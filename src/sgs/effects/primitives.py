@@ -114,10 +114,11 @@ def move_card(
     )
 
 
-def draw_from_deck(state: GameState, n: int) -> tuple[int, ...]:
-    """牌堆顶至多 ``n`` 张的 ``card_id``；**不改状态**。
+def draw_from_deck(state: GameState, n: int) -> tuple[CardRef, ...]:
+    """牌堆顶至多 ``n`` 张的牌面事实；**不改状态**（由 ``move_card`` 真正移动）。
 
     返回长度 ``< n`` 就是"短摸"信号：需要摸牌而牌堆给不出（票 08 §6）。
-    重洗规则（票 23）落地后，这个短返回只在弃牌堆也为空时出现。
+    重洗规则（票 23）落地后，这个短返回只在弃牌堆也为空时出现——届时签名补上 ``rng``
+    （票 07 §7 的冻结形状），本函数内部负责"牌堆空且弃牌堆非空则先重洗"。
     """
-    return tuple(state.deck[:n])
+    return state.refs(state.deck[:n])

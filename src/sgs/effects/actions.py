@@ -20,11 +20,22 @@ from sgs.state import (
     DiscardCards,
     EndPhase,
     GameState,
+    Player,
     QueryKind,
     UseCard,
 )
 
-__all__ = ["legal_actions_for"]
+__all__ = ["discard_count", "hand_limit", "legal_actions_for"]
+
+
+def hand_limit(player: Player) -> int:
+    """手牌上限 = 当前体力值（票 07 §4 的规则**公式**；M1 无修正项）。"""
+    return player.hp
+
+
+def discard_count(player: Player) -> int:
+    """弃牌阶段须弃置的张数；``<= 0`` 表示无需弃牌（也不发询问）。"""
+    return len(player.hand) - hand_limit(player)
 
 
 def legal_actions_for(
@@ -48,7 +59,7 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
 
 def _discard(state: GameState, seat: int, answers_seq: int) -> list[Action]:
     player = state.player(seat)
-    count = len(player.hand) - player.hp
+    count = discard_count(player)
     if count <= 0:
         return []
     return [

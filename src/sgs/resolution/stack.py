@@ -8,7 +8,7 @@
 - :class:`Goto` —— 跳到指定 ``pc``（如【闪】抵消后跳过生效时 / 生效后）。
 
 **恢复点是命名式**：权威是父帧的 ``pc``（下一个要执行的步骤），子帧的
-``return_to = (父帧 kind, 压栈那一步对应的时机 id)`` 只是把它翻译成人话，写进金日志。
+``return_to = (父帧 kind, 压栈那一步对应的时机 id)`` 只是把它翻译成人话，写进记录流。
 """
 
 from __future__ import annotations
@@ -105,19 +105,23 @@ class ResolutionStack:
         self.frames.clear()
         return discarded
 
-    def step(self, steps: StepTable, host: StepHost) -> None:
-        """执行栈顶帧的当前步骤一步；步骤表用完即出栈。"""
+    def step(self, steps: StepTable, host: StepHost) -> Frame | None:
+        """执行栈顶帧的当前步骤一步；步骤表用完即出栈并返回被弹出的帧。
+
+        返回值只用于让引擎记一条 ``pop`` 记录——**所有**出栈都必须经过调用方，
+        这样"帧的生命周期"在记录流里没有缺口（票 06 §1）。
+        """
         frame = self.top
         table = steps.get(frame.kind)
         if table is None:
             raise KeyError(f"没有为帧类型 {frame.kind.value!r} 登记步骤表")
         if frame.pc >= len(table):
-            self.pop()
-            return
+            return self.pop()
         control = table[frame.pc].run(host, frame)
         if control == "stay":
-            return
+            return None
         if isinstance(control, Goto):
             frame.pc = control.pc
-            return
+            return None
         frame.pc += 1
+        return None

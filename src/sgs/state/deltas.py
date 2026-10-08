@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
-from .models import CardRef, MoveReason, Zone
+from .models import CardRef, MoveReason, Zone, _FrozenModel
 
 __all__ = [
     "CardMoveDelta",
@@ -20,10 +20,6 @@ __all__ = [
     "Delta",
     "HpChangeDelta",
 ]
-
-
-class _FrozenModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class CardMoveDelta(_FrozenModel):

@@ -33,7 +33,7 @@ class _FrozenModel(BaseModel):
 
 
 class CardRef(_FrozenModel):
-    """内联的牌面快照（票 06 §3）。
+    """内联的牌面事实（票 06 §3）。
 
     ``card_id`` 是机器键；牌面（牌名 / 花色 / 点数）是渲染所需的事实，不是表现文本。
     M1 无转化牌与虚拟牌，内联不会漂移。

@@ -13,11 +13,11 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from sgs.timing import Timing
 
-from .models import CardRef, Phase
+from .models import CardRef, Phase, _FrozenModel
 
 __all__ = [
     "Action",
@@ -43,10 +43,6 @@ class QueryKind(str, Enum):
     DODGE = "DODGE"
     PEACH = "PEACH"
     DISCARD = "DISCARD"
-
-
-class _FrozenModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class PlayerPublic(_FrozenModel):

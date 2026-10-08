@@ -11,16 +11,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .errors import DataLoadError, LoadError
-from .models import _FrozenModel
 
 __all__ = ["RuleConfig", "validate_rule_config"]
 
 
-class RuleConfig(_FrozenModel):
+class RuleConfig(BaseModel):
     """M1 的规则配置：三个字段，值域即冻结面。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     player_count: Literal[2] = 2
     """模式第一参数；M1 的裁剪只在 2 人下成立，值 3 必须**加载期**失败。"""

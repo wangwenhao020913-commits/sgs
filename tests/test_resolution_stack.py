@@ -12,7 +12,7 @@ from sgs.resolution import Frame, Goto, ResolutionStack, Step
 from sgs.state import FrameKind
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state
+from support import RecordingPlayer, SeatSpec, build_state
 
 PACK = load_content_pack()
 
@@ -116,6 +116,7 @@ def test_engine_names_the_return_point_and_discards_frames_innermost_first():
     assert [record.frame_id for record in pushes] == [parent.frame_id, child.frame_id]
 
     engine.check_game_end(draw_reason="both_decks_empty")
+    check_seq = engine.records[-1].seq  # 检测点当刻的最后一条记录
     engine.finish()
 
     discards = [
@@ -123,4 +124,31 @@ def test_engine_names_the_return_point_and_discards_frames_innermost_first():
     ]
     assert [record.frame_id for record in discards] == [child.frame_id, parent.frame_id]
     assert engine.records[-1].kind == "game_end"
-    assert engine.records[-1].check_seq == discards[-1].seq
+    assert engine.records[-1].check_seq == check_seq, (
+        "check_seq 定格在 check_game_end() 当刻，而不是清栈之后"
+    )
+
+
+def test_exhausting_a_frame_records_its_pop_in_the_journal():
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=4, hand=(40, 41)), SeatSpec(hp=4, hand=(46, 47))],
+        deck=(0, 1),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    ran: list[str] = []
+    engine.steps = {
+        FrameKind.RECOVER: (Step(lambda h, f: ran.append("回复"), Timing.RECOVER_AFTER),)
+    }
+    frame = engine.push_frame(FrameKind.RECOVER, {}, timing=Timing.RECOVER_AFTER)
+
+    engine.run([RecordingPlayer(), RecordingPlayer()])
+
+    assert ran == ["回复"]
+    pops = [
+        record for record in engine.records if record.kind == "frame" and record.op == "pop"
+    ]
+    assert [record.frame_id for record in pops] == [frame.frame_id], (
+        "步骤表用完也要记 pop：帧的生命周期在记录流里没有缺口"
+    )

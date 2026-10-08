@@ -10,9 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from sgs.data import ContentPack, RuleConfig
-from sgs.state import CardRef, GameState, Player, Query
+from sgs.engine import instantiate_cards
+from sgs.state import GameState, Player, Query
 
-__all__ = ["SeatSpec", "build_state", "cards_of_type", "RecordingPlayer"]
+__all__ = ["RecordingPlayer", "SeatSpec", "build_state", "cards_of_type", "play_standard"]
 
 
 @dataclass(frozen=True)
@@ -42,17 +43,7 @@ def build_state(
     rule_config: RuleConfig | None = None,
 ) -> GameState:
     """把人为指定的局面写成 ``GameState``（``card_id`` 即数据表里的下标）。"""
-    names = {card_type.id: card_type.name for card_type in pack.card_types}
-    cards = tuple(
-        CardRef(
-            card_id=index,
-            type=deck_card.type,
-            name=names[deck_card.type],
-            suit=deck_card.suit.value,
-            rank=deck_card.rank,
-        )
-        for index, deck_card in enumerate(pack.deck.cards)
-    )
+    cards = instantiate_cards(pack)
     players = tuple(
         Player(
             seat=seat,

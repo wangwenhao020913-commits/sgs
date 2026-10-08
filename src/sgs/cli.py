@@ -23,8 +23,6 @@ from sgs.state import CardRef, Zone
 
 __all__ = ["main", "render"]
 
-SEED_LIMIT = 1 << 64
-
 
 def main(argv: list[str] | None = None) -> int:
     """解析命令行参数、跑完整局并返回进程退出码。"""
@@ -41,8 +39,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     seed = args.seed if args.seed is not None else new_seed()
-    if not 0 <= seed < SEED_LIMIT:
-        print(f"种子必须落在 [0, 2**64) 内，得到 {seed}", file=sys.stderr)
+    # 种子闸门只在唯一随机源里有第二份；这里直接借它的报错，不再抄一遍值域。
+    try:
+        source = RandomSource(seed)
+    except ValueError as error:
+        print(f"种子非法：{error}", file=sys.stderr)
         return 1
 
     try:
@@ -53,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
 
     rule_config = RuleConfig()
     engine = Engine.new_game(seed=seed, rule_config=rule_config, pack=pack)
-    ai_stream = RandomSource(seed).substream("ai")
+    ai_stream = source.substream("ai")
     participants = [RandomPlayer(ai_stream) for _ in range(rule_config.player_count)]
     try:
         engine.run(participants)

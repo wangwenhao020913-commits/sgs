@@ -16,7 +16,13 @@ from pydantic import BaseModel, ConfigDict
 
 from sgs.agents import Participant
 from sgs.data import ContentPack, RuleConfig
-from sgs.effects import EffectContext, draw_from_deck, legal_actions_for, move_card
+from sgs.effects import (
+    EffectContext,
+    discard_count,
+    draw_from_deck,
+    legal_actions_for,
+    move_card,
+)
 from sgs.resolution import Frame, ResolutionStack, StepTable
 from sgs.state import (
     Action,
@@ -50,7 +56,7 @@ from .journal import (
 )
 from .rng import RandomSource
 
-__all__ = ["DRAW_COUNT", "INITIAL_HP", "Engine", "Outcome", "new_game"]
+__all__ = ["DRAW_COUNT", "INITIAL_HP", "Engine", "Outcome", "instantiate_cards", "new_game"]
 
 INITIAL_HP = 4
 """M1 的体力上限恒 4（无武将、无体力上限变化）。"""
@@ -115,6 +121,7 @@ class Engine:
         self._answer: Action | None = None
         self._started = False
         self._frame_seq = 0
+        self._check_seq: int | None = None
         self._turn_pc = 0
         self._turn_data: dict[str, Any] = {}
         self._turn_steps: tuple[Callable[[], Any], ...] = (
@@ -243,13 +250,7 @@ class Engine:
         """接受一个应答；合法性 = 成员判定，非法输入零状态改动。"""
         pending = self.pending
         if pending is None:
-            raise IllegalActionError(
-                reason_code="no_pending",
-                message="当前没有待应答的询问",
-                expected="一个待应答的询问",
-                got="无",
-                answers_seq=action.answers_seq,
-            )
+            raise RuntimeError("当前没有待应答的询问")
         if action.answers_seq != pending.seq:
             self._emit(
                 ActionRecord(
@@ -297,7 +298,7 @@ class Engine:
             )
         if kind is QueryKind.DISCARD:
             player = self.state.player(actor)
-            count = len(player.hand) - player.hp
+            count = discard_count(player)
             return DiscardQuery(
                 seq=seq,
                 actor=actor,
@@ -324,6 +325,10 @@ class Engine:
             else:
                 outcome = Outcome(result="draw", winner=None, reason="no_survivor")
         self.pending_outcome = outcome
+        # check_seq = **调用本入口时**最后一条已 emit 记录的序号（票 08 §6）。
+        # 死亡路径上检测点与终止点之间还会 emit 死亡结算的记录，所以必须在此刻定格，
+        # 不能在 finish() 时再取。
+        self._check_seq = self._last_seq
         return outcome
 
     def finish(self) -> None:
@@ -333,16 +338,15 @@ class Engine:
         for frame in self.stack.clear():
             self._emit_frame("discard", frame)
         outcome = self.pending_outcome
-        if outcome is None:
+        if outcome is None or self._check_seq is None:
             raise RuntimeError("没有终局判定就清栈")
-        check_seq = self._last_seq
         self._emit(
             GameEndRecord(
                 seq=self._next_seq(),
                 result=outcome.result,
                 winner=outcome.winner,
                 reason=outcome.reason,
-                check_seq=check_seq,
+                check_seq=self._check_seq,
             )
         )
         self.finished = True
@@ -366,7 +370,9 @@ class Engine:
             self._start()
             return
         if self.stack:
-            self.stack.step(self.steps, self)
+            popped = self.stack.step(self.steps, self)
+            if popped is not None:
+                self._emit_frame("pop", popped)
             return
         self._step_turn()
 
@@ -417,7 +423,7 @@ class Engine:
             delta = move_card(
                 self.state,
                 EffectContext(actor=seat),
-                self.state.refs(taken),
+                taken,
                 to_zone=Zone.HAND,
                 to_seat=seat,
                 reason=MoveReason.DRAW,
@@ -464,7 +470,7 @@ class Engine:
             self.emit_timing(Timing.PHASE_DISCARD, actor=seat)
             self._turn_data["discard_emitted"] = True
         player = self.state.player(seat)
-        if len(player.hand) - player.hp <= 0:
+        if discard_count(player) <= 0:
             return None
         action = self.ask(
             lambda seq: self._build_query(QueryKind.DISCARD, seat, Timing.PHASE_DISCARD, seq)
@@ -501,16 +507,13 @@ class Engine:
         return seat
 
 
-def build_initial(
-    *, seed: int, rule_config: RuleConfig, pack: ContentPack
-) -> tuple[GameState, tuple[JournalRecord, ...]]:
-    """实例化牌堆 → 洗牌 → 发牌；顺带产出开局那几条记录。
+def instantiate_cards(pack: ContentPack) -> tuple[CardRef, ...]:
+    """按数据表顺序把内容包实例化成牌实例：``card_id`` 即下标（票 08 §4）。
 
-    ``seq = 1`` 必是初次 ``deck_shuffle``（``frame_id = 0``：无帧哨兵），
-    其后是发牌时机与按座序每座位一条 ``card_move``（票 08 §5 / 票 06 §7）。
+    牌实例的 id 在开局一次分配、随洗牌一起走；行为字段不在其中（归 ``effects``）。
     """
     names = {card_type.id: card_type.name for card_type in pack.card_types}
-    cards = tuple(
+    return tuple(
         CardRef(
             card_id=index,
             type=deck_card.type,
@@ -520,6 +523,17 @@ def build_initial(
         )
         for index, deck_card in enumerate(pack.deck.cards)
     )
+
+
+def build_initial(
+    *, seed: int, rule_config: RuleConfig, pack: ContentPack
+) -> tuple[GameState, tuple[JournalRecord, ...]]:
+    """实例化牌堆 → 洗牌 → 发牌；顺带产出开局那几条记录。
+
+    ``seq = 1`` 必是初次 ``deck_shuffle``（``frame_id = 0``：无帧哨兵），
+    其后是发牌时机与按座序每座位一条 ``card_move``（票 08 §5 / 票 06 §7）。
+    """
+    cards = instantiate_cards(pack)
     players = tuple(
         Player(seat=seat, hp=INITIAL_HP, hp_max=INITIAL_HP)
         for seat in range(rule_config.player_count)
@@ -560,7 +574,7 @@ def build_initial(
         delta = move_card(
             state,
             ctx,
-            state.refs(taken),
+            taken,
             to_zone=Zone.HAND,
             to_seat=player.seat,
             reason=MoveReason.DRAW,

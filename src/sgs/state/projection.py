@@ -12,7 +12,7 @@ __all__ = ["project"]
 
 
 def project(state: GameState, seat: int) -> PlayerView:
-    """投影出 ``seat`` 这一参与者能看到的棋盘快照。"""
+    """投影出 ``seat`` 这一参与者能看到的棋盘信息。"""
     players = tuple(
         PlayerPublic(
             seat=player.seat,

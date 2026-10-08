@@ -4,7 +4,7 @@
 """
 
 from .errors import IllegalActionError
-from .game import DRAW_COUNT, INITIAL_HP, Engine, Outcome, new_game
+from .game import DRAW_COUNT, INITIAL_HP, Engine, Outcome, instantiate_cards, new_game
 from .journal import (
     EVENT_SCHEMA_VERSION,
     ActionRecord,
@@ -45,6 +45,7 @@ __all__ = (
     "RandomSource",
     "TimingRecord",
     "dump_journal",
+    "instantiate_cards",
     "new_game",
     "new_seed",
     "record_json",
