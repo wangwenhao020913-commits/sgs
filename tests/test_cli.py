@@ -130,13 +130,31 @@ def test_same_seed_twice_is_byte_identical_across_processes():
     assert first.stdout != ""
 
 
+def _printed_seed(stream: str) -> int:
+    """命令行首行 ``seed = N`` 里的种子（省略 ``--seed`` 时由 CLI 现生成并打印）。"""
+    return int(stream.splitlines()[0].removeprefix("seed = "))
+
+
 def test_omitted_seed_is_generated_recorded_and_printed(capsys):
     assert main([]) == 0
 
-    lines = capsys.readouterr().out.splitlines()
-    seed = int(lines[0].removeprefix("seed = "))
+    stream = capsys.readouterr().out
+    lines = stream.splitlines()
+    seed = _printed_seed(stream)
     assert 0 <= seed < (1 << 64)
     assert lines[1].startswith(f"header 种子={seed} ")
+
+
+def test_a_generated_seed_replays_the_same_stream(capsys):
+    """省略种子只是现生成一个种子；拿它重跑必须得到同一份记录流（票 08 / 票 27）。"""
+    assert main([]) == 0
+    generated = capsys.readouterr().out
+    seed = _printed_seed(generated)
+
+    assert main(["--seed", str(seed)]) == 0
+    replayed = capsys.readouterr().out
+
+    assert replayed == generated
 
 
 def test_seed_outside_the_64_bit_range_is_rejected(capsys):

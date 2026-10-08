@@ -209,6 +209,27 @@ def test_readme_index_matches_the_golden_file_set() -> None:
     )
 
 
+FROZEN_BASELINES = (
+    "01-slash-dodge-cancel",
+    "02-slash-hit-damage",
+    "03-near-death-self-peach",
+    "04-near-death-other-peach",
+    "05-near-death-death",
+    "06-deck-reshuffle",
+)
+"""票 12 定格的六条基准。
+
+**故意写死、不从 ``scenarios.SCENARIOS`` 派生**：那张表是录制源，若从这里派生，新增 /
+删除一条基准就会连同场景一起被"自动追认"，钉不住票 12 的六条。新增基准是对票据的改动，
+必须先改票，再改这里。"""
+
+
+def test_the_frozen_six_baselines_are_exactly_the_file_set() -> None:
+    assert {path.stem for path in _golden_files()} == set(FROZEN_BASELINES), (
+        "M1 的基准恰好是票 12 定格的六条（票 11 §2 第 5 条）"
+    )
+
+
 def test_every_declared_scenario_is_recorded() -> None:
     assert set(scenarios.SCENARIOS) == {path.stem for path in _golden_files()}
 
