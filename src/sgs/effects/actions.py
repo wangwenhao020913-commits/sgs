@@ -10,7 +10,8 @@
 排序键由票 05 §4 定死：**牌实例 id 升序 → 同 id 再按行动类型名 → 无牌实例的排最后**，
 规则层不得重排。
 
-M1 已接线出牌阶段（【杀】/【桃】）与【闪】响应窗口；濒死求桃的候选归票 21。
+M1 已接线四类询问：出牌阶段（【杀】/【桃】）、【闪】响应窗口、弃牌阶段，
+以及濒死求桃（票 21）。
 """
 
 from __future__ import annotations
@@ -133,15 +134,23 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
 
 
 def legal_actions_for(
-    state: GameState, seat: int, kind: QueryKind, *, answers_seq: int
+    state: GameState, seat: int, kind: QueryKind, *, answers_seq: int, dying: int | None = None
 ) -> tuple[Action, ...]:
-    """给出 ``seat`` 在 ``kind`` 询问下的全部候选，按票 05 的稳定键排序。"""
+    """给出 ``seat`` 在 ``kind`` 询问下的全部候选，按票 05 的稳定键排序。
+
+    ``dying`` 只在 ``PEACH`` 询问下需要：濒死语境里【桃】的合法目标是**濒死者**
+    而不是应答者自己，故目标不走行为表的目标规则（票 07 §4 / 票 21 §7）。
+    """
     if kind is QueryKind.PLAY_PHASE:
         candidates = _play_phase(state, seat, answers_seq)
     elif kind is QueryKind.DISCARD:
         candidates = _discard(state, seat, answers_seq)
     elif kind is QueryKind.DODGE:
         candidates = _dodge(state, seat, answers_seq)
+    elif kind is QueryKind.PEACH:
+        if dying is None:
+            raise ValueError("PEACH 询问必须给出濒死者座位")
+        candidates = _peach(state, seat, dying, answers_seq)
     else:
         raise ValueError(f"M1 还没有 {kind.value} 询问的候选生成器")
     return tuple(sorted(candidates, key=_sort_key))
@@ -177,6 +186,21 @@ def _dodge(state: GameState, seat: int, answers_seq: int) -> list[Action]:
     actions = [
         UseCard(card=card, targets=(), answers_seq=answers_seq)
         for card in _usable_hand(state, seat, UseContext.RESPONSE, Timing.RESOLVE_BEFORE_EFFECT)
+    ]
+    actions.append(Pass(answers_seq=answers_seq))
+    return actions
+
+
+def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Action]:
+    """濒死求桃：手牌里每张能在**濒死语境**使用的牌各一个候选，目标恒为濒死者。
+
+    与出牌阶段【桃】的差别只在目标：出牌阶段的目标规则是"只能是自己且未满体力"，
+    濒死语境的目标由求桃询问直接给出（官方 4.17"对濒死角色使用"）。放弃恒在最后，
+    且**永远可选**——"放弃"是 PEACH 询问的一个候选而不是独立询问（票 05 §1）。
+    """
+    actions = [
+        UseCard(card=card, targets=(dying,), answers_seq=answers_seq)
+        for card in _usable_hand(state, seat, UseContext.NEAR_DEATH)
     ]
     actions.append(Pass(answers_seq=answers_seq))
     return actions

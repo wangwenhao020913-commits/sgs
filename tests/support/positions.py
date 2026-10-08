@@ -85,16 +85,33 @@ class RecordingPlayer:
         return action_query.legal_actions[0]
 
 
-def play_standard(seed: int = 7, *, pack: ContentPack | None = None):
-    """用标准内容包 + 两个随机玩家跑完一整局，返回跑完的引擎（便于读记录流）。"""
-    from sgs.agents import RandomPlayer
+def play_standard(seed: int = 7, *, pack: ContentPack | None = None, passive: bool = False):
+    """用标准内容包跑完一整局，返回跑完的引擎（便于读记录流）。
+
+    ``passive=False``（默认）用两个随机玩家；``passive=True`` 用"只结束阶段 / 一律放弃"
+    的玩家，于是**无人受伤**、以牌堆耗尽平局收场——适合断言与濒死无关的整局性质
+    （票 21 之后随机玩家可能停在死亡入口，见 ``tests/test_near_death.py``）。
+    """
+    import sgs.agents as agents
     from sgs.data import load_content_pack
     from sgs.engine import Engine, RandomSource
-
     resolved_pack = pack if pack is not None else load_content_pack()
     rule_config = RuleConfig()
     engine = Engine.new_game(seed=seed, rule_config=rule_config, pack=resolved_pack)
-    ai_stream = RandomSource(seed).substream("ai")
-    participants = [RandomPlayer(ai_stream) for _ in range(rule_config.player_count)]
+    if passive:
+        participants = [_EndPhasePlayer() for _ in range(rule_config.player_count)]
+    else:
+        ai_stream = RandomSource(seed).substream("ai")
+        participants = [agents.RandomPlayer(ai_stream) for _ in range(rule_config.player_count)]
     engine.run(participants)
     return engine
+
+
+class _EndPhasePlayer:
+    """只会结束阶段 / 放弃的玩家：整局无人受伤，故不触发濒死。"""
+
+    def respond(self, query: Query):
+        for candidate in query.legal_actions:
+            if candidate.kind in ("EndPhase", "Pass"):
+                return candidate
+        return query.legal_actions[0]

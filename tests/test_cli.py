@@ -105,9 +105,12 @@ def test_cli_runs_a_whole_game_and_prints_the_seed_then_the_stream(capsys):
     assert lines[0] == "seed = 7"
     assert lines[1].startswith("header 种子=7 ")
     assert lines[-1].startswith("#")
-    assert "终局 结果=draw" in lines[-1], (
-        "票 20 已让【杀】真的造成伤害，但濒死（21）/ 死亡与胜负（22）尚未实现，"
-        "故一局仍以牌堆耗尽收场"
+    # 票 21 已让濒死真的插入结算；死亡与胜负（票 22）尚未实现，故随机驱动的一局会
+    # **停在死亡入口**——流里出现濒死三时机，但末行不是 game_end（"终局"）。
+    stream = "\n".join(lines)
+    assert "NEAR_DEATH" in stream, "随机驱动的一局应当真的走到过濒死"
+    assert "终局" not in lines[-1], (
+        "死亡结算与胜负判定归票 22；本票只保证流程走到死亡入口即止"
     )
 
 

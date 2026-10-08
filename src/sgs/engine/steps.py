@@ -6,8 +6,13 @@
   被抵消则 ``Goto(RESOLVE_END_PC)`` 跳过"生效时 / 生效后"，直达"使用结算结束时"。
 - **DAMAGE 帧**（票 20）：L7 五个时机；"受到伤害时"之后压入 **LIFE_DECREASE** 子帧，
   在"造成伤害后"之前把体力真正扣掉。
-- **LIFE_DECREASE 帧**（票 20）：L8 三个时机；"扣减体力时"是唯一的体力写入点，
-  也是濒死结算的插入点（插入归票 21）。
+- **LIFE_DECREASE 帧**（票 20 / 21）：L8 三个时机；"扣减体力时"是唯一的体力写入点。
+  体力降到 0 及以下就在那里插入 **NEAR_DEATH** 子帧（票 21）；无人救时父帧**止步于
+  死亡入口**（返回 :data:`~sgs.resolution.DEATH_ENTRY`），救回则照常走完"扣减体力后"。
+- **NEAR_DEATH 帧**（票 21）：L12 三个时机；"处于濒死状态时"按官方顺序逐个求桃
+  （当前回合角色起、逆时针、一人一次），有人出桃则压入 **RECOVER** 子帧、在其中把
+  体力恢复 1 点，然后回到被中断的结算。
+- **RECOVER 帧**（票 21）：L10 两个时机；"确定回复数值"之后把体力写高（夹在上限内）。
 """
 
 from __future__ import annotations
@@ -15,9 +20,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Protocol
 
-from sgs.effects import EffectStep, PushFrame, behavior_for, opens_response_window
-from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable
-from sgs.state import CardRef, FrameKind, GameState, MoveReason, QueryKind, UseCard, Zone
+from sgs.effects import EffectStep, behavior_for, opens_response_window
+from sgs.resolution import DEATH_ENTRY, Control, Frame, Goto, Step, StepHost, StepTable
+from sgs.state import CardRef, FrameKind, GameState, QueryKind, UseCard
 from sgs.timing import Timing
 
 __all__ = ["RESOLVE_END_PC", "build_steps"]
@@ -42,11 +47,24 @@ class FrameHost(StepHost, Protocol):
 
     def push_frame(self, kind: FrameKind, data: dict[str, Any], *, timing: Timing) -> Frame: ...
 
-    def ask_query(self, kind: QueryKind, actor: int, timing: Timing) -> Any: ...
+    def ask_query(
+        self, kind: QueryKind, actor: int, timing: Timing, *, dying: int | None = None
+    ) -> Any: ...
 
     def suspended(self, value: Any) -> bool: ...
 
-    def start_use(self, card: CardRef, *, source: int, targets: tuple[int, ...]) -> Frame: ...
+    def start_use(
+        self,
+        card: CardRef,
+        *,
+        source: int,
+        targets: tuple[int, ...],
+        use_timing: Timing | None = None,
+    ) -> Frame: ...
+
+    def recover_from_peach(
+        self, frame: Frame, action: UseCard, *, asker: int, dying: int
+    ) -> None: ...
 
     def apply_effects(
         self, frame: Frame, effects: Sequence[EffectStep], *, timing: Timing
@@ -126,6 +144,13 @@ def resolve_start(host: FrameHost, frame: Frame) -> None:
 
 
 def resolve_before_effect(host: FrameHost, frame: Frame) -> Control:
+    if frame.data.get("use_timing") is Timing.NEAR_DEATH_AT:
+        # 濒死求桃建立的使用：回复结算已由求桃窗口显式压好（票 21），故跳过
+        # "生效时 / 生效后"（`Goto` 而不是 `None`——`None` 只表示"这一步做完了"，
+        # 会顺着 pc 走进效果步骤，回复就被写第二遍）。
+        _emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT, actor=frame.data["source"])
+        frame.data["canceled"] = False
+        return Goto(RESOLVE_END_PC)
     if "canceled" in frame.data:
         # 响应窗口已经处理过：**按 canceled 标志**决定去向（票 07 §3）。
         return Goto(RESOLVE_END_PC) if frame.data["canceled"] else None
@@ -246,7 +271,7 @@ DAMAGE_STEPS = (
 )
 
 
-# ---- LIFE_DECREASE 帧：L8 三个时机 -----------------------------------------
+# ---- LIFE_DECREASE 帧：L8 三个时机 + 在"扣减体力时"插入濒死 ------------------
 
 
 def life_decrease_before(host: FrameHost, frame: Frame) -> None:
@@ -256,22 +281,165 @@ def life_decrease_before(host: FrameHost, frame: Frame) -> None:
 def life_decrease_on(host: FrameHost, frame: Frame) -> None:
     """**扣减体力时** = 唯一的体力写入点；先 dispatch 时机，再把体力扣到目标值。
 
-    目标值由本帧算（``hp - amount``），原语只负责写（票 07 §1）。体力降到 0 及以下
-    是濒死结算的插入点，插入本身归票 21。
+    目标值由本帧算（``hp - amount``），原语只负责写（票 07 §1）。结算完**立刻**把
+    结果记进帧：濒死与否是这次扣减的结果，父帧要据此决定"继续"还是"止步于死亡入口"。
     """
     target = frame.data["target"]
     _emit(host, frame, Timing.LIFE_DECREASE_ON, actor=target)
     host.apply_hp_change(frame, target, host.state.player(target).hp - frame.data["amount"])
+    frame.data["dying"] = host.state.player(target).hp <= 0
 
 
-def life_decrease_after(host: FrameHost, frame: Frame) -> None:
+def life_decrease_trigger_near_death(host: FrameHost, frame: Frame) -> None:
+    """体力 ≤ 0 ⇒ 插入濒死结算（官方 4.17 第 1 条）。
+
+    插入点选在"扣减体力时"整步做完之后：时机本身的记录形态因此仍是
+    ``BEFORE → ON → AFTER``，濒死帧压在这三条之上——官方"濒死结算优先于
+    造成伤害后 / 受到伤害后类技能"（4.17）于是由栈结构直接表达。
+    """
+    target = frame.data["target"]
+    if not frame.data["dying"]:
+        return
+    host.push_frame(
+        FrameKind.NEAR_DEATH,
+        {"target": target, "dying": True},
+        timing=Timing.NEAR_DEATH_ENTER,
+    )
+
+
+def life_decrease_after(host: FrameHost, frame: Frame) -> Control:
+    """**扣减体力后**；之后就是唯一的岔路：救回继续，无人救则走到死亡入口。
+
+    "救回"读自体力（官方 4.17 第 4 条"每回复 1 点体力即检查：若体力 ≥ 1，脱离濒死"），
+    而不是读濒死帧的私有标志——体力是权威，"脱离濒死"与"体力 ≥ 1"在 M1 恒等价。
+    """
     _emit(host, frame, Timing.LIFE_DECREASE_AFTER, actor=frame.data["target"])
+    if not frame.data["dying"]:
+        return None
+    if host.state.player(frame.data["target"]).hp <= 0:
+        return DEATH_ENTRY
+    return None
 
 
 LIFE_DECREASE_STEPS = (
     Step(life_decrease_before, Timing.LIFE_DECREASE_BEFORE),
     Step(life_decrease_on, Timing.LIFE_DECREASE_ON),
+    # 压栈步骤的 `timing` 只作子帧 `return_to` 的可读标签：NEAR_DEATH_ENTER
+    # 由 NEAR_DEATH 帧自己 dispatch。
+    Step(life_decrease_trigger_near_death, Timing.NEAR_DEATH_ENTER),
     Step(life_decrease_after, Timing.LIFE_DECREASE_AFTER),
+)
+
+
+# ---- NEAR_DEATH 帧：L12 三个时机 + 官方求桃顺序 -----------------------------
+#
+# 应答者区间是票 05 §7 的"**从当前回合角色起、逆时针、每人一次**"（官方 L18.2，
+# ``flow/neardeath.txt``）；L18.8 的起点切换与 L12.2 的"新的濒死状态时"回退收窄
+# 按票 05 §7 / 票 13 §5 为"结构存在、M1 不可达"，故此处只落一个实例，不建第二套调度。
+
+
+def _emit_near_death(host: FrameHost, frame: Frame, timing: Timing) -> None:
+    _emit(host, frame, timing, actor=frame.data["target"])
+
+
+def near_death_enter(host: FrameHost, frame: Frame) -> None:
+    _emit_near_death(host, frame, Timing.NEAR_DEATH_ENTER)
+
+
+def near_death_at(host: FrameHost, frame: Frame) -> None:
+    """"处于濒死状态时"：打开求桃窗口，按官方顺序定下应答者区间。
+
+    区间在窗口打开时**定格**（``askers`` 进帧私有载荷）而不是每轮重算，使"当前回合
+    角色起逆时针"在整段濒死结算里只有一个真源；"新的濒死状态时"的回退收窄
+    （``flow/neardeath.txt`` 第 13 行）M1 不可达（票 05 §7），故不建重入分支。
+    """
+    target = frame.data["target"]
+    _emit_near_death(host, frame, Timing.NEAR_DEATH_AT)
+    frame.data.setdefault(
+        "askers", _askers_from(host.state, host.state.turn_seat, len(host.state.players))
+    )
+    frame.data.setdefault("next", 0)
+
+
+def near_death_ask(host: FrameHost, frame: Frame) -> Control:
+    """逐个应答者求桃，直到有人把体力回复到 1 点以上、或全部询问完毕。
+
+    "一个询问一个应答者"（票 05 §7）：每轮只发一个 ``PEACH`` 询问，``next`` 记进度，
+    故暂停、恢复、拒绝都落在同一个槽位上。体力恢复到 1 点以上就**立即**脱离濒死
+    （官方 4.17 第 4 条"每回复 1 点体力即检查"），不再问剩下的人。
+    """
+    target = frame.data["target"]
+    if host.state.player(target).hp >= 1:
+        return None
+    while frame.data["next"] < len(frame.data["askers"]):
+        asker = frame.data["askers"][frame.data["next"]]
+        action = host.ask_query(QueryKind.PEACH, asker, Timing.NEAR_DEATH_AT, dying=target)
+        if host.suspended(action):
+            return "stay"
+        frame.data["next"] += 1
+        if isinstance(action, UseCard):
+            host.recover_from_peach(frame, action, asker=asker, dying=target)
+            return "stay"  # 回复帧出栈后重入本步：先看体力是否已恢复到 1 点以上
+    return None
+
+
+def near_death_after(host: FrameHost, frame: Frame) -> None:
+    """"濒死结算结束后"：此时体力是否已恢复到 1 点以上可直接读（抢救结果归体力本身）。
+
+    本时机是**空实现**（官方此处只列技能效果，M1 无技能）：流程经过并照记，
+    但不产生任何状态变化（票 13 的三分类：dispatch 但无效果）。
+    """
+    _emit_near_death(host, frame, Timing.NEAR_DEATH_AFTER)
+
+
+NEAR_DEATH_STEPS = (
+    Step(near_death_enter, Timing.NEAR_DEATH_ENTER),
+    Step(near_death_at, Timing.NEAR_DEATH_AT),
+    Step(near_death_ask, Timing.NEAR_DEATH_AT),
+    Step(near_death_after, Timing.NEAR_DEATH_AFTER),
+)
+
+
+def _askers_from(state: GameState, start: int | None, count: int) -> tuple[int, ...]:
+    """应答者区间：从 ``start`` 起逆时针（座位号 +1）、每人一次、按座位序。
+
+    官方把阵亡角色排除在询问之外（``flow_neardeath`` 的"每名角色"读作在场角色）；
+    M1 的濒死者此刻仍存活，故它自己也在区间里（官方"濒死角色自己也可以使用【桃】自救"）。
+    ``start`` 为 ``None``（回合外）时退化为座位 0 起——M1 走不到，保留结构。
+    """
+    if count <= 0:
+        return ()
+    origin = 0 if start is None else start
+    return tuple(
+        seat
+        for offset in range(count)
+        for seat in ((origin + offset) % count,)
+        if state.player(seat).alive
+    )
+
+
+# ---- RECOVER 帧：L10 两个时机 ----------------------------------------------
+
+
+def recover_value(host: FrameHost, frame: Frame) -> None:
+    """**确定回复数值**：先跑时机，再把体力写高（夹在体力上限内）。
+
+    官方 4.13："回复体力"是数值变化四类事件之一，回复值受**体力上限**限制；
+    目标值由本帧算，原语只负责写（票 07 §1）。
+    """
+    target = frame.data["targets"][0]
+    _emit(host, frame, Timing.RECOVER_VALUE, actor=target)
+    player = host.state.player(target)
+    host.apply_hp_change(frame, target, min(player.hp + frame.data["amount"], player.hp_max))
+
+
+def recover_after(host: FrameHost, frame: Frame) -> None:
+    _emit(host, frame, Timing.RECOVER_AFTER, actor=frame.data["targets"][0])
+
+
+RECOVER_STEPS = (
+    Step(recover_value, Timing.RECOVER_VALUE),
+    Step(recover_after, Timing.RECOVER_AFTER),
 )
 
 
@@ -290,5 +458,6 @@ def build_steps() -> StepTable:
         FrameKind.RESOLVE: RESOLVE_STEPS,
         FrameKind.DAMAGE: DAMAGE_STEPS,
         FrameKind.LIFE_DECREASE: LIFE_DECREASE_STEPS,
-        FrameKind.RECOVER: (),
+        FrameKind.NEAR_DEATH: NEAR_DEATH_STEPS,
+        FrameKind.RECOVER: RECOVER_STEPS,
     }

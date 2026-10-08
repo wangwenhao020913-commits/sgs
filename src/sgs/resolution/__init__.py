@@ -3,9 +3,19 @@
 公开接口只在此再导出，外部不得 import 本子包的深层路径。
 """
 
-from .stack import Control, Frame, Goto, ResolutionStack, Step, StepHost, StepTable
+from .stack import (
+    DEATH_ENTRY,
+    Control,
+    Frame,
+    Goto,
+    ResolutionStack,
+    Step,
+    StepHost,
+    StepTable,
+)
 
 __all__ = (
+    "DEATH_ENTRY",
     "Control",
     "Frame",
     "Goto",

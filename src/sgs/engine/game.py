@@ -23,7 +23,6 @@ from sgs.effects import (
     EffectStep,
     PushFrame,
     apply_hp,
-    behavior_for,
     discard_count,
     draw_from_deck,
     legal_actions_for,
@@ -39,6 +38,7 @@ from sgs.state import (
     GameState,
     HpChangeDelta,
     MoveReason,
+    PeachQuery,
     Phase,
     PlayPhaseQuery,
     Player,
@@ -101,8 +101,11 @@ def _child_payload(
     parent_data: dict[str, Any],
     scalars: Sequence[tuple[str, Any]],
 ) -> dict[str, Any]:
-    """子帧载荷 = 从使用帧继承 ``source`` / ``targets`` / ``card`` + 行为表的标量字面量。
+    """子帧载荷 = 从使用帧继承 ``source`` / ``targets`` / ``card`` / ``use_timing``
+    + 行为表的标量字面量。
 
+    ``use_timing`` 一路带着走，好让"这次使用是从哪个窗口开的"在后面每一层都读得到
+    （濒死求桃开的【桃】用它把自己的回复结算与行为表的效果帧区分开，票 21）。
     伤害帧再规范化成官方**六要素**（票 07 §6）：``target`` = 唯一目标、
     ``channel`` = 使用的实体牌、``nature`` 恒 ``NORMAL``、``chain`` 恒 ``False``。
     """
@@ -110,6 +113,7 @@ def _child_payload(
         "source": parent_data.get("source"),
         "targets": tuple(parent_data.get("targets", ())),
         "card": parent_data.get("card"),
+        "use_timing": parent_data.get("use_timing"),
     }
     for key, value in scalars:
         if key in data:
@@ -149,11 +153,13 @@ class Engine:
 
         self.stack = ResolutionStack()
         self.steps: StepTable = build_steps()
-        """帧类型 → 步骤表：使用 / 结算的步骤在 :mod:`sgs.engine.steps`；伤害与回复留票 20 / 21。"""
+        """帧类型 → 步骤表：使用 / 结算的步骤在 :mod:`sgs.engine.steps`。"""
 
         self.pending: Query | None = None
         self.pending_outcome: Outcome | None = None
         self.finished = False
+        self.death_entry: int | None = None
+        """已走到**死亡入口**的座位；``None`` = 不在死亡路径上（票 21，死亡结算归票 22）。"""
 
         self._answer: Action | None = None
         self._started = False
@@ -290,18 +296,74 @@ class Engine:
         """``ask`` 的返回值是否为"已暂停等应答"哨兵。"""
         return value is SUSPEND
 
-    def ask_query(self, kind: QueryKind, actor: int, timing: Timing) -> Any:
+    def ask_query(
+        self,
+        kind: QueryKind,
+        actor: int,
+        timing: Timing,
+        *,
+        dying: int | None = None,
+    ) -> Any:
         """构造并交付一次询问；已有应答（重入）则直接返回它。"""
-        return self.ask(lambda seq: self._build_query(kind, actor, timing, seq))
+        return self.ask(lambda seq: self._build_query(kind, actor, timing, seq, dying=dying))
 
-    def start_use(self, card: CardRef, *, source: int, targets: tuple[int, ...]) -> Frame:
-        """开始一次使用：记一次本回合已用、压入 USE 帧（票 07 §6）。"""
+    def start_use(
+        self,
+        card: CardRef,
+        *,
+        source: int,
+        targets: tuple[int, ...],
+        use_timing: Timing | None = None,
+    ) -> Frame:
+        """开始一次使用：记一次本回合已用、压入 USE 帧（票 07 §6）。
+
+        ``use_timing`` 覆盖压栈步骤的 ``return_to`` 标签：默认是出牌阶段的
+        ``USE_CHOOSE_TARGET``，濒死求桃里出【桃】时是 ``NEAR_DEATH_AT``
+        （票 04 §4 的"从哪回来"要读得出是哪个窗口开的使用）。
+        """
         counts = self.state.player(source).card_use_counts
         counts[card.type] = counts.get(card.type, 0) + 1
         return self.push_frame(
             FrameKind.USE,
-            {"card": card, "source": source, "targets": tuple(targets)},
-            timing=Timing.USE_CHOOSE_TARGET,
+            {
+                "card": card,
+                "source": source,
+                "targets": tuple(targets),
+                "use_timing": use_timing,
+            },
+            timing=use_timing if use_timing is not None else Timing.USE_CHOOSE_TARGET,
+        )
+
+    def recover_from_peach(
+        self, frame: Frame, action: UseCard, *, asker: int, dying: int
+    ) -> None:
+        """有人在濒死窗口出【桃】：把**回复结算插在濒死之下**，再走【桃】自己的使用链。
+
+        官方 4.17："每回复 1 点体力即检查"。所以回复（内含体力写入）必须先于
+        "【桃】的使用结算结束"发生——于是先压 ``RECOVER`` 帧、再把这次使用挂在它上面
+        （票 21 第 3 条"回复结算插入在濒死之下，完成后回到被中断的原结算继续"）；
+        反之若先走使用链、出栈后再写体力，濒死判定就会读到过期的体力。
+
+        使用帧里的【桃】**不再**走"生效后"的效果列表：这次回复由本方法显式建立
+        （否则行为表会再压一个回复帧，同一次回复被写两遍）。压栈那一步的
+        ``return_to`` 标签是 ``NEAR_DEATH_AT``，记录流里因此读得出"这次使用是求桃窗口开的"，
+        效果层也据此辨认出"这张牌的效果已在此落地"。
+        """
+        self.push_frame(
+            FrameKind.RECOVER,
+            {
+                "source": asker,
+                "targets": (dying,),
+                "card": action.card,
+                "amount": 1,
+            },
+            timing=Timing.RECOVER_VALUE,
+        )
+        self.start_use(
+            action.card,
+            source=asker,
+            targets=(dying,),
+            use_timing=Timing.NEAR_DEATH_AT,
         )
 
     def move_used_card_to_processing(self, frame: Frame) -> None:
@@ -417,8 +479,16 @@ class Engine:
         self._answer = action
         self.pending = None
 
-    def _build_query(self, kind: QueryKind, actor: int, timing: Timing, seq: int) -> Query:
-        actions = legal_actions_for(self.state, actor, kind, answers_seq=seq)
+    def _build_query(
+        self,
+        kind: QueryKind,
+        actor: int,
+        timing: Timing,
+        seq: int,
+        *,
+        dying: int | None = None,
+    ) -> Query:
+        actions = legal_actions_for(self.state, actor, kind, answers_seq=seq, dying=dying)
         view = project(self.state, actor)
         if kind is QueryKind.PLAY_PHASE:
             return PlayPhaseQuery(
@@ -449,6 +519,18 @@ class Engine:
                 prompt="以你为目标的【杀】生效前：是否使用【闪】？",
                 legal_actions=actions,
                 view=view,
+            )
+        if kind is QueryKind.PEACH:
+            if dying is None:
+                raise ValueError("PEACH 询问必须给出濒死者座位")
+            return PeachQuery(
+                seq=seq,
+                actor=actor,
+                timing=timing,
+                prompt=f"座位 {dying} 处于濒死状态：是否对其使用【桃】？",
+                legal_actions=actions,
+                view=view,
+                dying=dying,
             )
         raise ValueError(f"M1 还没有 {kind.value} 询问的构造器")
 
@@ -500,21 +582,35 @@ class Engine:
         while not self.finished:
             if self.pending is None:
                 self._step()
+                if self.death_entry is not None:
+                    # 走到死亡入口即止（票 21）：死亡结算与清栈归票 22，届时这里
+                    # 会换成"跑完死亡四段再走终局入口"，而不是直接跳出驱动循环。
+                    break
                 continue
             query = self.pending
             self.submit(participants[query.actor].respond(query))
         return self.records
 
     def _step(self) -> None:
-        if self.finished:
+        if self.finished or self.death_entry is not None:
             return
         if not self._started:
             self._start()
             return
         if self.stack:
+            top = self.stack.top
             popped = self.stack.step(self.steps, self)
             if popped is not None:
                 self._emit_frame("pop", popped)
+            if (
+                popped is not None
+                and popped.kind is FrameKind.LIFE_DECREASE
+                and popped.data.get("dying")
+                and self.state.player(popped.data["target"]).hp <= 0
+            ):
+                # 停下：整条结算链止步于**死亡入口**。检测、记录与逐帧清栈归票 22；
+                # 这里只把"谁死了"记下来，好让"到达入口"可被单独断言。
+                self.death_entry = popped.data["target"]
             return
         self._step_turn()
 

@@ -7,10 +7,14 @@
 
 - **目标段**：按 slug 精准命中该链；
 - **收尾段**：固定确定性策略——能出【杀】就出【杀】；被【杀】且手里有【闪】就用【闪】，
-  否则放弃；出牌阶段不用【桃】。
+  否则放弃；濒死且手里有【桃】就**只自救**（对方濒死一律放弃）；出牌阶段不用【桃】。
 
-录制失败（目标段没命中 / 超过回合上限 / 没走到终局）就是**录制失败**，
+录制失败（目标段没命中 / 超过回合上限 / 没走到终止点）就是**录制失败**，
 必须重新选种并显式改写 ``SCENARIOS`` 里的常量，而不是放宽断言。
+
+**过渡态**（票 21）：``05-near-death-death`` 的流程目前止于**死亡入口**（死亡结算与胜负
+判定归票 22），故该条基准以"止于死亡入口"为准（``stops_at_death_entry = True``）；
+票 22 落地后把它改回"必达 ``game_end``"，其余断言不变。
 """
 
 from __future__ import annotations
@@ -27,25 +31,54 @@ __all__ = ["SCENARIOS", "Scenario", "record"]
 
 @dataclass(frozen=True)
 class Scenario:
-    """一条基准的录制参数；``max_turns`` 是终止保证（票 12 §3）。"""
+    """一条基准的录制参数；``max_turns`` 是终止保证（票 12 §3）。
+
+    ``stops_at_death_entry`` 是票 21 → 22 的过渡开关：为 ``True`` 时以"走到死亡入口"
+    为合格终点（死亡结算尚未实现）；票 22 落地后置回 ``False``。
+    """
 
     slug: str
     seed: int
     max_turns: int
+    stops_at_death_entry: bool = False
 
 
 SCENARIOS: dict[str, Scenario] = {
-    "01-slash-dodge-cancel": Scenario(slug="01-slash-dodge-cancel", seed=101, max_turns=40),
-    "02-slash-hit-damage": Scenario(slug="02-slash-hit-damage", seed=4, max_turns=40),
+    "01-slash-dodge-cancel": Scenario(
+        slug="01-slash-dodge-cancel", seed=101, max_turns=40, stops_at_death_entry=True
+    ),
+    "02-slash-hit-damage": Scenario(
+        slug="02-slash-hit-damage", seed=4, max_turns=40, stops_at_death_entry=True
+    ),
+    "03-near-death-self-peach": Scenario(
+        slug="03-near-death-self-peach", seed=28, max_turns=40
+    ),
+    "04-near-death-other-peach": Scenario(
+        slug="04-near-death-other-peach", seed=9, max_turns=40
+    ),
+    "05-near-death-death": Scenario(
+        slug="05-near-death-death", seed=1, max_turns=40, stops_at_death_entry=True
+    ),
 }
-"""M1 的基准清单；后续票（21–23）在此追加 03–06。"""
+"""M1 的基准清单；``06-deck-reshuffle`` 由票 23 追加。
+
+``01`` / ``02`` 也标了 ``stops_at_death_entry``：票 21 让收尾段的伤害真的能打死人，
+而死亡结算尚未实现（票 22），故一整局的终点从"牌堆耗尽平局"变成了"死亡入口"。
+票 22 落地后把这三条（01 / 02 / 05）一起改回"必达 ``game_end``"。
+"""
 
 
 @dataclass
 class _Recording:
-    """一次录制的进行时状态：目标段是否已命中。"""
+    """一次录制的进行时状态。"""
 
     goal_done: bool = False
+    goal_seat: int | None = None
+    """命中目标段的那一步是由哪个座位做出的（用于把"已命中"告诉另一个座位）。"""
+
+    def announce(self, seat: int) -> None:
+        self.goal_done = True
+        self.goal_seat = seat
 
 
 class ScenarioPlayer:
@@ -60,34 +93,100 @@ class ScenarioPlayer:
         target = self._target_segment(query)
         if target is not None:
             return target
-        return _cleanup(query)
+        return _cleanup_for(self.seat, query)
+
+    def _peers_goal(self) -> bool:
+        """目标段已由**另一个座位**命中：本座位此后只走收尾段。"""
+        return self.recording.goal_done and self.recording.goal_seat != self.seat
+
+    def _self_goal(self) -> bool:
+        """目标段已由**本座位**命中：目标段结束，本座位改走收尾段。"""
+        return self.recording.goal_done and self.recording.goal_seat == self.seat
+
+    def _any_goal(self) -> bool:
+        """目标段已经命中过（无论哪个座位）。"""
+        return self.recording.goal_done
 
     def _target_segment(self, query: Query) -> Action | None:
-        if self.recording.goal_done:
-            return None
         if self.slug == "01-slash-dodge-cancel":
+            if self.recording.goal_done:
+                return None
             return self._slash_dodge_cancel(query)
         if self.slug == "02-slash-hit-damage":
+            if self.recording.goal_done:
+                return None
             return self._slash_hit_damage(query)
+        if self.slug == "03-near-death-self-peach":
+            return self._near_death_self_peach(query)
+        if self.slug == "04-near-death-other-peach":
+            return self._near_death_other_peach(query)
+        if self.slug == "05-near-death-death":
+            return self._near_death_death(query)
         raise AssertionError(f"没有为场景 {self.slug} 写目标段")  # pragma: no cover - 开发期护栏
 
+    # ---- 01 / 02：座位 0 出【杀】，座位 1 在【闪】窗口给出互斥的两种应答 ----
+
     def _slash_dodge_cancel(self, query: Query) -> Action | None:
-        # 座位 0 用【杀】打座位 1；座位 1 在生效前用【闪】抵消。
         if self.seat == 0 and query.kind == "PLAY_PHASE":
             return _use(query, "slash", targets=(1,))
         if self.seat == 1 and query.kind == "DODGE":
             dodge = _use(query, "dodge")
             if dodge is not None:
-                self.recording.goal_done = True
+                self.recording.announce(self.seat)
             return dodge
         return None
 
     def _slash_hit_damage(self, query: Query) -> Action | None:
-        # 座位 0 用【杀】打座位 1；座位 1 放弃【闪】，让【杀】真的造成 1 点伤害。
         if self.seat == 0 and query.kind == "PLAY_PHASE":
             return _use(query, "slash", targets=(1,))
         if self.seat == 1 and query.kind == "DODGE":
-            self.recording.goal_done = True
+            self.recording.announce(self.seat)
+            return _find(query, Pass)
+        return None
+
+    # ---- 03：座位 1 在自己的回合被打到 0，被求桃时自救 ----
+
+    def _near_death_self_peach(self, query: Query) -> Action | None:
+        if query.kind == "PLAY_PHASE" and self.seat == 0 and not self._any_goal():
+            # 命中前：反复进攻；命中后收手，好让另一方能活到牌堆耗尽。
+            return _use(query, "slash", targets=(1,))
+        if self._peers_goal() or self._self_goal():
+            return None
+        if self.seat == 1 and query.kind == "PEACH" and query.dying == 1:
+            peach = _use(query, "peach", targets=(1,))
+            if peach is not None:
+                self.recording.announce(self.seat)
+                return peach
+            return _find(query, Pass)
+        return None
+
+    # ---- 04：座位 0（当前回合角色）在求桃窗口救座位 1 ----
+
+    def _near_death_other_peach(self, query: Query) -> Action | None:
+        if query.kind == "PLAY_PHASE" and self.seat == 0 and not self._any_goal():
+            return _use(query, "slash", targets=(1,))
+        if self._peers_goal() or self._self_goal():
+            return None
+        if self.seat == 0 and query.kind == "PEACH" and query.dying == 1:
+            peach = _use(query, "peach", targets=(1,))
+            if peach is not None:
+                self.recording.announce(self.seat)
+                return peach
+            return _find(query, Pass)
+        return None
+
+    # ---- 05：座位 1 濒死而双方均放弃 ----
+
+    def _near_death_death(self, query: Query) -> Action | None:
+        if self.recording.goal_done:
+            return None
+        if query.kind == "PLAY_PHASE":
+            return _use(query, "slash", targets=(1,)) if self.seat == 0 else _find(query, EndPhase)
+        if query.kind == "DODGE":
+            return _find(query, Pass)
+        if query.kind == "PEACH" and query.dying == 1:
+            if not self.recording.goal_done:
+                self.recording.announce(self.seat)
             return _find(query, Pass)
         return None
 
@@ -102,14 +201,19 @@ def _use(query: Query, type_id: str, targets: tuple[int, ...] | None = None) -> 
     return None
 
 
-def _cleanup(query: Query) -> Action:
-    """收尾段：能杀就杀、有闪就闪、不用【桃】；其余取候选里的第一个。"""
+def _cleanup_for(seat: int, query: Query) -> Action:
+    """收尾段（带座位）：能杀就杀、有闪就闪；濒死时只自救。"""
     if query.kind == "PLAY_PHASE":
         slash = _use(query, "slash")
         return slash if slash is not None else _find(query, EndPhase)
     if query.kind == "DODGE":
         dodge = _use(query, "dodge")
         return dodge if dodge is not None else _find(query, Pass)
+    if query.kind == "PEACH":
+        if query.dying == seat:
+            peach = _use(query, "peach")
+            return peach if peach is not None else _find(query, Pass)
+        return _find(query, Pass)
     return query.legal_actions[0]
 
 
@@ -129,7 +233,15 @@ def record(slug: str) -> str:
     engine.run([ScenarioPlayer(seat, slug, recording) for seat in range(2)])
 
     assert recording.goal_done, f"{slug}：目标段没有命中（seed={scenario.seed}）"
-    assert engine.records[-1].kind == "game_end", f"{slug}：没有走到终局"
+    if scenario.stops_at_death_entry:
+        assert engine.death_entry is not None, (
+            f"{slug}：没有走到死亡入口（seed={scenario.seed}）"
+        )
+        assert all(record_.kind != "game_end" for record_ in engine.records), (
+            f"{slug}：死亡结算尚未实现，却出现了终局记录"
+        )
+    else:
+        assert engine.records[-1].kind == "game_end", f"{slug}：没有走到终局"
     turns = sum(
         1
         for record_ in engine.records
