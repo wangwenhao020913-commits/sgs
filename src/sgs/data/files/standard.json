@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "pack_id": "standard",
+  "deck_profile": "m1_basic",
+  "card_types": [
+    {"id": "slash", "name": "杀", "category": "basic", "subcategory": null},
+    {"id": "dodge", "name": "闪", "category": "basic", "subcategory": null},
+    {"id": "peach", "name": "桃", "category": "basic", "subcategory": null}
+  ],
+  "decks": {
+    "m1_basic": {
+      "expect": {
+        "total": 53,
+        "by_type": {"slash": 30, "dodge": 15, "peach": 8}
+      },
+      "cards": [
+        {"type": "slash", "suit": "heart", "rank": 10},
+        {"type": "slash", "suit": "heart", "rank": 10},
+        {"type": "slash", "suit": "heart", "rank": 11},
+        {"type": "slash", "suit": "spade", "rank": 7},
+        {"type": "slash", "suit": "spade", "rank": 8},
+        {"type": "slash", "suit": "spade", "rank": 8},
+        {"type": "slash", "suit": "spade", "rank": 9},
+        {"type": "slash", "suit": "spade", "rank": 9},
+        {"type": "slash", "suit": "spade", "rank": 10},
+        {"type": "slash", "suit": "spade", "rank": 10},
+        {"type": "slash", "suit": "diamond", "rank": 6},
+        {"type": "slash", "suit": "diamond", "rank": 7},
+        {"type": "slash", "suit": "diamond", "rank": 8},
+        {"type": "slash", "suit": "diamond", "rank": 9},
+        {"type": "slash", "suit": "diamond", "rank": 10},
+        {"type": "slash", "suit": "diamond", "rank": 13},
+        {"type": "slash", "suit": "club", "rank": 2},
+        {"type": "slash", "suit": "club", "rank": 3},
+        {"type": "slash", "suit": "club", "rank": 4},
+        {"type": "slash", "suit": "club", "rank": 5},
+        {"type": "slash", "suit": "club", "rank": 6},
+        {"type": "slash", "suit": "club", "rank": 7},
+        {"type": "slash", "suit": "club", "rank": 8},
+        {"type": "slash", "suit": "club", "rank": 8},
+        {"type": "slash", "suit": "club", "rank": 9},
+        {"type": "slash", "suit": "club", "rank": 9},
+        {"type": "slash", "suit": "club", "rank": 10},
+        {"type": "slash", "suit": "club", "rank": 10},
+        {"type": "slash", "suit": "club", "rank": 11},
+        {"type": "slash", "suit": "club", "rank": 11},
+        {"type": "dodge", "suit": "heart", "rank": 2},
+        {"type": "dodge", "suit": "heart", "rank": 2},
+        {"type": "dodge", "suit": "heart", "rank": 13},
+        {"type": "dodge", "suit": "diamond", "rank": 2},
+        {"type": "dodge", "suit": "diamond", "rank": 2},
+        {"type": "dodge", "suit": "diamond", "rank": 3},
+        {"type": "dodge", "suit": "diamond", "rank": 4},
+        {"type": "dodge", "suit": "diamond", "rank": 5},
+        {"type": "dodge", "suit": "diamond", "rank": 6},
+        {"type": "dodge", "suit": "diamond", "rank": 7},
+        {"type": "dodge", "suit": "diamond", "rank": 8},
+        {"type": "dodge", "suit": "diamond", "rank": 9},
+        {"type": "dodge", "suit": "diamond", "rank": 10},
+        {"type": "dodge", "suit": "diamond", "rank": 11},
+        {"type": "dodge", "suit": "diamond", "rank": 11},
+        {"type": "peach", "suit": "heart", "rank": 3},
+        {"type": "peach", "suit": "heart", "rank": 4},
+        {"type": "peach", "suit": "heart", "rank": 6},
+        {"type": "peach", "suit": "heart", "rank": 7},
+        {"type": "peach", "suit": "heart", "rank": 8},
+        {"type": "peach", "suit": "heart", "rank": 9},
+        {"type": "peach", "suit": "heart", "rank": 12},
+        {"type": "peach", "suit": "diamond", "rank": 12}
+      ]
+    }
+  }
+}
