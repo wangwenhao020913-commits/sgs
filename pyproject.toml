@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sgs"
+version = "0.0.0"
+description = "《三国杀》规则引擎（M1 引擎骨架）"
+requires-python = ">=3.14"
+dependencies = [
+    "pydantic>=2.13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9",
+]
+
+[project.scripts]
+sgs = "sgs.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"sgs.data" = ["files/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

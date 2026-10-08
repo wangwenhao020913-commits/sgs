@@ -1,2 +1,11 @@
 # 本地 markdown issue tracker 的工作产物
 .scratch/
+
+# Python 虚拟环境与构建/缓存产物
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
