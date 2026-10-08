@@ -130,6 +130,32 @@ check "$DOC02" "增减体力上限时 / 后" "旧『增减体力上限时 / 后�
 check "$DOC02" "进行拼点时 → 亮出拼点牌后 → 赢/没赢后" "旧拼点三时机链" absent
 check "$DOC02" "死亡时 → 死亡后（奖惩与胜负判定）" "旧死亡行" absent
 
+# 票 03（M0 收尾）回写《开发文档/05-测试与验证策略.md》§2 / §5 的时机测试映射：T-1 / T-2。
+# 依据：.scratch/m1-engine-skeleton/research/01-timing-enum-alignment.md §5.3；
+# 落点 = tests/test_timing.py（83 节点、伪时机禁令）与 tests/test_timing_coverage.py（47/11/25 三分区）。
+DOC05="05-测试与验证策略.md"
+check "$DOC05" "时机表完整性" "T-1 映射表时机表完整性行"
+check "$DOC05" "83 个节点的枚举值与顺序" "T-1 权威表的 83 节点与顺序"
+check "$DOC05" "伪时机不得出现" "T-1 伪时机负测试行"
+check "$DOC05" "tests/test_timing.py" "T-1 枚举与伪时机禁令的落点"
+check "$DOC05" "时机覆盖清单" "T-1 映射表时机覆盖清单行"
+check "$DOC05" "47 dispatch 白名单 / 11 空日志 / 25 枚举位" "T-1 三分区口径"
+check "$DOC05" "tests/test_timing_coverage.py" "T-1 覆盖清单的判决落点"
+check "$DOC05" "§M2 的验收不冲突" "T-1 与 06 §M2 的验收口径对齐"
+check "$DOC05" "Golden Replay 用例 ≥ 30 条" "T-1 承接 06 §M2 的基准条数"
+check "$DOC05" "不变量 fuzz 无失败" "T-1 承接 06 §M2 的 fuzz 口径"
+check "$DOC05" "（T-1）" "T-1 回写逐处标注依据"
+
+check "$DOC05" "插入结算顺序" "T-2 插入结算顺序"
+check "$DOC05" "tests/test_use_and_resolve.py" "T-2 伤害 / 扣减体力嵌套落点"
+check "$DOC05" "tests/test_near_death.py" "T-2 濒死 / 回复插入落点"
+check "$DOC05" "tests/test_resolution_stack.py" "T-2 栈 / 恢复点落点"
+check "$DOC05" "tests/test_turn_loop.py" "T-2 回合环顺序落点"
+check "$DOC05" "不属于任何角色的回合起点" "T-2 L18.8 响应起点切换"
+check "$DOC05" "从其下家起" "T-2 L18.8 两个起点都登记"
+check "$DOC05" "登记为 M2" "T-2 实战走不到项显式登记 M2"
+check "$DOC05" "（T-2）" "T-2 回写逐处标注依据"
+
 if [ "$fail" -eq 0 ]; then
   echo "PASS: 开发文档校验全部通过"
 fi
