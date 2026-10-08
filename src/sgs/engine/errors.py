@@ -2,6 +2,9 @@
 
 ``IllegalActionError`` 抛点在"引擎接受行动"处，抛前**零状态改动**（校验只是成员判定），
 但被拒的应答本身仍写一条 ``accepted = false`` 的记录——拒绝是可观测的。
+三个 ``reason_code`` 与票 07 §5 的三类非法输入同名：``MalformedAction``（结构损坏，
+payload 不在行动 schema 内）/ ``StaleAction``（``answers_seq`` 失配）/
+``IllegalAction``（不在候选集合内）。M1 不重试、不超时（票 24）。
 
 ``JournalVersionError`` 抛点在**唯一反序列化器** :func:`sgs.engine.read_journal` 里，
 版本先行：文件版本不在支持集合内即拒，且**报双方版本**（票 15 §2）。
@@ -16,7 +19,7 @@ __all__ = ["IllegalActionError", "JournalVersionError"]
 
 
 class IllegalActionError(Exception):
-    """一次应答不在当前询问的合法行动集合内（或应答序号陈旧）。"""
+    """一次应答不在当前询问的合法行动集合内（或结构损坏 / 应答序号陈旧）。"""
 
     def __init__(
         self,
@@ -25,7 +28,7 @@ class IllegalActionError(Exception):
         message: str,
         expected: str,
         got: str,
-        answers_seq: int,
+        answers_seq: int | None,
     ) -> None:
         self.reason_code = reason_code
         self.message = message

@@ -44,6 +44,7 @@ __all__ = [
     "Header",
     "HpChangeRecord",
     "JournalRecord",
+    "MalformedAction",
     "QueryRecord",
     "TimingRecord",
     "dump_journal",
@@ -123,14 +124,39 @@ class QueryRecord(_FrozenModel):
     query: Query
 
 
+class MalformedAction(_FrozenModel):
+    """**结构损坏**的应答在 ``action`` 记录里的承载（票 07 §5 的 ``Malformed`` 一类）。
+
+    它**不是**一种行动：``Action`` 协议（票 05）冻结为四个构造子，损坏的应答按定义
+    读不出任何构造子。若不给它一个位置，"被拒应答记 ``accepted = false``"（票 24）
+    就只剩一个异常，拒绝不可观测；故 ``action`` 记录的 ``action`` 字段放宽为
+    ``Action | MalformedAction``。合法应答的序列化字节**一个都不变**，既有基准因此
+    不升版（票 15 的升版判据 = 既有基准重跑字节是否变）。
+    """
+
+    kind: Literal["MalformedAction"] = "MalformedAction"
+    answers_seq: int | None = None
+    """从损坏载荷里**尽力**读出的应答序号；读不出即 ``None``。"""
+
+    detail: str
+    """结构错误的首条路径与说明（pydantic 校验错误的首项）。"""
+
+    raw: str
+    """损坏载荷的 canonical 文本（JSON；不可 JSON 化时退化为 ``repr``）。"""
+
+
 class ActionRecord(_FrozenModel):
-    """一次应答；``answers_seq`` 由内联行动转出，是同一个键的单一真源。"""
+    """一次应答；``answers_seq`` 由内联行动转出，是同一个键的单一真源。
+
+    ``action`` 通常是四个构造子之一；**结构损坏**的应答承载为 :class:`MalformedAction`
+    （``accepted = false``），使"拒绝本身可观测"对三类非法输入都成立（票 07 §5 / 票 24）。
+    """
 
     kind: Literal["action"] = "action"
     seq: int
     accepted: bool
     reason: str | None = None
-    action: Action
+    action: Action | MalformedAction
 
     @model_validator(mode="before")
     @classmethod
@@ -146,8 +172,8 @@ class ActionRecord(_FrozenModel):
 
     @computed_field  # type: ignore[prop-decorator]
     @property
-    def answers_seq(self) -> int:
-        return self.action.answers_seq
+    def answers_seq(self) -> int | None:
+        return getattr(self.action, "answers_seq", None)
 
 
 class FrameRecord(_FrozenModel):

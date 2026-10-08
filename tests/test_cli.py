@@ -145,3 +145,101 @@ def test_seed_outside_the_64_bit_range_is_rejected(capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "种子必须落在" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# 非法行动：stderr 报告 + 退出码 1（票 07 §5 / 票 24）
+# ---------------------------------------------------------------------------
+
+ILLEGAL_ACTION_PROBE = """
+import sgs.cli as cli
+from sgs.state import Pass
+
+class IllegalPlayer:
+    def __init__(self, rng):
+        self._rng = rng
+
+    def respond(self, query):
+        return Pass(answers_seq=query.seq)
+
+cli.RandomPlayer = IllegalPlayer
+raise SystemExit(cli.main(["--seed", "7"]))
+"""
+
+MALFORMED_ACTION_PROBE = """
+import sgs.cli as cli
+
+class MalformedPlayer:
+    def __init__(self, rng):
+        self._rng = rng
+
+    def respond(self, query):
+        return {"kind": "Frobnicate", "answers_seq": query.seq}
+
+cli.RandomPlayer = MalformedPlayer
+raise SystemExit(cli.main(["--seed", "7"]))
+"""
+
+
+def _illegal_player_class(response):
+    """造一个总投喂固定（非法）应答的参与者类，替掉 CLI 默认的随机玩家。"""
+
+    class _IllegalPlayer:
+        def __init__(self, rng):
+            self._rng = rng
+
+        def respond(self, query):
+            return response(query)
+
+    return _IllegalPlayer
+
+
+def test_an_illegal_action_reports_to_stderr_and_exits_1(monkeypatch, capsys):
+    import sgs.cli as cli
+    from sgs.state import Pass
+
+    monkeypatch.setattr(
+        cli, "RandomPlayer", _illegal_player_class(lambda q: Pass(answers_seq=q.seq))
+    )
+
+    assert cli.main(["--seed", "7"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "非法行动" in captured.err
+    assert "IllegalAction" in captured.err
+
+
+def test_a_malformed_action_reports_to_stderr_and_exits_1(monkeypatch, capsys):
+    import sgs.cli as cli
+
+    monkeypatch.setattr(
+        cli,
+        "RandomPlayer",
+        _illegal_player_class(lambda q: {"kind": "Frobnicate", "answers_seq": q.seq}),
+    )
+
+    assert cli.main(["--seed", "7"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "非法行动" in captured.err
+    assert "MalformedAction" in captured.err
+
+
+def test_illegal_action_exit_code_in_subprocess():
+    result = _run(sys.executable, "-c", ILLEGAL_ACTION_PROBE)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "非法行动" in result.stderr
+    assert "IllegalAction" in result.stderr
+
+
+def test_malformed_action_exit_code_in_subprocess():
+    result = _run(sys.executable, "-c", MALFORMED_ACTION_PROBE)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "非法行动" in result.stderr
+    assert "MalformedAction" in result.stderr

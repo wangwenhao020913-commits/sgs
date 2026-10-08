@@ -17,7 +17,11 @@ __all__ = ["Participant", "RandomPlayer", "TapeError", "TapePlayer", "tape_from_
 
 
 class Participant(Protocol):
-    """引擎只在询问处调用它；入参自带候选行动与该参与者的视角。"""
+    """引擎只在询问处调用它；入参自带候选行动与该参与者的视角。
+
+    应答由**引擎**在边界校验：结构损坏 / 序号陈旧 / 不在候选集合内一律拒绝
+    （票 24），参与者无从绕过内联的合法行动集合。
+    """
 
     def respond(self, query: Query) -> Action: ...
 
@@ -68,8 +72,10 @@ class TapePlayer:
 def tape_from_journal(records: Sequence[object]) -> tuple[int, tuple[Action, ...]]:
     """从记录流抽出 ``(seed, 按行序的 Action 序列)``；纯函数、**不判版本**（票 10 §7 / 票 15 §2）。
 
+    只收**被接受**的应答：被拒的应答（含结构损坏的 ``MalformedAction``）不是回放输入。
     用鸭子类型读记录：依赖方向是 ``engine → agents``，故 ``agents`` 不能 import
-    ``engine`` 的记录类型。记录流的字段由票 06 冻结，这里只认 ``kind`` / ``seed`` / ``action``。
+    ``engine`` 的记录类型。记录流的字段由票 06 冻结，这里只认 ``kind`` / ``seed`` /
+    ``accepted`` / ``action``。
     """
     seed: int | None = None
     actions: list[Action] = []
@@ -77,7 +83,7 @@ def tape_from_journal(records: Sequence[object]) -> tuple[int, tuple[Action, ...
         kind = getattr(record, "kind", None)
         if kind == "header":
             seed = record.seed
-        elif kind == "action":
+        elif kind == "action" and record.accepted:
             actions.append(record.action)
     if seed is None:
         raise ValueError("记录流里没有 header，取不到种子")

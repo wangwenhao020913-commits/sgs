@@ -33,6 +33,7 @@ from .protocol import (
     Query,
     QueryKind,
     UseCard,
+    parse_action,
 )
 
 __all__ = (
@@ -60,5 +61,6 @@ __all__ = (
     "QueryKind",
     "UseCard",
     "Zone",
+    "parse_action",
     "project",
 )

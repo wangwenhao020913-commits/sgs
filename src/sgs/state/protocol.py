@@ -6,6 +6,10 @@
 
 ``answers_seq`` 是行动自带的字段：候选在**构造询问时**生成，那时询问的 ``seq`` 已定，
 于是"被提供的"与"被接受的"共享同一个陈旧输入校验键。
+
+外来应答经 :func:`parse_action` 解析：这是行动 schema 的**唯一入口**，schema 不认的
+输入（未知 ``kind`` / 缺字段 / 多余字段）抛 pydantic ``ValidationError``，由引擎归类为
+``Malformed``（票 07 §5）。
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, TypeAdapter
 
 from sgs.timing import Timing
 
@@ -33,6 +37,7 @@ __all__ = [
     "Query",
     "QueryKind",
     "UseCard",
+    "parse_action",
 ]
 
 
@@ -102,6 +107,19 @@ class DiscardCards(_ActionBase):
 
 
 Action = Annotated[UseCard | Pass | EndPhase | DiscardCards, Field(discriminator="kind")]
+
+_ACTION_ADAPTER: TypeAdapter[Action] = TypeAdapter(Action)
+
+
+def parse_action(raw: object) -> Action:
+    """把**外来应答**解析成 :data:`Action`：唯一入口，``extra="forbid"`` 即拒多余字段。
+
+    schema 不认的输入（未知 ``kind`` / 缺字段 / 类型不符 / 根本不是对象）抛 pydantic
+    ``ValidationError``——引擎据此记 ``MalformedAction`` 并抛 ``IllegalActionError``
+    （票 07 §5 的 ``Malformed`` 一类）。已经是 ``Action`` 实例的输入原样返回，
+    故参与者照常可以直接返回协议对象。
+    """
+    return _ACTION_ADAPTER.validate_python(raw)
 
 
 # ---------------------------------------------------------------------------

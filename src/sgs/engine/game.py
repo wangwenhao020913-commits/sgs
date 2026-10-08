@@ -9,10 +9,11 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from sgs.agents import Participant
 from sgs.data import ContentPack, RuleConfig
@@ -46,6 +47,7 @@ from sgs.state import (
     Query,
     QueryKind,
     Zone,
+    parse_action,
     project,
 )
 from sgs.timing import Timing
@@ -58,6 +60,7 @@ from .journal import (
     GameEndRecord,
     Header,
     JournalRecord,
+    MalformedAction,
     QueryRecord,
     TimingRecord,
     dump_journal,
@@ -127,6 +130,42 @@ def _child_payload(
         data["nature"] = DamageNature.NORMAL
         data["chain"] = False
     return data
+
+
+def _raw_kind(response: object) -> str:
+    """损坏载荷声明的 ``kind``；读不出来就报 Python 类型名（只作诊断）。"""
+    if isinstance(response, dict):
+        kind = response.get("kind")
+        if isinstance(kind, str):
+            return kind
+    return type(response).__name__
+
+
+def _raw_answers_seq(response: object) -> int | None:
+    """尽量从损坏载荷里取出 ``answers_seq``；只作诊断，不参与任何判定。"""
+    if isinstance(response, dict):
+        value = response.get("answers_seq")
+    else:
+        value = getattr(response, "answers_seq", None)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _first_validation_issue(error: ValidationError) -> str:
+    """结构错误的首条"路径 + 说明"，好让记录流里的拒绝能直接定位。"""
+    first = error.errors(include_url=False)[0]
+    where = ".".join(str(part) for part in first["loc"]) or "（根）"
+    return f"{where}: {first['msg']}"
+
+
+def _raw_text(response: object) -> str:
+    """损坏载荷的 canonical 文本，供记录流留存；不可 JSON 化时退化为 ``repr``。"""
+    payload = response.model_dump(mode="json") if isinstance(response, BaseModel) else response
+    try:
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return repr(response)
 
 
 class Engine:
@@ -502,35 +541,48 @@ class Engine:
         self.pending = query
         return SUSPEND
 
-    def submit(self, action: Action) -> None:
-        """接受一个应答；合法性 = 成员判定，非法输入零状态改动。"""
+    def submit(self, response: object) -> None:
+        """接受一个应答；合法性 = **成员判定**，非法输入**零状态改动**（票 07 §5）。
+
+        三类非法输入都在这里拒绝（票 24）：**结构损坏**（payload 不在行动 schema 内）/
+        **应答序号陈旧**（``answers_seq`` 失配）/ **不在候选集合内**。三者都先写一条
+        ``accepted = false`` 的 ``action`` 记录再抛 :class:`IllegalActionError`——
+        拒绝本身也必须可观测；被拒前不碰任何游戏状态，也不重试、不超时。
+        """
         pending = self.pending
         if pending is None:
             raise RuntimeError("当前没有待应答的询问")
-        if action.answers_seq != pending.seq:
-            self._emit(
-                ActionRecord(
-                    seq=self._next_seq(), accepted=False, reason="answers_seq 陈旧", action=action
-                )
+        try:
+            action = parse_action(response)
+        except ValidationError as error:
+            self._reject(
+                MalformedAction(
+                    answers_seq=_raw_answers_seq(response),
+                    detail=_first_validation_issue(error),
+                    raw=_raw_text(response),
+                ),
+                reason="结构损坏：payload 不在行动 schema 内",
             )
             raise IllegalActionError(
-                reason_code="stale",
+                reason_code="MalformedAction",
+                message="应答结构损坏，解析不出任何一种行动构造子",
+                expected="UseCard / Pass / EndPhase / DiscardCards 之一",
+                got=_raw_kind(response),
+                answers_seq=_raw_answers_seq(response),
+            ) from error
+        if action.answers_seq != pending.seq:
+            self._reject(action, reason="answers_seq 陈旧")
+            raise IllegalActionError(
+                reason_code="StaleAction",
                 message="应答的 answers_seq 与当前询问不符",
                 expected=str(pending.seq),
                 got=str(action.answers_seq),
                 answers_seq=action.answers_seq,
             )
         if action not in pending.legal_actions:
-            self._emit(
-                ActionRecord(
-                    seq=self._next_seq(),
-                    accepted=False,
-                    reason="不在候选集合内",
-                    action=action,
-                )
-            )
+            self._reject(action, reason="不在候选集合内")
             raise IllegalActionError(
-                reason_code="illegal",
+                reason_code="IllegalAction",
                 message="行动不在候选集合内",
                 expected="候选集合的成员之一",
                 got=action.kind,
@@ -539,6 +591,12 @@ class Engine:
         self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
         self._answer = action
         self.pending = None
+
+    def _reject(self, action: Action | MalformedAction, *, reason: str) -> None:
+        """把一次被拒应答写进记录流（``accepted = false``）；不碰任何游戏状态。"""
+        self._emit(
+            ActionRecord(seq=self._next_seq(), accepted=False, reason=reason, action=action)
+        )
 
     def _build_query(
         self,
