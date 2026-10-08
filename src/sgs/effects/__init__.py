@@ -17,6 +17,7 @@ from .behaviors import (
     CARD_BEHAVIORS,
     CallOp,
     CardBehavior,
+    DamageNature,
     EffectStep,
     PushFrame,
     TargetRule,
@@ -26,12 +27,13 @@ from .behaviors import (
     behavior_for,
     opens_response_window,
 )
-from .primitives import EffectContext, Randomness, draw_from_deck, locate, move_card
+from .primitives import EffectContext, Randomness, apply_hp, draw_from_deck, locate, move_card
 
 __all__ = (
     "CARD_BEHAVIORS",
     "CallOp",
     "CardBehavior",
+    "DamageNature",
     "EffectContext",
     "EffectStep",
     "PushFrame",
@@ -40,6 +42,7 @@ __all__ = (
     "UseContext",
     "UseLimit",
     "UseTiming",
+    "apply_hp",
     "attack_range",
     "behavior_for",
     "check_count",

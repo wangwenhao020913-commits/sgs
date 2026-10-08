@@ -4,9 +4,10 @@
   实体牌置入弃牌堆。实体牌在 L4.1 / L4.2 之间从手牌移入处理区（票 07 §3）。
 - **RESOLVE 帧**（逐目标结算）：L5 五个时机；"生效前"按**行为表**决定是否开响应窗口，
   被抵消则 ``Goto(RESOLVE_END_PC)`` 跳过"生效时 / 生效后"，直达"使用结算结束时"。
-
-DAMAGE / RECOVER 的步骤表留给票 20 / 21：本票只保证它们能被压入并弹出——
-否则一张未被抵消的【杀】会把引擎打崩。这不是"实现了伤害"。
+- **DAMAGE 帧**（票 20）：L7 五个时机；"受到伤害时"之后压入 **LIFE_DECREASE** 子帧，
+  在"造成伤害后"之前把体力真正扣掉。
+- **LIFE_DECREASE 帧**（票 20）：L8 三个时机；"扣减体力时"是唯一的体力写入点，
+  也是濒死结算的插入点（插入归票 21）。
 """
 
 from __future__ import annotations
@@ -50,6 +51,8 @@ class FrameHost(StepHost, Protocol):
     def apply_effects(
         self, frame: Frame, effects: Sequence[EffectStep], *, timing: Timing
     ) -> None: ...
+
+    def apply_hp_change(self, frame: Frame, seat: int, value: int) -> Any: ...
 
 
 def _emit(
@@ -184,6 +187,94 @@ RESOLVE_STEPS = (
 )
 
 
+# ---- DAMAGE 帧：L7 五个时机 + 在"受到伤害时"后插入 LIFE_DECREASE -----------
+
+
+def _damage_channel(frame: Frame) -> tuple[CardRef, ...]:
+    """官方六要素里的**渠道**：造成这次伤害的实体牌；无牌来源时为空元组。"""
+    channel = frame.data.get("channel")
+    return (channel,) if channel is not None else ()
+
+
+def _emit_damage(host: FrameHost, frame: Frame, timing: Timing, actor: int) -> None:
+    # 渠道牌进时机记录，使"谁用什么牌造成/受到了这次伤害"在记录流里可读。
+    _emit(host, frame, timing, actor=actor, cards=_damage_channel(frame))
+
+
+def damage_deal(host: FrameHost, frame: Frame) -> None:
+    _emit_damage(host, frame, Timing.DAMAGE_DEAL, frame.data["source"])
+
+
+def damage_take(host: FrameHost, frame: Frame) -> None:
+    _emit_damage(host, frame, Timing.DAMAGE_TAKE, frame.data["target"])
+
+
+def damage_push_life_decrease(host: FrameHost, frame: Frame) -> None:
+    """M1 无"防止伤害"（票 07 §1），故"受到伤害时"之后必定进入扣减体力结算。"""
+    host.push_frame(
+        FrameKind.LIFE_DECREASE,
+        {
+            "target": frame.data["target"],
+            "source": frame.data["source"],
+            "amount": frame.data["amount"],
+        },
+        timing=Timing.LIFE_DECREASE_BEFORE,
+    )
+
+
+def damage_after_deal(host: FrameHost, frame: Frame) -> None:
+    _emit_damage(host, frame, Timing.DAMAGE_AFTER_DEAL, frame.data["source"])
+
+
+def damage_after_take(host: FrameHost, frame: Frame) -> None:
+    _emit_damage(host, frame, Timing.DAMAGE_AFTER_TAKE, frame.data["target"])
+
+
+def damage_end(host: FrameHost, frame: Frame) -> None:
+    _emit_damage(host, frame, Timing.DAMAGE_END, frame.data["target"])
+
+
+DAMAGE_STEPS = (
+    Step(damage_deal, Timing.DAMAGE_DEAL),
+    Step(damage_take, Timing.DAMAGE_TAKE),
+    # 压栈步骤的 `timing` 只作子帧 `return_to` 的可读标签：LIFE_DECREASE_BEFORE
+    # 由 LIFE_DECREASE 帧自己 dispatch。
+    Step(damage_push_life_decrease, Timing.LIFE_DECREASE_BEFORE),
+    Step(damage_after_deal, Timing.DAMAGE_AFTER_DEAL),
+    Step(damage_after_take, Timing.DAMAGE_AFTER_TAKE),
+    Step(damage_end, Timing.DAMAGE_END),
+)
+
+
+# ---- LIFE_DECREASE 帧：L8 三个时机 -----------------------------------------
+
+
+def life_decrease_before(host: FrameHost, frame: Frame) -> None:
+    _emit(host, frame, Timing.LIFE_DECREASE_BEFORE, actor=frame.data["target"])
+
+
+def life_decrease_on(host: FrameHost, frame: Frame) -> None:
+    """**扣减体力时** = 唯一的体力写入点；先 dispatch 时机，再把体力扣到目标值。
+
+    目标值由本帧算（``hp - amount``），原语只负责写（票 07 §1）。体力降到 0 及以下
+    是濒死结算的插入点，插入本身归票 21。
+    """
+    target = frame.data["target"]
+    _emit(host, frame, Timing.LIFE_DECREASE_ON, actor=target)
+    host.apply_hp_change(frame, target, host.state.player(target).hp - frame.data["amount"])
+
+
+def life_decrease_after(host: FrameHost, frame: Frame) -> None:
+    _emit(host, frame, Timing.LIFE_DECREASE_AFTER, actor=frame.data["target"])
+
+
+LIFE_DECREASE_STEPS = (
+    Step(life_decrease_before, Timing.LIFE_DECREASE_BEFORE),
+    Step(life_decrease_on, Timing.LIFE_DECREASE_ON),
+    Step(life_decrease_after, Timing.LIFE_DECREASE_AFTER),
+)
+
+
 def _pc_of(timing: Timing) -> int:
     """按**时机**（而不是硬编码下标）定位步骤，重排步骤表不会再让跳转错位。"""
     return next(index for index, step in enumerate(RESOLVE_STEPS) if step.timing is timing)
@@ -197,6 +288,7 @@ def build_steps() -> StepTable:
     return {
         FrameKind.USE: USE_STEPS,
         FrameKind.RESOLVE: RESOLVE_STEPS,
-        FrameKind.DAMAGE: (),
+        FrameKind.DAMAGE: DAMAGE_STEPS,
+        FrameKind.LIFE_DECREASE: LIFE_DECREASE_STEPS,
         FrameKind.RECOVER: (),
     }

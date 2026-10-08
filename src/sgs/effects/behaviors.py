@@ -26,6 +26,7 @@ __all__ = [
     "CARD_BEHAVIORS",
     "CallOp",
     "CardBehavior",
+    "DamageNature",
     "EffectStep",
     "PushFrame",
     "TargetRule",
@@ -35,6 +36,14 @@ __all__ = [
     "behavior_for",
     "opens_response_window",
 ]
+
+
+class DamageNature(str, Enum):
+    """伤害的**属性**（官方六要素之一）；M1 恒 ``NORMAL``（无属性伤害 / 无连环）。"""
+
+    NORMAL = "NORMAL"
+    FIRE = "FIRE"
+    THUNDER = "THUNDER"
 
 
 class UseContext(str, Enum):

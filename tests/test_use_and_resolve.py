@@ -6,23 +6,31 @@
 
 from __future__ import annotations
 
+import pytest
+
 from sgs.data import load_content_pack
 from sgs.effects import (
     CARD_BEHAVIORS,
     CallOp,
+    DamageNature,
+    EffectContext,
     PushFrame,
     UseContext,
+    apply_hp,
     attack_range,
     behavior_for,
     check_count,
     check_forbidden,
     check_targets,
+    discard_count,
     distance,
+    hand_limit,
     legal_actions_for,
 )
 from sgs.engine import Engine
+from sgs.resolution import Step
 from sgs.state import EndPhase, FrameKind, Pass, QueryKind, UseCard
-from sgs.timing import Timing
+from sgs.timing import FORBIDDEN_TIMING_NAMES, Timing
 
 from support import SeatSpec, build_state, cards_of_type
 
@@ -408,4 +416,217 @@ def test_the_processing_area_is_public_and_holds_the_used_card_during_the_window
     assert [card.card_id for card in query.view.processing] == [SLASH[0]], (
         "响应窗口开着时，被响应的实体牌已在处理区——公开区，参与者看得见"
     )
+
+
+# ---------------------------------------------------------------------------
+# 伤害与扣减体力（票 20：L7 五个 + L8 三个）
+# ---------------------------------------------------------------------------
+
+
+def _damage_engine(*, hp_a=4, hp_b=4):
+    """一条【杀】必然命中的局面：座位 1 手里没有【闪】，只能放弃。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=hp_a, hand=(SLASH[0],)), SeatSpec(hp=hp_b, hand=(PEACH[0],))],
+        deck=(DODGE[0], DODGE[1]),
+        turn_seat=0,
+    )
+    return Engine.from_state(state, seed=1)
+
+
+def _damage_duel(*, hp_a=4, hp_b=4):
+    engine = _damage_engine(hp_a=hp_a, hp_b=hp_b)
+    engine.run([_ScriptedPlayer(0, slash_target=1), _ScriptedPlayer(1)])
+    return engine
+
+
+def _hp_changes(engine):
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta" and record.delta_type == "hp_change"
+    ]
+
+
+def test_apply_hp_writes_the_value_and_reports_the_signed_change():
+    state = _state(hp_a=4)
+
+    delta = apply_hp(state, EffectContext(actor=0), 0, 3)
+
+    assert state.player(0).hp == 3
+    assert (delta.seat, delta.before, delta.after, delta.amount) == (0, 4, 3, -1)
+
+
+def test_apply_hp_may_take_hp_below_zero_because_a_dying_character_is_an_intermediate_state():
+    state = _state(hp_a=0)
+
+    delta = apply_hp(state, EffectContext(actor=0), 0, -1)
+
+    assert (delta.before, delta.after, delta.amount) == (0, -1, -1), (
+        "官方：角色的体力有可能小于 0；上限才是硬边界"
+    )
+
+
+def test_apply_hp_refuses_a_value_above_the_hp_max():
+    state = _state(hp_a=3)
+
+    with pytest.raises(ValueError):
+        apply_hp(state, EffectContext(actor=0), 0, 5)
+
+    assert state.player(0).hp == 3, "越界写入必须零状态改动"
+
+
+def test_hand_limit_is_zero_when_hp_is_at_or_below_zero():
+    state = _state(hp_a=-1, hand_a=(SLASH[0], PEACH[0]))
+
+    assert hand_limit(state.player(0)) == 0, "官方：体力值 ≤ 0 时读作 0，手牌上限最小 0"
+    assert discard_count(state.player(0)) == len(state.player(0).hand), (
+        "体力为负时也必须给得出弃牌候选（不能要求弃超过手里的张数）"
+    )
+
+
+def test_an_uncancelled_slash_takes_one_hp_from_the_target():
+    engine = _damage_duel()
+    changes = _hp_changes(engine)
+
+    assert [(change.seat, change.before, change.after, change.amount) for change in changes] == [
+        (1, 4, 3, -1)
+    ], "未被抵消的【杀】造成 1 点伤害，恰好一条体力变化记录"
+    assert engine.state.player(1).hp == 3
+
+
+def test_the_damage_frame_nests_the_life_decrease_frame_inside_the_use_chain():
+    engine = _damage_duel()
+    pushes = [
+        record for record in engine.records if record.kind == "frame" and record.op == "push"
+    ]
+
+    assert [record.frame_kind for record in pushes[:4]] == [
+        FrameKind.USE,
+        FrameKind.RESOLVE,
+        FrameKind.DAMAGE,
+        FrameKind.LIFE_DECREASE,
+    ], "事件链：使用（USE + RESOLVE）→ 伤害 → 扣减体力"
+    assert [record.depth for record in pushes[:4]] == [1, 2, 3, 4], (
+        "记录流的 depth = 压栈后的栈深；RESOLVE 是使用结算中的帧，故伤害从 3 起"
+    )
+    assert pushes[2].return_to == ("RESOLVE", Timing.RESOLVE_AFTER_EFFECT.value)
+    assert pushes[3].return_to == ("DAMAGE", Timing.LIFE_DECREASE_BEFORE.value)
+
+
+def test_the_damage_frame_dispatches_the_official_five_timings_in_order():
+    engine = _damage_duel()
+    damage = _frame_ids(engine.records)[2]
+
+    assert _timings_of(engine.records, damage) == [
+        Timing.DAMAGE_DEAL,
+        Timing.DAMAGE_TAKE,
+        Timing.DAMAGE_AFTER_DEAL,
+        Timing.DAMAGE_AFTER_TAKE,
+        Timing.DAMAGE_END,
+    ]
+
+
+def test_the_life_decrease_frame_dispatches_its_three_timings_in_order():
+    engine = _damage_duel()
+    life_decrease = _frame_ids(engine.records)[3]
+
+    assert _timings_of(engine.records, life_decrease) == [
+        Timing.LIFE_DECREASE_BEFORE,
+        Timing.LIFE_DECREASE_ON,
+        Timing.LIFE_DECREASE_AFTER,
+    ]
+
+
+def test_life_decrease_sits_between_taking_and_after_dealing_damage():
+    engine = _damage_duel()
+    relevant = [
+        record.timing
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing
+        in (
+            Timing.DAMAGE_DEAL,
+            Timing.DAMAGE_TAKE,
+            Timing.LIFE_DECREASE_BEFORE,
+            Timing.LIFE_DECREASE_ON,
+            Timing.LIFE_DECREASE_AFTER,
+            Timing.DAMAGE_AFTER_DEAL,
+            Timing.DAMAGE_AFTER_TAKE,
+            Timing.DAMAGE_END,
+        )
+    ]
+
+    assert relevant == [
+        Timing.DAMAGE_DEAL,
+        Timing.DAMAGE_TAKE,
+        Timing.LIFE_DECREASE_BEFORE,
+        Timing.LIFE_DECREASE_ON,
+        Timing.LIFE_DECREASE_AFTER,
+        Timing.DAMAGE_AFTER_DEAL,
+        Timing.DAMAGE_AFTER_TAKE,
+        Timing.DAMAGE_END,
+    ], "官方流程：伤害结算中插入一次完整的扣减体力结算"
+
+
+def test_the_hp_change_is_attributed_to_the_life_decrease_frame():
+    engine = _damage_duel()
+    life_decrease = _frame_ids(engine.records)[3]
+    change = _hp_changes(engine)[0]
+
+    assert change.frame_id == life_decrease, "变化事件的归属由帧关联推出（票 06 §3）"
+    assert change.depth == 4
+    assert change.amount == change.after - change.before
+
+
+def test_the_damage_frame_saves_the_official_six_elements():
+    engine = _damage_engine()
+    captured: list[dict] = []
+
+    def probe(host, frame):
+        """只取伤害帧的载荷，不改状态：这条用例断言的是帧的契约数据。"""
+        captured.append(dict(frame.data))
+
+    engine.steps = {**engine.steps, FrameKind.DAMAGE: (Step(probe, Timing.DAMAGE_DEAL),)}
+    engine.run([_ScriptedPlayer(0, slash_target=1), _ScriptedPlayer(1)])
+
+    assert captured, "这局里【杀】必须造成伤害"
+    payload = captured[0]
+    assert payload["source"] == 0, "来源"
+    assert payload["target"] == 1, "受到伤害的角色"
+    assert payload["amount"] == 1, "伤害值"
+    assert payload["nature"] is DamageNature.NORMAL, "属性：M1 恒普通"
+    assert payload["chain"] is False, "是否连环：M1 恒否"
+    assert payload["channel"].card_id == SLASH[0], "渠道 = 使用的实体牌"
+
+
+def test_the_damage_layer_only_dispatches_the_official_timings():
+    engine = _damage_duel()
+    emitted = {record.timing.value for record in engine.records if record.kind == "timing"}
+
+    for forbidden in FORBIDDEN_TIMING_NAMES:
+        assert forbidden not in emitted, f"伪时机 {forbidden!r} 不得出现在记录流里"
+    assert {
+        Timing.DAMAGE_DEAL.value,
+        Timing.DAMAGE_TAKE.value,
+        Timing.DAMAGE_AFTER_DEAL.value,
+        Timing.DAMAGE_AFTER_TAKE.value,
+        Timing.DAMAGE_END.value,
+        Timing.LIFE_DECREASE_BEFORE.value,
+        Timing.LIFE_DECREASE_ON.value,
+        Timing.LIFE_DECREASE_AFTER.value,
+    } <= emitted
+
+
+def test_every_hp_change_stays_within_the_hp_range_and_records_its_amount():
+    engine = _damage_duel()
+
+    changes = _hp_changes(engine)
+    assert changes, "这局必须真的扣过体力"
+    for change in changes:
+        limit = engine.state.player(change.seat).hp_max
+        assert 0 <= change.after <= limit, (
+            "这一构造局面没有濒死帧，故体力应落在 [0, 上限] 内；上限越界无论如何都不允许"
+        )
+        assert change.amount == change.after - change.before
 

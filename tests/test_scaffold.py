@@ -83,6 +83,24 @@ def _owner_subpackage(path: Path) -> str | None:
     return None
 
 
+def test_the_leaf_primitives_never_reach_for_the_resolution_stack():
+    """叶子原语（票 07 §1 / 票 20）：只改状态，绝不压栈 / 发询问 / 暂停 / 访问结算栈。
+
+    结构保证 = ``effects.primitives`` 连 ``resolution`` / ``engine`` 都不导入，
+    因而拿不到栈、也发不出询问；只有 ``state`` 句柄与返回 delta 两条路。
+    """
+    path = SOURCE_ROOT / "effects" / "primitives.py"
+    imported = {
+        node.module
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+
+    assert "sgs.resolution" not in imported, "叶子原语不得导入结算栈"
+    assert "sgs.engine" not in imported, "叶子原语不得导入引擎"
+    assert "sgs.state" in imported, "叶子原语只经 state 句柄改状态"
+
+
 def _imported_sgs_modules(path: Path) -> Iterator[tuple[str, int]]:
     """文件里出现的 ``sgs.*`` 绝对导入模块名。"""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

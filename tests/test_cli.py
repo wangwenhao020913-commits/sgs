@@ -106,7 +106,8 @@ def test_cli_runs_a_whole_game_and_prints_the_seed_then_the_stream(capsys):
     assert lines[1].startswith("header 种子=7 ")
     assert lines[-1].startswith("#")
     assert "终局 结果=draw" in lines[-1], (
-        "票 19 已能使用【杀】/【闪】，但伤害帧是票 20 的交付物，故一局仍以牌堆耗尽收场"
+        "票 20 已让【杀】真的造成伤害，但濒死（21）/ 死亡与胜负（22）尚未实现，"
+        "故一局仍以牌堆耗尽收场"
     )
 
 

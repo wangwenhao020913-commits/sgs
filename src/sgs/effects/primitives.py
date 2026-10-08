@@ -1,7 +1,7 @@
 """叶子原语：只改状态、返回 delta，**绝不**压栈 / 发询问 / 暂停 / 访问结算栈（票 07 §1）。
 
-M1 骨架期只有 ``move_card`` 一个口（体力原语随伤害票落地）；洗牌是"明确的随机置换"，
-走 ``deck_shuffle`` 记录而不是 ``move_card``（票 08 §5）。
+两个口：``move_card``（移动牌）与 ``apply_hp``（写体力，唯一改体力的口）。
+洗牌是"明确的随机置换"，走 ``deck_shuffle`` 记录而不是 ``move_card``（票 08 §5）。
 """
 
 from __future__ import annotations
@@ -9,9 +9,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from sgs.state import CardMoveDelta, CardRef, GameState, MoveReason, Zone
+from sgs.state import (
+    CardMoveDelta,
+    CardRef,
+    GameState,
+    HpChangeDelta,
+    MoveReason,
+    Zone,
+)
 
-__all__ = ["EffectContext", "Randomness", "draw_from_deck", "locate", "move_card"]
+__all__ = [
+    "EffectContext",
+    "Randomness",
+    "apply_hp",
+    "draw_from_deck",
+    "locate",
+    "move_card",
+]
 
 
 class Randomness(Protocol):
@@ -112,6 +126,24 @@ def move_card(
         reason=reason,
         owner=source.owner if source.zone is Zone.HAND else None,
     )
+
+
+def apply_hp(state: GameState, ctx: EffectContext, seat: int, value: int) -> HpChangeDelta:
+    """把座位 ``seat`` 的体力**写成** ``value``，返回一条变化事件（唯一改体力的口）。
+
+    ``value`` 由调用帧算好（扣减帧 = ``hp - amount``；回复帧 = ``min(hp + amount, hp_max)``）；
+    本原语只做**上限**检查——越过体力上限是编程错误，帧必须先夹住。
+
+    **下限不在这里**：官方明说"角色的体力有可能小于 0"，体力降至 0 即进入濒死结算，
+    是规则上的中间态（濒死流程归票 21）。因此这里允许写到 0 以下；调用方不得据此
+    猜测"死亡"，死亡由濒死 → 死亡事件裁定。
+    """
+    player = state.player(seat)
+    if value > player.hp_max:
+        raise ValueError(f"体力 {value} 超过上限 {player.hp_max}；回复帧必须先夹住")
+    before = player.hp
+    player.hp = value
+    return HpChangeDelta(seat=seat, before=before, after=value, amount=value - before)
 
 
 def draw_from_deck(state: GameState, n: int) -> tuple[CardRef, ...]:

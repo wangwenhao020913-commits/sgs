@@ -36,8 +36,9 @@ class Scenario:
 
 SCENARIOS: dict[str, Scenario] = {
     "01-slash-dodge-cancel": Scenario(slug="01-slash-dodge-cancel", seed=101, max_turns=40),
+    "02-slash-hit-damage": Scenario(slug="02-slash-hit-damage", seed=4, max_turns=40),
 }
-"""M1 的基准清单；后续票（20–23）在此追加 02–06。"""
+"""M1 的基准清单；后续票（21–23）在此追加 03–06。"""
 
 
 @dataclass
@@ -66,6 +67,8 @@ class ScenarioPlayer:
             return None
         if self.slug == "01-slash-dodge-cancel":
             return self._slash_dodge_cancel(query)
+        if self.slug == "02-slash-hit-damage":
+            return self._slash_hit_damage(query)
         raise AssertionError(f"没有为场景 {self.slug} 写目标段")  # pragma: no cover - 开发期护栏
 
     def _slash_dodge_cancel(self, query: Query) -> Action | None:
@@ -77,6 +80,15 @@ class ScenarioPlayer:
             if dodge is not None:
                 self.recording.goal_done = True
             return dodge
+        return None
+
+    def _slash_hit_damage(self, query: Query) -> Action | None:
+        # 座位 0 用【杀】打座位 1；座位 1 放弃【闪】，让【杀】真的造成 1 点伤害。
+        if self.seat == 0 and query.kind == "PLAY_PHASE":
+            return _use(query, "slash", targets=(1,))
+        if self.seat == 1 and query.kind == "DODGE":
+            self.recording.goal_done = True
+            return _find(query, Pass)
         return None
 
 

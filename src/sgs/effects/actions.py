@@ -45,8 +45,12 @@ __all__ = [
 
 
 def hand_limit(player: Player) -> int:
-    """手牌上限 = 当前体力值（票 07 §4 的规则**公式**；M1 无修正项）。"""
-    return player.hp
+    """手牌上限 = **体力值**（票 07 §4 的规则**公式**；M1 无修正项）。
+
+    官方把"体力"（可小于 0）与作为参数读取的"体力值"分开：体力降到 0 或更低时，
+    体力值读作 0，且手牌上限经过修正后最小值为 0 —— 故这里取 ``max(hp, 0)``。
+    """
+    return max(player.hp, 0)
 
 
 def discard_count(player: Player) -> int:

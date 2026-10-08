@@ -18,9 +18,11 @@ from sgs.agents import Participant
 from sgs.data import ContentPack, RuleConfig
 from sgs.effects import (
     CallOp,
+    DamageNature,
     EffectContext,
     EffectStep,
     PushFrame,
+    apply_hp,
     behavior_for,
     discard_count,
     draw_from_deck,
@@ -35,6 +37,7 @@ from sgs.state import (
     DodgeQuery,
     FrameKind,
     GameState,
+    HpChangeDelta,
     MoveReason,
     Phase,
     PlayPhaseQuery,
@@ -91,6 +94,34 @@ class Outcome(BaseModel):
     result: Literal["winner", "draw"]
     winner: int | None = None
     reason: str
+
+
+def _child_payload(
+    kind: FrameKind,
+    parent_data: dict[str, Any],
+    scalars: Sequence[tuple[str, Any]],
+) -> dict[str, Any]:
+    """子帧载荷 = 从使用帧继承 ``source`` / ``targets`` / ``card`` + 行为表的标量字面量。
+
+    伤害帧再规范化成官方**六要素**（票 07 §6）：``target`` = 唯一目标、
+    ``channel`` = 使用的实体牌、``nature`` 恒 ``NORMAL``、``chain`` 恒 ``False``。
+    """
+    data: dict[str, Any] = {
+        "source": parent_data.get("source"),
+        "targets": tuple(parent_data.get("targets", ())),
+        "card": parent_data.get("card"),
+    }
+    for key, value in scalars:
+        if key in data:
+            raise ValueError(f"行为表的标量 {key!r} 会覆盖子帧继承的字段")
+        data[key] = value
+    if kind is FrameKind.DAMAGE:
+        targets = data["targets"]
+        data["target"] = targets[0] if targets else None
+        data["channel"] = data["card"]
+        data["nature"] = DamageNature.NORMAL
+        data["chain"] = False
+    return data
 
 
 class Engine:
@@ -285,6 +316,20 @@ class Engine:
             frame, (frame.data["card"],), to_zone=Zone.DISCARD, reason=MoveReason.USE
         )
 
+    def _effect_context(self, frame: Frame, *, actor: int) -> EffectContext:
+        """叶子原语要的结算主体信息：从当前帧继承 `source` / `targets` / `card` 与层级。
+
+        ``actor`` 是这次原语调用的主体（移动牌的操使者 / 体力被写的座位），由调用点给。
+        """
+        return EffectContext(
+            actor=actor,
+            source=frame.data.get("source"),
+            targets=tuple(frame.data.get("targets", ())),
+            card=frame.data.get("card"),
+            frame_id=frame.frame_id,
+            depth=self.stack.depth,
+        )
+
     def _move_in_frame(
         self,
         frame: Frame,
@@ -293,14 +338,7 @@ class Engine:
         to_zone: Zone,
         reason: MoveReason,
     ) -> None:
-        ctx = EffectContext(
-            actor=frame.data["source"],
-            source=frame.data.get("source"),
-            targets=tuple(frame.data.get("targets", ())),
-            card=frame.data.get("card"),
-            frame_id=frame.frame_id,
-            depth=self.stack.depth,
-        )
+        ctx = self._effect_context(frame, actor=frame.data["source"])
         delta = move_card(self.state, ctx, tuple(cards), to_zone=to_zone, reason=reason)
         self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
 
@@ -310,21 +348,23 @@ class Engine:
         """解释行为表的步骤列表：``PushFrame`` 压子帧、``CallOp`` 调叶子原语（M1 未登记）。"""
         for step in effects:
             if isinstance(step, PushFrame):
-                inherited = {
-                    "source": frame.data.get("source"),
-                    "targets": tuple(frame.data.get("targets", ())),
-                    "card": frame.data.get("card"),
-                }
-                for key, _ in step.scalars:
-                    if key in inherited:
-                        raise ValueError(f"行为表的标量 {key!r} 会覆盖子帧继承的字段")
-                data = {**inherited, **dict(step.scalars)}
+                data = _child_payload(step.kind, frame.data, step.scalars)
                 self.push_frame(step.kind, data, timing=timing)
                 continue
             assert isinstance(step, CallOp)  # union 只有两类步骤
             raise NotImplementedError(
                 f"M1 没有登记叶子原语调用 {step.op!r}（CallOp 只留位，票 07 §2）"
             )
+
+    def apply_hp_change(self, frame: Frame, seat: int, value: int) -> HpChangeDelta:
+        """调 ``apply_hp`` 这个叶子原语并把返回的变化事件写进记录流（票 07 §1）。
+
+        ``frame_id`` 即调用它的扣减 / 回复帧，故"这次体力变化属于谁"可由帧关联推出。
+        """
+        ctx = self._effect_context(frame, actor=seat)
+        delta = apply_hp(self.state, ctx, seat, value)
+        self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+        return delta
 
     # -- 询问 ---------------------------------------------------------------
 
