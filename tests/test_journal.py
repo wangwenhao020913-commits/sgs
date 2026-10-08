@@ -53,9 +53,9 @@ def test_every_record_after_the_header_has_a_strictly_increasing_seq():
 def test_the_seven_kinds_are_all_defined_and_serialisable():
     """七个 kind 齐备；随机玩家会真的用牌，故整局里 `frame` 记录也出现。
 
-    ``seed = 8`` 是筛出来的：随机驱动的一局**恰好没有走到濒死**，于是跑到
-    ``game_end``（牌堆耗尽平局）——七种记录因此齐备。走到濒死与死亡的随机局
-    由 ``tests/test_near_death.py`` / ``tests/test_death.py`` 覆盖。
+    随机驱动的一局必达 ``game_end``（票 22 / 票 23）；``seed = 8`` 这一局七种记录齐备
+    （重洗落地后它以胜负收局，不再是"牌堆耗尽平局"）。濒死与死亡的逐条断言分别在
+    ``tests/test_near_death.py`` / ``tests/test_death.py``。
     """
     produced = {record.kind for record in play_standard(seed=8).records}
 

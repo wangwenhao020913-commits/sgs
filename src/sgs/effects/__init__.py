@@ -27,13 +27,22 @@ from .behaviors import (
     behavior_for,
     opens_response_window,
 )
-from .primitives import EffectContext, Randomness, apply_hp, draw_from_deck, locate, move_card
+from .primitives import (
+    DrawResult,
+    EffectContext,
+    Randomness,
+    apply_hp,
+    draw_from_deck,
+    locate,
+    move_card,
+)
 
 __all__ = (
     "CARD_BEHAVIORS",
     "CallOp",
     "CardBehavior",
     "DamageNature",
+    "DrawResult",
     "EffectContext",
     "EffectStep",
     "PushFrame",

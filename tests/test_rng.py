@@ -50,6 +50,24 @@ def test_shuffle_is_our_own_durstenfeld_fisher_yates():
     assert items == [2, 3, 1, 0]
 
 
+def test_shuffle_reaches_every_permutation_without_obvious_bias():
+    """三张牌的 6 种排列全都出现，且没有哪一种被系统性抬高（票 23 的"无偏"粗检）。
+
+    期望每种 1000 次；6000 次下二项标准差约 29，600–1400 的带子有 ~13σ，不会偶然翻车。
+    """
+    from itertools import permutations
+
+    counts = {permutation: 0 for permutation in permutations(range(3))}
+    source = RandomSource(SEED).substream("shuffle")
+    for _ in range(6000):
+        items = [0, 1, 2]
+        source.shuffle(items)
+        counts[tuple(items)] += 1
+
+    assert set(counts) == set(permutations(range(3))), "每种排列都取得到"
+    assert all(600 <= count <= 1400 for count in counts.values()), "没有明显偏置"
+
+
 def test_randbelow_is_bounded_and_rejects_nonpositive_bounds():
     source = RandomSource(SEED)
 

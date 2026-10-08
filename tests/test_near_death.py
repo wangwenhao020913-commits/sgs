@@ -25,7 +25,7 @@ from sgs.engine import Engine, IllegalActionError
 from sgs.state import EndPhase, FrameKind, Pass, PlayerView, QueryKind, UseCard
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state, cards_of_type
+from support import SeatSpec, build_state, cards_of_type, run_turns
 
 PACK = load_content_pack()
 SLASH = cards_of_type(PACK, "slash")
@@ -82,11 +82,10 @@ def _find(query, action_type, *, type_id=None):
 
 
 def _run(*, hp_b: int, rescue_seat: int | None, slash_budget_b: int = 0):
-    """座位 0 出一次【杀】打座位 1；之后双方都不再进攻，对局以牌堆耗尽收场。
+    """座位 0 出一次【杀】打座位 1；之后双方都不再进攻。
 
-    ``slash_budget_b`` 让座位 1 也能出【杀】（用于"当前回合角色不是座位 0"的用例）；
-    默认 0，好让整局**只有一次**濒死——否则第二个回合会再触发一次濒死，
-    断言就分不清是哪一次。
+    重洗落地后（票 23）被动局面不再因牌堆耗尽收场，故只跑到**第一个回合走完**为止
+    （无人救的死亡路径仍会在第一回合内自然收局）。
     """
     state = build_state(
         pack=PACK,
@@ -98,11 +97,13 @@ def _run(*, hp_b: int, rescue_seat: int | None, slash_budget_b: int = 0):
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=1)
-    engine.run(
+    run_turns(
+        engine,
         [
             _ScriptedPlayer(seat, rescue=(seat == rescue_seat), slash_budget=budget)
             for seat, budget in enumerate((1, slash_budget_b))
-        ]
+        ],
+        turns=1,
     )
     return engine
 
@@ -260,7 +261,9 @@ def test_the_ask_order_starts_from_the_current_turn_seat_not_the_dying_character
         turn_seat=1,
     )
     engine = Engine.from_state(state, seed=1)
-    engine.run([_ScriptedPlayer(0), _ScriptedPlayer(1, rescue=True, slash_budget=1)])
+    run_turns(
+        engine, [_ScriptedPlayer(0), _ScriptedPlayer(1, rescue=True, slash_budget=1)], turns=2
+    )
 
     assert [query.actor for query in _queries(engine.records, "PEACH")] == [1], (
         "当前回合角色（座位 1）先被问，且它一出【桃】就结束询问"
@@ -357,7 +360,7 @@ def test_the_current_turn_character_may_save_the_dying_one_and_asking_stops():
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=1)
-    engine.run([_ScriptedPlayer(0, rescue=True, slash_budget=1), _ScriptedPlayer(1)])
+    run_turns(engine, [_ScriptedPlayer(0, rescue=True, slash_budget=1), _ScriptedPlayer(1)], turns=1)
 
     assert [query.actor for query in _queries(engine.records, "PEACH")] == [0], (
         "官方 4.17：直到体力首次回复至 1 点或 1 点以上为止——座位 0 一出桃就结束"
@@ -430,7 +433,7 @@ def test_recovery_never_goes_above_the_hp_max():
     )
     # 座位 1：上限 2；被扣到 0 后自救回复 1 点，恰好落在上限内。
     engine = Engine.from_state(state, seed=1)
-    engine.run([_ScriptedPlayer(0, slash_budget=1), _ScriptedPlayer(1, rescue=True)])
+    run_turns(engine, [_ScriptedPlayer(0, slash_budget=1), _ScriptedPlayer(1, rescue=True)], turns=1)
 
     limit = engine.state.player(1).hp_max
     changes = _hp_changes(engine.records)
@@ -470,10 +473,11 @@ def test_hp_below_zero_only_happens_while_the_near_death_frame_is_on_the_stack()
     engine = Engine.from_state(state, seed=1)
     players = [_ScriptedPlayer(0), _ScriptedPlayer(1, rescue=True)]
 
+    # 重洗落地后（票 23）被动局面不再自然收局：第一个回合走完（濒死链在其中）即停。
     for _ in range(20_000):
         if engine.pending is None:
             engine._step()
-            if engine.finished:
+            if engine.finished or _turn_finished(engine):
                 break
             continue
         on_stack = any(frame.kind is FrameKind.NEAR_DEATH for frame in engine.stack.frames)
@@ -482,9 +486,18 @@ def test_hp_below_zero_only_happens_while_the_near_death_frame_is_on_the_stack()
                 assert player.hp >= 0, "没有濒死帧在栈上时体力不得为负"
         query = engine.pending
         engine.submit(players[query.actor].respond(query))
+        if engine.finished or _turn_finished(engine):
+            break
 
     for player in engine.state.players:
         assert player.hp >= 0
+
+
+def _turn_finished(engine) -> bool:
+    return any(
+        record.kind == "timing" and record.timing is Timing.TURN_AFTER_END
+        for record in engine.records
+    )
 
 
 def test_the_peach_query_view_hides_the_opponents_hand_identities():

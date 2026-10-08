@@ -12,7 +12,7 @@ from sgs.resolution import Frame, Goto, ResolutionStack, Step
 from sgs.state import FrameKind
 from sgs.timing import Timing
 
-from support import RecordingPlayer, SeatSpec, build_state
+from support import RecordingPlayer, SeatSpec, build_state, run_turns
 
 PACK = load_content_pack()
 
@@ -143,7 +143,7 @@ def test_exhausting_a_frame_records_its_pop_in_the_journal():
     }
     frame = engine.push_frame(FrameKind.RECOVER, {}, timing=Timing.RECOVER_AFTER)
 
-    engine.run([RecordingPlayer(), RecordingPlayer()])
+    run_turns(engine, [RecordingPlayer(), RecordingPlayer()], turns=1)
 
     assert ran == ["回复"]
     pops = [

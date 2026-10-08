@@ -15,6 +15,7 @@
 | `03-near-death-self-peach` | 濒死求桃：自救 | 濒死（规则 4.17 / 4.7）；伤害 → 扣减体力 → `NEAR_DEATH_ENTER` / `AT` / `AFTER` 三时机；`PEACH` 询问按官方 L12.2 从当前回合角色起逆时针逐个发（一个询问一个应答者）；濒死者自己在 `NEAR_DEATH_AT` 出【桃】→ 回复帧 L10 两个（`RECOVER_VALUE` / `RECOVER_AFTER`）**插在濒死之下** → 救回后回到被中断的伤害结算（`LIFE_DECREASE_AFTER` 与 L7 的 `DAMAGE_AFTER_*` 照常出现） | `03-near-death-self-peach` |
 | `04-near-death-other-peach` | 濒死求桃：他人救 | 同 `03`，但**当前回合角色**（座位 0，也是第一个被问的人）对濒死者用【桃】→ 它一出桃就脱离濒死，**后面的应答者不再被问**；回复结算同样插在濒死之下 | `04-near-death-other-peach` |
 | `05-near-death-death` | 濒死无人救 → 死亡 → 胜负 | 濒死（规则 4.17）与死亡 / 胜负判定时点（4.18 / 4.19）；双方都放弃 → 濒死帧正常 dispatch 三时机、随后压入 **DEATH** 子帧：`DEATH_BEFORE_START`（空实现）→ `DEATH_REVEAL_IDENTITY_AFTER`（**胜负检测点**，检测后不终止）→ `DEATH_ON`（仅 Ⅰ.a 弃遗牌）→ `DEATH_AFTER`（空实现）→ 逐帧 `discard` 五帧（`NEAR_DEATH / LIFE_DECREASE / DAMAGE / RESOLVE / USE`）→ 处理区遗留牌入弃牌堆 → `game_end`（**最后一条**，`winner` = 存活方） | `05-near-death-death` |
+| `06-deck-reshuffle` | 牌堆耗尽 → 重洗 | 牌堆耗尽（规则 10.4）：需要摸牌而牌堆为空、弃牌堆非空 ⇒ 把弃牌堆洗混成新牌堆继续使用，"要 2 张、牌堆只剩 1 张"也自然补足；每次重洗只留**一条** `delta`：`delta_type="deck_shuffle"`、`from_zone="discard"`→`to_zone="deck"`、`cards` = **洗后**新牌堆顺序；**不出现** `card_move(DISCARD→DECK)`；初次洗牌仍是 `seq=1`、`frame_id=0`（无帧哨兵）、`from_zone=null` | `06-deck-reshuffle` |
 
 ## 整局终止口径（票 22 落地后）
 
@@ -27,3 +28,12 @@
   只写"濒死结算中间态除外"；把它精确收窄成"`hp < 0` 仅允许出现在 `NEAR_DEATH` 帧在栈上时"
   的是 **票 11 §79**——`tests/test_near_death.py` 逐条断言了这条不变量。
   上限不变量（`hp ≤ hp_max`）在每条基准里逐行成立。
+
+## 重洗落地后的收局口径（票 23）
+
+- 牌堆耗尽不再等于终局：**弃牌堆非空就一定重洗补足**，故 `game_end.reason = "deck_exhausted"`
+  不再产生；短摸只可能意味着**两堆皆空**（实战不可达，由构造局面单测覆盖）。
+- 因此**谁都不进攻的整局不会自然终止**（牌堆被弃牌堆无限补足）；基准与结构性单测都靠
+  "打死一方"或以 `tests/support/positions.py` 的 `run_turns` / `run_until` 主动跳出。
+- `03` / `04` 因此**重录**：它们原先停在"牌堆耗尽平局"，现在继续跑并最终以胜负收局；
+  `01` / `02` / `05` 在重洗落地前后逐字节不变（死亡先于第一次重洗）。

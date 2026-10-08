@@ -22,6 +22,7 @@ from sgs.effects import (
     EffectContext,
     EffectStep,
     PushFrame,
+    Randomness,
     apply_hp,
     discard_count,
     draw_from_deck,
@@ -137,6 +138,7 @@ class Engine:
         *,
         seed: int,
         init_records: Sequence[JournalRecord] = (),
+        shuffle_source: Randomness | None = None,
     ) -> None:
         self.state = state
         self._records: list[JournalRecord] = [
@@ -150,6 +152,17 @@ class Engine:
         self._records.extend(init_records)
         self._seq = len(init_records)
         self._last_seq = len(init_records)
+
+        self._shuffle: Randomness = (
+            shuffle_source
+            if shuffle_source is not None
+            else RandomSource(seed).substream("shuffle")
+        )
+        """洗牌子流：初次洗牌与中局重洗共用同一个位置（票 08 §3 / 票 23）。
+
+        ``Engine.new_game`` 把初始化那次洗牌用过的同一个句柄交进来；``from_state`` 起于位置 0。
+        与 ``ai`` 子流相互独立，回放不被参与者消耗随机数破坏。
+        """
 
         self.stack = ResolutionStack()
         self.steps: StepTable = build_steps()
@@ -188,9 +201,18 @@ class Engine:
 
     @classmethod
     def new_game(cls, *, seed: int, rule_config: RuleConfig, pack: ContentPack) -> "Engine":
-        """造初始状态（实例化 → 洗牌 → 发牌）并带上开局那几条记录。"""
-        state, init_records = build_initial(seed=seed, rule_config=rule_config, pack=pack)
-        return cls(state, seed=seed, init_records=init_records)
+        """造初始状态（实例化 → 洗牌 → 发牌）并带上开局那几条记录。
+
+        初次洗牌与后续重洗共用同一个 ``shuffle`` 子流句柄：重洗从初次洗牌之后的位置继续取数
+        （票 08 §3），因此同一 seed 的整局（含每一次重洗）逐字节可复现。
+        """
+        shuffle_source = RandomSource(seed).substream("shuffle")
+        state, init_records = build_initial(
+            seed=seed, rule_config=rule_config, pack=pack, shuffle_source=shuffle_source
+        )
+        return cls(
+            state, seed=seed, init_records=init_records, shuffle_source=shuffle_source
+        )
 
     @classmethod
     def from_state(cls, state: GameState, *, seed: int) -> "Engine":
@@ -713,21 +735,23 @@ class Engine:
     def _phase_draw(self) -> None:
         seat = self._turn_seat()
         self.emit_timing(Timing.PHASE_DRAW, actor=seat)
-        taken = draw_from_deck(self.state, DRAW_COUNT)
-        if taken:
+        drawn = draw_from_deck(self.state, DRAW_COUNT, self._shuffle)
+        if drawn.shuffle is not None:
+            # 重洗只发**一条** deck_shuffle（记洗后顺序），不另发牌移动事件（票 08 §5 / 票 23）。
+            self.emit_delta(drawn.shuffle)
+        if drawn.cards:
             delta = move_card(
                 self.state,
                 EffectContext(actor=seat),
-                taken,
+                drawn.cards,
                 to_zone=Zone.HAND,
                 to_seat=seat,
                 reason=MoveReason.DRAW,
             )
             self.emit_delta(delta)
-        if len(taken) < DRAW_COUNT:
-            # 短摸信号 → 唯一终局入口 → 检测点当步立即清栈（票 08 §6）。
-            draw_reason = "both_decks_empty" if not self.state.discard else "deck_exhausted"
-            self.check_game_end(draw_reason=draw_reason)
+        if len(drawn.cards) < DRAW_COUNT:
+            # 短摸 ⟺ 两堆皆空：弃牌堆非空时 draw_from_deck 已经重洗补足（票 23）。
+            self.check_game_end(draw_reason="both_decks_empty")
             self.finish()
 
     def _phase_draw_end(self) -> None:
@@ -822,12 +846,17 @@ def instantiate_cards(pack: ContentPack) -> tuple[CardRef, ...]:
 
 
 def build_initial(
-    *, seed: int, rule_config: RuleConfig, pack: ContentPack
+    *,
+    seed: int,
+    rule_config: RuleConfig,
+    pack: ContentPack,
+    shuffle_source: Randomness | None = None,
 ) -> tuple[GameState, tuple[JournalRecord, ...]]:
     """实例化牌堆 → 洗牌 → 发牌；顺带产出开局那几条记录。
 
     ``seq = 1`` 必是初次 ``deck_shuffle``（``frame_id = 0``：无帧哨兵），
     其后是发牌时机与按座序每座位一条 ``card_move``（票 08 §5 / 票 06 §7）。
+    ``shuffle_source`` 由 :meth:`Engine.new_game` 交进来，好让中局重洗接着同一子流取数。
     """
     cards = instantiate_cards(pack)
     players = tuple(
@@ -843,7 +872,8 @@ def build_initial(
         deck=list(range(len(cards))),
     )
 
-    RandomSource(seed).substream("shuffle").shuffle(state.deck)
+    rng = shuffle_source if shuffle_source is not None else RandomSource(seed).substream("shuffle")
+    rng.shuffle(state.deck)
 
     records: list[JournalRecord] = [
         DeckShuffleRecord(
@@ -864,9 +894,11 @@ def build_initial(
     ctx = EffectContext(actor=rule_config.first_seat)
     seq = 2
     for player in state.players:
-        taken = draw_from_deck(state, rule_config.starting_hand_size)
+        drawn = draw_from_deck(state, rule_config.starting_hand_size, rng)
+        taken = drawn.cards
         if not taken:
             continue
+        assert drawn.shuffle is None, "发牌阶段牌堆必然够用，不会重洗"
         delta = move_card(
             state,
             ctx,

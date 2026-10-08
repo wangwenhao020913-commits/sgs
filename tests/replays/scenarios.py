@@ -14,6 +14,10 @@
 
 票 22 之后**每条基准都以 ``game_end`` 收局**（真胜负或牌堆耗尽平局）：死亡结算、
 胜负判定、清栈与终局收尾都已落地。
+
+票 23 追加 ``06-deck-reshuffle``：重洗没有对应的询问，脚本看不见它，故用
+:class:`_ReshuffleWatcher` 在每次应答前扫一遍记录流，出现重洗才把目标段切到收尾段。
+重洗落地后"两堆皆空"在实战不可达，故除平局构造局面外每条基准都靠**打死一方**收局。
 """
 
 from __future__ import annotations
@@ -47,8 +51,9 @@ SCENARIOS: dict[str, Scenario] = {
         slug="04-near-death-other-peach", seed=9, max_turns=40
     ),
     "05-near-death-death": Scenario(slug="05-near-death-death", seed=1, max_turns=40),
+    "06-deck-reshuffle": Scenario(slug="06-deck-reshuffle", seed=2026, max_turns=80),
 }
-"""M1 的基准清单；``06-deck-reshuffle`` 由票 23 追加。"""
+"""M1 的 6 条基准（票 12 §3）；`06-deck-reshuffle` 由票 23 追加。"""
 
 
 @dataclass
@@ -62,6 +67,34 @@ class _Recording:
     def announce(self, seat: int) -> None:
         self.goal_done = True
         self.goal_seat = seat
+
+
+class _ReshuffleWatcher:
+    """把"记录流里出现了重洗"告诉场景脚本（票 23）。
+
+    重洗没有对应的询问，脚本玩家自己看不见；它发生在摸牌阶段、下一问（出牌阶段）
+    之前，故在 ``respond`` 入口处扫一遍记录流即可把目标段及时切到收尾段。
+    """
+
+    def __init__(self, engine: Engine, recording: _Recording, seat: int, inner: "ScenarioPlayer") -> None:
+        self._engine = engine
+        self._recording = recording
+        self._seat = seat
+        self._inner = inner
+
+    def respond(self, query: Query) -> Action:
+        if not self._recording.goal_done and _reshuffle_seen(self._engine):
+            self._recording.announce(self._seat)
+        return self._inner.respond(query)
+
+
+def _reshuffle_seen(engine: Engine) -> bool:
+    return any(
+        record.kind == "delta"
+        and record.delta_type == "deck_shuffle"
+        and record.from_zone is not None
+        for record in engine.records
+    )
 
 
 class ScenarioPlayer:
@@ -105,6 +138,11 @@ class ScenarioPlayer:
             return self._near_death_other_peach(query)
         if self.slug == "05-near-death-death":
             return self._near_death_death(query)
+        if self.slug == "06-deck-reshuffle":
+            # 目标段"不进攻"：只摸牌 + 弃至上限，直到 `_ReshuffleWatcher` 宣告重洗已出现。
+            if self.recording.goal_done:
+                return None
+            return _idle(query)
         raise AssertionError(f"没有为场景 {self.slug} 写目标段")  # pragma: no cover - 开发期护栏
 
     # ---- 01 / 02：座位 0 出【杀】，座位 1 在【闪】窗口给出互斥的两种应答 ----
@@ -184,6 +222,15 @@ def _use(query: Query, type_id: str, targets: tuple[int, ...] | None = None) -> 
     return None
 
 
+def _idle(query: Query) -> Action:
+    """目标段"不进攻"：能结束阶段就结束、能放弃就放弃，弃牌取候选里的自然后者。"""
+    if query.kind == "PLAY_PHASE":
+        return _find(query, EndPhase)
+    if query.kind in ("DODGE", "PEACH"):
+        return _find(query, Pass)
+    return query.legal_actions[0]
+
+
 def _cleanup_for(seat: int, query: Query) -> Action:
     """收尾段（带座位）：能杀就杀、有闪就闪；濒死时只自救。"""
     if query.kind == "PLAY_PHASE":
@@ -213,7 +260,13 @@ def record(slug: str) -> str:
     pack = load_content_pack()
     engine = Engine.new_game(seed=scenario.seed, rule_config=RuleConfig(), pack=pack)
     recording = _Recording()
-    engine.run([ScenarioPlayer(seat, slug, recording) for seat in range(2)])
+    players: list = [ScenarioPlayer(seat, slug, recording) for seat in range(2)]
+    if slug == "06-deck-reshuffle":
+        players = [
+            _ReshuffleWatcher(engine, recording, seat, player)
+            for seat, player in enumerate(players)
+        ]
+    engine.run(players)
 
     assert recording.goal_done, f"{slug}：目标段没有命中（seed={scenario.seed}）"
     assert engine.records[-1].kind == "game_end", f"{slug}：没有走到终局"

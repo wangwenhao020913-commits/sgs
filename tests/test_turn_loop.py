@@ -10,14 +10,23 @@ from sgs.engine import Engine
 from sgs.state import MoveReason, Phase
 from sgs.timing import Timing
 
-from support import RecordingPlayer, SeatSpec, build_state
+from support import RecordingPlayer, SeatSpec, build_state, run_turns
 
 PACK = load_content_pack()
 
 
-def _run(state, seed: int = 1):
+def _run(state, seed: int = 1, *, turns: int | None = 1):
+    """跑一局；``turns`` 给出时只跑到第 ``turns`` 个回合走完。
+
+    重洗落地后（票 23）被动局面不再因牌堆耗尽收场，故默认只跑一个回合；
+    需要终局（如"两堆皆空"）的用例显式传 ``turns=None``。
+    """
     engine = Engine.from_state(state, seed=seed)
-    engine.run([RecordingPlayer(), RecordingPlayer()])
+    players = [RecordingPlayer(), RecordingPlayer()]
+    if turns is None:
+        engine.run(players)
+    else:
+        run_turns(engine, players, turns=turns)
     return engine
 
 
@@ -100,7 +109,7 @@ def test_discard_phase_discards_down_to_current_hp():
 
 
 def test_short_draw_ends_the_game_at_the_single_entry_and_game_end_is_last():
-    engine = _run(_small_position(deck=(0,)))
+    engine = _run(_small_position(deck=(0,)), turns=None)
     tail = engine.records[-1]
 
     assert tail.kind == "game_end"
@@ -114,12 +123,20 @@ def test_short_draw_ends_the_game_at_the_single_entry_and_game_end_is_last():
     assert engine.finished
 
 
-def test_deck_exhausted_with_cards_in_discard_reports_the_real_reason():
+def test_a_nonempty_discard_pile_is_reshuffled_instead_of_ending_the_game():
+    """票 23：牌堆只剩 1 张、弃牌堆非空 ⇒ 重洗补足，**不**再报 `deck_exhausted`。"""
     engine = _run(_small_position(deck=(0,), discard=(1, 2, 3)))
-    tail = engine.records[-1]
 
-    assert tail.reason == "deck_exhausted"
-    assert tail.check_seq == _short_draw_move_seq(engine)
+    reshuffles = [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "deck_shuffle"
+        and record.from_zone is not None
+    ]
+    assert len(reshuffles) == 1
+    assert reshuffles[0].from_zone.value == "discard"
+    assert not [record for record in engine.records if record.kind == "game_end"]
 
 
 def test_an_ample_draw_does_not_end_the_game():
@@ -127,11 +144,12 @@ def test_an_ample_draw_does_not_end_the_game():
     first_draw = next(
         record
         for record in engine.records
-        if record.kind == "timing" and record.timing is Timing.PHASE_DRAW
+        if record.kind == "delta" and record.delta_type == "card_move"
     )
 
-    assert engine.records[-1].kind == "game_end", "这局最终会因牌堆耗尽收局"
-    assert engine.records[-1].check_seq > first_draw.seq
+    assert not engine.finished, "足额摸到 2 张就不该有任何终局"
+    assert [card.card_id for card in first_draw.cards] == [0, 1]
+    assert engine.records[-1].kind != "game_end"
 
 
 def test_the_game_starts_with_the_configured_first_seat():

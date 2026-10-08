@@ -1,7 +1,8 @@
 """叶子原语：只改状态、返回 delta，**绝不**压栈 / 发询问 / 暂停 / 访问结算栈（票 07 §1）。
 
 两个口：``move_card``（移动牌）与 ``apply_hp``（写体力，唯一改体力的口）。
-洗牌是"明确的随机置换"，走 ``deck_shuffle`` 记录而不是 ``move_card``（票 08 §5）。
+洗牌是"明确的随机置换"，走 ``deck_shuffle`` 记录而不是 ``move_card``（票 08 §5）：
+``draw_from_deck`` 在牌堆耗尽时把弃牌堆重洗成新牌堆，并把这次置换作为 delta 交回调用方。
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from typing import Protocol
 from sgs.state import (
     CardMoveDelta,
     CardRef,
+    DeckShuffleDelta,
     GameState,
     HpChangeDelta,
     MoveReason,
@@ -19,6 +21,7 @@ from sgs.state import (
 )
 
 __all__ = [
+    "DrawResult",
     "EffectContext",
     "Randomness",
     "apply_hp",
@@ -55,6 +58,18 @@ class EffectContext:
 class _Location:
     zone: Zone
     owner: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DrawResult:
+    """一次摸牌的结果：自顶向下的牌面事实 + 途中最多一次重洗（票 08 §4 / 票 23）。
+
+    ``shuffle`` 非空时调用方必须先把它 emit 成一条 ``deck_shuffle`` 记录，
+    再做这张/这些牌的 ``move_card``——记录流里的次序因此与真实发生次序一致。
+    """
+
+    cards: tuple[CardRef, ...]
+    shuffle: DeckShuffleDelta | None = None
 
 
 def locate(state: GameState, card_id: int) -> _Location:
@@ -146,11 +161,43 @@ def apply_hp(state: GameState, ctx: EffectContext, seat: int, value: int) -> HpC
     return HpChangeDelta(seat=seat, before=before, after=value, amount=value - before)
 
 
-def draw_from_deck(state: GameState, n: int) -> tuple[CardRef, ...]:
-    """牌堆顶至多 ``n`` 张的牌面事实；**不改状态**（由 ``move_card`` 真正移动）。
+def draw_from_deck(state: GameState, n: int, rng: Randomness) -> DrawResult:
+    """自牌堆顶取至多 ``n`` 张；牌堆耗尽而弃牌堆非空时先重洗，再继续（票 08 §4 / 票 23）。
 
-    返回长度 ``< n`` 就是"短摸"信号：需要摸牌而牌堆给不出（票 08 §6）。
-    重洗规则（票 23）落地后，这个短返回只在弃牌堆也为空时出现——届时签名补上 ``rng``
-    （票 07 §7 的冻结形状），本函数内部负责"牌堆空且弃牌堆非空则先重洗"。
+    返回的 ``cards`` 是自顶向下的牌面事实，**不改这批牌的位置**（由 ``move_card`` 真正移动）；
+    ``shuffle`` 是途中发生的那次重洗（每取一张前检查，故一次调用最多一次），
+    记录内容 = 洗后新牌堆的顺序，**不记洗前**，也**不**另发 ``card_move``（票 08 §5）。
+
+    返回长度 ``< n`` 就是"短摸"信号：需要摸牌而两堆皆空（票 08 §6）。
     """
-    return state.refs(state.deck[:n])
+    if n < 0:
+        raise ValueError(f"摸牌张数不能为负，得到 {n!r}")
+    taken: list[int] = []
+    shuffle: DeckShuffleDelta | None = None
+    while len(taken) < n:
+        if len(taken) < len(state.deck):
+            # 已取的那些牌还在 state.deck 的前缀里（尚未 move_card 走），故游标即 len(taken)。
+            taken.append(state.deck[len(taken)])
+            continue
+        if not state.discard:
+            break
+        shuffle = _reshuffle_into_deck(state, rng)
+    return DrawResult(cards=state.refs(taken), shuffle=shuffle)
+
+
+def _reshuffle_into_deck(state: GameState, rng: Randomness) -> DeckShuffleDelta:
+    """把弃牌堆洗混后接到牌堆尾，返回一条 ``deck_shuffle``（规则 10.4 / 票 08 §5）。
+
+    已经摸出的牌仍在 ``state.deck`` 的前缀里，故**只**置换新并入的那一段：
+    记录里的 ``cards`` 因此恰是洗后的**新牌堆**顺序；``move_card`` 随后移走前缀，
+    牌堆剩下的就是这段新牌堆减去本次继续摸走的那几张。
+    """
+    shuffled = list(state.discard)
+    rng.shuffle(shuffled)
+    state.discard.clear()
+    state.deck.extend(shuffled)
+    return DeckShuffleDelta(
+        cards=state.refs(shuffled),
+        from_zone=Zone.DISCARD,
+        to_zone=Zone.DECK,
+    )

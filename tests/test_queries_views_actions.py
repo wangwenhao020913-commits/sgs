@@ -13,7 +13,7 @@ from sgs.engine import Engine
 from sgs.state import DiscardQuery, PlayPhaseQuery, PlayerView
 from sgs.timing import Timing
 
-from support import RecordingPlayer, SeatSpec, build_state
+from support import RecordingPlayer, SeatSpec, build_state, run_turns
 
 PACK = load_content_pack()
 HAND_A = (40, 41, 42, 43)
@@ -34,7 +34,7 @@ def _run(*, hand_a=HAND_A, hand_b=HAND_B, hp_a=4, deck=DECK):
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=1)
-    engine.run([RecordingPlayer(), RecordingPlayer()])
+    run_turns(engine, [RecordingPlayer(), RecordingPlayer()], turns=1)
     return engine
 
 
@@ -112,6 +112,6 @@ def test_recording_player_saw_the_same_candidates_that_the_journal_recorded():
     )
     engine = Engine.from_state(state, seed=1)
     players = [RecordingPlayer(), RecordingPlayer()]
-    engine.run(players)
+    run_turns(engine, players, turns=1)
 
     assert players[0].seen[0].legal_actions == _queries(engine, "PLAY_PHASE")[0].legal_actions

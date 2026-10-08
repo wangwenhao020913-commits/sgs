@@ -32,7 +32,7 @@ from sgs.resolution import Step
 from sgs.state import EndPhase, FrameKind, Pass, QueryKind, UseCard
 from sgs.timing import FORBIDDEN_TIMING_NAMES, Timing
 
-from support import SeatSpec, build_state, cards_of_type
+from support import SeatSpec, build_state, cards_of_type, run_until
 
 PACK = load_content_pack()
 SLASH = cards_of_type(PACK, "slash")
@@ -241,6 +241,19 @@ def _find(query, action_type, *, type_id=None, targets=None):
     return None
 
 
+def _use_chain_done(engine) -> bool:
+    """这张【杀】的使用链整个跑完（USE 帧已出栈、结算栈空）。
+
+    重洗落地后（票 23）被动局面不再自然收局，故这些用例只跑到被测链结束即停；
+    在栈空后的下一个询问处跳出，好让 ``processing → discard`` 也已在记录里。
+    """
+    popped_use = any(
+        record.kind == "frame" and record.op == "pop" and record.frame_kind is FrameKind.USE
+        for record in engine.records
+    )
+    return popped_use and not engine.stack
+
+
 def _duel(*, hand_a, hand_b, hp_a=4, hp_b=4, deck, dodge_response=False):
     state = build_state(
         pack=PACK,
@@ -249,7 +262,11 @@ def _duel(*, hand_a, hand_b, hp_a=4, hp_b=4, deck, dodge_response=False):
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=1)
-    engine.run([_ScriptedPlayer(0, slash_target=1), _ScriptedPlayer(1, dodge=dodge_response)])
+    run_until(
+        engine,
+        [_ScriptedPlayer(0, slash_target=1), _ScriptedPlayer(1, dodge=dodge_response)],
+        _use_chain_done,
+    )
     return engine
 
 
@@ -436,7 +453,7 @@ def _damage_engine(*, hp_a=4, hp_b=4):
 
 def _damage_duel(*, hp_a=4, hp_b=4):
     engine = _damage_engine(hp_a=hp_a, hp_b=hp_b)
-    engine.run([_ScriptedPlayer(0, slash_target=1), _ScriptedPlayer(1)])
+    run_until(engine, [_ScriptedPlayer(0, slash_target=1), _ScriptedPlayer(1)], _use_chain_done)
     return engine
 
 
