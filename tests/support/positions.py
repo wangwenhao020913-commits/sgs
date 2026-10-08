@@ -9,20 +9,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from sgs.data import ContentPack, RuleConfig
-from sgs.engine import instantiate_cards
-from sgs.state import GameState, Player, Query
+from sgs.data import ContentPack, RuleConfig, load_content_pack
+from sgs.engine import Engine, instantiate_cards
+from sgs.state import GameState, Phase, Player, Query, UseCard
 from sgs.timing import Timing
 
 __all__ = [
+    "PeachInPlayPhasePlayer",
     "RecordingPlayer",
     "SeatSpec",
     "SequenceHalt",
     "build_state",
     "cards_of_type",
+    "play_phase_peach_engine",
     "play_standard",
     "run_turns",
     "run_until",
+    "turn_loop_engine",
 ]
 
 
@@ -78,6 +81,14 @@ def build_state(
     )
 
 
+def _end_phase_or_first(query: Query):
+    """能结束阶段就结束阶段，否则取候选里的第一个（候选已按稳定键排序）。"""
+    for candidate in query.legal_actions:
+        if candidate.kind == "EndPhase":
+            return candidate
+    return query.legal_actions[0]
+
+
 @dataclass
 class RecordingPlayer:
     """确定性脚本玩家：录下每一次询问，并总是给同一个规则化的应答。
@@ -89,10 +100,7 @@ class RecordingPlayer:
 
     def respond(self, action_query: Query):
         self.seen.append(action_query)
-        for candidate in action_query.legal_actions:
-            if candidate.kind == "EndPhase":
-                return candidate
-        return action_query.legal_actions[0]
+        return _end_phase_or_first(action_query)
 
 
 def play_standard(seed: int = 7, *, pack: ContentPack | None = None):
@@ -103,8 +111,8 @@ def play_standard(seed: int = 7, *, pack: ContentPack | None = None):
     需要"跑到第 N 个回合为止"的结构性单测请用 :func:`run_turns`。
     """
     import sgs.agents as agents
-    from sgs.data import load_content_pack
-    from sgs.engine import Engine, RandomSource
+    from sgs.engine import RandomSource
+
     resolved_pack = pack if pack is not None else load_content_pack()
     rule_config = RuleConfig()
     engine = Engine.new_game(seed=seed, rule_config=rule_config, pack=resolved_pack)
@@ -175,4 +183,62 @@ def run_turns(engine, participants, *, turns: int = 1):
         engine.run(wrapped)
     except SequenceHalt:
         pass
+    return engine
+
+
+# ---------------------------------------------------------------------------
+# 时机覆盖清单的两个构造局面来源（票 25 / 票 12 §6）
+# ---------------------------------------------------------------------------
+
+
+class PeachInPlayPhasePlayer:
+    """出牌阶段主动使用【桃】；其余询问走最小合法应答（结束阶段 / 放弃）。
+
+    仅用于场景 7（:func:`play_phase_peach_engine`）：它是「出牌阶段主动使用【桃】回复 1 点
+    体力」的驱动，故【桃】优先于一切、且只挑 ``type == "peach"`` 的 ``UseCard``。
+    """
+
+    def respond(self, query: Query):
+        for candidate in query.legal_actions:
+            if isinstance(candidate, UseCard) and candidate.card.type == "peach":
+                return candidate
+        return _end_phase_or_first(query)
+
+
+def turn_loop_engine(seed: int = 1):
+    """一个完整回合的引擎（人为局面从准备阶段起跑，票 12 §6 的构造局面单测 8）。
+
+    ``RecordingPlayer`` 每步都结束阶段，故这一回合只经历阶段轮换与摸牌 / 弃牌，
+    不碰使用结算。记录流是 L0 ``GAME_START`` / L1 / L2 可见节点的实测来源。
+    """
+    state = build_state(
+        pack=load_content_pack(),
+        seats=[SeatSpec(hp=4, hand=(40, 41, 42, 43)), SeatSpec(hp=4)],
+        deck=tuple(range(10)),
+        turn_seat=0,
+        phase=Phase.PREPARE,
+    )
+    engine = Engine.from_state(state, seed=seed)
+    run_turns(engine, [RecordingPlayer(), RecordingPlayer()], turns=1)
+    return engine
+
+
+def play_phase_peach_engine(seed: int = 1):
+    """场景 7：座位 0 体力 3（未满）且手握一张【桃】，在**出牌阶段主动**使用它回复。
+
+    回复走【桃】自己的使用链（L4 / L5）压出的 ``RECOVER`` 帧（L10），与濒死窗口里
+    出【桃】（基准 03 / 04）互为独立来源。摸到的两张牌即使含【杀】也不使用：驱动玩家
+    只看【桃】与结束阶段。
+    """
+    pack = load_content_pack()
+    peach = cards_of_type(pack, "peach")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=3, hp_max=4, hand=(peach,)), SeatSpec(hp=4)],
+        deck=tuple(card_id for card_id in range(len(pack.deck.cards)) if card_id != peach),
+        turn_seat=0,
+        phase=Phase.PREPARE,
+    )
+    engine = Engine.from_state(state, seed=seed)
+    run_turns(engine, [PeachInPlayPhasePlayer(), PeachInPlayPhasePlayer()], turns=1)
     return engine

@@ -22,10 +22,16 @@ import pytest
 from sgs.data import load_content_pack
 from sgs.effects import UseContext, behavior_for, legal_actions_for
 from sgs.engine import Engine, IllegalActionError
-from sgs.state import EndPhase, FrameKind, Pass, PlayerView, QueryKind, UseCard
+from sgs.state import EndPhase, FrameKind, MoveReason, Pass, PlayerView, QueryKind, UseCard
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state, cards_of_type, run_turns
+from support import (
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    play_phase_peach_engine,
+    run_turns,
+)
 
 PACK = load_content_pack()
 SLASH = cards_of_type(PACK, "slash")
@@ -409,6 +415,56 @@ def test_a_rescue_peach_is_recovered_exactly_once():
 
     assert len(recover_frames) == 1, "一次救援只写一次体力：行为表不再压第二个回复帧"
     assert len(_hp_changes(engine.records, frame_id=recover_frames[0])) == 1
+
+
+def test_peach_used_in_the_play_phase_recovers_through_the_recover_frame():
+    """场景 7：**出牌阶段主动**用【桃】——与濒死窗口两条回复路径互不相同。"""
+    engine = play_phase_peach_engine()
+    recover = next(
+        record.frame_id
+        for record in _of(engine.records, "frame")
+        if record.op == "push" and record.frame_kind is FrameKind.RECOVER
+    )
+    emitted = _timings(engine.records)
+
+    assert _timings(engine.records, frame_id=recover) == [
+        Timing.RECOVER_VALUE.value,
+        Timing.RECOVER_AFTER.value,
+    ]
+    assert [
+        (change.seat, change.before, change.after, change.amount)
+        for change in _hp_changes(engine.records, frame_id=recover)
+    ] == [(0, 3, 4, 1)], "体力 3 → 4，变化事件归属回复帧"
+    assert engine.state.player(0).hp == 4
+    assert Timing.NEAR_DEATH_ENTER.value not in emitted, "未满体力时用【桃】不经过濒死"
+
+    use_moves = [
+        (record.from_zone.value, record.to_zone.value)
+        for record in _of(engine.records, "delta")
+        if record.delta_type == "card_move" and record.reason is MoveReason.USE
+    ]
+    assert use_moves == [("hand", "processing"), ("processing", "discard")], (
+        "出牌阶段用【桃】照走手牌 → 处理区 → 弃牌堆两段移动"
+    )
+
+
+def test_play_phase_peach_is_not_offered_again_once_hp_is_full():
+    """回复 1 点后回到**同一座位**的出牌阶段重新询问：满体力时【桃】不再在候选里。"""
+    engine = play_phase_peach_engine()
+    play_queries = [
+        query for query in _queries(engine.records, "PLAY_PHASE") if query.actor == 0
+    ]
+
+    assert len(play_queries) >= 2, "用完【桃】后出牌阶段重新发问（票 07 §3）"
+    assert any(
+        action.kind == "UseCard" and action.card.type == "peach"
+        for action in play_queries[0].legal_actions
+    )
+    assert not [
+        action
+        for action in play_queries[1].legal_actions
+        if action.kind == "UseCard" and action.card.type == "peach"
+    ]
 
 
 def test_after_a_rescue_the_interrupted_resolution_continues():

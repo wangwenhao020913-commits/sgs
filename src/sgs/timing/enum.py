@@ -1,7 +1,17 @@
 """权威时机表（票 01 研究产物的枚举落地）。
 
-83 个节点一次建全：其中 **58 个**是 M1 流程真的会走到的（允许空实现 / 空日志），
-**25 个**只留枚举位、本里程碑不 dispatch。两组的划分是票 01 §C 的冻结数据。
+83 个节点一次建全，按票 01 §C 分两组：**58 个**是 (a) 类"M1 必须实现"
+（其中若干是**空实现**：dispatch 了但无效果），**25 个**是 (b) 类"只留枚举位、
+M1 流程走不到"。
+
+票 25 在 (a) 类之上再落一层**记录流可观测性**（票 18 的登记：L2 边界与阶段间节点不
+dispatch、不记）：
+
+- :data:`M1_DISPATCH_WHITELIST`（47）：M1 真的会 dispatch、可在记录流里观测到的节点；
+- :data:`M1_EMPTY_LOG`（11）：(a) 类里**空日志**的 L2 节点——枚举位保留，但流程结构性
+  地不经过，故"从实际记录流收集 dispatch 集合 ⊇ 58"按字面不成立（最多 47 条可见，
+  票 18 已登记此口径）。覆盖清单以 :data:`M1_DISPATCH_WHITELIST` 为白名单，见
+  ``tests/support/timing_coverage.py``。
 
 纪律：
 
@@ -15,7 +25,14 @@ from __future__ import annotations
 
 from enum import Enum
 
-__all__ = ["FORBIDDEN_TIMING_NAMES", "M1_ENUM_ONLY", "M1_IMPLEMENTED", "Timing"]
+__all__ = [
+    "FORBIDDEN_TIMING_NAMES",
+    "M1_DISPATCH_WHITELIST",
+    "M1_EMPTY_LOG",
+    "M1_ENUM_ONLY",
+    "M1_IMPLEMENTED",
+    "Timing",
+]
 
 
 class Timing(str, Enum):
@@ -232,6 +249,44 @@ M1_ENUM_ONLY: tuple[Timing, ...] = tuple(
     timing for timing in Timing if timing not in _IMPLEMENTED_MEMBERS
 )
 """票 01 §C 的 (b) 类：枚举位保留、M1 不 dispatch（遍历 ``Timing`` 保证顺序确定）。"""
+
+M1_EMPTY_LOG: tuple[Timing, ...] = (
+    # 准备阶段：只发阶段体 PHASE_PREPARE，边界不 dispatch。
+    Timing.PHASE_PREPARE_START,
+    Timing.PHASE_PREPARE_END,
+    Timing.INTERVAL_PREPARE_TO_JUDGE,
+    # 判定阶段是 M1 唯一的"空阶段"：只发阶段体 PHASE_JUDGE（判定事件 L14 不实现）。
+    Timing.PHASE_JUDGE_START,
+    Timing.PHASE_JUDGE_END,
+    Timing.INTERVAL_JUDGE_TO_DRAW,
+    # 出牌 / 摸牌 / 弃牌阶段的阶段体与边界都发（弃牌阶段不是空阶段），只有阶段之间不发。
+    Timing.INTERVAL_DRAW_TO_PLAY,
+    Timing.INTERVAL_PLAY_TO_DISCARD,
+    Timing.INTERVAL_DISCARD_TO_FINISH,
+    # 结束阶段：只发阶段体 PHASE_FINISH，边界不 dispatch。
+    Timing.PHASE_FINISH_START,
+    Timing.PHASE_FINISH_END,
+)
+"""票 01 (a) 类里的**空日志**节点：枚举位保留、M1 流程不 dispatch、记录流里不出现。
+
+票 18 承票 06 §7 的明文登记：5 个 ``INTERVAL_*`` 与**只发阶段体的三个阶段**（准备 /
+判定 / 结束）的 ``*_START`` / ``*_END`` 一律不 dispatch、不记；摸牌 / 出牌 / 弃牌三个
+阶段的阶段体与边界都发。于是 (a) 类的 58 个里只有 47 个可从记录流观测；这些空日志节点
+"结构性存在"（枚举成员 + 阶段口径），由 :data:`M1_EMPTY_LOG` 单列，不混进
+:data:`M1_DISPATCH_WHITELIST`。
+"""
+
+_EMPTY_LOG_MEMBERS = frozenset(M1_EMPTY_LOG)
+
+M1_DISPATCH_WHITELIST: tuple[Timing, ...] = tuple(
+    timing for timing in M1_IMPLEMENTED if timing not in _EMPTY_LOG_MEMBERS
+)
+"""M1 的 **dispatch 白名单**：47 个真的会 dispatch、可在记录流里观测到的节点。
+
+= 58 个 (a) 类 − 11 个空日志节点（票 18 登记、票 25 落地）。覆盖清单
+（``tests/support/timing_coverage.py``）的键集必须**恰等于**本集合，且每个节点都要在
+它声明的基准 / 用例产出的记录流里实测出现。
+"""
 
 FORBIDDEN_TIMING_NAMES: tuple[str, ...] = (
     "防止伤害",

@@ -1,0 +1,148 @@
+"""时机覆盖清单（票 25 / 票 12 §5）：节点 → 覆盖它的基准或用例，连同来源的记录流。
+
+清单的键集必须**恰等于** M1 的 dispatch 白名单（``sgs.timing.M1_DISPATCH_WHITELIST``，
+47 个可从记录流观测的节点）。每个值是一组来源 id：
+
+- ``baseline:<slug>``：``tests/replays/<slug>.jsonl`` 这条 Golden Replay 的记录流
+  （它的字节已由 ``tests/test_replays.py`` 用当前引擎回放验证）；
+- ``position:<name>``：``tests/support/positions.py`` 里一个人为构造局面的记录流。
+
+``tests/test_timing_coverage.py`` 会**真的**跑 / 读这些来源，逐节点断言"清单里声明的
+节点确实在来源的记录流里出现"——清单因此不是声明，而是机械判决。
+
+对票 12 §5 预分配表的修订（票 12 §9"实测未命中即回改清单并显式说明原因"）：
+
+- 表里把 L2 全 25 个都记作"必须实现"；实测只有 14 个进记录流——5 个 ``INTERVAL_*``
+  与准备 / 判定 / 结束阶段的 ``*_START`` / ``*_END``（共 11 个）结构性地不 dispatch。
+  它们已由 ``sgs.timing.M1_EMPTY_LOG`` 单列，**不进本清单**（票 18 的登记）。
+- L2 可见的 14 个按表挂"单测 8"，落到 ``position:turn-loop``：它与
+  ``tests/test_turn_loop.py`` 的构造局面同形，逐节点断言阶段轮换（含判定阶段空过）。
+- L10 按表挂"基准 03 / 04 + 单测 7"，落到 ``position:play-phase-peach``（出牌阶段主动
+  用【桃】）+ 基准 03 / 04（濒死自救 / 他人救）：三条互不相同的回复路径都要有来源。
+
+**不进清单的 36 个节点与理由**（票 12 §5"实战不可达者写明理由"）：
+
+- ``sgs.timing.M1_EMPTY_LOG``（11）：L2 边界 / 阶段间节点，M1 流程结构上不 dispatch
+  （票 18 承票 06 §7 的登记），记录流里不出现，故无来源可挂；
+- ``sgs.timing.M1_ENUM_ONLY``（25）：票 01 §C (b) 类——触发它们的前提机制（判定、拼点、
+  翻面、装备、技能、失去体力 / 体力上限、牌移动、打出…）在本里程碑被排除，
+  只留枚举位。
+
+另：基准 ``06-deck-reshuffle`` 不作为来源——重洗没有专属时机节点，它 dispatch 的 47 个
+与 01–05 相同；它自己的回归断言（重洗可观测）由 ``tests/test_deck_shuffle.py`` 与
+``tests/test_replays.py`` 承担。
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+
+from sgs.engine import read_journal
+from sgs.timing import Timing
+
+from .positions import play_phase_peach_engine, turn_loop_engine
+
+__all__ = ["ALL_SOURCES", "COVERAGE", "dispatched", "stream_records"]
+
+_REPLAYS_DIR = Path(__file__).resolve().parent.parent / "replays"
+
+TURN_LOOP = "position:turn-loop"
+PLAY_PHASE_PEACH = "position:play-phase-peach"
+
+
+def _baseline(slug: str) -> str:
+    return f"baseline:{slug}"
+
+
+B01 = _baseline("01-slash-dodge-cancel")
+B02 = _baseline("02-slash-hit-damage")
+B03 = _baseline("03-near-death-self-peach")
+B04 = _baseline("04-near-death-other-peach")
+B05 = _baseline("05-near-death-death")
+
+COVERAGE: dict[Timing, tuple[str, ...]] = {
+    # ---- L0 游戏级：发牌只在真实开局（new_game）里发生，故挂任一条基准 ----
+    Timing.GAME_INITIAL_HAND_DEALING: (B01,),
+    Timing.GAME_START: (TURN_LOOP,),
+    # ---- L1 / L2：构造局面单测 8（回合阶段轮换，含判定阶段空过） ----
+    Timing.TURN_BEFORE_START: (TURN_LOOP,),
+    Timing.TURN_START: (TURN_LOOP,),
+    Timing.PHASE_PREPARE: (TURN_LOOP,),
+    Timing.PHASE_JUDGE: (TURN_LOOP,),
+    Timing.PHASE_DRAW_START: (TURN_LOOP,),
+    Timing.PHASE_DRAW: (TURN_LOOP,),
+    Timing.PHASE_DRAW_END: (TURN_LOOP,),
+    Timing.PHASE_PLAY_START: (TURN_LOOP,),
+    Timing.PHASE_PLAY_IDLE: (TURN_LOOP,),
+    Timing.PHASE_PLAY_END: (TURN_LOOP,),
+    Timing.PHASE_DISCARD_START: (TURN_LOOP,),
+    Timing.PHASE_DISCARD: (TURN_LOOP,),
+    Timing.PHASE_DISCARD_END: (TURN_LOOP,),
+    Timing.PHASE_FINISH: (TURN_LOOP,),
+    Timing.TURN_END: (TURN_LOOP,),
+    Timing.TURN_AFTER_END: (TURN_LOOP,),
+    # ---- L4 使用结算前：基准 01 的【杀】使用链（它同时给出【闪】抵消的互斥证据） ----
+    Timing.USE_CHOOSE_TARGET: (B01,),
+    Timing.USE_ON_USE: (B01,),
+    Timing.USE_DESIGNATE_TARGET: (B01,),
+    Timing.USE_BECOME_TARGET: (B01,),
+    Timing.USE_AFTER_DESIGNATE_TARGET: (B01,),
+    Timing.USE_AFTER_BECOME_TARGET: (B01,),
+    # ---- L5 使用结算中/后：抵消路径挂 01，生效路径挂 02 ----
+    Timing.RESOLVE_START: (B01,),
+    Timing.RESOLVE_BEFORE_EFFECT: (B01,),
+    Timing.RESOLVE_EFFECT: (B02,),
+    Timing.RESOLVE_AFTER_EFFECT: (B02,),
+    Timing.RESOLVE_END: (B01,),
+    Timing.RESOLVE_AFTER_END: (B01,),
+    # ---- L7 伤害 / L8 扣减体力：基准 02 的一次命中伤害 ----
+    Timing.DAMAGE_DEAL: (B02,),
+    Timing.DAMAGE_TAKE: (B02,),
+    Timing.DAMAGE_AFTER_DEAL: (B02,),
+    Timing.DAMAGE_AFTER_TAKE: (B02,),
+    Timing.DAMAGE_END: (B02,),
+    Timing.LIFE_DECREASE_BEFORE: (B02,),
+    Timing.LIFE_DECREASE_ON: (B02, B03),
+    Timing.LIFE_DECREASE_AFTER: (B02,),
+    # ---- L10 回复体力：出牌阶段主动用桃 + 濒死自救 / 他人救三条路径 ----
+    Timing.RECOVER_VALUE: (PLAY_PHASE_PEACH, B03, B04),
+    Timing.RECOVER_AFTER: (PLAY_PHASE_PEACH, B03, B04),
+    # ---- L12 濒死 / L13 死亡：基准 03 与 05 各自命中一段互斥路径 ----
+    Timing.NEAR_DEATH_ENTER: (B03,),
+    Timing.NEAR_DEATH_AT: (B03,),
+    Timing.NEAR_DEATH_AFTER: (B03,),
+    Timing.DEATH_BEFORE_START: (B05,),
+    Timing.DEATH_REVEAL_IDENTITY_AFTER: (B05,),
+    Timing.DEATH_ON: (B05,),
+    Timing.DEATH_AFTER: (B05,),
+}
+"""47 个可从记录流观测的节点 → 覆盖它的基准 / 构造局面用例。"""
+
+
+@lru_cache(maxsize=None)
+def stream_records(source_id: str):
+    """一个覆盖来源产出的记录流；同一个来源在一次测试会话里只算一次。"""
+    if source_id.startswith("baseline:"):
+        slug = source_id.removeprefix("baseline:")
+        return read_journal(_REPLAYS_DIR / f"{slug}.jsonl")
+    if source_id == TURN_LOOP:
+        return turn_loop_engine().records
+    if source_id == PLAY_PHASE_PEACH:
+        return play_phase_peach_engine().records
+    raise KeyError(f"未知的覆盖来源：{source_id!r}")
+
+
+def dispatched(source_id: str) -> frozenset[str]:
+    """该来源的记录流里实测 dispatch 的时机节点（字符串取值）。"""
+    return frozenset(
+        record.timing.value
+        for record in stream_records(source_id)
+        if record.kind == "timing"
+    )
+
+
+ALL_SOURCES: tuple[str, ...] = tuple(
+    sorted({source for sources in COVERAGE.values() for source in sources})
+)
+"""清单里用到的全部来源 id（去重、定序）。"""
