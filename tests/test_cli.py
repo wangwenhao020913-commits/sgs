@@ -96,3 +96,47 @@ def test_bad_content_pack_exit_code_in_subprocess():
     assert "内容包加载失败" in result.stderr
     assert "version.unknown" in result.stderr
     assert result.stdout == ""
+
+
+def test_cli_runs_a_whole_game_and_prints_the_seed_then_the_stream(capsys):
+    assert main(["--seed", "7"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "seed = 7"
+    assert lines[1].startswith("header 种子=7 ")
+    assert lines[-1].startswith("#")
+    assert "终局 结果=draw" in lines[-1], "骨架期没有可用牌，一局以牌堆耗尽的平局收场"
+
+
+def test_module_entry_and_console_script_agree_byte_for_byte():
+    module = _run(sys.executable, "-m", "sgs", "--seed", "7")
+    script = _run(str(CONSOLE_SCRIPT), "--seed", "7")
+
+    assert module.returncode == 0, module.stderr
+    assert script.returncode == 0, script.stderr
+    assert module.stdout == script.stdout
+
+
+def test_same_seed_twice_is_byte_identical_across_processes():
+    first = _run(sys.executable, "-m", "sgs", "--seed", "20261008")
+    second = _run(sys.executable, "-m", "sgs", "--seed", "20261008")
+
+    assert first.stdout == second.stdout
+    assert first.stdout != ""
+
+
+def test_omitted_seed_is_generated_recorded_and_printed(capsys):
+    assert main([]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    seed = int(lines[0].removeprefix("seed = "))
+    assert 0 <= seed < (1 << 64)
+    assert lines[1].startswith(f"header 种子={seed} ")
+
+
+def test_seed_outside_the_64_bit_range_is_rejected(capsys):
+    assert main(["--seed=-1"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "种子必须落在" in captured.err

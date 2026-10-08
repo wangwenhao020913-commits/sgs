@@ -1,3 +1,52 @@
-"""引擎门面、随机源与记录流。"""
+"""引擎门面、随机源与记录流。
 
-__all__: tuple[str, ...] = ()
+公开接口只在此再导出，外部不得 import 本子包的深层路径。
+"""
+
+from .errors import IllegalActionError
+from .game import DRAW_COUNT, INITIAL_HP, Engine, Outcome, new_game
+from .journal import (
+    EVENT_SCHEMA_VERSION,
+    ActionRecord,
+    CardMoveRecord,
+    DeckShuffleRecord,
+    DeltaRecord,
+    FrameRecord,
+    GameEndRecord,
+    Header,
+    HpChangeRecord,
+    JournalRecord,
+    QueryRecord,
+    TimingRecord,
+    dump_journal,
+    record_json,
+    wrap_delta,
+)
+from .rng import SUBSTREAM_DOMAIN, RandomSource, new_seed
+
+__all__ = (
+    "DRAW_COUNT",
+    "EVENT_SCHEMA_VERSION",
+    "INITIAL_HP",
+    "SUBSTREAM_DOMAIN",
+    "ActionRecord",
+    "CardMoveRecord",
+    "DeckShuffleRecord",
+    "DeltaRecord",
+    "Engine",
+    "FrameRecord",
+    "GameEndRecord",
+    "Header",
+    "HpChangeRecord",
+    "IllegalActionError",
+    "JournalRecord",
+    "Outcome",
+    "QueryRecord",
+    "RandomSource",
+    "TimingRecord",
+    "dump_journal",
+    "new_game",
+    "new_seed",
+    "record_json",
+    "wrap_delta",
+)
