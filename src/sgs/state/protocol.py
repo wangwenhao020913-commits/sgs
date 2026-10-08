@@ -58,7 +58,8 @@ class PlayerPublic(_FrozenModel):
 class PlayerView(_FrozenModel):
     """参与者视角：只含自己的手牌与全部公开信息（票 05 §5）。
 
-    牌堆只给**剩余数量**、不给顺序；``discard`` 按置入序（先入在前）。
+    牌堆只给**剩余数量**、不给顺序；``discard`` 按置入序（先入在前）；
+    ``processing``（处理区）是公开区，按置入序（票 07 §3）。
     """
 
     seat: int
@@ -66,6 +67,7 @@ class PlayerView(_FrozenModel):
     self_hand: tuple[CardRef, ...]
     deck_count: int
     discard: tuple[CardRef, ...]
+    processing: tuple[CardRef, ...]
     turn_seat: int | None
     phase: Phase | None
 

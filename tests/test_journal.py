@@ -51,10 +51,10 @@ def test_every_record_after_the_header_has_a_strictly_increasing_seq():
 
 
 def test_the_seven_kinds_are_all_defined_and_serialisable():
-    """七个 kind 的定义齐备；本局未产生 frame 记录（骨架期没有结算帧在飞）。"""
+    """七个 kind 齐备；随机玩家会真的用牌，故整局里 `frame` 记录也出现。"""
     produced = {record.kind for record in play_standard(seed=7).records}
 
-    assert produced == {"header", "timing", "delta", "query", "action", "game_end"}
+    assert produced == {"header", "timing", "delta", "query", "action", "frame", "game_end"}
 
     synthetic = [
         Header(seed=1, pack_id="standard", deck_profile="m1_basic", rule_config=_rule_config()),

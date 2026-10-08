@@ -18,7 +18,8 @@ from support import RecordingPlayer, SeatSpec, build_state
 PACK = load_content_pack()
 HAND_A = (40, 41, 42, 43)
 HAND_B = (46, 47, 48, 49)
-DECK = (0, 1)
+DECK = (30, 31)
+"""牌堆给两张【闪】：座位 A 摸到后出牌阶段仍无可用牌，只有"结束阶段"（票 12 场景 9）。"""
 HAND_A_AFTER_DRAW = HAND_A + DECK
 
 

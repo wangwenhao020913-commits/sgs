@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, computed_field, model_validator
 
 from sgs.data import RuleConfig
 from sgs.state import (
@@ -29,8 +30,11 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
+from .errors import JournalVersionError
+
 __all__ = [
     "EVENT_SCHEMA_VERSION",
+    "SUPPORTED_EVENT_VERSIONS",
     "ActionRecord",
     "CardMoveRecord",
     "DeckShuffleRecord",
@@ -43,12 +47,16 @@ __all__ = [
     "QueryRecord",
     "TimingRecord",
     "dump_journal",
+    "read_journal",
     "record_json",
     "wrap_delta",
 ]
 
 EVENT_SCHEMA_VERSION = 1
 """记录流结构版本；与数据版本 ``schema_version`` 字段名不同、各自升版（票 15）。"""
+
+SUPPORTED_EVENT_VERSIONS: frozenset[int] = frozenset({EVENT_SCHEMA_VERSION})
+"""本引擎读得懂的记录流版本集合（M1 只有 1；升版判据见票 15 §3）。"""
 
 
 class _FrozenModel(BaseModel):
@@ -124,6 +132,18 @@ class ActionRecord(_FrozenModel):
     reason: str | None = None
     action: Action
 
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_derived_answers_seq(cls, data: object) -> object:
+        """反序列化时丢掉顶层那份派生副本；单一真源是内联行动（票 06 §3 / 票 18）。
+
+        ``answers_seq`` 是 ``computed_field``：序列化会写出它，``extra="forbid"`` 却会
+        在反序列化时拒收它。丢掉而不是校验，是因为它**没有独立真源**——权威值在内联行动里。
+        """
+        if isinstance(data, dict):
+            return {key: value for key, value in data.items() if key != "answers_seq"}
+        return data
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def answers_seq(self) -> int:
@@ -189,3 +209,60 @@ def record_json(record: JournalRecord) -> str:
 def dump_journal(records: Sequence[JournalRecord]) -> str:
     """把记录流序列化成 canonical JSONL（唯一序列化器）。"""
     return "".join(f"{record_json(record)}\n" for record in records)
+
+
+class _EventVersionProbe(BaseModel):
+    """只读版本闸门用的最小模型：``strict`` 让"非整数版本号"变成结构错误（票 15 §2）。"""
+
+    model_config = ConfigDict(strict=True, extra="ignore")
+
+    event_schema_version: int
+
+
+_DELTA_ADAPTER: TypeAdapter[DeltaRecord] = TypeAdapter(DeltaRecord)
+_RECORD_MODELS: dict[str, type[BaseModel]] = {
+    "header": Header,
+    "timing": TimingRecord,
+    "query": QueryRecord,
+    "action": ActionRecord,
+    "frame": FrameRecord,
+    "game_end": GameEndRecord,
+}
+"""``kind`` → 记录模型；``delta`` 再按 ``delta_type`` 走 :data:`_DELTA_ADAPTER`。
+
+手写分派而不是让 pydantic 猜联合类型：``kind`` 是七种记录的唯一判别字段，
+而 ``delta`` 这一支内部还有一层 ``delta_type`` 判别（嵌套判别联合 pydantic 不直接支持）。
+"""
+
+
+def _parse_record(payload: object) -> JournalRecord:
+    if not isinstance(payload, dict):
+        raise ValueError(f"记录流的一行必须是 JSON 对象，实得 {type(payload).__name__}")
+    kind = payload.get("kind")
+    if kind == "delta":
+        return _DELTA_ADAPTER.validate_python(payload)
+    model = _RECORD_MODELS.get(kind) if isinstance(kind, str) else None
+    if model is None:
+        raise ValueError(f"未知的记录 kind：{kind!r}")
+    return model.model_validate(payload)  # type: ignore[return-value]
+
+
+def read_journal(path: str | Path) -> tuple[JournalRecord, ...]:
+    """唯一反序列化器（:func:`dump_journal` 的对称物）：**版本先行** → 全量结构校验。
+
+    版本号缺失 / 非整数 ⇒ 结构错误（pydantic 校验失败），**不**报版本不符；
+    未知版本 ⇒ :class:`~sgs.engine.JournalVersionError`，消息里带双方版本（票 15 §2）。
+    返回的元组含首行 ``header``，于是 :func:`sgs.agents.tape_from_journal` 的签名不变。
+    """
+    resolved = Path(path)
+    lines = resolved.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        raise ValueError(f"记录流为空：{resolved}")
+    version = _EventVersionProbe.model_validate(json.loads(lines[0])).event_schema_version
+    if version not in SUPPORTED_EVENT_VERSIONS:
+        raise JournalVersionError(
+            path=resolved,
+            file_version=version,
+            supported_versions=SUPPORTED_EVENT_VERSIONS,
+        )
+    return tuple(_parse_record(json.loads(line)) for line in lines)

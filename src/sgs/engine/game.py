@@ -17,7 +17,11 @@ from pydantic import BaseModel, ConfigDict
 from sgs.agents import Participant
 from sgs.data import ContentPack, RuleConfig
 from sgs.effects import (
+    CallOp,
     EffectContext,
+    EffectStep,
+    PushFrame,
+    behavior_for,
     discard_count,
     draw_from_deck,
     legal_actions_for,
@@ -28,6 +32,7 @@ from sgs.state import (
     Action,
     CardRef,
     DiscardQuery,
+    DodgeQuery,
     FrameKind,
     GameState,
     MoveReason,
@@ -55,6 +60,7 @@ from .journal import (
     wrap_delta,
 )
 from .rng import RandomSource
+from .steps import build_steps
 
 __all__ = ["DRAW_COUNT", "INITIAL_HP", "Engine", "Outcome", "instantiate_cards", "new_game"]
 
@@ -111,8 +117,8 @@ class Engine:
         self._last_seq = len(init_records)
 
         self.stack = ResolutionStack()
-        self.steps: StepTable = {}
-        """帧类型 → 步骤表；骨架期结算栈为空，步骤表随使用 / 伤害 / 濒死票登记。"""
+        self.steps: StepTable = build_steps()
+        """帧类型 → 步骤表：使用 / 结算的步骤在 :mod:`sgs.engine.steps`；伤害与回复留票 20 / 21。"""
 
         self.pending: Query | None = None
         self.pending_outcome: Outcome | None = None
@@ -233,6 +239,93 @@ class Engine:
         self._emit_frame("pop", frame)
         return frame
 
+    # -- 结算帧步骤可用的操作面（步骤表在 steps.py，只经这些方法改状态）---------
+
+    def emit_frame_timing(
+        self, frame: Frame, timing: Timing, *, actor: int | None = None, cards=()
+    ) -> None:
+        """以 ``frame`` 为主体 dispatch 一个时机；``source`` / ``targets`` 随帧继承。"""
+        self.emit_timing(
+            timing,
+            frame_id=frame.frame_id,
+            depth=self.stack.depth,
+            actor=actor,
+            source=frame.data.get("source"),
+            targets=tuple(frame.data.get("targets", ())),
+            cards=tuple(cards),
+        )
+
+    def suspended(self, value: Any) -> bool:
+        """``ask`` 的返回值是否为"已暂停等应答"哨兵。"""
+        return value is SUSPEND
+
+    def ask_query(self, kind: QueryKind, actor: int, timing: Timing) -> Any:
+        """构造并交付一次询问；已有应答（重入）则直接返回它。"""
+        return self.ask(lambda seq: self._build_query(kind, actor, timing, seq))
+
+    def start_use(self, card: CardRef, *, source: int, targets: tuple[int, ...]) -> Frame:
+        """开始一次使用：记一次本回合已用、压入 USE 帧（票 07 §6）。"""
+        counts = self.state.player(source).card_use_counts
+        counts[card.type] = counts.get(card.type, 0) + 1
+        return self.push_frame(
+            FrameKind.USE,
+            {"card": card, "source": source, "targets": tuple(targets)},
+            timing=Timing.USE_CHOOSE_TARGET,
+        )
+
+    def move_used_card_to_processing(self, frame: Frame) -> None:
+        """手牌 → 处理区（``reason = USE``）：在 L4.1 / L4.2 之间（票 07 §3）。"""
+        self._move_in_frame(
+            frame, (frame.data["card"],), to_zone=Zone.PROCESSING, reason=MoveReason.USE
+        )
+
+    def move_processing_card_to_discard(self, frame: Frame) -> None:
+        """处理区 → 弃牌堆（``reason = USE``）：L5.6"使用结算结束后"（票 07 §3）。"""
+        self._move_in_frame(
+            frame, (frame.data["card"],), to_zone=Zone.DISCARD, reason=MoveReason.USE
+        )
+
+    def _move_in_frame(
+        self,
+        frame: Frame,
+        cards: tuple[CardRef, ...],
+        *,
+        to_zone: Zone,
+        reason: MoveReason,
+    ) -> None:
+        ctx = EffectContext(
+            actor=frame.data["source"],
+            source=frame.data.get("source"),
+            targets=tuple(frame.data.get("targets", ())),
+            card=frame.data.get("card"),
+            frame_id=frame.frame_id,
+            depth=self.stack.depth,
+        )
+        delta = move_card(self.state, ctx, tuple(cards), to_zone=to_zone, reason=reason)
+        self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+
+    def apply_effects(
+        self, frame: Frame, effects: Sequence[EffectStep], *, timing: Timing
+    ) -> None:
+        """解释行为表的步骤列表：``PushFrame`` 压子帧、``CallOp`` 调叶子原语（M1 未登记）。"""
+        for step in effects:
+            if isinstance(step, PushFrame):
+                inherited = {
+                    "source": frame.data.get("source"),
+                    "targets": tuple(frame.data.get("targets", ())),
+                    "card": frame.data.get("card"),
+                }
+                for key, _ in step.scalars:
+                    if key in inherited:
+                        raise ValueError(f"行为表的标量 {key!r} 会覆盖子帧继承的字段")
+                data = {**inherited, **dict(step.scalars)}
+                self.push_frame(step.kind, data, timing=timing)
+                continue
+            assert isinstance(step, CallOp)  # union 只有两类步骤
+            raise NotImplementedError(
+                f"M1 没有登记叶子原语调用 {step.op!r}（CallOp 只留位，票 07 §2）"
+            )
+
     # -- 询问 ---------------------------------------------------------------
 
     def ask(self, build: Callable[[int], Query]) -> Action | _Suspend:
@@ -308,7 +401,16 @@ class Engine:
                 view=view,
                 count=count,
             )
-        raise ValueError(f"骨架期还没有 {kind.value} 询问的构造器")
+        if kind is QueryKind.DODGE:
+            return DodgeQuery(
+                seq=seq,
+                actor=actor,
+                timing=timing,
+                prompt="以你为目标的【杀】生效前：是否使用【闪】？",
+                legal_actions=actions,
+                view=view,
+            )
+        raise ValueError(f"M1 还没有 {kind.value} 询问的构造器")
 
     # -- 终局 ---------------------------------------------------------------
 
@@ -399,7 +501,10 @@ class Engine:
 
     def _turn_start(self) -> None:
         # 该座位自己的 TURN_START 是使用次数计数器的重置点（票 07 §6）。
-        self.emit_timing(Timing.TURN_START, actor=self.state.turn_seat)
+        seat = self.state.turn_seat
+        if seat is not None:
+            self.state.player(seat).card_use_counts.clear()
+        self.emit_timing(Timing.TURN_START, actor=seat)
 
     def _phase_prepare(self) -> None:
         # 准备阶段在本里程碑没有内部事件：只发阶段体（票 06 §7）。
@@ -454,7 +559,8 @@ class Engine:
             return "stay"
         if action.kind == "EndPhase":
             return None
-        # 使用牌的候选随票 19 落地；骨架期出牌阶段只有"结束阶段"。
+        # 使用一张牌：压入 USE 帧；子帧结算完再回到本步重新询问（票 07 §3）。
+        self.start_use(action.card, source=seat, targets=action.targets)
         return "stay"
 
     def _phase_play_end(self) -> None:

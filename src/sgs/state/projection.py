@@ -30,6 +30,7 @@ def project(state: GameState, seat: int) -> PlayerView:
         self_hand=self_hand,
         deck_count=len(state.deck),
         discard=state.refs(state.discard),
+        processing=state.refs(state.processing),
         turn_seat=state.turn_seat,
         phase=state.phase,
     )

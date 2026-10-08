@@ -3,9 +3,12 @@
 公开接口只在此再导出，外部不得 import 本子包的深层路径。
 """
 
-from .participants import Participant, RandomPlayer
+from .participants import Participant, RandomPlayer, TapeError, TapePlayer, tape_from_journal
 
 __all__ = (
     "Participant",
     "RandomPlayer",
+    "TapeError",
+    "TapePlayer",
+    "tape_from_journal",
 )

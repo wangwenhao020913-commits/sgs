@@ -113,6 +113,11 @@ class Player(BaseModel):
     hp_max: int
     alive: bool = True
     hand: list[int] = Field(default_factory=list)
+    card_use_counts: dict[str, int] = Field(default_factory=dict)
+    """本回合各牌名（card type id）的已用次数；该座位自己的 ``TURN_START`` 重置（票 07 §6）。
+
+    只存总已用次数：额定 / 额外两个上限记在行为表里，M1 的判定只用总数（票 07 §6）。
+    """
     identity: str | None = None
     """M1 无身份局：字段保留在状态里，但**不参与任何判定**（票 13 §3）。"""
 
