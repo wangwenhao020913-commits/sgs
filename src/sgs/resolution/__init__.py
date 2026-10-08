@@ -4,7 +4,6 @@
 """
 
 from .stack import (
-    DEATH_ENTRY,
     Control,
     Frame,
     Goto,
@@ -15,7 +14,6 @@ from .stack import (
 )
 
 __all__ = (
-    "DEATH_ENTRY",
     "Control",
     "Frame",
     "Goto",

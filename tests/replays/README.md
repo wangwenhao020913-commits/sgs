@@ -14,18 +14,16 @@
 | `02-slash-hit-damage` | 【杀】→不闪→伤害 | 使用全步骤 / 数值四事件（17.10 / 4.13–4.15）；L5 六个（**含** `RESOLVE_EFFECT` / `RESOLVE_AFTER_EFFECT`）→ 伤害帧 L7 五个（`DAMAGE_DEAL` / `DAMAGE_TAKE` / `DAMAGE_AFTER_DEAL` / `DAMAGE_AFTER_TAKE` / `DAMAGE_END`）→ 其中嵌套扣减体力帧 L8 三个（`LIFE_DECREASE_BEFORE` / `ON` / `AFTER`，插在"造成伤害后"之前）；一条 `hp_change` delta（座位 / 前值 / 后值 / 增减量，`frame_id` = 扣减体力帧） | `02-slash-hit-damage` |
 | `03-near-death-self-peach` | 濒死求桃：自救 | 濒死（规则 4.17 / 4.7）；伤害 → 扣减体力 → `NEAR_DEATH_ENTER` / `AT` / `AFTER` 三时机；`PEACH` 询问按官方 L12.2 从当前回合角色起逆时针逐个发（一个询问一个应答者）；濒死者自己在 `NEAR_DEATH_AT` 出【桃】→ 回复帧 L10 两个（`RECOVER_VALUE` / `RECOVER_AFTER`）**插在濒死之下** → 救回后回到被中断的伤害结算（`LIFE_DECREASE_AFTER` 与 L7 的 `DAMAGE_AFTER_*` 照常出现） | `03-near-death-self-peach` |
 | `04-near-death-other-peach` | 濒死求桃：他人救 | 同 `03`，但**当前回合角色**（座位 0，也是第一个被问的人）对濒死者用【桃】→ 它一出桃就脱离濒死，**后面的应答者不再被问**；回复结算同样插在濒死之下 | `04-near-death-other-peach` |
-| `05-near-death-death` | 濒死无人救 → 死亡入口 | 濒死（规则 4.17 / 4.18）；双方都放弃 → 濒死帧正常 dispatch 三时机、随后**止步于死亡入口**：`LIFE_DECREASE_AFTER` 是最后一条时机，`DAMAGE_AFTER_DEAL` / `AFTER_TAKE` / `END` **一个都不出现**（濒死优先于"造成伤害后"），栈上仍留着 `USE / RESOLVE / DAMAGE` 三帧交给死亡结算 | `05-near-death-death` |
+| `05-near-death-death` | 濒死无人救 → 死亡 → 胜负 | 濒死（规则 4.17）与死亡 / 胜负判定时点（4.18 / 4.19）；双方都放弃 → 濒死帧正常 dispatch 三时机、随后压入 **DEATH** 子帧：`DEATH_BEFORE_START`（空实现）→ `DEATH_REVEAL_IDENTITY_AFTER`（**胜负检测点**，检测后不终止）→ `DEATH_ON`（仅 Ⅰ.a 弃遗牌）→ `DEATH_AFTER`（空实现）→ 逐帧 `discard` 五帧（`NEAR_DEATH / LIFE_DECREASE / DAMAGE / RESOLVE / USE`）→ 处理区遗留牌入弃牌堆 → `game_end`（**最后一条**，`winner` = 存活方） | `05-near-death-death` |
 
-## 已知过渡态（后续票会重录）
+## 整局终止口径（票 22 落地后）
 
-- **死亡结算尚未实现（票 22）**：`01` / `02` / `05` 的收尾段会真的把人打到体力 ≤ 0，
-  而引擎在**死亡入口**止步（官方死亡四段、胜负判定、清栈与终局记录归票 22），
-  故这三条的终点是"走到死亡入口"而不是 `game_end`；`scenarios.py` 用
-  `stops_at_death_entry` 显式标出。票 22 落地后把这三条一起改回"必达 `game_end`"并重录。
-- `03` / `04` 已经能跑到 `game_end`（牌堆耗尽平局）：自救 / 他人救成功之后收尾段停止进攻，
-  双方都不再受伤，故这两条是完整的整局基准。
-- `01` / `02` / `05` 的记录流里会出现 **体力 ≤ 0** 的行：官方明说"角色的体力有可能小于 0"
+- **每条基准都以 `game_end` 收局**：死亡结算、胜负判定、终局清栈与处理区收尾都已落地；
+  随机驱动的整局也一样（CLI 门禁断言末行是终局记录）。
+- 死亡路径的逐帧 `discard` 顺序、`DEATH_ON` 遗牌、终局收尾与胜负语义由
+  `tests/test_death.py` 逐条断言。
+- 记录流里会出现 **体力 ≤ 0** 的行：官方明说"角色的体力有可能小于 0"
   （M1 的一次扣减恰好只降到 0），它是濒死结算的中间态。`开发文档/05` §4 的"体力范围"不变量
   只写"濒死结算中间态除外"；把它精确收窄成"`hp < 0` 仅允许出现在 `NEAR_DEATH` 帧在栈上时"
-  的是 **票 11 §79**——该帧已在票 21 落地，`tests/test_near_death.py` 逐条断言了这条不变量。
+  的是 **票 11 §79**——`tests/test_near_death.py` 逐条断言了这条不变量。
   上限不变量（`hp ≤ hp_max`）在每条基准里逐行成立。

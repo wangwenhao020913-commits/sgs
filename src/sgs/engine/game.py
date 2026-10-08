@@ -158,8 +158,6 @@ class Engine:
         self.pending: Query | None = None
         self.pending_outcome: Outcome | None = None
         self.finished = False
-        self.death_entry: int | None = None
-        """已走到**死亡入口**的座位；``None`` = 不在死亡路径上（票 21，死亡结算归票 22）。"""
 
         self._answer: Action | None = None
         self._started = False
@@ -262,7 +260,13 @@ class Engine:
     # -- 结算栈 -------------------------------------------------------------
 
     def push_frame(self, kind: FrameKind, data: dict[str, Any], *, timing: Timing) -> Frame:
-        """压入一个子帧；``return_to`` 命名式记录"从哪回来"（父帧 kind + 时机 id）。"""
+        """压入一个子帧；``return_to`` 命名式记录"从哪回来"（父帧 kind + 时机 id）。
+
+        胜负检测点之后**拒绝插入任何新结算**（票 13 §3 / 票 04 §5 的压栈守卫）：
+        M1 无技能，实战天然不发生，守卫仍在，使"检测点之后不再开新结算"是结构事实。
+        """
+        if self.pending_outcome is not None:
+            raise RuntimeError("胜负已判定：拒绝插入新结算（票 13 §3 / 票 04 §5）")
         parent = self.stack.top if self.stack else None
         return_to = (parent.kind.value, timing.value) if parent is not None else None
         self._frame_seq += 1
@@ -270,6 +274,41 @@ class Engine:
         self.stack.push(frame)
         self._emit_frame("push", frame)
         return frame
+
+    def enter_death(self, frame: Frame, seat: int) -> Frame:
+        """死亡入口：标记阵亡并压入 **DEATH** 子帧（票 22）。
+
+        死亡结算挂在濒死帧之上（官方 `flow/neardeath`：A 死亡后**插入**死亡结算），
+        故濒死帧及其下整条伤害链留在栈上，留给终局清栈逐帧记 ``discard``。
+        ``alive`` 在检测点之前置假，唯一终局入口据此判"存活角色数 ≤ 1"。
+        """
+        self.state.player(seat).alive = False
+        return self.push_frame(
+            FrameKind.DEATH,
+            {"target": seat, "targets": (seat,), "source": frame.data.get("source")},
+            timing=Timing.DEATH_BEFORE_START,
+        )
+
+    def discard_dead_cards(self, frame: Frame) -> None:
+        """``DEATH_ON`` Ⅰ.a：把死亡角色区域里所有的牌置入弃牌堆（票 13 §4）。"""
+        seat = frame.data["target"]
+        hand = tuple(self.state.player(seat).hand)
+        if not hand:
+            return
+        delta = move_card(
+            self.state,
+            EffectContext(
+                actor=seat,
+                source=frame.data.get("source"),
+                targets=tuple(frame.data.get("targets", ())),
+                frame_id=frame.frame_id,
+                depth=self.stack.depth,
+            ),
+            self.state.refs(hand),
+            to_zone=Zone.DISCARD,
+            reason=MoveReason.DISCARD,
+        )
+        self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
 
     def pop_frame(self) -> Frame:
         frame = self.stack.pop()
@@ -556,14 +595,22 @@ class Engine:
         return outcome
 
     def finish(self) -> None:
-        """终止点：清栈（逐帧记被丢弃的帧）→ 终局记录（流里最后一条）。"""
+        """终止点：清栈（逐帧记被丢弃的帧）→ 终局收尾 → 终局记录（流里最后一条）。
+
+        清栈顺序 = **内层在前**（票 04 §5 的 `DISCARD_FRAME` 顺序可在记录流里断言）：
+        死亡路径实测丢弃 `NEAR_DEATH / LIFE_DECREASE / DAMAGE / RESOLVE / USE` 五帧。
+        收尾 = 补做"使用结算结束时"，把处理区遗留的实体牌一次性置入弃牌堆
+        （`reason = USE`，票 07 §6 的终局收尾；它是一次原语调用，不受压栈守卫约束），
+        使**牌守恒含终局**无条件成立。终局记录携带检测点那条记录的 ``seq``。
+        """
         if self.finished:
             return
-        for frame in self.stack.clear():
-            self._emit_frame("discard", frame)
+        while self.stack:
+            self._emit_frame("discard", self.stack.pop())
         outcome = self.pending_outcome
         if outcome is None or self._check_seq is None:
             raise RuntimeError("没有终局判定就清栈")
+        self._teardown_processing()
         self._emit(
             GameEndRecord(
                 seq=self._next_seq(),
@@ -575,6 +622,19 @@ class Engine:
         )
         self.finished = True
 
+    def _teardown_processing(self) -> None:
+        """终局收尾：处理区实体牌一次性置入弃牌堆（补做 L5.6，票 07 §6）。"""
+        if not self.state.processing:
+            return
+        delta = move_card(
+            self.state,
+            EffectContext(actor=self.state.rule_config.first_seat),
+            self.state.refs(tuple(self.state.processing)),
+            to_zone=Zone.DISCARD,
+            reason=MoveReason.USE,
+        )
+        self.emit_delta(delta)
+
     # -- 驱动 ---------------------------------------------------------------
 
     def run(self, participants: Sequence[Participant]) -> tuple[JournalRecord, ...]:
@@ -582,35 +642,29 @@ class Engine:
         while not self.finished:
             if self.pending is None:
                 self._step()
-                if self.death_entry is not None:
-                    # 走到死亡入口即止（票 21）：死亡结算与清栈归票 22，届时这里
-                    # 会换成"跑完死亡四段再走终局入口"，而不是直接跳出驱动循环。
-                    break
                 continue
             query = self.pending
             self.submit(participants[query.actor].respond(query))
         return self.records
 
     def _step(self) -> None:
-        if self.finished or self.death_entry is not None:
+        if self.finished:
             return
         if not self._started:
             self._start()
             return
         if self.stack:
-            top = self.stack.top
             popped = self.stack.step(self.steps, self)
             if popped is not None:
                 self._emit_frame("pop", popped)
             if (
                 popped is not None
-                and popped.kind is FrameKind.LIFE_DECREASE
-                and popped.data.get("dying")
-                and self.state.player(popped.data["target"]).hp <= 0
+                and popped.kind is FrameKind.DEATH
+                and self.pending_outcome is not None
             ):
-                # 停下：整条结算链止步于**死亡入口**。检测、记录与逐帧清栈归票 22；
-                # 这里只把"谁死了"记下来，好让"到达入口"可被单独断言。
-                self.death_entry = popped.data["target"]
+                # 死亡结算这个**原子单元**跑到了最后一个时机之后：此刻才是终止点
+                # （票 13 §3 / 票 04 §5）。清栈与终局收尾在 finish() 里逐帧记录。
+                self.finish()
             return
         self._step_turn()
 

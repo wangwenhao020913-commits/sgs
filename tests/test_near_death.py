@@ -1,4 +1,4 @@
-"""濒死与求桃（票 21）：L12 三个时机 + 官方求桃顺序 + 回复插入 + 死亡入口。
+"""濒死与求桃（票 21）：L12 三个时机 + 官方求桃顺序 + 回复插入。
 
 落点 = 库门面（主缝）：``Engine.from_state`` 的人为局面 + 记录流；候选生成从
 ``sgs.effects`` 的公开面直接断言。
@@ -7,7 +7,8 @@
 
 - **自救**：濒死者自己在 ``NEAR_DEATH_AT`` 出【桃】；
 - **他人救**：当前回合角色（先被问的那个）出【桃】；
-- **无人救**：全部放弃 ⇒ 流程**走到死亡入口即止**（死亡结算本身归 22）。
+- **无人救**：全部放弃 ⇒ 死亡结算（票 22）跑完并以胜负收局；死亡四段与终局收尾的
+  逐条断言落在 ``tests/test_death.py``，本文件只确认"濒死不被打断、救回则继续"。
 
 构造局面一律"**只打一次【杀】**"（``slash_budget``）：濒死是插入结算，一旦一方真的死亡
 （或一直被打到 0），后续回合会再触发濒死，断言就分不清是哪一次。牌堆故意留薄，
@@ -147,7 +148,7 @@ def _advance_to_first_peach(engine, *, players):
     for _ in range(20_000):
         if engine.pending is None:
             engine._step()
-            if engine.death_entry is not None or engine.finished:
+            if engine.finished:
                 return False
             continue
         query = engine.pending
@@ -206,21 +207,24 @@ def test_the_near_death_frame_is_pushed_from_the_life_decrease_frame():
 
 
 def test_near_death_takes_priority_over_the_damage_aftermath_timings():
-    """无人救：濒死之后流程止于死亡入口，故"造成伤害后"类时机一个都不出现。"""
+    """无人救：濒死之后直接进入死亡结算，故"造成伤害后"类时机一个都不出现。"""
     engine = _run(hp_b=1, rescue_seat=None)
     emitted = _timings(engine.records)
     last_near_death = max(
         index for index, timing in enumerate(emitted) if timing in NEAR_DEATH_TIMINGS
     )
-    life_decrease_after = emitted.index(Timing.LIFE_DECREASE_AFTER.value)
+    death_before_start = emitted.index(Timing.DEATH_BEFORE_START.value)
 
-    assert last_near_death < life_decrease_after, (
-        "濒死三时机整个插在'扣减体力后'之前；后者是父帧在自己的子帧出栈后补的收尾"
+    assert last_near_death < death_before_start, (
+        "濒死三时机整个插在死亡结算之前；死亡结算再跑完四段"
     )
     for timing in DAMAGE_AFTERMATH_TIMINGS:
         assert timing not in emitted, (
             f"官方 4.17：濒死结算优先于'造成伤害后 / 受到伤害后'，{timing} 不该出现"
         )
+    assert Timing.LIFE_DECREASE_AFTER.value not in emitted, (
+        "无人救时整条伤害链（含扣减体力尾巴）留给终局清栈，不再继续 dispatch"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +343,9 @@ def test_the_dying_character_may_save_itself_with_a_peach():
         "第一个应答者（座位 0）放弃后才轮到濒死者自己"
     )
     assert engine.state.player(1).hp == 1, "【桃】把濒死者从 0 回复到 1"
-    assert engine.death_entry is None, "自救成功，没有走到死亡入口"
+    assert Timing.DEATH_BEFORE_START.value not in _timings(engine.records), (
+        "自救成功：死亡结算帧根本不该出现"
+    )
 
 
 def test_the_current_turn_character_may_save_the_dying_one_and_asking_stops():
@@ -357,7 +363,7 @@ def test_the_current_turn_character_may_save_the_dying_one_and_asking_stops():
         "官方 4.17：直到体力首次回复至 1 点或 1 点以上为止——座位 0 一出桃就结束"
     )
     assert engine.state.player(1).hp == 1
-    assert engine.death_entry is None
+    assert Timing.DEATH_BEFORE_START.value not in _timings(engine.records)
 
 
 def test_the_recover_frame_is_inserted_under_the_near_death_frame():
@@ -439,43 +445,18 @@ def test_recovery_never_goes_above_the_hp_max():
 
 
 # ---------------------------------------------------------------------------
-# 无人救：走到死亡入口即止（死亡结算归票 22）
+# 无人救的终局：死亡四段与清栈收尾的逐条断言见 tests/test_death.py
 # ---------------------------------------------------------------------------
 
 
-def test_nobody_rescues_so_the_flow_stops_at_the_death_entry():
+def test_nobody_rescues_so_the_game_ends_in_victory():
     engine = _run(hp_b=1, rescue_seat=None)
 
-    assert engine.death_entry == 1, "流程走到死亡入口，并记下是谁"
     assert engine.state.player(1).hp == 0
-    assert not engine.finished, "死亡结算与胜负判定归票 22，本票不停在终局"
-    assert all(record.kind != "game_end" for record in engine.records)
-
-
-def test_the_death_entry_leaves_the_remaining_frames_on_the_stack_for_ticket_22():
-    engine = _run(hp_b=1, rescue_seat=None)
-
-    assert [frame.kind for frame in engine.stack.frames] == [
-        FrameKind.USE,
-        FrameKind.RESOLVE,
-        FrameKind.DAMAGE,
-    ], "止步而不是清栈：逐帧 DISCARD 由死亡结算（票 22）负责"
-
-
-def test_the_flow_stops_immediately_so_no_further_records_are_written():
-    engine = _run(hp_b=1, rescue_seat=None)
-    records = engine.records
-    last_query = max(record.seq for record in _of(records, "query"))
-
-    assert engine.pending is None
-    assert engine.state.turn_seat == 0, "停在死亡入口，回合不推进"
-    assert records[-1].kind == "frame"
-    assert records[-1].frame_kind is FrameKind.LIFE_DECREASE, (
-        "最后一条是扣减体力帧出栈：紧接着那一步在死亡入口止步，没有后续记录"
-    )
-    assert records[-1].op == "pop"
-    assert records[-1].seq > last_query
-    assert _timings(records)[-1] == Timing.LIFE_DECREASE_AFTER.value
+    assert engine.finished, "无人救 ⇒ 死亡结算跑完即终局（票 22）"
+    assert engine.records[-1].kind == "game_end"
+    assert engine.records[-1].result == "winner"
+    assert engine.records[-1].winner == 0, "1v1：一方阵亡即另一方获胜"
 
 
 def test_hp_below_zero_only_happens_while_the_near_death_frame_is_on_the_stack():
@@ -492,7 +473,7 @@ def test_hp_below_zero_only_happens_while_the_near_death_frame_is_on_the_stack()
     for _ in range(20_000):
         if engine.pending is None:
             engine._step()
-            if engine.death_entry is not None or engine.finished:
+            if engine.finished:
                 break
             continue
         on_stack = any(frame.kind is FrameKind.NEAR_DEATH for frame in engine.stack.frames)
@@ -517,7 +498,10 @@ def test_the_peach_query_view_hides_the_opponents_hand_identities():
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=1)
-    engine.run([_ScriptedPlayer(0), _ScriptedPlayer(1)])
+    reached = _advance_to_first_peach(
+        engine, players=[_ScriptedPlayer(0), _ScriptedPlayer(1)]
+    )
+    assert reached and engine.pending is not None
 
     query = _queries(engine.records, "PEACH")[0]
     view = query.view

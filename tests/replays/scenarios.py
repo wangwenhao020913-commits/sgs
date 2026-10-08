@@ -12,9 +12,8 @@
 录制失败（目标段没命中 / 超过回合上限 / 没走到终止点）就是**录制失败**，
 必须重新选种并显式改写 ``SCENARIOS`` 里的常量，而不是放宽断言。
 
-**过渡态**（票 21）：``05-near-death-death`` 的流程目前止于**死亡入口**（死亡结算与胜负
-判定归票 22），故该条基准以"止于死亡入口"为准（``stops_at_death_entry = True``）；
-票 22 落地后把它改回"必达 ``game_end``"，其余断言不变。
+票 22 之后**每条基准都以 ``game_end`` 收局**（真胜负或牌堆耗尽平局）：死亡结算、
+胜负判定、清栈与终局收尾都已落地。
 """
 
 from __future__ import annotations
@@ -31,41 +30,25 @@ __all__ = ["SCENARIOS", "Scenario", "record"]
 
 @dataclass(frozen=True)
 class Scenario:
-    """一条基准的录制参数；``max_turns`` 是终止保证（票 12 §3）。
-
-    ``stops_at_death_entry`` 是票 21 → 22 的过渡开关：为 ``True`` 时以"走到死亡入口"
-    为合格终点（死亡结算尚未实现）；票 22 落地后置回 ``False``。
-    """
+    """一条基准的录制参数；``max_turns`` 是终止保证（票 12 §3）。"""
 
     slug: str
     seed: int
     max_turns: int
-    stops_at_death_entry: bool = False
 
 
 SCENARIOS: dict[str, Scenario] = {
-    "01-slash-dodge-cancel": Scenario(
-        slug="01-slash-dodge-cancel", seed=101, max_turns=40, stops_at_death_entry=True
-    ),
-    "02-slash-hit-damage": Scenario(
-        slug="02-slash-hit-damage", seed=4, max_turns=40, stops_at_death_entry=True
-    ),
+    "01-slash-dodge-cancel": Scenario(slug="01-slash-dodge-cancel", seed=101, max_turns=40),
+    "02-slash-hit-damage": Scenario(slug="02-slash-hit-damage", seed=4, max_turns=40),
     "03-near-death-self-peach": Scenario(
         slug="03-near-death-self-peach", seed=28, max_turns=40
     ),
     "04-near-death-other-peach": Scenario(
         slug="04-near-death-other-peach", seed=9, max_turns=40
     ),
-    "05-near-death-death": Scenario(
-        slug="05-near-death-death", seed=1, max_turns=40, stops_at_death_entry=True
-    ),
+    "05-near-death-death": Scenario(slug="05-near-death-death", seed=1, max_turns=40),
 }
-"""M1 的基准清单；``06-deck-reshuffle`` 由票 23 追加。
-
-``01`` / ``02`` 也标了 ``stops_at_death_entry``：票 21 让收尾段的伤害真的能打死人，
-而死亡结算尚未实现（票 22），故一整局的终点从"牌堆耗尽平局"变成了"死亡入口"。
-票 22 落地后把这三条（01 / 02 / 05）一起改回"必达 ``game_end``"。
-"""
+"""M1 的基准清单；``06-deck-reshuffle`` 由票 23 追加。"""
 
 
 @dataclass
@@ -233,15 +216,8 @@ def record(slug: str) -> str:
     engine.run([ScenarioPlayer(seat, slug, recording) for seat in range(2)])
 
     assert recording.goal_done, f"{slug}：目标段没有命中（seed={scenario.seed}）"
-    if scenario.stops_at_death_entry:
-        assert engine.death_entry is not None, (
-            f"{slug}：没有走到死亡入口（seed={scenario.seed}）"
-        )
-        assert all(record_.kind != "game_end" for record_ in engine.records), (
-            f"{slug}：死亡结算尚未实现，却出现了终局记录"
-        )
-    else:
-        assert engine.records[-1].kind == "game_end", f"{slug}：没有走到终局"
+    assert engine.records[-1].kind == "game_end", f"{slug}：没有走到终局"
+    assert engine.records[-1].result in ("winner", "draw"), "终局结果只能是胜负或平局"
     turns = sum(
         1
         for record_ in engine.records

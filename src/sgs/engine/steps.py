@@ -7,11 +7,14 @@
 - **DAMAGE 帧**（票 20）：L7 五个时机；"受到伤害时"之后压入 **LIFE_DECREASE** 子帧，
   在"造成伤害后"之前把体力真正扣掉。
 - **LIFE_DECREASE 帧**（票 20 / 21）：L8 三个时机；"扣减体力时"是唯一的体力写入点。
-  体力降到 0 及以下就在那里插入 **NEAR_DEATH** 子帧（票 21）；无人救时父帧**止步于
-  死亡入口**（返回 :data:`~sgs.resolution.DEATH_ENTRY`），救回则照常走完"扣减体力后"。
+  体力降到 0 及以下就在那里插入 **NEAR_DEATH** 子帧（票 21）；救回则照常走完"扣减体力后"。
 - **NEAR_DEATH 帧**（票 21）：L12 三个时机；"处于濒死状态时"按官方顺序逐个求桃
   （当前回合角色起、逆时针、一人一次），有人出桃则压入 **RECOVER** 子帧、在其中把
-  体力恢复 1 点，然后回到被中断的结算。
+  体力恢复 1 点，然后回到被中断的结算。无人救时在"濒死结算结束后"压入 **DEATH** 子帧
+  （票 22）——死亡结算作为原子单元跑完，濒死帧与整条伤害链留给终局清栈。
+- **DEATH 帧**（票 22）：L13 裁剪后的四段。`DEATH_REVEAL_IDENTITY_BEFORE` **跳过**
+  （无身份牌、不 dispatch）；`DEATH_ON` 只执行 Ⅰ.a（弃置死者区域里的牌），奖惩与武将牌
+  相关步骤跳过；检测点在 `DEATH_REVEAL_IDENTITY_AFTER`，只判 mark、不在那里终止。
 - **RECOVER 帧**（票 21）：L10 两个时机；"确定回复数值"之后把体力写高（夹在上限内）。
 """
 
@@ -21,7 +24,7 @@ from collections.abc import Sequence
 from typing import Any, Protocol
 
 from sgs.effects import EffectStep, behavior_for, opens_response_window
-from sgs.resolution import DEATH_ENTRY, Control, Frame, Goto, Step, StepHost, StepTable
+from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable
 from sgs.state import CardRef, FrameKind, GameState, QueryKind, UseCard
 from sgs.timing import Timing
 
@@ -44,6 +47,12 @@ class FrameHost(StepHost, Protocol):
     def move_used_card_to_processing(self, frame: Frame) -> None: ...
 
     def move_processing_card_to_discard(self, frame: Frame) -> None: ...
+
+    def enter_death(self, frame: Frame, seat: int) -> Frame: ...
+
+    def discard_dead_cards(self, frame: Frame) -> None: ...
+
+    def check_game_end(self) -> Any: ...
 
     def push_frame(self, kind: FrameKind, data: dict[str, Any], *, timing: Timing) -> Frame: ...
 
@@ -282,7 +291,8 @@ def life_decrease_on(host: FrameHost, frame: Frame) -> None:
     """**扣减体力时** = 唯一的体力写入点；先 dispatch 时机，再把体力扣到目标值。
 
     目标值由本帧算（``hp - amount``），原语只负责写（票 07 §1）。结算完**立刻**把
-    结果记进帧：濒死与否是这次扣减的结果，父帧要据此决定"继续"还是"止步于死亡入口"。
+    结果记进帧：濒死与否是这次扣减的结果，"扣减体力时"之后据此决定是否压入濒死帧
+    （票 21）；无人救时死亡结算再从濒死帧压入（票 22）。
     """
     target = frame.data["target"]
     _emit(host, frame, Timing.LIFE_DECREASE_ON, actor=target)
@@ -307,18 +317,13 @@ def life_decrease_trigger_near_death(host: FrameHost, frame: Frame) -> None:
     )
 
 
-def life_decrease_after(host: FrameHost, frame: Frame) -> Control:
-    """**扣减体力后**；之后就是唯一的岔路：救回继续，无人救则走到死亡入口。
+def life_decrease_after(host: FrameHost, frame: Frame) -> None:
+    """**扣减体力后**：照常空实现收尾。
 
-    "救回"读自体力（官方 4.17 第 4 条"每回复 1 点体力即检查：若体力 ≥ 1，脱离濒死"），
-    而不是读濒死帧的私有标志——体力是权威，"脱离濒死"与"体力 ≥ 1"在 M1 恒等价。
+    无人救的死亡路径上这一步**不会被走到**——濒死帧在"濒死结算结束后"直接压入 DEATH
+    子帧并留在栈上，整条伤害链（含本帧）由终局清栈统一丢弃（票 22）；救回时才回到这里。
     """
     _emit(host, frame, Timing.LIFE_DECREASE_AFTER, actor=frame.data["target"])
-    if not frame.data["dying"]:
-        return None
-    if host.state.player(frame.data["target"]).hp <= 0:
-        return DEATH_ENTRY
-    return None
 
 
 LIFE_DECREASE_STEPS = (
@@ -384,12 +389,17 @@ def near_death_ask(host: FrameHost, frame: Frame) -> Control:
 
 
 def near_death_after(host: FrameHost, frame: Frame) -> None:
-    """"濒死结算结束后"：此时体力是否已恢复到 1 点以上可直接读（抢救结果归体力本身）。
+    """"濒死结算结束后"：抢救结果直接读体力（官方 4.17 第 4 条）。
 
-    本时机是**空实现**（官方此处只列技能效果，M1 无技能）：流程经过并照记，
-    但不产生任何状态变化（票 13 的三分类：dispatch 但无效果）。
+    本时机是**空实现**（官方此处只列技能效果，M1 无技能）：流程经过并照记，不产生状态
+    变化（票 13 的三分类：dispatch 但无效果）。体力仍 ≤ 0 就是**死亡入口**：在此压入
+    DEATH 子帧（票 22）。死亡结算挂在濒死帧**之上**，濒死帧因此留在栈上不弹出——
+    它连同整条伤害链在终局清栈时逐帧记 `discard`（票 04 §5 的 5 帧）。
     """
     _emit_near_death(host, frame, Timing.NEAR_DEATH_AFTER)
+    target = frame.data["target"]
+    if host.state.player(target).hp <= 0:
+        host.enter_death(frame, target)
 
 
 NEAR_DEATH_STEPS = (
@@ -416,6 +426,56 @@ def _askers_from(state: GameState, start: int | None, count: int) -> tuple[int, 
         for seat in ((origin + offset) % count,)
         if state.player(seat).alive
     )
+
+
+# ---- DEATH 帧：L13 裁剪后的四段（票 13 §4 / 票 22）--------------------------
+#
+# 官方流程四时机 = 亮出身份牌前 / 亮出身份牌后 / 死亡时 / 死亡后。1v1 裁剪：
+#   - ``DEATH_REVEAL_IDENTITY_BEFORE`` **跳过**（无身份牌 → 不 dispatch，枚举位保留）；
+#   - ``DEATH_REVEAL_IDENTITY_AFTER`` **保留**：唯一胜负检测点（判据 = 存活 ≤ 1）；
+#   - ``DEATH_ON`` **只执行 Ⅰ.a**（弃置死者区域里所有的牌）：Ⅰ.b/c 武将牌与 Ⅱ 奖惩跳过；
+#   - ``DEATH_BEFORE_START`` / ``DEATH_AFTER`` **空实现**（dispatch 但无效果）。
+# 检测点只置 ``pending_outcome``、**不**终止：其后 ``DEATH_ON`` / ``DEATH_AFTER`` 照常跑完，
+# 终止点是死亡结算最后一个时机之后（票 04 §5 的"检测点 ≠ 终止点"）。
+
+
+def _emit_death(host: FrameHost, frame: Frame, timing: Timing) -> None:
+    _emit(host, frame, timing, actor=frame.data["target"])
+
+
+def death_before_start(host: FrameHost, frame: Frame) -> None:
+    """空实现：主公死亡结束、视为来源杀死过、自己回合内死亡→回合结束在 M1 均不触发。"""
+    _emit_death(host, frame, Timing.DEATH_BEFORE_START)
+
+
+def death_reveal_identity_after(host: FrameHost, frame: Frame) -> None:
+    """胜负检测点：**先照记时机，再调唯一终局入口**。
+
+    顺序使 ``check_seq`` 恰为这条 ``DEATH_REVEAL_IDENTITY_AFTER`` 记录的序号
+    （票 08 §6 的"检测点那条记录"口径，票 22 第 6 条）。检测只置 ``pending_outcome``，
+    不清栈、不终止——死亡结算剩余两段照跑（票 13 §3）。
+    """
+    _emit_death(host, frame, Timing.DEATH_REVEAL_IDENTITY_AFTER)
+    host.check_game_end()
+
+
+def death_on(host: FrameHost, frame: Frame) -> None:
+    """Ⅰ.a：弃置死亡角色区域里所有的牌（M1 = 手牌）；奖惩与武将牌步骤跳过。"""
+    _emit_death(host, frame, Timing.DEATH_ON)
+    host.discard_dead_cards(frame)
+
+
+def death_after(host: FrameHost, frame: Frame) -> None:
+    """空实现：死亡结算收尾空时点（票 13 §4 的 C 类）。"""
+    _emit_death(host, frame, Timing.DEATH_AFTER)
+
+
+DEATH_STEPS = (
+    Step(death_before_start, Timing.DEATH_BEFORE_START),
+    Step(death_reveal_identity_after, Timing.DEATH_REVEAL_IDENTITY_AFTER),
+    Step(death_on, Timing.DEATH_ON),
+    Step(death_after, Timing.DEATH_AFTER),
+)
 
 
 # ---- RECOVER 帧：L10 两个时机 ----------------------------------------------
@@ -459,5 +519,6 @@ def build_steps() -> StepTable:
         FrameKind.DAMAGE: DAMAGE_STEPS,
         FrameKind.LIFE_DECREASE: LIFE_DECREASE_STEPS,
         FrameKind.NEAR_DEATH: NEAR_DEATH_STEPS,
+        FrameKind.DEATH: DEATH_STEPS,
         FrameKind.RECOVER: RECOVER_STEPS,
     }

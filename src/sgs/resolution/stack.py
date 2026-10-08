@@ -5,11 +5,13 @@
 
 - ``None``   —— 做完这一步，``pc`` 前进；
 - ``"stay"`` —— 原地重入同一步（用于询问暂停与循环）；
-- :class:`Goto` —— 跳到指定 ``pc``（如【闪】抵消后跳过生效时 / 生效后）；
-- :data:`DEATH_ENTRY` —— **中断整条结算链**，清空栈并交还"死亡入口"。
+- :class:`Goto` —— 跳到指定 ``pc``（如【闪】抵消后跳过生效时 / 生效后）。
 
 **恢复点是命名式**：权威是父帧的 ``pc``（下一个要执行的步骤），子帧的
 ``return_to = (父帧 kind, 压栈那一步对应的时机 id)`` 只是把它翻译成人话，写进记录流。
+
+**终止不是步骤的返回值**：胜负检测点只置引擎的 ``pending_outcome``，死亡结算作为原子
+单元照常跑完，直到死亡帧出栈才清栈并逐帧记 ``discard``（票 22 / 票 04 §5）。
 """
 
 from __future__ import annotations
@@ -22,7 +24,6 @@ from sgs.state import FrameKind
 from sgs.timing import Timing
 
 __all__ = [
-    "DEATH_ENTRY",
     "Control",
     "Frame",
     "Goto",
@@ -39,30 +40,8 @@ class Goto(NamedTuple):
     pc: int
 
 
-class _DeathEntry:
-    """``DEATH_ENTRY`` 哨兵：濒死无人救时，流程**走到死亡入口即止**（票 21）。
-
-    语义 = "这次结算到此为止，接下来交给死亡结算"（票 22）。发出它的那一步
-    **正常出栈**（``step`` 照记 ``pop``），但整条链不再往前推进半步：
-    濒死优先于"造成伤害后 / 受到伤害后"，故不能让父帧继续走剩下的时机。
-
-    冻结的实测（票 04 §5）是：死亡时被丢弃的是 ``NEAR_DEATH / LIFE_DECREASE /
-    DAMAGE / RESOLVE / USE`` 共 5 帧，且**逐帧**记 ``DISCARD_FRAME``——那是
-    "死亡结算作为原子单元跑完再清栈"（票 22 / 票 13 §7），本票只负责走到入口，
-    因此这里**不**清栈：栈原样留给票 22 的死亡结算与清栈步骤，逐帧记录才不会漏。
-    """
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:  # pragma: no cover - 仅调试可读性
-        return "DEATH_ENTRY"
-
-
-DEATH_ENTRY = _DeathEntry()
-
-Control: TypeAlias = str | Goto | _DeathEntry | None
-"""步骤函数的返回值：``None`` 前进 / ``"stay"`` 原地重入 / :class:`Goto` 跳转 /
-:data:`DEATH_ENTRY` 中断整条结算链。"""
+Control: TypeAlias = str | Goto | None
+"""步骤函数的返回值：``None`` 前进 / ``"stay"`` 原地重入 / :class:`Goto` 跳转。"""
 
 
 class StepHost(Protocol):
@@ -142,10 +121,6 @@ class ResolutionStack:
 
         返回值只用于让引擎记一条 ``pop`` 记录——**所有**出栈都必须经过调用方，
         这样"帧的生命周期"在记录流里没有缺口（票 06 §1）。
-
-        :data:`DEATH_ENTRY` 是唯一会**弹出但不再推进**的控制值：发出它的那一步
-        正常出栈（照记 ``pop``），栈上其余帧原样保留，由引擎在死亡入口处停下
-        （票 21）并把清栈交给死亡结算（票 22）。
         """
         frame = self.top
         table = steps.get(frame.kind)
@@ -159,7 +134,5 @@ class ResolutionStack:
         if isinstance(control, Goto):
             frame.pc = control.pc
             return None
-        if control is DEATH_ENTRY:
-            return self.pop()
         frame.pc += 1
         return None

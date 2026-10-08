@@ -90,7 +90,7 @@ def play_standard(seed: int = 7, *, pack: ContentPack | None = None, passive: bo
 
     ``passive=False``（默认）用两个随机玩家；``passive=True`` 用"只结束阶段 / 一律放弃"
     的玩家，于是**无人受伤**、以牌堆耗尽平局收场——适合断言与濒死无关的整局性质
-    （票 21 之后随机玩家可能停在死亡入口，见 ``tests/test_near_death.py``）。
+    （随机玩家的一局可能以真胜负收局，票 22 之后**必达** ``game_end``）。
     """
     import sgs.agents as agents
     from sgs.data import load_content_pack
