@@ -27,11 +27,13 @@ from sgs.state import (
     FrameKind,
     HpChangeDelta,
     IdentityDealDelta,
+    IdentityRevealDelta,
     Query,
 )
 from sgs.timing import Timing
 
 from .errors import JournalVersionError
+from .victory import Side
 
 __all__ = [
     "EVENT_SCHEMA_VERSION",
@@ -45,6 +47,7 @@ __all__ = [
     "Header",
     "HpChangeRecord",
     "IdentityDealRecord",
+    "IdentityRevealRecord",
     "JournalRecord",
     "MalformedAction",
     "QueryRecord",
@@ -125,8 +128,21 @@ class IdentityDealRecord(IdentityDealDelta):
     depth: int
 
 
+class IdentityRevealRecord(IdentityRevealDelta):
+    """一次身份亮明（票 25 / 决策回票 14 §5）：阵亡结算内逐座各一条、检测之前。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
 DeltaRecord = Annotated[
-    CardMoveRecord | HpChangeRecord | DeckShuffleRecord | IdentityDealRecord,
+    CardMoveRecord
+    | HpChangeRecord
+    | DeckShuffleRecord
+    | IdentityDealRecord
+    | IdentityRevealRecord,
     Field(discriminator="delta_type"),
 ]
 
@@ -204,12 +220,19 @@ class FrameRecord(_FrozenModel):
 
 
 class GameEndRecord(_FrozenModel):
-    """终局：清栈之后落定，是流里**最后**一条记录。"""
+    """终局：清栈之后落定，是流里**最后**一条记录。
+
+    ``side`` / ``winners`` 是身份局的胜负事实（票 25 / 决策回票 14 §1）：``winners`` =
+    获胜一侧的**全部**座位（含已阵亡者，按座位升序）、``winner`` 在身份局为 ``None``；
+    无身份局与平局沿用 M1 的形状（``side=None``；胜局 ``winners=(获胜座位,)``、平局 ``()``）。
+    """
 
     kind: Literal["game_end"] = "game_end"
     seq: int
     result: Literal["winner", "draw"]
     winner: int | None = None
+    side: Side | None = None
+    winners: tuple[int, ...] = ()
     reason: str
     check_seq: int
 
@@ -235,6 +258,8 @@ def wrap_delta(delta: Delta, *, seq: int, frame_id: int, depth: int) -> DeltaRec
         return HpChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, IdentityDealDelta):
         return IdentityDealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, IdentityRevealDelta):
+        return IdentityRevealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     return DeckShuffleRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
 
 

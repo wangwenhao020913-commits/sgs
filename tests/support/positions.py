@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 
 from sgs.data import ContentPack, Identity, RuleConfig, load_content_pack
 from sgs.engine import Engine, instantiate_cards
-from sgs.state import GameState, Phase, Player, Query, UseCard
+from sgs.resolution import Frame
+from sgs.state import FrameKind, GameState, Phase, Player, Query, UseCard
 from sgs.timing import Timing
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "SequenceHalt",
     "build_state",
     "cards_of_type",
+    "declare_death",
     "play_phase_peach_engine",
     "play_standard",
     "run_turns",
@@ -252,3 +254,22 @@ def play_phase_peach_engine(seed: int = 1):
     engine = Engine.from_state(state, seed=seed)
     run_turns(engine, [PeachInPlayPhasePlayer(), PeachInPlayPhasePlayer()], turns=1)
     return engine
+
+
+# ---------------------------------------------------------------------------
+# 受控死亡入口（票 25 / 决策回票 14 §9）
+# ---------------------------------------------------------------------------
+
+
+def declare_death(engine: Engine, seat: int, *, killer: int | None = None) -> None:
+    """把一次死亡**直接压进**引擎（不经过濒死 / 伤害链）。
+
+    M2 没有天然嵌套死亡的路径，故"同批同时死亡"只能这样造（票 14 §9）：先声明一个死亡，
+    在它的检测点之后再声明第二个，两次死亡就落在同一批里——引擎的压栈守卫在胜负判定后
+    **只放行 DEATH 帧**，正是为了让这条路径成立。``killer`` 写进合成帧的 ``damage_source``，
+    死亡段据此在 `DEATH_BEFORE_START` 定格 killer。
+
+    本函数只用于构造局面单测；真实对局里死亡一律由濒死帧压入（票 22）。
+    """
+    frame = Frame(kind=FrameKind.NEAR_DEATH, data={"target": seat, "damage_source": killer})
+    engine.enter_death(frame, seat)

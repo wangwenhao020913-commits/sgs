@@ -1235,4 +1235,4 @@
 {"depth":1,"frame_id":86,"frame_kind":"RESOLVE","kind":"frame","op":"discard","return_to":["USE","RESOLVE_START"],"seq":1234}
 {"depth":0,"frame_id":85,"frame_kind":"USE","kind":"frame","op":"discard","return_to":null,"seq":1235}
 {"cards":[{"card_id":9,"name":"杀","rank":10,"slot":null,"suit":"spade","type":"slash"}],"delta_type":"card_move","depth":0,"frame_id":0,"from_zone":{"seat":null,"zone":"processing"},"kind":"delta","owner":null,"reason":"USE","seq":1236,"to_zone":{"seat":null,"zone":"discard"}}
-{"check_seq":1226,"kind":"game_end","reason":"last_surviving","result":"winner","seq":1237,"winner":1}
+{"check_seq":1226,"kind":"game_end","reason":"last_surviving","result":"winner","seq":1237,"side":null,"winner":1,"winners":[1]}

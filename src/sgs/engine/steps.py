@@ -12,9 +12,11 @@
   （当前回合角色起、逆时针、一人一次），有人出桃则压入 **RECOVER** 子帧、在其中把
   体力恢复 1 点，然后回到被中断的结算。无人救时在"濒死结算结束后"压入 **DEATH** 子帧
   （票 22）——死亡结算作为原子单元跑完，濒死帧与整条伤害链留给终局清栈。
-- **DEATH 帧**（票 22）：L13 裁剪后的四段。`DEATH_REVEAL_IDENTITY_BEFORE` **跳过**
-  （无身份牌、不 dispatch）；`DEATH_ON` 只执行 Ⅰ.a（弃置死者区域里的牌），奖惩与武将牌
-  相关步骤跳过；检测点在 `DEATH_REVEAL_IDENTITY_AFTER`，只判 mark、不在那里终止。
+- **DEATH 帧**（票 22 / 票 25）：L13 裁剪后的死亡段，**按模式分叉**。无身份局四段
+  （`DEATH_REVEAL_IDENTITY_BEFORE` 不入表、不 dispatch）；身份局五段——入表并把身份
+  亮明成一条 ``identity_reveal``（在时机 dispatch 之后、胜负检测之前）。`DEATH_ON` 先
+  执行 Ⅰ.a（弃置死者区域里的牌）再执行 Ⅱ 奖惩；检测点在 `DEATH_REVEAL_IDENTITY_AFTER`，
+  只记暂定胜负、不在那里终止（批次关闭由引擎的 DEATH 出栈逻辑宣布）。
 - **RECOVER 帧**（票 21）：L10 两个时机；"确定回复数值"之后把体力写高（夹在上限内）。
 """
 
@@ -23,6 +25,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Protocol
 
+from sgs.data import Identity, Mode
 from sgs.effects import EffectStep, behavior_for, opens_response_window
 from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable
 from sgs.state import CardRef, FrameKind, GameState, QueryKind, UseCard, seats_from
@@ -51,6 +54,12 @@ class FrameHost(StepHost, Protocol):
     def enter_death(self, frame: Frame, seat: int) -> Frame: ...
 
     def discard_dead_cards(self, frame: Frame) -> None: ...
+
+    def reveal_dead_identity(self, frame: Frame) -> None: ...
+
+    def apply_death_rewards(self, frame: Frame) -> None: ...
+
+    def record_death_fact(self, frame: Frame) -> None: ...
 
     def check_game_end(self) -> Any: ...
 
@@ -312,7 +321,7 @@ def life_decrease_trigger_near_death(host: FrameHost, frame: Frame) -> None:
         return
     host.push_frame(
         FrameKind.NEAR_DEATH,
-        {"target": target, "dying": True},
+        {"target": target, "dying": True, "damage_source": frame.data.get("source")},
         timing=Timing.NEAR_DEATH_ENTER,
     )
 
@@ -423,15 +432,17 @@ def _askers_from(state: GameState, start: int | None, count: int) -> tuple[int, 
     return seats_from(state, start, count)
 
 
-# ---- DEATH 帧：L13 裁剪后的四段（票 13 §4 / 票 22）--------------------------
+# ---- DEATH 帧：L13 裁剪后的死亡段（票 13 §4 / 票 22 / 票 25）---------------
 #
-# 官方流程四时机 = 亮出身份牌前 / 亮出身份牌后 / 死亡时 / 死亡后。1v1 裁剪：
-#   - ``DEATH_REVEAL_IDENTITY_BEFORE`` **跳过**（无身份牌 → 不 dispatch，枚举位保留）；
-#   - ``DEATH_REVEAL_IDENTITY_AFTER`` **保留**：唯一胜负检测点（判据 = 存活 ≤ 1）；
-#   - ``DEATH_ON`` **只执行 Ⅰ.a**（弃置死者区域里所有的牌）：Ⅰ.b/c 武将牌与 Ⅱ 奖惩跳过；
-#   - ``DEATH_BEFORE_START`` / ``DEATH_AFTER`` **空实现**（dispatch 但无效果）。
-# 检测点只置 ``pending_outcome``、**不**终止：其后 ``DEATH_ON`` / ``DEATH_AFTER`` 照常跑完，
-# 终止点是死亡结算最后一个时机之后（票 04 §5 的"检测点 ≠ 终止点"）。
+# 官方流程四时机 = 亮出身份牌前 / 亮出身份牌后 / 死亡时 / 死亡后，**按模式分叉**（票 25）：
+#   - 无身份局（1v1）四段：``DEATH_REVEAL_IDENTITY_BEFORE`` **不入表**（无身份牌）；
+#   - 身份局五段：``DEATH_REVEAL_IDENTITY_BEFORE`` 入表并亮明身份（主公也照发）；
+#   - ``DEATH_REVEAL_IDENTITY_AFTER`` 是唯一胜负检测点；
+#   - ``DEATH_ON`` = 死亡时技能 → Ⅰ.a 系统处理牌 → Ⅱ 奖惩（票 14 §4 的段序）；
+#   - ``DEATH_BEFORE_START`` 定格 killer、主公死亡优先于回合结束；
+#   - ``DEATH_AFTER`` 空实现。
+# 检测点只置 ``pending_outcome``、**不**终止：同批最后一次 ``DEATH_AFTER`` 之后才宣布
+# 胜负（终止点在引擎的 DEATH 出栈逻辑里，票 14 §3）。
 
 
 def _emit_death(host: FrameHost, frame: Frame, timing: Timing) -> None:
@@ -439,25 +450,53 @@ def _emit_death(host: FrameHost, frame: Frame, timing: Timing) -> None:
 
 
 def death_before_start(host: FrameHost, frame: Frame) -> None:
-    """空实现：主公死亡结束、视为来源杀死过、自己回合内死亡→回合结束在 M1 均不触发。"""
+    """死亡结算开始前：①主公死亡不做回合结束；②否则定格 killer、自己的回合则回合结束。
+
+    身份局才做这两件事（票 14 §4，官方 `flow_death` 首段）；无身份局保持 M1 的空实现。
+    ``killer`` 只在**有来源的伤害且来源 ≠ 死者**时定格：失去体力 / 无来源伤害（闪电）/
+    自杀 ⇒ 未定格 ⇒ 无奖惩。来源由死亡帧的 ``damage_source`` 带下来（帧私有载荷，
+    不进 ``timing`` 记录的 ``source``，故记录面不变）。
+    """
     _emit_death(host, frame, Timing.DEATH_BEFORE_START)
+    if host.state.rule_config.mode is not Mode.IDENTITY:
+        return
+    seat = frame.data["target"]
+    if host.state.player(seat).identity is Identity.LORD:
+        # 官方"死亡结算开始前：若死亡的是主公，则游戏结束"——回合结束分支让位（票 14 §4）。
+        return
+    source = frame.data.get("damage_source")
+    if source is not None and source != seat:
+        frame.data["killer"] = source
+    if host.state.turn_seat == seat:
+        _emit(host, frame, Timing.TURN_END, actor=seat)
+
+
+def death_reveal_identity_before(host: FrameHost, frame: Frame) -> None:
+    """"亮出身份牌前"：先 dispatch 时机，再发一条 ``identity_reveal``（票 14 §5）。
+
+    只进身份局的步骤表；主公也照发（开局已亮明，再发一次只是形状统一）。
+    """
+    _emit_death(host, frame, Timing.DEATH_REVEAL_IDENTITY_BEFORE)
+    host.reveal_dead_identity(frame)
 
 
 def death_reveal_identity_after(host: FrameHost, frame: Frame) -> None:
-    """胜负检测点：**先照记时机，再调唯一终局入口**。
+    """胜负检测点：**先照记时机与死亡事实，再调唯一终局入口**。
 
     顺序使 ``check_seq`` 恰为这条 ``DEATH_REVEAL_IDENTITY_AFTER`` 记录的序号
     （票 08 §6 的"检测点那条记录"口径，票 22 第 6 条）。检测只置 ``pending_outcome``，
     不清栈、不终止——死亡结算剩余两段照跑（票 13 §3）。
     """
     _emit_death(host, frame, Timing.DEATH_REVEAL_IDENTITY_AFTER)
+    host.record_death_fact(frame)
     host.check_game_end()
 
 
 def death_on(host: FrameHost, frame: Frame) -> None:
-    """Ⅰ.a：弃置死亡角色区域里所有的牌（M1 = 手牌）；奖惩与武将牌步骤跳过。"""
+    """死亡时：先 dispatch（M2 无死亡时技能），再 Ⅰ.a 系统处理牌、最后 Ⅱ 奖惩。"""
     _emit_death(host, frame, Timing.DEATH_ON)
     host.discard_dead_cards(frame)
+    host.apply_death_rewards(frame)
 
 
 def death_after(host: FrameHost, frame: Frame) -> None:
@@ -471,6 +510,16 @@ DEATH_STEPS = (
     Step(death_on, Timing.DEATH_ON),
     Step(death_after, Timing.DEATH_AFTER),
 )
+"""无身份局（1v1）的死亡段：M1 的四段，与既有一字不差。"""
+
+IDENTITY_DEATH_STEPS = (
+    Step(death_before_start, Timing.DEATH_BEFORE_START),
+    Step(death_reveal_identity_before, Timing.DEATH_REVEAL_IDENTITY_BEFORE),
+    Step(death_reveal_identity_after, Timing.DEATH_REVEAL_IDENTITY_AFTER),
+    Step(death_on, Timing.DEATH_ON),
+    Step(death_after, Timing.DEATH_AFTER),
+)
+"""身份局的死亡段：多一段"亮出身份牌前"（票 25 / 决策回票 14 §4）。"""
 
 
 # ---- RECOVER 帧：L10 两个时机 ----------------------------------------------
@@ -507,13 +556,14 @@ RESOLVE_END_PC = _pc_of(Timing.RESOLVE_END)
 """RESOLVE 步骤表里"使用结算结束时"的位置：被抵消时 Goto 到这里（跳过生效时 / 生效后）。"""
 
 
-def build_steps() -> StepTable:
+def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
+    """按模式装配步骤表：只有 DEATH 帧的形状分叉（票 25）。"""
     return {
         FrameKind.USE: USE_STEPS,
         FrameKind.RESOLVE: RESOLVE_STEPS,
         FrameKind.DAMAGE: DAMAGE_STEPS,
         FrameKind.LIFE_DECREASE: LIFE_DECREASE_STEPS,
         FrameKind.NEAR_DEATH: NEAR_DEATH_STEPS,
-        FrameKind.DEATH: DEATH_STEPS,
+        FrameKind.DEATH: IDENTITY_DEATH_STEPS if mode is Mode.IDENTITY else DEATH_STEPS,
         FrameKind.RECOVER: RECOVER_STEPS,
     }

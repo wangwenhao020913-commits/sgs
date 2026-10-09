@@ -17,6 +17,7 @@ from .journal import (
     Header,
     HpChangeRecord,
     IdentityDealRecord,
+    IdentityRevealRecord,
     JournalRecord,
     MalformedAction,
     QueryRecord,
@@ -27,6 +28,7 @@ from .journal import (
     wrap_delta,
 )
 from .rng import SUBSTREAM_DOMAIN, RandomSource, new_seed
+from .victory import DeathFact, Side, Victory, solve_identity_outcome
 
 __all__ = (
     "DRAW_COUNT",
@@ -37,6 +39,7 @@ __all__ = (
     "ActionRecord",
     "CardMoveRecord",
     "DeckShuffleRecord",
+    "DeathFact",
     "DeltaRecord",
     "Engine",
     "FrameRecord",
@@ -44,6 +47,7 @@ __all__ = (
     "Header",
     "HpChangeRecord",
     "IdentityDealRecord",
+    "IdentityRevealRecord",
     "IllegalActionError",
     "JournalRecord",
     "JournalVersionError",
@@ -51,12 +55,15 @@ __all__ = (
     "Outcome",
     "QueryRecord",
     "RandomSource",
+    "Side",
     "TimingRecord",
+    "Victory",
     "dump_journal",
     "instantiate_cards",
     "new_game",
     "new_seed",
     "read_journal",
     "record_json",
+    "solve_identity_outcome",
     "wrap_delta",
 )

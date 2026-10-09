@@ -39,6 +39,7 @@ from sgs.state import (
     FrameKind,
     GameState,
     HpChangeDelta,
+    IdentityRevealDelta,
     MoveReason,
     PeachQuery,
     Phase,
@@ -72,6 +73,7 @@ from .journal import (
 )
 from .rng import RandomSource
 from .steps import build_steps
+from .victory import DeathFact, Side, solve_identity_outcome
 
 __all__ = ["DRAW_COUNT", "INITIAL_HP", "Engine", "Outcome", "instantiate_cards", "new_game"]
 
@@ -80,6 +82,9 @@ INITIAL_HP = 4
 
 DRAW_COUNT = 2
 """摸牌阶段的额定摸牌数；M1 无修正摸牌数的效果。"""
+
+REBEL_REWARD_DRAW = 3
+"""杀死反贼的奖惩摸牌数（规则 4.8；票 14 §4.2）。"""
 
 
 class _Suspend:
@@ -95,12 +100,19 @@ SUSPEND = _Suspend()
 
 
 class Outcome(BaseModel):
-    """终局判定结果；由唯一的 :meth:`Engine.check_game_end` 产出。"""
+    """终局判定结果；由唯一的 :meth:`Engine.check_game_end` 产出。
+
+    ``side`` / ``winners`` 形状统一（票 25 / 决策回票 14 §1）：无身份局填
+    ``side=None``、胜局 ``winners=(获胜座位,)``、平局 ``()``；身份局 ``winner=None``、
+    ``side`` 与 ``winners`` = 获胜一侧的全部座位（**含阵亡者**、按座位升序）。
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     result: Literal["winner", "draw"]
     winner: int | None = None
+    side: Side | None = None
+    winners: tuple[int, ...] = ()
     reason: str
 
 
@@ -208,8 +220,12 @@ class Engine:
         """
 
         self.stack = ResolutionStack()
-        self.steps: StepTable = build_steps()
-        """帧类型 → 步骤表：使用 / 结算的步骤在 :mod:`sgs.engine.steps`。"""
+        self.steps: StepTable = build_steps(state.rule_config.mode)
+        """帧类型 → 步骤表：使用 / 结算的步骤在 :mod:`sgs.engine.steps`。
+
+        死亡段的形状按模式分叉（票 25）：身份局多一段"亮出身份牌前"，
+        无身份局保持 M1 的四段。
+        """
 
         self.pending: Query | None = None
         self.pending_outcome: Outcome | None = None
@@ -219,6 +235,11 @@ class Engine:
         self._started = False
         self._frame_seq = 0
         self._check_seq: int | None = None
+        self._deaths_pending = 0
+        """同批未关闭的死亡单元计数（票 14 §3）：``enter_death`` +1、DEATH 帧出栈 -1。"""
+
+        self._batch_facts: list[DeathFact] = []
+        """本批每次死亡在检测点定格的事实；批次关闭时求解一次，未终局则清空。"""
         self._turn_pc = 0
         self._turn_data: dict[str, Any] = {}
         self._turn_steps: tuple[Callable[[], Any], ...] = (
@@ -327,10 +348,11 @@ class Engine:
     def push_frame(self, kind: FrameKind, data: dict[str, Any], *, timing: Timing) -> Frame:
         """压入一个子帧；``return_to`` 命名式记录"从哪回来"（父帧 kind + 时机 id）。
 
-        胜负检测点之后**拒绝插入任何新结算**（票 13 §3 / 票 04 §5 的压栈守卫）：
+        胜负检测点之后**拒绝插入任何新结算**（票 13 §3 / 票 04 §5 的压栈守卫），
+        **只放行 DEATH 帧**（票 14 §3）：同批的第二次死亡必须能进入，才谈得上"批次末宣布"。
         M1 无技能，实战天然不发生，守卫仍在，使"检测点之后不再开新结算"是结构事实。
         """
-        if self.pending_outcome is not None:
+        if self.pending_outcome is not None and kind is not FrameKind.DEATH:
             raise RuntimeError("胜负已判定：拒绝插入新结算（票 13 §3 / 票 04 §5）")
         parent = self.stack.top if self.stack else None
         return_to = (parent.kind.value, timing.value) if parent is not None else None
@@ -346,11 +368,22 @@ class Engine:
         死亡结算挂在濒死帧之上（官方 `flow/neardeath`：A 死亡后**插入**死亡结算），
         故濒死帧及其下整条伤害链留在栈上，留给终局清栈逐帧记 ``discard``。
         ``alive`` 在检测点之前置假，唯一终局入口据此判"存活角色数 ≤ 1"。
+        进入死亡单元时把同批计数 +1（票 14 §3）：DEATH 帧出栈时 -1，归零即批次关闭。
+
+        ``damage_source`` 是**未经资格检查**的致死来源座位（濒死帧从扣减体力帧带下来）；
+        ``death_before_start`` 再把它定格成 ``killer``（票 14 §4.1）。它放在帧私有载荷里、
+        不进任何 ``timing`` 记录的 ``source``，故记录面一个字节都不动。
         """
         self.state.player(seat).alive = False
+        self._deaths_pending += 1
         return self.push_frame(
             FrameKind.DEATH,
-            {"target": seat, "targets": (seat,), "source": frame.data.get("source")},
+            {
+                "target": seat,
+                "targets": (seat,),
+                "source": frame.data.get("source"),
+                "damage_source": frame.data.get("damage_source"),
+            },
             timing=Timing.DEATH_BEFORE_START,
         )
 
@@ -386,6 +419,96 @@ class Engine:
                 owner=seat,
             )
             self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+
+    def reveal_dead_identity(self, frame: Frame) -> None:
+        """``DEATH_REVEAL_IDENTITY_BEFORE``：亮出阵亡者的身份，发一条 ``identity_reveal``。
+
+        只进身份局的死亡段（票 25）；1v1 的步骤表里没有这一步。主公也照发——
+        它开局已亮明，再发一次只是**形状统一**（票 14 §5）。
+        """
+        seat = frame.data["target"]
+        self.emit_delta(
+            IdentityRevealDelta(seat=seat, identity=self.state.player(seat).identity),
+            frame_id=frame.frame_id,
+            depth=self.stack.depth,
+        )
+
+    def apply_death_rewards(self, frame: Frame) -> None:
+        """``DEATH_ON`` 的 Ⅱ：执行死亡奖惩（票 25 / 决策回票 14 §4.2）。
+
+        奖惩顺序在 Ⅰ（系统处理牌）之后；只进身份局。无来源伤害（闪电）、自杀、
+        失去体力 ⇒ ``killer`` 未定格 ⇒ 无奖惩；killer 已阵亡 ⇒ 跳过（保"阵亡者区域为空"）。
+        杀反贼 ⇒ killer 摸 3 张；主公杀忠臣 ⇒ **主公**弃置自己的手牌 / 装备区 / 判定区
+        （一手 `flow_death.txt`「所有牌」，登记 `R:323` 偏差）。
+        """
+        if self.state.rule_config.mode is not Mode.IDENTITY:
+            return
+        killer = frame.data.get("killer")
+        if killer is None or not self.state.player(killer).alive:
+            return
+        dead = frame.data["target"]
+        dead_identity = self.state.player(dead).identity
+        if dead_identity is Identity.REBEL:
+            self._reward_killer_draws(frame, killer)
+            return
+        if dead_identity is Identity.LOYALIST and self.state.player(killer).identity is Identity.LORD:
+            self._lord_discards_everything(frame, killer)
+
+    def _lord_discards_everything(self, frame: Frame, lord: int) -> None:
+        """主公杀死忠臣：逐来源区（手牌 / 装备区 / 判定区）各一条 ``card_move`` 入弃牌堆。"""
+        ctx = EffectContext(
+            actor=lord,
+            source=lord,
+            targets=(frame.data["target"],),
+            frame_id=frame.frame_id,
+            depth=self.stack.depth,
+        )
+        for source_ref in (
+            ZoneRef(Zone.HAND, lord),
+            ZoneRef(Zone.EQUIP, lord),
+            ZoneRef(Zone.JUDGE, lord),
+        ):
+            card_ids = tuple(self.state.zone(source_ref))
+            if not card_ids:
+                continue
+            delta = move_card(
+                self.state,
+                ctx,
+                self.state.refs(card_ids),
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.DISCARD,
+                owner=lord,
+            )
+            self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+
+    def _reward_killer_draws(self, frame: Frame, killer: int) -> None:
+        """杀死反贼的奖惩摸牌：与摸牌阶段**同一原语、同一洗牌子流**（票 14 §5）。
+
+        短摸（两堆皆空）⇒ 置 ``both_decks_empty`` 平局并**覆盖**已定胜负；
+        摸到几张进几张（可能 0 张、不发 ``card_move``）。
+        """
+        drawn = draw_from_deck(self.state, REBEL_REWARD_DRAW, self._shuffle)
+        if drawn.shuffle is not None:
+            self.emit_delta(drawn.shuffle, frame_id=frame.frame_id, depth=self.stack.depth)
+        if drawn.cards:
+            ctx = EffectContext(
+                actor=killer,
+                source=killer,
+                targets=(frame.data["target"],),
+                frame_id=frame.frame_id,
+                depth=self.stack.depth,
+            )
+            delta = move_card(
+                self.state,
+                ctx,
+                drawn.cards,
+                to_zone=ZoneRef(Zone.HAND, killer),
+                reason=MoveReason.DRAW,
+                owner=killer,
+            )
+            self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+        if len(drawn.cards) < REBEL_REWARD_DRAW:
+            self.check_game_end(draw_reason="both_decks_empty")
 
     def pop_frame(self) -> Frame:
         frame = self.stack.pop()
@@ -683,23 +806,89 @@ class Engine:
     # -- 终局 ---------------------------------------------------------------
 
     def check_game_end(self, *, draw_reason: str | None = None) -> Outcome | None:
-        """唯一终局入口：死亡锚点与牌堆耗尽平局共用（票 13 §3 / 票 08 §6）。"""
+        """唯一终局入口：死亡锚点与牌堆耗尽平局共用（票 13 §3 / 票 08 §6）。
+
+        按 :attr:`RuleConfig.mode` 分支（票 25 / 决策回票 14 §1）：无身份局保持 M1 的
+        "存活数 ≤ 1"；身份局按**本批死亡事实**求解（检测点只置**暂定**结果）。
+        短摸平局覆盖任何已定胜负（票 14 §3）。
+        """
         if draw_reason is not None:
             outcome = Outcome(result="draw", winner=None, reason=draw_reason)
+        elif self.state.rule_config.mode is Mode.IDENTITY:
+            outcome = self._solve_identity()
+            if outcome is None:
+                return None
         else:
             alive = [player.seat for player in self.state.players if player.alive]
             if len(alive) > 1:
                 return None
             if len(alive) == 1:
-                outcome = Outcome(result="winner", winner=alive[0], reason="last_surviving")
+                outcome = Outcome(
+                    result="winner",
+                    winner=alive[0],
+                    winners=(alive[0],),
+                    reason="last_surviving",
+                )
             else:
                 outcome = Outcome(result="draw", winner=None, reason="no_survivor")
         self.pending_outcome = outcome
-        # check_seq = **调用本入口时**最后一条已 emit 记录的序号（票 08 §6）。
-        # 死亡路径上检测点与终止点之间还会 emit 死亡结算的记录，所以必须在此刻定格，
-        # 不能在 finish() 时再取。
-        self._check_seq = self._last_seq
+        # check_seq = **本局第一次成功检测**那条记录的序号（票 08 §6 / 票 14 §3）：
+        # 同批的后续死亡检测不再改写它。死亡路径上检测点与终止点之间还会 emit
+        # 死亡结算的记录，所以必须在此刻定格，不能在 finish() 时再取。
+        if self._check_seq is None:
+            self._check_seq = self._last_seq
         return outcome
+
+    def record_death_fact(self, frame: Frame) -> None:
+        """检测点：把一个 DEATH 帧的死亡事实追加进本批（票 14 §3）。
+
+        由 `DEATH_REVEAL_IDENTITY_AFTER` 的步骤在 :meth:`check_game_end` **之前**显式调用，
+        故"记事实"与"求解"不会被栈顶形状悄悄分开。``snapshot`` = 该死亡瞬间**除死者外**
+        的存活座位集合（死者的 ``alive`` 已在 :meth:`enter_death` 置假）。
+        """
+        if self.state.rule_config.mode is not Mode.IDENTITY:
+            return
+        seat = frame.data["target"]
+        self._batch_facts.append(
+            DeathFact(
+                identity=self.state.player(seat).identity,
+                snapshot=tuple(player.seat for player in self.state.players if player.alive),
+            )
+        )
+
+    def _solve_identity(self) -> Outcome | None:
+        """按当前批次事实 + 当前存活集合求一次身份局胜负。"""
+        victory = solve_identity_outcome(
+            identities=[player.identity for player in self.state.players],
+            facts=self._batch_facts,
+            alive=[player.seat for player in self.state.players if player.alive],
+        )
+        if victory is None:
+            return None
+        return Outcome(
+            result="winner",
+            winner=None,
+            side=victory.side,
+            winners=victory.winners,
+            reason=victory.reason,
+        )
+
+    def _close_death_batch(self) -> None:
+        """终止点：同批最后一次 ``DEATH_AFTER`` 之后宣布胜负（票 14 §3）。
+
+        身份局在这里用**批次末存活集合**重解一次（检测点那次只是暂定）；已置的
+        **平局**不被重解覆盖（短摸平局覆盖已定胜负，票 14 §3）。未达终局则清空本批事实、
+        继续对局。
+        """
+        if self.state.rule_config.mode is Mode.IDENTITY and (
+            self.pending_outcome is None or self.pending_outcome.result == "winner"
+        ):
+            outcome = self._solve_identity()
+            if outcome is not None:
+                self.pending_outcome = outcome
+        if self.pending_outcome is not None:
+            self.finish()
+        self._batch_facts.clear()
 
     def finish(self) -> None:
         """终止点：清栈（逐帧记被丢弃的帧）→ 终局收尾 → 终局记录（流里最后一条）。
@@ -723,6 +912,8 @@ class Engine:
                 seq=self._next_seq(),
                 result=outcome.result,
                 winner=outcome.winner,
+                side=outcome.side,
+                winners=outcome.winners,
                 reason=outcome.reason,
                 check_seq=self._check_seq,
             )
@@ -768,14 +959,12 @@ class Engine:
             popped = self.stack.step(self.steps, self)
             if popped is not None:
                 self._emit_frame("pop", popped)
-            if (
-                popped is not None
-                and popped.kind is FrameKind.DEATH
-                and self.pending_outcome is not None
-            ):
-                # 死亡结算这个**原子单元**跑到了最后一个时机之后：此刻才是终止点
-                # （票 13 §3 / 票 04 §5）。清栈与终局收尾在 finish() 里逐帧记录。
-                self.finish()
+            if popped is not None and popped.kind is FrameKind.DEATH:
+                # DEATH 帧出栈：同批计数 -1；归零即**批次关闭**，此刻才宣布胜负
+                # （票 14 §3）。检测点只置了暂定结果，死亡单元永远原子跑完。
+                self._deaths_pending -= 1
+                if self._deaths_pending == 0:
+                    self._close_death_batch()
             return
         self._step_turn()
 

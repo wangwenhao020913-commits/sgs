@@ -72,6 +72,18 @@ def test_the_renderer_labels_identity_deals_in_chinese():
     assert "身份" in line and "座位=1" in line and "主公" in line
 
 
+def test_the_renderer_labels_identity_reveals_in_chinese():
+    """票 25：阵亡亮明也是 ``delta``，渲染同样不能误落到"洗牌"分支。"""
+    from sgs.data import Identity
+    from sgs.engine import IdentityRevealRecord
+
+    line = render(
+        IdentityRevealRecord(seq=3, frame_id=9, depth=6, seat=2, identity=Identity.REBEL)
+    )
+
+    assert "亮明身份" in line and "座位=2" in line and "反贼" in line
+
+
 def test_unknown_option_is_rejected():
     with pytest.raises(SystemExit):
         main(["--nope"])

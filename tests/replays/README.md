@@ -29,6 +29,10 @@
 - 每条内联牌面多一个 `slot`（装备槽位；`basic_53` 的每张牌都是 `null`），
   `PlayerPublic` 多 `equip` / `judge` / `identity` 三个公开字段（身份只对本人 / 主公 /
   已死亡者可见，其余为 `null`，票 13 §6）；手牌上限仍是**派生函数**，不落字段。
+- 记录流多两个 `delta_type`：`identity_deal`（开局暗发，票 24）与 `identity_reveal`
+  （阵亡亮明，票 25）；`game_end` 多 `side` / `winners` 两个字段——无身份局/平局
+  `side=null`（胜局 `winners=[获胜座位]`、平局 `[]`），身份局 `winner=null`、
+  `side` + `winners` = 获胜一侧全部座位（含阵亡者，票 25 / 决策回票 14）。
 - M1 六条基准的**决策轨迹**摘要冻结在 `tests/test_replays.py::M1_FROZEN_TRAJECTORIES`；
   摘要剔除 v2 新增的牌面事实字段（`slot`）后逐条相等，证明升版没改语义。
 

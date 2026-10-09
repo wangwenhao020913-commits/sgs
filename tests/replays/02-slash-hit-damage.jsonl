@@ -1281,4 +1281,4 @@
 {"depth":1,"frame_id":90,"frame_kind":"RESOLVE","kind":"frame","op":"discard","return_to":["USE","RESOLVE_START"],"seq":1280}
 {"depth":0,"frame_id":89,"frame_kind":"USE","kind":"frame","op":"discard","return_to":null,"seq":1281}
 {"cards":[{"card_id":16,"name":"杀","rank":2,"slot":null,"suit":"club","type":"slash"}],"delta_type":"card_move","depth":0,"frame_id":0,"from_zone":{"seat":null,"zone":"processing"},"kind":"delta","owner":null,"reason":"USE","seq":1282,"to_zone":{"seat":null,"zone":"discard"}}
-{"check_seq":1272,"kind":"game_end","reason":"last_surviving","result":"winner","seq":1283,"winner":1}
+{"check_seq":1272,"kind":"game_end","reason":"last_surviving","result":"winner","seq":1283,"side":null,"winner":1,"winners":[1]}

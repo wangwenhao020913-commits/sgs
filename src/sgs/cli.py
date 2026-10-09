@@ -113,6 +113,11 @@ def render(record: JournalRecord) -> str:
                 f"#{record.seq:<4} 身份 座位={record.seat} "
                 f"{IDENTITY_LABELS[record.identity]}"
             )
+        if record.delta_type == "identity_reveal":
+            return (
+                f"#{record.seq:<4} 亮明身份 座位={record.seat} "
+                f"{IDENTITY_LABELS[record.identity]}"
+            )
         return f"#{record.seq:<4} 洗牌 {_zone_label(record.from_zone)}→牌堆 {_cards(record.cards)}"
     if kind == "query":
         candidates = "、".join(action.kind for action in record.query.legal_actions)
@@ -129,8 +134,14 @@ def render(record: JournalRecord) -> str:
             f"#{record.seq:<4} 帧 {record.op} {record.frame_kind.value} "
             f"id={record.frame_id} 深度={record.depth}{label}"
         )
+    winners = "、".join(str(seat) for seat in record.winners)
+    if record.side is not None:
+        # 身份局没有单一获胜座位：读获胜方 + 该侧全部座位（含阵亡者，票 25）。
+        who = f"胜方={record.side} 获胜者=[{winners}]"
+    else:
+        who = f"胜者={record.winner} 获胜者=[{winners}]"
     return (
-        f"#{record.seq:<4} 终局 结果={record.result} 胜者={record.winner} "
+        f"#{record.seq:<4} 终局 结果={record.result} {who} "
         f"原因={record.reason} 检测点序号={record.check_seq}"
     )
 

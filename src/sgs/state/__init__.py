@@ -9,6 +9,7 @@ from .deltas import (
     Delta,
     HpChangeDelta,
     IdentityDealDelta,
+    IdentityRevealDelta,
 )
 from .models import (
     CardRef,
@@ -54,6 +55,7 @@ __all__ = (
     "GameState",
     "HpChangeDelta",
     "IdentityDealDelta",
+    "IdentityRevealDelta",
     "MoveReason",
     "Pass",
     "PeachQuery",

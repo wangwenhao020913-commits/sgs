@@ -208,6 +208,9 @@ def test_the_game_end_record_is_last_and_carries_the_check_point_seq():
     assert tail.check_seq == reveal.seq, "带胜负检测点（DEATH_REVEAL_IDENTITY_AFTER）那条记录的序号"
     assert tail.result == "winner"
     assert tail.winner == 0, "1v1：一方阵亡即另一方获胜"
+    assert (tail.side, tail.winners) == (None, (0,)), (
+        "票 25：无身份局形状统一——side=None、winners=(获胜座位,)"
+    )
 
 
 def test_identity_fields_stay_in_state_but_do_not_take_part_in_the_verdict():

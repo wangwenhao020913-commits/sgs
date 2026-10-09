@@ -1,8 +1,8 @@
 """变化事件（delta）的载荷类型：一次状态变化的纯事实（票 06 §2 / §3）。
 
-四种 ``delta_type``（``card_move`` / ``hp_change`` / ``deck_shuffle`` / ``identity_deal``）：
-它们是记录流 schema 的一部分，后补会动事件版本，所以即使 M1 的骨架期只用得到
-``card_move`` 也先建位。记录层（``engine``）在这些模型上**继承**出带
+五种 ``delta_type``（``card_move`` / ``hp_change`` / ``deck_shuffle`` / ``identity_deal`` /
+``identity_reveal``）：它们是记录流 schema 的一部分，后补会动事件版本，所以即使 M1 的
+骨架期只用得到 ``card_move`` 也先建位。记录层（``engine``）在这些模型上**继承**出带
 ``seq`` / ``frame_id`` / ``depth`` 的记录子类，从而 JSON 是平铺的。
 """
 
@@ -22,6 +22,7 @@ __all__ = [
     "Delta",
     "HpChangeDelta",
     "IdentityDealDelta",
+    "IdentityRevealDelta",
 ]
 
 
@@ -79,7 +80,20 @@ class IdentityDealDelta(_FrozenModel):
     identity: Identity
 
 
+class IdentityRevealDelta(_FrozenModel):
+    """一个座位阵亡时亮明身份（票 25 / 决策回票 14 §5）：死亡结算内、检测之前逐座一条。
+
+    与 :class:`IdentityDealDelta` 同形但语义不同——发放是开局**暗发**（逐座落在发牌前），
+    亮明是阵亡**公开**（`DEATH_REVEAL_IDENTITY_BEFORE` 的时机 dispatch 之后）。身份不是牌：
+    不进 ``cards``、不占牌守恒，与 :class:`MoveReason` 无关。
+    """
+
+    delta_type: Literal["identity_reveal"] = "identity_reveal"
+    seat: int
+    identity: Identity
+
+
 Delta = Annotated[
-    CardMoveDelta | HpChangeDelta | DeckShuffleDelta | IdentityDealDelta,
+    CardMoveDelta | HpChangeDelta | DeckShuffleDelta | IdentityDealDelta | IdentityRevealDelta,
     Field(discriminator="delta_type"),
 ]
