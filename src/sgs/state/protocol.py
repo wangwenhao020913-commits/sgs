@@ -33,8 +33,10 @@ from .models import CardRef, Phase, Zone, ZoneRef, _FrozenModel
 
 __all__ = [
     "Action",
+    "ActivateSkill",
     "DiscardCards",
     "DiscardQuery",
+    "DodgeContext",
     "DodgeQuery",
     "EndPhase",
     "Pass",
@@ -51,7 +53,12 @@ __all__ = [
     "SelectCards",
     "SelectCardsQuery",
     "SelectContext",
+    "SelectOption",
+    "SelectOptionContext",
+    "SelectOptionQuery",
     "SelectionSpec",
+    "SkillActivationContext",
+    "SkillActivationQuery",
     "Slot",
     "UseCard",
     "WindowCause",
@@ -60,10 +67,10 @@ __all__ = [
 
 
 class QueryKind(str, Enum):
-    """六类询问的标识；候选生成器按它分派（票 05 §1 / 票 19 §1）。
+    """八类询问的标识；候选生成器按它分派（票 05 §1 / 票 19 §1 / 票 12 §Q6）。
 
-    M1 四类一字不改；票 27 落 ``RESPOND`` / ``SELECT_CARDS`` 两类。
-    ``SKILL_ACTIVATION`` / ``SELECT_OPTION`` 归 M2 的装备技能票（29 / 30）。
+    M1 四类一字不改；票 27 落 ``RESPOND`` / ``SELECT_CARDS``；票 30 落
+    ``SKILL_ACTIVATION``（"是否发动"）与 ``SELECT_OPTION``（二选一，选择权在目标）。
     """
 
     PLAY_PHASE = "PLAY_PHASE"
@@ -72,6 +79,8 @@ class QueryKind(str, Enum):
     DISCARD = "DISCARD"
     RESPOND = "RESPOND"
     SELECT_CARDS = "SELECT_CARDS"
+    SKILL_ACTIVATION = "SKILL_ACTIVATION"
+    SELECT_OPTION = "SELECT_OPTION"
 
 
 class WindowCause(str, Enum):
@@ -126,7 +135,11 @@ class SelectionSpec(_FrozenModel):
 
 @dataclass(frozen=True, slots=True)
 class RespondContext:
-    """``RESPOND`` 候选生成的类型化载荷（票 19 §4 的 ``payload``）。"""
+    """``RESPOND`` 候选生成的类型化载荷（票 19 §4 的 ``payload``）。
+
+    ``providers_used`` 只在"需要【闪】"的响应窗口里用（票 10 §5.5 / 票 30）：把它记的
+    技能 id 从候选里去掉，实现"每提供者只问一次"。
+    """
 
     cause: WindowCause
     required: str | None = None
@@ -134,6 +147,7 @@ class RespondContext:
     window_frame: int = 0
     mode: RespondMode = RespondMode.PLAY
     use_targets: tuple[int, ...] = ()
+    providers_used: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +156,41 @@ class SelectContext:
 
     spec: SelectionSpec
     slots: tuple[Slot, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DodgeContext:
+    """``DODGE`` 候选生成的类型化载荷（票 30）：本次"需要【闪】"里已问过的提供者 id。
+
+    "每提供者只问一次"（票 10 §5）：【八卦阵】判定未通过后，再次询问同一个"需要【闪】"
+    的窗口时必须不再提供它。载荷只装**已经问过**的技能 id，候选生成器据此过滤。
+    """
+
+    providers_used: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SkillActivationContext:
+    """``SKILL_ACTIVATION`` 候选生成的类型化载荷（票 19 §5 / 票 30）。
+
+    发动 = **一次询问**：``optional`` 决定候选里有没有 ``Pass``（"可以 / 必须"是效果属性，
+    与 ``locked`` 正交）；``picks`` 型载荷（【贯石斧】弃两张）把面内位置烘进候选，
+    **付不起的组合不进候选**（池 < ``min_picks`` ⇒ 候选为空 ⇒ 不构造询问）。
+    """
+
+    skill_id: str
+    optional: bool = True
+    min_picks: int = 0
+    max_picks: int = 0
+    slots: tuple[Slot, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SelectOptionContext:
+    """``SELECT_OPTION`` 候选生成的类型化载荷（票 12 §Q6 / 票 30）：选项 id 闭集。"""
+
+    skill_id: str
+    options: tuple[str, ...]
 
 
 class PlayerPublic(_FrozenModel):
@@ -227,8 +276,32 @@ class SelectCards(_ActionBase):
     picks: tuple[int, ...]
 
 
+class ActivateSkill(_ActionBase):
+    """发动一个技能（票 19 §2 / 票 30）：载荷（选项 / 面内位置）**烘进候选**。
+
+    ``choices`` 是选项 id（一次性的"二选一"类），``picks`` 是面内位置（成本类载荷，
+    如【贯石斧】的两张牌）。两者都在**构造候选时**就付得起才出现，故不存在
+    "答了发动才发现付不起"的中间态。
+
+    M2 的唯一"二选一"生产者【雌雄双股剑】的**选择权在目标**，故它走独立的
+    ``SELECT_OPTION`` 询问（票 12 §Q6），``choices`` 是留给 M3 "由发动者自己选"的接口位。
+    """
+
+    kind: Literal["ActivateSkill"] = "ActivateSkill"
+    skill_id: str
+    choices: tuple[str, ...] = ()
+    picks: tuple[int, ...] = ()
+
+
+class SelectOption(_ActionBase):
+    """在**选项闭集**里挑一个（票 12 §Q6）：【雌雄双股剑】的二选一，选择权在**目标**。"""
+
+    kind: Literal["SelectOption"] = "SelectOption"
+    choice: str
+
+
 Action = Annotated[
-    UseCard | Pass | EndPhase | DiscardCards | PlayCard | SelectCards,
+    UseCard | Pass | EndPhase | DiscardCards | PlayCard | SelectCards | ActivateSkill | SelectOption,
     Field(discriminator="kind"),
 ]
 
@@ -301,7 +374,33 @@ class SelectCardsQuery(_QueryBase):
     slots: tuple[Slot, ...]
 
 
+class SkillActivationQuery(_QueryBase):
+    """是否发动（票 19 §5 / 票 30）：载荷（选项 / 成本面）随询问一并给出。"""
+
+    kind: Literal["SKILL_ACTIVATION"] = "SKILL_ACTIVATION"
+    skill_id: str
+    optional: bool = True
+    min_picks: int = 0
+    max_picks: int = 0
+    slots: tuple[Slot, ...] = ()
+
+
+class SelectOptionQuery(_QueryBase):
+    """选项二选一（票 12 §Q6 / 票 30）：生产者 = 【雌雄双股剑】，选择权在**目标**。"""
+
+    kind: Literal["SELECT_OPTION"] = "SELECT_OPTION"
+    skill_id: str
+    options: tuple[str, ...]
+
+
 Query = Annotated[
-    PlayPhaseQuery | DodgeQuery | PeachQuery | DiscardQuery | RespondQuery | SelectCardsQuery,
+    PlayPhaseQuery
+    | DodgeQuery
+    | PeachQuery
+    | DiscardQuery
+    | RespondQuery
+    | SelectCardsQuery
+    | SkillActivationQuery
+    | SelectOptionQuery,
     Field(discriminator="kind"),
 ]

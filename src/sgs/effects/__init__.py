@@ -43,6 +43,7 @@ from .behaviors import (
     behavior_for,
 )
 from .modifiers import (
+    CandidateScope,
     CarrierKind,
     Modifier,
     ModifierContext,
@@ -74,6 +75,7 @@ __all__ = (
     "CallOp",
     "CardBehavior",
     "CarrierKind",
+    "CandidateScope",
     "DamageNature",
     "DrawResult",
     "EffectContext",

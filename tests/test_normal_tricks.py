@@ -181,7 +181,8 @@ def _resolve_frame_id(engine: Engine) -> int:
 # ---------------------------------------------------------------------------
 
 
-def test_the_six_query_kinds_and_the_window_causes_are_defined():
+def test_the_eight_query_kinds_and_the_window_causes_are_defined():
+    """票 30 把 ``QueryKind`` 从 6 类扩到 8 类（+ 发动 / 选项），M1 四类与票 27 两类不动。"""
     assert {kind.value for kind in QueryKind} == {
         "PLAY_PHASE",
         "DODGE",
@@ -189,6 +190,8 @@ def test_the_six_query_kinds_and_the_window_causes_are_defined():
         "DISCARD",
         "RESPOND",
         "SELECT_CARDS",
+        "SKILL_ACTIVATION",
+        "SELECT_OPTION",
     }
     assert {cause.value for cause in WindowCause} == {
         "NULLIFY",

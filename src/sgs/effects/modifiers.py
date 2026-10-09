@@ -10,7 +10,7 @@
 是因为 M2 真有两处多来源合成——**距离**（目标 +1 坐骑、自身 −1 坐骑，属不同角色）与
 **青釭剑 × 仁王盾**（顺序与可抑制，票 30）。
 
-"谁持有哪一份"由 :func:`sgs.skills.carried_skills` 解析（载体 = 装备区）；本模块只在
+"谁持有哪一份"由 :func:`sgs.skills.resolve_instances` 解析（载体 = 装备区）；本模块只在
 **函数体内**延迟导入它——与 ``data/loader.py`` 调 ``effects`` / ``skills`` 同姿态：
 模块级不建立反向依赖，运行期调用发生在两个模块都已加载之后。
 """
@@ -18,13 +18,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum, IntEnum
 from typing import Any, TypeAlias
 
-from sgs.state import CardRef, GameState
+from sgs.state import CardRef, GameState, RespondMode
 
 __all__ = [
+    "CandidateScope",
     "CarrierKind",
     "Modifier",
     "ModifierContext",
@@ -34,6 +35,21 @@ __all__ = [
     "apply_modifiers",
     "priority_class_of",
 ]
+
+
+class CandidateScope(str, Enum):
+    """一次 ``CANDIDATES`` 派发发生在哪种"需要牌"语境（票 30）。
+
+    ``CARD`` = 逐张牌的常规候选（M1 姿态、``ctx.card`` 非空）；``PLAY`` / ``DODGE`` /
+    ``RESPOND`` = 整段候选期的**通用追加**（虚拟牌不绑实体手牌）。用枚举而不是裸字符串：
+    写入端（``effects/actions.py``）与读取端（``skills/catalog.py``）共享同一个闭集，
+    新增语境只改这一处。
+    """
+
+    CARD = "CARD"
+    PLAY = "PLAY"
+    DODGE = "DODGE"
+    RESPOND = "RESPOND"
 
 
 class CarrierKind(str, Enum):
@@ -111,6 +127,17 @@ class ModifierContext:
     ``pool`` / ``rated_targets`` 只给 ``CANDIDATES`` 挂点用：候选生成时把**已过
     TARGET_POOL 的目标池**与**本牌额定目标数**一并交给回调，回调便不必回头 import
     行为表（那会与 ``effects`` 成环），"额外目标过同一套合法性检测"由共用同一个池保证。
+
+    票 30 追加四样**派发期载荷**（都由 :func:`apply_modifiers` 或调用点填写）：
+
+    - ``skill_id``：当前这条修饰器属于哪个技能实例——【八卦阵】把候选的"提供者 id"
+      写进 ``ActivateSkill``，回调自己得知道它；
+    - ``answers_seq``：候选生成时的询问序号，回调造行动要用它（候选构造子必带）；
+    - ``providers_used``：本次"需要牌"流程里**已经问过**的提供者 id——"每提供者只问
+      一次"据此实现；
+    - ``flags``：链**内部**的旁路标志（【青釭剑】置 ``ignore_armor``、【仁王盾】读它）。
+      它是同一次查询里的临时便签，不是状态；用可变 ``dict`` 让链上先跑的回调能影响
+      后跑的回调（链序 = ``(priority_class, skill_id)``，青釭剑在仁王盾之前）。
     """
 
     subject: int
@@ -120,6 +147,19 @@ class ModifierContext:
     owner: int = -1
     pool: tuple[int, ...] = ()
     rated_targets: int = 0
+    skill_id: str = ""
+    answers_seq: int = 0
+    providers_used: tuple[str, ...] = ()
+    scope: CandidateScope = CandidateScope.CARD
+    """候选生成发生在哪种"需要牌"语境（见 :class:`CandidateScope`）。
+
+    ``CANDIDATES`` 回调据此分流（【丈八蛇矛】只在出牌 / 需要【杀】的响应里追加，
+    【八卦阵】只在需要【闪】的窗口里追加）；``CANDIDATE`` = 逐张牌的常规候选。
+    """
+    respond_required: str | None = None
+    respond_mode: RespondMode | None = None
+    respond_targets: tuple[int, ...] = ()
+    flags: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,15 +175,19 @@ def apply_modifiers(
 ) -> Any:
     """在 ``point`` 挂点上跑**链式管道**：``current`` 逐条交给命中的回调，返回终值。
 
-    链序 = ``(priority_class, skill_id, owner)``（由 :func:`sgs.skills.carried_skills`
+    链序 = ``(priority_class, skill_id, owner)``（由 :func:`sgs.skills.resolve_instances`
     排好）；``ctx.owner`` 在派发时按当前实例填写，回调据此判定"本实例是否作用于本次
     查询"。没有命中任何修饰器时**原样返回**（故 `basic_53` 的 M1 行为逐字节不变）。
     """
-    from sgs.skills import carried_skills
+    from sgs.skills import resolve_instances
 
     value = current
-    for owner, definition in carried_skills(state):
-        for modifier in definition.modifiers:
+    for instance in resolve_instances(state):
+        for modifier in instance.definition.modifiers:
             if modifier.point is point:
-                value = modifier.handler(state, replace(ctx, owner=owner), value)
+                value = modifier.handler(
+                    state,
+                    replace(ctx, owner=instance.owner, skill_id=instance.skill_id),
+                    value,
+                )
     return value

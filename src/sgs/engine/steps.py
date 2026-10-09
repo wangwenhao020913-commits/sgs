@@ -42,9 +42,11 @@ from sgs.effects import (
     target_is_effective,
 )
 from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable
-from sgs.skills import rejudge_capable_seats
+from sgs.skills import SeamKind, rejudge_capable_seats, virtual_dodge
 from sgs.state import (
+    ActivateSkill,
     CardRef,
+    DodgeContext,
     FrameKind,
     GameState,
     QueryKind,
@@ -110,8 +112,18 @@ class FrameHost(StepHost, Protocol):
 
     def push_frame(self, kind: FrameKind, data: dict[str, Any], *, timing: Timing) -> Frame: ...
 
+    def dispatch_seam(self, frame: Frame, kind: SeamKind) -> Any: ...
+
+    def open_skill_judgment(self, frame: Frame, subject: int, skill_id: str) -> None: ...
+
     def ask_query(
-        self, kind: QueryKind, actor: int, timing: Timing, *, dying: int | None = None
+        self,
+        kind: QueryKind,
+        actor: int,
+        timing: Timing,
+        *,
+        dying: int | None = None,
+        payload: Any = None,
     ) -> Any: ...
 
     def ask_respond(
@@ -159,13 +171,16 @@ def _emit(
     actor: int | None = None,
     cards: Sequence[CardRef] = (),
     targets: tuple[int, ...] | None = None,
-) -> None:
+) -> Control:
     """以 ``frame`` 为主体 dispatch 一个时机；``targets`` 缺省取帧的目标列表。
 
     C 段的时机记录按票 11 §3.3 取**当前目标**（``targets[cursor]``），故调用点显式给
     ``targets``；空目标的响应牌（【闪】/【无懈】）沿用空元组，与 M1 记录流一字不差。
+
+    返回 ``Control``（票 19 §8 / 票 30）：装备钩子可以在这里暂停去提问，步骤函数必须
+    把返回值**原样透传**——``"stay"`` = 本次时机没派完，重入时从这里接着跑。
     """
-    host.emit_frame_timing(frame, timing, actor=actor, cards=cards, targets=targets)
+    return host.emit_frame_timing(frame, timing, actor=actor, cards=cards, targets=targets)
 
 
 def _current_target(host: FrameHost, frame: Frame) -> int:
@@ -173,11 +188,11 @@ def _current_target(host: FrameHost, frame: Frame) -> int:
     return host.current_target(frame)
 
 
-def _resolve_emit(host: FrameHost, frame: Frame, timing: Timing) -> None:
+def _resolve_emit(host: FrameHost, frame: Frame, timing: Timing) -> Control:
     """C 段时机的统一发射口：actor = 当前目标、``targets`` = 当前目标（空目标时空元组）。"""
     targets = tuple(frame.data.get("targets", ()))
     current = _current_target(host, frame)
-    _emit(
+    return _emit(
         host,
         frame,
         timing,
@@ -189,21 +204,24 @@ def _resolve_emit(host: FrameHost, frame: Frame, timing: Timing) -> None:
 # ---- USE 帧：L4 六个时机 + 压入 RESOLVE + L5.6 ----------------------------
 
 
-def use_choose_target(host: FrameHost, frame: Frame) -> None:
-    _emit(host, frame, Timing.USE_CHOOSE_TARGET, actor=frame.data["source"])
+def use_choose_target(host: FrameHost, frame: Frame) -> Control:
+    control = _emit(host, frame, Timing.USE_CHOOSE_TARGET, actor=frame.data["source"])
+    if control is not None:
+        return control
     # 实体牌离开手牌、进入处理区：发生在 L4.1 与 L4.2 之间（票 07 §3）。
     host.move_used_card_to_processing(frame)
+    return None
 
 
-def use_on_use(host: FrameHost, frame: Frame) -> None:
-    _emit(host, frame, Timing.USE_ON_USE, actor=frame.data["source"])
+def use_on_use(host: FrameHost, frame: Frame) -> Control:
+    return _emit(host, frame, Timing.USE_ON_USE, actor=frame.data["source"])
 
 
-def use_designate_target(host: FrameHost, frame: Frame) -> None:
-    _emit(host, frame, Timing.USE_DESIGNATE_TARGET, actor=frame.data["source"])
+def use_designate_target(host: FrameHost, frame: Frame) -> Control:
+    return _emit(host, frame, Timing.USE_DESIGNATE_TARGET, actor=frame.data["source"])
 
 
-def use_become_target(host: FrameHost, frame: Frame) -> None:
+def use_become_target(host: FrameHost, frame: Frame) -> Control:
     """"成为目标时"：**时机外层、目标内层**（`A/flow_use.txt:46`）。
 
     多目标时逐个目标各发一条；空目标的响应牌（【闪】/【无懈】）沿用 M1 的
@@ -211,22 +229,27 @@ def use_become_target(host: FrameHost, frame: Frame) -> None:
     """
     targets = tuple(frame.data["targets"])
     if not targets:
-        _emit(host, frame, Timing.USE_BECOME_TARGET, actor=None)
-        return
+        return _emit(host, frame, Timing.USE_BECOME_TARGET, actor=None)
     for target in targets:
-        _emit(host, frame, Timing.USE_BECOME_TARGET, actor=target)
+        control = _emit(host, frame, Timing.USE_BECOME_TARGET, actor=target)
+        if control is not None:
+            return control
+    return None
 
 
 def use_after_designate_target(host: FrameHost, frame: Frame) -> Control:
     """"指定目标后"：目标已定、不再改变（`A/flow_use.txt:39`）。
 
-    票 27 在这里跑本牌的 ``timing_ops``（【五谷丰登】的"亮出 X 张"）；若那次动作没
-    完整执行（牌不够），**终止这次使用结算**、直奔"使用结算结束后"（不判平局）。
-    时机记录只在首次进入时发一次——``timing_ops`` 将来若中途提问，重入不会重复记录。
+    票 27 在这里跑本牌的 ``timing_ops``（【五谷丰登】的"亮出 X 张"）；票 30 在这里派发
+    装备钩子（【雌雄双股剑】）。若那次动作没完整执行（牌不够），**终止这次使用结算**、
+    直奔"使用结算结束后"（不判平局）。
+
+    时机记录的幂等由 ``emit_frame_timing`` 的帧内键保证（钩子可能提问暂停），故这里
+    不再自设 "emitted" 守卫——否则重入会跳过派发、钩子永远接不上。
     """
-    if not frame.data.get("after_designate_emitted"):
-        _emit(host, frame, Timing.USE_AFTER_DESIGNATE_TARGET, actor=frame.data["source"])
-        frame.data["after_designate_emitted"] = True
+    control = _emit(host, frame, Timing.USE_AFTER_DESIGNATE_TARGET, actor=frame.data["source"])
+    if control is not None:
+        return control
     control = host.apply_timing_ops(frame, Timing.USE_AFTER_DESIGNATE_TARGET)
     if control is not None:
         return control
@@ -235,14 +258,16 @@ def use_after_designate_target(host: FrameHost, frame: Frame) -> Control:
     return None
 
 
-def use_after_become_target(host: FrameHost, frame: Frame) -> None:
+def use_after_become_target(host: FrameHost, frame: Frame) -> Control:
     """"成为目标后"：同 B4，时机外层、目标内层；空目标沿用单条 ``actor = None``。"""
     targets = tuple(frame.data["targets"])
     if not targets:
-        _emit(host, frame, Timing.USE_AFTER_BECOME_TARGET, actor=None)
-        return
+        return _emit(host, frame, Timing.USE_AFTER_BECOME_TARGET, actor=None)
     for target in targets:
-        _emit(host, frame, Timing.USE_AFTER_BECOME_TARGET, actor=target)
+        control = _emit(host, frame, Timing.USE_AFTER_BECOME_TARGET, actor=target)
+        if control is not None:
+            return control
+    return None
 
 
 def use_push_resolve(host: FrameHost, frame: Frame) -> Control:
@@ -283,7 +308,7 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
             host.move_used_card_to_equip_zone(frame)
         else:
             host.move_processing_card_to_discard(frame)
-        _emit(
+        control = _emit(
             host,
             frame,
             Timing.RESOLVE_AFTER_END,
@@ -291,6 +316,8 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
             cards=(frame.data["card"],),
         )
         frame.data["after_end_done"] = True
+        if control is not None:
+            return control
     return host.apply_timing_ops(frame, Timing.RESOLVE_AFTER_END)
 
 
@@ -322,13 +349,15 @@ def resolve_start(host: FrameHost, frame: Frame) -> Control:
     """
     targets = tuple(frame.data["targets"])
     current = _current_target(host, frame)
-    _emit(
+    control = _emit(
         host,
         frame,
         Timing.RESOLVE_START,
         actor=frame.data["source"],
         targets=(current,) if targets else (),
     )
+    if control is not None:
+        return control
     if targets and not target_is_effective(
         host.state, frame.data["card"], frame.data["source"], current
     ):
@@ -339,54 +368,107 @@ def resolve_start(host: FrameHost, frame: Frame) -> Control:
 def resolve_before_effect(host: FrameHost, frame: Frame) -> Control:
     """**生效前**（C2）：按行为表的 ``response_window`` 分派响应窗口（票 11 §7 / 票 28）。
 
-    - ``DODGE``：【杀】的【闪】窗口——M1 的询问与记录形状一字不动；
+    - ``DODGE``：【杀】的【闪】窗口——M1 的询问与记录形状一字不动，票 30 在其候选里
+      追加【八卦阵】的 "是否发动"；
     - ``NULLIFY``：锦囊的**收集式**无懈窗口——全体存活每人每层一次，收齐后只有
       优先级最高者实际使用；被抵消与否由子帧**出栈时**传播回来（票 11 §2）；
     - ``None``：不开窗口，照记时机后继续。
 
     重入次序是本步的关键：窗口期间本帧一直**挂起**在 C2，故子帧出栈时传播来的
-    ``canceled`` 一定在下次重入可见（票 11 §2 的"出栈序即自底向上序"）。
+    ``canceled`` 一定在下次重入可见（票 11 §2 的"出栈序即自底向上序"）。被【闪】抵消
+    之后，票 30 的**帧内接缝**（【青龙偃月刀】/【贯石斧】）在这里派发。
     """
     if frame.data.get("use_timing") is Timing.NEAR_DEATH_AT:
         # 濒死求桃建立的使用：回复结算已由求桃窗口显式压好（票 21），故跳过
         # "生效时 / 生效后"（`Goto` 而不是 `None`——`None` 只表示"这一步做完了"，
         # 会顺着 pc 走进效果步骤，回复就被写第二遍）。
-        _emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT, actor=frame.data["source"])
+        control = _emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT, actor=frame.data["source"])
+        if control is not None:
+            return control
         frame.data["canceled"] = False
         return Goto(RESOLVE_END_PC)
     if "canceled" in frame.data:
         # 本目标的响应窗口已经处理过：**按 canceled 标志**决定去向（票 07 §3）。
         # 无懈的成功与否由出栈传播写进来，故这条分支也是无懈的出口。
+        if frame.data["canceled"]:
+            control = _slash_canceled_seam(host, frame)
+            if control is not None:
+                return control
+            if frame.data.pop("axe_saved", False):
+                # 【贯石斧】"依然造成伤害"：跳过"生效前 / 生效时"，直进"生效后"
+                # （票 12 Q16 / 票 30）。
+                return Goto(RESOLVE_AFTER_EFFECT_PC)
         return Goto(RESOLVE_END_PC) if frame.data["canceled"] else None
     behavior = behavior_for(frame.data["card"])
     window = behavior.response_window
     if window is None or (window is ResponseWindow.DODGE and not frame.data["targets"]):
-        _emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT, actor=frame.data["source"])
+        control = _emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT, actor=frame.data["source"])
+        if control is not None:
+            return control
         frame.data["canceled"] = False
         return None
     target = _current_target(host, frame)
-    _open_response_window(host, frame)
+    control = _open_response_window(host, frame)
+    if control is not None:
+        return control
     if window is ResponseWindow.DODGE:
         return _dodge_window(host, frame, target)
     return _collected_response_window(host, frame, target)
 
 
-def _open_response_window(host: FrameHost, frame: Frame) -> None:
-    """在"生效前"发**一次**时机记录：响应窗口的开窗点（两种窗口共用）。
+def _slash_canceled_seam(host: FrameHost, frame: Frame) -> Control:
+    """【杀】被抵消时的**帧内接缝**（票 12 §Q12 / 票 30）。
 
-    记录形态与 C3–C5 同口径：``actor`` = 当前目标、``targets`` = ``(当前目标,)``
-    （空目标时为空元组，票 11 §3.3），故多目标锦囊的每个目标各有一条自己的 C2 记录。
+    ``Timing`` 里没有"杀被抵消时"节点，故键是 :class:`~sgs.skills.SeamKind`；接缝只在
+    **被【闪】抵消的【杀】**上开，且提供者（青龙偃月刀 / 贯石斧）互斥（同为武器槽）。
     """
+    card = frame.data.get("card")
+    if card is None or card.type != "slash":
+        return None
+    return host.dispatch_seam(frame, SeamKind.SLASH_CANCELED)
+
+
+def _open_response_window(host: FrameHost, frame: Frame) -> Control:
+    """在"生效前"发**一次**时机记录：响应窗口的开窗点（两种窗口共用）。"""
     if frame.data.get("window_open"):
-        return
-    _resolve_emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT)
+        return None
+    control = _resolve_emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT)
+    if control is not None:
+        return control
     frame.data["window_open"] = True
+    return None
 
 
 def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
-    """【闪】响应窗口（M1 语义一字不动）：一次询问、出闪即抵消，【闪】自己照走 L4 / L5。"""
-    action = host.ask_query(QueryKind.DODGE, target, Timing.RESOLVE_BEFORE_EFFECT)
+    """【闪】响应窗口：真牌窗口 + "需要牌"提供者序列（票 10 §5 / 票 30）。
+
+    - 提供者（【八卦阵】）在候选里以 ``ActivateSkill`` 出现；选中即**惰性压判定帧**，
+      红 ⇒ 需要被满足（记为"视为使用【闪】"）、黑 ⇒ 该提供者机会用尽、重问真牌窗口。
+    - 真【闪】⇒ 抵消，【闪】自己照走 L4 / L5（M1 语义）。
+    """
+    if "skill_result" in frame.data:
+        success = frame.data.pop("skill_result")
+        if success:
+            frame.data["canceled"] = True
+            host.start_use(
+                virtual_dodge(host.state),
+                source=target,
+                targets=(),
+                use_timing=Timing.RESOLVE_BEFORE_EFFECT,
+            )
+            return "stay"
+    providers_used = tuple(frame.data.get("providers_used", ()))
+    action = host.ask_query(
+        QueryKind.DODGE,
+        target,
+        Timing.RESOLVE_BEFORE_EFFECT,
+        payload=DodgeContext(providers_used=providers_used),
+    )
     if host.suspended(action):
+        return "stay"
+    if isinstance(action, ActivateSkill):
+        frame.data.setdefault("providers_used", []).append(action.skill_id)
+        host.open_skill_judgment(frame, target, action.skill_id)
         return "stay"
     frame.data["canceled"] = isinstance(action, UseCard)
     if frame.data["canceled"]:
@@ -451,8 +533,8 @@ def _collected_response_window(host: FrameHost, frame: Frame, target: int) -> Co
     return "stay"
 
 
-def resolve_effect(host: FrameHost, frame: Frame) -> None:
-    _resolve_emit(host, frame, Timing.RESOLVE_EFFECT)
+def resolve_effect(host: FrameHost, frame: Frame) -> Control:
+    return _resolve_emit(host, frame, Timing.RESOLVE_EFFECT)
 
 
 def resolve_after_effect(host: FrameHost, frame: Frame) -> Control:
@@ -462,15 +544,17 @@ def resolve_after_effect(host: FrameHost, frame: Frame) -> Control:
     使"提问让出控制权"与"压子帧"都能从这里原地恢复（票 19 §8）。
     """
     if not frame.data.get("after_effect_emitted"):
-        _resolve_emit(host, frame, Timing.RESOLVE_AFTER_EFFECT)
+        control = _resolve_emit(host, frame, Timing.RESOLVE_AFTER_EFFECT)
+        if control is not None:
+            return control
         frame.data["after_effect_emitted"] = True
     return host.apply_effects(
         frame, behavior_for(frame.data["card"]).effects, timing=Timing.RESOLVE_AFTER_EFFECT
     )
 
 
-def resolve_end(host: FrameHost, frame: Frame) -> None:
-    _resolve_emit(host, frame, Timing.RESOLVE_END)
+def resolve_end(host: FrameHost, frame: Frame) -> Control:
+    return _resolve_emit(host, frame, Timing.RESOLVE_END)
 
 
 def resolve_advance(host: FrameHost, frame: Frame) -> Control:
@@ -494,11 +578,18 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
     "after_effect_emitted",
     "effect_pc",
     "asks",
+    "ask_answers",
     "op",
     "response_askers",
     "response_next",
     "response_declared",
     "response_used",
+    "providers_used",
+    "skill_result",
+    "axe_saved",
+    "axe_used",
+    "gdb_used",
+    "_pending_timing",
 )
 """**逐目标分槽**的帧私有键：游标推进时必须整体清掉（票 11 §3.2）。
 
@@ -530,6 +621,9 @@ RESOLVE_START_PC = _pc_of(RESOLVE_STEPS, Timing.RESOLVE_START)
 RESOLVE_END_PC = _pc_of(RESOLVE_STEPS, Timing.RESOLVE_END)
 """C5"使用结算结束时"：被抵消时 Goto 到这里（跳过生效时 / 生效后）。"""
 
+RESOLVE_AFTER_EFFECT_PC = _pc_of(RESOLVE_STEPS, Timing.RESOLVE_AFTER_EFFECT)
+"""C4"生效后"：【贯石斧】"依然造成伤害"时跳过 C3 直进这里（票 12 Q16）。"""
+
 CURSOR_PC = len(RESOLVE_STEPS) - 1
 """非 dispatch 的游标步骤：无效目标从这里直接推进，跳过 C2–C5。"""
 
@@ -546,21 +640,26 @@ def _damage_channel(frame: Frame) -> tuple[CardRef, ...]:
     return (channel,) if channel is not None else ()
 
 
-def _emit_damage(host: FrameHost, frame: Frame, timing: Timing, actor: int) -> None:
+def _emit_damage(host: FrameHost, frame: Frame, timing: Timing, actor: int) -> Control:
     # 渠道牌进时机记录，使"谁用什么牌造成/受到了这次伤害"在记录流里可读。
-    _emit(host, frame, timing, actor=actor, cards=_damage_channel(frame))
+    return _emit(host, frame, timing, actor=actor, cards=_damage_channel(frame))
 
 
-def damage_deal(host: FrameHost, frame: Frame) -> None:
-    _emit_damage(host, frame, Timing.DAMAGE_DEAL, frame.data["source"])
+def damage_deal(host: FrameHost, frame: Frame) -> Control:
+    return _emit_damage(host, frame, Timing.DAMAGE_DEAL, frame.data["source"])
 
 
-def damage_take(host: FrameHost, frame: Frame) -> None:
-    _emit_damage(host, frame, Timing.DAMAGE_TAKE, frame.data["target"])
+def damage_take(host: FrameHost, frame: Frame) -> Control:
+    return _emit_damage(host, frame, Timing.DAMAGE_TAKE, frame.data["target"])
 
 
 def damage_push_life_decrease(host: FrameHost, frame: Frame) -> None:
-    """M1 无"防止伤害"（票 07 §1），故"受到伤害时"之后必定进入扣减体力结算。"""
+    """"受到伤害时"之后进入扣减体力结算；**帧级 ``prevented`` 为真时跳过**。
+
+    票 12 §Q15 / 票 30：【寒冰剑】防止此伤害 ⇒ 跳体力扣减、**不新增 delta / 时机**。
+    """
+    if frame.data.get("prevented"):
+        return
     host.push_frame(
         FrameKind.LIFE_DECREASE,
         {
@@ -572,16 +671,16 @@ def damage_push_life_decrease(host: FrameHost, frame: Frame) -> None:
     )
 
 
-def damage_after_deal(host: FrameHost, frame: Frame) -> None:
-    _emit_damage(host, frame, Timing.DAMAGE_AFTER_DEAL, frame.data["source"])
+def damage_after_deal(host: FrameHost, frame: Frame) -> Control:
+    return _emit_damage(host, frame, Timing.DAMAGE_AFTER_DEAL, frame.data["source"])
 
 
-def damage_after_take(host: FrameHost, frame: Frame) -> None:
-    _emit_damage(host, frame, Timing.DAMAGE_AFTER_TAKE, frame.data["target"])
+def damage_after_take(host: FrameHost, frame: Frame) -> Control:
+    return _emit_damage(host, frame, Timing.DAMAGE_AFTER_TAKE, frame.data["target"])
 
 
-def damage_end(host: FrameHost, frame: Frame) -> None:
-    _emit_damage(host, frame, Timing.DAMAGE_END, frame.data["target"])
+def damage_end(host: FrameHost, frame: Frame) -> Control:
+    return _emit_damage(host, frame, Timing.DAMAGE_END, frame.data["target"])
 
 
 DAMAGE_STEPS = (
@@ -599,11 +698,11 @@ DAMAGE_STEPS = (
 # ---- LIFE_DECREASE 帧：L8 三个时机 + 在"扣减体力时"插入濒死 ------------------
 
 
-def life_decrease_before(host: FrameHost, frame: Frame) -> None:
-    _emit(host, frame, Timing.LIFE_DECREASE_BEFORE, actor=frame.data["target"])
+def life_decrease_before(host: FrameHost, frame: Frame) -> Control:
+    return _emit(host, frame, Timing.LIFE_DECREASE_BEFORE, actor=frame.data["target"])
 
 
-def life_decrease_on(host: FrameHost, frame: Frame) -> None:
+def life_decrease_on(host: FrameHost, frame: Frame) -> Control:
     """**扣减体力时** = 唯一的体力写入点；先 dispatch 时机，再把体力扣到目标值。
 
     目标值由本帧算（``hp - amount``），原语只负责写（票 07 §1）。结算完**立刻**把
@@ -611,9 +710,12 @@ def life_decrease_on(host: FrameHost, frame: Frame) -> None:
     （票 21）；无人救时死亡结算再从濒死帧压入（票 22）。
     """
     target = frame.data["target"]
-    _emit(host, frame, Timing.LIFE_DECREASE_ON, actor=target)
+    control = _emit(host, frame, Timing.LIFE_DECREASE_ON, actor=target)
+    if control is not None:
+        return control
     host.apply_hp_change(frame, target, host.state.player(target).hp - frame.data["amount"])
     frame.data["dying"] = host.state.player(target).hp <= 0
+    return None
 
 
 def life_decrease_trigger_near_death(host: FrameHost, frame: Frame) -> None:
@@ -633,13 +735,13 @@ def life_decrease_trigger_near_death(host: FrameHost, frame: Frame) -> None:
     )
 
 
-def life_decrease_after(host: FrameHost, frame: Frame) -> None:
+def life_decrease_after(host: FrameHost, frame: Frame) -> Control:
     """**扣减体力后**：照常空实现收尾。
 
     无人救的死亡路径上这一步**不会被走到**——濒死帧在"濒死结算结束后"直接压入 DEATH
     子帧并留在栈上，整条伤害链（含本帧）由终局清栈统一丢弃（票 22）；救回时才回到这里。
     """
-    _emit(host, frame, Timing.LIFE_DECREASE_AFTER, actor=frame.data["target"])
+    return _emit(host, frame, Timing.LIFE_DECREASE_AFTER, actor=frame.data["target"])
 
 
 LIFE_DECREASE_STEPS = (
@@ -659,27 +761,29 @@ LIFE_DECREASE_STEPS = (
 # 按票 05 §7 / 票 13 §5 为"结构存在、M1 不可达"，故此处只落一个实例，不建第二套调度。
 
 
-def _emit_near_death(host: FrameHost, frame: Frame, timing: Timing) -> None:
-    _emit(host, frame, timing, actor=frame.data["target"])
+def _emit_near_death(host: FrameHost, frame: Frame, timing: Timing) -> Control:
+    return _emit(host, frame, timing, actor=frame.data["target"])
 
 
-def near_death_enter(host: FrameHost, frame: Frame) -> None:
-    _emit_near_death(host, frame, Timing.NEAR_DEATH_ENTER)
+def near_death_enter(host: FrameHost, frame: Frame) -> Control:
+    return _emit_near_death(host, frame, Timing.NEAR_DEATH_ENTER)
 
 
-def near_death_at(host: FrameHost, frame: Frame) -> None:
+def near_death_at(host: FrameHost, frame: Frame) -> Control:
     """"处于濒死状态时"：打开求桃窗口，按官方顺序定下应答者区间。
 
     区间在窗口打开时**定格**（``askers`` 进帧私有载荷）而不是每轮重算，使"当前回合
     角色起逆时针"在整段濒死结算里只有一个真源；"新的濒死状态时"的回退收窄
     （``flow/neardeath.txt`` 第 13 行）M1 不可达（票 05 §7），故不建重入分支。
     """
-    target = frame.data["target"]
-    _emit_near_death(host, frame, Timing.NEAR_DEATH_AT)
+    control = _emit_near_death(host, frame, Timing.NEAR_DEATH_AT)
+    if control is not None:
+        return control
     frame.data.setdefault(
         "askers", _askers_from(host.state, host.state.turn_seat, len(host.state.players))
     )
     frame.data.setdefault("next", 0)
+    return None
 
 
 def near_death_ask(host: FrameHost, frame: Frame) -> Control:
@@ -704,7 +808,7 @@ def near_death_ask(host: FrameHost, frame: Frame) -> Control:
     return None
 
 
-def near_death_after(host: FrameHost, frame: Frame) -> None:
+def near_death_after(host: FrameHost, frame: Frame) -> Control:
     """"濒死结算结束后"：抢救结果直接读体力（官方 4.17 第 4 条）。
 
     本时机是**空实现**（官方此处只列技能效果，M1 无技能）：流程经过并照记，不产生状态
@@ -712,10 +816,13 @@ def near_death_after(host: FrameHost, frame: Frame) -> None:
     DEATH 子帧（票 22）。死亡结算挂在濒死帧**之上**，濒死帧因此留在栈上不弹出——
     它连同整条伤害链在终局清栈时逐帧记 `discard`（票 04 §5 的 5 帧）。
     """
-    _emit_near_death(host, frame, Timing.NEAR_DEATH_AFTER)
+    control = _emit_near_death(host, frame, Timing.NEAR_DEATH_AFTER)
+    if control is not None:
+        return control
     target = frame.data["target"]
     if host.state.player(target).hp <= 0:
         host.enter_death(frame, target)
+    return None
 
 
 NEAR_DEATH_STEPS = (
@@ -752,11 +859,11 @@ def _askers_from(state: GameState, start: int | None, count: int) -> tuple[int, 
 # 胜负（终止点在引擎的 DEATH 出栈逻辑里，票 14 §3）。
 
 
-def _emit_death(host: FrameHost, frame: Frame, timing: Timing) -> None:
-    _emit(host, frame, timing, actor=frame.data["target"])
+def _emit_death(host: FrameHost, frame: Frame, timing: Timing) -> Control:
+    return _emit(host, frame, timing, actor=frame.data["target"])
 
 
-def death_before_start(host: FrameHost, frame: Frame) -> None:
+def death_before_start(host: FrameHost, frame: Frame) -> Control:
     """死亡结算开始前：①主公死亡不做回合结束；②否则定格 killer、自己的回合则回合结束。
 
     身份局才做这两件事（票 14 §4，官方 `flow_death` 首段）；无身份局保持 M1 的空实现。
@@ -764,51 +871,63 @@ def death_before_start(host: FrameHost, frame: Frame) -> None:
     自杀 ⇒ 未定格 ⇒ 无奖惩。来源由死亡帧的 ``damage_source`` 带下来（帧私有载荷，
     不进 ``timing`` 记录的 ``source``，故记录面不变）。
     """
-    _emit_death(host, frame, Timing.DEATH_BEFORE_START)
+    control = _emit_death(host, frame, Timing.DEATH_BEFORE_START)
+    if control is not None:
+        return control
     if host.state.rule_config.mode is not Mode.IDENTITY:
-        return
+        return None
     seat = frame.data["target"]
     if host.state.player(seat).identity is Identity.LORD:
         # 官方"死亡结算开始前：若死亡的是主公，则游戏结束"——回合结束分支让位（票 14 §4）。
-        return
+        return None
     source = frame.data.get("damage_source")
     if source is not None and source != seat:
         frame.data["killer"] = source
     if host.state.turn_seat == seat:
-        _emit(host, frame, Timing.TURN_END, actor=seat)
+        return _emit(host, frame, Timing.TURN_END, actor=seat)
+    return None
 
 
-def death_reveal_identity_before(host: FrameHost, frame: Frame) -> None:
+def death_reveal_identity_before(host: FrameHost, frame: Frame) -> Control:
     """"亮出身份牌前"：先 dispatch 时机，再发一条 ``identity_reveal``（票 14 §5）。
 
     只进身份局的步骤表；主公也照发（开局已亮明，再发一次只是形状统一）。
     """
-    _emit_death(host, frame, Timing.DEATH_REVEAL_IDENTITY_BEFORE)
+    control = _emit_death(host, frame, Timing.DEATH_REVEAL_IDENTITY_BEFORE)
+    if control is not None:
+        return control
     host.reveal_dead_identity(frame)
+    return None
 
 
-def death_reveal_identity_after(host: FrameHost, frame: Frame) -> None:
+def death_reveal_identity_after(host: FrameHost, frame: Frame) -> Control:
     """胜负检测点：**先照记时机与死亡事实，再调唯一终局入口**。
 
     顺序使 ``check_seq`` 恰为这条 ``DEATH_REVEAL_IDENTITY_AFTER`` 记录的序号
     （票 08 §6 的"检测点那条记录"口径，票 22 第 6 条）。检测只置 ``pending_outcome``，
     不清栈、不终止——死亡结算剩余两段照跑（票 13 §3）。
     """
-    _emit_death(host, frame, Timing.DEATH_REVEAL_IDENTITY_AFTER)
+    control = _emit_death(host, frame, Timing.DEATH_REVEAL_IDENTITY_AFTER)
+    if control is not None:
+        return control
     host.record_death_fact(frame)
     host.check_game_end()
+    return None
 
 
-def death_on(host: FrameHost, frame: Frame) -> None:
+def death_on(host: FrameHost, frame: Frame) -> Control:
     """死亡时：先 dispatch（M2 无死亡时技能），再 Ⅰ.a 系统处理牌、最后 Ⅱ 奖惩。"""
-    _emit_death(host, frame, Timing.DEATH_ON)
+    control = _emit_death(host, frame, Timing.DEATH_ON)
+    if control is not None:
+        return control
     host.discard_dead_cards(frame)
     host.apply_death_rewards(frame)
+    return None
 
 
-def death_after(host: FrameHost, frame: Frame) -> None:
+def death_after(host: FrameHost, frame: Frame) -> Control:
     """空实现：死亡结算收尾空时点（票 13 §4 的 C 类）。"""
-    _emit_death(host, frame, Timing.DEATH_AFTER)
+    return _emit_death(host, frame, Timing.DEATH_AFTER)
 
 
 DEATH_STEPS = (
@@ -853,22 +972,22 @@ def _judge_cards(frame: Frame) -> tuple[CardRef, ...]:
     return (judge_card,) if judge_card is not None else ()
 
 
-def _emit_judge(host: FrameHost, frame: Frame, timing: Timing) -> None:
-    _emit(host, frame, timing, actor=_judge_actor(frame), cards=_judge_cards(frame))
+def _emit_judge(host: FrameHost, frame: Frame, timing: Timing) -> Control:
+    return _emit(host, frame, timing, actor=_judge_actor(frame), cards=_judge_cards(frame))
 
 
-def judge_on(host: FrameHost, frame: Frame) -> None:
+def judge_on(host: FrameHost, frame: Frame) -> Control:
     """取判定牌 → 入处理区 → **再** dispatch ``JUDGE_ON``（票 10 §1 步骤 1）。
 
     短摸（两堆皆空）⇒ 引擎已判 ``both_decks_empty`` 平局并终止；本步不再落牌、不再 dispatch。
     """
     if not host.draw_judge_card(frame):
-        return
+        return None
     host.move_judge_card_to_processing(frame)
-    _emit_judge(host, frame, Timing.JUDGE_ON)
+    return _emit_judge(host, frame, Timing.JUDGE_ON)
 
 
-def judge_before_effect(host: FrameHost, frame: Frame) -> None:
+def judge_before_effect(host: FrameHost, frame: Frame) -> Control:
     """改判窗口：**真 dispatch = 空实现**（保留：dispatch、无询问、无状态变化）。
 
     不是跳过——跳过会逼 M3 加【鬼才】类技能时改判定骨架（票 03 §4）。响应队列按
@@ -876,14 +995,17 @@ def judge_before_effect(host: FrameHost, frame: Frame) -> None:
     任何询问（票 10 §4）。真出现有能力者时，改判询问协议（票 19 的 ``RESPOND``）尚未建立，
     故 fail-closed 而不是静默丢弃。
     """
-    _emit_judge(host, frame, Timing.JUDGE_CARD_BEFORE_EFFECT)
+    control = _emit_judge(host, frame, Timing.JUDGE_CARD_BEFORE_EFFECT)
+    if control is not None:
+        return control
     if rejudge_askers(host.state, rejudge_capable_seats()):
         raise NotImplementedError("M2 没有改判技能：改判询问协议（票 19 的 RESPOND）属 M3")
+    return None
 
 
-def judge_after_effect(host: FrameHost, frame: Frame) -> None:
+def judge_after_effect(host: FrameHost, frame: Frame) -> Control:
     """判定牌生效后：结果已是帧私有 ``judge_card`` 的牌面，后果 op 在 ``judge_finish`` 读它。"""
-    _emit_judge(host, frame, Timing.JUDGE_CARD_AFTER_EFFECT)
+    return _emit_judge(host, frame, Timing.JUDGE_CARD_AFTER_EFFECT)
 
 
 def judge_finish(host: FrameHost, frame: Frame) -> None:
@@ -904,20 +1026,23 @@ JUDGE_STEPS = (
 # ---- RECOVER 帧：L10 两个时机 ----------------------------------------------
 
 
-def recover_value(host: FrameHost, frame: Frame) -> None:
+def recover_value(host: FrameHost, frame: Frame) -> Control:
     """**确定回复数值**：先跑时机，再把体力写高（夹在体力上限内）。
 
     官方 4.13："回复体力"是数值变化四类事件之一，回复值受**体力上限**限制；
     目标值由本帧算，原语只负责写（票 07 §1）。
     """
     target = frame.data["targets"][0]
-    _emit(host, frame, Timing.RECOVER_VALUE, actor=target)
+    control = _emit(host, frame, Timing.RECOVER_VALUE, actor=target)
+    if control is not None:
+        return control
     player = host.state.player(target)
     host.apply_hp_change(frame, target, min(player.hp + frame.data["amount"], player.hp_max))
+    return None
 
 
-def recover_after(host: FrameHost, frame: Frame) -> None:
-    _emit(host, frame, Timing.RECOVER_AFTER, actor=frame.data["targets"][0])
+def recover_after(host: FrameHost, frame: Frame) -> Control:
+    return _emit(host, frame, Timing.RECOVER_AFTER, actor=frame.data["targets"][0])
 
 
 RECOVER_STEPS = (
@@ -929,28 +1054,34 @@ RECOVER_STEPS = (
 # ---- PLAY 帧：L6 两个时机（票 19 §2：打出必须独立）---------------------------
 
 
-def play_declare(host: FrameHost, frame: Frame) -> None:
+def play_declare(host: FrameHost, frame: Frame) -> Control:
     """``PLAY_DECLARE``：打出牌进入处理区（与使用的第一段移动同姿态）。"""
-    _emit(
+    control = _emit(
         host,
         frame,
         Timing.PLAY_DECLARE,
         actor=frame.data["source"],
         cards=(frame.data["card"],),
     )
+    if control is not None:
+        return control
     host.move_played_card_to_processing(frame)
+    return None
 
 
-def play_on_play(host: FrameHost, frame: Frame) -> None:
+def play_on_play(host: FrameHost, frame: Frame) -> Control:
     """``PLAY_ON_PLAY``：打出的实体牌随即进弃牌堆（打出无使用结算）。"""
-    _emit(
+    control = _emit(
         host,
         frame,
         Timing.PLAY_ON_PLAY,
         actor=frame.data["source"],
         cards=(frame.data["card"],),
     )
+    if control is not None:
+        return control
     host.move_played_card_to_discard(frame)
+    return None
 
 
 PLAY_STEPS = (

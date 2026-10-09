@@ -7,9 +7,11 @@
   它们住下层，是因为五个挂点都由 ``effects/actions.py`` 的规则函数直接读；本子包把
   这些名字连同 :class:`~sgs.skills.catalog.SkillDef` / ``CATALOG`` 一起再导出，外部
   仍只认 ``sgs.skills`` 这一个入口。
-- :mod:`sgs.skills.catalog` 装**定义与回调**：``SkillDef`` / ``Hook`` / ``CATALOG`` /
-  ``carried_skills``。票 29 落其**静态面**（诸葛连弩 / 仁王盾 / 六坐骑 / 方天画戟），
-  票 30 在同一张表上补时机钩子、帧内接缝与虚拟牌。
+- :mod:`sgs.skills.catalog` 装**定义与派发**：``SkillDef`` / ``Hook`` / ``Seam`` /
+  ``CATALOG`` / ``resolve_instances`` / ``dispatch_timing`` / ``dispatch_seam``。
+  票 29 落其**静态面**（诸葛连弩 / 仁王盾 / 六坐骑 / 方天画戟），票 30 在同一张表上补
+  时机钩子、帧内接缝与虚拟牌。
+- :mod:`sgs.skills.virtual` 装**虚拟牌 / 转化牌**的构造（票 30）。
 
 本文件另装**跨层只读查询**：加载期用它校验"每张装备牌都有对应技能"（票 09 §7 #8），
 判定帧用它拿改判能力座位（票 10 §4），主公技门控用它（票 13 §4）。
@@ -31,7 +33,26 @@ from sgs.effects import (
     apply_modifiers,
 )
 
-from .catalog import CATALOG, Hook, SkillDef, carried_skills
+from .catalog import (
+    ACTIVATION_PLANS,
+    CATALOG,
+    ActivationPlan,
+    Hook,
+    Seam,
+    SeamKind,
+    SkillDef,
+    SkillInstance,
+    SkillSource,
+    SkillSourceKind,
+    activation_plan,
+    dispatch_seam,
+    dispatch_timing,
+    instance_key,
+    is_equipped,
+    prune_skill_state,
+    resolve_instances,
+)
+from .virtual import transformed_slash, virtual_dodge
 
 EQUIPMENT_CARD_TYPE_IDS: tuple[str, ...] = tuple(
     skill_id.removeprefix("equip.")
@@ -62,11 +83,13 @@ REJUDGE_SKILL_IDS: frozenset[str] = frozenset()
 """
 
 __all__ = (
+    "ACTIVATION_PLANS",
     "CATALOG",
     "EQUIPMENT_CARD_TYPE_IDS",
     "EQUIPMENT_SKILL_IDS",
     "LORD_SKILL_IDS",
     "REJUDGE_SKILL_IDS",
+    "ActivationPlan",
     "CarrierKind",
     "Hook",
     "Modifier",
@@ -74,12 +97,25 @@ __all__ = (
     "ModifierPoint",
     "ModifierRole",
     "PriorityClass",
+    "Seam",
+    "SeamKind",
     "SkillDef",
+    "SkillInstance",
+    "SkillSource",
+    "SkillSourceKind",
+    "activation_plan",
     "apply_modifiers",
-    "carried_skills",
+    "dispatch_seam",
+    "dispatch_timing",
     "equipment_skill_ids",
+    "instance_key",
+    "is_equipped",
     "lord_skill_allowed",
+    "prune_skill_state",
     "rejudge_capable_seats",
+    "resolve_instances",
+    "transformed_slash",
+    "virtual_dodge",
 )
 
 

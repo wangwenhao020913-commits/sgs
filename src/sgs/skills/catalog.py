@@ -1,73 +1,139 @@
-"""技能**定义目录**与装备效果回调（票 07 §1–§3；施工票 29 落其静态面）。
+"""技能**定义目录**、载体解析与派发（票 07 §1–§3；施工票 29 落静态面、票 30 落触发面）。
 
 一张装备 = 一个 :class:`SkillDef`（稳定 id = ``equip.<牌名 id>``），内部可带多条
-:class:`Hook`（键 = :class:`~sgs.timing.Timing` 枚举本身）与多条
-:class:`~sgs.effects.Modifier`（挂点 ∈ :class:`~sgs.effects.ModifierPoint` 的五档）。
-定义目录 :data:`CATALOG` 是**模块级不可变**的；"谁持有哪一份"由 :func:`carried_skills`
-在派发时按**载体**（M2 = 装备区）解析，不做 per-player 实例注册。
+:class:`Hook`（键 = 时机枚举本身）、多条 :class:`Seam`（帧内接缝）与多条
+:class:`Modifier`（五个挂点）。定义目录 :data:`CATALOG` 是**模块级不可变**的；
+"谁持有哪一份"由 :func:`resolve_instances` 在派发时按**载体**（M2 = 装备区 ∪ 虚拟授予）
+解析，不做 per-player 实例注册。
 
-**修饰器管道的词汇与派发住 ``effects`` 层**（:mod:`sgs.effects.modifiers`），因为五个挂点
-都由 ``effects/actions.py`` 的规则函数直接读；本模块只装**定义与回调**，方向是
-``skills → effects``（`开发文档/01` §5）。
+**四层落位**（票 12 §4 / 票 30）：
 
-**静态 vs 触发 = 修饰器 vs 钩子**（票 07 §3，官方口径 `A/rule_forced.txt:5`：锁定技只是
-强制性标签，不是时机 / 优先级）。本模块落**静态面**：次数上限 / 目标池 / 距离 / 有效性 /
-候选池五挂点与诸葛连弩、仁王盾、六坐骑、方天画戟的修饰器。有时机的钩子（青釭剑 /
-雌雄双股剑 / 麒麟弓 / 寒冰剑等）与帧内接缝、虚拟牌由票 30 在同一张表上补齐——故 17 条
-装备定义本票**全部登记**，未落效果的条目 hooks / modifiers 暂为空元组（加载期"装备必有
-技能"因此已成立）。
+- **钩子**（键 = ``Timing``）：【雌雄双股剑】（``USE_AFTER_DESIGNATE_TARGET``）、
+  【麒麟弓】/【寒冰剑】（``DAMAGE_DEAL``）；
+- **帧内接缝**（``Timing`` 里没有"需要【闪】""杀被抵消时"两节点，而派发键就是 ``Timing``）：
+  【八卦阵】（``CANDIDATES`` 进"需要【闪】"窗口 + 选中才惰性压判定帧）、
+  【青龙偃月刀】/【贯石斧】（``SeamKind.SLASH_CANCELED``）；
+- **修饰器**（五挂点）：诸葛连弩 / 仁王盾 / 青釭剑 / 坐骑 / 方天画戟 / 丈八蛇矛 / 八卦阵；
+- **``OPS``**（多步主体）：判定后果等。
+
+**静态 vs 触发 = 修饰器 vs 钩子**（票 07 §3，官方 `A/rule_forced.txt:5`：锁定技只是
+强制性标签，不是时机 / 优先级）。``locked`` 进 :class:`SkillDef`，判据逐字取官方
+"牌面有没有『可以』"；锁定 ⇒ 派发时**不问**、直接跑；非锁定 ⇒ 先发"是否发动"询问，
+**锁定与"同时机优先级"无关**（不进链序）。"可以 / 必须"是**效果属性**，与 ``locked``
+正交，落点是候选里有没有 ``Pass``。
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from itertools import combinations
 from types import MappingProxyType
 from typing import Any, TypeAlias
 
 from sgs.data import Color, color_of_suit
 from sgs.effects import (
+    CandidateScope,
     CarrierKind,
     Modifier,
     ModifierContext,
     ModifierPoint,
     PriorityClass,
+    check_count,
+    check_targets,
+    locate,
     priority_class_of,
 )
 from sgs.resolution import Control, Frame
-from sgs.state import GameState, UseCard
+from sgs.state import (
+    ActivateSkill,
+    GameState,
+    MoveReason,
+    PlayCard,
+    RespondMode,
+    SelectionSpec,
+    Slot,
+    SlotKind,
+    UseCard,
+    Zone,
+    ZoneRef,
+)
 from sgs.timing import Timing
 
+from .virtual import transformed_slash
+
 __all__ = [
+    "ACTIVATION_PLANS",
     "CATALOG",
+    "ActivationPlan",
     "Hook",
+    "Seam",
+    "SeamKind",
     "SkillDef",
-    "carried_skills",
+    "SkillInstance",
+    "SkillSource",
+    "SkillSourceKind",
+    "activation_plan",
+    "dispatch_seam",
+    "dispatch_timing",
+    "instance_key",
+    "is_equipped",
+    "prune_skill_state",
+    "resolve_instances",
 ]
 
 
 HookHandler: TypeAlias = Callable[[Any, Frame], Control]
-"""钩子回调：``(host, frame) -> Control``，与步骤函数同形（票 07 §1）。"""
+"""钩子回调：``(host, frame) -> Control``，与步骤函数同形（票 07 §1）。
+
+钩子属于哪个实例由派发器临时写进 ``frame.data["skill_owner"]``；这是为了让 M3 兼容面
+里冻结的 ``(host, frame)`` 签名保持不变（票 07 §6）。
+"""
+
+SeamHandler: TypeAlias = Callable[[Any, Frame], Control]
+"""帧内接缝回调：与钩子同形，但键是 :class:`SeamKind` 而不是 ``Timing``。"""
+
+
+class SeamKind(str, Enum):
+    """**帧内接缝**的键（票 12 §Q12 / 票 30）。
+
+    ``Timing`` 里没有"需要【闪】""杀被抵消时"两个节点（83 节点表已冻结、一个不增），
+    而派发键就是 ``Timing``，故这两类效果改由**非时机的帧内接缝**承载。
+    """
+
+    SLASH_CANCELED = "SLASH_CANCELED"
+
+
+class SkillSourceKind(str, Enum):
+    """技能实例的**来源**种类（票 07 §6 的带标签联合）。"""
+
+    EQUIPMENT_CARD = "EQUIPMENT_CARD"
+    VIRTUAL_GRANT = "VIRTUAL_GRANT"
 
 
 @dataclass(frozen=True, slots=True)
 class Hook:
-    """一条时机钩子：键 = :class:`~sgs.timing.Timing` 枚举本身 + 回调。
-
-    M2 的静态票只登记空的 ``hooks``；票 30 在同一张表上填触发类装备效果。
-    """
+    """一条时机钩子：键 = :class:`~sgs.timing.Timing` 枚举本身 + 回调。"""
 
     timing: Timing
     handler: HookHandler
 
 
 @dataclass(frozen=True, slots=True)
-class SkillDef:
-    """一张装备的完整技能定义（票 07 §2 / §6 的冻结形状）。
+class Seam:
+    """一条帧内接缝：键 = :class:`SeamKind` + 回调。"""
 
-    ``carrier`` 决定优先级档（装备档）；``locked`` 判据逐字取官方"牌面有没有『可以』"
-    （票 05 已逐条列出），M2 只登记、由票 30 的钩子派发读取。
+    kind: SeamKind
+    handler: SeamHandler
+
+
+@dataclass(frozen=True, slots=True)
+class SkillDef:
+    """一张装备的完整技能定义（票 07 §6 的冻结形状，票 30 只加可选字段）。
+
+    ``carrier`` 决定优先级档（装备档）；``locked`` 判据逐字取官方"牌面有没有『可以』"。
+    ``seams`` / ``virtual_slot`` 是票 30 的加法（默认空 / ``None``，M3 只许增）。
     """
 
     skill_id: str
@@ -75,11 +141,294 @@ class SkillDef:
     carrier: CarrierKind
     hooks: tuple[Hook, ...] = ()
     modifiers: tuple[Modifier, ...] = ()
+    seams: tuple[Seam, ...] = ()
+    virtual_slot: SlotKind | None = None
+    """虚拟装备的"视为槽位"；实体装备恒 ``None``（票 07 §6 / 票 30）。"""
 
     @property
     def priority_class(self) -> PriorityClass:
         """本技能在修饰器链里的优先级档（由载体派生，不另存字段以防漂移）。"""
         return priority_class_of(self.carrier)
+
+
+@dataclass(frozen=True, slots=True)
+class SkillSource:
+    """技能实例的**来源**：实体装备牌 / 虚拟授予。"""
+
+    kind: SkillSourceKind
+    card_id: int | None = None
+    skill_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SkillInstance:
+    """**技能实例**：``(owner, skill_id, source)`` 三元组（票 07 §6）。
+
+    状态按实例键存（``GameState.skill_state``）、随来源清理、按 ``skill_id`` 去重
+    （同 owner 同技能只留**最早存活来源**）——"两张同名装备 / 多人同技能 / 复制技能"
+    因此互不串状态。
+    """
+
+    owner: int
+    skill_id: str
+    source: SkillSource
+    definition: SkillDef
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationPlan:
+    """一次"是否发动"询问的声明式形态（票 19 §5 / §6）。
+
+    ``zones`` 非空时，"付得起"的载荷是这些区里的面内位置组合（【贯石斧】弃两张）；
+    ``available=False`` 表示**当前付不起** ⇒ 该技能不进候选、连询问都不构造。
+    """
+
+    zones: tuple[Zone, ...] = ()
+    min_picks: int = 0
+    max_picks: int = 0
+    optional: bool = True
+    available: bool = True
+    card_types: tuple[str, ...] = ()
+    """选取面只铺这些**牌名 id**；空元组 = 不筛（【青龙偃月刀】只让挑【杀】）。"""
+
+
+# ---------------------------------------------------------------------------
+# 载体解析：谁持有哪一份技能（票 07 §1 / §6）
+# ---------------------------------------------------------------------------
+
+
+def resolve_instances(state: GameState) -> tuple[SkillInstance, ...]:
+    """解析全部**存活实例**，按链序 ``(priority_class, skill_id, owner)`` 全序。
+
+    载体 = 装备区里的实体牌（``source = EQUIPMENT_CARD``）∪ 座位的虚拟授予
+    （``source = VIRTUAL_GRANT``，不占牌守恒）。同一 ``(owner, skill_id)`` 只留
+    **最早出现的来源**（票 07 §6 的去重口径）；两名角色各有同一技能时是**两个实例**。
+    """
+    found: list[SkillInstance] = []
+    for player in state.players:
+        if not player.alive:
+            continue
+        for card_id in player.equip:
+            card = state.card(card_id)
+            definition = CATALOG.get(f"equip.{card.type}")
+            if definition is None:
+                continue
+            found.append(
+                SkillInstance(
+                    owner=player.seat,
+                    skill_id=definition.skill_id,
+                    source=SkillSource(SkillSourceKind.EQUIPMENT_CARD, card_id=card_id),
+                    definition=definition,
+                )
+            )
+        for grant in player.virtual_equipment:
+            definition = CATALOG.get(grant)
+            if definition is None:
+                continue
+            found.append(
+                SkillInstance(
+                    owner=player.seat,
+                    skill_id=grant,
+                    source=SkillSource(SkillSourceKind.VIRTUAL_GRANT, skill_id=grant),
+                    definition=definition,
+                )
+            )
+    deduped: list[SkillInstance] = []
+    seen: list[tuple[int, str]] = []
+    for instance in found:
+        key = (instance.owner, instance.skill_id)
+        if key in seen:
+            continue
+        seen.append(key)
+        deduped.append(instance)
+    deduped.sort(key=lambda item: (int(item.definition.priority_class), item.skill_id, item.owner))
+    return tuple(deduped)
+
+
+def instance_key(instance: SkillInstance) -> str:
+    """实例键的规范文本（``GameState.skill_state`` 的键）。"""
+    source = instance.source
+    ref = source.card_id if source.card_id is not None else source.skill_id
+    return f"{instance.owner}:{instance.skill_id}:{source.kind.value}:{ref}"
+
+
+def prune_skill_state(state: GameState) -> None:
+    """清理**来源已消失**的 per-instance 状态（票 07 §6 的"随 source 清理"）。"""
+    live = {instance_key(instance) for instance in resolve_instances(state)}
+    for key in list(state.skill_state):
+        if key not in live:
+            del state.skill_state[key]
+
+
+def is_equipped(state: GameState, seat: int, slot: SlotKind) -> bool:
+    """``seat`` **已装备** ``slot`` 吗：实体装备 ∪ 虚拟授予（票 07 §6 / 票 30）。
+
+    实体侧读装备区里的牌面槽位；虚拟侧读授予技能的 ``virtual_slot``。两者并集，
+    故 M3 的【八阵】类"视为装备"能与实体装备共存判定，而虚拟装备不占牌守恒。
+    """
+    for card_id in state.player(seat).equip:
+        if state.card(card_id).slot is slot:
+            return True
+    for grant in state.player(seat).virtual_equipment:
+        definition = CATALOG.get(grant)
+        if definition is not None and definition.virtual_slot is slot:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# 派发：钩子 / 接缝 / 发动询问（票 07 §1 / 票 19 §5·§8）
+# ---------------------------------------------------------------------------
+
+
+def _matching_hooks(instance: SkillInstance, timing: Timing) -> tuple[Hook, ...]:
+    return tuple(hook for hook in instance.definition.hooks if hook.timing is timing)
+
+
+def _matching_seams(instance: SkillInstance, kind: SeamKind) -> tuple[Seam, ...]:
+    return tuple(seam for seam in instance.definition.seams if seam.kind is kind)
+
+
+def _dispatch(host: Any, frame: Frame, *, match: Any, timing: Timing, key: str) -> Control:
+    """钩子与接缝共用的派发环（唯一一份）：锁定直接跑，非锁定先问"是否发动"。
+
+    **只有答 ``ActivateSkill`` 才执行**——``Pass``（不发动）与 ``plan.available=False``
+    （付不起）都跳过；这是"非锁定技的发动是询问出来的"这条规则（`GLOSSARY.md` 的**发动**）
+    的唯一落点。暂停 = ``"stay"`，重入时整条链从头跑，但 `ask` 的应答按帧内键缓存。
+    """
+    for instance in resolve_instances(host.state):
+        items = match(instance)
+        if not items:
+            continue
+        if not instance.definition.locked:
+            plan = activation_plan(host.state, frame, instance)
+            if not plan.available:
+                continue
+            active = host.ask_skill_activation(frame, instance, timing, plan, key=key)
+            if host.suspended(active):
+                return "stay"
+            if not isinstance(active, ActivateSkill):
+                continue
+        for item in items:
+            frame.data["skill_owner"] = instance.owner
+            control = item.handler(host, frame)
+            if control is not None:
+                return control
+    return None
+
+
+def dispatch_timing(host: Any, frame: Frame, timing: Timing) -> Control:
+    """在 ``timing`` 上按链序派发钩子；**第一个返回非 ``None`` 的钩子即短路**。"""
+    return _dispatch(
+        host,
+        frame,
+        match=lambda instance: _matching_hooks(instance, timing),
+        timing=timing,
+        key=timing.value,
+    )
+
+
+def dispatch_seam(host: Any, frame: Frame, kind: SeamKind) -> Control:
+    """在帧内接缝 ``kind`` 上派发；键是接缝名而**不是时机**（票 30）。
+
+    发动询问仍发生在当前帧所处的时机里（接缝都嵌在 C2），故 ``timing`` 只作询问记录的
+    语境；**答案缓存键用接缝名**，与同时机上的真钩子互不串味。
+    """
+    return _dispatch(
+        host,
+        frame,
+        match=lambda instance: _matching_seams(instance, kind),
+        timing=Timing.RESOLVE_BEFORE_EFFECT,
+        key=f"seam:{kind.value}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 发动形态（票 19 §5 / §6）：付不起的不进候选
+# ---------------------------------------------------------------------------
+
+
+def _default_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
+    del state, frame, instance
+    return ActivationPlan()
+
+
+def _axe_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
+    player = state.player(instance.owner)
+    payable = len(player.hand) + len(player.equip)
+    available = frame.data.get("source") == instance.owner and payable >= 2
+    return ActivationPlan(
+        zones=(Zone.HAND, Zone.EQUIP),
+        min_picks=2,
+        max_picks=2,
+        optional=True,
+        available=available,
+    )
+
+
+def _green_dragon_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
+    """【青龙偃月刀】：只有**自己的**【杀】被抵消才发动，载荷 = 挑哪张【杀】。"""
+    available = frame.data.get("source") == instance.owner and _has_slash_in_hand(
+        state, instance.owner
+    )
+    return ActivationPlan(
+        zones=(Zone.HAND,),
+        min_picks=1,
+        max_picks=1,
+        optional=True,
+        available=available,
+        card_types=("slash",),
+    )
+
+
+def _double_sword_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
+    source = frame.data.get("source")
+    targets = tuple(frame.data.get("targets", ()))
+    available = source == instance.owner and any(
+        _opposite_genders(state, source, target) for target in targets
+    )
+    return ActivationPlan(optional=True, available=available)
+
+
+def _ice_sword_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
+    del state
+    available = frame.data.get("source") == instance.owner and _is_owner_slash_damage(
+        frame, instance
+    )
+    return ActivationPlan(optional=True, available=available)
+
+
+def _qilin_bow_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
+    target = frame.data.get("target")
+    available = (
+        frame.data.get("source") == instance.owner
+        and _is_owner_slash_damage(frame, instance)
+        and target is not None
+        and bool(_mount_ids(state, target))
+    )
+    return ActivationPlan(optional=True, available=available)
+
+
+ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], ActivationPlan]] = (
+    MappingProxyType(
+        {
+            "equip.axe": _axe_plan,
+            "equip.green_dragon_blade": _green_dragon_plan,
+            "equip.double_sword": _double_sword_plan,
+            "equip.ice_sword": _ice_sword_plan,
+            "equip.qilin_bow": _qilin_bow_plan,
+        }
+    )
+)
+"""发动形态注册表：``skill_id`` → 形态构造函数；**模块级不可变**，缺省 = 裸"是否发动"。"""
+
+
+def activation_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
+    """本实例在当前帧上的发动形态（缺省 = 裸询问、可选、无成本面）。"""
+    builder = ACTIVATION_PLANS.get(instance.skill_id)
+    if builder is None:
+        return _default_plan(state, frame, instance)
+    return builder(state, frame, instance)
 
 
 # ---------------------------------------------------------------------------
@@ -88,20 +437,12 @@ class SkillDef:
 
 
 def _own_slash(ctx: ModifierContext, *, holder: int | None) -> bool:
-    """``holder`` 是否**持有一张【杀】**且它就是本次查询的牌。
-
-    【诸葛连弩】【仁王盾】【方天画戟】的入口判据形状相同（"本人 / 本牌名"），故集中一处：
-    装备名与挂点的差异留给各自的条件，重复的守卫不必抄三遍。
-    """
+    """``holder`` 是否**持有一张【杀】**且它就是本次查询的牌。"""
     return ctx.owner == holder and ctx.card is not None and ctx.card.type == "slash"
 
 
 def _unlimited_slash(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """诸葛连弩：锁定技，你使用【杀】无次数限制（`A/flow_condition.txt:21`）。
-
-    只对**持有者自己**使用【杀】生效；``None`` 表示"无上限"，由
-    :func:`~sgs.effects.check_count` 读成"不超额"。
-    """
+    """诸葛连弩：锁定技，你使用【杀】无次数限制（`A/flow_condition.txt:21`）。"""
     del state
     if not _own_slash(ctx, holder=ctx.subject):
         return current
@@ -109,11 +450,7 @@ def _unlimited_slash(state: GameState, ctx: ModifierContext, current: Any) -> An
 
 
 def _mount_distance(step: int) -> Callable[[GameState, ModifierContext, Any], Any]:
-    """坐骑改**座位距离**：客体系数 +1（防御马）/ 主体系数 −1（进攻马）（票 12 §Q22）。
-
-    +1 坐骑只加"别人到你"，−1 坐骑只减"你到别人"——方向由 ``owner`` 与主体 / 客体的
-    关系表达，故同一 ``DISTANCE`` 挂点能同时承载两个方向。
-    """
+    """坐骑改**座位距离**：客体系数 +1（防御马）/ 主体系数 −1（进攻马）（票 12 §Q22）。"""
 
     def handler(state: GameState, ctx: ModifierContext, current: Any) -> Any:
         del state
@@ -126,41 +463,47 @@ def _mount_distance(step: int) -> Callable[[GameState, ModifierContext, Any], An
 
 
 def _renwang_effectiveness(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """仁王盾：锁定技，**黑色的【杀】对你无效**（`A/flow_use.txt:79` / `R:1829-1830`）。
+    """仁王盾：锁定技，**黑色的【杀】对你无效**（`A/flow_use.txt:79`）。
 
-    作用点在"使用结算开始时"的有效性检测（票 15 §5 的第 2 层）：为假 ⇒ 到 C1 即终止
-    对该目标的结算，**不开** C2 的响应窗口。颜色由花色派生（票 12 §Q4）。
+    【青釭剑】的"无视防具"通过在 ``EFFECTIVENESS`` 链上先置 ``ignore_armor`` 标志实现
+    （票 07 §3 的窄结论：不建通用抑制机制）；链序保证青釭剑（``equip.qinggang_sword``）
+    先于仁王盾（``equip.renwang_shield``）执行。
     """
     del state
     if not current:
         return current
     if not _own_slash(ctx, holder=ctx.target):
         return current
+    if ctx.flags.get("ignore_armor"):
+        return current
     assert ctx.card is not None  # _own_slash 已保证
-    if color_of_suit(ctx.card.suit) is Color.BLACK:
+    color = ctx.card.color if ctx.card.color is not None else color_of_suit(ctx.card.suit)
+    if color is Color.BLACK:
         return False
     return current
 
 
-def _halberd_same_target_pool(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """方天画戟的 ``TARGET_POOL`` 挂点：**池不改**（票 12 §4 的"合法性同标准"）。
+def _qinggang_ignore_armor(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """青釭剑：锁定技，你使用【杀】时**无视目标的防具**（`A/flow_use.txt:41`）。
 
-    官方一手 `A/flow_condition.txt:46` 把【方天画戟】列在"额定目标与额外目标的合法性
-    检测标准**相同**"之下，故额定目标与额外目标共用同一个 :func:`~sgs.effects.check_targets`
-    输出；这个挂点的意义是让那条"同一套检测"有一个明写的落点（M3 的【巧说】类
-    "标准不同"效果从这里分叉），M2 本身是恒等的。
+    只压制"目标身上的防具"（``ctx.owner == ctx.subject``，即使用者自己的青釭剑），
+    且只对【杀】生效；置的是链内旁路标志，不落任何状态（票 07 §3）。
     """
+    del state
+    if not _own_slash(ctx, holder=ctx.subject):
+        return current
+    ctx.flags["ignore_armor"] = True
+    return current
+
+
+def _halberd_same_target_pool(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """方天画戟的 ``TARGET_POOL`` 挂点：**池不改**（票 12 §4 的"合法性同标准"）。"""
     del state, ctx
     return current
 
 
 def _halberd_extra_targets(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """方天画戟：此【杀】是你**最后的手牌**时可多指定至多两个目标（`A/glossary_gamecard.txt:103-105`）。
-
-    条件判据 = 使用时刻手牌里除它之外为空（"最后两张手牌"与"最后一张手牌 + 一张装备牌"
-    都**不**满足）；额外目标与原额定目标**共用**同一个目标池（``ctx.pool`` 已过
-    ``TARGET_POOL``，含攻击范围检测），故"额外目标仍过同一套合法性检测"是结构性事实。
-    """
+    """方天画戟：此【杀】是你**最后的手牌**时可多指定至多两个目标（`A/glossary_gamecard.txt:103-105`）。"""
     if not _own_slash(ctx, holder=ctx.subject):
         return current
     assert ctx.card is not None  # _own_slash 已保证
@@ -188,12 +531,315 @@ def _halberd_extra_targets(state: GameState, ctx: ModifierContext, current: Any)
     return (*current, *extras)
 
 
+def _eight_diagrams_candidate(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """八卦阵：把你自己的 ``ActivateSkill`` 追加进"需要【闪】"的候选（票 10 §5.2 / 票 30）。
+
+    只在**需要者自己**的实例上追加（``ctx.owner == ctx.subject``）。"每提供者只问一次"
+    由**候选生成器**统一过滤 ``ctx.providers_used``（一处实现，不在这里重复）。
+    选中才惰性判定（判定帧由响应窗口步骤压出，不在候选生成期）。
+    """
+    del state
+    if ctx.scope is not CandidateScope.DODGE:
+        return current
+    if ctx.owner != ctx.subject:
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _serpent_spear_candidate(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """丈八蛇矛：两张手牌当【杀】**使用或打出**（`A/flow_use.txt:19`，票 12 §Q21）。
+
+    整段候选生成期的**通用追加**（``ctx.card is None`` 的那一趟）：对每对手牌造一张
+    转化【杀】，目标池走与真【杀】**同一套**合法性检测（``check_targets``，含坐骑 /
+    攻击范围）。**使用**走同一 ``COUNT_LIMIT`` 链（诸葛连弩因此能解除它的次数限制）；
+    **打出**不占使用次数，故不做次数校验（票 19 §2）。
+    """
+    if ctx.owner != ctx.subject or ctx.card is not None:
+        return current
+    if ctx.scope is CandidateScope.PLAY:
+        counts = True
+        use_mode = False
+    elif ctx.scope is CandidateScope.RESPOND and ctx.respond_required == "slash":
+        use_mode = ctx.respond_mode is RespondMode.USE
+        counts = use_mode
+    else:
+        return current
+    hand = list(state.player(ctx.subject).hand)
+    if len(hand) < 2:
+        return current
+    extras: list[Any] = []
+    for first, second in combinations(hand, 2):
+        virtual = transformed_slash(state, (first, second))
+        if counts and check_count(state, ctx.subject, virtual):
+            continue
+        if ctx.scope is CandidateScope.RESPOND:
+            if use_mode:
+                extras.extend(
+                    UseCard(card=virtual, targets=(target,), answers_seq=ctx.answers_seq)
+                    for target in ctx.respond_targets
+                )
+            else:
+                extras.append(PlayCard(card=virtual, answers_seq=ctx.answers_seq))
+            continue
+        pool = check_targets(state, ctx.subject, virtual)
+        if not pool:
+            continue
+        extras.extend(
+            UseCard(card=virtual, targets=(target,), answers_seq=ctx.answers_seq)
+            for target in pool
+        )
+    return (*current, *extras)
+
+
+# ---------------------------------------------------------------------------
+# 触发类装备效果（票 30）
+# ---------------------------------------------------------------------------
+
+
+def _opposite_genders(state: GameState, source: int, target: int) -> bool:
+    """异性判据：两侧性别都已知且不同（M2 无武将 ⇒ 性别恒未知 ⇒ 恒假）。"""
+    if source == target:
+        return False
+    left = state.player(source).gender
+    right = state.player(target).gender
+    return left is not None and right is not None and left is not right
+
+
+def _is_owner_slash_damage(frame: Frame, instance: SkillInstance) -> bool:
+    """这次伤害是**该实例持有者**用【杀】造成的吗（票 12 §Q12 的触发前提）。"""
+    if frame.data.get("source") != instance.owner:
+        return False
+    card = frame.data.get("card")
+    return card is not None and card.type == "slash"
+
+
+def _has_slash_in_hand(state: GameState, seat: int) -> bool:
+    """手里有没有【杀】（【青龙偃月刀】的"付得起"判据）。"""
+    return any(state.card(card_id).type == "slash" for card_id in state.player(seat).hand)
+
+
+def _double_sword(host: Any, frame: Frame) -> Control:
+    """雌雄双股剑：你使用【杀】指定**异性**目标后，令其选择"弃一张手牌"或"你摸一张"。
+
+    选择权在**目标**（票 12 §Q17）：选项 = 弃一张手牌 / 令你摸一张；目标无手牌时
+    "弃一张手牌"**不进候选**（付不起的组合不进候选，票 19 §6）。多目标时逐个目标处理，
+    游标存帧内 ``double_sword_cursor``。
+    """
+    source = frame.data.get("source")
+    targets = tuple(frame.data.get("targets", ()))
+    state = host.state
+    cursor = frame.data.get("double_sword_cursor", 0)
+    while cursor < len(targets):
+        target = targets[cursor]
+        frame.data["double_sword_cursor"] = cursor
+        if not _opposite_genders(state, source, target):
+            cursor += 1
+            continue
+        options = ("discard_one", "draw_one") if state.player(target).hand else ("draw_one",)
+        answer = host.ask_option(
+            frame,
+            target,
+            Timing.USE_AFTER_DESIGNATE_TARGET,
+            skill_id="equip.double_sword",
+            options=options,
+        )
+        if host.suspended(answer):
+            return "stay"
+        if answer.choice == "discard_one":
+            picked = host.ask_selection(
+                frame,
+                key=f"double_sword:{target}",
+                actor=target,
+                timing=Timing.USE_AFTER_DESIGNATE_TARGET,
+                spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1)),
+                build_face=lambda: host.selection_face(target, (Zone.HAND,)),
+            )
+            if host.suspended(picked):
+                return "stay"
+            if picked:
+                host.move_in_frame(
+                    frame,
+                    state.refs(picked),
+                    to_zone=ZoneRef(Zone.DISCARD),
+                    reason=MoveReason.DISCARD,
+                    owner=target,
+                    actor=target,
+                )
+        else:
+            host.draw_for_hand(frame, source, 1)
+        cursor += 1
+        frame.data["double_sword_cursor"] = cursor
+    return None
+
+
+def _ice_sword(host: Any, frame: Frame) -> Control:
+    """寒冰剑：你使用【杀】造成伤害时，**防止此伤害**并依次弃置目标的两张牌。
+
+    "防止伤害"由**帧级 ``prevented``**（票 12 §Q15）承担：跳体力扣减、不新增 delta /
+    时机；"依次"⇒ 逐张单询问（票 19 §7），池空则跳过剩余次数。
+    """
+    if frame.data.get("ice_sword_finished"):
+        return None
+    target = frame.data.get("target")
+    if target is None:
+        return None
+    # 帧级"已防止"标志（票 12 §Q15）：只置一次；重入时**不因它短路**，否则本次
+    # 选择询问的应答会没人消费而串到下一个询问（"每提供者只问一次"的代价）。
+    frame.data["prevented"] = True
+    done = frame.data.get("ice_sword_done", 0)
+    while done < 2:
+        if not host.has_zone_cards(target):
+            break
+        picked = host.ask_selection(
+            frame,
+            key=f"ice_sword:{done}",
+            actor=frame.data.get("skill_owner"),
+            timing=Timing.DAMAGE_DEAL,
+            spec=SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1)),
+            build_face=lambda: host.selection_face(target, (Zone.HAND, Zone.EQUIP)),
+        )
+        if host.suspended(picked):
+            return "stay"
+        if not picked:
+            break
+        host.move_in_frame(
+            frame,
+            host.state.refs(picked),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.DISCARD,
+            owner=target,
+            actor=target,
+        )
+        done += 1
+        frame.data["ice_sword_done"] = done
+    frame.data["ice_sword_finished"] = True
+    return None
+
+
+def _mount_ids(state: GameState, seat: int) -> tuple[int, ...]:
+    return tuple(
+        card_id
+        for card_id in state.player(seat).equip
+        if state.card(card_id).slot in (SlotKind.HORSE_DEFENSE, SlotKind.HORSE_OFFENSE)
+    )
+
+
+def _mount_face(host: Any, seat: int) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
+    card_ids = _mount_ids(host.state, seat)
+    return (
+        tuple(
+            Slot(ref=ZoneRef(Zone.EQUIP, seat), card=host.state.card(card_id))
+            for card_id in card_ids
+        ),
+        card_ids,
+    )
+
+
+def _qilin_bow(host: Any, frame: Frame) -> Control:
+    """麒麟弓：你使用【杀】造成伤害时，可弃置目标装备区里的一张**坐骑牌**。
+
+    选取面只铺**坐骑槽**（目标装备区、可见槽）；目标没有坐骑时该技能不满足发动前提
+    （形态的 ``available`` 已挡住，故不构造询问）。
+    """
+    target = frame.data.get("target")
+    if target is None or frame.data.get("qilin_bow_done"):
+        return None
+    picked = host.ask_selection(
+        frame,
+        key="qilin_bow",
+        actor=frame.data.get("skill_owner"),
+        timing=Timing.DAMAGE_DEAL,
+        spec=SelectionSpec(zones=(Zone.EQUIP,), total=(1, 1)),
+        build_face=lambda: _mount_face(host, target),
+    )
+    if host.suspended(picked):
+        return "stay"
+    frame.data["qilin_bow_done"] = True
+    if not picked:
+        return None
+    host.move_in_frame(
+        frame,
+        host.state.refs(picked),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=target,
+        actor=frame.data.get("skill_owner"),
+    )
+    return None
+
+
+def _green_dragon_blade(host: Any, frame: Frame) -> Control:
+    """青龙偃月刀：**你的**【杀】被【闪】抵消时，可对相同目标再使用一张【杀】。
+
+    续杀由发动询问的**载荷**指定（挑一张手牌里的【杀】），**无距离限制**
+    （`A/flow_condition.txt:66-67`）由"目标直接沿用原【杀】的目标"表达（不再走
+    ``check_targets``），且该次使用**不计次数**（票 12）；每张【杀】只给一次机会。
+    """
+    owner = frame.data.get("skill_owner")
+    if frame.data.get("gdb_used") or frame.data.get("source") != owner:
+        return None
+    picks = host.activation_picks(frame, "equip.green_dragon_blade")
+    if not picks:
+        return None
+    frame.data["gdb_used"] = True
+    host.start_use(
+        host.state.card(picks[0]),
+        source=owner,
+        targets=tuple(frame.data.get("targets", ())),
+        use_timing=Timing.RESOLVE_BEFORE_EFFECT,
+        counts=False,
+    )
+    return "stay"
+
+
+def _move_by_source(
+    host: Any, frame: Frame, card_ids: tuple[int, ...], *, to_zone: ZoneRef, owner: int
+) -> None:
+    """把一批选中的牌按**来源区**分组移动：一次 ``move_card`` 只能有一个来源区。
+
+    【贯石斧】的成本可以跨手牌与装备区（`A/flow_move.txt:33-39`），故逐来源区各发一条
+    ``card_move``；分组用 ``dict``（插入序确定），顺序逐种子可复现。
+    """
+    groups: dict[ZoneRef, list[int]] = {}
+    for card_id in card_ids:
+        groups.setdefault(locate(host.state, card_id), []).append(card_id)
+    for ids in groups.values():
+        host.move_in_frame(
+            frame,
+            host.state.refs(ids),
+            to_zone=to_zone,
+            reason=MoveReason.DISCARD,
+            owner=owner,
+            actor=owner,
+        )
+
+
+def _axe(host: Any, frame: Frame) -> Control:
+    """贯石斧：**你的**【杀】被抵消时，可弃两张牌使此【杀】**依然造成伤害**。
+
+    成本（弃两张）在"是否发动"询问里**烘进候选**；发起后置 ``axe_saved``，
+    ``resolve_before_effect`` 据此**跳过"生效前 / 生效时"、直进"生效后"**（票 12 Q16）。
+    两张牌可跨手牌 / 装备区，故按来源区分别移动。
+    """
+    owner = frame.data.get("skill_owner")
+    if frame.data.get("axe_used") or frame.data.get("source") != owner:
+        return None
+    card_ids = host.activation_picks(frame, "equip.axe")
+    if not card_ids or owner is None:
+        return None
+    frame.data["axe_used"] = True
+    _move_by_source(host, frame, card_ids, to_zone=ZoneRef(Zone.DISCARD), owner=owner)
+    frame.data["axe_saved"] = True
+    return None
+
+
 def _equip(
     card_type_id: str,
     *,
     locked: bool,
     modifiers: tuple[Modifier, ...] = (),
     hooks: tuple[Hook, ...] = (),
+    seams: tuple[Seam, ...] = (),
 ) -> SkillDef:
     """按牌名 id 造一条装备技能定义（``skill_id = "equip." + 牌名 id``，票 09 §1）。"""
     return SkillDef(
@@ -202,6 +848,7 @@ def _equip(
         carrier=CarrierKind.EQUIPMENT,
         hooks=hooks,
         modifiers=modifiers,
+        seams=seams,
     )
 
 
@@ -215,11 +862,31 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         locked=True,
         modifiers=(Modifier(ModifierPoint.COUNT_LIMIT, _unlimited_slash),),
     ),
-    _equip("qinggang_sword", locked=True),
-    _equip("double_sword", locked=False),
-    _equip("green_dragon_blade", locked=False),
-    _equip("serpent_spear", locked=False),
-    _equip("axe", locked=False),
+    _equip(
+        "qinggang_sword",
+        locked=True,
+        modifiers=(Modifier(ModifierPoint.EFFECTIVENESS, _qinggang_ignore_armor),),
+    ),
+    _equip(
+        "double_sword",
+        locked=False,
+        hooks=(Hook(Timing.USE_AFTER_DESIGNATE_TARGET, _double_sword),),
+    ),
+    _equip(
+        "green_dragon_blade",
+        locked=False,
+        seams=(Seam(SeamKind.SLASH_CANCELED, _green_dragon_blade),),
+    ),
+    _equip(
+        "serpent_spear",
+        locked=False,
+        modifiers=(Modifier(ModifierPoint.CANDIDATES, _serpent_spear_candidate),),
+    ),
+    _equip(
+        "axe",
+        locked=False,
+        seams=(Seam(SeamKind.SLASH_CANCELED, _axe),),
+    ),
     _equip(
         "halberd",
         locked=False,
@@ -228,10 +895,22 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
             Modifier(ModifierPoint.CANDIDATES, _halberd_extra_targets),
         ),
     ),
-    _equip("qilin_bow", locked=False),
-    _equip("ice_sword", locked=False),
+    _equip(
+        "qilin_bow",
+        locked=False,
+        hooks=(Hook(Timing.DAMAGE_DEAL, _qilin_bow),),
+    ),
+    _equip(
+        "ice_sword",
+        locked=False,
+        hooks=(Hook(Timing.DAMAGE_DEAL, _ice_sword),),
+    ),
     # 3 防具
-    _equip("eight_diagrams", locked=False),
+    _equip(
+        "eight_diagrams",
+        locked=False,
+        modifiers=(Modifier(ModifierPoint.CANDIDATES, _eight_diagrams_candidate),),
+    ),
     _equip(
         "renwang_shield",
         locked=True,
@@ -250,34 +929,4 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
     {definition.skill_id: definition for definition in _SKILL_DEFS}
 )
-"""定义目录：``skill_id`` → :class:`SkillDef`，**模块级不可变**（票 07 §1 / §6）。
-
-没有可变全局注册表：M2 的 17 条是代码侧字面量，M3 换数据来源时字段名不变
-（``register`` 式写入随 M3 的数据驱动加载一起加，M2 不需要）。
-"""
-
-
-def carried_skills(state: GameState) -> tuple[tuple[int, SkillDef], ...]:
-    """解析"谁持有哪一份技能"：遍历**存活**座位的装备区，按载体查出定义。
-
-    返回 ``(owner, SkillDef)`` 元组，按 **``(priority_class, skill_id)``** 全序排好
-    （票 07 §6 的冻结链序）；同一 ``skill_id`` 出现在多个座位（两张同名装备 / 多人同坐骑）
-    时，稳定排序保留**确定性的载体遍历序**（座位升序 → 槽位枚举序），故链序仍是全序、
-    同种子逐字节可复现。
-
-    死者的装备在真实流程里已随死亡收尾清空，这里跳过死者只是把不变量写死。
-    """
-    entries: list[tuple[PriorityClass, str, int, SkillDef]] = []
-    for player in state.players:
-        if not player.alive:
-            continue
-        for card_id in player.equip:
-            card = state.card(card_id)
-            definition = CATALOG.get(f"equip.{card.type}")
-            if definition is None:
-                continue
-            entries.append(
-                (definition.priority_class, definition.skill_id, player.seat, definition)
-            )
-    entries.sort(key=lambda entry: (int(entry[0]), entry[1]))
-    return tuple((owner, definition) for _priority, _skill_id, owner, definition in entries)
+"""定义目录：``skill_id`` → :class:`SkillDef`，**模块级不可变**（票 07 §1 / §6）。"""

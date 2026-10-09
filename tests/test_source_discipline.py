@@ -197,3 +197,77 @@ def test_the_scan_actually_covered_the_source_tree():
 
     assert len(files) >= 10, f"只扫到 {len(files)} 个源文件；SOURCE_ROOT 可能指错了"
     assert RNG_MODULE.exists(), f"找不到唯一随机源模块：{RNG_MODULE}"
+
+
+# ---------------------------------------------------------------------------
+# 5. 技能逻辑不进主干（票 07 §5 / 票 30）
+# ---------------------------------------------------------------------------
+
+ENGINE_ROOT = SOURCE_ROOT / "engine"
+
+
+def _engine_trees() -> Iterator[tuple[Path, ast.Module]]:
+    for path in sorted(ENGINE_ROOT.rglob("*.py")):
+        yield path, ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+
+def test_engine_contains_no_concrete_skill_id_or_equipment_name():
+    """票 07 §5 的机械判据：``engine/`` 不出现任何装备名或 ``equip.`` 技能 id。
+
+    ``Engine.emit_frame_timing`` 只调 ``skills.dispatch_timing``（通用派发）；装备效果
+    与技能 id 一律住 ``skills/``。这条扫描是"禁止技能逻辑进主干"（`06` L65）的兜底。
+    """
+    from sgs.skills import EQUIPMENT_CARD_TYPE_IDS
+
+    forbidden = {"equip."} | set(EQUIPMENT_CARD_TYPE_IDS)
+    offenders = []
+    for path, tree in _engine_trees():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                text = node.value
+                if "equip." in text or text in forbidden:
+                    offenders.append(f"{path.name}:{node.lineno} 字符串 {text!r}")
+
+    assert not offenders, "引擎侧出现具体技能 id / 装备名：" + "；".join(offenders)
+    assert len(list(_engine_trees())) >= 4, "扫描目标可能指错了"
+
+
+def test_engine_does_not_import_concrete_skill_modules():
+    """票 07 §5：``engine/`` 只许从 ``sgs.skills`` **包入口**取通用派发，不得深入子模块。
+
+    引擎侧只认 ``sgs.skills`` 这一个入口（``dispatch_timing`` / ``resolve_instances`` 等），
+    具体技能目录 / 虚拟牌构造住子模块，引擎不得直接 import——否则"唯一入口"形同虚设。
+    """
+    offenders = []
+    for path, tree in _engine_trees():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                if node.module.startswith("sgs.skills."):
+                    offenders.append(f"{path.name}:{node.lineno} from {node.module}")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("sgs.skills."):
+                        offenders.append(f"{path.name}:{node.lineno} import {alias.name}")
+
+    assert not offenders, "引擎侧深入了 skills 子模块：" + "；".join(offenders)
+
+
+def test_call_op_is_dispatched_through_the_op_registry():
+    """``CallOp`` 一律查 :data:`sgs.effects.OPS` 注册表，``engine/`` 不出现具体效果名。"""
+    source = (ENGINE_ROOT / "game.py").read_text(encoding="utf-8")
+
+    assert "OPS.get(" in source and "OPS[" in source, (
+        "apply_effects / apply_judge_after 必须按名查 OPS 注册表"
+    )
+
+
+def test_every_behavior_call_op_is_registered():
+    from sgs.effects import CARD_BEHAVIORS, OPS, CallOp
+
+    missing = [
+        step.op
+        for behavior in CARD_BEHAVIORS.values()
+        for step in behavior.effects
+        if isinstance(step, CallOp) and step.op not in OPS
+    ]
+    assert not missing, f"行为表引用了未登记的 op：{missing}"

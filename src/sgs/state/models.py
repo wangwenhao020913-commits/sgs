@@ -16,7 +16,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from sgs.data import Identity, RuleConfig
+from sgs.data import Color, Gender, Identity, RuleConfig
 
 __all__ = [
     "CardRef",
@@ -57,15 +57,33 @@ class CardRef(_FrozenModel):
     ``attack_range`` 同为**牌面事实**（票 09 §6 / 票 12 §1）：由 ``CardType.attack_range``
     在实例化时一次派生，使 ``attack_range()`` 真读武器牌而不必回头拿内容包；非武器恒为
     ``None``。两者都是"渲染 / 校验要读的事实"，不是行为字段。
+
+    票 30 的虚拟牌 / 转化牌：``card_id < 0`` 是虚拟牌的**唯一判据**（票 12 §Q21）。
+    虚拟牌不参与牌守恒与区域互斥（它从不进任何区域），故 ``suit`` / ``rank``
+    **可空**、``color`` 由花色派生或显式给出（纯虚拟牌三者皆无）。实体牌仍由
+    :func:`sgs.data.color_of_suit` 在实例化时一次派生颜色，不另抄映射。
     """
 
     card_id: int
     type: str
     name: str
-    suit: str
-    rank: int
+    suit: str | None = None
+    rank: int | None = None
     slot: SlotKind | None = None
     attack_range: int | None = None
+    color: Color | None = None
+    virtual_sources: tuple[int, ...] = ()
+    """转化牌的**来源实体牌 id**（票 12 §Q21 的"一条 delta 带两张"）。
+
+    纯虚拟牌为空元组（无实体来源，如【八卦阵】视为使用/打出的【闪】）；
+    转化牌（【丈八蛇矛】两张手牌当【杀】）装上被转化的实体牌 id，使用结界里据此把
+    来源牌按正常使用路径移动（手牌 → 处理区 → 弃牌堆），而虚拟牌本身不落任何区域。
+    """
+
+    @property
+    def is_virtual(self) -> bool:
+        """虚拟牌 / 转化牌：``card_id < 0``（票 12 §Q21 的判据）。"""
+        return self.card_id < 0
 
 
 class Zone(str, Enum):
@@ -179,6 +197,19 @@ class Player(BaseModel):
 
     判定一律比枚举成员；主公在开局即亮明（投影侧负责可见性，票 13 §6）。
     """
+    gender: Gender | None = None
+    """座位级性别（票 30 / 票 05 §7.1 的【雌雄双股剑】判据）。
+
+    性别是**武将牌**的事实；M2 无武将 ⇒ 恒 ``None``（"未知"），"异性"判据因此不成立。
+    字段是 M3 的接口位：加武将时由武将数据填值，装备效果的形状不变。
+    """
+    virtual_equipment: tuple[str, ...] = ()
+    """**虚拟装备**（"视为装备"）的持久授予态：授予它的技能 id 元组（票 07 §6 / 票 30）。
+
+    虚拟装备**不是牌**，绝不进装备区、不占牌守恒（票 07 §6 的"绝不为它造 CardRef"）；
+    `装备区` 只放实体牌，`已装备` = 实体装备 ∪ 虚拟授予（由 ``skills.is_equipped`` 求并集）。
+    M2 没有生产者（【八阵】类技能属 M3），字段是接口位。
+    """
 
 
 class GameState(BaseModel):
@@ -200,11 +231,25 @@ class GameState(BaseModel):
     processing: list[int] = Field(default_factory=list)
     turn_seat: int | None = None
     phase: Phase | None = None
+    skill_state: dict[str, int] = Field(default_factory=dict)
+    """**per-instance 技能状态**（票 07 §6 / 票 30）：实例键 → 计数（如"已用次数"）。
+
+    实例键 = ``(owner, skill_id, source)`` 的规范文本（``skills.instance_key``）；
+    来源消失（装备离场）时由 ``skills.prune_skill_state`` 清理。M2 的 17 条装备没有
+    持久状态，故本字段实际恒空——它是"M3 只许增"的接口位，形状在此钉死。
+    """
 
     def player(self, seat: int) -> Player:
         return self.players[seat]
 
     def card(self, card_id: int) -> CardRef:
+        """按 ``card_id`` 取牌面；虚拟牌（``card_id < 0``）不在 ``cards`` 里，取它即编程错误。
+
+        负下标若被静默放行会取到牌堆末尾的另一张实体牌（Python 负索引），那会静默破坏
+        "虚拟牌不参与牌守恒"这条不变量，故这里 fail-closed。
+        """
+        if card_id < 0:
+            raise ValueError(f"牌 {card_id} 是虚拟牌，不在实体牌表里")
         return self.cards[card_id]
 
     def refs(self, card_ids: tuple[int, ...] | list[int]) -> tuple[CardRef, ...]:

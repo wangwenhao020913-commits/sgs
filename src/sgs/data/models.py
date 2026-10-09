@@ -23,6 +23,7 @@ __all__ = [
     "Deck",
     "DeckCard",
     "DeckExpect",
+    "Gender",
     "Suit",
     "color_of_suit",
 ]
@@ -78,6 +79,18 @@ def color_of_suit(suit: Suit | str) -> Color | None:
     if resolved in _BLACK_SUITS:
         return Color.BLACK
     return None  # pragma: no cover - Suit 是闭集，本条只为全函数性保留
+
+
+class Gender(str, Enum):
+    """角色的**性别**（票 05 §7.1 的【雌雄双股剑】判据）。
+
+    性别在官方里是**武将牌**的事实；M2 一个武将都不落，故没有任何数据源会填它，
+    字段默认 ``None`` = "未知"。装备效果里的"异性"判据因此只有在测试人为指定时成立
+    （M3 加武将时由武将数据填值，接口与形状都不变）。
+    """
+
+    MALE = "male"
+    FEMALE = "female"
 
 
 class Category(str, Enum):

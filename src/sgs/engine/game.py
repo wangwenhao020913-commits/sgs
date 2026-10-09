@@ -16,7 +16,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from sgs.agents import Participant
-from sgs.data import ContentPack, Identity, Mode, RuleConfig, roster_for
+from sgs.data import Color, ContentPack, Identity, Mode, RuleConfig, color_of_suit, roster_for
 from sgs.effects import (
     OPS,
     CallOp,
@@ -34,17 +34,28 @@ from sgs.effects import (
     move_card,
     targets_within_attack_range,
 )
-from sgs.resolution import Frame, ResolutionStack, StepTable
+from sgs.resolution import Control, Frame, ResolutionStack, StepTable
+from sgs.skills import (
+    ActivationPlan,
+    SeamKind,
+    SkillInstance,
+    dispatch_seam,
+    dispatch_timing,
+    prune_skill_state,
+)
 from sgs.state import (
     Action,
+    ActivateSkill,
     CardRef,
     DiscardQuery,
+    DodgeContext,
     DodgeQuery,
     FrameKind,
     GameState,
     HpChangeDelta,
     IdentityRevealDelta,
     MoveReason,
+    Pass,
     PeachQuery,
     Phase,
     PlayPhaseQuery,
@@ -58,6 +69,11 @@ from sgs.state import (
     SelectCardsQuery,
     SelectContext,
     SelectionSpec,
+    SelectOption,
+    SelectOptionContext,
+    SelectOptionQuery,
+    SkillActivationContext,
+    SkillActivationQuery,
     Slot,
     SlotKind,
     UseCard,
@@ -346,8 +362,13 @@ class Engine:
         cards: tuple[CardRef, ...] = (),
         frame_id: int = 0,
         depth: int = 0,
-    ) -> None:
-        """dispatch 一个时机；空实现也照记。"""
+    ) -> Control:
+        """dispatch 一个时机；空实现也照记。
+
+        帧外的时机（回合环 / 判定阶段收尾）没有承载帧，M2 的装备钩子都挂在 L4 / L5 / L7，
+        故这里只记录、不派发技能；返回 ``None`` 让"返回控制值"的接缝在形状上统一
+        （票 19 §8 / 票 30）。
+        """
         self._emit(
             TimingRecord(
                 seq=self._next_seq(),
@@ -360,6 +381,7 @@ class Engine:
                 cards=cards,
             )
         )
+        return None
 
     def emit_delta(self, delta: Any, *, frame_id: int = 0, depth: int = 0) -> None:
         self._emit(wrap_delta(delta, seq=self._next_seq(), frame_id=frame_id, depth=depth))
@@ -597,23 +619,46 @@ class Engine:
         actor: int | None = None,
         cards=(),
         targets: tuple[int, ...] | None = None,
-    ) -> None:
-        """以 ``frame`` 为主体 dispatch 一个时机；``source`` 随帧继承。
+    ) -> Control:
+        """以 ``frame`` 为主体 dispatch 一个时机；``source`` 随帧继承，并派发技能钩子。
 
         ``targets`` 缺省取帧的目标列表；C 段的时机记录由步骤表显式给**当前目标**
         （票 11 §3.3），使逐目标结算在记录流里可定位。
+
+        **记录幂等**（票 30）：钩子可以因询问而暂停，重入时步骤会再调本方法一次。
+        同一个"时机实例"只在**第一次**落一条 ``timing`` 记录；``_pending_timing`` 记住
+        "上一次派发是否停在这里"，重入同键即跳过记录、继续派发。真正重复出现的时机
+        （逐目标的 C2–C5、逐窗口的 ``NEAR_DEATH_AT``）键不同或中间隔了一次完成的派发，
+        故不会被误吞。
         """
-        self.emit_timing(
+        key = (
             timing,
-            frame_id=frame.frame_id,
-            depth=self.stack.depth,
-            actor=actor,
-            source=frame.data.get("source"),
-            targets=(
-                tuple(frame.data.get("targets", ())) if targets is None else tuple(targets)
-            ),
-            cards=tuple(cards),
+            actor,
+            tuple(targets) if targets is not None else None,
+            tuple(card.card_id for card in cards),
         )
+        if frame.data.get("_pending_timing") != key:
+            self.emit_timing(
+                timing,
+                frame_id=frame.frame_id,
+                depth=self.stack.depth,
+                actor=actor,
+                source=frame.data.get("source"),
+                targets=(
+                    tuple(frame.data.get("targets", ())) if targets is None else tuple(targets)
+                ),
+                cards=tuple(cards),
+            )
+        control = dispatch_timing(self, frame, timing)
+        if control == "stay":
+            frame.data["_pending_timing"] = key
+        else:
+            frame.data.pop("_pending_timing", None)
+        return control
+
+    def dispatch_seam(self, frame: Frame, kind: SeamKind) -> Control:
+        """派发一个**帧内接缝**（票 12 §Q12 / 票 30）：键不是 ``Timing``。"""
+        return dispatch_seam(self, frame, kind)
 
     def suspended(self, value: Any) -> bool:
         """``ask`` 的返回值是否为"已暂停等应答"哨兵。"""
@@ -626,7 +671,12 @@ class Engine:
         timing: Timing,
         *,
         dying: int | None = None,
-        payload: RespondContext | SelectContext | None = None,
+        payload: RespondContext
+        | SelectContext
+        | DodgeContext
+        | SkillActivationContext
+        | SelectOptionContext
+        | None = None,
     ) -> Any:
         """构造并交付一次询问；已有应答（重入）则直接返回它。"""
         return self.ask(
@@ -643,6 +693,7 @@ class Engine:
         targets: tuple[int, ...],
         use_timing: Timing | None = None,
         cancel_target: tuple[int, int] | None = None,
+        counts: bool = True,
     ) -> Frame:
         """开始一次使用：记一次本回合已用、压入 USE 帧（票 07 §6）。
 
@@ -657,9 +708,12 @@ class Engine:
         ``cancel_target`` 只给**响应型使用**（无懈一类的牌）用（票 11 §2）：记下这次使用指向
         "哪一层的哪个目标"（``(被挂起帧 id, 目标座位)``），由子帧随 ``use_push_resolve``
         继承进它的 RESOLVE 帧，出栈时 :meth:`_propagate_cancel` 据此把那一层标成被抵消。
+
+        ``counts=False`` 用于**不计次数**的使用（【青龙偃月刀】的续杀，票 12）。
         """
-        counts = self.state.player(source).card_use_counts
-        counts[card.type] = counts.get(card.type, 0) + 1
+        if counts:
+            counts_by_type = self.state.player(source).card_use_counts
+            counts_by_type[card.type] = counts_by_type.get(card.type, 0) + 1
         data: dict[str, Any] = {
             "card": card,
             "source": source,
@@ -722,10 +776,19 @@ class Engine:
         )
 
     def move_used_card_to_processing(self, frame: Frame) -> None:
-        """手牌 → 处理区（``reason = USE``）：在 L4.1 / L4.2 之间（票 07 §3）。"""
+        """手牌 → 处理区（``reason = USE``）：在 L4.1 / L4.2 之间（票 07 §3）。
+
+        虚拟牌不落区域（票 12 §Q21）：纯虚拟牌（八阵的【闪】）无事发生；**转化牌**
+        （丈八蛇矛的【杀】）把它的**来源实体牌**走同一条路径（手牌 → 处理区），
+        故牌守恒对转化路径仍然成立。
+        """
+        card = frame.data["card"]
+        if card.is_virtual:
+            self._move_virtual_sources(frame, to_zone=ZoneRef(Zone.PROCESSING))
+            return
         self.move_in_frame(
             frame,
-            (frame.data["card"],),
+            (card,),
             to_zone=ZoneRef(Zone.PROCESSING),
             reason=MoveReason.USE,
             owner=frame.data["source"],
@@ -733,10 +796,27 @@ class Engine:
 
     def move_processing_card_to_discard(self, frame: Frame) -> None:
         """处理区 → 弃牌堆（``reason = USE``）：L5.6"使用结算结束后"（票 07 §3）。"""
+        card = frame.data["card"]
+        if card.is_virtual:
+            self._move_virtual_sources(frame, to_zone=ZoneRef(Zone.DISCARD))
+            return
         self.move_in_frame(
             frame,
-            (frame.data["card"],),
+            (card,),
             to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.USE,
+            owner=frame.data["source"],
+        )
+
+    def _move_virtual_sources(self, frame: Frame, *, to_zone: ZoneRef) -> None:
+        """把转化牌的来源实体牌从当前位置搬到 ``to_zone``（虚拟牌自己不动）。"""
+        sources = tuple(getattr(frame.data["card"], "virtual_sources", ()))
+        if not sources:
+            return
+        self.move_in_frame(
+            frame,
+            self.state.refs(sources),
+            to_zone=to_zone,
             reason=MoveReason.USE,
             owner=frame.data["source"],
         )
@@ -745,8 +825,10 @@ class Engine:
         """处理区 → 目标座位的判定区（``reason = PUT``、归属 = 使用者）。
 
         延时锦囊"使用当时"的落点（票 10 §7）：L4 走完就把实体牌置入目标判定区，
-        L5 推迟到目标自己的判定阶段。
+        L5 推迟到目标自己的判定阶段。虚拟牌不是延时锦囊，不会走到这里。
         """
+        if frame.data["card"].is_virtual:
+            return
         self.move_in_frame(
             frame,
             (frame.data["card"],),
@@ -766,6 +848,8 @@ class Engine:
         """
         card = frame.data["card"]
         seat = frame.data["source"]
+        if card.is_virtual:  # 虚拟装备不是牌（票 07 §6）：装备区只放实体牌
+            return
         for card_id in list(self.state.player(seat).equip):
             if self.state.card(card_id).slot is card.slot:
                 self.move_in_frame(
@@ -786,10 +870,14 @@ class Engine:
     # -- 打出帧（票 27）：手牌 → 处理区 → 弃牌堆 --------------------------------
 
     def move_played_card_to_processing(self, frame: Frame) -> None:
-        """打出：手牌 → 处理区（``reason = USE``）——L6 的第一段移动。"""
+        """打出：手牌 → 处理区（``reason = USE``）——L6 的第一段移动（转化牌同姿态）。"""
+        card = frame.data["card"]
+        if card.is_virtual:
+            self._move_virtual_sources(frame, to_zone=ZoneRef(Zone.PROCESSING))
+            return
         self.move_in_frame(
             frame,
-            (frame.data["card"],),
+            (card,),
             to_zone=ZoneRef(Zone.PROCESSING),
             reason=MoveReason.USE,
             owner=frame.data["source"],
@@ -797,9 +885,13 @@ class Engine:
 
     def move_played_card_to_discard(self, frame: Frame) -> None:
         """打出：处理区 → 弃牌堆（``reason = USE``）——打出没有使用结算。"""
+        card = frame.data["card"]
+        if card.is_virtual:
+            self._move_virtual_sources(frame, to_zone=ZoneRef(Zone.DISCARD))
+            return
         self.move_in_frame(
             frame,
-            (frame.data["card"],),
+            (card,),
             to_zone=ZoneRef(Zone.DISCARD),
             reason=MoveReason.USE,
             owner=frame.data["source"],
@@ -861,20 +953,29 @@ class Engine:
         return bool(player.hand or player.equip or player.judge)
 
     def selection_face(
-        self, seat: int, zones: tuple[Zone, ...]
+        self, seat: int, zones: tuple[Zone, ...], *, reveal_hand: bool = False
     ) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
         """按 ``zones`` 给出的区（固定顺序）铺开 ``seat`` 的选择面。
 
-        他人手牌是**隐藏槽**（只有位置）、装备 / 判定区是可见槽。隐藏槽的位置用新增的
-        ``select`` 子流打乱（票 19 §8 / §12），使"选了第几个"不携带手牌顺序信息；
-        返回的 ``card_ids`` 是**引擎私有**的位置 → 实体牌映射，不进询问记录，
-        故不泄露牌面身份。
+        他人手牌是**隐藏槽**（只有位置）、装备 / 判定区是可见槽；``reveal_hand=True``
+        用于"挑牌者就是手牌持有者本人"（【贯石斧】成本、【雌雄双股剑】弃牌、
+        【青龙偃月刀】挑【杀】），此时自己的手牌是**可见槽**（票 19 §3）。
+        隐藏槽的位置用新增的 ``select`` 子流打乱（票 19 §8 / §12），使"选了第几个"
+        不携带手牌顺序信息；返回的 ``card_ids`` 是**引擎私有**的位置 → 实体牌映射，
+        不进询问记录，故不泄露牌面身份。
         """
         player = self.state.player(seat)
         slots: list[Slot] = []
         card_ids: list[int] = []
         for zone in zones:
             if zone is Zone.HAND:
+                if reveal_hand:
+                    for card_id in player.hand:
+                        slots.append(
+                            Slot(ref=ZoneRef(Zone.HAND, seat), card=self.state.card(card_id))
+                        )
+                        card_ids.append(card_id)
+                    continue
                 order = list(range(len(player.hand)))
                 self._select.shuffle(order)
                 for index in order:
@@ -920,12 +1021,15 @@ class Engine:
         window_frame: int = 0,
         mode: RespondMode = RespondMode.PLAY,
         use_targets: tuple[int, ...] = (),
+        providers_used: tuple[str, ...] = (),
     ) -> Any:
         """向 ``actor`` 发一次 ``RESPOND`` 询问；重入直接返回已存应答（票 19 §8）。
 
         ``mode = USE`` 时候选是"使用某张牌"：``use_targets`` 非空时每个目标一个候选
         （借刀杀人迫使的【杀】），**为空时是无目标的响应使用**（无懈一类的牌，目标由
         ``window_frame`` + ``target`` 承载）；``mode = PLAY`` 是打出（无目标）。
+
+        ``providers_used`` 供"需要【闪】"窗口过滤已问过的装备提供者（票 10 §5.5）。
         """
         payload = RespondContext(
             cause=cause,
@@ -934,6 +1038,7 @@ class Engine:
             window_frame=window_frame,
             mode=mode,
             use_targets=tuple(use_targets),
+            providers_used=tuple(providers_used),
         )
         return self.ask(
             lambda seq: self._build_query(
@@ -956,12 +1061,20 @@ class Engine:
         ``build_face() -> (slots, card_ids)`` 会消耗一次 ``select`` 子流的随机数，
         故绝不能因重入而重跑；答案回来后把该位置解析成实体 ``card_id`` 元组返回。
         池为空时**不构造询问**、直接返回空元组（票 19 §6）。
+
+        答案也按帧内键缓存（票 30）：钩子可以跨多次重入，重入时既不重发询问、也不
+        重算选择面。
         """
+        answers = frame.data.setdefault("ask_answers", {})
+        answer_key = ("select", key)
+        if answer_key in answers:
+            return answers[answer_key]
         store = frame.data.setdefault("asks", {})
         if key not in store:
             store[key] = build_face()
         slots, card_ids = store[key]
         if not slots:
+            answers[answer_key] = ()
             return ()
         action = self.ask(
             lambda seq: self._build_query(
@@ -976,7 +1089,144 @@ class Engine:
             return SUSPEND
         assert isinstance(action, SelectCards)
         store.pop(key, None)
-        return tuple(card_ids[index] for index in action.picks)
+        result = tuple(card_ids[index] for index in action.picks)
+        answers[answer_key] = result
+        return result
+
+    def ask_skill_activation(
+        self,
+        frame: Frame,
+        instance: SkillInstance,
+        timing: Timing,
+        plan: ActivationPlan,
+        *,
+        key: str | None = None,
+    ) -> Any:
+        """发一次 ``SKILL_ACTIVATION`` 询问（票 19 §5 / 票 30）：候选 = 付得起的载荷组合。
+
+        载荷（面内位置）烘进 ``ActivateSkill`` 候选；返回 ``ActivateSkill`` / ``Pass``
+        / ``SUSPEND``；答案按 ``(skill_id, key)`` 帧内缓存，重入不重发（``key`` 让同一时机
+        上的真钩子与帧内接缝不共用缓存槽）。``plan.card_types`` 非空时选取面只铺这些牌名
+        （【青龙偃月刀】只让挑【杀】）。选中后的位置解析成实体牌 id，存进
+        ``activation_picks`` 供 handler 读。
+        """
+        answers = frame.data.setdefault("ask_answers", {})
+        answer_key = ("activate", instance.skill_id, key or str(timing))
+        if answer_key in answers:
+            return answers[answer_key]
+        slots: tuple[Slot, ...] = ()
+        card_ids: tuple[int, ...] = ()
+        face_key: str | None = None
+        if plan.zones:
+            store = frame.data.setdefault("asks", {})
+            face_key = f"activation:{key or timing.value}:{instance.skill_id}"
+            if face_key not in store:
+                store[face_key] = self.selection_face(
+                    instance.owner, plan.zones, reveal_hand=True
+                )
+            slots, card_ids = store[face_key]
+            if plan.card_types:
+                kept = [
+                    (slot, card_id)
+                    for slot, card_id in zip(slots, card_ids)
+                    if slot.card is not None and slot.card.type in plan.card_types
+                ]
+                slots = tuple(slot for slot, _ in kept)
+                card_ids = tuple(card_id for _, card_id in kept)
+        action = self.ask(
+            lambda seq: self._build_query(
+                QueryKind.SKILL_ACTIVATION,
+                instance.owner,
+                timing,
+                seq,
+                payload=SkillActivationContext(
+                    skill_id=instance.skill_id,
+                    optional=plan.optional,
+                    min_picks=plan.min_picks,
+                    max_picks=plan.max_picks,
+                    slots=tuple(slots),
+                ),
+            )
+        )
+        if action is SUSPEND:
+            return SUSPEND
+        if face_key is not None:
+            frame.data.setdefault("asks", {}).pop(face_key, None)
+        if isinstance(action, ActivateSkill) and action.picks:
+            frame.data.setdefault("activation_picks", {})[instance.skill_id] = tuple(
+                card_ids[index] for index in action.picks
+            )
+        answers[answer_key] = action
+        return action
+
+    def activation_picks(self, frame: Frame, skill_id: str) -> tuple[int, ...]:
+        """上一次"是否发动"询问里烘进候选的成本载荷（实体牌 id 元组）。"""
+        return tuple(frame.data.get("activation_picks", {}).get(skill_id, ()))
+
+    def ask_option(
+        self,
+        frame: Frame,
+        actor: int,
+        timing: Timing,
+        *,
+        skill_id: str,
+        options: tuple[str, ...],
+    ) -> Any:
+        """发一次 ``SELECT_OPTION`` 询问（票 12 §Q6 / 票 30）：选项闭集、强制选择。
+
+        答案按 ``(skill_id, actor)`` 帧内缓存，重入不重发。
+        """
+        answers = frame.data.setdefault("ask_answers", {})
+        answer_key = ("option", skill_id, actor)
+        if answer_key in answers:
+            return answers[answer_key]
+        action = self.ask(
+            lambda seq: self._build_query(
+                QueryKind.SELECT_OPTION,
+                actor,
+                timing,
+                seq,
+                payload=SelectOptionContext(skill_id=skill_id, options=options),
+            )
+        )
+        if action is SUSPEND:
+            return SUSPEND
+        assert isinstance(action, SelectOption)
+        answers[answer_key] = action
+        return action
+
+    def open_skill_judgment(self, frame: Frame, subject: int, skill_id: str) -> None:
+        """技能触发的一次**惰性判定**：压 JUDGE 帧（票 10 §1 / §5.3）。
+
+        ``after`` 指向通用的判定后果 op；``skill_id`` + ``activation_parent`` 让后果
+        把"红 / 黑"写回发起判定的那个帧（八阵出闪的成败）。
+        """
+        self.push_frame(
+            FrameKind.JUDGE,
+            {
+                "subject": subject,
+                "targets": (subject,),
+                "source": frame.data.get("source"),
+                "card": frame.data.get("card"),
+                "judge_card": None,
+                "use_timing": frame.data.get("use_timing"),
+                "after": "after_skill_judgment",
+                "skill_id": skill_id,
+                "activation_parent": frame.frame_id,
+            },
+            timing=Timing.JUDGE_ON,
+        )
+
+    def note_skill_judgment(self, frame: Frame) -> None:
+        """判定后果：把"红 = 成功"写回发起判定的帧（票 10 §5.3）。"""
+        parent_id = frame.data.get("activation_parent")
+        judge_card = frame.data.get("judge_card")
+        red = judge_card is not None and color_of_suit(judge_card.suit) is Color.RED
+        for candidate in reversed(self.stack.frames):
+            if candidate.frame_id == parent_id:
+                candidate.data["skill_result"] = red
+                return
+        raise RuntimeError(f"判定发起帧 {parent_id} 不在栈上；结算栈被破坏")
 
     def apply_timing_ops(self, frame: Frame, timing: Timing) -> Any:
         """跑绑定在这个时机上的调用型步骤（票 27 的 ``CardBehavior.timing_ops``）。
@@ -1101,6 +1351,7 @@ class Engine:
             self.state, ctx, tuple(cards), to_zone=to_zone, reason=reason, owner=owner
         )
         self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+        prune_skill_state(self.state)
 
     def _move_cards(
         self,
@@ -1126,6 +1377,7 @@ class Engine:
             owner=owner,
         )
         self.emit_delta(delta)
+        prune_skill_state(self.state)
 
     def apply_effects(
         self, frame: Frame, effects: Sequence[EffectStep], *, timing: Timing
@@ -1261,7 +1513,12 @@ class Engine:
         seq: int,
         *,
         dying: int | None = None,
-        payload: RespondContext | SelectContext | None = None,
+        payload: RespondContext
+        | SelectContext
+        | DodgeContext
+        | SkillActivationContext
+        | SelectOptionContext
+        | None = None,
     ) -> Query:
         actions = legal_actions_for(
             self.state, actor, kind, answers_seq=seq, dying=dying, payload=payload
@@ -1340,6 +1597,35 @@ class Engine:
                 view=view,
                 spec=payload.spec,
                 slots=payload.slots,
+            )
+        if kind is QueryKind.SKILL_ACTIVATION:
+            if not isinstance(payload, SkillActivationContext):
+                raise ValueError("SKILL_ACTIVATION 询问必须给出 SkillActivationContext")
+            return SkillActivationQuery(
+                seq=seq,
+                actor=actor,
+                timing=timing,
+                prompt="是否发动该技能？",
+                legal_actions=actions,
+                view=view,
+                skill_id=payload.skill_id,
+                optional=payload.optional,
+                min_picks=payload.min_picks,
+                max_picks=payload.max_picks,
+                slots=payload.slots,
+            )
+        if kind is QueryKind.SELECT_OPTION:
+            if not isinstance(payload, SelectOptionContext):
+                raise ValueError("SELECT_OPTION 询问必须给出 SelectOptionContext")
+            return SelectOptionQuery(
+                seq=seq,
+                actor=actor,
+                timing=timing,
+                prompt="请选择一项。",
+                legal_actions=actions,
+                view=view,
+                skill_id=payload.skill_id,
+                options=payload.options,
             )
         raise ValueError(f"还没有 {kind.value} 询问的构造器")
 
@@ -1787,6 +2073,7 @@ def instantiate_cards(pack: ContentPack) -> tuple[CardRef, ...]:
             rank=deck_card.rank,
             slot=slots[deck_card.type],
             attack_range=ranges[deck_card.type],
+            color=color_of_suit(deck_card.suit),
         )
         for index, deck_card in enumerate(pack.deck.cards)
     )

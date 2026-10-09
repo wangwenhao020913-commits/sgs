@@ -21,8 +21,10 @@ from itertools import combinations
 
 from sgs.state import (
     Action,
+    ActivateSkill,
     CardRef,
     DiscardCards,
+    DodgeContext,
     EndPhase,
     GameState,
     Pass,
@@ -33,6 +35,9 @@ from sgs.state import (
     RespondMode,
     SelectCards,
     SelectContext,
+    SelectOption,
+    SelectOptionContext,
+    SkillActivationContext,
     SlotKind,
     UseCard,
     alive_seats,
@@ -41,7 +46,13 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .behaviors import CardBehavior, TargetCount, UseContext, behavior_for
-from .modifiers import ModifierContext, ModifierPoint, ModifierRole, apply_modifiers
+from .modifiers import (
+    CandidateScope,
+    ModifierContext,
+    ModifierPoint,
+    ModifierRole,
+    apply_modifiers,
+)
 
 __all__ = [
     "EFFECTIVENESS",
@@ -354,20 +365,21 @@ def legal_actions_for(
     *,
     answers_seq: int,
     dying: int | None = None,
-    payload: RespondContext | SelectContext | None = None,
+    payload: RespondContext | SelectContext | DodgeContext | SkillActivationContext | SelectOptionContext | None = None,
 ) -> tuple[Action, ...]:
     """给出 ``seat`` 在 ``kind`` 询问下的全部候选，按票 05 的稳定键排序。
 
     ``dying`` 只在 ``PEACH`` 询问下需要：濒死语境里【桃】的合法目标是**濒死者**
     而不是应答者自己，故目标不走行为表的目标规则（票 07 §4 / 票 21 §7）。
-    票 27 的新 kind 走**类型化 ``payload``**（票 19 §4）。
+    票 27 的新 kind 走**类型化 ``payload``**（票 19 §4）；票 30 再补三类。
     """
     if kind is QueryKind.PLAY_PHASE:
         candidates = _play_phase(state, seat, answers_seq)
     elif kind is QueryKind.DISCARD:
         candidates = _discard(state, seat, answers_seq)
     elif kind is QueryKind.DODGE:
-        candidates = _dodge(state, seat, answers_seq)
+        providers_used = payload.providers_used if isinstance(payload, DodgeContext) else ()
+        candidates = _dodge(state, seat, answers_seq, providers_used)
     elif kind is QueryKind.PEACH:
         if dying is None:
             raise ValueError("PEACH 询问必须给出濒死者座位")
@@ -380,6 +392,14 @@ def legal_actions_for(
         if not isinstance(payload, SelectContext):
             raise ValueError("SELECT_CARDS 询问必须给出 SelectContext")
         candidates = _select_cards(state, seat, answers_seq, payload)
+    elif kind is QueryKind.SKILL_ACTIVATION:
+        if not isinstance(payload, SkillActivationContext):
+            raise ValueError("SKILL_ACTIVATION 询问必须给出 SkillActivationContext")
+        candidates = _skill_activation(seat, answers_seq, payload)
+    elif kind is QueryKind.SELECT_OPTION:
+        if not isinstance(payload, SelectOptionContext):
+            raise ValueError("SELECT_OPTION 询问必须给出 SelectOptionContext")
+        candidates = _select_option(seat, answers_seq, payload)
     else:
         raise ValueError(f"还没有 {kind.value} 询问的候选生成器")
     return tuple(sorted(candidates, key=_sort_key))
@@ -417,6 +437,17 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
         actions.extend(
             apply_modifiers(ModifierPoint.CANDIDATES, state, ctx, generated)
         )
+    # 整段候选期的**通用追加**（票 30）：虚拟牌不绑在某张手牌上（【丈八蛇矛】的
+    # 转化【杀】没有实体手牌可 loop），故在逐张牌之外再跑一趟 `ctx.card=None` 的
+    # CANDIDATES。排序仍由 `legal_actions_for` 统一执行。
+    actions.extend(
+        apply_modifiers(
+            ModifierPoint.CANDIDATES,
+            state,
+            ModifierContext(subject=seat, card=None, answers_seq=answers_seq, scope=CandidateScope.PLAY),
+            (),
+        )
+    )
     actions.append(EndPhase(answers_seq=answers_seq))
     return actions
 
@@ -433,11 +464,34 @@ def _discard(state: GameState, seat: int, answers_seq: int) -> list[Action]:
     ]
 
 
-def _dodge(state: GameState, seat: int, answers_seq: int) -> list[Action]:
-    """【闪】的响应窗口：手牌里的每张【闪】各一个候选，放弃恒在最后。"""
-    actions = [
+def _dodge(
+    state: GameState, seat: int, answers_seq: int, providers_used: tuple[str, ...] = ()
+) -> list[Action]:
+    """【闪】的响应窗口：真牌候选 + "需要牌"提供者序列（票 10 §5 / 票 30）+ 放弃。
+
+    提供者（【八卦阵】）由 ``CANDIDATES`` 挂点追加为 ``ActivateSkill``；已经问过的
+    提供者（``providers_used``）被过滤掉——"每个提供者只问一次"。选中才惰性判定。
+    放弃恒在最后且**永远可选**（需要【闪】是"可以"，不是"必须"）。
+    """
+    actions: list[Action] = [
         UseCard(card=card, targets=(), answers_seq=answers_seq)
         for card in _usable_hand(state, seat, UseContext.RESPONSE, Timing.RESOLVE_BEFORE_EFFECT)
+    ]
+    generated = apply_modifiers(
+        ModifierPoint.CANDIDATES,
+        state,
+        ModifierContext(
+            subject=seat,
+            answers_seq=answers_seq,
+            providers_used=providers_used,
+            scope=CandidateScope.DODGE,
+        ),
+        tuple(actions),
+    )
+    actions = [
+        action
+        for action in generated
+        if not (isinstance(action, ActivateSkill) and action.skill_id in providers_used)
     ]
     actions.append(Pass(answers_seq=answers_seq))
     return actions
@@ -485,6 +539,32 @@ def _respond(
                 actions.append(UseCard(card=card, targets=combo, answers_seq=answers_seq))
         else:
             actions.append(PlayCard(card=card, answers_seq=answers_seq))
+    if ctx.required in ("slash", "dodge"):
+        # 【丈八蛇矛】的转化【杀】可**打出**、【八卦阵】可"视为打出【闪】"（票 10 §5.5 /
+        # 票 30）：整段候选期追加一趟 CANDIDATES。"每提供者只问一次"由这里的通用过滤兜底。
+        scope = CandidateScope.RESPOND if ctx.required == "slash" else CandidateScope.DODGE
+        generated = apply_modifiers(
+            ModifierPoint.CANDIDATES,
+            state,
+            ModifierContext(
+                subject=seat,
+                card=None,
+                answers_seq=answers_seq,
+                providers_used=ctx.providers_used,
+                scope=scope,
+                respond_required=ctx.required,
+                respond_mode=ctx.mode,
+                respond_targets=tuple(ctx.use_targets),
+            ),
+            tuple(actions),
+        )
+        actions = [
+            action
+            for action in generated
+            if not (
+                isinstance(action, ActivateSkill) and action.skill_id in ctx.providers_used
+            )
+        ]
     actions.append(Pass(answers_seq=answers_seq))
     return actions
 
@@ -508,6 +588,41 @@ def _select_cards(
     if ctx.spec.optional:
         actions.append(Pass(answers_seq=answers_seq))
     return actions
+
+
+def _skill_activation(
+    seat: int, answers_seq: int, ctx: SkillActivationContext
+) -> list[Action]:
+    """"是否发动"：一次询问、载荷烘进候选（票 19 §5 / 票 30）。
+
+    ``max_picks == 0`` ⇒ 裸发动（后续强制步自己再问）；否则把"取 k 张面内位置"的全部
+    组合烘进 ``ActivateSkill.picks``。**付不起的组合不进候选**（``min_picks`` 大于面大小
+    时一个都不造）；``optional`` 决定放弃候选（"可以 / 必须"是效果属性，与 ``locked`` 正交）。
+    """
+    del seat
+    actions: list[Action] = []
+    if ctx.max_picks <= 0:
+        actions.append(ActivateSkill(skill_id=ctx.skill_id, answers_seq=answers_seq))
+    else:
+        high = min(ctx.max_picks, len(ctx.slots))
+        for count in range(ctx.min_picks, high + 1):
+            actions.extend(
+                ActivateSkill(skill_id=ctx.skill_id, picks=picks, answers_seq=answers_seq)
+                for picks in combinations(range(len(ctx.slots)), count)
+            )
+    if ctx.optional:
+        actions.append(Pass(answers_seq=answers_seq))
+    return actions
+
+
+def _select_option(
+    seat: int, answers_seq: int, ctx: SelectOptionContext
+) -> list[Action]:
+    """选项闭集：每个选项一个候选（强制选择，无 ``Pass``，票 12 §Q6）。"""
+    del seat
+    return [
+        SelectOption(choice=option, answers_seq=answers_seq) for option in ctx.options
+    ]
 
 
 def _usable_hand(
@@ -543,6 +658,8 @@ def _sort_key(action: Action) -> tuple[int, tuple[int, ...], str]:
     if isinstance(action, PlayCard):
         return (0, (action.card.card_id,), action.kind)
     if isinstance(action, SelectCards):
+        return (0, action.picks, action.kind)
+    if isinstance(action, ActivateSkill):
         return (0, action.picks, action.kind)
     if isinstance(action, DiscardCards):
         return (0, tuple(card.card_id for card in action.cards), action.kind)

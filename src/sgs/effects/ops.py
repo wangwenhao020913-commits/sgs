@@ -27,6 +27,7 @@ from typing import Any
 from sgs.data import Suit
 from sgs.resolution import Frame
 from sgs.state import (
+    ActivateSkill,
     FrameKind,
     MoveReason,
     PlayCard,
@@ -105,9 +106,21 @@ def resolve_lightning(host: Any, frame: Frame) -> None:
     _open_judgment(host, frame, after=after_lightning.__name__)
 
 
+def after_skill_judgment(host: Any, frame: Frame) -> None:
+    """**技能触发的判定**后果（票 10 §5.3 / 票 30）：把"红 / 黑"写回发起判定的帧。
+
+    唯一生产者是【八卦阵】的"需要【闪】时判定"：红 ⇒ 需要被满足（视为使用【闪】）、
+    黑 ⇒ 该提供者机会用尽、流程继续到真牌窗口。后果本身不在 ``effects`` 里判花色，
+    只把判定牌交给引擎（``note_skill_judgment``），使"红 = 成功"这条语义与技能定义同处
+    ``skills/`` 之外的中性位置。
+    """
+    host.note_skill_judgment(frame)
+
+
 def after_indulgence(host: Any, frame: Frame) -> None:
     """【乐不思蜀】判定后果：非红桃 ⇒ 被判定者**跳过出牌阶段**（不搬牌）。"""
-    if Suit(frame.data["judge_card"].suit) is not Suit.HEART:
+    judge_card = frame.data["judge_card"]
+    if judge_card.suit is None or Suit(judge_card.suit) is not Suit.HEART:
         host.skip_play_phase(frame.data["subject"])
 
 
@@ -119,9 +132,9 @@ def after_lightning(host: Any, frame: Frame) -> None:
     顺延到下一个合法目标的判定区（票 11 §4）。
     """
     judge_card = frame.data["judge_card"]
-    if Suit(judge_card.suit) is not Suit.SPADE:
+    if judge_card.suit is None or Suit(judge_card.suit) is not Suit.SPADE:
         return
-    if not LIGHTNING_RANK_MIN <= judge_card.rank <= LIGHTNING_RANK_MAX:
+    if judge_card.rank is None or not LIGHTNING_RANK_MIN <= judge_card.rank <= LIGHTNING_RANK_MAX:
         return
     subject = frame.data["subject"]
     _push_damage(
@@ -346,8 +359,17 @@ def _resist_or_damage(
     """"需打出【杀】/【闪】，否则受到使用者造成的 1 点伤害"的共用主体（南蛮 / 万箭）。
 
     ``target = None``：这是**打出窗口**（票 19 §3 的描述符口径），被问者由 ``actor`` 给出。
+    【万箭齐发】的"需要【闪】"是票 10 §5.5 的**第二个提供者序列**：与 M1 的 ``DODGE``
+    共用同一套嵌法——【八卦阵】作为 ``ActivateSkill`` 进候选、每提供者只问一次、
+    选中才惰性压判定帧、红 ⇒ 视为打出【闪】、黑 ⇒ 继续到真牌窗口。
     """
     target = host.current_target(frame)
+    providers_used: tuple[str, ...] = ()
+    if required == "dodge":
+        if "skill_result" in frame.data:
+            if frame.data.pop("skill_result"):
+                return None  # 红 ⇒ 视为打出【闪】，需要被满足、不受伤害
+        providers_used = tuple(frame.data.get("providers_used", ()))
     action = host.ask_respond(
         frame,
         target,
@@ -356,8 +378,13 @@ def _resist_or_damage(
         required=required,
         target=None,
         window_frame=frame.frame_id,
+        providers_used=providers_used,
     )
     if host.suspended(action):
+        return "stay"
+    if isinstance(action, ActivateSkill):
+        frame.data.setdefault("providers_used", []).append(action.skill_id)
+        host.open_skill_judgment(frame, target, action.skill_id)
         return "stay"
     if isinstance(action, PlayCard):
         host.play_card(action.card, source=target, timing=Timing.PLAY_DECLARE)
@@ -470,6 +497,7 @@ OPS: dict[str, Callable[[Any, Frame], Any]] = {
     resolve_lightning.__name__: resolve_lightning,
     after_indulgence.__name__: after_indulgence,
     after_lightning.__name__: after_lightning,
+    after_skill_judgment.__name__: after_skill_judgment,
     resolve_ex_nihilo.__name__: resolve_ex_nihilo,
     resolve_peach_garden.__name__: resolve_peach_garden,
     resolve_dismantlement.__name__: resolve_dismantlement,

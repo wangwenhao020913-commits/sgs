@@ -18,13 +18,14 @@
 from .errors import DataLoadError, LoadError
 from .identities import IDENTITY_LABELS, IDENTITY_ROSTERS, Identity, Mode, roster_for
 from .loader import load_content_pack, validate_content_pack
-from .models import Color, ContentPack, Suit, color_of_suit
+from .models import Color, ContentPack, Gender, Suit, color_of_suit
 from .rule_config import RuleConfig, validate_rule_config
 
 __all__ = (
     "Color",
     "ContentPack",
     "DataLoadError",
+    "Gender",
     "IDENTITY_LABELS",
     "IDENTITY_ROSTERS",
     "Identity",
