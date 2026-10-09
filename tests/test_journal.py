@@ -18,7 +18,7 @@ from sgs.engine import (
     dump_journal,
     record_json,
 )
-from sgs.state import FrameKind, MoveReason, Zone
+from sgs.state import FrameKind, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
 from support import play_standard
@@ -69,8 +69,8 @@ def test_the_seven_kinds_are_all_defined_and_serialisable():
             frame_id=0,
             depth=0,
             cards=(),
-            from_zone=Zone.DECK,
-            to_zone=Zone.HAND,
+            from_zone=ZoneRef(Zone.DECK),
+            to_zone=ZoneRef(Zone.HAND, 0),
             reason=MoveReason.DRAW,
         ),
         FrameRecord(
@@ -130,7 +130,7 @@ def test_the_opening_records_are_the_initial_shuffle_then_the_deal():
     assert shuffle.seq == 1, "seq = 1 必是初次洗牌（票 08 §5）"
     assert shuffle.frame_id == 0, "无帧哨兵：引擎初始化"
     assert shuffle.from_zone is None, "初次洗牌不来自弃牌堆"
-    assert shuffle.to_zone.value == "deck"
+    assert shuffle.to_zone.zone.value == "deck"
     assert len(shuffle.cards) == 53
 
     assert isinstance(dealing, TimingRecord)
@@ -140,7 +140,7 @@ def test_the_opening_records_are_the_initial_shuffle_then_the_deal():
     for seat, deal in enumerate((deal_seat_0, deal_seat_1)):
         assert deal.delta_type == "card_move"
         assert deal.reason is MoveReason.DRAW
-        assert deal.to_zone.value == "hand"
+        assert deal.to_zone.zone.value == "hand"
         assert len(deal.cards) == 4, "按座序每个座位发 4 张"
         assert [card.card_id for card in deal.cards] == [
             card.card_id for card in shuffle.cards[seat * 4 : seat * 4 + 4]

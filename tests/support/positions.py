@@ -31,11 +31,13 @@ __all__ = [
 
 @dataclass(frozen=True)
 class SeatSpec:
-    """一个座位的构造参数；``hand`` 是 ``card_id`` 元组。"""
+    """一个座位的构造参数；``hand`` / ``equip`` / ``judge`` 都是 ``card_id`` 元组。"""
 
     hp: int = 4
     hp_max: int = 4
     hand: tuple[int, ...] = ()
+    equip: tuple[int, ...] = ()
+    judge: tuple[int, ...] = ()
     alive: bool = True
 
 
@@ -64,6 +66,8 @@ def build_state(
             hp_max=spec.hp_max,
             alive=spec.alive,
             hand=list(spec.hand),
+            equip=list(spec.equip),
+            judge=list(spec.judge),
         )
         for seat, spec in enumerate(seats)
     )

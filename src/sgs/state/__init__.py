@@ -16,7 +16,9 @@ from .models import (
     MoveReason,
     Phase,
     Player,
+    SlotKind,
     Zone,
+    ZoneRef,
 )
 from .projection import project
 from .protocol import (
@@ -59,8 +61,10 @@ __all__ = (
     "PlayerView",
     "Query",
     "QueryKind",
+    "SlotKind",
     "UseCard",
     "Zone",
+    "ZoneRef",
     "parse_action",
     "project",
 )

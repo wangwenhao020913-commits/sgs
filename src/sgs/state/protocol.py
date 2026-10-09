@@ -51,13 +51,19 @@ class QueryKind(str, Enum):
 
 
 class PlayerPublic(_FrozenModel):
-    """公开区里的一个座位：对手只暴露手牌**数**，不暴露身份。"""
+    """公开区里的一个座位：对手只暴露手牌**数**，不暴露身份。
+
+    ``equip`` / ``judge`` 是**公开信息**且逐座位（票 08 §6）。手牌上限**不在这里**：
+    它由当前体力值派生（``effects.hand_limit``），不新增冗余字段。
+    """
 
     seat: int
     hp: int
     hp_max: int
     hand_count: int
     alive: bool
+    equip: tuple[CardRef, ...]
+    judge: tuple[CardRef, ...]
 
 
 class PlayerView(_FrozenModel):

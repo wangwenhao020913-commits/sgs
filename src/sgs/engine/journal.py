@@ -53,11 +53,15 @@ __all__ = [
     "wrap_delta",
 ]
 
-EVENT_SCHEMA_VERSION = 1
-"""记录流结构版本；与数据版本 ``schema_version`` 字段名不同、各自升版（票 15）。"""
+EVENT_SCHEMA_VERSION = 2
+"""记录流结构版本；与数据版本 ``schema_version`` 字段名不同、各自升版（票 15 / 票 16）。
+
+M2 集体一升：区域引用升 ``ZoneRef``、``owner`` 改义、``PlayerPublic`` 增公开区字段……
+此后任何票新增 / 变更记录字段或 ``delta_type`` 一律**就地追加**到票 16 §2 的 v2 清单。
+"""
 
 SUPPORTED_EVENT_VERSIONS: frozenset[int] = frozenset({EVENT_SCHEMA_VERSION})
-"""本引擎读得懂的记录流版本集合（M1 只有 1；升版判据见票 15 §3）。"""
+"""本引擎读得懂的记录流版本集合（M2 起只有 2；**不建** v1 兼容读取器，票 16 §4）。"""
 
 
 class _FrozenModel(BaseModel):

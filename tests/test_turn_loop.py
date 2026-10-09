@@ -103,8 +103,8 @@ def test_discard_phase_discards_down_to_current_hp():
     ]
     assert len(discards) == 1, "这一局只应有一次弃牌操作"
     assert len(discards[0].cards) == 2, "手牌 6、体力 4 ⇒ 弃 2 张"
-    assert discards[0].from_zone.value == "hand"
-    assert discards[0].to_zone.value == "discard"
+    assert discards[0].from_zone.zone.value == "hand"
+    assert discards[0].to_zone.zone.value == "discard"
     assert len(engine.state.player(0).hand) == engine.state.player(0).hp
 
 
@@ -135,7 +135,7 @@ def test_a_nonempty_discard_pile_is_reshuffled_instead_of_ending_the_game():
         and record.from_zone is not None
     ]
     assert len(reshuffles) == 1
-    assert reshuffles[0].from_zone.value == "discard"
+    assert reshuffles[0].from_zone.zone.value == "discard"
     assert not [record for record in engine.records if record.kind == "game_end"]
 
 

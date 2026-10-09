@@ -20,6 +20,8 @@ def project(state: GameState, seat: int) -> PlayerView:
             hp_max=player.hp_max,
             hand_count=len(player.hand),
             alive=player.alive,
+            equip=state.refs(player.equip),
+            judge=state.refs(player.judge),
         )
         for player in state.players
     )

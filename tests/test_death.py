@@ -14,7 +14,7 @@ import pytest
 
 from sgs.data import load_content_pack
 from sgs.engine import Engine
-from sgs.state import EndPhase, FrameKind, MoveReason, Pass, UseCard, Zone
+from sgs.state import EndPhase, FrameKind, MoveReason, Pass, UseCard, Zone, ZoneRef
 from sgs.timing import Timing
 
 from support import SeatSpec, build_state, cards_of_type
@@ -236,8 +236,8 @@ def test_death_on_discards_every_card_in_the_dead_characters_area():
     assert len(on_records) == 1, "Ⅰ.a 是一次移动操作（一次性把死者区域里的牌置入弃牌堆）"
     move = on_records[0]
     assert (move.from_zone, move.to_zone, move.reason) == (
-        Zone.HAND,
-        Zone.DISCARD,
+        ZoneRef(Zone.HAND, 1),
+        ZoneRef(Zone.DISCARD),
         MoveReason.DISCARD,
     )
     assert [card.card_id for card in move.cards] == [PEACH[0], PEACH[1]]
@@ -273,8 +273,8 @@ def test_the_teardown_moves_leftover_processing_cards_into_the_discard_pile():
     assert discarded[-1].seq < move.seq, "收尾在逐帧清栈之后"
     assert move.seq < engine.records[-1].seq, "收尾在终局记录之前"
     assert (move.from_zone, move.to_zone, move.reason) == (
-        Zone.PROCESSING,
-        Zone.DISCARD,
+        ZoneRef(Zone.PROCESSING),
+        ZoneRef(Zone.DISCARD),
         MoveReason.USE,
     ), "补做 L5.6'使用结算结束后把处理区里的牌置入弃牌堆'（票 07 §6）"
     assert engine.state.processing == [], "处理区在终局为空"
@@ -288,10 +288,12 @@ def test_card_conservation_holds_unconditionally_at_game_end():
         *state.discard,
         *state.processing,
         *(card_id for player in state.players for card_id in player.hand),
+        *(card_id for player in state.players for card_id in player.equip),
+        *(card_id for player in state.players for card_id in player.judge),
     ]
 
     assert sorted(everywhere) == list(range(len(state.cards))), (
-        "终局时每张实体牌恰在一个区域：牌守恒含终局无条件成立"
+        "终局时每张实体牌恰在一个区域（六个区）：牌守恒含终局无条件成立"
     )
 
 

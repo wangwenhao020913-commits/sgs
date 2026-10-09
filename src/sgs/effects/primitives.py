@@ -17,7 +17,9 @@ from sgs.state import (
     GameState,
     HpChangeDelta,
     MoveReason,
+    SlotKind,
     Zone,
+    ZoneRef,
 )
 
 __all__ = [
@@ -55,12 +57,6 @@ class EffectContext:
 
 
 @dataclass(frozen=True, slots=True)
-class _Location:
-    zone: Zone
-    owner: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class DrawResult:
     """一次摸牌的结果：自顶向下的牌面事实 + 途中最多一次重洗（票 08 §4 / 票 23）。
 
@@ -72,30 +68,46 @@ class DrawResult:
     shuffle: DeckShuffleDelta | None = None
 
 
-def locate(state: GameState, card_id: int) -> _Location:
-    """找出这张牌现在在哪个区域（一张实体牌任一时刻只在一个区域）。"""
+def locate(state: GameState, card_id: int) -> ZoneRef:
+    """找出这张牌现在的**区域坐标**（一张实体牌任一时刻只在一个区域）。"""
     if card_id in state.deck:
-        return _Location(Zone.DECK)
+        return ZoneRef(Zone.DECK)
     for player in state.players:
         if card_id in player.hand:
-            return _Location(Zone.HAND, player.seat)
+            return ZoneRef(Zone.HAND, player.seat)
+        if card_id in player.equip:
+            return ZoneRef(Zone.EQUIP, player.seat)
+        if card_id in player.judge:
+            return ZoneRef(Zone.JUDGE, player.seat)
     if card_id in state.discard:
-        return _Location(Zone.DISCARD)
+        return ZoneRef(Zone.DISCARD)
     if card_id in state.processing:
-        return _Location(Zone.PROCESSING)
+        return ZoneRef(Zone.PROCESSING)
     raise ValueError(f"牌 {card_id} 不在任何区域；牌守恒被破坏")
 
 
-def _source_list(state: GameState, location: _Location) -> list[int]:
-    if location.zone is Zone.DECK:
-        return state.deck
-    if location.zone is Zone.DISCARD:
-        return state.discard
-    if location.zone is Zone.PROCESSING:
-        return state.processing
-    if location.owner is None:
-        raise ValueError("手牌区没有持有者座位")
-    return state.player(location.owner).hand
+def _place_into_equipment(state: GameState, ref: ZoneRef, cards: tuple[CardRef, ...]) -> None:
+    """把装备牌放进目标座位的装备区，按槽位枚举序保持列表序（票 08 §2 / 票 12 §Q2）。
+
+    "同槽至多一张"本身是**规则层**的候选过滤（`17.10` 明文"不是合法目标"）；
+    这里只加一条**编程错误兜底**：一般"置入"撞已占槽位即抛——替换必须由调用方
+    先把旧牌移出（`4.10` 的替换是合法行为，但它是"新牌 PUT + 旧牌 LOSE"两条移动）。
+    """
+    if ref.seat is None:
+        raise ValueError("装备区按座位分装，区域坐标必须带座位")
+    equip = state.player(ref.seat).equip
+    occupied = [state.card(card_id).slot for card_id in equip]
+    for card in cards:
+        if card.slot is None:
+            raise ValueError(f"牌 {card.card_id} 没有装备槽位，不能置入装备区")
+        if card.slot in occupied:
+            raise ValueError(
+                f"装备槽位 {card.slot.value} 已有牌；替换必须由调用方先移出旧牌"
+            )
+        occupied.append(card.slot)
+    equip.extend(card.card_id for card in cards)
+    order = list(SlotKind)
+    equip.sort(key=lambda card_id: order.index(state.card(card_id).slot))
 
 
 def move_card(
@@ -103,14 +115,15 @@ def move_card(
     ctx: EffectContext,
     cards: tuple[CardRef, ...],
     *,
-    to_zone: Zone,
+    to_zone: ZoneRef,
     reason: MoveReason,
-    to_seat: int | None = None,
+    owner: int | None,
 ) -> CardMoveDelta:
-    """把一批牌从各自（同一个）来源区域移到目标区域，返回一条变化事件。
+    """把一批牌从各自（同一个）来源区域移到目标区域坐标，返回一条变化事件。
 
-    M1 的调用点包括：发牌、摸牌、使用入处理区、处理区→弃牌堆、弃牌阶段、
-    ``DEATH_ON`` 遗牌与终局收尾。``ctx`` 只提供结算主体信息，本原语不读结算栈。
+    ``owner`` 是这次移动的**归属角色**（判定牌 = 被判定者、弃置 / 使用 = 弃置者 /
+    使用者、摸牌 = 摸牌者、装备置入 = 持有者）；"无角色主体"的移动（如终局收尾）
+    传 ``None``。``ctx`` 只提供结算主体信息，本原语不读结算栈。
     """
     card_ids = tuple(card.card_id for card in cards)
     if not card_ids:
@@ -118,28 +131,24 @@ def move_card(
 
     source = locate(state, card_ids[0])
     for card_id in card_ids[1:]:
-        other = locate(state, card_id)
-        if other.zone is not source.zone or other.owner != source.owner:
+        if locate(state, card_id) != source:
             raise ValueError("一次 move_card 只能有一个来源区域")
 
-    source_list = _source_list(state, source)
+    source_list = state.zone(source)
     # 成员判定用元组而非 set：本项目禁一切无序容器参与顺序（票 08 §7）。
-    kept = [card_id for card_id in source_list if card_id not in card_ids]
-    source_list[:] = kept
+    source_list[:] = [card_id for card_id in source_list if card_id not in card_ids]
 
-    if to_zone is Zone.HAND:
-        if to_seat is None:
-            raise ValueError("移动到手牌必须给出目标座位")
-        state.player(to_seat).hand.extend(card_ids)
+    if to_zone.zone is Zone.EQUIP:
+        _place_into_equipment(state, to_zone, cards)
     else:
         state.zone(to_zone).extend(card_ids)
 
     return CardMoveDelta(
         cards=cards,
-        from_zone=source.zone,
+        from_zone=source,
         to_zone=to_zone,
         reason=reason,
-        owner=source.owner if source.zone is Zone.HAND else None,
+        owner=owner,
     )
 
 
@@ -198,6 +207,6 @@ def _reshuffle_into_deck(state: GameState, rng: Randomness) -> DeckShuffleDelta:
     state.deck.extend(shuffled)
     return DeckShuffleDelta(
         cards=state.refs(shuffled),
-        from_zone=Zone.DISCARD,
-        to_zone=Zone.DECK,
+        from_zone=ZoneRef(Zone.DISCARD),
+        to_zone=ZoneRef(Zone.DECK),
     )

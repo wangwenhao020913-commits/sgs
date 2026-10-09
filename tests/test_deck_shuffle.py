@@ -90,7 +90,7 @@ def test_the_opening_shuffle_is_the_first_record_and_belongs_to_the_no_frame_sen
     assert shuffle.seq == 1, "seq = 1 必是初次洗牌"
     assert (shuffle.frame_id, shuffle.depth) == (0, 0), "无帧哨兵 = 引擎初始化"
     assert shuffle.from_zone is None, "初次洗牌不来自任何区域"
-    assert shuffle.to_zone is Zone.DECK
+    assert shuffle.to_zone.zone is Zone.DECK
     assert len(shuffle.cards) == 53
 
 
@@ -105,7 +105,7 @@ def test_a_reshuffle_leaves_exactly_one_deck_shuffle_delta_from_discard_to_deck(
     reshuffles = _reshuffles(engine)
     assert len(reshuffles) == 1, "一次摸牌最多重洗一次，且这一回合必然发生"
     shuffle = reshuffles[0]
-    assert shuffle.from_zone is Zone.DISCARD and shuffle.to_zone is Zone.DECK
+    assert shuffle.from_zone.zone is Zone.DISCARD and shuffle.to_zone.zone is Zone.DECK
     assert (shuffle.frame_id, shuffle.depth) == (0, 0), "摸牌阶段没有结算帧，走无帧哨兵"
     assert sorted(card.card_id for card in shuffle.cards) == sorted(DISCARD_PILE), (
         "记录的是洗后的新牌堆：弃牌堆那三张的一个置换"
@@ -119,7 +119,7 @@ def test_a_reshuffle_does_not_also_emit_a_card_move_out_of_the_discard_pile():
     assert not [
         record
         for record in _deltas(engine, "card_move")
-        if record.from_zone is Zone.DISCARD and record.to_zone is Zone.DECK
+        if record.from_zone.zone is Zone.DISCARD and record.to_zone.zone is Zone.DECK
     ], "弃牌堆→牌堆由 deck_shuffle 承载，不得另发 card_move"
 
 

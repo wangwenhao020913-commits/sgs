@@ -439,7 +439,7 @@ def test_peach_used_in_the_play_phase_recovers_through_the_recover_frame():
     assert Timing.NEAR_DEATH_ENTER.value not in emitted, "未满体力时用【桃】不经过濒死"
 
     use_moves = [
-        (record.from_zone.value, record.to_zone.value)
+        (record.from_zone.zone.value, record.to_zone.zone.value)
         for record in _of(engine.records, "delta")
         if record.delta_type == "card_move" and record.reason is MoveReason.USE
     ]

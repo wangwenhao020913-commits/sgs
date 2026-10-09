@@ -24,6 +24,7 @@ from sgs.state import (
     Pass,
     Phase,
     PlayPhaseQuery,
+    PlayerPublic,
     PlayerView,
     QueryKind,
     UseCard,
@@ -178,7 +179,10 @@ def test_candidates_are_ordered_by_card_id_with_the_cardless_action_last():
 def test_player_view_reads_public_zones_in_insertion_order_and_never_the_deck_order():
     state = build_state(
         pack=PACK,
-        seats=[SeatSpec(hp=4, hand=HAND_A), SeatSpec(hp=3, hand=HAND_B)],
+        seats=[
+            SeatSpec(hp=4, hand=HAND_A),
+            SeatSpec(hp=3, hand=HAND_B, equip=(26,), judge=(27, 28)),
+        ],
         deck=(20, 21, 22),
         discard=(23, 24),
         processing=(25,),
@@ -190,12 +194,15 @@ def test_player_view_reads_public_zones_in_insertion_order_and_never_the_deck_or
 
     assert [card.card_id for card in view.discard] == [23, 24], "弃牌堆按置入序（先入在前）"
     assert [card.card_id for card in view.processing] == [25], "处理区是公开区，按置入序"
+    assert [card.card_id for card in view.players[1].equip] == [26], "装备区公开且逐座位"
+    assert [card.card_id for card in view.players[1].judge] == [27, 28], "判定区先入在前"
     assert view.deck_count == 3
     assert not hasattr(view, "deck_order"), "牌堆只给剩余数量，不给顺序"
     assert [player.hand_count for player in view.players] == [len(HAND_A), len(HAND_B)]
     assert view.players[1].hp == 3 and view.players[1].hp_max == 4
     assert all(card.card_id not in HAND_B for card in view.self_hand)
     assert "deck" not in PlayerView.model_fields and "opponent_hand" not in PlayerView.model_fields
+    assert "hand_limit" not in PlayerPublic.model_fields, "手牌上限由当前体力值派生，不落字段"
 
 
 # ---------------------------------------------------------------------------

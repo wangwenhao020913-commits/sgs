@@ -46,7 +46,9 @@ from sgs.state import (
     Player,
     Query,
     QueryKind,
+    SlotKind,
     Zone,
+    ZoneRef,
     parse_action,
     project,
 )
@@ -351,25 +353,37 @@ class Engine:
         )
 
     def discard_dead_cards(self, frame: Frame) -> None:
-        """``DEATH_ON`` Ⅰ.a：把死亡角色区域里所有的牌置入弃牌堆（票 13 §4）。"""
+        """``DEATH_ON`` Ⅰ.a：把死亡角色区域里所有的牌置入弃牌堆（规则 4.8 第 2 步）。
+
+        逐来源区各发一条 delta（票 08 §7）：手牌 / 装备区 / 判定区各一条，**不**新增复合
+        delta。归属 = 阵亡者本人（弃置者）；判定区的实体牌**直接**进弃牌堆（不经过处理区）。
+        M1 的 ``basic_53`` 没有装备与延时锦囊，故实测仍只有手牌那一条。
+        """
         seat = frame.data["target"]
-        hand = tuple(self.state.player(seat).hand)
-        if not hand:
-            return
-        delta = move_card(
-            self.state,
-            EffectContext(
-                actor=seat,
-                source=frame.data.get("source"),
-                targets=tuple(frame.data.get("targets", ())),
-                frame_id=frame.frame_id,
-                depth=self.stack.depth,
-            ),
-            self.state.refs(hand),
-            to_zone=Zone.DISCARD,
-            reason=MoveReason.DISCARD,
+        ctx = EffectContext(
+            actor=seat,
+            source=frame.data.get("source"),
+            targets=tuple(frame.data.get("targets", ())),
+            frame_id=frame.frame_id,
+            depth=self.stack.depth,
         )
-        self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+        for source_ref in (
+            ZoneRef(Zone.HAND, seat),
+            ZoneRef(Zone.EQUIP, seat),
+            ZoneRef(Zone.JUDGE, seat),
+        ):
+            card_ids = tuple(self.state.zone(source_ref))
+            if not card_ids:
+                continue
+            delta = move_card(
+                self.state,
+                ctx,
+                self.state.refs(card_ids),
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.DISCARD,
+                owner=seat,
+            )
+            self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
 
     def pop_frame(self) -> Frame:
         frame = self.stack.pop()
@@ -469,13 +483,21 @@ class Engine:
     def move_used_card_to_processing(self, frame: Frame) -> None:
         """手牌 → 处理区（``reason = USE``）：在 L4.1 / L4.2 之间（票 07 §3）。"""
         self._move_in_frame(
-            frame, (frame.data["card"],), to_zone=Zone.PROCESSING, reason=MoveReason.USE
+            frame,
+            (frame.data["card"],),
+            to_zone=ZoneRef(Zone.PROCESSING),
+            reason=MoveReason.USE,
+            owner=frame.data["source"],
         )
 
     def move_processing_card_to_discard(self, frame: Frame) -> None:
         """处理区 → 弃牌堆（``reason = USE``）：L5.6"使用结算结束后"（票 07 §3）。"""
         self._move_in_frame(
-            frame, (frame.data["card"],), to_zone=Zone.DISCARD, reason=MoveReason.USE
+            frame,
+            (frame.data["card"],),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.USE,
+            owner=frame.data["source"],
         )
 
     def _effect_context(self, frame: Frame, *, actor: int) -> EffectContext:
@@ -497,11 +519,14 @@ class Engine:
         frame: Frame,
         cards: tuple[CardRef, ...],
         *,
-        to_zone: Zone,
+        to_zone: ZoneRef,
         reason: MoveReason,
+        owner: int | None,
     ) -> None:
         ctx = self._effect_context(frame, actor=frame.data["source"])
-        delta = move_card(self.state, ctx, tuple(cards), to_zone=to_zone, reason=reason)
+        delta = move_card(
+            self.state, ctx, tuple(cards), to_zone=to_zone, reason=reason, owner=owner
+        )
         self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
 
     def apply_effects(
@@ -703,15 +728,19 @@ class Engine:
         self.finished = True
 
     def _teardown_processing(self) -> None:
-        """终局收尾：处理区实体牌一次性置入弃牌堆（补做 L5.6，票 07 §6）。"""
+        """终局收尾：处理区实体牌一次性置入弃牌堆（补做 L5.6，票 07 §6）。
+
+        这是"无角色主体"的收尾移动（处理区是共享区、结算已经结束），故归属为 ``None``。
+        """
         if not self.state.processing:
             return
         delta = move_card(
             self.state,
             EffectContext(actor=self.state.rule_config.first_seat),
             self.state.refs(tuple(self.state.processing)),
-            to_zone=Zone.DISCARD,
+            to_zone=ZoneRef(Zone.DISCARD),
             reason=MoveReason.USE,
+            owner=None,
         )
         self.emit_delta(delta)
 
@@ -802,9 +831,9 @@ class Engine:
                 self.state,
                 EffectContext(actor=seat),
                 drawn.cards,
-                to_zone=Zone.HAND,
-                to_seat=seat,
+                to_zone=ZoneRef(Zone.HAND, seat),
                 reason=MoveReason.DRAW,
+                owner=seat,
             )
             self.emit_delta(delta)
         if len(drawn.cards) < DRAW_COUNT:
@@ -859,8 +888,9 @@ class Engine:
             self.state,
             EffectContext(actor=seat),
             action.cards,
-            to_zone=Zone.DISCARD,
+            to_zone=ZoneRef(Zone.DISCARD),
             reason=MoveReason.DISCARD,
+            owner=seat,
         )
         self.emit_delta(delta)
         return None
@@ -885,11 +915,30 @@ class Engine:
         return seat
 
 
+_SLOT_BY_SUBCATEGORY: dict[str, SlotKind] = {
+    "weapon": SlotKind.WEAPON,
+    "armor": SlotKind.ARMOR,
+    "horse_defense": SlotKind.HORSE_DEFENSE,
+    "horse_offense": SlotKind.HORSE_OFFENSE,
+}
+"""``CardType.subcategory`` → 装备槽位（票 08 §2）。
+
+宝物槽位（``treasure``）属界限突破、M2 不启用，故不进这张表：它的牌面事实会是
+``slot = None``，置入装备区即触发编程错误兜底。
+"""
+
+
 def instantiate_cards(pack: ContentPack) -> tuple[CardRef, ...]:
     """按数据表顺序把内容包实例化成牌实例：``card_id`` 即下标（票 08 §4）。
 
     牌实例的 id 在开局一次分配、随洗牌一起走；行为字段不在其中（归 ``effects``）。
+    装备槽位是**牌面事实**：在实例化时由 ``CardType.subcategory`` 一次派生，
+    使移动原语不必拿到 ``ContentPack``（票 08 §2）。
     """
+    slots = {
+        card_type.id: _SLOT_BY_SUBCATEGORY.get(card_type.subcategory)
+        for card_type in pack.card_types
+    }
     names = {card_type.id: card_type.name for card_type in pack.card_types}
     return tuple(
         CardRef(
@@ -898,6 +947,7 @@ def instantiate_cards(pack: ContentPack) -> tuple[CardRef, ...]:
             name=names[deck_card.type],
             suit=deck_card.suit.value,
             rank=deck_card.rank,
+            slot=slots[deck_card.type],
         )
         for index, deck_card in enumerate(pack.deck.cards)
     )
@@ -940,7 +990,7 @@ def build_initial(
             depth=0,
             cards=state.refs(state.deck),
             from_zone=None,
-            to_zone=Zone.DECK,
+            to_zone=ZoneRef(Zone.DECK),
         ),
         TimingRecord(
             seq=2,
@@ -961,9 +1011,9 @@ def build_initial(
             state,
             ctx,
             taken,
-            to_zone=Zone.HAND,
-            to_seat=player.seat,
+            to_zone=ZoneRef(Zone.HAND, player.seat),
             reason=MoveReason.DRAW,
+            owner=player.seat,
         )
         seq += 1
         records.append(wrap_delta(delta, seq=seq, frame_id=0, depth=0))

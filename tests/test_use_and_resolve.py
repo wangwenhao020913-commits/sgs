@@ -371,7 +371,7 @@ def test_a_used_card_moves_hand_to_processing_to_discard_both_as_use():
         and [card.card_id for card in record.cards] == [SLASH[0]]
     ]
 
-    assert [(move.from_zone.value, move.to_zone.value, move.reason.value) for move in moves] == [
+    assert [(move.from_zone.zone.value, move.to_zone.zone.value, move.reason.value) for move in moves] == [
         ("hand", "processing", "USE"),
         ("processing", "discard", "USE"),
     ]
@@ -387,7 +387,7 @@ def test_the_used_card_sits_in_processing_while_the_response_window_is_open():
         for record in records
         if record.kind == "delta"
         and record.delta_type == "card_move"
-        and record.to_zone.value == "processing"
+        and record.to_zone.zone.value == "processing"
         and [card.card_id for card in record.cards] == [SLASH[0]]
     )
     query = next(
@@ -398,7 +398,7 @@ def test_the_used_card_sits_in_processing_while_the_response_window_is_open():
         for record in records
         if record.kind == "delta"
         and record.delta_type == "card_move"
-        and record.from_zone.value == "processing"
+        and record.from_zone.zone.value == "processing"
         and [card.card_id for card in record.cards] == [SLASH[0]]
     )
 
@@ -410,7 +410,7 @@ def test_a_dodge_use_moves_its_own_card_through_the_processing_area():
         hand_a=(SLASH[0],), hand_b=(DODGE[0],), deck=(PEACH[0], PEACH[1]), dodge_response=True
     )
     moves = [
-        (record.from_zone.value, record.to_zone.value, record.reason.value)
+        (record.from_zone.zone.value, record.to_zone.zone.value, record.reason.value)
         for record in engine.records
         if record.kind == "delta"
         and record.delta_type == "card_move"

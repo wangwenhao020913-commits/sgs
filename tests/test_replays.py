@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -70,6 +71,55 @@ def test_read_journal_rejects_an_unknown_event_schema_version_and_reports_both(t
     message = str(caught.value)
     assert "99" in message and str(EVENT_SCHEMA_VERSION) in message, "拒绝时必须报双方版本"
     assert str(path) in message
+
+
+def test_read_journal_says_whether_the_file_is_too_old_or_too_new(tmp_path):
+    """票 16 §4：报错补方向词，好让"旧引擎读新文件"与"新引擎读旧文件"一眼分清。"""
+    old = _write(tmp_path / "old.jsonl", _journal_with_version("1"))
+    with pytest.raises(JournalVersionError) as stale:
+        read_journal(old)
+    assert "过旧" in str(stale.value), "低于最低支持版本 ⇒ 文件过旧"
+
+    new = _write(tmp_path / "new.jsonl", _journal_with_version("3"))
+    with pytest.raises(JournalVersionError) as ahead:
+        read_journal(new)
+    assert "过新" in str(ahead.value), "高于最高支持版本 ⇒ 文件过新"
+
+
+def test_the_repository_contains_no_pre_v2_journals():
+    """票 16 §4 的机械断言：仓库里每个 ``*.jsonl`` 的 header 版本都是当前版本。"""
+    for path in _golden_files():
+        header = read_journal(path)[0]
+        assert header.event_schema_version == EVENT_SCHEMA_VERSION, (
+            f"{path.name} 仍是 v{header.event_schema_version}；v1 残留即红"
+        )
+
+
+def test_v2_card_moves_carry_zone_coordinates_instead_of_redundant_seat_fields():
+    """票 16 §3 的永久形状断言：区域坐标化、无 ``from_seat`` / ``to_seat``、归属在场。"""
+    from sgs.engine import CardMoveRecord
+
+    assert "from_seat" not in CardMoveRecord.model_fields
+    assert "to_seat" not in CardMoveRecord.model_fields
+
+    records = read_journal(REPLAYS_DIR / "01-slash-dodge-cancel.jsonl")
+    moves = [
+        record
+        for record in records
+        if record.kind == "delta" and record.delta_type == "card_move"
+    ]
+    assert moves, "这条基准必有牌移动"
+    for move in moves:
+        dumped = move.model_dump(mode="json")
+        assert set(dumped["from_zone"]) == {"zone", "seat"}, "区域引用是坐标对象"
+        assert set(dumped["to_zone"]) == {"zone", "seat"}
+        assert "owner" in dumped, "归属字段保留"
+
+    query = next(record for record in records if record.kind == "query")
+    for player in query.query.view.players:
+        dumped = player.model_dump(mode="json")
+        assert "equip" in dumped and "judge" in dumped
+        assert "hand_limit" not in dumped, "手牌上限是派生函数，不是公开字段"
 
 
 def test_read_journal_treats_a_missing_version_as_a_structural_error(tmp_path):
@@ -227,6 +277,95 @@ FROZEN_BASELINES = (
 def test_the_frozen_six_baselines_are_exactly_the_file_set() -> None:
     assert {path.stem for path in _golden_files()} == set(FROZEN_BASELINES), (
         "M1 的基准恰好是票 12 定格的六条（票 11 §2 第 5 条）"
+    )
+
+
+M1_FROZEN_TRAJECTORIES: dict[str, tuple[int, int, str]] = {
+    "01-slash-dodge-cancel": (
+        101,
+        77,
+        "ddd9a0ab0ea5e5545a38f3046ad7ccf4e6abf1bf3eb155ce8d6cb000fbe5b3dc",
+    ),
+    "02-slash-hit-damage": (
+        4,
+        78,
+        "7aea8dbe8df17e414e8f19762b2656cf725aadbad0f603c4af5e32c7c6dd212f",
+    ),
+    "03-near-death-self-peach": (
+        28,
+        113,
+        "d5c0e99a3eed1a12d82a3a1331c9b819dbd1472e862f36d5c287b1d05a7745b9",
+    ),
+    "04-near-death-other-peach": (
+        9,
+        78,
+        "cc96e111b75f96ac654e779c6059172e853b552ccb12b83a071deb9e751c8fd5",
+    ),
+    "05-near-death-death": (
+        1,
+        39,
+        "a86a689998208b0ae6db912b79966f6611e91115b0f1da7a1b1a14f6de633938",
+    ),
+    "06-deck-reshuffle": (
+        2026,
+        84,
+        "405ea88079d63f9446b6d94f3e3c99fa6a7593ad166433c14de3bf07b005bd0a",
+    ),
+}
+"""M1 六条基准的**决策轨迹**摘要 ``(seed, len(tape), sha256(tape))``（票 16 §3）。
+
+v2 升版证伪了"重录后差异只有 header 版本字段"：区域引用、``CardRef.slot``、
+``PlayerPublic`` 新字段都落在 body。**替代判据**就是这张表——``tape`` 是决策内容、
+delta 是它的确定性函数，冻结 tape 即冻结语义；hash 定义 = ``json.dumps`` 的
+``ensure_ascii=False, sort_keys=True, separators=(",", ":")`` 后取 sha256。
+
+值在**重录前**从 v1 文件算定并冻结；重录后逐条相等才说明升级没改语义。
+失败诊断先比对 git 历史里的 v1 文件，而不是放宽这里的常量。"""
+
+V2_CARD_FACE_ADDITIONS = ("slot",)
+"""v2 给 ``CardRef`` 新增的**牌面事实**字段；进记录流但不承载任何决策。
+
+票 16 §3 的字面定义（``model_dump`` 全量）是在 v1 的 ``CardRef`` 上算定的，而 v2 §2
+给每张牌加了 ``slot``（``CardType.subcategory`` 的纯函数，无决策信息）。把新增
+牌面事实剔掉，六条冻结摘要才真正回答"升版有没有改语义"——**登记为对票 16 §3 的
+就地细化**：本票不在静态表上覆盖那六个数，而是让定义与它们相容。
+后续票再给 ``CardRef`` 加字段（如票 30 的 ``color``）时追加到这里。"""
+
+
+def _decision_dump(payload):
+    """递归剔除 v2 新增的牌面事实字段，得到与 v1 ``CardRef`` 同形的决策载荷。"""
+    if isinstance(payload, dict):
+        return {
+            key: _decision_dump(value)
+            for key, value in payload.items()
+            if key not in V2_CARD_FACE_ADDITIONS
+        }
+    if isinstance(payload, list):
+        return [_decision_dump(item) for item in payload]
+    return payload
+
+
+def _tape_digest(tape) -> str:
+    payload = json.dumps(
+        [_decision_dump(action.model_dump(mode="json")) for action in tape],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def test_the_frozen_m1_decision_trajectories_are_unchanged() -> None:
+    mismatches = []
+    for slug, (seed, length, digest) in M1_FROZEN_TRAJECTORIES.items():
+        actual_seed, tape = tape_from_journal(read_journal(REPLAYS_DIR / f"{slug}.jsonl"))
+        actual = (actual_seed, len(tape), _tape_digest(tape))
+        if actual != (seed, length, digest):
+            mismatches.append(f"{slug}: 期望 {(seed, length, digest)}，实得 {actual}")
+
+    assert not mismatches, (
+        "M1 的决策轨迹变了（升版不得改语义；先比对 git 里的 v1 文件）：\n"
+        + "\n".join(mismatches)
     )
 
 

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -24,7 +25,9 @@ __all__ = [
     "MoveReason",
     "Phase",
     "Player",
+    "SlotKind",
     "Zone",
+    "ZoneRef",
 ]
 
 
@@ -32,11 +35,25 @@ class _FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+class SlotKind(str, Enum):
+    """装备区里的五个槽位（票 08 §2）；取值与数据层的 ``subcategory`` 同形。
+
+    宝物槽位属界限突破，**预留不启用**（ADR-006）；M2 只可能见到前四个。
+    """
+
+    WEAPON = "weapon"
+    ARMOR = "armor"
+    HORSE_DEFENSE = "horse_defense"
+    HORSE_OFFENSE = "horse_offense"
+    TREASURE = "treasure"
+
+
 class CardRef(_FrozenModel):
     """内联的牌面事实（票 06 §3）。
 
     ``card_id`` 是机器键；牌面（牌名 / 花色 / 点数）是渲染所需的事实，不是表现文本。
-    M1 无转化牌与虚拟牌，内联不会漂移。
+    ``slot`` 是装备槽位这一**牌面事实**（票 08 §2）：由 ``CardType.subcategory`` 在实例化时
+    一次派生，使移动原语不必拿到 ``ContentPack``。非装备牌恒为 ``None``。
     """
 
     card_id: int
@@ -44,27 +61,57 @@ class CardRef(_FrozenModel):
     name: str
     suit: str
     rank: int
+    slot: SlotKind | None = None
 
 
 class Zone(str, Enum):
-    """实体牌所在的区域。M1 只有这四个（判定区 / 装备区 / 武将牌上属 M2）。"""
+    """实体牌所在的区域种类（票 08 §1）。
+
+    ``HAND`` / ``EQUIP`` / ``JUDGE`` 是**逐座位**的区，座位在 :class:`ZoneRef` 坐标里；
+    ``DECK`` / ``DISCARD`` / ``PROCESSING`` 是共享区。
+    """
 
     DECK = "deck"
     HAND = "hand"
     DISCARD = "discard"
     PROCESSING = "processing"
+    EQUIP = "equip"
+    JUDGE = "judge"
+
+
+@dataclass(frozen=True, slots=True)
+class ZoneRef:
+    """**区域坐标**（票 08 §1）：区种类 + 座位。
+
+    ``seat`` 只对 ``HAND`` / ``EQUIP`` / ``JUDGE`` 有意义，共享区为 ``None``。
+    坐标说的是"**区域**在谁那里"，不是"牌归谁"——判定区的牌坐标带座位，但牌本身
+    仍"不为任何角色所拥有"（规则 11.6）；"归谁"由 :class:`CardMoveDelta.owner` 回答。
+
+    冻结值类型（用 ``dataclass`` 而非 pydantic）：pydantic 把 stdlib dataclass 字段
+    序列化成 ``{"zone": ..., "seat": ...}``（``seat`` 显式写出，含 ``null``），
+    与 ``CardRef`` 的平铺形状一致，且允许位置构造 ``ZoneRef(Zone.HAND, 0)``。
+    """
+
+    zone: Zone
+    seat: int | None = None
 
 
 class MoveReason(str, Enum):
-    """**来源**：牌实例移动到当前区域的操作原因。
+    """**来源**：牌实例移动到当前区域的操作原因（票 08 §4）。
 
     官方清单只界定**角色**失去牌的原因；牌堆方向的移动（摸牌）须另列。
-    洗牌走 ``delta_type = deck_shuffle``，**不**占这里的取值（票 08 §5）。
+    洗牌走 ``delta_type = deck_shuffle``，**不**占这里的取值。
     """
 
     DRAW = "DRAW"
     USE = "USE"
     DISCARD = "DISCARD"
+    PUT = "PUT"
+    """置入：手牌 / 牌堆 → 判定区或装备区（`17.10` B1"置入相应区域"）。"""
+    JUDGE = "JUDGE"
+    """判定：牌堆 → 处理区 → 弃牌堆（亮判定牌与判定牌生效后入弃牌堆，`11.6`）。"""
+    LOSE = "LOSE"
+    """失去：判定区 / 装备区 → 弃牌堆或他处（替换失去旧装备、拆 / 顺，`4.10` / `11.5`）。"""
 
 
 class Phase(str, Enum):
@@ -113,6 +160,10 @@ class Player(BaseModel):
     hp_max: int
     alive: bool = True
     hand: list[int] = Field(default_factory=list)
+    equip: list[int] = Field(default_factory=list)
+    """装备区（一个整体区）；列表序 = 槽位枚举序（票 12 §Q2），每槽至多一张。"""
+    judge: list[int] = Field(default_factory=list)
+    """判定区（**先入在前**）；"最后置入"的读取端用 ``reversed()`` 表达（票 08 §8）。"""
     card_use_counts: dict[str, int] = Field(default_factory=dict)
     """本回合各牌名（card type id）的已用次数；该座位自己的 ``TURN_START`` 重置（票 07 §6）。
 
@@ -151,14 +202,24 @@ class GameState(BaseModel):
     def refs(self, card_ids: tuple[int, ...] | list[int]) -> tuple[CardRef, ...]:
         return tuple(self.cards[card_id] for card_id in card_ids)
 
-    def zone(self, zone: Zone) -> list[int]:
-        """区域名 → 该区域的 ``card_id`` 列表（唯一入口，原语只经它改区域）。"""
-        if zone is Zone.DECK:
+    def zone(self, ref: ZoneRef) -> list[int]:
+        """区域坐标 → 该区域的 ``card_id`` 列表（唯一入口，原语只经它改区域）。
+
+        共享区（牌堆 / 弃牌堆 / 处理区）忽略座位；逐座位的三个区必须给出座位。
+        """
+        if ref.zone is Zone.DECK:
             return self.deck
-        if zone is Zone.HAND:
-            raise ValueError("手牌按座位分装，请用 player(seat).hand")
-        if zone is Zone.DISCARD:
+        if ref.zone is Zone.DISCARD:
             return self.discard
-        if zone is Zone.PROCESSING:
+        if ref.zone is Zone.PROCESSING:
             return self.processing
-        raise ValueError(f"未知区域：{zone!r}")
+        if ref.seat is None:
+            raise ValueError(f"{ref.zone.value} 区按座位分装，区域坐标必须带座位")
+        player = self.player(ref.seat)
+        if ref.zone is Zone.HAND:
+            return player.hand
+        if ref.zone is Zone.EQUIP:
+            return player.equip
+        if ref.zone is Zone.JUDGE:
+            return player.judge
+        raise ValueError(f"未知区域：{ref.zone!r}")

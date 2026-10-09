@@ -19,7 +19,7 @@ from sgs.engine import (
     RandomSource,
     new_seed,
 )
-from sgs.state import CardRef, Zone
+from sgs.state import CardRef, Zone, ZoneRef
 
 __all__ = ["main", "render"]
 
@@ -85,8 +85,9 @@ def render(record: JournalRecord) -> str:
     if kind == "delta":
         if record.delta_type == "card_move":
             return (
-                f"#{record.seq:<4} 牌移动 {record.from_zone.value}→{record.to_zone.value} "
-                f"来源={record.reason.value} {_cards(record.cards)}"
+                f"#{record.seq:<4} 牌移动 {_zone_label(record.from_zone)}→"
+                f"{_zone_label(record.to_zone)} 来源={record.reason.value} "
+                f"{_cards(record.cards)}"
             )
         if record.delta_type == "hp_change":
             return (
@@ -119,12 +120,17 @@ def _cards(cards: Sequence[CardRef]) -> str:
     return "、".join(f"{card.name}{card.suit}{card.rank}" for card in cards)
 
 
-def _zone_label(zone: Zone | None) -> str:
-    if zone is None:
+def _zone_label(ref: ZoneRef | None) -> str:
+    if ref is None:
         return "（初次）"
-    return {
+    label = {
         Zone.DECK: "牌堆",
         Zone.HAND: "手牌",
         Zone.DISCARD: "弃牌堆",
         Zone.PROCESSING: "处理区",
-    }.get(zone, zone.value)
+        Zone.EQUIP: "装备区",
+        Zone.JUDGE: "判定区",
+    }.get(ref.zone, ref.zone.value)
+    if ref.seat is None:
+        return label
+    return f"座位{ref.seat} {label}"

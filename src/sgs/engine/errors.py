@@ -39,7 +39,11 @@ class IllegalActionError(Exception):
 
 
 class JournalVersionError(Exception):
-    """记录流声明的 ``event_schema_version`` 不在本引擎的支持集合内（fail-closed）。"""
+    """记录流声明的 ``event_schema_version`` 不在本引擎的支持集合内（fail-closed）。
+
+    报错补**方向词**（票 16 §4）：文件版本低于最低支持 ⇒ "过旧"、高于最高支持 ⇒ "过新"，
+    好让"旧引擎读新文件"与"新引擎读旧文件"一眼分清。
+    """
 
     def __init__(
         self,
@@ -51,7 +55,15 @@ class JournalVersionError(Exception):
         self.path = Path(path)
         self.file_version = file_version
         self.supported_versions = tuple(sorted(supported_versions))
+        lowest = self.supported_versions[0]
+        highest = self.supported_versions[-1]
+        if file_version < lowest:
+            direction = f"文件过旧：{file_version} < 最低支持 {lowest}"
+        elif file_version > highest:
+            direction = f"文件过新：{file_version} > 最高支持 {highest}"
+        else:  # pragma: no cover - 版本在支持集合内就不会抛本异常
+            direction = f"文件版本 {file_version} 不在支持集合内"
         super().__init__(
-            f"记录流版本不符：文件 {self.path} 声明 event_schema_version={file_version}，"
-            f"本引擎支持 {list(self.supported_versions)}"
+            f"记录流版本不符（{direction}）：文件 {self.path} 声明 "
+            f"event_schema_version={file_version}，本引擎支持 {list(self.supported_versions)}"
         )

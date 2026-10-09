@@ -33,7 +33,7 @@ import pytest
 import sgs.agents as agents
 from sgs.data import ContentPack, RuleConfig, load_content_pack
 from sgs.engine import Engine, JournalRecord, RandomSource, TimingRecord
-from sgs.state import FrameKind, GameState, Zone
+from sgs.state import FrameKind, GameState, SlotKind, Zone, ZoneRef
 from sgs.timing import Timing
 
 from support import SeatSpec, build_state
@@ -164,10 +164,12 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
         if player.hp < 0 and not _near_death_on_stack(engine):
             _fail(seed, record, f"座位 {player.seat} 体力 {player.hp} < 0 却没有濒死帧在栈上")
 
-    # 区域互斥：一张实体牌任一时刻只在一个区域。
+    # 区域互斥：一张实体牌任一时刻只在一个区域（六个区：三个共享区 + 每座位三区）。
     everywhere = [*state.deck, *state.discard, *state.processing]
     for player in state.players:
         everywhere.extend(player.hand)
+        everywhere.extend(player.equip)
+        everywhere.extend(player.judge)
     if len(everywhere) != len(state.cards) or len(set(everywhere)) != len(everywhere):
         _fail(seed, record, "区域互斥被破坏：有实体牌丢失或同时出现在多个区域")
 
@@ -236,50 +238,82 @@ def _ids(record: JournalRecord) -> list[int]:
 
 @dataclass
 class _Piles:
-    """从 ``delta`` 重建的四个区域；手牌是**全局池**（见 :func:`_replay_deltas_and_cross_check`）。"""
+    """从 ``delta`` 重建的六个区域；逐座位的三区按座位分装（票 08 §7 / 票 16 §2）。
 
+    区域坐标带座位，故重建是**座位级**的：``from_zone`` / ``to_zone`` 直接给出座位，
+    手牌 / 装备区 / 判定区各归各座，不再是"全局手牌池"。
+    """
+
+    seats: int
     deck: list[int] = field(default_factory=list)
     discard: list[int] = field(default_factory=list)
     processing: list[int] = field(default_factory=list)
-    hands: list[int] = field(default_factory=list)
+    hands: list[list[int]] = field(default_factory=list)
+    equip: list[list[int]] = field(default_factory=list)
+    judge: list[list[int]] = field(default_factory=list)
+    slots: dict[int, SlotKind | None] = field(default_factory=dict)
+    """每条记录内联的牌面槽位（``card_id`` → ``slot``），供装备区按槽位枚举序重建。"""
 
     @property
     def total(self) -> int:
-        return len(self.deck) + len(self.discard) + len(self.processing) + len(self.hands)
+        return (
+            len(self.deck)
+            + len(self.discard)
+            + len(self.processing)
+            + sum(len(pile) for pile in self.hands)
+            + sum(len(pile) for pile in self.equip)
+            + sum(len(pile) for pile in self.judge)
+        )
 
     def reset(self, cards: list[int]) -> None:
-        self.deck = cards
+        self.deck = list(cards)
         self.discard = []
         self.processing = []
-        self.hands = []
+        self.hands = [[] for _ in range(self.seats)]
+        self.equip = [[] for _ in range(self.seats)]
+        self.judge = [[] for _ in range(self.seats)]
+
+    def _pile(self, ref: ZoneRef) -> list[int]:
+        if ref.zone is Zone.DECK:
+            return self.deck
+        if ref.zone is Zone.DISCARD:
+            return self.discard
+        if ref.zone is Zone.PROCESSING:
+            return self.processing
+        if ref.seat is None:
+            raise AssertionError(f"{ref.zone.value} 区按座位分装，缺座位的坐标无法定位")
+        if ref.zone is Zone.HAND:
+            return self.hands[ref.seat]
+        if ref.zone is Zone.EQUIP:
+            return self.equip[ref.seat]
+        if ref.zone is Zone.JUDGE:
+            return self.judge[ref.seat]
+        raise AssertionError(f"未知区域：{ref.zone!r}")
 
     def take(self, record: JournalRecord, seed: int) -> None:
-        if record.from_zone is Zone.DECK:
-            pile = self.deck
-        elif record.from_zone is Zone.DISCARD:
-            pile = self.discard
-        elif record.from_zone is Zone.PROCESSING:
-            pile = self.processing
-        else:
-            pile = self.hands
+        pile = self._pile(record.from_zone)
         for card_id in _ids(record):
             if card_id not in pile:
                 _fail(
                     seed,
                     record,
-                    f"delta 声称从 {record.from_zone.value} 移走牌 {card_id}，但它不在那里",
+                    f"delta 声称从 {record.from_zone.zone.value} 移走牌 {card_id}，但它不在那里",
                 )
             pile.remove(card_id)
 
     def place(self, record: JournalRecord) -> None:
-        if record.to_zone is Zone.HAND:
-            self.hands.extend(_ids(record))
-        elif record.to_zone is Zone.DECK:
-            self.deck.extend(_ids(record))
-        elif record.to_zone is Zone.DISCARD:
-            self.discard.extend(_ids(record))
-        else:
-            self.processing.extend(_ids(record))
+        ref = record.to_zone
+        pile = self._pile(ref)
+        pile.extend(_ids(record))
+        if ref.zone is Zone.EQUIP:
+            # 装备区存储序 = 槽位枚举序（票 12 §Q2）；重放器必须复刻，否则座位级互校会误报。
+            order = list(SlotKind)
+            pile.sort(key=lambda card_id: order.index(self.slots[card_id]))
+
+    def note_slots(self, record: JournalRecord) -> None:
+        """记下这条记录内联的牌面槽位；装备区的排序键来自这里（``hp_change`` 没有牌）。"""
+        for card in getattr(record, "cards", ()):
+            self.slots[card.card_id] = card.slot
 
     def merge_reshuffle(self, record: JournalRecord, seed: int) -> None:
         """重洗：弃牌堆洗混后并入牌堆尾（票 23 的 ``_reshuffle_into_deck`` 语义）。
@@ -295,17 +329,17 @@ class _Piles:
 
 
 def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int) -> None:
-    """从 ``delta`` 重建区域与手牌池，逐条查牌守恒，再与终局活状态互校。
+    """从 ``delta`` 重建六个区域，逐条查牌守恒，再与终局活状态互校。
 
-    手牌只重建**全局池**：``card_move`` 记录 ``owner``（移出者）而不记目标座位，
-    座位归属对"牌守恒"（每张牌恰在一个区域）不构成信息，故池级重建已足够；
-    座位级错误由第一层的区域互斥（重复）与手牌上限覆盖。
+    区域坐标带座位 ⇒ 重建是**座位级**的（票 16 §2：重放器补座位级重建），
+    故"手牌 / 装备区 / 判定区归错座位"也能被抓到，而不只是池级守恒。
     """
-    piles = _Piles()
+    piles = _Piles(seats=len(engine.state.players))
 
     for record in engine.records:
         if record.kind != "delta":
             continue
+        piles.note_slots(record)
         if record.delta_type == "deck_shuffle":
             if record.from_zone is None:
                 piles.reset(_ids(record))
@@ -318,7 +352,7 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int) -> None:
             continue  # hp_change 不动牌，与牌守恒无关
 
         if piles.total != CARD_COUNT:
-            _fail(seed, record, f"牌守恒被破坏：四个区域合计 {piles.total} 张，应为 {CARD_COUNT} 张")
+            _fail(seed, record, f"牌守恒被破坏：六个区域合计 {piles.total} 张，应为 {CARD_COUNT} 张")
 
     if piles.deck != engine.state.deck:
         _fail(seed, None, "牌堆与从 delta 重建的结果不一致（状态变了却没有 delta）")
@@ -326,12 +360,23 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int) -> None:
         _fail(seed, None, "弃牌堆与从 delta 重建的结果不一致")
     if piles.processing != engine.state.processing:
         _fail(seed, None, "处理区与从 delta 重建的结果不一致")
-    live_hands = sorted(card_id for player in engine.state.players for card_id in player.hand)
-    if sorted(piles.hands) != live_hands:
-        _fail(seed, None, "手牌与从 delta 重建的结果不一致")
-    if sorted([*piles.deck, *piles.discard, *piles.processing, *piles.hands]) != list(
-        range(CARD_COUNT)
-    ):
+    for seat, player in enumerate(engine.state.players):
+        if piles.hands[seat] != player.hand:
+            _fail(seed, None, f"座位 {seat} 手牌与从 delta 重建的结果不一致")
+        if piles.equip[seat] != player.equip:
+            _fail(seed, None, f"座位 {seat} 装备区与从 delta 重建的结果不一致")
+        if piles.judge[seat] != player.judge:
+            _fail(seed, None, f"座位 {seat} 判定区与从 delta 重建的结果不一致")
+    if sorted(
+        [
+            *piles.deck,
+            *piles.discard,
+            *piles.processing,
+            *(card_id for pile in piles.hands for card_id in pile),
+            *(card_id for pile in piles.equip for card_id in pile),
+            *(card_id for pile in piles.judge for card_id in pile),
+        ]
+    ) != list(range(CARD_COUNT)):
         _fail(seed, None, "牌守恒被破坏：并非每张实体牌恰在一个区域")
 
 
@@ -422,6 +467,17 @@ def test_the_live_checker_catches_a_lost_card():
 def test_the_live_checker_catches_a_duplicated_card():
     engine = _play(1)
     _duplicate_one_card(engine.state)
+
+    with pytest.raises(FuzzInvariantError, match="区域互斥"):
+        _check_live_invariants(engine, engine.records[-1])
+
+
+def test_the_live_checker_covers_the_equipment_and_judge_zones():
+    """区域互斥扩到六个区：把一张已在别处的牌塞进装备区 / 判定区必须被抓到（票 21）。"""
+    engine = _play(1)
+    pile = engine.state.discard or engine.state.deck or engine.state.processing
+    assert pile, "这一局必然有牌落在共享区"
+    engine.state.player(0).equip.append(pile[0])
 
     with pytest.raises(FuzzInvariantError, match="区域互斥"):
         _check_live_invariants(engine, engine.records[-1])
