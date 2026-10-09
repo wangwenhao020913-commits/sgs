@@ -37,6 +37,7 @@ __all__ = [
     "M2_DECK_PROFILE",
     "SCENARIOS",
     "Scenario",
+    "play_random",
     "record",
 ]
 
@@ -386,17 +387,35 @@ def _record_scripted(slug: str, scenario: Scenario) -> Engine:
     return engine
 
 
-def _record_random(slug: str, scenario: Scenario) -> Engine:
-    """M2 路径：随机驱动跑完整局，事后判据断言目标机制真的发生过（票 32 §1）。"""
-    pack = load_content_pack(deck_profile=scenario.deck_profile)
+def play_random(
+    seed: int,
+    player_count: int,
+    *,
+    deck_profile: str = M2_DECK_PROFILE,
+    pack=None,
+) -> Engine:
+    """随机驱动跑完整局：M2 录制路径与**种子搜索**（``seed_search.py``）共用的唯一驱动。
+
+    磁带冻结的是决策内容，回放与驱动无关；但"搜到的种子"必须与"录制时跑的种子"是同一局，
+    否则搜索会拿别的局去验证判据。故只留这一份实现，两边都调它。
+    """
+    if pack is None:
+        pack = load_content_pack(deck_profile=deck_profile)
     engine = Engine.new_game(
-        seed=scenario.seed,
-        rule_config=RuleConfig(player_count=scenario.player_count),
+        seed=seed,
+        rule_config=RuleConfig(player_count=player_count),
         pack=pack,
     )
-    stream = RandomSource(scenario.seed).substream("ai")
-    players = [RandomPlayer(stream) for _ in range(scenario.player_count)]
-    engine.run(players)
+    stream = RandomSource(seed).substream("ai")
+    engine.run([RandomPlayer(stream) for _ in range(player_count)])
+    return engine
+
+
+def _record_random(slug: str, scenario: Scenario) -> Engine:
+    """M2 路径：随机驱动跑完整局，事后判据断言目标机制真的发生过（票 32 §1）。"""
+    engine = play_random(
+        scenario.seed, scenario.player_count, deck_profile=scenario.deck_profile
+    )
     assert goal_for(slug)(engine), (
         f"{slug}：事后判据没命中（seed={scenario.seed}, n={scenario.player_count}）；"
         f"改种子前先读 goals.py 里这条判据"

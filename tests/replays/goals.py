@@ -6,7 +6,7 @@ M1 的六条基准用 ``ScenarioPlayer`` 在**录制期**迫使目标链发生�
 磁带冻结的是**决策内容**，回放期一律 :class:`~sgs.agents.TapePlayer`，与驱动无关。
 
 判据只读**记录流与终局态**，所以它们同时也是"这条基准到底在证什么"的可读规格。
-种子由开发期搜索得到（``.scratch/t32/find_seeds.py``），写死在 ``scenarios.py`` 里。
+种子由开发期搜索得到（``tests/replays/seed_search.py``），写死在 ``scenarios.py`` 里。
 """
 
 from __future__ import annotations

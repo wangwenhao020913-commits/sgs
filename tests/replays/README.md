@@ -24,6 +24,32 @@
   磁带冻结的是**决策内容**，回放期一律 `TapePlayer`，与驱动无关；种子由开发期搜索得到、
   写死在 `scenarios.py`，录制期零搜索。
 
+## 录制 M2 基准：先跑种子搜索（加基准 / 换种子时）
+
+**新增 M2 基准、或事后判据录制期没命中要换种子时，先读这里。** 从零搜出全部 28 条
+`(n, seed)` 并核对下表写死的值：
+
+```bash
+PYTHONPATH=tests .venv/bin/python -m replays.seed_search
+```
+
+它按三句话算法搜（`seed_search.py` 是唯一真源）：每个 `(n, seed)` 只跑一次引擎、把
+`goals.M2_GOALS` 全套一遍收集候选；每条基准只留**记录条数最少**的候选（更短的局 = 更小的
+golden + 更快的回放）；候选最少的基准先做贪心去重。**人数档**也写在那里：人数骨架
+`07`–`11` 锁死 4/5/6/7/8 人，其余 23 条在 4/5/6 人里自由选。
+
+退出码非零 = 有基准没搜到候选、或下表写死的值的**有效性**核对失败（`--verify` 单独跑）；
+要按票 32 Done when 的字面口径把"搜索 ≠ 写死值"也当失败，加 `--strict`。
+注意从零搜索的最小候选会与写死值不同：`goals.py` 与引擎在票 32 的搜索之后才定型，同一条
+`(n, seed)` 的记录条数已经变了（例如 `16` 由搜索期的 1293 变成 golden 里的 1797）；
+工具把这种漂移原样打印，但不据此判失败——写死的旧候选仍然有效，换基准时才需要用搜到的新
+值重写 `scenarios.py` 并 `pytest --update-golden` 重录。
+
+它是**开发期工具，不在门禁里**（不是第二个门禁入口）：门禁只回放，不做搜索。
+
+下面那张六列索引表由 `python -m replays.readme_index --write` 生成（类 / 档位 / 人数取自
+`distribution.py` 与 `scenarios.py`，中文名与规则条目取自 `readme_index.NAMES`）——**别手改表格行**。
+
 | slug | 中文场景名 | 类 | 档位 | 人数 | 验证的规则条目 |
 |---|---|---|---|---|---|
 | `01-slash-dodge-cancel` | 【杀】→【闪】抵消 | m1-regression | `basic_53` | 2 | 使用与打出 / 无效·抵消·失效 / 使用全步骤（规则 4.3 / 17.6 / 17.10）；L4 六个时机 + L5 的 `RESOLVE_BEFORE_EFFECT` / `RESOLVE_END` / `RESOLVE_AFTER_END`（**不出现** `RESOLVE_EFFECT` / `RESOLVE_AFTER_EFFECT`）；手牌 → 处理区 → 弃牌堆两段移动（`reason` 均为 `USE`） |

@@ -298,6 +298,27 @@ def test_the_readme_declares_the_class_deck_and_player_count_of_each_baseline() 
     assert declared == expected, "README 的类 / 档位 / 人数三列与 distribution / scenarios 不一致"
 
 
+def test_the_readme_index_table_is_exactly_what_the_generator_produces() -> None:
+    """票 32 §1：索引表由 ``replays/readme_index.py`` 生成，手改表格行即漂移。"""
+    from replays import readme_index
+
+    text = (REPLAYS_DIR / "README.md").read_text(encoding="utf-8")
+
+    assert readme_index.replace_table(text) == text, (
+        "README 的索引表与 readme_index.table() 不一致；"
+        "用 `python -m replays.readme_index --write` 重新生成"
+    )
+
+
+def test_the_readme_index_names_cover_exactly_the_baseline_set() -> None:
+    """票 32 §1：中文名 / 规则条目必须逐条登记，不得有孤儿或漏项。"""
+    from replays import readme_index
+
+    assert set(readme_index.NAMES) == set(scenarios.SCENARIOS), (
+        "索引表的中文名 / 规则条目必须逐条登记，不得有孤儿或漏项"
+    )
+
+
 FROZEN_BASELINES = (
     "01-slash-dodge-cancel",
     "02-slash-hit-damage",
