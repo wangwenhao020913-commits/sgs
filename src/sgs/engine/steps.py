@@ -12,10 +12,13 @@
   在"造成伤害后"之前把体力真正扣掉。
 - **LIFE_DECREASE 帧**（票 20 / 21）：L8 三个时机；"扣减体力时"是唯一的体力写入点。
   体力降到 0 及以下就在那里插入 **NEAR_DEATH** 子帧（票 21）；救回则照常走完"扣减体力后"。
-- **NEAR_DEATH 帧**（票 21）：L12 三个时机；"处于濒死状态时"按官方顺序逐个求桃
+- **NEAR_DEATH 帧**（票 21 / 票 31）：L12 三个时机；"处于濒死状态时"按官方顺序逐个求桃
   （当前回合角色起、逆时针、一人一次），有人出桃则压入 **RECOVER** 子帧、在其中把
-  体力恢复 1 点，然后回到被中断的结算。无人救时在"濒死结算结束后"压入 **DEATH** 子帧
-  （票 22）——死亡结算作为原子单元跑完，濒死帧与整条伤害链留给终局清栈。
+  体力恢复 1 点，然后回到被中断的结算。**新濒死回退**（票 20 / 票 31）＝同一帧的
+  时机级回退：某次响应**严格回复过体力但仍 < 1** ⇒ ``Goto`` 跳回"处于濒死状态时"
+  开出一个新窗口，新区间 = 旧应答者区间的**后缀**（起点 = 刚响应完的座位）；``ENTER`` /
+  ``AFTER`` 全程各恰一次，终局清栈形状零变化。无人救时在"濒死结算结束后"压入
+  **DEATH** 子帧（票 22）——死亡结算作为原子单元跑完，濒死帧与整条伤害链留给终局清栈。
 - **DEATH 帧**（票 22 / 票 25）：L13 裁剪后的死亡段，**按模式分叉**。无身份局四段
   （`DEATH_REVEAL_IDENTITY_BEFORE` 不入表、不 dispatch）；身份局五段——入表并把身份
   亮明成一条 ``identity_reveal``（在时机 dispatch 之后、胜负检测之前）。`DEATH_ON` 先
@@ -757,8 +760,14 @@ LIFE_DECREASE_STEPS = (
 # ---- NEAR_DEATH 帧：L12 三个时机 + 官方求桃顺序 -----------------------------
 #
 # 应答者区间是票 05 §7 的"**从当前回合角色起、逆时针、每人一次**"（官方 L18.2，
-# ``flow/neardeath.txt``）；L18.8 的起点切换与 L12.2 的"新的濒死状态时"回退收窄
-# 按票 05 §7 / 票 13 §5 为"结构存在、M1 不可达"，故此处只落一个实例，不建第二套调度。
+# ``flow/neardeath.txt``）；L18.8 的起点切换与 L12.2 的"新的濒死状态时"回退按票 20 / 票 31
+# 落成**同一帧内的窗口回退**（``Goto`` 跳回本步骤）：每个窗口的区间是上一窗的座位后缀，
+# 起点 = 刚响应完的响应者、终点仍是"当前回合角色的上家"（继承不重算）。
+#
+# **M3 交接**（票 20 §4）：``NEAR_DEATH_AT`` 逐窗口重发，而 ``R:475`` 的"同一时机发动一次后
+# 本次濒死结算结束前无效"其去重作用域 = **整个濒死结算帧**——M3 的技能去重键必须绑帧，
+# **不得**绑单次派发。帧上的 ``_pending_timing``（``game.py``）只是**记录幂等**机制，
+# 不是技能去重，两件事不要混用。
 
 
 def _emit_near_death(host: FrameHost, frame: Frame, timing: Timing) -> Control:
@@ -770,41 +779,60 @@ def near_death_enter(host: FrameHost, frame: Frame) -> Control:
 
 
 def near_death_at(host: FrameHost, frame: Frame) -> Control:
-    """"处于濒死状态时"：打开求桃窗口，按官方顺序定下应答者区间。
+    """"处于濒死状态时"：打开求桃窗口（首窗，或回退后开出的新窗），定下应答者区间。
 
-    区间在窗口打开时**定格**（``askers`` 进帧私有载荷）而不是每轮重算，使"当前回合
-    角色起逆时针"在整段濒死结算里只有一个真源；"新的濒死状态时"的回退收窄
-    （``flow/neardeath.txt`` 第 13 行）M1 不可达（票 05 §7），故不建重入分支。
+    区间在窗口打开时**定格**（``askers`` 进帧私有载荷）而不是每轮重算。首窗按官方
+    "当前回合角色起逆时针"；**回退窗**（票 20 / 票 31）取旧元组的**后缀**——``window_start``
+    由 :func:`near_death_ask` 在判定回退时写入（= 刚响应完的座位），故"先前已问过的人
+    不再问"与"终点不变"都是结构事实，且 ``turn_seat`` 为死者时也不会重算错。
     """
     control = _emit_near_death(host, frame, Timing.NEAR_DEATH_AT)
     if control is not None:
         return control
-    frame.data.setdefault(
-        "askers", _askers_from(host.state, host.state.turn_seat, len(host.state.players))
-    )
-    frame.data.setdefault("next", 0)
+    prior = frame.data.get("askers")
+    start = frame.data.get("window_start")
+    if start is None or prior is None:
+        askers = _askers_from(host.state, host.state.turn_seat, len(host.state.players))
+    else:
+        askers = prior[prior.index(start) :]
+    frame.data["askers"] = askers
+    frame.data["next"] = 0
     return None
 
 
 def near_death_ask(host: FrameHost, frame: Frame) -> Control:
-    """逐个应答者求桃，直到有人把体力回复到 1 点以上、或全部询问完毕。
+    """逐个应答者求桃；体力恢复过但仍 < 1 时**在同一帧内开出新窗口**。
 
     "一个询问一个应答者"（票 05 §7）：每轮只发一个 ``PEACH`` 询问，``next`` 记进度，
     故暂停、恢复、拒绝都落在同一个槽位上。体力恢复到 1 点以上就**立即**脱离濒死
     （官方 4.17 第 4 条"每回复 1 点体力即检查"），不再问剩下的人。
+
+    **回退判据**（票 20 §2 / 票 31）：刚推入的那次响应结算全部出栈后，若体力**严格
+    上升**且仍 < 1 ⇒ 记 ``window_start`` 为那名响应者并 ``Goto`` 回 :func:`near_death_at`
+    开新窗。检测点在响应结算之后，故体力写入本来就已经发生、判据零新增钩子；
+    ``pending_response`` 在每次重入时先取走，因而"结算未回复"的分支天然干净。
     """
     target = frame.data["target"]
+    pending = frame.data.pop("pending_response", None)
     if host.state.player(target).hp >= 1:
         return None
+    if pending is not None:
+        idx, hp_before = pending
+        if host.state.player(target).hp > hp_before:
+            frame.data["window_start"] = frame.data["askers"][idx]
+            return Goto(NEAR_DEATH_AT_PC)
+        frame.data["next"] = idx + 1
     while frame.data["next"] < len(frame.data["askers"]):
-        asker = frame.data["askers"][frame.data["next"]]
+        idx = frame.data["next"]
+        asker = frame.data["askers"][idx]
         action = host.ask_query(QueryKind.PEACH, asker, Timing.NEAR_DEATH_AT, dying=target)
         if host.suspended(action):
             return "stay"
-        frame.data["next"] += 1
         if isinstance(action, UseCard):
+            frame.data["pending_response"] = (idx, host.state.player(target).hp)
             host.recover_from_peach(frame, action, asker=asker, dying=target)
-            return "stay"  # 回复帧出栈后重入本步：先看体力是否已恢复到 1 点以上
+            return "stay"  # 响应链出栈后重入本步：此处判回退
+        frame.data["next"] = idx + 1
     return None
 
 
@@ -831,6 +859,9 @@ NEAR_DEATH_STEPS = (
     Step(near_death_ask, Timing.NEAR_DEATH_AT),
     Step(near_death_after, Timing.NEAR_DEATH_AFTER),
 )
+
+NEAR_DEATH_AT_PC = _pc_of(NEAR_DEATH_STEPS, Timing.NEAR_DEATH_AT)
+"""窗口步骤的下标：新濒死回退 = 在同一帧内 ``Goto`` 回这里（票 20 §1 / 票 31）。"""
 
 
 def _askers_from(state: GameState, start: int | None, count: int) -> tuple[int, ...]:
