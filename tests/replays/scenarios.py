@@ -29,7 +29,13 @@ from sgs.engine import Engine, dump_journal
 from sgs.state import Action, EndPhase, Pass, Query, UseCard
 from sgs.timing import Timing
 
-__all__ = ["SCENARIOS", "Scenario", "record"]
+__all__ = ["SCENARIOS", "M1_DECK_PROFILE", "Scenario", "record"]
+
+M1_DECK_PROFILE = "basic_53"
+"""M1 六条基准**显式选中的档位**（票 16 §9）。
+
+产品默认档在 M2 集成票翻到 ``standard_108`` 之后，M1 回归网仍必须跑 53 张切片——
+这里写死档位名，不让"默认档"的改动泄漏进基准录制。"""
 
 
 @dataclass(frozen=True)
@@ -257,7 +263,7 @@ def _find(query: Query, action_type: type) -> Action:
 def record(slug: str) -> str:
     """用场景脚本跑完整局，返回 canonical JSONL；录制期断言目标段与终止保证。"""
     scenario = SCENARIOS[slug]
-    pack = load_content_pack()
+    pack = load_content_pack(deck_profile=M1_DECK_PROFILE)
     engine = Engine.new_game(seed=scenario.seed, rule_config=RuleConfig(), pack=pack)
     recording = _Recording()
     players: list = [ScenarioPlayer(seat, slug, recording) for seat in range(2)]

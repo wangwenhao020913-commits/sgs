@@ -137,23 +137,46 @@ def test_the_opening_shuffle_and_deal_use_zone_coordinates_and_belonging():
 
 
 def _equipment_pack() -> ContentPack:
-    """一份最小装备内容包：两张武器（同槽）+ 一张防具（另一槽）+ 一张宝物（留位不启用）。"""
+    """一份最小内容包：两张武器（同槽）+ 一张防具（另一槽）+ 一张普通锦囊（无槽位）。
+
+    牌名取自标准行为表（加载期要求"声明的牌名必有行为"），故它们各自有槽位；
+    非装备牌没有槽位（``None``）——宝物槽位只**预留**在 ``SlotKind`` 里，
+    其子类别不在加载期闭集内、M2 不启用（票 09 §7 #11 / ADR-006）。
+    """
     raw: Mapping[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "pack_id": "test-equip",
         "deck_profile": "tiny",
         "card_types": [
-            {"id": "blade", "name": "测试刀", "category": "equipment", "subcategory": "weapon"},
-            {"id": "shield", "name": "测试盾", "category": "equipment", "subcategory": "armor"},
-            {"id": "relic", "name": "测试宝", "category": "equipment", "subcategory": "treasure"},
+            {
+                "id": "crossbow",
+                "name": "诸葛连弩",
+                "category": "equipment",
+                "subcategory": "weapon",
+                "attack_range": 1,
+            },
+            {
+                "id": "qinggang_sword",
+                "name": "青釭剑",
+                "category": "equipment",
+                "subcategory": "weapon",
+                "attack_range": 2,
+            },
+            {
+                "id": "eight_diagrams",
+                "name": "八卦阵",
+                "category": "equipment",
+                "subcategory": "armor",
+            },
+            {"id": "duel", "name": "决斗", "category": "trick", "subcategory": "instant"},
         ],
         "decks": {
             "tiny": {
                 "cards": [
-                    {"type": "blade", "suit": "spade", "rank": 5},
-                    {"type": "blade", "suit": "spade", "rank": 6},
-                    {"type": "shield", "suit": "heart", "rank": 2},
-                    {"type": "relic", "suit": "club", "rank": 3},
+                    {"type": "crossbow", "suit": "spade", "rank": 5},
+                    {"type": "qinggang_sword", "suit": "spade", "rank": 6},
+                    {"type": "eight_diagrams", "suit": "heart", "rank": 2},
+                    {"type": "duel", "suit": "club", "rank": 3},
                 ]
             }
         },
@@ -185,7 +208,7 @@ def test_the_slot_is_a_card_face_fact_derived_from_the_subcategory():
         SlotKind.WEAPON,
         SlotKind.ARMOR,
         None,
-    ], "槽位在实例化时一次派生；宝物槽位预留不启用（ADR-006）"
+    ], "槽位在实例化时一次派生；非装备牌没有槽位（宝物槽位预留不启用，ADR-006）"
 
 
 def test_putting_a_card_into_an_occupied_equipment_slot_is_a_programming_error():

@@ -31,7 +31,7 @@ def test_header_is_the_first_line_and_carries_the_envelope():
     assert isinstance(header, Header)
     assert header.seed == 7
     assert header.pack_id == "standard"
-    assert header.deck_profile == "m1_basic"
+    assert header.deck_profile == "basic_53"
     assert header.event_schema_version == EVENT_SCHEMA_VERSION
     assert header.rule_config.model_dump(mode="json") == {
         "player_count": 2,
@@ -62,7 +62,7 @@ def test_the_seven_kinds_are_all_defined_and_serialisable():
     assert produced == {"header", "timing", "delta", "query", "action", "frame", "game_end"}
 
     synthetic = [
-        Header(seed=1, pack_id="standard", deck_profile="m1_basic", rule_config=_rule_config()),
+        Header(seed=1, pack_id="standard", deck_profile="basic_53", rule_config=_rule_config()),
         TimingRecord(seq=1, timing=Timing.GAME_START, frame_id=0, depth=0),
         CardMoveRecord(
             seq=2,

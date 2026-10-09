@@ -14,7 +14,23 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict
 
-__all__ = ["Category", "CardType", "ContentPack", "Deck", "DeckCard", "DeckExpect", "Suit"]
+__all__ = [
+    "DEFAULT_SLOT_LIMIT",
+    "Category",
+    "CardType",
+    "ContentPack",
+    "Deck",
+    "DeckCard",
+    "DeckExpect",
+    "Suit",
+]
+
+DEFAULT_SLOT_LIMIT = 2
+"""同一 (花色,点数) 槽位的**默认**上限；``Deck.slot_limit`` 可逐档覆盖。
+
+标准版含 EX 的 108 张档位在 ♠2 / ♣2 / ♥Q / ♦Q 四个槽位各有三张，故该档显式写 3；
+基本 53 张档位沿用默认 2。它是"未声明时取几"，不是全局放宽（票 09 §3）。
+"""
 
 
 class _FrozenModel(BaseModel):
@@ -39,12 +55,19 @@ class Category(str, Enum):
 
 
 class CardType(_FrozenModel):
-    """牌名级定义：这张牌**是什么**。行为字段整体归 effects 层。"""
+    """牌名级定义：这张牌**是什么**。行为字段整体归 effects 层。
+
+    ``attack_range`` / ``delayed`` 是**牌面事实**（票 09 §6）：前者是"距离 ≤ 攻击范围"
+    L3 校验的取值来源、只属武器；后者是延时锦囊"置入判定区"的声明面。两者都带默认值，
+    故基本 53 张档位一字不改即可通过。
+    """
 
     id: str
     name: str
     category: Category
     subcategory: str | None = None
+    attack_range: int | None = None
+    delayed: bool = False
 
 
 class DeckCard(_FrozenModel):
@@ -56,13 +79,27 @@ class DeckCard(_FrozenModel):
 
 
 class DeckExpect(_FrozenModel):
-    """牌堆的声明式分布期望；加载期语义校验要求它与实况相符。"""
+    """牌堆的声明式分布期望；加载期语义校验要求它与实况相符。
+
+    ``total`` / ``by_type`` 必写；``by_suit`` / ``by_category`` 可选，缺失即不校验
+    —— 基本 53 张档位的花色分布是 13/19/7/14，写不出"每花色 27"，故不写这两项。
+    三项都沿用**双向穷尽**语义：实况出现但未声明的键同样报错。
+    """
 
     total: int
     by_type: dict[str, int]
+    by_suit: dict[str, int] | None = None
+    by_category: dict[str, int] | None = None
 
 
 class Deck(_FrozenModel):
+    """一个牌堆档位；``slot_limit`` 是**声明式分档字段**（默认 2）。
+
+    标准版含 EX 的 108 张在 ♠2 / ♣2 / ♥Q / ♦Q 四个槽位上各有三张，故该档显式写 3；
+    这是档位属性而不是全局放宽，否则基本 53 张"每槽至多两张"的机械保护会失效。
+    """
+
+    slot_limit: int = DEFAULT_SLOT_LIMIT
     expect: DeckExpect | None = None
     cards: tuple[DeckCard, ...]
 

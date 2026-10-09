@@ -14,7 +14,9 @@ from sgs.effects import (
     CallOp,
     DamageNature,
     EffectContext,
+    FinalZone,
     PushFrame,
+    TargetCount,
     UseContext,
     apply_hp,
     attack_range,
@@ -84,8 +86,12 @@ def test_in_1v1_the_distance_and_range_are_both_one():
 # ---------------------------------------------------------------------------
 
 
-def test_the_behavior_table_has_exactly_the_three_m1_cards():
-    assert set(CARD_BEHAVIORS) == {"slash", "dodge", "peach"}
+def test_the_behavior_table_covers_exactly_the_standard_card_names():
+    """M2 把行为表扩到标准版全表；加载期的双向覆盖校验以此为唯一真源（票 09 §7 #9）。"""
+    pack = load_content_pack(deck_profile="standard_108")
+
+    assert set(CARD_BEHAVIORS) == {card_type.id for card_type in pack.card_types}
+    assert {"slash", "dodge", "peach"} <= set(CARD_BEHAVIORS), "M1 三条仍在表内"
 
 
 def test_slash_declares_a_damage_push_and_a_rated_single_use_per_turn():
@@ -114,6 +120,45 @@ def test_behavior_steps_are_only_push_frame_and_call_op():
     for behavior in CARD_BEHAVIORS.values():
         for step in behavior.effects:
             assert isinstance(step, (PushFrame, CallOp))
+
+
+def test_the_final_zone_is_discard_by_default_equip_for_equipment_and_judge_for_delayed():
+    """结算完实体牌停在哪是牌面事实（票 09 §6）：基本牌用默认值，故 M1 行为零改动。"""
+    assert CARD_BEHAVIORS["slash"].final_zone is FinalZone.DISCARD
+    assert CARD_BEHAVIORS["peach"].final_zone is FinalZone.DISCARD
+    assert CARD_BEHAVIORS["crossbow"].final_zone is FinalZone.EQUIP
+    assert CARD_BEHAVIORS["eight_diagrams"].final_zone is FinalZone.EQUIP
+    assert CARD_BEHAVIORS["indulgence"].final_zone is FinalZone.JUDGE
+    assert CARD_BEHAVIORS["lightning"].final_zone is FinalZone.JUDGE
+
+
+def test_target_count_sources_are_rated_all_alive_and_all_alive_with_self():
+    """三种目标数来源（票 09 §5）：额定 / 全体存活不含自己 / 全体存活含自己。"""
+    assert CARD_BEHAVIORS["slash"].target_rule.count is TargetCount.RATED
+
+    barbarian = CARD_BEHAVIORS["barbarian_invasion"].target_rule
+    assert barbarian.count is TargetCount.ALL_ALIVE
+    assert barbarian.includes_self_in_pool() is False, "南蛮入侵不含使用者"
+    assert barbarian.target_count(3) == 3, "目标数 = 候选池大小"
+
+    peach_garden = CARD_BEHAVIORS["peach_garden"].target_rule
+    assert peach_garden.count is TargetCount.ALL_ALIVE_WITH_SELF
+    assert peach_garden.includes_self_in_pool() is True, "桃园结义含使用者"
+
+
+def test_the_all_alive_pools_include_or_exclude_the_user_in_target_selection():
+    pack = load_content_pack(deck_profile="standard_108")
+    barbarian = cards_of_type(pack, "barbarian_invasion")[0]
+    peach_garden = cards_of_type(pack, "peach_garden")[0]
+    seats = [SeatSpec(hand=(barbarian,)), SeatSpec(), SeatSpec()]
+    state = build_state(pack=pack, seats=seats, turn_seat=0)
+
+    assert set(check_targets(state, 0, state.card(barbarian))) == {1, 2}
+
+    seats = [SeatSpec(hand=(peach_garden,)), SeatSpec(), SeatSpec()]
+    state = build_state(pack=pack, seats=seats, turn_seat=0)
+
+    assert set(check_targets(state, 0, state.card(peach_garden))) == {0, 1, 2}
 
 
 # ---------------------------------------------------------------------------

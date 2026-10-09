@@ -15,6 +15,7 @@ from sgs.state import GameState, Phase, Player, Query, UseCard
 from sgs.timing import Timing
 
 __all__ = [
+    "M1_DECK_PROFILE",
     "PeachInPlayPhasePlayer",
     "RecordingPlayer",
     "SeatSpec",
@@ -27,6 +28,9 @@ __all__ = [
     "run_until",
     "turn_loop_engine",
 ]
+
+M1_DECK_PROFILE = "basic_53"
+"""M1 单测**显式选中的档位**（票 16 §9）：产品默认档翻到 108 后，M1 回归网仍跑 53 张切片。"""
 
 
 @dataclass(frozen=True)
@@ -117,7 +121,7 @@ def play_standard(seed: int = 7, *, pack: ContentPack | None = None):
     import sgs.agents as agents
     from sgs.engine import RandomSource
 
-    resolved_pack = pack if pack is not None else load_content_pack()
+    resolved_pack = pack if pack is not None else load_content_pack(deck_profile=M1_DECK_PROFILE)
     rule_config = RuleConfig()
     engine = Engine.new_game(seed=seed, rule_config=rule_config, pack=resolved_pack)
     ai_stream = RandomSource(seed).substream("ai")
@@ -216,7 +220,7 @@ def turn_loop_engine(seed: int = 1):
     不碰使用结算。记录流是 L0 ``GAME_START`` / L1 / L2 可见节点的实测来源。
     """
     state = build_state(
-        pack=load_content_pack(),
+        pack=load_content_pack(deck_profile=M1_DECK_PROFILE),
         seats=[SeatSpec(hp=4, hand=(40, 41, 42, 43)), SeatSpec(hp=4)],
         deck=tuple(range(10)),
         turn_seat=0,
@@ -234,7 +238,7 @@ def play_phase_peach_engine(seed: int = 1):
     出【桃】（基准 03 / 04）互为独立来源。摸到的两张牌即使含【杀】也不使用：驱动玩家
     只看【桃】与结束阶段。
     """
-    pack = load_content_pack()
+    pack = load_content_pack(deck_profile=M1_DECK_PROFILE)
     peach = cards_of_type(pack, "peach")[0]
     state = build_state(
         pack=pack,

@@ -31,7 +31,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .behaviors import CardBehavior, UseContext, behavior_for
+from .behaviors import CardBehavior, TargetCount, UseContext, behavior_for
 
 __all__ = [
     "attack_range",
@@ -111,10 +111,12 @@ def check_count(state: GameState, seat: int, card: CardRef) -> bool:
 def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]:
     """L3.3 ``USE_CHECK_TARGETS``：这张牌当前的合法目标池（可为空）。
 
-    额定目标数为 0 的响应牌（【闪】）返回空元组——它响应的是那张【杀】，不是座位。
+    目标数为 0 的响应牌（【闪】/【无懈可击】）返回空元组——它们响应的是那张牌 /
+    那次结算，不是座位。两个"全体存活"档的候选池由目标数来源枚举决定含不含自己，
+    候选池的**限制**（距离 1 以内、区域里有牌……）一律走技能侧的候选池修饰器。
     """
     rule = behavior_for(card).target_rule
-    if rule.rated_targets == 0:
+    if rule.count is TargetCount.RATED and rule.rated_targets == 0:
         return ()
     if rule.self_only:
         me = state.player(seat)
@@ -125,7 +127,7 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
     for player in state.players:
         if not player.alive:
             continue
-        if player.seat == seat and not rule.includes_self:
+        if player.seat == seat and not rule.includes_self_in_pool():
             continue
         if rule.needs_distance and distance(state, seat, player.seat) > attack_range(state, seat):
             continue
@@ -162,8 +164,9 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
     for card in _usable_hand(state, seat, UseContext.PLAY_PHASE):
         if check_count(state, seat, card):
             continue
-        rated = behavior_for(card).target_rule.rated_targets
-        for combo in combinations(check_targets(state, seat, card), rated):
+        rule = behavior_for(card).target_rule
+        pool = check_targets(state, seat, card)
+        for combo in combinations(pool, rule.target_count(len(pool))):
             actions.append(UseCard(card=card, targets=tuple(combo), answers_seq=answers_seq))
     actions.append(EndPhase(answers_seq=answers_seq))
     return actions

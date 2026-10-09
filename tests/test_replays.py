@@ -238,11 +238,14 @@ def test_golden_replay_matches_byte_for_byte(slug: str, tmp_path: Path, update_g
     expected = path.read_text(encoding="utf-8")
     records = read_journal(path)
     header = records[0]
-    assert (header.pack_id, header.deck_profile) == (PACK.pack_id, PACK.deck_profile), (
-        "回放以 header 为准重开一局；header 声明的 pack / deck 必须能被当前数据加载"
+    # 回放以 header 为准重开一局：header 声明的 pack / deck 必须能被当前数据加载，
+    # 且**就是本次运行选中的档**（不是包默认档——多档并存后两者可以不同，票 16 §8）。
+    pack = load_content_pack(header.pack_id, deck_profile=header.deck_profile)
+    assert pack.deck_profile == header.deck_profile, (
+        "header 声明的 pack / deck 必须能被当前数据加载"
     )
     seed, tape = tape_from_journal(records)
-    engine = Engine.new_game(seed=seed, rule_config=header.rule_config, pack=PACK)
+    engine = Engine.new_game(seed=seed, rule_config=header.rule_config, pack=pack)
     player = TapePlayer(tape)
     engine.run([player, player])
 

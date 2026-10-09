@@ -8,6 +8,12 @@
 3. 语义：手写检查，在结构通过之后跑（结构没过时字段本身还不可信）。
 
 任何一层不过都抛 :class:`~sgs.data.DataLoadError`，**绝不返回部分数据**。
+
+语义层里有两条**跨层校验**（票 09 §7 的 #9/#10）：牌名 ↔ 行为表双向覆盖、
+行为表里的 ``CallOp`` 操作名 ∈ ``OPS`` 注册表；以及装备牌名 ⇒ 技能表里有对应的
+``equip.<牌名 id>``（票 09 §7 的 #8）。它们是"行为留在代码、数据与代码不漂移"的
+机械保证——故加载器**跨层调用** ``sgs.effects`` 与 ``sgs.skills`` 的只读查询。
+两个导入都放在函数体内：``sgs.state`` 反向依赖 ``sgs.data``，模块级导入会成环。
 """
 
 from __future__ import annotations
@@ -21,19 +27,38 @@ from typing import Any
 from pydantic import ValidationError
 
 from .errors import DataLoadError, LoadError
-from .models import ContentPack, Deck
+from .models import Category, CardType, ContentPack, Deck
 
-__all__ = ["DEFAULT_PACK_ID", "KNOWN_SCHEMA_VERSIONS", "load_content_pack", "validate_content_pack"]
+__all__ = [
+    "DEFAULT_PACK_ID",
+    "KNOWN_SCHEMA_VERSIONS",
+    "load_content_pack",
+    "validate_content_pack",
+]
 
-KNOWN_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
-"""加载器认得的**数据模型**版本；与事件 schema 版本、规则版本是三件事。"""
+KNOWN_SCHEMA_VERSIONS: frozenset[int] = frozenset({2})
+"""加载器认得的**数据模型**版本；与事件 schema 版本、规则版本是三件事。
+
+升 2 的判据落在"旧加载器读新文件"：``Deck.slot_limit`` / ``CardType.attack_range`` /
+``CardType.delayed`` / ``DeckExpect.by_suit`` / ``by_category`` 在旧代码的
+``extra="forbid"`` 下是结构错误——这正是该由版本号先拦下的情形（票 09 §7）。
+"""
 
 DEFAULT_PACK_ID = "standard"
 
 RANK_MIN = 1
 RANK_MAX = 13
-SLOT_LIMIT = 2
-# 同一 (花色,点数) 槽位至多两张：标准版每槽印两张（票 03 §3）。
+
+SUBCATEGORIES: frozenset[str] = frozenset(
+    {"instant", "delayed", "weapon", "armor", "horse_offense", "horse_defense"}
+)
+"""``CardType.subcategory`` 的**闭集**（票 09 §7 #11）；基本牌取 ``null``。
+
+宝物槽位属界限突破、M2 不启用，故 ``treasure`` **不在**闭集里：预留的是槽位枚举，
+不是可加载的子类别。
+"""
+
+_EQUIPMENT_SKILL_PREFIX = "equip."
 
 _EXPECTED_BY_PYDANTIC_ERROR: dict[str, str] = {
     "missing": "必填字段",
@@ -173,6 +198,8 @@ def _semantic_errors(file: str, pack: ContentPack) -> list[LoadError]:
             )
         seen_names.add(card_type.name)
 
+    errors.extend(_card_type_errors(file, pack.card_types, pack_id=pack.pack_id))
+
     if pack.deck_profile not in pack.decks:
         errors.append(
             LoadError(
@@ -184,21 +211,167 @@ def _semantic_errors(file: str, pack: ContentPack) -> list[LoadError]:
             )
         )
 
+    card_types = {card_type.id: card_type for card_type in pack.card_types}
     for profile, deck in pack.decks.items():
         base = f"/decks/{profile}"
-        errors.extend(_deck_errors(file, base, deck, seen_ids))
+        errors.extend(_deck_errors(file, base, deck, card_types))
 
     return errors
 
 
-def _deck_errors(file: str, base: str, deck: Deck, known_ids: set[str]) -> list[LoadError]:
+def _card_type_errors(
+    file: str, card_types: tuple[CardType, ...], *, pack_id: str
+) -> list[LoadError]:
+    """牌名级语义校验：子类别闭集、延时自洽、武器范围、装备技能、行为表覆盖、op 引用。
+
+    行为表是**代码侧的全集**（``CARD_BEHAVIORS`` 覆盖标准版全表），故"双向覆盖"拆成两半：
+
+    - ``card_type.behavior_missing``：本包声明的牌名没有行为 —— **所有包**都查，
+      否则该包根本执行不了；
+    - ``card_type.behavior_orphan``：行为表里有、本包牌名表里没有 —— **只对标准包**查。
+      标准包的 ``card_types`` 就是行为表要一一对应的那个全集；部分包（测试里的最小
+      内容包）只是**借用**标准行为表的一个子集，此时表外的条目不是孤儿。
+
+    两条跨层只读查询在函数体内导入（``sgs.state`` 反向依赖 ``sgs.data``，模块级导入会成环）。
+    """
+    from sgs.effects import CARD_BEHAVIORS, OPS, CallOp
+    from sgs.skills import equipment_skill_ids
+
+    errors: list[LoadError] = []
+    behaviors, ops = CARD_BEHAVIORS, OPS
+    skill_ids = equipment_skill_ids()
+    known_ids = {card_type.id for card_type in card_types}
+    if not card_types:
+        # 空牌名表是单点根因（已由 card_types.empty 报出）：再逐条报孤儿只会淹没它。
+        return errors
+
+    for index, card_type in enumerate(card_types):
+        base = f"/card_types/{index}"
+
+        if card_type.category is Category.BASIC:
+            if card_type.subcategory is not None:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/subcategory",
+                        expected="null（基本牌没有子类别）",
+                        got=repr(card_type.subcategory),
+                        rule_id="card_type.unknown_subcategory",
+                    )
+                )
+        elif card_type.subcategory is None or card_type.subcategory not in SUBCATEGORIES:
+            errors.append(
+                LoadError(
+                    file=file,
+                    loc=f"{base}/subcategory",
+                    expected=f"子类别闭集之一：{sorted(SUBCATEGORIES)}",
+                    got=repr(card_type.subcategory),
+                    rule_id="card_type.unknown_subcategory",
+                )
+            )
+
+        expected_delayed = (
+            card_type.category is Category.TRICK and card_type.subcategory == "delayed"
+        )
+        if card_type.delayed != expected_delayed:
+            errors.append(
+                LoadError(
+                    file=file,
+                    loc=f"{base}/delayed",
+                    expected=str(expected_delayed),
+                    got=str(card_type.delayed),
+                    rule_id="card_type.delayed_mismatch",
+                )
+            )
+
+        if card_type.subcategory == "weapon":
+            if card_type.attack_range is None or card_type.attack_range < 1:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/attack_range",
+                        expected="≥ 1 的整数（武器必有攻击范围）",
+                        got=repr(card_type.attack_range),
+                        rule_id="card_type.weapon_range_required",
+                    )
+                )
+        elif card_type.attack_range is not None:
+            errors.append(
+                LoadError(
+                    file=file,
+                    loc=f"{base}/attack_range",
+                    expected="null（攻击范围只属武器）",
+                    got=repr(card_type.attack_range),
+                    rule_id="card_type.range_only_for_weapon",
+                )
+            )
+
+        if (
+            card_type.category is Category.EQUIPMENT
+            and f"{_EQUIPMENT_SKILL_PREFIX}{card_type.id}" not in skill_ids
+        ):
+            errors.append(
+                LoadError(
+                    file=file,
+                    loc=f"{base}/id",
+                    expected=f"技能表里存在 {_EQUIPMENT_SKILL_PREFIX}{card_type.id}（装备必有技能）",
+                    got=repr(card_type.id),
+                    rule_id="card_type.equipment_skill_missing",
+                )
+            )
+
+        behavior = behaviors.get(card_type.id)
+        if behavior is None:
+            errors.append(
+                LoadError(
+                    file=file,
+                    loc=f"{base}/id",
+                    expected="行为表中有对应条目",
+                    got=repr(card_type.id),
+                    rule_id="card_type.behavior_missing",
+                )
+            )
+            continue
+        for step in behavior.effects:
+            if isinstance(step, CallOp) and step.op not in ops:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/id",
+                        expected=f"OPS 注册表中的操作名：{sorted(ops)}",
+                        got=repr(step.op),
+                        rule_id="card_type.unknown_op",
+                    )
+                )
+
+    # 反向：标准包的行为表里若有、牌名表里没有的条目，也是"不相符"
+    # （防行为表长出孤儿）；部分包借用标准行为表的子集，不在此列。
+    if pack_id == DEFAULT_PACK_ID:
+        for orphan in sorted(card_id for card_id in behaviors if card_id not in known_ids):
+            errors.append(
+                LoadError(
+                    file=file,
+                    loc="/card_types",
+                    expected="行为表的每个条目都有对应牌名",
+                    got=repr(orphan),
+                    rule_id="card_type.behavior_orphan",
+                )
+            )
+
+    return errors
+
+
+def _deck_errors(
+    file: str, base: str, deck: Deck, card_types: Mapping[str, CardType]
+) -> list[LoadError]:
     errors: list[LoadError] = []
     slot_counts: dict[tuple[str, int], int] = {}
+    slot_limit = deck.slot_limit
 
     for index, card in enumerate(deck.cards):
         # 牌名引用只在有定义可查时才逐张判定：card_types 为空是单点根因，已由
         # card_types.empty 报出；再逐张报"引用不存在"只会用 53 条噪声淹没它。
-        if known_ids and card.type not in known_ids:
+        if card_types and card.type not in card_types:
             errors.append(
                 LoadError(
                     file=file,
@@ -221,55 +394,99 @@ def _deck_errors(file: str, base: str, deck: Deck, known_ids: set[str]) -> list[
 
         slot = (card.suit.value, card.rank)
         slot_counts[slot] = slot_counts.get(slot, 0) + 1
-        if slot_counts[slot] == SLOT_LIMIT + 1:
+        if slot_counts[slot] == slot_limit + 1:
             errors.append(
                 LoadError(
                     file=file,
                     loc=f"{base}/cards/{index}",
-                    expected=f"同一 (花色,点数) 槽位至多 {SLOT_LIMIT} 张",
+                    expected=f"同一 (花色,点数) 槽位至多 {slot_limit} 张",
                     got=f"{slot_counts[slot]} 张",
                     rule_id="deck.slot_limit",
                 )
             )
 
     if deck.expect is not None:
-        actual_total = len(deck.cards)
-        if deck.expect.total != actual_total:
-            errors.append(
-                LoadError(
-                    file=file,
-                    loc=f"{base}/expect/total",
-                    expected=str(deck.expect.total),
-                    got=str(actual_total),
-                    rule_id="deck.expect_total",
-                )
+        errors.extend(_deck_expect_errors(file, base, deck, card_types))
+
+    return errors
+
+
+def _deck_expect_errors(
+    file: str, base: str, deck: Deck, card_types: Mapping[str, CardType]
+) -> list[LoadError]:
+    """``expect`` 的双向穷尽核对：总数、按牌名、按花色、按类别。"""
+    errors: list[LoadError] = []
+    expect = deck.expect
+    assert expect is not None  # 调用方已判
+
+    actual_total = len(deck.cards)
+    if expect.total != actual_total:
+        errors.append(
+            LoadError(
+                file=file,
+                loc=f"{base}/expect/total",
+                expected=str(expect.total),
+                got=str(actual_total),
+                rule_id="deck.expect_total",
             )
-        actual_by_type = Counter(card.type for card in deck.cards)
-        for type_id, declared in deck.expect.by_type.items():
-            actual = actual_by_type.get(type_id, 0)
-            if declared != actual:
+        )
+
+    dimensions = (
+        (
+            "type",
+            "牌名",
+            expect.by_type,
+            Counter(card.type for card in deck.cards),
+            "deck.expect_by_type",
+        ),
+        (
+            "suit",
+            "花色",
+            expect.by_suit,
+            Counter(card.suit.value for card in deck.cards),
+            "deck.expect_by_suit",
+        ),
+        (
+            "category",
+            "类别",
+            expect.by_category,
+            Counter(
+                card_types[card.type].category.value
+                for card in deck.cards
+                if card.type in card_types
+            ),
+            "deck.expect_by_category",
+        ),
+    )
+    for key, label, declared, actual_counts, rule_id in dimensions:
+        if declared is None:
+            continue
+        for declared_key, declared_count in declared.items():
+            actual = actual_counts.get(declared_key, 0)
+            if declared_count != actual:
                 errors.append(
                     LoadError(
                         file=file,
-                        loc=f"{base}/expect/by_type/{type_id}",
-                        expected=str(declared),
+                        loc=f"{base}/expect/by_{key}/{declared_key}",
+                        expected=str(declared_count),
                         got=str(actual),
-                        rule_id="deck.expect_by_type",
+                        rule_id=rule_id,
                     )
                 )
-        if deck.expect.by_type:
-            # 反向：实况出现但期望没声明的牌名，也是"不相符"。
-            for type_id, actual in actual_by_type.items():
-                if type_id not in deck.expect.by_type:
-                    errors.append(
-                        LoadError(
-                            file=file,
-                            loc=f"{base}/expect/by_type/{type_id}",
-                            expected="0（期望未声明该牌名）",
-                            got=str(actual),
-                            rule_id="deck.expect_by_type",
-                        )
+        if not declared:
+            continue
+        # 反向：实况出现但期望没声明的键，也是"不相符"。
+        for actual_key, actual in actual_counts.items():
+            if actual_key not in declared:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/expect/by_{key}/{actual_key}",
+                        expected=f"0（期望未声明该{label}）",
+                        got=str(actual),
+                        rule_id=rule_id,
                     )
+                )
 
     return errors
 
@@ -298,8 +515,16 @@ def validate_content_pack(
     return pack
 
 
-def load_content_pack(pack_id: str = DEFAULT_PACK_ID) -> ContentPack:
-    """加载打包数据里的内容包（显式调用，import 期零副作用）。"""
+def load_content_pack(
+    pack_id: str = DEFAULT_PACK_ID, *, deck_profile: str | None = None
+) -> ContentPack:
+    """加载打包数据里的内容包（显式调用，import 期零副作用）。
+
+    ``deck_profile`` 缺省用包自带的默认档；显式给出时返回一份把 ``deck_profile``
+    改写成该档的副本（**全部档位都已校验**，这里只做选择）。未知档位 fail-closed，
+    报与数据层同一条 ``decks.unknown_profile``。
+    """
+    file = f"files/{pack_id}.json"
     resource = files("sgs.data").joinpath("files", f"{pack_id}.json")
     try:
         text = resource.read_text(encoding="utf-8")
@@ -307,7 +532,7 @@ def load_content_pack(pack_id: str = DEFAULT_PACK_ID) -> ContentPack:
         raise DataLoadError(
             [
                 LoadError(
-                    file=f"files/{pack_id}.json",
+                    file=file,
                     loc="/",
                     expected="存在的内容包文件",
                     got=pack_id,
@@ -315,4 +540,20 @@ def load_content_pack(pack_id: str = DEFAULT_PACK_ID) -> ContentPack:
                 )
             ]
         ) from exc
-    return validate_content_pack(text, file=f"files/{pack_id}.json")
+    pack = validate_content_pack(text, file=file)
+
+    if deck_profile is None or deck_profile == pack.deck_profile:
+        return pack
+    if deck_profile not in pack.decks:
+        raise DataLoadError(
+            [
+                LoadError(
+                    file=file,
+                    loc="/deck_profile",
+                    expected=f"decks 中存在的档位之一：{sorted(pack.decks)}",
+                    got=repr(deck_profile),
+                    rule_id="decks.unknown_profile",
+                )
+            ]
+        )
+    return pack.model_copy(update={"deck_profile": deck_profile})

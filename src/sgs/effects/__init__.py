@@ -19,7 +19,9 @@ from .behaviors import (
     CardBehavior,
     DamageNature,
     EffectStep,
+    FinalZone,
     PushFrame,
+    TargetCount,
     TargetRule,
     UseContext,
     UseLimit,
@@ -27,6 +29,7 @@ from .behaviors import (
     behavior_for,
     opens_response_window,
 )
+from .ops import OPS
 from .primitives import (
     DrawResult,
     EffectContext,
@@ -39,14 +42,17 @@ from .primitives import (
 
 __all__ = (
     "CARD_BEHAVIORS",
+    "OPS",
     "CallOp",
     "CardBehavior",
     "DamageNature",
     "DrawResult",
     "EffectContext",
     "EffectStep",
+    "FinalZone",
     "PushFrame",
     "Randomness",
+    "TargetCount",
     "TargetRule",
     "UseContext",
     "UseLimit",
