@@ -1,19 +1,26 @@
-"""询问与行动的协议 schema，以及参与者视角投影（票 05 / 票 07）。
+"""询问与行动的协议 schema，以及参与者视角投影（票 05 / 票 07 / 票 27）。
 
-四类询问（``PLAY_PHASE`` / ``DODGE`` / ``PEACH`` / ``DISCARD``）各一个 frozen 模型，
-以 ``kind`` 作判别字段；四个行动构造子（``UseCard`` / ``Pass`` / ``EndPhase`` /
-``DiscardCards``）同构。候选行动**内联**在询问里，参与者只从中挑一个。
+M1 四类询问（``PLAY_PHASE`` / ``DODGE`` / ``PEACH`` / ``DISCARD``）各一个 frozen 模型，
+以 ``kind`` 作判别字段；M2 票 27 按决策结构再补两类：
 
-``answers_seq`` 是行动自带的字段：候选在**构造询问时**生成，那时询问的 ``seq`` 已定，
-于是"被提供的"与"被接受的"共享同一个陈旧输入校验键。
+- ``RESPOND``：**响应窗口**——"从候选里挑一张牌行动或放弃"，覆盖**打出**（南蛮入侵 /
+  万箭齐发 / 决斗）与**借刀杀人的"使用【杀】"**（无懈的窗口归票 28）；
+- ``SELECT_CARDS``：**选牌**——从**选择面**（槽位表）里挑 k 张，覆盖过河拆桥 / 顺手牵羊 /
+  五谷丰登。
 
-外来应答经 :func:`parse_action` 解析：这是行动 schema 的**唯一入口**，schema 不认的
+行动构造子同样从四个扩到六个：新增 ``PlayCard``（打出：无目标、走 L6、**不占使用次数**，
+不能用 ``UseCard(targets=())`` 冒充）与 ``SelectCards``（用**面内位置**引用，不携带牌面身份）。
+
+候选行动**内联**在询问里，参与者只从中挑一个。``answers_seq`` 是行动自带的字段：候选在
+**构造询问时**生成，那时询问的 ``seq`` 已定，于是"被提供的"与"被接受的"共享同一个陈旧输入
+校验键。外来应答经 :func:`parse_action` 解析：这是行动 schema 的**唯一入口**，schema 不认的
 输入（未知 ``kind`` / 缺字段 / 多余字段）抛 pydantic ``ValidationError``，由引擎归类为
 ``Malformed``（票 07 §5）。
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Literal
 
@@ -22,7 +29,7 @@ from pydantic import Field, TypeAdapter
 from sgs.data import Identity
 from sgs.timing import Timing
 
-from .models import CardRef, Phase, _FrozenModel
+from .models import CardRef, Phase, Zone, ZoneRef, _FrozenModel
 
 __all__ = [
     "Action",
@@ -32,23 +39,109 @@ __all__ = [
     "EndPhase",
     "Pass",
     "PeachQuery",
+    "PlayCard",
     "PlayPhaseQuery",
     "PlayerPublic",
     "PlayerView",
     "Query",
     "QueryKind",
+    "RespondContext",
+    "RespondMode",
+    "RespondQuery",
+    "SelectCards",
+    "SelectCardsQuery",
+    "SelectContext",
+    "SelectionSpec",
+    "Slot",
     "UseCard",
+    "WindowCause",
     "parse_action",
 ]
 
 
 class QueryKind(str, Enum):
-    """四类询问的标识；候选生成器按它分派（票 05 §1）。"""
+    """六类询问的标识；候选生成器按它分派（票 05 §1 / 票 19 §1）。
+
+    M1 四类一字不改；票 27 落 ``RESPOND`` / ``SELECT_CARDS`` 两类。
+    ``SKILL_ACTIVATION`` / ``SELECT_OPTION`` 归 M2 的装备技能票（29 / 30）。
+    """
 
     PLAY_PHASE = "PLAY_PHASE"
     DODGE = "DODGE"
     PEACH = "PEACH"
     DISCARD = "DISCARD"
+    RESPOND = "RESPOND"
+    SELECT_CARDS = "SELECT_CARDS"
+
+
+class WindowCause(str, Enum):
+    """响应窗口的**成因**（票 19 §3；M2 闭集，M3 只许增）。
+
+    票 27 落四个效果内窗口；``NULLIFY`` 由票 28 的无懈窗口使用，此处先把闭集建全。
+    """
+
+    NULLIFY = "NULLIFY"
+    BARBARIAN_INVASION = "BARBARIAN_INVASION"
+    ARROW_BARRAGE = "ARROW_BARRAGE"
+    DUEL = "DUEL"
+    BORROWED_SWORD = "BORROWED_SWORD"
+
+
+class RespondMode(str, Enum):
+    """响应窗口要求的是**打出**还是**使用**（票 19 §1 的候选型别分野）。
+
+    打出（南蛮 / 万箭 / 决斗）⇒ 候选 ``PlayCard``；借刀杀人的"使用【杀】"⇒ 候选 ``UseCard``
+    （目标由 ``use_targets`` 给出）。``mode`` 只用于**生成候选**，不进记录——记录里读得出
+    候选是哪种构造子。
+    """
+
+    PLAY = "PLAY"
+    USE = "USE"
+
+
+class Slot(_FrozenModel):
+    """选择面上的一个可点位置（票 19 §3）。
+
+    ``ref`` 是区域坐标；``card = None`` 表示**隐藏槽**（只有位置、没有牌面身份，
+    如他人手牌）。Action 用**面内位置**引用槽位，故不泄露隐藏牌面。
+    """
+
+    ref: ZoneRef
+    card: CardRef | None = None
+
+
+class SelectionSpec(_FrozenModel):
+    """选择面的**声明式**约束（票 19 §3）：展示哪些区、总共 / 每区各取几张。
+
+    ``optional`` / ``sequential`` 是效果属性，M2 的拆、顺、五谷都取 ``(1, 1)`` 且非依次；
+    字段按"M3 只许增"保留在协议里。
+    """
+
+    zones: tuple[Zone, ...]
+    total: tuple[int, int]
+    per_zone: tuple[tuple[Zone, int, int], ...] = ()
+    optional: bool = False
+    sequential: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RespondContext:
+    """``RESPOND`` 候选生成的类型化载荷（票 19 §4 的 ``payload``）。"""
+
+    cause: WindowCause
+    required: str | None = None
+    target: int | None = None
+    window_frame: int = 0
+    mode: RespondMode = RespondMode.PLAY
+    use_targets: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SelectContext:
+    """``SELECT_CARDS`` 候选生成的类型化载荷：选择面 + 配额，逐字进询问。"""
+
+    spec: SelectionSpec
+    slots: tuple[Slot, ...]
 
 
 class PlayerPublic(_FrozenModel):
@@ -116,7 +209,28 @@ class DiscardCards(_ActionBase):
     cards: tuple[CardRef, ...]
 
 
-Action = Annotated[UseCard | Pass | EndPhase | DiscardCards, Field(discriminator="kind")]
+class PlayCard(_ActionBase):
+    """打出：**无目标**、走 L6 的 ``PLAY_DECLARE`` / ``PLAY_ON_PLAY``、**不占使用次数**。
+
+    必须是独立构造子（票 19 §2）：用 ``UseCard(targets=())`` 冒充会让"使用"与"打出"
+    在记录流里不可分。
+    """
+
+    kind: Literal["PlayCard"] = "PlayCard"
+    card: CardRef
+
+
+class SelectCards(_ActionBase):
+    """选牌：``picks`` 是**选择面内的位置**（``Slot`` 的下标），不携带牌面身份。"""
+
+    kind: Literal["SelectCards"] = "SelectCards"
+    picks: tuple[int, ...]
+
+
+Action = Annotated[
+    UseCard | Pass | EndPhase | DiscardCards | PlayCard | SelectCards,
+    Field(discriminator="kind"),
+]
 
 _ACTION_ADAPTER: TypeAdapter[Action] = TypeAdapter(Action)
 
@@ -165,7 +279,29 @@ class DiscardQuery(_QueryBase):
     """本阶段须弃置的张数（= 手牌数 − 当前体力值）。"""
 
 
+class RespondQuery(_QueryBase):
+    """响应窗口（票 19 §3）：从候选里挑一张牌行动或放弃。
+
+    ``window_frame`` = 窗口挂在哪张 ``RESOLVE`` 帧上（嵌套无懈的层靠它区分）；
+    ``target`` = 该窗口针对的座位（打出窗口为 ``None``、借刀为持刀者）。
+    """
+
+    kind: Literal["RESPOND"] = "RESPOND"
+    cause: WindowCause
+    required: str | None = None
+    target: int | None = None
+    window_frame: int = 0
+
+
+class SelectCardsQuery(_QueryBase):
+    """选牌（票 19 §3）：选择面随询问**落盘**、不进 ``PlayerView``。"""
+
+    kind: Literal["SELECT_CARDS"] = "SELECT_CARDS"
+    spec: SelectionSpec
+    slots: tuple[Slot, ...]
+
+
 Query = Annotated[
-    PlayPhaseQuery | DodgeQuery | PeachQuery | DiscardQuery,
+    PlayPhaseQuery | DodgeQuery | PeachQuery | DiscardQuery | RespondQuery | SelectCardsQuery,
     Field(discriminator="kind"),
 ]

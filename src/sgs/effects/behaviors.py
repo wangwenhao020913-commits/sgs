@@ -107,6 +107,9 @@ class TargetRule:
 
     ``includes_self`` 只在 ``count is RATED`` 时读；两个 ``ALL_ALIVE*`` 档的
     含不含自己由枚举本身表达，避免同一条事实写两处。
+
+    ``max_distance`` = 这条牌的**额定距离上限**（【顺手牵羊】= 1，与武器无关）；
+    ``needs_distance`` 才是"距离 ≤ 攻击范围"（【杀】）。两者可分别成立。
     """
 
     rated_targets: int = 0
@@ -115,6 +118,7 @@ class TargetRule:
     needs_distance: bool = False
     self_only: bool = False
     requires_wounded_self: bool = False
+    max_distance: int | None = None
 
     def includes_self_in_pool(self) -> bool:
         """候选池是否含使用者自己（由目标数来源 + ``includes_self`` 派生）。"""
@@ -162,7 +166,19 @@ EffectStep: TypeAlias = PushFrame | CallOp
 
 @dataclass(frozen=True, slots=True)
 class CardBehavior:
-    """一张牌名的完整行为；字段对齐 `开发文档/03` §2、由票 07 §2 冻结。"""
+    """一张牌名的完整行为；字段对齐 `开发文档/03` §2、由票 07 §2 冻结。
+
+    M2 票 27 在静态面上补三样**通用**声明（``TargetRule`` 因此不新增面向具体牌名的
+    布尔字段；谓词本身当然可以引用牌名，但只住在 ``effects/``，``engine/`` 一个都不出现）：
+
+    - ``target_filters``：**第 0 层合法性**的附加谓词名（``effects.actions.TARGET_FILTERS``），
+      全部为真该候选才进目标集合（【过河拆桥】/【顺手牵羊】的"区域里有牌"、
+      【借刀杀人】的"有武器且有合法【杀】目标"）；
+    - ``effectiveness``：**第 2 层"无效"**的谓词名（``effects.actions.EFFECTIVENESS``），
+      全部为真该目标才在 C1 之后继续结算（【桃园结义】"对未受伤的角色无效"）；
+    - ``timing_ops``：绑定在**某个 L4/L5 时机**上的调用型步骤（【五谷丰登】"指定目标后亮牌"
+      与"使用结算结束后弃余牌"）。它不是技能钩子，只是"这张牌在这个时机有个动作"。
+    """
 
     card_type_id: str
     use_timings: tuple[UseTiming, ...]
@@ -176,6 +192,15 @@ class CardBehavior:
     只有【闪电】为真：它"不命中就传下家"；其余延时锦囊（【乐不思蜀】）直接进弃牌堆。
     是**牌面事实**，故落在行为表而不是引擎的牌名分支。
     """
+
+    target_filters: tuple[str, ...] = ()
+    """第 0 层目标合法性的附加谓词名（票 15 §5 的三层模型）。"""
+
+    effectiveness: tuple[str, ...] = ()
+    """第 2 层"无效"的谓词名（票 15 §5）：被指定、但到 C1 终止，故不进 C2。"""
+
+    timing_ops: tuple[tuple[Timing, CallOp], ...] = ()
+    """绑定在具体时机上的调用型步骤（票 27 为【五谷丰登】的亮牌 / 弃余牌落地）。"""
 
     @property
     def is_delayed(self) -> bool:
@@ -197,15 +222,18 @@ def _one_other(
     *,
     final_zone: FinalZone = FinalZone.DISCARD,
     effects: tuple[EffectStep, ...] = (),
+    target_filters: tuple[str, ...] = (),
+    max_distance: int | None = None,
 ) -> CardBehavior:
     """额定一名他人（【过河拆桥】【顺手牵羊】【决斗】【借刀杀人】【乐不思蜀】）。"""
     return CardBehavior(
         card_type_id=card_type_id,
         use_timings=(_PLAY_PHASE,),
-        target_rule=TargetRule(rated_targets=1),
+        target_rule=TargetRule(rated_targets=1, max_distance=max_distance),
         use_limit=_UNLIMITED,
         effects=effects,
         final_zone=final_zone,
+        target_filters=target_filters,
     )
 
 
@@ -228,7 +256,14 @@ def _self_only(
     )
 
 
-def _all_alive(card_type_id: str, *, with_self: bool) -> CardBehavior:
+def _all_alive(
+    card_type_id: str,
+    *,
+    with_self: bool,
+    effects: tuple[EffectStep, ...] = (),
+    effectiveness: tuple[str, ...] = (),
+    timing_ops: tuple[tuple[Timing, CallOp], ...] = (),
+) -> CardBehavior:
     """全体存活（【南蛮入侵】【万箭齐发】不含自己；【桃园结义】【五谷丰登】含自己）。"""
     return CardBehavior(
         card_type_id=card_type_id,
@@ -237,7 +272,9 @@ def _all_alive(card_type_id: str, *, with_self: bool) -> CardBehavior:
             count=TargetCount.ALL_ALIVE_WITH_SELF if with_self else TargetCount.ALL_ALIVE
         ),
         use_limit=_UNLIMITED,
-        effects=(),
+        effects=effects,
+        effectiveness=effectiveness,
+        timing_ops=timing_ops,
     )
 
 
@@ -275,16 +312,50 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
         effects=(PushFrame(FrameKind.RECOVER, (("amount", 1),)),),
     ),
     "dodge": _response("dodge"),
-    # ---- 普通锦囊（效果与多目标结算由票 27 落地）----
-    "dismantlement": _one_other("dismantlement"),
-    "snatch": _one_other("snatch"),
-    "ex_nihilo": _self_only("ex_nihilo"),
-    "duel": _one_other("duel"),
-    "borrowed_sword": _one_other("borrowed_sword"),
-    "barbarian_invasion": _all_alive("barbarian_invasion", with_self=False),
-    "arrow_barrage": _all_alive("arrow_barrage", with_self=False),
-    "peach_garden": _all_alive("peach_garden", with_self=True),
-    "harvest": _all_alive("harvest", with_self=True),
+    # ---- 普通锦囊（效果全部由票 27 的 OPS 回调落地）----
+    "dismantlement": _one_other(
+        "dismantlement",
+        effects=(CallOp("resolve_dismantlement"),),
+        target_filters=("has_zone_cards",),
+    ),
+    "snatch": _one_other(
+        "snatch",
+        effects=(CallOp("resolve_snatch"),),
+        target_filters=("has_zone_cards",),
+        max_distance=1,
+    ),
+    "ex_nihilo": _self_only("ex_nihilo", effects=(CallOp("resolve_ex_nihilo"),)),
+    "duel": _one_other("duel", effects=(CallOp("resolve_duel"),)),
+    "borrowed_sword": _one_other(
+        "borrowed_sword",
+        effects=(CallOp("resolve_borrowed_sword"),),
+        target_filters=("borrowed_sword_target",),
+    ),
+    "barbarian_invasion": _all_alive(
+        "barbarian_invasion",
+        with_self=False,
+        effects=(CallOp("resolve_barbarian_invasion"),),
+    ),
+    "arrow_barrage": _all_alive(
+        "arrow_barrage",
+        with_self=False,
+        effects=(CallOp("resolve_arrow_barrage"),),
+    ),
+    "peach_garden": _all_alive(
+        "peach_garden",
+        with_self=True,
+        effects=(CallOp("resolve_peach_garden"),),
+        effectiveness=("wounded",),
+    ),
+    "harvest": _all_alive(
+        "harvest",
+        with_self=True,
+        effects=(CallOp("pick_harvest"),),
+        timing_ops=(
+            (Timing.USE_AFTER_DESIGNATE_TARGET, CallOp("reveal_harvest")),
+            (Timing.RESOLVE_AFTER_END, CallOp("finish_harvest")),
+        ),
+    ),
     "nullify": _response("nullify"),
     # ---- 延时锦囊（判定骨架在票 26；L5 的判定帧由 OPS 回调压出）----
     "indulgence": _one_other(

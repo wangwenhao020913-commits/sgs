@@ -4,6 +4,8 @@
 """
 
 from .actions import (
+    EFFECTIVENESS,
+    TARGET_FILTERS,
     attack_range,
     check_count,
     check_forbidden,
@@ -13,6 +15,8 @@ from .actions import (
     distance,
     hand_limit,
     legal_actions_for,
+    target_is_effective,
+    targets_within_attack_range,
 )
 from .behaviors import (
     CARD_BEHAVIORS,
@@ -45,7 +49,9 @@ from .primitives import (
 
 __all__ = (
     "CARD_BEHAVIORS",
+    "EFFECTIVENESS",
     "OPS",
+    "TARGET_FILTERS",
     "CallOp",
     "CardBehavior",
     "DamageNature",
@@ -77,4 +83,6 @@ __all__ = (
     "opens_response_window",
     "substitute_judge_card",
     "swap_judge_card",
+    "target_is_effective",
+    "targets_within_attack_range",
 )

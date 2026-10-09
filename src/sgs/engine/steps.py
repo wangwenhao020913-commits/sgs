@@ -29,7 +29,12 @@ from collections.abc import Sequence
 from typing import Any, Protocol
 
 from sgs.data import Identity, Mode
-from sgs.effects import EffectStep, behavior_for, opens_response_window
+from sgs.effects import (
+    EffectStep,
+    behavior_for,
+    opens_response_window,
+    target_is_effective,
+)
 from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable
 from sgs.skills import rejudge_capable_seats
 from sgs.state import (
@@ -58,6 +63,10 @@ class FrameHost(StepHost, Protocol):
     def emit_frame_timing(
         self, frame: Frame, timing: Timing, *, actor: int | None = None, cards: Sequence[CardRef] = ()
     ) -> None: ...
+
+    def current_target(self, frame: Frame) -> int: ...
+
+    def apply_timing_ops(self, frame: Frame, timing: Timing) -> Any: ...
 
     def move_used_card_to_processing(self, frame: Frame) -> None: ...
 
@@ -112,7 +121,7 @@ class FrameHost(StepHost, Protocol):
 
     def apply_effects(
         self, frame: Frame, effects: Sequence[EffectStep], *, timing: Timing
-    ) -> None: ...
+    ) -> Any: ...
 
     def apply_hp_change(self, frame: Frame, seat: int, value: int) -> Any: ...
 
@@ -124,14 +133,32 @@ def _emit(
     *,
     actor: int | None = None,
     cards: Sequence[CardRef] = (),
+    targets: tuple[int, ...] | None = None,
 ) -> None:
-    host.emit_frame_timing(frame, timing, actor=actor, cards=cards)
+    """以 ``frame`` 为主体 dispatch 一个时机；``targets`` 缺省取帧的目标列表。
+
+    C 段的时机记录按票 11 §3.3 取**当前目标**（``targets[cursor]``），故调用点显式给
+    ``targets``；空目标的响应牌（【闪】/【无懈】）沿用空元组，与 M1 记录流一字不差。
+    """
+    host.emit_frame_timing(frame, timing, actor=actor, cards=cards, targets=targets)
 
 
-def _effect_actor(frame: Frame) -> int:
-    """"生效时 / 生效后"的主体：有目标时是目标，无目标时是使用者（票 04 原型口径）。"""
-    targets = frame.data["targets"]
-    return targets[0] if targets else frame.data["source"]
+def _current_target(host: FrameHost, frame: Frame) -> int:
+    """C 段的**当前目标**：``targets[cursor]``，空目标时退回使用者（票 11 §3.3）。"""
+    return host.current_target(frame)
+
+
+def _resolve_emit(host: FrameHost, frame: Frame, timing: Timing) -> None:
+    """C 段时机的统一发射口：actor = 当前目标、``targets`` = 当前目标（空目标时空元组）。"""
+    targets = tuple(frame.data.get("targets", ()))
+    current = _current_target(host, frame)
+    _emit(
+        host,
+        frame,
+        timing,
+        actor=current,
+        targets=(current,) if targets else (),
+    )
 
 
 # ---- USE 帧：L4 六个时机 + 压入 RESOLVE + L5.6 ----------------------------
@@ -152,102 +179,89 @@ def use_designate_target(host: FrameHost, frame: Frame) -> None:
 
 
 def use_become_target(host: FrameHost, frame: Frame) -> None:
-    targets = frame.data["targets"]
-    _emit(host, frame, Timing.USE_BECOME_TARGET, actor=targets[0] if targets else None)
+    """"成为目标时"：**时机外层、目标内层**（`A/flow_use.txt:46`）。
+
+    多目标时逐个目标各发一条；空目标的响应牌（【闪】/【无懈】）沿用 M1 的
+    ``actor = None`` 单条记录，故 1v1 六条基准逐字节不变。
+    """
+    targets = tuple(frame.data["targets"])
+    if not targets:
+        _emit(host, frame, Timing.USE_BECOME_TARGET, actor=None)
+        return
+    for target in targets:
+        _emit(host, frame, Timing.USE_BECOME_TARGET, actor=target)
 
 
-def use_after_designate_target(host: FrameHost, frame: Frame) -> None:
-    _emit(host, frame, Timing.USE_AFTER_DESIGNATE_TARGET, actor=frame.data["source"])
+def use_after_designate_target(host: FrameHost, frame: Frame) -> Control:
+    """"指定目标后"：目标已定、不再改变（`A/flow_use.txt:39`）。
+
+    票 27 在这里跑本牌的 ``timing_ops``（【五谷丰登】的"亮出 X 张"）；若那次动作没
+    完整执行（牌不够），**终止这次使用结算**、直奔"使用结算结束后"（不判平局）。
+    时机记录只在首次进入时发一次——``timing_ops`` 将来若中途提问，重入不会重复记录。
+    """
+    if not frame.data.get("after_designate_emitted"):
+        _emit(host, frame, Timing.USE_AFTER_DESIGNATE_TARGET, actor=frame.data["source"])
+        frame.data["after_designate_emitted"] = True
+    control = host.apply_timing_ops(frame, Timing.USE_AFTER_DESIGNATE_TARGET)
+    if control is not None:
+        return control
+    if frame.data.get("use_terminated"):
+        return Goto(USE_AFTER_END_PC)
+    return None
 
 
 def use_after_become_target(host: FrameHost, frame: Frame) -> None:
-    targets = frame.data["targets"]
-    _emit(host, frame, Timing.USE_AFTER_BECOME_TARGET, actor=targets[0] if targets else None)
+    """"成为目标后"：同 B4，时机外层、目标内层；空目标沿用单条 ``actor = None``。"""
+    targets = tuple(frame.data["targets"])
+    if not targets:
+        _emit(host, frame, Timing.USE_AFTER_BECOME_TARGET, actor=None)
+        return
+    for target in targets:
+        _emit(host, frame, Timing.USE_AFTER_BECOME_TARGET, actor=target)
 
 
-def use_push_resolve(host: FrameHost, frame: Frame) -> None:
+def use_push_resolve(host: FrameHost, frame: Frame) -> Control:
     """压入逐目标结算帧；**延时锦囊例外**——它的 L5 推迟到目标角色的判定阶段。
 
     延时锦囊在**使用当时**只走完 L4 六个时机（票 10 §3.1 / §7）：实体牌置入目标的
     判定区，L5 的 RESOLVE 帧由判定阶段的回合步骤压出（``_phase_judge``）。故本步只
     对非延时锦囊压栈，延时锦囊直接落到 ``use_after_end`` 的置入判定区。
+
+    **目标减为 0 ⇒ 终止使用流程**（票 11 §5）：目标为空且这张牌的规则本来要目标时，
+    不压 RESOLVE、直达"使用结算结束后"（实体牌入弃牌堆）。响应牌（额定目标数为 0 的
+    【闪】/【无懈】）不在此列——它们的空目标 RESOLVE 必须照跑。
     """
-    if behavior_for(frame.data["card"]).is_delayed:
-        return
+    behavior = behavior_for(frame.data["card"])
+    if behavior.is_delayed:
+        return None
+    rule = behavior.target_rule
+    if not frame.data["targets"] and rule.target_count(1) > 0:
+        return Goto(USE_AFTER_END_PC)
     host.push_frame(FrameKind.RESOLVE, dict(frame.data), timing=Timing.RESOLVE_START)
+    return None
 
 
-def use_after_end(host: FrameHost, frame: Frame) -> None:
+def use_after_end(host: FrameHost, frame: Frame) -> Control:
     """实体牌的最终去向 + "使用结算结束后"。
 
     默认进弃牌堆（M1 语义）；延时锦囊置入目标的**判定区**（票 10 §7），并且**不**在这里
-    发 ``RESOLVE_AFTER_END``——那一步归判定阶段循环（票 10 §3.6）。
+    发 ``RESOLVE_AFTER_END``——那一步归判定阶段循环（票 10 §3.6）。票 27 在这里补跑
+    本牌的 ``timing_ops``（【五谷丰登】把亮牌中剩余的牌置入弃牌堆）。
     """
     if behavior_for(frame.data["card"]).is_delayed:
         host.move_used_card_to_judge_zone(frame)
-        return
-    host.move_processing_card_to_discard(frame)
-    _emit(
-        host,
-        frame,
-        Timing.RESOLVE_AFTER_END,
-        actor=frame.data["source"],
-        cards=(frame.data["card"],),
-    )
-
-
-# ---- RESOLVE 帧：L5 五个时机 ----------------------------------------------
-
-
-def resolve_start(host: FrameHost, frame: Frame) -> None:
-    _emit(host, frame, Timing.RESOLVE_START, actor=frame.data["source"])
-
-
-def resolve_before_effect(host: FrameHost, frame: Frame) -> Control:
-    if frame.data.get("use_timing") is Timing.NEAR_DEATH_AT:
-        # 濒死求桃建立的使用：回复结算已由求桃窗口显式压好（票 21），故跳过
-        # "生效时 / 生效后"（`Goto` 而不是 `None`——`None` 只表示"这一步做完了"，
-        # 会顺着 pc 走进效果步骤，回复就被写第二遍）。
-        _emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT, actor=frame.data["source"])
-        frame.data["canceled"] = False
-        return Goto(RESOLVE_END_PC)
-    if "canceled" in frame.data:
-        # 响应窗口已经处理过：**按 canceled 标志**决定去向（票 07 §3）。
-        return Goto(RESOLVE_END_PC) if frame.data["canceled"] else None
-    behavior = behavior_for(frame.data["card"])
-    targets = frame.data["targets"]
-    if not targets or not opens_response_window(behavior):
-        _emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT, actor=frame.data["source"])
-        frame.data["canceled"] = False
         return None
-    if not frame.data.get("window_open"):
-        _emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT, actor=targets[0])
-        frame.data["window_open"] = True
-    target = targets[0]
-    action = host.ask_query(QueryKind.DODGE, target, Timing.RESOLVE_BEFORE_EFFECT)
-    if host.suspended(action):
-        return "stay"
-    frame.data["canceled"] = isinstance(action, UseCard)
-    if frame.data["canceled"]:
-        # 抵消是"被响应帧"的标志；【闪】自己作为一次**使用**照走 L4 / L5（票 07 §3）。
-        host.start_use(action.card, source=target, targets=())
-    # 重入本步：等【闪】的 USE 帧出栈后，由上一条 ``canceled`` 分支决定去向。
-    return "stay"
-
-
-def resolve_effect(host: FrameHost, frame: Frame) -> None:
-    _emit(host, frame, Timing.RESOLVE_EFFECT, actor=_effect_actor(frame))
-
-
-def resolve_after_effect(host: FrameHost, frame: Frame) -> None:
-    _emit(host, frame, Timing.RESOLVE_AFTER_EFFECT, actor=_effect_actor(frame))
-    host.apply_effects(
-        frame, behavior_for(frame.data["card"]).effects, timing=Timing.RESOLVE_AFTER_EFFECT
-    )
-
-
-def resolve_end(host: FrameHost, frame: Frame) -> None:
-    _emit(host, frame, Timing.RESOLVE_END, actor=_effect_actor(frame))
+    if not frame.data.get("after_end_done"):
+        host.move_processing_card_to_discard(frame)
+        _emit(
+            host,
+            frame,
+            Timing.RESOLVE_AFTER_END,
+            actor=frame.data["source"],
+            cards=(frame.data["card"],),
+        )
+        frame.data["after_end_done"] = True
+    return host.apply_timing_ops(frame, Timing.RESOLVE_AFTER_END)
 
 
 USE_STEPS = (
@@ -262,6 +276,119 @@ USE_STEPS = (
     Step(use_push_resolve, Timing.RESOLVE_START),
     Step(use_after_end, Timing.RESOLVE_AFTER_END),
 )
+"""USE 帧：L4 六个时机（B 段用"时机外层、目标内层"）+ 压栈 + L5.6。"""
+
+
+# ---- RESOLVE 帧：L5 五个时机（**逐目标**）+ 一个非 dispatch 游标步骤 ----------
+
+
+def resolve_start(host: FrameHost, frame: Frame) -> Control:
+    """"使用结算开始时"：**先检测这张牌对目标的有效性**（票 15 §5 的第 2 层）。
+
+    无效 ⇒ **终止对该目标的结算**、直接推进游标（**不进 C2，故没有无懈窗口**）；
+    有效 ⇒ 照常走 C2–C5。时机本身照记——它就是这个检测点。
+
+    C1 的 ``actor`` 保持 M1 的**使用者**（C3–C5 才是当前目标），故 1v1 基准逐字节不变。
+    """
+    targets = tuple(frame.data["targets"])
+    current = _current_target(host, frame)
+    _emit(
+        host,
+        frame,
+        Timing.RESOLVE_START,
+        actor=frame.data["source"],
+        targets=(current,) if targets else (),
+    )
+    if targets and not target_is_effective(
+        host.state, frame.data["card"], frame.data["source"], current
+    ):
+        return Goto(CURSOR_PC)
+    return None
+
+
+def resolve_before_effect(host: FrameHost, frame: Frame) -> Control:
+    targets = tuple(frame.data["targets"])
+    if frame.data.get("use_timing") is Timing.NEAR_DEATH_AT:
+        # 濒死求桃建立的使用：回复结算已由求桃窗口显式压好（票 21），故跳过
+        # "生效时 / 生效后"（`Goto` 而不是 `None`——`None` 只表示"这一步做完了"，
+        # 会顺着 pc 走进效果步骤，回复就被写第二遍）。
+        _emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT, actor=frame.data["source"])
+        frame.data["canceled"] = False
+        return Goto(RESOLVE_END_PC)
+    if "canceled" in frame.data:
+        # 本目标的响应窗口已经处理过：**按 canceled 标志**决定去向（票 07 §3）。
+        return Goto(RESOLVE_END_PC) if frame.data["canceled"] else None
+    behavior = behavior_for(frame.data["card"])
+    if not targets or not opens_response_window(behavior):
+        _emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT, actor=frame.data["source"])
+        frame.data["canceled"] = False
+        return None
+    target = _current_target(host, frame)
+    if not frame.data.get("window_open"):
+        _emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT, actor=target)
+        frame.data["window_open"] = True
+    action = host.ask_query(QueryKind.DODGE, target, Timing.RESOLVE_BEFORE_EFFECT)
+    if host.suspended(action):
+        return "stay"
+    frame.data["canceled"] = isinstance(action, UseCard)
+    if frame.data["canceled"]:
+        # 抵消是"被响应帧"的标志；【闪】自己作为一次**使用**照走 L4 / L5（票 07 §3）。
+        host.start_use(action.card, source=target, targets=())
+    # 重入本步：等【闪】的 USE 帧出栈后，由上一条 ``canceled`` 分支决定去向。
+    return "stay"
+
+
+def resolve_effect(host: FrameHost, frame: Frame) -> None:
+    _resolve_emit(host, frame, Timing.RESOLVE_EFFECT)
+
+
+def resolve_after_effect(host: FrameHost, frame: Frame) -> Control:
+    """**生效后**：执行本牌的效果列表（票 27 起按帧内游标重入）。
+
+    ``after_effect_emitted`` 保证时机只记一次；``effect_pc`` 由引擎的效果执行器维护，
+    使"提问让出控制权"与"压子帧"都能从这里原地恢复（票 19 §8）。
+    """
+    if not frame.data.get("after_effect_emitted"):
+        _resolve_emit(host, frame, Timing.RESOLVE_AFTER_EFFECT)
+        frame.data["after_effect_emitted"] = True
+    return host.apply_effects(
+        frame, behavior_for(frame.data["card"]).effects, timing=Timing.RESOLVE_AFTER_EFFECT
+    )
+
+
+def resolve_end(host: FrameHost, frame: Frame) -> None:
+    _resolve_emit(host, frame, Timing.RESOLVE_END)
+
+
+def resolve_advance(host: FrameHost, frame: Frame) -> Control:
+    """**非 dispatch 的游标步骤**（票 11 §3.1）：一个目标跑完 C1–C5 后推进游标。
+
+    还有目标就 ``Goto(C1)``；否则 pc 前进 ⇒ 帧出栈。窗口状态与效果游标都**按当前目标
+    分槽**，故推进时统一清掉（票 11 §3.2）——新增按目标分槽的帧私有键时，
+    **必须加进 :data:`_PER_TARGET_FRAME_KEYS`**，否则它会跨目标串味。
+    """
+    frame.data["cursor"] = frame.data.get("cursor", 0) + 1
+    for key in _PER_TARGET_FRAME_KEYS:
+        frame.data.pop(key, None)
+    if frame.data["cursor"] < len(frame.data["targets"]):
+        return Goto(RESOLVE_START_PC)
+    return None
+
+
+_PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
+    "canceled",
+    "window_open",
+    "after_effect_emitted",
+    "effect_pc",
+    "asks",
+    "op",
+)
+"""**逐目标分槽**的帧私有键：游标推进时必须整体清掉（票 11 §3.2）。
+
+``canceled`` / ``window_open`` / ``after_effect_emitted`` / ``effect_pc`` 在 :mod:`steps`
+维护，``asks``（选择面记忆）在 :class:`~sgs.engine.Engine` 维护、``op`` 在效果回调里维护；
+集中列在这里，使"新加一个按目标分槽的键"只需改这一处。"""
+
 
 RESOLVE_STEPS = (
     Step(resolve_start, Timing.RESOLVE_START),
@@ -269,7 +396,27 @@ RESOLVE_STEPS = (
     Step(resolve_effect, Timing.RESOLVE_EFFECT),
     Step(resolve_after_effect, Timing.RESOLVE_AFTER_EFFECT),
     Step(resolve_end, Timing.RESOLVE_END),
+    Step(resolve_advance, None),
 )
+"""C 段 = C1–C5 **逐目标** + 末尾非 dispatch 的游标步骤（票 11 §3.1）。"""
+
+
+def _pc_of(steps: tuple[Step, ...], timing: Timing) -> int:
+    """按**时机**（而不是硬编码下标）定位步骤，重排步骤表不会再让跳转错位。"""
+    return next(index for index, step in enumerate(steps) if step.timing is timing)
+
+
+RESOLVE_START_PC = _pc_of(RESOLVE_STEPS, Timing.RESOLVE_START)
+"""C 段首步（C1）：游标推进后跳回这里。"""
+
+RESOLVE_END_PC = _pc_of(RESOLVE_STEPS, Timing.RESOLVE_END)
+"""C5"使用结算结束时"：被抵消时 Goto 到这里（跳过生效时 / 生效后）。"""
+
+CURSOR_PC = len(RESOLVE_STEPS) - 1
+"""非 dispatch 的游标步骤：无效目标从这里直接推进，跳过 C2–C5。"""
+
+USE_AFTER_END_PC = _pc_of(USE_STEPS, Timing.RESOLVE_AFTER_END)
+"""USE 帧的"使用结算结束后"：目标减为 0 / 执行动作未完成时直接跳到这里。"""
 
 
 # ---- DAMAGE 帧：L7 五个时机 + 在"受到伤害时"后插入 LIFE_DECREASE -----------
@@ -661,13 +808,38 @@ RECOVER_STEPS = (
 )
 
 
-def _pc_of(timing: Timing) -> int:
-    """按**时机**（而不是硬编码下标）定位步骤，重排步骤表不会再让跳转错位。"""
-    return next(index for index, step in enumerate(RESOLVE_STEPS) if step.timing is timing)
+# ---- PLAY 帧：L6 两个时机（票 19 §2：打出必须独立）---------------------------
 
 
-RESOLVE_END_PC = _pc_of(Timing.RESOLVE_END)
-"""RESOLVE 步骤表里"使用结算结束时"的位置：被抵消时 Goto 到这里（跳过生效时 / 生效后）。"""
+def play_declare(host: FrameHost, frame: Frame) -> None:
+    """``PLAY_DECLARE``：打出牌进入处理区（与使用的第一段移动同姿态）。"""
+    _emit(
+        host,
+        frame,
+        Timing.PLAY_DECLARE,
+        actor=frame.data["source"],
+        cards=(frame.data["card"],),
+    )
+    host.move_played_card_to_processing(frame)
+
+
+def play_on_play(host: FrameHost, frame: Frame) -> None:
+    """``PLAY_ON_PLAY``：打出的实体牌随即进弃牌堆（打出无使用结算）。"""
+    _emit(
+        host,
+        frame,
+        Timing.PLAY_ON_PLAY,
+        actor=frame.data["source"],
+        cards=(frame.data["card"],),
+    )
+    host.move_played_card_to_discard(frame)
+
+
+PLAY_STEPS = (
+    Step(play_declare, Timing.PLAY_DECLARE),
+    Step(play_on_play, Timing.PLAY_ON_PLAY),
+)
+"""打出事件的步骤表：两个时机构成 L6 的全部节点（票 01 的 6 个转 dispatch 之一对）。"""
 
 
 def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
@@ -675,6 +847,7 @@ def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
     return {
         FrameKind.USE: USE_STEPS,
         FrameKind.RESOLVE: RESOLVE_STEPS,
+        FrameKind.PLAY: PLAY_STEPS,
         FrameKind.DAMAGE: DAMAGE_STEPS,
         FrameKind.LIFE_DECREASE: LIFE_DECREASE_STEPS,
         FrameKind.NEAR_DEATH: NEAR_DEATH_STEPS,

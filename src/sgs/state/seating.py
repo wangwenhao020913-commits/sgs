@@ -12,7 +12,14 @@ from __future__ import annotations
 
 from .models import GameState
 
-__all__ = ["alive_seat_at", "alive_seats", "next_alive_seat", "rejudge_askers", "seats_from"]
+__all__ = [
+    "alive_seat_at",
+    "alive_seats",
+    "next_alive_seat",
+    "order_targets",
+    "rejudge_askers",
+    "seats_from",
+]
 
 
 def alive_seats(state: GameState) -> tuple[int, ...]:
@@ -73,3 +80,21 @@ def rejudge_askers(state: GameState, capable: tuple[int, ...]) -> tuple[int, ...
         for seat in seats_from(state, state.turn_seat, len(state.players))
         if seat in capable
     )
+
+
+def order_targets(state: GameState, targets: tuple[int, ...]) -> tuple[int, ...]:
+    """把目标列表排成**从当前回合角色起、逆时针**（票 15 §4）。
+
+    依据 = 一手 `A/rule_principle.txt:28/:34`（规则文档对多目标顺序零命中）。使用者与
+    当前回合角色可以不同（【借刀杀人】迫使的【杀】由持刀者使用），此时**仍按当前回合
+    角色起算**——那是 M2 里唯一的分叉点，标程序化约定（U-15-1）。
+
+    不在存活环上的目标（异常局面）保持声明序追加在后，函数因此是全函数。
+    """
+    if not targets:
+        return ()
+    ring = seats_from(state, state.turn_seat, len(state.players))
+    rank = {seat: index for index, seat in enumerate(ring)}
+    ordered = sorted((target for target in targets if target in rank), key=rank.__getitem__)
+    extra = [target for target in targets if target not in rank]
+    return tuple(ordered + extra)

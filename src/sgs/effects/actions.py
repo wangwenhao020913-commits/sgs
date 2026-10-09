@@ -16,6 +16,7 @@ M1 已接线四类询问：出牌阶段（【杀】/【桃】）、【闪】响�
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from itertools import combinations
 
 from sgs.state import (
@@ -25,8 +26,14 @@ from sgs.state import (
     EndPhase,
     GameState,
     Pass,
+    PlayCard,
     Player,
     QueryKind,
+    RespondContext,
+    RespondMode,
+    SelectCards,
+    SelectContext,
+    SlotKind,
     UseCard,
     alive_seats,
     seats_from,
@@ -36,6 +43,8 @@ from sgs.timing import Timing
 from .behaviors import CardBehavior, TargetCount, UseContext, behavior_for
 
 __all__ = [
+    "EFFECTIVENESS",
+    "TARGET_FILTERS",
     "attack_range",
     "check_count",
     "check_forbidden",
@@ -45,6 +54,8 @@ __all__ = [
     "distance",
     "hand_limit",
     "legal_actions_for",
+    "target_is_effective",
+    "targets_within_attack_range",
 ]
 
 
@@ -132,8 +143,13 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
     """L3.3 ``USE_CHECK_TARGETS``：这张牌当前的合法目标池（可为空）。
 
     目标数为 0 的响应牌（【闪】/【无懈可击】）返回空元组——它们响应的是那张牌 /
-    那次结算，不是座位。两个"全体存活"档的候选池由目标数来源枚举决定含不含自己，
-    候选池的**限制**（距离 1 以内、区域里有牌……）一律走技能侧的候选池修饰器。
+    那次结算，不是座位。两个"全体存活"档的候选池由目标数来源枚举决定含不含自己。
+
+    票 27 把**目标池限制**拆成两半，都不给 ``TargetRule`` 加面向具体牌名的布尔：
+
+    - **额定距离上限** ``rule.max_distance``（【顺手牵羊】= 1，与武器无关）；
+    - **附加谓词** ``behavior.target_filters``（【过河拆桥】/【顺手牵羊】"区域里有牌"、
+      【借刀杀人】"有武器且有合法【杀】目标"），经 :data:`TARGET_FILTERS` 注册表解析。
 
     延时锦囊另有一条**规则层**限制：判定区按**牌名**禁同名（票 03 §5），故已有同名
     延时锦囊的目标不是合法目标（标准版下这是"不合法"的唯一来源，票 03 §6）。
@@ -158,10 +174,85 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
                 state, seat
             ):
                 continue
+            if rule.max_distance is not None and distance(
+                state, seat, player.seat
+            ) > rule.max_distance:
+                continue
             pool.append(player.seat)
     if behavior.is_delayed:
         pool = [target for target in pool if not _same_named_in_judge(state, target, card)]
+    pool = [
+        target
+        for target in pool
+        if all(
+            TARGET_FILTERS[name](state, seat, target) for name in behavior.target_filters
+        )
+    ]
     return tuple(pool)
+
+
+def target_is_effective(state: GameState, card: CardRef, source: int, target: int) -> bool:
+    """**第 2 层"无效"**（票 15 §5）：被指定者到自己的 C1 才被终止结算。
+
+    ``True`` = 此牌对该目标有效、继续 C2–C5；``False`` = 终止对该目标的结算（故**不开**
+    C2 的无懈窗口）。谓词全部内联在 :data:`EFFECTIVENESS` 的回调里（票 07 §4）；
+    M2 的生产者只有【桃园结义】"对未受伤的角色无效"。
+    """
+    behavior = behavior_for(card)
+    return all(EFFECTIVENESS[name](state, source, target) for name in behavior.effectiveness)
+
+
+def targets_within_attack_range(state: GameState, seat: int) -> tuple[int, ...]:
+    """``seat`` 能触及的座位：一名**其他存活角色**且距离 ≤ 其攻击范围。
+
+    【借刀杀人】的目标合法性（第 0 层）与"持刀者使用【杀】"的候选都读它；
+    距离与攻击范围各只在这里读一次，不复制公式，故函数本身与具体牌名无关。
+    """
+    return tuple(
+        player.seat
+        for player in state.players
+        if player.alive
+        and player.seat != seat
+        and distance(state, seat, player.seat) <= attack_range(state, seat)
+    )
+
+
+def _has_zone_cards(state: GameState, source: int, target: int) -> bool:
+    """目标的手牌 / 装备区 / 判定区里至少有一张牌（拆、顺的"区域里有牌"）。"""
+    del source
+    player = state.player(target)
+    return bool(player.hand or player.equip or player.judge)
+
+
+def _borrowed_sword_target(state: GameState, source: int, target: int) -> bool:
+    """【借刀杀人】的第 0 层合法性：目标有**武器**且攻击范围内有合法【杀】目标。
+
+    官方两次合法性检测的第一次（`A/card_scroll.txt:45`）：选择 An 时就要能指出一个 Bn，
+    故没有合法【杀】目标者不能成为【借刀杀人】的目标。
+    """
+    del source
+    player = state.player(target)
+    has_weapon = any(state.card(card_id).slot is SlotKind.WEAPON for card_id in player.equip)
+    return has_weapon and bool(targets_within_attack_range(state, target))
+
+
+def _wounded(state: GameState, source: int, target: int) -> bool:
+    """未受伤者对【桃园结义】**无效**（`A/card_scroll.txt:171`）。"""
+    del source
+    player = state.player(target)
+    return player.hp < player.hp_max
+
+
+TARGET_FILTERS: dict[str, "Callable[[GameState, int, int], bool]"] = {
+    "has_zone_cards": _has_zone_cards,
+    "borrowed_sword_target": _borrowed_sword_target,
+}
+"""第 0 层附加谓词名 → 回调（``(state, source, target) -> bool``）。"""
+
+EFFECTIVENESS: dict[str, "Callable[[GameState, int, int], bool]"] = {
+    "wounded": _wounded,
+}
+"""第 2 层"无效"谓词名 → 回调；全为真才算**有效**。"""
 
 
 def _same_named_in_judge(state: GameState, seat: int, card: CardRef) -> bool:
@@ -191,12 +282,19 @@ def delayed_settle_target(state: GameState, card: CardRef, subject: int) -> int 
 
 
 def legal_actions_for(
-    state: GameState, seat: int, kind: QueryKind, *, answers_seq: int, dying: int | None = None
+    state: GameState,
+    seat: int,
+    kind: QueryKind,
+    *,
+    answers_seq: int,
+    dying: int | None = None,
+    payload: RespondContext | SelectContext | None = None,
 ) -> tuple[Action, ...]:
     """给出 ``seat`` 在 ``kind`` 询问下的全部候选，按票 05 的稳定键排序。
 
     ``dying`` 只在 ``PEACH`` 询问下需要：濒死语境里【桃】的合法目标是**濒死者**
     而不是应答者自己，故目标不走行为表的目标规则（票 07 §4 / 票 21 §7）。
+    票 27 的新 kind 走**类型化 ``payload``**（票 19 §4）。
     """
     if kind is QueryKind.PLAY_PHASE:
         candidates = _play_phase(state, seat, answers_seq)
@@ -208,8 +306,16 @@ def legal_actions_for(
         if dying is None:
             raise ValueError("PEACH 询问必须给出濒死者座位")
         candidates = _peach(state, seat, dying, answers_seq)
+    elif kind is QueryKind.RESPOND:
+        if not isinstance(payload, RespondContext):
+            raise ValueError("RESPOND 询问必须给出 RespondContext")
+        candidates = _respond(state, seat, answers_seq, payload)
+    elif kind is QueryKind.SELECT_CARDS:
+        if not isinstance(payload, SelectContext):
+            raise ValueError("SELECT_CARDS 询问必须给出 SelectContext")
+        candidates = _select_cards(state, seat, answers_seq, payload)
     else:
-        raise ValueError(f"M1 还没有 {kind.value} 询问的候选生成器")
+        raise ValueError(f"还没有 {kind.value} 询问的候选生成器")
     return tuple(sorted(candidates, key=_sort_key))
 
 
@@ -221,7 +327,12 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
             continue
         rule = behavior_for(card).target_rule
         pool = check_targets(state, seat, card)
-        for combo in combinations(pool, rule.target_count(len(pool))):
+        count = rule.target_count(len(pool))
+        if count <= 0:
+            # 空池的"全体存活"牌（唯一存活者）没有合法候选；M1 的额定牌由
+            # ``combinations(pool, 1)`` 自然为空，这里只补上零目标那档。
+            continue
+        for combo in combinations(pool, count):
             actions.append(UseCard(card=card, targets=tuple(combo), answers_seq=answers_seq))
     actions.append(EndPhase(answers_seq=answers_seq))
     return actions
@@ -264,6 +375,58 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
     return actions
 
 
+def _respond(
+    state: GameState, seat: int, answers_seq: int, ctx: RespondContext
+) -> list[Action]:
+    """响应窗口：手牌里满足 ``required`` 的牌各一个候选，放弃恒在最后。
+
+    - ``mode = PLAY``（南蛮 / 万箭 / 决斗）：候选是 ``PlayCard``（打出，无目标、不占次数）；
+    - ``mode = USE``（【借刀杀人】迫使的"使用【杀】"）：候选是 ``UseCard``，目标取
+      ``ctx.use_targets``（持刀者的合法【杀】目标），并按 L3.2 校验出牌次数。
+
+    手上没有所需牌者候选只有 ``Pass``——**仍发询问**（票 19 §9.2 的"各获一次机会"）。
+    """
+    actions: list[Action] = []
+    for card_id in state.player(seat).hand:
+        card = state.card(card_id)
+        if ctx.required is not None and card.type != ctx.required:
+            continue
+        if check_forbidden(state, seat, card):
+            continue
+        if ctx.mode is RespondMode.USE:
+            if check_count(state, seat, card):
+                continue
+            for target in ctx.use_targets:
+                actions.append(
+                    UseCard(card=card, targets=(target,), answers_seq=answers_seq)
+                )
+        else:
+            actions.append(PlayCard(card=card, answers_seq=answers_seq))
+    actions.append(Pass(answers_seq=answers_seq))
+    return actions
+
+
+def _select_cards(
+    state: GameState, seat: int, answers_seq: int, ctx: SelectContext
+) -> list[Action]:
+    """选牌：按 ``spec.total`` 枚举"取 k 张"的全部组合；``optional`` 时放弃在最后。
+
+    ``spec.zones`` 已由调用方用于铺选择面，``per_zone`` / ``sequential`` 是 M3 的扩展点
+    （票 19 §3 的"M3 只许增"）。M2 的三张选牌牌都是"取满 1 张"的强制选择，
+    故候选恰是每个槽位一个单张；池为空时调用方**不构造询问**（票 19 §6）。
+    """
+    del state, seat
+    low, high = ctx.spec.total
+    actions: list[Action] = [
+        SelectCards(picks=picks, answers_seq=answers_seq)
+        for count in range(low, min(high, len(ctx.slots)) + 1)
+        for picks in combinations(range(len(ctx.slots)), count)
+    ]
+    if ctx.spec.optional:
+        actions.append(Pass(answers_seq=answers_seq))
+    return actions
+
+
 def _usable_hand(
     state: GameState, seat: int, context: UseContext, timing: Timing | None = None
 ) -> list[CardRef]:
@@ -287,8 +450,17 @@ def _usable_in(behavior: CardBehavior, context: UseContext, timing: Timing | Non
 
 
 def _sort_key(action: Action) -> tuple[int, tuple[int, ...], str]:
+    """票 05 §4 的稳定键；票 15 §4 把 ``UseCard`` 的**目标列表**补进键里。
+
+    同牌不同目标组合因此有显式次序（不再依赖生成顺序的稳定性）；1v1 每张牌至多一个
+    目标组合，故 M1 六条基准逐字节不变。
+    """
     if isinstance(action, UseCard):
+        return (0, (action.card.card_id, *action.targets), action.kind)
+    if isinstance(action, PlayCard):
         return (0, (action.card.card_id,), action.kind)
+    if isinstance(action, SelectCards):
+        return (0, action.picks, action.kind)
     if isinstance(action, DiscardCards):
         return (0, tuple(card.card_id for card in action.cards), action.kind)
     return (1, (), action.kind)
