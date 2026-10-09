@@ -31,6 +31,20 @@ PACK = load_content_pack(deck_profile="basic_53")
 """回放对照用的档位：M1 的 ``play_standard`` 走 53 张切片（票 16 §9）。"""
 REPLAYS_DIR = Path(__file__).resolve().parent / "replays"
 
+REPLAYS_TOTAL_LIMIT_BYTES = 48 * 1024 * 1024
+REPLAY_SINGLE_LIMIT_BYTES = 4 * 1024 * 1024
+"""``tests/replays/*.jsonl``（**基准记录流**，不含 README / 生成器代码）的体积预算（retro-02）：
+总量 48 MiB、单文件 4 MiB。
+
+**这是绊线**：它照样会让门禁变红，所以每次增长都看得见；但调高阈值本身是被允许的**显式**动作，
+不是不可动的硬门——后续里程碑的基准可能合法地更大，只是不许悄悄长大。
+阈值 = retro-02 落地时的实测值 + 合理余量；实测基线（2026-10，票 32 后 34 条基准）：
+34 条 ``*.jsonl`` 合计 **33,586,853 字节 ≈ 32.03 MiB**，最大单文件
+**2,986,975 字节 ≈ 2.85 MiB**（``30-halberd-three-targets.jsonl``）。体积根源是记录流内联
+完整 ``Query`` / ``PlayerView``（随弃牌堆增长），不是种子没挑短——挑选已按"记录条数最少"
+做过（``seed_search.py``）。门禁每次都要读入并逐行回放全部体积
+（``test_golden_replay_matches_byte_for_byte``）。"""
+
 
 def _write(path: Path, text: str) -> Path:
     path.write_text(text, encoding="utf-8")
@@ -215,8 +229,13 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     metafunc.parametrize("slug", sorted(slugs))
 
 
-def _golden_files() -> list[Path]:
-    return sorted(REPLAYS_DIR.glob("*.jsonl"))
+def _golden_files(directory: Path = REPLAYS_DIR) -> list[Path]:
+    """``directory`` 下的基准文件（默认 = 仓库的 ``tests/replays/``）。
+
+    目录是入参，好让体积预算**复用**"哪些文件算基准"这一个定义（retro-02），
+    而不是在别处再 glob 一次。
+    """
+    return sorted(directory.glob("*.jsonl"))
 
 
 _README_ROW = re.compile(r"^\|\s*`([0-9]{2}-[a-z0-9-]+)`\s*\|")
@@ -558,3 +577,91 @@ def _first_field_diff(left: object, right: object, path: str):
 def _truncate(value: object, limit: int = 120) -> str:
     text = repr(value)
     return text if len(text) <= limit else f"{text[:limit]}…"
+
+
+# ---------------------------------------------------------------------------
+# 体积预算绊线（retro-02）
+# ---------------------------------------------------------------------------
+
+
+def _mib(size: int) -> str:
+    return f"{size / 1024 / 1024:.2f} MiB（{size} 字节）"
+
+
+def _size_budget_violations(
+    directory: Path,
+    *,
+    total_limit: int = REPLAYS_TOTAL_LIMIT_BYTES,
+    single_limit: int = REPLAY_SINGLE_LIMIT_BYTES,
+) -> list[str]:
+    """把 ``directory`` 下的基准记录流（``*.jsonl``）与体积预算对照，返回可读的越界条目
+    （空列表 = 在预算内；README / 生成器代码不计入，那部分增长可忽略且不稳定）。
+
+    纯函数：目录与两条上限都是入参，故诊断路径可以拿小阈值直接验，不必真造 48 MiB 数据。
+    """
+    sizes = [(path, path.stat().st_size) for path in _golden_files(directory)]
+    total = sum(size for _, size in sizes)
+    largest = max((size for _, size in sizes), default=0)
+
+    over: list[str] = []
+    if total > total_limit:
+        over.append(f"总量 {_mib(total)} > 总预算 {_mib(total_limit)}")
+    over.extend(
+        f"{path.name}：{_mib(size)} > 单文件上限 {_mib(single_limit)}"
+        for path, size in sizes
+        if size > single_limit
+    )
+    if not over:
+        return []
+
+    return [
+        "golden replay 体积超出预算（绊线：增长必须被看见，不是硬门）：",
+        *(f"- {line}" for line in over),
+        f"实测：{len(sizes)} 条基准共 {_mib(total)}，最大单文件 {_mib(largest)}。",
+        "改预算 = 一次显式决定：确认增长合理后，在同一次改动里更新 "
+        "REPLAYS_TOTAL_LIMIT_BYTES / REPLAY_SINGLE_LIMIT_BYTES 并把新的实测值记进注释。",
+    ]
+
+
+def test_the_size_budget_names_the_offending_file_and_the_way_out(tmp_path: Path) -> None:
+    """超预算时必须报出：当前值、超出的文件、以及"改预算 = 一次显式决定"（retro-02）。"""
+    oversized = tmp_path / "35-a-baseline-that-grew.jsonl"
+    oversized.write_bytes(b"x" * (REPLAY_SINGLE_LIMIT_BYTES + 1))
+    (tmp_path / "01-slash-dodge-cancel.jsonl").write_bytes(b"x" * 16)
+
+    violations = _size_budget_violations(tmp_path)
+
+    assert violations, "单文件超过上限必须绊线"
+    report = "\n".join(violations)
+    assert oversized.name in report, "失败消息必须点名超出的文件"
+    assert "单文件上限" in report, "失败消息必须写明被突破的是哪条预算"
+    assert "显式决定" in report, "失败消息必须写明改预算 = 一次显式决定"
+
+
+def test_the_size_budget_trips_on_the_total_even_when_no_single_file_is_huge(tmp_path: Path) -> None:
+    """总量与单文件是两条独立预算：一堆平庸文件堆起来同样要绊线（retro-02）。"""
+    for index in range(3):
+        (tmp_path / f"0{index}-small.jsonl").write_bytes(b"x" * 10)
+
+    violations = _size_budget_violations(tmp_path, total_limit=25, single_limit=1024)
+
+    report = "\n".join(violations)
+    assert "总量" in report, "总量越界必须绊线"
+    assert "单文件上限" not in report, "没有单文件越界时不得误报单文件预算"
+
+
+def test_the_size_budget_stays_quiet_within_the_limits(tmp_path: Path) -> None:
+    (tmp_path / "01-slash-dodge-cancel.jsonl").write_bytes(b"x" * 16)
+
+    assert _size_budget_violations(tmp_path) == []
+
+
+def test_the_golden_replays_fit_within_their_size_budget() -> None:
+    """绊线本体：``tests/replays/`` 的全部 ``*.jsonl`` 必须在预算内（retro-02）。
+
+    超了不要急着调大常量——先看是"合法新增基准"还是"记录流无谓变胖"；两者都要在
+    同一次改动里显式记账（见常量处的实测基线）。
+    """
+    violations = _size_budget_violations(REPLAYS_DIR)
+
+    assert not violations, "\n".join(violations)
