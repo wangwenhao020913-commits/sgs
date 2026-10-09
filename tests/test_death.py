@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from sgs.data import load_content_pack
+from sgs.data import Identity, load_content_pack
 from sgs.engine import Engine
 from sgs.state import EndPhase, FrameKind, MoveReason, Pass, UseCard, Zone, ZoneRef
 from sgs.timing import Timing
@@ -69,7 +69,7 @@ def _find(query, action_type, *, type_id=None):
     return None
 
 
-def _death_engine(*, identity: tuple[str | None, str | None] = (None, None)):
+def _death_engine(*, identity: tuple[Identity | None, Identity | None] = (None, None)):
     """座位 1 被一次【杀】打到濒死、双方放弃 ⇒ 死亡终局。"""
     state = build_state(
         pack=PACK,
@@ -211,11 +211,11 @@ def test_the_game_end_record_is_last_and_carries_the_check_point_seq():
 
 
 def test_identity_fields_stay_in_state_but_do_not_take_part_in_the_verdict():
-    engine = _death_engine(identity=("反贼", "主公"))
+    engine = _death_engine(identity=(Identity.REBEL, Identity.LORD))
 
     assert (engine.state.player(0).identity, engine.state.player(1).identity) == (
-        "反贼",
-        "主公",
+        Identity.REBEL,
+        Identity.LORD,
     ), "身份字段保留在状态里"
     assert engine.records[-1].winner == 0, "胜负只看存活数，不看身份（票 13 §3）"
 

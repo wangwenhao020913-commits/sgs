@@ -26,6 +26,7 @@ from sgs.state import (
     Delta,
     FrameKind,
     HpChangeDelta,
+    IdentityDealDelta,
     Query,
 )
 from sgs.timing import Timing
@@ -43,6 +44,7 @@ __all__ = [
     "GameEndRecord",
     "Header",
     "HpChangeRecord",
+    "IdentityDealRecord",
     "JournalRecord",
     "MalformedAction",
     "QueryRecord",
@@ -114,8 +116,17 @@ class DeckShuffleRecord(DeckShuffleDelta):
     depth: int
 
 
+class IdentityDealRecord(IdentityDealDelta):
+    """一次身份发放（票 13 §3 / 票 24）：开局逐座各一条、落在发牌之前。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
 DeltaRecord = Annotated[
-    CardMoveRecord | HpChangeRecord | DeckShuffleRecord,
+    CardMoveRecord | HpChangeRecord | DeckShuffleRecord | IdentityDealRecord,
     Field(discriminator="delta_type"),
 ]
 
@@ -222,6 +233,8 @@ def wrap_delta(delta: Delta, *, seq: int, frame_id: int, depth: int) -> DeltaRec
         return CardMoveRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, HpChangeDelta):
         return HpChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, IdentityDealDelta):
+        return IdentityDealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     return DeckShuffleRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
 
 

@@ -16,7 +16,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from sgs.agents import Participant
-from sgs.data import ContentPack, RuleConfig
+from sgs.data import ContentPack, Identity, Mode, RuleConfig, roster_for
 from sgs.effects import (
     CallOp,
     DamageNature,
@@ -62,6 +62,7 @@ from .journal import (
     FrameRecord,
     GameEndRecord,
     Header,
+    IdentityDealRecord,
     JournalRecord,
     MalformedAction,
     QueryRecord,
@@ -779,9 +780,22 @@ class Engine:
         self._step_turn()
 
     def _start(self) -> None:
-        self.state.turn_seat = self.state.rule_config.first_seat
+        self.state.turn_seat = self._first_seat()
         self.emit_timing(Timing.GAME_START)
         self._started = True
+
+    def _first_seat(self) -> int:
+        """先手座位：身份局扫主公座位（从 state 派生）、无身份局读配置（票 13 §4）。
+
+        身份局里 ``rule_config.first_seat`` 不被信任（构造期已被钉为默认 0），
+        唯一真源是"谁是主公"这一状态事实。
+        """
+        if self.state.rule_config.mode is Mode.NO_IDENTITY:
+            return self.state.rule_config.first_seat
+        for player in self.state.players:
+            if player.identity is Identity.LORD:
+                return player.seat
+        raise RuntimeError("身份局必须先发出一个主公座位（票 13 §4）")
 
     def _step_turn(self) -> None:
         step = self._turn_steps[self._turn_pc]
@@ -958,6 +972,29 @@ def instantiate_cards(pack: ContentPack) -> tuple[CardRef, ...]:
     )
 
 
+def _deal_identities(*, seed: int, rule_config: RuleConfig) -> tuple[Identity, ...] | None:
+    """身份局逐座发身份；无身份局返回 ``None``（票 13 §3）。
+
+    座位 = 下标固定（只有身份随机）；取配比多重集、用 ``identity`` 子流洗一次，
+    **下标 i 的牌发给座位 i**。子流名与创建顺序无关，故回放与"谁先被创建"无关。
+    """
+    if rule_config.mode is not Mode.IDENTITY:
+        return None
+    roster = list(roster_for(rule_config.player_count))
+    RandomSource(seed).substream("identity").shuffle(roster)
+    return tuple(roster)
+
+
+def _initial_player(seat: int, identity: Identity | None) -> Player:
+    """开局座位：主公体力与体力上限为初始值 +1，其余与无身份局同为 ``INITIAL_HP``。
+
+    初始体力不进记录流（``Player`` 不在 header、也无 delta），故这一步不发 delta
+    （票 13 §4）。
+    """
+    hp = INITIAL_HP + 1 if identity is Identity.LORD else INITIAL_HP
+    return Player(seat=seat, hp=hp, hp_max=hp, identity=identity)
+
+
 def build_initial(
     *,
     seed: int,
@@ -965,15 +1002,21 @@ def build_initial(
     pack: ContentPack,
     shuffle_source: Randomness | None = None,
 ) -> tuple[GameState, tuple[JournalRecord, ...]]:
-    """实例化牌堆 → 洗牌 → 发牌；顺带产出开局那几条记录。
+    """实例化牌堆 → 洗牌 → 发身份（身份局）→ 发牌；顺带产出开局那几条记录。
 
-    ``seq = 1`` 必是初次 ``deck_shuffle``（``frame_id = 0``：无帧哨兵），
-    其后是发牌时机与按座序每座位一条 ``card_move``（票 08 §5 / 票 06 §7）。
+    ``seq = 1`` 必是初次 ``deck_shuffle``（``frame_id = 0``：无帧哨兵）；身份局的
+    ``identity_deal`` 逐座紧随其后（票 13 §3：先发身份 → 亮主 → 发起始手牌），
+    再是发牌时机与按座序每座位一条 ``card_move``（票 08 §5 / 票 06 §7）。
+    无身份局完全不产生 ``identity_deal``，故 M1 六条基准的 seq 布局不变。
     ``shuffle_source`` 由 :meth:`Engine.new_game` 交进来，好让中局重洗接着同一子流取数。
     """
     cards = instantiate_cards(pack)
+    identities = _deal_identities(seed=seed, rule_config=rule_config)
     players = tuple(
-        Player(seat=seat, hp=INITIAL_HP, hp_max=INITIAL_HP)
+        _initial_player(
+            seat,
+            identities[seat] if identities is not None else None,
+        )
         for seat in range(rule_config.player_count)
     )
     state = GameState(
@@ -997,15 +1040,19 @@ def build_initial(
             from_zone=None,
             to_zone=ZoneRef(Zone.DECK),
         ),
-        TimingRecord(
-            seq=2,
-            frame_id=0,
-            depth=0,
-            timing=Timing.GAME_INITIAL_HAND_DEALING,
-        ),
     ]
+    seq = 1
+    if identities is not None:
+        for seat, identity in enumerate(identities):
+            seq += 1
+            records.append(
+                IdentityDealRecord(seq=seq, frame_id=0, depth=0, seat=seat, identity=identity)
+            )
+    seq += 1
+    records.append(
+        TimingRecord(seq=seq, frame_id=0, depth=0, timing=Timing.GAME_INITIAL_HAND_DEALING)
+    )
     ctx = EffectContext(actor=rule_config.first_seat)
-    seq = 2
     for player in state.players:
         drawn = draw_from_deck(state, rule_config.starting_hand_size, rng)
         taken = drawn.cards

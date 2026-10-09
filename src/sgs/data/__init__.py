@@ -7,9 +7,12 @@
 ``LoadError``（``DataLoadError.errors`` 的元素类型，供断言与展示）。
 票 09 把 ``RuleConfig`` 也判在本子包（"声明式输入的加载与校验"），随票 18 的信封落地，
 故公开面再增 :class:`RuleConfig` 与其进料边界 :func:`validate_rule_config`。
+票 24 再增身份与模式的规则常数（:class:`Identity` / :class:`Mode` / :func:`roster_for`）：
+它们与规则配置同层，都是"进料侧"的不可变事实。
 """
 
 from .errors import DataLoadError, LoadError
+from .identities import IDENTITY_LABELS, IDENTITY_ROSTERS, Identity, Mode, roster_for
 from .loader import load_content_pack, validate_content_pack
 from .models import ContentPack
 from .rule_config import RuleConfig, validate_rule_config
@@ -17,9 +20,14 @@ from .rule_config import RuleConfig, validate_rule_config
 __all__ = (
     "ContentPack",
     "DataLoadError",
+    "IDENTITY_LABELS",
+    "IDENTITY_ROSTERS",
+    "Identity",
     "LoadError",
+    "Mode",
     "RuleConfig",
     "load_content_pack",
+    "roster_for",
     "validate_content_pack",
     "validate_rule_config",
 )

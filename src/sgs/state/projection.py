@@ -1,14 +1,29 @@
 """参与者视角投影：``project(state, seat) -> PlayerView``（票 05 §5）。
 
 纯函数、每次构造询问时现算、不缓存；内部一律按座位序输出，不依赖任何无序容器的迭代。
+身份可见性也在这里落地（票 13 §6）：投影时就把不可见的身份抹成 ``None``，
+使"身份不泄露"是结构事实而不是约定。
 """
 
 from __future__ import annotations
 
-from .models import GameState
+from sgs.data import Identity
+
+from .models import GameState, Player
 from .protocol import PlayerPublic, PlayerView
 
 __all__ = ["project"]
+
+
+def _visible_identity(player: Player, *, viewer: int) -> Identity | None:
+    """``viewer`` 能看到 ``player`` 的身份吗（票 13 §6）。
+
+    可见 ⇔ 本人 ∨ 主公（开局立即亮明）∨ 已死亡（阵亡即亮明）；其余存活者不可见。
+    用 ``alive`` 派生而不是新状态字段：M2 该窗口内没有询问，派生是精确的。
+    """
+    if player.seat == viewer or player.identity is Identity.LORD or not player.alive:
+        return player.identity
+    return None
 
 
 def project(state: GameState, seat: int) -> PlayerView:
@@ -22,6 +37,7 @@ def project(state: GameState, seat: int) -> PlayerView:
             alive=player.alive,
             equip=state.refs(player.equip),
             judge=state.refs(player.judge),
+            identity=_visible_identity(player, viewer=seat),
         )
         for player in state.players
     )

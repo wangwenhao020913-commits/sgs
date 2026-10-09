@@ -16,7 +16,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from sgs.data import RuleConfig
+from sgs.data import Identity, RuleConfig
 
 __all__ = [
     "CardRef",
@@ -169,8 +169,11 @@ class Player(BaseModel):
 
     只存总已用次数：额定 / 额外两个上限记在行为表里，M1 的判定只用总数（票 07 §6）。
     """
-    identity: str | None = None
-    """M1 无身份局：字段保留在状态里，但**不参与任何判定**（票 13 §3）。"""
+    identity: Identity | None = None
+    """座位级身份（票 13 §3）：无身份局恒 ``None``，身份局由 ``build_initial`` 一次发放。
+
+    判定一律比枚举成员；主公在开局即亮明（投影侧负责可见性，票 13 §6）。
+    """
 
 
 class GameState(BaseModel):

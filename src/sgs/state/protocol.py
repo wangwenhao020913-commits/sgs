@@ -19,6 +19,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, TypeAdapter
 
+from sgs.data import Identity
 from sgs.timing import Timing
 
 from .models import CardRef, Phase, _FrozenModel
@@ -51,10 +52,12 @@ class QueryKind(str, Enum):
 
 
 class PlayerPublic(_FrozenModel):
-    """公开区里的一个座位：对手只暴露手牌**数**，不暴露身份。
+    """公开区里的一个座位：对手只暴露手牌**数**，身份按可见性规则给出。
 
     ``equip`` / ``judge`` 是**公开信息**且逐座位（票 08 §6）。手牌上限**不在这里**：
     它由当前体力值派生（``effects.hand_limit``），不新增冗余字段。
+    ``identity`` 只对**本人 / 主公 / 已死亡者**可见，其余为 ``None``（票 13 §6）：
+    投影时就把不可见的身份抹掉，"身份不泄露"因此是可断言的不变量。
     """
 
     seat: int
@@ -64,6 +67,7 @@ class PlayerPublic(_FrozenModel):
     alive: bool
     equip: tuple[CardRef, ...]
     judge: tuple[CardRef, ...]
+    identity: Identity | None = None
 
 
 class PlayerView(_FrozenModel):

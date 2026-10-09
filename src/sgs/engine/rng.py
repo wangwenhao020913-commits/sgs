@@ -4,7 +4,9 @@
 其余层只拿这里给出的句柄。
 
 - 根 = ``random.Random``（Mersenne Twister），不用模块级 ``random``（隐式共享状态）。
-- 子流 = 名字哈希派生（与创建顺序无关），M1 两条：``shuffle`` / ``ai``。
+- 子流 = 名字哈希派生（与创建顺序无关）：M1 两条 ``shuffle`` / ``ai``，M2 增身份发放
+  ``identity``（票 13 §3）；隐藏槽乱序的 ``select`` 由票 19 落地
+  （`GLOSSARY.md` §子流：M2 增身份发放与隐藏槽乱序）。
 - 洗牌自己写 Fisher–Yates + 无偏取数：不押在运行时的 ``shuffle`` / 播种实现细节上
   （官方只保证 ``random()`` 的跨版本一致，其余明说 subject to change）。
 """

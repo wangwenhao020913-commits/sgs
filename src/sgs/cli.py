@@ -12,7 +12,7 @@ import sys
 from collections.abc import Sequence
 
 from sgs.agents import RandomPlayer
-from sgs.data import DataLoadError, load_content_pack, validate_rule_config
+from sgs.data import IDENTITY_LABELS, DataLoadError, load_content_pack, validate_rule_config
 from sgs.engine import (
     Engine,
     IllegalActionError,
@@ -107,6 +107,11 @@ def render(record: JournalRecord) -> str:
             return (
                 f"#{record.seq:<4} 体力 座位={record.seat} "
                 f"{record.before}→{record.after}（{record.amount:+d}）"
+            )
+        if record.delta_type == "identity_deal":
+            return (
+                f"#{record.seq:<4} 身份 座位={record.seat} "
+                f"{IDENTITY_LABELS[record.identity]}"
             )
         return f"#{record.seq:<4} 洗牌 {_zone_label(record.from_zone)}→牌堆 {_cards(record.cards)}"
     if kind == "query":

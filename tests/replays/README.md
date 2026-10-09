@@ -27,7 +27,8 @@
   使用者、装备置入归持有者；"无角色主体"的收尾移动才是 `null`。判定牌的两条移动
   （`DECK→PROCESSING`、`PROCESSING→DISCARD`）归**被判定者**（归属 ≠ 区域坐标）。
 - 每条内联牌面多一个 `slot`（装备槽位；`basic_53` 的每张牌都是 `null`），
-  `PlayerPublic` 多 `equip` / `judge` 两个公开列表；手牌上限仍是**派生函数**，不落字段。
+  `PlayerPublic` 多 `equip` / `judge` / `identity` 三个公开字段（身份只对本人 / 主公 /
+  已死亡者可见，其余为 `null`，票 13 §6）；手牌上限仍是**派生函数**，不落字段。
 - M1 六条基准的**决策轨迹**摘要冻结在 `tests/test_replays.py::M1_FROZEN_TRAJECTORIES`；
   摘要剔除 v2 新增的牌面事实字段（`slot`）后逐条相等，证明升版没改语义。
 

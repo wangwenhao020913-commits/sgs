@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import sgs.__main__ as module_entry
-from sgs.cli import main
+from sgs.cli import main, render
 
 CONSOLE_SCRIPT = Path(sys.executable).parent / "sgs"
 
@@ -58,6 +58,18 @@ def test_an_unsupported_seat_count_reports_to_stderr_and_exits_1(count, capsys):
     assert captured.out == ""
     assert "人数非法" in captured.err
     assert "player_count" in captured.err
+
+
+def test_the_renderer_labels_identity_deals_in_chinese():
+    """票 24：身份发放也是 ``delta``，渲染必须走中文标签而不是误落到"洗牌"分支。"""
+    from sgs.data import Identity
+    from sgs.engine import IdentityDealRecord
+
+    line = render(
+        IdentityDealRecord(seq=2, frame_id=0, depth=0, seat=1, identity=Identity.LORD)
+    )
+
+    assert "身份" in line and "座位=1" in line and "主公" in line
 
 
 def test_unknown_option_is_rejected():
