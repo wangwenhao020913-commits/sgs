@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from .models import GameState
 
-__all__ = ["alive_seat_at", "alive_seats", "next_alive_seat", "seats_from"]
+__all__ = ["alive_seat_at", "alive_seats", "next_alive_seat", "rejudge_askers", "seats_from"]
 
 
 def alive_seats(state: GameState) -> tuple[int, ...]:
@@ -58,4 +58,18 @@ def seats_from(state: GameState, start: int | None, count: int) -> tuple[int, ..
         state.player((origin + offset) % total).seat
         for offset in range(min(count, total))
         if state.player((origin + offset) % total).alive
+    )
+
+
+def rejudge_askers(state: GameState, capable: tuple[int, ...]) -> tuple[int, ...]:
+    """**改判响应队列**（票 10 §4）：从当前回合角色起逆时针、每角色一次。
+
+    ``capable`` = 有改判能力的座位（技能侧解析，M2 恒空）。区间读法与濒死求桃同源
+    （``seats_from`` 的"当前回合角色起绕整圈"），只把没有能力的座位滤掉；队列为空时
+    判定帧不构造任何询问——这就是"队列恒空即终态正确"。
+    """
+    return tuple(
+        seat
+        for seat in seats_from(state, state.turn_seat, len(state.players))
+        if seat in capable
     )

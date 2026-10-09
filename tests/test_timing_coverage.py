@@ -76,8 +76,9 @@ def test_enum_only_and_empty_log_nodes_never_appear_in_any_record_stream():
     )
 
 
-def test_the_judge_phase_is_a_measured_empty_phase():
-    """判定阶段空过：阶段体照记，判定事件（L14）与阶段边界都不出现。"""
+def test_a_judge_phase_with_an_empty_judge_zone_dispatches_no_judge_events():
+    """判定区为空 ⇒ 阶段体照记、不发判定事件；边界节点结构性不发（票 26 起判定阶段
+    只在**有可结算的延时锦囊**时才 dispatch L14，故这里用 turn-loop 这个空判定区的局面）。"""
     stream = dispatched("position:turn-loop")
 
     assert Timing.PHASE_JUDGE.value in stream

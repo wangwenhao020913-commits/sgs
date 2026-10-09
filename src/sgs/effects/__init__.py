@@ -8,6 +8,7 @@ from .actions import (
     check_count,
     check_forbidden,
     check_targets,
+    delayed_settle_target,
     discard_count,
     distance,
     hand_limit,
@@ -38,6 +39,8 @@ from .primitives import (
     draw_from_deck,
     locate,
     move_card,
+    substitute_judge_card,
+    swap_judge_card,
 )
 
 __all__ = (
@@ -63,6 +66,7 @@ __all__ = (
     "check_count",
     "check_forbidden",
     "check_targets",
+    "delayed_settle_target",
     "discard_count",
     "distance",
     "draw_from_deck",
@@ -71,4 +75,6 @@ __all__ = (
     "locate",
     "move_card",
     "opens_response_window",
+    "substitute_judge_card",
+    "swap_judge_card",
 )

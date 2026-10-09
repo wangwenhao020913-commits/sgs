@@ -255,7 +255,8 @@ M1_EMPTY_LOG: tuple[Timing, ...] = (
     Timing.PHASE_PREPARE_START,
     Timing.PHASE_PREPARE_END,
     Timing.INTERVAL_PREPARE_TO_JUDGE,
-    # 判定阶段是 M1 唯一的"空阶段"：只发阶段体 PHASE_JUDGE（判定事件 L14 不实现）。
+    # 判定阶段的**边界节点**不 dispatch（阶段体 PHASE_JUDGE 发；判定事件 L14 自票 26
+    # 起在阶段体内由 JUDGE 帧 dispatch——判定阶段因此**不是**空阶段，票 03/票 17）。
     Timing.PHASE_JUDGE_START,
     Timing.PHASE_JUDGE_END,
     Timing.INTERVAL_JUDGE_TO_DRAW,
@@ -267,13 +268,17 @@ M1_EMPTY_LOG: tuple[Timing, ...] = (
     Timing.PHASE_FINISH_START,
     Timing.PHASE_FINISH_END,
 )
-"""票 01 (a) 类里的**空日志**节点：枚举位保留、M1 流程不 dispatch、记录流里不出现。
+"""票 01 (a) 类里的**空日志**节点：枚举位保留、记录流里不出现。
 
-票 18 承票 06 §7 的明文登记：5 个 ``INTERVAL_*`` 与**只发阶段体的三个阶段**（准备 /
-判定 / 结束）的 ``*_START`` / ``*_END`` 一律不 dispatch、不记；摸牌 / 出牌 / 弃牌三个
-阶段的阶段体与边界都发。于是 (a) 类的 58 个里只有 47 个可从记录流观测；这些空日志节点
-"结构性存在"（枚举成员 + 阶段口径），由 :data:`M1_EMPTY_LOG` 单列，不混进
+票 18 承票 06 §7 的明文登记：5 个 ``INTERVAL_*`` 与准备 / 判定 / 结束三个阶段的
+``*_START`` / ``*_END`` 一律不 dispatch、不记；摸牌 / 出牌 / 弃牌三个阶段的阶段体与边界都发。
+这些节点"结构性存在"（枚举成员 + 阶段口径），由 :data:`M1_EMPTY_LOG` 单列，不混进
 :data:`M1_DISPATCH_WHITELIST`。
+
+**票 26 起的读法**：本常量界定的是**边界节点**，不是"该阶段整体为空"。判定阶段的边界仍
+留在本表（票 17 §3 明定"判定阶段边界节点**不转**"），但它的阶段体自票 26 起会 dispatch
+L14 的判定事件——判定阶段因此不再空过。M1 的 47/58/25 计数与 ``M1_`` 前缀属 M1 里程碑
+陈述，M2 的 53/64/19/11 定格与去前缀由集成票（票 32）一次性执行。
 """
 
 _EMPTY_LOG_MEMBERS = frozenset(M1_EMPTY_LOG)

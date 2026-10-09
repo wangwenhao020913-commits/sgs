@@ -52,18 +52,39 @@ M2 **一个都没有**：武将技能整类 out of scope（票 13 §4）⇒ 主�
 M3 加武将时把主公技 id 填进来即可，门控与查询面都不改形。
 """
 
+REJUDGE_SKILL_IDS: frozenset[str] = frozenset()
+"""有**改判**能力的技能 id（【鬼才】/【鬼道】一类）。
+
+标准版里改判全在武将技能上，而武将技能整类 out of scope ⇒ M2 恒空。
+判定帧的改判窗口因此**真 dispatch 但队列恒空**（票 10 §4）。
+"""
+
 __all__ = (
     "EQUIPMENT_CARD_TYPE_IDS",
     "EQUIPMENT_SKILL_IDS",
     "LORD_SKILL_IDS",
+    "REJUDGE_SKILL_IDS",
     "equipment_skill_ids",
     "lord_skill_allowed",
+    "rejudge_capable_seats",
 )
 
 
 def equipment_skill_ids() -> frozenset[str]:
     """全部装备技能的 id 集合（只读；加载期跨层校验用）。"""
     return EQUIPMENT_SKILL_IDS
+
+
+def rejudge_capable_seats() -> tuple[int, ...]:
+    """当前**有改判能力**的座位（票 10 §4 的响应队列左项）。
+
+    M2 没有改判技能（``REJUDGE_SKILL_IDS`` 为空），故恒为空元组——判定帧的改判响应
+    队列因此恒空、无询问、无日志节点，"队列恒空即终态正确"。M3 立起技能实例
+    （``(owner, skill_id, source)``）后在此把 ``REJUDGE_SKILL_IDS`` 解析成座位集合。
+    """
+    if REJUDGE_SKILL_IDS:
+        raise NotImplementedError("M3 才有改判技能：座位的技能实例解析尚未建立")
+    return ()
 
 
 def lord_skill_allowed(identity: Identity | None, skill_id: str) -> bool:

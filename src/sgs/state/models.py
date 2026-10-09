@@ -128,11 +128,12 @@ class Phase(str, Enum):
 class FrameKind(str, Enum):
     """结算事件的帧类型（票 04 §6）。
 
-    前七个是 M1 真的会走到 `push` 的结算单元；其余是留位（触发它们的机制被排除），
-    只作 ``frame`` 记录 ``frame_kind`` 的合法取值。
+    前八个是 M2 真的会走到 `push` 的结算单元（``JUDGE`` 自票 26 从占位转真帧）；
+    其余是留位（触发它们的机制在本里程碑被排除），只作 ``frame`` 记录
+    ``frame_kind`` 的合法取值。
     """
 
-    # M1 会走到
+    # M2 会走到
     USE = "USE"
     RESOLVE = "RESOLVE"
     DAMAGE = "DAMAGE"
@@ -140,12 +141,12 @@ class FrameKind(str, Enum):
     NEAR_DEATH = "NEAR_DEATH"
     DEATH = "DEATH"
     RECOVER = "RECOVER"
+    JUDGE = "JUDGE"
     # 留枚举位
     PLAY = "PLAY"
     MOVE = "MOVE"
     LIFE_LOSE = "LIFE_LOSE"
     MAXLIFE = "MAXLIFE"
-    JUDGE = "JUDGE"
     RANK_COMPARE = "RANK_COMPARE"
     SKILL = "SKILL"
 

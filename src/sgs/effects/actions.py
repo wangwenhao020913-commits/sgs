@@ -29,6 +29,7 @@ from sgs.state import (
     QueryKind,
     UseCard,
     alive_seats,
+    seats_from,
 )
 from sgs.timing import Timing
 
@@ -39,6 +40,7 @@ __all__ = [
     "check_count",
     "check_forbidden",
     "check_targets",
+    "delayed_settle_target",
     "discard_count",
     "distance",
     "hand_limit",
@@ -132,25 +134,60 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
     目标数为 0 的响应牌（【闪】/【无懈可击】）返回空元组——它们响应的是那张牌 /
     那次结算，不是座位。两个"全体存活"档的候选池由目标数来源枚举决定含不含自己，
     候选池的**限制**（距离 1 以内、区域里有牌……）一律走技能侧的候选池修饰器。
+
+    延时锦囊另有一条**规则层**限制：判定区按**牌名**禁同名（票 03 §5），故已有同名
+    延时锦囊的目标不是合法目标（标准版下这是"不合法"的唯一来源，票 03 §6）。
     """
-    rule = behavior_for(card).target_rule
+    behavior = behavior_for(card)
+    rule = behavior.target_rule
     if rule.count is TargetCount.RATED and rule.rated_targets == 0:
         return ()
     if rule.self_only:
         me = state.player(seat)
         if not me.alive or (rule.requires_wounded_self and me.hp >= me.hp_max):
             return ()
-        return (seat,)
-    pool: list[int] = []
-    for player in state.players:
-        if not player.alive:
-            continue
-        if player.seat == seat and not rule.includes_self_in_pool():
-            continue
-        if rule.needs_distance and distance(state, seat, player.seat) > attack_range(state, seat):
-            continue
-        pool.append(player.seat)
+        pool: list[int] = [seat]
+    else:
+        pool = []
+        for player in state.players:
+            if not player.alive:
+                continue
+            if player.seat == seat and not rule.includes_self_in_pool():
+                continue
+            if rule.needs_distance and distance(state, seat, player.seat) > attack_range(
+                state, seat
+            ):
+                continue
+            pool.append(player.seat)
+    if behavior.is_delayed:
+        pool = [target for target in pool if not _same_named_in_judge(state, target, card)]
     return tuple(pool)
+
+
+def _same_named_in_judge(state: GameState, seat: int, card: CardRef) -> bool:
+    """``seat`` 的判定区里是否已有与 ``card`` **同名**的延时锦囊（票 03 §3）。"""
+    return any(state.card(card_id).type == card.type for card_id in state.player(seat).judge)
+
+
+def delayed_settle_target(state: GameState, card: CardRef, subject: int) -> int | None:
+    """延时锦囊结算后**仍在处理区**时的去向（票 11 §4 对票 10 §3.6 的特化）。
+
+    返回 = 应收下这张牌的**判定区座位**；``None`` = 直接进弃牌堆。
+
+    - **【闪电】**：逆时针顺延到第一个合法目标（存活 ∧ 判定区无同名），下家不合法再
+      往下，全不合法则回到**其自己的**判定区（官方 `A/card_scroll.txt:219`）。判定阶段
+      循环的 ``judged`` 守卫负责不让刚判完的牌原地重判（票 10 §3 的 U-10-1）。
+    - **其余延时锦囊**（【乐不思蜀】）：弃牌堆。
+
+    判据读行为表的 ``passes_to_next_judge``（牌面事实），引擎与规则层都不出现具体牌名。
+    """
+    if not behavior_for(card).passes_to_next_judge:
+        return None
+    ring = seats_from(state, subject, len(state.players))
+    for target in ring[1:] + ring[:1]:
+        if not _same_named_in_judge(state, target, card):
+            return target
+    return subject
 
 
 def legal_actions_for(

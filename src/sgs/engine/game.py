@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from sgs.agents import Participant
 from sgs.data import ContentPack, Identity, Mode, RuleConfig, roster_for
 from sgs.effects import (
+    OPS,
     CallOp,
     DamageNature,
     EffectContext,
@@ -25,6 +26,7 @@ from sgs.effects import (
     PushFrame,
     Randomness,
     apply_hp,
+    delayed_settle_target,
     discard_count,
     draw_from_deck,
     legal_actions_for,
@@ -625,6 +627,87 @@ class Engine:
             owner=frame.data["source"],
         )
 
+    def move_used_card_to_judge_zone(self, frame: Frame) -> None:
+        """处理区 → 目标座位的判定区（``reason = PUT``、归属 = 使用者）。
+
+        延时锦囊"使用当时"的落点（票 10 §7）：L4 走完就把实体牌置入目标判定区，
+        L5 推迟到目标自己的判定阶段。
+        """
+        self._move_in_frame(
+            frame,
+            (frame.data["card"],),
+            to_zone=ZoneRef(Zone.JUDGE, frame.data["targets"][0]),
+            reason=MoveReason.PUT,
+            owner=frame.data["source"],
+        )
+
+    # -- 判定帧（票 26）：取判定牌 / 入处理区 / 入弃牌堆 / 后果 op -----------------
+
+    def draw_judge_card(self, frame: Frame) -> bool:
+        """判定取牌：复用摸牌原语、沿用 ``shuffle`` 子流、**不算摸牌**（票 10 §2）。
+
+        重洗时就地先发**一条** ``deck_shuffle``、不另发 ``card_move``（与摸牌阶段同姿态）；
+        短摸（两堆皆空）⇒ 按"任何短摸即平局"判 ``both_decks_empty`` 并终止，返回 ``False``。
+        """
+        drawn = draw_from_deck(self.state, 1, self._shuffle)
+        if drawn.shuffle is not None:
+            self.emit_delta(drawn.shuffle, frame_id=frame.frame_id, depth=self.stack.depth)
+        if not drawn.cards:
+            self.check_game_end(draw_reason="both_decks_empty")
+            self.finish()
+            return False
+        frame.data["judge_card"] = drawn.cards[0]
+        return True
+
+    def move_judge_card_to_processing(self, frame: Frame) -> None:
+        """判定牌 牌堆 → 处理区（``reason = JUDGE``、归属 = 被判定者）。"""
+        subject = frame.data["subject"]
+        self._move_in_frame(
+            frame,
+            (frame.data["judge_card"],),
+            to_zone=ZoneRef(Zone.PROCESSING),
+            reason=MoveReason.JUDGE,
+            owner=subject,
+            actor=subject,
+        )
+
+    def discard_judge_card(self, frame: Frame) -> None:
+        """判定牌 处理区 → 弃牌堆（``reason = JUDGE``、归属 = 被判定者）：判定结算结束。"""
+        subject = frame.data["subject"]
+        self._move_in_frame(
+            frame,
+            (frame.data["judge_card"],),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.JUDGE,
+            owner=subject,
+            actor=subject,
+        )
+
+    def apply_judge_after(self, frame: Frame) -> None:
+        """调判定后果 op（帧私有 ``after`` = :data:`OPS` 注册名）；缺省即无后果。"""
+        after = frame.data.get("after")
+        if after is None:
+            return
+        OPS[after](self, frame)
+
+    def skip_play_phase(self, seat: int) -> None:
+        """让 ``seat`` 的**出牌阶段**整体跳过（【乐不思蜀】的判定后果）。
+
+        只对**当前回合角色**生效——判定阶段本来就跑在该角色自己的回合里；跳过由
+        :meth:`_phase_play_start` 消费（连阶段体一起不发，直奔弃牌阶段）。
+        """
+        if self.state.turn_seat == seat:
+            self._turn_data["skip_play"] = True
+
+    def consume_delayed_card(self, frame: Frame) -> None:
+        """把**延时锦囊本体**标记为"已消耗"：判定阶段循环的收尾据此送它进弃牌堆。
+
+        【闪电】命中（♠2~9）走这条；标记而非就地搬牌，是为了让"伤害后入弃牌堆"在
+        记录流里也真的发生在伤害帧结算之后（伤害帧是本 JUDGE 帧的子帧，先出栈）。
+        未标记的牌由收尾按 :func:`~sgs.effects.delayed_settle_target` 顺延。
+        """
+        self._turn_data["judge_consumed"] = frame.data["card"].card_id
+
     def _effect_context(self, frame: Frame, *, actor: int) -> EffectContext:
         """叶子原语要的结算主体信息：从当前帧继承 `source` / `targets` / `card` 与层级。
 
@@ -647,26 +730,65 @@ class Engine:
         to_zone: ZoneRef,
         reason: MoveReason,
         owner: int | None,
+        actor: int | None = None,
     ) -> None:
-        ctx = self._effect_context(frame, actor=frame.data["source"])
+        """在当前帧里移动一批牌并记一条 delta；``actor`` 缺省取帧的 ``source``。
+
+        判定路径的"无角色主体"移动（判定牌的两次移动、延时锦囊本体）主体是**被判定者**，
+        与 ``source``（可能为 ``None``）分列，故调用点可显式给 ``actor``。
+        """
+        ctx = self._effect_context(
+            frame, actor=frame.data["source"] if actor is None else actor
+        )
         delta = move_card(
             self.state, ctx, tuple(cards), to_zone=to_zone, reason=reason, owner=owner
         )
         self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
 
+    def _move_cards(
+        self,
+        card_ids: tuple[int, ...],
+        *,
+        to_zone: ZoneRef,
+        reason: MoveReason,
+        owner: int | None,
+        actor: int,
+    ) -> None:
+        """**帧外**移动一批牌并记一条 delta（帧已出栈的收尾移动，票 10 §3.6）。
+
+        判定阶段循环的两次收尾移动（延时锦囊 JUDGE→PROCESSING 与「仍在处理区」的去向）
+        没有承载帧，主体是当前回合角色；与 :meth:`_move_in_frame` 的唯一差别是
+        ``EffectContext`` 只有 ``actor``。
+        """
+        delta = move_card(
+            self.state,
+            EffectContext(actor=actor),
+            self.state.refs(card_ids),
+            to_zone=to_zone,
+            reason=reason,
+            owner=owner,
+        )
+        self.emit_delta(delta)
+
     def apply_effects(
         self, frame: Frame, effects: Sequence[EffectStep], *, timing: Timing
     ) -> None:
-        """解释行为表的步骤列表：``PushFrame`` 压子帧、``CallOp`` 调叶子原语（M1 未登记）。"""
+        """解释行为表的步骤列表：``PushFrame`` 压子帧、``CallOp`` 查 :data:`OPS` 表调用。
+
+        ``CallOp`` 只按**名**通用派发（回调签名 ``(host, frame)``），引擎里不出现任何
+        具体效果名（票 09 §4）；未登记的名字是加载期就该拦下的错误（``card_type.unknown_op``），
+        运行期再撞到即 fail-closed。
+        """
         for step in effects:
             if isinstance(step, PushFrame):
                 data = _child_payload(step.kind, frame.data, step.scalars)
                 self.push_frame(step.kind, data, timing=timing)
                 continue
             assert isinstance(step, CallOp)  # union 只有两类步骤
-            raise NotImplementedError(
-                f"M1 没有登记叶子原语调用 {step.op!r}（CallOp 只留位，票 07 §2）"
-            )
+            op = OPS.get(step.op)
+            if op is None:
+                raise NotImplementedError(f"未登记的效果原语 {step.op!r}（票 09 §4 的 OPS 表）")
+            op(self, frame)
 
     def apply_hp_change(self, frame: Frame, seat: int, value: int) -> HpChangeDelta:
         """调 ``apply_hp`` 这个叶子原语并把返回的变化事件写进记录流（票 07 §1）。
@@ -1018,10 +1140,89 @@ class Engine:
         self.state.phase = Phase.PREPARE
         self.emit_timing(Timing.PHASE_PREPARE, actor=self.state.turn_seat)
 
-    def _phase_judge(self) -> None:
-        # 空阶段：判定区在 M1 不存在，流程经过但不 dispatch 任何子时机。
-        self.state.phase = Phase.JUDGE
-        self.emit_timing(Timing.PHASE_JUDGE, actor=self.state.turn_seat)
+    def _phase_judge(self) -> str | None:
+        """判定阶段：**自循环回合步骤**，逐张结算当前回合角色判定区里的延时锦囊（票 10 §3）。
+
+        每轮**重新读** ``reversed(判定区)``（"最后置入"者优先、不预先快照），跳过本阶段
+        已结算的牌实例（``judged`` 守卫——官方"然后重复此流程"没写刚判完又放回的牌是否
+        重判，本实现取**不重判**以终止循环，程序化约定 U-10-1）。
+
+        结算一张的形态：该牌 ``JUDGE→PROCESSING``（``reason=LOSE``、无归属）→ 压 **RESOLVE**
+        帧只跑 L5（``source=None``、``use_timing=PHASE_JUDGE``，**不重发** L4 的六个时机）→
+        帧出栈后本循环做 L5.6：dispatch ``RESOLVE_AFTER_END``，再把仍在处理区的牌统一收尾
+        （【闪电】顺延到下一个合法目标的判定区，其余弃牌堆，票 11 §4）。
+        """
+        seat = self._turn_seat()
+        if not self._turn_data.get("judge_entered"):
+            self.state.phase = Phase.JUDGE
+            self.emit_timing(Timing.PHASE_JUDGE, actor=seat)
+            self._turn_data["judge_entered"] = True
+        judged: list[int] = self._turn_data.setdefault("judge_judged", [])
+        inflight = self._turn_data.pop("judge_inflight", None)
+        if inflight is not None:
+            self._finish_judge_round(seat, inflight)
+            judged.append(inflight)
+            return "stay"
+        card_id = self._next_judge_card(seat, judged)
+        if card_id is None:
+            return None
+        # 每轮重取的是"仍在判定区"的牌：结算前离开判定区（被拆 / 顺走）的牌自然不会
+        # 被选中，其使用流程随之终止（官方 `flow_use.txt:15`）。
+        self._move_judge_card_to_processing(seat, card_id)
+        self._turn_data["judge_inflight"] = card_id
+        resolve = self.push_frame(
+            FrameKind.RESOLVE,
+            {
+                "card": self.state.card(card_id),
+                "source": None,
+                "targets": (seat,),
+                "use_timing": Timing.PHASE_JUDGE,
+            },
+            timing=Timing.PHASE_JUDGE,
+        )
+        self._turn_data["judge_frame_id"] = resolve.frame_id
+        return "stay"
+
+    def _next_judge_card(self, seat: int, judged: list[int]) -> int | None:
+        """本轮该结算的牌：判定区里**最后置入**且本阶段还没判过的那张。"""
+        for card_id in reversed(self.state.player(seat).judge):
+            if card_id not in judged:
+                return card_id
+        return None
+
+    def _move_judge_card_to_processing(self, seat: int, card_id: int) -> None:
+        """延时锦囊 判定区 → 处理区（``reason = LOSE``、无角色主体，票 10 §7）。"""
+        self._move_cards(
+            (card_id,),
+            to_zone=ZoneRef(Zone.PROCESSING),
+            reason=MoveReason.LOSE,
+            owner=None,
+            actor=seat,
+        )
+
+    def _finish_judge_round(self, seat: int, card_id: int) -> None:
+        """判定阶段循环的收尾（本循环拥有延时锦囊的 L5.6，票 10 §3.6 / 票 11 §4）。
+
+        dispatch ``RESOLVE_AFTER_END``（``actor = 该座位``、``cards = 该牌``，帧 id 沿用
+        刚出栈的 RESOLVE 帧）；仍在处理区的牌按后果 op 是否**消耗**它（【闪电】命中）与
+        :func:`~sgs.effects.delayed_settle_target`（【闪电】顺延 / 其余弃牌堆）决定去向。
+        """
+        card = self.state.card(card_id)
+        self.emit_timing(
+            Timing.RESOLVE_AFTER_END,
+            actor=seat,
+            cards=(card,),
+            frame_id=self._turn_data.pop("judge_frame_id", 0),
+        )
+        consumed = self._turn_data.pop("judge_consumed", None)
+        if card_id not in self.state.processing:
+            return
+        target = None if consumed == card_id else delayed_settle_target(self.state, card, seat)
+        if target is None:
+            to_zone, reason = ZoneRef(Zone.DISCARD), MoveReason.USE
+        else:
+            to_zone, reason = ZoneRef(Zone.JUDGE, target), MoveReason.PUT
+        self._move_cards((card_id,), to_zone=to_zone, reason=reason, owner=None, actor=seat)
 
     def _phase_draw_start(self) -> None:
         self.state.phase = Phase.DRAW
@@ -1054,7 +1255,16 @@ class Engine:
 
     def _phase_play_start(self) -> None:
         self.state.phase = Phase.PLAY
+        if self._turn_data.pop("skip_play", False):
+            # 【乐不思蜀】判定非红桃 ⇒ **跳过出牌阶段**（官方"跳过其出牌阶段"，非跳过回合）：
+            # 阶段体与边界一并越过，直奔弃牌阶段（票 26）。
+            self._skip_to(self._phase_discard_start)
+            return
         self.emit_timing(Timing.PHASE_PLAY_START, actor=self.state.turn_seat)
+
+    def _skip_to(self, step: Callable[[], Any]) -> None:
+        """把回合环的 pc 拨到 ``step``：本步返回后 ``_step_turn`` 的 +1 正好落到它。"""
+        self._turn_pc = self._turn_steps.index(step) - 1
 
     def _phase_play_idle(self) -> str | None:
         seat = self._turn_seat()

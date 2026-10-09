@@ -30,6 +30,8 @@ __all__ = [
     "draw_from_deck",
     "locate",
     "move_card",
+    "substitute_judge_card",
+    "swap_judge_card",
 ]
 
 
@@ -150,6 +152,71 @@ def move_card(
         reason=reason,
         owner=owner,
     )
+
+
+def _place_new_judge_card(
+    state: GameState, ctx: EffectContext, new_card: CardRef, subject: int
+) -> CardMoveDelta:
+    """改判的公共第一步：改判牌进处理区、归属 = 被判定者（票 03 §4 的"新牌→PROCESSING"）。"""
+    return move_card(
+        state,
+        ctx,
+        (new_card,),
+        to_zone=ZoneRef(Zone.PROCESSING),
+        reason=MoveReason.JUDGE,
+        owner=subject,
+    )
+
+
+def substitute_judge_card(
+    state: GameState,
+    ctx: EffectContext,
+    *,
+    old_card: CardRef,
+    new_card: CardRef,
+    subject: int,
+) -> tuple[CardMoveDelta, CardMoveDelta]:
+    """改判「**代替**」：新判定牌进处理区、原判定牌**当刻**进弃牌堆（票 03 §4 / 票 10 §4）。
+
+    两条移动各发一条 ``card_move``（来源区不同，一次 ``move_card`` 只能有一个来源）；
+    二者都取 ``reason = JUDGE``、归属 = **被判定者**，与判定牌的两条移动同口径。
+    """
+    incoming = _place_new_judge_card(state, ctx, new_card, subject)
+    outgoing = move_card(
+        state,
+        ctx,
+        (old_card,),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.JUDGE,
+        owner=subject,
+    )
+    return (incoming, outgoing)
+
+
+def swap_judge_card(
+    state: GameState,
+    ctx: EffectContext,
+    *,
+    old_card: CardRef,
+    new_card: CardRef,
+    subject: int,
+    rejudger: int,
+) -> tuple[CardMoveDelta, CardMoveDelta]:
+    """改判「**替换**」：新判定牌进处理区、原判定牌归**改判者**（票 03 §4 / 票 10 §4）。
+
+    与 :func:`substitute_judge_card` 的唯一差别是原判定牌的去向（改判者手牌而非弃牌堆），
+    故其 ``reason`` 取 ``LOSE``（判定区 / 处理区里的牌被移走）、归属 = 改判者。
+    """
+    incoming = _place_new_judge_card(state, ctx, new_card, subject)
+    outgoing = move_card(
+        state,
+        ctx,
+        (old_card,),
+        to_zone=ZoneRef(Zone.HAND, rejudger),
+        reason=MoveReason.LOSE,
+        owner=rejudger,
+    )
+    return (incoming, outgoing)
 
 
 def apply_hp(state: GameState, ctx: EffectContext, seat: int, value: int) -> HpChangeDelta:

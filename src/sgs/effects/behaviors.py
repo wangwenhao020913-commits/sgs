@@ -170,6 +170,20 @@ class CardBehavior:
     use_limit: UseLimit
     effects: tuple[EffectStep, ...]
     final_zone: FinalZone = FinalZone.DISCARD
+    passes_to_next_judge: bool = False
+    """延时锦囊结算完**仍在处理区**时是否顺延到下一个合法目标的判定区（票 11 §4）。
+
+    只有【闪电】为真：它"不命中就传下家"；其余延时锦囊（【乐不思蜀】）直接进弃牌堆。
+    是**牌面事实**，故落在行为表而不是引擎的牌名分支。
+    """
+
+    @property
+    def is_delayed(self) -> bool:
+        """延时锦囊：使用当时只走 L4，实体牌置入目标判定区，L5 推迟到判定阶段（票 26）。
+
+        谓词取 ``final_zone`` 派生而不是新字段：延时锦囊的判据就是"结算完停判定区"。
+        """
+        return self.final_zone is FinalZone.JUDGE
 
 
 _PLAY_PHASE = UseTiming(UseContext.PLAY_PHASE)
@@ -178,27 +192,39 @@ _RESPONSE_BEFORE_EFFECT = UseTiming(UseContext.RESPONSE, Timing.RESOLVE_BEFORE_E
 _UNLIMITED = UseLimit(rated=None)
 
 
-def _one_other(card_type_id: str, *, final_zone: FinalZone = FinalZone.DISCARD) -> CardBehavior:
+def _one_other(
+    card_type_id: str,
+    *,
+    final_zone: FinalZone = FinalZone.DISCARD,
+    effects: tuple[EffectStep, ...] = (),
+) -> CardBehavior:
     """额定一名他人（【过河拆桥】【顺手牵羊】【决斗】【借刀杀人】【乐不思蜀】）。"""
     return CardBehavior(
         card_type_id=card_type_id,
         use_timings=(_PLAY_PHASE,),
         target_rule=TargetRule(rated_targets=1),
         use_limit=_UNLIMITED,
-        effects=(),
+        effects=effects,
         final_zone=final_zone,
     )
 
 
-def _self_only(card_type_id: str, *, final_zone: FinalZone = FinalZone.DISCARD) -> CardBehavior:
+def _self_only(
+    card_type_id: str,
+    *,
+    final_zone: FinalZone = FinalZone.DISCARD,
+    effects: tuple[EffectStep, ...] = (),
+    passes_to_next_judge: bool = False,
+) -> CardBehavior:
     """只能指定自己（【无中生有】、装备牌、【闪电】）。"""
     return CardBehavior(
         card_type_id=card_type_id,
         use_timings=(_PLAY_PHASE,),
         target_rule=TargetRule(rated_targets=1, self_only=True),
         use_limit=_UNLIMITED,
-        effects=(),
+        effects=effects,
         final_zone=final_zone,
+        passes_to_next_judge=passes_to_next_judge,
     )
 
 
@@ -260,9 +286,18 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
     "peach_garden": _all_alive("peach_garden", with_self=True),
     "harvest": _all_alive("harvest", with_self=True),
     "nullify": _response("nullify"),
-    # ---- 延时锦囊（判定骨架与后果由票 26 落地）----
-    "indulgence": _one_other("indulgence", final_zone=FinalZone.JUDGE),
-    "lightning": _self_only("lightning", final_zone=FinalZone.JUDGE),
+    # ---- 延时锦囊（判定骨架在票 26；L5 的判定帧由 OPS 回调压出）----
+    "indulgence": _one_other(
+        "indulgence",
+        final_zone=FinalZone.JUDGE,
+        effects=(CallOp("resolve_indulgence"),),
+    ),
+    "lightning": _self_only(
+        "lightning",
+        final_zone=FinalZone.JUDGE,
+        effects=(CallOp("resolve_lightning"),),
+        passes_to_next_judge=True,
+    ),
     # ---- 装备（使用面 = 置入装备区；效果由票 29 / 票 30 落地）----
     "crossbow": _self_only("crossbow", final_zone=FinalZone.EQUIP),
     "qinggang_sword": _self_only("qinggang_sword", final_zone=FinalZone.EQUIP),

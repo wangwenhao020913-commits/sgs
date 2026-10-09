@@ -18,6 +18,9 @@
   执行 Ⅰ.a（弃置死者区域里的牌）再执行 Ⅱ 奖惩；检测点在 `DEATH_REVEAL_IDENTITY_AFTER`，
   只记暂定胜负、不在那里终止（批次关闭由引擎的 DEATH 出栈逻辑宣布）。
 - **RECOVER 帧**（票 21）：L10 两个时机；"确定回复数值"之后把体力写高（夹在上限内）。
+- **JUDGE 帧**（票 26）：L14 三个时机；四步 = 取牌入处理区（复用摸牌原语、沿用 ``shuffle``
+  子流、不算摸牌）→ 改判窗口（真 dispatch、队列恒空）→ 结果 → 判定牌入弃牌堆后调后果 op。
+  帧私有 ``subject`` / ``judge_card`` 与渠道牌 ``card`` 分列（票 10 §1）。
 """
 
 from __future__ import annotations
@@ -28,7 +31,16 @@ from typing import Any, Protocol
 from sgs.data import Identity, Mode
 from sgs.effects import EffectStep, behavior_for, opens_response_window
 from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable
-from sgs.state import CardRef, FrameKind, GameState, QueryKind, UseCard, seats_from
+from sgs.skills import rejudge_capable_seats
+from sgs.state import (
+    CardRef,
+    FrameKind,
+    GameState,
+    QueryKind,
+    UseCard,
+    rejudge_askers,
+    seats_from,
+)
 from sgs.timing import Timing
 
 __all__ = ["RESOLVE_END_PC", "build_steps"]
@@ -49,7 +61,21 @@ class FrameHost(StepHost, Protocol):
 
     def move_used_card_to_processing(self, frame: Frame) -> None: ...
 
+    def move_used_card_to_judge_zone(self, frame: Frame) -> None: ...
+
     def move_processing_card_to_discard(self, frame: Frame) -> None: ...
+
+    def draw_judge_card(self, frame: Frame) -> bool: ...
+
+    def move_judge_card_to_processing(self, frame: Frame) -> None: ...
+
+    def discard_judge_card(self, frame: Frame) -> None: ...
+
+    def apply_judge_after(self, frame: Frame) -> None: ...
+
+    def skip_play_phase(self, seat: int) -> None: ...
+
+    def consume_delayed_card(self, frame: Frame) -> None: ...
 
     def enter_death(self, frame: Frame, seat: int) -> Frame: ...
 
@@ -140,10 +166,26 @@ def use_after_become_target(host: FrameHost, frame: Frame) -> None:
 
 
 def use_push_resolve(host: FrameHost, frame: Frame) -> None:
+    """压入逐目标结算帧；**延时锦囊例外**——它的 L5 推迟到目标角色的判定阶段。
+
+    延时锦囊在**使用当时**只走完 L4 六个时机（票 10 §3.1 / §7）：实体牌置入目标的
+    判定区，L5 的 RESOLVE 帧由判定阶段的回合步骤压出（``_phase_judge``）。故本步只
+    对非延时锦囊压栈，延时锦囊直接落到 ``use_after_end`` 的置入判定区。
+    """
+    if behavior_for(frame.data["card"]).is_delayed:
+        return
     host.push_frame(FrameKind.RESOLVE, dict(frame.data), timing=Timing.RESOLVE_START)
 
 
 def use_after_end(host: FrameHost, frame: Frame) -> None:
+    """实体牌的最终去向 + "使用结算结束后"。
+
+    默认进弃牌堆（M1 语义）；延时锦囊置入目标的**判定区**（票 10 §7），并且**不**在这里
+    发 ``RESOLVE_AFTER_END``——那一步归判定阶段循环（票 10 §3.6）。
+    """
+    if behavior_for(frame.data["card"]).is_delayed:
+        host.move_used_card_to_judge_zone(frame)
+        return
     host.move_processing_card_to_discard(frame)
     _emit(
         host,
@@ -522,6 +564,78 @@ IDENTITY_DEATH_STEPS = (
 """身份局的死亡段：多一段"亮出身份牌前"（票 25 / 决策回票 14 §4）。"""
 
 
+# ---- JUDGE 帧：L14 三个时机 + 取牌 / 后果（票 26 / 决策回票 10）------------
+#
+# 判定是**真帧**，四步（票 10 §1）：
+#   1. ``judge_on``：取牌堆顶一张（复用摸牌原语、沿用 ``shuffle`` 子流、不算摸牌）→
+#      移入处理区（``reason=JUDGE``、归属 = 被判定者）→ **再** dispatch（先落牌后 dispatch，
+#      使 ``JUDGE_ON`` 记录带得出判定牌）；
+#   2. ``judge_before_effect``：改判窗口，真 dispatch；M2 无改判技能 ⇒ 队列恒空、无询问；
+#   3. ``judge_after_effect``：结果（花色 / 点数 / 牌名）由后果 op 直接读帧私有 ``judge_card``；
+#   4. ``judge_finish``：判定结算结束 ⇒ 判定牌 ``PROCESSING→DISCARD``，随后调后果 op。
+#
+# 帧私有 ``data`` 把 **``subject``（被判定者）** 与 **``judge_card``（判定牌）** 与
+# ``card``（渠道牌）**分列**（票 10 §1）：三个判定时机的记录一律 ``actor = subject``，
+# ``cards = (judge_card,)``，故【闪电】伤害的渠道牌永远不会错成判定牌。
+
+
+def _judge_actor(frame: Frame) -> int:
+    return frame.data["subject"]
+
+
+def _judge_cards(frame: Frame) -> tuple[CardRef, ...]:
+    judge_card = frame.data.get("judge_card")
+    return (judge_card,) if judge_card is not None else ()
+
+
+def _emit_judge(host: FrameHost, frame: Frame, timing: Timing) -> None:
+    _emit(host, frame, timing, actor=_judge_actor(frame), cards=_judge_cards(frame))
+
+
+def judge_on(host: FrameHost, frame: Frame) -> None:
+    """取判定牌 → 入处理区 → **再** dispatch ``JUDGE_ON``（票 10 §1 步骤 1）。
+
+    短摸（两堆皆空）⇒ 引擎已判 ``both_decks_empty`` 平局并终止；本步不再落牌、不再 dispatch。
+    """
+    if not host.draw_judge_card(frame):
+        return
+    host.move_judge_card_to_processing(frame)
+    _emit_judge(host, frame, Timing.JUDGE_ON)
+
+
+def judge_before_effect(host: FrameHost, frame: Frame) -> None:
+    """改判窗口：**真 dispatch = 空实现**（保留：dispatch、无询问、无状态变化）。
+
+    不是跳过——跳过会逼 M3 加【鬼才】类技能时改判定骨架（票 03 §4）。响应队列按
+    "当前回合角色起逆时针、每角色一次"建好；M2 有能力者集合为空 ⇒ 队列恒空 ⇒ 不构造
+    任何询问（票 10 §4）。真出现有能力者时，改判询问协议（票 19 的 ``RESPOND``）尚未建立，
+    故 fail-closed 而不是静默丢弃。
+    """
+    _emit_judge(host, frame, Timing.JUDGE_CARD_BEFORE_EFFECT)
+    if rejudge_askers(host.state, rejudge_capable_seats()):
+        raise NotImplementedError("M2 没有改判技能：改判询问协议（票 19 的 RESPOND）属 M3")
+
+
+def judge_after_effect(host: FrameHost, frame: Frame) -> None:
+    """判定牌生效后：结果已是帧私有 ``judge_card`` 的牌面，后果 op 在 ``judge_finish`` 读它。"""
+    _emit_judge(host, frame, Timing.JUDGE_CARD_AFTER_EFFECT)
+
+
+def judge_finish(host: FrameHost, frame: Frame) -> None:
+    """判定结算结束：判定牌入弃牌堆，**随后**调后果 op（票 10 §1 步骤 4）。"""
+    host.discard_judge_card(frame)
+    host.apply_judge_after(frame)
+
+
+JUDGE_STEPS = (
+    Step(judge_on, Timing.JUDGE_ON),
+    Step(judge_before_effect, Timing.JUDGE_CARD_BEFORE_EFFECT),
+    Step(judge_after_effect, Timing.JUDGE_CARD_AFTER_EFFECT),
+    Step(judge_finish, None),
+)
+"""判定帧四步；``judge_finish`` **非 dispatch**（入弃牌堆是动作，没有对应时机节点）。"""
+
+
 # ---- RECOVER 帧：L10 两个时机 ----------------------------------------------
 
 
@@ -566,4 +680,5 @@ def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
         FrameKind.NEAR_DEATH: NEAR_DEATH_STEPS,
         FrameKind.DEATH: IDENTITY_DEATH_STEPS if mode is Mode.IDENTITY else DEATH_STEPS,
         FrameKind.RECOVER: RECOVER_STEPS,
+        FrameKind.JUDGE: JUDGE_STEPS,
     }
