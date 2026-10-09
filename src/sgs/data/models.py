@@ -18,11 +18,13 @@ __all__ = [
     "DEFAULT_SLOT_LIMIT",
     "Category",
     "CardType",
+    "Color",
     "ContentPack",
     "Deck",
     "DeckCard",
     "DeckExpect",
     "Suit",
+    "color_of_suit",
 ]
 
 DEFAULT_SLOT_LIMIT = 2
@@ -44,6 +46,38 @@ class Suit(str, Enum):
     DIAMOND = "diamond"
     SPADE = "spade"
     CLUB = "club"
+
+
+class Color(str, Enum):
+    """牌的**颜色**（票 12 §Q4 的取值表）：由花色派生，是【仁王盾】一类效果的判据。
+
+    无色（``None``）在 M2 只会由**转化牌 / 虚拟牌**产生（票 30）；实体牌恒有颜色。
+    真源是花色到颜色的映射（:func:`color_of_suit`），故没有第二份可漂移的数据。
+    """
+
+    RED = "red"
+    BLACK = "black"
+
+
+_RED_SUITS = frozenset({Suit.HEART, Suit.DIAMOND})
+_BLACK_SUITS = frozenset({Suit.SPADE, Suit.CLUB})
+
+
+def color_of_suit(suit: Suit | str) -> Color | None:
+    """由花色派生颜色；未知花色返回 ``None``（fail-open 到"无色"，不做静默猜测）。
+
+    接受 ``Suit`` 或它的字符串值：``CardRef.suit`` 是字符串（记录面形状），判定后果与
+    装备效果都经本函数解析，故两处不会各自重抄 ``"heart"`` 字面量。
+    """
+    try:
+        resolved = Suit(suit)
+    except ValueError:
+        return None
+    if resolved in _RED_SUITS:
+        return Color.RED
+    if resolved in _BLACK_SUITS:
+        return Color.BLACK
+    return None  # pragma: no cover - Suit 是闭集，本条只为全函数性保留
 
 
 class Category(str, Enum):

@@ -41,6 +41,7 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .behaviors import CardBehavior, TargetCount, UseContext, behavior_for
+from .modifiers import ModifierContext, ModifierPoint, ModifierRole, apply_modifiers
 
 __all__ = [
     "EFFECTIVENESS",
@@ -54,6 +55,7 @@ __all__ = [
     "distance",
     "hand_limit",
     "legal_actions_for",
+    "seat_distance",
     "target_is_effective",
     "targets_within_attack_range",
 ]
@@ -74,11 +76,31 @@ def discard_count(player: Player) -> int:
 
 
 def distance(state: GameState, a: int, b: int) -> int:
-    """座位环距离：两个方向各数**中间存活角色数**，取较小者 **+ 1**（票 07 §4）。
+    """距离：**座位距离 + 目标 +1 坐骑数 − 自身 −1 坐骑数**（下限 1、自身 0）。
 
-    官方把阵亡角色从距离里排除，故中间的死人不计数；1v1 恒为 1。
+    官方一手口径（`A/glossary_value.txt:53-57`）：先"数绿色小箭头"得**座位距离**
+    （两个方向上**严格位于两者之间的存活角色数**取小者 + 1）；坐骑只改"能不能够到"，
+    +1 坐骑（防御马）令别人到你 +1、−1 坐骑（进攻马）令你到别人 −1（`R:745-749`）。
+    下限 1 在管道之后夹住，自身恒 0（票 12 §1 的公式，`tests/test_use_and_resolve.py`
+    的断言逐条保留）。
+
+    两个方向的合成天然多来源（+1 属客体、−1 属主体、可能分属不同角色），故坐骑走
+    :data:`~sgs.skills.ModifierPoint.DISTANCE` 的**链式管道**，主语 / 客体靠
+    ``ctx.subject`` / ``ctx.target`` 分列。
+    """
+    if a == b:
+        return 0
+    base = seat_distance(state, a, b)
+    ctx = ModifierContext(subject=a, target=b, role=ModifierRole.TARGET)
+    return max(apply_modifiers(ModifierPoint.DISTANCE, state, ctx, base), 1)
+
+
+def seat_distance(state: GameState, a: int, b: int) -> int:
+    """**座位距离**：两个方向上严格位于两者之间的存活角色数取小 + 1（官方"数绿色小箭头"）。
+
     读取走**只读座位环真源**（票 23）：在座位环上取两方向的最短步数（只数存活者），
     与"数两方向中间的存活者再 +1"逐值相同（座位环上两方向中间的存活者数 = 步数 − 1）。
+    相邻两人中间 0 人 ⇒ 1；死者只让左右"挨近"，不把环当顶点集重新计步（票 12 §1 的更正）。
     """
     if a == b:
         return 0
@@ -114,29 +136,48 @@ def _counting_distance(state: GameState, a: int, b: int) -> int:
 
 
 def attack_range(state: GameState, seat: int) -> int:
-    """额定攻击范围：未装备武器 = 1（M1 无装备，恒 1）——**真写的函数**，不是常量。"""
-    del state, seat
+    """额定攻击范围：无武器 = 1，否则取武器牌的 ``attack_range``（票 12 §1 的公式）。
+
+    **不走 ``DISTANCE`` 挂点**（票 12 §Q22）：坐骑改的是座位距离、武器改的是攻击范围，
+    两张表各自只有一个写入者。攻击范围是**牌面事实**，实例化时已派生进 ``CardRef``，
+    故本函数真读武器牌而不必回头拿 ``ContentPack``。合法性 = ``距离 ≤ 攻击范围``，
+    属 L3 非时机（在 :func:`check_targets` 里读）。
+    """
+    for card_id in state.player(seat).equip:
+        card = state.card(card_id)
+        if card.slot is SlotKind.WEAPON:
+            return card.attack_range if card.attack_range is not None else 1
     return 1
 
 
 def check_forbidden(state: GameState, seat: int, card: CardRef) -> bool:
     """L3.1 ``USE_CHECK_FORBIDDEN``：``True`` = 禁止使用。
 
-    M1 没有"禁止使用"类效果，故恒 ``False``；函数保留（票 07 §4），
-    M2 引入【空城】类技能时在函数体内长出来，而不是在候选生成器里加分支。
+    M2 没有"禁止使用"类效果（装备效果全部落在修饰器 / 钩子 / 接缝三层），故恒 ``False``；
+    函数保留（票 07 §4），**M3 技能长在这里**，而不是在候选生成器里加分支（票 12 §Q7）。
     """
     del state, seat, card
     return False
 
 
 def check_count(state: GameState, seat: int, card: CardRef) -> bool:
-    """L3.2 ``USE_CHECK_COUNT``：``True`` = 已超过本回合次数上限。"""
+    """L3.2 ``USE_CHECK_COUNT``：``True`` = 已超过本回合次数上限。
+
+    额定上限先过 :data:`~sgs.skills.ModifierPoint.COUNT_LIMIT` 链：【诸葛连弩】把
+    【杀】的上限改成"无限"（``None``）；``extra`` 是牌面给的额外额度，链后相加。
+    """
     behavior = behavior_for(card)
     limit = behavior.use_limit
-    if limit.rated is None:
+    rated = apply_modifiers(
+        ModifierPoint.COUNT_LIMIT,
+        state,
+        ModifierContext(subject=seat, card=card),
+        limit.rated,
+    )
+    if rated is None:
         return False
     used = state.player(seat).card_use_counts.get(card.type, 0)
-    return used >= limit.rated + limit.extra
+    return used >= rated + limit.extra
 
 
 def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]:
@@ -188,7 +229,17 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
             TARGET_FILTERS[name](state, seat, target) for name in behavior.target_filters
         )
     ]
-    return tuple(pool)
+    # 第 0 层定集合之后过 TARGET_POOL 链（票 07 §3 的挂点）：M2 的【方天画戟】在此不改池
+    # （额定与额外目标的合法性检测标准相同，`A/flow_condition.txt:46`），M3 的"标准不同"
+    # 类效果从这里分叉。无修饰器时原样返回，故 M1 的候选逐字节不变。
+    return tuple(
+        apply_modifiers(
+            ModifierPoint.TARGET_POOL,
+            state,
+            ModifierContext(subject=seat, card=card),
+            tuple(pool),
+        )
+    )
 
 
 def target_is_effective(state: GameState, card: CardRef, source: int, target: int) -> bool:
@@ -196,10 +247,25 @@ def target_is_effective(state: GameState, card: CardRef, source: int, target: in
 
     ``True`` = 此牌对该目标有效、继续 C2–C5；``False`` = 终止对该目标的结算（故**不开**
     C2 的无懈窗口）。谓词全部内联在 :data:`EFFECTIVENESS` 的回调里（票 07 §4）；
-    M2 的生产者只有【桃园结义】"对未受伤的角色无效"。
+    M2 的生产者有两类：【桃园结义】"对未受伤的角色无效"（牌面谓词）与装备侧的
+    :data:`~sgs.skills.ModifierPoint.EFFECTIVENESS` 链（【仁王盾】"黑色【杀】对你无效"）。
     """
     behavior = behavior_for(card)
-    return all(EFFECTIVENESS[name](state, source, target) for name in behavior.effectiveness)
+    if not all(EFFECTIVENESS[name](state, source, target) for name in behavior.effectiveness):
+        return False
+    return bool(
+        apply_modifiers(
+            ModifierPoint.EFFECTIVENESS,
+            state,
+            ModifierContext(
+                subject=source,
+                target=target,
+                role=ModifierRole.TARGET,
+                card=card,
+            ),
+            True,
+        )
+    )
 
 
 def targets_within_attack_range(state: GameState, seat: int) -> tuple[int, ...]:
@@ -320,7 +386,13 @@ def legal_actions_for(
 
 
 def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
-    """出牌阶段：逐张开出可用牌 × 每个合法目标组合，最后是结束阶段。"""
+    """出牌阶段：逐张开出可用牌 × 每个合法目标组合，最后是结束阶段。
+
+    每张牌的额定组合生成后过 :data:`~sgs.skills.ModifierPoint.CANDIDATES` 链，让装备
+    技能**追加**候选（【方天画戟】的"额定 1 + 额外 k"组合）；回调只追加、不排序，
+    全表仍由 :func:`legal_actions_for` 按票 05 的稳定键统一排序，故"候选与校验同源"
+    不被打破。
+    """
     actions: list[Action] = []
     for card in _usable_hand(state, seat, UseContext.PLAY_PHASE):
         if check_count(state, seat, card):
@@ -332,8 +404,19 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
             # 空池的"全体存活"牌（唯一存活者）没有合法候选；M1 的额定牌由
             # ``combinations(pool, 1)`` 自然为空，这里只补上零目标那档。
             continue
-        for combo in combinations(pool, count):
-            actions.append(UseCard(card=card, targets=tuple(combo), answers_seq=answers_seq))
+        generated: tuple[Action, ...] = tuple(
+            UseCard(card=card, targets=tuple(combo), answers_seq=answers_seq)
+            for combo in combinations(pool, count)
+        )
+        ctx = ModifierContext(
+            subject=seat,
+            card=card,
+            pool=tuple(pool),
+            rated_targets=count,
+        )
+        actions.extend(
+            apply_modifiers(ModifierPoint.CANDIDATES, state, ctx, generated)
+        )
     actions.append(EndPhase(answers_seq=answers_seq))
     return actions
 

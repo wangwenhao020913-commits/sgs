@@ -54,6 +54,9 @@ class CardRef(_FrozenModel):
     ``card_id`` 是机器键；牌面（牌名 / 花色 / 点数）是渲染所需的事实，不是表现文本。
     ``slot`` 是装备槽位这一**牌面事实**（票 08 §2）：由 ``CardType.subcategory`` 在实例化时
     一次派生，使移动原语不必拿到 ``ContentPack``。非装备牌恒为 ``None``。
+    ``attack_range`` 同为**牌面事实**（票 09 §6 / 票 12 §1）：由 ``CardType.attack_range``
+    在实例化时一次派生，使 ``attack_range()`` 真读武器牌而不必回头拿内容包；非武器恒为
+    ``None``。两者都是"渲染 / 校验要读的事实"，不是行为字段。
     """
 
     card_id: int
@@ -62,6 +65,7 @@ class CardRef(_FrozenModel):
     suit: str
     rank: int
     slot: SlotKind | None = None
+    attack_range: int | None = None
 
 
 class Zone(str, Enum):

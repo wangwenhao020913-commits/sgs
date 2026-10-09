@@ -755,6 +755,34 @@ class Engine:
             owner=frame.data["source"],
         )
 
+    def move_used_card_to_equip_zone(self, frame: Frame) -> None:
+        """处理区 → 装备区（``reason = PUT``）；同槽已有牌则先被"顶替"出去。
+
+        替换 = **顶替**（票 12 §Q3）：新牌 ``PUT`` 入槽、旧牌 ``LOSE`` 入弃牌堆
+        （**不算弃置**，故 M3 的【枭姬】/【旋风】类"失去装备"仍能被触发）。一般"置入"
+        撞已占槽位由 :func:`~sgs.effects.move_card` 的编程错误兜底直接抛，只有"使用装备牌"
+        这条路径能替换，故两条移动的次序必须是**先旧后新**——先 ``PUT`` 新牌会立刻撞上
+        那条兜底（"先新后旧"是票 12 §Q3 自己撤销掉的提案）。
+        """
+        card = frame.data["card"]
+        seat = frame.data["source"]
+        for card_id in list(self.state.player(seat).equip):
+            if self.state.card(card_id).slot is card.slot:
+                self.move_in_frame(
+                    frame,
+                    (self.state.card(card_id),),
+                    to_zone=ZoneRef(Zone.DISCARD),
+                    reason=MoveReason.LOSE,
+                    owner=seat,
+                )
+        self.move_in_frame(
+            frame,
+            (card,),
+            to_zone=ZoneRef(Zone.EQUIP, seat),
+            reason=MoveReason.PUT,
+            owner=seat,
+        )
+
     # -- 打出帧（票 27）：手牌 → 处理区 → 弃牌堆 --------------------------------
 
     def move_played_card_to_processing(self, frame: Frame) -> None:
@@ -1741,13 +1769,15 @@ def instantiate_cards(pack: ContentPack) -> tuple[CardRef, ...]:
 
     牌实例的 id 在开局一次分配、随洗牌一起走；行为字段不在其中（归 ``effects``）。
     装备槽位是**牌面事实**：在实例化时由 ``CardType.subcategory`` 一次派生，
-    使移动原语不必拿到 ``ContentPack``（票 08 §2）。
+    使移动原语不必拿到 ``ContentPack``（票 08 §2）。攻击范围同姿态（票 12 §1）：
+    由 ``CardType.attack_range`` 派生，使 ``attack_range()`` 真读武器牌。
     """
     slots = {
         card_type.id: _SLOT_BY_SUBCATEGORY.get(card_type.subcategory)
         for card_type in pack.card_types
     }
     names = {card_type.id: card_type.name for card_type in pack.card_types}
+    ranges = {card_type.id: card_type.attack_range for card_type in pack.card_types}
     return tuple(
         CardRef(
             card_id=index,
@@ -1756,6 +1786,7 @@ def instantiate_cards(pack: ContentPack) -> tuple[CardRef, ...]:
             suit=deck_card.suit.value,
             rank=deck_card.rank,
             slot=slots[deck_card.type],
+            attack_range=ranges[deck_card.type],
         )
         for index, deck_card in enumerate(pack.deck.cards)
     )

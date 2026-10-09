@@ -36,6 +36,7 @@ from sgs.data import Identity, Mode
 from sgs.effects import (
     NULLIFY_RESPONSE_CARD,
     EffectStep,
+    FinalZone,
     ResponseWindow,
     behavior_for,
     target_is_effective,
@@ -78,6 +79,8 @@ class FrameHost(StepHost, Protocol):
     def move_used_card_to_processing(self, frame: Frame) -> None: ...
 
     def move_used_card_to_judge_zone(self, frame: Frame) -> None: ...
+
+    def move_used_card_to_equip_zone(self, frame: Frame) -> None: ...
 
     def move_processing_card_to_discard(self, frame: Frame) -> None: ...
 
@@ -267,14 +270,19 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
     """实体牌的最终去向 + "使用结算结束后"。
 
     默认进弃牌堆（M1 语义）；延时锦囊置入目标的**判定区**（票 10 §7），并且**不**在这里
-    发 ``RESOLVE_AFTER_END``——那一步归判定阶段循环（票 10 §3.6）。票 27 在这里补跑
-    本牌的 ``timing_ops``（【五谷丰登】把亮牌中剩余的牌置入弃牌堆）。
+    发 ``RESOLVE_AFTER_END``——那一步归判定阶段循环（票 10 §3.6）；装备牌**留装备区**
+    （``final_zone = EQUIP``，票 12 §2）：同槽已有牌则先被"顶替"出去（``LOSE``，不算弃置）。
+    票 27 在这里补跑本牌的 ``timing_ops``（【五谷丰登】把亮牌中剩余的牌置入弃牌堆）。
     """
-    if behavior_for(frame.data["card"]).is_delayed:
+    behavior = behavior_for(frame.data["card"])
+    if behavior.is_delayed:
         host.move_used_card_to_judge_zone(frame)
         return None
     if not frame.data.get("after_end_done"):
-        host.move_processing_card_to_discard(frame)
+        if behavior.final_zone is FinalZone.EQUIP:
+            host.move_used_card_to_equip_zone(frame)
+        else:
+            host.move_processing_card_to_discard(frame)
         _emit(
             host,
             frame,

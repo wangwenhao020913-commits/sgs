@@ -1,6 +1,12 @@
-"""效果原语与牌行为表。
+"""效果原语、牌行为表与修饰器管道的词汇 / 派发。
 
 公开接口只在此再导出，外部不得 import 本子包的深层路径。
+
+**修饰器管道为什么住这一层**（票 07 §3 / 施工票 29）：五个挂点都由本层的规则函数直接读
+（`check_count` / `check_targets` / `distance` / `target_is_effective` / `_play_phase`），
+故 `ModifierPoint` / `ModifierContext` / `Modifier` / `apply_modifiers` 住下层；
+技能**定义**（`SkillDef` / `Hook` / `CATALOG`）住 `skills`，方向是 `skills → effects`
+（`开发文档/01` §5）。`apply_modifiers` 读目录是延迟的跨层只读，不建立反向模块依赖。
 """
 
 from .actions import (
@@ -15,6 +21,7 @@ from .actions import (
     distance,
     hand_limit,
     legal_actions_for,
+    seat_distance,
     target_is_effective,
     targets_within_attack_range,
 )
@@ -34,6 +41,16 @@ from .behaviors import (
     UseLimit,
     UseTiming,
     behavior_for,
+)
+from .modifiers import (
+    CarrierKind,
+    Modifier,
+    ModifierContext,
+    ModifierPoint,
+    ModifierRole,
+    PriorityClass,
+    apply_modifiers,
+    priority_class_of,
 )
 from .ops import OPS
 from .primitives import (
@@ -56,11 +73,17 @@ __all__ = (
     "TARGET_FILTERS",
     "CallOp",
     "CardBehavior",
+    "CarrierKind",
     "DamageNature",
     "DrawResult",
     "EffectContext",
     "EffectStep",
     "FinalZone",
+    "Modifier",
+    "ModifierContext",
+    "ModifierPoint",
+    "ModifierRole",
+    "PriorityClass",
     "PushFrame",
     "Randomness",
     "ResponseWindow",
@@ -70,6 +93,7 @@ __all__ = (
     "UseLimit",
     "UseTiming",
     "apply_hp",
+    "apply_modifiers",
     "attack_range",
     "behavior_for",
     "check_count",
@@ -83,6 +107,8 @@ __all__ = (
     "legal_actions_for",
     "locate",
     "move_card",
+    "priority_class_of",
+    "seat_distance",
     "substitute_judge_card",
     "swap_judge_card",
     "target_is_effective",
