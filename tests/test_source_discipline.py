@@ -12,6 +12,9 @@
 4. ``state`` 子包的 **pydantic 模型字段**里没有 ``set`` / ``frozenset``
    （``dict`` 自 3.7 起插入序有语言保证，故不在禁止之列）。
 
+此外 §5 是"技能逻辑不进主干"；§6 是本文件里的**另一条纪律**——**档位纪律**：
+它扫 ``tests/`` 而非源码树，是 ``GLOSSARY.md`` 里与**源码纪律扫描**并列的独立术语（retro 票 03）。
+
 跨 ``PYTHONHASHSEED`` 的**实测**判决在 ``tests/test_determinism.py``；本文件是它的静态主力闸：
 两者一静一动，都不可被"恰好没出问题"替代。
 """
@@ -21,7 +24,7 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, get_args, get_origin
+from typing import Any, NamedTuple, get_args, get_origin
 
 from pydantic import BaseModel
 
@@ -271,3 +274,145 @@ def test_every_behavior_call_op_is_registered():
         if isinstance(step, CallOp) and step.op not in OPS
     ]
     assert not missing, f"行为表引用了未登记的 op：{missing}"
+
+
+# ---------------------------------------------------------------------------
+# 6. 档位纪律：测试模块的牌堆档位必须显式（GLOSSARY『档位纪律』；retro 票 03）
+# ---------------------------------------------------------------------------
+
+TESTS_ROOT = Path(__file__).resolve().parent
+"""被测树 = ``tests/`` 自身（票 32 的默认档事故就发生在这一层）。"""
+
+DECK_PROFILE_EXEMPT = frozenset({Path("data/test_load_validation.py")})
+"""豁免名单：``test_load_validation.py`` **故意**验证"未指定档位 = 产品默认档"（票 32 §1）。
+它当前的裸 ``load_content_pack()`` 都在函数体内（本规则本就不扫），保留豁免是为它日后把
+``PACK = load_content_pack()`` 提成模块常量时仍合法——豁免要有名单，不能靠"刚好没触发"。"""
+
+DECK_PROFILE_FIX_HINT = "显式选档（M1 回归网 basic_53 / M2 standard_108）"
+"""失败消息里的修法提示：两档即票 32 划定的 M1 回归网与产品默认档。"""
+
+
+class _PackLoad(NamedTuple):
+    """一条模块作用域的 ``PACK* = load_content_pack(...)``：文件、变量名、调用节点。"""
+
+    path: Path
+    name: str
+    call: ast.Call
+
+
+def _test_source_files() -> list[Path]:
+    return sorted(TESTS_ROOT.rglob("*.py"))
+
+
+def _module_scope_nodes(node: ast.AST) -> Iterator[ast.AST]:
+    """模块作用域内的节点：不下潜进函数 / 类 / lambda 的新作用域。
+
+    ``if`` / ``try`` / ``with`` 里的赋值仍算模块级（导入时照跑），只是缩进更深。
+    """
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        yield child
+        yield from _module_scope_nodes(child)
+
+
+def _is_load_content_pack_callee(func: ast.expr) -> bool:
+    """``load_content_pack(...)`` 或 ``模块.load_content_pack(...)``。
+
+    改名导入（``from sgs.data import load_content_pack as lcp``）是这条 AST 判据的已知盲区：
+    票面只认 ``load_content_pack()`` 字面，改名绕道交给评审兜底。
+    """
+    if isinstance(func, ast.Name):
+        return func.id == "load_content_pack"
+    return isinstance(func, ast.Attribute) and func.attr == "load_content_pack"
+
+
+def _module_level_pack_loads(tree: ast.Module) -> Iterator[tuple[str, ast.Call]]:
+    """模块作用域里 ``PACK* = load_content_pack(...)`` 的 ``(变量名, 调用节点)``。
+
+    ``Assign`` 与 ``AnnAssign``（``PACK: Final[...] = ...``）都算；函数体里的
+    ``pack = load_content_pack(...)`` 是局部显式选择，不是会静默跟随默认档的模块常量。
+    """
+    for node in _module_scope_nodes(tree):
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if not isinstance(value, ast.Call) or not _is_load_content_pack_callee(value.func):
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id.startswith("PACK"):
+                yield target.id, value
+
+
+def _chooses_deck_profile(call: ast.Call) -> bool:
+    """调用是否显式带了 ``deck_profile=`` 关键字（``**kwargs`` 不算显式）。"""
+    return any(keyword.arg == "deck_profile" for keyword in call.keywords)
+
+
+def _pack_loads_in(path: Path) -> list[_PackLoad]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return [_PackLoad(path, name, call) for name, call in _module_level_pack_loads(tree)]
+
+
+def _pack_load_violations(root: Path, exempt: frozenset[Path] = frozenset()) -> list[str]:
+    """扫一棵测试树，返回"模块级 PACK 未显式选档"的违规描述（空列表 = 通过）。
+
+    ``exempt`` 是按 ``root`` 相对路径的豁免名单。
+    """
+    return [
+        f"{path.relative_to(root)}:{load.call.lineno} 模块级 {load.name} = load_content_pack(...) "
+        f"未显式选档；{DECK_PROFILE_FIX_HINT}"
+        for path in sorted(root.rglob("*.py"))
+        if path.relative_to(root) not in exempt
+        for load in _pack_loads_in(path)
+        if not _chooses_deck_profile(load.call)
+    ]
+
+
+def test_module_level_pack_loads_choose_a_deck_profile_explicitly():
+    """裸 ``PACK = load_content_pack()`` 会静默跟随产品默认档——票 32 一次翻档踩过 12 个文件。"""
+    offenders = _pack_load_violations(TESTS_ROOT, DECK_PROFILE_EXEMPT)
+
+    assert not offenders, "测试模块默认档会静默跟随产品默认档：" + "；".join(offenders)
+
+
+def test_the_deck_profile_scan_goes_red_on_a_bare_pack_assignment(tmp_path):
+    """合成反例：在临时测试树上，模块级裸赋值（含注解 / 属性调用 / ``if`` 块内）必红，
+    显式档位与函数内局部赋值必绿，豁免名单照常生效——判的是文件级扫描的接线，不只判单个字符串。
+    """
+    sources = {
+        "bare.py": "PACK = load_content_pack()\n",
+        "annotated.py": "PACK: Final[ContentPack] = load_content_pack()\n",
+        "attribute.py": "PACK = sgs.load_content_pack()\n",
+        "scoped.py": "if True:\n    PACK = load_content_pack()\n",
+        "explicit.py": 'PACK = load_content_pack(deck_profile="basic_53")\n',
+        "local.py": "def f():\n    pack = load_content_pack()\n",
+    }
+    for name, text in sources.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+
+    reds = "\n".join(_pack_load_violations(tmp_path))
+
+    for red in ("bare.py", "annotated.py", "attribute.py", "scoped.py"):
+        assert red in reds, f"{red} 的模块级裸赋值应被判红：{reds}"
+    for green in ("explicit.py", "local.py"):
+        assert green not in reds, f"{green} 不该被判红：{reds}"
+    exempt = frozenset(
+        Path(name) for name in ("bare.py", "annotated.py", "attribute.py", "scoped.py")
+    )
+    assert not _pack_load_violations(tmp_path, exempt), "豁免名单应让这些文件整体放行"
+
+
+def test_the_deck_profile_scan_actually_covered_the_test_tree():
+    """防"扫描目标写错 / AST 判据失效 ⇒ 空转也算通过"。"""
+    files = _test_source_files()
+    loads = [load for path in files for load in _pack_loads_in(path)]
+    explicit = [load for load in loads if _chooses_deck_profile(load.call)]
+
+    assert len(files) >= 20, f"只扫到 {len(files)} 个测试文件；TESTS_ROOT 可能指错了"
+    assert len(explicit) >= 10, f"只认出 {len(explicit)} 个显式选档；AST 判据可能失效了"
+    for relative in DECK_PROFILE_EXEMPT:
+        assert (TESTS_ROOT / relative).is_file(), f"豁免名单里的文件不存在：{relative}"
