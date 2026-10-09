@@ -28,6 +28,7 @@ from sgs.state import (
     Player,
     QueryKind,
     UseCard,
+    alive_seats,
 )
 from sgs.timing import Timing
 
@@ -60,12 +61,29 @@ def discard_count(player: Player) -> int:
 
 
 def distance(state: GameState, a: int, b: int) -> int:
-    """座位环距离：两方向各数**中间存活角色数**，取较小者 **+ 1**（票 07 §4）。
+    """座位环距离：两个方向各数**中间存活角色数**，取较小者 **+ 1**（票 07 §4）。
 
     官方把阵亡角色从距离里排除，故中间的死人不计数；1v1 恒为 1。
+    读取走**只读座位环真源**（票 23）：在座位环上取两方向的最短步数（只数存活者），
+    与"数两方向中间的存活者再 +1"逐值相同（座位环上两方向中间的存活者数 = 步数 − 1）。
+    """
+    if a == b:
+        return 0
+    ring = alive_seats(state)
+    if a in ring and b in ring:
+        count = len(ring)
+        forward = (ring.index(b) - ring.index(a)) % count
+        return min(forward, count - forward)
+    return _counting_distance(state, a, b)
+
+
+def _counting_distance(state: GameState, a: int, b: int) -> int:
+    """任一端不是存活者时的退化读法（引擎不可达：候选池只含存活者）。
+
+    保留原"数两方向中间的存活者"公式，使函数对任意座位仍是全函数。
     """
     count = len(state.players)
-    if count == 0 or a == b:
+    if count == 0:
         return 0
     forward = 0
     seat = (a + 1) % count

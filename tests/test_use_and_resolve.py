@@ -31,7 +31,7 @@ from sgs.effects import (
 )
 from sgs.engine import Engine
 from sgs.resolution import Step
-from sgs.state import EndPhase, FrameKind, Pass, QueryKind, UseCard
+from sgs.state import EndPhase, FrameKind, Pass, QueryKind, UseCard, alive_seats
 from sgs.timing import FORBIDDEN_TIMING_NAMES, Timing
 
 from support import SeatSpec, build_state, cards_of_type, run_until
@@ -65,6 +65,20 @@ def test_distance_counts_living_seats_between_on_the_ring():
 
     state.player(1).alive = False
     assert distance(state, 0, 2) == 1, "死人之间的距离不计（官方：只数存活角色）"
+
+
+def test_distance_reads_the_survivor_ring_with_two_dead_seats():
+    """票 23：距离改读只读座位环真源；7 人两死者下逐值等于"数中间存活者 +1"。"""
+    state = _state(seats=7)
+    state.player(1).alive = False
+    state.player(4).alive = False
+
+    assert alive_seats(state) == (0, 2, 3, 5, 6)
+    assert distance(state, 0, 3) == 2
+    assert distance(state, 0, 5) == 2
+    assert distance(state, 0, 6) == 1
+    assert distance(state, 3, 6) == 2
+    assert distance(state, 0, 0) == 0
 
 
 def test_attack_range_is_the_rated_one_without_weapons():

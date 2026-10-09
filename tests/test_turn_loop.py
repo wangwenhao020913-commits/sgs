@@ -166,6 +166,28 @@ def test_the_game_starts_with_the_configured_first_seat():
     assert first_turn.actor == 1
 
 
+def test_turn_rotation_walks_the_survivor_ring_and_skips_the_dead():
+    """票 23：回合只在存活座位之间轮转（座位环真源），死者不占回合。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(alive=False), SeatSpec(), SeatSpec()],
+        deck=tuple(range(40)),
+        turn_seat=0,
+        phase=Phase.PREPARE,
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    run_turns(engine, [RecordingPlayer() for _ in range(4)], turns=3)
+
+    starts = [
+        record.actor
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.TURN_START
+    ]
+    assert starts[:4] == [0, 2, 3, 0], "座位 1 阵亡 ⇒ 轮转 0 → 2 → 3 → 0（绕过死者）"
+    assert 1 not in starts
+
+
 def _first_turn_after_end(engine) -> int:
     """第一个回合结束后的下一条记录序号（用作"本回合"的右开区间）。"""
     for record in engine.records:

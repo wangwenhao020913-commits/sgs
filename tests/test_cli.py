@@ -33,6 +33,33 @@ def test_seed_may_be_omitted():
     assert main([]) == 0
 
 
+def test_players_defaults_to_two(capsys):
+    assert main(["--seed", "7"]) == 0
+
+    header = capsys.readouterr().out.splitlines()[1]
+    assert "'player_count': 2" in header, "省略 --players 时必须仍是 2 人局"
+
+
+@pytest.mark.parametrize("count", [2, 4, 5, 6, 7, 8])
+def test_each_supported_seat_count_runs_a_whole_game(count, capsys):
+    """票 23：命令行接受 2/4/5/6/7/8，且每档都真的跑到 `game_end`。"""
+    assert main(["--seed", "7", "--players", str(count)]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert f"'player_count': {count}" in lines[1]
+    assert "终局" in lines[-1], f"{count} 人局必须跑到终局"
+
+
+@pytest.mark.parametrize("count", ["0", "1", "3", "9"])
+def test_an_unsupported_seat_count_reports_to_stderr_and_exits_1(count, capsys):
+    assert main(["--players", count]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "人数非法" in captured.err
+    assert "player_count" in captured.err
+
+
 def test_unknown_option_is_rejected():
     with pytest.raises(SystemExit):
         main(["--nope"])
@@ -163,6 +190,16 @@ def test_seed_outside_the_64_bit_range_is_rejected(capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "种子必须落在" in captured.err
+
+
+def test_unsupported_player_count_exit_code_in_subprocess():
+    """票 23：非法人数跨进程也是退出码 1 + stderr 报告（3 人仍加载失败）。"""
+    result = _run(sys.executable, "-m", "sgs", "--players", "3")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "人数非法" in result.stderr
+    assert "player_count" in result.stderr
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,8 @@
 """命令行门面：跑一局、打印人类可读的**全知**记录流、退出码 0。
 
-M1 的参数只有 ``--seed``（票 02 §2）；省略时按票 08 现生成 64 位种子、写进 header
-并在 stdout 打印，事后可原样重跑。坏数据与非法行动都走 stderr + 退出码 1。
+参数有 ``--seed``（票 02 §2）与 ``--players``（票 23：2/4/5/6/7/8、默认 2）。
+种子省略时按票 08 现生成 64 位种子、写进 header 并在 stdout 打印，事后可原样重跑。
+坏数据、非法人数与非法行动都走 stderr + 退出码 1。
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import sys
 from collections.abc import Sequence
 
 from sgs.agents import RandomPlayer
-from sgs.data import DataLoadError, RuleConfig, load_content_pack
+from sgs.data import DataLoadError, load_content_pack, validate_rule_config
 from sgs.engine import (
     Engine,
     IllegalActionError,
@@ -36,7 +37,21 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="随机种子；省略时现生成一个 64 位种子。",
     )
+    parser.add_argument(
+        "--players",
+        type=int,
+        default=2,
+        help="座位数：2/4/5/6/7/8；默认 2（2 人局是无身份 1v1）。",
+    )
     args = parser.parse_args(argv)
+
+    # 人数值域只在规则配置里有第二份；这里直接用它的加载期校验，不再抄一遍 2/4/5/6/7/8。
+    try:
+        rule_config = validate_rule_config({"player_count": args.players})
+    except DataLoadError as error:
+        details = "；".join(f"{item.loc} {item.got}" for item in error.errors)
+        print(f"人数非法：{details}", file=sys.stderr)
+        return 1
 
     seed = args.seed if args.seed is not None else new_seed()
     # 种子闸门只在唯一随机源里有第二份；这里直接借它的报错，不再抄一遍值域。
@@ -52,7 +67,6 @@ def main(argv: list[str] | None = None) -> int:
         print(error.report(), file=sys.stderr)
         return 1
 
-    rule_config = RuleConfig()
     engine = Engine.new_game(seed=seed, rule_config=rule_config, pack=pack)
     ai_stream = source.substream("ai")
     participants = [RandomPlayer(ai_stream) for _ in range(rule_config.player_count)]

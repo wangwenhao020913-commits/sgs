@@ -37,6 +37,7 @@ from .protocol import (
     UseCard,
     parse_action,
 )
+from .seating import alive_seat_at, alive_seats, next_alive_seat, seats_from
 
 __all__ = (
     "Action",
@@ -65,6 +66,10 @@ __all__ = (
     "UseCard",
     "Zone",
     "ZoneRef",
+    "alive_seat_at",
+    "alive_seats",
+    "next_alive_seat",
     "parse_action",
     "project",
+    "seats_from",
 )

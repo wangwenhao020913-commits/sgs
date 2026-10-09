@@ -23,8 +23,11 @@ class RuleConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    player_count: Literal[2] = 2
-    """模式第一参数；M1 的裁剪只在 2 人下成立，值 3 必须**加载期**失败。"""
+    player_count: Literal[2, 4, 5, 6, 7, 8] = 2
+    """模式第一参数；值域 = 2（无身份 1v1）与 4~8（身份局座位数）。
+
+    3 不在值域内，故**加载期**失败（票 13 §1：模式由座位数派生，没有 3 人配置）。
+    """
 
     starting_hand_size: int = Field(default=4, ge=1)
     """起始手牌张数（票 13 §2：模式级配置项，不写死在引擎里）。"""

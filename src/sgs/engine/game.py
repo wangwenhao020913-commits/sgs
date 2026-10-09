@@ -49,6 +49,7 @@ from sgs.state import (
     SlotKind,
     Zone,
     ZoneRef,
+    next_alive_seat,
     parse_action,
     project,
 )
@@ -791,7 +792,11 @@ class Engine:
             self._turn_pc = 0
             self._turn_data.clear()
             if self.state.turn_seat is not None and self.state.players:
-                self.state.turn_seat = (self.state.turn_seat + 1) % len(self.state.players)
+                # 回合只在**存活座位**之间轮转（票 15 §6）；座位环是唯一真源。
+                # 存活 ≤ 1 时终局已抢先，故正常对局必然读到一个存活下家。
+                next_seat = next_alive_seat(self.state, self.state.turn_seat)
+                if next_seat is not None:
+                    self.state.turn_seat = next_seat
 
     # -- 回合环的每一步 -----------------------------------------------------
 

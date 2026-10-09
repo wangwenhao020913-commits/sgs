@@ -41,3 +41,15 @@ def test_valid_raw_config_is_accepted():
 
     assert config.player_count == 2
     assert config.first_seat == 1
+
+
+@pytest.mark.parametrize("count", [2, 4, 5, 6, 7, 8])
+def test_the_seat_count_domain_is_two_or_four_to_eight(count):
+    """票 23：值域从 ``Literal[2]`` 扩为 2 / 4~8；3 与其余取值仍加载期失败。"""
+    assert validate_rule_config({"player_count": count}).player_count == count
+
+
+@pytest.mark.parametrize("count", [0, 1, 3, 9])
+def test_counts_outside_the_domain_are_rejected(count):
+    with pytest.raises(DataLoadError):
+        validate_rule_config({"player_count": count})

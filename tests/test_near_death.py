@@ -255,6 +255,55 @@ def test_peach_is_asked_one_responder_at_a_time_from_the_turn_seat_counterclockw
     )
 
 
+def test_eight_player_peach_window_has_one_enter_one_exit_and_a_query_per_survivor():
+    """票 23：8 人求桃的记录流 = 进入 ×1 → 询问与应答 ×N → 结束，N = 存活座位数。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=4, hand=(SLASH[0],)),
+            SeatSpec(hp=1),
+            *[SeatSpec() for _ in range(6)],
+        ],
+        deck=tuple(card_id for card_id in range(len(PACK.deck.cards)) if card_id != SLASH[0]),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    run_turns(engine, [_ScriptedPlayer(seat) for seat in range(8)], turns=1)
+
+    near_death = next(
+        record
+        for record in engine.records
+        if record.kind == "frame"
+        and record.op == "push"
+        and record.frame_kind is FrameKind.NEAR_DEATH
+    )
+    frame_timings = [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.frame_id == near_death.frame_id
+    ]
+    assert [record.timing.value for record in frame_timings] == list(NEAR_DEATH_TIMINGS), (
+        "进入 / 处于濒死状态时 / 濒死结算结束后 各恰 1 条"
+    )
+
+    at = next(record for record in frame_timings if record.timing is Timing.NEAR_DEATH_AT)
+    after = next(record for record in frame_timings if record.timing is Timing.NEAR_DEATH_AFTER)
+    window = [
+        record
+        for record in engine.records
+        if isinstance(getattr(record, "seq", None), int) and at.seq < record.seq < after.seq
+    ]
+
+    assert [record.kind for record in window] == ["query", "action"] * 8, (
+        "每个存活者一次询问 + 一次应答，别的记录不许插进来"
+    )
+    assert [record.query.actor for record in window if record.kind == "query"] == list(range(8)), (
+        "起点 = 当前回合角色（座位 0），逆时针绕整圈、终点 = 其上家（座位 7）"
+    )
+    assert all(record.accepted for record in window if record.kind == "action")
+    assert [record.query.dying for record in window if record.kind == "query"] == [1] * 8
+
+
 def test_the_ask_order_starts_from_the_current_turn_seat_not_the_dying_character():
     """回合角色是座位 1、濒死者是座位 0：应答序列从**座位 1** 起，而不是从濒死者起。"""
     state = build_state(

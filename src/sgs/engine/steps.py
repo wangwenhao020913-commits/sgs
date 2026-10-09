@@ -25,7 +25,7 @@ from typing import Any, Protocol
 
 from sgs.effects import EffectStep, behavior_for, opens_response_window
 from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable
-from sgs.state import CardRef, FrameKind, GameState, QueryKind, UseCard
+from sgs.state import CardRef, FrameKind, GameState, QueryKind, UseCard, seats_from
 from sgs.timing import Timing
 
 __all__ = ["RESOLVE_END_PC", "build_steps"]
@@ -416,16 +416,11 @@ def _askers_from(state: GameState, start: int | None, count: int) -> tuple[int, 
     官方把阵亡角色排除在询问之外（``flow_neardeath`` 的"每名角色"读作在场角色）；
     M1 的濒死者此刻仍存活，故它自己也在区间里（官方"濒死角色自己也可以使用【桃】自救"）。
     ``start`` 为 ``None``（回合外）时退化为座位 0 起——M1 走不到，保留结构。
+
+    读取走**只读座位环真源**（票 23）：``start`` = 当前回合角色、``count`` = 座位总数时，
+    区间恰是"绕整圈、终点为其上家"；位置与签名保持不变（票 15 §7 / 票 20）。
     """
-    if count <= 0:
-        return ()
-    origin = 0 if start is None else start
-    return tuple(
-        seat
-        for offset in range(count)
-        for seat in ((origin + offset) % count,)
-        if state.player(seat).alive
-    )
+    return seats_from(state, start, count)
 
 
 # ---- DEATH 帧：L13 裁剪后的四段（票 13 §4 / 票 22）--------------------------
