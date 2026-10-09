@@ -16,8 +16,12 @@ M2 的三处结构变化：
   目标池的限制一律走技能侧的候选池修饰器，不给目标规则加面向具体牌名的布尔。
 - :class:`CardBehavior` 增 ``final_zone``：结算完实体牌停在哪（默认 ``DISCARD``、
   装备 = ``EQUIP``、延时锦囊 = ``JUDGE``）。基本 53 张用默认值，故其行为**零改动**。
+- :class:`CardBehavior` 增 ``response_window``（票 11 §7 / 票 28）：这张牌在自己的
+  "生效前"给谁开窗口——【杀】= ``DODGE``（M1 的【闪】窗口一字不动）、锦囊 = ``NULLIFY``
+  （收集式无懈窗口）、其余 ``None``。它取代原先"效果里有没有伤害帧"的布尔判据。
 - 牌名扩到标准版全表 32 个；本票先把**静态面**（使用时机 / 目标规则 / 次数限制 /
-  最终去向区）补齐，需询问或多步的**效果**由后续票落进 ``effects``（票 26 / 27 / 29 / 30）。
+  最终去向区 / 响应窗口）补齐，需询问或多步的**效果**由后续票落进 ``effects``
+  （票 26 / 27 / 29 / 30）。
 """
 
 from __future__ import annotations
@@ -31,19 +35,20 @@ from sgs.timing import Timing
 
 __all__ = [
     "CARD_BEHAVIORS",
+    "NULLIFY_RESPONSE_CARD",
     "CallOp",
     "CardBehavior",
     "DamageNature",
     "EffectStep",
     "FinalZone",
     "PushFrame",
+    "ResponseWindow",
     "TargetCount",
     "TargetRule",
     "UseContext",
     "UseLimit",
     "UseTiming",
     "behavior_for",
-    "opens_response_window",
 ]
 
 
@@ -74,6 +79,27 @@ class TargetCount(str, Enum):
     RATED = "RATED"
     ALL_ALIVE = "ALL_ALIVE"
     ALL_ALIVE_WITH_SELF = "ALL_ALIVE_WITH_SELF"
+
+
+class ResponseWindow(str, Enum):
+    """这张牌在自己的"生效前"给**响应者**开哪种窗口（票 11 §7 / 票 28）。
+
+    - ``DODGE``：【杀】——目标用【闪】响应（M1 的 ``DODGE`` 询问与记录形状一字不动）；
+    - ``NULLIFY``：锦囊——全体存活按优先级收齐声明、只有最高者实际使用无懈。
+
+    取代原先"效果里有没有伤害帧"的布尔判据：它是**牌面事实**，落在行为表上，
+    调用点不再重算。``None`` = 生效前不开任何窗口。
+    """
+
+    DODGE = "DODGE"
+    NULLIFY = "NULLIFY"
+
+
+NULLIFY_RESPONSE_CARD = "nullify"
+"""无懈窗口里可用的牌名（票 11 §7 的 ``required``）。
+
+它是**牌面事实**：本文件是行为表的唯一真源，故约束值也住在这里，``engine/`` 不出现具体牌名。
+"""
 
 
 class FinalZone(str, Enum):
@@ -202,6 +228,9 @@ class CardBehavior:
     timing_ops: tuple[tuple[Timing, CallOp], ...] = ()
     """绑定在具体时机上的调用型步骤（票 27 为【五谷丰登】的亮牌 / 弃余牌落地）。"""
 
+    response_window: ResponseWindow | None = None
+    """"生效前"给响应者开的窗口（票 11 §7 / 票 28）：【杀】= 闪、锦囊 = 无懈、其余无。"""
+
     @property
     def is_delayed(self) -> bool:
         """延时锦囊：使用当时只走 L4，实体牌置入目标判定区，L5 推迟到判定阶段（票 26）。
@@ -234,6 +263,7 @@ def _one_other(
         effects=effects,
         final_zone=final_zone,
         target_filters=target_filters,
+        response_window=ResponseWindow.NULLIFY,
     )
 
 
@@ -243,6 +273,7 @@ def _self_only(
     final_zone: FinalZone = FinalZone.DISCARD,
     effects: tuple[EffectStep, ...] = (),
     passes_to_next_judge: bool = False,
+    response_window: ResponseWindow | None = None,
 ) -> CardBehavior:
     """只能指定自己（【无中生有】、装备牌、【闪电】）。"""
     return CardBehavior(
@@ -253,6 +284,7 @@ def _self_only(
         effects=effects,
         final_zone=final_zone,
         passes_to_next_judge=passes_to_next_judge,
+        response_window=response_window,
     )
 
 
@@ -275,14 +307,17 @@ def _all_alive(
         effects=effects,
         effectiveness=effectiveness,
         timing_ops=timing_ops,
+        response_window=ResponseWindow.NULLIFY,
     )
 
 
-def _response(card_type_id: str) -> CardBehavior:
+def _response(
+    card_type_id: str, *, response_window: ResponseWindow | None = None
+) -> CardBehavior:
     """在别人的结算里响应的牌（【闪】/【无懈可击】）：无座位目标、效果为空。
 
-    两者差别在响应窗口的**开法与归属**（【闪】对一次【杀】、无懈对"某张锦囊对某个目标"），
-    由响应链落地（票 11 / 票 28）；静态面此刻完全同形。
+    两者的差别在**它自己**的"生效前"开不开窗口：【闪】不开（它不可被反抵消），
+    【无懈可击】开无懈窗口（无懈可击本身也能被无懈）。
     """
     return CardBehavior(
         card_type_id=card_type_id,
@@ -290,6 +325,7 @@ def _response(card_type_id: str) -> CardBehavior:
         target_rule=TargetRule(rated_targets=0),
         use_limit=_UNLIMITED,
         effects=(),
+        response_window=response_window,
     )
 
 
@@ -301,6 +337,7 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
         target_rule=TargetRule(rated_targets=1, includes_self=False, needs_distance=True),
         use_limit=UseLimit(rated=1, extra=0, counts=True, ignore_distance=False),
         effects=(PushFrame(FrameKind.DAMAGE, (("amount", 1),)),),
+        response_window=ResponseWindow.DODGE,
     ),
     "peach": CardBehavior(
         card_type_id="peach",
@@ -324,7 +361,11 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
         target_filters=("has_zone_cards",),
         max_distance=1,
     ),
-    "ex_nihilo": _self_only("ex_nihilo", effects=(CallOp("resolve_ex_nihilo"),)),
+    "ex_nihilo": _self_only(
+        "ex_nihilo",
+        effects=(CallOp("resolve_ex_nihilo"),),
+        response_window=ResponseWindow.NULLIFY,
+    ),
     "duel": _one_other("duel", effects=(CallOp("resolve_duel"),)),
     "borrowed_sword": _one_other(
         "borrowed_sword",
@@ -356,7 +397,7 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
             (Timing.RESOLVE_AFTER_END, CallOp("finish_harvest")),
         ),
     ),
-    "nullify": _response("nullify"),
+    "nullify": _response("nullify", response_window=ResponseWindow.NULLIFY),
     # ---- 延时锦囊（判定骨架在票 26；L5 的判定帧由 OPS 回调压出）----
     "indulgence": _one_other(
         "indulgence",
@@ -368,6 +409,7 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
         final_zone=FinalZone.JUDGE,
         effects=(CallOp("resolve_lightning"),),
         passes_to_next_judge=True,
+        response_window=ResponseWindow.NULLIFY,
     ),
     # ---- 装备（使用面 = 置入装备区；效果由票 29 / 票 30 落地）----
     "crossbow": _self_only("crossbow", final_zone=FinalZone.EQUIP),
@@ -397,15 +439,3 @@ def behavior_for(card: CardRef) -> CardBehavior:
         return CARD_BEHAVIORS[card.type]
     except KeyError as error:
         raise KeyError(f"牌 {card.name}（{card.type}）没有行为表条目") from error
-
-
-def opens_response_window(behavior: CardBehavior) -> bool:
-    """这张牌在自己的"生效前"是否给目标开响应窗口。
-
-    M1 的判据 = 它的效果会压入伤害帧：官方牌面"以你为目标的【杀】生效前"的 M1 化。
-    M1 唯一造成伤害的牌就是【杀】，故本判据与官方逐字对应；M2 出现其他可被抵消的牌
-    （无懈可击、防具的响应）时，改为行为表上的显式字段，不改这里的调用点。
-    """
-    return any(
-        isinstance(step, PushFrame) and step.kind is FrameKind.DAMAGE for step in behavior.effects
-    )

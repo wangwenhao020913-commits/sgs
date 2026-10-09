@@ -2,8 +2,12 @@
 
 - **USE 帧**（使用一张牌）：L4 六个时机 → 压入 RESOLVE 子帧 → L5.6 把处理区里的
   实体牌置入弃牌堆。实体牌在 L4.1 / L4.2 之间从手牌移入处理区（票 07 §3）。
-- **RESOLVE 帧**（逐目标结算）：L5 五个时机；"生效前"按**行为表**决定是否开响应窗口，
-  被抵消则 ``Goto(RESOLVE_END_PC)`` 跳过"生效时 / 生效后"，直达"使用结算结束时"。
+- **RESOLVE 帧**（逐目标结算）：L5 五个时机；"生效前"按**行为表**的 ``response_window``
+  分派响应窗口（票 28）——【杀】给目标开【闪】窗口、锦囊开**收集式无懈窗口**
+  （全体存活每人每层一次、收齐后只有优先级最高者实际使用）。被抵消则
+  ``Goto(RESOLVE_END_PC)`` 跳过"生效时 / 生效后"，直达"使用结算结束时"。
+  无懈的成败由**子帧出栈时**向挂起帧传播（``Engine._propagate_cancel``），
+  故嵌套就是"帧上叠帧"、不新增帧类型。
 - **DAMAGE 帧**（票 20）：L7 五个时机；"受到伤害时"之后压入 **LIFE_DECREASE** 子帧，
   在"造成伤害后"之前把体力真正扣掉。
 - **LIFE_DECREASE 帧**（票 20 / 21）：L8 三个时机；"扣减体力时"是唯一的体力写入点。
@@ -30,9 +34,10 @@ from typing import Any, Protocol
 
 from sgs.data import Identity, Mode
 from sgs.effects import (
+    NULLIFY_RESPONSE_CARD,
     EffectStep,
+    ResponseWindow,
     behavior_for,
-    opens_response_window,
     target_is_effective,
 )
 from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable
@@ -42,7 +47,9 @@ from sgs.state import (
     FrameKind,
     GameState,
     QueryKind,
+    RespondMode,
     UseCard,
+    WindowCause,
     rejudge_askers,
     seats_from,
 )
@@ -104,6 +111,20 @@ class FrameHost(StepHost, Protocol):
         self, kind: QueryKind, actor: int, timing: Timing, *, dying: int | None = None
     ) -> Any: ...
 
+    def ask_respond(
+        self,
+        frame: Frame,
+        actor: int,
+        timing: Timing,
+        *,
+        cause: WindowCause,
+        required: str | None = None,
+        target: int | None = None,
+        window_frame: int = 0,
+        mode: RespondMode = RespondMode.PLAY,
+        use_targets: tuple[int, ...] = (),
+    ) -> Any: ...
+
     def suspended(self, value: Any) -> bool: ...
 
     def start_use(
@@ -113,6 +134,7 @@ class FrameHost(StepHost, Protocol):
         source: int,
         targets: tuple[int, ...],
         use_timing: Timing | None = None,
+        cancel_target: tuple[int, int] | None = None,
     ) -> Frame: ...
 
     def recover_from_peach(
@@ -307,7 +329,16 @@ def resolve_start(host: FrameHost, frame: Frame) -> Control:
 
 
 def resolve_before_effect(host: FrameHost, frame: Frame) -> Control:
-    targets = tuple(frame.data["targets"])
+    """**生效前**（C2）：按行为表的 ``response_window`` 分派响应窗口（票 11 §7 / 票 28）。
+
+    - ``DODGE``：【杀】的【闪】窗口——M1 的询问与记录形状一字不动；
+    - ``NULLIFY``：锦囊的**收集式**无懈窗口——全体存活每人每层一次，收齐后只有
+      优先级最高者实际使用；被抵消与否由子帧**出栈时**传播回来（票 11 §2）；
+    - ``None``：不开窗口，照记时机后继续。
+
+    重入次序是本步的关键：窗口期间本帧一直**挂起**在 C2，故子帧出栈时传播来的
+    ``canceled`` 一定在下次重入可见（票 11 §2 的"出栈序即自底向上序"）。
+    """
     if frame.data.get("use_timing") is Timing.NEAR_DEATH_AT:
         # 濒死求桃建立的使用：回复结算已由求桃窗口显式压好（票 21），故跳过
         # "生效时 / 生效后"（`Goto` 而不是 `None`——`None` 只表示"这一步做完了"，
@@ -317,16 +348,35 @@ def resolve_before_effect(host: FrameHost, frame: Frame) -> Control:
         return Goto(RESOLVE_END_PC)
     if "canceled" in frame.data:
         # 本目标的响应窗口已经处理过：**按 canceled 标志**决定去向（票 07 §3）。
+        # 无懈的成功与否由出栈传播写进来，故这条分支也是无懈的出口。
         return Goto(RESOLVE_END_PC) if frame.data["canceled"] else None
     behavior = behavior_for(frame.data["card"])
-    if not targets or not opens_response_window(behavior):
+    window = behavior.response_window
+    if window is None or (window is ResponseWindow.DODGE and not frame.data["targets"]):
         _emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT, actor=frame.data["source"])
         frame.data["canceled"] = False
         return None
     target = _current_target(host, frame)
-    if not frame.data.get("window_open"):
-        _emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT, actor=target)
-        frame.data["window_open"] = True
+    _open_response_window(host, frame)
+    if window is ResponseWindow.DODGE:
+        return _dodge_window(host, frame, target)
+    return _collected_response_window(host, frame, target)
+
+
+def _open_response_window(host: FrameHost, frame: Frame) -> None:
+    """在"生效前"发**一次**时机记录：响应窗口的开窗点（两种窗口共用）。
+
+    记录形态与 C3–C5 同口径：``actor`` = 当前目标、``targets`` = ``(当前目标,)``
+    （空目标时为空元组，票 11 §3.3），故多目标锦囊的每个目标各有一条自己的 C2 记录。
+    """
+    if frame.data.get("window_open"):
+        return
+    _resolve_emit(host, frame, Timing.RESOLVE_BEFORE_EFFECT)
+    frame.data["window_open"] = True
+
+
+def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
+    """【闪】响应窗口（M1 语义一字不动）：一次询问、出闪即抵消，【闪】自己照走 L4 / L5。"""
     action = host.ask_query(QueryKind.DODGE, target, Timing.RESOLVE_BEFORE_EFFECT)
     if host.suspended(action):
         return "stay"
@@ -335,6 +385,61 @@ def resolve_before_effect(host: FrameHost, frame: Frame) -> Control:
         # 抵消是"被响应帧"的标志；【闪】自己作为一次**使用**照走 L4 / L5（票 07 §3）。
         host.start_use(action.card, source=target, targets=())
     # 重入本步：等【闪】的 USE 帧出栈后，由上一条 ``canceled`` 分支决定去向。
+    return "stay"
+
+
+def _collected_response_window(host: FrameHost, frame: Frame, target: int) -> Control:
+    """**收集式**响应窗口（票 11 §2 / 票 19 §9）：收齐全部声明，只有最高优先级者打出。
+
+    窗口的"层"由**挂起帧**区分（``window_frame`` = 本帧 id）；响应牌自身那次使用也走
+    ``RESOLVE`` 帧，于是嵌套就是"帧上叠帧"——**不新增帧类型**。赢家那张牌记住它指向
+    "本帧 + 当前目标"（``cancel_target``），出栈时由引擎把那一层标成被抵消。
+
+    声明**按询问序追加**，故首个声明者就是优先级最高者（应答者区间 =
+    当前回合角色起逆时针、按座位序，票 15 §2）；输家的声明不耗牌、不压任何帧。
+    """
+    if frame.data.get("response_used"):
+        # 赢家的响应牌使用已完整结算：出栈传播（若成功）会先被上面的 ``canceled``
+        # 分支接住；走到这里就是**没被抵消**，照常继续 C3–C5。
+        return None
+    if "response_askers" not in frame.data:
+        frame.data["response_askers"] = seats_from(
+            host.state, host.state.turn_seat, len(host.state.players)
+        )
+        frame.data["response_next"] = 0
+        frame.data["response_declared"] = []
+    askers: tuple[int, ...] = frame.data["response_askers"]
+    while frame.data["response_next"] < len(askers):
+        asker = askers[frame.data["response_next"]]
+        action = host.ask_respond(
+            frame,
+            asker,
+            Timing.RESOLVE_BEFORE_EFFECT,
+            cause=WindowCause.NULLIFY,
+            required=NULLIFY_RESPONSE_CARD,
+            target=target,
+            window_frame=frame.frame_id,
+            mode=RespondMode.USE,
+        )
+        if host.suspended(action):
+            return "stay"
+        frame.data["response_next"] += 1
+        if isinstance(action, UseCard):
+            # **声明**：行动被接受，但此刻不耗牌、不压 USE 帧（票 19 §9.4）。
+            frame.data["response_declared"].append((asker, action.card))
+    declared: list[tuple[int, CardRef]] = frame.data["response_declared"]
+    if not declared:
+        frame.data["canceled"] = False
+        return None
+    winner, card = declared[0]
+    frame.data["response_used"] = True
+    host.start_use(
+        card,
+        source=winner,
+        targets=(),
+        use_timing=Timing.RESOLVE_BEFORE_EFFECT,
+        cancel_target=(frame.frame_id, target),
+    )
     return "stay"
 
 
@@ -382,11 +487,16 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
     "effect_pc",
     "asks",
     "op",
+    "response_askers",
+    "response_next",
+    "response_declared",
+    "response_used",
 )
 """**逐目标分槽**的帧私有键：游标推进时必须整体清掉（票 11 §3.2）。
 
 ``canceled`` / ``window_open`` / ``after_effect_emitted`` / ``effect_pc`` 在 :mod:`steps`
-维护，``asks``（选择面记忆）在 :class:`~sgs.engine.Engine` 维护、``op`` 在效果回调里维护；
+维护，``response_*``（收集式响应窗口的进度）同样在 :mod:`steps` 维护，``asks``（选择面记忆）
+在 :class:`~sgs.engine.Engine` 维护、``op`` 在效果回调里维护；
 集中列在这里，使"新加一个按目标分槽的键"只需改这一处。"""
 
 

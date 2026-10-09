@@ -520,9 +520,11 @@ def test_the_rejudge_window_is_dispatched_without_asking_anything():
     ]
 
     assert len(window) == 1
-    assert not [record for record in turn if record.kind == "query"], (
-        "改判窗口不构造询问：M2 队列恒空、无日志节点（本局的出牌阶段也被【乐不思蜀】跳过）"
-    )
+    assert not [
+        record
+        for record in turn
+        if record.kind == "query" and record.query.timing is Timing.JUDGE_CARD_BEFORE_EFFECT
+    ], "改判窗口不构造询问：M2 队列恒空、无日志节点（票 28 起判定阶段的结算另开无懈窗口）"
 
 
 def test_the_rejudge_queue_is_counterclockwise_from_the_turn_seat_and_one_per_seat():

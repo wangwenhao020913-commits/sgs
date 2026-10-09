@@ -159,6 +159,11 @@ def _queries(engine: Engine, kind: QueryKind) -> list:
     return [r.query for r in engine.records if r.kind == "query" and r.query.kind == kind]
 
 
+def _windows(engine: Engine, cause: WindowCause) -> list:
+    """某成因的响应窗口；票 28 起每张锦囊的"生效前"还会开一层无懈窗口，故按成因取。"""
+    return [query for query in _queries(engine, QueryKind.RESPOND) if query.cause is cause]
+
+
 def _deltas(engine: Engine, delta_type: str) -> list:
     return [r for r in engine.records if r.kind == "delta" and r.delta_type == delta_type]
 
@@ -496,8 +501,8 @@ def test_barbarian_invasion_only_hits_who_cannot_play_a_slash(pack):
     )
 
     assert [player.hp for player in engine.state.players] == [4, 4, 3, 3]
-    responses = _queries(engine, QueryKind.RESPOND)
-    assert {query.cause for query in responses} == {WindowCause.BARBARIAN_INVASION}
+    responses = _windows(engine, WindowCause.BARBARIAN_INVASION)
+    assert {query.required for query in responses} == {"slash"}
     assert slash in engine.state.discard, "打出的【杀】进弃牌堆"
 
 
@@ -514,7 +519,7 @@ def test_arrow_barrage_needs_a_dodge(pack):
     )
 
     assert [player.hp for player in engine.state.players] == [4, 4, 3]
-    assert {query.required for query in _queries(engine, QueryKind.RESPOND)} == {"dodge"}
+    assert {query.required for query in _windows(engine, WindowCause.ARROW_BARRAGE)} == {"dodge"}
 
 
 def test_duel_alternates_slash_until_someone_cannot_play(pack):
@@ -529,7 +534,7 @@ def test_duel_alternates_slash_until_someone_cannot_play(pack):
         respond="play",
     )
 
-    windows = _queries(engine, QueryKind.RESPOND)
+    windows = _windows(engine, WindowCause.DUEL)
     assert [query.cause for query in windows] == [WindowCause.DUEL, WindowCause.DUEL]
     assert [query.target for query in windows] == [None, None], "打出窗口的 target 为 None"
     # 目标先出【杀】，使用者无【杀】⇒ 使用者受到目标造成的 1 点伤害。
@@ -550,7 +555,7 @@ def test_borrowed_sword_lets_the_holder_use_a_slash(pack):
         use_target=2,
     )
 
-    window = _queries(engine, QueryKind.RESPOND)[0]
+    window = _windows(engine, WindowCause.BORROWED_SWORD)[0]
     assert window.cause is WindowCause.BORROWED_SWORD
     assert window.target == 1, "借刀窗口针对持刀者（具体座位）"
     assert any(isinstance(action, UseCard) for action in window.legal_actions)

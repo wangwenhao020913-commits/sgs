@@ -381,8 +381,9 @@ def _respond(
     """响应窗口：手牌里满足 ``required`` 的牌各一个候选，放弃恒在最后。
 
     - ``mode = PLAY``（南蛮 / 万箭 / 决斗）：候选是 ``PlayCard``（打出，无目标、不占次数）；
-    - ``mode = USE``（【借刀杀人】迫使的"使用【杀】"）：候选是 ``UseCard``，目标取
-      ``ctx.use_targets``（持刀者的合法【杀】目标），并按 L3.2 校验出牌次数。
+    - ``mode = USE``（【借刀杀人】迫使的"使用【杀】"、无懈窗口）：候选是 ``UseCard``，
+      目标取 ``ctx.use_targets``；**空 ``use_targets`` = 无目标的响应使用**（无懈的目标是
+      "这次结算 + 目标角色"，由窗口帧承载，故行动只带牌），并按 L3.2 校验出牌次数。
 
     手上没有所需牌者候选只有 ``Pass``——**仍发询问**（票 19 §9.2 的"各获一次机会"）。
     """
@@ -396,10 +397,9 @@ def _respond(
         if ctx.mode is RespondMode.USE:
             if check_count(state, seat, card):
                 continue
-            for target in ctx.use_targets:
-                actions.append(
-                    UseCard(card=card, targets=(target,), answers_seq=answers_seq)
-                )
+            combos = tuple((target,) for target in ctx.use_targets) if ctx.use_targets else ((),)
+            for combo in combos:
+                actions.append(UseCard(card=card, targets=combo, answers_seq=answers_seq))
         else:
             actions.append(PlayCard(card=card, answers_seq=answers_seq))
     actions.append(Pass(answers_seq=answers_seq))

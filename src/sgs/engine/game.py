@@ -101,6 +101,12 @@ DRAW_COUNT = 2
 REBEL_REWARD_DRAW = 3
 """杀死反贼的奖惩摸牌数（规则 4.8；票 14 §4.2）。"""
 
+_RESPONSE_CANCELED = "response_canceled"
+"""一次响应型使用**自身**是否被抵消的帧私有标记（票 11 §2）。
+
+与逐目标分槽的 ``canceled`` 分列：后者会被游标推进清掉，而传播发生在帧**出栈之后**。
+在 :meth:`Engine._propagate_cancel` 标记父帧时一并写入，子帧出栈时据此决定是否传播。"""
+
 
 class _Suspend:
     """``ask`` 的哨兵：询问已发出，等参与者应答。"""
@@ -539,8 +545,47 @@ class Engine:
 
     def pop_frame(self) -> Frame:
         frame = self.stack.pop()
-        self._emit_frame("pop", frame)
+        self._after_pop(frame)
         return frame
+
+    def _after_pop(self, popped: Frame) -> None:
+        """唯一的出栈收尾：记一条 ``pop``，再跑响应型使用的**成败传播**（票 11 §2）。
+
+        ``pop_frame`` 与 :meth:`_step` 都经这里，故"帧的生命周期"在记录流里没有缺口、
+        传播也只可能跑一次。
+        """
+        self._emit_frame("pop", popped)
+        self._propagate_cancel(popped)
+
+    def _propagate_cancel(self, popped: Frame) -> None:
+        """出栈钩子：响应型使用的 RESOLVE 帧出栈即向**它指向的那一层**传播成败（票 11 §2）。
+
+        深层总在浅层之前出栈，故出栈序**就是**自底向上序——"等链全部结算完再自底向上
+        做一次"因此只落在这一个钩子上，不必另建裁决阶段。成功的响应把它指向的那一层标成
+        被抵消；**自身被抵消的那层什么都不抵消**（子帧已先把父帧标掉，传播自然停在它）。
+
+        成败读 :data:`_RESPONSE_CANCELED` 而不是 ``canceled``：后者是**逐目标分槽**的窗口
+        状态，游标推进时会被清掉（见 ``steps._PER_TARGET_FRAME_KEYS``），而本钩子在帧
+        **出栈之后**才读它。被抵消时两个键一起写，故出栈时结果仍在。
+
+        ``cancel_target`` 里的座位会被**核对**：传播只许落在"该目标仍在窗口里"的那一层，
+        否则宁可 fail-closed——静默标错目标会在多目标结算里抵消掉别的目标。
+        """
+        if popped.kind is not FrameKind.RESOLVE:
+            return
+        target = popped.data.get("cancel_target")
+        if target is None or popped.data.get(_RESPONSE_CANCELED):
+            return
+        parent_id, seat = target
+        for frame in reversed(self.stack.frames):
+            if frame.frame_id != parent_id:
+                continue
+            if self.current_target(frame) != seat:
+                raise RuntimeError(f"响应指向座位 {seat}，但结算帧停在 {self.current_target(frame)}")
+            frame.data["canceled"] = True
+            frame.data[_RESPONSE_CANCELED] = True
+            return
+        raise RuntimeError(f"响应指向的结算帧 {parent_id} 不在栈上；结算栈被破坏")
 
     # -- 结算帧步骤可用的操作面（步骤表在 steps.py，只经这些方法改状态）---------
 
@@ -597,6 +642,7 @@ class Engine:
         source: int,
         targets: tuple[int, ...],
         use_timing: Timing | None = None,
+        cancel_target: tuple[int, int] | None = None,
     ) -> Frame:
         """开始一次使用：记一次本回合已用、压入 USE 帧（票 07 §6）。
 
@@ -607,17 +653,24 @@ class Engine:
         **目标顺序在这里定格为"从当前回合角色起、逆时针"**（票 15 §4）：B / C 两段都读
         同一个排好序的列表；使用者与当前回合角色不同（【借刀杀人】迫使的【杀】）时仍按
         当前回合角色起算（U-15-1，程序化约定）。
+
+        ``cancel_target`` 只给**响应型使用**（无懈一类的牌）用（票 11 §2）：记下这次使用指向
+        "哪一层的哪个目标"（``(被挂起帧 id, 目标座位)``），由子帧随 ``use_push_resolve``
+        继承进它的 RESOLVE 帧，出栈时 :meth:`_propagate_cancel` 据此把那一层标成被抵消。
         """
         counts = self.state.player(source).card_use_counts
         counts[card.type] = counts.get(card.type, 0) + 1
+        data: dict[str, Any] = {
+            "card": card,
+            "source": source,
+            "targets": order_targets(self.state, tuple(targets)),
+            "use_timing": use_timing,
+        }
+        if cancel_target is not None:
+            data["cancel_target"] = cancel_target
         return self.push_frame(
             FrameKind.USE,
-            {
-                "card": card,
-                "source": source,
-                "targets": order_targets(self.state, tuple(targets)),
-                "use_timing": use_timing,
-            },
+            data,
             timing=use_timing if use_timing is not None else Timing.USE_CHOOSE_TARGET,
         )
 
@@ -842,8 +895,9 @@ class Engine:
     ) -> Any:
         """向 ``actor`` 发一次 ``RESPOND`` 询问；重入直接返回已存应答（票 19 §8）。
 
-        ``mode = USE`` 时候选是"使用某张牌并指定 ``use_targets`` 里的目标"（借刀杀人的
-        使用【杀】），其余是打出（无目标）。
+        ``mode = USE`` 时候选是"使用某张牌"：``use_targets`` 非空时每个目标一个候选
+        （借刀杀人迫使的【杀】），**为空时是无目标的响应使用**（无懈一类的牌，目标由
+        ``window_frame`` + ``target`` 承载）；``mode = PLAY`` 是打出（无目标）。
         """
         payload = RespondContext(
             cause=cause,
@@ -1416,7 +1470,7 @@ class Engine:
         if self.stack:
             popped = self.stack.step(self.steps, self)
             if popped is not None:
-                self._emit_frame("pop", popped)
+                self._after_pop(popped)
             if popped is not None and popped.kind is FrameKind.DEATH:
                 # DEATH 帧出栈：同批计数 -1；归零即**批次关闭**，此刻才宣布胜负
                 # （票 14 §3）。检测点只置了暂定结果，死亡单元永远原子跑完。

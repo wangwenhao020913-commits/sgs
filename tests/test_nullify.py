@@ -1,0 +1,576 @@
+"""票 28：无懈可击与响应链（库门面主缝）。
+
+断言全部落在**记录流与棋盘状态**上：时机 / delta / query / action、体力、区域、手牌。
+不碰帧私有 ``data`` / ``pc``。仅有的例外是两条**牌面事实**断言（响应窗口的声明落在行为表），
+与 ``tests/test_judgment.py`` 的 ``passes_to_next_judge`` 同姿态：它们是"牌怎么写的"，
+不是"引擎怎么实现的"。
+
+被测的票面行为（`issues/28-nullify-and-response-chain.md`，决策回
+`issues/02-…` / `issues/11-…` / `issues/18-…`）：
+
+- 无懈是**使用**不是打出（走 USE 帧、不占使用次数）；被抵消的原锦囊**仍算已使用**；
+- 无懈的目标是"这次结算 + 目标角色"二元组：窗口开在结算的"生效前"、**逐目标**才轮到；
+- 嵌套用**嵌套结算帧**表达、**出栈即传播**（奇偶律退化为链长奇偶）：深一层总先出栈，
+  成功则把"它所指向的那层"标记为被抵消，被抵消的那层什么都不抵消；
+- 收齐式窗口：全体存活**每人每层一次**（按优先级降序），收齐后**只有优先级最高者**
+  实际使用，其余声明不耗牌、无使用事件；
+- 响应窗口按行为表的 ``response_window`` 声明分派（【杀】= 闪窗口、锦囊 = 无懈窗口）；
+- 延时锦囊的无懈窗口取**约定 B**：在目标角色判定阶段的那张结算帧上；
+  闪电被无懈 ⇒ 移交下家判定区，乐不思蜀被无懈 ⇒ 进弃牌堆。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import pytest
+
+from sgs.data import RuleConfig, load_content_pack
+from sgs.effects import CARD_BEHAVIORS, FinalZone, ResponseWindow
+from sgs.engine import Engine, dump_journal, read_journal
+from sgs.state import (
+    EndPhase,
+    MoveReason,
+    Pass,
+    Phase,
+    PlayCard,
+    QueryKind,
+    UseCard,
+    WindowCause,
+    Zone,
+)
+from sgs.timing import Timing
+
+from support.positions import SeatSpec, build_state, cards_of_type, run_turns, run_until
+
+STANDARD = "standard_108"
+
+RESOLVE_STAGES_CANCELED = (
+    Timing.RESOLVE_START,
+    Timing.RESOLVE_BEFORE_EFFECT,
+    Timing.RESOLVE_END,
+)
+"""被抵消的结算：C1 与 C2 照发、直达 C5（**不出现**生效时 / 生效后，票 11 §6）。"""
+
+RESOLVE_STAGES_FULL = (
+    Timing.RESOLVE_START,
+    Timing.RESOLVE_BEFORE_EFFECT,
+    Timing.RESOLVE_EFFECT,
+    Timing.RESOLVE_AFTER_EFFECT,
+    Timing.RESOLVE_END,
+)
+
+NULLIFY_TRICKS = (
+    "dismantlement",
+    "snatch",
+    "ex_nihilo",
+    "duel",
+    "borrowed_sword",
+    "barbarian_invasion",
+    "arrow_barrage",
+    "peach_garden",
+    "harvest",
+    "nullify",
+    "indulgence",
+    "lightning",
+)
+
+
+@pytest.fixture(scope="module")
+def pack():
+    return load_content_pack(deck_profile=STANDARD)
+
+
+# ---------------------------------------------------------------------------
+# 驱动：一个座位一个应答器
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Plan:
+    play: str = ""
+    """出牌阶段要使用的牌名（命中后转结束阶段）。"""
+
+    nullify: dict[int, int] = field(default_factory=dict)
+    """座位 → 允许在无懈窗口里**声明**的次数（用来制造"声明了但不生效"的输家）。"""
+
+    respond: str = "pass"
+    """非无懈的 RESPOND 窗口：``play`` = 打出第一张候选、其余放弃。"""
+
+    played: bool = False
+
+
+class _Planned:
+    def __init__(self, plan: _Plan) -> None:
+        self.plan = plan
+
+    def respond(self, query):
+        plan = self.plan
+        if query.kind == QueryKind.PLAY_PHASE:
+            if plan.play and not plan.played:
+                for action in query.legal_actions:
+                    if isinstance(action, UseCard) and action.card.type == plan.play:
+                        plan.played = True
+                        return action
+            return _find(query, EndPhase)
+        if query.kind == QueryKind.RESPOND:
+            if query.cause is WindowCause.NULLIFY:
+                if plan.nullify.get(query.actor, 0) > 0:
+                    card = _first(query, UseCard)
+                    if card is not None:
+                        plan.nullify[query.actor] -= 1
+                        return card
+                return _find(query, Pass)
+            if plan.respond == "play":
+                card = _first(query, PlayCard)
+                if card is not None:
+                    return card
+            return _find(query, Pass)
+        if query.kind in (QueryKind.DODGE, QueryKind.PEACH):
+            return _find(query, Pass)
+        return query.legal_actions[0]
+
+
+def _first(query, action_type):
+    for action in query.legal_actions:
+        if isinstance(action, action_type):
+            return action
+    return None
+
+
+def _find(query, action_type):
+    action = _first(query, action_type)
+    assert action is not None, f"{query.kind} 询问里没有 {action_type.__name__} 候选"
+    return action
+
+
+def _deck_excluding(pack, *card_ids: int) -> tuple[int, ...]:
+    excluded = set(card_ids)
+    return tuple(index for index in range(len(pack.deck.cards)) if index not in excluded)
+
+
+def _engine(
+    pack,
+    *,
+    play: str = "",
+    seats: list[SeatSpec],
+    deck: tuple[int, ...] | None = None,
+    turn_seat: int = 0,
+    seed: int = 1,
+    nullify: dict[int, int] | None = None,
+    respond: str = "pass",
+    phase=None,
+):
+    plan = _Plan(play=play, nullify=dict(nullify or {}), respond=respond)
+    used = [card for spec in seats for card in (*spec.hand, *spec.equip, *spec.judge)]
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=deck if deck is not None else _deck_excluding(pack, *used),
+        turn_seat=turn_seat,
+        phase=phase,
+        rule_config=RuleConfig(first_seat=turn_seat),
+    )
+    engine = Engine.from_state(state, seed=seed)
+    players = [_Planned(plan) for _ in seats]
+    return engine, plan, players
+
+
+def _run_trick(pack, **kwargs):
+    engine, plan, players = _engine(pack, **kwargs)
+    play = plan.play
+    run_until(engine, players, lambda e: plan.played and _use_settled(e, play))
+    return engine, plan
+
+
+def _run_turn(pack, **kwargs):
+    engine, plan, players = _engine(pack, **kwargs)
+    run_turns(engine, players, turns=1)
+    return engine, plan
+
+
+def _use_settled(engine: Engine, play: str) -> bool:
+    return any(
+        record.kind == "timing"
+        and record.timing is Timing.RESOLVE_AFTER_END
+        and any(card.type == play for card in record.cards)
+        for record in engine.records
+    )
+
+
+def _timings(engine: Engine, timing: Timing) -> list:
+    return [r for r in engine.records if r.kind == "timing" and r.timing is timing]
+
+
+def _queries(engine: Engine, kind: QueryKind) -> list:
+    return [r.query for r in engine.records if r.kind == "query" and r.query.kind == kind]
+
+
+def _deltas(engine: Engine, delta_type: str) -> list:
+    return [r for r in engine.records if r.kind == "delta" and r.delta_type == delta_type]
+
+
+def _resolve_frame_id(engine: Engine) -> int:
+    """记录流里的**第一个** RESOLVE 帧 = 原锦囊那次使用的结算帧。"""
+    return next(
+        record.frame_id
+        for record in engine.records
+        if record.kind == "frame" and record.frame_kind.value == "RESOLVE"
+    )
+
+
+def _stages(engine: Engine, frame_id: int) -> list[Timing]:
+    return [
+        record.timing
+        for record in engine.records
+        if record.kind == "timing"
+        and record.frame_id == frame_id
+        and record.timing.value.startswith("RESOLVE_")
+    ]
+
+
+def _use_frames(engine: Engine) -> list:
+    return [
+        record
+        for record in engine.records
+        if record.kind == "frame" and record.op == "push" and record.frame_kind.value == "USE"
+    ]
+
+
+def _declared(engine: Engine, card_id: int) -> list:
+    return [
+        record.action
+        for record in engine.records
+        if record.kind == "action"
+        and record.accepted
+        and record.action.kind == "UseCard"
+        and record.action.card.card_id == card_id
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 响应窗口的声明面
+# ---------------------------------------------------------------------------
+
+
+def test_the_response_window_is_declared_on_the_behavior_table():
+    assert CARD_BEHAVIORS["slash"].response_window is ResponseWindow.DODGE
+    for type_id in NULLIFY_TRICKS:
+        assert CARD_BEHAVIORS[type_id].response_window is ResponseWindow.NULLIFY, type_id
+    assert CARD_BEHAVIORS["peach"].response_window is None
+    assert CARD_BEHAVIORS["dodge"].response_window is None
+    for behavior in CARD_BEHAVIORS.values():
+        if behavior.final_zone is FinalZone.EQUIP:
+            assert behavior.response_window is None
+
+
+def test_nullify_is_declared_as_an_unlimited_response_use():
+    behavior = CARD_BEHAVIORS["nullify"]
+
+    assert behavior.use_limit.rated is None, "无懈不占使用次数"
+    assert behavior.target_rule.rated_targets == 0, "目标由窗口帧承载，行动只带牌"
+    assert behavior.effects == (), "抵消由出栈传播承担，不是效果步"
+
+
+# ---------------------------------------------------------------------------
+# 单体锦囊：被无懈抵消
+# ---------------------------------------------------------------------------
+
+
+def test_a_nullify_use_cancels_the_trick_and_leaves_it_used(pack):
+    ex_nihilo = cards_of_type(pack, "ex_nihilo")[0]
+    nullify = cards_of_type(pack, "nullify")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="ex_nihilo",
+        seats=[SeatSpec(hand=(ex_nihilo,)), SeatSpec(hand=(nullify,)), SeatSpec()],
+        nullify={1: 1},
+    )
+    frame_id = _resolve_frame_id(engine)
+
+    assert _stages(engine, frame_id) == list(RESOLVE_STAGES_CANCELED)
+    assert engine.state.player(0).card_use_counts.get("ex_nihilo") == 1, "被抵消仍算已使用"
+    assert ex_nihilo in engine.state.discard
+    assert nullify in engine.state.discard
+    assert not [
+        d
+        for d in _deltas(engine, "card_move")
+        if d.reason is MoveReason.DRAW and d.frame_id == frame_id
+    ], "被抵消 ⇒ 不摸牌（摸牌阶段的摸牌不属于这次结算）"
+
+    window = _queries(engine, QueryKind.RESPOND)[0]
+    assert window.cause is WindowCause.NULLIFY
+    assert window.required == "nullify"
+    assert window.target == 0, "目标是'这张锦囊对座位 0 的这次结算'"
+    assert window.window_frame == frame_id
+
+
+def test_nullify_resolves_as_a_use_frame_not_a_play(pack):
+    ex_nihilo = cards_of_type(pack, "ex_nihilo")[0]
+    nullify = cards_of_type(pack, "nullify")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="ex_nihilo",
+        seats=[SeatSpec(hand=(ex_nihilo,)), SeatSpec(hand=(nullify,)), SeatSpec()],
+        nullify={1: 1},
+    )
+
+    assert [record.frame_kind.value for record in _use_frames(engine)] == ["USE", "USE"], (
+        "原锦囊 + 无懈各一次使用"
+    )
+    assert not _timings(engine, Timing.PLAY_DECLARE), "无懈是使用，不走 L6"
+    assert _timings(engine, Timing.USE_ON_USE), "走 L4 的'使用时'"
+
+
+# ---------------------------------------------------------------------------
+# 嵌套：出栈即传播、链长奇偶
+# ---------------------------------------------------------------------------
+
+
+def test_a_nullify_of_a_nullify_restores_the_original_trick(pack):
+    ex_nihilo = cards_of_type(pack, "ex_nihilo")[0]
+    first = cards_of_type(pack, "nullify")[0]
+    second = cards_of_type(pack, "nullify")[1]
+    engine, _ = _run_trick(
+        pack,
+        play="ex_nihilo",
+        seats=[
+            SeatSpec(hand=(ex_nihilo,)),
+            SeatSpec(hand=(first,)),
+            SeatSpec(hand=(second,)),
+        ],
+        nullify={1: 1, 2: 2},
+    )
+    frame_id = _resolve_frame_id(engine)
+
+    assert _stages(engine, frame_id) == list(RESOLVE_STAGES_FULL), "链长 2 ⇒ 原锦囊不被抵消"
+    assert first in engine.state.discard and second in engine.state.discard
+    draws = [
+        d
+        for d in _deltas(engine, "card_move")
+        if d.reason is MoveReason.DRAW
+        and d.to_zone.zone is Zone.HAND
+        and d.frame_id == frame_id
+    ]
+    assert [len(d.cards) for d in draws] == [2]
+
+    windows = _queries(engine, QueryKind.RESPOND)
+    assert {w.cause for w in windows} == {WindowCause.NULLIFY}
+    assert sorted({w.target for w in windows}) == [0, 1, 2], (
+        "每层窗口针对它要抵消的那次结算：原锦囊对座位 0、两层无懈各对它的使用者"
+    )
+    assert len({w.window_frame for w in windows}) == 3, "每层一个挂起帧"
+
+
+def test_three_layers_of_nullify_end_with_the_original_trick_cancelled(pack):
+    ex_nihilo = cards_of_type(pack, "ex_nihilo")[0]
+    cards = cards_of_type(pack, "nullify")[:3]
+    engine, _ = _run_trick(
+        pack,
+        play="ex_nihilo",
+        seats=[
+            SeatSpec(hand=(ex_nihilo,)),
+            SeatSpec(hand=(cards[0],)),
+            SeatSpec(hand=(cards[1],)),
+            SeatSpec(hand=(cards[2],)),
+        ],
+        nullify={1: 1, 2: 2, 3: 3},
+    )
+    frame_id = _resolve_frame_id(engine)
+
+    assert _stages(engine, frame_id) == list(RESOLVE_STAGES_CANCELED), "链长 3 ⇒ 原锦囊被抵消"
+    assert all(card in engine.state.discard for card in cards)
+    assert not [
+        d
+        for d in _deltas(engine, "card_move")
+        if d.reason is MoveReason.DRAW and d.frame_id == frame_id
+    ]
+
+
+def test_the_same_seat_may_use_several_nullify_cards_in_one_turn(pack):
+    ex_nihilo = cards_of_type(pack, "ex_nihilo")[0]
+    first = cards_of_type(pack, "nullify")[0]
+    second = cards_of_type(pack, "nullify")[1]
+    engine, _ = _run_trick(
+        pack,
+        play="ex_nihilo",
+        seats=[SeatSpec(hand=(ex_nihilo,)), SeatSpec(hand=(first, second)), SeatSpec()],
+        nullify={1: 2},
+    )
+    frame_id = _resolve_frame_id(engine)
+
+    assert _stages(engine, frame_id) == list(RESOLVE_STAGES_FULL)
+    assert first in engine.state.discard and second in engine.state.discard
+    assert engine.state.player(1).card_use_counts.get("nullify") == 2, "计数照记、不受额定上限"
+
+
+# ---------------------------------------------------------------------------
+# 收齐式窗口：优先级最高者生效、其余不打出
+# ---------------------------------------------------------------------------
+
+
+def test_only_the_highest_priority_declaration_is_actually_used(pack):
+    ex_nihilo = cards_of_type(pack, "ex_nihilo")[0]
+    winner = cards_of_type(pack, "nullify")[0]
+    loser = cards_of_type(pack, "nullify")[1]
+    engine, _ = _run_trick(
+        pack,
+        play="ex_nihilo",
+        seats=[
+            SeatSpec(hand=(ex_nihilo,)),
+            SeatSpec(hand=(winner,)),
+            SeatSpec(hand=(loser,)),
+            SeatSpec(),
+        ],
+        nullify={1: 1, 2: 1},
+    )
+    frame_id = _resolve_frame_id(engine)
+
+    assert _stages(engine, frame_id) == list(RESOLVE_STAGES_CANCELED)
+    assert winner in engine.state.discard
+    assert loser in engine.state.player(2).hand, "声明了但没生效的那张不耗牌"
+    assert loser not in engine.state.discard
+    assert len(_use_frames(engine)) == 2, "只多出**一张**无懈的使用事件"
+    assert len(_declared(engine, loser)) == 1, "座位 2 的声明被接受，但没有产生使用"
+
+
+def test_every_alive_seat_is_asked_once_per_layer_even_without_nullify(pack):
+    ex_nihilo = cards_of_type(pack, "ex_nihilo")[0]
+    nullify = cards_of_type(pack, "nullify")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="ex_nihilo",
+        seats=[SeatSpec(hand=(ex_nihilo,)), SeatSpec(hand=(nullify,)), SeatSpec()],
+        nullify={1: 1},
+    )
+    layer_one = [
+        q
+        for q in _queries(engine, QueryKind.RESPOND)
+        if q.cause is WindowCause.NULLIFY and q.target == 0
+    ]
+
+    assert [q.actor for q in layer_one] == [0, 1, 2], "从当前回合角色起逆时针、每人一次"
+    assert all(_first(q, UseCard) is None for q in layer_one[:1]), (
+        "没有无懈的座位仍会被问，候选里只有放弃"
+    )
+    assert all(any(isinstance(a, Pass) for a in q.legal_actions) for q in layer_one)
+
+
+# ---------------------------------------------------------------------------
+# 逐目标窗口：一个目标被抵消不影响另一个
+# ---------------------------------------------------------------------------
+
+
+def test_the_nullify_window_opens_per_target_of_a_multi_target_trick(pack):
+    barbarian = cards_of_type(pack, "barbarian_invasion")[0]
+    nullify = cards_of_type(pack, "nullify")[0]
+    engine, _ = _run_trick(
+        pack,
+        play="barbarian_invasion",
+        seats=[
+            SeatSpec(hand=(barbarian,)),
+            SeatSpec(hand=(nullify,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        nullify={1: 1},
+        respond="pass",
+    )
+    frame_id = _resolve_frame_id(engine)
+
+    after_effect = [
+        record.targets[0]
+        for record in _timings(engine, Timing.RESOLVE_AFTER_EFFECT)
+        if record.frame_id == frame_id
+    ]
+    assert after_effect == [2, 3], "座位 1 的那次结算被抵消，2 / 3 照常结算"
+    assert [player.hp for player in engine.state.players] == [4, 4, 3, 3]
+    assert engine.state.player(0).card_use_counts.get("barbarian_invasion") == 1
+
+
+# ---------------------------------------------------------------------------
+# 延时锦囊：窗口在判定阶段（约定 B），被无懈后的去向
+# ---------------------------------------------------------------------------
+
+
+def test_a_nullified_lightning_moves_to_the_next_judge_zone_without_a_judgment(pack):
+    lightning = cards_of_type(pack, "lightning")[0]
+    nullify = cards_of_type(pack, "nullify")[0]
+    engine, _ = _run_turn(
+        pack,
+        seats=[SeatSpec(judge=(lightning,)), SeatSpec(hand=(nullify,))],
+        deck=_deck_excluding(pack, lightning, nullify),
+        phase=Phase.PREPARE,
+        nullify={1: 1},
+    )
+
+    assert not [t for t in _timings(engine, Timing.JUDGE_ON)]
+    assert not [t for t in _timings(engine, Timing.JUDGE_CARD_AFTER_EFFECT)]
+    passes = [
+        record
+        for record in _deltas(engine, "card_move")
+        if record.reason is MoveReason.PUT
+        and record.to_zone.zone is Zone.JUDGE
+        and record.cards[0].card_id == lightning
+    ]
+    assert [(record.to_zone.seat, record.owner) for record in passes] == [(1, None)]
+    assert nullify in engine.state.discard
+
+
+def test_a_nullified_indulgence_goes_to_discard_and_does_not_skip_the_play_phase(pack):
+    indulgence = cards_of_type(pack, "indulgence")[0]
+    nullify = cards_of_type(pack, "nullify")[0]
+    engine, _ = _run_turn(
+        pack,
+        seats=[SeatSpec(judge=(indulgence,)), SeatSpec(hand=(nullify,))],
+        deck=_deck_excluding(pack, indulgence, nullify),
+        phase=Phase.PREPARE,
+        nullify={1: 1},
+    )
+
+    assert indulgence in engine.state.discard
+    assert not [t for t in _timings(engine, Timing.JUDGE_ON)]
+    assert Timing.PHASE_PLAY_START in [r.timing for r in engine.records if r.kind == "timing"], (
+        "被抵消 ⇒ 不跳过出牌阶段"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 确定性与记录面往返
+# ---------------------------------------------------------------------------
+
+
+def test_the_nullify_chain_is_reproducible_and_round_trips(pack, tmp_path):
+    ex_nihilo = cards_of_type(pack, "ex_nihilo")[0]
+    first = cards_of_type(pack, "nullify")[0]
+    second = cards_of_type(pack, "nullify")[1]
+
+    def run() -> str:
+        engine, _ = _run_trick(
+            pack,
+            play="ex_nihilo",
+            seats=[
+                SeatSpec(hand=(ex_nihilo,)),
+                SeatSpec(hand=(first,)),
+                SeatSpec(hand=(second,)),
+            ],
+            nullify={1: 1, 2: 2},
+            seed=17,
+        )
+        return engine.journal()
+
+    text = run()
+    assert text == run(), "嵌套无懈不引入随机来源：同种子逐字节复现"
+
+    path = tmp_path / "nullify.jsonl"
+    path.write_text(text, encoding="utf-8")
+    restored = read_journal(path)
+
+    assert dump_journal(restored) == text
+    window = next(
+        record.query
+        for record in restored
+        if record.kind == "query" and record.query.kind == QueryKind.RESPOND
+    )
+    assert window.cause is WindowCause.NULLIFY
+    assert window.required == "nullify"
