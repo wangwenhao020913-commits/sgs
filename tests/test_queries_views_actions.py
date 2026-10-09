@@ -41,7 +41,8 @@ from support import (
     run_until,
 )
 
-PACK = load_content_pack()
+PACK = load_content_pack(deck_profile="basic_53")
+"""M1 回归网显式选中 53 张档（票 16 §9）：``HAND_A`` 的牌 id 锚在旧切片上。"""
 HAND_A = (40, 41, 42, 43)
 HAND_B = (46, 47, 48, 49)
 DECK = (30, 31)

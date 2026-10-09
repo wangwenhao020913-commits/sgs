@@ -33,7 +33,8 @@ from support import (
     run_turns,
 )
 
-PACK = load_content_pack()
+PACK = load_content_pack(deck_profile="basic_53")
+"""M1 回归网显式选中 53 张档（票 16 §9）：单次伤害恒 1，绝不触发新濒死回退（票 20 §6）。"""
 SLASH = cards_of_type(PACK, "slash")
 PEACH = cards_of_type(PACK, "peach")
 DODGE = cards_of_type(PACK, "dodge")

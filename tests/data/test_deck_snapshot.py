@@ -372,7 +372,7 @@ def test_only_the_two_delayed_tricks_carry_the_delayed_marker():
 
 
 def test_the_basic_53_card_types_are_untouched_by_the_new_face_facts():
-    pack = load_content_pack()
+    pack = load_content_pack(deck_profile=BASIC_53)
     basics = {card_type.id: card_type for card_type in pack.card_types if card_type.category.value == "basic"}
 
     assert set(basics) == {"slash", "dodge", "peach"}

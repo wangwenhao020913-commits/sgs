@@ -36,7 +36,8 @@ from sgs.timing import FORBIDDEN_TIMING_NAMES, Timing
 
 from support import SeatSpec, build_state, cards_of_type, run_until
 
-PACK = load_content_pack()
+PACK = load_content_pack(deck_profile="basic_53")
+"""M1 回归网显式选中 53 张档（票 16 §9）；需要 108 的用例在用例内自行显式选档。"""
 SLASH = cards_of_type(PACK, "slash")
 DODGE = cards_of_type(PACK, "dodge")
 PEACH = cards_of_type(PACK, "peach")

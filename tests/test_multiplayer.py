@@ -17,7 +17,7 @@ import sgs.agents as agents
 from sgs.data import Identity, RuleConfig, load_content_pack
 from sgs.engine import Engine, RandomSource
 
-PACK = load_content_pack()
+PACK = load_content_pack(deck_profile="standard_108")
 SPEED_SEED = 7
 """固定种子：让"每档都收局"是确定性断言，失败可原样重跑（票 08）。"""
 

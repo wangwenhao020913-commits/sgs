@@ -1,6 +1,6 @@
-"""M1 完成定义收口：七条 DoD 逐条机械成立（票 27 / 票 11 §2）。
+"""M2 完成定义收口：八条 DoD 逐条机械成立（票 17 §5 / 票 32 §5）。
 
-本文件不实现任何引擎行为，只把票 11 §2 的七条"完成"钉成**可判决的断言**：
+本文件不实现任何引擎行为，只把票 17 §5 的八条"完成"钉成**可判决的断言**：
 
 1. ``DOD_ITEMS`` 把每条 DoD 绑定到**建立它的用例 node id**；
    ``test_every_definition_of_done_item_is_established_by_collected_tests`` 断言
@@ -12,6 +12,10 @@
 
 递归禁令：本文件**不**调用仓库里的 ``tests/run_all.sh``（那会在 pytest 里再起 pytest）。
 沙箱判决的是门禁脚本的**行为**；真实门禁的全绿由交付流程跑一次 ``tests/run_all.sh`` 得到。
+
+M2 与 M1 的差别：条目 4 换成 M2 内容组（数据 108 / 六区 / 身份 / 判定 / 无懈 / 装备 /
+多人濒死 / 胜负 / 技能 / 视角 / RNG 纪律），条目 5 从"六条基准"换成"34 条 + 分布判据"，
+条目 8 从"三分区"换成"53/64/19/11 + 常量去 M1 前缀"。
 """
 
 from __future__ import annotations
@@ -49,7 +53,8 @@ class DoDItem(NamedTuple):
 
 DOD_ITEMS: dict[int, DoDItem] = {
     1: DoDItem(
-        "可执行入口：两个入口同源、同种子逐字节一致、跑完整局、退出码 0、省略种子时生成并打印",
+        "可执行入口：两个入口同源、同种子逐字节一致、跑完整局、退出码 0、省略种子时生成并打印、"
+        "`--players N` 每档跑到终局、非法人数退出码 1",
         (
             "tests/test_cli.py::test_module_entry_is_the_same_function",
             "tests/test_cli.py::test_console_script_points_at_the_same_entry_function",
@@ -59,6 +64,9 @@ DOD_ITEMS: dict[int, DoDItem] = {
             "tests/test_cli.py::test_cli_runs_a_whole_game_and_prints_the_seed_then_the_stream",
             "tests/test_cli.py::test_omitted_seed_is_generated_recorded_and_printed",
             "tests/test_cli.py::test_a_generated_seed_replays_the_same_stream",
+            "tests/test_cli.py::test_each_supported_seat_count_runs_a_whole_game",
+            "tests/test_cli.py::test_an_unsupported_seat_count_reports_to_stderr_and_exits_1",
+            "tests/test_cli.py::test_unsupported_player_count_exit_code_in_subprocess",
         ),
     ),
     2: DoDItem(
@@ -73,73 +81,94 @@ DOD_ITEMS: dict[int, DoDItem] = {
         ),
     ),
     3: DoDItem(
-        "记录流可比对：canonical JSONL、同种子逐字节、回放即重跑比对",
+        "记录流可比对：canonical JSONL v2、同种子逐字节、回放即重跑比对、仓库零 v1 文件",
         (
             "tests/test_journal.py::test_canonical_jsonl_is_lf_sorted_compact_unescaped_and_newline_terminated",
             "tests/test_journal.py::test_same_seed_twice_is_byte_identical",
             "tests/test_replays.py::test_replaying_the_tape_reproduces_the_journal_byte_for_byte",
+            "tests/test_replays.py::test_the_repository_contains_no_pre_v2_journals",
             "tests/test_determinism.py::test_the_same_game_is_byte_identical_across_python_hash_seeds",
         ),
     ),
     4: DoDItem(
-        "pytest 集合：数据加载与 53 张牌堆 / 58 时机 / 结算栈与终局收尾 / 四类 Query 与非法行动"
-        " / 使用全步骤与处理区 / 濒死死亡与弃牌上限 / 视角 / RNG 与确定性",
+        "pytest 集合（M2 内容组）：数据 108 / 六区 / 身份 / 判定 / 无懈 / 装备距离转化 /"
+        " 多人濒死 / 死亡奖惩 / 胜负 / 技能 / 视角过滤 / RNG 与源码纪律",
         (
-            # 数据加载与 53 张牌堆（票 03）
+            # 数据加载：标准 108 与 53 张回归切片（票 22 / 票 32）
             "tests/data/test_deck_snapshot.py::test_deck_matches_the_53_card_snapshot",
             "tests/data/test_deck_snapshot.py::test_deck_counts_by_type",
-            # 时机枚举 / 调度与 58 个必须实现的时机（票 01 / 票 25）
+            "tests/data/test_load_validation.py::test_loads_standard_content_pack",
+            "tests/data/test_load_validation.py::test_loads_the_standard_108_profile_with_all_its_declarations",
+            # 时机枚举与 dispatch 白名单（票 17 §3 / 票 32 §3）
             "tests/test_timing.py::test_enum_has_exactly_83_nodes",
             "tests/test_timing_coverage.py::test_the_union_of_actual_record_streams_is_exactly_the_dispatch_whitelist",
-            "tests/test_timing_coverage.py::test_the_dispatch_whitelist_and_the_empty_log_nodes_restate_the_58",
-            # 结算栈（帧 / pc / return_to / 丢弃顺序）与终局收尾（票 04 / 票 07）
+            # 六区模型（判定区 / 装备区）与区域坐标（票 08 / 票 21）
+            "tests/test_zones.py::test_the_basic_53_cards_carry_no_equipment_slot",
+            # 身份发放、模式派生与可见性（票 24）
+            "tests/test_identity.py::test_a_run_reaches_game_end_in_every_identity_seat_count",
+            "tests/test_identity.py::test_identity_is_visible_to_self_the_lord_and_the_dead_only",
+            "tests/test_identity_rosters.py::test_identity_labels_cover_exactly_the_four_identities",
+            # 判定帧与延时锦囊（票 26）
+            "tests/test_judgment.py::test_the_judge_frame_is_a_real_frame_with_the_three_dispatched_timings",
+            "tests/test_judgment.py::test_lightning_passes_counterclockwise_to_the_first_legal_judge_zone",
+            # 无懈响应链（票 28）
+            "tests/test_nullify.py::test_a_nullify_of_a_nullify_restores_the_original_trick",
+            "tests/test_nullify.py::test_a_nullified_lightning_moves_to_the_next_judge_zone_without_a_judgment",
+            # 装备 / 距离 / 攻击范围 / 虚拟牌（票 29 / 票 30）
+            "tests/test_equipment.py::test_a_weapon_makes_a_farther_target_legal_for_slash",
+            "tests/test_equipment.py::test_replacing_an_equipment_moves_the_old_card_to_the_discard_pile_as_a_loss",
+            "tests/test_skills.py::test_serpent_spear_offers_a_transformed_slash_candidate",
+            # 多目标与普通锦囊（票 27）
+            "tests/test_normal_tricks.py::test_a_multi_target_use_runs_one_resolve_frame_with_a_cursor_per_target",
+            "tests/test_normal_tricks.py::test_harvest_reveals_target_count_and_each_target_picks_one",
+            # 多人濒死与新回退（票 31）
+            "tests/test_near_death_rollback.py::test_a_peach_that_leaves_hp_below_one_rolls_back_to_the_same_start",
+            "tests/test_near_death_rollback.py::test_the_new_window_starts_at_the_responder_and_skips_seats_already_asked",
+            # 死亡奖惩与身份胜负（票 25）
+            "tests/test_victory.py::test_killing_a_rebel_draws_three_cards_for_the_killer",
+            "tests/test_victory.py::test_the_lord_killing_a_loyalist_discards_all_of_the_lords_own_cards",
+            "tests/test_victory.py::test_simultaneous_deaths_are_announced_only_after_the_last_death_of_the_batch",
+            "tests/test_multiplayer.py::test_every_identity_seat_count_reaches_game_end_with_a_side_and_winners",
+            # 结算栈、终局收尾、Query 与非法行动（票 04 / 票 07 / 票 24）
             "tests/test_resolution_stack.py::test_engine_names_the_return_point_and_discards_frames_innermost_first",
-            "tests/test_resolution_stack.py::test_exhausting_a_frame_records_its_pop_in_the_journal",
             "tests/test_death.py::test_the_teardown_moves_leftover_processing_cards_into_the_discard_pile",
             "tests/test_death.py::test_card_conservation_holds_unconditionally_at_game_end",
-            # 四类 Query、候选排序与非法行动三类拒绝（含 CLI 退出码 1，票 05 / 票 07 / 票 24）
-            "tests/test_queries_views_actions.py::test_play_phase_still_asks_when_the_only_candidate_is_end_phase",
-            "tests/test_queries_views_actions.py::test_discard_candidates_are_all_subsets_of_the_required_size_in_stable_order",
-            "tests/test_queries_views_actions.py::test_candidates_are_ordered_by_card_id_with_the_cardless_action_last",
             "tests/test_queries_views_actions.py::test_structure_damaged_responses_are_malformed_and_change_nothing",
             "tests/test_queries_views_actions.py::test_a_stale_answers_seq_is_rejected_and_changes_nothing",
             "tests/test_queries_views_actions.py::test_an_answer_outside_the_candidate_set_is_rejected_and_changes_nothing",
             "tests/test_cli.py::test_bad_content_pack_exit_code_in_subprocess",
             "tests/test_cli.py::test_illegal_action_exit_code_in_subprocess",
             "tests/test_cli.py::test_malformed_action_exit_code_in_subprocess",
-            # 使用全步骤链与处理区两段移动（票 07 / 票 19）
-            "tests/test_use_and_resolve.py::test_a_slash_use_walks_all_six_l4_timings_in_official_order",
-            "tests/test_use_and_resolve.py::test_an_uncancelled_slash_walks_effect_and_after_effect_and_pushes_damage",
-            "tests/test_use_and_resolve.py::test_a_used_card_moves_hand_to_processing_to_discard_both_as_use",
-            "tests/test_use_and_resolve.py::test_a_dodge_use_moves_its_own_card_through_the_processing_area",
-            # 濒死 / 死亡 / 胜负检测点与终止点分离、弃牌阶段手牌上限（票 13 / 票 21 / 票 22）
-            "tests/test_near_death.py::test_the_near_death_frame_dispatches_the_official_three_timings_in_order",
-            "tests/test_death.py::test_the_death_frame_dispatches_the_trimmed_l13_segments_in_order",
-            "tests/test_death.py::test_victory_is_recorded_at_the_check_point_but_does_not_terminate_there",
-            "tests/test_turn_loop.py::test_discard_phase_discards_down_to_current_hp",
-            # 视角（票 05）
+            # 视角过滤（票 05 / 票 13）
             "tests/test_queries_views_actions.py::test_player_view_exposes_only_public_information_and_own_hand",
             "tests/test_near_death.py::test_the_peach_query_view_hides_the_opponents_hand_identities",
-            # RNG 子流、洗牌 / 重洗、跨哈希种子确定性与源码纪律扫描（票 08 / 票 26）
+            # RNG 子流与源码纪律（票 08 / 票 30）
             "tests/test_rng.py::test_consuming_the_ai_stream_does_not_move_the_shuffle_stream",
-            "tests/test_deck_shuffle.py::test_swapping_the_ai_implementation_does_not_move_the_shuffle_stream",
-            "tests/test_deck_shuffle.py::test_a_reshuffle_leaves_exactly_one_deck_shuffle_delta_from_discard_to_deck",
             "tests/test_deck_shuffle.py::test_the_same_seed_replays_every_reshuffle_byte_for_byte",
-            "tests/test_determinism.py::test_the_same_game_is_byte_identical_across_python_hash_seeds",
             "tests/test_source_discipline.py::test_random_and_secrets_appear_only_in_the_rng_module",
+            "tests/test_source_discipline.py::test_engine_contains_no_concrete_skill_id_or_equipment_name",
         ),
     ),
     5: DoDItem(
-        "基准全绿：票 12 定格的 6 条基准全量逐行通过，索引表与文件集合互相等于",
+        "基准全绿 + 分布判据达标：34 条全量逐行通过、七类每类达标、索引 == 文件集合 == 类表",
         (
             "tests/test_replays.py::test_golden_replay_matches_byte_for_byte",
             "tests/test_replays.py::test_readme_index_matches_the_golden_file_set",
-            "tests/test_replays.py::test_the_frozen_six_baselines_are_exactly_the_file_set",
+            "tests/test_replays.py::test_the_frozen_m1_six_stay_in_the_file_set",
+            "tests/test_replays.py::test_the_baseline_distribution_meets_every_category_minimum",
+            "tests/test_replays.py::test_every_baseline_is_classified_and_the_registry_has_no_orphan",
+            "tests/test_replays.py::test_every_m2_baseline_has_an_after_the_fact_goal",
+            "tests/test_replays.py::test_the_frozen_m1_decision_trajectories_are_unchanged",
         ),
     ),
     6: DoDItem(
-        "不变量 fuzz 通过：随机对局驱动的五条不变量 + 终局附则",
-        ("tests/test_fuzz.py::test_random_games_satisfy_the_invariants",),
+        "不变量 fuzz 通过：六区座位级不变量 + 阵亡者三区为空 + 装备槽位 / 判定区同名唯一"
+        " + 终局身份-胜负一致 + 六档人数轮转 + 每局必达终局",
+        (
+            "tests/test_fuzz.py::test_random_games_satisfy_the_invariants",
+            "tests/test_fuzz.py::test_the_player_rotation_covers_the_six_identity_branches",
+            "tests/test_fuzz.py::test_the_live_checker_catches_a_dead_player_holding_cards",
+        ),
     ),
     7: DoDItem(
         "使用全步骤读作六 + 五时机**逐时机**断言",
@@ -147,6 +176,18 @@ DOD_ITEMS: dict[int, DoDItem] = {
             "tests/test_use_and_resolve.py::test_a_slash_use_walks_all_six_l4_timings_in_official_order",
             "tests/test_use_and_resolve.py::test_a_dodge_cancels_the_slash_and_skips_effect_and_after_effect",
             "tests/test_use_and_resolve.py::test_an_uncancelled_slash_walks_effect_and_after_effect_and_pushes_damage",
+        ),
+    ),
+    8: DoDItem(
+        "枚举纪律：IMPLEMENTED 64 / ENUM_ONLY 19 / EMPTY_LOG 11 逐组断言，白名单 53 实测等于"
+        "记录流并集，常量去 M1 前缀",
+        (
+            "tests/test_timing.py::test_implemented_and_enum_only_partition_the_whole_table",
+            "tests/test_timing.py::test_the_dispatch_whitelist_and_empty_log_nodes_partition_the_implemented_set",
+            "tests/test_timing.py::test_the_six_m2_nodes_are_dispatchable",
+            "tests/test_timing.py::test_no_timing_constant_keeps_the_m1_prefix",
+            "tests/test_timing_coverage.py::test_the_coverage_list_keys_are_exactly_the_dispatch_whitelist",
+            "tests/test_timing_coverage.py::test_enum_only_and_empty_log_nodes_never_appear_in_any_record_stream",
         ),
     ),
 }
@@ -170,7 +211,7 @@ SECOND_GATE_FILES = (
 
 
 # ---------------------------------------------------------------------------
-# 七条 DoD 的机械绑定
+# 八条 DoD 的机械绑定
 # ---------------------------------------------------------------------------
 
 
@@ -215,9 +256,9 @@ def _is_collected(nodeid: str, collected: frozenset[str]) -> bool:
     return any(item.startswith(f"{nodeid}[") for item in collected)
 
 
-def test_the_registry_pins_the_seven_frozen_items():
-    """票 11 §2 恰好七条；同一条里不重复登记建立者（跨条目复用是允许的）。"""
-    assert sorted(DOD_ITEMS) == list(range(1, 8)), "完成定义恰好七条（票 11 §2）"
+def test_the_registry_pins_the_eight_frozen_items():
+    """票 17 §5 恰好八条；同一条里不重复登记建立者（跨条目复用是允许的）。"""
+    assert sorted(DOD_ITEMS) == list(range(1, 9)), "完成定义恰好八条（票 17 §5）"
 
     for number, item in DOD_ITEMS.items():
         assert len(item.establishers) == len(set(item.establishers)), (

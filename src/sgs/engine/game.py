@@ -1813,6 +1813,13 @@ class Engine:
         raise RuntimeError("身份局必须先发出一个主公座位（票 13 §4）")
 
     def _step_turn(self) -> None:
+        if self._turn_is_over():
+            # 非主公在**自己的回合**内阵亡 ⇒ 剩余阶段整体跳过（票 14 §4 / `flow_death`
+            # "死亡结算开始前：若不是主公，则结束其回合"）。死亡段已在 ``DEATH_BEFORE_START``
+            # 发过 ``TURN_END``；这里把 pc 直接拨到 ``_turn_after_end``（本步就执行它），
+            # 只补 ``TURN_AFTER_END`` 并轮转到下一个存活座位，不再发第二条 ``TURN_END``、
+            # 也不让阵亡者摸牌 / 出牌。
+            self._turn_pc = self._turn_steps.index(self._turn_after_end)
         step = self._turn_steps[self._turn_pc]
         if step() == "stay":
             return
@@ -1826,6 +1833,15 @@ class Engine:
                 next_seat = next_alive_seat(self.state, self.state.turn_seat)
                 if next_seat is not None:
                     self.state.turn_seat = next_seat
+
+    def _turn_is_over(self) -> bool:
+        """当前回合角色已阵亡且终局未判 ⇒ 该回合立即结束（票 14 §4 的回合结束分支）。"""
+        if self.finished:
+            return False
+        seat = self.state.turn_seat
+        if seat is None:
+            return False
+        return not self.state.player(seat).alive
 
     # -- 回合环的每一步 -----------------------------------------------------
 

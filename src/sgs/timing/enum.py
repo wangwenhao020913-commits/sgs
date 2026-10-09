@@ -1,16 +1,15 @@
 """权威时机表（票 01 研究产物的枚举落地）。
 
-83 个节点一次建全，按票 01 §C 分两组：**58 个**是 (a) 类"M1 必须实现"
-（其中若干是**空实现**：dispatch 了但无效果），**25 个**是 (b) 类"只留枚举位、
-M1 流程走不到"。
+83 个节点一次建全。**M2 定格**（票 17 §3 / 票 32）：**64 个**是已实现类
+（其中若干是**空实现**：dispatch 了但无效果），**19 个**是只留枚举位类。
 
-票 25 在 (a) 类之上再落一层**记录流可观测性**（票 18 的登记：L2 边界与阶段间节点不
+在已实现类之上再落一层**记录流可观测性**（票 18 的登记：L2 边界与阶段间节点不
 dispatch、不记）：
 
-- :data:`M1_DISPATCH_WHITELIST`（47）：M1 真的会 dispatch、可在记录流里观测到的节点；
-- :data:`M1_EMPTY_LOG`（11）：(a) 类里**空日志**的 L2 节点——枚举位保留，但流程结构性
-  地不经过，故"从实际记录流收集 dispatch 集合 ⊇ 58"按字面不成立（最多 47 条可见，
-  票 18 已登记此口径）。覆盖清单以 :data:`M1_DISPATCH_WHITELIST` 为白名单，见
+- :data:`DISPATCH_WHITELIST`（53）：真的会 dispatch、可在记录流里观测到的节点；
+- :data:`EMPTY_LOG`（11）：已实现类里**空日志**的 L2 节点——枚举位保留，但流程结构性
+  地不经过，故"从实际记录流收集 dispatch 集合 ⊇ 64"按字面不成立（最多 53 条可见，
+  票 18 已登记此口径）。覆盖清单以 :data:`DISPATCH_WHITELIST` 为白名单，见
   ``tests/support/timing_coverage.py``。
 
 纪律：
@@ -26,11 +25,11 @@ from __future__ import annotations
 from enum import Enum
 
 __all__ = [
+    "DISPATCH_WHITELIST",
+    "EMPTY_LOG",
+    "ENUM_ONLY",
+    "IMPLEMENTED",
     "FORBIDDEN_TIMING_NAMES",
-    "M1_DISPATCH_WHITELIST",
-    "M1_EMPTY_LOG",
-    "M1_ENUM_ONLY",
-    "M1_IMPLEMENTED",
     "Timing",
 ]
 
@@ -172,7 +171,7 @@ class Timing(str, Enum):
         return f"L{self.layer}.{self.order} {self.value}"
 
 
-M1_IMPLEMENTED: tuple[Timing, ...] = (
+IMPLEMENTED: tuple[Timing, ...] = (
     # L0：发牌与开局（票 13 §2）
     Timing.GAME_INITIAL_HAND_DEALING,
     Timing.GAME_START,
@@ -218,6 +217,9 @@ M1_IMPLEMENTED: tuple[Timing, ...] = (
     Timing.RESOLVE_AFTER_EFFECT,
     Timing.RESOLVE_END,
     Timing.RESOLVE_AFTER_END,
+    # L6：打出（票 19 的独立构造子；无目标、不占使用次数）
+    Timing.PLAY_DECLARE,
+    Timing.PLAY_ON_PLAY,
     # L7：伤害骨架五时机
     Timing.DAMAGE_DEAL,
     Timing.DAMAGE_TAKE,
@@ -235,22 +237,27 @@ M1_IMPLEMENTED: tuple[Timing, ...] = (
     Timing.NEAR_DEATH_ENTER,
     Timing.NEAR_DEATH_AT,
     Timing.NEAR_DEATH_AFTER,
-    # L13：死亡四时机（BEFORE 跳过）
+    # L13：死亡四时机（无身份局跳过 REVEAL_BEFORE）——M2 身份局五段
     Timing.DEATH_BEFORE_START,
+    Timing.DEATH_REVEAL_IDENTITY_BEFORE,
     Timing.DEATH_REVEAL_IDENTITY_AFTER,
     Timing.DEATH_ON,
     Timing.DEATH_AFTER,
+    # L14：判定三时机（票 26 起 JUDGE 帧在 PHASE_JUDGE 体内 dispatch）
+    Timing.JUDGE_ON,
+    Timing.JUDGE_CARD_BEFORE_EFFECT,
+    Timing.JUDGE_CARD_AFTER_EFFECT,
 )
-"""票 01 §C 的 (a) 类：M1 流程真的会走到（允许空实现 / 空日志）。"""
+"""已实现类（M2 定格 = 64）：流程真的会走到（允许空实现 / 空日志）。"""
 
-_IMPLEMENTED_MEMBERS = frozenset(M1_IMPLEMENTED)
+_IMPLEMENTED_MEMBERS = frozenset(IMPLEMENTED)
 
-M1_ENUM_ONLY: tuple[Timing, ...] = tuple(
+ENUM_ONLY: tuple[Timing, ...] = tuple(
     timing for timing in Timing if timing not in _IMPLEMENTED_MEMBERS
 )
-"""票 01 §C 的 (b) 类：枚举位保留、M1 不 dispatch（遍历 ``Timing`` 保证顺序确定）。"""
+"""只留枚举位类（M2 定格 = 19）：不 dispatch（遍历 ``Timing`` 保证顺序确定）。"""
 
-M1_EMPTY_LOG: tuple[Timing, ...] = (
+EMPTY_LOG: tuple[Timing, ...] = (
     # 准备阶段：只发阶段体 PHASE_PREPARE，边界不 dispatch。
     Timing.PHASE_PREPARE_START,
     Timing.PHASE_PREPARE_END,
@@ -268,27 +275,26 @@ M1_EMPTY_LOG: tuple[Timing, ...] = (
     Timing.PHASE_FINISH_START,
     Timing.PHASE_FINISH_END,
 )
-"""票 01 (a) 类里的**空日志**节点：枚举位保留、记录流里不出现。
+"""已实现类里的**空日志**节点（M2 定格 = 11）：枚举位保留、记录流里不出现。
 
 票 18 承票 06 §7 的明文登记：5 个 ``INTERVAL_*`` 与准备 / 判定 / 结束三个阶段的
 ``*_START`` / ``*_END`` 一律不 dispatch、不记；摸牌 / 出牌 / 弃牌三个阶段的阶段体与边界都发。
-这些节点"结构性存在"（枚举成员 + 阶段口径），由 :data:`M1_EMPTY_LOG` 单列，不混进
-:data:`M1_DISPATCH_WHITELIST`。
+这些节点"结构性存在"（枚举成员 + 阶段口径），由 :data:`EMPTY_LOG` 单列，不混进
+:data:`DISPATCH_WHITELIST`。
 
 **票 26 起的读法**：本常量界定的是**边界节点**，不是"该阶段整体为空"。判定阶段的边界仍
 留在本表（票 17 §3 明定"判定阶段边界节点**不转**"），但它的阶段体自票 26 起会 dispatch
-L14 的判定事件——判定阶段因此不再空过。M1 的 47/58/25 计数与 ``M1_`` 前缀属 M1 里程碑
-陈述，M2 的 53/64/19/11 定格与去前缀由集成票（票 32）一次性执行。
+L14 的判定事件——判定阶段因此不再空过。53/64/19/11 的 M2 定格由票 32 一次性执行。
 """
 
-_EMPTY_LOG_MEMBERS = frozenset(M1_EMPTY_LOG)
+_EMPTY_LOG_MEMBERS = frozenset(EMPTY_LOG)
 
-M1_DISPATCH_WHITELIST: tuple[Timing, ...] = tuple(
-    timing for timing in M1_IMPLEMENTED if timing not in _EMPTY_LOG_MEMBERS
+DISPATCH_WHITELIST: tuple[Timing, ...] = tuple(
+    timing for timing in IMPLEMENTED if timing not in _EMPTY_LOG_MEMBERS
 )
-"""M1 的 **dispatch 白名单**：47 个真的会 dispatch、可在记录流里观测到的节点。
+"""**dispatch 白名单**（M2 定格 = 53）：真的会 dispatch、可在记录流里观测到的节点。
 
-= 58 个 (a) 类 − 11 个空日志节点（票 18 登记、票 25 落地）。覆盖清单
+= 64 个已实现类 − 11 个空日志节点（票 18 登记、票 25 落地、票 32 定格）。覆盖清单
 （``tests/support/timing_coverage.py``）的键集必须**恰等于**本集合，且每个节点都要在
 它声明的基准 / 用例产出的记录流里实测出现。
 """

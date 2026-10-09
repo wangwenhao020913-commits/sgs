@@ -14,7 +14,7 @@ from sgs.timing import Timing
 
 from support import RecordingPlayer, SeatSpec, build_state, run_turns
 
-PACK = load_content_pack()
+PACK = load_content_pack(deck_profile="basic_53")
 
 
 class _Host:

@@ -9,11 +9,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
 import pytest
 
-from replays import scenarios
+from replays import distribution, goals, scenarios
 from sgs.agents import TapeError, TapePlayer, tape_from_journal
 from sgs.data import RuleConfig, load_content_pack
 from sgs.engine import (
@@ -26,7 +27,8 @@ from sgs.engine import (
 
 from support import play_standard
 
-PACK = load_content_pack()
+PACK = load_content_pack(deck_profile="basic_53")
+"""回放对照用的档位：M1 的 ``play_standard`` 走 53 张切片（票 16 §9）。"""
 REPLAYS_DIR = Path(__file__).resolve().parent / "replays"
 
 
@@ -247,7 +249,7 @@ def test_golden_replay_matches_byte_for_byte(slug: str, tmp_path: Path, update_g
     seed, tape = tape_from_journal(records)
     engine = Engine.new_game(seed=seed, rule_config=header.rule_config, pack=pack)
     player = TapePlayer(tape)
-    engine.run([player, player])
+    engine.run([player] * header.rule_config.player_count)
 
     actual = dump_journal(engine.records)
     if actual != expected:
@@ -255,11 +257,45 @@ def test_golden_replay_matches_byte_for_byte(slug: str, tmp_path: Path, update_g
         artifact.write_text(actual, encoding="utf-8")
         raise AssertionError(f"{_first_divergence(expected, actual)}\n本次实际记录流：{artifact}")
 
+    if slug in goals.M2_GOALS:
+        # 门禁期**真的**验证这条基准在证它声称的机制（票 32 §1；M2 用"随机驱动 + 事后判据"
+        # 替代 M1 的录制期脚本，故判据必须在这里也生效，而不是只在 --update-golden 时）。
+        assert goals.M2_GOALS[slug](engine), (
+            f"{slug}：回放后的记录流没有命中它在 goals.py 里声称的机制——"
+            f"基准与判据脱节（要么换种子，要么修判据）"
+        )
+
 
 def test_readme_index_matches_the_golden_file_set() -> None:
     assert _readme_slugs() == {path.stem for path in _golden_files()}, (
         "索引表与基准文件集合互相等于（防孤儿基准 / 孤儿行）"
     )
+
+
+_README_FULL_ROW = re.compile(
+    r"^\|\s*`([0-9]{2}-[a-z0-9-]+)`\s*\|[^|]*\|([^|]*)\|([^|]*)\|([^|]*)\|"
+)
+
+
+def test_the_readme_declares_the_class_deck_and_player_count_of_each_baseline() -> None:
+    """票 32 §1：README 的「类 / 档位 / 人数」三列必须与真源逐条相等。"""
+    declared: dict[str, tuple[str, str, str]] = {}
+    for line in (REPLAYS_DIR / "README.md").read_text(encoding="utf-8").splitlines():
+        match = _README_FULL_ROW.match(line)
+        if match is not None:
+            slug, classes, deck, players = match.groups()
+            declared[slug] = (classes.strip(), deck.strip().strip("`"), players.strip())
+
+    expected = {
+        slug: (
+            "、".join(distribution.SLUG_CLASSES[slug]),
+            scenario.deck_profile,
+            str(scenario.player_count),
+        )
+        for slug, scenario in scenarios.SCENARIOS.items()
+    }
+
+    assert declared == expected, "README 的类 / 档位 / 人数三列与 distribution / scenarios 不一致"
 
 
 FROZEN_BASELINES = (
@@ -270,16 +306,56 @@ FROZEN_BASELINES = (
     "05-near-death-death",
     "06-deck-reshuffle",
 )
-"""票 12 定格的六条基准。
+"""票 12 定格的六条 M1 基准。
 
 **故意写死、不从 ``scenarios.SCENARIOS`` 派生**：那张表是录制源，若从这里派生，新增 /
 删除一条基准就会连同场景一起被"自动追认"，钉不住票 12 的六条。新增基准是对票据的改动，
 必须先改票，再改这里。"""
 
 
-def test_the_frozen_six_baselines_are_exactly_the_file_set() -> None:
-    assert {path.stem for path in _golden_files()} == set(FROZEN_BASELINES), (
-        "M1 的基准恰好是票 12 定格的六条（票 11 §2 第 5 条）"
+def test_the_frozen_m1_six_stay_in_the_file_set() -> None:
+    """M1 六条必须在 34 条里原样保留（票 32 §1：回归网不因 M2 扩容而消失）。"""
+    assert set(FROZEN_BASELINES) <= {path.stem for path in _golden_files()}
+    assert set(FROZEN_BASELINES) == set(scenarios.M1_SCENARIOS)
+
+
+M2_BASELINES = tuple(name for name in distribution.SLUG_CLASSES if name not in set(FROZEN_BASELINES))
+"""M2 的 28 条基准：分布表里除 M1 六条以外的全部 slug（票 32 §1）。"""
+
+
+def test_the_baseline_distribution_meets_every_category_minimum() -> None:
+    """每类达标：七类必需表逐类计数 ≥ 最少条数（票 17 §1 的机械载体）。"""
+    slugs = {path.stem for path in _golden_files()}
+    counts = Counter(
+        category
+        for slug in slugs
+        for category in distribution.SLUG_CLASSES.get(slug, ())
+    )
+
+    shortfalls = {
+        category: (counts[category], minimum)
+        for category, minimum in distribution.CATEGORY_MINIMUMS.items()
+        if counts[category] < minimum
+    }
+    assert not shortfalls, f"分布判据未达标（实得 / 最少）：{shortfalls}"
+    assert counts[distribution.M1_CLASS] == len(FROZEN_BASELINES)
+
+
+def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
+    """无未分类基准：文件集合 == 类表键集 == 场景表键集（三个集合互相等于）。"""
+    files = {path.stem for path in _golden_files()}
+
+    assert files == set(distribution.SLUG_CLASSES), (
+        "每个基准文件都必须在 distribution.SLUG_CLASSES 里登记；反之不得有孤儿登记"
+    )
+    assert files == set(scenarios.SCENARIOS), "场景表与基准文件集合互相等于"
+    assert set(M2_BASELINES) == files - set(FROZEN_BASELINES), "M2 恰为 34 − 6 = 28 条"
+
+
+def test_every_m2_baseline_has_an_after_the_fact_goal() -> None:
+    """28 条 M2 基准都必须有事后判据（goals.py 的登记不得漏）。"""
+    assert set(M2_BASELINES) == set(goals.M2_GOALS), (
+        "M2 基准集合与 goals.M2_GOALS 的键集必须相等"
     )
 
 

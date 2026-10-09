@@ -24,12 +24,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sgs.agents import RandomPlayer
 from sgs.data import RuleConfig, load_content_pack
-from sgs.engine import Engine, dump_journal
+from sgs.engine import Engine, RandomSource, dump_journal
 from sgs.state import Action, EndPhase, Pass, Query, UseCard
 from sgs.timing import Timing
 
-__all__ = ["SCENARIOS", "M1_DECK_PROFILE", "Scenario", "record"]
+from .goals import goal_for
+
+__all__ = [
+    "M1_DECK_PROFILE",
+    "M2_DECK_PROFILE",
+    "SCENARIOS",
+    "Scenario",
+    "record",
+]
 
 M1_DECK_PROFILE = "basic_53"
 """M1 六条基准**显式选中的档位**（票 16 §9）。
@@ -37,17 +46,28 @@ M1_DECK_PROFILE = "basic_53"
 产品默认档在 M2 集成票翻到 ``standard_108`` 之后，M1 回归网仍必须跑 53 张切片——
 这里写死档位名，不让"默认档"的改动泄漏进基准录制。"""
 
+M2_DECK_PROFILE = "standard_108"
+"""M2 的 28 条基准跑**标准版全表**（票 32 §1）。"""
+
 
 @dataclass(frozen=True)
 class Scenario:
-    """一条基准的录制参数；``max_turns`` 是终止保证（票 12 §3）。"""
+    """一条基准的录制参数；``max_turns`` 是终止保证（票 12 §3）。
+
+    ``driver`` 是录制期的驱动：M1 的六条用 ``"scripted"``（``ScenarioPlayer`` 迫使目标链
+    发生）；M2 的 28 条用 ``"random"``（与产品同源的随机玩家跑完整局，事后判据只负责
+    "这条基准要证的事真的发生过"）。磁带冻结决策内容，回放期一律 ``TapePlayer``。
+    """
 
     slug: str
     seed: int
     max_turns: int
+    player_count: int = 2
+    deck_profile: str = M1_DECK_PROFILE
+    driver: str = "scripted"
 
 
-SCENARIOS: dict[str, Scenario] = {
+M1_SCENARIOS: dict[str, Scenario] = {
     "01-slash-dodge-cancel": Scenario(slug="01-slash-dodge-cancel", seed=101, max_turns=40),
     "02-slash-hit-damage": Scenario(slug="02-slash-hit-damage", seed=4, max_turns=40),
     "03-near-death-self-peach": Scenario(
@@ -60,6 +80,90 @@ SCENARIOS: dict[str, Scenario] = {
     "06-deck-reshuffle": Scenario(slug="06-deck-reshuffle", seed=2026, max_turns=80),
 }
 """M1 的 6 条基准（票 12 §3）；`06-deck-reshuffle` 由票 23 追加。"""
+
+
+def _m2(slug: str, *, seed: int, player_count: int, max_turns: int = 400) -> Scenario:
+    return Scenario(
+        slug=slug,
+        seed=seed,
+        max_turns=max_turns,
+        player_count=player_count,
+        deck_profile=M2_DECK_PROFILE,
+        driver="random",
+    )
+
+
+M2_SCENARIOS: dict[str, Scenario] = {
+    "07-identity-4p-rebel-win": _m2("07-identity-4p-rebel-win", seed=233, player_count=4),
+    "08-identity-5p-lord-win": _m2("08-identity-5p-lord-win", seed=148, player_count=5),
+    "09-identity-6p-renegade-win": _m2(
+        "09-identity-6p-renegade-win", seed=521, player_count=6
+    ),
+    "10-identity-7p-lord-win": _m2("10-identity-7p-lord-win", seed=49, player_count=7),
+    "11-identity-8p-rebel-win": _m2("11-identity-8p-rebel-win", seed=37, player_count=8),
+    "12-indulgence-skips-play": _m2(
+        "12-indulgence-skips-play", seed=258, player_count=4
+    ),
+    "13-indulgence-heart-misses": _m2(
+        "13-indulgence-heart-misses", seed=43, player_count=5
+    ),
+    "14-lightning-thunder-damage": _m2(
+        "14-lightning-thunder-damage", seed=285, player_count=4
+    ),
+    "15-lightning-defers-next-seat": _m2(
+        "15-lightning-defers-next-seat", seed=28, player_count=4
+    ),
+    "16-nullify-cancels-a-trick": _m2(
+        "16-nullify-cancels-a-trick", seed=298, player_count=6
+    ),
+    "17-nullify-nested-two": _m2("17-nullify-nested-two", seed=117, player_count=4),
+    "18-nullify-nested-three": _m2("18-nullify-nested-three", seed=14, player_count=4),
+    "19-nullify-on-multi-target": _m2(
+        "19-nullify-on-multi-target", seed=213, player_count=5
+    ),
+    "20-nullify-lightning-defers": _m2(
+        "20-nullify-lightning-defers", seed=105, player_count=4
+    ),
+    "21-rebel-killed-reward": _m2("21-rebel-killed-reward", seed=101, player_count=4),
+    "22-lord-kills-loyalist": _m2("22-lord-kills-loyalist", seed=35, player_count=5),
+    "23-two-deaths-revealed": _m2("23-two-deaths-revealed", seed=36, player_count=4),
+    "24-multi-player-peach-window": _m2(
+        "24-multi-player-peach-window", seed=272, player_count=5
+    ),
+    "25-rollback-same-start": _m2("25-rollback-same-start", seed=241, player_count=4),
+    "26-rollback-start-advances": _m2(
+        "26-rollback-start-advances", seed=133, player_count=4
+    ),
+    "27-slash-beyond-adjacent": _m2(
+        "27-slash-beyond-adjacent", seed=89, player_count=6
+    ),
+    "28-equipment-replacement": _m2(
+        "28-equipment-replacement", seed=165, player_count=4
+    ),
+    "29-serpent-spear-virtual-slash": _m2(
+        "29-serpent-spear-virtual-slash", seed=106, player_count=4
+    ),
+    "30-halberd-three-targets": _m2(
+        "30-halberd-three-targets", seed=230, player_count=6
+    ),
+    "31-play-card-response": _m2("31-play-card-response", seed=190, player_count=4),
+    "32-five-grains-selection": _m2(
+        "32-five-grains-selection", seed=170, player_count=4
+    ),
+    "33-borrowed-sword-use-slash": _m2(
+        "33-borrowed-sword-use-slash", seed=105, player_count=5
+    ),
+    "34-dismantle-or-snatch-equip-judge": _m2(
+        "34-dismantle-or-snatch-equip-judge", seed=288, player_count=4
+    ),
+}
+"""M2 的 28 条基准（票 32 §1）：随机驱动 + 事后判据，种子由开发期搜索得到。
+
+种子策略（票 17 §9 的实现期落点）：在允许的人数档里搜**记录条数最少**的命中局，
+再贪心分配使 28 个 ``(人数, 种子)`` 互不相同——更短的局 = 更小的 golden 文件 +
+更快的门禁回放。搜索脚手架在 ``.scratch/t32/``（被 gitignore，不进交付）。"""
+
+SCENARIOS: dict[str, Scenario] = {**M1_SCENARIOS, **M2_SCENARIOS}
 
 
 @dataclass
@@ -260,21 +364,54 @@ def _find(query: Query, action_type: type) -> Action:
     raise AssertionError(f"{query.kind} 询问里没有 {action_type.__name__} 候选")  # pragma: no cover
 
 
-def record(slug: str) -> str:
-    """用场景脚本跑完整局，返回 canonical JSONL；录制期断言目标段与终止保证。"""
-    scenario = SCENARIOS[slug]
-    pack = load_content_pack(deck_profile=M1_DECK_PROFILE)
-    engine = Engine.new_game(seed=scenario.seed, rule_config=RuleConfig(), pack=pack)
+def _record_scripted(slug: str, scenario: Scenario) -> Engine:
+    """M1 路径：``ScenarioPlayer`` 迫使目标段发生。"""
+    pack = load_content_pack(deck_profile=scenario.deck_profile)
+    engine = Engine.new_game(
+        seed=scenario.seed,
+        rule_config=RuleConfig(player_count=scenario.player_count),
+        pack=pack,
+    )
     recording = _Recording()
-    players: list = [ScenarioPlayer(seat, slug, recording) for seat in range(2)]
+    players: list = [
+        ScenarioPlayer(seat, slug, recording) for seat in range(scenario.player_count)
+    ]
     if slug == "06-deck-reshuffle":
         players = [
             _ReshuffleWatcher(engine, recording, seat, player)
             for seat, player in enumerate(players)
         ]
     engine.run(players)
-
     assert recording.goal_done, f"{slug}：目标段没有命中（seed={scenario.seed}）"
+    return engine
+
+
+def _record_random(slug: str, scenario: Scenario) -> Engine:
+    """M2 路径：随机驱动跑完整局，事后判据断言目标机制真的发生过（票 32 §1）。"""
+    pack = load_content_pack(deck_profile=scenario.deck_profile)
+    engine = Engine.new_game(
+        seed=scenario.seed,
+        rule_config=RuleConfig(player_count=scenario.player_count),
+        pack=pack,
+    )
+    stream = RandomSource(scenario.seed).substream("ai")
+    players = [RandomPlayer(stream) for _ in range(scenario.player_count)]
+    engine.run(players)
+    assert goal_for(slug)(engine), (
+        f"{slug}：事后判据没命中（seed={scenario.seed}, n={scenario.player_count}）；"
+        f"改种子前先读 goals.py 里这条判据"
+    )
+    return engine
+
+
+def record(slug: str) -> str:
+    """跑完整局并返回 canonical JSONL；录制期断言目标链与终止保证。"""
+    scenario = SCENARIOS[slug]
+    if scenario.driver == "random":
+        engine = _record_random(slug, scenario)
+    else:
+        engine = _record_scripted(slug, scenario)
+
     assert engine.records[-1].kind == "game_end", f"{slug}：没有走到终局"
     assert engine.records[-1].result in ("winner", "draw"), "终局结果只能是胜负或平局"
     turns = sum(

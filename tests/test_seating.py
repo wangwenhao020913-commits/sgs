@@ -12,7 +12,7 @@ from sgs.state import alive_seat_at, alive_seats, next_alive_seat, seats_from
 
 from support import SeatSpec, build_state
 
-PACK = load_content_pack()
+PACK = load_content_pack(deck_profile="standard_108")
 
 
 def _state(*alive: bool):

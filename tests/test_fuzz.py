@@ -1,20 +1,25 @@
-"""不变量 fuzz：随机对局驱动的性质检验（票 11 §4 / 票 26）。
+"""不变量 fuzz：随机对局驱动的性质检验（票 11 §4 / 票 26 / 票 32 §2）。
 
-落点 = 库门面（主缝）：``new_game`` + 两个 ``RandomPlayer`` 的**多局**记录流与活状态。
+落点 = 库门面（主缝）：``new_game`` + 每座一个 ``RandomPlayer`` 的**多局**记录流与活状态。
 
-- 预算：默认 **200 局 / 30 s**，以先到者为准终止；默认预算内跑不满 200 局即判失败
-  （性能退化，票 11 §4）。``SGS_FUZZ_GAMES`` / ``SGS_FUZZ_SECONDS`` 可放大做长跑。
-- 逐局验五条不变量：**牌守恒 / 体力范围 / 区域互斥 / 手牌上限 / 事件序号单调**；
-  另加"**每局必达终局**"与"**终局牌守恒**"。
+- 预算：默认 **100 局 / 120 s**，以先到者为准终止；默认预算内跑不满 100 局即判失败
+  （性能退化，票 17 §2）。``SGS_FUZZ_GAMES`` / ``SGS_FUZZ_SECONDS`` 可放大做长跑。
+- 人数按 **2 → 4 → 5 → 6 → 7 → 8 六档确定性轮转**（2 人档护住 ADR-007 的
+  "检测点 ≠ 终止点"分支）；``SGS_FUZZ_PLAYERS`` 可覆盖成固定人数。
+- 逐局验不变量：**牌守恒 / 体力范围 / 区域互斥 / 手牌上限 / 事件序号单调 / 每局必达终局 /
+  终局牌守恒**，外加票 32 新增的四类：**阵亡者三区为空 / 装备槽位唯一 / 判定区同名唯一 /
+  终局身份-胜负一致**。
+- **不进 fuzz**：同时死亡、无懈链、改判——它们是**路径性质**，随机局不保证命中，
+  落基准与构造局面单测更可判决（票 17 §2）。
 - 对局种子来自**测试侧 OS 熵**（``secrets``），**不占游戏内随机源**；失败消息带可复现的
-  ``seed`` 与**步号**，可直接 ``python -m sgs --seed S`` 重跑同一局。
-- 全部走**库 API**（``Engine.new_game`` + 两个 ``RandomPlayer``），不经产品 CLI。
+  ``seed``、人数与**步号**，可直接 ``python -m sgs --seed S --players N`` 重跑同一局。
+- 全部走**库 API**（``Engine.new_game`` + ``RandomPlayer``），不经产品 CLI。
 
 断言分两层（票 11 §4）：
 
 1. **活状态层**：``_FuzzEngine`` 覆写记录流的唯一出口 ``_emit``，每写出一条记录就在**活
-   ``GameState``** 上验体力范围 / 区域互斥 /（边界上的）手牌上限；
-2. **记录流层**：从 ``delta`` 重建四个区域与手牌池，与终局活状态互校——"状态变了却没有
+   ``GameState``** 上验体力范围 / 区域互斥 /（边界上的）手牌上限 / 座位级三区约束；
+2. **记录流层**：从 ``delta`` 重建六区（座位级）并与终局活状态互校——"状态变了却没有
    ``delta``"（`01` 原则 6 的漏记）由此被抓到。
 
 本文件另有一组"fuzz 本身不空转"的元测试：对**人为破坏**的局面断言检查器确实报错。
@@ -31,47 +36,55 @@ from typing import Final
 import pytest
 
 import sgs.agents as agents
-from sgs.data import ContentPack, RuleConfig, load_content_pack
+from sgs.data import ContentPack, Identity, RuleConfig, load_content_pack
 from sgs.engine import Engine, JournalRecord, RandomSource, TimingRecord
 from sgs.state import FrameKind, GameState, SlotKind, Zone, ZoneRef
 from sgs.timing import Timing
 
 from support import SeatSpec, build_state
 
-DEFAULT_GAMES: Final = 200
-DEFAULT_SECONDS: Final = 30.0
+DEFAULT_GAMES: Final = 100
+DEFAULT_SECONDS: Final = 120.0
+PLAYER_ROTATION: Final = (2, 4, 5, 6, 7, 8)
+"""票 17 §2：六档人数确定性轮转；2 人档是无身份 1v1，护住 ADR-007 的分支。"""
 GAMES_ENV: Final = "SGS_FUZZ_GAMES"
 SECONDS_ENV: Final = "SGS_FUZZ_SECONDS"
 SEED_ENV: Final = "SGS_FUZZ_SEED"
+PLAYERS_ENV: Final = "SGS_FUZZ_PLAYERS"
 SEED_SPACE: Final = 1 << 64
 """种子值域上界（票 08 §1：``0 ≤ seed < 2**64``）。"""
 
-QUERY_BUDGET: Final = 20_000
-"""单局询问数上限：防"引擎卡死不收局"把门禁吊住；正常一局远低于它。"""
+QUERY_BUDGET: Final = 50_000
+"""单局询问数上限（票 17 §2：20 000 → 50 000）：防"引擎卡死不收局"把门禁吊住。"""
 
-PACK: Final[ContentPack] = load_content_pack()
-RULE_CONFIG: Final[RuleConfig] = RuleConfig()
+PACK: Final[ContentPack] = load_content_pack(deck_profile="standard_108")
 CARD_COUNT: Final[int] = len(PACK.deck.cards)
+
+SIDE_IDENTITIES: Final[dict[str, frozenset[Identity]]] = {
+    "lord": frozenset({Identity.LORD, Identity.LOYALIST}),
+    "rebel": frozenset({Identity.REBEL}),
+    "renegade": frozenset({Identity.RENEGADE}),
+}
 
 
 class FuzzInvariantError(AssertionError):
     """不变量失败；消息里带可复现的对局种子与步号。"""
 
 
-def _fail(seed: int, record: JournalRecord | None, message: str) -> None:
+def _fail(seed: int, n: int, record: JournalRecord | None, message: str) -> None:
     if record is None:
         where = "（引擎初始化）"
     else:
         where = f"步号 seq={getattr(record, 'seq', '?')} kind={record.kind}"
     raise FuzzInvariantError(
         f"不变量失败：{message}\n"
-        f"对局种子 seed={seed}，{where}\n"
-        f"可复现：python -m sgs --seed {seed}"
+        f"对局种子 seed={seed}，人数 n={n}，{where}\n"
+        f"可复现：python -m sgs --seed {seed} --players {n}"
     )
 
 
 # ---------------------------------------------------------------------------
-# 驱动：库 API × 两个随机玩家
+# 驱动：库 API × 每座一个随机玩家
 # ---------------------------------------------------------------------------
 
 
@@ -83,6 +96,7 @@ class _FuzzEngine(Engine):
     """
 
     game_seed: int = 0
+    game_players: int = 2
 
     def _emit(self, record: JournalRecord) -> None:
         super()._emit(record)
@@ -119,30 +133,33 @@ class _BudgetedPlayer:
         return self._inner.respond(query)
 
 
-def _play(seed: int, *, deadline: float | None = None) -> _FuzzEngine:
+def _play(seed: int, *, players: int = 4, deadline: float | None = None) -> _FuzzEngine:
     """跑完一局（种子由测试侧给定、不占游戏内随机源）。"""
-    engine = _FuzzEngine.new_game(seed=seed, rule_config=RULE_CONFIG, pack=PACK)
+    engine = _FuzzEngine.new_game(
+        seed=seed, rule_config=RuleConfig(player_count=players), pack=PACK
+    )
     engine.game_seed = seed
+    engine.game_players = players
     # 开局那几条记录（初次洗牌 + 发牌）由 ``build_initial`` 直接构造、不走 ``_emit``，
     # 故在这里补一次活状态检查；其后每条记录由 ``_emit`` 覆写逐一检查。
     _check_live_invariants(engine, None)
     ai_stream = RandomSource(seed).substream("ai")
     remaining = [QUERY_BUDGET]
-    players = [
+    participants = [
         _BudgetedPlayer(agents.RandomPlayer(ai_stream), remaining, deadline)
-        for _ in range(RULE_CONFIG.player_count)
+        for _ in range(players)
     ]
     try:
-        engine.run(players)
+        engine.run(participants)
     except _BudgetExceeded:
-        _fail(seed, engine.records[-1], f"超过 {QUERY_BUDGET} 次询问仍未收局")
+        _fail(seed, players, engine.records[-1], f"超过 {QUERY_BUDGET} 次询问仍未收局")
     except _GameTimeout:
-        _fail(seed, engine.records[-1], "单局超过墙上时钟兜底仍未收局（性能退化）")
+        _fail(seed, players, engine.records[-1], "单局超过墙上时钟兜底仍未收局（性能退化）")
     return engine
 
 
-def _play_and_check(seed: int, *, deadline: float | None = None) -> _FuzzEngine:
-    engine = _play(seed, deadline=deadline)
+def _play_and_check(seed: int, *, players: int, deadline: float | None = None) -> _FuzzEngine:
+    engine = _play(seed, players=players, deadline=deadline)
     _check_journal_invariants(engine)
     return engine
 
@@ -155,14 +172,43 @@ def _play_and_check(seed: int, *, deadline: float | None = None) -> _FuzzEngine:
 def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) -> None:
     state = engine.state
     seed = engine.game_seed
+    n = engine.game_players
 
-    # 体力范围：hp ≤ max_hp 恒成立（唯一改体力的口 apply_hp 只查上限）；hp < 0 只允许
-    # 在濒死帧在栈上时（票 11 §4）。M1 伤害恒 1、体力按 1 递减，故 hp < 0 实际不可达。
     for player in state.players:
+        # 体力范围：hp ≤ max_hp 恒成立（唯一改体力的口 apply_hp 只查上限）。hp < 0 只允许
+        # 在"伤害 / 扣减体力 / 濒死"结算在栈上时：3 点闪电把 1~2 体力打到 −1/−2 的那一刻，
+        # 负体力先落进状态、濒死帧随后才压（票 20 §6）。阵亡者保留死亡时的负体力，
+        # 故对 ``alive == False`` 不再要求。
         if player.hp > player.hp_max:
-            _fail(seed, record, f"座位 {player.seat} 体力 {player.hp} 超过上限 {player.hp_max}")
-        if player.hp < 0 and not _near_death_on_stack(engine):
-            _fail(seed, record, f"座位 {player.seat} 体力 {player.hp} < 0 却没有濒死帧在栈上")
+            _fail(seed, n, record, f"座位 {player.seat} 体力 {player.hp} 超过上限 {player.hp_max}")
+        if player.hp < 0 and player.alive and not _hp_may_be_negative(engine):
+            _fail(seed, n, record, f"座位 {player.seat} 体力 {player.hp} < 0 却没有伤害 / 濒死帧在栈上")
+
+        # 阵亡者三区为空（票 17 §2 / 票 32 §2）：死亡结算清空手牌 / 装备区 / 判定区。
+        # 只在**死亡单元跑完**（DEATH 帧不在栈上）时断言——``alive`` 在压 DEATH 帧之前
+        # 就置位，弃牌发生在 ``DEATH_ON``，故濒死→死亡结算中间态仍持有牌是合法的。
+        if (
+            not player.alive
+            and not _death_on_stack(engine)
+            and (player.hand or player.equip or player.judge)
+        ):
+            _fail(
+                seed,
+                n,
+                record,
+                f"座位 {player.seat} 已阵亡，仍有手牌 {len(player.hand)} / "
+                f"装备 {len(player.equip)} / 判定 {len(player.judge)}",
+            )
+
+        # 装备槽位唯一（票 17 §2）：每个座位每槽 ≤ 1（move_card 的编程错误兜底在此复验）。
+        slots = [state.cards[card_id].slot for card_id in player.equip]
+        if len(slots) != len(set(slots)):
+            _fail(seed, n, record, f"座位 {player.seat} 装备槽位重复：{slots}")
+
+        # 判定区同名唯一（票 17 §2）：每个座位的判定区每牌名 ≤ 1。
+        names = [state.cards[card_id].name for card_id in player.judge]
+        if len(names) != len(set(names)):
+            _fail(seed, n, record, f"座位 {player.seat} 判定区同名牌重复：{names}")
 
     # 区域互斥：一张实体牌任一时刻只在一个区域（六个区：三个共享区 + 每座位三区）。
     everywhere = [*state.deck, *state.discard, *state.processing]
@@ -171,7 +217,7 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
         everywhere.extend(player.equip)
         everywhere.extend(player.judge)
     if len(everywhere) != len(state.cards) or len(set(everywhere)) != len(everywhere):
-        _fail(seed, record, "区域互斥被破坏：有实体牌丢失或同时出现在多个区域")
+        _fail(seed, n, record, "区域互斥被破坏：有实体牌丢失或同时出现在多个区域")
 
     # 手牌上限 = 当前体力值，只在**边界处属于谁的座位**上断言（摸牌途中允许超上限；
     # 对手的手牌要到它自己回合的弃牌阶段才受约束）。每个座位都会在自己回合的
@@ -181,13 +227,22 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
         if player.alive and len(player.hand) > player.hp:
             _fail(
                 seed,
+                n,
                 record,
                 f"回合边界座位 {player.seat} 手牌 {len(player.hand)} 超过体力 {player.hp}",
             )
 
 
-def _near_death_on_stack(engine: Engine) -> bool:
-    return any(frame.kind is FrameKind.NEAR_DEATH for frame in engine.stack.frames)
+_HP_NEGATIVE_FRAMES = (FrameKind.DAMAGE, FrameKind.LIFE_DECREASE, FrameKind.NEAR_DEATH)
+"""负体力在结算中合法的帧：伤害 → 扣减体力 → 濒死（票 20 §6 的 3 点闪电）。"""
+
+
+def _hp_may_be_negative(engine: Engine) -> bool:
+    return any(frame.kind in _HP_NEGATIVE_FRAMES for frame in engine.stack.frames)
+
+
+def _death_on_stack(engine: Engine) -> bool:
+    return any(frame.kind is FrameKind.DEATH for frame in engine.stack.frames)
 
 
 def _is_hand_limit_point(record: JournalRecord | None) -> bool:
@@ -204,32 +259,96 @@ def _is_hand_limit_point(record: JournalRecord | None) -> bool:
 
 def _check_journal_invariants(engine: _FuzzEngine) -> None:
     seed = engine.game_seed
+    n = engine.game_players
     records = engine.records
 
     # 事件序号单调：全流单一 seq，从 1 起、严格递增（不必连续）。
     sequenced = [record for record in records if record.kind != "header"]
     if not sequenced or sequenced[0].seq != 1:
-        _fail(seed, sequenced[0] if sequenced else None, "记录流的 seq 必须从 1 起")
+        _fail(seed, n, sequenced[0] if sequenced else None, "记录流的 seq 必须从 1 起")
     for previous, current in zip(sequenced, sequenced[1:]):
         if current.seq <= previous.seq:
-            _fail(seed, current, f"事件序号必须严格递增：{previous.seq} → {current.seq}")
+            _fail(seed, n, current, f"事件序号必须严格递增：{previous.seq} → {current.seq}")
 
     # 每局必达终局，且 game_end 是最后一条记录。
     tail = records[-1]
     if tail.kind != "game_end":
-        _fail(seed, tail, "每局必达终局：最后一条记录必须是 game_end")
+        _fail(seed, n, tail, "每局必达终局：最后一条记录必须是 game_end")
     if tail.result not in {"winner", "draw"}:
-        _fail(seed, tail, f"终局结果只能是 winner / draw，实得 {tail.result!r}")
-    if tail.result == "winner" and tail.winner is None:
-        _fail(seed, tail, "winner 局必须有胜者")
-    if tail.result == "draw" and tail.winner is not None:
-        _fail(seed, tail, "平局不得有胜者")
+        _fail(seed, n, tail, f"终局结果只能是 winner / draw，实得 {tail.result!r}")
+
+    _check_endgame_identity_consistency(engine, tail)
 
     # 终局牌守恒：清栈收尾（补做 L5.6）之后处理区必空。
     if engine.state.processing:
-        _fail(seed, tail, "终局收尾后处理区必须为空")
+        _fail(seed, n, tail, "终局收尾后处理区必须为空")
 
-    _replay_deltas_and_cross_check(engine, seed)
+    _replay_deltas_and_cross_check(engine, seed, n)
+
+
+def _check_endgame_identity_consistency(engine: _FuzzEngine, tail: JournalRecord) -> None:
+    """终局身份-胜负一致（票 17 §2）。
+
+    判据读**引擎全知态**，不读 ``PlayerView``（其余角色身份未亮明）。无身份局（2 人）
+    沿用 M1 形状；身份局（4~8 人）按 ``side`` 断言。
+    """
+    seed = engine.game_seed
+    n = engine.game_players
+    identities = [player.identity for player in engine.state.players]
+
+    if n == 2:
+        if tail.result == "winner" and tail.winner is None:
+            _fail(seed, n, tail, "无身份局 winner 局必须有胜者")
+        if tail.result == "draw" and tail.winner is not None:
+            _fail(seed, n, tail, "平局不得有胜者")
+        return
+
+    # 身份局：draw ⇒ side=None 且 winners 空；winner ⇒ side 合法且 winners 非空。
+    if tail.result == "draw":
+        if tail.side is not None or tail.winners:
+            _fail(seed, n, tail, "身份局平局不得有 side / winners")
+        return
+
+    if tail.side not in SIDE_IDENTITIES:
+        _fail(seed, n, tail, f"身份局胜局的 side 必须是三条之一，实得 {tail.side!r}")
+        return
+    if not tail.winners:
+        _fail(seed, n, tail, "身份局胜局必须有 winners")
+        return
+    expected = {
+        seat for seat, identity in enumerate(identities) if identity in SIDE_IDENTITIES[tail.side]
+    }
+    if set(tail.winners) != expected:
+        _fail(seed, n, tail, f"winners 必须恰为该侧全部座位：期望 {sorted(expected)}，实得 {list(tail.winners)}")
+
+    lord_seat = next(
+        player.seat for player in engine.state.players if player.identity is Identity.LORD
+    )
+    lord_dead = not engine.state.players[lord_seat].alive
+    if tail.side == "lord":
+        # 主忠方胜：要么主公存活，要么主公阵亡当批只剩内奸同死（见票 14）。名字上只要求
+        # winners 含主公或全部反贼与内奸已死；这里断言较弱的、结构可靠的一条：side=lord
+        # 时**主公未死**或**所有反贼与内奸皆死**。
+        others_dead = all(
+            player.identity in SIDE_IDENTITIES["lord"] or not player.alive
+            for player in engine.state.players
+        )
+        if not (not lord_dead or others_dead):
+            _fail(seed, n, tail, "side=lord 但主公已阵亡且仍有非主忠方存活")
+    if tail.side == "rebel" and not lord_dead:
+        _fail(seed, n, tail, "side=rebel 必须以主公阵亡为前提")
+    if tail.side == "renegade":
+        if not lord_dead:
+            _fail(seed, n, tail, "side=renegade 必须以主公阵亡为前提")
+        alive_others = [
+            player.seat
+            for player in engine.state.players
+            if player.alive and player.seat != lord_seat
+        ]
+        if not (
+            len(alive_others) == 1 and identities[alive_others[0]] is Identity.RENEGADE
+        ):
+            _fail(seed, n, tail, f"side=renegade 但除主公外唯一存活者不是内奸：{alive_others}")
 
 
 def _ids(record: JournalRecord) -> list[int]:
@@ -296,6 +415,7 @@ class _Piles:
             if card_id not in pile:
                 _fail(
                     seed,
+                    self.seats,
                     record,
                     f"delta 声称从 {record.from_zone.zone.value} 移走牌 {card_id}，但它不在那里",
                 )
@@ -323,12 +443,12 @@ class _Piles:
         """
         shuffled = _ids(record)
         if sorted(shuffled) != sorted(self.discard):
-            _fail(seed, record, "重洗 delta 的牌集与当时弃牌堆不符")
+            _fail(seed, self.seats, record, "重洗 delta 的牌集与当时弃牌堆不符")
         self.discard = []
         self.deck.extend(shuffled)
 
 
-def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int) -> None:
+def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int, n: int) -> None:
     """从 ``delta`` 重建六个区域，逐条查牌守恒，再与终局活状态互校。
 
     区域坐标带座位 ⇒ 重建是**座位级**的（票 16 §2：重放器补座位级重建），
@@ -349,24 +469,29 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int) -> None:
             piles.take(record, seed)
             piles.place(record)
         else:
-            continue  # hp_change 不动牌，与牌守恒无关
+            continue  # hp_change / identity_* 不动牌，与牌守恒无关
 
         if piles.total != CARD_COUNT:
-            _fail(seed, record, f"牌守恒被破坏：六个区域合计 {piles.total} 张，应为 {CARD_COUNT} 张")
+            _fail(
+                seed,
+                n,
+                record,
+                f"牌守恒被破坏：六个区域合计 {piles.total} 张，应为 {CARD_COUNT} 张",
+            )
 
     if piles.deck != engine.state.deck:
-        _fail(seed, None, "牌堆与从 delta 重建的结果不一致（状态变了却没有 delta）")
+        _fail(seed, n, None, "牌堆与从 delta 重建的结果不一致（状态变了却没有 delta）")
     if piles.discard != engine.state.discard:
-        _fail(seed, None, "弃牌堆与从 delta 重建的结果不一致")
+        _fail(seed, n, None, "弃牌堆与从 delta 重建的结果不一致")
     if piles.processing != engine.state.processing:
-        _fail(seed, None, "处理区与从 delta 重建的结果不一致")
+        _fail(seed, n, None, "处理区与从 delta 重建的结果不一致")
     for seat, player in enumerate(engine.state.players):
         if piles.hands[seat] != player.hand:
-            _fail(seed, None, f"座位 {seat} 手牌与从 delta 重建的结果不一致")
+            _fail(seed, n, None, f"座位 {seat} 手牌与从 delta 重建的结果不一致")
         if piles.equip[seat] != player.equip:
-            _fail(seed, None, f"座位 {seat} 装备区与从 delta 重建的结果不一致")
+            _fail(seed, n, None, f"座位 {seat} 装备区与从 delta 重建的结果不一致")
         if piles.judge[seat] != player.judge:
-            _fail(seed, None, f"座位 {seat} 判定区与从 delta 重建的结果不一致")
+            _fail(seed, n, None, f"座位 {seat} 判定区与从 delta 重建的结果不一致")
     if sorted(
         [
             *piles.deck,
@@ -377,11 +502,11 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int) -> None:
             *(card_id for pile in piles.judge for card_id in pile),
         ]
     ) != list(range(CARD_COUNT)):
-        _fail(seed, None, "牌守恒被破坏：并非每张实体牌恰在一个区域")
+        _fail(seed, n, None, "牌守恒被破坏：并非每张实体牌恰在一个区域")
 
 
 # ---------------------------------------------------------------------------
-# 预算与种子（测试侧）
+# 预算、人数轮转与种子（测试侧）
 # ---------------------------------------------------------------------------
 
 
@@ -392,6 +517,16 @@ def _env_positive(name: str, default, convert):
     value = convert(raw)
     assert value > 0, f"{name} 必须是正数，得到 {raw!r}"
     return value
+
+
+def _players_for(game_index: int) -> int:
+    """人数轮转：默认 2/4/5/6/7/8 六档确定性轮转；``SGS_FUZZ_PLAYERS`` 覆盖成固定值。"""
+    raw = os.environ.get(PLAYERS_ENV)
+    if raw is not None:
+        value = int(raw)
+        assert value in PLAYER_ROTATION, f"{PLAYERS_ENV} 必须是 {PLAYER_ROTATION} 之一"
+        return value
+    return PLAYER_ROTATION[game_index % len(PLAYER_ROTATION)]
 
 
 def _seed_base() -> int:
@@ -408,7 +543,7 @@ def _seed_base() -> int:
 
 
 def test_random_games_satisfy_the_invariants():
-    """默认 200 局 / 30 s：以先到者为准；默认预算内跑不满即为性能退化（票 11 §4）。"""
+    """默认 100 局 / 120 s：以先到者为准；默认预算内跑不满即为性能退化（票 17 §2）。"""
     game_limit = _env_positive(GAMES_ENV, DEFAULT_GAMES, int)
     seconds = _env_positive(SECONDS_ENV, DEFAULT_SECONDS, float)
     base = _seed_base()
@@ -418,13 +553,23 @@ def test_random_games_satisfy_the_invariants():
     while played < game_limit:
         if time.monotonic() >= deadline:
             pytest.fail(
-                f"不变量 fuzz 超时：{seconds:g}s 内只跑完 {played}/{game_limit} 局（性能退化，票 11 §4）。\n"
+                f"不变量 fuzz 超时：{seconds:g}s 内只跑完 {played}/{game_limit} 局（性能退化，票 17 §2）。\n"
                 f"本次种子基数 base={base}；用 {SEED_ENV}={base} 可复跑同一序列。"
             )
-        _play_and_check((base + played) % SEED_SPACE, deadline=deadline)
+        players = _players_for(played)
+        _play_and_check((base + played) % SEED_SPACE, players=players, deadline=deadline)
         played += 1
 
     assert played == game_limit
+
+
+def test_the_player_rotation_covers_the_six_identity_branches():
+    """六档轮转是确定性的，且 2 人档（无身份分支）确在轮转里（票 17 §2）。"""
+    rotation = [_players_for(index) for index in range(len(PLAYER_ROTATION))]
+
+    assert set(rotation) == set(PLAYER_ROTATION)
+    assert len(rotation) == len(set(rotation))
+    assert 2 in rotation
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +622,8 @@ def test_the_live_checker_covers_the_equipment_and_judge_zones():
     engine = _play(1)
     pile = engine.state.discard or engine.state.deck or engine.state.processing
     assert pile, "这一局必然有牌落在共享区"
-    engine.state.player(0).equip.append(pile[0])
+    survivor = next(player for player in engine.state.players if player.alive)
+    survivor.equip.append(pile[0])
 
     with pytest.raises(FuzzInvariantError, match="区域互斥"):
         _check_live_invariants(engine, engine.records[-1])
@@ -501,10 +647,23 @@ def test_the_live_checker_catches_a_hand_over_the_limit_at_a_turn_boundary():
     )
     engine = _FuzzEngine.from_state(state, seed=1)
     engine.game_seed = 1
+    engine.game_players = 2
     boundary = TimingRecord(seq=999, timing=Timing.TURN_AFTER_END, frame_id=0, depth=0)
 
     with pytest.raises(FuzzInvariantError, match="手牌"):
         _check_live_invariants(engine, boundary)
+
+
+def test_the_live_checker_catches_a_dead_player_holding_cards():
+    """阵亡者三区为空（票 32 §2）：给阵亡者留一张手牌必须被抓到。"""
+    engine = _play(1)
+    victim = engine.state.players[1]
+    victim.alive = False
+    victim.hand.append(engine.state.deck[0])
+    engine.state.deck.remove(engine.state.deck[0])
+
+    with pytest.raises(FuzzInvariantError, match="已阵亡"):
+        _check_live_invariants(engine, engine.records[-1])
 
 
 def test_the_replay_check_catches_live_state_drifting_from_the_deltas():
@@ -512,10 +671,10 @@ def test_the_replay_check_catches_live_state_drifting_from_the_deltas():
     engine.state.discard.append(0)  # 状态变了却没有 delta
 
     with pytest.raises(FuzzInvariantError, match="不一致"):
-        _replay_deltas_and_cross_check(engine, engine.game_seed)
+        _replay_deltas_and_cross_check(engine, engine.game_seed, engine.game_players)
 
 
-def test_the_failure_message_carries_the_seed_and_the_step():
+def test_the_failure_message_carries_the_seed_the_player_count_and_the_step():
     engine = _play(1)
     _drop_one_card(engine.state)
 
@@ -524,5 +683,6 @@ def test_the_failure_message_carries_the_seed_and_the_step():
 
     message = str(caught.value)
     assert "seed=1" in message
+    assert f"n={engine.game_players}" in message
     assert f"步号 seq={engine.records[-1].seq}" in message
     assert "python -m sgs --seed 1" in message

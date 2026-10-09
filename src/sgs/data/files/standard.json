@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "pack_id": "standard",
-  "deck_profile": "basic_53",
+  "deck_profile": "standard_108",
   "card_types": [
     {
       "id": "slash",

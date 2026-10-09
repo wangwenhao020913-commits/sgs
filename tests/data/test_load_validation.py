@@ -43,22 +43,28 @@ def _standard_108_raw() -> dict[str, Any]:
 
 
 def _basic_only_raw() -> dict[str, Any]:
-    """只留 ``basic_53`` 档的基底：改坏牌名时不必连带修 ``standard_108`` 的引用。"""
+    """只留 ``basic_53`` 档的基底（并把默认档指回它）：改坏牌名时不必连带修 108 档的引用。"""
     raw = _standard_raw()
     del raw["decks"][STANDARD_108]
+    raw["deck_profile"] = BASIC_53
     return raw
 
 
 def test_loads_standard_content_pack():
+    """M2 收口后，产品默认档 = ``standard_108``（票 32 §1）；53 张档仍可显式选中。"""
     pack = load_content_pack()
 
     assert isinstance(pack, ContentPack)
     assert pack.schema_version == 2
     assert pack.pack_id == "standard"
-    assert pack.deck_profile == BASIC_53
+    assert pack.deck_profile == STANDARD_108
     assert [card_type.id for card_type in pack.card_types][:3] == ["slash", "dodge", "peach"]
     assert len(pack.card_types) == 32, "标准版全表 32 个牌名"
-    assert len(pack.deck.cards) == 53
+    assert len(pack.deck.cards) == 108
+
+    basic = load_content_pack(deck_profile=BASIC_53)
+    assert basic.deck_profile == BASIC_53
+    assert len(basic.deck.cards) == 53
 
 
 def test_loads_the_standard_108_profile_with_all_its_declarations():
@@ -82,11 +88,11 @@ def test_the_default_profile_is_selected_by_the_pack_and_can_be_overridden():
     basic = load_content_pack(deck_profile=BASIC_53)
     standard = load_content_pack(deck_profile=STANDARD_108)
 
-    assert default.deck_profile == BASIC_53
+    assert default.deck_profile == STANDARD_108, "M2 收口翻默认档（票 32 §1）"
     assert basic.deck_profile == BASIC_53
     assert standard.deck_profile == STANDARD_108
-    assert default.deck.cards == basic.deck.cards, "同档同数据"
-    assert len(standard.deck.cards) == 108
+    assert default.deck.cards == standard.deck.cards, "同档同数据"
+    assert len(basic.deck.cards) == 53
 
 
 def test_an_explicitly_unknown_profile_is_rejected_by_the_selection_entry():
@@ -531,12 +537,12 @@ def test_expect_by_category_must_declare_every_actual_category():
 
 def test_optional_expect_dimensions_are_not_checked_when_absent():
     """``basic_53`` 不写 ``by_suit`` / ``by_category``，故这两维对它不生效（零改动通过）。"""
-    pack = load_content_pack()
+    pack = load_content_pack(deck_profile=BASIC_53)
     expect = pack.decks[BASIC_53].expect
     assert expect is not None
     assert expect.by_suit is None and expect.by_category is None
 
-    assert _validate(_standard_raw()).deck_profile == BASIC_53
+    assert _validate(_basic_only_raw()).deck_profile == BASIC_53
 
 
 def test_semantic_errors_are_aggregated_not_fail_fast():

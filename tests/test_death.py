@@ -19,7 +19,8 @@ from sgs.timing import Timing
 
 from support import SeatSpec, build_state, cards_of_type
 
-PACK = load_content_pack()
+PACK = load_content_pack(deck_profile="basic_53")
+"""M1 回归网显式选中 53 张档（票 16 §9）；身份奖惩的 108 档用例在 ``test_victory.py``。"""
 SLASH = cards_of_type(PACK, "slash")
 PEACH = cards_of_type(PACK, "peach")
 

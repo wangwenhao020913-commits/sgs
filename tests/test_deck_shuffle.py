@@ -13,7 +13,8 @@ from sgs.state import MoveReason, Phase, Zone
 
 from support import RecordingPlayer, SeatSpec, build_state, run_turns, run_until
 
-PACK = load_content_pack()
+PACK = load_content_pack(deck_profile="basic_53")
+"""M1 回归网显式选中 53 张档（票 16 §9）：产品默认档翻到 108 后重洗语义仍钉在旧切片上。"""
 OLD_DECK = (0,)
 DISCARD_PILE = (1, 2, 3)
 """牌堆只剩 1 张、弃牌堆 3 张：第一回合要摸 2 张，必然跨过一次重洗。"""

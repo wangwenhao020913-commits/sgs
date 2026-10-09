@@ -28,7 +28,8 @@ from sgs.state import (
 
 from support import SeatSpec, build_state
 
-PACK = load_content_pack()
+PACK = load_content_pack(deck_profile="basic_53")
+"""M1 回归网显式选中 53 张档（票 16 §9）：座位手牌的牌 id 锚在旧切片上。"""
 
 
 # ---------------------------------------------------------------------------

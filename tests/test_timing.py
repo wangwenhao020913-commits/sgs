@@ -1,15 +1,15 @@
-"""时机枚举的完整性：权威表恰 83 个节点、层号派生、M1 三分区、伪时机禁令。
+"""时机枚举的完整性：权威表恰 83 个节点、层号派生、M2 三分区、伪时机禁令。
 
 枚举本身是票 01 冻结数据的落地；这里只断言"表没被写错"（数量、分区、伪时机禁令、
 标识符只存枚举标识），"哪些节点真的被 dispatch"由 ``tests/test_timing_coverage.py``
 的覆盖清单断言。
 
-M1 的分区在票 01 的 (a)/(b) 之上再分一层（票 18 登记、票 25 落地）：
+M2 定格（票 17 §3 / 票 32）把分区改为里程碑中性名：
 
-- ``M1_DISPATCH_WHITELIST``（47）：M1 真的会 dispatch、可在记录流里观测到的节点；
-- ``M1_EMPTY_LOG``（11）：票 01 (a) 类里**空日志**的 L2 边界与阶段间节点——枚举位按 (a)
-  保留，但流程结构性地不经过、因此记录流里一个都不出现；
-- ``M1_ENUM_ONLY``（25）：票 01 (b) 类，枚举位保留、M1 流程走不到。
+- ``DISPATCH_WHITELIST``（53）：真的会 dispatch、可在记录流里观测到的节点；
+- ``EMPTY_LOG``（11）：已实现类里**空日志**的 L2 边界与阶段间节点——枚举位保留，
+  但流程结构性地不经过、因此记录流里一个都不出现；
+- ``ENUM_ONLY``（19）：枚举位保留、流程走不到。
 """
 
 from __future__ import annotations
@@ -21,11 +21,11 @@ from pydantic import ValidationError
 
 from sgs.engine import TimingRecord, record_json
 from sgs.timing import (
+    DISPATCH_WHITELIST,
+    EMPTY_LOG,
+    ENUM_ONLY,
     FORBIDDEN_TIMING_NAMES,
-    M1_DISPATCH_WHITELIST,
-    M1_EMPTY_LOG,
-    M1_ENUM_ONLY,
-    M1_IMPLEMENTED,
+    IMPLEMENTED,
     Timing,
 )
 
@@ -46,29 +46,44 @@ def test_layer_and_order_are_derived_from_the_enum():
 
 
 def test_implemented_and_enum_only_partition_the_whole_table():
-    implemented = set(M1_IMPLEMENTED)
-    enum_only = set(M1_ENUM_ONLY)
+    implemented = set(IMPLEMENTED)
+    enum_only = set(ENUM_ONLY)
 
-    assert len(implemented) == 58, "票 01 §C (a) 类恰 58 个节点"
-    assert len(enum_only) == 25, "票 01 §C (b) 类恰 25 个节点"
+    assert len(implemented) == 64, "M2 已实现类恰 64 个节点（票 17 §3）"
+    assert len(enum_only) == 19, "M2 只留枚举位类恰 19 个节点（票 17 §3）"
     assert implemented | enum_only == set(Timing)
     assert implemented & enum_only == set()
 
 
 def test_the_dispatch_whitelist_and_empty_log_nodes_partition_the_implemented_set():
-    dispatch = set(M1_DISPATCH_WHITELIST)
-    empty_log = set(M1_EMPTY_LOG)
+    dispatch = set(DISPATCH_WHITELIST)
+    empty_log = set(EMPTY_LOG)
 
-    assert len(dispatch) == 47, "M1 真的会 dispatch 的节点恰 47 个（记录流可观测）"
-    assert len(empty_log) == 11, "票 01 (a) 类里的空日志 L2 节点恰 11 个"
+    assert len(dispatch) == 53, "M2 dispatch 白名单恰 53 个（记录流可观测）"
+    assert len(empty_log) == 11, "空日志 L2 节点恰 11 个"
     assert dispatch.isdisjoint(empty_log)
-    assert dispatch | empty_log == set(M1_IMPLEMENTED), "47 + 11 复原 58 个 (a) 类"
-    assert dispatch | empty_log | set(M1_ENUM_ONLY) == set(Timing)
+    assert dispatch | empty_log == set(IMPLEMENTED), "53 + 11 复原 64 个已实现类"
+    assert dispatch | empty_log | set(ENUM_ONLY) == set(Timing)
+
+
+def test_the_six_m2_nodes_are_dispatchable():
+    """票 01 §6 的 6 个 enum-only 转 dispatch（票 17 §3 / 票 32）。"""
+    six = {
+        Timing.JUDGE_ON,
+        Timing.JUDGE_CARD_BEFORE_EFFECT,
+        Timing.JUDGE_CARD_AFTER_EFFECT,
+        Timing.DEATH_REVEAL_IDENTITY_BEFORE,
+        Timing.PLAY_DECLARE,
+        Timing.PLAY_ON_PLAY,
+    }
+
+    assert set(DISPATCH_WHITELIST) >= six
+    assert six.isdisjoint(ENUM_ONLY)
 
 
 def test_the_empty_log_nodes_are_the_l2_boundaries_and_inter_phase_nodes():
-    """票 25 实测：11 个 (a) 类节点从不进记录流，它们是 L2 边界与 5 个阶段间。"""
-    assert set(M1_EMPTY_LOG) == {
+    """票 25 实测：11 个节点从不进记录流，它们是 L2 边界与 5 个阶段间。"""
+    assert set(EMPTY_LOG) == {
         Timing.PHASE_PREPARE_START,
         Timing.PHASE_PREPARE_END,
         Timing.INTERVAL_PREPARE_TO_JUDGE,
@@ -81,6 +96,13 @@ def test_the_empty_log_nodes_are_the_l2_boundaries_and_inter_phase_nodes():
         Timing.PHASE_FINISH_START,
         Timing.PHASE_FINISH_END,
     }
+
+
+def test_no_timing_constant_keeps_the_m1_prefix():
+    """票 17 §3：常量改里程碑中性名，避免 M1 / M2 双真源。"""
+    import sgs.timing as timing_module
+
+    assert not [name for name in dir(timing_module) if name.startswith("M1_")]
 
 
 def test_pseudo_timing_names_are_not_members():

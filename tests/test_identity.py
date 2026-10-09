@@ -24,7 +24,7 @@ from sgs.state import PlayerPublic, project
 
 from support import RecordingPlayer, SeatSpec, build_state, run_turns
 
-PACK: ContentPack = load_content_pack()
+PACK: ContentPack = load_content_pack(deck_profile="standard_108")
 SEED = 20261009
 
 

@@ -20,7 +20,7 @@ from sgs.timing import Timing
 
 from support import SeatSpec, build_state, cards_of_type, declare_death
 
-PACK = load_content_pack()
+PACK = load_content_pack(deck_profile="standard_108")
 SLASH = cards_of_type(PACK, "slash")
 PEACH = cards_of_type(PACK, "peach")
 
@@ -240,6 +240,36 @@ def test_the_lord_dying_on_their_own_turn_does_not_end_the_turn():
 
     death = _death_frame(engine)
     assert Timing.TURN_END.value not in _timings(engine, frame_id=death.frame_id)
+
+
+def test_a_non_lord_dying_on_their_own_turn_skips_the_rest_of_the_turn():
+    """票 14 §4 的回合结束分支必须**真的**结束回合（票 32 §2 的 fuzz 不变量发现的回归）。
+
+    阵亡者不再摸牌 / 出牌，该回合只发一条 ``TURN_END``（死亡段内那条），随后
+    ``TURN_AFTER_END`` 与轮转；第二条 ``TURN_END`` 不得出现。
+    """
+    engine = _engine(FOUR, deck=tuple(range(1, 40)))
+    engine._start()
+    engine.state.turn_seat = 2
+    declare_death(engine, 2)
+    _advance_deaths(engine, 1)
+
+    _advance_until(engine, lambda: engine.state.turn_seat == 3)
+
+    seat_two = [record for record in engine.records if record.kind == "timing" and record.actor == 2]
+    assert [record.timing.value for record in seat_two].count(Timing.TURN_END.value) == 1
+    assert [record.timing.value for record in seat_two].count(Timing.TURN_AFTER_END.value) == 1
+    assert not [
+        record.timing.value
+        for record in seat_two
+        if record.timing.value.startswith("PHASE_")
+    ], "阵亡者不得再走任何阶段（不摸牌、不出牌、不弃牌）"
+    gained = [
+        delta
+        for delta in _deltas(engine, "card_move")
+        if delta.to_zone is not None and delta.to_zone.seat == 2
+    ]
+    assert gained == [], "阵亡者不再获得任何牌"
 
 
 def test_a_lord_death_ends_the_game_with_the_rebel_side_and_its_winners():
