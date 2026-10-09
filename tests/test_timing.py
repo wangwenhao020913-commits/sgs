@@ -10,11 +10,16 @@ M2 定格（票 17 §3 / 票 32）把分区改为里程碑中性名：
 - ``EMPTY_LOG``（11）：已实现类里**空日志**的 L2 边界与阶段间节点——枚举位保留，
   但流程结构性地不经过、因此记录流里一个都不出现；
 - ``ENUM_ONLY``（19）：枚举位保留、流程走不到。
+
+末尾一节是**术语表计数纪律**（retro 票 06）：`GLOSSARY.md` 里这三个集合与派生的
+``IMPLEMENTED`` 的四个计数必须与本文导入的长度同步，否则漂移只在 review 时被人读出来。
 """
 
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -139,3 +144,94 @@ def test_timing_records_store_only_the_enum_identifier_not_the_rendered_label():
     for derived in ("label", "layer", "order"):
         assert derived not in payload
         assert derived not in TimingRecord.model_fields
+
+
+# ---------------------------------------------------------------------------
+# 术语表计数纪律：GLOSSARY.md 的时机计数必须与 enum.py 同步（retro 票 06）
+# ---------------------------------------------------------------------------
+
+GLOSSARY_PATH = Path(__file__).resolve().parent.parent / "GLOSSARY.md"
+"""术语表在仓库根，是**非冻结文档**：计数漂移时就地改它，不改 ``开发文档/``（票 17 §8 R-2/R-3）。"""
+
+_GLOSSARY_COUNT_CLAIMS: tuple[tuple[str, str], ...] = (
+    ("dispatch 白名单", r"\*\*dispatch 白名单\*\*里的\s*(\d+)\s*个"),
+    ("dispatch 白名单", r"观测到的\*\*时机节点\*\*集合（M2 定格\s*\*\*(\d+)\*\*\s*个）"),
+    ("空日志节点", r"不出现的\s*(\d+)\s*个 L2 节点"),
+    ("已实现类", r"复原\*\*已实现类\*\*的\s*(\d+)\s*个"),
+    ("枚举位", r"余\s*(\d+)\s*个\*\*枚举位\*\*"),
+)
+"""每条 =（轴, 正则）；正则恰好捕获一个十进制计数。同一轴可以有多处声明（**每处都得对、每处都得被扫到**）。"""
+
+_GLOSSARY_EXPECTED_COUNTS: dict[str, int] = {
+    "dispatch 白名单": len(DISPATCH_WHITELIST),
+    "空日志节点": len(EMPTY_LOG),
+    "已实现类": len(IMPLEMENTED),
+    "枚举位": len(ENUM_ONLY),
+}
+"""四个计数的唯一真源 = ``enum.py`` 的三个集合与由它们派生的 ``IMPLEMENTED``。"""
+
+_GLOSSARY_FIX_HINT = "同步 GLOSSARY.md 的计数（非冻结文档，可就地改）"
+
+
+def _glossary_text() -> str:
+    return GLOSSARY_PATH.read_text(encoding="utf-8")
+
+
+def _glossary_count_drift(text: str) -> list[str]:
+    """GLOSSARY 文本里与 ``enum.py`` 计数不符的声明；空列表 = 同步。"""
+    drift: list[str] = []
+    for axis, pattern in _GLOSSARY_COUNT_CLAIMS:
+        expected = _GLOSSARY_EXPECTED_COUNTS[axis]
+        for claimed in re.findall(pattern, text):
+            if int(claimed) != expected:
+                drift.append(
+                    f"GLOSSARY.md 的『{axis}』写 {claimed}，enum.py 是 {expected}；{_GLOSSARY_FIX_HINT}"
+                )
+    return drift
+
+
+def _glossary_unmatched_claims(text: str) -> list[str]:
+    """在文本里**一处也匹配不上**的声明正则（空 = 每条计数句都还在、正则都还有效）。"""
+    return [pattern for _, pattern in _GLOSSARY_COUNT_CLAIMS if not re.search(pattern, text)]
+
+
+def test_glossary_timing_counts_track_the_enum_partitions():
+    """票 32 删去 ``M1_`` 前缀并把计数改成 53/64/19/11 时，GLOSSARY 是靠人读出来的。"""
+    drift = _glossary_count_drift(_glossary_text())
+
+    assert not drift, "代码里的时机计数与 GLOSSARY.md 漂移：" + "；".join(drift)
+
+
+def test_the_glossary_count_scan_actually_covered_every_claim_site():
+    """防"某条计数句被改写 / 正则失效 ⇒ 该声明静默掉出扫描"。
+
+    按**声明点**判，不只按轴：同一轴的 dispatch 白名单有两处声明，只按轴判会让失效的那处
+    被另一处掩盖过去。
+    """
+    unmatched = _glossary_unmatched_claims(_glossary_text())
+
+    assert not unmatched, (
+        "GLOSSARY.md 里这些计数声明的正则已匹配不上（措辞变了或正则失效）：" + "；".join(unmatched)
+    )
+
+
+def test_the_glossary_count_scan_goes_red_on_a_stale_count():
+    """合成反例：把**真实 GLOSSARY** 里每条声明的数字改错一格，该轴必红。
+
+    直接改真实文本（而不是另写一份合成模板），扫描与文档因此不会各自漂移。
+    """
+    text = _glossary_text()
+    assert _glossary_count_drift(text) == []
+
+    for axis, pattern in _GLOSSARY_COUNT_CLAIMS:
+        match = re.search(pattern, text)
+        assert match is not None, f"真实 GLOSSARY 里找不到『{axis}』的声明：{pattern}"
+        claimed = match.group(1)
+        stale = int(claimed) - 1
+        stale_text = text[: match.start(1)] + str(stale) + text[match.end(1) :]
+
+        drift = _glossary_count_drift(stale_text)
+
+        assert any(axis in message for message in drift), (
+            f"把『{axis}』的 {claimed} 改成 {stale} 应判红：{drift}"
+        )
