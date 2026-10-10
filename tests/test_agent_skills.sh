@@ -67,6 +67,12 @@ check_file docs/agents/domain.md "单上下文" "单上下文布局"
 check_file docs/agents/domain.md "GLOSSARY.md" "术语表"
 check_file docs/agents/domain.md "静默继续" "缺失文件时静默继续"
 
+# 导航指针（票 06）：规则级账本 + 两份 gitignored 的票档 / 索引。
+check_file docs/agents/domain.md "程序化约定与偏离一手" "规则级账本指针"
+check_file docs/agents/domain.md ".scratch/m2-standard-identity/issues/" "M2 决策票档案指针"
+check_file docs/agents/domain.md ".scratch/m2-standard-identity/writeback.md" "票级行索引指针"
+check_file docs/agents/domain.md "存在时才读，缺则跳过" "gitignored 产物的读法"
+
 # coding standards（票 04）：评审期的判断题标准存在，且 AGENTS.md 只留导航指针。
 check_exists CODING_STANDARDS.md
 check_file AGENTS.md "### Coding standards" "coding standards 子段"

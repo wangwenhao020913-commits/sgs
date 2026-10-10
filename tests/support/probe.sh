@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 合成反例探针的共用纪律（票 05）：临时副本目录只建在 $TMPDIR；跑完证明探针没动过仓库树。
 #
-# 被 tests/test_dev_docs.sh / test_rules_doc.sh / test_agent_skills.sh `source`。
+# 被 tests/test_dev_docs.sh / test_rules_doc.sh / test_agent_skills.sh / test_session_decoder.sh `source`。
 # 不是门禁入口：tests/run_all.sh 只跑 `test_*.sh`，这份只做被引入的辅助。
 #
 # 用法：调用方在**第一个探针之前**取 `REPO_TREE_BEFORE="$(repo_tree_snapshot)"`，
