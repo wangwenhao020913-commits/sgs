@@ -9,3 +9,6 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+
+# 文档门禁合成反例用的临时副本目录（脚本中断时可能残留）
+.wb_probe.*
