@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple, get_args, get_origin
 
@@ -416,3 +416,48 @@ def test_the_deck_profile_scan_actually_covered_the_test_tree():
     assert len(explicit) >= 10, f"只认出 {len(explicit)} 个显式选档；AST 判据可能失效了"
     for relative in DECK_PROFILE_EXEMPT:
         assert (TESTS_ROOT / relative).is_file(), f"豁免名单里的文件不存在：{relative}"
+
+
+# ---------------------------------------------------------------------------
+# 7. 牌实例字段闭集：不含属性字段（ADR-003 的结构性表述；票 11）
+# ---------------------------------------------------------------------------
+
+CARD_REF_FORBIDDEN_ATTR_FIELDS = frozenset(
+    {"attribute", "attributes", "element", "damage_type", "nature"}
+)
+"""属性字段的禁名闭集：**属性由效果决定、不由原牌继承**（`06` §4 ADR-003）。
+
+谁日后给牌实例加属性字段，就必须回来**重裁 ADR-003**——所以这里钉的是"结构上没有属性"，
+而不是"某段代码没有读属性"。范围只到 `CardRef`：属性属于**效果**而非牌实例。
+"""
+
+
+def _attribute_field_offenders(fields: Iterable[str]) -> list[str]:
+    """字段集合里的属性字段名（空 = 干净）。抽成函数是为了能对它单独跑合成反例。"""
+    return sorted(set(fields) & CARD_REF_FORBIDDEN_ATTR_FIELDS)
+
+
+def test_card_ref_has_no_attribute_field():
+    from sgs.state import CardRef
+
+    fields = set(CardRef.model_fields)
+    offenders = _attribute_field_offenders(fields)
+
+    assert not offenders, "CardRef 不得有属性字段（ADR-003：属性由效果决定）：" + "；".join(offenders)
+    assert {"card_id", "type", "name"} <= fields, "CardRef 字段闭集可能读错了"
+    assert len(fields) >= 9, f"只读到 {len(fields)} 个 CardRef 字段；扫描目标可能指错了"
+
+
+def test_the_card_ref_attribute_scan_goes_red_on_a_new_attribute_field():
+    """合成反例：给 `CardRef` 的字段集合加一个属性字段名，扫描必红。
+
+    判的是"属性字段闭集"这条判据的接线——**没有**真的去改 `CardRef`（那会改动产品代码）。
+    """
+    from sgs.state import CardRef
+
+    real = set(CardRef.model_fields)
+    assert _attribute_field_offenders(real) == [], "真实 CardRef 竟然已含属性字段"
+
+    for injected in ("attribute", "element", "damage_type"):
+        offenders = _attribute_field_offenders(real | {injected})
+        assert injected in offenders, f"给 CardRef 加 {injected} 应被判红：{offenders}"

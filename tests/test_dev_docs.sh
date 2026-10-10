@@ -4,11 +4,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DIR="开发文档"
+DOC_DIR="$DIR"   # 票 11 合成反例的注入点：可临时指向副本目录
 fail=0
 
 check() { # $1=文件 $2=字面串 $3=描述 $4=absent 时断言「不得出现」，缺省断言「必须出现」
   local hit=0
-  if grep -qF "$2" "$DIR/$1"; then hit=1; fi
+  if grep -qF "$2" "$DOC_DIR/$1"; then hit=1; fi
   if [ "${4:-present}" = absent ]; then
     if [ "$hit" -eq 1 ]; then
       echo "FAIL: $1 仍含『$3』（$2）"
@@ -139,7 +140,7 @@ check "$DOC05" "83 个节点的枚举值与顺序" "T-1 权威表的 83 节点�
 check "$DOC05" "伪时机不得出现" "T-1 伪时机负测试行"
 check "$DOC05" "tests/test_timing.py" "T-1 枚举与伪时机禁令的落点"
 check "$DOC05" "时机覆盖清单" "T-1 映射表时机覆盖清单行"
-check "$DOC05" "47 dispatch 白名单 / 11 空日志 / 25 枚举位" "T-1 三分区口径"
+check "$DOC05" "53 dispatch 白名单 / 11 空日志 / 19 枚举位" "T-1 三分区口径（M2 定格）"
 check "$DOC05" "tests/test_timing_coverage.py" "T-1 覆盖清单的判决落点"
 check "$DOC05" "§M2 的验收不冲突" "T-1 与 06 §M2 的验收口径对齐"
 check "$DOC05" "Golden Replay 用例 ≥ 30 条" "T-1 承接 06 §M2 的基准条数"
@@ -182,10 +183,219 @@ check "$DOC06" '[x] ADR-001～007 已确认' "06 §5 第 3 项已勾"
 check "$DOC06" '[x] `tests/run_all.sh` 全绿' "06 §5 第 4 项已勾"
 check "$DOC06" '[x] 已确定 M1 的“杀闪桃”最小对局验收用例' "06 §5 第 5 项已勾"
 
-check "$DOC01" '最终形态 = 身份局 4～8 人（MVP 首期 5 人）' "01 §1.2 最终形态口径"
+check "$DOC01" '最终形态 = 身份局 **4～8 人**' "01 §1.2 最终形态口径（M2 人数统一）"
 check "$DOC01" 'M1 = 无身份 1v1（2 人，已完成）' "01 §1.2 M1 里程碑口径"
 check "$DOC01" 'M2 = 标准版身份局 4～8 人' "01 §1.2 M2 里程碑口径"
 check "$DOC01" '身份局 4～8 人（首期 5 人）' "01 §1.2 旧人数口径已改写" absent
+
+# 票 01（M2 文档回写）回写《开发文档/06-里程碑与风险.md》§4 的 ADR 表、表下变更块与新增 §5。
+# 依据：.scratch/m2-doc-writeback/spec.md 逐行口径 #1 / #4 / #5 / #6 / #11 / #23 + A1。
+check "$DOC06" '判定阶段进行判定之前的 `RESOLVE_BEFORE_EFFECT`' "ADR-001 改判 B（票 01 §9 + 票 02）"
+check "$DOC06" 'ADR-001 变更说明' "ADR-001 表下变更块"
+check "$DOC06" '**属性不由原牌继承**' "ADR-003 改判：属性不由原牌继承"
+check "$DOC06" 'ADR-003 变更说明' "ADR-003 表下变更块"
+check "$DOC06" '**颜色按来源同色派生**' "ADR-004 颜色按来源同色派生"
+check "$DOC06" '点数恒无' "ADR-004 点数恒无"
+check "$DOC06" 'ADR-004 变更说明' "ADR-004 表下变更块"
+check "$DOC06" '宝物槽随界限突破一并延后，M2 预留不启用' "ADR-006 宝物槽延后说明"
+check "$DOC06" '机械判据 = 源码纪律扫描' "风险表：技能硬编码的机械判据"
+check "$DOC06" '在 `06` §4 与 §5「程序化约定与偏离一手」逐条裁定并落文档' "风险表：存疑点未决行改写"
+check "$DOC06" '## 5. 程序化约定与偏离一手' "新增「程序化约定与偏离一手」一节"
+check "$DOC06" '**程序化约定**——官方无一手条文' "三类来源：程序化约定定义"
+check "$DOC06" '**偏离一手**——有官方明文' "三类来源：偏离一手定义"
+check "$DOC06" '**无一手源**——本机没有一手源' "三类来源：无一手源定义"
+check "$DOC06" '按模式分支' "胜负检测点 ≠ 终止点标为按模式分支"
+check "$DOC06" '先旧后新' "P1：装备顶替的语义顺序 = 先旧后新"
+check "$DOC06" '`horse_offense` / `horse_defense`' "P2：槽位拼写取数据层"
+# 退役旧串（两头钉的 absent 侧；票 11 段集中钉全部黑名单）
+check "$DOC06" '配置留开关' "旧 ADR-001『配置留开关』" absent
+check "$DOC06" 'A 方案' "旧风险表『A 方案』" absent
+check "$DOC06" '保留原牌属性' "旧 ADR-003『保留原牌属性』" absent
+check "$DOC06" '待官方 FAQ 复核' "旧 ADR-003『待官方 FAQ 复核』" absent
+check "$DOC06" '属性一并保留' "旧 ADR-003『属性一并保留』" absent
+
+# 票 03（M2 文档回写）回写《开发文档/02-规则引擎设计.md》§2 / §3.5 / §5.1 / §6 / §8。
+# 依据：.scratch/m2-doc-writeback/spec.md 逐行口径 #2 / #10 / #22 / #26 / #27 + A4 / A5。
+check "$DOC02" 'priority_class{HERO, EQUIPMENT,' "§3.5(3) 优先级枚举（散文保留）"
+check "$DOC02" 'SELECT_OPTION' "§5.1 Query 第 8 类 SELECT_OPTION"
+check "$DOC02" '`PlayCard`' "§6 补 PlayCard（使用与打出分列）"
+check "$DOC02" '`ActivateSkill`' "§6 补 ActivateSkill"
+check "$DOC02" '`SelectCards`' "§6 补 SelectCards"
+check "$DOC02" '规则层候选过滤' "§2.2 判定区同名归属"
+check "$DOC02" '属性不继承' "§2.4 转化牌属性不继承"
+check "$DOC02" '颜色按来源牌同色派生' "§2.4 多牌转化颜色按来源派生"
+check "$DOC02" 'player_count == 2 ⇒ 无身份局' "§8 模式由座位数派生"
+check "$DOC02" '不得预设' "§8 身份局 first_seat 必须保持默认"
+check "$DOC02" '存疑点相关的配置开关' "§8 存疑点清单为空"
+check "$DOC02" '无懈可击响应窗口 A / B' "旧无懈可击窗口配置行已删" absent
+
+# 票 04（M2 文档回写）回写《开发文档/03-数据模型与技能描述.md》§1–§8。
+# 依据：.scratch/m2-doc-writeback/spec.md 逐行口径 #7 / #8 / #9 / #12 / #13 / #14 / #19 / #20 + A5。
+DOC03="03-数据模型与技能描述.md"
+check "$DOC03" 'SkillDef{skill_id, locked, carrier, hooks, modifiers}' "§4 SkillDef 五元组"
+check "$DOC03" '条件内联在回调' "§4 条件内联在回调"
+check "$DOC03" '消耗不声明式' "§4 消耗不声明式"
+check "$DOC03" '仍由 `CardBehavior`' "§1/§2 声明式未落实、由 CardBehavior 承载"
+check "$DOC03" '主公技在 M2 **不可发动**' "§6 主公技不可发动"
+check "$DOC03" '限定技 / 觉醒技**归 M3**' "§6 限定 / 觉醒归 M3"
+check "$DOC03" '`CallOp`' "§5 CallOp（新增内容）"
+check "$DOC03" 'sgs.effects.OPS' "§5 op 注册表（查表派发）"
+check "$DOC03" '`ZoneRef(zone, seat)`' "§5 区域坐标 ZoneRef 形状"
+check "$DOC03" '`PUT`' "§5 收编 PUT"
+check "$DOC03" '`JUDGE`' "§5 收编 JUDGE"
+check "$DOC03" '`LOSE`' "§5 收编 LOSE"
+check "$DOC03" '身份过滤在 M2 无载体可过滤' "§6 身份过滤无载体"
+check "$DOC03" 'build_initial' "§3 主公 +1 体力上限落点 = 初始化段"
+check "$DOC03" '延时锦囊必须声明"置入判定区"' "§8 第 3 项 CardType.delayed + 加载期校验"
+check "$DOC03" '防御马（+1 坐骑）/ 进攻马（−1 坐骑）/ 宝物' "§2 五槽全名"
+check "$DOC03" '§1.1' "旧 §1.1 指针不再出现" absent
+check "$DOC03" '§8.3' "旧 §8.3 指针不再出现" absent
+
+# 票 05（M2 文档回写）回写《开发文档/05-测试与验证策略.md》§2 / §4 / §5 / §7。
+# 依据：.scratch/m2-doc-writeback/spec.md 逐行口径 #30 / #32 / #33 + A6 / A7。
+check "$DOC05" '64 已实现 = 53 dispatch + 11 空日志' "§2 64 是派生量（派生式）"
+check "$DOC05" '100 局 / 120 s' "§2 fuzz 预算 M2 口径"
+check "$DOC05" '§7 第 3 项的门禁口径与之同源' "§2 悬空指针已改指 §7 第 3 项"
+check "$DOC05" '规则层候选过滤' "§4 判定区唯一改述为规则层候选过滤"
+check "$DOC05" '判定区同名唯一' "§4 fuzz 不变量保留"
+check "$DOC05" '判定阶段不是空阶段' "§5 回合环：判定阶段走判定事件"
+check "$DOC05" '必须同时更新测试与决策记录' "§7 第 5 条删『配置』"
+check "$DOC05" '47 dispatch 白名单 / 11 空日志 / 25 枚举位' "旧三分区计数已退役" absent
+check "$DOC05" '200 局 / 30 s' "旧 fuzz 预算已退役" absent
+check "$DOC05" '判定阶段空过' "旧『判定阶段空过』已退役" absent
+check "$DOC05" '§7.3' "悬空 §7.3 指针已退役" absent
+
+# 票 06（M2 文档回写）回写《开发文档/01-总体设计.md》§1.2 / §2 原则 7 / §5 / §8 第 3 条。
+# 依据：.scratch/m2-doc-writeback/spec.md 逐行口径 #21 / #31 + A2。
+check "$DOC01" '只读依赖环 `data → effects → state → data`' "§5 data 依赖改为只读依赖环"
+check "$DOC01" '存疑点在 `06` §4 与 §5' "§2 原则 7 窄改（存疑点落文档）"
+check "$DOC01" '**存疑点裁定**：不建配置开关' "§8 第 3 条窄改（不建配置开关）"
+check "$DOC01" '`standard` / `standard+ex`（军争）/ `boundary`' "§8 合法开关：规则版本仍在"
+check "$DOC01" '**宝物槽位**随界限突破' "§8 合法开关：宝物槽仍在"
+check "$DOC01" '**军争属性伤害 / 连环**随军争篇引入' "§8 合法开关：军争属性 / 连环仍在"
+check "$DOC01" '（MVP 首期 5 人）' "旧『MVP 首期 5 人』已退役" absent
+check "$DOC01" '首期 5 人' "旧『首期 5 人』已退役" absent
+check "$DOC01" '存疑点开关' "旧『存疑点开关』已退役" absent
+
+# 票 07（M2 文档回写）回写《开发文档/04-AI与交互设计.md》§1 参与者接口。
+# 依据：.scratch/m2-doc-writeback/spec.md 逐行口径 #28。
+check "04-AI与交互设计.md" '| 入（引擎 → 参与者） | Query（类型、候选行动、可见信息、时限） |' "§1 契约入方向形状未变"
+check "04-AI与交互设计.md" '| 出（参与者 → 引擎） | Action（选择结果 / 放弃 / 超时） |' "§1 契约出方向形状未变"
+check "04-AI与交互设计.md" '响应窗口是“收集式”' "§1 无懈窗口收集式语义"
+check "04-AI与交互设计.md" '再一次性' "§1 收集后一次性推进"
+
+# 票 08（M2 文档回写）：术语表 GLOSSARY.md 收口（非冻结文档，可就地改）。
+# 依据：.scratch/m2-doc-writeback/spec.md 逐行口径 #18 / #29 与「新节与术语」。
+GLOSSARY="../GLOSSARY.md"
+check "$GLOSSARY" '**顶替**：' "术语表：顶替独立词条"
+check "$GLOSSARY" '**防具**：' "术语表：防具独立词条"
+check "$GLOSSARY" '失去装备 ≠ 弃置' "术语表：装备区条含『失去装备 ≠ 弃置』"
+check "$GLOSSARY" '已有牌时走**顶替**' "术语表：装备区条点明顶替"
+check "$GLOSSARY" '不约束已冻结的报文字段标识符' "术语表：_Avoid_ 让步纪律"
+check "$GLOSSARY" '移动报文（`CardMoveDelta`）里的 **`owner`**' "术语表：归属条点明英文标识符 owner"
+check "$GLOSSARY" '**程序化约定**：' "术语表：程序化约定词条"
+check "$GLOSSARY" '**偏离一手**：' "术语表：偏离一手词条"
+check "$GLOSSARY" '**无一手源**：' "术语表：无一手源词条"
+check "$GLOSSARY" '**标识符冻结**：' "术语表：标识符冻结纪律词条"
+check "$GLOSSARY" '存疑点开关' "术语表：旧『存疑点开关』说法已退役" absent
+
+# 票 10（M2 文档回写）票 21 两条 ⚠ 升格裁定（P1 / P2）的文档落点。
+# 依据：.scratch/m2-doc-writeback/spec.md「升格项」表 P1 / P2。
+check "$DOC03" '`horse_offense` = 进攻马、`horse_defense` = 防御马' "P2：03 §2 五槽拼写与数据层一致"
+check "$DOC06" '装备**顶替的语义顺序 = 先旧后新**' "P1：06 §5 账本登记顶替顺序"
+check "$DOC06" '装备区**撞槽即抛 = 编程错误兜底**' "P1：06 §5 账本登记撞槽即抛的归属"
+check "$DOC06" '槽位拼写取数据层 `horse_offense` / `horse_defense`' "P2：06 §5 账本登记槽位拼写"
+
+# ===========================================================================
+# 回写纪律（票 11）：两头钉 —— 每条回写同时断言「新串出现」与「退役旧串不出现」。
+# 黑名单来自 spec 的「机械断言的形态」节；旧串在**开发文档/ 全六份**里都不得出现。
+# 覆盖元断言 + 合成反例照 tests/test_timing.py 的「术语表计数纪律」姿态：
+#   ① 每条声明都必须在**真实文档**里匹配得上（文件不存在 = 空转，直接判红）；
+#   ② 把任一旧串临时写回副本，同一条 absent 断言**必须变红**。
+# ===========================================================================
+
+# 每条 = "文件|字面串|描述"。
+WRITEBACK_NEW=(
+  '06-里程碑与风险.md|判定阶段进行判定之前的 `RESOLVE_BEFORE_EFFECT`|ADR-001 改判 B'
+  '06-里程碑与风险.md|**程序化约定**——官方无一手条文|新节三类来源：程序化约定'
+  '06-里程碑与风险.md|**偏离一手**——有官方明文|新节三类来源：偏离一手'
+  '06-里程碑与风险.md|**无一手源**——本机没有一手源|新节三类来源：无一手源'
+  '02-规则引擎设计.md|priority_class{HERO, EQUIPMENT,|§3.5(3) 优先级枚举'
+  '02-规则引擎设计.md|player_count == 2 ⇒ 无身份局|§8 模式由座位数派生'
+  '03-数据模型与技能描述.md|SkillDef{skill_id, locked, carrier, hooks, modifiers}|§4 SkillDef 五元组'
+  '03-数据模型与技能描述.md|sgs.effects.OPS|§5 op 注册表'
+  '05-测试与验证策略.md|53 dispatch 白名单 / 11 空日志 / 19 枚举位|M2 三分区口径'
+  '05-测试与验证策略.md|100 局 / 120 s|M2 fuzz 预算'
+  '01-总体设计.md|只读依赖环 `data → effects → state → data`|§5 data 只读依赖环'
+  '04-AI与交互设计.md|响应窗口是“收集式”|§1 无懈窗口收集式语义'
+  '../GLOSSARY.md|**标识符冻结**：|术语表：标识符冻结纪律'
+)
+
+WRITEBACK_OLD=(
+  '06-里程碑与风险.md|配置留开关|旧 ADR-001 的配置开关说法'
+  '06-里程碑与风险.md|A 方案并留开关|旧风险表的 A 方案说法'
+  '01-总体设计.md|存疑点开关|旧 §8 的存疑点开关条目'
+  '05-测试与验证策略.md|200 局 / 30 s|旧 fuzz 预算'
+  '05-测试与验证策略.md|47 dispatch 白名单|旧三分区计数'
+  '01-总体设计.md|（MVP 首期 5 人）|旧人数口径'
+  '05-测试与验证策略.md|判定阶段空过|旧回合环口径'
+  '06-里程碑与风险.md|属性一并保留|旧 ADR-003 社区读法'
+  '06-里程碑与风险.md|保留原牌属性|旧 ADR-003 结论'
+  '06-里程碑与风险.md|10 武器|从未存在的武器计数表述'
+)
+
+writeback_check_claim() { # $1="文件|字面串|描述" $2=present|absent
+  local file literal desc
+  IFS='|' read -r file literal desc <<< "$1"
+  check "$file" "$literal" "$desc" "$2"
+}
+
+for claim in "${WRITEBACK_NEW[@]}"; do writeback_check_claim "$claim" present; done
+for claim in "${WRITEBACK_OLD[@]}"; do writeback_check_claim "$claim" absent; done
+
+# 覆盖元断言：每条声明的目标文件必须真实存在（否则 grep 落空 ⇒ absent 空转也算通过）。
+for claim in "${WRITEBACK_NEW[@]}" "${WRITEBACK_OLD[@]}"; do
+  IFS='|' read -r file literal desc <<< "$claim"
+  if [ ! -f "$DOC_DIR/$file" ]; then
+    echo "FAIL: 回写纪律声明指向不存在的文档（$desc）：$file"
+    fail=1
+  fi
+done
+# 黑名单只许指向 `开发文档/` 内的文件：合成反例会把字面串写进副本，
+# 指向 `..` 的目标（如 GLOSSARY）会**改到真实文件**——这是必须挡住的路径逃逸。
+for claim in "${WRITEBACK_OLD[@]}"; do
+  IFS='|' read -r file literal desc <<< "$claim"
+  case "$file" in
+    *..*) echo "FAIL: 回写纪律黑名单不得指向文档目录之外：$file"; fail=1;;
+  esac
+done
+if [ "${#WRITEBACK_OLD[@]}" -lt 10 ]; then
+  echo "FAIL: 回写纪律黑名单少于 10 条（覆盖元断言）"
+  fail=1
+fi
+
+# 合成反例：把任一旧串临时写回**副本**，相同的 absent 断言必须变红。
+writeback_absent_goes_red() { # $1=文件 $2=字面串；0 = 确实变红
+  local probe out
+  case "$1" in *..*) return 1;; esac   # 双保险：绝不写 `开发文档/` 之外
+  probe="$(mktemp -d "$PWD/.wb_probe.XXXXXX")" || return 1
+  if ! cp "$DOC_DIR/$1" "$probe/$1" 2>/dev/null; then
+    rm -rf "$probe"
+    return 1
+  fi
+  printf '\n%s\n' "$2" >> "$probe/$1"
+  out="$(DOC_DIR="$probe" check "$1" "$2" "合成反例" absent 2>&1 || true)"
+  rm -rf "$probe"
+  case "$out" in *FAIL*) return 0;; *) return 1;; esac
+}
+
+for claim in "${WRITEBACK_OLD[@]}"; do
+  IFS='|' read -r file literal desc <<< "$claim"
+  if ! writeback_absent_goes_red "$file" "$literal"; then
+    echo "FAIL: 合成反例未变红：把『$literal』写回 $file 后 absent 断言仍通过"
+    fail=1
+  fi
+done
 
 if [ "$fail" -eq 0 ]; then
   echo "PASS: 开发文档校验全部通过"

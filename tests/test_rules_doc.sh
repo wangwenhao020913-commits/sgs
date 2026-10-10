@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DOC="三国杀详细规则.txt"
+DOC_PATH="$DOC"   # 票 11 合成反例的注入点：可临时指向副本文件
 fail=0
 
 if [ ! -f "$DOC" ]; then
@@ -13,7 +14,7 @@ fi
 
 check() { # $1=描述 $2=字面串 $3=absent 时断言“不得出现”，缺省断言“必须出现”
   local hit=0
-  if grep -qF "$2" "$DOC"; then hit=1; fi
+  if grep -qF "$2" "$DOC_PATH"; then hit=1; fi
   if [ "${3:-present}" = absent ]; then
     if [ "$hit" -eq 1 ]; then
       echo "FAIL: $1（仍出现：$2）"
@@ -98,6 +99,18 @@ check "G-15 已消除『成为指定目标』" "成为指定目标" absent
 check "G-16 17.10 已消除时机名『使用牌时』" "B2. 使用牌时" absent
 check "G-16 已消除『使用牌时』类技能写法" "“使用牌时”类技能" absent
 
+# 票 02（M2 文档回写）回写《三国杀详细规则.txt》的四处"保留原文 + 校订 / 程序化约定注"。
+# 依据：.scratch/m2-doc-writeback/spec.md 逐行口径 #3 / #24 / #25 与追加行 A3。
+check "6.16 校订注作废约定 A 的开关" "程序化约定注作废"
+check "6.16 取约定 B 且不建配置开关" "本项目 M2 取 B，且**不建配置"
+check "内奸条件重述为主公死亡瞬间的唯一存活者" "主公死亡瞬间的唯一存活者"
+check "主公杀忠臣弃置范围取所有牌（含判定区）" "弃置范围 = 死者区域里的**全部牌**"
+check "R:16.3 属性不继承原牌" "属性不继承原牌"
+check "R:16.3 多牌转化颜色按来源同色派生" "颜色按来源牌同色派生"
+check "R:16.3 保留属性旧读法的痕迹" "本节曾按社区主流读作"
+check "R:16.3 旧属性口径已退役" "属性一并保留" absent
+check "R:16.3 旧多牌结论已退役" "因此不被" absent
+
 # 章节数量应为 21
 n=$(grep -cE '^第[一二三四五六七八九十]+章  ' "$DOC" || true)
 if [ "$n" -eq 21 ]; then
@@ -128,6 +141,76 @@ if [ -d "../sgs" ]; then
 else
   echo "PASS: 旧 sgs 已迁移并删除"
 fi
+
+# ===========================================================================
+# 回写纪律（票 11）：规则文档侧的两头钉 + 覆盖元断言 + 合成反例。
+# 黑名单与 `tests/test_dev_docs.sh` 的同名段一致（spec「机械断言的形态」节）。
+# ===========================================================================
+
+# 每条 = "字面串|描述"。
+# 黑名单只列**本轮真的从规则文档退役**的串；`开发文档/` 侧那批（配置留开关 / 存疑点开关 /
+# 200 局 / 30 s / 47 dispatch 白名单 / （MVP 首期 5 人）/ 判定阶段空过 / 10 武器 …）由
+# `tests/test_dev_docs.sh` 的黑名单统一钉住，不在这里对规则文档重复做空洞的 absent。
+WRITEBACK_NEW=(
+  '程序化约定注作废|6.16 作废约定 A 的程序化约定注'
+  '本项目 M2 取 B，且**不建配置|6.16 取约定 B 且不建配置开关'
+  '主公死亡瞬间的唯一存活者|内奸获胜条件重述'
+  '弃置范围 = 死者区域里的**全部牌**|主公杀忠臣弃置范围取所有牌'
+  '属性不继承原牌|16.3 属性不继承原牌'
+  '颜色按来源牌同色派生|16.3 多牌转化颜色按来源派生'
+  '本节曾按社区主流读作|16.3 保留属性旧读法的痕迹'
+)
+
+WRITEBACK_OLD=(
+  '属性一并保留|旧 16.3 属性社区读法（本轮从本文档退役）'
+  '因此不被|旧 16.3 多牌转化结论（本轮从本文档退役）'
+)
+
+for claim in "${WRITEBACK_NEW[@]}"; do
+  IFS='|' read -r literal desc <<< "$claim"
+  check "$desc" "$literal"
+done
+for claim in "${WRITEBACK_OLD[@]}"; do
+  IFS='|' read -r literal desc <<< "$claim"
+  check "$desc" "$literal" absent
+done
+
+# 覆盖元断言：目标文件必须真实存在；本票的退役串清单不得被清空成空转。
+if [ ! -f "$DOC_PATH" ]; then
+  echo "FAIL: 回写纪律声明的目标文件不存在：$DOC_PATH"
+  fail=1
+fi
+if [ "${#WRITEBACK_OLD[@]}" -lt 1 ]; then
+  echo "FAIL: 规则文档侧没有任何退役串断言（覆盖元断言）"
+  fail=1
+fi
+if [ "${#WRITEBACK_NEW[@]}" -lt 7 ]; then
+  echo "FAIL: 规则文档侧的新串断言少于 7 条（覆盖元断言）"
+  fail=1
+fi
+
+# 合成反例：把任一旧串临时写回副本，相同的 absent 断言必须变红。
+writeback_absent_goes_red() { # $1=字面串；0 = 确实变红
+  local probe path out
+  probe="$(mktemp -d "$PWD/.wb_probe.XXXXXX")" || return 1
+  path="$probe/$(basename "$DOC_PATH")"
+  if ! cp "$DOC_PATH" "$path" 2>/dev/null; then
+    rm -rf "$probe"
+    return 1
+  fi
+  printf '\n%s\n' "$1" >> "$path"
+  out="$(DOC_PATH="$path" check "合成反例" "$1" absent 2>&1 || true)"
+  rm -rf "$probe"
+  case "$out" in *FAIL*) return 0;; *) return 1;; esac
+}
+
+for claim in "${WRITEBACK_OLD[@]}"; do
+  IFS='|' read -r literal desc <<< "$claim"
+  if ! writeback_absent_goes_red "$literal"; then
+    echo "FAIL: 合成反例未变红：把『$literal』写回后 absent 断言仍通过"
+    fail=1
+  fi
+done
 
 if [ "$fail" -eq 0 ]; then
   echo "PASS: 规则文档校验全部通过"
