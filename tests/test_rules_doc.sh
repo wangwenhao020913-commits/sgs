@@ -7,6 +7,14 @@ DOC="三国杀详细规则.txt"
 DOC_PATH="$DOC"   # 票 11 合成反例的注入点：可临时指向副本文件
 fail=0
 
+# 合成反例的临时副本目录只在 $TMPDIR 下建（票 05）：探针中断也不在仓库根留残留目录。
+PROBE_TMP="${TMPDIR:-/tmp}"
+probe_mktemp() { mktemp -d "${PROBE_TMP%/}/.wb_probe.XXXXXX"; }
+# 防再漏（票 05）：探针只许动 $TMPDIR。比对探针前后的 git 工作树快照，并检查仓库根
+# 无 .wb_probe.* 残留——两者任一不满足即判红（挡「有人把探针目录改回仓库内」的回归）。
+repo_tree_snapshot() { git status --porcelain --untracked-files=all 2>/dev/null | sort; }
+probe_residue() { find "$PWD" -maxdepth 1 -name '.wb_probe.*' -print 2>/dev/null; }
+
 if [ ! -f "$DOC" ]; then
   echo "FAIL: 缺少 $DOC"
   exit 1
@@ -194,7 +202,7 @@ fi
 # 合成反例：把任一旧串临时写回副本，相同的 absent 断言必须变红。
 writeback_absent_goes_red() { # $1=字面串；0 = 确实变红
   local probe path out
-  probe="$(mktemp -d "$PWD/.wb_probe.XXXXXX")" || return 1
+  probe="$(probe_mktemp)" || return 1
   path="$probe/$(basename "$DOC_PATH")"
   if ! cp "$DOC_PATH" "$path" 2>/dev/null; then
     rm -rf "$probe"
@@ -206,6 +214,7 @@ writeback_absent_goes_red() { # $1=字面串；0 = 确实变红
   case "$out" in *FAIL*) return 0;; *) return 1;; esac
 }
 
+REPO_TREE_BEFORE="$(repo_tree_snapshot)"
 for claim in "${WRITEBACK_OLD[@]}"; do
   IFS='|' read -r literal desc <<< "$claim"
   if ! writeback_absent_goes_red "$literal"; then
@@ -213,6 +222,18 @@ for claim in "${WRITEBACK_OLD[@]}"; do
     fail=1
   fi
 done
+
+# 防再漏（票 05）：探针不得改动仓库工作树，也不得在仓库根留 .wb_probe.* 残留。
+if [ "$(repo_tree_snapshot)" != "$REPO_TREE_BEFORE" ]; then
+  echo "FAIL: 合成反例探针改动了仓库工作树（探针目录必须只在 \$TMPDIR 下）"
+  repo_tree_snapshot | head -20
+  fail=1
+fi
+residue="$(probe_residue)"
+if [ -n "$residue" ]; then
+  echo "FAIL: 仓库根残留合成反例探针目录：$(printf '%s ' $residue)"
+  fail=1
+fi
 
 if [ "$fail" -eq 0 ]; then
   echo "PASS: 规则文档校验全部通过"

@@ -15,3 +15,8 @@
 ### Domain docs
 
 单上下文（single-context）布局。当前 ADR 见 `开发文档/06-里程碑与风险.md` 第 4 节，稳定态设计见 `开发文档/`。详见 `docs/agents/domain.md`。
+
+### Coding standards
+
+评审期（`code-review` 的 Standards 轴）的判断题标准见 `CODING_STANDARDS.md`：
+引用符号当行为落点要连调用方一起看；术语表只写定义与 `_Avoid_`。

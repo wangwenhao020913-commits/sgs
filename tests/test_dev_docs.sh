@@ -7,6 +7,14 @@ DIR="开发文档"
 DOC_DIR="$DIR"   # 票 11 合成反例的注入点：可临时指向副本目录
 fail=0
 
+# 合成反例的临时副本目录只在 $TMPDIR 下建（票 05）：探针中断也不在仓库根留残留目录。
+PROBE_TMP="${TMPDIR:-/tmp}"
+probe_mktemp() { mktemp -d "${PROBE_TMP%/}/.wb_probe.XXXXXX"; }
+# 防再漏（票 05）：探针只许动 $TMPDIR。比对探针前后的 git 工作树快照，并检查仓库根
+# 无 .wb_probe.* 残留——两者任一不满足即判红（挡「有人把探针目录改回仓库内」的回归）。
+repo_tree_snapshot() { git status --porcelain --untracked-files=all 2>/dev/null | sort; }
+probe_residue() { find "$PWD" -maxdepth 1 -name '.wb_probe.*' -print 2>/dev/null; }
+
 check() { # $1=文件 $2=字面串 $3=描述 $4=absent 时断言「不得出现」，缺省断言「必须出现」
   local hit=0
   if grep -qF "$2" "$DOC_DIR/$1"; then hit=1; fi
@@ -386,7 +394,7 @@ fi
 writeback_absent_goes_red() { # $1=文件 $2=字面串；0 = 确实变红
   local probe out
   case "$1" in *..*) return 1;; esac   # 双保险：绝不写 `开发文档/` 之外
-  probe="$(mktemp -d "$PWD/.wb_probe.XXXXXX")" || return 1
+  probe="$(probe_mktemp)" || return 1
   if ! cp "$DOC_DIR/$1" "$probe/$1" 2>/dev/null; then
     rm -rf "$probe"
     return 1
@@ -397,6 +405,7 @@ writeback_absent_goes_red() { # $1=文件 $2=字面串；0 = 确实变红
   case "$out" in *FAIL*) return 0;; *) return 1;; esac
 }
 
+REPO_TREE_BEFORE="$(repo_tree_snapshot)"
 for claim in "${WRITEBACK_OLD[@]}"; do
   IFS='|' read -r file literal desc <<< "$claim"
   if ! writeback_absent_goes_red "$file" "$literal"; then
@@ -445,7 +454,7 @@ REF_FILES=()
 while IFS= read -r f; do REF_FILES+=("$f"); done < <(
   find "$PWD/开发文档" "$PWD/docs" "$PWD/tests" "$PWD/src" -type f \
     \( -name '*.md' -o -name '*.py' -o -name '*.sh' \) -print 2>/dev/null | sort
-  printf '%s\n' "$PWD/GLOSSARY.md" "$PWD/AGENTS.md"
+  printf '%s\n' "$PWD/GLOSSARY.md" "$PWD/AGENTS.md" "$PWD/CODING_STANDARDS.md"
 )
 
 # 探针统一判定：输出里出现 FAIL 即「确实变红」。
@@ -577,7 +586,7 @@ scan_blacklist_tree_absent() { # 退役串全树 absent；返回 1 = 有错
 # 引用它的锚定断言必须变红——这正是 §5/§6 那次静默错位的机械复现。
 anchor_rename_goes_red() {
   local probe out
-  probe="$(mktemp -d "$PWD/.wb_probe.XXXXXX")" || return 1
+  probe="$(probe_mktemp)" || return 1
   if ! cp "$DOC_DIR"/*.md "$probe/" 2>/dev/null; then rm -rf "$probe"; return 1; fi
   if ! grep -q '^## 6\.' "$probe/06-里程碑与风险.md"; then rm -rf "$probe"; return 1; fi
   sed -i 's/^## 6\./## 7./' "$probe/06-里程碑与风险.md"
@@ -590,7 +599,7 @@ anchor_rename_goes_red() {
 # 检查抓不到这一半（正是那节让位新节后错位的情形），锚定断言必须同样变红。
 anchor_retitle_goes_red() {
   local probe out
-  probe="$(mktemp -d "$PWD/.wb_probe.XXXXXX")" || return 1
+  probe="$(probe_mktemp)" || return 1
   if ! cp "$DOC_DIR"/*.md "$probe/" 2>/dev/null; then rm -rf "$probe"; return 1; fi
   if ! grep -q '^## 6\. 进入实现前的检查清单' "$probe/06-里程碑与风险.md"; then
     rm -rf "$probe"; return 1
@@ -605,7 +614,7 @@ anchor_retitle_goes_red() {
 blacklist_tree_goes_red() {
   local probe out lit
   IFS='|' read -r _f lit _d <<< "${WRITEBACK_OLD[0]}"
-  probe="$(mktemp -d "$PWD/.wb_probe.XXXXXX")" || return 1
+  probe="$(probe_mktemp)" || return 1
   if ! cp "$DOC_DIR"/*.md "$probe/" 2>/dev/null; then rm -rf "$probe"; return 1; fi
   printf '\n%s\n' "$lit" >> "$probe/01-总体设计.md"
   out="$(DOC_DIR="$probe" scan_blacklist_tree_absent 2>&1 || true)"
@@ -625,6 +634,18 @@ if ! anchor_retitle_goes_red; then
 fi
 if ! blacklist_tree_goes_red; then
   echo "FAIL: 合成反例未变红：把退役串写进另一份开发文档后，全树 absent 仍通过"
+  fail=1
+fi
+
+# 防再漏（票 05）：探针不得改动仓库工作树，也不得在仓库根留 .wb_probe.* 残留。
+if [ "$(repo_tree_snapshot)" != "$REPO_TREE_BEFORE" ]; then
+  echo "FAIL: 合成反例探针改动了仓库工作树（探针目录必须只在 \$TMPDIR 下）"
+  repo_tree_snapshot | head -20
+  fail=1
+fi
+residue="$(probe_residue)"
+if [ -n "$residue" ]; then
+  echo "FAIL: 仓库根残留合成反例探针目录：$(printf '%s ' $residue)"
   fail=1
 fi
 

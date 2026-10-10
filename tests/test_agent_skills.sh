@@ -5,6 +5,14 @@ cd "$(dirname "$0")/.."
 
 fail=0
 
+# 合成反例的临时副本目录只在 $TMPDIR 下建（票 05）：探针中断也不在仓库根留残留目录。
+PROBE_TMP="${TMPDIR:-/tmp}"
+probe_mktemp() { mktemp -d "${PROBE_TMP%/}/.wb_probe.XXXXXX"; }
+# 防再漏（票 05）：探针只许动 $TMPDIR。比对探针前后的 git 工作树快照，并检查仓库根
+# 无 .wb_probe.* 残留——两者任一不满足即判红（挡「有人把探针目录改回仓库内」的回归）。
+repo_tree_snapshot() { git status --porcelain --untracked-files=all 2>/dev/null | sort; }
+probe_residue() { find "$PWD" -maxdepth 1 -name '.wb_probe.*' -print 2>/dev/null; }
+
 check_file() { # $1=文件 $2=需包含的字面串 $3=描述
   if grep -qF "$2" "$1"; then
     echo "PASS: $1 含『$3』"
@@ -54,6 +62,13 @@ check_file docs/agents/domain.md "决策记录（ADR）" "既有 ADR 表指针"
 check_file docs/agents/domain.md "单上下文" "单上下文布局"
 check_file docs/agents/domain.md "GLOSSARY.md" "术语表"
 check_file docs/agents/domain.md "静默继续" "缺失文件时静默继续"
+
+# coding standards（票 04）：评审期的判断题标准存在，且 AGENTS.md 只留导航指针。
+check_exists CODING_STANDARDS.md
+check_file AGENTS.md "### Coding standards" "coding standards 子段"
+check_file AGENTS.md "CODING_STANDARDS.md" "coding standards 路径"
+check_file CODING_STANDARDS.md "调用方" "落点要连调用方一起看"
+check_file CODING_STANDARDS.md "_Avoid_" "术语表边界"
 
 # 本地 tracker 工作产物不进版本库
 check_exists .gitignore
@@ -116,7 +131,7 @@ scan_issue_status() { # $1=仓库根；返回 1 = 有错
 # 合成反例：词表外的值、追加别的词、加粗写法必须变红；词表内（含行尾空格）必须变绿。
 issue_status_probe() { # $1=工单正文 $2=red|green
   local probe out
-  probe="$(mktemp -d "$PWD/.wb_probe.XXXXXX")" || return 1
+  probe="$(probe_mktemp)" || return 1
   mkdir -p "$probe/.scratch/demo/issues"
   printf '%s\n' "$1" > "$probe/.scratch/demo/issues/01-demo.md"
   out="$(scan_issue_status "$probe" 2>&1 || true)"
@@ -127,7 +142,7 @@ issue_status_probe() { # $1=工单正文 $2=red|green
 # 覆盖元断言的反面：有 issues 目录、却没有任何票 ⇒ 必须判红（防 find 失效空转通过）。
 issue_status_empty_dir_goes_red() {
   local probe out
-  probe="$(mktemp -d "$PWD/.wb_probe.XXXXXX")" || return 1
+  probe="$(probe_mktemp)" || return 1
   mkdir -p "$probe/.scratch/demo/issues"
   out="$(scan_issue_status "$probe" 2>&1 || true)"
   rm -rf "$probe"
@@ -135,6 +150,7 @@ issue_status_empty_dir_goes_red() {
 }
 
 if ! scan_issue_status "$PWD"; then fail=1; fi
+REPO_TREE_BEFORE="$(repo_tree_snapshot)"
 if ! issue_status_probe $'Type: task\nStatus: done' red; then
   echo "FAIL: 合成反例未变红：词表外的 Status: done 未被判红"
   fail=1
@@ -157,6 +173,18 @@ if ! issue_status_probe $'Type: task\nStatus: resolved  ' green; then
 fi
 if ! issue_status_empty_dir_goes_red; then
   echo "FAIL: 合成反例未变红：空 issues 目录未被判红（覆盖元断言失效）"
+  fail=1
+fi
+
+# 防再漏（票 05）：探针不得改动仓库工作树，也不得在仓库根留 .wb_probe.* 残留。
+if [ "$(repo_tree_snapshot)" != "$REPO_TREE_BEFORE" ]; then
+  echo "FAIL: 合成反例探针改动了仓库工作树（探针目录必须只在 \$TMPDIR 下）"
+  repo_tree_snapshot | head -20
+  fail=1
+fi
+residue="$(probe_residue)"
+if [ -n "$residue" ]; then
+  echo "FAIL: 仓库根残留合成反例探针目录：$(printf '%s ' $residue)"
   fail=1
 fi
 
