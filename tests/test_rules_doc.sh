@@ -7,13 +7,9 @@ DOC="三国杀详细规则.txt"
 DOC_PATH="$DOC"   # 票 11 合成反例的注入点：可临时指向副本文件
 fail=0
 
-# 合成反例的临时副本目录只在 $TMPDIR 下建（票 05）：探针中断也不在仓库根留残留目录。
-PROBE_TMP="${TMPDIR:-/tmp}"
-probe_mktemp() { mktemp -d "${PROBE_TMP%/}/.wb_probe.XXXXXX"; }
-# 防再漏（票 05）：探针只许动 $TMPDIR。比对探针前后的 git 工作树快照，并检查仓库根
-# 无 .wb_probe.* 残留——两者任一不满足即判红（挡「有人把探针目录改回仓库内」的回归）。
-repo_tree_snapshot() { git status --porcelain --untracked-files=all 2>/dev/null | sort; }
-probe_residue() { find "$PWD" -maxdepth 1 -name '.wb_probe.*' -print 2>/dev/null; }
+# 合成反例探针纪律（票 05）：探针目录只在 $TMPDIR；跑完证明没动过仓库树。
+# shellcheck source=tests/support/probe.sh
+source tests/support/probe.sh
 
 if [ ! -f "$DOC" ]; then
   echo "FAIL: 缺少 $DOC"
@@ -224,16 +220,9 @@ for claim in "${WRITEBACK_OLD[@]}"; do
 done
 
 # 防再漏（票 05）：探针不得改动仓库工作树，也不得在仓库根留 .wb_probe.* 残留。
-if [ "$(repo_tree_snapshot)" != "$REPO_TREE_BEFORE" ]; then
-  echo "FAIL: 合成反例探针改动了仓库工作树（探针目录必须只在 \$TMPDIR 下）"
-  repo_tree_snapshot | head -20
-  fail=1
-fi
-residue="$(probe_residue)"
-if [ -n "$residue" ]; then
-  echo "FAIL: 仓库根残留合成反例探针目录：$(printf '%s ' $residue)"
-  fail=1
-fi
+# 断言本身也要有反面自检（覆盖元断言），防 find / 比较失效时空转通过。
+if ! probe_discipline_check "$REPO_TREE_BEFORE"; then fail=1; fi
+if ! probe_discipline_selftest; then fail=1; fi
 
 if [ "$fail" -eq 0 ]; then
   echo "PASS: 规则文档校验全部通过"

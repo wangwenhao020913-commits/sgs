@@ -18,5 +18,4 @@
 
 ### Coding standards
 
-评审期（`code-review` 的 Standards 轴）的判断题标准见 `CODING_STANDARDS.md`：
-引用符号当行为落点要连调用方一起看；术语表只写定义与 `_Avoid_`。
+评审期（`code-review` 的 Standards 轴）的判断题标准见 `CODING_STANDARDS.md`。
