@@ -425,7 +425,7 @@ def test_the_deck_profile_scan_actually_covered_the_test_tree():
 CARD_REF_FORBIDDEN_ATTR_FIELDS = frozenset(
     {"attribute", "attributes", "element", "damage_type", "nature"}
 )
-"""属性字段的禁名闭集：**属性由效果决定、不由原牌继承**（`06` §4 ADR-003）。
+"""属性字段的禁名闭集：**属性由效果决定、不由原牌继承**（`06` §4「决策记录（ADR）」 ADR-003）。
 
 谁日后给牌实例加属性字段，就必须回来**重裁 ADR-003**——所以这里钉的是"结构上没有属性"，
 而不是"某段代码没有读属性"。范围只到 `CardRef`：属性属于**效果**而非牌实例。

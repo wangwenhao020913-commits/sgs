@@ -6,7 +6,7 @@
 （`check_count` / `check_targets` / `distance` / `target_is_effective` / `_play_phase`），
 故 `ModifierPoint` / `ModifierContext` / `Modifier` / `apply_modifiers` 住下层；
 技能**定义**（`SkillDef` / `Hook` / `CATALOG`）住 `skills`，方向是 `skills → effects`
-（`开发文档/01` §5）。`apply_modifiers` 读目录是延迟的跨层只读，不建立反向模块依赖。
+（`开发文档/01` §5「模块划分」）。`apply_modifiers` 读目录是延迟的跨层只读，不建立反向模块依赖。
 """
 
 from .actions import (

@@ -9,7 +9,8 @@
   （注意与仓库内长期设计文档 `开发文档/` 区分：前者是一次性工作产物，后者是稳定态设计）
 - 实现工单每票一个文件：`.scratch/<feature-slug>/issues/<NN>-<slug>.md`，
   从 `01` 起编号，**不要**写成单个合并的 tickets 文件
-- 工单文件顶部用 `Status:` 行记录状态
+- 工单文件顶部用一行规范 `Status:` 记录状态，取值限词表：`open`（未认领）/ `claimed`（已认领）/ `resolved`（已解决）。
+  写成 `Status: <值>`（**不加粗**、不追加别的词）；`tests/test_agent_skills.sh` 会机械校验 `.scratch/*/issues/*.md`。
 - 评论与对话历史追加到文件底部的 `## Comments` 标题下
 
 ## 当某个技能说“publish to the issue tracker”
@@ -27,7 +28,7 @@
 - **地图**：`.scratch/<effort>/map.md`（含 Notes / Decisions-so-far / Fog 正文）。
 - **子工单**：`.scratch/<effort>/issues/NN-<slug>.md`，从 `01` 起编号，正文写问题。
   `Type:` 行记录工单类型（`research`/`prototype`/`grilling`/`task`）；
-  `Status:` 行记录 `claimed`/`resolved`。
+  `Status:` 行记录 `open` / `claimed` / `resolved`（词表同「约定」节）。
 - **阻塞**：顶部附近的 `Blocked by: NN, NN` 行。
   当它列出的每个文件都是 `resolved` 时，该工单解除阻塞。
 - **前沿（frontier）**：扫描 `.scratch/<effort>/issues/`，找出未关闭、未阻塞、未被认领的文件；编号最小者优先。

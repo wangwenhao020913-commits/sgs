@@ -192,7 +192,7 @@ EffectStep: TypeAlias = PushFrame | CallOp
 
 @dataclass(frozen=True, slots=True)
 class CardBehavior:
-    """一张牌名的完整行为；字段对齐 `开发文档/03` §2、由票 07 §2 冻结。
+    """一张牌名的完整行为；字段对齐 `开发文档/03` §2「卡牌数据模型」、由票 07 §2 冻结。
 
     M2 票 27 在静态面上补三样**通用**声明（``TargetRule`` 因此不新增面向具体牌名的
     布尔字段；谓词本身当然可以引用牌名，但只住在 ``effects/``，``engine/`` 一个都不出现）：

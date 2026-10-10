@@ -157,9 +157,9 @@ check "$DOC05" "从其下家起" "T-2 L18.8 两个起点都登记"
 check "$DOC05" "登记为 M2" "T-2 实战走不到项显式登记 M2"
 check "$DOC05" "（T-2）" "T-2 回写逐处标注依据"
 
-# 票 04（M0 收尾）回写 ADR-007 的 M1 语义重述、`01` §1.2 的人数口径与 `06` §6 的检查清单。
+# 票 04（M0 收尾）回写 ADR-007 的 M1 语义重述、`01` §1.2 的人数口径与 `06` §6「进入实现前的检查清单」。
 # 依据：票 13 §3 的重述原文 / `G-10`；ADR 变更的连带同步（规则文档 / 配置项 / 相关测试）
-# 逐条记录在 `06` §4。
+# 逐条记录在 `06` §4「决策记录（ADR）」。
 DOC06="06-里程碑与风险.md"
 DOC01="01-总体设计.md"
 
@@ -176,12 +176,12 @@ check "$DOC06" '`G-9`（4.18 死亡五段）/ `G-10`（4.16 三条调度规则�
 check "$DOC06" '与本节文字一致，无需订正' "GLOSSARY 回归：胜负检测点 / 终止点一致（无改动）"
 check "$DOC06" '无身份 1v1（2 人）' "06 §M1 与 01 §1.2 的人数口径一致"
 
-check "$DOC06" '无一项推后到 M2' "06 §6 收口：全部满足、无推后项"
-check "$DOC06" '[x] 规则文档缺口已补' "06 §6 第 1 项已勾"
-check "$DOC06" '[x] 开发文档 01–06 已评审通过' "06 §6 第 2 项已勾"
-check "$DOC06" '[x] ADR-001～007 已确认' "06 §6 第 3 项已勾"
-check "$DOC06" '[x] `tests/run_all.sh` 全绿' "06 §6 第 4 项已勾"
-check "$DOC06" '[x] 已确定 M1 的“杀闪桃”最小对局验收用例' "06 §6 第 5 项已勾"
+check "$DOC06" '无一项推后到 M2' "06 §6「进入实现前的检查清单」收口：全部满足、无推后项"
+check "$DOC06" '[x] 规则文档缺口已补' "06 §6「进入实现前的检查清单」第 1 项已勾"
+check "$DOC06" '[x] 开发文档 01–06 已评审通过' "06 §6「进入实现前的检查清单」第 2 项已勾"
+check "$DOC06" '[x] ADR-001～007 已确认' "06 §6「进入实现前的检查清单」第 3 项已勾"
+check "$DOC06" '[x] `tests/run_all.sh` 全绿' "06 §6「进入实现前的检查清单」第 4 项已勾"
+check "$DOC06" '[x] 已确定 M1 的“杀闪桃”最小对局验收用例' "06 §6「进入实现前的检查清单」第 5 项已勾"
 
 check "$DOC01" '最终形态 = 身份局 **4～8 人**' "01 §1.2 最终形态口径（M2 人数统一）"
 check "$DOC01" 'M1 = 无身份 1v1（2 人，已完成）' "01 §1.2 M1 里程碑口径"
@@ -199,7 +199,7 @@ check "$DOC06" '点数恒无' "ADR-004 点数恒无"
 check "$DOC06" 'ADR-004 变更说明' "ADR-004 表下变更块"
 check "$DOC06" '宝物槽随界限突破一并延后，M2 预留不启用' "ADR-006 宝物槽延后说明"
 check "$DOC06" '机械判据 = 源码纪律扫描' "风险表：技能硬编码的机械判据"
-check "$DOC06" '在 `06` §4 与 §5「程序化约定与偏离一手」逐条裁定并落文档' "风险表：存疑点未决行改写"
+check "$DOC06" '在 `06` §4「决策记录（ADR）」与 §5「程序化约定与偏离一手」逐条裁定并落文档' "风险表：存疑点未决行改写"
 check "$DOC06" '## 5. 程序化约定与偏离一手' "新增「程序化约定与偏离一手」一节"
 check "$DOC06" '**程序化约定**——官方无一手条文' "三类来源：程序化约定定义"
 check "$DOC06" '**偏离一手**——有官方明文' "三类来源：偏离一手定义"
@@ -251,7 +251,7 @@ check "$DOC03" '防御马（+1 坐骑）/ 进攻马（−1 坐骑）/ 宝物' "�
 check "$DOC03" '§1.1' "旧 §1.1 指针不再出现" absent
 check "$DOC03" '§8.3' "旧 §8.3 指针不再出现" absent
 
-# 票 09（M2 文档回写）#17：`03` §7 显式补一次装备计数（"10 武器"悬案的正面表述）。
+# 票 09（M2 文档回写）#17：`03` §7「内容包与版本」显式补一次装备计数（"10 武器"悬案的正面表述）。
 check "$DOC03" '武器 **9 名 / 10 实体张**（诸葛连弩 ×2）' "§7 装备计数：9 名 / 10 实体张"
 check "$DOC03" '合计 **19 张**' "§7 装备计数：合计 19 张"
 
@@ -272,7 +272,7 @@ check "$DOC05" '§7.3' "悬空 §7.3 指针已退役" absent
 # 票 06（M2 文档回写）回写《开发文档/01-总体设计.md》§1.2 / §2 原则 7 / §5 / §8 第 3 条。
 # 依据：.scratch/m2-doc-writeback/spec.md 逐行口径 #21 / #31 + A2。
 check "$DOC01" '只读依赖环 `data → effects → state → data`' "§5 data 依赖改为只读依赖环"
-check "$DOC01" '存疑点在 `06` §4 与 §5' "§2 原则 7 窄改（存疑点落文档）"
+check "$DOC01" '存疑点在 `06` §4「决策记录（ADR）」与 §5' "§2 原则 7 窄改（存疑点落文档）"
 check "$DOC01" '**存疑点裁定**：不建配置开关' "§8 第 3 条窄改（不建配置开关）"
 check "$DOC01" '`standard` / `standard+ex`（军争）/ `boundary`' "§8 合法开关：规则版本仍在"
 check "$DOC01" '**宝物槽位**随界限突破' "§8 合法开关：宝物槽仍在"
@@ -309,10 +309,10 @@ check "$GLOSSARY" '`开发文档/` 是冻结文档，按票 17 §8 R-2/R-3 不�
 
 # 票 10（M2 文档回写）票 21 两条 ⚠ 升格裁定（P1 / P2）的文档落点。
 # 依据：.scratch/m2-doc-writeback/spec.md「升格项」表 P1 / P2。
-check "$DOC03" '`horse_offense` = 进攻马、`horse_defense` = 防御马' "P2：03 §2 五槽拼写与数据层一致"
-check "$DOC06" '装备**顶替的语义顺序 = 先旧后新**' "P1：06 §5 账本登记顶替顺序"
-check "$DOC06" '装备区**撞槽即抛 = 编程错误兜底**' "P1：06 §5 账本登记撞槽即抛的归属"
-check "$DOC06" '槽位拼写取数据层 `horse_offense` / `horse_defense`' "P2：06 §5 账本登记槽位拼写"
+check "$DOC03" '`horse_offense` = 进攻马、`horse_defense` = 防御马' "P2：03 §2「卡牌数据模型」五槽拼写与数据层一致"
+check "$DOC06" '装备**顶替的语义顺序 = 先旧后新**' "P1：06 §5「程序化约定与偏离一手」账本登记顶替顺序"
+check "$DOC06" '装备区**撞槽即抛 = 编程错误兜底**' "P1：06 §5「程序化约定与偏离一手」账本登记撞槽即抛的归属"
+check "$DOC06" '槽位拼写取数据层 `horse_offense` / `horse_defense`' "P2：06 §5「程序化约定与偏离一手」账本登记槽位拼写"
 
 # ===========================================================================
 # 回写纪律（票 11）：两头钉 —— 每条回写同时断言「新串出现」与「退役旧串不出现」。
@@ -404,6 +404,229 @@ for claim in "${WRITEBACK_OLD[@]}"; do
     fail=1
   fi
 done
+
+# ===========================================================================
+# 票 01（retro-m2doc）：两类文档漂移的确定性检查。
+#   ① 交叉引用标题锚定：引用写成 `NN` §N「标题」——解析该文档必须存在 `## N.` 标题、
+#      且标题文本包含所引「标题」串。裸 `NN` §N 会随「插入一节」静默错位，一律判红；
+#      `§N.M` 子节与 `§M<数字>` 里程碑两种**合理形态**显式列白名单，未登记即红（不静默放过）。
+#   ② 退役串全树 absent：在既有 per-file 断言之外，对 开发文档/*.md + GLOSSARY.md
+#      + 参考资料/三国杀详细规则.txt 再扫一遍（「另一份文档」漏网也挡得住）。
+# 两条都带覆盖元断言 + 合成反例，姿态同上面的回写纪律段。
+# 语法边界：本扫描只认 `NN` §N（NN = 01–06 的文档号）。不带文档号的裸 `§N` 是票内小节
+# 自引用或本地指针（如「票 14 §4.2」「依据研究 §5.3」），不属该语法，故不在此检查。
+# 注意：本段自身会被扫描，故注释里不写 `NN` §N 的字面示例（用 `NN` / 「标题」这类占位）。
+# ===========================================================================
+
+# 文档号 → 文件名（标题锚定的解析目标）。用 case 而非 declare -A：脚本保持 bash 3.2 可跑。
+doc_file_for_num() {
+  case "$1" in
+    01) echo "01-总体设计.md" ;;
+    02) echo "02-规则引擎设计.md" ;;
+    03) echo "03-数据模型与技能描述.md" ;;
+    04) echo "04-AI与交互设计.md" ;;
+    05) echo "05-测试与验证策略.md" ;;
+    06) echo "06-里程碑与风险.md" ;;
+    *) return 1 ;;
+  esac
+}
+
+# 白名单 = 「合理但不能标题锚定」的形态，以 `|键|` 定界串存整键（bash 3.2 无关联数组）。
+# 键 = 文档号:子节号 / 文档号:里程碑。每条都必须真的被命中（死条目即判红）。
+SUBSECTION_WHITELIST="|01:1.2|02:2.2|02:3.5|"
+MILESTONE_WHITELIST="|06:M1|06:M2|"
+
+# 绊线（tripwire）：锚定引用数塌到阈值以下即判红——它防的是「扫描失效 ⇒ 空转通过」，
+# 不是覆盖目标；引用真的退役时随盘点下调。
+ANCHOR_TRIPWIRE=20
+
+# 引用扫描范围：承载「文档 §节」引用的仓库文本（不含 gitignored 的 .scratch/，任何 clone 都可跑）。
+REF_FILES=()
+while IFS= read -r f; do REF_FILES+=("$f"); done < <(
+  find "$PWD/开发文档" "$PWD/docs" "$PWD/tests" "$PWD/src" -type f \
+    \( -name '*.md' -o -name '*.py' -o -name '*.sh' \) -print 2>/dev/null | sort
+  printf '%s\n' "$PWD/GLOSSARY.md" "$PWD/AGENTS.md"
+)
+
+# 探针统一判定：输出里出现 FAIL 即「确实变红」。
+output_has_fail() { case "$1" in *FAIL*) return 0;; *) return 1;; esac; }
+
+scan_doc_refs() { # 标题锚定扫描；返回 1 = 有错
+  local errors=0 anchored_total=0
+  local f entry lineno line rest before after doc sec anchor docfile heading key trimmed
+  local seen_sub="|" seen_mile="|"
+
+  for f in "${REF_FILES[@]}"; do
+    [ -f "$f" ] || continue
+    while IFS= read -r entry; do
+      lineno="${entry%%:*}"
+      line="${entry#*:}"
+      rest="$line"
+      while [[ "$rest" =~ (0[1-6])\`?[[:space:]]*§[[:space:]]*([0-9]+|[A-Za-z][0-9]*) ]]; do
+        doc="${BASH_REMATCH[1]}"
+        sec="${BASH_REMATCH[2]}"
+        local match="${BASH_REMATCH[0]}"
+        # bash 不给匹配偏移：用字面串把 rest 切成 before / after（首次出现处）。
+        before="${rest%%"$match"*}"
+        after="${rest#"$before"}"
+        after="${after#"$match"}"
+        rest="$after"
+        # 票号引用（票 NN 的 §M）不是文档交叉引用。
+        # 这里用 glob + 参数展开而非 `=~`：C/POSIX locale 下多字节 `=~` 会失配（假红）。
+        trimmed="$before"
+        while [[ "$trimmed" == *[[:space:]] ]]; do trimmed="${trimmed%?}"; done
+        if [[ "$trimmed" == *"票" ]]; then continue; fi
+        if [[ "$sec" =~ ^[A-Za-z] ]]; then
+          key="$doc:$sec"; seen_mile="$seen_mile$key|"
+          if [[ "$MILESTONE_WHITELIST" != *"|$key|"* ]]; then
+            echo "FAIL: 未登记的里程碑形态引用 \`$doc\`（§${sec}）（${f#"$PWD"/}:$lineno）"
+            errors=$((errors+1))
+          fi
+          continue
+        fi
+        if [[ "$after" == .* ]]; then
+          key="$doc:$sec"
+          if [[ "$after" =~ ^\.([0-9]+) ]]; then key="$doc:$sec.${BASH_REMATCH[1]}"; fi
+          seen_sub="$seen_sub$key|"
+          if [[ "$SUBSECTION_WHITELIST" != *"|$key|"* ]]; then
+            echo "FAIL: 未登记的子节形态引用 \`$doc\`（§${key#*:}）（${f#"$PWD"/}:$lineno）"
+            errors=$((errors+1))
+          fi
+          continue
+        fi
+        # 标题锚定：`NN` §N「标题」。同样用 glob + 参数展开，避免 C locale 下多字节 `=~` 失配。
+        if [[ "$after" == "「"* ]]; then
+          if [[ "$after" != *"」"* ]]; then
+            echo "FAIL: 锚点未闭合（缺 」）：\`$doc\`（§$sec）（${f#"$PWD"/}:$lineno）"
+            errors=$((errors+1))
+            continue
+          fi
+          anchor="${after#「}"
+          anchor="${anchor%%」*}"
+          anchored_total=$((anchored_total+1))
+          if ! docfile="$(doc_file_for_num "$doc")"; then
+            echo "FAIL: 锚定引用指向不存在的文档号 \`$doc\`（${f#"$PWD"/}:$lineno）"
+            errors=$((errors+1))
+            continue
+          fi
+          if [ ! -f "$DOC_DIR/$docfile" ]; then
+            echo "FAIL: 锚定引用的目标文档不存在：$DOC_DIR/$docfile"
+            errors=$((errors+1))
+            continue
+          fi
+          heading="$(grep -m1 -E "^## ${sec}\." "$DOC_DIR/$docfile" || true)"
+          if [ -z "$heading" ]; then
+            echo "FAIL: \`$doc\` 没有 \`## $sec.\` 标题，引用却声称「$anchor」（${f#"$PWD"/}:$lineno）"
+            errors=$((errors+1))
+          elif [[ "$heading" != *"$anchor"* ]]; then
+            echo "FAIL: \`$doc\` 的 \`## $sec.\` 标题不含「$anchor」（实际：$heading）"
+            errors=$((errors+1))
+          fi
+          continue
+        fi
+        echo "FAIL: 交叉引用未标题锚定：\`$doc\`（§$sec）（${f#"$PWD"/}:$lineno）——请写成 \`$doc\`（§$sec「标题」）"
+        errors=$((errors+1))
+      done
+    done < <(grep -nF '§' "$f" || true)
+  done
+
+  # 覆盖元断言：白名单条条命中（防死条目 / 扫描失效），锚定引用不得塌到绊线以下（防正则失效空转）。
+  for key in ${SUBSECTION_WHITELIST//|/ }; do
+    if [[ "$seen_sub" != *"|$key|"* ]]; then
+      echo "FAIL: 子节白名单条目未被任何引用命中（白名单已死或扫描失效）：$key"
+      errors=$((errors+1))
+    fi
+  done
+  for key in ${MILESTONE_WHITELIST//|/ }; do
+    if [[ "$seen_mile" != *"|$key|"* ]]; then
+      echo "FAIL: 里程碑白名单条目未被任何引用命中（白名单已死或扫描失效）：$key"
+      errors=$((errors+1))
+    fi
+  done
+  if [ "$anchored_total" -lt "$ANCHOR_TRIPWIRE" ]; then
+    echo "FAIL: 标题锚定引用只解析到 $anchored_total 处（< $ANCHOR_TRIPWIRE，扫描疑似失效）"
+    errors=$((errors+1))
+  fi
+  if [ "$errors" -eq 0 ]; then
+    echo "PASS: 交叉引用全部标题锚定（$anchored_total 处锚定 + 子节/里程碑白名单条条命中）"
+  fi
+  [ "$errors" -eq 0 ]
+}
+
+BLACKLIST_TREE_EXTRA=("$PWD/GLOSSARY.md" "$PWD/参考资料/三国杀详细规则.txt")
+
+scan_blacklist_tree_absent() { # 退役串全树 absent；返回 1 = 有错
+  local errors=0 claim file lit desc
+  for claim in "${WRITEBACK_OLD[@]}"; do
+    IFS='|' read -r _file lit desc <<< "$claim"
+    for file in "$DOC_DIR"/*.md "${BLACKLIST_TREE_EXTRA[@]}"; do
+      [ -f "$file" ] || continue
+      if grep -qF -- "$lit" "$file"; then
+        echo "FAIL: 退役串『$lit』（$desc）仍出现在 ${file#"$PWD"/}"
+        errors=$((errors+1))
+      fi
+    done
+  done
+  if [ "$errors" -eq 0 ]; then
+    echo "PASS: 退役串在 开发文档/ + GLOSSARY.md + 规则文档 全树 absent"
+  fi
+  [ "$errors" -eq 0 ]
+}
+
+# 合成反例①a：把 06 的 `## 6.` 挪成 `## 7.`（= 前面插了一节把清单挤走），
+# 引用它的锚定断言必须变红——这正是 §5/§6 那次静默错位的机械复现。
+anchor_rename_goes_red() {
+  local probe out
+  probe="$(mktemp -d "$PWD/.wb_probe.XXXXXX")" || return 1
+  if ! cp "$DOC_DIR"/*.md "$probe/" 2>/dev/null; then rm -rf "$probe"; return 1; fi
+  if ! grep -q '^## 6\.' "$probe/06-里程碑与风险.md"; then rm -rf "$probe"; return 1; fi
+  sed -i 's/^## 6\./## 7./' "$probe/06-里程碑与风险.md"
+  out="$(DOC_DIR="$probe" scan_doc_refs 2>&1 || true)"
+  rm -rf "$probe"
+  output_has_fail "$out"
+}
+
+# 合成反例①b：节号不动、只把 `## 6.` 的**标题文字**改掉。只查「节号存在」的纯存在性
+# 检查抓不到这一半（正是那节让位新节后错位的情形），锚定断言必须同样变红。
+anchor_retitle_goes_red() {
+  local probe out
+  probe="$(mktemp -d "$PWD/.wb_probe.XXXXXX")" || return 1
+  if ! cp "$DOC_DIR"/*.md "$probe/" 2>/dev/null; then rm -rf "$probe"; return 1; fi
+  if ! grep -q '^## 6\. 进入实现前的检查清单' "$probe/06-里程碑与风险.md"; then
+    rm -rf "$probe"; return 1
+  fi
+  sed -i 's/^## 6\. 进入实现前的检查清单.*/## 6. 另一份清单/' "$probe/06-里程碑与风险.md"
+  out="$(DOC_DIR="$probe" scan_doc_refs 2>&1 || true)"
+  rm -rf "$probe"
+  output_has_fail "$out"
+}
+
+# 合成反例②：把任一退役串写进**另一份**开发文档的副本，全树 absent 必须变红。
+blacklist_tree_goes_red() {
+  local probe out lit
+  IFS='|' read -r _f lit _d <<< "${WRITEBACK_OLD[0]}"
+  probe="$(mktemp -d "$PWD/.wb_probe.XXXXXX")" || return 1
+  if ! cp "$DOC_DIR"/*.md "$probe/" 2>/dev/null; then rm -rf "$probe"; return 1; fi
+  printf '\n%s\n' "$lit" >> "$probe/01-总体设计.md"
+  out="$(DOC_DIR="$probe" scan_blacklist_tree_absent 2>&1 || true)"
+  rm -rf "$probe"
+  output_has_fail "$out"
+}
+
+if ! scan_doc_refs; then fail=1; fi
+if ! scan_blacklist_tree_absent; then fail=1; fi
+if ! anchor_rename_goes_red; then
+  echo "FAIL: 合成反例未变红：把 06 的 \`## 6.\` 挪号后，引用它的锚定断言仍通过"
+  fail=1
+fi
+if ! anchor_retitle_goes_red; then
+  echo "FAIL: 合成反例未变红：只改 06 的 \`## 6.\` 标题文字后，引用它的锚定断言仍通过"
+  fail=1
+fi
+if ! blacklist_tree_goes_red; then
+  echo "FAIL: 合成反例未变红：把退役串写进另一份开发文档后，全树 absent 仍通过"
+  fail=1
+fi
 
 if [ "$fail" -eq 0 ]; then
   echo "PASS: 开发文档校验全部通过"
