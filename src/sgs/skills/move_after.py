@@ -39,12 +39,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import SkillType, hero_skill_id
+from sgs.data import SkillType
 from sgs.effects import CarrierKind
 from sgs.state import CardRef, GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
-from .catalog import MATCH_OWNER_KEY, Hook, SkillDef, dispatch_timing, resolve_instances
+from .catalog import (
+    MATCH_OWNER_KEY,
+    HeroSkillDecl,
+    Hook,
+    SkillDef,
+    dispatch_timing,
+    resolve_instances,
+)
 
 __all__ = [
     "MOVE_AFTER_SKILLS",
@@ -123,18 +130,11 @@ def dispatch_move_after(host: Any, frame: Any) -> None:
 
 
 @dataclass(frozen=True, slots=True)
-class MoveAfterSkill:
+class MoveAfterSkill(HeroSkillDecl):
     """D 族一条技能的**声明**：触发条件 + 摸牌数（票 07 §要做什么 6 一行）。"""
 
-    hero_id: str
-    short_id: str
     draws: int
     trigger: Any
-
-    @property
-    def skill_id(self) -> str:
-        """全限定技能 id（与数据侧共用 :func:`sgs.data.hero_skill_id` 这一处派生）。"""
-        return hero_skill_id(self.hero_id, self.short_id)
 
     def fires(self, state: GameState, move: MoveEvent, owner: int | None) -> bool:
         """本次移动对这条技能（持有者 ``owner``）算不算"失去"（只看区域与**移动后**的持有）。"""

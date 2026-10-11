@@ -13,9 +13,17 @@
 - **两档**：**全场档**（``target=None``，标签作用于整次使用 / 整个帧）与**逐目标档**
   （带目标座位）两档；``has_tag`` 带目标时"全场档也算命中"。
 
+两档**分住两个帧私有键**（R4-Q1 的绑定读法，code-review C3）：
+
+- :data:`USE_TAGS_KEY`（``target_tags``）**登记**在 ``engine.steps._PER_TARGET_FRAME_KEYS``
+  里，逐目标游标推进时被结构性清除；
+- :data:`WHOLE_FIELD_TAGS_KEY`（``global_tags``）**刻意不登记**——全场档作用于整次使用的
+  每一个目标，多目标【杀】推进游标时必须存活。
+
+早先两档共用一个键，于是"推进游标"会连全场档一起清掉（票 08 登记的被迫读法）；
+C3 按 R4-Q1 的原文把只登记逐目标档这条兑现成结构性事实。
+
 帧私有数据不进记录流（``engine/journal.py`` 不记 ``frame.data``），故挂标签不改任何既有基准。
-袋子的槽名是 :data:`USE_TAGS_KEY`；逐目标档随逐目标游标推进被结构性清除
-（``engine/steps.py`` 的 ``_PER_TARGET_FRAME_KEYS``），不靠手工 ``del``。
 """
 
 from __future__ import annotations
@@ -25,7 +33,15 @@ from enum import Enum
 
 from .stack import Frame
 
-__all__ = ["EMPTY_TAGS", "USE_TAGS_KEY", "Tag", "UseTags", "add_tag", "has_tag"]
+__all__ = [
+    "EMPTY_TAGS",
+    "USE_TAGS_KEY",
+    "WHOLE_FIELD_TAGS_KEY",
+    "Tag",
+    "UseTags",
+    "add_tag",
+    "has_tag",
+]
 
 
 class Tag(str, Enum):
@@ -72,18 +88,42 @@ EMPTY_TAGS = UseTags()
 """空袋：没有标签时的缺省值（也是"无标签帧"的唯一读法）。"""
 
 USE_TAGS_KEY = "use_tags"
-"""帧私有槽名：帧标签袋（:class:`UseTags`）在 ``frame.data`` 里的键。"""
+"""帧私有槽名：**逐目标档**帧标签（``UseTags.target_tags``）在 ``frame.data`` 里的键。
+
+它登记在 ``engine.steps._PER_TARGET_FRAME_KEYS`` 里，故逐目标游标推进时被结构性清除
+（R4-Q1：只登记逐目标档，不靠手工 ``del``）。
+"""
+
+WHOLE_FIELD_TAGS_KEY = "use_whole_field_tags"
+"""帧私有槽名：**全场档**帧标签（``UseTags.global_tags``）在 ``frame.data`` 里的键。
+
+**刻意不登记**在 ``_PER_TARGET_FRAME_KEYS`` 里：全场档作用于整次使用的每一个目标，
+多目标【杀】推进游标时它必须存活（R4-Q1 的"只登记逐目标档"，code-review C3）。
+"""
 
 
-def _tags_of(frame: Frame) -> UseTags:
-    """读出帧上的袋子；没有 / 类型不对（构造局面里的裸帧）时退回空袋。"""
-    value = frame.data.get(USE_TAGS_KEY)
+def _read(frame: Frame, key: str) -> UseTags:
+    """读出某个键上的半个袋子；没有 / 类型不对（构造局面里的裸帧）时退回空袋。"""
+    value = frame.data.get(key)
     return value if isinstance(value, UseTags) else EMPTY_TAGS
 
 
+def _tags_of(frame: Frame) -> UseTags:
+    """把两个键上的半个袋子合成一个 :class:`UseTags`（读取侧的唯一入口）。"""
+    return UseTags(
+        global_tags=_read(frame, WHOLE_FIELD_TAGS_KEY).global_tags,
+        target_tags=_read(frame, USE_TAGS_KEY).target_tags,
+    )
+
+
 def add_tag(frame: Frame, tag: Tag, *, target: int | None = None) -> None:
-    """给 ``frame`` 打一个标签；``target`` 缺省 = 全场档，给出 = 逐目标档。"""
-    frame.data[USE_TAGS_KEY] = _tags_of(frame).with_tag(tag, target=target)
+    """给 ``frame`` 打一个标签；``target`` 缺省 = 全场档，给出 = 逐目标档。
+
+    两档分写两个键：``target`` 缺省写 :data:`WHOLE_FIELD_TAGS_KEY`（跨目标存活），
+    给出目标写 :data:`USE_TAGS_KEY`（随游标推进清除）。
+    """
+    key = USE_TAGS_KEY if target is not None else WHOLE_FIELD_TAGS_KEY
+    frame.data[key] = _read(frame, key).with_tag(tag, target=target)
 
 
 def has_tag(frame: Frame, tag: Tag, *, target: int | None = None) -> bool:

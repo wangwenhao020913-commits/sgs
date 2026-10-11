@@ -40,7 +40,8 @@ class DoDItem(NamedTuple):
 
 DOD_M3_ITEMS: dict[int, DoDItem] = {
     1: DoDItem(
-        "机制族矩阵 A–I 逐格有落点：每族至少一个族级构造局面单测文件，且文件里有点名它的用例",
+        "机制族矩阵 A–I 逐格有落点：每族至少一个族级构造局面单测文件，"
+        "且文件里有**至少两条**点名它的用例（spec Acceptance 第 1 行）",
         (
             "tests/test_dod_m3.py::test_the_family_matrix_a_to_i_each_has_a_landing_file",
             "tests/test_hero_catalog.py::test_every_enabled_hero_skill_is_named_by_a_family_test_file",
@@ -66,8 +67,8 @@ DOD_M3_ITEMS: dict[int, DoDItem] = {
         ),
     ),
     4: DoDItem(
-        "四轴计数 65/54/18/11 与术语表同步：实现 65 = 白名单 54 + 空日志 11、枚举位 18；"
-        "解封集合恰为 `MOVE_AFTER`",
+        "四轴计数 65/54/18/11 与规则级账本的『时机四轴计数』段同步："
+        "实现 65 = 白名单 54 + 空日志 11、枚举位 18；解封集合恰为 `MOVE_AFTER`",
         (
             "tests/test_timing.py::test_implemented_and_enum_only_partition_the_whole_table",
             "tests/test_timing.py::test_glossary_timing_counts_track_the_enum_partitions",
@@ -104,17 +105,84 @@ DOD_M3_ITEMS: dict[int, DoDItem] = {
     ),
 }
 
-# 机制族 A–I 的落点：族 → （族级构造局面单测文件，文件里必须出现的用例名）。
-FAMILY_LANDINGS: dict[str, tuple[str, str]] = {
-    "A": ("tests/test_hero_active.py", "test_rende_recovers_when_two_cards_are_given_for_the_first_time"),
-    "B": ("tests/test_hero_damage_after.py", "test_two_points_of_damage_ask_yiji_twice_and_jianxiong_once"),
-    "C": ("tests/test_hero_target_pool.py", "test_kongcheng_without_hand_cards_leaves_the_slash_pool"),
-    "D": ("tests/test_hero_move_after.py", "test_lianying_draws_when_the_hand_empties_on_use"),
-    "E": ("tests/test_hero_response_window.py", "test_wushuang_needs_two_dodges_to_cancel_a_slash"),
-    "F": ("tests/test_hero_lord.py", "test_hujia_asks_counterclockwise_from_the_turn_seat_and_stops_at_the_first_success"),
-    "G": ("tests/test_hero_arrange.py", "test_guanxing_reveals_the_top_x_cards_and_places_them_by_order_and_split"),
-    "H": ("tests/test_hero_transform.py", "test_wusheng_offers_a_red_card_as_a_slash_inheriting_suit_rank_and_color"),
-    "I": ("tests/test_hero_rejudge.py", "test_a_single_rejudge_replaces_the_judge_card_and_changes_the_result"),
+# 机制族 A–I 的落点：族 → （族级构造局面单测文件，**至少两条**点名该族的用例字面串）。
+# 结构刻意表达"至少两条"（`MIN_FAMILY_LITERALS`），不是恰好一对可被缩到一条的硬编码：
+# `spec.md`「Acceptance」第 1 行要求每族 **≥2 条实测**（R2-Q5 的"每族≥2 条"）。
+class FamilyLanding(NamedTuple):
+    """一个机制族的落点：族级文件 + 该文件里点名本族的用例名。"""
+
+    file: str
+    literals: tuple[str, ...]
+
+
+MIN_FAMILY_LITERALS = 2
+"""每族至少被点名几条用例（`spec.md` Acceptance 第 1 行；票 14 §8 / R2-Q5）。"""
+
+
+FAMILY_LANDINGS: dict[str, FamilyLanding] = {
+    "A": FamilyLanding(
+        "tests/test_hero_active.py",
+        (
+            "test_rende_recovers_when_two_cards_are_given_for_the_first_time",
+            "test_zhiheng_discards_by_source_zone_and_draws_the_same_count",
+        ),
+    ),
+    "B": FamilyLanding(
+        "tests/test_hero_damage_after.py",
+        (
+            "test_two_points_of_damage_ask_yiji_twice_and_jianxiong_once",
+            "test_jianxiong_takes_the_card_that_dealt_the_damage",
+        ),
+    ),
+    "C": FamilyLanding(
+        "tests/test_hero_target_pool.py",
+        (
+            "test_kongcheng_without_hand_cards_leaves_the_slash_pool",
+            "test_qianxun_leaves_the_snatch_and_indulgence_pools_even_with_hand_cards",
+        ),
+    ),
+    "D": FamilyLanding(
+        "tests/test_hero_move_after.py",
+        (
+            "test_lianying_draws_when_the_hand_empties_on_use",
+            "test_xiaoji_fires_when_equipment_is_taken_by_snatch",
+        ),
+    ),
+    "E": FamilyLanding(
+        "tests/test_hero_response_window.py",
+        (
+            "test_wushuang_needs_two_dodges_to_cancel_a_slash",
+            "test_tieqi_red_hides_the_whole_dodge_window",
+        ),
+    ),
+    "F": FamilyLanding(
+        "tests/test_hero_lord.py",
+        (
+            "test_hujia_asks_counterclockwise_from_the_turn_seat_and_stops_at_the_first_success",
+            "test_jiuyuan_adds_one_when_a_wu_character_rescues_sunquan_with_a_peach",
+        ),
+    ),
+    "G": FamilyLanding(
+        "tests/test_hero_arrange.py",
+        (
+            "test_guanxing_reveals_the_top_x_cards_and_places_them_by_order_and_split",
+            "test_guanxing_puts_the_remainder_below_the_existing_deck_bottom",
+        ),
+    ),
+    "H": FamilyLanding(
+        "tests/test_hero_transform.py",
+        (
+            "test_wusheng_offers_a_red_card_as_a_slash_inheriting_suit_rank_and_color",
+            "test_longdan_offers_a_hand_slash_as_a_dodge_when_a_dodge_is_needed",
+        ),
+    ),
+    "I": FamilyLanding(
+        "tests/test_hero_rejudge.py",
+        (
+            "test_a_single_rejudge_replaces_the_judge_card_and_changes_the_result",
+            "test_tiandu_takes_the_final_card_after_a_rejudge_and_not_the_discarded_original",
+        ),
+    ),
 }
 
 # `06` 第 5 节的七行 M3 规则级账本：行内锚定串 → 票号列里必须出现的裁定来源。
@@ -192,16 +260,33 @@ def test_the_registry_pins_the_eight_m3_items():
 
 
 def test_the_family_matrix_a_to_i_each_has_a_landing_file():
-    """机制族矩阵 A–I 逐格有落点：每族的族级文件存在且点名了该族用例。"""
+    """机制族矩阵 A–I 逐格有落点：每族的族级文件存在且**至少两条**点名它的用例。
+
+    `spec.md` Acceptance 第 1 行要求"每族 ≥2 条实测"；本用例用 ``MIN_FAMILY_LITERALS``
+    把这个下界写成可判决的断言（不是恰好一对可被悄悄缩水的硬编码），并逐条校验用例名
+    真的以 ``def <name>(`` 出现在族级文件里——"文件里提过这个名字"不算数。
+    """
     assert set(FAMILY_LANDINGS) == set("ABCDEFGHI"), "A–I 恰九族（spec 的必含集）"
 
-    for family, (relative, literal) in FAMILY_LANDINGS.items():
-        target = ROOT / relative
-        assert target.is_file(), f"机制族 {family} 的落点文件不存在：{relative}"
-        assert literal in target.read_text(encoding="utf-8"), (
-            f"机制族 {family} 的落点文件 {relative} 里找不到用例「{literal}」——"
-            f"该族的构造局面单测被删 / 改名即红"
-        )
+    thin = {
+        family: len(landing.literals)
+        for family, landing in FAMILY_LANDINGS.items()
+        if len(landing.literals) < MIN_FAMILY_LITERALS
+    }
+    assert not thin, (
+        f"机制族 {sorted(thin)} 点名的用例少于 {MIN_FAMILY_LITERALS} 条（实得 {thin}）——"
+        f"spec Acceptance 第 1 行要求每族 ≥{MIN_FAMILY_LITERALS} 条实测"
+    )
+
+    for family, landing in FAMILY_LANDINGS.items():
+        target = ROOT / landing.file
+        assert target.is_file(), f"机制族 {family} 的落点文件不存在：{landing.file}"
+        text = target.read_text(encoding="utf-8")
+        for literal in landing.literals:
+            assert f"def {literal}(" in text, (
+                f"机制族 {family} 的落点文件 {landing.file} 里没有用例「{literal}」——"
+                f"该族的构造局面单测被删 / 改名即红"
+            )
 
 
 def test_the_four_m3_adrs_are_in_the_milestones_doc():

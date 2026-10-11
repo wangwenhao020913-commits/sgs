@@ -560,24 +560,60 @@ def test_a_heuristic_game_replays_from_its_tape():
 # ---------------------------------------------------------------------------
 
 
-def _heuristic_wins(seed: int, *, heuristic_seat: int) -> bool:
-    engine = Engine.new_game(seed=seed, rule_config=RuleConfig(player_count=2), pack=PACK)
+def _candidate_wins(seed: int, *, heuristic: bool) -> bool:
+    """5 人局里座位 0 是候选：``heuristic`` 决定它是不是启发式档，其余四席一律随机。
+
+    两臂用**同一个种子**（牌堆 / 身份 / 武将映射逐字节相同）⇒ 差别只来自座位 0 的档位，
+    这正是票面说的"在同一批种子上"；``hero_pool=()`` 与验收 5 的批次同口径（开武将）。
+    五个座位共用同一个 ``ai`` 子流（与 ``cli.py`` / ``test_all_ai_games.py`` 一处口径）。
+    """
+    engine = Engine.new_game(
+        seed=seed,
+        rule_config=RuleConfig(player_count=5),
+        pack=PACK,
+        hero_pool=(),
+    )
     stream = _stream(seed)
     players = [
-        (HeuristicPlayer if seat == heuristic_seat else RandomPlayer)(stream)
-        for seat in (0, 1)
+        (HeuristicPlayer if heuristic and seat == 0 else RandomPlayer)(stream)
+        for seat in range(5)
     ]
     engine.run(players)
-    return heuristic_seat in set(engine.records[-1].winners)
+    return 0 in set(engine.records[-1].winners)
+
+
+def _candidate_wins_over(seeds: tuple[int, ...], *, heuristic: bool) -> int:
+    """跑完一批种子、数座位 0 的胜局；任一局崩溃都**点名报出**（不静默缩小批次）。
+
+    票 13 §验收 6 要求在**验收 5 的同一批 5 人种子**上比较；随机档遇崩溃时不能悄悄
+    减种子，故这里收集失败清单并整条判红。
+    """
+    wins = 0
+    failures: list[str] = []
+    for seed in seeds:
+        try:
+            wins += _candidate_wins(seed, heuristic=heuristic)
+        except Exception as error:  # noqa: BLE001 - 崩溃即失败，但要报出是哪个种子
+            failures.append(f"seed={seed}: {type(error).__name__}: {error}")
+    assert not failures, (
+        "5 人 32 种子批里有对局没跑完（不得静默缩小批次）：\n" + "\n".join(failures)
+    )
+    return wins
 
 
 def test_the_heuristic_beats_random_on_the_same_seeds():
-    """同一批种子上两种座位各下一半：启发式的胜率明显高于随机。
+    """票 13 §验收 6：**同一批种子**（= 验收 5 的 5 人 32 种子批）上启发式胜率显著更高。
 
-    阈值刻意宽松（0.65）：判的是"规则启发式确实比均匀乱选强"，不是某个精确胜率。
+    座位 0 为候选、其余四席随机：同一种子下两臂的局面逐字节相同，故胜率差只反映档位。
+    判据刻意宽松（启发式 ≥ 0.6 且比随机多赢 ≥ 1/4 的种子），避免脆弱。
     """
-    seeds = tuple(range(1, 17))
-    games = [(seed, seat) for seed in seeds for seat in (0, 1)]
-    wins = sum(1 for seed, seat in games if _heuristic_wins(seed, heuristic_seat=seat))
+    seeds = tuple(range(1, 33))
 
-    assert wins / len(games) >= 0.65, f"启发式只赢了 {wins}/{len(games)} 局"
+    heuristic_wins = _candidate_wins_over(seeds, heuristic=True)
+    random_wins = _candidate_wins_over(seeds, heuristic=False)
+
+    assert heuristic_wins / len(seeds) >= 0.6, f"启发式座位 0 只赢了 {heuristic_wins}/32"
+    assert heuristic_wins - random_wins >= len(seeds) // 4, (
+        f"启发式 {heuristic_wins}/32 vs 随机 {random_wins}/32："
+        f"优势不足（票 13 §验收 6 的宽松判据）"
+    )

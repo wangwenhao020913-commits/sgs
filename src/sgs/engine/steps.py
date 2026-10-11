@@ -109,6 +109,8 @@ class FrameHost(StepHost, Protocol):
 
     def substitute_judge_card(self, frame: Frame, *, seat: int, new_card: CardRef) -> Control: ...
 
+    def resume_judge_substitution(self, frame: Frame) -> Control: ...
+
     def apply_judge_after(self, frame: Frame) -> None: ...
 
     def skip_play_phase(self, seat: int) -> None: ...
@@ -702,7 +704,10 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
 集中列在这里，使"新加一个按目标分槽的键"只需改这一处。
 
 票 08 追加两个按目标分槽的键：``dodges_done``（本次响应窗口已攒够几张）与 ``use_tags``
-（**帧标签袋**——登在这里使"逐目标档随游标推进自动清除"是结构性的、不靠手工 ``del``）。
+（帧标签袋的**逐目标档**——登在这里使"逐目标档随游标推进自动清除"是结构性的、不靠手工
+``del``）。**全场档**住 :data:`sgs.resolution.WHOLE_FIELD_TAGS_KEY`，**刻意不登在这里**：
+它作用于整次使用的每一个目标，多目标【杀】推进游标时必须存活（R4-Q1 只要求登记逐目标档；
+code-review C3 把两档拆成两个帧私有键，见 ``tests/test_hero_response_window.py``）。
 票 09 再追加提供者展开的四个键（``provider_skill`` / ``provider_actor`` /
 ``provider_satisfied`` / ``lord_request``）：它们是**一次求助窗口**的进度，多目标【杀】里
 必须逐目标重来，否则后一个目标会捡到前一个目标的应答者区间。
@@ -1212,15 +1217,20 @@ def judge_before_effect(host: FrameHost, frame: Frame) -> Control:
     1. 真 dispatch 一次 ``JUDGE_CARD_BEFORE_EFFECT``（既有语义不变；M2 无改判技能
        ⇒ 队列恒空、无询问、无额外日志节点）。时机记录**每个判定帧只落一次**
        （``REJUDGE_EMITTED`` 守卫重入；循环重开不改时点序，票 11 §验收 7）。
-    2. 在 :func:`_rejudge_window` 里逐个问**有改判能力**的座位（``WindowCause.REJUDGE``、
-       ``required=None``、``mode=PLAY`` = 打出一张**手牌**代替之）；每次替代后窗口重开，
-       直到无人再替代。
+    2. 先把上一次替代的**在途进度**收尾（``resume_judge_substitution``；code-review C2：
+       替代的第一段移动可能因内联钩子提问而挂起，而 ``_rejudge_window`` 已把这个座位
+       记进"已问过"、不会再次进来），再在 :func:`_rejudge_window` 里逐个问**有改判能力**
+       的座位（``WindowCause.REJUDGE``、``required=None``、``mode=PLAY`` = 打出一张**手牌**
+       代替之）；每次替代后窗口重开，直到无人再替代。
     """
     if not frame.data.get(REJUDGE_EMITTED):
         control = _emit_judge(host, frame, Timing.JUDGE_CARD_BEFORE_EFFECT)
         if control is not None:
             return control
         frame.data[REJUDGE_EMITTED] = True
+    control = host.resume_judge_substitution(frame)
+    if control is not None:
+        return control
     return _rejudge_window(host, frame)
 
 

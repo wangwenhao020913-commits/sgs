@@ -21,7 +21,16 @@ from __future__ import annotations
 
 from sgs.data import load_content_pack
 from sgs.engine import Engine
-from sgs.resolution import Frame, Tag, UseTags, add_tag, has_tag
+from sgs.engine.steps import _PER_TARGET_FRAME_KEYS, resolve_advance
+from sgs.resolution import (
+    USE_TAGS_KEY,
+    WHOLE_FIELD_TAGS_KEY,
+    Frame,
+    Tag,
+    UseTags,
+    add_tag,
+    has_tag,
+)
 from sgs.state import (
     ActivateSkill,
     EndPhase,
@@ -625,7 +634,7 @@ def test_tieqi_tag_does_not_cross_into_the_next_use():
 def test_the_frame_tag_bag_has_two_tiers_and_immutable_values():
     """``add_tag`` / ``has_tag`` 的公开语义（票 08 §要做什么 4）：两档互不串味、值不可变。"""
     frame = Frame(kind=FrameKind.RESOLVE)
-    before = frame.data.get("use_tags")
+    before = frame.data.get(USE_TAGS_KEY)
 
     add_tag(frame, Tag.UNRESPONSIVE, target=1)
     assert has_tag(frame, Tag.UNRESPONSIVE, target=1)
@@ -637,10 +646,10 @@ def test_the_frame_tag_bag_has_two_tiers_and_immutable_values():
     assert has_tag(frame, Tag.PREVENTED)
     assert has_tag(frame, Tag.PREVENTED, target=2), "全场档对任何一个目标都成立"
 
-    first = frame.data["use_tags"]
+    first = frame.data[WHOLE_FIELD_TAGS_KEY]
     assert isinstance(first, UseTags)
     add_tag(frame, Tag.SAVED)
-    assert first is not frame.data["use_tags"], "加入标签换一个新值（浅拷贝安全）"
+    assert first is not frame.data[WHOLE_FIELD_TAGS_KEY], "加入标签换一个新值（浅拷贝安全）"
     assert not first.has(Tag.SAVED), "旧值不被就地改写"
 
 
@@ -650,7 +659,28 @@ def test_the_frame_tag_bag_is_idempotent_and_keeps_insertion_order():
     add_tag(frame, Tag.UNRESPONSIVE, target=2)
     add_tag(frame, Tag.PREVENTED)
     add_tag(frame, Tag.UNRESPONSIVE, target=2)
-    tags = frame.data["use_tags"]
 
-    assert tags.target_tags == ((2, Tag.UNRESPONSIVE),)
-    assert tags.global_tags == (Tag.PREVENTED,)
+    assert frame.data[USE_TAGS_KEY].target_tags == ((2, Tag.UNRESPONSIVE),)
+    assert frame.data[WHOLE_FIELD_TAGS_KEY].global_tags == (Tag.PREVENTED,)
+
+
+def test_the_whole_field_tag_survives_a_per_target_cursor_advance():
+    """R4-Q1：只把**逐目标档**登记进 ``_PER_TARGET_FRAME_KEYS``（code-review C3）。
+
+    多目标【杀】里游标推进必须清掉逐目标档（否则标签会串到下一个目标），但**全场档**
+    （【寒冰剑】的 ``PREVENTED`` / 【贯石斧】的 ``SAVED`` 一类）作用于整次使用，必须跨
+    目标存活。两档因此分住两个 ``frame.data`` 键，只有逐目标那个登记进清除表。
+    """
+    assert USE_TAGS_KEY in _PER_TARGET_FRAME_KEYS, "逐目标档随游标推进清除"
+    assert WHOLE_FIELD_TAGS_KEY not in _PER_TARGET_FRAME_KEYS, "全场档不随游标推进清除"
+
+    frame = Frame(kind=FrameKind.RESOLVE, data={"targets": (1, 2), "cursor": 0})
+    add_tag(frame, Tag.PREVENTED)  # 全场档
+    add_tag(frame, Tag.UNRESPONSIVE, target=1)  # 逐目标档
+
+    resolve_advance(None, frame)
+
+    assert frame.data["cursor"] == 1, "游标真的推进了（断言不空转）"
+    assert has_tag(frame, Tag.PREVENTED, target=2), "全场档跨目标存活"
+    assert not has_tag(frame, Tag.UNRESPONSIVE, target=1), "逐目标档随游标推进被清除"
+

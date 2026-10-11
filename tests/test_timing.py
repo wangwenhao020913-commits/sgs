@@ -11,8 +11,10 @@ M2 定格（票 17 §3 / 票 32）把分区改为里程碑中性名：
   但流程结构性地不经过、因此记录流里一个都不出现；
 - ``ENUM_ONLY``（19）：枚举位保留、流程走不到。
 
-末尾一节是**术语表计数纪律**（retro 票 06）：`GLOSSARY.md` 里这三个集合与派生的
+末尾一节是**时机计数纪律**（retro 票 06 / code-review C7）：规则级账本
+（`06` §5「程序化约定与偏离一手」的"时机四轴计数"段）里这三个集合与派生的
 ``IMPLEMENTED`` 的四个计数必须与本文导入的长度同步，否则漂移只在 review 时被人读出来。
+术语表 `GLOSSARY.md` 只留定义、不承担账目（C7 把账目从术语表搬进账本）。
 """
 
 from __future__ import annotations
@@ -160,90 +162,107 @@ def test_timing_records_store_only_the_enum_identifier_not_the_rendered_label():
 
 
 # ---------------------------------------------------------------------------
-# 术语表计数纪律：GLOSSARY.md 的时机计数必须与 enum.py 同步（retro 票 06）
+# 时机计数纪律：规则级账本的"时机四轴计数"段必须与 enum.py 同步（retro 票 06 / C7）
 # ---------------------------------------------------------------------------
 
-GLOSSARY_PATH = Path(__file__).resolve().parent.parent / "GLOSSARY.md"
-"""术语表在仓库根，是**非冻结文档**：计数漂移时就地改它，不改 ``开发文档/``（票 17 §8 R-2/R-3）。"""
-
-_GLOSSARY_COUNT_CLAIMS: tuple[tuple[str, str], ...] = (
-    ("dispatch 白名单", r"\*\*dispatch 白名单\*\*里的\s*(\d+)\s*个"),
-    ("dispatch 白名单", r"观测到的\*\*时机节点\*\*集合（M2 定格\s*\*\*(\d+)\*\*\s*个）"),
-    ("空日志节点", r"不出现的\s*(\d+)\s*个 L2 节点"),
-    ("已实现类", r"复原\*\*已实现类\*\*的\s*(\d+)\s*个"),
-    ("枚举位", r"余\s*(\d+)\s*个\*\*枚举位\*\*"),
+MILESTONES_PATH = (
+    Path(__file__).resolve().parent.parent / "开发文档" / "06-里程碑与风险.md"
 )
-"""每条 =（轴, 正则）；正则恰好捕获一个十进制计数。同一轴可以有多处声明（**每处都得对、每处都得被扫到**）。"""
+"""计数账本 = `06` §5「程序化约定与偏离一手」的"时机四轴计数"段（code-review C7）。
 
-_GLOSSARY_EXPECTED_COUNTS: dict[str, int] = {
+术语表 `GLOSSARY.md` 只留定义、**不承担账目**；四轴计数只住账本一处，代码与账本必须同一次
+改动（票 32 以来的计数纪律）。扫的是**规则级账本段**而不是术语表：定义与账目分家，
+"54 = 53 + 1"那类自相矛盾的实现账目因此不会再落进术语表。
+"""
+
+LEDGER_SECTION_HEADING = "## 5. 程序化约定与偏离一手"
+"""计数段所在小节；对账前先确认它还在（小节被挪号 / 改标题 ⇒ 扫描目标错位即判红）。"""
+
+LEDGER_PARAGRAPH_MARK = "**时机四轴计数（M3 收口；`tests/test_timing.py` 与本段对账）**"
+"""计数段的段首标记（覆盖元断言据此确认我们扫的是账本段、不是别的计数句）。"""
+
+_LEDGER_COUNT_CLAIMS: tuple[tuple[str, str], ...] = (
+    ("dispatch 白名单", r"`dispatch 白名单`\s*\*\*(\d+)\*\*\s*个"),
+    ("空日志节点", r"`空日志节点`\s*\*\*(\d+)\*\*\s*个"),
+    ("已实现类", r"`已实现类`\s*\*\*(\d+)\*\*\s*个"),
+    ("枚举位", r"余\s*\*\*(\d+)\*\*\s*个\s*`枚举位`"),
+)
+"""每条 =（轴, 正则）；正则恰好捕获一个十进制计数。四轴各一处声明。"""
+
+_LEDGER_EXPECTED_COUNTS: dict[str, int] = {
     "dispatch 白名单": len(DISPATCH_WHITELIST),
     "空日志节点": len(EMPTY_LOG),
     "已实现类": len(IMPLEMENTED),
     "枚举位": len(ENUM_ONLY),
 }
-"""四个计数的唯一真源 = ``enum.py`` 的三个集合与由它们派生的 ``IMPLEMENTED``。"""
+"""四个计数的唯一真源 = `enum.py` 的三个集合与由它们派生的 ``IMPLEMENTED``。"""
 
-_GLOSSARY_FIX_HINT = "同步 GLOSSARY.md 的计数（非冻结文档，可就地改）"
-
-
-def _glossary_text() -> str:
-    return GLOSSARY_PATH.read_text(encoding="utf-8")
+_LEDGER_FIX_HINT = "同步规则级账本的『时机四轴计数』段（非冻结文档，可就地改）"
 
 
-def _glossary_count_drift(text: str) -> list[str]:
-    """GLOSSARY 文本里与 ``enum.py`` 计数不符的声明；空列表 = 同步。"""
+def _ledger_text() -> str:
+    return MILESTONES_PATH.read_text(encoding="utf-8")
+
+
+def _ledger_count_drift(text: str) -> list[str]:
+    """账本文本里与 ``enum.py`` 计数不符的声明；空列表 = 同步。"""
     drift: list[str] = []
-    for axis, pattern in _GLOSSARY_COUNT_CLAIMS:
-        expected = _GLOSSARY_EXPECTED_COUNTS[axis]
+    for axis, pattern in _LEDGER_COUNT_CLAIMS:
+        expected = _LEDGER_EXPECTED_COUNTS[axis]
         for claimed in re.findall(pattern, text):
             if int(claimed) != expected:
                 drift.append(
-                    f"GLOSSARY.md 的『{axis}』写 {claimed}，enum.py 是 {expected}；{_GLOSSARY_FIX_HINT}"
+                    f"规则级账本的『{axis}』写 {claimed}，enum.py 是 {expected}；"
+                    f"{_LEDGER_FIX_HINT}"
                 )
     return drift
 
 
-def _glossary_unmatched_claims(text: str) -> list[str]:
+def _ledger_unmatched_claims(text: str) -> list[str]:
     """在文本里**一处也匹配不上**的声明正则（空 = 每条计数句都还在、正则都还有效）。"""
-    return [pattern for _, pattern in _GLOSSARY_COUNT_CLAIMS if not re.search(pattern, text)]
+    return [pattern for _, pattern in _LEDGER_COUNT_CLAIMS if not re.search(pattern, text)]
 
 
 def test_glossary_timing_counts_track_the_enum_partitions():
-    """票 32 删去 ``M1_`` 前缀并把计数改成 53/64/19/11 时，GLOSSARY 是靠人读出来的。"""
-    drift = _glossary_count_drift(_glossary_text())
+    """四轴计数与 `enum.py` 同步（计数账本自 C7 起住规则级账本、不住术语表）。"""
+    text = _ledger_text()
+    assert LEDGER_SECTION_HEADING in text, "计数段所在小节被挪号 / 改标题"
+    assert LEDGER_PARAGRAPH_MARK in text, "账本里找不到『时机四轴计数』段"
 
-    assert not drift, "代码里的时机计数与 GLOSSARY.md 漂移：" + "；".join(drift)
+    drift = _ledger_count_drift(text)
+
+    assert not drift, "代码里的时机计数与规则级账本漂移：" + "；".join(drift)
 
 
 def test_the_glossary_count_scan_actually_covered_every_claim_site():
     """防"某条计数句被改写 / 正则失效 ⇒ 该声明静默掉出扫描"。
 
-    按**声明点**判，不只按轴：同一轴的 dispatch 白名单有两处声明，只按轴判会让失效的那处
-    被另一处掩盖过去。
+    按**声明点**判：每条声明的正则都必须在真实账本段里命中一次——否则空转即判红。
     """
-    unmatched = _glossary_unmatched_claims(_glossary_text())
+    unmatched = _ledger_unmatched_claims(_ledger_text())
 
     assert not unmatched, (
-        "GLOSSARY.md 里这些计数声明的正则已匹配不上（措辞变了或正则失效）：" + "；".join(unmatched)
+        "规则级账本里这些计数声明的正则已匹配不上（措辞变了或正则失效）："
+        + "；".join(unmatched)
     )
 
 
 def test_the_glossary_count_scan_goes_red_on_a_stale_count():
-    """合成反例：把**真实 GLOSSARY** 里每条声明的数字改错一格，该轴必红。
+    """合成反例：把**真实账本**里每条声明的数字改错一格，该轴必红。
 
     直接改真实文本（而不是另写一份合成模板），扫描与文档因此不会各自漂移。
     """
-    text = _glossary_text()
-    assert _glossary_count_drift(text) == []
+    text = _ledger_text()
+    assert _ledger_count_drift(text) == []
 
-    for axis, pattern in _GLOSSARY_COUNT_CLAIMS:
+    for axis, pattern in _LEDGER_COUNT_CLAIMS:
         match = re.search(pattern, text)
-        assert match is not None, f"真实 GLOSSARY 里找不到『{axis}』的声明：{pattern}"
+        assert match is not None, f"真实账本里找不到『{axis}』的声明：{pattern}"
         claimed = match.group(1)
         stale = int(claimed) - 1
         stale_text = text[: match.start(1)] + str(stale) + text[match.end(1) :]
 
-        drift = _glossary_count_drift(stale_text)
+        drift = _ledger_count_drift(stale_text)
 
         assert any(axis in message for message in drift), (
             f"把『{axis}』的 {claimed} 改成 {stale} 应判红：{drift}"

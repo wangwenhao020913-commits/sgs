@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from sgs.data import Kingdom, SkillType, hero_skill_id
+from sgs.data import SkillType
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
@@ -58,7 +58,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .catalog import SkillDef, same_kingdom
+from .catalog import HeroSkillDecl, SkillDef, same_kingdom
 
 __all__ = [
     "HUJIA",
@@ -242,7 +242,7 @@ def _run_lord_request(
 
 
 @dataclass(frozen=True, slots=True)
-class LordSkill:
+class LordSkill(HeroSkillDecl):
     """F 族一条"求助型"技能的**声明**：需要什么牌 + 在哪个候选语境里提供。
 
     ``scope`` 决定候选回调在哪条 ``CANDIDATES`` 派发里生效（【护驾】= ``DODGE``、
@@ -250,16 +250,9 @@ class LordSkill:
     （【激将】按票面只覆盖**打出**【杀】的窗口：南蛮 / 决斗，不含【借刀杀人】的"使用【杀】"）。
     """
 
-    hero_id: str
-    short_id: str
     required: str
     scope: CandidateScope
     respond_mode: RespondMode | None = None
-
-    @property
-    def skill_id(self) -> str:
-        """全限定技能 id（与数据侧共用 :func:`sgs.data.hero_skill_id` 这一处派生）。"""
-        return hero_skill_id(self.hero_id, self.short_id)
 
     def offer(self, state: GameState, ctx: ModifierContext, current: Any) -> Any:
         """``CANDIDATES`` 回调：需要者**自己**的这条实例给它追加"视为发动"候选。
@@ -312,19 +305,11 @@ LORD_REQUEST_SKILLS: tuple[LordSkill, ...] = (HUJIA, JIJIANG)
 
 
 @dataclass(frozen=True, slots=True)
-class RecoverBoost:
-    """F 族"改回复量"一条技能的声明：牌名闭集 + 势力 + 加成值。"""
+class RecoverBoost(HeroSkillDecl):
+    """F 族"改回复量"一条技能的声明：牌名闭集 + 加成值。"""
 
-    hero_id: str
-    short_id: str
-    kingdom: Kingdom
     card_types: tuple[str, ...] = ("peach",)
     step: int = 1
-
-    @property
-    def skill_id(self) -> str:
-        """全限定技能 id（与数据侧共用 :func:`sgs.data.hero_skill_id` 这一处派生）。"""
-        return hero_skill_id(self.hero_id, self.short_id)
 
     def recover_amount(self, state: GameState, ctx: ModifierContext, current: Any) -> Any:
         """``RECOVER_AMOUNT`` 回调：其他同势力角色对**自己**用【桃】时把回复量 +1。
@@ -343,7 +328,7 @@ class RecoverBoost:
         return current + self.step
 
 
-JIUYUAN = RecoverBoost(hero_id="sunquan", short_id="jiuyuan", kingdom=Kingdom.WU)
+JIUYUAN = RecoverBoost(hero_id="sunquan", short_id="jiuyuan")
 """孙权【救援】：锁定技，其他吴势力角色对你使用【桃】时，回复的体力值 +1（规则 1004）。"""
 
 

@@ -29,13 +29,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import SkillType, hero_skill_id
+from sgs.data import SkillType
 from sgs.effects import CarrierKind, Modifier, ModifierContext, ModifierPoint
 from sgs.resolution import Control, Frame, Tag, add_tag
 from sgs.state import GameState
 from sgs.timing import Timing
 
-from .catalog import Hook, HookHandler, SkillDef
+from .catalog import HeroSkillDecl, Hook, HookHandler, SkillDef
 
 __all__ = ["RESPONSE_WINDOW_SKILLS", "response_window_skill_definitions"]
 
@@ -55,18 +55,11 @@ TIEQI_CURSOR = "tieqi_cursor"
 
 
 @dataclass(frozen=True, slots=True)
-class ResponseCountSkill:
+class ResponseCountSkill(HeroSkillDecl):
     """E 族"改所需张数"一条技能的声明：牌名闭集 + 目标张数。"""
 
-    hero_id: str
-    short_id: str
     card_types: tuple[str, ...]
     count: int = RESPONSE_COUNT_NEEDED
-
-    @property
-    def skill_id(self) -> str:
-        """全限定技能 id（与数据侧共用 :func:`sgs.data.hero_skill_id` 这一处派生）。"""
-        return hero_skill_id(self.hero_id, self.short_id)
 
     def response_count(self, state: GameState, ctx: ModifierContext, current: Any) -> Any:
         """``RESPONSE_COUNT`` 回调：**自己使用**那张牌时把所需张数改成 ``count``。
@@ -119,27 +112,18 @@ def _tieqi(host: Any, frame: Frame) -> Control:
 
 
 @dataclass(frozen=True, slots=True)
-class FrameTagSkill:
+class FrameTagSkill(HeroSkillDecl):
     """E 族"加一条禁令"一条技能的声明：触发时机 + 标签取值。"""
 
-    hero_id: str
-    short_id: str
     timing: Timing
-    tag: Tag
     locked: bool
     handler: HookHandler
-
-    @property
-    def skill_id(self) -> str:
-        """全限定技能 id（与数据侧共用 :func:`sgs.data.hero_skill_id` 这一处派生）。"""
-        return hero_skill_id(self.hero_id, self.short_id)
 
 
 TIEQI = FrameTagSkill(
     hero_id="machao",
     short_id="tieqi",
     timing=Timing.USE_AFTER_DESIGNATE_TARGET,
-    tag=Tag.UNRESPONSIVE,
     locked=False,
     handler=_tieqi,
 )

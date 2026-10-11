@@ -158,6 +158,16 @@ _MOVE_EVENTS = "move_events"
 帧外移动没有帧可挂标记，那份幂等键住 :attr:`Engine._move_recorded`。
 """
 
+_JUDGE_SUBSTITUTION = "judge_substitution"
+"""帧私有槽名：一次改判「**代替**」的在途进度（票 11 §② 的重入；code-review C2）。
+
+``{"old": CardRef, "new": CardRef, "seat": int, "stage": int}``：``stage`` = 已搬完的段数
+（0 = 都还没搬、1 = 新牌已进处理区、2 = 原判定牌也已进弃牌堆）。**原判定牌在首次进入时
+定格**，故重入不会把它错读成刚写进 ``judge_card`` 的新牌；``stage`` 让重入跳过已搬段，
+既不搬第二遍、也不会把原判定牌遗留在处理区。``resume`` 在
+:func:`~sgs.engine.steps.judge_before_effect` 顶部消费它。
+"""
+
 
 class _Suspend:
     """``ask`` 的哨兵：询问已发出，等参与者应答。"""
@@ -1496,33 +1506,75 @@ class Engine:
 
         与 :func:`sgs.effects.substitute_judge_card` 的**代替**口径逐字段一致
         （``reason = JUDGE``、归属 = **被判定者**、新牌进处理区、原牌进弃牌堆），
-        只是走 :meth:`move_in_frame` 这个"搬牌必记 delta、必派发失去牌后"的**唯一入口**：
+        只是走 :meth:`move_in_frame` 这个"搬牌必记 delta、必派发失去牌后"的公共移动口：
         替代掉的手牌因此照常触发 D 族的"失去牌后"，而不是绕开移动入口直接改状态。
 
         两条移动各发一条 ``card_move``（来源区不同）。完成时把帧私有 ``judge_card``
         换成新牌 —— 它成为新的"生效前"判定牌（窗口据此重开）。
+
+        **可重入（code-review C2）**：第一次移动可能因内联钩子提问而挂起（例如改判的
+        是【连营】持有者的最后一张手牌）。进度记在帧私有 :data:`_JUDGE_SUBSTITUTION`：
+        原判定牌**首次进入时定格**、``stage`` 记住已搬段，故重入要么由本方法续跑、
+        要么由 :meth:`resume_judge_substitution` 续跑——两者都不会把原判定牌遗留处理区。
+        """
+        progress = frame.data.get(_JUDGE_SUBSTITUTION)
+        if progress is None:
+            progress = {
+                "old": frame.data["judge_card"],
+                "new": new_card,
+                "seat": seat,
+                "stage": 0,
+            }
+            frame.data[_JUDGE_SUBSTITUTION] = progress
+        return self._advance_judge_substitution(frame, progress)
+
+    def resume_judge_substitution(self, frame: Frame) -> Control:
+        """把被打断的改判「代替」接着做完；没有在途替代时是**零动作**（code-review C2）。
+
+        改判窗口是**步骤级**循环：挂起重入时 ``_rejudge_window`` 已经把这个座位记进
+        "已问过"，不会再次调 :meth:`substitute_judge_card`。故续跑点放在
+        :func:`~sgs.engine.steps.judge_before_effect` 的入口——它先收尾在途替代，
+        再开新一轮询问。
+        """
+        progress = frame.data.get(_JUDGE_SUBSTITUTION)
+        if progress is None:
+            return None
+        return self._advance_judge_substitution(frame, progress)
+
+    def _advance_judge_substitution(self, frame: Frame, progress: dict[str, Any]) -> Control:
+        """按 ``progress["stage"]`` 搬完改判的两段移动；每段搬完即记进度、挂起即透传。
+
+        ``stage`` 在**调用移动之前**前进：``move_in_frame`` 返回 ``"stay"`` 时牌**已经**
+        搬完（只是钩子的派发还没续跑），故重入必须跳过这一段。
         """
         subject = frame.data["subject"]
-        old_card = frame.data["judge_card"]
-        frame.data["judge_card"] = new_card
-        control = self.move_in_frame(
-            frame,
-            (new_card,),
-            to_zone=ZoneRef(Zone.PROCESSING),
-            reason=MoveReason.JUDGE,
-            owner=subject,
-            actor=seat,
-        )
-        if control is not None:
-            return control
-        return self.move_in_frame(
-            frame,
-            (old_card,),
-            to_zone=ZoneRef(Zone.DISCARD),
-            reason=MoveReason.JUDGE,
-            owner=subject,
-            actor=subject,
-        )
+        if progress["stage"] < 1:
+            progress["stage"] = 1
+            control = self.move_in_frame(
+                frame,
+                (progress["new"],),
+                to_zone=ZoneRef(Zone.PROCESSING),
+                reason=MoveReason.JUDGE,
+                owner=subject,
+                actor=progress["seat"],
+            )
+            frame.data["judge_card"] = progress["new"]
+            if control is not None:
+                return control
+        if progress["stage"] < 2:
+            progress["stage"] = 2
+            control = self.move_in_frame(
+                frame,
+                (progress["old"],),
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.JUDGE,
+                owner=subject,
+                actor=subject,
+            )
+            if control is not None:
+                return control
+        frame.data.pop(_JUDGE_SUBSTITUTION, None)
+        return None
 
     def discard_judge_card(self, frame: Frame) -> None:
         """判定牌 处理区 → 弃牌堆（``reason = JUDGE``、归属 = 被判定者）：判定结算结束。
@@ -1604,12 +1656,21 @@ class Engine:
         这也是**效果回调的公共移动口**（票 27）：``OPS`` 里的 op 只经它搬牌，
         故"搬牌必记 delta"这条不变量对使用链与效果链是同一个实现。
 
-        **失去牌后（票 07）**：本方法是全项目移动的**唯一入口**——有承载帧的移动在
-        本帧内派发 ``MOVE_AFTER``（帧私有载荷 :class:`~sgs.skills.MoveEvent`，帧私有数据
-        不进记录流）；**没有承载帧**的移动（弃牌阶段的弃置等回合环步骤）给 ``frame=None``，
-        由 :meth:`emit_timing` 用一个不压栈的临时帧派发。钩子若提问，挂起状态记在引擎上
-        （``_move_pending``），由 :meth:`_flush_pending_move` 在下一个询问应答之后续跑——
-        故这里的返回值只用于"步骤可以被安全推进"的判断，挂起的续跑不依赖它。
+        **失去牌后（票 07）**：有承载帧的移动在本帧内派发 ``MOVE_AFTER``（帧私有载荷
+        :class:`~sgs.skills.MoveEvent`，帧私有数据不进记录流）；**没有承载帧**的移动
+        （弃牌阶段的弃置、判定阶段循环的两次收尾等回合环步骤）给 ``frame=None``，
+        由 :meth:`_dispatch_move_after` 用一个不压栈的临时帧派发。钩子若提问，挂起状态
+        记在引擎上（``_move_pending``），由 :meth:`_flush_pending_move` 在下一个询问应答
+        之后续跑——故这里的返回值只用于"步骤可以被安全推进"的判断，挂起的续跑不依赖它。
+
+        **它不是全项目唯一的搬牌点**：使用链、效果回调与上面两类帧外移动都经本方法，
+        但另有一小组**直接调** :func:`~sgs.effects.move_card` 的收尾点——阵亡者的区域清空
+        （:meth:`discard_dead_cards`）、主公杀忠臣的弃置（:meth:`_lord_discards_everything`）、
+        奖惩摸牌（:meth:`_reward_killer_draws`）、摸牌阶段（:meth:`_phase_draw`）、终局清栈
+        （:meth:`_teardown_processing`）与开局发牌（:func:`build_initial`）。它们**不派发**
+        失去牌后：摸牌阶段 / 奖惩摸牌 / 开局发牌是"牌堆 → 手牌"（`R5-Q3`：摸牌不算失去），
+        终局清栈发生在胜负已定之后，而阵亡弃牌 / 主公弃置仍是票 07 §范围外登记在案的缺口。
+        勿据此在本方法里加回唯一性论断。
         """
         card_ids = tuple(card.card_id for card in cards)
         current_count = frame.data.get(_MOVE_EVENTS, 0) if frame is not None else 0
@@ -1751,23 +1812,22 @@ class Engine:
         reason: MoveReason,
         owner: int | None,
         actor: int,
-    ) -> None:
-        """**帧外**移动一批牌并记一条 delta（帧已出栈的收尾移动，票 10 §3.6）。
+    ) -> Control:
+        """**帧外**移动一批牌（帧已出栈的收尾移动，票 10 §3.6）：转调 :meth:`move_in_frame`。
 
         判定阶段循环的两次收尾移动（延时锦囊 JUDGE→PROCESSING 与「仍在处理区」的去向）
-        没有承载帧，主体是当前回合角色；与 :meth:`move_in_frame` 的唯一差别是
-        ``EffectContext`` 只有 ``actor``。
+        没有承载帧，主体是当前回合角色；``frame=None`` 正是 :meth:`move_in_frame` 表达
+        "本次移动没有承载帧"的形式，故这里是**纯转调**（票 07 的帧外直调点在 C1 收口）：
+        "搬牌必记 delta、必派发失去牌后"这条不变量不再有第二份实现。
         """
-        delta = move_card(
-            self.state,
-            EffectContext(actor=actor),
+        return self.move_in_frame(
+            None,
             self.state.refs(card_ids),
             to_zone=to_zone,
             reason=reason,
             owner=owner,
+            actor=actor,
         )
-        self.emit_delta(delta)
-        prune_skill_state(self.state)
 
     def apply_effects(
         self, frame: Frame, effects: Sequence[EffectStep], *, timing: Timing

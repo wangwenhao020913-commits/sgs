@@ -413,29 +413,20 @@ def _score_liuli(query: Query, action: Action, view: PlayerView) -> float:
     return 3.0 - 0.5 * _picked_value(view, action)
 
 
-def _score_hujia(query: Query, action: Action, view: PlayerView) -> float:
-    """【护驾】：主公技，"视为你打出一张【闪】"（响应窗口里使用）。"""
-    del query, action, view
-    return _DODGE_SKILL_VALUE
-
-
-def _score_jijiang(query: Query, action: Action, view: PlayerView) -> float:
-    """【激将】：主公技，"视为你使用/打出一张【杀】"（响应窗口里使用）。"""
-    del query, action, view
-    return _RESPOND_VALUE
-
-
 SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]] = {
     # 魏
     "hero.caocao.jianxiong": (_constant(4.0), "受伤后获得造成伤害的牌：净赚一张，恒发动"),
-    "hero.caocao.hujia": (_score_hujia, "主公技：视为打出一张【闪】，响应窗口里能抵消就抵消"),
+    "hero.caocao.hujia": (
+        _constant(_DODGE_SKILL_VALUE),
+        "主公技：视为打出一张【闪】，响应窗口里能抵消就抵消",
+    ),
     "hero.simayi.fankui": (_constant(3.5), "受伤后获得来源一张牌：净赚一张，恒发动"),
     "hero.simayi.guicai": (_constant(1.0), "改判窗口：有改判能力即参与（保守给正但不高）"),
     "hero.guojia.tiandu": (_constant(2.0), "获得此判定牌：额外一张手牌"),
     "hero.guojia.yiji": (_constant(4.5), "受伤后摸两张并可分配：净赚两张"),
     # 蜀
     "hero.liubei.rende": (_score_rende, "给牌是成本；首次给到两张以上回复 1 点 ⇒ 受伤时值得"),
-    "hero.liubei.jijiang": (_score_jijiang, "主公技：视为使用/打出一张【杀】"),
+    "hero.liubei.jijiang": (_constant(_RESPOND_VALUE), "主公技：视为使用/打出一张【杀】"),
     "hero.guanyu.wusheng": (_constant(2.0), "红色牌当【杀】：多一条进攻路径，按牌价保守为正"),
     "hero.zhaoyun.longdan": (_constant(2.0), "【杀】⇄【闪】互转：攻防两便"),
     "hero.machao.tieqi": (_constant(2.5), "使用【杀】后判定，通过则目标不可响应：助此【杀】命中"),

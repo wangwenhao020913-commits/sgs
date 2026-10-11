@@ -37,7 +37,7 @@ from itertools import combinations
 from types import MappingProxyType
 from typing import Any
 
-from sgs.data import Gender, SkillType, Suit, hero_skill_id
+from sgs.data import Gender, SkillType, Suit
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
@@ -46,7 +46,6 @@ from sgs.effects import (
     ModifierContext,
     ModifierPoint,
     check_targets,
-    locate,
 )
 from sgs.state import (
     ActivateSkill,
@@ -59,7 +58,13 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .catalog import SkillDef, instance_key, resolve_instances
+from .catalog import (
+    HeroSkillDecl,
+    SkillDef,
+    _move_by_source,
+    instance_key,
+    resolve_instances,
+)
 from .virtual import pure_virtual_card
 
 __all__ = [
@@ -206,42 +211,19 @@ def _move_to_discard(
 ) -> Any:
     """把选中的牌按**来源区**分组弃置（一次 ``move_card`` 只能有一个来源区）。
 
-    与【贯石斧】的 ``_move_by_source`` 同姿态：分组用 ``dict``（插入序确定），
-    故"手牌 + 装备区"混选时逐种子可复现。
-
-    **让出控制权（票 14 §1）**：内联 ``MOVE_AFTER`` 的钩子会提问，``move_in_frame``
-    返回 ``"stay"`` 时必须**原样透传**给步骤表——否则本步会在应答被消费之前继续
-    （摸牌 / 压帧），把"是否发动"的应答漏给外层询问。进度（已搬走的组数）存帧私有载荷
-    ``key``，重入时跳过已完成的组，不会把同一批牌搬第二遍。
+    与【贯石斧】的成本移动是**同一个形状**，故直接复用
+    :func:`~sgs.skills.catalog._move_by_source`（code-review C10 去重）：plan / done 游标、
+    "内联 ``MOVE_AFTER`` 挂起时透传 ``"stay"``"的重入纪律都只有一份实现。
+    这里的 ``to_zone`` 恒为弃牌堆、``reason`` 由 helper 恒取 ``DISCARD``。
     """
-    if not card_ids:
-        return None
-    plan_key = f"{key}:plan"
-    done_key = f"{key}:done"
-    plan = frame.data.get(plan_key)
-    if plan is None:
-        groups: dict[ZoneRef, list[int]] = {}
-        for card_id in card_ids:
-            groups.setdefault(locate(host.state, card_id), []).append(card_id)
-        plan = tuple((zone, tuple(ids)) for zone, ids in groups.items())
-        frame.data[plan_key] = plan
-    index = frame.data.get(done_key, 0)
-    while index < len(plan):
-        frame.data[done_key] = index + 1
-        control = host.move_in_frame(
-            frame,
-            host.state.refs(plan[index][1]),
-            to_zone=ZoneRef(Zone.DISCARD),
-            reason=MoveReason.DISCARD,
-            owner=owner,
-            actor=owner,
-        )
-        if control == "stay":
-            return "stay"
-        index += 1
-    frame.data.pop(plan_key, None)
-    frame.data.pop(done_key, None)
-    return None
+    return _move_by_source(
+        host,
+        frame,
+        card_ids,
+        to_zone=ZoneRef(Zone.DISCARD),
+        owner=owner,
+        key=key,
+    )
 
 
 def _push_recover(host: Any, frame: Any, *, source: int, target: int, amount: int = 1) -> None:
@@ -734,18 +716,11 @@ ActivationHandler = Callable[[Any, Any], Any]
 
 
 @dataclass(frozen=True, slots=True)
-class ActiveSkill:
+class ActiveSkill(HeroSkillDecl):
     """A 族一条技能的**声明**：候选构造 + 发动主体（票 04 §表一行）。"""
 
-    hero_id: str
-    short_id: str
     offers: Callable[[GameState, ModifierContext, Any], Any]
     activate: ActivationHandler
-
-    @property
-    def skill_id(self) -> str:
-        """全限定技能 id（与数据侧共用 :func:`sgs.data.hero_skill_id` 这一处派生）。"""
-        return hero_skill_id(self.hero_id, self.short_id)
 
 
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (

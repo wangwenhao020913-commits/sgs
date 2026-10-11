@@ -32,11 +32,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from sgs.data import Color, SkillType, color_of_suit, hero_skill_id
+from sgs.data import Color, SkillType, color_of_suit
 from sgs.effects import CandidateScope, CarrierKind, Modifier, ModifierPoint
 from sgs.state import GameState, Zone
 
-from .catalog import ModifierContext, SkillDef
+from .catalog import HeroSkillDecl, ModifierContext, SkillDef
 from .virtual import card_ids, single_conversion
 
 __all__ = ["CONVERSION_SKILLS", "conversion_skill_definitions"]
@@ -106,21 +106,14 @@ def _hand(state: GameState, seat: int) -> tuple[int, ...]:
 
 
 @dataclass(frozen=True, slots=True)
-class ConversionSkill:
+class ConversionSkill(HeroSkillDecl):
     """H 族一条技能的**声明**：源筛选谓词 + 目标牌名 + 可用语境（票 03 §表一行）。"""
 
-    hero_id: str
-    short_id: str
     target_type_id: str
     source_zone: ZoneFilter
     predicate: Predicate
     scopes: tuple[CandidateScope, ...]
     outside_turn_only: bool = False
-
-    @property
-    def skill_id(self) -> str:
-        """全限定技能 id（与数据侧共用 :func:`sgs.data.hero_skill_id` 这一处派生）。"""
-        return hero_skill_id(self.hero_id, self.short_id)
 
     def select(self, state: GameState, seat: int) -> tuple[int, ...]:
         """本技能在当前局面下**筛好的**来源牌（区域谓词 + 牌面谓词 + 时机谓词）。"""

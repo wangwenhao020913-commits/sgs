@@ -658,3 +658,61 @@ def test_xiaoji_does_not_fire_when_another_seat_loses_equipment():
     assert ("equip", "discard", "DISCARD") in _moves_of(engine, weapon), "座位 1 掉了装备"
     assert _drawn_to(_after(engine, weapon), 0) == [], "不是孙尚香失去的牌 ⇒ 枭姬不摸"
     assert _hand(engine, 0) == (filler,), "孙尚香的手牌一张没动"
+
+
+# ---------------------------------------------------------------------------
+# 帧外收尾移动也经同一个移动入口（code-review C1）
+# ---------------------------------------------------------------------------
+
+
+def _judge_card_left_for_processing(engine, card_id: int) -> bool:
+    """延时锦囊那次帧外收尾移动已经落进记录流（判定区 → 处理区）。"""
+    return ("judge", "processing", "LOSE") in _moves_of(engine, card_id)
+
+
+def test_a_delayed_trick_leaving_the_judge_zone_dispatches_move_after():
+    """判定阶段循环的帧外收尾移动也派发"失去牌后"（code-review C1）。
+
+    局面上有 D 族提供者（座位 1 的陆逊）时，延时锦囊 JUDGE→PROCESSING 这次移动必须落
+    一条 ``MOVE_AFTER`` 记录。票 07 把这三处帧外直调点登记为范围外缺口；C1 把
+    ``Engine._move_cards`` 收口到 :meth:`Engine.move_in_frame` 后，这一处不再绕开移动入口。
+    """
+    indulgence = _cards("indulgence")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(judge=(indulgence,)), SeatSpec(hero="luxun")],
+        deck=_deck_excluding(indulgence),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    _advance(
+        engine,
+        [Scripted(), Scripted()],
+        lambda e: _judge_card_left_for_processing(e, indulgence),
+    )
+
+    assert indulgence in _move_after_cards(engine), (
+        "判定区 → 处理区（帧外收尾）也经移动入口派发失去牌后"
+    )
+
+
+def test_the_judge_zone_move_stays_silent_without_a_move_after_provider():
+    """无提供者 ⇒ 本次帧外移动零派发（票 07 §验收 3；M2 的 34 条基准逐字节不变）。"""
+    indulgence = _cards("indulgence")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(judge=(indulgence,)), SeatSpec()],
+        deck=_deck_excluding(indulgence),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    _advance(
+        engine,
+        [Scripted(), Scripted()],
+        lambda e: _judge_card_left_for_processing(e, indulgence),
+    )
+
+    assert indulgence not in _move_after_cards(engine), "无提供者 ⇒ 一个时机事件都不发"
+

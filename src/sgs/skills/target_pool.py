@@ -24,28 +24,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import SkillType, hero_skill_id
+from sgs.data import SkillType
 from sgs.effects import CarrierKind, Modifier, ModifierContext, ModifierPoint
 from sgs.state import GameState
 
-from .catalog import SkillDef
+from .catalog import HeroSkillDecl, SkillDef
 
 __all__ = ["TARGET_POOL_SKILLS", "target_pool_skill_definitions"]
 
 
 @dataclass(frozen=True, slots=True)
-class TargetPoolSkill:
+class TargetPoolSkill(HeroSkillDecl):
     """C 族一条技能的**声明**：出池的牌名闭集 + 是否要求自己无手牌。"""
 
-    hero_id: str
-    short_id: str
     card_types: tuple[str, ...]
     requires_empty_hand: bool = False
-
-    @property
-    def skill_id(self) -> str:
-        """全限定技能 id（与数据侧共用 :func:`sgs.data.hero_skill_id` 这一处派生）。"""
-        return hero_skill_id(self.hero_id, self.short_id)
 
     def remove_self(self, state: GameState, ctx: ModifierContext, current: Any) -> Any:
         """``TARGET_POOL`` 回调：条件满足时把**自己**从池里去掉，否则原样返回。"""

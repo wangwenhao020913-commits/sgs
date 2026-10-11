@@ -9,7 +9,8 @@
 - 逐局验不变量：**牌守恒 / 体力范围 / 区域互斥 / 手牌上限 / 事件序号单调 / 每局必达终局 /
   终局牌守恒**，外加票 32 新增的四类：**阵亡者三区为空 / 装备槽位唯一 / 判定区同名唯一 /
   终局身份-胜负一致**，以及票 04 新增、票 14 收口的**候选数上界**（任何询问 ≤ 128；
-  四族一维枚举按票 10 的 `DiscardCards` 先例豁免，见 :func:`_check_candidate_cap`）。
+  四条一维枚举按票 10 的 `DiscardCards` 先例逐条豁免，显式表见
+  :data:`EXEMPT_ONE_DIMENSIONAL_FAMILIES`、裁定口径见 :func:`_check_candidate_cap`）。
 - **不进 fuzz**：同时死亡、无懈链、改判——它们是**路径性质**，随机局不保证命中，
   落基准与构造局面单测更可判决（票 17 §2）。
 - 对局种子来自**测试侧 OS 熵**（``secrets``），**不占游戏内随机源**；失败消息带可复现的
@@ -31,6 +32,7 @@ from __future__ import annotations
 import os
 import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -261,20 +263,17 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
 def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> None:
     """候选数上界（票 04 §验收 7 / `spec.md` §Testing Decisions / 票 14 §3）：≤ ``CANDIDATE_CAP``。
 
-    **审计口径（票 14 §3 的裁定）**：上界只审**两维相乘**的技能候选——spec 的
-    §机制面的统一约定 明写"组合爆炸只对**两维相乘**的技能加闸（上界 128）"，一维的
-    子集枚举与询问级的排列各有其天然的、**不属于技能层**的组合空间。按票 10 建议的
-    "`DiscardCards` 先例"给四族**一维枚举**逐条豁免：
+    **审计口径**：上界只审**两维相乘**的技能候选——`spec.md` 的 §机制面的统一约定 明写
+    "组合爆炸只对**两维相乘**的技能加闸（上界 128）"，一维的子集枚举与询问级的排列各有其
+    天然的、**不属于技能层**的组合空间。按票 10 建议的"`DiscardCards` 先例"，四条一维枚举
+    逐条豁免，表在 :data:`EXEMPT_ONE_DIMENSIONAL_FAMILIES`（含每条的"为什么不是两维技能
+    组合"）；`.scratch/m3-standard-heroes/map.md` 的 Decisions-so-far 第 7 轮（C6）记了这条
+    裁定的完整口径——**为什么字面判据"任何询问 ≤ 128"无法在不改 M2 行为的前提下满足**。
 
-    - ``DiscardCards``：M2 的 ``C(手牌, 手牌−体力)`` 子集（票 04 实测 210，无武将也会撞）；
-    - ``ArrangeCards``：``ARRANGE`` 的 ``X!×(X+1)`` 排列（票 10，询问级候选、非技能组合）；
-    - ``ActivateSkill(choices=())``：一维成本子集，**制衡的 2ⁿ 按票 04 不设闸**；
-    - ``UseCard(virtual_sources≠())``：M2 转化族的两张组合（丈八蛇矛 ``C(n,2)``，票 08 实测 135）。
-
-    余下的：两维相乘的 ``ActivateSkill`` **按技能分别计数**（同一询问里几条互不相关的
-    技能合法地各有自己的候选，票 14 实测一局 6 手牌的【仁德】126 条 + 3 条普通候选 =
-    129 总数）；其余非技能候选按总数查。四条豁免都有"为什么不是两维技能组合"的理由；
-    审计面因此**仍有咬合力**：两维相乘的技能一旦忘了降级，它自己的那一组立刻判红。
+    余下的：两维相乘的 ``ActivateSkill`` **按技能分别计数**（同一询问里几条互不相关的技能
+    合法地各有自己的候选，票 14 实测一局 6 手牌的【仁德】126 条 + 3 条普通候选 = 129 总数）；
+    其余非技能候选按总数查。豁免表因此**仍有咬合力**：两维相乘的技能一旦忘了降级，它自己
+    的那一组立刻判红（``test_the_candidate_cap_checker_catches_an_over_cap_two_dimensional_skill``）。
     """
     if record is None or record.kind != "query":
         return
@@ -306,18 +305,52 @@ def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> Non
         )
 
 
-def _is_one_dimensional_enumeration(action) -> bool:
-    """四族**一维枚举**候选的机械判据（见 :func:`_check_candidate_cap` 的审计口径）。"""
-    if isinstance(action, DiscardCards):
-        return True
-    if isinstance(action, ArrangeCards):
-        return True
-    if isinstance(action, ActivateSkill):
-        # 两维相乘 = 成本维（picks）× 目标维（choices）；只动 picks 的是一维子集枚举。
-        return not action.choices
-    if isinstance(action, UseCard):
-        return bool(action.card.virtual_sources)
-    return False
+@dataclass(frozen=True)
+class _ExemptFamily:
+    """一条**一维枚举**豁免：候选空间只在一个维度上展开，不属技能层两维相乘。"""
+
+    label: str
+    """可读标签（元测试按它与样本一一对应）。"""
+
+    rationale: str
+    """为什么它不是两维相乘的技能组合（C6 裁定里的豁免理由）。"""
+
+    matches: Callable[[object], bool]
+    """该族候选的机械判据（唯一真源：``_is_one_dimensional_enumeration`` 遍历本表）。"""
+
+
+EXEMPT_ONE_DIMENSIONAL_FAMILIES: tuple[_ExemptFamily, ...] = (
+    _ExemptFamily(
+        "DiscardCards",
+        "M2 的 C(手牌, 手牌−体力) 子集（票 04 实测 210，无武将也会撞）",
+        lambda action: isinstance(action, DiscardCards),
+    ),
+    _ExemptFamily(
+        "ArrangeCards",
+        "ARRANGE 的 X!×(X+1) 排列（票 10，询问级候选、非技能组合）",
+        lambda action: isinstance(action, ArrangeCards),
+    ),
+    _ExemptFamily(
+        "ActivateSkill(choices=())",
+        "一维成本子集：制衡的 2ⁿ 按票 04 不设闸（只动 picks、不动目标维）",
+        lambda action: isinstance(action, ActivateSkill) and not action.choices,
+    ),
+    _ExemptFamily(
+        "UseCard(virtual_sources≠())",
+        "M2 转化族的两张组合（丈八蛇矛 C(n,2)，票 08 实测 135）",
+        lambda action: isinstance(action, UseCard) and bool(action.card.virtual_sources),
+    ),
+)
+"""四条一维枚举豁免的**显式表**（C6：审计口径自文档化，判据与理由同处一张表）。
+
+顺序 = 票 10 的文档顺序；增删一条必须同时改这里与元测试的样本表，
+故"悄悄放宽审计"会直接判红。
+"""
+
+
+def _is_one_dimensional_enumeration(action: object) -> bool:
+    """四族**一维枚举**候选的机械判据（= :data:`EXEMPT_ONE_DIMENSIONAL_FAMILIES` 的并集）。"""
+    return any(family.matches(action) for family in EXEMPT_ONE_DIMENSIONAL_FAMILIES)
 
 
 _HP_NEGATIVE_FRAMES = (FrameKind.DAMAGE, FrameKind.LIFE_DECREASE, FrameKind.NEAR_DEATH)
@@ -860,29 +893,47 @@ def test_the_candidate_cap_checker_catches_an_over_cap_two_dimensional_skill():
 
 
 def test_the_candidate_cap_checker_exempts_the_one_dimensional_enumerations():
-    """四族一维枚举都放行（票 14 §3 的审计口径；见 :func:`_check_candidate_cap`）。"""
+    """四族一维枚举都放行，且**豁免表与样本一一对应**（票 14 §3 的审计口径 / C6）。
+
+    这条是豁免规则的机械覆盖：
+    ① 表恰四条、每条都有非空理由；
+    ② 每条理由对应的候选样本**命中**该族判据；
+    ③ 每条样本哪怕堆到 ``CANDIDATE_CAP + 1`` 也不报错（= 真的被放行）。
+    """
+    assert len(EXEMPT_ONE_DIMENSIONAL_FAMILIES) == 4, "豁免表恰四族（C6 的裁定）"
+    assert all(family.rationale for family in EXEMPT_ONE_DIMENSIONAL_FAMILIES), (
+        "每条豁免都必须写明『为什么不是两维技能组合』"
+    )
+
     state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
     card = state.card(0)
     virtual = CardRef(
         card_id=-1, type="slash", name="杀（丈八蛇矛转化）", virtual_sources=(0, 1)
     )
-    families = {
+    over_cap = CANDIDATE_CAP + 1
+    samples = {
         "DiscardCards": [
-            DiscardCards(cards=(card,), answers_seq=1) for _ in range(CANDIDATE_CAP + 1)
+            DiscardCards(cards=(card,), answers_seq=1) for _ in range(over_cap)
         ],
         "ArrangeCards": [
-            ArrangeCards(order=(0,), split=0, answers_seq=1)
-            for _ in range(CANDIDATE_CAP + 1)
+            ArrangeCards(order=(0,), split=0, answers_seq=1) for _ in range(over_cap)
         ],
         "ActivateSkill(choices=())": [
             ActivateSkill(skill_id="hero.sunquan.zhiheng", picks=(0,), answers_seq=1)
-            for _ in range(CANDIDATE_CAP + 1)
+            for _ in range(over_cap)
         ],
-        "UseCard(virtual_sources)": [
-            UseCard(card=virtual, targets=(), answers_seq=1)
-            for _ in range(CANDIDATE_CAP + 1)
+        "UseCard(virtual_sources≠())": [
+            UseCard(card=virtual, targets=(), answers_seq=1) for _ in range(over_cap)
         ],
     }
 
-    for label, actions in families.items():
-        _check_candidate_cap(_query_record(state, actions), 1, 2), f"{label} 应被豁免"
+    assert set(samples) == {family.label for family in EXEMPT_ONE_DIMENSIONAL_FAMILIES}, (
+        "样本表与豁免表必须逐条对应（增删一族时两处同改）"
+    )
+    for family in EXEMPT_ONE_DIMENSIONAL_FAMILIES:
+        actions = samples[family.label]
+        assert all(family.matches(action) for action in actions), (
+            f"{family.label} 的样本必须命中该族判据"
+        )
+        _check_candidate_cap(_query_record(state, actions), 1, 2)  # 不抛 = 放行
+

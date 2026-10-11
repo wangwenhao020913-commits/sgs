@@ -43,6 +43,7 @@ PACK = load_content_pack(deck_profile="standard_108")
 
 GUICAI = hero_skill_id("simayi", "guicai")
 TIANDU = hero_skill_id("guojia", "tiandu")
+LIANYING = hero_skill_id("luxun", "lianying")
 
 INDULGENCE = cards_of_type(PACK, "indulgence")[0]
 
@@ -473,3 +474,47 @@ def test_tiandu_takes_the_final_card_after_a_rejudge_and_not_the_discarded_origi
     assert replacement in engine.state.player(0).hand, "天妒拿最终生效的那张"
     assert replacement not in engine.state.discard
     assert original in engine.state.discard, "被替代掉的原牌照旧进弃牌堆"
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 改判「代替」的可重入（code-review C2）
+# ---------------------------------------------------------------------------
+
+
+def test_a_rejudge_that_suspends_mid_substitution_still_discards_the_original_card():
+    """替代的第一段移动挂起后，重入必须把**原判定牌**送进弃牌堆（code-review C2）。
+
+    改判者同时持有【鬼才】（虚拟授予）与【连营】：替代用的最后一张手牌离开手牌时
+    【连营】提问 ⇒ ``substitute_judge_card`` 的第一段移动挂起。旧实现在重入时把已经
+    写进 ``judge_card`` 的新牌当成原判定牌，真正的原牌因此**滞留处理区**——本用例钉住
+    "原牌进弃牌堆、处理区不留牌"。
+    """
+    original = _card_id(black=True)
+    replacement = _card_id(black=False)
+    state = _judgment_state(
+        seats=[
+            SeatSpec(hp=4, judge=(INDULGENCE,)),
+            SeatSpec(
+                hp=4,
+                hero="luxun",
+                hand=(replacement,),
+                virtual_equipment=(GUICAI,),
+            ),
+        ],
+        deck=_deck(original, replacement),
+    )
+
+    engine = Engine.from_state(state, seed=1)
+    run_turns(engine, [Scripted(), Scripted(lambda query: _play(query, replacement))], turns=1)
+
+    assert [query.actor for query in _respond_queries(engine, WindowCause.REJUDGE)] == [1], (
+        "虚拟授予的【鬼才】让座位 1 进改判窗口"
+    )
+    assert any(
+        query.kind == "SKILL_ACTIVATION" and query.skill_id == LIANYING
+        for query in _queries(engine, "SKILL_ACTIVATION")
+    ), "替代的手牌离手 ⇒ 【连营】真的提了问（挂起路径被走到）"
+    assert original in engine.state.discard, "原判定牌必须进弃牌堆"
+    assert original not in engine.state.processing, "原判定牌不得滞留处理区"
+    assert replacement in engine.state.discard, "结算结束后新判定牌进弃牌堆"
+

@@ -36,7 +36,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import SkillType, hero_skill_id
+from sgs.data import SkillType
 from sgs.effects import CarrierKind, locate
 from sgs.state import (
     CardRef,
@@ -49,7 +49,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .catalog import Hook, SkillDef
+from .catalog import HeroSkillDecl, Hook, SkillDef
 
 __all__ = [
     "DAMAGE_AFTER_SKILLS",
@@ -126,19 +126,12 @@ def _fankui_source(state: GameState, frame: Any, owner: int | None) -> int | Non
 
 
 @dataclass(frozen=True, slots=True)
-class DamageAfterSkill:
+class DamageAfterSkill(HeroSkillDecl):
     """B 族一条技能的**声明**：触发条件 + 回调（票 05 §要做什么 2 一行）。"""
 
-    hero_id: str
-    short_id: str
     per_point: bool
     condition: Any
     handler: Any
-
-    @property
-    def skill_id(self) -> str:
-        """全限定技能 id（与数据侧共用 :func:`sgs.data.hero_skill_id` 这一处派生）。"""
-        return hero_skill_id(self.hero_id, self.short_id)
 
 
 def _jianxiong_condition(host: Any, frame: Any) -> bool:

@@ -70,6 +70,7 @@ __all__ = [
     "ActivationPlan",
     "Hook",
     "HookCondition",
+    "HeroSkillDecl",
     "MATCH_OWNER_KEY",
     "Seam",
     "SeamKind",
@@ -194,6 +195,27 @@ class SkillDef:
     def priority_class(self) -> PriorityClass:
         """本技能在修饰器链里的优先级档（由载体派生，不另存字段以防漂移）。"""
         return priority_class_of(self.carrier)
+
+
+@dataclass(frozen=True, slots=True)
+class HeroSkillDecl:
+    """**武将技能声明**的公共字段：``hero_id`` + ``short_id`` ⇒ 全限定 ``skill_id``（C9）。
+
+    十张族级声明（转化 / 目标池 / 伤害后 / 阶段体 / 主动 / 主公求助 / 救援 / 失去牌后 /
+    响应张数 / 帧标签）逐字共用这一对字段与同一个派生属性：``hero_id`` 与 ``short_id``
+    **总是成对出现**（Data Clump），故收成一个基类，而不是在各处复制十份 ``skill_id``。
+
+    基类字段排在前面，故子类（同为 frozen dataclass）的构造签名里 ``hero_id`` /
+    ``short_id`` 仍是前两个位置参数；属性名与调用点一字不改。
+    """
+
+    hero_id: str
+    short_id: str
+
+    @property
+    def skill_id(self) -> str:
+        """全限定技能 id（与数据侧共用 :func:`sgs.data.hero_skill_id` 这一处派生）。"""
+        return hero_skill_id(self.hero_id, self.short_id)
 
 
 @dataclass(frozen=True, slots=True)

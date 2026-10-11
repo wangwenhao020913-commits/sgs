@@ -30,30 +30,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import SkillType, hero_skill_id
+from sgs.data import SkillType
 from sgs.effects import CarrierKind
 from sgs.resolution import Control, Frame
 from sgs.state import GameState
 from sgs.timing import Timing
 
-from .catalog import ActivationPlan, Hook, SkillDef
+from .catalog import ActivationPlan, HeroSkillDecl, Hook, SkillDef
 
 __all__ = ["PHASE_BODY_SKILLS", "PhaseBodySkill", "phase_body_skill_definitions"]
 
 
 @dataclass(frozen=True, slots=True)
-class PhaseBodySkill:
+class PhaseBodySkill(HeroSkillDecl):
     """L 族一条技能的**声明**：阶段体时机 + 摸牌数（票 12 §落地表第 17/27 行）。"""
 
-    hero_id: str
-    short_id: str
     timing: Timing
     draws: int
-
-    @property
-    def skill_id(self) -> str:
-        """全限定技能 id（与数据侧共用 :func:`sgs.data.hero_skill_id` 这一处派生）。"""
-        return hero_skill_id(self.hero_id, self.short_id)
 
     def handler(self, host: Any, frame: Frame) -> Control:
         """阶段体钩子：是否发动已由派发器问过；这里把 ``draws`` 张摸进持有者手里。"""
