@@ -1,6 +1,7 @@
 """命令行门面：跑一局、打印人类可读的**全知**记录流、退出码 0。
 
-参数有 ``--seed``（票 02 §2）与 ``--players``（票 23：2/4/5/6/7/8、默认 2）。
+参数有 ``--seed``（票 02 §2）与 ``--players``（票 23：2/4/5/6/7/8、默认 2），
+以及武将发放的 ``--heroes a,b,c`` / ``--hero-pool x,y,z``（票 02：显式指定 / 换启用池）。
 种子省略时按票 08 现生成 64 位种子、写进 header 并在 stdout 打印，事后可原样重跑。
 坏数据、非法人数与非法行动都走 stderr + 退出码 1。
 """
@@ -12,7 +13,13 @@ import sys
 from collections.abc import Sequence
 
 from sgs.agents import RandomPlayer
-from sgs.data import IDENTITY_LABELS, DataLoadError, load_content_pack, validate_rule_config
+from sgs.data import (
+    IDENTITY_LABELS,
+    DataLoadError,
+    HeroDealError,
+    load_content_pack,
+    validate_rule_config,
+)
 from sgs.engine import (
     Engine,
     IllegalActionError,
@@ -23,6 +30,11 @@ from sgs.engine import (
 from sgs.state import CardRef, Zone, ZoneRef
 
 __all__ = ["main", "render"]
+
+
+def _csv(raw: str) -> tuple[str, ...]:
+    """``a,b,c`` → ``("a", "b", "c")``；空白与空项一律剔除。"""
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,6 +54,18 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=2,
         help="座位数：2/4/5/6/7/8；默认 2（2 人局是无身份 1v1）。",
+    )
+    parser.add_argument(
+        "--heroes",
+        type=_csv,
+        default=(),
+        help="显式指定武将（逗号分隔、按座位序）；给出时跳过随机发放。",
+    )
+    parser.add_argument(
+        "--hero-pool",
+        type=_csv,
+        default=None,
+        help="随机发放用的启用池（逗号分隔）；省略 = 无武将模式。",
     )
     args = parser.parse_args(argv)
 
@@ -67,7 +91,17 @@ def main(argv: list[str] | None = None) -> int:
         print(error.report(), file=sys.stderr)
         return 1
 
-    engine = Engine.new_game(seed=seed, rule_config=rule_config, pack=pack)
+    try:
+        engine = Engine.new_game(
+            seed=seed,
+            rule_config=rule_config,
+            pack=pack,
+            heroes=args.heroes,
+            hero_pool=args.hero_pool,
+        )
+    except HeroDealError as error:
+        print(f"武将发放非法：{error}", file=sys.stderr)
+        return 1
     ai_stream = source.substream("ai")
     participants = [RandomPlayer(ai_stream) for _ in range(rule_config.player_count)]
     try:

@@ -26,7 +26,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, TypeAdapter
 
-from sgs.data import Identity
+from sgs.data import Identity, Kingdom
 from sgs.timing import Timing
 
 from .models import CardRef, Phase, Zone, ZoneRef, _FrozenModel
@@ -200,6 +200,14 @@ class PlayerPublic(_FrozenModel):
     它由当前体力值派生（``effects.hand_limit``），不新增冗余字段。
     ``identity`` 只对**本人 / 主公 / 已死亡者**可见，其余为 ``None``（票 13 §6）：
     投影时就把不可见的身份抹掉，"身份不泄露"因此是可断言的不变量。
+
+    ``hero`` / ``kingdom``（票 02）是**公开信息**（标准版武将牌明置；`04`（§2「信息可见性」）），
+    故照搬、不按观察者过滤。``hero = None`` **专指"未发放武将"**——无武将模式与人为局面的
+    默认——与"暗置武将"（国战：发了牌但别人看不见）**不是一回事**：前者是"这张座位上没有
+    武将牌"，后者是"有牌但不公开"，将来做国战时两者必须能同时存在。
+
+    两条新字段**不进记录流**（``exclude``）：无武将模式下加字段不改 M2 的记录流字节
+    （票 02 §验收 5 的"34 条基准逐行通过"）；带武将的记录形态留给定票按需立项。
     """
 
     seat: int
@@ -210,6 +218,8 @@ class PlayerPublic(_FrozenModel):
     equip: tuple[CardRef, ...]
     judge: tuple[CardRef, ...]
     identity: Identity | None = None
+    hero: str | None = Field(default=None, exclude=True)
+    kingdom: Kingdom | None = Field(default=None, exclude=True)
 
 
 class PlayerView(_FrozenModel):

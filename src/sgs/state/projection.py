@@ -27,7 +27,11 @@ def _visible_identity(player: Player, *, viewer: int) -> Identity | None:
 
 
 def project(state: GameState, seat: int) -> PlayerView:
-    """投影出 ``seat`` 这一参与者能看到的棋盘信息。"""
+    """投影出 ``seat`` 这一参与者能看到的棋盘信息。
+
+    武将 id 与势力是**公开信息**（标准版武将牌明置；`04`（§2「信息可见性」）），故逐座位照搬；
+    ``identity`` 仍走 :func:`_visible_identity` 的过滤（票 02 §可见性 8：过滤逻辑一字不改）。
+    """
     players = tuple(
         PlayerPublic(
             seat=player.seat,
@@ -38,6 +42,8 @@ def project(state: GameState, seat: int) -> PlayerView:
             equip=state.refs(player.equip),
             judge=state.refs(player.judge),
             identity=_visible_identity(player, viewer=seat),
+            hero=player.hero,
+            kingdom=player.kingdom,
         )
         for player in state.players
     )

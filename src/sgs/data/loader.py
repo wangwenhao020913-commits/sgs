@@ -35,6 +35,7 @@ __all__ = [
     "HERO_SKILL_PREFIX",
     "KNOWN_HEROES_SCHEMA_VERSIONS",
     "KNOWN_SCHEMA_VERSIONS",
+    "enabled_hero_ids",
     "hero_skill_id",
     "hero_skill_ids",
     "load_content_pack",
@@ -754,3 +755,15 @@ def hero_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tuple[str
         return ()
     return tuple(hero_skill_id(hero.id, skill.id) for skill in hero.skills)
 
+
+def enabled_hero_ids(
+    table: HeroTable | None = None, *, pack_id: str = DEFAULT_PACK_ID
+) -> tuple[str, ...]:
+    """``table`` 里**已启用**武将的 id（按数据文件顺序）；缺省读当前包的表（票 02）。
+
+    这是启用门控的**只读面**：发放段用它当"本局可发的武将池"的缺省来源，而
+    :func:`validate_heroes` 用同一份 ``enabled`` 字段做条件化引用校验——两处读同一字段，
+    不各抄一份名单。``table`` 入参让"派生"这条判据能对一份注入的表单独验证。
+    """
+    source = load_heroes(pack_id) if table is None else table
+    return tuple(hero.id for hero in source.heroes if hero.enabled)

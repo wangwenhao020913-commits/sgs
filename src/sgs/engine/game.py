@@ -16,7 +16,18 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from sgs.agents import Participant
-from sgs.data import Color, ContentPack, Identity, Mode, RuleConfig, color_of_suit, roster_for
+from sgs.data import (
+    Color,
+    ContentPack,
+    Hero,
+    Identity,
+    Mode,
+    RuleConfig,
+    color_of_suit,
+    deal_heroes,
+    load_heroes,
+    roster_for,
+)
 from sgs.effects import (
     OPS,
     CallOp,
@@ -109,7 +120,10 @@ from .victory import DeathFact, Side, solve_identity_outcome
 __all__ = ["DRAW_COUNT", "INITIAL_HP", "Engine", "Outcome", "instantiate_cards", "new_game"]
 
 INITIAL_HP = 4
-"""M1 的体力上限恒 4（无武将、无体力上限变化）。"""
+"""**无武将模式**的体力上限回落值（M1/M2 口径：无武将、无体力上限变化）。
+
+有武将时体力上限读武将数据（票 02）；本常数只作"没有武将牌可读"时的兜底，
+故 M2 的 34 条基准一行不改。"""
 
 DRAW_COUNT = 2
 """摸牌阶段的额定摸牌数；M1 无修正摸牌数的效果。"""
@@ -313,15 +327,29 @@ class Engine:
     # -- 便利包装 -----------------------------------------------------------
 
     @classmethod
-    def new_game(cls, *, seed: int, rule_config: RuleConfig, pack: ContentPack) -> "Engine":
-        """造初始状态（实例化 → 洗牌 → 发牌）并带上开局那几条记录。
+    def new_game(
+        cls,
+        *,
+        seed: int,
+        rule_config: RuleConfig,
+        pack: ContentPack,
+        heroes: Sequence[str] = (),
+        hero_pool: Sequence[str] | None = None,
+    ) -> "Engine":
+        """造初始状态（实例化 → 洗牌 → 发身份 → 发武将 → 发牌）并带上开局那几条记录。
 
         初次洗牌与后续重洗共用同一个 ``shuffle`` 子流句柄：重洗从初次洗牌之后的位置继续取数
         （票 08 §3），因此同一 seed 的整局（含每一次重洗）逐字节可复现。
+        ``heroes`` / ``hero_pool`` 与 :func:`build_initial` 同义（票 02）：缺省 = 无武将模式。
         """
         shuffle_source = RandomSource(seed).substream("shuffle")
         state, init_records = build_initial(
-            seed=seed, rule_config=rule_config, pack=pack, shuffle_source=shuffle_source
+            seed=seed,
+            rule_config=rule_config,
+            pack=pack,
+            shuffle_source=shuffle_source,
+            heroes=heroes,
+            hero_pool=hero_pool,
         )
         return cls(
             state, seed=seed, init_records=init_records, shuffle_source=shuffle_source
@@ -2108,14 +2136,26 @@ def _deal_identities(*, seed: int, rule_config: RuleConfig) -> tuple[Identity, .
     return tuple(roster)
 
 
-def _initial_player(seat: int, identity: Identity | None) -> Player:
-    """开局座位：主公体力与体力上限为初始值 +1，其余与无身份局同为 ``INITIAL_HP``。
+def _initial_player(
+    seat: int, identity: Identity | None, hero: Hero | None = None
+) -> Player:
+    """开局座位：体力上限由**武将数据**派生，主公 +1 的既有初始化段不动。
 
+    无武将（``hero is None``）时体力上限回落到引擎常数 ``INITIAL_HP``，M2 行为因此不变。
     初始体力不进记录流（``Player`` 不在 header、也无 delta），故这一步不发 delta
     （票 13 §4）。
     """
-    hp = INITIAL_HP + 1 if identity is Identity.LORD else INITIAL_HP
-    return Player(seat=seat, hp=hp, hp_max=hp, identity=identity)
+    hp_max = INITIAL_HP if hero is None else hero.hp_max
+    if identity is Identity.LORD:
+        hp_max += 1
+    return Player(
+        seat=seat,
+        hp=hp_max,
+        hp_max=hp_max,
+        identity=identity,
+        hero=None if hero is None else hero.id,
+        kingdom=None if hero is None else hero.kingdom,
+    )
 
 
 def build_initial(
@@ -2124,21 +2164,37 @@ def build_initial(
     rule_config: RuleConfig,
     pack: ContentPack,
     shuffle_source: Randomness | None = None,
+    heroes: Sequence[str] = (),
+    hero_pool: Sequence[str] | None = None,
 ) -> tuple[GameState, tuple[JournalRecord, ...]]:
-    """实例化牌堆 → 洗牌 → 发身份（身份局）→ 发牌；顺带产出开局那几条记录。
+    """实例化牌堆 → 洗牌 → 发身份（身份局）→ 发武将 → 发牌；顺带产出开局那几条记录。
 
     ``seq = 1`` 必是初次 ``deck_shuffle``（``frame_id = 0``：无帧哨兵）；身份局的
     ``identity_deal`` 逐座紧随其后（票 13 §3：先发身份 → 亮主 → 发起始手牌），
     再是发牌时机与按座序每座位一条 ``card_move``（票 08 §5 / 票 06 §7）。
     无身份局完全不产生 ``identity_deal``，故 M1 六条基准的 seq 布局不变。
     ``shuffle_source`` 由 :meth:`Engine.new_game` 交进来，好让中局重洗接着同一子流取数。
+
+    **武将发放**（票 02）走唯一随机源的专用子流 ``hero``：``heroes`` 为空 = **无武将模式**
+    （M2 的 34 条基准靠它保持有效）、非空 = 显式指定；``hero_pool`` 非 ``None`` 时从该池
+    不重复随机抽 N 名。发放段本身**不产出记录**（武将不是牌、也没有 delta），故关掉武将
+    时记录流逐字节不变。
     """
+    heroes_table = load_heroes(pack.pack_id)
+    assigned = deal_heroes(
+        seat_count=rule_config.player_count,
+        stream=RandomSource(seed).substream("hero"),
+        heroes=heroes,
+        hero_pool=hero_pool,
+        table=heroes_table,
+    )
     cards = instantiate_cards(pack)
     identities = _deal_identities(seed=seed, rule_config=rule_config)
     players = tuple(
         _initial_player(
             seat,
             identities[seat] if identities is not None else None,
+            None if assigned is None else heroes_table.by_id(assigned[seat]),
         )
         for seat in range(rule_config.player_count)
     )
@@ -2195,9 +2251,22 @@ def build_initial(
     return state, tuple(records)
 
 
-def new_game(*, seed: int, rule_config: RuleConfig, pack: ContentPack) -> GameState:
-    """便利包装：造初始状态（实例化牌堆 → 洗牌 → 发牌），不返回记录流。
+def new_game(
+    *,
+    seed: int,
+    rule_config: RuleConfig,
+    pack: ContentPack,
+    heroes: Sequence[str] = (),
+    hero_pool: Sequence[str] | None = None,
+) -> GameState:
+    """便利包装：造初始状态（实例化牌堆 → 洗牌 → 发身份 → 发武将 → 发牌），不返回记录流。
 
-    要"跑一局并拿到记录流"用 :meth:`Engine.new_game`。
+    要"跑一局并拿到记录流"用 :meth:`Engine.new_game`。``heroes`` / ``hero_pool`` 同义。
     """
-    return build_initial(seed=seed, rule_config=rule_config, pack=pack)[0]
+    return build_initial(
+        seed=seed,
+        rule_config=rule_config,
+        pack=pack,
+        heroes=heroes,
+        hero_pool=hero_pool,
+    )[0]

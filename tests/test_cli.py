@@ -227,6 +227,68 @@ def test_unsupported_player_count_exit_code_in_subprocess():
 
 
 # ---------------------------------------------------------------------------
+# 武将发放：``--heroes`` 显式指定 / ``--hero-pool`` 换启用池（票 02）
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_heroes_run_a_whole_game(capsys):
+    assert main(["--seed", "7", "--players", "2", "--heroes", "caocao,guanyu"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "终局" in lines[-1]
+
+
+def test_heroes_are_parsed_as_a_comma_list():
+    """空项与空白被剔除，不把 ``" caocao"`` 当成另一个武将。"""
+    import sgs.cli as cli
+
+    assert cli.main(["--seed", "7", "--heroes", " caocao , guanyu "]) == 0
+
+
+def test_an_unknown_explicit_hero_reports_to_stderr_and_exits_1(capsys):
+    assert main(["--seed", "7", "--players", "2", "--heroes", "caocao,nobody"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "武将发放非法" in captured.err
+    assert "nobody" in captured.err
+
+
+def test_a_pool_without_heroes_reports_the_empty_enabled_pool(capsys):
+    """当前数据文件 25 名全部未启用（票 12 才翻牌）⇒ 空启用池 fail-closed。"""
+    assert main(["--seed", "7", "--players", "2", "--hero-pool", ""]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "武将发放非法" in captured.err
+
+
+def test_an_explicit_pool_switches_the_dealt_heroes(capsys):
+    """换池：2 人局从 ``caocao,guanyu`` 里不重复抽两名。"""
+    assert main(["--seed", "7", "--players", "2", "--hero-pool", "caocao,guanyu"]) == 0
+
+    assert capsys.readouterr().out.splitlines()[-1].startswith("#")
+
+
+def test_omitting_the_hero_flags_stays_in_no_hero_mode(capsys):
+    """缺省仍是**无武将模式**（M2 的 34 条基准靠它保持有效）。"""
+    assert main(["--seed", "7", "--players", "2"]) == 0
+
+    stream = capsys.readouterr().out
+    assert "'heroes'" not in stream and "hero=" not in stream
+
+
+def test_hero_deal_failure_exit_code_in_subprocess():
+    result = _run(
+        sys.executable, "-m", "sgs", "--players", "2", "--heroes", "caocao,nobody"
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "武将发放非法" in result.stderr
+
+
+# ---------------------------------------------------------------------------
 # 非法行动：stderr 报告 + 退出码 1（票 07 §5 / 票 24）
 # ---------------------------------------------------------------------------
 

@@ -17,11 +17,15 @@
 :class:`Kingdom` / :class:`SkillType` 与其加载 / 只读查询（``load_heroes`` / ``validate_heroes`` /
 ``hero_skill_id`` / ``hero_skill_ids``）——数据文件只装"武将是什么"，
 技能行为仍住 ``skills/``（ADR-009）。
+票 02（M3）再增**发放**与**启用池**两个只读面：:func:`deal_heroes`（开局按座位序决定
+谁坐哪，走 ``hero`` 子流）与 :func:`enabled_hero_ids`（启用门控的只读查询）。
 """
 
 from .errors import DataLoadError, LoadError
+from .heroes import HeroDealError, deal_heroes
 from .identities import IDENTITY_LABELS, IDENTITY_ROSTERS, Identity, Mode, roster_for
 from .loader import (
+    enabled_hero_ids,
     hero_skill_id,
     hero_skill_ids,
     load_content_pack,
@@ -49,6 +53,7 @@ __all__ = (
     "DataLoadError",
     "Gender",
     "Hero",
+    "HeroDealError",
     "HeroSkill",
     "HeroTable",
     "IDENTITY_LABELS",
@@ -61,6 +66,8 @@ __all__ = (
     "SkillType",
     "Suit",
     "color_of_suit",
+    "deal_heroes",
+    "enabled_hero_ids",
     "hero_skill_id",
     "hero_skill_ids",
     "load_content_pack",

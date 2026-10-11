@@ -4,7 +4,15 @@
 """
 
 from .errors import IllegalActionError, JournalVersionError
-from .game import DRAW_COUNT, INITIAL_HP, Engine, Outcome, instantiate_cards, new_game
+from .game import (
+    DRAW_COUNT,
+    INITIAL_HP,
+    Engine,
+    Outcome,
+    build_initial,
+    instantiate_cards,
+    new_game,
+)
 from .journal import (
     EVENT_SCHEMA_VERSION,
     SUPPORTED_EVENT_VERSIONS,
@@ -58,6 +66,7 @@ __all__ = (
     "Side",
     "TimingRecord",
     "Victory",
+    "build_initial",
     "dump_journal",
     "instantiate_cards",
     "new_game",
