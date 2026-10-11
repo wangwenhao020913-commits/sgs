@@ -52,12 +52,21 @@ from .catalog import (
     lord_skill_allowed,
     lord_skill_ids,
     prune_skill_state,
+    reset_phase_skill_state,
     resolve_instances,
+)
+from .active import (
+    ACTIVATIONS,
+    ACTIVE_SKILLS,
+    CANDIDATE_CAP,
+    ActiveSkill,
+    activate_skill,
 )
 from .virtual import (
     MAX_VIRTUAL_SOURCES,
     VirtualKind,
     VirtualSourceError,
+    pure_virtual_card,
     transformed_card,
     transformed_slash,
     virtual_card_id,
@@ -95,7 +104,10 @@ REJUDGE_SKILL_IDS: frozenset[str] = frozenset()
 """
 
 __all__ = (
+    "ACTIVATIONS",
     "ACTIVATION_PLANS",
+    "ACTIVE_SKILLS",
+    "CANDIDATE_CAP",
     "CATALOG",
     "EQUIPMENT_CARD_TYPE_IDS",
     "EQUIPMENT_SKILL_IDS",
@@ -103,6 +115,7 @@ __all__ = (
     "MAX_VIRTUAL_SOURCES",
     "REJUDGE_SKILL_IDS",
     "ActivationPlan",
+    "ActiveSkill",
     "CarrierKind",
     "Hook",
     "Modifier",
@@ -119,6 +132,7 @@ __all__ = (
     "SkillType",
     "VirtualKind",
     "VirtualSourceError",
+    "activate_skill",
     "activation_plan",
     "apply_modifiers",
     "dispatch_seam",
@@ -129,7 +143,9 @@ __all__ = (
     "lord_skill_allowed",
     "lord_skill_ids",
     "prune_skill_state",
+    "pure_virtual_card",
     "rejudge_capable_seats",
+    "reset_phase_skill_state",
     "resolve_instances",
     "transformed_card",
     "transformed_slash",

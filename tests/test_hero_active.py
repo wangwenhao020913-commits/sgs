@@ -1,0 +1,1041 @@
+"""A 族：出牌阶段**主动技候选**（票 04）。
+
+落点与票 04 §验收一致，全部走**外部缝**：
+
+- ``legal_actions_for(PLAY_PHASE)`` 的候选集合（形状 / 载荷 / 付不起 / 用过后不再进池）；
+- ``Engine.from_state`` 的人为局面 + 脚本玩家驱动的记录流与终局状态（效果 / 伤害来源 /
+  牌移动 / 回复夹上限）；
+- 组合上限闸的**候选形态**与**顺序降级**（``SelectionSpec(sequential=True)``）。
+
+不测 ``ACTIVATIONS`` / 候选回调的内部结构；行为只经候选、询问、delta 流观测。
+【苦肉】不在 16 名名单（票 12 的 46 条计数不含它），故"裸发动 + 失去体力"用**注入的
+假定义**验形状（``tests/test_hero_skills.py`` 的先例）。
+"""
+
+from __future__ import annotations
+
+from types import MappingProxyType
+
+import pytest
+
+from sgs.data import Gender, load_content_pack
+from sgs.effects import CandidateScope, CarrierKind, Modifier, ModifierPoint, legal_actions_for
+from sgs.engine import Engine
+from sgs.resolution import Frame
+from sgs.skills import (
+    CATALOG,
+    CANDIDATE_CAP,
+    SkillDef,
+    SkillType,
+    activate_skill,
+    pure_virtual_card,
+    reset_phase_skill_state,
+)
+from sgs.skills import active as active_module
+from sgs.skills import catalog as catalog_module
+from sgs.state import (
+    ActivateSkill,
+    FrameKind,
+    Pass,
+    QueryKind,
+    SelectCards,
+    SelectOption,
+)
+from sgs.timing import Timing
+
+from support import RecordingPlayer, SeatSpec, build_state, cards_of_type, run_turns, run_until
+
+PACK = load_content_pack(deck_profile="standard_108")
+
+ZHIHENG = "hero.sunquan.zhiheng"
+RENDE = "hero.liubei.rende"
+FANJIAN = "hero.zhouyu.fanjian"
+QINGNANG = "hero.huatuo.qingnang"
+LIJIAN = "hero.diaochan.lijian"
+JIEYIN = "hero.sunshangxiang.jieyin"
+KUROU = "hero.huanggai.kurou"
+
+
+def _cards(type_id: str) -> list[int]:
+    return cards_of_type(PACK, type_id)
+
+
+def _deck_excluding(*used: int) -> tuple[int, ...]:
+    excluded = set(used)
+    return tuple(card_id for card_id in range(len(PACK.deck.cards)) if card_id not in excluded)
+
+
+def _hearts(count: int) -> tuple[int, ...]:
+    return tuple(
+        card_id for card_id, card in enumerate(PACK.deck.cards) if card.suit == "heart"
+    )[:count]
+
+
+def _play_candidates(state, seat: int = 0):
+    return legal_actions_for(state, seat, QueryKind.PLAY_PHASE, answers_seq=1)
+
+
+def _offers(actions, skill_id: str) -> list[ActivateSkill]:
+    return [
+        action
+        for action in actions
+        if isinstance(action, ActivateSkill) and action.skill_id == skill_id
+    ]
+
+
+def _find(query, predicate):
+    for action in query.legal_actions:
+        if predicate(action):
+            return action
+    return None
+
+
+def _decline(query):
+    """响应窗口一律放弃：随机摸到的【无懈可击】/【闪】不会把被测链改道。"""
+    if query.kind in (QueryKind.RESPOND, QueryKind.DODGE):
+        return _find(query, lambda action: isinstance(action, Pass))
+    return None
+
+
+class Scripted:
+    """先跑 ``handler``，返回 ``None`` 时退到最小应答（结束阶段 / 放弃）。"""
+
+    def __init__(self, handler=None) -> None:
+        self._handler = handler
+        self._fallback = RecordingPlayer()
+
+    def respond(self, query):
+        if self._handler is not None:
+            action = self._handler(query)
+            if action is not None:
+                return action
+        return self._fallback.respond(query)
+
+
+def _run(state, players, stop, seed: int = 1):
+    engine = Engine.from_state(state, seed=seed)
+    run_until(engine, players, stop)
+    return engine
+
+
+def _skill_frame_popped(engine) -> bool:
+    return any(
+        record.kind == "frame" and record.op == "pop" and record.frame_kind is FrameKind.SKILL
+        for record in engine.records
+    )
+
+
+def _play_query_count(engine, skill_id: str) -> int:
+    """记录流里出现过该技能候选的 PLAY_PHASE 询问数。"""
+    total = 0
+    for record in engine.records:
+        if record.kind != "query" or record.query.kind != QueryKind.PLAY_PHASE.value:
+            continue
+        if any(
+            isinstance(action, ActivateSkill) and action.skill_id == skill_id
+            for action in record.query.legal_actions
+        ):
+            total += 1
+    return total
+
+
+def _moves_of(engine, card_id: int) -> list[tuple[str, str, str]]:
+    return [
+        (record.from_zone.zone.value, record.to_zone.zone.value, record.reason.value)
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and [card.card_id for card in record.cards] == [card_id]
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 制衡（孙权）：弃任意张（手牌 + 装备区）→ 摸等量；一维 2ⁿ，不设闸
+# ---------------------------------------------------------------------------
+
+
+def test_zhiheng_offers_every_nonempty_subset_of_hand_and_equipment():
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    equip = _cards("jueying")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(first, second), equip=(equip,), hero="sunquan"), SeatSpec()],
+        deck=_deck_excluding(first, second, equip),
+        turn_seat=0,
+    )
+
+    picks = {action.picks for action in _offers(_play_candidates(state), ZHIHENG)}
+
+    assert picks == {
+        (first,),
+        (second,),
+        (equip,),
+        (first, second),
+        (first, equip),
+        (second, equip),
+        (first, second, equip),
+    }, "全组合 2ⁿ（跨手牌与装备区）且**弃 0 张不入池**"
+
+
+def test_zhiheng_is_not_offered_without_any_card_to_discard():
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="sunquan"), SeatSpec()],
+        deck=_deck_excluding(),
+        turn_seat=0,
+    )
+
+    assert not _offers(_play_candidates(state), ZHIHENG), "付不起的组合不进池"
+
+
+def test_zhiheng_discards_by_source_zone_and_draws_the_same_count():
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    equip = _cards("jueying")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(first, second), equip=(equip,), hero="sunquan"), SeatSpec()],
+        deck=_deck_excluding(first, second, equip),
+        turn_seat=0,
+    )
+
+    def zhiheng(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill)
+                and action.skill_id == ZHIHENG
+                and set(action.picks) == {first, equip},
+            )
+        return _decline(query)
+
+    engine = _run(state, [Scripted(zhiheng), Scripted(_decline)], _skill_frame_popped)
+
+    assert first in engine.state.discard and equip in engine.state.discard
+    assert second in engine.state.player(0).hand, "没被选中的牌留在手里"
+    assert not engine.state.player(0).equip, "装备区那张按来源区弃掉"
+    assert ("hand", "discard", "DISCARD") in _moves_of(engine, first)
+    assert ("equip", "discard", "DISCARD") in _moves_of(engine, equip)
+    # 起始 2 张 + 摸牌阶段 2 张 − 制衡弃 1 张手牌 + 制衡摸 2 张 = 5。
+    assert len(engine.state.player(0).hand) == 5, "摸牌数与弃置数相等（弃 2 摸 2）"
+
+
+def test_a_used_active_skill_disappears_from_the_next_play_phase_query():
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(first, second), hero="sunquan"), SeatSpec()],
+        deck=_deck_excluding(first, second),
+        turn_seat=0,
+    )
+
+    def zhiheng(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == ZHIHENG,
+            )
+        return _decline(query)
+
+    engine = _run(state, [Scripted(zhiheng), Scripted(_decline)], _skill_frame_popped)
+
+    assert _play_query_count(engine, ZHIHENG) == 1, (
+        "第一次询问里有它；发动后重新询问里不再有它（用完即不再进池）"
+    )
+
+
+def test_reset_phase_skill_state_clears_the_counters_at_play_phase_start():
+    card = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(card,), hero="sunquan"), SeatSpec()],
+        deck=_deck_excluding(card),
+        turn_seat=0,
+    )
+    state.skill_state["0:hero.sunquan.zhiheng:HERO_CARD:hero.sunquan.zhiheng"] = 1
+
+    run_turns(Engine.from_state(state, seed=1), [RecordingPlayer(), RecordingPlayer()], turns=1)
+
+    assert state.skill_state == {}, "本出牌阶段开始时复位（票 04 §要做什么 2）"
+
+
+def test_reset_phase_skill_state_is_a_public_reset_point():
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="sunquan"), SeatSpec()],
+        deck=_deck_excluding(),
+        turn_seat=0,
+    )
+    state.skill_state["0:x:HERO_CARD:x"] = 1
+
+    reset_phase_skill_state(state)
+
+    assert state.skill_state == {}
+
+
+# ---------------------------------------------------------------------------
+# 【苦肉】的形状：裸发动（max_picks == 0）+ 失去体力（LIFE_LOSE_* 不解封）
+# ---------------------------------------------------------------------------
+
+
+def test_a_bare_activation_candidate_and_handler_run_the_shape(monkeypatch):
+    """裸发动：候选载荷全空，发动后回调直接跑（本例 = 失去 1 点体力）。"""
+
+    def offers(state, ctx, current):
+        if ctx.scope is not CandidateScope.PLAY or ctx.owner != ctx.subject:
+            return current
+        return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+    def activate(host, frame):
+        seat = frame.data["source"]
+        host.apply_hp_change(frame, seat, host.state.player(seat).hp - 1)
+        return None
+
+    definition = SkillDef(
+        skill_id=KUROU,
+        locked=False,
+        carrier=CarrierKind.HERO,
+        skill_type=SkillType.NORMAL,
+        modifiers=(Modifier(ModifierPoint.CANDIDATES, offers),),
+    )
+    monkeypatch.setattr(
+        catalog_module,
+        "CATALOG",
+        MappingProxyType({**catalog_module.CATALOG, KUROU: definition}),
+    )
+    monkeypatch.setattr(
+        active_module,
+        "ACTIVATIONS",
+        MappingProxyType({**active_module.ACTIVATIONS, KUROU: activate}),
+    )
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=4, hp_max=4, hero="huanggai"), SeatSpec()],
+        deck=_deck_excluding(),
+        turn_seat=0,
+    )
+
+    bare = [
+        action
+        for action in _offers(_play_candidates(state), KUROU)
+        if action.picks == () and action.choices == ()
+    ]
+    assert bare, "max_picks == 0 ⇒ 裸发动候选（无载荷）"
+
+    def kurou(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == KUROU,
+            )
+        return _decline(query)
+
+    engine = _run(state, [Scripted(kurou), Scripted(_decline)], _skill_frame_popped)
+
+    assert engine.state.player(0).hp == 3, "失去体力走 apply_hp 原语"
+    assert not any(
+        record.kind == "frame" and record.frame_kind is FrameKind.LIFE_LOSE
+        for record in engine.records
+    ), "LIFE_LOSE_* 不解封"
+    assert not any(
+        record.kind == "timing" and record.timing.value.startswith("LIFE_LOSE")
+        for record in engine.records
+    )
+
+
+def test_activate_skill_fails_closed_for_an_unregistered_id():
+    with pytest.raises(NotImplementedError):
+        activate_skill(None, Frame(kind=FrameKind.SKILL, data={"skill_id": "no.such.skill"}))
+
+
+# ---------------------------------------------------------------------------
+# 仁德（刘备）：给任意张手牌；本阶段首次给到第 2 张回复 1 点；两维 ⇒ 闸 + 顺序降级
+# ---------------------------------------------------------------------------
+
+
+def test_rende_offers_a_subset_of_the_hand_for_each_other_character():
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(first, second), hero="liubei"), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(first, second),
+        turn_seat=0,
+    )
+
+    offers = _offers(_play_candidates(state), RENDE)
+
+    assert {(action.picks, action.choices) for action in offers} == {
+        ((first,), ("seat:1",)),
+        ((second,), ("seat:1",)),
+        ((first, second), ("seat:1",)),
+        ((first,), ("seat:2",)),
+        ((second,), ("seat:2",)),
+        ((first, second), ("seat:2",)),
+    }, "两维相乘：张数 × 目标；空组合（给 0 张）不进池"
+
+
+def test_rende_is_not_offered_without_hand_cards_or_without_a_target():
+    no_hand = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="liubei"), SeatSpec()],
+        deck=_deck_excluding(),
+        turn_seat=0,
+    )
+    no_target = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="liubei")],
+        deck=_deck_excluding(),
+        turn_seat=0,
+    )
+
+    assert not _offers(_play_candidates(no_hand), RENDE)
+    assert not _offers(_play_candidates(no_target), RENDE)
+
+
+def test_rende_recovers_when_two_cards_are_given_for_the_first_time():
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=3, hp_max=4, hand=(first, second), hero="liubei"), SeatSpec()],
+        deck=_deck_excluding(first, second),
+        turn_seat=0,
+    )
+
+    def rende(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill)
+                and action.skill_id == RENDE
+                and set(action.picks) == {first, second},
+            )
+        return _decline(query)
+
+    engine = _run(state, [Scripted(rende), Scripted(_decline)], _skill_frame_popped)
+
+    assert engine.state.player(0).hp == 4, "首次给到第 2 张回复 1 点"
+    assert set(engine.state.player(1).hand) == {first, second}, "两张手牌交给目标"
+    assert first not in engine.state.player(0).hand
+
+
+def test_rende_does_not_recover_when_only_one_card_is_given():
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=3, hp_max=4, hand=(first, second), hero="liubei"), SeatSpec()],
+        deck=_deck_excluding(first, second),
+        turn_seat=0,
+    )
+
+    def rende(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill)
+                and action.skill_id == RENDE
+                and action.picks == (first,),
+            )
+        return _decline(query)
+
+    engine = _run(state, [Scripted(rende), Scripted(_decline)], _skill_frame_popped)
+
+    assert engine.state.player(0).hp == 3, "只给 1 张 ⇒ 不回复"
+
+
+def _rende_driver(picks_made: list[int], *, rounds: int, prefer: tuple[int, ...] | None = None):
+    """驱动一次【仁德】：``prefer`` 命中就直接挑它；否则挑载荷最大的（降级后即裸候选）。"""
+
+    def driver(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            candidates = _offers(query.legal_actions, RENDE)
+            if prefer is not None:
+                chosen = [action for action in candidates if action.picks == prefer]
+                if chosen:
+                    return chosen[0]
+            return max(candidates, key=lambda action: len(action.picks))
+        if query.kind == QueryKind.SELECT_CARDS:
+            if len(picks_made) < rounds:
+                picks_made.append(1)
+                return _find(
+                    query,
+                    lambda action: isinstance(action, SelectCards) and action.picks == (0,),
+                )
+            return _find(query, lambda action: isinstance(action, Pass))
+        return _decline(query)
+
+    return driver
+
+
+def _small_and_big_rende():
+    hand = tuple(_cards("slash") + _cards("dodge"))[:8]
+    big = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=3, hp_max=4, hand=hand, hero="liubei"), SeatSpec()],
+        deck=_deck_excluding(*hand),
+        turn_seat=0,
+    )
+    small = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=3, hp_max=4, hand=hand[:2], hero="liubei"), SeatSpec()],
+        deck=_deck_excluding(*hand[:2]),
+        turn_seat=0,
+    )
+    return big, small
+
+
+def test_rende_degrades_to_target_only_candidates_beyond_the_cap():
+    big, _small = _small_and_big_rende()
+    hand_size = len(big.player(0).hand) + 2  # 摸牌阶段后
+    assert (2**hand_size - 1) > CANDIDATE_CAP, "这局必须触发降级（否则本用例空转）"
+
+    offers = _offers(_play_candidates(big), RENDE)
+
+    assert [(action.picks, action.choices) for action in offers] == [((), ("seat:1",))], (
+        "降级后候选只保留目标这一维，张数由顺序选牌补齐"
+    )
+
+
+def test_rende_sequential_mode_preserves_the_result_of_giving_at_once():
+    big, small = _small_and_big_rende()
+
+    big_engine = _run(
+        big, [Scripted(_rende_driver([], rounds=2)), Scripted(_decline)], _skill_frame_popped
+    )
+    small_engine = _run(
+        small,
+        [
+            Scripted(
+                _rende_driver([], rounds=2, prefer=tuple(small.player(0).hand))
+            ),
+            Scripted(_decline),
+        ],
+        _skill_frame_popped,
+    )
+
+    specs = [
+        record.query.spec
+        for record in big_engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.SELECT_CARDS.value
+    ]
+    assert specs and all(spec.sequential for spec in specs), (
+        "降级 = SelectionSpec(sequential=True) 的多轮"
+    )
+    assert all(spec.total == (1, 1) for spec in specs), "逐张一轮"
+    assert (
+        set(big_engine.state.player(1).hand),
+        big_engine.state.player(0).hp,
+    ) == (
+        set(small_engine.state.player(1).hand),
+        small_engine.state.player(0).hp,
+    ), "逐张给与一次给的结果一致（同一组牌、同一次回复）"
+
+
+def test_rende_recovers_only_once_per_phase():
+    big, _small = _small_and_big_rende()
+    big.player(0).hp = 2
+    big.player(0).hp_max = 5
+
+    engine = _run(
+        big, [Scripted(_rende_driver([], rounds=4)), Scripted(_decline)], _skill_frame_popped
+    )
+
+    assert len(engine.state.player(1).hand) == 4, "四张都交出去了"
+    assert engine.state.player(0).hp == 3, "第 2 张回复一次；第 3、4 张不再回复"
+
+
+def test_the_gated_skill_keeps_the_play_query_under_the_cap():
+    hand = tuple(_cards("slash") + _cards("dodge"))[:8]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=3, hp_max=4, hand=hand, hero="liubei"), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(*hand),
+        turn_seat=0,
+    )
+    hand_size = len(state.player(0).hand) + 2
+    assert (2**hand_size - 1) * 2 > CANDIDATE_CAP, "两维相乘必须过闸（否则本用例空转）"
+
+    assert len(_play_candidates(state)) <= CANDIDATE_CAP, "降级后单次询问候选数不超过闸值"
+
+
+# ---------------------------------------------------------------------------
+# 反间（周瑜）：目标选花色 + 获得并展示你的一张手牌 + 条件伤害
+# ---------------------------------------------------------------------------
+
+
+def _fanjian_plugin(*, suit: str):
+    def activator(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill)
+                and action.skill_id == FANJIAN,
+            )
+        return _decline(query)
+
+    def target(query):
+        if query.kind == QueryKind.SELECT_OPTION:
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption) and action.choice == suit,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and action.picks == (0,)
+            )
+        return _decline(query)
+
+    return activator, target
+
+
+def _fanjian_state():
+    hearts = _hearts(2)
+    return build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=hearts, hero="zhouyu"), SeatSpec(hp=4, hp_max=4)],
+        deck=_deck_excluding(*hearts),
+        turn_seat=0,
+    ), hearts
+
+
+def test_fanjian_offers_one_candidate_per_other_character():
+    heart = _hearts(1)[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(heart,), hero="zhouyu"), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(heart),
+        turn_seat=0,
+    )
+
+    assert {action.choices for action in _offers(_play_candidates(state), FANJIAN)} == {
+        ("seat:1",),
+        ("seat:2",),
+    }
+
+
+def test_fanjian_does_not_need_the_target_to_hold_cards():
+    heart = _hearts(1)[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(heart,), hero="zhouyu"), SeatSpec()],
+        deck=_deck_excluding(heart),
+        turn_seat=0,
+    )
+
+    assert _offers(_play_candidates(state), FANJIAN), (
+        "展示的是**发动者的**手牌 ⇒ 目标无手牌不是边界（票 04 §验收 4）"
+    )
+
+
+def test_fanjian_a_different_suit_deals_one_damage_from_the_activator():
+    state, hearts = _fanjian_state()
+    activator, target = _fanjian_plugin(suit="spade")
+
+    engine = _run(state, [Scripted(activator), Scripted(target)], _skill_frame_popped)
+
+    assert engine.state.player(1).hp == 3, "花色不同 ⇒ 目标受到周瑜造成的 1 点伤害"
+    assert len(engine.state.player(1).hand) == 1, "目标获得了那一张手牌"
+    damage = [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.DAMAGE_DEAL
+    ]
+    assert damage and damage[-1].source == 0, "伤害来源是发动者"
+    revealed = [
+        card.card_id
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.from_zone.zone.value == "hand"
+        and record.to_zone.zone.value == "processing"
+        for card in record.cards
+    ]
+    assert len(revealed) == 1
+    paths = [(from_zone, to_zone) for from_zone, to_zone, _reason in _moves_of(engine, revealed[0])]
+    assert ("hand", "processing") in paths, "展示 = 先亮进公开的处理区"
+    assert ("processing", "hand") in paths, "再从处理区进目标手牌（获得）"
+
+
+def test_fanjian_a_matching_suit_deals_no_damage():
+    state, _hearts_used = _fanjian_state()
+    activator, target = _fanjian_plugin(suit="heart")
+
+    engine = _run(state, [Scripted(activator), Scripted(target)], _skill_frame_popped)
+
+    assert engine.state.player(1).hp == 4, "花色相同 ⇒ 不受伤"
+    assert len(engine.state.player(1).hand) == 1, "但牌照常被获得"
+
+
+# ---------------------------------------------------------------------------
+# 青囊（华佗）：弃 1 张手牌 → 一名已受伤角色回复 1 点（含自己）
+# ---------------------------------------------------------------------------
+
+
+def test_qingnang_target_pool_is_the_wounded_characters_including_self():
+    card = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=3, hp_max=4, hand=(card,), hero="huatuo"),
+            SeatSpec(hp=4, hp_max=4),
+            SeatSpec(hp=2, hp_max=4),
+        ],
+        deck=_deck_excluding(card),
+        turn_seat=0,
+    )
+
+    assert {action.choices for action in _offers(_play_candidates(state), QINGNANG)} == {
+        ("seat:0",),
+        ("seat:2",),
+    }, "目标池 = 已受伤角色（含自己），未受伤者出池"
+
+
+def test_qingnang_discards_one_hand_card_and_heals_the_wounded_target():
+    card = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(card,), hero="huatuo"), SeatSpec(hp=2, hp_max=4)],
+        deck=_deck_excluding(card),
+        turn_seat=0,
+    )
+
+    def qingnang(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill)
+                and action.skill_id == QINGNANG
+                and action.picks == (card,)
+                and action.choices == ("seat:1",),
+            )
+        return _decline(query)
+
+    engine = _run(state, [Scripted(qingnang), Scripted(_decline)], _skill_frame_popped)
+
+    assert engine.state.player(1).hp == 3, "目标回复 1 点"
+    assert ("hand", "discard", "DISCARD") in _moves_of(engine, card)
+
+
+# ---------------------------------------------------------------------------
+# 离间（貂蝉）：弃 1 张牌 + 两名男性 → 视为其中一名对另一名使用【决斗】
+# ---------------------------------------------------------------------------
+
+
+def test_lijian_requires_two_male_characters():
+    card = _cards("slash")[0]
+    one_male = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(card,), hero="diaochan", gender=Gender.FEMALE),
+            SeatSpec(gender=Gender.MALE),
+            SeatSpec(gender=Gender.FEMALE),
+        ],
+        deck=_deck_excluding(card),
+        turn_seat=0,
+    )
+    two_males = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(card,), hero="diaochan", gender=Gender.FEMALE),
+            SeatSpec(gender=Gender.MALE),
+            SeatSpec(gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(card),
+        turn_seat=0,
+    )
+
+    assert not _offers(_play_candidates(one_male), LIJIAN), (
+        "只有一名男性 / 两名女性 ⇒ 该组合不进候选"
+    )
+    assert {action.choices for action in _offers(_play_candidates(two_males), LIJIAN)} == {
+        ("seat:1", "seat:2"),
+        ("seat:2", "seat:1"),
+    }, "有序对：谁对谁使用由此指定"
+
+
+def test_lijian_the_chosen_male_is_the_user_and_the_damage_source():
+    card = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(card,), hero="diaochan", gender=Gender.FEMALE),
+            SeatSpec(hp=4, hp_max=4, gender=Gender.MALE),
+            SeatSpec(hp=4, hp_max=4, gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(card),
+        turn_seat=0,
+    )
+
+    def diaochan(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill)
+                and action.skill_id == LIJIAN
+                and action.picks == (card,)
+                and action.choices == ("seat:1", "seat:2"),
+            )
+        return _decline(query)
+
+    engine = _run(
+        state, [Scripted(diaochan), Scripted(_decline), Scripted(_decline)], _skill_frame_popped
+    )
+
+    use_frames = [
+        record
+        for record in engine.records
+        if record.kind == "frame" and record.op == "push" and record.frame_kind is FrameKind.USE
+    ]
+    assert use_frames, "离间压出一次使用帧（视为使用【决斗】）"
+    assert card in engine.state.discard, "成本弃掉"
+    assert engine.state.player(2).hp == 3, "目标 2 没打出【杀】⇒ 受到 1 点伤害"
+    assert engine.state.player(1).hp == 4, "使用者座位 1 不受伤（决斗败方是座位 2）"
+    damage = [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.DAMAGE_DEAL
+    ]
+    assert damage and damage[-1].source == 1, "伤害来源随被选中的男性使用者（不是貂蝉）"
+
+
+def test_lijian_user_is_the_chosen_male_not_the_activator():
+    """把有序对反过来 ⇒ 使用者与败方互换，伤害来源随之（不是固定座位）。"""
+    card = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(card,), hero="diaochan", gender=Gender.FEMALE),
+            SeatSpec(hp=4, hp_max=4, gender=Gender.MALE),
+            SeatSpec(hp=4, hp_max=4, gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(card),
+        turn_seat=0,
+    )
+
+    def diaochan(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill)
+                and action.skill_id == LIJIAN
+                and action.picks == (card,)
+                and action.choices == ("seat:2", "seat:1"),
+            )
+        return _decline(query)
+
+    engine = _run(
+        state, [Scripted(diaochan), Scripted(_decline), Scripted(_decline)], _skill_frame_popped
+    )
+
+    assert engine.state.player(1).hp == 3, "这次败方是座位 1（座位 2 是使用者）"
+    damage = [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.DAMAGE_DEAL
+    ]
+    assert damage and damage[-1].source == 2
+
+
+def test_lijian_may_pay_with_an_equipment_card():
+    equip = _cards("jueying")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(equip=(equip,), hero="diaochan", gender=Gender.FEMALE),
+            SeatSpec(gender=Gender.MALE),
+            SeatSpec(gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(equip),
+        turn_seat=0,
+    )
+
+    assert (equip,) in {action.picks for action in _offers(_play_candidates(state), LIJIAN)}, (
+        "成本可以取装备区的牌"
+    )
+
+
+def test_lijian_uses_a_pure_virtual_duel_card():
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+
+    card = pure_virtual_card(state, "duel")
+
+    assert card.card_id < 0 and card.type == "duel" and card.name == "决斗"
+    assert card.suit is None and card.rank is None and card.color is None
+
+
+# ---------------------------------------------------------------------------
+# 结姻（孙尚香）：弃 2 张手牌 + 一名已受伤男性 → 你与其各回复 1 点
+# ---------------------------------------------------------------------------
+
+
+def test_jieyin_target_pool_is_wounded_males_excluding_self():
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hp=3,
+                hp_max=4,
+                hand=(first, second),
+                hero="sunshangxiang",
+                gender=Gender.FEMALE,
+            ),
+            SeatSpec(hp=4, hp_max=4, gender=Gender.MALE),
+            SeatSpec(hp=2, hp_max=4, gender=Gender.MALE),
+            SeatSpec(hp=2, hp_max=4, gender=Gender.FEMALE),
+        ],
+        deck=_deck_excluding(first, second),
+        turn_seat=0,
+    )
+
+    assert {action.choices for action in _offers(_play_candidates(state), JIEYIN)} == {
+        ("seat:2",),
+    }, "只含已受伤男性：满血男性与受伤女性都出池"
+
+
+def test_jieyin_heals_both_and_clamps_at_the_maximum():
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hp=4,
+                hp_max=4,
+                hand=(first, second),
+                hero="sunshangxiang",
+                gender=Gender.FEMALE,
+            ),
+            SeatSpec(hp=2, hp_max=3, gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(first, second),
+        turn_seat=0,
+    )
+
+    def jieyin(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill)
+                and action.skill_id == JIEYIN
+                and set(action.picks) == {first, second},
+            )
+        return _decline(query)
+
+    engine = _run(state, [Scripted(jieyin), Scripted(_decline)], _skill_frame_popped)
+
+    assert engine.state.player(1).hp == 3, "目标回复 1 点"
+    assert engine.state.player(0).hp == 4, "自己已满 ⇒ 不再回复、不越上限"
+    assert first in engine.state.discard and second in engine.state.discard
+
+
+# ---------------------------------------------------------------------------
+# 登记面：声明与 CATALOG 同步（票 12 照表登记的前置）
+# ---------------------------------------------------------------------------
+
+
+def test_every_declared_active_skill_has_a_handler_and_a_catalog_definition():
+    assert set(active_module.ACTIVATIONS) == {
+        skill.skill_id for skill in active_module.ACTIVE_SKILLS
+    }
+    assert all(skill_id in CATALOG for skill_id in active_module.ACTIVATIONS)
+
+
+# ---------------------------------------------------------------------------
+# 两维相乘的其余三条：过闸后同样降级为"只留目标维"（票 04 §要做什么 3）
+# ---------------------------------------------------------------------------
+
+
+def _wounded_males(count: int) -> list[SeatSpec]:
+    return [SeatSpec(hp=2, hp_max=4, gender=Gender.MALE) for _ in range(count)]
+
+
+def test_qingnang_degrades_to_target_only_candidates_beyond_the_cap():
+    hand = tuple(range(20))
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=hand, hero="huatuo"), *_wounded_males(7)],
+        deck=_deck_excluding(*hand),
+        turn_seat=0,
+    )
+    assert len(hand) * 7 > CANDIDATE_CAP, "这局必须过闸（否则本用例空转）"
+
+    offers = _offers(_play_candidates(state), QINGNANG)
+
+    assert offers and all(action.picks == () for action in offers)
+    assert {action.choices for action in offers} == {
+        (f"seat:{seat}",) for seat in range(1, 8)
+    }
+
+
+def test_lijian_degrades_to_pair_only_candidates_beyond_the_cap():
+    hand = tuple(range(20))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=hand, hero="diaochan", gender=Gender.FEMALE),
+            *_wounded_males(7),
+        ],
+        deck=_deck_excluding(*hand),
+        turn_seat=0,
+    )
+    assert len(hand) * (7 * 6) > CANDIDATE_CAP, "这局必须过闸（否则本用例空转）"
+
+    offers = _offers(_play_candidates(state), LIJIAN)
+
+    assert offers and all(action.picks == () for action in offers)
+    assert len({action.choices for action in offers}) == 7 * 6
+
+
+def test_jieyin_degrades_to_target_only_candidates_beyond_the_cap():
+    hand = tuple(range(20))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=hand, hero="sunshangxiang", gender=Gender.FEMALE),
+            *_wounded_males(2),
+        ],
+        deck=_deck_excluding(*hand),
+        turn_seat=0,
+    )
+    pair_count = len(hand) * (len(hand) - 1) // 2
+    assert pair_count * 2 > CANDIDATE_CAP, "这局必须过闸（否则本用例空转）"
+
+    offers = _offers(_play_candidates(state), JIEYIN)
+
+    assert [(action.picks, action.choices) for action in offers] == [
+        ((), ("seat:1",)),
+        ((), ("seat:2",)),
+    ]
+
+
+def test_jieyin_sequential_mode_discards_two_cards_asked_one_at_a_time():
+    hand = tuple(range(20))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=4, hp_max=4, hand=hand, hero="sunshangxiang", gender=Gender.FEMALE),
+            SeatSpec(hp=2, hp_max=4, gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(*hand),
+        turn_seat=0,
+    )
+    picks_made: list[int] = []
+
+    def jieyin(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            candidates = _offers(query.legal_actions, JIEYIN)
+            assert candidates and all(action.picks == () for action in candidates)
+            return candidates[0]
+        if query.kind == QueryKind.SELECT_CARDS:
+            if len(picks_made) < 2:
+                picks_made.append(1)
+                return _find(
+                    query,
+                    lambda action: isinstance(action, SelectCards) and action.picks == (0,),
+                )
+            return _find(query, lambda action: isinstance(action, Pass))
+        return _decline(query)
+
+    engine = _run(state, [Scripted(jieyin), Scripted(_decline)], _skill_frame_popped)
+
+    assert engine.state.player(1).hp == 3, "目标回复 1 点"
+    assert len(picks_made) == 2, "两张手牌逐张问出"
+    assert len(engine.state.player(0).hand) == len(hand) + 2 - 2, "两张手牌被弃"

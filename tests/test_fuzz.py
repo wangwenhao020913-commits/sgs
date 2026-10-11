@@ -8,7 +8,8 @@
   "检测点 ≠ 终止点"分支）；``SGS_FUZZ_PLAYERS`` 可覆盖成固定人数。
 - 逐局验不变量：**牌守恒 / 体力范围 / 区域互斥 / 手牌上限 / 事件序号单调 / 每局必达终局 /
   终局牌守恒**，外加票 32 新增的四类：**阵亡者三区为空 / 装备槽位唯一 / 判定区同名唯一 /
-  终局身份-胜负一致**。
+  终局身份-胜负一致**，以及票 04 新增的**候选数上界**（任何询问 ≤ 128；M2 既有的
+  ``DiscardCards`` 枚举不在闸内，见 :func:`_check_candidate_cap`）。
 - **不进 fuzz**：同时死亡、无懈链、改判——它们是**路径性质**，随机局不保证命中，
   落基准与构造局面单测更可判决（票 17 §2）。
 - 对局种子来自**测试侧 OS 熵**（``secrets``），**不占游戏内随机源**；失败消息带可复现的
@@ -37,8 +38,19 @@ import pytest
 
 import sgs.agents as agents
 from sgs.data import ContentPack, Identity, RuleConfig, load_content_pack
-from sgs.engine import Engine, JournalRecord, RandomSource, TimingRecord
-from sgs.state import FrameKind, GameState, SlotKind, Zone, ZoneRef
+from sgs.engine import Engine, JournalRecord, QueryRecord, RandomSource, TimingRecord
+from sgs.skills import CANDIDATE_CAP
+from sgs.state import (
+    DiscardCards,
+    EndPhase,
+    FrameKind,
+    GameState,
+    PlayPhaseQuery,
+    SlotKind,
+    Zone,
+    ZoneRef,
+    project,
+)
 from sgs.timing import Timing
 
 from support import SeatSpec, build_state
@@ -231,6 +243,32 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
                 record,
                 f"回合边界座位 {player.seat} 手牌 {len(player.hand)} 超过体力 {player.hp}",
             )
+
+    _check_candidate_cap(record, seed, n)
+
+
+def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> None:
+    """候选数上界（票 04 §验收 7 / `spec.md` §Testing Decisions）：任何询问 ≤ ``CANDIDATE_CAP``。
+
+    **M2 既有的弃牌枚举不在闸内**：``_discard`` 枚举 ``C(手牌, 手牌 − 体力)`` 个子集，
+    与本票的技能组合闸是两族候选（实测：120 局无武将 fuzz 里就有一局到 **210**）。
+    本断言查**其余候选**——技能候选（``ActivateSkill``）正是落在 ``PLAY_PHASE`` 的那一支，
+    故两维相乘的技能一旦忘了降级，这里立刻判红。
+    """
+    if record is None or record.kind != "query":
+        return
+    governed = [
+        action
+        for action in record.query.legal_actions
+        if not isinstance(action, DiscardCards)
+    ]
+    if len(governed) > CANDIDATE_CAP:
+        _fail(
+            seed,
+            n,
+            record,
+            f"候选数 {len(governed)} 超过上界 {CANDIDATE_CAP}（询问 {record.query.kind}）",
+        )
 
 
 _HP_NEGATIVE_FRAMES = (FrameKind.DAMAGE, FrameKind.LIFE_DECREASE, FrameKind.NEAR_DEATH)
@@ -686,3 +724,41 @@ def test_the_failure_message_carries_the_seed_the_player_count_and_the_step():
     assert f"n={engine.game_players}" in message
     assert f"步号 seq={engine.records[-1].seq}" in message
     assert "python -m sgs --seed 1" in message
+
+
+def _query_record(state, actions) -> QueryRecord:
+    query = PlayPhaseQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="测试用",
+        legal_actions=tuple(actions),
+        view=project(state, 0),
+    )
+    return QueryRecord(seq=1, query=query)
+
+
+def test_the_candidate_cap_checker_catches_an_over_cap_query():
+    """合成反例：超过闸值的询问必红（票 04 §验收 7 不空转）。"""
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    record = _query_record(
+        state, [EndPhase(answers_seq=1) for _ in range(CANDIDATE_CAP + 1)]
+    )
+
+    with pytest.raises(FuzzInvariantError, match="候选数"):
+        _check_candidate_cap(record, 1, 2)
+
+    green = _query_record(state, [EndPhase(answers_seq=1) for _ in range(CANDIDATE_CAP)])
+    _check_candidate_cap(green, 1, 2)
+
+
+def test_the_candidate_cap_checker_exempts_the_m2_discard_enumeration():
+    """``DiscardCards`` 的 ``C(n, k)`` 是 M2 既有枚举，不属本票的闸（见函数 docstring）。"""
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    card = state.card(0)
+    record = _query_record(
+        state,
+        [DiscardCards(cards=(card,), answers_seq=1) for _ in range(CANDIDATE_CAP + 1)],
+    )
+
+    _check_candidate_cap(record, 1, 2)

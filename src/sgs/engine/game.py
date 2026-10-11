@@ -53,6 +53,7 @@ from sgs.skills import (
     dispatch_seam,
     dispatch_timing,
     prune_skill_state,
+    reset_phase_skill_state,
 )
 from sgs.state import (
     Action,
@@ -771,6 +772,27 @@ class Engine:
             timing=timing,
         )
 
+    def start_skill(self, action: ActivateSkill, *, source: int) -> Frame:
+        """发动一个**主动技**：压入 SKILL 帧（票 04）。
+
+        载荷（``picks`` / ``choices``）由候选构造时付清、原样带进帧；效果主体住技能层，
+        由 SKILL 帧的唯一步骤按 ``skill_id`` 查表通用派发（``sgs.skills.activate_skill``）
+        ——引擎不认识任何具体技能 id。``use_timing`` 取 ``PHASE_PLAY_IDLE``，使技能开的
+        使用 / 伤害 / 回复子帧在记录流里读得出"从出牌阶段空闲时间点来"。
+        """
+        return self.push_frame(
+            FrameKind.SKILL,
+            {
+                "source": source,
+                "targets": (),
+                "skill_id": action.skill_id,
+                "picks": tuple(action.picks),
+                "choices": tuple(action.choices),
+                "use_timing": Timing.PHASE_PLAY_IDLE,
+            },
+            timing=Timing.PHASE_PLAY_IDLE,
+        )
+
     def recover_from_peach(
         self, frame: Frame, action: UseCard, *, asker: int, dying: int
     ) -> None:
@@ -1091,7 +1113,8 @@ class Engine:
         池为空时**不构造询问**、直接返回空元组（票 19 §6）。
 
         答案也按帧内键缓存（票 30）：钩子可以跨多次重入，重入时既不重发询问、也不
-        重算选择面。
+        重算选择面。``spec.optional = True`` 时可选 ``Pass`` 表示"不再选"（票 04 的
+        顺序多轮用它收尾），返回空元组。
         """
         answers = frame.data.setdefault("ask_answers", {})
         answer_key = ("select", key)
@@ -1115,6 +1138,12 @@ class Engine:
         )
         if action is SUSPEND:
             return SUSPEND
+        if isinstance(action, Pass):
+            # ``SelectionSpec(optional=True)`` 的"够了 / 不选了"出口（票 04 的顺序多轮）：
+            # 空元组与"池为空"同形，调用方据此收尾。
+            store.pop(key, None)
+            answers[answer_key] = ()
+            return ()
         assert isinstance(action, SelectCards)
         store.pop(key, None)
         result = tuple(card_ids[index] for index in action.picks)
@@ -2003,6 +2032,9 @@ class Engine:
 
     def _phase_play_start(self) -> None:
         self.state.phase = Phase.PLAY
+        # 出牌阶段限一次的技能计数在本步复位：与"座位自己的 TURN_START 清空
+        # card_use_counts"同一重置口径（票 04 §要做什么 2 / 票 07 §6）。
+        reset_phase_skill_state(self.state)
         if self._turn_data.pop("skip_play", False):
             # 【乐不思蜀】判定非红桃 ⇒ **跳过出牌阶段**（官方"跳过其出牌阶段"，非跳过回合）：
             # 阶段体与边界一并越过，直奔弃牌阶段（票 26）。
@@ -2026,6 +2058,10 @@ class Engine:
             return "stay"
         if action.kind == "EndPhase":
             return None
+        if isinstance(action, ActivateSkill):
+            # 主动技（票 04）：压 SKILL 帧跑发动主体，出栈后回到本步重新询问。
+            self.start_skill(action, source=seat)
+            return "stay"
         # 使用一张牌：压入 USE 帧；子帧结算完再回到本步重新询问（票 07 §3）。
         self.start_use(action.card, source=seat, targets=action.targets)
         return "stay"
@@ -2144,6 +2180,10 @@ def _initial_player(
     无武将（``hero is None``）时体力上限回落到引擎常数 ``INITIAL_HP``，M2 行为因此不变。
     初始体力不进记录流（``Player`` 不在 header、也无 delta），故这一步不发 delta
     （票 13 §4）。
+
+    ``gender`` **不在这里填**：票 02 把"性别由武将数据填值"钉成**独立议题**
+    （``test_the_gender_field_is_still_a_separate_concern``），故 A 族的
+    【结姻】/【离间】在构造局面里用显式 ``gender`` 驱动；真实对局的性别接线属后续票。
     """
     hp_max = INITIAL_HP if hero is None else hero.hp_max
     if identity is Identity.LORD:

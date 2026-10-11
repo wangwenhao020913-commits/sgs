@@ -45,7 +45,7 @@ from sgs.effects import (
     target_is_effective,
 )
 from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable
-from sgs.skills import SeamKind, rejudge_capable_seats, virtual_dodge
+from sgs.skills import SeamKind, activate_skill, rejudge_capable_seats, virtual_dodge
 from sgs.state import (
     ActivateSkill,
     CardRef,
@@ -1122,12 +1122,29 @@ PLAY_STEPS = (
 """打出事件的步骤表：两个时机构成 L6 的全部节点（票 01 的 6 个转 dispatch 之一对）。"""
 
 
+# ---- SKILL 帧：主动技的发动主体（票 04）--------------------------------------
+#
+# 出牌阶段空闲时间点答 ``ActivateSkill`` ⇒ 压一个 SKILL 帧；帧只有一步：按 ``skill_id``
+# 查 ``sgs.skills.ACTIVATIONS`` 通用派发（引擎侧不出现任何具体技能 id，票 07 §5）。
+# 回调可以提问 / 压子帧，故沿用既有的"返回 stay ⇒ 原地重入"范式（票 19 §8）。
+
+
+def skill_activate(host: FrameHost, frame: Frame) -> Control:
+    """SKILL 帧的唯一步骤；控制值由发动回调原样决定（``stay`` = 本次没跑完）。"""
+    return activate_skill(host, frame)
+
+
+SKILL_STEPS = (Step(skill_activate, None),)
+"""主动技帧：非 dispatch 的单步（``None`` = 这一步本身不对应任何时机枚举位）。"""
+
+
 def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
     """按模式装配步骤表：只有 DEATH 帧的形状分叉（票 25）。"""
     return {
         FrameKind.USE: USE_STEPS,
         FrameKind.RESOLVE: RESOLVE_STEPS,
         FrameKind.PLAY: PLAY_STEPS,
+        FrameKind.SKILL: SKILL_STEPS,
         FrameKind.DAMAGE: DAMAGE_STEPS,
         FrameKind.LIFE_DECREASE: LIFE_DECREASE_STEPS,
         FrameKind.NEAR_DEATH: NEAR_DEATH_STEPS,

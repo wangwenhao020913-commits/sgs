@@ -48,6 +48,7 @@ __all__ = [
     "VirtualSourceError",
     "card_ids",
     "grouped_candidates",
+    "pure_virtual_card",
     "single_conversion",
     "transformed_card",
     "transformed_slash",
@@ -70,6 +71,7 @@ class VirtualKind(IntEnum):
     DODGE = 1
     PEACH = 2
     INDULGENCE = 3
+    DUEL = 4
 
 
 LEGACY_KIND_COUNT = 2
@@ -87,8 +89,9 @@ _KIND_BY_TYPE: dict[str, VirtualKind] = {
     "dodge": VirtualKind.DODGE,
     "peach": VirtualKind.PEACH,
     "indulgence": VirtualKind.INDULGENCE,
+    "duel": VirtualKind.DUEL,
 }
-"""目标**牌名 id** → 命名空间；只登记本里程碑有生产者的牌（票 03 §表）。"""
+"""目标**牌名 id** → 命名空间；只登记本里程碑有生产者的牌（票 03 §表 / 票 04 加【决斗】）。"""
 
 KIND_COUNT = len(VirtualKind)
 """命名空间的段数（只读事实，供测试与文档引用；id 算式不读它）。"""
@@ -295,20 +298,33 @@ def transformed_slash(state: GameState, sources: tuple[int, ...]) -> CardRef:
     return transformed_card(state, sources, "slash")
 
 
+def pure_virtual_card(state: GameState, target_type_id: str) -> CardRef:
+    """**纯虚拟牌**：没有来源实体牌，牌面（花色 / 点数 / 颜色）三者皆无（ADR-004）。
+
+    与 :func:`transformed_card` 的分工是构造期的硬边界（票 03 §验收 4）：转化牌**必须**
+    至少一张来源，纯虚拟牌**必须**没有来源。生产者：【八卦阵】的视为【闪】、
+    【离间】的视为使用【决斗】（票 04）。id 走 :func:`virtual_card_id` 的**空来源**段，
+    故同一牌名的纯虚拟牌恒得同一个 id、且与一切转化牌不撞。
+    """
+    return CardRef(
+        card_id=virtual_card_id(
+            kind=_kind_of(target_type_id), sources=(), card_count=len(state.cards)
+        ),
+        type=target_type_id,
+        name=_card_name(state, target_type_id),
+        suit=None,
+        rank=None,
+        color=None,
+    )
+
+
 def virtual_dodge(state: GameState) -> CardRef:
     """【八卦阵】判定为红时"**视为**使用/打出【闪】"的纯虚拟牌（票 10 §5.3）。
 
     **纯虚拟牌**：没有来源实体牌（``virtual_sources`` 为空），牌面三者皆无。它是"这次
     需要"的产物、与座位无关，故 id 里不含持有者——同一次需要里只用它一次即可。
     """
-    return CardRef(
-        card_id=virtual_card_id(kind=VirtualKind.DODGE, sources=(), card_count=len(state.cards)),
-        type="dodge",
-        name=_card_name(state, "dodge"),
-        suit=None,
-        rank=None,
-        color=None,
-    )
+    return pure_virtual_card(state, "dodge")
 
 
 # ---------------------------------------------------------------------------

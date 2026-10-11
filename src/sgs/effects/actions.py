@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from itertools import combinations
+from typing import Any
 
 from sgs.state import (
     Action,
@@ -647,11 +648,12 @@ def _usable_in(behavior: CardBehavior, context: UseContext, timing: Timing | Non
     )
 
 
-def _sort_key(action: Action) -> tuple[int, tuple[int, ...], str]:
+def _sort_key(action: Action) -> tuple[Any, ...]:
     """票 05 §4 的稳定键；票 15 §4 把 ``UseCard`` 的**目标列表**补进键里。
 
     同牌不同目标组合因此有显式次序（不再依赖生成顺序的稳定性）；1v1 每张牌至多一个
-    目标组合，故 M1 六条基准逐字节不变。
+    目标组合，故 M1 六条基准逐字节不变。票 04 再把 ``ActivateSkill.choices`` 补进键
+    （键长不同无妨：首元素是构造子类别，不同类别在更早的位置就已分出先后）。
     """
     if isinstance(action, UseCard):
         return (0, (action.card.card_id, *action.targets), action.kind)
@@ -660,7 +662,10 @@ def _sort_key(action: Action) -> tuple[int, tuple[int, ...], str]:
     if isinstance(action, SelectCards):
         return (0, action.picks, action.kind)
     if isinstance(action, ActivateSkill):
-        return (0, action.picks, action.kind)
+        # ``choices`` 也进键（票 04）：主动技同一组牌可以配不同目标座位，不带上它就会
+        # 落进"键相等、顺序靠生成顺序"的隐式约定。既有候选两者皆空，故纪律扫描与
+        # M2 基准的次序逐字节不变。
+        return (0, action.picks, action.kind, action.choices)
     if isinstance(action, DiscardCards):
         return (0, tuple(card.card_id for card in action.cards), action.kind)
     return (1, (), action.kind)

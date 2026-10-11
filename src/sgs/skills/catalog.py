@@ -81,6 +81,7 @@ __all__ = [
     "lord_skill_allowed",
     "lord_skill_ids",
     "prune_skill_state",
+    "reset_phase_skill_state",
     "resolve_instances",
 ]
 
@@ -334,6 +335,19 @@ def prune_skill_state(state: GameState) -> None:
     for key in list(state.skill_state):
         if key not in live:
             del state.skill_state[key]
+
+
+def reset_phase_skill_state(state: GameState) -> None:
+    """清理**本出牌阶段**的 per-instance 技能状态（票 04 §要做什么 2）。
+
+    与"座位自己的 ``TURN_START`` 清空 ``card_use_counts``"同一重置口径（票 07 §6），
+    只是节拍落在 ``PHASE_PLAY_START``：M3 里 ``skill_state`` 的**唯一写入者**是 A 族
+    "出牌阶段限一次"（含【仁德】"首次达两张"）的计数，故按阶段整体清空即等于
+    "每阶段限一次"的复位。装备技能不写 ``skill_state``；限定技 / 觉醒技的"已用"键
+    按 ADR-008 改判 M5、M3 无载体——真出现**跨阶段**的 per-instance 状态时，这里必须
+    升级成带作用域的清理（本函数是那个唯一的升级点）。
+    """
+    state.skill_state.clear()
 
 
 def is_equipped(state: GameState, seat: int, slot: SlotKind) -> bool:
@@ -977,14 +991,20 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
     _equip("zixing", locked=True, modifiers=_DISTANCE_MINUS_ONE),
 )
 
-# 武将技能定义（票 03 的 H 族；票 12 起全表）在**文件末尾**并入：`heroes` 反向 import
-# 本模块的 SkillDef / ModifierContext，故这一行必须晚于那两者的定义（见 CATALOG 的 docstring）。
+# 武将技能定义（票 03 的 H 族、票 04 的 A 族；票 12 起全表）在**文件末尾**并入：
+# `heroes` / `active` 反向 import 本模块的 SkillDef / ModifierContext，故这一行必须晚于
+# 那两者的定义（见 CATALOG 的 docstring）。
 from .heroes import conversion_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
+from .active import active_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
     {
         definition.skill_id: definition
-        for definition in (*_SKILL_DEFS, *conversion_skill_definitions())
+        for definition in (
+            *_SKILL_DEFS,
+            *conversion_skill_definitions(),
+            *active_skill_definitions(),
+        )
     }
 )
 """定义目录：``skill_id`` → :class:`SkillDef`，**模块级不可变**（票 07 §1 / §6）。
