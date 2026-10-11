@@ -1491,12 +1491,52 @@ class Engine:
             actor=subject,
         )
 
-    def discard_judge_card(self, frame: Frame) -> None:
-        """判定牌 处理区 → 弃牌堆（``reason = JUDGE``、归属 = 被判定者）：判定结算结束。"""
+    def substitute_judge_card(self, frame: Frame, *, seat: int, new_card: CardRef) -> Control:
+        """改判「**代替**」（票 11 §②）：新牌 手牌 → 处理区、原判定牌 处理区 → 弃牌堆。
+
+        与 :func:`sgs.effects.substitute_judge_card` 的**代替**口径逐字段一致
+        （``reason = JUDGE``、归属 = **被判定者**、新牌进处理区、原牌进弃牌堆），
+        只是走 :meth:`move_in_frame` 这个"搬牌必记 delta、必派发失去牌后"的**唯一入口**：
+        替代掉的手牌因此照常触发 D 族的"失去牌后"，而不是绕开移动入口直接改状态。
+
+        两条移动各发一条 ``card_move``（来源区不同）。完成时把帧私有 ``judge_card``
+        换成新牌 —— 它成为新的"生效前"判定牌（窗口据此重开）。
+        """
         subject = frame.data["subject"]
+        old_card = frame.data["judge_card"]
+        frame.data["judge_card"] = new_card
+        control = self.move_in_frame(
+            frame,
+            (new_card,),
+            to_zone=ZoneRef(Zone.PROCESSING),
+            reason=MoveReason.JUDGE,
+            owner=subject,
+            actor=seat,
+        )
+        if control is not None:
+            return control
+        return self.move_in_frame(
+            frame,
+            (old_card,),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.JUDGE,
+            owner=subject,
+            actor=subject,
+        )
+
+    def discard_judge_card(self, frame: Frame) -> None:
+        """判定牌 处理区 → 弃牌堆（``reason = JUDGE``、归属 = 被判定者）：判定结算结束。
+
+        判定牌**已被"生效后"的效果获得**（【天妒】等）时不再入弃牌堆（规则 11.2
+        "若未被【天妒】等获得"）：判据是"牌还在不在处理区"，与具体技能 id 无关。
+        """
+        subject = frame.data["subject"]
+        judge_card = frame.data["judge_card"]
+        if judge_card.card_id not in self.state.processing:
+            return
         self.move_in_frame(
             frame,
-            (frame.data["judge_card"],),
+            (judge_card,),
             to_zone=ZoneRef(Zone.DISCARD),
             reason=MoveReason.JUDGE,
             owner=subject,

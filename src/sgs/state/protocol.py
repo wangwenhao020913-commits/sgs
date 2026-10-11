@@ -96,6 +96,8 @@ class WindowCause(str, Enum):
     票 09（M3）加 ``LORD_REQUEST``：**势力求助窗口**的成因——主公技令其他同势力角色
     打出一张牌（【护驾】/【激将】），与"这张牌自己的响应窗口"（``DODGE`` / ``DUEL`` 等）
     分列，使记录流里读得出"这次询问来自求助"。
+    票 11（M3）加 ``REJUDGE``：**改判窗口**的成因——判定牌生效前，有改判能力的角色
+    打出一张手牌代替之（`11.3`）；它挂在判定帧上、可循环重开，与效果自己的响应窗口分列。
     """
 
     NULLIFY = "NULLIFY"
@@ -104,6 +106,7 @@ class WindowCause(str, Enum):
     DUEL = "DUEL"
     BORROWED_SWORD = "BORROWED_SWORD"
     LORD_REQUEST = "LORD_REQUEST"
+    REJUDGE = "REJUDGE"
 
 
 class RespondMode(str, Enum):

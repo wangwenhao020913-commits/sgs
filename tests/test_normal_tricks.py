@@ -202,6 +202,7 @@ def test_the_nine_query_kinds_and_the_window_causes_are_defined():
         "DUEL",
         "BORROWED_SWORD",
         "LORD_REQUEST",
+        "REJUDGE",
     }
 
 

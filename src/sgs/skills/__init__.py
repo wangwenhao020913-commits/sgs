@@ -32,6 +32,7 @@ from sgs.effects import (
     PriorityClass,
     apply_modifiers,
 )
+from sgs.state import GameState
 
 from .catalog import (
     ACTIVATION_PLANS,
@@ -55,6 +56,7 @@ from .catalog import (
     lord_skill_allowed,
     lord_skill_ids,
     prune_skill_state,
+    rejudge_skill_ids,
     reset_phase_skill_state,
     resolve_instances,
     same_kingdom,
@@ -116,6 +118,13 @@ from .lord_request import (
     provider_registered,
     start_provider,
 )
+from .rejudge import (
+    GUICAI,
+    TIANDU,
+    rejudge_activation_plans,
+    rejudge_skill_definitions,
+    tiandu_handler,
+)
 
 EQUIPMENT_CARD_TYPE_IDS: tuple[str, ...] = tuple(
     skill_id.removeprefix("equip.")
@@ -140,11 +149,13 @@ LORD_SKILL_IDS: frozenset[str] = lord_skill_ids()
 不读这个快照。
 """
 
-REJUDGE_SKILL_IDS: frozenset[str] = frozenset()
-"""有**改判**能力的技能 id（【鬼才】/【鬼道】一类）。
+REJUDGE_SKILL_IDS: frozenset[str] = rejudge_skill_ids()
+"""有**改判**能力的技能 id（【鬼才】/【鬼道】一类）：:func:`rejudge_skill_ids` 对
+``CATALOG`` 的 **import 期快照**（票 11 §①：M2 手抄空集 → M3 由定义字段派生）。
 
-标准版里改判全在武将技能上，而武将技能整类 out of scope ⇒ M2 恒空。
-判定帧的改判窗口因此**真 dispatch 但队列恒空**（票 10 §4）。
+"这是不是改判技"因此只有一个真源（``SkillDef.rejudge_capable``），不再是一张会与定义
+漂移的名单；运行期的座位解析读**存活实例**的定义字段（:func:`rejudge_capable_seats`），
+不读这个快照。
 """
 
 __all__ = (
@@ -160,6 +171,7 @@ __all__ = (
     "EQUIPMENT_SKILL_IDS",
     "GUANXING",
     "GUANXING_MAX",
+    "GUICAI",
     "HUJIA",
     "JIJIANG",
     "JIUYUAN",
@@ -194,6 +206,7 @@ __all__ = (
     "SkillSource",
     "SkillSourceKind",
     "SkillType",
+    "TIANDU",
     "VirtualKind",
     "VirtualSourceError",
     "activate_skill",
@@ -221,11 +234,15 @@ __all__ = (
     "prune_skill_state",
     "provider_registered",
     "pure_virtual_card",
+    "rejudge_activation_plans",
     "rejudge_capable_seats",
+    "rejudge_skill_definitions",
+    "rejudge_skill_ids",
     "reset_phase_skill_state",
     "resolve_instances",
     "same_kingdom",
     "start_provider",
+    "tiandu_handler",
     "timing_hooks_present",
     "transformed_card",
     "transformed_slash",
@@ -239,13 +256,19 @@ def equipment_skill_ids() -> frozenset[str]:
     return EQUIPMENT_SKILL_IDS
 
 
-def rejudge_capable_seats() -> tuple[int, ...]:
-    """当前**有改判能力**的座位（票 10 §4 的响应队列左项）。
+def rejudge_capable_seats(state: GameState) -> tuple[int, ...]:
+    """当前**有改判能力**的座位（票 11 §①；判定帧的改判响应队列左项）。
 
-    M2 没有改判技能（``REJUDGE_SKILL_IDS`` 为空），故恒为空元组——判定帧的改判响应
-    队列因此恒空、无询问、无日志节点，"队列恒空即终态正确"。M3 立起技能实例
-    （``(owner, skill_id, source)``）后在此把 ``REJUDGE_SKILL_IDS`` 解析成座位集合。
+    解析**存活实例**（``resolve_instances``：装备区 ∪ 虚拟授予 ∪ 武将牌，武将阵亡 /
+    来源消失即自动出队），取其中定义带 :attr:`~sgs.skills.catalog.SkillDef.rejudge_capable`
+    的实例的持有者。读定义字段而不是 :data:`REJUDGE_SKILL_IDS` 快照，与主公技门控读
+    ``skill_type`` 同一姿态："能力"只有一个真源。
+
+    场上没有改判能力者 ⇒ 空元组 ⇒ 判定帧不构造任何询问、无额外日志节点，
+    "队列恒空即终态正确"的既有口径不破（M2 的 34 条基准一行不改）。
     """
-    if REJUDGE_SKILL_IDS:
-        raise NotImplementedError("M3 才有改判技能：座位的技能实例解析尚未建立")
-    return ()
+    seats: list[int] = []
+    for instance in resolve_instances(state):
+        if instance.definition.rejudge_capable and instance.owner not in seats:
+            seats.append(instance.owner)
+    return tuple(seats)

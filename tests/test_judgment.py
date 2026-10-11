@@ -536,7 +536,7 @@ def test_the_rejudge_queue_is_counterclockwise_from_the_turn_seat_and_one_per_se
 
     assert rejudge_askers(state, capable=(3, 0, 1)) == (1, 3, 0), "逆时针、每人一次、按座位序"
     assert rejudge_askers(state, capable=(2,)) == (), "死者不在区间里"
-    assert rejudge_capable_seats() == (), "M2 没有改判技能 ⇒ 队列恒空"
+    assert rejudge_capable_seats(state) == (), "无武将局面没有改判技能 ⇒ 队列恒空"
 
 
 def test_the_substitute_primitive_puts_the_new_card_in_processing_and_discards_the_old():

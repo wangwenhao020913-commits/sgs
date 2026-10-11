@@ -85,6 +85,7 @@ __all__ = [
     "lord_skill_allowed",
     "lord_skill_ids",
     "prune_skill_state",
+    "rejudge_skill_ids",
     "reset_phase_skill_state",
     "resolve_instances",
     "same_kingdom",
@@ -180,6 +181,14 @@ class SkillDef:
     virtual_slot: SlotKind | None = None
     """虚拟装备的"视为槽位"；实体装备恒 ``None``（票 07 §6 / 票 30）。"""
 
+    rejudge_capable: bool = False
+    """本技能有没有**改判能力**（票 11 §① 的加法，默认 ``False``，既有 17 条装备定义一字不改）。
+
+    能力是**定义上的显式标记**（不是 ``skill_type`` 的取值，也不是一张会漂移的 id 名单）：
+    :func:`rejudge_skill_ids` 由它派生 ``sgs.skills.REJUDGE_SKILL_IDS``，判定帧的改判
+    应答者队列由 :func:`~sgs.skills.rejudge_capable_seats` 读**存活实例**的定义字段得座位集合。
+    """
+
     @property
     def priority_class(self) -> PriorityClass:
         """本技能在修饰器链里的优先级档（由载体派生，不另存字段以防漂移）。"""
@@ -250,6 +259,21 @@ def lord_skill_ids(catalog: Mapping[str, SkillDef] | None = None) -> frozenset[s
     source = CATALOG if catalog is None else catalog
     return frozenset(
         definition.skill_id for definition in source.values() if _is_lord_skill(definition)
+    )
+
+
+def rejudge_skill_ids(catalog: Mapping[str, SkillDef] | None = None) -> frozenset[str]:
+    """``catalog`` 里全部**带改判能力**的技能 id；缺省读**当前**的 :data:`CATALOG`。
+
+    与 :func:`lord_skill_ids` 同构：``sgs.skills.REJUDGE_SKILL_IDS`` 只是本函数的
+    import 期快照，"谁有改判能力"的唯一真源是 :attr:`SkillDef.rejudge_capable`；
+    判定帧的座位集合由 :func:`~sgs.skills.rejudge_capable_seats` 读**存活实例**的定义
+    字段得出——两者读同一字段，不各抄一份名单。传 ``catalog`` 让"派生"这条判据能对
+    一份注入的表单独验证。
+    """
+    source = CATALOG if catalog is None else catalog
+    return frozenset(
+        definition.skill_id for definition in source.values() if definition.rejudge_capable
     )
 
 
@@ -1111,11 +1135,17 @@ from .damage_after import (  # noqa: E402  （末尾 import 是刻意的）
     damage_after_skill_definitions,
     damage_point_index,
 )
+from .rejudge import (  # noqa: E402  （末尾 import 是刻意的）
+    rejudge_activation_plans,
+    rejudge_skill_definitions,
+)
 
 ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], ActivationPlan]] = (
-    MappingProxyType({**ACTIVATION_PLANS, **arrange_activation_plans()})
+    MappingProxyType(
+        {**ACTIVATION_PLANS, **arrange_activation_plans(), **rejudge_activation_plans()}
+    )
 )
-"""G 族（票 10）的发动形态并入后的**完整**注册表：与 :data:`CATALOG` 同一合并姿态。"""
+"""G 族（票 10）与 I 族（票 11）的发动形态并入后的**完整**注册表：与 :data:`CATALOG` 同一合并姿态。"""
 
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
     {
@@ -1130,6 +1160,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *lord_skill_definitions(),
             *arrange_skill_definitions(),
             *damage_after_skill_definitions(),
+            *rejudge_skill_definitions(),
         )
     }
 )

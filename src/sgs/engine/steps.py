@@ -26,8 +26,10 @@
   只记暂定胜负、不在那里终止（批次关闭由引擎的 DEATH 出栈逻辑宣布）。
 - **RECOVER 帧**（票 21）：L10 两个时机；"确定回复数值"之后把体力写高（夹在上限内）。
 - **JUDGE 帧**（票 26）：L14 三个时机；四步 = 取牌入处理区（复用摸牌原语、沿用 ``shuffle``
-  子流、不算摸牌）→ 改判窗口（真 dispatch、队列恒空）→ 结果 → 判定牌入弃牌堆后调后果 op。
-  帧私有 ``subject`` / ``judge_card`` 与渠道牌 ``card`` 分列（票 10 §1）。
+  子流、不算摸牌）→ 改判循环窗口（``RESPOND`` + ``WindowCause.REJUDGE``：每次替代后重开、
+  每座位一次、按存活重滤；无能力者 ⇒ 队列恒空）→ 结果 → 判定牌入弃牌堆后调后果 op
+  （被【天妒】等获得则跳过入弃牌堆）。帧私有 ``subject`` / ``judge_card`` 与渠道牌
+  ``card`` 分列（票 10 §1）。
 """
 
 from __future__ import annotations
@@ -61,6 +63,7 @@ from sgs.state import (
     DodgeContext,
     FrameKind,
     GameState,
+    PlayCard,
     QueryKind,
     RespondMode,
     UseCard,
@@ -103,6 +106,8 @@ class FrameHost(StepHost, Protocol):
     def move_judge_card_to_processing(self, frame: Frame) -> None: ...
 
     def discard_judge_card(self, frame: Frame) -> None: ...
+
+    def substitute_judge_card(self, frame: Frame, *, seat: int, new_card: CardRef) -> Control: ...
 
     def apply_judge_after(self, frame: Frame) -> None: ...
 
@@ -1145,9 +1150,11 @@ IDENTITY_DEATH_STEPS = (
 #   1. ``judge_on``：取牌堆顶一张（复用摸牌原语、沿用 ``shuffle`` 子流、不算摸牌）→
 #      移入处理区（``reason=JUDGE``、归属 = 被判定者）→ **再** dispatch（先落牌后 dispatch，
 #      使 ``JUDGE_ON`` 记录带得出判定牌）；
-#   2. ``judge_before_effect``：改判窗口，真 dispatch；M2 无改判技能 ⇒ 队列恒空、无询问；
+#   2. ``judge_before_effect``：改判**循环窗口**（票 11）：真 dispatch 后按
+#      ``WindowCause.REJUDGE`` 逐个问有能力的座位；无能力者 ⇒ 队列恒空、无询问；
 #   3. ``judge_after_effect``：结果（花色 / 点数 / 牌名）由后果 op 直接读帧私有 ``judge_card``；
-#   4. ``judge_finish``：判定结算结束 ⇒ 判定牌 ``PROCESSING→DISCARD``，随后调后果 op。
+#   4. ``judge_finish``：判定结算结束 ⇒ 判定牌 ``PROCESSING→DISCARD``（已被效果获得则跳过），
+#      随后调后果 op。
 #
 # 帧私有 ``data`` 把 **``subject``（被判定者）** 与 **``judge_card``（判定牌）** 与
 # ``card``（渠道牌）**分列**（票 10 §1）：三个判定时机的记录一律 ``actor = subject``，
@@ -1178,20 +1185,71 @@ def judge_on(host: FrameHost, frame: Frame) -> Control:
     return _emit_judge(host, frame, Timing.JUDGE_ON)
 
 
-def judge_before_effect(host: FrameHost, frame: Frame) -> Control:
-    """改判窗口：**真 dispatch = 空实现**（保留：dispatch、无询问、无状态变化）。
+REJUDGE_EMITTED = "rejudge_emitted"
+"""帧私有键：``JUDGE_CARD_BEFORE_EFFECT`` 的时机记录已落（重入时不再重发）。"""
 
-    不是跳过——跳过会逼 M3 加【鬼才】类技能时改判定骨架（票 03 §4）。响应队列按
-    "当前回合角色起逆时针、每角色一次"建好；M2 有能力者集合为空 ⇒ 队列恒空 ⇒ 不构造
-    任何询问（票 10 §4）。真出现有能力者时，改判询问协议（票 19 的 ``RESPOND``）尚未建立，
-    故 fail-closed 而不是静默丢弃。
+REJUDGE_ASKED = "rejudge_asked"
+"""帧私有键：本帧改判窗口里**已问过的座位**（列表，插入序确定；不用集合，票 08 §7）。
+
+"同一次判定的改判机会：每名可改判的角色只有一次响应机会，放弃后不能再响应"
+（规则 11.3）：这个名单**跨替代重开**存活，故同一座位不会因循环被问第二次。
+"""
+
+
+def judge_before_effect(host: FrameHost, frame: Frame) -> Control:
+    """改判窗口（票 11 §②）：``JUDGE_CARD_BEFORE_EFFECT`` 时点 + **循环**改判响应。
+
+    1. 真 dispatch 一次 ``JUDGE_CARD_BEFORE_EFFECT``（既有语义不变；M2 无改判技能
+       ⇒ 队列恒空、无询问、无额外日志节点）。时机记录**每个判定帧只落一次**
+       （``REJUDGE_EMITTED`` 守卫重入；循环重开不改时点序，票 11 §验收 7）。
+    2. 在 :func:`_rejudge_window` 里逐个问**有改判能力**的座位（``WindowCause.REJUDGE``、
+       ``required=None``、``mode=PLAY`` = 打出一张**手牌**代替之）；每次替代后窗口重开，
+       直到无人再替代。
     """
-    control = _emit_judge(host, frame, Timing.JUDGE_CARD_BEFORE_EFFECT)
-    if control is not None:
-        return control
-    if rejudge_askers(host.state, rejudge_capable_seats()):
-        raise NotImplementedError("M2 没有改判技能：改判询问协议（票 19 的 RESPOND）属 M3")
-    return None
+    if not frame.data.get(REJUDGE_EMITTED):
+        control = _emit_judge(host, frame, Timing.JUDGE_CARD_BEFORE_EFFECT)
+        if control is not None:
+            return control
+        frame.data[REJUDGE_EMITTED] = True
+    return _rejudge_window(host, frame)
+
+
+def _rejudge_window(host: FrameHost, frame: Frame) -> Control:
+    """改判循环窗口：每次替代后重开，应答者区间**逐轮重滤**（票 11 §② / 规则 11.3）。
+
+    循环口径（三处都必要）：
+
+    - **重开**：选中 ``PlayCard`` ⇒ :meth:`~sgs.engine.steps.FrameHost.substitute_judge_card`
+      把新牌变成判定牌（新的"生效前"），下一轮按新的局面重扫应答者；
+    - **每座位一次**：``REJUDGE_ASKED`` 记录已问过的座位，故同一座位不因循环被问第二次；
+    - **绑帧与重滤**：每轮都从 ``rejudge_askers(存活座位, 有能力座位)`` 现算——窗口内
+      有人死亡时，死者自动从区间里消失（"冻结元组"是 M2 濒死窗口的口径，不搬到这里）。
+
+    ``ask_respond`` 的帧内应答缓存让挂起重入续跑同一次询问；``asked`` 在**应答到达后**
+    才追加，故重入时仍选中同一座位、消费那条应答。
+    """
+    while True:
+        askers = rejudge_askers(host.state, rejudge_capable_seats(host.state))
+        asked = frame.data.setdefault(REJUDGE_ASKED, [])
+        seat = next((candidate for candidate in askers if candidate not in asked), None)
+        if seat is None:
+            return None
+        action = host.ask_respond(
+            frame,
+            seat,
+            Timing.JUDGE_CARD_BEFORE_EFFECT,
+            cause=WindowCause.REJUDGE,
+            required=None,
+            window_frame=frame.frame_id,
+            mode=RespondMode.PLAY,
+        )
+        if host.suspended(action):
+            return "stay"
+        asked.append(seat)
+        if isinstance(action, PlayCard):
+            control = host.substitute_judge_card(frame, seat=seat, new_card=action.card)
+            if control is not None:
+                return control
 
 
 def judge_after_effect(host: FrameHost, frame: Frame) -> Control:
