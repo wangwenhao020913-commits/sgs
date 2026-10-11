@@ -1540,6 +1540,7 @@ class Engine:
                 # 不重录）——这是本票的硬约束，比"每条移动都落一条记录"更重要。
                 frame.data.pop("_pending_move_timing", None)
                 return None
+            carried = frame.frame_id == frame_id
             if frame.data.get("_pending_move_timing") != key:
                 self.emit_timing(
                     Timing.MOVE_AFTER,
@@ -1550,6 +1551,16 @@ class Engine:
                     targets=(),
                     cards=event.cards,
                 )
+            if not carried:
+                # 承载帧已经不在栈上（挂起期间上层帧出栈）：用临时帧续跑，
+                # 不往一个已出栈的帧里写载荷。
+                transient = Frame(
+                    kind=FrameKind.RESOLVE,
+                    data={"source": event.actor, "targets": (), "card": None},
+                    frame_id=frame_id,
+                )
+                transient.data[MOVE_EVENT_KEY] = event
+                return dispatch_move_after(self, transient)
             frame.data[MOVE_EVENT_KEY] = event
             result = dispatch_move_after(self, frame)
             if result == "stay":
