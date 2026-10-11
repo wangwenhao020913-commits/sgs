@@ -1,7 +1,9 @@
 """命令行门面：跑一局、打印人类可读的**全知**记录流、退出码 0。
 
 参数有 ``--seed``（票 02 §2）与 ``--players``（票 23：2/4/5/6/7/8、默认 2），
-以及武将发放的 ``--heroes a,b,c`` / ``--hero-pool x,y,z``（票 02：显式指定 / 换启用池）。
+武将发放的 ``--heroes a,b,c`` / ``--hero-pool x,y,z``（票 02：显式指定 / 换启用池），
+以及参与者档位 ``--ai random|heuristic``（票 13：**缺省仍是随机**——默认参与者不动，
+M2 的 34 条基准磁带一行不改）。
 种子省略时按票 08 现生成 64 位种子、写进 header 并在 stdout 打印，事后可原样重跑。
 坏数据、非法人数与非法行动都走 stderr + 退出码 1。
 """
@@ -12,7 +14,7 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from sgs.agents import RandomPlayer
+from sgs.agents import HeuristicPlayer, Participant, RandomPlayer
 from sgs.data import (
     IDENTITY_LABELS,
     DataLoadError,
@@ -35,6 +37,13 @@ __all__ = ["main", "render"]
 def _csv(raw: str) -> tuple[str, ...]:
     """``a,b,c`` → ``("a", "b", "c")``；空白与空项一律剔除。"""
     return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _player(name: str, stream) -> Participant:
+    """按档位名造一个参与者；两档共用同一个 ``ai`` 子流（票 13 §档位）。"""
+    if name == "heuristic":
+        return HeuristicPlayer(stream)
+    return RandomPlayer(stream)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -66,6 +75,12 @@ def main(argv: list[str] | None = None) -> int:
         type=_csv,
         default=None,
         help="随机发放用的启用池（逗号分隔）；省略 = 无武将模式。",
+    )
+    parser.add_argument(
+        "--ai",
+        choices=("random", "heuristic"),
+        default="random",
+        help="参与者档位：random（缺省，均匀随机）或 heuristic（规则启发式）。",
     )
     args = parser.parse_args(argv)
 
@@ -103,7 +118,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"武将发放非法：{error}", file=sys.stderr)
         return 1
     ai_stream = source.substream("ai")
-    participants = [RandomPlayer(ai_stream) for _ in range(rule_config.player_count)]
+    participants: list[Participant] = [
+        _player(args.ai, ai_stream) for _ in range(rule_config.player_count)
+    ]
     try:
         engine.run(participants)
     except IllegalActionError as error:

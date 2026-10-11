@@ -484,3 +484,126 @@ def test_the_card_ref_attribute_scan_goes_red_on_a_new_attribute_field():
     for injected in ("attribute", "element", "damage_type"):
         offenders = _attribute_field_offenders(real | {injected})
         assert injected in offenders, f"给 CardRef 加 {injected} 应被判红：{offenders}"
+
+
+# ---------------------------------------------------------------------------
+# 8. 启发式 AI 的可见性硬约束（票 13 §硬约束 4；ADR-011）
+# ---------------------------------------------------------------------------
+
+HEURISTIC = SOURCE_ROOT / "agents" / "heuristic.py"
+"""被测文件 = 启发式 AI 的唯一模块（票 13 §落点与结构）。"""
+
+HEURISTIC_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
+    "__future__": frozenset({"annotations"}),
+    "collections.abc": frozenset({"Callable", "Mapping", "Sequence"}),
+    "types": frozenset({"MappingProxyType"}),
+    "sgs.effects": frozenset({"Randomness"}),
+    "sgs.state": frozenset(
+        {
+            # 协议 / 视角那一半（可见面），**不含** GameState / Player / Frame 等全知面。
+            "Action",
+            "ActivateSkill",
+            "ArrangeCards",
+            "ArrangeQuery",
+            "CardRef",
+            "DiscardCards",
+            "DiscardQuery",
+            "DodgeQuery",
+            "EndPhase",
+            "Pass",
+            "PeachQuery",
+            "PlayCard",
+            "PlayPhaseQuery",
+            "PlayerPublic",
+            "PlayerView",
+            "Query",
+            "QueryKind",
+            "RespondQuery",
+            "SelectCards",
+            "SelectCardsQuery",
+            "SelectOption",
+            "SelectOptionQuery",
+            "SkillActivationQuery",
+            "UseCard",
+        }
+    ),
+}
+"""只许 import 的**可见面**：询问 / 行动协议、视角投影、随机句柄与纯类型工具。
+
+``sgs.engine`` / ``sgs.skills`` / ``sgs.data`` / ``sgs.resolution`` / ``sgs.timing`` 与
+``sgs.state`` 里的 ``GameState`` / ``Player`` / ``Frame`` 全部**不在名单**——它们要么能读到
+全知状态，要么能读到记录流。名单是**白名单**（fail-closed）：新增任何 import 都要回来显式
+登记，而不是静默放行。
+"""
+
+HEURISTIC_ALLOWED_SGS_MODULES = frozenset({"sgs.effects", "sgs.state"})
+"""``import sgs.x`` 形态允许的整包名（白名单之外一律判红）。"""
+
+
+def _heuristic_visibility_offenders(tree: ast.Module) -> list[str]:
+    """启发式 AI 的越权 import（空列表 = 只碰可见面）。抽出来是为了能对它跑合成反例。"""
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.level:  # 相对导入天然留在本子包内
+                continue
+            allowed = HEURISTIC_IMPORT_ALLOWLIST.get(node.module or "")
+            if allowed is None:
+                offenders.append(f"{node.lineno} from {node.module} import …")
+                continue
+            offenders.extend(
+                f"{node.lineno} from {node.module} import {alias.name}"
+                for alias in node.names
+                if alias.name not in allowed
+            )
+        elif isinstance(node, ast.Import):
+            offenders.extend(
+                f"{node.lineno} import {alias.name}"
+                for alias in node.names
+                if alias.name.split(".")[0] == "sgs"
+                and alias.name not in HEURISTIC_ALLOWED_SGS_MODULES
+            )
+    return offenders
+
+
+def test_the_heuristic_ai_only_imports_the_visible_query_surface():
+    """票 13 §硬约束 4：``agents/heuristic.py`` 不 import 任何全知状态读取路径。"""
+    tree = ast.parse(HEURISTIC.read_text(encoding="utf-8"), filename=str(HEURISTIC))
+
+    offenders = _heuristic_visibility_offenders(tree)
+
+    assert not offenders, "启发式 AI 碰到了全知面：" + "；".join(offenders)
+
+
+def test_the_heuristic_import_scan_is_not_vacuous():
+    """防"扫描目标写错 / 解析失败 ⇒ 空转也算通过"。"""
+    tree = ast.parse(HEURISTIC.read_text(encoding="utf-8"), filename=str(HEURISTIC))
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+
+    assert "Query" in imported and "PlayerView" in imported, "扫描目标可能指错了"
+    assert {"GameState", "Player", "Frame"}.isdisjoint(imported)
+
+
+def test_the_heuristic_import_scan_goes_red_on_an_omniscient_import():
+    """合成反例：全知面（``GameState`` / ``sgs.engine`` / ``sgs.skills``）一律判红。"""
+    red = ast.parse(
+        "from sgs.state import GameState\n"
+        "import sgs.engine\n"
+        "from sgs.skills import CATALOG\n"
+        "from sgs.timing import Timing\n"
+    )
+    green = ast.parse(
+        "from sgs.state import Action, Query, PlayerView\n"
+        "from sgs.effects import Randomness\n"
+        "from .participants import Participant\n"
+    )
+
+    reds = "\n".join(_heuristic_visibility_offenders(red))
+    for needle in ("GameState", "sgs.engine", "sgs.skills", "sgs.timing"):
+        assert needle in reds, f"{needle} 应被判红：{reds}"
+    assert not _heuristic_visibility_offenders(green), "可见面 import 不该被判红"

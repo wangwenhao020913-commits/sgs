@@ -438,26 +438,37 @@ def _fanjian_activate(host: Any, frame: Any) -> Any:
         if host.suspended(picked):
             return "stay"
         card = state.card(picked[0])
-        host.move_in_frame(
+        # 载荷先落帧、再搬牌：搬牌可能内联派发"失去牌后"并**挂起**（票 07），
+        # 重入时据此跳过本段、直接续跑交付段（否则会把这次移动做第二遍）。
+        frame.data["revealed"] = card.card_id
+        if host.move_in_frame(
             frame,
             (card,),
             to_zone=ZoneRef(Zone.PROCESSING),
             reason=MoveReason.PUT,
             owner=target,
             actor=owner,
-        )
-        frame.data["revealed"] = card.card_id
+        ) == "stay":
+            # 搬牌挂起 ⇒ **立刻让出控制权**，不继续做后面的交付与伤害：否则帧会在
+            # 应答被消费之前继续推进，"是否发动"的应答会漏给**外层**询问（票 13 §验收 5）。
+            return "stay"
     if "delivered" not in frame.data:
         card = state.card(frame.data["revealed"])
-        host.move_in_frame(
+        frame.data["delivered"] = True
+        if host.move_in_frame(
             frame,
             (card,),
             to_zone=ZoneRef(Zone.HAND, target),
             reason=MoveReason.PUT,
             owner=target,
             actor=owner,
-        )
-        frame.data["delivered"] = True
+        ) == "stay":
+            return "stay"
+    if "damage_done" not in frame.data:
+        # 伤害**单列一个帧内游标**：交付那一步若挂起，重入必须只跑伤害、而不是连交付
+        # 一起重做（把游标写在搬牌之前，正是为了让"搬完但没结算"也能被识别）。
+        frame.data["damage_done"] = True
+        card = state.card(frame.data["revealed"])
         if card.suit != frame.data["suit"]:
             _push_damage(host, frame, source=owner, target=target)
     return None

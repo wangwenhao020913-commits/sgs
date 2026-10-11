@@ -390,3 +390,40 @@ def test_malformed_action_exit_code_in_subprocess():
     assert result.stdout == ""
     assert "非法行动" in result.stderr
     assert "MalformedAction" in result.stderr
+
+
+def test_the_ai_tier_defaults_to_random(capsys, monkeypatch):
+    """票 13 §档位：缺省仍是随机——默认参与者不动，M2 的 34 条基准一行不改。"""
+    import sgs.cli as cli
+
+    seen: list[str] = []
+
+    def factory(name, stream):
+        seen.append(name)
+        return cli.RandomPlayer(stream)
+
+    monkeypatch.setattr(cli, "_player", factory)
+
+    assert cli.main(["--seed", "7"]) == 0
+    assert seen == ["random", "random"]
+
+
+def test_the_heuristic_tier_runs_a_whole_game(capsys):
+    assert main(["--seed", "7", "--ai", "heuristic"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "seed = 7"
+    assert "终局" in lines[-1], "启发式档位必须跑到真实胜负"
+
+
+def test_the_heuristic_tier_runs_with_heroes(capsys):
+    assert main(["--seed", "7", "--players", "5", "--hero-pool", "", "--ai", "heuristic"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "'player_count': 5" in lines[1]
+    assert "终局" in lines[-1]
+
+
+def test_an_unknown_ai_tier_is_rejected():
+    with pytest.raises(SystemExit):
+        main(["--ai", "oracle"])

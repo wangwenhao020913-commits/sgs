@@ -124,12 +124,15 @@ class RecordingPlayer:
         return _end_phase_or_first(action_query)
 
 
-def play_standard(seed: int = 7, *, pack: ContentPack | None = None):
+def play_standard(seed: int = 7, *, pack: ContentPack | None = None, ai: str = "random"):
     """用标准内容包跑完一整局（两个随机玩家），返回跑完的引擎（便于读记录流）。
 
     重洗落地后（票 23）牌堆会被弃牌堆无限补足，只有**进攻**才会收局；
     随机玩家会真的打死一方，故这一局仍必达 ``game_end``。
     需要"跑到第 N 个回合为止"的结构性单测请用 :func:`run_turns`。
+
+    ``ai``（票 13）选参与者档位：``"random"``（缺省，M2 基准与确定性探针的口径）或
+    ``"heuristic"``（规则启发式）；两档共用同一个 ``ai`` 子流。
     """
     import sgs.agents as agents
     from sgs.engine import RandomSource
@@ -138,7 +141,8 @@ def play_standard(seed: int = 7, *, pack: ContentPack | None = None):
     rule_config = RuleConfig()
     engine = Engine.new_game(seed=seed, rule_config=rule_config, pack=resolved_pack)
     ai_stream = RandomSource(seed).substream("ai")
-    participants = [agents.RandomPlayer(ai_stream) for _ in range(rule_config.player_count)]
+    player = agents.HeuristicPlayer if ai == "heuristic" else agents.RandomPlayer
+    participants = [player(ai_stream) for _ in range(rule_config.player_count)]
     engine.run(participants)
     return engine
 

@@ -12,6 +12,7 @@
 用法::
 
     python tests/journal_probe.py --seed 7 --out /tmp/journal.jsonl
+    python tests/journal_probe.py --seed 7 --ai heuristic --out /tmp/h.jsonl
 """
 
 from __future__ import annotations
@@ -24,18 +25,24 @@ from support import play_standard
 __all__ = ["journal_for_seed", "main"]
 
 
-def journal_for_seed(seed: int) -> str:
+def journal_for_seed(seed: int, *, ai: str = "random") -> str:
     """库 API 跑完整局并返回 canonical JSONL（唯一序列化器的入口）。"""
-    return play_standard(seed).journal()
+    return play_standard(seed, ai=ai).journal()
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="产出一局的 canonical journal（确定性探针）。")
     parser.add_argument("--seed", type=int, required=True, help="对局种子。")
     parser.add_argument("--out", type=Path, required=True, help="journal 落盘路径。")
+    parser.add_argument(
+        "--ai",
+        choices=("random", "heuristic"),
+        default="random",
+        help="参与者档位（票 13）；缺省 random，与 M2 探针口径一致。",
+    )
     args = parser.parse_args(argv)
     # newline="" 关掉平台换行翻译：canonical 形态写死为 LF（票 10 §5）。
-    args.out.write_text(journal_for_seed(args.seed), encoding="utf-8", newline="")
+    args.out.write_text(journal_for_seed(args.seed, ai=args.ai), encoding="utf-8", newline="")
     return 0
 
 
