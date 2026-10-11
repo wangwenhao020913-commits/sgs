@@ -53,6 +53,7 @@ from .modifiers import (
     PriorityClass,
     apply_modifiers,
     priority_class_of,
+    response_count,
 )
 from .ops import OPS
 from .primitives import (
@@ -112,6 +113,7 @@ __all__ = (
     "locate",
     "move_card",
     "priority_class_of",
+    "response_count",
     "seat_distance",
     "substitute_judge_card",
     "swap_judge_card",

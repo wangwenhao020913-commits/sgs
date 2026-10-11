@@ -42,6 +42,7 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .behaviors import DamageNature
+from .modifiers import response_count
 
 __all__ = ("OPS",)
 
@@ -282,13 +283,21 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
 
     交替状态存在帧私有 ``op`` 里；每次提问让出控制权后重入，一问一答地推进（票 19 §8
     的帧内游标范式）。打出【杀】走 L6 的 PLAY 帧（票 19 §2）。
+
+    **每次响应所需张数**由 :func:`~sgs.effects.response_count` 给出（缺省 1；【无双】改成 2）：
+    同一方的连续响应里 ``duel_plays`` 累加，攒够所需张数才把响应权交给对方（票 08 §要做什么 2）。
+    只出一张就放弃 ⇒ 该方受伤——打出的那张是**真打出**（照走 L6、进弃牌堆），只是不构成完整响应。
     """
     source = frame.data["source"]
     op = frame.data.setdefault("op", {})
     if "duel_turn" not in op:
         op["duel_turn"] = host.current_target(frame)
+        op["duel_plays"] = 0
     turn = op["duel_turn"]
     other = source if turn != source else host.current_target(frame)
+    required = response_count(
+        host.state, source=source, card=frame.data.get("card"), target=turn
+    )
     action = host.ask_respond(
         frame,
         turn,
@@ -302,7 +311,10 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
         return "stay"
     if isinstance(action, PlayCard):
         host.play_card(action.card, source=turn, timing=Timing.PLAY_DECLARE)
-        op["duel_turn"] = other
+        op["duel_plays"] = op.get("duel_plays", 0) + 1
+        if op["duel_plays"] >= required:
+            op["duel_plays"] = 0
+            op["duel_turn"] = other
         return "stay"
     _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
     return None

@@ -34,7 +34,7 @@ from itertools import combinations
 from types import MappingProxyType
 from typing import Any, TypeAlias
 
-from sgs.data import Color, Identity, SkillType, color_of_suit, hero_skill_ids
+from sgs.data import Color, Identity, SkillType, color_of_suit, hero_skill_id, hero_skill_ids
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
@@ -46,7 +46,7 @@ from sgs.effects import (
     locate,
     priority_class_of,
 )
-from sgs.resolution import Control, Frame
+from sgs.resolution import Control, Frame, Tag, add_tag
 from sgs.state import (
     ActivateSkill,
     GameState,
@@ -509,6 +509,24 @@ def _ice_sword_plan(state: GameState, frame: Frame, instance: SkillInstance) -> 
     return ActivationPlan(optional=True, available=available)
 
 
+def _tieji_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
+    """马超【铁骑】（票 08）：只在**自己使用【杀】**的那次使用上问"是否发动"。
+
+    与 :func:`_double_sword_plan` / :func:`_ice_sword_plan` 同姿态：非锁定技"付不起 / 不满足
+    前提"时该技能连问都不该问。判据 = 本次使用的来源是该实例持有者、牌名是【杀】、且**确实
+    指定了目标**——铁骑的判定只给"此【杀】指定的目标"打标签，别的使用与它无关。
+    """
+    del state
+    card = frame.data.get("card")
+    available = (
+        frame.data.get("source") == instance.owner
+        and card is not None
+        and card.type == "slash"
+        and bool(frame.data.get("targets"))
+    )
+    return ActivationPlan(optional=True, available=available)
+
+
 def _qilin_bow_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
     target = frame.data.get("target")
     available = (
@@ -528,6 +546,7 @@ ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], Activ
             "equip.double_sword": _double_sword_plan,
             "equip.ice_sword": _ice_sword_plan,
             "equip.qilin_bow": _qilin_bow_plan,
+            hero_skill_id("machao", "tieqi"): _tieji_plan,
         }
     )
 )
@@ -761,17 +780,18 @@ def _double_sword(host: Any, frame: Frame) -> Control:
 def _ice_sword(host: Any, frame: Frame) -> Control:
     """寒冰剑：你使用【杀】造成伤害时，**防止此伤害**并依次弃置目标的两张牌。
 
-    "防止伤害"由**帧级 ``prevented``**（票 12 §Q15）承担：跳体力扣减、不新增 delta /
-    时机；"依次"⇒ 逐张单询问（票 19 §7），池空则跳过剩余次数。
+    "防止伤害"由**帧标签 ``PREVENTED``**（票 12 §Q15；票 08 起住帧标签袋）承担：
+    跳体力扣减、不新增 delta / 时机；"依次"⇒ 逐张单询问（票 19 §7），池空则跳过剩余次数。
     """
     if frame.data.get("ice_sword_finished"):
         return None
     target = frame.data.get("target")
     if target is None:
         return None
-    # 帧级"已防止"标志（票 12 §Q15）：只置一次；重入时**不因它短路**，否则本次
-    # 选择询问的应答会没人消费而串到下一个询问（"每提供者只问一次"的代价）。
-    frame.data["prevented"] = True
+    # 帧标签袋里的"已防止"标志（票 12 §Q15；票 08 起住帧标签袋）：只置一次；重入时
+    # **不因它短路**，否则本次选择询问的应答会没人消费而串到下一个询问
+    # （"每提供者只问一次"的代价）。
+    add_tag(frame, Tag.PREVENTED)
     done = frame.data.get("ice_sword_done", 0)
     while done < 2:
         if not host.has_zone_cards(target):
@@ -903,8 +923,9 @@ def _move_by_source(
 def _axe(host: Any, frame: Frame) -> Control:
     """贯石斧：**你的**【杀】被抵消时，可弃两张牌使此【杀】**依然造成伤害**。
 
-    成本（弃两张）在"是否发动"询问里**烘进候选**；发起后置 ``axe_saved``，
-    ``resolve_before_effect`` 据此**跳过"生效前 / 生效时"、直进"生效后"**（票 12 Q16）。
+    成本（弃两张）在"是否发动"询问里**烘进候选**；发起后打帧标签 ``SAVED``，
+    ``resolve_before_effect`` 据此**跳过"生效前 / 生效时"、直进"生效后"**（票 12 Q16；
+    标志自票 08 起住帧标签袋）。
     两张牌可跨手牌 / 装备区，故按来源区分别移动。
     """
     owner = frame.data.get("skill_owner")
@@ -915,7 +936,7 @@ def _axe(host: Any, frame: Frame) -> Control:
         return None
     frame.data["axe_used"] = True
     _move_by_source(host, frame, card_ids, to_zone=ZoneRef(Zone.DISCARD), owner=owner)
-    frame.data["axe_saved"] = True
+    add_tag(frame, Tag.SAVED)
     return None
 
 
@@ -1019,6 +1040,9 @@ from .heroes import conversion_skill_definitions  # noqa: E402  （末尾 import
 from .active import active_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 from .target_pool import target_pool_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 from .move_after import move_after_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
+from .response_window import (  # noqa: E402  （末尾 import 是刻意的）
+    response_window_skill_definitions,
+)
 
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
     {
@@ -1029,6 +1053,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *active_skill_definitions(),
             *target_pool_skill_definitions(),
             *move_after_skill_definitions(),
+            *response_window_skill_definitions(),
         )
     }
 )

@@ -35,6 +35,7 @@ __all__ = [
     "PriorityClass",
     "apply_modifiers",
     "priority_class_of",
+    "response_count",
 ]
 
 
@@ -94,7 +95,8 @@ class ModifierPoint(str, Enum):
     - ``TARGET_POOL``：目标池（方天画戟的"额外目标合法性同标准"挂点）；
     - ``DISTANCE``：座位距离（六坐骑：客体 +1 / 主体 −1）；
     - ``EFFECTIVENESS``：第 2 层"无效"（仁王盾）；
-    - ``CANDIDATES``：候选行动的追加（方天画戟的额外目标组合）。
+    - ``CANDIDATES``：候选行动的追加（方天画戟的额外目标组合）；
+    - ``RESPONSE_COUNT``：本次响应窗口**需要几张**（缺省 1；票 08 的 M3 加法）。
     """
 
     COUNT_LIMIT = "COUNT_LIMIT"
@@ -102,6 +104,7 @@ class ModifierPoint(str, Enum):
     DISTANCE = "DISTANCE"
     EFFECTIVENESS = "EFFECTIVENESS"
     CANDIDATES = "CANDIDATES"
+    RESPONSE_COUNT = "RESPONSE_COUNT"
 
 
 class ModifierRole(str, Enum):
@@ -194,3 +197,17 @@ def apply_modifiers(
                     value,
                 )
     return value
+
+
+def response_count(
+    state: GameState, *, source: int, card: CardRef | None, target: int | None = None
+) -> int:
+    """本次响应窗口**需要几张**（缺省 1，票 08 §要做什么 1–2）。
+
+    "抵消【杀】"与"响应【决斗】"两处数数只读这一处真源（``_dodge_window`` 与
+    ``resolve_duel``），故"需连续两张【闪】/【杀】"由一个修饰值表达，引擎里不出现技能名。
+    ``ctx.subject`` = **本次使用的来源**（谁用的牌），修饰器回调据此比对自己是不是
+    那张牌的使用者；``ctx.card`` = 本次使用的牌（牌名读它）。
+    """
+    ctx = ModifierContext(subject=source, target=target, card=card)
+    return apply_modifiers(ModifierPoint.RESPONSE_COUNT, state, ctx, 1)

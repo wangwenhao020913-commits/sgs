@@ -42,9 +42,10 @@ from sgs.effects import (
     FinalZone,
     ResponseWindow,
     behavior_for,
+    response_count,
     target_is_effective,
 )
-from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable
+from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable, Tag, has_tag
 from sgs.skills import SeamKind, activate_skill, rejudge_capable_seats, virtual_dodge
 from sgs.state import (
     ActivateSkill,
@@ -397,9 +398,9 @@ def resolve_before_effect(host: FrameHost, frame: Frame) -> Control:
             control = _slash_canceled_seam(host, frame)
             if control is not None:
                 return control
-            if frame.data.pop("axe_saved", False):
+            if has_tag(frame, Tag.SAVED):
                 # 【贯石斧】"依然造成伤害"：跳过"生效前 / 生效时"，直进"生效后"
-                # （票 12 Q16 / 票 30）。
+                # （票 12 Q16 / 票 30；标志自票 08 起住帧标签袋）。
                 return Goto(RESOLVE_AFTER_EFFECT_PC)
         return Goto(RESOLVE_END_PC) if frame.data["canceled"] else None
     behavior = behavior_for(frame.data["card"])
@@ -414,6 +415,11 @@ def resolve_before_effect(host: FrameHost, frame: Frame) -> Control:
     control = _open_response_window(host, frame)
     if control is not None:
         return control
+    if has_tag(frame, Tag.UNRESPONSIVE, target=target):
+        # 帧标签只负责"跳过本窗口"（票 08 §要做什么 6）：窗口该不该存在仍由行为表决定，
+        # 被【铁骑】判红的目标这里**不发任何询问**（【八卦阵】一类的"视为使用【闪】"也一并封）。
+        frame.data["canceled"] = False
+        return None
     if window is ResponseWindow.DODGE:
         return _dodge_window(host, frame, target)
     return _collected_response_window(host, frame, target)
@@ -443,16 +449,29 @@ def _open_response_window(host: FrameHost, frame: Frame) -> Control:
 
 
 def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
-    """【闪】响应窗口：真牌窗口 + "需要牌"提供者序列（票 10 §5 / 票 30）。
+    """【闪】响应窗口：真牌窗口 + "需要牌"提供者序列（票 10 §5 / 票 30 / 票 08）。
 
     - 提供者（【八卦阵】）在候选里以 ``ActivateSkill`` 出现；选中即**惰性压判定帧**，
       红 ⇒ 需要被满足（记为"视为使用【闪】"）、黑 ⇒ 该提供者机会用尽、重问真牌窗口。
     - 真【闪】⇒ 抵消，【闪】自己照走 L4 / L5（M1 语义）。
+
+    **本次窗口需要几张**由 :func:`~sgs.effects.response_count` 给出（缺省 1；【无双】改成 2）：
+    每成功一次（真【闪】或提供者的红判定）``dodges_done`` 加一，**攒够所需张数才算抵消**；
+    没攒够就重开真牌窗口（已问过的提供者由 ``providers_used`` 过滤掉，故"每提供者只问一次"
+    在张数为 2 时也成立）。没攒够而放弃 ⇒ ``canceled = False``、照常结算。
     """
+    required = response_count(
+        host.state, source=frame.data["source"], card=frame.data["card"], target=target
+    )
+    done = frame.data.get("dodges_done", 0)
     if "skill_result" in frame.data:
         success = frame.data.pop("skill_result")
         if success:
-            frame.data["canceled"] = True
+            # "视为使用【闪】"仍是**一次**使用：走与真牌同一条使用链（票 08 的一手读法）。
+            done += 1
+            frame.data["dodges_done"] = done
+            if done >= required:
+                frame.data["canceled"] = True
             host.start_use(
                 virtual_dodge(host.state),
                 source=target,
@@ -473,11 +492,17 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
         frame.data.setdefault("providers_used", []).append(action.skill_id)
         host.open_skill_judgment(frame, target, action.skill_id)
         return "stay"
-    frame.data["canceled"] = isinstance(action, UseCard)
-    if frame.data["canceled"]:
+    if isinstance(action, UseCard):
+        done += 1
+        frame.data["dodges_done"] = done
+        if done >= required:
+            frame.data["canceled"] = True
         # 抵消是"被响应帧"的标志；【闪】自己作为一次**使用**照走 L4 / L5（票 07 §3）。
         host.start_use(action.card, source=target, targets=())
-    # 重入本步：等【闪】的 USE 帧出栈后，由上一条 ``canceled`` 分支决定去向。
+    else:
+        frame.data["canceled"] = False
+    # 重入本步：等【闪】的 USE 帧出栈后，由上一条 ``canceled`` 分支决定去向；
+    # 张数没攒够则继续问下一次响应。
     return "stay"
 
 
@@ -589,7 +614,8 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
     "response_used",
     "providers_used",
     "skill_result",
-    "axe_saved",
+    "dodges_done",
+    "use_tags",
     "axe_used",
     "gdb_used",
     "_pending_timing",
@@ -599,7 +625,11 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
 ``canceled`` / ``window_open`` / ``after_effect_emitted`` / ``effect_pc`` 在 :mod:`steps`
 维护，``response_*``（收集式响应窗口的进度）同样在 :mod:`steps` 维护，``asks``（选择面记忆）
 在 :class:`~sgs.engine.Engine` 维护、``op`` 在效果回调里维护；
-集中列在这里，使"新加一个按目标分槽的键"只需改这一处。"""
+集中列在这里，使"新加一个按目标分槽的键"只需改这一处。
+
+票 08 追加两个按目标分槽的键：``dodges_done``（本次响应窗口已攒够几张）与 ``use_tags``
+（**帧标签袋**——登在这里使"逐目标档随游标推进自动清除"是结构性的、不靠手工 ``del``）。
+"""
 
 
 RESOLVE_STEPS = (
@@ -657,11 +687,12 @@ def damage_take(host: FrameHost, frame: Frame) -> Control:
 
 
 def damage_push_life_decrease(host: FrameHost, frame: Frame) -> None:
-    """"受到伤害时"之后进入扣减体力结算；**帧级 ``prevented`` 为真时跳过**。
+    """"受到伤害时"之后进入扣减体力结算；**帧标签 ``PREVENTED`` 为真时跳过**。
 
     票 12 §Q15 / 票 30：【寒冰剑】防止此伤害 ⇒ 跳体力扣减、**不新增 delta / 时机**。
+    该标志自票 08 起住帧标签袋（"加一条禁令 / 标志 ⇒ 帧标签"，不再占帧私有裸键）。
     """
-    if frame.data.get("prevented"):
+    if has_tag(frame, Tag.PREVENTED):
         return
     host.push_frame(
         FrameKind.LIFE_DECREASE,

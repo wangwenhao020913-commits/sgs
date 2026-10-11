@@ -12,13 +12,20 @@ from .stack import (
     StepHost,
     StepTable,
 )
+from .tags import EMPTY_TAGS, USE_TAGS_KEY, Tag, UseTags, add_tag, has_tag
 
 __all__ = (
     "Control",
+    "EMPTY_TAGS",
     "Frame",
     "Goto",
     "ResolutionStack",
     "Step",
     "StepHost",
     "StepTable",
+    "USE_TAGS_KEY",
+    "Tag",
+    "UseTags",
+    "add_tag",
+    "has_tag",
 )
