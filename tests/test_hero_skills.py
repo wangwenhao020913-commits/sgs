@@ -104,12 +104,13 @@ def test_a_lord_hero_skill_is_resolved_as_a_hero_card_instance(monkeypatch):
     )
 
     instances = resolve_instances(state)
+    hujia = [instance for instance in instances if instance.skill_id == HUJIA]
 
-    assert [instance.skill_id for instance in instances] == [HUJIA]
-    assert instances[0].owner == 0
-    assert instances[0].source.kind.value == "HERO_CARD"
-    assert instances[0].definition.priority_class is not None
-    assert instance_key(instances[0]) == f"0:{HUJIA}:HERO_CARD:{HUJIA}"
+    assert len(hujia) == 1, "注入的主公技在身份为主公时产出实例"
+    assert hujia[0].owner == 0
+    assert hujia[0].source.kind.value == "HERO_CARD"
+    assert hujia[0].definition.priority_class is not None
+    assert instance_key(hujia[0]) == f"0:{HUJIA}:HERO_CARD:{HUJIA}"
 
 
 def test_a_hero_skill_takes_the_hero_priority_class_and_sorts_before_equipment(monkeypatch):
@@ -122,7 +123,12 @@ def test_a_hero_skill_takes_the_hero_priority_class_and_sorts_before_equipment(m
 
     instances = resolve_instances(state)
 
-    assert [instance.skill_id for instance in instances] == [HUJIA, "equip.crossbow"], (
+    # 曹操 4 点体力、诸葛连弩 +1：实例数超出 1 也照样验"档序"，故只对"武将档先于装备档"
+    # 这条性质断言（票 05 起曹操的【奸雄】已登记，注入的【护驾】不再是唯一武将实例）。
+    assert [instance.skill_id for instance in instances][:2] == [HUJIA, JIANXIONG]
+    hero_index = [instance.skill_id for instance in instances].index(HUJIA)
+    equip_index = [instance.skill_id for instance in instances].index("equip.crossbow")
+    assert hero_index < equip_index, (
         "武将档（HERO=0）先于装备档（EQUIPMENT=1），由链序直接表达，不靠特判"
     )
 

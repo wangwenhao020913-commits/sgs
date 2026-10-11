@@ -47,7 +47,14 @@ from sgs.effects import (
     target_is_effective,
 )
 from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable, Tag, has_tag
-from sgs.skills import SeamKind, activate_skill, rejudge_capable_seats, virtual_dodge
+from sgs.skills import (
+    DAMAGE_POINT_KEY,
+    DAMAGE_RECORDED_KEY,
+    SeamKind,
+    activate_skill,
+    rejudge_capable_seats,
+    virtual_dodge,
+)
 from sgs.state import (
     ActivateSkill,
     CardRef,
@@ -182,16 +189,29 @@ def _emit(
     actor: int | None = None,
     cards: Sequence[CardRef] = (),
     targets: tuple[int, ...] | None = None,
+    event: Any = None,
+    emit_record: bool = True,
 ) -> Control:
     """以 ``frame`` 为主体 dispatch 一个时机；``targets`` 缺省取帧的目标列表。
 
     C 段的时机记录按票 11 §3.3 取**当前目标**（``targets[cursor]``），故调用点显式给
     ``targets``；空目标的响应牌（【闪】/【无懈】）沿用空元组，与 M1 记录流一字不差。
 
+    ``event`` 是**帧私有时机载荷**（票 07 的 ``MOVE_AFTER`` 用它带移动事件）；
+    ``emit_record=False`` 表示这一轮只派发、不再落记录（票 05 的逐点触发）。
+
     返回 ``Control``（票 19 §8 / 票 30）：装备钩子可以在这里暂停去提问，步骤函数必须
     把返回值**原样透传**——``"stay"`` = 本次时机没派完，重入时从这里接着跑。
     """
-    return host.emit_frame_timing(frame, timing, actor=actor, cards=cards, targets=targets)
+    return host.emit_frame_timing(
+        frame,
+        timing,
+        actor=actor,
+        cards=cards,
+        targets=targets,
+        event=event,
+        emit_record=emit_record,
+    )
 
 
 def _current_target(host: FrameHost, frame: Frame) -> int:
@@ -656,6 +676,8 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
     "provider_satisfied",
     "lord_request",
     "_pending_timing",
+    DAMAGE_POINT_KEY,
+    DAMAGE_RECORDED_KEY,
 )
 """**逐目标分槽**的帧私有键：游标推进时必须整体清掉（票 11 §3.2）。
 
@@ -669,6 +691,9 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
 票 09 再追加提供者展开的四个键（``provider_skill`` / ``provider_actor`` /
 ``provider_satisfied`` / ``lord_request``）：它们是**一次求助窗口**的进度，多目标【杀】里
 必须逐目标重来，否则后一个目标会捡到前一个目标的应答者区间。
+票 05 追加逐点触发的两个键（``damage_point_index`` / ``damage_recorded``）：DAMAGE 帧今天
+恒单目标（多目标由行为表逐目标各压一个子帧），登在这里是姿态上的一致——真出现"一帧多目标"
+时它们同样必须逐目标重来。
 """
 
 
@@ -713,12 +738,34 @@ def _damage_channel(frame: Frame) -> tuple[CardRef, ...]:
     return (channel,) if channel is not None else ()
 
 
-def _emit_damage(host: FrameHost, frame: Frame, timing: Timing, actor: int) -> Control:
+def _emit_damage(
+    host: FrameHost,
+    frame: Frame,
+    timing: Timing,
+    actor: int,
+    *,
+    emit_record: bool = True,
+) -> Control:
     # 渠道牌进时机记录，使"谁用什么牌造成/受到了这次伤害"在记录流里可读。
-    return _emit(host, frame, timing, actor=actor, cards=_damage_channel(frame))
+    return _emit(
+        host,
+        frame,
+        timing,
+        actor=actor,
+        cards=_damage_channel(frame),
+        emit_record=emit_record,
+    )
 
 
 def damage_deal(host: FrameHost, frame: Frame) -> Control:
+    """**造成伤害时**：本帧逐点触发的两个帧私有键在这里重置（票 05）。
+
+    "本帧第几点 / 记过没有"是**帧级**事实，故在帧的第一步显式清零：同一份载荷字典被复用、
+    或某个调用点先写过这两个键时，后一次伤害不会接着前一次的轮次跑（帧私有数据不进记录流，
+    这一步对 M2 逐字节无影响）。
+    """
+    frame.data[DAMAGE_POINT_KEY] = 0
+    frame.data.pop(DAMAGE_RECORDED_KEY, None)
     return _emit_damage(host, frame, Timing.DAMAGE_DEAL, frame.data["source"])
 
 
@@ -750,7 +797,49 @@ def damage_after_deal(host: FrameHost, frame: Frame) -> Control:
 
 
 def damage_after_take(host: FrameHost, frame: Frame) -> Control:
-    return _emit_damage(host, frame, Timing.DAMAGE_AFTER_TAKE, frame.data["target"])
+    """**受到伤害后**：按伤害值**逐点**派发（票 05 §要做什么 1 / `spec.md` §结算层）。
+
+    "触发次数是技能定义的一部分"（``03`` §4）在这里兑现：``Hook.per_point`` 为真的钩子
+    每一轮都有机会，为假的只在**第一轮**有机会（"每次伤害事件一次"）。轮次写进帧私有
+    ``damage_point_index``，供技能回调判读，也进非锁定技"是否发动"的答案缓存键——故逐点
+    技能每一轮各问一次，非逐点技能只问第一轮。
+
+    **记录形态与 M2 逐字节一致**：一次伤害事件恰好一条 ``DAMAGE_AFTER_TAKE`` 记录
+    （``amount=3`` 的【闪电】也只有一条），逐点只体现为"这一条记录内多轮派发"；某一轮里
+    钩子提问会让出控制权（返回 ``"stay"``），重入时由 :data:`DAMAGE_RECORDED_KEY` 分辨
+    "只派发、不再记录"，一轮派完即推进 :data:`DAMAGE_POINT_KEY`。
+
+    **伤害被减为 0 ⇒ 不触发**（沿用"防止伤害"的既有语义）：帧标签 ``PREVENTED`` 为真时
+    只落一条时机记录、一轮都不派发（与"没有受到伤害"的读法一致，也保住 M2【寒冰剑】
+    路径的记录流形态）；伤害值本身 ≤ 0 时同样一轮不派发。
+    """
+    amount = frame.data["amount"]
+    if amount <= 0 or has_tag(frame, Tag.PREVENTED):
+        # **伤害被减为 0 ⇒ B 族一次都不触发**（票 05 §验收 2）：沿用"防止伤害"的既有
+        # 语义，时机记录照落一条（M2 的【寒冰剑】路径就是这样），但一个钩子都不派发。
+        return _emit_damage(
+            host, frame, Timing.DAMAGE_AFTER_TAKE, frame.data["target"]
+        )
+    point = frame.data.get(DAMAGE_POINT_KEY, 0)
+    while point < amount:
+        frame.data[DAMAGE_POINT_KEY] = point
+        # **时机记录恰好一条**（与 M2 逐字节一致）：逐点只是"这一条记录内派发多轮"，
+        # 不把伤害事件拆成多条记录——既有基准里 amount=3 的【闪电】也只有一条。
+        # 重入（某轮提问让出控制权后回来）时本点还没标记，故照旧只派发、不再记。
+        control = _emit_damage(
+            host,
+            frame,
+            Timing.DAMAGE_AFTER_TAKE,
+            frame.data["target"],
+            emit_record=not frame.data.get(DAMAGE_RECORDED_KEY),
+        )
+        if control is not None:
+            # 让出控制权（钩子提问）：本轮尚未标成已派发，重入时同一轮继续。
+            return control
+        frame.data[DAMAGE_RECORDED_KEY] = True
+        point += 1
+        frame.data[DAMAGE_POINT_KEY] = point
+    return None
 
 
 def damage_end(host: FrameHost, frame: Frame) -> Control:

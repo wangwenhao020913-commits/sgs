@@ -160,11 +160,16 @@ def test_the_enabled_flag_is_required_and_read_back_from_the_data(monkeypatch):
 
 
 def test_disabled_heroes_load_even_when_their_skills_are_not_implemented():
-    """未启用的武将只查结构与唯一性：M3 票 01 一条武将技能都还没登记，整张表照样可加载。"""
+    """未启用的武将只查结构与唯一性：技能还没实现也照样加载整张表。
+
+    判据取**明确不做**的技能（夏侯惇【刚烈】：R6-Q3 判为"只丢一个样例"，夏侯惇不在
+    16 名名单、M3 不会实现），故它不会随族级票推进而变成已登记——这条断言验的是
+    "条件化引用校验"，不是某条技能当时的实现状态。
+    """
     table = load_heroes()
 
     assert all(not hero.enabled for hero in table.heroes)
-    assert "hero.caocao.jianxiong" not in catalog_module.CATALOG
+    assert "hero.xiahoudun.ganglie" not in catalog_module.CATALOG
 
 
 def test_an_enabled_hero_whose_skills_all_exist_loads(monkeypatch):

@@ -65,6 +65,8 @@ from .virtual import card_ids, grouped_candidates
 __all__ = [
     "ACTIVATION_PLANS",
     "CATALOG",
+    "DAMAGE_POINT_KEY",
+    "DAMAGE_RECORDED_KEY",
     "ActivationPlan",
     "Hook",
     "HookCondition",
@@ -75,6 +77,7 @@ __all__ = [
     "SkillSource",
     "SkillSourceKind",
     "activation_plan",
+    "damage_point_index",
     "dispatch_seam",
     "dispatch_timing",
     "instance_key",
@@ -137,11 +140,16 @@ class Hook:
 
     ``condition`` 是票 07 的加法（默认 ``None``，既有的 4 条装备钩子一字不改）：【连营】/
     【枭姬】这类**条件触发**的技能若在条件不成立时仍发询问，就会在每一次牌移动上打扰玩家。
+
+    ``per_point`` 是票 05 的加法（默认 ``False``，M3 只许增）：**触发次数是技能定义的一部分**
+    （``03`` §4）。``False`` = "每次伤害事件一次"——只在伤害帧的**第一轮**有机会；
+    ``True`` = "每受到 1 点伤害一次"——引擎按伤害值逐轮派发，每一轮都有机会（【遗计】）。
     """
 
     timing: Timing
     handler: HookHandler
     condition: HookCondition | None = None
+    per_point: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,11 +429,16 @@ def is_equipped(state: GameState, seat: int, slot: SlotKind) -> bool:
 
 
 def _matching_hooks(instance: SkillInstance, timing: Timing, host: Any, frame: Frame) -> tuple[Hook, ...]:
-    """本实例在 ``timing`` 上**条件成立**的钩子（条件缺省 = 恒成立；票 07 的 ``condition``）。"""
+    """本实例在 ``timing`` 上**条件成立**的钩子（条件缺省 = 恒成立；票 07 的 ``condition``）。
+
+    ``per_point``（票 05）在这里过滤"逐点"触发次数：``False`` 的钩子只在伤害帧的**第一轮**
+    有机会（:func:`damage_point_index` 为 0），``True`` 的每一轮都有机会。
+    """
     return tuple(
         hook
         for hook in instance.definition.hooks
         if hook.timing is timing
+        and (hook.per_point or damage_point_index(frame) == 0)
         and (hook.condition is None or hook.condition(host, frame))
     )
 
@@ -463,13 +476,19 @@ def _dispatch(host: Any, frame: Frame, *, match: Any, timing: Timing, key: str) 
 
 
 def dispatch_timing(host: Any, frame: Frame, timing: Timing) -> Control:
-    """在 ``timing`` 上按链序派发钩子；**第一个返回非 ``None`` 的钩子即短路**。"""
+    """在 ``timing`` 上按链序派发钩子；**第一个返回非 ``None`` 的钩子即短路**。
+
+    答案缓存键带上 :func:`~sgs.skills.damage_after.damage_point_index`（票 05）：逐点触发的
+    时机里"第 1 点"与"第 2 点"是**两个**时机实例，非锁定技在每一轮各自问一次"是否发动"；
+    其余时机里该序号恒为 0，键与既有形态逐字相同（M2 基准不受影响）。
+    """
+    point = damage_point_index(frame)
     return _dispatch(
         host,
         frame,
         match=lambda instance: _matching_hooks(instance, timing, host, frame),
         timing=timing,
-        key=timing.value,
+        key=timing.value if point == 0 else f"{timing.value}:{point}",
     )
 
 
@@ -1086,6 +1105,12 @@ from .arrange import (  # noqa: E402  （末尾 import 是刻意的）
     arrange_activation_plans,
     arrange_skill_definitions,
 )
+from .damage_after import (  # noqa: E402  （末尾 import 是刻意的）
+    DAMAGE_POINT_KEY,
+    DAMAGE_RECORDED_KEY,
+    damage_after_skill_definitions,
+    damage_point_index,
+)
 
 ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], ActivationPlan]] = (
     MappingProxyType({**ACTIVATION_PLANS, **arrange_activation_plans()})
@@ -1104,6 +1129,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *response_window_skill_definitions(),
             *lord_skill_definitions(),
             *arrange_skill_definitions(),
+            *damage_after_skill_definitions(),
         )
     }
 )

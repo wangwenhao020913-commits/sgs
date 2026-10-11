@@ -36,6 +36,8 @@ from sgs.effects import (
 from .catalog import (
     ACTIVATION_PLANS,
     CATALOG,
+    DAMAGE_POINT_KEY,
+    DAMAGE_RECORDED_KEY,
     ActivationPlan,
     Hook,
     Seam,
@@ -45,6 +47,7 @@ from .catalog import (
     SkillSource,
     SkillSourceKind,
     activation_plan,
+    damage_point_index,
     dispatch_seam,
     dispatch_timing,
     instance_key,
@@ -63,6 +66,11 @@ from .arrange import (
     arrange_activation_plans,
     arrange_skill_definitions,
     guanxing_handler,
+)
+from .damage_after import (
+    DAMAGE_AFTER_SKILLS,
+    DamageAfterSkill,
+    damage_after_skill_definitions,
 )
 from .active import (
     ACTIVATIONS,
@@ -145,6 +153,9 @@ __all__ = (
     "ACTIVE_SKILLS",
     "CANDIDATE_CAP",
     "CATALOG",
+    "DAMAGE_AFTER_SKILLS",
+    "DAMAGE_POINT_KEY",
+    "DAMAGE_RECORDED_KEY",
     "EQUIPMENT_CARD_TYPE_IDS",
     "EQUIPMENT_SKILL_IDS",
     "GUANXING",
@@ -166,6 +177,7 @@ __all__ = (
     "ActivationPlan",
     "ActiveSkill",
     "CarrierKind",
+    "DamageAfterSkill",
     "Hook",
     "LordSkill",
     "Modifier",
@@ -190,6 +202,8 @@ __all__ = (
     "apply_modifiers",
     "arrange_activation_plans",
     "arrange_skill_definitions",
+    "damage_after_skill_definitions",
+    "damage_point_index",
     "dispatch_move_after",
     "dispatch_provider",
     "dispatch_seam",

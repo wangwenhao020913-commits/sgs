@@ -45,7 +45,7 @@ from sgs.effects import (
     move_card,
     targets_within_attack_range,
 )
-from sgs.resolution import Control, Frame, ResolutionStack, StepTable
+from sgs.resolution import Control, Frame, ResolutionStack, StepTable, Tag, has_tag
 from sgs.skills import (
     MOVE_EVENT_KEY,
     ActivationPlan,
@@ -707,6 +707,7 @@ class Engine:
         cards=(),
         targets: tuple[int, ...] | None = None,
         event: Any = None,
+        emit_record: bool = True,
     ) -> Control:
         """以 ``frame`` 为主体 dispatch 一个时机；``source`` 随帧继承，并派发技能钩子。
 
@@ -722,8 +723,12 @@ class Engine:
         （逐目标的 C2–C5、逐窗口的 ``NEAR_DEATH_AT``、**同帧的多次移动**）键不同或中间隔了
         一次完成的派发，故不会被误吞——同帧的多次移动靠 ``_MOVE_EVENTS`` 计数把"第 n 次
         移动"与"第 n 次重入"分开（票 07）。
+
+        ``emit_record=False`` 表示**这一轮只派发、不再落记录**（票 05 的逐点触发：一次伤害
+        事件只有一条 ``DAMAGE_AFTER_TAKE`` 记录，第 2 轮起由派发侧显式关掉记录）。
         """
-        if event is not None:
+        if isinstance(event, MoveEvent):
+            # 只有"失去牌后"的载荷需要落进帧私有槽（钩子经 ``move_event`` 读它）。
             frame.data[MOVE_EVENT_KEY] = event
         key = (
             timing,
@@ -732,7 +737,7 @@ class Engine:
             tuple(card.card_id for card in cards),
             frame.data.get(_MOVE_EVENTS, 0) if event is not None else None,
         )
-        if frame.data.get("_pending_timing") != key:
+        if emit_record and frame.data.get("_pending_timing") != key:
             self.emit_timing(
                 timing,
                 frame_id=frame.frame_id,
@@ -744,6 +749,12 @@ class Engine:
                 ),
                 cards=tuple(cards),
             )
+        if timing is Timing.DAMAGE_AFTER_TAKE and has_tag(frame, Tag.PREVENTED):
+            # **伤害被减为 0 ⇒ B 族一次都不触发**（票 05 §验收 2）：时机记录照落一条
+            # （M2 的【寒冰剑】路径就是这样，改它会动既有基准），但一个钩子都不派发——
+            # "防止伤害"的既有语义不被"受到伤害后"的时点绕开。
+            frame.data.pop("_pending_timing", None)
+            return None
         control = dispatch_timing(self, frame, timing)
         if control == "stay":
             frame.data["_pending_timing"] = key
@@ -1180,6 +1191,15 @@ class Engine:
                 raise ValueError(f"{zone.value} 不是可选择的逐座位区域")
         return tuple(slots), tuple(card_ids)
 
+    def shuffle_positions(self, order: list[int]) -> None:
+        """把"隐藏槽的位置序"就地打乱（票 19 §8 / §12 的 ``select`` 子流）。
+
+        :meth:`selection_face` 铺他人手牌时用它，使"选了第几个"不携带手牌顺序信息。
+        技能层自铺选择面（【反馈】的手牌隐藏槽 + 装备可见槽）时也必须走这里——随机来源
+        只能有一个（``tests/test_source_discipline.py`` §1），技能层不得自己抽随机数。
+        """
+        self._select.shuffle(order)
+
     def attack_range_targets(self, seat: int) -> tuple[int, ...]:
         """``seat`` 攻击范围内的其他存活座位（【借刀杀人】迫使的用牌目标候选）。"""
         return targets_within_attack_range(self.state, seat)
@@ -1238,6 +1258,7 @@ class Engine:
         timing: Timing,
         spec: SelectionSpec,
         build_face: Any,
+        revealed: tuple[CardRef, ...] = (),
     ) -> Any:
         """发一次 ``SELECT_CARDS`` 询问；**选择面只构造一次**（帧内记忆，重入复用）。
 
@@ -1248,6 +1269,10 @@ class Engine:
         答案也按帧内键缓存（票 30）：钩子可以跨多次重入，重入时既不重发询问、也不
         重算选择面。``spec.optional = True`` 时可选 ``Pass`` 表示"不再选"（票 04 的
         顺序多轮用它收尾），返回空元组。
+
+        ``revealed`` 是本次询问**授予 ``actor`` 的牌面**（票 05 的【遗计】：选牌面位置上
+        铺的是"牌堆顶 2 张"这样的实体牌，但牌面本身本不该进任何视角）。通道与
+        :meth:`ask_query` 完全同一条（票 10 §①）。
         """
         answers = frame.data.setdefault("ask_answers", {})
         answer_key = ("select", key)
@@ -1267,6 +1292,7 @@ class Engine:
                 timing,
                 seq,
                 payload=SelectContext(spec=spec, slots=slots),
+                revealed=revealed,
             )
         )
         if action is SUSPEND:
