@@ -9,3 +9,6 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+
+# 录像（M4 的一局游玩存档；不入库——它是游玩事实，不是门禁基准）
+runs/

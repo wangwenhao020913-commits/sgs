@@ -311,10 +311,18 @@ def test_the_frozen_surface_table_is_in_the_data_model_doc():
 
 
 def test_the_doc_gate_whitelists_the_m3_milestone_and_the_seven_ledger_rows():
-    """文档门禁含 `06:M3` 白名单，且七行 M3 账本逐行有 `check`。"""
+    """文档门禁含 `06:M3` 白名单，且七行 M3 账本逐行有 `check`。
+
+    M4 票 00 扩白名单时把这条从"逐字等于三个里程碑"改成"**含** `06:M3`"——
+    白名单会随后续里程碑增长，逐字钉死会让每次扩白名单都来改 M3 的验收脚本
+    （那不是在验收 M3，是在制造假耦合）。真正该钉的是"`06:M3` 在里面"。
+    """
     text = DOC_GATE.read_text(encoding="utf-8")
 
-    assert 'MILESTONE_WHITELIST="|06:M1|06:M2|06:M3|"' in text, "文档门禁缺 `06:M3` 白名单"
+    assert 'MILESTONE_WHITELIST="|' in text, "文档门禁没有里程碑白名单"
+    _, _, rest = text.partition('MILESTONE_WHITELIST="|')
+    whitelist = f"{rest.split('"', 1)[0]}|"
+    assert "06:M3|" in whitelist, "文档门禁缺 `06:M3` 白名单"
     for description in M3_LEDGER_GATE_CHECKS:
         assert description in text, f"文档门禁没有断言『{description}』"
 
