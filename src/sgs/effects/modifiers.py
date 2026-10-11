@@ -10,7 +10,8 @@
 是因为 M2 真有两处多来源合成——**距离**（目标 +1 坐骑、自身 −1 坐骑，属不同角色）与
 **青釭剑 × 仁王盾**（顺序与可抑制，票 30）。
 
-"谁持有哪一份"由 :func:`sgs.skills.resolve_instances` 解析（载体 = 装备区）；本模块只在
+"谁持有哪一份"由 :func:`sgs.skills.resolve_instances` 解析（M2 = 装备区 ∪ 虚拟授予，
+M3 起再加**武将牌**）；本模块只在
 **函数体内**延迟导入它——与 ``data/loader.py`` 调 ``effects`` / ``skills`` 同姿态：
 模块级不建立反向依赖，运行期调用发生在两个模块都已加载之后。
 """
@@ -55,11 +56,12 @@ class CandidateScope(str, Enum):
 class CarrierKind(str, Enum):
     """技能实例的**载体**（票 07 §1 的"派发时先解析谁持有哪一份"）。
 
-    M2 只有装备区；武将牌 / 身份是 M3 的加法（票 07 §6 的"M3 只许增"：M3 加 ``HERO`` /
-    ``IDENTITY``）。
+    M2 只有装备区；M3 加 **``HERO``**（武将牌，票 01）。``IDENTITY`` 按 `03` §4「技能描述模型」的冻结面
+    是"只许增"的下一个加法，M3 **不落载体**——主公技的载体是**武将牌**、不是身份牌。
     """
 
     EQUIPMENT = "EQUIPMENT"
+    HERO = "HERO"
 
 
 class PriorityClass(IntEnum):
@@ -76,6 +78,7 @@ class PriorityClass(IntEnum):
 
 _CARRIER_PRIORITY: dict[CarrierKind, PriorityClass] = {
     CarrierKind.EQUIPMENT: PriorityClass.EQUIPMENT,
+    CarrierKind.HERO: PriorityClass.HERO,
 }
 
 

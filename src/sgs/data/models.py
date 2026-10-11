@@ -6,6 +6,10 @@
 
 牌实例的 ``id`` **不在这里**：数据只给牌堆清单，实例化由 state/engine 在开局时做，
 所以数据文件可以有同型同花色同点数的两张牌。
+
+M3 票 01 追加**武将面**（``Kingdom`` / ``SkillType`` / ``HeroSkill`` / ``Hero`` /
+``HeroTable``）：数据文件只装"武将是什么"（id / 名称 / 势力 / 性别 / 体力上限 /
+技能清单 / 版本 / 启用），技能**行为**仍住 ``skills/`` 的 Python（ADR-009）。
 """
 
 from __future__ import annotations
@@ -24,6 +28,11 @@ __all__ = [
     "DeckCard",
     "DeckExpect",
     "Gender",
+    "Hero",
+    "HeroSkill",
+    "HeroTable",
+    "Kingdom",
+    "SkillType",
     "Suit",
     "color_of_suit",
 ]
@@ -91,6 +100,88 @@ class Gender(str, Enum):
 
     MALE = "male"
     FEMALE = "female"
+
+
+class Kingdom(str, Enum):
+    """武将的**势力**（`GLOSSARY.md`「势力」；M3 票 01 新增）。
+
+    标准版四势力取英文值，中文只出现在渲染层：势力作用域（"其他同势力角色"）判定
+    一律比枚举成员，不把中文串塞进状态。扩展的神 / 晋等属后续里程碑，**不建预留取值**
+    （未出现的势力等到有数据的那个里程碑再加，避免"闭集里躺着用不到的成员"）。
+    """
+
+    WEI = "wei"
+    SHU = "shu"
+    WU = "wu"
+    QUN = "qun"
+
+
+class SkillType(str, Enum):
+    """技能的**类型**（`GLOSSARY.md`「技能类型」；`03` §4「技能描述模型」的闭集；M3 票 01 新增）。
+
+    闭集 = ``NORMAL``（普通技）/ ``LORD``（主公技）——标准版 25 名只落这两类。
+    ``LIMITED``（限定技）/ ``AWAKENING``（觉醒技）是**预留取值**：字段照建、取值合法，
+    但标准版 25 名**零载体**，M3 不落（ADR-008：改判 M5）。
+    """
+
+    NORMAL = "NORMAL"
+    LORD = "LORD"
+    LIMITED = "LIMITED"
+    AWAKENING = "AWAKENING"
+
+
+class HeroSkill(_FrozenModel):
+    """武将牌上的一条技能**条目**：引用技能定义，不装行为。
+
+    ``id`` 是**短 id**（如 ``hujia``）；对外的技能 id = ``hero.<武将 id>.<短 id>``
+    （票 01 §Data / 票 12），由 :func:`sgs.data.hero_skill_id` 一处派生。
+
+    条目自带的 ``skill_type`` 是数据侧的声明，加载期会与 ``skills.CATALOG`` 里那份
+    定义的 ``SkillType`` 对账（**仅对启用的武将**，见 :mod:`sgs.data.loader`）；
+    身份门控的规范落点仍读定义上的字段，不读这里。
+    """
+
+    id: str
+    name: str
+    skill_type: SkillType
+
+
+class Hero(_FrozenModel):
+    """一名武将：**是什么**（身份事实），不含任何行为。
+
+    ``version`` 区分同名武将的不同版本（标准版 / 界限突破版；ADR-006：界版数据分开存、
+    MVP 不启用），本文件只有 ``"standard"``。``enabled`` 是**启用门控**：只有启用的武将
+    可被发放，且其技能引用必须在 ``skills.CATALOG`` 里闭合；未启用的只做结构与唯一性校验
+    （"技能还没实现"不该拦住整张表）。两个字段都**必写**——"没声明"与"声明为假"是两件事。
+    """
+
+    id: str
+    name: str
+    kingdom: Kingdom
+    gender: Gender
+    hp_max: int
+    skills: tuple[HeroSkill, ...]
+    version: str
+    enabled: bool
+
+
+class HeroTable(_FrozenModel):
+    """一份已通过加载期校验的**武将表**（``heroes.<pack_id>.json``）。
+
+    与内容包分开成文件、分开校验：武将面按其自己的 ``schema_version`` 升版，
+    与牌堆档位 / 记录流 / 规则版本互不牵动。
+    """
+
+    schema_version: int
+    pack_id: str
+    heroes: tuple[Hero, ...]
+
+    def by_id(self, hero_id: str) -> Hero | None:
+        """按 id 取武将；未知 id 返回 ``None``（fail-closed 的调用方自行决定）。"""
+        for hero in self.heroes:
+            if hero.id == hero_id:
+                return hero
+        return None
 
 
 class Category(str, Enum):

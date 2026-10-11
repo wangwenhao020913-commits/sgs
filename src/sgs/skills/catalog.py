@@ -2,9 +2,11 @@
 
 一张装备 = 一个 :class:`SkillDef`（稳定 id = ``equip.<牌名 id>``），内部可带多条
 :class:`Hook`（键 = 时机枚举本身）、多条 :class:`Seam`（帧内接缝）与多条
-:class:`Modifier`（五个挂点）。定义目录 :data:`CATALOG` 是**模块级不可变**的；
-"谁持有哪一份"由 :func:`resolve_instances` 在派发时按**载体**（M2 = 装备区 ∪ 虚拟授予）
-解析，不做 per-player 实例注册。
+:class:`Modifier`（五个挂点）。M3 票 01 起，**武将牌**成为与装备区并列的载体
+（``CarrierKind.HERO``、``SkillSourceKind.HERO_CARD``、``SkillDef.skill_type`` 的身份门控），
+故同一套定义 / 派发路径服务两类载体。定义目录 :data:`CATALOG` 是**模块级不可变**的；
+"谁持有哪一份"由 :func:`resolve_instances` 在派发时按**载体**
+（装备区 ∪ 虚拟授予 ∪ 武将牌）解析，不做 per-player 实例注册。
 
 **四层落位**（票 12 §4 / 票 30）：
 
@@ -32,7 +34,7 @@ from itertools import combinations
 from types import MappingProxyType
 from typing import Any, TypeAlias
 
-from sgs.data import Color, color_of_suit
+from sgs.data import Color, Identity, SkillType, color_of_suit, hero_skill_ids
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
@@ -79,6 +81,8 @@ __all__ = [
     "dispatch_timing",
     "instance_key",
     "is_equipped",
+    "lord_skill_allowed",
+    "lord_skill_ids",
     "prune_skill_state",
     "resolve_instances",
 ]
@@ -106,10 +110,15 @@ class SeamKind(str, Enum):
 
 
 class SkillSourceKind(str, Enum):
-    """技能实例的**来源**种类（票 07 §6 的带标签联合）。"""
+    """技能实例的**来源**种类（票 07 §6 的带标签联合）。
+
+    ``HERO_CARD``（票 01）是**武将牌**：它不是实体牌，故只为它记 ``skill_id``，
+    **绝不为它造 ``CardRef``**（与虚拟装备同一姿态）。
+    """
 
     EQUIPMENT_CARD = "EQUIPMENT_CARD"
     VIRTUAL_GRANT = "VIRTUAL_GRANT"
+    HERO_CARD = "HERO_CARD"
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,15 +139,18 @@ class Seam:
 
 @dataclass(frozen=True, slots=True)
 class SkillDef:
-    """一张装备的完整技能定义（票 07 §6 的冻结形状，票 30 只加可选字段）。
+    """一张技能定义（票 07 §6 的冻结形状，票 30 / 票 01 只加可选字段）。
 
-    ``carrier`` 决定优先级档（装备档）；``locked`` 判据逐字取官方"牌面有没有『可以』"。
+    ``carrier`` 决定优先级档（武将档 / 装备档）；``locked`` 判据逐字取官方"牌面有没有
+    『可以』"；``skill_type``（票 01 的加法，默认 ``NORMAL``，既有 17 条装备定义一字不改）
+    是 `03` §4「技能描述模型」的闭集 ``NORMAL`` / ``LORD``——身份门控的规范落点读它。
     ``seams`` / ``virtual_slot`` 是票 30 的加法（默认空 / ``None``，M3 只许增）。
     """
 
     skill_id: str
     locked: bool
     carrier: CarrierKind
+    skill_type: SkillType = SkillType.NORMAL
     hooks: tuple[Hook, ...] = ()
     modifiers: tuple[Modifier, ...] = ()
     seams: tuple[Seam, ...] = ()
@@ -153,7 +165,10 @@ class SkillDef:
 
 @dataclass(frozen=True, slots=True)
 class SkillSource:
-    """技能实例的**来源**：实体装备牌 / 虚拟授予。"""
+    """技能实例的**来源**：实体装备牌 / 虚拟授予 / 武将牌（票 01 加 ``HERO_CARD``）。
+
+    武将牌不是实体牌，故 ``HERO_CARD`` 只带 ``skill_id``（不带 ``card_id``）。
+    """
 
     kind: SkillSourceKind
     card_id: int | None = None
@@ -197,12 +212,69 @@ class ActivationPlan:
 # ---------------------------------------------------------------------------
 
 
+def _is_lord_skill(definition: SkillDef) -> bool:
+    """这条定义是不是**主公技**（`03` §6「技能分类与过滤」的类型判据，唯一一处）。"""
+    return definition.skill_type is SkillType.LORD
+
+
+def lord_skill_ids(catalog: Mapping[str, SkillDef] | None = None) -> frozenset[str]:
+    """``catalog`` 里全部主公技的 id；缺省读**当前**的 :data:`CATALOG`。
+
+    这是票 01 §载体接入 #8"``LORD_SKILL_IDS`` 从手抄空集改为由 ``CATALOG`` 派生"的可测
+    落点：``sgs.skills.LORD_SKILL_IDS`` 只是它的 import 期快照。传 ``catalog`` 参数让
+    "派生"这条判据能对一份注入的表单独验证。
+    """
+    source = CATALOG if catalog is None else catalog
+    return frozenset(
+        definition.skill_id for definition in source.values() if _is_lord_skill(definition)
+    )
+
+
+def _identity_gates_out(definition: SkillDef, identity: Identity | None) -> bool:
+    """身份门控：主公技而持有者不是主公 ⇒ 该实例**不产出**（票 01 §身份门控）。"""
+    return _is_lord_skill(definition) and identity is not Identity.LORD
+
+
+def lord_skill_allowed(identity: Identity | None, skill_id: str) -> bool:
+    """主公技门控的**只读谓词**：`(身份 == 主公) ∧ (技能定义的类型 == 主公技)`（票 01）。
+
+    与 :func:`_identity_gates_out` 共用 :func:`_is_lord_skill` 这一个判据，故谓词与派发
+    不会各写一份而漂移。规范落点是 :func:`resolve_instances`（非主公 ⇒ 实例不产出，
+    语义 = 武将牌上根本没有）；本函数只回答"能不能用"，不产出、不驱动派发，给
+    `03` §6「技能分类与过滤」的**过滤链首项**与测试提供可读谓词。未知 ``skill_id``
+    （如 M2 的装备技能）恒 ``False``。
+    """
+    definition = CATALOG.get(skill_id)
+    return definition is not None and _is_lord_skill(definition) and identity is Identity.LORD
+
+
+def _add_instance(
+    found: list[SkillInstance], owner: int, definition: SkillDef, source: SkillSource
+) -> None:
+    """记一条载体命中（三种载体公用；``skill_id`` 一律取定义上的那份，不另传）。"""
+    found.append(
+        SkillInstance(
+            owner=owner,
+            skill_id=definition.skill_id,
+            source=source,
+            definition=definition,
+        )
+    )
+
+
 def resolve_instances(state: GameState) -> tuple[SkillInstance, ...]:
     """解析全部**存活实例**，按链序 ``(priority_class, skill_id, owner)`` 全序。
 
     载体 = 装备区里的实体牌（``source = EQUIPMENT_CARD``）∪ 座位的虚拟授予
-    （``source = VIRTUAL_GRANT``，不占牌守恒）。同一 ``(owner, skill_id)`` 只留
-    **最早出现的来源**（票 07 §6 的去重口径）；两名角色各有同一技能时是**两个实例**。
+    （``source = VIRTUAL_GRANT``，不占牌守恒）∪ **武将牌**（``source = HERO_CARD``，
+    票 01：读 ``player.hero`` 经 ``sgs.data.hero_skill_ids`` 取该武将的技能清单）。
+    同一 ``(owner, skill_id)`` 只留**最早出现的来源**（票 07 §6 的去重口径）；
+    两名角色各有同一技能时是**两个实例**。
+
+    **身份门控在派发侧的唯一兑现处**是这里（票 01 §身份门控 / `03` §6「技能分类与过滤」）：
+    主公技而持有者不是主公 ⇒ **该实例不产出**——不进实例集合、不进候选、不进修饰器链、不落
+    ``skill_state``、不进记录流。语义是"武将牌上根本没有这个技能"，不是"有但不生效"。
+    ``player.hero is None``（无武将模式）时**根本不查武将数据**，故 M2 的输出逐字节不变。
     """
     found: list[SkillInstance] = []
     for player in state.players:
@@ -211,31 +283,38 @@ def resolve_instances(state: GameState) -> tuple[SkillInstance, ...]:
         for card_id in player.equip:
             card = state.card(card_id)
             definition = CATALOG.get(f"equip.{card.type}")
-            if definition is None:
-                continue
-            found.append(
-                SkillInstance(
-                    owner=player.seat,
-                    skill_id=definition.skill_id,
-                    source=SkillSource(SkillSourceKind.EQUIPMENT_CARD, card_id=card_id),
-                    definition=definition,
+            if definition is not None:
+                _add_instance(
+                    found,
+                    player.seat,
+                    definition,
+                    SkillSource(SkillSourceKind.EQUIPMENT_CARD, card_id=card_id),
                 )
-            )
         for grant in player.virtual_equipment:
             definition = CATALOG.get(grant)
-            if definition is None:
-                continue
-            found.append(
-                SkillInstance(
-                    owner=player.seat,
-                    skill_id=grant,
-                    source=SkillSource(SkillSourceKind.VIRTUAL_GRANT, skill_id=grant),
-                    definition=definition,
+            if definition is not None:
+                _add_instance(
+                    found,
+                    player.seat,
+                    definition,
+                    SkillSource(SkillSourceKind.VIRTUAL_GRANT, skill_id=grant),
                 )
-            )
+        if player.hero is None:
+            continue
+        for skill_id in hero_skill_ids(player.hero, pack_id=state.pack_id):
+            definition = CATALOG.get(skill_id)
+            if definition is not None:
+                _add_instance(
+                    found,
+                    player.seat,
+                    definition,
+                    SkillSource(SkillSourceKind.HERO_CARD, skill_id=skill_id),
+                )
     deduped: list[SkillInstance] = []
     seen: list[tuple[int, str]] = []
     for instance in found:
+        if _identity_gates_out(instance.definition, state.player(instance.owner).identity):
+            continue
         key = (instance.owner, instance.skill_id)
         if key in seen:
             continue

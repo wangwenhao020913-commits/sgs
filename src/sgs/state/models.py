@@ -16,7 +16,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from sgs.data import Color, Gender, Identity, RuleConfig
+from sgs.data import Color, Gender, Identity, Kingdom, RuleConfig
 
 __all__ = [
     "CardRef",
@@ -200,8 +200,23 @@ class Player(BaseModel):
     gender: Gender | None = None
     """座位级性别（票 30 / 票 05 §7.1 的【雌雄双股剑】判据）。
 
-    性别是**武将牌**的事实；M2 无武将 ⇒ 恒 ``None``（"未知"），"异性"判据因此不成立。
-    字段是 M3 的接口位：加武将时由武将数据填值，装备效果的形状不变。
+    性别是**武将牌**的事实；无武将模式 ⇒ 恒 ``None``（"未知"），"异性"判据因此不成立。
+    **接口位**：由武将数据填值的落点属票 02 的发放段（本票尚未落地），装备效果的形状不变。
+    """
+    hero: str | None = None
+    """座位级**武将 id**（票 01 §载体接入 / 票 02 的发放段）。
+
+    ``None`` 专指**未发放武将**（无武将模式与人为局面的默认），与"暗置武将"（国战）
+    不是一回事。载体解析**已读它**：``resolve_instances`` 据此取该武将的技能清单
+    （``sgs.data.hero_skill_ids``），武将技能因此与装备技能同构地进链；把它填上的
+    发放段属票 02（本票尚未落地）。
+    """
+    kingdom: Kingdom | None = None
+    """座位级**势力**（`GLOSSARY.md`「势力」；票 01 / 票 02）。
+
+    与 ``hero`` 同源的**事实**字段（同样由票 02 的发放段填值，本票尚未落地）。
+    势力的**行为**（"其他同势力角色"）落点是技能回调自己比座位，属票 09；本票不建
+    任何作用域字段，也不在这里做判定。
     """
     virtual_equipment: tuple[str, ...] = ()
     """**虚拟装备**（"视为装备"）的持久授予态：授予它的技能 id 元组（票 07 §6 / 票 30）。

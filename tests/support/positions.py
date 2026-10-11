@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from sgs.data import ContentPack, Gender, Identity, RuleConfig, load_content_pack
+from sgs.data import ContentPack, Gender, Identity, Kingdom, RuleConfig, load_content_pack
 from sgs.engine import Engine, instantiate_cards
 from sgs.resolution import Frame
 from sgs.state import FrameKind, GameState, Phase, Player, Query, UseCard
@@ -47,6 +47,8 @@ class SeatSpec:
     alive: bool = True
     identity: Identity | None = None
     gender: Gender | None = None
+    hero: str | None = None
+    kingdom: Kingdom | None = None
     virtual_equipment: tuple[str, ...] = ()
 
 
@@ -79,6 +81,8 @@ def build_state(
             judge=list(spec.judge),
             identity=spec.identity,
             gender=spec.gender,
+            hero=spec.hero,
+            kingdom=spec.kingdom,
             virtual_equipment=tuple(spec.virtual_equipment),
         )
         for seat, spec in enumerate(seats)

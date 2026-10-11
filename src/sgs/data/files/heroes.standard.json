@@ -1,0 +1,301 @@
+{
+  "schema_version": 1,
+  "pack_id": "standard",
+  "heroes": [
+    {
+      "id": "caocao",
+      "name": "曹操",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "jianxiong", "name": "奸雄", "skill_type": "NORMAL" },
+        { "id": "hujia", "name": "护驾", "skill_type": "LORD" }
+      ]
+    },
+    {
+      "id": "simayi",
+      "name": "司马懿",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "fankui", "name": "反馈", "skill_type": "NORMAL" },
+        { "id": "guicai", "name": "鬼才", "skill_type": "NORMAL" }
+      ]
+    },
+    {
+      "id": "xiahoudun",
+      "name": "夏侯惇",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [{ "id": "ganglie", "name": "刚烈", "skill_type": "NORMAL" }]
+    },
+    {
+      "id": "zhangliao",
+      "name": "张辽",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [{ "id": "tuxi", "name": "突袭", "skill_type": "NORMAL" }]
+    },
+    {
+      "id": "xuchu",
+      "name": "许褚",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [{ "id": "luoyi", "name": "裸衣", "skill_type": "NORMAL" }]
+    },
+    {
+      "id": "guojia",
+      "name": "郭嘉",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "tiandu", "name": "天妒", "skill_type": "NORMAL" },
+        { "id": "yiji", "name": "遗计", "skill_type": "NORMAL" }
+      ]
+    },
+    {
+      "id": "zhenji",
+      "name": "甄姬",
+      "kingdom": "wei",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "qingguo", "name": "倾国", "skill_type": "NORMAL" },
+        { "id": "luoshen", "name": "洛神", "skill_type": "NORMAL" }
+      ]
+    },
+    {
+      "id": "liubei",
+      "name": "刘备",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "rende", "name": "仁德", "skill_type": "NORMAL" },
+        { "id": "jijiang", "name": "激将", "skill_type": "LORD" }
+      ]
+    },
+    {
+      "id": "guanyu",
+      "name": "关羽",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [{ "id": "wusheng", "name": "武圣", "skill_type": "NORMAL" }]
+    },
+    {
+      "id": "zhangfei",
+      "name": "张飞",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [{ "id": "paoxiao", "name": "咆哮", "skill_type": "NORMAL" }]
+    },
+    {
+      "id": "zhaoyun",
+      "name": "赵云",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [{ "id": "longdan", "name": "龙胆", "skill_type": "NORMAL" }]
+    },
+    {
+      "id": "machao",
+      "name": "马超",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "mashu", "name": "马术", "skill_type": "NORMAL" },
+        { "id": "tieqi", "name": "铁骑", "skill_type": "NORMAL" }
+      ]
+    },
+    {
+      "id": "zhugeliang",
+      "name": "诸葛亮",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "guanxing", "name": "观星", "skill_type": "NORMAL" },
+        { "id": "kongcheng", "name": "空城", "skill_type": "NORMAL" }
+      ]
+    },
+    {
+      "id": "huangyueying",
+      "name": "黄月英",
+      "kingdom": "shu",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "jizhi", "name": "集智", "skill_type": "NORMAL" },
+        { "id": "qicai", "name": "奇才", "skill_type": "NORMAL" }
+      ]
+    },
+    {
+      "id": "sunquan",
+      "name": "孙权",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "zhiheng", "name": "制衡", "skill_type": "NORMAL" },
+        { "id": "jiuyuan", "name": "救援", "skill_type": "LORD" }
+      ]
+    },
+    {
+      "id": "ganning",
+      "name": "甘宁",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [{ "id": "qixi", "name": "奇袭", "skill_type": "NORMAL" }]
+    },
+    {
+      "id": "lvmeng",
+      "name": "吕蒙",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [{ "id": "keji", "name": "克己", "skill_type": "NORMAL" }]
+    },
+    {
+      "id": "huanggai",
+      "name": "黄盖",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [{ "id": "kurou", "name": "苦肉", "skill_type": "NORMAL" }]
+    },
+    {
+      "id": "zhouyu",
+      "name": "周瑜",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "yingzi", "name": "英姿", "skill_type": "NORMAL" },
+        { "id": "fanjian", "name": "反间", "skill_type": "NORMAL" }
+      ]
+    },
+    {
+      "id": "daqiao",
+      "name": "大乔",
+      "kingdom": "wu",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "guose", "name": "国色", "skill_type": "NORMAL" },
+        { "id": "liuli", "name": "流离", "skill_type": "NORMAL" }
+      ]
+    },
+    {
+      "id": "luxun",
+      "name": "陆逊",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "qianxun", "name": "谦逊", "skill_type": "NORMAL" },
+        { "id": "lianying", "name": "连营", "skill_type": "NORMAL" }
+      ]
+    },
+    {
+      "id": "sunshangxiang",
+      "name": "孙尚香",
+      "kingdom": "wu",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "jieyin", "name": "结姻", "skill_type": "NORMAL" },
+        { "id": "xiaoji", "name": "枭姬", "skill_type": "NORMAL" }
+      ]
+    },
+    {
+      "id": "huatuo",
+      "name": "华佗",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "jijiu", "name": "急救", "skill_type": "NORMAL" },
+        { "id": "qingnang", "name": "青囊", "skill_type": "NORMAL" }
+      ]
+    },
+    {
+      "id": "lvbu",
+      "name": "吕布",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "standard",
+      "enabled": false,
+      "skills": [{ "id": "wushuang", "name": "无双", "skill_type": "NORMAL" }]
+    },
+    {
+      "id": "diaochan",
+      "name": "貂蝉",
+      "kingdom": "qun",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "standard",
+      "enabled": false,
+      "skills": [
+        { "id": "lijian", "name": "离间", "skill_type": "NORMAL" },
+        { "id": "biyue", "name": "闭月", "skill_type": "NORMAL" }
+      ]
+    }
+  ]
+}

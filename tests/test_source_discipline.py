@@ -208,6 +208,18 @@ def test_the_scan_actually_covered_the_source_tree():
 
 ENGINE_ROOT = SOURCE_ROOT / "engine"
 
+SKILL_ID_PREFIXES = ("equip.", "hero.")
+"""具体技能 id 的前缀：装备（票 07 §5）与武将（票 01）。落进 ``engine/`` 即判红。
+
+武将技能进 ``skills/`` 之后，这条扫描若只认 ``equip.``，票 02–12 就能把
+``hero.<武将>.<技能>`` 漏进主干而不判红——票 01 的验收正是要它**非空转**。
+"""
+
+
+def _skill_literal_offender(text: str, forbidden_names: frozenset[str]) -> bool:
+    """这段字符串字面量是不是"具体技能 id / 装备名"（抽出来是为了能对它单独跑合成反例）。"""
+    return any(prefix in text for prefix in SKILL_ID_PREFIXES) or text in forbidden_names
+
 
 def _engine_trees() -> Iterator[tuple[Path, ast.Module]]:
     for path in sorted(ENGINE_ROOT.rglob("*.py")):
@@ -215,24 +227,35 @@ def _engine_trees() -> Iterator[tuple[Path, ast.Module]]:
 
 
 def test_engine_contains_no_concrete_skill_id_or_equipment_name():
-    """票 07 §5 的机械判据：``engine/`` 不出现任何装备名或 ``equip.`` 技能 id。
+    """票 07 §5 / 票 01 的机械判据：``engine/`` 不出现装备名、``equip.`` 或 ``hero.`` 技能 id。
 
-    ``Engine.emit_frame_timing`` 只调 ``skills.dispatch_timing``（通用派发）；装备效果
-    与技能 id 一律住 ``skills/``。这条扫描是"禁止技能逻辑进主干"（`06` L65）的兜底。
+    ``Engine.emit_frame_timing`` 只调 ``skills.dispatch_timing``（通用派发）；装备效果、
+    武将技能与具体技能 id 一律住 ``skills/``。这条扫描是"禁止技能逻辑进主干"（`06` L65）
+    的兜底，覆盖两类载体。
     """
     from sgs.skills import EQUIPMENT_CARD_TYPE_IDS
 
-    forbidden = {"equip."} | set(EQUIPMENT_CARD_TYPE_IDS)
+    forbidden_names = frozenset(EQUIPMENT_CARD_TYPE_IDS)
     offenders = []
     for path, tree in _engine_trees():
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 text = node.value
-                if "equip." in text or text in forbidden:
+                if _skill_literal_offender(text, forbidden_names):
                     offenders.append(f"{path.name}:{node.lineno} 字符串 {text!r}")
 
     assert not offenders, "引擎侧出现具体技能 id / 装备名：" + "；".join(offenders)
     assert len(list(_engine_trees())) >= 4, "扫描目标可能指错了"
+
+
+def test_the_skill_id_scan_goes_red_on_a_hero_literal_too():
+    """合成反例：``hero.`` 前缀必须与 ``equip.`` 同等判红（票 01 验收 5 不能空转）。"""
+    names = frozenset({"crossbow"})
+
+    assert _skill_literal_offender("equip.crossbow", names)
+    assert _skill_literal_offender("hero.caocao.hujia", names)
+    assert _skill_literal_offender("crossbow", names)
+    assert not _skill_literal_offender("dispatch_timing", names)
 
 
 def test_engine_does_not_import_concrete_skill_modules():

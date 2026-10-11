@@ -22,7 +22,7 @@
 
 from __future__ import annotations
 
-from sgs.data import Identity
+from sgs.data import SkillType
 from sgs.effects import (
     CarrierKind,
     Modifier,
@@ -49,6 +49,8 @@ from .catalog import (
     dispatch_timing,
     instance_key,
     is_equipped,
+    lord_skill_allowed,
+    lord_skill_ids,
     prune_skill_state,
     resolve_instances,
 )
@@ -68,11 +70,13 @@ EQUIPMENT_SKILL_IDS: frozenset[str] = frozenset(
 )
 """装备**技能 id = ``equip.`` + 牌名 id**（票 09 §1）：由 ``CATALOG`` 派生，不另抄一遍。"""
 
-LORD_SKILL_IDS: frozenset[str] = frozenset()
-"""登记在**主公技类型**上的技能 id（票 07 §4 允许清单的右项）。
+LORD_SKILL_IDS: frozenset[str] = lord_skill_ids()
+"""登记在**主公技类型**上的技能 id：:func:`lord_skill_ids` 对 ``CATALOG`` 的 **import 期快照**
+（票 01 §载体接入 #8：M2 手抄空集 → M3 由定义字段派生）。
 
-M2 **一个都没有**：武将技能整类 out of scope（票 13 §4）⇒ 主公技门控恒为假。
-M3 加武将时把主公技 id 填进来即可，门控与查询面都不改形。
+"这是不是主公技"因此只有一个真源（``SkillDef.skill_type``），不再是一张会与定义漂移的
+名单；运行期的门控读定义字段（:func:`_identity_gates_out` / :func:`lord_skill_allowed`），
+不读这个快照。
 """
 
 REJUDGE_SKILL_IDS: frozenset[str] = frozenset()
@@ -103,6 +107,7 @@ __all__ = (
     "SkillInstance",
     "SkillSource",
     "SkillSourceKind",
+    "SkillType",
     "activation_plan",
     "apply_modifiers",
     "dispatch_seam",
@@ -111,6 +116,7 @@ __all__ = (
     "instance_key",
     "is_equipped",
     "lord_skill_allowed",
+    "lord_skill_ids",
     "prune_skill_state",
     "rejudge_capable_seats",
     "resolve_instances",
@@ -134,15 +140,3 @@ def rejudge_capable_seats() -> tuple[int, ...]:
     if REJUDGE_SKILL_IDS:
         raise NotImplementedError("M3 才有改判技能：座位的技能实例解析尚未建立")
     return ()
-
-
-def lord_skill_allowed(identity: Identity | None, skill_id: str) -> bool:
-    """主公技门控：`(身份 == 主公) ∧ (技能属于主公技类型)`（票 07 §4 的允许清单）。
-
-    M2 还没有 ``SkillDef`` 的类型字段（票 07 冻结面不新增），故"属于主公技类型"
-    由 ``LORD_SKILL_IDS`` 的**成员资格**表达；M3 立起 ``skill_type`` 后这里改为读字段，
-    调用方与门控形状都不变。``LORD_SKILL_IDS`` 在 M2 为空，故本函数对任何输入都返回
-    ``False``——"M2 一个都不可发动"因此是可断言的系统事实，而不只是一句约定
-    （U-13-1：真实门控要等 M3 的武将技能登记进来才可测）。
-    """
-    return identity is Identity.LORD and skill_id in LORD_SKILL_IDS

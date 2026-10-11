@@ -21,19 +21,26 @@ from __future__ import annotations
 import json
 from collections import Counter
 from collections.abc import Mapping
+from functools import lru_cache
 from importlib.resources import files
 from typing import Any
 
 from pydantic import ValidationError
 
 from .errors import DataLoadError, LoadError
-from .models import Category, CardType, ContentPack, Deck
+from .models import Category, CardType, ContentPack, Deck, HeroTable
 
 __all__ = [
     "DEFAULT_PACK_ID",
+    "HERO_SKILL_PREFIX",
+    "KNOWN_HEROES_SCHEMA_VERSIONS",
     "KNOWN_SCHEMA_VERSIONS",
+    "hero_skill_id",
+    "hero_skill_ids",
     "load_content_pack",
+    "load_heroes",
     "validate_content_pack",
+    "validate_heroes",
 ]
 
 KNOWN_SCHEMA_VERSIONS: frozenset[int] = frozenset({2})
@@ -44,7 +51,21 @@ KNOWN_SCHEMA_VERSIONS: frozenset[int] = frozenset({2})
 ``extra="forbid"`` 下是结构错误——这正是该由版本号先拦下的情形（票 09 §7）。
 """
 
+KNOWN_HEROES_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
+"""武将表（``heroes.<pack_id>.json``）认得的版本集合（票 01）。
+
+与 ``KNOWN_SCHEMA_VERSIONS`` **分开**：武将表是新文件、独立升版，牌堆侧的改动不该
+牵动它，反之亦然。首版取 1。
+"""
+
 DEFAULT_PACK_ID = "standard"
+
+HERO_SKILL_PREFIX = "hero."
+"""武将技能 id 的前缀（票 01 §Data / 票 12）：``hero.<武将 id>.<短 id>``。
+
+前缀与装备的 ``equip.`` 并列，是"两张表能双向对上、漏配能机械检出"的落点：
+加载期的启用武将引用校验、派发期的载体解析都经 :func:`hero_skill_id` 一处派生。
+"""
 
 RANK_MIN = 1
 RANK_MAX = 13
@@ -135,22 +156,30 @@ def _parse_json(file: str, raw: str | bytes | Mapping[str, Any]) -> Mapping[str,
     return parsed
 
 
-def _version_error(file: str, parsed: Mapping[str, Any]) -> LoadError | None:
-    """版本闸门：未知 / 缺失 ``schema_version`` 一律拒绝（fail-closed）。"""
+def _version_error(
+    file: str,
+    parsed: Mapping[str, Any],
+    *,
+    known: frozenset[int] = KNOWN_SCHEMA_VERSIONS,
+) -> LoadError | None:
+    """版本闸门：未知 / 缺失 ``schema_version`` 一律拒绝（fail-closed）。
+
+    ``known`` 让武将表（``heroes.<pack_id>.json``）复用同一条判据而不共用版本集合。
+    """
     if "schema_version" not in parsed:
         return LoadError(
             file=file,
             loc="/schema_version",
-            expected=f"数据模型版本之一：{sorted(KNOWN_SCHEMA_VERSIONS)}",
+            expected=f"数据模型版本之一：{sorted(known)}",
             got="缺失",
             rule_id="version.missing",
         )
     value = parsed["schema_version"]
-    if isinstance(value, bool) or not isinstance(value, int) or value not in KNOWN_SCHEMA_VERSIONS:
+    if isinstance(value, bool) or not isinstance(value, int) or value not in known:
         return LoadError(
             file=file,
             loc="/schema_version",
-            expected=f"数据模型版本之一：{sorted(KNOWN_SCHEMA_VERSIONS)}",
+            expected=f"数据模型版本之一：{sorted(known)}",
             got=repr(value),
             rule_id="version.unknown",
         )
@@ -557,3 +586,171 @@ def load_content_pack(
             ]
         )
     return pack.model_copy(update={"deck_profile": deck_profile})
+
+
+# ---------------------------------------------------------------------------
+# 武将表：``heroes.<pack_id>.json`` 的定位、三段校验与只读查询（票 01）
+# ---------------------------------------------------------------------------
+
+
+def hero_skill_id(hero_id: str, skill_id: str) -> str:
+    """武将技能 id 的**唯一派生处**：``hero.<武将 id>.<短 id>``（票 01 §Data）。
+
+    加载期的引用校验与派发期的载体解析都走这里，故前缀不会在两处各抄一遍。
+    """
+    return f"{HERO_SKILL_PREFIX}{hero_id}.{skill_id}"
+
+
+def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
+    """武将表的语义校验：结构 / 唯一性（全体）+ 技能引用（**仅启用的武将**）。
+
+    条件化是本票的核心（票 01 §Data #3；`03` §7「内容包与版本」的启用门控）：数据文件装全
+    25 名，不因"还没实现"而砍表；
+    ``enabled`` 的武将才要求 ``hero.<id>.<skill>`` 在 ``skills.CATALOG`` 里闭合，
+    未启用的只做结构、唯一性与"≥1 技能"校验。``CATALOG`` 在函数体内导入——
+    与 :func:`_card_type_errors` 同姿态，避免 ``data ↔ skills`` 的模块级环。
+    """
+    from sgs.skills import CATALOG
+
+    errors: list[LoadError] = []
+
+    if not table.heroes:
+        errors.append(
+            LoadError(
+                file=file,
+                loc="/heroes",
+                expected="非空的武将列表",
+                got="0 条",
+                rule_id="heroes.empty",
+            )
+        )
+
+    seen_ids: set[str] = set()
+    for index, hero in enumerate(table.heroes):
+        base = f"/heroes/{index}"
+
+        if hero.id in seen_ids:
+            errors.append(
+                LoadError(
+                    file=file,
+                    loc=f"{base}/id",
+                    expected="全局唯一的武将 id",
+                    got=repr(hero.id),
+                    rule_id="heroes.duplicate_id",
+                )
+            )
+        seen_ids.add(hero.id)
+
+        if hero.hp_max < 1:
+            errors.append(
+                LoadError(
+                    file=file,
+                    loc=f"{base}/hp_max",
+                    expected="正整数（体力上限）",
+                    got=repr(hero.hp_max),
+                    rule_id="hero.hp_max_range",
+                )
+            )
+
+        if not hero.skills:
+            errors.append(
+                LoadError(
+                    file=file,
+                    loc=f"{base}/skills",
+                    expected="每名武将至少一个技能",
+                    got="0 条",
+                    rule_id="hero.skills_empty",
+                )
+            )
+
+        seen_skills: set[str] = set()
+        for skill_index, skill in enumerate(hero.skills):
+            if skill.id in seen_skills:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/skills/{skill_index}/id",
+                        expected="同一武将内唯一的技能 id",
+                        got=repr(skill.id),
+                        rule_id="hero.skill_duplicate_id",
+                    )
+                )
+            seen_skills.add(skill.id)
+
+            if not hero.enabled:
+                continue
+            full_id = hero_skill_id(hero.id, skill.id)
+            if CATALOG.get(full_id) is None:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/skills/{skill_index}/id",
+                        expected=f"技能表里存在 {full_id}（已启用武将的技能引用必须闭合）",
+                        got=repr(skill.id),
+                        rule_id="hero.skill_missing",
+                    )
+                )
+
+    return errors
+
+
+def validate_heroes(raw: str | bytes | Mapping[str, Any], *, file: str = "<memory>") -> HeroTable:
+    """校验一份武将表数据；不过则抛 :class:`DataLoadError`（聚合全部错误）。
+
+    与 :func:`validate_content_pack` 同姿态的**三段**：版本 → 结构 → 语义，
+    任何一层不过都不返回部分数据。
+    """
+    parsed = _parse_json(file, raw)
+
+    version_error = _version_error(file, parsed, known=KNOWN_HEROES_SCHEMA_VERSIONS)
+    if version_error is not None:
+        raise DataLoadError([version_error])
+
+    try:
+        table = HeroTable.model_validate(parsed)
+    except ValidationError as exc:
+        raise DataLoadError(_structural_errors(file, exc)) from exc
+
+    semantic_errors = _hero_semantic_errors(file, table)
+    if semantic_errors:
+        raise DataLoadError(semantic_errors)
+    return table
+
+
+@lru_cache(maxsize=None)
+def load_heroes(pack_id: str = DEFAULT_PACK_ID) -> HeroTable:
+    """加载打包数据里的武将表（``files/heroes.<pack_id>.json``）。
+
+    纯函数式缓存：文件是**只读进料**，同 ``pack_id`` 恒得同一张已校验的表，
+    故派发热路径可以反复取用而不重读磁盘。缺文件 fail-closed，报 ``heroes.not_found``。
+    """
+    file = f"files/heroes.{pack_id}.json"
+    resource = files("sgs.data").joinpath("files", f"heroes.{pack_id}.json")
+    try:
+        text = resource.read_text(encoding="utf-8")
+    except (FileNotFoundError, IsADirectoryError) as exc:
+        raise DataLoadError(
+            [
+                LoadError(
+                    file=file,
+                    loc="/",
+                    expected="存在的武将表文件",
+                    got=pack_id,
+                    rule_id="heroes.not_found",
+                )
+            ]
+        ) from exc
+    return validate_heroes(text, file=file)
+
+
+def hero_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tuple[str, ...]:
+    """某武将的**全限定技能 id**（``hero.<武将 id>.<短 id>``，按数据文件里的顺序）。
+
+    未知 ``hero_id`` 返回空元组：调用方（载体解析）与"装备牌查不到技能定义即跳过"
+    同姿态，不因一处未知引用把整局打断；数据侧的"漏配"由加载期校验负责拦。
+    """
+    hero = load_heroes(pack_id).by_id(hero_id)
+    if hero is None:
+        return ()
+    return tuple(hero_skill_id(hero.id, skill.id) for skill in hero.skills)
+
