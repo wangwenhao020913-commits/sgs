@@ -84,6 +84,7 @@ __all__ = [
     "prune_skill_state",
     "reset_phase_skill_state",
     "resolve_instances",
+    "same_kingdom",
 ]
 
 
@@ -342,6 +343,23 @@ def instance_key(instance: SkillInstance) -> str:
     source = instance.source
     ref = source.card_id if source.card_id is not None else source.skill_id
     return f"{instance.owner}:{instance.skill_id}:{source.kind.value}:{ref}"
+
+
+def same_kingdom(state: GameState, a: int, b: int) -> bool:
+    """``a`` 与 ``b`` 是不是**同一势力**（票 09 §要做什么 1 的只读小工具）。
+
+    势力作用域**不建字段**：一切"其他同势力角色"都落成"回调自己比座位"——回调拿
+    ``ctx.owner``（技能持有者）/ ``ctx.subject``（本次决策者）或 ``frame.data["source"]``
+    （事件来源）来调本函数。判据 = 两侧的 ``Player.kingdom`` 都已发牌（非 ``None``）**且相等**；
+    无武将模式（势力未知）恒 ``False``，故 M2 的记录流一条不变。
+
+    "其他"由调用方写 ``a != b``：本函数只回答"势力相同"，不替调用方决定作用域
+    （【黄天】式注入里持有者可能自己也在候选面上）。``same_kingdom(state, s, s)``
+    对**有势力**的座位是 ``True``。
+    """
+    left = state.player(a).kingdom
+    right = state.player(b).kingdom
+    return left is not None and left is right
 
 
 def prune_skill_state(state: GameState) -> None:
@@ -664,8 +682,10 @@ def _halberd_extra_targets(state: GameState, ctx: ModifierContext, current: Any)
 def _eight_diagrams_candidate(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     """八卦阵：把你自己的 ``ActivateSkill`` 追加进"需要【闪】"的候选（票 10 §5.2 / 票 30）。
 
-    只在**需要者自己**的实例上追加（``ctx.owner == ctx.subject``）。"每提供者只问一次"
-    由**候选生成器**统一过滤 ``ctx.providers_used``（一处实现，不在这里重复）。
+    ``ctx.owner == ctx.subject``（只在**需要者自己**的实例上追加）是**本技能自己的谓词**，
+    不是平台约束：跨座位注入是合法用法（`03` §4「技能描述模型」的「技能定义 / 实例 / 派发的冻结面」小节，
+    票 09 的【黄天】式形态会在这里写 ``ctx.owner != ctx.subject`` 的分支）。
+    "每提供者只问一次"由**候选生成器**统一过滤 ``ctx.providers_used``（一处实现，不在这里重复）。
     选中才惰性判定（判定帧由响应窗口步骤压出，不在候选生成期）。
     """
     del state
@@ -1043,6 +1063,9 @@ from .move_after import move_after_skill_definitions  # noqa: E402  （末尾 im
 from .response_window import (  # noqa: E402  （末尾 import 是刻意的）
     response_window_skill_definitions,
 )
+from .lord_request import (  # noqa: E402  （末尾 import 是刻意的）
+    lord_skill_definitions,
+)
 
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
     {
@@ -1054,6 +1077,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *target_pool_skill_definitions(),
             *move_after_skill_definitions(),
             *response_window_skill_definitions(),
+            *lord_skill_definitions(),
         )
     }
 )

@@ -262,19 +262,21 @@ def test_no_identity_mode_projects_no_identities():
 
 
 # ---------------------------------------------------------------------------
-# 主公技接口位：门控恒为假，但可断言（票 24 / 决策回票 13 §4，U-13-1）
+# 主公技接口位：M3 起由技能定义派生（票 24 / 决策回票 13 §4，U-13-1；票 09 转正）
 # ---------------------------------------------------------------------------
 
 
-def test_no_skill_is_registered_as_a_lord_skill_in_m2():
-    """M2 没有任何技能落在主公技类型上（武将技能整类 out of scope）⇒ 门控恒为假。"""
-    assert LORD_SKILL_IDS == frozenset()
+def test_the_lord_skill_ids_are_now_derived_from_the_m3_definitions():
+    """M2 的接口位是手抄空集；M3 票 09 转正 ⇒ 由 ``SkillDef.skill_type`` 派生（三条主公技）。"""
+    assert LORD_SKILL_IDS == frozenset(
+        {"hero.caocao.hujia", "hero.liubei.jijiang", "hero.sunquan.jiuyuan"}
+    )
 
 
 @pytest.mark.parametrize("identity", list(Identity))
-def test_the_lord_skill_gate_is_false_for_every_identity_and_skill(identity):
-    """`(身份==主公) ∧ (类型==主公技)` 的接口位可断言，且 M2 一个都不可发动。"""
+def test_the_lord_skill_gate_reads_identity_and_skill_type(identity):
+    """`(身份==主公) ∧ (类型==主公技)`：M3 起主公可发动，其余身份与装备技能照旧为假。"""
     assert lord_skill_allowed(identity, "equip.crossbow") is False
-    assert lord_skill_allowed(identity, "hero.caocao.hujia") is False
+    assert lord_skill_allowed(identity, "hero.caocao.hujia") is (identity is Identity.LORD)
 
 

@@ -35,6 +35,7 @@ __all__ = [
     "PriorityClass",
     "apply_modifiers",
     "priority_class_of",
+    "recover_amount",
     "response_count",
 ]
 
@@ -89,14 +90,15 @@ def priority_class_of(carrier: CarrierKind) -> PriorityClass:
 
 
 class ModifierPoint(str, Enum):
-    """修饰器的五个**挂点**（票 07 §3）；M3 只许增。
+    """修饰器的**挂点**（票 07 §3）；M3 只许增。
 
     - ``COUNT_LIMIT``：本回合使用次数上限（诸葛连弩）；
     - ``TARGET_POOL``：目标池（方天画戟的"额外目标合法性同标准"挂点）；
     - ``DISTANCE``：座位距离（六坐骑：客体 +1 / 主体 −1）；
     - ``EFFECTIVENESS``：第 2 层"无效"（仁王盾）；
     - ``CANDIDATES``：候选行动的追加（方天画戟的额外目标组合）；
-    - ``RESPONSE_COUNT``：本次响应窗口**需要几张**（缺省 1；票 08 的 M3 加法）。
+    - ``RESPONSE_COUNT``：本次响应窗口**需要几张**（缺省 1；票 08 的 M3 加法）；
+    - ``RECOVER_AMOUNT``：本次回复**回复几点**（缺省 1；票 09 的 M3 加法，【救援】）。
     """
 
     COUNT_LIMIT = "COUNT_LIMIT"
@@ -105,6 +107,7 @@ class ModifierPoint(str, Enum):
     EFFECTIVENESS = "EFFECTIVENESS"
     CANDIDATES = "CANDIDATES"
     RESPONSE_COUNT = "RESPONSE_COUNT"
+    RECOVER_AMOUNT = "RECOVER_AMOUNT"
 
 
 class ModifierRole(str, Enum):
@@ -211,3 +214,24 @@ def response_count(
     """
     ctx = ModifierContext(subject=source, target=target, card=card)
     return apply_modifiers(ModifierPoint.RESPONSE_COUNT, state, ctx, 1)
+
+
+def recover_amount(
+    state: GameState,
+    *,
+    source: int,
+    card: CardRef | None,
+    target: int,
+    base: int = 1,
+) -> int:
+    """本次回复**回复几点**（缺省 ``base`` = 1，票 09 §要做什么 3；【救援】）。
+
+    `三国杀详细规则.txt:425`："确定回复数值：先结算修正本次回复数值的效果（如【救援】），
+    然后角色按此数值回复体力。" 故唯一读点是 ``RECOVER`` 帧的"确定回复数值"步骤
+    （``steps.recover_value``）；回调自己按 ``ctx`` 判势力 / 牌名 / 目标，引擎里不出现技能名。
+
+    ``ctx.subject`` = **回复的来源**（谁用的【桃】）、``ctx.target`` = 被回复者、
+    ``ctx.card`` = 造成这次回复的牌（读牌名）。
+    """
+    ctx = ModifierContext(subject=source, target=target, card=card)
+    return apply_modifiers(ModifierPoint.RECOVER_AMOUNT, state, ctx, base)

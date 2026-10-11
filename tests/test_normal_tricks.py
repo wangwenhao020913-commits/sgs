@@ -199,6 +199,7 @@ def test_the_eight_query_kinds_and_the_window_causes_are_defined():
         "ARROW_BARRAGE",
         "DUEL",
         "BORROWED_SWORD",
+        "LORD_REQUEST",
     }
 
 

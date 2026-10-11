@@ -42,6 +42,7 @@ from sgs.effects import (
     FinalZone,
     ResponseWindow,
     behavior_for,
+    recover_amount,
     response_count,
     target_is_effective,
 )
@@ -117,6 +118,12 @@ class FrameHost(StepHost, Protocol):
     def push_frame(self, kind: FrameKind, data: dict[str, Any], *, timing: Timing) -> Frame: ...
 
     def dispatch_seam(self, frame: Frame, kind: SeamKind) -> Any: ...
+
+    def provider_registered(self, skill_id: str) -> bool: ...
+
+    def advance_provider(self, frame: Frame, timing: Timing) -> Any: ...
+
+    def start_provider(self, frame: Frame, skill_id: str, actor: int, timing: Timing) -> Any: ...
 
     def open_skill_judgment(self, frame: Frame, subject: int, skill_id: str) -> None: ...
 
@@ -449,21 +456,35 @@ def _open_response_window(host: FrameHost, frame: Frame) -> Control:
 
 
 def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
-    """【闪】响应窗口：真牌窗口 + "需要牌"提供者序列（票 10 §5 / 票 30 / 票 08）。
+    """【闪】响应窗口：真牌窗口 + "需要牌"提供者序列（票 10 §5 / 票 30 / 票 08 / 票 09）。
 
-    - 提供者（【八卦阵】）在候选里以 ``ActivateSkill`` 出现；选中即**惰性压判定帧**，
-      红 ⇒ 需要被满足（记为"视为使用【闪】"）、黑 ⇒ 该提供者机会用尽、重问真牌窗口。
+    - 提供者（【八卦阵】/【护驾】）在候选里以 ``ActivateSkill`` 出现；选中即**惰性展开**：
+      【八卦阵】压判定帧（红 ⇒ 需要被满足）、【护驾】开**势力求助窗口**（同势力角色打出
+      【闪】⇒ 需要被满足）。两条路都由技能层的提供者注册表分派，引擎不认具体技能 id。
     - 真【闪】⇒ 抵消，【闪】自己照走 L4 / L5（M1 语义）。
 
     **本次窗口需要几张**由 :func:`~sgs.effects.response_count` 给出（缺省 1；【无双】改成 2）：
-    每成功一次（真【闪】或提供者的红判定）``dodges_done`` 加一，**攒够所需张数才算抵消**；
+    每成功一次（真【闪】或提供者）``dodges_done`` 加一，**攒够所需张数才算抵消**；
     没攒够就重开真牌窗口（已问过的提供者由 ``providers_used`` 过滤掉，故"每提供者只问一次"
     在张数为 2 时也成立）。没攒够而放弃 ⇒ ``canceled = False``、照常结算。
+
+    **提供者可能跨多次重入**（求助窗口逐个问人）：引擎在窗口顶部先 :meth:`advance_provider`
+    重入它，收尾后再按它写回的"是否满足"记一次成功（票 09）。
     """
     required = response_count(
         host.state, source=frame.data["source"], card=frame.data["card"], target=target
     )
     done = frame.data.get("dodges_done", 0)
+    control, satisfied = host.advance_provider(frame, Timing.RESOLVE_BEFORE_EFFECT)
+    if control is not None:
+        return control
+    if satisfied is not None:
+        if satisfied:
+            done += 1
+            frame.data["dodges_done"] = done
+            if done >= required:
+                frame.data["canceled"] = True
+        return "stay"
     if "skill_result" in frame.data:
         success = frame.data.pop("skill_result")
         if success:
@@ -490,7 +511,19 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
         return "stay"
     if isinstance(action, ActivateSkill):
         frame.data.setdefault("providers_used", []).append(action.skill_id)
-        host.open_skill_judgment(frame, target, action.skill_id)
+        if not host.provider_registered(action.skill_id):
+            host.open_skill_judgment(frame, target, action.skill_id)
+            return "stay"
+        control, satisfied = host.start_provider(
+            frame, action.skill_id, target, Timing.RESOLVE_BEFORE_EFFECT
+        )
+        if control is not None:
+            return control
+        if satisfied:
+            done += 1
+            frame.data["dodges_done"] = done
+            if done >= required:
+                frame.data["canceled"] = True
         return "stay"
     if isinstance(action, UseCard):
         done += 1
@@ -618,6 +651,10 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
     "use_tags",
     "axe_used",
     "gdb_used",
+    "provider_skill",
+    "provider_actor",
+    "provider_satisfied",
+    "lord_request",
     "_pending_timing",
 )
 """**逐目标分槽**的帧私有键：游标推进时必须整体清掉（票 11 §3.2）。
@@ -629,6 +666,9 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
 
 票 08 追加两个按目标分槽的键：``dodges_done``（本次响应窗口已攒够几张）与 ``use_tags``
 （**帧标签袋**——登在这里使"逐目标档随游标推进自动清除"是结构性的、不靠手工 ``del``）。
+票 09 再追加提供者展开的四个键（``provider_skill`` / ``provider_actor`` /
+``provider_satisfied`` / ``lord_request``）：它们是**一次求助窗口**的进度，多目标【杀】里
+必须逐目标重来，否则后一个目标会捡到前一个目标的应答者区间。
 """
 
 
@@ -1092,14 +1132,23 @@ def recover_value(host: FrameHost, frame: Frame) -> Control:
     """**确定回复数值**：先跑时机，再把体力写高（夹在体力上限内）。
 
     官方 4.13："回复体力"是数值变化四类事件之一，回复值受**体力上限**限制；
-    目标值由本帧算，原语只负责写（票 07 §1）。
+    目标值由本帧算，原语只负责写（票 07 §1）。回复量本身先过
+    :func:`~sgs.effects.recover_amount` 链（票 09 的 ``RECOVER_AMOUNT``，缺省 1）——
+    【救援】在此把"其他吴势力角色对孙权用【桃】"的回复量改成 2。
     """
     target = frame.data["targets"][0]
     control = _emit(host, frame, Timing.RECOVER_VALUE, actor=target)
     if control is not None:
         return control
+    amount = recover_amount(
+        host.state,
+        source=frame.data["source"],
+        card=frame.data.get("card"),
+        target=target,
+        base=frame.data["amount"],
+    )
     player = host.state.player(target)
-    host.apply_hp_change(frame, target, min(player.hp + frame.data["amount"], player.hp_max))
+    host.apply_hp_change(frame, target, min(player.hp + amount, player.hp_max))
     return None
 
 

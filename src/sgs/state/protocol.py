@@ -87,6 +87,9 @@ class WindowCause(str, Enum):
     """响应窗口的**成因**（票 19 §3；M2 闭集，M3 只许增）。
 
     票 27 落四个效果内窗口；``NULLIFY`` 由票 28 的无懈窗口使用，此处先把闭集建全。
+    票 09（M3）加 ``LORD_REQUEST``：**势力求助窗口**的成因——主公技令其他同势力角色
+    打出一张牌（【护驾】/【激将】），与"这张牌自己的响应窗口"（``DODGE`` / ``DUEL`` 等）
+    分列，使记录流里读得出"这次询问来自求助"。
     """
 
     NULLIFY = "NULLIFY"
@@ -94,6 +97,7 @@ class WindowCause(str, Enum):
     ARROW_BARRAGE = "ARROW_BARRAGE"
     DUEL = "DUEL"
     BORROWED_SWORD = "BORROWED_SWORD"
+    LORD_REQUEST = "LORD_REQUEST"
 
 
 class RespondMode(str, Enum):

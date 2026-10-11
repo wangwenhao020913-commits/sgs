@@ -241,10 +241,16 @@ def test_lord_skill_allowed_reads_the_definition_field(monkeypatch):
 
 
 def test_lord_skill_ids_are_derived_from_the_skill_definitions(monkeypatch):
-    """注入一条主公技定义 ⇒ 派生集合**非空且含它**（手抄空集过不了这条）。"""
+    """注入一条主公技定义 ⇒ 派生集合**非空且含它**（手抄空集过不了这条）。
+
+    票 09 起真实 ``CATALOG`` 已有三条主公技（护驾 / 激将 / 救援），故期望集合要含它们；
+    注入点仍是同一条派生路径（``SkillDef.skill_type``）。
+    """
     _install(monkeypatch, _hero_def())
 
-    assert lord_skill_ids() == frozenset({HUJIA})
+    assert lord_skill_ids() == frozenset(
+        {HUJIA, "hero.liubei.jijiang", "hero.sunquan.jiuyuan"}
+    )
 
 
 def test_the_lord_skill_ids_snapshot_matches_the_shipped_catalog():

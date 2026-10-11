@@ -278,6 +278,15 @@ def resolve_snatch(host: Any, frame: Frame) -> Any:
     return _move_lost_cards(host, frame, picked, to_zone=ZoneRef(Zone.HAND, frame.data["source"]))
 
 
+def _duel_accepted(op: dict[str, Any], *, other: int, required: int) -> str:
+    """一次**成立**的【决斗】响应：累加已出张数，攒够所需张数就把响应权交给对方。"""
+    op["duel_plays"] = op.get("duel_plays", 0) + 1
+    if op["duel_plays"] >= required:
+        op["duel_plays"] = 0
+        op["duel_turn"] = other
+    return "stay"
+
+
 def resolve_duel(host: Any, frame: Frame) -> Any:
     """【决斗】：由目标开始，双方轮流**打出【杀】**；未打出者受到对方 1 点伤害。
 
@@ -287,6 +296,10 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
     **每次响应所需张数**由 :func:`~sgs.effects.response_count` 给出（缺省 1；【无双】改成 2）：
     同一方的连续响应里 ``duel_plays`` 累加，攒够所需张数才把响应权交给对方（票 08 §要做什么 2）。
     只出一张就放弃 ⇒ 该方受伤——打出的那张是**真打出**（照走 L6、进弃牌堆），只是不构成完整响应。
+
+    **提供者（【激将】）**：候选里的 ``ActivateSkill`` 走技能层通用派发（票 09）；它可能跨
+    多次重入（逐个问同势力角色），故窗口顶部先 :meth:`advance_provider` 重入它，收尾后再决定
+    这次响应成不成立。同势力角色代打的【杀】是**真打出**、不占其使用次数。
     """
     source = frame.data["source"]
     op = frame.data.setdefault("op", {})
@@ -298,6 +311,14 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
     required = response_count(
         host.state, source=source, card=frame.data.get("card"), target=turn
     )
+    control, satisfied = host.advance_provider(frame, Timing.RESOLVE_AFTER_EFFECT)
+    if control is not None:
+        return control
+    if satisfied is not None:
+        if satisfied:
+            return _duel_accepted(op, other=other, required=required)
+        _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
+        return None
     action = host.ask_respond(
         frame,
         turn,
@@ -306,15 +327,26 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
         required="slash",
         target=None,
         window_frame=frame.frame_id,
+        providers_used=tuple(frame.data.get("providers_used", ())),
     )
     if host.suspended(action):
         return "stay"
     if isinstance(action, PlayCard):
         host.play_card(action.card, source=turn, timing=Timing.PLAY_DECLARE)
-        op["duel_plays"] = op.get("duel_plays", 0) + 1
-        if op["duel_plays"] >= required:
-            op["duel_plays"] = 0
-            op["duel_turn"] = other
+        return _duel_accepted(op, other=other, required=required)
+    if isinstance(action, ActivateSkill):
+        frame.data.setdefault("providers_used", []).append(action.skill_id)
+        if not host.provider_registered(action.skill_id):
+            raise NotImplementedError(
+                f"【决斗】窗口没有判定式提供者：{action.skill_id!r}（票 09）"
+            )
+        control, satisfied = host.start_provider(
+            frame, action.skill_id, turn, Timing.RESOLVE_AFTER_EFFECT
+        )
+        if control is not None:
+            return control
+        if satisfied:
+            return _duel_accepted(op, other=other, required=required)
         return "stay"
     _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
     return None
@@ -376,14 +408,23 @@ def _resist_or_damage(
     【万箭齐发】的"需要【闪】"是票 10 §5.5 的**第二个提供者序列**：与 M1 的 ``DODGE``
     共用同一套嵌法——【八卦阵】作为 ``ActivateSkill`` 进候选、每提供者只问一次、
     选中才惰性压判定帧、红 ⇒ 视为打出【闪】、黑 ⇒ 继续到真牌窗口。
+
+    【南蛮入侵】的"需要【杀】"是票 09 的**势力求助窗口**（【激将】）：同样是候选里的
+    ``ActivateSkill``，选中后按技能层通用派发逐问同势力角色；首个打出者即满足需要
+    （短路式），代打是真打出。
     """
     target = host.current_target(frame)
-    providers_used: tuple[str, ...] = ()
-    if required == "dodge":
-        if "skill_result" in frame.data:
-            if frame.data.pop("skill_result"):
-                return None  # 红 ⇒ 视为打出【闪】，需要被满足、不受伤害
-        providers_used = tuple(frame.data.get("providers_used", ()))
+    control, satisfied = host.advance_provider(frame, Timing.RESOLVE_AFTER_EFFECT)
+    if control is not None:
+        return control
+    if satisfied is not None:
+        if satisfied:
+            return None  # 需要被满足 ⇒ 不受伤害
+        # 未满足 ⇒ 落回真牌窗口（该提供者已被 ``providers_used`` 过滤）
+    if required == "dodge" and "skill_result" in frame.data:
+        if frame.data.pop("skill_result"):
+            return None  # 红 ⇒ 视为打出【闪】，需要被满足、不受伤害
+    providers_used = tuple(frame.data.get("providers_used", ()))
     action = host.ask_respond(
         frame,
         target,
@@ -398,7 +439,16 @@ def _resist_or_damage(
         return "stay"
     if isinstance(action, ActivateSkill):
         frame.data.setdefault("providers_used", []).append(action.skill_id)
-        host.open_skill_judgment(frame, target, action.skill_id)
+        if not host.provider_registered(action.skill_id):
+            host.open_skill_judgment(frame, target, action.skill_id)
+            return "stay"
+        control, satisfied = host.start_provider(
+            frame, action.skill_id, target, Timing.RESOLVE_AFTER_EFFECT
+        )
+        if control is not None:
+            return control
+        if satisfied:
+            return None
         return "stay"
     if isinstance(action, PlayCard):
         host.play_card(action.card, source=target, timing=Timing.PLAY_DECLARE)

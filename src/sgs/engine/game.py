@@ -52,12 +52,15 @@ from sgs.skills import (
     MoveEvent,
     SeamKind,
     SkillInstance,
+    advance_provider,
     dispatch_move_after,
     dispatch_seam,
     dispatch_timing,
     move_after_providers,
+    provider_registered,
     prune_skill_state,
     reset_phase_skill_state,
+    start_provider,
 )
 from sgs.state import (
     Action,
@@ -748,6 +751,22 @@ class Engine:
     def dispatch_seam(self, frame: Frame, kind: SeamKind) -> Control:
         """派发一个**帧内接缝**（票 12 §Q12 / 票 30）：键不是 ``Timing``。"""
         return dispatch_seam(self, frame, kind)
+
+    def provider_registered(self, skill_id: str) -> bool:
+        """技能层有没有登记这条 ``skill_id`` 的**提供者回调**（票 09）。
+
+        引擎据此把响应窗口里的 ``ActivateSkill`` 分到两条路：登记了 ⇒ 求助窗口（技能层通用
+        派发）；没登记 ⇒ 引擎既有的【八卦阵】判定路径。引擎两处都不出现具体技能 id。
+        """
+        return provider_registered(skill_id)
+
+    def advance_provider(self, frame: Frame, timing: Timing) -> Any:
+        """重入当前正在展开的提供者（票 09）：``(control, satisfied)``，见 ``sgs.skills``。"""
+        return advance_provider(self, frame, timing)
+
+    def start_provider(self, frame: Frame, skill_id: str, actor: int, timing: Timing) -> Any:
+        """开始一次提供者展开（票 09）：``(control, satisfied)``，见 ``sgs.skills``。"""
+        return start_provider(self, frame, skill_id, actor, timing)
 
     def suspended(self, value: Any) -> bool:
         """``ask`` 的返回值是否为"已暂停等应答"哨兵。"""
