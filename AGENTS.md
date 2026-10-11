@@ -5,6 +5,9 @@
 ## 注意事项
 
 1. 每次改动后，必须编写或更新相关测试，并在交付前跑通测试和验证。
+2. 唯一门禁是仓根的 **`bash tests/run_all.sh`**（全部 shell 校验 + pytest，约 2.5 分钟）。
+   **没有 CI、也没有默认 hook 会替你跑它。** 先跑一次 `bash tools/install-hooks.sh`
+   把它接到 pre-commit 上（改动落在 `src/` 或 `tests/` 时才触发）。
 
 ## Agent skills
 

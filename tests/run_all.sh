@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 运行 SGS 项目的全部检查：4 个文档/规则校验 + Python 测试。
+# 运行 SGS 项目的全部检查：全部 shell 校验 + Python 测试。
 # 唯一门禁：任一阶段失败即整体失败；聚合全部失败、不 fail-fast。
 set -euo pipefail
 
