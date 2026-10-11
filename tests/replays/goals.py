@@ -13,10 +13,10 @@ from __future__ import annotations
 
 from sgs.data import Identity
 from sgs.engine import Engine, JournalRecord
-from sgs.state import MoveReason, PlayCard, QueryKind, UseCard, WindowCause, Zone
+from sgs.state import ActivateSkill, ArrangeCards, MoveReason, PlayCard, QueryKind, UseCard, WindowCause, Zone
 from sgs.timing import Timing
 
-__all__ = ["M2_GOALS", "goal_for"]
+__all__ = ["M2_GOALS", "M3_GOALS", "goal_for"]
 
 
 def _records(engine: Engine) -> tuple[JournalRecord, ...]:
@@ -394,9 +394,173 @@ M2_GOALS = {
 """28 条 M2 基准的 slug → 事后判据。"""
 
 
+# ---------------------------------------------------------------------------
+# M3 专项基准的判据（票 14 §8）
+# ---------------------------------------------------------------------------
+
+
+def _skill_activations(engine: Engine, skill_id: str) -> list[JournalRecord]:
+    """被接受、且 ``skill_id`` 命中的 ``ActivateSkill`` 行动记录。"""
+    return [
+        record
+        for record in _accepted(engine)
+        if isinstance(record.action, ActivateSkill) and record.action.skill_id == skill_id
+    ]
+
+
+def _window_cause(engine: Engine, cause: WindowCause) -> bool:
+    return any(
+        record.kind == "query"
+        and record.query.kind == QueryKind.RESPOND
+        and record.query.cause is cause
+        for record in _records(engine)
+    )
+
+
+def _yiji_triggers_per_damage_point(engine: Engine) -> bool:
+    """郭嘉【遗计】逐点触发：一次伤害里问两次、发动两次（B 族的 ``per_point``）。"""
+    return len(_skill_activations(engine, "hero.guojia.yiji")) >= 2
+
+
+def _guicai_rejudge_cycle(engine: Engine) -> bool:
+    """【鬼才】改判窗口真的开过（``WindowCause.REJUDGE``；票 11 的循环）。"""
+    return _window_cause(engine, WindowCause.REJUDGE)
+
+
+def _lord_request(engine: Engine) -> bool:
+    """【护驾】/【激将】的**势力求助窗口**真的开过（``WindowCause.LORD_REQUEST``）。"""
+    return _window_cause(engine, WindowCause.LORD_REQUEST)
+
+
+def _lost_cards_family(engine: Engine) -> bool:
+    """【连营】与【枭姬】各发动过，且有一次**顶替**（装备 ``LOSE``）留下记录。"""
+    replaced = any(
+        move.from_zone is not None
+        and move.from_zone.zone is Zone.EQUIP
+        and move.reason is MoveReason.LOSE
+        for move in _card_moves(engine)
+    )
+    return (
+        bool(_skill_activations(engine, "hero.luxun.lianying"))
+        and bool(_skill_activations(engine, "hero.sunshangxiang.xiaoji"))
+        and replaced
+    )
+
+
+def _hand_sizes_over_time(engine: Engine) -> list[tuple[int, list[int]]]:
+    """记录流里每次 ``card_move`` **之前**的各座位手牌数（``(seq, sizes)``）。
+
+    用来判 C 族的条件前提（【空城】只在"没有手牌"时把目标挡出池）：记录流本身不含
+    手牌张数，故从 delta 增量重建——与 fuzz 的 delta 重建同一口径。
+    """
+    sizes = [0] * len(engine.state.players)
+    snapshots: list[tuple[int, list[int]]] = []
+    for record in _records(engine):
+        if record.kind != "delta" or record.delta_type != "card_move":
+            continue
+        snapshots.append((record.seq, list(sizes)))
+        count = len(record.cards)
+        if record.from_zone is not None and record.from_zone.zone is Zone.HAND:
+            sizes[record.from_zone.seat] -= count
+        if record.to_zone is not None and record.to_zone.zone is Zone.HAND:
+            sizes[record.to_zone.seat] += count
+    return snapshots
+
+
+def _target_pool_exclusion(engine: Engine) -> bool:
+    """【空城】/【谦逊】的目标池真排除在整局里可观测（C 族）。
+
+    判据读**使用行动的 ``targets``**：受保护座位（诸葛亮 / 陆逊）在一次受限牌的使用里
+    **不在任何候选目标里**，而同一张牌确实指到了别人——
+
+    - 【谦逊】无条件：陆逊不可被【顺手牵羊】/【过河拆桥】指定；
+    - 【空城】有条件：诸葛亮**手牌为 0** 时不可被【杀】/【决斗】指定（前提由
+      :func:`_hand_sizes_over_time` 重建）。
+    """
+    heroes = {player.seat: player.hero for player in engine.state.players}
+    qianxun = next((seat for seat, hero in heroes.items() if hero == "luxun"), None)
+    kongcheng = next((seat for seat, hero in heroes.items() if hero == "zhugeliang"), None)
+
+    sizes_before = dict(_hand_sizes_over_time(engine))
+
+    def _used(types: frozenset[str]):
+        return [
+            record
+            for record in _accepted(engine)
+            if isinstance(record.action, (UseCard, PlayCard))
+            and getattr(record.action, "targets", ())
+            and record.action.card.type in types
+        ]
+
+    def _excluded(record, seat: int) -> bool:
+        return seat not in record.action.targets
+
+    qianxun_ok = qianxun is not None and any(
+        _excluded(record, qianxun) for record in _used(frozenset({"snatch", "dismantlement"}))
+    )
+    kongcheng_ok = kongcheng is not None and any(
+        sizes_before.get(record.seq, [0] * len(heroes))[kongcheng] == 0
+        and _excluded(record, kongcheng)
+        for record in _used(frozenset({"slash", "duel"}))
+    )
+    return qianxun_ok and kongcheng_ok
+
+
+def _wushuang_two_responses(engine: Engine) -> bool:
+    """吕布【无双】：同一次响应里连开两个同类型窗口（两个连续的 ``DODGE`` 询问）。"""
+    run = best = 0
+    for record in _records(engine):
+        if record.kind != "query":
+            continue
+        if record.query.kind == QueryKind.DODGE:
+            run += 1
+            best = max(best, run)
+        else:
+            run = 0
+    return best >= 2
+
+
+def _guanxing_arranged(engine: Engine) -> bool:
+    """诸葛亮【观星】真的排过一次牌（``ArrangeCards`` 被接受）。"""
+    return any(
+        record.kind == "action" and record.accepted and isinstance(record.action, ArrangeCards)
+        for record in _records(engine)
+    )
+
+
+def _transform_family(engine: Engine) -> bool:
+    """H 族的转化：某次使用 / 打出带着**非空** ``virtual_sources``（武圣 / 龙胆 / 国色 / 急救）。"""
+    heroes = {player.seat: player.hero for player in engine.state.players}
+    transform_heroes = {"guanyu", "zhaoyun", "daqiao", "huatuo"}
+    actor: int | None = None
+    for record in _records(engine):
+        if record.kind == "query":
+            actor = record.query.actor
+        elif record.kind == "action" and record.accepted:
+            action = record.action
+            if isinstance(action, (UseCard, PlayCard)) and action.card.virtual_sources:
+                if actor is not None and heroes.get(actor) in transform_heroes:
+                    return True
+    return False
+
+
+M3_GOALS = {
+    "35-hero-damage-points": _yiji_triggers_per_damage_point,
+    "36-hero-rejudge-cycle": _guicai_rejudge_cycle,
+    "37-hero-lord-request": _lord_request,
+    "38-hero-lost-cards": _lost_cards_family,
+    "39-hero-target-pool": _target_pool_exclusion,
+    "40-hero-wushuang": _wushuang_two_responses,
+    "41-hero-guanxing": _guanxing_arranged,
+    "42-hero-transform": _transform_family,
+}
+"""8 条 M3 专项基准的 slug → 事后判据（票 14 §8 的逐类清单）。"""
+
+
 def goal_for(slug: str):
     """取一条基准的判据；未登记即抛（录制期护栏）。"""
+    table = {**M2_GOALS, **M3_GOALS}
     try:
-        return M2_GOALS[slug]
+        return table[slug]
     except KeyError:  # pragma: no cover - 开发期护栏
         raise AssertionError(f"没有为场景 {slug} 写事后判据") from None

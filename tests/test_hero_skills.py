@@ -5,7 +5,14 @@
 （``Engine.from_state`` 的人为局面 + 脚本玩家）观测行为，不测内部字段。
 
 本文件按 `spec.md` §Testing Decisions 的约定**新建**（不往装备技能的既有测试文件里再堆）；
-票 01 只落「载体与身份门控」一节，票 03–11 的族级测试各占其后一节。
+票 01 只落「载体与身份门控」一节。族级构造局面单测的**落点读法**（票 14 §1 追认）：
+票 03–11 把它们各自放在 `tests/test_hero_<族>.py`——A `test_hero_active.py` / B
+`test_hero_damage_after.py` / C `test_hero_target_pool.py` / D `test_hero_move_after.py` /
+E `test_hero_response_window.py` / F `test_hero_lord.py` / G `test_hero_arrange.py` /
+H `test_hero_transform.py` / I `test_hero_rejudge.py` + 顺带族 M `test_hero_target_change.py`
+与 L `phase_body`（住 `test_hero_catalog.py`）。每族 ≥2 条，"一个文件一族"比"一个文件九节"
+定位更快，且同样满足"不混进 `test_skills.py`"这条纪律；票面点名"新文件
+`tests/test_hero_skills.py`"的意图（族级单测有独立的家）由这两层合起来兑现。
 
 票 01 尚未登记任何武将技能（那是票 12），故这里的 ``hero.caocao.hujia`` 用**注入的假定义**
 表达——试的是"载体 + 门控"这套机器，而不是曹操的技能行为；注入点在

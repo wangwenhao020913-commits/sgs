@@ -73,6 +73,15 @@ NAMES: dict[str, tuple[str, str]] = {
     "32-five-grains-selection": ("五谷丰登 · 选牌", "`SELECT_CARDS` 选择面；X = 目标数、剩余牌进弃牌堆"),
     "33-borrowed-sword-use-slash": ("借刀杀人 · 使用【杀】", "`RESPOND/BORROWED_SWORD`，候选是 `UseCard`（使用而非打出）"),
     "34-dismantle-or-snatch-equip-judge": ("拆顺取装备区 / 判定区", "`SELECT_CARDS` 选择面含装备区或判定区；判定区先入在前"),
+    # ---- 8. 武将技能（票 14 §8） ----
+    "35-hero-damage-points": ("【遗计】逐点伤害", "B 族按点触发：一次多点伤害里同一时机被派发多次、各自问一次「是否发动」；`DAMAGE_AFTER_TAKE` 的两个时机实例"),
+    "36-hero-rejudge-cycle": ("【鬼才】改判循环", "I 族改判窗口（`WindowCause.REJUDGE`）：判定牌生效前打出代替；`JUDGE_CARD_BEFORE_EFFECT` 可循环重开"),
+    "37-hero-lord-request": ("【护驾】/【激将】势力求助", "F 族主公技：`WindowCause.LORD_REQUEST` 的势力作用域求助窗口；同势力角色打出【闪】/【杀】"),
+    "38-hero-lost-cards": ("【连营】+【枭姬】含顶替", "D 族 `MOVE_AFTER` 内联时机：失去最后的手牌 / 失去装备区里的一张牌（含同槽顶替的旧装备那条 `LOSE`）"),
+    "39-hero-target-pool": ("【空城】+【谦逊】目标池", "C 族目标池真排除：【谦逊】无条件、【空城】手牌为零时，受限牌的目标候选里没有受保护座位"),
+    "40-hero-wushuang": ("【无双】两张【闪】", "E 族响应窗口张数：一次【杀】的生效前连开两个 `DODGE` 窗口，两张【闪】才抵消"),
+    "41-hero-guanxing": ("【观星】排列", "G 族授予可见性与排列：`ARRANGE` 询问 + `ArrangeCards`（只记面内位置，无带牌面的 delta）"),
+    "42-hero-transform": ("转化族（武圣 / 龙胆 / 国色 / 急救）", "H 族转化牌泛化：`UseCard` / `PlayCard` 的 `virtual_sources` 非空；来源实体牌经使用链搬进处理区再进弃牌堆"),
 }
 """slug → ``(中文场景名, 验证的规则条目)``：索引表里两列人工维护的**单一真源**。"""
 

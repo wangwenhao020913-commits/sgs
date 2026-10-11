@@ -40,7 +40,9 @@ REPLAY_SINGLE_LIMIT_BYTES = 4 * 1024 * 1024
 不是不可动的硬门——后续里程碑的基准可能合法地更大，只是不许悄悄长大。
 阈值 = retro-02 落地时的实测值 + 合理余量；实测基线（2026-10，票 32 后 34 条基准）：
 34 条 ``*.jsonl`` 合计 **33,586,853 字节 ≈ 32.03 MiB**，最大单文件
-**2,986,975 字节 ≈ 2.85 MiB**（``30-halberd-three-targets.jsonl``）。体积根源是记录流内联
+**2,986,975 字节 ≈ 2.85 MiB**（``30-halberd-three-targets.jsonl``）；票 14 加 8 条武将
+专项基准后 42 条合计 **37,480,092 字节 ≈ 35.74 MiB**，最大单文件 **1,019,785 字节
+≈ 0.97 MiB**（``38-hero-lost-cards.jsonl``），仍在上限内。体积根源是记录流内联
 完整 ``Query`` / ``PlayerView``（随弃牌堆增长），不是种子没挑短——挑选已按"记录条数最少"
 做过（``seed_search.py``）。门禁每次都要读入并逐行回放全部体积
 （``test_golden_replay_matches_byte_for_byte``）。"""
@@ -266,7 +268,16 @@ def test_golden_replay_matches_byte_for_byte(slug: str, tmp_path: Path, update_g
         "header 声明的 pack / deck 必须能被当前数据加载"
     )
     seed, tape = tape_from_journal(records)
-    engine = Engine.new_game(seed=seed, rule_config=header.rule_config, pack=pack)
+    scenario = scenarios.SCENARIOS[slug]
+    # 武将**不是** header 的一部分（武将不是牌、没有 delta）：专项基准的逐座位武将以
+    # ``scenarios.SCENARIOS`` 为唯一真源（与"档位 / 人数"同一姿态，票 14 §8）。
+    engine = Engine.new_game(
+        seed=seed,
+        rule_config=header.rule_config,
+        pack=pack,
+        heroes=scenario.heroes,
+        hero_pool=scenario.hero_pool,
+    )
     player = TapePlayer(tape)
     engine.run([player] * header.rule_config.player_count)
 
@@ -276,10 +287,11 @@ def test_golden_replay_matches_byte_for_byte(slug: str, tmp_path: Path, update_g
         artifact.write_text(actual, encoding="utf-8")
         raise AssertionError(f"{_first_divergence(expected, actual)}\n本次实际记录流：{artifact}")
 
-    if slug in goals.M2_GOALS:
+    if slug in goals.M2_GOALS or slug in goals.M3_GOALS:
         # 门禁期**真的**验证这条基准在证它声称的机制（票 32 §1；M2 用"随机驱动 + 事后判据"
-        # 替代 M1 的录制期脚本，故判据必须在这里也生效，而不是只在 --update-golden 时）。
-        assert goals.M2_GOALS[slug](engine), (
+        # 替代 M1 的录制期脚本，故判据必须在这里也生效，而不是只在 --update-golden 时；
+        # M3 的专项基准同一口径，票 14 §8）。
+        assert goals.goal_for(slug)(engine), (
             f"{slug}：回放后的记录流没有命中它在 goals.py 里声称的机制——"
             f"基准与判据脱节（要么换种子，要么修判据）"
         )
@@ -354,17 +366,24 @@ FROZEN_BASELINES = (
 
 
 def test_the_frozen_m1_six_stay_in_the_file_set() -> None:
-    """M1 六条必须在 34 条里原样保留（票 32 §1：回归网不因 M2 扩容而消失）。"""
+    """M1 六条必须在基准文件集合里原样保留（票 32 §1：回归网不因 M2/M3 扩容而消失）。"""
     assert set(FROZEN_BASELINES) <= {path.stem for path in _golden_files()}
     assert set(FROZEN_BASELINES) == set(scenarios.M1_SCENARIOS)
 
 
-M2_BASELINES = tuple(name for name in distribution.SLUG_CLASSES if name not in set(FROZEN_BASELINES))
-"""M2 的 28 条基准：分布表里除 M1 六条以外的全部 slug（票 32 §1）。"""
+M3_BASELINES = tuple(scenarios.M3_SCENARIOS)
+"""M3 的 8 条武将技能专项基准（票 14 §8）。"""
+
+M2_BASELINES = tuple(
+    name
+    for name in distribution.SLUG_CLASSES
+    if name not in set(FROZEN_BASELINES) and name not in set(M3_BASELINES)
+)
+"""M2 的 28 条基准：分布表里除 M1 六条与 M3 八条以外的全部 slug（票 32 §1 / 票 14 §8）。"""
 
 
 def test_the_baseline_distribution_meets_every_category_minimum() -> None:
-    """每类达标：七类必需表逐类计数 ≥ 最少条数（票 17 §1 的机械载体）。"""
+    """每类达标：八类必需表逐类计数 ≥ 最少条数（票 17 §1 的机械载体）。"""
     slugs = {path.stem for path in _golden_files()}
     counts = Counter(
         category
@@ -389,7 +408,12 @@ def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
         "每个基准文件都必须在 distribution.SLUG_CLASSES 里登记；反之不得有孤儿登记"
     )
     assert files == set(scenarios.SCENARIOS), "场景表与基准文件集合互相等于"
-    assert set(M2_BASELINES) == files - set(FROZEN_BASELINES), "M2 恰为 34 − 6 = 28 条"
+    assert set(M2_BASELINES) == files - set(FROZEN_BASELINES) - set(M3_BASELINES), (
+        "M2 恰为 42 − 6 − 8 = 28 条"
+    )
+    assert set(M3_BASELINES) == set(scenarios.M3_SCENARIOS) == set(goals.M3_GOALS), (
+        "M3 的 8 条专项基准必须与场景表、判据表三方相等"
+    )
 
 
 def test_every_m2_baseline_has_an_after_the_fact_goal() -> None:

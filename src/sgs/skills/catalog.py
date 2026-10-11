@@ -70,6 +70,7 @@ __all__ = [
     "ActivationPlan",
     "Hook",
     "HookCondition",
+    "MATCH_OWNER_KEY",
     "Seam",
     "SeamKind",
     "SkillDef",
@@ -452,12 +453,26 @@ def is_equipped(state: GameState, seat: int, slot: SlotKind) -> bool:
 # ---------------------------------------------------------------------------
 
 
+MATCH_OWNER_KEY = "hook_owner"
+"""帧私有槽名：**条件求值期**当前实例的持有者（票 14 §2）。
+
+``Hook.condition(host, frame)`` 拿不到实例，而条件又必须能按"谁的牌动了"过滤
+（【连营】/【枭姬】的"**你**失去…"）——故 :func:`_matching_hooks` 在求值前把持有者写进
+这个槽。它与 :data:`skill_owner`（**回调执行期**才写）分开，是为了不改变既有条件的
+求值时机（【反馈】等的退化判据依赖"求值期读不到持有者"）。
+"""
+
+
 def _matching_hooks(instance: SkillInstance, timing: Timing, host: Any, frame: Frame) -> tuple[Hook, ...]:
     """本实例在 ``timing`` 上**条件成立**的钩子（条件缺省 = 恒成立；票 07 的 ``condition``）。
 
     ``per_point``（票 05）在这里过滤"逐点"触发次数：``False`` 的钩子只在伤害帧的**第一轮**
     有机会（:func:`damage_point_index` 为 0），``True`` 的每一轮都有机会。
+
+    求值前把 ``instance.owner`` 写进 :data:`MATCH_OWNER_KEY`（票 14 §2）：条件据此判
+    "失去牌的是不是持有者本人"，而 ``skill_owner`` 的写入时机（回调前）保持不变。
     """
+    frame.data[MATCH_OWNER_KEY] = instance.owner
     return tuple(
         hook
         for hook in instance.definition.hooks
@@ -841,14 +856,23 @@ def _double_sword(host: Any, frame: Frame) -> Control:
             if host.suspended(picked):
                 return "stay"
             if picked:
-                host.move_in_frame(
-                    frame,
-                    state.refs(picked),
-                    to_zone=ZoneRef(Zone.DISCARD),
-                    reason=MoveReason.DISCARD,
-                    owner=target,
-                    actor=target,
-                )
+                moved_key = f"double_sword_moved:{target}"
+                if not frame.data.get(moved_key):
+                    frame.data[moved_key] = True
+                    if (
+                        host.move_in_frame(
+                            frame,
+                            state.refs(picked),
+                            to_zone=ZoneRef(Zone.DISCARD),
+                            reason=MoveReason.DISCARD,
+                            owner=target,
+                            actor=target,
+                        )
+                        == "stay"
+                    ):
+                        # 成本移动内联挂起（【连营】一类的"失去牌后"会提问）：让出控制权，
+                        # 由挂起的派发先消费那条应答（票 14 §1）。
+                        return "stay"
         else:
             host.draw_for_hand(frame, source, 1)
         cursor += 1
@@ -887,16 +911,22 @@ def _ice_sword(host: Any, frame: Frame) -> Control:
             return "stay"
         if not picked:
             break
-        host.move_in_frame(
-            frame,
-            host.state.refs(picked),
-            to_zone=ZoneRef(Zone.DISCARD),
-            reason=MoveReason.DISCARD,
-            owner=target,
-            actor=target,
-        )
+        # 游标在**搬牌之前**前进：这次弃置可能内联派发"失去牌后"并挂起（目标若是孙尚香
+        # 掉装备就是【枭姬】），重入时据此跳过已搬的这一张（票 14 §1）。
+        frame.data["ice_sword_done"] = done + 1
+        if (
+            host.move_in_frame(
+                frame,
+                host.state.refs(picked),
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.DISCARD,
+                owner=target,
+                actor=target,
+            )
+            == "stay"
+        ):
+            return "stay"
         done += 1
-        frame.data["ice_sword_done"] = done
     frame.data["ice_sword_finished"] = True
     return None
 
@@ -942,7 +972,9 @@ def _qilin_bow(host: Any, frame: Frame) -> Control:
     frame.data["qilin_bow_done"] = True
     if not picked:
         return None
-    host.move_in_frame(
+    # "内联挂起就让出控制权"（票 14 §1）：目标若是孙尚香，掉坐骑触发【枭姬】会提问，
+    # `"stay"` 必须透传；`qilin_bow_done` 已在搬牌前落，重入时上面那条短路接手。
+    return host.move_in_frame(
         frame,
         host.state.refs(picked),
         to_zone=ZoneRef(Zone.DISCARD),
@@ -950,7 +982,6 @@ def _qilin_bow(host: Any, frame: Frame) -> Control:
         owner=target,
         actor=frame.data.get("skill_owner"),
     )
-    return None
 
 
 def _green_dragon_blade(host: Any, frame: Frame) -> Control:
@@ -978,25 +1009,51 @@ def _green_dragon_blade(host: Any, frame: Frame) -> Control:
 
 
 def _move_by_source(
-    host: Any, frame: Frame, card_ids: tuple[int, ...], *, to_zone: ZoneRef, owner: int
-) -> None:
+    host: Any,
+    frame: Frame,
+    card_ids: tuple[int, ...],
+    *,
+    to_zone: ZoneRef,
+    owner: int,
+    key: str,
+) -> Control:
     """把一批选中的牌按**来源区**分组移动：一次 ``move_card`` 只能有一个来源区。
 
     【贯石斧】的成本可以跨手牌与装备区（`A/flow_move.txt:33-39`），故逐来源区各发一条
     ``card_move``；分组用 ``dict``（插入序确定），顺序逐种子可复现。
+
+    **让出控制权（票 14 §1）**：成本移动可能内联派发 `MOVE_AFTER` 并挂起（例如
+    【枭姬】的持有者弃掉自己的装备），`"stay"` 必须透传；帧私有游标 ``key`` 让重入
+    只搬还没搬的组。
     """
-    groups: dict[ZoneRef, list[int]] = {}
-    for card_id in card_ids:
-        groups.setdefault(locate(host.state, card_id), []).append(card_id)
-    for ids in groups.values():
-        host.move_in_frame(
+    if not card_ids:
+        return None
+    plan_key = f"{key}:plan"
+    done_key = f"{key}:done"
+    plan = frame.data.get(plan_key)
+    if plan is None:
+        groups: dict[ZoneRef, list[int]] = {}
+        for card_id in card_ids:
+            groups.setdefault(locate(host.state, card_id), []).append(card_id)
+        plan = tuple(tuple(ids) for ids in groups.values())
+        frame.data[plan_key] = plan
+    index = frame.data.get(done_key, 0)
+    while index < len(plan):
+        frame.data[done_key] = index + 1
+        control = host.move_in_frame(
             frame,
-            host.state.refs(ids),
+            host.state.refs(plan[index]),
             to_zone=to_zone,
             reason=MoveReason.DISCARD,
             owner=owner,
             actor=owner,
         )
+        if control == "stay":
+            return "stay"
+        index += 1
+    frame.data.pop(plan_key, None)
+    frame.data.pop(done_key, None)
+    return None
 
 
 def _axe(host: Any, frame: Frame) -> Control:
@@ -1008,13 +1065,22 @@ def _axe(host: Any, frame: Frame) -> Control:
     两张牌可跨手牌 / 装备区，故按来源区分别移动。
     """
     owner = frame.data.get("skill_owner")
-    if frame.data.get("axe_used") or frame.data.get("source") != owner:
+    if owner is None or frame.data.get("source") != owner or frame.data.get("axe_used"):
         return None
     card_ids = host.activation_picks(frame, "equip.axe")
-    if not card_ids or owner is None:
+    if not card_ids:
         return None
+    # 成本的搬牌可能内联挂起；`axe_used` 只在**成本搬完之后**落，重入时据此短路。
+    if _move_by_source(
+        host,
+        frame,
+        card_ids,
+        to_zone=ZoneRef(Zone.DISCARD),
+        owner=owner,
+        key="axe:cost",
+    ) == "stay":
+        return "stay"
     frame.data["axe_used"] = True
-    _move_by_source(host, frame, card_ids, to_zone=ZoneRef(Zone.DISCARD), owner=owner)
     add_tag(frame, Tag.SAVED)
     return None
 

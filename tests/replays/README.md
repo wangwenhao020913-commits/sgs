@@ -7,22 +7,24 @@
 - 录制 / 重录的唯一入口：`pytest --update-golden`（票 10 §6；不给产品 CLI 加参数）。
 - 场景脚本玩家（`scenarios.py`）**只在录制时使用**；验证期一律 `TapePlayer`。
 - `tests/test_replays.py` 断言本表的 slug 集合与 `*.jsonl` 集合**互相等于**（防孤儿），
-  并按 `distribution.py` 的七类必需表判决**分布判据**（票 17 §1 / 票 32 §1）。
+  并按 `distribution.py` 的八类必需表判决**分布判据**（票 17 §1 / 票 32 §1 / 票 14 §8）。
 
-## 分布判据（票 32 §1）
+## 分布判据（票 32 §1 / 票 14 §8）
 
 `≥30` 条只是门槛，不是目标。真源 = `tests/replays/distribution.py`：**类 → 最少条数**
 （人数骨架 5 / 判定与延时锦囊 4 / 无懈可击与响应链 5 / 死亡奖惩 3 / 多人濒死 3 /
-装备·距离·转化 4 / 普通锦囊与打出 4 = **28 条新增**）+ M1 六条回归 = **34 条**；
-判决"每类达标、每个 slug 恰属至少一类、索引 == 文件集合 == 类表"。
+装备·距离·转化 4 / 普通锦囊与打出 4 = **28 条 M2 新增** + 武将技能 8 = **36 条新增**）
++ M1 六条回归 = **42 条**；判决"每类达标、每个 slug 恰属至少一类、索引 == 文件集合 == 类表"。
 
-## 录制驱动（票 32 §1）
+## 录制驱动（票 32 §1 / 票 14 §8）
 
 - M1 六条走 `ScenarioPlayer`：录制期精确迫使目标链发生（票 12 §3）。
 - M2 28 条走**随机驱动 + 事后判据**：录制期用与产品同源的 `RandomPlayer`（测试侧种子子流，
   确定性）跑完整局，再断言"这条基准要证的事真的发生过"（判据在 `goals.py`）。
-  磁带冻结的是**决策内容**，回放期一律 `TapePlayer`，与驱动无关；种子由开发期搜索得到、
-  写死在 `scenarios.py`，录制期零搜索。
+- M3 8 条武将技能专项基准同样走随机驱动 + 事后判据，但用 `Scenario.heroes` **显式逐座位**
+  指定武将（`heroes=()` 是"数据文件启用池随机发放"，无武将则缺省 `None`）；判据在
+  `goals.M3_GOALS`，与 M2 同一门禁口径。磁带冻结的是**决策内容**，回放期一律 `TapePlayer`，
+  与驱动无关；种子由开发期搜索得到、写死在 `scenarios.py`，录制期零搜索。
 
 ## 录制 M2 基准：先跑种子搜索（加基准 / 换种子时）
 
@@ -86,6 +88,14 @@ golden + 更快的回放）；候选最少的基准先做贪心去重。**人数
 | `32-five-grains-selection` | 五谷丰登 · 选牌 | 普通锦囊与打出 | `standard_108` | 4 | `SELECT_CARDS` 选择面；X = 目标数、剩余牌进弃牌堆 |
 | `33-borrowed-sword-use-slash` | 借刀杀人 · 使用【杀】 | 普通锦囊与打出 | `standard_108` | 5 | `RESPOND/BORROWED_SWORD`，候选是 `UseCard`（使用而非打出） |
 | `34-dismantle-or-snatch-equip-judge` | 拆顺取装备区 / 判定区 | 普通锦囊与打出 | `standard_108` | 4 | `SELECT_CARDS` 选择面含装备区或判定区；判定区先入在前 |
+| `35-hero-damage-points` | 【遗计】逐点伤害 | 武将技能 | `standard_108` | 4 | B 族按点触发：一次多点伤害里同一时机被派发多次、各自问一次「是否发动」；`DAMAGE_AFTER_TAKE` 的两个时机实例 |
+| `36-hero-rejudge-cycle` | 【鬼才】改判循环 | 武将技能 | `standard_108` | 4 | I 族改判窗口（`WindowCause.REJUDGE`）：判定牌生效前打出代替；`JUDGE_CARD_BEFORE_EFFECT` 可循环重开 |
+| `37-hero-lord-request` | 【护驾】/【激将】势力求助 | 武将技能 | `standard_108` | 4 | F 族主公技：`WindowCause.LORD_REQUEST` 的势力作用域求助窗口；同势力角色打出【闪】/【杀】 |
+| `38-hero-lost-cards` | 【连营】+【枭姬】含顶替 | 武将技能 | `standard_108` | 4 | D 族 `MOVE_AFTER` 内联时机：失去最后的手牌 / 失去装备区里的一张牌（含同槽顶替的旧装备那条 `LOSE`） |
+| `39-hero-target-pool` | 【空城】+【谦逊】目标池 | 武将技能 | `standard_108` | 4 | C 族目标池真排除：【谦逊】无条件、【空城】手牌为零时，受限牌的目标候选里没有受保护座位 |
+| `40-hero-wushuang` | 【无双】两张【闪】 | 武将技能 | `standard_108` | 4 | E 族响应窗口张数：一次【杀】的生效前连开两个 `DODGE` 窗口，两张【闪】才抵消 |
+| `41-hero-guanxing` | 【观星】排列 | 武将技能 | `standard_108` | 4 | G 族授予可见性与排列：`ARRANGE` 询问 + `ArrangeCards`（只记面内位置，无带牌面的 delta） |
+| `42-hero-transform` | 转化族（武圣 / 龙胆 / 国色 / 急救） | 武将技能 | `standard_108` | 4 | H 族转化牌泛化：`UseCard` / `PlayCard` 的 `virtual_sources` 非空；来源实体牌经使用链搬进处理区再进弃牌堆 |
 
 ## 记录面 v2（施工票 21 落地后）
 

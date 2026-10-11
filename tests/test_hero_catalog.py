@@ -14,8 +14,16 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from pathlib import Path
 
-from sgs.data import Gender, Kingdom, enabled_hero_ids, load_content_pack, load_heroes
+from sgs.data import (
+    Gender,
+    Kingdom,
+    enabled_hero_ids,
+    hero_skill_id,
+    load_content_pack,
+    load_heroes,
+)
 from sgs.engine import DRAW_COUNT, Engine
 from sgs.skills import CATALOG
 from sgs.state import EndPhase, Pass
@@ -408,3 +416,66 @@ def test_declining_biyue_leaves_the_hand_alone():
 
     assert len(player.queries) == 1
     assert sorted(engine.state.player(0).hand) == list(range(50, 54)), "不发动 ⇒ 一张都不摸"
+
+
+SKILL_FILES: dict[str, str] = {
+    # 魏
+    "hero.caocao.jianxiong": "test_hero_damage_after.py",
+    "hero.caocao.hujia": "test_hero_lord.py",
+    "hero.simayi.fankui": "test_hero_damage_after.py",
+    "hero.simayi.guicai": "test_hero_rejudge.py",
+    "hero.guojia.tiandu": "test_hero_rejudge.py",
+    "hero.guojia.yiji": "test_hero_damage_after.py",
+    # 蜀
+    "hero.liubei.rende": "test_hero_active.py",
+    "hero.liubei.jijiang": "test_hero_lord.py",
+    "hero.guanyu.wusheng": "test_hero_transform.py",
+    "hero.zhaoyun.longdan": "test_hero_transform.py",
+    "hero.machao.mashu": "test_hero_target_change.py",
+    "hero.machao.tieqi": "test_hero_response_window.py",
+    "hero.zhugeliang.guanxing": "test_hero_arrange.py",
+    "hero.zhugeliang.kongcheng": "test_hero_target_pool.py",
+    # 吴
+    "hero.sunquan.zhiheng": "test_hero_active.py",
+    "hero.sunquan.jiuyuan": "test_hero_lord.py",
+    "hero.zhouyu.yingzi": "test_hero_catalog.py",
+    "hero.zhouyu.fanjian": "test_hero_active.py",
+    "hero.luxun.qianxun": "test_hero_target_pool.py",
+    "hero.luxun.lianying": "test_hero_move_after.py",
+    "hero.daqiao.guose": "test_hero_transform.py",
+    "hero.daqiao.liuli": "test_hero_target_change.py",
+    "hero.sunshangxiang.jieyin": "test_hero_active.py",
+    "hero.sunshangxiang.xiaoji": "test_hero_move_after.py",
+    # 群
+    "hero.huatuo.jijiu": "test_hero_transform.py",
+    "hero.huatuo.qingnang": "test_hero_active.py",
+    "hero.lvbu.wushuang": "test_hero_response_window.py",
+    "hero.diaochan.lijian": "test_hero_active.py",
+    "hero.diaochan.biyue": "test_hero_catalog.py",
+}
+"""29 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表）。
+
+一个显式登记，而不是从测试源码里猜：新增一条技能时这张表先缺键变红，逼出"给它写一条
+断言"。短 id 在该文件里确实出现是第二道闸（防"登记了但文件里其实没提"）。"""
+
+
+def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
+    """**每条启用技能都至少被一条族级单测点名**（票 14 §1 / 票 12 §要做什么 3 的机械补全）。"""
+    skills = {
+        hero_skill_id(hero.id, skill.id)
+        for hero in HEROES.heroes
+        if hero.enabled
+        for skill in hero.skills
+    }
+
+    assert set(SKILL_FILES) == skills, "覆盖表必须恰等于 16 名的 29 条技能"
+
+    tests_dir = Path(__file__).resolve().parent
+    unnamed = sorted(
+        skill_id
+        for skill_id, filename in SKILL_FILES.items()
+        if skill_id.rsplit(".", 1)[1]
+        not in (tests_dir / filename).read_text(encoding="utf-8")
+    )
+
+    assert not unnamed, "这些技能登记了测试文件、但短 id 没出现在文件里：" + "；".join(unnamed)

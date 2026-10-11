@@ -73,6 +73,46 @@ def test_the_unsealed_set_is_exactly_the_move_after_node():
     assert Timing.MOVE_AFTER in COVERAGE, "解封的节点必须有实测来源"
 
 
+PHASE_START_NODES = (
+    Timing.PHASE_PREPARE_START,
+    Timing.PHASE_JUDGE_START,
+    Timing.PHASE_DRAW_START,
+    Timing.PHASE_PLAY_START,
+    Timing.PHASE_DISCARD_START,
+    Timing.PHASE_FINISH_START,
+)
+"""六条阶段起点：M2 解封了摸牌 / 出牌 / 弃牌三条，M3 **一条都没再动**（票 14 §6）。"""
+
+M2_PHASE_START_WHITELIST = (
+    Timing.PHASE_DRAW_START,
+    Timing.PHASE_PLAY_START,
+    Timing.PHASE_DISCARD_START,
+)
+"""M2 就在白名单里的三条阶段起点（摸牌 / 出牌 / 弃牌）；M3 的增量必须为空。"""
+
+
+def test_m3_unseals_no_phase_start_node():
+    """六条 ``PHASE_*_START`` 的解封面与 M2 逐节点相同（票 14 §6）。
+
+    "解封集合 = 白名单增量 = {MOVE_AFTER}" 的集合等式已经钉住总量；这条把票面点名的
+    "``PHASE_*_START`` 不动"写成**逐节点的机械判据**：白名单里的阶段起点恰是 M2 的
+    摸牌 / 出牌两条，其余四条继续留在空日志节点里。
+    """
+    whitelist = {timing.value for timing in DISPATCH_WHITELIST}
+    empty_log = {timing.value for timing in EMPTY_LOG}
+
+    whitelisted = {timing.value for timing in PHASE_START_NODES if timing.value in whitelist}
+    assert whitelisted == {
+        timing.value for timing in M2_PHASE_START_WHITELIST
+    }, "M3 没有新解封任何阶段起点"
+    for timing in PHASE_START_NODES:
+        if timing in M2_PHASE_START_WHITELIST:
+            continue
+        assert timing.value in empty_log, f"{timing.value} 应继续留在空日志节点里"
+        assert timing.value not in whitelist, f"{timing.value} 不得进 dispatch 白名单"
+
+
+
 def test_the_dispatch_whitelist_and_the_empty_log_nodes_restate_the_implemented_set():
     assert len(WHITELIST) == 54, "M2 的 53 + M3 解封的 `MOVE_AFTER`（票 07）"
     assert len(EMPTY_LOG) == 11

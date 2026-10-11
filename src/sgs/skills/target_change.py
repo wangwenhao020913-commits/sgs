@@ -152,14 +152,23 @@ def _liuli(host: Any, frame: Frame) -> Control:
         return None
     new_target = pool[chosen[0]]
 
-    host.move_in_frame(
-        frame,
-        host.state.refs(cost),
-        to_zone=ZoneRef(Zone.DISCARD),
-        reason=MoveReason.DISCARD,
-        owner=owner,
-        actor=owner,
-    )
+    # 成本搬牌可能内联派发"失去牌后"并挂起（票 14 §1）：先落"已搬"游标，`"stay"` 原样
+    # 透传；重入时跳过搬牌、直接续跑转移与补派发。
+    moved_key = "liuli:cost_moved"
+    if not frame.data.get(moved_key):
+        frame.data[moved_key] = True
+        if (
+            host.move_in_frame(
+                frame,
+                host.state.refs(cost),
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.DISCARD,
+                owner=owner,
+                actor=owner,
+            )
+            == "stay"
+        ):
+            return "stay"
     frame.data[_LIULI_USED] = True
     frame.data["targets"] = tuple(new_target if seat == owner else seat for seat in targets)
     # 新目标也是"成为目标时"：对它补一条派发（它因此照常进响应窗口）。**载荷显式给

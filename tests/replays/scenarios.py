@@ -58,6 +58,9 @@ class Scenario:
     ``driver`` 是录制期的驱动：M1 的六条用 ``"scripted"``（``ScenarioPlayer`` 迫使目标链
     发生）；M2 的 28 条用 ``"random"``（与产品同源的随机玩家跑完整局，事后判据只负责
     "这条基准要证的事真的发生过"）。磁带冻结决策内容，回放期一律 ``TapePlayer``。
+
+    ``heroes`` / ``hero_pool``（票 14 §8）：M3 的专项基准用**显式逐座位武将**
+    （``heroes``）保证被测技能在场；缺省 ``None`` ⇒ 无武将模式，M2 的 34 条保持逐字节不变。
     """
 
     slug: str
@@ -66,6 +69,8 @@ class Scenario:
     player_count: int = 2
     deck_profile: str = M1_DECK_PROFILE
     driver: str = "scripted"
+    heroes: tuple[str, ...] | None = None
+    hero_pool: tuple[str, ...] | None = None
 
 
 M1_SCENARIOS: dict[str, Scenario] = {
@@ -164,7 +169,73 @@ M2_SCENARIOS: dict[str, Scenario] = {
 再贪心分配使 28 个 ``(人数, 种子)`` 互不相同——更短的局 = 更小的 golden 文件 +
 更快的门禁回放。搜索脚手架在 ``.scratch/t32/``（被 gitignore，不进交付）。"""
 
-SCENARIOS: dict[str, Scenario] = {**M1_SCENARIOS, **M2_SCENARIOS}
+
+def _m3(slug: str, *, seed: int, heroes: tuple[str, ...], player_count: int = 4, max_turns: int = 400) -> Scenario:
+    """M3 专项基准（票 14 §8）：显式逐座位武将 + 随机驱动 + 事后判据。"""
+    return Scenario(
+        slug=slug,
+        seed=seed,
+        max_turns=max_turns,
+        player_count=player_count,
+        deck_profile=M2_DECK_PROFILE,
+        driver="random",
+        heroes=heroes,
+    )
+
+
+M3_SCENARIOS: dict[str, Scenario] = {
+    # B 族逐点伤害：【遗计】在一次多点伤害里问两次（郭嘉在场）。
+    "35-hero-damage-points": _m3(
+        "35-hero-damage-points",
+        seed=150,
+        heroes=("guojia", "caocao", "simayi", "luxun"),
+    ),
+    # I 族改判循环：司马懿【鬼才】的改判窗口（判定牌生效前打出代替）。
+    "36-hero-rejudge-cycle": _m3(
+        "36-hero-rejudge-cycle",
+        seed=169,
+        heroes=("simayi", "guojia", "sunquan", "luxun"),
+    ),
+    # F 族势力求助窗口：主公在曹操 / 刘备之中，且**同势力**的求助对象在场（司马懿 / 关羽）。
+    "37-hero-lord-request": _m3(
+        "37-hero-lord-request",
+        seed=116,
+        heroes=("caocao", "simayi", "liubei", "guanyu"),
+    ),
+    # D 族失去牌后：【连营】+【枭姬】含顶替。
+    "38-hero-lost-cards": _m3(
+        "38-hero-lost-cards",
+        seed=76,
+        heroes=("luxun", "sunshangxiang", "guanyu", "sunquan"),
+    ),
+    # C 族目标池真排除：【空城】+【谦逊】。
+    "39-hero-target-pool": _m3(
+        "39-hero-target-pool",
+        seed=128,
+        heroes=("zhugeliang", "luxun", "sunquan", "lvbu"),
+    ),
+    # E 族响应窗口张数：吕布【无双】两张【闪】。
+    "40-hero-wushuang": _m3(
+        "40-hero-wushuang",
+        seed=46,
+        heroes=("lvbu", "guanyu", "zhaoyun", "luxun"),
+    ),
+    # G 族授予可见性与排列：诸葛亮【观星】。
+    "41-hero-guanxing": _m3(
+        "41-hero-guanxing",
+        seed=202,
+        heroes=("zhugeliang", "sunquan", "luxun", "guojia"),
+    ),
+    # H 族转化牌泛化：武圣 / 龙胆 / 国色 / 急救。
+    "42-hero-transform": _m3(
+        "42-hero-transform",
+        seed=145,
+        heroes=("guanyu", "zhaoyun", "daqiao", "huatuo"),
+    ),
+}
+"""8 条 M3 专项基准（票 14 §8）：每条 pin 一族机制的整局记录流，种子由开发期搜索得到。"""
+
+SCENARIOS: dict[str, Scenario] = {**M1_SCENARIOS, **M2_SCENARIOS, **M3_SCENARIOS}
 
 
 @dataclass
@@ -393,11 +464,15 @@ def play_random(
     *,
     deck_profile: str = M2_DECK_PROFILE,
     pack=None,
+    heroes: tuple[str, ...] | None = None,
+    hero_pool: tuple[str, ...] | None = None,
 ) -> Engine:
     """随机驱动跑完整局：M2 录制路径与**种子搜索**（``seed_search.py``）共用的唯一驱动。
 
     磁带冻结的是决策内容，回放与驱动无关；但"搜到的种子"必须与"录制时跑的种子"是同一局，
     否则搜索会拿别的局去验证判据。故只留这一份实现，两边都调它。
+
+    ``heroes`` / ``hero_pool``（票 14 §8）与 :meth:`Engine.new_game` 同义：缺省 = 无武将。
     """
     if pack is None:
         pack = load_content_pack(deck_profile=deck_profile)
@@ -405,6 +480,8 @@ def play_random(
         seed=seed,
         rule_config=RuleConfig(player_count=player_count),
         pack=pack,
+        heroes=heroes,
+        hero_pool=hero_pool,
     )
     stream = RandomSource(seed).substream("ai")
     engine.run([RandomPlayer(stream) for _ in range(player_count)])
@@ -412,9 +489,13 @@ def play_random(
 
 
 def _record_random(slug: str, scenario: Scenario) -> Engine:
-    """M2 路径：随机驱动跑完整局，事后判据断言目标机制真的发生过（票 32 §1）。"""
+    """M2/M3 路径：随机驱动跑完整局，事后判据断言目标机制真的发生过（票 32 §1 / 票 14 §8）。"""
     engine = play_random(
-        scenario.seed, scenario.player_count, deck_profile=scenario.deck_profile
+        scenario.seed,
+        scenario.player_count,
+        deck_profile=scenario.deck_profile,
+        heroes=scenario.heroes,
+        hero_pool=scenario.hero_pool,
     )
     assert goal_for(slug)(engine), (
         f"{slug}：事后判据没命中（seed={scenario.seed}, n={scenario.player_count}）；"

@@ -4,8 +4,9 @@
 由 ``tests/test_replays.py`` 逐类判决：**每类达标、每个 slug 恰属至少一类、无未分类 slug**，
 且 README 索引 == 文件集合 == 本表。
 
-- M1 的六条基准标 ``m1-regression``（回归网，不计入七类必需表）；
-- M2 的 28 条按七类必需表各就各位（一条 slug 可同属多类，本表里没有重叠）。
+- M1 的六条基准标 ``m1-regression``（回归网，不计入八类必需表）；
+- M2 的 28 条按七类必需表各就各位（一条 slug 可同属多类，本表里没有重叠）；
+- M3 的 8 条武将技能专项基准标 ``武将技能``（票 14 §8）。
 """
 
 from __future__ import annotations
@@ -24,8 +25,9 @@ CATEGORY_MINIMUMS: dict[str, int] = {
     "多人濒死": 3,
     "装备/距离/转化": 4,
     "普通锦囊与打出": 4,
+    "武将技能": 8,
 }
-"""七类必需表：类 → 最少条数；合计 = 28 条新增 + M1 六条 = 34 条。"""
+"""八类必需表：类 → 最少条数；合计 = 28 条 M2 新增 + 8 条 M3 专项 + M1 六条 = 42 条。"""
 
 
 SLUG_CLASSES: dict[str, tuple[str, ...]] = {
@@ -71,5 +73,14 @@ SLUG_CLASSES: dict[str, tuple[str, ...]] = {
     "32-five-grains-selection": ("普通锦囊与打出",),
     "33-borrowed-sword-use-slash": ("普通锦囊与打出",),
     "34-dismantle-or-snatch-equip-judge": ("普通锦囊与打出",),
+    # ---- 8. 武将技能（票 14 §8：逐族一条专项基准） ----
+    "35-hero-damage-points": ("武将技能",),
+    "36-hero-rejudge-cycle": ("武将技能",),
+    "37-hero-lord-request": ("武将技能",),
+    "38-hero-lost-cards": ("武将技能",),
+    "39-hero-target-pool": ("武将技能",),
+    "40-hero-wushuang": ("武将技能",),
+    "41-hero-guanxing": ("武将技能",),
+    "42-hero-transform": ("武将技能",),
 }
 """slug → 类（**每个 slug 至少一类**；新增基准必须在这里登记）。"""

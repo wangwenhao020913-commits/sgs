@@ -429,6 +429,115 @@ def test_lianying_fires_when_the_borrowed_weapon_is_handed_over():
     assert weapon in _move_after_cards(engine), "交给也算失去"
 
 
+def test_lianying_does_not_fire_when_another_seat_empties_its_hand():
+    """【连营】写的是"**你**失去最后的手牌"：别人掉光手牌不关持有者的事（票 14 §2）。
+
+    反例的形状：座位 0 是陆逊且**手里有牌**，座位 1 掉光最后一张手牌。触发判据必须
+    落在"失去牌的那个座位 == 技能持有者"，否则这条询问会替陆逊摸牌（票 13 实测的
+    种子 18 崩溃正是这条越界触发把外层应答吃掉）。
+    """
+    filler, other = _cards("peach")[0], _cards("peach")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="luxun", hand=(filler,)), SeatSpec(hand=(other,))],
+        deck=_deck_excluding(filler, other),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.move_in_frame(
+        None,
+        engine.state.refs((other,)),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=1,
+        actor=1,
+    )
+    # 挂起的"失去牌后"派发也要跑完（`_settled` 只看栈与询问，看不到 `_move_pending`）。
+    _advance(engine, [Scripted(), Scripted()], lambda e: _settled(e, other) and e._move_pending is None)
+
+    assert ("hand", "discard", "DISCARD") in _moves_of(engine, other), "座位 1 掉光手牌"
+    assert other in _move_after_cards(engine), "失去牌后照记"
+    assert _drawn_to(_after(engine, other), 0) == [], "不是陆逊失去的牌 ⇒ 连营不摸"
+    assert _hand(engine, 0) == (filler,), "陆逊的手牌一张没动"
+
+
+# ---------------------------------------------------------------------------
+# 统一约定（票 14 §1）：内联 `MOVE_AFTER` 挂起后，调用方**必须让出控制权**
+# ---------------------------------------------------------------------------
+
+
+def test_an_equipment_hook_that_suspends_on_move_after_yields_control():
+    """装备技逐张弃目标装备、目标又是孙尚香时，必须**让出控制权**（票 14 §1）。
+
+    寒冰剑的两次弃置都是 ``MOVE_AFTER`` 的来源；目标每一次掉装备都会问"是否发动
+    【枭姬】"。``_ice_sword`` 若忽略 ``"stay"``，就会在第一条应答被消费之前继续问
+    第二张，把两次询问的应答错位（票 14 已知缺陷族的同一形状）。
+
+    判据：两张装备各进弃牌堆一次；两次"失去装备"各触发一次【枭姬】（共摸 4 张）。
+    """
+    horse, horse2, slash, ice = (
+        _cards("chitu")[0],
+        _cards("dawan")[0],
+        _cards("slash")[0],
+        _cards("ice_sword")[0],
+    )
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(slash,), equip=(ice,)),
+            SeatSpec(hero="sunshangxiang", equip=(horse, horse2)),
+        ],
+        deck=_deck_excluding(horse, horse2, slash, ice),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == slash:
+                    return action
+            return None
+        if query.kind == "SKILL_ACTIVATION":
+            for action in query.legal_actions:
+                if getattr(action, "kind", None) == "ActivateSkill":
+                    return action
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+        if query.kind == "SELECT_CARDS":
+            for action in query.legal_actions:
+                if getattr(action, "kind", None) == "SelectCards":
+                    return action
+        return None
+
+    def defender(query):
+        if query.kind == "DODGE":
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+        return None
+
+    engine = Engine.from_state(state, seed=7)
+    players = [Scripted(attacker), Scripted(defender)]
+    _advance(engine, players, lambda e: len(_drawn_to(e.records, 1)) >= 2)
+
+    assert _moves_of(engine, horse).count(("equip", "discard", "DISCARD")) == 1, "同一张牌不搬第二遍"
+    assert horse in engine.state.discard, "被寒冰剑弃掉的坐骑进了弃牌堆"
+    after = _after(engine, horse)
+    activations = [
+        index
+        for index, record in enumerate(after)
+        if record.kind == "query"
+        and record.query.kind == "SKILL_ACTIVATION"
+        and record.query.actor == 1
+    ]
+    assert activations, "目标掉装备触发【枭姬】的『是否发动』询问"
+    assert after[activations[0] + 1].kind == "action", (
+        "让出控制权：询问之后紧接着就是它的应答——寒冰剑没有在应答被消费之前另发询问"
+    )
+    assert len(_drawn_to(after, 1)) >= 2, "枭姬真的摸了牌"
+
+
 # ---------------------------------------------------------------------------
 # 孙尚香【枭姬】：失去装备区里的一张牌 ⇒ 摸 2 张（含顶替）
 # ---------------------------------------------------------------------------
@@ -521,3 +630,31 @@ def test_xiaoji_ignores_equipment_entering_the_equip_zone():
         "两条移动的来源都不是装备区"
     )
     assert _drawn_to(_after(engine, weapon), 0) == [], "装备进场不是失去 ⇒ 枭姬没摸牌"
+
+
+def test_xiaoji_does_not_fire_when_another_seat_loses_equipment():
+    """【枭姬】写的是"**你**失去装备区里的一张牌"：别人掉装备不关持有者的事（票 14 §2）。
+
+    与【连营】同一处越界：触发判据必须落在"失去牌的那个座位 == 技能持有者"。
+    """
+    filler, weapon = _cards("peach")[0], _cards("crossbow")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="sunshangxiang", hand=(filler,)), SeatSpec(equip=(weapon,))],
+        deck=_deck_excluding(filler, weapon),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.move_in_frame(
+        None,
+        engine.state.refs((weapon,)),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=1,
+        actor=1,
+    )
+    _advance(engine, [Scripted(), Scripted()], lambda e: _settled(e, weapon, from_zone="equip") and e._move_pending is None)
+
+    assert ("equip", "discard", "DISCARD") in _moves_of(engine, weapon), "座位 1 掉了装备"
+    assert _drawn_to(_after(engine, weapon), 0) == [], "不是孙尚香失去的牌 ⇒ 枭姬不摸"
+    assert _hand(engine, 0) == (filler,), "孙尚香的手牌一张没动"

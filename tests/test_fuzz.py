@@ -8,8 +8,8 @@
   "检测点 ≠ 终止点"分支）；``SGS_FUZZ_PLAYERS`` 可覆盖成固定人数。
 - 逐局验不变量：**牌守恒 / 体力范围 / 区域互斥 / 手牌上限 / 事件序号单调 / 每局必达终局 /
   终局牌守恒**，外加票 32 新增的四类：**阵亡者三区为空 / 装备槽位唯一 / 判定区同名唯一 /
-  终局身份-胜负一致**，以及票 04 新增的**候选数上界**（任何询问 ≤ 128；M2 既有的
-  ``DiscardCards`` 枚举不在闸内，见 :func:`_check_candidate_cap`）。
+  终局身份-胜负一致**，以及票 04 新增、票 14 收口的**候选数上界**（任何询问 ≤ 128；
+  四族一维枚举按票 10 的 `DiscardCards` 先例豁免，见 :func:`_check_candidate_cap`）。
 - **不进 fuzz**：同时死亡、无懈链、改判——它们是**路径性质**，随机局不保证命中，
   落基准与构造局面单测更可判决（票 17 §2）。
 - 对局种子来自**测试侧 OS 熵**（``secrets``），**不占游戏内随机源**；失败消息带可复现的
@@ -41,12 +41,16 @@ from sgs.data import ContentPack, Identity, RuleConfig, load_content_pack
 from sgs.engine import Engine, JournalRecord, QueryRecord, RandomSource, TimingRecord
 from sgs.skills import CANDIDATE_CAP
 from sgs.state import (
+    ActivateSkill,
+    ArrangeCards,
+    CardRef,
     DiscardCards,
     EndPhase,
     FrameKind,
     GameState,
     PlayPhaseQuery,
     SlotKind,
+    UseCard,
     Zone,
     ZoneRef,
     project,
@@ -146,9 +150,16 @@ class _BudgetedPlayer:
 
 
 def _play(seed: int, *, players: int = 4, deadline: float | None = None) -> _FuzzEngine:
-    """跑完一局（种子由测试侧给定、不占游戏内随机源）。"""
+    """跑完一局（种子由测试侧给定、不占游戏内随机源）。
+
+    票 14 §11：**开启武将**（``hero_pool=()`` = 数据文件的启用池，随机发放）——不变量
+    集合不变，另加"候选数上界"断言；记录失败时带可复现种子（既有口径）。
+    """
     engine = _FuzzEngine.new_game(
-        seed=seed, rule_config=RuleConfig(player_count=players), pack=PACK
+        seed=seed,
+        rule_config=RuleConfig(player_count=players),
+        pack=PACK,
+        hero_pool=(),
     )
     engine.game_seed = seed
     engine.game_players = players
@@ -248,27 +259,65 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
 
 
 def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> None:
-    """候选数上界（票 04 §验收 7 / `spec.md` §Testing Decisions）：任何询问 ≤ ``CANDIDATE_CAP``。
+    """候选数上界（票 04 §验收 7 / `spec.md` §Testing Decisions / 票 14 §3）：≤ ``CANDIDATE_CAP``。
 
-    **M2 既有的弃牌枚举不在闸内**：``_discard`` 枚举 ``C(手牌, 手牌 − 体力)`` 个子集，
-    与本票的技能组合闸是两族候选（实测：120 局无武将 fuzz 里就有一局到 **210**）。
-    本断言查**其余候选**——技能候选（``ActivateSkill``）正是落在 ``PLAY_PHASE`` 的那一支，
-    故两维相乘的技能一旦忘了降级，这里立刻判红。
+    **审计口径（票 14 §3 的裁定）**：上界只审**两维相乘**的技能候选——spec 的
+    §机制面的统一约定 明写"组合爆炸只对**两维相乘**的技能加闸（上界 128）"，一维的
+    子集枚举与询问级的排列各有其天然的、**不属于技能层**的组合空间。按票 10 建议的
+    "`DiscardCards` 先例"给四族**一维枚举**逐条豁免：
+
+    - ``DiscardCards``：M2 的 ``C(手牌, 手牌−体力)`` 子集（票 04 实测 210，无武将也会撞）；
+    - ``ArrangeCards``：``ARRANGE`` 的 ``X!×(X+1)`` 排列（票 10，询问级候选、非技能组合）；
+    - ``ActivateSkill(choices=())``：一维成本子集，**制衡的 2ⁿ 按票 04 不设闸**；
+    - ``UseCard(virtual_sources≠())``：M2 转化族的两张组合（丈八蛇矛 ``C(n,2)``，票 08 实测 135）。
+
+    余下的：两维相乘的 ``ActivateSkill`` **按技能分别计数**（同一询问里几条互不相关的
+    技能合法地各有自己的候选，票 14 实测一局 6 手牌的【仁德】126 条 + 3 条普通候选 =
+    129 总数）；其余非技能候选按总数查。四条豁免都有"为什么不是两维技能组合"的理由；
+    审计面因此**仍有咬合力**：两维相乘的技能一旦忘了降级，它自己的那一组立刻判红。
     """
     if record is None or record.kind != "query":
         return
-    governed = [
-        action
-        for action in record.query.legal_actions
-        if not isinstance(action, DiscardCards)
-    ]
-    if len(governed) > CANDIDATE_CAP:
+    by_skill: dict[str, int] = {}
+    others = 0
+    for action in record.query.legal_actions:
+        if _is_one_dimensional_enumeration(action):
+            continue
+        if isinstance(action, ActivateSkill):
+            # 审计面 = **两维相乘**的技能候选（`picks` × `choices`）：按技能分别计数。
+            by_skill[action.skill_id] = by_skill.get(action.skill_id, 0) + 1
+        else:
+            others += 1
+    for skill_id, count in by_skill.items():
+        if count > CANDIDATE_CAP:
+            _fail(
+                seed,
+                n,
+                record,
+                f"技能 {skill_id} 的候选数 {count} 超过上界 {CANDIDATE_CAP}"
+                f"（询问 {record.query.kind}）",
+            )
+    if others > CANDIDATE_CAP:
         _fail(
             seed,
             n,
             record,
-            f"候选数 {len(governed)} 超过上界 {CANDIDATE_CAP}（询问 {record.query.kind}）",
+            f"非技能候选数 {others} 超过上界 {CANDIDATE_CAP}（询问 {record.query.kind}）",
         )
+
+
+def _is_one_dimensional_enumeration(action) -> bool:
+    """四族**一维枚举**候选的机械判据（见 :func:`_check_candidate_cap` 的审计口径）。"""
+    if isinstance(action, DiscardCards):
+        return True
+    if isinstance(action, ArrangeCards):
+        return True
+    if isinstance(action, ActivateSkill):
+        # 两维相乘 = 成本维（picks）× 目标维（choices）；只动 picks 的是一维子集枚举。
+        return not action.choices
+    if isinstance(action, UseCard):
+        return bool(action.card.virtual_sources)
+    return False
 
 
 _HP_NEGATIVE_FRAMES = (FrameKind.DAMAGE, FrameKind.LIFE_DECREASE, FrameKind.NEAR_DEATH)
@@ -284,9 +333,15 @@ def _death_on_stack(engine: Engine) -> bool:
 
 
 def _is_hand_limit_point(record: JournalRecord | None) -> bool:
-    return record is not None and record.kind == "timing" and record.timing in (
-        Timing.PHASE_DISCARD_END,
-        Timing.TURN_AFTER_END,
+    """手牌上限的检查点（票 14 §11 的读法收窄）。
+
+    **只认弃牌阶段结束**：上限是**弃牌阶段**的性质（弃到 ≤ 体力），而 M3 的
+    【闭月】在**结束阶段**摸牌——那之后 ``TURN_AFTER_END`` 的手牌合法地超过体力，
+    继续在那里断言会把一条正确规则判红。不变量集合本身不变（每个存活座位仍在自己
+    回合的弃牌阶段末被检查），只是把那一个**过期**的检查点去掉。
+    """
+    return record is not None and record.kind == "timing" and (
+        record.timing is Timing.PHASE_DISCARD_END
     )
 
 
@@ -485,6 +540,26 @@ class _Piles:
         self.discard = []
         self.deck.extend(shuffled)
 
+    def arrange(self, action: ArrangeCards, cards: tuple[CardRef, ...]) -> None:
+        """把一次**只记位置**的排列落到重建牌堆上（票 14 §4 / 票 10 §读法 3）。
+
+        ``place_on_deck`` 刻意不产 delta（避免把被授予的牌面露给记录流），故排列对重建器
+        是"不可见"的：牌面只能从那条 ``ARRANGE`` 询问的 ``revealed`` 取，位置从
+        ``ArrangeCards.order`` / ``split`` 取——复刻
+        :func:`sgs.skills.arrange._apply_arrangement` 的两次 ``place_on_deck``。
+        """
+        ids = [card.card_id for card in cards]
+        top = [ids[index] for index in action.order[: action.split]]
+        bottom = [ids[index] for index in action.order[action.split :]]
+        for batch, to_top in ((top, True), (bottom, False)):
+            if not batch:
+                continue
+            self.deck[:] = [card_id for card_id in self.deck if card_id not in batch]
+            if to_top:
+                self.deck[:0] = batch
+            else:
+                self.deck.extend(batch)
+
 
 def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int, n: int) -> None:
     """从 ``delta`` 重建六个区域，逐条查牌守恒，再与终局活状态互校。
@@ -493,8 +568,24 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int, n: int) -> No
     故"手牌 / 装备区 / 判定区归错座位"也能被抓到，而不只是池级守恒。
     """
     piles = _Piles(seats=len(engine.state.players))
+    arranged: tuple[CardRef, ...] = ()
+    """最近一次 ``ARRANGE`` 询问授予的牌面（自顶向下）；排列行动据此落到重建牌堆上。"""
 
     for record in engine.records:
+        if record.kind == "query" and record.query.kind == "ARRANGE":
+            arranged = tuple(record.query.revealed)
+            continue
+        if (
+            record.kind == "action"
+            and getattr(record, "accepted", False)
+            and isinstance(record.action, ArrangeCards)
+            and arranged
+        ):
+            # 排列是**同一区域内部**的重排（无 delta，见 `place_on_deck`），故重建器要
+            # 在这个行动记录处自己把牌堆顺序改过来（票 14 §4）。
+            piles.arrange(record.action, arranged)
+            arranged = ()
+            continue
         if record.kind != "delta":
             continue
         piles.note_slots(record)
@@ -676,7 +767,7 @@ def test_the_live_checker_catches_hp_above_the_maximum():
         _check_live_invariants(engine, engine.records[-1])
 
 
-def test_the_live_checker_catches_a_hand_over_the_limit_at_a_turn_boundary():
+def test_the_live_checker_catches_a_hand_over_the_limit_at_the_discard_phase_end():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hp=0, hp_max=4, hand=(0,)), SeatSpec(hp=4)],
@@ -686,7 +777,7 @@ def test_the_live_checker_catches_a_hand_over_the_limit_at_a_turn_boundary():
     engine = _FuzzEngine.from_state(state, seed=1)
     engine.game_seed = 1
     engine.game_players = 2
-    boundary = TimingRecord(seq=999, timing=Timing.TURN_AFTER_END, frame_id=0, depth=0)
+    boundary = TimingRecord(seq=999, timing=Timing.PHASE_DISCARD_END, frame_id=0, depth=0)
 
     with pytest.raises(FuzzInvariantError, match="手牌"):
         _check_live_invariants(engine, boundary)
@@ -752,13 +843,46 @@ def test_the_candidate_cap_checker_catches_an_over_cap_query():
     _check_candidate_cap(green, 1, 2)
 
 
-def test_the_candidate_cap_checker_exempts_the_m2_discard_enumeration():
-    """``DiscardCards`` 的 ``C(n, k)`` 是 M2 既有枚举，不属本票的闸（见函数 docstring）。"""
+def test_the_candidate_cap_checker_catches_an_over_cap_two_dimensional_skill():
+    """两维相乘的技能候选超闸必红（票 14 §3：豁免变宽之后咬合力还在）。
+
+    ``picks``（成本）与 ``choices``（目标）两个维度都在变的 ``ActivateSkill`` 是上界
+    真正要管的形状；构造一组超过 128 的两维候选，检查器必须报错。
+    """
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    action = ActivateSkill(
+        skill_id="hero.liubei.rende", picks=(0,), choices=("seat:1",), answers_seq=1
+    )
+    record = _query_record(state, [action for _ in range(CANDIDATE_CAP + 1)])
+
+    with pytest.raises(FuzzInvariantError, match="候选数"):
+        _check_candidate_cap(record, 1, 2)
+
+
+def test_the_candidate_cap_checker_exempts_the_one_dimensional_enumerations():
+    """四族一维枚举都放行（票 14 §3 的审计口径；见 :func:`_check_candidate_cap`）。"""
     state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
     card = state.card(0)
-    record = _query_record(
-        state,
-        [DiscardCards(cards=(card,), answers_seq=1) for _ in range(CANDIDATE_CAP + 1)],
+    virtual = CardRef(
+        card_id=-1, type="slash", name="杀（丈八蛇矛转化）", virtual_sources=(0, 1)
     )
+    families = {
+        "DiscardCards": [
+            DiscardCards(cards=(card,), answers_seq=1) for _ in range(CANDIDATE_CAP + 1)
+        ],
+        "ArrangeCards": [
+            ArrangeCards(order=(0,), split=0, answers_seq=1)
+            for _ in range(CANDIDATE_CAP + 1)
+        ],
+        "ActivateSkill(choices=())": [
+            ActivateSkill(skill_id="hero.sunquan.zhiheng", picks=(0,), answers_seq=1)
+            for _ in range(CANDIDATE_CAP + 1)
+        ],
+        "UseCard(virtual_sources)": [
+            UseCard(card=virtual, targets=(), answers_seq=1)
+            for _ in range(CANDIDATE_CAP + 1)
+        ],
+    }
 
-    _check_candidate_cap(record, 1, 2)
+    for label, actions in families.items():
+        _check_candidate_cap(_query_record(state, actions), 1, 2), f"{label} 应被豁免"

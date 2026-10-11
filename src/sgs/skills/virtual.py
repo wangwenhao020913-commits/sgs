@@ -31,21 +31,17 @@ from itertools import combinations
 from sgs.data import Color
 from sgs.effects import (
     CandidateScope,
-    EffectContext,
     check_count,
     check_targets,
     forced_use_targets,
-    move_card,
 )
 from sgs.state import (
     CardRef,
     GameState,
-    MoveReason,
     PlayCard,
     RespondMode,
     UseCard,
     Zone,
-    ZoneRef,
 )
 
 __all__ = [
@@ -403,38 +399,6 @@ def virtual_card_use(
     return []
 
 
-def _lose_extra_sources(state: GameState, sources: tuple[int, ...], *, actor: int) -> None:
-    """把**非手牌区**的来源牌在候选生成期移出（手牌由使用 / 打出的 L4/L6 自然搬走）。
-
-    规则 16.3 明说转化牌"花色与点数继承原牌、判定按原牌处理"，而武圣 / 急救的"一张
-    红色牌"在标准版下包含装备区里的红牌。装备区的牌不经过"手牌 → 处理区"那条 L4 路径，
-    故在此用一次 ``LOSE`` 移动把它送进弃牌堆——与牌被**使用**后的归宿一致，且不改记
-    录流（候选生成期不发记录，见票 12 §Q21 的"虚拟牌自己不动"）。
-
-    手牌来源**不在这里动**：它由使用 / 打出的既有 L4/L6 移动搬到处理区再进弃牌堆，
-    动了会与那条路径抢同一张牌。
-    """
-    player = state.player(actor)
-    for card_id in sources:
-        if card_id in player.hand:
-            continue
-        if card_id in player.equip:
-            zone = Zone.EQUIP
-        elif card_id in player.judge:
-            zone = Zone.JUDGE
-        else:
-            continue
-        ctx = EffectContext(actor=actor)
-        move_card(
-            state,
-            ctx,
-            (state.card(card_id),),
-            to_zone=ZoneRef(Zone.DISCARD),
-            reason=MoveReason.LOSE,
-            owner=actor,
-        )
-
-
 def virtual_candidates(
     state: GameState,
     ctx: Any,
@@ -449,8 +413,11 @@ def virtual_candidates(
     本函数只做"组合 → 虚拟牌 → 行动"的三段搬运，不重复任何筛选判据——每个技能一个
     ``CANDIDATES`` 回调声明"源筛选 + 目标牌名"，谓词**内联在回调里**（票 03 §要做什么 3）。
 
-    整批候选**先全部算完**、之后才把非手牌区的来源牌移出（:func:`_lose_extra_sources`）：
-    逐组边算边移会让先生成的那组改变后一组看到的目标状态（【空城】读"有没有手牌"）。
+    **本函数只读状态、一张牌都不搬**（票 14 收口）：来源牌（含装备区 / 判定区的）由
+    :meth:`~sgs.engine.game.Engine._move_virtual_sources` 在**使用链**里经
+    ``move_in_frame`` 搬到处理区再进弃牌堆——那条路径才记 delta。早先在这里就地
+    ``move_card`` 不落记录，会让记录流重建的牌堆与活状态分叉（票 14 的 fuzz 开启武将后
+    实测：从装备区转化【杀】后，下一次从弃牌堆的移动对不上重建结果）。
     """
     if ctx.card is not None or ctx.owner != ctx.subject:
         return []
@@ -459,19 +426,13 @@ def virtual_candidates(
     if ctx.scope is CandidateScope.RESPOND and ctx.respond_required != target_type_id:
         return []
     actions: list[Any] = []
-    moved: list[tuple[int, ...]] = []
     for group in sources:
         if len(group) > MAX_VIRTUAL_SOURCES:
             raise VirtualSourceError(
                 f"{target_type_id}: 来源 {len(group)} 张超过上界 {MAX_VIRTUAL_SOURCES}"
             )
         card = transformed_card(state, group, target_type_id)
-        generated = virtual_card_use(state, ctx.subject, card, ctx)
-        if generated:
-            moved.append(group)
-        actions.extend(generated)
-    for group in moved:
-        _lose_extra_sources(state, group, actor=ctx.subject)
+        actions.extend(virtual_card_use(state, ctx.subject, card, ctx))
     return actions
 
 

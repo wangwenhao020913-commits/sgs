@@ -187,7 +187,13 @@ def _pay_sequential(
             return None
         if not picked:
             break
-        _move_to_discard(host, frame, picked, owner=owner)
+        if (
+            _move_to_discard(
+                host, frame, picked, owner=owner, key=f"{key_prefix}:{index}"
+            )
+            == "stay"
+        ):
+            return None
         chosen.extend(picked)
         index += 1
         frame.data["chosen"] = tuple(chosen)
@@ -196,28 +202,46 @@ def _pay_sequential(
 
 
 def _move_to_discard(
-    host: Any, frame: Any, card_ids: tuple[int, ...], *, owner: int
-) -> None:
+    host: Any, frame: Any, card_ids: tuple[int, ...], *, owner: int, key: str
+) -> Any:
     """把选中的牌按**来源区**分组弃置（一次 ``move_card`` 只能有一个来源区）。
 
     与【贯石斧】的 ``_move_by_source`` 同姿态：分组用 ``dict``（插入序确定），
     故"手牌 + 装备区"混选时逐种子可复现。
+
+    **让出控制权（票 14 §1）**：内联 ``MOVE_AFTER`` 的钩子会提问，``move_in_frame``
+    返回 ``"stay"`` 时必须**原样透传**给步骤表——否则本步会在应答被消费之前继续
+    （摸牌 / 压帧），把"是否发动"的应答漏给外层询问。进度（已搬走的组数）存帧私有载荷
+    ``key``，重入时跳过已完成的组，不会把同一批牌搬第二遍。
     """
     if not card_ids:
-        return
-    state = host.state
-    groups: dict[ZoneRef, list[int]] = {}
-    for card_id in card_ids:
-        groups.setdefault(locate(state, card_id), []).append(card_id)
-    for zone, ids in groups.items():
-        host.move_in_frame(
+        return None
+    plan_key = f"{key}:plan"
+    done_key = f"{key}:done"
+    plan = frame.data.get(plan_key)
+    if plan is None:
+        groups: dict[ZoneRef, list[int]] = {}
+        for card_id in card_ids:
+            groups.setdefault(locate(host.state, card_id), []).append(card_id)
+        plan = tuple((zone, tuple(ids)) for zone, ids in groups.items())
+        frame.data[plan_key] = plan
+    index = frame.data.get(done_key, 0)
+    while index < len(plan):
+        frame.data[done_key] = index + 1
+        control = host.move_in_frame(
             frame,
-            state.refs(ids),
+            host.state.refs(plan[index][1]),
             to_zone=ZoneRef(Zone.DISCARD),
             reason=MoveReason.DISCARD,
             owner=owner,
             actor=owner,
         )
+        if control == "stay":
+            return "stay"
+        index += 1
+    frame.data.pop(plan_key, None)
+    frame.data.pop(done_key, None)
+    return None
 
 
 def _push_recover(host: Any, frame: Any, *, source: int, target: int, amount: int = 1) -> None:
@@ -280,7 +304,8 @@ def _zhiheng_activate(host: Any, frame: Any) -> Any:
     owner = frame.data["source"]
     _mark_phase(state, owner, frame.data["skill_id"], _USED)
     picks = tuple(frame.data.get("picks", ()))
-    _move_to_discard(host, frame, picks, owner=owner)
+    if _move_to_discard(host, frame, picks, owner=owner, key="zhiheng:cost") == "stay":
+        return "stay"
     host.draw_for_hand(frame, owner, len(picks))
     return None
 
@@ -322,11 +347,21 @@ def _rende_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     return (*current, *offers)
 
 
-def _give(host: Any, frame: Any, owner: int, target: int, card_ids: tuple[int, ...]) -> None:
-    """把 ``card_ids`` 从发动者手牌交给目标（``PUT`` 进目标手牌、归属 = 目标）。"""
+def _give(
+    host: Any, frame: Any, owner: int, target: int, card_ids: tuple[int, ...], *, key: str
+) -> Any:
+    """把 ``card_ids`` 从发动者手牌交给目标（``PUT`` 进目标手牌、归属 = 目标）。
+
+    与 :func:`_move_to_discard` 同姿态：内联 ``MOVE_AFTER`` 挂起时透传 ``"stay"``；
+    帧私有游标 ``key`` 让重入不把同一次交给做第二遍。
+    """
     if not card_ids:
-        return
-    host.move_in_frame(
+        return None
+    done_key = f"{key}:done"
+    if frame.data.get(done_key):
+        return None
+    frame.data[done_key] = True
+    return host.move_in_frame(
         frame,
         host.state.refs(card_ids),
         to_zone=ZoneRef(Zone.HAND, target),
@@ -356,7 +391,8 @@ def _rende_activate(host: Any, frame: Any) -> Any:
     target = _chosen_seats(frame)[0]
     picks = tuple(frame.data.get("picks", ()))
     if picks:
-        _give(host, frame, owner, target, picks)
+        if _give(host, frame, owner, target, picks, key="rende:cost") == "stay":
+            return "stay"
         _rende_recover(host, frame, owner, skill_id, len(picks))
         return None
     # 顺序降级：逐张问、可随时放弃；累计达到第 2 张时回复。
@@ -376,7 +412,8 @@ def _rende_activate(host: Any, frame: Any) -> Any:
             return "stay"
         if not picked:
             break
-        _give(host, frame, owner, target, picked)
+        if _give(host, frame, owner, target, picked, key=f"rende:{index}") == "stay":
+            return "stay"
         index += 1
         frame.data["round"] = index
         if _rende_recover(host, frame, owner, skill_id, index):
@@ -516,7 +553,8 @@ def _qingnang_activate(host: Any, frame: Any) -> Any:
     target = _chosen_seats(frame)[0]
     picks = tuple(frame.data.get("picks", ()))
     if picks:
-        _move_to_discard(host, frame, picks, owner=owner)
+        if _move_to_discard(host, frame, picks, owner=owner, key="qingnang:cost") == "stay":
+            return "stay"
     else:
         # 过闸降级：成本张数由顺序多轮补齐（每一轮问中即弃）。
         paid = _pay_sequential(
@@ -593,7 +631,8 @@ def _lijian_activate(host: Any, frame: Any) -> Any:
     user, victim = _chosen_seats(frame)
     picks = tuple(frame.data.get("picks", ()))
     if picks:
-        _move_to_discard(host, frame, picks, owner=owner)
+        if _move_to_discard(host, frame, picks, owner=owner, key="lijian:cost") == "stay":
+            return "stay"
     else:
         paid = _pay_sequential(
             host,
@@ -667,7 +706,8 @@ def _jieyin_activate(host: Any, frame: Any) -> Any:
     target = _chosen_seats(frame)[0]
     picks = tuple(frame.data.get("picks", ()))
     if picks:
-        _move_to_discard(host, frame, picks, owner=owner)
+        if _move_to_discard(host, frame, picks, owner=owner, key="jieyin:cost") == "stay":
+            return "stay"
     else:
         paid = _pay_sequential(
             host,

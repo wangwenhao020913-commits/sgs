@@ -44,7 +44,7 @@ from sgs.effects import CarrierKind
 from sgs.state import CardRef, GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
-from .catalog import Hook, SkillDef, dispatch_timing, resolve_instances
+from .catalog import MATCH_OWNER_KEY, Hook, SkillDef, dispatch_timing, resolve_instances
 
 __all__ = [
     "MOVE_AFTER_SKILLS",
@@ -136,44 +136,56 @@ class MoveAfterSkill:
         """全限定技能 id（与数据侧共用 :func:`sgs.data.hero_skill_id` 这一处派生）。"""
         return hero_skill_id(self.hero_id, self.short_id)
 
-    def fires(self, state: GameState, move: MoveEvent) -> bool:
-        """本次移动对这条技能算不算"失去"（条件只看区域与**移动后**的持有）。"""
-        return bool(self.trigger(state, move))
+    def fires(self, state: GameState, move: MoveEvent, owner: int | None) -> bool:
+        """本次移动对这条技能（持有者 ``owner``）算不算"失去"（只看区域与**移动后**的持有）。"""
+        return owner is not None and bool(self.trigger(state, move, owner))
 
     def condition(self, host: Any, frame: Any) -> bool:
         """钩子触发条件（``Hook.condition``）：不成立就连"是否发动"询问都不发。
 
         条件读写 :func:`move_event` 给出的本次移动载荷——没有载荷（不在``MOVE_AFTER``
-        派发中）即不成立。
+        派发中）即不成立；**持有者**读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`
+        （条件求值期由派发器写，票 14 §2）——``skill_owner`` 要到回调前才写。
         """
         move = move_event(frame)
-        return move is not None and self.fires(host.state, move)
+        if move is None:
+            return False
+        return self.fires(host.state, move, frame.data.get(MATCH_OWNER_KEY))
 
     def handle(self, host: Any, frame: Any) -> None:
         """钩子回调：条件成立则摸 ``draws`` 张（短摸 ⇒ 平局，与摸牌阶段同口径）。"""
         host.draw_for_hand(frame, frame.data["skill_owner"], self.draws)
 
 
-def _emptied_hand(state: GameState, move: MoveEvent) -> bool:
+def _emptied_hand(state: GameState, move: MoveEvent, owner: int) -> bool:
     """陆逊【连营】的触发条件（票 07 §要做什么 6 的表，第一行）。
 
     ``from_zone == HAND ∧ to_zone != HAND ∧`` **移动后** ``hand`` 为空。判定读移动后的
     状态：``move_card`` 已经在派发之前跑完，故"手牌为空"就是移动后的手牌。
+
+    **只认技能持有者本人**（票 14 §2）：失去牌的那个座位取 ``move.from_zone.seat``
+    （"归属" ``move.owner`` 在【顺手牵羊】一类里写的是**拿走牌的人**），它必须等于
+    ``owner``——否则别人掉光手牌会把陆逊的【连营】点亮。
     """
     if move.from_zone.zone is not Zone.HAND or move.to_zone.zone is Zone.HAND:
         return False
-    return not state.player(move.owner).hand
+    if move.from_zone.seat != owner:
+        return False
+    return not state.player(owner).hand
 
 
-def _lost_equipment(state: GameState, move: MoveEvent) -> bool:
+def _lost_equipment(state: GameState, move: MoveEvent, owner: int) -> bool:
     """孙尚香【枭姬】的触发条件（票 07 §要做什么 6 的表，第二行）。
 
     只看 ``from_zone == EQUIP``：与去向、与 :class:`~sgs.state.MoveReason` 都无关——
     弃置 / 被【顺手牵羊】拿走 / **顶替**（同槽先旧后新的旧装备那条移动）都算失去。
     "装备从牌堆进入装备区"是 ``from_zone != EQUIP``，天然不触发。
+
+    **只认技能持有者本人**（票 14 §2）：``from_zone.seat == owner``（同【连营】，
+    不用"归属" ``move.owner``——拆 / 顺写的是操使者）。
     """
     del state
-    return move.from_zone.zone is Zone.EQUIP
+    return move.from_zone.zone is Zone.EQUIP and move.from_zone.seat == owner
 
 
 MOVE_AFTER_SKILLS: tuple[MoveAfterSkill, ...] = (
