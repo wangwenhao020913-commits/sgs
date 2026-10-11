@@ -42,7 +42,6 @@ from sgs.effects import (
     ModifierContext,
     ModifierPoint,
     PriorityClass,
-    check_count,
     check_targets,
     locate,
     priority_class_of,
@@ -52,8 +51,6 @@ from sgs.state import (
     ActivateSkill,
     GameState,
     MoveReason,
-    PlayCard,
-    RespondMode,
     SelectionSpec,
     Slot,
     SlotKind,
@@ -63,7 +60,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .virtual import transformed_slash
+from .virtual import card_ids, grouped_candidates
 
 __all__ = [
     "ACTIVATION_PLANS",
@@ -628,46 +625,21 @@ def _eight_diagrams_candidate(state: GameState, ctx: ModifierContext, current: A
 def _serpent_spear_candidate(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     """丈八蛇矛：两张手牌当【杀】**使用或打出**（`A/flow_use.txt:19`，票 12 §Q21）。
 
-    整段候选生成期的**通用追加**（``ctx.card is None`` 的那一趟）：对每对手牌造一张
-    转化【杀】，目标池走与真【杀】**同一套**合法性检测（``check_targets``，含坐骑 /
-    攻击范围）。**使用**走同一 ``COUNT_LIMIT`` 链（诸葛连弩因此能解除它的次数限制）；
-    **打出**不占使用次数，故不做次数校验（票 19 §2）。
+    票 03 起本回调只是**共享候选构造器**的一组参数（两张手牌、目标牌名【杀】、
+    ``PLAY`` + ``RESPOND``）——组合、目标池、次数链都在 ``skills/virtual.py`` 里，
+    与 H 族四技能共用同一份，故"转化牌算不算有距离限制"这类判据不可能两处各写一份。
     """
-    if ctx.owner != ctx.subject or ctx.card is not None:
-        return current
-    if ctx.scope is CandidateScope.PLAY:
-        counts = True
-        use_mode = False
-    elif ctx.scope is CandidateScope.RESPOND and ctx.respond_required == "slash":
-        use_mode = ctx.respond_mode is RespondMode.USE
-        counts = use_mode
-    else:
-        return current
-    hand = list(state.player(ctx.subject).hand)
-    if len(hand) < 2:
-        return current
-    extras: list[Any] = []
-    for first, second in combinations(hand, 2):
-        virtual = transformed_slash(state, (first, second))
-        if counts and check_count(state, ctx.subject, virtual):
-            continue
-        if ctx.scope is CandidateScope.RESPOND:
-            if use_mode:
-                extras.extend(
-                    UseCard(card=virtual, targets=(target,), answers_seq=ctx.answers_seq)
-                    for target in ctx.respond_targets
-                )
-            else:
-                extras.append(PlayCard(card=virtual, answers_seq=ctx.answers_seq))
-            continue
-        pool = check_targets(state, ctx.subject, virtual)
-        if not pool:
-            continue
-        extras.extend(
-            UseCard(card=virtual, targets=(target,), answers_seq=ctx.answers_seq)
-            for target in pool
-        )
-    return (*current, *extras)
+    return (
+        *current,
+        *grouped_candidates(
+            state,
+            ctx,
+            target_type_id="slash",
+            cards=card_ids(state, ctx.subject, Zone.HAND),
+            group_size=2,
+            scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1005,7 +977,21 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
     _equip("zixing", locked=True, modifiers=_DISTANCE_MINUS_ONE),
 )
 
+# 武将技能定义（票 03 的 H 族；票 12 起全表）在**文件末尾**并入：`heroes` 反向 import
+# 本模块的 SkillDef / ModifierContext，故这一行必须晚于那两者的定义（见 CATALOG 的 docstring）。
+from .heroes import conversion_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
+
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
-    {definition.skill_id: definition for definition in _SKILL_DEFS}
+    {
+        definition.skill_id: definition
+        for definition in (*_SKILL_DEFS, *conversion_skill_definitions())
+    }
 )
-"""定义目录：``skill_id`` → :class:`SkillDef`，**模块级不可变**（票 07 §1 / §6）。"""
+"""定义目录：``skill_id`` → :class:`SkillDef`，**模块级不可变**（票 07 §1 / §6）。
+
+装备技能（17 条）与武将技能（票 03 起逐族落地）**共用同一张表**：载体解析、优先级档、
+修饰器链、时机派发都只认这张表，不区分两类载体。合并点在**文件末尾**（而不是模块头部的
+import）是为了让 :mod:`sgs.skills.heroes` 能反向 import 本模块的 :class:`SkillDef`——
+`heroes` 在 import 期读到的 :data:`CATALOG` 是装备那半张，而它的定义由这里的
+:func:`sgs.skills.heroes.conversion_skill_definitions` 现取现并，故两半都不会漏。
+"""

@@ -54,7 +54,15 @@ from .catalog import (
     prune_skill_state,
     resolve_instances,
 )
-from .virtual import transformed_slash, virtual_dodge
+from .virtual import (
+    MAX_VIRTUAL_SOURCES,
+    VirtualKind,
+    VirtualSourceError,
+    transformed_card,
+    transformed_slash,
+    virtual_card_id,
+    virtual_dodge,
+)
 
 EQUIPMENT_CARD_TYPE_IDS: tuple[str, ...] = tuple(
     skill_id.removeprefix("equip.")
@@ -92,6 +100,7 @@ __all__ = (
     "EQUIPMENT_CARD_TYPE_IDS",
     "EQUIPMENT_SKILL_IDS",
     "LORD_SKILL_IDS",
+    "MAX_VIRTUAL_SOURCES",
     "REJUDGE_SKILL_IDS",
     "ActivationPlan",
     "CarrierKind",
@@ -108,6 +117,8 @@ __all__ = (
     "SkillSource",
     "SkillSourceKind",
     "SkillType",
+    "VirtualKind",
+    "VirtualSourceError",
     "activation_plan",
     "apply_modifiers",
     "dispatch_seam",
@@ -120,7 +131,9 @@ __all__ = (
     "prune_skill_state",
     "rejudge_capable_seats",
     "resolve_instances",
+    "transformed_card",
     "transformed_slash",
+    "virtual_card_id",
     "virtual_dodge",
 )
 

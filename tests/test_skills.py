@@ -1021,9 +1021,35 @@ def test_virtual_equipment_unions_with_physical_equipment_without_occupying_a_zo
 
 
 def test_every_equipment_card_has_a_skill_and_vice_versa():
+    """``CATALOG`` 的两半：装备技能 = 17 张装备牌名，武将技能 = 票 03 起的 H 族。
+
+    票 03 之前武将那半是空的，故这条断言当时写作"``CATALOG`` 恰等于装备集合"；
+    现在改成按 ``carrier`` 分区（载体是技能定义上的字段），M3 的后续票再往武将那半
+    加技能时这条**不会**跟着改。
+    """
+    from sgs.effects import CarrierKind
     from sgs.skills import EQUIPMENT_CARD_TYPE_IDS
 
-    assert set(CATALOG) == {f"equip.{card_type}" for card_type in EQUIPMENT_CARD_TYPE_IDS}
+    equipment = {
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if definition.carrier is CarrierKind.EQUIPMENT
+    }
+    heroes = {
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if definition.carrier is CarrierKind.HERO
+    }
+
+    assert equipment == {f"equip.{card_type}" for card_type in EQUIPMENT_CARD_TYPE_IDS}
+    assert not equipment & heroes, "两类载体的技能 id 前缀各一套，不相交"
+    assert set(CATALOG) == equipment | heroes
+    assert {
+        "hero.guanyu.wusheng",
+        "hero.zhaoyun.longdan",
+        "hero.daqiao.guose",
+        "hero.huatuo.jijiu",
+    } <= heroes, "票 03 的 H 族四条技能已在目录里"
 
 
 def test_the_new_query_and_action_kinds_round_trip_through_the_journal(tmp_path):
