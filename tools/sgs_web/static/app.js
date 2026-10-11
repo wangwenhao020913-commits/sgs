@@ -241,12 +241,43 @@ function renderPending(view) {
     renderSlots(pending);
   }
   renderCountdown(view);
-  $("btn-submit").disabled = selected === null ? !hasDirectSubmit(pending) : false;
+  // 提交按钮：只有"能造出一个**候选里真有**的 Action"时才可点。空选提交会被引擎拒（400），
+  // 所以这里必须自己拦住——前端可以做合法性高亮与禁用，但**不能替引擎裁决**（`04` §4.1）。
+  const blocked = selected === null ? null : selectionError(selected, pending);
+  const ready = selected !== null
+    ? blocked === null
+    : state.selectedCards.length > 0 && buildAction() !== null;
+  $("btn-submit").disabled = !ready;
+  $("t-choice").textContent = blocked
+    || (selected === null && !ready ? "先选一项，或点一张手牌再提交。" : "");
   $("btn-cancel").disabled = selected === null && state.selectedCards.length === 0 && state.picks.length === 0;
 }
 
-function hasDirectSubmit(pending) {
-  return pending.legal_actions.some((action) => action.kind === "EndPhase" || action.kind === "Pass");
+/** 这次选择的**未就绪原因**；``null`` = 可以提交。
+ *
+ * 判据全部来自 `legal_actions` 里的那一条候选（`spec.total` / `cards` 长度 / `order` 长度），
+ * 不自己发明规则。
+ */
+function selectionError(action, pending) {
+  if (action.kind === "SelectCards") {
+    const total = (pending.spec && pending.spec.total) || [1, 1];
+    const least = total[0];
+    const most = total[1];
+    if (state.picks.length < least) return `从选择面里选 ${least} 张牌（已选 ${state.picks.length}）。`;
+    if (state.picks.length > most) return `最多只能选 ${most} 张（已选 ${state.picks.length}）。`;
+    return null;
+  }
+  if (action.kind === "DiscardCards") {
+    const need = (action.cards || []).length;
+    if (state.selectedCards.length !== need) return `要弃 ${need} 张牌（已选 ${state.selectedCards.length}）。`;
+    return null;
+  }
+  if (action.kind === "ArrangeCards") {
+    const need = (action.order || []).length;
+    if (!need) return "排列为空，不能提交。";
+    return null;
+  }
+  return null;
 }
 
 function groupActions(actions) {
@@ -350,6 +381,17 @@ async function submitAction() {
     $("t-choice").textContent = "没有可提交的候选：先选中一张牌或一个选项。";
     return;
   }
+  const pending = state.view.pending;
+  const blocked = selectionError(action, pending);
+  if (blocked) {
+    $("t-choice").textContent = blocked;
+    return;
+  }
+  if (!pending.legal_actions.some((candidate) => JSON.stringify(candidate) === JSON.stringify(action))) {
+    // 最后一道自检：造出来的必须**逐字段**是候选里的那一条（否则引擎会拒，且错在界面）。
+    $("t-choice").textContent = "这个组合不在合法候选里，请换一个选择。";
+    return;
+  }
   try {
     const body = await post(
       `/api/sessions/${state.sessionId}/answer?after=${state.cursor}&logs=${state.logSeq}`,
@@ -442,7 +484,8 @@ async function loadRuns() {
         : run.human_seat_won === false ? `<span class="lose">我输</span>` : `<span class="dim">—</span>`;
       row.innerHTML = `<span><code>${run.name}</code> <span class="dim">种子 ${run.seed} · ${run.player_count} 人</span></span>
         <span>${result} <button type="button" class="ghost">看回放</button></span>`;
-      row.querySelector("button").addEventListener("click", () => openReplay(run.name));
+      const button = row.querySelector("button");
+      if (button) button.addEventListener("click", () => openReplay(run.name));
       box.appendChild(row);
     }
   } catch (error) {
