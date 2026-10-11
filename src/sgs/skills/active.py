@@ -45,6 +45,7 @@ from sgs.effects import (
     Modifier,
     ModifierContext,
     ModifierPoint,
+    check_targets,
     locate,
 )
 from sgs.state import (
@@ -538,7 +539,19 @@ def _lijian_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     )
     if not cards or len(males) < 2:
         return current
-    pairs = tuple((user, victim) for user in males for victim in males if victim != user)
+    # 【离间】视为使用【决斗】**强制指定目标**，但强制不等于绕过"不能成为目标"的锁定技
+    # （票 06 §要做什么 2 的同源要求）：受害者的合法性读与真牌同一条 ``check_targets``
+    # 链（【空城】据此出池）。使用者不受此限——"不能成为目标"只约束受害者一侧。
+    duel = pure_virtual_card(state, "duel")
+    duel_pools = {user: frozenset(check_targets(state, user, duel)) for user in males}
+    pairs = tuple(
+        (user, victim)
+        for user in males
+        for victim in males
+        if victim != user and victim in duel_pools[user]
+    )
+    if not pairs:
+        return current
     if _over_cap(len(cards), len(pairs)):
         offers = [
             ActivateSkill(
@@ -581,8 +594,9 @@ def _lijian_activate(host: Any, frame: Any) -> Any:
         )
         if paid is None:
             return "stay"
-    # 强制指定使用者与目标：不查"能否使用"的常规合法性，只走【决斗】自己的结算链，
-    # 故伤害来源随使用者（不是貂蝉）。
+    # 使用者与目标在**候选生成期**已按同一条 ``check_targets`` 链定下（票 06），故这里
+    # 不再重查"能否使用"的常规合法性，只走【决斗】自己的结算链——伤害来源随使用者
+    # （不是貂蝉）。
     host.start_use(
         pure_virtual_card(state, "duel"),
         source=user,

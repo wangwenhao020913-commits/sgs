@@ -996,6 +996,7 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
 # 那两者的定义（见 CATALOG 的 docstring）。
 from .heroes import conversion_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 from .active import active_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
+from .target_pool import target_pool_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
     {
@@ -1004,6 +1005,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *_SKILL_DEFS,
             *conversion_skill_definitions(),
             *active_skill_definitions(),
+            *target_pool_skill_definitions(),
         )
     }
 )

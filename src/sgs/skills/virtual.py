@@ -29,7 +29,14 @@ from enum import IntEnum
 from itertools import combinations
 
 from sgs.data import Color
-from sgs.effects import CandidateScope, EffectContext, check_count, check_targets, move_card
+from sgs.effects import (
+    CandidateScope,
+    EffectContext,
+    check_count,
+    check_targets,
+    forced_use_targets,
+    move_card,
+)
 from sgs.state import (
     CardRef,
     GameState,
@@ -386,11 +393,8 @@ def virtual_card_use(
         if ctx.respond_mode is RespondMode.USE:
             if check_count(state, seat, card):
                 return []
-            combos = (
-                tuple((target,) for target in ctx.respond_targets)
-                if ctx.respond_targets
-                else ((),)
-            )
+            pool = forced_use_targets(state, seat, card, ctx.respond_targets)
+            combos = tuple((target,) for target in pool) if pool else ((),)
             return [
                 UseCard(card=card, targets=combo, answers_seq=ctx.answers_seq)
                 for combo in combos

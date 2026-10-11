@@ -65,6 +65,7 @@ __all__ = [
     "delayed_settle_target",
     "discard_count",
     "distance",
+    "forced_use_targets",
     "hand_limit",
     "legal_actions_for",
     "seat_distance",
@@ -295,6 +296,27 @@ def targets_within_attack_range(state: GameState, seat: int) -> tuple[int, ...]:
     )
 
 
+def forced_use_targets(
+    state: GameState, seat: int, card: CardRef, allowed: tuple[int, ...]
+) -> tuple[int, ...]:
+    """**被迫使用**（【借刀杀人】迫使的【杀】）的目标池：以 :func:`check_targets` 为准。
+
+    引擎在发响应窗口时已按攻击范围算出一份预选集 ``allowed``（Bn 烘进候选人；U-27-1），
+    但预选集不含 :data:`~sgs.skills.ModifierPoint.TARGET_POOL` 链——【空城】这类"不能
+    成为目标"的锁定技必须能把它删掉，否则强制指定目标的效果就成了绕过技能的缺口
+    （票 06 §要做什么 2 的**同源要求**）。
+
+    故真源仍是 :func:`check_targets`：``allowed`` 只作**上界**（引擎预选集的语义保留），
+    链上删掉的目标一律不出现。真实牌与转化牌共用本函数（``skills/virtual.py`` 的
+    ``RESPOND`` + ``USE`` 路径），故两条候选生成路不会各写一份。
+    """
+    pool = check_targets(state, seat, card)
+    if allowed:
+        permitted = set(allowed)
+        pool = tuple(target for target in pool if target in permitted)
+    return pool
+
+
 def _has_zone_cards(state: GameState, source: int, target: int) -> bool:
     """目标的手牌 / 装备区 / 判定区里至少有一张牌（拆、顺的"区域里有牌"）。"""
     del source
@@ -520,8 +542,9 @@ def _respond(
 
     - ``mode = PLAY``（南蛮 / 万箭 / 决斗）：候选是 ``PlayCard``（打出，无目标、不占次数）；
     - ``mode = USE``（【借刀杀人】迫使的"使用【杀】"、无懈窗口）：候选是 ``UseCard``，
-      目标取 ``ctx.use_targets``；**空 ``use_targets`` = 无目标的响应使用**（无懈的目标是
-      "这次结算 + 目标角色"，由窗口帧承载，故行动只带牌），并按 L3.2 校验出牌次数。
+      目标走 :func:`forced_use_targets`（**与真牌同一条 ``TARGET_POOL`` 链**），
+      **空预选集 = 无目标的响应使用**（无懈的目标是"这次结算 + 目标角色"，由窗口帧承载，
+      故行动只带牌），并按 L3.2 校验出牌次数。
 
     手上没有所需牌者候选只有 ``Pass``——**仍发询问**（票 19 §9.2 的"各获一次机会"）。
     """
@@ -535,7 +558,8 @@ def _respond(
         if ctx.mode is RespondMode.USE:
             if check_count(state, seat, card):
                 continue
-            combos = tuple((target,) for target in ctx.use_targets) if ctx.use_targets else ((),)
+            pool = forced_use_targets(state, seat, card, ctx.use_targets)
+            combos = tuple((target,) for target in pool) if pool else ((),)
             for combo in combos:
                 actions.append(UseCard(card=card, targets=combo, answers_seq=answers_seq))
         else:
