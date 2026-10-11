@@ -302,29 +302,50 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def make_server(port: int = DEFAULT_PORT, runs_dir: Path | None = None) -> ThreadingHTTPServer:
+DEFAULT_HOST = "127.0.0.1"
+"""缺省只监听回环：单机自用最安全，也不给同网段任何一台机器开门。
+
+WSL2 里浏览器跑在 Windows 那侧时，回环**可能**被 localhost 转发接上，但不保证；
+那时候用 ``--host 0.0.0.0`` 让 Windows 走 WSL 的 IP（见 `map.md` §Notes 的"跨 WSL 打开界面"）。
+"""
+
+
+def make_server(
+    port: int = DEFAULT_PORT, runs_dir: Path | None = None, host: str = DEFAULT_HOST
+) -> ThreadingHTTPServer:
     """造一个已装好路由的 HTTP 服务；``port=0`` 让内核分配（``server_address[1]`` 读回）。"""
     registry = GameRegistry(runs_dir=runs_dir)
     handler = type("_BoundHandler", (_Handler,), {"registry": registry})
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    server = ThreadingHTTPServer((host, port), handler)
     server.registry = registry  # type: ignore[attr-defined]
     return server
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``python tools/sgs_web/serve.py [--port N] [--runs-dir DIR]``；把实际端口打到 stdout。"""
+    """``python tools/sgs_web/serve.py [--host H] [--port N] [--runs-dir DIR]``；把实际地址打到 stdout。"""
     import argparse
 
     parser = argparse.ArgumentParser(prog="sgs-web", description="SGS 极简 Web 界面（M4）。")
+    parser.add_argument(
+        "--host",
+        default=DEFAULT_HOST,
+        help=f"监听地址（缺省 {DEFAULT_HOST}）；想让 WSL 之外的浏览器访问就用 0.0.0.0。",
+    )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="监听端口；0 = 由内核分配。")
     parser.add_argument(
         "--runs-dir", type=Path, default=DEFAULT_RUNS_DIR, help="录像目录（缺省仓根 runs/）。"
     )
     args = parser.parse_args(argv)
 
-    server = make_server(args.port, args.runs_dir)
+    server = make_server(args.port, args.runs_dir, host=args.host)
     host, port = server.server_address[:2]
     print(f"sgs-web listening on http://{host}:{port}/  (runs: {args.runs_dir})", flush=True)
+    if host == "0.0.0.0":  # noqa: S104 - 显式选项，不是缺省
+        print(
+            "提示：0.0.0.0 = 监听全部网卡。WSL 里从 Windows 打开请用 "
+            "「在 PowerShell 里跑 wsl hostname -I 拿到的那个 IP」:端口。",
+            flush=True,
+        )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

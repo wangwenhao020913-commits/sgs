@@ -141,5 +141,34 @@ if ! node tests/support/ui_smoke.mjs "http://127.0.0.1:$PORT"; then
   exit 1
 fi
 
+# ⑦ `--host 0.0.0.0` 必须真的绑全部网卡（WSL 里从 Windows 打开界面就靠它）。
+# 只多起一个进程、只发两个请求，然后立刻杀掉——它防的是"host 参数被写死回环"这种回归。
+echo "=== 跨机可达：--host 0.0.0.0 ==="
+WSL_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [ -z "$WSL_IP" ]; then
+  echo "PASS: 拿不到 WSL IP（非 WSL 环境），跳过跨机检查"
+else
+  ANY_PORT="$("$PYTHON" -c 'import socket
+s = socket.socket(); s.bind(("0.0.0.0", 0)); print(s.getsockname()[1]); s.close()')"
+  "$PYTHON" tools/sgs_web/serve.py --host 0.0.0.0 --port "$ANY_PORT" --runs-dir "$RUNS" \
+    > "$TMP/any.log" 2>&1 &
+  ANY_PID=$!
+  ANY_CODE=""
+  for _ in $(seq 1 50); do
+    ANY_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://$WSL_IP:$ANY_PORT/" 2>/dev/null || true)"
+    [ "$ANY_CODE" = "200" ] && break
+    sleep 0.2
+  done
+  kill "$ANY_PID" 2>/dev/null || true
+  wait "$ANY_PID" 2>/dev/null || true
+  if [ "$ANY_CODE" = "200" ]; then
+    echo "PASS: --host 0.0.0.0 时经 $WSL_IP 可达（200）"
+  else
+    echo "FAIL: --host 0.0.0.0 时经 $WSL_IP 不可达（$ANY_CODE）"
+    cat "$TMP/any.log" 2>/dev/null || true
+    exit 1
+  fi
+fi
+
 echo "PASS: M4 端到端门禁全部通过"
 exit 0
