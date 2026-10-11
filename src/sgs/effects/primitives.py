@@ -30,6 +30,7 @@ __all__ = [
     "draw_from_deck",
     "locate",
     "move_card",
+    "place_on_deck",
     "substitute_judge_card",
     "swap_judge_card",
 ]
@@ -235,6 +236,36 @@ def apply_hp(state: GameState, ctx: EffectContext, seat: int, value: int) -> HpC
     before = player.hp
     player.hp = value
     return HpChangeDelta(seat=seat, before=before, after=value, amount=value - before)
+
+
+def place_on_deck(
+    state: GameState, cards: tuple[CardRef, ...], *, to_top: bool
+) -> None:
+    """把一批牌**置于牌堆顶 / 底**（`03` §5「效果原语（Effect Primitives）清单」的原语；票 10）。
+
+    ``to_top=True`` ⇒ 这批牌成为新的牌堆顶，**元组顺序即自顶向下**（``cards[0]`` 在最上）；
+    ``to_top=False`` ⇒ 依次接在**原有牌堆底之下**（追加到 ``state.deck`` 尾部），
+    故"先给的仍在上面"。"底"取"原有牌堆底**之下**"这一读法，见票 10 §验收 1。
+
+    **返回 ``None``，不产出 delta**：这批牌本来就是牌堆顶（"观看牌堆顶"只看不移），
+    排列是**同一区域内部**的重排、不是六区之间的移动。若为此发一条带 ``cards`` 的
+    ``card_move``，被授予的牌面就会随记录流泄露给其它座位/复盘者（票 10 §验收 2、
+    `spec.md` 用户故事 47）；这次排列的记录面因此只有 `ArrangeCards` 行动本身——
+    它带的是**面内位置**，牌面只出现在被授予的那一次询问里。
+
+    ``cards`` 为空是合法的（切分点落在两端）：什么都不做。
+    """
+    if not cards:
+        return
+    card_ids = tuple(card.card_id for card in cards)
+    for card_id in card_ids:
+        if card_id not in state.deck:
+            raise ValueError(f"牌 {card_id} 不在牌堆里，不能置于牌堆顶 / 底")
+    state.deck[:] = [card_id for card_id in state.deck if card_id not in card_ids]
+    if to_top:
+        state.deck[:0] = card_ids
+    else:
+        state.deck.extend(card_ids)
 
 
 def draw_from_deck(state: GameState, n: int, rng: Randomness) -> DrawResult:

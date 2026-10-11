@@ -61,10 +61,13 @@ from sgs.skills import (
     prune_skill_state,
     reset_phase_skill_state,
     start_provider,
+    timing_hooks_present,
 )
 from sgs.state import (
     Action,
     ActivateSkill,
+    ArrangeContext,
+    ArrangeQuery,
     CardRef,
     DiscardQuery,
     DodgeContext,
@@ -784,14 +787,67 @@ class Engine:
         | DodgeContext
         | SkillActivationContext
         | SelectOptionContext
+        | ArrangeContext
         | None = None,
+        revealed: tuple[CardRef, ...] = (),
     ) -> Any:
-        """构造并交付一次询问；已有应答（重入）则直接返回它。"""
+        """构造并交付一次询问；已有应答（重入）则直接返回它。
+
+        ``revealed`` 是**本次询问授予该参与者的牌面**（票 10 §①，缺省空 = 不授予）：
+        它是通用通道，任何询问都能带（【观星】的排列与将来【遗计】的"只看不排"共用），
+        随询问结束即失效、不写状态、不进 ``PlayerView``。
+        """
         return self.ask(
             lambda seq: self._build_query(
-                kind, actor, timing, seq, dying=dying, payload=payload
+                kind, actor, timing, seq, dying=dying, payload=payload, revealed=revealed
             )
         )
+
+    def ask_arrange(
+        self,
+        frame: Frame,
+        actor: int,
+        timing: Timing,
+        *,
+        cards: tuple[CardRef, ...],
+    ) -> Any:
+        """发一次 ``ARRANGE`` 询问（票 10 §②）：把 ``cards`` 授予 ``actor`` 并请其排列。
+
+        ``cards`` 是**自顶向下**的被授予牌面（就是这次询问的 ``revealed``）；候选 =
+        全部排列 × 全部切分点（:class:`~sgs.state.ArrangeContext`）。答案按
+        ``(actor, timing, 牌 id 元组)`` 帧内缓存，钩子重入时不重发（票 07 的帧内记忆姿态）。
+        返回 ``ArrangeCards`` / ``SUSPEND``。
+        """
+        answers = frame.data.setdefault("ask_answers", {})
+        answer_key = ("arrange", actor, timing.value, tuple(card.card_id for card in cards))
+        if answer_key in answers:
+            return answers[answer_key]
+        action = self.ask(
+            lambda seq: self._build_query(
+                QueryKind.ARRANGE,
+                actor,
+                timing,
+                seq,
+                payload=ArrangeContext(count=len(cards)),
+                revealed=cards,
+            )
+        )
+        if action is SUSPEND:
+            return SUSPEND
+        answers[answer_key] = action
+        return action
+
+    def peek_deck(self, frame: Frame, n: int) -> tuple[CardRef, ...]:
+        """**观看牌堆顶** ``n`` 张：返回牌面、**不移动**它们（票 10 §①）。
+
+        与摸牌同一套规则（沿用 ``shuffle`` 子流、牌堆不够时把弃牌堆重洗补足、只记一条
+        既有的 ``deck_shuffle``），但不落 ``card_move``——被观看的牌仍在牌堆顶，
+        授予只发生在**这一次询问**的 ``revealed`` 里（"逐次授予"）。
+        """
+        drawn = draw_from_deck(self.state, n, self._shuffle)
+        if drawn.shuffle is not None:
+            self.emit_frame_delta(frame, drawn.shuffle)
+        return drawn.cards
 
     def start_use(
         self,
@@ -1786,7 +1842,9 @@ class Engine:
         | DodgeContext
         | SkillActivationContext
         | SelectOptionContext
+        | ArrangeContext
         | None = None,
+        revealed: tuple[CardRef, ...] = (),
     ) -> Query:
         actions = legal_actions_for(
             self.state, actor, kind, answers_seq=seq, dying=dying, payload=payload
@@ -1800,6 +1858,7 @@ class Engine:
                 prompt="出牌阶段：使用一张牌，或结束出牌阶段。",
                 legal_actions=actions,
                 view=view,
+                revealed=revealed,
             )
         if kind is QueryKind.DISCARD:
             player = self.state.player(actor)
@@ -1812,6 +1871,7 @@ class Engine:
                 legal_actions=actions,
                 view=view,
                 count=count,
+                revealed=revealed,
             )
         if kind is QueryKind.DODGE:
             return DodgeQuery(
@@ -1821,6 +1881,7 @@ class Engine:
                 prompt="以你为目标的【杀】生效前：是否使用【闪】？",
                 legal_actions=actions,
                 view=view,
+                revealed=revealed,
             )
         if kind is QueryKind.PEACH:
             if dying is None:
@@ -1833,6 +1894,7 @@ class Engine:
                 legal_actions=actions,
                 view=view,
                 dying=dying,
+                revealed=revealed,
             )
         if kind is QueryKind.RESPOND:
             if not isinstance(payload, RespondContext):
@@ -1852,6 +1914,7 @@ class Engine:
                 required=payload.required,
                 target=payload.target,
                 window_frame=payload.window_frame,
+                revealed=revealed,
             )
         if kind is QueryKind.SELECT_CARDS:
             if not isinstance(payload, SelectContext):
@@ -1865,6 +1928,7 @@ class Engine:
                 view=view,
                 spec=payload.spec,
                 slots=payload.slots,
+                revealed=revealed,
             )
         if kind is QueryKind.SKILL_ACTIVATION:
             if not isinstance(payload, SkillActivationContext):
@@ -1881,6 +1945,7 @@ class Engine:
                 min_picks=payload.min_picks,
                 max_picks=payload.max_picks,
                 slots=payload.slots,
+                revealed=revealed,
             )
         if kind is QueryKind.SELECT_OPTION:
             if not isinstance(payload, SelectOptionContext):
@@ -1894,6 +1959,19 @@ class Engine:
                 view=view,
                 skill_id=payload.skill_id,
                 options=payload.options,
+                revealed=revealed,
+            )
+        if kind is QueryKind.ARRANGE:
+            if not isinstance(payload, ArrangeContext):
+                raise ValueError("ARRANGE 询问必须给出 ArrangeContext")
+            return ArrangeQuery(
+                seq=seq,
+                actor=actor,
+                timing=timing,
+                prompt="请排列这些牌：给出顺序与前几张置于牌堆顶。",
+                legal_actions=actions,
+                view=view,
+                revealed=revealed,
             )
         raise ValueError(f"还没有 {kind.value} 询问的构造器")
 
@@ -2139,10 +2217,42 @@ class Engine:
             self.state.player(seat).card_use_counts.clear()
         self.emit_timing(Timing.TURN_START, actor=seat)
 
-    def _phase_prepare(self) -> None:
-        # 准备阶段在本里程碑没有内部事件：只发阶段体（票 06 §7）。
+    def _phase_prepare(self) -> str | None:
+        # 准备阶段体照记；有技能钩子（M3 的【观星】式）时惰性建帧派发（票 10 §③）。
         self.state.phase = Phase.PREPARE
-        self.emit_timing(Timing.PHASE_PREPARE, actor=self.state.turn_seat)
+        return self._dispatch_phase_body(Timing.PHASE_PREPARE, "phase_prepare")
+
+    def _dispatch_phase_body(self, timing: Timing, key: str) -> Control:
+        """**帧外阶段体**的钩子派发（票 10）：空实现照记，有提供者才惰性建帧。
+
+        阶段体（准备 / 摸牌 / 结束）没有结算帧，而钩子必须能提问并跨重入续跑，故这里给
+        它一个**不压栈**的持久帧（住 ``_turn_data``）：它不进记录流、不参与步骤表，
+        只作钩子的上下文与帧内答案缓存（与 ``emit_timing`` 给 ``MOVE_AFTER`` 造的
+        临时帧同形，区别只是要跨暂停存活）。没有注册在该时机上的实例时**一个帧都不建**，
+        记录流与 M2 逐字节相同（票 10 的硬纪律：34 条基准一行不改）。
+
+        时机记录只发一次（``_turn_data`` 的键作幂等闸）；派发返回 ``"stay"`` 时整个阶段体
+        原地重入，重用同一个帧与同一份应答缓存。
+        """
+        store = self._turn_data
+        if key not in store:
+            self.emit_timing(timing, actor=self.state.turn_seat)
+            if not timing_hooks_present(self.state, timing):
+                store[key] = None
+                return None
+            store[key] = Frame(
+                kind=FrameKind.RESOLVE,
+                data={"source": self.state.turn_seat, "targets": (), "card": None},
+                frame_id=0,
+            )
+        frame = store[key]
+        if frame is None:
+            return None
+        control = dispatch_timing(self, frame, timing)
+        if control == "stay":
+            return "stay"
+        store[key] = None
+        return None
 
     def _phase_judge(self) -> str | None:
         """判定阶段：**自循环回合步骤**，逐张结算当前回合角色判定区里的延时锦囊（票 10 §3）。
@@ -2232,9 +2342,15 @@ class Engine:
         self.state.phase = Phase.DRAW
         self.emit_timing(Timing.PHASE_DRAW_START, actor=self.state.turn_seat)
 
-    def _phase_draw(self) -> None:
+    def _phase_draw(self) -> str | None:
         seat = self._turn_seat()
-        self.emit_timing(Timing.PHASE_DRAW, actor=seat)
+        control = self._dispatch_phase_body(Timing.PHASE_DRAW, "phase_draw")
+        if control == "stay":
+            return "stay"
+        if self._turn_data.get("phase_draw_drawn"):
+            # 钩子在同一阶段体里提过问：重入时只补完基础摸牌，不重发时机记录、不重摸。
+            return None
+        self._turn_data["phase_draw_drawn"] = True
         drawn = draw_from_deck(self.state, DRAW_COUNT, self._shuffle)
         if drawn.shuffle is not None:
             # 重洗只发**一条** deck_shuffle（记洗后顺序），不另发牌移动事件（票 08 §5 / 票 23）。
@@ -2253,6 +2369,7 @@ class Engine:
             # 短摸 ⟺ 两堆皆空：弃牌堆非空时 draw_from_deck 已经重洗补足（票 23）。
             self.check_game_end(draw_reason="both_decks_empty")
             self.finish()
+        return None
 
     def _phase_draw_end(self) -> None:
         self.emit_timing(Timing.PHASE_DRAW_END, actor=self.state.turn_seat)
@@ -2329,9 +2446,9 @@ class Engine:
     def _phase_discard_end(self) -> None:
         self.emit_timing(Timing.PHASE_DISCARD_END, actor=self.state.turn_seat)
 
-    def _phase_finish(self) -> None:
+    def _phase_finish(self) -> str | None:
         self.state.phase = Phase.FINISH
-        self.emit_timing(Timing.PHASE_FINISH, actor=self.state.turn_seat)
+        return self._dispatch_phase_body(Timing.PHASE_FINISH, "phase_finish")
 
     def _turn_end(self) -> None:
         self.emit_timing(Timing.TURN_END, actor=self.state.turn_seat)

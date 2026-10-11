@@ -17,12 +17,14 @@ M1 已接线四类询问：出牌阶段（【杀】/【桃】）、【闪】响�
 from __future__ import annotations
 
 from collections.abc import Callable
-from itertools import combinations
+from itertools import combinations, permutations
 from typing import Any
 
 from sgs.state import (
     Action,
     ActivateSkill,
+    ArrangeCards,
+    ArrangeContext,
     CardRef,
     DiscardCards,
     DodgeContext,
@@ -423,6 +425,10 @@ def legal_actions_for(
         if not isinstance(payload, SelectOptionContext):
             raise ValueError("SELECT_OPTION 询问必须给出 SelectOptionContext")
         candidates = _select_option(seat, answers_seq, payload)
+    elif kind is QueryKind.ARRANGE:
+        if not isinstance(payload, ArrangeContext):
+            raise ValueError("ARRANGE 询问必须给出 ArrangeContext")
+        candidates = _arrange(answers_seq, payload)
     else:
         raise ValueError(f"还没有 {kind.value} 询问的候选生成器")
     return tuple(sorted(candidates, key=_sort_key))
@@ -650,6 +656,21 @@ def _select_option(
     ]
 
 
+def _arrange(answers_seq: int, ctx: ArrangeContext) -> list[Action]:
+    """排列：``X`` 个面内位置的**全部排列** × **全部切分点**（票 10 §②）。
+
+    授予了几张牌就排几张（``ctx.count``）；强制选择，没有 ``Pass``——"答了发动"之后的
+    排列是这次发动的载荷，玩家想不排就应当在上一步的"是否发动"里放弃。``X`` 至多 5
+    （观星的上限），故候选至多 ``5! × 6 = 720``；这是**询问级**候选，不占票 04 给
+    "两维相乘的技能候选"设的 128 闸（那道闸管的是技能组合，不是排列的全枚举）。
+    """
+    return [
+        ArrangeCards(order=order, split=split, answers_seq=answers_seq)
+        for split in range(ctx.count + 1)
+        for order in permutations(range(ctx.count))
+    ]
+
+
 def _usable_hand(
     state: GameState, seat: int, context: UseContext, timing: Timing | None = None
 ) -> list[CardRef]:
@@ -692,4 +713,8 @@ def _sort_key(action: Action) -> tuple[Any, ...]:
         return (0, action.picks, action.kind, action.choices)
     if isinstance(action, DiscardCards):
         return (0, tuple(card.card_id for card in action.cards), action.kind)
+    if isinstance(action, ArrangeCards):
+        # 排列候选只与排列候选同处一个询问，故键只需在族内定序（票 10）：显式写出
+        # ``order`` / ``split``，不靠 `permutations` 的生成顺序当隐式约定。
+        return (0, action.order, action.kind, action.split)
     return (1, (), action.kind)

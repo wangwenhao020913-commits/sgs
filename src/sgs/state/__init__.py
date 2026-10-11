@@ -26,6 +26,9 @@ from .projection import project
 from .protocol import (
     Action,
     ActivateSkill,
+    ArrangeCards,
+    ArrangeContext,
+    ArrangeQuery,
     DiscardCards,
     DiscardQuery,
     DodgeContext,
@@ -68,6 +71,9 @@ from .seating import (
 __all__ = (
     "Action",
     "ActivateSkill",
+    "ArrangeCards",
+    "ArrangeContext",
+    "ArrangeQuery",
     "CardMoveDelta",
     "CardRef",
     "DeckShuffleDelta",

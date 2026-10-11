@@ -22,9 +22,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, TypeAdapter, model_serializer
 
 from sgs.data import Identity, Kingdom
 from sgs.timing import Timing
@@ -34,6 +34,9 @@ from .models import CardRef, Phase, Zone, ZoneRef, _FrozenModel
 __all__ = [
     "Action",
     "ActivateSkill",
+    "ArrangeCards",
+    "ArrangeContext",
+    "ArrangeQuery",
     "DiscardCards",
     "DiscardQuery",
     "DodgeContext",
@@ -67,10 +70,12 @@ __all__ = [
 
 
 class QueryKind(str, Enum):
-    """八类询问的标识；候选生成器按它分派（票 05 §1 / 票 19 §1 / 票 12 §Q6）。
+    """九类询问的标识；候选生成器按它分派（票 05 §1 / 票 19 §1 / 票 12 §Q6）。
 
     M1 四类一字不改；票 27 落 ``RESPOND`` / ``SELECT_CARDS``；票 30 落
-    ``SKILL_ACTIVATION``（"是否发动"）与 ``SELECT_OPTION``（二选一，选择权在目标）。
+    ``SKILL_ACTIVATION``（"是否发动"）与 ``SELECT_OPTION``（二选一，选择权在目标）；
+    票 10 落 ``ARRANGE``（排列：一次观星的"任意顺序 + 切分点"是**一份决策**，
+    拆成多次选牌会让顺序语义靠询问序号隐式表达）。
     """
 
     PLAY_PHASE = "PLAY_PHASE"
@@ -81,6 +86,7 @@ class QueryKind(str, Enum):
     SELECT_CARDS = "SELECT_CARDS"
     SKILL_ACTIVATION = "SKILL_ACTIVATION"
     SELECT_OPTION = "SELECT_OPTION"
+    ARRANGE = "ARRANGE"
 
 
 class WindowCause(str, Enum):
@@ -195,6 +201,17 @@ class SelectOptionContext:
 
     skill_id: str
     options: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ArrangeContext:
+    """``ARRANGE`` 候选生成的类型化载荷（票 10）：本次授予了几张牌。
+
+    候选 = ``count`` 个**面内位置**的全部排列 × 全部切分点，故候选生成只需要张数；
+    牌面本身由询问的 :attr:`_QueryBase.revealed` 承载（对参与者可见、对其它座位不可见）。
+    """
+
+    count: int
 
 
 class PlayerPublic(_FrozenModel):
@@ -314,8 +331,30 @@ class SelectOption(_ActionBase):
     choice: str
 
 
+class ArrangeCards(_ActionBase):
+    """排列（票 10 §②）：``order`` = **全部 X 个面内位置**的一个排列，``split`` = 前几张放牌堆顶。
+
+    ``order`` 的方向读作**自顶向下**：``order[:split]`` 依次成为新的牌堆顶（``order[0]``
+    在最上），``order[split:]`` 依次置于牌堆底。答复只带**面内位置**，不带牌面身份——
+    位置 → 实体牌的映射留在引擎里（与 ``SelectCards.picks`` 同姿态），故记录流里
+    这次排列只以"位置"出现。
+    """
+
+    kind: Literal["ArrangeCards"] = "ArrangeCards"
+    order: tuple[int, ...]
+    split: int
+
+
 Action = Annotated[
-    UseCard | Pass | EndPhase | DiscardCards | PlayCard | SelectCards | ActivateSkill | SelectOption,
+    UseCard
+    | Pass
+    | EndPhase
+    | DiscardCards
+    | PlayCard
+    | SelectCards
+    | ActivateSkill
+    | SelectOption
+    | ArrangeCards,
     Field(discriminator="kind"),
 ]
 
@@ -345,6 +384,24 @@ class _QueryBase(_FrozenModel):
     prompt: str
     legal_actions: tuple[Action, ...]
     view: PlayerView
+    revealed: tuple[CardRef, ...] = ()
+    """**本次询问授予该参与者的牌面**（票 10 §①，默认空 = 不授予）。
+
+    这是"观看牌堆顶"这类效果的**唯一授予通道**，属于**这一次询问**：询问结束即失效，
+    既不写状态、不进 :class:`PlayerView`、也不泄露给其它座位。它不是"参与者视角快照"
+    的一部分——塞进 ``PlayerView`` 会污染"常驻视角 = 全量快照"的语义，也会让可见性断言
+    失去唯一读点（`04`（§2「信息可见性」）的"牌堆顺序仅引擎按效果逐张授予"）。
+
+    **空元组不进序列化**（``_serialize``）：无授予的询问与 M2 逐字节相同，34 条基准
+    因此一行不改；有授予时牌面只出现在这**一次**询问记录里，不落进任何 delta。
+    """
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> Any:
+        data = handler(self)
+        if not self.revealed:
+            data.pop("revealed", None)
+        return data
 
 
 class PlayPhaseQuery(_QueryBase):
@@ -407,6 +464,17 @@ class SelectOptionQuery(_QueryBase):
     options: tuple[str, ...]
 
 
+class ArrangeQuery(_QueryBase):
+    """排列（票 10 §②）：被授予的牌面随询问给出，答复 = 一个排列 + 一个切分点。
+
+    "观看牌堆顶 X 张并按任意顺序放回顶上 / 底下"是**一份决策**：拆成多次
+    ``SELECT_CARDS`` 会让一次观星变成十几次询问、且顺序语义靠询问序号隐式表达
+    （``SelectCards.picks`` 是无序集合，表达不出"任意顺序"）。故新增这一类询问。
+    """
+
+    kind: Literal["ARRANGE"] = "ARRANGE"
+
+
 Query = Annotated[
     PlayPhaseQuery
     | DodgeQuery
@@ -415,6 +483,7 @@ Query = Annotated[
     | RespondQuery
     | SelectCardsQuery
     | SkillActivationQuery
-    | SelectOptionQuery,
+    | SelectOptionQuery
+    | ArrangeQuery,
     Field(discriminator="kind"),
 ]

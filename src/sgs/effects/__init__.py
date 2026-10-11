@@ -65,6 +65,7 @@ from .primitives import (
     draw_from_deck,
     locate,
     move_card,
+    place_on_deck,
     substitute_judge_card,
     swap_judge_card,
 )
@@ -113,6 +114,7 @@ __all__ = (
     "legal_actions_for",
     "locate",
     "move_card",
+    "place_on_deck",
     "priority_class_of",
     "recover_amount",
     "response_count",

@@ -85,6 +85,7 @@ __all__ = [
     "reset_phase_skill_state",
     "resolve_instances",
     "same_kingdom",
+    "timing_hooks_present",
 ]
 
 
@@ -336,6 +337,21 @@ def resolve_instances(state: GameState) -> tuple[SkillInstance, ...]:
         deduped.append(instance)
     deduped.sort(key=lambda item: (int(item.definition.priority_class), item.skill_id, item.owner))
     return tuple(deduped)
+
+
+def timing_hooks_present(state: GameState, timing: Timing) -> bool:
+    """当前局面有没有注册在 ``timing`` 上的技能钩子（票 10 的**帧外阶段体懒守卫**）。
+
+    阶段体（``PHASE_PREPARE`` / ``PHASE_DRAW`` / ``PHASE_FINISH``）没有结算帧；引擎据本
+    谓词决定"要不要为它建一个钩子帧"。无武将模式与"这套技能还没实现"两种情形都返回
+    ``False``，故 M2 的记录流与 34 条基准逐字节不变——代价为零（与 ``move_after_providers``
+    对"失去牌后"的惰性守卫同一姿态）。
+    """
+    return any(
+        hook.timing is timing
+        for instance in resolve_instances(state)
+        for hook in instance.definition.hooks
+    )
 
 
 def instance_key(instance: SkillInstance) -> str:
@@ -1066,6 +1082,15 @@ from .response_window import (  # noqa: E402  （末尾 import 是刻意的）
 from .lord_request import (  # noqa: E402  （末尾 import 是刻意的）
     lord_skill_definitions,
 )
+from .arrange import (  # noqa: E402  （末尾 import 是刻意的）
+    arrange_activation_plans,
+    arrange_skill_definitions,
+)
+
+ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], ActivationPlan]] = (
+    MappingProxyType({**ACTIVATION_PLANS, **arrange_activation_plans()})
+)
+"""G 族（票 10）的发动形态并入后的**完整**注册表：与 :data:`CATALOG` 同一合并姿态。"""
 
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
     {
@@ -1078,6 +1103,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *move_after_skill_definitions(),
             *response_window_skill_definitions(),
             *lord_skill_definitions(),
+            *arrange_skill_definitions(),
         )
     }
 )
