@@ -144,7 +144,7 @@ check "$DOC05" "83 个节点的枚举值与顺序" "T-1 权威表的 83 节点�
 check "$DOC05" "伪时机不得出现" "T-1 伪时机负测试行"
 check "$DOC05" "tests/test_timing.py" "T-1 枚举与伪时机禁令的落点"
 check "$DOC05" "时机覆盖清单" "T-1 映射表时机覆盖清单行"
-check "$DOC05" "53 dispatch 白名单 / 11 空日志 / 19 枚举位" "T-1 三分区口径（M2 定格）"
+check "$DOC05" "54 dispatch 白名单 / 11 空日志 / 18 枚举位" "T-1 三分区口径（M3 解封 `MOVE_AFTER` 后）"
 check "$DOC05" "tests/test_timing_coverage.py" "T-1 覆盖清单的判决落点"
 check "$DOC05" "§M2 的验收不冲突" "T-1 与 06 §M2 的验收口径对齐"
 check "$DOC05" "Golden Replay 用例 ≥ 30 条" "T-1 承接 06 §M2 的基准条数"
@@ -263,7 +263,7 @@ check "$DOC03" '合计 **19 张**' "§7 装备计数：合计 19 张"
 
 # 票 05（M2 文档回写）回写《开发文档/05-测试与验证策略.md》§2 / §4 / §5 / §7。
 # 依据：.scratch/m2-doc-writeback/spec.md 逐行口径 #30 / #32 / #33 + A6 / A7。
-check "$DOC05" '64 已实现 = 53 dispatch + 11 空日志' "§2 64 是派生量（派生式）"
+check "$DOC05" '65 已实现 = 54 dispatch + 11 空日志' "§2 64 是派生量（派生式）"
 check "$DOC05" '100 局 / 120 s' "§2 fuzz 预算 M2 口径"
 check "$DOC05" '§7 第 3 项的门禁口径与之同源' "§2 悬空指针已改指 §7 第 3 项"
 check "$DOC05" '规则层候选过滤' "§4 判定区唯一改述为规则层候选过滤"
@@ -447,7 +447,7 @@ WRITEBACK_NEW=(
   '02-规则引擎设计.md|player_count == 2 ⇒ 无身份局|§8 模式由座位数派生'
   '03-数据模型与技能描述.md|SkillDef{skill_id, locked, carrier, hooks, modifiers}|§4 SkillDef 五元组'
   '03-数据模型与技能描述.md|sgs.effects.OPS|§5 op 注册表'
-  '05-测试与验证策略.md|53 dispatch 白名单 / 11 空日志 / 19 枚举位|M2 三分区口径'
+  '05-测试与验证策略.md|54 dispatch 白名单 / 11 空日志 / 18 枚举位|M3 三分区口径'
   '05-测试与验证策略.md|100 局 / 120 s|M2 fuzz 预算'
   '01-总体设计.md|只读依赖环 `data → effects → state → data`|§5 data 只读依赖环'
   '04-AI与交互设计.md|响应窗口是“收集式”|§1 无懈窗口收集式语义'

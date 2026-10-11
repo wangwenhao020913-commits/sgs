@@ -237,11 +237,15 @@ def _take_one_zone_card(
 
 def _move_lost_cards(
     host: Any, frame: Frame, card_ids: tuple[int, ...], *, to_zone: ZoneRef
-) -> None:
-    """拆 / 顺的公共第二步：被选中的牌以 ``LOSE`` 离开原区（票 08 的来源口径）。"""
+) -> Any:
+    """拆 / 顺的公共第二步：被选中的牌以 ``LOSE`` 离开原区（票 08 的来源口径）。
+
+    返回 :meth:`~sgs.engine.game.Engine.move_in_frame` 的控制值：这次移动的"失去牌后"
+    钩子可以提问（票 07），``"stay"`` 必须透传给效果帧的内游标。
+    """
     if not card_ids:
-        return
-    host.move_in_frame(
+        return None
+    return host.move_in_frame(
         frame,
         host.state.refs(card_ids),
         to_zone=to_zone,
@@ -259,8 +263,7 @@ def resolve_dismantlement(host: Any, frame: Frame) -> Any:
     )
     if host.suspended(picked):
         return "stay"
-    _move_lost_cards(host, frame, picked, to_zone=ZoneRef(Zone.DISCARD))
-    return None
+    return _move_lost_cards(host, frame, picked, to_zone=ZoneRef(Zone.DISCARD))
 
 
 def resolve_snatch(host: Any, frame: Frame) -> Any:
@@ -271,8 +274,7 @@ def resolve_snatch(host: Any, frame: Frame) -> Any:
     )
     if host.suspended(picked):
         return "stay"
-    _move_lost_cards(host, frame, picked, to_zone=ZoneRef(Zone.HAND, frame.data["source"]))
-    return None
+    return _move_lost_cards(host, frame, picked, to_zone=ZoneRef(Zone.HAND, frame.data["source"]))
 
 
 def resolve_duel(host: Any, frame: Frame) -> Any:
@@ -342,7 +344,7 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
         return None
     weapon = host.weapon_of(holder)
     if weapon is not None:
-        host.move_in_frame(
+        return host.move_in_frame(
             frame,
             (weapon,),
             to_zone=ZoneRef(Zone.HAND, source),
@@ -464,7 +466,7 @@ def pick_harvest(host: Any, frame: Frame) -> Any:
     if not picked:
         return None
     chosen = picked[0]
-    host.move_in_frame(
+    control = host.move_in_frame(
         frame,
         host.state.refs((chosen,)),
         to_zone=ZoneRef(Zone.HAND, target),
@@ -472,6 +474,8 @@ def pick_harvest(host: Any, frame: Frame) -> Any:
         owner=target,
         actor=target,
     )
+    if control == "stay":
+        return "stay"
     frame.data["revealed"] = tuple(card_id for card_id in revealed if card_id != chosen)
     return None
 

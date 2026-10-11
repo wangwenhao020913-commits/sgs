@@ -3,10 +3,10 @@
 覆盖清单 = 「时机节点 → 覆盖它的基准或用例」的映射，定义在
 ``tests/support/timing_coverage.py``。本文件把它变成判决，断言四件事：
 
-1. 清单的键集**恰等于** M2 的 dispatch 白名单（53 个可从记录流观测的节点）；
+1. 清单的键集**恰等于** dispatch 白名单（54 个可从记录流观测的节点）；
 2. 清单里声明的**每一个**来源都真的 dispatch 它声称覆盖的节点（实测，不靠声明）；
 3. 所有来源的记录流并集**恰等于**白名单（既 ⊇ 也不多）；
-4. 19 个枚举位与 11 个空日志节点**一个都不出现**在任何记录流里。
+4. 18 个枚举位与 11 个空日志节点**一个都不出现**在任何记录流里。
 
 **"⊇ 64" 的重述**（票 18 已登记、票 25 落地、票 32 定格）：64 个已实现类里有 11 个 L2
 边界 / 阶段间节点结构性地不 dispatch、记录流不可见，故机械判据是
@@ -47,12 +47,34 @@ def test_every_declared_source_really_dispatches_the_node_it_covers():
 def test_the_union_of_actual_record_streams_is_exactly_the_dispatch_whitelist():
     collected = _collected()
 
-    assert collected >= WHITELIST, "64 个已实现里可从记录流观测的那些，一个不漏"
+    assert collected >= WHITELIST, "65 个已实现里可从记录流观测的那些，一个不漏"
     assert collected == WHITELIST, "也不得多：白名单之外的节点不得被 dispatch"
 
 
-def test_the_dispatch_whitelist_and_the_empty_log_nodes_restate_the_64():
-    assert len(WHITELIST) == 53
+M2_DISPATCH_WHITELIST = frozenset(
+    timing.value for timing in DISPATCH_WHITELIST if timing is not Timing.MOVE_AFTER
+)
+"""M2 的 53 个：M3 的解封增量只有一个（票 07 / ADR-010 的"解封集合 = 白名单增量"）。"""
+
+
+def test_the_unsealed_set_is_exactly_the_move_after_node():
+    """ADR-010 的机械判据：``解封集合 = 白名单增量 = {MOVE_AFTER}``（票 07）。
+
+    M3 是 milestone 中性名里唯一一次枚举位解封，且**只解封 after**——``MOVE_BEFORE``
+    继续留在枚举位。这条断言把"例外清单"钉成集合等式，而不是靠人读 diff。
+    """
+    unsealed = frozenset(timing.value for timing in DISPATCH_WHITELIST) - M2_DISPATCH_WHITELIST
+
+    assert unsealed == {Timing.MOVE_AFTER.value}, "M3 解封的恰是 MOVE_AFTER 一个"
+    assert Timing.MOVE_BEFORE.value not in {
+        timing.value for timing in DISPATCH_WHITELIST
+    }, "移动前继续留枚举位（M3 无载体）"
+    assert len(M2_DISPATCH_WHITELIST) == 53, "M2 基线恰 53 个"
+    assert Timing.MOVE_AFTER in COVERAGE, "解封的节点必须有实测来源"
+
+
+def test_the_dispatch_whitelist_and_the_empty_log_nodes_restate_the_implemented_set():
+    assert len(WHITELIST) == 54, "M2 的 53 + M3 解封的 `MOVE_AFTER`（票 07）"
     assert len(EMPTY_LOG) == 11
     assert WHITELIST | {timing.value for timing in EMPTY_LOG} == {
         timing.value for timing in IMPLEMENTED
@@ -69,7 +91,7 @@ def test_enum_only_and_empty_log_nodes_never_appear_in_any_record_stream():
     collected = _collected()
 
     assert collected.isdisjoint({timing.value for timing in ENUM_ONLY}), (
-        "19 个枚举位只留位，M2 一次都不 dispatch"
+        "18 个枚举位只留位，M3 一次都不 dispatch"
     )
     assert collected.isdisjoint({timing.value for timing in EMPTY_LOG}), (
         "11 个空日志节点结构性存在，但记录流里不出现"

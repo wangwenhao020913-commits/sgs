@@ -43,7 +43,7 @@ from pathlib import Path
 from sgs.engine import read_journal
 from sgs.timing import Timing
 
-from .positions import play_phase_peach_engine, turn_loop_engine
+from .positions import move_after_engine, play_phase_peach_engine, turn_loop_engine
 
 __all__ = ["ALL_SOURCES", "COVERAGE", "dispatched", "stream_records"]
 
@@ -51,6 +51,7 @@ _REPLAYS_DIR = Path(__file__).resolve().parent.parent / "replays"
 
 TURN_LOOP = "position:turn-loop"
 PLAY_PHASE_PEACH = "position:play-phase-peach"
+MOVE_AFTER_SCENE = "position:move-after"
 
 
 def _baseline(slug: str) -> str:
@@ -129,8 +130,10 @@ COVERAGE: dict[Timing, tuple[str, ...]] = {
     Timing.JUDGE_ON: (B14,),
     Timing.JUDGE_CARD_BEFORE_EFFECT: (B14,),
     Timing.JUDGE_CARD_AFTER_EFFECT: (B14,),
+    # ---- L16 牌移动：票 07 解封的 `MOVE_AFTER`，来源是 D 族的构造局面单测 ----
+    Timing.MOVE_AFTER: (MOVE_AFTER_SCENE,),
 }
-"""53 个可从记录流观测的节点 → 覆盖它的基准 / 构造局面用例。"""
+"""54 个可从记录流观测的节点 → 覆盖它的基准 / 构造局面用例。"""
 
 
 @lru_cache(maxsize=None)
@@ -143,6 +146,8 @@ def stream_records(source_id: str):
         return turn_loop_engine().records
     if source_id == PLAY_PHASE_PEACH:
         return play_phase_peach_engine().records
+    if source_id == MOVE_AFTER_SCENE:
+        return move_after_engine().records
     raise KeyError(f"未知的覆盖来源：{source_id!r}")
 
 

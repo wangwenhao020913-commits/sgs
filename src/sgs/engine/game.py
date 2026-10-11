@@ -47,11 +47,15 @@ from sgs.effects import (
 )
 from sgs.resolution import Control, Frame, ResolutionStack, StepTable
 from sgs.skills import (
+    MOVE_EVENT_KEY,
     ActivationPlan,
+    MoveEvent,
     SeamKind,
     SkillInstance,
+    dispatch_move_after,
     dispatch_seam,
     dispatch_timing,
+    move_after_providers,
     prune_skill_state,
     reset_phase_skill_state,
 )
@@ -137,6 +141,16 @@ _RESPONSE_CANCELED = "response_canceled"
 
 与逐目标分槽的 ``canceled`` 分列：后者会被游标推进清掉，而传播发生在帧**出栈之后**。
 在 :meth:`Engine._propagate_cancel` 标记父帧时一并写入，子帧出栈时据此决定是否传播。"""
+
+_MOVE_EVENTS = "move_events"
+"""帧私有槽名：本帧已经派发过的 ``MOVE_AFTER`` 次数（票 07 的派发幂等时钟）。
+
+同一帧里可以有**多次移动**（【方天画戟】的额外目标 / 顶替的先旧后新 / 拆顺的两次搬牌），
+而带提问的钩子会让 ``move_in_frame`` 从**同一个步骤**重入（帧内游标不前进）。这个计数
+让"第 n 次移动"与"第 n 次重入"区分开：这次移动的幂等键带上它的序号
+（见 :meth:`Engine._move_key`），故"同一次移动"只落一条记录、只派发一遍。
+帧外移动没有帧可挂标记，那份幂等键住 :attr:`Engine._move_recorded`。
+"""
 
 
 class _Suspend:
@@ -305,6 +319,26 @@ class Engine:
         self._batch_facts: list[DeathFact] = []
         """本批每次死亡在检测点定格的事实；批次关闭时求解一次，未终局则清空。"""
         self._turn_pc = 0
+        self._move_moved: tuple[tuple[int, ...], ZoneRef, int] | None = None
+        """最近一次**已搬完**的移动：``(牌 id, 目标区域, 本帧移动序号)``（票 07 的重入判据）。
+
+        重入同一个步骤时，若"这一批牌 + 这个目标区域 + 这个序号"与它完全一致，说明
+        `move_card` 已经跑过了——不再搬第二遍，只等钩子的派发续跑。
+        """
+        self._move_recorded: tuple | None = None
+        """最近一次**无承载帧**移动已落过记录的那个幂等键（票 07）。
+
+        帧外移动没有 ``frame.data`` 可挂"记录过了"的标记，故这个判据住引擎上；
+        重入同一批牌时不再重复落 ``MOVE_AFTER`` 记录。
+        """
+        self._move_pending: tuple[MoveEvent, tuple, Frame | None] | None = None
+        """被钩子挂起的 ``MOVE_AFTER``（票 07）：``(载荷, 幂等键, 承载帧或 None)``。
+
+        "失去牌后"是**内联时机**，它的钩子可以提问。提问把控制权交回驱动循环之后，
+        重入**不一定落在同一个步骤上**（拆顺会继续跑效果帧的后续步骤、使用链会继续跑
+        L4/L5），故挂起状态存在引擎上，由 :meth:`_flush_pending_move` 在"引擎空闲"处
+        接着派发完——这是"移动入口不建帧"（R1-Q2）的代价，也是它的唯一落点。
+        """
         self._turn_data: dict[str, Any] = {}
         self._turn_steps: tuple[Callable[[], Any], ...] = (
             self._turn_before_start,
@@ -391,13 +425,20 @@ class Engine:
         cards: tuple[CardRef, ...] = (),
         frame_id: int = 0,
         depth: int = 0,
+        event: Any = None,
     ) -> Control:
         """dispatch 一个时机；空实现也照记。
 
         帧外的时机（回合环 / 判定阶段收尾）没有承载帧，M2 的装备钩子都挂在 L4 / L5 / L7，
         故这里只记录、不派发技能；返回 ``None`` 让"返回控制值"的接缝在形状上统一
         （票 19 §8 / 票 30）。
+
+        ``event`` 是**帧外时机**的私有载荷（票 07 的 ``MOVE_AFTER`` 用在无承载帧的移动上，
+        如弃牌阶段）：写进一个**不压栈的临时帧**，使钩子回调拿到与帧内派发同形的上下文；
+        ``frame_id`` / ``depth`` 仍由调用方给定，故记录流里的坐标与同一次移动的
+        ``card_move`` 一致（临时帧不进记录流，不会被看见）。
         """
+        dispatch_frame = frame_id == 0 and event is not None
         self._emit(
             TimingRecord(
                 seq=self._next_seq(),
@@ -410,6 +451,17 @@ class Engine:
                 cards=cards,
             )
         )
+        if not dispatch_frame:
+            return None
+        if not move_after_providers(self.state):
+            return None
+        frame = Frame(
+            kind=FrameKind.RESOLVE,
+            data={"source": actor, "targets": targets, "card": None},
+            frame_id=frame_id,
+        )
+        frame.data[MOVE_EVENT_KEY] = event
+        dispatch_move_after(self, frame)
         return None
 
     def emit_delta(self, delta: Any, *, frame_id: int = 0, depth: int = 0) -> None:
@@ -648,23 +700,31 @@ class Engine:
         actor: int | None = None,
         cards=(),
         targets: tuple[int, ...] | None = None,
+        event: Any = None,
     ) -> Control:
         """以 ``frame`` 为主体 dispatch 一个时机；``source`` 随帧继承，并派发技能钩子。
 
         ``targets`` 缺省取帧的目标列表；C 段的时机记录由步骤表显式给**当前目标**
         （票 11 §3.3），使逐目标结算在记录流里可定位。
 
+        ``event`` 是这一次时机的**私有载荷**（票 07 的 ``MOVE_AFTER`` 用它带 :class:`MoveEvent`），
+        写进本帧的私有槽后原样透传给 :func:`~sgs.skills.dispatch_timing` 的钩子。
+
         **记录幂等**（票 30）：钩子可以因询问而暂停，重入时步骤会再调本方法一次。
         同一个"时机实例"只在**第一次**落一条 ``timing`` 记录；``_pending_timing`` 记住
         "上一次派发是否停在这里"，重入同键即跳过记录、继续派发。真正重复出现的时机
-        （逐目标的 C2–C5、逐窗口的 ``NEAR_DEATH_AT``）键不同或中间隔了一次完成的派发，
-        故不会被误吞。
+        （逐目标的 C2–C5、逐窗口的 ``NEAR_DEATH_AT``、**同帧的多次移动**）键不同或中间隔了
+        一次完成的派发，故不会被误吞——同帧的多次移动靠 ``_MOVE_EVENTS`` 计数把"第 n 次
+        移动"与"第 n 次重入"分开（票 07）。
         """
+        if event is not None:
+            frame.data[MOVE_EVENT_KEY] = event
         key = (
             timing,
             actor,
             tuple(targets) if targets is not None else None,
             tuple(card.card_id for card in cards),
+            frame.data.get(_MOVE_EVENTS, 0) if event is not None else None,
         )
         if frame.data.get("_pending_timing") != key:
             self.emit_timing(
@@ -825,7 +885,7 @@ class Engine:
             use_timing=Timing.NEAR_DEATH_AT,
         )
 
-    def move_used_card_to_processing(self, frame: Frame) -> None:
+    def move_used_card_to_processing(self, frame: Frame) -> Control:
         """手牌 → 处理区（``reason = USE``）：在 L4.1 / L4.2 之间（票 07 §3）。
 
         虚拟牌不落区域（票 12 §Q21）：纯虚拟牌（八阵的【闪】）无事发生；**转化牌**
@@ -834,9 +894,8 @@ class Engine:
         """
         card = frame.data["card"]
         if card.is_virtual:
-            self._move_virtual_sources(frame, to_zone=ZoneRef(Zone.PROCESSING))
-            return
-        self.move_in_frame(
+            return self._move_virtual_sources(frame, to_zone=ZoneRef(Zone.PROCESSING))
+        return self.move_in_frame(
             frame,
             (card,),
             to_zone=ZoneRef(Zone.PROCESSING),
@@ -923,9 +982,8 @@ class Engine:
         """打出：手牌 → 处理区（``reason = USE``）——L6 的第一段移动（转化牌同姿态）。"""
         card = frame.data["card"]
         if card.is_virtual:
-            self._move_virtual_sources(frame, to_zone=ZoneRef(Zone.PROCESSING))
-            return
-        self.move_in_frame(
+            return self._move_virtual_sources(frame, to_zone=ZoneRef(Zone.PROCESSING))
+        return self.move_in_frame(
             frame,
             (card,),
             to_zone=ZoneRef(Zone.PROCESSING),
@@ -1369,11 +1427,15 @@ class Engine:
         """
         self._turn_data["judge_consumed"] = frame.data["card"].card_id
 
-    def _effect_context(self, frame: Frame, *, actor: int) -> EffectContext:
+    def _effect_context(self, frame: Frame | None, *, actor: int | None) -> EffectContext:
         """叶子原语要的结算主体信息：从当前帧继承 `source` / `targets` / `card` 与层级。
 
         ``actor`` 是这次原语调用的主体（移动牌的操使者 / 体力被写的座位），由调用点给。
+        ``frame=None`` 是**没有承载帧**的移动（弃牌阶段等回合环步骤，票 07）：主体只剩
+        ``actor``，帧字段全取缺省。
         """
+        if frame is None:
+            return EffectContext(actor=actor)
         return EffectContext(
             actor=actor,
             source=frame.data.get("source"),
@@ -1385,30 +1447,149 @@ class Engine:
 
     def move_in_frame(
         self,
-        frame: Frame,
+        frame: Frame | None,
         cards: tuple[CardRef, ...],
         *,
         to_zone: ZoneRef,
         reason: MoveReason,
         owner: int | None,
         actor: int | None = None,
-    ) -> None:
-        """在当前帧里移动一批牌并记一条 delta；``actor`` 缺省取帧的 ``source``。
+    ) -> Control:
+        """移动一批牌、记一条 delta，并在 ``move_card`` 之后内联派发 ``MOVE_AFTER``。
 
         判定路径的"无角色主体"移动（判定牌的两次移动、延时锦囊本体）主体是**被判定者**，
         与 ``source``（可能为 ``None``）分列，故调用点可显式给 ``actor``。
 
         这也是**效果回调的公共移动口**（票 27）：``OPS`` 里的 op 只经它搬牌，
         故"搬牌必记 delta"这条不变量对使用链与效果链是同一个实现。
+
+        **失去牌后（票 07）**：本方法是全项目移动的**唯一入口**——有承载帧的移动在
+        本帧内派发 ``MOVE_AFTER``（帧私有载荷 :class:`~sgs.skills.MoveEvent`，帧私有数据
+        不进记录流）；**没有承载帧**的移动（弃牌阶段的弃置等回合环步骤）给 ``frame=None``，
+        由 :meth:`emit_timing` 用一个不压栈的临时帧派发。钩子若提问，挂起状态记在引擎上
+        （``_move_pending``），由 :meth:`_flush_pending_move` 在下一个询问应答之后续跑——
+        故这里的返回值只用于"步骤可以被安全推进"的判断，挂起的续跑不依赖它。
         """
+        card_ids = tuple(card.card_id for card in cards)
+        current_count = frame.data.get(_MOVE_EVENTS, 0) if frame is not None else 0
+        if (
+            frame is not None
+            and self._move_pending is not None
+            and self._move_moved == (card_ids, to_zone, current_count)
+        ):
+            # 同一次移动的**重入**：牌已搬完、delta 已记，只是钩子的派发还没续跑。
+            # 不再搬第二遍（牌已不在来源区），把控制权交回驱动循环去消费那条应答。
+            return "stay"
         ctx = self._effect_context(
-            frame, actor=frame.data["source"] if actor is None else actor
+            frame,
+            actor=(frame.data["source"] if frame is not None else None) if actor is None else actor,
         )
         delta = move_card(
             self.state, ctx, tuple(cards), to_zone=to_zone, reason=reason, owner=owner
         )
-        self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+        self.emit_delta(
+            delta,
+            frame_id=(frame.frame_id if frame is not None else 0),
+            depth=self.stack.depth,
+        )
         prune_skill_state(self.state)
+        count = frame.data.get(_MOVE_EVENTS, 0) + 1 if frame is not None else 0
+        if frame is not None:
+            frame.data[_MOVE_EVENTS] = count
+        event = self._move_event(delta, actor=actor)
+        key = self._move_key(event, count)
+        self._move_moved = (card_ids, to_zone, count)
+        control = self._dispatch_move_after(
+            frame, event, count=count, key=key, frame_id=frame.frame_id if frame is not None else 0
+        )
+        if control == "stay":
+            self._move_pending = (event, key, frame)
+        return "stay" if control == "stay" else None
+
+    def _move_event(self, delta: Any, *, actor: int | None) -> MoveEvent:
+        """把一条 ``card_move`` 的形状装成 :class:`~sgs.skills.MoveEvent`（派发载荷）。"""
+        return MoveEvent(
+            cards=tuple(delta.cards),
+            from_zone=delta.from_zone,
+            to_zone=delta.to_zone,
+            reason=delta.reason,
+            owner=delta.owner,
+            after_holder=delta.to_zone.seat,
+            actor=actor,
+        )
+
+    def _dispatch_move_after(
+        self,
+        frame: Frame | None,
+        event: MoveEvent,
+        *,
+        count: int,
+        key: tuple,
+        frame_id: int = 0,
+    ) -> Control:
+        """把这次移动当"失去牌后"派发 ``MOVE_AFTER``（票 07）。
+
+        ``key`` 是这次时机实例的幂等键（见 :meth:`_move_key`）：重入续跑时沿用它，
+        故"同一次移动"只落一条记录、只派发一遍。承载帧可能已经不在栈上（挂起期间
+        上层帧出栈），故不使用帧自己的私有标记；载荷写进 ``frame.data`` 供钩子读。
+        """
+        if frame is not None:
+            if not move_after_providers(self.state):
+                # **惰性守卫**（票 07 §要做什么 2）：没有提供者 ⇒ 一个时机事件都不发、
+                # 一个钩子都不跑。无武将模式的记录流因此**逐字节不变**（M2 的 34 条基准
+                # 不重录）——这是本票的硬约束，比"每条移动都落一条记录"更重要。
+                frame.data.pop("_pending_move_timing", None)
+                return None
+            if frame.data.get("_pending_move_timing") != key:
+                self.emit_timing(
+                    Timing.MOVE_AFTER,
+                    frame_id=frame_id,
+                    depth=self.stack.depth,
+                    actor=event.actor,
+                    source=frame.data.get("source"),
+                    targets=(),
+                    cards=event.cards,
+                )
+            frame.data[MOVE_EVENT_KEY] = event
+            result = dispatch_move_after(self, frame)
+            if result == "stay":
+                frame.data["_pending_move_timing"] = key
+            else:
+                frame.data.pop("_pending_move_timing", None)
+            return result
+        # 无承载帧（弃牌阶段等）：先判惰性守卫，再落记录并派发。
+        if not move_after_providers(self.state):
+            return None
+        if self._move_recorded != key:
+            self.emit_timing(
+                Timing.MOVE_AFTER,
+                frame_id=frame_id,
+                depth=self.stack.depth,
+                actor=event.actor,
+                source=event.actor,
+                targets=(),
+                cards=event.cards,
+            )
+            self._move_recorded = key
+        # **不压栈**的临时帧只服务这一次派发（记录坐标取 ``frame_id=0``/``depth=0``，
+        # 与它那条 ``card_move`` 一致）。
+        transient = Frame(
+            kind=FrameKind.RESOLVE,
+            data={"source": event.actor, "targets": (), "card": None},
+            frame_id=frame_id,
+        )
+        transient.data[MOVE_EVENT_KEY] = event
+        return dispatch_move_after(self, transient)
+
+    @staticmethod
+    def _move_key(event: MoveEvent, count: int) -> tuple:
+        """一次 ``MOVE_AFTER`` 时机实例的幂等键。
+
+        键 = ``(时机, 这批牌, 本帧第几次移动)``——**必须带序号**：同一帧里"同一批牌"
+        可能移动到不同区域（顶替的先旧后新、拆顺的两次搬牌），只按键里的牌 id 会把
+        后一次移动误当成前一次的记录重入（票 07）。
+        """
+        return (Timing.MOVE_AFTER, tuple(card.card_id for card in event.cards), count)
 
     def _move_cards(
         self,
@@ -1832,9 +2013,25 @@ class Engine:
             self.submit(participants[query.actor].respond(query))
         return self.records
 
+    def _flush_pending_move(self) -> None:
+        """把被钩子挂起的 ``MOVE_AFTER`` 派发完（票 07）。
+
+        询问刚被应答、下一帧还没跑时调用：此时钩子重入需要的那条应答已经在
+        ``_answer`` 里，故续跑会把它消费掉。没有挂起的移动时是**零动作**。
+        """
+        while self._move_pending is not None:
+            event, key, pending_frame = self._move_pending
+            control = self._dispatch_move_after(
+                pending_frame, event, count=key[2], key=key
+            )
+            if control == "stay":  # pragma: no cover - 本族的钩子不提问（见 move_after 模块）
+                return
+            self._move_pending = None
+
     def _step(self) -> None:
         if self.finished:
             return
+        self._flush_pending_move()
         if not self._started:
             self._start()
             return
@@ -2086,15 +2283,17 @@ class Engine:
         )
         if action is SUSPEND:
             return "stay"
-        delta = move_card(
-            self.state,
-            EffectContext(actor=seat),
+        # 弃牌阶段没有承载帧，但"弃置"也是**失去**（票 07 §要做什么 5）：走同一个移动入口，
+        # 由它按惰性守卫派发 `MOVE_AFTER`；记录坐标（frame_id=0 / depth=stack.depth）与
+        # 既有那条 `card_move` 一致——无武将时零派发，M2 基准一行不变。
+        self.move_in_frame(
+            None,
             action.cards,
             to_zone=ZoneRef(Zone.DISCARD),
             reason=MoveReason.DISCARD,
             owner=seat,
+            actor=seat,
         )
-        self.emit_delta(delta)
         return None
 
     def _phase_discard_end(self) -> None:

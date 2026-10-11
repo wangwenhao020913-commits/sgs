@@ -81,7 +81,7 @@ class FrameHost(StepHost, Protocol):
 
     def apply_timing_ops(self, frame: Frame, timing: Timing) -> Any: ...
 
-    def move_used_card_to_processing(self, frame: Frame) -> None: ...
+    def move_used_card_to_processing(self, frame: Frame) -> Control: ...
 
     def move_used_card_to_judge_zone(self, frame: Frame) -> None: ...
 
@@ -212,8 +212,8 @@ def use_choose_target(host: FrameHost, frame: Frame) -> Control:
     if control is not None:
         return control
     # 实体牌离开手牌、进入处理区：发生在 L4.1 与 L4.2 之间（票 07 §3）。
-    host.move_used_card_to_processing(frame)
-    return None
+    # 返回值必须透传：这次移动的"失去后"钩子可以在这里提问。
+    return host.move_used_card_to_processing(frame)
 
 
 def use_on_use(host: FrameHost, frame: Frame) -> Control:

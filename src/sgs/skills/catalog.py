@@ -67,6 +67,7 @@ __all__ = [
     "CATALOG",
     "ActivationPlan",
     "Hook",
+    "HookCondition",
     "Seam",
     "SeamKind",
     "SkillDef",
@@ -119,12 +120,26 @@ class SkillSourceKind(str, Enum):
     HERO_CARD = "HERO_CARD"
 
 
+HookCondition: TypeAlias = Callable[[Any, Frame], bool]
+"""钩子的**触发条件**：``(host, frame) -> bool``（票 07 的加法）。
+
+``False`` ⇒ 这次时机里该钩子不成立（**不发"是否发动"询问**、不执行回调），理由与
+:func:`~sgs.skills.catalog.activation_plan` 的 ``available=False`` 同姿态：
+"付不起 / 不满足前提"的技能连问都不该问。``None``（缺省）= 无条件。
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class Hook:
-    """一条时机钩子：键 = :class:`~sgs.timing.Timing` 枚举本身 + 回调。"""
+    """一条时机钩子：键 = :class:`~sgs.timing.Timing` 枚举本身 + 可选触发条件 + 回调。
+
+    ``condition`` 是票 07 的加法（默认 ``None``，既有的 4 条装备钩子一字不改）：【连营】/
+    【枭姬】这类**条件触发**的技能若在条件不成立时仍发询问，就会在每一次牌移动上打扰玩家。
+    """
 
     timing: Timing
     handler: HookHandler
+    condition: HookCondition | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,8 +386,14 @@ def is_equipped(state: GameState, seat: int, slot: SlotKind) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _matching_hooks(instance: SkillInstance, timing: Timing) -> tuple[Hook, ...]:
-    return tuple(hook for hook in instance.definition.hooks if hook.timing is timing)
+def _matching_hooks(instance: SkillInstance, timing: Timing, host: Any, frame: Frame) -> tuple[Hook, ...]:
+    """本实例在 ``timing`` 上**条件成立**的钩子（条件缺省 = 恒成立；票 07 的 ``condition``）。"""
+    return tuple(
+        hook
+        for hook in instance.definition.hooks
+        if hook.timing is timing
+        and (hook.condition is None or hook.condition(host, frame))
+    )
 
 
 def _matching_seams(instance: SkillInstance, kind: SeamKind) -> tuple[Seam, ...]:
@@ -412,7 +433,7 @@ def dispatch_timing(host: Any, frame: Frame, timing: Timing) -> Control:
     return _dispatch(
         host,
         frame,
-        match=lambda instance: _matching_hooks(instance, timing),
+        match=lambda instance: _matching_hooks(instance, timing, host, frame),
         timing=timing,
         key=timing.value,
     )
@@ -997,6 +1018,7 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
 from .heroes import conversion_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 from .active import active_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 from .target_pool import target_pool_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
+from .move_after import move_after_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
     {
@@ -1006,6 +1028,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *conversion_skill_definitions(),
             *active_skill_definitions(),
             *target_pool_skill_definitions(),
+            *move_after_skill_definitions(),
         )
     }
 )

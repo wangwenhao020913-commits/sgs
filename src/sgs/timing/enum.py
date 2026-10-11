@@ -247,15 +247,25 @@ IMPLEMENTED: tuple[Timing, ...] = (
     Timing.JUDGE_ON,
     Timing.JUDGE_CARD_BEFORE_EFFECT,
     Timing.JUDGE_CARD_AFTER_EFFECT,
+    # L16：牌移动事件（票 07 的 M3 唯一解封；**只解封 after**，`MOVE_BEFORE` 继续留枚举位）
+    Timing.MOVE_AFTER,
 )
-"""已实现类（M2 定格 = 64）：流程真的会走到（允许空实现 / 空日志）。"""
+"""已实现类（M2 定格 64 + M3 解封 1 = 65）：流程真的会走到（允许空实现 / 空日志）。
+
+M3 的增量只有 :attr:`Timing.MOVE_AFTER` 一个（票 07 / ADR-010 的不对称解封）：它在
+:meth:`~sgs.engine.game.Engine.move_in_frame` 这个**唯一移动入口**里内联派发，且只在
+当前局面有注册在该时机上的实例时派发（惰性守卫）——无武将模式因此零派发、M2 基准一行不变。
+"""
 
 _IMPLEMENTED_MEMBERS = frozenset(IMPLEMENTED)
 
 ENUM_ONLY: tuple[Timing, ...] = tuple(
     timing for timing in Timing if timing not in _IMPLEMENTED_MEMBERS
 )
-"""只留枚举位类（M2 定格 = 19）：不 dispatch（遍历 ``Timing`` 保证顺序确定）。"""
+"""只留枚举位类（M2 定格 19 − M3 解封 1 = 18）：不 dispatch（遍历 ``Timing`` 保证顺序确定）。
+
+M3 只从中移走 :attr:`Timing.MOVE_AFTER` 一个（票 07）；其余 18 个仍无载体。
+"""
 
 EMPTY_LOG: tuple[Timing, ...] = (
     # 准备阶段：只发阶段体 PHASE_PREPARE，边界不 dispatch。
@@ -292,9 +302,9 @@ _EMPTY_LOG_MEMBERS = frozenset(EMPTY_LOG)
 DISPATCH_WHITELIST: tuple[Timing, ...] = tuple(
     timing for timing in IMPLEMENTED if timing not in _EMPTY_LOG_MEMBERS
 )
-"""**dispatch 白名单**（M2 定格 = 53）：真的会 dispatch、可在记录流里观测到的节点。
+"""**dispatch 白名单**（M2 定格 53 + M3 解封 1 = 54）：真的会 dispatch、可在记录流里观测的节点。
 
-= 64 个已实现类 − 11 个空日志节点（票 18 登记、票 25 落地、票 32 定格）。覆盖清单
+= 65 个已实现类 − 11 个空日志节点（票 18 登记、票 25 落地、票 32 定格）。覆盖清单
 （``tests/support/timing_coverage.py``）的键集必须**恰等于**本集合，且每个节点都要在
 它声明的基准 / 用例产出的记录流里实测出现。
 """

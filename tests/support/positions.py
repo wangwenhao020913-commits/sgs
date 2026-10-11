@@ -24,6 +24,7 @@ __all__ = [
     "build_state",
     "cards_of_type",
     "declare_death",
+    "move_after_engine",
     "play_phase_peach_engine",
     "play_standard",
     "run_turns",
@@ -241,6 +242,59 @@ def turn_loop_engine(seed: int = 1):
     engine = Engine.from_state(state, seed=seed)
     run_turns(engine, [RecordingPlayer(), RecordingPlayer()], turns=1)
     return engine
+
+
+def move_after_engine(seed: int = 7):
+    """场景 8（票 07，D 族）：陆逊在出牌阶段使用唯一的手牌，触发【连营】摸牌。
+
+    "失去牌后"是**内联时机**（不建帧），它的记录流只在当前局面存在注册在该时机上的
+    实例时才会出现。这个构造局面就是 :data:`~sgs.timing.DISPATCH_WHITELIST` 里
+    ``MOVE_AFTER`` 的**实测来源**：座位 0 手里只有一张【桃】、体力未满，它被使用后
+    手牌归零 ⇒ 【连营】摸 1 张（于是同一帧里还有一次"摸牌"移动）。
+    """
+    pack = load_content_pack(deck_profile=M1_DECK_PROFILE)
+    peach = cards_of_type(pack, "peach")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=3, hp_max=4, hero="luxun"), SeatSpec()],
+        deck=tuple(card_id for card_id in range(len(pack.deck.cards)) if card_id != peach),
+        turn_seat=0,
+        phase=Phase.PREPARE,
+    )
+    engine = Engine.from_state(state, seed=seed)
+    players = [_MoveAfterPlayer(peach), _MoveAfterPlayer(peach)]
+    for _ in range(2_000):
+        if any(
+            record.kind == "timing" and record.timing is Timing.MOVE_AFTER
+            for record in engine.records
+        ):
+            return engine
+        if engine.pending is None:
+            engine._step()
+            if engine.finished:
+                return engine
+            continue
+        query = engine.pending
+        engine.submit(players[query.actor].respond(query))
+    return engine
+
+
+class _MoveAfterPlayer:
+    """场景 8 的脚本玩家：出牌阶段用指定的那张牌；技能询问一律发动；其余最小应答。"""
+
+    def __init__(self, card_id: int) -> None:
+        self._card_id = card_id
+
+    def respond(self, query: Query):
+        if query.kind == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == self._card_id:
+                    return action
+        if query.kind == "SKILL_ACTIVATION":
+            for action in query.legal_actions:
+                if action.kind == "ActivateSkill":
+                    return action
+        return _end_phase_or_first(query)
 
 
 def play_phase_peach_engine(seed: int = 1):

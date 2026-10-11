@@ -54,8 +54,8 @@ def test_implemented_and_enum_only_partition_the_whole_table():
     implemented = set(IMPLEMENTED)
     enum_only = set(ENUM_ONLY)
 
-    assert len(implemented) == 64, "M2 已实现类恰 64 个节点（票 17 §3）"
-    assert len(enum_only) == 19, "M2 只留枚举位类恰 19 个节点（票 17 §3）"
+    assert len(implemented) == 65, "M2 已实现类 64 + M3 解封的 1 个（票 07）"
+    assert len(enum_only) == 18, "M3 只解封 `MOVE_AFTER`，枚举位 19 → 18（票 07）"
     assert implemented | enum_only == set(Timing)
     assert implemented & enum_only == set()
 
@@ -64,11 +64,24 @@ def test_the_dispatch_whitelist_and_empty_log_nodes_partition_the_implemented_se
     dispatch = set(DISPATCH_WHITELIST)
     empty_log = set(EMPTY_LOG)
 
-    assert len(dispatch) == 53, "M2 dispatch 白名单恰 53 个（记录流可观测）"
+    assert len(dispatch) == 54, "M2 dispatch 白名单 53 + M3 解封的 `MOVE_AFTER`（票 07）"
     assert len(empty_log) == 11, "空日志 L2 节点恰 11 个"
     assert dispatch.isdisjoint(empty_log)
-    assert dispatch | empty_log == set(IMPLEMENTED), "53 + 11 复原 64 个已实现类"
+    assert dispatch | empty_log == set(IMPLEMENTED), "54 + 11 复原 65 个已实现类"
     assert dispatch | empty_log | set(ENUM_ONLY) == set(Timing)
+
+
+def test_the_m3_unseal_is_exactly_move_after():
+    """票 07：M3 唯一解封的枚举位 = `MOVE_AFTER`，且**只解封 after**。
+
+    配对的 `MOVE_BEFORE` 继续留在枚举位（M3 无载体，ADR-010 的不对称解封）。
+    """
+    assert Timing.MOVE_AFTER in IMPLEMENTED
+    assert Timing.MOVE_AFTER in DISPATCH_WHITELIST
+    assert Timing.MOVE_AFTER not in ENUM_ONLY
+    assert Timing.MOVE_BEFORE in ENUM_ONLY, "移动前继续留枚举位（M3 无载体）"
+    assert Timing.MOVE_BEFORE not in IMPLEMENTED
+    assert Timing.MOVE_BEFORE not in DISPATCH_WHITELIST
 
 
 def test_the_six_m2_nodes_are_dispatchable():
