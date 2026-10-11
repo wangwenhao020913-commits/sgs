@@ -142,16 +142,22 @@ def test_hero_skill_ids_are_fully_qualified_and_keep_the_data_order():
 
 
 def test_the_enabled_flag_is_required_and_read_back_from_the_data(monkeypatch):
-    """``enabled`` 是声明式字段：数据里没写就是结构错误，写了就原样读出（不静默取默认）。"""
+    """``enabled`` 是声明式字段：数据里没写就是结构错误，写了就原样读出（不静默取默认）。
+
+    票 12 起数据文件里 16 名启用、9 名未启用，故这里钉的是**两种取值都能原样读出**，
+    而不是"全表都关"。
+    """
     table = load_heroes()
 
     assert len(table.heroes) == STANDARD_HERO_COUNT
-    assert all(hero.enabled is False for hero in table.heroes)
+    assert sum(hero.enabled for hero in table.heroes) == 16
 
     _patch_catalog(monkeypatch)
     raw = _heroes_raw()
     raw["heroes"][_index_of(raw, "caocao")]["enabled"] = True
     assert _validate(raw).by_id("caocao").enabled is True
+    raw["heroes"][_index_of(raw, "caocao")]["enabled"] = False
+    assert _validate(raw).by_id("caocao").enabled is False
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +174,8 @@ def test_disabled_heroes_load_even_when_their_skills_are_not_implemented():
     """
     table = load_heroes()
 
-    assert all(not hero.enabled for hero in table.heroes)
+    assert sum(hero.enabled for hero in table.heroes) == 16, "启用 16 名"
+    assert not table.by_id("xiahoudun").enabled, "落选武将不启用（故引用不查）"
     assert "hero.xiahoudun.ganglie" not in catalog_module.CATALOG
 
 
@@ -214,13 +221,15 @@ def test_a_disabled_hero_may_reference_a_missing_skill(monkeypatch):
 
 
 def test_duplicate_hero_id_is_rejected():
+    """判据用**未启用**的武将做基底：启用会连带报出技能引用错误，淹没唯一性这一条。"""
     raw = _heroes_raw()
-    raw["heroes"][1]["id"] = "caocao"
+    index = _index_of(raw, "xiahoudun")
+    raw["heroes"][index]["id"] = "zhangliao"
 
     errors = _errors(raw)
 
     assert [error.rule_id for error in errors] == ["heroes.duplicate_id"]
-    assert errors[0].loc == "/heroes/1/id"
+    assert errors[0].loc == f"/heroes/{index + 1}/id"
 
 
 def test_non_positive_hp_max_is_rejected():

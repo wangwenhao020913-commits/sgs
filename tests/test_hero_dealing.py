@@ -6,6 +6,9 @@
 票 02 尚未启用任何武将（那是票 12），故随机发放用 **``hero_pool`` 显式换池**表达：
 池是入参、不走数据文件的 ``enabled`` 名单，这样"发放"这套机器在本票可测，而
 "数据文件里启用谁"仍留给定票。
+
+票 12 起数据文件里的启用池非空（16 名），故 ``hero_pool=()`` 的那条断言改判为
+"从启用池里真发得出牌"；显式换池的路径一字未动。
 """
 
 from __future__ import annotations
@@ -169,29 +172,56 @@ def test_an_unknown_hero_id_is_rejected():
 
 
 def test_enabled_hero_ids_reads_the_table_enablement():
-    """启用门控的只读面：当前数据文件里 25 名全部未启用 ⇒ 空集（票 12 才翻牌）。"""
-    assert enabled_hero_ids(HEROES) == ()
+    """启用门控的只读面：票 12 起数据文件里有 16 名启用 ⇒ 启用池恰是那 16 名。"""
+    ids = enabled_hero_ids(HEROES)
 
-    enabled = HEROES.model_copy(
+    assert len(ids) == 16
+    assert set(ids) == {
+        "caocao",
+        "simayi",
+        "guojia",
+        "liubei",
+        "guanyu",
+        "zhaoyun",
+        "machao",
+        "zhugeliang",
+        "sunquan",
+        "zhouyu",
+        "luxun",
+        "daqiao",
+        "sunshangxiang",
+        "huatuo",
+        "lvbu",
+        "diaochan",
+    }
+    assert all(HEROES.by_id(hero_id).enabled for hero_id in ids)
+
+    # 派生判据本身（"读的是 enabled 字段"）：造一张只启用第一名的表，池随之收缩。
+    only_first = HEROES.model_copy(
         update={
             "heroes": (
                 HEROES.heroes[0].model_copy(update={"enabled": True}),
-                *HEROES.heroes[1:],
+                *(
+                    hero.model_copy(update={"enabled": False})
+                    for hero in HEROES.heroes[1:]
+                ),
             )
         }
     )
 
-    assert enabled_hero_ids(enabled) == (HEROES.heroes[0].id,)
+    assert enabled_hero_ids(only_first) == (HEROES.heroes[0].id,)
     assert isinstance(HEROES.heroes[0], Hero)
     assert isinstance(HEROES.heroes[0].skills[0], HeroSkill)
 
 
 def test_an_empty_explicit_pool_means_the_data_file_enabled_pool():
-    """``hero_pool=()`` = 换用数据文件的启用池；当前启用池为空 ⇒ fail-closed。"""
-    with pytest.raises(ValueError) as caught:
-        _build(seed=5, player_count=4, hero_pool=())
+    """``hero_pool=()`` = 换用数据文件的启用池；票 12 起该池非空，故 4 人局发得出 4 名。"""
+    state = _build(seed=5, player_count=4, hero_pool=())
 
-    assert "启用池" in str(caught.value)
+    dealt = _heroes_of(state)
+
+    assert len(set(dealt)) == 4, "不重复抽取"
+    assert set(dealt) <= set(enabled_hero_ids(HEROES))
 
 
 # ---------------------------------------------------------------------------
@@ -344,13 +374,24 @@ def test_the_new_visibility_fields_do_not_change_the_serialized_journal():
     assert public.hero is None and public.kingdom is None, "字段本身仍在模型上可读"
 
 
-def test_the_gender_field_is_still_a_separate_concern():
-    """性别照旧由人为局面指定（票 02 只填 hero / kingdom）。"""
-    state = build_state(
-        pack=PACK,
-        seats=[SeatSpec(gender=Gender.FEMALE, hero="diaochan", kingdom=Kingdom.QUN)],
-    )
-    assert state.players[0].gender is Gender.FEMALE
+def test_the_gender_field_is_filled_from_the_hero_data():
+    """票 02 留的独立议题由票 12 收口：真实对局里性别由武将数据填值（不再是独立事项）。
+
+    票 02 时这条断言说的是"只有人为局面能给性别"；票 12 把 ``gender=hero.gender`` 接进
+    ``_initial_player``，故现在断言**数据驱动**：发到女武将的座位性别就是女。
+    """
+    explicit = ("diaochan", "zhouyu", "daqiao", "lvbu")
+    state = _build(seed=3, player_count=4, heroes=explicit)
+
+    assert [player.gender for player in state.players] == [
+        HEROES.by_id(hero).gender for hero in explicit
+    ]
+    assert [player.gender for player in state.players] == [
+        Gender.FEMALE,
+        Gender.MALE,
+        Gender.FEMALE,
+        Gender.MALE,
+    ]
 
 
 # ---------------------------------------------------------------------------

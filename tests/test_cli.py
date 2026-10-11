@@ -254,13 +254,19 @@ def test_an_unknown_explicit_hero_reports_to_stderr_and_exits_1(capsys):
     assert "nobody" in captured.err
 
 
-def test_a_pool_without_heroes_reports_the_empty_enabled_pool(capsys):
-    """当前数据文件 25 名全部未启用（票 12 才翻牌）⇒ 空启用池 fail-closed。"""
-    assert main(["--seed", "7", "--players", "2", "--hero-pool", ""]) == 1
+def test_an_empty_pool_flag_uses_the_data_file_enabled_pool(capsys):
+    """``--hero-pool ""``（与全空白项的写法）都解析成空元组 = 用数据文件的启用池。
 
+    票 12 起该池有 16 名，故 2 人局发得出牌；"池不够"的 fail-closed 由引擎侧
+    （``test_hero_dealing.py`` 的"池比座位少"）钉住。
+    """
+    assert main(["--seed", "7", "--players", "2", "--hero-pool", ""]) == 0
     captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "武将发放非法" in captured.err
+    assert captured.err == ""
+    assert captured.out.splitlines()[-1].startswith("#")
+
+    assert main(["--seed", "7", "--players", "2", "--hero-pool", ","]) == 0
+    assert capsys.readouterr().err == ""
 
 
 def test_an_explicit_pool_switches_the_dealt_heroes(capsys):

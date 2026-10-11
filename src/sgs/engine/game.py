@@ -2587,15 +2587,16 @@ def _deal_identities(*, seed: int, rule_config: RuleConfig) -> tuple[Identity, .
 def _initial_player(
     seat: int, identity: Identity | None, hero: Hero | None = None
 ) -> Player:
-    """开局座位：体力上限由**武将数据**派生，主公 +1 的既有初始化段不动。
+    """开局座位：体力上限 / 势力 / 性别都由**武将数据**派生，主公 +1 的既有初始化段不动。
 
-    无武将（``hero is None``）时体力上限回落到引擎常数 ``INITIAL_HP``，M2 行为因此不变。
-    初始体力不进记录流（``Player`` 不在 header、也无 delta），故这一步不发 delta
-    （票 13 §4）。
+    无武将（``hero is None``）时三项全部回落到 ``None`` / 引擎常数 ``INITIAL_HP``，故 M2
+    行为与 34 条基准不变。初始体力不进记录流（``Player`` 不在 header、也无 delta），
+    故这一步不发 delta（票 13 §4）。
 
-    ``gender`` **不在这里填**：票 02 把"性别由武将数据填值"钉成**独立议题**
-    （``test_the_gender_field_is_still_a_separate_concern``），故 A 族的
-    【结姻】/【离间】在构造局面里用显式 ``gender`` 驱动；真实对局的性别接线属后续票。
+    ``gender`` 由票 12 从武将数据接线（票 02 曾把它钉成独立议题，
+    ``test_the_gender_field_is_still_a_separate_concern`` 原先断言它恒空）：【结姻】/【离间】
+    因此能在**真实对局**里进候选——那是它们唯一的性别读点，也是票 04 遗留议题的收口；
+    该断言同票改判为 ``test_the_gender_field_is_filled_from_the_hero_data``。
     """
     hp_max = INITIAL_HP if hero is None else hero.hp_max
     if identity is Identity.LORD:
@@ -2605,6 +2606,7 @@ def _initial_player(
         hp=hp_max,
         hp_max=hp_max,
         identity=identity,
+        gender=None if hero is None else hero.gender,
         hero=None if hero is None else hero.id,
         kingdom=None if hero is None else hero.kingdom,
     )

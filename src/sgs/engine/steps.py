@@ -262,14 +262,24 @@ def use_become_target(host: FrameHost, frame: Frame) -> Control:
 
     多目标时逐个目标各发一条；空目标的响应牌（【闪】/【无懈】）沿用 M1 的
     ``actor = None`` 单条记录，故 1v1 六条基准逐字节不变。
+
+    **目标列表在派发中可能变**（票 12 的【流离】：把目标转移给另一名角色，见规则
+    17.4/17.5 的"目标确定阶段"）：故这里**不预先快照**，而是每轮记下"哪些座位已经
+    派发过"（``become_target_done``，帧私有），重入时跳过它们——转移后的新目标因此
+    拿到自己的"成为目标时"，被转移掉的那一个不再被派发，且两边都恰好一次。
+    帧私有数据不进记录流，故无武将的对局逐字节不变（34 条基准一行不改）。
     """
     targets = tuple(frame.data["targets"])
     if not targets:
         return _emit(host, frame, Timing.USE_BECOME_TARGET, actor=None)
+    done: list[int] = frame.data.setdefault("become_target_done", [])
     for target in targets:
+        if target in done:
+            continue
         control = _emit(host, frame, Timing.USE_BECOME_TARGET, actor=target)
         if control is not None:
             return control
+        done.append(target)
     return None
 
 

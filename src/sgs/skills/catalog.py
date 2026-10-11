@@ -1139,13 +1139,26 @@ from .rejudge import (  # noqa: E402  （末尾 import 是刻意的）
     rejudge_activation_plans,
     rejudge_skill_definitions,
 )
+from .phase_body import (  # noqa: E402  （末尾 import 是刻意的）
+    phase_body_activation_plans,
+    phase_body_skill_definitions,
+)
+from .target_change import (  # noqa: E402  （末尾 import 是刻意的）
+    target_change_skill_definitions,
+)
 
 ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], ActivationPlan]] = (
     MappingProxyType(
-        {**ACTIVATION_PLANS, **arrange_activation_plans(), **rejudge_activation_plans()}
+        {
+            **ACTIVATION_PLANS,
+            **arrange_activation_plans(),
+            **rejudge_activation_plans(),
+            **phase_body_activation_plans(),
+        }
     )
 )
-"""G 族（票 10）与 I 族（票 11）的发动形态并入后的**完整**注册表：与 :data:`CATALOG` 同一合并姿态。"""
+"""G 族（票 10）、I 族（票 11）与 L 族（票 12）的发动形态并入后的**完整**注册表：
+与 :data:`CATALOG` 同一合并姿态。"""
 
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
     {
@@ -1161,14 +1174,16 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *arrange_skill_definitions(),
             *damage_after_skill_definitions(),
             *rejudge_skill_definitions(),
+            *phase_body_skill_definitions(),
+            *target_change_skill_definitions(),
         )
     }
 )
 """定义目录：``skill_id`` → :class:`SkillDef`，**模块级不可变**（票 07 §1 / §6）。
 
-装备技能（17 条）与武将技能（票 03 起逐族落地）**共用同一张表**：载体解析、优先级档、
-修饰器链、时机派发都只认这张表，不区分两类载体。合并点在**文件末尾**（而不是模块头部的
-import）是为了让 :mod:`sgs.skills.heroes` 能反向 import 本模块的 :class:`SkillDef`——
-`heroes` 在 import 期读到的 :data:`CATALOG` 是装备那半张，而它的定义由这里的
-:func:`sgs.skills.heroes.conversion_skill_definitions` 现取现并，故两半都不会漏。
+装备技能（17 条）与武将技能（票 03 起逐族落地，票 12 起 29 条齐）**共用同一张表**：
+载体解析、优先级档、修饰器链、时机派发都只认这张表，不区分两类载体。合并点在**文件末尾**
+（而不是模块头部的 import）是为了让 :mod:`sgs.skills.heroes` 能反向 import 本模块的
+:class:`SkillDef`——`heroes` 在 import 期读到的 :data:`CATALOG` 是装备那半张，而它的定义由
+这里的 :func:`sgs.skills.heroes.conversion_skill_definitions` 现取现并，故两半都不会漏。
 """

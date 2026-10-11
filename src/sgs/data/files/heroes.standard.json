@@ -9,7 +9,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "jianxiong", "name": "奸雄", "skill_type": "NORMAL" },
         { "id": "hujia", "name": "护驾", "skill_type": "LORD" }
@@ -22,7 +22,7 @@
       "gender": "male",
       "hp_max": 3,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "fankui", "name": "反馈", "skill_type": "NORMAL" },
         { "id": "guicai", "name": "鬼才", "skill_type": "NORMAL" }
@@ -65,7 +65,7 @@
       "gender": "male",
       "hp_max": 3,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "tiandu", "name": "天妒", "skill_type": "NORMAL" },
         { "id": "yiji", "name": "遗计", "skill_type": "NORMAL" }
@@ -91,7 +91,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "rende", "name": "仁德", "skill_type": "NORMAL" },
         { "id": "jijiang", "name": "激将", "skill_type": "LORD" }
@@ -104,7 +104,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "wusheng", "name": "武圣", "skill_type": "NORMAL" }]
     },
     {
@@ -124,7 +124,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "longdan", "name": "龙胆", "skill_type": "NORMAL" }]
     },
     {
@@ -134,7 +134,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "mashu", "name": "马术", "skill_type": "NORMAL" },
         { "id": "tieqi", "name": "铁骑", "skill_type": "NORMAL" }
@@ -147,7 +147,7 @@
       "gender": "male",
       "hp_max": 3,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "guanxing", "name": "观星", "skill_type": "NORMAL" },
         { "id": "kongcheng", "name": "空城", "skill_type": "NORMAL" }
@@ -173,7 +173,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "zhiheng", "name": "制衡", "skill_type": "NORMAL" },
         { "id": "jiuyuan", "name": "救援", "skill_type": "LORD" }
@@ -216,7 +216,7 @@
       "gender": "male",
       "hp_max": 3,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "yingzi", "name": "英姿", "skill_type": "NORMAL" },
         { "id": "fanjian", "name": "反间", "skill_type": "NORMAL" }
@@ -229,7 +229,7 @@
       "gender": "female",
       "hp_max": 3,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "guose", "name": "国色", "skill_type": "NORMAL" },
         { "id": "liuli", "name": "流离", "skill_type": "NORMAL" }
@@ -242,7 +242,7 @@
       "gender": "male",
       "hp_max": 3,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "qianxun", "name": "谦逊", "skill_type": "NORMAL" },
         { "id": "lianying", "name": "连营", "skill_type": "NORMAL" }
@@ -255,7 +255,7 @@
       "gender": "female",
       "hp_max": 3,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "jieyin", "name": "结姻", "skill_type": "NORMAL" },
         { "id": "xiaoji", "name": "枭姬", "skill_type": "NORMAL" }
@@ -268,7 +268,7 @@
       "gender": "male",
       "hp_max": 3,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "jijiu", "name": "急救", "skill_type": "NORMAL" },
         { "id": "qingnang", "name": "青囊", "skill_type": "NORMAL" }
@@ -281,7 +281,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "wushuang", "name": "无双", "skill_type": "NORMAL" }]
     },
     {
@@ -291,7 +291,7 @@
       "gender": "female",
       "hp_max": 3,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "lijian", "name": "离间", "skill_type": "NORMAL" },
         { "id": "biyue", "name": "闭月", "skill_type": "NORMAL" }

@@ -125,6 +125,16 @@ from .rejudge import (
     rejudge_skill_definitions,
     tiandu_handler,
 )
+from .phase_body import (
+    PHASE_BODY_SKILLS,
+    PhaseBodySkill,
+    phase_body_skill_definitions,
+)
+from .target_change import (
+    LIULI,
+    MASHU,
+    target_change_skill_definitions,
+)
 
 EQUIPMENT_CARD_TYPE_IDS: tuple[str, ...] = tuple(
     skill_id.removeprefix("equip.")
@@ -175,12 +185,15 @@ __all__ = (
     "HUJIA",
     "JIJIANG",
     "JIUYUAN",
+    "LIULI",
     "LORD_REQUEST_KEY",
     "LORD_REQUEST_SKILLS",
     "LORD_SKILL_IDS",
+    "MASHU",
     "MAX_VIRTUAL_SOURCES",
     "MOVE_AFTER_SKILLS",
     "MOVE_EVENT_KEY",
+    "PHASE_BODY_SKILLS",
     "PROVIDERS",
     "PROVIDER_ACTOR_KEY",
     "PROVIDER_SATISFIED_KEY",
@@ -198,6 +211,7 @@ __all__ = (
     "ModifierRole",
     "MoveAfterSkill",
     "MoveEvent",
+    "PhaseBodySkill",
     "PriorityClass",
     "Seam",
     "SeamKind",
@@ -231,6 +245,7 @@ __all__ = (
     "move_after_providers",
     "move_after_skill_definitions",
     "move_event",
+    "phase_body_skill_definitions",
     "prune_skill_state",
     "provider_registered",
     "pure_virtual_card",
@@ -242,6 +257,7 @@ __all__ = (
     "resolve_instances",
     "same_kingdom",
     "start_provider",
+    "target_change_skill_definitions",
     "tiandu_handler",
     "timing_hooks_present",
     "transformed_card",
