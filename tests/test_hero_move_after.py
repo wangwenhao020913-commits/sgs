@@ -27,7 +27,7 @@
 
 from __future__ import annotations
 
-from sgs.data import load_content_pack
+from sgs.data import RuleConfig, load_content_pack
 from sgs.engine import Engine
 from sgs.state import (
     ActivateSkill,
@@ -715,4 +715,89 @@ def test_the_judge_zone_move_stays_silent_without_a_move_after_provider():
     )
 
     assert indulgence not in _move_after_cards(engine), "无提供者 ⇒ 一个时机事件都不发"
+
+
+# ---------------------------------------------------------------------------
+# 重入不重放移动（code-review 复核）：挂起后恢复恰一条 `card_move`、零同区 delta
+# ---------------------------------------------------------------------------
+
+
+def _same_zone_moves(engine) -> list[tuple[str, str]]:
+    """记录流里 ``from_zone == to_zone`` 的 ``card_move``（**幻影 delta** 的形状）。"""
+    return [
+        (record.from_zone.zone.value, record.to_zone.zone.value)
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.from_zone == record.to_zone
+    ]
+
+
+class _AutoActivate:
+    """整局随机驱动：技能一律发动、可选选牌取第一项、其余可选一律放弃。
+
+    与基准录制用的随机参与者不同——这里要的是**确定性地**走到底，好让"钩子提问把移动
+    挂起"这件事必然发生；判据只读记录流，故应答策略不进入被测行为。
+    """
+
+    def respond(self, query):
+        for action in query.legal_actions:
+            if getattr(action, "kind", None) == "ActivateSkill":
+                return action
+        for action in query.legal_actions:
+            if getattr(action, "kind", None) == "SelectCards":
+                return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def test_a_move_that_suspends_on_move_after_is_not_replayed_when_it_resumes():
+    """``MOVE_AFTER`` 钩子提问而挂起、恢复后**不得重放 ``move_card``**（code-review 复核）。
+
+    钩子（承载帧上的移动触发【连营】的"是否发动"）把控制权交还驱动循环之后，
+    ``_flush_pending_move`` 先消费应答并清掉挂起状态；承载帧上的效果游标随即**原地重入**
+    同一个 op，op 于是再调一次 :meth:`~sgs.engine.game.Engine.move_in_frame`。
+    那一次**不是新的移动**（牌已在处理区）：第二遍 ``move_card`` 只记下一条
+    ``processing → processing`` 的幻影 delta——"这次移动已经发生"必须比"挂起状态还在"
+    活得更久。判据机械：这次移动恰一条 ``card_move``、且**没有任何** ``from_zone ==
+    to_zone`` 的记录。
+
+    局面取 M3 基准同款的**多武将局**（含座位 0 的陆逊【连营】，它是 D 族提问的提供者），
+    故本用例钉住的是基准里真实出现过的缺陷路径，而不是只在测试里成立的形状。
+    """
+    engine = Engine.new_game(
+        seed=76,
+        pack=PACK,
+        heroes=("guojia", "caocao", "simayi", "luxun"),
+        rule_config=RuleConfig(player_count=4),
+    )
+    players = [_AutoActivate() for _ in range(4)]
+
+    def suspended_on_a_carried_frame(candidate) -> bool:
+        if candidate._move_pending is None:
+            return False
+        _, _, pending_frame = candidate._move_pending
+        return pending_frame is not None and pending_frame.frame_id != 0
+
+    _advance(engine, players, suspended_on_a_carried_frame)
+
+    _, key, _ = engine._move_pending
+    card_id = key[1][0]
+    moved = _moves_of(engine, card_id)
+    assert len(moved) == 1, f"挂起前这次移动恰一条 card_move：{moved}"
+    assert engine.pending is not None and engine.pending.kind == "SKILL_ACTIVATION", (
+        "钩子的『是否发动』把这次移动挂起"
+    )
+
+    # 恢复：先让驱动循环消费那条应答，再推进承载帧——这是重放的充分条件。
+    engine.submit(players[engine.pending.actor].respond(engine.pending))
+    engine._step()
+
+    assert _moves_of(engine, card_id) == [moved[0]], (
+        f"同一次移动只搬一遍：重入不是第二次移动（{_moves_of(engine, card_id)}）"
+    )
+    assert _same_zone_moves(engine) == [], "重入不得留下 processing → processing 之类的幻影 delta"
+    assert engine._move_pending is None, "挂起状态已经收尾"
 

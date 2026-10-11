@@ -140,6 +140,35 @@ def test_v2_card_moves_carry_zone_coordinates_instead_of_redundant_seat_fields()
         assert "hand_limit" not in dumped, "手牌上限是派生函数，不是公开字段"
 
 
+def test_no_baseline_records_a_move_whose_source_and_destination_zone_are_the_same():
+    """**没有**一条 ``card_move`` 的 ``from_zone == to_zone``（code-review 复核的机械不变量）。
+
+    同区移动（``hand → hand`` / ``discard → discard``）在一次"记录流重入"里是可观测的缺陷
+    形状：``MOVE_AFTER`` 钩子提问把移动挂起、恢复后承载帧原地重跑同一个 op，第二遍
+    ``move_card`` 就会把**已经搬到目标区**的牌"再搬一次"——来源坐标与目标坐标因此相同。
+    真正的移动不可能以自己为来源，故这条判据既**完备**（缺陷必然被记下来）又**不误报**
+    （跨座位的 ``hand → hand`` 交给是合法的，两个区域坐标不同，不在此列）。
+
+    逐份基准都查：军争 hero 基准（M3）先出现过 5 条幻影，判据必须覆盖整份文件集合，
+    而不是只钉住当时出问题的那两条。
+    """
+    violations: list[str] = []
+    for path in _golden_files():
+        for record in read_journal(path):
+            if record.kind != "delta" or record.delta_type != "card_move":
+                continue
+            if record.from_zone == record.to_zone:
+                violations.append(
+                    f"{path.name}: seq={record.seq} "
+                    f"{record.from_zone.zone.value} → {record.to_zone.zone.value} "
+                    f"（牌 {[card.card_id for card in record.cards]}，reason={record.reason.value}）"
+                )
+
+    assert not violations, (
+        "基准里出现了同区移动（重入重放搬牌的幻影 delta）：\n" + "\n".join(violations)
+    )
+
+
 def test_read_journal_treats_a_missing_version_as_a_structural_error(tmp_path):
     line, rest = play_standard(seed=7).journal().split("\n", 1)
     payload = json.loads(line)

@@ -42,12 +42,14 @@ from sgs.effects import (
     discard_count,
     draw_from_deck,
     legal_actions_for,
+    locate,
     move_card,
     targets_within_attack_range,
 )
 from sgs.resolution import Control, Frame, ResolutionStack, StepTable, Tag, has_tag
 from sgs.skills import (
     MOVE_EVENT_KEY,
+    RUNNING_SKILL_KEY,
     ActivationPlan,
     MoveEvent,
     SeamKind,
@@ -147,6 +149,15 @@ _RESPONSE_CANCELED = "response_canceled"
 
 与逐目标分槽的 ``canceled`` 分列：后者会被游标推进清掉，而传播发生在帧**出栈之后**。
 在 :meth:`Engine._propagate_cancel` 标记父帧时一并写入，子帧出栈时据此决定是否传播。"""
+
+_MOVE_DONE = "move_done"
+"""帧私有槽名：本帧**已经搬完的移动**的身份（code-review 复核的重入判据）。
+
+身份 = ``(正在执行的技能 id, 这批牌, 目标区域)``。判据 = "身份相同 **且** 这批牌此刻真的
+在目标区域"：重入（``MOVE_AFTER`` 钩子提问把自己挂起、应答消费后承载帧原地重跑同一个
+op）两条都成立——那条 ``card_move`` 已记过、牌已在目标区；而同一帧里真正的新移动要么
+换了技能身份，要么牌还在来源区，故不会被误吞。
+"""
 
 _MOVE_EVENTS = "move_events"
 """帧私有槽名：本帧已经派发过的 ``MOVE_AFTER`` 次数（票 07 的派发幂等时钟）。
@@ -335,12 +346,6 @@ class Engine:
         self._batch_facts: list[DeathFact] = []
         """本批每次死亡在检测点定格的事实；批次关闭时求解一次，未终局则清空。"""
         self._turn_pc = 0
-        self._move_moved: tuple[tuple[int, ...], ZoneRef, int] | None = None
-        """最近一次**已搬完**的移动：``(牌 id, 目标区域, 本帧移动序号)``（票 07 的重入判据）。
-
-        重入同一个步骤时，若"这一批牌 + 这个目标区域 + 这个序号"与它完全一致，说明
-        `move_card` 已经跑过了——不再搬第二遍，只等钩子的派发续跑。
-        """
         self._move_recorded: tuple | None = None
         """最近一次**无承载帧**移动已落过记录的那个幂等键（票 07）。
 
@@ -1663,6 +1668,10 @@ class Engine:
         记在引擎上（``_move_pending``），由 :meth:`_flush_pending_move` 在下一个询问应答
         之后续跑——故这里的返回值只用于"步骤可以被安全推进"的判断，挂起的续跑不依赖它。
 
+        **重入判据是"这次移动已经搬完"，不是"还挂着"**：续跑清掉 ``_move_pending`` 之后，
+        承载帧上的 op 会原地重入本方法一次；那一次必须经帧私有 :data:`_MOVE_DONE` 认出
+        "同一次移动"，否则会重放搬牌并留下同区幻影 delta（见该属性的说明）。
+
         **它不是全项目唯一的搬牌点**：使用链、效果回调与上面两类帧外移动都经本方法，
         但另有一小组**直接调** :func:`~sgs.effects.move_card` 的收尾点——阵亡者的区域清空
         （:meth:`discard_dead_cards`）、主公杀忠臣的弃置（:meth:`_lord_discards_everything`）、
@@ -1673,15 +1682,42 @@ class Engine:
         勿据此在本方法里加回唯一性论断。
         """
         card_ids = tuple(card.card_id for card in cards)
-        current_count = frame.data.get(_MOVE_EVENTS, 0) if frame is not None else 0
+        # 这次移动的**身份** = "哪个技能、把哪些牌、搬到哪里"。
+        head = (
+            frame.data.get(RUNNING_SKILL_KEY) if frame is not None else None,
+            card_ids,
+            to_zone,
+        )
         if (
             frame is not None
-            and self._move_pending is not None
-            and self._move_moved == (card_ids, to_zone, current_count)
+            and frame.data.get(_MOVE_DONE) == head
+            and all(locate(self.state, card_id) == to_zone for card_id in card_ids)
         ):
             # 同一次移动的**重入**：牌已搬完、delta 已记，只是钩子的派发还没续跑。
             # 不再搬第二遍（牌已不在来源区），把控制权交回驱动循环去消费那条应答。
-            return "stay"
+            #
+            # 判据挂在"这次移动**已经发生**"这个持久事实上——它写在**承载帧私有**的
+            # :data:`_MOVE_DONE` 里，而不是挂在"``_move_pending`` 还在"上：
+            # :meth:`_flush_pending_move` 消费完应答就把挂起状态清掉，之后承载帧才原地重入
+            # 同一个 op，若把重入与挂起混为一谈，第二遍 ``move_card`` 会照记一条
+            # ``processing → processing`` 的幻影 delta。
+            #
+            # 两个条件都必需，且各自挡住一种误判：
+            #
+            # - **身份带技能**（:data:`RUNNING_SKILL_KEY`）挡住"同帧里另一次参数相同的移动"
+            #   被当成重入：多点伤害里两个提供者可以把同一张牌搬向同一个区域（【遗计】交给
+            #   郭嘉、【反馈】再拿郭嘉那张），此时牌 + 目标逐字段相同，但技能不同。
+            # - **牌真的在目标区**挡住"同技能、同牌、同目标的**新**移动"被当成重入：真正的
+            #   新移动发生在来源区（牌还没搬），而重入时那条 delta 已经记过、牌已在目标区。
+            #
+            # **判据按帧私有存储**：续跑的钩子可能在**临时帧**上搬牌（【连营】的摸牌就走
+            #   :meth:`_dispatch_move_after` 的临时帧），状态挂在引擎上会被那次搬牌覆盖，
+            #   于是这次重入认不出来。
+            #
+            # 返回 ``None`` 而不是 ``"stay"``：重入的调用点看到的是"这次移动已经完成"，
+            # 若回 ``"stay"``，把返回值透传出去的 op（``use_choose_target`` 一类）会认为
+            # 自己还没跑完、把游标留在原处，驱动循环于是原地空转。
+            return None
         ctx = self._effect_context(
             frame,
             actor=(frame.data["source"] if frame is not None else None) if actor is None else actor,
@@ -1697,12 +1733,17 @@ class Engine:
         prune_skill_state(self.state)
         count = frame.data.get(_MOVE_EVENTS, 0) + 1 if frame is not None else 0
         if frame is not None:
+            # 这次移动的**持久事实**落在承载帧私有；重入时同一份身份 + "牌已在目标区"即认出。
+            frame.data[_MOVE_DONE] = head
             frame.data[_MOVE_EVENTS] = count
         event = self._move_event(delta, actor=actor)
         key = self._move_key(event, count)
-        self._move_moved = (card_ids, to_zone, count)
         control = self._dispatch_move_after(
-            frame, event, count=count, key=key, frame_id=frame.frame_id if frame is not None else 0
+            frame,
+            event,
+            count=count,
+            key=key,
+            frame_id=frame.frame_id if frame is not None else 0,
         )
         if control == "stay":
             self._move_pending = (event, key, frame)

@@ -72,6 +72,7 @@ __all__ = [
     "HookCondition",
     "HeroSkillDecl",
     "MATCH_OWNER_KEY",
+    "RUNNING_SKILL_KEY",
     "Seam",
     "SeamKind",
     "SkillDef",
@@ -485,6 +486,17 @@ MATCH_OWNER_KEY = "hook_owner"
 """
 
 
+RUNNING_SKILL_KEY = "running_skill"
+"""帧私有槽名：**正在执行**的钩子 / 接缝所属技能 id（code-review 复核）。
+
+帧私有数据不进记录流，故对既有基准逐字节无影响。它服务的是"移动的重入判据"：
+同一帧里两个不同提供者可以发出**参数逐字段相同**的移动（多点伤害里【遗计】把一张牌
+交给郭嘉、【反馈】又拿郭嘉那张——同一张牌、同一个目标区、同一帧内序号），此时唯一能
+区分"同一次移动的重入"与"另一次移动"的就是**是哪个技能在跑**。派发环在调每个 handler
+前写它，重入时同一个 handler 会写回同一个值，故它是稳定的重入坐标。
+"""
+
+
 def _matching_hooks(instance: SkillInstance, timing: Timing, host: Any, frame: Frame) -> tuple[Hook, ...]:
     """本实例在 ``timing`` 上**条件成立**的钩子（条件缺省 = 恒成立；票 07 的 ``condition``）。
 
@@ -530,6 +542,9 @@ def _dispatch(host: Any, frame: Frame, *, match: Any, timing: Timing, key: str) 
                 continue
         for item in items:
             frame.data["skill_owner"] = instance.owner
+            # 移动的重入判据要认"哪个技能在跑"（两个提供者可以发出参数相同的移动）；
+            # 重入时同一个 handler 写回同一个值，故它稳定。
+            frame.data[RUNNING_SKILL_KEY] = instance.skill_id
             control = item.handler(host, frame)
             if control is not None:
                 return control
