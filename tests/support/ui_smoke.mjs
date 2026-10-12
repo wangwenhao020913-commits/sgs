@@ -131,10 +131,7 @@ const openSession = async (body) => {
   ui.state.logRecords = [];
   ui.state.cursor = -1;
   ui.state.logSeq = 0;
-  ui.state.selectedCards = [];
-  ui.state.selectedOption = null;
-  ui.state.picks = [];
-  ui.state.lastRejectReason = "";
+  ui.resetSelection();
   $("t-log").innerHTML = "";
   ui.applyView(body);
   return body;
@@ -144,6 +141,84 @@ const newSession = async (seed, extra = {}) => openSession(await post("/api/sess
 }));
 const logText = () => $("t-log").text();
 const logCount = () => $("t-log").children.length;
+
+/** 推进一条对局到一个干净局面。
+ *
+ * 取**第一条候选**（`legal_actions[0]`）：这是"与引擎扫描路径一致"的那条路——
+ * 界面里那些前置（【南蛮入侵】落入人类手里这类）只在同一条路径上才出现，
+ * 走"结束阶段优先"会让对局完全长成另一个样子，前置就永远扫不到。
+ * 只有"界面本就要显示将提交什么"时才退到 `selectedOption`。
+ */
+const advanceOnce = async () => {
+  const p = ui.state.view.pending;
+  if (p && ui.isHandPick(p)) {
+    // 手选询问：界面**只**允许"点一张牌"这条路，所以驱动方也走那条路，
+    // 否则重放回不到同一局面（点哪张牌会改变对局，前置就漂了）。
+    ui.resetSelection();
+    ui.renderTable();
+    const index = ui.cardIndex(p);
+    const cardId = Object.keys(index)[0];
+    if (cardId !== undefined) {
+      ui.toggleFocus(Number(cardId));
+      const combo = (index[String(cardId)].combos || [])[0] || [];
+      for (const seat of combo) {
+        const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(seat));
+        if (box) (box.listeners.click || []).forEach((fn) => fn({ target: box }));
+      }
+    }
+    if (ui.buildAction() !== null) { await ui.submitAction(); return; }
+  }
+  ui.resetSelection();
+  ui.state.selectedOption = 0;
+  await ui.submitAction();
+};
+
+/** 重放回扫描时停住的那一步（同一 seed 同一响应序列 ⇒ 同一局面）。 */
+const replayTo = async (found) => {
+  await newSession(found.seed);
+  for (let step = 0; step < found.steps; step += 1) await advanceOnce();
+  ui.renderTable();
+  ui.renderPending(ui.state.view);
+  return found;
+};
+
+/** 一遍扫出本次改造需要的三种前置：半可用局面 / 多组合牌 / 目标被迫唯一。
+ *
+ * 三种都是真的引擎局面（不造假的响应体），且都记下 `steps` 供 :func:`replayTo` 复现。
+ */
+const scanCases = async () => {
+  let partial = null;
+  let manual = null;
+  let auto = null;
+  for (const seed of [1, 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47]) {
+    await newSession(seed);
+    for (let step = 0; step < 400 && ui.state.view.pending; step += 1) {
+      const pending = ui.state.view.pending;
+      if (ui.isHandPick(pending)) {
+        const hand = ui.state.view.snapshot.self_hand || [];
+        const usable = hand.filter((card) => ui.cardSelectable(pending, card.card_id));
+        const unusable = hand.filter((card) => !ui.cardSelectable(pending, card.card_id));
+        if (!partial && usable.length > 0 && unusable.length > 0) {
+          partial = { seed, steps: step, unusable: unusable[0], usable: usable[0] };
+        }
+      }
+      if (pending.kind === "PLAY_PHASE" && pending.actor === 0) {
+        const index = ui.cardIndex(pending);
+        for (const [cardId, entry] of Object.entries(index)) {
+          if (!manual && entry.combos.length > 1 && entry.pool.length > 1) {
+            manual = { seed, steps: step, cardId, entry };
+          }
+          if (!auto && entry.combos.length === 1 && entry.pool.length > 1) {
+            auto = { seed, steps: step, cardId, entry };
+          }
+        }
+      }
+      if (partial && manual && auto) return { partial, manual, auto };
+      await advanceOnce();
+    }
+  }
+  return { partial, manual, auto };
+};
 
 /* ------------------------------------------------ ① 建局 + 牌桌/手牌/事件流 */
 
@@ -188,34 +263,41 @@ const logAll = logText();
 check("㉿1c 切到全部能看到对手的响应往来", /询问 RESPOND/.test(logAll), logAll.replace(/\s+/g, " ").slice(0, 80));
 setSelect("t-log-mode", "focus");
 
-/* ============ ㉿ 红测试：可点的牌 ≠ 可用的牌（刀 2） ============
+/* ============ ㉿ 红测试：可点的牌 ≠ 可用的牌（刀 2 → 手选版） ============
  *
  * 真界面上发生过：手牌张张可点，点了一张**用不出**的牌之后提交按钮永久灰掉、
  * 界面只说"先选一项，或点一张手牌再提交"——玩家不知道是这张牌不能用于当前询问。
- * 两件事要成立：① 用不出的牌**不给点**（置灰 + 不进选中态）；② 说出**为什么**。
+ * 手选之后这两条仍然成立，只是判据从 `cardCandidates` 换成**候选索引**：
+ * ① 用不出的牌**不给焦点**（置灰 + 点它不设焦点）；② 说出**为什么**。
+ *
+ * 这条断言需要一个"手里既有用得出、又有用不出"的**手选**局面（`PLAY_PHASE` / `RESPOND`），
+ * 故先扫一个出来——直接拿建局后那个询问会在"唯一候选 = 放弃"的窗口上落空。
  */
-check("㉿2 这条询问里存在一张**用不出**的手牌（前提成立）", (() => {
-  const pending = ui.state.view.pending;
-  const hand = ui.state.view.snapshot.self_hand || [];
-  return hand.some((card) => (ui.cardCandidates ? ui.cardCandidates(pending, card.card_id).length === 0 : true));
-})(), `手牌 ${(ui.state.view.snapshot.self_hand || []).length} 张 / 候选 ${ui.state.view.pending.legal_actions.length} 条`);
+const { partial, manual: multi, auto } = await scanCases();
 
-const unusable = (ui.state.view.snapshot.self_hand || []).find(
-  (card) => !ui.cardCandidates || ui.cardCandidates(ui.state.view.pending, card.card_id).length === 0,
-);
-if (unusable && ui.toggleCard) {
-  ui.toggleCard(unusable.card_id);
-  check("㉿2a 用不出的牌**不进入**选中态", !ui.state.selectedCards.includes(unusable.card_id), `selectedCards=${JSON.stringify(ui.state.selectedCards)}`);
+check("㉿2 找到一个前置：手里既有用得出、又有用不出的牌", partial !== null,
+  partial ? `seed=${partial.seed} 用不出=${partial.unusable.name} 用得出=${partial.usable.name}` : "16 个种子内没找到");
+
+if (partial) {
+  await replayTo(partial);
+  ui.toggleFocus(partial.unusable.card_id);
+  check("㉿2a 用不出的牌**不成为焦点**", ui.state.focusCardId !== partial.unusable.card_id,
+    `focusCardId=${ui.state.focusCardId}`);
   check("㉿2b 用不出的牌被置灰（dis 类）", (() => {
-    const chip = $("t-hand").children.find((c) => (c._html || "").includes(unusable.name) && c.classList.contains("dis"));
+    const chip = $("t-hand").children.find((c) => (c._html || "").includes(partial.unusable.name) && c.classList.contains("dis"));
     return !!chip;
-  })(), "手牌里应有一个 dis 的牌");
+  })(), `手牌里的【${partial.unusable.name}】应当是 dis`);
   check("㉿2c 提交按钮**不可点**", $("btn-submit").disabled === true, `disabled=${$("btn-submit").disabled}`);
   check("㉿2d 给出**为什么**（不是笼统提示）", /不能用于当前询问/.test($("t-choice").textContent), `提示="${$("t-choice").textContent}"`);
+
+  ui.toggleFocus(partial.usable.card_id);
+  check("㉿2e 用得出的牌可以成为焦点", String(ui.state.focusCardId) === String(partial.usable.card_id),
+    `focusCardId=${ui.state.focusCardId}`);
   ui.clearSelection();
-  check("㉿2e 清空选择后按钮仍不可点（没选中任何东西）", $("btn-submit").disabled === true);
+  check("㉿2f 清空选择后按钮不可点（没选中任何东西）", $("btn-submit").disabled === true
+    && ui.state.focusCardId === null && ui.state.selectedTargets.length === 0);
 } else {
-  check("㉿2 跳过：本局手里没有用不出的牌", true);
+  check("㉿2 跳过：16 个种子内没找到半可用局面", true);
 }
 
 /* ============ ㉿ 红测试：技能按钮三态（刀 4 前端片） ============
@@ -225,24 +307,27 @@ if (unusable && ui.toggleCard) {
  * 本片只渲染色态与可点性——**不新增引擎数据**：清单来自响应体的 `skills`（刀 4 后端片）。
  */
 {
+  // 先扫出"某个种子的出牌阶段里有技能可发动"，**记下步数**——断言前用 `replayTo` 回到那个局面。
+  // （老写法在扫到更早的种子后 `break` 出内层循环、外层又跑到最后一个种子，断言就落在了别的局面上。）
   let skillCase = null;
-  for (const seed of [7, 11, 13, 17, 19, 23, 29, 31, 37, 41]) {
+  for (const seed of [7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67]) {
     await newSession(seed);
     for (let step = 0; step < 400 && ui.state.view.pending; step += 1) {
       const pending = ui.state.view.pending;
       const offered = (ui.state.view.skills || []).filter((s) => s.available);
       if (pending.kind === "PLAY_PHASE" && pending.actor === 0 && offered.length > 0) {
-        // **就停在这个局面上**做断言（别再重开一局——那会把刚找到的前置丢掉）。
-        skillCase = { seed, offered, skills: ui.state.view.skills };
+        skillCase = { seed, steps: step, offered };
         break;
       }
-      ui.state.selectedOption = pending.legal_actions.findIndex((a) => a.kind === "EndPhase" || a.kind === "Pass");
-      if (ui.state.selectedOption < 0) ui.state.selectedOption = 0;
-      await ui.submitAction();
+      // **必须**与 `replayTo` 走同一条推进路径（`advanceOnce`），否则重放回不到这一步：
+      // 这里曾用"优先结束阶段"的策略，`replayTo` 用 `advanceOnce`，两边在出牌阶段点的是
+      // 不同的东西 ⇒ 断言的局面比前置少一步，`㉿4c/4d` 因此假红。
+      await advanceOnce();
     }
     if (skillCase) break;
   }
-  if (!skillCase) await newSession(7);   // 没找到前置时也留一个带技能的局面
+  if (skillCase) await replayTo(skillCase);
+  else await newSession(7);   // 没找到前置时也留一个带技能的局面
 
   check("㉿4a 锁定/被动技是银灰且**不可点**（引擎在时机上派发，点了没意义）", (() => {
     const locked = ui.state.view.skills.filter((s) => s.locked);
@@ -297,78 +382,282 @@ if (unusable && ui.toggleCard) {
   }));
 }
 
-/* ============ ㉿ 红测试：同一张牌的多个目标要能点（刀 3） ============
- *
- * 引擎把**每个目标组合**枚举成一条独立候选（实测：`card_id=19` 有
- * `targets:[4]` 与 `targets:[6]` 两条）。当前渲染器按"用哪张牌"聚合，
- * 把 `targets` 塞进标签文字却做不成可点的东西——玩家选不了目标。
- */
-// 造一个确定的前置：在真引擎里反复开局，直到人类座位拿到"同一张牌有两个目标"的出牌阶段
-const multi = await (async () => {
-  for (const seed of [1, 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31]) {
-    const body = await post("/api/sessions", {
-      player_count: 8, ai: "random", human_seat: 0, timeout_seconds: null, seed,
-    });
-    ui.state.sessionId = body.session_id;
-    ui.state.logRecords = [];
-    ui.applyView(body);
-    for (let step = 0; step < 400 && ui.state.view.pending; step += 1) {
-      const pending = ui.state.view.pending;
-      if (pending.kind === "PLAY_PHASE" && pending.actor === 0) {
-        const byCard = new Map();
-        for (const action of pending.legal_actions) {
-          const id = action.card && action.card.card_id;
-          if (id === undefined || id === null) continue;
-          if (!byCard.has(id)) byCard.set(id, []);
-          byCard.get(id).push(action);
-        }
-        const found = [...byCard.entries()].find(([, acts]) => acts.length > 1);
-        if (found) return { seed, cardId: found[0], actions: found[1], pending };
-      }
-      ui.state.selectedOption = pending.legal_actions.findIndex((a) => a.kind === "EndPhase" || a.kind === "Pass");
-      if (ui.state.selectedOption < 0) ui.state.selectedOption = 0;
-      await ui.submitAction();
-    }
-  }
-  return null;
-})();
-
-check("㉿3 找到一个前置：人类座位的同一张牌有两个目标候选", multi !== null,
-  multi ? `seed=${multi.seed} card_id=${multi.cardId} 目标组合=${multi.actions.map((a) => JSON.stringify(a.targets)).join(" / ")}` : "12 个种子内没找到");
+check("㉿M1 找到一个前置：同一张牌有多个目标组合（该手选，不该自动选中）", multi !== null,
+  multi ? `seed=${multi.seed} card_id=${multi.cardId} 池=${multi.entry.pool.length} 组合=${multi.entry.combos.length} 条` : "16 个种子内没找到");
 
 if (multi) {
-  // 玩家路径：点这张手牌 → 界面上只出它的目标 → 点一个目标
-  ui.state.selectedOption = null;
-  ui.state.selectedCards = [multi.cardId];
-  ui.renderTable();
-  ui.renderPending(ui.state.view);
-  const opts = $("t-options").children;
-  const grouped = ui.groupActions(ui.state.view.pending.legal_actions);
-  check("㉿3 聚合项按**每条候选**给出目标（同一张牌的两个目标 = 两条，不去重合并）",
-    grouped.filter((g) => Array.isArray(g.targets)).length >= multi.actions.length,
-    `带 targets 的聚合项 ${grouped.filter((g) => Array.isArray(g.targets)).length} 个`);
-  const targetsSeen = opts.map((c) => c.getAttribute("data-targets")).filter((v) => v);
-  check("㉿3a 点牌后只显示这张牌的候选，且每个目标组合各有一个 data-targets",
-    targetsSeen.length === multi.actions.length
-      && targetsSeen.every((v, i) => JSON.parse(v).join(",") === multi.actions[i].targets.join(",")),
-    `期望 ${multi.actions.length} 个目标项，实得 ${JSON.stringify(targetsSeen)}`);
+  await replayTo(multi);
+  check("㉿M0 重放回到了同一个局面（候选索引一致）", (() => {
+    const entry = ui.cardEntry(ui.state.view.pending, multi.cardId);
+    return entry !== null && entry.combos.length === multi.entry.combos.length;
+  })(), `组合 ${multi.entry.combos.length} 条`);
 
-  const index = ui.state.view.pending.legal_actions.findIndex((a) => JSON.stringify(a) === JSON.stringify(multi.actions[0]));
-  const targetOption = opts.find((c) => c.getAttribute("data-targets") === JSON.stringify(multi.actions[0].targets));
-  check("㉿3a2 每个目标组合是一个**可点**选项（不是一段死文字）", !!targetOption,
-    `选项里找不到 data-targets=${JSON.stringify(multi.actions[0].targets)}`);
-  if (targetOption) {
-    (targetOption.listeners.click || []).forEach((fn) => fn({ target: targetOption }));
+  ui.toggleFocus(Number(multi.cardId));
+  check("㉿M2 点手牌 = 设焦点", String(ui.state.focusCardId) === String(multi.cardId), `focusCardId=${ui.state.focusCardId}`);
+  check("㉿M3 有多个合法组合时**不**自动选中", ui.state.selectedTargets.length === 0,
+    `selectedTargets=${JSON.stringify(ui.state.selectedTargets)}`);
+  check("㉿M4 未选目标时提交按钮不可点", $("btn-submit").disabled === true);
+
+  const targetable = $("t-seats").children.filter((c) => c.classList.contains("targetable"));
+  check("㉿M5 合法目标座位被标成可点（**数据**给的类）", targetable.length === multi.entry.pool.length,
+    `可点座位 ${targetable.length} 个 / 池 ${multi.entry.pool.length} 个`);
+
+  // 手选路径：点出**第一组组合**要求的那些座位（多目标牌就得点够）
+  const want = multi.entry.combos[0];
+  for (const seat of want) {
+    const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(seat));
+    if (box) (box.listeners.click || []).forEach((fn) => fn({ target: box }));
   }
-  check("㉿3a3 点了目标选项后它被选中", ui.state.selectedOption === index, `selectedOption=${ui.state.selectedOption} want=${index}`);
+  check("㉿M6 点座位 = 选目标", JSON.stringify(ui.state.selectedTargets) === JSON.stringify(want),
+    `已选 ${JSON.stringify(ui.state.selectedTargets)} 想要 ${JSON.stringify(want)}`);
+  check("㉿M7 选够后提交按钮可点（组合恰好在候选里）", $("btn-submit").disabled === false);
+
+  const chosen = ui.buildAction();
+  check("㉿M8 buildAction() 取到的是候选里那一条（targets 逐字段相同）",
+    chosen !== null && JSON.stringify(chosen.targets) === JSON.stringify(want),
+    `chosen=${JSON.stringify(chosen && chosen.targets)}`);
+
+  // 再点一次已选座位 = 取消该目标
+  const firstSeat = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(want[0]));
+  if (firstSeat) (firstSeat.listeners.click || []).forEach((fn) => fn({ target: firstSeat }));
+  check("㉿M9 再点一次已选座位 = 取消该目标", !ui.state.selectedTargets.includes(want[0]),
+    `selectedTargets=${JSON.stringify(ui.state.selectedTargets)}`);
+
+  // 点牌一次 = 整张取消
+  ui.toggleFocus(Number(multi.cardId));
+  check("㉿M10 再点一次牌 = 取消焦点并清空已选目标",
+    ui.state.focusCardId === null && ui.state.selectedTargets.length === 0);
+
+  // 走真 HTTP：重选一遍并提交，断言发出去的字节
+  ui.toggleFocus(Number(multi.cardId));
+  for (const seat of want) {
+    const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(seat));
+    if (box) (box.listeners.click || []).forEach((fn) => fn({ target: box }));
+  }
   const before = calls.length;
   await ui.submitAction();
   const sent = calls.slice(before).find((c) => c.path.includes("/answer"));
   const sentAction = sent && sent.body ? sent.body.action : null;
-  check("㉿3b 点目标后提交的正是**那一条**候选（targets 逐字段相同）",
-    sentAction !== null && JSON.stringify(sentAction) === JSON.stringify(multi.actions[0]),
-    `sent=${JSON.stringify(sentAction && sentAction.targets)} want=${JSON.stringify(multi.actions[0].targets)}`);
-  ui.state.selectedCards = [];
+  check("㉿M11 提交的正是**那一条**候选（targets 逐字段相同）",
+    sentAction !== null && JSON.stringify(sentAction.targets) === JSON.stringify(want),
+    `sent=${JSON.stringify(sentAction && sentAction.targets)} want=${JSON.stringify(want)}`);
+  // 不变量 ④：前端**不合成** Action——`buildAction()` 给回的必须是 `legal_actions` 里
+  // **同一个对象**（`Object.is`），不是"一个字段长得一样"的新对象。
+  // 只比 JSON 字符串会放过"重建了一份"这种改法。注意 `SelectCards` 那条**故意**是拷贝
+  // （引擎只发骨架、picks 由界面补），故此断言只对手选路径成立。
+  // （上一步的提交已把询问推进走，故这里重放回同一局面再验。）
+  await replayTo(multi);
+  ui.toggleFocus(Number(multi.cardId));
+  for (const seat of want) {
+    const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(seat));
+    if (box) (box.listeners.click || []).forEach((fn) => fn({ target: box }));
+  }
+  const picked = ui.buildAction();
+  check("㉿M18 buildAction() 返回的是 legal_actions 里的**同一个对象**（不合成）",
+    picked !== null && ui.state.view.pending.legal_actions.includes(picked),
+    picked === null ? "buildAction() 返回 null" : `includes 命中=${ui.state.view.pending.legal_actions.includes(picked)}`);
+}
+
+/* ============ ㉿ 非手选询问里点手牌：不许崩 ============
+ *
+ * 真 bug（code-review 的 Standards 轴抓到）：`toggleFocus` 在非手选询问上委托回
+ * `toggleCard`，而 `toggleCard` 又委托回 `toggleFocus` ⇒ 在**弃牌 / 排列 / 选择面**这类
+ * 旧路径的询问上点任意一张手牌就 `RangeError: Maximum call stack size exceeded`。
+ * 手选询问走 picker 分支、碰不到那条路，所以端到端烟测当时全绿也照样漏掉了它。
+ */
+{
+  let nonPick = null;
+  for (const seed of [1, 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47]) {
+    await newSession(seed);
+    for (let step = 0; step < 400 && ui.state.view.pending; step += 1) {
+      const pending = ui.state.view.pending;
+      const hand = ui.state.view.snapshot.self_hand || [];
+      if (!ui.isHandPick(pending) && hand.length > 0) { nonPick = { seed, steps: step }; break; }
+      await advanceOnce();
+    }
+    if (nonPick) break;
+  }
+  check("㉿N1 找到一个非手选询问的前置（弃牌 / 排列 / 选择面）", nonPick !== null,
+    nonPick ? `seed=${nonPick.seed}` : "16 个种子内没找到");
+  if (nonPick) {
+    await replayTo(nonPick);
+    const pending = ui.state.view.pending;
+    const cardId = (ui.state.view.snapshot.self_hand || [])[0].card_id;
+    let threw = null;
+    try { ui.toggleFocus(cardId); } catch (error) { threw = error; }
+    check("㉿N2 非手选询问里点手牌**不抛错**（不得互递归）", threw === null,
+      threw ? `${threw.constructor.name}: ${String(threw.message).slice(0, 50)}` : "无异常");
+    check("㉿N3 非手选询问里点手牌**不设焦点**（那条路由候选列表驱动）",
+      ui.state.focusCardId === null && ui.state.selectedTargets.length === 0,
+      `focusCardId=${ui.state.focusCardId} targets=${JSON.stringify(ui.state.selectedTargets)}`);
+    check("㉿N4 界面仍停在同一询问（点牌没有误提交）",
+      ui.state.view.pending === pending && pending.kind === ui.state.view.pending.kind);
+  }
+}
+
+/* ============ ㉿ 前后端键名是契约：唯一一条带目标的候选必须手选 ============
+ *
+ * 真 bug（code-review 的 Spec 轴抓到，P0）：服务端发 `min_targets` / `max_targets`，
+ * 界面读 `entry.max` ⇒ 恒 `undefined` ⇒ `needsPicker()` 恒假 ⇒ 借刀杀人那种
+ * "唯一一条 `UseCard{杀, targets=(4,)}`" 被 `direct` 分支抢先命中，**未点任何东西提交按钮就可点**，
+ * 违反 D8「永不自动提交」与 Acceptance 2。这条断言把它钉死：只断言服务端键名不够，
+ * 必须断言**界面读得到**。
+ */
+{
+  const lone = {
+    kind: "RESPOND",
+    prompt: "响应窗口：请使用一张牌，或放弃。",
+    actor: 0,
+    legal_actions: [{ answers_seq: 1, kind: "UseCard", card: { card_id: 34, name: "杀", type: "slash" }, targets: [4] }],
+    candidate_index: {
+      "34": {
+        card: { card_id: 34, name: "杀", type: "slash" },
+        pool: [4, 6, 7, 9], min_targets: 1, max_targets: 1,
+        combos: [[4], [6], [7], [9]],
+      },
+    },
+  };
+  const entry = ui.cardEntry(lone, 34);
+  check("㉿K1 界面按服务端的键名读目标数（max_targets / min_targets）",
+    entry.min_targets === 1 && entry.max_targets === 1,
+    `min_targets=${entry.min_targets} max_targets=${entry.max_targets}`);
+  check("㉿K2 唯一一条带目标的候选 ⇒ needsPicker 为真（不得走 direct）",
+    ui.needsPicker(lone) === true && ui.renderKind(lone, lone.legal_actions) === "picker",
+    `needsPicker=${ui.needsPicker(lone)} renderKind=${ui.renderKind(lone, lone.legal_actions)}`);
+  const saved = ui.state.view;
+  ui.state.view = { pending: lone, snapshot: { self_hand: [], players: [], seat: 0 }, human_seat: 0, heroes: {} };
+  ui.renderPending(ui.state.view);
+  check("㉿K3 未交互前提交按钮**不可点**（D8 永不自动提交）",
+    $("btn-submit").disabled === true && ui.buildAction() === null,
+    `disabled=${$("btn-submit").disabled} buildAction=${JSON.stringify(ui.buildAction())}`);
+  ui.toggleFocus(34);
+  check("㉿K4 池 4 / 目标数 1 ⇒ **不**自动选中任何目标",
+    ui.state.selectedTargets.length === 0,
+    `selectedTargets=${JSON.stringify(ui.state.selectedTargets)}`);
+  ui.state.view = saved;
+  ui.resetSelection();
+}
+
+/* ============ ㉿ 响应窗口：放弃必须是一个**点得到**的入口 ============
+ *
+ * 报障原文：「响应南蛮入侵时强制出杀，没有放弃选项」。引擎侧 `_respond` **恒追加**
+ * `Pass`（`effects/actions.py`），所以候选从来没缺过——缺的是界面入口：手选路径
+ * 只画"点一张手牌"，`Pass` 因此不可见，玩家以为必须出牌。
+ *
+ * 判据用**合成 payload**：形状取自真实引擎（一张真【杀】的 `PlayCard` + `Pass`），
+ * 但不必为了构造它去搜一颗恰好让人类手上留【杀】的种子。
+ */
+{
+  const nanman = {
+    kind: "RESPOND",
+    prompt: "响应窗口：请打出一张牌，或放弃。",
+    actor: 0,
+    cause: "BARBARIAN_INVASION",
+    required: "slash",
+    legal_actions: [
+      { answers_seq: 9, kind: "PlayCard", card: { card_id: 7, name: "杀", type: "slash" } },
+      { answers_seq: 9, kind: "Pass" },
+    ],
+    candidate_index: {
+      "7": { card: { card_id: 7, name: "杀", type: "slash" }, pool: [], min_targets: 0, max_targets: 0, combos: [[]] },
+    },
+  };
+  const saved = ui.state.view;
+  ui.state.view = { pending: nanman, snapshot: { self_hand: [{ card_id: 7, name: "杀" }], players: [], seat: 0 }, human_seat: 0, heroes: {} };
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(ui.state.view);
+
+  const buttons = $("t-options").children;
+  const giveUp = buttons.find((b) => (b.textContent || "").includes("放弃"));
+  check("㉿R1 响应窗口里『放弃』是一个**看得见**的按钮", !!giveUp,
+    `选项=${JSON.stringify(buttons.map((b) => b.textContent))}`);
+  check("㉿R2 有【杀】可出时，未选任何东西**不可**提交（别替玩家出牌）",
+    $("btn-submit").disabled === true && ui.buildAction() === null);
+  if (giveUp) {
+    (giveUp.listeners.click || []).forEach((fn) => fn({ target: giveUp }));
+    check("㉿R3 点『放弃』= 选中那条 Pass 候选", (() => {
+      const picked = ui.buildAction();
+      return picked !== null && picked.kind === "Pass";
+    })(), `buildAction=${JSON.stringify(ui.buildAction())}`);
+    check("㉿R4 点『放弃』后提交按钮可点", $("btn-submit").disabled === false);
+  }
+  ui.state.view = saved;
+  ui.resetSelection();
+}
+
+/* ============ ㉿ 选择面：点槽位必须能提交（点击路径，不手工设 selectedOption） ============
+ *
+ * 真 bug（本轮用户报障「五谷丰登也没法选择卡牌获得，按钮是灰的」）：
+ * `renderSlots` 只写 `state.picks`，从不设 `state.selectedOption`；而提交态统一到
+ * `refreshSubmit()` 后它要求有选中的候选 ⇒ `buildAction()` 恒 null ⇒ **点完槽位按钮仍是灰的**。
+ *
+ * ㉿S 段刻意**不**像驱动循环那样手工设 `selectedOption`——正是那个"替玩家把这一步做掉"
+ * 的写法让这个 bug 穿过了当时的全部门禁。
+ */
+{
+  const face = {
+    kind: "SELECT_CARDS",
+    prompt: "请从选择面里选择一张牌。",
+    actor: 0,
+    spec: { zones: ["processing"], total: [1, 1], per_zone: [], optional: false, sequential: false },
+    slots: [0, 1, 2, 3].map((i) => ({
+      ref: { zone: "processing", seat: null },
+      card: { card_id: 200 + i, name: ["杀", "闪", "桃", "决斗"][i] },
+    })),
+    legal_actions: [{ answers_seq: 9, kind: "SelectCards", picks: [] }],
+    candidate_index: {},
+  };
+  const saved = ui.state.view;
+  ui.state.view = { pending: face, snapshot: { self_hand: [], players: [], seat: 0 }, human_seat: 0, heroes: {} };
+  ui.resetSelection();
+  ui.renderPending(ui.state.view);
+  const row = $("t-options").children.find((c) => c.className === "cards");
+  check("㉿S1 选择面渲染出 4 个槽位", !!row && row.children.length === 4, `槽位=${row ? row.children.length : 0}`);
+  check("㉿S2 未选槽位时不可提交", $("btn-submit").disabled === true);
+  if (row) {
+    (row.children[2].listeners.click || []).forEach((fn) => fn({ target: row.children[2] }));
+    check("㉿S3 点第三个槽位 = picks 收下它", JSON.stringify(ui.state.picks) === "[2]",
+      `picks=${JSON.stringify(ui.state.picks)}`);
+    check("㉿S4 点完槽位提交按钮**可点**（这是本轮修的 bug）", $("btn-submit").disabled === false);
+    check("㉿S5 buildAction 带上所选 picks", (() => {
+      const picked = ui.buildAction();
+      return picked !== null && picked.kind === "SelectCards" && JSON.stringify(picked.picks) === "[2]";
+    })(), `buildAction=${JSON.stringify(ui.buildAction())}`);
+    // 再点一次取消
+    const again = $("t-options").children.find((c) => c.className === "cards");
+    (again.children[2].listeners.click || []).forEach((fn) => fn({ target: again.children[2] }));
+    check("㉿S6 再点一次取消槽位", JSON.stringify(ui.state.picks) === "[]" && $("btn-submit").disabled === true);
+  }
+  ui.state.view = saved;
+  ui.resetSelection();
+}
+
+check("㉿M12 找到一个前置：目标被迫唯一的牌（combos == 池）", auto !== null,
+  auto ? `seed=${auto.seed} card_id=${auto.cardId} 池=${auto.entry.pool.length} 组合=1 条` : "16 个种子内没找到");
+
+if (auto) {
+  await replayTo(auto);
+  ui.toggleFocus(Number(auto.cardId));
+  check("㉿M13 自动选中：点牌即把池的全集填成已选目标（不用逐个点）",
+    JSON.stringify(ui.state.selectedTargets.slice().sort((a, b) => a - b)) === JSON.stringify(auto.entry.pool.slice().sort((a, b) => a - b)),
+    `已选 ${JSON.stringify(ui.state.selectedTargets)} / 池 ${JSON.stringify(auto.entry.pool)}`);
+  check("㉿M14 自动选中后提交按钮直接可点", $("btn-submit").disabled === false);
+  check("㉿M15 自动选中的目标是**确定态**：点单个座位不取消它（否则组合就非法了）", (() => {
+    const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(auto.entry.pool[0]));
+    if (box) (box.listeners.click || []).forEach((fn) => fn({ target: box }));
+    return ui.state.selectedTargets.length === auto.entry.pool.length;
+  })(), `已选 ${JSON.stringify(ui.state.selectedTargets)}`);
+  check("㉿M16 提示说明了目标为什么是自动的",
+    /自动选中|唯一确定/.test($("t-target-hint").textContent), `提示="${$("t-target-hint").textContent}"`);
+
+  // 反向判据：**这不是"什么都选"**——有真实选择余地的牌绝不自动选中。
+  // 必须先把局面重放回来：`scanCases` 只记 `{seed, steps, cardId, entry}`，**不存 pending**，
+  // 拿一个不存在的 `multi.pending` 去判会让这条断言恒真（本轮 code-review 抓到的空转）。
+  await replayTo(multi);
+  check("㉿M17 自动选中不越界：多组合的牌 autoCombo() 返回 null",
+    ui.autoCombo(ui.state.view.pending, Number(multi.cardId)) === null,
+    `池=${ui.cardEntry(ui.state.view.pending, multi.cardId).pool.length} 组合=${ui.cardEntry(ui.state.view.pending, multi.cardId).combos.length}`);
 }
 
 // 回到干净的一局，别把后续断言带进上面那个中间局面
@@ -378,27 +667,44 @@ if (multi) {
   });
   ui.state.sessionId = fresh.session_id;
   ui.state.logRecords = [];
-  ui.state.selectedOption = null;
-  ui.state.selectedCards = [];
-  ui.state.picks = [];
-  ui.state.lastRejectReason = "";
+  ui.resetSelection();
   ui.applyView(fresh);
 }
 
 /* ------------------------------------------- ② 九类询问：渲染 + 提交纪律 */
 
-const pending0 = created.pending;
+// 先回到建局那一刻：上面那些前置扫描把界面推到了别的局面，直接读 `created` 的字段会张冠李戴。
+await openSession(created);
+const pending0 = ui.state.view.pending;
 check("建局后有挂起询问", !!pending0, pending0 && pending0.kind);
-check("候选已聚合渲染（不刷屏）", $("t-options").children.length > 0, `${$("t-options").children.length} 个选项 / 服务端 ${pending0.legal_actions.length} 条候选`);
+// 唯一候选**不铺按钮**：界面只说"将提交什么"（spec D9）。建局后那个 RESPOND 往往正是这种
+// （合法行动只有"放弃"），所以这里断言的是"零按钮 + 说明将提交什么"，而不是"零选项 = 坏了"。
+check("唯一候选不铺按钮，只说明将提交什么", (() => {
+  const rk = ui.renderKind(pending0, pending0.legal_actions);
+  if (rk === "direct") {
+    return $("t-options").children.length === 0 && /将提交/.test($("t-choice").textContent);
+  }
+  return $("t-options").children.length > 0;
+})(), `${ui.renderKind(pending0, pending0.legal_actions)} / ${pending0.legal_actions.map((a) => a.kind).join(",")} / ${JSON.stringify(pending0.legal_actions[0])} / choice="${$("t-choice").textContent}"`);
 check("询问文案已渲染", $("t-prompt").textContent.length > 0, $("t-prompt").textContent.slice(0, 40));
 check("时限关闭时不显示倒计时", $("t-timer").textContent === "", `"${$("t-timer").textContent}"`);
 
 const seen = new Set();
 const renderErrors = [];
+// 借刀杀人的被迫【杀】窗口（`cause=BORROWED_SWORD`）：**恒单阶段**（spec D11）——
+// 询问里没有 `use_targets`，官方的"再选一次目标"已经烘进候选，所以界面就是"点座位"。
+// 这个窗口很稀（实测 40 局只出 1 次），故这里按"遇到就必然成立、遇不到也说得清"来断言。
+let borrowed = 0;
+let borrowedHadStage = false;
 let steps = 0;
-while (ui.state.view.pending && steps < 1200) {
+while (ui.state.view.pending && steps < 4000) {
   const p = ui.state.view.pending;
   seen.add(p.kind);
+  if (p.kind === "RESPOND" && p.cause === "BORROWED_SWORD") {
+    borrowed += 1;
+    const payload = JSON.parse(JSON.stringify(p));
+    borrowedHadStage = "use_targets" in payload || "mode" in payload;
+  }
   try {
     ui.state.selectedOption = null;
     ui.state.picks = [];
@@ -415,8 +721,44 @@ while (ui.state.view.pending && steps < 1200) {
   // 选候选 + 按候选自己的约束补足选择（与真玩家点选等价）。
   // 优先"结束 / 放弃"以便对局真的往前走（一直用第一张牌会反复发动技能、走不到终局）。
   const terminal = p.legal_actions.findIndex((a) => a.kind === "EndPhase" || a.kind === "Pass");
-  ui.state.selectedOption = terminal >= 0 ? terminal : 0;
-  const chosen = p.legal_actions[ui.state.selectedOption];
+  if (ui.isHandPick(p)) {
+    // 手选路径：走玩家那条路——点一张牌（必要时逐个点它第一组合的座位）。
+    // 判据是"这条询问走手选"（`isHandPick`）而不是"这条询问必须点目标"（`needsPicker`）：
+    // 唯一一张【闪】没有目标要选，但它仍然要点一下牌才能提交。
+    ui.resetSelection();
+    ui.renderTable();
+    const index = ui.cardIndex(p);
+    const cardId = Object.keys(index)[0];
+    if (terminal >= 0) {
+      // 有"结束出牌阶段 / 放弃"就走它：否则同一条询问会反复出同一张牌（无穷循环）。
+      // 让对局真的往前走，是本烟测的驱动策略，不是被测行为。
+      ui.state.selectedOption = terminal;
+      $("t-choice").textContent = `将提交：${ui.actionLabel(p.legal_actions[terminal])}`;
+    } else if (cardId === undefined) {
+      // 这条手选询问里没有可点的牌（例如池为空的响应窗口）：退到第一条候选。
+      ui.state.selectedOption = 0;
+    } else {
+      ui.toggleFocus(Number(cardId));
+      const combo = (index[String(cardId)].combos || [])[0] || [];
+      for (const seat of combo) {
+        const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(seat));
+        if (box) (box.listeners.click || []).forEach((fn) => fn({ target: box }));
+      }
+    }
+  } else if (ui.renderKind(p, p.legal_actions) === "direct") {
+    // 唯一且无需选目标的候选：界面显示"将提交：…"，驱动方**必须**取同一条，
+    // 否则下一条断言比的就成了另一个 Action（旧断言在这里会假红）。
+    ui.state.selectedOption = 0;
+  } else {
+    ui.state.selectedOption = terminal >= 0 ? terminal : 0;
+  }
+  const chosen = ui.buildAction()
+    || (ui.needsPicker(p) ? p.legal_actions[0] : p.legal_actions[ui.state.selectedOption !== null ? ui.state.selectedOption : 0]);
+  // 注意：`SelectCards` 的 buildAction 结果是 `Object.assign({}, 候选, {picks})`，**键序**与
+  // 候选不同，故这里不能拿 JSON 字符串当身份；`kind` 在九类询问里是判别式，用它找那一条。
+  const chosenAt = p.legal_actions.findIndex((a) => a.kind === chosen.kind);
+  if (chosenAt < 0) { renderErrors.push(`${p.kind}: 选不出一个候选`); break; }
+  ui.state.selectedOption = chosenAt;
   if (chosen.kind === "SelectCards") {
     const least = (p.spec && p.spec.total && p.spec.total[0]) || 1;
     ui.state.picks = Array.from({ length: least }, (_, i) => i);
@@ -427,14 +769,20 @@ while (ui.state.view.pending && steps < 1200) {
     $("btn-submit").disabled = true;
     ui.state.picks = Array.from({ length: least }, (_, i) => i);
     ui.renderPending(ui.state.view);
-    if ($("btn-submit").disabled) { renderErrors.push(`SelectCards 选够 ${least} 张后提交按钮仍不可点`); break; }
+    if ($("btn-submit").disabled) {
+      renderErrors.push(`SelectCards 选够 ${least} 张后提交按钮仍不可点 [spec.total=${JSON.stringify(p.spec && p.spec.total)} slots=${(p.slots||[]).length} picks=${ui.state.picks.length} selectedOption=${ui.state.selectedOption} choice="${$("t-choice").textContent}"]`);
+      break;
+    }
   }
   if (chosen.kind === "DiscardCards") {
+    // 弃牌没有"手选"路径（spec D10），由旧候选列表路径处理；`picks` 装的是**手牌下标**，
+    // 与提交时用来比对的 `card_id` 在同一个秩序里（`self_hand` 就是按 `hand` 顺序投影的）。
     const need = (chosen.cards || []).length;
-    ui.state.selectedCards = [];
+    ui.state.picks = [];
     const hand = ui.state.view.snapshot.self_hand.map((c) => c.card_id);
-    ui.state.selectedCards = hand.slice(0, need);
-    if (ui.state.selectedCards.length < need) { renderErrors.push("弃牌张数不够（手牌不足）"); break; }
+    ui.state.picks = hand.slice(0, need);
+    if (ui.state.picks.length < need) { renderErrors.push("弃牌张数不够（手牌不足）"); break; }
+    ui.renderTable();
     ui.renderPending(ui.state.view);
   }
   const action = ui.buildAction();
@@ -453,7 +801,9 @@ while (ui.state.view.pending && steps < 1200) {
   steps += 1;
 }
 check(`每类询问都能渲染并提交（本局走到 ${seen.size} 类：${[...seen].join("、")}）`, renderErrors.length === 0, renderErrors.join("；"));
-check("对局已终局", ui.state.view.finished === true);
+check("借刀杀人窗口恒单阶段（询问体不带 use_targets / mode）", borrowedHadStage === false,
+  borrowed > 0 ? `本局遇到 ${borrowed} 次 BORROWED_SWORD 窗口` : "本局没遇到（D11 由 40 局探针实测：该窗口 40 局才 1 次；这里遇不到即无第二阶段可言）");
+check("对局已终局", ui.state.view.finished === true, `驱动 ${steps} 步后 finished=${ui.state.view.finished}`);
 check("终局后提示已结束", $("t-prompt").textContent.includes("结束"), $("t-prompt").textContent);
 
 /* ------------------------------------------------------ ③ 倒计时（有时限时） */
@@ -483,5 +833,4 @@ check("回放页显示逐座位武将（侧车 meta）", $("r-heroes").textConte
 check("回放页事件流有内容", $("r-log").children.length > 0, `${$("r-log").children.length} 条`);
 check("回放位置指示到末尾", $("r-pos").textContent.includes(String(ui.state.replay.records.length)), $("r-pos").textContent);
 
-console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);
-process.exit(failures === 0 ? 0 : 1);
+console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

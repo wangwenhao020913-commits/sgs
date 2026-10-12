@@ -46,10 +46,11 @@ from sgs.state import (
     Slot,
     Zone,
     ZoneRef,
+    alive_seats,
 )
 from sgs.timing import Timing
 
-from .catalog import HeroSkillDecl, Hook, SkillDef
+from .catalog import MATCH_OWNER_KEY, HeroSkillDecl, Hook, SkillDef
 
 __all__ = [
     "DAMAGE_AFTER_SKILLS",
@@ -135,8 +136,11 @@ class DamageAfterSkill(HeroSkillDecl):
 
 
 def _jianxiong_condition(host: Any, frame: Any) -> bool:
-    """【奸雄】的触发条件：造成伤害的那张牌**还在处理区**（找不到就跳过）。"""
-    return _in_processing(host.state, _damage_channel_card(frame))
+    """【奸雄】的触发条件：**受伤的是持有者自己**，且造成伤害的那张牌**还在处理区**。
+
+    持有者判据是必须的：派发环会给每个存活玩家的实例求条件（见 :func:`_hurt_owner`）。
+    """
+    return _hurt_owner(frame) and _in_processing(host.state, _damage_channel_card(frame))
 
 
 def _jianxiong(host: Any, frame: Any) -> None:
@@ -223,10 +227,27 @@ def _fankui(host: Any, frame: Any) -> Any:
     )
 
 
+def _hurt_owner(frame: Any) -> bool:
+    """**这次伤害打在技能持有者身上吗**。
+
+    伤害后技能的共同前提（官方【遗计】【奸雄】【反馈】开头都是"当**你**受到伤害后"）。
+    判据读派发器在条件求值期写好的 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`
+    （同 `move_after.py` 的口径）——``skill_owner`` 要到回调前才写，条件里读不到。
+
+    **为什么必须自校**：``_dispatch`` 遍历**每个存活玩家**的实例，只按
+    ``timing`` / ``per_point`` / ``condition`` 过滤。"条件恒真"因此等于"任何人挨打都触发"，
+    而【遗计】的回调会把牌堆顶的牌**移动给持有者**——别人挨打、郭嘉白拿牌。
+    """
+    return frame.data.get(MATCH_OWNER_KEY) == frame.data.get("target")
+
+
 def _yiji_condition(host: Any, frame: Any) -> bool:
-    """【遗计】逐点触发：每一轮都成立（牌堆重洗由 ``peek_deck`` 沿用同一套口径）。"""
-    del host, frame
-    return True
+    """【遗计】逐点触发：**持有者**每受一点伤害各成立一次。
+
+    逐点由帧私有 ``damage_point_index`` 驱动（牌堆重洗由 ``peek_deck`` 沿用同一套口径）。
+    """
+    del host
+    return _hurt_owner(frame)
 
 
 def _yiji(host: Any, frame: Any) -> Any:
@@ -260,16 +281,33 @@ def _yiji(host: Any, frame: Any) -> Any:
     )
     if host.suspended(picked):
         return "stay"
-    frame.data.pop(YIJI_SEEN_KEY, None)
     if not picked:
         # "可以不交给任何人"：这一轮作罢；下一轮的观看重新从（已变短的）牌堆顶取。
+        frame.data.pop(YIJI_SEEN_KEY, None)
         return None
+    # ---- 交给谁（官方："将这些牌**交给任意角色**"）--------------------------------
+    # 用 ``SELECT_OPTION`` 承载：它的 ``options`` 是**开放闭集**（任意字符串元组），
+    # 不需要新造 QueryKind，界面上也已经是一条一个按钮、点得动的形态。
+    # ``skill_id`` 每轮取不同的值——``ask_option`` 的答案缓存键是
+    # ``("option", skill_id, actor)``，逐点两轮若同名就会把第 2 轮读成第 1 轮的答案。
+    round_index = damage_point_index(frame)
+    choice = host.ask_option(
+        frame,
+        owner,
+        Timing.DAMAGE_AFTER_TAKE,
+        skill_id=f"yiji:give:{round_index}",
+        options=tuple(f"seat:{seat}" for seat in alive_seats(host.state)),
+    )
+    if host.suspended(choice):
+        return "stay"
+    frame.data.pop(YIJI_SEEN_KEY, None)
+    receiver = int(choice.choice.split(":", 1)[1])
     return host.move_in_frame(
         frame,
         host.state.refs(picked),
-        to_zone=ZoneRef(Zone.HAND, owner),
+        to_zone=ZoneRef(Zone.HAND, receiver),
         reason=MoveReason.PUT,
-        owner=owner,
+        owner=receiver,
         actor=owner,
     )
 

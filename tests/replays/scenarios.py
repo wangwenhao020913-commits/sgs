@@ -185,9 +185,12 @@ def _m3(slug: str, *, seed: int, heroes: tuple[str, ...], player_count: int = 4,
 
 M3_SCENARIOS: dict[str, Scenario] = {
     # B 族逐点伤害：【遗计】在一次多点伤害里问两次（郭嘉在场）。
+    # 种子 150 → 109：遗计修复（只在**持有者**受伤时触发）后，150 那局的郭嘉不再因别人
+    # 受伤而反复触发，判据（≥2 次逐点）不再命中。按本模块的纪律**重新选种**而不是放宽判据：
+    # 109 在同样四名武将下命中判据，且记录条数更少（925 vs 3111），基准更小。
     "35-hero-damage-points": _m3(
         "35-hero-damage-points",
-        seed=150,
+        seed=109,
         heroes=("guojia", "caocao", "simayi", "luxun"),
     ),
     # I 族改判循环：司马懿【鬼才】的改判窗口（判定牌生效前打出代替）。

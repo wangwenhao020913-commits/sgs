@@ -1,9 +1,24 @@
 /* SGS M4 极简界面：只做两件事——渲染事件流、收集并提交应答。
  *
- * 纪律（`04` §4.1 与地图 D8）：
- *  - 前端**不做规则判定**，合法性只用于高亮与禁用；提交的 Action **原样取自** legal_actions；
- *  - 隐藏信息在传输层已被过滤，本文件拿不到未公开数据，也不去猜；
- *  - 界面**不自己代答超时**，只显示倒计时（代答在服务端，是纯函数）。
+ * 纪律（`04` §4.1 与地图 D8；本轮裁定见 `.scratch/m4-manual-select/spec.md`）：
+ *  - 前端**不做规则判定**：合法性只问"这个组合在不在候选索引里"，不读距离 / 花色 / 体力 / 存活；
+ *  - **手选卡牌 + 手选目标**：点牌设**焦点**，点座位选目标，再点一次取消；
+ *  - **自动选中**只在"合法组合恰好一组、且那组就是池的全部"时触发（省掉一次没有信息量的点击）；
+ *  - 提交的 Action **原样取自** legal_actions（不自己拼 Action）；
+ *  - 隐藏信息在传输层已被过滤；界面**不自己代答超时**，只显示倒计时（代答在服务端）。
+ *
+ * **跨线契约**：`pending.candidate_index` 是 `{card_id: entry}`，界面读的字段**只有这四个**——
+ *
+ *     entry.card          这张牌的牌面（`CardRef`）
+ *     entry.pool          合法目标座位
+ *     entry.min_targets   这次使用最少要选几个目标
+ *     entry.max_targets   这次使用最多能选几个目标
+ *     entry.combos        合法目标组合（元组的数组）
+ *
+ * 真源在 `tools/sgs_web/projection.py:candidate_index`；键名两边必须**逐字**一致。
+ * 只断言服务端"发了这个键"是不够的——服务端断言与界面读法之间曾经失配过
+ * （界面读 `entry.max` 而服务端发 `max_targets`），后果是 `needsPicker()` 恒假、
+ * 唯一一条带目标的候选在未交互时就能提交。故 `ui_smoke.mjs` 的 ㉿K1–K4 两侧都钉。
  */
 "use strict";
 
@@ -28,13 +43,22 @@ function phaseLabel(phase) {
   if (!phase) return "—";
   return PHASE_LABELS[phase] || phase;
 }
+
+/** 走手选的询问类（本刀射程：出牌阶段 + 响应窗口）。
+ *
+ * 其余五类（弃牌 / 排列 / 选择面 / 技能发动 / 单选）**暂时**保留旧的候选列表按钮，
+ * 等下一刀再抹平——这样本刀不会把已有功能砍掉。
+ */
+const HAND_PICK_KINDS = ["PLAY_PHASE", "RESPOND", "DODGE"];
+
 const state = {
   sessionId: null,
   cursor: -1,
   logSeq: 0,
   view: null,          // 服务端最近一次下发的会话视图
-  selectedCards: [],   // 手牌里选中的 card_id
-  selectedOption: null,// 选中的 legal_action 下标
+  focusCardId: null,   // **焦点**：正在挑目标的那张候选牌（再点一次取消）
+  selectedTargets: [], // 已选目标座位
+  selectedOption: null,// 旧路径：选中的 legal_action 下标（弃牌 / 排列 / 单选 / 技能）
   picks: [],           // SELECT_CARDS 选中的槽位下标
   timer: null,
   runs: [],
@@ -130,6 +154,8 @@ function applyView(body) {
     if (record.kind === "query") state.logQuerySeat = record.query.actor;
     appendLog(record, state.logQuerySeat);
   }
+  // 新询问到达 ⇒ 未提交的选择一律作废（spec D14：不弹确认、不尝试提交）。
+  resetSelection();
   renderTable();
   const logNode = $("t-log");
   if (logNode.lastChild) logNode.lastChild.scrollIntoView({ block: "nearest" });
@@ -140,11 +166,21 @@ function applyView(body) {
     $("btn-submit").disabled = true;
     $("btn-cancel").disabled = true;
     $("t-options").innerHTML = "";
+    $("t-target-hint").textContent = "";
     $("status").textContent = "已结束（录像已存）";
     loadRuns();
     return;
   }
   renderPending(body);
+}
+
+/** 清空全部未提交的选择（焦点 / 已选目标 / 旧路径的候选与槽位）。 */
+function resetSelection() {
+  state.focusCardId = null;
+  state.selectedTargets = [];
+  state.selectedOption = null;
+  state.picks = [];
+  state.lastRejectReason = "";
 }
 
 async function refresh() {
@@ -163,6 +199,105 @@ async function poll() {
   window.setTimeout(poll, 1200);
 }
 
+/* ------------------------------------------------------------ 候选索引 */
+
+/** 这次询问的候选索引：**只读服务端下发的那一份**（`pending.candidate_index`）。
+ *
+ * 前端**不自己从 `legal_actions` 重建索引**——那是一份会漂移的第二实现，
+ * 而"池 ⊆ 候选、候选 ⊆ 索引"这条不变量已经由 `tests/test_web.py` 钉在服务端那一侧。
+ * 空索引是合法状态（`Pass` / `SelectOption` 这类没有"牌 → 目标"的询问就是空的）。
+ */
+function cardIndex(pending) {
+  return (pending && pending.candidate_index) || {};
+}
+
+function cardEntry(pending, cardId) {
+  return cardIndex(pending)[String(cardId)] || null;
+}
+
+/** 这张牌此刻点不点得动：候选索引里有它才有候选（唯一判据，不读规则）。 */
+function cardSelectable(pending, cardId) {
+  return cardEntry(pending, cardId) !== null;
+}
+
+function sameCombo(a, b) {
+  if (a.length !== b.length) return false;
+  const left = a.slice().sort((x, y) => x - y);
+  const right = b.slice().sort((x, y) => x - y);
+  return left.every((v, i) => v === right[i]);
+}
+
+/** 组合是否恰好是候选索引里的一组（**唯一的合法性判据**）。 */
+function isLegalCombo(pending, cardId, targets) {
+  const entry = cardEntry(pending, cardId);
+  if (!entry) return false;
+  return entry.combos.some((combo) => sameCombo(combo, targets || []));
+}
+
+/** **自动选中**：候选组合恰好只有一组、且那组就是池的全部 ⇒ 返回那一组；否则 ``null``。
+ *
+ * 判据只读候选索引，不引用任何规则知识。反例：借刀杀人的被迫【杀】是"池 4、目标数 1、
+ * 组合 4 条"——此时**必须手选**，否则会把 4 个座位全自动选中。
+ */
+function autoCombo(pending, cardId) {
+  const entry = cardEntry(pending, cardId);
+  if (!entry || entry.combos.length !== 1) return null;
+  const combo = entry.combos[0];
+  const pool = entry.pool.slice().sort((x, y) => x - y);
+  const sorted = combo.slice().sort((x, y) => x - y);
+  if (pool.length !== sorted.length) return null;
+  if (!pool.every((seat, i) => seat === sorted[i])) return null;
+  // 空组合（无目标使用：【闪】【无懈】）**不算自动选中**——没有目标可填，
+  // 返回 `[]` 会让"已自动选中"这句话为假（`[]` 是 truthy，调用方会当成填好了）。
+  return combo.length === 0 ? null : combo.slice();
+}
+
+function isHandPick(pending) {
+  return Boolean(pending) && HAND_PICK_KINDS.includes(pending.kind);
+}
+
+/** 出牌阶段 / 响应窗口下"哪些座位此刻可点"（**数据**给的，不是 CSS 猜的）。
+ *
+ * 返回**池里的每一个座位**并标出它此刻是什么状态，而不是只返回"可点的那些"——
+ * 已选目标必须留在里面，否则它就没法被再点一次取消（点击路径只在"池里"的座位上生效）。
+ */
+function pickerSeats(pending) {
+  if (!isHandPick(pending)) return [];
+  if (state.focusCardId === null) return [];
+  const entry = cardEntry(pending, state.focusCardId);
+  if (!entry) return [];
+  if (entry.max_targets === 0) return [];   // 无目标使用（【闪】【无懈】）：没有座位可点
+  const selected = state.selectedTargets;
+  const candidates = entry.combos.filter((combo) => selected.every((seat) => combo.includes(seat)));
+  return entry.pool.map((seat) => ({
+    seat,
+    selected: selected.includes(seat),
+    isTargetable: candidates.some((combo) => combo.includes(seat) && !selected.includes(seat)),
+  }));
+}
+
+/** 目标区的一句人话（不推荐、不排序，只说"还差什么"）。 */
+function pickerTargetHint(pending) {
+  if (!isHandPick(pending)) return "";
+  if (state.focusCardId === null) return "点一张手牌 = 选牌；点座位 = 选目标。";
+  const entry = cardEntry(pending, state.focusCardId);
+  if (!entry) return "";
+  if (entry.max_targets === 0) return "本窗口无需指定目标。";
+  if (autoCombo(pending, state.focusCardId)) return "目标由规则唯一确定，已自动选中（点牌可整张取消）。";
+  const have = state.selectedTargets.length;
+  if (isLegalCombo(pending, state.focusCardId, state.selectedTargets)) return "目标已选好，可以提交。";
+  const rest = entry.combos.filter((combo) => state.selectedTargets.every((seat) => combo.includes(seat)));
+  if (!rest.length) return "这组目标不是合法组合，点座位取消再选。";
+  const need = Math.max(...rest.map((combo) => combo.length)) - have;
+  return need > 0 ? `还要选 ${need} 个目标（已选 ${have}）。` : "这组目标不是合法组合，点座位取消再选。";
+}
+
+/** 目标座位是否**就是自己或空集**：这类牌（【无中生有】【桃】、装备牌）不画座位高亮。 */
+function targetsSelfOnly(entry, selfSeat) {
+  if (!entry) return false;
+  return entry.pool.length === 1 && entry.pool[0] === selfSeat;
+}
+
 /* ------------------------------------------------------------------ 牌桌 */
 
 function renderTable() {
@@ -175,14 +310,27 @@ function renderTable() {
     ? "—"
     : `座位 ${turnSeat}${turnSeat === snapshot.seat ? "（我）" : ""}`;
 
-  const seats = $("t-seats");
-  seats.innerHTML = "";
+  const pendingNow = view.pending || null;
+  const handPick = isHandPick(pendingNow);
+  const seats = pickerSeats(pendingNow);
+  const seatOf = (seat) => seats.find((item) => item.seat === seat) || null;
+  const focusEntry = state.focusCardId === null ? null : cardEntry(pendingNow, state.focusCardId);
+  // 池就是"自己"一个座位（【无中生有】【桃】、装备牌）：不画座位高亮，免得看着像要打自己
+  const selfOnly = targetsSelfOnly(focusEntry, snapshot.seat);
+
+  const ring = $("t-seats");
+  ring.innerHTML = "";
   for (const player of snapshot.players) {
     const box = document.createElement("div");
     box.className = "seat";
     if (player.seat === snapshot.seat) box.classList.add("me");
     if (!player.alive) box.classList.add("dead");
     if (player.seat === snapshot.turn_seat) box.classList.add("turn");
+    const seatState = seatOf(player.seat);
+    if (handPick && !selfOnly) {
+      if (seatState && seatState.selected) box.classList.add("tsel");
+      else if (seatState && seatState.isTargetable) box.classList.add("targetable");
+    }
     const hero = view.heroes[player.seat] || "（无武将）";
     const identity = player.identity ? ` · ${identityLabel(player.identity)}` : "";
     box.innerHTML = `
@@ -193,17 +341,21 @@ function renderTable() {
       <div class="small">${hero}${identity}</div>
       <div class="small">手牌 ${player.hand_count}　装备 ${player.equip.length}　判定 ${player.judge.length}</div>
       <div class="small">${player.alive ? "" : "已阵亡"}</div>`;
-    seats.appendChild(box);
+    if (seatState && !selfOnly) {
+      box.setAttribute("data-seat", String(player.seat));
+      if (seatState.selected || seatState.isTargetable) {
+        box.addEventListener("click", () => selectTarget(player.seat));
+      }
+    }
+    ring.appendChild(box);
   }
 
   $("t-hand-count").textContent = `${snapshot.self_hand.length} 张`;
   const hand = $("t-hand");
   hand.innerHTML = "";
-  const pendingNow = state.view ? state.view.pending : null;
   for (const card of snapshot.self_hand) {
-    hand.appendChild(
-      cardChip(card, state.selectedCards.includes(card.card_id), false, cardUsable(pendingNow, card.card_id)),
-    );
+    const usable = handPick ? cardSelectable(pendingNow, card.card_id) : cardUsable(pendingNow, card.card_id);
+    hand.appendChild(cardChip(card, state.focusCardId === card.card_id, false, usable));
   }
   $("t-equip").innerHTML = "";
   for (const card of ownZone(snapshot, "equip")) $("t-equip").appendChild(cardChip(card, false, true));
@@ -245,7 +397,8 @@ function renderSkills(view) {
       if (index >= 0) {
         button.addEventListener("click", () => {
           state.selectedOption = index;
-          state.selectedCards = [];
+          state.focusCardId = null;
+          state.selectedTargets = [];
           state.lastRejectReason = "";
           renderTable();
           renderPending(state.view);
@@ -273,63 +426,225 @@ function cardChip(card, selected, isStatic, usable = true) {
   if (isStatic) chip.classList.add("static");
   if (!isStatic && !usable) chip.classList.add("dis");
   chip.innerHTML = `<span class="n">${card.name}</span><span class="s">${card.suit || ""}${card.rank ?? ""}</span>`;
-  if (!isStatic) chip.addEventListener("click", () => toggleCard(card.card_id));
+  if (!isStatic) chip.addEventListener("click", () => toggleFocus(card.card_id));
   return chip;
 }
 
-/** 本次询问里"用这张牌"的候选（可能多条——同一张牌的不同目标组合各算一条）。 */
-function cardCandidates(pending, cardId) {
-  if (!pending) return [];
-  return pending.legal_actions.filter(
-    (action) => action.card && action.card.card_id === cardId && (action.kind === "UseCard" || action.kind === "PlayCard"),
-  );
-}
-
-/** 这张牌**现在**能不能用：有候选才可用。不能用的牌不给点、置灰（图 1 的死按钮就是这个坑）。 */
-function cardUsable(pending, cardId) {
-  return cardCandidates(pending, cardId).length > 0;
-}
-
-function toggleCard(cardId) {
+/** 点座位 = 选 / 取消目标。**自动选中**的目标是确定态，点单个座位不取消它（spec D6）。 */
+function selectTarget(seat) {
   const pending = state.view ? state.view.pending : null;
-  if (pending && !cardUsable(pending, cardId)) {
-    // 点了一张**用不出**的牌：不给它选中态，并说清为什么（原来这里会静默选中、按钮永久灰掉）。
-    state.selectedCards = [];
-    const card = (state.view.snapshot.self_hand || []).find((c) => c.card_id === cardId);
-    state.lastRejectReason = `这一手【${card ? card.name : cardId}】不能用于当前询问（${pending.prompt}）`;
-    renderTable();
-    renderPending(state.view);
-    return;
-  }
-  const index = state.selectedCards.indexOf(cardId);
-  if (index >= 0) state.selectedCards.splice(index, 1);
-  else state.selectedCards.push(cardId);
+  if (!isHandPick(pending) || state.focusCardId === null) return;
+  const here = pickerSeats(pending).find((item) => item.seat === seat);
+  // 只有"池里的座位"能点：池外的点了没反应（置灰）；已选的座位**始终**能再点一次取消。
+  if (!here || (!here.selected && !here.isTargetable)) return;
+  if (here.selected && autoCombo(pending, state.focusCardId)) return;
+  const at = state.selectedTargets.indexOf(seat);
+  if (at >= 0) state.selectedTargets.splice(at, 1);
+  else state.selectedTargets.push(seat);
   state.lastRejectReason = "";
   renderTable();
   renderPending(state.view);
 }
 
+/** 点手牌 = 设**焦点**；再点一次取消焦点并清空已选目标。
+ *
+ * 非手选询问（弃牌 / 排列 / 选择面 / 单选）里的手牌点击**不是手选**——那些路径由
+ * `legal_actions` 的候选列表驱动，点牌不设焦点。本刀之前 `toggleCard` 承担这个入口，
+ * 但它与 `toggleFocus` 互相委托会让非手选询问一点牌面就**无限递归**
+ * （`toggleFocus` → `toggleCard` → `toggleFocus` → …），故收成一个函数、不再互调。
+ */
+function toggleFocus(cardId) {
+  const pending = state.view ? state.view.pending : null;
+  if (!isHandPick(pending)) return;
+  if (state.focusCardId === cardId) {
+    state.focusCardId = null;
+    state.selectedTargets = [];
+    state.lastRejectReason = "";
+  } else if (!cardSelectable(pending, cardId)) {
+    // 用不出的牌不给焦点，并说清为什么（原来这里会静默选中、按钮永久灰掉）。
+    state.focusCardId = null;
+    state.selectedTargets = [];
+    const card = (state.view.snapshot.self_hand || []).find((c) => c.card_id === cardId);
+    state.lastRejectReason = `【${card ? card.name : cardId}】不能用于当前询问（${pending.prompt}）`;
+  } else {
+    state.focusCardId = cardId;
+    state.selectedTargets = [];
+    const auto = autoCombo(pending, cardId);
+    if (auto) state.selectedTargets = auto.slice();
+    state.lastRejectReason = "";
+  }
+  renderTable();
+  renderPending(state.view);
+}
+
+/** 本次询问里"用这张牌"的候选（旧路径：候选列表按钮用）。 */
+function cardCandidates(pending, cardId) {
+  if (!pending) return [];
+  return (pending.legal_actions || []).filter(
+    (action) => action.card && action.card.card_id === cardId && (action.kind === "UseCard" || action.kind === "PlayCard"),
+  );
+}
+
+/** 这张牌**能不能点**（旧路径的判据；手选路径用 :func:`cardSelectable`）。 */
+function cardUsable(pending, cardId) {
+  return cardCandidates(pending, cardId).length > 0;
+}
+
 /* ------------------------------------------------------------ 询问渲染 */
 
+/** 手选路径：点牌设焦点、点座位选目标、选出一组**候选里真有**的组合才可提交。 */
 function renderPending(view) {
   const pending = view.pending;
-  const options = $("t-options");
-  options.innerHTML = "";
+  $("t-options").innerHTML = "";
   $("t-prompt").textContent = pending ? pending.prompt : "（没有待应答的询问）";
   $("btn-submit").disabled = true;
   $("btn-cancel").disabled = true;
   $("t-choice").textContent = "";
+  const targetHint = $("t-target-hint");
+  if (targetHint) targetHint.textContent = "";
   if (!pending) {
     $("t-timer").textContent = "";
     return;
   }
-  const actions = pending.legal_actions;
-  const selected = state.selectedOption === null ? null : actions[state.selectedOption];
+  const actions = pending.legal_actions || [];
+  const kind = renderKind(pending, actions);
 
+  if (kind === "picker") renderPicker(pending);
+  else if (kind === "slots") {
+    // 选择面也要**指到那条候选**：引擎只发一条 `SelectCards` 骨架，具体 `picks` 由
+    // `buildAction()` 补上；不指过去它就没有可补的对象 ⇒ `buildAction()` 返回 null ⇒
+    // 点完槽位提交按钮仍然是灰的（本轮实测：点第 1 个槽位后 picks=[0] 而按钮不可点）。
+    const index = actions.findIndex((action) => action.kind === "SelectCards");
+    if (index >= 0) state.selectedOption = index;
+    renderSlots(pending);
+  }
+  else if (kind === "direct") renderDirect(actions[0]);
+  else renderCandidateList(pending, actions);
+
+  // 提交按钮的启用与否**只算一次**（每个分支只管"铺界面"）：分散在各分支里写过一次
+  // 就会漏掉一条路径（`SELECT_CARDS` 的选择面就因此永远灰着）。
+  refreshSubmit(pending);
+  renderCountdown(view);
+}
+
+/** 这次询问该走哪条渲染路径。
+ *
+ * - `picker`：出牌阶段 / 响应窗口 —— 点牌 + 点目标（本刀新增）；
+ * - `direct`：只有一条候选、且它**没有目标要选** —— 不铺按钮，直接显示"将提交：…"；
+ * - `slots`：`SELECT_CARDS` 的选择面（下一刀再统一）；
+ * - `list`：其余询问类保留旧的候选列表按钮（逃生梯，下一刀抹平）。
+ */
+function renderKind(pending, actions) {
+  // 选择面**永远**要渲染：它的交互在 `slots` 上（点槽位），不在候选条数上。
+  // 引擎为 `SELECT_CARDS` 只生成**一条**候选（`SelectCards` + 全部 picks 的组合是前端拼的），
+  // 所以"只有一条候选"绝不能理解成"没什么可选的、直接提交"。
+  if (pending.kind === "SELECT_CARDS") return "slots";
+  // **显式选中的候选优先**：技能按钮（`ActivateSkill`）在出牌阶段里与手选并存，
+  // 点了它就等于"我就要发这个技能"，界面必须画那条候选的选中态，不能再画手选提示。
+  if (state.selectedOption !== null && actions[state.selectedOption]) return "list";
+  // 唯一且不需要选目标（放弃 / 结束阶段 / 唯一的无目标响应牌）：直接说"将提交：…"。
+  // 判据用 `needsPicker`，**不能**只看"只有一条候选"——一条 `UseCard{杀, targets=(4,)}`
+  // 也是唯一候选，但它必须让玩家先看见"打的是谁"。
+  if (directAction(pending)) return "direct";
+  // 手选询问（出牌阶段 / 响应窗口）**一律**走 picker：点牌 + 点目标。
+  if (isHandPick(pending)) return "picker";
+  return "list";
+}
+
+/** 这条询问是不是"唯一一条候选、且不需要选目标"——是则返回那条候选，否则 `null`。
+ *
+ * 界面（:func:`renderKind` / :func:`refreshSubmit`）与提交（:func:`buildAction`）**必须**用
+ * 同一个判据：各写一遍时，改一处漏一处就会出现"界面显示将提交：…、而 buildAction 返回 null"
+ * 这种失配（本刀在 `SELECT_CARDS` 与技能按钮上各踩过一次）。
+ */
+function directAction(pending) {
+  const actions = (pending && pending.legal_actions) || [];
+  if (actions.length !== 1) return null;
+  return needsPicker(pending) ? null : actions[0];
+}
+
+/** 这条询问是否必须让玩家手选（点牌 / 点目标）。 */
+function needsPicker(pending) {
+  if (!isHandPick(pending)) return false;
+  const lone = (pending.legal_actions || [])[0];
+  if (lone && lone.card) {
+    const entry = cardEntry(pending, lone.card.card_id);
+    if (entry && entry.max_targets > 0) return true;   // 有目标要选 ⇒ 必须手选
+  }
+  return false;
+}
+
+/** 手选路径：点牌设焦点、点座位选目标（提交按钮由 :func:`refreshSubmit` 统一算）。
+ *
+ * 另外把**不是"用某张牌"的候选**（`Pass` / `EndPhase`）也渲染成按钮：响应窗口里
+ * "放弃"是一个**真候选**，只把它藏在提交按钮后面，玩家会以为"必须出牌"——
+ * 报障原文：「响应南蛮入侵时强制出杀，没有放弃选项」。引擎侧 `_respond` 恒追加 `Pass`
+ * （`effects/actions.py`），所以这不是缺候选，是缺入口。
+ */
+function renderPicker(pending) {
+  const hint = $("t-target-hint");
+  if (hint) hint.textContent = pickerTargetHint(pending);
+  $("btn-cancel").disabled = state.focusCardId === null;
+  renderPickerAlternatives(pending);
+}
+
+function renderPickerAlternatives(pending) {
+  const box = $("t-options");
+  (pending.legal_actions || []).forEach((action, index) => {
+    if (action.card || action.kind === "ActivateSkill" || action.kind === "SelectCards") return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "opt";
+    if (state.selectedOption === index) button.classList.add("sel");
+    button.textContent = actionLabel(action);
+    button.addEventListener("click", () => {
+      state.selectedOption = index;
+      state.focusCardId = null;
+      state.selectedTargets = [];
+      state.lastRejectReason = "";
+      renderTable();
+      renderPending(state.view);
+    });
+    box.appendChild(button);
+  });
+}
+
+/** 唯一且不需要选目标的候选：不铺按钮，直接说"将提交：…"（spec D9）。 */
+function renderDirect(only) {
+  $("t-choice").textContent = only ? `将提交：${actionLabel(only)}` : "";
+}
+
+/** 提交按钮的唯一判据：**能造出一个候选里真有的 Action** 时才可点。
+ *
+ * 空选提交会被引擎拒（400），所以界面必须自己拦住——但**不能替引擎裁决**（`04` §4.1）：
+ * `buildAction()` 只做"查找"，最后一道逐字段核对在 :func:`submitAction` 里。
+ */
+function refreshSubmit(pending) {
+  const selected = state.selectedOption === null ? null : (pending.legal_actions || [])[state.selectedOption];
+  const blocked = selected === null ? null : selectionError(selected, pending);
+  const ready = blocked === null && buildAction() !== null;
+  $("btn-submit").disabled = !ready;
+  if (state.lastRejectReason) { $("t-choice").textContent = state.lastRejectReason; return; }
+  if (blocked) { $("t-choice").textContent = blocked; return; }
+  if (state.focusCardId !== null && isHandPick(pending)) {
+    $("t-choice").textContent = ready ? "可以提交。" : pickerTargetHint(pending);
+    return;
+  }
+  if (directAction(pending)) {
+    renderDirect((pending.legal_actions || [])[0]);
+    return;
+  }
+  $("t-choice").textContent = ready ? "" : "先选一项，或点一张可用的手牌再提交。";
+}
+
+/** 旧路径：每条候选一个按钮（`SelectOption` / `SKILL_ACTIVATION` / `DISCARD` 等）。 */
+function renderCandidateList(pending, actions) {
+  const options = $("t-options");
   // 候选太多时（转化 / 多目标组合）不逐条铺开：先按"用哪张牌"聚合。
   // 点了手牌就**只**显示它的候选：点牌 → 出目标 → 点目标（这是玩家的心智模型）。
-  const focused = state.selectedCards.length === 1
-    ? actions.map((action, index) => ({ action, index })).filter(({ action }) => action.card && action.card.card_id === state.selectedCards[0])
+  const focused = state.focusCardId !== null
+    ? actions.map((action, index) => ({ action, index }))
+        .filter(({ action }) => action.card && String(action.card.card_id) === String(state.focusCardId))
     : null;
   const groups = groupActions(focused ? focused.map(({ action }) => action) : actions);
   if (focused) {
@@ -351,21 +666,11 @@ function renderPending(view) {
     options.appendChild(button);
   }
 
-  if (selected && selected.kind === "SelectCards") {
-    renderSlots(pending);
+  if (state.selectedOption !== null) {
+    const chosen = actions[state.selectedOption];
+    if (chosen && chosen.kind === "SelectCards") renderSlots(pending);
   }
-  renderCountdown(view);
-  // 提交按钮：只有"能造出一个**候选里真有**的 Action"时才可点。空选提交会被引擎拒（400），
-  // 所以这里必须自己拦住——前端可以做合法性高亮与禁用，但**不能替引擎裁决**（`04` §4.1）。
-  const blocked = selected === null ? null : selectionError(selected, pending);
-  const ready = selected !== null
-    ? blocked === null
-    : state.selectedCards.length > 0 && buildAction() !== null;
-  $("btn-submit").disabled = !ready;
-  $("t-choice").textContent = state.lastRejectReason
-    || blocked
-    || (selected === null && !ready ? "先选一项，或点一张可用的手牌再提交。" : "");
-  $("btn-cancel").disabled = selected === null && state.selectedCards.length === 0 && state.picks.length === 0;
+  $("btn-cancel").disabled = state.selectedOption === null && state.focusCardId === null && state.picks.length === 0;
 }
 
 /** 这次选择的**未就绪原因**；``null`` = 可以提交。
@@ -384,7 +689,8 @@ function selectionError(action, pending) {
   }
   if (action.kind === "DiscardCards") {
     const need = (action.cards || []).length;
-    if (state.selectedCards.length !== need) return `要弃 ${need} 张牌（已选 ${state.selectedCards.length}）。`;
+    const chosen = state.picks.length;
+    if (chosen !== need) return `要弃 ${need} 张牌（已选 ${chosen}）。`;
     return null;
   }
   if (action.kind === "ArrangeCards") {
@@ -473,27 +779,50 @@ function buildAction() {
   const pending = state.view.pending;
   if (!pending) return null;
   const actions = pending.legal_actions;
+  // 选择面的候选里**没有**具体 picks（引擎只发一条骨架），要按已点槽位补上。
+  const withPicks = (action) => (action.kind === "SelectCards" ? Object.assign({}, action, { picks: state.picks.slice() }) : action);
+  // 唯一且不需要选目标的候选（放弃 / 结束阶段 / 唯一的无目标响应牌）：直接就是它。
+  // 这条必须在手选分支**之前**——`renderKind` 对同一个询问也返回 `direct`，
+  // 否则界面显示"将提交：放弃"、而 `buildAction()` 在手选模式下因为没有焦点而返回 null。
+  const only = directAction(pending);
+  if (only) return withPicks(only);
+  // **显式选中的候选优先于手选**：技能按钮（`ActivateSkill`）住在出牌阶段的候选里，
+  // 点了它就是"我就要发这个技能"——它没有焦点也没有目标，走手选分支会返回 null。
   if (state.selectedOption !== null) {
     const action = actions[state.selectedOption];
-    if (action.kind === "SelectCards") {
-      return Object.assign({}, action, { picks: state.picks.slice() });
+    if (!action) return null;
+    if (action.kind === "SelectCards") return withPicks(action);
+    if (action.kind === "DiscardCards") {
+      // 弃牌候选带的是 `cards`（不是单张 `card`），故按"已选牌集合"找那一条。
+      const mine = state.picks.slice().sort((a, b) => a - b).join(",");
+      return actions.find(
+        (candidate) =>
+          candidate.kind === "DiscardCards"
+          && (candidate.cards || []).map((card) => card.card_id).sort((a, b) => a - b).join(",") === mine,
+      ) || null;
     }
     return action;
   }
-  // 没有显式选候选：用选中的手牌去匹配"使用这张牌"的候选。
-  if (state.selectedCards.length === 1) {
-    const cardId = state.selectedCards[0];
-    return actions.find((action) => action.card && action.card.card_id === cardId) || null;
+  if (isHandPick(pending)) {
+    // 手选路径：焦点 + 已选目标 → 在候选里**查**那一条（不自己拼 Action）。
+    if (state.focusCardId === null) return null;
+    if (!isLegalCombo(pending, state.focusCardId, state.selectedTargets)) return null;
+    const targets = state.selectedTargets.slice().sort((a, b) => a - b);
+    return actions.find(
+      (action) =>
+        action.card
+        && String(action.card.card_id) === String(state.focusCardId)
+        && (action.kind === "UseCard" || action.kind === "PlayCard")
+        && (action.targets || []).slice().sort((a, b) => a - b).join(",") === targets.join(","),
+    ) || null;
   }
-  // 只有唯一候选时允许直接提交（例如结束阶段 / 放弃）。
-  const direct = actions.filter((action) => ["EndPhase", "Pass"].includes(action.kind));
-  return direct.length === 1 ? direct[0] : null;
+  return null;
 }
 
 async function submitAction() {
   const action = buildAction();
   if (!action) {
-    $("t-choice").textContent = "没有可提交的候选：先选中一张牌或一个选项。";
+    $("t-choice").textContent = "没有可提交的候选：先选一张牌或一个选项。";
     return;
   }
   const pending = state.view.pending;
@@ -512,9 +841,7 @@ async function submitAction() {
       `/api/sessions/${state.sessionId}/answer?after=${state.cursor}&logs=${state.logSeq}`,
       { action },
     );
-    state.selectedCards = [];
-    state.selectedOption = null;
-    state.picks = [];
+    resetSelection();
     applyView(body);
   } catch (error) {
     if (error.status === 409) {
@@ -534,10 +861,7 @@ async function takeover() {
 }
 
 function clearSelection() {
-  state.selectedCards = [];
-  state.selectedOption = null;
-  state.picks = [];
-  state.lastRejectReason = "";
+  resetSelection();
   renderTable();
   renderPending(state.view);
 }

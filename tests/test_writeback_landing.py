@@ -125,6 +125,83 @@ def validate_ledger(path: Path, root: Path = REPO_ROOT) -> tuple[list[str], list
     return errors, claims
 
 
+# ---------------------------------------------------------------------------
+# `06` §5「程序化约定与偏离一手」账本：入库的那张表（与 `.scratch/*/writeback.md` 不同，它**总是**在）
+# ---------------------------------------------------------------------------
+
+# 为什么还要查一遍：M2 的复盘（`CODING_STANDARDS.md` 规则 1 的反例）与本轮 M4 手选重构
+# 各错过一次**同型**的错——账本声称的落点在源码里根本不是做那件事的地方
+# （M2 写 `_place_into_equipment`、行为在 `move_used_card_to_equip_zone`；M4 写 `autoCombo`、
+# 行为在 `toggleFocus` / `selectTarget`）。**文件不存在**这一类（比符号更粗）尤其容易漏：
+# 这一轮 P0 就是文档写了 `{pool, min_targets, max_targets, combos}` 而界面读了别的键名。
+# 故：文件必须存在；带 `:符号` 的，符号必须在该文件里定义。
+DOC06 = REPO_ROOT / "开发文档" / "06-里程碑与风险.md"
+SECTION5_HEADING = "## 5. 程序化约定与偏离一手"
+
+CITATION_RE = re.compile(
+    r"`([A-Za-z0-9_./\-]+\.(?:py|js|mjs|sh|md|json|txt))(?::([A-Za-z_][A-Za-z0-9_.]*))?`"
+)
+CONVENTIONAL_PATH_RE = re.compile(r"^(?:[A-Za-z0-9_./\-]+/)+[A-Za-z0-9_.\-]+$")
+PSEUDO_PATH_RE = re.compile(r"^(?:\d+(?:\.\d+)*|[A-Za-z]+://)")
+
+# 绊线：本条表目前有 50+ 条文件引用；塌到 40 以下说明解析失效（表被改格式），此时判红，
+# 而不是"一行没扫到也算通过"。
+MIN_DOC_CITATIONS = 40
+
+
+def section5_rows() -> list[tuple[int, str]]:
+    """返回 §5 账本的 (行号, 行文本)；表头与分隔行不在内。"""
+    lines = DOC06.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith(SECTION5_HEADING))
+    rows: list[tuple[int, str]] = []
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.startswith("---"):
+            break
+        if not line.startswith("|") or set(line) <= set("|-: "):
+            continue
+        if line.startswith("| 裁定"):
+            continue
+        rows.append((index + 1, line))  # 真实行号，报错时能直接跳过去
+    return rows
+
+
+def test_doc06_ledger_landing_points_exist() -> None:
+    """§5 账本「落地位置」列的每个文件 / 符号都必须真实存在。
+
+    这条把 `CODING_STANDARDS.md` 规则 1 的**机械那一半**下沉成检查：符号在不在那个文件里
+    是确定的，不该靠评审人肉核。规则 1 剩下的一半（"行为在调用方"）仍是判断题，留在标准里。
+    """
+    if not DOC06.is_file():
+        pytest.skip("开发文档/06-里程碑与风险.md 不在（非本仓布局）")
+
+    errors: list[str] = []
+    checked = 0
+    for line_no, line in section5_rows():
+        landing = line.rsplit("|", 2)[1] if line.endswith("|") else line
+        for rel, symbol in CITATION_RE.findall(landing):
+            if PSEUDO_PATH_RE.match(rel) or not CONVENTIONAL_PATH_RE.match(rel):
+                continue          # 文档号的引用（不是仓库路径）——它们由文档门禁自己核
+            target = _resolve(rel.removeprefix("./"), REPO_ROOT)
+            if target is None:
+                errors.append(f"§5:{line_no}: 落点文件不存在：`{rel}`")
+                continue
+            checked += 1
+            if not symbol:
+                continue
+            source = target.read_text(encoding="utf-8")
+            defined = f"def {symbol}" in source or f"class {symbol}" in source
+            if target.suffix in {".js", ".mjs"}:
+                defined = defined or f"function {symbol}" in source or f"const {symbol} " in source
+            if not defined:
+                errors.append(f"§5:{line_no}: `{rel}` 里没有 `{symbol}`（落点写错了？）")
+
+    assert not errors, "账本落点不可核：\n" + "\n".join(errors)
+    assert checked >= MIN_DOC_CITATIONS, (
+        f"只核到 {checked} 条文件引用（< {MIN_DOC_CITATIONS}）：表结构可能变了，本条已失效"
+    )
+
+
 def anchor_count(claims: list[Claim]) -> int:
     return sum(len(claim.anchors) for claim in claims)
 

@@ -78,13 +78,14 @@ def _pass_or_first(query):
 
 
 class Scripted:
-    """技能发动一律同意；``select``（``(query, round) -> Action``）应答选牌询问。"""
+    """技能发动一律同意；``select``（``(query, round) -> Action``）应答**选牌与选座**询问。"""
 
     def __init__(self, select=None, *, activate: bool = True) -> None:
         self._select = select
         self.activate = activate
         self.activation_queries: list = []
         self.selections: list = []
+        self.options: list = []
 
     def respond(self, query):
         if query.kind == "SKILL_ACTIVATION":
@@ -99,6 +100,11 @@ class Scripted:
         if query.kind == "SELECT_CARDS" and self._select is not None:
             self.selections.append(query)
             return self._select(query, len(self.selections) - 1)
+        # 「交给谁」走 `SELECT_OPTION`（见 `damage_after._yiji`）：也要能交回给测试的
+        # 选座回调，否则它会落到下面的 `_pass_or_first` 上、静默选第一个座位。
+        if query.kind == "SELECT_OPTION" and self._select is not None:
+            self.options.append(query)
+            return self._select(query, len(self.options) - 1)
         return _pass_or_first(query)
 
 
@@ -121,6 +127,7 @@ def _damage_frame(state, card: int | None, *, amount: int, source: int | None):
 def _damage_engine(
     *,
     target: SeatSpec | None = None,
+    source_seat: SeatSpec | None = None,
     seats_after: int = 0,
     amount: int = 1,
     card: int | None = None,
@@ -139,7 +146,7 @@ def _damage_engine(
     if processing is None:
         processing = (card,)
     specs = (
-        [SeatSpec()]
+        [source_seat if source_seat is not None else SeatSpec()]
         + [target if target is not None else SeatSpec()]
         + [SeatSpec() for _ in range(seats_after)]
     )
@@ -422,8 +429,28 @@ def test_fankui_can_take_a_visible_equipment_card():
 # ---------------------------------------------------------------------------
 
 
+def _yiji_give_to(owner_seat: int):
+    """在【遗计】"交给谁"的 ``SELECT_OPTION`` 询问里选 ``owner_seat``。"""
+
+    def choose(query):
+        wanted = f"seat:{owner_seat}"
+        for action in query.legal_actions:
+            if getattr(action, "choice", None) == wanted:
+                return action
+        raise AssertionError(
+            f"候选里没有 {wanted}：{[getattr(a, 'choice', None) for a in query.legal_actions]}"
+        )
+
+    return choose
+
+
 def _yiji_select(query, _round_index):
-    """【遗计】的应答：每轮把面内**第一张**交给郭嘉自己（一轮一张）。"""
+    """【遗计】的应答：每轮把面内**第一张**交给郭嘉自己（一轮一张）。
+
+    一轮有**两问**：先选牌（``SELECT_CARDS``）、再选"交给谁"（``SELECT_OPTION``）。
+    """
+    if query.kind == "SELECT_OPTION":
+        return _yiji_give_to(1)(query)   # 座位 1 = 郭嘉（本文件的遗计夹具）
     return next(
         action
         for action in query.legal_actions
@@ -626,3 +653,102 @@ def test_near_death_timings_precede_damage_after_take_in_the_record_stream():
         Timing.NEAR_DEATH_AFTER,
     ]
     assert _activation_count(engine, JIANXIONG) == 1
+
+
+# ---------------------------------------------------------------------------
+# ①b 伤害后技能必须**自校持有者**（本轮用户报障；`CODING_STANDARDS.md` 规则 1 的落点）
+# ---------------------------------------------------------------------------
+
+
+def test_foreign_damage_does_not_offer_yiji_to_the_unhurt_owner():
+    """**别人受伤 ⇒ 郭嘉不该被问【遗计】**。
+
+    报障原文：「遗计的发动条件似乎是场上任一角色受到伤害」。核实为真：``_dispatch``
+    遍历**每个存活玩家**的实例，只按 ``timing`` / ``per_point`` / ``condition`` 过滤
+    （`catalog.py` 的派发环），而 ``_yiji_condition`` 当时恒返回 ``True``——
+    于是任何人挨打，郭嘉都会被问一次，而【遗计】的回调会把牌堆顶的牌**移动给郭嘉**：
+    等于"别人挨打、郭嘉白拿牌"。
+
+    判据：手里装【遗计】的是**座位 0**，挨打的是**座位 1** ⇒ 一次都不该问。
+    这条判据对**所有**伤害后技能成立（【奸雄】【反馈】同缺口，另案处理）。
+    """
+    # 夹具的座位约定：座位 0 = 伤害来源，座位 1 = 被伤害者（`target` 覆盖**座位 1**）。
+    # 故郭嘉装在**座位 1 = 挨打的那个**，另需一个"别人挨打"的局面 ⇒ 让郭嘉装在来源座位 0。
+    # 注意：武将必须在**建局时**装上；跑完再写 `hero` 不会解析出技能实例，那样的断言会假绿。
+    engine, _players = _damage_engine(target=SeatSpec(), source_seat=SeatSpec(hero="guojia"), amount=1)
+
+    assert _activation_count(engine, YIJI) == 0, (
+        "受伤的是座位 1、装【遗计】的是座位 0（郭嘉）⇒ 不该问；"
+        "问了就说明触发条件没自校持有者"
+    )
+
+
+def _yiji_select_then_seat(seat: int):
+    """【遗计】的两问应答：先选面内第一张，再选把这张交出去的座位。"""
+
+    def respond(query, round_index):
+        if query.kind == "SELECT_OPTION":
+            return _yiji_give_to(seat)(query)
+        return next(
+            action
+            for action in query.legal_actions
+            if isinstance(action, SelectCards) and action.picks == (0,)
+        )
+
+    return respond
+
+
+def test_yiji_gives_the_card_to_the_chosen_character_not_always_the_owner():
+    """【遗计】"将这些牌**交给任意角色**"（规则 993 / `三国杀详细规则.txt:958`）。
+
+    报障原文：「也没法选择座次交给别人」。核实为真：现行实现一轮只问"选面内哪一张"，
+    然后 ``move_in_frame(..., to_zone=ZoneRef(Zone.HAND, owner))``——**去向被写死成郭嘉自己**，
+    "交给谁"这一步根本不存在。
+
+    判据：把牌交给**另一个角色**，那张牌必须落进**他的**手牌、而不是郭嘉的。
+    """
+    slash = _cards("slash")[0]
+    deck = _deck_excluding(slash)
+    top = deck[:2]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hero="guojia"), SeatSpec()],
+        deck=deck,
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, amount=1, source=0),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    giver = 1      # 郭嘉（持有者）
+    receiver = 2   # 另一个角色：牌该交给他
+    players = [Scripted(), Scripted(_yiji_select_then_seat(receiver)), Scripted()]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.DAMAGE_END
+            for record in e.records
+        ),
+    )
+
+    assert top[0] in engine.state.player(receiver).hand, (
+        "交出去的牌必须落进被选中的角色手里"
+    )
+    assert top[0] not in engine.state.player(giver).hand, "不该还给持有者"
+
+
+def test_foreign_damage_does_not_offer_jianxiong_to_the_unhurt_owner():
+    """**别人受伤 ⇒ 曹操不该被问【奸雄】**（与【遗计】同一个缺口）。
+
+    派发环会给**每个存活玩家**的实例求条件，而 ``_jianxiong_condition`` 只判"渠道牌还在
+    处理区"，没判"受伤的是不是曹操"——于是任何人挨打，曹操都能顺手把那张牌拿走。
+    同族的【反馈】没有这个缺口：它自带"来源不是自己"的守卫（``_fankui_source``）。
+    """
+    engine, _players = _damage_engine(target=SeatSpec(), source_seat=SeatSpec(hero="caocao"), amount=1)
+
+    assert _activation_count(engine, JIANXIONG) == 0, (
+        "受伤的是座位 1、装【奸雄】的是座位 0（曹操）⇒ 不该问"
+    )

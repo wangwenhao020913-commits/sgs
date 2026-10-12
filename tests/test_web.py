@@ -30,6 +30,7 @@ from sgs.engine import Engine, RandomSource, dump_journal  # noqa: E402
 from sgs.state import Action  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
+    candidate_index,
     pending_payload,
     visible_record,
     visible_snapshot,
@@ -350,6 +351,136 @@ def test_the_pending_query_carries_the_candidates_for_the_human_seat() -> None:
     assert payload["actor"] == session.human_seat
     assert payload["legal_actions"], "挂起的那一条必须带候选"
     assert all(a["answers_seq"] == payload["seq"] for a in payload["legal_actions"])
+
+
+# ---------------------------------------------------------------------------
+# 5b. 候选索引：与合法行动集合**同源**（票 02 的四不变量 ①②）
+# ---------------------------------------------------------------------------
+
+
+def test_the_respond_query_carries_no_second_target_stage() -> None:
+    """``RESPOND`` 询问体**不带** ``use_targets`` / ``mode``：借刀杀人恒单阶段（spec D11）。
+
+    引擎内部确实有这两个东西（``RespondContext``），但它们只用于**生成候选**——
+    官方"使用者选 An 的同时选 An 使用【杀】的合法目标 Bn"已经被烘进候选
+    （``UseCard{杀, targets=(Bn,)}``），故线上没有第二阶段可问。
+    这条断言防的是"顺手把 ``use_targets`` 也下发"：那会让界面长出一次多余的目标选择。
+    """
+    checked = 0
+    for seed in (31, 37):
+        session = Session(seed=seed, ai="random", timeout_seconds=None, player_count=8)
+        guard = 0
+        while session.pending is not None and guard < 400:
+            guard += 1
+            query = session.pending
+            if str(query.kind) == "RESPOND":
+                checked += 1
+                payload = query.model_dump(mode="json")
+                assert "use_targets" not in payload, "RESPOND 询问不得带 use_targets（第二阶段不存在）"
+                assert "mode" not in payload, "RESPOND 询问不得带 mode（候选里读得出是打出还是使用）"
+            session.submit_answer(query.legal_actions[0])
+    # 覆盖元断言：一条"逐条检查"的循环若一条都没检查到，它就是空转通过。
+    assert checked >= 50, f"取样太少（只查到 {checked} 次 RESPOND），断言谈不上机械"
+
+
+def test_the_candidate_index_is_derived_from_the_legal_actions() -> None:
+    """候选索引是**索引**，不是第二份合法性：它算出的每个池、每组组合都能在候选里找到。
+
+    判据（spec §四条不变量）：
+    ① **池 ⊆ 候选**、**组合 ⊆ 候选**（每组组合都对应一条该牌的候选）；
+    ② **候选 ⊆ 索引**（每条带牌的候选都进了某张牌的 ``combos``，不丢候选）。
+
+    跨多个种子、多种人数跑局取样——一张牌的池会随存活人数与装备技能变化，
+    单局取样会漏掉【方天画戟】那种"额定一组 + 追加一组"的形状。
+    """
+    checked = 0
+    for seed in (11, 23, 37):
+        for player_count in (2, 5, 8):
+            session = Session(
+                seed=seed, ai="random", timeout_seconds=None, player_count=player_count
+            )
+            guard = 0
+            while session.pending is not None and guard < 400:
+                guard += 1
+                query = session.pending
+                index = candidate_index(query)
+                payload = pending_payload(session)
+                assert payload is not None
+
+                # ② 候选 ⊆ 索引：每条带牌的候选都在索引里，且挂在**自己那张牌**下
+                for action in payload["legal_actions"]:
+                    card = action.get("card")
+                    if card is None:
+                        continue
+                    entry = index.get(str(card["card_id"]))
+                    assert entry is not None, f"{action['kind']} 的牌不在候选索引里"
+                    assert entry["card"] == card, "索引里的牌面必须与候选里的是同一张"
+                    assert action.get("targets", []) in entry["combos"], (
+                        f"{card['name']} 的候选 targets={action.get('targets')} 不在 combos 里"
+                    )
+
+                # ① 池 / 组合 ⊆ 候选：索引里的每一组组合都能在候选里找到那一条
+                by_card_and_targets = {
+                    (str(action["card"]["card_id"]), tuple(action.get("targets", [])))
+                    for action in payload["legal_actions"]
+                    if action.get("card") is not None
+                }
+                for card_id, entry in index.items():
+                    for combo in entry["combos"]:
+                        assert (card_id, tuple(combo)) in by_card_and_targets, (
+                            f"索引凭空多出一组组合：card_id={card_id} targets={combo}"
+                        )
+                    for seat in entry["pool"]:
+                        assert any(seat in combo for combo in entry["combos"]), (
+                            f"池里的座位 {seat} 不在任何组合里"
+                        )
+                    assert entry["min_targets"] <= entry["max_targets"]
+                    sizes = {len(combo) for combo in entry["combos"]}
+                    assert entry["min_targets"] == min(sizes)
+                    assert entry["max_targets"] == max(sizes)
+                    # 键名是**契约**：界面按 `card` / `pool` / `min_targets` / `max_targets` / `combos`
+                    # 读；只断言"值算得对"而不断言键名，会让"界面读了一个不存在的键"这类
+                    # 静默失配穿过全部测试（前端读不到只会退化，不会抛错）。
+                    assert set(entry) == {"card", "pool", "min_targets", "max_targets", "combos"}, (
+                        f"候选索引的键集合变了：{sorted(entry)}；改键名必须同时改 app.js 的读法"
+                    )
+                    assert isinstance(entry["card"], dict) and "card_id" in entry["card"]
+                    assert isinstance(entry["pool"], list)
+                    assert isinstance(entry["combos"], list) and entry["combos"]
+                    assert isinstance(entry["min_targets"], int)
+                    assert isinstance(entry["max_targets"], int)
+                checked += 1
+                session.submit_answer(query.legal_actions[0])
+
+    assert checked > 200, f"取样太少（{checked} 次询问），断言谈不上机械"
+
+
+def test_the_candidate_index_never_carries_rule_judgements() -> None:
+    """③ 索引无规则：它只聚合候选里已有的座位，不算距离 / 攻击范围 / 花色 / 体力 / 存活。
+
+    取样的判据：索引里的座位**恰好**等于该牌候选的目标并集——多一个（"我算出来的合法目标"）
+    或少一个（"我过滤掉了无效目标"）都会判红。这条断言把"别在接入层重新实现规则"钉死。
+    """
+    for seed in (13, 29):
+        session = Session(seed=seed, ai="random", timeout_seconds=None, player_count=8)
+        guard = 0
+        while session.pending is not None and guard < 300:
+            guard += 1
+            query = session.pending
+            index = candidate_index(query)
+            expected: dict[str, set[int]] = {}
+            for action in query.legal_actions:
+                card = getattr(action, "card", None)
+                if card is None:
+                    continue
+                expected.setdefault(str(card.card_id), set()).update(
+                    getattr(action, "targets", ())
+                )
+
+            assert set(index) == set(expected), "索引的牌集合必须与候选的牌集合逐键相同"
+            for card_id, seats in expected.items():
+                assert set(index[card_id]["pool"]) == seats
+            session.submit_answer(query.legal_actions[0])
 
 
 # ---------------------------------------------------------------------------

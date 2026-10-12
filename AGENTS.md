@@ -8,6 +8,11 @@
 2. 唯一门禁是仓根的 **`bash tests/run_all.sh`**（全部 shell 校验 + pytest，约 2.5 分钟）。
    **没有 CI、也没有默认 hook 会替你跑它。** 先跑一次 `bash tools/install-hooks.sh`
    把它接到 pre-commit 上（改动落在 `src/` 或 `tests/` 时才触发）。
+3. **派发子代理之前先提交**（或先明确告知它"当前工作树未提交"）。子代理会在自己的会话里
+   跑 git 命令收尾自己的临时改动；工作树未提交时，一条 `git checkout -- <file>`
+   就把你手上的活打回 HEAD 了。本仓已发生过一次（`ui_smoke.mjs` 被抹回 HEAD）。
+4. 前端改动想快速看一眼，用 **`bash tests/smoke-web.sh`**（约 4 秒：起临时服务 +
+   跑 `ui_smoke.mjs` + 收尾）。它在门禁之外，跑完整门禁才用 `tests/run_all.sh`。
 
 ## Agent skills
 

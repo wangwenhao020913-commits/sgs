@@ -25,6 +25,7 @@ from .session import Session
 
 __all__ = [
     "build_skills",
+    "candidate_index",
     "pending_payload",
     "serialize_record",
     "visible_record",
@@ -112,10 +113,59 @@ def _query_summary(query: Query) -> dict[str, Any]:
     }
 
 
+def candidate_index(query: Query) -> dict[str, dict[str, Any]]:
+    """按牌聚合的**候选索引**——界面据它高亮"能点谁"，据它判定提交**可否**。
+
+    它是**合法行动集合**的索引，不是第二份合法性：每个 ``pool`` 里的座位、每组 ``combos``
+    里的组合，都能在同一张牌的候选里找到对应的一条。故"候选与校验同源"不因下发形状变化而改变，
+    可由一条断言机械钉死（`tests/test_web.py`）。
+
+    三件事刻意不做：
+
+    - **不裁决规则**：不读距离 / 攻击范围 / 花色 / 体力 / 存活；只把候选里有的事实聚合起来。
+    - **不重排**：``pool`` 与 ``combos`` 保持候选的**首次出现顺序**（候选本身由引擎稳定排序）。
+    - **不收无牌的候选**：``SelectOption`` / ``ActivateSkill`` 不是"牌 → 目标"，不进索引。
+
+    ``min_targets`` / ``max_targets`` 是**这张牌这次使用**要选几个目标（【杀】恒 1；
+    【南蛮入侵】类等于池大小），界面据此说"还要选 N 个"。
+    """
+    grouped: dict[str, dict[str, Any]] = {}
+    for action in query.legal_actions:
+        card = getattr(action, "card", None)
+        if card is None:
+            continue
+        entry = grouped.get(str(card.card_id))
+        if entry is None:
+            entry = {
+                "card": card.model_dump(mode="json"),
+                "pool": [],
+                "combos": [],
+                "_sizes": set(),
+            }
+            grouped[str(card.card_id)] = entry
+        combo = tuple(getattr(action, "targets", ()))
+        if combo not in entry["combos"]:
+            entry["combos"].append(combo)
+        entry["_sizes"].add(len(combo))
+        for seat in combo:
+            if seat not in entry["pool"]:
+                entry["pool"].append(seat)
+
+    for entry in grouped.values():
+        sizes = entry.pop("_sizes")
+        entry["min_targets"] = min(sizes) if sizes else 0
+        entry["max_targets"] = max(sizes) if sizes else 0
+        entry["combos"] = [list(combo) for combo in entry["combos"]]
+    return grouped
+
+
 def pending_payload(session: Session | Query | None) -> dict[str, Any] | None:
     """一次询问的**可应答形态**——带候选、带询问者自己的视角（前端只 pick，不自己拼 Action）。
 
     收 ``Session``（取它的当前挂起）、``Query``（409 里附带的现状）或 ``None``（无挂起）。
+
+    ``legal_actions`` 保留（既有测试、超时兜底与"提交必须原样取自候选"的自我核对都读它），
+    ``candidate_index`` 是本轮新增的**索引形状**：界面用它手选目标，不再逐条铺候选按钮。
     """
     if session is None:
         return None
@@ -124,6 +174,7 @@ def pending_payload(session: Session | Query | None) -> dict[str, Any] | None:
         return None
     payload = query.model_dump(mode="json")
     payload["legal_actions"] = [action.model_dump(mode="json") for action in query.legal_actions]
+    payload["candidate_index"] = candidate_index(query)
     return payload
 
 

@@ -166,6 +166,9 @@ check "$DOC05" "（T-2）" "T-2 回写逐处标注依据"
 # 逐条记录在 `06` §4「决策记录（ADR）」。
 DOC06="06-里程碑与风险.md"
 DOC01="01-总体设计.md"
+DOC04="04-AI与交互设计.md"
+# 不变量 ③（索引无规则）的源码文本断言要读 `tools/sgs_web/projection.py`。
+PROJECTION="tools/sgs_web/projection.py"
 
 check "$DOC06" '检测点 ≠ 终止点' "ADR-007 重述：胜负检测点与终止点分离"
 check "$DOC06" '不再插入任何新结算' "ADR-007 重述：满足后不再插入新结算"
@@ -485,6 +488,50 @@ check "$GLOSSARY" '**录像**：' "M4 术语表：录像词条"
 check "$GLOSSARY" '**侧车元数据**：' "M4 术语表：侧车元数据词条"
 
 # ===========================================================================
+# 票 00（.scratch/m4-manual-select）：牌桌交互重构的术语、账本与 ADR 变更块。
+# 两头钉：新词条 / 新账本行 present；被**改判掉的旧口径** absent，防它悄悄长回来。
+# ===========================================================================
+check "$GLOSSARY" '**候选牌**：' "手选术语：候选牌"
+check "$GLOSSARY" '**候选目标池**：' "手选术语：候选目标池"
+check "$GLOSSARY" '**候选索引**：' "手选术语：候选索引"
+check "$GLOSSARY" '**自动选中**：' "手选术语：自动选中"
+check "$GLOSSARY" '**焦点**：' "手选术语：焦点"
+check "$DOC06" '**ADR-012 变更说明（第二次' "牌桌交互重构：ADR-012 第二次变更块"
+check "$DOC06" '**自动选中的判据 = 合法组合恰好一组且等于池的全部**' "手选账本：自动选中判据"
+check "$DOC06" '**牌桌的合法性只在「候选索引」里问**' "手选账本：合法性只问候选索引"
+check "$DOC06" '`tools/sgs_web/static/app.js:toggleFocus`（判据命中即填入已选目标）与 `tools/sgs_web/static/app.js:selectTarget`（确定态' \
+  "手选账本：自动选中落点写在调用方（不是纯判据 autoCombo）"
+check "$DOC06" '`autoCombo` 只是**纯判据**，不含这两条行为' \
+  "手选账本：点明 autoCombo 不是行为落点"
+check "04-AI与交互设计.md" '**手选卡牌 + 手选目标**' "手选：交互原则补手选"
+check "04-AI与交互设计.md" '`candidate_index`' "手选：协议表补候选索引"
+# 两头钉：D2 的口径是"**保留** legal_actions **并新增** candidate_index"。
+# 上一版文档写成"响应体不再逐条内联全部候选"，与 D2 与代码都相反——这条钉住正确说法。
+check "$DOC06" '候选改为「内联集合 + 按牌索引」两份一起下发' "手选：ADR 变更块说清两份一起下发（D2）"
+check "$DOC06" '`legal_actions` 仍然保留' "手选：ADR 变更块保留 legal_actions"
+check "$DOC06" '**候选索引** / **自动选中** / **焦点**（共 5 条）' "手选：连带同步列出 5 条术语"
+# 连带同步那句曾把已撤掉的「判定」也列进去（文档宣称了一个不存在的词条）。
+check "$DOC06" '**焦点** / **判定**' "手选：连带同步不得宣称已撤掉的「判定」词条" absent
+# 这条 absent 只探 GLOSSARY.md，走不了下面那套「只写 开发文档/ 副本」的合成反例；
+# 它由 grep 直接判定（术语表里出现 `**判定**：` 即红），不是空转。
+check "$GLOSSARY" '**判定**：' "手选：术语表不得有「判定」词条（与判定牌机制撞名）" absent
+check "$DOC04" '（合法行动集合，逐条）' "手选：协议表说明两份都在"
+check "$DOC04" '`legal_actions` 保留给三处' "手选：协议表说明 legal_actions 的用途"
+
+# 不变量 ③（索引无规则）：`candidate_index` 的**实现体**里不得出现任何规则判定词。
+# 由票 00 指定落点：源码文本断言（票 06）+ 代码评审。
+RULE_WORDS='distance|range|attack_range|targets_within|color|suit|rank|hp|alive|effective|forbidden'
+idx_body="$(sed -n '/^def candidate_index(/,/^def [a-z_]*(/p' "$PROJECTION" | head -n -1)"
+if [ -z "$idx_body" ]; then
+  echo "FAIL: 取不到 candidate_index 的实现体（源码文本断言失效）"; fail=1
+elif printf '%s' "$idx_body" | grep -qE "\b($RULE_WORDS)\b"; then
+  echo "FAIL: candidate_index 里出现规则判定词：$(printf '%s' "$idx_body" | grep -nE "\b($RULE_WORDS)\b" | head -3)"
+  fail=1
+else
+  echo "PASS: candidate_index 实现体不含规则判定词（不变量 ③）"
+fi
+
+# ===========================================================================
 # 回写纪律（票 11）：两头钉 —— 每条回写同时断言「新串出现」与「退役旧串不出现」。
 # 黑名单来自 spec 的「机械断言的形态」节；旧串在**开发文档/ 全六份**里都不得出现。
 # 覆盖元断言 + 合成反例照 tests/test_timing.py 的「术语表计数纪律」姿态：
@@ -532,6 +579,7 @@ WRITEBACK_OLD=(
   '03-数据模型与技能描述.md|❌ 归 M3|旧 §6 表格归 M3'
   '03-数据模型与技能描述.md|主公技在 M2 **不可发动**|旧 §6 主公技不可发动'
   '04-AI与交互设计.md|超时则由引擎按|旧 §3.4 超时条款'
+  '06-里程碑与风险.md|**焦点** / **判定**|手选：连带同步曾宣称已撤掉的「判定」词条'
 )
 
 writeback_check_claim() { # $1="文件|字面串|描述" $2=present|absent
