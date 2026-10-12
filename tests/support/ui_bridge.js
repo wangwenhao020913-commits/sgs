@@ -11,6 +11,7 @@
   const names = [
     "state", "applyView", "renderPending", "buildAction", "submitAction",
     "loadRuns", "openReplay", "renderReplay", "renderLog", "phaseLabel",
+    "toggleCard", "cardUsable", "cardCandidates", "clearSelection", "groupActions", "renderTable", "actionLabel",
     "PHASE_LABELS", "keepRecord",
   ];
   const out = {};

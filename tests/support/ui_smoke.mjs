@@ -50,6 +50,8 @@ class El {
   set innerHTML(v) { this._html = String(v); this.children = []; this._text = ""; }
   appendChild(c) { this.children.push(c); return c; }
   addEventListener(k, fn) { (this.listeners[k] ||= []).push(fn); }
+  setAttribute(name, value) { (this.attrs ||= {})[name] = String(value); }
+  getAttribute(name) { return (this.attrs || {})[name]; }
   querySelector(selector) {
     const tag = String(selector).toLowerCase();
     return this.children.find((c) => c.tagName.toLowerCase() === tag) || null;
@@ -167,6 +169,124 @@ setSelect("t-log-mode", "all");
 const logAll = logText();
 check("㉿1c 切到全部能看到对手的响应往来", /询问 RESPOND/.test(logAll), logAll.replace(/\s+/g, " ").slice(0, 80));
 setSelect("t-log-mode", "focus");
+
+/* ============ ㉿ 红测试：可点的牌 ≠ 可用的牌（刀 2） ============
+ *
+ * 真界面上发生过：手牌张张可点，点了一张**用不出**的牌之后提交按钮永久灰掉、
+ * 界面只说"先选一项，或点一张手牌再提交"——玩家不知道是这张牌不能用于当前询问。
+ * 两件事要成立：① 用不出的牌**不给点**（置灰 + 不进选中态）；② 说出**为什么**。
+ */
+check("㉿2 这条询问里存在一张**用不出**的手牌（前提成立）", (() => {
+  const pending = ui.state.view.pending;
+  const hand = ui.state.view.snapshot.self_hand || [];
+  return hand.some((card) => (ui.cardCandidates ? ui.cardCandidates(pending, card.card_id).length === 0 : true));
+})(), `手牌 ${(ui.state.view.snapshot.self_hand || []).length} 张 / 候选 ${ui.state.view.pending.legal_actions.length} 条`);
+
+const unusable = (ui.state.view.snapshot.self_hand || []).find(
+  (card) => !ui.cardCandidates || ui.cardCandidates(ui.state.view.pending, card.card_id).length === 0,
+);
+if (unusable && ui.toggleCard) {
+  ui.toggleCard(unusable.card_id);
+  check("㉿2a 用不出的牌**不进入**选中态", !ui.state.selectedCards.includes(unusable.card_id), `selectedCards=${JSON.stringify(ui.state.selectedCards)}`);
+  check("㉿2b 用不出的牌被置灰（dis 类）", (() => {
+    const chip = $("t-hand").children.find((c) => (c._html || "").includes(unusable.name) && c.classList.contains("dis"));
+    return !!chip;
+  })(), "手牌里应有一个 dis 的牌");
+  check("㉿2c 提交按钮**不可点**", $("btn-submit").disabled === true, `disabled=${$("btn-submit").disabled}`);
+  check("㉿2d 给出**为什么**（不是笼统提示）", /不能用于当前询问/.test($("t-choice").textContent), `提示="${$("t-choice").textContent}"`);
+  ui.clearSelection();
+  check("㉿2e 清空选择后按钮仍不可点（没选中任何东西）", $("btn-submit").disabled === true);
+} else {
+  check("㉿2 跳过：本局手里没有用不出的牌", true);
+}
+
+/* ============ ㉿ 红测试：同一张牌的多个目标要能点（刀 3） ============
+ *
+ * 引擎把**每个目标组合**枚举成一条独立候选（实测：`card_id=19` 有
+ * `targets:[4]` 与 `targets:[6]` 两条）。当前渲染器按"用哪张牌"聚合，
+ * 把 `targets` 塞进标签文字却做不成可点的东西——玩家选不了目标。
+ */
+// 造一个确定的前置：在真引擎里反复开局，直到人类座位拿到"同一张牌有两个目标"的出牌阶段
+const multi = await (async () => {
+  for (const seed of [1, 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31]) {
+    const body = await post("/api/sessions", {
+      player_count: 8, ai: "random", human_seat: 0, timeout_seconds: null, seed,
+    });
+    ui.state.sessionId = body.session_id;
+    ui.state.logRecords = [];
+    ui.applyView(body);
+    for (let step = 0; step < 400 && ui.state.view.pending; step += 1) {
+      const pending = ui.state.view.pending;
+      if (pending.kind === "PLAY_PHASE" && pending.actor === 0) {
+        const byCard = new Map();
+        for (const action of pending.legal_actions) {
+          const id = action.card && action.card.card_id;
+          if (id === undefined || id === null) continue;
+          if (!byCard.has(id)) byCard.set(id, []);
+          byCard.get(id).push(action);
+        }
+        const found = [...byCard.entries()].find(([, acts]) => acts.length > 1);
+        if (found) return { seed, cardId: found[0], actions: found[1], pending };
+      }
+      ui.state.selectedOption = pending.legal_actions.findIndex((a) => a.kind === "EndPhase" || a.kind === "Pass");
+      if (ui.state.selectedOption < 0) ui.state.selectedOption = 0;
+      await ui.submitAction();
+    }
+  }
+  return null;
+})();
+
+check("㉿3 找到一个前置：人类座位的同一张牌有两个目标候选", multi !== null,
+  multi ? `seed=${multi.seed} card_id=${multi.cardId} 目标组合=${multi.actions.map((a) => JSON.stringify(a.targets)).join(" / ")}` : "12 个种子内没找到");
+
+if (multi) {
+  // 玩家路径：点这张手牌 → 界面上只出它的目标 → 点一个目标
+  ui.state.selectedOption = null;
+  ui.state.selectedCards = [multi.cardId];
+  ui.renderTable();
+  ui.renderPending(ui.state.view);
+  const opts = $("t-options").children;
+  const grouped = ui.groupActions(ui.state.view.pending.legal_actions);
+  check("㉿3 聚合项按**每条候选**给出目标（同一张牌的两个目标 = 两条，不去重合并）",
+    grouped.filter((g) => Array.isArray(g.targets)).length >= multi.actions.length,
+    `带 targets 的聚合项 ${grouped.filter((g) => Array.isArray(g.targets)).length} 个`);
+  const targetsSeen = opts.map((c) => c.getAttribute("data-targets")).filter((v) => v);
+  check("㉿3a 点牌后只显示这张牌的候选，且每个目标组合各有一个 data-targets",
+    targetsSeen.length === multi.actions.length
+      && targetsSeen.every((v, i) => JSON.parse(v).join(",") === multi.actions[i].targets.join(",")),
+    `期望 ${multi.actions.length} 个目标项，实得 ${JSON.stringify(targetsSeen)}`);
+
+  const index = ui.state.view.pending.legal_actions.findIndex((a) => JSON.stringify(a) === JSON.stringify(multi.actions[0]));
+  const targetOption = opts.find((c) => c.getAttribute("data-targets") === JSON.stringify(multi.actions[0].targets));
+  check("㉿3a2 每个目标组合是一个**可点**选项（不是一段死文字）", !!targetOption,
+    `选项里找不到 data-targets=${JSON.stringify(multi.actions[0].targets)}`);
+  if (targetOption) {
+    (targetOption.listeners.click || []).forEach((fn) => fn({ target: targetOption }));
+  }
+  check("㉿3a3 点了目标选项后它被选中", ui.state.selectedOption === index, `selectedOption=${ui.state.selectedOption} want=${index}`);
+  const before = calls.length;
+  await ui.submitAction();
+  const sent = calls.slice(before).find((c) => c.path.includes("/answer"));
+  const sentAction = sent && sent.body ? sent.body.action : null;
+  check("㉿3b 点目标后提交的正是**那一条**候选（targets 逐字段相同）",
+    sentAction !== null && JSON.stringify(sentAction) === JSON.stringify(multi.actions[0]),
+    `sent=${JSON.stringify(sentAction && sentAction.targets)} want=${JSON.stringify(multi.actions[0].targets)}`);
+  ui.state.selectedCards = [];
+}
+
+// 回到干净的一局，别把后续断言带进上面那个中间局面
+{
+  const fresh = await post("/api/sessions", {
+    player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261012,
+  });
+  ui.state.sessionId = fresh.session_id;
+  ui.state.logRecords = [];
+  ui.state.selectedOption = null;
+  ui.state.selectedCards = [];
+  ui.state.picks = [];
+  ui.state.lastRejectReason = "";
+  ui.applyView(fresh);
+}
 
 /* ------------------------------------------- ② 九类询问：渲染 + 提交纪律 */
 

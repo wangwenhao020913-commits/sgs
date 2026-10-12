@@ -39,7 +39,8 @@ const state = {
   timer: null,
   runs: [],
   replay: null,
-  logRecords: [],   // 已收到的全部下发记录（切换详略时重画用）
+  logRecords: [],
+  lastRejectReason: "",   // 已收到的全部下发记录（切换详略时重画用）
 };
 
 /* ------------------------------------------------------------------ 网络 */
@@ -198,8 +199,11 @@ function renderTable() {
   $("t-hand-count").textContent = `${snapshot.self_hand.length} 张`;
   const hand = $("t-hand");
   hand.innerHTML = "";
+  const pendingNow = state.view ? state.view.pending : null;
   for (const card of snapshot.self_hand) {
-    hand.appendChild(cardChip(card, state.selectedCards.includes(card.card_id)));
+    hand.appendChild(
+      cardChip(card, state.selectedCards.includes(card.card_id), false, cardUsable(pendingNow, card.card_id)),
+    );
   }
   $("t-equip").innerHTML = "";
   for (const card of ownZone(snapshot, "equip")) $("t-equip").appendChild(cardChip(card, false, true));
@@ -217,21 +221,46 @@ function identityLabel(identity) {
   return { lord: "主公", loyalist: "忠臣", rebel: "反贼", traitor: "内奸" }[identity] || identity;
 }
 
-function cardChip(card, selected, isStatic) {
+function cardChip(card, selected, isStatic, usable = true) {
   const chip = document.createElement("button");
   chip.type = "button";
   chip.className = "card";
   if (selected) chip.classList.add("sel");
   if (isStatic) chip.classList.add("static");
+  if (!isStatic && !usable) chip.classList.add("dis");
   chip.innerHTML = `<span class="n">${card.name}</span><span class="s">${card.suit || ""}${card.rank ?? ""}</span>`;
   if (!isStatic) chip.addEventListener("click", () => toggleCard(card.card_id));
   return chip;
 }
 
+/** 本次询问里"用这张牌"的候选（可能多条——同一张牌的不同目标组合各算一条）。 */
+function cardCandidates(pending, cardId) {
+  if (!pending) return [];
+  return pending.legal_actions.filter(
+    (action) => action.card && action.card.card_id === cardId && (action.kind === "UseCard" || action.kind === "PlayCard"),
+  );
+}
+
+/** 这张牌**现在**能不能用：有候选才可用。不能用的牌不给点、置灰（图 1 的死按钮就是这个坑）。 */
+function cardUsable(pending, cardId) {
+  return cardCandidates(pending, cardId).length > 0;
+}
+
 function toggleCard(cardId) {
+  const pending = state.view ? state.view.pending : null;
+  if (pending && !cardUsable(pending, cardId)) {
+    // 点了一张**用不出**的牌：不给它选中态，并说清为什么（原来这里会静默选中、按钮永久灰掉）。
+    state.selectedCards = [];
+    const card = (state.view.snapshot.self_hand || []).find((c) => c.card_id === cardId);
+    state.lastRejectReason = `这一手【${card ? card.name : cardId}】不能用于当前询问（${pending.prompt}）`;
+    renderTable();
+    renderPending(state.view);
+    return;
+  }
   const index = state.selectedCards.indexOf(cardId);
   if (index >= 0) state.selectedCards.splice(index, 1);
   else state.selectedCards.push(cardId);
+  state.lastRejectReason = "";
   renderTable();
   renderPending(state.view);
 }
@@ -254,15 +283,25 @@ function renderPending(view) {
   const selected = state.selectedOption === null ? null : actions[state.selectedOption];
 
   // 候选太多时（转化 / 多目标组合）不逐条铺开：先按"用哪张牌"聚合。
-  const groups = groupActions(actions);
+  // 点了手牌就**只**显示它的候选：点牌 → 出目标 → 点目标（这是玩家的心智模型）。
+  const focused = state.selectedCards.length === 1
+    ? actions.map((action, index) => ({ action, index })).filter(({ action }) => action.card && action.card.card_id === state.selectedCards[0])
+    : null;
+  const groups = groupActions(focused ? focused.map(({ action }) => action) : actions);
+  if (focused) {
+    // 把"焦点内的下标"翻译回原候选下标（选项点击要落回原数组）
+    groups.forEach((group, i) => { group.actionIndex = focused[i].index; });
+  }
   for (const group of groups) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "opt";
     button.textContent = group.label;
+    if (group.targets && group.targets.length) button.setAttribute("data-targets", JSON.stringify(group.targets));
     if (group.actionIndex !== null && state.selectedOption === group.actionIndex) button.classList.add("sel");
     button.addEventListener("click", () => {
       state.selectedOption = group.actionIndex;
+      state.lastRejectReason = "";
       renderPending(state.view);
     });
     options.appendChild(button);
@@ -279,8 +318,9 @@ function renderPending(view) {
     ? blocked === null
     : state.selectedCards.length > 0 && buildAction() !== null;
   $("btn-submit").disabled = !ready;
-  $("t-choice").textContent = blocked
-    || (selected === null && !ready ? "先选一项，或点一张手牌再提交。" : "");
+  $("t-choice").textContent = state.lastRejectReason
+    || blocked
+    || (selected === null && !ready ? "先选一项，或点一张可用的手牌再提交。" : "");
   $("btn-cancel").disabled = selected === null && state.selectedCards.length === 0 && state.picks.length === 0;
 }
 
@@ -311,36 +351,36 @@ function selectionError(action, pending) {
   return null;
 }
 
+function actionLabel(action) {
+  if (action.kind === "UseCard" || action.kind === "PlayCard") {
+    const targets = action.targets && action.targets.length ? ` → 座位 ${action.targets.join("、")}` : "";
+    return `使用【${action.card.name}】${targets}`;
+  }
+  if (action.kind === "ActivateSkill") {
+    return `发动技能 ${action.skill_id}${action.picks && action.picks.length ? `（选 ${action.picks.length} 张）` : ""}`;
+  }
+  if (action.kind === "SelectCards") return "选牌";
+  if (action.kind === "SelectOption") return `选项：${action.choice}`;
+  if (action.kind === "ArrangeCards") return `排列（${action.order.length} 张）`;
+  if (action.kind === "DiscardCards") return `弃牌（${(action.cards || []).length} 张）`;
+  if (action.kind === "EndPhase") return "结束出牌阶段";
+  if (action.kind === "Pass") return "放弃";
+  return action.kind;
+}
+
+/** 候选 → 可点选项。**每条候选一个选项**（不再按标签去重）：
+ *
+ * 引擎把每个目标组合枚举成一条独立候选，所以"指定目标"就是"点那一条候选"。
+ * 去重会把同一张牌的多个目标组合并成一条，玩家就没法选目标了。
+ * 带 `targets` 的候选在选项上打 `data-targets`，好让界面与测试都能"看见目标"。
+ */
 function groupActions(actions) {
-  const out = [];
-  const seen = new Map();
-  actions.forEach((action, index) => {
-    let label;
-    if (action.kind === "UseCard" || action.kind === "PlayCard") {
-      const targets = action.targets && action.targets.length ? ` → 座位 ${action.targets.join("、")}` : "";
-      label = `使用【${action.card.name}】${targets}`;
-    } else if (action.kind === "ActivateSkill") {
-      label = `发动技能 ${action.skill_id}${action.picks && action.picks.length ? `（选 ${action.picks.length} 张）` : ""}`;
-    } else if (action.kind === "SelectCards") {
-      label = `选牌（已选 ${state.picks.length}）`;
-    } else if (action.kind === "SelectOption") {
-      label = `选项：${action.choice}`;
-    } else if (action.kind === "ArrangeCards") {
-      label = `排列（${action.order.length} 张）`;
-    } else if (action.kind === "DiscardCards") {
-      label = `弃牌（${(action.cards || []).length} 张）`;
-    } else if (action.kind === "EndPhase") {
-      label = "结束出牌阶段";
-    } else if (action.kind === "Pass") {
-      label = "放弃";
-    } else {
-      label = action.kind;
-    }
-    if (seen.has(label)) return;
-    seen.set(label, true);
-    out.push({ label, actionIndex: index });
-  });
-  return out;
+  return actions.map((action, index) => ({
+    label: actionLabel(action),
+    actionIndex: index,
+    targets: action.targets === undefined ? null : action.targets,
+    cardId: action.card ? action.card.card_id : null,
+  }));
 }
 
 function renderSlots(pending) {
@@ -453,6 +493,7 @@ function clearSelection() {
   state.selectedCards = [];
   state.selectedOption = null;
   state.picks = [];
+  state.lastRejectReason = "";
   renderTable();
   renderPending(state.view);
 }
