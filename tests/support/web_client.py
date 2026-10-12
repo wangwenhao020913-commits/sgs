@@ -128,14 +128,44 @@ def play(base: str, *, seed: int, players: int, timeout: float | None, max_answe
     return 0
 
 
+def probe_skills(base: str) -> int:
+    """建局响应必须带**本人**技能清单（刀 4）；引擎的可见面里没有技能。"""
+    status, body = call(
+        f"{base}/api/sessions",
+        {"player_count": 5, "ai": "random", "seed": 20261012, "timeout_seconds": None},
+    )
+    if status != 200:
+        print(f"FAIL 建局失败：HTTP {status} {body}")
+        return 1
+    skills = body.get("skills")
+    if not skills:
+        print(f"FAIL 响应体里没有 skills：{sorted(body.keys())}")
+        return 1
+    need = {"skill_id", "name", "skill_type", "locked", "carrier", "available"}
+    for entry in skills:
+        if not need <= set(entry):
+            print(f"FAIL 技能条目字段不全：{entry}")
+            return 1
+        if not isinstance(entry["locked"], bool) or not isinstance(entry["available"], bool):
+            print(f"FAIL locked / available 必须是布尔：{entry}")
+            return 1
+    print(f"PASS 建局响应带本人技能清单（{len(skills)} 条：{[s['name'] for s in skills]}）")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", required=True)
-    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--players", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=None)
     parser.add_argument("--max-answers", type=int, default=4000)
+    parser.add_argument("--probe-skills", action="store_true")
     args = parser.parse_args(argv)
+    if args.probe_skills:
+        return probe_skills(args.base)
+    if args.seed is None:
+        parser.error("--seed 必填（除非用 --probe-skills）")
     return play(
         args.base,
         seed=args.seed,

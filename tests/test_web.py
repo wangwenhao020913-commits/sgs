@@ -28,7 +28,12 @@ from sgs.agents import RandomPlayer, TapePlayer  # noqa: E402
 from sgs.data import validate_rule_config  # noqa: E402
 from sgs.engine import Engine, RandomSource, dump_journal  # noqa: E402
 from sgs.state import Action  # noqa: E402
-from sgs_web.projection import pending_payload, visible_record, visible_snapshot  # noqa: E402
+from sgs_web.projection import (  # noqa: E402
+    build_skills,
+    pending_payload,
+    visible_record,
+    visible_snapshot,
+)
 from sgs_web.replay import list_runs, load_run, replay_journal, save_run  # noqa: E402
 from sgs_web.session import Session, StaleAnswer  # noqa: E402
 from sgs_web.timeout import fallback_action  # noqa: E402
@@ -436,3 +441,98 @@ def test_the_three_hero_pool_states_stay_distinguishable() -> None:
     assert all(hero is not None for hero in enabled.hero_assignments)
     assert none.hero_assignments == (None, None)
     assert explicit.hero_assignments == ("liubei", "sunquan")
+
+
+# ---------------------------------------------------------------------------
+# 7. 技能清单（刀 4 后端片）：只给自己的、名称/类型/锁定/可用性都可核
+# ---------------------------------------------------------------------------
+
+
+def test_the_session_view_carries_the_human_seats_skills() -> None:
+    """**响应体**必须带本人技能清单——引擎下发的可见面里没有技能，前端无从画按钮。
+
+    注意这条打的是 `GameRegistry.view`（HTTP 层真正下发的那个 dict）这一**缝**，
+    不是直接调 `build_skills`：直接调函数会漏掉"接线断了"这一类回归。
+    """
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {"player_count": 8, "ai": "heuristic", "seed": 20261012, "timeout_seconds": None}
+    )
+    payload = registry.view(session, after=-1, logs_after=0)
+
+    assert "skills" in payload, "响应体里没有 skills（接线断了）"
+    assert payload["skills"], "本人应当有技能"
+    skills = payload["skills"]
+
+    hero_id = session.hero_assignments[session.human_seat]
+    assert hero_id is not None
+    from sgs.data import load_heroes
+
+    expected = {skill.name for skill in load_heroes(session.pack.pack_id).by_id(hero_id).skills}
+    assert {skill["name"] for skill in skills} == expected, "技能清单必须与该武将的武将面一致"
+
+
+def test_every_skill_entry_carries_type_lock_and_availability() -> None:
+    session = Session(seed=7, ai="heuristic", timeout_seconds=None, player_count=8)
+    for entry in build_skills(session, session.human_seat):
+        assert set(entry) == {"skill_id", "name", "skill_type", "locked", "carrier", "available"}
+        assert isinstance(entry["locked"], bool)
+        assert isinstance(entry["available"], bool)
+        assert entry["skill_type"] in ("NORMAL", "LORD")
+        assert entry["carrier"] == "HERO"
+
+
+def test_skills_never_leak_another_seats_inventory() -> None:
+    """别人的技能是**暗置**信息：清单里只能有 `seat` 自己的实例。"""
+    session = Session(seed=20261012, ai="heuristic", timeout_seconds=None, player_count=8)
+    mine = {entry["skill_id"] for entry in build_skills(session, session.human_seat)}
+
+    assert mine, "人类座位应当有技能"
+    for seat in range(session.rule_config.player_count):
+        if seat == session.human_seat:
+            continue
+        # 无武将时该座位没有技能；有武将时其技能与我的**不共享 skill_id**（每人一名武将）。
+        theirs = {entry["skill_id"] for entry in build_skills(session, seat)}
+        assert not (mine & theirs), f"座位 {seat} 的技能与我的重叠：{mine & theirs}"
+
+
+def test_the_lord_skill_gate_is_inherited_not_reimplemented() -> None:
+    """主公技的门控**不在接入层**：清单直接读 `resolve_instances`，身份门控在引擎侧已兑现。
+
+    这里只钉一件事：清单里**没有**任何条目是我自己筛出来的——它恰等于
+    `resolve_instances` 里 `owner == seat` 的那些（装备技因暂无中文名被略去）。
+    """
+    from sgs.skills import resolve_instances
+
+    session = Session(seed=20261012, ai="heuristic", timeout_seconds=None, player_count=8)
+    mine = {entry["skill_id"] for entry in build_skills(session, session.human_seat)}
+    owners_instances = {
+        instance.skill_id
+        for instance in resolve_instances(session.engine.state)
+        if instance.owner == session.human_seat
+    }
+
+    assert mine <= owners_instances, "清单里出现了不属于本座位的实例"
+    assert owners_instances - mine <= owners_instances, "（装备技暂不列，见地图 D20）"
+    assert mine, "人类座位应当有技能"
+
+
+def test_availability_follows_the_pending_queries_candidates() -> None:
+    """`available` 只由"当前挂起里有没有这个技能的 ActivateSkill 候选"决定。"""
+    session = Session(seed=20261012, ai="random", timeout_seconds=None, player_count=8)
+    for _ in range(300):
+        pending = session.pending
+        if pending is None:
+            break
+        offered = {
+            action.skill_id
+            for action in pending.legal_actions
+            if action.kind == "ActivateSkill"
+        }
+        for entry in build_skills(session, session.human_seat):
+            assert entry["available"] is (entry["skill_id"] in offered), (
+                f"{entry['name']} 的 available 与挂起询问的候选不一致"
+            )
+        session.submit_answer(pending.legal_actions[0])

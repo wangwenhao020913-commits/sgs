@@ -16,12 +16,20 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from sgs.data import load_heroes
 from sgs.engine import record_json
+from sgs.skills import resolve_instances
 from sgs.state import Query, project
 
 from .session import Session
 
-__all__ = ["pending_payload", "serialize_record", "visible_record", "visible_snapshot"]
+__all__ = [
+    "build_skills",
+    "pending_payload",
+    "serialize_record",
+    "visible_record",
+    "visible_snapshot",
+]
 
 
 def visible_snapshot(session: Session) -> dict[str, Any]:
@@ -32,6 +40,65 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
     """
     view = project(session.engine.state, session.human_seat)
     return view.model_dump(mode="json")
+
+
+def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
+    """``seat`` 的**技能清单**（刀 4）：名称 / 类型 / 是否锁定 / **此刻是否可用**。
+
+    三件事必须说清，否则这条清单是编的：
+
+    - **谁的技能**：技能实例由 ``sgs.skills.resolve_instances`` 解析，它已经含身份门控
+      （非主公的武将牌上**没有**主公技），故"有的技能"不是前端猜的；
+    - **什么类型**：``locked`` 是官方"牌面有没有『可以』"的逐字判据，中文名与
+      ``skill_type`` 取自**武将面数据**（`HeroSkill.name` / `.skill_type`）；
+    - **此刻能不能用**：`available` = 当前挂起的询问里有没有针对这个技能的
+      ``ActivateSkill`` 候选。**不去问引擎"这个技能满不满足条件"**——那是第二条真源。
+
+    只列 ``seat`` 自己的实例：别人的技能是**暗置**信息，不下发。
+    """
+    state = session.engine.state
+    pending = session.pending
+    offered = {
+        action.skill_id
+        for action in (pending.legal_actions if pending is not None else ())
+        if action.kind == "ActivateSkill"
+    }
+    hero_id = state.players[seat].hero
+    names: dict[str, tuple[str, str]] = {}
+    if hero_id is not None:
+        hero = load_heroes(state.pack_id).by_id(hero_id)
+        if hero is not None:
+            # 武将面里的技能 id 是**短名**（`guose`），而实例上的 `skill_id` 带命名空间
+            # （`hero.daqiao.guose`）；两边靠**末段**对上，别去猜前缀。
+            names = {
+                skill.id.rsplit(".", 1)[-1]: (skill.name, getattr(skill.skill_type, "value", str(skill.skill_type)))
+                for skill in hero.skills
+            }
+
+    out: list[dict[str, Any]] = []
+    for instance in resolve_instances(state):
+        if instance.owner != seat:
+            continue
+        definition = instance.definition
+        # 没有中文名的只剩装备技能；它们由装备牌承载，先不列（地图 D20 登记）。
+        short_id = instance.skill_id.rsplit(".", 1)[-1]
+        name, skill_type = names.get(
+            short_id, (None, getattr(definition.skill_type, "value", str(definition.skill_type)))
+        )
+        if name is None:
+            continue
+        out.append(
+            {
+                "skill_id": definition.skill_id,
+                "name": name,
+                "skill_type": skill_type,
+                "locked": bool(definition.locked),
+                "carrier": getattr(definition.carrier, "value", str(definition.carrier)),
+                "available": definition.skill_id in offered,
+            }
+        )
+    out.sort(key=lambda item: (item["locked"], item["skill_id"]))
+    return out
 
 
 def _query_summary(query: Query) -> dict[str, Any]:

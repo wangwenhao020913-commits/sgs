@@ -62,6 +62,13 @@ else
   exit 1
 fi
 
+# ①b 建局响应必须带本人技能清单（刀 4：引擎的可见面里没有技能，界面的技能按钮全靠它）
+echo "=== 建局响应：技能清单 ==="
+if ! "$PYTHON" tests/support/web_client.py --base "http://127.0.0.1:$PORT" --probe-skills; then
+  echo "FAIL: 建局响应缺技能清单"
+  exit 1
+fi
+
 # ② 一整局 8 人身份局，人类座位逐个经 HTTP 应答
 echo "=== 正局：8 人，逐问经 HTTP 应答 ==="
 if ! "$PYTHON" tests/support/web_client.py --base "http://127.0.0.1:$PORT" \

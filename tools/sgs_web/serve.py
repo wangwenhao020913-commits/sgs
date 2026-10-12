@@ -39,7 +39,12 @@ from sgs_web import REPO_ROOT, ensure_engine_importable
 ensure_engine_importable()
 
 from sgs.engine import IllegalActionError  # noqa: E402
-from sgs_web.projection import pending_payload, visible_record, visible_snapshot  # noqa: E402
+from sgs_web.projection import (  # noqa: E402
+    build_skills,
+    pending_payload,
+    visible_record,
+    visible_snapshot,
+)
 from sgs_web.replay import list_runs, load_run, save_run  # noqa: E402
 from sgs_web.session import (  # noqa: E402
     DEFAULT_TIMEOUT_SECONDS,
@@ -129,6 +134,7 @@ class GameRegistry:
             "cursor": session.next_cursor(after),
             "log_seq": session.log_seq,
             "snapshot": visible_snapshot(session),
+            "skills": build_skills(session, session.human_seat),
             "pending": pending_payload(session),
             "records": records,
             "session_log": [entry.as_dict() for entry in session.logs_after(logs_after)],
