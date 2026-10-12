@@ -65,6 +65,7 @@
       <span class="tag">种子</span> <code id="t-seed"></code>
       <span class="tag">座位</span> <code id="t-seat"></code>
       <span class="tag">回合计</span> <code id="t-phase"></code>
+      <span class="tag">轮到</span> <code id="t-turn"></code>
     </div>
     <div>
       <span id="t-timer" class="timer"></span>
@@ -106,7 +107,13 @@
   </div>
 
   <section class="panel">
-    <h2>事件流 <span class="dim">（只显示公开事实；对手手牌只有数量）</span></h2>
+    <h2>事件流
+      <span class="dim">（只显示公开事实；对手手牌只有数量）</span>
+      <select id="t-log-mode" title="事件流的详略">
+        <option value="focus" selected>重点（隐藏对手的响应往来）</option>
+        <option value="all">全部（逐条，含对手响应）</option>
+      </select>
+    </h2>
     <ol id="t-log" class="log"></ol>
   </section>
 </main>

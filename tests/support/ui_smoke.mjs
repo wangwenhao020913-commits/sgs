@@ -69,6 +69,9 @@ for (const m of html.matchAll(/<(input|select|button|span|div|ol|section|main|fo
   if (m[1] === "main") node.hidden = m[2] !== "view-lobby";
 }
 for (const id of ["in-players", "in-ai", "in-seat", "in-timeout", "in-seed"]) if (!byId.has(id)) el("input", id);
+// `<select>` 的初值 = 带 `selected` 的那个 option（真 DOM 语义）；垫片不解析 option 结构，
+// 故这里给一个显式初值，由下方 `setSelect` 在测试里改。
+byId.get("t-log-mode").value = "focus";
 Object.assign(byId.get("in-players"), { value: "8" });
 Object.assign(byId.get("in-ai"), { value: "heuristic" });
 Object.assign(byId.get("in-seat"), { value: "0" });
@@ -102,11 +105,8 @@ const context = vm.createContext({
 });
 context.globalThis = context;
 const source = readFileSync("tools/sgs_web/static/app.js", "utf8");
-vm.runInContext(
-  `${source}\n;globalThis.__bridge = { state, applyView, renderPending, buildAction, submitAction, loadRuns, openReplay, renderReplay };\n`,
-  context,
-  { filename: "app.js" },
-);
+const bridge = readFileSync("tests/support/ui_bridge.js", "utf8");
+vm.runInContext(`${source}\n${bridge}`, context, { filename: "app.js" });
 const ui = context.__bridge;
 
 /* ------------------------------------------------------------------ 断言工具 */
@@ -117,6 +117,13 @@ const check = (label, ok, detail = "") => {
   else { failures += 1; console.log(`FAIL ${label}${detail ? ` — ${detail}` : ""}`); }
 };
 const $ = (id) => documentShim.getElementById(id);
+const setSelect = (id, value) => {
+  const node = $(id);
+  node.value = value;
+  (node.listeners.change || []).forEach((fn) => fn({ target: node }));
+};
+const logText = () => $("t-log").text();
+const logCount = () => $("t-log").children.length;
 
 /* ------------------------------------------------ ① 建局 + 牌桌/手牌/事件流 */
 
@@ -134,6 +141,32 @@ check("手牌渲染出牌面且张数一致", $("t-hand").children.length === cr
 check("对手座位不出现牌面名", !["杀", "闪", "桃", "无懈可击"].some((n) => $("t-seats").children[1].text().includes(n)), $("t-seats").children[1].text().replace(/\s+/g, " ").trim().slice(0, 40));
 check("种子已显示", $("t-seed").textContent === String(created.seed), $("t-seed").textContent);
 check("事件流已渲染开局记录", $("t-log").children.length > 0, `${$("t-log").children.length} 条`);
+
+/* ================= ㉿ 红测试：阶段可读性 + 事件流噪音（刀 1） =================
+ *
+ * 两条现在应当**失败**的断言：
+ *   ① `回合计` 显示的是 `Phase` 枚举的字面值（`play`），不是中文阶段名；
+ *   ② 事件流把每次响应窗口的 `query` + `action` 逐条铺开（一局 268 次 RESPOND），
+ *      而阶段时点（`PHASE_*` / `TURN_*`）被推到很远的上方——玩家在牌桌上"看不见自己在哪个阶段"。
+ * 修法（刀 1）：`回合计` 走中文映射 + 新增"轮到谁"；事件流默认**重点**模式
+ * （隐藏对手的响应往来）并有"全部"开关；新记录自动滚到底。
+ */
+
+// 阶段可见性要在"重点"模式下检查（真实游玩时的缺省视图）。
+setSelect("t-log-mode", "focus");
+
+check("㉿1a 回合计显示中文阶段名（不是枚举字面值 play）", $("t-phase").textContent === "出牌阶段", `实际 "${$("t-phase").textContent}"`);
+const turnText = $("t-turn").textContent;
+check("㉿1a 轮到谁已显示", typeof turnText === "string" && turnText.length > 0, `实际 "${turnText}"`);
+
+const logNow = logText();
+check("㉿1b 重点模式里能看到阶段时点", /准备阶段|判定阶段|摸牌阶段|出牌阶段|弃牌阶段|结束阶段|回合开始|回合结束/.test(logNow), logNow.replace(/\s+/g, " ").slice(0, 80));
+check("㉿1b 重点模式里不再逐条铺对手的响应往来", !/询问 RESPOND → 座位 (?!0\b)/.test(logNow), logNow.replace(/\s+/g, " ").slice(0, 80));
+
+setSelect("t-log-mode", "all");
+const logAll = logText();
+check("㉿1c 切到全部能看到对手的响应往来", /询问 RESPOND/.test(logAll), logAll.replace(/\s+/g, " ").slice(0, 80));
+setSelect("t-log-mode", "focus");
 
 /* ------------------------------------------- ② 九类询问：渲染 + 提交纪律 */
 

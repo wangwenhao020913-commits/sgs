@@ -8,6 +8,26 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+
+/** `Phase` 枚举的字面值 → 中文阶段名。
+ *
+ * 枚举值（`prepare` / `judge` / `draw` / `play` / `discard` / `finish`）是**稳定报文值**，
+ * 改它就是改契约（还会波及记录流与基准），所以映射只住表现层这一处。
+ * `null` 段也覆盖到：`phase` 可能为 `null`（回合之外）。
+ */
+const PHASE_LABELS = {
+  prepare: "准备阶段",
+  judge: "判定阶段",
+  draw: "摸牌阶段",
+  play: "出牌阶段",
+  discard: "弃牌阶段",
+  finish: "结束阶段",
+};
+
+function phaseLabel(phase) {
+  if (!phase) return "—";
+  return PHASE_LABELS[phase] || phase;
+}
 const state = {
   sessionId: null,
   cursor: -1,
@@ -19,6 +39,7 @@ const state = {
   timer: null,
   runs: [],
   replay: null,
+  logRecords: [],   // 已收到的全部下发记录（切换详略时重画用）
 };
 
 /* ------------------------------------------------------------------ 网络 */
@@ -103,8 +124,14 @@ function applyView(body) {
   $("t-seed").textContent = String(body.seed);
   $("t-seat").textContent = String(body.human_seat);
   $("btn-takeover").hidden = body.finished;
-  for (const record of body.records) appendLog(record);
+  state.logRecords = (state.logRecords || []).concat(body.records || []);
+  for (const record of body.records) {
+    if (record.kind === "query") state.logQuerySeat = record.query.actor;
+    appendLog(record, state.logQuerySeat);
+  }
   renderTable();
+  const logNode = $("t-log");
+  if (logNode.lastChild) logNode.lastChild.scrollIntoView({ block: "nearest" });
   if (body.finished) {
     state.timer = null;
     $("t-timer").textContent = "";
@@ -141,7 +168,11 @@ function renderTable() {
   const view = state.view;
   if (!view) return;
   const snapshot = view.snapshot;
-  $("t-phase").textContent = snapshot.phase || "—";
+  $("t-phase").textContent = phaseLabel(snapshot.phase);
+  const turnSeat = snapshot.turn_seat;
+  $("t-turn").textContent = turnSeat === null || turnSeat === undefined
+    ? "—"
+    : `座位 ${turnSeat}${turnSeat === snapshot.seat ? "（我）" : ""}`;
 
   const seats = $("t-seats");
   seats.innerHTML = "";
@@ -428,15 +459,51 @@ function clearSelection() {
 
 /* ------------------------------------------------------------------ 日志 */
 
-function appendLog(record) {
+/** 事件流的详略；`focus` = 隐藏对手之间的响应往来（一局 268 次 RESPOND 会把阶段埋掉）。 */
+const LOG_MODES = ["focus", "all"];
+
+function logMode() {
+  const node = $("t-log-mode");
+  const mode = node && node.value ? node.value : "focus";
+  return LOG_MODES.includes(mode) ? mode : "focus";
+}
+
+/** 这条记录在**重点**模式下要不要显示。回放页不走这个函数（那边是上帝视角、逐条看）。 */
+function keepRecord(record, querySeat) {
+  if (logMode() === "all") return true;
+  // `action` 记录不带座位，故用"上一条询问的 actor"当它的座位（记录流里询问与应答严格相邻）。
+  const seat = record.kind === "query" ? record.query.actor : querySeat;
+  const me = state.view ? state.view.human_seat : null;
+  if (record.kind === "query" || record.kind === "action") return seat === me;
+  if (record.kind === "delta" && record.delta_type === "deck_shuffle") return false;
+  return true;
+}
+
+function appendLog(record, querySeat) {
+  if (!keepRecord(record, querySeat)) return;
   const item = document.createElement("li");
   item.innerHTML = describeRecord(record);
   $("t-log").appendChild(item);
 }
 
+/** 重画整条事件流（切换详略时需要把已渲染的清掉重来）。 */
+function renderLog() {
+  const log = $("t-log");
+  log.innerHTML = "";
+  if (!state.view) return;
+  let querySeat = null;
+  for (const record of state.view.records || []) {
+    if (record.kind === "query") querySeat = record.query.actor;
+    appendLog(record, querySeat);
+  }
+}
+
 function describeRecord(record) {
   if (record.kind === "header") return `<span class="k">开局</span> 种子 ${record.seed} · ${record.rule_config.player_count} 人`;
-  if (record.kind === "timing") return `<span class="k">#${record.seq}</span> 时机 ${record.timing}${record.actor !== null && record.actor !== undefined ? ` · 座位 ${record.actor}` : ""}`;
+  if (record.kind === "timing") {
+    const who = record.actor !== null && record.actor !== undefined ? ` · 座位 ${record.actor}` : "";
+    return `<span class="k">#${record.seq}</span> ${timingLabel(record.timing)}${who}`;
+  }
   if (record.kind === "query") return `<span class="k">#${record.seq}</span> 询问 ${record.query.kind} → 座位 ${record.query.actor}`;
   if (record.kind === "action") return `<span class="k">#${record.seq}</span> 应答 ${record.action ? record.action.kind : "？"} ${record.accepted ? "（接受）" : "（被拒）"}`;
   if (record.kind === "frame") return `<span class="k">#${record.seq}</span> 结算帧 ${record.op} ${record.frame_kind}（深度 ${record.depth}）`;
@@ -451,6 +518,30 @@ function describeRecord(record) {
     return `<span class="k">#${record.seq}</span> 洗牌`;
   }
   return `<span class="k">#${record.seq || ""}</span> ${record.kind}`;
+}
+
+/** 时机枚举名 → 中文。只做**通用裁剪**（前缀 + 阶段专名），不逐条手抄 83 个名字。 */
+const TIMING_PREFIXES = [
+  ["PHASE_PREPARE", "准备阶段"],
+  ["PHASE_JUDGE", "判定阶段"],
+  ["PHASE_DRAW", "摸牌阶段"],
+  ["PHASE_PLAY", "出牌阶段"],
+  ["PHASE_DISCARD", "弃牌阶段"],
+  ["PHASE_FINISH", "结束阶段"],
+  ["TURN_", "回合"],
+  ["GAME_", "开局"],
+];
+
+function timingLabel(timing) {
+  if (!timing) return "时机";
+  for (const [prefix, label] of TIMING_PREFIXES) {
+    if (timing === prefix || timing.startsWith(prefix)) {
+      const rest = timing.slice(prefix.length).replace(/^_/, "");
+      const suffix = { "": "", START: "开始", END: "结束", IDLE: "空闲", BEFORE: "前", AFTER: "后" }[rest];
+      return suffix === undefined ? `${label} ${rest}` : `${label}${suffix}`;
+    }
+  }
+  return timing;
 }
 
 function zoneLabel(ref) {
@@ -569,6 +660,11 @@ function wire() {
   $("nav-lobby").addEventListener("click", () => { show("lobby"); loadRuns(); });
   $("nav-table").addEventListener("click", () => show("table"));
   $("nav-replay").addEventListener("click", () => { show("replay"); if (!state.replay) $("r-log").innerHTML = "<li class=\"dim\">从开局页选一局录像。</li>"; });
+  const modeSelect = $("t-log-mode");
+  if (modeSelect) modeSelect.addEventListener("change", () => {
+    state.view = Object.assign({}, state.view, { records: state.logRecords });
+    renderLog();
+  });
   $("btn-submit").addEventListener("click", submitAction);
   $("btn-cancel").addEventListener("click", clearSelection);
   $("btn-refresh").addEventListener("click", refresh);
