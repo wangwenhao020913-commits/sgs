@@ -250,59 +250,88 @@ def _yiji_condition(host: Any, frame: Any) -> bool:
     return _hurt_owner(frame)
 
 
+def _yiji_keys(point: int) -> tuple[str, str]:
+    """【遗计】在**第 ``point`` 点伤害**上的两个帧私有槽名：本点亮出的牌 / 本点已交出的牌 id。
+
+    "逐点触发"意味着同一次伤害里有多轮独立的【遗计】；槽名带点号，两轮的观看与进度
+    才不会互相顶掉（否则第 2 点会读到第 1 点剩的那张）。
+    """
+    return (f"{YIJI_SEEN_KEY}:{point}", f"{YIJI_GIVEN_KEY}:{point}")
+
+
 def _yiji(host: Any, frame: Any) -> Any:
-    """郭嘉【遗计】：观看牌堆顶 2 张，然后交给任意角色（规则 993；逐点触发）。
+    """郭嘉【遗计】：观看牌堆顶 2 张，然后**逐张**交给任意角色（规则 993；逐点触发）。
 
     **只看不排**：走票 10 的授予通道（``peek_deck`` + 询问的 ``revealed``）——观看的
-    牌面只出现在这次询问里，不进任何 ``PlayerView``、不落带牌面的 delta。**交给** =
-    从授予的牌里选一张、``move_card`` 进自己的手牌（``PUT``）；``Pass`` = 这张不交给
-    任何人（牌留在牌堆顶）。牌堆顶两张由**逐点触发的两轮**各交一张（每轮各看、各选一次）
-    ——这是"观看 2 张并交给任意角色"在"一份询问 = 一次决策"下的直读，写进本模块的判据。
+    牌面只出现在这次询问里，不进任何 ``PlayerView``、不落带牌面的 delta。
+
+    **一次触发内逐张分配**（本轮报障修正）：官方原文是"观看牌堆顶的两张牌，然后**将这些牌**
+    交给任意角色"——是复数的"这些牌"，不是一张。故本回调在**同一个伤害点**内循环：
+
+        while 还有没交出的亮牌：
+            选牌（``SELECT_CARDS``，面里只铺**剩余**亮牌，可选 ``Pass`` 收尾）
+            → 选座次（``SELECT_OPTION``，选项 ``seat:N`` = 任意存活角色）
+            → 把那张牌移进收牌人的手牌
+
+    旧实现把"下一张"交给**下一个伤害点**驱动：1 点伤害只有一轮 ⇒ 第二张永远发不出去；
+    2 点伤害则第二轮**重新观看牌堆顶**（第一张已被移走）⇒ 两张亮牌被换成另一对。
+
+    ``Pass``（选牌面上放弃）= 剩下的亮牌留在牌堆顶、本点收尾。进度落在**帧私有键**里
+    （点号 + 已交牌 id），故"挂起 → 应答 → 续跑"重入本回调时既不复述也不重发询问；
+    移动本身由 ``move_in_frame`` 的重入守卫保证只发生一次（`CODING_STANDARDS.md` 规则 3）。
     """
     owner = frame.data["skill_owner"]
-    seen: tuple[CardRef, ...] | None = frame.data.get(YIJI_SEEN_KEY)
+    point = damage_point_index(frame)
+    seen_key, given_key = _yiji_keys(point)
+    seen: tuple[CardRef, ...] | None = frame.data.get(seen_key)
     if seen is None:
         seen = host.peek_deck(frame, YIJI_COUNT)
-        frame.data[YIJI_SEEN_KEY] = seen
+        frame.data[seen_key] = seen
+        frame.data[given_key] = ()
     if not seen:
         return None
+    given: tuple[int, ...] = tuple(frame.data.get(given_key, ()))
+    remaining = tuple(card for card in seen if card.card_id not in given)
+    if not remaining:
+        # 本点已经看完并分配完：**保留帧私有键**，重入直接作罢。
+        # 这一点很关键：同一个伤害点的派发可能因**另一个钩子**（同族技能 / 移动后）挂起而
+        # 被重入；键若被清掉，重入就会重新观看牌堆顶、把已经处理过的两张再问一遍。
+        return None
+    round_index = len(given)
     spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=True)
     picked = host.ask_selection(
         frame,
-        key=f"yiji:{damage_point_index(frame)}",
+        key=f"yiji:pick:{point}:{round_index}",
         actor=owner,
         timing=Timing.DAMAGE_AFTER_TAKE,
         spec=spec,
         build_face=lambda: (
-            tuple(Slot(ref=ZoneRef(Zone.HAND, owner), card=item) for item in seen),
-            tuple(item.card_id for item in seen),
+            tuple(Slot(ref=ZoneRef(Zone.HAND, owner), card=item) for item in remaining),
+            tuple(item.card_id for item in remaining),
         ),
-        revealed=seen,
+        revealed=remaining,
     )
     if host.suspended(picked):
         return "stay"
     if not picked:
-        # "可以不交给任何人"：这一轮作罢；下一轮的观看重新从（已变短的）牌堆顶取。
-        frame.data.pop(YIJI_SEEN_KEY, None)
+        # "可以不交给任何人"：剩下的亮牌留在牌堆顶，本点收尾（键照留，重入仍返回空）。
         return None
     # ---- 交给谁（官方："将这些牌**交给任意角色**"）--------------------------------
     # 用 ``SELECT_OPTION`` 承载：它的 ``options`` 是**开放闭集**（任意字符串元组），
     # 不需要新造 QueryKind，界面上也已经是一条一个按钮、点得动的形态。
-    # ``skill_id`` 每轮取不同的值——``ask_option`` 的答案缓存键是
-    # ``("option", skill_id, actor)``，逐点两轮若同名就会把第 2 轮读成第 1 轮的答案。
-    round_index = damage_point_index(frame)
+    # ``skill_id`` 带**点号 + 轮号**——``ask_option`` 的答案缓存键是
+    # ``("option", skill_id, actor)``，同一点内的下一张若同名就会把第 2 轮读成第 1 轮的答案。
     choice = host.ask_option(
         frame,
         owner,
         Timing.DAMAGE_AFTER_TAKE,
-        skill_id=f"yiji:give:{round_index}",
+        skill_id=f"yiji:give:{point}:{round_index}",
         options=tuple(f"seat:{seat}" for seat in alive_seats(host.state)),
     )
     if host.suspended(choice):
         return "stay"
-    frame.data.pop(YIJI_SEEN_KEY, None)
     receiver = int(choice.choice.split(":", 1)[1])
-    return host.move_in_frame(
+    control = host.move_in_frame(
         frame,
         host.state.refs(picked),
         to_zone=ZoneRef(Zone.HAND, receiver),
@@ -310,13 +339,22 @@ def _yiji(host: Any, frame: Any) -> Any:
         owner=receiver,
         actor=owner,
     )
+    if control == "stay":
+        return "stay"
+    # 交出成功才记进度：移动若挂起，重入会拿同一份缓存答案重试（移动幂等）。
+    # ``ask_selection`` 返回的是**实体牌 id**（不是 ``CardRef``）。
+    frame.data[given_key] = given + tuple(picked)
+    return _yiji(host, frame)
 
 
 YIJI_COUNT = 2
 """【遗计】"观看牌堆顶"的张数（规则 993：两张）。"""
 
 YIJI_SEEN_KEY = "yiji_seen"
-"""帧私有槽名：本次伤害里【遗计】已经观看过的那批牌（逐点触发时每一轮各看一次）。"""
+"""帧私有槽名前缀：本点伤害里【遗计】已经观看过的那批牌（槽名再带点号）。"""
+
+YIJI_GIVEN_KEY = "yiji_given"
+"""帧私有槽名前缀：本点伤害里【遗计】已经交出去的那批牌 id（槽名再带点号）。"""
 
 DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
     # 曹操【奸雄】：你可以获得造成此伤害的牌（规则 972）——每次伤害事件一次。

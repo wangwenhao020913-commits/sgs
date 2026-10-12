@@ -833,4 +833,84 @@ check("回放页显示逐座位武将（侧车 meta）", $("r-heroes").textConte
 check("回放页事件流有内容", $("r-log").children.length > 0, `${$("r-log").children.length} 条`);
 check("回放位置指示到末尾", $("r-pos").textContent.includes(String(ui.state.replay.records.length)), $("r-pos").textContent);
 
+/* ============ 本轮报障（合成局面）：公开处理区 + 询问上下文 + 遗计选座位 ============
+ *
+ * 三条都是**界面读法**的断言，故不依赖某一局恰好走到那个前置：直接喂一份与
+ * 服务端响应体同形的合成 `view`，看界面按不按那些键读。服务端那一侧（`context` /
+ * `option_seats` 怎么算）由 `tests/test_web.py` 钉。
+ */
+
+const synthCard = (id, name) => ({
+  card_id: id, name, suit: "spade", rank: 7, type: "slash", slot: null,
+  attack_range: null, color: "black", virtual_sources: [],
+});
+const synthView = (pending) => ({
+  seed: 1, human_seat: 0, finished: false, timeout_seconds: null,
+  heroes: { 0: "guojia", 1: "zhangfei", 2: "diaochan" },
+  skills: [],
+  pending,
+  snapshot: {
+    seat: 0, phase: "play", turn_seat: 0,
+    players: [0, 1, 2].map((seat) => ({
+      seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [], identity: null,
+    })),
+    self_hand: [synthCard(1, "杀")],
+    deck_count: 50, discard: [],
+    processing: [synthCard(9, "五谷丰登"), synthCard(10, "闪")],
+  },
+});
+
+// ① 处理区 / 效果区：公开渲染，且与"是否轮到自己"无关（pending.actor 是另一个座位）。
+ui.state.view = synthView({
+  kind: "SELECT_CARDS", actor: 2, prompt: "请从选择面里选择一张牌。",
+  legal_actions: [], candidate_index: {}, context: null, option_seats: {},
+  slots: [], spec: { zones: ["hand"], total: [1, 1] },
+});
+ui.renderTable();
+const processingText = $("t-processing").text();
+check("㉿P1 处理区渲染出五谷亮牌（不只轮到自己才看得见）",
+  processingText.includes("五谷丰登") && processingText.includes("闪"),
+  `处理区="${processingText.replace(/\s+/g, " ").trim()}"`);
+check("㉿P2 处理区的牌不可点（公开信息，不是我的选择）",
+  $("t-processing").children.length > 0 && $("t-processing").children.every((c) => !(c.listeners.click || []).length));
+
+// ② 询问上下文：本窗口写"谁对谁做了什么"。
+ui.state.view = synthView({
+  kind: "SKILL_ACTIVATION", actor: 0, prompt: "是否发动该技能？",
+  legal_actions: [{ kind: "ActivateSkill", skill_id: "hero.guojia.yiji", answers_seq: 1, choices: [], picks: [] }],
+  candidate_index: {}, option_seats: {},
+  context: { label: "0号位郭嘉对0号位郭嘉使用遗计", name: "遗计", targets: [0] },
+});
+ui.renderTable();
+ui.renderPending(ui.state.view);
+check("㉿P3 询问窗口显示上下文（谁对谁做了什么）",
+  $("t-context").textContent.includes("0号位郭嘉对0号位郭嘉使用遗计"),
+  `上下文="${$("t-context").textContent}"`);
+
+// ③ 遗计的"交给谁"：座位可点，点座位 = 选中那条 seat:N 候选。
+ui.state.view = synthView({
+  kind: "SELECT_OPTION", actor: 0, prompt: "请选择一项。",
+  legal_actions: [
+    { kind: "SelectOption", choice: "seat:0", answers_seq: 9 },
+    { kind: "SelectOption", choice: "seat:2", answers_seq: 9 },
+  ],
+  candidate_index: {}, context: { label: "0号位郭嘉对0号位郭嘉使用遗计", name: "遗计", targets: [0] },
+  option_seats: { "seat:0": 0, "seat:2": 2 },
+});
+ui.state.selectedOption = null;
+ui.renderTable();
+ui.renderPending(ui.state.view);
+const seatBox = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "2");
+check("㉿P4 可交给的座位画成可点（targetable）",
+  !!seatBox && seatBox.classList.contains("targetable"));
+(seatBox.listeners.click || []).forEach((fn) => fn({ target: seatBox }));
+check("㉿P5 点座位 = 选中那条 seat:2 候选", ui.state.selectedOption === 1,
+  `selectedOption=${ui.state.selectedOption}`);
+check("㉿P6 点座位后提交按钮可点", $("btn-submit").disabled === false,
+  `disabled=${$("btn-submit").disabled}`);
+const optAction = ui.buildAction();
+check("㉿P7 提交的正是 seat:2 那条原候选",
+  !!optAction && optAction.kind === "SelectOption" && optAction.choice === "seat:2",
+  JSON.stringify(optAction));
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

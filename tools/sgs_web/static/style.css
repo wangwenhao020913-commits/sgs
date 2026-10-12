@@ -94,6 +94,8 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 }
 .opt.sel { border-color: var(--accent); background: var(--accent-soft); }
 .prompt { margin: 0 0 4px; }
+/* 询问窗口的"谁对谁做了什么"（服务端下发的 context.label）。 */
+.context { margin: 0 0 4px; font-weight: 600; color: var(--accent); }
 .hint { margin: 0 0 6px; font-size: 13px; color: var(--dim); }
 .timer { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
 

@@ -27,17 +27,35 @@ _bootstrap()
 from sgs.agents import RandomPlayer, TapePlayer  # noqa: E402
 from sgs.data import validate_rule_config  # noqa: E402
 from sgs.engine import Engine, RandomSource, dump_journal  # noqa: E402
-from sgs.state import Action  # noqa: E402
+from sgs.resolution import Frame, ResolutionStack  # noqa: E402
+from sgs.state import (  # noqa: E402
+    Action,
+    FrameKind,
+    PeachQuery,
+    RespondQuery,
+    SelectCardsQuery,
+    SelectionSpec,
+    SelectOptionQuery,
+    Slot,
+    WindowCause,
+    Zone,
+    ZoneRef,
+    project,
+)
+from sgs.timing import Timing  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
     candidate_index,
+    option_seats,
     pending_payload,
+    query_context,
     visible_record,
     visible_snapshot,
 )
 from sgs_web.replay import list_runs, load_run, replay_journal, save_run  # noqa: E402
 from sgs_web.session import Session, StaleAnswer  # noqa: E402
 from sgs_web.timeout import fallback_action  # noqa: E402
+from support.positions import SeatSpec, build_state, cards_of_type  # noqa: E402
 
 TWO_PLAYERS = {"player_count": 2}
 """2 人局：无身份 1v1，跑得快，且足以覆盖"挂起 → 应答 → 续跑"的全部分支。"""
@@ -453,6 +471,225 @@ def test_the_candidate_index_is_derived_from_the_legal_actions() -> None:
                 session.submit_answer(query.legal_actions[0])
 
     assert checked > 200, f"取样太少（{checked} 次询问），断言谈不上机械"
+
+
+# ---------------------------------------------------------------------------
+# 5c. 询问窗口的"谁对谁做了什么"（本轮报障）
+# ---------------------------------------------------------------------------
+
+
+_CONTEXT_PACK = None
+
+
+def _context_pack():
+    """标准牌堆（惰性加载，避免模块导入期就建表）。"""
+    global _CONTEXT_PACK
+    if _CONTEXT_PACK is None:
+        from sgs.data import load_content_pack
+
+        _CONTEXT_PACK = load_content_pack(deck_profile="standard_108")
+    return _CONTEXT_PACK
+
+
+def _context_fixture(seats, *, frame_kind, frame_data):
+    """只有"一个栈顶帧"的最小引擎面：:func:`query_context` 只读 ``state`` 与 ``stack``。
+
+    ``frame_data`` 可以是 dict，也可以是 ``state -> dict``（取 ``CardRef`` 需要先有 state）。
+    """
+    from types import SimpleNamespace
+
+    state = build_state(pack=_context_pack(), seats=seats)
+    data = frame_data(state) if callable(frame_data) else dict(frame_data)
+    stack = ResolutionStack()
+    stack.push(Frame(kind=frame_kind, data=data))
+    return SimpleNamespace(state=state, stack=stack), state
+
+
+def test_query_context_names_the_skill_and_its_owner() -> None:
+    """【遗计】的询问窗口要写得出"1号位郭嘉对1号位郭嘉使用遗计"。
+
+    技能询问（``SKILL_ACTIVATION`` / ``SELECT_OPTION``）没有"使用的牌"，名字来自
+    ``skill_id``（可能是 ``hero.guojia.yiji`` 这样的命名空间 id，也可能是
+    ``yiji:give:0:0`` 这样的合成键）；作用者是技能持有者（= 询问的 actor），
+    目标也是他自己——这就是报障给的样例形状。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(), SeatSpec(hero="guojia")],
+        frame_kind=FrameKind.DAMAGE,
+        frame_data={"target": 1, "source": 0, "targets": (1,)},
+    )
+    query = SelectOptionQuery(
+        seq=1,
+        actor=1,
+        timing=Timing.DAMAGE_AFTER_TAKE,
+        prompt="请选择一项。",
+        legal_actions=(),
+        view=project(state, 1),
+        skill_id="yiji:give:0:0",
+        options=("seat:0", "seat:1"),
+    )
+
+    context = query_context(engine, query)
+
+    assert context is not None
+    assert context["label"] == "1号位郭嘉对1号位郭嘉使用遗计", context
+    assert context["name"] == "遗计"
+    assert context["targets"] == [1]
+
+
+def test_query_context_names_the_card_user_and_the_current_target() -> None:
+    """牌询问要写得出"0号位张飞对2号位貂蝉使用五谷丰登"（用**当前目标**，不是全部目标）。
+
+    多目标锦囊在 C 段逐目标结算，``RESOLVE`` 帧的 ``cursor`` 指向当前目标；
+    响应窗口（无懈）自带的 ``target`` 优先。这里用响应窗口的样例。
+    """
+    harvest = cards_of_type(_context_pack(), "harvest")[0]
+    engine, state = _context_fixture(
+        [SeatSpec(hero="zhangfei"), SeatSpec(), SeatSpec(hero="diaochan")],
+        frame_kind=FrameKind.RESOLVE,
+        frame_data=lambda s: {
+            "card": s.card(harvest),
+            "source": 0,
+            "targets": (1, 2),
+            "cursor": 1,
+        },
+    )
+    query = RespondQuery(
+        seq=2,
+        actor=2,
+        timing=Timing.RESOLVE_BEFORE_EFFECT,
+        prompt="响应窗口：请使用一张牌，或放弃。",
+        legal_actions=(),
+        view=project(state, 2),
+        cause=WindowCause.NULLIFY,
+        target=2,
+        window_frame=1,
+    )
+
+    context = query_context(engine, query)
+
+    assert context is not None
+    assert context["label"] == "0号位张飞对2号位貂蝉使用五谷丰登", context
+    assert context["name"] == "五谷丰登"
+    assert context["targets"] == [2]
+
+
+def test_the_pending_payload_carries_a_context_key() -> None:
+    """联动：``pending_payload`` 必须下发 ``context``（哪怕这一问没有可写的上下文 = ``None``）。"""
+    session = Session(seed=83, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    payload = pending_payload(session)
+
+    assert payload is not None
+    assert "context" in payload, "询问窗口的上下文是契约键，读不到只会静默退化"
+
+
+def test_option_seats_maps_seat_choices_and_ignores_the_rest() -> None:
+    """``option_seats`` 只把 ``seat:N`` 选项映射成座位；别的选项（弃牌 / 摸牌）不进。
+
+    界面据此把座位画成可点的（【遗计】"交给谁"），解析在服务端、前端只读数据。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(), SeatSpec(hero="guojia"), SeatSpec()],
+        frame_kind=FrameKind.DAMAGE,
+        frame_data={"target": 1, "source": 0, "targets": (1,)},
+    )
+    seat_query = SelectOptionQuery(
+        seq=1,
+        actor=1,
+        timing=Timing.DAMAGE_AFTER_TAKE,
+        prompt="请选择一项。",
+        legal_actions=(),
+        view=project(state, 1),
+        skill_id="yiji:give:0:0",
+        options=("seat:0", "seat:2"),
+    )
+    plain_query = SelectOptionQuery(
+        seq=2,
+        actor=1,
+        timing=Timing.USE_AFTER_DESIGNATE_TARGET,
+        prompt="请选择一项。",
+        legal_actions=(),
+        view=project(state, 1),
+        skill_id="equip.double_sword",
+        options=("discard_one", "draw_one"),
+    )
+
+    assert option_seats(seat_query) == {"seat:0": 0, "seat:2": 2}
+    assert option_seats(plain_query) == {}
+    assert option_seats(
+        RespondQuery(
+            seq=3,
+            actor=0,
+            timing=Timing.RESOLVE_BEFORE_EFFECT,
+            prompt="响应窗口：请使用一张牌，或放弃。",
+            legal_actions=(),
+            view=project(state, 0),
+            cause=WindowCause.NULLIFY,
+        )
+    ) == {}
+
+
+def test_query_context_reads_the_running_skill_for_a_watch_style_card_pick() -> None:
+    """【遗计】的"选哪张亮牌"窗口必须写"使用遗计"，**不能**写成造成伤害的那张牌。
+
+    这条询问是 ``SELECT_CARDS`` 且带了 ``revealed`` 授予（观看型选牌）：名字取栈顶帧的
+    ``running_skill``（谁在跑这个回调），而不是帧里的渠道牌。不这么分，窗口会写成
+    "0号位X对1号位郭嘉使用杀"——玩家会以为自己在响应【杀】。
+    """
+    slash = cards_of_type(_context_pack(), "slash")[0]
+    engine, state = _context_fixture(
+        [SeatSpec(), SeatSpec(hero="guojia")],
+        frame_kind=FrameKind.DAMAGE,
+        frame_data=lambda s: {
+            "card": s.card(slash),
+            "source": 0,
+            "targets": (1,),
+            "target": 1,
+            "running_skill": "hero.guojia.yiji",
+        },
+    )
+    granted = state.card(slash)
+    query = SelectCardsQuery(
+        seq=1,
+        actor=1,
+        timing=Timing.DAMAGE_AFTER_TAKE,
+        prompt="请从选择面里选择一张牌。",
+        legal_actions=(),
+        view=project(state, 1),
+        spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=True),
+        slots=(Slot(ref=ZoneRef(Zone.HAND, 1), card=granted),),
+        revealed=(granted,),
+    )
+
+    context = query_context(engine, query)
+
+    assert context is not None
+    assert context["label"] == "1号位郭嘉对1号位郭嘉使用遗计", context
+    assert context["name"] == "遗计"
+
+
+def test_query_context_falls_back_to_the_damage_source_for_a_dying_window() -> None:
+    """濒死求桃没有"使用的牌"，退化成"谁对谁造成了伤害"（否则这一问在窗口里没有上下文）。"""
+    engine, state = _context_fixture(
+        [SeatSpec(hero="zhangfei"), SeatSpec(hero="diaochan")],
+        frame_kind=FrameKind.DEATH,
+        frame_data={"target": 1, "dying": True, "damage_source": 0},
+    )
+    query = PeachQuery(
+        seq=3,
+        actor=1,
+        timing=Timing.NEAR_DEATH_AT,
+        prompt="座位 1 处于濒死状态：是否对其使用【桃】？",
+        legal_actions=(),
+        view=project(state, 1),
+        dying=1,
+    )
+
+    context = query_context(engine, query)
+
+    assert context is not None
+    assert context["label"] == "0号位张飞对1号位貂蝉造成伤害", context
+    assert context["targets"] == [1]
 
 
 def test_the_candidate_index_never_carries_rule_judgements() -> None:

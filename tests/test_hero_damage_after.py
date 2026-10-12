@@ -485,17 +485,23 @@ def test_yiji_sees_the_top_two_cards_and_gives_them_away_without_leaking_them():
     )
 
     assert _activation_count(engine, YIJI) == 1, "1 点伤害 ⇒ 只问一次"
-    assert len(players[1].selections) == 1
-    query = players[1].selections[0]
+    assert len(players[1].selections) == 2, "一次触发里两张亮牌**各选一次**"
+    first, second = players[1].selections
 
-    assert tuple(card.card_id for card in query.revealed) == top, "授予牌堆顶 2 张（自顶向下）"
-    assert query.view.deck_count == len(deck), "授予不改牌堆张数"
-    assert all(slot.card is not None for slot in query.slots), "观看的牌面在面内可见"
-    for record in engine.records:
-        if record.kind == "query" and record.query is not query:
-            assert record.query.revealed == (), "牌面只出现在被授予的那次询问里"
-    # **观看本身不产 delta**：授予的牌面只在上面那次询问的 ``revealed`` 里；带牌面的
-    # ``card_move`` 只有"交给"那一条（观看不搬牌）。
+    assert tuple(card.card_id for card in first.revealed) == top, "授予牌堆顶 2 张（自顶向下）"
+    assert first.view.deck_count == len(deck), "授予不改牌堆张数"
+    assert all(slot.card is not None for slot in first.slots), "观看的牌面在面内可见"
+    assert tuple(card.card_id for card in second.revealed) == (top[1],), (
+        "第二轮铺的是**本点剩余的那张亮牌**，不重新观看牌堆顶"
+    )
+    revealed_queries = [
+        record.query
+        for record in engine.records
+        if record.kind == "query" and record.query.revealed
+    ]
+    assert revealed_queries == [first, second], "牌面只出现在被授予的那两次选牌询问里"
+    # **观看本身不产 delta**：授予的牌面只在上面那两次询问的 ``revealed`` 里；带牌面的
+    # ``card_move`` 只有"交给"那两条（观看不搬牌）。
     moved = [
         tuple(card.card_id for card in record.cards)
         for record in engine.records
@@ -503,10 +509,10 @@ def test_yiji_sees_the_top_two_cards_and_gives_them_away_without_leaking_them():
         and record.delta_type == "card_move"
         and set(card.card_id for card in record.cards) & set(top)
     ]
-    assert moved == [(top[0],)], "观看不搬牌；只有'交给'那一条移动"
+    assert moved == [(top[0],), (top[1],)], "观看不搬牌；两张各有一条'交给'移动"
 
-    assert engine.state.player(1).hand == [top[0]], "选中那张进了郭嘉手里（结算后揭晓）"
-    assert engine.state.deck == list(deck[1:]), "被观看的牌离开牌堆顶，其余顺序不变"
+    assert engine.state.player(1).hand == [top[0], top[1]], "两张都进了郭嘉手里（结算后揭晓）"
+    assert engine.state.deck == list(deck[2:]), "被观看的牌离开牌堆顶，其余顺序不变"
     assert _total_cards(engine.state) == len(PACK.deck.cards), "牌守恒仍成立"
 
 
@@ -548,7 +554,7 @@ def test_declining_yiji_leaves_the_deck_untouched():
 
 
 def test_yiji_sees_a_fresh_top_two_on_each_damage_point():
-    """逐点 ⇒ 每一轮各看一次牌堆顶（上一轮拿走的牌不再出现）。"""
+    """逐点 ⇒ 每一轮各看一次牌堆顶（上一轮拿走的牌不再出现），且每点两张都发得出去。"""
     slash = _cards("slash")[0]
     deck = _deck_excluding(slash)
     state = build_state(
@@ -573,11 +579,13 @@ def test_yiji_sees_a_fresh_top_two_on_each_damage_point():
         ),
     )
 
-    assert len(players[1].selections) == 2, "2 点伤害 ⇒【遗计】问两轮"
-    first, second = players[1].selections
-    assert tuple(card.card_id for card in first.revealed) == deck[:2]
-    assert tuple(card.card_id for card in second.revealed) == deck[1:3], "第二轮看新的牌堆顶"
-    assert engine.state.player(1).hand == [deck[0], deck[1]]
+    assert len(players[1].selections) == 4, "2 点伤害 × 每点两张 ⇒ 四次选牌"
+    first_a, first_b, second_a, second_b = players[1].selections
+    assert tuple(card.card_id for card in first_a.revealed) == deck[:2]
+    assert tuple(card.card_id for card in first_b.revealed) == (deck[1],), "第一点的第二张"
+    assert tuple(card.card_id for card in second_a.revealed) == deck[2:4], "第二点看新的牌堆顶"
+    assert tuple(card.card_id for card in second_b.revealed) == (deck[3],), "第二点的第二张"
+    assert engine.state.player(1).hand == [deck[0], deck[1], deck[2], deck[3]]
     assert _total_cards(engine.state) == len(PACK.deck.cards)
 
 
@@ -738,6 +746,75 @@ def test_yiji_gives_the_card_to_the_chosen_character_not_always_the_owner():
         "交出去的牌必须落进被选中的角色手里"
     )
     assert top[0] not in engine.state.player(giver).hand, "不该还给持有者"
+
+
+def _yiji_plan(picks: list[int], seats: list[int]):
+    """按计划应答【遗计】的逐轮两问：``picks[i]`` 选面内第几张，``seats[i]`` 交给谁。
+
+    ``Scripted`` 传进来的 ``round_index`` 是**每类询问各自**的出现序号（选牌与选座各数各的），
+    故两个计划各按自己的下标取。
+    """
+
+    def respond(query, round_index):
+        if query.kind == "SELECT_OPTION":
+            return _yiji_give_to(seats[round_index])(query)
+        wanted = picks[round_index]
+        return next(
+            action
+            for action in query.legal_actions
+            if isinstance(action, SelectCards) and action.picks == (wanted,)
+        )
+
+    return respond
+
+
+def test_yiji_distributes_both_revealed_cards_within_one_damage_point():
+    """一次受伤触发亮 2 张 ⇒ **两张都要能各自选座交出**（本轮报障）。
+
+    报障原文：「展示的两张牌只能选择1张获得」。核实为真：``_yiji`` 一轮只处理一张，
+    下一轮的"观看"由**下一个伤害点**驱动——1 点伤害只有一轮，故第二张永远发不出去；
+    2 点伤害则第二轮**重新观看牌堆顶**（第一张已被移走）⇒ 两张亮牌被换成另一对。
+
+    判据：1 点伤害、亮出 ``top[0]`` / ``top[1]``；第一张交给座位 0，第二张交给座位 2。
+    """
+    slash = _cards("slash")[0]
+    deck = _deck_excluding(slash)
+    top = deck[:2]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hero="guojia"), SeatSpec()],
+        deck=deck,
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, amount=1, source=0),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    yiji_player = Scripted(_yiji_plan(picks=[0, 0], seats=[0, 2]))
+    players = [Scripted(), yiji_player, Scripted()]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.DAMAGE_END
+            for record in e.records
+        ),
+    )
+
+    assert top[0] in engine.state.player(0).hand, "第一张应交给座位 0"
+    assert top[1] in engine.state.player(2).hand, (
+        "第二张（仍是这次亮出的那张）必须也能交出——只能交一张说明一轮只处理一张"
+    )
+    assert top[0] not in engine.state.player(1).hand
+    assert top[1] not in engine.state.player(1).hand
+
+    faces = [[slot.card.name for slot in query.slots] for query in yiji_player.selections]
+    assert len(faces) == 2, f"一次 1 点伤害应有**两轮**选牌（两张各一次），实得 {faces}"
+    assert faces[1] == [engine.state.card(top[1]).name], (
+        f"第二轮的选择面必须是**剩余的那张亮牌**，而不是重新观看牌堆顶：{faces[1]}"
+    )
 
 
 def test_foreign_damage_does_not_offer_jianxiong_to_the_unhurt_owner():

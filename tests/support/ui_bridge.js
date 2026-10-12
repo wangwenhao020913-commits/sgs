@@ -17,6 +17,8 @@
     "cardIndex", "cardEntry", "cardSelectable", "isLegalCombo", "autoCombo",
     "pickerSeats", "pickerTargetHint", "toggleFocus", "selectTarget",
     "renderKind", "resetSelection", "isHandPick", "sameCombo", "HAND_PICK_KINDS", "needsPicker",
+    // 本轮报障：公开处理区（五谷亮牌）+ 询问上下文 + 遗计"交给谁"的座位点选
+    "selectOptionSeat",
   ];
   const out = {};
   for (const name of names) {

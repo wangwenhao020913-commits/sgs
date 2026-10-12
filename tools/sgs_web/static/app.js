@@ -317,6 +317,11 @@ function renderTable() {
   const focusEntry = state.focusCardId === null ? null : cardEntry(pendingNow, state.focusCardId);
   // 池就是"自己"一个座位（【无中生有】【桃】、装备牌）：不画座位高亮，免得看着像要打自己
   const selfOnly = targetsSelfOnly(focusEntry, snapshot.seat);
+  // `SELECT_OPTION` 的"选座位"形态（【遗计】的"交给谁"，服务端下发 `option_seats`）：
+  // 座位是**可点的**——点它就等于选中那条 `seat:N` 候选。选项串的解析在服务端。
+  const optionSeats = (pendingNow && pendingNow.option_seats) || {};
+  const optionChoiceAt = (seat) =>
+    Object.keys(optionSeats).find((choice) => Number(optionSeats[choice]) === Number(seat)) || null;
 
   const ring = $("t-seats");
   ring.innerHTML = "";
@@ -346,8 +351,24 @@ function renderTable() {
       if (seatState.selected || seatState.isTargetable) {
         box.addEventListener("click", () => selectTarget(player.seat));
       }
+    } else if (optionChoiceAt(player.seat)) {
+      // 选座位形态：只在座位上点，不在手牌上点（本窗口没有"选牌"这一步）。
+      box.classList.add("targetable");
+      box.setAttribute("data-seat", String(player.seat));
+      box.addEventListener("click", () => selectOptionSeat(player.seat));
     }
     ring.appendChild(box);
+  }
+
+  $("t-processing").innerHTML = "";
+  const processing = snapshot.processing || [];
+  if (!processing.length) {
+    const empty = document.createElement("span");
+    empty.className = "dim";
+    empty.textContent = "（空）";
+    $("t-processing").appendChild(empty);
+  } else {
+    for (const card of processing) $("t-processing").appendChild(cardChip(card, false, true));
   }
 
   $("t-hand-count").textContent = `${snapshot.self_hand.length} 张`;
@@ -446,6 +467,24 @@ function selectTarget(seat) {
   renderPending(state.view);
 }
 
+/** 点座位 = 选中那条 `seat:N` 的 `SELECT_OPTION` 候选（【遗计】的"交给谁"）。
+ *
+ * 服务端把 `seat:N` 解析成 `pending.option_seats`（{选项串: 座位}），界面只读这份数据，
+ * 不自己在客户端解析选项串。
+ */
+function selectOptionSeat(seat) {
+  const pending = state.view ? state.view.pending : null;
+  if (!pending || pending.kind !== "SELECT_OPTION") return;
+  const index = (pending.legal_actions || []).findIndex(
+    (action) => action.kind === "SelectOption" && action.choice === `seat:${seat}`,
+  );
+  if (index < 0) return;
+  state.selectedOption = index;
+  state.lastRejectReason = "";
+  renderTable();
+  renderPending(state.view);
+}
+
 /** 点手牌 = 设**焦点**；再点一次取消焦点并清空已选目标。
  *
  * 非手选询问（弃牌 / 排列 / 选择面 / 单选）里的手牌点击**不是手选**——那些路径由
@@ -497,6 +536,12 @@ function renderPending(view) {
   const pending = view.pending;
   $("t-options").innerHTML = "";
   $("t-prompt").textContent = pending ? pending.prompt : "（没有待应答的询问）";
+  // 询问窗口的"谁对谁做了什么"（服务端从结算栈顶帧派生；读不到就不写这一行）。
+  const contextNode = $("t-context");
+  if (contextNode) {
+    const label = pending && pending.context && pending.context.label;
+    contextNode.textContent = label ? `本窗口：${label}` : "";
+  }
   $("btn-submit").disabled = true;
   $("btn-cancel").disabled = true;
   $("t-choice").textContent = "";
@@ -710,7 +755,10 @@ function actionLabel(action) {
     return `发动技能 ${action.skill_id}${action.picks && action.picks.length ? `（选 ${action.picks.length} 张）` : ""}`;
   }
   if (action.kind === "SelectCards") return "选牌";
-  if (action.kind === "SelectOption") return `选项：${action.choice}`;
+  if (action.kind === "SelectOption") {
+    const seat = /^seat:(\d+)$/.exec(action.choice);
+    return seat ? `选择座位 ${seat[1]}` : `选项：${action.choice}`;
+  }
   if (action.kind === "ArrangeCards") return `排列（${action.order.length} 张）`;
   if (action.kind === "DiscardCards") return `弃牌（${(action.cards || []).length} 张）`;
   if (action.kind === "EndPhase") return "结束出牌阶段";
