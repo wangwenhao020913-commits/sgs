@@ -692,6 +692,61 @@ def test_query_context_falls_back_to_the_damage_source_for_a_dying_window() -> N
     assert context["targets"] == [1]
 
 
+def test_query_context_points_a_nullify_window_at_the_card_not_the_nullifier() -> None:
+    """无懈窗口的"目标"是被无懈的**那张牌**，不是无懈使用者自己（本轮报障）。
+
+    报障原文：「无懈可击的目标是卡牌，不是自己」。核实为真：无懈自身的 ``RESOLVE`` 帧
+    ``targets = ()``，"当前目标"因此退回 ``source``（= 无懈使用者），窗口上下文于是写成
+    "1号位对1号位使用无懈可击"——看起来像自己无懈自己。正确读法是顺着 ``cancel_target``
+    找到被无懈的那一层，把**原来那张牌**连同它的使用者 / 目标写进窗口。
+    """
+    from types import SimpleNamespace
+
+    pack = _context_pack()
+    trick = cards_of_type(pack, "ex_nihilo")[0]
+    nullify = cards_of_type(pack, "nullify")[0]
+    state = build_state(pack=pack, seats=[SeatSpec(), SeatSpec(), SeatSpec()])
+    stack = ResolutionStack()
+    stack.push(
+        Frame(
+            kind=FrameKind.RESOLVE,
+            data={"card": state.card(trick), "source": 0, "targets": (1,)},
+            frame_id=7,
+        )
+    )
+    stack.push(
+        Frame(
+            kind=FrameKind.RESOLVE,
+            data={
+                "card": state.card(nullify),
+                "source": 1,
+                "targets": (),
+                "cancel_target": (7, 1),
+            },
+            frame_id=8,
+        )
+    )
+    engine = SimpleNamespace(state=state, stack=stack)
+    query = RespondQuery(
+        seq=4,
+        actor=2,
+        timing=Timing.RESOLVE_BEFORE_EFFECT,
+        prompt="响应窗口：请使用一张牌，或放弃。",
+        legal_actions=(),
+        view=project(state, 2),
+        cause=WindowCause.NULLIFY,
+        target=1,
+        window_frame=8,
+    )
+
+    context = query_context(engine, query)
+
+    assert context is not None
+    assert context["label"] == "1号位使用【无懈可击】（抵消 0号位对1号位使用的【无中生有】）", context
+    assert context["name"] == "无懈可击"
+    assert context["targets"] == [1], "窗口仍要指向被无懈那张牌的目标座位"
+
+
 def test_the_candidate_index_never_carries_rule_judgements() -> None:
     """③ 索引无规则：它只聚合候选里已有的座位，不算距离 / 攻击范围 / 花色 / 体力 / 存活。
 

@@ -74,6 +74,11 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .seat .top { display: flex; justify-content: space-between; gap: 8px; }
 .seat .who { font-weight: 600; }
 .seat .small { font-size: 12px; color: var(--dim); }
+/* 场上装备区 / 判定区：逐座位画牌面（只写数量看不见"谁的判定区里是什么"）。 */
+.seat .cards.mini { margin-top: 4px; gap: 4px; }
+.seat .cards.mini .card { min-width: 46px; padding: 2px 6px; font-size: 12px; }
+.seat .cards.mini .card .n { font-weight: 500; }
+.seat .cards.mini[data-zone="judge"] .card { border-style: dashed; }
 .hp { letter-spacing: 1px; }
 
 .cards { display: flex; flex-wrap: wrap; gap: 6px; }

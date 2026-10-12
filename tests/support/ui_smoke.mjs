@@ -913,4 +913,109 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   !!optAction && optAction.kind === "SelectOption" && optAction.choice === "seat:2",
   JSON.stringify(optAction));
 
+/* ============ 本轮报障（合成局面）：场上装备/判定区可见 + 弃牌手选 + 效果区并栏 ============
+ *
+ * 三条都是**界面读法**的断言，故喂一份与服务端响应体同形的合成 `view`。
+ */
+
+// ① 场上每个座位的装备区 / 判定区都要画出**牌面**（不只是数量）。
+//    报障原文：「不可见场上装备区、判定区牌」——座位框只有"装备 N 判定 N"，
+//    而 `PlayerPublic.equip/judge` 早就逐座位下发了（`src/sgs/state/protocol.py`）。
+//    这也是「乐不思蜀在座次 2 却判定给座次 0」误判的根因：两个座位都摆着乐不思蜀时，
+//    看不见牌的人分不清哪张是谁的（真实对局 `s2` 里一张被过河拆桥拿走、另一张才判）。
+{
+  const zoneView = synthView({
+    kind: "PLAY_PHASE", actor: 0, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [], candidate_index: {}, context: null, option_seats: {},
+  });
+  zoneView.snapshot.players[0].equip = [synthCard(11, "八卦阵")];
+  zoneView.snapshot.players[0].judge = [synthCard(12, "闪电")];
+  zoneView.snapshot.players[1].judge = [synthCard(13, "乐不思蜀")];
+  ui.state.view = zoneView;
+  ui.resetSelection();
+  ui.renderTable();
+  const boxes = $("t-seats").children;
+  const zoneRow = (seat, zone) => {
+    const box = boxes[seat];
+    return box ? (box.children || []).find((c) => c.getAttribute && c.getAttribute("data-zone") === zone) : null;
+  };
+  const rowText = (seat, zone) => (zoneRow(seat, zone) ? zoneRow(seat, zone).text() : "");
+  check("㉿Q1 0 号位的装备区画出牌面【八卦阵】",
+    rowText(0, "equip").includes("八卦阵"), `装备行="${rowText(0, "equip")}"`);
+  check("㉿Q2 0 号位的判定区画出牌面【闪电】",
+    rowText(0, "judge").includes("闪电"), `判定行="${rowText(0, "judge")}"`);
+  check("㉿Q3 对手（1 号位）的判定区也画出牌面【乐不思蜀】",
+    rowText(1, "judge").includes("乐不思蜀"), `对手判定行="${rowText(1, "judge")}"`);
+  check("㉿Q4 装备/判定行的牌不可点（公开信息，不是我的选择）",
+    [zoneRow(0, "equip"), zoneRow(0, "judge"), zoneRow(1, "judge")]
+      .filter(Boolean)
+      .every((row) => (row.children || []).every((chip) => !(chip.listeners.click || []).length)));
+}
+
+// ② 弃牌阶段：从手牌点选，直到"未选张数 == 手牌上限"（= 选够 `pending.count` 张）。
+//    报障原文：「现在是很多很多选择，名称都是『弃牌（x张）』」——引擎把 C(n,k) 个组合
+//    逐条铺成按钮（`effects/actions.py:_discard`），界面照单全收。改为点手牌。
+{
+  const discard = {
+    kind: "DISCARD", actor: 0, seq: 50, timing: "PHASE_DISCARD",
+    prompt: "弃牌阶段：请弃置 1 张手牌。", count: 1,
+    legal_actions: [
+      { kind: "DiscardCards", answers_seq: 50, cards: [synthCard(1, "杀")] },
+      { kind: "DiscardCards", answers_seq: 50, cards: [synthCard(2, "闪")] },
+      { kind: "DiscardCards", answers_seq: 50, cards: [synthCard(3, "桃")] },
+    ],
+    candidate_index: {}, context: null, option_seats: {},
+  };
+  const discardView = synthView(discard);
+  discardView.snapshot.self_hand = [synthCard(1, "杀"), synthCard(2, "闪"), synthCard(3, "桃")];
+  ui.state.view = discardView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(discardView);
+  const clickHand = (index) => {
+    const chip = $("t-hand").children[index];
+    (chip.listeners.click || []).forEach((fn) => fn({ target: chip }));
+  };
+  check("㉿D1 弃牌阶段不再逐条铺『弃牌（N张）』按钮",
+    $("t-options").children.filter((b) => /弃牌（/.test(b.textContent || "")).length === 0,
+    `选项=${JSON.stringify($("t-options").children.map((b) => b.textContent))}`);
+  check("㉿D2 未选牌时不可提交", $("btn-submit").disabled === true && ui.buildAction() === null,
+    `disabled=${$("btn-submit").disabled} action=${JSON.stringify(ui.buildAction())}`);
+  clickHand(1);
+  check("㉿D3 点一张手牌 = 收进待弃置（picks 装 card_id）",
+    JSON.stringify(ui.state.picks) === "[2]", `picks=${JSON.stringify(ui.state.picks)}`);
+  const discardAction = ui.buildAction();
+  check("㉿D4 选够张数后可提交，且 buildAction 是候选里那一条",
+    $("btn-submit").disabled === false && !!discardAction
+      && discardAction.kind === "DiscardCards" && discardAction.cards[0].card_id === 2,
+    `disabled=${$("btn-submit").disabled} action=${JSON.stringify(discardAction)}`);
+  clickHand(0);
+  check("㉿D5 只该弃 1 张，选够后再点不超额",
+    JSON.stringify(ui.state.picks) === "[2]", `picks=${JSON.stringify(ui.state.picks)}`);
+  clickHand(1);
+  check("㉿D6 再点一次取消该牌，提交重新变灰",
+    JSON.stringify(ui.state.picks) === "[]" && $("btn-submit").disabled === true,
+    `picks=${JSON.stringify(ui.state.picks)} disabled=${$("btn-submit").disabled}`);
+}
+
+// ③ 效果区（处理区）与询问窗口同栏：两者息息相关（报障原文「放一起才对」）。
+//    用 index.html 的结构断言——DOM 垫片不建父子关系，故直接查源串的 section 归属。
+{
+  const sectionOf = (id) => {
+    const at = html.indexOf(`id="${id}"`);
+    if (at < 0) return "";
+    return html.slice(html.lastIndexOf("<section", at), html.indexOf("</section>", at));
+  };
+  const askSection = sectionOf("t-prompt");
+  check("㉿X1 效果区（#t-processing）与询问窗口（#t-prompt）在同一个 section",
+    askSection.includes('id="t-processing"') && askSection.includes('id="t-prompt"'),
+    `询问 section 含效果区=${askSection.includes('id="t-processing"')}`);
+  // 判定时点的人话：事件流里"判定开始 / 判定牌生效后 · 座位 N"读得出这次判定属于谁。
+  check("㉿X2 判定时点译成中文（判定开始 / 判定牌生效前 / 生效后）",
+    ui.timingLabel("JUDGE_ON") === "判定开始"
+      && ui.timingLabel("JUDGE_CARD_BEFORE_EFFECT") === "判定牌生效前"
+      && ui.timingLabel("JUDGE_CARD_AFTER_EFFECT") === "判定牌生效后",
+    `${ui.timingLabel("JUDGE_ON")} / ${ui.timingLabel("JUDGE_CARD_AFTER_EFFECT")}`);
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

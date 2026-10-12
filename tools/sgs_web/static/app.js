@@ -46,8 +46,9 @@ function phaseLabel(phase) {
 
 /** 走手选的询问类（本刀射程：出牌阶段 + 响应窗口）。
  *
- * 其余五类（弃牌 / 排列 / 选择面 / 技能发动 / 单选）**暂时**保留旧的候选列表按钮，
- * 等下一刀再抹平——这样本刀不会把已有功能砍掉。
+ * 弃牌阶段的交互是**另一条**手选路（点手牌收进待弃置集合，没有目标要选），
+ * 由 :func:`isDiscardPick` 单独认出来——它不进这里，免得 `pickerSeats` 去读候选索引。
+ * 其余四类（排列 / 选择面 / 技能发动 / 单选）保留旧的候选列表按钮。
  */
 const HAND_PICK_KINDS = ["PLAY_PHASE", "RESPOND", "DODGE"];
 
@@ -256,6 +257,11 @@ function isHandPick(pending) {
   return Boolean(pending) && HAND_PICK_KINDS.includes(pending.kind);
 }
 
+/** 弃牌阶段：点手牌 = 收进 / 移出待弃置集合（`picks` 装 **card_id**，与 `DiscardCards.cards` 同键）。 */
+function isDiscardPick(pending) {
+  return Boolean(pending) && pending.kind === "DISCARD";
+}
+
 /** 出牌阶段 / 响应窗口下"哪些座位此刻可点"（**数据**给的，不是 CSS 猜的）。
  *
  * 返回**池里的每一个座位**并标出它此刻是什么状态，而不是只返回"可点的那些"——
@@ -338,6 +344,7 @@ function renderTable() {
     }
     const hero = view.heroes[player.seat] || "（无武将）";
     const identity = player.identity ? ` · ${identityLabel(player.identity)}` : "";
+    box.setAttribute("data-seat", String(player.seat));
     box.innerHTML = `
       <div class="top">
         <span class="who">座位 ${player.seat}${player.seat === snapshot.seat ? "（我）" : ""}</span>
@@ -346,15 +353,24 @@ function renderTable() {
       <div class="small">${hero}${identity}</div>
       <div class="small">手牌 ${player.hand_count}　装备 ${player.equip.length}　判定 ${player.judge.length}</div>
       <div class="small">${player.alive ? "" : "已阵亡"}</div>`;
+    // 装备区 / 判定区是**公开信息且逐座位**（`PlayerPublic.equip/judge` 早就下发了）：
+    // 只写数量会让"谁的判定区里有乐不思蜀"看不见，进而把别人的判定误读成自己的。
+    for (const [zone, cards] of [["equip", player.equip || []], ["judge", player.judge || []]]) {
+      if (!cards.length) continue;
+      const row = document.createElement("div");
+      row.className = "cards mini";
+      row.setAttribute("data-zone", zone);
+      row.setAttribute("data-seat", String(player.seat));
+      for (const card of cards) row.appendChild(cardChip(card, false, true));
+      box.appendChild(row);
+    }
     if (seatState && !selfOnly) {
-      box.setAttribute("data-seat", String(player.seat));
       if (seatState.selected || seatState.isTargetable) {
         box.addEventListener("click", () => selectTarget(player.seat));
       }
     } else if (optionChoiceAt(player.seat)) {
       // 选座位形态：只在座位上点，不在手牌上点（本窗口没有"选牌"这一步）。
       box.classList.add("targetable");
-      box.setAttribute("data-seat", String(player.seat));
       box.addEventListener("click", () => selectOptionSeat(player.seat));
     }
     ring.appendChild(box);
@@ -373,15 +389,19 @@ function renderTable() {
 
   $("t-hand-count").textContent = `${snapshot.self_hand.length} 张`;
   const hand = $("t-hand");
+  const discardPick = isDiscardPick(pendingNow);
   hand.innerHTML = "";
   for (const card of snapshot.self_hand) {
+    if (discardPick) {
+      // 弃牌阶段：点手牌 = 收进 / 移出待弃置集合；只该弃 `count` 张，选够后剩下的不再给收。
+      const chosen = state.picks.includes(card.card_id);
+      const full = state.picks.length >= (pendingNow.count || 0);
+      hand.appendChild(cardChip(card, chosen, false, chosen || !full, () => toggleDiscardPick(card.card_id)));
+      continue;
+    }
     const usable = handPick ? cardSelectable(pendingNow, card.card_id) : cardUsable(pendingNow, card.card_id);
     hand.appendChild(cardChip(card, state.focusCardId === card.card_id, false, usable));
   }
-  $("t-equip").innerHTML = "";
-  for (const card of ownZone(snapshot, "equip")) $("t-equip").appendChild(cardChip(card, false, true));
-  $("t-judge").innerHTML = "";
-  for (const card of ownZone(snapshot, "judge")) $("t-judge").appendChild(cardChip(card, false, true));
   $("t-hero").textContent = view.heroes[snapshot.seat] || "（无武将）";
   renderSkills(view);
 }
@@ -430,16 +450,11 @@ function renderSkills(view) {
   }
 }
 
-function ownZone(snapshot, zone) {
-  const me = snapshot.players.find((player) => player.seat === snapshot.seat);
-  return me ? me[zone] : [];
-}
-
 function identityLabel(identity) {
   return { lord: "主公", loyalist: "忠臣", rebel: "反贼", traitor: "内奸" }[identity] || identity;
 }
 
-function cardChip(card, selected, isStatic, usable = true) {
+function cardChip(card, selected, isStatic, usable = true, onClick = null) {
   const chip = document.createElement("button");
   chip.type = "button";
   chip.className = "card";
@@ -447,8 +462,21 @@ function cardChip(card, selected, isStatic, usable = true) {
   if (isStatic) chip.classList.add("static");
   if (!isStatic && !usable) chip.classList.add("dis");
   chip.innerHTML = `<span class="n">${card.name}</span><span class="s">${card.suit || ""}${card.rank ?? ""}</span>`;
-  if (!isStatic) chip.addEventListener("click", () => toggleFocus(card.card_id));
+  // 静态牌（装备 / 判定 / 处理区）不可点；其余默认走"点牌设焦点"，弃牌阶段另给入口。
+  if (!isStatic) chip.addEventListener("click", onClick || (() => toggleFocus(card.card_id)));
   return chip;
+}
+
+/** 弃牌阶段：点手牌 = 收进 / 移出待弃置集合；收够 `pending.count` 张后不再多收。 */
+function toggleDiscardPick(cardId) {
+  const pending = state.view ? state.view.pending : null;
+  if (!isDiscardPick(pending)) return;
+  const at = state.picks.indexOf(cardId);
+  if (at >= 0) state.picks.splice(at, 1);
+  else if (state.picks.length < (pending.count || 0)) state.picks.push(cardId);
+  state.lastRejectReason = "";
+  renderTable();
+  renderPending(state.view);
 }
 
 /** 点座位 = 选 / 取消目标。**自动选中**的目标是确定态，点单个座位不取消它（spec D6）。 */
@@ -555,6 +583,7 @@ function renderPending(view) {
   const kind = renderKind(pending, actions);
 
   if (kind === "picker") renderPicker(pending);
+  else if (kind === "discard") renderDiscard(pending);
   else if (kind === "slots") {
     // 选择面也要**指到那条候选**：引擎只发一条 `SelectCards` 骨架，具体 `picks` 由
     // `buildAction()` 补上；不指过去它就没有可补的对象 ⇒ `buildAction()` 返回 null ⇒
@@ -584,6 +613,8 @@ function renderKind(pending, actions) {
   // 引擎为 `SELECT_CARDS` 只生成**一条**候选（`SelectCards` + 全部 picks 的组合是前端拼的），
   // 所以"只有一条候选"绝不能理解成"没什么可选的、直接提交"。
   if (pending.kind === "SELECT_CARDS") return "slots";
+  // 弃牌阶段：不铺候选按钮，点手牌收进待弃置集合（`buildAction` 按 picks 找候选）。
+  if (pending.kind === "DISCARD") return "discard";
   // **显式选中的候选优先**：技能按钮（`ActivateSkill`）在出牌阶段里与手选并存，
   // 点了它就等于"我就要发这个技能"，界面必须画那条候选的选中态，不能再画手选提示。
   if (state.selectedOption !== null && actions[state.selectedOption]) return "list";
@@ -633,6 +664,19 @@ function renderPicker(pending) {
   renderPickerAlternatives(pending);
 }
 
+/** 弃牌阶段：不铺候选按钮（引擎按 C(n,k) 枚举组合，会铺出几十个「弃牌（N张）」），
+ * 只提示"还要弃几张"，实际交互是 `renderTable` 里手牌的点选（`toggleDiscardPick`）。
+ * 提交态由 :func:`refreshSubmit` 统一算——`buildAction` 按 `picks` 反查那条候选。
+ */
+function renderDiscard(pending) {
+  const hint = $("t-target-hint");
+  if (hint) {
+    const need = pending.count || 0;
+    hint.textContent = `点手牌选要弃置的牌：共 ${need} 张（已选 ${state.picks.length} 张）。`;
+  }
+  $("btn-cancel").disabled = state.picks.length === 0;
+}
+
 function renderPickerAlternatives(pending) {
   const box = $("t-options");
   (pending.legal_actions || []).forEach((action, index) => {
@@ -671,6 +715,13 @@ function refreshSubmit(pending) {
   $("btn-submit").disabled = !ready;
   if (state.lastRejectReason) { $("t-choice").textContent = state.lastRejectReason; return; }
   if (blocked) { $("t-choice").textContent = blocked; return; }
+  if (isDiscardPick(pending)) {
+    const need = pending.count || 0;
+    $("t-choice").textContent = ready
+      ? "可以提交。"
+      : `还要选 ${Math.max(0, need - state.picks.length)} 张手牌弃置。`;
+    return;
+  }
   if (state.focusCardId !== null && isHandPick(pending)) {
     $("t-choice").textContent = ready ? "可以提交。" : pickerTargetHint(pending);
     return;
@@ -829,6 +880,18 @@ function buildAction() {
   const actions = pending.legal_actions;
   // 选择面的候选里**没有**具体 picks（引擎只发一条骨架），要按已点槽位补上。
   const withPicks = (action) => (action.kind === "SelectCards" ? Object.assign({}, action, { picks: state.picks.slice() }) : action);
+  // 弃牌阶段：候选带的是 `cards`（不是单张 `card`），按"已选手牌集合"反查那一条。
+  // 这条必须在 `directAction` **之前**：弃牌可能恰好只有一条候选（必须全弃），
+  // 但那也不该在玩家点牌之前就显示成"将提交"。
+  if (isDiscardPick(pending)) {
+    if (!state.picks.length) return null;
+    const mine = state.picks.slice().sort((a, b) => a - b).join(",");
+    return actions.find(
+      (candidate) =>
+        candidate.kind === "DiscardCards"
+        && (candidate.cards || []).map((card) => card.card_id).sort((a, b) => a - b).join(",") === mine,
+    ) || null;
+  }
   // 唯一且不需要选目标的候选（放弃 / 结束阶段 / 唯一的无目标响应牌）：直接就是它。
   // 这条必须在手选分支**之前**——`renderKind` 对同一个询问也返回 `direct`，
   // 否则界面显示"将提交：放弃"、而 `buildAction()` 在手选模式下因为没有焦点而返回 null。
@@ -985,6 +1048,12 @@ const TIMING_PREFIXES = [
   ["PHASE_PLAY", "出牌阶段"],
   ["PHASE_DISCARD", "弃牌阶段"],
   ["PHASE_FINISH", "结束阶段"],
+  // 判定帧的三个时点：逐字译出来，"这次判定属于哪个座位"才读得清
+  // （事件流的人话里带 `· 座位 N`，而 N 就是被判定者）。
+  ["JUDGE_CARD_BEFORE_EFFECT", "判定牌生效前"],
+  ["JUDGE_CARD_AFTER_EFFECT", "判定牌生效后"],
+  ["JUDGE_ON", "判定开始"],
+  ["JUDGE_", "判定"],
   ["TURN_", "回合"],
   ["GAME_", "开局"],
 ];

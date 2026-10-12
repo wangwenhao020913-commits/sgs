@@ -19,7 +19,7 @@ from typing import Any
 from sgs.data import load_content_pack, load_heroes
 from sgs.engine import record_json
 from sgs.skills import resolve_instances
-from sgs.state import Query, project
+from sgs.state import Query, WindowCause, project
 
 from .session import Session
 
@@ -165,6 +165,17 @@ def _skill_display_name(state: Any, skill_id: str) -> str | None:
     return None
 
 
+def _frame_targets(data: dict[str, Any]) -> list[int]:
+    """帧载荷里的**当前目标**：``targets[cursor]``；多目标结算逐目标取一个。"""
+    targets = tuple(data.get("targets", ()))
+    if not targets:
+        return []
+    cursor = data.get("cursor")
+    if isinstance(cursor, int) and 0 <= cursor < len(targets):
+        return [int(targets[cursor])]
+    return [int(seat) for seat in targets]
+
+
 def _context_targets(query: Query, data: dict[str, Any]) -> list[int]:
     """这次询问针对的座位：询问自带的 ``target`` / ``dying`` 优先，否则读栈顶帧的当前目标。
 
@@ -177,13 +188,32 @@ def _context_targets(query: Query, data: dict[str, Any]) -> list[int]:
     dying = getattr(query, "dying", None)
     if dying is not None:
         return [int(dying)]
-    targets = tuple(data.get("targets", ()))
-    if not targets:
-        return []
-    cursor = data.get("cursor")
-    if isinstance(cursor, int) and 0 <= cursor < len(targets):
-        return [int(targets[cursor])]
-    return [int(seat) for seat in targets]
+    return _frame_targets(data)
+
+
+def _nullified_frame(engine: Any, data: dict[str, Any]) -> dict[str, Any]:
+    """顺着帧私有 ``cancel_target`` 找到**被无懈的那一层**帧载荷。
+
+    无懈自身的 ``RESOLVE`` 帧 ``targets = ()``，"当前目标"退回 ``source``（= 无懈使用者），
+    于是嵌套无懈窗口会写成"1号位对1号位使用无懈可击"（看起来像自己无懈自己）。
+    无懈的载荷里记着它指向哪一层的哪个目标（``cancel_target``），故这里原地回溯——
+    嵌套多层的无懈会一路跳到最外层那张**牌**。找不到父帧时返回原载荷（fail-soft，不编话）。
+    """
+    frames = getattr(getattr(engine, "stack", None), "frames", ()) or ()
+    seen: set[int] = set()
+    while getattr(data.get("card"), "type", None) == "nullify":
+        cancel = data.get("cancel_target")
+        if not isinstance(cancel, tuple) or len(cancel) != 2:
+            return data
+        parent_id = cancel[0]
+        if parent_id in seen:
+            return data
+        seen.add(parent_id)
+        parent = next((frame for frame in frames if frame.frame_id == parent_id), None)
+        if parent is None:
+            return data
+        data = parent.data
+    return data
 
 
 def option_seats(query: Query) -> dict[str, int]:
@@ -248,6 +278,37 @@ def query_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
         if not targets:
             targets = [int(query.actor)]
     else:
+        # 无懈窗口的"目标"是**被无懈的那张牌**（报障：不能写成"自己"）。
+        # 顶层帧若本身就是一张【无懈可击】，它的 targets 为空、"当前目标"退回使用者，
+        # 直读会写成"1号位对1号位使用无懈可击"；顺着 cancel_target 回溯到被无懈的牌。
+        if (
+            getattr(query, "cause", None) is WindowCause.NULLIFY
+            and getattr(data.get("card"), "type", None) == "nullify"
+        ):
+            origin = _nullified_frame(engine, data)
+            origin_card = origin.get("card")
+            origin_name = getattr(origin_card, "name", None)
+            origin_source = origin.get("source")
+            origin_targets = _frame_targets(origin)
+            if origin_name is not None and origin_source is not None:
+                nullifier = data.get("source")
+                head = (
+                    f"{_seat_label(state, int(nullifier))}使用【无懈可击】"
+                    if nullifier is not None
+                    else "使用【无懈可击】"
+                )
+                source_label = _seat_label(state, int(origin_source))
+                if origin_targets:
+                    target_labels = "、".join(_seat_label(state, seat) for seat in origin_targets)
+                    held = f"{source_label}对{target_labels}使用的【{origin_name}】"
+                else:
+                    held = f"{source_label}使用的【{origin_name}】"
+                return {
+                    "actor": int(nullifier) if nullifier is not None else int(origin_source),
+                    "name": "无懈可击",
+                    "targets": [int(seat) for seat in origin_targets],
+                    "label": f"{head}（抵消 {held}）",
+                }
         name = getattr(data.get("card"), "name", None)
         source = data.get("source", query.actor)
         targets = _context_targets(query, data)
