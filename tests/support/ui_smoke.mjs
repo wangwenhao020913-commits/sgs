@@ -124,6 +124,24 @@ const setSelect = (id, value) => {
   node.value = value;
   (node.listeners.change || []).forEach((fn) => fn({ target: node }));
 };
+/** 重开一局并把它灌进界面（测试之间必须各自干净——状态污染会让断言指向上一局）。 */
+const openSession = async (body) => {
+  ui.state.sessionId = body.session_id;
+  ui.state.view = null;
+  ui.state.logRecords = [];
+  ui.state.cursor = -1;
+  ui.state.logSeq = 0;
+  ui.state.selectedCards = [];
+  ui.state.selectedOption = null;
+  ui.state.picks = [];
+  ui.state.lastRejectReason = "";
+  $("t-log").innerHTML = "";
+  ui.applyView(body);
+  return body;
+};
+const newSession = async (seed, extra = {}) => openSession(await post("/api/sessions", {
+  player_count: 8, ai: "random", human_seat: 0, timeout_seconds: null, seed, ...extra,
+}));
 const logText = () => $("t-log").text();
 const logCount = () => $("t-log").children.length;
 
@@ -198,6 +216,85 @@ if (unusable && ui.toggleCard) {
   check("㉿2e 清空选择后按钮仍不可点（没选中任何东西）", $("btn-submit").disabled === true);
 } else {
   check("㉿2 跳过：本局手里没有用不出的牌", true);
+}
+
+/* ============ ㉿ 红测试：技能按钮三态（刀 4 前端片） ============
+ *
+ * 用户要：每个技能一个按钮；主动技满足条件 = 绿色可点、不满足 = 深灰不可点；
+ * 锁定/被动技 = 银灰常暗（由引擎在时机上派发或弹询问）。
+ * 本片只渲染色态与可点性——**不新增引擎数据**：清单来自响应体的 `skills`（刀 4 后端片）。
+ */
+{
+  let skillCase = null;
+  for (const seed of [7, 11, 13, 17, 19, 23, 29, 31, 37, 41]) {
+    await newSession(seed);
+    for (let step = 0; step < 400 && ui.state.view.pending; step += 1) {
+      const pending = ui.state.view.pending;
+      const offered = (ui.state.view.skills || []).filter((s) => s.available);
+      if (pending.kind === "PLAY_PHASE" && pending.actor === 0 && offered.length > 0) {
+        // **就停在这个局面上**做断言（别再重开一局——那会把刚找到的前置丢掉）。
+        skillCase = { seed, offered, skills: ui.state.view.skills };
+        break;
+      }
+      ui.state.selectedOption = pending.legal_actions.findIndex((a) => a.kind === "EndPhase" || a.kind === "Pass");
+      if (ui.state.selectedOption < 0) ui.state.selectedOption = 0;
+      await ui.submitAction();
+    }
+    if (skillCase) break;
+  }
+  if (!skillCase) await newSession(7);   // 没找到前置时也留一个带技能的局面
+
+  check("㉿4a 锁定/被动技是银灰且**不可点**（引擎在时机上派发，点了没意义）", (() => {
+    const locked = ui.state.view.skills.filter((s) => s.locked);
+    if (!locked.length) return true;  // 该武将没有锁定技时不判
+    return locked.every((s) => {
+      const b = $("t-skills").children.find((c) => c.getAttribute && c.getAttribute("data-skill-id") === s.skill_id);
+      return b && b.classList.contains("locked") && b.disabled === true;
+    });
+  })(), `锁定技 ${ui.state.view.skills.filter((s) => s.locked).map((s) => s.name).join("、") || "（无）"}`);
+
+  check("㉿4b 当前不满足的主动技是深灰且不可点", (() => {
+    const off = ui.state.view.skills.filter((s) => !s.locked && !s.available);
+    if (!off.length) return true;
+    return off.every((s) => {
+      const b = $("t-skills").children.find((c) => c.getAttribute && c.getAttribute("data-skill-id") === s.skill_id);
+      return b && !b.classList.contains("ready") && b.disabled === true;
+    });
+  })(), `不可用主动技 ${ui.state.view.skills.filter((s) => !s.locked && !s.available).map((s) => s.name).join("、") || "（无）"}`);
+
+  check("㉿4 每个技能都渲染成一个按钮（清单来自响应体）", (() => {
+    const buttons = $("t-skills").children.filter((c) => c.tagName === "BUTTON");
+    const skills = ui.state.view.skills || [];
+    return skills.length > 0 && buttons.length === skills.length;
+  })(), `按钮 ${$("t-skills").children.filter((c) => c.tagName === "BUTTON").length} 个 / 清单 ${(ui.state.view.skills || []).length} 条`);
+
+  check("㉿4 找到一个技能可发动的前置", skillCase !== null, skillCase ? `seed=${skillCase.seed} 可发动=${skillCase.offered.map((s) => s.name).join("、")}` : "10 个种子内没找到");
+
+  if (skillCase) {
+    const target = skillCase.offered[0];
+    const button = $("t-skills").children.find((c) => c.getAttribute && c.getAttribute("data-skill-id") === target.skill_id);
+    check("㉿4c 可发动的技能是绿色高亮且**可点**",
+      !!button && button.classList.contains("ready") && button.disabled === false,
+      `按钮存在=${!!button} ready=${button && button.classList.contains("ready")} disabled=${button && button.disabled}`);
+    if (button) {
+      const beforeClick = ui.state.selectedOption;
+      (button.listeners.click || []).forEach((fn) => fn({ target: button }));
+      const pending = ui.state.view.pending;
+      const index = pending.legal_actions.findIndex((a) => a.kind === "ActivateSkill" && a.skill_id === target.skill_id);
+      check("㉿4d 点了它 = 选中那条 ActivateSkill 候选", ui.state.selectedOption === index && index >= 0,
+        `selectedOption=${ui.state.selectedOption} want=${index}（点击前 ${beforeClick}）`);
+      const before = calls.length;
+      await ui.submitAction();
+      const sent = calls.slice(before).find((c) => c.path.includes("/answer"));
+      const sentAction = sent && sent.body ? sent.body.action : null;
+      check("㉿4e 提交的正是那个技能的候选", sentAction !== null && sentAction.kind === "ActivateSkill" && sentAction.skill_id === target.skill_id,
+        `sent=${JSON.stringify(sentAction && { kind: sentAction.kind, skill_id: sentAction.skill_id })}`);
+    }
+  }
+
+  await openSession(await post("/api/sessions", {
+    player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261012,
+  }));
 }
 
 /* ============ ㉿ 红测试：同一张牌的多个目标要能点（刀 3） ============

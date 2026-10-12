@@ -104,3 +104,16 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .lose { color: var(--accent); font-weight: 600; }
 .banner { padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); margin: 8px 0; }
 .hidden { display: none; }
+
+/* 技能按钮三态（刀 4）：色相表类型、明暗表可用性。 */
+.skills { display: flex; flex-wrap: wrap; gap: 8px; }
+.skill {
+  border: 1px solid var(--line); border-radius: 8px; padding: 5px 11px; cursor: not-allowed;
+  background: #f0eeea; color: #8b867e; font: inherit;
+}
+.skill.locked { background: #e8e8ea; color: #7c7f88; border-color: #d3d4d9; }
+.skill.ready {
+  background: #e7f5ec; border-color: #1d6b3a; color: #14532b; font-weight: 600; cursor: pointer;
+}
+.skill.ready:hover { background: #d3ecdd; }
+.skill .kind { display: block; font-size: 11px; color: inherit; opacity: .75; }

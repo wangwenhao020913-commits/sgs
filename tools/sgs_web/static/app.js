@@ -210,6 +210,50 @@ function renderTable() {
   $("t-judge").innerHTML = "";
   for (const card of ownZone(snapshot, "judge")) $("t-judge").appendChild(cardChip(card, false, true));
   $("t-hero").textContent = view.heroes[snapshot.seat] || "（无武将）";
+  renderSkills(view);
+}
+
+/** 技能按钮：三态由**数据**决定（`locked` 表类型、`available` 表此刻能不能发动）。
+ *
+ * 纪律：不发动的技能**不给点**——它是"引擎在时机上自动派发/弹询问"的东西，
+ * 界面上点它没有意义。能用时点了就等于选它那条 `ActivateSkill` 候选。
+ */
+function renderSkills(view) {
+  const box = $("t-skills");
+  if (!box) return;
+  box.innerHTML = "";
+  const skills = view.skills || [];
+  if (!skills.length) {
+    box.innerHTML = '<span class="dim">（无武将，或本局未发放武将）</span>';
+    return;
+  }
+  const pending = view.pending;
+  for (const skill of skills) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "skill";
+    if (skill.locked) button.classList.add("locked");
+    if (skill.available) button.classList.add("ready");
+    button.disabled = !skill.available;
+    button.setAttribute("data-skill-id", skill.skill_id);
+    button.setAttribute("data-available", String(skill.available));
+    button.setAttribute("data-locked", String(skill.locked));
+    const kind = skill.locked ? "锁定技 / 被动" : (skill.skill_type === "LORD" ? "主公技" : "主动技");
+    button.innerHTML = `${skill.name}<span class="kind">${kind}${skill.available ? " · 可发动" : ""}</span>`;
+    if (skill.available && pending) {
+      const index = pending.legal_actions.findIndex((a) => a.kind === "ActivateSkill" && a.skill_id === skill.skill_id);
+      if (index >= 0) {
+        button.addEventListener("click", () => {
+          state.selectedOption = index;
+          state.selectedCards = [];
+          state.lastRejectReason = "";
+          renderTable();
+          renderPending(state.view);
+        });
+      }
+    }
+    box.appendChild(button);
+  }
 }
 
 function ownZone(snapshot, zone) {
