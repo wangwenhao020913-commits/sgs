@@ -237,6 +237,18 @@ check("对手座位不出现牌面名", !["杀", "闪", "桃", "无懈可击"].s
 check("种子已显示", $("t-seed").textContent === String(created.seed), $("t-seed").textContent);
 check("事件流已渲染开局记录", $("t-log").children.length > 0, `${$("t-log").children.length} 条`);
 
+// 牌堆 / 弃牌堆数量（服务端 `PlayerView` 早就下发了 `deck_count` 与 `discard`，界面此前没画）。
+check(
+  "牌堆数量已显示",
+  $("t-deck").textContent === String(created.snapshot.deck_count),
+  `实得 "${$("t-deck").textContent}"，期望 ${created.snapshot.deck_count}`,
+);
+check(
+  "弃牌堆数量已显示",
+  $("t-discard").textContent === String(created.snapshot.discard.length),
+  `实得 "${$("t-discard").textContent}"，期望 ${created.snapshot.discard.length}`,
+);
+
 /* ================= ㉿ 红测试：阶段可读性 + 事件流噪音（刀 1） =================
  *
  * 两条现在应当**失败**的断言：
@@ -376,6 +388,22 @@ if (partial) {
         `sent=${JSON.stringify(sentAction && { kind: sentAction.kind, skill_id: sentAction.skill_id })}`);
     }
   }
+
+  // 装备技能与武将技能**同列**（报障：装备技能此前整条不进清单，界面也就画不出按钮）。
+  // 这里直接喂一份含装备技能的清单给**真的** `renderSkills`，只检查渲染与标注；清单本身
+  // 由服务端 `build_skills` 提供（其"装备技能也要列"由 pytest 的 test_web.py 钉住）。
+  const realSkillsView = ui.state.view;
+  ui.renderSkills({ ...realSkillsView, skills: [
+    { skill_id: "hero.guanyu.wusheng", name: "武圣", skill_type: "NORMAL", locked: false, carrier: "HERO", available: true },
+    { skill_id: "equip.crossbow", name: "诸葛连弩", skill_type: "NORMAL", locked: true, carrier: "EQUIPMENT", available: false },
+  ] });
+  const mixedButtons = $("t-skills").children.filter((c) => c.tagName === "BUTTON");
+  check("㉿4f 装备技能与武将技能同列渲染", mixedButtons.length === 2, `按钮 ${mixedButtons.length} 个`);
+  const equipButton = mixedButtons.find((c) => c.getAttribute("data-skill-id") === "equip.crossbow");
+  check("㉿4f 装备技能标注为「装备技」且锁定态不可点",
+    !!equipButton && equipButton.text().includes("装备技") && equipButton.disabled === true,
+    equipButton ? equipButton.text() : "按钮缺失");
+  ui.renderSkills(realSkillsView);
 
   await openSession(await post("/api/sessions", {
     player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261012,

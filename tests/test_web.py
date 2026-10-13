@@ -747,6 +747,50 @@ def test_query_context_points_a_nullify_window_at_the_card_not_the_nullifier() -
     assert context["targets"] == [1], "窗口仍要指向被无懈那张牌的目标座位"
 
 
+def test_query_context_names_the_judged_character_for_a_delayed_trick() -> None:
+    """延时锦囊的无懈窗口要写得出"0号位吕布判定乐不思蜀（判定开始前）"（第 2 项报障）。
+
+    报障原文：「修复乐不思蜀在其他角色回合询问无懈可击的bug……应该是自身判定阶段开始时、
+    判定开始前询问」。引擎的**时机本来就是对的**（`_phase_judge` 只在回合角色自己的判定区
+    取牌、压在 `PHASE_JUDGE`、`JUDGE_ON` 之前）。真正的问题是提示：判定路径的 `RESOLVE`
+    帧 `source=None`，而 `query_context` 对 `source is None` 直接返回 `None` ⇒ 界面不写
+    "本窗口"，玩家只看见处理区一张【乐不思蜀】和另一名角色判定区里的另一张，就误以为在问
+    别人的牌。
+
+    判据：窗口上下文要点名**被判定者**与**牌名**；时机线索（判定开始前）也写进去。
+    """
+    indulgence = cards_of_type(_context_pack(), "indulgence")[0]
+    engine, state = _context_fixture(
+        [SeatSpec(hero="lvbu"), SeatSpec(hero="diaochan"), SeatSpec()],
+        frame_kind=FrameKind.RESOLVE,
+        frame_data=lambda s: {
+            "card": s.card(indulgence),
+            "source": None,
+            "targets": (0,),
+            "use_timing": Timing.PHASE_JUDGE,
+        },
+    )
+    query = RespondQuery(
+        seq=11,
+        actor=0,
+        timing=Timing.RESOLVE_BEFORE_EFFECT,
+        prompt="响应窗口：请使用一张牌，或放弃。",
+        legal_actions=(),
+        view=project(state, 0),
+        cause=WindowCause.NULLIFY,
+        required="nullify",
+        target=0,
+        window_frame=1,
+    )
+
+    context = query_context(engine, query)
+
+    assert context is not None, "判定窗口的上下文不能是 None（否则界面写不出'这是谁的牌'）"
+    assert context["label"] == "0号位吕布判定乐不思蜀（判定开始前）", context
+    assert context["name"] == "乐不思蜀"
+    assert context["targets"] == [0], "指向被判定者，不是别处"
+
+
 def test_the_candidate_index_never_carries_rule_judgements() -> None:
     """③ 索引无规则：它只聚合候选里已有的座位，不算距离 / 攻击范围 / 花色 / 体力 / 存活。
 
@@ -904,7 +948,36 @@ def test_every_skill_entry_carries_type_lock_and_availability() -> None:
         assert isinstance(entry["locked"], bool)
         assert isinstance(entry["available"], bool)
         assert entry["skill_type"] in ("NORMAL", "LORD")
-        assert entry["carrier"] == "HERO"
+        assert entry["carrier"] in ("HERO", "EQUIPMENT")
+
+
+def test_equipment_skills_are_listed_under_the_equipment_card_name() -> None:
+    """装备技能与武将技能**同列**：中文名 = 装备牌名、``carrier`` = ``EQUIPMENT``。
+
+    报障原文：「将装备技能也按照规则绘制按钮，和武将技能放在一起」。原实现按"武将面里
+    有没有这个短 id"取名，装备技能没有中文名 ⇒ 整条被 ``continue`` 掉（地图 D20 的旧登记）。
+    判据：给座位装一张【诸葛连弩】，清单里必须出现 ``equip.crossbow`` 且名字为"诸葛连弩"；
+    武将技能仍在同一份清单里。
+    """
+    from types import SimpleNamespace
+
+    pack = _context_pack()
+    crossbow = cards_of_type(pack, "crossbow")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero="guanyu", equip=(crossbow,))],
+    )
+    engine = Engine.from_state(state, seed=1)
+    entries = build_skills(SimpleNamespace(engine=engine, pending=None), 0)
+    by_id = {entry["skill_id"]: entry for entry in entries}
+
+    equip = by_id.get("equip.crossbow")
+    assert equip is not None, "装备技能必须出现在清单里（不再因没有中文名被略去）"
+    assert equip["name"] == "诸葛连弩", "中文名取装备牌名"
+    assert equip["carrier"] == "EQUIPMENT"
+    assert equip["locked"] is True, "【诸葛连弩】是锁定技"
+    assert equip["available"] is False, "没有 ActivateSkill 候选 ⇒ 不可点"
+    assert any(entry["carrier"] == "HERO" for entry in entries), "武将技能与它同列"
 
 
 def test_skills_never_leak_another_seats_inventory() -> None:
@@ -924,8 +997,8 @@ def test_skills_never_leak_another_seats_inventory() -> None:
 def test_the_lord_skill_gate_is_inherited_not_reimplemented() -> None:
     """主公技的门控**不在接入层**：清单直接读 `resolve_instances`，身份门控在引擎侧已兑现。
 
-    这里只钉一件事：清单里**没有**任何条目是我自己筛出来的——它恰等于
-    `resolve_instances` 里 `owner == seat` 的那些（装备技因暂无中文名被略去）。
+    这里钉两件事：清单里**没有**任何条目是我自己筛出来的——它恰等于 `resolve_instances`
+    里 `owner == seat` 的那些（装备技自本轮起也列，故不再有"被略去"的差集）。
     """
     from sgs.skills import resolve_instances
 
@@ -937,8 +1010,7 @@ def test_the_lord_skill_gate_is_inherited_not_reimplemented() -> None:
         if instance.owner == session.human_seat
     }
 
-    assert mine <= owners_instances, "清单里出现了不属于本座位的实例"
-    assert owners_instances - mine <= owners_instances, "（装备技暂不列，见地图 D20）"
+    assert mine == owners_instances, "清单必须逐条对应本座位的实例（不多不少）"
     assert mine, "人类座位应当有技能"
 
 

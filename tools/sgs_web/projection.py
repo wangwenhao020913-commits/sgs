@@ -20,6 +20,7 @@ from sgs.data import load_content_pack, load_heroes
 from sgs.engine import record_json
 from sgs.skills import resolve_instances
 from sgs.state import Query, WindowCause, project
+from sgs.timing import Timing
 
 from .session import Session
 
@@ -83,11 +84,15 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
         if instance.owner != seat:
             continue
         definition = instance.definition
-        # 没有中文名的只剩装备技能；它们由装备牌承载，先不列（地图 D20 登记）。
         short_id = instance.skill_id.rsplit(".", 1)[-1]
         name, skill_type = names.get(
             short_id, (None, getattr(definition.skill_type, "value", str(definition.skill_type)))
         )
+        if name is None and definition.skill_id.startswith("equip."):
+            # 装备技能没有**武将面**的名字：中文名取它所依附的**装备牌名**
+            # （``equip.crossbow`` → 诸葛连弩）。装备与武将技能同列，界面据 ``carrier``
+            # 分别标注（报障：装备技能此前整条被略去）。
+            name = _card_type_name(state, definition.skill_id[len("equip.") :])
         if name is None:
             continue
         out.append(
@@ -329,6 +334,17 @@ def query_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
             }
         return None
     if source is None:
+        # 判定路径的 ``RESOLVE`` 帧**没有使用者**（``source=None``，由 ``_phase_judge`` 压出），
+        # 但"被判定者"就在 ``targets`` 里。不点名他，界面只画一条通用提示——玩家看见处理区
+        # 一张【乐不思蜀】和另一名角色判定区里的另一张，就会以为在问**别人的**牌。
+        if targets and data.get("use_timing") is Timing.PHASE_JUDGE:
+            who = "、".join(_seat_label(state, int(seat)) for seat in targets)
+            return {
+                "actor": int(targets[0]),
+                "name": name,
+                "targets": [int(seat) for seat in targets],
+                "label": f"{who}判定{name}（判定开始前）",
+            }
         return None
 
     source_label = _seat_label(state, int(source))

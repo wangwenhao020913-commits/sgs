@@ -315,6 +315,10 @@ function renderTable() {
   $("t-turn").textContent = turnSeat === null || turnSeat === undefined
     ? "—"
     : `座位 ${turnSeat}${turnSeat === snapshot.seat ? "（我）" : ""}`;
+  // 牌堆 / 弃牌堆**数量**（服务端 `PlayerView` 只给牌堆数量、`discard` 按置入序给牌面，
+  // 都是公开事实；这里只画数量，不泄露牌堆顺序）。
+  $("t-deck").textContent = String(snapshot.deck_count ?? 0);
+  $("t-discard").textContent = String((snapshot.discard || []).length);
 
   const pendingNow = view.pending || null;
   const handPick = isHandPick(pendingNow);
@@ -431,7 +435,9 @@ function renderSkills(view) {
     button.setAttribute("data-skill-id", skill.skill_id);
     button.setAttribute("data-available", String(skill.available));
     button.setAttribute("data-locked", String(skill.locked));
-    const kind = skill.locked ? "锁定技 / 被动" : (skill.skill_type === "LORD" ? "主公技" : "主动技");
+    const kind = skill.carrier === "EQUIPMENT"
+      ? (skill.locked ? "装备技 / 锁定" : "装备技")
+      : (skill.locked ? "锁定技 / 被动" : (skill.skill_type === "LORD" ? "主公技" : "主动技"));
     button.innerHTML = `${skill.name}<span class="kind">${kind}${skill.available ? " · 可发动" : ""}</span>`;
     if (skill.available && pending) {
       const index = pending.legal_actions.findIndex((a) => a.kind === "ActivateSkill" && a.skill_id === skill.skill_id);
