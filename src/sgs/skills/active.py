@@ -17,11 +17,16 @@ A 族与其他族的形态差别只有一处：它的候选**不是某张牌的*
   在**候选生成期**就挡掉用过的技能（不是进池后拒绝）；复位走
   :func:`sgs.skills.reset_phase_skill_state`（引擎在 ``PHASE_PLAY_START`` 调用）。
 
-**组合上限闸**（票 04 §要做什么 3）：**两维相乘**的技能（【仁德】张数 × 目标、【青囊】
-1 张 × 目标、【离间】1 张 × 有序男性对、【结姻】2 张 × 目标）在 ``组合数 >
-CANDIDATE_CAP`` 时**降级为顺序多轮**——候选只保留"目标"这一维，张数由发动后的
-``SelectionSpec(sequential=True)`` 逐张询问补齐；**结果集合不变**（逐张给与一次给
-到达同一终局）。一维的 2ⁿ（【制衡】）与一维的目标对（【反间】）按票面**不设闸**。
+**组合上限闸**（票 04 §要做什么 3）：**两维相乘**的技能（【青囊】1 张 × 目标、【离间】
+1 张 × 有序男性对、【结姻】2 张 × 目标）在 ``组合数 > CANDIDATE_CAP`` 时**降级为顺序
+多轮**——候选只保留"目标"这一维，张数由发动后的 ``SelectionSpec(sequential=True)``
+逐张询问补齐；**结果集合不变**（逐张给与一次给到达同一终局）。一维的 2ⁿ（【制衡】）
+与一维的目标对（【反间】）按票面**不设闸**。
+
+**【仁德】是闸门的例外**（用户裁定）：它的前端交互是"直接多选手牌 + 直接点座位、一步
+交出去"，界面必须能一次提交"这组牌 → 这个座位"，故它**不降级**、非空子集 × 目标全部
+进池（手牌 8 张 × 7 目标约 1800 条候选，换掉闸门换来交互）。它同时**没有"出牌阶段限
+一次"**（规则 976）：``_can_offer(..., once_per_phase=False)``，每轮出牌阶段都在池里。
 
 **苦肉的形状**（裸发动 + 失去体力）：本模块不登记【苦肉】（黄盖不在 16 名名单，
 票 12 的 46 条计数也不含它），但机制支持——``ActivateSkill`` 的载荷可全空
@@ -143,12 +148,18 @@ def _chosen_seats(frame: Any) -> tuple[int, ...]:
     )
 
 
-def _can_offer(state: GameState, ctx: ModifierContext) -> bool:
-    """本技能此刻能不能进 PLAY 池：整段追加 + 本人 + 本阶段没用过。"""
+def _can_offer(state: GameState, ctx: ModifierContext, *, once_per_phase: bool = True) -> bool:
+    """本技能此刻能不能进 PLAY 池：整段追加 + 本人 + （可选）本阶段没用过。
+
+    ``once_per_phase=False`` 用于**没有"出牌阶段限一次"**的主动技（【仁德】：
+    规则 976 只给"任意数量"、没有次数上限），它每轮出牌阶段询问都该重新进池。
+    """
     if ctx.card is not None or ctx.owner != ctx.subject:
         return False
     if ctx.scope is not CandidateScope.PLAY:
         return False
+    if not once_per_phase:
+        return True
     return not (_phase_flags(state, ctx.owner, ctx.skill_id) & _USED)
 
 
@@ -298,24 +309,19 @@ def _zhiheng_activate(host: Any, frame: Any) -> Any:
 
 
 def _rende_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    if not _can_offer(state, ctx):
+    if not _can_offer(state, ctx, once_per_phase=False):
         return current
     hand = tuple(state.player(ctx.subject).hand)
     targets = tuple(p.seat for p in state.players if p.alive and p.seat != ctx.subject)
     if not hand or not targets:
         return current
-    if _over_cap(2 ** len(hand) - 1, len(targets)):
-        # 顺序降级：只烘"目标"这一维，张数由发动后的顺序选牌补齐（结果集合不变）。
-        offers = [
-            ActivateSkill(
-                skill_id=ctx.skill_id,
-                choices=(_seat_choice(target),),
-                answers_seq=ctx.answers_seq,
-            )
-            for target in targets
-        ]
-    else:
-        offers = [
+    # 【仁德】**不设组合闸**：它的前端交互是"直接多选手牌 + 直接点座位"，界面要能一次
+    # 提交"这组牌 → 这个座位"，所以每一组（非空子集 × 目标）都必须在候选里。
+    # 手牌 8 张 × 7 个目标约 1800 条候选（实测 ~227 KiB），在出牌阶段的可接受范围内；
+    # 换掉闸门换来的是"没有选项按钮、一步交出去"这条交互（用户裁定）。
+    return (
+        *current,
+        *(
             ActivateSkill(
                 skill_id=ctx.skill_id,
                 picks=picks,
@@ -325,8 +331,8 @@ def _rende_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
             for size in range(1, len(hand) + 1)
             for picks in combinations(hand, size)
             for target in targets
-        ]
-    return (*current, *offers)
+        ),
+    )
 
 
 def _give(
@@ -369,38 +375,15 @@ def _rende_activate(host: Any, frame: Any) -> Any:
     state = host.state
     owner = frame.data["source"]
     skill_id = frame.data["skill_id"]
-    _mark_phase(state, owner, skill_id, _USED)
+    # **不置 ``_USED``**：【仁德】没有"出牌阶段限一次"（规则 976）；本阶段只置
+    # ``_RECOVERED``（"首次给到第 2 张"回复一次）。
     target = _chosen_seats(frame)[0]
     picks = tuple(frame.data.get("picks", ()))
-    if picks:
-        if _give(host, frame, owner, target, picks, key="rende:cost") == "stay":
-            return "stay"
-        _rende_recover(host, frame, owner, skill_id, len(picks))
+    if not picks:  # pragma: no cover - 候选恒带非空 picks；此处只作 fail-soft
         return None
-    # 顺序降级：逐张问、可随时放弃；累计达到第 2 张时回复。
-    index = frame.data.get("round", 0)
-    while True:
-        picked = host.ask_selection(
-            frame,
-            key=f"rende:{index}",
-            actor=owner,
-            timing=Timing.PHASE_PLAY_IDLE,
-            spec=SelectionSpec(
-                zones=(Zone.HAND,), total=(1, 1), optional=True, sequential=True
-            ),
-            build_face=lambda: host.selection_face(owner, (Zone.HAND,), reveal_hand=True),
-        )
-        if host.suspended(picked):
-            return "stay"
-        if not picked:
-            break
-        if _give(host, frame, owner, target, picked, key=f"rende:{index}") == "stay":
-            return "stay"
-        index += 1
-        frame.data["round"] = index
-        if _rende_recover(host, frame, owner, skill_id, index):
-            # 先让回复帧结算完再继续问下一张（否则新询问会排在回复帧之前送达）。
-            return "stay"
+    if _give(host, frame, owner, target, picks, key="rende:cost") == "stay":
+        return "stay"
+    _rende_recover(host, frame, owner, skill_id, len(picks))
     return None
 
 

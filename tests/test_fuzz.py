@@ -260,6 +260,15 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
     _check_candidate_cap(record, seed, n)
 
 
+OVER_CAP_BY_DESIGN: frozenset[str] = frozenset({"hero.liubei.rende"})
+"""**按裁定**允许超过 ``CANDIDATE_CAP`` 的技能（本轮用户裁定，报障 2）。
+
+【仁德】的前端交互是"直接多选手牌 + 直接点座位、一次交出去"：界面要能一次提交
+"这组牌 → 这个座位"，所以它**不降级**、非空子集 × 目标全部进池（手牌一多必然超过 128；
+6 人局实测 315 条）。这不是漏降级，别的两维相乘技能本表里一个都没有。
+"""
+
+
 def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> None:
     """候选数上界（票 04 §验收 7 / `spec.md` §Testing Decisions / 票 14 §3）：≤ ``CANDIDATE_CAP``。
 
@@ -274,6 +283,8 @@ def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> Non
     合法地各有自己的候选，票 14 实测一局 6 手牌的【仁德】126 条 + 3 条普通候选 = 129 总数）；
     其余非技能候选按总数查。豁免表因此**仍有咬合力**：两维相乘的技能一旦忘了降级，它自己
     的那一组立刻判红（``test_the_candidate_cap_checker_catches_an_over_cap_two_dimensional_skill``）。
+    本轮另加一条**按裁定**的例外 :data:`OVER_CAP_BY_DESIGN`（【仁德】：界面要一次提交
+    "这组牌 → 这个座位"，故有意不降级），由 ``..._exempts_rende_by_design`` 钉住它只有一条。
     """
     if record is None or record.kind != "query":
         return
@@ -288,6 +299,10 @@ def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> Non
         else:
             others += 1
     for skill_id, count in by_skill.items():
+        if skill_id in OVER_CAP_BY_DESIGN:
+            # 【仁德】：**有意**超过上界（用户裁定）——界面要一次提交"这组牌 → 这个座位"，
+            # 故它不降级、非空子集 × 目标全进池。见该常量的说明。
+            continue
         if count > CANDIDATE_CAP:
             _fail(
                 seed,
@@ -881,15 +896,31 @@ def test_the_candidate_cap_checker_catches_an_over_cap_two_dimensional_skill():
 
     ``picks``（成本）与 ``choices``（目标）两个维度都在变的 ``ActivateSkill`` 是上界
     真正要管的形状；构造一组超过 128 的两维候选，检查器必须报错。
+    【仁德】是本轮**有意**豁免的例外，故这里换一条仍在闸下的两维技能（【结姻】）。
     """
     state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
     action = ActivateSkill(
-        skill_id="hero.liubei.rende", picks=(0,), choices=("seat:1",), answers_seq=1
+        skill_id="hero.sunshangxiang.jieyin", picks=(0,), choices=("seat:1",), answers_seq=1
     )
     record = _query_record(state, [action for _ in range(CANDIDATE_CAP + 1)])
 
     with pytest.raises(FuzzInvariantError, match="候选数"):
         _check_candidate_cap(record, 1, 2)
+
+
+def test_the_candidate_cap_checker_exempts_rende_by_design():
+    """【仁德】是本轮**唯一**的"按裁定超上界"技能：例外集合不许无声变宽。"""
+    assert OVER_CAP_BY_DESIGN == {"hero.liubei.rende"}, (
+        "超上界例外只该有【仁德】（用户裁定：界面要一次提交『这组牌 → 这个座位』）"
+    )
+
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    action = ActivateSkill(
+        skill_id="hero.liubei.rende", picks=(0,), choices=("seat:1",), answers_seq=1
+    )
+    over_cap = CANDIDATE_CAP + 1
+
+    _check_candidate_cap(_query_record(state, [action for _ in range(over_cap)]), 1, 2)  # 不抛 = 放行
 
 
 def test_the_candidate_cap_checker_exempts_the_one_dimensional_enumerations():

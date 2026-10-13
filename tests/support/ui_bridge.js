@@ -6,6 +6,11 @@
  * 做法：用 `eval` 按**名字**去作用域链上取——`const` / `function` 的绑定在 vm 的词法作用域里，
  * 未必是 vm 全局对象的属性（用 `name in globalThis` 会漏），而 `eval` 看得见它们；
  * 取不到就是 undefined，不抛错。
+ *
+ * **回放（报障 3）**：app.js 的 `applyView` / `submitAction` 现在会先播事件再提交视图。
+ * 烟测不跑真实计时器（`window.setTimeout` 是空实现），故这里把这两个入口包一层：
+ * 默认**立刻把回放跑完**（等价于"等动画播完再断言"），需要观察中间态的用例改用
+ * `applyViewRaw` / `submitActionRaw` 配合 `stepPlayback`。
  */
 {
   const names = [
@@ -19,11 +24,28 @@
     "renderKind", "resetSelection", "isHandPick", "sameCombo", "HAND_PICK_KINDS", "needsPicker",
     // 本轮报障：公开处理区（五谷亮牌）+ 询问上下文 + 遗计"交给谁"的座位点选
     "selectOptionSeat",
+    // 报障 2 / 4：主动技手选（【仁德】）与转化技来源索引（【龙胆】）
+    "cardAliases", "enterSkillMode", "toggleSkillCard", "selectSkillSeat", "toggleConvertSkill",
+    "seatChoices",
+    // 报障 3：事件回放（固定 0.5s 一步）+ 效果区逐事件派生
+    "flushPlayback", "stepPlayback", "renderProcessing", "applyEffectDelta", "EVENT_DELAY_MS",
   ];
   const out = {};
   for (const name of names) {
     const value = globalThis.eval(`typeof ${name} === "undefined" ? undefined : ${name}`);
     if (typeof value !== "undefined") out[name] = value;
   }
+  // 原始入口（不自动冲刷回放）：观察中间态的用例用它。
+  out.applyViewRaw = out.applyView;
+  const rawSubmit = out.submitAction;
+  out.applyView = (body) => {
+    out.applyViewRaw(body);
+    if (out.flushPlayback) out.flushPlayback();
+  };
+  out.submitAction = async (...args) => {
+    const result = rawSubmit ? await rawSubmit(...args) : undefined;
+    if (out.flushPlayback) out.flushPlayback();
+    return result;
+  };
   globalThis.__bridge = out;
 }

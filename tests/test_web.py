@@ -319,6 +319,28 @@ def test_mark_pending_does_not_restart_the_countdown() -> None:
     assert session.pending_since == 100.0
 
 
+def test_a_new_question_gets_a_fresh_deadline() -> None:
+    """**报障 1**：倒计时必须挂在**当前**询问上，换了询问就得重新起算。
+
+    否则第一次询问的 ``pending_since`` 会一直沿用到后面的每一次询问：人类思考超过
+    时限后按下提交，``answer()`` 里随后的 ``advance_clock`` 会拿旧戳去比新询问，
+    把刚产生的询问当场代答——出牌阶段里的表现就是「点了提交，出牌阶段直接结束」。
+    """
+    session = Session(seed=53, ai="random", timeout_seconds=10.0, **TWO_PLAYERS)
+    session.mark_pending(100.0)
+    first = session.pending
+    session.submit_answer(fallback_action(first))
+    assert session.pending is not None
+    assert session.pending.seq != first.seq, "提交后引擎推进到了新的询问"
+
+    # 人类思考 11 秒后才提交：answer() 会先 submit_answer、再 advance_clock。
+    session.mark_pending(111.0)
+
+    assert session.pending_since == 111.0, "新询问的倒计时从它出现的那一刻起算"
+    assert session.expire_if_due(111.0, fallback_action) is False, "刚出现的询问不该被立刻代答"
+    assert session.timeouts == 0
+
+
 # ---------------------------------------------------------------------------
 # 5. 可见面：不泄露（票 03；判据 2）
 # ---------------------------------------------------------------------------
@@ -472,6 +494,111 @@ def test_the_candidate_index_is_derived_from_the_legal_actions() -> None:
                 session.submit_answer(query.legal_actions[0])
 
     assert checked > 200, f"取样太少（{checked} 次询问），断言谈不上机械"
+
+
+# ---------------------------------------------------------------------------
+# 5c. 转化来源索引（报障 4）：点【闪】要命中"当【杀】"的那条虚拟候选
+# ---------------------------------------------------------------------------
+
+
+def _play_query(state, seat: int = 0):
+    """人为局面上的一个 ``PLAY_PHASE`` 询问（只为 ``build_skills`` / ``virtual_index`` 取样）。"""
+    from sgs.effects import legal_actions_for
+    from sgs.state import PlayPhaseQuery, QueryKind as _QueryKind
+
+    return PlayPhaseQuery(
+        seq=1,
+        actor=seat,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="",
+        legal_actions=legal_actions_for(state, seat, _QueryKind.PLAY_PHASE, answers_seq=1),
+        view=project(state, seat),
+    )
+
+
+def test_the_virtual_index_aliases_a_conversion_source_to_its_virtual_card() -> None:
+    """【龙胆】的【闪】→【杀】：界面按**实体【闪】**的 id 读得到那条虚拟候选。
+
+    不建这份别名，玩家点【闪】时按实体 id 查候选索引必然查空 ——【闪】被画成"用不出"，
+    这正是报障 4 截图里那张灰掉的【闪】。
+    """
+    from sgs_web.projection import virtual_index
+
+    pack = _context_pack()
+    dodge = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(dodge,), hero="zhaoyun"), SeatSpec(hand=())],
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    query = _play_query(engine.state)
+
+    aliases = virtual_index(query, engine.state)[str(dodge)]
+
+    assert len(aliases) == 1, "单来源转化：这张【闪】此刻只产出一张虚拟牌"
+    assert aliases[0]["skill_ids"] == ["hero.zhaoyun.longdan"]
+    entry = candidate_index(query)[str(aliases[0]["card_id"])]
+    assert entry["card"]["type"] == "slash", "别名指向的是那张虚拟【杀】"
+    assert entry["card"]["virtual_sources"] == [dodge], "虚拟牌的来源就是这张实体牌"
+
+
+def test_the_pending_payload_carries_the_virtual_source_index() -> None:
+    """跨线契约：``pending_payload`` 必须下发 ``virtual_index``（否则前端读不到）。"""
+    session = Session(seed=20261012, ai="random", timeout_seconds=None, player_count=8)
+
+    payload = pending_payload(session)
+
+    assert payload is not None
+    assert "virtual_index" in payload
+    assert isinstance(payload["virtual_index"], dict)
+
+
+def test_rende_skill_entry_takes_cards_then_a_seat_by_direct_clicks() -> None:
+    """报障 2：`ui.manual` 让界面走"直接多选手牌 → 直接点武将"，而不是铺选项按钮。"""
+    from types import SimpleNamespace
+
+    pack = _context_pack()
+    hand = (*cards_of_type(pack, "slash")[:2], cards_of_type(pack, "dodge")[0])
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=hand, hero="liubei"), SeatSpec(hand=())],
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, pending=_play_query(engine.state, 0))
+
+    entry = next(
+        item for item in build_skills(session, 0) if item["skill_id"] == "hero.liubei.rende"
+    )
+
+    assert entry["ui"]["manual"] is True
+    assert entry["ui"]["pick_cards"] == list(hand), "可选手牌就是本人手牌（按手牌序）"
+    assert entry["ui"]["pick_seats"] == [1], "可点座位是其他存活角色"
+    assert entry["ui"]["requirement"] == "交给一名其他角色任意张手牌"
+
+
+def test_longdan_skill_entry_lists_the_convertible_source_cards() -> None:
+    """报障 4：转牌没有 ``ActivateSkill`` 候选，界面靠 ``ui.convert_sources`` 让按钮点得动。"""
+    from types import SimpleNamespace
+
+    pack = _context_pack()
+    dodge = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(dodge,), hero="zhaoyun"), SeatSpec(hand=())],
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, pending=_play_query(engine.state, 0))
+
+    entry = next(
+        item for item in build_skills(session, 0) if item["skill_id"] == "hero.zhaoyun.longdan"
+    )
+
+    assert entry["available"] is False, "转牌不是 ActivateSkill 候选"
+    assert entry["ui"]["convert_sources"] == [dodge], "这张【闪】此刻当【杀】"
+    assert entry["ui"]["manual"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1060,11 +1187,31 @@ def test_the_session_view_carries_the_human_seats_skills() -> None:
 def test_every_skill_entry_carries_type_lock_and_availability() -> None:
     session = Session(seed=7, ai="heuristic", timeout_seconds=None, player_count=8)
     for entry in build_skills(session, session.human_seat):
-        assert set(entry) == {"skill_id", "name", "skill_type", "locked", "carrier", "available"}
+        assert set(entry) == {
+            "skill_id",
+            "name",
+            "skill_type",
+            "locked",
+            "carrier",
+            "available",
+            "ui",
+        }
         assert isinstance(entry["locked"], bool)
         assert isinstance(entry["available"], bool)
         assert entry["skill_type"] in ("NORMAL", "LORD")
         assert entry["carrier"] in ("HERO", "EQUIPMENT")
+        # `ui` 是**表现层契约**：改键名必须同时改 app.js 的读法（同候选索引的姿态）。
+        assert set(entry["ui"]) == {
+            "requirement",
+            "manual",
+            "pick_cards",
+            "pick_seats",
+            "convert_sources",
+        }, f"技能界面提示的键集合变了：{sorted(entry['ui'])}"
+        assert isinstance(entry["ui"]["manual"], bool)
+        assert isinstance(entry["ui"]["pick_cards"], list)
+        assert isinstance(entry["ui"]["pick_seats"], list)
+        assert isinstance(entry["ui"]["convert_sources"], list)
 
 
 def test_equipment_skills_are_listed_under_the_equipment_card_name() -> None:

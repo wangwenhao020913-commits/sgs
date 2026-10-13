@@ -134,7 +134,10 @@ class Session:
         self.cursor = 0
         self.session_log: list[SessionLogEntry] = []
         # 询问发出的接入层时刻；由 HTTP 层在用 pending 回话时打戳（超时判定的输入之一）。
+        # ``_pending_seq`` 记住这个时刻属于**哪一次**询问：询问换了就必须重新起算，
+        # 否则旧询问的时限会顺延到新询问上（报障 1：提交后新询问被当场代答）。
         self.pending_since: float | None = None
+        self._pending_seq: int | None = None
         self.timeouts = 0
 
         content = pack if pack is not None else load_content_pack()
@@ -190,13 +193,17 @@ class Session:
     def mark_pending(self, now: float) -> None:
         """给"当前挂起"打上接入层时刻（超时的起点）；``pending`` 为空时清掉。
 
-        幂等：同一个 pending 上重复打戳不刷新起点——否则每次轮询都会把倒计时重置，
-        超时永远不会到点。
+        幂等按**询问身份**（``seq``）而不是"有没有戳"：同一次询问上重复打戳不刷新起点
+        （否则每次轮询都会把倒计时重置，超时永远不会到点），但**换了询问**就从这一刻重新
+        起算——一次询问一个时限，前一次的思考时长不欠到后一次头上（报障 1）。
         """
-        if self.pending is None:
+        pending = self.pending
+        if pending is None:
             self.pending_since = None
-        elif self.pending_since is None:
+            self._pending_seq = None
+        elif self._pending_seq != pending.seq:
             self.pending_since = now
+            self._pending_seq = pending.seq
 
     @property
     def hero_assignments(self) -> tuple[str | None, ...]:
@@ -277,6 +284,7 @@ class Session:
             now, "timeout", seq=pending.seq, query_kind=pending.kind, answered=action.kind
         )
         self.pending_since = None
+        self._pending_seq = None
         self.drive()
         return True
 

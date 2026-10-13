@@ -52,6 +52,14 @@ function phaseLabel(phase) {
  */
 const HAND_PICK_KINDS = ["PLAY_PHASE", "RESPOND", "DODGE"];
 
+/** 事件回放的固定步长（毫秒）：每一条事件在事件流 / 效果区停留这么久。
+ *
+ * 报障 3：AI 一回合的结算在一次响应里全部返回，界面**一次性**画完，于是【杀】【闪】
+ * 【桃】在效果区一闪而过。改成逐条回放后，牌会在效果区停满一个步长。
+ * **严格顺序**（用户裁定）：这一批播完才提交新的快照与询问，故播放期间禁掉提交。
+ */
+const EVENT_DELAY_MS = 500;
+
 const state = {
   sessionId: null,
   cursor: -1,
@@ -60,11 +68,17 @@ const state = {
   focusCardId: null,   // **焦点**：正在挑目标的那张候选牌（再点一次取消）
   selectedTargets: [], // 已选目标座位
   selectedOption: null,// 旧路径：选中的 legal_action 下标（弃牌 / 排列 / 单选 / 技能）
-  picks: [],           // SELECT_CARDS 选中的槽位下标
+  picks: [],           // 手选槽位下标 / 弃牌 card_id / 主动技手选的 card_id
+  skillMode: null,     // 主动技"多选手牌 → 点座位"模式（【仁德】）：{skillId,name,requirement,cards,seats}
+  skillSeat: null,     // 上面那个模式里已点中的座位
+  convertSkill: null,  // 转化技"挑来源牌"模式（【龙胆】）：正在等玩家点一张可转化的手牌
+  playback: null,      // 事件回放：{body, records, index, querySeat}
+  effectCards: [],     // 回放期间效果区里当前可见的牌（由 card_move delta 派生）
   timer: null,
   runs: [],
   replay: null,
   logRecords: [],
+  lastQuerySeat: null, // 事件流里"上一条询问的 actor"（action 记录靠它归属）
   lastRejectReason: "",   // 已收到的全部下发记录（切换详略时重画用）
 };
 
@@ -143,18 +157,118 @@ async function startGame(event) {
 
 /* ------------------------------------------------ 会话视图的接收与应用 */
 
+let playbackTimer = null;
+
+/** 收到一份新视图：**有事件就先回放**，播完再提交快照与询问（报障 3 的严格顺序）。
+ *
+ * 回放期间 ``state.view`` 仍是**上一条**视图、提交按钮是灰的——用户看到的是事件一条条
+ * 发生，而不是"画面直接跳到结算完"。没有事件（纯刷新）就直接提交。
+ */
 function applyView(body) {
+  if (state.playback) flushPlayback();
+  const incoming = body.records || [];
+  const first = state.view === null;
+  if (!incoming.length) {
+    commitView(body);
+    return;
+  }
+  const previous = state.view && state.view.snapshot ? state.view.snapshot.processing || [] : [];
+  state.effectCards = previous.slice();
+  state.playback = { body, records: incoming, index: 0, querySeat: state.lastQuerySeat };
+  $("btn-submit").disabled = true;
+  $("btn-cancel").disabled = true;
+  $("t-choice").textContent = "";
+  // 第一条也等满一个步长再出现：每个事件之间的间隔就是固定的 EVENT_DELAY_MS。
+  playbackTimer = window.setTimeout(() => stepPlayback(false), EVENT_DELAY_MS);
+  // **开局**是唯一不等节奏的：此前牌桌上一片空白，逐条播开局事件只是空屏五秒。
+  // 直接把记录走完（日志照收），让牌桌立刻有局面可看。
+  if (first) flushPlayback();
+}
+
+/** 回放一步：画一条事件（事件流 + 效果区），然后排下一步。
+ *
+ * ``immediate`` = 测试 / 批量冲刷用：不排计时器，由 :func:`flushPlayback` 直接连跑。
+ */
+function stepPlayback(immediate) {
+  const playback = state.playback;
+  if (!playback) return;
+  if (playback.index >= playback.records.length) {
+    finishPlayback();
+    return;
+  }
+  const record = playback.records[playback.index];
+  if (record.kind === "query") {
+    playback.querySeat = record.query.actor;
+    state.lastQuerySeat = record.query.actor;
+  }
+  state.logRecords.push(record);
+  appendLog(record, playback.querySeat);
+  applyEffectDelta(record);
+  renderProcessing();
+  const logNode = $("t-log");
+  if (logNode.lastChild) logNode.lastChild.scrollIntoView({ block: "nearest" });
+  playback.index += 1;
+  if (!immediate) playbackTimer = window.setTimeout(() => stepPlayback(false), EVENT_DELAY_MS);
+}
+
+/** 把整批回放**立刻**跑完（测试与"收到新视图前先收尾"用）。 */
+function flushPlayback() {
+  if (playbackTimer !== null) {
+    if (window.clearTimeout) window.clearTimeout(playbackTimer);
+    playbackTimer = null;
+  }
+  let guard = 0;
+  while (state.playback && guard < 100000) {
+    stepPlayback(true);
+    guard += 1;
+    if (playbackTimer !== null) {
+      if (window.clearTimeout) window.clearTimeout(playbackTimer);
+      playbackTimer = null;
+    }
+  }
+}
+
+function finishPlayback() {
+  const playback = state.playback;
+  if (!playback) return;
+  state.playback = null;
+  if (playbackTimer !== null) {
+    if (window.clearTimeout) window.clearTimeout(playbackTimer);
+    playbackTimer = null;
+  }
+  commitView(playback.body);
+}
+
+/** 效果区的逐事件派生：``card_move`` 进 / 出处理区时增删牌面。
+ *
+ * 处理区是**公开区**（`snapshot.processing`），但一次响应只给**终态**；回放期间要看见
+ * 【杀】【闪】【桃】停在里面，只能顺着增量把牌挪进挪出。
+ */
+function applyEffectDelta(record) {
+  if (!record || record.kind !== "delta" || record.delta_type !== "card_move") return;
+  const cards = record.cards || [];
+  const from = record.from_zone || {};
+  const to = record.to_zone || {};
+  if (from.zone === "processing") {
+    const ids = new Set(cards.map((card) => card.card_id));
+    state.effectCards = state.effectCards.filter((card) => !ids.has(card.card_id));
+  }
+  if (to.zone === "processing") {
+    for (const card of cards) {
+      if (!state.effectCards.some((held) => held.card_id === card.card_id)) state.effectCards.push(card);
+    }
+  }
+}
+
+/** 提交这份视图：装快照 / 游标，重画牌桌与询问（回放播完后的落点）。 */
+function commitView(body) {
   state.view = body;
   state.cursor = body.cursor;
   state.logSeq = body.log_seq;
   $("t-seed").textContent = String(body.seed);
   $("t-seat").textContent = String(body.human_seat);
   $("btn-takeover").hidden = body.finished;
-  state.logRecords = (state.logRecords || []).concat(body.records || []);
-  for (const record of body.records) {
-    if (record.kind === "query") state.logQuerySeat = record.query.actor;
-    appendLog(record, state.logQuerySeat);
-  }
+  state.effectCards = (body.snapshot && body.snapshot.processing) || [];
   // 新询问到达 ⇒ 未提交的选择一律作废（spec D14：不弹确认、不尝试提交）。
   resetSelection();
   renderTable();
@@ -175,17 +289,20 @@ function applyView(body) {
   renderPending(body);
 }
 
-/** 清空全部未提交的选择（焦点 / 已选目标 / 旧路径的候选与槽位）。 */
+/** 清空全部未提交的选择（焦点 / 已选目标 / 旧路径的候选与槽位 / 主动技手选模式）。 */
 function resetSelection() {
   state.focusCardId = null;
   state.selectedTargets = [];
   state.selectedOption = null;
   state.picks = [];
+  state.skillMode = null;
+  state.skillSeat = null;
+  state.convertSkill = null;
   state.lastRejectReason = "";
 }
 
 async function refresh() {
-  if (!state.sessionId) return;
+  if (!state.sessionId || state.playback) return;
   try {
     const body = await api(`/api/sessions/${state.sessionId}?after=${state.cursor}&logs=${state.logSeq}`);
     applyView(body);
@@ -212,8 +329,30 @@ function cardIndex(pending) {
   return (pending && pending.candidate_index) || {};
 }
 
+/** 这张**实体手牌**能转化出的虚拟牌候选（服务端 `pending.virtual_index`）。
+ *
+ * 转化技（【龙胆】）的候选里带的 ``card`` 是虚拟牌（``card_id < 0``），而手牌区渲染的是
+ * 实体牌；服务端按"实体来源 id → [{card_id, skill_ids}]"下发了别名索引，界面只读它。
+ */
+function cardAliases(pending, cardId) {
+  const map = (pending && pending.virtual_index) || {};
+  return map[String(cardId)] || [];
+}
+
+/** 这张牌此刻的候选条目：先看它自己，再看**转化别名**（单来源、必要时限定当前技能）。
+ *
+ * 返回的 ``entry.card`` 可能是虚拟牌——它才是要提交的那张；焦点仍是玩家点的**实体牌**，
+ * 故 :func:`buildAction` 按 ``entry.card.card_id`` 找候选，而不是按焦点 id。
+ */
 function cardEntry(pending, cardId) {
-  return cardIndex(pending)[String(cardId)] || null;
+  const direct = cardIndex(pending)[String(cardId)] || null;
+  if (direct) return direct;
+  let aliases = cardAliases(pending, cardId);
+  if (state.convertSkill !== null) {
+    aliases = aliases.filter((alias) => (alias.skill_ids || []).includes(state.convertSkill));
+  }
+  if (aliases.length !== 1) return null;
+  return cardIndex(pending)[String(aliases[0].card_id)] || null;
 }
 
 /** 这张牌此刻点不点得动：候选索引里有它才有候选（唯一判据，不读规则）。 */
@@ -342,9 +481,23 @@ function renderTable() {
     if (!player.alive) box.classList.add("dead");
     if (player.seat === snapshot.turn_seat) box.classList.add("turn");
     const seatState = seatOf(player.seat);
-    if (handPick && !selfOnly) {
+    const optionChoice = optionChoiceAt(player.seat);
+    const optionSelected = optionChoice !== null
+      && state.selectedOption !== null
+      && (pendingNow.legal_actions[state.selectedOption] || {}).choice === optionChoice;
+    if (state.skillMode) {
+      // 主动技手选（【仁德】）：候选座位由技能清单下发；点它就是"把选好的牌交给他"。
+      if (state.skillMode.seats.includes(player.seat)) {
+        if (state.skillSeat === player.seat) box.classList.add("tsel");
+        else box.classList.add("targetable");
+      }
+    } else if (handPick && !selfOnly) {
       if (seatState && seatState.selected) box.classList.add("tsel");
       else if (seatState && seatState.isTargetable) box.classList.add("targetable");
+    } else if (optionChoice !== null) {
+      // 选座位形态（【遗计】"交给谁"）：座位可点，选中的那座画成确定态。
+      if (optionSelected) box.classList.add("tsel");
+      else box.classList.add("targetable");
     }
     const hero = view.heroes[player.seat] || "（无武将）";
     const identity = player.identity ? ` · ${identityLabel(player.identity)}` : "";
@@ -368,28 +521,22 @@ function renderTable() {
       for (const card of cards) row.appendChild(cardChip(card, false, true));
       box.appendChild(row);
     }
-    if (seatState && !selfOnly) {
+    if (state.skillMode) {
+      if (state.skillMode.seats.includes(player.seat)) {
+        box.addEventListener("click", () => selectSkillSeat(player.seat));
+      }
+    } else if (seatState && !selfOnly) {
       if (seatState.selected || seatState.isTargetable) {
         box.addEventListener("click", () => selectTarget(player.seat));
       }
     } else if (optionChoiceAt(player.seat)) {
       // 选座位形态：只在座位上点，不在手牌上点（本窗口没有"选牌"这一步）。
-      box.classList.add("targetable");
       box.addEventListener("click", () => selectOptionSeat(player.seat));
     }
     ring.appendChild(box);
   }
 
-  $("t-processing").innerHTML = "";
-  const processing = snapshot.processing || [];
-  if (!processing.length) {
-    const empty = document.createElement("span");
-    empty.className = "dim";
-    empty.textContent = "（空）";
-    $("t-processing").appendChild(empty);
-  } else {
-    for (const card of processing) $("t-processing").appendChild(cardChip(card, false, true));
-  }
+  renderProcessing();
 
   $("t-hand-count").textContent = `${snapshot.self_hand.length} 张`;
   const hand = $("t-hand");
@@ -403,11 +550,37 @@ function renderTable() {
       hand.appendChild(cardChip(card, chosen, false, chosen || !full, () => toggleDiscardPick(card.card_id)));
       continue;
     }
+    if (state.skillMode) {
+      // 主动技手选：只让技能声明的可选手牌可点，点它 = 收进 / 移出待给集合。
+      const choosable = state.skillMode.cards.includes(card.card_id);
+      const chosen = state.picks.includes(card.card_id);
+      hand.appendChild(cardChip(card, chosen, false, choosable, () => toggleSkillCard(card.card_id)));
+      continue;
+    }
     const usable = handPick ? cardSelectable(pendingNow, card.card_id) : cardUsable(pendingNow, card.card_id);
     hand.appendChild(cardChip(card, state.focusCardId === card.card_id, false, usable));
   }
   $("t-hero").textContent = view.heroes[snapshot.seat] || "（无武将）";
   renderSkills(view);
+}
+
+/** 效果区 / 处理区：回放期间画**逐事件派生**的那份（看得见【杀】【闪】【桃】停留），
+ * 否则画快照里的公开处理区。 */
+function renderProcessing() {
+  const box = $("t-processing");
+  if (!box) return;
+  box.innerHTML = "";
+  const cards = state.playback
+    ? state.effectCards
+    : ((state.view && state.view.snapshot && state.view.snapshot.processing) || []);
+  if (!cards.length) {
+    const empty = document.createElement("span");
+    empty.className = "dim";
+    empty.textContent = "（空）";
+    box.appendChild(empty);
+    return;
+  }
+  for (const card of cards) box.appendChild(cardChip(card, false, true));
 }
 
 /** 技能按钮：三态由**数据**决定（`locked` 表类型、`available` 表此刻能不能发动）。
@@ -426,20 +599,35 @@ function renderSkills(view) {
   }
   const pending = view.pending;
   for (const skill of skills) {
+    const ui = skill.ui || {};
+    const convertCards = ui.convert_sources || [];
+    const usable = Boolean(skill.available) || convertCards.length > 0;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "skill";
     if (skill.locked) button.classList.add("locked");
-    if (skill.available) button.classList.add("ready");
-    button.disabled = !skill.available;
+    if (usable) button.classList.add("ready");
+    button.disabled = !usable;
     button.setAttribute("data-skill-id", skill.skill_id);
     button.setAttribute("data-available", String(skill.available));
+    button.setAttribute("data-usable", String(usable));
     button.setAttribute("data-locked", String(skill.locked));
+    if (ui.manual) button.setAttribute("data-manual", "true");
+    if (convertCards.length) button.setAttribute("data-convert", String(convertCards.length));
     const kind = skill.carrier === "EQUIPMENT"
       ? (skill.locked ? "装备技 / 锁定" : "装备技")
       : (skill.locked ? "锁定技 / 被动" : (skill.skill_type === "LORD" ? "主公技" : "主动技"));
-    button.innerHTML = `${skill.name}<span class="kind">${kind}${skill.available ? " · 可发动" : ""}</span>`;
-    if (skill.available && pending) {
+    const badge = ui.manual ? " · 点它选牌" : (convertCards.length ? " · 点它转化" : (skill.available ? " · 可发动" : ""));
+    button.innerHTML = `${skill.name}<span class="kind">${kind}${badge}</span>`;
+    if (state.playback) {
+      // 回放期间不接任何操作（严格顺序：这批事件播完才轮到下一次询问）。
+    } else if (usable && pending && ui.manual) {
+      // 主动技手选（【仁德】）：点它进入"多选手牌 → 点场上武将"的模式，不直接提交候选。
+      button.addEventListener("click", () => enterSkillMode(skill));
+    } else if (usable && pending && convertCards.length) {
+      // 转化技（【龙胆】）：点它进入"挑一张来源牌"的模式（再点一次退出）。
+      button.addEventListener("click", () => toggleConvertSkill(skill));
+    } else if (skill.available && pending) {
       const index = pending.legal_actions.findIndex((a) => a.kind === "ActivateSkill" && a.skill_id === skill.skill_id);
       if (index >= 0) {
         button.addEventListener("click", () => {
@@ -454,6 +642,65 @@ function renderSkills(view) {
     }
     box.appendChild(button);
   }
+}
+
+/** 进入主动技手选模式（【仁德】：候选带 picks + 唯一目标）。 */
+function enterSkillMode(skill) {
+  const ui = skill.ui || {};
+  state.skillMode = {
+    skillId: skill.skill_id,
+    name: skill.name,
+    requirement: ui.requirement || "",
+    cards: (ui.pick_cards || []).slice(),
+    seats: (ui.pick_seats || []).slice(),
+  };
+  state.skillSeat = null;
+  state.picks = [];
+  state.focusCardId = null;
+  state.selectedTargets = [];
+  state.selectedOption = null;
+  state.convertSkill = null;
+  state.lastRejectReason = "";
+  renderTable();
+  renderPending(state.view);
+}
+
+/** 点手牌：收进 / 移出"要交出去的牌"。 */
+function toggleSkillCard(cardId) {
+  if (state.playback || !state.skillMode) return;
+  if (!state.skillMode.cards.includes(cardId)) return;
+  const at = state.picks.indexOf(cardId);
+  if (at >= 0) state.picks.splice(at, 1);
+  else state.picks.push(cardId);
+  state.lastRejectReason = "";
+  renderTable();
+  renderPending(state.view);
+}
+
+/** 点场上武将：把选好的牌交给他 —— 组合在候选里就直接提交（用户要的"点座位即交出去"）。 */
+function selectSkillSeat(seat) {
+  if (state.playback || !state.skillMode) return;
+  if (!state.skillMode.seats.includes(seat)) return;
+  state.skillSeat = seat;
+  state.lastRejectReason = "";
+  renderTable();
+  renderPending(state.view);
+  if (buildAction() !== null) submitAction();
+}
+
+/** 进入 / 退出转化技模式（【龙胆】：点技能 → 点一张可转化的手牌 → 照常选目标提交）。 */
+function toggleConvertSkill(skill) {
+  if (state.playback) return;
+  state.convertSkill = state.convertSkill === skill.skill_id ? null : skill.skill_id;
+  state.skillMode = null;
+  state.skillSeat = null;
+  state.picks = [];
+  state.focusCardId = null;
+  state.selectedTargets = [];
+  state.selectedOption = null;
+  state.lastRejectReason = "";
+  renderTable();
+  renderPending(state.view);
 }
 
 function identityLabel(identity) {
@@ -476,7 +723,7 @@ function cardChip(card, selected, isStatic, usable = true, onClick = null) {
 /** 弃牌阶段：点手牌 = 收进 / 移出待弃置集合；收够 `pending.count` 张后不再多收。 */
 function toggleDiscardPick(cardId) {
   const pending = state.view ? state.view.pending : null;
-  if (!isDiscardPick(pending)) return;
+  if (state.playback || !isDiscardPick(pending)) return;
   const at = state.picks.indexOf(cardId);
   if (at >= 0) state.picks.splice(at, 1);
   else if (state.picks.length < (pending.count || 0)) state.picks.push(cardId);
@@ -488,7 +735,7 @@ function toggleDiscardPick(cardId) {
 /** 点座位 = 选 / 取消目标。**自动选中**的目标是确定态，点单个座位不取消它（spec D6）。 */
 function selectTarget(seat) {
   const pending = state.view ? state.view.pending : null;
-  if (!isHandPick(pending) || state.focusCardId === null) return;
+  if (state.playback || !isHandPick(pending) || state.focusCardId === null) return;
   const here = pickerSeats(pending).find((item) => item.seat === seat);
   // 只有"池里的座位"能点：池外的点了没反应（置灰）；已选的座位**始终**能再点一次取消。
   if (!here || (!here.selected && !here.isTargetable)) return;
@@ -508,7 +755,7 @@ function selectTarget(seat) {
  */
 function selectOptionSeat(seat) {
   const pending = state.view ? state.view.pending : null;
-  if (!pending || pending.kind !== "SELECT_OPTION") return;
+  if (state.playback || !pending || pending.kind !== "SELECT_OPTION") return;
   const index = (pending.legal_actions || []).findIndex(
     (action) => action.kind === "SelectOption" && action.choice === `seat:${seat}`,
   );
@@ -528,7 +775,7 @@ function selectOptionSeat(seat) {
  */
 function toggleFocus(cardId) {
   const pending = state.view ? state.view.pending : null;
-  if (!isHandPick(pending)) return;
+  if (state.playback || !isHandPick(pending)) return;
   if (state.focusCardId === cardId) {
     state.focusCardId = null;
     state.selectedTargets = [];
@@ -573,6 +820,15 @@ function renderPending(view) {
   const requirement = pending && pending.context && pending.context.requirement;
   $("t-prompt").textContent = requirement
     || (pending ? pending.prompt : "（没有待应答的询问）");
+  // 主动技手选（【仁德】）/ 转化技（【龙胆】）正在等玩家点牌时，说清"现在要做什么"：
+  // 这两步是**界面自己**开的模式，服务端的通用 prompt 读不出它。
+  if (state.skillMode) {
+    $("t-prompt").textContent = state.skillMode.requirement || `发动【${state.skillMode.name}】`;
+  } else if (state.convertSkill !== null) {
+    const skill = (view.skills || []).find((item) => item.skill_id === state.convertSkill);
+    const text = skill && skill.ui && skill.ui.requirement;
+    if (text) $("t-prompt").textContent = text;
+  }
   // 询问窗口的"谁对谁做了什么"（服务端从结算栈顶帧派生；读不到就不写这一行）。
   const contextNode = $("t-context");
   if (contextNode) {
@@ -599,6 +855,8 @@ function renderPending(view) {
 
   if (kind === "picker") renderPicker(pending);
   else if (kind === "discard") renderDiscard(pending);
+  else if (kind === "skill") renderSkillPick(pending);
+  else if (kind === "seat") renderSeatPick(pending);
   else if (kind === "slots") {
     // 选择面也要**指到那条候选**：引擎只发一条 `SelectCards` 骨架，具体 `picks` 由
     // `buildAction()` 补上；不指过去它就没有可补的对象 ⇒ `buildAction()` 返回 null ⇒
@@ -630,6 +888,10 @@ function renderKind(pending, actions) {
   if (pending.kind === "SELECT_CARDS") return "slots";
   // 弃牌阶段：不铺候选按钮，点手牌收进待弃置集合（`buildAction` 按 picks 找候选）。
   if (pending.kind === "DISCARD") return "discard";
+  // 主动技手选模式（【仁德】）：牌子由手牌区点、座位由牌桌点，本窗口不铺选项按钮。
+  if (state.skillMode) return "skill";
+  // `SELECT_OPTION` 的"选座位"形态（【遗计】"交给谁"）：**取消选项按钮**，只点场上武将。
+  if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) return "seat";
   // **显式选中的候选优先**：技能按钮（`ActivateSkill`）在出牌阶段里与手选并存，
   // 点了它就等于"我就要发这个技能"，界面必须画那条候选的选中态，不能再画手选提示。
   if (state.selectedOption !== null && actions[state.selectedOption]) return "list";
@@ -640,6 +902,11 @@ function renderKind(pending, actions) {
   // 手选询问（出牌阶段 / 响应窗口）**一律**走 picker：点牌 + 点目标。
   if (isHandPick(pending)) return "picker";
   return "list";
+}
+
+/** ``SELECT_OPTION`` 里形如 ``seat:N`` 的选项（服务端已解析成 ``option_seats``）。 */
+function seatChoices(pending) {
+  return Object.keys((pending && pending.option_seats) || {});
 }
 
 /** 这条询问是不是"唯一一条候选、且不需要选目标"——是则返回那条候选，否则 `null`。
@@ -692,6 +959,23 @@ function renderDiscard(pending) {
   $("btn-cancel").disabled = state.picks.length === 0;
 }
 
+/** 主动技手选（【仁德】）：点手牌多选、点场上武将交出去；不铺任何选项按钮。 */
+function renderSkillPick(pending) {
+  const mode = state.skillMode;
+  const hint = $("t-target-hint");
+  if (hint) {
+    hint.textContent = `点手牌选要交出的牌（已选 ${state.picks.length} 张），再点场上武将交给他。`;
+  }
+  $("btn-cancel").disabled = state.picks.length === 0 && state.skillSeat === null;
+}
+
+/** `SELECT_OPTION` 的"选座位"形态（【遗计】"交给谁"）：只点场上武将，不铺选项按钮。 */
+function renderSeatPick(pending) {
+  const hint = $("t-target-hint");
+  if (hint) hint.textContent = "点场上武将，选择把这张牌交给谁。";
+  $("btn-cancel").disabled = state.selectedOption === null;
+}
+
 function renderPickerAlternatives(pending) {
   const box = $("t-options");
   (pending.legal_actions || []).forEach((action, index) => {
@@ -724,12 +1008,31 @@ function renderDirect(only) {
  * `buildAction()` 只做"查找"，最后一道逐字段核对在 :func:`submitAction` 里。
  */
 function refreshSubmit(pending) {
+  if (state.playback) {
+    // 严格顺序：这批事件播完之前不接任何提交。
+    $("btn-submit").disabled = true;
+    $("btn-cancel").disabled = true;
+    $("t-choice").textContent = "正在播放事件…";
+    if (state.lastRejectReason) $("t-choice").textContent = state.lastRejectReason;
+    return;
+  }
   const selected = state.selectedOption === null ? null : (pending.legal_actions || [])[state.selectedOption];
   const blocked = selected === null ? null : selectionError(selected, pending);
   const ready = blocked === null && buildAction() !== null;
   $("btn-submit").disabled = !ready;
   if (state.lastRejectReason) { $("t-choice").textContent = state.lastRejectReason; return; }
   if (blocked) { $("t-choice").textContent = blocked; return; }
+  if (state.skillMode) {
+    // 主动技手选（【仁德】）：说清"还差什么"，不替玩家决定。
+    $("t-choice").textContent = ready
+      ? "可以提交。"
+      : (state.picks.length === 0 ? "先点手牌选要交出的牌。" : "再点一名其他角色。");
+    return;
+  }
+  if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) {
+    $("t-choice").textContent = ready ? "可以提交。" : "点场上武将选择交给谁。";
+    return;
+  }
   if (isDiscardPick(pending)) {
     const need = pending.count || 0;
     $("t-choice").textContent = ready
@@ -755,7 +1058,11 @@ function renderCandidateList(pending, actions) {
   // 点了手牌就**只**显示它的候选：点牌 → 出目标 → 点目标（这是玩家的心智模型）。
   const focused = state.focusCardId !== null
     ? actions.map((action, index) => ({ action, index }))
-        .filter(({ action }) => action.card && String(action.card.card_id) === String(state.focusCardId))
+        .filter(({ action }) => {
+          if (!action.card) return false;
+          const entry = cardEntry(pending, state.focusCardId);
+          return entry !== null && String(action.card.card_id) === String(entry.card.card_id);
+        })
     : null;
   const groups = groupActions(focused ? focused.map(({ action }) => action) : actions);
   if (focused) {
@@ -907,6 +1214,19 @@ function buildAction() {
         && (candidate.cards || []).map((card) => card.card_id).sort((a, b) => a - b).join(",") === mine,
     ) || null;
   }
+  // 主动技手选（【仁德】）：已选手牌 + 已点座位 → 在候选里**查**那一条（不自己拼 Action）。
+  if (state.skillMode) {
+    if (!state.picks.length || state.skillSeat === null) return null;
+    const picks = state.picks.slice().sort((a, b) => a - b).join(",");
+    const choices = `seat:${state.skillSeat}`;
+    return actions.find(
+      (action) =>
+        action.kind === "ActivateSkill"
+        && action.skill_id === state.skillMode.skillId
+        && (action.picks || []).slice().sort((a, b) => a - b).join(",") === picks
+        && (action.choices || []).join(",") === choices,
+    ) || null;
+  }
   // 唯一且不需要选目标的候选（放弃 / 结束阶段 / 唯一的无目标响应牌）：直接就是它。
   // 这条必须在手选分支**之前**——`renderKind` 对同一个询问也返回 `direct`，
   // 否则界面显示"将提交：放弃"、而 `buildAction()` 在手选模式下因为没有焦点而返回 null。
@@ -933,11 +1253,14 @@ function buildAction() {
     // 手选路径：焦点 + 已选目标 → 在候选里**查**那一条（不自己拼 Action）。
     if (state.focusCardId === null) return null;
     if (!isLegalCombo(pending, state.focusCardId, state.selectedTargets)) return null;
+    // 焦点是玩家点的**实体牌**；转化技下要提交的是它对应的**虚拟牌**（`entry.card`）。
+    const entry = cardEntry(pending, state.focusCardId);
+    if (!entry) return null;
     const targets = state.selectedTargets.slice().sort((a, b) => a - b);
     return actions.find(
       (action) =>
         action.card
-        && String(action.card.card_id) === String(state.focusCardId)
+        && String(action.card.card_id) === String(entry.card.card_id)
         && (action.kind === "UseCard" || action.kind === "PlayCard")
         && (action.targets || []).slice().sort((a, b) => a - b).join(",") === targets.join(","),
     ) || null;
@@ -946,6 +1269,7 @@ function buildAction() {
 }
 
 async function submitAction() {
+  if (state.playback) return;
   const action = buildAction();
   if (!action) {
     $("t-choice").textContent = "没有可提交的候选：先选一张牌或一个选项。";
@@ -982,11 +1306,13 @@ async function submitAction() {
 async function takeover() {
   /* 托管 = **服务端的超时代答**（纯函数，见 `timeout.py`）：前端不自己造 Action，
    * 也不越过 legal_actions。故这个按钮只做一件事——催服务端判定一次（取增量即判定）。 */
+  if (state.playback) return;
   await refresh();
   $("t-choice").textContent = "已请服务端判定一次（到时限即自动代答）。";
 }
 
 function clearSelection() {
+  if (state.playback) return;
   resetSelection();
   renderTable();
   renderPending(state.view);
@@ -1225,8 +1551,9 @@ function wire() {
   });
   loadRuns();
   // 倒计时每秒刷新（只在牌桌页可见时）；不改任何服务端状态。
+  // 回放期间不刷：那时 `state.view` 还是上一条询问，倒计时会指向已经过去的那个窗口。
   window.setInterval(() => {
-    if (!$("view-table").hidden) renderCountdown(state.view);
+    if (!$("view-table").hidden && !state.playback) renderCountdown(state.view);
   }, 1000);
 }
 

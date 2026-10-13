@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from itertools import combinations
 from types import MappingProxyType
 
 import pytest
@@ -441,30 +442,6 @@ def test_rende_does_not_recover_when_only_one_card_is_given():
     assert engine.state.player(0).hp == 3, "只给 1 张 ⇒ 不回复"
 
 
-def _rende_driver(picks_made: list[int], *, rounds: int, prefer: tuple[int, ...] | None = None):
-    """驱动一次【仁德】：``prefer`` 命中就直接挑它；否则挑载荷最大的（降级后即裸候选）。"""
-
-    def driver(query):
-        if query.kind == QueryKind.PLAY_PHASE:
-            candidates = _offers(query.legal_actions, RENDE)
-            if prefer is not None:
-                chosen = [action for action in candidates if action.picks == prefer]
-                if chosen:
-                    return chosen[0]
-            return max(candidates, key=lambda action: len(action.picks))
-        if query.kind == QueryKind.SELECT_CARDS:
-            if len(picks_made) < rounds:
-                picks_made.append(1)
-                return _find(
-                    query,
-                    lambda action: isinstance(action, SelectCards) and action.picks == (0,),
-                )
-            return _find(query, lambda action: isinstance(action, Pass))
-        return _decline(query)
-
-    return driver
-
-
 def _small_and_big_rende():
     hand = tuple(_cards("slash") + _cards("dodge"))[:8]
     big = build_state(
@@ -482,76 +459,104 @@ def _small_and_big_rende():
     return big, small
 
 
-def test_rende_degrades_to_target_only_candidates_beyond_the_cap():
+def test_rende_offers_picks_beyond_the_old_cap_so_the_ui_can_commit_in_one_step():
+    """**报障 2**：【仁德】不降级——超过旧闸值时仍带 ``picks``。
+
+    前端要"直接多选手牌 + 直接点座位、一次交出去"，所以每一组非空子集 × 目标都必须
+    能原样找到一条候选；若降级成"只有目标"，界面就拼不出这一组。
+    """
     big, _small = _small_and_big_rende()
-    hand_size = len(big.player(0).hand) + 2  # 摸牌阶段后
-    assert (2**hand_size - 1) > CANDIDATE_CAP, "这局必须触发降级（否则本用例空转）"
+    hand = tuple(big.player(0).hand)
+    assert (2 ** (len(hand) + 2) - 1) > CANDIDATE_CAP, "这局必须超过旧闸值（否则本用例空转）"
 
     offers = _offers(_play_candidates(big), RENDE)
 
-    assert [(action.picks, action.choices) for action in offers] == [((), ("seat:1",))], (
-        "降级后候选只保留目标这一维，张数由顺序选牌补齐"
-    )
+    assert {action.picks for action in offers} == {
+        subset
+        for size in range(1, len(hand) + 1)
+        for subset in combinations(hand, size)
+    }, "非空子集全在池（不降级），界面才能一步提交"
 
 
-def test_rende_sequential_mode_preserves_the_result_of_giving_at_once():
-    big, small = _small_and_big_rende()
-
-    big_engine = _run(
-        big, [Scripted(_rende_driver([], rounds=2)), Scripted(_decline)], _skill_frame_popped
-    )
-    small_engine = _run(
-        small,
-        [
-            Scripted(
-                _rende_driver([], rounds=2, prefer=tuple(small.player(0).hand))
-            ),
-            Scripted(_decline),
-        ],
-        _skill_frame_popped,
-    )
-
-    specs = [
-        record.query.spec
-        for record in big_engine.records
-        if record.kind == "query" and record.query.kind == QueryKind.SELECT_CARDS.value
-    ]
-    assert specs and all(spec.sequential for spec in specs), (
-        "降级 = SelectionSpec(sequential=True) 的多轮"
-    )
-    assert all(spec.total == (1, 1) for spec in specs), "逐张一轮"
-    assert (
-        set(big_engine.state.player(1).hand),
-        big_engine.state.player(0).hp,
-    ) == (
-        set(small_engine.state.player(1).hand),
-        small_engine.state.player(0).hp,
-    ), "逐张给与一次给的结果一致（同一组牌、同一次回复）"
-
-
-def test_rende_recovers_only_once_per_phase():
+def test_rende_gives_several_cards_without_an_intermediate_selection():
+    """一次发动 = 一次移动：不再有"逐张选牌"的 ``SELECT_CARDS`` 中间询问。"""
     big, _small = _small_and_big_rende()
-    big.player(0).hp = 2
-    big.player(0).hp_max = 5
+    hand = tuple(big.player(0).hand)
+    chosen = hand[:3]
 
-    engine = _run(
-        big, [Scripted(_rende_driver([], rounds=4)), Scripted(_decline)], _skill_frame_popped
-    )
+    def rende(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill)
+                and action.skill_id == RENDE
+                and action.picks == chosen,
+            )
+        return _decline(query)
 
-    assert len(engine.state.player(1).hand) == 4, "四张都交出去了"
-    assert engine.state.player(0).hp == 3, "第 2 张回复一次；第 3、4 张不再回复"
+    engine = _run(big, [Scripted(rende), Scripted(_decline)], _skill_frame_popped)
+
+    assert set(engine.state.player(1).hand) == set(chosen), "三张一次交出"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.SELECT_CARDS.value
+    ], "仁德不再走顺序选牌"
 
 
-def test_the_gated_skill_keeps_the_play_query_under_the_cap():
-    hand = tuple(_cards("slash") + _cards("dodge"))[:8]
+def test_rende_has_no_once_per_phase_limit():
+    """**报障 2**：规则 976 没有"限一次"——同一出牌阶段可以给第二次。"""
+    first, second, third, fourth = (_cards("slash") + _cards("dodge"))[:4]
     state = build_state(
         pack=PACK,
-        seats=[SeatSpec(hp=3, hp_max=4, hand=hand, hero="liubei"), SeatSpec(), SeatSpec()],
+        seats=[SeatSpec(hp=2, hp_max=4, hand=(first, second, third, fourth), hero="liubei"), SeatSpec()],
+        deck=_deck_excluding(first, second, third, fourth),
+        turn_seat=0,
+    )
+    plan = [(first, second), (third, fourth)]
+
+    def give(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            candidates = _offers(query.legal_actions, RENDE)
+            for want in list(plan):
+                chosen = [action for action in candidates if action.picks == want]
+                if chosen:
+                    plan.remove(want)
+                    return chosen[0]
+        return _decline(query)
+
+    def two_skill_frames(engine) -> bool:
+        return (
+            sum(
+                1
+                for record in engine.records
+                if record.kind == "frame"
+                and record.op == "pop"
+                and record.frame_kind is FrameKind.SKILL
+            )
+            >= 2
+        )
+
+    engine = _run(state, [Scripted(give), Scripted(_decline)], two_skill_frames)
+
+    assert set(engine.state.player(1).hand) == {first, second, third, fourth}, "两次都给成了"
+    assert engine.state.player(0).hp == 3, "第 2 张回复 1 点（2 → 3），第 4 张不再回复"
+    assert _play_query_count(engine, RENDE) >= 2, "发动过之后仍回到池里（没有限一次）"
+
+
+def test_the_still_gated_skills_keep_the_play_query_under_the_cap():
+    """闸门仍在：会降级的技能（【离间】两维相乘）单次询问候选数不超闸值。"""
+    hand = tuple(range(20))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=hand, hero="diaochan", gender=Gender.FEMALE),
+            *_wounded_males(7),
+        ],
         deck=_deck_excluding(*hand),
         turn_seat=0,
     )
-    hand_size = len(state.player(0).hand) + 2
-    assert (2**hand_size - 1) * 2 > CANDIDATE_CAP, "两维相乘必须过闸（否则本用例空转）"
+    assert len(hand) * (7 * 6) > CANDIDATE_CAP, "两维相乘必须过闸（否则本用例空转）"
 
     assert len(_play_candidates(state)) <= CANDIDATE_CAP, "降级后单次询问候选数不超过闸值"
 
