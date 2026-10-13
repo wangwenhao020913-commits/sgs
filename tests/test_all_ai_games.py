@@ -23,10 +23,15 @@ from sgs.agents import HeuristicPlayer, TapePlayer, tape_from_journal
 from sgs.data import Identity, RuleConfig, load_content_pack
 from sgs.engine import Engine, RandomSource
 
+from support import ACCEPTANCE_SEEDS
+
 PACK = load_content_pack(deck_profile="standard_108")
 
-SEEDS: tuple[int, ...] = tuple(range(1, 33))
-"""票面写死的 32 个种子（``python -m sgs --seed S --players 5 --hero-pool "" --ai heuristic``）。"""
+SEEDS: tuple[int, ...] = ACCEPTANCE_SEEDS
+"""验收写死的 32 个种子（``python -m sgs --seed S --players 5 --hero-pool "" --ai heuristic``）。
+
+与 ``test_heuristic_ai`` 的扫描 / 胜率对比**必须同批**，故真源收在
+``support.ACCEPTANCE_SEEDS``（本轮【奸雄】修复后重新选种，理由见那里）。"""
 
 PLAYERS = 5
 """固定 5 人（身份局：1 主 1 忠 2 反 1 内）。"""

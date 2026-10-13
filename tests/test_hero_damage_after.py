@@ -24,10 +24,13 @@ from sgs.data import load_content_pack
 from sgs.engine import Engine
 from sgs.resolution import Tag, add_tag
 from sgs.state import (
+    EndPhase,
     FrameKind,
     Pass,
+    Phase,
     SelectCards,
     SelectCardsQuery,
+    UseCard,
     Zone,
     ZoneRef,
 )
@@ -312,6 +315,129 @@ def test_jianxiong_is_skipped_when_the_card_is_no_longer_in_the_processing_zone(
     assert engine.state.player(1).hand == []
     assert _activation_count(engine, JIANXIONG) == 0, "找不到那张牌 ⇒ 连问都不问"
     assert engine.state.processing == [other]
+
+
+# ---------------------------------------------------------------------------
+# ③b 【奸雄】要走完**真实使用链**才交付（本轮报障；上方三条只压 DAMAGE 帧，
+#     照不到 USE 帧的 L5.6，那正是这个 bug 藏身处）
+# ---------------------------------------------------------------------------
+
+
+class _SlashUser:
+    """出牌阶段对 ``target`` 使用手里那张【杀】（只用一次），随后立即结束阶段。
+
+    "随后结束阶段"是刻意的：摸牌阶段已经补了两张牌，若不结束，通用脚本会接着打出它们，
+    引入第二次伤害、第二次【奸雄】询问——那测的就不是这条链了。
+    """
+
+    def __init__(self, target: int) -> None:
+        self._target = target
+        self.used = False
+
+    def respond(self, query):
+        if query.kind == "PLAY_PHASE":
+            if not self.used:
+                for action in query.legal_actions:
+                    if (
+                        isinstance(action, UseCard)
+                        and action.card.type == "slash"
+                        and self._target in (action.targets or ())
+                    ):
+                        self.used = True
+                        return action
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+        return _pass_or_first(query)
+
+
+class _CaoCaoResponder:
+    """曹操的应答器：【奸雄】按 ``activate`` 决定发动与否，其余交给通用脚本。"""
+
+    def __init__(self, *, activate: bool) -> None:
+        self.activate = activate
+        self.asked = 0
+
+    def respond(self, query):
+        if query.kind == "SKILL_ACTIVATION":
+            if getattr(query, "skill_id", None) == JIANXIONG:
+                self.asked += 1
+                if self.activate:
+                    for action in query.legal_actions:
+                        if getattr(action, "kind", None) == "ActivateSkill":
+                            return action
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+        return _pass_or_first(query)
+
+
+def _jianxiong_full_use(*, activate: bool):
+    """座位 0 对座位 1（曹操）使用一张真【杀】，跑完**整条使用链**直到本回合结束。"""
+    slash = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(slash,)), SeatSpec(hero="caocao")],
+        deck=_deck_excluding(slash),
+        turn_seat=0,
+        phase=Phase.PREPARE,
+    )
+    engine = Engine.from_state(state, seed=7)
+    caocao = _CaoCaoResponder(activate=activate)
+    players = [_SlashUser(1), caocao]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.TURN_AFTER_END
+            for record in e.records
+        ),
+    )
+    return engine, caocao, slash
+
+
+def _slash_moves(engine, slash: int) -> list[tuple[Zone, Zone]]:
+    return [
+        (record.from_zone.zone, record.to_zone.zone)
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and slash in [card.card_id for card in record.cards]
+    ]
+
+
+def test_jianxiong_keeps_the_card_through_the_whole_use_chain():
+    """报障原文：「有时候奸雄发动但是无法获得牌」。
+
+    上方三条只压一个 ``DAMAGE`` 子帧，照不到外层 ``USE`` 帧的 L5.6。真实对局里
+    【杀】的实体牌在 ``use_after_end`` 才离开处理区，而 :meth:`Engine.move_processing_card_to_discard`
+    当时**不核牌还在不在处理区**：牌已被【奸雄】搬进曹操手里，它仍照着"处理区 → 弃牌堆"
+    再记一条 ``hand(曹操) → discard`` 的移动——发动了，牌却没了。
+
+    判据：整条使用链走完，那张【杀】在曹操手里、且**没有**一条把它从曹操手里搬走的移动。
+    """
+    engine, caocao, slash = _jianxiong_full_use(activate=True)
+
+    assert caocao.asked == 1, "【奸雄】被问了一次"
+    assert slash in engine.state.player(1).hand, "使用链走完，那张【杀】必须仍在曹操手里"
+    assert slash not in engine.state.discard, "L5.6 不得把已被【奸雄】拿走的牌再弃掉"
+    assert _slash_moves(engine, slash) == [
+        (Zone.HAND, Zone.PROCESSING),
+        (Zone.PROCESSING, Zone.HAND),
+    ], "牌的轨迹只该是 手牌→处理区→曹操手牌"
+
+
+def test_without_jianxiong_the_slash_still_goes_to_discard():
+    """正面对照：不发动【奸雄】时，【杀】照旧在"使用结算结束后"进弃牌堆。"""
+    engine, caocao, slash = _jianxiong_full_use(activate=False)
+
+    assert caocao.asked == 1, "问过一次（答了不发动）"
+    assert slash in engine.state.discard
+    assert slash not in engine.state.player(1).hand
+    assert _slash_moves(engine, slash) == [
+        (Zone.HAND, Zone.PROCESSING),
+        (Zone.PROCESSING, Zone.DISCARD),
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -200,9 +200,12 @@ M3_SCENARIOS: dict[str, Scenario] = {
         heroes=("simayi", "guojia", "sunquan", "luxun"),
     ),
     # F 族势力求助窗口：主公在曹操 / 刘备之中，且**同势力**的求助对象在场（司马懿 / 关羽）。
+    # 种子 116 → 94：【奸雄】修复（牌不再被 L5.6 从曹操手里弃掉）后，116 那局的走向改变、
+    # 势力求助窗口不再出现。按本模块纪律**重新选种**而不是放宽判据：94 在同样四名武将下
+    # 命中判据，且记录条数更少（910 vs 原局）。
     "37-hero-lord-request": _m3(
         "37-hero-lord-request",
-        seed=116,
+        seed=94,
         heroes=("caocao", "simayi", "liubei", "guanyu"),
     ),
     # D 族失去牌后：【连营】+【枭姬】含顶替。

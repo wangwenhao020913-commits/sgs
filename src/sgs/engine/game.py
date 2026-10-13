@@ -1005,10 +1005,18 @@ class Engine:
         )
 
     def move_processing_card_to_discard(self, frame: Frame) -> None:
-        """处理区 → 弃牌堆（``reason = USE``）：L5.6"使用结算结束后"（票 07 §3）。"""
+        """处理区 → 弃牌堆（``reason = USE``）：L5.6"使用结算结束后"（票 07 §3）。
+
+        **只在牌仍留在处理区时才搬**：结算期间它可以被别人的技能拿去（【奸雄】把造成伤害的
+        那张【杀】搬进曹操手里），那时它已经不在处理区，本次收尾就无事可做。少了这条守卫，
+        ``move_card`` 会照着"牌现在在哪"把它从**曹操手里**再搬进弃牌堆——技能发动了、牌却没了
+        （本轮报障）。判定路径的同名守卫见 :meth:`_finish_judge_round` 与 :meth:`discard_judge_card`。
+        """
         card = frame.data["card"]
         if card.is_virtual:
             self._move_virtual_sources(frame, to_zone=ZoneRef(Zone.DISCARD))
+            return
+        if card.card_id not in self.state.processing:
             return
         self.move_in_frame(
             frame,
@@ -1097,6 +1105,8 @@ class Engine:
         card = frame.data["card"]
         if card.is_virtual:
             self._move_virtual_sources(frame, to_zone=ZoneRef(Zone.DISCARD))
+            return
+        if card.card_id not in self.state.processing:
             return
         self.move_in_frame(
             frame,

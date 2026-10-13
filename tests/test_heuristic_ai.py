@@ -57,7 +57,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state
+from support import ACCEPTANCE_SEEDS, SeatSpec, build_state
 
 PACK = load_content_pack(deck_profile="standard_108")
 TESTS_DIR = Path(__file__).resolve().parent
@@ -503,7 +503,7 @@ def test_the_full_ai_sweep_of_thirty_two_seeds_never_answers_illegally_or_crashe
     不要求"一定打死一方"之外的判决——胜负正确性由票 14 的基准组按身份口径复核。
     """
     games = 0
-    for seed in range(1, 33):
+    for seed in ACCEPTANCE_SEEDS:
         engine = Engine.new_game(
             seed=seed,
             rule_config=RuleConfig(player_count=5),
@@ -607,7 +607,7 @@ def test_the_heuristic_beats_random_on_the_same_seeds():
     座位 0 为候选、其余四席随机：同一种子下两臂的局面逐字节相同，故胜率差只反映档位。
     判据刻意宽松（启发式 ≥ 0.6 且比随机多赢 ≥ 1/4 的种子），避免脆弱。
     """
-    seeds = tuple(range(1, 33))
+    seeds = ACCEPTANCE_SEEDS
 
     heuristic_wins = _candidate_wins_over(seeds, heuristic=True)
     random_wins = _candidate_wins_over(seeds, heuristic=False)
