@@ -617,3 +617,106 @@ def test_the_heuristic_beats_random_on_the_same_seeds():
         f"启发式 {heuristic_wins}/32 vs 随机 {random_wins}/32："
         f"优势不足（票 13 §验收 6 的宽松判据）"
     )
+
+
+# ---------------------------------------------------------------------------
+# 已发动技能的步骤里不许挑「取消」（票 01）
+#
+# "取消不消耗技能使用次数" + "AI 贪心挑最便宜的一条（Pass = 0 分）" = 空转：
+# 发动 → 取消 → 技能立刻又可发动 → 再发动 …… 32 种子基准组的 seed=107 就是这么自旋的。
+# 故 AI 的纪律是：**既然选了发动，就把成本付完**；要放弃就该在上一层放弃。
+# ---------------------------------------------------------------------------
+
+
+def _committed_step_state():
+    slash = _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(slash,), hero="diaochan"), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(slash),
+        turn_seat=0,
+    )
+    return state, slash
+
+
+def test_the_ai_pays_the_cost_of_a_skill_it_already_activated():
+    """步 1（选牌面）：候选里给了一条 `Pass`，AI 也不许挑它。"""
+    state, slash = _committed_step_state()
+    slots = (Slot(ref=ZoneRef(Zone.HAND, 0), card=state.card(slash)),)
+    spec = SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1), optional=True)
+    actions = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_CARDS,
+        answers_seq=1,
+        payload=SelectContext(spec=spec, slots=slots),
+    )
+    query = SelectCardsQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="弃置1张牌。",
+        legal_actions=actions,
+        view=project(state, 0),
+        spec=spec,
+        slots=slots,
+    )
+
+    action = HeuristicPlayer(_stream(11)).respond(query)
+
+    assert getattr(action, "kind", None) == "SelectCards", f"不许撤销已发动的技能，实得 {action!r}"
+
+
+def test_the_ai_picks_a_seat_instead_of_cancelling_a_committed_skill():
+    """步 2/3（座位选项）：候选里有 `Pass`（取消），AI 也必须选一个座位。"""
+    state, _slash = _committed_step_state()
+    options = ("seat:1", "seat:2")
+    actions = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_OPTION,
+        answers_seq=1,
+        payload=SelectOptionContext(skill_id="lijian:user", options=options, optional=True),
+    )
+    query = SelectOptionQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="选择场上两名男性角色。",
+        legal_actions=actions,
+        view=project(state, 0),
+        skill_id="lijian:user",
+        options=options,
+    )
+
+    action = HeuristicPlayer(_stream(12)).respond(query)
+
+    assert getattr(action, "kind", None) == "SelectOption", f"不许撤销已发动的技能，实得 {action!r}"
+
+
+def test_an_optional_pick_outside_the_play_phase_may_still_be_declined():
+    """对照面：别的时机（【遗计】伤害后看牌那类）仍可放弃 —— 惩罚只落在"已发动的技能步骤"。"""
+    state, slash = _committed_step_state()
+    slots = (Slot(ref=ZoneRef(Zone.HAND, 0), card=state.card(slash)),)
+    spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=True)
+    actions = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_CARDS,
+        answers_seq=1,
+        payload=SelectContext(spec=spec, slots=slots),
+    )
+    query = SelectCardsQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.DAMAGE_AFTER_TAKE,
+        prompt="选择一张牌。",
+        legal_actions=actions,
+        view=project(state, 0),
+        spec=spec,
+        slots=slots,
+    )
+
+    action = HeuristicPlayer(_stream(13)).respond(query)
+
+    assert isinstance(action, Pass), f"出牌阶段之外的可选选牌仍可放弃，实得 {action!r}"

@@ -545,18 +545,18 @@ def test_rende_has_no_once_per_phase_limit():
 
 
 def test_the_still_gated_skills_keep_the_play_query_under_the_cap():
-    """闸门仍在：会降级的技能（【离间】两维相乘）单次询问候选数不超闸值。"""
+    """闸门仍在：会降级的技能（【青囊】两维相乘）单次询问候选数不超闸值。
+
+    【离间】迁到步骤流水线后（票 01）不再是本例的样本——它的候选恒为一条，与闸门无关。
+    """
     hand = tuple(range(20))
     state = build_state(
         pack=PACK,
-        seats=[
-            SeatSpec(hand=hand, hero="diaochan", gender=Gender.FEMALE),
-            *_wounded_males(7),
-        ],
+        seats=[SeatSpec(hand=hand, hero="huatuo"), *_wounded_males(7)],
         deck=_deck_excluding(*hand),
         turn_seat=0,
     )
-    assert len(hand) * (7 * 6) > CANDIDATE_CAP, "两维相乘必须过闸（否则本用例空转）"
+    assert len(hand) * 7 > CANDIDATE_CAP, "两维相乘必须过闸（否则本用例空转）"
 
     assert len(_play_candidates(state)) <= CANDIDATE_CAP, "降级后单次询问候选数不超过闸值"
 
@@ -748,15 +748,33 @@ def test_lijian_requires_two_male_characters():
     )
 
     assert not _offers(_play_candidates(one_male), LIJIAN), (
-        "只有一名男性 / 两名女性 ⇒ 该组合不进候选"
+        "只有一名男性 / 两名女性 ⇒ 不进候选"
     )
-    assert {action.choices for action in _offers(_play_candidates(two_males), LIJIAN)} == {
-        ("seat:1", "seat:2"),
-        ("seat:2", "seat:1"),
-    }, "有序对：谁对谁使用由此指定"
+    assert len(_offers(_play_candidates(two_males), LIJIAN)) == 1, "够条件 ⇒ 一条骨架候选"
 
 
-def test_lijian_the_chosen_male_is_the_user_and_the_damage_source():
+def test_lijian_offer_is_a_single_skeleton_candidate_however_many_cards_and_males():
+    """票 01：候选不再烘"牌 × 有序男性对"，恒为一条骨架 —— 手牌 20 × 男性 7 也不爆。
+
+    这条取代旧的"过闸降级"断言：降级路径对【离间】不再有消费者。
+    """
+    hand = tuple(range(20))
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=hand, hero="diaochan", gender=Gender.FEMALE), *_wounded_males(7)],
+        deck=_deck_excluding(*hand),
+        turn_seat=0,
+    )
+    assert len(hand) * (7 * 6) > CANDIDATE_CAP, "旧形状必须过闸（否则本用例证明不了什么）"
+
+    offers = _offers(_play_candidates(state), LIJIAN)
+
+    assert len(offers) == 1, "两维相乘的枚举消失：候选恒一条"
+    assert offers[0].picks == () and offers[0].choices == (), "载荷为空，改由发动后的步骤询问"
+    assert len(_play_candidates(state)) <= CANDIDATE_CAP, "整段询问仍不超闸值"
+
+
+def _lijian_state():
     card = _cards("slash")[0]
     state = build_state(
         pack=PACK,
@@ -768,28 +786,67 @@ def test_lijian_the_chosen_male_is_the_user_and_the_damage_source():
         deck=_deck_excluding(card),
         turn_seat=0,
     )
+    return card, state
 
-    def diaochan(query):
+
+def _lijian_driver(*, user: int, victim: int):
+    """按**新流程**应答：点技能 → 弃置 1 张牌 → 选使用者 → 选目标。"""
+
+    def driver(query):
         if query.kind == QueryKind.PLAY_PHASE:
             return _find(
                 query,
-                lambda action: isinstance(action, ActivateSkill)
-                and action.skill_id == LIJIAN
-                and action.picks == (card,)
-                and action.choices == ("seat:1", "seat:2"),
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == LIJIAN,
             )
+        if query.kind == QueryKind.SELECT_CARDS:
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and action.picks == (0,)
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            wanted = {
+                "lijian:user": f"seat:{user}",
+                "lijian:victim": f"seat:{victim}",
+            }.get(query.skill_id)
+            if wanted is not None:
+                return _find(
+                    query,
+                    lambda action: isinstance(action, SelectOption) and action.choice == wanted,
+                )
         return _decline(query)
 
-    engine = _run(
-        state, [Scripted(diaochan), Scripted(_decline), Scripted(_decline)], _skill_frame_popped
+    return driver
+
+
+def _lijian_victim_query(engine):
+    return next(
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SELECT_OPTION.value
+        and record.query.skill_id == "lijian:victim"
     )
 
-    use_frames = [
-        record
-        for record in engine.records
-        if record.kind == "frame" and record.op == "push" and record.frame_kind is FrameKind.USE
-    ]
-    assert use_frames, "离间压出一次使用帧（视为使用【决斗】）"
+
+def test_lijian_asks_the_card_then_the_two_males_in_order():
+    card, state = _lijian_state()
+
+    engine = _run(
+        state,
+        [
+            Scripted(_lijian_driver(user=1, victim=2)),
+            Scripted(_decline),
+            Scripted(_decline),
+        ],
+        _skill_frame_popped,
+    )
+
+    asked = [record.query.kind for record in engine.records if record.kind == "query"]
+    assert asked[:4] == ["PLAY_PHASE", "SELECT_CARDS", "SELECT_OPTION", "SELECT_OPTION"], (
+        "先问「弃置1张牌」，再先后问两名男性（第一次点的是使用者）"
+    )
+    assert _lijian_victim_query(engine).options == ("seat:2",), (
+        "使用者不能当自己的目标：第二次的池排除已选的那名男性"
+    )
     assert card in engine.state.discard, "成本弃掉"
     assert engine.state.player(2).hp == 3, "目标 2 没打出【杀】⇒ 受到 1 点伤害"
     assert engine.state.player(1).hp == 4, "使用者座位 1 不受伤（决斗败方是座位 2）"
@@ -802,34 +859,20 @@ def test_lijian_the_chosen_male_is_the_user_and_the_damage_source():
 
 
 def test_lijian_user_is_the_chosen_male_not_the_activator():
-    """把有序对反过来 ⇒ 使用者与败方互换，伤害来源随之（不是固定座位）。"""
-    card = _cards("slash")[0]
-    state = build_state(
-        pack=PACK,
-        seats=[
-            SeatSpec(hand=(card,), hero="diaochan", gender=Gender.FEMALE),
-            SeatSpec(hp=4, hp_max=4, gender=Gender.MALE),
-            SeatSpec(hp=4, hp_max=4, gender=Gender.MALE),
-        ],
-        deck=_deck_excluding(card),
-        turn_seat=0,
-    )
-
-    def diaochan(query):
-        if query.kind == QueryKind.PLAY_PHASE:
-            return _find(
-                query,
-                lambda action: isinstance(action, ActivateSkill)
-                and action.skill_id == LIJIAN
-                and action.picks == (card,)
-                and action.choices == ("seat:2", "seat:1"),
-            )
-        return _decline(query)
+    """把两次点选反过来 ⇒ 使用者与败方互换，伤害来源随之（不是固定座位）。"""
+    card, state = _lijian_state()
 
     engine = _run(
-        state, [Scripted(diaochan), Scripted(_decline), Scripted(_decline)], _skill_frame_popped
+        state,
+        [
+            Scripted(_lijian_driver(user=2, victim=1)),
+            Scripted(_decline),
+            Scripted(_decline),
+        ],
+        _skill_frame_popped,
     )
 
+    assert card in engine.state.discard
     assert engine.state.player(1).hp == 3, "这次败方是座位 1（座位 2 是使用者）"
     damage = [
         record
@@ -840,6 +883,7 @@ def test_lijian_user_is_the_chosen_male_not_the_activator():
 
 
 def test_lijian_may_pay_with_an_equipment_card():
+    """成本可以是**装备区**的牌：步 1 的选择面 = 手牌 ∪ 装备区。"""
     equip = _cards("jueying")[0]
     state = build_state(
         pack=PACK,
@@ -851,10 +895,119 @@ def test_lijian_may_pay_with_an_equipment_card():
         deck=_deck_excluding(equip),
         turn_seat=0,
     )
+    face: list[tuple[str, int]] = []
 
-    assert (equip,) in {action.picks for action in _offers(_play_candidates(state), LIJIAN)}, (
-        "成本可以取装备区的牌"
+    def diaochan(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == LIJIAN,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            slots = list(query.slots)
+            face.extend((slot.ref.zone.value, slot.card.card_id) for slot in slots)
+            index = next(
+                position
+                for position, slot in enumerate(slots)
+                if slot.card.card_id == equip
+            )
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectCards)
+                and action.picks == (index,),
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            wanted = {"lijian:user": "seat:1", "lijian:victim": "seat:2"}.get(query.skill_id)
+            if wanted is not None:
+                return _find(
+                    query,
+                    lambda action: isinstance(action, SelectOption) and action.choice == wanted,
+                )
+        return _decline(query)
+
+    engine = _run(
+        state,
+        [Scripted(diaochan), Scripted(_decline), Scripted(_decline)],
+        _skill_frame_popped,
     )
+
+    assert ("equip", equip) in face, "装备区的牌进了选择面"
+    assert equip in engine.state.discard, "装备区的牌被弃置"
+    assert engine.state.player(2).hp == 3, "技能照常结算"
+
+
+# ---------------------------------------------------------------------------
+# 取消（票 01 / S2）：中途退出不搬家产、不消耗次数
+# ---------------------------------------------------------------------------
+
+
+def _lijian_offered_after_cancel(engine) -> bool:
+    """取消之后**同一出牌阶段**又挂起了含【离间】候选的 PLAY_PHASE 询问。"""
+    if not _skill_frame_popped(engine):
+        return False
+    pending = engine.pending
+    return (
+        pending is not None
+        and pending.kind == QueryKind.PLAY_PHASE.value
+        and any(
+            isinstance(action, ActivateSkill) and action.skill_id == LIJIAN
+            for action in pending.legal_actions
+        )
+    )
+
+
+def _run_lijian_cancel(cancel_at: str):
+    """在流水线的 ``cancel_at`` 步取消（``card`` / ``user`` / ``victim``）。
+
+    返回 ``(engine, 选择面上出现过的牌面集合)``；停止条件是"取消后又挂起了一次含【离间】
+    候选的出牌阶段询问"——这正是"取消不消耗次数"的可观测判据。
+    """
+    _card, state = _lijian_state()
+    faces: list[set[int]] = []
+
+    def diaochan(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == LIJIAN,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            faces.append({slot.card.card_id for slot in query.slots})
+            if cancel_at == "card":
+                return _find(query, lambda action: isinstance(action, Pass))
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and action.picks == (0,)
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            if cancel_at == query.skill_id.removeprefix("lijian:"):
+                return _find(query, lambda action: isinstance(action, Pass))
+            wanted = {"lijian:user": "seat:1", "lijian:victim": "seat:2"}[query.skill_id]
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption) and action.choice == wanted,
+            )
+        return _decline(query)
+
+    engine = _run(
+        state,
+        [Scripted(diaochan), Scripted(_decline), Scripted(_decline)],
+        _lijian_offered_after_cancel,
+    )
+    return engine, faces
+
+
+@pytest.mark.parametrize("cancel_at", ["card", "user", "victim"])
+def test_lijian_cancel_leaves_the_table_untouched_and_the_skill_available(cancel_at):
+    """三步中任何一步取消 ⇒ 手牌 / 装备 / 弃牌堆原样，且同一阶段还能再发动一次。"""
+    engine, faces = _run_lijian_cancel(cancel_at)
+    player = engine.state.player(0)
+
+    assert faces, "取消发生在选牌之后，故选择面一定构造过"
+    assert set(player.hand) | set(player.equip) == faces[-1], (
+        "选择只收集、提交才生效：取消不搬任何一张牌"
+    )
+    assert not engine.state.discard, "弃牌堆为空 —— 成本没有被执行"
+    assert _lijian_offered_after_cancel(engine), "取消不消耗发动次数：同一阶段仍可再发动"
 
 
 def test_lijian_uses_a_pure_virtual_duel_card():
@@ -968,25 +1121,6 @@ def test_qingnang_degrades_to_target_only_candidates_beyond_the_cap():
     assert {action.choices for action in offers} == {
         (f"seat:{seat}",) for seat in range(1, 8)
     }
-
-
-def test_lijian_degrades_to_pair_only_candidates_beyond_the_cap():
-    hand = tuple(range(20))
-    state = build_state(
-        pack=PACK,
-        seats=[
-            SeatSpec(hand=hand, hero="diaochan", gender=Gender.FEMALE),
-            *_wounded_males(7),
-        ],
-        deck=_deck_excluding(*hand),
-        turn_seat=0,
-    )
-    assert len(hand) * (7 * 6) > CANDIDATE_CAP, "这局必须过闸（否则本用例空转）"
-
-    offers = _offers(_play_candidates(state), LIJIAN)
-
-    assert offers and all(action.picks == () for action in offers)
-    assert len({action.choices for action in offers}) == 7 * 6
 
 
 def test_jieyin_degrades_to_target_only_candidates_beyond_the_cap():

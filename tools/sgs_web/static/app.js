@@ -963,6 +963,8 @@ function renderPending(view) {
     const index = actions.findIndex((action) => action.kind === "SelectCards");
     if (index >= 0) state.selectedOption = index;
     renderSlots(pending);
+    // 选择面这一步可不可以取消（票 01 的技能流水线给出一条 `Pass`）。
+    $("btn-cancel").disabled = state.picks.length === 0 && !cancelAction(pending);
   }
   else if (kind === "direct") renderDirect(actions[0]);
   else renderCandidateList(pending, actions);
@@ -1006,6 +1008,36 @@ function renderKind(pending, actions) {
 /** ``SELECT_OPTION`` 里形如 ``seat:N`` 的选项（服务端已解析成 ``option_seats``）。 */
 function seatChoices(pending) {
   return Object.keys((pending && pending.option_seats) || {});
+}
+
+/** 这一步能不能**取消**（票 01 的技能流水线）：候选里真有一条 `Pass` 吗。
+ *
+ * 与「清空选择」的区别：清空只动界面本地状态；取消要**送出一条合法候选**，服务端据此
+ * 中止这一步（选中的牌不会被搬走、技能使用次数不消耗）。故只有候选里真有 `Pass` 时，
+ * 取消按钮才接到提交上——其余情形仍是原来的"清空选择"，既有询问一字不改。
+ */
+function cancelAction(pending) {
+  if (!pending) return null;
+  if (pending.kind !== "SELECT_CARDS" && pending.kind !== "SELECT_OPTION") return null;
+  return (pending.legal_actions || []).find((action) => action.kind === "Pass") || null;
+}
+
+/** 取消：候选里真有 `Pass` 就送出去（服务端据此中止这一步），否则只清本地选择。 */
+async function cancelOrClear() {
+  if (state.playback) return;
+  const pending = state.view ? state.view.pending : null;
+  const pass = cancelAction(pending);
+  if (!pass) {
+    clearSelection();
+    return;
+  }
+  state.selectedOption = (pending.legal_actions || []).indexOf(pass);
+  state.focusCardId = null;
+  state.selectedTargets = [];
+  state.picks = [];
+  state.skillMode = null;
+  state.lastRejectReason = "";
+  await submitAction();
 }
 
 /** 这条询问是不是"唯一一条候选、且不需要选目标"——是则返回那条候选，否则 `null`。
@@ -1068,11 +1100,15 @@ function renderSkillPick(pending) {
   $("btn-cancel").disabled = state.picks.length === 0 && state.skillSeat === null;
 }
 
-/** `SELECT_OPTION` 的"选座位"形态（【遗计】"交给谁"）：只点场上武将，不铺选项按钮。 */
+/** `SELECT_OPTION` 的"选座位"形态（【遗计】"交给谁" / 【离间】选使用者与目标）：只点场上武将。 */
 function renderSeatPick(pending) {
   const hint = $("t-target-hint");
-  if (hint) hint.textContent = "点场上武将，选择把这张牌交给谁。";
-  $("btn-cancel").disabled = state.selectedOption === null;
+  if (hint) {
+    hint.textContent = cancelAction(pending)
+      ? "点场上武将选择；可点「取消」放弃这一步。"
+      : "点场上武将，选择把这张牌交给谁。";
+  }
+  $("btn-cancel").disabled = state.selectedOption === null && !cancelAction(pending);
 }
 
 function renderPickerAlternatives(pending) {
@@ -1644,7 +1680,7 @@ function wire() {
     renderLog();
   });
   $("btn-submit").addEventListener("click", submitAction);
-  $("btn-cancel").addEventListener("click", clearSelection);
+  $("btn-cancel").addEventListener("click", cancelOrClear);
   $("btn-refresh").addEventListener("click", refresh);
   $("btn-takeover").addEventListener("click", takeover);
   $("btn-delay").addEventListener("click", cycleDelay);

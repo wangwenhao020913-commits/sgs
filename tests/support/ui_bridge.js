@@ -27,6 +27,8 @@
     // 报障 2 / 4：主动技手选（【仁德】）与转化技来源索引（【龙胆】）
     "cardAliases", "enterSkillMode", "toggleSkillCard", "selectSkillSeat", "toggleConvertSkill",
     "seatChoices",
+    // 票 01：技能流水线的「取消」（候选里有 Pass 就送出去，否则只清本地选择）
+    "cancelAction", "cancelOrClear",
     // 报障 3：事件回放（步长按钮 0.1–0.5s，默认 0.1）+ 效果区逐事件派生 + 描述文本
     "flushPlayback", "stepPlayback", "renderProcessing", "applyEffectDelta", "DELAY_STEPS_MS", "describeEffect",
   ];

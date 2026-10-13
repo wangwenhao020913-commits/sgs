@@ -1294,3 +1294,72 @@ def test_availability_follows_the_pending_queries_candidates() -> None:
                 f"{entry['name']} 的 available 与挂起询问的候选不一致"
             )
         session.submit_answer(pending.legal_actions[0])
+
+
+# ---------------------------------------------------------------------------
+# 分步技能的**逐步文案**（票 01 的【离间】样板）
+# ---------------------------------------------------------------------------
+
+
+def test_query_context_walks_the_lijian_steps_with_their_own_wording() -> None:
+    """【离间】三步各有各的问法：先"弃置1张牌"，再"选择两名男性角色…"。
+
+    步 1 是 ``SELECT_CARDS``（询问自带不了步骤名），步 2/3 是 ``SELECT_OPTION``（步骤名在
+    ``skill_id`` 冒号后）。两处都只读**询问里已有的标识** ⇒ 询问协议与 Golden Replay 不动。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(hero="diaochan"), SeatSpec(), SeatSpec()],
+        frame_kind=FrameKind.SKILL,
+        frame_data={"skill_id": "hero.diaochan.lijian", "source": 0},
+    )
+
+    cards_query = SelectCardsQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="请从选择面里选择一张牌。",
+        legal_actions=(),
+        view=project(state, 0),
+        spec=SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1), optional=True),
+        slots=(),
+    )
+    assert query_context(engine, cards_query)["requirement"] == "弃置1张牌"
+
+    for step in ("user", "victim"):
+        option_query = SelectOptionQuery(
+            seq=2,
+            actor=0,
+            timing=Timing.PHASE_PLAY_IDLE,
+            prompt="请选择一项。",
+            legal_actions=(),
+            view=project(state, 0),
+            skill_id=f"lijian:{step}",
+            options=("seat:1", "seat:2"),
+        )
+        assert query_context(engine, option_query)["requirement"] == (
+            "选择场上两名男性角色，先点选的是决斗使用者，后点选的是决斗的目标"
+        ), f"步骤 {step} 的问法"
+
+
+def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_skills() -> None:
+    """没有 ``step_requirements`` 的技能仍读一句话的 summary（旧技能一字不改）。"""
+    engine, state = _context_fixture(
+        [SeatSpec(hero="huatuo"), SeatSpec()],
+        frame_kind=FrameKind.SKILL,
+        frame_data={"skill_id": "hero.huatuo.qingnang", "source": 0},
+    )
+
+    cards_query = SelectCardsQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="请从选择面里选择一张牌。",
+        legal_actions=(),
+        view=project(state, 0),
+        spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1)),
+        slots=(),
+    )
+
+    assert query_context(engine, cards_query)["requirement"] == (
+        "弃一张手牌，令一名已受伤角色回复 1 点体力"
+    )

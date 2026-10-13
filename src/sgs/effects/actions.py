@@ -657,11 +657,18 @@ def _skill_activation(
 def _select_option(
     seat: int, answers_seq: int, ctx: SelectOptionContext
 ) -> list[Action]:
-    """选项闭集：每个选项一个候选（强制选择，无 ``Pass``，票 12 §Q6）。"""
+    """选项闭集：每个选项一个候选（缺省**强制选择**，没有 ``Pass``，票 12 §Q6）。
+
+    ``ctx.optional``（票 00 / N4）才多一条 ``Pass``——它是"取消这一步"的合法应答，
+    供发动后的技能流水线用；缺省 ``False``，故既有消费者候选一字不变。
+    """
     del seat
-    return [
+    actions: list[Action] = [
         SelectOption(choice=option, answers_seq=answers_seq) for option in ctx.options
     ]
+    if ctx.optional:
+        actions.append(Pass(answers_seq=answers_seq))
+    return actions
 
 
 def _arrange(answers_seq: int, ctx: ArrangeContext) -> list[Action]:

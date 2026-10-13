@@ -27,6 +27,7 @@ from sgs.state import (
     PlayerPublic,
     PlayerView,
     QueryKind,
+    SelectOptionContext,
     UseCard,
     project,
 )
@@ -423,3 +424,41 @@ def test_a_second_slash_in_the_same_turn_is_not_a_candidate():
         "本回合已用过额定 1 张【杀】：剩下的那张【杀】不再进候选"
     )
     assert not any(isinstance(action, UseCard) for action in second.legal_actions)
+
+
+# ---------------------------------------------------------------------------
+# SELECT_OPTION 的可取消形态（票 00 / N4）：缺省强制，optional=True 才多一条 Pass
+# ---------------------------------------------------------------------------
+
+
+def test_select_option_is_forced_by_default_and_offers_pass_when_optional():
+    """「取消选择流程」需要 ``Pass``，而既有 SELECT_OPTION 是强制闭集。
+
+    故取消能力做成**显式开关**：``optional`` 缺省 ``False`` ⟹ 既有消费者（雌雄双股剑、
+    遗计"交给谁"）候选一条不多、一条不少。
+    """
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], deck=DECK, turn_seat=0)
+
+    forced = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_OPTION,
+        answers_seq=9,
+        payload=SelectOptionContext(skill_id="demo", options=("a", "b")),
+    )
+    assert [action.kind for action in forced] == ["SelectOption", "SelectOption"], (
+        "缺省强制：闭集两选项，没有 Pass"
+    )
+
+    cancelable = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_OPTION,
+        answers_seq=9,
+        payload=SelectOptionContext(skill_id="demo", options=("a", "b"), optional=True),
+    )
+    kinds = sorted(action.kind for action in cancelable)
+    assert kinds == ["Pass", "SelectOption", "SelectOption"], (
+        "optional=True：多一条 Pass，作为「取消」的合法应答"
+    )
+    assert all(action.answers_seq == 9 for action in cancelable)

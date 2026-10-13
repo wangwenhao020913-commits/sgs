@@ -1195,6 +1195,105 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(sent));
 }
 
+/* ============ 票 01（合成局面）：【离间】流水线 —— 逐步文案 + 取消送出 Pass ============
+ *
+ * 三步都是**服务端驱动的询问**（点技能 → SELECT_CARDS → SELECT_OPTION ×2），前端只按
+ * `pending` 渲染、把候选原样送回去。这里喂与服务端 `pending_payload` 同形的合成 view，
+ * 钉三件事：逐步文案真是服务端那句、两步座位共用同一句问法、有 `Pass` 时取消按钮
+ * **送出一条候选**（而不是只清本地状态）。
+ */
+{
+  const handCard = synthCard(21, "杀");
+  const equipCard = { ...synthCard(22, "的卢"), type: "mount" };
+  const lijianSkill = {
+    skill_id: "hero.diaochan.lijian", name: "离间", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true,
+    ui: {
+      requirement: "弃一张牌，选择两名男性角色", manual: false,
+      pick_cards: [], pick_seats: [], convert_sources: [],
+    },
+  };
+
+  // ① 步 1：弃置 1 张牌（手牌 ∪ 装备区），询问里带一条 `Pass` = 可取消。
+  const pickView = synthView({
+    kind: "SELECT_CARDS", actor: 0, seq: 910, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 910, picks: [] },
+      { kind: "Pass", answers_seq: 910 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "hand" }, card: handCard },
+      { ref: { seat: 0, zone: "equip" }, card: equipCard },
+    ],
+    spec: { zones: ["hand", "equip"], total: [1, 1], sequential: false, optional: true },
+    context: { requirement: "弃置1张牌", skill_hints: [] },
+  });
+  pickView.skills = [lijianSkill];
+  pickView.heroes = { 0: "diaochan", 1: "guanyu", 2: "zhangfei" };
+  pickView.snapshot.self_hand = [handCard];
+  pickView.snapshot.players[0].equip = [equipCard];
+  ui.state.view = pickView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pickView);
+
+  check("㉿J1 步 1 的询问区文案就是服务端那句「弃置1张牌」",
+    $("t-prompt").textContent === "弃置1张牌", `"${$("t-prompt").textContent}"`);
+  check("㉿J2 选择面把手牌与装备区的槽位都铺出来",
+    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 2,
+    `块=${$("t-options").children.length}`);
+  check("㉿J3 候选里有 Pass ⇒ 取消按钮可点（不再只是清空本地选择）",
+    $("btn-cancel").disabled === false, `disabled=${$("btn-cancel").disabled}`);
+
+  ui.state.sessionId = "smoke-missing-session";
+  const beforePick = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
+  check("㉿J4 步 1 点取消 = **送出一条 Pass 候选**",
+    !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
+
+  // ② 步 2 / 3：先点使用者、后点目标；同一句问法，座位可点。
+  const seatView = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 911, prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "seat:1", answers_seq: 911 },
+      { kind: "SelectOption", choice: "seat:2", answers_seq: 911 },
+      { kind: "Pass", answers_seq: 911 },
+    ],
+    candidate_index: {}, virtual_index: {},
+    option_seats: { "seat:1": 1, "seat:2": 2 },
+    context: {
+      requirement: "选择场上两名男性角色，先点选的是决斗使用者，后点选的是决斗的目标",
+      skill_hints: [],
+    },
+  });
+  seatView.skills = [lijianSkill];
+  seatView.heroes = { 0: "diaochan", 1: "guanyu", 2: "zhangfei" };
+  ui.state.view = seatView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(seatView);
+
+  check("㉿J5 座位步的询问区文案是服务端那句「先点选的是决斗使用者…」",
+    $("t-prompt").textContent === "选择场上两名男性角色，先点选的是决斗使用者，后点选的是决斗的目标",
+    `"${$("t-prompt").textContent}"`);
+  const targetBox = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "1");
+  check("㉿J6 男性武将画成可点", !!targetBox && targetBox.classList.contains("targetable"),
+    `targetable=${targetBox && targetBox.classList.contains("targetable")}`);
+  (targetBox.listeners.click || []).forEach((fn) => fn({ target: targetBox }));
+  const seatAction = ui.buildAction();
+  check("㉿J7 点第一个男性 = 选中那条 seat:N 候选（提交才送出去）",
+    !!seatAction && seatAction.kind === "SelectOption" && seatAction.choice === "seat:1",
+    JSON.stringify(seatAction));
+
+  const beforeSeat = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentSeat = calls.length > beforeSeat ? calls[calls.length - 1].body.action : null;
+  check("㉿J8 座位步点取消 = 送出 Pass（中途退出这一步）",
+    !!sentSeat && sentSeat.kind === "Pass", JSON.stringify(sentSeat));
+}
+
 /* ============ 报障 3（合成局面）：事件逐个回放 + 效果区逐事件派生 ============ */
 {
   const moveIn = {

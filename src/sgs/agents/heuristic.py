@@ -135,6 +135,19 @@ _RESPOND_VALUE = 5.0
 _ILLEGAL_PENALTY = -100.0
 _UNKNOWN_SKILL_VALUE = -1.0
 """表里没有的技能：**低于 Pass**（0.0）⇒ 缺省保守，拿不准就不发动。"""
+_ABORT_SKILL_PENALTY = -100.0
+"""撤销一次**已经发动**的技能（发动后流水线里的「取消」）：比任何成本都差。
+
+与 :data:`_ILLEGAL_PENALTY` 同值但**语义不同**（那条是"这条应答本身不合法"），
+故各留一个常量，免得日后调一处误伤另一处。理由见 :func:`_is_committed_skill_step`。
+"""
+_PLAY_PHASE_IDLE = "PHASE_PLAY_IDLE"
+"""时机标识的**字面量**（:class:`~sgs.timing.Timing` 是 ``str`` 枚举，故可直接比）。
+
+为什么抄一个字面量而不是 import：本模块**不许碰全知面**，而
+``tests/test_source_discipline.py`` 的可见面白名单把 ``sgs.timing`` 判红
+（`HEURISTIC_ALLOWED_SGS_MODULES` 只有 ``sgs.effects`` 与 ``sgs.state``）。
+"""
 
 
 def _card_value(card: CardRef | None) -> float:
@@ -272,11 +285,32 @@ def _score_skill_activation(query: Query, action: Action) -> float:
     return _skill_value(query, action)
 
 
+def _is_committed_skill_step(query: Query) -> bool:
+    """这一步的「放弃」等于**撤销一次已经发动的技能**（而不是放弃一桩好事）。
+
+    判据 = 出牌阶段空闲时机（``PHASE_PLAY_IDLE``）**且这一步可取消**。这个组合只由主动技
+    发动后的步骤流水线产出（【离间】票 01）：玩家点了技能按钮就是"要发动"，中途放弃 =
+    撤销；而引擎的"取消不消耗使用次数"意味着**技能会立刻重新可发动**。
+
+    AI 若在这里挑「放弃」，就会"发动 → 放弃 → 又发动"地空转、永远走不完出牌阶段
+    （32 种子基准组的 seed=107 就是这么自旋的）。故 AI 的纪律是：
+    **既然选了发动，就得把成本付完**；要放弃就该在上一层（不点那个技能）放弃。
+    """
+    if getattr(query, "timing", None) != _PLAY_PHASE_IDLE:
+        return False
+    spec = getattr(query, "spec", None)
+    if spec is not None:
+        return bool(getattr(spec, "optional", False))
+    # ``SELECT_OPTION`` 没有 ``spec``：此刻**候选里有 Pass** 本身就说明这一步可取消，
+    # 而可取消的选项询问只有发动后流水线会发（取消 = 撤销一次已发动的技能）。
+    return any(getattr(action, "kind", None) == "Pass" for action in query.legal_actions)
+
+
 def _score_select_cards(query: Query, action: Action) -> float:
     """``SELECT_CARDS``：选**别人的**牌取高价值、选**自己的**牌（成本）取低价值。"""
     assert isinstance(query, SelectCardsQuery)
     if not isinstance(action, SelectCards):
-        return 0.0
+        return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
     total = 0.0
     for index in action.picks:
         if not 0 <= index < len(query.slots):
@@ -297,10 +331,15 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
 
 
 def _score_select_option(query: Query, action: Action) -> float:
-    """``SELECT_OPTION``：按上面的特征贪心；未知选项一律 0（平分交给 ai 子流）。"""
+    """``SELECT_OPTION``：按上面的特征贪心；未知选项一律 0（平分交给 ai 子流）。
+
+    「取消一次已发动的技能」（发动后流水线里的 ``Pass``）是例外：给它一个惩罚，
+    否则 AI 会在座位步挑「取消」，再回头重新发动同一条技能 —— 空转（见
+    :func:`_is_committed_skill_step`）。
+    """
     assert isinstance(query, SelectOptionQuery)
     if not isinstance(action, SelectOption):
-        return 0.0
+        return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
     return _OPTION_VALUES.get(action.choice, 0.0)
 
 

@@ -200,6 +200,19 @@ class SkillDef:
     不被序列化）⇒ 既有 Golden Replay 一行不改。缺省 ``None`` = 没有可展示的文案。
     """
 
+    step_requirements: Mapping[str, str] | None = None
+    """**多步技能**逐步的"需要做什么"（票 01）；键 = 步骤名，缺省 ``None`` = 不分步。
+
+    分步技能的每一步各有各的问法（【离间】先"弃置1张牌"、再"选择两名男性角色…"），
+    一句话的 :attr:`requirement` 盖不住。键的取法**不动询问协议**，只用询问里已有的标识：
+
+    - ``SELECT_OPTION``：键 = 询问自带 ``skill_id`` 冒号后的那一段（``lijian:user`` → ``user``）；
+    - ``SELECT_CARDS``：键 = ``"card"``（技能帧的那一步选牌）。
+
+    与 :attr:`requirement` 同处声明、同样**不进记录流**⇒ 既有 Golden Replay 一行不改；
+    查不到对应键就退回 :attr:`requirement`（旧技能一字不改）。
+    """
+
     virtual_type_ids: tuple[str, ...] = ()
     """本技能的候选是"当某某牌"的**虚拟牌**时，那些目标牌名（转化技 / 丈八蛇矛）。
 

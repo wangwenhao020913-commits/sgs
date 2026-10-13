@@ -34,12 +34,16 @@ from sgs.state import (
     QueryKind,
     RespondContext,
     RespondMode,
+    SelectCards,
+    SelectOption,
     UseCard,
     WindowCause,
 )
 from sgs.timing import Timing
+from sgs.skills import pure_virtual_card
 
 from support import SeatSpec, build_state, cards_of_type, run_until
+from test_hero_active import Scripted, _decline, _find, _run, _skill_frame_popped
 from test_skills import PACK, _deck_excluding
 
 LIJIAN = "hero.diaochan.lijian"
@@ -418,7 +422,11 @@ def test_a_play_phase_card_with_an_emptied_pool_is_simply_not_offered():
 
 
 def test_lijian_does_not_choose_a_kongcheng_character_as_the_duel_target():
-    """空城的诸葛亮不能被离间选为【决斗】的目标，但仍可作为**使用者**。"""
+    """空城的诸葛亮不能被离间选为【决斗】的目标，但仍可作为**使用者**。
+
+    票 01 起【离间】走"发动后步骤流水线"：两个池分别在
+    ``lijian:user`` / ``lijian:victim`` 两次 ``SELECT_OPTION`` 里下发。
+    """
     filler = _cards("peach")[0]
     state = build_state(
         pack=PACK,
@@ -427,17 +435,74 @@ def test_lijian_does_not_choose_a_kongcheng_character_as_the_duel_target():
             SeatSpec(hand=(filler,), gender=Gender.MALE),
             SeatSpec(hero="zhugeliang", gender=Gender.MALE),
         ],
+        deck=_deck_excluding(filler),
         turn_seat=0,
     )
+    asked: dict[str, tuple[str, ...]] = {}
 
-    pairs = {
-        tuple(int(choice.removeprefix("seat:")) for choice in action.choices)
+    def diaochan(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == LIJIAN,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and action.picks == (0,)
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            asked[query.skill_id] = tuple(query.options)
+            wanted = {"lijian:user": "seat:2", "lijian:victim": "seat:1"}.get(query.skill_id)
+            if wanted is not None:
+                return _find(
+                    query,
+                    lambda action: isinstance(action, SelectOption) and action.choice == wanted,
+                )
+        return _decline(query)
+
+    _run(
+        state,
+        [Scripted(diaochan), Scripted(_decline), Scripted(_decline)],
+        _skill_frame_popped,
+    )
+
+    assert "seat:2" in asked["lijian:user"], "诸葛亮仍可作为【决斗】的使用者"
+    assert asked["lijian:victim"] == ("seat:1",), (
+        "诸葛亮（无手牌 ⇒ 空城）不能被选为【决斗】目标，故受害者池里只剩座位 1"
+    )
+
+
+def test_lijian_is_not_offered_when_no_ordered_pair_is_legal():
+    """回归（票 01 引入步骤流水线时踩到）：**没有任何合法有序对**时连候选都不造。
+
+    旧形状把"合法有序对"烘进候选，天然不会出现空池；改成发动后再问之后，"使用者"这一问
+    必须**至少有一个合法受害者**，否则参与者会收到一个没有候选的 ``SELECT_OPTION``
+    （启发式 AI 在那里直接抛 ``ValueError``；由 ``tests/test_all_ai_games.py`` 的全 AI 局
+    扫出来）。判据仍取自同一条 ``check_targets`` 链。
+    """
+    filler = _cards("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(filler,), hero="diaochan", gender=Gender.FEMALE),
+            SeatSpec(hero="zhugeliang", gender=Gender.MALE),
+            SeatSpec(hero="zhugeliang", gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(filler),
+        turn_seat=0,
+    )
+    males = (1, 2)
+    duel = pure_virtual_card(state, "duel")
+    assert all(
+        not [victim for victim in males if victim != user and victim in check_targets(state, user, duel)]
+        for user in males
+    ), "两名男性互为对方的【决斗】目标时都因空城出池"
+
+    assert not [
+        action
         for action in _play_candidates(state)
         if isinstance(action, ActivateSkill) and action.skill_id == LIJIAN
-    }
-
-    assert (1, 2) not in pairs, "诸葛亮（无手牌）不能被选为【决斗】目标"
-    assert (2, 1) in pairs, "诸葛亮仍可作为【决斗】的使用者"
+    ], "没有合法有序对 ⇒ 离间不进候选"
 
 
 # ---------------------------------------------------------------------------

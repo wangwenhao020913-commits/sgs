@@ -1429,8 +1429,12 @@ class Engine:
         *,
         skill_id: str,
         options: tuple[str, ...],
+        optional: bool = False,
     ) -> Any:
-        """发一次 ``SELECT_OPTION`` 询问（票 12 §Q6 / 票 30）：选项闭集、强制选择。
+        """发一次 ``SELECT_OPTION`` 询问（票 12 §Q6 / 票 30）：选项闭集。
+
+        缺省**强制选择**（既有消费者的口径）；``optional=True`` 时候选里多一条 ``Pass``，
+        并把它**原样返回**给调用方——"这一步可以取消"的判据由调用方自己定（票 00 / N4）。
 
         答案按 ``(skill_id, actor)`` 帧内缓存，重入不重发。
         """
@@ -1444,12 +1448,14 @@ class Engine:
                 actor,
                 timing,
                 seq,
-                payload=SelectOptionContext(skill_id=skill_id, options=options),
+                payload=SelectOptionContext(
+                    skill_id=skill_id, options=options, optional=optional
+                ),
             )
         )
         if action is SUSPEND:
             return SUSPEND
-        assert isinstance(action, SelectOption)
+        assert isinstance(action, (SelectOption, Pass))
         answers[answer_key] = action
         return action
 

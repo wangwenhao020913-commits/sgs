@@ -200,10 +200,16 @@ class SkillActivationContext:
 
 @dataclass(frozen=True, slots=True)
 class SelectOptionContext:
-    """``SELECT_OPTION`` 候选生成的类型化载荷（票 12 §Q6 / 票 30）：选项 id 闭集。"""
+    """``SELECT_OPTION`` 候选生成的类型化载荷（票 12 §Q6 / 票 30）：选项 id 闭集。
+
+    ``optional`` 是**取消能力**的显式开关（票 00 / N4）：缺省 ``False`` ⟹ 强制闭集，
+    候选一条不多（雌雄双股剑、遗计"交给谁"的既有口径不变）；置 ``True`` 才多一条
+    ``Pass``，供"发动后中途取消、取消不消耗技能使用次数"的技能流水线用。
+    """
 
     skill_id: str
     options: tuple[str, ...]
+    optional: bool = False
 
 
 @dataclass(frozen=True, slots=True)

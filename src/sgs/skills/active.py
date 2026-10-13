@@ -57,6 +57,7 @@ from sgs.state import (
     FrameKind,
     GameState,
     MoveReason,
+    Pass,
     SelectionSpec,
     Zone,
     ZoneRef,
@@ -546,78 +547,123 @@ def _lijian_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
         return current
     player = state.player(ctx.subject)
     cards = (*player.hand, *player.equip)
-    males = tuple(
+    if not cards or not _lijian_partners(state, ctx.subject):
+        return current
+    # 票 01：候选**恒为一条骨架**，不再烘"牌 × 有序男性对"。
+    # 弃哪张、谁是使用者、谁是目标，一律改由发动后的步骤流水线问（:func:`_lijian_activate`）；
+    # 故候选数与手牌数、场上男性数无关，``CANDIDATE_CAP`` 的降级路径对【离间】不再触发。
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _lijian_males(state: GameState, owner: int) -> tuple[int, ...]:
+    """【离间】的可选男性角色（不含发动者自己；座位序 = 玩家序，确定性）。"""
+    return tuple(
         p.seat
         for p in state.players
-        if p.alive and p.gender is Gender.MALE and p.seat != ctx.subject
+        if p.alive and p.gender is Gender.MALE and p.seat != owner
     )
-    if not cards or len(males) < 2:
-        return current
-    # 【离间】视为使用【决斗】**强制指定目标**，但强制不等于绕过"不能成为目标"的锁定技
-    # （票 06 §要做什么 2 的同源要求）：受害者的合法性读与真牌同一条 ``check_targets``
-    # 链（【空城】据此出池）。使用者不受此限——"不能成为目标"只约束受害者一侧。
+
+
+def _lijian_partners(state: GameState, owner: int) -> dict[int, tuple[int, ...]]:
+    """**合法的有序对**：使用者 → 可作为其【决斗】目标的男性（受害者一侧走真牌同一条链）。
+
+    这张表是两步座位询问的**共同真源**，也承担"付不起就不进池"的旧语义：
+
+    - 只为**至少有一个合法受害者**的男性开"使用者"这一问（否则第二步的池为空，
+      参与者会收到一个没有候选的询问——AI 直接抛错）；
+    - 受害者池直接取表里的那一项，故【空城】这类"不能成为目标"的锁定技照常出池。
+    """
     duel = pure_virtual_card(state, "duel")
-    duel_pools = {user: frozenset(check_targets(state, user, duel)) for user in males}
-    pairs = tuple(
-        (user, victim)
+    males = _lijian_males(state, owner)
+    return {
+        user: victims
         for user in males
-        for victim in males
-        if victim != user and victim in duel_pools[user]
-    )
-    if not pairs:
-        return current
-    if _over_cap(len(cards), len(pairs)):
-        offers = [
-            ActivateSkill(
-                skill_id=ctx.skill_id,
-                choices=(_seat_choice(user), _seat_choice(victim)),
-                answers_seq=ctx.answers_seq,
+        if (
+            victims := tuple(
+                victim
+                for victim in males
+                if victim != user and victim in check_targets(state, user, duel)
             )
-            for user, victim in pairs
-        ]
-    else:
-        offers = [
-            ActivateSkill(
-                skill_id=ctx.skill_id,
-                picks=(card_id,),
-                choices=(_seat_choice(user), _seat_choice(victim)),
-                answers_seq=ctx.answers_seq,
-            )
-            for card_id in cards
-            for user, victim in pairs
-        ]
-    return (*current, *offers)
+        )
+    }
+
+
+def _option_seat(action: Any) -> int:
+    """``SelectOption(choice="seat:N")`` → 座位号。"""
+    return int(action.choice.removeprefix(_SEAT_PREFIX))
 
 
 def _lijian_activate(host: Any, frame: Any) -> Any:
+    """票 01 的**步骤流水线**：弃 1 张牌 → 选使用者 → 选目标 → 一次性结算。
+
+    三条纪律：
+
+    - **选择只收集、提交才生效**（用户裁定 Q3）：牌直到三步走完才搬进弃牌堆，故任何一步
+      取消都留下完整的手牌；
+    - **取消不消耗次数**：``_USED`` 位在**流水线全部走完**之后才落，取消 ⇒ 一个位都不落；
+    - **顺序即语义**：第一次点的是【决斗】**使用者**，第二次点的是**目标**；有序性不靠
+      按钮文案，靠步骤次序，前端不做任何裁决。
+    """
     state = host.state
     owner = frame.data["source"]
-    _mark_phase(state, owner, frame.data["skill_id"], _USED)
-    user, victim = _chosen_seats(frame)
-    picks = tuple(frame.data.get("picks", ()))
-    if picks:
-        if _move_to_discard(host, frame, picks, owner=owner, key="lijian:cost") == "stay":
-            return "stay"
-    else:
-        paid = _pay_sequential(
-            host,
-            frame,
-            owner,
-            needed=1,
-            key_prefix="lijian",
-            zones=(Zone.HAND, Zone.EQUIP),
-        )
-        if paid is None:
-            return "stay"
-    # 使用者与目标在**候选生成期**已按同一条 ``check_targets`` 链定下（票 06），故这里
-    # 不再重查"能否使用"的常规合法性，只走【决斗】自己的结算链——伤害来源随使用者
-    # （不是貂蝉）。
-    host.start_use(
-        pure_virtual_card(state, "duel"),
-        source=user,
-        targets=(victim,),
-        use_timing=Timing.PHASE_PLAY_IDLE,
+
+    # 步 1：弃置 1 张牌（手牌 ∪ 装备区）。``optional=True`` 给出一条 ``Pass`` = 取消。
+    picks = host.ask_selection(
+        frame,
+        key="lijian:card",
+        actor=owner,
+        timing=Timing.PHASE_PLAY_IDLE,
+        spec=SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1), optional=True),
+        build_face=lambda: host.selection_face(
+            owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True
+        ),
     )
+    if host.suspended(picks):
+        return "stay"
+    if not picks:
+        # 取消：一个副作用都不产生（不搬牌、不落 ``_USED``），技能随时可再发动。
+        return None
+
+    partners = _lijian_partners(state, owner)
+    # 步 2：**先点的是使用者**（只开"至少有一个合法受害者"的那些男性）。
+    user = host.ask_option(
+        frame,
+        owner,
+        Timing.PHASE_PLAY_IDLE,
+        skill_id="lijian:user",
+        options=tuple(_seat_choice(seat) for seat in partners),
+        optional=True,
+    )
+    if host.suspended(user):
+        return "stay"
+    if isinstance(user, Pass):
+        return None
+    user_seat = _option_seat(user)
+
+    # 步 3：**后点的是目标**。使用者不能当自己的目标；受害者一侧仍读真牌同一条
+    # ``check_targets`` 链（【空城】据此出池），使用者一侧不受"不能成为目标"限制。
+    duel = pure_virtual_card(state, "duel")
+    victim = host.ask_option(
+        frame,
+        owner,
+        Timing.PHASE_PLAY_IDLE,
+        skill_id="lijian:victim",
+        options=tuple(_seat_choice(seat) for seat in partners[user_seat]),
+        optional=True,
+    )
+    if host.suspended(victim):
+        return "stay"
+    if isinstance(victim, Pass):
+        return None
+    victim_seat = _option_seat(victim)
+
+    # 三步走完：这才算发动过（次数位在此落，取消路径一个位都不落）。
+    _mark_phase(state, owner, frame.data["skill_id"], _USED)
+    if _move_to_discard(host, frame, picks, owner=owner, key="lijian:cost") == "stay":
+        return "stay"
+    # 使用者与目标已按同一条 ``check_targets`` 链定下，故这里不再重查"能否使用"的常规
+    # 合法性，只走【决斗】自己的结算链——伤害来源随使用者（不是貂蝉）。
+    host.start_use(duel, source=user_seat, targets=(victim_seat,), use_timing=Timing.PHASE_PLAY_IDLE)
     return None
 
 
@@ -738,6 +784,19 @@ _REQUIREMENTS: dict[str, str] = {
 }
 """A 族六条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
+_STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
+    "lijian": {
+        "card": "弃置1张牌",
+        "user": "选择场上两名男性角色，先点选的是决斗使用者，后点选的是决斗的目标",
+        "victim": "选择场上两名男性角色，先点选的是决斗使用者，后点选的是决斗的目标",
+    },
+}
+"""**多步技能**逐步的问法（票 01）；键 = 步骤名（判据见 :attr:`SkillDef.step_requirements`）。
+
+【离间】的三步各有各的问法：步 1 只问"弃哪张"，步 2/3 是同一句话（先点的是使用者、
+后点的是目标）。旧技能不在此表 ⇒ 仍读一句话的 :data:`_REQUIREMENTS`。
+"""
+
 
 def active_skill_definitions() -> tuple[SkillDef, ...]:
     """A 族六条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
@@ -753,6 +812,7 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             modifiers=(Modifier(ModifierPoint.CANDIDATES, skill.offers),),
             requirement=_REQUIREMENTS[skill.short_id],
+            step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
         )
         for skill in ACTIVE_SKILLS
     )
