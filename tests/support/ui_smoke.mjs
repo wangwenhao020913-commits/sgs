@@ -1259,6 +1259,96 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `playback=${!!ui.state.playback} cursor=${ui.state.view.cursor}`);
 }
 
+/* ============ 报障：描述文本的目标 / 使用者（决斗串味 + 杀缺目标 + 南蛮逐目标） ============
+ *
+ * 根因：卡牌在 ``USE_CHOOSE_TARGET`` 之后、``USE_DESIGNATE_TARGET`` 之前就进了处理区，
+ * 而界面在**进区那一刻**去套"最近一次指定目标"——决斗因此套到上一次【南蛮入侵】的 7 个
+ * 目标（报障图 1），杀则因为上一次不是自己而干脆没目标（图 2）。
+ * 修法：进区只记使用者；``USE_DESIGNATE_TARGET`` 到了再认领目标；
+ * 逐目标结算时用 ``RESOLVE_*`` 的**当前目标**覆盖，南蛮轮到谁就写谁。
+ */
+{
+  const tr = (seq, name, actor, targets) => ({ kind: "timing", seq, timing: name, actor, targets, cards: [] });
+  const mv = (seq, owner, card) => ({
+    kind: "delta", delta_type: "card_move", seq, reason: "USE", owner,
+    from_zone: { seat: owner, zone: "hand" }, to_zone: { seat: null, zone: "processing" }, cards: [card],
+  });
+  const base = synthView(null);
+  base.snapshot.processing = [];
+  const before = { ...base, cursor: 600, log_seq: 0, records: [], finished: false };
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 900, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 900 }], candidate_index: {}, virtual_index: {},
+    option_seats: {}, context: null,
+  };
+  const play = (records) => {
+    const view = { ...base, cursor: 900, log_seq: 0, finished: false, pending, records };
+    ui.state.logRecords = [];
+    $("t-log").innerHTML = "";
+    ui.state.view = null;
+    ui.applyViewRaw(before);
+    ui.applyViewRaw(view);
+  };
+
+  // ① 决斗：上一次是 4 号位的 7 目标【南蛮入侵】；这次决斗只有目标 5。
+  play([
+    tr(901, "USE_DESIGNATE_TARGET", 4, [5, 6, 7, 0, 1, 2, 3]),
+    mv(902, 4, synthCard(20, "决斗")),
+    tr(903, "USE_DESIGNATE_TARGET", 4, [5]),
+    tr(904, "RESOLVE_START", 4, [5]),
+  ]);
+  ui.stepPlayback(true);
+  ui.stepPlayback(true);
+  check("㉿F1 决斗刚进处理区：只写使用者，不套上一次的目标",
+    $("t-context").textContent === "处理中：【决斗】（4号位 使用）",
+    `描述="${$("t-context").textContent}"`);
+  ui.stepPlayback(true);
+  check("㉿F2 决斗指定目标后：写它自己的目标（不是上一次南蛮的 7 个）",
+    $("t-context").textContent.includes("4号位 对 5号位 使用")
+      && !$("t-context").textContent.includes("6号位"),
+    `描述="${$("t-context").textContent}"`);
+  ui.stepPlayback(true);
+  check("㉿F3 逐目标结算窗口里也写得出目标",
+    $("t-context").textContent.includes("4号位 对 5号位 使用"),
+    `描述="${$("t-context").textContent}"`);
+
+  // ② 杀：进处理区时没有可套的目标（上一次是别人用的），指定目标后才显示。
+  play([
+    mv(911, 5, synthCard(30, "杀")),
+    tr(912, "USE_DESIGNATE_TARGET", 5, [6]),
+  ]);
+  ui.stepPlayback(true);
+  check("㉿F4a 杀刚进处理区：只有使用者",
+    $("t-context").textContent === "处理中：【杀】（5号位 使用）",
+    `描述="${$("t-context").textContent}"`);
+  ui.stepPlayback(true);
+  check("㉿F4b 杀指定目标后：补上目标（图 2 的 bug）",
+    $("t-context").textContent.includes("5号位 对 6号位 使用"),
+    `描述="${$("t-context").textContent}"`);
+
+  // ③ 南蛮入侵：逐目标生效，轮到谁就写谁。
+  play([
+    mv(921, 3, synthCard(40, "南蛮入侵")),
+    tr(922, "USE_DESIGNATE_TARGET", 3, [4, 5, 6, 7, 0, 1, 2]),
+    tr(923, "RESOLVE_START", 3, [4]),
+    tr(924, "RESOLVE_BEFORE_EFFECT", 4, [4]),
+    tr(925, "RESOLVE_START", 3, [5]),
+    tr(926, "RESOLVE_BEFORE_EFFECT", 5, [5]),
+  ]);
+  ui.stepPlayback(true);
+  ui.stepPlayback(true);
+  ui.stepPlayback(true);
+  check("㉿F5 南蛮逐目标：轮到 4 号位就写 4 号位",
+    $("t-context").textContent.includes("3号位 对 4号位 使用"),
+    `描述="${$("t-context").textContent}"`);
+  ui.stepPlayback(true);
+  ui.stepPlayback(true);
+  check("㉿F6 南蛮换到 5 号位时描述跟着换（不再看不见轮到谁）",
+    $("t-context").textContent.includes("3号位 对 5号位 使用")
+      && !$("t-context").textContent.includes("4号位"),
+    `描述="${$("t-context").textContent}"`);
+}
+
 /* ============ 报障 2 / 4（真局）：从真实服务端扫出刘备 / 赵云的局面再验一次 ============ */
 {
   const scanHeroCases = async () => {

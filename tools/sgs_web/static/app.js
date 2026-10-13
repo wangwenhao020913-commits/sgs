@@ -78,7 +78,6 @@ const state = {
   playback: null,      // 事件回放：{body, records, index, querySeat}
   eventDelayMs: DELAY_STEPS_MS[0], // 回放步长（牌桌按钮切档）
   effectCards: [],     // 效果区里当前可见的牌；回放期间由 card_move delta 逐事件派生
-  lastUse: null,       // 回放期间最近一次「指定目标」的 {source, targets}（给处理区的牌标注使用者）
   timer: null,
   runs: [],
   replay: null,
@@ -247,18 +246,33 @@ function finishPlayback() {
   commitView(playback.body);
 }
 
+/** 逐目标结算的 C 段时机：它们的 ``targets`` 是**当前正在结算的那个目标**。
+ *
+ * 不含 ``RESOLVE_AFTER_END``：那一条带的还是整张牌的目标列表，且卡牌此时已在离开处理区，
+ * 拿它更新"当前目标"会把下一张牌错认成目标。
+ */
+const RESOLVE_TARGET_TIMINGS = new Set([
+  "RESOLVE_START",
+  "RESOLVE_BEFORE_EFFECT",
+  "RESOLVE_EFFECT",
+  "RESOLVE_AFTER_EFFECT",
+  "RESOLVE_END",
+]);
+
 /** 效果区的逐事件派生：``card_move`` 进 / 出处理区时增删牌面。
  *
  * 处理区是**公开区**（`snapshot.processing`），但一次响应只给**终态**；回放期间要看见
  * 【杀】【闪】【桃】停在里面，只能顺着增量把牌挪进挪出。
  *
- * 牌进处理区时顺手记下"谁在用"（`USE_DESIGNATE_TARGET` 的 `source`/`targets`，
- * 或这条移动自带的 `owner`），描述文本据此写「（N号位 对 M号位 使用）」。
+ * **为什么进区时只记使用者、不记目标**：卡牌在 ``USE_CHOOSE_TARGET`` 之后、
+ * ``USE_DESIGNATE_TARGET`` 之前就进了处理区，那一刻这次使用的目标**还没定**；拿"上一次
+ * 指定目标"去套会串味（【决斗】套到上一次【南蛮入侵】的 7 个目标，报障图 1）。
+ * 目标在 :func:`applyUseTiming` 里等 ``USE_DESIGNATE_TARGET`` 到了再认领。
  */
 function applyEffectDelta(record) {
   if (!record) return;
-  if (record.kind === "timing" && record.timing === "USE_DESIGNATE_TARGET") {
-    state.lastUse = { source: record.actor, targets: (record.targets || []).slice() };
+  if (record.kind === "timing") {
+    applyUseTiming(record);
     return;
   }
   if (record.kind !== "delta" || record.delta_type !== "card_move") return;
@@ -272,14 +286,32 @@ function applyEffectDelta(record) {
   if (to.zone === "processing") {
     for (const card of cards) {
       if (state.effectCards.some((held) => held.card_id === card.card_id)) continue;
-      // 只有"这条移动的使用者就是刚指定目标的那个人"才敢套用那一组目标；
-      // 否则（无懈一类的响应使用）只标注来源，不编目标。
-      const use = (record.reason === "USE" && state.lastUse && state.lastUse.source === record.owner)
-        ? state.lastUse
-        : null;
-      const source = use ? use.source : (record.reason === "USE" ? record.owner : null);
-      state.effectCards.push({ ...card, source, targets: use ? use.targets : [] });
+      state.effectCards.push({
+        ...card,
+        source: record.reason === "USE" ? record.owner : null, // 使用者随这次使用已知
+        targets: null,        // 目标等 USE_DESIGNATE_TARGET 认领
+        currentTarget: null,  // 逐目标结算时由 RESOLVE_* 覆盖
+      });
     }
+  }
+}
+
+/** 时机记录对描述文本的两个贡献：认领这次使用的目标、更新"当前结算到谁"。
+ *
+ * 认领只看**栈顶那张处理区牌**（刚进来的那张）且要求使用者与时机 ``actor`` 相同、
+ * 目标还没认领过；认领过一次就不再改，故一次使用的目标只认领自己那一份。
+ */
+function applyUseTiming(record) {
+  const card = state.effectCards[state.effectCards.length - 1];
+  if (!card) return;
+  if (record.timing === "USE_DESIGNATE_TARGET") {
+    if (card.source === record.actor && (card.targets === null || card.targets === undefined)) {
+      card.targets = (record.targets || []).slice();
+    }
+    return;
+  }
+  if (RESOLVE_TARGET_TIMINGS.has(record.timing) && (record.targets || []).length) {
+    card.currentTarget = record.targets[0];
   }
 }
 
@@ -288,7 +320,12 @@ function mergeEffectCards(cards) {
   const previous = new Map((state.effectCards || []).map((card) => [card.card_id, card]));
   return (cards || []).map((card) => {
     const held = previous.get(card.card_id);
-    return { ...card, source: held ? held.source : null, targets: held ? held.targets : [] };
+    return {
+      ...card,
+      source: held ? held.source : null,
+      targets: held ? held.targets : null,
+      currentTarget: held ? held.currentTarget : null,
+    };
   });
 }
 
@@ -298,15 +335,20 @@ function describeEffect(cards) {
   const parts = cards.map((card) => {
     const who = (card.source === null || card.source === undefined)
       ? ""
-      : `（${useText(card.source, card.targets)}）`;
+      : `（${useText(card)}）`;
     return `【${card.name}】${who}`;
   });
   return `处理中：${parts.join("、")}`;
 }
 
-/** 处理区里某张牌的"谁在用"：有他人目标写"X号位 对 Y号位 使用"，否则写"X号位 使用"。 */
-function useText(source, targets) {
-  const others = (targets || []).filter((seat) => seat !== source);
+/** 处理区里某张牌的"谁对谁"：逐目标结算时写**当前**目标；否则写全部（去重使用者本人）。 */
+function useText(card) {
+  const source = card.source;
+  const current = card.currentTarget;
+  if (current !== null && current !== undefined && current !== source) {
+    return `${source}号位 对 ${current}号位 使用`;
+  }
+  const others = (card.targets || []).filter((seat) => seat !== source);
   return others.length
     ? `${source}号位 对 ${others.map((seat) => `${seat}号位`).join("、")} 使用`
     : `${source}号位 使用`;
