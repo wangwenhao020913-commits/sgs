@@ -114,6 +114,9 @@ class ConversionSkill(HeroSkillDecl):
     predicate: Predicate
     scopes: tuple[CandidateScope, ...]
     outside_turn_only: bool = False
+    requirement: str = ""
+    """这条转化"需要玩家做什么"的人话（item 4）；`conversion_skill_definitions` 透进
+    :attr:`~sgs.skills.catalog.SkillDef.requirement`（龙胆两个方向各一条 ⇒ 用"；"并起来）。"""
 
     def select(self, state: GameState, seat: int) -> tuple[int, ...]:
         """本技能在当前局面下**筛好的**来源牌（区域谓词 + 牌面谓词 + 时机谓词）。"""
@@ -171,6 +174,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         source_zone=_all_cards,
         predicate=_red,
         scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
+        requirement="选择1张红色牌当【杀】使用或打出",
     ),
     # 赵云【龙胆】两条方向共用一个技能 id（规则 982）。
     ConversionSkill(
@@ -180,6 +184,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         source_zone=_hand,
         predicate=_slash,
         scopes=(CandidateScope.DODGE, CandidateScope.RESPOND),
+        requirement="选择1张【杀】当【闪】打出",
     ),
     ConversionSkill(
         hero_id="zhaoyun",
@@ -188,6 +193,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         source_zone=_hand,
         predicate=_dodge,
         scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
+        requirement="选择1张【闪】当【杀】使用或打出",
     ),
     # 大乔【国色】：一张方块牌当【乐不思蜀】使用（规则 1024）。
     ConversionSkill(
@@ -197,6 +203,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         source_zone=_hand,
         predicate=_diamond,
         scopes=(CandidateScope.PLAY,),
+        requirement="选择1张方块牌当【乐不思蜀】使用",
     ),
     # 华佗【急救】：回合外一张红色牌当【桃】使用（规则 1041）。
     ConversionSkill(
@@ -207,6 +214,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         predicate=_red,
         scopes=(CandidateScope.PLAY,),
         outside_turn_only=True,
+        requirement="选择1张红色牌当【桃】使用",
     ),
 )
 """H 族四条技能（五条声明：龙胆两个方向各一条）的逐字声明（票 03 §表）。"""
@@ -237,6 +245,9 @@ def conversion_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             modifiers=tuple(_modifier(skill) for skill in skills),
+            # 龙胆两个方向各一条声明 ⇒ 文案用"；"并起来；虚拟牌名去重后收成元组。
+            requirement="；".join(skill.requirement for skill in skills),
+            virtual_type_ids=tuple(dict.fromkeys(skill.target_type_id for skill in skills)),
         )
         for skill_id, skills in grouped.items()
     )

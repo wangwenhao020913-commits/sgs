@@ -198,6 +198,12 @@ MOVE_AFTER_SKILLS: tuple[MoveAfterSkill, ...] = (
 )
 """D 族两条技能的逐字声明（票 07 §要做什么 6 的表）。"""
 
+_REQUIREMENTS: dict[str, str] = {
+    "lianying": "摸一张牌",
+    "xiaoji": "摸两张牌",
+}
+"""D 族两条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+
 
 def move_after_skill_definitions() -> tuple[SkillDef, ...]:
     """D 族两条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
@@ -212,6 +218,7 @@ def move_after_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             hooks=(Hook(Timing.MOVE_AFTER, skill.handle, skill.condition),),
+            requirement=_REQUIREMENTS[skill.short_id],
         )
         for skill in MOVE_AFTER_SKILLS
     )

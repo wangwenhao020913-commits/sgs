@@ -1043,14 +1043,31 @@ class Engine:
         """处理区 → 目标座位的判定区（``reason = PUT``、归属 = 使用者）。
 
         延时锦囊"使用当时"的落点（票 10 §7）：L4 走完就把实体牌置入目标判定区，
-        L5 推迟到目标自己的判定阶段。虚拟牌不是延时锦囊，不会走到这里。
+        L5 推迟到目标自己的判定阶段。
+
+        **转化延时锦囊**（【国色】的方块牌当【乐不思蜀】）：判定区只装实体牌，故置入的是
+        **来源实体牌**，并在 :attr:`~sgs.state.GameState.virtual_judge` 记下"它其实代表哪张
+        虚拟牌"；判定阶段据此按虚拟牌结算。纯虚拟牌（无来源）置入判定区没有实体可放，跳过。
         """
-        if frame.data["card"].is_virtual:
+        card = frame.data["card"]
+        target = frame.data["targets"][0]
+        if card.is_virtual:
+            sources = tuple(getattr(card, "virtual_sources", ()))
+            if len(sources) != 1:
+                return  # 纯虚拟牌 / 多源转化：标准版没有这样的延时锦囊生产者
+            self.move_in_frame(
+                frame,
+                self.state.refs(sources),
+                to_zone=ZoneRef(Zone.JUDGE, target),
+                reason=MoveReason.PUT,
+                owner=frame.data["source"],
+            )
+            self.state.virtual_judge[sources[0]] = card
             return
         self.move_in_frame(
             frame,
-            (frame.data["card"],),
-            to_zone=ZoneRef(Zone.JUDGE, frame.data["targets"][0]),
+            (card,),
+            to_zone=ZoneRef(Zone.JUDGE, target),
             reason=MoveReason.PUT,
             owner=frame.data["source"],
         )
@@ -2431,6 +2448,21 @@ class Engine:
         store[key] = None
         return None
 
+    def phase_body_skill(self) -> str | None:
+        """**阶段体**里正在跑的技能 id（不压栈的那条帧），没有则 ``None``。
+
+        阶段体帧住 ``_turn_data``（见 :meth:`_dispatch_phase_body`），不在结算栈上，故
+        接入层的询问上下文（"这是哪条技能在问"）读不到栈顶。这里把那条帧的
+        :data:`~sgs.skills.catalog.RUNNING_SKILL_KEY` 读出来——只读、不改行为，服务的是
+        【观星】这类阶段体技能的询问提示（item 4）。
+        """
+        for value in self._turn_data.values():
+            if isinstance(value, Frame):
+                skill_id = value.data.get(RUNNING_SKILL_KEY)
+                if skill_id:
+                    return str(skill_id)
+        return None
+
     def _phase_judge(self) -> str | None:
         """判定阶段：**自循环回合步骤**，逐张结算当前回合角色判定区里的延时锦囊（票 10 §3）。
 
@@ -2457,6 +2489,9 @@ class Engine:
         card_id = self._next_judge_card(seat, judged)
         if card_id is None:
             return None
+        # 判定区装实体牌，但转化延时锦囊（【国色】）代表的是一张**虚拟牌**：先把那层
+        # 映射读出来，再搬牌（搬出判定区会清掉映射，见 :func:`~sgs.effects.move_card`）。
+        judged_card = self.state.virtual_judge.get(card_id, self.state.card(card_id))
         # 每轮重取的是"仍在判定区"的牌：结算前离开判定区（被拆 / 顺走）的牌自然不会
         # 被选中，其使用流程随之终止（官方 `flow_use.txt:15`）。
         self._move_judge_card_to_processing(seat, card_id)
@@ -2464,7 +2499,7 @@ class Engine:
         resolve = self.push_frame(
             FrameKind.RESOLVE,
             {
-                "card": self.state.card(card_id),
+                "card": judged_card,
                 "source": None,
                 "targets": (seat,),
                 "use_timing": Timing.PHASE_JUDGE,

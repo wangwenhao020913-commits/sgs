@@ -569,12 +569,21 @@ function cardUsable(pending, cardId) {
 function renderPending(view) {
   const pending = view.pending;
   $("t-options").innerHTML = "";
-  $("t-prompt").textContent = pending ? pending.prompt : "（没有待应答的询问）";
+  // 询问文本：**需要做什么**（服务端 `context.requirement`）优先；没有就退回引擎的通用 prompt。
+  const requirement = pending && pending.context && pending.context.requirement;
+  $("t-prompt").textContent = requirement
+    || (pending ? pending.prompt : "（没有待应答的询问）");
   // 询问窗口的"谁对谁做了什么"（服务端从结算栈顶帧派生；读不到就不写这一行）。
   const contextNode = $("t-context");
   if (contextNode) {
     const label = pending && pending.context && pending.context.label;
     contextNode.textContent = label ? `本窗口：${label}` : "";
+  }
+  // 这条窗口里**被提供**的技能（主动技 / 提供者 / 转化技）的"需要做什么"文案。
+  const hintsNode = $("t-skill-hints");
+  if (hintsNode) {
+    const hints = (pending && pending.context && pending.context.skill_hints) || [];
+    hintsNode.textContent = hints.map((hint) => `【${hint.name}】${hint.requirement}`).join("　");
   }
   $("btn-submit").disabled = true;
   $("btn-cancel").disabled = true;

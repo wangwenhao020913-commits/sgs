@@ -62,6 +62,12 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
 )
 """L 族两条技能的逐字声明（票 12 §落地表第 17/27 行）。"""
 
+_REQUIREMENTS: dict[str, str] = {
+    "yingzi": "多摸一张牌",
+    "biyue": "摸一张牌",
+}
+"""L 族两条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+
 
 def phase_body_activation_plans() -> dict[str, Any]:
     """L 族的发动形态注册表（由 :data:`sgs.skills.catalog.ACTIVATION_PLANS` 末尾并入）。
@@ -92,6 +98,7 @@ def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             hooks=(Hook(skill.timing, skill.handler),),
+            requirement=_REQUIREMENTS[skill.short_id],
         )
         for skill in PHASE_BODY_SKILLS
     )

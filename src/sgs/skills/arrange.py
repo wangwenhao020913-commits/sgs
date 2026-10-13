@@ -125,5 +125,6 @@ def arrange_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             hooks=(Hook(Timing.PHASE_PREPARE, guanxing_handler),),
+            requirement="观看牌堆顶若干张牌，以任意顺序放回牌堆顶 / 牌堆底",
         ),
     )

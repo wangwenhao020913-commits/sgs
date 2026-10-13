@@ -141,6 +141,12 @@ def move_card(
     # 成员判定用元组而非 set：本项目禁一切无序容器参与顺序（票 08 §7）。
     source_list[:] = [card_id for card_id in source_list if card_id not in card_ids]
 
+    if source.zone is Zone.JUDGE:
+        # 离开判定区即清掉"这张实体牌代表哪张虚拟延时锦囊"的映射（【国色】）：映射只在
+        # 判定阶段被读一次，留着会让同一张实体牌日后被误判成那张虚拟牌。
+        for card_id in card_ids:
+            state.virtual_judge.pop(card_id, None)
+
     if to_zone.zone is Zone.EQUIP:
         _place_into_equipment(state, to_zone, cards)
     else:

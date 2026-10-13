@@ -715,6 +715,13 @@ check("唯一候选不铺按钮，只说明将提交什么", (() => {
   return $("t-options").children.length > 0;
 })(), `${ui.renderKind(pending0, pending0.legal_actions)} / ${pending0.legal_actions.map((a) => a.kind).join(",")} / ${JSON.stringify(pending0.legal_actions[0])} / choice="${$("t-choice").textContent}"`);
 check("询问文案已渲染", $("t-prompt").textContent.length > 0, $("t-prompt").textContent.slice(0, 40));
+// item 4：询问面板 = **事件**（#t-context）+ **需要做什么**（#t-prompt 优先显示服务端
+// `context.requirement`）；被提供的技能文案另起一行（#t-skill-hints）。
+const askContext = (pending0 && pending0.context) || null;
+check("㉿N5 询问面板显示「需要做什么」（服务端 requirement）",
+  !askContext || !askContext.requirement || $("t-prompt").textContent === askContext.requirement,
+  `prompt="${$("t-prompt").textContent}" requirement=${askContext && askContext.requirement}`);
+check("㉿N5 技能提示行已渲染", !!$("t-skill-hints"), `hints="${$("t-skill-hints").textContent}"`);
 check("时限关闭时不显示倒计时", $("t-timer").textContent === "", `"${$("t-timer").textContent}"`);
 
 const seen = new Set();

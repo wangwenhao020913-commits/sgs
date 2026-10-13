@@ -745,6 +745,16 @@ ACTIVATIONS: MappingProxyType[str, ActivationHandler] = MappingProxyType(
 )
 """``skill_id`` → 发动回调。引擎只按 :func:`activate_skill` 通用派发，不认识任何具体 id。"""
 
+_REQUIREMENTS: dict[str, str] = {
+    "zhiheng": "弃置任意张牌（手牌 / 装备区），然后摸等量的牌",
+    "rende": "交给一名其他角色任意张手牌",
+    "fanjian": "选择一种花色",
+    "qingnang": "弃一张手牌，令一名已受伤角色回复 1 点体力",
+    "lijian": "弃一张牌，选择两名男性角色",
+    "jieyin": "弃两张手牌，选择一名已受伤男性角色",
+}
+"""A 族六条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+
 
 def active_skill_definitions() -> tuple[SkillDef, ...]:
     """A 族六条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
@@ -759,6 +769,7 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             modifiers=(Modifier(ModifierPoint.CANDIDATES, skill.offers),),
+            requirement=_REQUIREMENTS[skill.short_id],
         )
         for skill in ACTIVE_SKILLS
     )

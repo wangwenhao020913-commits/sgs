@@ -351,6 +351,7 @@ def lord_request_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.LORD,
             modifiers=(Modifier(ModifierPoint.CANDIDATES, skill.offer),),
+            requirement={"dodge": "打出【闪】", "slash": "打出【杀】"}[skill.required],
         )
         for skill in LORD_REQUEST_SKILLS
     )
@@ -366,5 +367,6 @@ def lord_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.LORD,
             modifiers=(Modifier(ModifierPoint.RECOVER_AMOUNT, JIUYUAN.recover_amount),),
+            requirement="其他吴势力角色对你使用【桃】时，回复的体力值 +1",
         ),
     )

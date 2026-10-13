@@ -100,6 +100,7 @@ def rejudge_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             rejudge_capable=True,
+            requirement="打出一张手牌，代替此判定牌",
         ),
         SkillDef(
             skill_id=TIANDU,
@@ -107,5 +108,6 @@ def rejudge_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             hooks=(Hook(Timing.JUDGE_CARD_AFTER_EFFECT, tiandu_handler),),
+            requirement="获得此判定牌",
         ),
     )

@@ -358,8 +358,16 @@ EFFECTIVENESS: dict[str, "Callable[[GameState, int, int], bool]"] = {
 
 
 def _same_named_in_judge(state: GameState, seat: int, card: CardRef) -> bool:
-    """``seat`` 的判定区里是否已有与 ``card`` **同名**的延时锦囊（票 03 §3）。"""
-    return any(state.card(card_id).type == card.type for card_id in state.player(seat).judge)
+    """``seat`` 的判定区里是否已有与 ``card`` **同名**的延时锦囊（票 03 §3）。
+
+    判定区装实体牌，但转化延时锦囊（【国色】）在里面代表的是一张**虚拟牌**；牌名按
+    :attr:`~sgs.state.GameState.virtual_judge` 里的映射读，否则一张方块牌当的
+    【乐不思蜀】会被当成方块牌，同名检查漏掉它。
+    """
+    return any(
+        (state.virtual_judge.get(card_id) or state.card(card_id)).type == card.type
+        for card_id in state.player(seat).judge
+    )
 
 
 def delayed_settle_target(state: GameState, card: CardRef, subject: int) -> int | None:

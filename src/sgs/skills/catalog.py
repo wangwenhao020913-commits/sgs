@@ -192,6 +192,22 @@ class SkillDef:
     应答者队列由 :func:`~sgs.skills.rejudge_capable_seats` 读**存活实例**的定义字段得座位集合。
     """
 
+    requirement: str | None = None
+    """这条技能**需要玩家做什么**的人话（item 4：询问文本提示）。
+
+    与技能定义同处声明（各族 ``*_skill_definitions()`` 里紧跟该技能），由接入层
+    :func:`sgs_web.projection.query_context` 在询问里原样展示。**不进记录流**（``SkillDef``
+    不被序列化）⇒ 既有 Golden Replay 一行不改。缺省 ``None`` = 没有可展示的文案。
+    """
+
+    virtual_type_ids: tuple[str, ...] = ()
+    """本技能的候选是"当某某牌"的**虚拟牌**时，那些目标牌名（转化技 / 丈八蛇矛）。
+
+    转化候选本身不带技能归属（``UseCard`` / ``CardRef`` 是冻结报文），接入层据这个
+    声明把"窗口里的虚拟牌候选"对回技能，从而展示它的 ``requirement``。取自已有的
+    ``ConversionSkill.target_type_id`` / 蛇矛的目标牌名，不是第二份真源。
+    """
+
     @property
     def priority_class(self) -> PriorityClass:
         """本技能在修饰器链里的优先级档（由载体派生，不另存字段以防漂移）。"""
@@ -1126,9 +1142,11 @@ def _equip(
     card_type_id: str,
     *,
     locked: bool,
+    requirement: str = "",
     modifiers: tuple[Modifier, ...] = (),
     hooks: tuple[Hook, ...] = (),
     seams: tuple[Seam, ...] = (),
+    virtual_type_ids: tuple[str, ...] = (),
 ) -> SkillDef:
     """按牌名 id 造一条装备技能定义（``skill_id = "equip." + 牌名 id``，票 09 §1）。"""
     return SkillDef(
@@ -1138,6 +1156,8 @@ def _equip(
         hooks=hooks,
         modifiers=modifiers,
         seams=seams,
+        requirement=requirement or None,
+        virtual_type_ids=virtual_type_ids,
     )
 
 
@@ -1149,36 +1169,44 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
     _equip(
         "crossbow",
         locked=True,
+        requirement="出牌阶段使用【杀】无次数限制",
         modifiers=(Modifier(ModifierPoint.COUNT_LIMIT, _unlimited_slash),),
     ),
     _equip(
         "qinggang_sword",
         locked=True,
+        requirement="使用【杀】时无视目标的防具",
         modifiers=(Modifier(ModifierPoint.EFFECTIVENESS, _qinggang_ignore_armor),),
     ),
     _equip(
         "double_sword",
         locked=False,
+        requirement="选择：弃一张手牌 / 令使用者摸一张",
         hooks=(Hook(Timing.USE_AFTER_DESIGNATE_TARGET, _double_sword),),
     ),
     _equip(
         "green_dragon_blade",
         locked=False,
+        requirement="选择一张【杀】继续使用",
         seams=(Seam(SeamKind.SLASH_CANCELED, _green_dragon_blade),),
     ),
     _equip(
         "serpent_spear",
         locked=False,
+        requirement="选择两张手牌当【杀】使用或打出",
         modifiers=(Modifier(ModifierPoint.CANDIDATES, _serpent_spear_candidate),),
+        virtual_type_ids=("slash",),
     ),
     _equip(
         "axe",
         locked=False,
+        requirement="弃两张牌，令被抵消的【杀】依然造成伤害",
         seams=(Seam(SeamKind.SLASH_CANCELED, _axe),),
     ),
     _equip(
         "halberd",
         locked=False,
+        requirement="最后一张手牌【杀】可指定至多 3 个目标",
         modifiers=(
             Modifier(ModifierPoint.TARGET_POOL, _halberd_same_target_pool),
             Modifier(ModifierPoint.CANDIDATES, _halberd_extra_targets),
@@ -1187,32 +1215,66 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
     _equip(
         "qilin_bow",
         locked=False,
+        requirement="弃置目标装备区里的一匹坐骑",
         hooks=(Hook(Timing.DAMAGE_DEAL, _qilin_bow),),
     ),
     _equip(
         "ice_sword",
         locked=False,
+        requirement="防止此伤害，并依次弃置目标的两张牌",
         hooks=(Hook(Timing.DAMAGE_DEAL, _ice_sword),),
     ),
     # 3 防具
     _equip(
         "eight_diagrams",
         locked=False,
+        requirement="判定为红则视为使用【闪】",
         modifiers=(Modifier(ModifierPoint.CANDIDATES, _eight_diagrams_candidate),),
     ),
     _equip(
         "renwang_shield",
         locked=True,
+        requirement="黑色【杀】对你无效",
         modifiers=(Modifier(ModifierPoint.EFFECTIVENESS, _renwang_effectiveness),),
     ),
     # 6 坐骑：−1 进攻马（赤兔 ♥5）/ +1 防御马（绝影 ♠5）/ +1 防御马（的卢 ♣5）/
     # +1 防御马（爪黄飞电 ♥K）/ −1 进攻马（大宛 ♠K）/ −1 进攻马（紫骍 ♦K）
-    _equip("chitu", locked=True, modifiers=_DISTANCE_MINUS_ONE),
-    _equip("jueying", locked=True, modifiers=_DISTANCE_PLUS_ONE),
-    _equip("dilu", locked=True, modifiers=_DISTANCE_PLUS_ONE),
-    _equip("zhuahuang_feidian", locked=True, modifiers=_DISTANCE_PLUS_ONE),
-    _equip("dawan", locked=True, modifiers=_DISTANCE_MINUS_ONE),
-    _equip("zixing", locked=True, modifiers=_DISTANCE_MINUS_ONE),
+    _equip(
+        "chitu",
+        locked=True,
+        requirement="计算与其他角色的距离时 -1",
+        modifiers=_DISTANCE_MINUS_ONE,
+    ),
+    _equip(
+        "jueying",
+        locked=True,
+        requirement="其他角色计算与你的距离时 +1",
+        modifiers=_DISTANCE_PLUS_ONE,
+    ),
+    _equip(
+        "dilu",
+        locked=True,
+        requirement="其他角色计算与你的距离时 +1",
+        modifiers=_DISTANCE_PLUS_ONE,
+    ),
+    _equip(
+        "zhuahuang_feidian",
+        locked=True,
+        requirement="其他角色计算与你的距离时 +1",
+        modifiers=_DISTANCE_PLUS_ONE,
+    ),
+    _equip(
+        "dawan",
+        locked=True,
+        requirement="计算与其他角色的距离时 -1",
+        modifiers=_DISTANCE_MINUS_ONE,
+    ),
+    _equip(
+        "zixing",
+        locked=True,
+        requirement="计算与其他角色的距离时 -1",
+        modifiers=_DISTANCE_MINUS_ONE,
+    ),
 )
 
 # 武将技能定义（票 03 的 H 族、票 04 的 A 族；票 12 起全表）在**文件末尾**并入：

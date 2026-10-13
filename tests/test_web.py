@@ -30,6 +30,7 @@ from sgs.engine import Engine, RandomSource, dump_journal  # noqa: E402
 from sgs.resolution import Frame, ResolutionStack  # noqa: E402
 from sgs.state import (  # noqa: E402
     Action,
+    ArrangeQuery,
     FrameKind,
     PeachQuery,
     RespondQuery,
@@ -535,6 +536,7 @@ def test_query_context_names_the_skill_and_its_owner() -> None:
     assert context["label"] == "1号位郭嘉对1号位郭嘉使用遗计", context
     assert context["name"] == "遗计"
     assert context["targets"] == [1]
+    assert context["requirement"] == "观看牌堆顶两张牌，然后逐张交给任意角色", "合成键要能查回技能定义"
 
 
 def test_query_context_names_the_card_user_and_the_current_target() -> None:
@@ -572,6 +574,7 @@ def test_query_context_names_the_card_user_and_the_current_target() -> None:
     assert context["label"] == "0号位张飞对2号位貂蝉使用五谷丰登", context
     assert context["name"] == "五谷丰登"
     assert context["targets"] == [2]
+    assert context["requirement"] == "需要使用【无懈可击】"
 
 
 def test_the_pending_payload_carries_a_context_key() -> None:
@@ -745,6 +748,7 @@ def test_query_context_points_a_nullify_window_at_the_card_not_the_nullifier() -
     assert context["label"] == "1号位使用【无懈可击】（抵消 0号位对1号位使用的【无中生有】）", context
     assert context["name"] == "无懈可击"
     assert context["targets"] == [1], "窗口仍要指向被无懈那张牌的目标座位"
+    assert context["requirement"] == "需要使用【无懈可击】"
 
 
 def test_query_context_names_the_judged_character_for_a_delayed_trick() -> None:
@@ -789,6 +793,118 @@ def test_query_context_names_the_judged_character_for_a_delayed_trick() -> None:
     assert context["label"] == "0号位吕布判定乐不思蜀（判定开始前）", context
     assert context["name"] == "乐不思蜀"
     assert context["targets"] == [0], "指向被判定者，不是别处"
+    assert context["requirement"] == "需要使用【无懈可击】"
+
+
+# ---------------------------------------------------------------------------
+# 7c "需要做什么"（item 4）：卡牌窗口的张数、转化技文案、观星
+# ---------------------------------------------------------------------------
+
+
+def test_requirement_counts_a_wushuang_duel_demand_and_phrases_it():
+    """样例②：3号位吕布对0号位曹操使用决斗 ⇒ 需要打出2张【杀】（【无双】）。"""
+    duel = cards_of_type(_context_pack(), "duel")[0]
+    engine, state = _context_fixture(
+        [SeatSpec(hero="caocao"), SeatSpec(), SeatSpec(), SeatSpec(hero="lvbu")],
+        frame_kind=FrameKind.RESOLVE,
+        frame_data=lambda s: {"card": s.card(duel), "source": 3, "targets": (0,)},
+    )
+    query = RespondQuery(
+        seq=2,
+        actor=0,
+        timing=Timing.RESOLVE_AFTER_EFFECT,
+        prompt="响应窗口：请打出一张牌，或放弃。",
+        legal_actions=(),
+        view=project(state, 0),
+        cause=WindowCause.DUEL,
+        required="slash",
+        target=None,
+        window_frame=1,
+    )
+
+    context = query_context(engine, query)
+
+    assert context["label"] == "3号位吕布对0号位曹操使用决斗"
+    assert context["requirement"] == "需要打出2张【杀】（依次打出两张，每打完一张再询问一次）"
+
+
+def test_requirement_drops_the_increment_note_when_one_card_suffices():
+    """正面对照：没有【无双】时只需一张，文案不带"依次两张"。"""
+    duel = cards_of_type(_context_pack(), "duel")[0]
+    engine, state = _context_fixture(
+        [SeatSpec(), SeatSpec(), SeatSpec(), SeatSpec()],
+        frame_kind=FrameKind.RESOLVE,
+        frame_data=lambda s: {"card": s.card(duel), "source": 1, "targets": (0,)},
+    )
+    query = RespondQuery(
+        seq=3,
+        actor=0,
+        timing=Timing.RESOLVE_AFTER_EFFECT,
+        prompt="响应窗口：请打出一张牌，或放弃。",
+        legal_actions=(),
+        view=project(state, 0),
+        cause=WindowCause.DUEL,
+        required="slash",
+        target=None,
+        window_frame=1,
+    )
+
+    context = query_context(engine, query)
+
+    assert context["requirement"] == "需要打出【杀】"
+
+
+def test_requirement_names_the_wusheng_conversion_skill_in_the_play_phase():
+    """样例⑤：关羽想出【杀】⇒ 窗口里列出【武圣】："选择1张红色牌当【杀】使用或打出"。
+
+    转化技没有独立询问，候选是空的 `UseCard`（虚拟牌不带技能归属），故接入层按
+    `SkillDef.virtual_type_ids` 把牌名对回技能，把它的 `requirement` 一并列出。
+    """
+    pack = _context_pack()
+    red = next(index for index, card in enumerate(pack.deck.cards) if card.suit in ("heart", "diamond"))
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero="guanyu", hand=(red,)), SeatSpec()],
+        deck=tuple(index for index in range(len(pack.deck.cards)) if index != red),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=3)
+    while engine.pending is None:
+        engine._step()
+    query = engine.pending
+    assert query.kind == "PLAY_PHASE"
+
+    context = query_context(engine, query)
+
+    assert context["requirement"] == "使用一张牌（或发动技能），或结束出牌阶段"
+    hints = {hint["skill_id"]: hint for hint in context["skill_hints"]}
+    assert "hero.guanyu.wusheng" in hints, f"窗口里有虚拟【杀】候选却没列出【武圣】：{hints}"
+    assert hints["hero.guanyu.wusheng"]["name"] == "武圣"
+    assert hints["hero.guanyu.wusheng"]["requirement"] == "选择1张红色牌当【杀】使用或打出"
+
+
+def test_requirement_names_the_guanxing_arrange_even_though_its_frame_is_not_on_the_stack():
+    """【观星】的排列询问：阶段体帧不压栈，仍要写得出"需要做什么"。"""
+    from types import SimpleNamespace
+
+    from sgs.skills import CATALOG
+
+    state = build_state(pack=_context_pack(), seats=[SeatSpec(hero="zhugeliang"), SeatSpec()])
+    engine = SimpleNamespace(state=state, stack=ResolutionStack(), phase_body_skill=lambda: "hero.zhugeliang.guanxing")
+    query = ArrangeQuery(
+        seq=5,
+        actor=0,
+        timing=Timing.PHASE_PREPARE,
+        prompt="请排列这些牌：给出顺序与前几张置于牌堆顶。",
+        legal_actions=(),
+        view=project(state, 0),
+    )
+
+    context = query_context(engine, query)
+
+    assert context is not None, "排列询问也要写得出'需要做什么'"
+    assert context["requirement"] == CATALOG["hero.zhugeliang.guanxing"].requirement
+    assert context["label"] is None, "阶段体帧不压栈 ⇒ 事件行为空，但不该因此丢掉 requirement"
 
 
 def test_the_candidate_index_never_carries_rule_judgements() -> None:

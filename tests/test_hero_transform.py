@@ -33,7 +33,16 @@ from sgs.skills import (
     virtual_dodge,
 )
 from sgs.skills.virtual import LEGACY_KIND_COUNT
-from sgs.state import PlayCard, QueryKind, RespondContext, RespondMode, UseCard, WindowCause
+from sgs.state import (
+    FrameKind,
+    PlayCard,
+    QueryKind,
+    RespondContext,
+    RespondMode,
+    UseCard,
+    WindowCause,
+)
+from sgs.timing import Timing
 
 from support import SeatSpec, build_state, cards_of_type, run_until
 
@@ -589,6 +598,86 @@ def test_guose_does_not_offer_a_non_diamond_card():
     )
 
     assert not _virtual(_play_candidates(state), "indulgence")
+
+
+class _GuoseUser:
+    """座位 0：把手里的方块牌当【乐不思蜀】用掉；其余一律结束阶段 / 放弃。"""
+
+    def __init__(self) -> None:
+        self.used = False
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE and not self.used:
+            for action in query.legal_actions:
+                if (
+                    isinstance(action, UseCard)
+                    and action.card.type == "indulgence"
+                    and action.card.is_virtual
+                ):
+                    self.used = True
+                    return action
+        for action in query.legal_actions:
+            if getattr(action, "kind", None) == "EndPhase":
+                return action
+        for action in query.legal_actions:
+            if getattr(action, "kind", None) == "Pass":
+                return action
+        return query.legal_actions[0]
+
+
+class _FrameSpy(Engine):
+    """记下每一次压栈的帧类型与载荷：判定帧拿的是哪张牌只能这样观测。"""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.pushed: list[tuple[Any, dict[str, Any]]] = []
+
+    def push_frame(self, kind, data, *, timing):  # type: ignore[no-untyped-def]
+        frame = super().push_frame(kind, data, timing=timing)
+        self.pushed.append((kind, dict(data)))
+        return frame
+
+
+def test_guose_places_its_virtual_indulgence_in_the_judge_zone_and_it_judges():
+    """【国色】的方块牌当【乐不思蜀】要**真进判定区、真判定**（顺手修的真 bug）。
+
+    现行 :meth:`Engine.move_used_card_to_judge_zone` 对虚拟牌直接 ``return``：来源方块牌
+    卡在处理区，判定区永远为空、``JUDGE_ON`` 一次都不发。修法是把 ``virtual_sources`` 置入
+    判定区，并在引擎里记下"这张判定牌其实是哪张虚拟牌"，判定阶段按虚拟牌结算。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(DIAMOND,), hero="daqiao"), SeatSpec()],
+        deck=_deck_excluding(DIAMOND),
+        turn_seat=0,
+    )
+    engine = _FrameSpy.from_state(state, seed=3)
+    players = [_GuoseUser(), _GuoseUser()]
+    for _ in range(3000):
+        if engine.pending is None:
+            engine._step()
+            if engine.finished:
+                break
+            continue
+        query = engine.pending
+        engine.submit(players[query.actor].respond(query))
+
+    judge_on = [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.JUDGE_ON
+    ]
+    assert judge_on, "【国色】的【乐不思蜀】必须走到判定（现在 JUDGE_ON 一次都不发）"
+    assert judge_on[0].actor == 1, "判定的是被指定的座位 1"
+    resolve_cards = [
+        data.get("card") for kind, data in engine.pushed if kind is FrameKind.RESOLVE
+    ]
+    assert any(getattr(card, "type", None) == "indulgence" for card in resolve_cards), (
+        "判定阶段的 RESOLVE 帧必须拿那张**虚拟**乐不思蜀来跑效果，而不是来源方块牌"
+    )
+    assert DIAMOND in engine.state.discard, "判定收尾后来源方块牌进弃牌堆"
+    assert not engine.state.processing, "处理区不该留下卡住的牌"
+    assert not engine.state.virtual_judge, "来源牌离开判定区后映射要清掉"
 
 
 # ---------------------------------------------------------------------------

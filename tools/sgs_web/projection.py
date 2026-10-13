@@ -17,9 +17,10 @@ import json
 from typing import Any
 
 from sgs.data import load_content_pack, load_heroes
+from sgs.effects import response_count
 from sgs.engine import record_json
-from sgs.skills import resolve_instances
-from sgs.state import Query, WindowCause, project
+from sgs.skills import CATALOG, resolve_instances
+from sgs.state import FrameKind, Query, WindowCause, project
 from sgs.timing import Timing
 
 from .session import Session
@@ -240,8 +241,8 @@ def option_seats(query: Query) -> dict[str, int]:
     return out
 
 
-def query_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
-    """这次询问的**上下文人话**："0号位郭嘉对0号位郭嘉使用遗计"。
+def _event_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
+    """这次询问**正在发生什么**的人话："0号位郭嘉对0号位郭嘉使用遗计"。
 
     数据来源只有**公开事实**：询问本身（``kind`` / ``skill_id`` / ``target`` / ``dying`` /
     ``revealed``）与结算栈顶帧的载荷（``source`` / ``card`` / ``targets`` / ``cursor`` /
@@ -360,6 +361,185 @@ def query_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
         "targets": [int(seat) for seat in targets],
         "label": label,
     }
+
+
+# ---------------------------------------------------------------------------
+# "需要做什么"（item 4）：技能文案取自 SkillDef.requirement；卡牌窗口走表现层表
+# ---------------------------------------------------------------------------
+
+
+def _definition_of(state: Any, skill_id: str):
+    """技能 id → :class:`~sgs.skills.catalog.SkillDef`；合成键（``yiji:give:0:0``）走短 id。"""
+    head = skill_id.split(":", 1)[0]
+    definition = CATALOG.get(head)
+    if definition is not None:
+        return definition
+    short = head.rsplit(".", 1)[-1]
+    for candidate in CATALOG.values():
+        if candidate.skill_id.rsplit(".", 1)[-1] == short:
+            return candidate
+    return None
+
+
+def _skill_of_query(engine: Any, query: Query, data: dict[str, Any]) -> str | None:
+    """这次询问归**哪条技能**（按可靠度依次）：询问自带 id → 帧 ``running_skill`` →
+    ``SKILL`` 帧的 ``skill_id``（主动技顺序选牌）→ **阶段体**里正在跑的技能（【观星】）。
+
+    都没有 ⇒ ``None``（这是一条纯卡牌窗口，文案走表现层表）。
+    """
+    skill_id = getattr(query, "skill_id", None)
+    if skill_id:
+        return str(skill_id)
+    if data.get("running_skill"):
+        return str(data["running_skill"])
+    frames = getattr(getattr(engine, "stack", None), "frames", ()) or ()
+    if frames and getattr(frames[-1], "kind", None) is FrameKind.SKILL and data.get("skill_id"):
+        return str(data["skill_id"])
+    phase_body = getattr(engine, "phase_body_skill", None)
+    if callable(phase_body):
+        running = phase_body()
+        if running:
+            return str(running)
+    return None
+
+
+def _need_text(verb: str, card_name: str, need: int) -> str:
+    """"需要打出一张 X / 连续两张 X"的人话；数量 > 1 时补"依次、打一张再问一次"。"""
+    if need > 1:
+        done = "打完" if verb == "打出" else f"{verb}完"
+        return f"需要{verb}{need}张{card_name}（依次{verb}两张，每{done}一张再询问一次）"
+    return f"需要{verb}{card_name}"
+
+
+def _count_needed(engine: Any, query: Query, data: dict[str, Any]) -> int:
+    """本窗口需要几张：唯一真源 :func:`sgs.effects.response_count`（【无双】= 2）。"""
+    source = data.get("source")
+    if source is None:
+        return 1
+    target = getattr(query, "target", None)
+    if target is None:
+        target = getattr(query, "actor", None)
+    return int(response_count(engine.state, source=source, card=data.get("card"), target=target))
+
+
+def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) -> str | None:
+    """**不带技能归属**的窗口的"需要做什么"（表现层表；不新增真源）。"""
+    kind = str(getattr(query, "kind", ""))
+    if kind == "PLAY_PHASE":
+        return "使用一张牌（或发动技能），或结束出牌阶段"
+    if kind == "DISCARD":
+        return f"弃置 {getattr(query, 'count', 0)} 张手牌"
+    if kind == "DODGE":
+        return _need_text("使用", "【闪】", _count_needed(engine, query, data))
+    if kind == "PEACH":
+        dying = getattr(query, "dying", None)
+        return f"使用【桃】救回 {dying} 号位" if dying is not None else "使用【桃】"
+    if kind == "ARRANGE":
+        return "排列这些牌：给出顺序与前几张置于牌堆顶"
+    if kind == "SELECT_CARDS":
+        card_type = getattr(data.get("card"), "type", None)
+        if card_type in ("dismantlement", "snatch"):
+            return "选择目标区域里的一张牌"
+        if card_type == "harvest":
+            return "从亮出的牌里选一张获得"
+        return "从选择面里选择要交出的牌"
+    if kind == "RESPOND":
+        cause = getattr(query, "cause", None)
+        if cause is WindowCause.NULLIFY:
+            return "需要使用【无懈可击】"
+        if cause is WindowCause.DUEL:
+            return _need_text("打出", "【杀】", _count_needed(engine, query, data))
+        if cause is WindowCause.BARBARIAN_INVASION:
+            return "需要打出【杀】，否则受到使用者 1 点伤害"
+        if cause is WindowCause.ARROW_BARRAGE:
+            return "需要打出【闪】，否则受到使用者 1 点伤害"
+        if cause is WindowCause.BORROWED_SWORD:
+            return "对合法目标使用【杀】，或放弃（放弃＝交出武器）"
+        if cause is WindowCause.LORD_REQUEST:
+            required = getattr(query, "required", None)
+            card = {"slash": "【杀】", "dodge": "【闪】"}.get(required, "一张牌")
+            return f"需要打出{card}"
+        if cause is WindowCause.REJUDGE:
+            return "打出一张手牌，代替此判定牌"
+    return None
+
+
+def _skill_hints(state: Any, query: Query) -> list[dict[str, str]]:
+    """这条窗口里**被提供**的技能（主动技 / 提供者 / 转化技）及其文案。
+
+    来源只有**候选**里的公开事实：``ActivateSkill`` 候选自带 ``skill_id``；转化技的候选是
+    虚拟牌（不带技能归属），故按 :attr:`SkillDef.virtual_type_ids` 把牌名对回技能。
+    """
+    actor = int(query.actor)
+    hints: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(skill_id: str) -> None:
+        definition = _definition_of(state, skill_id.split(":", 1)[0])
+        if definition is None or not definition.requirement or definition.skill_id in seen:
+            return
+        seen.add(definition.skill_id)
+        hints.append(
+            {
+                "skill_id": definition.skill_id,
+                "name": _skill_display_name(state, definition.skill_id) or definition.skill_id,
+                "requirement": definition.requirement,
+            }
+        )
+
+    for action in query.legal_actions:
+        if getattr(action, "kind", None) == "ActivateSkill":
+            add(str(action.skill_id))
+    virtual_types = {
+        action.card.type
+        for action in query.legal_actions
+        if getattr(action, "card", None) is not None and action.card.is_virtual
+    }
+    if virtual_types:
+        for instance in resolve_instances(state):
+            if instance.owner != actor:
+                continue
+            definition = instance.definition
+            if definition.virtual_type_ids and virtual_types & set(definition.virtual_type_ids):
+                add(definition.skill_id)
+    return hints
+
+
+def query_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
+    """这次询问的两行人话：**正在发生什么**（``label``）+ **需要做什么**（``requirement``）。
+
+    ``requirement`` 的落点分三档：
+
+    1. 询问能归属到技能（``skill_id`` / 帧 ``running_skill`` / ``SKILL`` 帧 / 阶段体）⇒
+       读该技能定义上写死的 :attr:`~sgs.skills.catalog.SkillDef.requirement`（与技能代码同处）；
+    2. 否则走**表现层**的卡牌窗口表（张数读唯一真源 :func:`sgs.effects.response_count`）；
+    3. ``skill_hints`` 另列这条窗口里**被提供**的技能（主动技 / 提供者 / 转化技）的文案。
+
+    纯派生、只读公开事实；不参与合法性判定。两个都取不到时返回 ``None``（界面不画）。
+    """
+    if query is None:
+        return None
+    state = engine.state
+    frames = getattr(getattr(engine, "stack", None), "frames", ()) or ()
+    data: dict[str, Any] = frames[-1].data if frames else {}
+
+    base = _event_context(engine, query)
+    skill_id = _skill_of_query(engine, query, data)
+    definition = _definition_of(state, skill_id) if skill_id is not None else None
+    requirement = definition.requirement if definition is not None else None
+    if requirement is None:
+        requirement = _card_window_requirement(engine, query, data)
+    hints = _skill_hints(state, query)
+    if definition is not None:
+        hints = [hint for hint in hints if hint["skill_id"] != definition.skill_id]
+
+    if base is None and requirement is None and not hints:
+        return None
+    if base is None:
+        base = {"actor": int(query.actor), "name": None, "targets": [], "label": None}
+    base["requirement"] = requirement
+    base["skill_hints"] = hints
+    return base
 
 
 def candidate_index(query: Query) -> dict[str, dict[str, Any]]:

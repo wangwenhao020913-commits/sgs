@@ -366,6 +366,13 @@ DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
 )
 """B 族三条技能的逐字声明（票 05 §要做什么 2 的表）。"""
 
+_REQUIREMENTS: dict[str, str] = {
+    "jianxiong": "获得造成伤害的牌",
+    "fankui": "获得伤害来源的一张牌",
+    "yiji": "观看牌堆顶两张牌，然后逐张交给任意角色",
+}
+"""B 族三条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+
 
 def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
     """B 族三条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
@@ -387,6 +394,7 @@ def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
                     per_point=skill.per_point,
                 ),
             ),
+            requirement=_REQUIREMENTS[skill.short_id],
         )
         for skill in DAMAGE_AFTER_SKILLS
     )

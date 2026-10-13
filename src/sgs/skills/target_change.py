@@ -200,6 +200,7 @@ def target_change_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             modifiers=(Modifier(ModifierPoint.DISTANCE, _mashu_distance),),
+            requirement="计算与其他角色的距离时 -1",
         ),
         SkillDef(
             skill_id=LIULI,
@@ -207,5 +208,6 @@ def target_change_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             hooks=(Hook(Timing.USE_BECOME_TARGET, _liuli, _liuli_condition),),
+            requirement="弃一张牌，把【杀】转移给另一名角色",
         ),
     )

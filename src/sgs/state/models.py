@@ -244,6 +244,14 @@ class GameState(BaseModel):
     deck: list[int] = Field(default_factory=list)
     discard: list[int] = Field(default_factory=list)
     processing: list[int] = Field(default_factory=list)
+    virtual_judge: dict[int, CardRef] = Field(default_factory=dict)
+    """判定区里的**虚拟延时锦囊**：实体来源牌 id → 它代表的那张虚拟牌。
+
+    判定区只装**实体牌** id（虚拟牌不进任何区域，见 :attr:`CardRef.is_virtual`）。故
+    【国色】这类"一张方块牌当【乐不思蜀】"的转化延时锦囊把**来源牌**置入判定区，并在这里
+    记下"它其实是哪张虚拟牌"，供判定阶段按虚拟牌结算、以及"判定区同名"检查读。
+    字典**不进记录流**（回放重跑引擎时按同样的决策重建）；来源牌离开判定区即清掉。
+    """
     turn_seat: int | None = None
     phase: Phase | None = None
     skill_state: dict[str, int] = Field(default_factory=dict)

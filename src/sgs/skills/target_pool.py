@@ -87,6 +87,10 @@ def target_pool_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             modifiers=(_modifier(skill),),
+            requirement={
+                "kongcheng": "没有手牌时，不能成为【杀】或【决斗】的目标",
+                "qianxun": "不能成为【顺手牵羊】或【乐不思蜀】的目标",
+            }[skill.short_id],
         )
         for skill in TARGET_POOL_SKILLS
     )

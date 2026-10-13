@@ -133,6 +133,12 @@ TIEQI = FrameTagSkill(
 RESPONSE_WINDOW_SKILLS: tuple[ResponseCountSkill | FrameTagSkill, ...] = (WUSHUANG, TIEQI)
 """E 族两条技能的逐字声明（票 08 §要做什么 3 / 7）。"""
 
+_REQUIREMENTS: dict[str, str] = {
+    "wushuang": "使用【杀】/【决斗】时，响应者需要连续打出两张",
+    "tieqi": "判定；红色则该目标不能使用【闪】响应此【杀】",
+}
+"""E 族两条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+
 
 def response_window_skill_definitions() -> tuple[SkillDef, ...]:
     """E 族两条技能的 :class:`~sgs.skills.catalog.SkillDef`。
@@ -148,6 +154,7 @@ def response_window_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             modifiers=(Modifier(ModifierPoint.RESPONSE_COUNT, WUSHUANG.response_count),),
+            requirement=_REQUIREMENTS["wushuang"],
         ),
         SkillDef(
             skill_id=TIEQI.skill_id,
@@ -155,5 +162,6 @@ def response_window_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             hooks=(Hook(TIEQI.timing, TIEQI.handler),),
+            requirement=_REQUIREMENTS["tieqi"],
         ),
     )
