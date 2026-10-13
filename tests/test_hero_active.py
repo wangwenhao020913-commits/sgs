@@ -14,13 +14,21 @@
 
 from __future__ import annotations
 
+from functools import partial
 from itertools import combinations
 from types import MappingProxyType
 
 import pytest
 
 from sgs.data import Gender, load_content_pack
-from sgs.effects import CandidateScope, CarrierKind, Modifier, ModifierPoint, legal_actions_for
+from sgs.effects import (
+    CandidateScope,
+    CarrierKind,
+    Modifier,
+    ModifierPoint,
+    check_targets,
+    legal_actions_for,
+)
 from sgs.engine import Engine
 from sgs.resolution import Frame
 from sgs.skills import (
@@ -41,6 +49,7 @@ from sgs.state import (
     QueryKind,
     SelectCards,
     SelectOption,
+    Zone,
 )
 from sgs.timing import Timing
 
@@ -545,18 +554,23 @@ def test_rende_has_no_once_per_phase_limit():
 
 
 def test_the_still_gated_skills_keep_the_play_query_under_the_cap():
-    """闸门仍在：会降级的技能（【青囊】两维相乘）单次询问候选数不超闸值。
+    """闸门仍在：会降级的技能（【结姻】两维相乘）单次询问候选数不超闸值。
 
-    【离间】迁到步骤流水线后（票 01）不再是本例的样本——它的候选恒为一条，与闸门无关。
+    【离间】迁到步骤流水线后（票 01）、【青囊】迁走后（票 02）都不再是样本——它们的候选
+    恒为一条，与闸门无关；本票仍留【结姻】当样本（它到票 03 才迁）。
     """
     hand = tuple(range(20))
     state = build_state(
         pack=PACK,
-        seats=[SeatSpec(hand=hand, hero="huatuo"), *_wounded_males(7)],
+        seats=[
+            SeatSpec(hand=hand, hero="sunshangxiang", gender=Gender.FEMALE),
+            *_wounded_males(7),
+        ],
         deck=_deck_excluding(*hand),
         turn_seat=0,
     )
-    assert len(hand) * 7 > CANDIDATE_CAP, "两维相乘必须过闸（否则本用例空转）"
+    pair_count = len(hand) * (len(hand) - 1) // 2
+    assert pair_count * 7 > CANDIDATE_CAP, "两维相乘必须过闸（否则本用例空转）"
 
     assert len(_play_candidates(state)) <= CANDIDATE_CAP, "降级后单次询问候选数不超过闸值"
 
@@ -671,7 +685,61 @@ def test_fanjian_a_matching_suit_deals_no_damage():
 
 # ---------------------------------------------------------------------------
 # 青囊（华佗）：弃 1 张手牌 → 一名已受伤角色回复 1 点（含自己）
+#
+# 票 02：形状与【离间】同源 —— 候选恒一条骨架，"弃哪张 / 治谁"由发动后的步骤
+# 流水线问（``SELECT_CARDS`` → ``SELECT_OPTION``）。旧的"过闸降级"分支已删除，
+# 同一个技能不再有两种交互形状。
 # ---------------------------------------------------------------------------
+
+
+def _qingnang_state(*, target_hp: int = 2):
+    """发动者 0（华佗，手牌 1 张【杀】）+ 座位 1（默认已受伤）。"""
+    card = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(card,), hero="huatuo"), SeatSpec(hp=target_hp, hp_max=4)],
+        deck=_deck_excluding(card),
+        turn_seat=0,
+    )
+    return card, state
+
+
+def _qingnang_driver(*, target: int = 1, cancel_at: str | None = None):
+    """按**新流程**应答：点技能 → 弃置 1 张手牌 → 选一名已受伤角色。"""
+
+    def driver(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == QINGNANG,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            if cancel_at == "card":
+                return _find(query, lambda action: isinstance(action, Pass))
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and action.picks == (0,)
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            if cancel_at == "seat":
+                return _find(query, lambda action: isinstance(action, Pass))
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption)
+                and action.choice == f"seat:{target}",
+            )
+        return _decline(query)
+
+    return driver
+
+
+def _qingnang_option_query(engine):
+    return next(
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SELECT_OPTION.value
+        and str(record.query.skill_id).startswith("qingnang:")
+    )
 
 
 def test_qingnang_target_pool_is_the_wounded_characters_including_self():
@@ -687,36 +755,90 @@ def test_qingnang_target_pool_is_the_wounded_characters_including_self():
         turn_seat=0,
     )
 
-    assert {action.choices for action in _offers(_play_candidates(state), QINGNANG)} == {
-        ("seat:0",),
-        ("seat:2",),
-    }, "目标池 = 已受伤角色（含自己），未受伤者出池"
+    engine = _run(
+        state,
+        [Scripted(_qingnang_driver(cancel_at="seat")), Scripted(_decline)],
+        _skill_frame_popped,
+    )
+
+    assert _qingnang_option_query(engine).options == ("seat:0", "seat:2"), (
+        "目标池 = 已受伤角色（含自己），未受伤者出池"
+    )
+
+
+def test_qingnang_asks_the_card_then_the_target():
+    _card, state = _qingnang_state()
+
+    engine = _run(
+        state,
+        [Scripted(_qingnang_driver(target=1)), Scripted(_decline)],
+        _skill_frame_popped,
+    )
+
+    asked = [record.query.kind for record in engine.records if record.kind == "query"]
+    assert asked[:3] == ["PLAY_PHASE", "SELECT_CARDS", "SELECT_OPTION"], (
+        "先问「弃置1张手牌」，再问治谁（两步流水线）"
+    )
 
 
 def test_qingnang_discards_one_hand_card_and_heals_the_wounded_target():
-    card = _cards("slash")[0]
-    state = build_state(
-        pack=PACK,
-        seats=[SeatSpec(hand=(card,), hero="huatuo"), SeatSpec(hp=2, hp_max=4)],
-        deck=_deck_excluding(card),
-        turn_seat=0,
+    card, state = _qingnang_state()
+
+    engine = _run(
+        state,
+        [Scripted(_qingnang_driver(target=1)), Scripted(_decline)],
+        _skill_frame_popped,
     )
-
-    def qingnang(query):
-        if query.kind == QueryKind.PLAY_PHASE:
-            return _find(
-                query,
-                lambda action: isinstance(action, ActivateSkill)
-                and action.skill_id == QINGNANG
-                and action.picks == (card,)
-                and action.choices == ("seat:1",),
-            )
-        return _decline(query)
-
-    engine = _run(state, [Scripted(qingnang), Scripted(_decline)], _skill_frame_popped)
 
     assert engine.state.player(1).hp == 3, "目标回复 1 点"
     assert ("hand", "discard", "DISCARD") in _moves_of(engine, card)
+
+
+def _qingnang_offered_after_cancel(engine) -> bool:
+    """取消之后**同一出牌阶段**又挂起了含【青囊】候选的 PLAY_PHASE 询问。"""
+    if not _skill_frame_popped(engine):
+        return False
+    pending = engine.pending
+    return (
+        pending is not None
+        and pending.kind == QueryKind.PLAY_PHASE.value
+        and any(
+            isinstance(action, ActivateSkill) and action.skill_id == QINGNANG
+            for action in pending.legal_actions
+        )
+    )
+
+
+def _run_qingnang_cancel(cancel_at: str):
+    """在流水线的 ``cancel_at`` 步取消（``card`` / ``seat``）。
+
+    返回 ``(成本牌, engine, 选择面上出现过的牌面集合)``；停止条件同【离间】：
+    "取消后又挂起了一次含【青囊】候选的出牌阶段询问"。
+    """
+    card, state = _qingnang_state()
+    faces: list[set[int]] = []
+
+    def huatuo(query):
+        if query.kind == QueryKind.SELECT_CARDS:
+            faces.append({slot.card.card_id for slot in query.slots})
+        return _qingnang_driver(cancel_at=cancel_at)(query)
+
+    engine = _run(state, [Scripted(huatuo), Scripted(_decline)], _qingnang_offered_after_cancel)
+    return card, engine, faces
+
+
+@pytest.mark.parametrize("cancel_at", ["card", "seat"])
+def test_qingnang_cancel_leaves_the_table_untouched_and_the_skill_available(cancel_at):
+    """两步中任何一步取消 ⇒ 手牌原样、弃牌堆不变、目标未治疗、同一阶段还能再发动。"""
+    card, engine, faces = _run_qingnang_cancel(cancel_at)
+    player = engine.state.player(0)
+
+    assert faces, "步 1 的问一定要先发生"
+    assert set(player.hand) | set(player.equip) == faces[-1], "选择只收集、提交才生效"
+    assert card in player.hand, "成本还在手里"
+    assert not engine.state.discard, "弃牌堆为空 —— 成本没有被执行"
+    assert engine.state.player(1).hp == 2, "目标没有被治疗"
+    assert _qingnang_offered_after_cancel(engine), "取消不消耗次数：同一阶段仍可再发动"
 
 
 # ---------------------------------------------------------------------------
@@ -1020,6 +1142,161 @@ def test_lijian_uses_a_pure_virtual_duel_card():
 
 
 # ---------------------------------------------------------------------------
+# 通用步骤流水线（票 02）：提炼出的形状**能表达**【离间】的三步
+#
+# 本票不迁【离间】（它保持票 01 的手写三步），所以这里把提炼物当作**新技能**注入
+# （复用【苦肉】的空槽位，与上面 KUROU 的先例同姿态），只钉【青囊】用不到的那两维：
+# 有序两次选座，且第二次的池由第一次的结果（与真牌同源的 ``check_targets``）决定。
+# ---------------------------------------------------------------------------
+
+
+def _inject_flow_skill(monkeypatch, flow) -> None:
+    """把一条 :class:`~sgs.skills.active.SkillFlow` 当作【苦肉】槽位上的真技能注入。"""
+
+    def offers(state_, ctx, current):
+        if ctx.scope is not CandidateScope.PLAY or ctx.owner != ctx.subject:
+            return current
+        return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+    definition = SkillDef(
+        skill_id=KUROU,
+        locked=False,
+        carrier=CarrierKind.HERO,
+        skill_type=SkillType.NORMAL,
+        modifiers=(Modifier(ModifierPoint.CANDIDATES, offers),),
+    )
+    monkeypatch.setattr(
+        catalog_module,
+        "CATALOG",
+        MappingProxyType({**catalog_module.CATALOG, KUROU: definition}),
+    )
+    monkeypatch.setattr(
+        active_module,
+        "ACTIVATIONS",
+        MappingProxyType(
+            {**active_module.ACTIVATIONS, KUROU: partial(active_module.run_flow, flow=flow)}
+        ),
+    )
+
+
+def _flow_two_male_state():
+    card = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(card,), hero="huanggai"), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(card),
+        turn_seat=0,
+    )
+    return card, state
+
+
+def _flow_driver(seats: tuple[int, int]):
+    """点技能 → 弃 1 张牌 → 依次点 ``seats`` 那两个座位。"""
+
+    def driver(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == KUROU,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and action.picks == (0,)
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            wanted = {
+                "kurou:seat:0": f"seat:{seats[0]}",
+                "kurou:seat:1": f"seat:{seats[1]}",
+            }.get(query.skill_id)
+            if wanted is not None:
+                return _find(
+                    query,
+                    lambda action: isinstance(action, SelectOption) and action.choice == wanted,
+                )
+        return _decline(query)
+
+    return driver
+
+
+def _flow_seat_queries(engine):
+    return [
+        record.query
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.SELECT_OPTION.value
+    ]
+
+
+def test_the_flow_shape_can_express_a_dependent_two_seat_pick(monkeypatch):
+    """``pool(state, owner, chosen)`` 拿得到第一次的结果 ⇒ 能照真牌 ``check_targets`` 收窄。"""
+    _card, state = _flow_two_male_state()
+    duel = pure_virtual_card(state, "duel")
+    seen: list[tuple[int, ...]] = []
+
+    def pool(state_, owner, chosen):
+        """与 ``_lijian_partners`` 同形：使用者一侧不设限，受害者一侧走真牌同一条链。"""
+        del owner
+        seen.append(tuple(chosen))
+        if not chosen:
+            return (1, 2)
+        return tuple(seat for seat in (1, 2) if seat in check_targets(state_, chosen[0], duel))
+
+    _inject_flow_skill(
+        monkeypatch,
+        active_module.SkillFlow(
+            steps=(
+                active_module.PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=1, hi=1, key="card"),
+                active_module.PickSeats(lo=2, hi=2, pool=pool, key="seat"),
+            ),
+            effect=lambda host, frame, answers: None,
+        ),
+    )
+
+    engine = _run(
+        state,
+        [Scripted(_flow_driver((1, 2))), Scripted(_decline), Scripted(_decline)],
+        _skill_frame_popped,
+    )
+
+    asked = [record.query.kind for record in engine.records if record.kind == "query"]
+    assert asked[:4] == ["PLAY_PHASE", "SELECT_CARDS", "SELECT_OPTION", "SELECT_OPTION"], (
+        "①选牌 → ②选第一次座位 → ③选第二次座位（有序两次都是同一个 PickSeats 步骤）"
+    )
+    seats = _flow_seat_queries(engine)
+    assert [query.actor for query in seats] == [0, 0], "两步都由发动者应答（actor 缺省）"
+    assert (1,) in seen, "第二次的池建在第一次的结果之上（check_targets 据此收窄）"
+    assert seats[0].options == ("seat:1", "seat:2"), "第一次：全部合法男性"
+    assert seats[1].options == ("seat:2",), "第二次：check_targets 只留下座位 2"
+
+
+def test_the_flow_shape_ordered_pick_never_re_offers_the_chosen_seat(monkeypatch):
+    """``ordered=True``：同一步里第二问的池自动排除第一问已选的座位（design §3 N3）。"""
+    _card, state = _flow_two_male_state()
+
+    def pool(state_, owner, chosen):
+        del state_, owner, chosen
+        return (1, 2)  # 刻意不做任何收窄：排除只能来自 ordered
+
+    _inject_flow_skill(
+        monkeypatch,
+        active_module.SkillFlow(
+            steps=(active_module.PickSeats(lo=2, hi=2, ordered=True, pool=pool, key="seat"),),
+            effect=lambda host, frame, answers: None,
+        ),
+    )
+
+    engine = _run(
+        state,
+        [Scripted(_flow_driver((1, 2))), Scripted(_decline), Scripted(_decline)],
+        _skill_frame_popped,
+    )
+
+    seats = _flow_seat_queries(engine)
+    assert [query.options for query in seats] == [("seat:1", "seat:2"), ("seat:2",)], (
+        "第一问全池，第二问刨掉已选的座位 1"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 结姻（孙尚香）：弃 2 张手牌 + 一名已受伤男性 → 你与其各回复 1 点
 # ---------------------------------------------------------------------------
 
@@ -1097,7 +1374,10 @@ def test_every_declared_active_skill_has_a_handler_and_a_catalog_definition():
 
 
 # ---------------------------------------------------------------------------
-# 两维相乘的其余三条：过闸后同样降级为"只留目标维"（票 04 §要做什么 3）
+# 两维相乘的技能：过闸后降级为"只留目标维"（票 04 §要做什么 3）
+#
+# 票 01 的【离间】、票 02 的【青囊】迁到骨架候选后不再过闸；这里只剩【结姻】
+# （票 03 才迁）仍在验降级路径，外加【青囊】"候选恒一条"的对照面。
 # ---------------------------------------------------------------------------
 
 
@@ -1105,7 +1385,12 @@ def _wounded_males(count: int) -> list[SeatSpec]:
     return [SeatSpec(hp=2, hp_max=4, gender=Gender.MALE) for _ in range(count)]
 
 
-def test_qingnang_degrades_to_target_only_candidates_beyond_the_cap():
+def test_qingnang_offer_is_a_single_skeleton_candidate_however_many_cards_and_targets():
+    """票 02：候选不再烘"牌 × 目标"，恒一条骨架 —— 手牌 20 × 7 受伤目标也不爆。
+
+    这条取代旧的"过闸降级"断言（`test_qingnang_degrades_to_target_only_candidates_beyond_the_cap`）：
+    【青囊】的 `CANDIDATE_CAP` 降级分支已删除，同一个技能不再有两种交互形状。
+    """
     hand = tuple(range(20))
     state = build_state(
         pack=PACK,
@@ -1113,14 +1398,13 @@ def test_qingnang_degrades_to_target_only_candidates_beyond_the_cap():
         deck=_deck_excluding(*hand),
         turn_seat=0,
     )
-    assert len(hand) * 7 > CANDIDATE_CAP, "这局必须过闸（否则本用例空转）"
+    assert len(hand) * 7 > CANDIDATE_CAP, "旧形状必须过闸（否则本用例证明不了什么）"
 
     offers = _offers(_play_candidates(state), QINGNANG)
 
-    assert offers and all(action.picks == () for action in offers)
-    assert {action.choices for action in offers} == {
-        (f"seat:{seat}",) for seat in range(1, 8)
-    }
+    assert len(offers) == 1, "两维相乘的枚举消失：候选恒一条"
+    assert offers[0].picks == () and offers[0].choices == (), "载荷为空，改由发动后的步骤询问"
+    assert len(_play_candidates(state)) <= CANDIDATE_CAP, "整段询问仍不超闸值"
 
 
 def test_jieyin_degrades_to_target_only_candidates_beyond_the_cap():

@@ -1294,6 +1294,97 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!sentSeat && sentSeat.kind === "Pass", JSON.stringify(sentSeat));
 }
 
+/* ============ 票 02（合成局面）：【青囊】流水线 —— 逐步文案 + 取消送出 Pass ============
+ *
+ * 形状与【离间】同源（两步都是服务端驱动的询问：点技能 → SELECT_CARDS → SELECT_OPTION），
+ * 只有步数与目标池不同。这里喂与服务端 `pending_payload` 同形的合成 view，钉同一组事：
+ * 两步文案各是服务端那一句、座位步有 Pass 时取消按钮**送出一条候选**。
+ */
+{
+  const handCard = synthCard(31, "杀");
+  const qingnangSkill = {
+    skill_id: "hero.huatuo.qingnang", name: "青囊", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true,
+    ui: {
+      requirement: "弃一张手牌，令一名已受伤角色回复 1 点体力", manual: false,
+      pick_cards: [], pick_seats: [], convert_sources: [],
+    },
+  };
+
+  // ① 步 1：弃置 1 张手牌，询问里带一条 `Pass` = 可取消。
+  const pickView = synthView({
+    kind: "SELECT_CARDS", actor: 0, seq: 920, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 920, picks: [] },
+      { kind: "Pass", answers_seq: 920 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [{ ref: { seat: 0, zone: "hand" }, card: handCard }],
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: true },
+    context: { requirement: "弃置1张手牌", skill_hints: [] },
+  });
+  pickView.skills = [qingnangSkill];
+  pickView.heroes = { 0: "huatuo", 1: "guanyu", 2: "zhangfei" };
+  pickView.snapshot.self_hand = [handCard];
+  ui.state.view = pickView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pickView);
+
+  check("㉿H1 步 1 的询问区文案就是服务端那句「弃置1张手牌」",
+    $("t-prompt").textContent === "弃置1张手牌", `"${$("t-prompt").textContent}"`);
+  check("㉿H2 选择面只铺手牌（弃的是自己的手牌，不是装备区）",
+    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 1,
+    `块=${$("t-options").children.length}`);
+  check("㉿H3 候选里有 Pass ⇒ 取消按钮可点", $("btn-cancel").disabled === false,
+    `disabled=${$("btn-cancel").disabled}`);
+
+  ui.state.sessionId = "smoke-missing-session";
+  const beforePick = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
+  check("㉿H4 步 1 点取消 = **送出一条 Pass 候选**",
+    !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
+
+  // ② 步 2：选一名已受伤角色（目标池含自己 ⇒ 选项里有 seat:0 与 seat:2）。
+  const seatView = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 921, prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "seat:0", answers_seq: 921 },
+      { kind: "SelectOption", choice: "seat:2", answers_seq: 921 },
+      { kind: "Pass", answers_seq: 921 },
+    ],
+    candidate_index: {}, virtual_index: {},
+    option_seats: { "seat:0": 0, "seat:2": 2 },
+    context: { requirement: "选择一名已受伤角色回复1点体力", skill_hints: [] },
+  });
+  seatView.skills = [qingnangSkill];
+  seatView.heroes = { 0: "huatuo", 1: "guanyu", 2: "zhangfei" };
+  ui.state.view = seatView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(seatView);
+
+  check("㉿H5 步 2 的询问区文案就是服务端那句「选择一名已受伤角色回复1点体力」",
+    $("t-prompt").textContent === "选择一名已受伤角色回复1点体力",
+    `"${$("t-prompt").textContent}"`);
+  const seatBox = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "2");
+  check("㉿H6 已受伤角色画成可点", !!seatBox && seatBox.classList.contains("targetable"),
+    `targetable=${seatBox && seatBox.classList.contains("targetable")}`);
+  (seatBox.listeners.click || []).forEach((fn) => fn({ target: seatBox }));
+  const seatAction = ui.buildAction();
+  check("㉿H7 点它 = 选中那条 seat:N 候选（提交才送出去）",
+    !!seatAction && seatAction.kind === "SelectOption" && seatAction.choice === "seat:2",
+    JSON.stringify(seatAction));
+
+  const beforeQingnangSeat = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentQingnangSeat = calls.length > beforeQingnangSeat
+    ? calls[calls.length - 1].body.action : null;
+  check("㉿H8 步 2 点取消 = 送出 Pass（中途退出这一步）",
+    !!sentQingnangSeat && sentQingnangSeat.kind === "Pass", JSON.stringify(sentQingnangSeat));
+}
+
 /* ============ 报障 3（合成局面）：事件逐个回放 + 效果区逐事件派生 ============ */
 {
   const moveIn = {

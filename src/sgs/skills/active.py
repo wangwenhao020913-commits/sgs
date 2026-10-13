@@ -17,11 +17,12 @@ A 族与其他族的形态差别只有一处：它的候选**不是某张牌的*
   在**候选生成期**就挡掉用过的技能（不是进池后拒绝）；复位走
   :func:`sgs.skills.reset_phase_skill_state`（引擎在 ``PHASE_PLAY_START`` 调用）。
 
-**组合上限闸**（票 04 §要做什么 3）：**两维相乘**的技能（【青囊】1 张 × 目标、【离间】
-1 张 × 有序男性对、【结姻】2 张 × 目标）在 ``组合数 > CANDIDATE_CAP`` 时**降级为顺序
-多轮**——候选只保留"目标"这一维，张数由发动后的 ``SelectionSpec(sequential=True)``
-逐张询问补齐；**结果集合不变**（逐张给与一次给到达同一终局）。一维的 2ⁿ（【制衡】）
-与一维的目标对（【反间】）按票面**不设闸**。
+**组合上限闸**（票 04 §要做什么 3）：**两维相乘**的技能（【结姻】2 张 × 目标）在
+组合数 > :data:`CANDIDATE_CAP` 时**降级为顺序多轮**——候选只保留"目标"这一维，张数由
+发动后的 ``SelectionSpec(sequential=True)`` 逐张询问补齐；**结果集合不变**（逐张给与一次
+给到达同一终局）。一维的 2ⁿ（【制衡】）与一维的目标对（【反间】）按票面**不设闸**。
+【离间】（票 01）与【青囊】（票 02）已改走骨架候选 + :class:`SkillFlow` 步骤流水线 ⇒
+候选恒一条、与手牌数无关，不再触发本闸（票 03 迁走【结姻】后这条降级路径就没有消费者了）。
 
 **【仁德】是闸门的例外**（用户裁定）：它的前端交互是"直接多选手牌 + 直接点座位、一步
 交出去"，界面必须能一次提交"这组牌 → 这个座位"，故它**不降级**、非空子集 × 目标全部
@@ -36,7 +37,7 @@ A 族与其他族的形态差别只有一处：它的候选**不是某张牌的*
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from itertools import combinations
 from types import MappingProxyType
@@ -78,15 +79,20 @@ __all__ = [
     "ACTIVE_SKILLS",
     "CANDIDATE_CAP",
     "ActiveSkill",
+    "PickCards",
+    "PickOption",
+    "PickSeats",
+    "SkillFlow",
     "activate_skill",
     "active_skill_definitions",
+    "run_flow",
 ]
 
 CANDIDATE_CAP = 128
 """单次询问候选数的组合上限（票 04 §要做什么 3 / `spec.md` §机制面的统一约定）。
 
-只对**两维相乘**的技能启用（【仁德】/【青囊】/【离间】/【结姻】）；一维的 2ⁿ（【制衡】）
-与一维的目标对（【反间】）不设闸。
+只对**仍未迁到步骤流水线的两维相乘**技能启用（【结姻】）；【离间】【青囊】已改骨架候选
+（候选恒一条 ⇒ 恒不过闸），【制衡】/【反间】按票面不设闸。
 """
 
 _USED = 1
@@ -270,6 +276,239 @@ def _push_damage(host: Any, frame: Any, *, source: int, target: int, amount: int
         },
         timing=Timing.DAMAGE_DEAL,
     )
+
+
+# ---------------------------------------------------------------------------
+# 通用步骤流水线（票 02）：声明 + 执行器
+#
+# 票 01 在【离间】里手写的三步流水线（选择只收集、取消零副作用、``_USED`` 最后才落）
+# 在这里被提炼成**声明式**形状：一条主动技声明它的 ``steps`` 与 ``effect``，引擎按
+# 帧内 ``ask_answers`` 缓存逐步入栈出栈。**第二个实例**（【青囊】）确认形状后才抽出来，
+# 而不是先设计后找消费者（design.md §6 顺序理由 / §9 执行纪律 1）。
+# ---------------------------------------------------------------------------
+
+FlowAnswers = Mapping[str, object]
+"""流水线收集到的答案：键 = 步骤键。
+
+- :class:`PickCards` / :class:`PickSeats` → ``tuple[int, ...]``（实体牌 id / 座位号）；
+- :class:`PickOption` → ``str``（选中的选项文本，原样）。
+"""
+
+SeatPool = Callable[[GameState, int, tuple[int, ...]], tuple[int, ...]]
+"""``PickSeats.pool(state, owner, chosen)``：这一步此刻可选的座位（座位序 = 玩家序）。
+
+``owner`` = **发动者**（合法性相对发动者定，不是相对应答者）；``chosen`` = **本步**已经
+选中的座位 —— 有序多选时第二问据此排除第一问的结果（【离间】受害者池即由它 + 真牌
+``check_targets`` 链共同确定）。
+"""
+
+ActorRef = int | None | Callable[[GameState, int, FlowAnswers], int]
+"""一步由**谁**应答：``None`` = 发动者本人；``int`` = 那个座位；可调用 =
+``(state, owner, 已回答的流答案) -> 座位``。
+
+可调用这一档是给票 06 的"选择权在目标"留的**同一扇门**（不把发动者写死进执行器）：
+实际的非发动者询问由票 06 落，本票只保证执行器不在这一步预设答案。
+"""
+
+FlowEffect = Callable[[Any, Any, FlowAnswers], Any]
+"""流水线效果：``(host, frame, answers) -> Control``；只在**所有步骤提交后**跑一次。"""
+
+
+@dataclass(frozen=True, slots=True)
+class PickCards:
+    """选牌步骤：在 ``zones`` 上问一次 ``SELECT_CARDS``（``lo..hi`` 张）。
+
+    ``key`` 是帧内 ``ask_selection`` 的缓存键，也是效果读取答案的键（同一条流水线里唯一）；
+    ``optional=True`` 给一条 ``Pass`` = 取消整条流水线。
+    """
+
+    zones: tuple[Zone, ...]
+    lo: int
+    hi: int
+    optional: bool = True
+    key: str = "card"
+    actor: ActorRef = None
+
+
+@dataclass(frozen=True, slots=True)
+class PickSeats:
+    """选座位步骤：逐次问 ``SELECT_OPTION``（选项文本 ``seat:N``），共 ``lo..hi`` 次。
+
+    ``ordered=True`` 时依次排除本步已选的座位（"顺序即语义"的通用形态；先后两问的问法
+    由 ``step_requirements`` 分别给）。``pool`` 返回空池 ⇒ 本步提前收尾：凑够 ``lo`` 就
+    提交，不够就取消（**不**发出没有候选的询问 —— 票 01 的 AI 崩溃就是这么来的）。
+    """
+
+    lo: int
+    hi: int
+    pool: SeatPool
+    ordered: bool = False
+    optional: bool = True
+    key: str = "seat"
+    actor: ActorRef = None
+
+
+@dataclass(frozen=True, slots=True)
+class PickOption:
+    """选项步骤：问一次 ``SELECT_OPTION``（闭集 ``options``，选中文本原样进答案）。"""
+
+    options: tuple[str, ...]
+    actor: ActorRef = None
+    optional: bool = True
+    key: str = "option"
+
+
+FlowStep = PickCards | PickSeats | PickOption
+
+
+@dataclass(frozen=True, slots=True)
+class SkillFlow:
+    """一条主动技的**步骤流水线**：结算前按序问完 ``steps``、收集答案，再跑 ``effect``。
+
+    三条纪律与票 01 手写的【离间】逐字同源：
+
+    - **选择只收集**：步骤只把答案收进 ``answers``，**不搬牌、不改状态**；
+    - **取消零副作用**：任一步答 ``Pass``（或选的张数不足 ``lo``）⇒ 直接让帧出栈，
+      ``_USED`` 一个位都不落、``effect`` 一次都不跑；因为技能仍未消耗，同一阶段可再发动；
+    - **``_USED`` 在最后一步之后**：``once_per_phase=True`` 时由执行器在 ``effect`` 前落位
+      （没有阶段限一次的技能 ——【仁德】—— 传 ``False``，阶段位自己管）。
+    """
+
+    steps: tuple[FlowStep, ...]
+    effect: FlowEffect
+    once_per_phase: bool = True
+
+
+def _flow_actor(step: FlowStep, state: GameState, owner: int, answers: FlowAnswers) -> int:
+    """这一步由谁应答：``None`` = 发动者，``int`` = 该座位，可调用 = 由流答案派生。"""
+    actor = step.actor
+    if actor is None:
+        return owner
+    if callable(actor):
+        return int(actor(state, owner, answers))
+    return int(actor)
+
+
+def _flow_option_id(frame: Any, key: str, index: int, *, multi: bool) -> str:
+    """``SELECT_OPTION`` 的 ``skill_id``：既是步骤键、也是 ``ask_answers`` 的缓存键。
+
+    单问步骤的 ``skill_id`` 就是 ``<短 id>:<key>``（投影 ``projection._step_requirement``
+    读冒号后那段 ⇒ 直接命中 ``SkillDef.step_requirements``）；同一步问多次时补序号，
+    既避免缓存撞车，也让两问可以各有各的文案（键形如 ``seat:0`` / ``seat:1``）。
+    """
+    short = frame.data["skill_id"].rsplit(".", 1)[-1]
+    return f"{short}:{key}:{index}" if multi else f"{short}:{key}"
+
+
+def _flow_step_cards(
+    host: Any, frame: Any, step: PickCards, owner: int, answers: FlowAnswers
+) -> tuple[str, object]:
+    """跑一步选牌：返回 ``("stay", ())`` / ``("cancel", ())`` / ``("ok", picks)``。"""
+    actor = _flow_actor(step, host.state, owner, answers)
+    picks = host.ask_selection(
+        frame,
+        key=step.key,
+        actor=actor,
+        timing=Timing.PHASE_PLAY_IDLE,
+        spec=SelectionSpec(zones=step.zones, total=(step.lo, step.hi), optional=step.optional),
+        build_face=lambda: host.selection_face(actor, step.zones, reveal_hand=True),
+    )
+    if host.suspended(picks):
+        return "stay", ()
+    # 池为空（``ask_selection`` 直接返回空）与 ``Pass`` 同形：凑不够 ``lo`` 即取消。
+    if len(picks) < step.lo:
+        return "cancel", ()
+    return "ok", tuple(int(card_id) for card_id in picks)
+
+
+def _flow_step_seats(
+    host: Any, frame: Any, step: PickSeats, owner: int, answers: FlowAnswers
+) -> tuple[str, object]:
+    """跑一步选座位（``lo..hi`` 次 ``SELECT_OPTION``）：返回三态 + 座位元组。"""
+    actor = _flow_actor(step, host.state, owner, answers)
+    chosen: list[int] = []
+    while len(chosen) < step.hi:
+        pool = tuple(int(seat) for seat in step.pool(host.state, owner, tuple(chosen)))
+        if step.ordered:
+            pool = tuple(seat for seat in pool if seat not in chosen)
+        if not pool:
+            break
+        answer = host.ask_option(
+            frame,
+            actor,
+            Timing.PHASE_PLAY_IDLE,
+            skill_id=_flow_option_id(frame, step.key, len(chosen), multi=step.hi > 1),
+            options=tuple(_seat_choice(seat) for seat in pool),
+            optional=step.optional,
+        )
+        if host.suspended(answer):
+            return "stay", ()
+        if isinstance(answer, Pass):
+            break
+        chosen.append(_option_seat(answer))
+    if len(chosen) < step.lo:
+        return "cancel", ()
+    return "ok", tuple(chosen)
+
+
+def _flow_step_option(
+    host: Any, frame: Any, step: PickOption, owner: int, answers: FlowAnswers
+) -> tuple[str, object]:
+    """跑一步选项询问：返回三态 + 选项文本。"""
+    actor = _flow_actor(step, host.state, owner, answers)
+    if not step.options:
+        return "cancel", ""
+    answer = host.ask_option(
+        frame,
+        actor,
+        Timing.PHASE_PLAY_IDLE,
+        skill_id=_flow_option_id(frame, step.key, 0, multi=False),
+        options=step.options,
+        optional=step.optional,
+    )
+    if host.suspended(answer):
+        return "stay", ""
+    if isinstance(answer, Pass):
+        return "cancel", ""
+    return "ok", answer.choice
+
+
+def run_flow(host: Any, frame: Any, flow: SkillFlow) -> Any:
+    """执行一条 :class:`SkillFlow`（``ACTIVATIONS`` 的通用回调之一）。
+
+    帧内**不需要额外游标**：每一步的询问都由 ``ask_answers`` 帧内缓存重入（票 01 的姿态），
+    故重入时从头重跑一边步骤既不会发第二次询问、也不会重复副作用；``answers`` 每次重建，
+    效果拿到的永远是"已经全部提交"的那一份。
+
+    返回 ``"stay"`` = 让出控制权（某步挂起）、``None`` = 走完（提交或取消）。
+    """
+    owner = frame.data["source"]
+    answers: dict[str, object] = {}
+    for step in flow.steps:
+        if isinstance(step, PickCards):
+            status, value = _flow_step_cards(host, frame, step, owner, answers)
+        elif isinstance(step, PickSeats):
+            status, value = _flow_step_seats(host, frame, step, owner, answers)
+        else:
+            status, value = _flow_step_option(host, frame, step, owner, answers)
+        if status == "stay":
+            return "stay"
+        if status == "cancel":
+            # 取消：一个副作用都不产生（``_USED`` 不落、``effect`` 不跑），技能可再发动。
+            return None
+        answers[step.key] = value
+    if flow.once_per_phase:
+        _mark_phase(host.state, owner, frame.data["skill_id"], _USED)
+    return flow.effect(host, frame, answers)
+
+
+def flow_handler(flow: SkillFlow) -> ActivationHandler:
+    """把一条 :class:`SkillFlow` 绑成 ``ACTIVATIONS`` 的 ``(host, frame)`` 回调。"""
+
+    def handler(host: Any, frame: Any) -> Any:
+        return run_flow(host, frame, flow)
+
+    return handler
 
 
 # ---------------------------------------------------------------------------
@@ -479,62 +718,54 @@ def _fanjian_activate(host: Any, frame: Any) -> Any:
 
 # ---------------------------------------------------------------------------
 # 华佗【青囊】：弃 1 张手牌 → 一名已受伤角色回复 1 点（目标池含自己）
+#
+# 票 02：本技能是 :class:`SkillFlow` 的**第二个实例**（第一个是票 01 手写的【离间】），
+# 声明式形状在这里被确认：骨架候选 + ``PickCards → PickSeats`` 两步，旧的"过闸降级"
+# 分支删除（同一个技能不再有两种交互形状）。
 # ---------------------------------------------------------------------------
+
+
+def _qingnang_targets(state: GameState, owner: int, chosen: tuple[int, ...]) -> tuple[int, ...]:
+    """【青囊】的可选目标：所有**已受伤**的存活角色（含发动者自己），座位序。
+
+    签名与 :data:`SeatPool` 对齐（``owner`` / ``chosen`` 对静态池无意义）。
+    """
+    del owner, chosen
+    return tuple(p.seat for p in state.players if p.alive and p.hp < p.hp_max)
 
 
 def _qingnang_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     if not _can_offer(state, ctx):
         return current
-    hand = tuple(state.player(ctx.subject).hand)
-    targets = tuple(p.seat for p in state.players if p.alive and p.hp < p.hp_max)
-    if not hand or not targets:
+    if not state.player(ctx.subject).hand:
         return current
-    if _over_cap(len(hand), len(targets)):
-        offers = [
-            ActivateSkill(
-                skill_id=ctx.skill_id,
-                choices=(_seat_choice(target),),
-                answers_seq=ctx.answers_seq,
-            )
-            for target in targets
-        ]
-    else:
-        offers = [
-            ActivateSkill(
-                skill_id=ctx.skill_id,
-                picks=(card_id,),
-                choices=(_seat_choice(target),),
-                answers_seq=ctx.answers_seq,
-            )
-            for card_id in hand
-            for target in targets
-        ]
-    return (*current, *offers)
+    if not _qingnang_targets(state, ctx.subject, ()):
+        return current
+    # 票 02：候选**恒为一条骨架**（与【离间】同姿态），不再烘"牌 × 目标"。弃哪张、
+    # 治谁改由发动后的步骤流水线问 ⇒ 候选数与手牌数、受伤人数无关。
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
 
-def _qingnang_activate(host: Any, frame: Any) -> Any:
-    state = host.state
+def _qingnang_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：搬成本进弃牌堆，再压回复帧（``_USED`` 已由执行器在调用前落位）。"""
     owner = frame.data["source"]
-    _mark_phase(state, owner, frame.data["skill_id"], _USED)
-    target = _chosen_seats(frame)[0]
-    picks = tuple(frame.data.get("picks", ()))
-    if picks:
-        if _move_to_discard(host, frame, picks, owner=owner, key="qingnang:cost") == "stay":
-            return "stay"
-    else:
-        # 过闸降级：成本张数由顺序多轮补齐（每一轮问中即弃）。
-        paid = _pay_sequential(
-            host,
-            frame,
-            owner,
-            needed=1,
-            key_prefix="qingnang",
-            zones=(Zone.HAND,),
-        )
-        if paid is None:
-            return "stay"
-    _push_recover(host, frame, source=owner, target=target)
+    seats = answers["seat"]
+    cards = answers["card"]
+    assert isinstance(seats, tuple) and isinstance(cards, tuple)
+    if _move_to_discard(host, frame, cards, owner=owner, key="qingnang:cost") == "stay":
+        return "stay"
+    _push_recover(host, frame, source=owner, target=int(seats[0]))
     return None
+
+
+QINGNANG_FLOW = SkillFlow(
+    steps=(
+        PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="card"),
+        PickSeats(lo=1, hi=1, pool=_qingnang_targets, key="seat"),
+    ),
+    effect=_qingnang_effect,
+)
+"""【青囊】的两步流水线：弃 1 张手牌 → 一名已受伤角色回复 1 点（票 02）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -746,10 +977,21 @@ ActivationHandler = Callable[[Any, Any], Any]
 
 @dataclass(frozen=True, slots=True)
 class ActiveSkill(HeroSkillDecl):
-    """A 族一条技能的**声明**：候选构造 + 发动主体（票 04 §表一行）。"""
+    """A 族一条技能的**声明**：候选构造 + 发动主体（票 04 §表一行）。
+
+    ``activate`` 与 ``flow`` **恰有一个**：未迁的主动技（票 04 的老四条 + 【结姻】）给手写
+    回调；迁到步骤流水线的技能（票 01 的【离间】形状、票 02 起用 :class:`SkillFlow` 声明）
+    给 ``flow``，回调由 :func:`flow_handler` 派生。这样声明面只有一份真源（谁发动、问什么、
+    怎么结算），不会出现"回调与声明各写一套"的漂移。
+    """
 
     offers: Callable[[GameState, ModifierContext, Any], Any]
-    activate: ActivationHandler
+    activate: ActivationHandler | None = None
+    flow: SkillFlow | None = None
+
+    def __post_init__(self) -> None:
+        if (self.activate is None) == (self.flow is None):
+            raise ValueError(f"{self.skill_id} 必须恰有 activate / flow 之一")
 
 
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
@@ -759,8 +1001,8 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     ActiveSkill("liubei", "rende", _rende_offers, _rende_activate),
     # 周瑜【反间】：令一名其他角色选花色 → 获得并展示你的一张手牌 → 花色不同则受伤（规则 1017）。
     ActiveSkill("zhouyu", "fanjian", _fanjian_offers, _fanjian_activate),
-    # 华佗【青囊】：弃一张手牌 → 一名已受伤角色回复 1 点（规则 1040）。
-    ActiveSkill("huatuo", "qingnang", _qingnang_offers, _qingnang_activate),
+    # 华佗【青囊】：弃一张手牌 → 一名已受伤角色回复 1 点（规则 1040）；票 02 的流水线消费者。
+    ActiveSkill("huatuo", "qingnang", _qingnang_offers, flow=QINGNANG_FLOW),
     # 貂蝉【离间】：弃一张牌 + 两名男性角色 → 视为其中一名对另一名使用【决斗】（规则 1049）。
     ActiveSkill("diaochan", "lijian", _lijian_offers, _lijian_activate),
     # 孙尚香【结姻】：弃两张手牌 + 一名已受伤男性 → 你与其各回复 1 点（规则 1033）。
@@ -769,8 +1011,16 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
 """A 族六条技能（票 04 §逐技能落位表；【苦肉】不在 16 名名单、只留形状，见模块 docstring）。"""
 
 
+def _activation_handler(skill: ActiveSkill) -> ActivationHandler:
+    """一条声明的发动回调：手写回调原样取用，声明式流水线由 :func:`flow_handler` 派生。"""
+    if skill.flow is not None:
+        return flow_handler(skill.flow)
+    assert skill.activate is not None  # __post_init__ 已保证恰有其一
+    return skill.activate
+
+
 ACTIVATIONS: MappingProxyType[str, ActivationHandler] = MappingProxyType(
-    {skill.skill_id: skill.activate for skill in ACTIVE_SKILLS}
+    {skill.skill_id: _activation_handler(skill) for skill in ACTIVE_SKILLS}
 )
 """``skill_id`` → 发动回调。引擎只按 :func:`activate_skill` 通用派发，不认识任何具体 id。"""
 
@@ -790,12 +1040,18 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
         "user": "选择场上两名男性角色，先点选的是决斗使用者，后点选的是决斗的目标",
         "victim": "选择场上两名男性角色，先点选的是决斗使用者，后点选的是决斗的目标",
     },
+    "qingnang": {
+        # 键的取法同【离间】：``SELECT_CARDS`` 恒读 ``"card"``（技能帧的那一步选牌），
+        # ``SELECT_OPTION`` 读询问 ``skill_id`` 冒号后那段 —— 执行器发的是
+        # ``qingnang:seat``（见 :func:`_flow_option_id`），故这里写 ``seat``。
+        "card": "弃置1张手牌",
+        "seat": "选择一名已受伤角色回复1点体力",
+    },
 }
-"""**多步技能**逐步的问法（票 01）；键 = 步骤名（判据见 :attr:`SkillDef.step_requirements`）。
+"""**多步技能**逐步的问法（票 01 起）；键 = 步骤名（判据见 :attr:`SkillDef.step_requirements`）。
 
-【离间】的三步各有各的问法：步 1 只问"弃哪张"，步 2/3 是同一句话（先点的是使用者、
-后点的是目标）。旧技能不在此表 ⇒ 仍读一句话的 :data:`_REQUIREMENTS`。
-"""
+【离间】三步各有各的问法；【青囊】两步（票 02）。不在此表的技能 ⇒ 仍读一句话的
+:data:`_REQUIREMENTS`。"""
 
 
 def active_skill_definitions() -> tuple[SkillDef, ...]:
