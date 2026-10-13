@@ -715,8 +715,8 @@ check("唯一候选不铺按钮，只说明将提交什么", (() => {
   return $("t-options").children.length > 0;
 })(), `${ui.renderKind(pending0, pending0.legal_actions)} / ${pending0.legal_actions.map((a) => a.kind).join(",")} / ${JSON.stringify(pending0.legal_actions[0])} / choice="${$("t-choice").textContent}"`);
 check("询问文案已渲染", $("t-prompt").textContent.length > 0, $("t-prompt").textContent.slice(0, 40));
-// item 4：询问面板 = **事件**（#t-context）+ **需要做什么**（#t-prompt 优先显示服务端
-// `context.requirement`）；被提供的技能文案另起一行（#t-skill-hints）。
+// item 4：询问面板 = **效果区说明**（#t-context，跟处理区走）+ **需要做什么**
+// （#t-prompt 优先显示服务端 `context.requirement`）；被提供的技能文案另起一行（#t-skill-hints）。
 const askContext = (pending0 && pending0.context) || null;
 check("㉿N5 询问面板显示「需要做什么」（服务端 requirement）",
   !askContext || !askContext.requirement || $("t-prompt").textContent === askContext.requirement,
@@ -909,7 +909,7 @@ check("㉿P1 处理区渲染出五谷亮牌（不只轮到自己才看得见）"
 check("㉿P2 处理区的牌不可点（公开信息，不是我的选择）",
   $("t-processing").children.length > 0 && $("t-processing").children.every((c) => !(c.listeners.click || []).length));
 
-// ② 询问上下文：本窗口写"谁对谁做了什么"。
+// ② 描述文本：跟效果区（处理区）走，不再写服务端的"本窗口：谁对谁做了什么"。
 ui.state.view = synthView({
   kind: "SKILL_ACTIVATION", actor: 0, prompt: "是否发动该技能？",
   legal_actions: [{ kind: "ActivateSkill", skill_id: "hero.guojia.yiji", answers_seq: 1, choices: [], picks: [] }],
@@ -918,9 +918,11 @@ ui.state.view = synthView({
 });
 ui.renderTable();
 ui.renderPending(ui.state.view);
-check("㉿P3 询问窗口显示上下文（谁对谁做了什么）",
-  $("t-context").textContent.includes("0号位郭嘉对0号位郭嘉使用遗计"),
-  `上下文="${$("t-context").textContent}"`);
+check("㉿P3 描述文本跟效果区（不再写『本窗口：…』查询上下文）",
+  $("t-context").textContent.includes("处理中")
+    && $("t-context").textContent.includes("五谷丰登")
+    && !$("t-context").textContent.includes("本窗口"),
+  `描述="${$("t-context").textContent}"`);
 
 // ③ 遗计的"交给谁"：座位可点，点座位 = 选中那条 seat:N 候选。
 ui.state.view = synthView({
@@ -1196,12 +1198,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 /* ============ 报障 3（合成局面）：事件逐个回放 + 效果区逐事件派生 ============ */
 {
   const moveIn = {
-    kind: "delta", delta_type: "card_move", seq: 501, reason: "USE",
+    kind: "delta", delta_type: "card_move", seq: 501, reason: "USE", owner: 0,
     from_zone: { seat: 0, zone: "hand" }, to_zone: { seat: null, zone: "processing" },
     cards: [synthCard(6, "杀")],
   };
   const moveOut = {
-    kind: "delta", delta_type: "card_move", seq: 502, reason: "USE",
+    kind: "delta", delta_type: "card_move", seq: 502, reason: "USE", owner: 0,
     from_zone: { seat: null, zone: "processing" }, to_zone: { seat: null, zone: "discard" },
     cards: [synthCard(6, "杀")],
   };
@@ -1216,19 +1218,41 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.state.logRecords = [];
   ui.state.view = null;
   ui.applyViewRaw(before);
-  check("㉿E1 回放步长固定 0.5 秒", ui.EVENT_DELAY_MS === 500, `EVENT_DELAY_MS=${ui.EVENT_DELAY_MS}`);
+  // 步长按钮：默认 0.1s，点一下在 0.1→0.5 五档之间循环（不记住，刷新回默认）。
+  check("㉿E1 默认步长 0.1 秒", ui.state.eventDelayMs === 100, `eventDelayMs=${ui.state.eventDelayMs}`);
+  check("㉿E1b 档位就是 0.1–0.5 秒五档",
+    JSON.stringify(ui.DELAY_STEPS_MS) === JSON.stringify([100, 200, 300, 400, 500]),
+    `steps=${JSON.stringify(ui.DELAY_STEPS_MS)}`);
+  const delayBtn = $("btn-delay");
+  check("㉿E1c 牌桌上有步长按钮，按钮上显示当前档", !!delayBtn && delayBtn.textContent.includes("0.1"),
+    `按钮="${delayBtn ? delayBtn.textContent : "(缺)"}"`);
+  const clickDelay = () => (delayBtn.listeners.click || []).forEach((fn) => fn({ target: delayBtn }));
+  clickDelay();
+  check("㉿E1d 点一下 → 0.2 秒", ui.state.eventDelayMs === 200,
+    `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
+  for (let i = 0; i < 4; i += 1) clickDelay();
+  check("㉿E1e 满档后循环回 0.1 秒", ui.state.eventDelayMs === 100 && delayBtn.textContent.includes("0.1"),
+    `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
   ui.applyViewRaw(after);
   check("㉿E2 收到事件先进入回放：快照还没提交、提交按钮灰着",
     !!ui.state.playback && ui.state.view.cursor === 500 && $("btn-submit").disabled === true,
     `playback=${!!ui.state.playback} cursor=${ui.state.view.cursor} disabled=${$("btn-submit").disabled}`);
+  check("㉿E2b 回放期间响应文本清空（回放结束、新询问提交后才显示）",
+    $("t-prompt").textContent === "", `响应文本="${$("t-prompt").textContent}"`);
   check("㉿E3 播放前效果区还是旧的（空）", !$("t-processing").text().includes("杀"),
     `处理区="${$("t-processing").text().trim()}"`);
   ui.stepPlayback(true);
   check("㉿E4 播到「牌进处理区」⇒ 效果区里看得见这张【杀】",
     $("t-processing").text().includes("杀"), `处理区="${$("t-processing").text().trim()}"`);
+  check("㉿E4b 描述文本同一步就跟上效果区（不再残留上一条）",
+    $("t-context").textContent.includes("处理中") && $("t-context").textContent.includes("杀")
+      && $("t-context").textContent.includes("0号位"),
+    `描述="${$("t-context").textContent}"`);
   ui.stepPlayback(true);
   check("㉿E5 播到「离开处理区」⇒ 效果区清空（牌「停留」过一步）",
     !$("t-processing").text().includes("杀"), `处理区="${$("t-processing").text().trim()}"`);
+  check("㉿E5b 效果区空了 ⇒ 描述文本立即清空",
+    $("t-context").textContent === "", `描述="${$("t-context").textContent}"`);
   ui.flushPlayback();
   check("㉿E6 播完才提交新快照与询问",
     ui.state.playback === null && ui.state.view.cursor === 502 && $("t-prompt").textContent.includes("出牌阶段"),

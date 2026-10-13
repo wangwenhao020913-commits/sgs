@@ -52,13 +52,16 @@ function phaseLabel(phase) {
  */
 const HAND_PICK_KINDS = ["PLAY_PHASE", "RESPOND", "DODGE"];
 
-/** 事件回放的固定步长（毫秒）：每一条事件在事件流 / 效果区停留这么久。
+/** 事件回放的步长档位（毫秒）：每一条事件在事件流 / 效果区停留这么久。
  *
  * 报障 3：AI 一回合的结算在一次响应里全部返回，界面**一次性**画完，于是【杀】【闪】
  * 【桃】在效果区一闪而过。改成逐条回放后，牌会在效果区停满一个步长。
  * **严格顺序**（用户裁定）：这一批播完才提交新的快照与询问，故播放期间禁掉提交。
+ *
+ * 步长改成牌桌上的按钮（0.1–0.5 秒，点一下换一档）；缺省 0.1 秒，**不记住**——
+ * 刷新/换局回默认，故它只住内存（`state.eventDelayMs`），不落 localStorage。
  */
-const EVENT_DELAY_MS = 500;
+const DELAY_STEPS_MS = [100, 200, 300, 400, 500];
 
 const state = {
   sessionId: null,
@@ -73,7 +76,9 @@ const state = {
   skillSeat: null,     // 上面那个模式里已点中的座位
   convertSkill: null,  // 转化技"挑来源牌"模式（【龙胆】）：正在等玩家点一张可转化的手牌
   playback: null,      // 事件回放：{body, records, index, querySeat}
-  effectCards: [],     // 回放期间效果区里当前可见的牌（由 card_move delta 派生）
+  eventDelayMs: DELAY_STEPS_MS[0], // 回放步长（牌桌按钮切档）
+  effectCards: [],     // 效果区里当前可见的牌；回放期间由 card_move delta 逐事件派生
+  lastUse: null,       // 回放期间最近一次「指定目标」的 {source, targets}（给处理区的牌标注使用者）
   timer: null,
   runs: [],
   replay: null,
@@ -173,13 +178,16 @@ function applyView(body) {
     return;
   }
   const previous = state.view && state.view.snapshot ? state.view.snapshot.processing || [] : [];
-  state.effectCards = previous.slice();
+  state.effectCards = mergeEffectCards(previous);
   state.playback = { body, records: incoming, index: 0, querySeat: state.lastQuerySeat };
   $("btn-submit").disabled = true;
   $("btn-cancel").disabled = true;
   $("t-choice").textContent = "";
-  // 第一条也等满一个步长再出现：每个事件之间的间隔就是固定的 EVENT_DELAY_MS。
-  playbackTimer = window.setTimeout(() => stepPlayback(false), EVENT_DELAY_MS);
+  // 回放期间**响应文本清空**：它属于"下方询问界面"的那一问，等播完、新询问提交后再显示。
+  // 描述文本不在这里清——它由 renderProcessing 按效果区逐事件改写。
+  $("t-prompt").textContent = "";
+  // 第一条也等满一个步长再出现：每个事件之间的间隔就是当前的步长档。
+  playbackTimer = window.setTimeout(() => stepPlayback(false), state.eventDelayMs);
   // **开局**是唯一不等节奏的：此前牌桌上一片空白，逐条播开局事件只是空屏五秒。
   // 直接把记录走完（日志照收），让牌桌立刻有局面可看。
   if (first) flushPlayback();
@@ -208,7 +216,7 @@ function stepPlayback(immediate) {
   const logNode = $("t-log");
   if (logNode.lastChild) logNode.lastChild.scrollIntoView({ block: "nearest" });
   playback.index += 1;
-  if (!immediate) playbackTimer = window.setTimeout(() => stepPlayback(false), EVENT_DELAY_MS);
+  if (!immediate) playbackTimer = window.setTimeout(() => stepPlayback(false), state.eventDelayMs);
 }
 
 /** 把整批回放**立刻**跑完（测试与"收到新视图前先收尾"用）。 */
@@ -243,9 +251,17 @@ function finishPlayback() {
  *
  * 处理区是**公开区**（`snapshot.processing`），但一次响应只给**终态**；回放期间要看见
  * 【杀】【闪】【桃】停在里面，只能顺着增量把牌挪进挪出。
+ *
+ * 牌进处理区时顺手记下"谁在用"（`USE_DESIGNATE_TARGET` 的 `source`/`targets`，
+ * 或这条移动自带的 `owner`），描述文本据此写「（N号位 对 M号位 使用）」。
  */
 function applyEffectDelta(record) {
-  if (!record || record.kind !== "delta" || record.delta_type !== "card_move") return;
+  if (!record) return;
+  if (record.kind === "timing" && record.timing === "USE_DESIGNATE_TARGET") {
+    state.lastUse = { source: record.actor, targets: (record.targets || []).slice() };
+    return;
+  }
+  if (record.kind !== "delta" || record.delta_type !== "card_move") return;
   const cards = record.cards || [];
   const from = record.from_zone || {};
   const to = record.to_zone || {};
@@ -255,9 +271,45 @@ function applyEffectDelta(record) {
   }
   if (to.zone === "processing") {
     for (const card of cards) {
-      if (!state.effectCards.some((held) => held.card_id === card.card_id)) state.effectCards.push(card);
+      if (state.effectCards.some((held) => held.card_id === card.card_id)) continue;
+      // 只有"这条移动的使用者就是刚指定目标的那个人"才敢套用那一组目标；
+      // 否则（无懈一类的响应使用）只标注来源，不编目标。
+      const use = (record.reason === "USE" && state.lastUse && state.lastUse.source === record.owner)
+        ? state.lastUse
+        : null;
+      const source = use ? use.source : (record.reason === "USE" ? record.owner : null);
+      state.effectCards.push({ ...card, source, targets: use ? use.targets : [] });
     }
   }
+}
+
+/** 把新快照的处理区并进 `state.effectCards`：同一张牌保留回放期间标注的使用者/目标。 */
+function mergeEffectCards(cards) {
+  const previous = new Map((state.effectCards || []).map((card) => [card.card_id, card]));
+  return (cards || []).map((card) => {
+    const held = previous.get(card.card_id);
+    return { ...card, source: held ? held.source : null, targets: held ? held.targets : [] };
+  });
+}
+
+/** 效果区（处理区）的说明文本：有牌才有一行，牌全走了就**立即清空**（用户裁定）。 */
+function describeEffect(cards) {
+  if (!cards || !cards.length) return "";
+  const parts = cards.map((card) => {
+    const who = (card.source === null || card.source === undefined)
+      ? ""
+      : `（${useText(card.source, card.targets)}）`;
+    return `【${card.name}】${who}`;
+  });
+  return `处理中：${parts.join("、")}`;
+}
+
+/** 处理区里某张牌的"谁在用"：有他人目标写"X号位 对 Y号位 使用"，否则写"X号位 使用"。 */
+function useText(source, targets) {
+  const others = (targets || []).filter((seat) => seat !== source);
+  return others.length
+    ? `${source}号位 对 ${others.map((seat) => `${seat}号位`).join("、")} 使用`
+    : `${source}号位 使用`;
 }
 
 /** 提交这份视图：装快照 / 游标，重画牌桌与询问（回放播完后的落点）。 */
@@ -268,7 +320,8 @@ function commitView(body) {
   $("t-seed").textContent = String(body.seed);
   $("t-seat").textContent = String(body.human_seat);
   $("btn-takeover").hidden = body.finished;
-  state.effectCards = (body.snapshot && body.snapshot.processing) || [];
+  // `state.effectCards` 不在这里重设：`renderTable` 会把快照的处理区并进来
+  // （`mergeEffectCards`），从而保留回放期间标注的"谁在用"。
   // 新询问到达 ⇒ 未提交的选择一律作废（spec D14：不弹确认、不尝试提交）。
   resetSelection();
   renderTable();
@@ -536,6 +589,9 @@ function renderTable() {
     ring.appendChild(box);
   }
 
+  // 快照到达时把处理区并进 `state.effectCards`（同一张牌保留回放期间的使用者标注）；
+  // 回放期间不并——那份是逐事件派生的，快照要等播完才提交。
+  if (!state.playback) state.effectCards = mergeEffectCards(snapshot.processing || []);
   renderProcessing();
 
   $("t-hand-count").textContent = `${snapshot.self_hand.length} 张`;
@@ -564,23 +620,26 @@ function renderTable() {
   renderSkills(view);
 }
 
-/** 效果区 / 处理区：回放期间画**逐事件派生**的那份（看得见【杀】【闪】【桃】停留），
- * 否则画快照里的公开处理区。 */
+/** 效果区 / 处理区：画 `state.effectCards`（回放期间逐事件派生、快照到达时并进来），
+ * 并把**描述文本**（`#t-context`）同步成它的说明——两者同源，故不会一个变一个不变。
+ *
+ * 描述文本曾经是服务端下发的"本窗口：谁对谁使用…"，只在询问到达时更新，回放期间会残留；
+ * 现在它跟着效果区走：有牌写「处理中：【牌】（谁在使用）」，牌全走了**立即清空**。 */
 function renderProcessing() {
   const box = $("t-processing");
   if (!box) return;
+  const cards = state.effectCards || [];
   box.innerHTML = "";
-  const cards = state.playback
-    ? state.effectCards
-    : ((state.view && state.view.snapshot && state.view.snapshot.processing) || []);
   if (!cards.length) {
     const empty = document.createElement("span");
     empty.className = "dim";
     empty.textContent = "（空）";
     box.appendChild(empty);
-    return;
+  } else {
+    for (const card of cards) box.appendChild(cardChip(card, false, true));
   }
-  for (const card of cards) box.appendChild(cardChip(card, false, true));
+  const contextNode = $("t-context");
+  if (contextNode) contextNode.textContent = describeEffect(cards);
 }
 
 /** 技能按钮：三态由**数据**决定（`locked` 表类型、`available` 表此刻能不能发动）。
@@ -829,12 +888,10 @@ function renderPending(view) {
     const text = skill && skill.ui && skill.ui.requirement;
     if (text) $("t-prompt").textContent = text;
   }
-  // 询问窗口的"谁对谁做了什么"（服务端从结算栈顶帧派生；读不到就不写这一行）。
+  // 描述文本 = 效果区（处理区）当前内容的说明，**不**再写服务端的"本窗口：谁对谁使用…"。
+  // 那条只在询问到达时更新，回放期间会残留；效果区那行才与牌桌同步（用户裁定）。
   const contextNode = $("t-context");
-  if (contextNode) {
-    const label = pending && pending.context && pending.context.label;
-    contextNode.textContent = label ? `本窗口：${label}` : "";
-  }
+  if (contextNode) contextNode.textContent = describeEffect(state.effectCards);
   // 这条窗口里**被提供**的技能（主动技 / 提供者 / 转化技）的"需要做什么"文案。
   const hintsNode = $("t-skill-hints");
   if (hintsNode) {
@@ -1520,6 +1577,18 @@ function replayStep(delta) {
 
 /* ------------------------------------------------------------------ 装配 */
 
+/** 牌桌按钮：在 0.1–0.5 秒之间切一档回放步长（缺省 0.1，不记住）。 */
+function cycleDelay() {
+  const at = DELAY_STEPS_MS.indexOf(state.eventDelayMs);
+  state.eventDelayMs = DELAY_STEPS_MS[(at + 1) % DELAY_STEPS_MS.length];
+  updateDelayButton();
+}
+
+function updateDelayButton() {
+  const button = $("btn-delay");
+  if (button) button.textContent = `步长 ${(state.eventDelayMs / 1000).toFixed(1)}s`;
+}
+
 function wire() {
   seedOptions();
   $("in-players").addEventListener("change", seedOptions);
@@ -1536,6 +1605,8 @@ function wire() {
   $("btn-cancel").addEventListener("click", clearSelection);
   $("btn-refresh").addEventListener("click", refresh);
   $("btn-takeover").addEventListener("click", takeover);
+  $("btn-delay").addEventListener("click", cycleDelay);
+  updateDelayButton();
   $("btn-r-first").addEventListener("click", () => { state.replay.index = 0; renderReplay(); });
   $("btn-r-prev").addEventListener("click", () => replayStep(-1));
   $("btn-r-next").addEventListener("click", () => replayStep(1));
