@@ -209,9 +209,14 @@ M3_SCENARIOS: dict[str, Scenario] = {
         heroes=("caocao", "simayi", "liubei", "guanyu"),
     ),
     # D 族失去牌后：【连营】+【枭姬】含顶替。
+    # 种子 76 → 103：票 03 迁移【结姻】（候选由"手牌对 × 目标"改为恒一条骨架 + 两步流水线）
+    # 改变了随机驱动在同一局里的行动序列，76 那局不再同时命中【连营】/【枭姬】/顶替三件事；
+    # 随后修掉 `_sort_key` 缺 `SelectOption` 分支的候选次序 bug（Pass 曾排在真候选之前），
+    # 又让中途选的 890 不再命中。按本模块纪律**重新选种**而不是放宽判据：103 在同样四名
+    # 武将下命中判据，且记录条数最少（1563，候选由 `.scratch/seed38.py` 扫 0–1199 得到）。
     "38-hero-lost-cards": _m3(
         "38-hero-lost-cards",
-        seed=76,
+        seed=103,
         heroes=("luxun", "sunshangxiang", "guanyu", "sunquan"),
     ),
     # C 族目标池真排除：【空城】+【谦逊】。

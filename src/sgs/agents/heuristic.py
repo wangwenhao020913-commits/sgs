@@ -149,6 +149,23 @@ _PLAY_PHASE_IDLE = "PHASE_PLAY_IDLE"
 （`HEURISTIC_ALLOWED_SGS_MODULES` 只有 ``sgs.effects`` 与 ``sgs.state``）。
 """
 
+_LORD_SIDE = frozenset({"lord", "loyalist"})
+_REBEL_SIDE = frozenset({"rebel", "renegade"})
+_LORD = "lord"
+_REBEL = "rebel"
+_RENEGADE = "renegade"
+"""身份的**字面量**（:class:`~sgs.data.Identity` 是 ``str`` 枚举，故可直接比）。
+
+同 :data:`_PLAY_PHASE_IDLE` 的理由：``Identity`` 住在 ``sgs.data``，不在本模块的可见面
+白名单里。``frozenset`` 只作成员判定、从不迭代（源码纪律禁止的是迭代）。
+"""
+
+_SEAT_TARGET_VALUE = 2.0
+"""座位步里"已明身份的敌 / 友"的分值幅度（未知身份是中性 0）。"""
+
+_ENEMY_FOCUS = 2.0
+"""伤害目标里"已明身份的敌人"的加权：小到不盖过手牌防御贴现，只作同价时的偏向。"""
+
 
 def _card_value(card: CardRef | None) -> float:
     """一张牌的局部估值：牌名表 → 装备槽位 → 未知兜底（不读任何隐藏信息）。"""
@@ -196,6 +213,9 @@ def _score_attack(action: Action, view: PlayerView) -> float:
     score = _DAMAGE_BASE + _TARGET_BONUS * len(others)
     for seat in others:
         score -= _HAND_DEFENSE_WEIGHT * min(view.players[seat].hand_count, _HAND_DEFENSE_CAP)
+        # 主公是公开信息：反贼据此**略**偏向锁定他，但不能盖过"手牌越多越难命中"的贴现。
+        if _is_revealed_enemy(view, seat):
+            score += _ENEMY_FOCUS
     return score
 
 
@@ -258,6 +278,9 @@ def _score_peach(query: Query, action: Action) -> float:
     me = _me(query.view)
     if me.hp <= 1 and me.hand_count <= 1:
         return _CONSERVE_VALUE
+    if _is_revealed_enemy(query.view, query.dying):
+        # 已明的敌人（主公 ↔ 反贼）：救活他等于替对手续命。
+        return -_SAVE_VALUE
     return _SAVE_VALUE
 
 
@@ -330,8 +353,66 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
 )
 
 
+def _is_revealed_enemy(view: PlayerView, seat: int) -> bool:
+    """``seat`` 是不是**已明身份**的敌人（只用公开信息）。
+
+    身份只对本人 / 主公 / 已阵亡者可见（``PlayerPublic.identity``），故可靠的敌我信号
+    就是"主公 ↔ 反贼/内奸"这一对；其余一律当作未知（不猜、不读隐藏面）。
+    """
+    mine = view.players[view.seat].identity
+    theirs = view.players[seat].identity
+    if mine is None or theirs is None:
+        return False
+    if mine == _RENEGADE:
+        # 内奸要**最后一个人活着**：主公提前死 ⇒ 反贼直接赢，自己也输。故不把主公当
+        # 优先敌人（其余都算对手）；这是内奸唯一的可靠策略信号。
+        return theirs not in (_RENEGADE, _LORD)
+    if mine == _REBEL:
+        return theirs in _LORD_SIDE
+    if mine in _LORD_SIDE:
+        return theirs in _REBEL_SIDE
+    return False
+
+
+def _is_revealed_ally(view: PlayerView, seat: int) -> bool:
+    """``seat`` 是不是**已明身份**的盟友（唯一的可靠情形：主公与我同在主公阵营）。"""
+    mine = view.players[view.seat].identity
+    theirs = view.players[seat].identity
+    return mine in _LORD_SIDE and theirs == _LORD
+
+
+_HOSTILE_SEAT_STEPS = ("lijian:", "fanjian:")
+"""座位步的**语义分组**：这些步骤里的座位是"被指向的对手"，其余（治疗 / 给牌）是"被帮助的人"。
+
+键 = 执行器发的 ``skill_id`` 前缀（``lijian:victim`` / ``fanjian:seat`` …）。不属于任何
+一组的座位步按中性处理——宁可 0 分（交给随机流打破平分），也不猜错方向。
+"""
+
+
+def _score_seat_option(query: SelectOptionQuery, choice: str) -> float:
+    """座位选项的敌我估值：帮助类避开敌人、决斗类瞄准敌人，``self`` 恒是好的帮助对象。
+
+    票 03 起【结姻】/【青囊】/【离间】的座位改由步骤询问；若一律 0 分，AI 会在友敌之间
+    掷硬币（候选次序修复后胜率掉到 50% 的正是这个短板）。
+    """
+    view = query.view
+    try:
+        seat = int(choice.removeprefix("seat:"))
+    except ValueError:  # pragma: no cover - 座位步的选项恒是 seat:N
+        return 0.0
+    if not 0 <= seat < len(view.players):
+        return 0.0
+    enemy = _is_revealed_enemy(view, seat)
+    skill = str(getattr(query, "skill_id", "") or "")
+    if skill.startswith(_HOSTILE_SEAT_STEPS):
+        return _SEAT_TARGET_VALUE if enemy else 0.0
+    if seat == view.seat or _is_revealed_ally(view, seat):
+        return _SEAT_TARGET_VALUE
+    return -_SEAT_TARGET_VALUE if enemy else 0.0
+
+
 def _score_select_option(query: Query, action: Action) -> float:
-    """``SELECT_OPTION``：按上面的特征贪心；未知选项一律 0（平分交给 ai 子流）。
+    """``SELECT_OPTION``：座位步按敌我估值、其余按特征表贪心；未知选项一律 0。
 
     「取消一次已发动的技能」（发动后流水线里的 ``Pass``）是例外：给它一个惩罚，
     否则 AI 会在座位步挑「取消」，再回头重新发动同一条技能 —— 空转（见
@@ -340,6 +421,8 @@ def _score_select_option(query: Query, action: Action) -> float:
     assert isinstance(query, SelectOptionQuery)
     if not isinstance(action, SelectOption):
         return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
+    if action.choice.startswith("seat:"):
+        return _score_seat_option(query, action.choice)
     return _OPTION_VALUES.get(action.choice, 0.0)
 
 
@@ -403,6 +486,24 @@ def _picked_value(view: PlayerView, action: ActivateSkill) -> float:
     return sum(_card_value(by_id.get(card_id)) for card_id in action.picks)
 
 
+def _skeleton_cost(view: PlayerView, count: int) -> float:
+    """**骨架候选**的成本预估：发动后那一步会让 AI 挑最便宜的成本张。
+
+    主动技迁到步骤流水线后（票 02 起），候选不再烘 ``picks``（付不付得起改判在步骤里），
+    于是 ``_picked_value`` 恒 0、技能看起来免费。``_score_select_cards`` 之后会挑自己
+    价值最低的牌当成本，故这里按"手里最便宜的 ``count`` 张"预估，让发动决策重新看得见成本。
+    """
+    values = sorted(_card_value(card) for card in view.self_hand)
+    return sum(values[:count])
+
+
+def _skill_cost(view: PlayerView, action: ActivateSkill, skeleton: int) -> float:
+    """技能成本：候选带 ``picks`` ⇒ 实际牌价；骨架候选 ⇒ 按 ``skeleton`` 张预估。"""
+    if action.picks:
+        return _picked_value(view, action)
+    return _skeleton_cost(view, skeleton)
+
+
 def _score_rende(query: Query, action: Action, view: PlayerView) -> float:
     """【仁德】：给牌是成本；首次给到两张以上回复 1 点（只在受伤时值得）。"""
     assert isinstance(action, ActivateSkill)
@@ -439,10 +540,16 @@ def _score_lijian(query: Query, action: Action, view: PlayerView) -> float:
 
 
 def _score_jieyin(query: Query, action: Action, view: PlayerView) -> float:
-    """【结姻】：弃两张手牌，双方各回复 1 点（自己回血是主要收益）。"""
+    """【结姻】：弃两张手牌，双方各回复 1 点（自己回血是主要收益）。
+
+    票 03 起候选是**骨架**（``picks`` 为空，成本改由发动后的 ``SELECT_CARDS`` 挑）⇒
+    按"手里最便宜的两张"预估成本，否则裸候选看起来免费、AI 无脑发动（胜率回归）。
+    自己没受伤时收益只剩"替目标回血"（目标还可能是敌人），故大幅降值。
+    """
     assert isinstance(action, ActivateSkill)
     del query
-    return 4.0 - _picked_value(view, action)
+    bonus = 4.0 if _wounded(view) else 1.0
+    return bonus - _skill_cost(view, action, 2)
 
 
 def _score_liuli(query: Query, action: Action, view: PlayerView) -> float:

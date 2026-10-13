@@ -17,12 +17,13 @@ A 族与其他族的形态差别只有一处：它的候选**不是某张牌的*
   在**候选生成期**就挡掉用过的技能（不是进池后拒绝）；复位走
   :func:`sgs.skills.reset_phase_skill_state`（引擎在 ``PHASE_PLAY_START`` 调用）。
 
-**组合上限闸**（票 04 §要做什么 3）：**两维相乘**的技能（【结姻】2 张 × 目标）在
+**组合上限闸**（票 04 §要做什么 3）：**两维相乘**的技能（旧【结姻】2 张 × 目标）在
 组合数 > :data:`CANDIDATE_CAP` 时**降级为顺序多轮**——候选只保留"目标"这一维，张数由
 发动后的 ``SelectionSpec(sequential=True)`` 逐张询问补齐；**结果集合不变**（逐张给与一次
 给到达同一终局）。一维的 2ⁿ（【制衡】）与一维的目标对（【反间】）按票面**不设闸**。
-【离间】（票 01）与【青囊】（票 02）已改走骨架候选 + :class:`SkillFlow` 步骤流水线 ⇒
-候选恒一条、与手牌数无关，不再触发本闸（票 03 迁走【结姻】后这条降级路径就没有消费者了）。
+【离间】（票 01）、【青囊】（票 02）与【结姻】（票 03）先后改走骨架候选 +
+:class:`SkillFlow` 步骤流水线 ⇒ 候选恒一条、与手牌数无关；**这条降级路径在本族已无消费者**
+（:func:`_over_cap` / :func:`_pay_sequential` 按 design.md §7 Q4 先留，待后置票统一清除）。
 
 **【仁德】是闸门的例外**（用户裁定）：它的前端交互是"直接多选手牌 + 直接点座位、一步
 交出去"，界面必须能一次提交"这组牌 → 这个座位"，故它**不降级**、非空子集 × 目标全部
@@ -91,8 +92,9 @@ __all__ = [
 CANDIDATE_CAP = 128
 """单次询问候选数的组合上限（票 04 §要做什么 3 / `spec.md` §机制面的统一约定）。
 
-只对**仍未迁到步骤流水线的两维相乘**技能启用（【结姻】）；【离间】【青囊】已改骨架候选
-（候选恒一条 ⇒ 恒不过闸），【制衡】/【反间】按票面不设闸。
+只对**两维相乘**的技能启用；本批 A 族已无消费者——【结姻】（票 03）迁走后，"牌 × 目标"
+的枚举在本族绝迹（【离间】/【青囊】/【结姻】恒骨架候选，【制衡】/【反间】按票面不设闸）。
+旧原语按 design.md §7 Q4 **先留**，待后置票统一清除。
 """
 
 _USED = 1
@@ -900,70 +902,66 @@ def _lijian_activate(host: Any, frame: Any) -> Any:
 
 # ---------------------------------------------------------------------------
 # 孙尚香【结姻】：弃 2 张手牌 + 一名已受伤男性 → 你与其各回复 1 点
+#
+# 票 03：本技能是 :class:`SkillFlow` 的**第三个实例**（【离间】手写、【青囊】声明式），
+# 也是确认"``PickCards(lo, hi)`` 能表达恰好 2 张"的那一个：``lo=hi=2`` ⇒
+# ``SelectionSpec(total=(2, 2))`` 只枚举恰好两张的组合。旧的"两维过闸降级为顺序多轮"
+# 分支删除（同一个技能不再有两种交互形状），`_over_cap` / `_pay_sequential` 由此
+# 再无消费者，但按 design.md §7 Q4 **先留、之后再清**。
 # ---------------------------------------------------------------------------
+
+
+def _jieyin_targets(state: GameState, owner: int, chosen: tuple[int, ...]) -> tuple[int, ...]:
+    """【结姻】的可选目标：**已受伤的男性**、存活、不含发动者自己，座位序。
+
+    签名与 :data:`SeatPool` 对齐（``chosen`` 对单选无意义）。付不起就不进池：池为空时
+    候选根本不产出（:func:`_jieyin_offers`），不会发出没有候选的询问。
+    """
+    del chosen
+    return tuple(
+        p.seat
+        for p in state.players
+        if p.alive
+        and p.seat != owner
+        and p.gender is Gender.MALE
+        and p.hp < p.hp_max
+    )
 
 
 def _jieyin_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     if not _can_offer(state, ctx):
         return current
-    hand = tuple(state.player(ctx.subject).hand)
-    targets = tuple(
-        p.seat
-        for p in state.players
-        if p.alive
-        and p.seat != ctx.subject
-        and p.gender is Gender.MALE
-        and p.hp < p.hp_max
-    )
-    if len(hand) < 2 or not targets:
+    if len(state.player(ctx.subject).hand) < 2:
         return current
-    card_count = len(hand) * (len(hand) - 1) // 2
-    if _over_cap(card_count, len(targets)):
-        offers = [
-            ActivateSkill(
-                skill_id=ctx.skill_id,
-                choices=(_seat_choice(target),),
-                answers_seq=ctx.answers_seq,
-            )
-            for target in targets
-        ]
-    else:
-        offers = [
-            ActivateSkill(
-                skill_id=ctx.skill_id,
-                picks=pair,
-                choices=(_seat_choice(target),),
-                answers_seq=ctx.answers_seq,
-            )
-            for pair in combinations(hand, 2)
-            for target in targets
-        ]
-    return (*current, *offers)
+    if not _jieyin_targets(state, ctx.subject, ()):
+        return current
+    # 票 03：候选**恒为一条骨架**（与【离间】/【青囊】同姿态），不再烘"手牌对 × 目标"。
+    # 弃哪两张、救谁改由发动后的步骤流水线问 ⇒ 候选数与手牌数、受伤男性数无关。
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
 
-def _jieyin_activate(host: Any, frame: Any) -> Any:
-    state = host.state
+def _jieyin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：搬两张成本进弃牌堆，再压两个回复帧（``_USED`` 已由执行器在调用前落位）。"""
     owner = frame.data["source"]
-    _mark_phase(state, owner, frame.data["skill_id"], _USED)
-    target = _chosen_seats(frame)[0]
-    picks = tuple(frame.data.get("picks", ()))
-    if picks:
-        if _move_to_discard(host, frame, picks, owner=owner, key="jieyin:cost") == "stay":
-            return "stay"
-    else:
-        paid = _pay_sequential(
-            host,
-            frame,
-            owner,
-            needed=2,
-            key_prefix="jieyin",
-            zones=(Zone.HAND,),
-        )
-        if paid is None:
-            return "stay"
+    seats = answers["seat"]
+    cards = answers["card"]
+    assert isinstance(seats, tuple) and isinstance(cards, tuple)
+    if _move_to_discard(host, frame, cards, owner=owner, key="jieyin:cost") == "stay":
+        return "stay"
+    target = int(seats[0])
     _push_recover(host, frame, source=owner, target=target)
     _push_recover(host, frame, source=owner, target=owner)
     return None
+
+
+JIEYIN_FLOW = SkillFlow(
+    steps=(
+        PickCards(zones=(Zone.HAND,), lo=2, hi=2, key="card"),
+        PickSeats(lo=1, hi=1, pool=_jieyin_targets, key="seat"),
+    ),
+    effect=_jieyin_effect,
+)
+"""【结姻】的两步流水线：一并弃恰好 2 张手牌 → 一名已受伤男性 → 双方各回复 1 点（票 03）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -979,10 +977,10 @@ ActivationHandler = Callable[[Any, Any], Any]
 class ActiveSkill(HeroSkillDecl):
     """A 族一条技能的**声明**：候选构造 + 发动主体（票 04 §表一行）。
 
-    ``activate`` 与 ``flow`` **恰有一个**：未迁的主动技（票 04 的老四条 + 【结姻】）给手写
-    回调；迁到步骤流水线的技能（票 01 的【离间】形状、票 02 起用 :class:`SkillFlow` 声明）
-    给 ``flow``，回调由 :func:`flow_handler` 派生。这样声明面只有一份真源（谁发动、问什么、
-    怎么结算），不会出现"回调与声明各写一套"的漂移。
+    ``activate`` 与 ``flow`` **恰有一个**：未迁的主动技（票 04 的老三条：制衡 / 仁德 /
+    反间）给手写回调；迁到步骤流水线的技能（票 01 的【离间】形状、票 02 起用
+    :class:`SkillFlow` 声明）给 ``flow``，回调由 :func:`flow_handler` 派生。这样声明面
+    只有一份真源（谁发动、问什么、怎么结算），不会出现"回调与声明各写一套"的漂移。
     """
 
     offers: Callable[[GameState, ModifierContext, Any], Any]
@@ -1006,7 +1004,7 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 貂蝉【离间】：弃一张牌 + 两名男性角色 → 视为其中一名对另一名使用【决斗】（规则 1049）。
     ActiveSkill("diaochan", "lijian", _lijian_offers, _lijian_activate),
     # 孙尚香【结姻】：弃两张手牌 + 一名已受伤男性 → 你与其各回复 1 点（规则 1033）。
-    ActiveSkill("sunshangxiang", "jieyin", _jieyin_offers, _jieyin_activate),
+    ActiveSkill("sunshangxiang", "jieyin", _jieyin_offers, flow=JIEYIN_FLOW),
 )
 """A 族六条技能（票 04 §逐技能落位表；【苦肉】不在 16 名名单、只留形状，见模块 docstring）。"""
 
@@ -1047,11 +1045,16 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
         "card": "弃置1张手牌",
         "seat": "选择一名已受伤角色回复1点体力",
     },
+    "jieyin": {
+        # 与【青囊】同一套键；差别只在成本是**恰好 2 张**、目标池是"已受伤男性（不含自己）"。
+        "card": "弃置2张手牌",
+        "seat": "选择一名已受伤男性角色回复1点体力",
+    },
 }
 """**多步技能**逐步的问法（票 01 起）；键 = 步骤名（判据见 :attr:`SkillDef.step_requirements`）。
 
-【离间】三步各有各的问法；【青囊】两步（票 02）。不在此表的技能 ⇒ 仍读一句话的
-:data:`_REQUIREMENTS`。"""
+【离间】三步各有各的问法；【青囊】（票 02）、【结姻】（票 03）各两步。不在此表的技能 ⇒
+仍读一句话的 :data:`_REQUIREMENTS`。"""
 
 
 def active_skill_definitions() -> tuple[SkillDef, ...]:

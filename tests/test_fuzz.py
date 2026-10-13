@@ -896,7 +896,9 @@ def test_the_candidate_cap_checker_catches_an_over_cap_two_dimensional_skill():
 
     ``picks``（成本）与 ``choices``（目标）两个维度都在变的 ``ActivateSkill`` 是上界
     真正要管的形状；构造一组超过 128 的两维候选，检查器必须报错。
-    【仁德】是本轮**有意**豁免的例外，故这里换一条仍在闸下的两维技能（【结姻】）。
+    【仁德】是本轮**有意**豁免的例外。票 03 迁走【结姻】后，本族已**没有**真实的
+    两维相乘技能（那条 id 只作合成载荷的载体），故这里纯粹给检查器造样本、不再指向
+    任何在产的降级路径。
     """
     state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
     action = ActivateSkill(

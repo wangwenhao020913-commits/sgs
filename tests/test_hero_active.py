@@ -553,28 +553,6 @@ def test_rende_has_no_once_per_phase_limit():
     assert _play_query_count(engine, RENDE) >= 2, "发动过之后仍回到池里（没有限一次）"
 
 
-def test_the_still_gated_skills_keep_the_play_query_under_the_cap():
-    """闸门仍在：会降级的技能（【结姻】两维相乘）单次询问候选数不超闸值。
-
-    【离间】迁到步骤流水线后（票 01）、【青囊】迁走后（票 02）都不再是样本——它们的候选
-    恒为一条，与闸门无关；本票仍留【结姻】当样本（它到票 03 才迁）。
-    """
-    hand = tuple(range(20))
-    state = build_state(
-        pack=PACK,
-        seats=[
-            SeatSpec(hand=hand, hero="sunshangxiang", gender=Gender.FEMALE),
-            *_wounded_males(7),
-        ],
-        deck=_deck_excluding(*hand),
-        turn_seat=0,
-    )
-    pair_count = len(hand) * (len(hand) - 1) // 2
-    assert pair_count * 7 > CANDIDATE_CAP, "两维相乘必须过闸（否则本用例空转）"
-
-    assert len(_play_candidates(state)) <= CANDIDATE_CAP, "降级后单次询问候选数不超过闸值"
-
-
 # ---------------------------------------------------------------------------
 # 反间（周瑜）：目标选花色 + 获得并展示你的一张手牌 + 条件伤害
 # ---------------------------------------------------------------------------
@@ -1298,7 +1276,71 @@ def test_the_flow_shape_ordered_pick_never_re_offers_the_chosen_seat(monkeypatch
 
 # ---------------------------------------------------------------------------
 # 结姻（孙尚香）：弃 2 张手牌 + 一名已受伤男性 → 你与其各回复 1 点
+#
+# 票 03：形状与【青囊】逐字同源 —— 候选恒一条骨架，"弃哪两张 / 救谁"由发动后的
+# 步骤流水线问（``SELECT_CARDS`` **恰好 2 张** → ``SELECT_OPTION``）。旧的
+# "两维过闸降级为顺序多轮"分支已删除，同一个技能不再有两种交互形状。
 # ---------------------------------------------------------------------------
+
+
+def _jieyin_state(*, owner_hp: int = 3, target_hp: int = 2, target_hp_max: int = 4):
+    """发动者 0（孙尚香，手牌 2 张）+ 座位 1（默认已受伤男性）。"""
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hp=owner_hp,
+                hp_max=4,
+                hand=(first, second),
+                hero="sunshangxiang",
+                gender=Gender.FEMALE,
+            ),
+            SeatSpec(hp=target_hp, hp_max=target_hp_max, gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(first, second),
+        turn_seat=0,
+    )
+    return first, second, state
+
+
+def _jieyin_driver(*, target: int = 1, cancel_at: str | None = None):
+    """按**新流程**应答：点技能 → 一并弃置 2 张手牌 → 选一名已受伤男性。"""
+
+    def driver(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == JIEYIN,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            if cancel_at == "card":
+                return _find(query, lambda action: isinstance(action, Pass))
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectCards) and len(action.picks) == 2,
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            if cancel_at == "seat":
+                return _find(query, lambda action: isinstance(action, Pass))
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption)
+                and action.choice == f"seat:{target}",
+            )
+        return _decline(query)
+
+    return driver
+
+
+def _jieyin_option_query(engine):
+    return next(
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SELECT_OPTION.value
+        and str(record.query.skill_id).startswith("jieyin:")
+    )
 
 
 def test_jieyin_target_pool_is_wounded_males_excluding_self():
@@ -1321,44 +1363,131 @@ def test_jieyin_target_pool_is_wounded_males_excluding_self():
         turn_seat=0,
     )
 
-    assert {action.choices for action in _offers(_play_candidates(state), JIEYIN)} == {
-        ("seat:2",),
-    }, "只含已受伤男性：满血男性与受伤女性都出池"
+    engine = _run(
+        state,
+        [Scripted(_jieyin_driver(cancel_at="seat")), Scripted(_decline)],
+        _skill_frame_popped,
+    )
+
+    assert _jieyin_option_query(engine).options == ("seat:2",), (
+        "只含已受伤男性：满血男性、受伤女性与发动者自己都出池"
+    )
+
+
+def test_jieyin_asks_the_two_cards_then_the_target():
+    _first, _second, state = _jieyin_state()
+
+    engine = _run(
+        state,
+        [Scripted(_jieyin_driver(target=1)), Scripted(_decline)],
+        _skill_frame_popped,
+    )
+
+    asked = [record.query.kind for record in engine.records if record.kind == "query"]
+    assert asked[:3] == ["PLAY_PHASE", "SELECT_CARDS", "SELECT_OPTION"], (
+        "先问「弃置2张手牌」，再问救谁（两步流水线）"
+    )
 
 
 def test_jieyin_heals_both_and_clamps_at_the_maximum():
-    first, second = _cards("slash")[0], _cards("dodge")[0]
-    state = build_state(
-        pack=PACK,
-        seats=[
-            SeatSpec(
-                hp=4,
-                hp_max=4,
-                hand=(first, second),
-                hero="sunshangxiang",
-                gender=Gender.FEMALE,
-            ),
-            SeatSpec(hp=2, hp_max=3, gender=Gender.MALE),
-        ],
-        deck=_deck_excluding(first, second),
-        turn_seat=0,
+    first, second, state = _jieyin_state(owner_hp=4, target_hp=2, target_hp_max=3)
+
+    engine = _run(
+        state,
+        [Scripted(_jieyin_driver(target=1)), Scripted(_decline)],
+        _skill_frame_popped,
     )
-
-    def jieyin(query):
-        if query.kind == QueryKind.PLAY_PHASE:
-            return _find(
-                query,
-                lambda action: isinstance(action, ActivateSkill)
-                and action.skill_id == JIEYIN
-                and set(action.picks) == {first, second},
-            )
-        return _decline(query)
-
-    engine = _run(state, [Scripted(jieyin), Scripted(_decline)], _skill_frame_popped)
 
     assert engine.state.player(1).hp == 3, "目标回复 1 点"
     assert engine.state.player(0).hp == 4, "自己已满 ⇒ 不再回复、不越上限"
     assert first in engine.state.discard and second in engine.state.discard
+
+
+def test_jieyin_heals_the_wounded_activator_as_well():
+    _first, _second, state = _jieyin_state(owner_hp=2, target_hp=2)
+
+    engine = _run(
+        state,
+        [Scripted(_jieyin_driver(target=1)), Scripted(_decline)],
+        _skill_frame_popped,
+    )
+
+    assert engine.state.player(0).hp == 3, "发动者自己也回复 1 点"
+    assert engine.state.player(1).hp == 3, "目标回复 1 点"
+
+
+def _jieyin_offered_after_cancel(engine) -> bool:
+    """取消之后**同一出牌阶段**又挂起了含【结姻】候选的 PLAY_PHASE 询问。"""
+    if not _skill_frame_popped(engine):
+        return False
+    pending = engine.pending
+    return (
+        pending is not None
+        and pending.kind == QueryKind.PLAY_PHASE.value
+        and any(
+            isinstance(action, ActivateSkill) and action.skill_id == JIEYIN
+            for action in pending.legal_actions
+        )
+    )
+
+
+def _run_jieyin_cancel(cancel_at: str):
+    """在流水线的 ``cancel_at`` 步取消（``card`` / ``seat``）。
+
+    返回 ``(成本两张牌, engine, 选择面上出现过的牌面集合)``；停止条件同【青囊】：
+    "取消后又挂起了一次含【结姻】候选的出牌阶段询问"。
+    """
+    first, second, state = _jieyin_state(owner_hp=2, target_hp=2)
+    faces: list[set[int]] = []
+
+    def sunshangxiang(query):
+        if query.kind == QueryKind.SELECT_CARDS:
+            faces.append({slot.card.card_id for slot in query.slots})
+        return _jieyin_driver(cancel_at=cancel_at)(query)
+
+    engine = _run(
+        state, [Scripted(sunshangxiang), Scripted(_decline)], _jieyin_offered_after_cancel
+    )
+    return (first, second), engine, faces
+
+
+@pytest.mark.parametrize("cancel_at", ["card", "seat"])
+def test_jieyin_cancel_leaves_the_table_untouched_and_the_skill_available(cancel_at):
+    """两步中任何一步取消 ⇒ 手牌原样、弃牌堆不变、双方未治疗、同一阶段还能再发动。"""
+    cards, engine, faces = _run_jieyin_cancel(cancel_at)
+    player = engine.state.player(0)
+
+    assert faces, "步 1 的问一定要先发生"
+    assert set(player.hand) | set(player.equip) == faces[-1], "选择只收集、提交才生效"
+    assert set(cards) <= set(player.hand), "两张成本都还在手里"
+    assert not engine.state.discard, "弃牌堆为空 —— 成本没有被执行"
+    assert engine.state.player(0).hp == 2, "自己没有被治疗"
+    assert engine.state.player(1).hp == 2, "目标没有被治疗"
+    assert _jieyin_offered_after_cancel(engine), "取消不消耗次数：同一阶段仍可再发动"
+
+
+def test_a_cancelable_seat_step_offers_pass_last_so_a_first_choice_actor_commits():
+    """**活锁**回归（票 03 扫出）：``Pass`` 是"放弃"，必须排在真候选**之后**。
+
+    票 01 的 AI 纪律（``heuristic._is_committed_skill_step``）只护住了启发式 AI；取
+    ``legal_actions[0]`` 的贪心参与者（``tests/test_web.py::_play_to_end`` 就是一例）
+    一旦撞上"Pass 排在首位"，就会 发动→取消→再发动 地空转——因为取消不消耗次数，
+    技能立刻重新进池。候选次序的真源是 ``effects.actions._sort_key``：``SelectOption``
+    原先落进与 ``Pass`` 相同的兜底键 ``(1, (), kind)``，而 ``"Pass" < "SelectOption"``。
+    """
+    _first, _second, state = _jieyin_state()
+    order: list[list[str]] = []
+
+    def driver(query):
+        if query.kind == QueryKind.SELECT_OPTION and str(query.skill_id).startswith("jieyin:"):
+            order.append([action.kind for action in query.legal_actions])
+        return _jieyin_driver(target=1)(query)
+
+    _run(state, [Scripted(driver), Scripted(_decline)], _skill_frame_popped)
+
+    assert order, "座位步确实发过一次询问"
+    assert order[0][-1] == "Pass", f"放弃候选恒在最后（实际 {order[0]}）"
+    assert "SelectOption" in order[0], "真候选仍要在（不能只剩 Pass）"
 
 
 # ---------------------------------------------------------------------------
@@ -1374,10 +1503,11 @@ def test_every_declared_active_skill_has_a_handler_and_a_catalog_definition():
 
 
 # ---------------------------------------------------------------------------
-# 两维相乘的技能：过闸后降级为"只留目标维"（票 04 §要做什么 3）
+# 骨架候选：迁到步骤流水线的技能恒一条候选，与手牌数 / 目标数无关
 #
-# 票 01 的【离间】、票 02 的【青囊】迁到骨架候选后不再过闸；这里只剩【结姻】
-# （票 03 才迁）仍在验降级路径，外加【青囊】"候选恒一条"的对照面。
+# 票 01 的【离间】、票 02 的【青囊】、票 03 的【结姻】都改走"骨架候选 + 步骤流水线"，
+# 两维相乘的枚举与 `CANDIDATE_CAP` 降级路径对本族**再无消费者**（旧原语按 §7 Q4 先留、
+# 之后再清）。这里并排钉【青囊】与【结姻】两条"候选恒一条"的对照面。
 # ---------------------------------------------------------------------------
 
 
@@ -1407,40 +1537,49 @@ def test_qingnang_offer_is_a_single_skeleton_candidate_however_many_cards_and_ta
     assert len(_play_candidates(state)) <= CANDIDATE_CAP, "整段询问仍不超闸值"
 
 
-def test_jieyin_degrades_to_target_only_candidates_beyond_the_cap():
+def test_jieyin_offer_is_a_single_skeleton_candidate_however_many_cards_and_targets():
+    """票 03：候选不再烘"手牌对 × 目标"，恒一条骨架 —— 手牌 20 × 7 受伤男性也不爆。
+
+    这条取代旧的"过闸降级"断言（`test_jieyin_degrades_to_target_only_candidates_beyond_the_cap`）：
+    【结姻】的 `CANDIDATE_CAP` 降级分支已删除，同一个技能不再有两种交互形状。
+    """
     hand = tuple(range(20))
     state = build_state(
         pack=PACK,
         seats=[
             SeatSpec(hand=hand, hero="sunshangxiang", gender=Gender.FEMALE),
-            *_wounded_males(2),
+            *_wounded_males(7),
         ],
         deck=_deck_excluding(*hand),
         turn_seat=0,
     )
     pair_count = len(hand) * (len(hand) - 1) // 2
-    assert pair_count * 2 > CANDIDATE_CAP, "这局必须过闸（否则本用例空转）"
+    assert pair_count * 7 > CANDIDATE_CAP, "旧形状必须过闸（否则本用例证明不了什么）"
 
     offers = _offers(_play_candidates(state), JIEYIN)
 
-    assert [(action.picks, action.choices) for action in offers] == [
-        ((), ("seat:1",)),
-        ((), ("seat:2",)),
-    ]
+    assert len(offers) == 1, "两维相乘的枚举消失：候选恒一条"
+    assert offers[0].picks == () and offers[0].choices == (), "载荷为空，改由发动后的步骤询问"
+    assert len(_play_candidates(state)) <= CANDIDATE_CAP, "整段询问仍不超闸值"
 
 
-def test_jieyin_sequential_mode_discards_two_cards_asked_one_at_a_time():
+def test_jieyin_discards_exactly_two_cards_in_one_step_and_heals_both():
+    """票 03：两步流水线 = 一并问出**恰好 2 张**手牌 → 问一名已受伤男性 → 双方各回复 1。
+
+    这条取代旧的"顺序多轮逐张付成本"断言（`test_jieyin_sequential_mode_discards_two_cards_asked_one_at_a_time`）：
+    降级路径删除后，成本是**一次** ``SELECT_CARDS(total=(2, 2))``，不再逐张问。
+    """
     hand = tuple(range(20))
     state = build_state(
         pack=PACK,
         seats=[
-            SeatSpec(hp=4, hp_max=4, hand=hand, hero="sunshangxiang", gender=Gender.FEMALE),
+            SeatSpec(hp=2, hp_max=4, hand=hand, hero="sunshangxiang", gender=Gender.FEMALE),
             SeatSpec(hp=2, hp_max=4, gender=Gender.MALE),
         ],
         deck=_deck_excluding(*hand),
         turn_seat=0,
     )
-    picks_made: list[int] = []
+    asked_picks: list[tuple[int, ...]] = []
 
     def jieyin(query):
         if query.kind == QueryKind.PLAY_PHASE:
@@ -1448,17 +1587,35 @@ def test_jieyin_sequential_mode_discards_two_cards_asked_one_at_a_time():
             assert candidates and all(action.picks == () for action in candidates)
             return candidates[0]
         if query.kind == QueryKind.SELECT_CARDS:
-            if len(picks_made) < 2:
-                picks_made.append(1)
-                return _find(
-                    query,
-                    lambda action: isinstance(action, SelectCards) and action.picks == (0,),
-                )
-            return _find(query, lambda action: isinstance(action, Pass))
+            action = _find(
+                query, lambda action: isinstance(action, SelectCards) and len(action.picks) == 2
+            )
+            asked_picks.append(action.picks)
+            return action
+        if query.kind == QueryKind.SELECT_OPTION:
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption) and action.choice == "seat:1",
+            )
         return _decline(query)
 
     engine = _run(state, [Scripted(jieyin), Scripted(_decline)], _skill_frame_popped)
 
+    asked = [record.query.kind for record in engine.records if record.kind == "query"]
+    assert asked[:3] == ["PLAY_PHASE", "SELECT_CARDS", "SELECT_OPTION"], "先选两张，再选目标"
+    assert asked.count("SELECT_CARDS") == 1, "两张一并问出，不再逐张多轮"
+    assert len(asked_picks) == 1 and len(asked_picks[0]) == 2, "恰好两张一并问出"
+    assert engine.state.player(0).hp == 3, "自己回复 1 点"
     assert engine.state.player(1).hp == 3, "目标回复 1 点"
-    assert len(picks_made) == 2, "两张手牌逐张问出"
-    assert len(engine.state.player(0).hand) == len(hand) + 2 - 2, "两张手牌被弃"
+    discarded = [
+        card.card_id
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.from_zone is not None
+        and record.from_zone.zone.value == "hand"
+        and record.to_zone is not None
+        and record.to_zone.zone.value == "discard"
+        for card in record.cards
+    ]
+    assert len(discarded) == 2, "恰好两张手牌被弃（不是一张、也不是三张）"

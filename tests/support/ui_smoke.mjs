@@ -1385,6 +1385,103 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!sentQingnangSeat && sentQingnangSeat.kind === "Pass", JSON.stringify(sentQingnangSeat));
 }
 
+/* ============ 票 03（合成局面）：【结姻】流水线 —— 逐步文案 + 取消送出 Pass ============
+ *
+ * 形状与【青囊】同源（两步都是服务端驱动的询问：点技能 → SELECT_CARDS → SELECT_OPTION），
+ * 差别只在成本是**恰好两张手牌**、目标池是"已受伤男性（不含自己）"。这里喂与服务端
+ * `pending_payload` 同形的合成 view，钉同一组事：两步文案各是服务端那一句、有 Pass 时
+ * 取消按钮**送出一条候选**。
+ */
+{
+  const firstCard = synthCard(41, "杀");
+  const secondCard = synthCard(42, "闪");
+  const jieyinSkill = {
+    skill_id: "hero.sunshangxiang.jieyin", name: "结姻", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true,
+    ui: {
+      requirement: "弃两张手牌，选择一名已受伤男性角色", manual: false,
+      pick_cards: [], pick_seats: [], convert_sources: [],
+    },
+  };
+
+  // ① 步 1：一并弃置恰好 2 张手牌，询问里带一条 `Pass` = 可取消。
+  const pickView = synthView({
+    kind: "SELECT_CARDS", actor: 0, seq: 930, prompt: "请从选择面里选择两张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 930, picks: [0, 1] },
+      { kind: "Pass", answers_seq: 930 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "hand" }, card: firstCard },
+      { ref: { seat: 0, zone: "hand" }, card: secondCard },
+    ],
+    spec: { zones: ["hand"], total: [2, 2], sequential: false, optional: true },
+    context: { requirement: "弃置2张手牌", skill_hints: [] },
+  });
+  pickView.skills = [jieyinSkill];
+  pickView.heroes = { 0: "sunshangxiang", 1: "guanyu", 2: "zhangfei" };
+  pickView.snapshot.self_hand = [firstCard, secondCard];
+  ui.state.view = pickView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pickView);
+
+  check("㉿Y1 步 1 的询问区文案就是服务端那句「弃置2张手牌」",
+    $("t-prompt").textContent === "弃置2张手牌", `"${$("t-prompt").textContent}"`);
+  check("㉿Y2 选择面把手牌两张都铺出来（恰好两张，一次问完）",
+    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 2,
+    `块=${$("t-options").children.length}`);
+  check("㉿Y3 候选里有 Pass ⇒ 取消按钮可点", $("btn-cancel").disabled === false,
+    `disabled=${$("btn-cancel").disabled}`);
+
+  ui.state.sessionId = "smoke-missing-session";
+  const beforePick = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
+  check("㉿Y4 步 1 点取消 = **送出一条 Pass 候选**",
+    !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
+
+  // ② 步 2：选一名已受伤男性（目标池不含自己 ⇒ 选项里只有 seat:1 / seat:2）。
+  const seatView = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 931, prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "seat:1", answers_seq: 931 },
+      { kind: "SelectOption", choice: "seat:2", answers_seq: 931 },
+      { kind: "Pass", answers_seq: 931 },
+    ],
+    candidate_index: {}, virtual_index: {},
+    option_seats: { "seat:1": 1, "seat:2": 2 },
+    context: { requirement: "选择一名已受伤男性角色回复1点体力", skill_hints: [] },
+  });
+  seatView.skills = [jieyinSkill];
+  seatView.heroes = { 0: "sunshangxiang", 1: "guanyu", 2: "zhangfei" };
+  ui.state.view = seatView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(seatView);
+
+  check("㉿Y5 步 2 的询问区文案就是服务端那句「选择一名已受伤男性角色回复1点体力」",
+    $("t-prompt").textContent === "选择一名已受伤男性角色回复1点体力",
+    `"${$("t-prompt").textContent}"`);
+  const seatBox = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "1");
+  check("㉿Y6 已受伤男性画成可点（自己不在池里）",
+    !!seatBox && seatBox.classList.contains("targetable"),
+    `targetable=${seatBox && seatBox.classList.contains("targetable")}`);
+  (seatBox.listeners.click || []).forEach((fn) => fn({ target: seatBox }));
+  const seatAction = ui.buildAction();
+  check("㉿Y7 点它 = 选中那条 seat:N 候选（提交才送出去）",
+    !!seatAction && seatAction.kind === "SelectOption" && seatAction.choice === "seat:1",
+    JSON.stringify(seatAction));
+
+  const beforeJieyinSeat = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentJieyinSeat = calls.length > beforeJieyinSeat
+    ? calls[calls.length - 1].body.action : null;
+  check("㉿Y8 步 2 点取消 = 送出 Pass（中途退出这一步）",
+    !!sentJieyinSeat && sentJieyinSeat.kind === "Pass", JSON.stringify(sentJieyinSeat));
+}
+
 /* ============ 报障 3（合成局面）：事件逐个回放 + 效果区逐事件派生 ============ */
 {
   const moveIn = {

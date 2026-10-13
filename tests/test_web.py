@@ -1374,6 +1374,29 @@ def test_query_context_walks_the_qingnang_steps_with_their_own_wording() -> None
     assert query_context(engine, option_query)["requirement"] == "选择一名已受伤角色回复1点体力"
 
 
+def test_query_context_walks_the_jieyin_steps_with_their_own_wording() -> None:
+    """【结姻】两步各有各的问法（票 03）：先"弃置2张手牌"，再"选择一名已受伤男性角色…"。
+
+    键的取法完全复用【离间】/【青囊】那一套：``SELECT_CARDS`` 读 ``"card"``、
+    ``SELECT_OPTION`` 读询问 ``skill_id`` 冒号后那段（执行器发的是 ``jieyin:seat``）。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(hero="sunshangxiang"), SeatSpec()],
+        frame_kind=FrameKind.SKILL,
+        frame_data={"skill_id": "hero.sunshangxiang.jieyin", "source": 0},
+    )
+
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,), optional=True)
+    assert query_context(engine, cards_query)["requirement"] == "弃置2张手牌"
+
+    option_query = _skill_step_option_query(
+        state, skill_id="jieyin:seat", options=("seat:1",)
+    )
+    assert query_context(engine, option_query)["requirement"] == (
+        "选择一名已受伤男性角色回复1点体力"
+    )
+
+
 def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_skills() -> None:
     """没有 ``step_requirements`` 的技能仍读一句话的 summary（旧技能一字不改）。
 

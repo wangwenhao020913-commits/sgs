@@ -27,7 +27,14 @@ from sgs.agents import (
     TapePlayer,
     tape_from_journal,
 )
-from sgs.data import RuleConfig, enabled_hero_ids, hero_skill_id, load_content_pack, load_heroes
+from sgs.data import (
+    Identity,
+    RuleConfig,
+    enabled_hero_ids,
+    hero_skill_id,
+    load_content_pack,
+    load_heroes,
+)
 from sgs.effects import legal_actions_for
 from sgs.engine import Engine, RandomSource
 from sgs.skills import CATALOG
@@ -45,6 +52,7 @@ from sgs.state import (
     SelectCardsQuery,
     SelectContext,
     SelectionSpec,
+    SelectOption,
     SelectOptionContext,
     SelectOptionQuery,
     SkillActivationContext,
@@ -692,6 +700,73 @@ def test_the_ai_picks_a_seat_instead_of_cancelling_a_committed_skill():
     action = HeuristicPlayer(_stream(12)).respond(query)
 
     assert getattr(action, "kind", None) == "SelectOption", f"不许撤销已发动的技能，实得 {action!r}"
+
+
+def _seat_option_query(state, skill_id: str, options: tuple[str, ...]) -> SelectOptionQuery:
+    """造一条"发动后流水线的座位步"询问（可取消，故带一条 ``Pass``）。"""
+    actions = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_OPTION,
+        answers_seq=1,
+        payload=SelectOptionContext(skill_id=skill_id, options=options, optional=True),
+    )
+    return SelectOptionQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="选择一名角色。",
+        legal_actions=actions,
+        view=project(state, 0),
+        skill_id=skill_id,
+        options=options,
+    )
+
+
+def _rebel_and_lord():
+    """座位 0 = 已明身份的反贼；座位 1 = **公开可见的主公**（反贼的敌人）；座位 2 = 身份未知。"""
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=3, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=2, hp_max=4, identity=Identity.LORD),
+            SeatSpec(hp=2, hp_max=4),
+        ],
+        deck=_deck_excluding(),
+        turn_seat=0,
+    )
+
+
+def _seat_choices(state, skill_id: str, options: tuple[str, ...]) -> set[str]:
+    """在多个 ``ai`` 子流上问同一步：答案若随随机流变化，说明打分没有分辨力。"""
+    query = _seat_option_query(state, skill_id, options)
+    return {
+        HeuristicPlayer(_stream(seed)).respond(query).choice  # type: ignore[union-attr]
+        for seed in range(16)
+    }
+
+
+def test_a_targeted_seat_step_is_not_a_coin_flip_when_the_enemy_is_revealed():
+    """座位步的目标选择要**看身份**，不能掷硬币：治疗步避开已明的敌人（主公）。
+
+    票 03 起【结姻】/【青囊】的座位改由步骤询问，``seat:N`` 选项若一律 0 分，AI 就会
+    在朋友与敌人之间随机挑——这正是候选次序修复后胜率掉到 50% 的那个短板。判据取
+    "跨 16 条随机流答案恒为同一个"，故平分（掷硬币）必然判红。
+    """
+    state = _rebel_and_lord()
+
+    assert _seat_choices(state, "jieyin:seat", ("seat:1", "seat:2")) == {"seat:2"}, (
+        "反贼不该把回复给主公（已明的敌人）"
+    )
+
+
+def test_a_harmful_seat_step_aims_at_the_revealed_enemy():
+    """伤害 / 决斗那一类座位步相反：已明的敌人是首选目标。"""
+    state = _rebel_and_lord()
+
+    assert _seat_choices(state, "lijian:victim", ("seat:1", "seat:2")) == {"seat:1"}, (
+        "决斗受害者该挑主公（已明的敌人）"
+    )
 
 
 def test_an_optional_pick_outside_the_play_phase_may_still_be_declined():
