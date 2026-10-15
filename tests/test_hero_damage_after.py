@@ -943,6 +943,49 @@ def test_yiji_distributes_both_revealed_cards_within_one_damage_point():
     )
 
 
+def test_yiji_rounds_in_one_damage_point_do_not_share_the_seat_answer():
+    """同一点内的两轮"交给谁"各有各的缓存键 ⇒ 第 2 轮不会读回第 1 轮的座位答案（票 11）。
+
+    ``ask_option`` 的答案缓存键是 ``(skill_id, actor)``：两轮若同名，第 2 轮会**直接命中**
+    第 1 轮那条 ``SelectOption``（不重发询问）⇒ 两张牌都交给第一个人。故手写回调把
+    ``skill_id`` 写成 ``yiji:give:<点号>:<轮号>``（票 05 的逐轮缓存键）。这里把**真实询问
+    里的键形状**与"两张牌各自去向"绑在同一处断言里。
+    """
+    slash = _cards("slash")[0]
+    deck = _deck_excluding(slash)
+    top = deck[:2]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hero="guojia"), SeatSpec()],
+        deck=deck,
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, amount=1, source=0),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    yiji_player = Scripted(_yiji_plan(picks=[0, 0], seats=[0, 2]))
+    players = [Scripted(), yiji_player, Scripted()]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.DAMAGE_END
+            for record in e.records
+        ),
+    )
+
+    assert [query.skill_id for query in yiji_player.options] == ["yiji:give:0:0", "yiji:give:0:1"], (
+        "同一点的两轮'交给谁'必须各有各的缓存键（点号 + 轮号），否则第 2 轮读回第 1 轮的答案"
+    )
+    assert top[0] in engine.state.player(0).hand, "第 1 轮：交给座位 0"
+    assert top[1] in engine.state.player(2).hand, (
+        "第 2 轮的座位答案（2）必须被采纳，而不是读回第 1 轮的答案（0）"
+    )
+
+
 def test_foreign_damage_does_not_offer_jianxiong_to_the_unhurt_owner():
     """**别人受伤 ⇒ 曹操不该被问【奸雄】**（与【遗计】同一个缺口）。
 

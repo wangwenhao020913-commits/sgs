@@ -579,12 +579,32 @@ def _skill_hints(state: Any, query: Query) -> list[dict[str, str]]:
     return hints
 
 
+def _step_wording(steps: Any, step: str) -> str | None:
+    """步骤名 → 逐步文案；名字里的**序号段**（末尾的 ``:<数字>``，可多段）先剥掉再查。
+
+    执行器给"同一步问多次"补序号只为答案缓存不撞车（``seat:0`` / ``seat:1``，见
+    :func:`~sgs.skills.flow._flow_option_id`），文案仍归那一步。【遗计】的"给谁"步更进一层：
+    它的 ``skill_id`` 是手写的 ``yiji:give:<点号>:<轮号>``（票 05 的逐轮缓存键，两个数字段
+    都必须留 —— 否则同一伤害点的第 2 轮会读回第 1 轮的答案）。故按**循环**剥末尾的数字段，
+    单段（``seat:0``）与多段（``give:0:1``）走同一条判据。
+    """
+    found = steps.get(step)
+    while found is None:
+        stem, colon, index = step.rpartition(":")
+        if not colon or not index.isdigit():
+            break
+        step = stem
+        found = steps.get(step)
+    return found
+
+
 def _step_requirement(definition: Any, query: Query, data: dict[str, Any]) -> str | None:
     """**多步技能**逐步的"需要做什么"（票 01）；取不到 ⇒ ``None``（退回一句话的文案）。
 
     键的取法只读询问里已有的标识，**不动询问协议**（故 Golden Replay 一行不改）：
 
-    - ``SELECT_OPTION``：询问自带 ``skill_id`` 形如 ``lijian:user`` ⇒ 键 = 冒号后那段；
+    - ``SELECT_OPTION``：询问自带 ``skill_id`` 形如 ``lijian:user`` ⇒ 键 = 冒号后那段
+      （末尾的序号段先剥掉，见 :func:`_step_wording`）；
     - ``SELECT_CARDS``：技能帧上的那一步选牌 ⇒ 键 = ``"card"``。
     """
     steps = getattr(definition, "step_requirements", None)
@@ -594,15 +614,7 @@ def _step_requirement(definition: Any, query: Query, data: dict[str, Any]) -> st
     if raw:
         _head, sep, step = str(raw).partition(":")
         if sep:
-            found = steps.get(step)
-            if found is None:
-                # 同一步问多次时执行器会补序号（``seat:0`` / ``seat:1``，见
-                # ``active._flow_option_id``）：序号只为答案缓存不撞车，文案仍归那一步，
-                # 故去掉末尾的 ``:<数字>`` 再查一次（本批没有消费者，先堵住这个坑）。
-                stem, colon, index = step.rpartition(":")
-                if colon and index.isdigit():
-                    found = steps.get(stem)
-            return found
+            return _step_wording(steps, step)
     if getattr(query, "kind", None) == "SELECT_CARDS" and data.get("skill_id") == definition.skill_id:
         return steps.get("card")
     return None

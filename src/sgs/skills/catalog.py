@@ -1314,6 +1314,7 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         locked=False,
         requirement="选择：弃一张手牌 / 令使用者摸一张",
         hooks=(Hook(Timing.USE_AFTER_DESIGNATE_TARGET, _double_sword),),
+        step_requirements={"card": "由目标选择弃置一张手牌"},
     ),
     _equip(
         "green_dragon_blade",

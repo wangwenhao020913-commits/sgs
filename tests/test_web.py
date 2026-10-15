@@ -749,7 +749,9 @@ def test_query_context_names_the_skill_and_its_owner() -> None:
     assert context["label"] == "1号位郭嘉对1号位郭嘉使用遗计", context
     assert context["name"] == "遗计"
     assert context["targets"] == [1]
-    assert context["requirement"] == "观看牌堆顶两张牌，然后逐张交给任意角色", "合成键要能查回技能定义"
+    # 合成键要能查回技能定义；票 11 起"给谁"步还有自己的逐步文案（键 = 剥掉 ``:<点>:<轮>``
+    # 后的 ``give``），故这里读到的已是那一步的问法，而不是一句话的 summary。
+    assert context["requirement"] == "选择将这张牌交给哪名角色", "合成键要能查回技能定义"
 
 
 def test_query_context_names_the_card_user_and_the_current_target() -> None:
@@ -1600,6 +1602,63 @@ def test_query_context_reads_the_qilin_bow_and_ice_sword_step_wording() -> None:
     )
 
 
+def test_query_context_reads_the_double_sword_step_wording() -> None:
+    """【雌雄双股剑】的手写钩子也报得出选牌步自己的问法（票 11）。
+
+    与票 10 的【寒冰剑】同姿态：**不迁流水线不代表没有逐步文案**——逐步文案是投影侧的
+    声明（:attr:`~sgs.skills.catalog.SkillDef.step_requirements`），与执行路径无关。
+    选取面是**目标自己的手牌**（应答者 = 目标），步骤键仍是 ``SELECT_CARDS`` 的既有约定
+    ``"card"``；归属由帧内 ``running_skill`` 给出。
+
+    另一步（``discard_one`` / ``draw_one`` 的 ``SELECT_OPTION``）的询问 ``skill_id`` 是
+    **裸技能 id**（``equip.double_sword``，没有冒号），投影按现有键约定取不到步骤名，
+    故它照读一句话的 summary —— 那是记录流的一部分，票 11 不动（见票的 ``## Answer``）。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(equip=(cards_of_type(_context_pack(), "double_sword")[0],)), SeatSpec()],
+        frame_kind=FrameKind.USE,
+        frame_data={
+            "source": 0,
+            "targets": (1,),
+            "running_skill": "equip.double_sword",
+            "skill_id": "equip.double_sword",
+        },
+    )
+
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,))
+
+    assert query_context(engine, cards_query)["requirement"] == "由目标选择弃置一张手牌"
+
+
+def test_query_context_walks_the_yiji_steps_with_their_own_wording() -> None:
+    """【遗计】逐张分配的两步各有各的问法（票 11）：先"从亮出的牌里选择一张"，再"给谁"。
+
+    两条的键都按**询问里已有的标识**取，不动询问协议：
+
+    - 选牌步是 ``SELECT_CARDS``（步骤键 = ``"card"``；帧内有 ``running_skill``）；
+    - "给谁"步是 ``SELECT_OPTION``，执行器发的 ``skill_id`` 带**点号 + 轮号**
+      （``yiji:give:<点>:<轮>``，票 05 的逐轮缓存键）——投影去掉末尾的 ``:<数字>`` 段
+      （可多段）后命中 ``"give"``。这一段的形状就是真实询问里的形状，不是合成键。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(), SeatSpec(hero="guojia")],
+        frame_kind=FrameKind.DAMAGE,
+        frame_data={
+            "source": 0,
+            "target": 1,
+            "targets": (1,),
+            "running_skill": "hero.guojia.yiji",
+            "skill_id": "hero.guojia.yiji",
+        },
+    )
+
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,), optional=True)
+    assert query_context(engine, cards_query)["requirement"] == "从亮出的牌里选择一张"
+
+    give_query = _skill_step_option_query(state, skill_id="yiji:give:0:1", options=("seat:1",))
+    assert query_context(engine, give_query)["requirement"] == "选择将这张牌交给哪名角色"
+
+
 def test_query_context_walks_the_zhiheng_step_with_its_own_wording() -> None:
     """【制衡】单步（票 04）也有自己的问法：``SELECT_CARDS`` 读 ``"card"`` 键。
 
@@ -1667,15 +1726,16 @@ def test_query_context_walks_the_fanjian_steps_with_their_own_wording() -> None:
 def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_skills() -> None:
     """没有 ``step_requirements`` 的技能仍读一句话的 summary（旧技能一字不改）。
 
-    A 族六条主动技自票 06 起**全部**有了逐步文案，故样本改成**装备技能**（【雌雄双股剑】）
+    A 族六条主动技自票 06 起**全部**有了逐步文案，样本因此是**装备技能**；票 11 又把
+    【雌雄双股剑】补上了选牌步文案，故样本改用同样没有逐步文案的【丈八蛇矛】
     ——回退面本身是通用的（读 :attr:`~sgs.skills.catalog.SkillDef.requirement`），
-    没有理由再绑在某条还没迁的 A 族技能上（那会让本用例每票都要跟着改）。
+    没有理由再绑在某条逐票要补文案的技能上（那会让本用例每票都要跟着改）。
     """
     engine, state = _context_fixture(
-        [SeatSpec(), SeatSpec()],
+        [SeatSpec(equip=(cards_of_type(_context_pack(), "serpent_spear")[0],)), SeatSpec()],
         frame_kind=FrameKind.SKILL,
-        frame_data={"skill_id": "equip.double_sword", "source": 0},
+        frame_data={"skill_id": "equip.serpent_spear", "source": 0},
     )
 
     cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,))
-    assert query_context(engine, cards_query)["requirement"] == "选择：弃一张手牌 / 令使用者摸一张"
+    assert query_context(engine, cards_query)["requirement"] == "选择两张手牌当【杀】使用或打出"

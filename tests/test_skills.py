@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from sgs.data import Color, Gender, RuleConfig, load_content_pack
 from sgs.effects import (
     legal_actions_for,
@@ -28,6 +30,7 @@ from sgs.skills import (
     resolve_instances,
     transformed_slash,
 )
+from sgs.skills import catalog as catalog_module
 from sgs.state import (
     ActivateSkill,
     DodgeContext,
@@ -639,6 +642,83 @@ def test_double_sword_does_not_trigger_for_same_gender_targets():
 
     assert not _has_query(engine, "SELECT_OPTION")
     assert not _has_query(engine, "SKILL_ACTIVATION", skill_id="equip.double_sword")
+
+
+class _DoubleSwordHost:
+    """【雌雄双股剑】逐目标循环的最小宿主（只实现 ``_double_sword`` 用到的那几张面）。
+
+    多目标的【杀】在本引擎里只可能由【方天画戟】造出（与【雌雄双股剑】同槽、装不到一起），
+    故"逐目标循环"无法经一次真实使用驱动；这里直接给出手写的 USE 帧数据（形状与引擎派发时
+    写进帧的 ``source`` / ``targets`` 同源），把断言钉在**循环本身**上。
+    """
+
+    def __init__(self, state, choices: dict[int, str]) -> None:
+        self.state = state
+        self._choices = choices
+        self.options: list[tuple[int, tuple[str, ...]]] = []
+        self.selections: list[int] = []
+        self.moves: list[tuple[int, ...]] = []
+        self.draws: list[tuple[int, int]] = []
+
+    @staticmethod
+    def suspended(value):
+        return value == "SUSPEND"
+
+    def ask_option(self, frame, actor, timing, *, skill_id, options):
+        del frame, timing, skill_id
+        self.options.append((actor, tuple(options)))
+        return SimpleNamespace(choice=self._choices[actor])
+
+    def ask_selection(self, frame, *, key, actor, timing, spec, build_face):
+        del frame, key, timing, spec, build_face
+        self.selections.append(actor)
+        return (self.state.player(actor).hand[0],)
+
+    def move_in_frame(self, frame, refs, *, to_zone, reason, owner, actor):
+        del frame, to_zone, reason, owner, actor
+        self.moves.append(tuple(ref.card_id for ref in refs))
+        return None
+
+    def draw_for_hand(self, frame, seat, count):
+        del frame
+        self.draws.append((seat, count))
+
+
+def test_double_sword_asks_each_opposite_gender_target_once():
+    """【雌雄双股剑】逐目标推进：**只问异性**、每个目标恰好一次、已处理的不重复问（票 11）。
+
+    目标表 = ``(1, 2, 3)``：座位 1 / 3 是女性、座位 2 是男性（与使用者同性）⇒ 座位 2 一个
+    询问都不发；座位 1 答"弃一张"、座位 3 答"令使用者摸一张" ⇒ 各走各的提交动作。
+    """
+    first, same_gender, second = _cards("peach")[0], _cards("slash")[1], _cards("peach")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,), equip=(DOUBLE_SWORD,), gender=Gender.MALE),
+            SeatSpec(hand=(first,), gender=Gender.FEMALE),
+            SeatSpec(hand=(same_gender,), gender=Gender.MALE),
+            SeatSpec(hand=(second,), gender=Gender.FEMALE),
+        ],
+        deck=_deck_excluding(SLASH, DOUBLE_SWORD, first, same_gender, second),
+        turn_seat=0,
+    )
+    host = _DoubleSwordHost(state, choices={1: "discard_one", 3: "draw_one"})
+    frame = SimpleNamespace(data={"source": 0, "targets": (1, 2, 3)})
+
+    assert catalog_module._double_sword(host, frame) is None
+
+    assert [actor for actor, _ in host.options] == [1, 3], (
+        "逐个异性目标、按目标序：同性的座位 2 一个询问都不发，每个目标只问一次"
+    )
+    assert host.options[0][1] == ("discard_one", "draw_one")
+    assert host.selections == [1], "只有答'弃一张'的目标才进选牌步"
+    assert host.moves == [(first,)], "选中的那张立即搬走（逐轮提交）"
+    assert host.draws == [(0, 1)], "答'令使用者摸一张' ⇒ 使用者摸一张"
+    assert frame.data["double_sword_cursor"] == 3, "游标推进到目标表末尾"
+
+    # 重入（同一个帧再跑一遍）：已处理完的目标不再被问第二次（游标是唯一进度真源）。
+    assert catalog_module._double_sword(host, frame) is None
+    assert [actor for actor, _ in host.options] == [1, 3]
 
 
 # ---------------------------------------------------------------------------
