@@ -799,29 +799,47 @@ def test_rende_cancel_does_not_spend_the_first_recovery():
 # ---------------------------------------------------------------------------
 
 
-def _fanjian_plugin(*, suit: str):
-    def activator(query):
+def _fanjian_driver(
+    *, suit: str, target: int = 1, card_pick: int = 0, cancel_at: str | None = None
+):
+    """按**新流程**应答：点技能 → 选谁 →（目标）猜花色 →（目标）挑发动者的一张牌。
+
+    同一个驱动器给两个座位用：座位 0 只会在 PLAY_PHASE 里挑【反间】，座位 1 只会在
+    步 2/3 的询问上应答 —— 这正是"选择权在目标"的形状（票 06）。
+    """
+
+    def driver(query):
         if query.kind == QueryKind.PLAY_PHASE:
             return _find(
                 query,
-                lambda action: isinstance(action, ActivateSkill)
-                and action.skill_id == FANJIAN,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == FANJIAN,
             )
-        return _decline(query)
-
-    def target(query):
         if query.kind == QueryKind.SELECT_OPTION:
+            if str(query.skill_id).endswith(":seat"):
+                if cancel_at == "seat":
+                    return _find(query, lambda action: isinstance(action, Pass))
+                return _find(
+                    query,
+                    lambda action: isinstance(action, SelectOption)
+                    and action.choice == f"seat:{target}",
+                )
+            if cancel_at == "suit":
+                return _find(query, lambda action: isinstance(action, Pass))
             return _find(
                 query,
                 lambda action: isinstance(action, SelectOption) and action.choice == suit,
             )
         if query.kind == QueryKind.SELECT_CARDS:
+            if cancel_at == "card":
+                return _find(query, lambda action: isinstance(action, Pass))
             return _find(
-                query, lambda action: isinstance(action, SelectCards) and action.picks == (0,)
+                query,
+                lambda action: isinstance(action, SelectCards)
+                and action.picks == (card_pick,),
             )
         return _decline(query)
 
-    return activator, target
+    return driver
 
 
 def _fanjian_state():
@@ -834,7 +852,8 @@ def _fanjian_state():
     ), hearts
 
 
-def test_fanjian_offers_one_candidate_per_other_character():
+def test_fanjian_offer_is_a_single_skeleton_candidate():
+    """票 06：候选不再"每个其他角色一条"，恒一条骨架（选谁改由发动后的步 1 问）。"""
     heart = _hearts(1)[0]
     state = build_state(
         pack=PACK,
@@ -843,10 +862,10 @@ def test_fanjian_offers_one_candidate_per_other_character():
         turn_seat=0,
     )
 
-    assert {action.choices for action in _offers(_play_candidates(state), FANJIAN)} == {
-        ("seat:1",),
-        ("seat:2",),
-    }
+    offers = _offers(_play_candidates(state), FANJIAN)
+
+    assert len(offers) == 1, "候选恒一条"
+    assert offers[0].picks == () and offers[0].choices == (), "载荷为空，改由发动后的步骤询问"
 
 
 def test_fanjian_does_not_need_the_target_to_hold_cards():
@@ -865,9 +884,9 @@ def test_fanjian_does_not_need_the_target_to_hold_cards():
 
 def test_fanjian_a_different_suit_deals_one_damage_from_the_activator():
     state, hearts = _fanjian_state()
-    activator, target = _fanjian_plugin(suit="spade")
+    driver = _fanjian_driver(suit="spade")
 
-    engine = _run(state, [Scripted(activator), Scripted(target)], _skill_frame_popped)
+    engine = _run(state, [Scripted(driver), Scripted(driver)], _skill_frame_popped)
 
     assert engine.state.player(1).hp == 3, "花色不同 ⇒ 目标受到周瑜造成的 1 点伤害"
     assert len(engine.state.player(1).hand) == 1, "目标获得了那一张手牌"
@@ -894,12 +913,92 @@ def test_fanjian_a_different_suit_deals_one_damage_from_the_activator():
 
 def test_fanjian_a_matching_suit_deals_no_damage():
     state, _hearts_used = _fanjian_state()
-    activator, target = _fanjian_plugin(suit="heart")
+    driver = _fanjian_driver(suit="heart")
 
-    engine = _run(state, [Scripted(activator), Scripted(target)], _skill_frame_popped)
+    engine = _run(state, [Scripted(driver), Scripted(driver)], _skill_frame_popped)
 
     assert engine.state.player(1).hp == 4, "花色相同 ⇒ 不受伤"
     assert len(engine.state.player(1).hand) == 1, "但牌照常被获得"
+
+
+def _fanjian_queries(engine):
+    return [record.query for record in engine.records if record.kind == "query"]
+
+
+def test_fanjian_asks_the_seat_then_the_suit_then_a_card_of_the_activator():
+    """三步序列 + 每问的 ``actor``：步 1 问发动者、步 2/3 问**目标**；步 3 铺发动者的手牌。"""
+    state, hearts = _fanjian_state()
+    driver = _fanjian_driver(suit="spade")
+
+    engine = _run(state, [Scripted(driver), Scripted(driver)], _skill_frame_popped)
+
+    queries = _fanjian_queries(engine)
+    # 周瑜的【英姿】在摸牌阶段先发了一条 SKILL_ACTIVATION ⇒ 从"铺出【反间】候选的那条
+    # PLAY_PHASE"开始数三步。
+    start = next(
+        index
+        for index, query in enumerate(queries)
+        if query.kind == "PLAY_PHASE"
+        and any(
+            isinstance(action, ActivateSkill) and action.skill_id == FANJIAN
+            for action in query.legal_actions
+        )
+    )
+    seat_q, suit_q, card_q = queries[start + 1], queries[start + 2], queries[start + 3]
+    assert [q.kind for q in (queries[start], seat_q, suit_q, card_q)] == [
+        "PLAY_PHASE",
+        "SELECT_OPTION",
+        "SELECT_OPTION",
+        "SELECT_CARDS",
+    ], "点技能 → 选谁 → 猜花色 → 挑一张"
+    assert seat_q.skill_id == "fanjian:seat" and seat_q.actor == 0, "步 1 由发动者应答"
+    assert suit_q.skill_id == "fanjian:suit" and suit_q.actor == 1, "步 2 由**目标**应答"
+    assert card_q.actor == 1, "步 3 也由**目标**应答"
+    assert {slot.ref.seat for slot in card_q.slots} == {0}, (
+        "但选择面铺的是**发动者**的手牌（PickCards.actor 与 .face 第一次分开）"
+    )
+    assert set(hearts) <= {slot.card.card_id for slot in card_q.slots}, (
+        "发动者的手牌（含开局那两张红桃）就是这一问的选择面"
+    )
+
+
+def _fanjian_offered_after_cancel(engine) -> bool:
+    """取消之后**同一出牌阶段**又挂起了含【反间】候选的 PLAY_PHASE 询问。"""
+    if not _skill_frame_popped(engine):
+        return False
+    pending = engine.pending
+    return (
+        pending is not None
+        and pending.kind == QueryKind.PLAY_PHASE.value
+        and any(
+            isinstance(action, ActivateSkill) and action.skill_id == FANJIAN
+            for action in pending.legal_actions
+        )
+    )
+
+
+def _run_fanjian_cancel(cancel_at: str):
+    state, hearts = _fanjian_state()
+    driver = _fanjian_driver(suit="spade", cancel_at=cancel_at)
+
+    engine = _run(
+        state,
+        [Scripted(driver), Scripted(driver)],
+        _fanjian_offered_after_cancel,
+    )
+    return hearts, engine
+
+
+@pytest.mark.parametrize("cancel_at", ["seat", "suit", "card"])
+def test_fanjian_cancel_leaves_the_table_untouched_and_the_skill_available(cancel_at):
+    """三步中任何一步取消 ⇒ 没有牌移动、没有伤害、同一阶段还能再发动。"""
+    hearts, engine = _run_fanjian_cancel(cancel_at)
+
+    assert set(hearts) <= set(engine.state.player(0).hand), "选择只收集：那几张牌仍在手里"
+    assert not engine.state.player(1).hand, "一张都没交出去"
+    assert engine.state.player(1).hp == 4, "目标没有受伤"
+    assert engine.state.processing == [], "处理区为空 —— 没有亮过牌"
+    assert _fanjian_offered_after_cancel(engine), "取消不消耗次数：同一阶段仍可再发动"
 
 
 # ---------------------------------------------------------------------------

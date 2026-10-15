@@ -283,6 +283,47 @@ def test_fallback_action_prefers_pass_when_the_query_offers_it() -> None:
     pytest.skip("本局没走到带 Pass 的询问（不变量由构造局面单测覆盖）")
 
 
+def test_fallback_action_answers_the_target_of_a_fanjian_step() -> None:
+    """票 06：反间的步 2/3 由**目标**应答（不是发动者）。超时兜底要在"等目标作答"时给出
+    一个**合法**代答 —— 带 ``Pass`` 的选牌步落到"取消这一步"，而不是发出非法动作。"""
+    from sgs.effects import legal_actions_for
+    from sgs.state import Pass, QueryKind, SelectContext
+
+    pack = _context_pack()
+    hearts = cards_of_type(pack, "heart")[:2]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=tuple(hearts), hero="zhouyu"), SeatSpec()],
+        turn_seat=0,
+    )
+    # 步 3 的形状：**目标**（座位 1）应答，选择面铺的是**发动者**（座位 0）的手牌。
+    slots = tuple(
+        Slot(ref=ZoneRef(Zone.HAND, 0), card=state.card(card_id)) for card_id in hearts
+    )
+    spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=True)
+    actions = legal_actions_for(
+        state,
+        1,
+        QueryKind.SELECT_CARDS,
+        answers_seq=1,
+        payload=SelectContext(spec=spec, slots=slots, skill_id="hero.zhouyu.fanjian"),
+    )
+    query = SelectCardsQuery(
+        seq=1,
+        actor=1,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="请从选择面里选择一张牌。",
+        legal_actions=actions,
+        view=project(state, 1),
+        spec=spec,
+        slots=slots,
+        skill_id="hero.zhouyu.fanjian",
+    )
+
+    assert any(isinstance(action, Pass) for action in actions), "这一步可取消（流水线语义）"
+    assert isinstance(fallback_action(query), Pass), "超时代答 = 取消这一步，不是非法动作"
+
+
 def test_a_timeout_touches_the_session_log_but_not_the_journal() -> None:
     """超时只落侧车日志；**记录流一个字节都不加**（地图 D10）。
 
@@ -1436,16 +1477,39 @@ def test_query_context_walks_the_rende_steps_with_their_own_wording() -> None:
     assert query_context(engine, option_query)["requirement"] == "选择交给哪名其他角色"
 
 
-def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_skills() -> None:
-    """没有 ``step_requirements`` 的技能仍读一句话的 summary（旧技能一字不改）。
-
-    样本 = 【反间】（本批结束后**唯一**还没有逐步文案的 A 族主动技——它到票 06 才迁）。
-    """
+def test_query_context_walks_the_fanjian_steps_with_their_own_wording() -> None:
+    """【反间】三步各有各的问法（票 06）：步 2/3 的文案要写出**归属**（"由目标…"），
+    否则发动者看不懂为什么屏幕跑到别人那儿去了（票面明写的要求）。"""
     engine, state = _context_fixture(
         [SeatSpec(hero="zhouyu"), SeatSpec()],
         frame_kind=FrameKind.SKILL,
         frame_data={"skill_id": "hero.zhouyu.fanjian", "source": 0},
     )
 
+    seat_query = _skill_step_option_query(state, skill_id="fanjian:seat", options=("seat:1",))
+    assert query_context(engine, seat_query)["requirement"] == "选择一名其他角色"
+
+    suit_query = _skill_step_option_query(
+        state, skill_id="fanjian:suit", options=("heart", "spade")
+    )
+    assert query_context(engine, suit_query)["requirement"] == "由目标选择一种花色"
+
     cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,))
-    assert query_context(engine, cards_query)["requirement"] == "选择一种花色"
+    assert query_context(engine, cards_query)["requirement"] == "由目标从你的手牌中选择一张"
+
+
+def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_skills() -> None:
+    """没有 ``step_requirements`` 的技能仍读一句话的 summary（旧技能一字不改）。
+
+    A 族六条主动技自票 06 起**全部**有了逐步文案，故样本改成**装备技能**（【雌雄双股剑】）
+    ——回退面本身是通用的（读 :attr:`~sgs.skills.catalog.SkillDef.requirement`），
+    没有理由再绑在某条还没迁的 A 族技能上（那会让本用例每票都要跟着改）。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(), SeatSpec()],
+        frame_kind=FrameKind.SKILL,
+        frame_data={"skill_id": "equip.double_sword", "source": 0},
+    )
+
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,))
+    assert query_context(engine, cards_query)["requirement"] == "选择：弃一张手牌 / 令使用者摸一张"

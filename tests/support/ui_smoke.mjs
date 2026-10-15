@@ -1647,6 +1647,110 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!sentRendeSeat && sentRendeSeat.kind === "Pass", JSON.stringify(sentRendeSeat));
 }
 
+/* ============ 票 06（合成局面）：【反间】三步流水线 —— 应答者是**目标** ============
+ *
+ * 步 1 问发动者（选谁），步 2/3 问**目标**（猜花色、从**发动者**手牌里挑一张）。钉三件事：
+ * 三步各自的文案（步 2/3 要写出归属）、步 3 的选择面铺的是发动者的牌、取消按钮送出 `Pass`。
+ */
+{
+  const handCard = synthCard(71, "杀");
+  const fanjianSkill = {
+    skill_id: "hero.zhouyu.fanjian", name: "反间", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true,
+    ui: {
+      requirement: "选择一种花色", manual: false,
+      pick_cards: [], pick_seats: [], convert_sources: [],
+    },
+  };
+
+  // ① 步 1：发动者选谁被反间。
+  const fanSeatView = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 960, prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "seat:1", answers_seq: 960 },
+      { kind: "Pass", answers_seq: 960 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: { "seat:1": 1 },
+    context: { requirement: "选择一名其他角色", skill_hints: [] },
+  });
+  fanSeatView.skills = [fanjianSkill];
+  fanSeatView.heroes = { 0: "zhouyu", 1: "guanyu" };
+  ui.state.view = fanSeatView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(fanSeatView);
+
+  check("㉿V1 步 1 的文案 =「选择一名其他角色」（由发动者应答）",
+    $("t-prompt").textContent === "选择一名其他角色", `"${$("t-prompt").textContent}"`);
+
+  // ② 步 2：**目标**猜花色（`pending.actor` 是别人 ⇒ 文案必须写出归属）。
+  const suitView = synthView({
+    kind: "SELECT_OPTION", actor: 1, seq: 961, prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "heart", answers_seq: 961 },
+      { kind: "SelectOption", choice: "spade", answers_seq: 961 },
+      { kind: "Pass", answers_seq: 961 },
+    ],
+    candidate_index: {}, virtual_index: {},
+    context: { requirement: "由目标选择一种花色", skill_hints: [] },
+  });
+  suitView.skills = [fanjianSkill];
+  suitView.heroes = { 0: "zhouyu", 1: "guanyu" };
+  ui.state.view = suitView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(suitView);
+
+  check("㉿V2 步 2 的文案写明归属 =「由目标选择一种花色」",
+    $("t-prompt").textContent === "由目标选择一种花色", `"${$("t-prompt").textContent}"`);
+  // 候选列表形态的 `SELECT_OPTION`（花色不是座位）：未选任何一项时取消按钮先不可点，
+  // 选中一项后可点 —— 与座位步 `renderSeatPick`（有 Pass 即可取消）略有差别，是既有形态。
+  const suitButton = $("t-options").children[0];
+  (suitButton.listeners.click || []).forEach((fn) => fn({ target: suitButton }));
+  check("㉿V3 步 2 选中一项花色后取消按钮可点", $("btn-cancel").disabled === false,
+    `disabled=${$("btn-cancel").disabled}`);
+
+  ui.state.sessionId = "smoke-missing-session";
+  const beforeSuit = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentSuit = calls.length > beforeSuit ? calls[calls.length - 1].body.action : null;
+  check("㉿V4 步 2 点取消 = 送出 Pass", !!sentSuit && sentSuit.kind === "Pass",
+    JSON.stringify(sentSuit));
+
+  // ③ 步 3：**目标**从**发动者**手里挑一张。
+  const fanCardView = synthView({
+    kind: "SELECT_CARDS", actor: 1, seq: 962, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 962, picks: [0] },
+      { kind: "Pass", answers_seq: 962 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [{ ref: { seat: 0, zone: "hand" }, card: handCard }],
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: true },
+    context: { requirement: "由目标从你的手牌中选择一张", skill_hints: [] },
+  });
+  fanCardView.skills = [fanjianSkill];
+  fanCardView.heroes = { 0: "zhouyu", 1: "guanyu" };
+  fanCardView.snapshot.self_hand = [handCard];
+  ui.state.view = fanCardView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(fanCardView);
+
+  check("㉿V5 步 3 的文案写明归属 =「由目标从你的手牌中选择一张」",
+    $("t-prompt").textContent === "由目标从你的手牌中选择一张",
+    `"${$("t-prompt").textContent}"`);
+  check("㉿V6 步 3 的选择面铺出发动者（座位 0）的那张牌",
+    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 1,
+    `块=${$("t-options").children.length}`);
+
+  const beforeFanCard = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentFanCard = calls.length > beforeFanCard ? calls[calls.length - 1].body.action : null;
+  check("㉿V7 步 3 点取消 = 送出 Pass（中途退出这一步）",
+    !!sentFanCard && sentFanCard.kind === "Pass", JSON.stringify(sentFanCard));
+}
+
 /* ============ 报障 3（合成局面）：事件逐个回放 + 效果区逐事件派生 ============ */
 {
   const moveIn = {
