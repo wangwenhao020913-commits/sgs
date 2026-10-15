@@ -12,6 +12,16 @@
 - 工单文件顶部用一行规范 `Status:` 记录状态，取值限词表：`open`（未认领）/ `claimed`（已认领）/ `resolved`（已解决）。
   写成 `Status: <值>`（**不加粗**、不追加别的词）；`tests/test_agent_skills.sh` 会机械校验 `.scratch/*/issues/*.md`。
 - 评论与对话历史追加到文件底部的 `## Comments` 标题下
+- **收口（`## Answer`）**：**开工时先置 `Status: claimed`**（让"在飞"可见 —— 派发被中断时，
+  这是别人判断"做到哪了"的唯一线索）；**解决时在文件底部的 `## Answer` 标题下写答案**
+  （非空正文），再置 `Status: resolved`。
+  想对本 feature 启用机械校验，就在它的 `spec.md`（或 `design.md`）里写一行
+  `Answer contract: on`：此后该 feature 的每张 `resolved` 票都必须有非空 `## Answer`
+  （`tests/test_agent_skills.sh` 核）。不写则沿用旧约定（`## Comments` 收口），不追溯历史。
+- **`Touches:`**：顶部可选一行 `Touches: <逗号分隔的仓库内路径>`，声明本票会改哪些文件。
+  `/implement-spec` 据此**机械**判断前沿上的票能不能并行（文件不重叠才并行）；
+  它也让"票面说可并行、实际全撞同一个文件"在**写票时**就暴露，而不是等执行时才发现。
+  写了就必须每条路径都存在（`tests/test_agent_skills.sh` 核）。
 
 ## 当某个技能说“publish to the issue tracker”
 
@@ -33,5 +43,5 @@
   当它列出的每个文件都是 `resolved` 时，该工单解除阻塞。
 - **前沿（frontier）**：扫描 `.scratch/<effort>/issues/`，找出未关闭、未阻塞、未被认领的文件；编号最小者优先。
 - **认领**：先写 `Status: claimed` 并保存，再开始任何工作。
-- **解决**：在 `## Answer` 标题下追加答案，置 `Status: resolved`，
+- **解决**：在 `## Answer` 标题下追加**非空**答案，置 `Status: resolved`，
   然后把一条上下文指针（摘要 + 链接）追加到 `map.md` 的 Decisions-so-far。

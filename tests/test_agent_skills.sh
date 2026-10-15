@@ -59,6 +59,8 @@ check_file docs/agents/issue-tracker.md "spec.md" "规格文件"
 check_file docs/agents/issue-tracker.md "Wayfinding 操作" "wayfinder 操作节"
 check_file docs/agents/issue-tracker.md "Blocked by" "阻塞边"
 check_file docs/agents/issue-tracker.md "Status: claimed" "认领状态"
+check_file docs/agents/issue-tracker.md "Answer contract: on" "Answer 契约的自选标记"
+check_file docs/agents/issue-tracker.md "Touches:" "票面声明会改哪些文件"
 
 # domain 规则：必须指向既有 ADR 表与开发文档
 check_file docs/agents/domain.md "开发文档/" "稳定态设计文档"
@@ -69,6 +71,7 @@ check_file docs/agents/domain.md "静默继续" "缺失文件时静默继续"
 
 # 导航指针（票 06）：规则级账本 + 两份 gitignored 的票档 / 索引。
 check_file docs/agents/domain.md "程序化约定与偏离一手" "规则级账本指针"
+check_file docs/agents/domain.md "superseded-by" "账本锚的替身写法（retro S7）"
 check_file docs/agents/domain.md ".scratch/m2-standard-identity/issues/" "M2 决策票档案指针"
 check_file docs/agents/domain.md ".scratch/m2-standard-identity/writeback.md" "票级行索引指针"
 check_file docs/agents/domain.md "存在时才读，缺则跳过" "gitignored 产物的读法"
@@ -160,6 +163,97 @@ issue_status_empty_dir_goes_red() {
 }
 
 if ! scan_issue_status "$PWD"; then fail=1; fi
+
+# 工单 Answer 契约（retro S2）。两条规则：
+#
+# ① **全局**：写了 `## Answer` 的票，Answer 下必须有非空正文 —— "空 Answer" 形同没写。
+#    这条对全部历史票也成立（实测 58 张有 Answer、**0 张空**），纯属防退化。
+# ② **按 effort 自选**：在 effort 的 `spec.md` / `design.md` 里写一行 `Answer contract: on`，
+#    该 effort 的每张 `resolved` 票就必须有非空 `## Answer`。
+#
+# 为什么要自选而不是一刀切：`.scratch/` 有 124 张 resolved 票，其中 33 张是旧 effort（只写
+# `## Comments` 或干脆不写），而且像 `m2-standard-identity` 那样**前松后紧的混合** effort
+# 也存在 —— 任何"按现状反推"的判据都会把历史判红。自选标记把"启用契约"变成 effort 作者
+# 在**自己的裁定处**（spec / design）做的一次显式动作：机械可判、且不追溯。
+# 动机：`/implement-spec` 的中断恢复 —— implementer 被中断时若没写 Answer，进度就只能靠
+# `git diff` 猜（本轮 6 次派发里 4 次被中断，吃过这个亏）。
+scan_issue_answers() { # $1=仓库根；返回 1 = 有错
+  local root="$1" errors=0 checked=0 opted=0
+  local dirs=() d f body marker
+  if [ -d "$root/.scratch" ]; then
+    while IFS= read -r d; do dirs+=("$d"); done < <(
+      find "$root/.scratch" -mindepth 2 -maxdepth 2 -type d -name issues 2>/dev/null | sort
+    )
+  fi
+  if [ "${#dirs[@]}" -eq 0 ]; then
+    echo "PASS: 无 .scratch/*/issues/，工单 Answer 检查 skip（干净 clone 全绿）"
+    return 0
+  fi
+  for d in "${dirs[@]}"; do
+    local effort strict_here=0
+    effort="$(dirname "$d")"
+    for marker in "$effort/spec.md" "$effort/design.md"; do
+      [ -f "$marker" ] || continue
+      if grep -q '^Answer contract: on[[:space:]]*$' "$marker"; then strict_here=1; fi
+    done
+    [ "$strict_here" -eq 1 ] && opted=$((opted+1))
+    for f in "$d"/*.md; do
+      [ -e "$f" ] || continue
+      # ① 全局：有 `## Answer` ⇒ 必须有非空正文（对历史也成立，防"空节"退化）。
+      if grep -q '^## Answer' "$f"; then
+        body="$(awk '/^## Answer/{f=1;next} /^## /{f=0} f && !/^[[:space:]]*$/{print; exit}' "$f")"
+        if [ -z "$body" ]; then
+          echo "FAIL: ${f#"$root"/} 的『## Answer』是空节（等于没写）"
+          errors=$((errors+1))
+        fi
+      fi
+      # ② 自选 effort：resolved 票必须收口。
+      [ "$strict_here" -eq 1 ] || continue
+      grep -qE '^Status: resolved[[:space:]]*$' "$f" || continue
+      checked=$((checked+1))
+      grep -q '^## Answer' "$f" && continue
+      echo "FAIL: ${f#"$root"/} 是 resolved 但缺少『## Answer』（该 effort 声明了 Answer contract: on）"
+      errors=$((errors+1))
+    done
+  done
+  if [ "$errors" -eq 0 ]; then
+    echo "PASS: 工单 Answer 契约符合（$opted 个 effort 启用契约，覆盖 $checked 张 resolved）"
+  fi
+  [ "$errors" -eq 0 ]
+}
+
+# 工单 `Touches:`（retro S8）：声明本票会改哪些文件，让"前沿能不能并行"成为机械判断
+# （`/implement-spec` 的规则是"文件不重叠才并行"）。字段**可选**；写了就必须每条路径都
+# 存在 —— 写错的声明比不写更坏（会让人据此做出错误的并行决定）。
+scan_issue_touches() { # $1=仓库根；返回 1 = 有错
+  local root="$1" errors=0 declared=0
+  local files=() f line item
+  if [ -d "$root/.scratch" ]; then
+    while IFS= read -r f; do files+=("$f"); done < <(
+      find "$root/.scratch" -mindepth 3 -maxdepth 3 -type f -path '*/issues/*.md' 2>/dev/null | sort
+    )
+  fi
+  for f in "${files[@]}"; do
+    line="$(grep -m1 '^Touches:' "$f" || true)"
+    [ -n "$line" ] || continue
+    declared=$((declared+1))
+    item="${line#Touches:}"
+    local IFS=','
+    for item in $item; do
+      item="$(printf '%s' "$item" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+      [ -n "$item" ] || continue
+      if [ ! -e "$root/$item" ]; then
+        echo "FAIL: ${f#"$root"/} 的『Touches:』列了不存在的路径：$item"
+        errors=$((errors+1))
+      fi
+    done
+  done
+  if [ "$errors" -eq 0 ]; then
+    echo "PASS: 工单 Touches 声明全部可解析（$declared 张票声明了 Touches）"
+  fi
+  [ "$errors" -eq 0 ]
+}
+
 REPO_TREE_BEFORE="$(repo_tree_snapshot)"
 if ! issue_status_probe $'Type: task\nStatus: done' red; then
   echo "FAIL: 合成反例未变红：词表外的 Status: done 未被判红"
@@ -185,6 +279,72 @@ if ! issue_status_empty_dir_goes_red; then
   echo "FAIL: 合成反例未变红：空 issues 目录未被判红（覆盖元断言失效）"
   fail=1
 fi
+
+# 工单 Answer 契约的合成反例（正反两面 + grandfather 面）。
+# $1 = 对照票正文（带 Answer），$2 = 被测的 resolved 票正文，$3 = red|green
+answer_probe() { # $1=对照票 $2=被测 resolved 票 $3=red|green $4=on|off（是否写自选标记）
+  local probe out
+  probe="$(probe_mktemp)" || return 1
+  mkdir -p "$probe/.scratch/demo/issues"
+  if [ "$4" = on ]; then
+    printf 'Answer contract: on\n' > "$probe/.scratch/demo/spec.md"
+  else
+    printf '（未启用契约）\n' > "$probe/.scratch/demo/spec.md"
+  fi
+  printf '%s\n' "$1" > "$probe/.scratch/demo/issues/01-a.md"
+  printf '%s\n' "$2" > "$probe/.scratch/demo/issues/02-b.md"
+  out="$(scan_issue_answers "$probe" 2>&1 || true)"
+  rm -rf "$probe"
+  if [ "$3" = red ]; then out_is_red "$out"; else ! out_is_red "$out"; fi
+}
+GOOD=$'Type: task\nStatus: resolved\n\n## Answer\n\n落地了。'
+BAD_NO_ANSWER=$'Type: task\nStatus: resolved\n\n## Comments'
+BAD_EMPTY_ANSWER=$'Type: task\nStatus: resolved\n\n## Answer\n'
+if ! answer_probe "$GOOD" "$BAD_NO_ANSWER" red on; then
+  echo "FAIL: 合成反例未变红：effort 声明了契约，另一张 resolved 却没有 Answer"
+  fail=1
+fi
+if ! answer_probe "$GOOD" "$BAD_NO_ANSWER" green off; then
+  echo "FAIL: grandfather 失效：没声明契约的 effort 却被判红"
+  fail=1
+fi
+if ! answer_probe "$GOOD" "$BAD_EMPTY_ANSWER" red off; then
+  echo "FAIL: 合成反例未变红：空的『## Answer』未被判红（全局规则，与契约标记无关）"
+  fail=1
+fi
+if ! answer_probe "$GOOD" "$GOOD" green on; then
+  echo "FAIL: 合成反例未变绿：两张都写了 Answer 仍被判红"
+  fail=1
+fi
+
+if ! scan_issue_answers "$PWD"; then fail=1; fi
+
+# `Touches:` 声明可解析的合成反例（正反两面）。
+touches_probe() { # $1=red|green
+  local probe out
+  probe="$(probe_mktemp)" || return 1
+  mkdir -p "$probe/.scratch/demo/issues" "$probe/src"
+  : > "$probe/src/real.py"
+  if [ "$1" = red ]; then
+    printf 'Type: task\nStatus: open\nTouches: src/nope.py\n' \
+      > "$probe/.scratch/demo/issues/01-a.md"
+  else
+    printf 'Type: task\nStatus: open\nTouches: src/real.py, src/real.py\n' \
+      > "$probe/.scratch/demo/issues/01-a.md"
+  fi
+  out="$(scan_issue_touches "$probe" 2>&1 || true)"
+  rm -rf "$probe"
+  if [ "$1" = red ]; then out_is_red "$out"; else ! out_is_red "$out"; fi
+}
+if ! touches_probe red; then
+  echo "FAIL: 合成反例未变红：Touches 列了不存在的路径未被判红"
+  fail=1
+fi
+if ! touches_probe green; then
+  echo "FAIL: 合成反例未变绿：Touches 全是存在的路径仍被判红"
+  fail=1
+fi
+if ! scan_issue_touches "$PWD"; then fail=1; fi
 
 # 防再漏（票 05）：探针不得改动仓库工作树，也不得在仓库根留 .wb_probe.* 残留。
 # 断言本身也要有反面自检（覆盖元断言），防 find / 比较失效时空转通过。

@@ -33,6 +33,27 @@ LANDING_COL = "断言落点"
 # 一条锚点的形态：`路径`「字面串」。字面串本身允许含反引号（如 `` `horse_offense` ``）。
 ANCHOR_RE = re.compile(r"`([^`]+)`「([^」]+)」")
 
+# retro S7：账本的锚（尤其"测试函数名"这一类）会随重构改名，而账本可能属于**另一个 effort**
+# （`.scratch/*/writeback.md`）。允许在同一行声明它的**替身**：`superseded-by: <新名字>`；
+# 校验时原锚找不到、替身找得到 ⇒ 放行。比逼人把旧名字塞进新测试的 docstring 当锚点更诚实
+# （本轮为改名真这么绕过一次：`06`（§5「程序化约定与偏离一手」）与 `.scratch/m3-standard-heroes/writeback.md`）。
+# 值可以是**符号名**（`test_foo`），也可以是 `.scratch` 账本里的**中文字面串**（`落点描述甲`），
+# 故按分隔符取值而不是按标识符字符集。
+SUPERSEDED_RE = re.compile(r"superseded-by:\s*([^)\s|`]+)")
+
+
+def _superseded_candidates(row_text: str) -> tuple[str, ...]:
+    """同一行里声明的 `superseded-by:` 替身名字（可能多个）。"""
+    return tuple(SUPERSEDED_RE.findall(row_text))
+
+
+def _is_defined(source: str, symbol: str, *, js: bool) -> bool:
+    """符号是否在该源码里定义（Py 的 `def`/`class`；JS 另认 `function`/`const`）。"""
+    found = f"def {symbol}" in source or f"class {symbol}" in source
+    if js:
+        found = found or f"function {symbol}" in source or f"const {symbol} " in source
+    return found
+
 # 覆盖元断言（绊线）：账本 = 主表 33 行 + §1b 追加/升格 11 行 = 44 行、44 个锚点。
 # 少掉一整张子表就会低于绊线 ⇒ 判红，防「表被改格式 / 删表 ⇒ 一行没扫到也算通过」。
 MIN_ROWS = 44
@@ -108,6 +129,7 @@ def validate_ledger(path: Path, root: Path = REPO_ROOT) -> tuple[list[str], list
     if not claims:
         errors.append(f"{path}: 没解析到任何「{TICKET_COL} / {LANDING_COL}」行（表头被改？）")
         return errors, claims
+    rows = path.read_text(encoding="utf-8").splitlines()
     for claim in claims:
         where = f"{claim.ledger}:{claim.line}"
         if not claim.ticket:
@@ -120,7 +142,12 @@ def validate_ledger(path: Path, root: Path = REPO_ROOT) -> tuple[list[str], list
             if target is None:
                 errors.append(f"{where}: 落点文件不存在（或越出仓库）：`{rel}`")
                 continue
-            if literal not in target.read_text(encoding="utf-8"):
+            source = target.read_text(encoding="utf-8")
+            row_text = rows[claim.line - 1] if 0 < claim.line <= len(rows) else ""
+            # 原字面串不在时，看同一行声明的 `superseded-by:` 替身在不在（retro S7）。
+            if literal not in source and not any(
+                name in source for name in _superseded_candidates(row_text)
+            ):
                 errors.append(f"{where}: `{rel}` 里找不到字面串「{literal}」")
     return errors, claims
 
@@ -190,10 +217,9 @@ def test_doc06_ledger_landing_points_exist() -> None:
             if not symbol:
                 continue
             source = target.read_text(encoding="utf-8")
-            defined = f"def {symbol}" in source or f"class {symbol}" in source
-            if target.suffix in {".js", ".mjs"}:
-                defined = defined or f"function {symbol}" in source or f"const {symbol} " in source
-            if not defined:
+            js = target.suffix in {".js", ".mjs"}
+            names = (symbol, *_superseded_candidates(landing))
+            if not any(_is_defined(source, name, js=js) for name in names if name):
                 errors.append(f"§5:{line_no}: `{rel}` 里没有 `{symbol}`（落点写错了？）")
 
     assert not errors, "账本落点不可核：\n" + "\n".join(errors)
@@ -259,6 +285,35 @@ def test_bogus_anchor_is_red(tmp_path: Path) -> None:
     )
     errors, _ = validate_ledger(ledger, tmp_path)
     assert any("找不到字面串「并不存在的落点」" in error for error in errors), errors
+
+
+def test_superseded_by_lets_a_renamed_anchor_resolve(tmp_path: Path) -> None:
+    """retro S7：锚改名后，同一行声明 `superseded-by: <新字面串>` 即放行。
+
+    账本的锚常是**测试函数名**，改名就要跨仓跨轮次改账本（本轮真撞到：`06`（§5「程序化约定与偏离一手」）
+    与另一 effort 的 `.scratch/m3-standard-heroes/writeback.md`）。允许声明替身，比逼人把
+    旧名字塞进新测试的 docstring 当锚点更诚实。
+    """
+    ledger = _make_repo(tmp_path)
+    ledger.write_text(
+        "| # | 落地票号 | 断言落点 |\n|---|---|---|\n"
+        "| 1 | 01 | `test_demo.sh`「早已改名的旧串」(superseded-by: 落点描述甲) |\n",
+        encoding="utf-8",
+    )
+    errors, _ = validate_ledger(ledger, tmp_path)
+    assert errors == [], errors
+
+
+def test_superseded_by_is_still_red_when_the_replacement_is_missing(tmp_path: Path) -> None:
+    """替身也不在 ⇒ 照旧判红（这条逃逸口不能退化成"写什么都放行"）。"""
+    ledger = _make_repo(tmp_path)
+    ledger.write_text(
+        "| # | 落地票号 | 断言落点 |\n|---|---|---|\n"
+        "| 1 | 01 | `test_demo.sh`「旧串」(superseded-by: 也不存在的替身) |\n",
+        encoding="utf-8",
+    )
+    errors, _ = validate_ledger(ledger, tmp_path)
+    assert any("找不到字面串" in error for error in errors), errors
 
 
 def test_anchor_less_row_is_red(tmp_path: Path) -> None:

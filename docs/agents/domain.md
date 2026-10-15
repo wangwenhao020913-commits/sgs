@@ -12,6 +12,9 @@
 - **`.scratch/m2-standard-identity/issues/`**：**M2 决策票档案**——票面裁定在正文；有**改判 / 升格**时追加在 `## Comments`。查“某条裁定当初为什么这么定、后来有没有被推翻”时读它。
 - **`.scratch/m2-standard-identity/writeback.md`**：**票级行索引**——把票面裁决映射到「落地票号 / 断言落点」。追“某条裁定落进哪个文件、被哪条断言钉住”时读它。
 - **`GLOSSARY.md`**（仓库根目录）：项目术语表。见下“惰性创建”。
+- **账本锚改名**：账本的锚常是**测试函数名**，重构会把它改掉（账本甚至可能属于另一个 effort）。
+  锚不再存在时，在**同一行**写上 `superseded-by: <新锚>`，`tests/test_writeback_landing.py`
+  就改核那个替身（替身也不在才判红）。这比把旧名字塞进新测试的 docstring 当锚点诚实。
 
 若上述文件不存在（如 `docs/adr/`、`.scratch/` 下那两份 gitignored 一次性工作产物），**静默继续**：**存在时才读，缺则跳过**，不要指出它们缺失，也不要主动建议先创建。
 `/domain-modeling` 技能（经 `/grill-with-docs` 触达）会在术语或决策真正被敲定时惰性创建它们。

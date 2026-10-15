@@ -14,6 +14,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=9",
+    "pytest-timeout>=2",
 ]
 
 [project.scripts]
@@ -27,3 +28,11 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# 每个测试的**墙钟上限**（秒）：把"活锁"从"永远等"变成"一条红 + traceback"。
+#
+# 为什么是 240 而不是更小：单条合法的慢测试必须留够余量 —— 胜率批（`RATE_SEEDS` 128 局）
+# 实测 ~66s，fuzz 自己的模拟预算是 120s（`tests/test_fuzz.py` 的 `DEFAULT_SECONDS`）。
+# 240s ≈ 这两者最大值的 2 倍，而任何活锁都会在 4 分钟内被就地判红。
+# 缺了 `pytest-timeout` 这个键会**静默失效**（pytest 只发 config warning），
+# 故 `tests/run_all.sh` 另有一条 fail-closed 检查钉住插件确实装了 —— 见那里的注释。
+timeout = 240

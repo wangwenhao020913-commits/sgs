@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from replays import goals, scenarios, seed_search
 from replays.seed_search import (
     SKELETON_TIERS,
@@ -151,3 +153,36 @@ def test_the_module_exposes_no_gate_entry_hook():
     """它是``python -m``工具，不是 pytest 插件：不定义 pytest 钩子。"""
     for name in dir(seed_search):
         assert not name.startswith("pytest_"), f"种子搜索不得成为门禁入口：{name}"
+
+
+# ---------------------------------------------------------------------------
+# 单条基准重选种子（retro S6）：`--slug` 是**可选**入口，不改 M2-only 的默认面
+# ---------------------------------------------------------------------------
+
+
+def test_reseed_slug_refuses_scripted_baselines():
+    """M1 六条是脚本驱动、种子手写 —— 没有"种子搜索"这回事，必须明确拒绝。"""
+    m1_slug = next(iter(scenarios.M1_SCENARIOS))
+    with pytest.raises(ValueError, match="脚本驱动"):
+        seed_search.reseed_slug(m1_slug, limit=1)
+
+
+def test_reseed_slug_returns_hits_sorted_by_record_count_within_range():
+    """真跑引擎的冒烟（少量种子）：命中项都落在范围内，且**按记录条数最少**排序。"""
+    slug = "42-hero-transform"  # M3 专项基准里判据最容易命中的一条
+    hits = seed_search.reseed_slug(slug, limit=8)
+
+    assert all(0 <= candidate.seed < 8 for candidate in hits)
+    assert all(candidate.player_count == scenarios.SCENARIOS[slug].player_count for candidate in hits)
+    assert [candidate.record_count for candidate in hits] == sorted(
+        candidate.record_count for candidate in hits
+    ), "按记录条数最少排序（基准越小越好）"
+
+
+def test_main_slug_reports_a_missing_or_scripted_scenario(capsys):
+    """`--slug` 的两种失败面都要**点名**并以非零退出（不静默当成功）。"""
+    assert seed_search.main(["--slug", "no-such-slug"]) == 2
+    assert "no-such-slug" in capsys.readouterr().out
+
+    m1_slug = next(iter(scenarios.M1_SCENARIOS))
+    assert seed_search.main(["--slug", m1_slug, "--limit", "1"]) == 2
