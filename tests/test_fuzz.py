@@ -50,6 +50,7 @@ from sgs.state import (
     EndPhase,
     FrameKind,
     GameState,
+    Pass,
     PlayPhaseQuery,
     SelectCards,
     SlotKind,
@@ -259,6 +260,31 @@ def _check_live_invariants(engine: _FuzzEngine, record: JournalRecord | None) ->
             )
 
     _check_candidate_cap(record, seed, n)
+    _check_decline_sorts_last(record, seed, n)
+
+
+def _check_decline_sorts_last(record: JournalRecord | None, seed: int, n: int) -> None:
+    """候选次序（retro S4）：**放弃（``Pass``）恒在最后一条**。
+
+    ``_sort_key``（``effects/actions.py``）把"放弃"放在兜底档 ``(1, …)``、真候选放在
+    ``(0, …)``，故候选里只要出现 ``Pass``，它就必须排在最后。这条不变量是**补**的：
+    ``_sort_key`` 曾漏了 ``SelectOption`` 分支，让它与 ``Pass`` 同档、又按
+    ``"Pass" < "SelectOption"`` 排到**真候选之前** —— 取首个候选的贪心消费者
+    （``tests/test_web.py::_play_to_end``）因此"发动→取消"空转、门禁无声挂死。当时
+    ``tests/test_queries_views_actions.py`` 的断言先 ``sorted()`` 再比，把要断的次序
+    抹掉了，所以没拦住。**次序类断言不许先归一化**（``CODING_STANDARDS.md`` §4）。
+    """
+    if record is None or record.kind != "query":
+        return
+    actions = record.query.legal_actions
+    for index, action in enumerate(actions):
+        if isinstance(action, Pass) and index != len(actions) - 1:
+            _fail(
+                seed,
+                n,
+                record,
+                f"『放弃』候选排在第 {index} 条（共 {len(actions)} 条），不在最后",
+            )
 
 
 OVER_CAP_BY_DESIGN: frozenset[str] = frozenset({"hero.liubei.rende"})
@@ -915,6 +941,23 @@ def test_the_candidate_cap_checker_catches_an_over_cap_two_dimensional_skill():
 
     with pytest.raises(FuzzInvariantError, match="候选数"):
         _check_candidate_cap(record, 1, 2)
+
+
+def test_the_decline_sorts_last_checker_catches_a_pass_before_real_candidates():
+    """合成反例（retro S4）：「放弃」排在真候选**之前**必红 —— 这正是 `_sort_key` 曾经的坑。"""
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    record = _query_record(state, [Pass(answers_seq=1), EndPhase(answers_seq=1)])
+
+    with pytest.raises(FuzzInvariantError, match="放弃"):
+        _check_decline_sorts_last(record, 1, 2)
+
+
+def test_the_decline_sorts_last_checker_passes_when_pass_is_last():
+    """对照面：「放弃」在最后（`_sort_key` 的兜底档）时放行。"""
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    record = _query_record(state, [EndPhase(answers_seq=1), Pass(answers_seq=1)])
+
+    _check_decline_sorts_last(record, 1, 2)  # 不抛 = 放行
 
 
 def test_the_candidate_cap_checker_exempts_rende_by_design():

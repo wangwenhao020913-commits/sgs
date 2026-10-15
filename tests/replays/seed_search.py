@@ -58,6 +58,7 @@ __all__ = [
     "collect",
     "compare_with_scenarios",
     "main",
+    "reseed_slug",
     "search",
     "tiers_for",
     "verify_recorded",
@@ -246,10 +247,58 @@ def _dump(candidates: Mapping[str, Sequence[Candidate]], path: Path) -> None:
     print(f"候选表写到 {path}")
 
 
+def reseed_slug(
+    slug: str,
+    *,
+    limit: int = 900,
+    progress: Callable[[int, int], None] | None = None,
+) -> list[Candidate]:
+    """给**一条**基准重选种子（retro S6）；返回按"记录条数最少"排序的候选。
+
+    为什么单独有这个入口：`*.jsonl` 是**逐字节**基准，任何**询问形状**的改动都会移动
+    随机驱动的行动序列，于是某条基准的事后判据可能不再命中。本仓的纪律是**重选种子**、
+    而不是放宽判据（见 `scenarios.py` 里 38 / 41 的注释）—— 此前这一步是每次现写一段
+    一次性脚本（本轮为 38 / 41 写了三次），故收进工具里。
+
+    只支持 ``driver == "random"`` 的基准（M2 / M3）：M1 六条是脚本驱动、种子手写，
+    没有"种子搜索"这回事。
+    """
+    scenario = scenarios.SCENARIOS[slug]
+    if scenario.driver != "random":
+        raise ValueError(f"{slug} 是脚本驱动（driver={scenario.driver}），没有种子可搜")
+    goal = goals.goal_for(slug)
+    found: list[Candidate] = []
+    for seed in range(limit):
+        if progress is not None:
+            progress(seed, limit)
+        engine = scenarios.play_random(
+            seed,
+            scenario.player_count,
+            deck_profile=scenario.deck_profile,
+            heroes=scenario.heroes,
+            hero_pool=scenario.hero_pool,
+        )
+        if goal(engine):
+            found.append(Candidate(len(engine.records), scenario.player_count, seed))
+    found.sort()
+    return found
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--seeds", type=int, default=None, help="冒烟：把所有档位截到这么多种子")
     parser.add_argument("--dump", type=Path, default=None, help="把原始候选表写成 JSON")
+    parser.add_argument(
+        "--slug",
+        default=None,
+        help="只给这一条基准重选种子（retro S6；只支持 driver=random 的 M2/M3 基准）",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=900,
+        help="--slug 的种子搜索范围 0..limit-1（缺省 900）",
+    )
     parser.add_argument(
         "--verify",
         action="store_true",
@@ -261,6 +310,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="搜索结果与 scenarios.py 写死值不一致时以非零退出（票 32 Done when 的字面口径）",
     )
     args = parser.parse_args(argv)
+
+    if args.slug is not None:
+        try:
+            hits = reseed_slug(
+                args.slug,
+                limit=args.limit,
+                progress=lambda index, total: _report_progress(index, total, 0, index),
+            )
+        except KeyError:
+            print(f"--slug 失败：没有场景 {args.slug!r}")
+            return 2
+        except ValueError as error:
+            print(f"--slug 失败：{error}")
+            return 2
+        if not hits:
+            print(f"{args.slug}：0..{args.limit - 1} 里没有一个种子命中判据")
+            return 1
+        print(f"{args.slug}：{len(hits)} 个命中；按记录条数最少排序，前 5：")
+        for candidate in hits[:5]:
+            print(f"  seed={candidate.seed}\t记录条数={candidate.record_count}")
+        return 0
 
     if args.verify:
         return _report_verification()

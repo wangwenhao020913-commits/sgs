@@ -307,6 +307,29 @@ def test_run_all_is_the_single_gate_entry():
     )
 
 
+def test_the_per_test_timeout_guardrail_is_wired():
+    """retro S1：per-test 超时是**三件套**，缺一件就静默失效。
+
+    `[tool.pytest.ini_options] timeout` 只在 `pytest-timeout` 装了时才生效（没装时 pytest
+    只发一条 config warning）—— 于是"活锁"会悄悄退回"永远等"，正是 retro 要防的那种
+    "检查在位但没接上"。故三者一起断言：dev 依赖声明 + 配置值 + 当前解释器能 import。
+    """
+    import importlib.util
+    import tomllib
+
+    config = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    dev = config["project"]["optional-dependencies"]["dev"]
+    assert any(dep.replace(" ", "").startswith("pytest-timeout") for dep in dev), (
+        "dev 依赖必须声明 pytest-timeout"
+    )
+    timeout = config["tool"]["pytest"]["ini_options"].get("timeout")
+    assert isinstance(timeout, int) and timeout > 0, f"必须设正的 per-test 超时，实得 {timeout!r}"
+    assert importlib.util.find_spec("pytest_timeout") is not None, (
+        "当前解释器没有 pytest-timeout ⇒ timeout 静默失效；"
+        "装上：python3 -m pip --python .venv/bin/python install -e '.[dev]'"
+    )
+
+
 def test_the_gate_fails_when_pytest_is_missing(tmp_path):
     tests_dir = _sandbox(tmp_path, scripts={"test_ok.sh": _PASSING_SCRIPT}, pytest_exit=None)
 
