@@ -51,14 +51,17 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .catalog import MATCH_OWNER_KEY, HeroSkillDecl, Hook, SkillDef
+from .flow import FlowAnswers, PickCards, SkillFlow
 
 __all__ = [
     "DAMAGE_AFTER_SKILLS",
     "DAMAGE_POINT_KEY",
     "DAMAGE_RECORDED_KEY",
     "DamageAfterSkill",
+    "FANKUI_FLOW",
     "damage_after_skill_definitions",
     "damage_point_index",
+    "fankui_step_key",
 ]
 
 DAMAGE_POINT_KEY = "damage_point_index"
@@ -121,6 +124,18 @@ def _fankui_source(state: GameState, frame: Any, owner: int | None) -> int | Non
     return source if player.hand or player.equip else None
 
 
+def fankui_step_key(frame: Any) -> str:
+    """【反馈】选牌步的**帧内缓存键**：``fankui:<点号>``。
+
+    点号是必须的（票 07 §5 的"逐字节等价"要求）：同一次伤害事件会按伤害值**逐轮派发**，
+    而 ``ask_selection`` 的答案按帧内键缓存 —— 键若只认步骤名（``"card"``），第 2 点会
+    命中第 1 点的缓存答案、**只搬一张牌**。迁移前的键是 ``fankui:<来源>:<点号>``，
+    来源在一条流水线里是常量，故这里只补点号；而点号的真源
+    :data:`DAMAGE_POINT_KEY` 就住本模块（``flow.py`` 反向不得 import 本模块）。
+    """
+    return f"fankui:{damage_point_index(frame)}"
+
+
 # ---------------------------------------------------------------------------
 # 逐技能落位（票 05 §要做什么 2 的表）
 # ---------------------------------------------------------------------------
@@ -132,7 +147,8 @@ class DamageAfterSkill(HeroSkillDecl):
 
     per_point: bool
     condition: Any
-    handler: Any
+    handler: Any = None
+    flow: Any = None
 
 
 def _jianxiong_condition(host: Any, frame: Any) -> bool:
@@ -170,61 +186,84 @@ def _fankui_condition(host: Any, frame: Any) -> bool:
     return _fankui_source(host.state, frame, frame.data.get("skill_owner")) is not None
 
 
-def _fankui_face(
-    host: Any, source: int
-) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
-    """【反馈】的选取面：来源的**手牌（隐藏槽）** + **装备区（可见槽）**。
+def _fankui_source_seat(state: Any, frame: Any, owner: int, answers: Any) -> Any:
+    """**步 1 的选取面**：有牌可拿时是"伤害来源那一个座位"，否则**空元组** = 这一步不存在。
 
-    手牌槽带 ``Slot.card = None``（只有位置、没有牌面身份）——这与
-    :meth:`~sgs.engine.game.Engine.selection_face` 的 ``reveal_hand=False`` 同一条口径，
-    但这里**还要并上装备区**，且手牌的隐藏位序要用 ``select`` 子流打乱，故显式构造
-    （不调 ``selection_face`` 以避免在技能层触碰引擎私有的随机句柄）。
+    这是"派生参数读帧"的落点（票 07 §3）：``frame`` 给出伤害来源，``owner`` 是技能持有者
+    （派发环显式传 ``instance.owner``）。
+
+    返回空元组（而不是一个座位号）时，执行器的"**退化面不询问**"判据接管：这一步**一个询问
+    都不发**、整条流水线按取消收尾（与迁移前 :func:`_fankui` 的提前返回同形）。这一档是必须
+    的，不是防御性代码：派发环遍历**每个存活玩家**的实例，而 ``_fankui_condition`` 在条件
+    求值期还读不到持有者（``skill_owner`` 要到回调前才写），故它的判据退化成"来源有牌"——
+    **来源自己**那个实例也会过闸、也会被问"是否发动"，由这里挡掉后续的选牌询问。
     """
-    player = host.state.player(source)
-    slots: list[Slot] = []
-    card_ids: list[int] = []
-    order = list(range(len(player.hand)))
-    host.shuffle_positions(order)
-    for index in order:
-        slots.append(Slot(ref=ZoneRef(Zone.HAND, source), card=None))
-        card_ids.append(player.hand[index])
-    for card_id in player.equip:
-        slots.append(Slot(ref=ZoneRef(Zone.EQUIP, source), card=host.state.card(card_id)))
-        card_ids.append(card_id)
-    return tuple(slots), tuple(card_ids)
+    del state, answers
+    source = _fankui_source_from_frame(frame)
+    if source is None or source == owner:
+        return ()
+    return source
 
 
-def _fankui(host: Any, frame: Any) -> Any:
-    """司马懿【反馈】：你可以获得伤害来源的一张牌（规则 1014）。
+def _fankui_source_from_frame(frame: Any) -> int | None:
+    """帧里的伤害来源座位；没有来源时 ``None``。"""
+    source = frame.data.get("source")
+    return None if source is None else int(source)
 
-    选取面 = 来源的手牌（隐藏槽）+ 装备区（可见槽）；选中并结算**之后**才揭晓那张手牌
-    （揭晓 = 它进了自己的手牌，见 ``03`` §4 的"隐藏槽选中后揭晓"）。
+
+def _fankui_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：把选中的那张牌从**伤害来源**的区搬进持有者手牌（``PUT``）。
+
+    **复核一次"来源不是自己"**（与迁移前的 :func:`_fankui` 逐字同形）：上面的空池已经
+    挡掉了"来源是自己"的实例，但效果是**独立的第二道闸**——守卫住"无论怎么走到这里，
+    都不会把自己手里的牌搬给自己"，不依赖步骤声明这一个前提。
+
+    搬牌可能内联派发"失去牌后"并挂起，故重入时必须只搬一次 —— 由
+    :meth:`Engine.move_in_frame` 的重入守卫保证（`CODING_STANDARDS.md` 规则 3）。
     """
     owner = frame.data["skill_owner"]
-    source = _fankui_source(host.state, frame, owner)
-    if source is None:
-        return None
-    spec = SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1))
-    picked = host.ask_selection(
-        frame,
-        key=f"fankui:{source}:{damage_point_index(frame)}",
-        actor=owner,
-        timing=Timing.DAMAGE_AFTER_TAKE,
-        spec=spec,
-        build_face=lambda: _fankui_face(host, source),
-    )
-    if host.suspended(picked):
-        return "stay"
-    if not picked:
+    if _fankui_source(host.state, frame, owner) is None:
         return None
     return host.move_in_frame(
         frame,
-        host.state.refs(picked),
+        host.state.refs(answers["card"]),
         to_zone=ZoneRef(Zone.HAND, owner),
         reason=MoveReason.PUT,
         owner=owner,
         actor=owner,
     )
+
+
+FANKUI_FLOW = SkillFlow(
+    steps=(
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP),
+            lo=1,
+            hi=1,
+            # **有意保留现状**（票 07 §5）：迁移前的选牌步没有 ``Pass``，"取消"的唯一出口
+            # 是发动询问那一道。改成 ``True`` 会改记录流与既有录像。
+            optional=False,
+            # 帧内**缓存键**带点号：同一次伤害事件会按伤害值逐轮派发，键若只认步骤名，
+            # 第 2 点就命中第 1 点的缓存答案（见 :func:`fankui_step_key`）。效果读答案
+            # 仍按 ``key="card"``，不受逐点影响。
+            cache_key=fankui_step_key,
+            # ``face``（铺谁的区）在这里指回**伤害来源**，而 ``actor``（谁应答）保持缺省
+            # = 发动者 = 派发环传进来的 ``instance.owner``。两者在【反馈】里再次分开：
+            # 持有者选牌、选的是**来源**的区。
+            face=_fankui_source_seat,
+            # 来源的手牌是**隐藏槽**（只有位置、没有牌面），与迁移前的
+            # ``_fankui_face`` 逐字同形；装备区照旧可见。
+            reveal_hand=False,
+        ),
+    ),
+    effect=_fankui_effect,
+)
+"""【反馈】的一步流水线（票 07 §5）：选伤害来源的一张牌（手牌隐藏槽 + 装备可见槽）→ 获得。
+
+选取面走引擎的 :meth:`Engine.selection_face`（``reveal_hand=False``）：它与迁移前手写的
+``_fankui_face`` 铺的是同一个东西（HAND 逐张打乱隐藏、EQUIP 可见），**随机数消耗次序也
+相同**，故既有 Golden Replay 一行不改。
+"""
 
 
 def _hurt_owner(frame: Any) -> bool:
@@ -360,7 +399,8 @@ DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
     # 曹操【奸雄】：你可以获得造成此伤害的牌（规则 972）——每次伤害事件一次。
     DamageAfterSkill("caocao", "jianxiong", False, _jianxiong_condition, _jianxiong),
     # 司马懿【反馈】：你可以获得伤害来源的一张牌（规则 1014）——每次伤害事件一次。
-    DamageAfterSkill("simayi", "fankui", False, _fankui_condition, _fankui),
+    # 票 07：它是**被动技步骤流水线**（``SkillFlow``）的第一个消费者。
+    DamageAfterSkill("simayi", "fankui", False, _fankui_condition, None, FANKUI_FLOW),
     # 郭嘉【遗计】：观看牌堆顶两张牌，然后交给任意角色（规则 993）——每受到 1 点伤害一次。
     DamageAfterSkill("guojia", "yiji", True, _yiji_condition, _yiji),
 )
@@ -372,6 +412,13 @@ _REQUIREMENTS: dict[str, str] = {
     "yiji": "观看牌堆顶两张牌，然后逐张交给任意角色",
 }
 """B 族三条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+
+_STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
+    # 票 07：走步骤流水线的被动技逐步文案。键的取法同 A 族 —— ``SELECT_CARDS`` 恒读
+    # ``"card"``（见 :func:`~sgs_web.projection._step_requirement`）。【反馈】只有一步。
+    "fankui": {"card": "获得伤害来源的一张牌"},
+}
+"""**多步被动技**逐步的"需要做什么"（票 07）；键 = 短 id → 步骤名 → 文案。"""
 
 
 def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
@@ -392,9 +439,11 @@ def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
                     skill.handler,
                     skill.condition,
                     per_point=skill.per_point,
+                    flow=skill.flow,
                 ),
             ),
             requirement=_REQUIREMENTS[skill.short_id],
+            step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
         )
         for skill in DAMAGE_AFTER_SKILLS
     )

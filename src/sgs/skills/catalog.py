@@ -60,6 +60,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
+from .flow import SkillFlow, run_flow
 from .virtual import card_ids, grouped_candidates
 
 __all__ = [
@@ -148,20 +149,34 @@ class Hook:
     ``per_point`` 是票 05 的加法（默认 ``False``，M3 只许增）：**触发次数是技能定义的一部分**
     （``03`` §4）。``False`` = "每次伤害事件一次"——只在伤害帧的**第一轮**有机会；
     ``True`` = "每受到 1 点伤害一次"——引擎按伤害值逐轮派发，每一轮都有机会（【遗计】）。
+
+    ``handler`` 与 ``flow`` **恰有其一**（票 07 §4，与 ``ActiveSkill`` 同一条纪律）：
+    手写回调给 ``handler``；走步骤流水线的技能（【反馈】是第一个消费者）给 ``flow``，
+    由 :func:`~sgs.skills.flow.run_flow` 驱动。派发环据此二选一，声明面因此只有一份真源。
     """
 
     timing: Timing
-    handler: HookHandler
+    handler: HookHandler | None = None
     condition: HookCondition | None = None
     per_point: bool = False
+    flow: SkillFlow | None = None
+
+    def __post_init__(self) -> None:
+        if (self.handler is None) == (self.flow is None):
+            raise ValueError(f"{self.timing.value} 上的钩子必须恰有 handler / flow 之一")
 
 
 @dataclass(frozen=True, slots=True)
 class Seam:
-    """一条帧内接缝：键 = :class:`SeamKind` + 回调。"""
+    """一条帧内接缝：键 = :class:`SeamKind` + 回调（``handler`` 与 ``flow`` 恰有其一）。"""
 
     kind: SeamKind
-    handler: SeamHandler
+    handler: SeamHandler | None = None
+    flow: SkillFlow | None = None
+
+    def __post_init__(self) -> None:
+        if (self.handler is None) == (self.flow is None):
+            raise ValueError(f"{self.kind.value} 上的接缝必须恰有 handler / flow 之一")
 
 
 @dataclass(frozen=True, slots=True)
@@ -574,10 +589,26 @@ def _dispatch(host: Any, frame: Frame, *, match: Any, timing: Timing, key: str) 
             # 移动的重入判据要认"哪个技能在跑"（两个提供者可以发出参数相同的移动）；
             # 重入时同一个 handler 写回同一个值，故它稳定。
             frame.data[RUNNING_SKILL_KEY] = instance.skill_id
-            control = item.handler(host, frame)
+            control = _run_item(host, frame, item, instance, timing)
             if control is not None:
                 return control
     return None
+
+
+def _run_item(host: Any, frame: Frame, item: Any, instance: SkillInstance, timing: Timing) -> Control:
+    """跑一条钩子 / 接缝：``flow`` 非空走流水线，否则调手写回调（票 07 §4）。
+
+    **被动侧的两处显式传参**（票 07 §2）：``owner`` 取 ``instance.owner``——被动技的帧里
+    ``data["source"]`` 是**伤害来源**（【反馈】）/ 牌的使用者（【流离】），不是技能持有者；
+    ``timing`` 取派发环当前持有的那个（``dispatch_seam`` 传的是**接缝语境**的时机）。
+    二者都不是执行器里的特判，而是"谁在跑、在哪个时机跑"这两条事实的显式传递。
+    """
+    if item.flow is not None:
+        # 被动侧的持有者**显式**传：帧里的 ``source`` 是伤害来源（【反馈】）/ 使用者
+        # （【流离】），不是技能持有者。``owner=None``（未指定）时执行器才读 ``source``。
+        return run_flow(host, frame, item.flow, owner=instance.owner, timing=timing)
+    assert item.handler is not None  # __post_init__ 已保证恰有其一
+    return item.handler(host, frame)
 
 
 def dispatch_timing(host: Any, frame: Frame, timing: Timing) -> Control:

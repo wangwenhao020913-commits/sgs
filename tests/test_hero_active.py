@@ -1664,14 +1664,14 @@ def _flow_seat_queries(engine):
 
 
 def test_the_flow_shape_can_express_a_dependent_two_seat_pick(monkeypatch):
-    """``pool(state, owner, chosen)`` 拿得到第一次的结果 ⇒ 能照真牌 ``check_targets`` 收窄。"""
+    """``pool(state, frame, owner, chosen)`` 拿得到第一次的结果 ⇒ 能照真牌 ``check_targets`` 收窄。"""
     _card, state = _flow_two_male_state()
     duel = pure_virtual_card(state, "duel")
     seen: list[tuple[int, ...]] = []
 
-    def pool(state_, owner, chosen):
+    def pool(state_, frame, owner, chosen):
         """与 ``_lijian_partners`` 同形：使用者一侧不设限，受害者一侧走真牌同一条链。"""
-        del owner
+        del frame, owner
         seen.append(tuple(chosen))
         if not chosen:
             return (1, 2)
@@ -1709,8 +1709,8 @@ def test_the_flow_shape_ordered_pick_never_re_offers_the_chosen_seat(monkeypatch
     """``ordered=True``：同一步里第二问的池自动排除第一问已选的座位（design §3 N3）。"""
     _card, state = _flow_two_male_state()
 
-    def pool(state_, owner, chosen):
-        del state_, owner, chosen
+    def pool(state_, frame, owner, chosen):
+        del state_, frame, owner, chosen
         return (1, 2)  # 刻意不做任何收窄：排除只能来自 ordered
 
     _inject_flow_skill(
