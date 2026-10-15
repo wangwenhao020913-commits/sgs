@@ -99,7 +99,14 @@ CANDIDATE_CAP = 128
 _USED = 1
 """per-instance 阶段位：本出牌阶段已经发动过（候选生成期据此挡掉）。"""
 _RECOVERED = 2
-"""per-instance 阶段位：【仁德】"首次给到第 2 张"的回复已经发生过。"""
+"""per-instance 阶段位：【仁德】本阶段那次"累计达到第 2 张"的回复**已经发生过**（每阶段至多一次）。"""
+_GAVE_ANY = 4
+"""per-instance 阶段位：【仁德】本阶段**已经给过 ≥1 张**。
+
+规则 976 判的是**本阶段累计**给出的张数是否首次达到 2，不是单次发动的张数（见
+:func:`_rende_recover`）。每次发动至少给 1 张（`lo=1`），所以"本阶段是否已给过 ≥1 张"
+这一位就够推出"这次会把累计推过 2"。
+"""
 
 _SEAT_PREFIX = "seat:"
 """``ActivateSkill.choices`` 里目标座位的**规范文本前缀**（见 :func:`_seat_choice`）。"""
@@ -656,9 +663,26 @@ def _give(
 def _rende_recover(
     host: Any, frame: Any, owner: int, skill_id: str, given: int
 ) -> bool:
-    """累计给出 ``given`` 张时是否**首次**达到两张并回复 1 点；返回是否压了回复帧。"""
+    """本次交出 ``given`` 张后，**本阶段累计**是否**首次**达到 2 张；返回是否压了回复帧。
+
+    规则 976 的口径是**累计**（"若你于此阶段内给出的牌首次达到两张"），不是单次发动的张数：
+
+    - 给 1 张、再给 1 张 ⇒ **第二次**发动时累计到 2 ⇒ 回血；
+    - 给 1 张、再给 3 张 ⇒ 同样是**第二次**发动时累计跨过 2 ⇒ 回血；
+    - 一次给 2 张 ⇒ 当次回血；
+    - 累计达到 2 之后，本阶段再给多少都不算"首次" ⇒ 每阶段**至多回一次**。
+
+    判据只用两个阶段位：``_RECOVERED``（回过没有）与 ``_GAVE_ANY``（本阶段是否已给过 ≥1 张）。
+    每次发动至少给 1 张（`lo=1`），故读这两个位就够，不必把累计张数存进状态。
+    """
     state = host.state
-    if given < 2 or (_phase_flags(state, owner, skill_id) & _RECOVERED):
+    flags = _phase_flags(state, owner, skill_id)
+    healed = bool(flags & _RECOVERED)
+    # 这次确实交出去了（无论回不回血）：先落位，供**下一次**发动判断累计。
+    _mark_phase(state, owner, skill_id, _GAVE_ANY)
+    if healed or given < 1:
+        return False
+    if given < 2 and not (flags & _GAVE_ANY):
         return False
     _mark_phase(state, owner, skill_id, _RECOVERED)
     _push_recover(host, frame, source=owner, target=owner)
@@ -666,10 +690,10 @@ def _rende_recover(
 
 
 def _rende_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
-    """提交点：把选中的手牌一次性交给目标；首次给到 ≥2 张随即回复 1 点。
+    """提交点：把选中的手牌一次性交给目标；**本阶段累计**首次达到 2 张时回复 1 点。
 
     **不置 ``_USED``**：执行器按 ``once_per_phase=False`` 跳过它（规则 976 没有
-    "出牌阶段限一次"）；本阶段只置 ``_RECOVERED``（"首次给到第 2 张"回复一次）。
+    "出牌阶段限一次"）；本阶段只按 :func:`_rende_recover` 落 ``_GAVE_ANY`` / ``_RECOVERED``。
     """
     owner = frame.data["source"]
     skill_id = frame.data["skill_id"]

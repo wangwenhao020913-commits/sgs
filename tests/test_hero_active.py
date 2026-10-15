@@ -710,6 +710,84 @@ def _skill_frames_popped(engine) -> int:
     )
 
 
+def _rende_sequence_driver(plan: list[tuple[int, ...]]):
+    """按 ``plan`` **逐次发动**【仁德】：第 i 次选 ``plan[i]`` 那组手牌、都给座位 1。
+
+    用来验"授予量由多次发动**累计**"这条规则（单次发动的驱动器 `_rende_driver` 盖不住）。
+    """
+    remaining = list(plan)
+
+    def driver(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == RENDE,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            indices = _slot_indices(query, remaining[0])
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and action.picks == indices
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            remaining.pop(0)  # 这一步答完，本次发动就完成了
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption) and action.choice == "seat:1",
+            )
+        return _decline(query)
+
+    return driver
+
+
+def test_rende_recovers_when_the_running_total_reaches_two_across_activations():
+    """**规则 976 的口径是"本阶段累计"**：给 1 张、再给 1 张 ⇒ **第二次发动**时回血。
+
+    旧实现只看**单次发动**的张数（`given < 2` ⇒ 不回），1+1 永远不回血 —— 这正是用户实机
+    验收报回来的那处瑕疵（`../acceptance.md` §A）。
+    """
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = _rende_state((first, second))
+
+    engine = _run(
+        state,
+        [Scripted(_rende_sequence_driver([(first,), (second,)])), Scripted(_decline)],
+        lambda e: _skill_frames_popped(e) >= 2,
+    )
+
+    assert set(engine.state.player(1).hand) == {first, second}, "两次各给 1 张"
+    assert engine.state.player(0).hp == 4, "累计到第 2 张的那一次发动回 1 点血"
+
+
+def test_rende_recovers_on_the_activation_that_pushes_the_total_past_two():
+    """1 张 + 3 张：**第二次**发动时累计跨过 2 ⇒ 回血（不是第一次、也不是按单次张数）。"""
+    hand = tuple((_cards("slash") + _cards("dodge"))[:4])
+    state = _rende_state(hand)
+
+    engine = _run(
+        state,
+        [Scripted(_rende_sequence_driver([hand[:1], hand[1:]])), Scripted(_decline)],
+        lambda e: _skill_frames_popped(e) >= 2,
+    )
+
+    assert set(engine.state.player(1).hand) == set(hand), "1 + 3 张都交出去了"
+    assert engine.state.player(0).hp == 4, "第二次发动把累计推过 2 ⇒ 回血"
+
+
+def test_rende_recovers_at_most_once_per_phase():
+    """累计达到 2 之后，本阶段再给多少都不算"首次"⇒ 只回一次。"""
+    hand = tuple((_cards("slash") + _cards("dodge"))[:3])
+    state = _rende_state(hand, owner_hp=2)
+
+    engine = _run(
+        state,
+        [Scripted(_rende_sequence_driver([hand[:1], hand[1:2], hand[2:]])), Scripted(_decline)],
+        lambda e: _skill_frames_popped(e) >= 3,
+    )
+
+    assert set(engine.state.player(1).hand) == set(hand), "三次都给成了"
+    assert engine.state.player(0).hp == 3, "1+1 时回一次（2→3）；第三次再给也不回"
+
+
 def _rende_offered_after_cancel(engine) -> bool:
     """取消之后**同一出牌阶段**又挂起了含【仁德】候选的 PLAY_PHASE 询问。"""
     if not _skill_frame_popped(engine):
