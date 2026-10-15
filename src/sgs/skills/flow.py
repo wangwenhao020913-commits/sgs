@@ -231,8 +231,15 @@ def _flow_option_id(frame: Any, key: str, index: int, *, multi: bool) -> str:
     单问步骤的 ``skill_id`` 就是 ``<短 id>:<key>``（投影 ``projection._step_requirement``
     读冒号后那段 ⇒ 直接命中 ``SkillDef.step_requirements``）；同一步问多次时补序号，
     既避免缓存撞车，也让两问可以各有各的文案（键形如 ``seat:0`` / ``seat:1``）。
+
+    **短 id 的取法分两档**（票 08 的加法）：主动技的 ``SKILL`` 帧把全限定 id 写在
+    ``frame.data["skill_id"]``；被动技**没有**这个键，派发环只写 ``running_skill``
+    （见 :func:`~sgs.skills.catalog._dispatch`）。【流离】是第一条带座位步的被动技
+    （【反馈】只有选牌步、不经过这里），若不认第二档就会在运行时 ``KeyError``。
+    这里只读帧里的**既有键**，不新增协议字段——故记录流除新询问本身外不变。
     """
-    short = frame.data["skill_id"].rsplit(".", 1)[-1]
+    raw = frame.data.get("skill_id") or frame.data.get("running_skill") or ""
+    short = str(raw).rsplit(".", 1)[-1]
     return f"{short}:{key}:{index}" if multi else f"{short}:{key}"
 
 

@@ -1484,6 +1484,33 @@ def test_query_context_reads_the_fankui_step_wording_for_a_damage_frame() -> Non
     assert query_context(engine, cards_query)["requirement"] == "获得伤害来源的一张牌"
 
 
+def test_query_context_walks_the_liuli_steps_with_their_own_wording() -> None:
+    """【流离】（票 08）两步各有各的问法：先"弃置一张牌"，再"选择转移给谁"。
+
+    它是第二条走流水线的**被动技**（票 07 的【反馈】之后）：归属由派发环写的帧内
+    ``running_skill`` 给出（被动技没有 ``SKILL`` 帧）。步 2 是 ``SELECT_OPTION``、
+    ``skill_id`` = ``liuli:seat``（票 08 的交互变更），文案按冒号后那段取。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(), SeatSpec(hero="daqiao")],
+        frame_kind=FrameKind.USE,
+        frame_data={
+            "source": 0,
+            "targets": (1,),
+            "running_skill": "hero.daqiao.liuli",
+            "skill_id": "hero.daqiao.liuli",
+        },
+    )
+
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND, Zone.EQUIP))
+    assert query_context(engine, cards_query)["requirement"] == "弃置一张牌（手牌 / 装备区）"
+
+    option_query = _skill_step_option_query(
+        state, skill_id="liuli:seat", options=("seat:2",)
+    )
+    assert query_context(engine, option_query)["requirement"] == "选择将此【杀】转移给哪名其他角色"
+
+
 def test_query_context_walks_the_jieyin_steps_with_their_own_wording() -> None:
     """【结姻】两步各有各的问法（票 03）：先"弃置2张手牌"，再"选择一名已受伤男性角色…"。
 

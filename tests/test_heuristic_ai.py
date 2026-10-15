@@ -789,6 +789,19 @@ def test_a_harmful_seat_step_aims_at_the_revealed_enemy():
     )
 
 
+def test_the_liuli_seat_step_aims_at_the_revealed_enemy():
+    """【流离】的新目标也是"被指向的对手"（票 08 迁到 ``seat:N`` 后必须归入有害座位步）。
+
+    不登记这一条，``_score_seat_option`` 会把它当"帮助类"：AI 系统性地把【杀】转给盟友
+    （迁移前是均匀分值的座位槽，至少是随机挑）——比随机还差。判据取跨 16 条随机流恒同。
+    """
+    state = _rebel_and_lord()
+
+    assert _seat_choices(state, "liuli:seat", ("seat:1", "seat:2")) == {"seat:1"}, (
+        "转移目标该挑主公（已明的敌人）"
+    )
+
+
 def test_an_optional_pick_outside_the_play_phase_may_still_be_declined():
     """对照面：别的时机（【遗计】伤害后看牌那类）仍可放弃 —— 惩罚只落在"已发动的技能步骤"。"""
     state, slash = _committed_step_state()

@@ -430,11 +430,13 @@ def _is_revealed_ally(view: PlayerView, seat: int) -> bool:
     return mine in _LORD_SIDE and theirs == _LORD
 
 
-_HOSTILE_SEAT_STEPS = ("lijian:", "fanjian:")
+_HOSTILE_SEAT_STEPS = ("lijian:", "fanjian:", "liuli:")
 """座位步的**语义分组**：这些步骤里的座位是"被指向的对手"，其余（治疗 / 给牌）是"被帮助的人"。
 
-键 = 执行器发的 ``skill_id`` 前缀（``lijian:victim`` / ``fanjian:seat`` …）。不属于任何
-一组的座位步按中性处理——宁可 0 分（交给随机流打破平分），也不猜错方向。
+键 = 执行器发的 ``skill_id`` 前缀（``lijian:victim`` / ``fanjian:seat`` / ``liuli:seat`` …）。
+【流离】（票 08 起走 ``PickSeats``）的座位是"把【杀】转嫁给谁"，属被指向的对手——**必须**
+登记在这里：不登记就落进"帮助类"，AI 会系统性地把【杀】转给盟友（迁移前是均匀分值的
+隐藏槽，至少是随机挑），比随机还差。
 """
 
 
