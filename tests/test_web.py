@@ -554,8 +554,11 @@ def test_the_pending_payload_carries_the_virtual_source_index() -> None:
     assert isinstance(payload["virtual_index"], dict)
 
 
-def test_rende_skill_entry_takes_cards_then_a_seat_by_direct_clicks() -> None:
-    """报障 2：`ui.manual` 让界面走"直接多选手牌 → 直接点武将"，而不是铺选项按钮。"""
+def test_rende_skill_entry_is_server_driven_not_manual() -> None:
+    """票 05：【仁德】改走步骤流水线 ⇒ 界面**不再**走"直接多选手牌 → 直接点武将"的
+    ``ui.manual`` 模式（那是候选烘载荷时代的产物），改由服务端的
+    ``SELECT_CARDS → SELECT_OPTION`` 两步驱动；候选仍是可点的骨架。
+    """
     from types import SimpleNamespace
 
     pack = _context_pack()
@@ -572,9 +575,9 @@ def test_rende_skill_entry_takes_cards_then_a_seat_by_direct_clicks() -> None:
         item for item in build_skills(session, 0) if item["skill_id"] == "hero.liubei.rende"
     )
 
-    assert entry["ui"]["manual"] is True
-    assert entry["ui"]["pick_cards"] == list(hand), "可选手牌就是本人手牌（按手牌序）"
-    assert entry["ui"]["pick_seats"] == [1], "可点座位是其他存活角色"
+    assert entry["available"] is True, "骨架候选仍在出牌阶段池里（技能按钮可点）"
+    assert entry["ui"]["manual"] is False, "改由服务端逐步询问，前端不再自行拼合载荷"
+    assert entry["ui"]["pick_cards"] == [] and entry["ui"]["pick_seats"] == []
     assert entry["ui"]["requirement"] == "交给一名其他角色任意张手牌"
 
 
@@ -1412,11 +1415,11 @@ def test_query_context_walks_the_zhiheng_step_with_its_own_wording() -> None:
     assert query_context(engine, cards_query)["requirement"] == "弃置任意张牌（手牌 / 装备区）"
 
 
-def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_skills() -> None:
-    """没有 ``step_requirements`` 的技能仍读一句话的 summary（旧技能一字不改）。
+def test_query_context_walks_the_rende_steps_with_their_own_wording() -> None:
+    """【仁德】两步各有各的问法（票 05）：先"选择任意张要交给其他角色的手牌"，再"交给谁"。
 
-    样本 = 【仁德】（本批唯一的"候选烘牌 × 目标、一步交出去"的多维主动技）；
-    【制衡】票 04 起有了逐步文案，不再是这条回退面的样本。
+    键的取法完全复用【离间】/【青囊】/【结姻】/【制衡】那一套：``SELECT_CARDS`` 读
+    ``"card"``、``SELECT_OPTION`` 读询问 ``skill_id`` 冒号后那段（执行器发 ``rende:seat``）。
     """
     engine, state = _context_fixture(
         [SeatSpec(hero="liubei"), SeatSpec()],
@@ -1424,5 +1427,25 @@ def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_s
         frame_data={"skill_id": "hero.liubei.rende", "source": 0},
     )
 
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,), optional=True)
+    assert query_context(engine, cards_query)["requirement"] == (
+        "选择任意张要交给其他角色的手牌"
+    )
+
+    option_query = _skill_step_option_query(state, skill_id="rende:seat", options=("seat:1",))
+    assert query_context(engine, option_query)["requirement"] == "选择交给哪名其他角色"
+
+
+def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_skills() -> None:
+    """没有 ``step_requirements`` 的技能仍读一句话的 summary（旧技能一字不改）。
+
+    样本 = 【反间】（本批结束后**唯一**还没有逐步文案的 A 族主动技——它到票 06 才迁）。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(hero="zhouyu"), SeatSpec()],
+        frame_kind=FrameKind.SKILL,
+        frame_data={"skill_id": "hero.zhouyu.fanjian", "source": 0},
+    )
+
     cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,))
-    assert query_context(engine, cards_query)["requirement"] == "交给一名其他角色任意张手牌"
+    assert query_context(engine, cards_query)["requirement"] == "选择一种花色"

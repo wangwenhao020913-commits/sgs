@@ -1333,7 +1333,9 @@ class Engine:
                 actor,
                 timing,
                 seq,
-                payload=SelectContext(spec=spec, slots=slots),
+                payload=SelectContext(
+                    spec=spec, slots=slots, skill_id=frame.data.get("skill_id")
+                ),
                 revealed=revealed,
             )
         )
@@ -2128,6 +2130,7 @@ class Engine:
                 view=view,
                 spec=payload.spec,
                 slots=payload.slots,
+                skill_id=payload.skill_id,
                 revealed=revealed,
             )
         if kind is QueryKind.SKILL_ACTIVATION:

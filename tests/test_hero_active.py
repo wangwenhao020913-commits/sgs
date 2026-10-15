@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 from functools import partial
-from itertools import combinations
 from types import MappingProxyType
 
 import pytest
@@ -479,29 +478,142 @@ def test_activate_skill_fails_closed_for_an_unregistered_id():
 
 
 # ---------------------------------------------------------------------------
-# 仁德（刘备）：给任意张手牌；本阶段首次给到第 2 张回复 1 点；两维 ⇒ 闸 + 顺序降级
+# 仁德（刘备）：给任意张手牌 → 一名其他角色；本阶段首次给到第 2 张回复 1 点
+#
+# 票 05：本技能是 SkillFlow 的第四个消费者（前三个：【青囊】票 02、【结姻】票 03、
+# 【制衡】票 04），也是**唯一一条没有"出牌阶段限一次"**的（规则 976）：流水线传
+# ``once_per_phase=False``，``_can_offer(..., once_per_phase=False)``，取消后同一阶段
+# 仍可再发动。旧形状按用户裁定不设组合闸（非空手牌子集 × 目标全枚举，手牌 8 张约
+# 1800 条候选，用来换"点座位即提交"的交互）；票 05 换成骨架候选 + 两步询问，交互随之
+# 变成**选任意张手牌 → 点一名其他角色 → 确认**（用户已知情并接受）。
 # ---------------------------------------------------------------------------
 
 
-def test_rende_offers_a_subset_of_the_hand_for_each_other_character():
-    first, second = _cards("slash")[0], _cards("dodge")[0]
-    state = build_state(
+def _rende_state(
+    hand: tuple[int, ...],
+    *,
+    owner_hp: int = 3,
+    owner_hp_max: int = 4,
+    targets: int = 1,
+):
+    return build_state(
         pack=PACK,
-        seats=[SeatSpec(hand=(first, second), hero="liubei"), SeatSpec(), SeatSpec()],
-        deck=_deck_excluding(first, second),
+        seats=[
+            SeatSpec(hp=owner_hp, hp_max=owner_hp_max, hand=hand, hero="liubei"),
+            *[SeatSpec() for _ in range(targets)],
+        ],
+        deck=_deck_excluding(*hand),
         turn_seat=0,
     )
 
+
+def test_rende_offer_is_a_single_skeleton_candidate():
+    """票 05：候选不再枚举"非空手牌子集 × 目标"，恒一条骨架（旧形状手牌 2 张即 6 条）。"""
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = _rende_state((first, second), targets=2)
+
     offers = _offers(_play_candidates(state), RENDE)
 
-    assert {(action.picks, action.choices) for action in offers} == {
-        ((first,), ("seat:1",)),
-        ((second,), ("seat:1",)),
-        ((first, second), ("seat:1",)),
-        ((first,), ("seat:2",)),
-        ((second,), ("seat:2",)),
-        ((first, second), ("seat:2",)),
-    }, "两维相乘：张数 × 目标；空组合（给 0 张）不进池"
+    assert len(offers) == 1, "两维相乘的枚举消失：候选恒一条"
+    assert offers[0].picks == () and offers[0].choices == (), "载荷为空，改由发动后的步骤询问"
+
+
+def test_rende_offer_is_a_single_skeleton_candidate_however_many_cards_and_targets():
+    """候选数与手牌数 / 目标数无关（旧形状 20 张手牌 × 7 目标远超闸值，按用户裁定不设闸）。
+
+    这条取代旧的 ``test_rende_offers_picks_beyond_the_old_cap_so_the_ui_can_commit_in_one_step``
+    （票 05 起【仁德】改走骨架候选 + 两步流水线，"界面要能一次提交这组牌 → 这个座位"的
+    载荷烘焙形状连同 `ui.manual` 一起不再有生产者）。
+    """
+    hand = tuple(range(20))
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=hand, hero="liubei"), *[SeatSpec() for _ in range(7)]],
+        deck=_deck_excluding(*hand),
+        turn_seat=0,
+    )
+    assert (2 ** len(hand) - 1) * 7 > CANDIDATE_CAP, "旧形状必须超闸（否则本用例证明不了什么）"
+
+    offers = _offers(_play_candidates(state), RENDE)
+
+    assert len(offers) == 1, "两维相乘的枚举消失：候选恒一条"
+    assert offers[0].picks == () and offers[0].choices == ()
+    assert len(_play_candidates(state)) <= CANDIDATE_CAP, "整段询问不随张数增长"
+
+
+def _rende_driver(*, pick=None, target: int = 1, cancel_at: str | None = None):
+    """按**新流程**应答：点【仁德】→ 选任意张手牌 → 点一名其他角色（两步）。"""
+
+    def driver(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == RENDE,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            if cancel_at == "card":
+                return _find(query, lambda action: isinstance(action, Pass))
+            if pick is None:
+                return _find(
+                    query,
+                    lambda action: isinstance(action, SelectCards) and len(action.picks) == 1,
+                )
+            indices = _slot_indices(query, pick)
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and action.picks == indices
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            if cancel_at == "seat":
+                return _find(query, lambda action: isinstance(action, Pass))
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption)
+                and action.choice == f"seat:{target}",
+            )
+        return _decline(query)
+
+    return driver
+
+
+def test_rende_asks_the_cards_then_the_target():
+    """两步流水线（**有**中间 ``SELECT_CARDS``）：先选任意张手牌，再点一名其他角色。"""
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = _rende_state((first, second))
+
+    engine = _run(
+        state,
+        [Scripted(_rende_driver(pick=(first, second))), Scripted(_decline)],
+        _skill_frame_popped,
+    )
+
+    asked = [record.query.kind for record in engine.records if record.kind == "query"]
+    assert asked[:3] == ["PLAY_PHASE", "SELECT_CARDS", "SELECT_OPTION"], (
+        "先问「交给一名其他角色任意张手牌」，再问交给谁（两步流水线）"
+    )
+
+
+def test_rende_gives_the_chosen_cards_to_the_target_in_one_step():
+    """一次发动 = 一次移动：三张牌在提交点一并交给目标（不再逐张问）。"""
+    hand = tuple(_cards("slash")[:4])
+    chosen = hand[:3]
+    state = _rende_state(hand, owner_hp=4, owner_hp_max=4)
+
+    engine = _run(
+        state, [Scripted(_rende_driver(pick=chosen)), Scripted(_decline)], _skill_frame_popped
+    )
+
+    assert set(engine.state.player(1).hand) == set(chosen), "三张一次交出"
+    assert not set(chosen) & set(engine.state.player(0).hand), "给出的牌离开自己的手牌"
+    put_moves = [
+        {card.card_id for card in record.cards}
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.from_zone.zone.value == "hand"
+        and record.to_zone.zone.value == "hand"
+        and record.reason.value == "PUT"
+    ]
+    assert set(chosen) in put_moves, "移动原因是 PUT（交给，不是弃置）"
 
 
 def test_rende_is_not_offered_without_hand_cards_or_without_a_target():
@@ -524,24 +636,13 @@ def test_rende_is_not_offered_without_hand_cards_or_without_a_target():
 
 def test_rende_recovers_when_two_cards_are_given_for_the_first_time():
     first, second = _cards("slash")[0], _cards("dodge")[0]
-    state = build_state(
-        pack=PACK,
-        seats=[SeatSpec(hp=3, hp_max=4, hand=(first, second), hero="liubei"), SeatSpec()],
-        deck=_deck_excluding(first, second),
-        turn_seat=0,
+    state = _rende_state((first, second))
+
+    engine = _run(
+        state,
+        [Scripted(_rende_driver(pick=(first, second))), Scripted(_decline)],
+        _skill_frame_popped,
     )
-
-    def rende(query):
-        if query.kind == QueryKind.PLAY_PHASE:
-            return _find(
-                query,
-                lambda action: isinstance(action, ActivateSkill)
-                and action.skill_id == RENDE
-                and set(action.picks) == {first, second},
-            )
-        return _decline(query)
-
-    engine = _run(state, [Scripted(rende), Scripted(_decline)], _skill_frame_popped)
 
     assert engine.state.player(0).hp == 4, "首次给到第 2 张回复 1 点"
     assert set(engine.state.player(1).hand) == {first, second}, "两张手牌交给目标"
@@ -550,128 +651,147 @@ def test_rende_recovers_when_two_cards_are_given_for_the_first_time():
 
 def test_rende_does_not_recover_when_only_one_card_is_given():
     first, second = _cards("slash")[0], _cards("dodge")[0]
-    state = build_state(
-        pack=PACK,
-        seats=[SeatSpec(hp=3, hp_max=4, hand=(first, second), hero="liubei"), SeatSpec()],
-        deck=_deck_excluding(first, second),
-        turn_seat=0,
+    state = _rende_state((first, second))
+
+    engine = _run(
+        state, [Scripted(_rende_driver(pick=(first,))), Scripted(_decline)], _skill_frame_popped
     )
-
-    def rende(query):
-        if query.kind == QueryKind.PLAY_PHASE:
-            return _find(
-                query,
-                lambda action: isinstance(action, ActivateSkill)
-                and action.skill_id == RENDE
-                and action.picks == (first,),
-            )
-        return _decline(query)
-
-    engine = _run(state, [Scripted(rende), Scripted(_decline)], _skill_frame_popped)
 
     assert engine.state.player(0).hp == 3, "只给 1 张 ⇒ 不回复"
+    assert engine.state.player(1).hand == [first]
 
 
-def _small_and_big_rende():
-    hand = tuple(_cards("slash") + _cards("dodge"))[:8]
-    big = build_state(
-        pack=PACK,
-        seats=[SeatSpec(hp=3, hp_max=4, hand=hand, hero="liubei"), SeatSpec()],
-        deck=_deck_excluding(*hand),
-        turn_seat=0,
-    )
-    small = build_state(
-        pack=PACK,
-        seats=[SeatSpec(hp=3, hp_max=4, hand=hand[:2], hero="liubei"), SeatSpec()],
-        deck=_deck_excluding(*hand[:2]),
-        turn_seat=0,
-    )
-    return big, small
-
-
-def test_rende_offers_picks_beyond_the_old_cap_so_the_ui_can_commit_in_one_step():
-    """**报障 2**：【仁德】不降级——超过旧闸值时仍带 ``picks``。
-
-    前端要"直接多选手牌 + 直接点座位、一次交出去"，所以每一组非空子集 × 目标都必须
-    能原样找到一条候选；若降级成"只有目标"，界面就拼不出这一组。
-    """
-    big, _small = _small_and_big_rende()
-    hand = tuple(big.player(0).hand)
-    assert (2 ** (len(hand) + 2) - 1) > CANDIDATE_CAP, "这局必须超过旧闸值（否则本用例空转）"
-
-    offers = _offers(_play_candidates(big), RENDE)
-
-    assert {action.picks for action in offers} == {
-        subset
-        for size in range(1, len(hand) + 1)
-        for subset in combinations(hand, size)
-    }, "非空子集全在池（不降级），界面才能一步提交"
-
-
-def test_rende_gives_several_cards_without_an_intermediate_selection():
-    """一次发动 = 一次移动：不再有"逐张选牌"的 ``SELECT_CARDS`` 中间询问。"""
-    big, _small = _small_and_big_rende()
-    hand = tuple(big.player(0).hand)
-    chosen = hand[:3]
-
-    def rende(query):
-        if query.kind == QueryKind.PLAY_PHASE:
-            return _find(
-                query,
-                lambda action: isinstance(action, ActivateSkill)
-                and action.skill_id == RENDE
-                and action.picks == chosen,
-            )
-        return _decline(query)
-
-    engine = _run(big, [Scripted(rende), Scripted(_decline)], _skill_frame_popped)
-
-    assert set(engine.state.player(1).hand) == set(chosen), "三张一次交出"
-    assert not [
-        record
+def _skill_frames_popped(engine) -> int:
+    return sum(
+        1
         for record in engine.records
-        if record.kind == "query" and record.query.kind == QueryKind.SELECT_CARDS.value
-    ], "仁德不再走顺序选牌"
+        if record.kind == "frame"
+        and record.op == "pop"
+        and record.frame_kind is FrameKind.SKILL
+    )
+
+
+def _rende_offered_after_cancel(engine) -> bool:
+    """取消之后**同一出牌阶段**又挂起了含【仁德】候选的 PLAY_PHASE 询问。"""
+    if not _skill_frame_popped(engine):
+        return False
+    pending = engine.pending
+    return (
+        pending is not None
+        and pending.kind == QueryKind.PLAY_PHASE.value
+        and any(
+            isinstance(action, ActivateSkill) and action.skill_id == RENDE
+            for action in pending.legal_actions
+        )
+    )
 
 
 def test_rende_has_no_once_per_phase_limit():
-    """**报障 2**：规则 976 没有"限一次"——同一出牌阶段可以给第二次。"""
+    """**规则 976**：没有"出牌阶段限一次"——同一出牌阶段可以给第二次。"""
     first, second, third, fourth = (_cards("slash") + _cards("dodge"))[:4]
     state = build_state(
         pack=PACK,
-        seats=[SeatSpec(hp=2, hp_max=4, hand=(first, second, third, fourth), hero="liubei"), SeatSpec()],
+        seats=[
+            SeatSpec(hp=2, hp_max=4, hand=(first, second, third, fourth), hero="liubei"),
+            SeatSpec(),
+        ],
         deck=_deck_excluding(first, second, third, fourth),
         turn_seat=0,
     )
     plan = [(first, second), (third, fourth)]
+    round_index = {"value": 0}
 
     def give(query):
         if query.kind == QueryKind.PLAY_PHASE:
-            candidates = _offers(query.legal_actions, RENDE)
-            for want in list(plan):
-                chosen = [action for action in candidates if action.picks == want]
-                if chosen:
-                    plan.remove(want)
-                    return chosen[0]
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == RENDE,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            wanted = plan[round_index["value"]]
+            indices = _slot_indices(query, wanted)
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and action.picks == indices
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            round_index["value"] += 1
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption) and action.choice == "seat:1",
+            )
         return _decline(query)
 
-    def two_skill_frames(engine) -> bool:
-        return (
-            sum(
-                1
-                for record in engine.records
-                if record.kind == "frame"
-                and record.op == "pop"
-                and record.frame_kind is FrameKind.SKILL
-            )
-            >= 2
-        )
-
-    engine = _run(state, [Scripted(give), Scripted(_decline)], two_skill_frames)
+    engine = _run(state, [Scripted(give), Scripted(_decline)], lambda e: _skill_frames_popped(e) >= 2)
 
     assert set(engine.state.player(1).hand) == {first, second, third, fourth}, "两次都给成了"
     assert engine.state.player(0).hp == 3, "第 2 张回复 1 点（2 → 3），第 4 张不再回复"
     assert _play_query_count(engine, RENDE) >= 2, "发动过之后仍回到池里（没有限一次）"
+
+
+def _run_rende_cancel(cancel_at: str):
+    """在流水线的 ``cancel_at`` 步取消（``card`` / ``seat``）。
+
+    返回 ``(成本两张牌, engine, 选择面上出现过的牌面集合)``；停止条件同【青囊】/【结姻】：
+    "取消后又挂起了一次含【仁德】候选的出牌阶段询问"。
+    """
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = _rende_state((first, second))
+    faces: list[set[int]] = []
+
+    def liubei(query):
+        if query.kind == QueryKind.SELECT_CARDS:
+            faces.append({slot.card.card_id for slot in query.slots})
+        return _rende_driver(pick=(first, second), cancel_at=cancel_at)(query)
+
+    engine = _run(state, [Scripted(liubei), Scripted(_decline)], _rende_offered_after_cancel)
+    return (first, second), engine, faces
+
+
+@pytest.mark.parametrize("cancel_at", ["card", "seat"])
+def test_rende_cancel_leaves_the_table_untouched_and_the_skill_available(cancel_at):
+    """两步中任何一步取消 ⇒ 手牌原样、弃牌堆不变、未交牌未回复、同一阶段还能再发动。"""
+    _cards_used, engine, faces = _run_rende_cancel(cancel_at)
+    player = engine.state.player(0)
+
+    assert faces, "步 1 的问一定要先发生"
+    assert set(player.hand) == faces[-1], "选择只收集、提交才生效（手牌逐张原样）"
+    assert not engine.state.discard, "弃牌堆为空 —— 没有产生任何副作用"
+    assert not engine.state.player(1).hand, "一张都没交出去"
+    assert player.hp == 3, "没有回复"
+    assert _rende_offered_after_cancel(engine), "取消不消耗次数：同一阶段仍可再发动"
+
+
+def test_rende_cancel_does_not_spend_the_first_recovery():
+    """取消不落 ``_RECOVERED``：紧接着给到第 2 张仍回复（取消零副作用）。"""
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = _rende_state((first, second))
+    cancelled = {"done": False}
+
+    def liubei(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == RENDE,
+            )
+        if query.kind == QueryKind.SELECT_CARDS and not cancelled["done"]:
+            cancelled["done"] = True
+            return _find(query, lambda action: isinstance(action, Pass))
+        if query.kind == QueryKind.SELECT_CARDS:
+            indices = _slot_indices(query, (first, second))
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and action.picks == indices
+            )
+        if query.kind == QueryKind.SELECT_OPTION:
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption) and action.choice == "seat:1",
+            )
+        return _decline(query)
+
+    engine = _run(state, [Scripted(liubei), Scripted(_decline)], lambda e: _skill_frames_popped(e) >= 2)
+
+    assert set(engine.state.player(1).hand) == {first, second}, "第二次给成了"
+    assert engine.state.player(0).hp == 4, "取消没有花掉本阶段的首次回复"
 
 
 # ---------------------------------------------------------------------------

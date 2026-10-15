@@ -1066,11 +1066,16 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `${ui.timingLabel("JUDGE_ON")} / ${ui.timingLabel("JUDGE_CARD_AFTER_EFFECT")}`);
 }
 
-/* ============ 报障 2 / 4（合成局面）：仁德"选牌 → 点座"与龙胆"点技能 → 点闪" ============
+/* ============ 报障 2 / 4（合成局面）：**遗留** hand-pick 渲染路径与龙胆"点技能 → 点闪" =
  *
  * 两条都是**界面读法**的断言：喂与服务端 `pending_payload` / `skills` 同形的合成 view，
  * 看界面按不按 `ui.manual` / `ui.convert_sources` / `virtual_index` 这些键读。
  * 服务端怎么算这些键由 `tests/test_web.py` 钉；这里钉前端有没有真的读它。
+ *
+ * ⚠️ 【仁德】那一条（①'）自**票 05** 起是**遗留路径**：A 族六条主动技已全部改走
+ * `SkillFlow`，候选恒骨架（不带 `picks`/`choices`）⇒ `ui.manual` 在生产里恒假，手选模式
+ * 没有生产者。它按 design.md §7 Q4"先留、之后再清"保留在这里，测的是**这段尚未删除的
+ * 渲染代码**仍然读得对；【仁德】的真实交互（服务端两步询问）由 ㉿W1–W8 与 ㉿R8–R11 覆盖。
  */
 
 // ① 龙胆：转化候选的 card_id 是虚拟牌，界面手牌是实体牌——`virtual_index` 是那座桥。
@@ -1544,6 +1549,104 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
 }
 
+/* ============ 票 05（合成局面）：【仁德】流水线 —— 逐步文案 + 取消送出 Pass ============
+ *
+ * 两步：`SELECT_CARDS`（手牌、任意张、上限 = 真实池大小）→ `SELECT_OPTION`（交给谁）。
+ * 与【青囊】/【结姻】/【制衡】同形，钉同一组事：两步文案各是服务端那一句、有 `Pass` 时
+ * 取消按钮**送出一条候选**。
+ */
+{
+  const firstCard = synthCard(61, "杀");
+  const secondCard = synthCard(62, "闪");
+  const rendeSkill = {
+    skill_id: "hero.liubei.rende", name: "仁德", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true,
+    ui: {
+      requirement: "交给一名其他角色任意张手牌", manual: false,
+      pick_cards: [], pick_seats: [], convert_sources: [],
+    },
+  };
+
+  // ① 步 1：选任意张手牌交出去，询问里带一条 `Pass` = 可取消。
+  const pickView = synthView({
+    kind: "SELECT_CARDS", actor: 0, seq: 950, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 950, picks: [0] },
+      { kind: "SelectCards", answers_seq: 950, picks: [0, 1] },
+      { kind: "Pass", answers_seq: 950 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "hand" }, card: firstCard },
+      { ref: { seat: 0, zone: "hand" }, card: secondCard },
+    ],
+    spec: { zones: ["hand"], total: [1, 2], sequential: false, optional: true },
+    context: { requirement: "选择任意张要交给其他角色的手牌", skill_hints: [] },
+  });
+  pickView.skills = [rendeSkill];
+  pickView.heroes = { 0: "liubei", 1: "guanyu" };
+  pickView.snapshot.self_hand = [firstCard, secondCard];
+  ui.state.view = pickView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pickView);
+
+  check("㉿W1 步 1 的询问区文案就是服务端那句「选择任意张要交给其他角色的手牌」",
+    $("t-prompt").textContent === "选择任意张要交给其他角色的手牌",
+    `"${$("t-prompt").textContent}"`);
+  check("㉿W2 选择面把本人手牌铺出来（2 个槽）、上限是真实池大小",
+    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 2
+      && JSON.stringify(pickView.pending.spec.total) === "[1,2]",
+    `块=${$("t-options").children.length} total=${JSON.stringify(pickView.pending.spec.total)}`);
+  check("㉿W3 候选里有 Pass ⇒ 取消按钮可点", $("btn-cancel").disabled === false,
+    `disabled=${$("btn-cancel").disabled}`);
+
+  ui.state.sessionId = "smoke-missing-session";
+  const beforePick = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
+  check("㉿W4 步 1 点取消 = **送出一条 Pass 候选**",
+    !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
+
+  // ② 步 2：点一名其他角色（选项 = seat:1 / seat:2，自己不在池里）。
+  const seatView = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 951, prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "seat:1", answers_seq: 951 },
+      { kind: "SelectOption", choice: "seat:2", answers_seq: 951 },
+      { kind: "Pass", answers_seq: 951 },
+    ],
+    candidate_index: {}, virtual_index: {},
+    option_seats: { "seat:1": 1, "seat:2": 2 },
+    context: { requirement: "选择交给哪名其他角色", skill_hints: [] },
+  });
+  seatView.skills = [rendeSkill];
+  seatView.heroes = { 0: "liubei", 1: "guanyu", 2: "zhangfei" };
+  ui.state.view = seatView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(seatView);
+
+  check("㉿W5 步 2 的询问区文案就是服务端那句「选择交给哪名其他角色」",
+    $("t-prompt").textContent === "选择交给哪名其他角色",
+    `"${$("t-prompt").textContent}"`);
+  const rendeSeat = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "2");
+  check("㉿W6 其他角色画成可点", !!rendeSeat && rendeSeat.classList.contains("targetable"),
+    `targetable=${rendeSeat && rendeSeat.classList.contains("targetable")}`);
+  (rendeSeat.listeners.click || []).forEach((fn) => fn({ target: rendeSeat }));
+  const rendeAction = ui.buildAction();
+  check("㉿W7 点它 = 选中那条 seat:N 候选（提交才送出去）",
+    !!rendeAction && rendeAction.kind === "SelectOption" && rendeAction.choice === "seat:2",
+    JSON.stringify(rendeAction));
+
+  const beforeRendeSeat = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentRendeSeat = calls.length > beforeRendeSeat
+    ? calls[calls.length - 1].body.action : null;
+  check("㉿W8 步 2 点取消 = 送出 Pass（中途退出这一步）",
+    !!sentRendeSeat && sentRendeSeat.kind === "Pass", JSON.stringify(sentRendeSeat));
+}
+
 /* ============ 报障 3（合成局面）：事件逐个回放 + 效果区逐事件派生 ============ */
 {
   const moveIn = {
@@ -1718,9 +1821,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
         }
         if (p && p.kind === "PLAY_PHASE" && p.actor === 0 && hero === "liubei" && !rende) {
           const skill = (view.skills || []).find((item) => item.skill_id === "hero.liubei.rende");
-          if (skill && skill.ui && skill.ui.manual && skill.ui.pick_cards.length && skill.ui.pick_seats.length) {
-            rende = { seed, steps: step };
-          }
+          if (skill && skill.available) rende = { seed, steps: step };
         }
         if (longdan && rende) return { longdan, rende };
         await advanceOnce();
@@ -1746,26 +1847,29 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       `card=${dodge && dodge.name} selectable=${dodge && ui.cardSelectable(p, dodge.card_id)}`);
   }
 
-  check("㉿R8 真局扫到「刘备出牌阶段仁德走手选模式」", !!found.rende,
+  check("㉿R8 真局扫到「刘备出牌阶段仁德可发动」", !!found.rende,
     found.rende ? `seed=${found.rende.seed} steps=${found.rende.steps}` : "16 个种子内没找到");
   if (found.rende) {
     await replayScanTo(found.rende);
-    const view = ui.state.view;
-    const skill = (view.skills || []).find((item) => item.skill_id === "hero.liubei.rende");
     const button = $("t-skills").children.find((b) => b.getAttribute("data-skill-id") === "hero.liubei.rende");
-    check("㉿R9 真局里仁德按钮是手选模式且可点",
-      !!button && button.disabled === false && button.getAttribute("data-manual") === "true",
+    check("㉿R9 真局里仁德按钮可点、**不再**是手选模式（票 05：改由服务端逐步询问）",
+      !!button && button.disabled === false && button.getAttribute("data-manual") !== "true",
       `disabled=${button && button.disabled} manual=${button && button.getAttribute("data-manual")}`);
     (button.listeners.click || []).forEach((fn) => fn({ target: button }));
-    const handChip = (index) => $("t-hand").children[index];
-    (handChip(0).listeners.click || []).forEach((fn) => fn({ target: handChip(0) }));
-    (handChip(1).listeners.click || []).forEach((fn) => fn({ target: handChip(1) }));
-    const seat = skill.ui.pick_seats[0];
-    const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(seat));
-    check("㉿R10 真局里复选两张牌后目标武将可点、组合命中候选",
-      !!box && box.classList.contains("targetable")
-        && ui.state.picks.length === 2 && ui.buildAction() === null,
-      `picks=${JSON.stringify(ui.state.picks)}（还没点座位 ⇒ buildAction 为 null）`);
+    const rendeAction = ui.buildAction();
+    check("㉿R10 真局里点仁德 = 选中那条骨架 ActivateSkill 候选（载荷全空）",
+      !!rendeAction && rendeAction.kind === "ActivateSkill"
+        && rendeAction.skill_id === "hero.liubei.rende"
+        && (rendeAction.picks || []).length === 0 && (rendeAction.choices || []).length === 0,
+      JSON.stringify(rendeAction));
+    if (rendeAction) {
+      await ui.submitAction();
+      const p = ui.state.view.pending;
+      check("㉿R11 真局里提交后服务端问步 1「选择任意张要交给其他角色的手牌」",
+        !!p && p.kind === "SELECT_CARDS"
+          && p.context && p.context.requirement === "选择任意张要交给其他角色的手牌",
+        `kind=${p && p.kind} req=${p && p.context && p.context.requirement}`);
+    }
   }
 }
 

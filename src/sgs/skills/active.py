@@ -40,7 +40,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from itertools import combinations
 from types import MappingProxyType
 from typing import Any
 
@@ -571,35 +570,34 @@ ZHIHENG_FLOW = SkillFlow(
 
 
 # ---------------------------------------------------------------------------
-# 刘备【仁德】：给任意张手牌 → 本阶段首次给到第 2 张回复 1 点（两维相乘 ⇒ 闸 + 顺序降级）
+# 刘备【仁德】：给任意张手牌 → 一名其他角色；本阶段首次给到第 2 张回复 1 点
+#
+# 票 05：本技能是 :class:`SkillFlow` 的第四个消费者，也是**唯一一条没有"出牌阶段限一次"**
+# 的（规则 976）⇒ 流水线传 ``once_per_phase=False``，`_USED` 一个位都不落，取消后同一
+# 阶段立刻可再发动。旧形状按用户裁定不设组合闸（非空手牌子集 × 目标全枚举，手牌 8 张
+# 约 1800 条候选），换来的是"点座位即提交、没有确认步"的交互；票 05 换成骨架候选 +
+# 两步询问，交互随之变成**选任意张手牌 → 点一名其他角色 → 确认**（用户已知情并接受）。
 # ---------------------------------------------------------------------------
+
+
+def _rende_targets(state: GameState, owner: int, chosen: tuple[int, ...]) -> tuple[int, ...]:
+    """【仁德】的可选目标：存活且**不是发动者自己**的座位（座位序；``chosen`` 对单选无意义）。
+
+    池为空 ⇒ 候选根本不产出（:func:`_rende_offers`），不会发出没有候选的询问。
+    """
+    del chosen
+    return tuple(p.seat for p in state.players if p.alive and p.seat != owner)
 
 
 def _rende_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     if not _can_offer(state, ctx, once_per_phase=False):
         return current
     hand = tuple(state.player(ctx.subject).hand)
-    targets = tuple(p.seat for p in state.players if p.alive and p.seat != ctx.subject)
-    if not hand or not targets:
+    if not hand or not _rende_targets(state, ctx.subject, ()):
         return current
-    # 【仁德】**不设组合闸**：它的前端交互是"直接多选手牌 + 直接点座位"，界面要能一次
-    # 提交"这组牌 → 这个座位"，所以每一组（非空子集 × 目标）都必须在候选里。
-    # 手牌 8 张 × 7 个目标约 1800 条候选（实测 ~227 KiB），在出牌阶段的可接受范围内；
-    # 换掉闸门换来的是"没有选项按钮、一步交出去"这条交互（用户裁定）。
-    return (
-        *current,
-        *(
-            ActivateSkill(
-                skill_id=ctx.skill_id,
-                picks=picks,
-                choices=(_seat_choice(target),),
-                answers_seq=ctx.answers_seq,
-            )
-            for size in range(1, len(hand) + 1)
-            for picks in combinations(hand, size)
-            for target in targets
-        ),
-    )
+    # 票 05：候选**恒为一条骨架**（与【离间】/【青囊】/【结姻】/【制衡】同姿态），
+    # 给哪几张、给谁改由发动后的步骤流水线问 ⇒ 候选数与手牌数、目标数无关。
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
 
 def _give(
@@ -638,20 +636,33 @@ def _rende_recover(
     return True
 
 
-def _rende_activate(host: Any, frame: Any) -> Any:
-    state = host.state
+def _rende_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：把选中的手牌一次性交给目标；首次给到 ≥2 张随即回复 1 点。
+
+    **不置 ``_USED``**：执行器按 ``once_per_phase=False`` 跳过它（规则 976 没有
+    "出牌阶段限一次"）；本阶段只置 ``_RECOVERED``（"首次给到第 2 张"回复一次）。
+    """
     owner = frame.data["source"]
     skill_id = frame.data["skill_id"]
-    # **不置 ``_USED``**：【仁德】没有"出牌阶段限一次"（规则 976）；本阶段只置
-    # ``_RECOVERED``（"首次给到第 2 张"回复一次）。
-    target = _chosen_seats(frame)[0]
-    picks = tuple(frame.data.get("picks", ()))
-    if not picks:  # pragma: no cover - 候选恒带非空 picks；此处只作 fail-soft
-        return None
-    if _give(host, frame, owner, target, picks, key="rende:cost") == "stay":
+    seats = answers["seat"]
+    cards = answers["card"]
+    assert isinstance(seats, tuple) and isinstance(cards, tuple)
+    target = int(seats[0])
+    if _give(host, frame, owner, target, cards, key="rende:cost") == "stay":
         return "stay"
-    _rende_recover(host, frame, owner, skill_id, len(picks))
+    _rende_recover(host, frame, owner, skill_id, len(cards))
     return None
+
+
+RENDE_FLOW = SkillFlow(
+    steps=(
+        PickCards(zones=(Zone.HAND,), lo=1, hi=None, key="card"),
+        PickSeats(lo=1, hi=1, pool=_rende_targets, key="seat"),
+    ),
+    effect=_rende_effect,
+    once_per_phase=False,
+)
+"""【仁德】的两步流水线：给任意张手牌 → 一名其他角色（**无出牌阶段限一次**，票 05）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -1021,7 +1032,7 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 孙权【制衡】：弃任意张（手牌 + 装备区）→ 摸等量（规则 1009）；票 04 的单步流水线。
     ActiveSkill("sunquan", "zhiheng", _zhiheng_offers, flow=ZHIHENG_FLOW),
     # 刘备【仁德】：给一名其他角色任意张手牌；本阶段首次给到第 2 张回复 1 点（规则 976）。
-    ActiveSkill("liubei", "rende", _rende_offers, _rende_activate),
+    ActiveSkill("liubei", "rende", _rende_offers, flow=RENDE_FLOW),
     # 周瑜【反间】：令一名其他角色选花色 → 获得并展示你的一张手牌 → 花色不同则受伤（规则 1017）。
     ActiveSkill("zhouyu", "fanjian", _fanjian_offers, _fanjian_activate),
     # 华佗【青囊】：弃一张手牌 → 一名已受伤角色回复 1 点（规则 1040）；票 02 的流水线消费者。
@@ -1079,10 +1090,16 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
         "card": "弃置2张手牌",
         "seat": "选择一名已受伤男性角色回复1点体力",
     },
+    "rende": {
+        # 票 05：给牌是成本（不是弃置）——文案要读得出"交给别人"这层意思。
+        "card": "选择任意张要交给其他角色的手牌",
+        "seat": "选择交给哪名其他角色",
+    },
 }
 """**多步技能**逐步的问法（票 01 起）；键 = 步骤名（判据见 :attr:`SkillDef.step_requirements`）。
 
-【离间】三步各有各的问法；【青囊】（票 02）、【结姻】（票 03）各两步。不在此表的技能 ⇒
+【离间】三步各有各的问法；【青囊】（票 02）、【结姻】（票 03）、【制衡】（票 04）、
+【仁德】（票 05）各一至两步。不在此表的技能 ⇒
 仍读一句话的 :data:`_REQUIREMENTS`。"""
 
 

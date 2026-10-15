@@ -147,6 +147,12 @@ _CYCLE_VALUE = 1.5
 牌面价值低于它的牌才值得换掉；两处共用一个常量，保证"发不发动"与"弃哪几张"的
 模型一致（否则发动决策与随后的选牌步会各说各话）。
 """
+_RENDE_RECOVER_VALUE = 4.0
+"""【仁德】本阶段首次给到 ≥2 张时那 1 点体力对 AI 的价值。
+
+发动决策（:func:`_score_rende`）与选牌步（:func:`_score_select_cards` 的给牌分支）共用，
+保证"给 2 张还是 1 张"两处算的是同一笔账。
+"""
 _PLAY_PHASE_IDLE = "PHASE_PLAY_IDLE"
 """时机标识的**字面量**（:class:`~sgs.timing.Timing` 是 ``str`` 枚举，故可直接比）。
 
@@ -335,30 +341,41 @@ def _is_committed_skill_step(query: Query) -> bool:
     return any(getattr(action, "kind", None) == "Pass" for action in query.legal_actions)
 
 
-def _is_any_count_cost_step(query: Query) -> bool:
-    """这一步是不是"任意张自己的牌当成本"（``total=(lo, hi)`` 且 ``lo != hi``）。
+_GIVE_STEPS = frozenset({"rende"})
+"""把**自己的牌交出去**的技能短 id（选牌步的成本语义与"弃一张换一张"完全不同）。
 
-    目前只有【制衡】的骨架流水线产出这个形状：弃几张由玩家定，**每弃一张就换一张新牌**，
-    故选牌步不能像固定张数的成本步那样"取得越少越好"，而要按 :data:`_CYCLE_VALUE` 逐张估值。
-    """
-    spec = getattr(query, "spec", None)
-    if spec is None:
-        return False
-    low, high = getattr(spec, "total", (0, 0))
-    return low != high
+【仁德】给牌是纯成本（没有回抽），但给到 ≥2 张且自己受伤时换回 1 点体力
+（:data:`_RENDE_RECOVER_VALUE`）。判据读询问自带的 ``skill_id``（票 05 加的本地通道，
+不进记录流）——**不能只看 ``total`` 的 ``lo != hi``**：【制衡】与【仁德】都是
+``(1, n)``，只看形状会把给牌误当成换牌（票 04 的 Answer 点名过这个坑）。
+"""
+
+_CYCLE_STEPS = frozenset({"zhiheng"})
+"""每弃一张就回抽一张的技能短 id（【制衡】）：按 :data:`_CYCLE_VALUE` 逐张估值。"""
+
+
+def _step_skill_short(query: Query) -> str:
+    """这一步属于哪条技能（询问自带 ``skill_id`` 的短 id）；不是技能步 ⇒ 空串。"""
+    raw = getattr(query, "skill_id", None)
+    return str(raw).rsplit(".", 1)[-1] if raw else ""
 
 
 def _score_select_cards(query: Query, action: Action) -> float:
     """``SELECT_CARDS``：选**别人的**牌取高价值、选**自己的**牌（成本）取低价值。
 
-    例外是【制衡】式"任意张自己的牌"（:func:`_is_any_count_cost_step`）：那一步每弃一张
-    会换回一张，故逐张按 ``_CYCLE_VALUE - 牌价`` 估值（恰好与 :func:`_score_zhiheng`
-    的骨架预估同一个模型）。
+    两种"任意张自己的牌"各有各的成本语义（按询问自带的技能 id 分派，不看 ``total`` 形状）：
+
+    - 【制衡】:data:`_CYCLE_STEPS`：每弃一张回抽一张 ⇒ 逐张按 ``_CYCLE_VALUE - 牌价`` 估值；
+    - 【仁德】:data:`_GIVE_STEPS`：给出去没有回抽，但给到 ≥2 张且自己受伤换回 1 点体力 ⇒
+      按 ``-牌价`` 估值并给"≥2 张"补上 :data:`_RENDE_RECOVER_VALUE`。
     """
     assert isinstance(query, SelectCardsQuery)
     if not isinstance(action, SelectCards):
         return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
-    cycle = _is_committed_skill_step(query) and _is_any_count_cost_step(query)
+    committed = _is_committed_skill_step(query)
+    short = _step_skill_short(query) if committed else ""
+    cycle = short in _CYCLE_STEPS
+    give = short in _GIVE_STEPS
     total = 0.0
     for index in action.picks:
         if not 0 <= index < len(query.slots):
@@ -371,6 +388,8 @@ def _score_select_cards(query: Query, action: Action) -> float:
             total += _CYCLE_VALUE - value
         else:
             total -= value
+    if give and len(action.picks) >= 2 and _wounded(query.view):
+        total += _RENDE_RECOVER_VALUE
     return total
 
 
@@ -535,10 +554,24 @@ def _skill_cost(view: PlayerView, action: ActivateSkill, skeleton: int) -> float
 
 
 def _score_rende(query: Query, action: Action, view: PlayerView) -> float:
-    """【仁德】：给牌是成本；首次给到两张以上回复 1 点（只在受伤时值得）。"""
+    """【仁德】：给牌是成本；本阶段首次给到 ≥2 张回复 1 点（只在受伤时值得）。
+
+    票 05 起候选是**骨架**（``picks`` 为空，给哪几张改由发动后的 ``SELECT_CARDS`` 问）；
+    旧式 ``len(action.picks) >= 2`` 对骨架恒假、AI 会干脆不用【仁德】。这里按下游那一步
+    的实际选择预估（与 :func:`_score_select_cards` 的给牌分支同一模型）：受伤且手牌 ≥2 张
+    时给最便宜的两张换 1 点体力，否则给最便宜的一张（净亏，通常不会发动）。
+    """
     assert isinstance(action, ActivateSkill)
-    bonus = 4.0 if len(action.picks) >= 2 and _wounded(view) else 0.0
-    return bonus - _picked_value(view, action)
+    del query
+    if action.picks:
+        bonus = _RENDE_RECOVER_VALUE if len(action.picks) >= 2 and _wounded(view) else 0.0
+        return bonus - _picked_value(view, action)
+    values = sorted(_card_value(card) for card in view.self_hand)
+    if not values:
+        return 0.0
+    if _wounded(view) and len(values) >= 2:
+        return _RENDE_RECOVER_VALUE - (values[0] + values[1])
+    return -values[0]
 
 
 def _score_zhiheng(query: Query, action: Action, view: PlayerView) -> float:

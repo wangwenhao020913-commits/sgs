@@ -165,10 +165,17 @@ class RespondContext:
 
 @dataclass(frozen=True, slots=True)
 class SelectContext:
-    """``SELECT_CARDS`` 候选生成的类型化载荷：选择面 + 配额，逐字进询问。"""
+    """``SELECT_CARDS`` 候选生成的类型化载荷：选择面 + 配额，逐字进询问。
+
+    ``skill_id`` 是**这一步属于哪条技能**（票 05）：发动后流水线的选牌步带发动技能的
+    全限定 id（取自 SKILL 帧），其余选牌窗口（顺、拆、五谷…）为 ``None``。它随询问落在
+    :class:`SelectCardsQuery` 上供**本地消费者**（启发式 AI 的成本语义）读取，
+    **不进记录流**（见该字段的 ``exclude``）——故既有 Golden Replay 一行不改。
+    """
 
     spec: SelectionSpec
     slots: tuple[Slot, ...]
+    skill_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,11 +454,18 @@ class RespondQuery(_QueryBase):
 
 
 class SelectCardsQuery(_QueryBase):
-    """选牌（票 19 §3）：选择面随询问**落盘**、不进 ``PlayerView``。"""
+    """选牌（票 19 §3）：选择面随询问**落盘**、不进 ``PlayerView``。
+
+    ``skill_id``（票 05）标识这一步属于哪条技能（发动后流水线的选牌步；别的窗口为
+    ``None``）。它让只看得见询问的**本地消费者**（启发式 AI）能分辨"这一步的成本语义"
+    ——【制衡】弃一张换一张 vs【仁德】把牌交出去。**不进记录流**（``exclude``，与
+    ``PlayerPublic.hero`` 同一姿态）：加字段不改既有 Golden Replay 的字节。
+    """
 
     kind: Literal["SELECT_CARDS"] = "SELECT_CARDS"
     spec: SelectionSpec
     slots: tuple[Slot, ...]
+    skill_id: str | None = Field(default=None, exclude=True)
 
 
 class SkillActivationQuery(_QueryBase):
