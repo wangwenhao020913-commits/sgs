@@ -1397,11 +1397,10 @@ def test_query_context_walks_the_jieyin_steps_with_their_own_wording() -> None:
     )
 
 
-def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_skills() -> None:
-    """没有 ``step_requirements`` 的技能仍读一句话的 summary（旧技能一字不改）。
+def test_query_context_walks_the_zhiheng_step_with_its_own_wording() -> None:
+    """【制衡】单步（票 04）也有自己的问法：``SELECT_CARDS`` 读 ``"card"`` 键。
 
-    样本 = 【制衡】（票 04 起就手写、到本批结束仍未分步）；【青囊】票 02 起有了逐步文案，
-    不再是这条回退面的样本。
+    单步技能没有第二条步骤文案，故只钉这一条；键的取法与【离间】/【青囊】/【结姻】同源。
     """
     engine, state = _context_fixture(
         [SeatSpec(hero="sunquan"), SeatSpec()],
@@ -1409,7 +1408,21 @@ def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_s
         frame_data={"skill_id": "hero.sunquan.zhiheng", "source": 0},
     )
 
-    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND, Zone.EQUIP))
-    assert query_context(engine, cards_query)["requirement"] == (
-        "弃置任意张牌（手牌 / 装备区），然后摸等量的牌"
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND, Zone.EQUIP), optional=True)
+    assert query_context(engine, cards_query)["requirement"] == "弃置任意张牌（手牌 / 装备区）"
+
+
+def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_skills() -> None:
+    """没有 ``step_requirements`` 的技能仍读一句话的 summary（旧技能一字不改）。
+
+    样本 = 【仁德】（本批唯一的"候选烘牌 × 目标、一步交出去"的多维主动技）；
+    【制衡】票 04 起有了逐步文案，不再是这条回退面的样本。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(hero="liubei"), SeatSpec()],
+        frame_kind=FrameKind.SKILL,
+        frame_data={"skill_id": "hero.liubei.rende", "source": 0},
     )
+
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,))
+    assert query_context(engine, cards_query)["requirement"] == "交给一名其他角色任意张手牌"

@@ -141,6 +141,12 @@ _ABORT_SKILL_PENALTY = -100.0
 与 :data:`_ILLEGAL_PENALTY` 同值但**语义不同**（那条是"这条应答本身不合法"），
 故各留一个常量，免得日后调一处误伤另一处。理由见 :func:`_is_committed_skill_step`。
 """
+_CYCLE_VALUE = 1.5
+"""「弃一张换一张」的每张期望增益（【制衡】的骨架候选与它的选牌步共用同一估值）。
+
+牌面价值低于它的牌才值得换掉；两处共用一个常量，保证"发不发动"与"弃哪几张"的
+模型一致（否则发动决策与随后的选牌步会各说各话）。
+"""
 _PLAY_PHASE_IDLE = "PHASE_PLAY_IDLE"
 """时机标识的**字面量**（:class:`~sgs.timing.Timing` 是 ``str`` 枚举，故可直接比）。
 
@@ -329,18 +335,42 @@ def _is_committed_skill_step(query: Query) -> bool:
     return any(getattr(action, "kind", None) == "Pass" for action in query.legal_actions)
 
 
+def _is_any_count_cost_step(query: Query) -> bool:
+    """这一步是不是"任意张自己的牌当成本"（``total=(lo, hi)`` 且 ``lo != hi``）。
+
+    目前只有【制衡】的骨架流水线产出这个形状：弃几张由玩家定，**每弃一张就换一张新牌**，
+    故选牌步不能像固定张数的成本步那样"取得越少越好"，而要按 :data:`_CYCLE_VALUE` 逐张估值。
+    """
+    spec = getattr(query, "spec", None)
+    if spec is None:
+        return False
+    low, high = getattr(spec, "total", (0, 0))
+    return low != high
+
+
 def _score_select_cards(query: Query, action: Action) -> float:
-    """``SELECT_CARDS``：选**别人的**牌取高价值、选**自己的**牌（成本）取低价值。"""
+    """``SELECT_CARDS``：选**别人的**牌取高价值、选**自己的**牌（成本）取低价值。
+
+    例外是【制衡】式"任意张自己的牌"（:func:`_is_any_count_cost_step`）：那一步每弃一张
+    会换回一张，故逐张按 ``_CYCLE_VALUE - 牌价`` 估值（恰好与 :func:`_score_zhiheng`
+    的骨架预估同一个模型）。
+    """
     assert isinstance(query, SelectCardsQuery)
     if not isinstance(action, SelectCards):
         return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
+    cycle = _is_committed_skill_step(query) and _is_any_count_cost_step(query)
     total = 0.0
     for index in action.picks:
         if not 0 <= index < len(query.slots):
             return _ILLEGAL_PENALTY
         slot = query.slots[index]
         value = _card_value(slot.card)
-        total += value if slot.ref.seat != query.view.seat else -value
+        if slot.ref.seat != query.view.seat:
+            total += value
+        elif cycle:
+            total += _CYCLE_VALUE - value
+        else:
+            total -= value
     return total
 
 
@@ -512,10 +542,26 @@ def _score_rende(query: Query, action: Action, view: PlayerView) -> float:
 
 
 def _score_zhiheng(query: Query, action: Action, view: PlayerView) -> float:
-    """【制衡】：弃任意张摸等量——净牌数不变、换质量；弃【桃】/【闪】按价值扣分。"""
+    """【制衡】：弃任意张摸等量——净牌数不变、换质量；弃【桃】/【闪】按价值扣分。
+
+    票 04 起候选是**骨架**（``picks`` 为空，弃几张改由发动后的 ``SELECT_CARDS`` 问）。
+    按下游那一步的实际选择预估：:func:`_score_select_cards` 对"任意张自己的牌"逐张按
+    :data:`_CYCLE_VALUE - 牌价` 估值 ⇒ 它会弃掉所有**低于换牌期望**的牌（手牌 ∪ 装备区），
+    这里就用同一组牌算同一笔账。旧公式 ``1.5 * len(picks) - picked_value`` 对骨架恒 0，
+    会让 AI 干脆不用【制衡】（与【结姻】票 03 同一类退化）。
+    """
     assert isinstance(action, ActivateSkill)
     del query
-    return 1.5 * len(action.picks) - _picked_value(view, action)
+    if action.picks:
+        return _CYCLE_VALUE * len(action.picks) - _picked_value(view, action)
+    mine = view.players[view.seat]
+    values = sorted(_card_value(card) for card in (*view.self_hand, *mine.equip))
+    count = sum(1 for value in values if value < _CYCLE_VALUE)
+    if count == 0:
+        # 没有值得换的牌，但 ``lo=1`` 仍逼着弃一张 ⇒ 发动只会白丢最便宜的那张。
+        # 给**负分**（而不是 0.0）：否则与"结束阶段"打平，AI 会随机把限一次的机会浪费掉。
+        return _CYCLE_VALUE - values[0] if values else 0.0
+    return _CYCLE_VALUE * count - sum(values[:count])
 
 
 def _score_qingnang(query: Query, action: Action, view: PlayerView) -> float:

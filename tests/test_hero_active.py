@@ -160,31 +160,48 @@ def _moves_of(engine, card_id: int) -> list[tuple[str, str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# 制衡（孙权）：弃任意张（手牌 + 装备区）→ 摸等量；一维 2ⁿ，不设闸
+# 制衡（孙权）：弃任意张（手牌 + 装备区）→ 摸等量
+#
+# 票 04：本技能是【制衡】**只有一步**的实例（``PickCards(HAND ∪ EQUIP, 1, n)``）——
+# 候选不再枚举 2ⁿ 个子集，恒一条骨架；"弃几张"由发动后的 ``SELECT_CARDS`` 询问
+# 声明上下限（``total=(1, n)``，``n`` = 手牌 ∪ 装备区张数）。
 # ---------------------------------------------------------------------------
 
 
-def test_zhiheng_offers_every_nonempty_subset_of_hand_and_equipment():
-    first, second = _cards("slash")[0], _cards("dodge")[0]
-    equip = _cards("jueying")[0]
-    state = build_state(
+def _zhiheng_state(hand: tuple[int, ...], equip: tuple[int, ...] = ()):
+    return build_state(
         pack=PACK,
-        seats=[SeatSpec(hand=(first, second), equip=(equip,), hero="sunquan"), SeatSpec()],
-        deck=_deck_excluding(first, second, equip),
+        seats=[SeatSpec(hand=hand, equip=equip, hero="sunquan"), SeatSpec()],
+        deck=_deck_excluding(*hand, *equip),
         turn_seat=0,
     )
 
-    picks = {action.picks for action in _offers(_play_candidates(state), ZHIHENG)}
 
-    assert picks == {
-        (first,),
-        (second,),
-        (equip,),
-        (first, second),
-        (first, equip),
-        (second, equip),
-        (first, second, equip),
-    }, "全组合 2ⁿ（跨手牌与装备区）且**弃 0 张不入池**"
+def test_zhiheng_offer_is_a_single_skeleton_candidate_however_many_cards():
+    """票 04：候选不再枚举"所有非空子集"，恒一条骨架 —— 手牌 8 张也不爆。
+
+    这条取代旧的 ``test_zhiheng_offers_every_nonempty_subset_of_hand_and_equipment``
+    （旧形状手牌 8 张约 255 条候选，整段询问随张数指数增长）。
+    """
+    hand = tuple(_cards("slash")[:4]) + tuple(_cards("dodge")[:4])
+    assert len(hand) == 8, "手牌 8 张：旧形状 2⁸ − 1 = 255 条候选"
+    state = _zhiheng_state(hand)
+
+    offers = _offers(_play_candidates(state), ZHIHENG)
+
+    assert len(offers) == 1, "一维 2ⁿ 的枚举消失：候选恒一条"
+    assert offers[0].picks == () and offers[0].choices == (), "载荷为空，改由发动后的步骤询问"
+    assert len(_play_candidates(state)) <= CANDIDATE_CAP, "整段询问不随张数增长"
+
+
+def test_zhiheng_candidate_count_is_constant_across_hand_sizes():
+    """候选数与手牌 / 装备区张数无关（8 张与 2 张都是同一条骨架）。"""
+    hand = tuple(_cards("slash")[:8])
+    small = _offers(_play_candidates(_zhiheng_state(hand[:2])), ZHIHENG)
+    large = _offers(_play_candidates(_zhiheng_state(hand)), ZHIHENG)
+
+    assert len(small) == len(large) == 1
+    assert small[0].picks == large[0].picks == ()
 
 
 def test_zhiheng_is_not_offered_without_any_card_to_discard():
@@ -198,27 +215,93 @@ def test_zhiheng_is_not_offered_without_any_card_to_discard():
     assert not _offers(_play_candidates(state), ZHIHENG), "付不起的组合不进池"
 
 
-def test_zhiheng_discards_by_source_zone_and_draws_the_same_count():
-    first, second = _cards("slash")[0], _cards("dodge")[0]
-    equip = _cards("jueying")[0]
-    state = build_state(
-        pack=PACK,
-        seats=[SeatSpec(hand=(first, second), equip=(equip,), hero="sunquan"), SeatSpec()],
-        deck=_deck_excluding(first, second, equip),
-        turn_seat=0,
+def _slot_indices(query, card_ids: tuple[int, ...]) -> tuple[int, ...]:
+    """选择面上这些实体牌的位置（``selection_face(reveal_hand=True)`` 下槽位可读牌面）。"""
+    wanted = set(card_ids)
+    return tuple(
+        index
+        for index, slot in enumerate(query.slots)
+        if slot.card is not None and slot.card.card_id in wanted
     )
 
-    def zhiheng(query):
+
+def _zhiheng_driver(
+    *,
+    pick: tuple[int, ...] | None = None,
+    cancel: bool = False,
+    on_cards=None,
+):
+    """按**新流程**应答：点【制衡】→ 在唯一的 ``SELECT_CARDS`` 步一次选完。"""
+
+    def driver(query):
         if query.kind == QueryKind.PLAY_PHASE:
             return _find(
                 query,
-                lambda action: isinstance(action, ActivateSkill)
-                and action.skill_id == ZHIHENG
-                and set(action.picks) == {first, equip},
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == ZHIHENG,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            if on_cards is not None:
+                on_cards(query)
+            if cancel:
+                return _find(query, lambda action: isinstance(action, Pass))
+            if pick is not None:
+                indices = _slot_indices(query, pick)
+                return _find(
+                    query,
+                    lambda action: isinstance(action, SelectCards) and action.picks == indices,
+                )
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and len(action.picks) == 1
             )
         return _decline(query)
 
-    engine = _run(state, [Scripted(zhiheng), Scripted(_decline)], _skill_frame_popped)
+    return driver
+
+
+def test_zhiheng_step_declares_any_number_from_one_up_to_the_whole_pool():
+    """票 04："任意张"的上下限由**步骤声明**表达：``total=(1, 手牌 ∪ 装备区张数)``。
+
+    上限是执行器按真实池解析出的 ``hi=None``（不是写死的大哨兵）⇒ 前端看到的选择面
+    与引擎候选面同源；下限 ``lo=1`` ⇒ 空选不是合法提交。
+    """
+    hand = tuple(_cards("slash")[:3])
+    equip = (_cards("jueying")[0],)
+    state = _zhiheng_state(hand, equip)
+    observed: list[tuple[tuple[int, int], int, list[tuple[int, ...]]]] = []
+
+    def observe(query):
+        empty_picks = [
+            action.picks
+            for action in query.legal_actions
+            if isinstance(action, SelectCards) and action.picks == ()
+        ]
+        observed.append((tuple(query.spec.total), len(query.slots), empty_picks))
+
+    engine = _run(
+        state,
+        [Scripted(_zhiheng_driver(pick=(hand[0],), on_cards=observe)), Scripted(_decline)],
+        _skill_frame_popped,
+    )
+
+    assert len(observed) == 1, "单步流水线只发一次选牌询问"
+    (lo, hi), pool, empty_picks = observed[0]
+    assert lo == 1, "下限 1：0 张不是合法提交"
+    assert hi == pool > 1, "上限 = 全部可选牌（执行器按真实池解析，不是写死的小值）"
+    assert not empty_picks, "lo=1 ⇒ 候选里没有 picks == ()"
+    assert engine.state.player(0).hand, "牌都在（本用例只观察询问，不要求弃牌）"
+
+
+def test_zhiheng_discards_by_source_zone_and_draws_the_same_count():
+    """单步流水线：一次选出的牌按来源区弃置，再摸**等量**的牌。"""
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    equip = _cards("jueying")[0]
+    state = _zhiheng_state((first, second), (equip,))
+
+    engine = _run(
+        state,
+        [Scripted(_zhiheng_driver(pick=(first, equip))), Scripted(_decline)],
+        _skill_frame_popped,
+    )
 
     assert first in engine.state.discard and equip in engine.state.discard
     assert second in engine.state.player(0).hand, "没被选中的牌留在手里"
@@ -227,6 +310,44 @@ def test_zhiheng_discards_by_source_zone_and_draws_the_same_count():
     assert ("equip", "discard", "DISCARD") in _moves_of(engine, equip)
     # 起始 2 张 + 摸牌阶段 2 张 − 制衡弃 1 张手牌 + 制衡摸 2 张 = 5。
     assert len(engine.state.player(0).hand) == 5, "摸牌数与弃置数相等（弃 2 摸 2）"
+
+
+def _zhiheng_offered_after_cancel(engine) -> bool:
+    """取消之后**同一出牌阶段**又挂起了含【制衡】候选的 PLAY_PHASE 询问。"""
+    if not _skill_frame_popped(engine):
+        return False
+    pending = engine.pending
+    return (
+        pending is not None
+        and pending.kind == QueryKind.PLAY_PHASE.value
+        and any(
+            isinstance(action, ActivateSkill) and action.skill_id == ZHIHENG
+            for action in pending.legal_actions
+        )
+    )
+
+
+def test_zhiheng_cancel_leaves_the_table_untouched_and_the_skill_available():
+    """唯一一步取消 ⇒ 手牌 ∪ 装备区原样、弃牌堆为空、未摸牌、同一阶段还能再发动。"""
+    card = _cards("slash")[0]
+    equip = _cards("jueying")[0]
+    state = _zhiheng_state((card,), (equip,))
+    faces: list[set[int]] = []
+
+    def sunquan(query):
+        if query.kind == QueryKind.SELECT_CARDS:
+            faces.append({slot.card.card_id for slot in query.slots})
+        return _zhiheng_driver(cancel=True)(query)
+
+    engine = _run(state, [Scripted(sunquan), Scripted(_decline)], _zhiheng_offered_after_cancel)
+    player = engine.state.player(0)
+
+    assert faces, "唯一的选牌步一定要先发生"
+    assert faces[-1] == set(player.hand) | set(player.equip), "选择面 = 手牌 ∪ 装备区"
+    assert card in player.hand and equip in player.equip, "选择只收集、提交才生效"
+    assert not engine.state.discard, "弃牌堆为空 —— 成本没有被执行"
+    assert len(player.hand) == 3, "没有制衡摸牌（起始 1 + 摸牌阶段 2）"
+    assert _zhiheng_offered_after_cancel(engine), "取消不消耗次数：同一阶段仍可再发动"
 
 
 def test_a_used_active_skill_disappears_from_the_next_play_phase_query():

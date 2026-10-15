@@ -8,8 +8,8 @@
   "检测点 ≠ 终止点"分支）；``SGS_FUZZ_PLAYERS`` 可覆盖成固定人数。
 - 逐局验不变量：**牌守恒 / 体力范围 / 区域互斥 / 手牌上限 / 事件序号单调 / 每局必达终局 /
   终局牌守恒**，外加票 32 新增的四类：**阵亡者三区为空 / 装备槽位唯一 / 判定区同名唯一 /
-  终局身份-胜负一致**，以及票 04 新增、票 14 收口的**候选数上界**（任何询问 ≤ 128；
-  四条一维枚举按票 10 的 `DiscardCards` 先例逐条豁免，显式表见
+  终局身份-胜负一致**，以及票 04 新增、票 14 收口的**候选数上界**（技能层两维组合 ≤ 128；
+  五条一维枚举按票 10 的 `DiscardCards` 先例逐条豁免，显式表见
   :data:`EXEMPT_ONE_DIMENSIONAL_FAMILIES`、裁定口径见 :func:`_check_candidate_cap`）。
 - **不进 fuzz**：同时死亡、无懈链、改判——它们是**路径性质**，随机局不保证命中，
   落基准与构造局面单测更可判决（票 17 §2）。
@@ -51,6 +51,7 @@ from sgs.state import (
     FrameKind,
     GameState,
     PlayPhaseQuery,
+    SelectCards,
     SlotKind,
     UseCard,
     Zone,
@@ -274,7 +275,7 @@ def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> Non
 
     **审计口径**：上界只审**两维相乘**的技能候选——`spec.md` 的 §机制面的统一约定 明写
     "组合爆炸只对**两维相乘**的技能加闸（上界 128）"，一维的子集枚举与询问级的排列各有其
-    天然的、**不属于技能层**的组合空间。按票 10 建议的"`DiscardCards` 先例"，四条一维枚举
+    天然的、**不属于技能层**的组合空间。按票 10 建议的"`DiscardCards` 先例"，五条一维枚举
     逐条豁免，表在 :data:`EXEMPT_ONE_DIMENSIONAL_FAMILIES`（含每条的"为什么不是两维技能
     组合"）；`.scratch/m3-standard-heroes/map.md` 的 Decisions-so-far 第 7 轮（C6）记了这条
     裁定的完整口径——**为什么字面判据"任何询问 ≤ 128"无法在不改 M2 行为的前提下满足**。
@@ -347,7 +348,7 @@ EXEMPT_ONE_DIMENSIONAL_FAMILIES: tuple[_ExemptFamily, ...] = (
     ),
     _ExemptFamily(
         "ActivateSkill(choices=())",
-        "一维成本子集：制衡的 2ⁿ 按票 04 不设闸（只动 picks、不动目标维）",
+        "一维成本子集：只动 ``picks``、不动目标维（票 04 的裁定：一维 2ⁿ 不设闸）",
         lambda action: isinstance(action, ActivateSkill) and not action.choices,
     ),
     _ExemptFamily(
@@ -355,8 +356,14 @@ EXEMPT_ONE_DIMENSIONAL_FAMILIES: tuple[_ExemptFamily, ...] = (
         "M2 转化族的两张组合（丈八蛇矛 C(n,2)，票 08 实测 135）",
         lambda action: isinstance(action, UseCard) and bool(action.card.virtual_sources),
     ),
+    _ExemptFamily(
+        "SelectCards",
+        "``SELECT_CARDS`` 的 C(n, lo..hi) 子集面：与 ``DiscardCards`` 同一类的一维枚举"
+        "（票 04 迁移后【制衡】的任意张走这里；询问级候选，非技能层两维组合）",
+        lambda action: isinstance(action, SelectCards),
+    ),
 )
-"""四条一维枚举豁免的**显式表**（C6：审计口径自文档化，判据与理由同处一张表）。
+"""五条一维枚举豁免的**显式表**（C6：审计口径自文档化，判据与理由同处一张表）。
 
 顺序 = 票 10 的文档顺序；增删一条必须同时改这里与元测试的样本表，
 故"悄悄放宽审计"会直接判红。
@@ -364,7 +371,7 @@ EXEMPT_ONE_DIMENSIONAL_FAMILIES: tuple[_ExemptFamily, ...] = (
 
 
 def _is_one_dimensional_enumeration(action: object) -> bool:
-    """四族**一维枚举**候选的机械判据（= :data:`EXEMPT_ONE_DIMENSIONAL_FAMILIES` 的并集）。"""
+    """五族**一维枚举**候选的机械判据（= :data:`EXEMPT_ONE_DIMENSIONAL_FAMILIES` 的并集）。"""
     return any(family.matches(action) for family in EXEMPT_ONE_DIMENSIONAL_FAMILIES)
 
 
@@ -926,14 +933,14 @@ def test_the_candidate_cap_checker_exempts_rende_by_design():
 
 
 def test_the_candidate_cap_checker_exempts_the_one_dimensional_enumerations():
-    """四族一维枚举都放行，且**豁免表与样本一一对应**（票 14 §3 的审计口径 / C6）。
+    """五族一维枚举都放行，且**豁免表与样本一一对应**（票 14 §3 的审计口径 / C6）。
 
     这条是豁免规则的机械覆盖：
-    ① 表恰四条、每条都有非空理由；
+    ① 表恰五条、每条都有非空理由；
     ② 每条理由对应的候选样本**命中**该族判据；
     ③ 每条样本哪怕堆到 ``CANDIDATE_CAP + 1`` 也不报错（= 真的被放行）。
     """
-    assert len(EXEMPT_ONE_DIMENSIONAL_FAMILIES) == 4, "豁免表恰四族（C6 的裁定）"
+    assert len(EXEMPT_ONE_DIMENSIONAL_FAMILIES) == 5, "豁免表恰五族（C6 的裁定 + 票 04 的 SelectCards）"
     assert all(family.rationale for family in EXEMPT_ONE_DIMENSIONAL_FAMILIES), (
         "每条豁免都必须写明『为什么不是两维技能组合』"
     )
@@ -957,6 +964,9 @@ def test_the_candidate_cap_checker_exempts_the_one_dimensional_enumerations():
         ],
         "UseCard(virtual_sources≠())": [
             UseCard(card=virtual, targets=(), answers_seq=1) for _ in range(over_cap)
+        ],
+        "SelectCards": [
+            SelectCards(picks=(0,), answers_seq=1) for _ in range(over_cap)
         ],
     }
 

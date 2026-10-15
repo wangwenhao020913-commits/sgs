@@ -1482,6 +1482,68 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!sentJieyinSeat && sentJieyinSeat.kind === "Pass", JSON.stringify(sentJieyinSeat));
 }
 
+/* ============ 票 04（合成局面）：【制衡】单步流水线 —— 任意张 + 取消送出 Pass ============
+ *
+ * 只有一步：一条 `SELECT_CARDS` 覆盖**手牌 ∪ 装备区**、`total = (1, 全部可选)`。钉四件事：
+ * 文案是服务端那句、选择面同时铺出手牌与装备区、上限是**真实池大小**而不是哨兵值、
+ * 有 `Pass` 时取消按钮**送出一条候选**。
+ */
+{
+  const handCard = synthCard(51, "杀");
+  const equipCard = { ...synthCard(52, "的卢"), type: "mount" };
+  const zhihengSkill = {
+    skill_id: "hero.sunquan.zhiheng", name: "制衡", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true,
+    ui: {
+      requirement: "弃置任意张牌（手牌 / 装备区），然后摸等量的牌", manual: false,
+      pick_cards: [], pick_seats: [], convert_sources: [],
+    },
+  };
+
+  const pickView = synthView({
+    kind: "SELECT_CARDS", actor: 0, seq: 940, prompt: "请从选择面里选择任意张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 940, picks: [0] },
+      { kind: "SelectCards", answers_seq: 940, picks: [0, 1] },
+      { kind: "Pass", answers_seq: 940 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "hand" }, card: handCard },
+      { ref: { seat: 0, zone: "equip" }, card: equipCard },
+    ],
+    spec: { zones: ["hand", "equip"], total: [1, 2], sequential: false, optional: true },
+    context: { requirement: "弃置任意张牌（手牌 / 装备区）", skill_hints: [] },
+  });
+  pickView.skills = [zhihengSkill];
+  pickView.heroes = { 0: "sunquan", 1: "guanyu" };
+  pickView.snapshot.self_hand = [handCard];
+  pickView.snapshot.players[0].equip = [equipCard];
+  ui.state.view = pickView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pickView);
+
+  check("㉿Z1 单步的询问区文案就是服务端那句「弃置任意张牌（手牌 / 装备区）」",
+    $("t-prompt").textContent === "弃置任意张牌（手牌 / 装备区）",
+    `"${$("t-prompt").textContent}"`);
+  check("㉿Z2 选择面同时铺出手牌与自己的装备区（2 个块 / 共 2 个槽）",
+    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 2,
+    `块=${$("t-options").children.length}`);
+  check("㉿Z3 「任意张」的上限是**真实池大小**（服务端解析 hi=None，不进哨兵值）",
+    JSON.stringify(pickView.pending.spec.total) === "[1,2]",
+    JSON.stringify(pickView.pending.spec.total));
+  check("㉿Z4 候选里有 Pass ⇒ 取消按钮可点", $("btn-cancel").disabled === false,
+    `disabled=${$("btn-cancel").disabled}`);
+
+  ui.state.sessionId = "smoke-missing-session";
+  const beforePick = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
+  check("㉿Z5 点取消 = **送出一条 Pass 候选**",
+    !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
+}
+
 /* ============ 报障 3（合成局面）：事件逐个回放 + 效果区逐事件派生 ============ */
 {
   const moveIn = {

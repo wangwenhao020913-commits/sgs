@@ -20,8 +20,8 @@ A 族与其他族的形态差别只有一处：它的候选**不是某张牌的*
 **组合上限闸**（票 04 §要做什么 3）：**两维相乘**的技能（旧【结姻】2 张 × 目标）在
 组合数 > :data:`CANDIDATE_CAP` 时**降级为顺序多轮**——候选只保留"目标"这一维，张数由
 发动后的 ``SelectionSpec(sequential=True)`` 逐张询问补齐；**结果集合不变**（逐张给与一次
-给到达同一终局）。一维的 2ⁿ（【制衡】）与一维的目标对（【反间】）按票面**不设闸**。
-【离间】（票 01）、【青囊】（票 02）与【结姻】（票 03）先后改走骨架候选 +
+给到达同一终局）。一维的目标对（【反间】）按票面**不设闸**。
+【离间】（票 01）、【青囊】（票 02）、【结姻】（票 03）与【制衡】（票 04）先后改走骨架候选 +
 :class:`SkillFlow` 步骤流水线 ⇒ 候选恒一条、与手牌数无关；**这条降级路径在本族已无消费者**
 （:func:`_over_cap` / :func:`_pay_sequential` 按 design.md §7 Q4 先留，待后置票统一清除）。
 
@@ -93,7 +93,7 @@ CANDIDATE_CAP = 128
 """单次询问候选数的组合上限（票 04 §要做什么 3 / `spec.md` §机制面的统一约定）。
 
 只对**两维相乘**的技能启用；本批 A 族已无消费者——【结姻】（票 03）迁走后，"牌 × 目标"
-的枚举在本族绝迹（【离间】/【青囊】/【结姻】恒骨架候选，【制衡】/【反间】按票面不设闸）。
+的枚举在本族绝迹（【离间】/【青囊】/【结姻】/【制衡】恒骨架候选，【反间】按票面不设闸）。
 旧原语按 design.md §7 Q4 **先留**，待后置票统一清除。
 """
 
@@ -322,11 +322,17 @@ class PickCards:
 
     ``key`` 是帧内 ``ask_selection`` 的缓存键，也是效果读取答案的键（同一条流水线里唯一）；
     ``optional=True`` 给一条 ``Pass`` = 取消整条流水线。
+
+    ``hi=None`` = **"全部可选牌"**（票 04）：执行器在发问前把它解析成
+    :func:`_zone_pool_size`（``zones`` 此刻对 ``actor`` 铺出的槽位数），故
+    ``spec.total`` 里进的是**真实上限**，前端看到的选择面与引擎的候选面同源。
+    【制衡】的"任意张"正是这个形状；写死一个大哨兵值（如 999）虽被
+    ``_select_cards`` 夹住、功能上安全，但会把一个不存在的上限投影给前端。
     """
 
     zones: tuple[Zone, ...]
     lo: int
-    hi: int
+    hi: int | None
     optional: bool = True
     key: str = "card"
     actor: ActorRef = None
@@ -402,17 +408,29 @@ def _flow_option_id(frame: Any, key: str, index: int, *, multi: bool) -> str:
     return f"{short}:{key}:{index}" if multi else f"{short}:{key}"
 
 
+def _zone_pool_size(state: GameState, seat: int, zones: tuple[Zone, ...]) -> int:
+    """``zones`` 此刻对 ``seat`` 铺出的槽位数（``PickCards.hi=None`` 的解析真源）。
+
+    唯一入口是 :meth:`GameState.zone`（与 :meth:`Engine.selection_face` 铺面读到的是同一
+    份区域列表），故投影给前端的 ``spec.total`` 上限与引擎真实的选择面**同源**，不写死、
+    不猜。``selection_face(..., reveal_hand=True)`` 下隐藏手牌也是逐张铺槽，故槽位数 =
+    各区域张数之和。
+    """
+    return sum(len(state.zone(ZoneRef(zone, seat))) for zone in zones)
+
+
 def _flow_step_cards(
     host: Any, frame: Any, step: PickCards, owner: int, answers: FlowAnswers
 ) -> tuple[str, object]:
     """跑一步选牌：返回 ``("stay", ())`` / ``("cancel", ())`` / ``("ok", picks)``。"""
     actor = _flow_actor(step, host.state, owner, answers)
+    hi = step.hi if step.hi is not None else _zone_pool_size(host.state, actor, step.zones)
     picks = host.ask_selection(
         frame,
         key=step.key,
         actor=actor,
         timing=Timing.PHASE_PLAY_IDLE,
-        spec=SelectionSpec(zones=step.zones, total=(step.lo, step.hi), optional=step.optional),
+        spec=SelectionSpec(zones=step.zones, total=(step.lo, hi), optional=step.optional),
         build_face=lambda: host.selection_face(actor, step.zones, reveal_hand=True),
     )
     if host.suspended(picks):
@@ -514,35 +532,42 @@ def flow_handler(flow: SkillFlow) -> ActivationHandler:
 
 
 # ---------------------------------------------------------------------------
-# 孙权【制衡】：弃任意张（手牌 + 装备区）→ 摸等量（一维 2ⁿ，不设闸）
+# 孙权【制衡】：弃任意张（手牌 + 装备区）→ 摸等量
+#
+# 票 04：本技能是 :class:`SkillFlow` **只有一步**的第一个实例（票 01/02/03 都是两步）：
+# ``PickCards(HAND ∪ EQUIP, 1, None)`` → 弃置那几张、摸等量。旧的 2ⁿ 全枚举
+# （手牌 8 张约 255 条候选）随之删除；"任意张"的上下限由步骤声明表达：
+# 下限 ``lo=1``（0 张不是合法提交）、上限 ``hi=None``（= 全部可选牌，执行器解析）。
 # ---------------------------------------------------------------------------
 
 
 def _zhiheng_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    # 一维 2ⁿ：按票 04 §要做什么 3，**不设闸**（组合上限只对两维相乘的技能启用）。
     if not _can_offer(state, ctx):
         return current
     player = state.player(ctx.subject)
-    cards = (*player.hand, *player.equip)
-    return (
-        *current,
-        *(
-            ActivateSkill(skill_id=ctx.skill_id, picks=picks, answers_seq=ctx.answers_seq)
-            for size in range(1, len(cards) + 1)
-            for picks in combinations(cards, size)
-        ),
-    )
+    if not player.hand and not player.equip:
+        return current
+    # 票 04：候选**恒为一条骨架**（与【离间】/【青囊】/【结姻】同姿态），不再烘 2ⁿ 个子集。
+    # 弃哪几张改由发动后的步骤流水线问 ⇒ 候选数与手牌数、装备数无关。
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
 
-def _zhiheng_activate(host: Any, frame: Any) -> Any:
-    state = host.state
+def _zhiheng_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：按来源区弃置选中的牌，再摸**等量**的牌（``_USED`` 已由执行器落位）。"""
     owner = frame.data["source"]
-    _mark_phase(state, owner, frame.data["skill_id"], _USED)
-    picks = tuple(frame.data.get("picks", ()))
-    if _move_to_discard(host, frame, picks, owner=owner, key="zhiheng:cost") == "stay":
+    cards = answers["card"]
+    assert isinstance(cards, tuple)
+    if _move_to_discard(host, frame, cards, owner=owner, key="zhiheng:cost") == "stay":
         return "stay"
-    host.draw_for_hand(frame, owner, len(picks))
+    host.draw_for_hand(frame, owner, len(cards))
     return None
+
+
+ZHIHENG_FLOW = SkillFlow(
+    steps=(PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=1, hi=None, key="card"),),
+    effect=_zhiheng_effect,
+)
+"""【制衡】的单步流水线：弃任意张（手牌 ∪ 装备区、非空）→ 摸等量（票 04）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -993,8 +1018,8 @@ class ActiveSkill(HeroSkillDecl):
 
 
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
-    # 孙权【制衡】：弃任意张（手牌 + 装备区）→ 摸等量（规则 1009）。
-    ActiveSkill("sunquan", "zhiheng", _zhiheng_offers, _zhiheng_activate),
+    # 孙权【制衡】：弃任意张（手牌 + 装备区）→ 摸等量（规则 1009）；票 04 的单步流水线。
+    ActiveSkill("sunquan", "zhiheng", _zhiheng_offers, flow=ZHIHENG_FLOW),
     # 刘备【仁德】：给一名其他角色任意张手牌；本阶段首次给到第 2 张回复 1 点（规则 976）。
     ActiveSkill("liubei", "rende", _rende_offers, _rende_activate),
     # 周瑜【反间】：令一名其他角色选花色 → 获得并展示你的一张手牌 → 花色不同则受伤（规则 1017）。
@@ -1037,6 +1062,10 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
         "card": "弃置1张牌",
         "user": "选择场上两名男性角色，先点选的是决斗使用者，后点选的是决斗的目标",
         "victim": "选择场上两名男性角色，先点选的是决斗使用者，后点选的是决斗的目标",
+    },
+    "zhiheng": {
+        # 单步技能（票 04）：唯一的 ``SELECT_CARDS`` 恒读 ``"card"``（与【青囊】同一套键）。
+        "card": "弃置任意张牌（手牌 / 装备区）",
     },
     "qingnang": {
         # 键的取法同【离间】：``SELECT_CARDS`` 恒读 ``"card"``（技能帧的那一步选牌），

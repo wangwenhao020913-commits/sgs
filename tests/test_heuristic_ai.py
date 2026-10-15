@@ -590,39 +590,59 @@ def _candidate_wins(seed: int, *, heuristic: bool) -> bool:
     return 0 in set(engine.records[-1].winners)
 
 
-def _candidate_wins_over(seeds: tuple[int, ...], *, heuristic: bool) -> int:
-    """跑完一批种子、数座位 0 的胜局；任一局崩溃都**点名报出**（不静默缩小批次）。
+RATE_SEEDS: tuple[int, ...] = tuple(range(104, 232))
+"""**绝对胜率**的种子批（票 13 §验收 6 的 128 局裁定，见 design.md §9 的裁定记录）。
 
-    票 13 §验收 6 要求在**验收 5 的同一批 5 人种子**上比较；随机档遇崩溃时不能悄悄
-    减种子，故这里收集失败清单并整条判红。
+32 种子的验收批（:data:`~support.ACCEPTANCE_SEEDS`）在阈值 19.2 上是**刀尖平衡**：实测
+19–21，每次引擎迁移（技能改走步骤流水线、候选次序修正）都会把它抖动 ±2，而启发式的真实
+胜率约 0.63–0.75（随种子区间、以及座位 0 被发到的身份而变）。故**绝对胜率**放到 128 局
+上估计（标准差 ~0.04，不再刀尖），**"同一批种子上的优势"仍按原 32 种子批**判。
+"""
+
+
+def _candidate_wins_over(seeds: tuple[int, ...], *, heuristic: bool) -> dict[int, bool]:
+    """跑完一批种子，返回 ``seed -> 座位 0 是否获胜``；任一局崩溃都**点名报出**。
+
+    返回**逐种子结果**（而不是只返回总数），好让同一次运行同时供两个判据用：绝对胜率读
+    整个 :data:`RATE_SEEDS`，相对优势读它的 :data:`~support.ACCEPTANCE_SEEDS` 子集 ——
+    两处都不必把对局再跑一遍。随机档遇崩溃时不能悄悄减种子，故收集失败清单并整条判红。
     """
-    wins = 0
+    wins: dict[int, bool] = {}
     failures: list[str] = []
     for seed in seeds:
         try:
-            wins += _candidate_wins(seed, heuristic=heuristic)
+            wins[seed] = _candidate_wins(seed, heuristic=heuristic)
         except Exception as error:  # noqa: BLE001 - 崩溃即失败，但要报出是哪个种子
             failures.append(f"seed={seed}: {type(error).__name__}: {error}")
     assert not failures, (
-        "5 人 32 种子批里有对局没跑完（不得静默缩小批次）：\n" + "\n".join(failures)
+        "5 人种子批里有对局没跑完（不得静默缩小批次）：\n" + "\n".join(failures)
     )
     return wins
 
 
 def test_the_heuristic_beats_random_on_the_same_seeds():
-    """票 13 §验收 6：**同一批种子**（= 验收 5 的 5 人 32 种子批）上启发式胜率显著更高。
+    """票 13 §验收 6：同一批种子上启发式胜率显著更高。
+
+    判据分两处（用户裁定）：**绝对胜率 ≥ 0.6** 在 :data:`RATE_SEEDS`（128 局）上判
+    ——32 局时它是刀尖平衡；**比随机多赢 ≥ 1/4 的种子**仍在验收 5 的原批
+    （:data:`~support.ACCEPTANCE_SEEDS`）上判。
 
     座位 0 为候选、其余四席随机：同一种子下两臂的局面逐字节相同，故胜率差只反映档位。
-    判据刻意宽松（启发式 ≥ 0.6 且比随机多赢 ≥ 1/4 的种子），避免脆弱。
     """
+    heuristic = _candidate_wins_over(RATE_SEEDS, heuristic=True)
+    random = _candidate_wins_over(RATE_SEEDS, heuristic=False)
+
+    won = sum(heuristic.values())
+    rate = won / len(RATE_SEEDS)
+    assert rate >= 0.6, (
+        f"启发式座位 0 在 {len(RATE_SEEDS)} 局里只赢了 {won} 局（{rate:.3f}），低于 0.6"
+    )
+
     seeds = ACCEPTANCE_SEEDS
-
-    heuristic_wins = _candidate_wins_over(seeds, heuristic=True)
-    random_wins = _candidate_wins_over(seeds, heuristic=False)
-
-    assert heuristic_wins / len(seeds) >= 0.6, f"启发式座位 0 只赢了 {heuristic_wins}/32"
-    assert heuristic_wins - random_wins >= len(seeds) // 4, (
-        f"启发式 {heuristic_wins}/32 vs 随机 {random_wins}/32："
+    hero = sum(heuristic[seed] for seed in seeds)
+    baseline = sum(random[seed] for seed in seeds)
+    assert hero - baseline >= len(seeds) // 4, (
+        f"启发式 {hero}/32 vs 随机 {baseline}/32："
         f"优势不足（票 13 §验收 6 的宽松判据）"
     )
 
