@@ -24,14 +24,16 @@ from sgs.data import load_content_pack
 from sgs.engine import Engine
 from sgs.skills import Hook, Seam, catalog as catalog_module
 from sgs.skills.damage_after import FANKUI_FLOW, fankui_step_key
-from sgs.skills.flow import PickCards, SkillFlow
+from sgs.skills.flow import PickCards, SkillFlow, _flow_step_cards
 from sgs.state import (
     FrameKind,
     Pass,
     QueryKind,
     SelectCards,
     SelectCardsQuery,
+    Slot,
     Zone,
+    ZoneRef,
 )
 from sgs.timing import Timing
 
@@ -262,3 +264,65 @@ def test_fankui_runs_once_for_a_two_point_damage_event():
     assert len(simayi.selections) == 1, "【反馈】不是逐点技：一次伤害事件只问一次"
     assert len(engine.state.player(1).hand) == 1, "只搬一张"
     assert len(engine.state.player(0).hand) == 1, "来源还剩一张"
+
+
+# ---------------------------------------------------------------------------
+# ⑥ PickCards.card_types（票 09）：牌名白名单过滤 + hi=None 与过滤后池同源
+# ---------------------------------------------------------------------------
+
+
+def test_pick_cards_card_types_filter_narrows_the_face_and_the_hi_none_limit():
+    """``hi=None`` + ``card_types``：上限与选择面一起按**过滤后**的池算（票 09）。
+
+    直接对执行器跑一步（最小宿主，只实现 :func:`run_flow` 用到的四个方法）：
+    手牌 = 【杀】×2 + 【桃】×1，白名单 = ``("slash",)`` ⇒ 投影给前端的 ``total``
+    上限是 **2**（不是手牌 3 张），选择面也只有那两张【杀】。
+    """
+    slashes = tuple(_cards("slash")[:2])
+    peach = _cards("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(*slashes, peach)), SeatSpec()],
+        deck=_deck_excluding(*slashes, peach),
+        turn_seat=0,
+    )
+    seen: dict[str, object] = {}
+
+    class _Host:
+        def __init__(self) -> None:
+            self.state = state
+
+        @staticmethod
+        def suspended(value) -> bool:
+            return value == "SUSPEND"
+
+        @staticmethod
+        def selection_face(seat, zones, *, reveal_hand):
+            del reveal_hand
+            slots, card_ids = [], []
+            for zone in zones:
+                for card_id in state.zone(ZoneRef(zone, seat)):
+                    slots.append(Slot(ref=ZoneRef(zone, seat), card=state.card(card_id)))
+                    card_ids.append(card_id)
+            return tuple(slots), tuple(card_ids)
+
+        @staticmethod
+        def ask_selection(frame, *, key, actor, timing, spec, build_face):
+            del frame, key, actor, timing
+            slots, _card_ids = build_face()
+            seen["total"] = spec.total
+            seen["offered"] = [slot.card.card_id for slot in slots]
+            return (0,)
+
+    step = PickCards(
+        zones=(Zone.HAND,),
+        lo=1,
+        hi=None,
+        optional=False,
+        card_types=("slash",),
+    )
+
+    _flow_step_cards(_Host(), _Frame(source=0), step, 0, {}, Timing.PHASE_PLAY_IDLE)
+
+    assert seen["total"] == (1, 2), "上限 = 过滤后的池大小（2 张【杀】），不是手牌 3 张"
+    assert seen["offered"] == list(slashes), "选择面也只铺【杀】"

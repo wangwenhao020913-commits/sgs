@@ -1534,6 +1534,31 @@ def test_query_context_walks_the_jieyin_steps_with_their_own_wording() -> None:
     )
 
 
+def test_query_context_reads_the_equipment_cost_steps_own_wording() -> None:
+    """【青龙偃月刀】/【贯石斧】的成本步也报得出"需要做什么"（票 09）。
+
+    两条是**装备接缝**（``SeamKind.SLASH_CANCELED``）上的被动技：迁移后成本从发动候选
+    下沉成 ``SELECT_CARDS`` 步，归属仍由派发环写的帧内 ``running_skill`` 给出（与
+    【反馈】/【流离】同一条链），步骤键仍是 ``SELECT_CARDS`` 的既有约定 ``"card"``。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(equip=(cards_of_type(_context_pack(), "axe")[0],)), SeatSpec()],
+        frame_kind=FrameKind.USE,
+        frame_data={
+            "source": 0,
+            "targets": (1,),
+            "running_skill": "equip.axe",
+            "skill_id": "equip.axe",
+        },
+    )
+
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND, Zone.EQUIP))
+
+    assert query_context(engine, cards_query)["requirement"] == (
+        "弃置两张牌（手牌 / 装备区）令此【杀】依然造成伤害"
+    )
+
+
 def test_query_context_walks_the_zhiheng_step_with_its_own_wording() -> None:
     """【制衡】单步（票 04）也有自己的问法：``SELECT_CARDS`` 读 ``"card"`` 键。
 

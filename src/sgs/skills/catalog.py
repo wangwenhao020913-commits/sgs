@@ -60,7 +60,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .flow import SkillFlow, run_flow
+from .flow import FlowAnswers, PickCards, SkillFlow, run_flow, zone_pool_size
 from .virtual import card_ids, grouped_candidates
 
 __all__ = [
@@ -654,31 +654,36 @@ def _default_plan(state: GameState, frame: Frame, instance: SkillInstance) -> Ac
 
 
 def _axe_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
-    player = state.player(instance.owner)
-    payable = len(player.hand) + len(player.equip)
-    available = frame.data.get("source") == instance.owner and payable >= 2
-    return ActivationPlan(
-        zones=(Zone.HAND, Zone.EQUIP),
-        min_picks=2,
-        max_picks=2,
-        optional=True,
-        available=available,
+    """【贯石斧】：只有**自己的**【杀】被抵消、且能弃两张牌时才发动。
+
+    票 09 起发动询问是**裸"是否发动"**（``available`` 保留）：成本（弃两张）由发动后的
+    一步 ``PickCards`` 问，候选因此不再枚举 C(手牌 + 装备, 2) 张两张组合。判据 =
+    :data:`AXE_FLOW` 那一步此刻铺出的槽位数 ≥ 2（**同源**，不写死）。
+
+    **有意保留**"武器牌也在成本面里"这一现状（工单 §要做什么第 4 条的口径）：迁移前的
+    ``zones=(HAND, EQUIP)`` 铺的就是同一份面，换掉它属于行为改动、不在本票范围内；
+    判据与面同源即可。
+    """
+    step = AXE_FLOW.steps[0]
+    assert isinstance(step, PickCards)  # 声明形状是编译期事实，写错要立刻炸
+    available = (
+        frame.data.get("source") == instance.owner
+        and zone_pool_size(state, instance.owner, step.zones) >= 2
     )
+    return ActivationPlan(optional=True, available=available)
 
 
 def _green_dragon_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
-    """【青龙偃月刀】：只有**自己的**【杀】被抵消才发动，载荷 = 挑哪张【杀】。"""
+    """【青龙偃月刀】：只有**自己的**【杀】被抵消、且手里有【杀】时才发动。
+
+    票 09 起发动询问是**裸"是否发动"**（"手里有【杀】"的 ``available`` 保留）：挑哪张
+    【杀】由发动后的一步 ``PickCards``（``card_types=("slash",)``）问，候选因此不再
+    "每张【杀】一条"。
+    """
     available = frame.data.get("source") == instance.owner and _has_slash_in_hand(
         state, instance.owner
     )
-    return ActivationPlan(
-        zones=(Zone.HAND,),
-        min_picks=1,
-        max_picks=1,
-        optional=True,
-        available=available,
-        card_types=("slash",),
-    )
+    return ActivationPlan(optional=True, available=available)
 
 
 def _double_sword_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
@@ -1081,17 +1086,17 @@ def _qilin_bow(host: Any, frame: Frame) -> Control:
     )
 
 
-def _green_dragon_blade(host: Any, frame: Frame) -> Control:
-    """青龙偃月刀：**你的**【杀】被【闪】抵消时，可对相同目标再使用一张【杀】。
+def _green_dragon_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
+    """提交点：把步 1 选中的那张【杀】**继续使用**（沿用原【杀】的目标、不计次数）。
 
-    续杀由发动询问的**载荷**指定（挑一张手牌里的【杀】），**无距离限制**
-    （`A/flow_condition.txt:66-67`）由"目标直接沿用原【杀】的目标"表达（不再走
-    ``check_targets``），且该次使用**不计次数**（票 12）；每张【杀】只给一次机会。
+    续杀**无距离限制**（`A/flow_condition.txt:66-67`）由"目标直接沿用原【杀】的目标"表达
+    （不再走 ``check_targets``）；该次使用**不计次数**（票 12）；``gdb_used`` 只落一次，
+    故每张【杀】只给一次机会（重入时上面那条短路接手）。
     """
     owner = frame.data.get("skill_owner")
     if frame.data.get("gdb_used") or frame.data.get("source") != owner:
         return None
-    picks = host.activation_picks(frame, "equip.green_dragon_blade")
+    picks = tuple(answers["card"])
     if not picks:
         return None
     frame.data["gdb_used"] = True
@@ -1103,6 +1108,81 @@ def _green_dragon_blade(host: Any, frame: Frame) -> Control:
         counts=False,
     )
     return "stay"
+
+
+GREEN_DRAGON_FLOW = SkillFlow(
+    steps=(
+        PickCards(
+            zones=(Zone.HAND,),
+            lo=1,
+            hi=1,
+            # **有意保留现状**（票 09 §要做什么）：迁移前的选牌没有 ``Pass``，"取消"的
+            # 唯一出口是发动询问那一道（答 ``Pass`` ⇒ 一个询问都不发）。
+            optional=False,
+            card_types=("slash",),
+            key="card",
+        ),
+    ),
+    effect=_green_dragon_effect,
+)
+"""【青龙偃月刀】的一步流水线（票 09）：[发动询问] → 挑一张手牌里的【杀】 → 继续使用。
+
+票 09 前，这张【杀】是**烘进发动询问候选**的载荷（每张手牌【杀】一条候选）；
+迁移后发动询问回到裸"是否发动"（``available`` = 自己的【杀】被抵消 + 手里有【杀】），
+成本改由 ``PickCards(card_types=("slash",))`` 问。
+"""
+
+
+def _axe_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
+    """提交点：弃掉步 1 选中的两张牌，再打帧标签 ``SAVED``（"此【杀】依然造成伤害"）。
+
+    ``resolve_before_effect`` 据此**跳过"生效前 / 生效时"、直进"生效后"**（票 12 Q16；
+    标志自票 08 起住帧标签袋）。两张牌可跨手牌 / 装备区，故按来源区分别移动
+    （:func:`_move_by_source`）。
+
+    成本的搬牌可能内联挂起（失去牌触发【连营】/【枭姬】一类）；``axe_used`` 只在**成本
+    搬完之后**落（与迁移前逐字同形），重入时据此短路。
+    """
+    owner = frame.data.get("skill_owner")
+    if owner is None or frame.data.get("source") != owner or frame.data.get("axe_used"):
+        return None
+    cards = tuple(answers["card"])
+    if not cards:
+        return None
+    if _move_by_source(
+        host,
+        frame,
+        cards,
+        to_zone=ZoneRef(Zone.DISCARD),
+        owner=owner,
+        key="axe:cost",
+    ) == "stay":
+        return "stay"
+    frame.data["axe_used"] = True
+    add_tag(frame, Tag.SAVED)
+    return None
+
+
+AXE_FLOW = SkillFlow(
+    steps=(
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP),
+            lo=2,
+            hi=2,
+            # **有意保留现状**（票 09 §要做什么）：迁移前的两张组合没有 ``Pass``，
+            # "取消"的唯一出口是发动询问那一道。
+            optional=False,
+            key="card",
+        ),
+    ),
+    effect=_axe_effect,
+)
+"""【贯石斧】的一步流水线（票 09）：[发动询问] → 弃两张牌（手牌 / 装备区） → 打 ``SAVED``。
+
+票 09 前，两张牌是**烘进发动询问候选**的全部 C(n,2) 组合（手牌 + 装备一多就是成百条
+按钮）；迁移后发动询问回到裸"是否发动"（``available`` = 自己的【杀】被抵消 + 弃得起
+两张），成本改由 ``PickCards`` 问。成本搬牌与帧标签仍只在提交点发生（N6）。
+"""
 
 
 def _move_by_source(
@@ -1153,35 +1233,6 @@ def _move_by_source(
     return None
 
 
-def _axe(host: Any, frame: Frame) -> Control:
-    """贯石斧：**你的**【杀】被抵消时，可弃两张牌使此【杀】**依然造成伤害**。
-
-    成本（弃两张）在"是否发动"询问里**烘进候选**；发起后打帧标签 ``SAVED``，
-    ``resolve_before_effect`` 据此**跳过"生效前 / 生效时"、直进"生效后"**（票 12 Q16；
-    标志自票 08 起住帧标签袋）。
-    两张牌可跨手牌 / 装备区，故按来源区分别移动。
-    """
-    owner = frame.data.get("skill_owner")
-    if owner is None or frame.data.get("source") != owner or frame.data.get("axe_used"):
-        return None
-    card_ids = host.activation_picks(frame, "equip.axe")
-    if not card_ids:
-        return None
-    # 成本的搬牌可能内联挂起；`axe_used` 只在**成本搬完之后**落，重入时据此短路。
-    if _move_by_source(
-        host,
-        frame,
-        card_ids,
-        to_zone=ZoneRef(Zone.DISCARD),
-        owner=owner,
-        key="axe:cost",
-    ) == "stay":
-        return "stay"
-    frame.data["axe_used"] = True
-    add_tag(frame, Tag.SAVED)
-    return None
-
-
 def _equip(
     card_type_id: str,
     *,
@@ -1191,8 +1242,14 @@ def _equip(
     hooks: tuple[Hook, ...] = (),
     seams: tuple[Seam, ...] = (),
     virtual_type_ids: tuple[str, ...] = (),
+    step_requirements: Mapping[str, str] | None = None,
 ) -> SkillDef:
-    """按牌名 id 造一条装备技能定义（``skill_id = "equip." + 牌名 id``，票 09 §1）。"""
+    """按牌名 id 造一条装备技能定义（``skill_id = "equip." + 牌名 id``，票 09 §1）。
+
+    ``step_requirements``（票 09）：走步骤流水线的装备技逐步的"需要做什么"，与其余各族的
+    :attr:`SkillDef.step_requirements` 同一形态（缺省 ``None`` = 不分步，既有 15 条定义
+    一字不改）。
+    """
     return SkillDef(
         skill_id=f"equip.{card_type_id}",
         locked=locked,
@@ -1201,6 +1258,7 @@ def _equip(
         modifiers=modifiers,
         seams=seams,
         requirement=requirement or None,
+        step_requirements=step_requirements,
         virtual_type_ids=virtual_type_ids,
     )
 
@@ -1232,7 +1290,8 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         "green_dragon_blade",
         locked=False,
         requirement="选择一张【杀】继续使用",
-        seams=(Seam(SeamKind.SLASH_CANCELED, _green_dragon_blade),),
+        seams=(Seam(SeamKind.SLASH_CANCELED, flow=GREEN_DRAGON_FLOW),),
+        step_requirements={"card": "选择一张手牌里的【杀】继续使用（目标不变）"},
     ),
     _equip(
         "serpent_spear",
@@ -1245,7 +1304,8 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         "axe",
         locked=False,
         requirement="弃两张牌，令被抵消的【杀】依然造成伤害",
-        seams=(Seam(SeamKind.SLASH_CANCELED, _axe),),
+        seams=(Seam(SeamKind.SLASH_CANCELED, flow=AXE_FLOW),),
+        step_requirements={"card": "弃置两张牌（手牌 / 装备区）令此【杀】依然造成伤害"},
     ),
     _equip(
         "halberd",

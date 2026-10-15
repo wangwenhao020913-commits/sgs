@@ -678,7 +678,8 @@ def test_axe_discards_two_cards_to_keep_the_damage_after_a_dodge():
         if query.kind == "PLAY_PHASE":
             return _slash_use(query, SLASH, 1)
         if query.kind == "SKILL_ACTIVATION":
-            return _find(query, lambda action: isinstance(action, ActivateSkill) and len(action.picks) == 2)
+            # 票 09：成本已不在发动候选里（恒一条裸骨架），两张牌改由发动后的 SELECT_CARDS 步问。
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
         return None
 
     def defender(query):
@@ -719,6 +720,199 @@ def test_axe_discards_two_cards_to_keep_the_damage_after_a_dodge():
     ]
     assert Timing.RESOLVE_EFFECT not in timings, "贯石斧跳『生效时』"
     assert Timing.RESOLVE_AFTER_EFFECT in timings, "直进『生效后』"
+
+
+# ---------------------------------------------------------------------------
+# 青龙偃月刀 / 贯石斧的**成本步**（票 09）：候选恒一条骨架，成本由流水线步骤问
+#
+# 迁移前：成本被**烘进发动询问的候选**（青龙 = 每张手牌【杀】一条；
+# 贯石斧 = 手牌 ∪ 装备区的 C(n,2) 条两张组合）。迁移后发动询问回到裸"是否发动"，
+# "挑哪张 / 弃哪两张"改由发动后的 ``SELECT_CARDS`` 步问 —— 形状与票 04【制衡】同源。
+# ---------------------------------------------------------------------------
+
+
+def _activation_actions(engine, skill_id: str):
+    """记录流里 ``skill_id`` 那条 ``SKILL_ACTIVATION`` 询问的候选。"""
+    for record in engine.records:
+        if (
+            record.kind == "query"
+            and record.query.kind == "SKILL_ACTIVATION"
+            and record.query.skill_id == skill_id
+        ):
+            return record.query.legal_actions
+    raise AssertionError(f"记录流里没有 {skill_id} 的 SKILL_ACTIVATION 询问")
+
+
+def _activation_offers(engine, skill_id: str) -> list[ActivateSkill]:
+    """那条发动询问里**真候选**（不含 ``Pass``）的形状 —— 票 09 起恒一条裸骨架。"""
+    return [
+        action
+        for action in _activation_actions(engine, skill_id)
+        if isinstance(action, ActivateSkill)
+    ]
+
+
+def _cost_step_query(engine, *, actor: int = 0):
+    """成本步的 ``SELECT_CARDS`` 询问（``actor`` = 发动者）。
+
+    **不**按 ``query.skill_id`` 找：被动技的帧没有 ``skill_id``（派发环只写
+    ``running_skill``），故该字段是 ``None``——文案由投影读帧的 ``running_skill`` 取
+    （`projection._skill_of_query` 的第二档）。测试按"这一步是哪个询问"定位。
+    """
+    for record in engine.records:
+        if (
+            record.kind == "query"
+            and record.query.kind == "SELECT_CARDS"
+            and record.query.actor == actor
+        ):
+            return record.query
+    raise AssertionError(f"记录流里没有 actor={actor} 的 SELECT_CARDS 询问")
+
+
+def _offered_card_ids(query) -> list[int]:
+    """选择面可见槽上的实体牌 id（隐藏槽是 ``None``）。"""
+    return [slot.card.card_id for slot in query.slots if slot.card is not None]
+
+
+def _slash_cost_driver(*, use: int, activation=None):
+    """出牌阶段对座位 1 使用 ``use`` 的脚本；座位 1 用【闪】抵消（第一次）。"""
+
+    def driver(query):
+        if query.kind == "PLAY_PHASE":
+            return _slash_use(query, use, 1)
+        if query.kind == "SKILL_ACTIVATION" and activation is not None:
+            return activation(query)
+        if query.kind == "DODGE":
+            return _find(query, lambda action: isinstance(action, UseCard))
+        return None
+
+    return driver
+
+
+def test_green_dragon_offer_is_a_single_skeleton_candidate_however_many_slashes():
+    """票 09：发动候选不再"每张手牌【杀】一条"，恒一条骨架 —— 手里 6 张【杀】也一样。"""
+    slashes = tuple(_cards("slash")[:6])
+    dodge = _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=slashes, equip=(GREEN_DRAGON,)), SeatSpec(hand=(dodge,))],
+        deck=_deck_excluding(*slashes, GREEN_DRAGON, dodge),
+        turn_seat=0,
+    )
+
+    engine = _run(
+        state,
+        [Scripted(_slash_cost_driver(use=slashes[0])), Scripted(None)],
+        lambda engine: engine.state.player(1).hp < 4,
+    )
+
+    offers = _activation_offers(engine, "equip.green_dragon_blade")
+    assert len(offers) == 1, "每张【杀】一条候选的枚举消失：候选恒一条"
+    assert offers[0].picks == () and offers[0].choices == (), "载荷为空，改由发动后的步骤问"
+
+    step = _cost_step_query(engine)
+    offered = _offered_card_ids(step)
+    assert offered and all(card_id in slashes for card_id in offered), (
+        "【青龙】的选取面只铺【杀】（手牌里的【桃】【万箭齐发】都不进面）"
+    )
+    assert step.spec.total == (1, 1), "这一步恰要一张；候选数是恒定的，不随【杀】张数增长"
+    assert engine.state.player(1).hp == 3, "续杀照常造成伤害"
+
+
+def test_axe_offer_is_a_single_skeleton_candidate_however_many_cards():
+    """票 09：发动候选不再枚举 C(手牌 + 装备, 2)，恒一条骨架 —— 8 张牌也一样。"""
+    others = _cards("peach")[:7]
+    hand = (SLASH, *others)
+    assert len(hand) == 8, "手牌 8 张 ⇒ 旧形状 C(8, 2) = 28 条两张组合"
+    dodge = _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=hand, equip=(AXE,)), SeatSpec(hand=(dodge,))],
+        deck=_deck_excluding(*hand, AXE, dodge),
+        turn_seat=0,
+    )
+
+    engine = _run(
+        state,
+        [Scripted(_slash_cost_driver(use=SLASH)), Scripted(None)],
+        lambda engine: engine.state.player(1).hp < 4,
+    )
+
+    offers = _activation_offers(engine, "equip.axe")
+    assert len(offers) == 1, "两张组合的枚举消失：候选恒一条"
+    assert offers[0].picks == () and offers[0].choices == (), "载荷为空，改由发动后的步骤问"
+
+    step = _cost_step_query(engine)
+    assert step.spec.total == (2, 2), "成本步恰要两张（手牌 ∪ 装备区）"
+    assert len(step.slots) > 2, "选择面是此刻真铺的牌（上限由它解析出来）"
+    assert engine.state.player(1).hp == 3, "弃两张后此【杀】依然造成伤害"
+
+
+def test_green_dragon_declining_the_activation_asks_for_nothing_and_stays_put():
+    """发动询问答 ``Pass`` ⇒ 零副作用，选牌步一个都不发（票 09 的取消出口）。"""
+    second_slash = _cards("slash")[1]
+    dodge = _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH, second_slash), equip=(GREEN_DRAGON,)),
+            SeatSpec(hand=(dodge,)),
+        ],
+        deck=_deck_excluding(SLASH, second_slash, GREEN_DRAGON, dodge),
+        turn_seat=0,
+    )
+
+    engine = _run(
+        state,
+        [
+            Scripted(
+                _slash_cost_driver(
+                    use=SLASH,
+                    activation=lambda query: _find(query, lambda a: isinstance(a, Pass)),
+                )
+            ),
+            Scripted(None),
+        ],
+        lambda engine: _use_frame_popped(engine),
+    )
+
+    assert _has_query(engine, "SKILL_ACTIVATION", skill_id="equip.green_dragon_blade")
+    assert not _has_query(engine, "SELECT_CARDS"), "不发动 ⇒ 不构造续杀的选取询问"
+    assert second_slash in engine.state.player(0).hand, "成本没动"
+
+
+def test_axe_declining_the_activation_asks_for_nothing_and_stays_put():
+    """发动询问答 ``Pass`` ⇒ 零副作用，选牌步一个都不发（票 09 的取消出口）。"""
+    extra, extra2 = _cards("peach")[0], _cards("peach")[1]
+    dodge = _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH, extra, extra2), equip=(AXE,)),
+            SeatSpec(hand=(dodge,)),
+        ],
+        deck=_deck_excluding(SLASH, extra, extra2, AXE, dodge),
+        turn_seat=0,
+    )
+
+    engine = _run(
+        state,
+        [
+            Scripted(
+                _slash_cost_driver(
+                    use=SLASH,
+                    activation=lambda query: _find(query, lambda a: isinstance(a, Pass)),
+                )
+            ),
+            Scripted(None),
+        ],
+        lambda engine: _use_frame_popped(engine),
+    )
+
+    assert _has_query(engine, "SKILL_ACTIVATION", skill_id="equip.axe")
+    assert not _has_query(engine, "SELECT_CARDS"), "不发动 ⇒ 不构造弃两张的选取询问"
+    assert AXE in engine.state.player(0).equip, "成本没动"
+    assert engine.state.player(1).hp == 4, "没发动 ⇒ 闪抵消，未受伤"
 
 
 def test_serpent_spear_transformed_play_ignores_the_slash_limit():

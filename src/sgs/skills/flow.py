@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from sgs.state import GameState, Pass, SelectionSpec, Zone, ZoneRef
+from sgs.state import GameState, Pass, SelectionSpec, Slot, Zone, ZoneRef
 from sgs.timing import Timing
 
 __all__ = [
@@ -52,6 +52,7 @@ __all__ = [
     "option_seat",
     "run_flow",
     "seat_choice",
+    "zone_pool_size",
 ]
 
 SEAT_PREFIX = "seat:"
@@ -115,11 +116,19 @@ class PickCards:
     留下的缓存答案（【反馈】的 ``fankui_step_key``）。两件事分开，是因为"这一步叫什么"
     与"这一次问的答案存哪儿"在逐点派发里不再是一回事。
 
-    ``hi=None`` = **"全部可选牌"**（票 04）：执行器在发问前把它解析成
-    :func:`_zone_pool_size`（``zones`` 此刻对 ``face`` 铺出的槽位数），故
-    ``spec.total`` 里进的是**真实上限**，前端看到的选择面与引擎的候选面同源。
-    【制衡】的"任意张"正是这个形状；写死一个大哨兵值（如 999）虽被
+    ``hi=None`` = **"全部可选牌"**（票 04）：执行器在发问前把它解析成**过滤后**选择面的
+    槽位数（:func:`zone_pool_size` 给出 ``zones`` 此刻对 ``face`` 铺出的槽位，再按
+    ``card_types`` 筛），故 ``spec.total`` 里进的是**真实上限**，前端看到的选择面与引擎
+    的候选面同源。【制衡】的"任意张"正是这个形状；写死一个大哨兵值（如 999）虽被
     ``_select_cards`` 夹住、功能上安全，但会把一个不存在的上限投影给前端。
+
+    ``card_types``（票 09 的加法）：**牌名 id 白名单**，空元组 = 不筛。与
+    :attr:`~sgs.skills.catalog.ActivationPlan.card_types` 同一语义（【青龙偃月刀】
+    的选取面只铺【杀】），但过滤发生在**步骤层**——票 09 把成本从发动询问的候选里
+    搬到这里之后，"只挑【杀】"这件事必须跟着成本一起下沉。过滤后池为空 ⇒ 与
+    ``face`` 返回空元组同形：**不发没有候选的询问**，走取消。``hi=None`` 的上限由
+    :func:`_filtered_zone_pool_size` 按**过滤后**的池重算（与 :meth:`Engine.ask_selection`
+    收到的同一份槽位），故"上限"与"选择面"仍同源。
 
     ``face`` / ``reveal_hand``（票 06）：**选择面铺谁的区**。``face=None``（缺省）=
     应答者自己的区 —— 青囊 / 结姻 / 制衡 / 仁德都是"自己选自己的牌"。**反间**是
@@ -137,6 +146,7 @@ class PickCards:
     face: ActorRef = None
     reveal_hand: bool = True
     cache_key: str | Callable[[Any], str] | None = None
+    card_types: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,7 +218,7 @@ def _resolve_face(ref: ActorRef, state: GameState, frame: Any, owner: int, answe
 
     ``face`` 比 :func:`_resolve_actor` 多一档：派生回调返回 ``()`` 表示"此刻没有合法的
     选取对象"，执行器据此**不发询问**（票 07 §5 的被动侧守卫）。空元组是唯一被放行的
-    非座位取值，其余一律解析成座位号（读错在 :func:`_zone_pool_size` 立刻炸，不静默）。
+    非座位取值，其余一律解析成座位号（读错在 :func:`zone_pool_size` 立刻炸，不静默）。
     """
     if ref is None:
         return owner
@@ -244,14 +254,62 @@ def _flow_option_id(frame: Any, key: str, index: int, *, multi: bool) -> str:
 
 
 def _zone_pool_size(state: GameState, seat: int, zones: tuple[Zone, ...]) -> int:
-    """``zones`` 此刻对 ``seat`` 铺出的槽位数（``PickCards.hi=None`` 的解析真源）。
+    """``zones`` 此刻对 ``seat`` 铺出的槽位数（``PickCards.hi=None`` 的解析真源）。"""
+    return sum(len(state.zone(ZoneRef(zone, seat))) for zone in zones)
+
+
+def zone_pool_size(state: GameState, seat: int, zones: tuple[Zone, ...]) -> int:
+    """``zones`` 此刻对 ``seat`` 铺出的槽位数。
 
     唯一入口是 :meth:`GameState.zone`（与 :meth:`Engine.selection_face` 铺面读到的是同一
     份区域列表），故投影给前端的 ``spec.total`` 上限与引擎真实的选择面**同源**，不写死、
     不猜。``selection_face(..., reveal_hand=True)`` 下隐藏手牌也是逐张铺槽，故槽位数 =
     各区域张数之和。
+
+    **公开**（票 09）：被动技的 ``available`` 判据要与成本步的选择面同源（【贯石斧】的
+    "手牌 ∪ 装备区 ≥ 2"），而判据住在 :mod:`sgs.skills.catalog` —— 把这里的算法再抄一份
+    就会有两个真源。``PickCards.hi=None`` 的解析也走它。
     """
-    return sum(len(state.zone(ZoneRef(zone, seat))) for zone in zones)
+    return _zone_pool_size(state, seat, zones)
+
+
+def _filtered_zone_pool_size(
+    state: GameState, seat: int, zones: tuple[Zone, ...], card_types: tuple[str, ...]
+) -> int:
+    """``card_types`` 过滤后，``zones`` 此刻对 ``seat`` 真能挑的牌数。
+
+    只**读**区域列表（:meth:`GameState.zone`），不铺选择面 —— 故它可以在每次重入时安全
+    地现算（铺面会消耗 ``select`` 子流的随机数，绝不能重复跑）。
+    """
+    return sum(
+        1
+        for zone in zones
+        for card_id in state.zone(ZoneRef(zone, seat))
+        if state.card(card_id).type in card_types
+    )
+
+
+def _filter_card_types(
+    slots: tuple[Slot, ...], card_ids: tuple[int, ...], card_types: tuple[str, ...]
+) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
+    """按**牌名 id 白名单**过滤选择面（``PickCards.card_types`` 的唯一实现，票 09）。
+
+    ``slots`` 与 ``card_ids`` 是**同一份选择面**的两个投影，必须同步过滤——只改一个，
+    步骤读回的实体牌 id 就会错位（票 09 的【青龙偃月刀】是第一个消费者）。
+    与 :meth:`Engine.ask_skill_activation` 里那段"只铺这些牌名"的过滤同形（同一判据、
+    同一位置：``slot.card`` 的 ``type``）。
+    """
+    if not card_types:
+        return slots, card_ids
+    kept = [
+        (slot, card_id)
+        for slot, card_id in zip(slots, card_ids)
+        if slot.card is not None and slot.card.type in card_types
+    ]
+    return (
+        tuple(slot for slot, _ in kept),
+        tuple(card_id for _, card_id in kept),
+    )
 
 
 def _flow_step_cards(
@@ -267,6 +325,14 @@ def _flow_step_cards(
     ``face`` 的派生回调可以返回**空元组**（票 07 §5）＝"这一步此刻根本不存在"：被动技的
     选取面几乎都要先读帧，而"读不到合法对象"必须**不发询问**（与 :class:`PickSeats` 的
     空池同一条纪律——没有候选的询问会让参与者 / AI 无从应答）。空元组与座位 ``0`` 不混同。
+
+    ``card_types``（票 09）在铺面之后**再筛一次牌名**，筛完为空与空池同形（不发询问、
+    走取消）；``hi=None`` 的上限按**过滤后**的池算（:func:`_filtered_zone_pool_size`），
+    故"上限 = 引擎此刻真能挑的牌数"。
+
+    **铺面必须惰性**（``build_face`` 闭包）：``selection_face(reveal_hand=False)`` 铺隐藏
+    槽时会消耗 ``select`` 子流的随机数，而 :meth:`Engine.ask_selection` 只在**第一次**
+    调用它（帧内记忆）。这里若提前铺好，"每次重入消耗一次随机数"会让既有录像分叉。
     """
     actor = _flow_actor(step, host.state, frame, owner, answers)
     face = (
@@ -279,15 +345,27 @@ def _flow_step_cards(
     cache_key = step.cache_key if step.cache_key is not None else step.key
     if callable(cache_key):
         cache_key = cache_key(frame)
-    hi = step.hi if step.hi is not None else _zone_pool_size(host.state, face, step.zones)
+    if step.card_types:
+        hi = (
+            step.hi
+            if step.hi is not None
+            else _filtered_zone_pool_size(host.state, face, step.zones, step.card_types)
+        )
+        if hi < step.lo:
+            # 与空池同形：一张能挑的都没有（或不够 ``lo``）⇒ 不发没有答案的询问；
+            # 同时也挡住 ``(lo, hi) = (1, 0)`` 这种会让 `_select_cards` 的 range 为空的形状。
+            return "cancel", ()
+    else:
+        hi = step.hi if step.hi is not None else _zone_pool_size(host.state, face, step.zones)
     picks = host.ask_selection(
         frame,
         key=cache_key,
         actor=actor,
         timing=timing,
         spec=SelectionSpec(zones=step.zones, total=(step.lo, hi), optional=step.optional),
-        build_face=lambda: host.selection_face(
-            face, step.zones, reveal_hand=step.reveal_hand
+        build_face=lambda: _filter_card_types(
+            *host.selection_face(face, step.zones, reveal_hand=step.reveal_hand),
+            step.card_types,
         ),
     )
     if host.suspended(picks):
