@@ -1460,6 +1460,30 @@ def test_query_context_walks_the_qingnang_steps_with_their_own_wording() -> None
     assert query_context(engine, option_query)["requirement"] == "选择一名已受伤角色回复1点体力"
 
 
+def test_query_context_reads_the_fankui_step_wording_for_a_damage_frame() -> None:
+    """【反馈】是**被动技**：它的选牌步文案要在 ``DAMAGE`` 帧上取到（票 07）。
+
+    被动技没有 ``SKILL`` 帧，技能的归属由派发环写的帧内 ``running_skill`` 给出（与【遗计】
+    同一条链）；步骤键仍是 ``"card"``（``SELECT_CARDS`` 的既有约定）。这条钉的是"逐步文案
+    不是主动技专属"——迁到流水线之后，被动技的每一步照样报得出"需要做什么"。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(), SeatSpec(hero="simayi")],
+        frame_kind=FrameKind.DAMAGE,
+        frame_data={
+            "source": 0,
+            "target": 1,
+            "targets": (1,),
+            "running_skill": "hero.simayi.fankui",
+            "skill_id": "hero.simayi.fankui",
+        },
+    )
+
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND, Zone.EQUIP))
+
+    assert query_context(engine, cards_query)["requirement"] == "获得伤害来源的一张牌"
+
+
 def test_query_context_walks_the_jieyin_steps_with_their_own_wording() -> None:
     """【结姻】两步各有各的问法（票 03）：先"弃置2张手牌"，再"选择一名已受伤男性角色…"。
 
