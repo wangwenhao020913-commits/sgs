@@ -287,12 +287,14 @@ def _check_decline_sorts_last(record: JournalRecord | None, seed: int, n: int) -
             )
 
 
-OVER_CAP_BY_DESIGN: frozenset[str] = frozenset({"hero.liubei.rende"})
-"""**按裁定**允许超过 ``CANDIDATE_CAP`` 的技能（本轮用户裁定，报障 2）。
+OVER_CAP_BY_DESIGN: frozenset[str] = frozenset()
+"""**按裁定**允许超过 ``CANDIDATE_CAP`` 的技能 —— 现在是**空集**。
 
-【仁德】的前端交互是"直接多选手牌 + 直接点座位、一次交出去"：界面要能一次提交
-"这组牌 → 这个座位"，所以它**不降级**、非空子集 × 目标全部进池（手牌一多必然超过 128；
-6 人局实测 315 条）。这不是漏降级，别的两维相乘技能本表里一个都没有。
+它曾经装着 ``{"hero.liubei.rende"}``（报障 2 的用户裁定：界面要一次提交"这组牌 → 这个座位"，
+故【仁德】有意不降级、非空子集 × 目标全进池，手牌一多必然超过 128）。**票 05 把【仁德】改成
+骨架候选之后这条裁定就没有对象了** —— 候选恒 1 条，再不可能是例外，留着它就是一段"钉住一个
+已不存在形状"的 sediment（retro 顺手发现的）。空集**保留**而不是删掉 `_check_candidate_cap`
+里的分支，是为了让下一个"按裁定豁免"有落点、且其存在必须显式写进这个常量。
 """
 
 
@@ -310,8 +312,7 @@ def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> Non
     合法地各有自己的候选，票 14 实测一局 6 手牌的【仁德】126 条 + 3 条普通候选 = 129 总数）；
     其余非技能候选按总数查。豁免表因此**仍有咬合力**：两维相乘的技能一旦忘了降级，它自己
     的那一组立刻判红（``test_the_candidate_cap_checker_catches_an_over_cap_two_dimensional_skill``）。
-    本轮另加一条**按裁定**的例外 :data:`OVER_CAP_BY_DESIGN`（【仁德】：界面要一次提交
-    "这组牌 → 这个座位"，故有意不降级），由 ``..._exempts_rende_by_design`` 钉住它只有一条。
+    :data:`OVER_CAP_BY_DESIGN` 是留给"按裁定豁免"的落点，**现在是空集**。
     """
     if record is None or record.kind != "query":
         return
@@ -327,8 +328,7 @@ def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> Non
             others += 1
     for skill_id, count in by_skill.items():
         if skill_id in OVER_CAP_BY_DESIGN:
-            # 【仁德】：**有意**超过上界（用户裁定）——界面要一次提交"这组牌 → 这个座位"，
-            # 故它不降级、非空子集 × 目标全进池。见该常量的说明。
+            # 按裁定的例外（见该常量的说明）；当前为空集，任何技能都走下面的判红。
             continue
         if count > CANDIDATE_CAP:
             _fail(
@@ -960,19 +960,23 @@ def test_the_decline_sorts_last_checker_passes_when_pass_is_last():
     _check_decline_sorts_last(record, 1, 2)  # 不抛 = 放行
 
 
-def test_the_candidate_cap_checker_exempts_rende_by_design():
-    """【仁德】是本轮**唯一**的"按裁定超上界"技能：例外集合不许无声变宽。"""
-    assert OVER_CAP_BY_DESIGN == {"hero.liubei.rende"}, (
-        "超上界例外只该有【仁德】（用户裁定：界面要一次提交『这组牌 → 这个座位』）"
-    )
+def test_the_over_cap_by_design_exemption_is_empty_after_the_rende_migration():
+    """retro：例外集合已**空** —— 票 05 把【仁德】改成骨架候选后，"有意超上界"的裁定失去了对象。
+
+    这条取代 `test_the_candidate_cap_checker_exempts_rende_by_design`（它当时钉的是"例外集合
+    只该有【仁德】"）。现在钉两件事都成立：集合为空，**且**同样形状的仁德两维候选再也不能靠
+    旧裁定逃过上界 —— 否则"空集"只是文档，不是判据。
+    """
+    assert OVER_CAP_BY_DESIGN == frozenset(), "例外集合应为空（没有『按裁定超上界』的技能）"
 
     state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
     action = ActivateSkill(
         skill_id="hero.liubei.rende", picks=(0,), choices=("seat:1",), answers_seq=1
     )
-    over_cap = CANDIDATE_CAP + 1
+    record = _query_record(state, [action for _ in range(CANDIDATE_CAP + 1)])
 
-    _check_candidate_cap(_query_record(state, [action for _ in range(over_cap)]), 1, 2)  # 不抛 = 放行
+    with pytest.raises(FuzzInvariantError, match="候选数"):
+        _check_candidate_cap(record, 1, 2)
 
 
 def test_the_candidate_cap_checker_exempts_the_one_dimensional_enumerations():
