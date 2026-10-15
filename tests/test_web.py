@@ -1559,6 +1559,47 @@ def test_query_context_reads_the_equipment_cost_steps_own_wording() -> None:
     )
 
 
+def test_query_context_reads_the_qilin_bow_and_ice_sword_step_wording() -> None:
+    """【麒麟弓】/【寒冰剑】的选牌步也报得出"需要做什么"（票 10）。
+
+    两条都是 ``DAMAGE_DEAL`` 上的装备钩子：归属由派发环写的帧内 ``running_skill`` 给出
+    （与【反馈】/【流离】/票 09 两条接缝同一条链），步骤键仍是 ``SELECT_CARDS`` 的既有
+    约定 ``"card"``。【麒麟弓】迁上流水线、【寒冰剑】按票 10 的裁定保持手写，但逐步文案
+    同落一处（:attr:`~sgs.skills.catalog.SkillDef.step_requirements`）。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(equip=(cards_of_type(_context_pack(), "qilin_bow")[0],)), SeatSpec()],
+        frame_kind=FrameKind.DAMAGE,
+        frame_data={
+            "source": 0,
+            "target": 1,
+            "targets": (1,),
+            "running_skill": "equip.qilin_bow",
+            "skill_id": "equip.qilin_bow",
+        },
+    )
+    cards_query = _skill_step_cards_query(state, zones=(Zone.EQUIP,))
+    assert query_context(engine, cards_query)["requirement"] == (
+        "弃置目标装备区里的一匹坐骑（只能选坐骑）"
+    )
+
+    engine, state = _context_fixture(
+        [SeatSpec(equip=(cards_of_type(_context_pack(), "ice_sword")[0],)), SeatSpec()],
+        frame_kind=FrameKind.DAMAGE,
+        frame_data={
+            "source": 0,
+            "target": 1,
+            "targets": (1,),
+            "running_skill": "equip.ice_sword",
+            "skill_id": "equip.ice_sword",
+        },
+    )
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND, Zone.EQUIP))
+    assert query_context(engine, cards_query)["requirement"] == (
+        "依次弃置目标的一张牌（手牌 / 装备区），至多两张"
+    )
+
+
 def test_query_context_walks_the_zhiheng_step_with_its_own_wording() -> None:
     """【制衡】单步（票 04）也有自己的问法：``SELECT_CARDS`` 读 ``"card"`` 键。
 

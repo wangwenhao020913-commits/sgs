@@ -52,7 +52,6 @@ from sgs.state import (
     GameState,
     MoveReason,
     SelectionSpec,
-    Slot,
     SlotKind,
     UseCard,
     Zone,
@@ -987,6 +986,13 @@ def _ice_sword(host: Any, frame: Frame) -> Control:
 
     "防止伤害"由**帧标签 ``PREVENTED``**（票 12 §Q15；票 08 起住帧标签袋）承担：
     跳体力扣减、不新增 delta / 时机；"依次"⇒ 逐张单询问（票 19 §7），池空则跳过剩余次数。
+
+    **票 10 裁定：有意保持手写，不迁 ``SkillFlow``**（理由见票 10 的 ``## Answer`` 与
+    ``design.md`` §7 纪律 3）。一句话：它的发动形态本来就是**裸"是否发动"**（没有成本 /
+    载荷烘进候选，迁移不减少任何候选），而"每轮立即搬牌"与流水线的"步骤只收集、提交点
+    才生效 + 取消零副作用"契约正面冲突 —— 逐张立即弃置正是"两轮不能选同一张牌"的实现
+    （见下方游标）。硬塞一个"每轮提交"步骤类型只会给多轮语言开一个未经验证的逃生口；
+    设计多轮原语是票 11（【雌雄】/【遗计】两个消费者）的范围。
     """
     if frame.data.get("ice_sword_finished"):
         return None
@@ -1041,49 +1047,72 @@ def _mount_ids(state: GameState, seat: int) -> tuple[int, ...]:
     )
 
 
-def _mount_face(host: Any, seat: int) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
-    card_ids = _mount_ids(host.state, seat)
-    return (
-        tuple(
-            Slot(ref=ZoneRef(Zone.EQUIP, seat), card=host.state.card(card_id))
-            for card_id in card_ids
-        ),
-        card_ids,
-    )
+def _qilin_bow_target_face(
+    state: GameState, frame: Frame, owner: int, answers: FlowAnswers
+) -> int | tuple[()]:
+    """【麒麟弓】的选取面铺谁的区 = 这次伤害的目标（票 10）。
+
+    沿用票 07 给 ``face`` 的**空元组**档（"这一步此刻不存在"）：帧上没有目标时一个询问
+    都不发（与 :func:`_liuli_cost_face` 同形），而不是把座位 ``0`` 当成目标。
+    """
+    del state, owner, answers
+    target = frame.data.get("target")
+    return () if target is None else int(target)
 
 
-def _qilin_bow(host: Any, frame: Frame) -> Control:
-    """麒麟弓：你使用【杀】造成伤害时，可弃置目标装备区里的一张**坐骑牌**。
+def _qilin_bow_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
+    """提交点：弃掉步 1 选中的那张**坐骑**。
 
-    选取面只铺**坐骑槽**（目标装备区、可见槽）；目标没有坐骑时该技能不满足发动前提
-    （形态的 ``available`` 已挡住，故不构造询问）。
+    ``qilin_bow_done`` 在**搬牌之前**落（与迁移前逐字同形），故重入时上面的短路接手、
+    同一张坐骑只弃一次。"内联挂起就让出控制权"（票 14 §1）：目标若是孙尚香，掉坐骑触发
+    【枭姬】会提问，``"stay"`` 必须透传。
     """
     target = frame.data.get("target")
     if target is None or frame.data.get("qilin_bow_done"):
         return None
-    picked = host.ask_selection(
-        frame,
-        key="qilin_bow",
-        actor=frame.data.get("skill_owner"),
-        timing=Timing.DAMAGE_DEAL,
-        spec=SelectionSpec(zones=(Zone.EQUIP,), total=(1, 1)),
-        build_face=lambda: _mount_face(host, target),
-    )
-    if host.suspended(picked):
-        return "stay"
     frame.data["qilin_bow_done"] = True
-    if not picked:
+    picks = tuple(answers["card"])
+    if not picks:
         return None
-    # "内联挂起就让出控制权"（票 14 §1）：目标若是孙尚香，掉坐骑触发【枭姬】会提问，
-    # `"stay"` 必须透传；`qilin_bow_done` 已在搬牌前落，重入时上面那条短路接手。
     return host.move_in_frame(
         frame,
-        host.state.refs(picked),
+        host.state.refs(picks),
         to_zone=ZoneRef(Zone.DISCARD),
         reason=MoveReason.DISCARD,
         owner=target,
         actor=frame.data.get("skill_owner"),
     )
+
+
+QILIN_BOW_FLOW = SkillFlow(
+    steps=(
+        PickCards(
+            zones=(Zone.EQUIP,),
+            lo=1,
+            hi=1,
+            # **有意保留现状**（票 10 §要做什么）：迁移前的选牌没有 ``Pass``，"取消"的
+            # 唯一出口是发动询问那一道（答 ``Pass`` ⇒ 一个询问都不发）。
+            optional=False,
+            key="card",
+            # 帧内询问缓存键沿用迁移前的 ``"qilin_bow"``（``ask_selection`` 的既有键），
+            # 故重入不重发、记录流除步骤归属外一行不变。
+            cache_key="qilin_bow",
+            face=_qilin_bow_target_face,
+            # 选取面只铺目标的**坐骑槽**（票 10 的原语加法）：坐骑是六个不同牌名共用的
+            # 槽位种类，牌名白名单表达不了，故给 ``PickCards`` 加 ``slot_kinds``。
+            slot_kinds=(SlotKind.HORSE_DEFENSE, SlotKind.HORSE_OFFENSE),
+        ),
+    ),
+    effect=_qilin_bow_effect,
+)
+"""【麒麟弓】的一步流水线（票 10）：[发动询问] → 弃目标装备区的一张坐骑。
+
+迁移前这条技能的选取面由 ``_mount_face`` **自铺**（技能层自己拼槽位）；迁移后由
+``PickCards`` 的 ``slot_kinds`` 过滤表达
+（与票 09 的 ``card_types`` 同一条链路：同步过滤 ``slots`` / ``card_ids``、``hi=None``
+的上限按过滤后的池重算、铺面仍惰性）。``available`` 判据（目标有坐骑）留在
+:func:`_qilin_bow_plan`，不在步骤里再判一遍。
+"""
 
 
 def _green_dragon_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
@@ -1320,13 +1349,15 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         "qilin_bow",
         locked=False,
         requirement="弃置目标装备区里的一匹坐骑",
-        hooks=(Hook(Timing.DAMAGE_DEAL, _qilin_bow),),
+        hooks=(Hook(Timing.DAMAGE_DEAL, flow=QILIN_BOW_FLOW),),
+        step_requirements={"card": "弃置目标装备区里的一匹坐骑（只能选坐骑）"},
     ),
     _equip(
         "ice_sword",
         locked=False,
         requirement="防止此伤害，并依次弃置目标的两张牌",
         hooks=(Hook(Timing.DAMAGE_DEAL, _ice_sword),),
+        step_requirements={"card": "依次弃置目标的一张牌（手牌 / 装备区），至多两张"},
     ),
     # 3 防具
     _equip(

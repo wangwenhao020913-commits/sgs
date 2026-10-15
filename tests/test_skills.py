@@ -73,6 +73,7 @@ EIGHT_DIAGRAMS = _cards("eight_diagrams")[0]
 SERPENT = _cards("serpent_spear")[0]
 CROSSBOW = _cards("crossbow")[0]
 JUYING = _cards("jueying")[0]
+CHITU = _cards("chitu")[0]
 SLASH = _cards("slash")[0]
 BLACK_SLASH = _first_by_color("slash", black=True)
 RED_SLASH = _first_by_color("slash", black=False)
@@ -133,6 +134,20 @@ def _slash_use(query, card_id: int, target: int):
         and action.card.card_id == card_id
         and action.targets == (target,),
     )
+
+
+def _select_slot_of(query, card_id: int):
+    """挑**可见槽**上那张实体牌的动作（按槽位序号选中它）。
+
+    隐藏槽（``slot.card is None``）认不出牌面，故本 helper 只服务"目标装备区"这类
+    可见面的用例（票 10 的【麒麟弓】/【寒冰剑】驱动脚本）。
+    """
+    for index, slot in enumerate(query.slots):
+        if slot.card is not None and slot.card.card_id == card_id:
+            return _find(
+                query, lambda action, i=index: isinstance(action, SelectCards) and action.picks == (i,)
+            )
+    return None
 
 
 def _use_frame_popped(engine) -> bool:
@@ -279,6 +294,84 @@ def test_ice_sword_clamps_to_the_targets_available_cards():
     assert engine.state.player(1).hp == 4
 
 
+def test_ice_sword_two_rounds_cannot_pick_the_same_card():
+    """两轮**不能选同一张牌**（票 10 的守门测试）：第一轮搬走的那张不再出现在第二轮的面里。
+
+    驱动脚本两轮都**先试着挑同一个可见槽**（``JUYING``）：只要第一轮的弃置是**立即搬走**
+    （迁移前后的既定语义），第二轮的面里就没有它，脚本退到"挑第一个槽"从而拿走 ``CHITU``。
+    若改成"先收集两张、提交点再一起弃"，第二轮的面里 ``JUYING`` 还在，它会被选第二遍
+    ——``CHITU`` 一张都不动，断言立刻变红。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,), equip=(ICE_SWORD,)),
+            SeatSpec(equip=(JUYING, CHITU)),
+        ],
+        deck=_deck_excluding(SLASH, ICE_SWORD, JUYING, CHITU),
+        turn_seat=0,
+    )
+
+    rounds: list[int] = []
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _slash_use(query, SLASH, 1)
+        if query.kind == "SKILL_ACTIVATION":
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
+        if query.kind == "SELECT_CARDS":
+            rounds.append(len(query.slots))
+            return _select_slot_of(query, JUYING) or _find(
+                query, lambda action: isinstance(action, SelectCards)
+            )
+        return None
+
+    engine = _run(
+        state,
+        [
+            Scripted(attacker),
+            Scripted(lambda q: _find(q, lambda a: isinstance(a, Pass)) if q.kind == "DODGE" else None),
+        ],
+        lambda engine: _use_frame_popped(engine),
+    )
+
+    assert len(rounds) == 2, "固定两轮（目标有两张牌）"
+    assert rounds[1] == 1, "第二轮的面里第一轮那张已经不在了（逐张立即搬走）"
+    assert _moves_of(engine, JUYING) == [("equip", "discard", "DISCARD")]
+    assert _moves_of(engine, CHITU) == [("equip", "discard", "DISCARD")]
+    assert engine.state.player(1).hp == 4, "防止伤害照旧"
+
+
+def test_ice_sword_asks_nothing_when_the_target_has_no_cards():
+    """目标没牌 ⇒ **不发没有候选的询问**，但"防止此伤害"照旧（票 10）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(SLASH,), equip=(ICE_SWORD,)), SeatSpec()],
+        deck=_deck_excluding(SLASH, ICE_SWORD),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _slash_use(query, SLASH, 1)
+        if query.kind == "SKILL_ACTIVATION":
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
+        return None
+
+    engine = _run(
+        state,
+        [
+            Scripted(attacker),
+            Scripted(lambda q: _find(q, lambda a: isinstance(a, Pass)) if q.kind == "DODGE" else None),
+        ],
+        lambda engine: _use_frame_popped(engine),
+    )
+
+    assert _has_query(engine, "SKILL_ACTIVATION", skill_id="equip.ice_sword")
+    assert not _has_query(engine, "SELECT_CARDS"), "池为空 ⇒ 一个选牌询问都不发"
+    assert engine.state.player(1).hp == 4, "没有牌可弃也照样防止伤害"
+
+
 # ---------------------------------------------------------------------------
 # 麒麟弓：造成伤害时可弃目标一张坐骑
 # ---------------------------------------------------------------------------
@@ -311,6 +404,42 @@ def test_qilin_bow_discards_a_mount_of_the_damage_target():
     assert _has_query(engine, "SKILL_ACTIVATION", skill_id="equip.qilin_bow")
     assert _moves_of(engine, mount) == [("equip", "discard", "DISCARD")]
     assert engine.state.player(1).hp == 3, "麒麟弓只弃坐骑，不防止伤害"
+
+
+def test_qilin_bow_offers_only_the_targets_mounts():
+    """选取面**只**铺目标的坐骑槽（票 10）：同区的武器 / 防具不进面，也不能被弃。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,), equip=(QILIN,)),
+            SeatSpec(equip=(QINGGANG, JUYING)),
+        ],
+        deck=_deck_excluding(SLASH, QILIN, QINGGANG, JUYING),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _slash_use(query, SLASH, 1)
+        if query.kind == "SKILL_ACTIVATION":
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
+        if query.kind == "SELECT_CARDS":
+            return _select_slot_of(query, JUYING) or _find(
+                query, lambda action: isinstance(action, SelectCards)
+            )
+        return None
+
+    engine = _run(
+        state,
+        [Scripted(attacker), Scripted(lambda q: _find(q, lambda a: isinstance(a, Pass)) if q.kind == "DODGE" else None)],
+        lambda engine: _use_frame_popped(engine),
+    )
+
+    step = _cost_step_query(engine, actor=0)
+    assert _offered_card_ids(step) == [JUYING], "面里只有坐骑（武器【青釭剑】不在其中）"
+    assert _moves_of(engine, JUYING) == [("equip", "discard", "DISCARD")]
+    assert _moves_of(engine, QINGGANG) == [], "同区的非坐骑一张都不动"
+    assert QINGGANG in engine.state.player(1).equip
 
 
 def test_declining_a_non_locked_activation_skips_the_hook():

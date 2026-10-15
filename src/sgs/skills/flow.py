@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from sgs.state import GameState, Pass, SelectionSpec, Slot, Zone, ZoneRef
+from sgs.state import GameState, Pass, SelectionSpec, Slot, SlotKind, Zone, ZoneRef
 from sgs.timing import Timing
 
 __all__ = [
@@ -135,6 +135,12 @@ class PickCards:
     应答者（目标）选**发动者**的牌，故把 ``face`` 指回发动者（``lambda s, f, owner, a: owner``）
     而 ``actor`` 仍是目标：这两件事在【反间】里第一次分开，正是票 06 要加深的语义。
     **反馈**（票 07）则是两者都指向伤害来源：应答者是持有者，铺的是**来源**的区。
+
+    ``slot_kinds``（票 10 的加法）：**槽位种类白名单**，空元组 = 不筛。与 ``card_types``
+    同一条链路（同一份选择面、同步过滤 ``slots`` / ``card_ids``、``hi=None`` 的上限按
+    过滤后的池重算）。它服务的是"选取面只铺某类槽"的技能 —— 【麒麟弓】只铺目标的
+    **坐骑槽**（``(HORSE_DEFENSE, HORSE_OFFENSE)``），而牌名 id 认不出"这是不是坐骑"
+    （坐骑是六个不同牌名）。两条白名单可同时给（依次作用）。
     """
 
     zones: tuple[Zone, ...]
@@ -147,6 +153,7 @@ class PickCards:
     reveal_hand: bool = True
     cache_key: str | Callable[[Any], str] | None = None
     card_types: tuple[str, ...] = ()
+    slot_kinds: tuple[SlotKind, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,19 +281,33 @@ def zone_pool_size(state: GameState, seat: int, zones: tuple[Zone, ...]) -> int:
 
 
 def _filtered_zone_pool_size(
-    state: GameState, seat: int, zones: tuple[Zone, ...], card_types: tuple[str, ...]
+    state: GameState,
+    seat: int,
+    zones: tuple[Zone, ...],
+    card_types: tuple[str, ...],
+    slot_kinds: tuple[SlotKind, ...] = (),
 ) -> int:
-    """``card_types`` 过滤后，``zones`` 此刻对 ``seat`` 真能挑的牌数。
+    """``card_types`` / ``slot_kinds`` 过滤后，``zones`` 此刻对 ``seat`` 真能挑的牌数。
 
     只**读**区域列表（:meth:`GameState.zone`），不铺选择面 —— 故它可以在每次重入时安全
-    地现算（铺面会消耗 ``select`` 子流的随机数，绝不能重复跑）。
+    地现算（铺面会消耗 ``select`` 子流的随机数，绝不能重复跑）。两条白名单的空元组 =
+    不筛（同一份判据 :func:`_kept_by_whitelists` 与铺面过滤共用）。
     """
     return sum(
         1
         for zone in zones
         for card_id in state.zone(ZoneRef(zone, seat))
-        if state.card(card_id).type in card_types
+        if _kept_by_whitelists(state.card(card_id), card_types, slot_kinds)
     )
+
+
+def _kept_by_whitelists(
+    card: Any, card_types: tuple[str, ...], slot_kinds: tuple[SlotKind, ...]
+) -> bool:
+    """这张牌是否同时过**牌名**与**槽位种类**两条白名单（空元组 = 该维度不筛）。"""
+    if card_types and card.type not in card_types:
+        return False
+    return not (slot_kinds and card.slot not in slot_kinds)
 
 
 def _filter_card_types(
@@ -312,6 +333,38 @@ def _filter_card_types(
     )
 
 
+def _filter_slot_kinds(
+    slots: tuple[Slot, ...], card_ids: tuple[int, ...], slot_kinds: tuple[SlotKind, ...]
+) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
+    """按**槽位种类白名单**过滤选择面（``PickCards.slot_kinds`` 的唯一实现，票 10）。
+
+    与 :func:`_filter_card_types` 逐字同姿态：``slots`` / ``card_ids`` 同步过滤（否则步骤
+    读回的牌会错位）。判据取 ``slot.card.slot`` —— 坐骑是六个**不同牌名**共用的槽位种类，
+    牌名白名单表达不了"只铺坐骑"（【麒麟弓】是第一个消费者）。
+    """
+    if not slot_kinds:
+        return slots, card_ids
+    kept = [
+        (slot, card_id)
+        for slot, card_id in zip(slots, card_ids)
+        if slot.card is not None and slot.card.slot in slot_kinds
+    ]
+    return (
+        tuple(slot for slot, _ in kept),
+        tuple(card_id for _, card_id in kept),
+    )
+
+
+def _filter_face(
+    slots: tuple[Slot, ...],
+    card_ids: tuple[int, ...],
+    card_types: tuple[str, ...],
+    slot_kinds: tuple[SlotKind, ...],
+) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
+    """把两条白名单**依次**作用在同一份选择面上（票 09 的牌名 + 票 10 的槽位）。"""
+    return _filter_slot_kinds(*_filter_card_types(slots, card_ids, card_types), slot_kinds)
+
+
 def _flow_step_cards(
     host: Any, frame: Any, step: PickCards, owner: int, answers: FlowAnswers, timing: Timing
 ) -> tuple[str, object]:
@@ -328,7 +381,8 @@ def _flow_step_cards(
 
     ``card_types``（票 09）在铺面之后**再筛一次牌名**，筛完为空与空池同形（不发询问、
     走取消）；``hi=None`` 的上限按**过滤后**的池算（:func:`_filtered_zone_pool_size`），
-    故"上限 = 引擎此刻真能挑的牌数"。
+    故"上限 = 引擎此刻真能挑的牌数"。``slot_kinds``（票 10）走同一条链路，只是判据换成
+    ``slot.card.slot``（【麒麟弓】只铺目标的坐骑槽）。
 
     **铺面必须惰性**（``build_face`` 闭包）：``selection_face(reveal_hand=False)`` 铺隐藏
     槽时会消耗 ``select`` 子流的随机数，而 :meth:`Engine.ask_selection` 只在**第一次**
@@ -345,11 +399,13 @@ def _flow_step_cards(
     cache_key = step.cache_key if step.cache_key is not None else step.key
     if callable(cache_key):
         cache_key = cache_key(frame)
-    if step.card_types:
+    if step.card_types or step.slot_kinds:
         hi = (
             step.hi
             if step.hi is not None
-            else _filtered_zone_pool_size(host.state, face, step.zones, step.card_types)
+            else _filtered_zone_pool_size(
+                host.state, face, step.zones, step.card_types, step.slot_kinds
+            )
         )
         if hi < step.lo:
             # 与空池同形：一张能挑的都没有（或不够 ``lo``）⇒ 不发没有答案的询问；
@@ -363,9 +419,10 @@ def _flow_step_cards(
         actor=actor,
         timing=timing,
         spec=SelectionSpec(zones=step.zones, total=(step.lo, hi), optional=step.optional),
-        build_face=lambda: _filter_card_types(
+        build_face=lambda: _filter_face(
             *host.selection_face(face, step.zones, reveal_hand=step.reveal_hand),
             step.card_types,
+            step.slot_kinds,
         ),
     )
     if host.suspended(picks):

@@ -32,6 +32,7 @@ from sgs.state import (
     SelectCards,
     SelectCardsQuery,
     Slot,
+    SlotKind,
     Zone,
     ZoneRef,
 )
@@ -326,3 +327,65 @@ def test_pick_cards_card_types_filter_narrows_the_face_and_the_hi_none_limit():
 
     assert seen["total"] == (1, 2), "上限 = 过滤后的池大小（2 张【杀】），不是手牌 3 张"
     assert seen["offered"] == list(slashes), "选择面也只铺【杀】"
+
+
+# ---------------------------------------------------------------------------
+# ⑦ PickCards.slot_kinds（票 10）：槽位白名单过滤 + hi=None 与过滤后池同源
+# ---------------------------------------------------------------------------
+
+
+def test_pick_cards_slot_kinds_filter_narrows_the_face_and_the_hi_none_limit():
+    """``hi=None`` + ``slot_kinds``：上限与选择面一起按**过滤后**的池算（票 10）。
+
+    直接对执行器跑一步（与 ⑥ 同一个最小宿主）：装备区 = 武器【青釭剑】 + 防御马【绝影】，
+    白名单 = 坐骑槽 ⇒ 投影给前端的 ``total`` 上限是 **1**（不是装备区 2 张），选择面
+    也只有那匹坐骑 —— 【麒麟弓】"只铺目标的坐骑槽"正是这个形状。
+    """
+    weapon = _cards("qinggang_sword")[0]
+    mount = _cards("jueying")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=(weapon, mount)), SeatSpec()],
+        deck=_deck_excluding(weapon, mount),
+        turn_seat=0,
+    )
+    seen: dict[str, object] = {}
+
+    class _Host:
+        def __init__(self) -> None:
+            self.state = state
+
+        @staticmethod
+        def suspended(value) -> bool:
+            return value == "SUSPEND"
+
+        @staticmethod
+        def selection_face(seat, zones, *, reveal_hand):
+            del reveal_hand
+            slots, card_ids = [], []
+            for zone in zones:
+                for card_id in state.zone(ZoneRef(zone, seat)):
+                    slots.append(Slot(ref=ZoneRef(zone, seat), card=state.card(card_id)))
+                    card_ids.append(card_id)
+            return tuple(slots), tuple(card_ids)
+
+        @staticmethod
+        def ask_selection(frame, *, key, actor, timing, spec, build_face):
+            del frame, key, actor, timing
+            slots, _card_ids = build_face()
+            seen["total"] = spec.total
+            seen["offered"] = [slot.card.card_id for slot in slots]
+            return (0,)
+
+    step = PickCards(
+        zones=(Zone.EQUIP,),
+        lo=1,
+        hi=None,
+        optional=False,
+        slot_kinds=(SlotKind.HORSE_DEFENSE, SlotKind.HORSE_OFFENSE),
+    )
+
+    _flow_step_cards(_Host(), _Frame(source=0), step, 0, {}, Timing.DAMAGE_DEAL)
+
+    assert seen["total"] == (1, 1), "上限 = 过滤后的池大小（1 匹坐骑），不是装备区 2 张"
+    assert seen["offered"] == [mount], "选择面也只铺坐骑（武器不在其中）"
