@@ -457,8 +457,11 @@ def test_select_option_is_forced_by_default_and_offers_pass_when_optional():
         answers_seq=9,
         payload=SelectOptionContext(skill_id="demo", options=("a", "b"), optional=True),
     )
-    kinds = sorted(action.kind for action in cancelable)
-    assert kinds == ["Pass", "SelectOption", "SelectOption"], (
-        "optional=True：多一条 Pass，作为「取消」的合法应答"
+    kinds = [action.kind for action in cancelable]
+    assert kinds == ["SelectOption", "SelectOption", "Pass"], (
+        "optional=True：多一条 Pass，且「放弃」恒排在真候选**之后**——取首个候选的贪心"
+        "参与者（``tests/test_web.py::_play_to_end`` 就是一例）才不会一直挑取消；"
+        "``_select_cards`` / ``_skill_activation`` 早已是这个次序，只有 ``SELECT_OPTION`` "
+        "曾因 ``_sort_key`` 缺分支而把 Pass 排到首位"
     )
     assert all(action.answers_seq == 9 for action in cancelable)

@@ -1066,11 +1066,16 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `${ui.timingLabel("JUDGE_ON")} / ${ui.timingLabel("JUDGE_CARD_AFTER_EFFECT")}`);
 }
 
-/* ============ 报障 2 / 4（合成局面）：仁德"选牌 → 点座"与龙胆"点技能 → 点闪" ============
+/* ============ 报障 2 / 4（合成局面）：**遗留** hand-pick 渲染路径与龙胆"点技能 → 点闪" =
  *
  * 两条都是**界面读法**的断言：喂与服务端 `pending_payload` / `skills` 同形的合成 view，
  * 看界面按不按 `ui.manual` / `ui.convert_sources` / `virtual_index` 这些键读。
  * 服务端怎么算这些键由 `tests/test_web.py` 钉；这里钉前端有没有真的读它。
+ *
+ * ⚠️ 【仁德】那一条（①'）自**票 05** 起是**遗留路径**：A 族六条主动技已全部改走
+ * `SkillFlow`，候选恒骨架（不带 `picks`/`choices`）⇒ `ui.manual` 在生产里恒假，手选模式
+ * 没有生产者。它按 design.md §7 Q4"先留、之后再清"保留在这里，测的是**这段尚未删除的
+ * 渲染代码**仍然读得对；【仁德】的真实交互（服务端两步询问）由 ㉿W1–W8 与 ㉿R8–R11 覆盖。
  */
 
 // ① 龙胆：转化候选的 card_id 是虚拟牌，界面手牌是实体牌——`virtual_index` 是那座桥。
@@ -1294,6 +1299,457 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!sentSeat && sentSeat.kind === "Pass", JSON.stringify(sentSeat));
 }
 
+/* ============ 票 02（合成局面）：【青囊】流水线 —— 逐步文案 + 取消送出 Pass ============
+ *
+ * 形状与【离间】同源（两步都是服务端驱动的询问：点技能 → SELECT_CARDS → SELECT_OPTION），
+ * 只有步数与目标池不同。这里喂与服务端 `pending_payload` 同形的合成 view，钉同一组事：
+ * 两步文案各是服务端那一句、座位步有 Pass 时取消按钮**送出一条候选**。
+ */
+{
+  const handCard = synthCard(31, "杀");
+  const qingnangSkill = {
+    skill_id: "hero.huatuo.qingnang", name: "青囊", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true,
+    ui: {
+      requirement: "弃一张手牌，令一名已受伤角色回复 1 点体力", manual: false,
+      pick_cards: [], pick_seats: [], convert_sources: [],
+    },
+  };
+
+  // ① 步 1：弃置 1 张手牌，询问里带一条 `Pass` = 可取消。
+  const pickView = synthView({
+    kind: "SELECT_CARDS", actor: 0, seq: 920, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 920, picks: [] },
+      { kind: "Pass", answers_seq: 920 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [{ ref: { seat: 0, zone: "hand" }, card: handCard }],
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: true },
+    context: { requirement: "弃置1张手牌", skill_hints: [] },
+  });
+  pickView.skills = [qingnangSkill];
+  pickView.heroes = { 0: "huatuo", 1: "guanyu", 2: "zhangfei" };
+  pickView.snapshot.self_hand = [handCard];
+  ui.state.view = pickView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pickView);
+
+  check("㉿H1 步 1 的询问区文案就是服务端那句「弃置1张手牌」",
+    $("t-prompt").textContent === "弃置1张手牌", `"${$("t-prompt").textContent}"`);
+  check("㉿H2 选择面只铺手牌（弃的是自己的手牌，不是装备区）",
+    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 1,
+    `块=${$("t-options").children.length}`);
+  check("㉿H3 候选里有 Pass ⇒ 取消按钮可点", $("btn-cancel").disabled === false,
+    `disabled=${$("btn-cancel").disabled}`);
+
+  ui.state.sessionId = "smoke-missing-session";
+  const beforePick = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
+  check("㉿H4 步 1 点取消 = **送出一条 Pass 候选**",
+    !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
+
+  // ② 步 2：选一名已受伤角色（目标池含自己 ⇒ 选项里有 seat:0 与 seat:2）。
+  const seatView = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 921, prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "seat:0", answers_seq: 921 },
+      { kind: "SelectOption", choice: "seat:2", answers_seq: 921 },
+      { kind: "Pass", answers_seq: 921 },
+    ],
+    candidate_index: {}, virtual_index: {},
+    option_seats: { "seat:0": 0, "seat:2": 2 },
+    context: { requirement: "选择一名已受伤角色回复1点体力", skill_hints: [] },
+  });
+  seatView.skills = [qingnangSkill];
+  seatView.heroes = { 0: "huatuo", 1: "guanyu", 2: "zhangfei" };
+  ui.state.view = seatView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(seatView);
+
+  check("㉿H5 步 2 的询问区文案就是服务端那句「选择一名已受伤角色回复1点体力」",
+    $("t-prompt").textContent === "选择一名已受伤角色回复1点体力",
+    `"${$("t-prompt").textContent}"`);
+  const seatBox = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "2");
+  check("㉿H6 已受伤角色画成可点", !!seatBox && seatBox.classList.contains("targetable"),
+    `targetable=${seatBox && seatBox.classList.contains("targetable")}`);
+  (seatBox.listeners.click || []).forEach((fn) => fn({ target: seatBox }));
+  const seatAction = ui.buildAction();
+  check("㉿H7 点它 = 选中那条 seat:N 候选（提交才送出去）",
+    !!seatAction && seatAction.kind === "SelectOption" && seatAction.choice === "seat:2",
+    JSON.stringify(seatAction));
+
+  const beforeQingnangSeat = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentQingnangSeat = calls.length > beforeQingnangSeat
+    ? calls[calls.length - 1].body.action : null;
+  check("㉿H8 步 2 点取消 = 送出 Pass（中途退出这一步）",
+    !!sentQingnangSeat && sentQingnangSeat.kind === "Pass", JSON.stringify(sentQingnangSeat));
+}
+
+/* ============ 票 03（合成局面）：【结姻】流水线 —— 逐步文案 + 取消送出 Pass ============
+ *
+ * 形状与【青囊】同源（两步都是服务端驱动的询问：点技能 → SELECT_CARDS → SELECT_OPTION），
+ * 差别只在成本是**恰好两张手牌**、目标池是"已受伤男性（不含自己）"。这里喂与服务端
+ * `pending_payload` 同形的合成 view，钉同一组事：两步文案各是服务端那一句、有 Pass 时
+ * 取消按钮**送出一条候选**。
+ */
+{
+  const firstCard = synthCard(41, "杀");
+  const secondCard = synthCard(42, "闪");
+  const jieyinSkill = {
+    skill_id: "hero.sunshangxiang.jieyin", name: "结姻", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true,
+    ui: {
+      requirement: "弃两张手牌，选择一名已受伤男性角色", manual: false,
+      pick_cards: [], pick_seats: [], convert_sources: [],
+    },
+  };
+
+  // ① 步 1：一并弃置恰好 2 张手牌，询问里带一条 `Pass` = 可取消。
+  const pickView = synthView({
+    kind: "SELECT_CARDS", actor: 0, seq: 930, prompt: "请从选择面里选择两张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 930, picks: [0, 1] },
+      { kind: "Pass", answers_seq: 930 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "hand" }, card: firstCard },
+      { ref: { seat: 0, zone: "hand" }, card: secondCard },
+    ],
+    spec: { zones: ["hand"], total: [2, 2], sequential: false, optional: true },
+    context: { requirement: "弃置2张手牌", skill_hints: [] },
+  });
+  pickView.skills = [jieyinSkill];
+  pickView.heroes = { 0: "sunshangxiang", 1: "guanyu", 2: "zhangfei" };
+  pickView.snapshot.self_hand = [firstCard, secondCard];
+  ui.state.view = pickView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pickView);
+
+  check("㉿Y1 步 1 的询问区文案就是服务端那句「弃置2张手牌」",
+    $("t-prompt").textContent === "弃置2张手牌", `"${$("t-prompt").textContent}"`);
+  check("㉿Y2 选择面把手牌两张都铺出来（恰好两张，一次问完）",
+    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 2,
+    `块=${$("t-options").children.length}`);
+  check("㉿Y3 候选里有 Pass ⇒ 取消按钮可点", $("btn-cancel").disabled === false,
+    `disabled=${$("btn-cancel").disabled}`);
+
+  ui.state.sessionId = "smoke-missing-session";
+  const beforePick = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
+  check("㉿Y4 步 1 点取消 = **送出一条 Pass 候选**",
+    !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
+
+  // ② 步 2：选一名已受伤男性（目标池不含自己 ⇒ 选项里只有 seat:1 / seat:2）。
+  const seatView = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 931, prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "seat:1", answers_seq: 931 },
+      { kind: "SelectOption", choice: "seat:2", answers_seq: 931 },
+      { kind: "Pass", answers_seq: 931 },
+    ],
+    candidate_index: {}, virtual_index: {},
+    option_seats: { "seat:1": 1, "seat:2": 2 },
+    context: { requirement: "选择一名已受伤男性角色回复1点体力", skill_hints: [] },
+  });
+  seatView.skills = [jieyinSkill];
+  seatView.heroes = { 0: "sunshangxiang", 1: "guanyu", 2: "zhangfei" };
+  ui.state.view = seatView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(seatView);
+
+  check("㉿Y5 步 2 的询问区文案就是服务端那句「选择一名已受伤男性角色回复1点体力」",
+    $("t-prompt").textContent === "选择一名已受伤男性角色回复1点体力",
+    `"${$("t-prompt").textContent}"`);
+  const seatBox = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "1");
+  check("㉿Y6 已受伤男性画成可点（自己不在池里）",
+    !!seatBox && seatBox.classList.contains("targetable"),
+    `targetable=${seatBox && seatBox.classList.contains("targetable")}`);
+  (seatBox.listeners.click || []).forEach((fn) => fn({ target: seatBox }));
+  const seatAction = ui.buildAction();
+  check("㉿Y7 点它 = 选中那条 seat:N 候选（提交才送出去）",
+    !!seatAction && seatAction.kind === "SelectOption" && seatAction.choice === "seat:1",
+    JSON.stringify(seatAction));
+
+  const beforeJieyinSeat = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentJieyinSeat = calls.length > beforeJieyinSeat
+    ? calls[calls.length - 1].body.action : null;
+  check("㉿Y8 步 2 点取消 = 送出 Pass（中途退出这一步）",
+    !!sentJieyinSeat && sentJieyinSeat.kind === "Pass", JSON.stringify(sentJieyinSeat));
+}
+
+/* ============ 票 04（合成局面）：【制衡】单步流水线 —— 任意张 + 取消送出 Pass ============
+ *
+ * 只有一步：一条 `SELECT_CARDS` 覆盖**手牌 ∪ 装备区**、`total = (1, 全部可选)`。钉四件事：
+ * 文案是服务端那句、选择面同时铺出手牌与装备区、上限是**真实池大小**而不是哨兵值、
+ * 有 `Pass` 时取消按钮**送出一条候选**。
+ */
+{
+  const handCard = synthCard(51, "杀");
+  const equipCard = { ...synthCard(52, "的卢"), type: "mount" };
+  const zhihengSkill = {
+    skill_id: "hero.sunquan.zhiheng", name: "制衡", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true,
+    ui: {
+      requirement: "弃置任意张牌（手牌 / 装备区），然后摸等量的牌", manual: false,
+      pick_cards: [], pick_seats: [], convert_sources: [],
+    },
+  };
+
+  const pickView = synthView({
+    kind: "SELECT_CARDS", actor: 0, seq: 940, prompt: "请从选择面里选择任意张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 940, picks: [0] },
+      { kind: "SelectCards", answers_seq: 940, picks: [0, 1] },
+      { kind: "Pass", answers_seq: 940 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "hand" }, card: handCard },
+      { ref: { seat: 0, zone: "equip" }, card: equipCard },
+    ],
+    spec: { zones: ["hand", "equip"], total: [1, 2], sequential: false, optional: true },
+    context: { requirement: "弃置任意张牌（手牌 / 装备区）", skill_hints: [] },
+  });
+  pickView.skills = [zhihengSkill];
+  pickView.heroes = { 0: "sunquan", 1: "guanyu" };
+  pickView.snapshot.self_hand = [handCard];
+  pickView.snapshot.players[0].equip = [equipCard];
+  ui.state.view = pickView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pickView);
+
+  check("㉿Z1 单步的询问区文案就是服务端那句「弃置任意张牌（手牌 / 装备区）」",
+    $("t-prompt").textContent === "弃置任意张牌（手牌 / 装备区）",
+    `"${$("t-prompt").textContent}"`);
+  check("㉿Z2 选择面同时铺出手牌与自己的装备区（2 个块 / 共 2 个槽）",
+    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 2,
+    `块=${$("t-options").children.length}`);
+  check("㉿Z3 「任意张」的上限是**真实池大小**（服务端解析 hi=None，不进哨兵值）",
+    JSON.stringify(pickView.pending.spec.total) === "[1,2]",
+    JSON.stringify(pickView.pending.spec.total));
+  check("㉿Z4 候选里有 Pass ⇒ 取消按钮可点", $("btn-cancel").disabled === false,
+    `disabled=${$("btn-cancel").disabled}`);
+
+  ui.state.sessionId = "smoke-missing-session";
+  const beforePick = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
+  check("㉿Z5 点取消 = **送出一条 Pass 候选**",
+    !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
+}
+
+/* ============ 票 05（合成局面）：【仁德】流水线 —— 逐步文案 + 取消送出 Pass ============
+ *
+ * 两步：`SELECT_CARDS`（手牌、任意张、上限 = 真实池大小）→ `SELECT_OPTION`（交给谁）。
+ * 与【青囊】/【结姻】/【制衡】同形，钉同一组事：两步文案各是服务端那一句、有 `Pass` 时
+ * 取消按钮**送出一条候选**。
+ */
+{
+  const firstCard = synthCard(61, "杀");
+  const secondCard = synthCard(62, "闪");
+  const rendeSkill = {
+    skill_id: "hero.liubei.rende", name: "仁德", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true,
+    ui: {
+      requirement: "交给一名其他角色任意张手牌", manual: false,
+      pick_cards: [], pick_seats: [], convert_sources: [],
+    },
+  };
+
+  // ① 步 1：选任意张手牌交出去，询问里带一条 `Pass` = 可取消。
+  const pickView = synthView({
+    kind: "SELECT_CARDS", actor: 0, seq: 950, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 950, picks: [0] },
+      { kind: "SelectCards", answers_seq: 950, picks: [0, 1] },
+      { kind: "Pass", answers_seq: 950 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "hand" }, card: firstCard },
+      { ref: { seat: 0, zone: "hand" }, card: secondCard },
+    ],
+    spec: { zones: ["hand"], total: [1, 2], sequential: false, optional: true },
+    context: { requirement: "选择任意张要交给其他角色的手牌", skill_hints: [] },
+  });
+  pickView.skills = [rendeSkill];
+  pickView.heroes = { 0: "liubei", 1: "guanyu" };
+  pickView.snapshot.self_hand = [firstCard, secondCard];
+  ui.state.view = pickView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pickView);
+
+  check("㉿W1 步 1 的询问区文案就是服务端那句「选择任意张要交给其他角色的手牌」",
+    $("t-prompt").textContent === "选择任意张要交给其他角色的手牌",
+    `"${$("t-prompt").textContent}"`);
+  check("㉿W2 选择面把本人手牌铺出来（2 个槽）、上限是真实池大小",
+    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 2
+      && JSON.stringify(pickView.pending.spec.total) === "[1,2]",
+    `块=${$("t-options").children.length} total=${JSON.stringify(pickView.pending.spec.total)}`);
+  check("㉿W3 候选里有 Pass ⇒ 取消按钮可点", $("btn-cancel").disabled === false,
+    `disabled=${$("btn-cancel").disabled}`);
+
+  ui.state.sessionId = "smoke-missing-session";
+  const beforePick = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
+  check("㉿W4 步 1 点取消 = **送出一条 Pass 候选**",
+    !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
+
+  // ② 步 2：点一名其他角色（选项 = seat:1 / seat:2，自己不在池里）。
+  const seatView = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 951, prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "seat:1", answers_seq: 951 },
+      { kind: "SelectOption", choice: "seat:2", answers_seq: 951 },
+      { kind: "Pass", answers_seq: 951 },
+    ],
+    candidate_index: {}, virtual_index: {},
+    option_seats: { "seat:1": 1, "seat:2": 2 },
+    context: { requirement: "选择交给哪名其他角色", skill_hints: [] },
+  });
+  seatView.skills = [rendeSkill];
+  seatView.heroes = { 0: "liubei", 1: "guanyu", 2: "zhangfei" };
+  ui.state.view = seatView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(seatView);
+
+  check("㉿W5 步 2 的询问区文案就是服务端那句「选择交给哪名其他角色」",
+    $("t-prompt").textContent === "选择交给哪名其他角色",
+    `"${$("t-prompt").textContent}"`);
+  const rendeSeat = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "2");
+  check("㉿W6 其他角色画成可点", !!rendeSeat && rendeSeat.classList.contains("targetable"),
+    `targetable=${rendeSeat && rendeSeat.classList.contains("targetable")}`);
+  (rendeSeat.listeners.click || []).forEach((fn) => fn({ target: rendeSeat }));
+  const rendeAction = ui.buildAction();
+  check("㉿W7 点它 = 选中那条 seat:N 候选（提交才送出去）",
+    !!rendeAction && rendeAction.kind === "SelectOption" && rendeAction.choice === "seat:2",
+    JSON.stringify(rendeAction));
+
+  const beforeRendeSeat = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentRendeSeat = calls.length > beforeRendeSeat
+    ? calls[calls.length - 1].body.action : null;
+  check("㉿W8 步 2 点取消 = 送出 Pass（中途退出这一步）",
+    !!sentRendeSeat && sentRendeSeat.kind === "Pass", JSON.stringify(sentRendeSeat));
+}
+
+/* ============ 票 06（合成局面）：【反间】三步流水线 —— 应答者是**目标** ============
+ *
+ * 步 1 问发动者（选谁），步 2/3 问**目标**（猜花色、从**发动者**手牌里挑一张）。钉三件事：
+ * 三步各自的文案（步 2/3 要写出归属）、步 3 的选择面铺的是发动者的牌、取消按钮送出 `Pass`。
+ */
+{
+  const fanjianSkill = {
+    skill_id: "hero.zhouyu.fanjian", name: "反间", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true,
+    ui: {
+      requirement: "选择一种花色", manual: false,
+      pick_cards: [], pick_seats: [], convert_sources: [],
+    },
+  };
+
+  // ① 步 1：发动者选谁被反间。
+  const fanSeatView = synthView({
+    kind: "SELECT_OPTION", actor: 0, seq: 960, prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "seat:1", answers_seq: 960 },
+      { kind: "Pass", answers_seq: 960 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: { "seat:1": 1 },
+    context: { requirement: "选择一名其他角色", skill_hints: [] },
+  });
+  fanSeatView.skills = [fanjianSkill];
+  fanSeatView.heroes = { 0: "zhouyu", 1: "guanyu" };
+  ui.state.view = fanSeatView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(fanSeatView);
+
+  check("㉿V1 步 1 的文案 =「选择一名其他角色」（由发动者应答）",
+    $("t-prompt").textContent === "选择一名其他角色", `"${$("t-prompt").textContent}"`);
+
+  // ② 步 2：**目标**猜花色（`pending.actor` 是别人 ⇒ 文案必须写出归属）。
+  const suitView = synthView({
+    kind: "SELECT_OPTION", actor: 1, seq: 961, prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "heart", answers_seq: 961 },
+      { kind: "SelectOption", choice: "spade", answers_seq: 961 },
+      { kind: "Pass", answers_seq: 961 },
+    ],
+    candidate_index: {}, virtual_index: {},
+    context: { requirement: "由目标选择一种花色", skill_hints: [] },
+  });
+  suitView.skills = [fanjianSkill];
+  suitView.heroes = { 0: "zhouyu", 1: "guanyu" };
+  ui.state.view = suitView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(suitView);
+
+  check("㉿V2 步 2 的文案写明归属 =「由目标选择一种花色」",
+    $("t-prompt").textContent === "由目标选择一种花色", `"${$("t-prompt").textContent}"`);
+  // 候选列表形态的 `SELECT_OPTION`（花色不是座位）：未选任何一项时取消按钮先不可点，
+  // 选中一项后可点 —— 与座位步 `renderSeatPick`（有 Pass 即可取消）略有差别，是既有形态。
+  const suitButton = $("t-options").children[0];
+  (suitButton.listeners.click || []).forEach((fn) => fn({ target: suitButton }));
+  check("㉿V3 步 2 选中一项花色后取消按钮可点", $("btn-cancel").disabled === false,
+    `disabled=${$("btn-cancel").disabled}`);
+
+  ui.state.sessionId = "smoke-missing-session";
+  const beforeSuit = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentSuit = calls.length > beforeSuit ? calls[calls.length - 1].body.action : null;
+  check("㉿V4 步 2 点取消 = 送出 Pass", !!sentSuit && sentSuit.kind === "Pass",
+    JSON.stringify(sentSuit));
+
+  // ③ 步 3：**目标**从**发动者**手里盲挑一张（槽位只有位置、没有牌面）。
+  const fanCardView = synthView({
+    kind: "SELECT_CARDS", actor: 1, seq: 962, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 962, picks: [0] },
+      { kind: "Pass", answers_seq: 962 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [{ ref: { seat: 0, zone: "hand" }, card: null }],
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: true },
+    context: { requirement: "由目标从你的手牌中选择一张", skill_hints: [] },
+  });
+  fanCardView.skills = [fanjianSkill];
+  fanCardView.heroes = { 0: "zhouyu", 1: "guanyu" };
+  fanCardView.snapshot.self_hand = [];
+  ui.state.view = fanCardView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(fanCardView);
+
+  check("㉿V5 步 3 的文案写明归属 =「由目标从你的手牌中选择一张」",
+    $("t-prompt").textContent === "由目标从你的手牌中选择一张",
+    `"${$("t-prompt").textContent}"`);
+  check("㉿V6 步 3 铺出发动者（座位 0）的**隐藏**槽位（盲挑，不亮牌面）",
+    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 1,
+    `块=${$("t-options").children.length}`);
+
+  const beforeFanCard = calls.length;
+  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  const sentFanCard = calls.length > beforeFanCard ? calls[calls.length - 1].body.action : null;
+  check("㉿V7 步 3 点取消 = 送出 Pass（中途退出这一步）",
+    !!sentFanCard && sentFanCard.kind === "Pass", JSON.stringify(sentFanCard));
+}
+
 /* ============ 报障 3（合成局面）：事件逐个回放 + 效果区逐事件派生 ============ */
 {
   const moveIn = {
@@ -1468,9 +1924,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
         }
         if (p && p.kind === "PLAY_PHASE" && p.actor === 0 && hero === "liubei" && !rende) {
           const skill = (view.skills || []).find((item) => item.skill_id === "hero.liubei.rende");
-          if (skill && skill.ui && skill.ui.manual && skill.ui.pick_cards.length && skill.ui.pick_seats.length) {
-            rende = { seed, steps: step };
-          }
+          if (skill && skill.available) rende = { seed, steps: step };
         }
         if (longdan && rende) return { longdan, rende };
         await advanceOnce();
@@ -1496,26 +1950,29 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       `card=${dodge && dodge.name} selectable=${dodge && ui.cardSelectable(p, dodge.card_id)}`);
   }
 
-  check("㉿R8 真局扫到「刘备出牌阶段仁德走手选模式」", !!found.rende,
+  check("㉿R8 真局扫到「刘备出牌阶段仁德可发动」", !!found.rende,
     found.rende ? `seed=${found.rende.seed} steps=${found.rende.steps}` : "16 个种子内没找到");
   if (found.rende) {
     await replayScanTo(found.rende);
-    const view = ui.state.view;
-    const skill = (view.skills || []).find((item) => item.skill_id === "hero.liubei.rende");
     const button = $("t-skills").children.find((b) => b.getAttribute("data-skill-id") === "hero.liubei.rende");
-    check("㉿R9 真局里仁德按钮是手选模式且可点",
-      !!button && button.disabled === false && button.getAttribute("data-manual") === "true",
+    check("㉿R9 真局里仁德按钮可点、**不再**是手选模式（票 05：改由服务端逐步询问）",
+      !!button && button.disabled === false && button.getAttribute("data-manual") !== "true",
       `disabled=${button && button.disabled} manual=${button && button.getAttribute("data-manual")}`);
     (button.listeners.click || []).forEach((fn) => fn({ target: button }));
-    const handChip = (index) => $("t-hand").children[index];
-    (handChip(0).listeners.click || []).forEach((fn) => fn({ target: handChip(0) }));
-    (handChip(1).listeners.click || []).forEach((fn) => fn({ target: handChip(1) }));
-    const seat = skill.ui.pick_seats[0];
-    const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(seat));
-    check("㉿R10 真局里复选两张牌后目标武将可点、组合命中候选",
-      !!box && box.classList.contains("targetable")
-        && ui.state.picks.length === 2 && ui.buildAction() === null,
-      `picks=${JSON.stringify(ui.state.picks)}（还没点座位 ⇒ buildAction 为 null）`);
+    const rendeAction = ui.buildAction();
+    check("㉿R10 真局里点仁德 = 选中那条骨架 ActivateSkill 候选（载荷全空）",
+      !!rendeAction && rendeAction.kind === "ActivateSkill"
+        && rendeAction.skill_id === "hero.liubei.rende"
+        && (rendeAction.picks || []).length === 0 && (rendeAction.choices || []).length === 0,
+      JSON.stringify(rendeAction));
+    if (rendeAction) {
+      await ui.submitAction();
+      const p = ui.state.view.pending;
+      check("㉿R11 真局里提交后服务端问步 1「选择任意张要交给其他角色的手牌」",
+        !!p && p.kind === "SELECT_CARDS"
+          && p.context && p.context.requirement === "选择任意张要交给其他角色的手牌",
+        `kind=${p && p.kind} req=${p && p.context && p.context.requirement}`);
+    }
   }
 }
 

@@ -594,7 +594,15 @@ def _step_requirement(definition: Any, query: Query, data: dict[str, Any]) -> st
     if raw:
         _head, sep, step = str(raw).partition(":")
         if sep:
-            return steps.get(step)
+            found = steps.get(step)
+            if found is None:
+                # 同一步问多次时执行器会补序号（``seat:0`` / ``seat:1``，见
+                # ``active._flow_option_id``）：序号只为答案缓存不撞车，文案仍归那一步，
+                # 故去掉末尾的 ``:<数字>`` 再查一次（本批没有消费者，先堵住这个坑）。
+                stem, colon, index = step.rpartition(":")
+                if colon and index.isdigit():
+                    found = steps.get(stem)
+            return found
     if getattr(query, "kind", None) == "SELECT_CARDS" and data.get("skill_id") == definition.skill_id:
         return steps.get("card")
     return None

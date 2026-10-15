@@ -283,6 +283,89 @@ def test_fallback_action_prefers_pass_when_the_query_offers_it() -> None:
     pytest.skip("本局没走到带 Pass 的询问（不变量由构造局面单测覆盖）")
 
 
+def test_fallback_action_answers_the_target_of_a_fanjian_step() -> None:
+    """票 06：反间的步 2/3 由**目标**应答（不是发动者）。超时兜底要在"等目标作答"时给出
+    一个**合法**代答 —— 带 ``Pass`` 的选牌步落到"取消这一步"，而不是发出非法动作。"""
+    from sgs.effects import legal_actions_for
+    from sgs.state import Pass, QueryKind, SelectContext
+
+    pack = _context_pack()
+    hearts = cards_of_type(pack, "heart")[:2]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=tuple(hearts), hero="zhouyu"), SeatSpec()],
+        turn_seat=0,
+    )
+    # 步 3 的形状：**目标**（座位 1）应答，选择面铺的是**发动者**（座位 0）的手牌。
+    slots = tuple(
+        Slot(ref=ZoneRef(Zone.HAND, 0), card=state.card(card_id)) for card_id in hearts
+    )
+    spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=True)
+    actions = legal_actions_for(
+        state,
+        1,
+        QueryKind.SELECT_CARDS,
+        answers_seq=1,
+        payload=SelectContext(spec=spec, slots=slots, skill_id="hero.zhouyu.fanjian"),
+    )
+    query = SelectCardsQuery(
+        seq=1,
+        actor=1,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="请从选择面里选择一张牌。",
+        legal_actions=actions,
+        view=project(state, 1),
+        spec=spec,
+        slots=slots,
+        skill_id="hero.zhouyu.fanjian",
+    )
+
+    assert any(isinstance(action, Pass) for action in actions), "这一步可取消（流水线语义）"
+    assert isinstance(fallback_action(query), Pass), "超时代答 = 取消这一步，不是非法动作"
+
+
+def test_a_timeout_answers_the_target_of_fanjian_in_a_real_session() -> None:
+    """票 06：反间的步 2/3 由**目标**应答。真实会话里（AI 周瑜反间人类座位）超时兜底要能
+    在"等目标作答"时替**目标**代答一次，且代答之后该局仍能跑完。"""
+    from sgs.state import Pass
+
+    session = Session(
+        seed=0,
+        player_count=2,
+        ai="random",
+        human_seat=1,
+        heroes=("zhouyu", "guanyu"),
+        timeout_seconds=1.0,
+    )
+    for _ in range(400):
+        pending = session.pending
+        if pending is None:
+            break
+        if pending.kind == "SELECT_OPTION" and str(pending.skill_id).startswith("fanjian:"):
+            break
+        session.submit_answer(fallback_action(pending))
+
+    pending = session.pending
+    assert pending is not None and pending.skill_id == "fanjian:suit", (
+        "扫到了 AI 发动的【反间】的第二步"
+    )
+    assert pending.actor == session.human_seat, "这一步问的正是**目标**（人类座位）"
+    assert isinstance(fallback_action(pending), Pass)
+
+    session.mark_pending(100.0)
+    assert session.expire_if_due(101.0, fallback_action) is True, "到点替目标代答"
+    assert session.timeouts == 1
+    assert session.session_log[-1].kind == "timeout"
+    assert session.session_log[-1].detail["query_kind"] == "SELECT_OPTION"
+
+    for _ in range(400):
+        if session.pending is None:
+            break
+        session.submit_answer(fallback_action(session.pending))
+
+    assert session.pending is None, "被代答之后该局仍能跑完"
+
+
 def test_a_timeout_touches_the_session_log_but_not_the_journal() -> None:
     """超时只落侧车日志；**记录流一个字节都不加**（地图 D10）。
 
@@ -554,8 +637,11 @@ def test_the_pending_payload_carries_the_virtual_source_index() -> None:
     assert isinstance(payload["virtual_index"], dict)
 
 
-def test_rende_skill_entry_takes_cards_then_a_seat_by_direct_clicks() -> None:
-    """报障 2：`ui.manual` 让界面走"直接多选手牌 → 直接点武将"，而不是铺选项按钮。"""
+def test_rende_skill_entry_is_server_driven_not_manual() -> None:
+    """票 05：【仁德】改走步骤流水线 ⇒ 界面**不再**走"直接多选手牌 → 直接点武将"的
+    ``ui.manual`` 模式（那是候选烘载荷时代的产物），改由服务端的
+    ``SELECT_CARDS → SELECT_OPTION`` 两步驱动；候选仍是可点的骨架。
+    """
     from types import SimpleNamespace
 
     pack = _context_pack()
@@ -572,9 +658,9 @@ def test_rende_skill_entry_takes_cards_then_a_seat_by_direct_clicks() -> None:
         item for item in build_skills(session, 0) if item["skill_id"] == "hero.liubei.rende"
     )
 
-    assert entry["ui"]["manual"] is True
-    assert entry["ui"]["pick_cards"] == list(hand), "可选手牌就是本人手牌（按手牌序）"
-    assert entry["ui"]["pick_seats"] == [1], "可点座位是其他存活角色"
+    assert entry["available"] is True, "骨架候选仍在出牌阶段池里（技能按钮可点）"
+    assert entry["ui"]["manual"] is False, "改由服务端逐步询问，前端不再自行拼合载荷"
+    assert entry["ui"]["pick_cards"] == [] and entry["ui"]["pick_seats"] == []
     assert entry["ui"]["requirement"] == "交给一名其他角色任意张手牌"
 
 
@@ -1297,8 +1383,34 @@ def test_availability_follows_the_pending_queries_candidates() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 分步技能的**逐步文案**（票 01 的【离间】样板）
+# 分步技能的**逐步文案**（票 01 的【离间】样板 / 票 02 的【青囊】）
 # ---------------------------------------------------------------------------
+
+
+def _skill_step_cards_query(state, *, zones: tuple[Zone, ...], optional: bool = False):
+    return SelectCardsQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="请从选择面里选择一张牌。",
+        legal_actions=(),
+        view=project(state, 0),
+        spec=SelectionSpec(zones=zones, total=(1, 1), optional=optional),
+        slots=(),
+    )
+
+
+def _skill_step_option_query(state, *, skill_id: str, options: tuple[str, ...]):
+    return SelectOptionQuery(
+        seq=2,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="请选择一项。",
+        legal_actions=(),
+        view=project(state, 0),
+        skill_id=skill_id,
+        options=options,
+    )
 
 
 def test_query_context_walks_the_lijian_steps_with_their_own_wording() -> None:
@@ -1313,53 +1425,140 @@ def test_query_context_walks_the_lijian_steps_with_their_own_wording() -> None:
         frame_data={"skill_id": "hero.diaochan.lijian", "source": 0},
     )
 
-    cards_query = SelectCardsQuery(
-        seq=1,
-        actor=0,
-        timing=Timing.PHASE_PLAY_IDLE,
-        prompt="请从选择面里选择一张牌。",
-        legal_actions=(),
-        view=project(state, 0),
-        spec=SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1), optional=True),
-        slots=(),
+    cards_query = _skill_step_cards_query(
+        state, zones=(Zone.HAND, Zone.EQUIP), optional=True
     )
     assert query_context(engine, cards_query)["requirement"] == "弃置1张牌"
 
     for step in ("user", "victim"):
-        option_query = SelectOptionQuery(
-            seq=2,
-            actor=0,
-            timing=Timing.PHASE_PLAY_IDLE,
-            prompt="请选择一项。",
-            legal_actions=(),
-            view=project(state, 0),
-            skill_id=f"lijian:{step}",
-            options=("seat:1", "seat:2"),
+        option_query = _skill_step_option_query(
+            state, skill_id=f"lijian:{step}", options=("seat:1", "seat:2")
         )
         assert query_context(engine, option_query)["requirement"] == (
             "选择场上两名男性角色，先点选的是决斗使用者，后点选的是决斗的目标"
         ), f"步骤 {step} 的问法"
 
 
-def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_skills() -> None:
-    """没有 ``step_requirements`` 的技能仍读一句话的 summary（旧技能一字不改）。"""
+def test_query_context_walks_the_qingnang_steps_with_their_own_wording() -> None:
+    """【青囊】两步各有各的问法（票 02）：先"弃置1张手牌"，再"选择一名已受伤角色…"。
+
+    键的取法完全复用【离间】那一套：``SELECT_CARDS`` 读 ``"card"``、``SELECT_OPTION``
+    读询问 ``skill_id`` 冒号后那段（执行器发的是 ``qingnang:seat``）。
+    """
     engine, state = _context_fixture(
         [SeatSpec(hero="huatuo"), SeatSpec()],
         frame_kind=FrameKind.SKILL,
         frame_data={"skill_id": "hero.huatuo.qingnang", "source": 0},
     )
 
-    cards_query = SelectCardsQuery(
-        seq=1,
-        actor=0,
-        timing=Timing.PHASE_PLAY_IDLE,
-        prompt="请从选择面里选择一张牌。",
-        legal_actions=(),
-        view=project(state, 0),
-        spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1)),
-        slots=(),
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,), optional=True)
+    assert query_context(engine, cards_query)["requirement"] == "弃置1张手牌"
+
+    option_query = _skill_step_option_query(
+        state, skill_id="qingnang:seat", options=("seat:0", "seat:1")
+    )
+    assert query_context(engine, option_query)["requirement"] == "选择一名已受伤角色回复1点体力"
+
+
+def test_query_context_walks_the_jieyin_steps_with_their_own_wording() -> None:
+    """【结姻】两步各有各的问法（票 03）：先"弃置2张手牌"，再"选择一名已受伤男性角色…"。
+
+    键的取法完全复用【离间】/【青囊】那一套：``SELECT_CARDS`` 读 ``"card"``、
+    ``SELECT_OPTION`` 读询问 ``skill_id`` 冒号后那段（执行器发的是 ``jieyin:seat``）。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(hero="sunshangxiang"), SeatSpec()],
+        frame_kind=FrameKind.SKILL,
+        frame_data={"skill_id": "hero.sunshangxiang.jieyin", "source": 0},
     )
 
-    assert query_context(engine, cards_query)["requirement"] == (
-        "弃一张手牌，令一名已受伤角色回复 1 点体力"
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,), optional=True)
+    assert query_context(engine, cards_query)["requirement"] == "弃置2张手牌"
+
+    option_query = _skill_step_option_query(
+        state, skill_id="jieyin:seat", options=("seat:1",)
     )
+    assert query_context(engine, option_query)["requirement"] == (
+        "选择一名已受伤男性角色回复1点体力"
+    )
+
+
+def test_query_context_walks_the_zhiheng_step_with_its_own_wording() -> None:
+    """【制衡】单步（票 04）也有自己的问法：``SELECT_CARDS`` 读 ``"card"`` 键。
+
+    单步技能没有第二条步骤文案，故只钉这一条；键的取法与【离间】/【青囊】/【结姻】同源。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(hero="sunquan"), SeatSpec()],
+        frame_kind=FrameKind.SKILL,
+        frame_data={"skill_id": "hero.sunquan.zhiheng", "source": 0},
+    )
+
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND, Zone.EQUIP), optional=True)
+    assert query_context(engine, cards_query)["requirement"] == "弃置任意张牌（手牌 / 装备区）"
+
+
+def test_query_context_walks_the_rende_steps_with_their_own_wording() -> None:
+    """【仁德】两步各有各的问法（票 05）：先"选择任意张要交给其他角色的手牌"，再"交给谁"。
+
+    键的取法完全复用【离间】/【青囊】/【结姻】/【制衡】那一套：``SELECT_CARDS`` 读
+    ``"card"``、``SELECT_OPTION`` 读询问 ``skill_id`` 冒号后那段（执行器发 ``rende:seat``）。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(hero="liubei"), SeatSpec()],
+        frame_kind=FrameKind.SKILL,
+        frame_data={"skill_id": "hero.liubei.rende", "source": 0},
+    )
+
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,), optional=True)
+    assert query_context(engine, cards_query)["requirement"] == (
+        "选择任意张要交给其他角色的手牌"
+    )
+
+    option_query = _skill_step_option_query(state, skill_id="rende:seat", options=("seat:1",))
+    assert query_context(engine, option_query)["requirement"] == "选择交给哪名其他角色"
+
+
+def test_query_context_walks_the_fanjian_steps_with_their_own_wording() -> None:
+    """【反间】三步各有各的问法（票 06）：步 2/3 的文案要写出**归属**（"由目标…"），
+    否则发动者看不懂为什么屏幕跑到别人那儿去了（票面明写的要求）。"""
+    engine, state = _context_fixture(
+        [SeatSpec(hero="zhouyu"), SeatSpec()],
+        frame_kind=FrameKind.SKILL,
+        frame_data={"skill_id": "hero.zhouyu.fanjian", "source": 0},
+    )
+
+    seat_query = _skill_step_option_query(state, skill_id="fanjian:seat", options=("seat:1",))
+    assert query_context(engine, seat_query)["requirement"] == "选择一名其他角色"
+
+    suit_query = _skill_step_option_query(
+        state, skill_id="fanjian:suit", options=("heart", "spade")
+    )
+    assert query_context(engine, suit_query)["requirement"] == "由目标选择一种花色"
+
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,))
+    assert query_context(engine, cards_query)["requirement"] == "由目标从你的手牌中选择一张"
+
+    repeat_query = _skill_step_option_query(
+        state, skill_id="fanjian:seat:1", options=("seat:1",)
+    )
+    assert query_context(engine, repeat_query)["requirement"] == "选择一名其他角色", (
+        "同一步问多次时执行器补的序号（``:1``）只用于答案缓存，不该让文案掉回 summary"
+    )
+
+
+def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_skills() -> None:
+    """没有 ``step_requirements`` 的技能仍读一句话的 summary（旧技能一字不改）。
+
+    A 族六条主动技自票 06 起**全部**有了逐步文案，故样本改成**装备技能**（【雌雄双股剑】）
+    ——回退面本身是通用的（读 :attr:`~sgs.skills.catalog.SkillDef.requirement`），
+    没有理由再绑在某条还没迁的 A 族技能上（那会让本用例每票都要跟着改）。
+    """
+    engine, state = _context_fixture(
+        [SeatSpec(), SeatSpec()],
+        frame_kind=FrameKind.SKILL,
+        frame_data={"skill_id": "equip.double_sword", "source": 0},
+    )
+
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,))
+    assert query_context(engine, cards_query)["requirement"] == "选择：弃一张手牌 / 令使用者摸一张"

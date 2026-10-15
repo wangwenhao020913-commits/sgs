@@ -209,9 +209,13 @@ M3_SCENARIOS: dict[str, Scenario] = {
         heroes=("caocao", "simayi", "liubei", "guanyu"),
     ),
     # D 族失去牌后：【连营】+【枭姬】含顶替。
+    # 种子 76 → 103 → 23：票 03 迁移【结姻】、票 03 修候选次序（Pass 曾排在真候选之前）、
+    # 票 04 迁移【制衡】（本局有孙权），每一步都改变了随机驱动的行动序列，旧种子不再命中
+    # 【连营】/【枭姬】/顶替三件事。按本模块纪律**重新选种**而不是放宽判据：23 在同样四名
+    # 武将下命中判据，且记录条数最少（1486，`.scratch/reseed.py` 扫 0–899 得到）。
     "38-hero-lost-cards": _m3(
         "38-hero-lost-cards",
-        seed=76,
+        seed=23,
         heroes=("luxun", "sunshangxiang", "guanyu", "sunquan"),
     ),
     # C 族目标池真排除：【空城】+【谦逊】。
@@ -227,9 +231,11 @@ M3_SCENARIOS: dict[str, Scenario] = {
         heroes=("lvbu", "guanyu", "zhaoyun", "luxun"),
     ),
     # G 族授予可见性与排列：诸葛亮【观星】。
+    # 种子 202 → 626：票 04 迁移【制衡】（本局有孙权）改变了随机驱动的行动序列，
+    # 202 那局不再命中【观星】的排列判据；按本模块纪律**重新选种**，626 记录条数最少（533）。
     "41-hero-guanxing": _m3(
         "41-hero-guanxing",
-        seed=202,
+        seed=626,
         heroes=("zhugeliang", "sunquan", "luxun", "guojia"),
     ),
     # H 族转化牌泛化：武圣 / 龙胆 / 国色 / 急救。
