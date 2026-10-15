@@ -167,9 +167,9 @@ class RespondContext:
 class SelectContext:
     """``SELECT_CARDS`` 候选生成的类型化载荷：选择面 + 配额，逐字进询问。
 
-    ``skill_id`` 是**这一步属于哪条技能**（票 05）：发动后流水线的选牌步带发动技能的
-    全限定 id（取自 SKILL 帧），其余选牌窗口（顺、拆、五谷…）为 ``None``。它随询问落在
-    :class:`SelectCardsQuery` 上供**本地消费者**（启发式 AI 的成本语义）读取，
+    ``skill_id`` 是**这一步属于哪条技能**（票 05）：取自**调用方帧**的 ``skill_id``
+    ——发动后流水线里那帧是 SKILL 帧，其余选牌窗口（顺、拆、五谷…）没有该键，为 ``None``。
+    它随询问落在 :class:`SelectCardsQuery` 上供**本地消费者**（启发式 AI 的成本语义）读取，
     **不进记录流**（见该字段的 ``exclude``）——故既有 Golden Replay 一行不改。
     """
 

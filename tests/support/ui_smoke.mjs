@@ -1653,7 +1653,6 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
  * 三步各自的文案（步 2/3 要写出归属）、步 3 的选择面铺的是发动者的牌、取消按钮送出 `Pass`。
  */
 {
-  const handCard = synthCard(71, "杀");
   const fanjianSkill = {
     skill_id: "hero.zhouyu.fanjian", name: "反间", skill_type: "NORMAL", locked: false,
     carrier: "HERO", available: true,
@@ -1717,7 +1716,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿V4 步 2 点取消 = 送出 Pass", !!sentSuit && sentSuit.kind === "Pass",
     JSON.stringify(sentSuit));
 
-  // ③ 步 3：**目标**从**发动者**手里挑一张。
+  // ③ 步 3：**目标**从**发动者**手里盲挑一张（槽位只有位置、没有牌面）。
   const fanCardView = synthView({
     kind: "SELECT_CARDS", actor: 1, seq: 962, prompt: "请从选择面里选择一张牌。",
     legal_actions: [
@@ -1725,13 +1724,13 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       { kind: "Pass", answers_seq: 962 },
     ],
     candidate_index: {}, virtual_index: {}, option_seats: {},
-    slots: [{ ref: { seat: 0, zone: "hand" }, card: handCard }],
+    slots: [{ ref: { seat: 0, zone: "hand" }, card: null }],
     spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: true },
     context: { requirement: "由目标从你的手牌中选择一张", skill_hints: [] },
   });
   fanCardView.skills = [fanjianSkill];
   fanCardView.heroes = { 0: "zhouyu", 1: "guanyu" };
-  fanCardView.snapshot.self_hand = [handCard];
+  fanCardView.snapshot.self_hand = [];
   ui.state.view = fanCardView;
   ui.resetSelection();
   ui.renderTable();
@@ -1740,7 +1739,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿V5 步 3 的文案写明归属 =「由目标从你的手牌中选择一张」",
     $("t-prompt").textContent === "由目标从你的手牌中选择一张",
     `"${$("t-prompt").textContent}"`);
-  check("㉿V6 步 3 的选择面铺出发动者（座位 0）的那张牌",
+  check("㉿V6 步 3 铺出发动者（座位 0）的**隐藏**槽位（盲挑，不亮牌面）",
     $("t-options").children.length === 2 && $("t-options").children[1].children.length === 1,
     `块=${$("t-options").children.length}`);
 

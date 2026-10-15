@@ -349,6 +349,45 @@ def test_zhiheng_cancel_leaves_the_table_untouched_and_the_skill_available():
     assert _zhiheng_offered_after_cancel(engine), "取消不消耗次数：同一阶段仍可再发动"
 
 
+def test_a_flow_card_step_carries_its_skill_id_on_the_runtime_query():
+    """票 05 加的本地通道（`SelectCardsQuery.skill_id`）确实被填上：启发式据此才分得开
+    【制衡】的"弃一张换一张"与【仁德】的"把牌交出去"。
+
+    这个字段 ``exclude=True``、**不进记录流**，故只能读**运行期**的 `query` 对象
+    （记录流里那条 `QueryRecord` 持有的就是它）。这条钉的是"字段有读取方"的那一半：
+    服务端真的把技能归属发了出去。
+    """
+    card = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(card,), hero="sunquan"), SeatSpec()],
+        deck=_deck_excluding(card),
+        turn_seat=0,
+    )
+
+    def zhiheng(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _find(
+                query,
+                lambda action: isinstance(action, ActivateSkill) and action.skill_id == ZHIHENG,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and action.picks == (0,)
+            )
+        return _decline(query)
+
+    engine = _run(state, [Scripted(zhiheng), Scripted(_decline)], _skill_frame_popped)
+
+    cards_queries = [
+        record.query
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.SELECT_CARDS.value
+    ]
+    assert cards_queries, "制衡的选牌步发过询问"
+    assert cards_queries[0].skill_id == ZHIHENG, "选牌询问带上了发动它的技能归属"
+
+
 def test_a_used_active_skill_disappears_from_the_next_play_phase_query():
     first, second = _cards("slash")[0], _cards("dodge")[0]
     state = build_state(
@@ -957,8 +996,10 @@ def test_fanjian_asks_the_seat_then_the_suit_then_a_card_of_the_activator():
     assert {slot.ref.seat for slot in card_q.slots} == {0}, (
         "但选择面铺的是**发动者**的手牌（PickCards.actor 与 .face 第一次分开）"
     )
-    assert set(hearts) <= {slot.card.card_id for slot in card_q.slots}, (
-        "发动者的手牌（含开局那两张红桃）就是这一问的选择面"
+    assert len(card_q.slots) >= len(hearts), "发动者的手牌（含开局那两张红桃）就是这一问的选择面"
+    assert all(slot.card is None for slot in card_q.slots), (
+        "**盲挑**：槽位只有位置、没有牌面 —— 官方口径是「获得之后才展示」，"
+        "挑的时候不亮牌（迁移前 selection_face 的缺省就是隐藏槽）"
     )
 
 

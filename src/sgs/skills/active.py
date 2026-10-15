@@ -149,11 +149,9 @@ def _seat_choice(seat: int) -> str:
     return f"{_SEAT_PREFIX}{seat}"
 
 
-def _chosen_seats(frame: Any) -> tuple[int, ...]:
-    """把 ``frame.data["choices"]`` 解回座位元组（顺序即候选里给的顺序）。"""
-    return tuple(
-        int(choice.removeprefix(_SEAT_PREFIX)) for choice in frame.data.get("choices", ())
-    )
+def _other_alive_seats(state: GameState, owner: int) -> tuple[int, ...]:
+    """**除发动者本人外**的存活座位（座位序）。【仁德】/【反间】的目标池同一形状。"""
+    return tuple(p.seat for p in state.players if p.alive and p.seat != owner)
 
 
 def _can_offer(state: GameState, ctx: ModifierContext, *, once_per_phase: bool = True) -> bool:
@@ -515,6 +513,19 @@ def _flow_step_option(
     return "ok", answer.choice
 
 
+_FLOW_STEP_RUNNERS: MappingProxyType[type, Callable[..., tuple[str, object]]] = (
+    MappingProxyType(
+        {
+            PickCards: _flow_step_cards,
+            PickSeats: _flow_step_seats,
+            PickOption: _flow_step_option,
+        }
+    )
+)
+"""步骤类型 → 它的执行器（**唯一登记处**）：加一种步骤只改这里与 :data:`FlowStep`，
+不必在 :func:`run_flow` 的 if 级联里再找一遍（评审指出的"两处同步改"）。"""
+
+
 def run_flow(host: Any, frame: Any, flow: SkillFlow) -> Any:
     """执行一条 :class:`SkillFlow`（``ACTIVATIONS`` 的通用回调之一）。
 
@@ -527,12 +538,7 @@ def run_flow(host: Any, frame: Any, flow: SkillFlow) -> Any:
     owner = frame.data["source"]
     answers: dict[str, object] = {}
     for step in flow.steps:
-        if isinstance(step, PickCards):
-            status, value = _flow_step_cards(host, frame, step, owner, answers)
-        elif isinstance(step, PickSeats):
-            status, value = _flow_step_seats(host, frame, step, owner, answers)
-        else:
-            status, value = _flow_step_option(host, frame, step, owner, answers)
+        status, value = _FLOW_STEP_RUNNERS[type(step)](host, frame, step, owner, answers)
         if status == "stay":
             return "stay"
         if status == "cancel":
@@ -604,12 +610,12 @@ ZHIHENG_FLOW = SkillFlow(
 
 
 def _rende_targets(state: GameState, owner: int, chosen: tuple[int, ...]) -> tuple[int, ...]:
-    """【仁德】的可选目标：存活且**不是发动者自己**的座位（座位序；``chosen`` 对单选无意义）。
+    """【仁德】的可选目标：其他存活角色（座位序；``chosen`` 对单选无意义）。
 
     池为空 ⇒ 候选根本不产出（:func:`_rende_offers`），不会发出没有候选的询问。
     """
     del chosen
-    return tuple(p.seat for p in state.players if p.alive and p.seat != owner)
+    return _other_alive_seats(state, owner)
 
 
 def _rende_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
@@ -700,7 +706,7 @@ RENDE_FLOW = SkillFlow(
 def _fanjian_targets(state: GameState, owner: int, chosen: tuple[int, ...]) -> tuple[int, ...]:
     """【反间】的可选目标：其他存活角色（座位序；``chosen`` 对单选无意义）。"""
     del chosen
-    return tuple(p.seat for p in state.players if p.alive and p.seat != owner)
+    return _other_alive_seats(state, owner)
 
 
 def _fanjian_target(state: GameState, owner: int, answers: FlowAnswers) -> int:
@@ -779,6 +785,11 @@ FANJIAN_FLOW = SkillFlow(
             key="card",
             actor=_fanjian_target,
             face=lambda state, owner, answers: owner,
+            # **盲挑**：目标只看得到槽位、看不到牌面（`reveal_hand=False`，与迁移前
+            # `selection_face(owner, (HAND,))` 的缺省一字同形）。官方口径是"获得你的一张
+            # 手牌并展示之"——**获得之后**才展示，故挑的时候不亮牌；`reveal_hand=True` 是
+            # "挑牌者就是手牌持有者本人"（贯石斧 / 雌雄 / 青龙），用在这里会泄露手牌。
+            reveal_hand=False,
         ),
     ),
     effect=_fanjian_effect,

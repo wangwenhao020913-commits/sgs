@@ -324,6 +324,48 @@ def test_fallback_action_answers_the_target_of_a_fanjian_step() -> None:
     assert isinstance(fallback_action(query), Pass), "超时代答 = 取消这一步，不是非法动作"
 
 
+def test_a_timeout_answers_the_target_of_fanjian_in_a_real_session() -> None:
+    """票 06：反间的步 2/3 由**目标**应答。真实会话里（AI 周瑜反间人类座位）超时兜底要能
+    在"等目标作答"时替**目标**代答一次，且代答之后该局仍能跑完。"""
+    from sgs.state import Pass
+
+    session = Session(
+        seed=0,
+        player_count=2,
+        ai="random",
+        human_seat=1,
+        heroes=("zhouyu", "guanyu"),
+        timeout_seconds=1.0,
+    )
+    for _ in range(400):
+        pending = session.pending
+        if pending is None:
+            break
+        if pending.kind == "SELECT_OPTION" and str(pending.skill_id).startswith("fanjian:"):
+            break
+        session.submit_answer(fallback_action(pending))
+
+    pending = session.pending
+    assert pending is not None and pending.skill_id == "fanjian:suit", (
+        "扫到了 AI 发动的【反间】的第二步"
+    )
+    assert pending.actor == session.human_seat, "这一步问的正是**目标**（人类座位）"
+    assert isinstance(fallback_action(pending), Pass)
+
+    session.mark_pending(100.0)
+    assert session.expire_if_due(101.0, fallback_action) is True, "到点替目标代答"
+    assert session.timeouts == 1
+    assert session.session_log[-1].kind == "timeout"
+    assert session.session_log[-1].detail["query_kind"] == "SELECT_OPTION"
+
+    for _ in range(400):
+        if session.pending is None:
+            break
+        session.submit_answer(fallback_action(session.pending))
+
+    assert session.pending is None, "被代答之后该局仍能跑完"
+
+
 def test_a_timeout_touches_the_session_log_but_not_the_journal() -> None:
     """超时只落侧车日志；**记录流一个字节都不加**（地图 D10）。
 
@@ -1496,6 +1538,13 @@ def test_query_context_walks_the_fanjian_steps_with_their_own_wording() -> None:
 
     cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,))
     assert query_context(engine, cards_query)["requirement"] == "由目标从你的手牌中选择一张"
+
+    repeat_query = _skill_step_option_query(
+        state, skill_id="fanjian:seat:1", options=("seat:1",)
+    )
+    assert query_context(engine, repeat_query)["requirement"] == "选择一名其他角色", (
+        "同一步问多次时执行器补的序号（``:1``）只用于答案缓存，不该让文案掉回 summary"
+    )
 
 
 def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_skills() -> None:

@@ -566,12 +566,11 @@ def _score_rende(query: Query, action: Action, view: PlayerView) -> float:
     if action.picks:
         bonus = _RENDE_RECOVER_VALUE if len(action.picks) >= 2 and _wounded(view) else 0.0
         return bonus - _picked_value(view, action)
-    values = sorted(_card_value(card) for card in view.self_hand)
-    if not values:
+    if not view.self_hand:
         return 0.0
-    if _wounded(view) and len(values) >= 2:
-        return _RENDE_RECOVER_VALUE - (values[0] + values[1])
-    return -values[0]
+    if _wounded(view) and len(view.self_hand) >= 2:
+        return _RENDE_RECOVER_VALUE - _skeleton_cost(view, 2)
+    return -_skeleton_cost(view, 1)
 
 
 def _score_zhiheng(query: Query, action: Action, view: PlayerView) -> float:
