@@ -598,14 +598,23 @@ def _step_wording(steps: Any, step: str) -> str | None:
     return found
 
 
-def _step_requirement(definition: Any, query: Query, data: dict[str, Any]) -> str | None:
+def _step_requirement(definition: Any, query: Query) -> str | None:
     """**多步技能**逐步的"需要做什么"（票 01）；取不到 ⇒ ``None``（退回一句话的文案）。
 
     键的取法只读询问里已有的标识，**不动询问协议**（故 Golden Replay 一行不改）：
 
     - ``SELECT_OPTION``：询问自带 ``skill_id`` 形如 ``lijian:user`` ⇒ 键 = 冒号后那段
       （末尾的序号段先剥掉，见 :func:`_step_wording`）；
-    - ``SELECT_CARDS``：技能帧上的那一步选牌 ⇒ 键 = ``"card"``。
+    - ``SELECT_CARDS``：技能的那一步选牌 ⇒ 键 = ``"card"``。这一问归**哪条技能**已由
+      :func:`_skill_of_query` 判过（询问 ``skill_id`` → 帧 ``running_skill`` → ``SKILL``
+      帧 → 阶段体，与 ``SELECT_OPTION`` **同一条判据**），传进来的 ``definition`` 就是它，
+      故这里**不再另读帧键**。
+
+    旧判据读 ``frame.data["skill_id"]`` 并要求它等于 ``definition.skill_id``；而**被动帧
+    （DAMAGE / USE）从不写这个键**——全仓只有 SKILL 帧与 JUDGE 帧写它，派发环写的是
+    ``running_skill``。于是【流离】成本 / 【青龙】/【贯石斧】/【麒麟弓】/【寒冰剑】/
+    【雌雄】/【遗计】的逐步文案在生产路径上**全部退回一句话 summary**（票 12 §1）。
+    真会话回归见 ``tests/test_web.py::test_a_real_session_reaches_the_yiji_card_step_wording``。
     """
     steps = getattr(definition, "step_requirements", None)
     if not steps:
@@ -615,7 +624,7 @@ def _step_requirement(definition: Any, query: Query, data: dict[str, Any]) -> st
         _head, sep, step = str(raw).partition(":")
         if sep:
             return _step_wording(steps, step)
-    if getattr(query, "kind", None) == "SELECT_CARDS" and data.get("skill_id") == definition.skill_id:
+    if getattr(query, "kind", None) == "SELECT_CARDS":
         return steps.get("card")
     return None
 
@@ -644,7 +653,7 @@ def query_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
     requirement = definition.requirement if definition is not None else None
     if definition is not None:
         # 分步技能：这一步的问法优先于一句话的 summary（票 01）。
-        requirement = _step_requirement(definition, query, data) or requirement
+        requirement = _step_requirement(definition, query) or requirement
     if requirement is None:
         requirement = _card_window_requirement(engine, query, data)
     hints = _skill_hints(state, query)

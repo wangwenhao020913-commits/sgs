@@ -166,7 +166,7 @@ DOC06 = REPO_ROOT / "开发文档" / "06-里程碑与风险.md"
 SECTION5_HEADING = "## 5. 程序化约定与偏离一手"
 
 CITATION_RE = re.compile(
-    r"`([A-Za-z0-9_./\-]+\.(?:py|js|mjs|sh|md|json|txt))(?::([A-Za-z_][A-Za-z0-9_.]*))?`"
+    r"`([A-Za-z0-9_./\-]+\.(?:py|js|mjs|sh|md|json|txt))(?::+:?([A-Za-z_][A-Za-z0-9_.]*))?`"
 )
 CONVENTIONAL_PATH_RE = re.compile(r"^(?:[A-Za-z0-9_./\-]+/)+[A-Za-z0-9_.\-]+$")
 PSEUDO_PATH_RE = re.compile(r"^(?:\d+(?:\.\d+)*|[A-Za-z]+://)")
@@ -191,6 +191,30 @@ def section5_rows() -> list[tuple[int, str]]:
             continue
         rows.append((index + 1, line))  # 真实行号，报错时能直接跳过去
     return rows
+
+
+def test_the_doc06_citation_pattern_also_reads_double_colon_test_names() -> None:
+    """``path.py::test_name`` 也要被核到（票 12 §5）。
+
+    旧 ``CITATION_RE`` 只认单冒号 ``path:symbol``，于是账本里写
+    ``...test_skill_flow.py::test_run_flow_reads_the_skill_owner_and_the_dispatch_timing``
+    这种**根本不存在的测试名**时，正则只捕到文件、``symbol`` 为空 ⇒ 文件存在即放行，
+    "落点必须可核"这条纪律对测试名整段失效（本轮真撞到，账本锚点与真实测试名不符）。
+    ``::`` 是 pytest 的常规写法，故让正则认它；符号仍交给 :func:`_is_defined` 核 ``def``。
+    """
+    assert dict(CITATION_RE.findall("`tests/test_skill_flow.py::test_demo_name`")) == {
+        "tests/test_skill_flow.py": "test_demo_name"
+    }
+    assert dict(CITATION_RE.findall("`src/sgs/skills/flow.py:run_flow`")) == {
+        "src/sgs/skills/flow.py": "run_flow"
+    }
+    # 捕到的符号必须由 `_is_defined` 真的核：不存在的测试名判否、真实测试名判是
+    # （否则"认了 `::` 却什么都没核"与原状无异）。
+    source = (REPO_ROOT / "tests" / "test_skill_flow.py").read_text(encoding="utf-8")
+    assert _is_defined(source, "test_demo_name", js=False) is False
+    assert _is_defined(
+        source, "test_fankui_asks_the_skill_owner_at_the_dispatch_timing", js=False
+    ) is True
 
 
 def test_doc06_ledger_landing_points_exist() -> None:

@@ -292,18 +292,19 @@ from .flow import (  # noqa: F401  （重导出：既有 import 点与 __all__ �
     PickSeats,
     SeatPool,
     SkillFlow,
-    flow_handler,
     option_seat as _option_seat,
     run_flow,
     seat_choice as _seat_choice,
 )
 
 def _activation_handler(skill: ActiveSkill) -> ActivationHandler:
-    """一条声明的发动回调：手写回调原样取用，声明式流水线由 :func:`flow_handler` 派生。
+    """一条声明的发动回调：手写回调原样取用，声明式流水线在这里**现建闭包**。
 
     ``on_commit``（票 07）**在每次调用时现算**：主动技的"出牌阶段限一次"落在
     ``(skill_owner, skill_id)`` 那条实例的 ``_USED`` 位，``owner`` 读的是**本次 SKILL 帧**
-    的 ``source`` —— 在装配 ``flow_handler`` 那一处就把 owner / skill_id 烘死是错的。
+    的 ``source`` —— 在装配 :class:`ActiveSkill` 那一处就把 owner / skill_id 烘死是错的。
+    （票 12 §4：旧实现由 ``flow.flow_handler`` 这个通用工厂派生，但它拿不到帧、做不了这件事，
+    已删；本函数是**唯一**落点。）
     ``once_per_phase=False`` 的技能（【仁德】）照样不落位。
     """
     if skill.flow is not None:
@@ -844,10 +845,11 @@ ActivationHandler = Callable[[Any, Any], Any]
 class ActiveSkill(HeroSkillDecl):
     """A 族一条技能的**声明**：候选构造 + 发动主体（票 04 §表一行）。
 
-    ``activate`` 与 ``flow`` **恰有一个**：未迁的主动技（票 04 的老三条：制衡 / 仁德 /
-    反间）给手写回调；迁到步骤流水线的技能（票 01 的【离间】形状、票 02 起用
-    :class:`SkillFlow` 声明）给 ``flow``，回调由 :func:`flow_handler` 派生。这样声明面
-    只有一份真源（谁发动、问什么、怎么结算），不会出现"回调与声明各写一套"的漂移。
+    ``activate`` 与 ``flow`` **恰有一个**：未迁的主动技（票 01 的【离间】）给手写回调；
+    迁到步骤流水线的技能（票 02 起用 :class:`SkillFlow` 声明）给 ``flow``，回调由
+    :func:`_activation_handler` 现建（票 12 §4：旧落点写作 ``flow.flow_handler``，那个通用
+    工厂拿不到帧、已删）。这样声明面只有一份真源（谁发动、问什么、怎么结算），不会出现
+    "回调与声明各写一套"的漂移。
     """
 
     offers: Callable[[GameState, ModifierContext, Any], Any]

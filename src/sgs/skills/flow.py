@@ -48,7 +48,6 @@ __all__ = [
     "PickSeats",
     "SeatPool",
     "SkillFlow",
-    "flow_handler",
     "option_seat",
     "run_flow",
     "seat_choice",
@@ -202,6 +201,10 @@ class SkillFlow:
     - **提交点由调用方定义**：``once_per_phase=True`` 时由执行器在 ``effect`` 前调
       ``run_flow(..., on_commit=…)`` 传进来的回调（主动技传"落 ``_USED`` 位"，
       没有阶段限一次的【仁德】与被动技传 ``None``）。
+    - **``on_commit`` 必须幂等**（票 12 §7）：``effect`` 里的移动可能内联派发钩子并**挂起**，
+      续跑是**重新进入同一个 op** ⇒ ``on_commit`` 会被**重复调用**。当前唯一消费者
+      ``active._mark_phase`` 落的是幂等 OR 位，故安全；后来者若在这里做"只能发生一次"的
+      副作用，必须自带帧私有守卫（`CODING_STANDARDS.md` §3「会挂起的操作必须幂等」）。
     """
 
     steps: tuple[FlowStep, ...]
@@ -504,9 +507,10 @@ _FLOW_STEP_RUNNERS: MappingProxyType[type, Callable[..., tuple[str, object]]] = 
 class _Unset:
     """``run_flow(owner=…)`` 的**未指定**哨兵。
 
-    不能用 ``None`` 当"未指定"：``owner=None`` 本身是合法取值（"这一步的应答者按步骤的
-    ``actor`` 定，执行器不预设"），而**缺省**要读 ``frame.data["source"]``。两者混同就会
-    让显式传 ``None`` 的调用点静默退回"发动者 = 帧的 source"。
+    ``owner`` 的合法取值是**座位号 ``int``**（没有哪个座位是 ``None``）。哨兵只用来把
+    "未指定"与"某个座位"分开：未指定时读 ``frame.data["source"]``。显式传 ``None`` 是
+    编程错误，会在 :func:`run_flow` 里的 ``int(...)`` 上立刻 ``TypeError`` —— 旧文档曾写
+    "``owner=None`` 合法（应答者按步骤的 ``actor`` 定）"，但实现从不支持它（票 12 §2 收紧）。
     """
 
 
@@ -518,7 +522,7 @@ def run_flow(
     frame: Any,
     flow: SkillFlow,
     *,
-    owner: int | _Unset | None = _UNSET,
+    owner: int | _Unset = _UNSET,
     timing: Timing = Timing.PHASE_PLAY_IDLE,
     on_commit: Callable[[], None] | None = None,
 ) -> Any:
@@ -529,17 +533,21 @@ def run_flow(
     效果拿到的永远是"已经全部提交"的那一份。
 
     ``owner``（票 07）：发动者 —— 缺省（``_UNSET``）读 ``frame.data["source"]``（主动技的
-    SKILL 帧）；**被动技**在钩子 / 接缝里没有"发动者"，由派发环显式传 ``instance.owner``；
-    ``None`` 是**显式**取值（不预设应答者，只按步骤的 ``actor`` 定），与缺省可区分。
+    SKILL 帧）；**被动技**在钩子 / 接缝里没有"发动者"，由派发环显式传 ``instance.owner``。
+    取值是**座位号 ``int``**；显式传 ``None`` 是编程错误（``int(None)`` 立刻炸），旧文档
+    里"``None`` 合法"的说法已随票 12 §2 收紧删除。
     ``timing``（票 07）：每一步询问挂的时机 —— 缺省 ``PHASE_PLAY_IDLE``（主动技的 SKILL
     帧所处时机）；被动技传**派发环当前持有的时机**（【反馈】是 ``DAMAGE_AFTER_TAKE``），
     否则询问记录里的时机就与迁移前不一致。
     ``on_commit``（票 07）：所有步骤提交后、``effect`` 之前的回调 —— 主动技用它落
     ``_USED`` 位；被动技没有"阶段限一次"（每次触发都是新的帧）⇒ 传 ``None``。
+    **它必须幂等**：``effect`` 挂起后的续跑会重新走到这里（票 12 §7；见 :class:`SkillFlow`）。
 
     返回 ``"stay"`` = 让出控制权（某步挂起）、``None`` = 走完（提交或取消）。
     """
-    seat = int(frame.data["source"] if owner is _UNSET else owner)
+    # ``int(owner)``：类型上是 no-op，但把"显式传 None"在**发问前**变成清晰的 TypeError
+    # （票 12 §2 收紧后的契约；见 :class:`_Unset`）。
+    seat = int(frame.data["source"]) if owner is _UNSET else int(owner)
     answers: dict[str, object] = {}
     for step in flow.steps:
         status, value = _FLOW_STEP_RUNNERS[type(step)](
@@ -554,14 +562,3 @@ def run_flow(
     if on_commit is not None:
         on_commit()
     return flow.effect(host, frame, answers)
-
-
-def flow_handler(
-    flow: SkillFlow, *, on_commit: Callable[[], None] | None = None
-) -> Callable[[Any, Any], Any]:
-    """把一条 :class:`SkillFlow` 绑成 ``ACTIVATIONS`` 的 ``(host, frame)`` 回调。"""
-
-    def handler(host: Any, frame: Any) -> Any:
-        return run_flow(host, frame, flow, on_commit=on_commit)
-
-    return handler

@@ -1124,6 +1124,106 @@ def test_axe_declining_the_activation_asks_for_nothing_and_stays_put():
     assert engine.state.player(1).hp == 4, "没发动 ⇒ 闪抵消，未受伤"
 
 
+def _dodge_driver(query):
+    """座位 1 的应答脚本：闪窗口打出【闪】，其余不插手。"""
+    if query.kind == "DODGE":
+        return _find(query, lambda action: isinstance(action, UseCard))
+    return None
+
+
+def test_green_dragon_without_a_slash_in_hand_is_never_asked():
+    """付不起（手里没有第二张【杀】）⇒【青龙偃月刀】**连发动询问都不发**（票 12 §6）。
+
+    票 09 票面明写的覆盖缺口：``available=False`` 时 :func:`~sgs.skills.catalog._dispatch`
+    直接 ``continue`` —— 既不进候选、也不构造 ``SKILL_ACTIVATION``。既有用例只覆盖
+    "非持有者不问"与"发动询问答 ``Pass``"，没有覆盖判据本身为假这一档。
+
+    牌堆前两张显式放【桃】：自己的回合会摸 2 张，不能让它们碰巧是【杀】——
+    那样"手里没有第二张【杀】"这个前提就没了（判据读的是**摸牌后**的手牌）。
+    """
+    dodge = _cards("dodge")[0]
+    fillers = tuple(_cards("peach")[:2])
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(SLASH,), equip=(GREEN_DRAGON,)), SeatSpec(hand=(dodge,))],
+        deck=(*fillers, *_deck_excluding(SLASH, GREEN_DRAGON, dodge, *fillers)),
+        turn_seat=0,
+    )
+
+    engine = _run(
+        state,
+        [Scripted(_slash_cost_driver(use=SLASH)), Scripted(_dodge_driver)],
+        lambda engine: _use_frame_popped(engine),
+    )
+
+    assert not _has_query(engine, "SKILL_ACTIVATION", skill_id="equip.green_dragon_blade"), (
+        "手里没有第二张【杀】⇒ 付不起 ⇒ 连发动询问都不发（票 09 的 available 判据）"
+    )
+    assert not _has_query(engine, "SELECT_CARDS"), "没有发动询问 ⇒ 更没有成本步询问"
+    assert engine.state.player(1).hp == 4, "闪抵消，且没有续杀"
+    assert GREEN_DRAGON in engine.state.player(0).equip
+
+
+def test_axe_with_only_one_card_is_never_asked():
+    """付不起（手牌 ∪ 装备区只有 1 张）⇒【贯石斧】**连发动询问都不发**（票 12 §6）。
+
+    与【青龙】同一条判据：``_axe_plan`` 的 ``available`` 读与成本步**同源**的槽位数
+    （``zone_pool_size ≥ 2``）。**为什么走【借刀杀人】而不走自己的出牌阶段**：正常回合的
+    摸牌阶段会给斧主补 2 张手牌，接缝处池恒 ≥ 2（"付不起"在自己回合里造不出来）；
+    借刀窗口里斧主用掉唯一一张【杀】后手牌为空、装备区只剩武器自己 ⇒ 池 = 1。
+    先手必须钉在座位 1（借刀使用者）：否则引擎的 ``_first_seat`` 会把回合还给座位 0、
+    先给它摸 2 张，"只有 1 张"的前提当场失效。
+    """
+    from sgs.state import WindowCause
+
+    borrowed = _cards("borrowed_sword")[0]
+    dodge = _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,), equip=(AXE,)),
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(hand=(dodge,)),
+        ],
+        deck=_deck_excluding(SLASH, AXE, borrowed, dodge),
+        turn_seat=1,
+        rule_config=RuleConfig(first_seat=1),
+    )
+
+    def _borrowed_user(query):
+        if query.kind == "PLAY_PHASE":
+            return _find(
+                query,
+                lambda action: isinstance(action, UseCard)
+                and action.card.card_id == borrowed
+                and action.targets == (0,),
+            )
+        return None
+
+    def _axe_owner(query):
+        if getattr(query, "cause", None) is WindowCause.BORROWED_SWORD:
+            return _find(
+                query,
+                lambda action: isinstance(action, UseCard)
+                and action.card.type == "slash"
+                and action.targets == (2,),
+            )
+        return None
+
+    engine = _run(
+        state,
+        [Scripted(_axe_owner), Scripted(_borrowed_user), Scripted(_dodge_driver)],
+        lambda engine: SLASH in engine.state.discard,
+    )
+
+    assert not _has_query(engine, "SKILL_ACTIVATION", skill_id="equip.axe"), (
+        "手牌 ∪ 装备区不足两张 ⇒ 付不起 ⇒ 连发动询问都不发"
+    )
+    assert not _has_query(engine, "SELECT_CARDS"), "没有发动询问 ⇒ 更没有成本步询问"
+    assert engine.state.player(2).hp == 4, "闪抵消，未受伤"
+    assert AXE in engine.state.player(0).equip
+
+
 def test_serpent_spear_transformed_play_ignores_the_slash_limit():
     """打出不占使用次数（票 19 §2）：次数用尽仍可从候选里打出转化【杀】。"""
     from sgs.state import RespondContext, RespondMode, WindowCause

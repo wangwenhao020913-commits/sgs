@@ -1477,7 +1477,8 @@ def test_query_context_reads_the_fankui_step_wording_for_a_damage_frame() -> Non
             "target": 1,
             "targets": (1,),
             "running_skill": "hero.simayi.fankui",
-            "skill_id": "hero.simayi.fankui",
+            # **不**注 ``skill_id``：被动帧从不写这个键（全仓只有 SKILL 帧与 JUDGE 帧写它），
+            # 归属只由派发环写的 ``running_skill`` 给出 —— 这就是真实帧形状（票 12 §1）。
         },
     )
 
@@ -1500,7 +1501,7 @@ def test_query_context_walks_the_liuli_steps_with_their_own_wording() -> None:
             "source": 0,
             "targets": (1,),
             "running_skill": "hero.daqiao.liuli",
-            "skill_id": "hero.daqiao.liuli",
+            # 被动帧没有 ``skill_id``（真实帧形状；票 12 §1）。
         },
     )
 
@@ -1550,7 +1551,7 @@ def test_query_context_reads_the_equipment_cost_steps_own_wording() -> None:
             "source": 0,
             "targets": (1,),
             "running_skill": "equip.axe",
-            "skill_id": "equip.axe",
+            # 被动帧没有 ``skill_id``（真实帧形状；票 12 §1）。
         },
     )
 
@@ -1577,7 +1578,7 @@ def test_query_context_reads_the_qilin_bow_and_ice_sword_step_wording() -> None:
             "target": 1,
             "targets": (1,),
             "running_skill": "equip.qilin_bow",
-            "skill_id": "equip.qilin_bow",
+            # 被动帧没有 ``skill_id``（真实帧形状；票 12 §1）。
         },
     )
     cards_query = _skill_step_cards_query(state, zones=(Zone.EQUIP,))
@@ -1593,7 +1594,7 @@ def test_query_context_reads_the_qilin_bow_and_ice_sword_step_wording() -> None:
             "target": 1,
             "targets": (1,),
             "running_skill": "equip.ice_sword",
-            "skill_id": "equip.ice_sword",
+            # 被动帧没有 ``skill_id``（真实帧形状；票 12 §1）。
         },
     )
     cards_query = _skill_step_cards_query(state, zones=(Zone.HAND, Zone.EQUIP))
@@ -1621,7 +1622,7 @@ def test_query_context_reads_the_double_sword_step_wording() -> None:
             "source": 0,
             "targets": (1,),
             "running_skill": "equip.double_sword",
-            "skill_id": "equip.double_sword",
+            # 被动帧没有 ``skill_id``（真实帧形状；票 12 §1）。
         },
     )
 
@@ -1648,7 +1649,7 @@ def test_query_context_walks_the_yiji_steps_with_their_own_wording() -> None:
             "target": 1,
             "targets": (1,),
             "running_skill": "hero.guojia.yiji",
-            "skill_id": "hero.guojia.yiji",
+            # 被动帧没有 ``skill_id``（真实帧形状；票 12 §1）。
         },
     )
 
@@ -1657,6 +1658,103 @@ def test_query_context_walks_the_yiji_steps_with_their_own_wording() -> None:
 
     give_query = _skill_step_option_query(state, skill_id="yiji:give:0:1", options=("seat:1",))
     assert query_context(engine, give_query)["requirement"] == "选择将这张牌交给哪名角色"
+
+
+# ---------------------------------------------------------------------------
+# 票 12 §1 的真会话回归：读取方在**真实帧**下真的读到了分步文案
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedSeat:
+    """真会话里的脚本参与者：有技能发动候选就发动，否则取第一个候选。"""
+
+    def respond(self, query):
+        for action in query.legal_actions:
+            if getattr(action, "kind", None) == "ActivateSkill":
+                return action
+        return query.legal_actions[0]
+
+
+def _advance_to_the_yiji_card_step(session: Session, *, limit: int = 20_000) -> None:
+    """逐步把**真引擎**推到【遗计】的 ``SELECT_CARDS`` 询问（不到就炸，不静默退化）。"""
+    engine = session.engine
+    for _ in range(limit):
+        pending = engine.pending
+        if pending is not None and pending.kind == "SELECT_CARDS":
+            return
+        if pending is None:
+            engine._step()  # noqa: SLF001 - 与 tests/test_hero_damage_after.py 同一推进手法
+            if engine.finished:
+                break
+            continue
+        engine.submit(session.participants[pending.actor].respond(pending))
+    raise AssertionError("真会话没有走到【遗计】的选牌步")
+
+
+def _yiji_real_session() -> Session:
+    """一条**真会话**：真引擎 + 真 ``DAMAGE`` 帧 + 真派发环，停在【遗计】的选牌步。
+
+    随机建局走不到【遗计】（武将与挨打都随机），故引擎换成人为局面；但会话壳、派发环、
+    ``pending_payload`` / ``query_context`` 这条**读取方**链路一字不换 —— 这正是票 12 §1
+    要的证据：不是合成帧上的读数，而是网页真会走到的那份数据。
+    """
+    pack = _context_pack()
+    slash = cards_of_type(pack, "slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(), SeatSpec(hero="guojia")],
+        deck=tuple(card_id for card_id in range(len(pack.deck.cards)) if card_id != slash),
+        processing=(slash,),
+    )
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = tuple(_ScriptedSeat() for _ in range(2))
+    session.engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": 0,
+            "targets": (1,),
+            "card": state.card(slash),
+            "use_timing": Timing.PHASE_PLAY_IDLE,
+            "target": 1,
+            "channel": state.card(slash),
+            "nature": "NORMAL",
+            "chain": False,
+            "amount": 1,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+    _advance_to_the_yiji_card_step(session)
+    return session
+
+
+def test_a_real_session_reaches_the_yiji_card_step_wording() -> None:
+    """票 12 §1 的关键回归：生产帧形状下，【遗计】选牌步的**分步文案真的被读到**。
+
+    这条钉的是 ``CODING_STANDARDS.md`` §1 的读取方：旧判据读 ``frame.data["skill_id"]``，
+    而被动帧**从不写**这个键（派发环只写 ``running_skill``）⇒ 逐步文案全部退回一句话
+    summary，合成用例却因为把引擎从不写的键注进了帧而全绿（M4 同型错）。故这里
+
+    - 跑**真引擎**到【遗计】的 ``SELECT_CARDS``（真 DAMAGE 帧 + 真派发环写 ``running_skill``）；
+    - 先断言帧里**没有** ``skill_id``（真实形状，合成注入无从混入）；
+    - 再断言读取方拿到的 ``context.requirement`` 是**分步文案**而不是 summary
+      （summary 是 "观看牌堆顶两张牌，然后逐张交给任意角色"）。
+    """
+    session = _yiji_real_session()
+    query = session.pending
+
+    assert query is not None and query.kind == "SELECT_CARDS"
+    assert query.skill_id is None, "【遗计】选牌步的询问不带 skill_id（真实形状）"
+    data = session.engine.stack.frames[-1].data
+    assert data.get("running_skill") == "hero.guojia.yiji"
+    assert "skill_id" not in data, "被动帧从不写 skill_id —— 这正是旧判据读不到的原因"
+
+    payload = pending_payload(session)
+
+    assert payload is not None and payload["context"] is not None
+    assert payload["context"]["requirement"] == "从亮出的牌里选择一张", (
+        "读取方必须真的读到分步文案；退回一句话 summary 就说明判据又读错了键"
+    )
 
 
 def test_query_context_walks_the_zhiheng_step_with_its_own_wording() -> None:

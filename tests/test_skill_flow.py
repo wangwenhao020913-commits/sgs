@@ -24,7 +24,7 @@ from sgs.data import load_content_pack
 from sgs.engine import Engine
 from sgs.skills import Hook, Seam, catalog as catalog_module
 from sgs.skills.damage_after import FANKUI_FLOW, fankui_step_key
-from sgs.skills.flow import PickCards, SkillFlow, _flow_step_cards
+from sgs.skills.flow import PickCards, SkillFlow, _flow_step_cards, run_flow
 from sgs.state import (
     FrameKind,
     Pass,
@@ -201,6 +201,65 @@ def test_fankui_asks_the_skill_owner_at_the_dispatch_timing():
     query = simayi.selections[0]
     assert query.actor == 1, "被动侧读 skill_owner（座位 1），不是帧的 source（座位 0）"
     assert query.timing is DAMAGE_AFTER_TAKE, "询问挂派发环当前的时机，不写死出牌阶段空闲"
+
+
+def test_run_flow_needs_an_integer_owner_and_reads_the_frame_source_by_default():
+    """``run_flow(owner=…)`` 的取值收成 ``int``：缺省读帧 ``source``，传 ``None`` 立刻炸。
+
+    票 12 §2 的二选一：旧文档写"``owner=None`` 合法（应答者按步骤的 ``actor`` 定）"，而实现
+    ``int(... else owner)`` 对 ``None`` 直接 ``TypeError`` —— 文档与实现互相打架，且全仓无
+    ``owner=None`` 调用点。本票选**收紧**（"真支持"要在每次发问前新增"``actor`` 必填"的校验
+    层，没有消费者），故类型与文档收成 ``int``，并在这里把契约钉死：未指定读帧的 ``source``、
+    显式座位覆盖它、显式 ``None`` 是编程错误。
+    """
+    slash = _cards("slash")[0]
+    peach = _cards("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(slash,)), SeatSpec(hand=(peach,))],
+        deck=_deck_excluding(slash, peach),
+        turn_seat=0,
+    )
+    seen: dict[str, object] = {}
+
+    class _Host:
+        def __init__(self) -> None:
+            self.state = state
+
+        @staticmethod
+        def suspended(value) -> bool:
+            return value == "SUSPEND"
+
+        @staticmethod
+        def selection_face(seat, zones, *, reveal_hand):
+            del reveal_hand
+            slots, card_ids = [], []
+            for zone in zones:
+                for card_id in state.zone(ZoneRef(zone, seat)):
+                    slots.append(Slot(ref=ZoneRef(zone, seat), card=state.card(card_id)))
+                    card_ids.append(card_id)
+            return tuple(slots), tuple(card_ids)
+
+        @staticmethod
+        def ask_selection(frame, *, key, actor, timing, spec, build_face):
+            del frame, key, timing, spec
+            build_face()
+            seen["actor"] = actor
+            return (0,)
+
+    flow = SkillFlow(
+        steps=(PickCards(zones=(Zone.HAND,), lo=1, hi=1, optional=False),),
+        effect=lambda host, frame, answers: None,
+    )
+
+    run_flow(_Host(), _Frame(source=1), flow)
+    assert seen["actor"] == 1, "缺省（未指定）读帧的 source"
+
+    run_flow(_Host(), _Frame(source=0), flow, owner=1)
+    assert seen["actor"] == 1, "显式 owner 覆盖帧的 source"
+
+    with pytest.raises(TypeError):
+        run_flow(_Host(), _Frame(source=0), flow, owner=None)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
