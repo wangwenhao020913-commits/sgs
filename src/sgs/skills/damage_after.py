@@ -114,8 +114,10 @@ def _fankui_source(state: GameState, frame: Any, owner: int | None) -> int | Non
     """【反馈】的选取对象：**造成伤害的角色**；无来源 / 是自己 / 无牌可拿 ⇒ ``None``。
 
     无来源伤害（【闪电】一类）不进候选；"来源自己"也不进——技能面写的是"获得**伤害来源**
-    的一张牌"，自己不是伤害来源。``owner`` 为 ``None``（条件求值期还没写
-    ``skill_owner``，见 :func:`~sgs.skills.catalog._dispatch`）时只按"来源有牌"判。
+    的一张牌"，自己不是伤害来源。``owner`` 由调用方给：条件体传
+    :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（持有者自校，票 13），效果体传
+    ``skill_owner``（此时已写好）。``owner`` 为 ``None`` 的兜底分支仍按"来源有牌"判，
+    但条件体那侧已由 :func:`_hurt_owner` 短路，走不到它。
     """
     source = frame.data.get("source")
     if source is None or source == owner:
@@ -177,13 +179,19 @@ def _jianxiong(host: Any, frame: Any) -> None:
 
 
 def _fankui_condition(host: Any, frame: Any) -> bool:
-    """【反馈】的触发条件：伤害来源存在、不是自己、且**有牌可拿**。
+    """【反馈】的触发条件：**受伤的是持有者自己**（规则"当**你**受到伤害后"），
+    且伤害来源存在、不是自己、且**有牌可拿**。
 
-    ``condition`` 在派发器写 ``frame.data["skill_owner"]`` **之前**求值（
-    :func:`~sgs.skills.catalog._dispatch` 的次序），故这里读不到持有者；判据退化成
-    "来源有牌"——来源是不是自己由回调 :func:`_fankui` 再挡一次（那里持有者已经写好）。
+    持有者判据 :func:`_hurt_owner` 与其他伤害后技能同源，且是**必须的**：``condition`` 在
+    派发器写 ``frame.data["skill_owner"]`` **之前**求值，故持有者只能从派发器在求值前写好的
+    :data:`~sgs.skills.catalog.MATCH_OWNER_KEY` 读。漏掉它，条件就退化成"来源有牌"，
+    派发环遍历**每个存活玩家**的实例 ⇒ 任何人挨打、司马懿都被问，答"发动"后真去拿来源的牌
+    （票 13；用户实机报障）。
     """
-    return _fankui_source(host.state, frame, frame.data.get("skill_owner")) is not None
+    return (
+        _hurt_owner(frame)
+        and _fankui_source(host.state, frame, frame.data.get(MATCH_OWNER_KEY)) is not None
+    )
 
 
 def _fankui_source_seat(state: Any, frame: Any, owner: int, answers: Any) -> Any:
@@ -193,10 +201,13 @@ def _fankui_source_seat(state: Any, frame: Any, owner: int, answers: Any) -> Any
     （派发环显式传 ``instance.owner``）。
 
     返回空元组（而不是一个座位号）时，执行器的"**退化面不询问**"判据接管：这一步**一个询问
-    都不发**、整条流水线按取消收尾（与迁移前 :func:`_fankui` 的提前返回同形）。这一档是必须
-    的，不是防御性代码：派发环遍历**每个存活玩家**的实例，而 ``_fankui_condition`` 在条件
-    求值期还读不到持有者（``skill_owner`` 要到回调前才写），故它的判据退化成"来源有牌"——
-    **来源自己**那个实例也会过闸、也会被问"是否发动"，由这里挡掉后续的选牌询问。
+    都不发**、整条流水线按取消收尾（与迁移前 :func:`_fankui` 的提前返回同形）。
+
+    票 13 之前，这一档是**必需的**：``_fankui_condition`` 在条件求值期读不到持有者，
+    判据退化成"来源有牌"，于是"来源自己"那个实例也会过闸、也会被问"是否发动"，只能由这里
+    挡掉后续的选牌询问。票 13 让条件读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY` 自校后，
+    过闸的实例已经只剩"受伤的持有者"一个；这一档作为**独立的第二道闸**原样保留——与
+    :func:`_fankui_effect` 的复核同姿态，也继续兜住直接调用（不经派发环）的情形。
     """
     del state, answers
     source = _fankui_source_from_frame(frame)

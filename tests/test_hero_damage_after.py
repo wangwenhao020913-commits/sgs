@@ -551,6 +551,87 @@ def test_fankui_can_take_a_visible_equipment_card():
 
 
 # ---------------------------------------------------------------------------
+# ④b 【反馈】必须自校持有者（票 13；用户实机报障）
+#
+# 夹具约定：座位 0 = 伤害来源、座位 1 = 挨打者、**座位 2 = 司马懿**——
+# 受伤的那个人不是持有者。旧条件读 ``frame.data.get("skill_owner")``（条件求值期还没写）
+# ⇒ 判据退化成"来源有牌"，于是座位 2 的实例也会被问"是否发动"，答发动后**真去拿来源的牌**。
+# ---------------------------------------------------------------------------
+
+
+def _foreign_damage_with_simayi(*, equip: tuple[int, ...] = ()):
+    """座位 0 打座位 1；司马懿（持【反馈】）在座位 2，手里有牌的是**来源**。
+
+    返回 ``(engine, players, source_hand)``：来源的手牌固定两张
+    （覆盖"隐藏槽"与"装备可见槽"两种选取面），装备由 ``equip`` 给。
+    """
+    slash = _cards("slash")[0]
+    source_hand = (_cards("peach")[0], _cards("peach")[1])
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=source_hand, equip=equip),
+            SeatSpec(),
+            SeatSpec(hero="simayi"),
+        ],
+        deck=_deck_excluding(slash, *source_hand, *equip),
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, amount=1, source=0),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    players = [Scripted(), Scripted(), Scripted()]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.DAMAGE_END
+            for record in e.records
+        ),
+    )
+    return engine, players, source_hand
+
+
+def test_foreign_damage_does_not_offer_fankui_to_the_unhurt_owner():
+    """**别人受伤 ⇒ 司马懿不该被问【反馈】**（票 13；用户原话「任何角色受到伤害都会触发」）。
+
+    判据：受伤的是座位 1、装【反馈】的是座位 2（司马懿），且**来源手里有牌**
+    ⇒ 一次"是否发动"都不该问。旧条件在条件求值期读 ``skill_owner``（那时还没写），
+    退化成"伤害有来源且有牌"，这条就会变红。
+    """
+    engine, _players, source_hand = _foreign_damage_with_simayi()
+
+    assert _activation_count(engine, FANKUI) == 0, (
+        "受伤的是座位 1、装【反馈】的是座位 2 ⇒ 不该问；问了就说明触发条件没自校持有者"
+    )
+    # 那 4 条既有【反馈】用例断言的事一件也没发生（见下一条）。
+    assert source_hand and all(card in engine.state.player(0).hand for card in source_hand)
+
+
+def test_foreign_damage_moves_no_card_for_fankui():
+    """**别人受伤时，那 4 条既有【反馈】用例断言的事一件也不发生**（票 13）。
+
+    四条既有用例分别钉：无来源不询问 / 来源无牌不询问 / 隐藏手牌槽 + 结算后进司马懿手 /
+    装备可见槽可拿。这里把"来源有手牌 + 有装备"的最好条件摆出来，但受伤的不是司马懿：
+
+    - 没有 SKILL_ACTIVATION 询问（对应前两条"不进候选"）；
+    - 司马懿一张选牌询问都不发（对应后两条的选取面）；
+    - 来源的手牌与装备**原封不动**（旧行为会把牌真搬进司马懿手里）。
+    """
+    equip = (_cards("crossbow")[0],)
+    engine, players, source_hand = _foreign_damage_with_simayi(equip=equip)
+
+    assert _activation_count(engine, FANKUI) == 0
+    assert players[2].selections == [], "没有『是否发动』就没有后续选牌询问"
+    assert sorted(engine.state.player(0).hand) == sorted(source_hand), "来源的手牌一张不少"
+    assert engine.state.player(0).equip == list(equip), "来源的装备一件不少"
+    assert engine.state.player(2).hand == [], "司马懿没有拿到任何牌"
+
+
+# ---------------------------------------------------------------------------
 # ⑤ 【遗计】看牌堆顶 2 张：不泄露、交给后牌守恒（票 05 §验收 5）
 # ---------------------------------------------------------------------------
 

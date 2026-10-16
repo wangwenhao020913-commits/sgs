@@ -532,6 +532,12 @@ if (multi) {
  * 必须断言**界面读得到**。
  */
 {
+  // **先清掉前一个块残留的选中态**：`renderKind` / `buildAction` 把 `state.selectedOption`
+  // 当作"我显式选了这条候选"的输入（`app.js` 的 `renderKind` 在它非空时直接返回 `list`）。
+  // 本块断言的是**合成的 `lone` 询问**本身该走 `picker`，与前面哪个真局块最后停在什么选择上无关；
+  // 不先清，断言就变成 order-dependent（票 13 收窄【反馈】/【流离】条件后，前面的扫种子块落到
+  // 别的 seed、留下的选中态不同，本块才暴露出来）。
+  ui.resetSelection();
   const lone = {
     kind: "RESPOND",
     prompt: "响应窗口：请使用一张牌，或放弃。",

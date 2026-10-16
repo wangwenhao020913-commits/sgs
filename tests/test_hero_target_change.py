@@ -88,9 +88,12 @@ class _LiuliDriver:
     座位槽）。驱动器按形状分别记录，供三条行为基线读。
     """
 
-    def __init__(self, *, activate: bool = True, new_target: int = 2) -> None:
+    def __init__(
+        self, *, activate: bool = True, new_target: int = 2, slash_target: int = 1
+    ) -> None:
         self.activate = activate
         self.new_target = new_target
+        self.slash_target = slash_target
         self.activation_queries = []
         self.cost_queries = []
         self.target_queries = []
@@ -122,7 +125,11 @@ class _LiuliDriver:
         if query.kind == "PLAY_PHASE" and query.actor == 0:
             for action in query.legal_actions:
                 card = getattr(action, "card", None)
-                if card is not None and card.card_id == SLASH:
+                if (
+                    card is not None
+                    and card.card_id == SLASH
+                    and self.slash_target in (getattr(action, "targets", None) or ())
+                ):
                     return action
         if query.kind == "PLAY_PHASE":
             return next(a for a in query.legal_actions if isinstance(a, EndPhase))
@@ -216,6 +223,36 @@ def test_liuli_excludes_the_user_and_the_owner_from_the_new_target_pool():
         for option in query.options
     }
     assert seats == {2}
+
+
+def test_liuli_is_offered_only_when_the_owner_is_a_target():
+    """**只有大乔成为【杀】的目标时才问【流离】**（票 13；用户原话「任何角色成为【杀】的目标都会触发」）。
+
+    同一套局面换**【杀】指向谁**读两次：
+
+    - 指向座位 2 ⇒ 座位 1 的大乔不是目标 ⇒ 一次「是否发动」都不问、成本牌不动；
+    - 指向座位 1 ⇒ 大乔是目标 ⇒ 恰好问一次并完成转移（正面对照，防"恒不问"的假绿）。
+
+    旧条件逐条检查 ``_LIULI_USED`` / 使用者 / 牌是不是【杀】，**通篇没有"持有者是不是目标"**
+    ⇒ 指向座位 2 时大乔也会被问，答「发动」后被 :func:`_liuli_applies` 挡回 ⇒ 按取消收尾
+    （用户看到的"无事发生"）。
+    """
+    not_target = _LiuliDriver(slash_target=2)
+    engine = _liuli_engine()
+    run_queries(engine, [not_target, not_target, _PASS], lambda e: _hit(e, 2))
+
+    assert not_target.activation_queries == [], (
+        "【杀】指向座位 2、大乔（座位 1）不是目标 ⇒ 不该问；问了就说明条件没自校持有者"
+    )
+    assert PAID in engine.state.player(1).hand, "不是目标 ⇒ 连成本都不问、牌不动"
+    assert PAID not in engine.state.discard
+
+    driver = _LiuliDriver(slash_target=1)
+    engine = _liuli_engine()
+    run_queries(engine, [driver, driver, _PASS], lambda e: _hit(e, 2))
+
+    assert len(driver.activation_queries) == 1, "大乔是目标 ⇒ 恰好问一次（正面对照）"
+    assert PAID in engine.state.discard, "是目标 ⇒ 转移完成、成本付掉"
 
 
 # ---------------------------------------------------------------------------

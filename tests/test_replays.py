@@ -53,7 +53,13 @@ REPLAY_SINGLE_LIMIT_BYTES = 4 * 1024 * 1024
 **重新选种**为 109（记录条数 3111 → 925），而不是放宽判据。体积根源是记录流内联
 完整 ``Query`` / ``PlayerView``（随弃牌堆增长），不是种子没挑短——挑选已按"记录条数最少"
 做过（``seed_search.py``）。门禁每次都要读入并逐行回放全部体积
-（``test_golden_replay_matches_byte_for_byte``）。"""
+（``test_golden_replay_matches_byte_for_byte``）。
+
+**票 13（【反馈】【流离】条件自校）后的实测**：42 条合计 **44,584,106 字节 ≈ 42.52 MiB**，
+最大单文件 **2,999,427 字节 ≈ 2.86 MiB**（``42-hero-transform.jsonl``）——仍在两句上限之内，
+故**不动预算**。条件收紧**减少**询问 ⇒ 含【反馈】的 35 / 36 / 37 与含【流离】的 42 四条基准
+的对局走向改变，由 ``pytest --update-golden`` 重录（四条在 ``goals.py`` 里的判据——逐点伤害 /
+改判循环 / 势力求助 / 转化族——重录后仍命中，判据未放宽，种子也未重选；41 未受影响）。"""
 
 
 def _write(path: Path, text: str) -> Path:
