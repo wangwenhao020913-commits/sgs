@@ -808,6 +808,26 @@ def candidate_index(query: Query) -> dict[str, dict[str, Any]]:
     return grouped
 
 
+def _mask_watched_faces(payload: dict[str, Any]) -> None:
+    """把**观看来的牌面**从一份不归本座位的载荷里抹掉（票 15；`CODING_STANDARDS.md` §1 读取方）。
+
+    ``SELECT_CARDS`` 的 ``slots[].card`` 与询问的 ``revealed`` 是**授予本次应答者观看**的
+    牌面（【遗计】看牌堆顶两张、将来【观星】看牌堆顶若干）。引擎侧它们不进任何 ``PlayerView``、
+    不落带牌面的 delta；接入层这条"当前挂起"的载荷因此也必须只在**该询问的挂起者就是人类座位**
+    时才带牌面——否则任何一次"人类不是挂起者"的下发（陈旧应答的 409 现状等）都会把别人
+    观看的牌面直接送出去。
+
+    公开事实（谁在看、有几个位置）保留：``slots`` 仍按**位置**下发（``card=None``），
+    与 :func:`~sgs.state.project` 对隐藏区域的"只有位置"是同一形状。
+    """
+    slots = payload.get("slots")
+    if isinstance(slots, list):
+        payload["slots"] = [
+            {**slot, "card": None} if isinstance(slot, dict) else slot for slot in slots
+        ]
+    payload["revealed"] = []
+
+
 def pending_payload(session: Session | Query | None) -> dict[str, Any] | None:
     """一次询问的**可应答形态**——带候选、带询问者自己的视角（前端只 pick，不自己拼 Action）。
 
@@ -815,6 +835,11 @@ def pending_payload(session: Session | Query | None) -> dict[str, Any] | None:
 
     ``legal_actions`` 保留（既有测试、超时兜底与"提交必须原样取自候选"的自我核对都读它），
     ``candidate_index`` 是本轮新增的**索引形状**：界面用它手选目标，不再逐条铺候选按钮。
+
+    **观看私密（票 15）**：收 ``Session`` 且它的当前挂起**不属于人类座位**时，这份载荷抹掉
+    ``slots[].card`` / ``revealed``（见 :func:`_mask_watched_faces`）——"当前挂起"是给人类
+    座位应答的，别人的询问不该连牌面一起下发。裸 ``Query``（409 里附带的那份现状，构造时
+    本就只为人类座位）走原样，不改既有的 :func:`query_context` 单测形状。
     """
     if session is None:
         return None
@@ -822,6 +847,8 @@ def pending_payload(session: Session | Query | None) -> dict[str, Any] | None:
     if query is None:
         return None
     payload = query.model_dump(mode="json")
+    if isinstance(session, Session) and int(query.actor) != int(session.human_seat):
+        _mask_watched_faces(payload)
     payload["legal_actions"] = [action.model_dump(mode="json") for action in query.legal_actions]
     payload["candidate_index"] = candidate_index(query)
     # 询问窗口的"谁对谁做了什么"：从**结算栈顶帧 + 询问本身**派生的表现层事实。

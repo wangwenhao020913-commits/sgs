@@ -1383,7 +1383,11 @@ function renderSlots(pending) {
   const box = $("t-options");
   const heading = document.createElement("div");
   heading.className = "small";
-  heading.textContent = "选择面：隐藏区域的槽位只有位置（看不到牌面），选中并结算后才揭晓。";
+  // 张数上限读服务端的 `spec.total`（同一份约束，前端不另立真源）：
+  // 上限 > 1 时要说清"可以多选"（【遗计】一次交两张，票 15）。
+  const cap = selectionCap(pending);
+  const pickText = cap === 1 ? "选择一张" : `选择一至 ${cap} 张`;
+  heading.textContent = `选择面：隐藏区域的槽位只有位置（看不到牌面），选中并结算后才揭晓。这一步${pickText}。`;
   box.appendChild(heading);
   const row = document.createElement("div");
   row.className = "cards";
@@ -1396,14 +1400,33 @@ function renderSlots(pending) {
     const where = slot.ref && slot.ref.seat !== null && slot.ref.seat !== undefined ? `座${slot.ref.seat}` : "";
     chip.innerHTML = `<span class="n">${face}</span><span class="s">${where} ${slot.ref ? slot.ref.zone : ""}</span>`;
     chip.addEventListener("click", () => {
-      const at = state.picks.indexOf(index);
-      if (at >= 0) state.picks.splice(at, 1);
-      else state.picks.push(index);
+      toggleSlotPick(pending, index);
       renderPending(state.view);
     });
     row.appendChild(chip);
   });
   box.appendChild(row);
+}
+
+/** 选择面的张数上限（服务端 ``spec.total`` 的上界；缺省 1）。 */
+function selectionCap(pending) {
+  const total = (pending && pending.spec && pending.spec.total) || [1, 1];
+  return Math.max(1, Number(total[1]) || 1);
+}
+
+/** 点一个槽位 = 选中 / 取消它；**上限之内**才收下（票 15：【遗计】一次可选两张，多选不得越界）。
+ *
+ * 上限是服务端 ``spec.total`` 的纯函数（与 :func:`cardFace` 同一条"当前状态的纯函数"纪律），
+ * 故这里只做越界拒绝，不做任何跨询问的记账。
+ */
+function toggleSlotPick(pending, index) {
+  const at = state.picks.indexOf(index);
+  if (at >= 0) {
+    state.picks.splice(at, 1);
+    return;
+  }
+  if (state.picks.length >= selectionCap(pending)) return;
+  state.picks.push(index);
 }
 
 /** 「提供一张 B」面（票 14 §C）：渲染实现**不是**选择面块——候选牌已经在 :func:`renderTable`

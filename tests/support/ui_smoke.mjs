@@ -1286,6 +1286,85 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `dis=${handChips().map((c) => c.classList.contains("dis")).join(",")}`);
 }
 
+/* ============ ㉿ 遗计：一次选两张 / 取消（票 15 的用户口径） ============
+ *
+ * 用户原话（`acceptance.md` §C）："一次给出这两张牌时就需要**允许同时选择两张牌**
+ * （目前不行）"。这里用**真 app.js** 的 `renderSlots` 点击路径验四件事：
+ * 面上每张牌都能点、点两张 = picks 收两个面内位置、提交的是那条候选补上 picks、
+ * 再点第三张**不越界**（上限 = 服务端 `spec.total` 的纯函数）。
+ * 面里铺三张（比上限多一张）就是为了让"越界拒绝"可观察——它是"允许两张"的另一半。
+ * 私密（牌面只给持有者）由 `test_hero_damage_after.py` / `test_web.py` 的引擎侧判据钉。
+ */
+{
+  const first = synthCard(1, "桃园结义");
+  const second = synthCard(2, "万箭齐发");
+  const third = synthCard(3, "杀");
+  const yijiPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 921,
+    prompt: "请从选择面里选择一至两张牌。",
+    legal_actions: [
+      { kind: "SelectCards", picks: [], answers_seq: 921 },
+      { kind: "SelectCards", picks: [0], answers_seq: 921 },
+      { kind: "SelectCards", picks: [1], answers_seq: 921 },
+      { kind: "SelectCards", picks: [0, 1], answers_seq: 921 },
+      { kind: "Pass", answers_seq: 921 },
+    ],
+    candidate_index: {},
+    slots: [
+      { ref: { zone: "hand", seat: 0 }, card: first },
+      { ref: { zone: "hand", seat: 0 }, card: second },
+      { ref: { zone: "hand", seat: 0 }, card: third },
+    ],
+    // 面里是**观看来的**亮牌（不是手牌区的牌）：上限两张，选中的两张一起交给同一名角色。
+    spec: { zones: ["hand"], total: [1, 2], optional: true },
+    virtual_index: {}, option_seats: {}, context: null,
+  };
+  const view = synthView(yijiPending);
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  // 每次点击都会重铺选择面（`renderPending` 清空 `t-options`），故槽位要**重新取**，
+  // 否则断言读的是被换掉的旧节点（第一版就在这里红了）。
+  const slotChips = () => {
+    const row = $("t-options").children.find((c) => c.className === "cards");
+    return row ? row.children : [];
+  };
+  const click = (index) => (slotChips()[index].listeners.click || []).forEach((fn) => fn({ target: slotChips()[index] }));
+
+  check("㉿G1 选牌面铺出亮牌，上限读服务端 spec.total（不是写死 1）",
+    slotChips().length === 3 && ui.selectionCap(yijiPending) === 2,
+    `槽位=${slotChips().length} cap=${ui.selectionCap(yijiPending)}`);
+  check("㉿G2 未选时不可提交", $("btn-submit").disabled === true);
+
+  click(0);
+  check("㉿G3 点第一张 = picks 收下位置 0", JSON.stringify(ui.state.picks) === "[0]",
+    `picks=${JSON.stringify(ui.state.picks)}`);
+  click(1);
+  check("㉿G4 一次可以点两张（用户口径：允许同时选择两张牌）",
+    JSON.stringify(ui.state.picks) === "[0,1]", `picks=${JSON.stringify(ui.state.picks)}`);
+  check("㉿G5 两张都能画成选中态（sel）",
+    slotChips()[0].classList.contains("sel") && slotChips()[1].classList.contains("sel")
+      && !slotChips()[2].classList.contains("sel"),
+    `sel=${slotChips().map((c) => c.classList.contains("sel")).join(",")}`);
+  const action = ui.buildAction();
+  check("㉿G6 提交的是候选里那条 SelectCards 补上两个面内位置",
+    !!action && action.kind === "SelectCards" && JSON.stringify(action.picks) === "[0,1]",
+    JSON.stringify(action));
+  check("㉿G7 选够两张后提交按钮可点", $("btn-submit").disabled === false,
+    `disabled=${$("btn-submit").disabled}`);
+
+  click(2);
+  check("㉿G8 上限就是两张：再点第三张不越界（上限 = spec.total 的纯函数）",
+    JSON.stringify(ui.state.picks) === "[0,1]", `picks=${JSON.stringify(ui.state.picks)}`);
+  click(0);
+  check("㉿G9 再点已选中的那张 = 取消它（另一张仍在）",
+    JSON.stringify(ui.state.picks) === "[1]", `picks=${JSON.stringify(ui.state.picks)}`);
+  click(2);
+  check("㉿G10 取消掉一张后名额释放：第三张现在收得下（不是粘滞的置灰）",
+    JSON.stringify(ui.state.picks) === "[1,2]", `picks=${JSON.stringify(ui.state.picks)}`);
+}
+
 // ② 仁德：点技能 → 直接多选手牌 → 直接点场上武将 → 一次交出去；**没有任何选项按钮**。
 {
   const first = synthCard(11, "杀");

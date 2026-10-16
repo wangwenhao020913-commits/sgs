@@ -873,7 +873,7 @@ def test_query_context_names_the_skill_and_its_owner() -> None:
     assert context["targets"] == [1]
     # 合成键要能查回技能定义；票 11 起"给谁"步还有自己的逐步文案（键 = 剥掉 ``:<点>:<轮>``
     # 后的 ``give``），故这里读到的已是那一步的问法，而不是一句话的 summary。
-    assert context["requirement"] == "选择将这张牌交给哪名角色", "合成键要能查回技能定义"
+    assert context["requirement"] == "选择将这些牌交给哪名角色", "合成键要能查回技能定义"
 
 
 def test_query_context_names_the_card_user_and_the_current_target() -> None:
@@ -1754,7 +1754,7 @@ def test_query_context_reads_the_double_sword_step_wording() -> None:
 
 
 def test_query_context_walks_the_yiji_steps_with_their_own_wording() -> None:
-    """【遗计】逐张分配的两步各有各的问法（票 11）：先"从亮出的牌里选择一张"，再"给谁"。
+    """【遗计】分配两步各有各的问法（票 11 / 票 15）：先"从亮出的牌里选择一至两张"，再"给谁"。
 
     两条的键都按**询问里已有的标识**取，不动询问协议：
 
@@ -1776,10 +1776,10 @@ def test_query_context_walks_the_yiji_steps_with_their_own_wording() -> None:
     )
 
     cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,), optional=True)
-    assert query_context(engine, cards_query)["requirement"] == "从亮出的牌里选择一张"
+    assert query_context(engine, cards_query)["requirement"] == "从亮出的牌里选择一至两张"
 
     give_query = _skill_step_option_query(state, skill_id="yiji:give:0:1", options=("seat:1",))
-    assert query_context(engine, give_query)["requirement"] == "选择将这张牌交给哪名角色"
+    assert query_context(engine, give_query)["requirement"] == "选择将这些牌交给哪名角色"
 
 
 # ---------------------------------------------------------------------------
@@ -1860,7 +1860,7 @@ def test_a_real_session_reaches_the_yiji_card_step_wording() -> None:
     - 跑**真引擎**到【遗计】的 ``SELECT_CARDS``（真 DAMAGE 帧 + 真派发环写 ``running_skill``）；
     - 先断言帧里**没有** ``skill_id``（真实形状，合成注入无从混入）；
     - 再断言读取方拿到的 ``context.requirement`` 是**分步文案**而不是 summary
-      （summary 是 "观看牌堆顶两张牌，然后逐张交给任意角色"）。
+      （summary 是 "观看牌堆顶两张牌，然后交给任意角色"）。
     """
     session = _yiji_real_session()
     query = session.pending
@@ -1874,9 +1874,47 @@ def test_a_real_session_reaches_the_yiji_card_step_wording() -> None:
     payload = pending_payload(session)
 
     assert payload is not None and payload["context"] is not None
-    assert payload["context"]["requirement"] == "从亮出的牌里选择一张", (
+    assert payload["context"]["requirement"] == "从亮出的牌里选择一至两张", (
         "读取方必须真的读到分步文案；退回一句话 summary 就说明判据又读错了键"
     )
+
+
+def test_the_watched_cards_are_private_to_the_pending_seat() -> None:
+    """**私密观看**（票 15）：看牌堆顶的牌面只在**挂起者本人**的那份载荷里。
+
+    用户口径（`acceptance.md` §C）："仅此技能拥有者观看，其他人不可见"。引擎侧已经保证
+    观看不写 ``PlayerView``、不落带牌面的 delta（见 `test_hero_damage_after.py` 的视角判据）；
+    接入层这条"当前挂起"的下发是**读取方**，同一处也要成立：收 ``Session`` 时，挂起者
+    不是人类座位 ⇒ ``slots[].card`` / ``revealed`` 必须抹掉（否则任何"人类不是挂起者"的
+    下发——陈旧应答的 409 现状等——都会把别人观看的牌面直接送出去）。
+
+    **正反两面都断**（`CODING_STANDARDS.md` §6）：把 ``human_seat`` 换成挂起者本人时，
+    同一个载荷必须**带着**牌面——否则"恒抹掉"也会让这条测试变绿，而私密观看就退化成了
+    "谁都不能看"。
+    """
+    session = _yiji_real_session()
+    query = session.pending
+    assert query is not None and query.kind == "SELECT_CARDS"
+    assert query.revealed, "【遗计】的选牌询问带着观看授予（前置）"
+    watched = {card.card_id for card in query.revealed}
+
+    stranger = pending_payload(session)
+    assert stranger is not None, "人类座位 0 不是挂起者，但载荷仍要给（只是不带牌面）"
+    assert stranger["actor"] == 1, "这条询问的挂起者是座位 1（郭嘉）"
+    assert len(stranger["slots"]) == len(watched), "位置（有几个）是公开事实，照给"
+    assert all(slot["card"] is None for slot in stranger["slots"]), (
+        f"别人的载荷里不得出现观看的牌面：{stranger['slots']}"
+    )
+    assert stranger["revealed"] == [], "观看授予本身就是牌面，别人的载荷里必须为空"
+
+    # 反向对照：把人类座位换成挂起者本人 ⇒ 同一个载荷**必须**带牌面。
+    session.human_seat = 1
+    owner = pending_payload(session)
+    assert owner is not None
+    assert {slot["card"]["card_id"] for slot in owner["slots"] if slot["card"]} == watched, (
+        "持有者本人必须看得到那两张牌（否则'私密'变成了'谁都不能看'）"
+    )
+    assert {card["card_id"] for card in owner["revealed"]} == watched
 
 
 def test_the_context_fixture_refuses_a_key_that_damage_frames_never_carry() -> None:

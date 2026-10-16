@@ -33,6 +33,7 @@ from sgs.state import (
     UseCard,
     Zone,
     ZoneRef,
+    project,
 )
 from sgs.timing import Timing
 
@@ -1065,6 +1066,193 @@ def test_yiji_rounds_in_one_damage_point_do_not_share_the_seat_answer():
     assert top[1] in engine.state.player(2).hand, (
         "第 2 轮的座位答案（2）必须被采纳，而不是读回第 1 轮的答案（0）"
     )
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 【遗计】一次交出两张 / 一张一交（票 15：用户口径"允许同时选择两张牌"）
+# ---------------------------------------------------------------------------
+
+
+def _yiji_pick_slots(count: int, receiver: int = 2):
+    """一次在面里选中前 ``count`` 个槽位，并把这一批**一起**交给 ``receiver``。
+
+    两个问法各应答一次（选牌 → 给谁），正是"一次交出两张"的形状：若实现退回"一轮一张"，
+    选牌面里就**没有** ``picks=(0, 1)`` 这条候选，本应答器会当场炸掉（红）。
+    """
+
+    def respond(query, _round_index):
+        if query.kind == "SELECT_OPTION":
+            return _yiji_give_to(receiver)(query)
+        picks = tuple(range(count))
+        return next(
+            action
+            for action in query.legal_actions
+            if isinstance(action, SelectCards) and action.picks == picks
+        )
+
+    return respond
+
+
+def test_yiji_two_cards_can_be_picked_together_and_given_to_one_character():
+    """**一次交出两张**：选牌面允许 ``picks=(0, 1)``，两张**一次移动**给同一名角色。
+
+    用户口径（`acceptance.md` §C）："一次给出这两张牌时就需要**允许同时选择两张牌**
+    （目前不行）"。故判据是三条：面内有那条双选候选、两张各只有**一条**移动记录
+    （分两次给是**操作路径**，不是规则手续）、且两张都落进**同一名**角色手里。
+    """
+    slash = _cards("slash")[0]
+    deck = _deck_excluding(slash)
+    top = deck[:2]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hero="guojia"), SeatSpec()],
+        deck=deck,
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, amount=1, source=0),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    giver, receiver = 1, 2
+    players = [Scripted(), Scripted(_yiji_pick_slots(2)), Scripted()]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.DAMAGE_END
+            for record in e.records
+        ),
+    )
+
+    assert engine.state.player(receiver).hand == [top[0], top[1]], (
+        "一次交出的两张必须**一起**落进被选中的那一座"
+    )
+    assert engine.state.player(giver).hand == [], "交出去就不留在持有者手里"
+    assert engine.state.deck == list(deck[2:]), "两张亮牌都离开牌堆顶"
+    moves = [
+        tuple(card.card_id for card in record.cards)
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and set(card.card_id for card in record.cards) & set(top)
+    ]
+    assert moves == [(top[0], top[1])], (
+        f"两张只该有一条'交给'移动（同一名角色一次给）：{moves}"
+    )
+
+
+def test_yiji_one_card_at_a_time_can_choose_a_different_character_each_round():
+    """**一张一交**：第一轮只选一张交给座位 0，第二轮把剩下的那张交给座位 2。
+
+    与上一条共用同一段实现，故这里额外钉两件"别弄丢"的旧行为：两轮的面各是
+    "本点剩余亮牌"，且两轮的"交给谁"答案不串味（票 11 的逐轮缓存键）。
+    """
+    slash = _cards("slash")[0]
+    deck = _deck_excluding(slash)
+    top = deck[:2]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hero="guojia"), SeatSpec()],
+        deck=deck,
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, amount=1, source=0),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    yiji_player = Scripted(_yiji_plan(picks=[0, 0], seats=[0, 2]))
+    players = [Scripted(), yiji_player, Scripted()]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.DAMAGE_END
+            for record in e.records
+        ),
+    )
+
+    assert top[0] in engine.state.player(0).hand, "第一轮：交给座位 0"
+    assert top[1] in engine.state.player(2).hand, "第二轮：剩下的那张交给**另一名**角色（座位 2）"
+    assert engine.state.player(1).hand == [], "两张都交出去了"
+    assert [tuple(card.card_id for card in query.revealed) for query in yiji_player.selections] == [
+        top,
+        (top[1],),
+    ], "第一轮看两张、第二轮只看剩余的那张（不重新观看牌堆顶）"
+
+
+# ---------------------------------------------------------------------------
+# ⑧ 【遗计】私密观看：牌面只授予**技能拥有者**（票 15：其它视角 / 公开面都不得出现）
+# ---------------------------------------------------------------------------
+
+
+def test_yiji_watched_cards_reach_only_the_owner_view_and_stay_out_of_the_public_surface():
+    """**私密观看**：观看不写任何视角快照 —— 其它座位读不出这两张，持有者拿在手里。
+
+    用户口径（`acceptance.md` §C）："仅此技能拥有者观看，其他人不可见"。引擎侧的通道是
+    询问的 ``revealed`` 授予（不写 ``PlayerView``、不落带牌面的 delta），故两条判据：
+    其它座位的视角快照里**读不出**这两张（它们在牌堆顶，只有数量）；带牌面的移动只有
+    "交给"那一条，且"观看"本身零搬牌。**"授予"这一半由谁看得见**（别人的载荷必须抹掉
+    牌面）由接入层的 `tests/test_web.py::test_the_watched_cards_are_private_to_the_pending_seat`
+    钉。
+    """
+    slash = _cards("slash")[0]
+    deck = _deck_excluding(slash)
+    top = deck[:2]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hero="guojia"), SeatSpec()],
+        deck=deck,
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, amount=1, source=0),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    giver = 1
+    players = [Scripted(), Scripted(_yiji_select), Scripted()]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.DAMAGE_END
+            for record in e.records
+        ),
+    )
+
+    assert engine.state.player(giver).hand == [top[0], top[1]], "持有者拿在手里（观看后揭晓）"
+    # ① 其它座位的视角快照：只读得出牌堆**数量**，读不出这两张亮牌。
+    for seat in (0, 2):
+        view = project(engine.state, seat)
+        visible = _view_card_ids(view)
+        assert not (visible & set(top)), (
+            f"座位 {seat} 的视角里不该出现观看的牌面："
+            f"{[engine.state.card(c).name for c in visible & set(top)]}"
+        )
+    # ② 公开记录流：观看**零搬牌**——带这两张牌面的移动只有"交给"那两条。
+    watched_moves = [
+        tuple(card.card_id for card in record.cards)
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and set(card.card_id for card in record.cards) & set(top)
+    ]
+    assert watched_moves == [(top[0],), (top[1],)], (
+        f"观看不搬牌；两张各有一条'交给'移动：{watched_moves}"
+    )
+
+
+def _view_card_ids(view) -> set[int]:
+    """``PlayerView`` 里所有**带牌面**的 ``CardRef`` 的 id（自己手牌 + 公开区）。"""
+    refs = list(view.self_hand) + list(view.discard) + list(view.processing)
+    for player in view.players:
+        refs += list(player.equip) + list(player.judge)
+    return {int(ref.card_id) for ref in refs}
 
 
 def test_foreign_damage_does_not_offer_jianxiong_to_the_unhurt_owner():
