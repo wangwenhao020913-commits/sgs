@@ -2001,20 +2001,25 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.state.logRecords = [];
   ui.state.view = null;
   ui.applyViewRaw(before);
-  // 步长按钮：默认 0.1s，点一下在 0.1→0.5 五档之间循环（不记住，刷新回默认）。
+  // 步长按钮：默认 0.1s，点一下在 0.05→0.5 六档之间循环（不记住，刷新回默认）。
   check("㉿E1 默认步长 0.1 秒", ui.state.eventDelayMs === 100, `eventDelayMs=${ui.state.eventDelayMs}`);
-  check("㉿E1b 档位就是 0.1–0.5 秒五档",
-    JSON.stringify(ui.DELAY_STEPS_MS) === JSON.stringify([100, 200, 300, 400, 500]),
+  check("㉿E1b 档位就是 0.05–0.5 秒六档（最小挡 0.05s 在首位）",
+    JSON.stringify(ui.DELAY_STEPS_MS) === JSON.stringify([50, 100, 200, 300, 400, 500]),
     `steps=${JSON.stringify(ui.DELAY_STEPS_MS)}`);
   const delayBtn = $("btn-delay");
-  check("㉿E1c 牌桌上有步长按钮，按钮上显示当前档", !!delayBtn && delayBtn.textContent.includes("0.1"),
+  check("㉿E1c 牌桌上有步长按钮，按钮上显示当前档", !!delayBtn && delayBtn.textContent === "步长 0.1s",
     `按钮="${delayBtn ? delayBtn.textContent : "(缺)"}"`);
   const clickDelay = () => (delayBtn.listeners.click || []).forEach((fn) => fn({ target: delayBtn }));
   clickDelay();
   check("㉿E1d 点一下 → 0.2 秒", ui.state.eventDelayMs === 200,
     `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
+  // 走完 0.2 / 0.3 / 0.4 / 0.5 四档，下一档就是新增的最小挡 0.05s。
   for (let i = 0; i < 4; i += 1) clickDelay();
-  check("㉿E1e 满档后循环回 0.1 秒", ui.state.eventDelayMs === 100 && delayBtn.textContent.includes("0.1"),
+  check("㉿E1f 满档后落到新的最小挡 0.05 秒，按钮文字跟着换",
+    ui.state.eventDelayMs === 50 && delayBtn.textContent === "步长 0.05s",
+    `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
+  clickDelay();
+  check("㉿E1e 再点一下循环回默认 0.1 秒", ui.state.eventDelayMs === 100 && delayBtn.textContent.includes("0.1"),
     `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
   ui.applyViewRaw(after);
   check("㉿E2 收到事件先进入回放：快照还没提交、提交按钮灰着",

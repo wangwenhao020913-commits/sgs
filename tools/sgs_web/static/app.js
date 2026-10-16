@@ -58,10 +58,10 @@ const HAND_PICK_KINDS = ["PLAY_PHASE", "RESPOND", "DODGE"];
  * 【桃】在效果区一闪而过。改成逐条回放后，牌会在效果区停满一个步长。
  * **严格顺序**（用户裁定）：这一批播完才提交新的快照与询问，故播放期间禁掉提交。
  *
- * 步长改成牌桌上的按钮（0.1–0.5 秒，点一下换一档）；缺省 0.1 秒，**不记住**——
+ * 步长改成牌桌上的按钮（0.05–0.5 秒，点一下换一档）；缺省 0.1 秒，**不记住**——
  * 刷新/换局回默认，故它只住内存（`state.eventDelayMs`），不落 localStorage。
  */
-const DELAY_STEPS_MS = [100, 200, 300, 400, 500];
+const DELAY_STEPS_MS = [50, 100, 200, 300, 400, 500];
 
 const state = {
   sessionId: null,
@@ -76,7 +76,7 @@ const state = {
   skillSeat: null,     // 上面那个模式里已点中的座位
   convertSkill: null,  // 转化技"挑来源牌"模式（【龙胆】）：正在等玩家点一张可转化的手牌
   playback: null,      // 事件回放：{body, records, index, querySeat}
-  eventDelayMs: DELAY_STEPS_MS[0], // 回放步长（牌桌按钮切档）
+  eventDelayMs: 100,   // 回放步长（牌桌按钮切档）；缺省 0.1s **不随档位表首位走**
   effectCards: [],     // 效果区里当前可见的牌；回放期间由 card_move delta 逐事件派生
   timer: null,
   runs: [],
@@ -1805,7 +1805,7 @@ function replayStep(delta) {
 
 /* ------------------------------------------------------------------ 装配 */
 
-/** 牌桌按钮：在 0.1–0.5 秒之间切一档回放步长（缺省 0.1，不记住）。 */
+/** 牌桌按钮：在 0.05–0.5 秒之间切一档回放步长（缺省 0.1，不记住）。 */
 function cycleDelay() {
   const at = DELAY_STEPS_MS.indexOf(state.eventDelayMs);
   state.eventDelayMs = DELAY_STEPS_MS[(at + 1) % DELAY_STEPS_MS.length];
@@ -1814,7 +1814,10 @@ function cycleDelay() {
 
 function updateDelayButton() {
   const button = $("btn-delay");
-  if (button) button.textContent = `步长 ${(state.eventDelayMs / 1000).toFixed(1)}s`;
+  if (!button) return;
+  // 0.05s 是亚 0.1 秒挡：一位小数会被 toFixed(1) 抹成 "0.1"，与 0.1 挡撞字，故两位。
+  const seconds = state.eventDelayMs / 1000;
+  button.textContent = `步长 ${seconds < 0.1 ? seconds.toFixed(2) : seconds.toFixed(1)}s`;
 }
 
 function wire() {
