@@ -2167,3 +2167,29 @@ def test_query_context_falls_back_to_the_one_line_requirement_for_other_active_s
 
     cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,))
     assert query_context(engine, cards_query)["requirement"] == "选择两张手牌当【杀】使用或打出"
+
+
+def test_every_product_pending_payload_call_names_its_viewer() -> None:
+    """CODING_STANDARDS §6 的机械半（票 15 私密观看泄露的回归闸）。
+
+    ``pending_payload`` 要知道"这是谁的挂起"才能决定抹不抹掉观看牌面。产品调用点要么传
+    ``Session``（查看者从会话里读），要么**显式** ``human_seat=``；裸传一个 ``Query`` 等于把
+    判定权交给默认值——票 15 的 409 路径（``serve.py`` 把 ``StaleAnswer.pending`` 原样交出去）
+    就是这么把两张牌面吐出去的。测试自己当然可以用裸 ``Query`` 去钉 fail-closed 行为。
+    """
+    src = (REPO_ROOT / "tools" / "sgs_web" / "serve.py").read_text(encoding="utf-8")
+
+    bad: list[str] = []
+    for line in src.splitlines():
+        code = line.split("#", 1)[0]
+        if "pending_payload(" not in code or code.lstrip().startswith("def "):
+            continue
+        args = code.split("pending_payload(", 1)[1].strip()
+        if "human_seat=" in args or args.startswith("session"):
+            continue
+        bad.append(code.strip())
+
+    assert not bad, (
+        "产品代码里的 pending_payload 调用没有声明查看者"
+        "（裸 Query 会 fail-closed 抹掉牌面）：\n  " + "\n  ".join(bad)
+    )

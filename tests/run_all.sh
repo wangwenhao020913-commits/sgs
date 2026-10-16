@@ -39,6 +39,14 @@ else
 fi
 echo
 
+# 门禁本身跑得动，但"提交 / 合并时自动跑"靠的是 core.hooksPath。没装 = 只有人手动跑时才跑，
+# 而本仓没有 CI——"没人跑它等于零"（见 .githooks/pre-commit 的注释）。
+if [ "$(git -C "$ROOT" config --get core.hooksPath || true)" != ".githooks" ]; then
+  echo "⚠️  提醒：core.hooksPath 未指向 .githooks —— 改动提交 / 合并时不会自动触发本门禁。"
+  echo "    跑一次：bash tools/install-hooks.sh"
+  echo
+fi
+
 if [ "$fail" -eq 0 ]; then
   echo "ALL TESTS PASSED"
 else
