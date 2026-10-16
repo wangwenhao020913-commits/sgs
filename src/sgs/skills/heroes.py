@@ -36,10 +36,10 @@ from sgs.data import Color, SkillType, color_of_suit
 from sgs.effects import CandidateScope, CarrierKind, Modifier, ModifierPoint
 from sgs.state import GameState, Zone
 
-from .catalog import HeroSkillDecl, ModifierContext, SkillDef
+from .catalog import HeroSkillDecl, ModifierContext, SkillDef, resolve_instances
 from .virtual import card_ids, single_conversion
 
-__all__ = ["CONVERSION_SKILLS", "conversion_skill_definitions"]
+__all__ = ["CONVERSION_SKILLS", "conversion_offers", "conversion_skill_definitions"]
 
 ZoneFilter = Callable[[GameState, int], tuple[int, ...]]
 """取牌区谓词：``(state, seat) -> 该座位在这个区域里的牌 id``（区域是闭集的一个谓词）。"""
@@ -223,6 +223,37 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
 def _modifier(skill: ConversionSkill) -> Modifier:
     """一条转化技能的 ``CANDIDATES`` 修饰器（回调 = 该声明的 :meth:`candidate`）。"""
     return Modifier(ModifierPoint.CANDIDATES, skill.candidate)
+
+
+def conversion_offers(
+    state: GameState, seat: int, target_type_id: str
+) -> tuple[tuple[int, str], ...]:
+    """此刻**能把哪张牌当** ``target_type_id``：``((来源实体牌 id, 技能 id), …)``（票 14）。
+
+    这是"源筛选"的唯一真源：逐条按 :data:`CONVERSION_SKILLS` 的 ``target_type_id`` /
+    ``source_zone`` / 牌面谓词 / 时机谓词核对（:meth:`ConversionSkill.select` 一次给全），
+    故"限手牌"（【龙胆】）与"任意区域"（【武圣】/【急救】）两种源筛选只是表里的参数——
+    "提供一张 B"的候选面与接入层的技能归属**读同一份**，不各写一份谓词。
+
+    **先过"这个座位真有这条技能"**（:func:`~sgs.skills.catalog.resolve_instances`）：源谓词
+    只回答"这张牌当不当得成 B"，不回答"你会不会这条技能"——少了这一道，红牌在任何人手里
+    都会被算成【武圣】（身份门控 / 武将牌的判断在实例解析那一处，不在这里重写）。
+
+    **只覆盖单来源转化**：多来源的【丈八蛇矛】是装备的 ``CANDIDATES`` 回调、不在本表里
+    （它的"先选两张"是另一维，票 14 不做）。方向也由 ``target_type_id`` 逐条区分：
+    需要【杀】时【龙胆】只给【闪】、需要【闪】时只给【杀】（票 14 顺手修的现有 bug）。
+    """
+    owned = {
+        instance.skill_id
+        for instance in resolve_instances(state)
+        if instance.owner == seat
+    }
+    return tuple(
+        (card_id, skill.skill_id)
+        for skill in CONVERSION_SKILLS
+        if skill.target_type_id == target_type_id and skill.skill_id in owned
+        for card_id in skill.select(state, seat)
+    )
 
 
 def conversion_skill_definitions() -> tuple[SkillDef, ...]:

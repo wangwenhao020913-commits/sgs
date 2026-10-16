@@ -538,6 +538,94 @@ function targetsSelfOnly(entry, selfSeat) {
   return entry.pool.length === 1 && entry.pool[0] === selfSeat;
 }
 
+/* ------------------------------------------------- 提供一张 B（票 14） */
+
+/** 这一步是不是**"提供一张 B"**（票 14）：``provide_type`` 非空 = B 的牌名 id。
+ *
+ * 服务端只在**成本 / 续用 / 被问使用或打出**这类"提供一张 B"的询问上下发它
+ * （`flow.PickProvide`）。这种面**就地**渲染：候选牌在本人手牌 / 装备区 / 判定区
+ * 直接亮起，不新开选择区（用户裁定 7）。
+ */
+function isProvide(pending) {
+  return Boolean(pending) && pending.kind === "SELECT_CARDS" && Boolean(pending.provide_type);
+}
+
+/** "提供一张 B"面上这张牌对应的**槽位序号**（票 14）；``-1`` = 这张牌不在候选面里。
+ *
+ * 面上位置（不是牌 id）才是提交要的答案：虚拟 B 背后没有实体牌，服务端的 ``picks``
+ * 是面内下标。两类命中：
+ *
+ * 1. **实体 B**：槽上的牌面就是这张牌（手牌 / 装备 / 判定区里的【杀】）；
+ * 2. **转化来源**：服务端 ``virtual_index`` 按来源实体牌给出面内那张虚拟 B 的 id
+ *    （【龙胆】的【闪】/【武圣】的红牌）。预发动（点了技能按钮）后只认那条技能的方向。
+ */
+function provideSlotIndex(pending, cardId) {
+  if (!isProvide(pending)) return -1;
+  const slots = pending.slots || [];
+  for (let index = 0; index < slots.length; index += 1) {
+    const face = slots[index].card;
+    if (face && String(face.card_id) === String(cardId)) return index;
+  }
+  let aliases = cardAliases(pending, cardId);
+  if (state.convertSkill !== null) {
+    aliases = aliases.filter((alias) => (alias.skill_ids || []).includes(state.convertSkill));
+  }
+  for (const alias of aliases) {
+    const index = slots.findIndex(
+      (slot) => slot.card && String(slot.card.card_id) === String(alias.card_id),
+    );
+    if (index >= 0) return index;
+  }
+  return -1;
+}
+
+/** 这张牌此刻的 ``{selectable, selected, slotIndex}``——**唯一**的置灰派生（票 14 §D）。
+ *
+ * 输入只有"当前询问 + 这张牌"：没有一处缓存上一问的置灰，:func:`renderTable` 每次
+ * 整体重算，`state.picks` 又在新询问到达时由 :func:`resetSelection` 清空 ⇒
+ * **进询问 / 换询问 / 退出询问**三个时点各自只看当前状态，不叠加、不粘滞（用户逐字要求）。
+ * 无询问（退出询问）按"候选索引里有没有它"退回可不用/打出，而不是保留上一问的亮面。
+ */
+function cardFace(pending, card) {
+  const slotIndex = provideSlotIndex(pending, card.card_id);
+  if (slotIndex >= 0) {
+    const total = (pending.spec && pending.spec.total) || [1, 1];
+    const selected = state.picks.includes(slotIndex);
+    return { selectable: selected || state.picks.length < total[1], selected, slotIndex };
+  }
+  if (isDiscardPick(pending)) {
+    const selected = state.picks.includes(card.card_id);
+    return {
+      selectable: selected || state.picks.length < (pending.count || 0),
+      selected,
+      slotIndex: -1,
+    };
+  }
+  if (state.skillMode) {
+    return {
+      selectable: state.skillMode.cards.includes(card.card_id),
+      selected: state.picks.includes(card.card_id),
+      slotIndex: -1,
+    };
+  }
+  const selectable = pending
+    ? (isHandPick(pending) ? cardSelectable(pending, card.card_id) : cardUsable(pending, card.card_id))
+    : false;
+  return { selectable, selected: state.focusCardId === card.card_id, slotIndex: -1 };
+}
+
+/** 点一张牌：按 :func:`cardFace` 给出的**当前模式**分派（提供 B / 弃牌 / 技能手选 / 设焦点）。 */
+function activateCard(pending, card, face) {
+  if (state.playback) return;
+  if (isProvide(pending)) {
+    if (face.slotIndex >= 0) toggleProvidePick(face.slotIndex);
+    return;
+  }
+  if (isDiscardPick(pending)) { toggleDiscardPick(card.card_id); return; }
+  if (state.skillMode) { toggleSkillCard(card.card_id); return; }
+  toggleFocus(card.card_id);
+}
+
 /* ------------------------------------------------------------------ 牌桌 */
 
 function renderTable() {
@@ -613,7 +701,18 @@ function renderTable() {
       row.className = "cards mini";
       row.setAttribute("data-zone", zone);
       row.setAttribute("data-seat", String(player.seat));
-      for (const card of cards) row.appendChild(cardChip(card, false, true));
+      for (const card of cards) {
+        // 「提供一张 B」面（票 14）：**本人自己**可见区域里的候选牌**就地**亮起、可点
+        // （【武圣】的来源可以是装备 / 判定区的红牌）；别人的区与其余窗口保持静态不可点。
+        if (!isProvide(pendingNow) || player.seat !== snapshot.seat) {
+          row.appendChild(cardChip(card, false, true));
+          continue;
+        }
+        const face = cardFace(pendingNow, card);
+        row.appendChild(
+          cardChip(card, face.selected, false, face.selectable, () => activateCard(pendingNow, card, face)),
+        );
+      }
       box.appendChild(row);
     }
     if (state.skillMode) {
@@ -638,25 +737,14 @@ function renderTable() {
 
   $("t-hand-count").textContent = `${snapshot.self_hand.length} 张`;
   const hand = $("t-hand");
-  const discardPick = isDiscardPick(pendingNow);
   hand.innerHTML = "";
   for (const card of snapshot.self_hand) {
-    if (discardPick) {
-      // 弃牌阶段：点手牌 = 收进 / 移出待弃置集合；只该弃 `count` 张，选够后剩下的不再给收。
-      const chosen = state.picks.includes(card.card_id);
-      const full = state.picks.length >= (pendingNow.count || 0);
-      hand.appendChild(cardChip(card, chosen, false, chosen || !full, () => toggleDiscardPick(card.card_id)));
-      continue;
-    }
-    if (state.skillMode) {
-      // 主动技手选：只让技能声明的可选手牌可点，点它 = 收进 / 移出待给集合。
-      const choosable = state.skillMode.cards.includes(card.card_id);
-      const chosen = state.picks.includes(card.card_id);
-      hand.appendChild(cardChip(card, chosen, false, choosable, () => toggleSkillCard(card.card_id)));
-      continue;
-    }
-    const usable = handPick ? cardSelectable(pendingNow, card.card_id) : cardUsable(pendingNow, card.card_id);
-    hand.appendChild(cardChip(card, state.focusCardId === card.card_id, false, usable));
+    // 置灰 / 选中**只**由 :func:`cardFace` 从"当前询问 + 这张牌"算出（票 14 §D）：
+    // 弃牌、技能手选、提供 B、普通手选四条路都在那一个函数里分流，这里不再各写一份。
+    const face = cardFace(pendingNow, card);
+    hand.appendChild(
+      cardChip(card, face.selected, false, face.selectable, () => activateCard(pendingNow, card, face)),
+    );
   }
   $("t-hero").textContent = view.heroes[snapshot.seat] || "（无武将）";
   renderSkills(view);
@@ -962,7 +1050,9 @@ function renderPending(view) {
     // 点完槽位提交按钮仍然是灰的（本轮实测：点第 1 个槽位后 picks=[0] 而按钮不可点）。
     const index = actions.findIndex((action) => action.kind === "SelectCards");
     if (index >= 0) state.selectedOption = index;
-    renderSlots(pending);
+    // 「提供一张 B」（票 14）：**就地**渲染（不铺选择面块），候选牌在牌桌上直接亮起。
+    if (isProvide(pending)) renderProvide(pending);
+    else renderSlots(pending);
     // 选择面这一步可不可以取消（票 01 的技能流水线给出一条 `Pass`）。
     $("btn-cancel").disabled = state.picks.length === 0 && !cancelAction(pending);
   }
@@ -1314,6 +1404,43 @@ function renderSlots(pending) {
     row.appendChild(chip);
   });
   box.appendChild(row);
+}
+
+/** 「提供一张 B」面（票 14 §C）：渲染实现**不是**选择面块——候选牌已经在 :func:`renderTable`
+ * 里按 :func:`cardFace` **就地**亮在本人手牌 / 装备区 / 判定区上，这里只留一句"怎么点"。
+ *
+ * 与 :func:`renderSlots` 的分岔点只有一处（`renderPending` 的 `slots` 分支）：
+ * `provide_type` 非空走这里，其余一字不改（规则 B 窄化到"提供 B"面，`design.md` §11 C）。
+ */
+function renderProvide(pending) {
+  const hint = $("t-target-hint");
+  if (!hint) return;
+  const total = (pending.spec && pending.spec.total) || [1, 1];
+  const named = (pending.slots || []).map((slot) => slot.card).find(Boolean);
+  const name = (named && named.name) || pending.provide_type;
+  hint.textContent = state.picks.length >= total[0]
+    ? `已提供 ${state.picks.length} 张【${name}】，可以提交。`
+    : `在当前亮起的牌上直接点选：提供一张【${name}】（已选 ${state.picks.length} 张）。`;
+}
+
+/** 「提供一张 B」面：点一张就地高亮的牌 = 选中 / 取消它对应的**面上槽位**（票 14）。
+ *
+ * 提交的答案是**面内位置**（`picks`），由既有 `SelectCards` 骨架补上（`buildAction`）——
+ * 虚拟 B 背后没有实体牌，回传实体 id 会把"转出来的是哪张"丢掉。
+ */
+function toggleProvidePick(slotIndex) {
+  const pending = state.view ? state.view.pending : null;
+  if (state.playback || !isProvide(pending)) return;
+  const at = state.picks.indexOf(slotIndex);
+  if (at >= 0) {
+    state.picks.splice(at, 1);
+  } else {
+    const total = (pending.spec && pending.spec.total) || [1, 1];
+    if (state.picks.length < total[1]) state.picks.push(slotIndex);
+  }
+  state.lastRejectReason = "";
+  renderTable();
+  renderPending(state.view);
 }
 
 function renderCountdown(view) {

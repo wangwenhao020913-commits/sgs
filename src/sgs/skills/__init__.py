@@ -28,7 +28,7 @@
 | 阶段体 | :mod:`sgs.skills.phase_body` | 英姿 / 闭月 |
 | 排列 | :mod:`sgs.skills.arrange` | 观星 |
 | 目标池 / 响应窗口 | :mod:`sgs.skills.target_pool` / :mod:`sgs.skills.response_window` | 空城 / 谦逊；无双 / 铁骑 |
-| **流水线执行器**（**不**依赖 catalog） | :mod:`sgs.skills.flow` | ``SkillFlow`` / ``PickCards`` / ``PickSeats`` / ``PickOption`` / ``run_flow`` |
+| **流水线执行器**（**不**依赖 catalog） | :mod:`sgs.skills.flow` | ``SkillFlow`` / ``PickCards`` / ``PickSeats`` / ``PickOption`` / ``PickProvide`` / ``run_flow`` |
 | **注册表 + 装备定义** | :mod:`sgs.skills.catalog` | ``SkillDef`` / ``CATALOG`` / ``resolve_instances`` / ``dispatch_timing`` / ``dispatch_seam`` |
 
 本文件另装**跨层只读查询**：加载期用它校验"每张装备牌都有对应技能"（票 09 §7 #8），
@@ -81,6 +81,10 @@ from .catalog import (
     same_kingdom,
     timing_hooks_present,
 )
+# 转化技的**来源查询**（票 14）：接入层只允许 import ``sgs.skills`` 这个公开子包入口，
+# 不能深导入 ``sgs.skills.heroes``（M4 第一纪律，`tests/test_dod_m4.py` 钉着），故在包入口
+# 重导出这一条只读查询。
+from .heroes import conversion_offers
 from .arrange import (
     GUANXING,
     GUANXING_MAX,
@@ -100,6 +104,7 @@ from .active import (
     ActiveSkill,
     PickCards,
     PickOption,
+    PickProvide,
     PickSeats,
     SkillFlow,
     activate_skill,
@@ -239,6 +244,7 @@ __all__ = (
     "PhaseBodySkill",
     "PickCards",
     "PickOption",
+    "PickProvide",
     "PickSeats",
     "PriorityClass",
     "Seam",
@@ -258,6 +264,7 @@ __all__ = (
     "apply_modifiers",
     "arrange_activation_plans",
     "arrange_skill_definitions",
+    "conversion_offers",
     "damage_after_skill_definitions",
     "damage_point_index",
     "dispatch_move_after",

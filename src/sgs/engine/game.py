@@ -1301,6 +1301,7 @@ class Engine:
         spec: SelectionSpec,
         build_face: Any,
         revealed: tuple[CardRef, ...] = (),
+        provide_type: str | None = None,
     ) -> Any:
         """发一次 ``SELECT_CARDS`` 询问；**选择面只构造一次**（帧内记忆，重入复用）。
 
@@ -1334,7 +1335,10 @@ class Engine:
                 timing,
                 seq,
                 payload=SelectContext(
-                    spec=spec, slots=slots, skill_id=frame.data.get("skill_id")
+                    spec=spec,
+                    slots=slots,
+                    skill_id=frame.data.get("skill_id"),
+                    provide_type=provide_type,
                 ),
                 revealed=revealed,
             )
@@ -2131,6 +2135,7 @@ class Engine:
                 spec=payload.spec,
                 slots=payload.slots,
                 skill_id=payload.skill_id,
+                provide_type=payload.provide_type,
                 revealed=revealed,
             )
         if kind is QueryKind.SKILL_ACTIVATION:

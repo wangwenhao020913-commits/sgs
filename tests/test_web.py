@@ -687,6 +687,97 @@ def test_longdan_skill_entry_lists_the_convertible_source_cards() -> None:
     assert entry["ui"]["manual"] is False
 
 
+def _provide_query(engine, *, actor: int = 0, type_id: str = "slash"):
+    """人为局面上的一个「提供一张 B」询问（票 14）：面取自引擎的同一个 ``provide_face``。"""
+    from sgs.skills.flow import provide_face
+
+    slots, _ = provide_face(engine.state, actor, type_id, (Zone.HAND,))
+    return SelectCardsQuery(
+        seq=1,
+        actor=actor,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt=f"提供一张【{type_id}】继续使用（目标不变；可发动转化技）",
+        legal_actions=(),
+        view=project(engine.state, actor),
+        spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1)),
+        slots=slots,
+        provide_type=type_id,
+    )
+
+
+def test_the_pending_payload_carries_the_provide_type() -> None:
+    """票 14：``pending_payload`` 必须**显式**下发 ``provide_type``。
+
+    它**不在** ``SELECT_CARDS`` 的记录流里（``exclude=True``，既有 Golden Replay 一字不改），
+    故界面只能从这份显式载荷读到"这一步是提供一张 B"。丢了它，前端就退回新开选择面——
+    正是用户实机报障的"界面套娃"。
+    """
+    pack = _context_pack()
+    dodge = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(dodge,), hero="zhaoyun"), SeatSpec(hand=())],
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    query = _provide_query(engine)
+
+    payload = pending_payload(query)
+
+    assert payload is not None
+    assert payload["provide_type"] == "slash"
+    assert "provide_type" not in query.model_dump(mode="json"), "不进记录流"
+
+
+def test_the_virtual_index_reads_the_provide_faces_slots() -> None:
+    """票 14：「提供一张 B」的虚拟 B 只在 ``slots`` 上（候选只有面内位置）。
+
+    ``virtual_index`` 必须把槽上的来源实体牌（【龙胆】的【闪】）映射到那张虚拟【杀】，
+    否则【青龙】追问时【龙胆】的技能按钮点不亮（"待答期间技能栏仍可点"这条验收会红）。
+    """
+    from sgs_web.projection import virtual_index
+
+    pack = _context_pack()
+    dodge = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(dodge,), hero="zhaoyun"), SeatSpec(hand=())],
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    query = _provide_query(engine)
+
+    aliases = virtual_index(query, engine.state)
+
+    assert list(aliases) == [str(dodge)], "面上那张虚拟【杀】的来源就是这张【闪】"
+    assert aliases[str(dodge)][0]["skill_ids"] == ["hero.zhaoyun.longdan"]
+    assert aliases[str(dodge)][0]["card_id"] < 0, "别名指向的是虚拟牌（没有实体 id）"
+
+
+def test_the_provide_window_lists_the_conversion_skill_hint() -> None:
+    """票 14：``skill_hints`` 也要读到**选择面槽位**上的虚拟 B。
+
+    只看候选时，"提供一张 B"的窗口列不出【龙胆】/【武圣】的文案——玩家就不知道
+    这一步还能发动转化技（用户口径"青龙追问时再点龙胆"）。
+    """
+    pack = _context_pack()
+    dodge = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(dodge,), hero="zhaoyun"), SeatSpec(hand=())],
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    query = _provide_query(engine)
+
+    context = query_context(engine, query)
+
+    hints = {hint["skill_id"]: hint for hint in context["skill_hints"]}
+    assert "hero.zhaoyun.longdan" in hints, f"提供面里的虚拟【杀】没归到【龙胆】：{hints}"
+    # 【龙胆】两个方向共用一条 `SkillDef`，requirement 是两条声明用"；"并起来的。
+    assert "选择1张【闪】当【杀】使用或打出" in hints["hero.zhaoyun.longdan"]["requirement"]
+
+
 # ---------------------------------------------------------------------------
 # 5c. 询问窗口的"谁对谁做了什么"（本轮报障）
 # ---------------------------------------------------------------------------

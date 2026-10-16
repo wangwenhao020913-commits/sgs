@@ -19,7 +19,7 @@ from typing import Any
 from sgs.data import load_content_pack, load_heroes
 from sgs.effects import response_count
 from sgs.engine import record_json
-from sgs.skills import CATALOG, resolve_instances
+from sgs.skills import CATALOG, conversion_offers, resolve_instances
 from sgs.state import FrameKind, Query, WindowCause, project
 from sgs.timing import Timing
 
@@ -541,8 +541,10 @@ def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) ->
 def _skill_hints(state: Any, query: Query) -> list[dict[str, str]]:
     """这条窗口里**被提供**的技能（主动技 / 提供者 / 转化技）及其文案。
 
-    来源只有**候选**里的公开事实：``ActivateSkill`` 候选自带 ``skill_id``；转化技的候选是
-    虚拟牌（不带技能归属），故按 :attr:`SkillDef.virtual_type_ids` 把牌名对回技能。
+    来源只有**候选与选择面槽位**里的公开事实：``ActivateSkill`` 候选自带 ``skill_id``；
+    转化技的候选是虚拟牌（不带技能归属），故按
+    :func:`~sgs.skills.heroes.conversion_offers` 的**来源**逐张对回技能（票 14），
+    不在声明表里的虚拟牌退回 :attr:`SkillDef.virtual_type_ids` 的牌名匹配。
     """
     actor = int(query.actor)
     hints: list[dict[str, str]] = []
@@ -564,17 +566,29 @@ def _skill_hints(state: Any, query: Query) -> list[dict[str, str]]:
     for action in query.legal_actions:
         if getattr(action, "kind", None) == "ActivateSkill":
             add(str(action.skill_id))
-    virtual_types = {
-        action.card.type
-        for action in query.legal_actions
-        if getattr(action, "card", None) is not None and action.card.is_virtual
-    }
-    if virtual_types:
+    # 收**候选与选择面槽位**两处的虚拟牌（票 14）："提供一张 B"的虚拟 B 只在后者上，
+    # 不收它这条窗口就列不出【龙胆】/【武圣】的文案。归属按
+    # :func:`~sgs.skills.heroes.conversion_offers` **逐张核对来源**（需要【杀】只归【闪】、
+    # 需要【闪】只归【杀】）；不在声明表里的虚拟牌（【八卦阵】"视为使用【闪】"等）
+    # 退回按牌名匹配。
+    for card in _virtual_cards(query):
+        if not card.is_virtual:
+            continue
+        source = int(card.virtual_sources[0]) if len(card.virtual_sources) == 1 else None
+        attributed = {
+            skill_id
+            for card_id, skill_id in conversion_offers(state, actor, card.type)
+            if source is not None and int(card_id) == source
+        }
+        if attributed:
+            for skill_id in attributed:
+                add(skill_id)
+            continue
         for instance in resolve_instances(state):
             if instance.owner != actor:
                 continue
             definition = instance.definition
-            if definition.virtual_type_ids and virtual_types & set(definition.virtual_type_ids):
+            if definition.virtual_type_ids and card.type in definition.virtual_type_ids:
                 add(definition.skill_id)
     return hints
 
@@ -670,16 +684,26 @@ def query_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
 
 
 def virtual_index(query: Query, state: Any | None = None) -> dict[str, list[dict[str, Any]]]:
-    """转化候选的**来源手牌索引**：``"<实体来源牌 id>": [{"card_id": <虚拟牌 id>, "skill_ids": [...]}]``。
+    """转化候选的**来源牌索引**：``"<实体来源牌 id>": [{"card_id": <虚拟牌 id>, "skill_ids": [...]}]``。
 
     【龙胆】这类转化技的候选里带的 ``card`` 是**虚拟牌**（``card_id < 0``），而界面手牌区
     渲染的是**实体牌**（``card_id > 0``）。不建这份索引，玩家点【闪】时界面按实体 id
-    查不到候选，【闪】就被画成"用不出"（本轮报障 4 的原样）。
+    查不到候选，【闪】就被画成"用不出"（报障 4 的原样）。
 
     只收**单来源**转化（源头只有一张实体牌）：这是标准版【武圣】【龙胆】【国色】【急救】
     的形状；多来源（【丈八蛇矛】的两张手牌当【杀】）需要"先选几张"的第二维，留给它自己
-    的界面改造，不在本轮射程。``skill_ids`` 由**实例声明**的 ``virtual_type_ids`` 反查，
-    故前端能据此只显示"当前技能能转的牌"。
+    的界面改造，不在本轮射程。
+
+    **``skill_ids`` 按声明的源谓词逐张核对**（票 14）：旧实现按 ``SkillDef.virtual_type_ids``
+    的**牌名并集**归属，而【龙胆】两个方向共用一个技能 id（``("dodge", "slash")``）⇒ 两个
+    方向分不开、"点龙胆后所有手牌都亮"（用户实机）。现在读
+    :func:`~sgs.skills.heroes.conversion_offers`（目标牌名 + 该声明的区域 / 牌面 / 时机
+    谓词）：需要【杀】时只归【闪】、需要【闪】时只归【杀】。拿不到引擎（409 里附带的裸
+    ``Query``）时退回牌名匹配——谓词需要 ``state``。
+
+    ``SELECT_CARDS`` 的**"提供一张 B"面**（票 14）没有 ``action.card``，虚拟 B 全在
+    ``query.slots`` 里，故两个来源都要收：缺了后者，【青龙】追问时【龙胆】/【武圣】的
+    技能按钮就点不亮（"待答期间技能栏仍可点"这条验收会红）。
     """
     return _virtual_index(query, state, owner=int(query.actor))
 
@@ -696,16 +720,46 @@ def _virtual_index(
             definition = instance.definition
             if definition.virtual_type_ids:
                 typed.append((definition.skill_id, frozenset(definition.virtual_type_ids)))
+    # 牌名 → {来源实体牌 id: 技能 id 元组}；按需现算（一次询问里通常只有一两种牌名）。
+    offers: dict[str, dict[int, tuple[str, ...]]] = {}
+
+    def offerers(card: Any) -> list[str]:
+        if state is None:
+            return [skill_id for skill_id, types in typed if card.type in types]
+        table = offers.get(card.type)
+        if table is None:
+            grouped: dict[int, list[str]] = {}
+            for source, skill_id in conversion_offers(state, owner, card.type):
+                grouped.setdefault(source, []).append(skill_id)
+            table = {source: tuple(ids) for source, ids in grouped.items()}
+            offers[card.type] = table
+        return list(table.get(int(card.virtual_sources[0]), ()))
+
     out: dict[str, list[dict[str, Any]]] = {}
-    for action in query.legal_actions:
-        card = getattr(action, "card", None)
-        if card is None or not card.is_virtual or len(card.virtual_sources) != 1:
+    for card in _virtual_cards(query):
+        if not card.is_virtual or len(card.virtual_sources) != 1:
             continue
-        skills = [skill_id for skill_id, types in typed if card.type in types]
         bucket = out.setdefault(str(int(card.virtual_sources[0])), [])
         if not any(item["card_id"] == card.card_id for item in bucket):
-            bucket.append({"card_id": card.card_id, "skill_ids": skills})
+            bucket.append({"card_id": card.card_id, "skill_ids": offerers(card)})
     return out
+
+
+def _virtual_cards(query: Query) -> list[Any]:
+    """这次询问里的全部牌面：候选带的 ``card`` 与**选择面槽位**上的牌（票 14）。
+
+    "提供一张 B"的虚拟 B 只出现在后者的 ``slots[].card`` 上（``SELECT_CARDS`` 的候选
+    只带面内位置），故两个来源都要读——顺序固定（候选在前、槽位在后）以保证可复现。
+    """
+    cards: list[Any] = []
+    for action in query.legal_actions:
+        card = getattr(action, "card", None)
+        if card is not None:
+            cards.append(card)
+    for slot in getattr(query, "slots", ()) or ():
+        if slot.card is not None:
+            cards.append(slot.card)
+    return cards
 
 
 def candidate_index(query: Query) -> dict[str, dict[str, Any]]:
@@ -776,6 +830,9 @@ def pending_payload(session: Session | Query | None) -> dict[str, Any] | None:
         query_context(session.engine, query) if isinstance(session, Session) else None
     )
     payload["option_seats"] = option_seats(query)
+    # 这一步是不是"提供一张 B"（票 14）：非空 = B 的牌名 id。字段在记录流里被 ``exclude``，
+    # 故**不进** Golden Replay 的字节；界面靠它把这一类选择面**就地**铺到本人的可见区域上。
+    payload["provide_type"] = getattr(query, "provide_type", None)
     # 转化候选的**来源手牌**索引（【龙胆】：点【闪】要能命中"当【杀】"的那条候选）。
     # 拿不到引擎（409 里附带的裸 ``Query``）时仍下发来源 → 虚拟牌的别名，只是 ``skill_ids`` 为空。
     payload["virtual_index"] = _virtual_index(

@@ -1143,6 +1143,149 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿L7 提交按钮可点", $("btn-submit").disabled === false, `disabled=${$("btn-submit").disabled}`);
 }
 
+/* ③ 票 14：【青龙偃月刀】续杀的「提供一张【杀】」面——**就地**高亮（不新开区域）、
+ *    置灰是**当前状态的纯函数**（进询问 / 换询问 / 退出询问三点各一条）、两条入口都给、
+ *    取消预发动**回到同一层询问**（不是取消整条流水线）。
+ *
+ * 面 = 手牌里的实体【杀】（槽 0）＋【龙胆】的【闪】转化（槽 1）＋【武圣】的装备区红马
+ * 转化（槽 2）；手牌里的【桃】不在面上。
+ */
+{
+  const slash = synthCard(1, "杀");
+  const dodge = { ...synthCard(2, "闪"), type: "dodge" };
+  const peach = { ...synthCard(4, "桃"), type: "peach" };
+  const horse = { ...synthCard(5, "赤兔"), type: "horse", color: "red" };
+  const fromDodge = { ...synthCard(-3, "杀"), type: "slash", virtual_sources: [2] };
+  const fromHorse = { ...synthCard(-6, "杀"), type: "slash", virtual_sources: [5] };
+  const providePending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 940,
+    prompt: "提供一张【杀】继续使用（目标不变；可发动转化技）",
+    provide_type: "slash",
+    legal_actions: [{ kind: "SelectCards", answers_seq: 940, picks: [] }],
+    candidate_index: {}, option_seats: {}, context: null,
+    slots: [
+      { ref: { zone: "hand", seat: 0 }, card: slash },
+      { ref: { zone: "hand", seat: 0 }, card: fromDodge },
+      { ref: { zone: "equip", seat: 0 }, card: fromHorse },
+    ],
+    spec: { zones: ["hand"], total: [1, 1] },
+    virtual_index: {
+      "2": [{ card_id: -3, skill_ids: ["hero.zhaoyun.longdan"] }],
+      "5": [{ card_id: -6, skill_ids: ["hero.guanyu.wusheng"] }],
+    },
+  };
+  const view = synthView(providePending);
+  view.heroes = { 0: "zhaoyun", 1: "guanyu", 2: "diaochan" };
+  view.snapshot.self_hand = [slash, dodge, peach];
+  view.snapshot.players[0].equip = [horse];
+  view.skills = [
+    {
+      skill_id: "hero.zhaoyun.longdan", name: "龙胆", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: false,
+      ui: {
+        requirement: "选择1张【闪】当【杀】使用或打出", manual: false,
+        pick_cards: [], pick_seats: [], convert_sources: [2],
+      },
+    },
+    {
+      skill_id: "hero.guanyu.wusheng", name: "武圣", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: false,
+      ui: {
+        requirement: "一张红色牌当【杀】使用或打出", manual: false,
+        pick_cards: [], pick_seats: [], convert_sources: [5],
+      },
+    },
+  ];
+  const handChips = () => $("t-hand").children;
+  const equipChip = () => {
+    const row = $("t-seats").children
+      .find((c) => c.getAttribute("data-seat") === "0")
+      .children.find((c) => c.getAttribute("data-zone") === "equip");
+    return row ? row.children[0] : null;
+  };
+  const skillButton = (id) => $("t-skills").children.find((b) => b.getAttribute("data-skill-id") === id);
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  // (a) 进询问：就地高亮、**不**新开选择区。
+  check("㉿B1 「提供一张【杀】」不铺选择面块（t-options 为空）",
+    $("t-options").children.length === 0, `options=${$("t-options").children.length}`);
+  check("㉿B2 实体【杀】就地亮起（面上槽 0）",
+    ui.provideSlotIndex(providePending, 1) === 0 && ui.cardFace(providePending, slash).selectable === true
+      && !handChips()[0].classList.contains("dis"),
+    `slot=${ui.provideSlotIndex(providePending, 1)} dis=${handChips()[0].classList.contains("dis")}`);
+  check("㉿B3 【龙胆】的【闪】走别名就地亮起（面上槽 1）",
+    ui.provideSlotIndex(providePending, 2) === 1 && ui.cardFace(providePending, dodge).selectable === true
+      && !handChips()[1].classList.contains("dis"),
+    `slot=${ui.provideSlotIndex(providePending, 2)} dis=${handChips()[1].classList.contains("dis")}`);
+  check("㉿B3b 装备区的【武圣】红牌也在**原地**亮起（面上槽 2，装备区不再静态）",
+    ui.provideSlotIndex(providePending, 5) === 2 && !!equipChip()
+      && !equipChip().classList.contains("dis"),
+    `slot=${ui.provideSlotIndex(providePending, 5)} chip=${!!equipChip()}`);
+  check("㉿B4 不满足条件的【桃】置灰（当前状态的纯函数）",
+    ui.cardFace(providePending, peach).selectable === false && handChips()[2].classList.contains("dis"),
+    `dis=${handChips()[2].classList.contains("dis")}`);
+
+  // (b) 点【闪】= 选中它对应的**面内位置**（虚拟 B 没有实体 id）。
+  (handChips()[1].listeners.click || []).forEach((fn) => fn({ target: handChips()[1] }));
+  check("㉿B5 点【闪】= 选中面内位置 1（不是实体 id 2）",
+    JSON.stringify(ui.state.picks) === "[1]", `picks=${JSON.stringify(ui.state.picks)}`);
+  const provided = ui.buildAction();
+  check("㉿B6 提交的是 SelectCards 骨架补上面内位置",
+    !!provided && provided.kind === "SelectCards" && JSON.stringify(provided.picks) === "[1]",
+    JSON.stringify(provided));
+  check("㉿B7 提交按钮可点", $("btn-submit").disabled === false, `disabled=${$("btn-submit").disabled}`);
+
+  // (c) 两条入口：源牌直接亮起（上面）+ 技能按钮（下面）。预发动 / 取消 = 两档语义。
+  const longdan = skillButton("hero.zhaoyun.longdan");
+  check("㉿B8 待答期间【龙胆】按钮可点（convert_sources 点亮，不是 ActivateSkill 候选）",
+    !!longdan && longdan.disabled === false && longdan.getAttribute("data-convert") === "1",
+    `disabled=${longdan && longdan.disabled} convert=${longdan && longdan.getAttribute("data-convert")}`);
+  (longdan.listeners.click || []).forEach((fn) => fn({ target: longdan }));
+  check("㉿B9 点技能 = 预发动：只按该方向亮源牌（【闪】亮、【武圣】的马灰），询问**不动**",
+    ui.state.convertSkill === "hero.zhaoyun.longdan"
+      && ui.state.view.pending === providePending
+      && !handChips()[1].classList.contains("dis")
+      && equipChip().classList.contains("dis"),
+    `convert=${ui.state.convertSkill} dodgeDis=${handChips()[1].classList.contains("dis")} horseDis=${equipChip().classList.contains("dis")}`);
+  (longdan.listeners.click || []).forEach((fn) => fn({ target: longdan }));
+  check("㉿B10 再点一次 = 取消预发动、回到**同一层询问**（不是取消流水线）",
+    ui.state.convertSkill === null && ui.state.view.pending === providePending
+      && !equipChip().classList.contains("dis"),
+    `convert=${ui.state.convertSkill} pending=${ui.state.view.pending === providePending}`);
+
+  // (d) 置灰是当前状态的纯函数：换询问 / 退出询问都**整体重算**，不叠加、不粘滞。
+  const playPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 941, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 941, card: peach, targets: [] },
+      { kind: "EndPhase", answers_seq: 941 },
+    ],
+    candidate_index: { "4": { card: peach, pool: [], combos: [[]], min_targets: 0, max_targets: 0 } },
+    virtual_index: {}, option_seats: {}, context: null,
+  };
+  ui.state.view = synthView(playPending);
+  ui.state.view.snapshot.self_hand = [slash, dodge, peach];
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(ui.state.view);
+  check("㉿B11 换询问整体重算：【杀】【闪】灰、【桃】亮（不保留上一问的亮面）",
+    handChips()[0].classList.contains("dis") && handChips()[1].classList.contains("dis")
+      && !handChips()[2].classList.contains("dis"),
+    `dis=${handChips().map((c) => c.classList.contains("dis")).join(",")}`);
+
+  ui.state.view = synthView(null);
+  ui.state.view.snapshot.self_hand = [slash, dodge, peach];
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(ui.state.view);
+  check("㉿B12 退出询问整体重算：无挂起时全部按不可用判（提供面的亮面不粘滞）",
+    handChips().every((c) => c.classList.contains("dis")),
+    `dis=${handChips().map((c) => c.classList.contains("dis")).join(",")}`);
+}
+
 // ② 仁德：点技能 → 直接多选手牌 → 直接点场上武将 → 一次交出去；**没有任何选项按钮**。
 {
   const first = synthCard(11, "杀");

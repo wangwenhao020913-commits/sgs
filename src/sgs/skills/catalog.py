@@ -59,7 +59,15 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .flow import FlowAnswers, PickCards, SkillFlow, run_flow, zone_pool_size
+from .flow import (
+    FlowAnswers,
+    PickCards,
+    PickProvide,
+    SkillFlow,
+    provide_face,
+    run_flow,
+    zone_pool_size,
+)
 from .virtual import card_ids, grouped_candidates
 
 __all__ = [
@@ -674,14 +682,16 @@ def _axe_plan(state: GameState, frame: Frame, instance: SkillInstance) -> Activa
 
 
 def _green_dragon_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
-    """【青龙偃月刀】：只有**自己的**【杀】被抵消、且手里有【杀】时才发动。
+    """【青龙偃月刀】：只有**自己的**【杀】被抵消、且**提供得起**一张【杀】时才发动。
 
-    票 09 起发动询问是**裸"是否发动"**（"手里有【杀】"的 ``available`` 保留）：挑哪张
-    【杀】由发动后的一步 ``PickCards``（``card_types=("slash",)``）问，候选因此不再
-    "每张【杀】一条"。
+    票 09 起发动询问是**裸"是否发动"**；票 14 起这一步问的是"**提供一张【杀】**"
+    （``PickProvide``），故"付得起"的判据与那一步的候选面**同源**
+    （:func:`provide_face`）：手里的实体【杀】∨ **任一转化技能此刻能转出的虚拟【杀】**
+    （赵云的【闪】、【武圣】的红牌）。少了虚拟那一半，只有【闪】的赵云就**连询问都不发**——
+    正是用户实机"青龙追问时想点龙胆却没有入口"的那一幕。
     """
-    available = frame.data.get("source") == instance.owner and _has_slash_in_hand(
-        state, instance.owner
+    available = frame.data.get("source") == instance.owner and bool(
+        provide_face(state, instance.owner, "slash", (Zone.HAND,))[0]
     )
     return ActivationPlan(optional=True, available=available)
 
@@ -914,11 +924,6 @@ def _is_owner_slash_damage(frame: Frame, instance: SkillInstance) -> bool:
     return card is not None and card.type == "slash"
 
 
-def _has_slash_in_hand(state: GameState, seat: int) -> bool:
-    """手里有没有【杀】（【青龙偃月刀】的"付得起"判据）。"""
-    return any(state.card(card_id).type == "slash" for card_id in state.player(seat).hand)
-
-
 def _double_sword(host: Any, frame: Frame) -> Control:
     """雌雄双股剑：你使用【杀】指定**异性**目标后，令其选择"弃一张手牌"或"你摸一张"。
 
@@ -1117,11 +1122,16 @@ QILIN_BOW_FLOW = SkillFlow(
 
 
 def _green_dragon_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
-    """提交点：把步 1 选中的那张【杀】**继续使用**（沿用原【杀】的目标、不计次数）。
+    """提交点：把步 1 选中的那张【杀】（实体或**转化出来的**）**继续使用**。
 
-    续杀**无距离限制**（`A/flow_condition.txt:66-67`）由"目标直接沿用原【杀】的目标"表达
-    （不再走 ``check_targets``）；该次使用**不计次数**（票 12）；``gdb_used`` 只落一次，
-    故每张【杀】只给一次机会（重入时上面那条短路接手）。
+    续杀"目标不变、不计次数、不限距离"（`A/flow_condition.txt:66-67`）由三步事实表达：
+    目标**直接沿用原【杀】的目标**（不再走 ``check_targets`` ⇒ 距离/目标池一概不重算）、
+    ``counts=False``（票 12）、``gdb_used`` 只落一次（每张【杀】只给一次机会，重入由上面
+    的短路接手）。
+
+    步 1 的答案是 **``CardRef``**（票 14）：【龙胆】的【闪】当【杀】、【武圣】的红牌当【杀】
+    与手牌里的实体【杀】在这里**没有分岔**——都是"一张要用的【杀】"，来源实体牌的移动由
+    使用链的 ``_move_virtual_sources`` 负责。
     """
     owner = frame.data.get("skill_owner")
     if frame.data.get("gdb_used") or frame.data.get("source") != owner:
@@ -1131,7 +1141,7 @@ def _green_dragon_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Contr
         return None
     frame.data["gdb_used"] = True
     host.start_use(
-        host.state.card(picks[0]),
+        picks[0],
         source=owner,
         targets=tuple(frame.data.get("targets", ())),
         use_timing=Timing.RESOLVE_BEFORE_EFFECT,
@@ -1142,24 +1152,25 @@ def _green_dragon_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Contr
 
 GREEN_DRAGON_FLOW = SkillFlow(
     steps=(
-        PickCards(
+        PickProvide(
+            type_id="slash",
             zones=(Zone.HAND,),
             lo=1,
             hi=1,
-            # **有意保留现状**（票 09 §要做什么）：迁移前的选牌没有 ``Pass``，"取消"的
-            # 唯一出口是发动询问那一道（答 ``Pass`` ⇒ 一个询问都不发）。
+            # **有意保留现状**（票 09 §要做什么）：这一步没有 ``Pass``，"取消"的唯一出口是
+            # 发动询问那一道（答 ``Pass`` ⇒ 一个询问都不发）。
             optional=False,
-            card_types=("slash",),
             key="card",
         ),
     ),
     effect=_green_dragon_effect,
 )
-"""【青龙偃月刀】的一步流水线（票 09）：[发动询问] → 挑一张手牌里的【杀】 → 继续使用。
+"""【青龙偃月刀】的一步流水线（票 09；票 14 换成"提供一张【杀】"）：[发动询问] → 提供一张【杀】 → 继续使用。
 
 票 09 前，这张【杀】是**烘进发动询问候选**的载荷（每张手牌【杀】一条候选）；
-迁移后发动询问回到裸"是否发动"（``available`` = 自己的【杀】被抵消 + 手里有【杀】），
-成本改由 ``PickCards(card_types=("slash",))`` 问。
+票 09 把成本下沉成 ``SELECT_CARDS`` 步；票 14 把这一步换成 :class:`PickProvide`——
+候选面 = 手牌里的实体【杀】**＋各转化技此刻能转出的虚拟【杀】**（赵云的【闪】、
+【武圣】的红牌，含装备 / 判定区），故"青龙追问时再点龙胆/武圣"这条用户口径有了落点。
 """
 
 
@@ -1322,7 +1333,7 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         locked=False,
         requirement="选择一张【杀】继续使用",
         seams=(Seam(SeamKind.SLASH_CANCELED, flow=GREEN_DRAGON_FLOW),),
-        step_requirements={"card": "选择一张手牌里的【杀】继续使用（目标不变）"},
+        step_requirements={"card": "提供一张【杀】继续使用（目标不变；可发动转化技）"},
     ),
     _equip(
         "serpent_spear",
