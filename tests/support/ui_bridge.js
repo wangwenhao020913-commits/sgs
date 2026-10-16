@@ -35,6 +35,8 @@
     "isProvide", "provideSlotIndex", "cardFace", "activateCard", "renderProvide", "toggleProvidePick",
     // 票 15：选择面的张数上限（读服务端 spec.total）+ 槽位点选（【遗计】一次两张 / 取消）
     "selectionCap", "toggleSlotPick",
+    // 票 19：开局点将——列表拉取 + 开关（关了 = 置灰 + 建局不带 my_hero）
+    "loadHeroCatalog", "fillHeroOptions", "syncPointjiang",
   ];
   const out = {};
   for (const name of names) {

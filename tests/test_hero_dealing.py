@@ -51,7 +51,15 @@ def _heroes_of(state) -> tuple[str | None, ...]:
     return tuple(player.hero for player in state.players)
 
 
-def _build(*, seed: int, player_count: int, heroes=(), hero_pool=None):
+def _build(
+    *,
+    seed: int,
+    player_count: int,
+    heroes=(),
+    hero_pool=None,
+    pinned_hero=None,
+    pinned_seat=0,
+):
     """``build_initial`` 的薄包装：只取状态，规则配置按人数造。"""
     state, _ = build_initial(
         seed=seed,
@@ -59,6 +67,8 @@ def _build(*, seed: int, player_count: int, heroes=(), hero_pool=None):
         pack=PACK,
         heroes=heroes,
         hero_pool=hero_pool,
+        pinned_hero=pinned_hero,
+        pinned_seat=pinned_seat,
     )
     return state
 
@@ -222,6 +232,104 @@ def test_an_empty_explicit_pool_means_the_data_file_enabled_pool():
 
     assert len(set(dealt)) == 4, "不重复抽取"
     assert set(dealt) <= set(enabled_hero_ids(HEROES))
+
+
+# ---------------------------------------------------------------------------
+# 点将（票 19）：预指派一个座位 + 其余从**去掉它的池**里随机
+# ---------------------------------------------------------------------------
+
+
+def test_a_picked_hero_lands_on_its_seat_and_never_reaches_the_others():
+    """点将 = 座位 0 指定；其余座位从**去掉该武将后的池**里随机——不得再抽到他/她。"""
+    heroes = _heroes_of(_build(seed=13, player_count=5, hero_pool=POOL, pinned_hero="diaochan"))
+
+    assert heroes[0] == "diaochan", "点将的武将必须落在座位 0"
+    assert "diaochan" not in heroes[1:], "本局其它座位不得拿到我已点的武将"
+    assert len(set(heroes)) == 5, "其余座位仍是无放回随机"
+    assert set(heroes) <= set(POOL), "不得发出池外的武将"
+
+
+def test_the_other_seats_are_dealt_from_the_pool_without_the_pick():
+    """独立真源：其余座位 = 在 ``池 − 点将`` 上跑同一套无放回抽取（不引入新的随机源）。"""
+    rest = tuple(hero for hero in POOL if hero != "simayi")
+    expected = ("simayi",) + _expected_draw(rest, 4, seed=17)
+
+    heroes = _heroes_of(_build(seed=17, player_count=5, hero_pool=POOL, pinned_hero="simayi"))
+
+    assert heroes == expected
+
+
+def test_the_pick_can_be_moved_off_the_first_seat():
+    """预指派是"座位 × 武将"两件事：人类座位不是 0 时点将也得落在**他那张椅子**上。"""
+    heroes = _heroes_of(
+        _build(seed=13, player_count=5, hero_pool=POOL, pinned_hero="guanyu", pinned_seat=3)
+    )
+
+    assert heroes[3] == "guanyu"
+    assert "guanyu" not in heroes[:3] + heroes[4:]
+
+
+def test_the_same_seed_and_the_same_pick_deal_the_same_heroes():
+    first = _heroes_of(_build(seed=17, player_count=5, hero_pool=POOL, pinned_hero="simayi"))
+    second = _heroes_of(_build(seed=17, player_count=5, hero_pool=POOL, pinned_hero="simayi"))
+    other = _heroes_of(_build(seed=17, player_count=5, hero_pool=POOL, pinned_hero="lvbu"))
+
+    assert first == second, "同 seed + 同点将 ⇒ 同一份发将结果"
+    assert first != other, "换一名点将 ⇒ 结果随之改变（不是常量）"
+
+
+def test_a_pick_works_against_the_data_file_enabled_pool():
+    """``hero_pool=()``（启用池）下点将同样成立。"""
+    heroes = _heroes_of(_build(seed=23, player_count=4, hero_pool=(), pinned_hero="liubei"))
+
+    assert heroes[0] == "liubei"
+    assert "liubei" not in heroes[1:]
+
+
+def test_an_unknown_pick_is_refused_instead_of_falling_back_to_random():
+    with pytest.raises(ValueError) as caught:
+        _build(seed=5, player_count=4, hero_pool=POOL, pinned_hero="nobody")
+
+    assert "nobody" in str(caught.value), "未知 id 要 fail-closed，不得静默退回随机"
+
+
+def test_a_pick_outside_the_pool_is_refused():
+    """池里没有这名武将 ⇒ 报错（"自由选一名"只限池内）。"""
+    pool = ("caocao", "guanyu", "diaochan", "simayi", "lvbu")
+    with pytest.raises(ValueError) as caught:
+        _build(seed=5, player_count=4, hero_pool=pool, pinned_hero="zhouyu")
+
+    assert "zhouyu" in str(caught.value)
+
+
+def test_a_pick_needs_a_pool_to_deal_the_other_seats():
+    """无武将模式（``hero_pool=None``）下没有池可发其余座位 ⇒ 报错。"""
+    with pytest.raises(ValueError):
+        _build(seed=5, player_count=4, hero_pool=None, pinned_hero="caocao")
+
+
+def test_a_pick_and_a_full_explicit_lineup_are_mutually_exclusive():
+    """全显式与部分预指派是两种互斥语义，同时给 = 配置非法。"""
+    with pytest.raises(ValueError):
+        _build(
+            seed=5,
+            player_count=4,
+            heroes=("caocao", "guanyu", "diaochan", "simayi"),
+            pinned_hero="caocao",
+        )
+
+
+def test_a_pick_beyond_the_seat_range_is_refused():
+    with pytest.raises(ValueError):
+        _build(seed=5, player_count=4, hero_pool=POOL, pinned_hero="caocao", pinned_seat=4)
+
+
+def test_no_pick_keeps_the_random_path_untouched():
+    """开关关着（不点将）⇒ 与引入点将之前**逐字节一致**：仍是纯随机那一份。"""
+    plain = _heroes_of(_build(seed=29, player_count=5, hero_pool=POOL))
+    explicit_none = _heroes_of(_build(seed=29, player_count=5, hero_pool=POOL, pinned_hero=None))
+
+    assert plain == explicit_none == _expected_draw(POOL, 5, seed=29)
 
 
 # ---------------------------------------------------------------------------

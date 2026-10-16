@@ -81,6 +81,7 @@ const state = {
   timer: null,
   runs: [],
   replay: null,
+  heroCatalog: [],     // 点将列表（`GET /api/heroes` 的启用池）；开局页的选项来源
   logRecords: [],
   lastQuerySeat: null, // 事件流里"上一条询问的 actor"（action 记录靠它归属）
   lastRejectReason: "",   // 已收到的全部下发记录（切换详略时重画用）
@@ -133,10 +134,49 @@ function seedOptions() {
   if (previous && Number(previous) < count) select.value = previous;
 }
 
+/** 点将列表：把服务端下发的启用池铺成选项（`id` 是值、名称是给人看的字）。 */
+function fillHeroOptions() {
+  const select = $("in-my-hero");
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = "";
+  for (const hero of state.heroCatalog) {
+    const option = document.createElement("option");
+    option.value = hero.id;
+    option.textContent = hero.name;
+    select.appendChild(option);
+  }
+  const known = state.heroCatalog.some((hero) => hero.id === previous);
+  select.value = known ? previous : (state.heroCatalog[0] || {}).id || "";
+}
+
+/** 拉一次点将列表；失败只提示、不挡住开局（列表空 ⇒ 开关自然点不出东西）。 */
+async function loadHeroCatalog() {
+  try {
+    const body = await api("/api/heroes");
+    state.heroCatalog = (body && body.heroes) || [];
+  } catch (error) {
+    state.heroCatalog = [];
+    $("lobby-hint").textContent = `点将列表拉取失败：${error.message}`;
+  }
+  fillHeroOptions();
+  syncPointjiang();
+}
+
+/** 开关的**唯一**落点：关了 = 置灰选将列表 + 建局不带 `my_hero`（纯随机）。 */
+function syncPointjiang() {
+  const on = !!($("in-pointjiang") || {}).checked;
+  const select = $("in-my-hero");
+  if (select) select.disabled = !on;
+  return on;
+}
+
 async function startGame(event) {
   event.preventDefault();
   const seedRaw = $("in-seed").value.trim();
   const timeout = Number($("in-timeout").value);
+  // 点将（票 19）：开关关着 ⇒ `my_hero: null`，服务端走**纯随机**那条老路径。
+  const myHero = syncPointjiang() ? $("in-my-hero").value || null : null;
   $("lobby-hint").textContent = "正在建局…";
   try {
     const body = await post("/api/sessions", {
@@ -145,6 +185,7 @@ async function startGame(event) {
       human_seat: Number($("in-seat").value),
       timeout_seconds: timeout > 0 ? timeout : null,
       seed: seedRaw === "" ? null : Number(seedRaw),
+      my_hero: myHero,
     });
     state.sessionId = body.session_id;
     state.cursor = -1;
@@ -1823,6 +1864,9 @@ function updateDelayButton() {
 function wire() {
   seedOptions();
   $("in-players").addEventListener("change", seedOptions);
+  $("in-pointjiang").addEventListener("change", syncPointjiang);
+  syncPointjiang();
+  loadHeroCatalog();
   $("lobby-form").addEventListener("submit", startGame);
   $("nav-lobby").addEventListener("click", () => { show("lobby"); loadRuns(); });
   $("nav-table").addEventListener("click", () => show("table"));

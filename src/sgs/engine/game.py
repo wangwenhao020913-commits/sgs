@@ -391,12 +391,15 @@ class Engine:
         pack: ContentPack,
         heroes: Sequence[str] = (),
         hero_pool: Sequence[str] | None = None,
+        pinned_hero: str | None = None,
+        pinned_seat: int = 0,
     ) -> "Engine":
         """造初始状态（实例化 → 洗牌 → 发身份 → 发武将 → 发牌）并带上开局那几条记录。
 
         初次洗牌与后续重洗共用同一个 ``shuffle`` 子流句柄：重洗从初次洗牌之后的位置继续取数
         （票 08 §3），因此同一 seed 的整局（含每一次重洗）逐字节可复现。
         ``heroes`` / ``hero_pool`` 与 :func:`build_initial` 同义（票 02）：缺省 = 无武将模式。
+        ``pinned_hero`` / ``pinned_seat`` 同义（票 19 的点将：钉住一个座位、其余随机）。
         """
         shuffle_source = RandomSource(seed).substream("shuffle")
         state, init_records = build_initial(
@@ -406,6 +409,8 @@ class Engine:
             shuffle_source=shuffle_source,
             heroes=heroes,
             hero_pool=hero_pool,
+            pinned_hero=pinned_hero,
+            pinned_seat=pinned_seat,
         )
         return cls(
             state, seed=seed, init_records=init_records, shuffle_source=shuffle_source
@@ -2780,6 +2785,8 @@ def build_initial(
     shuffle_source: Randomness | None = None,
     heroes: Sequence[str] = (),
     hero_pool: Sequence[str] | None = None,
+    pinned_hero: str | None = None,
+    pinned_seat: int = 0,
 ) -> tuple[GameState, tuple[JournalRecord, ...]]:
     """实例化牌堆 → 洗牌 → 发身份（身份局）→ 发武将 → 发牌；顺带产出开局那几条记录。
 
@@ -2791,8 +2798,9 @@ def build_initial(
 
     **武将发放**（票 02）走唯一随机源的专用子流 ``hero``：``heroes`` 为空 = **无武将模式**
     （M2 的 34 条基准靠它保持有效）、非空 = 显式指定；``hero_pool`` 非 ``None`` 时从该池
-    不重复随机抽 N 名。发放段本身**不产出记录**（武将不是牌、也没有 delta），故关掉武将
-    时记录流逐字节不变。
+    不重复随机抽 N 名。``pinned_hero`` / ``pinned_seat``（票 19 的点将）钉住一个座位、其余
+    从去掉它的池里随机——仍只取 ``hero`` 子流。发放段本身**不产出记录**（武将不是牌、
+    也没有 delta），故关掉武将时记录流逐字节不变。
     """
     heroes_table = load_heroes(pack.pack_id)
     assigned = deal_heroes(
@@ -2800,6 +2808,8 @@ def build_initial(
         stream=RandomSource(seed).substream("hero"),
         heroes=heroes,
         hero_pool=hero_pool,
+        pinned_hero=pinned_hero,
+        pinned_seat=pinned_seat,
         table=heroes_table,
     )
     cards = instantiate_cards(pack)
@@ -2872,6 +2882,8 @@ def new_game(
     pack: ContentPack,
     heroes: Sequence[str] = (),
     hero_pool: Sequence[str] | None = None,
+    pinned_hero: str | None = None,
+    pinned_seat: int = 0,
 ) -> GameState:
     """便利包装：造初始状态（实例化牌堆 → 洗牌 → 发身份 → 发武将 → 发牌），不返回记录流。
 
@@ -2883,4 +2895,6 @@ def new_game(
         pack=pack,
         heroes=heroes,
         hero_pool=hero_pool,
+        pinned_hero=pinned_hero,
+        pinned_seat=pinned_seat,
     )[0]

@@ -111,6 +111,7 @@ class Session:
         human_seat: int = DEFAULT_HUMAN_SEAT,
         hero_pool: Sequence[str] | None | Literal["enabled"] = "enabled",
         heroes: Sequence[str] = (),
+        my_hero: str | None = None,
         timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS,
         pack: ContentPack | None = None,
         session_id: str = "",
@@ -119,6 +120,8 @@ class Session:
             raise ValueError(f"AI 档位非法：{ai!r}（可选 {AI_TIERS}）")
         if hero_pool == "enabled" and heroes:
             hero_pool = None  # 显式武将优先；池不参与（引擎在 heroes 非空时直接早退）
+        if my_hero is not None and not isinstance(my_hero, str):
+            raise ValueError(f"点将的武将 id 必须是字符串：{my_hero!r}")
         rule_config: RuleConfig = validate_rule_config({"player_count": player_count})
         if not 0 <= human_seat < rule_config.player_count:
             raise ValueError(f"人类座位非法：{human_seat}（本局座位 0..{rule_config.player_count - 1}）")
@@ -152,12 +155,18 @@ class Session:
             if hero_pool == "enabled"
             else (None if hero_pool is None else tuple(hero_pool))
         )
+        # 点将（票 19）：人类座位预指派一名，其余座位从**去掉它**的池里随机发。
+        # 钉的座位是 ``human_seat`` 而不是字面的 0——开局页的「我的座位」可选，
+        # 缺省 0 时才与"座位 0 指定"逐字等价。``None`` = 不点将（纯随机，默认路径不变）。
+        self.my_hero: str | None = my_hero
         self.engine = Engine.new_game(
             seed=self.seed,
             rule_config=rule_config,
             pack=content,
             heroes=self.heroes,
             hero_pool=self.hero_pool,
+            pinned_hero=self.my_hero,
+            pinned_seat=human_seat,
         )
 
         self._ai_stream = RandomSource(self.seed).substream("ai")

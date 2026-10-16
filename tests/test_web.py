@@ -221,6 +221,87 @@ def test_the_hero_pool_is_dealt_from_the_enabled_pool_by_default() -> None:
     assert len(set(assigned)) == len(assigned), "发放不重复"
 
 
+# ---------------------------------------------------------------------------
+# 6b. 开局点将（票 19）：建局参数 ``my_hero`` + 点将列表只读面
+# ---------------------------------------------------------------------------
+
+
+def test_a_picked_hero_lands_on_the_human_seat_and_nowhere_else() -> None:
+    """建局参数 ``my_hero`` = "我要的武将"；其余 AI 不得再拿到他/她。"""
+    session = Session(
+        seed=37,
+        ai="random",
+        timeout_seconds=None,
+        player_count=5,
+        my_hero="liubei",
+    )
+
+    assigned = session.hero_assignments
+    assert assigned[session.human_seat] == "liubei"
+    assert "liubei" not in assigned[1:], "本局其它座位不得选我已点的武将"
+    assert len(set(assigned)) == len(assigned), "其余座位仍是无放回随机"
+
+
+def test_the_pick_follows_the_human_seat_not_the_literal_seat_zero() -> None:
+    """人类座位可选（开局页的「我的座位」）⇒ 点将必须落在**他那张椅子**上。"""
+    session = Session(
+        seed=37, ai="random", timeout_seconds=None, player_count=5, human_seat=3, my_hero="guanyu"
+    )
+
+    assert session.hero_assignments[3] == "guanyu"
+    assert "guanyu" not in session.hero_assignments[:3] + session.hero_assignments[4:]
+
+
+def test_no_pick_reproduces_the_pre_ticket_random_session() -> None:
+    """开关关着 ⇒ 逐字节就是引入点将之前那条纯随机路径（默认参数不动行为）。"""
+    plain = Session(seed=41, ai="random", timeout_seconds=None, player_count=5)
+    explicit_none = Session(
+        seed=41, ai="random", timeout_seconds=None, player_count=5, my_hero=None
+    )
+
+    assert plain.hero_assignments == explicit_none.hero_assignments
+    assert len(set(plain.hero_assignments)) == 5, "关着仍是随机发放，不是不发"
+
+
+def test_an_unknown_pick_is_refused_at_session_construction() -> None:
+    """未知 id ⇒ fail-closed 报错，不静默退回随机。"""
+    with pytest.raises(ValueError) as caught:
+        Session(seed=43, ai="random", timeout_seconds=None, player_count=5, my_hero="nobody")
+
+    assert "nobody" in str(caught.value)
+
+
+def test_the_registry_passes_the_pick_through_from_the_request_body() -> None:
+    """打 ``GameRegistry.create`` 这一缝：**接线断了**要比"引擎报错"先被看见。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {
+            "player_count": 5,
+            "ai": "random",
+            "seed": 20261012,
+            "timeout_seconds": None,
+            "my_hero": "diaochan",
+        }
+    )
+    payload = registry.view(session, after=-1, logs_after=0)
+
+    assert payload["heroes"][0] == "diaochan"
+    assert "diaochan" not in payload["heroes"][1:]
+
+
+def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
+    """点将列表的只读面：只有**启用**武将，且与发放用的启用池同源同序。"""
+    from sgs.data import enabled_hero_ids, load_heroes
+    from sgs_web.serve import hero_catalog
+
+    catalog = hero_catalog()
+
+    assert [entry["id"] for entry in catalog] == list(enabled_hero_ids(load_heroes()))
+    assert all(entry["name"] for entry in catalog), "列表要能给人看（名称非空）"
+
+
 def test_the_session_log_stays_out_of_the_journal() -> None:
     """侧车日志是接入层事实：写它**不得**动记录流一个字节（地图 D10）。"""
     session = Session(seed=31, ai="random", timeout_seconds=None, **TWO_PLAYERS)

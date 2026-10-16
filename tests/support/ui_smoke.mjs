@@ -41,6 +41,8 @@ class El {
     this.tagName = tag.toUpperCase(); this.id = id; this.children = []; this.listeners = {};
     this.classList = new ClassList(); this._text = ""; this._html = ""; this.value = "";
     this.hidden = false; this.disabled = false; this.type = ""; this.className = "";
+    // 真 DOM 的 `<input type=checkbox>` 缺省未勾选；app.js 读的是 `.checked`（不是 `.value`）。
+    this.checked = false;
   }
   get textContent() { return this._text + this.children.map((c) => c.textContent || c.text()).join(""); }
   set textContent(v) { this._text = String(v); this._html = ""; this.children = []; }
@@ -141,6 +143,77 @@ const newSession = async (seed, extra = {}) => openSession(await post("/api/sess
 }));
 const logText = () => $("t-log").text();
 const logCount = () => $("t-log").children.length;
+
+/* ------------------------------------------------- ⓪ 开局点将（票 19）
+ *
+ * 这里**走真的开局表单**（`#lobby-form` 的 submit → `startGame` → `POST /api/sessions`），
+ * 不是直接调 `post`：判据是"用户点得出来"，接线断在 `startGame` 里也必须红。
+ * 请求体从烟测自己的 `calls`（`/api/` 拦截器）里读，故"关了开关 ⇒ 不带 `my_hero`"
+ * 这条是**线上事实**而不是读 `state`。
+ */
+
+const submitLobby = async () => {
+  const form = $("lobby-form");
+  for (const fn of form.listeners.submit || []) await fn({ preventDefault() {} });
+  return ui.state.view;
+};
+const tickPointjiang = (on) => {
+  const box = $("in-pointjiang");
+  box.checked = on;
+  (box.listeners.change || []).forEach((fn) => fn({ target: box }));
+};
+/** 这一段之后新发生的建局请求体（`calls` 里也可能有烟测自己发的 `post`）。 */
+const sessionBodiesSince = (from) =>
+  calls.slice(from).filter((call) => call.path === "/api/sessions").map((call) => call.body);
+
+await ui.loadHeroCatalog();
+check("⓪1 点将列表拉到了启用池", ui.state.heroCatalog.length > 0, `${ui.state.heroCatalog.length} 名`);
+check("⓪2 列表铺进了「我的武将」下拉",
+  $("in-my-hero").children.length === ui.state.heroCatalog.length,
+  `选项 ${$("in-my-hero").children.length} / 池 ${ui.state.heroCatalog.length}`);
+check("⓪3 开关缺省是关的（不点将 = 老路径）", $("in-pointjiang").checked === false);
+
+$("in-players").value = "5";
+const picked = ui.state.heroCatalog[2];
+tickPointjiang(true);
+check("⓪4 开关开着时「我的武将」可选", $("in-my-hero").disabled === false);
+$("in-my-hero").value = picked.id;
+$("in-seed").value = "2468";
+let mark = calls.length;
+const pinned = await submitLobby();
+check("⓪5 点将：我的座位（0）就是我点的那名武将",
+  pinned.heroes[0] === picked.id, `点 ${picked.id} / 实得 ${pinned.heroes[0]}`);
+check("⓪6 点将：本局其它 AI 不选我已点的武将",
+  !pinned.heroes.slice(1).includes(picked.id), pinned.heroes.join(","));
+check("⓪7 点将：建局请求体带上了 my_hero",
+  sessionBodiesSince(mark).pop().my_hero === picked.id,
+  JSON.stringify(sessionBodiesSince(mark)));
+
+mark = calls.length;
+const again = await submitLobby();
+check("⓪8 同 seed + 同点将 ⇒ 同一份发将（可复现）",
+  JSON.stringify(again.heroes) === JSON.stringify(pinned.heroes),
+  `${again.heroes.join(",")} vs ${pinned.heroes.join(",")}`);
+
+tickPointjiang(false);
+check("⓪9 关了开关时「我的武将」被置灰", $("in-my-hero").disabled === true);
+mark = calls.length;
+await submitLobby();
+const randomBody = sessionBodiesSince(mark).pop();
+check("⓪10 关了开关 ⇒ 建局不带 my_hero（回到随机选择模式）",
+  !randomBody.my_hero, JSON.stringify(randomBody));
+
+// "回到随机"的正面判据：同一个 seed 下座位 0 不再被钉成我点的那名，且换 seed 会跟着变。
+// （单看一次"随机结果不等于我点的那名"是撞运气——池有 16 名，换 seed 扫一遍才立得住。）
+const seatZero = [];
+for (const seed of ["2468", "101", "202", "303", "404", "505", "606"]) {
+  $("in-seed").value = seed;
+  seatZero.push((await submitLobby()).heroes[0]);
+}
+check("⓪11 关了开关 ⇒ 六个 seed 里出现过不是我已点的那名（没被钉死）",
+  seatZero.some((hero) => hero !== picked.id), `点将 ${picked.id} / 实得 ${seatZero.join(",")}`);
+check("⓪12 关了开关 ⇒ 我的武将随 seed 变（真的是随机发将）",
+  new Set(seatZero).size > 1, seatZero.join(","));
 
 /** 推进一条对局到一个干净局面。
  *
