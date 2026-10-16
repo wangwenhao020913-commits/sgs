@@ -95,6 +95,14 @@
 - **机械的那一半已下沉**：`tests/test_web.py:_context_fixture` 对"窄写方"的键设闸
   （`skill_id` 只由 SKILL / JUDGE 帧写），注入即抛；守卫本身有正反两面的用例
   （`test_the_context_fixture_refuses_a_key_that_damage_frames_never_carry`）。
+- **守卫（guard）分支必须由产品调用点驱动的测试覆盖**：只在"异常视角 / 检查失败"才走的那一支，
+  若绿只来自**替换过引擎的合成夹具**，它在产品路径上可能根本**不可达**——票 15 的"私密观看"
+  守卫就是这样（`pending.actor` 恒 = 人类座位 ⇒ 判归属那一支永不触发），而真实泄露口
+  （409 的裸 `Query`）恰好被守卫的 `isinstance` 排除。守卫要么 **fail-closed** 兜住默认值，
+  要么有**产品调用点**的用例钉住；只由合成夹具覆盖 = 未覆盖。
+- **机械的那一半**：产品代码里每个 `pending_payload(...)` 调用点都必须**声明查看者**
+  （传 `Session`，或显式 `human_seat=`）——
+  `tests/test_web.py::test_every_product_pending_payload_call_names_its_viewer` 扫。
 - 留在这里的是判断题：**这条断言要证明的"读取方"是谁、它读的键由谁写**。读取方断言跨了
   服务端 → 前端 / 消费者的边界时，**两侧都要有人核**（本仓 `PlayerPublic.hero` 与
   `SelectCardsQuery.skill_id` 都是这条纪律的产物）。
