@@ -14,7 +14,7 @@ from sgs.skills import CATALOG
 from sgs.state import ActivateSkill, EndPhase, Pass, Zone
 from sgs.timing import Timing
 
-from support import PassPlayer, SeatSpec, build_state, cards_of_type, run_queries
+from support import PassPlayer, SeatSpec, build_state, cards_of_type, find_action, run_queries
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -382,3 +382,113 @@ def test_liuli_cost_move_that_suspends_is_resumed_without_moving_twice():
     assert payload["actor"] == 2 and payload["targets"] == (2,), (
         "载荷显式给 targets=(new_target,)（与 use_become_target 重入那一轮的键一致）"
     )
+
+
+# ---------------------------------------------------------------------------
+# 票 21：同一【杀】帧里【流离】成本步 vs【青龙偃月刀】提供步的 ask key 撞车
+# ---------------------------------------------------------------------------
+
+
+def test_green_dragon_provide_step_does_not_reuse_liuli_cost_answer():
+    """票 21 回归：同帧内两个步骤不得共用 ``ask_selection`` 的帧内答案缓存。
+
+    【流离】的成本步是 ``PickCards(key="card")``（大乔自己的手牌 / 装备区），【青龙偃月刀】
+    的提供步是 ``PickProvide``（攻击者的手牌【杀】＋转化技的虚拟【杀】）——两者都发生在
+    **同一个【杀】帧**里（流离在「成为目标时」、接缝在「【杀】被抵消时」）。票 14 之前
+    青龙那一步不是 ``PickProvide``，票 14 换成 ``PickProvide`` 时沿用了缺省 ``key="card"``，
+    于是它命中流离留下的答案：那份答案来自**另一份面**（大乔弃的牌），
+    ``_flow_step_provide`` 的 ``refs`` 里没有 ⇒ ``KeyError: <流离弃的那张牌>``。
+
+    修法是给提供步一个本步独有的 ``cache_key``（票 21）。本用例就是那条确定性红：
+    没有它，``_step()`` 在接缝派发提供步时直接抛 ``KeyError``。
+    """
+    slash_for_green = _cards("slash")[2]
+    green_dragon = _cards("green_dragon_blade")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH, slash_for_green), equip=(green_dragon,)),
+            SeatSpec(hero="daqiao", hand=(PAID,)),
+            SeatSpec(hand=(DODGE,)),
+        ],
+        deck=tuple(
+            card_id
+            for card_id in range(len(PACK.deck.cards))
+            if card_id not in (SLASH, PAID, DODGE, slash_for_green, green_dragon)
+        ),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
+
+    class _Attacker:
+        def respond(self, query):
+            if query.kind == "PLAY_PHASE":
+                for action in query.legal_actions:
+                    card = getattr(action, "card", None)
+                    if (
+                        card is not None
+                        and card.card_id == SLASH
+                        and 1 in (getattr(action, "targets", None) or ())
+                    ):
+                        return action
+                return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+            if (
+                query.kind == "SKILL_ACTIVATION"
+                and query.skill_id == "equip.green_dragon_blade"
+            ):
+                return next(a for a in query.legal_actions if isinstance(a, ActivateSkill))
+            if query.kind == "SELECT_CARDS":
+                # 提供步：面里点那张续杀（虚拟槽也有，但本局攻击者没有转化技）。
+                return next(
+                    a
+                    for a in query.legal_actions
+                    if a.picks
+                    and query.slots[a.picks[0]].card is not None
+                    and query.slots[a.picks[0]].card.card_id == slash_for_green
+                )
+            return next(
+                (a for a in query.legal_actions if isinstance(a, Pass)),
+                query.legal_actions[0],
+            )
+
+    class _Liuli:
+        def respond(self, query):
+            if query.kind == "SKILL_ACTIVATION" and query.skill_id == LIULI:
+                return next(a for a in query.legal_actions if isinstance(a, ActivateSkill))
+            if query.kind == "SELECT_CARDS":
+                return next(
+                    a
+                    for a in query.legal_actions
+                    if a.picks
+                    and query.slots[a.picks[0]].card is not None
+                    and query.slots[a.picks[0]].card.card_id == PAID
+                )
+            if query.kind == "SELECT_OPTION":
+                return next(
+                    a for a in query.legal_actions if getattr(a, "choice", None) == "seat:2"
+                )
+            return next(
+                (a for a in query.legal_actions if isinstance(a, Pass)),
+                query.legal_actions[0],
+            )
+
+    class _Defender:
+        def respond(self, query):
+            if query.kind == "DODGE":
+                return find_action(query, lambda a: a.kind == "UseCard") or next(
+                    a for a in query.legal_actions if isinstance(a, Pass)
+                )
+            return next(
+                (a for a in query.legal_actions if isinstance(a, Pass)),
+                query.legal_actions[0],
+            )
+
+    run_queries(
+        engine,
+        [_Attacker(), _Liuli(), _Defender()],
+        lambda e: e.state.player(2).hp < 4 or e.finished,
+    )
+
+    assert engine.state.player(2).hp == 3, "青龙续杀命中被转移后的新目标"
+    assert PAID in engine.state.discard, "流离的成本照旧只弃自己那张牌"
+    assert slash_for_green not in engine.state.player(0).hand, "续杀用的是提供步点到的那张牌"

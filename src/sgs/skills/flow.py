@@ -177,6 +177,13 @@ class PickProvide:
     答案 = ``tuple[CardRef, ...]``（**牌面**）：虚拟 B 背后没有实体牌，回传实体 id 会
     把"转出来的是哪张牌"丢掉。``lo`` / ``hi`` / ``optional`` / ``key`` / ``actor`` 与
     :class:`PickCards` 同义。``hi=None`` 尚无消费者，本步恒取定数张。
+
+    ``cache_key``（票 21）与 :class:`PickCards` 的**同名参数**同义：帧内 ``ask_selection``
+    的缓存键，缺省 = ``key``。它与 ``key`` 分开是因为"这一步叫什么"（效果读答案、前端取
+    文案）与"这一次问的答案存哪儿"不是一回事——**同一帧里两个不同的步骤若共用同一个缓存
+    键，后者的询问会直接命中前者留下的答案**（:meth:`Engine.ask_selection` 的帧内答案缓存
+    只按 key 分桶），答出的 id 属于**另一份面**，取 ``refs`` 时就是 ``KeyError``（票 21 的
+    【流离】成本步 vs【青龙偃月刀】提供步）。
     """
 
     type_id: str
@@ -185,6 +192,7 @@ class PickProvide:
     hi: int = 1
     optional: bool = False
     key: str = "card"
+    cache_key: str | Callable[[Any], str] | None = None
     actor: ActorRef = None
 
 
@@ -542,10 +550,14 @@ def _flow_step_provide(
     **面按帧内键只构造一次**（与 :meth:`Engine.ask_selection` 的"铺面只构造一次"同一条
     纪律）：``effect`` 里的使用会挂起并让本 op **重新进入**，那时来源牌可能已经离区
     （被用掉的那张【杀】不在手里了）；重算出来的面会与**已缓存的答案**（面内位置）
-    对不上——重入必须复用同一份面。
+    对不上——重入必须复用同一份面。面的缓存键取**有效的询问键**（``cache_key`` 优先），
+    与答案缓存**同源**（票 21）：两者若分母不同，面会把另一份面的答案喂进 ``refs``。
     """
     actor = _flow_actor(step, host.state, frame, owner, answers)
-    face_key = f"provide_face:{step.key}"
+    cache_key = step.cache_key if step.cache_key is not None else step.key
+    if callable(cache_key):
+        cache_key = cache_key(frame)
+    face_key = f"provide_face:{cache_key}"
     face = frame.data.get(face_key)
     if face is None:
         face = provide_face(host.state, actor, step.type_id, step.zones)
@@ -560,7 +572,7 @@ def _flow_step_provide(
     }
     picked = host.ask_selection(
         frame,
-        key=step.key,
+        key=cache_key,
         actor=actor,
         timing=timing,
         spec=SelectionSpec(

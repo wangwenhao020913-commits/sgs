@@ -1192,6 +1192,11 @@ GREEN_DRAGON_FLOW = SkillFlow(
             # 发动询问那一道（答 ``Pass`` ⇒ 一个询问都不发）。
             optional=False,
             key="card",
+            # 帧内询问缓存键给一个**本步独有**的名字（票 21）：同一个【杀】帧里
+            # 【流离】的成本步也是 ``key="card"`` 的 ``PickCards``，两者共用缓存键时
+            # 本步会命中前者的答案——那份答案来自**另一份面**，``refs`` 里没有 ⇒
+            # ``KeyError``。``key`` 不变（效果读 ``answers["card"]``、前端取文案都不动）。
+            cache_key="green_dragon_blade",
         ),
     ),
     effect=_green_dragon_effect,
