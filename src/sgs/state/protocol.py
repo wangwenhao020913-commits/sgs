@@ -176,6 +176,13 @@ class SelectContext:
     spec: SelectionSpec
     slots: tuple[Slot, ...]
     skill_id: str | None = None
+    provide_type: str | None = None
+    """这一步是不是**"提供一张 B"**（票 14）：非空 = B 的牌名 id。
+
+    非空时 ``slots`` 里除了区域里的**实体 B**，还有各转化技产出的**虚拟 B**
+    （单来源，票 14 射程）；接入层据它把这张面**就地**铺到本人可见区域上，
+    不再新开选择区（用户裁定）。与 ``skill_id`` 同姿态：**不进记录流**。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,6 +473,9 @@ class SelectCardsQuery(_QueryBase):
     spec: SelectionSpec
     slots: tuple[Slot, ...]
     skill_id: str | None = Field(default=None, exclude=True)
+    provide_type: str | None = Field(default=None, exclude=True)
+    """**"提供一张 B"** 的 B 牌名 id（票 14）；``None`` = 普通选牌面。**不进记录流**：
+    加字段不改既有 Golden Replay 的字节（与 ``skill_id`` 同一姿态）。"""
 
 
 class SkillActivationQuery(_QueryBase):

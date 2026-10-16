@@ -221,6 +221,87 @@ def test_the_hero_pool_is_dealt_from_the_enabled_pool_by_default() -> None:
     assert len(set(assigned)) == len(assigned), "发放不重复"
 
 
+# ---------------------------------------------------------------------------
+# 6b. 开局点将（票 19）：建局参数 ``my_hero`` + 点将列表只读面
+# ---------------------------------------------------------------------------
+
+
+def test_a_picked_hero_lands_on_the_human_seat_and_nowhere_else() -> None:
+    """建局参数 ``my_hero`` = "我要的武将"；其余 AI 不得再拿到他/她。"""
+    session = Session(
+        seed=37,
+        ai="random",
+        timeout_seconds=None,
+        player_count=5,
+        my_hero="liubei",
+    )
+
+    assigned = session.hero_assignments
+    assert assigned[session.human_seat] == "liubei"
+    assert "liubei" not in assigned[1:], "本局其它座位不得选我已点的武将"
+    assert len(set(assigned)) == len(assigned), "其余座位仍是无放回随机"
+
+
+def test_the_pick_follows_the_human_seat_not_the_literal_seat_zero() -> None:
+    """人类座位可选（开局页的「我的座位」）⇒ 点将必须落在**他那张椅子**上。"""
+    session = Session(
+        seed=37, ai="random", timeout_seconds=None, player_count=5, human_seat=3, my_hero="guanyu"
+    )
+
+    assert session.hero_assignments[3] == "guanyu"
+    assert "guanyu" not in session.hero_assignments[:3] + session.hero_assignments[4:]
+
+
+def test_no_pick_reproduces_the_pre_ticket_random_session() -> None:
+    """开关关着 ⇒ 逐字节就是引入点将之前那条纯随机路径（默认参数不动行为）。"""
+    plain = Session(seed=41, ai="random", timeout_seconds=None, player_count=5)
+    explicit_none = Session(
+        seed=41, ai="random", timeout_seconds=None, player_count=5, my_hero=None
+    )
+
+    assert plain.hero_assignments == explicit_none.hero_assignments
+    assert len(set(plain.hero_assignments)) == 5, "关着仍是随机发放，不是不发"
+
+
+def test_an_unknown_pick_is_refused_at_session_construction() -> None:
+    """未知 id ⇒ fail-closed 报错，不静默退回随机。"""
+    with pytest.raises(ValueError) as caught:
+        Session(seed=43, ai="random", timeout_seconds=None, player_count=5, my_hero="nobody")
+
+    assert "nobody" in str(caught.value)
+
+
+def test_the_registry_passes_the_pick_through_from_the_request_body() -> None:
+    """打 ``GameRegistry.create`` 这一缝：**接线断了**要比"引擎报错"先被看见。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {
+            "player_count": 5,
+            "ai": "random",
+            "seed": 20261012,
+            "timeout_seconds": None,
+            "my_hero": "diaochan",
+        }
+    )
+    payload = registry.view(session, after=-1, logs_after=0)
+
+    assert payload["heroes"][0] == "diaochan"
+    assert "diaochan" not in payload["heroes"][1:]
+
+
+def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
+    """点将列表的只读面：只有**启用**武将，且与发放用的启用池同源同序。"""
+    from sgs.data import enabled_hero_ids, load_heroes
+    from sgs_web.serve import hero_catalog
+
+    catalog = hero_catalog()
+
+    assert [entry["id"] for entry in catalog] == list(enabled_hero_ids(load_heroes()))
+    assert all(entry["name"] for entry in catalog), "列表要能给人看（名称非空）"
+
+
 def test_the_session_log_stays_out_of_the_journal() -> None:
     """侧车日志是接入层事实：写它**不得**动记录流一个字节（地图 D10）。"""
     session = Session(seed=31, ai="random", timeout_seconds=None, **TWO_PLAYERS)
@@ -687,6 +768,97 @@ def test_longdan_skill_entry_lists_the_convertible_source_cards() -> None:
     assert entry["ui"]["manual"] is False
 
 
+def _provide_query(engine, *, actor: int = 0, type_id: str = "slash"):
+    """人为局面上的一个「提供一张 B」询问（票 14）：面取自引擎的同一个 ``provide_face``。"""
+    from sgs.skills.flow import provide_face
+
+    slots, _ = provide_face(engine.state, actor, type_id, (Zone.HAND,))
+    return SelectCardsQuery(
+        seq=1,
+        actor=actor,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt=f"提供一张【{type_id}】继续使用（目标不变；可发动转化技）",
+        legal_actions=(),
+        view=project(engine.state, actor),
+        spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1)),
+        slots=slots,
+        provide_type=type_id,
+    )
+
+
+def test_the_pending_payload_carries_the_provide_type() -> None:
+    """票 14：``pending_payload`` 必须**显式**下发 ``provide_type``。
+
+    它**不在** ``SELECT_CARDS`` 的记录流里（``exclude=True``，既有 Golden Replay 一字不改），
+    故界面只能从这份显式载荷读到"这一步是提供一张 B"。丢了它，前端就退回新开选择面——
+    正是用户实机报障的"界面套娃"。
+    """
+    pack = _context_pack()
+    dodge = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(dodge,), hero="zhaoyun"), SeatSpec(hand=())],
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    query = _provide_query(engine)
+
+    payload = pending_payload(query)
+
+    assert payload is not None
+    assert payload["provide_type"] == "slash"
+    assert "provide_type" not in query.model_dump(mode="json"), "不进记录流"
+
+
+def test_the_virtual_index_reads_the_provide_faces_slots() -> None:
+    """票 14：「提供一张 B」的虚拟 B 只在 ``slots`` 上（候选只有面内位置）。
+
+    ``virtual_index`` 必须把槽上的来源实体牌（【龙胆】的【闪】）映射到那张虚拟【杀】，
+    否则【青龙】追问时【龙胆】的技能按钮点不亮（"待答期间技能栏仍可点"这条验收会红）。
+    """
+    from sgs_web.projection import virtual_index
+
+    pack = _context_pack()
+    dodge = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(dodge,), hero="zhaoyun"), SeatSpec(hand=())],
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    query = _provide_query(engine)
+
+    aliases = virtual_index(query, engine.state)
+
+    assert list(aliases) == [str(dodge)], "面上那张虚拟【杀】的来源就是这张【闪】"
+    assert aliases[str(dodge)][0]["skill_ids"] == ["hero.zhaoyun.longdan"]
+    assert aliases[str(dodge)][0]["card_id"] < 0, "别名指向的是虚拟牌（没有实体 id）"
+
+
+def test_the_provide_window_lists_the_conversion_skill_hint() -> None:
+    """票 14：``skill_hints`` 也要读到**选择面槽位**上的虚拟 B。
+
+    只看候选时，"提供一张 B"的窗口列不出【龙胆】/【武圣】的文案——玩家就不知道
+    这一步还能发动转化技（用户口径"青龙追问时再点龙胆"）。
+    """
+    pack = _context_pack()
+    dodge = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(dodge,), hero="zhaoyun"), SeatSpec(hand=())],
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    query = _provide_query(engine)
+
+    context = query_context(engine, query)
+
+    hints = {hint["skill_id"]: hint for hint in context["skill_hints"]}
+    assert "hero.zhaoyun.longdan" in hints, f"提供面里的虚拟【杀】没归到【龙胆】：{hints}"
+    # 【龙胆】两个方向共用一条 `SkillDef`，requirement 是两条声明用"；"并起来的。
+    assert "选择1张【闪】当【杀】使用或打出" in hints["hero.zhaoyun.longdan"]["requirement"]
+
+
 # ---------------------------------------------------------------------------
 # 5c. 询问窗口的"谁对谁做了什么"（本轮报障）
 # ---------------------------------------------------------------------------
@@ -782,7 +954,7 @@ def test_query_context_names_the_skill_and_its_owner() -> None:
     assert context["targets"] == [1]
     # 合成键要能查回技能定义；票 11 起"给谁"步还有自己的逐步文案（键 = 剥掉 ``:<点>:<轮>``
     # 后的 ``give``），故这里读到的已是那一步的问法，而不是一句话的 summary。
-    assert context["requirement"] == "选择将这张牌交给哪名角色", "合成键要能查回技能定义"
+    assert context["requirement"] == "选择将这些牌交给哪名角色", "合成键要能查回技能定义"
 
 
 def test_query_context_names_the_card_user_and_the_current_target() -> None:
@@ -1663,7 +1835,7 @@ def test_query_context_reads_the_double_sword_step_wording() -> None:
 
 
 def test_query_context_walks_the_yiji_steps_with_their_own_wording() -> None:
-    """【遗计】逐张分配的两步各有各的问法（票 11）：先"从亮出的牌里选择一张"，再"给谁"。
+    """【遗计】分配两步各有各的问法（票 11 / 票 15）：先"从亮出的牌里选择一至两张"，再"给谁"。
 
     两条的键都按**询问里已有的标识**取，不动询问协议：
 
@@ -1685,10 +1857,10 @@ def test_query_context_walks_the_yiji_steps_with_their_own_wording() -> None:
     )
 
     cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,), optional=True)
-    assert query_context(engine, cards_query)["requirement"] == "从亮出的牌里选择一张"
+    assert query_context(engine, cards_query)["requirement"] == "从亮出的牌里选择一至两张"
 
     give_query = _skill_step_option_query(state, skill_id="yiji:give:0:1", options=("seat:1",))
-    assert query_context(engine, give_query)["requirement"] == "选择将这张牌交给哪名角色"
+    assert query_context(engine, give_query)["requirement"] == "选择将这些牌交给哪名角色"
 
 
 # ---------------------------------------------------------------------------
@@ -1769,7 +1941,7 @@ def test_a_real_session_reaches_the_yiji_card_step_wording() -> None:
     - 跑**真引擎**到【遗计】的 ``SELECT_CARDS``（真 DAMAGE 帧 + 真派发环写 ``running_skill``）；
     - 先断言帧里**没有** ``skill_id``（真实形状，合成注入无从混入）；
     - 再断言读取方拿到的 ``context.requirement`` 是**分步文案**而不是 summary
-      （summary 是 "观看牌堆顶两张牌，然后逐张交给任意角色"）。
+      （summary 是 "观看牌堆顶两张牌，然后交给任意角色"）。
     """
     session = _yiji_real_session()
     query = session.pending
@@ -1783,9 +1955,115 @@ def test_a_real_session_reaches_the_yiji_card_step_wording() -> None:
     payload = pending_payload(session)
 
     assert payload is not None and payload["context"] is not None
-    assert payload["context"]["requirement"] == "从亮出的牌里选择一张", (
+    assert payload["context"]["requirement"] == "从亮出的牌里选择一至两张", (
         "读取方必须真的读到分步文案；退回一句话 summary 就说明判据又读错了键"
     )
+
+
+def test_the_watched_cards_are_private_to_the_pending_seat() -> None:
+    """**私密观看**（票 15）：看牌堆顶的牌面只在**挂起者本人**的那份载荷里。
+
+    用户口径（`acceptance.md` §C）："仅此技能拥有者观看，其他人不可见"。引擎侧已经保证
+    观看不写 ``PlayerView``、不落带牌面的 delta（见 `test_hero_damage_after.py` 的视角判据）；
+    接入层这条"当前挂起"的下发是**读取方**，同一处也要成立：收 ``Session`` 时，挂起者
+    不是人类座位 ⇒ ``slots[].card`` / ``revealed`` 必须抹掉（否则任何"人类不是挂起者"的
+    下发——陈旧应答的 409 现状等——都会把别人观看的牌面直接送出去）。
+
+    **正反两面都断**（`CODING_STANDARDS.md` §6）：把 ``human_seat`` 换成挂起者本人时，
+    同一个载荷必须**带着**牌面——否则"恒抹掉"也会让这条测试变绿，而私密观看就退化成了
+    "谁都不能看"。
+    """
+    session = _yiji_real_session()
+    query = session.pending
+    assert query is not None and query.kind == "SELECT_CARDS"
+    assert query.revealed, "【遗计】的选牌询问带着观看授予（前置）"
+    watched = {card.card_id for card in query.revealed}
+
+    stranger = pending_payload(session)
+    assert stranger is not None, "人类座位 0 不是挂起者，但载荷仍要给（只是不带牌面）"
+    assert stranger["actor"] == 1, "这条询问的挂起者是座位 1（郭嘉）"
+    assert len(stranger["slots"]) == len(watched), "位置（有几个）是公开事实，照给"
+    assert all(slot["card"] is None for slot in stranger["slots"]), (
+        f"别人的载荷里不得出现观看的牌面：{stranger['slots']}"
+    )
+    assert stranger["revealed"] == [], "观看授予本身就是牌面，别人的载荷里必须为空"
+
+    # 反向对照：把人类座位换成挂起者本人 ⇒ 同一个载荷**必须**带牌面。
+    session.human_seat = 1
+    owner = pending_payload(session)
+    assert owner is not None
+    assert {slot["card"]["card_id"] for slot in owner["slots"] if slot["card"]} == watched, (
+        "持有者本人必须看得到那两张牌（否则'私密'变成了'谁都不能看'）"
+    )
+    assert {card["card_id"] for card in owner["revealed"]} == watched
+
+
+def test_the_409_path_does_not_hand_the_watched_faces_to_a_query_without_a_viewer() -> None:
+    """评审 finding ①：票 15 的**私密观看**在 409 那条**裸 ``Query``** 路径上也必须判归属。
+
+    ``serve.py`` 的 409 分支把 :attr:`StaleAnswer.pending`（一份**裸 ``Query``**，不带
+    ``session``）交给 :func:`pending_payload`。旧签发把裸 ``Query`` 当"构造时本就只为人类
+    座位"**原样放行**，而"当前挂起者是人类座位"这条判据只写在收 ``Session`` 的分支里 ——
+    于是两张观看牌面随 409 直接下发（本例在修复前实测泄露：桃园结义 / 万箭齐发）。
+
+    这里走**产品的 409 机制本身**：真 :meth:`Session.submit_answer` 因序号过期抛
+    :class:`StaleAnswer`，其 ``pending`` 就是引擎的当前挂起（带真【遗计】的 ``revealed``）。
+    拿不到查看者（裸 ``Query``）时**默认抹掉**（fail-closed）；拿得到且与挂起者同座时才带
+    牌面 —— 正反两面都在这里断，免得"恒抹掉"也能变绿。
+    """
+    session = _yiji_real_session()
+    query = session.pending
+    assert query is not None and query.kind == "SELECT_CARDS"
+    assert int(query.actor) != int(session.human_seat), "前置：挂起者不是人类座位（0）"
+    watched = {card.card_id for card in query.revealed}
+    assert watched, "【遗计】的选牌询问带着观看授予（前置）"
+    stale = query.legal_actions[0].model_copy(update={"answers_seq": -1})
+
+    with pytest.raises(StaleAnswer) as info:
+        session.submit_answer(stale)
+    error = info.value
+    assert error.pending is query, "409 附带的就是引擎当前挂起（原样）"
+
+    payload = pending_payload(error.pending)
+    assert payload is not None
+    assert len(payload["slots"]) == len(watched), "位置（有几个）是公开事实，照给"
+    assert all(slot["card"] is None for slot in payload["slots"]), (
+        f"裸 Query（409 路径）拿不到查看者 ⇒ 默认不得带牌面：{payload['slots']}"
+    )
+    assert payload["revealed"] == [], "观看授予本身就是牌面，拿不到查看者时须为空"
+
+    # 产品调用点（``serve.py`` 的 409 分支）：查看者 = 这个会话的人类座位（0）≠ 挂起者（1）
+    # ⇒ 照样抹掉。异常自己带着 human_seat，那条路径因此判得出归属。
+    product = pending_payload(error.pending, human_seat=error.human_seat)
+    assert product is not None
+    assert all(slot["card"] is None for slot in product["slots"]), (
+        "409 的下发方只需原样转交 StaleAnswer.human_seat，不得再漏牌面"
+    )
+
+    # 反向对照：把查看者声明成挂起者本人 ⇒ 同一份裸 Query 必须带牌面。
+    owner = pending_payload(error.pending, human_seat=int(query.actor))
+    assert owner is not None
+    assert {slot["card"]["card_id"] for slot in owner["slots"] if slot["card"]} == watched, (
+        "持有者本人必须看得到那两张牌（否则'私密'变成了'谁都不能看'）"
+    )
+
+
+def test_the_hanging_payload_still_shows_the_watched_faces_to_the_owner() -> None:
+    """反向（票 15 私密观看的**正常挂起路径**）：人类座位就是挂起者时，牌面必须照给。
+
+    与上一条互补：那条钉"409 拿不到查看者 ⇒ 抹掉"，这条钉"拿得到且同座 ⇒ 不抹"。
+    恒抹掉会让私密观看退化成"谁都不能看"。
+    """
+    session = _yiji_real_session()
+    query = session.pending
+    assert query is not None and query.kind == "SELECT_CARDS"
+    watched = {card.card_id for card in query.revealed}
+    session.human_seat = int(query.actor)  # 正常挂起：人类就是挂起者
+
+    payload = pending_payload(session)
+    assert payload is not None
+    assert {slot["card"]["card_id"] for slot in payload["slots"] if slot["card"]} == watched
+    assert {card["card_id"] for card in payload["revealed"]} == watched
 
 
 def test_the_context_fixture_refuses_a_key_that_damage_frames_never_carry() -> None:

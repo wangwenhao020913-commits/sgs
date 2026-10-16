@@ -50,10 +50,16 @@ DEFAULT_AI: Final[str] = "heuristic"
 
 
 class StaleAnswer(Exception):
-    """提交的应答对不上当前暂停点，或当前根本没有暂停点（地图 D15 → HTTP 409）。"""
+    """提交的应答对不上当前暂停点，或当前根本没有暂停点（地图 D15 → HTTP 409）。
 
-    def __init__(self, pending: Query | None) -> None:
+    ``human_seat`` 是**查看者**（这个会话的人类座位）：409 下发的那份"当前挂起"要据此判
+    "这份载荷该不该带观看来的牌面"（票 15 私密观看 / 评审 finding ①）。带上它，409 那条
+    裸 ``Query`` 路径才判得出归属；``None`` = 无从判 ⇒ 下发方按 fail-closed 抹掉。
+    """
+
+    def __init__(self, pending: Query | None, *, human_seat: int | None = None) -> None:
         self.pending = pending
+        self.human_seat = human_seat
         if pending is None:
             super().__init__("当前没有待应答的询问")
         else:
@@ -111,6 +117,7 @@ class Session:
         human_seat: int = DEFAULT_HUMAN_SEAT,
         hero_pool: Sequence[str] | None | Literal["enabled"] = "enabled",
         heroes: Sequence[str] = (),
+        my_hero: str | None = None,
         timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS,
         pack: ContentPack | None = None,
         session_id: str = "",
@@ -119,6 +126,8 @@ class Session:
             raise ValueError(f"AI 档位非法：{ai!r}（可选 {AI_TIERS}）")
         if hero_pool == "enabled" and heroes:
             hero_pool = None  # 显式武将优先；池不参与（引擎在 heroes 非空时直接早退）
+        if my_hero is not None and not isinstance(my_hero, str):
+            raise ValueError(f"点将的武将 id 必须是字符串：{my_hero!r}")
         rule_config: RuleConfig = validate_rule_config({"player_count": player_count})
         if not 0 <= human_seat < rule_config.player_count:
             raise ValueError(f"人类座位非法：{human_seat}（本局座位 0..{rule_config.player_count - 1}）")
@@ -152,12 +161,18 @@ class Session:
             if hero_pool == "enabled"
             else (None if hero_pool is None else tuple(hero_pool))
         )
+        # 点将（票 19）：人类座位预指派一名，其余座位从**去掉它**的池里随机发。
+        # 钉的座位是 ``human_seat`` 而不是字面的 0——开局页的「我的座位」可选，
+        # 缺省 0 时才与"座位 0 指定"逐字等价。``None`` = 不点将（纯随机，默认路径不变）。
+        self.my_hero: str | None = my_hero
         self.engine = Engine.new_game(
             seed=self.seed,
             rule_config=rule_config,
             pack=content,
             heroes=self.heroes,
             hero_pool=self.hero_pool,
+            pinned_hero=self.my_hero,
+            pinned_seat=human_seat,
         )
 
         self._ai_stream = RandomSource(self.seed).substream("ai")
@@ -251,11 +266,15 @@ class Session:
                 break
 
     def submit_answer(self, action: object) -> None:
-        """把一次应答送回引擎并继续推进；序号对不上即 :class:`StaleAnswer`（D15）。"""
+        """把一次应答送回引擎并继续推进；序号对不上即 :class:`StaleAnswer`（D15）。
+
+        异常里一并带出 ``human_seat``：409 的下发方（``serve.py``）只有那份裸 ``Query``，
+        没有它判不了"这张观看牌面该不该下发"（票 15 / 评审 finding ①）。
+        """
         pending = self.engine.pending
         answers_seq = getattr(action, "answers_seq", None)
         if pending is None or answers_seq != pending.seq:
-            raise StaleAnswer(pending)
+            raise StaleAnswer(pending, human_seat=self.human_seat)
         self.engine.submit(action)
         self.drive()
 

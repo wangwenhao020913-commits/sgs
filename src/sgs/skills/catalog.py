@@ -59,7 +59,15 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .flow import FlowAnswers, PickCards, SkillFlow, run_flow, zone_pool_size
+from .flow import (
+    FlowAnswers,
+    PickCards,
+    PickProvide,
+    SkillFlow,
+    provide_face,
+    run_flow,
+    zone_pool_size,
+)
 from .virtual import card_ids, grouped_candidates
 
 __all__ = [
@@ -525,7 +533,8 @@ MATCH_OWNER_KEY = "hook_owner"
 ``Hook.condition(host, frame)`` 拿不到实例，而条件又必须能按"谁的牌动了"过滤
 （【连营】/【枭姬】的"**你**失去…"）——故 :func:`_matching_hooks` 在求值前把持有者写进
 这个槽。它与 :data:`skill_owner`（**回调执行期**才写）分开，是为了不改变既有条件的
-求值时机（【反馈】等的退化判据依赖"求值期读不到持有者"）。
+求值时机；票 13 起所有"关于我"的条件（【反馈】【流离】【连营】【枭姬】…）都读这个槽
+自校持有者，表驱动机械检查见 ``tests/test_hero_catalog.py`` §⑤。
 """
 
 
@@ -673,14 +682,16 @@ def _axe_plan(state: GameState, frame: Frame, instance: SkillInstance) -> Activa
 
 
 def _green_dragon_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
-    """【青龙偃月刀】：只有**自己的**【杀】被抵消、且手里有【杀】时才发动。
+    """【青龙偃月刀】：只有**自己的**【杀】被抵消、且**提供得起**一张【杀】时才发动。
 
-    票 09 起发动询问是**裸"是否发动"**（"手里有【杀】"的 ``available`` 保留）：挑哪张
-    【杀】由发动后的一步 ``PickCards``（``card_types=("slash",)``）问，候选因此不再
-    "每张【杀】一条"。
+    票 09 起发动询问是**裸"是否发动"**；票 14 起这一步问的是"**提供一张【杀】**"
+    （``PickProvide``），故"付得起"的判据与那一步的候选面**同源**
+    （:func:`provide_face`）：手里的实体【杀】∨ **任一转化技能此刻能转出的虚拟【杀】**
+    （赵云的【闪】、【武圣】的红牌）。少了虚拟那一半，只有【闪】的赵云就**连询问都不发**——
+    正是用户实机"青龙追问时想点龙胆却没有入口"的那一幕。
     """
-    available = frame.data.get("source") == instance.owner and _has_slash_in_hand(
-        state, instance.owner
+    available = frame.data.get("source") == instance.owner and bool(
+        provide_face(state, instance.owner, "slash", (Zone.HAND,))[0]
     )
     return ActivationPlan(optional=True, available=available)
 
@@ -913,11 +924,6 @@ def _is_owner_slash_damage(frame: Frame, instance: SkillInstance) -> bool:
     return card is not None and card.type == "slash"
 
 
-def _has_slash_in_hand(state: GameState, seat: int) -> bool:
-    """手里有没有【杀】（【青龙偃月刀】的"付得起"判据）。"""
-    return any(state.card(card_id).type == "slash" for card_id in state.player(seat).hand)
-
-
 def _double_sword(host: Any, frame: Frame) -> Control:
     """雌雄双股剑：你使用【杀】指定**异性**目标后，令其选择"弃一张手牌"或"你摸一张"。
 
@@ -987,12 +993,43 @@ def _ice_sword(host: Any, frame: Frame) -> Control:
     "防止伤害"由**帧标签 ``PREVENTED``**（票 12 §Q15；票 08 起住帧标签袋）承担：
     跳体力扣减、不新增 delta / 时机；"依次"⇒ 逐张单询问（票 19 §7），池空则跳过剩余次数。
 
-    **票 10 裁定：有意保持手写，不迁 ``SkillFlow``**（理由见票 10 的 ``## Answer`` 与
-    ``design.md`` §7 纪律 3）。一句话：它的发动形态本来就是**裸"是否发动"**（没有成本 /
-    载荷烘进候选，迁移不减少任何候选），而"每轮立即搬牌"与流水线的"步骤只收集、提交点
-    才生效 + 取消零副作用"契约正面冲突 —— 逐张立即弃置正是"两轮不能选同一张牌"的实现
-    （见下方游标）。硬塞一个"每轮提交"步骤类型只会给多轮语言开一个未经验证的逃生口；
-    设计多轮原语是票 11（【雌雄】/【遗计】两个消费者）的范围。
+    **票 16 裁定：保持手写（选项 b）**，多轮原语经第三个消费者评估后仍**不落**
+    （前两次见票 10 的 ``## Answer`` 与 ``design.md`` §10）。举证标准与票 10 同级，逐条：
+
+    1. **契约冲突**：``SkillFlow`` 的中心契约是"步骤只收集、提交点才生效 + 取消零副作用"，
+       而"两轮不能选同一张牌"**只能**由"第 1 轮立即搬走"实现 —— 落一个循环步骤等于给
+       流水线加**第二套提交语义**（已提交轮不回滚），并触碰 A 族 / 【反馈】/【流离】/
+       装备各条共享的那条契约；
+    2. **重入游标**：进度无论如何要留在技能里（挂起续跑要靠帧私有 ``ice_sword_done``
+       认出"这张已经搬过"），即便有循环步骤也删不掉；
+    3. **候选收益为零**：发动形态本来就是裸"是否发动"（没有成本 / 载荷烘进候选），
+       迁移不减少任何候选；
+    4. **第三个消费者仍不同源**：【遗计】轮内是"选剩余亮牌（可选 ``Pass`` 收尾）→ 选收牌
+       角色 → 立即搬"、缓存键按**点号 + 轮号**；【雌雄】按**目标**推进、应答者是每个目标、
+       轮内是"选项 → 条件选牌 → 立即搬 / 摸"。给两者落一个原语要同时加四轴，而轮内键形状
+       必须各自保留 ⇒ 记成**后置重构候选**（等轮次形状真正同源的消费者出现再抽）。
+
+    **"每轮提交"语义**（票 16 定形；下面这个帧内游标循环是它的实现与唯一真源）：
+
+    - 帧内游标 ``ice_sword_done`` = **已提交**的轮数；**每轮立即搬牌**（提交点 = 这一次
+      ``move_in_frame``），故第 1 轮搬走的那张不出现在第 2 轮的面里；
+    - 游标在**搬牌之前**前进：这次搬牌可能内联派发"失去牌后"（目标若是孙尚香，掉装备就是
+      【枭姬】）并挂起，重入时据此跳过已搬的这张（票 14 §1）；
+    - 每轮一个**独立缓存键** ``ice_sword:<轮>``：选择面只构造一次、重入复用，重入既不重发
+      上一轮的询问、也不重放已提交的轮（``"stay"`` 照透传）；
+    - 任何出口（``has_zone_cards`` 判空 / 这一轮没有答案 / 挂起后续跑）都**只停循环**、
+      **不回滚已提交的轮次**。寒冰剑的轮内**没有 ``Pass`` 候选**（``optional=False``：
+      弃置两张是强制的），"可选 ``Pass`` 收尾"这一档属【遗计】那条手写循环；
+    - 入口的 ``add_tag(frame, Tag.PREVENTED)`` **只置一次**（重复置入幂等），重入**不因它
+      短路** —— 否则本次选择询问的应答会没人消费而串到下一个询问。
+
+    钉住各条款的用例：``tests/test_skills.py`` 的
+    ``test_ice_sword_two_rounds_cannot_pick_the_same_card``（立即搬 / 第二轮面里没有它）、
+    ``test_ice_sword_round_two_asks_again_after_an_inline_suspension``（重入不短路 + 每轮
+    独立键 + 轮内无 ``Pass``）、
+    ``test_ice_sword_a_round_without_an_answer_stops_the_loop_and_keeps_the_committed_round``、
+    ``test_ice_sword_a_suspended_move_resumes_at_the_next_round_without_replaying_it``、
+    ``test_ice_sword_asks_nothing_when_the_target_has_no_cards``。
     """
     if frame.data.get("ice_sword_finished"):
         return None
@@ -1116,11 +1153,16 @@ QILIN_BOW_FLOW = SkillFlow(
 
 
 def _green_dragon_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
-    """提交点：把步 1 选中的那张【杀】**继续使用**（沿用原【杀】的目标、不计次数）。
+    """提交点：把步 1 选中的那张【杀】（实体或**转化出来的**）**继续使用**。
 
-    续杀**无距离限制**（`A/flow_condition.txt:66-67`）由"目标直接沿用原【杀】的目标"表达
-    （不再走 ``check_targets``）；该次使用**不计次数**（票 12）；``gdb_used`` 只落一次，
-    故每张【杀】只给一次机会（重入时上面那条短路接手）。
+    续杀"目标不变、不计次数、不限距离"（`A/flow_condition.txt:66-67`）由三步事实表达：
+    目标**直接沿用原【杀】的目标**（不再走 ``check_targets`` ⇒ 距离/目标池一概不重算）、
+    ``counts=False``（票 12）、``gdb_used`` 只落一次（每张【杀】只给一次机会，重入由上面
+    的短路接手）。
+
+    步 1 的答案是 **``CardRef``**（票 14）：【龙胆】的【闪】当【杀】、【武圣】的红牌当【杀】
+    与手牌里的实体【杀】在这里**没有分岔**——都是"一张要用的【杀】"，来源实体牌的移动由
+    使用链的 ``_move_virtual_sources`` 负责。
     """
     owner = frame.data.get("skill_owner")
     if frame.data.get("gdb_used") or frame.data.get("source") != owner:
@@ -1130,7 +1172,7 @@ def _green_dragon_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Contr
         return None
     frame.data["gdb_used"] = True
     host.start_use(
-        host.state.card(picks[0]),
+        picks[0],
         source=owner,
         targets=tuple(frame.data.get("targets", ())),
         use_timing=Timing.RESOLVE_BEFORE_EFFECT,
@@ -1141,24 +1183,30 @@ def _green_dragon_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Contr
 
 GREEN_DRAGON_FLOW = SkillFlow(
     steps=(
-        PickCards(
+        PickProvide(
+            type_id="slash",
             zones=(Zone.HAND,),
             lo=1,
             hi=1,
-            # **有意保留现状**（票 09 §要做什么）：迁移前的选牌没有 ``Pass``，"取消"的
-            # 唯一出口是发动询问那一道（答 ``Pass`` ⇒ 一个询问都不发）。
+            # **有意保留现状**（票 09 §要做什么）：这一步没有 ``Pass``，"取消"的唯一出口是
+            # 发动询问那一道（答 ``Pass`` ⇒ 一个询问都不发）。
             optional=False,
-            card_types=("slash",),
             key="card",
+            # 帧内询问缓存键给一个**本步独有**的名字（票 21）：同一个【杀】帧里
+            # 【流离】的成本步也是 ``key="card"`` 的 ``PickCards``，两者共用缓存键时
+            # 本步会命中前者的答案——那份答案来自**另一份面**，``refs`` 里没有 ⇒
+            # ``KeyError``。``key`` 不变（效果读 ``answers["card"]``、前端取文案都不动）。
+            cache_key="green_dragon_blade",
         ),
     ),
     effect=_green_dragon_effect,
 )
-"""【青龙偃月刀】的一步流水线（票 09）：[发动询问] → 挑一张手牌里的【杀】 → 继续使用。
+"""【青龙偃月刀】的一步流水线（票 09；票 14 换成"提供一张【杀】"）：[发动询问] → 提供一张【杀】 → 继续使用。
 
 票 09 前，这张【杀】是**烘进发动询问候选**的载荷（每张手牌【杀】一条候选）；
-迁移后发动询问回到裸"是否发动"（``available`` = 自己的【杀】被抵消 + 手里有【杀】），
-成本改由 ``PickCards(card_types=("slash",))`` 问。
+票 09 把成本下沉成 ``SELECT_CARDS`` 步；票 14 把这一步换成 :class:`PickProvide`——
+候选面 = 手牌里的实体【杀】**＋各转化技此刻能转出的虚拟【杀】**（赵云的【闪】、
+【武圣】的红牌，含装备 / 判定区），故"青龙追问时再点龙胆/武圣"这条用户口径有了落点。
 """
 
 
@@ -1321,7 +1369,7 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         locked=False,
         requirement="选择一张【杀】继续使用",
         seams=(Seam(SeamKind.SLASH_CANCELED, flow=GREEN_DRAGON_FLOW),),
-        step_requirements={"card": "选择一张手牌里的【杀】继续使用（目标不变）"},
+        step_requirements={"card": "提供一张【杀】继续使用（目标不变；可发动转化技）"},
     ),
     _equip(
         "serpent_spear",

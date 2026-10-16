@@ -82,6 +82,7 @@ NAMES: dict[str, tuple[str, str]] = {
     "40-hero-wushuang": ("【无双】两张【闪】", "E 族响应窗口张数：一次【杀】的生效前连开两个 `DODGE` 窗口，两张【闪】才抵消"),
     "41-hero-guanxing": ("【观星】排列", "G 族授予可见性与排列：`ARRANGE` 询问 + `ArrangeCards`（只记面内位置，无带牌面的 delta）"),
     "42-hero-transform": ("转化族（武圣 / 龙胆 / 国色 / 急救）", "H 族转化牌泛化：`UseCard` / `PlayCard` 的 `virtual_sources` 非空；来源实体牌经使用链搬进处理区再进弃牌堆"),
+    "43-double-sword-opposite-gender": ("【雌雄双股剑】异性目标的二选一", "装备牌在出牌阶段的 `UseCard` + 【杀】的 `USE_AFTER_DESIGNATE_TARGET`：`SELECT_OPTION` 的**选择权在目标**（`actor` = 目标）、选项 `(discard_one, draw_one)`；答 `draw_one` ⇒ 使用者摸一张（`to_zone=hand(0)`、`reason=draw`）"),
 }
 """slug → ``(中文场景名, 验证的规则条目)``：索引表里两列人工维护的**单一真源**。"""
 

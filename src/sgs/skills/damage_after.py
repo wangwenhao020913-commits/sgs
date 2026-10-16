@@ -15,12 +15,15 @@ B 族的形态差别只有一处：它挂在 ``DAMAGE_AFTER_TAKE`` 上，而**�
 =========================  ======  =========  ==========================================
 曹操【奸雄】               非锁定  ``False``  获得**造成此伤害的牌**（在处理区里找）
 司马懿【反馈】             非锁定  ``False``  获得**伤害来源**的一张牌（手牌隐藏槽 + 装备可见槽）
-郭嘉【遗计】               非锁定  ``True``   观看牌堆顶 2 张 → 交给任意角色（每轮一张）
+郭嘉【遗计】               非锁定  ``True``   观看牌堆顶 2 张 → 交给任意角色（可一次两张）
 =========================  ======  =========  ==========================================
 
 三条都是**非锁定技**（技能面写了"你可以"）⇒ 发动是询问出来的。它们在回调里可以
 **提问**（【反馈】选牌、【遗计】看牌与交给），返回 ``"stay"`` 让出控制权；引擎按
-"同一轮重入不重问、轮次推进"的帧内游标范式继续（票 19 §8）。
+"同一轮重入不重问、轮次推进"的帧内游标范式继续（票 19 §8）。【遗计】的面是**观看**
+（票 15）：牌面只在**持有者本人**的那次询问里（询问的 ``revealed`` 授予），不进任何
+``PlayerView``、不落带牌面的 delta；同一个伤害点内**一次可以选两张一起交给同一名角色**，
+也可以一张一交、每次换人。
 
 **"获得造成伤害的牌"**读 ``frame.data["card"]``（= 官方六要素的**渠道牌**，与
 ``channel`` 同源）经 :func:`~sgs.effects.locate` 定位：牌在处理区里才拿得到；已被
@@ -114,8 +117,10 @@ def _fankui_source(state: GameState, frame: Any, owner: int | None) -> int | Non
     """【反馈】的选取对象：**造成伤害的角色**；无来源 / 是自己 / 无牌可拿 ⇒ ``None``。
 
     无来源伤害（【闪电】一类）不进候选；"来源自己"也不进——技能面写的是"获得**伤害来源**
-    的一张牌"，自己不是伤害来源。``owner`` 为 ``None``（条件求值期还没写
-    ``skill_owner``，见 :func:`~sgs.skills.catalog._dispatch`）时只按"来源有牌"判。
+    的一张牌"，自己不是伤害来源。``owner`` 由调用方给：条件体传
+    :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（持有者自校，票 13），效果体传
+    ``skill_owner``（此时已写好）。``owner`` 为 ``None`` 的兜底分支仍按"来源有牌"判，
+    但条件体那侧已由 :func:`_hurt_owner` 短路，走不到它。
     """
     source = frame.data.get("source")
     if source is None or source == owner:
@@ -177,13 +182,19 @@ def _jianxiong(host: Any, frame: Any) -> None:
 
 
 def _fankui_condition(host: Any, frame: Any) -> bool:
-    """【反馈】的触发条件：伤害来源存在、不是自己、且**有牌可拿**。
+    """【反馈】的触发条件：**受伤的是持有者自己**（规则"当**你**受到伤害后"），
+    且伤害来源存在、不是自己、且**有牌可拿**。
 
-    ``condition`` 在派发器写 ``frame.data["skill_owner"]`` **之前**求值（
-    :func:`~sgs.skills.catalog._dispatch` 的次序），故这里读不到持有者；判据退化成
-    "来源有牌"——来源是不是自己由回调 :func:`_fankui` 再挡一次（那里持有者已经写好）。
+    持有者判据 :func:`_hurt_owner` 与其他伤害后技能同源，且是**必须的**：``condition`` 在
+    派发器写 ``frame.data["skill_owner"]`` **之前**求值，故持有者只能从派发器在求值前写好的
+    :data:`~sgs.skills.catalog.MATCH_OWNER_KEY` 读。漏掉它，条件就退化成"来源有牌"，
+    派发环遍历**每个存活玩家**的实例 ⇒ 任何人挨打、司马懿都被问，答"发动"后真去拿来源的牌
+    （票 13；用户实机报障）。
     """
-    return _fankui_source(host.state, frame, frame.data.get("skill_owner")) is not None
+    return (
+        _hurt_owner(frame)
+        and _fankui_source(host.state, frame, frame.data.get(MATCH_OWNER_KEY)) is not None
+    )
 
 
 def _fankui_source_seat(state: Any, frame: Any, owner: int, answers: Any) -> Any:
@@ -193,10 +204,13 @@ def _fankui_source_seat(state: Any, frame: Any, owner: int, answers: Any) -> Any
     （派发环显式传 ``instance.owner``）。
 
     返回空元组（而不是一个座位号）时，执行器的"**退化面不询问**"判据接管：这一步**一个询问
-    都不发**、整条流水线按取消收尾（与迁移前 :func:`_fankui` 的提前返回同形）。这一档是必须
-    的，不是防御性代码：派发环遍历**每个存活玩家**的实例，而 ``_fankui_condition`` 在条件
-    求值期还读不到持有者（``skill_owner`` 要到回调前才写），故它的判据退化成"来源有牌"——
-    **来源自己**那个实例也会过闸、也会被问"是否发动"，由这里挡掉后续的选牌询问。
+    都不发**、整条流水线按取消收尾（与迁移前 :func:`_fankui` 的提前返回同形）。
+
+    票 13 之前，这一档是**必需的**：``_fankui_condition`` 在条件求值期读不到持有者，
+    判据退化成"来源有牌"，于是"来源自己"那个实例也会过闸、也会被问"是否发动"，只能由这里
+    挡掉后续的选牌询问。票 13 让条件读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY` 自校后，
+    过闸的实例已经只剩"受伤的持有者"一个；这一档作为**独立的第二道闸**原样保留——与
+    :func:`_fankui_effect` 的复核同姿态，也继续兜住直接调用（不经派发环）的情形。
     """
     del state, answers
     source = _fankui_source_from_frame(frame)
@@ -299,18 +313,24 @@ def _yiji_keys(point: int) -> tuple[str, str]:
 
 
 def _yiji(host: Any, frame: Any) -> Any:
-    """郭嘉【遗计】：观看牌堆顶 2 张，然后**逐张**交给任意角色（规则 993；逐点触发）。
+    """郭嘉【遗计】：观看牌堆顶 2 张，然后交给任意角色（规则 993；逐点触发）。
 
     **只看不排**：走票 10 的授予通道（``peek_deck`` + 询问的 ``revealed``）——观看的
-    牌面只出现在这次询问里，不进任何 ``PlayerView``、不落带牌面的 delta。
+    牌面只出现在这次询问里，不进任何 ``PlayerView``、不落带牌面的 delta。用户口径
+    逐字（票 15 / `acceptance.md` §C）：不是"摸两张再从手牌区交出"，也不是"展示牌堆顶
+    两张"，而是**观看**，且**仅持有者可见**。
 
-    **一次触发内逐张分配**（本轮报障修正）：官方原文是"观看牌堆顶的两张牌，然后**将这些牌**
-    交给任意角色"——是复数的"这些牌"，不是一张。故本回调在**同一个伤害点**内循环：
+    **一次触发内分配**（票 05 修"两张只发得出一张"，票 15 加"一次两张"）：官方原文是
+    "观看牌堆顶的两张牌，然后**将这些牌**交给任意角色"——是复数的"这些牌"，不是一张。
+    故本回调在**同一个伤害点**内循环：
 
         while 还有没交出的亮牌：
-            选牌（``SELECT_CARDS``，面里只铺**剩余**亮牌，可选 ``Pass`` 收尾）
+            选牌（``SELECT_CARDS``，面里只铺**剩余**亮牌，``total=(1, 2)``、可选 ``Pass`` 收尾）
             → 选座次（``SELECT_OPTION``，选项 ``seat:N`` = 任意存活角色）
-            → 把那张牌移进收牌人的手牌
+            → 把这批牌一起移进收牌人的手牌
+
+    选一张 = 现有的一轮一张路径（两张分两轮、每轮可换人）；选两张 = **一次交出两张**
+    给同一名角色。两条路径共用下面同一段"选座 → 移动"，只是 ``picked`` 的长度不同。
 
     旧实现把"下一张"交给**下一个伤害点**驱动：1 点伤害只有一轮 ⇒ 第二张永远发不出去；
     2 点伤害则第二轮**重新观看牌堆顶**（第一张已被移走）⇒ 两张亮牌被换成另一对。
@@ -337,7 +357,11 @@ def _yiji(host: Any, frame: Any) -> Any:
         # 被重入；键若被清掉，重入就会重新观看牌堆顶、把已经处理过的两张再问一遍。
         return None
     round_index = len(given)
-    spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=True)
+    # 票 15：**一次可选两张**（用户口径"一次给出这两张牌时需要允许同时选择两张牌"）。
+    # ``total=(1, 2)`` ⇒ 面内同时铺 1 张与 2 张两种候选：选 2 张 = 一次交同一名角色；
+    # 选 1 张 = 现有的一轮一张路径（两张分两轮、每轮可换人）。两条路径共用下面同一段
+    # "选座 → 移动"，故"分两次给"的行为一字不改。
+    spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 2), optional=True)
     picked = host.ask_selection(
         frame,
         key=f"yiji:pick:{point}:{round_index}",
@@ -381,7 +405,8 @@ def _yiji(host: Any, frame: Any) -> Any:
     if control == "stay":
         return "stay"
     # 交出成功才记进度：移动若挂起，重入会拿同一份缓存答案重试（移动幂等）。
-    # ``ask_selection`` 返回的是**实体牌 id**（不是 ``CardRef``）。
+    # ``ask_selection`` 返回的是**实体牌 id**（不是 ``CardRef``）；一次两张时两条 id
+    # **一起**记进 ``given``——进度按"这一批已经交给谁"推进，重入不会把其中一张再发一遍。
     frame.data[given_key] = given + tuple(picked)
     return _yiji(host, frame)
 
@@ -409,7 +434,7 @@ DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
 _REQUIREMENTS: dict[str, str] = {
     "jianxiong": "获得造成伤害的牌",
     "fankui": "获得伤害来源的一张牌",
-    "yiji": "观看牌堆顶两张牌，然后逐张交给任意角色",
+    "yiji": "观看牌堆顶两张牌，然后交给任意角色",
 }
 """B 族三条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
@@ -420,7 +445,9 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
     # 票 11：【遗计】有意保持**手写**（裁定见票的 ``## Answer``），但逐步文案与是否走流水线
     # 无关 —— 两步各有各的问法。选牌步键 = ``"card"``；"给谁"步的询问 ``skill_id`` 是
     # ``yiji:give:<点号>:<轮号>``（逐轮缓存键），投影剥掉末尾序号段后命中 ``"give"``。
-    "yiji": {"card": "从亮出的牌里选择一张", "give": "选择将这张牌交给哪名角色"},
+    # 票 15：选牌步**一次可选两张**（用户口径），故文案写"一至两张"；"给谁"步承认复数的
+    # "这些牌"——一次两张与一张一交共用它（只选一张时读起来也通顺）。
+    "yiji": {"card": "从亮出的牌里选择一至两张", "give": "选择将这些牌交给哪名角色"},
 }
 """**多步被动技**逐步的"需要做什么"（票 07）；键 = 短 id → 步骤名 → 文案。"""
 

@@ -19,7 +19,7 @@ from typing import Any
 from sgs.data import load_content_pack, load_heroes
 from sgs.effects import response_count
 from sgs.engine import record_json
-from sgs.skills import CATALOG, resolve_instances
+from sgs.skills import CATALOG, conversion_offers, resolve_instances
 from sgs.state import FrameKind, Query, WindowCause, project
 from sgs.timing import Timing
 
@@ -538,11 +538,26 @@ def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) ->
     return None
 
 
+def _offers_by_source(state: Any, owner: int, type_id: str) -> dict[int, tuple[str, ...]]:
+    """:func:`~sgs.skills.heroes.conversion_offers` 的**按来源实体牌分组**形状。
+
+    两处读取方共用同一条分组（评审 Standards finding 1）：:func:`_skill_hints` 要"某张来源牌
+    能当这个牌名的技能是哪些"，:func:`_virtual_index.offerers` 要整张表。分组只写一次，
+    两处都调这里——否则"来源 → 技能"这层含义会有第二份实现。
+    """
+    grouped: dict[int, list[str]] = {}
+    for source, skill_id in conversion_offers(state, owner, type_id):
+        grouped.setdefault(int(source), []).append(skill_id)
+    return {source: tuple(skill_ids) for source, skill_ids in grouped.items()}
+
+
 def _skill_hints(state: Any, query: Query) -> list[dict[str, str]]:
     """这条窗口里**被提供**的技能（主动技 / 提供者 / 转化技）及其文案。
 
-    来源只有**候选**里的公开事实：``ActivateSkill`` 候选自带 ``skill_id``；转化技的候选是
-    虚拟牌（不带技能归属），故按 :attr:`SkillDef.virtual_type_ids` 把牌名对回技能。
+    来源只有**候选与选择面槽位**里的公开事实：``ActivateSkill`` 候选自带 ``skill_id``；
+    转化技的候选是虚拟牌（不带技能归属），故按
+    :func:`~sgs.skills.heroes.conversion_offers` 的**来源**逐张对回技能（票 14），
+    不在声明表里的虚拟牌退回 :attr:`SkillDef.virtual_type_ids` 的牌名匹配。
     """
     actor = int(query.actor)
     hints: list[dict[str, str]] = []
@@ -564,17 +579,29 @@ def _skill_hints(state: Any, query: Query) -> list[dict[str, str]]:
     for action in query.legal_actions:
         if getattr(action, "kind", None) == "ActivateSkill":
             add(str(action.skill_id))
-    virtual_types = {
-        action.card.type
-        for action in query.legal_actions
-        if getattr(action, "card", None) is not None and action.card.is_virtual
-    }
-    if virtual_types:
+    # 收**候选与选择面槽位**两处的虚拟牌（票 14）："提供一张 B"的虚拟 B 只在后者上，
+    # 不收它这条窗口就列不出【龙胆】/【武圣】的文案。归属按
+    # :func:`~sgs.skills.heroes.conversion_offers` **逐张核对来源**（需要【杀】只归【闪】、
+    # 需要【闪】只归【杀】）；不在声明表里的虚拟牌（【八卦阵】"视为使用【闪】"等）
+    # 退回按牌名匹配。
+    for card in _virtual_cards(query):
+        if not card.is_virtual:
+            continue
+        source = int(card.virtual_sources[0]) if len(card.virtual_sources) == 1 else None
+        attributed = (
+            set(_offers_by_source(state, actor, card.type).get(source, ()))
+            if source is not None
+            else set()
+        )
+        if attributed:
+            for skill_id in attributed:
+                add(skill_id)
+            continue
         for instance in resolve_instances(state):
             if instance.owner != actor:
                 continue
             definition = instance.definition
-            if definition.virtual_type_ids and virtual_types & set(definition.virtual_type_ids):
+            if definition.virtual_type_ids and card.type in definition.virtual_type_ids:
                 add(definition.skill_id)
     return hints
 
@@ -670,16 +697,26 @@ def query_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
 
 
 def virtual_index(query: Query, state: Any | None = None) -> dict[str, list[dict[str, Any]]]:
-    """转化候选的**来源手牌索引**：``"<实体来源牌 id>": [{"card_id": <虚拟牌 id>, "skill_ids": [...]}]``。
+    """转化候选的**来源牌索引**：``"<实体来源牌 id>": [{"card_id": <虚拟牌 id>, "skill_ids": [...]}]``。
 
     【龙胆】这类转化技的候选里带的 ``card`` 是**虚拟牌**（``card_id < 0``），而界面手牌区
     渲染的是**实体牌**（``card_id > 0``）。不建这份索引，玩家点【闪】时界面按实体 id
-    查不到候选，【闪】就被画成"用不出"（本轮报障 4 的原样）。
+    查不到候选，【闪】就被画成"用不出"（报障 4 的原样）。
 
     只收**单来源**转化（源头只有一张实体牌）：这是标准版【武圣】【龙胆】【国色】【急救】
     的形状；多来源（【丈八蛇矛】的两张手牌当【杀】）需要"先选几张"的第二维，留给它自己
-    的界面改造，不在本轮射程。``skill_ids`` 由**实例声明**的 ``virtual_type_ids`` 反查，
-    故前端能据此只显示"当前技能能转的牌"。
+    的界面改造，不在本轮射程。
+
+    **``skill_ids`` 按声明的源谓词逐张核对**（票 14）：旧实现按 ``SkillDef.virtual_type_ids``
+    的**牌名并集**归属，而【龙胆】两个方向共用一个技能 id（``("dodge", "slash")``）⇒ 两个
+    方向分不开、"点龙胆后所有手牌都亮"（用户实机）。现在读
+    :func:`~sgs.skills.heroes.conversion_offers`（目标牌名 + 该声明的区域 / 牌面 / 时机
+    谓词）：需要【杀】时只归【闪】、需要【闪】时只归【杀】。拿不到引擎（409 里附带的裸
+    ``Query``）时退回牌名匹配——谓词需要 ``state``。
+
+    ``SELECT_CARDS`` 的**"提供一张 B"面**（票 14）没有 ``action.card``，虚拟 B 全在
+    ``query.slots`` 里，故两个来源都要收：缺了后者，【青龙】追问时【龙胆】/【武圣】的
+    技能按钮就点不亮（"待答期间技能栏仍可点"这条验收会红）。
     """
     return _virtual_index(query, state, owner=int(query.actor))
 
@@ -696,16 +733,43 @@ def _virtual_index(
             definition = instance.definition
             if definition.virtual_type_ids:
                 typed.append((definition.skill_id, frozenset(definition.virtual_type_ids)))
+    # 牌名 → {来源实体牌 id: 技能 id 元组}；按需现算（一次询问里通常只有一两种牌名）。
+    offers: dict[str, dict[int, tuple[str, ...]]] = {}
+
+    def offerers(card: Any) -> list[str]:
+        if state is None:
+            return [skill_id for skill_id, types in typed if card.type in types]
+        table = offers.get(card.type)
+        if table is None:
+            table = _offers_by_source(state, owner, card.type)
+            offers[card.type] = table
+        return list(table.get(int(card.virtual_sources[0]), ()))
+
     out: dict[str, list[dict[str, Any]]] = {}
-    for action in query.legal_actions:
-        card = getattr(action, "card", None)
-        if card is None or not card.is_virtual or len(card.virtual_sources) != 1:
+    for card in _virtual_cards(query):
+        if not card.is_virtual or len(card.virtual_sources) != 1:
             continue
-        skills = [skill_id for skill_id, types in typed if card.type in types]
         bucket = out.setdefault(str(int(card.virtual_sources[0])), [])
         if not any(item["card_id"] == card.card_id for item in bucket):
-            bucket.append({"card_id": card.card_id, "skill_ids": skills})
+            bucket.append({"card_id": card.card_id, "skill_ids": offerers(card)})
     return out
+
+
+def _virtual_cards(query: Query) -> list[Any]:
+    """这次询问里的全部牌面：候选带的 ``card`` 与**选择面槽位**上的牌（票 14）。
+
+    "提供一张 B"的虚拟 B 只出现在后者的 ``slots[].card`` 上（``SELECT_CARDS`` 的候选
+    只带面内位置），故两个来源都要读——顺序固定（候选在前、槽位在后）以保证可复现。
+    """
+    cards: list[Any] = []
+    for action in query.legal_actions:
+        card = getattr(action, "card", None)
+        if card is not None:
+            cards.append(card)
+    for slot in getattr(query, "slots", ()) or ():
+        if slot.card is not None:
+            cards.append(slot.card)
+    return cards
 
 
 def candidate_index(query: Query) -> dict[str, dict[str, Any]]:
@@ -754,20 +818,60 @@ def candidate_index(query: Query) -> dict[str, dict[str, Any]]:
     return grouped
 
 
-def pending_payload(session: Session | Query | None) -> dict[str, Any] | None:
+def _mask_watched_faces(payload: dict[str, Any]) -> None:
+    """把**观看来的牌面**从一份不归本座位的载荷里抹掉（票 15；`CODING_STANDARDS.md` §1 读取方）。
+
+    ``SELECT_CARDS`` 的 ``slots[].card`` 与询问的 ``revealed`` 是**授予本次应答者观看**的
+    牌面（【遗计】看牌堆顶两张、将来【观星】看牌堆顶若干）。引擎侧它们不进任何 ``PlayerView``、
+    不落带牌面的 delta；接入层这条"当前挂起"的载荷因此也必须只在**该询问的挂起者就是查看者**
+    （人类座位）时才带牌面——否则任何一次"查看者不是挂起者"的下发都会把别人观看的牌面直接
+    送出去。查看者缺失（裸 ``Query`` 且调用方没声明）按**不是挂起者**处理（fail-closed）。
+
+    公开事实（谁在看、有几个位置）保留：``slots`` 仍按**位置**下发（``card=None``），
+    与 :func:`~sgs.state.project` 对隐藏区域的"只有位置"是同一形状。
+    """
+    slots = payload.get("slots")
+    if isinstance(slots, list):
+        payload["slots"] = [
+            {**slot, "card": None} if isinstance(slot, dict) else slot for slot in slots
+        ]
+    payload["revealed"] = []
+
+
+def pending_payload(
+    session: Session | Query | None, *, human_seat: int | None = None
+) -> dict[str, Any] | None:
     """一次询问的**可应答形态**——带候选、带询问者自己的视角（前端只 pick，不自己拼 Action）。
 
-    收 ``Session``（取它的当前挂起）、``Query``（409 里附带的现状）或 ``None``（无挂起）。
+    收 ``Session``（取它的当前挂起，查看者 = 它的 ``human_seat``）、``Query``（409 里附带的
+    现状，查看者得由调用方用 ``human_seat`` 声明）或 ``None``（无挂起）。
 
     ``legal_actions`` 保留（既有测试、超时兜底与"提交必须原样取自候选"的自我核对都读它），
     ``candidate_index`` 是本轮新增的**索引形状**：界面用它手选目标，不再逐条铺候选按钮。
+
+    **观看私密（票 15，评审 finding ①）**：这份载荷只有在**查看者就是挂起者**时才带
+    ``slots[].card`` / ``revealed``（见 :func:`_mask_watched_faces`）。查看者的真源分两条：
+
+    - 收 ``Session`` ⇒ 它的 ``human_seat``（唯一的会话级真源，``human_seat`` 参数忽略）；
+    - 收裸 ``Query``（409 里附带的那份现状）⇒ 只能由 ``human_seat`` 声明——**没声明就抹掉**
+      （fail-closed）。旧签发把裸 ``Query`` 当"构造时本就只为人类座位"原样放行，而
+      `serve.py` 的 409 分支传的正是裸 ``Query`` ⇒ 两张观看牌面随 409 直接下发（稳定复现见
+      `tests/test_web.py::test_the_409_path_does_not_hand_the_watched_faces_to_a_query_without_a_viewer`）。
+      现在 :class:`~sgs_web.session.StaleAnswer` 自己带着 ``human_seat``，那条路径照样判得出归属。
     """
     if session is None:
         return None
-    query = session.pending if isinstance(session, Session) else session
+    if isinstance(session, Session):
+        query = session.pending
+        viewer: int | None = int(session.human_seat)
+    else:
+        query = session
+        viewer = None if human_seat is None else int(human_seat)
     if query is None:
         return None
     payload = query.model_dump(mode="json")
+    if viewer is None or int(query.actor) != viewer:
+        _mask_watched_faces(payload)
     payload["legal_actions"] = [action.model_dump(mode="json") for action in query.legal_actions]
     payload["candidate_index"] = candidate_index(query)
     # 询问窗口的"谁对谁做了什么"：从**结算栈顶帧 + 询问本身**派生的表现层事实。
@@ -776,6 +880,9 @@ def pending_payload(session: Session | Query | None) -> dict[str, Any] | None:
         query_context(session.engine, query) if isinstance(session, Session) else None
     )
     payload["option_seats"] = option_seats(query)
+    # 这一步是不是"提供一张 B"（票 14）：非空 = B 的牌名 id。字段在记录流里被 ``exclude``，
+    # 故**不进** Golden Replay 的字节；界面靠它把这一类选择面**就地**铺到本人的可见区域上。
+    payload["provide_type"] = getattr(query, "provide_type", None)
     # 转化候选的**来源手牌**索引（【龙胆】：点【闪】要能命中"当【杀】"的那条候选）。
     # 拿不到引擎（409 里附带的裸 ``Query``）时仍下发来源 → 虚拟牌的别名，只是 ``skill_ids`` 为空。
     payload["virtual_index"] = _virtual_index(

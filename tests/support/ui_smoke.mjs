@@ -41,6 +41,8 @@ class El {
     this.tagName = tag.toUpperCase(); this.id = id; this.children = []; this.listeners = {};
     this.classList = new ClassList(); this._text = ""; this._html = ""; this.value = "";
     this.hidden = false; this.disabled = false; this.type = ""; this.className = "";
+    // 真 DOM 的 `<input type=checkbox>` 缺省未勾选；app.js 读的是 `.checked`（不是 `.value`）。
+    this.checked = false;
   }
   get textContent() { return this._text + this.children.map((c) => c.textContent || c.text()).join(""); }
   set textContent(v) { this._text = String(v); this._html = ""; this.children = []; }
@@ -141,6 +143,77 @@ const newSession = async (seed, extra = {}) => openSession(await post("/api/sess
 }));
 const logText = () => $("t-log").text();
 const logCount = () => $("t-log").children.length;
+
+/* ------------------------------------------------- ⓪ 开局点将（票 19）
+ *
+ * 这里**走真的开局表单**（`#lobby-form` 的 submit → `startGame` → `POST /api/sessions`），
+ * 不是直接调 `post`：判据是"用户点得出来"，接线断在 `startGame` 里也必须红。
+ * 请求体从烟测自己的 `calls`（`/api/` 拦截器）里读，故"关了开关 ⇒ 不带 `my_hero`"
+ * 这条是**线上事实**而不是读 `state`。
+ */
+
+const submitLobby = async () => {
+  const form = $("lobby-form");
+  for (const fn of form.listeners.submit || []) await fn({ preventDefault() {} });
+  return ui.state.view;
+};
+const tickPointjiang = (on) => {
+  const box = $("in-pointjiang");
+  box.checked = on;
+  (box.listeners.change || []).forEach((fn) => fn({ target: box }));
+};
+/** 这一段之后新发生的建局请求体（`calls` 里也可能有烟测自己发的 `post`）。 */
+const sessionBodiesSince = (from) =>
+  calls.slice(from).filter((call) => call.path === "/api/sessions").map((call) => call.body);
+
+await ui.loadHeroCatalog();
+check("⓪1 点将列表拉到了启用池", ui.state.heroCatalog.length > 0, `${ui.state.heroCatalog.length} 名`);
+check("⓪2 列表铺进了「我的武将」下拉",
+  $("in-my-hero").children.length === ui.state.heroCatalog.length,
+  `选项 ${$("in-my-hero").children.length} / 池 ${ui.state.heroCatalog.length}`);
+check("⓪3 开关缺省是关的（不点将 = 老路径）", $("in-pointjiang").checked === false);
+
+$("in-players").value = "5";
+const picked = ui.state.heroCatalog[2];
+tickPointjiang(true);
+check("⓪4 开关开着时「我的武将」可选", $("in-my-hero").disabled === false);
+$("in-my-hero").value = picked.id;
+$("in-seed").value = "2468";
+let mark = calls.length;
+const pinned = await submitLobby();
+check("⓪5 点将：我的座位（0）就是我点的那名武将",
+  pinned.heroes[0] === picked.id, `点 ${picked.id} / 实得 ${pinned.heroes[0]}`);
+check("⓪6 点将：本局其它 AI 不选我已点的武将",
+  !pinned.heroes.slice(1).includes(picked.id), pinned.heroes.join(","));
+check("⓪7 点将：建局请求体带上了 my_hero",
+  sessionBodiesSince(mark).pop().my_hero === picked.id,
+  JSON.stringify(sessionBodiesSince(mark)));
+
+mark = calls.length;
+const again = await submitLobby();
+check("⓪8 同 seed + 同点将 ⇒ 同一份发将（可复现）",
+  JSON.stringify(again.heroes) === JSON.stringify(pinned.heroes),
+  `${again.heroes.join(",")} vs ${pinned.heroes.join(",")}`);
+
+tickPointjiang(false);
+check("⓪9 关了开关时「我的武将」被置灰", $("in-my-hero").disabled === true);
+mark = calls.length;
+await submitLobby();
+const randomBody = sessionBodiesSince(mark).pop();
+check("⓪10 关了开关 ⇒ 建局不带 my_hero（回到随机选择模式）",
+  !randomBody.my_hero, JSON.stringify(randomBody));
+
+// "回到随机"的正面判据：同一个 seed 下座位 0 不再被钉成我点的那名，且换 seed 会跟着变。
+// （单看一次"随机结果不等于我点的那名"是撞运气——池有 16 名，换 seed 扫一遍才立得住。）
+const seatZero = [];
+for (const seed of ["2468", "101", "202", "303", "404", "505", "606"]) {
+  $("in-seed").value = seed;
+  seatZero.push((await submitLobby()).heroes[0]);
+}
+check("⓪11 关了开关 ⇒ 六个 seed 里出现过不是我已点的那名（没被钉死）",
+  seatZero.some((hero) => hero !== picked.id), `点将 ${picked.id} / 实得 ${seatZero.join(",")}`);
+check("⓪12 关了开关 ⇒ 我的武将随 seed 变（真的是随机发将）",
+  new Set(seatZero).size > 1, seatZero.join(","));
 
 /** 推进一条对局到一个干净局面。
  *
@@ -532,6 +605,12 @@ if (multi) {
  * 必须断言**界面读得到**。
  */
 {
+  // **先清掉前一个块残留的选中态**：`renderKind` / `buildAction` 把 `state.selectedOption`
+  // 当作"我显式选了这条候选"的输入（`app.js` 的 `renderKind` 在它非空时直接返回 `list`）。
+  // 本块断言的是**合成的 `lone` 询问**本身该走 `picker`，与前面哪个真局块最后停在什么选择上无关；
+  // 不先清，断言就变成 order-dependent（票 13 收窄【反馈】/【流离】条件后，前面的扫种子块落到
+  // 别的 seed、留下的选中态不同，本块才暴露出来）。
+  ui.resetSelection();
   const lone = {
     kind: "RESPOND",
     prompt: "响应窗口：请使用一张牌，或放弃。",
@@ -1135,6 +1214,228 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && JSON.stringify(longdanAction.targets) === "[1]",
     JSON.stringify(longdanAction));
   check("㉿L7 提交按钮可点", $("btn-submit").disabled === false, `disabled=${$("btn-submit").disabled}`);
+}
+
+/* ③ 票 14：【青龙偃月刀】续杀的「提供一张【杀】」面——**就地**高亮（不新开区域）、
+ *    置灰是**当前状态的纯函数**（进询问 / 换询问 / 退出询问三点各一条）、两条入口都给、
+ *    取消预发动**回到同一层询问**（不是取消整条流水线）。
+ *
+ * 面 = 手牌里的实体【杀】（槽 0）＋【龙胆】的【闪】转化（槽 1）＋【武圣】的装备区红马
+ * 转化（槽 2）；手牌里的【桃】不在面上。
+ */
+{
+  const slash = synthCard(1, "杀");
+  const dodge = { ...synthCard(2, "闪"), type: "dodge" };
+  const peach = { ...synthCard(4, "桃"), type: "peach" };
+  const horse = { ...synthCard(5, "赤兔"), type: "horse", color: "red" };
+  const fromDodge = { ...synthCard(-3, "杀"), type: "slash", virtual_sources: [2] };
+  const fromHorse = { ...synthCard(-6, "杀"), type: "slash", virtual_sources: [5] };
+  const providePending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 940,
+    prompt: "提供一张【杀】继续使用（目标不变；可发动转化技）",
+    provide_type: "slash",
+    legal_actions: [{ kind: "SelectCards", answers_seq: 940, picks: [] }],
+    candidate_index: {}, option_seats: {}, context: null,
+    slots: [
+      { ref: { zone: "hand", seat: 0 }, card: slash },
+      { ref: { zone: "hand", seat: 0 }, card: fromDodge },
+      { ref: { zone: "equip", seat: 0 }, card: fromHorse },
+    ],
+    spec: { zones: ["hand"], total: [1, 1] },
+    virtual_index: {
+      "2": [{ card_id: -3, skill_ids: ["hero.zhaoyun.longdan"] }],
+      "5": [{ card_id: -6, skill_ids: ["hero.guanyu.wusheng"] }],
+    },
+  };
+  const view = synthView(providePending);
+  view.heroes = { 0: "zhaoyun", 1: "guanyu", 2: "diaochan" };
+  view.snapshot.self_hand = [slash, dodge, peach];
+  view.snapshot.players[0].equip = [horse];
+  view.skills = [
+    {
+      skill_id: "hero.zhaoyun.longdan", name: "龙胆", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: false,
+      ui: {
+        requirement: "选择1张【闪】当【杀】使用或打出", manual: false,
+        pick_cards: [], pick_seats: [], convert_sources: [2],
+      },
+    },
+    {
+      skill_id: "hero.guanyu.wusheng", name: "武圣", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: false,
+      ui: {
+        requirement: "一张红色牌当【杀】使用或打出", manual: false,
+        pick_cards: [], pick_seats: [], convert_sources: [5],
+      },
+    },
+  ];
+  const handChips = () => $("t-hand").children;
+  const equipChip = () => {
+    const row = $("t-seats").children
+      .find((c) => c.getAttribute("data-seat") === "0")
+      .children.find((c) => c.getAttribute("data-zone") === "equip");
+    return row ? row.children[0] : null;
+  };
+  const skillButton = (id) => $("t-skills").children.find((b) => b.getAttribute("data-skill-id") === id);
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  // (a) 进询问：就地高亮、**不**新开选择区。
+  check("㉿B1 「提供一张【杀】」不铺选择面块（t-options 为空）",
+    $("t-options").children.length === 0, `options=${$("t-options").children.length}`);
+  check("㉿B2 实体【杀】就地亮起（面上槽 0）",
+    ui.provideSlotIndex(providePending, 1) === 0 && ui.cardFace(providePending, slash).selectable === true
+      && !handChips()[0].classList.contains("dis"),
+    `slot=${ui.provideSlotIndex(providePending, 1)} dis=${handChips()[0].classList.contains("dis")}`);
+  check("㉿B3 【龙胆】的【闪】走别名就地亮起（面上槽 1）",
+    ui.provideSlotIndex(providePending, 2) === 1 && ui.cardFace(providePending, dodge).selectable === true
+      && !handChips()[1].classList.contains("dis"),
+    `slot=${ui.provideSlotIndex(providePending, 2)} dis=${handChips()[1].classList.contains("dis")}`);
+  check("㉿B3b 装备区的【武圣】红牌也在**原地**亮起（面上槽 2，装备区不再静态）",
+    ui.provideSlotIndex(providePending, 5) === 2 && !!equipChip()
+      && !equipChip().classList.contains("dis"),
+    `slot=${ui.provideSlotIndex(providePending, 5)} chip=${!!equipChip()}`);
+  check("㉿B4 不满足条件的【桃】置灰（当前状态的纯函数）",
+    ui.cardFace(providePending, peach).selectable === false && handChips()[2].classList.contains("dis"),
+    `dis=${handChips()[2].classList.contains("dis")}`);
+
+  // (b) 点【闪】= 选中它对应的**面内位置**（虚拟 B 没有实体 id）。
+  (handChips()[1].listeners.click || []).forEach((fn) => fn({ target: handChips()[1] }));
+  check("㉿B5 点【闪】= 选中面内位置 1（不是实体 id 2）",
+    JSON.stringify(ui.state.picks) === "[1]", `picks=${JSON.stringify(ui.state.picks)}`);
+  const provided = ui.buildAction();
+  check("㉿B6 提交的是 SelectCards 骨架补上面内位置",
+    !!provided && provided.kind === "SelectCards" && JSON.stringify(provided.picks) === "[1]",
+    JSON.stringify(provided));
+  check("㉿B7 提交按钮可点", $("btn-submit").disabled === false, `disabled=${$("btn-submit").disabled}`);
+
+  // (c) 两条入口：源牌直接亮起（上面）+ 技能按钮（下面）。预发动 / 取消 = 两档语义。
+  const longdan = skillButton("hero.zhaoyun.longdan");
+  check("㉿B8 待答期间【龙胆】按钮可点（convert_sources 点亮，不是 ActivateSkill 候选）",
+    !!longdan && longdan.disabled === false && longdan.getAttribute("data-convert") === "1",
+    `disabled=${longdan && longdan.disabled} convert=${longdan && longdan.getAttribute("data-convert")}`);
+  (longdan.listeners.click || []).forEach((fn) => fn({ target: longdan }));
+  check("㉿B9 点技能 = 预发动：只按该方向亮源牌（【闪】亮、【武圣】的马灰），询问**不动**",
+    ui.state.convertSkill === "hero.zhaoyun.longdan"
+      && ui.state.view.pending === providePending
+      && !handChips()[1].classList.contains("dis")
+      && equipChip().classList.contains("dis"),
+    `convert=${ui.state.convertSkill} dodgeDis=${handChips()[1].classList.contains("dis")} horseDis=${equipChip().classList.contains("dis")}`);
+  (longdan.listeners.click || []).forEach((fn) => fn({ target: longdan }));
+  check("㉿B10 再点一次 = 取消预发动、回到**同一层询问**（不是取消流水线）",
+    ui.state.convertSkill === null && ui.state.view.pending === providePending
+      && !equipChip().classList.contains("dis"),
+    `convert=${ui.state.convertSkill} pending=${ui.state.view.pending === providePending}`);
+
+  // (d) 置灰是当前状态的纯函数：换询问 / 退出询问都**整体重算**，不叠加、不粘滞。
+  const playPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 941, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 941, card: peach, targets: [] },
+      { kind: "EndPhase", answers_seq: 941 },
+    ],
+    candidate_index: { "4": { card: peach, pool: [], combos: [[]], min_targets: 0, max_targets: 0 } },
+    virtual_index: {}, option_seats: {}, context: null,
+  };
+  ui.state.view = synthView(playPending);
+  ui.state.view.snapshot.self_hand = [slash, dodge, peach];
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(ui.state.view);
+  check("㉿B11 换询问整体重算：【杀】【闪】灰、【桃】亮（不保留上一问的亮面）",
+    handChips()[0].classList.contains("dis") && handChips()[1].classList.contains("dis")
+      && !handChips()[2].classList.contains("dis"),
+    `dis=${handChips().map((c) => c.classList.contains("dis")).join(",")}`);
+
+  ui.state.view = synthView(null);
+  ui.state.view.snapshot.self_hand = [slash, dodge, peach];
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(ui.state.view);
+  check("㉿B12 退出询问整体重算：无挂起时全部按不可用判（提供面的亮面不粘滞）",
+    handChips().every((c) => c.classList.contains("dis")),
+    `dis=${handChips().map((c) => c.classList.contains("dis")).join(",")}`);
+}
+
+/* ============ ㉿ 遗计：一次选两张 / 取消（票 15 的用户口径） ============
+ *
+ * 用户原话（`acceptance.md` §C）："一次给出这两张牌时就需要**允许同时选择两张牌**
+ * （目前不行）"。这里用**真 app.js** 的 `renderSlots` 点击路径验四件事：
+ * 面上每张牌都能点、点两张 = picks 收两个面内位置、提交的是那条候选补上 picks、
+ * 再点第三张**不越界**（上限 = 服务端 `spec.total` 的纯函数）。
+ * 面里铺三张（比上限多一张）就是为了让"越界拒绝"可观察——它是"允许两张"的另一半。
+ * 私密（牌面只给持有者）由 `test_hero_damage_after.py` / `test_web.py` 的引擎侧判据钉。
+ */
+{
+  const first = synthCard(1, "桃园结义");
+  const second = synthCard(2, "万箭齐发");
+  const third = synthCard(3, "杀");
+  const yijiPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 921,
+    prompt: "请从选择面里选择一至两张牌。",
+    legal_actions: [
+      { kind: "SelectCards", picks: [], answers_seq: 921 },
+      { kind: "SelectCards", picks: [0], answers_seq: 921 },
+      { kind: "SelectCards", picks: [1], answers_seq: 921 },
+      { kind: "SelectCards", picks: [0, 1], answers_seq: 921 },
+      { kind: "Pass", answers_seq: 921 },
+    ],
+    candidate_index: {},
+    slots: [
+      { ref: { zone: "hand", seat: 0 }, card: first },
+      { ref: { zone: "hand", seat: 0 }, card: second },
+      { ref: { zone: "hand", seat: 0 }, card: third },
+    ],
+    // 面里是**观看来的**亮牌（不是手牌区的牌）：上限两张，选中的两张一起交给同一名角色。
+    spec: { zones: ["hand"], total: [1, 2], optional: true },
+    virtual_index: {}, option_seats: {}, context: null,
+  };
+  const view = synthView(yijiPending);
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  // 每次点击都会重铺选择面（`renderPending` 清空 `t-options`），故槽位要**重新取**，
+  // 否则断言读的是被换掉的旧节点（第一版就在这里红了）。
+  const slotChips = () => {
+    const row = $("t-options").children.find((c) => c.className === "cards");
+    return row ? row.children : [];
+  };
+  const click = (index) => (slotChips()[index].listeners.click || []).forEach((fn) => fn({ target: slotChips()[index] }));
+
+  check("㉿G1 选牌面铺出亮牌，上限读服务端 spec.total（不是写死 1）",
+    slotChips().length === 3 && ui.selectionCap(yijiPending) === 2,
+    `槽位=${slotChips().length} cap=${ui.selectionCap(yijiPending)}`);
+  check("㉿G2 未选时不可提交", $("btn-submit").disabled === true);
+
+  click(0);
+  check("㉿G3 点第一张 = picks 收下位置 0", JSON.stringify(ui.state.picks) === "[0]",
+    `picks=${JSON.stringify(ui.state.picks)}`);
+  click(1);
+  check("㉿G4 一次可以点两张（用户口径：允许同时选择两张牌）",
+    JSON.stringify(ui.state.picks) === "[0,1]", `picks=${JSON.stringify(ui.state.picks)}`);
+  check("㉿G5 两张都能画成选中态（sel）",
+    slotChips()[0].classList.contains("sel") && slotChips()[1].classList.contains("sel")
+      && !slotChips()[2].classList.contains("sel"),
+    `sel=${slotChips().map((c) => c.classList.contains("sel")).join(",")}`);
+  const action = ui.buildAction();
+  check("㉿G6 提交的是候选里那条 SelectCards 补上两个面内位置",
+    !!action && action.kind === "SelectCards" && JSON.stringify(action.picks) === "[0,1]",
+    JSON.stringify(action));
+  check("㉿G7 选够两张后提交按钮可点", $("btn-submit").disabled === false,
+    `disabled=${$("btn-submit").disabled}`);
+
+  click(2);
+  check("㉿G8 上限就是两张：再点第三张不越界（上限 = spec.total 的纯函数）",
+    JSON.stringify(ui.state.picks) === "[0,1]", `picks=${JSON.stringify(ui.state.picks)}`);
+  click(0);
+  check("㉿G9 再点已选中的那张 = 取消它（另一张仍在）",
+    JSON.stringify(ui.state.picks) === "[1]", `picks=${JSON.stringify(ui.state.picks)}`);
+  click(2);
+  check("㉿G10 取消掉一张后名额释放：第三张现在收得下（不是粘滞的置灰）",
+    JSON.stringify(ui.state.picks) === "[1,2]", `picks=${JSON.stringify(ui.state.picks)}`);
 }
 
 // ② 仁德：点技能 → 直接多选手牌 → 直接点场上武将 → 一次交出去；**没有任何选项按钮**。
@@ -1773,20 +2074,25 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.state.logRecords = [];
   ui.state.view = null;
   ui.applyViewRaw(before);
-  // 步长按钮：默认 0.1s，点一下在 0.1→0.5 五档之间循环（不记住，刷新回默认）。
+  // 步长按钮：默认 0.1s，点一下在 0.05→0.5 六档之间循环（不记住，刷新回默认）。
   check("㉿E1 默认步长 0.1 秒", ui.state.eventDelayMs === 100, `eventDelayMs=${ui.state.eventDelayMs}`);
-  check("㉿E1b 档位就是 0.1–0.5 秒五档",
-    JSON.stringify(ui.DELAY_STEPS_MS) === JSON.stringify([100, 200, 300, 400, 500]),
+  check("㉿E1b 档位就是 0.05–0.5 秒六档（最小挡 0.05s 在首位）",
+    JSON.stringify(ui.DELAY_STEPS_MS) === JSON.stringify([50, 100, 200, 300, 400, 500]),
     `steps=${JSON.stringify(ui.DELAY_STEPS_MS)}`);
   const delayBtn = $("btn-delay");
-  check("㉿E1c 牌桌上有步长按钮，按钮上显示当前档", !!delayBtn && delayBtn.textContent.includes("0.1"),
+  check("㉿E1c 牌桌上有步长按钮，按钮上显示当前档", !!delayBtn && delayBtn.textContent === "步长 0.1s",
     `按钮="${delayBtn ? delayBtn.textContent : "(缺)"}"`);
   const clickDelay = () => (delayBtn.listeners.click || []).forEach((fn) => fn({ target: delayBtn }));
   clickDelay();
   check("㉿E1d 点一下 → 0.2 秒", ui.state.eventDelayMs === 200,
     `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
+  // 走完 0.2 / 0.3 / 0.4 / 0.5 四档，下一档就是新增的最小挡 0.05s。
   for (let i = 0; i < 4; i += 1) clickDelay();
-  check("㉿E1e 满档后循环回 0.1 秒", ui.state.eventDelayMs === 100 && delayBtn.textContent.includes("0.1"),
+  check("㉿E1f 满档后落到新的最小挡 0.05 秒，按钮文字跟着换",
+    ui.state.eventDelayMs === 50 && delayBtn.textContent === "步长 0.05s",
+    `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
+  clickDelay();
+  check("㉿E1e 再点一下循环回默认 0.1 秒", ui.state.eventDelayMs === 100 && delayBtn.textContent.includes("0.1"),
     `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
   ui.applyViewRaw(after);
   check("㉿E2 收到事件先进入回放：快照还没提交、提交按钮灰着",

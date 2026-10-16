@@ -53,7 +53,13 @@ REPLAY_SINGLE_LIMIT_BYTES = 4 * 1024 * 1024
 **重新选种**为 109（记录条数 3111 → 925），而不是放宽判据。体积根源是记录流内联
 完整 ``Query`` / ``PlayerView``（随弃牌堆增长），不是种子没挑短——挑选已按"记录条数最少"
 做过（``seed_search.py``）。门禁每次都要读入并逐行回放全部体积
-（``test_golden_replay_matches_byte_for_byte``）。"""
+（``test_golden_replay_matches_byte_for_byte``）。
+
+**票 13（【反馈】【流离】条件自校）后的实测**：42 条合计 **44,584,106 字节 ≈ 42.52 MiB**，
+最大单文件 **2,999,427 字节 ≈ 2.86 MiB**（``42-hero-transform.jsonl``）——仍在两句上限之内，
+故**不动预算**。条件收紧**减少**询问 ⇒ 含【反馈】的 35 / 36 / 37 与含【流离】的 42 四条基准
+的对局走向改变，由 ``pytest --update-golden`` 重录（四条在 ``goals.py`` 里的判据——逐点伤害 /
+改判循环 / 势力求助 / 转化族——重录后仍命中，判据未放宽，种子也未重选；41 未受影响）。"""
 
 
 def _write(path: Path, text: str) -> Path:
@@ -324,10 +330,10 @@ def test_golden_replay_matches_byte_for_byte(slug: str, tmp_path: Path, update_g
         artifact.write_text(actual, encoding="utf-8")
         raise AssertionError(f"{_first_divergence(expected, actual)}\n本次实际记录流：{artifact}")
 
-    if slug in goals.M2_GOALS or slug in goals.M3_GOALS:
+    if slug in goals.M1_GOALS or slug in goals.M2_GOALS or slug in goals.M3_GOALS:
         # 门禁期**真的**验证这条基准在证它声称的机制（票 32 §1；M2 用"随机驱动 + 事后判据"
         # 替代 M1 的录制期脚本，故判据必须在这里也生效，而不是只在 --update-golden 时；
-        # M3 的专项基准同一口径，票 14 §8）。
+        # M3 的专项基准同一口径，票 14 §8；脚本专项基准由票 17 起登记在 M1_GOALS）。
         assert goals.goal_for(slug)(engine), (
             f"{slug}：回放后的记录流没有命中它在 goals.py 里声称的机制——"
             f"基准与判据脱节（要么换种子，要么修判据）"
@@ -411,12 +417,17 @@ def test_the_frozen_m1_six_stay_in_the_file_set() -> None:
 M3_BASELINES = tuple(scenarios.M3_SCENARIOS)
 """M3 的 8 条武将技能专项基准（票 14 §8）。"""
 
+SCRIPTED_BASELINES = tuple(scenarios.SCRIPTED_SCENARIOS)
+"""票 17 起的脚本驱动专项基准（与 M1 六条同一驱动，但不属于票 12 定格的回归网）。"""
+
 M2_BASELINES = tuple(
     name
     for name in distribution.SLUG_CLASSES
-    if name not in set(FROZEN_BASELINES) and name not in set(M3_BASELINES)
+    if name not in set(FROZEN_BASELINES)
+    and name not in set(M3_BASELINES)
+    and name not in set(SCRIPTED_BASELINES)
 )
-"""M2 的 28 条基准：分布表里除 M1 六条与 M3 八条以外的全部 slug（票 32 §1 / 票 14 §8）。"""
+"""M2 的 28 条基准：分布表里除 M1 六条、M3 八条与脚本专项以外的全部 slug（票 32 §1）。"""
 
 
 def test_the_baseline_distribution_meets_every_category_minimum() -> None:
@@ -445,11 +456,14 @@ def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
         "每个基准文件都必须在 distribution.SLUG_CLASSES 里登记；反之不得有孤儿登记"
     )
     assert files == set(scenarios.SCENARIOS), "场景表与基准文件集合互相等于"
-    assert set(M2_BASELINES) == files - set(FROZEN_BASELINES) - set(M3_BASELINES), (
-        "M2 恰为 42 − 6 − 8 = 28 条"
-    )
+    assert set(M2_BASELINES) == files - set(FROZEN_BASELINES) - set(M3_BASELINES) - set(
+        SCRIPTED_BASELINES
+    ), "M2 恰为 43 − 6 − 8 − 1 = 28 条"
     assert set(M3_BASELINES) == set(scenarios.M3_SCENARIOS) == set(goals.M3_GOALS), (
         "M3 的 8 条专项基准必须与场景表、判据表三方相等"
+    )
+    assert set(SCRIPTED_BASELINES) == set(scenarios.SCRIPTED_SCENARIOS), (
+        "票 17 起的脚本专项基准必须与场景表相等"
     )
 
 
@@ -457,6 +471,13 @@ def test_every_m2_baseline_has_an_after_the_fact_goal() -> None:
     """28 条 M2 基准都必须有事后判据（goals.py 的登记不得漏）。"""
     assert set(M2_BASELINES) == set(goals.M2_GOALS), (
         "M2 基准集合与 goals.M2_GOALS 的键集必须相等"
+    )
+
+
+def test_every_scripted_baseline_has_an_after_the_fact_goal() -> None:
+    """脚本专项基准也必须独立复读一遍记录流（票 17）：脚本宣布命中 ≠ 记录流里有那回事。"""
+    assert set(SCRIPTED_BASELINES) == set(goals.M1_GOALS), (
+        "脚本专项基准集合与 goals.M1_GOALS 的键集必须相等"
     )
 
 

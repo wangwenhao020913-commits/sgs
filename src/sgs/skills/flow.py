@@ -34,6 +34,13 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
+from sgs.effects import (
+    CandidateScope,
+    ModifierContext,
+    ModifierPoint,
+    apply_modifiers,
+    locate,
+)
 from sgs.state import GameState, Pass, SelectionSpec, Slot, SlotKind, Zone, ZoneRef
 from sgs.timing import Timing
 
@@ -45,6 +52,7 @@ __all__ = [
     "FlowStep",
     "PickCards",
     "PickOption",
+    "PickProvide",
     "PickSeats",
     "SeatPool",
     "SkillFlow",
@@ -80,6 +88,7 @@ FlowAnswers = Mapping[str, object]
 """流水线收集到的答案：键 = 步骤键。
 
 - :class:`PickCards` / :class:`PickSeats` → ``tuple[int, ...]``（实体牌 id / 座位号）；
+- :class:`PickProvide` → ``tuple[CardRef, ...]``（**牌面**，因为虚拟 B 背后没有实体牌）；
 - :class:`PickOption` → ``str``（选中的选项文本，原样）。
 """
 
@@ -156,6 +165,38 @@ class PickCards:
 
 
 @dataclass(frozen=True, slots=True)
+class PickProvide:
+    """"提供一张 B"步骤（票 14）：问一次"用一张 B"，候选 = 实体 B ＋ 转化技的虚拟 B。
+
+    ``zones`` 里**实体 B**（牌名 = ``type_id``）进面；各转化技的**虚拟 B** 由既有的
+    :data:`~sgs.skills.ModifierPoint.CANDIDATES` 通道产出（与出牌阶段 / 响应窗口里
+    "把红牌当【杀】"的是**同一批回调**），故"哪些牌能当 B"只有一处判据
+    （``heroes.CONVERSION_SKILLS`` 的声明表）。**只收单来源**转化——多来源的
+    【丈八蛇矛】需要"先选几张"的第二维，票 14 不做。
+
+    答案 = ``tuple[CardRef, ...]``（**牌面**）：虚拟 B 背后没有实体牌，回传实体 id 会
+    把"转出来的是哪张牌"丢掉。``lo`` / ``hi`` / ``optional`` / ``key`` / ``actor`` 与
+    :class:`PickCards` 同义。``hi=None`` 尚无消费者，本步恒取定数张。
+
+    ``cache_key``（票 21）与 :class:`PickCards` 的**同名参数**同义：帧内 ``ask_selection``
+    的缓存键，缺省 = ``key``。它与 ``key`` 分开是因为"这一步叫什么"（效果读答案、前端取
+    文案）与"这一次问的答案存哪儿"不是一回事——**同一帧里两个不同的步骤若共用同一个缓存
+    键，后者的询问会直接命中前者留下的答案**（:meth:`Engine.ask_selection` 的帧内答案缓存
+    只按 key 分桶），答出的 id 属于**另一份面**，取 ``refs`` 时就是 ``KeyError``（票 21 的
+    【流离】成本步 vs【青龙偃月刀】提供步）。
+    """
+
+    type_id: str
+    zones: tuple[Zone, ...] = (Zone.HAND,)
+    lo: int = 1
+    hi: int = 1
+    optional: bool = False
+    key: str = "card"
+    cache_key: str | Callable[[Any], str] | None = None
+    actor: ActorRef = None
+
+
+@dataclass(frozen=True, slots=True)
 class PickSeats:
     """选座位步骤：逐次问 ``SELECT_OPTION``（选项文本 ``seat:N``），共 ``lo..hi`` 次。
 
@@ -186,7 +227,7 @@ class PickOption:
     key: str = "option"
 
 
-FlowStep = PickCards | PickSeats | PickOption
+FlowStep = PickCards | PickSeats | PickOption | PickProvide
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +246,15 @@ class SkillFlow:
       续跑是**重新进入同一个 op** ⇒ ``on_commit`` 会被**重复调用**。当前唯一消费者
       ``active._mark_phase`` 落的是幂等 OR 位，故安全；后来者若在这里做"只能发生一次"的
       副作用，必须自带帧私有守卫（`CODING_STANDARDS.md` §3「会挂起的操作必须幂等」）。
+
+    **边界：本语言没有"循环 / 每轮提交"步骤**（票 16）。任一步答 ``Pass`` 都只意味着
+    *取消整条流水线*（零副作用），没有"停循环但不回滚已提交轮"这第二档出口；逐轮提交由
+    **手写的帧内游标循环**承担（:func:`sgs.skills.catalog._ice_sword`、
+    :func:`sgs.skills.catalog._double_sword`、:func:`sgs.skills.damage_after._yiji`）。
+    票 10 / 票 11 / 票 16 三次评估都不为它加第二套提交语义（逐条理由见
+    ``catalog._ice_sword`` 的 docstring）。后来者若要在这里加循环步骤，
+    **A 族 / 【反馈】/【流离】/ 装备各条的"取消零副作用"必须一字不动** —— 它是本模块的
+    中心契约，不按消费者分档。
     """
 
     steps: tuple[FlowStep, ...]
@@ -436,6 +486,111 @@ def _flow_step_cards(
     return "ok", tuple(int(card_id) for card_id in picks)
 
 
+def provide_face(
+    state: GameState, seat: int, type_id: str, zones: tuple[Zone, ...]
+) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
+    """**"提供一张 B"的选择面**（票 14）：``(槽位, 引擎私有的位置 → 牌 id)``。
+
+    两半合成，各读各的真源：
+
+    - **实体 B**：``zones`` 此刻对 ``seat`` 铺出的面，按牌名 ``type_id`` 筛
+      （与 :class:`PickCards` 的 ``card_types`` 同一条牌名过滤；这一步**永远**是
+      "本人自己的区域" ⇒ 手牌是**可见槽**，与 ``reveal_hand=True`` 同形）；
+    - **虚拟 B**：跑一趟 ``CANDIDATES`` 通道（``scope=RESPOND`` +
+      ``respond_required=type_id``、``card=None``）——**与使用 / 打出窗口同一批回调**，
+      故"哪些牌能当 B"由各技能自己的声明决定，本函数不写第二份谓词。
+      **只收单来源**转化（``len(virtual_sources) == 1``）：多来源的【丈八蛇矛】是
+      "先选两张"的另一维，票 14 不做。
+
+    虚拟槽的 ``ref`` 指向**来源实体牌**所在的区（判定 / 装备区的红牌因此也点得到），
+    牌面是那张虚拟 B（``card_id < 0``）。**只读状态、不抽随机数**：本函数因此也能当
+    "付得起"的判据（【青龙】的 ``available`` 与这一步的候选面**同源**）。
+    """
+    slots: list[Slot] = []
+    card_ids: list[int] = []
+    for zone in zones:
+        for card_id in state.zone(ZoneRef(zone, seat)):
+            card = state.card(card_id)
+            if card.type != type_id:
+                continue
+            slots.append(Slot(ref=ZoneRef(zone, seat), card=card))
+            card_ids.append(card_id)
+    seen = {int(card_id) for card_id in card_ids}
+    for action in apply_modifiers(
+        ModifierPoint.CANDIDATES,
+        state,
+        ModifierContext(
+            subject=seat,
+            card=None,
+            scope=CandidateScope.RESPOND,
+            respond_required=type_id,
+        ),
+        (),
+    ):
+        card = getattr(action, "card", None)
+        if card is None or not card.is_virtual or card.type != type_id:
+            continue
+        sources = tuple(card.virtual_sources)
+        if len(sources) != 1 or int(card.card_id) in seen:
+            continue
+        seen.add(int(card.card_id))
+        slots.append(Slot(ref=locate(state, sources[0]), card=card))
+        card_ids.append(int(card.card_id))
+    return tuple(slots), tuple(card_ids)
+
+
+def _flow_step_provide(
+    host: Any, frame: Any, step: PickProvide, owner: int, answers: FlowAnswers, timing: Timing
+) -> tuple[str, object]:
+    """跑一步"提供一张 B"：返回三态 + ``tuple[CardRef, ...]``。
+
+    面为空（或不够 ``lo``）与空池同形：**不发没有答案的询问**，走取消（票 19 §6）。
+    答案从槽位回读**牌面**——虚拟 B 的负 id 进不了 :meth:`GameState.card`。
+
+    **面只有一处缓存**（评审 Standards finding 2）：住在本步自己的帧内键
+    ``provide_face:<有效询问键>`` 里，``ask_selection`` 通过 ``face=`` **直接用这一份**、
+    不再在 ``asks`` 里另存第二份（那是票 21 ``KeyError`` 的土壤：两份缓存一旦分母不同，
+    另一份面的答案就会被喂进 ``refs``）。重入时来源牌可能已经离区（被用掉的那张【杀】
+    不在手里了），重算出来的面会与**已缓存的答案**（面内位置）对不上——复用同一份面才对。
+    面的缓存键取**有效的询问键**（``cache_key`` 优先），与答案缓存**同源**（票 21）。
+    """
+    actor = _flow_actor(step, host.state, frame, owner, answers)
+    cache_key = step.cache_key if step.cache_key is not None else step.key
+    if callable(cache_key):
+        cache_key = cache_key(frame)
+    face_key = f"provide_face:{cache_key}"
+    face = frame.data.get(face_key)
+    if face is None:
+        face = provide_face(host.state, actor, step.type_id, step.zones)
+        frame.data[face_key] = face
+    slots, _card_ids = face
+    if len(slots) < step.lo:
+        return "cancel", ()
+    refs = {
+        int(slot.card.card_id): slot.card
+        for slot in slots
+        if slot.card is not None
+    }
+    picked = host.ask_selection(
+        frame,
+        key=cache_key,
+        actor=actor,
+        timing=timing,
+        spec=SelectionSpec(
+            zones=step.zones,
+            total=(step.lo, min(step.hi, len(slots))),
+            optional=step.optional,
+        ),
+        face=face,
+        provide_type=step.type_id,
+    )
+    if host.suspended(picked):
+        return "stay", ()
+    if len(picked) < step.lo:
+        return "cancel", ()
+    return "ok", tuple(refs[int(card_id)] for card_id in picked)
+
+
 def _flow_step_seats(
     host: Any, frame: Any, step: PickSeats, owner: int, answers: FlowAnswers, timing: Timing
 ) -> tuple[str, object]:
@@ -497,6 +652,7 @@ _FLOW_STEP_RUNNERS: MappingProxyType[type, Callable[..., tuple[str, object]]] = 
             PickCards: _flow_step_cards,
             PickSeats: _flow_step_seats,
             PickOption: _flow_step_option,
+            PickProvide: _flow_step_provide,
         }
     )
 )

@@ -22,6 +22,7 @@ from sgs.effects import (
     target_is_effective,
 )
 from sgs.engine import Engine
+from sgs.resolution import Tag, has_tag
 from sgs.skills import (
     CATALOG,
     instance_key,
@@ -375,6 +376,165 @@ def test_ice_sword_asks_nothing_when_the_target_has_no_cards():
     assert engine.state.player(1).hp == 4, "没有牌可弃也照样防止伤害"
 
 
+def test_ice_sword_round_two_asks_again_after_an_inline_suspension():
+    """"每轮提交"（票 16）在这个手写循环里的形状 = **帧内游标 + 每轮独立缓存键**。
+
+    第 1 轮立即搬走（= 提交）；搬掉的若是装备，`move_in_frame` 会内联派发【枭姬】并
+    **挂起**，钩子带 ``"stay"`` 重入。重入时游标已在**搬牌之前**前进到 1，故问的是
+    ``ice_sword:1``（第 2 轮、面里已经少了第 1 轮那张），而不是因入口刚置的
+    ``Tag.PREVENTED`` 短路掉这次询问 —— 也不会把已提交的第 1 轮再搬一遍。
+    """
+    only = _cards("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,), equip=(ICE_SWORD,)),
+            SeatSpec(hero="sunshangxiang", hand=(only,), equip=(JUYING,)),
+        ],
+        deck=_deck_excluding(SLASH, ICE_SWORD, JUYING, only),
+        turn_seat=0,
+    )
+
+    faces: list[tuple[int, bool]] = []  # (面内槽数, 这一步有没有 Pass 候选)
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _slash_use(query, SLASH, 1)
+        if query.kind == "SKILL_ACTIVATION":
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
+        if query.kind == "SELECT_CARDS":
+            round_index = len(faces)
+            faces.append(
+                (len(query.slots), any(isinstance(a, Pass) for a in query.legal_actions))
+            )
+            if round_index == 0:
+                return _select_slot_of(query, JUYING)
+            return _find(
+                query, lambda action: isinstance(action, SelectCards) and action.picks == (0,)
+            )
+        return None
+
+    def defender(query):
+        if query.kind in ("DODGE", "SKILL_ACTIVATION"):
+            # 拒绝【枭姬】：它**被问到**本身即证明"弃置装备"内联挂起过（重入的驱动源）。
+            return _find(query, lambda action: isinstance(action, Pass))
+        return None
+
+    engine = _run(
+        state,
+        [Scripted(attacker), Scripted(defender)],
+        lambda engine: _use_frame_popped(engine),
+    )
+
+    assert _has_query(engine, "SKILL_ACTIVATION", skill_id="hero.sunshangxiang.xiaoji"), (
+        "第 1 轮搬装备触发【枭姬】：钩子挂起 ⇒ _ice_sword 必须重入"
+    )
+    assert [slots for slots, _ in faces] == [2, 1], (
+        "两轮各一问：第 1 轮的面 = 手牌 + 装备；第 2 轮的面只剩手牌（第 1 轮那张已立即搬走）"
+    )
+    assert not any(passable for _, passable in faces), (
+        "弃置两张是强制的（``optional=False``）⇒ 寒冰剑的轮内没有 Pass 候选"
+    )
+    assert _moves_of(engine, JUYING) == [("equip", "discard", "DISCARD")], (
+        "已提交的第 1 轮不因挂起 / 重入而回滚或重放"
+    )
+    assert _moves_of(engine, only) == [("hand", "discard", "DISCARD")]
+    assert engine.state.player(1).hp == 4, "防止伤害照旧（``PREVENTED`` 只置一次、不短路）"
+
+
+class _IceSwordHost:
+    """【寒冰剑】两轮循环的最小宿主（只实现 :func:`_ice_sword` 用到的那几张面）。
+
+    "轮内没有答案"这条出口经真实引擎走不到（``optional=False`` ⇒ 没有 ``Pass`` 候选，
+    池空又由 ``has_zone_cards`` 提前挡住），故把断言直接钉在**循环本身**上：给宿主喂
+    逐轮的答案，看已提交的轮在"下一轮没有答案"时是否被回滚。
+    """
+
+    def __init__(self, state, answers) -> None:
+        self.state = state
+        self._answers = list(answers)
+        self.keys: list[str] = []
+        self.moves: list[tuple[int, ...]] = []
+
+    @staticmethod
+    def suspended(value):
+        return value == "SUSPEND"
+
+    def has_zone_cards(self, seat: int) -> bool:
+        return bool(self.state.player(seat).hand or self.state.player(seat).equip)
+
+    def ask_selection(self, frame, *, key, actor, timing, spec, build_face):
+        del frame, actor, timing, spec, build_face
+        self.keys.append(key)
+        return self._answers.pop(0) if self._answers else ()
+
+    def move_in_frame(self, frame, refs, *, to_zone, reason, owner, actor):
+        del frame, to_zone, reason, owner, actor
+        self.moves.append(tuple(ref.card_id for ref in refs))
+        return None
+
+
+def test_ice_sword_a_round_without_an_answer_stops_the_loop_and_keeps_the_committed_round():
+    """取消 / 无答案**只停循环**，不撤销已应用的轮次（票 16 的"每轮提交"）。
+
+    第 1 轮答了牌（立即搬走 = 提交）、第 2 轮没有答案 ⇒ 循环收尾；已提交的第 1 轮留在
+    弃牌堆里，也没有第三个缓存键。``Tag.PREVENTED`` 在入口置上（重复置入幂等）。
+    """
+    first, second = _cards("peach")[0], _cards("peach")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hand=(first, second))],
+        turn_seat=0,
+    )
+    host = _IceSwordHost(state, [(first,), ()])
+    frame = SimpleNamespace(data={"target": 1, "skill_owner": 0})
+
+    assert catalog_module._ice_sword(host, frame) is None
+
+    assert host.keys == ["ice_sword:0", "ice_sword:1"], "每轮一个独立缓存键"
+    assert host.moves == [(first,)], "第 2 轮无答案只停循环：已提交的第 1 轮不回滚"
+    assert frame.data["ice_sword_done"] == 1, "游标停在已提交的那个轮次上"
+    assert frame.data["ice_sword_finished"] is True, "无答案 ⇒ 本帧收尾，不再问"
+    assert has_tag(frame, Tag.PREVENTED), "入口置一次（重复置入是幂等的）"
+
+
+def test_ice_sword_a_suspended_move_resumes_at_the_next_round_without_replaying_it():
+    """``"stay"`` 透传 + 重入续跑：搬牌挂起时**不重放**已提交的轮，续跑从下一轮的键接上。
+
+    宿主第 1 次 ``move_in_frame`` 返回 ``"stay"``（模拟内联挂起）。重入（同一个帧再调一次
+    ``_ice_sword``）时，游标已在搬牌之前前进 ⇒ 直接问 ``ice_sword:1``（第 2 轮），已提交的
+    那张不会被重放；两轮共用同一个帧标签袋。
+    """
+    first, second = _cards("peach")[0], _cards("peach")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hand=(first, second))],
+        turn_seat=0,
+    )
+
+    class _Suspending(_IceSwordHost):
+        def move_in_frame(self, frame, refs, *, to_zone, reason, owner, actor):
+            del frame, to_zone, reason, owner, actor
+            self.moves.append(tuple(ref.card_id for ref in refs))
+            return "stay" if len(self.moves) == 1 else None
+
+    host = _Suspending(state, [(first,), (second,)])
+    frame = SimpleNamespace(data={"target": 1, "skill_owner": 0})
+
+    assert catalog_module._ice_sword(host, frame) == "stay", "搬牌挂起 ⇒ 让出控制权"
+    assert host.keys == ["ice_sword:0"]
+    assert host.moves == [(first,)]
+    assert frame.data["ice_sword_done"] == 1
+    assert "ice_sword_finished" not in frame.data, "挂起不是收尾"
+
+    assert catalog_module._ice_sword(host, frame) is None, "续跑走完第 2 轮"
+    assert host.keys == ["ice_sword:0", "ice_sword:1"], "续跑从下一轮的键接上"
+    assert host.moves == [(first,), (second,)], "已提交的第 1 轮不重放"
+    assert frame.data["ice_sword_finished"] is True
+    assert has_tag(frame, Tag.PREVENTED)
+    assert frame.data["ice_sword_finished"] is True
+
+
 # ---------------------------------------------------------------------------
 # 麒麟弓：造成伤害时可弃目标一张坐骑
 # ---------------------------------------------------------------------------
@@ -618,6 +778,9 @@ def test_double_sword_hides_the_discard_option_when_the_target_has_no_hand_cards
         if record.kind == "query" and record.query.kind == "SELECT_OPTION"
     )
     assert option_query.options == ("draw_one",)
+    assert not _has_query(engine, "SELECT_CARDS"), (
+        "只剩「令其摸一张」这一支 ⇒ 没有「选一张手牌」的步骤（票 17 复现核对第 2 条）"
+    )
 
 
 def test_double_sword_does_not_trigger_for_same_gender_targets():
@@ -642,6 +805,70 @@ def test_double_sword_does_not_trigger_for_same_gender_targets():
 
     assert not _has_query(engine, "SELECT_OPTION")
     assert not _has_query(engine, "SKILL_ACTIVATION", skill_id="equip.double_sword")
+
+
+def test_double_sword_discards_the_chosen_card_to_the_discard_pile():
+    """目标答"弃一张手牌" ⇒ 那张牌真进弃牌堆，且使用者**不**摸牌（票 17 复现核对第 3 条）。
+
+    与上面那条"令其摸一张"的用例互斥：一次使用只冻结一份应答，故两条分支各一条用例。
+    这条同时钉住"选中的牌立即搬走"——只断言"问了"会让"答了却什么都不发生"（票 13 的
+    【流离】事故）照样通过。
+    """
+    other = _cards("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,), equip=(DOUBLE_SWORD,), gender=Gender.MALE),
+            SeatSpec(hand=(other,), gender=Gender.FEMALE),
+        ],
+        deck=_deck_excluding(SLASH, DOUBLE_SWORD, other),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _slash_use(query, SLASH, 1)
+        if query.kind == "SKILL_ACTIVATION":
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
+        return None
+
+    def defender(query):
+        if query.kind == "DODGE":
+            return _find(query, lambda action: isinstance(action, Pass))
+        if query.kind == "SELECT_OPTION":
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption)
+                and action.choice == "discard_one",
+            )
+        if query.kind == "SELECT_CARDS":
+            return _find(query, lambda action: isinstance(action, SelectCards))
+        return None
+
+    engine = _run(
+        state,
+        [Scripted(attacker), Scripted(defender)],
+        lambda engine: _use_frame_popped(engine),
+    )
+
+    option_query = next(
+        record.query
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == "SELECT_OPTION"
+    )
+    assert option_query.options == ("discard_one", "draw_one")
+    assert option_query.actor == 1, "选择权在目标"
+    assert _moves_of(engine, other) == [("hand", "discard", "DISCARD")], (
+        "目标选中的那张手牌必须真的落进弃牌堆（答了却无事发生是票 13 的【流离】事故）"
+    )
+    assert not any(
+        record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason.value == "draw"
+        and record.to_zone.seat == 0
+        and record.seq > option_query.seq
+        for record in engine.records
+    ), "目标是弃牌而不是让使用者摸牌；询问之后使用者这条链上不该有摸牌"
 
 
 class _DoubleSwordHost:

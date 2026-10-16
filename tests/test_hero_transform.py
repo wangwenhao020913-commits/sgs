@@ -34,6 +34,7 @@ from sgs.skills import (
 )
 from sgs.skills.virtual import LEGACY_KIND_COUNT
 from sgs.state import (
+    ActivateSkill,
     FrameKind,
     PlayCard,
     QueryKind,
@@ -47,7 +48,9 @@ from sgs.timing import Timing
 from support import SeatSpec, build_state, cards_of_type, run_until
 
 from test_skills import (
+    GREEN_DRAGON,
     PACK,
+    SLASH,
     Scripted,
     _cards,
     _deck_excluding,
@@ -712,3 +715,196 @@ def test_jijiu_is_not_offered_inside_its_owners_turn():
         "急救限于回合外：自己的回合内不进候选"
     )
 
+
+
+# ---------------------------------------------------------------------------
+# 票 14：「提供一张 B」的询问（【青龙偃月刀】的续杀）—— 候选 = 实体 B ＋ 转化技的虚拟 B
+#
+# 用户口径（acceptance §B 裁定 1–4）：需要使用或打出一张牌时**不新开区域**、就地高亮，
+# 且这一步要能发动别的转化技（【龙胆】/【武圣】）——故询问的候选面必须同时装得下
+# 实体【杀】与"别的技能转出来的【杀】"。
+# ---------------------------------------------------------------------------
+
+
+def _provide_query(engine, target: str = "slash"):
+    """记录流里【青龙】"提供一张 B"那一步的 ``SELECT_CARDS`` 询问。"""
+    for record in engine.records:
+        if (
+            record.kind == "query"
+            and record.query.kind == QueryKind.SELECT_CARDS
+            and getattr(record.query, "provide_type", None) == target
+        ):
+            return record.query
+    raise AssertionError(f"记录流里没有 provide_type={target!r} 的选择面询问")
+
+
+def _provide_face(query):
+    """``provide`` 面每个槽的 ``(牌 id, 牌名, 来源实体牌)``（虚拟槽读 ``virtual_sources``）。"""
+    return [
+        (
+            slot.card.card_id,
+            slot.card.type,
+            tuple(slot.card.virtual_sources),
+        )
+        for slot in query.slots
+        if slot.card is not None
+    ]
+
+
+def _green_dragon_provide_driver(*, activation="activate"):
+    """座位 0：用首张【杀】打座位 1；【青龙】发动询问按 ``activation`` 应答。"""
+
+    def driver(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _slash_use(query, SLASH, 1)
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            if activation == "activate":
+                return _find(query, lambda action: isinstance(action, ActivateSkill))
+            return _find(query, lambda action: isinstance(action, Pass))
+        return None
+
+    return Scripted(driver)
+
+
+def _dodge_with_real_card(query):
+    if query.kind == QueryKind.DODGE:
+        return _find(query, lambda action: isinstance(action, UseCard))
+    return None
+
+
+def _to_provide_step(engine) -> bool:
+    return (
+        engine.pending is not None
+        and engine.pending.kind == QueryKind.SELECT_CARDS
+        and getattr(engine.pending, "provide_type", None) == "slash"
+    )
+
+
+def test_green_dragon_provide_face_offers_the_hand_slash_alongside_longdans_dodge():
+    """续杀的询问里**同时**有手牌【杀】与【龙胆】的【闪】转化的虚拟【杀】（票 14 验收 1）。"""
+    second = _cards("slash")[1]
+    dodge = RED_DODGE
+    defender_dodge = _cards("dodge")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH, second, dodge), equip=(GREEN_DRAGON,), hero="zhaoyun"),
+            SeatSpec(hand=(defender_dodge,)),
+        ],
+        deck=_deck_excluding(SLASH, second, dodge, GREEN_DRAGON, defender_dodge),
+        turn_seat=0,
+    )
+
+    engine = _run(
+        state,
+        [_green_dragon_provide_driver(), Scripted(_dodge_with_real_card)],
+        _to_provide_step,
+    )
+
+    face = _provide_face(_provide_query(engine))
+
+    assert (second, "slash", ()) in face, f"手牌里的实体【杀】必须进面：{face}"
+    assert any(
+        type_id == "slash" and sources == (dodge,) for _card_id, type_id, sources in face
+    ), f"【龙胆】的【闪】→【杀】必须进面：{face}"
+    assert len(face) == 2, f"这一步此刻恰有两张可提供的【杀】：{face}"
+
+
+def test_green_dragon_provide_face_reads_wusheng_sources_from_any_zone():
+    """【武圣】的红牌（**含装备区**）也进"提供一张【杀】"的面（票 14 验收 1）。"""
+    horse = _cards("chitu")[0]
+    defender_dodge = _cards("dodge")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,), equip=(GREEN_DRAGON, horse), hero="guanyu"),
+            SeatSpec(hand=(defender_dodge,)),
+        ],
+        deck=_deck_excluding(SLASH, GREEN_DRAGON, horse, defender_dodge),
+        turn_seat=0,
+    )
+
+    engine = _run(
+        state,
+        [_green_dragon_provide_driver(), Scripted(_dodge_with_real_card)],
+        _to_provide_step,
+    )
+
+    face = _provide_face(_provide_query(engine))
+
+    # 虚拟槽的第一项是**虚拟牌** id（负数）；来源实体牌读 ``virtual_sources``——与前一条
+    # 用例的 ``sources == (dodge,)`` 同姿态，不能拿来源 id 去比虚拟牌 id。
+    assert any(
+        type_id == "slash" and sources == (horse,) for _card_id, type_id, sources in face
+    ), f"装备区的红牌是【武圣】的合法来源：{face}"
+    assert all(
+        sources != (GREEN_DRAGON,) for _card_id, _type_id, sources in face
+    ), "【青龙偃月刀】本身是黑牌，不能当【武圣】的来源"
+
+
+def test_green_dragon_continuation_ignores_distance_and_uses_the_original_target():
+    """续杀**原目标沿用 / 不计次数 / 不限距离**：目标离开攻击范围也照打（票 14 验收 2）。
+
+    构造：8 个座位，座位 0 到座位 4 的距离是 4；关羽装备【青龙偃月刀】（攻击范围 3）
+    与进攻马赤兔（−1）⇒ 距离 3，最初那张【杀】合法。座位 4 用【闪】抵消后，续杀**用赤兔
+    本身**作【武圣】的来源 ⇒ 马一离场距离就回到 4，但这一次使用**不重算距离**
+    （目标直接沿用原【杀】的目标）。
+    """
+    horse = _cards("chitu")[0]
+    defender_dodge = _cards("dodge")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,), equip=(GREEN_DRAGON, horse), hero="guanyu"),
+            *[SeatSpec() for _ in range(3)],
+            SeatSpec(hand=(defender_dodge,)),
+            *[SeatSpec() for _ in range(3)],
+        ],
+        deck=_deck_excluding(SLASH, GREEN_DRAGON, horse, defender_dodge),
+        turn_seat=0,
+    )
+
+    def driver(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _slash_use(query, SLASH, 4)
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
+        if query.kind == QueryKind.SELECT_CARDS:
+            # **必须挑赤兔那张**（虚拟槽的 ``card_id`` 是负数，来源读 ``virtual_sources``）：
+            # 摸牌阶段进手的两张红牌也是【武圣】的合法来源，改挑它们马不离场、距离压根不变，
+            # 这条用例就证明不了"续杀不重算距离"。
+            index = next(
+                i
+                for i, slot in enumerate(query.slots)
+                if slot.card is not None and tuple(slot.card.virtual_sources) == (horse,)
+            )
+            return _find(
+                query,
+                lambda action: getattr(action, "kind", None) == "SelectCards"
+                and tuple(getattr(action, "picks", ())) == (index,),
+            )
+        return None
+
+    def defender(query):
+        if query.kind == QueryKind.DODGE:
+            return _find(query, lambda action: isinstance(action, UseCard))
+        return None
+
+    # ``participants`` **按座位号索引**（``game.Engine.run``）：8 个座位就得给 8 个参与者，
+    # 追问【闪】的是座位 4，只给两个会在那个询问上 IndexError（不是引擎问错 actor）。
+    engine = _run(
+        state,
+        [
+            Scripted(driver),
+            *[Scripted() for _ in range(3)],
+            Scripted(defender),
+            *[Scripted() for _ in range(3)],
+        ],
+        lambda engine: engine.state.player(4).hp < 4,
+    )
+
+    assert engine.state.player(4).hp == 3, "续杀命中：目标离开攻击范围也照打（不限距离）"
+    assert engine.state.player(0).card_use_counts.get("slash", 0) == 1, (
+        "续杀不计次数：本回合【杀】的计数只算最初那张"
+    )
+    assert horse in engine.state.discard, "【武圣】的来源（赤兔）走正常的使用路径离场"

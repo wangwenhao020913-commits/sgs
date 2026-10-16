@@ -81,6 +81,8 @@ def deal_heroes(
     stream: Randomness,
     heroes: Sequence[str] = (),
     hero_pool: Sequence[str] | None = None,
+    pinned_hero: str | None = None,
+    pinned_seat: int = 0,
     table: HeroTable | None = None,
 ) -> tuple[str, ...] | None:
     """决定每个座位的武将 id；``None`` = **无武将模式**（一局不发武将）。
@@ -89,11 +91,23 @@ def deal_heroes(
     - ``heroes`` 为空且 ``hero_pool is None`` ⇒ **无武将模式**，返回 ``None``
       （M2 的 34 条基准靠它保持有效）；
     - ``hero_pool`` **给出**（哪怕是空元组）⇒ 随机发放：从池里无放回抽 ``seat_count`` 名；
-      空元组 = 用**数据文件里的启用池**（``enabled_hero_ids``，票 12 翻牌后非空）。
+      空元组 = 用**数据文件里的启用池**（``enabled_hero_ids``，票 12 翻牌后非空）；
+    - ``pinned_hero`` 非 ``None``（票 19 的**点将**）⇒ **部分预指派**：``pinned_seat`` 拿
+      ``pinned_hero``，其余座位从**去掉它的池**里无放回随机抽——同一局里别人**抽不到**它。
+      "去掉"因此不是过滤而是池本身变了，抽取仍只走 ``hero`` 子流、**不引入新的随机源**。
+
+    点将是"在随机发放之上钉住一个座位"，故与其它三种语义的边界必须显式：
+    ``heroes`` 非空（全显式）或 ``hero_pool is None``（无池可发其余座位）时给
+    ``pinned_hero`` 一律 **fail-closed**，不猜用户想走哪条路。``pinned_seat`` 越界同理。
 
     ``table`` 入参只为"启用池"这条缺省能被测试注入替换；缺省读当前包的武将表。
     """
     if heroes:
+        if pinned_hero is not None:
+            raise HeroDealError(
+                f"全显式（heroes={list(heroes)!r}）与点将（pinned_hero={pinned_hero!r}）"
+                "是两种互斥语义，只能给一个"
+            )
         pool = _validate_pool(tuple(heroes))
         if table is not None:
             for hero_id in pool:
@@ -105,7 +119,14 @@ def deal_heroes(
         return pool
 
     if hero_pool is None:
+        if pinned_hero is not None:
+            raise HeroDealError(
+                f"无武将模式（hero_pool=None）没有池来发其余座位，点将 {pinned_hero!r} 无从落地"
+            )
         return None
+
+    if pinned_hero is not None and not 0 <= pinned_seat < seat_count:
+        raise HeroDealError(f"点将座位越界：{pinned_seat}（本局座位 0..{seat_count - 1}）")
 
     if hero_pool == ():
         resolved = load_heroes() if table is None else table
@@ -116,4 +137,15 @@ def deal_heroes(
     if resolved is not None:
         for hero_id in pool:
             _known_hero(resolved, hero_id)
-    return _deal_from_pool(pool, seat_count, stream=stream)
+
+    if pinned_hero is None:
+        return _deal_from_pool(pool, seat_count, stream=stream)
+
+    if pinned_hero not in pool:
+        raise HeroDealError(f"点将的武将 {pinned_hero!r} 不在本局可发的池里（{list(pool)}）")
+    rest = _deal_from_pool(
+        tuple(hero_id for hero_id in pool if hero_id != pinned_hero),
+        seat_count - 1,
+        stream=stream,
+    )
+    return rest[:pinned_seat] + (pinned_hero,) + rest[pinned_seat:]

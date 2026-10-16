@@ -55,7 +55,7 @@ from sgs.resolution import Control, Frame
 from sgs.state import GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
-from .catalog import Hook, SkillDef
+from .catalog import MATCH_OWNER_KEY, Hook, SkillDef
 from .flow import FlowAnswers, PickCards, PickSeats, SkillFlow
 
 __all__ = ["LIULI_FLOW", "LIULI", "MASHU", "target_change_skill_definitions"]
@@ -91,12 +91,16 @@ def _mashu_distance(state: GameState, ctx: ModifierContext, current: Any) -> Any
 def _liuli_condition(host: Any, frame: Frame) -> bool:
     """触发条件：**持有者是这次【杀】的目标**、使用者是别人、且本人还没转移过。
 
-    ``condition`` 在派发器写 ``frame.data["skill_owner"]`` **之前**求值（票 10 §读法 5），
-    故这里读不到持有者；"持有者是谁"由 :func:`_liuli_applies`（票 08 起，效果体之前的守卫）
-    用 ``skill_owner`` 再判一次。
+    ``condition`` 在派发器写 ``frame.data["skill_owner"]`` **之前**求值，故"持有者是谁"只能读
+    派发器在求值前写好的 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（票 13）。
+    漏掉这一判据，条件对**每个存活玩家**的实例都成立 ⇒ 任何角色成为【杀】的目标都会弹
+    【流离】的"是否发动"，答发动后又被 :func:`_liuli_applies` 挡回 ⇒ 静默取消
+    （票 13；用户实机报障的"无事发生"）。
     """
     del host
     if frame.data.get(_LIULI_USED):
+        return False
+    if frame.data.get(MATCH_OWNER_KEY) not in tuple(frame.data.get("targets", ())):
         return False
     if frame.data.get("source") == frame.data.get("actor"):
         return False
@@ -126,11 +130,13 @@ def _liuli_target_pool(
 def _liuli_applies(state: GameState, frame: Frame, owner: int) -> bool:
     """**这一步此刻存在吗**：迁移前手写回调里的全部提前返回，收在一处。
 
-    派发环遍历每个存活玩家的实例，而 ``condition`` 在求值期读不到持有者（``skill_owner``
-    要到回调前才写），故"是不是这次【杀】的目标""使用者是不是自己""有没有合法新目标"
-    都必须在这里再判一次。返回 ``False`` ⇒ 成本步的 ``face`` 给出**空元组**，执行器据此
-    **一个询问都不发**（与迁移前 ``_liuli`` 的提前返回同形），也避免"没有合法新目标却先问
-    弃哪张牌"。
+    票 13 之前，``condition`` 在求值期读不到持有者，故"是不是这次【杀】的目标""使用者是不是
+    自己""有没有合法新目标"都必须在这里再判一次（否则每个实例都会走到效果体）。票 13 让
+    :func:`_liuli_condition` 读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY` 自校后，过闸的
+    实例已经只剩"本次【杀】的目标"；这一档作为**独立的第二道闸**原样保留（与
+    :func:`_liuli_effect` 的复核同姿态），并继续承担"没有合法新目标 ⇒ 连成本都不问"：
+    返回 ``False`` ⇒ 成本步的 ``face`` 给出**空元组**，执行器据此**一个询问都不发**
+    （与迁移前 ``_liuli`` 的提前返回同形）。
     """
     if frame.data.get(_LIULI_USED):
         return False

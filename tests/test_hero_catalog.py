@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 from sgs.data import (
     Gender,
@@ -26,7 +27,9 @@ from sgs.data import (
 )
 from sgs.engine import DRAW_COUNT, Engine
 from sgs.skills import CATALOG
-from sgs.state import EndPhase, Pass
+from sgs.skills.catalog import MATCH_OWNER_KEY
+from sgs.skills.move_after import MOVE_EVENT_KEY, MoveEvent
+from sgs.state import EndPhase, GameState, MoveReason, Pass, Zone, ZoneRef
 from sgs.timing import DISPATCH_WHITELIST, Timing
 
 from support import (
@@ -479,3 +482,146 @@ def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
     )
 
     assert not unnamed, "这些技能登记了测试文件、但短 id 没出现在文件里：" + "；".join(unnamed)
+
+
+# ---------------------------------------------------------------------------
+# ⑤ 钩子条件的**持有者自校**：表驱动机械检查（票 13 §要做什么 4）
+#
+# 报障两例（【反馈】【流离】）同根因：``Hook.condition`` 在条件求值期读不到持有者
+# （``skill_owner`` 要到回调前才写），于是"关于我"的判据退化成"关于任何人"——派发环会给
+# **每个存活玩家**的实例求条件，缺这一判据 = 任何人触发。这条检查让**同型的第三例再也
+# 进不来**：正表逐条给出"持有者是自己"的合成帧（条件为真），再把持有者换成别人、断言为假；
+# 覆盖断言要求 正表 ∪ 豁免表 == ``CATALOG`` 里**全部**带条件的钩子（机械发现，不手抄名单）。
+# ---------------------------------------------------------------------------
+
+ME = 1
+"""合成帧里的**技能持有者**（"我"）。"""
+
+OTHER = 2
+"""合成帧里的**别人**——把 ``MATCH_OWNER_KEY`` 换成它，就得到"持有者在别人身上"。"""
+
+_PROBE_PROCESSING_SLASH = cards_of_type(PACK, "slash")[0]
+_PROBE_CHANNEL_SLASH = cards_of_type(PACK, "slash")[1]
+_PROBE_SOURCE_CARD = cards_of_type(PACK, "peach")[0]
+"""合成局面用到的牌 id（牌堆档位固定，模块级算一次）。"""
+
+
+class _HookFrame:
+    """只带 ``data`` 的最小帧：``Hook.condition`` 的输入面就是 ``frame.data``（+ ``host.state``）。"""
+
+    def __init__(self, **data: Any) -> None:
+        self.data = data
+
+
+class _HookHost:
+    """只带 ``state`` 的最小宿主：条件里唯一用到的宿主面。"""
+
+    def __init__(self, state: GameState) -> None:
+        self.state = state
+
+
+def _probe_state() -> GameState:
+    """合成局面：座位 0 手里有牌（【反馈】的**伤害来源**）、座位 1 / 2 空手（【连营】的"已失去"）、
+    处理区有一张【杀】（【奸雄】的渠道牌）。"""
+    return build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(_PROBE_SOURCE_CARD,)), SeatSpec(), SeatSpec()],
+        processing=(_PROBE_PROCESSING_SLASH,),
+    )
+
+
+def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
+    """技能 id → **"持有者是自己"**的合成帧（条件必须为真的那一侧）。
+
+    帧里的 ``target`` / ``targets`` / ``source`` / 移动载荷都指向**别人**（座位 0 / 座位 1），
+    只有 ``MATCH_OWNER_KEY`` 由检查本身按 ME / OTHER 改写。逐条的"我"分别是：
+    受伤者（【奸雄】【遗计】）、受伤者 + 拿来源牌的持有者（【反馈】）、
+    本次【杀】的目标（【流离】）、刚失去最后一张手牌 / 装备的失主（【连营】【枭姬】）。
+    """
+    move_lianying = MoveEvent(
+        cards=(),
+        from_zone=ZoneRef(Zone.HAND, ME),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=ME,
+        after_holder=None,
+        actor=ME,
+    )
+    move_xiaoji = MoveEvent(
+        cards=(),
+        from_zone=ZoneRef(Zone.EQUIP, ME),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=ME,
+        after_holder=None,
+        actor=ME,
+    )
+    return {
+        "hero.caocao.jianxiong": _HookFrame(
+            target=ME, source=0, card=state.card(_PROBE_PROCESSING_SLASH)
+        ),
+        "hero.simayi.fankui": _HookFrame(target=ME, source=0),
+        "hero.guojia.yiji": _HookFrame(target=ME),
+        "hero.daqiao.liuli": _HookFrame(
+            source=0, actor=ME, targets=(ME,), card=state.card(_PROBE_CHANNEL_SLASH)
+        ),
+        "hero.luxun.lianying": _HookFrame(**{MOVE_EVENT_KEY: move_lianying}),
+        "hero.sunshangxiang.xiaoji": _HookFrame(**{MOVE_EVENT_KEY: move_xiaoji}),
+    }
+
+
+EXEMPT_OWNER_SELF_CHECK: dict[str, str] = {}
+"""**豁免表**：技能 id → "为什么它的条件不需要持有者判据"；**现在是空集**。
+
+姿态照 `tests/test_fuzz.py:OVER_CAP_BY_DESIGN`：例外必须显式列名 + 写明理由，覆盖断言会核
+"正表 ∪ 这张表 == 全部带条件的钩子"，故新增一条同型钩子时逼你二选一（写探针 / 登记豁免）。
+"""
+
+
+def _conditional_hook_skills() -> set[str]:
+    """``CATALOG`` 里**带条件**的钩子所属的技能 id（机械发现，不手抄名单）。"""
+    return {
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        for hook in definition.hooks
+        if hook.condition is not None
+    }
+
+
+def test_the_owner_self_check_exemption_table_is_empty() -> None:
+    """豁免表**现在是空集**：这条挡住"顺手往例外里塞一条"而没人看见。"""
+    assert EXEMPT_OWNER_SELF_CHECK == {}, (
+        "六条带条件的钩子全是『关于我』的 ⇒ 一条例外都不该有；要加必须写明理由并同步本条"
+    )
+
+
+def test_every_conditional_hook_goes_false_when_the_owner_is_someone_else() -> None:
+    """**"关于我"的钩子条件必须自校持有者**（票 13 §要做什么 4 的机械检查）。
+
+    逐条：先证明"我是持有者"时条件为真（正面对照，防"恒假的假绿"），再把
+    ``frame.data[MATCH_OWNER_KEY]`` 换成**别人**（座位 2）⇒ 条件必须为假。
+    覆盖断言 = 正表 ∪ 豁免表 恰等于全部带条件的钩子：漏写一条同型钩子的探针就红。
+    """
+    probes = _owner_probes(_probe_state())
+    discovered = _conditional_hook_skills()
+
+    assert discovered == set(probes) | set(EXEMPT_OWNER_SELF_CHECK), (
+        "有带条件的钩子既不在正表、也不在豁免表里（漏写探针）："
+        f"{sorted(discovered - set(probes) - set(EXEMPT_OWNER_SELF_CHECK))}"
+    )
+
+    state = _probe_state()
+    host = _HookHost(state)
+    for skill_id, frame in probes.items():
+        hooks = [hook for hook in CATALOG[skill_id].hooks if hook.condition is not None]
+        assert len(hooks) == 1, f"{skill_id} 的带条件钩子不止一条，探针只覆盖第一条"
+        condition = hooks[0].condition
+
+        frame.data[MATCH_OWNER_KEY] = ME
+        assert condition(host, frame) is True, (
+            f"{skill_id}：持有者是自己时条件必须成立（正面对照，否则负断言是假绿）"
+        )
+        frame.data[MATCH_OWNER_KEY] = OTHER
+        assert condition(host, frame) is False, (
+            f"{skill_id}：持有者换成别人后条件仍成立 ⇒ 触发条件没自校持有者"
+        )

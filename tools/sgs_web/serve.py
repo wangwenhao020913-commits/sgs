@@ -11,6 +11,7 @@
 ``POST``         ``/api/sessions``                   建局；返回首个挂起与快照
 ``GET``          ``/api/sessions/<id>?after=&logs=`` 取增量；**顺带判定超时**
 ``POST``         ``/api/sessions/<id>/answer``       提交应答；推进到下一个挂起或终局
+``GET``          ``/api/heroes``                     开局页点将列表（启用池的 id + 名称）
 ``GET``          ``/api/runs``                       录像列表
 ``GET``          ``/api/runs/<name>``                某局录像（meta + 记录流）
 ===============  ==================================  ==================================
@@ -38,6 +39,7 @@ from sgs_web import REPO_ROOT, ensure_engine_importable
 
 ensure_engine_importable()
 
+from sgs.data import enabled_hero_ids, load_heroes  # noqa: E402
 from sgs.engine import IllegalActionError  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
@@ -54,7 +56,7 @@ from sgs_web.session import (  # noqa: E402
 )
 from sgs_web.timeout import fallback_action  # noqa: E402
 
-__all__ = ["GameRegistry", "make_server", "main"]
+__all__ = ["GameRegistry", "hero_catalog", "make_server", "main"]
 
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
 DEFAULT_PORT = 8100
@@ -76,6 +78,21 @@ _SAVED: set[str] = set()
 """
 
 
+def hero_catalog() -> list[dict[str, str]]:
+    """开局页点将列表的只读面（票 19）：**启用池**的 ``id`` + 名称，按数据文件顺序。
+
+    池的来源与发放段**同源**（``enabled_hero_ids`` 读同一个 ``enabled`` 字段），
+    所以"列表里点得到的"与"引擎发得出的"不会各抄一份名单而漂开。
+    """
+    table = load_heroes()
+    catalog: list[dict[str, str]] = []
+    for hero_id in enabled_hero_ids(table):
+        hero = table.by_id(hero_id)
+        assert hero is not None  # enabled_hero_ids 只从这张表里挑，找不到就是上游违约
+        catalog.append({"id": hero.id, "name": hero.name})
+    return catalog
+
+
 class GameRegistry:
     """内存里的会话表；**一局一个会话**，进程重启即丢（D15、`06` §2"单机跑通再谈"）。"""
 
@@ -93,6 +110,7 @@ class GameRegistry:
             player_count=int(body.get("player_count", 8)),
             ai=str(body.get("ai", "heuristic")),
             human_seat=int(body.get("human_seat", 0)),
+            my_hero=body.get("my_hero") or None,
             timeout_seconds=body.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
             session_id=f"s{self._counter}",
         )
@@ -222,6 +240,9 @@ class _Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/runs":
                 self._send_json(200, {"runs": list_runs(self.registry.runs_dir)})
                 return
+            if parsed.path == "/api/heroes":
+                self._send_json(200, {"heroes": hero_catalog()})
+                return
             if parsed.path.startswith("/api/runs/"):
                 name = parsed.path[len("/api/runs/") :]
                 self._send_json(200, load_run(self.registry.runs_dir, name))
@@ -269,11 +290,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "未知会话"})
             return
         except StaleAnswer as error:
+            # 这份"当前挂起"是给人看的：查看者（这个会话的人类座位）随异常带出来，才能判
+            # "该不该带观看来的牌面"（票 15 私密观看 / 评审 finding ①）。
             self._send_json(
                 409,
                 {
                     "error": str(error),
-                    "pending": pending_payload(error.pending) if error.pending is not None else None,
+                    "pending": (
+                        pending_payload(error.pending, human_seat=error.human_seat)
+                        if error.pending is not None
+                        else None
+                    ),
                 },
             )
             return
