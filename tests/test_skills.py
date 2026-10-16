@@ -463,8 +463,8 @@ class _IceSwordHost:
     def has_zone_cards(self, seat: int) -> bool:
         return bool(self.state.player(seat).hand or self.state.player(seat).equip)
 
-    def ask_selection(self, frame, *, key, actor, timing, spec, build_face):
-        del frame, actor, timing, spec, build_face
+    def ask_selection(self, frame, *, owner, key, actor, timing, spec, build_face):
+        del frame, owner, actor, timing, spec, build_face
         self.keys.append(key)
         return self._answers.pop(0) if self._answers else ()
 
@@ -896,8 +896,8 @@ class _DoubleSwordHost:
         self.options.append((actor, tuple(options)))
         return SimpleNamespace(choice=self._choices[actor])
 
-    def ask_selection(self, frame, *, key, actor, timing, spec, build_face):
-        del frame, key, timing, spec, build_face
+    def ask_selection(self, frame, *, owner, key, actor, timing, spec, build_face):
+        del frame, owner, key, timing, spec, build_face
         self.selections.append(actor)
         return (self.state.player(actor).hand[0],)
 

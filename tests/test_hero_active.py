@@ -1680,6 +1680,7 @@ def test_the_flow_shape_can_express_a_dependent_two_seat_pick(monkeypatch):
     _inject_flow_skill(
         monkeypatch,
         active_module.SkillFlow(
+            name="probe_dependent_seats",
             steps=(
                 active_module.PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=1, hi=1, key="card"),
                 active_module.PickSeats(lo=2, hi=2, pool=pool, key="seat"),
@@ -1716,6 +1717,7 @@ def test_the_flow_shape_ordered_pick_never_re_offers_the_chosen_seat(monkeypatch
     _inject_flow_skill(
         monkeypatch,
         active_module.SkillFlow(
+            name="probe_ordered_seats",
             steps=(active_module.PickSeats(lo=2, hi=2, ordered=True, pool=pool, key="seat"),),
             effect=lambda host, frame, answers: None,
         ),

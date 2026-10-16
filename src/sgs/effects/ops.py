@@ -216,10 +216,23 @@ def resolve_peach_garden(host: Any, frame: Frame) -> None:
     )
 
 
+_ASK_DISMANTLEMENT = "ops.dismantlement"
+"""手写询问位置（票 22）：【过河拆桥】目标区选一张牌。"""
+
+_ASK_SNATCH = "ops.snatch"
+"""手写询问位置（票 22）：【顺手牵羊】目标区选一张牌。"""
+
+_ASK_HARVEST = "ops.harvest"
+"""手写询问位置（票 22）：【五谷丰登】目标从剩余亮牌里取一张。"""
+
+
 def _take_one_zone_card(
-    host: Any, frame: Frame, *, key: str, owner_seat: int, timing: Timing
+    host: Any, frame: Frame, *, ask_owner: Any, key: str, owner_seat: int, timing: Timing
 ) -> Any:
     """在 ``owner_seat`` 的三区同面上选一张牌；池为空 ⇒ 直接返回空元组（不发询问）。
+
+    ``ask_owner`` 是这个询问的**询问位置**（票 22）：本 helper 服务两个技能（拆 / 顺），
+    两次调用的面与池不同，故位置由调用方各自给一个模块级常量，不与 ``key``（询问名）混同。
 
     返回 ``"stay"`` 哨兵（经 ``ask_selection`` 转成 ``SUSPEND``）时调用方据此让出控制权。
     """
@@ -228,6 +241,7 @@ def _take_one_zone_card(
     spec = _zone_selection_spec()
     return host.ask_selection(
         frame,
+        owner=ask_owner,
         key=f"{key}:{owner_seat}",
         actor=frame.data["source"],
         timing=timing,
@@ -260,7 +274,12 @@ def resolve_dismantlement(host: Any, frame: Frame) -> Any:
     """【过河拆桥】：当前目标**区域里的一张牌**进弃牌堆（三区同面，不另发区域询问）。"""
     target = host.current_target(frame)
     picked = _take_one_zone_card(
-        host, frame, key="dismantlement", owner_seat=target, timing=Timing.RESOLVE_AFTER_EFFECT
+        host,
+        frame,
+        ask_owner=_ASK_DISMANTLEMENT,
+        key="dismantlement",
+        owner_seat=target,
+        timing=Timing.RESOLVE_AFTER_EFFECT,
     )
     if host.suspended(picked):
         return "stay"
@@ -271,7 +290,12 @@ def resolve_snatch(host: Any, frame: Frame) -> Any:
     """【顺手牵羊】：当前目标的**一张牌**进使用者的手牌（距离 1 由目标规则保证）。"""
     target = host.current_target(frame)
     picked = _take_one_zone_card(
-        host, frame, key="snatch", owner_seat=target, timing=Timing.RESOLVE_AFTER_EFFECT
+        host,
+        frame,
+        ask_owner=_ASK_SNATCH,
+        key="snatch",
+        owner_seat=target,
+        timing=Timing.RESOLVE_AFTER_EFFECT,
     )
     if host.suspended(picked):
         return "stay"
@@ -517,6 +541,7 @@ def pick_harvest(host: Any, frame: Frame) -> Any:
 
     picked = host.ask_selection(
         frame,
+        owner=_ASK_HARVEST,
         key=f"harvest:{target}",
         actor=target,
         timing=Timing.RESOLVE_AFTER_EFFECT,

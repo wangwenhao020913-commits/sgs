@@ -249,6 +249,7 @@ def _fankui_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
 
 
 FANKUI_FLOW = SkillFlow(
+    name="fankui",
     steps=(
         PickCards(
             zones=(Zone.HAND, Zone.EQUIP),
@@ -312,6 +313,11 @@ def _yiji_keys(point: int) -> tuple[str, str]:
     return (f"{YIJI_SEEN_KEY}:{point}", f"{YIJI_GIVEN_KEY}:{point}")
 
 
+_ASK_YIJI_PICK = "hero.guojia.yiji.pick"
+"""手写询问位置（票 22）：【遗计】从亮牌里选牌的那次 ``ask_selection``（轮次由 ``key``
+的 ``:<point>:<round>`` 改**询问名**）。"""
+
+
 def _yiji(host: Any, frame: Any) -> Any:
     """郭嘉【遗计】：观看牌堆顶 2 张，然后交给任意角色（规则 993；逐点触发）。
 
@@ -364,6 +370,7 @@ def _yiji(host: Any, frame: Any) -> Any:
     spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 2), optional=True)
     picked = host.ask_selection(
         frame,
+        owner=_ASK_YIJI_PICK,
         key=f"yiji:pick:{point}:{round_index}",
         actor=owner,
         timing=Timing.DAMAGE_AFTER_TAKE,

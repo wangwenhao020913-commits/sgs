@@ -172,6 +172,11 @@ def _over_cap(*dimensions: int) -> bool:
     return total > CANDIDATE_CAP
 
 
+_ASK_PAY_SEQUENTIAL = "active.pay_sequential"
+"""手写询问位置（票 22）：:func:`_pay_sequential` 的顺序多轮付成本询问（逐轮各改一次
+**询问名**——位置只管"这是哪一处询问"，轮次由 ``key`` 的 ``:<index>`` 承担）。"""
+
+
 def _pay_sequential(
     host: Any,
     frame: Any,
@@ -194,6 +199,7 @@ def _pay_sequential(
     while len(chosen) < needed:
         picked = host.ask_selection(
             frame,
+            owner=_ASK_PAY_SEQUENTIAL,
             key=f"{key_prefix}:{index}",
             actor=owner,
             timing=Timing.PHASE_PLAY_IDLE,
@@ -363,6 +369,7 @@ def _zhiheng_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
 
 
 ZHIHENG_FLOW = SkillFlow(
+    name="zhiheng",
     steps=(PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=1, hi=None, key="card"),),
     effect=_zhiheng_effect,
 )
@@ -474,6 +481,7 @@ def _rende_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
 
 
 RENDE_FLOW = SkillFlow(
+    name="rende",
     steps=(
         PickCards(zones=(Zone.HAND,), lo=1, hi=None, key="card"),
         PickSeats(lo=1, hi=1, pool=_rende_targets, key="seat"),
@@ -567,6 +575,7 @@ def _fanjian_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
 
 
 FANJIAN_FLOW = SkillFlow(
+    name="fanjian",
     steps=(
         PickSeats(lo=1, hi=1, pool=_fanjian_targets, key="seat"),
         PickOption(options=_SUIT_OPTIONS, actor=_fanjian_target, key="suit"),
@@ -634,6 +643,7 @@ def _qingnang_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
 
 
 QINGNANG_FLOW = SkillFlow(
+    name="qingnang",
     steps=(
         PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="card"),
         PickSeats(lo=1, hi=1, pool=_qingnang_targets, key="seat"),
@@ -694,6 +704,10 @@ def _lijian_partners(state: GameState, owner: int) -> dict[int, tuple[int, ...]]
     }
 
 
+_ASK_LIJIAN_CARD = "hero.diaochan.lijian.card"
+"""手写询问位置（票 22）：:func:`_lijian_activate` 步 1 的"弃一张牌"。"""
+
+
 def _lijian_activate(host: Any, frame: Any) -> Any:
     """票 01 的**步骤流水线**：弃 1 张牌 → 选使用者 → 选目标 → 一次性结算。
 
@@ -711,6 +725,7 @@ def _lijian_activate(host: Any, frame: Any) -> Any:
     # 步 1：弃置 1 张牌（手牌 ∪ 装备区）。``optional=True`` 给出一条 ``Pass`` = 取消。
     picks = host.ask_selection(
         frame,
+        owner=_ASK_LIJIAN_CARD,
         key="lijian:card",
         actor=owner,
         timing=Timing.PHASE_PLAY_IDLE,
@@ -825,6 +840,7 @@ def _jieyin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
 
 
 JIEYIN_FLOW = SkillFlow(
+    name="jieyin",
     steps=(
         PickCards(zones=(Zone.HAND,), lo=2, hi=2, key="card"),
         PickSeats(lo=1, hi=1, pool=_jieyin_targets, key="seat"),

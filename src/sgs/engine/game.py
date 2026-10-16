@@ -1300,6 +1300,7 @@ class Engine:
         self,
         frame: Frame,
         *,
+        owner: Any,
         key: str,
         actor: int,
         timing: Timing,
@@ -1315,17 +1316,34 @@ class Engine:
         故绝不能因重入而重跑；答案回来后把该位置解析成实体 ``card_id`` 元组返回。
         池为空时**不构造询问**、直接返回空元组（票 19 §6）。
 
+        **``owner`` 是这次询问的**询问位置**（票 22，**必填**；不给在发问前就
+        ``TypeError``）**：帧内缓存（答案与自建的面）按 ``(owner, key)`` 分桶，于是"这一步
+        问的答案"与"哪一步问的"**绑在一起**。``owner`` 与 ``key`` 是两件事 —— ``key`` 是
+        这一步的**询问名**（也是面 / 记录流里的键），``owner`` 是**询问位置**（逐处唯一）：
+
+        - 步骤流水线（:func:`~sgs.skills.flow.run_flow`）给 ``(flow.name, index)`` ——
+          重入时"从头重跑一遍步骤"，位置索引天然稳定；
+        - 手写回调各用一个模块级常量（:data:`~sgs.skills.flow.AskIdentity` 的两个形状）。
+
+        术语见 ``GLOSSARY.md`` 的**询问标识**；这里两个名字都与**归属**（移动报文里那个
+        冻结的 ``owner`` 字段）无关，也与座位意义上的持有者无关。
+
+        本仓不配 typechecker，故用运行期必填参数而不是类型系统来挡"漏给位置"。票 21 的
+        ``KeyError`` 就是两个步骤共用 ``key`` 导致的：后者的询问命中前者留下的答案，
+        取回的 id 与**自己那份面**不同源。
+
         面的真源**只有一处**（评审 Standards finding 2）：**恰好**给一个 ——
 
-        - ``build_face``：调用方给惰性构造器，面缓存在这里的 ``frame.data["asks"][key]``；
+        - ``build_face``：调用方给惰性构造器，面缓存在这里的
+          ``frame.data["asks"][(owner, key)]``；
         - ``face``：调用方**自己**已经缓存了面（如 :func:`~sgs.skills.flow._flow_step_provide`
-          的 ``provide_face:<key>``），这里直接用它、**不再另存一份**。两份缓存曾让"面"与
-          "答案"可能分母不同（票 21 的 ``KeyError`` 就是它），现在结构上不可能：同一帧里
-          这个询问只认一个面。
+          的 ``provide_faces[(owner, key)]``），这里直接用它、**不再另存一份**。两份缓存曾让
+          "面"与"答案"可能分母不同（票 21 的 ``KeyError`` 就是它），现在结构上不可能：
+          同一帧里这个询问只认一个面。
 
-        答案也按帧内键缓存（票 30）：钩子可以跨多次重入，重入时既不重发询问、也不
-        重算选择面。``spec.optional = True`` 时可选 ``Pass`` 表示"不再选"（票 04 的
-        顺序多轮用它收尾），返回空元组。
+        答案也按 ``(owner, key)`` 帧内缓存（票 30）：钩子可以跨多次重入，重入时既不重发
+        询问、也不重算选择面。``spec.optional = True`` 时可选 ``Pass`` 表示"不再选"
+        （票 04 的顺序多轮用它收尾），返回空元组。
 
         ``revealed`` 是本次询问**授予 ``actor`` 的牌面**（票 05 的【遗计】：选牌面位置上
         铺的是"牌堆顶 2 张"这样的实体牌，但牌面本身本不该进任何视角）。通道与
@@ -1335,16 +1353,17 @@ class Engine:
             raise TypeError(
                 "ask_selection 必须**恰好**给一个面来源：build_face（这里缓存）或 face（调用方缓存）"
             )
+        identity = (owner, key)
         answers = frame.data.setdefault("ask_answers", {})
-        answer_key = ("select", key)
+        answer_key = ("select", *identity)
         if answer_key in answers:
             return answers[answer_key]
-        owned_store: dict[str, Any] | None = None
+        owned_store: dict[Any, Any] | None = None
         if face is None:
             owned_store = frame.data.setdefault("asks", {})
-            if key not in owned_store:
-                owned_store[key] = build_face()
-            slots, card_ids = owned_store[key]
+            if identity not in owned_store:
+                owned_store[identity] = build_face()
+            slots, card_ids = owned_store[identity]
         else:
             slots, card_ids = face
         if not slots:
@@ -1371,12 +1390,12 @@ class Engine:
             # ``SelectionSpec(optional=True)`` 的"够了 / 不选了"出口（票 04 的顺序多轮）：
             # 空元组与"池为空"同形，调用方据此收尾。
             if owned_store is not None:
-                owned_store.pop(key, None)
+                owned_store.pop(identity, None)
             answers[answer_key] = ()
             return ()
         assert isinstance(action, SelectCards)
         if owned_store is not None:
-            owned_store.pop(key, None)
+            owned_store.pop(identity, None)
         result = tuple(card_ids[index] for index in action.picks)
         answers[answer_key] = result
         return result

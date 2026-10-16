@@ -924,6 +924,10 @@ def _is_owner_slash_damage(frame: Frame, instance: SkillInstance) -> bool:
     return card is not None and card.type == "slash"
 
 
+_ASK_DOUBLE_SWORD_DISCARD = "equip.double_sword.discard"
+"""手写询问位置（票 22）：【雌雄双股剑】目标弃一张手牌的那次 ``ask_selection``。"""
+
+
 def _double_sword(host: Any, frame: Frame) -> Control:
     """雌雄双股剑：你使用【杀】指定**异性**目标后，令其选择"弃一张手牌"或"你摸一张"。
 
@@ -954,6 +958,7 @@ def _double_sword(host: Any, frame: Frame) -> Control:
         if answer.choice == "discard_one":
             picked = host.ask_selection(
                 frame,
+                owner=_ASK_DOUBLE_SWORD_DISCARD,
                 key=f"double_sword:{target}",
                 actor=target,
                 timing=Timing.USE_AFTER_DESIGNATE_TARGET,
@@ -985,6 +990,10 @@ def _double_sword(host: Any, frame: Frame) -> Control:
         cursor += 1
         frame.data["double_sword_cursor"] = cursor
     return None
+
+
+_ASK_ICE_SWORD_DISCARD = "equip.ice_sword.discard"
+"""手写询问位置（票 22）：【寒冰剑】逐轮弃牌的那次 ``ask_selection``。"""
 
 
 def _ice_sword(host: Any, frame: Frame) -> Control:
@@ -1046,6 +1055,7 @@ def _ice_sword(host: Any, frame: Frame) -> Control:
             break
         picked = host.ask_selection(
             frame,
+            owner=_ASK_ICE_SWORD_DISCARD,
             key=f"ice_sword:{done}",
             actor=frame.data.get("skill_owner"),
             timing=Timing.DAMAGE_DEAL,
@@ -1122,6 +1132,7 @@ def _qilin_bow_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
 
 
 QILIN_BOW_FLOW = SkillFlow(
+    name="qilin_bow",
     steps=(
         PickCards(
             zones=(Zone.EQUIP,),
@@ -1182,6 +1193,7 @@ def _green_dragon_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Contr
 
 
 GREEN_DRAGON_FLOW = SkillFlow(
+    name="green_dragon_blade",
     steps=(
         PickProvide(
             type_id="slash",
@@ -1192,10 +1204,12 @@ GREEN_DRAGON_FLOW = SkillFlow(
             # 发动询问那一道（答 ``Pass`` ⇒ 一个询问都不发）。
             optional=False,
             key="card",
-            # 帧内询问缓存键给一个**本步独有**的名字（票 21）：同一个【杀】帧里
-            # 【流离】的成本步也是 ``key="card"`` 的 ``PickCards``，两者共用缓存键时
-            # 本步会命中前者的答案——那份答案来自**另一份面**，``refs`` 里没有 ⇒
-            # ``KeyError``。``key`` 不变（效果读 ``answers["card"]``、前端取文案都不动）。
+            # **历史**（票 21）：同一个【杀】帧里【流离】的成本步也是 ``key="card"`` 的
+            # ``PickCards``，两者共用缓存键时本步会命中前者的答案——那份答案来自**另一份
+            # 面**，``refs`` 里没有 ⇒ ``KeyError``。票 21 用一个本步独有的 ``cache_key``
+            # 躲开它；票 22 起跨步骤隔离由**询问位置** ``(flow.name, index)`` 承担，这个
+            # ``cache_key`` 因此只剩"本步的询问名"这一层含义，保留它是为了不动既有的
+            # 询问记录与前端文案（``key`` 仍是 ``"card"``，效果读 ``answers["card"]``）。
             cache_key="green_dragon_blade",
         ),
     ),
@@ -1241,6 +1255,7 @@ def _axe_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
 
 
 AXE_FLOW = SkillFlow(
+    name="axe",
     steps=(
         PickCards(
             zones=(Zone.HAND, Zone.EQUIP),

@@ -47,6 +47,7 @@ from sgs.timing import Timing
 __all__ = [
     "SEAT_PREFIX",
     "ActorRef",
+    "AskIdentity",
     "FlowAnswers",
     "FlowEffect",
     "FlowStep",
@@ -56,6 +57,7 @@ __all__ = [
     "PickSeats",
     "SeatPool",
     "SkillFlow",
+    "ask_key_of",
     "option_seat",
     "run_flow",
     "seat_choice",
@@ -112,17 +114,32 @@ ActorRef = int | None | Callable[[GameState, Any, int, FlowAnswers], int]
 FlowEffect = Callable[[Any, Any, FlowAnswers], Any]
 """流水线效果：``(host, frame, answers) -> Control``；只在**所有步骤提交后**跑一次。"""
 
+AskIdentity = str | tuple[str, int]
+"""一次询问的**询问位置**（票 22）：:meth:`Engine.ask_selection` 的 ``owner`` 参数。
+
+两档形状，各自在调用侧机械给出：步骤流水线是 ``(flow.name, index)``（:func:`run_flow` 的
+``enumerate`` 直接给；重入时从头重跑一遍步骤，序号跨重入天然稳定），手写回调是各调用点
+自己的模块级字符串常量。它不是步骤名 :data:`FlowAnswers` 的键（那个是**询问名**：效果读
+答案、前端取文案）——引擎把**位置**（本类型）与**名字**（``key``）拼成 ``(owner, key)``
+一起分桶，故同一帧里两个不同的询问即便同名也不共用缓存槽。术语见 ``GLOSSARY.md`` 的
+**询问标识**。
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class PickCards:
     """选牌步骤：在 ``zones`` 上问一次 ``SELECT_CARDS``（``lo..hi`` 张）。
 
     ``key`` 是**效果读取答案**的键（同一条流水线里唯一）；``optional=True`` 给一条
-    ``Pass`` = 取消整条流水线。``cache_key`` 是帧内 ``ask_selection`` 的**缓存键**，
+    ``Pass`` = 取消整条流水线。``cache_key`` 是帧内 ``ask_selection`` 的**询问键**，
     缺省 = ``key``；它可以是 ``str``，也可以是 ``(frame) -> str``（票 07）——**同一次伤害
     事件按伤害值逐轮派发**时，第 2 点的缓存键必须与第 1 点不同，否则第二次会命中第一次
     留下的缓存答案（【反馈】的 ``fankui_step_key``）。两件事分开，是因为"这一步叫什么"
     与"这一次问的答案存哪儿"在逐点派发里不再是一回事。
+
+    **跨步骤的隔离不靠 ``cache_key``**（票 22）：同一个 frame 里两个**不同步骤**的询问缓存
+    由**询问位置** ``(flow.name, index)`` 分开，故它们即便共用 ``cache_key`` 也不会串答案；
+    逐点 / 逐轮的"同一步问多次"仍靠 ``cache_key``（同一步的位置不变）。
 
     ``hi=None`` = **"全部可选牌"**（票 04）：执行器在发问前把它解析成**过滤后**选择面的
     槽位数（:func:`zone_pool_size` 给出 ``zones`` 此刻对 ``face`` 铺出的槽位，再按
@@ -179,11 +196,11 @@ class PickProvide:
     :class:`PickCards` 同义。``hi=None`` 尚无消费者，本步恒取定数张。
 
     ``cache_key``（票 21）与 :class:`PickCards` 的**同名参数**同义：帧内 ``ask_selection``
-    的缓存键，缺省 = ``key``。它与 ``key`` 分开是因为"这一步叫什么"（效果读答案、前端取
-    文案）与"这一次问的答案存哪儿"不是一回事——**同一帧里两个不同的步骤若共用同一个缓存
-    键，后者的询问会直接命中前者留下的答案**（:meth:`Engine.ask_selection` 的帧内答案缓存
-    只按 key 分桶），答出的 id 属于**另一份面**，取 ``refs`` 时就是 ``KeyError``（票 21 的
-    【流离】成本步 vs【青龙偃月刀】提供步）。
+    的询问名，缺省 = ``key``。它与 ``key`` 分开是因为"这一步叫什么"（效果读答案、前端取
+    文案）与"这一次问的答案存哪儿"不是一回事。**票 21 曾用它来躲跨步骤撞车**（同一帧里
+    【流离】成本步 vs 本步共用缺省 ``key="card"`` ⇒ 后者命中前者的答案、``refs`` 里没有 ⇒
+    ``KeyError``）；**票 22 起跨步骤的隔离改由询问位置 ``(flow.name, index)`` 承担**，
+    ``cache_key`` 只再管"同一步问多次"（逐点 / 逐轮，此时位置不变）。
     """
 
     type_id: str
@@ -255,11 +272,37 @@ class SkillFlow:
     ``catalog._ice_sword`` 的 docstring）。后来者若要在这里加循环步骤，
     **A 族 / 【反馈】/【流离】/ 装备各条的"取消零副作用"必须一字不动** —— 它是本模块的
     中心契约，不按消费者分档。
+
+    **``name``（票 22）**：这条流水线的**稳定短名**，与步骤序号一起构成每个步骤的
+    **询问位置** ``(name, index)``。它必须逐流程唯一（``tests/test_ask_points.py`` 机械核），
+    否则同一个帧里两条流程的同一位置会共用询问缓存。名字**不进记录流**，故既有录像不受
+    影响。
     """
 
+    name: str
     steps: tuple[FlowStep, ...]
     effect: FlowEffect
     once_per_phase: bool = True
+
+    def __post_init__(self) -> None:
+        """**同一流程内步骤 ``key`` 两两不同**（票 22）：重复即流程定义写错。
+
+        ``run_flow`` 把答案按 ``answers[step.key]`` 回写给 ``effect``，故同流程内重名必然
+        互相覆盖 —— 它不会撞询问缓存（位置含步骤序号），但会让效果读到别步的答案，
+        属"写错了要在构造期炸掉"的一类，不是运行期可恢复的状态。
+        """
+        if not self.name:
+            raise ValueError("SkillFlow.name 是询问位置的一部分，必须非空")
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for step in self.steps:
+            if step.key in seen and step.key not in duplicates:
+                duplicates.append(step.key)
+            seen.add(step.key)
+        if duplicates:
+            raise ValueError(
+                f"SkillFlow {self.name!r} 的步骤 key 必须两两不同，重复：{sorted(duplicates)}"
+            )
 
 
 def _resolve_actor(
@@ -293,6 +336,22 @@ def _flow_actor(
 ) -> int:
     """这一步由谁应答：``None`` = 发动者，``int`` = 该座位，可调用 = 由流答案派生。"""
     return _resolve_actor(step.actor, state, frame, owner, answers)
+
+
+def ask_key_of(step: PickCards | PickProvide, frame: Any = None) -> str:
+    """这一步的**询问名**：``cache_key`` 优先，缺省 = 步骤 ``key``（票 22）。
+
+    唯一实现（原先在选牌步与提供步各抄了一份）：``cache_key`` 是同一步问多次（逐点 /
+    逐轮）时的**名字**那一半；可调用档要用 ``frame`` 求值（【反馈】的 ``fankui_step_key``），
+    静态消费方（机械闸）给 ``frame=None`` 时只取得到字符串档，故这里对可调用档 fail-closed
+    地回落到步骤名。
+    """
+    cache_key = step.cache_key
+    if cache_key is None:
+        return step.key
+    if callable(cache_key):
+        return step.key if frame is None else str(cache_key(frame))
+    return cache_key
 
 
 def _flow_option_id(frame: Any, key: str, index: int, *, multi: bool) -> str:
@@ -419,7 +478,13 @@ def _filter_face(
 
 
 def _flow_step_cards(
-    host: Any, frame: Any, step: PickCards, owner: int, answers: FlowAnswers, timing: Timing
+    host: Any,
+    frame: Any,
+    step: PickCards,
+    owner: int,
+    answers: FlowAnswers,
+    timing: Timing,
+    ask_owner: Any,
 ) -> tuple[str, object]:
     """跑一步选牌：返回 ``("stay", ())`` / ``("cancel", ())`` / ``("ok", picks)``。
 
@@ -449,9 +514,7 @@ def _flow_step_cards(
     )
     if face == ():
         return "cancel", ()
-    cache_key = step.cache_key if step.cache_key is not None else step.key
-    if callable(cache_key):
-        cache_key = cache_key(frame)
+    cache_key = ask_key_of(step, frame)
     if step.card_types or step.slot_kinds:
         hi = (
             step.hi
@@ -468,6 +531,7 @@ def _flow_step_cards(
         hi = step.hi if step.hi is not None else _zone_pool_size(host.state, face, step.zones)
     picks = host.ask_selection(
         frame,
+        owner=ask_owner,
         key=cache_key,
         actor=actor,
         timing=timing,
@@ -540,7 +604,13 @@ def provide_face(
 
 
 def _flow_step_provide(
-    host: Any, frame: Any, step: PickProvide, owner: int, answers: FlowAnswers, timing: Timing
+    host: Any,
+    frame: Any,
+    step: PickProvide,
+    owner: int,
+    answers: FlowAnswers,
+    timing: Timing,
+    ask_owner: Any,
 ) -> tuple[str, object]:
     """跑一步"提供一张 B"：返回三态 + ``tuple[CardRef, ...]``。
 
@@ -548,21 +618,22 @@ def _flow_step_provide(
     答案从槽位回读**牌面**——虚拟 B 的负 id 进不了 :meth:`GameState.card`。
 
     **面只有一处缓存**（评审 Standards finding 2）：住在本步自己的帧内键
-    ``provide_face:<有效询问键>`` 里，``ask_selection`` 通过 ``face=`` **直接用这一份**、
-    不再在 ``asks`` 里另存第二份（那是票 21 ``KeyError`` 的土壤：两份缓存一旦分母不同，
-    另一份面的答案就会被喂进 ``refs``）。重入时来源牌可能已经离区（被用掉的那张【杀】
-    不在手里了），重算出来的面会与**已缓存的答案**（面内位置）对不上——复用同一份面才对。
-    面的缓存键取**有效的询问键**（``cache_key`` 优先），与答案缓存**同源**（票 21）。
+    ``frame.data["provide_faces"][(ask_owner, cache_key)]`` 里，``ask_selection`` 通过
+    ``face=`` **直接用这一份**、不再在 ``asks`` 里另存第二份（那是票 21 ``KeyError`` 的
+    土壤：两份缓存一旦分母不同，另一份面的答案就会被喂进 ``refs``）。重入时来源牌可能
+    已经离区（被用掉的那张【杀】不在手里了），重算出来的面会与**已缓存的答案**（面内位置）
+    对不上——复用同一份面才对。缓存键与 :meth:`Engine.ask_selection` 的答案缓存**逐字
+    同源**（``(询问位置, 询问名)``，票 22）：两个提供步即便共用 ``cache_key`` 也不会互相
+    串面；同一步用可调用的 ``cache_key`` 逐轮改名时，每轮各有一份自己的面（不会拿上一轮的
+    面去解析这一轮的答案）。
     """
     actor = _flow_actor(step, host.state, frame, owner, answers)
-    cache_key = step.cache_key if step.cache_key is not None else step.key
-    if callable(cache_key):
-        cache_key = cache_key(frame)
-    face_key = f"provide_face:{cache_key}"
-    face = frame.data.get(face_key)
+    cache_key = ask_key_of(step, frame)
+    faces = frame.data.setdefault("provide_faces", {})
+    face = faces.get((ask_owner, cache_key))
     if face is None:
         face = provide_face(host.state, actor, step.type_id, step.zones)
-        frame.data[face_key] = face
+        faces[(ask_owner, cache_key)] = face
     slots, _card_ids = face
     if len(slots) < step.lo:
         return "cancel", ()
@@ -573,6 +644,7 @@ def _flow_step_provide(
     }
     picked = host.ask_selection(
         frame,
+        owner=ask_owner,
         key=cache_key,
         actor=actor,
         timing=timing,
@@ -592,9 +664,16 @@ def _flow_step_provide(
 
 
 def _flow_step_seats(
-    host: Any, frame: Any, step: PickSeats, owner: int, answers: FlowAnswers, timing: Timing
+    host: Any,
+    frame: Any,
+    step: PickSeats,
+    owner: int,
+    answers: FlowAnswers,
+    timing: Timing,
+    ask_owner: Any,
 ) -> tuple[str, object]:
     """跑一步选座位（``lo..hi`` 次 ``SELECT_OPTION``）：返回三态 + 座位元组。"""
+    del ask_owner  # 座位步走 ``ask_option``，其询问名是 ``skill_id``（自带步骤序号）
     actor = _flow_actor(step, host.state, frame, owner, answers)
     chosen: list[int] = []
     while len(chosen) < step.hi:
@@ -625,9 +704,16 @@ def _flow_step_seats(
 
 
 def _flow_step_option(
-    host: Any, frame: Any, step: PickOption, owner: int, answers: FlowAnswers, timing: Timing
+    host: Any,
+    frame: Any,
+    step: PickOption,
+    owner: int,
+    answers: FlowAnswers,
+    timing: Timing,
+    ask_owner: Any,
 ) -> tuple[str, object]:
     """跑一步选项询问：返回三态 + 选项文本。"""
+    del ask_owner  # 选项步走 ``ask_option``，其询问名是 ``skill_id``（自带步骤序号）
     actor = _flow_actor(step, host.state, frame, owner, answers)
     if not step.options:
         return "cancel", ""
@@ -705,9 +791,9 @@ def run_flow(
     # （票 12 §2 收紧后的契约；见 :class:`_Unset`）。
     seat = int(frame.data["source"]) if owner is _UNSET else int(owner)
     answers: dict[str, object] = {}
-    for step in flow.steps:
+    for index, step in enumerate(flow.steps):
         status, value = _FLOW_STEP_RUNNERS[type(step)](
-            host, frame, step, seat, answers, timing
+            host, frame, step, seat, answers, timing, (flow.name, index)
         )
         if status == "stay":
             return "stay"

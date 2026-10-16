@@ -24,7 +24,14 @@ from sgs.data import load_content_pack
 from sgs.engine import Engine
 from sgs.skills import Hook, Seam, catalog as catalog_module
 from sgs.skills.damage_after import FANKUI_FLOW, fankui_step_key
-from sgs.skills.flow import PickCards, PickProvide, SkillFlow, _flow_step_cards, run_flow
+from sgs.skills.flow import (
+    PickCards,
+    PickProvide,
+    PickSeats,
+    SkillFlow,
+    _flow_step_cards,
+    run_flow,
+)
 from sgs.state import (
     FrameKind,
     Pass,
@@ -77,7 +84,11 @@ def _noop(host, frame):
 
 
 def _noop_flow() -> SkillFlow:
-    return SkillFlow(steps=(PickCards(zones=(Zone.HAND,), lo=1, hi=1),), effect=_noop)
+    return SkillFlow(
+        name="noop",
+        steps=(PickCards(zones=(Zone.HAND,), lo=1, hi=1),),
+        effect=_noop,
+    )
 
 
 def test_a_hook_requires_exactly_one_of_handler_and_flow():
@@ -241,13 +252,14 @@ def test_run_flow_needs_an_integer_owner_and_reads_the_frame_source_by_default()
             return tuple(slots), tuple(card_ids)
 
         @staticmethod
-        def ask_selection(frame, *, key, actor, timing, spec, build_face):
-            del frame, key, timing, spec
+        def ask_selection(frame, *, owner, key, actor, timing, spec, build_face):
+            del frame, owner, key, timing, spec
             build_face()
             seen["actor"] = actor
             return (0,)
 
     flow = SkillFlow(
+        name="probe_actor",
         steps=(PickCards(zones=(Zone.HAND,), lo=1, hi=1, optional=False),),
         effect=lambda host, frame, answers: None,
     )
@@ -367,8 +379,8 @@ def test_pick_cards_card_types_filter_narrows_the_face_and_the_hi_none_limit():
             return tuple(slots), tuple(card_ids)
 
         @staticmethod
-        def ask_selection(frame, *, key, actor, timing, spec, build_face):
-            del frame, key, actor, timing
+        def ask_selection(frame, *, owner, key, actor, timing, spec, build_face):
+            del frame, owner, key, actor, timing
             slots, _card_ids = build_face()
             seen["total"] = spec.total
             seen["offered"] = [slot.card.card_id for slot in slots]
@@ -382,7 +394,9 @@ def test_pick_cards_card_types_filter_narrows_the_face_and_the_hi_none_limit():
         card_types=("slash",),
     )
 
-    _flow_step_cards(_Host(), _Frame(source=0), step, 0, {}, Timing.PHASE_PLAY_IDLE)
+    _flow_step_cards(
+        _Host(), _Frame(source=0), step, 0, {}, Timing.PHASE_PLAY_IDLE, ("probe", 0)
+    )
 
     assert seen["total"] == (1, 2), "上限 = 过滤后的池大小（2 张【杀】），不是手牌 3 张"
     assert seen["offered"] == list(slashes), "选择面也只铺【杀】"
@@ -429,8 +443,8 @@ def test_pick_cards_slot_kinds_filter_narrows_the_face_and_the_hi_none_limit():
             return tuple(slots), tuple(card_ids)
 
         @staticmethod
-        def ask_selection(frame, *, key, actor, timing, spec, build_face):
-            del frame, key, actor, timing
+        def ask_selection(frame, *, owner, key, actor, timing, spec, build_face):
+            del frame, owner, key, actor, timing
             slots, _card_ids = build_face()
             seen["total"] = spec.total
             seen["offered"] = [slot.card.card_id for slot in slots]
@@ -444,7 +458,9 @@ def test_pick_cards_slot_kinds_filter_narrows_the_face_and_the_hi_none_limit():
         slot_kinds=(SlotKind.HORSE_DEFENSE, SlotKind.HORSE_OFFENSE),
     )
 
-    _flow_step_cards(_Host(), _Frame(source=0), step, 0, {}, Timing.DAMAGE_DEAL)
+    _flow_step_cards(
+        _Host(), _Frame(source=0), step, 0, {}, Timing.DAMAGE_DEAL, ("probe", 0)
+    )
 
     assert seen["total"] == (1, 1), "上限 = 过滤后的池大小（1 匹坐骑），不是装备区 2 张"
     assert seen["offered"] == [mount], "选择面也只铺坐骑（武器不在其中）"
@@ -456,12 +472,15 @@ def test_pick_cards_slot_kinds_filter_narrows_the_face_and_the_hi_none_limit():
 
 
 def test_provide_step_keeps_a_single_face_cache_on_the_real_engine():
-    """提供步的面只缓存在 ``provide_face:<键>``，``Engine.ask_selection`` 不再另存一份。
+    """提供步的面只缓存在 ``provide_faces[(询问位置, 询问名)]``，``Engine.ask_selection``
+    不再另存一份。
 
-    旧实现是两份：本步的 ``frame.data["provide_face:<键>"]`` 与 ``Engine.ask_selection``
-    内部的 ``frame.data["asks"][<键>]``。票 21 的 ``KeyError`` 正是两份不同源的结果。
-    现在本步把面**直接交给** ``ask_selection``（``face=``）、后者不再往 ``asks`` 里写，
-    故这里断的是结构事实：面在本步的键里、``asks`` **根本不存在**；重入复用同一个面对象。
+    旧实现是两份：本步自己的帧内键与 ``Engine.ask_selection`` 内部的 ``frame.data["asks"]``。
+    票 21 的 ``KeyError`` 正是两份不同源的结果。现在本步把面**直接交给** ``ask_selection``
+    （``face=``）、后者不再往 ``asks`` 里写，故这里断的是结构事实：面在本步的键里、
+    ``asks`` **根本不存在**；重入复用同一个面对象。票 22 起这个键与答案缓存**逐字同源**
+    （``(询问位置, 询问名)``）而不是只认字符串 ``cache_key``，两个提供步共用 ``cache_key``
+    也不会互相串面；同一步用可调用的 ``cache_key`` 逐轮改名时每轮各有一份面。
     """
     slash = _cards("slash")[0]
     state = build_state(
@@ -475,6 +494,7 @@ def test_provide_step_keeps_a_single_face_cache_on_the_real_engine():
         FrameKind.USE, {"source": 0, "targets": ()}, timing=Timing.RESOLVE_BEFORE_EFFECT
     )
     flow = SkillFlow(
+        name="provide_probe",
         steps=(
             PickProvide(
                 type_id="slash",
@@ -490,7 +510,8 @@ def test_provide_step_keeps_a_single_face_cache_on_the_real_engine():
     )
 
     assert run_flow(engine, frame, flow, owner=0) == "stay", "面铺好、发询问后挂起"
-    face = frame.data["provide_face:green_dragon_blade"]
+    face_key = (("provide_probe", 0), "green_dragon_blade")
+    face = frame.data["provide_faces"][face_key]
     assert [slot.card.card_id for slot in face[0]] == [slash], "面 = 攻击者手里那张【杀】"
     assert "asks" not in frame.data, (
         "面只有一处缓存：ask_selection 收到现成 face 后不得再往 asks 里存第二份"
@@ -507,7 +528,7 @@ def test_provide_step_keeps_a_single_face_cache_on_the_real_engine():
     )
     run_flow(engine, frame, flow, owner=0)  # 重入：读回同一份面、命中答案缓存
 
-    assert frame.data["provide_face:green_dragon_blade"] is face, "重入复用同一份面（不重算）"
+    assert frame.data["provide_faces"][face_key] is face, "重入复用同一份面（不重算）"
     assert "asks" not in frame.data
     select_queries = [
         record
@@ -515,3 +536,203 @@ def test_provide_step_keeps_a_single_face_cache_on_the_real_engine():
         if record.kind == "query" and record.query.kind == "SELECT_CARDS"
     ]
     assert len(select_queries) == 1, "重入不重发询问"
+
+
+def test_a_provide_step_recomputes_its_face_when_the_ask_name_changes():
+    """票 22：提供步的面与答案缓存**同名同源** —— 同一步换 ``cache_key`` 再问时要重算面。
+
+    ``cache_key`` 的可调用档正是"同一步问多次"（逐点 / 逐轮）的机制（【反馈】的
+    ``fankui_step_key``）。修复前提供步的面只按 ``ask_owner`` 缓存：第 2 轮复用第 1 轮的面，
+    而答案却按 ``(ask_owner, cache_key)`` 取 ⇒ 两者再次不同源，正是票 22 要杀的那个病。
+    本用例不改手牌，只钉结构事实：第 2 轮**重算了一份新面**（两个键各自留存、两次询问）。
+    """
+    slash_a = _cards("slash")[0]
+    slash_b = _cards("slash")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(slash_a, slash_b)), SeatSpec()],
+        deck=_deck_excluding(slash_a, slash_b),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=3)
+    frame = engine.push_frame(
+        FrameKind.USE, {"source": 0, "targets": ()}, timing=Timing.RESOLVE_BEFORE_EFFECT
+    )
+    flow = SkillFlow(
+        name="provide_rounds",
+        steps=(
+            PickProvide(
+                type_id="slash",
+                zones=(Zone.HAND,),
+                lo=1,
+                hi=1,
+                optional=False,
+                key="card",
+                cache_key=lambda frame_: f"round:{frame_.data.get('round', 0)}",
+            ),
+        ),
+        effect=lambda host, frame, answers: None,
+    )
+
+    assert run_flow(engine, frame, flow, owner=0) == "stay", "第 1 轮发问后挂起"
+    first_key = (("provide_rounds", 0), "round:0")
+    first = engine.pending
+    assert first is not None
+    engine.submit(
+        next(
+            action
+            for action in first.legal_actions
+            if isinstance(action, SelectCards) and action.picks == (0,)
+        )
+    )
+    assert run_flow(engine, frame, flow, owner=0) is None, "第 1 轮提交（effect 是空操作）"
+    face_round_0 = frame.data["provide_faces"][first_key]
+
+    frame.data["round"] = 1
+    assert run_flow(engine, frame, flow, owner=0) == "stay", "换询问名后必须再问一次"
+    second_key = (("provide_rounds", 0), "round:1")
+    face_round_1 = frame.data["provide_faces"][second_key]
+    assert face_round_1 is not face_round_0, (
+        "第 2 轮的面必须重算；修复前按 ask_owner 复用第 1 轮的面，答案与面不同源"
+    )
+
+    select_queries = [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == "SELECT_CARDS"
+    ]
+    assert len(select_queries) == 2, "两轮各问一次"
+
+
+# ---------------------------------------------------------------------------
+# ⑨ 票 22：同帧两个步骤共用 cache_key 也不得串答案（引擎按**询问位置**分桶）
+# ---------------------------------------------------------------------------
+
+
+def test_two_flow_steps_sharing_a_cache_name_ask_their_own_questions():
+    """票 22 回归：同一帧里两个步骤即使共用 ``cache_key``，也各发各的询问、各拿各的答案。
+
+    构造：步 1 铺**手牌**、步 2 铺**装备区**，两步的 ``cache_key`` 都是 ``"card"``
+    （步骤 ``key`` 分别是 ``"hand"`` / ``"equip"``，故流程定义合法）。修复前
+    ``ask_selection`` 的帧内答案只按 ``key`` 分桶，步 2 直接命中步 1 留下的答案 ⇒
+    **不发第二个询问**，效果读到的是手牌里那张牌（与步 2 自己的面不同源）。
+    """
+    hand_card = _cards("peach")[0]
+    equip_card = _cards("qinggang_sword")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(hand_card,), equip=(equip_card,)), SeatSpec()],
+        deck=_deck_excluding(hand_card, equip_card),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=5)
+    frame = engine.push_frame(
+        FrameKind.USE, {"source": 0, "targets": ()}, timing=Timing.RESOLVE_BEFORE_EFFECT
+    )
+    captured: dict[str, object] = {}
+
+    def effect(host, frame_, answers):
+        captured.update(answers)
+        return None
+
+    flow = SkillFlow(
+        name="cache_name_probe",
+        steps=(
+            PickCards(
+                zones=(Zone.HAND,),
+                lo=1,
+                hi=1,
+                optional=False,
+                key="hand",
+                cache_key="card",
+            ),
+            PickCards(
+                zones=(Zone.EQUIP,),
+                lo=1,
+                hi=1,
+                optional=False,
+                key="equip",
+                cache_key="card",
+            ),
+        ),
+        effect=effect,
+    )
+
+    assert run_flow(engine, frame, flow, owner=0) == "stay", "步 1 发问后挂起"
+    first = engine.pending
+    assert first is not None and first.kind == "SELECT_CARDS"
+    engine.submit(
+        next(
+            action
+            for action in first.legal_actions
+            if isinstance(action, SelectCards) and action.picks == (0,)
+        )
+    )
+
+    assert run_flow(engine, frame, flow, owner=0) == "stay", "步 2 也必须发自己的询问"
+    second = engine.pending
+    assert second is not None and second.kind == "SELECT_CARDS", (
+        "步 2 不得命中步 1 的答案缓存（修复前这里读回命令式答案、根本没有第二个询问）"
+    )
+    engine.submit(
+        next(
+            action
+            for action in second.legal_actions
+            if isinstance(action, SelectCards) and action.picks == (0,)
+        )
+    )
+    assert run_flow(engine, frame, flow, owner=0) is None
+
+    select_queries = [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == "SELECT_CARDS"
+    ]
+    assert len(select_queries) == 2, "两个步骤各发一次 SELECT_CARDS"
+    assert captured["hand"] == (hand_card,)
+    assert captured["equip"] == (equip_card,), "步 2 的答案必须来自步骤 2 自己的面（装备区）"
+
+
+# ---------------------------------------------------------------------------
+# ⑩ 票 22：流程定义在**构造期**就挡住"同流程内步骤重名"
+# ---------------------------------------------------------------------------
+
+
+def test_a_flow_rejects_two_steps_sharing_a_key():
+    """同流程内步骤 ``key`` 两两不同（票 22）：重名会让 ``answers[step.key]`` 互相覆盖。
+
+    询问缓存本身不会撞（位置含步骤序号），但 ``run_flow`` 按 ``step.key`` 回写答案，
+    后者会盖掉前者、``effect`` 读到别步的答案 —— 这是流程定义写错，构造期就该炸。
+    """
+    with pytest.raises(ValueError, match="两两不同"):
+        SkillFlow(
+            name="dup_keys",
+            steps=(
+                PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="card"),
+                PickProvide(type_id="slash", key="card"),
+            ),
+            effect=_noop,
+        )
+
+
+def test_a_flow_requires_a_non_empty_name():
+    """``name`` 是询问位置的一部分（票 22），空名字会让两条流程的同一位置撞在一起。"""
+    with pytest.raises(ValueError, match="name"):
+        SkillFlow(
+            name="",
+            steps=(PickCards(zones=(Zone.HAND,), lo=1, hi=1),),
+            effect=_noop,
+        )
+
+
+def test_a_flow_keeps_distinct_step_keys():
+    """正例：键两两不同的两步流程照常构造（判据不能把合法形状一起挡掉）。"""
+    flow = SkillFlow(
+        name="distinct_keys",
+        steps=(
+            PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="card"),
+            PickSeats(lo=1, hi=1, pool=lambda state, frame, owner, chosen: (), key="seat"),
+        ),
+        effect=_noop,
+    )
+    assert [step.key for step in flow.steps] == ["card", "seat"]

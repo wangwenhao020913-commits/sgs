@@ -217,6 +217,7 @@ def _liuli_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
 
 
 LIULI_FLOW = SkillFlow(
+    name="liuli",
     steps=(
         PickCards(
             zones=(Zone.HAND, Zone.EQUIP),
