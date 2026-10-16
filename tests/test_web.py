@@ -705,15 +705,46 @@ def _context_pack():
     return _CONTEXT_PACK
 
 
+# ---------------------------------------------------------------------------
+# 合成帧的**窄写方**键表（retro-2 S2）
+#
+# 教训：票 12 修的硬违规——`projection._step_requirement` 读 `frame.data["skill_id"]`，
+# 而**被动帧（DAMAGE / USE）从不写它**（派发环写的是 `running_skill`）；合成用例却把这个
+# 引擎不写的键注进了帧，于是 6 条断言全绿（`CODING_STANDARDS.md` §1 的 M4 同型错）。
+#
+# 表只收**有窄写方**的键：值 = 真的会写它的帧类型（写方见括注）。表外键一律放行——
+# `frame.data` 是开放字典，技能自己会写一堆私有键（`liuli_used` / `yiji_seen:0` …），
+# 全量枚举只会 drift。本表只回答一个问题：**这个键属于这一类帧吗**。
+# ---------------------------------------------------------------------------
+_KIND_SPECIFIC_KEYS: dict[str, frozenset[FrameKind]] = {
+    # SKILL 帧（`engine/game.py` 的 SKILL 路径）与 JUDGE 帧（改判）写它；其余帧想让投影
+    # 认领技能，走的是派发环写的 `running_skill`（`catalog._dispatch`）。
+    "skill_id": frozenset({FrameKind.SKILL, FrameKind.JUDGE}),
+}
+
+
 def _context_fixture(seats, *, frame_kind, frame_data):
     """只有"一个栈顶帧"的最小引擎面：:func:`query_context` 只读 ``state`` 与 ``stack``。
 
     ``frame_data`` 可以是 dict，也可以是 ``state -> dict``（取 ``CardRef`` 需要先有 state）。
+
+    **合成帧必须与引擎的写入面同源**（retro-2 S2）：窄写方的键（见
+    :data:`_KIND_SPECIFIC_KEYS`）出现在不写它的帧类型上时**直接抛**，不让断言在假形状上变绿。
+    断"读取方真的读到了"的测试走**真会话**，样板见
+    :func:`test_a_real_session_reaches_the_yiji_card_step_wording`。
     """
     from types import SimpleNamespace
 
     state = build_state(pack=_context_pack(), seats=seats)
     data = frame_data(state) if callable(frame_data) else dict(frame_data)
+    for key, kinds in _KIND_SPECIFIC_KEYS.items():
+        if key in data and frame_kind not in kinds:
+            allowed = " / ".join(sorted(kind.value for kind in kinds))
+            raise AssertionError(
+                f"合成帧注入了引擎不写的键：{key!r} 只由 {allowed} 帧写，"
+                f"而这里是 {frame_kind.value} 帧（被动帧的技能归属走 running_skill）。"
+                "—— 断'读取方读到了'的测试必须走真实形状（retro-2 S2 / CODING_STANDARDS §6）。"
+            )
     stack = ResolutionStack()
     stack.push(Frame(kind=frame_kind, data=data))
     return SimpleNamespace(state=state, stack=stack), state
@@ -1755,6 +1786,27 @@ def test_a_real_session_reaches_the_yiji_card_step_wording() -> None:
     assert payload["context"]["requirement"] == "从亮出的牌里选择一张", (
         "读取方必须真的读到分步文案；退回一句话 summary 就说明判据又读错了键"
     )
+
+
+def test_the_context_fixture_refuses_a_key_that_damage_frames_never_carry() -> None:
+    """retro-2 S2 的守卫：合成帧不许注入引擎不写的键。
+
+    正是这一档假绿盖住了票 12 的硬违规（被动帧读 ``skill_id``）。守卫只有几行，钉住它；
+    **正反两面都断**，免得"守卫恒抛"也算通过。
+    """
+    with pytest.raises(AssertionError, match="skill_id"):
+        _context_fixture(
+            [SeatSpec(), SeatSpec()],
+            frame_kind=FrameKind.DAMAGE,
+            frame_data={"target": 1, "source": 0, "skill_id": "hero.guojia.yiji"},
+        )
+    # 正向对照：SKILL 帧本来就写 skill_id，照常放行。
+    engine, _ = _context_fixture(
+        [SeatSpec(hero="guojia"), SeatSpec()],
+        frame_kind=FrameKind.SKILL,
+        frame_data={"skill_id": "hero.guojia.yiji", "source": 0},
+    )
+    assert engine.stack.frames[-1].data["skill_id"] == "hero.guojia.yiji"
 
 
 def test_query_context_walks_the_zhiheng_step_with_its_own_wording() -> None:

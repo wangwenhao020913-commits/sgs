@@ -13,6 +13,24 @@
   时机钩子、帧内接缝与虚拟牌。
 - :mod:`sgs.skills.virtual` 装**虚拟牌 / 转化牌**的构造（票 30）。
 
+**族 → 模块**（一条技能一条 :class:`~sgs.skills.catalog.SkillDef`；"某条技能住哪"先查这张表，
+别逐个模块翻）：
+
+| 族 | 模块 | 代表技能 |
+|---|---|---|
+| A 主动技 | :mod:`sgs.skills.active` | 制衡 / 仁德 / 反间 / 青囊 / 离间 / 结姻 |
+| B 伤害后 | :mod:`sgs.skills.damage_after` | 奸雄 / 反馈 / 遗计 |
+| H 转化（源谓词 → 虚拟牌） | :mod:`sgs.skills.heroes` | 武圣 / 龙胆 / 国色 / 急救 |
+| K·M 距离与目标转移 | :mod:`sgs.skills.target_change` | 马术 / 流离 |
+| 主公求助 | :mod:`sgs.skills.lord_request` | 护驾 / 激将 / 救援 |
+| 改判 | :mod:`sgs.skills.rejudge` | 鬼才 / 天妒 |
+| 失去牌后 | :mod:`sgs.skills.move_after` | 连营 / 枭姬 |
+| 阶段体 | :mod:`sgs.skills.phase_body` | 英姿 / 闭月 |
+| 排列 | :mod:`sgs.skills.arrange` | 观星 |
+| 目标池 / 响应窗口 | :mod:`sgs.skills.target_pool` / :mod:`sgs.skills.response_window` | 空城 / 谦逊；无双 / 铁骑 |
+| **流水线执行器**（**不**依赖 catalog） | :mod:`sgs.skills.flow` | ``SkillFlow`` / ``PickCards`` / ``PickSeats`` / ``PickOption`` / ``run_flow`` |
+| **注册表 + 装备定义** | :mod:`sgs.skills.catalog` | ``SkillDef`` / ``CATALOG`` / ``resolve_instances`` / ``dispatch_timing`` / ``dispatch_seam`` |
+
 本文件另装**跨层只读查询**：加载期用它校验"每张装备牌都有对应技能"（票 09 §7 #8），
 判定帧用它拿改判能力座位（票 10 §4），主公技门控用它（票 13 §4）。
 

@@ -7,7 +7,8 @@
 1. 每次改动后，必须编写或更新相关测试，并在交付前跑通测试和验证。
 2. 唯一门禁是仓根的 **`bash tests/run_all.sh`**（全部 shell 校验 + pytest，**约 3 分钟**）。
    **没有 CI、也没有默认 hook 会替你跑它。** 先跑一次 `bash tools/install-hooks.sh`
-   把它接到 pre-commit 上（改动落在 `src/` 或 `tests/` 时才触发）。
+   把它接到 pre-commit 上（改动落在 `src/` 或 `tests/` 时才触发）；**合并提交**由同源的
+   `.githooks/pre-merge-commit` 覆盖（`git merge` 不触发 pre-commit，否则会整段绕过门禁）。
    **放后台跑**：它超过多数前台工具调用的超时（前台跑会被打断、输出丢掉）；用后台任务
    起它，再取输出。**提交时 hook 会替你跑同一件事，别在提交前手动重跑一遍**（每票白等
    3 分钟）；迭代期要快就用单文件 pytest 子集或 `bash tests/smoke-web.sh`。
@@ -16,6 +17,8 @@
    就把你手上的活打回 HEAD 了。本仓已发生过一次（`ui_smoke.mjs` 被抹回 HEAD）。
 4. 前端改动想快速看一眼，用 **`bash tests/smoke-web.sh`**（约 4 秒：起临时服务 +
    跑 `ui_smoke.mjs` + 收尾）。它在门禁之外，跑完整门禁才用 `tests/run_all.sh`。
+   人工**实机验收**：`python tools/sgs_web/serve.py --port 8080`（**缺省端口 8100**，
+   8080 只是习惯用法；服务把实际地址打到 stdout）。
 
 ## Agent skills
 

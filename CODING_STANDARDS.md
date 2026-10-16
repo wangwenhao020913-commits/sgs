@@ -81,3 +81,20 @@
 （阈值 19.2/32），实测 19–21、每次引擎改动抖 ±2；为把它推回 20+ 花掉的调参就是拟合样本。
 现按裁定改为：**绝对胜率在 128 局（`RATE_SEEDS`）上判**，"比随机多赢 ≥1/4 的种子"仍在
 原 32 种子批上判。
+
+## 6. 断"读取方读到了"的测试要走**真实产出路径**
+
+一条断言"界面 / 消费者真的读到了这个键"的测试，只有在**引擎真的写过这个键**的形状上跑才算证据。
+合成夹具可以省事，但必须与写入面同源：注入一个引擎从不写的键，测试会绿得毫无意义——M4 的硬违规
+（投影读 `frame.data["skill_id"]` 来认领被动技，而**被动帧从不写**这个键，派发环写的是
+`running_skill`）就是被"合成帧把 `skill_id` 注了进去、6 条断言全绿"盖住的，最后靠两轴评审逐行
+读代码才发现。
+
+- **机械的那一半已下沉**：`tests/test_web.py:_context_fixture` 对"窄写方"的键设闸
+  （`skill_id` 只由 SKILL / JUDGE 帧写），注入即抛；守卫本身有正反两面的用例
+  （`test_the_context_fixture_refuses_a_key_that_damage_frames_never_carry`）。
+- 留在这里的是判断题：**这条断言要证明的"读取方"是谁、它读的键由谁写**。读取方断言跨了
+  服务端 → 前端 / 消费者的边界时，**两侧都要有人核**（本仓 `PlayerPublic.hero` 与
+  `SelectCardsQuery.skill_id` 都是这条纪律的产物）。
+- 分步文案这类"投影读得到"的断言，配一条**真会话**回归（样板：
+  `tests/test_web.py::test_a_real_session_reaches_the_yiji_card_step_wording`）。

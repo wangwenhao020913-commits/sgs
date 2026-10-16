@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# 门禁 hook（retro-2 S1）：**合并提交**也要过门禁。
+#
+# 为什么单开一个：`git merge` 不触发 `pre-commit` —— git 只对合并认 `pre-merge-commit`
+# （M3 retro S12 的对照实验：装 hook 后普通 `git commit` 触发门禁、`git merge --no-ff`
+# 不触发）。于是"合并落地"曾是一条能整段绕过门禁的路径；集成分支 / 尾票合并都会走它。
+#
+# 与 `pre-commit` 同源：同一段"改动是否落在 src/ 或 tests/"判据 + 同一段 run_all.sh。
+# 合并提交时 `git diff --cached --name-only` 给的是**被并进来的改动**（index 对 HEAD）。
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+staged="$(git diff --cached --name-only)"
+case "$staged" in
+  *src/* | *tests/*) ;;
+  *)
+    echo "门禁 hook（合并）：本次改动不含 src/ 或 tests/，跳过。"
+    exit 0
+    ;;
+esac
+
+echo "门禁 hook（合并）：跑 bash tests/run_all.sh（约 2.5 分钟）……"
+if bash tests/run_all.sh; then
+  echo "门禁 hook（合并）：通过。"
+else
+  echo "门禁 hook（合并）：门禁失败，本次合并提交被拒。"
+  echo "  修好之后再合并。确要落地未过门禁的状态，用 --no-verify。"
+  exit 1
+fi
