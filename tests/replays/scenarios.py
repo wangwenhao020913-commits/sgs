@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from sgs.agents import RandomPlayer
 from sgs.data import RuleConfig, load_content_pack
 from sgs.engine import Engine, RandomSource, dump_journal
-from sgs.state import Action, EndPhase, Pass, Query, UseCard
+from sgs.state import Action, EndPhase, Pass, Query, SelectOption, UseCard
 from sgs.timing import Timing
 
 from .goals import goal_for
@@ -49,6 +49,13 @@ M1_DECK_PROFILE = "basic_53"
 
 M2_DECK_PROFILE = "standard_108"
 """M2 的 28 条基准跑**标准版全表**（票 32 §1）。"""
+
+DOUBLE_SWORD_HEROES: tuple[str, ...] = ("liubei", "sunshangxiang", "guanyu", "luxun")
+"""票 17 的脚本基准写死的逐座位武将（座 0 刘备男 / 座 1 孙尚香女 ⇒ 异性目标**必然**在场）。
+
+性别由**武将数据**派生（``_initial_player``），无武将局里性别恒 ``None`` ⇒【雌雄双股剑】
+的 ``available`` 恒假——这是复现困难的一半根因，故这条基准必须显式指定武将。座位 2 / 3
+只是填满 4 人身份局；换成别人不改这条基准要证的事。"""
 
 
 @dataclass(frozen=True)
@@ -85,7 +92,27 @@ M1_SCENARIOS: dict[str, Scenario] = {
     "05-near-death-death": Scenario(slug="05-near-death-death", seed=1, max_turns=40),
     "06-deck-reshuffle": Scenario(slug="06-deck-reshuffle", seed=2026, max_turns=80),
 }
-"""M1 的 6 条基准（票 12 §3）；`06-deck-reshuffle` 由票 23 追加。"""
+"""M1 的六条基准（票 12 §3 定格，`06` 由票 23 追加）。"""
+
+SCRIPTED_SCENARIOS: dict[str, Scenario] = {
+    # 票 17：给【雌雄双股剑】一条**确定性可复现**的脚本基准（先复现，再谈要不要改）。
+    # 要证的事需要三件事同时成立：某人**装备**了雌雄、手里有【杀】、对**异性**目标使用。
+    # 实机里三件事都靠运气——缺省局的武将随机发放（性别因此随机），而标准牌堆只有**一张**
+    # 雌雄；随机驱动的 M2/M3 基准从没命中过这条链。这条基准用脚本驱动把三件事按次序焊死，
+    # 整局记录流因此成了一份可直接开来看的录像。种子 77 由开发期搜索得到（座 0 起始手牌
+    # 同时有雌雄与【杀】、座 1 为异性；`.scratch/t17/search_double_sword.py`，被 gitignore）。
+    "43-double-sword-opposite-gender": Scenario(
+        slug="43-double-sword-opposite-gender",
+        seed=77,
+        max_turns=60,
+        player_count=4,
+        deck_profile=M2_DECK_PROFILE,
+        heroes=DOUBLE_SWORD_HEROES,
+    ),
+}
+"""票 17 起的**脚本驱动专项基准**：与 M1 六条同驱动（``ScenarioPlayer``），但不属于
+票 12 定格的回归网，故**单列**——M1 那张表被
+``test_the_frozen_m1_six_stay_in_the_file_set`` 逐键钉死，往里加条目等于谎报回归网。"""
 
 
 def _m2(slug: str, *, seed: int, player_count: int, max_turns: int = 400) -> Scenario:
@@ -247,7 +274,12 @@ M3_SCENARIOS: dict[str, Scenario] = {
 }
 """8 条 M3 专项基准（票 14 §8）：每条 pin 一族机制的整局记录流，种子由开发期搜索得到。"""
 
-SCENARIOS: dict[str, Scenario] = {**M1_SCENARIOS, **M2_SCENARIOS, **M3_SCENARIOS}
+SCENARIOS: dict[str, Scenario] = {
+    **M1_SCENARIOS,
+    **M2_SCENARIOS,
+    **M3_SCENARIOS,
+    **SCRIPTED_SCENARIOS,
+}
 
 
 @dataclass
@@ -292,12 +324,19 @@ def _reshuffle_seen(engine: Engine) -> bool:
 
 
 class ScenarioPlayer:
-    """按 slug 走目标段、其余走收尾段的脚本玩家（票 12 §3）。"""
+    """按 slug 走目标段、其余走收尾段的脚本玩家（票 12 §3）。
 
-    def __init__(self, seat: int, slug: str, recording: _Recording) -> None:
+    ``engine``（票 17）：目标段要按**局面事实**（性别）挑目标时用得着；缺省 ``None`` 时
+    只有不读局面的目标段能用（01–06 全是这一类，故它们的调用点一字未改）。
+    """
+
+    def __init__(
+        self, seat: int, slug: str, recording: _Recording, engine: Engine | None = None
+    ) -> None:
         self.seat = seat
         self.slug = slug
         self.recording = recording
+        self.engine = engine
 
     def respond(self, query: Query) -> Action:
         target = self._target_segment(query)
@@ -337,6 +376,10 @@ class ScenarioPlayer:
             if self.recording.goal_done:
                 return None
             return _idle(query)
+        if self.slug == "43-double-sword-opposite-gender":
+            if self.recording.goal_done:
+                return None
+            return self._double_sword(query)
         raise AssertionError(f"没有为场景 {self.slug} 写目标段")  # pragma: no cover - 开发期护栏
 
     # ---- 01 / 02：座位 0 出【杀】，座位 1 在【闪】窗口给出互斥的两种应答 ----
@@ -405,6 +448,51 @@ class ScenarioPlayer:
             return _find(query, Pass)
         return None
 
+    # ---- 43：座位 0 装雌雄 → 对异性座位 1 出【杀】 → 目标答"令其摸一张" ----
+
+    def _double_sword(self, query: Query) -> Action | None:
+        """把【雌雄双股剑】的三件事按次序焊死：装雌雄 → 对异性出【杀】 → 目标选一支。
+
+        目标从**局面事实**里挑（性别不同的最近座位），不是写死座 1——写死的目标一旦
+        不是异性，这条基准就证不了"异性 ⇒ 询问 / 同性 ⇒ 不问"这条判据。
+        """
+        if query.kind == "PLAY_PHASE" and self.seat == 0:
+            # 先装雌雄（装备牌在出牌阶段就是一次 ``UseCard``），装上以后每个出牌阶段都
+            # 对异性目标出【杀】——一击不中（目标有【闪】/ 贴了防具）就下一轮再来，
+            # 这正是实机里的被动姿态。
+            equip = _use(query, "double_sword")
+            if equip is not None:
+                return equip
+            target = self._opposite_gender_target()
+            if target is not None:
+                slash = _use(query, "slash", targets=(target,))
+                if slash is not None:
+                    return slash
+        if query.kind == "DODGE":
+            return _find(query, Pass)
+        if query.kind == "SELECT_OPTION":
+            self.recording.announce(self.seat)
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and action.choice == "draw_one":
+                    return action
+        return None
+
+    def _opposite_gender_target(self) -> int | None:
+        """局面上第一个与座 0 **异性**的存活座位；没有则 ``None``（性别未知也算没有）。"""
+        state = self.engine.state
+        source = state.player(0)
+        for seat in range(len(state.players)):
+            player = state.player(seat)
+            if (
+                seat != 0
+                and player.alive
+                and source.gender is not None
+                and player.gender is not None
+                and source.gender is not player.gender
+            ):
+                return seat
+        return None
+
 
 def _use(query: Query, type_id: str, targets: tuple[int, ...] | None = None) -> Action | None:
     for action in query.legal_actions:
@@ -449,16 +537,23 @@ def _find(query: Query, action_type: type) -> Action:
 
 
 def _record_scripted(slug: str, scenario: Scenario) -> Engine:
-    """M1 路径：``ScenarioPlayer`` 迫使目标段发生。"""
+    """M1 路径：``ScenarioPlayer`` 迫使目标段发生。
+
+    ``heroes``（票 17）：脚本基准也能指定逐座位武将——【雌雄双股剑】的"异性"判据读的是
+    **武将数据派生的性别**，没有武将时性别恒 ``None``、这条链根本进不了候选。缺省
+    ``None`` ⇒ 无武将模式，01–06 六条基准的录制一字未变。
+    """
     pack = load_content_pack(deck_profile=scenario.deck_profile)
     engine = Engine.new_game(
         seed=scenario.seed,
         rule_config=RuleConfig(player_count=scenario.player_count),
         pack=pack,
+        heroes=scenario.heroes or (),
+        hero_pool=scenario.hero_pool,
     )
     recording = _Recording()
     players: list = [
-        ScenarioPlayer(seat, slug, recording) for seat in range(scenario.player_count)
+        ScenarioPlayer(seat, slug, recording, engine) for seat in range(scenario.player_count)
     ]
     if slug == "06-deck-reshuffle":
         players = [

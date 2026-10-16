@@ -778,6 +778,9 @@ def test_double_sword_hides_the_discard_option_when_the_target_has_no_hand_cards
         if record.kind == "query" and record.query.kind == "SELECT_OPTION"
     )
     assert option_query.options == ("draw_one",)
+    assert not _has_query(engine, "SELECT_CARDS"), (
+        "只剩「令其摸一张」这一支 ⇒ 没有「选一张手牌」的步骤（票 17 复现核对第 2 条）"
+    )
 
 
 def test_double_sword_does_not_trigger_for_same_gender_targets():
@@ -802,6 +805,70 @@ def test_double_sword_does_not_trigger_for_same_gender_targets():
 
     assert not _has_query(engine, "SELECT_OPTION")
     assert not _has_query(engine, "SKILL_ACTIVATION", skill_id="equip.double_sword")
+
+
+def test_double_sword_discards_the_chosen_card_to_the_discard_pile():
+    """目标答"弃一张手牌" ⇒ 那张牌真进弃牌堆，且使用者**不**摸牌（票 17 复现核对第 3 条）。
+
+    与上面那条"令其摸一张"的用例互斥：一次使用只冻结一份应答，故两条分支各一条用例。
+    这条同时钉住"选中的牌立即搬走"——只断言"问了"会让"答了却什么都不发生"（票 13 的
+    【流离】事故）照样通过。
+    """
+    other = _cards("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,), equip=(DOUBLE_SWORD,), gender=Gender.MALE),
+            SeatSpec(hand=(other,), gender=Gender.FEMALE),
+        ],
+        deck=_deck_excluding(SLASH, DOUBLE_SWORD, other),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _slash_use(query, SLASH, 1)
+        if query.kind == "SKILL_ACTIVATION":
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
+        return None
+
+    def defender(query):
+        if query.kind == "DODGE":
+            return _find(query, lambda action: isinstance(action, Pass))
+        if query.kind == "SELECT_OPTION":
+            return _find(
+                query,
+                lambda action: isinstance(action, SelectOption)
+                and action.choice == "discard_one",
+            )
+        if query.kind == "SELECT_CARDS":
+            return _find(query, lambda action: isinstance(action, SelectCards))
+        return None
+
+    engine = _run(
+        state,
+        [Scripted(attacker), Scripted(defender)],
+        lambda engine: _use_frame_popped(engine),
+    )
+
+    option_query = next(
+        record.query
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == "SELECT_OPTION"
+    )
+    assert option_query.options == ("discard_one", "draw_one")
+    assert option_query.actor == 1, "选择权在目标"
+    assert _moves_of(engine, other) == [("hand", "discard", "DISCARD")], (
+        "目标选中的那张手牌必须真的落进弃牌堆（答了却无事发生是票 13 的【流离】事故）"
+    )
+    assert not any(
+        record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason.value == "draw"
+        and record.to_zone.seat == 0
+        and record.seq > option_query.seq
+        for record in engine.records
+    ), "目标是弃牌而不是让使用者摸牌；询问之后使用者这条链上不该有摸牌"
 
 
 class _DoubleSwordHost:

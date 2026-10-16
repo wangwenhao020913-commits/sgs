@@ -16,7 +16,7 @@ from sgs.engine import Engine, JournalRecord
 from sgs.state import ActivateSkill, ArrangeCards, MoveReason, PlayCard, QueryKind, UseCard, WindowCause, Zone
 from sgs.timing import Timing
 
-__all__ = ["M2_GOALS", "M3_GOALS", "goal_for"]
+__all__ = ["M1_GOALS", "M2_GOALS", "M3_GOALS", "goal_for"]
 
 
 def _records(engine: Engine) -> tuple[JournalRecord, ...]:
@@ -557,9 +557,74 @@ M3_GOALS = {
 """8 条 M3 专项基准的 slug → 事后判据（票 14 §8 的逐类清单）。"""
 
 
+# ---------------------------------------------------------------------------
+# 脚本基准的事后判据（票 17）
+# ---------------------------------------------------------------------------
+
+
+def _double_sword_chain(engine: Engine) -> bool:
+    """【雌雄双股剑】的整条链真的发生过（票 17，脚本基准 slug 43）。
+
+    判据分两半：**询问**（谁被问、问什么）与**结算**（目标选了哪一支、那一支真的落地）。
+    它只读记录流，故同时也是"这条基准到底在证什么"的可读规格：
+
+    1. 存在一次选项询问，恰是 ``("discard_one", "draw_one")``——这一对选项在本引擎里
+       只有【雌雄双股剑】会发；
+    2. 该询问的 ``actor`` 是**目标**（座 1），不是使用者（座 0）——票 12 §Q17 的选择权归属；
+    3. 座 1 答了 ``draw_one``，且随后**座 0 摸了一张**（``to_zone = HAND(0)``、
+       ``reason = DRAW``）——"令其摸一张"必须真的让使用者摸到；
+    4. 全程**没有**给座 2 / 座 3（与座 0 同性）发过【雌雄】的选项询问——同性不触发。
+    """
+    option_records = [
+        record
+        for record in _queries(engine)
+        if record.query.kind == QueryKind.SELECT_OPTION
+        and record.query.options == ("discard_one", "draw_one")
+    ]
+    if len(option_records) != 1:
+        return False
+    option = option_records[0]
+    if option.query.actor != 1:
+        return False
+    if any(
+        record.query.kind == QueryKind.SELECT_OPTION and record.query.actor in (2, 3)
+        for record in _queries(engine)
+    ):
+        return False
+    answered = any(
+        record.kind == "action"
+        and record.accepted
+        and record.seq == option.seq + 1
+        and getattr(record.action, "choice", None) == "draw_one"
+        for record in _records(engine)
+    )
+    if not answered:
+        return False
+    return any(
+        record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is MoveReason.DRAW
+        and record.to_zone.zone is Zone.HAND
+        and record.to_zone.seat == 0
+        and record.seq > option.seq
+        for record in _records(engine)
+    )
+
+
+M1_GOALS = {
+    "43-double-sword-opposite-gender": _double_sword_chain,
+}
+"""脚本基准的 slug → 事后判据（票 17 起；只收"脚本驱动 + 需要事后确认"的那条）。
+
+为什么脚本基准也要事后判据：``_record_scripted`` 只保证**目标段命中过**
+（``recording.goal_done``），而"命中"是脚本自己宣布的。判据在这里独立地把
+"询问的形状 + 结算的落点"重新读一遍，免得脚本宣布命中、记录流里却没那回事。
+"""
+
+
 def goal_for(slug: str):
     """取一条基准的判据；未登记即抛（录制期护栏）。"""
-    table = {**M2_GOALS, **M3_GOALS}
+    table = {**M1_GOALS, **M2_GOALS, **M3_GOALS}
     try:
         return table[slug]
     except KeyError:  # pragma: no cover - 开发期护栏

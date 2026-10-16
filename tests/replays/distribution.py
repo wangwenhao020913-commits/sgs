@@ -68,6 +68,8 @@ SLUG_CLASSES: dict[str, tuple[str, ...]] = {
     "28-equipment-replacement": ("装备/距离/转化",),
     "29-serpent-spear-virtual-slash": ("装备/距离/转化",),
     "30-halberd-three-targets": ("装备/距离/转化",),
+    # ---- 票 17 的脚本驱动专项基准（既不属于 M1 回归网，也不凑 M2 的七类计数） ----
+    "43-double-sword-opposite-gender": ("装备/距离/转化",),
     # ---- 7. 普通锦囊与打出 ----
     "31-play-card-response": ("普通锦囊与打出",),
     "32-five-grains-selection": ("普通锦囊与打出",),
