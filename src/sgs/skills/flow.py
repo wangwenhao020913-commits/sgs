@@ -238,6 +238,15 @@ class SkillFlow:
       续跑是**重新进入同一个 op** ⇒ ``on_commit`` 会被**重复调用**。当前唯一消费者
       ``active._mark_phase`` 落的是幂等 OR 位，故安全；后来者若在这里做"只能发生一次"的
       副作用，必须自带帧私有守卫（`CODING_STANDARDS.md` §3「会挂起的操作必须幂等」）。
+
+    **边界：本语言没有"循环 / 每轮提交"步骤**（票 16）。任一步答 ``Pass`` 都只意味着
+    *取消整条流水线*（零副作用），没有"停循环但不回滚已提交轮"这第二档出口；逐轮提交由
+    **手写的帧内游标循环**承担（:func:`sgs.skills.catalog._ice_sword`、
+    :func:`sgs.skills.catalog._double_sword`、:func:`sgs.skills.damage_after._yiji`）。
+    票 10 / 票 11 / 票 16 三次评估都不为它加第二套提交语义（逐条理由见
+    ``catalog._ice_sword`` 的 docstring）。后来者若要在这里加循环步骤，
+    **A 族 / 【反馈】/【流离】/ 装备各条的"取消零副作用"必须一字不动** —— 它是本模块的
+    中心契约，不按消费者分档。
     """
 
     steps: tuple[FlowStep, ...]
