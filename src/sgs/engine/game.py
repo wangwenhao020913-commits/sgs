@@ -1304,15 +1304,24 @@ class Engine:
         actor: int,
         timing: Timing,
         spec: SelectionSpec,
-        build_face: Any,
+        build_face: Any = None,
         revealed: tuple[CardRef, ...] = (),
         provide_type: str | None = None,
+        face: tuple[tuple[Slot, ...], tuple[int, ...]] | None = None,
     ) -> Any:
         """发一次 ``SELECT_CARDS`` 询问；**选择面只构造一次**（帧内记忆，重入复用）。
 
         ``build_face() -> (slots, card_ids)`` 会消耗一次 ``select`` 子流的随机数，
         故绝不能因重入而重跑；答案回来后把该位置解析成实体 ``card_id`` 元组返回。
         池为空时**不构造询问**、直接返回空元组（票 19 §6）。
+
+        面的真源**只有一处**（评审 Standards finding 2）：**恰好**给一个 ——
+
+        - ``build_face``：调用方给惰性构造器，面缓存在这里的 ``frame.data["asks"][key]``；
+        - ``face``：调用方**自己**已经缓存了面（如 :func:`~sgs.skills.flow._flow_step_provide`
+          的 ``provide_face:<key>``），这里直接用它、**不再另存一份**。两份缓存曾让"面"与
+          "答案"可能分母不同（票 21 的 ``KeyError`` 就是它），现在结构上不可能：同一帧里
+          这个询问只认一个面。
 
         答案也按帧内键缓存（票 30）：钩子可以跨多次重入，重入时既不重发询问、也不
         重算选择面。``spec.optional = True`` 时可选 ``Pass`` 表示"不再选"（票 04 的
@@ -1322,14 +1331,22 @@ class Engine:
         铺的是"牌堆顶 2 张"这样的实体牌，但牌面本身本不该进任何视角）。通道与
         :meth:`ask_query` 完全同一条（票 10 §①）。
         """
+        if (build_face is None) == (face is None):
+            raise TypeError(
+                "ask_selection 必须**恰好**给一个面来源：build_face（这里缓存）或 face（调用方缓存）"
+            )
         answers = frame.data.setdefault("ask_answers", {})
         answer_key = ("select", key)
         if answer_key in answers:
             return answers[answer_key]
-        store = frame.data.setdefault("asks", {})
-        if key not in store:
-            store[key] = build_face()
-        slots, card_ids = store[key]
+        owned_store: dict[str, Any] | None = None
+        if face is None:
+            owned_store = frame.data.setdefault("asks", {})
+            if key not in owned_store:
+                owned_store[key] = build_face()
+            slots, card_ids = owned_store[key]
+        else:
+            slots, card_ids = face
         if not slots:
             answers[answer_key] = ()
             return ()
@@ -1353,11 +1370,13 @@ class Engine:
         if isinstance(action, Pass):
             # ``SelectionSpec(optional=True)`` 的"够了 / 不选了"出口（票 04 的顺序多轮）：
             # 空元组与"池为空"同形，调用方据此收尾。
-            store.pop(key, None)
+            if owned_store is not None:
+                owned_store.pop(key, None)
             answers[answer_key] = ()
             return ()
         assert isinstance(action, SelectCards)
-        store.pop(key, None)
+        if owned_store is not None:
+            owned_store.pop(key, None)
         result = tuple(card_ids[index] for index in action.picks)
         answers[answer_key] = result
         return result

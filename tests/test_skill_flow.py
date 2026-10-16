@@ -24,7 +24,7 @@ from sgs.data import load_content_pack
 from sgs.engine import Engine
 from sgs.skills import Hook, Seam, catalog as catalog_module
 from sgs.skills.damage_after import FANKUI_FLOW, fankui_step_key
-from sgs.skills.flow import PickCards, SkillFlow, _flow_step_cards, run_flow
+from sgs.skills.flow import PickCards, PickProvide, SkillFlow, _flow_step_cards, run_flow
 from sgs.state import (
     FrameKind,
     Pass,
@@ -448,3 +448,70 @@ def test_pick_cards_slot_kinds_filter_narrows_the_face_and_the_hi_none_limit():
 
     assert seen["total"] == (1, 1), "上限 = 过滤后的池大小（1 匹坐骑），不是装备区 2 张"
     assert seen["offered"] == [mount], "选择面也只铺坐骑（武器不在其中）"
+
+
+# ---------------------------------------------------------------------------
+# ⑧ 评审 Standards finding 2：PickProvide 的面**只有一处缓存**（真引擎上读）
+# ---------------------------------------------------------------------------
+
+
+def test_provide_step_keeps_a_single_face_cache_on_the_real_engine():
+    """提供步的面只缓存在 ``provide_face:<键>``，``Engine.ask_selection`` 不再另存一份。
+
+    旧实现是两份：本步的 ``frame.data["provide_face:<键>"]`` 与 ``Engine.ask_selection``
+    内部的 ``frame.data["asks"][<键>]``。票 21 的 ``KeyError`` 正是两份不同源的结果。
+    现在本步把面**直接交给** ``ask_selection``（``face=``）、后者不再往 ``asks`` 里写，
+    故这里断的是结构事实：面在本步的键里、``asks`` **根本不存在**；重入复用同一个面对象。
+    """
+    slash = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(slash,)), SeatSpec()],
+        deck=_deck_excluding(slash),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=3)
+    frame = engine.push_frame(
+        FrameKind.USE, {"source": 0, "targets": ()}, timing=Timing.RESOLVE_BEFORE_EFFECT
+    )
+    flow = SkillFlow(
+        steps=(
+            PickProvide(
+                type_id="slash",
+                zones=(Zone.HAND,),
+                lo=1,
+                hi=1,
+                optional=False,
+                key="card",
+                cache_key="green_dragon_blade",
+            ),
+        ),
+        effect=lambda host, frame, answers: None,
+    )
+
+    assert run_flow(engine, frame, flow, owner=0) == "stay", "面铺好、发询问后挂起"
+    face = frame.data["provide_face:green_dragon_blade"]
+    assert [slot.card.card_id for slot in face[0]] == [slash], "面 = 攻击者手里那张【杀】"
+    assert "asks" not in frame.data, (
+        "面只有一处缓存：ask_selection 收到现成 face 后不得再往 asks 里存第二份"
+    )
+
+    query = engine.pending
+    assert query is not None and query.kind == "SELECT_CARDS"
+    engine.submit(
+        next(
+            action
+            for action in query.legal_actions
+            if isinstance(action, SelectCards) and action.picks == (0,)
+        )
+    )
+    run_flow(engine, frame, flow, owner=0)  # 重入：读回同一份面、命中答案缓存
+
+    assert frame.data["provide_face:green_dragon_blade"] is face, "重入复用同一份面（不重算）"
+    assert "asks" not in frame.data
+    select_queries = [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == "SELECT_CARDS"
+    ]
+    assert len(select_queries) == 1, "重入不重发询问"

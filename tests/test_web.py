@@ -1998,6 +1998,74 @@ def test_the_watched_cards_are_private_to_the_pending_seat() -> None:
     assert {card["card_id"] for card in owner["revealed"]} == watched
 
 
+def test_the_409_path_does_not_hand_the_watched_faces_to_a_query_without_a_viewer() -> None:
+    """评审 finding ①：票 15 的**私密观看**在 409 那条**裸 ``Query``** 路径上也必须判归属。
+
+    ``serve.py`` 的 409 分支把 :attr:`StaleAnswer.pending`（一份**裸 ``Query``**，不带
+    ``session``）交给 :func:`pending_payload`。旧签发把裸 ``Query`` 当"构造时本就只为人类
+    座位"**原样放行**，而"当前挂起者是人类座位"这条判据只写在收 ``Session`` 的分支里 ——
+    于是两张观看牌面随 409 直接下发（本例在修复前实测泄露：桃园结义 / 万箭齐发）。
+
+    这里走**产品的 409 机制本身**：真 :meth:`Session.submit_answer` 因序号过期抛
+    :class:`StaleAnswer`，其 ``pending`` 就是引擎的当前挂起（带真【遗计】的 ``revealed``）。
+    拿不到查看者（裸 ``Query``）时**默认抹掉**（fail-closed）；拿得到且与挂起者同座时才带
+    牌面 —— 正反两面都在这里断，免得"恒抹掉"也能变绿。
+    """
+    session = _yiji_real_session()
+    query = session.pending
+    assert query is not None and query.kind == "SELECT_CARDS"
+    assert int(query.actor) != int(session.human_seat), "前置：挂起者不是人类座位（0）"
+    watched = {card.card_id for card in query.revealed}
+    assert watched, "【遗计】的选牌询问带着观看授予（前置）"
+    stale = query.legal_actions[0].model_copy(update={"answers_seq": -1})
+
+    with pytest.raises(StaleAnswer) as info:
+        session.submit_answer(stale)
+    error = info.value
+    assert error.pending is query, "409 附带的就是引擎当前挂起（原样）"
+
+    payload = pending_payload(error.pending)
+    assert payload is not None
+    assert len(payload["slots"]) == len(watched), "位置（有几个）是公开事实，照给"
+    assert all(slot["card"] is None for slot in payload["slots"]), (
+        f"裸 Query（409 路径）拿不到查看者 ⇒ 默认不得带牌面：{payload['slots']}"
+    )
+    assert payload["revealed"] == [], "观看授予本身就是牌面，拿不到查看者时须为空"
+
+    # 产品调用点（``serve.py`` 的 409 分支）：查看者 = 这个会话的人类座位（0）≠ 挂起者（1）
+    # ⇒ 照样抹掉。异常自己带着 human_seat，那条路径因此判得出归属。
+    product = pending_payload(error.pending, human_seat=error.human_seat)
+    assert product is not None
+    assert all(slot["card"] is None for slot in product["slots"]), (
+        "409 的下发方只需原样转交 StaleAnswer.human_seat，不得再漏牌面"
+    )
+
+    # 反向对照：把查看者声明成挂起者本人 ⇒ 同一份裸 Query 必须带牌面。
+    owner = pending_payload(error.pending, human_seat=int(query.actor))
+    assert owner is not None
+    assert {slot["card"]["card_id"] for slot in owner["slots"] if slot["card"]} == watched, (
+        "持有者本人必须看得到那两张牌（否则'私密'变成了'谁都不能看'）"
+    )
+
+
+def test_the_hanging_payload_still_shows_the_watched_faces_to_the_owner() -> None:
+    """反向（票 15 私密观看的**正常挂起路径**）：人类座位就是挂起者时，牌面必须照给。
+
+    与上一条互补：那条钉"409 拿不到查看者 ⇒ 抹掉"，这条钉"拿得到且同座 ⇒ 不抹"。
+    恒抹掉会让私密观看退化成"谁都不能看"。
+    """
+    session = _yiji_real_session()
+    query = session.pending
+    assert query is not None and query.kind == "SELECT_CARDS"
+    watched = {card.card_id for card in query.revealed}
+    session.human_seat = int(query.actor)  # 正常挂起：人类就是挂起者
+
+    payload = pending_payload(session)
+    assert payload is not None
+    assert {slot["card"]["card_id"] for slot in payload["slots"] if slot["card"]} == watched
+    assert {card["card_id"] for card in payload["revealed"]} == watched
+
+
 def test_the_context_fixture_refuses_a_key_that_damage_frames_never_carry() -> None:
     """retro-2 S2 的守卫：合成帧不许注入引擎不写的键。
 

@@ -761,6 +761,77 @@ def test_declining_yiji_leaves_the_deck_untouched():
     assert _total_cards(engine.state) == len(PACK.deck.cards)
 
 
+def test_yiji_pass_on_a_later_round_stops_the_loop_without_rolling_back_the_committed_round():
+    """票 16 契约：**已提交的轮次不回滚**；取消（``Pass``）只**停止循环**，不撤销已应用的轮次。
+
+    【遗计】是唯一在轮内**可达** ``Pass`` 的多轮路径（票 15 把选牌步做成 ``optional=True``，
+    候选面里真有 ``Pass``；【寒冰剑】的轮内选牌是强制的，见票 16 的 ``## Answer``）。故"每轮
+    提交"这条语义只能在这里用**产品路径**钉住：
+
+    第 1 轮选 1 张、交给座位 0 ⇒ 这一轮**已提交**（牌离堆、进收牌人手牌、``yiji_given`` 前进）；
+    第 2 轮对剩下的那张亮牌答 ``Pass`` ⇒ 循环停在已提交的第 1 轮**之后**——第 1 张仍在收牌人
+    手里（不回滚），第 2 张留在牌堆顶，游标不回退（不会把第 1 张再问一遍）。
+
+    与既有的 ``test_declining_yiji_leaves_the_deck_untouched``（只 ``Pass`` 第 1 轮 = 什么都
+    没提交）互补：那条钉"无提交时不搬牌"，这条钉"有提交时 ``Pass`` 收尾不回滚"。
+    """
+    slash = _cards("slash")[0]
+    deck = _deck_excluding(slash)
+    top = deck[:2]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hero="guojia"), SeatSpec()],
+        deck=deck,
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=7)
+    frame = engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, amount=1, source=0),
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    def first_round_commits_then_pass(query, round_index):
+        if query.kind == "SELECT_OPTION":
+            return _yiji_give_to(0)(query)
+        if round_index == 0:
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, SelectCards) and action.picks == (0,)
+            )
+        return next(action for action in query.legal_actions if isinstance(action, Pass))
+
+    yiji_player = Scripted(first_round_commits_then_pass)
+    players = [Scripted(), yiji_player, Scripted()]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.DAMAGE_END
+            for record in e.records
+        ),
+    )
+
+    assert len(yiji_player.selections) == 2, (
+        "恰好两轮：第 2 轮答 Pass 即收尾，不得再问第三轮"
+    )
+    assert top[0] in engine.state.player(0).hand, "已提交的第 1 轮**仍在**（牌没被回滚）"
+    assert top[0] not in engine.state.player(1).hand, "已交出的那张不该退回持有者手里"
+    assert engine.state.deck[0] == top[1], "Pass 剩下的那张亮牌留在牌堆顶、位置不动"
+    assert engine.state.deck == list(deck[1:]), "Pass 不搬牌：牌堆只少了已提交的那一张"
+    assert frame.data.get("yiji_given:0") == (top[0],), (
+        f"进度游标必须停在已提交的那一轮，不回退：{frame.data.get('yiji_given:0')}"
+    )
+    assert _total_cards(engine.state) == len(PACK.deck.cards)
+
+    # 轮次游标也不回退：第 2 轮的面只铺剩下的那一张（不是把两张又铺一遍）。
+    faces = [[slot.card.card_id for slot in query.slots] for query in yiji_player.selections]
+    assert faces == [[top[0], top[1]], [top[1]]], (
+        f"第 1 轮是两张亮牌、第 2 轮只剩没交出的那张，实得 {faces}"
+    )
+
+
 def test_yiji_sees_a_fresh_top_two_on_each_damage_point():
     """逐点 ⇒ 每一轮各看一次牌堆顶（上一轮拿走的牌不再出现），且每点两张都发得出去。"""
     slash = _cards("slash")[0]

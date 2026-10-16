@@ -50,10 +50,16 @@ DEFAULT_AI: Final[str] = "heuristic"
 
 
 class StaleAnswer(Exception):
-    """提交的应答对不上当前暂停点，或当前根本没有暂停点（地图 D15 → HTTP 409）。"""
+    """提交的应答对不上当前暂停点，或当前根本没有暂停点（地图 D15 → HTTP 409）。
 
-    def __init__(self, pending: Query | None) -> None:
+    ``human_seat`` 是**查看者**（这个会话的人类座位）：409 下发的那份"当前挂起"要据此判
+    "这份载荷该不该带观看来的牌面"（票 15 私密观看 / 评审 finding ①）。带上它，409 那条
+    裸 ``Query`` 路径才判得出归属；``None`` = 无从判 ⇒ 下发方按 fail-closed 抹掉。
+    """
+
+    def __init__(self, pending: Query | None, *, human_seat: int | None = None) -> None:
         self.pending = pending
+        self.human_seat = human_seat
         if pending is None:
             super().__init__("当前没有待应答的询问")
         else:
@@ -260,11 +266,15 @@ class Session:
                 break
 
     def submit_answer(self, action: object) -> None:
-        """把一次应答送回引擎并继续推进；序号对不上即 :class:`StaleAnswer`（D15）。"""
+        """把一次应答送回引擎并继续推进；序号对不上即 :class:`StaleAnswer`（D15）。
+
+        异常里一并带出 ``human_seat``：409 的下发方（``serve.py``）只有那份裸 ``Query``，
+        没有它判不了"这张观看牌面该不该下发"（票 15 / 评审 finding ①）。
+        """
         pending = self.engine.pending
         answers_seq = getattr(action, "answers_seq", None)
         if pending is None or answers_seq != pending.seq:
-            raise StaleAnswer(pending)
+            raise StaleAnswer(pending, human_seat=self.human_seat)
         self.engine.submit(action)
         self.drive()
 

@@ -538,6 +538,19 @@ def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) ->
     return None
 
 
+def _offers_by_source(state: Any, owner: int, type_id: str) -> dict[int, tuple[str, ...]]:
+    """:func:`~sgs.skills.heroes.conversion_offers` 的**按来源实体牌分组**形状。
+
+    两处读取方共用同一条分组（评审 Standards finding 1）：:func:`_skill_hints` 要"某张来源牌
+    能当这个牌名的技能是哪些"，:func:`_virtual_index.offerers` 要整张表。分组只写一次，
+    两处都调这里——否则"来源 → 技能"这层含义会有第二份实现。
+    """
+    grouped: dict[int, list[str]] = {}
+    for source, skill_id in conversion_offers(state, owner, type_id):
+        grouped.setdefault(int(source), []).append(skill_id)
+    return {source: tuple(skill_ids) for source, skill_ids in grouped.items()}
+
+
 def _skill_hints(state: Any, query: Query) -> list[dict[str, str]]:
     """这条窗口里**被提供**的技能（主动技 / 提供者 / 转化技）及其文案。
 
@@ -575,11 +588,11 @@ def _skill_hints(state: Any, query: Query) -> list[dict[str, str]]:
         if not card.is_virtual:
             continue
         source = int(card.virtual_sources[0]) if len(card.virtual_sources) == 1 else None
-        attributed = {
-            skill_id
-            for card_id, skill_id in conversion_offers(state, actor, card.type)
-            if source is not None and int(card_id) == source
-        }
+        attributed = (
+            set(_offers_by_source(state, actor, card.type).get(source, ()))
+            if source is not None
+            else set()
+        )
         if attributed:
             for skill_id in attributed:
                 add(skill_id)
@@ -728,10 +741,7 @@ def _virtual_index(
             return [skill_id for skill_id, types in typed if card.type in types]
         table = offers.get(card.type)
         if table is None:
-            grouped: dict[int, list[str]] = {}
-            for source, skill_id in conversion_offers(state, owner, card.type):
-                grouped.setdefault(source, []).append(skill_id)
-            table = {source: tuple(ids) for source, ids in grouped.items()}
+            table = _offers_by_source(state, owner, card.type)
             offers[card.type] = table
         return list(table.get(int(card.virtual_sources[0]), ()))
 
@@ -813,9 +823,9 @@ def _mask_watched_faces(payload: dict[str, Any]) -> None:
 
     ``SELECT_CARDS`` 的 ``slots[].card`` 与询问的 ``revealed`` 是**授予本次应答者观看**的
     牌面（【遗计】看牌堆顶两张、将来【观星】看牌堆顶若干）。引擎侧它们不进任何 ``PlayerView``、
-    不落带牌面的 delta；接入层这条"当前挂起"的载荷因此也必须只在**该询问的挂起者就是人类座位**
-    时才带牌面——否则任何一次"人类不是挂起者"的下发（陈旧应答的 409 现状等）都会把别人
-    观看的牌面直接送出去。
+    不落带牌面的 delta；接入层这条"当前挂起"的载荷因此也必须只在**该询问的挂起者就是查看者**
+    （人类座位）时才带牌面——否则任何一次"查看者不是挂起者"的下发都会把别人观看的牌面直接
+    送出去。查看者缺失（裸 ``Query`` 且调用方没声明）按**不是挂起者**处理（fail-closed）。
 
     公开事实（谁在看、有几个位置）保留：``slots`` 仍按**位置**下发（``card=None``），
     与 :func:`~sgs.state.project` 对隐藏区域的"只有位置"是同一形状。
@@ -828,26 +838,39 @@ def _mask_watched_faces(payload: dict[str, Any]) -> None:
     payload["revealed"] = []
 
 
-def pending_payload(session: Session | Query | None) -> dict[str, Any] | None:
+def pending_payload(
+    session: Session | Query | None, *, human_seat: int | None = None
+) -> dict[str, Any] | None:
     """一次询问的**可应答形态**——带候选、带询问者自己的视角（前端只 pick，不自己拼 Action）。
 
-    收 ``Session``（取它的当前挂起）、``Query``（409 里附带的现状）或 ``None``（无挂起）。
+    收 ``Session``（取它的当前挂起，查看者 = 它的 ``human_seat``）、``Query``（409 里附带的
+    现状，查看者得由调用方用 ``human_seat`` 声明）或 ``None``（无挂起）。
 
     ``legal_actions`` 保留（既有测试、超时兜底与"提交必须原样取自候选"的自我核对都读它），
     ``candidate_index`` 是本轮新增的**索引形状**：界面用它手选目标，不再逐条铺候选按钮。
 
-    **观看私密（票 15）**：收 ``Session`` 且它的当前挂起**不属于人类座位**时，这份载荷抹掉
-    ``slots[].card`` / ``revealed``（见 :func:`_mask_watched_faces`）——"当前挂起"是给人类
-    座位应答的，别人的询问不该连牌面一起下发。裸 ``Query``（409 里附带的那份现状，构造时
-    本就只为人类座位）走原样，不改既有的 :func:`query_context` 单测形状。
+    **观看私密（票 15，评审 finding ①）**：这份载荷只有在**查看者就是挂起者**时才带
+    ``slots[].card`` / ``revealed``（见 :func:`_mask_watched_faces`）。查看者的真源分两条：
+
+    - 收 ``Session`` ⇒ 它的 ``human_seat``（唯一的会话级真源，``human_seat`` 参数忽略）；
+    - 收裸 ``Query``（409 里附带的那份现状）⇒ 只能由 ``human_seat`` 声明——**没声明就抹掉**
+      （fail-closed）。旧签发把裸 ``Query`` 当"构造时本就只为人类座位"原样放行，而
+      `serve.py` 的 409 分支传的正是裸 ``Query`` ⇒ 两张观看牌面随 409 直接下发（稳定复现见
+      `tests/test_web.py::test_the_409_path_does_not_hand_the_watched_faces_to_a_query_without_a_viewer`）。
+      现在 :class:`~sgs_web.session.StaleAnswer` 自己带着 ``human_seat``，那条路径照样判得出归属。
     """
     if session is None:
         return None
-    query = session.pending if isinstance(session, Session) else session
+    if isinstance(session, Session):
+        query = session.pending
+        viewer: int | None = int(session.human_seat)
+    else:
+        query = session
+        viewer = None if human_seat is None else int(human_seat)
     if query is None:
         return None
     payload = query.model_dump(mode="json")
-    if isinstance(session, Session) and int(query.actor) != int(session.human_seat):
+    if viewer is None or int(query.actor) != viewer:
         _mask_watched_faces(payload)
     payload["legal_actions"] = [action.model_dump(mode="json") for action in query.legal_actions]
     payload["candidate_index"] = candidate_index(query)

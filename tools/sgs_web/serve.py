@@ -290,11 +290,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "未知会话"})
             return
         except StaleAnswer as error:
+            # 这份"当前挂起"是给人看的：查看者（这个会话的人类座位）随异常带出来，才能判
+            # "该不该带观看来的牌面"（票 15 私密观看 / 评审 finding ①）。
             self._send_json(
                 409,
                 {
                     "error": str(error),
-                    "pending": pending_payload(error.pending) if error.pending is not None else None,
+                    "pending": (
+                        pending_payload(error.pending, human_seat=error.human_seat)
+                        if error.pending is not None
+                        else None
+                    ),
                 },
             )
             return

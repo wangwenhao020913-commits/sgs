@@ -547,11 +547,12 @@ def _flow_step_provide(
     面为空（或不够 ``lo``）与空池同形：**不发没有答案的询问**，走取消（票 19 §6）。
     答案从槽位回读**牌面**——虚拟 B 的负 id 进不了 :meth:`GameState.card`。
 
-    **面按帧内键只构造一次**（与 :meth:`Engine.ask_selection` 的"铺面只构造一次"同一条
-    纪律）：``effect`` 里的使用会挂起并让本 op **重新进入**，那时来源牌可能已经离区
-    （被用掉的那张【杀】不在手里了）；重算出来的面会与**已缓存的答案**（面内位置）
-    对不上——重入必须复用同一份面。面的缓存键取**有效的询问键**（``cache_key`` 优先），
-    与答案缓存**同源**（票 21）：两者若分母不同，面会把另一份面的答案喂进 ``refs``。
+    **面只有一处缓存**（评审 Standards finding 2）：住在本步自己的帧内键
+    ``provide_face:<有效询问键>`` 里，``ask_selection`` 通过 ``face=`` **直接用这一份**、
+    不再在 ``asks`` 里另存第二份（那是票 21 ``KeyError`` 的土壤：两份缓存一旦分母不同，
+    另一份面的答案就会被喂进 ``refs``）。重入时来源牌可能已经离区（被用掉的那张【杀】
+    不在手里了），重算出来的面会与**已缓存的答案**（面内位置）对不上——复用同一份面才对。
+    面的缓存键取**有效的询问键**（``cache_key`` 优先），与答案缓存**同源**（票 21）。
     """
     actor = _flow_actor(step, host.state, frame, owner, answers)
     cache_key = step.cache_key if step.cache_key is not None else step.key
@@ -562,7 +563,7 @@ def _flow_step_provide(
     if face is None:
         face = provide_face(host.state, actor, step.type_id, step.zones)
         frame.data[face_key] = face
-    slots, card_ids = face
+    slots, _card_ids = face
     if len(slots) < step.lo:
         return "cancel", ()
     refs = {
@@ -580,7 +581,7 @@ def _flow_step_provide(
             total=(step.lo, min(step.hi, len(slots))),
             optional=step.optional,
         ),
-        build_face=lambda: (slots, card_ids),
+        face=face,
         provide_type=step.type_id,
     )
     if host.suspended(picked):
