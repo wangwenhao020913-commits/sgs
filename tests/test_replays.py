@@ -24,6 +24,7 @@ from sgs.engine import (
     dump_journal,
     read_journal,
 )
+from sgs.state import ActivateSkill, QueryKind
 
 from support import play_standard
 
@@ -59,7 +60,16 @@ REPLAY_SINGLE_LIMIT_BYTES = 4 * 1024 * 1024
 最大单文件 **2,999,427 字节 ≈ 2.86 MiB**（``42-hero-transform.jsonl``）——仍在两句上限之内，
 故**不动预算**。条件收紧**减少**询问 ⇒ 含【反馈】的 35 / 36 / 37 与含【流离】的 42 四条基准
 的对局走向改变，由 ``pytest --update-golden`` 重录（四条在 ``goals.py`` 里的判据——逐点伤害 /
-改判循环 / 势力求助 / 转化族——重录后仍命中，判据未放宽，种子也未重选；41 未受影响）。"""
+改判循环 / 势力求助 / 转化族——重录后仍命中，判据未放宽，种子也未重选；41 未受影响）。
+
+**W4-5（预发动金录像重录）后的实测**：44 条合计 **45,735,934 字节 ≈ 43.62 MiB**，最大单文件
+**3,229,429 字节 ≈ 3.08 MiB**（``42-hero-transform.jsonl``）——仍在两句上限之内，故**不动预算**。
+本轮把 8 条技能 / 5 条转化 / 反间的预发动接入落到记录流：出牌阶段的 ``ActivateSkill`` 骨架被删
+（可用性只在 ``preactivations`` 清单里），转化技的区域默认改变候选面，随机驱动的行动序列因此
+偏移——7 条基准（36 / 37 / 38 / 39 / 41 / 42 / 43）由 ``pytest --update-golden`` 重录；其中 38 的
+判据（【连营】+【枭姬】+ 顶替）在新行为下不再命中原种子 23，按本模块纪律**重新选种**为 579
+（记录条数 1486 → 897），而不是放宽判据；另新增脚本专项 44（取消零副作用，约 140 KiB）。
+40 仍逐字节不变。"""
 
 
 def _write(path: Path, text: str) -> Path:
@@ -458,7 +468,7 @@ def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
     assert files == set(scenarios.SCENARIOS), "场景表与基准文件集合互相等于"
     assert set(M2_BASELINES) == files - set(FROZEN_BASELINES) - set(M3_BASELINES) - set(
         SCRIPTED_BASELINES
-    ), "M2 恰为 43 − 6 − 8 − 1 = 28 条"
+    ), "M2 恰为 44 − 6 − 8 − 2 = 28 条"
     assert set(M3_BASELINES) == set(scenarios.M3_SCENARIOS) == set(goals.M3_GOALS), (
         "M3 的 8 条专项基准必须与场景表、判据表三方相等"
     )
@@ -479,6 +489,37 @@ def test_every_scripted_baseline_has_an_after_the_fact_goal() -> None:
     assert set(SCRIPTED_BASELINES) == set(goals.M1_GOALS), (
         "脚本专项基准集合与 goals.M1_GOALS 的键集必须相等"
     )
+
+
+def test_the_preativation_cancel_equals_the_not_activating_path() -> None:
+    """W4-5：**取消零副作用**——取消与"从不进预发动"两条路径的后续记录逐字节相等。
+
+    录制期 ``scenarios._record_scripted`` 已判一次；这里是**门禁期**的复算：同一颗种子
+    重跑两遍，取消路径会按清单填好复合动作并交给引擎同一个校验器（``validate_activation``），
+    然后**不提交**。两条记录流必须一字不差——取消是接入层本地态，读清单 / 填表 / 取消都
+    不得在记录流里留下任何东西。
+    """
+    cancel, plain = scenarios.preactivation_cancel_pair()
+
+    assert dump_journal(cancel.records) == dump_journal(plain.records), (
+        "取消与不发动两条路径的后续记录必须一致（取消不得留下记录 / 副作用）"
+    )
+    offered = [
+        record
+        for record in cancel.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.PLAY_PHASE
+        and goals.PREACTIVATION_CANCEL_SKILL in record.query.preactivations
+    ]
+    assert offered, "取消专项的前提：出牌阶段询问上必须真的随附【制衡】清单"
+    assert not [
+        record
+        for record in cancel.records
+        if record.kind == "action"
+        and record.accepted
+        and isinstance(record.action, ActivateSkill)
+        and record.action.skill_id == goals.PREACTIVATION_CANCEL_SKILL
+    ], "取消（不提交）⇒ 记录流里没有该技能的 ActivateSkill"
 
 
 M1_FROZEN_TRAJECTORIES: dict[str, tuple[int, int, str]] = {

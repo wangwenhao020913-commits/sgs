@@ -16,7 +16,13 @@ from sgs.engine import Engine, JournalRecord
 from sgs.state import ActivateSkill, ArrangeCards, MoveReason, PlayCard, QueryKind, UseCard, WindowCause, Zone
 from sgs.timing import Timing
 
-__all__ = ["M1_GOALS", "M2_GOALS", "M3_GOALS", "goal_for"]
+__all__ = [
+    "M1_GOALS",
+    "M2_GOALS",
+    "M3_GOALS",
+    "PREACTIVATION_CANCEL_SKILL",
+    "goal_for",
+]
 
 
 def _records(engine: Engine) -> tuple[JournalRecord, ...]:
@@ -611,8 +617,42 @@ def _double_sword_chain(engine: Engine) -> bool:
     )
 
 
+PREACTIVATION_CANCEL_SKILL = "hero.sunquan.zhiheng"
+"""W4-5 取消专项里被"进预发动 → 取消"的技能（座 0 = 孙权）。
+
+定义在这里而不是场景表里：判据与场景共用同一个 id，两侧不会各写一份而漂移
+（``scenarios.py`` 从这里 import）。"""
+
+
+def _preativation_cancel_records_nothing(engine: Engine) -> bool:
+    """预发动**取消零副作用**（W4-5，脚本基准 44）：进得去、填得出、但一个 action 都没有。
+
+    判据读**记录流里的询问与行动**：
+
+    1. 至少有一条 ``PLAY_PHASE`` 询问随附【制衡】的预发动清单——那一刻技能可用、接入层
+       能进入预发动（清单是引擎下发的真值，取消专项的前提）；
+    2. 整局**没有**任何被接受的 ``ActivateSkill`` 命中它——取消（不提交）与"从未发动"
+       在记录流里同形；
+    3. 记录流照常走完（终局由 ``record()`` 另行断言）。
+
+    第 2 条只读到"没发动"；取消路径与不发动路径**逐字节相等**由
+    ``scenarios.preactivation_cancel_pair`` + ``tests/test_replays.py`` 的同种子双跑钉住，
+    因为"取消"本身是接入层本地态，记录流里不该有它的位置。
+    """
+    offered = [
+        record
+        for record in _queries(engine)
+        if record.query.kind == QueryKind.PLAY_PHASE
+        and PREACTIVATION_CANCEL_SKILL in record.query.preactivations
+    ]
+    if not offered:
+        return False
+    return not _skill_activations(engine, PREACTIVATION_CANCEL_SKILL)
+
+
 M1_GOALS = {
     "43-double-sword-opposite-gender": _double_sword_chain,
+    "44-preativation-cancel-no-side-effect": _preativation_cancel_records_nothing,
 }
 """脚本基准的 slug → 事后判据（票 17 起；只收"脚本驱动 + 需要事后确认"的那条）。
 

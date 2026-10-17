@@ -27,17 +27,20 @@ from dataclasses import dataclass
 from sgs.agents import RandomPlayer
 from sgs.data import RuleConfig, load_content_pack
 from sgs.engine import Engine, RandomSource, dump_journal
-from sgs.state import Action, EndPhase, Pass, Query, SelectOption, UseCard
+from sgs.skills import validate_activation
+from sgs.state import Action, ActivateSkill, EndPhase, Pass, Query, SelectOption, UseCard
 from sgs.timing import Timing
 
-from .goals import goal_for
+from .goals import PREACTIVATION_CANCEL_SKILL, goal_for
 
 __all__ = [
     "M1_DECK_PROFILE",
     "M2_DECK_PROFILE",
+    "PREACTIVATION_CANCEL_SCENARIO",
     "SCENARIOS",
     "Scenario",
     "play_random",
+    "preactivation_cancel_pair",
     "record",
 ]
 
@@ -49,6 +52,16 @@ M1_DECK_PROFILE = "basic_53"
 
 M2_DECK_PROFILE = "standard_108"
 """M2 的 28 条基准跑**标准版全表**（票 32 §1）。"""
+
+PREACTIVATION_CANCEL_SCENARIO = "44-preativation-cancel-no-side-effect"
+"""W4-5 的**预发动取消零副作用**专项基准（脚本驱动，座 0 = 孙权）。
+
+它证的不是某条技能的效果，而是**接入层本地态**：进入预发动 → 按清单填好复合动作（含
+交给引擎同一个校验器的那次计算）→ **取消**，与"从不进预发动"的同一局逐字节相等。
+"""
+
+PREACTIVATION_CANCEL_HEROES: tuple[str, ...] = ("sunquan", "guanyu")
+"""座 0 孙权给出【制衡】的预发动清单（本专项的取消对象）；座 1 关羽只是填满 2 人局。"""
 
 DOUBLE_SWORD_HEROES: tuple[str, ...] = ("liubei", "sunshangxiang", "guanyu", "luxun")
 """票 17 的脚本基准写死的逐座位武将（座 0 刘备男 / 座 1 孙尚香女 ⇒ 异性目标**必然**在场）。
@@ -108,6 +121,19 @@ SCRIPTED_SCENARIOS: dict[str, Scenario] = {
         player_count=4,
         deck_profile=M2_DECK_PROFILE,
         heroes=DOUBLE_SWORD_HEROES,
+    ),
+    # W4-5：【预发动取消零副作用】。脚本在座 0 的第一条随附【制衡】清单的出牌阶段询问上
+    # 按清单**填一个复合动作**（并交给引擎同一个校验器）然后**取消**；同一颗种子再跑一局
+    # "从不进预发动"作对照，两条记录流必须逐字节相等（`_record_scripted` 与
+    # `tests/test_replays.py` 各钉一次）。取消是本地态，录制物因此与"没发动"完全同形。
+    # 种子 9：座 0 起手有【杀】（收尾段能推进对局），且第一回合就随附【制衡】清单；
+    # 2 人局的记录条数最少（407 条 ≈ 140 KB，7 个回合就以座 1 阵亡收局）。
+    PREACTIVATION_CANCEL_SCENARIO: Scenario(
+        slug=PREACTIVATION_CANCEL_SCENARIO,
+        seed=9,
+        max_turns=80,
+        player_count=2,
+        heroes=PREACTIVATION_CANCEL_HEROES,
     ),
 }
 """票 17 起的**脚本驱动专项基准**：与 M1 六条同驱动（``ScenarioPlayer``），但不属于
@@ -236,13 +262,14 @@ M3_SCENARIOS: dict[str, Scenario] = {
         heroes=("caocao", "simayi", "liubei", "guanyu"),
     ),
     # D 族失去牌后：【连营】+【枭姬】含顶替。
-    # 种子 76 → 103 → 23：票 03 迁移【结姻】、票 03 修候选次序（Pass 曾排在真候选之前）、
-    # 票 04 迁移【制衡】（本局有孙权），每一步都改变了随机驱动的行动序列，旧种子不再命中
-    # 【连营】/【枭姬】/顶替三件事。按本模块纪律**重新选种**而不是放宽判据：23 在同样四名
-    # 武将下命中判据，且记录条数最少（1486，`.scratch/reseed.py` 扫 0–899 得到）。
+    # 种子 76 → 103 → 23 → 579：票 03 迁移【结姻】、票 03 修候选次序（Pass 曾排在真候选之前）、
+    # 票 04 迁移【制衡】（本局有孙权），每一步都改变了随机驱动的行动序列；W4-2 再删掉
+    # 【制衡】/【结姻】的 PLAY_PHASE 骨架候选，23 那局不再命中【连营】/【枭姬】/顶替三件事。
+    # 按本模块纪律**重新选种**而不是放宽判据：579 在同样四名武将下命中判据，且记录条数最少
+    # （897，`python -m replays.seed_search --slug 38-hero-lost-cards --limit 900` 扫 0–899 得到）。
     "38-hero-lost-cards": _m3(
         "38-hero-lost-cards",
-        seed=23,
+        seed=579,
         heroes=("luxun", "sunshangxiang", "guanyu", "sunquan"),
     ),
     # C 族目标池真排除：【空城】+【谦逊】。
@@ -494,6 +521,69 @@ class ScenarioPlayer:
         return None
 
 
+class _PreativationCancelPlayer(ScenarioPlayer):
+    """44：**进预发动 → 填好复合动作 → 取消**（``enter=True``）与**从不进**（``enter=False``）。
+
+    两条路径的差别只有接入层本地态：
+
+    - 取消路径：在座 0 第一条随附【制衡】清单的出牌阶段询问上，按清单填一个复合
+      ``ActivateSkill``，再把它交给**引擎同一个校验器**（``validate_activation``）——这一步
+      就是界面上"确认键已可点"所需的全部计算；然后**取消**（``_target_segment`` 返回
+      ``None``，本询问照常由收尾段应答）。
+    - 不发动路径：根本不读清单，直接由收尾段应答。
+
+    取消 / 填表都不向引擎提交任何东西，故两条路径的记录流必须逐字节相等
+    （:func:`preactivation_cancel_pair` 在录制期与门禁期各断言一次）。
+    """
+
+    def __init__(
+        self, seat: int, slug: str, recording: _Recording, engine: Engine, *, enter: bool
+    ) -> None:
+        super().__init__(seat, slug, recording, engine)
+        self._enter = enter
+        self._cancelled = False
+
+    def _target_segment(self, query: Query) -> Action | None:
+        if (
+            not self._enter
+            or self._cancelled
+            or self.seat != 0
+            or query.kind != "PLAY_PHASE"
+            or PREACTIVATION_CANCEL_SKILL not in query.preactivations
+        ):
+            return None
+        filled = _filled_activation(query)
+        reason = validate_activation(
+            self.engine.state,
+            self.seat,
+            filled.skill_id,
+            filled.picks,
+            filled.choices,
+        )
+        assert reason is None, (
+            "取消专项：按清单填好的复合动作必须被同一个校验器放行"
+            f"（否则清单与校验器已漂移：{reason}）"
+        )
+        self._cancelled = True
+        self.recording.announce(self.seat)
+        return None
+
+
+def _filled_activation(query: Query) -> ActivateSkill:
+    """按清单给【制衡】填一个复合动作：代价牌取第一步候选池的第一项（恰好一张 ≥ 下限）。"""
+    steps = query.preactivations.get(PREACTIVATION_CANCEL_SKILL, ())
+    assert steps and steps[0].pool and steps[0].pool[0].options, (
+        "取消专项：【制衡】清单必须带代价牌候选（否则这次「进预发动」没有可填的东西）"
+    )
+    pick = int(steps[0].pool[0].options[0])
+    return ActivateSkill(
+        skill_id=PREACTIVATION_CANCEL_SKILL,
+        picks=(pick,),
+        choices=(),
+        answers_seq=query.seq,
+    )
+
+
 def _use(query: Query, type_id: str, targets: tuple[int, ...] | None = None) -> Action | None:
     for action in query.legal_actions:
         if not isinstance(action, UseCard) or action.card.type != type_id:
@@ -536,31 +626,84 @@ def _find(query: Query, action_type: type) -> Action:
     raise AssertionError(f"{query.kind} 询问里没有 {action_type.__name__} 候选")  # pragma: no cover
 
 
-def _record_scripted(slug: str, scenario: Scenario) -> Engine:
-    """M1 路径：``ScenarioPlayer`` 迫使目标段发生。
-
-    ``heroes``（票 17）：脚本基准也能指定逐座位武将——【雌雄双股剑】的"异性"判据读的是
-    **武将数据派生的性别**，没有武将时性别恒 ``None``、这条链根本进不了候选。缺省
-    ``None`` ⇒ 无武将模式，01–06 六条基准的录制一字未变。
-    """
+def _new_scripted_engine(scenario: Scenario) -> Engine:
+    """按场景声明开一局脚本基准（档位 / 人数 / 逐座位武将与真人局同一条入口）。"""
     pack = load_content_pack(deck_profile=scenario.deck_profile)
-    engine = Engine.new_game(
+    return Engine.new_game(
         seed=scenario.seed,
         rule_config=RuleConfig(player_count=scenario.player_count),
         pack=pack,
         heroes=scenario.heroes or (),
         hero_pool=scenario.hero_pool,
     )
+
+
+def _run_scripted(
+    scenario: Scenario, slug: str, *, enter: bool | None = None
+) -> tuple[Engine, _Recording]:
+    """跑一局脚本驱动并返回引擎与录制状态。
+
+    ``enter``（W4-5）：只有取消专项有两条路径——``True`` = 进预发动后取消，
+    ``False`` = 从不进预发动；其余场景必须保持 ``None``。
+    """
+    engine = _new_scripted_engine(scenario)
     recording = _Recording()
-    players: list = [
-        ScenarioPlayer(seat, slug, recording, engine) for seat in range(scenario.player_count)
-    ]
+    if slug == PREACTIVATION_CANCEL_SCENARIO:
+        assert enter is not None, f"{slug}：调用方必须显式选取消 / 不发动路径"
+        players: list = [
+            _PreativationCancelPlayer(seat, slug, recording, engine, enter=enter)
+            for seat in range(scenario.player_count)
+        ]
+    else:
+        assert enter is None, "只有取消专项有两条路径"
+        players = [
+            ScenarioPlayer(seat, slug, recording, engine)
+            for seat in range(scenario.player_count)
+        ]
     if slug == "06-deck-reshuffle":
         players = [
             _ReshuffleWatcher(engine, recording, seat, player)
             for seat, player in enumerate(players)
         ]
     engine.run(players)
+    return engine, recording
+
+
+def preactivation_cancel_pair(
+    slug: str = PREACTIVATION_CANCEL_SCENARIO,
+) -> tuple[Engine, Engine]:
+    """同一种子跑两遍：**取消路径** / **不发动路径**（W4-5 的专项基准）。
+
+    两次只差接入层本地态（读清单 + 填复合动作 + 交给校验器），引擎看不到取消，故记录流
+    必须逐字节相等。录制期由 :func:`_record_scripted` 判一次，门禁期由
+    ``tests/test_replays.py`` 再判一次。
+    """
+    scenario = SCENARIOS[slug]
+    assert scenario.driver == "scripted", f"{slug}：取消专项必须是脚本驱动的确定性基准"
+    cancel, _ = _run_scripted(scenario, slug, enter=True)
+    plain, _ = _run_scripted(scenario, slug, enter=False)
+    return cancel, plain
+
+
+def _record_scripted(slug: str, scenario: Scenario) -> Engine:
+    """M1 路径：``ScenarioPlayer`` 迫使目标段发生。
+
+    ``heroes``（票 17）：脚本基准也能指定逐座位武将——【雌雄双股剑】的"异性"判据读的是
+    **武将数据派生的性别**，没有武将时性别恒 ``None``、这条链根本进不了候选。缺省
+    ``None`` ⇒ 无武将模式，01–06 六条基准的录制一字未变。
+
+    W4-5 的取消专项（44）在录制期**同时**跑不发动路径：两条记录流不一致就拒绝录制，
+    免得"取消留下了副作用"被写进基准。
+    """
+    if slug == PREACTIVATION_CANCEL_SCENARIO:
+        engine, recording = _run_scripted(scenario, slug, enter=True)
+        plain, _ = _run_scripted(scenario, slug, enter=False)
+        assert dump_journal(engine.records) == dump_journal(plain.records), (
+            f"{slug}：取消与不发动两条路径的后续记录不一致——"
+            "取消是本地态，不得留下任何记录 / 副作用"
+        )
+    else:
+        engine, recording = _run_scripted(scenario, slug)
     assert recording.goal_done, f"{slug}：目标段没有命中（seed={scenario.seed}）"
     return engine
 
