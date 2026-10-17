@@ -98,18 +98,21 @@ _KIND_BY_TYPE: dict[str, VirtualKind] = {
 
 KIND_COUNT = len(VirtualKind)
 """命名空间的段数（只读事实，供测试与文档引用；id 算式不读它）。"""
-MAX_VIRTUAL_SOURCES = 8
-"""虚拟牌的**来源张数上界**（票 03 §验收 4）。
+MAX_VIRTUAL_SOURCES = 7
+"""虚拟牌的**来源张数上界**（票 03 §验收 4；W4-fix-1 由 ``2**53`` 反推）。
 
-步长与算式不再依赖来源张数（票 03 §要做什么 1），但"id 空间有限"这件事必须有一个
-显式上界才能成立：超过它由 :func:`transformed_card` 抛 :class:`VirtualSourceError`，
-而不是静默产出可能撞 id 的虚拟牌。取 8 是宽松的余量——标准版全部转化技能最多两张
-来源（【丈八蛇矛】），8 张的任何组合都远超未来可预见的需求，同时把"撞 id"这条风险
-变成构造期的可定位错误。
+线上的 id 是 JSON 数字，浏览器 ``JSON.parse`` 只把 ``|id| < 2**53`` 的整数读成精确
+整数。:func:`_generalized_block` 的一段容量是 ``(MAX+1) * base**MAX``（紧界），而
+全体 id 的上界是 ``KIND_COUNT * block``；标准包 ``base = 109``、``KIND_COUNT = 5`` 时
+
+- ``MAX = 7``：``5 * 8 * 109**7 ≈ 7.31e15 < 2**53 ≈ 9.01e15`` ✓
+- ``MAX = 8``：``5 * 9 * 109**8 ≈ 8.97e17`` ✗
+
+故 7 是编码撑得住的最大值。``tests/test_virtual_ids.py`` 从 ``2**53`` 重新推导它，
+不让这个数字成为魔法数。超过它由 :func:`transformed_card` / :func:`virtual_card_id`
+抛 :class:`VirtualSourceError`（构造期可定位错误），而不是静默产出撞 id 或会被浏览器
+变形的虚拟牌。标准版全部转化技能最多两张来源（【丈八蛇矛】），7 张的余量足够。
 """
-
-_BASE_DIGITS = 10
-"""``virtual_card_id`` 的**十进制数字槽**：``base = card_count + 1`` 进制的每一位。"""
 
 
 class VirtualSourceError(ValueError):
@@ -121,13 +124,8 @@ class VirtualSourceError(ValueError):
 
 
 def _base(card_count: int) -> int:
-    """进制 = ``card_count + 1``：来源 id 全部落进 ``1..card_count``，故恒小于它。"""
+    """进制 = ``card_count + 1``：来源 id 全部落进 ``0..card_count-1``，故恒小于它。"""
     return card_count + 1
-
-
-def _digits_per_source() -> int:
-    """一张来源牌在编码里占的十进制位数（``_BASE_DIGITS`` 的倍数）。"""
-    return _BASE_DIGITS
 
 
 def virtual_card_id(
@@ -143,18 +141,19 @@ def virtual_card_id(
     - ``kind < 2``（【丈八蛇矛】的转化【杀】/【八卦阵】的视为【闪】）走**兼容编码**：
       逐张来源按 ``base = card_count + 1`` 进制折叠，段步长恒为 ``base ** 2``。这三个
       数字与旧算式**逐字节相同**，故 M2 的 Golden Replay 磁带一行不改；
-    - ``kind >= 2``（票 03 起新增的目标牌名）走**泛化编码**：每段容量
-      :func:`_generalized_block`，与来源张数上限（:data:`MAX_VIRTUAL_SOURCES`）同阶，
-      故单源 / 多源 / 纯虚拟**逐对不撞**。
+    - ``kind >= 2``（票 03 起新增的目标牌名）走**泛化编码**：张数哨兵 + 每张来源一位
+      ``base`` 进制的紧凑折叠（:func:`_fold`），每段容量取紧界
+      :func:`_generalized_block`。全体 id 因此严格小于
+      ``KIND_COUNT * (MAX_VIRTUAL_SOURCES + 1) * base ** MAX_VIRTUAL_SOURCES``，
+      而来源上限 :data:`MAX_VIRTUAL_SOURCES` 正是按它 ``< 2**53`` 反推的。
 
-    两段区间互不重叠：泛化段的起点 ``2 * block`` 远大于兼容段的上界
-    ``base ** 2``（``block`` 至少是它的 ``BASE ** 8`` 倍），见 :func:`_generalized_block`。
+    两段区间互不重叠：泛化段的起点 ``1 + 2 * block`` 大于兼容段的上界
+    ``1 + base ** 2``（``block = (MAX+1) * base**MAX > base**2``，``MAX >= 2``）。
 
     签名保持既有的 ``kind`` / ``sources`` / ``card_count`` 三个关键字——既有调用点与测试
-    不破；``card_count`` 仍作进制用（不再有"来源张数上限"那层含义，那层由
-    :data:`MAX_VIRTUAL_SOURCES` 显式承担）。
+    不破；``card_count`` 仍作进制用（"来源张数上限"那层由 :data:`MAX_VIRTUAL_SOURCES`
+    显式承担）。
     """
-    digits = _digits_per_source()
     base = _base(card_count)
     # 空来源是**合法的**（纯虚拟牌走这一段）；"转化牌至少一张来源"由
     # :func:`transformed_card` 把关，id 派生本身不区分二者。
@@ -162,32 +161,38 @@ def virtual_card_id(
     if kind < LEGACY_KIND_COUNT:
         mixed = _fold_legacy(base=base, sources=sources)
         return -(1 + kind * base * base + mixed)
-    mixed = _fold(base=base, digits=digits, sources=sources)
-    block = _generalized_block(base=base, digits=digits)
+    mixed = _fold(base=base, sources=sources)
+    block = _generalized_block(base=base)
     return -(1 + kind * block + mixed)
 
 
-def _generalized_block(*, base: int, digits: int) -> int:
-    """泛化命名空间的一段容量：容纳 ``len <= MAX_VIRTUAL_SOURCES`` 的全部哨兵编码。
+def _generalized_block(*, base: int) -> int:
+    """泛化命名空间的一段容量：``(MAX_VIRTUAL_SOURCES + 1) * base**MAX_VIRTUAL_SOURCES``。
 
-    编码的最大值是 ``MAX_VIRTUAL_SOURCES * (base**digits) ** MAX_VIRTUAL_SOURCES
-    + (base**digits - 1)``，它小于 ``(base**digits) ** (MAX_VIRTUAL_SOURCES + 1)``
-    （因为 ``MAX_VIRTUAL_SOURCES < base**digits``），故取后者为容量即严格包住，
-    且各段（``kind`` 的不同取值）首尾不相接。
+    :func:`_fold` 在 ``L`` 张来源时落在 ``[L * base**L, (L+1) * base**L - 1]``，
+    故 ``L <= MAX_VIRTUAL_SOURCES`` 的全部编码严格小于本容量。这个界是**紧的**（只差
+    1），不是旧版按 ``10`` 个十进制位撑出来的天文数——正因如此
+    ``MAX_VIRTUAL_SOURCES`` 才能压进 ``2**53``。各 ``kind`` 段因此首尾不相接：第 ``k``
+    段的 ``|id|`` 落在 ``[1 + k * block, (k+1) * block]``，下一段从 ``1 + (k+1) * block``
+    起算。
     """
-    return base ** (digits * (MAX_VIRTUAL_SOURCES + 1))
+    return (MAX_VIRTUAL_SOURCES + 1) * base**MAX_VIRTUAL_SOURCES
 
 
-def _fold(*, base: int, digits: int, sources: tuple[int, ...]) -> int:
-    """泛化编码：最高段是张数哨兵，其后逐张来源各占一段。
+def _fold(*, base: int, sources: tuple[int, ...]) -> int:
+    """泛化编码：最高一段是张数哨兵，其后逐张来源各占一位 ``base`` 进制。
 
-    哨兵槽的取值为 ``1..MAX_VIRTUAL_SOURCES``，而任何来源段的取值都 ``< base``，
-    故"哨兵 + 定长段"的读法是唯一的——这正是旧算式只在高 ``2`` 张时成立、第 ``3`` 张
-    起就撞 id 的原因，泛化编码把它补上。
+    展开式是 ``L * base**L + sum_i s_i * base**(L-1-i)``（``L = len(sources)``，
+    每张来源 ``s_i < base``）。**单射证明**（不是注释保证，判据见
+    ``tests/test_virtual_ids.py``）：固定 ``L`` 时编码落在
+    ``[L * base**L, (L+1) * base**L - 1]``；相邻两段严格递增且不相交，因为
+    ``(L+1) * base**L - 1 < (L+1) * base**(L+1)``（``base >= 2``）。故 ``L`` 可由
+    编码唯一读出；固定 ``L`` 后余下的定长 ``base`` 进制展开也唯一——这正是旧算式只
+    在最多两张来源时成立、第 ``3`` 张起就撞 id 的原因，泛化编码把它补上。
     """
     mixed = len(sources)
     for card_id in sources:
-        mixed = mixed * (base**digits) + card_id
+        mixed = mixed * base + card_id
     return mixed
 
 

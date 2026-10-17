@@ -157,13 +157,15 @@ def test_the_id_derivation_is_injective_over_every_kind_and_source_count():
 
     对 ``kind`` 的全部取值 × ``0..MAX_VIRTUAL_SOURCES`` 张来源 × 若干 ``card_count``
     逐个算 id，断言**两两不同**——旧的 ``(card_count+1)**2`` 步长在第 3 张来源上就会撞。
-    来源 id 取 ``1..size``（合法牌 id 的**非零**前缀）。兼容段（``kind < 2``）逐字保留旧
-    算式，故它的 id **只由来源集合决定、与牌堆张数无关**（``card_count`` 只是那里的进制）：
+    来源 id 取 ``1..size``（合法牌 id 的**非零**前缀）；``card_count`` 因此都取
+    ``>= MAX_VIRTUAL_SOURCES + 1``，否则 ``1..size`` 会越过 ``base`` 这一位、不再是
+    合法来源。兼容段（``kind < 2``）逐字保留旧算式，故它的 id **只由来源集合决定、
+    与牌堆张数无关**（``card_count`` 只是那里的进制）：
     跨牌堆的撞因此只查**泛化段**（``kind >= 2``）——本票新引入的那一半。
     """
     count = len(PACK.deck.cards)
     global_seen: set[int] = set()
-    for card_count in (2, 53, count):
+    for card_count in (MAX_VIRTUAL_SOURCES + 1, 53, count):
         seen: set[int] = set()
         for kind in range(len(VirtualKind)):
             for size in range(MAX_VIRTUAL_SOURCES + 1):
