@@ -25,9 +25,11 @@ from sgs.agents import (
     HeuristicPlayer,
     RandomPlayer,
     TapePlayer,
+    is_structured_activation,
     tape_from_journal,
 )
 from sgs.data import (
+    Gender,
     Identity,
     RuleConfig,
     enabled_hero_ids,
@@ -38,6 +40,12 @@ from sgs.data import (
 from sgs.effects import legal_actions_for
 from sgs.engine import Engine, RandomSource
 from sgs.skills import CATALOG
+from sgs.skills.preativation import (
+    preactivated_skill_ids,
+    preactivation_for,
+    preactivations_for,
+    validate_activation,
+)
 from sgs.state import (
     ActivateSkill,
     ArrangeContext,
@@ -65,7 +73,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import ACCEPTANCE_SEEDS, SeatSpec, build_state
+from support import ACCEPTANCE_SEEDS, SeatSpec, build_state, run_until
 
 PACK = load_content_pack(deck_profile="standard_108")
 TESTS_DIR = Path(__file__).resolve().parent
@@ -125,10 +133,47 @@ def _missing_entries(table, values) -> list[str]:
     return missing
 
 
+def _equipment_skill_ids(pack=PACK) -> frozenset[str]:
+    """内容包里全部装备的**技能 id**（``equip.<牌名 id>``，与 :func:`_equip` 的派生同源）。"""
+    # ``Category`` 是 ``str`` 枚举但不在 ``sgs.data`` 的公开导出里；测试不 import
+    # ``sgs.data.models``（``test_scaffold`` 的外部导入纪律），故按枚举的字符串值判。
+    return frozenset(
+        f"equip.{card_type.id}"
+        for card_type in pack.card_types
+        if card_type.category == "equipment"
+    )
+
+
 def _stray_entries(table, values) -> list[str]:
-    """表里每个 id 都必须在数据文件里存在（不能凭空多出一条）。"""
+    """表里每个 id 都必须在数据文件里存在（不能凭空多出一条）。
+
+    已知集合 = 武将技（内容包的武将自己声明）∪ **装备技**（内容包里的装备牌名派生）。
+    装备技不在 ``load_heroes()`` 的表里，不补进来时每一条装备条目都会被误判为"凭空多出"。
+    """
     known = {hero_skill_id(hero.id, skill.id) for hero in table.heroes for skill in hero.skills}
+    known |= set(_equipment_skill_ids())
     return sorted(set(values) - known)
+
+
+def _activatable_equipment(catalog=CATALOG) -> dict[str, object]:
+    """非锁定、且**确实会问"是否发动"**的装备技（= 有钩子或接缝的那 5 条）。
+
+    【八卦阵】/【丈八蛇矛】/【方天画戟】虽非锁定，但没有"是否发动"询问（触发形态是
+    候选注入 / 修饰器），故不要求 :data:`SKILL_VALUES` 条目——"装备技入表"管的是
+    **AI 会被问到的那几条**。
+    """
+    return {
+        skill_id: definition
+        for skill_id, definition in catalog.items()
+        if skill_id.startswith("equip.")
+        and not definition.locked
+        and (definition.hooks or definition.seams)
+    }
+
+
+def _missing_equipment_entries(values, catalog=CATALOG) -> list[str]:
+    """每一条会问"是否发动"的非锁定装备技都应有语义条目（Pass=0 ⇒ 不入表就永不发动）。"""
+    return sorted(set(_activatable_equipment(catalog)) - set(values))
 
 
 def test_every_enabled_non_locked_hero_skill_has_a_semantic_entry():
@@ -168,6 +213,35 @@ def test_the_reverse_check_goes_red_on_an_unknown_id():
     assert "hero.caocao.not_a_skill" in _stray_entries(table, injected)
 
 
+def test_every_non_locked_equipment_skill_has_a_semantic_entry():
+    """W4-4：非锁定装备技（那 5 条会问"是否发动"的）都在表里。
+
+    缺省 :data:`_UNKNOWN_SKILL_VALUE = -1.0` 低于 ``Pass``（0.0）⇒ 不入表就**永远不发动**，
+    这正是【雌雄双股剑】在 AI 局里无法复现的根因。判据与数据同源（``CATALOG`` 的
+    ``locked`` / 钩子 / 接缝），不手抄 id 名单。
+    """
+    assert not _missing_equipment_entries(SKILL_VALUES), (
+        "这些非锁定装备技还没教 AI：" + "；".join(_missing_equipment_entries(SKILL_VALUES))
+    )
+
+
+def test_the_equipment_forward_check_goes_red_when_an_entry_is_removed():
+    """合成反例：临时删掉【寒冰剑】⇒ 装备技正向断言必须变红（双向同步的"表里有"）。"""
+    trimmed = dict(SKILL_VALUES)
+    del trimmed["equip.ice_sword"]
+
+    assert "equip.ice_sword" in _missing_equipment_entries(trimmed)
+
+
+def test_the_reverse_check_goes_red_on_an_unknown_equipment_id():
+    """合成反例：装备条目也必须能在内容包里找到（双向同步的"数据里有"）。"""
+    table = load_heroes()
+    injected = dict(SKILL_VALUES)
+    injected["equip.not_a_card"] = (lambda *_: 0.0, "合成反例")
+
+    assert "equip.not_a_card" in _stray_entries(table, injected)
+
+
 # ---------------------------------------------------------------------------
 # ② 可见性：只读 query.view 与 query.legal_actions（票 13 §硬约束 4）
 # ---------------------------------------------------------------------------
@@ -193,6 +267,66 @@ def _play_phase_query(state, seat: int = 0) -> PlayPhaseQuery:
         prompt="出牌阶段。",
         legal_actions=actions,
         view=project(state, seat),
+    )
+
+
+def _play_phase_with_preactivations(state, seat: int = 0) -> PlayPhaseQuery:
+    """与引擎同形的 ``PLAY_PHASE`` 询问：清单下发、已翻技能的骨架从候选里删掉。
+
+    清单用引擎自己的 :func:`~sgs.skills.preativation.preactivations_for` 渲染（不手抄），
+    删骨架读声明上的 :func:`~sgs.skills.preativation.preactivated_skill_ids`——与
+    ``Engine._build_query`` 的两步一致。AI 的填表判据因此跑在**真询问形状**上。
+    """
+    candidates = tuple(
+        legal_actions_for(state, seat, QueryKind.PLAY_PHASE, answers_seq=1)
+    )
+    offered = tuple(
+        action.skill_id for action in candidates if isinstance(action, ActivateSkill)
+    )
+    preactivations = preactivations_for(state, seat, offered)
+    flagged = preactivated_skill_ids()
+    actions = tuple(
+        action
+        for action in candidates
+        if not (isinstance(action, ActivateSkill) and action.skill_id in flagged)
+    )
+    return PlayPhaseQuery(
+        seq=1,
+        actor=seat,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="出牌阶段。",
+        legal_actions=actions,
+        view=project(state, seat),
+        preactivations=preactivations,
+    )
+
+
+def _passive_preactivation_query(
+    state,
+    seat: int,
+    skill_id: str,
+    *,
+    timing: Timing,
+    frame=None,
+) -> SkillActivationQuery:
+    """与引擎同形的 ``SKILL_ACTIVATION`` 询问（被动入口带清单）。"""
+    actions = legal_actions_for(
+        state,
+        seat,
+        QueryKind.SKILL_ACTIVATION,
+        answers_seq=1,
+        payload=SkillActivationContext(skill_id=skill_id, optional=True),
+    )
+    return SkillActivationQuery(
+        seq=1,
+        actor=seat,
+        timing=timing,
+        prompt="是否发动？",
+        legal_actions=actions,
+        view=project(state, seat),
+        skill_id=skill_id,
+        optional=True,
+        preactivation=preactivation_for(state, seat, skill_id, timing=timing, frame=frame),
     )
 
 
@@ -359,7 +493,12 @@ def test_skill_activation_uses_the_semantic_table_for_a_known_skill():
 
 
 def test_skill_activation_defaults_to_pass_when_the_table_has_no_entry():
-    """缺省保守：装备技能与锁定技都不在表里 ⇒ 不发动（票 13 §验收 5 的"拿不准就不发动"）。"""
+    """缺省保守：**没有"是否发动"询问的装备技**与锁定技都不在表里 ⇒ 不发动。
+
+    W4-4 把这 5 条装备技（雌雄 / 青龙 / 贯石 / 麒麟 / 寒冰）加进了表，故这里改用
+    【八卦阵】（非锁定、但触发形态是候选注入，没有"是否发动"询问）与锁定技作对照：
+    缺省值 ``_UNKNOWN_SKILL_VALUE = -1.0 < Pass(0)`` 的保守口径本身不变。
+    """
     state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()])
 
     for skill_id in ("equip.eight_diagrams", "hero.machao.mashu"):
@@ -462,7 +601,12 @@ def test_arrange_puts_the_most_useful_card_on_top():
 
 
 class _IllegalAnswerScan:
-    """包一层参与者：断言每次应答都在候选集合内（引擎侧也会拒，但这里显式记一笔）。"""
+    """包一层参与者：每次应答要么在候选集合内、要么是**按清单填的复合动作**。
+
+    W4-4：预发动后复合动作本来就不在 ``legal_actions`` 里（`spec.md` §3 的"候选 = 接受"
+    唯一让开处），故这里用 :func:`~sgs.agents.is_structured_activation` 认第二类；它是否真的合法
+    由引擎的同一个校验器裁决——非法应答会让整局抛错。
+    """
 
     def __init__(self, inner) -> None:
         self._inner = inner
@@ -472,7 +616,9 @@ class _IllegalAnswerScan:
     def respond(self, query):
         action = self._inner.respond(query)
         self.answers += 1
-        if action not in query.legal_actions:
+        if action not in query.legal_actions and not is_structured_activation(
+            query, action
+        ):
             self.illegal += 1
         return action
 
@@ -601,8 +747,15 @@ RATE_SEEDS: tuple[int, ...] = tuple(range(104, 232))
 **评审处置 §5：绝对下限已删，只留相对判据。** 票 15 曾把绝对档重钉为 0.55（实测
 75/128 = 0.586），但 0.586 距阈值只有 **0.8σ**（σ≈0.043）——阈值仍落在噪声带里，下一次
 无害改动会随机翻红。按 `CODING_STANDARDS.md` §5（"阈值落在噪声里时……换成不含绝对阈值的
-相对判据"），本批只保留 :func:`_candidate_wins_over` 派生的**两臂之差**（对随机档
-≥ 0.15；实测 0.586 vs 0.414）与 32 局批内优势（≥ 1/8），绝对胜率**不再断言**、只作诊断读数。
+相对判据"），本批只保留 :func:`_candidate_wins_over` 派生的**两臂之差**与 32 局批内优势
+（≥ 1/8），绝对胜率**不再断言**、只作诊断读数。
+
+**W4-4 重新标定（同一批 128 种子，改动前后各跑一遍）**：相对优势阈值按票面从 **0.15
+降到 0.10**；绝对胜率只打印、不断言。实测（装备技入表 + AI 填表之后）：启发式
+**85/128 = 0.664**、随机 **52/128 = 0.406** ⇒ 相对优势 **0.258**。同一批种子在改动前也是
+**85/128 vs 52/128 = 0.258**（坐 0 的装备发动确实发生了：128 局里雌雄 5 次、寒冰 12 次、
+贯石 4 次、麒麟 4 次、青龙 2 次，但这批种子的胜负对它们不敏感）。0.10 距实测 0.258 余量
+充足；相对判据同种子两臂，本身不含绝对阈值。
 
 **票 15 的实测与根因留档**（改动本身与绝对档无关，仍值得记）：票 15 之后 75/128 = 0.586
 （随机档同批 53/128 = 0.414），比上一条基线的 79/128 低 4 局（种子 113 / 181 / 209 / 217
@@ -636,13 +789,13 @@ def _candidate_wins_over(seeds: tuple[int, ...], *, heuristic: bool) -> dict[int
 
 
 def test_the_heuristic_beats_random_on_the_same_seeds():
-    """票 13 §验收 6：同一批种子上启发式胜率显著更高。
+    """票 13 §验收 6 / W4-4 重新标定：同一批种子上启发式胜率显著更高。
 
     判据**只留相对档**（评审处置 §5 删除绝对下限，理由见 :data:`RATE_SEEDS`）：
-    **对随机档的优势 ≥ 0.15** 在 :data:`RATE_SEEDS` 的 128 局上判，以及**比随机多赢
-    ≥ 1/8 的种子**在验收 5 的原批（:data:`~support.ACCEPTANCE_SEEDS`）上判。
-    "绝对胜率 ≥ 0.55"这一档已删——它在 128 局、σ≈0.043 下距实测 0.586 只有 0.8σ，
-    仍在噪声带里，会随机翻红（`CODING_STANDARDS.md` §5：阈值落在噪声里就换相对判据）。
+    **对随机档的优势 ≥ 0.10**（W4-4 按票面从 0.15 下调）在 :data:`RATE_SEEDS` 的
+    128 局上判，以及**比随机多赢 ≥ 1/8 的种子**在验收 5 的原批
+    （:data:`~support.ACCEPTANCE_SEEDS`）上判。绝对胜率**只打印、不断言**——它在 128 局、
+    σ≈0.043 下仍然落在噪声带里（`CODING_STANDARDS.md` §5）。
 
     座位 0 为候选、其余四席随机：同一种子下两臂的局面逐字节相同，故胜率差只反映档位。
     """
@@ -652,10 +805,15 @@ def test_the_heuristic_beats_random_on_the_same_seeds():
     won = sum(heuristic.values())
     rate = won / len(RATE_SEEDS)
     other = sum(random.values()) / len(RATE_SEEDS)
+    print(
+        f"启发式 {won}/{len(RATE_SEEDS)} = {rate:.3f}；"
+        f"随机 {sum(random.values())}/{len(RATE_SEEDS)} = {other:.3f}；"
+        f"相对优势 {rate - other:.3f}"
+    )
     # **只看相对判据**：这条测试真正要证的是"启发式显著更好"，那是**两臂之差**，不是某个
-    # 绝对档。绝对下限已在评审处置 §5 删除（理由见 :data:`RATE_SEEDS` 与 32 局批内判据）。
-    assert rate - other >= 0.15, (
-        f"启发式 {rate:.3f} vs 随机 {other:.3f}：相对优势不足 0.15"
+    # 绝对档。绝对胜率只作读数（W4-4 的重新标定见 :data:`RATE_SEEDS`）。
+    assert rate - other >= 0.10, (
+        f"启发式 {rate:.3f} vs 随机 {other:.3f}：相对优势不足 0.10"
     )
 
     seeds = ACCEPTANCE_SEEDS
@@ -849,3 +1007,453 @@ def test_an_optional_pick_outside_the_play_phase_may_still_be_declined():
     action = HeuristicPlayer(_stream(13)).respond(query)
 
     assert isinstance(action, Pass), f"出牌阶段之外的可选选牌仍可放弃，实得 {action!r}"
+
+
+# ---------------------------------------------------------------------------
+# ⑥ 预发动填表（W4-4）：AI 读清单、复用打分器填复合动作，交给同一个校验器
+# ---------------------------------------------------------------------------
+
+
+def test_the_ai_fills_the_composite_form_of_a_preactivated_skill():
+    """【青囊】的复合动作不在 ``legal_actions`` 里：AI 自己按清单填，校验器必须收。
+
+    代价取 ``_card_value`` 最低的那张（【闪电】= 1.0）交给已受伤目标；
+    ``_score_qingnang``（3.0 − 牌价）压过"使用【闪电】"（1.5）与结束阶段（0）。
+    """
+    lightning = _ids("lightning")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="huatuo", hand=(lightning,)),
+            SeatSpec(hp=2, hp_max=4),
+        ],
+        deck=_deck_excluding(lightning),
+        turn_seat=0,
+    )
+    query = _play_phase_with_preactivations(state)
+    assert "hero.huatuo.qingnang" in query.preactivations
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, ActivateSkill), f"该填复合动作，实得 {action!r}"
+    assert action.skill_id == "hero.huatuo.qingnang"
+    assert action.picks == (lightning,), "代价取牌面价值最低的那张"
+    assert action.choices == ("seat:1",), "目标取 _score_seat_option 最高的那名已受伤角色"
+    assert action not in query.legal_actions, "复合动作本来就不在候选里（靠校验器放行）"
+    assert (
+        validate_activation(
+            state, 0, action.skill_id, action.picks, action.choices
+        )
+        is None
+    )
+
+
+def test_the_ai_fills_a_passive_preactivation_manifest_too():
+    """被动入口同理：【青龙偃月刀】的提供步由 AI 填成复合动作，校验器放行。"""
+    green = _ids("green_dragon_blade")[0]
+    slash = _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(slash,), equip=(green,)), SeatSpec()],
+        deck=_deck_excluding(green, slash),
+        turn_seat=0,
+    )
+    query = _passive_preactivation_query(
+        state, 0, "equip.green_dragon_blade", timing=Timing.RESOLVE_BEFORE_EFFECT
+    )
+    assert query.preactivation
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, ActivateSkill), f"该填复合动作，实得 {action!r}"
+    assert action.skill_id == "equip.green_dragon_blade"
+    assert action.picks == (slash,), "提供步取牌面价值最低的【杀】"
+    assert action not in query.legal_actions
+    assert (
+        validate_activation(
+            state, 0, action.skill_id, action.picks, action.choices, timing=query.timing
+        )
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 覆盖判据（W4-4）：每条可发动技能都有一条"AI 能合法填表发动"的确定性场景
+#
+# 表驱动 + 双向同步（与 ① 的技能语义表同一样板）：
+#   ① 正向：可发动技能集合（有 flow 的技能 ∪ 那 5 条会问"是否发动"的非锁定装备技）
+#      每一条都必须有场景；漏一条立刻判红。
+#   ② 反向：场景表每一行都必须是数据里存在且非锁定的技能；凭空多一行立刻判红。
+# 每个场景都真的让 AI 应答：有清单的技能必须交出一个**不在候选里**的复合动作，并由
+# `validate_activation`（与引擎同一个校验器）放行；没有 flow 的装备技则必须在骨架候选里。
+# ---------------------------------------------------------------------------
+
+
+class _ActivationFrame:
+    """被动入口校验器要读的最小帧替身（只实现 ``data``）。"""
+
+    def __init__(self, **data) -> None:
+        self.data = dict(data)
+
+
+def _coverage_zhiheng():
+    lightning = _ids("lightning")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="sunquan", equip=(lightning,)), SeatSpec()],
+        deck=_deck_excluding(lightning),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
+def _coverage_rende():
+    low = tuple(_ids("lightning")[:2])
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="liubei", hp=2, hp_max=4, hand=low), SeatSpec()],
+        deck=_deck_excluding(*low),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
+def _coverage_fanjian():
+    lightning = _ids("lightning")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="zhouyu", hand=(lightning,)), SeatSpec()],
+        deck=_deck_excluding(lightning),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
+def _coverage_qingnang():
+    lightning = _ids("lightning")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="huatuo", hand=(lightning,)), SeatSpec(hp=2, hp_max=4)],
+        deck=_deck_excluding(lightning),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
+def _coverage_lijian():
+    lightning = _ids("lightning")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="diaochan", hand=(lightning,)),
+            SeatSpec(gender=Gender.MALE),
+            SeatSpec(gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(lightning),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
+def _coverage_jieyin():
+    low = tuple(_ids("lightning")[:2])
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="sunshangxiang", hp=2, hp_max=4, hand=low),
+            SeatSpec(hp=2, hp_max=4, gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(*low),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
+def _coverage_green_dragon():
+    green = _ids("green_dragon_blade")[0]
+    slash = _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(slash,), equip=(green,)), SeatSpec()],
+        deck=_deck_excluding(green, slash),
+        turn_seat=0,
+    )
+    query = _passive_preactivation_query(
+        state, 0, "equip.green_dragon_blade", timing=Timing.RESOLVE_BEFORE_EFFECT
+    )
+    return state, query, None
+
+
+def _coverage_axe():
+    axe = _ids("axe")[0]
+    low = _ids("lightning")[0]
+    other = _ids("peach_garden")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(low, other), equip=(axe,)), SeatSpec()],
+        deck=_deck_excluding(axe, low, other),
+        turn_seat=0,
+    )
+    query = _passive_preactivation_query(
+        state, 0, "equip.axe", timing=Timing.RESOLVE_BEFORE_EFFECT
+    )
+    return state, query, None
+
+
+def _coverage_qilin_bow():
+    bow = _ids("qilin_bow")[0]
+    horse = _ids("chitu")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=(bow,)), SeatSpec(equip=(horse,))],
+        deck=_deck_excluding(bow, horse),
+        turn_seat=0,
+    )
+    frame = _ActivationFrame(target=1)
+    query = _passive_preactivation_query(
+        state, 0, "equip.qilin_bow", timing=Timing.DAMAGE_DEAL, frame=frame
+    )
+    return state, query, frame
+
+
+def _coverage_liuli():
+    lightning = _ids("lightning")[0]
+    slash = _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="daqiao", hand=(lightning,)),
+            SeatSpec(hand=(slash,)),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(lightning, slash),
+        turn_seat=1,
+    )
+    frame = _ActivationFrame(
+        source=1, targets=(0,), card=state.card(slash), skill_owner=0
+    )
+    query = _passive_preactivation_query(
+        state, 0, "hero.daqiao.liuli", timing=Timing.USE_BECOME_TARGET, frame=frame
+    )
+    return state, query, frame
+
+
+def _coverage_double_sword():
+    weapon = _ids("double_sword")[0]
+    slash = _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(slash,), equip=(weapon,)), SeatSpec()],
+        deck=_deck_excluding(weapon, slash),
+        turn_seat=0,
+    )
+    query = _passive_preactivation_query(
+        state, 0, "equip.double_sword", timing=Timing.USE_AFTER_DESIGNATE_TARGET
+    )
+    return state, query, None
+
+
+def _coverage_ice_sword():
+    weapon = _ids("ice_sword")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=(weapon,)), SeatSpec(hand=(_ids("peach")[0],))],
+        deck=_deck_excluding(weapon),
+        turn_seat=0,
+    )
+    query = _passive_preactivation_query(
+        state, 0, "equip.ice_sword", timing=Timing.DAMAGE_DEAL
+    )
+    return state, query, None
+
+
+_COVERAGE_CASES = {
+    "hero.sunquan.zhiheng": _coverage_zhiheng,
+    "hero.liubei.rende": _coverage_rende,
+    "hero.zhouyu.fanjian": _coverage_fanjian,
+    "hero.huatuo.qingnang": _coverage_qingnang,
+    "hero.diaochan.lijian": _coverage_lijian,
+    "hero.sunshangxiang.jieyin": _coverage_jieyin,
+    "hero.daqiao.liuli": _coverage_liuli,
+    "equip.green_dragon_blade": _coverage_green_dragon,
+    "equip.axe": _coverage_axe,
+    "equip.qilin_bow": _coverage_qilin_bow,
+    "equip.double_sword": _coverage_double_sword,
+    "equip.ice_sword": _coverage_ice_sword,
+}
+"""``skill_id`` → 构造 ``(state, query, frame)`` 的确定性场景。
+
+覆盖范围 = **有 flow 的技能**（清单可填）∪ **会问"是否发动"的非锁定装备技**（W4-4 的
+两条新落点）。没有 flow 的装备技（雌雄 / 寒冰）走骨架候选，场景只证明"AI 会答发动"。
+"""
+
+
+def _coverage_required() -> frozenset[str]:
+    """每一条应当可被 AI 填表发动的技能。
+
+    = **已翻到预发动的技能**（``preativated`` 开关：6 条主动 + 流离 / 青龙 / 贯石）
+    ∪ **那 5 条会问"是否发动"的非锁定装备技**（麒麟 / 雌雄 / 寒冰也在内）。
+    有 flow 但**清单不下发**的技能（【反馈】：来源手牌是隐藏面，清单为空）不在此列——
+    AI 对它只能答骨架 + 逐步选牌，没有"表"可填。
+    """
+    return frozenset(preactivated_skill_ids()) | frozenset(_activatable_equipment())
+
+
+def _coverage_gaps(cases) -> list[str]:
+    """正向同步：可发动技能里还没有确定性场景的那些。"""
+    return sorted(_coverage_required() - set(cases))
+
+
+def _coverage_strays(cases) -> list[str]:
+    """反向同步：场景表里不在数据里、或标了锁定的那些 id。"""
+    return sorted(
+        skill_id
+        for skill_id in cases
+        if skill_id not in CATALOG or CATALOG[skill_id].locked
+    )
+
+
+def test_every_activatable_skill_can_be_ai_filled_and_validated_at_least_once():
+    """覆盖判据（spec §5）：每条非锁定装备/技能都有一条"AI 合法发动"的确定性场景。"""
+    assert not _coverage_gaps(_COVERAGE_CASES), (
+        "这些技能还没有 AI 覆盖场景：" + "；".join(_coverage_gaps(_COVERAGE_CASES))
+    )
+    assert not _coverage_strays(_COVERAGE_CASES), (
+        "覆盖表里有数据里不存在 / 已锁定的技能：" + "；".join(_coverage_strays(_COVERAGE_CASES))
+    )
+
+    for skill_id in sorted(_COVERAGE_CASES):
+        state, query, frame = _COVERAGE_CASES[skill_id]()
+        action = HeuristicPlayer(_stream(0)).respond(query)
+
+        assert isinstance(action, ActivateSkill), f"{skill_id}：AI 该答发动，实得 {action!r}"
+        assert action.skill_id == skill_id, f"{skill_id}：AI 发动的不是这条技能"
+        if is_structured_activation(query, action):
+            assert action not in query.legal_actions, (
+                f"{skill_id}：有清单时应当填复合动作，而不是挑骨架候选"
+            )
+            assert (
+                validate_activation(
+                    state,
+                    query.actor,
+                    skill_id,
+                    action.picks,
+                    action.choices,
+                    timing=query.timing,
+                    frame=frame,
+                )
+                is None
+            ), f"{skill_id}：AI 填的复合动作没过校验器"
+        else:
+            assert action in query.legal_actions, (
+                f"{skill_id}：没有清单的技能只能答候选里的骨架动作"
+            )
+
+
+def test_the_coverage_table_goes_red_when_an_activatable_skill_is_missing():
+    """合成反例：抽掉【寒冰剑】一行 ⇒ 正向覆盖断言必须变红（"新增技能漏教 AI"）。"""
+    trimmed = {
+        skill_id: builder
+        for skill_id, builder in _COVERAGE_CASES.items()
+        if skill_id != "equip.ice_sword"
+    }
+
+    assert "equip.ice_sword" in _coverage_gaps(trimmed)
+
+
+def test_the_coverage_table_goes_red_on_an_unknown_id():
+    """合成反例：凭空加一行不存在的技能 ⇒ 反向覆盖断言必须变红。"""
+    injected = dict(_COVERAGE_CASES)
+    injected["equip.not_a_card"] = _coverage_ice_sword
+
+    assert "equip.not_a_card" in _coverage_strays(injected)
+
+
+def test_double_sword_really_fires_in_a_deterministic_ai_game():
+    """验收：装备技在 AI 局里**真的发动**——【雌雄双股剑】的目标被问到弃牌 / 摸牌。
+
+    真引擎 + 两席启发式、固定种子：座位 0（男）装【雌雄】使用【杀】，AI 答"发动"；
+    座位 1（女，有手牌）随后收到 ``SELECT_OPTION``，选项 = ``discard_one`` / ``draw_one``。
+    这是 W4-4 之前**不可能出现**的询问——装备技缺省 ``_UNKNOWN_SKILL_VALUE=-1.0 < Pass``。
+    """
+    weapon = _ids("double_sword")[0]
+    slash = _ids("slash")[0]
+    peach = _ids("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(slash,), equip=(weapon,), gender=Gender.MALE),
+            SeatSpec(hand=(peach,), gender=Gender.FEMALE),
+        ],
+        deck=_deck_excluding(weapon, slash, peach),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+
+    def choice_made(running) -> bool:
+        return any(
+            record.kind == "action"
+            and getattr(record.action, "kind", None) == "SelectOption"
+            for record in running.records
+        )
+
+    run_until(engine, players, choice_made)
+
+    option_query = next(
+        record.query
+        for record in engine.records
+        if record.kind == "query" and getattr(record.query, "kind", None) == "SELECT_OPTION"
+    )
+    assert option_query.actor == 1, "选择权在目标"
+    assert set(option_query.options) == {"discard_one", "draw_one"}, (
+        "目标应当被问「弃一张手牌 / 令使用者摸一张」"
+    )
+    accepted = [
+        record.action
+        for record in engine.records
+        if record.kind == "action" and record.accepted
+    ]
+    assert any(
+        isinstance(action, ActivateSkill) and action.skill_id == "equip.double_sword"
+        for action in accepted
+    ), "AI 必须真的发动【雌雄双股剑】"
+    assert any(
+        isinstance(action, SelectOption)
+        and action.choice in ("discard_one", "draw_one")
+        for action in accepted
+    ), "目标必须真的答了弃牌 / 摸牌"
+
+
+def test_a_composite_action_only_counts_when_that_skill_was_offered():
+    """`is_structured_activation` 不是"任何 ActivateSkill 都放行"（W4-4 的 fail-closed 面）。"""
+    lightning = _ids("lightning")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="huatuo", hand=(lightning,)), SeatSpec(hp=2, hp_max=4)],
+        deck=_deck_excluding(lightning),
+        turn_seat=0,
+    )
+    query = _play_phase_with_preactivations(state)
+
+    assert is_structured_activation(
+        query,
+        ActivateSkill(
+            skill_id="hero.huatuo.qingnang",
+            picks=(lightning,),
+            choices=("seat:1",),
+            answers_seq=query.seq,
+        ),
+    )
+    assert not is_structured_activation(
+        query,
+        ActivateSkill(
+            skill_id="hero.sunquan.zhiheng",
+            picks=(lightning,),
+            answers_seq=query.seq,
+        ),
+    )
+    assert not is_structured_activation(
+        query,
+        ActivateSkill(skill_id="hero.huatuo.qingnang", answers_seq=query.seq),
+    ), "空载荷是 W4-2 之前的旧骨架，不是填好的复合动作"

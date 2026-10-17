@@ -9,22 +9,32 @@
 ``scorer(query, action) -> float`` → 取最高分；**平分由 ``"ai"`` 子流打破**
 （同种子逐字节可复现，不另造随机源）。
 
-**硬约束**（票 13 §硬约束 4 / `04` 的 AI 工程约束）：只能读 :attr:`Query.view` 与
-:attr:`Query.legal_actions`。本模块**不** import ``sgs.engine`` / ``sgs.skills`` /
-``sgs.data`` / ``sgs.resolution`` / ``sgs.timing``，也不读 ``GameState``——"信息隐藏
-不是约定"这条因此是可断言事实（静态扫描住 ``tests/test_source_discipline.py``）。
+**硬约束**（票 13 §硬约束 4 / `04` 的 AI 工程约束）：只读**询问自带的面**
+（:attr:`Query.view`、:attr:`Query.legal_actions` 与询问自己的派生态：
+``skill_id`` / ``spec`` / ``slots`` / ``preactivations`` / ``preactivation``）。本模块
+**不** import ``sgs.engine`` / ``sgs.skills`` / ``sgs.data`` / ``sgs.resolution`` /
+``sgs.timing``，也不读 ``GameState``——"信息隐藏不是约定"这条因此是可断言事实
+（静态扫描住 ``tests/test_source_discipline.py``）。
 **不做身份推断、不建决策时限**（ADR-011）：拿不准时缺省保守，而不是猜身份。
 
-**技能语义表** :data:`SKILL_VALUES`：键 = 技能 id（含 ``hero.`` 前缀），值 =
+**预发动填表**（W4-4）：预发动后复合动作**不在** ``legal_actions`` 里，AI 读询问随附的
+清单（主动 ``preactivations`` / 被动 ``preactivation``），按**现有打分器**填一个
+``ActivateSkill(picks, choices)``：代价取 :func:`_card_value` 最低、目标取
+:func:`_score_seat_option` 最高、转化源取旧 :func:`_score_select_cards` 会挑的那张；
+提交后由引擎的**同一个校验器**（``sgs.skills.validate_activation``）放行。
+转化技**不填**——它们的清单住 ``transform_preactivations``，确认仍是普通 ``UseCard`` 候选。
+
+**技能语义表** :data:`SKILL_VALUES`：键 = 技能 id（含 ``hero.`` / ``equip.`` 前缀），值 =
 ``(打分函数, 默认策略说明)``；打分函数签名统一 ``(query, action, view) -> float``
-（`map.md` R4-Q6）。表里没有的技能**缺省 Pass**（"拿不准就不发动"）。双向同步纪律
-（`03` 的「技能分类与过滤」：加武将忘了教 AI 必须立刻红）住 ``tests/test_heuristic_ai.py``：
-① 启用的每名武将的每个**非锁定**技能都有条目；② 表里每个 id 都在数据文件里存在。
+（`map.md` R4-Q6）。表里没有的技能**缺省 Pass**（"拿不准就不发动"）。三向同步纪律
+（`03` 的「技能分类与过滤」：加武将 / 装备忘了教 AI 必须立刻红）住
+``tests/test_heuristic_ai.py``：① 启用的每名武将的每个**非锁定**技能都有条目；
+② 会问"是否发动"的每条非锁定装备技都有条目；③ 表里每个 id 都在数据文件里存在。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from types import MappingProxyType
 
 from sgs.effects import Randomness
@@ -159,6 +169,12 @@ _PLAY_PHASE_IDLE = "PHASE_PLAY_IDLE"
 为什么抄一个字面量而不是 import：本模块**不许碰全知面**，而
 ``tests/test_source_discipline.py`` 的可见面白名单把 ``sgs.timing`` 判红
 （`HEURISTIC_ALLOWED_SGS_MODULES` 只有 ``sgs.effects`` 与 ``sgs.state``）。
+"""
+
+_SEAT_PREFIX = "seat:"
+"""座位选项的规范文本前缀（与 `sgs.skills.flow.SEAT_PREFIX` 同值）。
+
+同 :data:`_PLAY_PHASE_IDLE` 的理由：``sgs.skills`` 不在可见面白名单里，故按字面量读。
 """
 
 _LORD_SIDE = frozenset({"lord", "loyalist"})
@@ -440,21 +456,31 @@ _HOSTILE_SEAT_STEPS = ("lijian:", "fanjian:", "liuli:")
 """
 
 
-def _score_seat_option(query: SelectOptionQuery, choice: str) -> float:
+def _score_seat_option(
+    query: Query, choice: str, *, skill_id: str | None = None
+) -> float:
     """座位选项的敌我估值：帮助类避开敌人、决斗类瞄准敌人，``self`` 恒是好的帮助对象。
 
     票 03 起【结姻】/【青囊】/【离间】的座位改由步骤询问；若一律 0 分，AI 会在友敌之间
     掷硬币（候选次序修复后胜率掉到 50% 的正是这个短板）。
+
+    ``skill_id``（W4-4）：预发动填表时答案不在 ``SELECT_OPTION`` 询问上（复合动作一次
+    提交），故由调用方把"这一步属于哪条技能"（``<短 id>:<步骤键>``）显式传进来；逐步
+    应答仍缺省读询问自带的 ``skill_id``。
     """
     view = query.view
     try:
-        seat = int(choice.removeprefix("seat:"))
+        seat = int(choice.removeprefix(_SEAT_PREFIX))
     except ValueError:  # pragma: no cover - 座位步的选项恒是 seat:N
         return 0.0
     if not 0 <= seat < len(view.players):
         return 0.0
     enemy = _is_revealed_enemy(view, seat)
-    skill = str(getattr(query, "skill_id", "") or "")
+    skill = (
+        str(skill_id)
+        if skill_id is not None
+        else str(getattr(query, "skill_id", "") or "")
+    )
     if skill.startswith(_HOSTILE_SEAT_STEPS):
         return _SEAT_TARGET_VALUE if enemy else 0.0
     if seat == view.seat or _is_revealed_ally(view, seat):
@@ -475,6 +501,193 @@ def _score_select_option(query: Query, action: Action) -> float:
     if action.choice.startswith("seat:"):
         return _score_seat_option(query, action.choice)
     return _OPTION_VALUES.get(action.choice, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# 预发动填表（W4-4）：读清单、复用现有打分器填一个复合动作
+# ---------------------------------------------------------------------------
+
+
+def _visible_cards(view: PlayerView) -> dict[int, tuple[CardRef, int]]:
+    """本视角里**看得到牌面**的实体牌 → ``(牌面, 归属座位)``。
+
+    自己的手牌 ＋ 全部座位的装备 / 判定区（后两者是公开信息，票 08 §6）。清单下发的
+    选牌候选只可能落在这些牌上——他人手牌那一步在清单里**退化**（不下发候选），故这里
+    也不会读到隐藏牌面。
+    """
+    out: dict[int, tuple[CardRef, int]] = {
+        card.card_id: (card, view.seat) for card in view.self_hand
+    }
+    for player in view.players:
+        for card in (*player.equip, *player.judge):
+            out.setdefault(card.card_id, (card, player.seat))
+    return out
+
+
+def _pool_row_for(step, prior: tuple[str, ...]):
+    """找出与前序答案文本匹配的那一行子池；``when=()`` 行 = 池与前序无关。
+
+    ``step`` 是 ``sgs.state.Step``（清单的一步）。本模块的可见面白名单**不许 import**
+    它的类型（``Step`` / ``StepPool`` 不在 ``HEURISTIC_IMPORT_ALLOWLIST`` 里），故这里
+    按询问自带的形状鸭子类型读——数据本身由询问下发，不是全知面。
+    """
+    rows = step.pool
+    if not rows:
+        return None
+    for row in rows:
+        if tuple(row.when) == prior:
+            return row
+    for row in rows:
+        if not row.when:
+            return row
+    return None
+
+
+def _pick_card_ids(
+    step,
+    options: tuple[str, ...],
+    cards: Mapping[int, tuple[CardRef, int]],
+    view: PlayerView,
+    short: str,
+) -> tuple[int, ...] | None:
+    """按现有选牌语义挑本步的牌 id（``None`` = 填不出来）。
+
+    - **别人的牌**（【麒麟弓】弃目标坐骑）：与 ``_score_select_cards`` 的"选别人的牌取
+      高价值"同向 ⇒ 取 ``_card_value`` 最高的 ``min`` 张；
+    - **自己的牌（代价）**：取最低的；其中【制衡】按 :data:`_CYCLE_VALUE` 逐张筛
+      （低价值的都换掉），【仁德】受伤时给最便宜的两张（``_RENDE_RECOVER_VALUE`` 那笔账），
+      其余技能取 ``min`` 张。这三档与 :func:`_score_select_cards` 逐字同一模型，故
+      "发不发动"与"填哪几张"不会各说各话。
+
+    【青龙】的提供步也走这里（来源牌是自己的成本 ⇒ 取 ``_card_value`` 最低的那张），
+    这正是票面"转化源取旧 ``_score_select_cards`` 会挑的那张"。
+    """
+    entries: list[tuple[int, float, int]] = []
+    for text in options:
+        try:
+            card_id = int(text)
+        except (TypeError, ValueError):
+            return None
+        card, owner = cards.get(card_id, (None, view.seat))
+        entries.append((card_id, _card_value(card), owner))
+    if not entries:
+        return None
+    lower = max(0, step.min)
+    upper = len(entries) if step.max is None else min(step.max, len(entries))
+    if len(entries) < lower or upper < lower:
+        return None
+    if all(owner != view.seat for _card_id, _value, owner in entries):
+        count = max(lower, 1)
+        ordered = sorted(entries, key=lambda item: (-item[1], item[0]))
+    else:
+        if short in _CYCLE_STEPS:
+            count = sum(1 for _id, value, _owner in entries if value < _CYCLE_VALUE) or 1
+        elif short in _GIVE_STEPS and _wounded(view):
+            count = 2
+        else:
+            count = lower or 1
+        ordered = sorted(entries, key=lambda item: (item[1], item[0]))
+    count = max(lower, min(count, upper))
+    return tuple(card_id for card_id, _value, _owner in ordered[:count])
+
+
+def _pick_options(
+    step, options: tuple[str, ...], query: Query, short: str
+) -> tuple[str, ...] | None:
+    """座位 / 选项步：取 :func:`_score_seat_option` 最高（座位）或特征表最高（选项）。"""
+    remaining = list(options)
+    wanted = max(step.min, 1) if step.min else 1
+    if step.max is not None:
+        wanted = min(wanted, step.max)
+    wanted = min(wanted, len(remaining))
+    if wanted < step.min:
+        return None
+    chosen: list[str] = []
+    for _ in range(wanted):
+        best: str | None = None
+        best_score = 0.0
+        for text in remaining:
+            score = (
+                _score_seat_option(query, text, skill_id=f"{short}:{step.name}")
+                if text.startswith(_SEAT_PREFIX)
+                else _OPTION_VALUES.get(text, 0.0)
+            )
+            if best is None or score > best_score:
+                best, best_score = text, score
+        assert best is not None
+        remaining.remove(best)
+        chosen.append(best)
+    return tuple(chosen)
+
+
+def _fill_activation(
+    query: Query,
+    skill_id: str,
+    steps: tuple[object, ...],
+    cards: Mapping[int, tuple[CardRef, int]],
+) -> ActivateSkill | None:
+    """按清单填一个复合动作；任何一步填不出来 ⇒ ``None``（不提交半成品）。"""
+    picks: list[int] = []
+    choices: list[str] = []
+    prior: list[str] = []
+    short = str(skill_id).rsplit(".", 1)[-1]
+    for step in sorted(steps, key=lambda item: item.order):
+        row = _pool_row_for(step, tuple(prior))
+        if row is None:
+            return None
+        options = tuple(row.options)
+        if not options:
+            return None
+        if all(text.startswith(_SEAT_PREFIX) for text in options):
+            chosen = _pick_options(step, options, query, short)
+            if chosen is None:
+                return None
+            choices.extend(chosen)
+            prior.extend(chosen)
+        elif all(text.isdigit() for text in options):
+            picked = _pick_card_ids(step, options, cards, query.view, short)
+            if picked is None:
+                return None
+            picks.extend(picked)
+            prior.extend(str(card_id) for card_id in picked)
+        else:
+            chosen = _pick_options(step, options, query, short)
+            if chosen is None:
+                return None
+            choices.extend(chosen)
+            prior.extend(chosen)
+    return ActivateSkill(
+        skill_id=skill_id,
+        picks=tuple(picks),
+        choices=tuple(choices),
+        answers_seq=query.seq,
+    )
+
+
+def _preactivation_candidates(query: Query) -> tuple[ActivateSkill, ...]:
+    """本次询问可填的全部复合动作（主动读 ``preactivations``、被动读 ``preactivation``）。
+
+    转化技**不**在这里：它们的清单住 ``transform_preactivations``，确认仍是普通
+    ``UseCard`` 候选（`spec.md` §3；W4-3 的裁定），AI 照旧按候选挑。
+    """
+    kind = QueryKind(query.kind)
+    if kind is QueryKind.PLAY_PHASE:
+        manifests = dict(getattr(query, "preactivations", None) or {})
+    elif kind is QueryKind.SKILL_ACTIVATION:
+        skill_id = getattr(query, "skill_id", None)
+        steps = tuple(getattr(query, "preactivation", None) or ())
+        manifests = {str(skill_id): steps} if skill_id and steps else {}
+    else:
+        return ()
+    if not manifests:
+        return ()
+    cards = _visible_cards(query.view)
+    return tuple(
+        action
+        for skill_id in sorted(manifests)
+        if (action := _fill_activation(query, skill_id, manifests[skill_id], cards))
+        is not None
+    )
 
 
 def _score_arrange(query: Query, action: Action) -> float:
@@ -671,13 +884,23 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.huatuo.qingnang": (_score_qingnang, "弃一张手牌令已受伤角色回复 1 点"),
     "hero.diaochan.lijian": (_score_lijian, "弃一张牌令两名男性决斗：伤害转嫁"),
     "hero.diaochan.biyue": (_constant(2.5), "结束阶段摸一张：净赚一张"),
+    # 装备技（W4-4）：会问"是否发动"的 5 条非锁定装备**各给一个正分常量**。
+    # 缺省 ``_UNKNOWN_SKILL_VALUE = -1.0 < Pass(0)`` ⇒ 不入表就永不发动（雌雄无法复现
+    # 的根因）；正分 ⇒ 永远发动（Pass = 0，成本 / 收益不建模，见票面"不做收益模型调参"）。
+    "equip.double_sword": (_constant(2.0), "雌雄双股剑：令异性目标弃一张或你摸一张"),
+    "equip.green_dragon_blade": (_constant(2.0), "青龙偃月刀：被抵消后再补一张【杀】"),
+    "equip.axe": (_constant(2.0), "贯石斧：弃两张令被抵消的【杀】依然造成伤害"),
+    "equip.qilin_bow": (_constant(2.0), "麒麟弓：造成伤害时弃目标的一匹坐骑"),
+    "equip.ice_sword": (_constant(2.0), "寒冰剑：防止伤害并依次弃目标两张牌"),
 }
 """技能 id → ``(打分函数, 默认策略说明)``（`map.md` R4-Q6 的统一签名）。
 
-**只装非锁定武将技能**：锁定技没有 ``SKILL_ACTIVATION`` 询问（派发器直接跑），
-故不要求条目；装备技能同理不在此表（缺省保守 ``Pass``）。两个方向的同步断言
-（"启用的非锁定技能都在" + "表里每个 id 都在数据文件里"）住
-``tests/test_heuristic_ai.py``——加武将忘了教 AI 会立刻判红。
+**英雄侧只装非锁定武将技能**：锁定技没有 ``SKILL_ACTIVATION`` 询问（派发器直接跑），
+故不要求条目。**装备侧**装那 5 条会问"是否发动"的非锁定装备技（雌雄 / 青龙 / 贯石 /
+麒麟 / 寒冰）；【八卦阵】/【丈八蛇矛】/【方天画戟】没有"是否发动"询问（候选注入 /
+修饰器），故仍走缺省保守 ``Pass``。三向同步断言住 ``tests/test_heuristic_ai.py``：
+① 启用的非锁定武将技都在；② 那 5 条会问"是否发动"的非锁定装备技都在；③ 表里每个 id
+都在数据文件里（武将技 ∪ 装备技）。加武将 / 装备忘了教 AI 会立刻判红。
 """
 
 
@@ -697,7 +920,20 @@ class HeuristicPlayer:
         self._rng = rng
 
     def respond(self, query: Query) -> Action:
-        actions: Sequence[Action] = query.legal_actions
+        actions: list[Action] = list(query.legal_actions)
+        # W4-4：预发动后复合动作**不在候选里**，AI 自己按清单填；同一个技能若也给了
+        # 骨架候选（未删的被动入口），用填好的那份替换它——"确认 = 填表"是这一档的语义。
+        composites = _preactivation_candidates(query)
+        if composites:
+            filled = {action.skill_id for action in composites}
+            actions = [
+                action
+                for action in actions
+                if not (
+                    isinstance(action, ActivateSkill) and action.skill_id in filled
+                )
+            ]
+            actions.extend(composites)
         if not actions:
             raise ValueError(f"{query.kind} 询问没有候选行动，参与者无法应答")
         scorer = _SCORERS[QueryKind(query.kind)]

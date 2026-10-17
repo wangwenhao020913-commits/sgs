@@ -19,7 +19,12 @@ from __future__ import annotations
 
 import pytest
 
-from sgs.agents import HeuristicPlayer, TapePlayer, tape_from_journal
+from sgs.agents import (
+    HeuristicPlayer,
+    TapePlayer,
+    is_structured_activation,
+    tape_from_journal,
+)
 from sgs.data import Identity, RuleConfig, load_content_pack
 from sgs.engine import Engine, RandomSource
 
@@ -44,7 +49,11 @@ SIDE_IDENTITIES: dict[str, frozenset[Identity]] = {
 
 
 class _IllegalAnswerScan:
-    """包一层参与者：断言每次应答都在候选集合内（引擎侧也会拒，这里显式记一笔）。"""
+    """包一层参与者：每次应答要么在候选集合内、要么是按清单填的复合动作。
+
+    W4-4：预发动后复合动作不在 ``legal_actions`` 里（`spec.md` §3），由引擎的同一个
+    校验器裁决；``is_structured_activation`` 只认"命中本次询问下发的清单"的那一类。
+    """
 
     def __init__(self, inner) -> None:
         self._inner = inner
@@ -54,7 +63,9 @@ class _IllegalAnswerScan:
     def respond(self, query):
         action = self._inner.respond(query)
         self.answers += 1
-        if action not in query.legal_actions:
+        if action not in query.legal_actions and not is_structured_activation(
+            query, action
+        ):
             self.illegal += 1
         return action
 

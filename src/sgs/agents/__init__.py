@@ -4,7 +4,14 @@
 """
 
 from .heuristic import SKILL_VALUES, HeuristicPlayer
-from .participants import Participant, RandomPlayer, TapeError, TapePlayer, tape_from_journal
+from .participants import (
+    Participant,
+    RandomPlayer,
+    TapeError,
+    TapePlayer,
+    is_structured_activation,
+    tape_from_journal,
+)
 
 __all__ = (
     "HeuristicPlayer",
@@ -13,5 +20,6 @@ __all__ = (
     "SKILL_VALUES",
     "TapeError",
     "TapePlayer",
+    "is_structured_activation",
     "tape_from_journal",
 )
