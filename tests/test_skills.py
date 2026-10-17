@@ -1894,7 +1894,9 @@ def test_green_dragon_preactivation_costs_a_converted_slash_source():
 
     steps = captured["steps"]
     assert [step.name for step in steps] == ["card"]
-    assert steps[0].zones == (Zone.HAND,)
+    assert steps[0].zones == (Zone.HAND, Zone.EQUIP), (
+        "提供步的区域 = 手牌 ∪ 装备（W4-3 的区域默认；W4 评审处置 C.6 让 zones 与池同源）"
+    )
     assert (steps[0].min, steps[0].max) == (1, 1)
     assert set(_step_options(steps[0])) == {str(dodge_cost)}, (
         "【龙胆】把【闪】转成【杀】⇒ 候选是**来源**那张【闪】，不是虚拟牌的负 id"

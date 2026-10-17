@@ -37,10 +37,11 @@ from sgs.data import (
     load_content_pack,
     load_heroes,
 )
-from sgs.effects import legal_actions_for
+from sgs.effects import legal_actions_for, locate
 from sgs.engine import Engine, RandomSource
 from sgs.skills import CATALOG
 from sgs.skills.preativation import (
+    flow_for,
     preactivated_skill_ids,
     preactivation_for,
     preactivations_for,
@@ -57,6 +58,7 @@ from sgs.state import (
     PeachQuery,
     PlayPhaseQuery,
     QueryKind,
+    SelectCards,
     SelectCardsQuery,
     SelectContext,
     SelectionSpec,
@@ -1077,15 +1079,128 @@ def test_the_ai_fills_a_passive_preactivation_manifest_too():
     )
 
 
+def _select_cards_query_for_step(
+    state, skill_id: str, step, *, optional: bool
+) -> SelectCardsQuery:
+    """把清单的一步摊成一条**同形的** ``SELECT_CARDS`` 询问（同一份选择面 / 同一技能）。
+
+    用途：让 ``_score_select_cards``（已提交技能的选牌步模型）在同一组候选上作答，
+    与预发动复合动作的 ``picks`` 对齐（W4 评审处置 D.7）。``skill_id`` 用全限定 id：
+    ``_step_skill_short`` 取最后一段，与 ``_fill_activation`` 的 ``short`` 逐字同源。
+    """
+    options = tuple(int(text) for text in step.pool[0].options)
+    slots = tuple(
+        Slot(ref=locate(state, card_id), card=state.card(card_id)) for card_id in options
+    )
+    spec = SelectionSpec(
+        zones=tuple(step.zones), total=(step.min, step.max), optional=optional
+    )
+    actions = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_CARDS,
+        answers_seq=1,
+        payload=SelectContext(spec=spec, slots=slots),
+    )
+    return SelectCardsQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="请选择要弃置 / 交出的牌。",
+        legal_actions=actions,
+        view=project(state, 0),
+        spec=spec,
+        slots=slots,
+        skill_id=skill_id,
+    )
+
+
+def test_the_ai_fills_the_same_cards_that_score_select_cards_would_pick():
+    """D.7：复合动作的 ``picks`` == ``_score_select_cards`` 在同一询问下挑的那组牌。
+
+    两份模型收敛成**同一个**价值口径（``_CYCLE_VALUE`` / ``_RENDE_RECOVER_VALUE`` /
+    牌面价值表），故"发不发动"与"填哪几张"不会各说各话：
+
+    - 【制衡】按 ``_CYCLE_VALUE`` 逐张筛：两张坐骑（的卢 1.2 / 赤兔 1.0）都低于 1.5
+      ⇒ 都换掉，【桃】6.0 / 【闪】4.0 留下；
+    - 【仁德】受伤时给最便宜的两张换 1 点体力（``_RENDE_RECOVER_VALUE`` 那笔账）。
+
+    两张场景各交出一份**真复合动作**，再用同一份面让 ``_score_select_cards`` 作答；
+    若 ``_pick_card_ids`` 另写一套"选哪几张"，这条断言就会红。
+    """
+    cases = [
+        {
+            "skill_id": "hero.sunquan.zhiheng",
+            "state": build_state(
+                pack=PACK,
+                seats=[
+                    SeatSpec(
+                        hero="sunquan",
+                        hand=(_ids("peach")[0], _ids("dodge")[0]),
+                        equip=(_ids("dilu")[0], _ids("chitu")[0]),
+                    ),
+                    SeatSpec(),
+                ],
+                deck=_deck_excluding(
+                    _ids("peach")[0],
+                    _ids("dodge")[0],
+                    _ids("dilu")[0],
+                    _ids("chitu")[0],
+                ),
+                turn_seat=0,
+            ),
+        },
+        {
+            "skill_id": "hero.liubei.rende",
+            "state": build_state(
+                pack=PACK,
+                seats=[
+                    SeatSpec(hero="liubei", hp=2, hp_max=4, hand=tuple(_ids("lightning")[:2])),
+                    SeatSpec(),
+                ],
+                deck=_deck_excluding(*_ids("lightning")[:2]),
+                turn_seat=0,
+            ),
+        },
+    ]
+
+    for case in cases:
+        state = case["state"]
+        skill_id = case["skill_id"]
+        query = _play_phase_with_preactivations(state)
+        assert skill_id in query.preactivations, f"{skill_id} 应当有预发动清单"
+
+        composite = HeuristicPlayer(_stream(0)).respond(query)
+        assert isinstance(composite, ActivateSkill), f"该填复合动作，实得 {composite!r}"
+        assert composite.skill_id == skill_id
+        assert len(composite.picks) >= 2, "这两个场景都该选多张（否则钉不住分歧）"
+
+        step = query.preactivations[skill_id][0]
+        select_query = _select_cards_query_for_step(
+            state, skill_id, step, optional=True
+        )
+        picked = HeuristicPlayer(_stream(0)).respond(select_query)
+        assert isinstance(picked, SelectCards), f"选牌步该答 SelectCards，实得 {picked!r}"
+
+        options = tuple(int(text) for text in step.pool[0].options)
+        model_picks = {options[index] for index in picked.picks}
+        assert model_picks == set(composite.picks), (
+            f"{skill_id}：复合动作 {sorted(composite.picks)} 与 _score_select_cards "
+            f"选的 {sorted(model_picks)} 不是同一组牌"
+        )
+
+
 # ---------------------------------------------------------------------------
 # ⑦ 覆盖判据（W4-4）：每条可发动技能都有一条"AI 能合法填表发动"的确定性场景
 #
 # 表驱动 + 双向同步（与 ① 的技能语义表同一样板）：
-#   ① 正向：可发动技能集合（有 flow 的技能 ∪ 那 5 条会问"是否发动"的非锁定装备技）
+#   ① 正向：**要求集**（有 flow 的技能 ∪ 那 5 条会问"是否发动"的非锁定装备技）
 #      每一条都必须有场景；漏一条立刻判红。
-#   ② 反向：场景表每一行都必须是数据里存在且非锁定的技能；凭空多一行立刻判红。
+#   ② 反向：场景表每一行都必须在**要求集**里（由此推出"在数据里且非锁定"）；
+#      "数据里有、要求集里没有"同样判红（W4 评审处置 C.4）。
 # 每个场景都真的让 AI 应答：有清单的技能必须交出一个**不在候选里**的复合动作，并由
 # `validate_activation`（与引擎同一个校验器）放行；没有 flow 的装备技则必须在骨架候选里。
+# 分支按**技能有没有流**判（不是按应答形状）——有流的技能答骨架就是退化，会立刻红。
 # ---------------------------------------------------------------------------
 
 
@@ -1293,23 +1408,41 @@ def _coverage_required() -> frozenset[str]:
 
     = **已翻到预发动的技能**（``preativated`` 开关：6 条主动 + 流离 / 青龙 / 贯石）
     ∪ **那 5 条会问"是否发动"的非锁定装备技**（麒麟 / 雌雄 / 寒冰也在内）。
-    有 flow 但**清单不下发**的技能（【反馈】：来源手牌是隐藏面，清单为空）不在此列——
-    AI 对它只能答骨架 + 逐步选牌，没有"表"可填。
+
+    这个范围就是 `spec.md` §5 的**收窄后措辞**（裁定见 `spec.md` §1 第 10 条）：
+    它只收"会向 AI 下发『是否发动』询问、且有表可填 / 可答骨架"的非锁定技能与装备。
+    不在要求集里的三类都有裁定：
+
+    - **没有「是否发动」询问**（【方天画戟】是修饰器、【八卦阵】是候选注入、【丈八蛇矛】
+      是转化入口、【国色】/【武圣】/【龙胆】/【急救】是普通转化候选）——AI 走普通候选，
+      没有可填的表；
+    - **清单为空**（【反馈】：来源手牌是隐藏面）——只能逐步选牌，没有"表"；
+    - **其余自动触发 / 锁定技**——从不出现在询问里，由既有的技能语义表覆盖。
+
+    要求集里的每一条都必须由**真的发动**钉住：有流（清单）的技能必须交出复合动作并
+    过校验器；没有流的装备技（雌雄 / 寒冰）的**全部交互形态**就是骨架候选本身。
     """
     return frozenset(preactivated_skill_ids()) | frozenset(_activatable_equipment())
 
 
 def _coverage_gaps(cases) -> list[str]:
-    """正向同步：可发动技能里还没有确定性场景的那些。"""
+    """正向同步：要求集里还没有确定性场景的那些。"""
     return sorted(_coverage_required() - set(cases))
 
 
 def _coverage_strays(cases) -> list[str]:
-    """反向同步：场景表里不在数据里、或标了锁定的那些 id。"""
+    """反向同步：场景表里**不在要求集**、或不在数据里、或标了锁定的那些 id。
+
+    三条一起查：把"数据里存在且非锁定但不在要求集"的 id 塞进表里，也必须红——否则
+    场景表与要求集可以各说各话（W4 评审处置 C.4）。
+    """
+    required = _coverage_required()
     return sorted(
         skill_id
         for skill_id in cases
-        if skill_id not in CATALOG or CATALOG[skill_id].locked
+        if skill_id not in required
+        or skill_id not in CATALOG
+        or CATALOG[skill_id].locked
     )
 
 
@@ -1326,28 +1459,37 @@ def test_every_activatable_skill_can_be_ai_filled_and_validated_at_least_once():
         state, query, frame = _COVERAGE_CASES[skill_id]()
         action = HeuristicPlayer(_stream(0)).respond(query)
 
-        assert isinstance(action, ActivateSkill), f"{skill_id}：AI 该答发动，实得 {action!r}"
+        assert isinstance(action, ActivateSkill), (
+            f"{skill_id}：AI 至少该选 ActivateSkill 而不是 Pass，实得 {action!r}"
+        )
         assert action.skill_id == skill_id, f"{skill_id}：AI 发动的不是这条技能"
-        if is_structured_activation(query, action):
-            assert action not in query.legal_actions, (
-                f"{skill_id}：有清单时应当填复合动作，而不是挑骨架候选"
-            )
-            assert (
-                validate_activation(
-                    state,
-                    query.actor,
-                    skill_id,
-                    action.picks,
-                    action.choices,
-                    timing=query.timing,
-                    frame=frame,
-                )
-                is None
-            ), f"{skill_id}：AI 填的复合动作没过校验器"
-        else:
+        if flow_for(skill_id, query.timing) is None:
+            # 没有清单的装备技（雌雄 / 寒冰）：骨架候选就是它与 AI 的**全部**交互形态，
+            # 不是"退化的弱分支"——这两条本来就没有可填的表。
             assert action in query.legal_actions, (
                 f"{skill_id}：没有清单的技能只能答候选里的骨架动作"
             )
+            continue
+        # 有清单 ⇒ 必须把表**填完**（复合动作不在候选里）并过同一个校验器。
+        # "答骨架"在这里是退化，不是可选分支。
+        assert is_structured_activation(query, action), (
+            f"{skill_id}：有清单却没填复合动作（不许退化成挑骨架）"
+        )
+        assert action not in query.legal_actions, (
+            f"{skill_id}：有清单时应当填复合动作，而不是挑骨架候选"
+        )
+        assert (
+            validate_activation(
+                state,
+                query.actor,
+                skill_id,
+                action.picks,
+                action.choices,
+                timing=query.timing,
+                frame=frame,
+            )
+            is None
+        ), f"{skill_id}：AI 填的复合动作没过校验器"
 
 
 def test_the_coverage_table_goes_red_when_an_activatable_skill_is_missing():
@@ -1367,6 +1509,18 @@ def test_the_coverage_table_goes_red_on_an_unknown_id():
     injected["equip.not_a_card"] = _coverage_ice_sword
 
     assert "equip.not_a_card" in _coverage_strays(injected)
+
+
+def test_the_coverage_table_goes_red_on_a_row_outside_the_required_set():
+    """合成反例：数据里存在、非锁定，但**不在要求集**里 ⇒ 反向覆盖断言也必须变红。
+
+    W4 评审处置 C.4：场景表与要求集是同一个圆——不是"数据里有的都能进表"。取【龙胆】
+    （非锁定、真实存在、但它走普通转化候选、没有可填的复合动作清单）。
+    """
+    injected = dict(_COVERAGE_CASES)
+    injected["hero.zhaoyun.longdan"] = _coverage_ice_sword
+
+    assert "hero.zhaoyun.longdan" in _coverage_strays(injected)
 
 
 def test_double_sword_really_fires_in_a_deterministic_ai_game():

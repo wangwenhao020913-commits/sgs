@@ -21,12 +21,13 @@ from typing import Any
 import pytest
 
 from sgs.data import Color, color_of_suit
-from sgs.effects import legal_actions_for, target_is_effective
+from sgs.effects import legal_actions_for, locate, target_is_effective
 from sgs.engine import Engine
 from sgs.skills import (
     MAX_VIRTUAL_SOURCES,
     VirtualKind,
     VirtualSourceError,
+    preactivation_for,
     transformed_card,
     transformed_slash,
     virtual_card_id,
@@ -1196,6 +1197,36 @@ def test_longdan_manifests_have_a_source_step_only_in_both_response_directions()
     assert tuple(other_direction[0].pool[0].options) == (str(RED_DODGE),)
 
 
+def test_longdan_active_use_manifest_takes_the_dodge_then_the_slash_target():
+    """龙胆（主动使用，当【杀】）：1. 一张【闪】（手牌 ∪ 装备）；2. 这张【杀】的目标。
+
+    与上面两条**响应方向**的清单不同：主动使用带目标步，``seat`` 步的池就是这张虚拟
+    【杀】此刻的合法目标（W4 评审处置 B.2；渲染早已如此，缺的是这条钉子）。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_DODGE,), hero="zhaoyun"), SeatSpec()],
+        deck=_deck_excluding(RED_DODGE),
+        turn_seat=0,
+    )
+    actions = [action for action in _virtual_actions(state) if action.card.type == "slash"]
+    assert actions, "主动使用方向：手牌【闪】必须能转成【杀】并出现在出牌阶段候选里"
+
+    steps = _manifest(state, actions, ZHAOYUN_SLASH)
+
+    assert [step.name for step in steps] == ["card", "seat"]
+    assert [step.order for step in steps] == [0, 1]
+    source = steps[0]
+    assert source.min == source.max == 1, "一张【闪】"
+    assert tuple(source.zones) == (Zone.HAND,), "这张【闪】此刻在手里"
+    assert tuple(source.pool[0].options) == (str(RED_DODGE),)
+    target = steps[1]
+    assert target.min == target.max == 1
+    assert [option for row in target.pool for option in row.options] == ["seat:1"], (
+        "目标步的池 = 这张【杀】的目标（不是「所有座位」）"
+    )
+
+
 def test_guose_manifest_reads_diamond_sources_from_the_equipment_zone_too():
     """国色（主动使用）：1. 一张方块牌（手牌 ∪ 装备）；2. 这张【乐不思蜀】的目标。"""
     state = build_state(
@@ -1251,6 +1282,36 @@ def test_serpent_spear_manifest_takes_exactly_two_hand_cards_then_the_slash_targ
     assert tuple(steps[0].zones) == (Zone.HAND,)
     assert set(steps[0].pool[0].options) == {str(first), str(second)}
     assert [option for row in steps[1].pool for option in row.options] == ["seat:1"]
+
+
+def test_serpent_spear_respond_manifest_has_only_the_two_hand_sources():
+    """丈八蛇矛（响应·当【杀】打出）：1. 恰好两张手牌；**无目标步**。
+
+    使用侧的清单由上面那条钉（``card`` + ``seat``）；这一条补响应方向：打出的目标由
+    窗口承载，清单只有来源步（W4 评审处置 B.3；渲染早已如此，缺的是这条钉子）。
+    """
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(first, second), equip=(SERPENT,)), SeatSpec()],
+        deck=_deck_excluding(first, second, SERPENT),
+        turn_seat=0,
+    )
+    actions = [
+        action
+        for action in legal_actions_for(
+            state, 0, QueryKind.RESPOND, answers_seq=1, payload=_respond("slash")
+        )
+        if isinstance(action, PlayCard) and action.card.is_virtual
+    ]
+    assert actions, "响应方向：两张手牌必须能转成【杀】并出现在 RESPOND 候选里"
+
+    steps = _manifest(state, actions, "equip.serpent_spear")
+
+    assert [step.name for step in steps] == ["card"], "响应：无目标步"
+    assert steps[0].min == steps[0].max == 2, "恰好两张手牌"
+    assert tuple(steps[0].zones) == (Zone.HAND,)
+    assert set(steps[0].pool[0].options) == {str(first), str(second)}
 
 
 def test_the_play_phase_query_carries_the_transform_preactivation_manifests():
@@ -1321,3 +1382,38 @@ def test_green_dragon_provide_face_reads_longdan_equip_slash_and_skips_the_judge
     assert all(
         sources != (judge_dodge,) for _card_id, _type_id, sources in face
     ), "判定区的牌不是源（区域默认不包含判定区）"
+
+
+def test_green_dragon_provide_zones_cover_every_source_zone_in_its_pool():
+    """青龙的提供步：``Step.zones`` 必须覆盖池里每个来源此刻所在的区。
+
+    W4-3 的区域默认让【龙胆】/【武圣】的转化源也能来自装备区；因此青龙这一行的
+    ``PickProvide.zones``（原来只写 ``(HAND,)``）必须与池同源（手牌 ∪ 装备）。
+    ``flow.manifest`` 的语义不动：它照旧把 ``PickProvide.zones`` 摊成 ``Step.zones``
+    （W4 评审处置 C.6）。
+    """
+    equip_dodge = _cards("dodge")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,), equip=(GREEN_DRAGON, equip_dodge), hero="zhaoyun"),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(SLASH, GREEN_DRAGON, equip_dodge),
+        turn_seat=0,
+    )
+
+    steps = preactivation_for(state, 0, "equip.green_dragon_blade")
+
+    assert [step.name for step in steps] == ["card"]
+    step = steps[0]
+    sources = tuple(int(option) for option in step.pool[0].options)
+    assert set(sources) == {SLASH, equip_dodge}, (
+        "池 = 手牌实体【杀】 ＋ 龙胆把装备区【闪】转出的【杀】"
+    )
+    source_zones = {locate(state, source).zone for source in sources}
+    assert Zone.EQUIP in source_zones, "池里确有装备区来源（否则这条断言不说明问题）"
+    assert source_zones <= set(step.zones), (
+        f"Step.zones={tuple(zone.value for zone in step.zones)} 必须覆盖池里来源所在的区 "
+        f"{sorted(zone.value for zone in source_zones)}"
+    )

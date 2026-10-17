@@ -376,6 +376,23 @@ def _step_skill_short(query: Query) -> str:
     return str(raw).rsplit(".", 1)[-1] if raw else ""
 
 
+def _step_card_score(card: CardRef | None, owner: int, me: int, short: str) -> float:
+    """一步选牌的**单张**分值（``_score_select_cards`` 与预发动填表共用的唯一口径）。
+
+    - **别人的牌**（【麒麟弓】弃目标坐骑 / 【反间】挑发动者的牌）：取高价值 ⇒ ``+牌价``；
+    - **自己的牌（成本）**：按技能语义取负——【制衡】每弃一张回抽一张，记
+      ``_CYCLE_VALUE - 牌价``；其余（含【仁德】的给牌）记 ``-牌价``。
+
+    两处读它（选牌步的打分、预发动填表的"选哪几张"），故两份模型不会漂移。
+    """
+    value = _card_value(card)
+    if owner != me:
+        return value
+    if short in _CYCLE_STEPS:
+        return _CYCLE_VALUE - value
+    return -value
+
+
 def _score_select_cards(query: Query, action: Action) -> float:
     """``SELECT_CARDS``：选**别人的**牌取高价值、选**自己的**牌（成本）取低价值。
 
@@ -384,27 +401,22 @@ def _score_select_cards(query: Query, action: Action) -> float:
     - 【制衡】:data:`_CYCLE_STEPS`：每弃一张回抽一张 ⇒ 逐张按 ``_CYCLE_VALUE - 牌价`` 估值；
     - 【仁德】:data:`_GIVE_STEPS`：给出去没有回抽，但给到 ≥2 张且自己受伤换回 1 点体力 ⇒
       按 ``-牌价`` 估值并给"≥2 张"补上 :data:`_RENDE_RECOVER_VALUE`。
+
+    单张口径的唯一实现是 :func:`_step_card_score`——W4 评审处置 D.7 起，预发动填表的
+    "选哪几张"也读它（不再另写一套）。
     """
     assert isinstance(query, SelectCardsQuery)
     if not isinstance(action, SelectCards):
         return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
     committed = _is_committed_skill_step(query)
     short = _step_skill_short(query) if committed else ""
-    cycle = short in _CYCLE_STEPS
-    give = short in _GIVE_STEPS
     total = 0.0
     for index in action.picks:
         if not 0 <= index < len(query.slots):
             return _ILLEGAL_PENALTY
         slot = query.slots[index]
-        value = _card_value(slot.card)
-        if slot.ref.seat != query.view.seat:
-            total += value
-        elif cycle:
-            total += _CYCLE_VALUE - value
-        else:
-            total -= value
-    if give and len(action.picks) >= 2 and _wounded(query.view):
+        total += _step_card_score(slot.card, slot.ref.seat, query.view.seat, short)
+    if short in _GIVE_STEPS and len(action.picks) >= 2 and _wounded(query.view):
         total += _RENDE_RECOVER_VALUE
     return total
 
@@ -543,6 +555,36 @@ def _pool_row_for(step, prior: tuple[str, ...]):
     return None
 
 
+def _model_card_picks(
+    entries: list[tuple[int, float]],
+    step,
+    short: str,
+    view: PlayerView,
+) -> tuple[int, ...] | None:
+    """按 :func:`_step_card_score` 的口径选出本步的实体 id（**同一个**打分模型）。
+
+    打分器对一组 picks 的分数 = 各张单张分值之和（【仁德】另给 ≥2 张的回复奖励），
+    故"最优子集"= 按单张分值降序取前 ``count`` 张，再在 ``min..max`` 内取总和最高的
+    ``count``；同分取更小的 ``count``（多加一张零分牌不改变模型的选择）。
+    """
+    lower = max(0, step.min)
+    upper = len(entries) if step.max is None else min(step.max, len(entries))
+    if len(entries) < lower or upper < lower:
+        return None
+    ordered = sorted(entries, key=lambda item: (-item[1], item[0]))
+    give = short in _GIVE_STEPS
+    best_score = 0.0
+    best_count = lower
+    for count in range(lower, upper + 1):
+        score = sum(value for _card_id, value in ordered[:count])
+        if give and count >= 2 and _wounded(view):
+            score += _RENDE_RECOVER_VALUE
+        if count == lower or score > best_score:
+            best_score = score
+            best_count = count
+    return tuple(card_id for card_id, _value in ordered[:best_count])
+
+
 def _pick_card_ids(
     step,
     options: tuple[str, ...],
@@ -550,45 +592,23 @@ def _pick_card_ids(
     view: PlayerView,
     short: str,
 ) -> tuple[int, ...] | None:
-    """按现有选牌语义挑本步的牌 id（``None`` = 填不出来）。
+    """把**模型选出的实体 id** 映回清单的选项文本（``None`` = 填不出来）。
 
-    - **别人的牌**（【麒麟弓】弃目标坐骑）：与 ``_score_select_cards`` 的"选别人的牌取
-      高价值"同向 ⇒ 取 ``_card_value`` 最高的 ``min`` 张；
-    - **自己的牌（代价）**：取最低的；其中【制衡】按 :data:`_CYCLE_VALUE` 逐张筛
-      （低价值的都换掉），【仁德】受伤时给最便宜的两张（``_RENDE_RECOVER_VALUE`` 那笔账），
-      其余技能取 ``min`` 张。这三档与 :func:`_score_select_cards` 逐字同一模型，故
-      "发不发动"与"填哪几张"不会各说各话。
-
-    【青龙】的提供步也走这里（来源牌是自己的成本 ⇒ 取 ``_card_value`` 最低的那张），
-    这正是票面"转化源取旧 ``_score_select_cards`` 会挑的那张"。
+    "选哪几张"不再是这里另写的一套：单张口径读 :func:`_step_card_score`，
+    子集选择读 :func:`_model_card_picks`——与 ``_score_select_cards`` 逐字同一模型
+    （W4 评审处置 D.7；原先按技能分支手写的三档已删除）。
     """
-    entries: list[tuple[int, float, int]] = []
+    entries: list[tuple[int, float]] = []
     for text in options:
         try:
             card_id = int(text)
         except (TypeError, ValueError):
             return None
         card, owner = cards.get(card_id, (None, view.seat))
-        entries.append((card_id, _card_value(card), owner))
+        entries.append((card_id, _step_card_score(card, owner, view.seat, short)))
     if not entries:
         return None
-    lower = max(0, step.min)
-    upper = len(entries) if step.max is None else min(step.max, len(entries))
-    if len(entries) < lower or upper < lower:
-        return None
-    if all(owner != view.seat for _card_id, _value, owner in entries):
-        count = max(lower, 1)
-        ordered = sorted(entries, key=lambda item: (-item[1], item[0]))
-    else:
-        if short in _CYCLE_STEPS:
-            count = sum(1 for _id, value, _owner in entries if value < _CYCLE_VALUE) or 1
-        elif short in _GIVE_STEPS and _wounded(view):
-            count = 2
-        else:
-            count = lower or 1
-        ordered = sorted(entries, key=lambda item: (item[1], item[0]))
-    count = max(lower, min(count, upper))
-    return tuple(card_id for card_id, _value, _owner in ordered[:count])
+    return _model_card_picks(entries, step, short, view)
 
 
 def _pick_options(

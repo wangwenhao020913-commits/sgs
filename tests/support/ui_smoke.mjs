@@ -1161,13 +1161,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 /* ============ 报障 2 / 4（合成局面）：**遗留** hand-pick 渲染路径与龙胆"点技能 → 点闪" =
  *
  * 两条都是**界面读法**的断言：喂与服务端 `pending_payload` / `skills` 同形的合成 view，
- * 看界面按不按 `ui.manual` / `ui.convert_sources` / `virtual_index` 这些键读。
+ * 看界面按不按 `ui.convert_sources` / `virtual_index` 这些键读。
  * 服务端怎么算这些键由 `tests/test_web.py` 钉；这里钉前端有没有真的读它。
  *
- * ⚠️ 【仁德】那一条（①'）自**票 05** 起是**遗留路径**：A 族六条主动技已全部改走
- * `SkillFlow`，候选恒骨架（不带 `picks`/`choices`）⇒ `ui.manual` 在生产里恒假，手选模式
- * 没有生产者。它按 design.md §7 Q4"先留、之后再清"保留在这里，测的是**这段尚未删除的
- * 渲染代码**仍然读得对；【仁德】的真实交互（服务端两步询问）由 ㉿W1–W8 与 ㉿R8–R11 覆盖。
+ * ⚠️ 合成 `ui` 只注入生产会写的键（`CODING_STANDARDS.md` §6）：`_skill_ui` 现在只产
+ * `requirement` 与 `convert_sources`；`manual` / `pick_cards` / `pick_seats` 的生产者已随
+ * W4-2 删除，注入它们只会让测试绿得毫无意义（W4 评审处置 A.1 已清掉）。
  */
 
 // ① 龙胆：转化候选的 card_id 是虚拟牌，界面手牌是实体牌——`virtual_index` 是那座桥。
@@ -1195,8 +1194,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     skill_id: "hero.zhaoyun.longdan", name: "龙胆", skill_type: "NORMAL", locked: false,
     carrier: "HERO", available: false,
     ui: {
-      requirement: "选择1张【闪】当【杀】使用或打出", manual: false,
-      pick_cards: [], pick_seats: [], convert_sources: [2],
+      requirement: "选择1张【闪】当【杀】使用或打出",
+      convert_sources: [2],
     },
   }];
   ui.state.view = view;
@@ -1254,7 +1253,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       { ref: { zone: "hand", seat: 0 }, card: fromDodge },
       { ref: { zone: "equip", seat: 0 }, card: fromHorse },
     ],
-    spec: { zones: ["hand"], total: [1, 1] },
+    // 与生产同源（`GREEN_DRAGON_FLOW.PickProvide.zones`）：来源含装备区的【武圣】红马。
+    spec: { zones: ["hand", "equip"], total: [1, 1] },
     virtual_index: {
       "2": [{ card_id: -3, skill_ids: ["hero.zhaoyun.longdan"] }],
       "5": [{ card_id: -6, skill_ids: ["hero.guanyu.wusheng"] }],
@@ -1269,16 +1269,16 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       skill_id: "hero.zhaoyun.longdan", name: "龙胆", skill_type: "NORMAL", locked: false,
       carrier: "HERO", available: false,
       ui: {
-        requirement: "选择1张【闪】当【杀】使用或打出", manual: false,
-        pick_cards: [], pick_seats: [], convert_sources: [2],
+        requirement: "选择1张【闪】当【杀】使用或打出",
+        convert_sources: [2],
       },
     },
     {
       skill_id: "hero.guanyu.wusheng", name: "武圣", skill_type: "NORMAL", locked: false,
       carrier: "HERO", available: false,
       ui: {
-        requirement: "一张红色牌当【杀】使用或打出", manual: false,
-        pick_cards: [], pick_seats: [], convert_sources: [5],
+        requirement: "一张红色牌当【杀】使用或打出",
+        convert_sources: [5],
       },
     },
   ];
@@ -1557,8 +1557,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     skill_id: "hero.diaochan.lijian", name: "离间", skill_type: "NORMAL", locked: false,
     carrier: "HERO", available: true,
     ui: {
-      requirement: "弃一张牌，选择两名男性角色", manual: false,
-      pick_cards: [], pick_seats: [], convert_sources: [],
+      requirement: "弃一张牌，选择两名男性角色",
+      convert_sources: [],
     },
   };
 
@@ -1654,8 +1654,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     skill_id: "hero.huatuo.qingnang", name: "青囊", skill_type: "NORMAL", locked: false,
     carrier: "HERO", available: true,
     ui: {
-      requirement: "弃一张手牌，令一名已受伤角色回复 1 点体力", manual: false,
-      pick_cards: [], pick_seats: [], convert_sources: [],
+      requirement: "弃一张手牌，令一名已受伤角色回复 1 点体力",
+      convert_sources: [],
     },
   };
 
@@ -1747,8 +1747,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     skill_id: "hero.sunshangxiang.jieyin", name: "结姻", skill_type: "NORMAL", locked: false,
     carrier: "HERO", available: true,
     ui: {
-      requirement: "弃两张手牌，选择一名已受伤男性角色", manual: false,
-      pick_cards: [], pick_seats: [], convert_sources: [],
+      requirement: "弃两张手牌，选择一名已受伤男性角色",
+      convert_sources: [],
     },
   };
 
@@ -1843,8 +1843,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     skill_id: "hero.sunquan.zhiheng", name: "制衡", skill_type: "NORMAL", locked: false,
     carrier: "HERO", available: true,
     ui: {
-      requirement: "弃置任意张牌（手牌 / 装备区），然后摸等量的牌", manual: false,
-      pick_cards: [], pick_seats: [], convert_sources: [],
+      requirement: "弃置任意张牌（手牌 / 装备区），然后摸等量的牌",
+      convert_sources: [],
     },
   };
 
@@ -1905,8 +1905,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     skill_id: "hero.liubei.rende", name: "仁德", skill_type: "NORMAL", locked: false,
     carrier: "HERO", available: true,
     ui: {
-      requirement: "交给一名其他角色任意张手牌", manual: false,
-      pick_cards: [], pick_seats: [], convert_sources: [],
+      requirement: "交给一名其他角色任意张手牌",
+      convert_sources: [],
     },
   };
 
@@ -2000,8 +2000,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     skill_id: "hero.zhouyu.fanjian", name: "反间", skill_type: "NORMAL", locked: false,
     carrier: "HERO", available: true,
     ui: {
-      requirement: "选择一种花色", manual: false,
-      pick_cards: [], pick_seats: [], convert_sources: [],
+      requirement: "选择一种花色",
+      convert_sources: [],
     },
   };
 
@@ -2569,7 +2569,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       { ref: { zone: "hand", seat: 0 }, card: fromDodge },
       { ref: { zone: "equip", seat: 0 }, card: fromHorse },
     ],
-    spec: { zones: ["hand"], total: [1, 1] },
+    // 与生产同源（`GREEN_DRAGON_FLOW.PickProvide.zones`）：来源含装备区的【武圣】红马。
+    spec: { zones: ["hand", "equip"], total: [1, 1] },
     virtual_index: {
       "2": [{ card_id: -3, skill_ids: ["hero.zhaoyun.longdan"] }],
       "5": [{ card_id: -6, skill_ids: ["hero.guanyu.wusheng"] }],
