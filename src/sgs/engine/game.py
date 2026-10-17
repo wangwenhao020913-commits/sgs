@@ -58,6 +58,7 @@ from sgs.skills import (
     dispatch_move_after,
     dispatch_seam,
     dispatch_timing,
+    conversion_preactivations,
     move_after_providers,
     preactivation_for,
     preactivated_skill_ids,
@@ -86,6 +87,7 @@ from sgs.state import (
     Pass,
     PeachQuery,
     Phase,
+    PlayCard,
     PlayPhaseQuery,
     Player,
     Query,
@@ -2246,6 +2248,13 @@ class Engine:
                         and action.skill_id in flagged
                     )
                 )
+        transform_preactivations = conversion_preactivations(
+            self.state,
+            actor,
+            _transform_actions(kind, actions),
+            # 求桃窗口的目标由窗口固定（濒死者）：清单只下发来源步（`spec.md` §2 急救行）。
+            fixed_target=kind is QueryKind.PEACH,
+        )
         view = project(self.state, actor)
         if kind is QueryKind.PLAY_PHASE:
             return PlayPhaseQuery(
@@ -2257,6 +2266,7 @@ class Engine:
                 view=view,
                 revealed=revealed,
                 preactivations=preactivations,
+                transform_preactivations=transform_preactivations,
             )
         if kind is QueryKind.DISCARD:
             player = self.state.player(actor)
@@ -2280,6 +2290,7 @@ class Engine:
                 legal_actions=actions,
                 view=view,
                 revealed=revealed,
+                transform_preactivations=transform_preactivations,
             )
         if kind is QueryKind.PEACH:
             if dying is None:
@@ -2293,6 +2304,7 @@ class Engine:
                 view=view,
                 dying=dying,
                 revealed=revealed,
+                transform_preactivations=transform_preactivations,
             )
         if kind is QueryKind.RESPOND:
             if not isinstance(payload, RespondContext):
@@ -2313,6 +2325,7 @@ class Engine:
                 target=payload.target,
                 window_frame=payload.window_frame,
                 revealed=revealed,
+                transform_preactivations=transform_preactivations,
             )
         if kind is QueryKind.SELECT_CARDS:
             if not isinstance(payload, SelectContext):
@@ -2893,6 +2906,36 @@ _SLOT_BY_SUBCATEGORY: dict[str, SlotKind] = {
 宝物槽位（``treasure``）属界限突破、M2 不启用，故不进这张表：它的牌面事实会是
 ``slot = None``，置入装备区即触发编程错误兜底。
 """
+
+
+def _transform_actions(
+    kind: QueryKind, actions: tuple[Action, ...]
+) -> tuple[Action, ...]:
+    """这次询问里**属于转化技入口**的候选（W4-3 的清单从它们派生）。
+
+    清单（:func:`sgs.skills.conversion_preactivations`）只描述"这次询问里已经存在的
+    虚拟牌候选"，故先按语境把候选收窄：
+
+    - 出牌阶段 / 【闪】窗口 / 求桃：``UseCard``（使用或响应）；
+    - 响应窗口：只收**打出**（``PlayCard``）——"被迫使用"（借刀杀人）的第二段预发动
+      属 W5，且排除它之后"响应语境无目标步"这条清单形状才成立（`spec.md` §2）；
+    - 其余询问：没有转化技入口（返回空元组）。
+    """
+    if kind not in (
+        QueryKind.PLAY_PHASE,
+        QueryKind.DODGE,
+        QueryKind.PEACH,
+        QueryKind.RESPOND,
+    ):
+        return ()
+    accepted = (PlayCard,) if kind is QueryKind.RESPOND else (UseCard, PlayCard)
+    return tuple(
+        action
+        for action in actions
+        if isinstance(action, accepted)
+        and getattr(action, "card", None) is not None
+        and action.card.is_virtual
+    )
 
 
 def instantiate_cards(pack: ContentPack) -> tuple[CardRef, ...]:

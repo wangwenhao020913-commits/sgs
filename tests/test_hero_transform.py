@@ -42,6 +42,7 @@ from sgs.state import (
     RespondMode,
     UseCard,
     WindowCause,
+    Zone,
 )
 from sgs.timing import Timing
 
@@ -50,6 +51,7 @@ from support import SeatSpec, build_state, cards_of_type, run_until
 from test_skills import (
     GREEN_DRAGON,
     PACK,
+    SERPENT,
     SLASH,
     Scripted,
     _cards,
@@ -310,8 +312,18 @@ def test_wusheng_offers_a_red_card_as_a_slash_inheriting_suit_rank_and_color():
     assert all(action.card.virtual_sources != (BLACK_SLASH,) for action in virtual)
 
 
-def test_wusheng_picks_sources_from_any_zone_by_color():
-    """五个谓词里的**颜色**与**区域**：装备区与判定区的红牌同样可作来源。"""
+def test_wusheng_source_zone_default_is_hand_plus_equip_and_never_the_judge_zone():
+    """区域默认（W4-3 / `GLOSSARY.md`「区域默认」）：牌面没写区域 ⇒ 手牌 ∪ 装备。
+
+    判定区**不默认包含**——武圣的牌面只写"一张红色牌"，故判定区的红牌不是它的源
+    （旧声明是"任意区域"＝手牌∪装备∪判定，本票按区域默认收窄）。
+    """
+    hand_state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_PEACH,), hero="guanyu"), SeatSpec()],
+        deck=_deck_excluding(RED_PEACH),
+        turn_seat=0,
+    )
     equip_state = build_state(
         pack=PACK,
         seats=[SeatSpec(equip=(RED_DODGE,), hero="guanyu"), SeatSpec()],
@@ -325,8 +337,11 @@ def test_wusheng_picks_sources_from_any_zone_by_color():
         turn_seat=0,
     )
 
+    assert _sources(_play_candidates(hand_state), "slash") == {(RED_PEACH,)}
     assert _sources(_play_candidates(equip_state), "slash") == {(RED_DODGE,)}
-    assert _sources(_play_candidates(judge_state), "slash") == {(RED_DODGE,)}
+    assert not _virtual(_play_candidates(judge_state), "slash"), (
+        "判定区的红牌不是【武圣】的源：区域默认不包含判定区"
+    )
 
 
 def test_wusheng_needs_at_least_one_source_but_may_use_several_red_cards():
@@ -551,6 +566,40 @@ def test_longdan_dodge_source_is_the_slash_card_name_not_a_red_card():
     assert _sources(actions, "dodge") == {(BLACK_SLASH,)}, "红【桃】不能当【闪】"
 
 
+def test_longdan_source_zone_default_is_hand_plus_equip_in_both_directions():
+    """区域默认：龙胆两个方向的源都扩到**手牌 ∪ 装备**（纯统一，无实际判定变化）。
+
+    牌面写的是"一张【杀】/【闪】"，故判定区的牌仍不是源。
+    """
+    slash_equip = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=(RED_SLASH,), hero="zhaoyun"), SeatSpec()],
+        deck=_deck_excluding(RED_SLASH),
+        turn_seat=0,
+    )
+    dodge_equip = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=(RED_DODGE,), hero="zhaoyun"), SeatSpec()],
+        deck=_deck_excluding(RED_DODGE),
+        turn_seat=0,
+    )
+
+    assert _sources(legal_actions_for(slash_equip, 0, QueryKind.DODGE, answers_seq=1), "dodge") == {
+        (RED_SLASH,)
+    }, "装备区的【杀】可当【闪】打出"
+    assert _sources(_play_candidates(dodge_equip), "slash") == {(RED_DODGE,)}, (
+        "装备区的【闪】可当【杀】使用"
+    )
+
+    judge_state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(judge=(RED_DODGE,), hero="zhaoyun"), SeatSpec()],
+        deck=_deck_excluding(RED_DODGE),
+        turn_seat=0,
+    )
+    assert not _virtual(_play_candidates(judge_state), "slash"), "判定区的牌不是源"
+
+
 def test_longdan_offers_the_hand_slash_in_the_play_out_response_window():
     """``RESPOND``（万箭 / 南蛮的"打出"窗口）也要走：龙胆的两个方向都覆盖两条路。"""
     state = build_state(
@@ -590,6 +639,28 @@ def test_guose_offers_a_diamond_card_as_an_indulgence():
     assert [action.card.virtual_sources for action in virtual] == [(DIAMOND,)]
     assert virtual[0].card.suit == state.card(DIAMOND).suit, "单源转化继承花色"
     assert virtual[0].targets == (1,), "目标池走与真【乐不思蜀】同一套 check_targets"
+
+
+def test_guose_source_zone_default_includes_the_equipment_zone():
+    """区域默认：国色牌面只写"一张方块牌" ⇒ 手牌 ∪ 装备（验收：国色可选装备区方块牌）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(BLACK_SLASH,), equip=(DIAMOND,), hero="daqiao"), SeatSpec()],
+        deck=_deck_excluding(BLACK_SLASH, DIAMOND),
+        turn_seat=0,
+    )
+
+    assert _sources(_play_candidates(state), "indulgence") == {(DIAMOND,)}
+
+    judge_state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(judge=(DIAMOND,), hero="daqiao"), SeatSpec()],
+        deck=_deck_excluding(DIAMOND),
+        turn_seat=0,
+    )
+    assert not _virtual(_play_candidates(judge_state), "indulgence"), (
+        "判定区的方块牌同样不是源（区域默认不包含判定区）"
+    )
 
 
 def test_guose_does_not_offer_a_non_diamond_card():
@@ -714,6 +785,130 @@ def test_jijiu_is_not_offered_inside_its_owners_turn():
     assert not _virtual(_play_candidates(state), "peach"), (
         "急救限于回合外：自己的回合内不进候选"
     )
+
+
+# ---------------------------------------------------------------------------
+# 急救接求桃窗口（W4-3）：`_peach` 的**转化源候选路径**
+#
+# 旧形状两处互斥：`scopes=(PLAY,)`（出牌阶段）＋ `outside_turn_only=True`（回合外）——
+# 回合外没有出牌阶段，故急救进不了任何候选；求桃窗口又只取真实手牌。本票给求桃窗口
+# 加转换化源的候选路径：清单 = 一张红牌（手牌 ∪ 装备），**无目标步**（濒死者由窗口固定）。
+# ---------------------------------------------------------------------------
+
+
+def _peach_candidates(state, seat: int, dying: int):
+    return legal_actions_for(state, seat, QueryKind.PEACH, answers_seq=1, dying=dying)
+
+
+def test_the_peach_window_offers_jijiu_as_a_transformed_peach_targeting_the_dying_seat():
+    """验收：急救在求桃窗口**真实出现**——红牌（手牌 / 装备）当【桃】，目标 = 濒死者。"""
+    for spec, source in (
+        (SeatSpec(hand=(RED_PEACH,), hero="huatuo"), RED_PEACH),
+        (SeatSpec(equip=(RED_DODGE,), hero="huatuo"), RED_DODGE),
+    ):
+        state = build_state(
+            pack=PACK,
+            seats=[spec, SeatSpec(hp=0)],
+            deck=_deck_excluding(source),
+            turn_seat=1,  # 华佗在回合外：急救的时机谓词
+        )
+
+        virtual = _virtual_uses(_peach_candidates(state, 0, dying=1), "peach")
+
+        assert [action.card.virtual_sources for action in virtual] == [(source,)], (
+            f"红牌 {source} 必须能当【桃】：{virtual}"
+        )
+        assert virtual[0].targets == (1,), "濒死者由窗口固定：转化【桃】的目标就是它"
+
+
+def test_the_peach_window_never_reads_jijiu_sources_from_the_judge_zone():
+    """区域默认：判定区的红牌不是急救的源（手牌 ∪ 装备）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(judge=(RED_DODGE,), hero="huatuo"), SeatSpec(hp=0)],
+        deck=_deck_excluding(RED_DODGE),
+        turn_seat=1,
+    )
+
+    assert not _virtual(_peach_candidates(state, 0, dying=1), "peach")
+
+
+def test_the_peach_window_does_not_offer_jijiu_during_the_owners_own_turn():
+    """时机谓词照旧：急救只在回合外（自己的回合里求桃窗口不给转化【桃】）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_DODGE,), hero="huatuo"), SeatSpec(hp=0)],
+        deck=_deck_excluding(RED_DODGE),
+        turn_seat=0,
+    )
+
+    assert not _virtual(_peach_candidates(state, 0, dying=1), "peach")
+
+
+def test_a_real_near_death_session_is_rescued_by_jijiu_out_of_turn():
+    """**真濒死会话**钉住急救：座位 2 的华佗在回合外把红牌当【桃】救回座位 1。
+
+    这条走完整引擎（记录流 + 候选 + 移动），不是合成的 ``legal_actions_for`` 调用。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,)),
+            SeatSpec(hp=1),
+            SeatSpec(hand=(RED_DODGE,), hero="huatuo"),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(SLASH, RED_DODGE),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _slash_use(query, SLASH, 1)
+        return None
+
+    def huatuo(query):
+        if query.kind == QueryKind.PEACH:
+            return _find(
+                query,
+                lambda action: isinstance(action, UseCard)
+                and action.card.card_id < 0
+                and action.card.type == "peach",
+            )
+        return None
+
+    engine = _run(
+        state,
+        [Scripted(attacker), Scripted(), Scripted(huatuo), Scripted()],
+        lambda engine: any(
+            record.kind == "frame"
+            and record.op == "pop"
+            and record.frame_kind is FrameKind.NEAR_DEATH
+            for record in engine.records
+        ),
+    )
+
+    rescue = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.PEACH
+        and record.query.actor == 2
+    ]
+    assert rescue, "濒死窗口必须问到回合外的座位 2（华佗）"
+    offered = [
+        action
+        for action in rescue[0].legal_actions
+        if isinstance(action, UseCard)
+        and action.card.is_virtual
+        and action.card.type == "peach"
+    ]
+    assert [action.card.virtual_sources for action in offered] == [(RED_DODGE,)], (
+        f"求桃窗口里急救的候选 = 这张红牌转化的【桃】：{rescue[0].legal_actions}"
+    )
+    assert engine.state.player(1).hp == 1, "转化【桃】把濒死者救回 1 点体力"
+    assert RED_DODGE not in engine.state.player(2).hand, "来源红牌走正常使用路径离手"
+    assert RED_DODGE in engine.state.discard, "来源红牌使用后进弃牌堆"
 
 
 
@@ -908,3 +1103,221 @@ def test_green_dragon_continuation_ignores_distance_and_uses_the_original_target
         "续杀不计次数：本回合【杀】的计数只算最初那张"
     )
     assert horse in engine.state.discard, "【武圣】的来源（赤兔）走正常的使用路径离场"
+
+
+# ---------------------------------------------------------------------------
+# 预发动清单（W4-3）：五条转化技的入口 = "点技能 → 选源牌 → 选目标 → 确认"
+#
+# 清单从**这次询问的候选**派生（候选 = 清单：来源组就是候选的 ``virtual_sources``），
+# 故张数 / 目标池 / 区域 / 次数链与候选天然同源。确认仍是**普通候选**
+# ``UseCard(虚拟牌, 目标)``（本来就一次动作），不产生复合动作。
+# ---------------------------------------------------------------------------
+
+
+def _virtual_actions(state, seat: int = 0):
+    """``PLAY_PHASE`` 里本座位全部**虚拟牌**候选（转化技的产物）。"""
+    return [
+        action
+        for action in legal_actions_for(state, seat, QueryKind.PLAY_PHASE, answers_seq=1)
+        if isinstance(action, (UseCard, PlayCard)) and action.card.is_virtual
+    ]
+
+
+def _manifest(state, actions, skill_id: str, *, fixed_target: bool = False):
+    from sgs.skills import conversion_preactivations
+
+    return conversion_preactivations(
+        state, 0, actions, fixed_target=fixed_target
+    )[skill_id]
+
+
+def test_wusheng_preactivation_manifest_orders_the_red_source_then_the_slash_target():
+    """武圣（主动使用）：1. 一张红牌（手牌 ∪ 装备）；2. 这张【杀】的目标。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(RED_PEACH,), equip=(RED_DODGE,), judge=(RED_SLASH,), hero="guanyu"),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(RED_PEACH, RED_DODGE, RED_SLASH),
+        turn_seat=0,
+    )
+
+    steps = _manifest(state, _virtual_actions(state), GUANYU)
+
+    assert [step.name for step in steps] == ["card", "seat"]
+    assert [step.order for step in steps] == [0, 1]
+    source = steps[0]
+    assert source.min == source.max == 1, "一张红牌"
+    assert set(source.zones) == {Zone.HAND, Zone.EQUIP}, "区域默认：手牌 ∪ 装备，不含判定区"
+    assert source.pool[0].when == ()
+    assert set(source.pool[0].options) == {str(RED_PEACH), str(RED_DODGE)}, (
+        f"判定区的红牌不是源：{source.pool[0].options}"
+    )
+    target = steps[1]
+    assert target.min == target.max == 1
+    assert [option for row in target.pool for option in row.options] == ["seat:1"]
+
+
+def test_longdan_manifests_have_a_source_step_only_in_both_response_directions():
+    """龙胆（响应）：1. 一张【杀】/【闪】；**无目标**（打出的目标由窗口承载）。"""
+    dodge_state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=(RED_SLASH,), hero="zhaoyun"), SeatSpec()],
+        deck=_deck_excluding(RED_SLASH),
+        turn_seat=0,
+    )
+    dodge_actions = [
+        action
+        for action in legal_actions_for(dodge_state, 0, QueryKind.DODGE, answers_seq=1)
+        if isinstance(action, UseCard) and action.card.is_virtual
+    ]
+    slash_direction = _manifest(dodge_state, dodge_actions, ZHAOYUN_SLASH)
+    assert [step.name for step in slash_direction] == ["card"], "响应：无目标步"
+    assert tuple(slash_direction[0].pool[0].options) == (str(RED_SLASH),)
+    assert tuple(slash_direction[0].zones) == (Zone.EQUIP,), "区域默认：装备区的【杀】可当【闪】"
+
+    respond_state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_DODGE,), hero="zhaoyun"), SeatSpec()],
+        deck=_deck_excluding(RED_DODGE),
+        turn_seat=0,
+    )
+    respond_actions = [
+        action
+        for action in legal_actions_for(
+            respond_state, 0, QueryKind.RESPOND, answers_seq=1, payload=_respond("slash")
+        )
+        if isinstance(action, PlayCard) and action.card.is_virtual
+    ]
+    assert respond_actions, "RESPOND（南蛮 / 决斗的打出窗口）必须把【闪】转的【杀】放进候选"
+    other_direction = _manifest(respond_state, respond_actions, ZHAOYUN_SLASH)
+    assert [step.name for step in other_direction] == ["card"]
+    assert tuple(other_direction[0].pool[0].options) == (str(RED_DODGE),)
+
+
+def test_guose_manifest_reads_diamond_sources_from_the_equipment_zone_too():
+    """国色（主动使用）：1. 一张方块牌（手牌 ∪ 装备）；2. 这张【乐不思蜀】的目标。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(BLACK_SLASH,), equip=(DIAMOND,), hero="daqiao"), SeatSpec()],
+        deck=_deck_excluding(BLACK_SLASH, DIAMOND),
+        turn_seat=0,
+    )
+
+    steps = _manifest(state, _virtual_actions(state), DAQIAO)
+
+    assert [step.name for step in steps] == ["card", "seat"]
+    assert tuple(steps[0].pool[0].options) == (str(DIAMOND),)
+    assert set(steps[0].zones) == {Zone.EQUIP}
+    assert [option for row in steps[1].pool for option in row.options] == ["seat:1"]
+
+
+def test_jijiu_peach_manifest_is_one_red_card_and_has_no_target_step():
+    """急救（求桃窗口）：1. 一张红牌（手牌 ∪ 装备）；**无目标步**（濒死者由窗口固定）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=(RED_DODGE,), hero="huatuo"), SeatSpec(hp=0)],
+        deck=_deck_excluding(RED_DODGE),
+        turn_seat=1,
+    )
+
+    actions = [
+        action
+        for action in _peach_candidates(state, 0, dying=1)
+        if isinstance(action, UseCard) and action.card.is_virtual
+    ]
+    steps = _manifest(state, actions, HUATUO, fixed_target=True)
+
+    assert [step.name for step in steps] == ["card"], "无目标步：濒死者由求桃窗口固定"
+    assert tuple(steps[0].pool[0].options) == (str(RED_DODGE),)
+    assert tuple(steps[0].zones) == (Zone.EQUIP,)
+
+
+def test_serpent_spear_manifest_takes_exactly_two_hand_cards_then_the_slash_target():
+    """丈八蛇矛：1. 恰好两张手牌；2.（使用）这张【杀】的目标。"""
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(first, second), equip=(SERPENT,)), SeatSpec()],
+        deck=_deck_excluding(first, second, SERPENT),
+        turn_seat=0,
+    )
+
+    steps = _manifest(state, _virtual_actions(state), "equip.serpent_spear")
+
+    assert [step.name for step in steps] == ["card", "seat"]
+    assert steps[0].min == steps[0].max == 2, "恰好两张手牌"
+    assert tuple(steps[0].zones) == (Zone.HAND,)
+    assert set(steps[0].pool[0].options) == {str(first), str(second)}
+    assert [option for row in steps[1].pool for option in row.options] == ["seat:1"]
+
+
+def test_the_play_phase_query_carries_the_transform_preactivation_manifests():
+    """跨线写入面：清单落在**询问**上（由接入层下发），不是接入层自己再算一份。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_PEACH,), hero="guanyu"), SeatSpec()],
+        deck=_deck_excluding(RED_PEACH),
+        turn_seat=0,
+    )
+
+    engine = _run(
+        state,
+        [Scripted(), Scripted()],
+        lambda engine: engine.pending is not None
+        and engine.pending.kind == QueryKind.PLAY_PHASE,
+    )
+    query = engine.pending
+
+    assert query is not None
+    assert GUANYU in query.transform_preactivations, (
+        f"出牌阶段的询问必须带转化技清单：{query.transform_preactivations}"
+    )
+    steps = query.transform_preactivations[GUANYU]
+    assert [step.name for step in steps] == ["card", "seat"]
+    assert str(RED_PEACH) in steps[0].pool[0].options
+    assert "transform_preactivations" not in query.model_dump(mode="json"), (
+        "清单是派生数据：不进记录流（既有 Golden Replay 因此逐字节不变）"
+    )
+
+
+def test_green_dragon_provide_face_reads_longdan_equip_slash_and_skips_the_judge_zone():
+    """青龙的"1 张【杀】"步骤：实体【杀】∪ 转化【杀】（龙胆 / 武圣），来源含装备、不含判定。
+
+    龙胆要把一张【闪】**转成**【杀】，故"装备区的【杀】"这条读法不成立——放装备区的是一张
+    【闪】。判定区的同一张【闪】不合法（区域默认不包含判定区）。
+    """
+    equip_dodge = _cards("dodge")[1]
+    judge_dodge = _cards("dodge")[2]
+    defender_dodge = _cards("dodge")[3]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hand=(SLASH,),
+                equip=(GREEN_DRAGON, equip_dodge),
+                judge=(judge_dodge,),
+                hero="zhaoyun",
+            ),
+            SeatSpec(hand=(defender_dodge,)),
+        ],
+        deck=_deck_excluding(SLASH, GREEN_DRAGON, equip_dodge, judge_dodge, defender_dodge),
+        turn_seat=0,
+    )
+
+    engine = _run(
+        state,
+        [_green_dragon_provide_driver(), Scripted(_dodge_with_real_card)],
+        _to_provide_step,
+    )
+
+    face = _provide_face(_provide_query(engine))
+
+    assert (SLASH, "slash", ()) not in face, "最初那张【杀】已经被用掉，不在手里"
+    assert any(
+        type_id == "slash" and sources == (equip_dodge,) for _card_id, type_id, sources in face
+    ), f"装备区的【闪】经【龙胆】转出的【杀】必须进面：{face}"
+    assert all(
+        sources != (judge_dodge,) for _card_id, _type_id, sources in face
+    ), "判定区的牌不是源（区域默认不包含判定区）"

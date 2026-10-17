@@ -84,7 +84,7 @@ from .catalog import (
 # 转化技的**来源查询**（票 14）：接入层只允许 import ``sgs.skills`` 这个公开子包入口，
 # 不能深导入 ``sgs.skills.heroes``（M4 第一纪律，`tests/test_dod_m4.py` 钉着），故在包入口
 # 重导出这一条只读查询。
-from .heroes import conversion_offers
+from .heroes import conversion_offers, conversion_offers_by_source, conversion_preactivations
 from .arrange import (
     GUANXING,
     GUANXING_MAX,
@@ -272,6 +272,8 @@ __all__ = (
     "arrange_activation_plans",
     "arrange_skill_definitions",
     "conversion_offers",
+    "conversion_offers_by_source",
+    "conversion_preactivations",
     "damage_after_skill_definitions",
     "damage_point_index",
     "dispatch_move_after",

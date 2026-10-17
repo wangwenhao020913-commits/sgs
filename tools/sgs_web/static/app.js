@@ -848,11 +848,15 @@ function renderSkills(view) {
     const ui = skill.ui || {};
     const convertCards = ui.convert_sources || [];
     const preactivated = Boolean(skill.preativated);
-    const manifest = preactivated ? preactivationManifest(pending, skill.skill_id) : null;
+    // 清单有两类消费者（W4-2 / W4-3）：已翻到预发动的技能（`preativated`）= **复合动作**
+    // 清单；转化技 = **本地入口**清单（确认仍是普通候选 `UseCard(虚拟牌, 目标)`）。
+    // 两者都由 `pending.preativations[skill_id]` 下发，界面据 `preativated` 分派。
+    const manifest = preactivationManifest(pending, skill.skill_id);
     // 已翻预发动：**可用性只剩清单**（清单渲不出来 = 此刻不可用，与服务端同一判据）。
+    // 转化技：候选或清单任一存在即点得动（清单为空 ⇒ 此刻没有可转化的使用 / 响应）。
     const usable = preactivated
       ? Boolean(manifest)
-      : (Boolean(skill.available) || convertCards.length > 0);
+      : (Boolean(skill.available) || convertCards.length > 0 || Boolean(manifest));
     const button = document.createElement("button");
     button.type = "button";
     button.className = "skill";
@@ -871,12 +875,13 @@ function renderSkills(view) {
       : (skill.locked ? "锁定技 / 被动" : (skill.skill_type === "LORD" ? "主公技" : "主动技"));
     const badge = preactivated
       ? (manifest ? " · 预发动" : "")
-      : (convertCards.length ? " · 点它转化" : (skill.available ? " · 可发动" : ""));
+      : (manifest ? " · 预发动" : (convertCards.length ? " · 点它转化" : (skill.available ? " · 可发动" : "")));
     button.innerHTML = `${skill.name}<span class="kind">${kind}${badge}</span>`;
     if (state.playback) {
       // 回放期间不接任何操作（严格顺序：这批事件播完才轮到下一次询问）。
-    } else if (usable && pending && preactivated && manifest) {
-      // 已翻到预发动：点它进入**清单驱动**的本地态；取消 = 什么都不提交（被动入口 = 放弃）。
+    } else if (usable && pending && manifest) {
+      // 清单驱动的本地态（W4-2 复合动作 / W4-3 转化技本地入口）：取消 = 什么都不提交
+      // （被动入口 = 放弃）。转化技在"提供一张 B"的面里没有清单，仍走下面的转化模式。
       button.addEventListener("click", () => enterPreativation(skill, manifest));
     } else if (usable && pending && convertCards.length) {
       // 转化技（【龙胆】）：点它进入"挑一张来源牌"的模式（再点一次退出）。
@@ -954,13 +959,18 @@ function toggleConvertSkill(skill) {
  *
  * 实体 B 不属于任何转化方向 ⇒ 恒合法；虚拟 B 只有在 `virtual_index` 把它归给 `mode`
  * 时才合法（服务端按来源谓词逐张归属，界面只读那份数据）。
+ *
+ * **"虚拟牌"的判据读序列化后仍在的那个字段**：`CardRef.is_virtual` 是 pydantic 的
+ * `@property`，**不进** `model_dump`——界面收到的牌面里没有它。故这里用
+ * `virtual_sources`（实体牌恒为空元组、转化牌恒非空）判，"读一个永远 undefined 的键"
+ * 会让这一支恒真、切换模式永远不清空（`CODING_STANDARDS.md` §1 的读取方纪律）。
  */
 function providePickStays(pending, index, mode) {
   if (mode === null) return true;
   const slot = ((pending && pending.slots) || [])[index];
   if (!slot || !slot.card) return false;
-  if (!slot.card.is_virtual) return true;
   const sources = slot.card.virtual_sources || [];
+  if (!sources.length) return true;
   if (sources.length !== 1) return false;
   return cardAliases(pending, sources[0]).some(
     (alias) => String(alias.card_id) === String(slot.card.card_id)
@@ -1036,11 +1046,17 @@ function preactivationAnswerTexts(step, values) {
   return values.map((value) => String(value));
 }
 
-/** 进入预发动：**不压帧、不计次数**，只把清单与本地答案摊开（W4-1）。 */
+/** 进入预发动：**不压帧、不计次数**，只把清单与本地答案摊开（W4-1）。
+ *
+ * `composite` = 确认时提交**复合动作**（已翻到预发动的技能，W4-2）；`false` = **转化技的
+ * 本地入口**（W4-3）：确认时从这次询问的候选里查出那条普通的 `UseCard(虚拟牌, 目标)`，
+ * 转化技的最终动作本来就一次动作。
+ */
 function enterPreativation(skill, manifest) {
   state.preativation = {
     skillId: skill.skill_id,
     name: skill.name,
+    composite: Boolean(skill.preativated),
     steps: manifest,
     answers: manifest.map(() => ({ values: [], texts: [] })),
     cursor: 0,
@@ -1154,16 +1170,29 @@ function preactivationReady(pa) {
   });
 }
 
-/** 预发动的提交载荷：**复合动作**（不要求出现在 `legal_actions` 里，由服务端校验器验）。 */
+/** 预发动的提交载荷。
+ *
+ * - **复合动作**（已翻到预发动的技能）：`ActivateSkill(picks, choices)`——不要求出现在
+ *   `legal_actions` 里，由服务端校验器按同一份步骤声明验；
+ * - **转化技的本地入口**（W4-3）：从这次询问的候选里**查出**那条普通的
+ *   `UseCard(虚拟牌, 目标)`（`findTransformAction`），不自己拼牌 / 目标——虚拟牌的 id
+ *   由服务端派生，界面只按"来源集合 + 目标集合"对回原候选。
+ */
 function buildPreativationAction(pending, pa) {
   if (!pending || !pa || !preactivationReady(pa)) return null;
   const picks = [];
   const choices = [];
+  const targets = [];
   pa.steps.forEach((step, index) => {
     const answer = pa.answers[index];
-    if (preactivationStepKind(step) === "card") picks.push(...answer.values);
-    else choices.push(...answer.texts);
+    const kind = preactivationStepKind(step);
+    if (kind === "card") picks.push(...answer.values);
+    else {
+      choices.push(...answer.texts);
+      if (kind === "seat") targets.push(...answer.values);
+    }
   });
+  if (!pa.composite) return findTransformAction(pending, picks, targets);
   return {
     kind: "ActivateSkill",
     skill_id: pa.skillId,
@@ -1171,6 +1200,27 @@ function buildPreativationAction(pending, pa) {
     choices,
     answers_seq: pending.seq,
   };
+}
+
+/** 转化技：按"来源实体牌集合（＋目标集合）"在候选里查那条虚拟牌行动。
+ *
+ * 唯一的合法性判据仍是**候选本身**：查不到 = 这组来源 / 目标没有候选（提交按钮不给点）。
+ * 无目标步的语境（响应 / 求桃）不比较目标——响应窗口没有目标，求桃的目标由窗口固定。
+ */
+function findTransformAction(pending, sources, targets) {
+  const sourceKey = sources.slice().sort((a, b) => a - b).join(",");
+  const targetKey = targets.slice().sort((a, b) => a - b).join(",");
+  return (pending.legal_actions || []).find((action) => {
+    if (action.kind !== "UseCard" && action.kind !== "PlayCard") return false;
+    const card = action.card;
+    if (!card) return false;
+    // 转化牌的判据读 `virtual_sources`（实体牌恒空、转化牌恒非空）：`is_virtual` 是
+    // pydantic 属性，**不进**下发的牌面（见 :func:`providePickStays` 同一条纪律）。
+    const got = (card.virtual_sources || []).slice().sort((a, b) => a - b).join(",");
+    if (got !== sourceKey) return false;
+    if (!targets.length) return true;
+    return (action.targets || []).slice().sort((a, b) => a - b).join(",") === targetKey;
+  }) || null;
 }
 
 function preactivationStepLabel(step) {
@@ -1667,10 +1717,18 @@ function refreshSubmit(pending) {
   if (blocked) { $("t-choice").textContent = blocked; return; }
   if (state.preativation) {
     const pa = state.preativation;
-    $("btn-submit").disabled = !preactivationReady(pa);
-    $("t-choice").textContent = preactivationReady(pa)
-      ? "可以确认发动（提交一个复合动作）。"
-      : (pa.cursor >= pa.steps.length ? "清单里还有步骤没填完。" : preactivationStepHint(pa, pending));
+    // 复合动作：填完就交（服务端校验器裁决）；转化技的本地入口：填完还得**查得到候选**
+    // （查不到 = 这组来源 / 目标此刻不合法，按钮不给点）。
+    $("btn-submit").disabled = !preactivationReady(pa) || buildAction() === null;
+    if (!preactivationReady(pa)) {
+      $("t-choice").textContent = pa.cursor >= pa.steps.length
+        ? "清单里还有步骤没填完。"
+        : preactivationStepHint(pa, pending);
+    } else {
+      $("t-choice").textContent = pa.composite
+        ? "可以确认发动（提交一个复合动作）。"
+        : "可以确认发动（提交这次的使用 / 响应）。";
+    }
     return;
   }
   if (isPassivePreativation(pending) && state.preativation === null) {

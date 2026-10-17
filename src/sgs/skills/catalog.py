@@ -252,6 +252,14 @@ class SkillDef:
     ``ConversionSkill.target_type_id`` / 蛇矛的目标牌名，不是第二份真源。
     """
 
+    virtual_source_count: int = 1
+    """这条技能的虚拟牌候选**每次消耗几张来源牌**（W4-3 的清单归属判据）。
+
+    H 族单源转化恒 1；【丈八蛇矛】是 2。候选本身不带技能归属，故"这两张来源的虚拟牌是
+    谁转出来的"只能由声明回答——张数本来就是候选构造的参数（``grouped_candidates`` 的
+    ``group_size``），这里只是把它暴露出来，不是第二份判据。
+    """
+
     @property
     def priority_class(self) -> PriorityClass:
         """本技能在修饰器链里的优先级档（由载体派生，不另存字段以防漂移）。"""
@@ -1343,6 +1351,7 @@ def _equip(
     hooks: tuple[Hook, ...] = (),
     seams: tuple[Seam, ...] = (),
     virtual_type_ids: tuple[str, ...] = (),
+    virtual_source_count: int = 1,
     step_requirements: Mapping[str, str] | None = None,
     preativated: bool = False,
 ) -> SkillDef:
@@ -1353,6 +1362,8 @@ def _equip(
     一字不改）。``preativated``（W4-2）：已迁到预发动的接缝技（【青龙偃月刀】/【贯石斧】）
     翻这个位——被动入口的清单随 ``SkillActivationQuery.preativation`` 下发，成本由
     复合动作一次提交（骨架候选是"是否发动"那一问，保留）。
+    ``virtual_source_count``（W4-3）：虚拟牌候选每次消耗几张来源牌——【丈八蛇矛】是 2，
+    其余（含一切非转化技）恒 1；清单归属据此区分"两张来源的【杀】是谁转出来的"。
     """
     return SkillDef(
         skill_id=f"equip.{card_type_id}",
@@ -1364,6 +1375,7 @@ def _equip(
         requirement=requirement or None,
         step_requirements=step_requirements,
         virtual_type_ids=virtual_type_ids,
+        virtual_source_count=virtual_source_count,
         preativated=preativated,
     )
 
@@ -1406,6 +1418,7 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         requirement="选择两张手牌当【杀】使用或打出",
         modifiers=(Modifier(ModifierPoint.CANDIDATES, _serpent_spear_candidate),),
         virtual_type_ids=("slash",),
+        virtual_source_count=2,
     ),
     _equip(
         "axe",

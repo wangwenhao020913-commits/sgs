@@ -11,12 +11,16 @@ r"""武将技能的**定义**（票 03 起；全表登记归票 12）。
 ===========  ==================  ==================  ==============================
 技能         源筛选               目标牌名             形态
 ===========  ==================  ==================  ==============================
-关羽【武圣】  红色牌、任意区域      【杀】（普通）        单源、``PLAY`` + ``RESPOND``
-赵云【龙胆】  【杀】                【闪】               单源、``RESPOND`` / ``DODGE``
-赵云【龙胆】  【闪】                【杀】（普通）        单源、``PLAY`` + ``RESPOND``
-大乔【国色】  方块牌                【乐不思蜀】          单源、``PLAY``
-华佗【急救】  红色牌                【桃】               单源、**限回合外**
+关羽【武圣】  红色牌、手牌∪装备     【杀】（普通）        单源、``PLAY`` + ``RESPOND``
+赵云【龙胆】  【杀】、手牌∪装备     【闪】               单源、``RESPOND`` / ``DODGE``
+赵云【龙胆】  【闪】、手牌∪装备     【杀】（普通）        单源、``PLAY`` + ``RESPOND``
+大乔【国色】  方块牌、手牌∪装备     【乐不思蜀】          单源、``PLAY``
+华佗【急救】  红色牌、手牌∪装备     【桃】               单源、**限回合外**
 ===========  ==================  ==================  ==============================
+
+**区域默认**（W4-3 / `GLOSSARY.md`）：五条牌面都只写"一张牌"，没有一条写"区域内的牌"
+或"场上的牌" ⇒ 源区一律是 :func:`_hand_equip`（手牌 ∪ 装备）。**不设统一的转化源区**，
+更不默认包含判定区；将来某条转化技的牌面真写了别的区域，改它自己那一行的 ``source_zone``。
 
 **五个谓词全部内联在回调里**（票 03 §要做什么 3）：颜色 / 花色 / 牌名（三者在
 :func:`_convertible` 的谓词分支里）、区域（``card_ids`` 给出取牌区）、时机（回合外，
@@ -29,17 +33,25 @@ r"""武将技能的**定义**（票 03 起；全表登记归票 12）。
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from sgs.data import Color, SkillType, color_of_suit
-from sgs.effects import CandidateScope, CarrierKind, Modifier, ModifierPoint
-from sgs.state import GameState, Zone
+from sgs.effects import CandidateScope, CarrierKind, Modifier, ModifierPoint, locate
+from sgs.state import GameState, Step, StepPool, Zone
 
 from .catalog import HeroSkillDecl, ModifierContext, SkillDef, resolve_instances
+from .flow import seat_choice
 from .virtual import card_ids, single_conversion
 
-__all__ = ["CONVERSION_SKILLS", "conversion_offers", "conversion_skill_definitions"]
+__all__ = [
+    "CONVERSION_SKILLS",
+    "conversion_offers",
+    "conversion_offers_by_source",
+    "conversion_preactivations",
+    "conversion_skill_definitions",
+]
 
 ZoneFilter = Callable[[GameState, int], tuple[int, ...]]
 """取牌区谓词：``(state, seat) -> 该座位在这个区域里的牌 id``（区域是闭集的一个谓词）。"""
@@ -86,18 +98,14 @@ def _outside_turn(state: GameState, seat: int) -> bool:
     return state.turn_seat != seat
 
 
-def _all_cards(state: GameState, seat: int) -> tuple[int, ...]:
-    """**任意区域**：手牌 ∪ 装备区 ∪ 判定区（区序固定，逐种子可复现）。"""
-    return (
-        card_ids(state, seat, Zone.HAND)
-        + card_ids(state, seat, Zone.EQUIP)
-        + card_ids(state, seat, Zone.JUDGE)
-    )
+def _hand_equip(state: GameState, seat: int) -> tuple[int, ...]:
+    """**区域默认**：手牌 ∪ 装备（牌面没写区域时按这一档读，`GLOSSARY.md`「区域默认」）。
 
-
-def _hand(state: GameState, seat: int) -> tuple[int, ...]:
-    """手牌（【龙胆】/【国色】的源：牌面写"一张牌"，标准版按**手牌**读）。"""
-    return card_ids(state, seat, Zone.HAND)
+    判定区**不默认包含**（W4-3）：五条转化技的牌面都只写"一张牌 / 一张红色牌 / 一张
+    方块牌 / 一张【杀】/【闪】"，没有一条写"区域内的牌"或"场上的牌"，故一律落到
+    手牌 + 装备。区序固定（先手牌后装备），逐种子可复现。
+    """
+    return card_ids(state, seat, Zone.HAND) + card_ids(state, seat, Zone.EQUIP)
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +179,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         hero_id="guanyu",
         short_id="wusheng",
         target_type_id="slash",
-        source_zone=_all_cards,
+        source_zone=_hand_equip,
         predicate=_red,
         scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
         requirement="选择1张红色牌当【杀】使用或打出",
@@ -181,7 +189,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         hero_id="zhaoyun",
         short_id="longdan",
         target_type_id="dodge",
-        source_zone=_hand,
+        source_zone=_hand_equip,
         predicate=_slash,
         scopes=(CandidateScope.DODGE, CandidateScope.RESPOND),
         requirement="选择1张【杀】当【闪】打出",
@@ -190,7 +198,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         hero_id="zhaoyun",
         short_id="longdan",
         target_type_id="slash",
-        source_zone=_hand,
+        source_zone=_hand_equip,
         predicate=_dodge,
         scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
         requirement="选择1张【闪】当【杀】使用或打出",
@@ -200,7 +208,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         hero_id="daqiao",
         short_id="guose",
         target_type_id="indulgence",
-        source_zone=_hand,
+        source_zone=_hand_equip,
         predicate=_diamond,
         scopes=(CandidateScope.PLAY,),
         requirement="选择1张方块牌当【乐不思蜀】使用",
@@ -210,7 +218,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         hero_id="huatuo",
         short_id="jijiu",
         target_type_id="peach",
-        source_zone=_all_cards,
+        source_zone=_hand_equip,
         predicate=_red,
         scopes=(CandidateScope.PLAY,),
         outside_turn_only=True,
@@ -232,7 +240,7 @@ def conversion_offers(
 
     这是"源筛选"的唯一真源：逐条按 :data:`CONVERSION_SKILLS` 的 ``target_type_id`` /
     ``source_zone`` / 牌面谓词 / 时机谓词核对（:meth:`ConversionSkill.select` 一次给全），
-    故"限手牌"（【龙胆】）与"任意区域"（【武圣】/【急救】）两种源筛选只是表里的参数——
+    故"手牌 ∪ 装备"（W4-3 的区域默认）只是表里的参数——
     "提供一张 B"的候选面与接入层的技能归属**读同一份**，不各写一份谓词。
 
     **先过"这个座位真有这条技能"**（:func:`~sgs.skills.catalog.resolve_instances`）：源谓词
@@ -254,6 +262,165 @@ def conversion_offers(
         if skill.target_type_id == target_type_id and skill.skill_id in owned
         for card_id in skill.select(state, seat)
     )
+
+
+def conversion_offers_by_source(
+    state: GameState, seat: int, target_type_id: str
+) -> dict[int, tuple[str, ...]]:
+    """:func:`conversion_offers` 的**按来源实体牌分组**形状：``{来源 id: (技能 id, …)}``。
+
+    两处读取方共用同一条分组（W4-3 收口）：
+
+    - :func:`sgs_web.projection._offers_by_source`（界面：来源牌 → 技能按钮 / 文案）；
+    - :func:`conversion_preactivations`（接入层：来源牌 → 该技能的预发动清单）。
+
+    分组只写一次，两处都调这里——否则"来源 → 技能"这层含义会有第二份实现。
+    """
+    grouped: dict[int, list[str]] = {}
+    for source, skill_id in conversion_offers(state, seat, target_type_id):
+        grouped.setdefault(int(source), []).append(skill_id)
+    return {source: tuple(skill_ids) for source, skill_ids in grouped.items()}
+
+
+def _candidate_skill_ids(state: GameState, owner: int, card: Any) -> tuple[str, ...]:
+    """一张**虚拟牌候选**归属哪些已拥有的转化技（清单渲染的技能归属判据）。
+
+    - **单来源**：读 :func:`conversion_offers_by_source`——区域 / 颜色 / 花色 / 牌名 /
+      时机谓词全在那份声明表里，故"这张【闪】能不能当【杀】"不会在这里有第二份答案；
+    - **多来源**（【丈八蛇矛】）：单源声明表不覆盖它，改按定义上的
+      :attr:`~sgs.skills.catalog.SkillDef.virtual_source_count` + ``virtual_type_ids``
+      归属——两张来源的虚拟【杀】只有张数是 2 的那条技能能转出来。
+    """
+    sources = tuple(int(source) for source in card.virtual_sources)
+    if len(sources) == 1:
+        return conversion_offers_by_source(state, owner, card.type).get(sources[0], ())
+    return tuple(
+        instance.skill_id
+        for instance in resolve_instances(state)
+        if instance.owner == owner
+        and card.type in instance.definition.virtual_type_ids
+        and instance.definition.virtual_source_count == len(sources)
+    )
+
+
+_SOURCE_ZONE_ORDER: tuple[Zone, ...] = (Zone.HAND, Zone.EQUIP, Zone.JUDGE)
+"""清单 ``Step.zones`` 的规范化次序（与 :func:`_hand_equip` 的区序一致，判定区垫底）。"""
+
+
+def conversion_preactivations(
+    state: GameState,
+    owner: int,
+    actions: Iterable[Any],
+    *,
+    fixed_target: bool = False,
+) -> dict[str, tuple[Step, ...]]:
+    """把一次询问的**虚拟牌候选**按转化技渲染成**预发动清单**（W4-3）。
+
+    转化技的最终动作仍是普通的 ``UseCard(虚拟牌, 目标)``（本来就一次动作）；预发动只是
+    接入层给它一个"点技能 → 选源牌 → 选目标 → 确认"的本地入口。故清单不描述"复合动作"，
+    而是描述**这次询问里已经存在的那些候选**：
+
+    - **来源步**（``name="card"``）：候选的 ``virtual_sources`` 就是来源组；每组的张数
+      （单源 1 / 丈八 2）⇒ ``min = max = 组大小``。``zones`` = 这些来源**此刻**所在的区
+      （判定区永不出现——区域默认不包含它）；
+    - **目标步**（``name="seat"``）：仅当候选带目标（主动使用）时下发，``pool`` 按前序
+      来源逐行给 ``seat:N``；响应 / 求桃语境**没有目标步**（目标由窗口承载 / 濒死者由窗口
+      固定）。
+
+    **清单与候选同源**：张数、目标池、次数链（``check_count``）、区域与时机谓词都没有
+    在这里重算一次——它们已经体现在"候选存在与否"里。空 dict = 这次询问没有可预发动的
+    转化技。渲染**只读状态**：不铺选择面、不抽随机数、不搬牌。
+
+    ``actions`` 由调用方按语境给（出牌阶段 / 闪 / 响应 / 求桃的候选）；响应窗口里
+    "打出"与"被迫使用"的区别由调用方筛（借刀杀人的使用预发动是 W5，不在本票）。
+    ``fixed_target=True``：本次语境的**目标由窗口固定**（求桃的濒死者）——候选带着那个
+    目标，但玩家没有"选目标"这一步，故清单只下发来源步（`spec.md` §2 的急救行）。
+    """
+    groups: dict[str, dict[tuple[int, ...], list[tuple[int, ...]]]] = {}
+    source_zones: dict[int, Zone] = {}
+    for action in actions:
+        card = getattr(action, "card", None)
+        if card is None or not card.is_virtual:
+            continue
+        sources = tuple(int(source) for source in card.virtual_sources)
+        if not sources:
+            continue  # 纯虚拟牌（八卦阵的视为【闪】）没有转化技归属
+        targets = tuple(int(target) for target in (getattr(action, "targets", None) or ()))
+        skill_ids = _candidate_skill_ids(state, owner, card)
+        if not skill_ids:
+            continue
+        for skill_id in skill_ids:
+            rows = groups.setdefault(skill_id, {}).setdefault(sources, [])
+            if targets not in rows:
+                rows.append(targets)
+        for source in sources:
+            source_zones.setdefault(source, locate(state, source).zone)
+
+    out: dict[str, tuple[Step, ...]] = {}
+    for skill_id in sorted(groups):
+        steps = _manifest_steps(
+            groups[skill_id], source_zones, include_target=not fixed_target
+        )
+        if steps is not None:
+            out[skill_id] = steps
+    return out
+
+
+def _manifest_steps(
+    per_source: dict[tuple[int, ...], list[tuple[int, ...]]],
+    source_zones: dict[int, Zone],
+    *,
+    include_target: bool = True,
+) -> tuple[Step, ...] | None:
+    """一个技能的"来源组 → 目标组合"表 → 清单步骤；不可表达的形状返回 ``None``。
+
+    不可表达的两档都**不下发清单**（不猜）：同一个技能出现不同张数的来源组；或目标数
+    不是 0 / 1（多目标组合的逐目标子池属于 W5 的借刀一类，本票的转化技都是一目标）。
+    """
+    sizes = {len(sources) for sources in per_source}
+    if len(sizes) != 1:
+        return None
+    count = sizes.pop()
+    zones_used = {
+        source_zones[source] for sources in per_source for source in sources
+    }
+    options = tuple(dict.fromkeys(str(source) for sources in per_source for source in sources))
+    steps = [
+        Step(
+            name="card",
+            zones=tuple(zone for zone in _SOURCE_ZONE_ORDER if zone in zones_used),
+            min=count,
+            max=count,
+            pool=(StepPool(when=(), options=options),),
+            order=0,
+        )
+    ]
+    if not include_target:
+        return tuple(steps)
+    combos = [targets for rows in per_source.values() for targets in rows]
+    if not combos or all(not targets for targets in combos):
+        return tuple(steps)
+    if any(len(targets) != 1 for targets in combos):
+        return None
+    rows = [
+        (
+            tuple(str(source) for source in sources),
+            tuple(dict.fromkeys(seat_choice(targets[0]) for targets in targets_list)),
+        )
+        for sources, targets_list in per_source.items()
+    ]
+    if len({options for _when, options in rows}) == 1:
+        rows = [((), rows[0][1])]
+    steps.append(
+        Step(
+            name="seat",
+            min=1,
+            max=1,
+            pool=tuple(StepPool(when=when, options=options) for when, options in rows),
+            order=1,
+        )
+    )
+    return tuple(steps)
 
 
 def conversion_skill_definitions() -> tuple[SkillDef, ...]:

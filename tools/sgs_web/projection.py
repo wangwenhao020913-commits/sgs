@@ -19,7 +19,11 @@ from typing import Any
 from sgs.data import load_content_pack, load_heroes
 from sgs.effects import response_count
 from sgs.engine import record_json
-from sgs.skills import CATALOG, conversion_offers, resolve_instances
+from sgs.skills import (
+    CATALOG,
+    conversion_offers_by_source,
+    resolve_instances,
+)
 from sgs.state import FrameKind, Query, WindowCause, project
 from sgs.timing import Timing
 
@@ -510,17 +514,6 @@ def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) ->
     return None
 
 
-def _offers_by_source(state: Any, owner: int, type_id: str) -> dict[int, tuple[str, ...]]:
-    """:func:`~sgs.skills.heroes.conversion_offers` 的**按来源实体牌分组**形状。
-
-    两处读取方共用同一条分组（评审 Standards finding 1）：:func:`_skill_hints` 要"某张来源牌
-    能当这个牌名的技能是哪些"，:func:`_virtual_index.offerers` 要整张表。分组只写一次，
-    两处都调这里——否则"来源 → 技能"这层含义会有第二份实现。
-    """
-    grouped: dict[int, list[str]] = {}
-    for source, skill_id in conversion_offers(state, owner, type_id):
-        grouped.setdefault(int(source), []).append(skill_id)
-    return {source: tuple(skill_ids) for source, skill_ids in grouped.items()}
 
 
 def _skill_hints(state: Any, query: Query) -> list[dict[str, str]]:
@@ -561,7 +554,7 @@ def _skill_hints(state: Any, query: Query) -> list[dict[str, str]]:
             continue
         source = int(card.virtual_sources[0]) if len(card.virtual_sources) == 1 else None
         attributed = (
-            set(_offers_by_source(state, actor, card.type).get(source, ()))
+            set(conversion_offers_by_source(state, actor, card.type).get(source, ()))
             if source is not None
             else set()
         )
@@ -713,7 +706,7 @@ def _virtual_index(
             return [skill_id for skill_id, types in typed if card.type in types]
         table = offers.get(card.type)
         if table is None:
-            table = _offers_by_source(state, owner, card.type)
+            table = conversion_offers_by_source(state, owner, card.type)
             offers[card.type] = table
         return list(table.get(int(card.virtual_sources[0]), ()))
 
@@ -894,9 +887,11 @@ def pending_payload(
     # 主动入口 = 技能 id → 清单；被动入口 = 单份清单。没有时给空值，键恒在（读取方契约）。
     # 载荷键沿用 W4-1 已下发的拼写（``preativations`` / ``preativation``，读取方 = app.js），
     # 与**询问模型字段**（`preactivations` / `preactivation`）不是同一个名字——改键要两头一起改。
-    payload["preativations"] = _preativation_payload(
-        getattr(query, "preactivations", None) or {}
-    )
+    # W4-3：转化技的清单是**本地入口**（确认 = 普通候选，不是复合动作），但载体同一个键：
+    # 界面按技能声明上的 ``preativated`` 分辨"复合动作 / 本地入口"，读取方因此只有一处。
+    manifests = dict(getattr(query, "preactivations", None) or {})
+    manifests.update(getattr(query, "transform_preactivations", None) or {})
+    payload["preativations"] = _preativation_payload(manifests)
     payload["preativation"] = _steps_payload(getattr(query, "preactivation", ()) or ())
     if foreign:
         _mask_foreign_preactivations(payload)

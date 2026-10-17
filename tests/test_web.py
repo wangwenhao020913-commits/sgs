@@ -2347,3 +2347,128 @@ def test_a_foreign_viewer_does_not_get_the_actors_hand_from_the_manifest() -> No
         "座位步的 when 可能含被选中的牌 id，也必须抹掉；候选（seat:N）保留"
     )
     assert steps[1]["pool"][0]["options"], "公开的目标候选照常保留"
+
+
+# ---------------------------------------------------------------------------
+# W4-3：转化技的**本地入口清单**也要按 app.js 的键下发
+#
+# 写方 = 引擎的 ``_build_query``（``transform_preactivations``，`exclude` 不进记录流），
+# 读方 = ``app.js:preactivationManifest`` → ``pending.preativations[skill_id]``。
+# 两侧各由这里的真产出路径与 ``ui_smoke`` 的合成载荷钉一次（`CODING_STANDARDS.md` §1）。
+# ---------------------------------------------------------------------------
+
+WUSHENG = "hero.guanyu.wusheng"
+JIJIU = "hero.huatuo.jijiu"
+
+
+def _session_at_wusheng_play_phase() -> Session:
+    """真会话：人类座位 = 关羽，驱动到"出牌阶段且【武圣】有转化入口清单"那一刻。"""
+    session = Session(
+        seed=1,
+        ai="random",
+        timeout_seconds=None,
+        player_count=2,
+        heroes=("guanyu", "zhouyu"),
+        human_seat=0,
+    )
+    for _ in range(200):
+        pending = session.pending
+        if pending is None:
+            raise AssertionError("会话提前结束，没走到【武圣】的出牌阶段")
+        if pending.kind == "PLAY_PHASE" and WUSHENG in pending.transform_preactivations:
+            return session
+        session.submit_answer(fallback_action(pending))
+    raise AssertionError("200 次应答内没走到【武圣】的出牌阶段清单")
+
+
+def test_the_pending_payload_forwards_the_transform_preactivation_manifest() -> None:
+    """转化技的入口清单：来源步（红牌）+ 目标步（seat:N），按 app.js 的键下发。"""
+    from sgs.data import color_of_suit, Color
+
+    session = _session_at_wusheng_play_phase()
+    state = session.engine.state
+    player = state.player(session.human_seat)
+    red_sources = {
+        str(card_id)
+        for card_id in (*player.hand, *player.equip)
+        if color_of_suit(state.card(card_id).suit) is Color.RED
+    }
+
+    payload = pending_payload(session)
+
+    assert payload is not None
+    steps = payload["preativations"][WUSHENG]
+    assert [step["name"] for step in steps] == ["card", "seat"]
+    assert [step["order"] for step in steps] == [0, 1]
+    assert steps[0]["min"] == steps[0]["max"] == 1, "一张红牌"
+    # ``zones`` 列的是**此刻这些来源所在的区**（清单从候选派生）；装备区的红牌同样会成为
+    # 来源——那条由 ``tests/test_hero_transform.py`` 的国色 / 龙胆用例钉住。
+    assert steps[0]["zones"] == ["hand"]
+    assert set(steps[0]["pool"][0]["options"]) == red_sources, (
+        f"来源候选 = 此刻的红牌（手牌 / 装备）：{steps[0]['pool'][0]['options']}"
+    )
+    assert steps[0]["pool"][0]["when"] == []
+    assert steps[1]["pool"][0]["options"], "目标候选（seat:N）也下发了"
+
+
+def test_the_pending_payload_forwards_the_jijiu_manifest_in_the_peach_window() -> None:
+    """求桃窗口：**急救**的清单 = 一张红牌，**无目标步**（濒死者由窗口固定）。"""
+    from sgs.data import Color, color_of_suit
+    from sgs.state import QueryKind, UseCard
+
+    pack = _context_pack()
+    slash = cards_of_type(pack, "slash")[0]
+    red_dodge = next(
+        card_id
+        for card_id in cards_of_type(pack, "dodge")
+        if color_of_suit(pack.deck.cards[card_id].suit) is Color.RED
+    )
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(slash,)),
+            SeatSpec(hp=1),
+            SeatSpec(hand=(red_dodge,), hero="huatuo"),
+        ],
+        deck=tuple(
+            card_id
+            for card_id in range(len(pack.deck.cards))
+            if card_id not in (slash, red_dodge)
+        ),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    def respond(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == slash:
+                    return action
+            for action in query.legal_actions:
+                if action.kind == "EndPhase":
+                    return action
+        for action in query.legal_actions:
+            if action.kind == "Pass":
+                return action
+        return query.legal_actions[0]
+
+    query = None
+    for _ in range(3000):
+        if engine.pending is None:
+            engine._step()
+            if engine.finished:
+                break
+            continue
+        if engine.pending.kind == QueryKind.PEACH and engine.pending.actor == 2:
+            query = engine.pending
+            break
+        engine.submit(respond(engine.pending))
+    assert query is not None, "没走到座位 2（回合外的华佗）的求桃询问"
+
+    payload = pending_payload(query, human_seat=2)
+
+    assert payload is not None
+    steps = payload["preativations"][JIJIU]
+    assert [step["name"] for step in steps] == ["card"], "无目标步：濒死者由窗口固定"
+    assert steps[0]["pool"][0]["options"] == [str(red_dodge)]
+    assert steps[0]["zones"] == ["hand"]

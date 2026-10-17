@@ -467,6 +467,21 @@ class _QueryBase(_FrozenModel):
     因此一行不改；有授予时牌面只出现在这**一次**询问记录里，不落进任何 delta。
     """
 
+    transform_preactivations: dict[str, tuple[Step, ...]] = Field(
+        default_factory=dict, exclude=True
+    )
+    """**转化技的预发动清单**（W4-3）：技能 id → 清单。
+
+    与 :attr:`PlayPhaseQuery.preactivations`（**复合动作**清单）分开：转化技的确认仍是
+    **普通候选** ``UseCard(虚拟牌, 目标)``（本来就一次动作），不产生 ``ActivateSkill``
+    复合动作；接入层据清单收集来源 / 目标，再从候选里查出那一条提交。
+
+    清单由 :func:`sgs.skills.conversion_preactivations` 从**这次询问的候选**派生
+    （来源组 = 候选的 ``virtual_sources``），四类语境都要下发：出牌阶段（主动使用）、
+    ``DODGE`` / ``RESPOND``（响应）、``PEACH``（求桃）。**不进记录流**（``exclude``），
+    由 :func:`sgs_web.projection.pending_payload` 显式下发。
+    """
+
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> Any:
         data = handler(self)

@@ -556,13 +556,42 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
     与出牌阶段【桃】的差别只在目标：出牌阶段的目标规则是"只能是自己且未满体力"，
     濒死语境的目标由求桃询问直接给出（官方 4.17"对濒死角色使用"）。放弃恒在最后，
     且**永远可选**——"放弃"是 PEACH 询问的一个候选而不是独立询问（票 05 §1）。
+
+    **转化源路径**（W4-3）：除了真牌，**能把牌当【桃】的转化技**（当前只有华佗【急救】）
+    也在这里产出候选——红牌（手牌 ∪ 装备）当【桃】，目标仍是濒死者。候选集合与
+    ``GLOSSARY.md``「预发动清单」里的那一步**同源**：来源由
+    :func:`~sgs.skills.conversion_offers` 逐一筛出（区域默认 / 颜色 / 时机谓词都在那份
+    声明表里），本函数不另写谓词；漏掉这条路径，急救就永远进不了任何候选
+    （``scopes=(PLAY,)`` 与"限回合外"互斥）。
     """
-    actions = [
+    actions: list[Action] = [
         UseCard(card=card, targets=(dying,), answers_seq=answers_seq)
         for card in _usable_hand(state, seat, UseContext.NEAR_DEATH)
     ]
+    actions.extend(_transformed_peaches(state, seat, dying, answers_seq))
     actions.append(Pass(answers_seq=answers_seq))
     return actions
+
+
+def _transformed_peaches(
+    state: GameState, seat: int, dying: int, answers_seq: int
+) -> list[Action]:
+    """求桃窗口的**转化源候选**：把每张能当【桃】的来源牌变成一个无目标争议的 ``UseCard``。
+
+    惰性 import：``sgs.skills`` 反向依赖本模块（``skills/virtual.py`` 读 ``sgs.effects``
+    的 ``check_targets`` 等），模块级 import 会成环。目标由窗口固定成 ``dying``——
+    这一点与清单的"无目标步"是同一件事（`spec.md` §2 的急救行）。
+    """
+    from sgs.skills import conversion_offers, transformed_card
+
+    return [
+        UseCard(
+            card=transformed_card(state, (source,), "peach"),
+            targets=(dying,),
+            answers_seq=answers_seq,
+        )
+        for source, _skill_id in conversion_offers(state, seat, "peach")
+    ]
 
 
 def _respond(

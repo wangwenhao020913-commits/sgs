@@ -1241,8 +1241,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const dodge = { ...synthCard(2, "闪"), type: "dodge" };
   const peach = { ...synthCard(4, "桃"), type: "peach" };
   const horse = { ...synthCard(5, "赤兔"), type: "horse", color: "red" };
-  const fromDodge = { ...synthCard(-3, "杀"), type: "slash", is_virtual: true, virtual_sources: [2] };
-  const fromHorse = { ...synthCard(-6, "杀"), type: "slash", is_virtual: true, virtual_sources: [5] };
+  const fromDodge = { ...synthCard(-3, "杀"), type: "slash", virtual_sources: [2] };
+  const fromHorse = { ...synthCard(-6, "杀"), type: "slash", virtual_sources: [5] };
   const providePending = {
     kind: "SELECT_CARDS", actor: 0, seq: 940,
     prompt: "提供一张【杀】继续使用（目标不变；可发动转化技）",
@@ -2555,8 +2555,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 {
   const slash = synthCard(1, "杀");
   const dodge = { ...synthCard(2, "闪"), type: "dodge" };
-  const fromDodge = { ...synthCard(-3, "杀"), type: "slash", is_virtual: true, virtual_sources: [2] };
-  const fromHorse = { ...synthCard(-6, "杀"), type: "slash", is_virtual: true, virtual_sources: [5] };
+  const fromDodge = { ...synthCard(-3, "杀"), type: "slash", virtual_sources: [2] };
+  const fromHorse = { ...synthCard(-6, "杀"), type: "slash", virtual_sources: [5] };
   const horse = { ...synthCard(5, "赤兔"), type: "horse", color: "red" };
   const providePending = {
     kind: "SELECT_CARDS", actor: 0, seq: 80,
@@ -2659,6 +2659,134 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     ui.state.preativation === beforeMode
       && JSON.stringify(ui.state.preativation.answers[0].values) === "[1]",
     `pre=${!!ui.state.preativation} answers=${JSON.stringify(ui.state.preativation && ui.state.preativation.answers[0])}`);
+}
+
+
+/* ============ W4-3：转化技的**本地预发动入口**（点技能 → 选源牌 → 选目标 → 确认）
+ *
+ * 清单由服务端从**这次询问的候选**派生（`tests/test_web.py` 钉写方），这里钉前端真的按
+ * `pending.preativations` 的清单进入本地态，且**确认 = 普通候选 `UseCard(虚拟牌, 目标)`**
+ * ——转化技的最终动作本来就一次动作，不产生复合动作。
+ */
+{
+  const red = { ...synthCard(2, "桃"), type: "peach", color: "red" };
+  const virtualSlash = { ...synthCard(-3, "杀"), type: "slash", color: "red", virtual_sources: [2] };
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 910,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 910, card: virtualSlash, targets: [1] },
+      { kind: "EndPhase", answers_seq: 910 },
+    ],
+    candidate_index: {
+      "-3": { card: virtualSlash, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
+    },
+    virtual_index: { "2": [{ card_id: -3, skill_ids: ["hero.guanyu.wusheng"] }] },
+    preativations: {
+      "hero.guanyu.wusheng": [
+        { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["2"] }] },
+        { name: "seat", min: 1, max: 1, order: 1,
+          pool: [{ when: ["2"], options: ["seat:1"] }] },
+      ],
+    },
+    preactivation: [], option_seats: {}, context: null,
+  };
+  const view = synthView(pending);
+  view.heroes = { 0: "guanyu", 1: "zhaoyun", 2: "diaochan" };
+  view.snapshot.self_hand = [red];
+  view.skills = [{
+    skill_id: "hero.guanyu.wusheng", name: "武圣", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: false, preativated: false,
+    ui: { requirement: "选择1张红色牌当【杀】使用或打出", convert_sources: [2] },
+  }];
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const wusheng = $("t-skills").children.find(
+    (b) => b.getAttribute("data-skill-id") === "hero.guanyu.wusheng");
+  check("㉿T1 转化技有清单时按清单入口点亮（data-preativation = 步骤数）",
+    !!wusheng && wusheng.disabled === false && wusheng.getAttribute("data-preativation") === "2",
+    `disabled=${wusheng && wusheng.disabled} steps=${wusheng && wusheng.getAttribute("data-preativation")}`);
+  (wusheng.listeners.click || []).forEach((fn) => fn({ target: wusheng }));
+  check("㉿T2 点武圣 = 进入**预发动**本地态（不是旧的转化模式、也不是复合动作）",
+    !!ui.state.preativation
+      && ui.state.preativation.skillId === "hero.guanyu.wusheng"
+      && ui.state.preativation.composite === false
+      && ui.state.convertSkill === null,
+    `pre=${!!ui.state.preativation} composite=${ui.state.preativation && ui.state.preativation.composite}`);
+  const redChip = $("t-hand").children[0];
+  (redChip.listeners.click || []).forEach((fn) => fn({ target: redChip }));
+  check("㉿T3 清单第 1 步：点源牌 = 选中这张红牌",
+    JSON.stringify(ui.state.preativation.answers[0].values) === "[2]",
+    JSON.stringify(ui.state.preativation.answers[0]));
+  ui.advancePreativation();
+  const seatBox = $("t-seats").children.find((b) => b.getAttribute("data-seat") === "1");
+  (seatBox.listeners.click || []).forEach((fn) => fn({ target: seatBox }));
+  const action = ui.buildAction();
+  check("㉿T4 清单填完 ⇒ 确认提交的是**普通的虚拟【杀】候选**（不是复合动作）",
+    !!action && action.kind === "UseCard"
+      && String(action.card.card_id) === "-3"
+      && JSON.stringify(action.targets) === "[1]",
+    JSON.stringify(action));
+  check("㉿T5 只填了源牌、没选目标时不能确认",
+    ui.state.preativation.cursor === 2 && ui.preactivationReady(ui.state.preativation) === true,
+    `cursor=${ui.state.preativation.cursor}`);
+}
+
+/* 求桃窗口：急救的清单 = 一张红牌、**无目标步**（濒死者由窗口固定）。 */
+{
+  const red = { ...synthCard(4, "闪"), type: "dodge", color: "red" };
+  const virtualPeach = { ...synthCard(-5, "桃"), type: "peach", color: "red", virtual_sources: [4] };
+  const pending = {
+    kind: "PEACH", actor: 0, seq: 920, dying: 2,
+    prompt: "座位 2 处于濒死状态：是否对其使用【桃】？",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 920, card: virtualPeach, targets: [2] },
+      { kind: "Pass", answers_seq: 920 },
+    ],
+    candidate_index: {
+      "-5": { card: virtualPeach, pool: [2], combos: [[2]], min_targets: 1, max_targets: 1 },
+    },
+    virtual_index: { "4": [{ card_id: -5, skill_ids: ["hero.huatuo.jijiu"] }] },
+    preativations: {
+      "hero.huatuo.jijiu": [
+        { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["4"] }] },
+      ],
+    },
+    preactivation: [], option_seats: {}, context: null,
+  };
+  const view = synthView(pending);
+  view.heroes = { 0: "huatuo", 1: "guanyu", 2: "diaochan" };
+  view.snapshot.self_hand = [red];
+  view.skills = [{
+    skill_id: "hero.huatuo.jijiu", name: "急救", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: false, preativated: false,
+    ui: { requirement: "选择1张红色牌当【桃】使用", convert_sources: [4] },
+  }];
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  const jijiu = $("t-skills").children.find(
+    (b) => b.getAttribute("data-skill-id") === "hero.huatuo.jijiu");
+  (jijiu.listeners.click || []).forEach((fn) => fn({ target: jijiu }));
+  const chip = $("t-hand").children[0];
+  (chip.listeners.click || []).forEach((fn) => fn({ target: chip }));
+  ui.advancePreativation();
+  const action = ui.buildAction();
+  check("㉿T6 急救：一张红牌填完即可确认（无目标步，目标是窗口固定的濒死者）",
+    !!action && action.kind === "UseCard"
+      && String(action.card.card_id) === "-5"
+      && JSON.stringify(action.targets) === "[2]",
+    JSON.stringify(action));
+  check("㉿T7 急救清单只有一步（没有 seat 步）",
+    ui.state.preativation.steps.length === 1
+      && ui.state.preativation.steps[0].name === "card",
+    JSON.stringify(ui.state.preativation.steps.map((step) => step.name)));
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
