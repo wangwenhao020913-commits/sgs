@@ -43,6 +43,7 @@ from sgs.state import (
     SelectOption,
     SelectOptionContext,
     UseCard,
+    Zone,
 )
 from sgs.timing import Timing
 
@@ -1823,3 +1824,149 @@ def test_the_new_query_and_action_kinds_round_trip_through_the_journal(tmp_path)
     assert _has_query(engine, "SKILL_ACTIVATION", skill_id="equip.double_sword")
     assert _has_query(engine, "SELECT_OPTION")
     assert dump_journal(read_journal(path)) == text
+
+
+# ---------------------------------------------------------------------------
+# W4-2：【青龙偃月刀】/【贯石斧】的预发动（清单 + 复合动作）
+# ---------------------------------------------------------------------------
+
+
+def _activation_query_of(engine, skill_id: str):
+    return next(
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == "SKILL_ACTIVATION"
+        and record.query.skill_id == skill_id
+    )
+
+
+def test_green_dragon_preactivation_costs_a_converted_slash_source():
+    """清单的一步 = **一张【杀】**；转化来源（【龙胆】的【闪】）以**来源实体牌 id** 出现。
+
+    W4-2 的口径：复合动作的 ``picks`` 是"代价牌 id"，而虚拟【杀】背后没有实体牌——界面
+    点的是那张【闪】。故清单候选 / 校验器都用来源 id，效果体拿到的仍是虚拟【杀】。
+    """
+    dodge_cost = _cards("dodge")[0]
+    defender_dodge = _cards("dodge")[1]
+    green_dragon = _cards("green_dragon_blade")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH, dodge_cost), equip=(green_dragon,), hero="zhaoyun"),
+            SeatSpec(hand=(defender_dodge,)),
+        ],
+        deck=_deck_excluding(SLASH, dodge_cost, defender_dodge, green_dragon),
+        turn_seat=0,
+    )
+    captured: dict[str, object] = {}
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _slash_use(query, SLASH, 1)
+        if (
+            query.kind == "SKILL_ACTIVATION"
+            and query.skill_id == "equip.green_dragon_blade"
+        ):
+            captured["steps"] = tuple(query.preactivation)
+            return ActivateSkill(
+                skill_id="equip.green_dragon_blade",
+                picks=(dodge_cost,),
+                answers_seq=query.seq,
+            )
+        return None
+
+    dodged = {"used": False}
+
+    def defender(query):
+        if query.kind == "DODGE" and not dodged["used"]:
+            dodged["used"] = True
+            return _find(query, lambda action: isinstance(action, UseCard))
+        if query.kind == "DODGE":
+            return _find(query, lambda action: isinstance(action, Pass))
+        return None
+
+    engine = _run(
+        state,
+        [Scripted(attacker), Scripted(defender)],
+        lambda engine: engine.state.player(1).hp < 4,
+    )
+
+    steps = captured["steps"]
+    assert [step.name for step in steps] == ["card"]
+    assert steps[0].zones == (Zone.HAND,)
+    assert (steps[0].min, steps[0].max) == (1, 1)
+    assert set(_step_options(steps[0])) == {str(dodge_cost)}, (
+        "【龙胆】把【闪】转成【杀】⇒ 候选是**来源**那张【闪】，不是虚拟牌的负 id"
+    )
+
+    assert dodge_cost not in engine.state.player(0).hand, "来源牌真的离手（虚拟【杀】用它当来源）"
+    assert engine.state.player(1).hp == 3, "续杀命中"
+
+
+def _step_options(step) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(option for row in step.pool for option in row.options)
+    )
+
+
+def test_axe_preactivation_costs_exactly_two_cards_as_one_composite():
+    """【贯石斧】：清单一步 = 两张牌（手牌 ∪ 装备区）；确认 = 一个复合动作。"""
+    extra, extra2 = _cards("peach")[0], _cards("peach")[1]
+    dodge = _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH, extra, extra2), equip=(AXE,)),
+            SeatSpec(hand=(dodge,)),
+        ],
+        deck=_deck_excluding(SLASH, extra, extra2, AXE, dodge),
+        turn_seat=0,
+    )
+    captured: dict[str, object] = {}
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _slash_use(query, SLASH, 1)
+        if query.kind == "SKILL_ACTIVATION" and query.skill_id == "equip.axe":
+            captured["steps"] = tuple(query.preactivation)
+            return ActivateSkill(
+                skill_id="equip.axe",
+                picks=(extra, extra2),
+                answers_seq=query.seq,
+            )
+        return None
+
+    def defender(query):
+        if query.kind == "DODGE":
+            return _find(query, lambda action: isinstance(action, UseCard))
+        return None
+
+    engine = _run(
+        state,
+        [Scripted(attacker), Scripted(defender)],
+        lambda engine: engine.state.player(1).hp < 4,
+    )
+
+    steps = captured["steps"]
+    assert [step.name for step in steps] == ["card"]
+    assert steps[0].zones == (Zone.HAND, Zone.EQUIP)
+    assert (steps[0].min, steps[0].max) == (2, 2)
+    assert set(_step_options(steps[0])) >= {str(extra), str(extra2), str(AXE)}, (
+        "手牌 ∪ 装备区都在候选里（【杀】已用掉，摸牌阶段又补了两张）"
+    )
+
+    assert engine.state.player(1).hp == 3, "弃两张后此【杀】依然造成伤害"
+    assert AXE in engine.state.player(0).equip, "武器本身不能当成本"
+    cost_moves = [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason.value == "DISCARD"
+        and record.from_zone is not None
+        and record.from_zone.seat == 0
+    ]
+    assert sorted(
+        card.card_id for record in cost_moves for card in record.cards
+    ) == sorted((extra, extra2)), "恰好两张手牌当成本"

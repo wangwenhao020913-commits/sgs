@@ -407,16 +407,46 @@ def test_fallback_action_answers_the_target_of_a_fanjian_step() -> None:
 
 def test_a_timeout_answers_the_target_of_fanjian_in_a_real_session() -> None:
     """票 06：反间的步 2/3 由**目标**应答。真实会话里（AI 周瑜反间人类座位）超时兜底要能
-    在"等目标作答"时替**目标**代答一次，且代答之后该局仍能跑完。"""
-    from sgs.state import Pass
+    在"等目标作答"时替**目标**代答一次，且代答之后该局仍能跑完。
 
+    W4-2 起第一段是**预发动清单**（AI 的随机档不会填表 ⇒ W4-4 才补），故这里给座位 0
+    注入一个会确认复合动作的参与者；第二段仍由引擎逐步问**目标**（人类座位）。
+    """
+    from sgs.state import ActivateSkill, Pass
+
+    class _Activator:
+        """座位 0：**第一次**见到【反间】清单就确认第一段（选人类座位），其余交给随机档。"""
+
+        def __init__(self, fallback) -> None:  # noqa: ANN001 - 与 Participant 协议一致
+            self._fallback = fallback
+            self._done = False
+
+        def respond(self, query):
+            if (
+                not self._done
+                and query.kind == "PLAY_PHASE"
+                and "hero.zhouyu.fanjian" in query.preactivations
+            ):
+                self._done = True
+                return ActivateSkill(
+                    skill_id="hero.zhouyu.fanjian",
+                    choices=(f"seat:{human_seat}",),
+                    answers_seq=query.seq,
+                )
+            return self._fallback.respond(query)
+
+    human_seat = 1
     session = Session(
         seed=0,
         player_count=2,
         ai="random",
-        human_seat=1,
+        human_seat=human_seat,
         heroes=("zhouyu", "guanyu"),
         timeout_seconds=1.0,
+    )
+    session.participants = (
+        _Activator(session.participants[0]),
+        session.participants[1],
     )
     for _ in range(400):
         pending = session.pending
@@ -428,7 +458,7 @@ def test_a_timeout_answers_the_target_of_fanjian_in_a_real_session() -> None:
 
     pending = session.pending
     assert pending is not None and pending.skill_id == "fanjian:suit", (
-        "扫到了 AI 发动的【反间】的第二步"
+        "扫到了【反间】的第二段（第一段已由复合动作确认）"
     )
     assert pending.actor == session.human_seat, "这一步问的正是**目标**（人类座位）"
     assert isinstance(fallback_action(pending), Pass)
@@ -439,7 +469,7 @@ def test_a_timeout_answers_the_target_of_fanjian_in_a_real_session() -> None:
     assert session.session_log[-1].kind == "timeout"
     assert session.session_log[-1].detail["query_kind"] == "SELECT_OPTION"
 
-    for _ in range(400):
+    for _ in range(2000):
         if session.pending is None:
             break
         session.submit_answer(fallback_action(session.pending))
@@ -719,9 +749,10 @@ def test_the_pending_payload_carries_the_virtual_source_index() -> None:
 
 
 def test_rende_skill_entry_is_server_driven_not_manual() -> None:
-    """票 05：【仁德】改走步骤流水线 ⇒ 界面**不再**走"直接多选手牌 → 直接点武将"的
-    ``ui.manual`` 模式（那是候选烘载荷时代的产物），改由服务端的
-    ``SELECT_CARDS → SELECT_OPTION`` 两步驱动；候选仍是可点的骨架。
+    """票 05 / W4-2：【仁德】走预发动清单 ⇒ 界面**没有**手选模式（``ui.manual`` 已删除）。
+
+    "多选手牌 → 点武将"由清单的两步表达；可用性来自 ``preactivations``（这条合成询问
+    没带清单 ⇒ 退回骨架候选的成员判定）。
     """
     from types import SimpleNamespace
 
@@ -740,8 +771,8 @@ def test_rende_skill_entry_is_server_driven_not_manual() -> None:
     )
 
     assert entry["available"] is True, "骨架候选仍在出牌阶段池里（技能按钮可点）"
-    assert entry["ui"]["manual"] is False, "改由服务端逐步询问，前端不再自行拼合载荷"
-    assert entry["ui"]["pick_cards"] == [] and entry["ui"]["pick_seats"] == []
+    assert entry["preativated"] is True, "已翻预发动：界面走清单入口"
+    assert "manual" not in entry["ui"], "手选模式已删除（没有生产者）"
     assert entry["ui"]["requirement"] == "交给一名其他角色任意张手牌"
 
 
@@ -765,7 +796,6 @@ def test_longdan_skill_entry_lists_the_convertible_source_cards() -> None:
 
     assert entry["available"] is False, "转牌不是 ActivateSkill 候选"
     assert entry["ui"]["convert_sources"] == [dodge], "这张【闪】此刻当【杀】"
-    assert entry["ui"]["manual"] is False
 
 
 def _provide_query(engine, *, actor: int = 0, type_id: str = "slash"):
@@ -1485,23 +1515,19 @@ def test_every_skill_entry_carries_type_lock_and_availability() -> None:
             "locked",
             "carrier",
             "available",
+            "preativated",
             "ui",
         }
         assert isinstance(entry["locked"], bool)
         assert isinstance(entry["available"], bool)
+        assert isinstance(entry["preativated"], bool)
         assert entry["skill_type"] in ("NORMAL", "LORD")
         assert entry["carrier"] in ("HERO", "EQUIPMENT")
         # `ui` 是**表现层契约**：改键名必须同时改 app.js 的读法（同候选索引的姿态）。
         assert set(entry["ui"]) == {
             "requirement",
-            "manual",
-            "pick_cards",
-            "pick_seats",
             "convert_sources",
         }, f"技能界面提示的键集合变了：{sorted(entry['ui'])}"
-        assert isinstance(entry["ui"]["manual"], bool)
-        assert isinstance(entry["ui"]["pick_cards"], list)
-        assert isinstance(entry["ui"]["pick_seats"], list)
         assert isinstance(entry["ui"]["convert_sources"], list)
 
 
@@ -2256,17 +2282,55 @@ def test_the_preactivation_manifest_is_not_written_into_the_journal() -> None:
     assert "preactivations" not in raw and "preativation" not in raw
 
 
-def test_the_skill_entry_stays_available_while_the_skeleton_still_exists() -> None:
-    """本票不翻任何一条技能：骨架候选仍是可用性的来源，清单与之并存。"""
+def test_the_pending_payload_forwards_a_passive_activation_manifest() -> None:
+    """W4-2：**被动入口**的单份清单也要由 ``pending_payload`` 下发。
+
+    真实产出路径：``Engine._build_query(SKILL_ACTIVATION)`` 把
+    ``SkillActivationContext.preactivation``（模型字段）写进询问；这里用**同一个询问模型**
+    的形状验投影那一半（投影旧实现在 ``getattr(query, "preativation")`` 上取错名字 ⇒ 清单
+    恒空，前端永远进不了被动预发动）。读取方 = ``app.js:preactivationManifest``。
+    """
+    from sgs.state import SkillActivationQuery, Step, StepPool
+
+    pack = _context_pack()
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(), hero="sunquan"), SeatSpec()],
+        turn_seat=0,
+    )
+    step = Step(name="card", zones=(Zone.HAND,), min=1, max=1,
+                pool=(StepPool(when=(), options=("7",)),), order=0)
+    query = SkillActivationQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="是否发动该技能？",
+        legal_actions=(),
+        view=project(state, 0),
+        skill_id="equip.green_dragon_blade",
+        preactivation=(step,),
+    )
+
+    payload = pending_payload(query, human_seat=0)
+
+    assert payload is not None
+    assert payload["preativation"] and payload["preativation"][0]["name"] == "card"
+    assert payload["preativation"][0]["pool"][0]["options"] == ["7"]
+    assert payload["preativations"] == {}, "被动入口没有「技能 id → 清单」那张表"
+
+
+def test_the_skill_entry_is_available_through_the_manifest_and_carries_the_switch() -> None:
+    """W4-2：可用性只剩清单（骨架候选已删），且技能条目带上 `preativated` 供界面分流。"""
     session = _session_at_rende_play_phase()
 
     entry = next(item for item in build_skills(session, 0) if item["skill_id"] == RENDE)
 
     assert entry["available"] is True
-    assert any(
+    assert entry["preativated"] is True, "界面据这个键把入口切到清单驱动（读取方 = app.js）"
+    assert not any(
         action.kind == "ActivateSkill" and action.skill_id == RENDE
         for action in session.pending.legal_actions
-    ), "未翻预发动的技能仍以骨架候选表达可用性"
+    ), "已翻预发动：不再以骨架候选表达可用性"
 
 
 def test_a_foreign_viewer_does_not_get_the_actors_hand_from_the_manifest() -> None:

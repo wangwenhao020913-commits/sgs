@@ -498,17 +498,18 @@ def _drive_until_pending(engine):
 
 
 def test_a_composite_activation_is_accepted_though_it_is_not_a_candidate():
-    """W4-1：复合动作**不要求**在 ``legal_actions`` 里；校验器通过即接受。
+    """W4-2：复合动作**不要求**在 ``legal_actions`` 里；校验器通过即接受。
 
-    同一问里仍有骨架候选（未翻 ``preativated`` 的技能）——两条路并存，这正是本票的
-    "候选 **或** 结构化动作 + 校验"。
+    【仁德】已翻预发动 ⇒ 同一问里**没有**骨架候选（可用性只在清单里），这正是
+    "候选 **或** 结构化动作 + 校验"里第二条路唯一还开着的形状。
     """
     engine = _parked_at_rende()
     query = engine.pending
     assert query.preactivations[RENDE], "出牌阶段随附【仁德】的预发动清单"
-    assert any(isinstance(action, ActivateSkill) for action in query.legal_actions), (
-        "本票不翻任何一条技能：骨架候选仍在（W4-2 逐条删）"
-    )
+    assert not any(
+        isinstance(action, ActivateSkill) and action.skill_id == RENDE
+        for action in query.legal_actions
+    ), "W4-2 已翻预发动：骨架候选从 legal_actions 删掉"
     card = engine.state.player(0).hand[0]
     composite = ActivateSkill(
         skill_id=RENDE,

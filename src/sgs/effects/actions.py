@@ -150,15 +150,25 @@ def _counting_distance(state: GameState, a: int, b: int) -> int:
     return min(forward, backward) + 1
 
 
-def attack_range(state: GameState, seat: int) -> int:
+def attack_range(
+    state: GameState, seat: int, *, excluding: tuple[int, ...] = ()
+) -> int:
     """额定攻击范围：无武器 = 1，否则取武器牌的 ``attack_range``（票 12 §1 的公式）。
 
     **不走 ``DISTANCE`` 挂点**（票 12 §Q22）：坐骑改的是座位距离、武器改的是攻击范围，
     两张表各自只有一个写入者。攻击范围是**牌面事实**，实例化时已派生进 ``CardRef``，
     故本函数真读武器牌而不必回头拿 ``ContentPack``。合法性 = ``距离 ≤ 攻击范围``，
     属 L3 非时机（在 :func:`check_targets` 里读）。
+
+    ``excluding``（W4-2【流离】）："**把这几张牌先付掉之后**"的攻击范围。预发动/逐步询问
+    都在**成本搬牌之前**选新目标，而【流离】的成本可能正是自己的武器（弃掉之后范围回落）；
+    规则读的是付完之后的场况，故把已选成本的 id 传进来、由同一个公式重算，而不是在
+    技能层抄一份"没有武器 = 1"。
     """
+    skipped = set(excluding)
     for card_id in state.player(seat).equip:
+        if card_id in skipped:
+            continue
         card = state.card(card_id)
         if card.slot is SlotKind.WEAPON:
             return card.attack_range if card.attack_range is not None else 1
@@ -283,18 +293,24 @@ def target_is_effective(state: GameState, card: CardRef, source: int, target: in
     )
 
 
-def targets_within_attack_range(state: GameState, seat: int) -> tuple[int, ...]:
+def targets_within_attack_range(
+    state: GameState, seat: int, *, excluding: tuple[int, ...] = ()
+) -> tuple[int, ...]:
     """``seat`` 能触及的座位：一名**其他存活角色**且距离 ≤ 其攻击范围。
 
     【借刀杀人】的目标合法性（第 0 层）与"持刀者使用【杀】"的候选都读它；
     距离与攻击范围各只在这里读一次，不复制公式，故函数本身与具体牌名无关。
+
+    ``excluding``（W4-2【流离】）：先付掉这几张牌之后的触及范围——见
+    :func:`attack_range` 的同名参数。
     """
     return tuple(
         player.seat
         for player in state.players
         if player.alive
         and player.seat != seat
-        and distance(state, seat, player.seat) <= attack_range(state, seat)
+        and distance(state, seat, player.seat)
+        <= attack_range(state, seat, excluding=excluding)
     )
 
 

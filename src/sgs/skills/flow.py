@@ -63,6 +63,7 @@ __all__ = [
     "ask_key_of",
     "manifest",
     "option_seat",
+    "provide_source_id",
     "run_flow",
     "seat_choice",
     "validate_flow_activation",
@@ -829,10 +830,39 @@ def _card_options(state: GameState, face: int, step: PickCards) -> tuple[int, ..
     return tuple(out)
 
 
-def _provide_options(state: GameState, actor: int, step: PickProvide) -> tuple[int, ...]:
-    """``PickProvide`` 此刻的候选牌 id（实体 B ＋ 单来源转化 B，与执行器同一份面）。"""
+def provide_source_id(slot: Slot) -> int | None:
+    """这一槽在**预发动清单里**的候选 id：实体 B = 它自己的 id；转化 B = **来源实体牌** id。
+
+    为什么不是虚拟 B 的负 id（W4-2）：复合动作的 ``picks`` 口径是"代价牌 id"（`spec.md` §3），
+    而虚拟 B 背后没有实体牌——界面手牌 / 装备区渲染的是**来源**那张。用来源 id 作候选，
+    "点那张【闪】选【龙胆】转出的【杀】"就不需要在接入层再建一层 id 映射；校验器
+    (:func:`_assign_activation`) 用同一个函数把 id 换回要用的 ``CardRef``（虚拟 B）。
+    多来源转化（【丈八蛇矛】）没有单一来源 ⇒ 不给清单候选（与 :func:`provide_face` 的
+    "只收单来源"同一条边界）。
+    """
+    card = slot.card
+    if card is None:
+        return None
+    if not card.is_virtual:
+        return int(card.card_id)
+    sources = tuple(card.virtual_sources)
+    return int(sources[0]) if len(sources) == 1 else None
+
+
+def _provide_refs(state: GameState, actor: int, step: PickProvide) -> dict[int, Any]:
+    """``PickProvide`` 的面 → ``{清单候选 id: 要用的牌面}``（实体 B 先占位，虚拟 B 不覆盖它）。"""
     slots, _ids = provide_face(state, actor, step.type_id, step.zones)
-    return tuple(int(slot.card.card_id) for slot in slots if slot.card is not None)
+    refs: dict[int, Any] = {}
+    for slot in slots:
+        source = provide_source_id(slot)
+        if source is not None and slot.card is not None:
+            refs.setdefault(source, slot.card)
+    return refs
+
+
+def _provide_options(state: GameState, actor: int, step: PickProvide) -> tuple[int, ...]:
+    """``PickProvide`` 此刻的候选（实体 B 与**单来源**转化 B 的来源牌 id，见 :func:`provide_source_id`）。"""
+    return tuple(_provide_refs(state, actor, step))
 
 
 def _hidden_face(step: PickCards, face: object, owner: int) -> bool:
@@ -1207,12 +1237,7 @@ def _assign_activation(
             take = _picks_for_step(flow, index, step, remaining)
             chunk = tuple(int(card_id) for card_id in picks[pick_index : pick_index + take])
             pick_index += take
-            slots, _ids = provide_face(state, actor, step.type_id, step.zones)
-            refs = {
-                int(slot.card.card_id): slot.card
-                for slot in slots
-                if slot.card is not None
-            }
+            refs = _provide_refs(state, actor, step)
             if check:
                 for card_id in chunk:
                     if card_id not in refs:

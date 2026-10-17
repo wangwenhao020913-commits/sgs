@@ -58,7 +58,6 @@ from sgs.state import (
     FrameKind,
     GameState,
     MoveReason,
-    Pass,
     SelectionSpec,
     Zone,
     ZoneRef,
@@ -665,9 +664,10 @@ def _lijian_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     cards = (*player.hand, *player.equip)
     if not cards or not _lijian_partners(state, ctx.subject):
         return current
-    # 票 01：候选**恒为一条骨架**，不再烘"牌 × 有序男性对"。
-    # 弃哪张、谁是使用者、谁是目标，一律改由发动后的步骤流水线问（:func:`_lijian_activate`）；
-    # 故候选数与手牌数、场上男性数无关，``CANDIDATE_CAP`` 的降级路径对【离间】不再触发。
+    # 票 01 / W4-2：候选**恒为一条骨架**（不再烘"牌 × 有序男性对"），且它立刻被引擎从
+    # 已翻预发动的技能里删掉——弃哪张、谁是使用者、谁是目标由 :data:`LIJIAN_FLOW` 的
+    # 三步清单表达；故候选数与手牌数、场上男性数无关，``CANDIDATE_CAP`` 的降级路径对
+    # 【离间】不再触发。
     return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
 
@@ -704,83 +704,69 @@ def _lijian_partners(state: GameState, owner: int) -> dict[int, tuple[int, ...]]
     }
 
 
-_ASK_LIJIAN_CARD = "hero.diaochan.lijian.card"
-"""手写询问位置（票 22）：:func:`_lijian_activate` 步 1 的"弃一张牌"。"""
+def _lijian_users(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """步 2 的池：**至少有一个合法受害者**的男性（座位序）。"""
+    del frame, chosen
+    return tuple(_lijian_partners(state, owner))
 
 
-def _lijian_activate(host: Any, frame: Any) -> Any:
-    """票 01 的**步骤流水线**：弃 1 张牌 → 选使用者 → 选目标 → 一次性结算。
+def _lijian_victims(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """步 3 的池：步 2 选中那名**使用者**的合法受害者（真牌 ``check_targets`` 链）。
 
-    三条纪律：
-
-    - **选择只收集、提交才生效**（用户裁定 Q3）：牌直到三步走完才搬进弃牌堆，故任何一步
-      取消都留下完整的手牌；
-    - **取消不消耗次数**：``_USED`` 位在**流水线全部走完**之后才落，取消 ⇒ 一个位都不落；
-    - **顺序即语义**：第一次点的是【决斗】**使用者**，第二次点的是**目标**；有序性不靠
-      按钮文案，靠步骤次序，前端不做任何裁决。
+    池依赖前序答案 ⇒ 从 :func:`~sgs.skills.flow._with_answers` 挂上的
+    ``frame.data["preativation_answers"]`` 读（清单渲染与校验器共用的唯一通道，W4-1）。
+    没有前序答案（清单退化 / 尚未选使用者）⇒ 空池，宁可少给候选也不瞎猜。
     """
-    state = host.state
+    del chosen
+    answers = (getattr(frame, "data", {}) or {}).get("preativation_answers") or {}
+    users = answers.get("user") or ()
+    if not users:
+        return ()
+    return _lijian_partners(state, owner).get(int(users[0]), ())
+
+
+def _lijian_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：弃成本 → 使用者对其受害者发起【决斗】。
+
+    三步都只收集：牌直到这里才搬进弃牌堆（取消 / 校验失败 ⇒ 手牌原样）。``_USED`` 由
+    执行器的 ``on_commit`` 在 ``effect`` 之前落位（``once_per_phase=True``），故本函数
+    不重复记账。
+    """
     owner = frame.data["source"]
-
-    # 步 1：弃置 1 张牌（手牌 ∪ 装备区）。``optional=True`` 给出一条 ``Pass`` = 取消。
-    picks = host.ask_selection(
-        frame,
-        owner=_ASK_LIJIAN_CARD,
-        key="lijian:card",
-        actor=owner,
-        timing=Timing.PHASE_PLAY_IDLE,
-        spec=SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1), optional=True),
-        build_face=lambda: host.selection_face(
-            owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True
-        ),
-    )
-    if host.suspended(picks):
-        return "stay"
-    if not picks:
-        # 取消：一个副作用都不产生（不搬牌、不落 ``_USED``），技能随时可再发动。
-        return None
-
-    partners = _lijian_partners(state, owner)
-    # 步 2：**先点的是使用者**（只开"至少有一个合法受害者"的那些男性）。
-    user = host.ask_option(
-        frame,
-        owner,
-        Timing.PHASE_PLAY_IDLE,
-        skill_id="lijian:user",
-        options=tuple(_seat_choice(seat) for seat in partners),
-        optional=True,
-    )
-    if host.suspended(user):
-        return "stay"
-    if isinstance(user, Pass):
-        return None
-    user_seat = _option_seat(user)
-
-    # 步 3：**后点的是目标**。使用者不能当自己的目标；受害者一侧仍读真牌同一条
-    # ``check_targets`` 链（【空城】据此出池），使用者一侧不受"不能成为目标"限制。
-    duel = pure_virtual_card(state, "duel")
-    victim = host.ask_option(
-        frame,
-        owner,
-        Timing.PHASE_PLAY_IDLE,
-        skill_id="lijian:victim",
-        options=tuple(_seat_choice(seat) for seat in partners[user_seat]),
-        optional=True,
-    )
-    if host.suspended(victim):
-        return "stay"
-    if isinstance(victim, Pass):
-        return None
-    victim_seat = _option_seat(victim)
-
-    # 三步走完：这才算发动过（次数位在此落，取消路径一个位都不落）。
-    _mark_phase(state, owner, frame.data["skill_id"], _USED)
-    if _move_to_discard(host, frame, picks, owner=owner, key="lijian:cost") == "stay":
+    user_seat = int(answers["user"][0])
+    victim_seat = int(answers["victim"][0])
+    if _move_to_discard(host, frame, answers["card"], owner=owner, key="lijian:cost") == "stay":
         return "stay"
     # 使用者与目标已按同一条 ``check_targets`` 链定下，故这里不再重查"能否使用"的常规
     # 合法性，只走【决斗】自己的结算链——伤害来源随使用者（不是貂蝉）。
-    host.start_use(duel, source=user_seat, targets=(victim_seat,), use_timing=Timing.PHASE_PLAY_IDLE)
+    host.start_use(
+        pure_virtual_card(host.state, "duel"),
+        source=user_seat,
+        targets=(victim_seat,),
+        use_timing=Timing.PHASE_PLAY_IDLE,
+    )
     return None
+
+
+LIJIAN_FLOW = SkillFlow(
+    name="lijian",
+    steps=(
+        PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=1, hi=1, key="card"),
+        PickSeats(lo=1, hi=1, pool=_lijian_users, key="user"),
+        PickSeats(lo=1, hi=1, pool=_lijian_victims, key="victim"),
+    ),
+    effect=_lijian_effect,
+)
+"""【离间】的三步流水线（票 01 手写 → W4-2 声明式）：弃 1 张牌 → 使用者 → 目标。
+
+顺序即语义：第一次点的是【决斗】**使用者**、第二次点的才是**目标**（有序性由步骤次序
+承担，不靠按钮文案）。受害者池读前序答案（使用者），故清单按前序选项逐行下发
+（:func:`~sgs.skills.flow.manifest` 的逐选项子池）。
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -888,17 +874,19 @@ class ActiveSkill(HeroSkillDecl):
 
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 孙权【制衡】：弃任意张（手牌 + 装备区）→ 摸等量（规则 1009）；票 04 的单步流水线。
-    ActiveSkill("sunquan", "zhiheng", _zhiheng_offers, flow=ZHIHENG_FLOW),
+    ActiveSkill("sunquan", "zhiheng", _zhiheng_offers, flow=ZHIHENG_FLOW, preativated=True),
     # 刘备【仁德】：给一名其他角色任意张手牌；本阶段首次给到第 2 张回复 1 点（规则 976）。
-    ActiveSkill("liubei", "rende", _rende_offers, flow=RENDE_FLOW),
+    ActiveSkill("liubei", "rende", _rende_offers, flow=RENDE_FLOW, preativated=True),
     # 周瑜【反间】：令一名其他角色选花色 → 获得并展示你的一张手牌 → 花色不同则受伤（规则 1017）。
-    ActiveSkill("zhouyu", "fanjian", _fanjian_offers, flow=FANJIAN_FLOW),
+    # W4-2：只把**第一段**（选谁）放进预发动；猜花色 / 挑牌仍由目标逐步应答。
+    ActiveSkill("zhouyu", "fanjian", _fanjian_offers, flow=FANJIAN_FLOW, preativated=True),
     # 华佗【青囊】：弃一张手牌 → 一名已受伤角色回复 1 点（规则 1040）；票 02 的流水线消费者。
-    ActiveSkill("huatuo", "qingnang", _qingnang_offers, flow=QINGNANG_FLOW),
+    ActiveSkill("huatuo", "qingnang", _qingnang_offers, flow=QINGNANG_FLOW, preativated=True),
     # 貂蝉【离间】：弃一张牌 + 两名男性角色 → 视为其中一名对另一名使用【决斗】（规则 1049）。
-    ActiveSkill("diaochan", "lijian", _lijian_offers, _lijian_activate),
+    # W4-2：手写步骤流水线改成声明式（三步各有自己的池：受害者池按使用者）。
+    ActiveSkill("diaochan", "lijian", _lijian_offers, flow=LIJIAN_FLOW, preativated=True),
     # 孙尚香【结姻】：弃两张手牌 + 一名已受伤男性 → 你与其各回复 1 点（规则 1033）。
-    ActiveSkill("sunshangxiang", "jieyin", _jieyin_offers, flow=JIEYIN_FLOW),
+    ActiveSkill("sunshangxiang", "jieyin", _jieyin_offers, flow=JIEYIN_FLOW, preativated=True),
 )
 """A 族六条技能（票 04 §逐技能落位表；【苦肉】不在 16 名名单、只留形状，见模块 docstring）。"""
 

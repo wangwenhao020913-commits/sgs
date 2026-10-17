@@ -75,7 +75,7 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     # （被动入口）——两者都从询问里读，不另问引擎"满不满足条件"。
     if pending is not None:
         offered.update((getattr(pending, "preactivations", None) or {}).keys())
-        if getattr(pending, "preativation", ()):
+        if getattr(pending, "preactivation", ()):
             offered.add(str(getattr(pending, "skill_id", "")))
     hand = tuple(state.player(seat).hand)
     virtual = _virtual_index(pending, state, owner=seat) if pending is not None else {}
@@ -115,23 +115,16 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
                 "locked": bool(definition.locked),
                 "carrier": getattr(definition.carrier, "value", str(definition.carrier)),
                 "available": definition.skill_id in offered,
-                # 界面怎么摆这个技能：多选手牌 → 点座位（【仁德】）与转化来源牌（【龙胆】）。
-                # **纯表现层派生**，只读候选与实例声明，不参与任何合法性判定。
+                # W4-2：这条技能是否已翻到预发动。界面据此**只**走清单入口（不再把骨架
+                # 候选画成"发动技能 XXX"选项）；它是声明上的开关，不是第二条合法性判据。
+                "preativated": bool(definition.preativated),
+                # 界面怎么摆这个技能：转化来源牌（【龙胆】）。**纯表现层派生**，只读候选与
+                # 实例声明，不参与任何合法性判定。
                 "ui": _skill_ui(definition, actions, hand, virtual),
             }
         )
     out.sort(key=lambda item: (item["locked"], item["skill_id"]))
     return out
-
-
-def _seat_of_choice(choice: Any) -> int | None:
-    """候选载荷里的 ``seat:N`` → 座位；别的文本（花色等）→ ``None``。"""
-    if isinstance(choice, str) and choice.startswith("seat:"):
-        try:
-            return int(choice.split(":", 1)[1])
-        except ValueError:
-            return None
-    return None
 
 
 def _skill_ui(
@@ -142,47 +135,19 @@ def _skill_ui(
 ) -> dict[str, Any]:
     """一条技能的**界面提示**：它此刻要求玩家怎么点。
 
-    - ``manual``：这条技能的候选带 ``picks``（手牌）且有唯一目标 —— 即"多选手牌 →
-      点一位在场角色"，界面据此走**直接点手牌 / 直接点武将**的路，而不是铺选项按钮
-      （【仁德】【青囊】【结姻】）。判据全部取自候选：有一条带非空 ``picks`` 的候选、
-      每个候选恰好一个 ``choices``、且 ``picks`` 都是本人手牌。
-    - ``convert_sources``：本技能此刻能转化为虚拟牌的**来源手牌 id**（【龙胆】的
-      "一张【闪】当【杀】"）。转牌没有 ``ActivateSkill`` 候选，界面据这份来源清单
-      让技能按钮点得动、并只高亮可转化的手牌。
+    ``convert_sources``：本技能此刻能转化为虚拟牌的**来源手牌 id**（【龙胆】的
+    "一张【闪】当【杀】"）。转牌没有 ``ActivateSkill`` 候选，界面据这份来源清单
+    让技能按钮点得动、并只高亮可转化的手牌。
+
+    W4-2 删掉了 ``manual`` / ``pick_cards`` / ``pick_seats``：A 族六条主动技全部走
+    **预发动清单**，候选恒为"是否发动"的裸骨架（不再带 ``picks`` / ``choices``），故
+    "多选手牌 → 点一位在场角色"的手选模式**没有生产者**（票 05 起就只剩遗留路径）。
+    预发动清单本身由询问字段下发（``preativations`` / ``preativation``），不在这里。
     """
+    del actions, hand  # 手选模式删除后，界面提示只剩 requirement 与转化来源
     skill_id = definition.skill_id
-    own = [
-        action
-        for action in actions
-        if getattr(action, "kind", None) == "ActivateSkill" and action.skill_id == skill_id
-    ]
-    chosen: set[int] = set()
-    seats: list[int] = []
-    has_picks = False
-    single_seat = bool(own)
-    all_hand = bool(own)
-    for action in own:
-        picks = tuple(getattr(action, "picks", ()))
-        if picks:
-            has_picks = True
-        for card_id in picks:
-            card_id = int(card_id)
-            chosen.add(card_id)
-            if card_id not in hand:
-                all_hand = False
-        choices = tuple(getattr(action, "choices", ()))
-        if len(choices) != 1:
-            single_seat = False
-        for choice in choices:
-            seat = _seat_of_choice(choice)
-            if seat is not None and seat not in seats:
-                seats.append(seat)
-    manual = has_picks and bool(seats) and single_seat and all_hand
     return {
         "requirement": definition.requirement or "",
-        "manual": manual,
-        "pick_cards": [card_id for card_id in hand if card_id in chosen] if manual else [],
-        "pick_seats": seats if manual else [],
         "convert_sources": sorted(
             int(source)
             for source, aliases in virtual.items()
@@ -927,10 +892,12 @@ def pending_payload(
     payload["candidate_index"] = candidate_index(query)
     # 预发动清单（W4-1）：**不进记录流**（询问字段 ``exclude``），故接入层显式下发。
     # 主动入口 = 技能 id → 清单；被动入口 = 单份清单。没有时给空值，键恒在（读取方契约）。
+    # 载荷键沿用 W4-1 已下发的拼写（``preativations`` / ``preativation``，读取方 = app.js），
+    # 与**询问模型字段**（`preactivations` / `preactivation`）不是同一个名字——改键要两头一起改。
     payload["preativations"] = _preativation_payload(
         getattr(query, "preactivations", None) or {}
     )
-    payload["preativation"] = _steps_payload(getattr(query, "preativation", ()) or ())
+    payload["preativation"] = _steps_payload(getattr(query, "preactivation", ()) or ())
     if foreign:
         _mask_foreign_preactivations(payload)
     # 询问窗口的"谁对谁做了什么"：从**结算栈顶帧 + 询问本身**派生的表现层事实。

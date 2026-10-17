@@ -446,7 +446,20 @@ if (partial) {
     check("㉿4c 可发动的技能是绿色高亮且**可点**",
       !!button && button.classList.contains("ready") && button.disabled === false,
       `按钮存在=${!!button} ready=${button && button.classList.contains("ready")} disabled=${button && button.disabled}`);
-    if (button) {
+    if (button && target.preativated) {
+      // W4-2：已翻预发动 ⇒ 点它进入**清单驱动**的本地态（不直接选骨架候选、不提交）。
+      (button.listeners.click || []).forEach((fn) => fn({ target: button }));
+      check("㉿4d 点了它 = 进入预发动（清单入口），不提交",
+        !!ui.state.preativation && ui.state.preativation.skillId === target.skill_id
+          && ui.state.selectedOption === null,
+        `pre=${JSON.stringify(ui.state.preativation && ui.state.preativation.skillId)} option=${ui.state.selectedOption}`);
+      const beforeCancel = calls.length;
+      await ui.cancelOrClear();
+      const sent = calls.slice(beforeCancel).find((c) => c.path.includes("/answer"));
+      check("㉿4e 取消预发动 = 零 action 提交",
+        !sent && ui.state.preativation === null,
+        `sent=${JSON.stringify(sent && sent.body && sent.body.action)}`);
+    } else if (button) {
       const beforeClick = ui.state.selectedOption;
       (button.listeners.click || []).forEach((fn) => fn({ target: button }));
       const pending = ui.state.view.pending;
@@ -1228,8 +1241,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const dodge = { ...synthCard(2, "闪"), type: "dodge" };
   const peach = { ...synthCard(4, "桃"), type: "peach" };
   const horse = { ...synthCard(5, "赤兔"), type: "horse", color: "red" };
-  const fromDodge = { ...synthCard(-3, "杀"), type: "slash", virtual_sources: [2] };
-  const fromHorse = { ...synthCard(-6, "杀"), type: "slash", virtual_sources: [5] };
+  const fromDodge = { ...synthCard(-3, "杀"), type: "slash", is_virtual: true, virtual_sources: [2] };
+  const fromHorse = { ...synthCard(-6, "杀"), type: "slash", is_virtual: true, virtual_sources: [5] };
   const providePending = {
     kind: "SELECT_CARDS", actor: 0, seq: 940,
     prompt: "提供一张【杀】继续使用（目标不变；可发动转化技）",
@@ -1324,10 +1337,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && equipChip().classList.contains("dis"),
     `convert=${ui.state.convertSkill} dodgeDis=${handChips()[1].classList.contains("dis")} horseDis=${equipChip().classList.contains("dis")}`);
   (longdan.listeners.click || []).forEach((fn) => fn({ target: longdan }));
-  check("㉿B10 再点一次 = 取消预发动、回到**同一层询问**（不是取消流水线）",
-    ui.state.convertSkill === null && ui.state.view.pending === providePending
-      && !equipChip().classList.contains("dis"),
-    `convert=${ui.state.convertSkill} pending=${ui.state.view.pending === providePending}`);
+  check("㉿B10 再点一次 = 退出转化模式、回到**同一层询问**；已选源牌仍合法 ⇒ 保留",
+    ui.state.convertSkill === null
+      && ui.state.view.pending === providePending
+      && JSON.stringify(ui.state.picks) === "[1]"
+      && !handChips()[1].classList.contains("dis"),
+    `convert=${ui.state.convertSkill} picks=${JSON.stringify(ui.state.picks)}`);
 
   // (d) 置灰是当前状态的纯函数：换询问 / 退出询问都**整体重算**，不叠加、不粘滞。
   const playPending = {
@@ -1438,30 +1453,30 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(ui.state.picks) === "[1,2]", `picks=${JSON.stringify(ui.state.picks)}`);
 }
 
-// ② 仁德：点技能 → 直接多选手牌 → 直接点场上武将 → 一次交出去；**没有任何选项按钮**。
+// ② 仁德（W4-2）：点技能 → 按**清单**两步（多选手牌 → 点武将）→ 确认 = 一个复合动作。
+//    验收：界面上**不再**出现"发动技能 XXX"选项；确认 / 取消是底部两个按钮。
 {
   const first = synthCard(11, "杀");
   const second = synthCard(12, "闪");
-  const legal = [];
-  for (const picks of [[11], [12], [11, 12]]) {
-    for (const seat of [1, 2]) {
-      legal.push({ kind: "ActivateSkill", skill_id: "hero.liubei.rende", picks, choices: [`seat:${seat}`], answers_seq: 901 });
-    }
-  }
-  legal.push({ kind: "EndPhase", answers_seq: 901 });
+  const manifest = [
+    { name: "card", zones: ["hand"], min: 1, max: 2, order: 0,
+      pool: [{ when: [], options: ["11", "12"] }] },
+    { name: "seat", zones: [], min: 1, max: 1, order: 1,
+      pool: [{ when: [], options: ["seat:1", "seat:2"] }] },
+  ];
   const view = synthView({
     kind: "PLAY_PHASE", actor: 0, seq: 901, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
-    legal_actions: legal, candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+    legal_actions: [{ kind: "EndPhase", answers_seq: 901 }],
+    preativations: { "hero.liubei.rende": manifest },
+    preactivation: [],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
   });
   view.heroes = { 0: "liubei", 1: "guanyu", 2: "diaochan" };
   view.snapshot.self_hand = [first, second];
   view.skills = [{
     skill_id: "hero.liubei.rende", name: "仁德", skill_type: "NORMAL", locked: false,
-    carrier: "HERO", available: true,
-    ui: {
-      requirement: "交给一名其他角色任意张手牌", manual: true,
-      pick_cards: [11, 12], pick_seats: [1, 2], convert_sources: [],
-    },
+    carrier: "HERO", available: true, preativated: true,
+    ui: { requirement: "交给一名其他角色任意张手牌", convert_sources: [] },
   }];
   ui.state.view = view;
   ui.resetSelection();
@@ -1469,36 +1484,63 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderPending(view);
 
   const button = $("t-skills").children.find((b) => b.getAttribute("data-skill-id") === "hero.liubei.rende");
-  check("㉿R1 仁德按钮标成手选模式且可点",
-    !!button && button.disabled === false && button.getAttribute("data-manual") === "true",
-    `disabled=${button && button.disabled} manual=${button && button.getAttribute("data-manual")}`);
-  (button.listeners.click || []).forEach((fn) => fn({ target: button }));
-  check("㉿R2 点仁德进入手选模式（提示 = 交给一名其他角色任意张手牌）",
-    !!ui.state.skillMode && ui.state.skillMode.skillId === "hero.liubei.rende"
-      && $("t-prompt").textContent === "交给一名其他角色任意张手牌",
-    `mode=${JSON.stringify(ui.state.skillMode)} prompt="${$("t-prompt").textContent}"`);
-  check("㉿R3 这个过程**不铺任何选项按钮**", $("t-options").children.length === 0,
+  check("㉿R1 仁德是**预发动**入口（按钮可点、标出步骤数）",
+    !!button && button.disabled === false
+      && button.getAttribute("data-preativated") === "true"
+      && button.getAttribute("data-preativation") === "2",
+    `disabled=${button && button.disabled} pre=${button && button.getAttribute("data-preativation")}`);
+  check("㉿R1b 出牌阶段没有「发动技能 XXX」选项",
+    !$("t-options").children.some((b) => /发动技能/.test(b.textContent)),
     `选项=${JSON.stringify($("t-options").children.map((b) => b.textContent))}`);
+  (button.listeners.click || []).forEach((fn) => fn({ target: button }));
+  check("㉿R2 点仁德 = 进入预发动（提示 = 预发动【仁德】：按清单逐步选择）",
+    !!ui.state.preativation && ui.state.preativation.skillId === "hero.liubei.rende"
+      && ui.state.preativation.steps.length === 2
+      && /预发动【仁德】/.test($("t-prompt").textContent),
+    `mode=${JSON.stringify(ui.state.preativation)} prompt="${$("t-prompt").textContent}"`);
   const handChip = (index) => $("t-hand").children[index];
   (handChip(0).listeners.click || []).forEach((fn) => fn({ target: handChip(0) }));
   (handChip(1).listeners.click || []).forEach((fn) => fn({ target: handChip(1) }));
-  check("㉿R4 复选手牌（两张都收下）", JSON.stringify(ui.state.picks) === "[11,12]",
-    `picks=${JSON.stringify(ui.state.picks)}`);
-  check("㉿R5 还没点目标 ⇒ 不可提交", $("btn-submit").disabled === true && ui.buildAction() === null,
-    `disabled=${$("btn-submit").disabled}`);
+  check("㉿R3 步 1 多选：两张都收进本地答案",
+    JSON.stringify(ui.state.preativation.answers[0].values) === "[11,12]",
+    JSON.stringify(ui.state.preativation.answers[0]));
+  // 多选步：点已选 = 取消该张、点新牌 = 追加（用户裁定的重选规则）。
+  (handChip(0).listeners.click || []).forEach((fn) => fn({ target: handChip(0) }));
+  check("㉿R3b 多选步再点已选那张 = 取消它（另一张仍在）",
+    JSON.stringify(ui.state.preativation.answers[0].values) === "[12]",
+    JSON.stringify(ui.state.preativation.answers[0]));
+  (handChip(0).listeners.click || []).forEach((fn) => fn({ target: handChip(0) }));
+  check("㉿R3c 再点一次 = 追加回来",
+    JSON.stringify(ui.state.preativation.answers[0].values) === "[12,11]",
+    JSON.stringify(ui.state.preativation.answers[0]));
+  const next = $("t-options").children.find((b) => b.textContent === "下一步");
+  check("㉿R4 张数达标后「下一步」可点", !!next && next.disabled === false);
+  (next.listeners.click || []).forEach((fn) => fn({ target: next }));
+  check("㉿R5 进第 2 步：只高亮清单给的两名其他角色",
+    ui.state.preativation.cursor === 1
+      && ui.preactivationOptions(ui.state.preativation, 1).join(",") === "seat:1,seat:2",
+    `cursor=${ui.state.preativation.cursor}`);
   const targetBox = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "2");
   check("㉿R6 目标武将画成可点（直接点场上武将）",
     !!targetBox && targetBox.classList.contains("targetable"));
-  // 点座位 = 交出去：界面会自动提交那条 (picks, seat:2) 候选。用不存在的会话 id，免得
-  // 这次探测真的改掉服务器上的对局。
   ui.state.sessionId = "smoke-missing-session";
-  const before = calls.length;
+  const beforeOk = calls.length;
   (targetBox.listeners.click || []).forEach((fn) => fn({ target: targetBox }));
-  const sent = calls.length > before ? calls[calls.length - 1].body.action : null;
-  check("㉿R7 点座位 = 一次提交「这组牌 → 这个座位」那条原候选",
-    !!sent && sent.kind === "ActivateSkill" && sent.skill_id === "hero.liubei.rende"
-      && JSON.stringify(sent.picks) === "[11,12]" && JSON.stringify(sent.choices) === '["seat:2"]',
-    JSON.stringify(sent));
+  const composite = ui.buildAction();
+  check("㉿R7 填完 = 复合动作（picks = 手牌 id、choices = seat:N），按钮文案是「确认发动」",
+    !!composite && composite.kind === "ActivateSkill" && composite.skill_id === "hero.liubei.rende"
+      && JSON.stringify(composite.picks) === "[12,11]"
+      && JSON.stringify(composite.choices) === '["seat:2"]'
+      && $("btn-submit").textContent === "确认发动",
+    JSON.stringify(composite));
+  check("㉿R7b 点座位**不**自动提交（确认由玩家按）", calls.length === beforeOk,
+    `calls=${calls.length - beforeOk}`);
+  (button.listeners.click || []).forEach((fn) => fn({ target: button }));
+  const cancelButton = $("btn-cancel");
+  (cancelButton.listeners.click || []).forEach((fn) => fn({ target: cancelButton }));
+  check("㉿R8 取消预发动 = 本地态清空、零 action 提交",
+    ui.state.preativation === null && calls.length === beforeOk,
+    `pre=${ui.state.preativation} calls=${calls.length - beforeOk}`);
 }
 
 /* ============ 票 01（合成局面）：【离间】流水线 —— 逐步文案 + 取消送出 Pass ============
@@ -2261,23 +2303,43 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   if (found.rende) {
     await replayScanTo(found.rende);
     const button = $("t-skills").children.find((b) => b.getAttribute("data-skill-id") === "hero.liubei.rende");
-    check("㉿R9 真局里仁德按钮可点、**不再**是手选模式（票 05：改由服务端逐步询问）",
-      !!button && button.disabled === false && button.getAttribute("data-manual") !== "true",
-      `disabled=${button && button.disabled} manual=${button && button.getAttribute("data-manual")}`);
+    check("㉿R9 真局里仁德是**预发动**入口（按钮可点、清单两步、没有「发动技能」选项）",
+      !!button && button.disabled === false
+        && button.getAttribute("data-preativated") === "true"
+        && button.getAttribute("data-preativation") === "2"
+        && !$("t-options").children.some((b) => /发动技能/.test(b.textContent)),
+      `disabled=${button && button.disabled} pre=${button && button.getAttribute("data-preativation")}`);
     (button.listeners.click || []).forEach((fn) => fn({ target: button }));
-    const rendeAction = ui.buildAction();
-    check("㉿R10 真局里点仁德 = 选中那条骨架 ActivateSkill 候选（载荷全空）",
-      !!rendeAction && rendeAction.kind === "ActivateSkill"
-        && rendeAction.skill_id === "hero.liubei.rende"
-        && (rendeAction.picks || []).length === 0 && (rendeAction.choices || []).length === 0,
-      JSON.stringify(rendeAction));
-    if (rendeAction) {
+    const pa = ui.state.preativation;
+    const options = ui.preactivationOptions(pa, 0) || [];
+    const cardId = Number(options[0]);
+    // 点清单里的第一张手牌（清单候选 = 实体牌 id）。
+    const handCards = ui.state.view.snapshot.self_hand || [];
+    const targetIndex = handCards.findIndex((card) => String(card.card_id) === String(cardId));
+    if (targetIndex >= 0) {
+      (($("t-hand").children[targetIndex].listeners.click) || []).forEach((fn) =>
+        fn({ target: $("t-hand").children[targetIndex] }));
+    }
+    check("㉿R10 真局里点清单候选 = 收进本地答案（不提交）",
+      !!pa && JSON.stringify(pa.answers[0].values) === JSON.stringify([cardId]),
+      `answers=${pa && JSON.stringify(pa.answers[0])}`);
+    const next = $("t-options").children.find((b) => b.textContent === "下一步");
+    if (next) (next.listeners.click || []).forEach((fn) => fn({ target: next }));
+    const seats = pa ? ui.preactivationOptions(pa, 1) : null;
+    const seatBox = $("t-seats").children.find(
+      (c) => seats && seats.includes(`seat:${c.getAttribute("data-seat")}`));
+    if (seatBox) (seatBox.listeners.click || []).forEach((fn) => fn({ target: seatBox }));
+    const composite = ui.buildAction();
+    check("㉿R10b 真局里清单填完 = 复合动作（不要求是候选）",
+      !!composite && composite.kind === "ActivateSkill"
+        && composite.skill_id === "hero.liubei.rende"
+        && composite.picks.length === 1 && composite.choices.length === 1,
+      JSON.stringify(composite));
+    if (composite) {
       await ui.submitAction();
       const p = ui.state.view.pending;
-      check("㉿R11 真局里提交后服务端问步 1「选择任意张要交给其他角色的手牌」",
-        !!p && p.kind === "SELECT_CARDS"
-          && p.context && p.context.requirement === "选择任意张要交给其他角色的手牌",
-        `kind=${p && p.kind} req=${p && p.context && p.context.requirement}`);
+      check("㉿R11 真局里确认后服务端一次执行完（不再逐步问 SELECT_CARDS / SELECT_OPTION）",
+        !!p && p.kind === "PLAY_PHASE", `kind=${p && p.kind}`);
     }
   }
 }
@@ -2296,7 +2358,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
     legal_actions: [{ kind: "EndPhase", answers_seq: 77 }],
     candidate_index: {}, option_seats: {}, context: null,
-    preactivations: {
+    preativations: {
       "demo.preativate": [
         {
           name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
@@ -2314,8 +2376,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   preView.snapshot.self_hand = [slash, dodge];
   preView.skills = [{
     skill_id: "demo.preativate", name: "示例技", skill_type: "NORMAL", locked: false,
-    carrier: "HERO", available: true,
-    ui: { requirement: "", manual: false, pick_cards: [], pick_seats: [], convert_sources: [] },
+    carrier: "HERO", available: true, preativated: true,
+    ui: { requirement: "", convert_sources: [] },
   }];
   ui.state.view = preView;
   ui.resetSelection();
@@ -2330,7 +2392,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     (c) => c.getAttribute("data-seat") === String(seat),
   );
 
-  check("㉿PZ1 清单驱动：没有骨架候选也能从 preactivations 点亮技能按钮",
+  check("㉿PZ1 清单驱动：没有骨架候选也能从 preativations 点亮技能按钮",
     !!skillButton() && skillButton().disabled === false
       && skillButton().getAttribute("data-preativation") === "2",
     `disabled=${skillButton() && skillButton().disabled} pre=${skillButton() && skillButton().getAttribute("data-preativation")}`);
@@ -2405,7 +2467,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
     legal_actions: [{ kind: "EndPhase", answers_seq: 78 }],
     candidate_index: {}, option_seats: {}, context: null,
-    preactivations: {
+    preativations: {
       "demo.degraded": [
         { name: "seat", zones: [], min: 1, max: 1, order: 0, pool: [] },
       ],
@@ -2415,8 +2477,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const degradedView = synthView(degradedPending);
   degradedView.skills = [{
     skill_id: "demo.degraded", name: "退化技", skill_type: "NORMAL", locked: false,
-    carrier: "HERO", available: true,
-    ui: { requirement: "", manual: false, pick_cards: [], pick_seats: [], convert_sources: [] },
+    carrier: "HERO", available: true, preativated: true,
+    ui: { requirement: "", convert_sources: [] },
   }];
   ui.state.view = degradedView;
   ui.resetSelection();
@@ -2430,7 +2492,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     (c) => c.getAttribute("data-seat") === String(seat),
   );
   check("㉿PZ10 退化清单的座位步被识别为座位（不是选项步，不会死路）",
-    ui.preactivationStepKind(degradedPending.preactivations["demo.degraded"][0]) === "seat"
+    ui.preactivationStepKind(degradedPending.preativations["demo.degraded"][0]) === "seat"
       && ui.preactivationOptions(ui.state.preativation, 0) === null);
   check("㉿PZ11 退化后座位仍可点（全都点得动，合法性交给校验器）",
     seatBox(1).classList.contains("targetable") && seatBox(2).classList.contains("targetable"));
@@ -2440,6 +2502,163 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!degradedAction && degradedAction.kind === "ActivateSkill"
       && JSON.stringify(degradedAction.choices) === '["seat:1"]',
     JSON.stringify(degradedAction));
+}
+
+/* ⑥ W4-2：被动入口（时机询问随附清单）——不画"发动技能 XXX"，只给入口 + 放弃。
+ */
+{
+  const passivePending = {
+    kind: "SKILL_ACTIVATION", actor: 0, seq: 79,
+    prompt: "是否发动该技能？", skill_id: "demo.passive",
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: "demo.passive", answers_seq: 79, picks: [], choices: [] },
+      { kind: "Pass", answers_seq: 79 },
+    ],
+    candidate_index: {}, option_seats: {}, context: null,
+    preativations: {},
+    preativation: [
+      { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+        pool: [{ when: [], options: ["11"] }] },
+    ],
+  };
+  const passiveView = synthView(passivePending);
+  passiveView.snapshot.self_hand = [synthCard(11, "杀")];
+  passiveView.skills = [{
+    skill_id: "demo.passive", name: "示例被动", skill_type: "NORMAL", locked: false,
+    carrier: "EQUIPMENT", available: true, preativated: true,
+    ui: { requirement: "", convert_sources: [] },
+  }];
+  ui.state.view = passiveView;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(passiveView);
+
+  check("㉿PZ13 被动入口：没有「发动技能 XXX」选项，技能按钮标出清单",
+    !$("t-options").children.some((b) => /发动技能/.test(b.textContent))
+      && (() => {
+        const b = $("t-skills").children.find((x) => x.getAttribute("data-skill-id") === "demo.passive");
+        return !!b && b.disabled === false && b.getAttribute("data-preativation") === "1";
+      })(),
+    `选项=${JSON.stringify($("t-options").children.map((b) => b.textContent))}`);
+  const beforePass = calls.length;
+  const cancel = $("btn-cancel");
+  (cancel.listeners.click || []).forEach((fn) => fn({ target: cancel }));
+  await new Promise((resolve) => setImmediate(resolve));
+  const passSent = calls.length > beforePass ? calls[calls.length - 1].body.action : null;
+  check("㉿PZ14 被动入口点「放弃」= 送出 Pass（时机消费，不重问）",
+    !!passSent && passSent.kind === "Pass", JSON.stringify(passSent));
+}
+
+/* ⑦ W4-2：转化模式切换的**宽松保留**（切换后已选源牌仍合法则保留、不合法才清空）。
+ */
+{
+  const slash = synthCard(1, "杀");
+  const dodge = { ...synthCard(2, "闪"), type: "dodge" };
+  const fromDodge = { ...synthCard(-3, "杀"), type: "slash", is_virtual: true, virtual_sources: [2] };
+  const fromHorse = { ...synthCard(-6, "杀"), type: "slash", is_virtual: true, virtual_sources: [5] };
+  const horse = { ...synthCard(5, "赤兔"), type: "horse", color: "red" };
+  const providePending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 80,
+    prompt: "提供一张【杀】继续使用（目标不变；可发动转化技）",
+    provide_type: "slash",
+    legal_actions: [{ kind: "SelectCards", answers_seq: 80, picks: [] }],
+    candidate_index: {}, option_seats: {}, context: null,
+    slots: [
+      { ref: { zone: "hand", seat: 0 }, card: slash },
+      { ref: { zone: "hand", seat: 0 }, card: fromDodge },
+      { ref: { zone: "equip", seat: 0 }, card: fromHorse },
+    ],
+    spec: { zones: ["hand"], total: [1, 1] },
+    virtual_index: {
+      "2": [{ card_id: -3, skill_ids: ["hero.zhaoyun.longdan"] }],
+      "5": [{ card_id: -6, skill_ids: ["hero.guanyu.wusheng"] }],
+    },
+    preativations: {}, preactivation: [],
+  };
+  const provideView = synthView(providePending);
+  provideView.snapshot.self_hand = [slash, dodge];
+  provideView.snapshot.players[0].equip = [horse];
+  provideView.skills = [
+    {
+      skill_id: "hero.zhaoyun.longdan", name: "龙胆", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: false, preativated: false,
+      ui: { requirement: "选择1张【闪】当【杀】使用或打出", convert_sources: [2] },
+    },
+    {
+      skill_id: "hero.guanyu.wusheng", name: "武圣", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: false, preativated: false,
+      ui: { requirement: "一张红色牌当【杀】使用或打出", convert_sources: [5] },
+    },
+  ];
+  ui.state.view = provideView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(provideView);
+  const skillButton = (id) => $("t-skills").children.find((b) => b.getAttribute("data-skill-id") === id);
+  const handChips = () => $("t-hand").children;
+
+  // ① 先点【闪】（只在龙胆方向合法）→ 切到武圣 ⇒ 不合法、清空。
+  (skillButton("hero.zhaoyun.longdan").listeners.click || []).forEach((fn) =>
+    fn({ target: skillButton("hero.zhaoyun.longdan") }));
+  (handChips()[1].listeners.click || []).forEach((fn) => fn({ target: handChips()[1] }));
+  check("㉿PZ15 龙胆方向下点【闪】= 选中面内位置 1",
+    JSON.stringify(ui.state.picks) === "[1]", `picks=${JSON.stringify(ui.state.picks)}`);
+  (skillButton("hero.guanyu.wusheng").listeners.click || []).forEach((fn) =>
+    fn({ target: skillButton("hero.guanyu.wusheng") }));
+  check("㉿PZ16 切到武圣 ⇒ 已选的【闪】不再合法、清空",
+    JSON.stringify(ui.state.picks) === "[]" && ui.state.convertSkill === "hero.guanyu.wusheng",
+    `picks=${JSON.stringify(ui.state.picks)}`);
+
+  // ② 先点实体【杀】（两个方向都合法）→ 切到龙胆 ⇒ 仍合法、保留。
+  (handChips()[0].listeners.click || []).forEach((fn) => fn({ target: handChips()[0] }));
+  (skillButton("hero.zhaoyun.longdan").listeners.click || []).forEach((fn) =>
+    fn({ target: skillButton("hero.zhaoyun.longdan") }));
+  check("㉿PZ17 实体【杀】在两个方向都合法 ⇒ 切换后保留",
+    JSON.stringify(ui.state.picks) === "[0]" && ui.state.convertSkill === "hero.zhaoyun.longdan",
+    `picks=${JSON.stringify(ui.state.picks)}`);
+
+  // ③ 预发动中途切模式：不撤销清单，仍合法的已选答案保留。
+  const prePending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 81, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 81 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preativations: {
+      "demo.convert": [
+        { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["1"] }] },
+      ],
+    },
+    preactivation: [],
+  };
+  const preView2 = synthView(prePending);
+  preView2.snapshot.self_hand = [slash, dodge];
+  preView2.skills = [
+    {
+      skill_id: "demo.convert", name: "示例技", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: true, preativated: true,
+      ui: { requirement: "", convert_sources: [] },
+    },
+    {
+      skill_id: "hero.zhaoyun.longdan", name: "龙胆", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: false, preativated: false,
+      ui: { requirement: "选择1张【闪】当【杀】使用或打出", convert_sources: [2] },
+    },
+  ];
+  ui.state.view = preView2;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(preView2);
+  (skillButton("demo.convert").listeners.click || []).forEach((fn) =>
+    fn({ target: skillButton("demo.convert") }));
+  (handChips()[0].listeners.click || []).forEach((fn) => fn({ target: handChips()[0] }));
+  const beforeMode = ui.state.preativation;
+  (skillButton("hero.zhaoyun.longdan").listeners.click || []).forEach((fn) =>
+    fn({ target: skillButton("hero.zhaoyun.longdan") }));
+  check("㉿PZ18 预发动中途切转化模式：清单不撤销、仍合法的已选源牌保留",
+    ui.state.preativation === beforeMode
+      && JSON.stringify(ui.state.preativation.answers[0].values) === "[1]",
+    `pre=${!!ui.state.preativation} answers=${JSON.stringify(ui.state.preativation && ui.state.preativation.answers[0])}`);
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

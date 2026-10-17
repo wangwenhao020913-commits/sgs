@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from sgs.data import load_content_pack
 from sgs.engine import Engine
 from sgs.effects import distance
@@ -492,3 +494,153 @@ def test_green_dragon_provide_step_does_not_reuse_liuli_cost_answer():
     assert engine.state.player(2).hp == 3, "青龙续杀命中被转移后的新目标"
     assert PAID in engine.state.discard, "流离的成本照旧只弃自己那张牌"
     assert slash_for_green not in engine.state.player(0).hand, "续杀用的是提供步点到的那张牌"
+
+
+# ---------------------------------------------------------------------------
+# W4-2：预发动（清单 + 复合动作）+ **成本弃武器后攻击范围重算**
+# ---------------------------------------------------------------------------
+
+# 五座环上，大乔（座 1）的距离：座 0 / 2 = 1，座 3 / 4 = 2。
+# 武器【青釭剑】攻击范围 2 ⇒ 不弃武器时能触及 2/3/4；弃掉武器后回落到 1 ⇒ 只剩座 2。
+WEAPON_COST = _cards("qinggang_sword")[0]
+
+
+def _liuli_range_state():
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,)),
+            SeatSpec(hero="daqiao", hand=(PAID,), equip=(WEAPON_COST,)),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=tuple(
+            card_id
+            for card_id in range(len(PACK.deck.cards))
+            if card_id not in (SLASH, PAID, WEAPON_COST)
+        ),
+        turn_seat=0,
+    )
+
+
+def _liuli_range_queries():
+    """开到"大乔的【流离】发动询问"那一刻；返回 ``(engine, query)``。"""
+
+    class _Attacker:
+        def respond(self, query):
+            if query.kind == "PLAY_PHASE":
+                return find_action(
+                    query,
+                    lambda a: getattr(a, "card", None) is not None
+                    and a.card.card_id == SLASH
+                    and 1 in (getattr(a, "targets", None) or ()),
+                )
+            return next(a for a in query.legal_actions if isinstance(a, Pass))
+
+    engine = Engine.from_state(_liuli_range_state(), seed=11)
+    run_queries(
+        engine,
+        [_Attacker(), PassPlayer(), PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: e.pending is not None
+        and e.pending.kind == "SKILL_ACTIVATION"
+        and e.pending.skill_id == LIULI,
+    )
+    return engine, engine.pending
+
+
+def test_liuli_preactivation_manifest_costs_a_card_then_offers_the_new_targets():
+    """W4-2：清单 = 一张牌（手牌 ∪ 装备区）→ 新目标；目标池按**付掉成本之后**的范围渲染。"""
+    engine, query = _liuli_range_queries()
+
+    steps = tuple(query.preactivation)
+    assert [step.name for step in steps] == ["card", "seat"], "两步清单"
+    assert steps[0].zones == (Zone.HAND, Zone.EQUIP)
+    assert (steps[0].min, steps[0].max) == (1, 1)
+    assert steps[1].zones == ()
+
+    hand_row = next(row for row in steps[1].pool if str(PAID) in row.when)
+    weapon_row = next(row for row in steps[1].pool if str(WEAPON_COST) in row.when)
+    assert set(hand_row.options) == {"seat:2", "seat:3", "seat:4"}, (
+        "不弃武器 ⇒ 攻击范围 2，三个座位都够得着（使用者座 0 与自己座 1 出池）"
+    )
+    assert set(weapon_row.options) == {"seat:2"}, (
+        "把武器当成本弃掉 ⇒ 范围回落到 1，只剩距离 1 的座 2"
+    )
+
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind in ("SELECT_CARDS", "SELECT_OPTION")
+        and int(record.query.actor) == 1
+    ], "预发动确认前，大乔一个逐步询问都还没发"
+
+
+def test_liuli_composite_confirmation_transfers_the_slash_and_pays_the_cost():
+    """确认 = 一个复合动作：成本 + 新目标一次提交，不再逐步发问。"""
+    engine, query = _liuli_range_queries()
+    baseline = tuple(engine.state.player(1).hand) + tuple(engine.state.player(1).equip)
+
+    from sgs.engine import IllegalActionError
+
+    with pytest.raises(IllegalActionError):
+        engine.submit(
+            ActivateSkill(
+                skill_id=LIULI,
+                picks=(WEAPON_COST,),
+                choices=("seat:3",),
+                answers_seq=query.seq,
+            )
+        )
+    assert engine.pending is query, "非法复合动作零状态改动（询问原样还在）"
+    assert tuple(engine.state.player(1).hand) + tuple(engine.state.player(1).equip) == baseline
+
+    engine.submit(
+        ActivateSkill(
+            skill_id=LIULI,
+            picks=(PAID,),
+            choices=("seat:3",),
+            answers_seq=query.seq,
+        )
+    )
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer(), PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: _hit(e, 3) or e.finished,
+    )
+
+    assert _hit(engine, 3), "【杀】被转移到座 3 并命中"
+    assert engine.state.player(1).hp == 4, "大乔不再结算此【杀】"
+    assert PAID in engine.state.discard, "成本那张手牌弃掉"
+    assert WEAPON_COST in engine.state.player(1).equip, "没当成本的那张武器仍装备着"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind in ("SELECT_CARDS", "SELECT_OPTION")
+        and int(record.query.actor) == 1
+    ], "复合动作把两步都填了 ⇒ 不再逐步发问"
+
+
+def test_liuli_paying_with_the_weapon_narrows_the_targets_to_the_recomputed_range():
+    """弃武器当成本 ⇒ 新目标只能在**回落之后**的范围里（座 3 不再可选，座 2 仍可）。"""
+    engine, query = _liuli_range_queries()
+
+    engine.submit(
+        ActivateSkill(
+            skill_id=LIULI,
+            picks=(WEAPON_COST,),
+            choices=("seat:2",),
+            answers_seq=query.seq,
+        )
+    )
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer(), PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: _hit(e, 2) or e.finished,
+    )
+
+    assert _hit(engine, 2), "距离 1 的座 2 在回落后的范围里，转移成功"
+    assert WEAPON_COST in engine.state.discard, "武器作为成本被弃置"
+    assert engine.state.player(1).hp == 4

@@ -424,8 +424,8 @@ def test_a_play_phase_card_with_an_emptied_pool_is_simply_not_offered():
 def test_lijian_does_not_choose_a_kongcheng_character_as_the_duel_target():
     """空城的诸葛亮不能被离间选为【决斗】的目标，但仍可作为**使用者**。
 
-    票 01 起【离间】走"发动后步骤流水线"：两个池分别在
-    ``lijian:user`` / ``lijian:victim`` 两次 ``SELECT_OPTION`` 里下发。
+    W4-2 起【离间】第一段进预发动：两个池都在**清单**里（``user`` / ``victim`` 两步），
+    受害者池按前序的使用者逐行下发（``when`` = 前两步答案）。
     """
     filler = _cards("peach")[0]
     state = build_state(
@@ -438,36 +438,21 @@ def test_lijian_does_not_choose_a_kongcheng_character_as_the_duel_target():
         deck=_deck_excluding(filler),
         turn_seat=0,
     )
-    asked: dict[str, tuple[str, ...]] = {}
 
-    def diaochan(query):
-        if query.kind == QueryKind.PLAY_PHASE:
-            return _find(
-                query,
-                lambda action: isinstance(action, ActivateSkill) and action.skill_id == LIJIAN,
-            )
-        if query.kind == QueryKind.SELECT_CARDS:
-            return _find(
-                query, lambda action: isinstance(action, SelectCards) and action.picks == (0,)
-            )
-        if query.kind == QueryKind.SELECT_OPTION:
-            asked[query.skill_id] = tuple(query.options)
-            wanted = {"lijian:user": "seat:2", "lijian:victim": "seat:1"}.get(query.skill_id)
-            if wanted is not None:
-                return _find(
-                    query,
-                    lambda action: isinstance(action, SelectOption) and action.choice == wanted,
-                )
-        return _decline(query)
-
-    _run(
+    engine = _run(
         state,
-        [Scripted(diaochan), Scripted(_decline), Scripted(_decline)],
-        _skill_frame_popped,
+        [Scripted(_decline), Scripted(_decline), Scripted(_decline)],
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.PLAY_PHASE.value,
     )
+    steps = engine.pending.preactivations[LIJIAN]
 
-    assert "seat:2" in asked["lijian:user"], "诸葛亮仍可作为【决斗】的使用者"
-    assert asked["lijian:victim"] == ("seat:1",), (
+    assert "seat:2" in tuple(
+        option for row in steps[1].pool for option in row.options
+    ), "诸葛亮仍可作为【决斗】的使用者（使用者一侧不受目标限制）"
+    victims_for_kongcheng = {
+        option for row in steps[2].pool for option in row.options
+    }
+    assert victims_for_kongcheng == {"seat:1"}, (
         "诸葛亮（无手牌 ⇒ 空城）不能被选为【决斗】目标，故受害者池里只剩座位 1"
     )
 

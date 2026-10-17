@@ -24,16 +24,17 @@
     "renderKind", "resetSelection", "isHandPick", "sameCombo", "HAND_PICK_KINDS", "needsPicker",
     // 本轮报障：公开处理区（五谷亮牌）+ 询问上下文 + 遗计"交给谁"的座位点选
     "selectOptionSeat",
-    // 报障 2 / 4：主动技手选（【仁德】）与转化技来源索引（【龙胆】）
-    "cardAliases", "enterSkillMode", "toggleSkillCard", "selectSkillSeat", "toggleConvertSkill",
+    // 报障 2 / 4：转化技来源索引（【龙胆】）与转化模式切换（W4-2 的宽松保留）
+    "cardAliases", "toggleConvertSkill", "providePickStays", "prunePreativationAnswers",
     "seatChoices",
     // 票 01：技能流水线的「取消」（候选里有 Pass 就送出去，否则只清本地选择）
     "cancelAction", "cancelOrClear",
-    // W4-1：预发动清单（本地态、复合动作、取消零提交）
+    // W4-1 / W4-2：预发动清单（本地态、复合动作、取消零提交、被动入口）
     "preactivationManifest", "enterPreativation", "togglePreativationCard",
     "advancePreativation", "selectPreativationSeat", "selectPreativationOption",
     "jumpPreativationStep", "preactivationReady", "buildPreativationAction",
     "preactivationStepKind", "preactivationOptions", "preactivationCardOptions",
+    "preactivatedSkill", "isPassivePreativation", "renderPreativationEntry", "setActionLabels",
     // 报障 3：事件回放（步长按钮 0.1–0.5s，默认 0.1）+ 效果区逐事件派生 + 描述文本
     "flushPlayback", "stepPlayback", "renderProcessing", "applyEffectDelta", "DELAY_STEPS_MS", "describeEffect",
     // 票 14：「提供一张 B」的就地渲染 + 置灰纯函数（cardFace）

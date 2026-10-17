@@ -71,9 +71,7 @@ const state = {
   focusCardId: null,   // **焦点**：正在挑目标的那张候选牌（再点一次取消）
   selectedTargets: [], // 已选目标座位
   selectedOption: null,// 旧路径：选中的 legal_action 下标（弃牌 / 排列 / 单选 / 技能）
-  picks: [],           // 手选槽位下标 / 弃牌 card_id / 主动技手选的 card_id
-  skillMode: null,     // 主动技"多选手牌 → 点座位"模式（【仁德】）：{skillId,name,requirement,cards,seats}
-  skillSeat: null,     // 上面那个模式里已点中的座位
+  picks: [],           // 手选槽位下标 / 弃牌 card_id / 提供面的面内位置
   preactivation: null, // 预发动（W4-1）：{skillId,name,steps,answers,cursor}；本地态，取消零提交
   convertSkill: null,  // 转化技"挑来源牌"模式（【龙胆】）：正在等玩家点一张可转化的手牌
   playback: null,      // 事件回放：{body, records, index, querySeat}
@@ -426,14 +424,12 @@ function commitView(body) {
   renderPending(body);
 }
 
-/** 清空全部未提交的选择（焦点 / 已选目标 / 旧路径的候选与槽位 / 主动技手选模式）。 */
+/** 清空全部未提交的选择（焦点 / 已选目标 / 旧路径的候选与槽位 / 预发动本地态）。 */
 function resetSelection() {
   state.focusCardId = null;
   state.selectedTargets = [];
   state.selectedOption = null;
   state.picks = [];
-  state.skillMode = null;
-  state.skillSeat = null;
   state.preativation = null;
   state.convertSkill = null;
   state.lastRejectReason = "";
@@ -644,13 +640,6 @@ function cardFace(pending, card) {
       slotIndex: -1,
     };
   }
-  if (state.skillMode) {
-    return {
-      selectable: state.skillMode.cards.includes(card.card_id),
-      selected: state.picks.includes(card.card_id),
-      slotIndex: -1,
-    };
-  }
   if (state.preativation) {
     const options = preactivationCardOptions(pending);
     const answer = state.preativation.answers[state.preativation.cursor];
@@ -666,7 +655,7 @@ function cardFace(pending, card) {
   return { selectable, selected: state.focusCardId === card.card_id, slotIndex: -1 };
 }
 
-/** 点一张牌：按 :func:`cardFace` 给出的**当前模式**分派（提供 B / 弃牌 / 技能手选 / 设焦点）。 */
+/** 点一张牌：按 :func:`cardFace` 给出的**当前模式**分派（提供 B / 弃牌 / 预发动 / 设焦点）。 */
 function activateCard(pending, card, face) {
   if (state.playback) return;
   if (isProvide(pending)) {
@@ -674,7 +663,6 @@ function activateCard(pending, card, face) {
     return;
   }
   if (isDiscardPick(pending)) { toggleDiscardPick(card.card_id); return; }
-  if (state.skillMode) { toggleSkillCard(card.card_id); return; }
   if (state.preativation) { togglePreativationCard(card.card_id); return; }
   toggleFocus(card.card_id);
 }
@@ -735,12 +723,6 @@ function renderTable() {
         if (answer && answer.values.includes(player.seat)) box.classList.add("tsel");
         else box.classList.add("targetable");
       }
-    } else if (state.skillMode) {
-      // 主动技手选（【仁德】）：候选座位由技能清单下发；点它就是"把选好的牌交给他"。
-      if (state.skillMode.seats.includes(player.seat)) {
-        if (state.skillSeat === player.seat) box.classList.add("tsel");
-        else box.classList.add("targetable");
-      }
     } else if (handPick && !selfOnly) {
       if (seatState && seatState.selected) box.classList.add("tsel");
       else if (seatState && seatState.isTargetable) box.classList.add("targetable");
@@ -788,10 +770,6 @@ function renderTable() {
     if (state.preativation) {
       if (preSeats && preSeats.includes(`seat:${player.seat}`)) {
         box.addEventListener("click", () => selectPreativationSeat(player.seat));
-      }
-    } else if (state.skillMode) {
-      if (state.skillMode.seats.includes(player.seat)) {
-        box.addEventListener("click", () => selectSkillSeat(player.seat));
       }
     } else if (seatState && !selfOnly) {
       if (seatState.selected || seatState.isTargetable) {
@@ -849,7 +827,12 @@ function renderProcessing() {
 /** 技能按钮：三态由**数据**决定（`locked` 表类型、`available` 表此刻能不能发动）。
  *
  * 纪律：不发动的技能**不给点**——它是"引擎在时机上自动派发/弹询问"的东西，
- * 界面上点它没有意义。能用时点了就等于选它那条 `ActivateSkill` 候选。
+ * 界面上点它没有意义。
+ *
+ * **预发动（W4-1 / W4-2）**：`skill.preativated` 的技能只剩**清单入口**——点它进入
+ * 清单驱动的本地态（确认 = 复合动作、取消零提交），不再去 `legal_actions` 里找
+ * 骨架候选（已翻的技能连骨架都没有）。未翻的技能照旧：转化技亮点选来源牌，其余
+ * 点一下 = 选中那条 `ActivateSkill` 候选。
  */
 function renderSkills(view) {
   const box = $("t-skills");
@@ -864,11 +847,12 @@ function renderSkills(view) {
   for (const skill of skills) {
     const ui = skill.ui || {};
     const convertCards = ui.convert_sources || [];
-    const manifest = preactivationManifest(pending, skill.skill_id);
-    const skeleton = Boolean(pending) && (pending.legal_actions || []).some(
-      (action) => action.kind === "ActivateSkill" && action.skill_id === skill.skill_id,
-    );
-    const usable = Boolean(skill.available) || convertCards.length > 0 || Boolean(manifest);
+    const preactivated = Boolean(skill.preativated);
+    const manifest = preactivated ? preactivationManifest(pending, skill.skill_id) : null;
+    // 已翻预发动：**可用性只剩清单**（清单渲不出来 = 此刻不可用，与服务端同一判据）。
+    const usable = preactivated
+      ? Boolean(manifest)
+      : (Boolean(skill.available) || convertCards.length > 0);
     const button = document.createElement("button");
     button.type = "button";
     button.className = "skill";
@@ -879,24 +863,21 @@ function renderSkills(view) {
     button.setAttribute("data-available", String(skill.available));
     button.setAttribute("data-usable", String(usable));
     button.setAttribute("data-locked", String(skill.locked));
-    if (ui.manual) button.setAttribute("data-manual", "true");
+    if (preactivated) button.setAttribute("data-preativated", "true");
     if (convertCards.length) button.setAttribute("data-convert", String(convertCards.length));
     if (manifest) button.setAttribute("data-preativation", String(manifest.length));
     const kind = skill.carrier === "EQUIPMENT"
       ? (skill.locked ? "装备技 / 锁定" : "装备技")
       : (skill.locked ? "锁定技 / 被动" : (skill.skill_type === "LORD" ? "主公技" : "主动技"));
-    const badge = manifest && !skeleton
-      ? " · 预发动"
-      : (ui.manual ? " · 点它选牌" : (convertCards.length ? " · 点它转化" : (skill.available ? " · 可发动" : "")));
+    const badge = preactivated
+      ? (manifest ? " · 预发动" : "")
+      : (convertCards.length ? " · 点它转化" : (skill.available ? " · 可发动" : ""));
     button.innerHTML = `${skill.name}<span class="kind">${kind}${badge}</span>`;
     if (state.playback) {
       // 回放期间不接任何操作（严格顺序：这批事件播完才轮到下一次询问）。
-    } else if (usable && pending && manifest && !skeleton) {
-      // 已翻到预发动（骨架已删）：点它进入**清单驱动**的本地态；取消 = 什么都不提交。
+    } else if (usable && pending && preactivated && manifest) {
+      // 已翻到预发动：点它进入**清单驱动**的本地态；取消 = 什么都不提交（被动入口 = 放弃）。
       button.addEventListener("click", () => enterPreativation(skill, manifest));
-    } else if (usable && pending && ui.manual) {
-      // 主动技手选（【仁德】）：点它进入"多选手牌 → 点场上武将"的模式，不直接提交候选。
-      button.addEventListener("click", () => enterSkillMode(skill));
     } else if (usable && pending && convertCards.length) {
       // 转化技（【龙胆】）：点它进入"挑一张来源牌"的模式（再点一次退出）。
       button.addEventListener("click", () => toggleConvertSkill(skill));
@@ -917,74 +898,101 @@ function renderSkills(view) {
   }
 }
 
-/** 进入主动技手选模式（【仁德】：候选带 picks + 唯一目标）。 */
-function enterSkillMode(skill) {
-  const ui = skill.ui || {};
-  state.skillMode = {
-    skillId: skill.skill_id,
-    name: skill.name,
-    requirement: ui.requirement || "",
-    cards: (ui.pick_cards || []).slice(),
-    seats: (ui.pick_seats || []).slice(),
-  };
-  state.skillSeat = null;
-  state.preativation = null;
-  state.picks = [];
-  state.focusCardId = null;
-  state.selectedTargets = [];
-  state.selectedOption = null;
-  state.convertSkill = null;
-  state.lastRejectReason = "";
-  renderTable();
-  renderPending(state.view);
+/** 这条询问对应的、**已翻预发动**的技能条目；`null` = 未翻 / 不是这个技能的问。
+ *
+ * 只看技能声明上的开关（`skills[*].preativated`），**不**看清单是否渲得出来：清单为空
+ * 时该技能此刻不可用（清单入口不给点），但这一问仍是它的"是否发动"——界面要把它画成
+ * "只能放弃"，而不是退回"发动技能 XXX"的骨架候选。
+ */
+function preactivatedSkill(pending) {
+  if (!pending || pending.kind !== "SKILL_ACTIVATION") return null;
+  return (((state.view && state.view.skills) || []).find(
+    (item) => item.skill_id === pending.skill_id && item.preativated,
+  ) || null);
 }
 
-/** 点手牌：收进 / 移出"要交出去的牌"。 */
-function toggleSkillCard(cardId) {
-  if (state.playback || !state.skillMode) return;
-  if (!state.skillMode.cards.includes(cardId)) return;
-  const at = state.picks.indexOf(cardId);
-  if (at >= 0) state.picks.splice(at, 1);
-  else state.picks.push(cardId);
-  state.lastRejectReason = "";
-  renderTable();
-  renderPending(state.view);
+/** 被动入口的"放弃"：预发动清单已经下发、但玩家还没进入本地态。 */
+function isPassivePreativation(pending) {
+  return preactivatedSkill(pending) !== null;
 }
 
-/** 点场上武将：把选好的牌交给他 —— 组合在候选里就直接提交（用户要的"点座位即交出去"）。 */
-function selectSkillSeat(seat) {
-  if (state.playback || !state.skillMode) return;
-  if (!state.skillMode.seats.includes(seat)) return;
-  state.skillSeat = seat;
-  state.lastRejectReason = "";
-  renderTable();
-  renderPending(state.view);
-  if (buildAction() !== null) submitAction();
-}
-
-/** 进入 / 退出转化技模式（【龙胆】：点技能 → 点一张可转化的手牌 → 照常选目标提交）。 */
+/** 进入 / 退出转化技模式（【龙胆】：点技能 → 点一张可转化的手牌 → 照常选目标提交）。
+ *
+ * **宽松保留**（W4-2 / `spec.md` §1.5 的重选规则）：切换模式**不**清空已选的东西——
+ * 已选源牌 / 焦点仍在当前模式的合法集合里就保留，不合法才清空。预发动中途切模式也不
+ * 撤销清单（只是把不再合法的已选答案剔掉）。
+ */
 function toggleConvertSkill(skill) {
   if (state.playback) return;
-  state.convertSkill = state.convertSkill === skill.skill_id ? null : skill.skill_id;
-  state.skillMode = null;
-  state.skillSeat = null;
-  state.preativation = null;
-  state.picks = [];
-  state.focusCardId = null;
-  state.selectedTargets = [];
-  state.selectedOption = null;
+  const next = state.convertSkill === skill.skill_id ? null : skill.skill_id;
+  state.convertSkill = next;
+  const pending = state.view ? state.view.pending : null;
+  if (state.preativation) {
+    prunePreativationAnswers(state.preativation, pending);
+    state.lastRejectReason = "";
+    renderTable();
+    renderPending(state.view);
+    return;
+  }
+  if (pending) {
+    state.picks = state.picks.filter((index) => providePickStays(pending, index, next));
+    if (state.focusCardId !== null && !cardSelectable(pending, state.focusCardId)) {
+      state.focusCardId = null;
+      state.selectedTargets = [];
+    }
+  } else {
+    state.picks = [];
+    state.focusCardId = null;
+    state.selectedTargets = [];
+  }
   state.lastRejectReason = "";
   renderTable();
   renderPending(state.view);
+}
+
+/** 这个面内位置在**新转化模式**下还合法吗（`mode = null` = 不限定方向）。
+ *
+ * 实体 B 不属于任何转化方向 ⇒ 恒合法；虚拟 B 只有在 `virtual_index` 把它归给 `mode`
+ * 时才合法（服务端按来源谓词逐张归属，界面只读那份数据）。
+ */
+function providePickStays(pending, index, mode) {
+  if (mode === null) return true;
+  const slot = ((pending && pending.slots) || [])[index];
+  if (!slot || !slot.card) return false;
+  if (!slot.card.is_virtual) return true;
+  const sources = slot.card.virtual_sources || [];
+  if (sources.length !== 1) return false;
+  return cardAliases(pending, sources[0]).some(
+    (alias) => String(alias.card_id) === String(slot.card.card_id)
+      && (alias.skill_ids || []).includes(mode),
+  );
+}
+
+/** 切换转化模式后按**宽松版**收窄清单里的已选答案：仍合法则保留、不合法才清空。 */
+function prunePreativationAnswers(pa, pending) {
+  pa.steps.forEach((step, index) => {
+    const answer = pa.answers[index];
+    if (!answer || !answer.values.length) return;
+    const options = preactivationOptions(pa, index);
+    if (options === null || options === undefined) return; // 退化清单：全都点得动
+    const kept = answer.values.filter((value) => options.includes(String(value)));
+    answer.values = kept;
+    answer.texts = preactivationAnswerTexts(step, kept);
+  });
 }
 
 /* ------------------------------------------------------------ 预发动（W4-1） */
 
-/** 一条技能此刻的预发动清单：主动入口 = `pending.preactivations[skill_id]`，
- * 被动入口 = `pending.preativation`。两者都由服务端按 `SkillFlow.steps` 渲染。 */
+/** 一条技能此刻的预发动清单：主动入口 = `pending.preativations[skill_id]`，
+ * 被动入口 = `pending.preativation`。两者都由服务端按 `SkillFlow.steps` 渲染。
+ *
+ * 载荷键沿用 `spec.md` §3 的拼写（``preativations`` / ``preativation``）——与询问模型字段
+ * （`preactivations` / `preactivation`）不是同一个名字；服务端 `pending_payload` 下发前者。
+ * 这条跨线契约由 `tests/test_web.py` 与 `tests/support/ui_smoke.mjs` 两侧各钉一次。
+ */
 function preactivationManifest(pending, skillId) {
   if (!pending) return null;
-  const table = pending.preactivations || {};
+  const table = pending.preativations || {};
   if (table[skillId] && table[skillId].length) return table[skillId];
   if (
     pending.kind === "SKILL_ACTIVATION"
@@ -1037,8 +1045,6 @@ function enterPreativation(skill, manifest) {
     answers: manifest.map(() => ({ values: [], texts: [] })),
     cursor: 0,
   };
-  state.skillMode = null;
-  state.skillSeat = null;
   state.convertSkill = null;
   state.picks = [];
   state.focusCardId = null;
@@ -1356,12 +1362,10 @@ function renderPending(view) {
   const requirement = pending && pending.context && pending.context.requirement;
   $("t-prompt").textContent = requirement
     || (pending ? pending.prompt : "（没有待应答的询问）");
-  // 主动技手选（【仁德】）/ 转化技（【龙胆】）正在等玩家点牌时，说清"现在要做什么"：
-  // 这两步是**界面自己**开的模式，服务端的通用 prompt 读不出它。
+  // 预发动 / 转化技正在等玩家点牌时，说清"现在要做什么"：
+  // 这些是**界面自己**开的模式，服务端的通用 prompt 读不出它。
   if (state.preativation) {
     $("t-prompt").textContent = `预发动【${state.preativation.name}】：按清单逐步选择。`;
-  } else if (state.skillMode) {
-    $("t-prompt").textContent = state.skillMode.requirement || `发动【${state.skillMode.name}】`;
   } else if (state.convertSkill !== null) {
     const skill = (view.skills || []).find((item) => item.skill_id === state.convertSkill);
     const text = skill && skill.ui && skill.ui.requirement;
@@ -1384,6 +1388,7 @@ function renderPending(view) {
   if (targetHint) targetHint.textContent = "";
   if (!pending) {
     $("t-timer").textContent = "";
+    setActionLabels(false, false);
     return;
   }
   const actions = pending.legal_actions || [];
@@ -1392,7 +1397,7 @@ function renderPending(view) {
   if (kind === "picker") renderPicker(pending);
   else if (kind === "discard") renderDiscard(pending);
   else if (kind === "preativation") renderPreativation(pending);
-  else if (kind === "skill") renderSkillPick(pending);
+  else if (kind === "preativation-entry") renderPreativationEntry(pending);
   else if (kind === "seat") renderSeatPick(pending);
   else if (kind === "slots") {
     // 选择面也要**指到那条候选**：引擎只发一条 `SelectCards` 骨架，具体 `picks` 由
@@ -1409,10 +1414,24 @@ function renderPending(view) {
   else if (kind === "direct") renderDirect(actions[0]);
   else renderCandidateList(pending, actions);
 
+  // 提交 / 取消两个按钮的**文案**跟着模式走（预发动 = 确认发动 / 取消预发动；被动入口 = 放弃）。
+  setActionLabels(state.preativation !== null, isPassivePreativation(pending));
   // 提交按钮的启用与否**只算一次**（每个分支只管"铺界面"）：分散在各分支里写过一次
   // 就会漏掉一条路径（`SELECT_CARDS` 的选择面就因此永远灰着）。
   refreshSubmit(pending);
   renderCountdown(view);
+}
+
+/** 底部两个按钮的文案：预发动 = 「确认发动 / 取消预发动」，被动入口 = 「放弃」。 */
+function setActionLabels(inPreativation, passiveEntry) {
+  const submit = $("btn-submit");
+  const cancel = $("btn-cancel");
+  if (submit) submit.textContent = inPreativation ? "确认发动" : "提交";
+  if (cancel) {
+    cancel.textContent = inPreativation
+      ? (passiveEntry ? "放弃" : "取消预发动")
+      : (passiveEntry ? "放弃" : "清空选择");
+  }
 }
 
 /** 这次询问该走哪条渲染路径。
@@ -1431,8 +1450,9 @@ function renderKind(pending, actions) {
   if (pending.kind === "DISCARD") return "discard";
   // 预发动（W4-1）：清单驱动，不铺候选列表、不走手选。
   if (state.preativation) return "preativation";
-  // 主动技手选模式（【仁德】）：牌子由手牌区点、座位由牌桌点，本窗口不铺选项按钮。
-  if (state.skillMode) return "skill";
+  // 被动入口（W4-2）：已翻预发动的技能在时机上只发一次询问并随询问下发清单。界面给它
+  // 一个**入口**（技能按钮）与一条"放弃"（= `Pass`），不把骨架候选画成"发动技能 XXX"。
+  if (isPassivePreativation(pending)) return "preativation-entry";
   // `SELECT_OPTION` 的"选座位"形态（【遗计】"交给谁"）：**取消选项按钮**，只点场上武将。
   if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) return "seat";
   // **显式选中的候选优先**：技能按钮（`ActivateSkill`）在出牌阶段里与手选并存，
@@ -1467,16 +1487,31 @@ function cancelAction(pending) {
 /** 取消：候选里真有 `Pass` 就送出去（服务端据此中止这一步），否则只清本地选择。 */
 async function cancelOrClear() {
   if (state.playback) return;
-  // 预发动（W4-1）：取消只是退出**接入层**的本地态，**一个 action 都不提交**；
-  // 主动入口回到同一个出牌阶段询问，被动入口的"放弃"才是另一条 `Pass`（W4-2）。
-  if (state.preativation) {
+  const pending = state.view ? state.view.pending : null;
+  // 预发动（W4-1 / W4-2）：主动入口的取消只是退出**接入层**的本地态，**一个 action 都
+  // 不提交**（回到同一个出牌阶段询问）。被动入口的取消是「放弃」——**送出那条 `Pass`**，
+  // 时机随之消费、不重问（`GLOSSARY.md`「放弃」）；没进入本地态时同样可以直接放弃。
+  if (state.preativation || isPassivePreativation(pending)) {
+    const passive = isPassivePreativation(pending);
+    if (passive) {
+      const pass = (pending.legal_actions || []).find((action) => action.kind === "Pass");
+      if (pass) {
+        state.selectedOption = (pending.legal_actions || []).indexOf(pass);
+        state.preativation = null;
+        state.focusCardId = null;
+        state.selectedTargets = [];
+        state.picks = [];
+        state.lastRejectReason = "";
+        await submitAction();
+        return;
+      }
+    }
     state.preativation = null;
     state.lastRejectReason = "";
     renderTable();
     renderPending(state.view);
     return;
   }
-  const pending = state.view ? state.view.pending : null;
   const pass = cancelAction(pending);
   if (!pass) {
     clearSelection();
@@ -1486,7 +1521,6 @@ async function cancelOrClear() {
   state.focusCardId = null;
   state.selectedTargets = [];
   state.picks = [];
-  state.skillMode = null;
   state.preativation = null;
   state.lastRejectReason = "";
   await submitAction();
@@ -1542,14 +1576,36 @@ function renderDiscard(pending) {
   $("btn-cancel").disabled = state.picks.length === 0;
 }
 
-/** 主动技手选（【仁德】）：点手牌多选、点场上武将交出去；不铺任何选项按钮。 */
-function renderSkillPick(pending) {
-  const mode = state.skillMode;
+/** 被动入口（W4-2）：时机询问已带清单，界面只给**进入预发动**的入口与「放弃」。
+
+ * 入口 = 技能栏里那条按钮（`data-preativation` 已标出步骤数）；这里**不**把骨架候选
+ * 画成"发动技能 XXX"选项（验收：界面上不再出现这种选项），只留一条真候选 `Pass`。
+ */
+function renderPreativationEntry(pending) {
+  const skill = preactivatedSkill(pending);
   const hint = $("t-target-hint");
   if (hint) {
-    hint.textContent = `点手牌选要交出的牌（已选 ${state.picks.length} 张），再点场上武将交给他。`;
+    hint.textContent = `点技能【${skill ? skill.name : pending.skill_id}】进入预发动；`
+      + "或点「放弃」跳过这次时机（放弃后不再询问）。";
   }
-  $("btn-cancel").disabled = state.picks.length === 0 && state.skillSeat === null;
+  const actions = pending.legal_actions || [];
+  const node = $("t-options");
+  actions.forEach((action, index) => {
+    if (action.kind !== "Pass") return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "opt";
+    if (state.selectedOption === index) button.classList.add("sel");
+    button.textContent = actionLabel(action);
+    button.addEventListener("click", () => {
+      state.selectedOption = index;
+      state.lastRejectReason = "";
+      renderPending(state.view);
+    });
+    node.appendChild(button);
+  });
+  $("btn-cancel").disabled = false;
+  $("btn-submit").disabled = true;
 }
 
 /** `SELECT_OPTION` 的"选座位"形态（【遗计】"交给谁" / 【离间】选使用者与目标）：只点场上武将。 */
@@ -1617,11 +1673,8 @@ function refreshSubmit(pending) {
       : (pa.cursor >= pa.steps.length ? "清单里还有步骤没填完。" : preactivationStepHint(pa, pending));
     return;
   }
-  if (state.skillMode) {
-    // 主动技手选（【仁德】）：说清"还差什么"，不替玩家决定。
-    $("t-choice").textContent = ready
-      ? "可以提交。"
-      : (state.picks.length === 0 ? "先点手牌选要交出的牌。" : "再点一名其他角色。");
+  if (isPassivePreativation(pending) && state.preativation === null) {
+    $("t-choice").textContent = ready ? "可以提交：放弃。" : "点技能进入预发动，或点「放弃」。";
     return;
   }
   if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) {
@@ -1874,19 +1927,6 @@ function buildAction() {
       (candidate) =>
         candidate.kind === "DiscardCards"
         && (candidate.cards || []).map((card) => card.card_id).sort((a, b) => a - b).join(",") === mine,
-    ) || null;
-  }
-  // 主动技手选（【仁德】）：已选手牌 + 已点座位 → 在候选里**查**那一条（不自己拼 Action）。
-  if (state.skillMode) {
-    if (!state.picks.length || state.skillSeat === null) return null;
-    const picks = state.picks.slice().sort((a, b) => a - b).join(",");
-    const choices = `seat:${state.skillSeat}`;
-    return actions.find(
-      (action) =>
-        action.kind === "ActivateSkill"
-        && action.skill_id === state.skillMode.skillId
-        && (action.picks || []).slice().sort((a, b) => a - b).join(",") === picks
-        && (action.choices || []).join(",") === choices,
     ) || null;
   }
   // 唯一且不需要选目标的候选（放弃 / 结束阶段 / 唯一的无目标响应牌）：直接就是它。
