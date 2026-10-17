@@ -2193,3 +2193,93 @@ def test_every_product_pending_payload_call_names_its_viewer() -> None:
         "产品代码里的 pending_payload 调用没有声明查看者"
         "（裸 Query 会 fail-closed 抹掉牌面）：\n  " + "\n  ".join(bad)
     )
+
+
+# ---------------------------------------------------------------------------
+# W4-1：预发动清单走**真会话**下发（主动入口），取消是纯本地态、零 action
+# ---------------------------------------------------------------------------
+
+RENDE = "hero.liubei.rende"
+
+
+def _session_at_rende_play_phase() -> Session:
+    """真会话：人类座位 = 刘备，驱动到"出牌阶段且【仁德】有预发动清单"那一刻。"""
+    session = Session(
+        seed=20261012,
+        ai="random",
+        timeout_seconds=None,
+        player_count=2,
+        heroes=("liubei", "zhouyu"),
+        human_seat=0,
+    )
+    for _ in range(400):
+        pending = session.pending
+        if pending is None:
+            raise AssertionError("会话提前结束，没走到【仁德】的出牌阶段")
+        if pending.kind == "PLAY_PHASE" and RENDE in pending.preactivations:
+            return session
+        session.submit_answer(fallback_action(pending))
+    raise AssertionError("400 次应答内没走到【仁德】的出牌阶段")
+
+
+def test_the_pending_payload_carries_the_play_phase_preactivations() -> None:
+    """跨线契约：``preactivations`` 必须由 ``pending_payload`` 显式下发（读取方 = app.js）。"""
+    session = _session_at_rende_play_phase()
+
+    payload = pending_payload(session)
+
+    assert payload is not None
+    assert "preativations" in payload and "preativation" in payload, (
+        "两个键恒在（没有清单时给空值），读取方不必先判键存在"
+    )
+    steps = payload["preativations"][RENDE]
+    assert [step["name"] for step in steps] == ["card", "seat"]
+    assert [step["order"] for step in steps] == [0, 1]
+    assert set(steps[0]) == {"name", "zones", "min", "max", "pool", "order"}
+    assert steps[0]["zones"] == ["hand"]
+    assert steps[0]["max"] >= steps[0]["min"] >= 1
+    assert steps[1]["pool"][0]["options"], "选座位步的候选（seat:N）也下发了"
+    assert payload["preativation"] == [], "主动入口没有单份清单"
+
+
+def test_the_preactivation_manifest_is_not_written_into_the_journal() -> None:
+    """清单是**派生数据**：不进记录流，既有 Golden Replay 因此逐字节不变。"""
+    session = _session_at_rende_play_phase()
+    record = next(
+        record
+        for record in reversed(session.engine.records)
+        if record.kind == "query" and record.query is session.pending
+    )
+
+    raw = record.query.model_dump(mode="json")
+
+    assert "preactivations" not in raw and "preativation" not in raw
+
+
+def test_the_skill_entry_stays_available_while_the_skeleton_still_exists() -> None:
+    """本票不翻任何一条技能：骨架候选仍是可用性的来源，清单与之并存。"""
+    session = _session_at_rende_play_phase()
+
+    entry = next(item for item in build_skills(session, 0) if item["skill_id"] == RENDE)
+
+    assert entry["available"] is True
+    assert any(
+        action.kind == "ActivateSkill" and action.skill_id == RENDE
+        for action in session.pending.legal_actions
+    ), "未翻预发动的技能仍以骨架候选表达可用性"
+
+
+def test_a_foreign_viewer_does_not_get_the_actors_hand_from_the_manifest() -> None:
+    """清单里的选牌候选 = **询问者**的手牌 id：换一个查看者就不能原样下发。"""
+    session = _session_at_rende_play_phase()
+    foreign = (session.human_seat + 1) % session.rule_config.player_count
+
+    payload = pending_payload(session.pending, human_seat=foreign)
+
+    steps = payload["preativations"][RENDE]
+    assert steps, "步骤形状（区域 / 张数 / 顺序）是公开的，仍然下发"
+    assert all(not row["options"] for row in steps[0]["pool"]), "选牌候选被抹掉"
+    assert all(not row["when"] for row in steps[1]["pool"]), (
+        "座位步的 when 可能含被选中的牌 id，也必须抹掉；候选（seat:N）保留"
+    )
+    assert steps[1]["pool"][0]["options"], "公开的目标候选照常保留"

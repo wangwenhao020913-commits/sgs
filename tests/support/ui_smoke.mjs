@@ -2282,4 +2282,164 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   }
 }
 
+
+/* ④ W4-1：预发动清单驱动（合成 view，验**读取方**真按服务端字段读）。
+ *
+ * 形状 = `pending_payload` 下发的 `preativations[skill_id]`：两步（选牌 → 选目标）。
+ * 这一块只验前端：清单驱动的进入 / 逐项选 / 重选 / 取消零提交 / 复合动作拼装。
+ */
+{
+  const slash = synthCard(11, "杀");
+  const dodge = { ...synthCard(12, "闪"), type: "dodge" };
+  const prePending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 77,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 77 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {
+      "demo.preativate": [
+        {
+          name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["11", "12"] }],
+        },
+        {
+          name: "seat", zones: [], min: 1, max: 1, order: 1,
+          pool: [{ when: [], options: ["seat:1", "seat:2"] }],
+        },
+      ],
+    },
+    preactivation: [],
+  };
+  const preView = synthView(prePending);
+  preView.snapshot.self_hand = [slash, dodge];
+  preView.skills = [{
+    skill_id: "demo.preativate", name: "示例技", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true,
+    ui: { requirement: "", manual: false, pick_cards: [], pick_seats: [], convert_sources: [] },
+  }];
+  ui.state.view = preView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(preView);
+
+  const skillButton = () => $("t-skills").children.find(
+    (b) => b.getAttribute("data-skill-id") === "demo.preativate",
+  );
+  const handChips = () => $("t-hand").children;
+  const seatBox = (seat) => $("t-seats").children.find(
+    (c) => c.getAttribute("data-seat") === String(seat),
+  );
+
+  check("㉿PZ1 清单驱动：没有骨架候选也能从 preactivations 点亮技能按钮",
+    !!skillButton() && skillButton().disabled === false
+      && skillButton().getAttribute("data-preativation") === "2",
+    `disabled=${skillButton() && skillButton().disabled} pre=${skillButton() && skillButton().getAttribute("data-preativation")}`);
+
+  (skillButton().listeners.click || []).forEach((fn) => fn({ target: skillButton() }));
+  check("㉿PZ2 点技能 = 进入预发动（不提交、询问原样还在）",
+    !!ui.state.preativation && ui.state.preativation.skillId === "demo.preativate"
+      && ui.state.view.pending === prePending);
+
+  check("㉿PZ3 第 1 步选牌：清单里的两张牌就地可点、其余牌灰",
+    ui.cardFace(prePending, slash).selectable === true
+      && ui.cardFace(prePending, dodge).selectable === true
+      && !handChips()[0].classList.contains("dis"));
+
+  (handChips()[0].listeners.click || []).forEach((fn) => fn({ target: handChips()[0] }));
+  check("㉿PZ4 点牌 = 收进本地答案（不提交）",
+    JSON.stringify(ui.state.preativation.answers[0].values) === "[11]"
+      && ui.state.view.pending === prePending,
+    JSON.stringify(ui.state.preativation.answers[0]));
+
+  const next = $("t-options").children.find((c) => c.textContent === "下一步");
+  check("㉿PZ5 选牌步的「下一步」在张数达标后可点", !!next && next.disabled === false);
+  (next.listeners.click || []).forEach((fn) => fn({ target: next }));
+  check("㉿PZ6 进第 2 步：座位 1 / 2 可点、座位 0 不可点",
+    seatBox(1).classList.contains("targetable")
+      && seatBox(2).classList.contains("targetable")
+      && !seatBox(0).classList.contains("targetable"),
+    `seat1=${seatBox(1).classList.contains("targetable")} seat0=${seatBox(0).classList.contains("targetable")}`);
+
+  // 重选第 1 步：清空第 1..N 步（用户裁定的"重选第 K 步清空 K..N"）。
+  const stepRow = $("t-options").children.find((c) => c.tagName === "DIV");
+  const stepChip = stepRow && stepRow.children.find(
+    (c) => c.getAttribute && c.getAttribute("data-step") === "0",
+  );
+  (stepChip.listeners.click || []).forEach((fn) => fn({ target: stepChip }));
+  check("㉿PZ7 重选第 1 步清空第 1..N 步",
+    ui.state.preativation.cursor === 0
+      && ui.state.preativation.answers.every((answer) => answer.values.length === 0),
+    JSON.stringify(ui.state.preativation.answers));
+
+  // 再走一遍，确认复合动作的拼装。
+  (handChips()[0].listeners.click || []).forEach((fn) => fn({ target: handChips()[0] }));
+  const next2 = $("t-options").children.find((c) => c.textContent === "下一步");
+  (next2.listeners.click || []).forEach((fn) => fn({ target: next2 }));
+  (seatBox(2).listeners.click || []).forEach((fn) => fn({ target: seatBox(2) }));
+  const composite = ui.buildAction();
+  check("㉿PZ8 清单填完 = 拼出复合 ActivateSkill（picks = 实体牌 id、choices = seat:N）",
+    !!composite && composite.kind === "ActivateSkill"
+      && JSON.stringify(composite.picks) === "[11]"
+      && JSON.stringify(composite.choices) === '["seat:2"]'
+      && composite.answers_seq === 77,
+    JSON.stringify(composite));
+
+  // 取消：本地态清空、**没有任何请求**发出（取消不提交任何 action）。
+  (skillButton().listeners.click || []).forEach((fn) => fn({ target: skillButton() }));
+  const before = calls.length;
+  ui.cancelOrClear();
+  check("㉿PZ9 取消预发动 = 回到同一层询问、零 action 提交",
+    ui.state.preativation === null
+      && ui.state.view.pending === prePending
+      && calls.length === before,
+    `pre=${ui.state.preativation} calls=${calls.length - before}`);
+}
+
+
+/* ⑤ W4-1：退化清单（服务端 `pool=()`）——不铺候选索引，座位步退化为"全都点得动"，
+ *    仍能把复合动作拼出来（合法性由服务端校验器裁决，界面不裁决规则）。
+ */
+{
+  const degradedPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 78,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 78 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {
+      "demo.degraded": [
+        { name: "seat", zones: [], min: 1, max: 1, order: 0, pool: [] },
+      ],
+    },
+    preactivation: [],
+  };
+  const degradedView = synthView(degradedPending);
+  degradedView.skills = [{
+    skill_id: "demo.degraded", name: "退化技", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true,
+    ui: { requirement: "", manual: false, pick_cards: [], pick_seats: [], convert_sources: [] },
+  }];
+  ui.state.view = degradedView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(degradedView);
+  const button = () => $("t-skills").children.find(
+    (b) => b.getAttribute("data-skill-id") === "demo.degraded",
+  );
+  (button().listeners.click || []).forEach((fn) => fn({ target: button() }));
+  const seatBox = (seat) => $("t-seats").children.find(
+    (c) => c.getAttribute("data-seat") === String(seat),
+  );
+  check("㉿PZ10 退化清单的座位步被识别为座位（不是选项步，不会死路）",
+    ui.preactivationStepKind(degradedPending.preactivations["demo.degraded"][0]) === "seat"
+      && ui.preactivationOptions(ui.state.preativation, 0) === null);
+  check("㉿PZ11 退化后座位仍可点（全都点得动，合法性交给校验器）",
+    seatBox(1).classList.contains("targetable") && seatBox(2).classList.contains("targetable"));
+  (seatBox(1).listeners.click || []).forEach((fn) => fn({ target: seatBox(1) }));
+  const degradedAction = ui.buildAction();
+  check("㉿PZ12 退化清单仍能拼出复合动作",
+    !!degradedAction && degradedAction.kind === "ActivateSkill"
+      && JSON.stringify(degradedAction.choices) === '["seat:1"]',
+    JSON.stringify(degradedAction));
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

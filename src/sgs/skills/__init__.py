@@ -110,6 +110,13 @@ from .active import (
     activate_skill,
     run_flow,
 )
+from .flow import manifest, validate_flow_activation
+from .preativation import (
+    preactivation_for,
+    preactivated_skill_ids,
+    preactivations_for,
+    validate_activation,
+)
 from .move_after import (
     MOVE_AFTER_SKILLS,
     MOVE_EVENT_KEY,

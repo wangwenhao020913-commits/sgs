@@ -70,6 +70,13 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
         for action in actions
         if action.kind == "ActivateSkill"
     }
+    # W4-1：**预发动清单也是可用性的一份**。已翻到预发动的技能不再有骨架候选，可用性
+    # 只剩 ``PLAY_PHASE.preactivations``（主动入口）与 ``SKILL_ACTIVATION.preativation``
+    # （被动入口）——两者都从询问里读，不另问引擎"满不满足条件"。
+    if pending is not None:
+        offered.update((getattr(pending, "preactivations", None) or {}).keys())
+        if getattr(pending, "preativation", ()):
+            offered.add(str(getattr(pending, "skill_id", "")))
     hand = tuple(state.player(seat).hand)
     virtual = _virtual_index(pending, state, owner=seat) if pending is not None else {}
     hero_id = state.players[seat].hero
@@ -838,6 +845,49 @@ def _mask_watched_faces(payload: dict[str, Any]) -> None:
     payload["revealed"] = []
 
 
+def _steps_payload(steps: Any) -> list[dict[str, Any]]:
+    """预发动清单 → JSON 形状（``Step`` 的字段原样；读取方 = ``app.js`` 的清单渲染）。"""
+    return [step.model_dump(mode="json") for step in steps]
+
+
+def _preativation_payload(manifests: Any) -> dict[str, list[dict[str, Any]]]:
+    """``技能 id → 清单`` → JSON 形状；保持询问里的顺序（引擎已按技能 id 排序）。"""
+    return {skill_id: _steps_payload(steps) for skill_id, steps in manifests.items()}
+
+
+def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
+    """查看者不是询问者时，抹掉清单里**属于询问者**的牌面（W4-1；与观看私密同一条纪律）。
+
+    清单的选牌步候选用的是**实体牌 id**（本人手牌的 id）——把整份清单原样发给别人就等于
+    泄露手牌。这里按步类型收窄：
+
+    - 选牌步（``zones`` 非空）⇒ 候选清空（区 / 张数这些**公开形状**保留）；
+    - 选座位 / 选项步 ⇒ ``when`` 里的前序答案（可能含被选中的牌 id）清空，候选（公开的
+      ``seat:N`` / 选项文本）并成一行保留。
+
+    这条只在**非询问者**路径上生效；产品调用点（``Session`` 的 ``human_seat`` 就是询问者）
+    不受影响。与 :func:`_mask_watched_faces` 同姿态：fail-closed（查看者缺失即按非询问者）。
+    """
+
+    def mask(steps: list[dict[str, Any]]) -> None:
+        for step in steps:
+            if step.get("zones"):
+                step["pool"] = [
+                    {**entry, "options": []} for entry in (step.get("pool") or [])
+                ]
+                continue
+            options: list[Any] = []
+            for entry in step.get("pool") or []:
+                for option in entry.get("options") or []:
+                    if option not in options:
+                        options.append(option)
+            step["pool"] = [{"when": [], "options": options}]
+
+    for steps in (payload.get("preativations") or {}).values():
+        mask(steps)
+    mask(payload.get("preativation") or [])
+
+
 def pending_payload(
     session: Session | Query | None, *, human_seat: int | None = None
 ) -> dict[str, Any] | None:
@@ -870,10 +920,19 @@ def pending_payload(
     if query is None:
         return None
     payload = query.model_dump(mode="json")
-    if viewer is None or int(query.actor) != viewer:
+    foreign = viewer is None or int(query.actor) != viewer
+    if foreign:
         _mask_watched_faces(payload)
     payload["legal_actions"] = [action.model_dump(mode="json") for action in query.legal_actions]
     payload["candidate_index"] = candidate_index(query)
+    # 预发动清单（W4-1）：**不进记录流**（询问字段 ``exclude``），故接入层显式下发。
+    # 主动入口 = 技能 id → 清单；被动入口 = 单份清单。没有时给空值，键恒在（读取方契约）。
+    payload["preativations"] = _preativation_payload(
+        getattr(query, "preactivations", None) or {}
+    )
+    payload["preativation"] = _steps_payload(getattr(query, "preativation", ()) or ())
+    if foreign:
+        _mask_foreign_preactivations(payload)
     # 询问窗口的"谁对谁做了什么"：从**结算栈顶帧 + 询问本身**派生的表现层事实。
     # 只有拿得到 ``Session``（= 拿得到引擎）时才算；409 里附带的那份现状（裸 ``Query``）为 None。
     payload["context"] = (

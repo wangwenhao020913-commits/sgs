@@ -59,11 +59,15 @@ from sgs.skills import (
     dispatch_seam,
     dispatch_timing,
     move_after_providers,
+    preactivation_for,
+    preactivated_skill_ids,
+    preactivations_for,
     provider_registered,
     prune_skill_state,
     reset_phase_skill_state,
     start_provider,
     timing_hooks_present,
+    validate_activation,
 )
 from sgs.state import (
     Action,
@@ -100,6 +104,7 @@ from sgs.state import (
     SkillActivationQuery,
     Slot,
     SlotKind,
+    Step,
     UseCard,
     WindowCause,
     Zone,
@@ -190,6 +195,14 @@ class _Suspend:
 
 
 SUSPEND = _Suspend()
+
+_NOT_STRUCTURED: object = object()
+"""``submit`` 的三态哨兵：这个 ``ActivateSkill`` **不是**结构化入口的候选。
+
+``None`` = 结构化校验通过；字符串 = 首个失败原因；本哨兵 = 走原来的成员判定路径
+（也含所有非 ``ActivateSkill`` 的行动）。三态必须分开，否则"不合格但也不是结构化入口"
+会被误当成"校验通过"。
+"""
 
 
 class Outcome(BaseModel):
@@ -337,6 +350,14 @@ class Engine:
         self.finished = False
 
         self._answer: Action | None = None
+        self._structured_activation: ActivateSkill | None = None
+        """最近一次**经校验器接受**的复合 ``ActivateSkill``（W4-1）。
+
+        ``submit`` 的成员判定之外只有这一条让开的路：复合动作不在 ``legal_actions`` 里，
+        但它的 ``picks`` / ``choices`` 是**实体牌 id / 座位**（不是面内位置），后续
+        ``start_skill`` / ``ask_skill_activation`` 据这个身份把载荷原样挂进帧，交给
+        ``run_flow`` 跳过本人应答的步骤——而不是当成面内位置去索引。
+        """
         self._started = False
         self._frame_seq = 0
         self._check_seq: int | None = None
@@ -948,16 +969,43 @@ class Engine:
         """
         return self.push_frame(
             FrameKind.SKILL,
-            {
-                "source": source,
-                "targets": (),
-                "skill_id": action.skill_id,
-                "picks": tuple(action.picks),
-                "choices": tuple(action.choices),
-                "use_timing": Timing.PHASE_PLAY_IDLE,
-            },
+            self._skill_payload(action, source),
             timing=Timing.PHASE_PLAY_IDLE,
         )
+
+    def _skill_payload(self, action: ActivateSkill, source: int) -> dict[str, Any]:
+        """SKILL 帧的载荷；结构化复合动作额外带 ``activation``（W4-1）。
+
+        ``picks`` / ``choices`` 在结构化入口里是**实体牌 id / 座位文本**（不是面内位置），
+        故不能沿用"载荷原样进帧"的旧读法：这里把它们放进 ``activation``，由
+        :func:`sgs.skills.flow.run_flow` 摊回逐步答案；普通骨架候选的载荷形状一字不改。
+        """
+        data: dict[str, Any] = {
+            "source": source,
+            "targets": (),
+            "skill_id": action.skill_id,
+            "picks": tuple(action.picks),
+            "choices": tuple(action.choices),
+            "use_timing": Timing.PHASE_PLAY_IDLE,
+        }
+        activation = self._take_structured_activation(action)
+        if activation is not None:
+            data["activation"] = activation
+        return data
+
+    def _take_structured_activation(
+        self, action: ActivateSkill
+    ) -> dict[str, tuple[Any, ...]] | None:
+        """若 ``action`` 是**经校验器接受**的复合动作，取走它的载荷（并清掉引擎标记）。
+
+        两个消费点（主动技的 ``_skill_payload`` 与被动技的 ``ask_skill_activation``）共用
+        这一处，免得"实体牌 id / 座位"的读法各写一遍。标记按**对象身份**认领：骨架候选
+        永远不是同一个对象，故不会误把普通候选当成复合动作。
+        """
+        if self._structured_activation is not action:
+            return None
+        self._structured_activation = None
+        return {"picks": tuple(action.picks), "choices": tuple(action.choices)}
 
     def recover_from_peach(
         self, frame: Frame, action: UseCard, *, asker: int, dying: int
@@ -1452,6 +1500,13 @@ class Engine:
                     min_picks=plan.min_picks,
                     max_picks=plan.max_picks,
                     slots=tuple(slots),
+                    preactivation=preactivation_for(
+                        self.state,
+                        instance.owner,
+                        instance.skill_id,
+                        timing=timing,
+                        frame=frame,
+                    ),
                 ),
             )
         )
@@ -1459,10 +1514,16 @@ class Engine:
             return SUSPEND
         if face_key is not None:
             frame.data.setdefault("asks", {}).pop(face_key, None)
-        if isinstance(action, ActivateSkill) and action.picks:
-            frame.data.setdefault("activation_picks", {})[instance.skill_id] = tuple(
-                card_ids[index] for index in action.picks
-            )
+        if isinstance(action, ActivateSkill):
+            activation = self._take_structured_activation(action)
+            if activation is not None:
+                # W4-1：复合动作的 picks 是**实体牌 id**，不是面内位置；原样交给
+                # ``run_flow`` 摊回逐步答案，别拿它去索引 ``card_ids``。
+                frame.data["activation"] = activation
+            elif action.picks:
+                frame.data.setdefault("activation_picks", {})[instance.skill_id] = tuple(
+                    card_ids[index] for index in action.picks
+                )
         answers[answer_key] = action
         return action
 
@@ -2022,16 +2083,25 @@ class Engine:
         return SUSPEND
 
     def submit(self, response: object) -> None:
-        """接受一个应答；合法性 = **成员判定**，非法输入**零状态改动**（票 07 §5）。
+        """接受一个应答；合法性 = **成员判定**（含 W4-1 的复合动作例外）。
 
         三类非法输入都在这里拒绝（票 24）：**结构损坏**（payload 不在行动 schema 内）/
         **应答序号陈旧**（``answers_seq`` 失配）/ **不在候选集合内**。三者都先写一条
         ``accepted = false`` 的 ``action`` 记录再抛 :class:`IllegalActionError`——
         拒绝本身也必须可观测；被拒前不碰任何游戏状态，也不重试、不超时。
+
+        **W4-1 的例外**：``ActivateSkill`` 还多一条"复合动作"的路——它**不要求**在
+        ``legal_actions`` 里，但只对 ``PLAY_PHASE`` / ``SKILL_ACTIVATION`` 开放，且必须
+        通过 :func:`sgs.skills.validate_activation`。失败时首因写进拒绝记录的 ``reason``；
+        通过时照常落一条 ``accepted = true``，并把动作身份记到
+        :attr:`_structured_activation` 供执行侧摊回答案。
         """
         pending = self.pending
         if pending is None:
             raise RuntimeError("当前没有待应答的询问")
+        # 上一条经过校验器的复合动作若没被消费就进入了新的询问，标记不能跨询问存活
+        # （它只服务"接受 → 建帧 / 派发"这一段）。
+        self._structured_activation = None
         try:
             action = parse_action(response)
         except ValidationError as error:
@@ -2060,17 +2130,72 @@ class Engine:
                 answers_seq=action.answers_seq,
             )
         if action not in pending.legal_actions:
-            self._reject(action, reason="不在候选集合内")
-            raise IllegalActionError(
-                reason_code="IllegalAction",
-                message="行动不在候选集合内",
-                expected="候选集合的成员之一",
-                got=action.kind,
-                answers_seq=action.answers_seq,
-            )
+            failure = self._structured_activation_failure(action, pending)
+            if failure is _NOT_STRUCTURED:
+                self._reject(action, reason="不在候选集合内")
+                raise IllegalActionError(
+                    reason_code="IllegalAction",
+                    message="行动不在候选集合内",
+                    expected="候选集合的成员之一",
+                    got=action.kind,
+                    answers_seq=action.answers_seq,
+                )
+            if failure is not None:
+                # W4-1：结构化动作确实走了校验器，但第一个失败原因要落进记录（可观测）。
+                self._reject(action, reason=f"预发动校验失败：{failure}")
+                raise IllegalActionError(
+                    reason_code="IllegalAction",
+                    message=failure,
+                    expected="按预发动清单填写的复合动作",
+                    got=action.kind,
+                    answers_seq=action.answers_seq,
+                )
+            self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
+            self._answer = action
+            self._structured_activation = action
+            self.pending = None
+            return
         self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
         self._answer = action
         self.pending = None
+
+    def _structured_activation_failure(
+        self, action: Action, pending: Query
+    ) -> str | None | object:
+        """复合动作的校验（W4-1）：``None`` = 通过；``str`` = 首个原因；哨兵 = 不适用。
+
+        只有两类询问有资格让"不在候选里"的 ``ActivateSkill`` 通过：
+
+        - ``PLAY_PHASE``：该技能必须在 :attr:`PlayPhaseQuery.preactivations` 里（可用性
+          的第二个真源；未迁移的技能仍走骨架候选的成员判定）；
+        - ``SKILL_ACTIVATION``：必须是这一问的那条技能、且它随询问下发了清单。
+
+        其余询问（响应窗口 / 选项 / 选牌…）一律不适用——不然一次响应里的
+        ``ActivateSkill`` 就能绕过窗口的候选集合。
+        """
+        if not isinstance(action, ActivateSkill):
+            return _NOT_STRUCTURED
+        if pending.kind == QueryKind.PLAY_PHASE:
+            if action.skill_id not in pending.preactivations:
+                return _NOT_STRUCTURED
+            frame = None
+        elif pending.kind == QueryKind.SKILL_ACTIVATION:
+            if action.skill_id != pending.skill_id or not pending.preactivation:
+                return _NOT_STRUCTURED
+            # 被动入口的池常要读**真帧**（【流离】的使用者 / 【麒麟弓】的目标）：
+            # 挂起期间栈顶就是发问的那一帧，校验器必须读同一份上下文。
+            frame = self.stack.top if self.stack else None
+        else:
+            return _NOT_STRUCTURED
+        return validate_activation(
+            self.state,
+            pending.actor,
+            action.skill_id,
+            action.picks,
+            action.choices,
+            timing=pending.timing,
+            frame=frame,
+        )
 
     def _reject(self, action: Action | MalformedAction, *, reason: str) -> None:
         """把一次被拒应答写进记录流（``accepted = false``）；不碰任何游戏状态。"""
@@ -2098,6 +2223,29 @@ class Engine:
         actions = legal_actions_for(
             self.state, actor, kind, answers_seq=seq, dying=dying, payload=payload
         )
+        preactivations: dict[str, tuple[Step, ...]] = {}
+        if kind is QueryKind.PLAY_PHASE:
+            # W4-1：可用性从**候选回调**来（骨架仍在），清单按同一批技能 id 渲染。
+            # 已翻到预发动的技能（``preativated``）把骨架从候选里删掉——可用性只剩这份
+            # 清单；清单渲不出来 ⇒ 该技能此刻不可用（声明错误应当可见，不 fail-open）。
+            offered = tuple(
+                action.skill_id
+                for action in actions
+                if isinstance(action, ActivateSkill)
+            )
+            preactivations = preactivations_for(
+                self.state, actor, offered, timing=timing
+            )
+            flagged = preactivated_skill_ids()
+            if flagged:
+                actions = tuple(
+                    action
+                    for action in actions
+                    if not (
+                        isinstance(action, ActivateSkill)
+                        and action.skill_id in flagged
+                    )
+                )
         view = project(self.state, actor)
         if kind is QueryKind.PLAY_PHASE:
             return PlayPhaseQuery(
@@ -2108,6 +2256,7 @@ class Engine:
                 legal_actions=actions,
                 view=view,
                 revealed=revealed,
+                preactivations=preactivations,
             )
         if kind is QueryKind.DISCARD:
             player = self.state.player(actor)
@@ -2196,6 +2345,7 @@ class Engine:
                 min_picks=payload.min_picks,
                 max_picks=payload.max_picks,
                 slots=payload.slots,
+                preactivation=payload.preactivation,
                 revealed=revealed,
             )
         if kind is QueryKind.SELECT_OPTION:

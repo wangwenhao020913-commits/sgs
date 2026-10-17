@@ -29,6 +29,11 @@
     "seatChoices",
     // 票 01：技能流水线的「取消」（候选里有 Pass 就送出去，否则只清本地选择）
     "cancelAction", "cancelOrClear",
+    // W4-1：预发动清单（本地态、复合动作、取消零提交）
+    "preactivationManifest", "enterPreativation", "togglePreativationCard",
+    "advancePreativation", "selectPreativationSeat", "selectPreativationOption",
+    "jumpPreativationStep", "preactivationReady", "buildPreativationAction",
+    "preactivationStepKind", "preactivationOptions", "preactivationCardOptions",
     // 报障 3：事件回放（步长按钮 0.1–0.5s，默认 0.1）+ 效果区逐事件派生 + 描述文本
     "flushPlayback", "stepPlayback", "renderProcessing", "applyEffectDelta", "DELAY_STEPS_MS", "describeEffect",
     // 票 14：「提供一张 B」的就地渲染 + 置灰纯函数（cardFace）

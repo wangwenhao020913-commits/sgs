@@ -63,6 +63,8 @@ __all__ = [
     "SkillActivationContext",
     "SkillActivationQuery",
     "Slot",
+    "Step",
+    "StepPool",
     "UseCard",
     "WindowCause",
     "parse_action",
@@ -146,6 +148,45 @@ class SelectionSpec(_FrozenModel):
     sequential: bool = False
 
 
+class StepPool(_FrozenModel):
+    """预发动清单里**一步的候选池**（W4-1）：``when`` = 前序步骤的答案，``options`` = 此刻的候选。
+
+    ``when`` 是按步骤顺序摊平后的答案文本：选牌步给实体牌 id（十进制文本），选座位步给
+    ``seat:N``，选项步给选项文本。空元组 = 这份子池与前序选择无关。
+
+    **逐选项子池一次下发**：池依赖前序步骤的技能（【流离】选不选武器、【离间】先点谁）
+    会为每个前序选项各给一行；接入层按玩家当前已选的值找对应行。行数超过
+    :data:`~sgs.skills.flow.MANIFEST_POOL_LIMIT`、或前序是**多选**步且池确实随它变时，
+    引擎**退化**为该步不下发候选（``Step.pool = ()``），由校验器裁决——退化只削弱界面
+    提示，不改变合法性。
+    """
+
+    when: tuple[str, ...] = ()
+    options: tuple[str, ...] = ()
+
+
+class Step(_FrozenModel):
+    """预发动清单的一步（W4-1）：``{name, zones, min, max, pool, order}``。
+
+    ``name`` = 步骤键（效果按它从答案里取）；``zones`` = 选牌步铺哪些区（座位步 / 选项步
+    为空）；``min`` / ``max`` = 张数区间。``max = None`` 表示"全部可选的牌"（声明面）；
+    渲染器会把它解析成**当前可选牌数**（与 ``SelectionSpec.total`` 同一条解析），故下发的
+    清单里通常是整数。``pool`` = 候选池（见 :class:`StepPool`）；
+    ``order`` = 步骤序号（0 起）。
+
+    清单由 ``SkillFlow.steps`` **渲染**而来（:func:`sgs.skills.flow.manifest`），校验器读
+    同一份声明——两者不是两套规则。``pool`` 为空元组 = 本步没有（或退化掉了）候选索引，
+    接入层可退化为"全部都点得动、提交时由校验器裁决"。
+    """
+
+    name: str
+    zones: tuple[Zone, ...] = ()
+    min: int = 0
+    max: int | None = None
+    pool: tuple[StepPool, ...] = ()
+    order: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class RespondContext:
     """``RESPOND`` 候选生成的类型化载荷（票 19 §4 的 ``payload``）。
@@ -210,6 +251,13 @@ class SkillActivationContext:
     min_picks: int = 0
     max_picks: int = 0
     slots: tuple[Slot, ...] = ()
+    preactivation: tuple[Step, ...] = ()
+    """本时机上的**预发动清单**（W4-1；被动入口）。
+
+    由 ``SkillFlow.steps`` 渲染（:func:`sgs.skills.flow.manifest`），只含**由持有者本人**
+    应答的前缀步骤；后续换成别人应答的段（反间猜花色 / 挑牌）仍然逐步询问。空元组 =
+    这条技能此刻没有可下发的预发动清单（未迁移 / 选取面不可见 / 池为空）。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,6 +477,17 @@ class _QueryBase(_FrozenModel):
 
 class PlayPhaseQuery(_QueryBase):
     kind: Literal["PLAY_PHASE"] = "PLAY_PHASE"
+    preactivations: dict[str, tuple[Step, ...]] = Field(default_factory=dict, exclude=True)
+    """本出牌阶段**可预发动**的技能：技能 id → 清单（W4-1）。
+
+    与 ``legal_actions`` 里的骨架候选**同源**：骨架仍由各技能的候选回调产出，接入层据它
+    判断"此刻可用"，再渲染清单。迁移到预发动的技能会从 ``legal_actions`` 里删掉骨架，
+    可用性就只剩这一份（AI 与前端同读）。
+
+    **不进记录流**（``exclude``）：清单可由状态 + 技能声明重新渲染，落盘只是冗余；既有
+    Golden Replay 因此逐字节不变。接入层在 :func:`sgs_web.projection.pending_payload`
+    里显式下发它。
+    """
 
 
 class DodgeQuery(_QueryBase):
@@ -487,6 +546,11 @@ class SkillActivationQuery(_QueryBase):
     min_picks: int = 0
     max_picks: int = 0
     slots: tuple[Slot, ...] = ()
+    preactivation: tuple[Step, ...] = Field(default=(), exclude=True)
+    """被动入口的**预发动清单**（W4-1）：空元组 = 这条技能此刻没有可下发的清单。
+
+    与 :attr:`PlayPhaseQuery.preactivations` 同姿态：**不进记录流**，由接入层显式下发。
+    """
 
 
 class SelectOptionQuery(_QueryBase):

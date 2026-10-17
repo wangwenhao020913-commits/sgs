@@ -19,6 +19,7 @@ from sgs.data import load_content_pack
 from sgs.effects import legal_actions_for
 from sgs.engine import Engine, IllegalActionError, MalformedAction, dump_journal, read_journal
 from sgs.state import (
+    ActivateSkill,
     DiscardQuery,
     EndPhase,
     Pass,
@@ -465,3 +466,146 @@ def test_select_option_is_forced_by_default_and_offers_pass_when_optional():
         "曾因 ``_sort_key`` 缺分支而把 Pass 排到首位"
     )
     assert all(action.answers_seq == 9 for action in cancelable)
+
+
+# ---------------------------------------------------------------------------
+# W4-1：submit 的两条路——候选 **或** 结构化复合动作 + 校验器
+# ---------------------------------------------------------------------------
+
+RENDE = "hero.liubei.rende"
+
+
+def _parked_at_rende(*, hand=(SLASH[0],)):
+    """停在【仁德】持有者的**第一个出牌阶段询问**上（好亲手投喂复合动作）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=4, hand=hand, hero="liubei"), SeatSpec(hp=4, hand=(), hero="zhouyu")],
+        deck=DECK,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    run_until(engine, [RecordingPlayer(), RecordingPlayer()], lambda e: e.pending is not None)
+    assert engine.pending is not None and engine.pending.kind == "PLAY_PHASE"
+    return engine
+
+
+def _drive_until_pending(engine):
+    for _ in range(200):
+        if engine.pending is not None or engine.finished:
+            return
+        engine._step()
+    raise AssertionError("200 步内没有回到询问")
+
+
+def test_a_composite_activation_is_accepted_though_it_is_not_a_candidate():
+    """W4-1：复合动作**不要求**在 ``legal_actions`` 里；校验器通过即接受。
+
+    同一问里仍有骨架候选（未翻 ``preativated`` 的技能）——两条路并存，这正是本票的
+    "候选 **或** 结构化动作 + 校验"。
+    """
+    engine = _parked_at_rende()
+    query = engine.pending
+    assert query.preactivations[RENDE], "出牌阶段随附【仁德】的预发动清单"
+    assert any(isinstance(action, ActivateSkill) for action in query.legal_actions), (
+        "本票不翻任何一条技能：骨架候选仍在（W4-2 逐条删）"
+    )
+    card = engine.state.player(0).hand[0]
+    composite = ActivateSkill(
+        skill_id=RENDE,
+        picks=(card,),
+        choices=("seat:1",),
+        answers_seq=query.seq,
+    )
+    assert composite not in query.legal_actions
+
+    engine.submit(composite)
+    _drive_until_pending(engine)
+
+    assert card in engine.state.player(1).hand, "复合动作一次交出去：牌到了目标手里"
+    assert card not in engine.state.player(0).hand
+    accepted = [r for r in engine.records if r.kind == "action" and r.accepted]
+    assert accepted[-1].action == composite, "确认 = 一个复合 ActivateSkill（记录流口径）"
+    assert not [
+        r
+        for r in engine.records
+        if r.kind == "query" and r.query.kind in ("SELECT_CARDS", "SELECT_OPTION")
+    ], "本人应答的前缀步骤不再逐步发问"
+
+
+def test_an_illegal_composite_activation_changes_nothing_and_is_recorded():
+    engine = _parked_at_rende()
+    query = engine.pending
+    card = engine.state.player(0).hand[0]
+    baseline = _game_snapshot(engine)
+
+    with pytest.raises(IllegalActionError) as caught:
+        engine.submit(
+            ActivateSkill(
+                skill_id=RENDE,
+                picks=(card,),
+                choices=("seat:0",),  # 不能给自己
+                answers_seq=query.seq,
+            )
+        )
+
+    assert caught.value.reason_code == "IllegalAction"
+    assert "不在可选范围" in caught.value.message, "首个失败原因原样报出"
+    assert _game_snapshot(engine) == baseline, "非法结构化动作零状态改动"
+    assert engine.pending is query
+    rejected = engine.records[-1]
+    assert rejected.accepted is False and "预发动校验失败" in rejected.reason
+
+
+def test_a_composite_for_a_skill_outside_the_manifest_still_follows_membership():
+    """没有清单的技能 / 行动不因"结构化"三个字绕过成员判定。"""
+    engine = _parked_at_rende()
+    query = engine.pending
+    baseline = _game_snapshot(engine)
+
+    with pytest.raises(IllegalActionError) as caught:
+        engine.submit(
+            ActivateSkill(
+                skill_id="hero.sunquan.zhiheng",
+                picks=(query.view.self_hand[0].card_id,),
+                choices=(),
+                answers_seq=query.seq,
+            )
+        )
+
+    assert caught.value.reason_code == "IllegalAction"
+    assert caught.value.message == "行动不在候选集合内"
+    assert _game_snapshot(engine) == baseline
+
+
+def test_a_preactivated_skill_drops_its_skeleton_and_availability_moves_to_the_manifest(
+    monkeypatch,
+):
+    """W4-1 §5 的机制：``preativated=True`` 的技能不再有骨架候选，可用性只剩清单。
+
+    本票不翻任何一条真实技能（W4-2 逐条翻），故这里用声明派生的开关注入一份集合，
+    验的是"翻过去之后引擎的读法"——骨架没了、清单还在、复合动作照样能提交。
+    """
+    import sgs.engine.game as game_module
+
+    monkeypatch.setattr(
+        game_module, "preactivated_skill_ids", lambda: frozenset({RENDE})
+    )
+    engine = _parked_at_rende()
+    query = engine.pending
+
+    assert RENDE in query.preactivations, "可用性由清单表达"
+    assert not any(isinstance(action, ActivateSkill) for action in query.legal_actions), (
+        "已翻到预发动的技能不得再出现在 legal_actions 里（骨架已删）"
+    )
+
+    card = engine.state.player(0).hand[0]
+    engine.submit(
+        ActivateSkill(
+            skill_id=RENDE,
+            picks=(card,),
+            choices=("seat:1",),
+            answers_seq=query.seq,
+        )
+    )
+    _drive_until_pending(engine)
+    assert card in engine.state.player(1).hand

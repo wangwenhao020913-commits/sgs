@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from itertools import product
 from types import MappingProxyType
 from typing import Any
 
@@ -41,10 +42,11 @@ from sgs.effects import (
     apply_modifiers,
     locate,
 )
-from sgs.state import GameState, Pass, SelectionSpec, Slot, SlotKind, Zone, ZoneRef
+from sgs.state import GameState, Pass, SelectionSpec, Slot, SlotKind, Step, StepPool, Zone, ZoneRef
 from sgs.timing import Timing
 
 __all__ = [
+    "MANIFEST_POOL_LIMIT",
     "SEAT_PREFIX",
     "ActorRef",
     "AskIdentity",
@@ -57,10 +59,13 @@ __all__ = [
     "PickSeats",
     "SeatPool",
     "SkillFlow",
+    "activation_answers",
     "ask_key_of",
+    "manifest",
     "option_seat",
     "run_flow",
     "seat_choice",
+    "validate_flow_activation",
     "zone_pool_size",
 ]
 
@@ -759,6 +764,511 @@ class _Unset:
 _UNSET = _Unset()
 
 
+# ---------------------------------------------------------------------------
+# 预发动清单 + 复合动作校验（W4-1）
+# ---------------------------------------------------------------------------
+
+MANIFEST_POOL_LIMIT = 32
+"""一步的**逐选项子池**最多下发多少行（W4-1）。
+
+池依赖前序选择的技能（【流离】选了武器 ⇒ 攻击范围变、【离间】先点使用者）要给每个前序
+选项各渲一行。前序选项的组合数超过本上限时**退化**：该步的 ``pool`` 置空
+（不下发候选索引），合法性仍由 :func:`validate_flow_activation` 按真谓词裁决——退化只
+削弱界面提示，不放宽任何规则。
+"""
+
+
+class _ActivationFrame:
+    """没有真帧时给步骤池用的最小帧替身（只实现 ``data``）。"""
+
+    __slots__ = ("data",)
+
+    def __init__(self, data: Mapping[str, Any] | None = None) -> None:
+        self.data = dict(data or {})
+
+
+def _with_answers(frame: Any, answers: FlowAnswers) -> _ActivationFrame:
+    """把**前序步骤的答案**挂到帧上再调用派生回调（``preativation_answers``）。
+
+    这是清单渲染器与执行器共用的唯一通道：池函数若依赖前序选择（【离间】的受害者池
+    按使用者、【流离】的新目标池按弃掉的牌），从 ``frame.data["preativation_answers"]``
+    读，而不是自己再存一份。
+    """
+    data = dict(getattr(frame, "data", {}) or {})
+    data["preativation_answers"] = dict(answers)
+    return _ActivationFrame(data)
+
+
+def _answer_shape(step: FlowStep, value: object) -> object:
+    """清单渲染期的代表值 → 答案形状（效果读到的形状）。"""
+    if isinstance(value, tuple):
+        return tuple(int(item) for item in value)
+    if isinstance(step, PickOption):
+        return value
+    return (int(value),)
+
+
+def _answer_text(step: FlowStep, value: object) -> str:
+    """单值 → :class:`~sgs.state.StepPool.when` 里的规范文本。"""
+    if isinstance(step, PickSeats):
+        return seat_choice(int(value))
+    if isinstance(step, PickOption):
+        return str(value)
+    return str(int(value))
+
+
+def _card_options(state: GameState, face: int, step: PickCards) -> tuple[int, ...]:
+    """``PickCards`` 此刻对该座位铺出的候选实体牌 id（与执行器同一份过滤）。"""
+    if not isinstance(face, int):
+        return ()
+    out: list[int] = []
+    for zone in step.zones:
+        for card_id in state.zone(ZoneRef(zone, face)):
+            if _kept_by_whitelists(state.card(card_id), step.card_types, step.slot_kinds):
+                out.append(int(card_id))
+    return tuple(out)
+
+
+def _provide_options(state: GameState, actor: int, step: PickProvide) -> tuple[int, ...]:
+    """``PickProvide`` 此刻的候选牌 id（实体 B ＋ 单来源转化 B，与执行器同一份面）。"""
+    slots, _ids = provide_face(state, actor, step.type_id, step.zones)
+    return tuple(int(slot.card.card_id) for slot in slots if slot.card is not None)
+
+
+def _hidden_face(step: PickCards, face: object, owner: int) -> bool:
+    """这一步的牌面是否**不应对发动者展示**（他人手牌 / 明示盲挑）。"""
+    if not isinstance(face, int):
+        return True
+    if step.reveal_hand is False:
+        return True
+    return face != owner and Zone.HAND in step.zones
+
+
+def _sampled_answers(step: FlowStep, values: tuple[object, ...]) -> list[object]:
+    """一个前序步骤的**代表答案**：单值 ＋ 满选 ＋ 前 ``lo`` 个（去重、保序）。
+
+    多选步（结姻恰好两张、仁德任意张）的答案是一组值；池若依赖"这组牌"，单值行必然与
+    校验器读到的组合不同源。清单渲染只抽样这几个代表，用来回答"池到底随不随前序变"：
+    全相同 ⇒ 收成一行 ``when=()``；有不同 ⇒ 该步不下发候选索引（由校验器裁决）。
+    """
+    if not values:
+        return []
+    out: list[object] = [(value,) for value in values]
+    take = step.hi if step.hi is not None else len(values)
+    out.append(tuple(values[:take]))
+    if step.lo and step.lo != take:
+        out.append(tuple(values[: step.lo]))
+    return list(dict.fromkeys(out))
+
+
+def _prior_contexts(
+    domains: list[tuple[FlowStep, tuple[object, ...]]], limit: int
+) -> list[dict[str, object]] | None:
+    """前序步骤的代表答案组合；超过 ``limit`` ⇒ ``None``（退化）。"""
+    per_step: list[list[object]] = []
+    for step, values in domains:
+        answers = (
+            _sampled_answers(step, values)
+            if step.hi is None or step.hi > 1
+            else [(value,) for value in values]
+        )
+        if not answers:
+            return []
+        per_step.append(answers)
+    total = 1
+    for answers in per_step:
+        total *= len(answers)
+    if total > limit:
+        return None
+    keys = [step.key for step, _ in domains]
+    return [dict(zip(keys, combo)) for combo in product(*per_step)]
+
+
+def _when_texts(
+    domains: list[tuple[FlowStep, tuple[object, ...]]], combo: Mapping[str, object]
+) -> tuple[str, ...]:
+    """一个前序组合 → ``StepPool.when``（按步骤顺序摊平；多选答案摊成一串）。"""
+    texts: list[str] = []
+    for step, _values in domains:
+        value = combo[step.key]
+        if isinstance(value, tuple):
+            texts.extend(_answer_text(step, item) for item in value)
+        else:
+            texts.append(_answer_text(step, value))
+    return tuple(texts)
+
+
+def _pool_rows(rows: list[tuple[tuple[str, ...], tuple[str, ...]]]) -> tuple[StepPool, ...]:
+    """去重后转成协议形状（保留首次出现的次序，确定性）。
+
+    若所有前序组合给出的候选**完全相同**，收成一行 ``when=()``："这一步的池与前序选择
+    无关"——比逐项重复 N 遍更小，也让接入层不必为无关的前序选择找行。
+    """
+    if rows and len({options for _when, options in rows}) == 1:
+        return (StepPool(when=(), options=rows[0][1]),)
+    seen: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
+    out: list[StepPool] = []
+    for when, options in rows:
+        key = (when, options)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(StepPool(when=when, options=options))
+    return tuple(out)
+
+
+def manifest(
+    flow: SkillFlow,
+    state: GameState,
+    owner: int,
+    *,
+    frame: Any = None,
+    limit: int = MANIFEST_POOL_LIMIT,
+) -> tuple[Step, ...]:
+    """把一条 :class:`SkillFlow` 的步骤声明渲染成**预发动清单**（W4-1）。
+
+    只渲染**由 ``owner`` 本人应答的前缀**：遇到第一步的 ``actor`` 解析成别人就停
+    （反间猜花色 / 挑牌这类"换应答者的第二段"仍逐步询问，不进预发动）。``pool`` 是
+    "前序选择 → 这一步的候选"的函数，按前序选项逐行下发；组合数超过 ``limit`` 时
+    退化成一行（见 :data:`MANIFEST_POOL_LIMIT`）。渲染**只读状态**：不铺选择面、不抽
+    随机数、不搬牌。逐选项子池按前序步骤的**单个选项**取键（流离的一张牌、离间的一名
+    使用者），不枚举多选步的幂集——多选步之后的池若真依赖"选中的那几张"，要在 W4-2
+    按技能显式收窄，而不是让清单按 2ⁿ 行下发。
+
+    返回空元组 = 这条技能此刻没有可用的预发动清单（没有 flow / 首步无候选 /
+    选取面不可见 / 由别人应答）。
+    """
+    base = frame if frame is not None else _ActivationFrame()
+    steps: list[Step] = []
+    domains: list[tuple[FlowStep, tuple[object, ...]]] = []
+
+    def probe_answers() -> FlowAnswers:
+        return {
+            step.key: _answer_shape(step, values[0])
+            for step, values in domains
+            if values
+        }
+
+    def answer_map(combo: Mapping[str, object]) -> FlowAnswers:
+        return {
+            step.key: _answer_shape(step, combo[step.key])
+            for step, _values in domains
+            if step.key in combo
+        }
+
+    for index, step in enumerate(flow.steps):
+        answers = probe_answers()
+        if _flow_actor(step, state, _with_answers(base, answers), owner, answers) != owner:
+            break
+        combos = _prior_contexts(domains, limit)
+        degraded = combos is None
+        if degraded:
+            combos = [{}]
+        multi_prior = any(step.hi is None or step.hi > 1 for step, _ in domains)
+        rows: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+        values: list[object] = []
+
+        if isinstance(step, PickCards):
+            for combo in combos:
+                answers = answer_map(combo)
+                framed = _with_answers(base, answers)
+                face = _resolve_face(step.face, state, framed, owner, answers)
+                if face == ():
+                    return ()
+                hidden = _hidden_face(step, face, owner)
+                options = () if hidden else _card_options(state, int(face), step)
+                if not hidden and len(options) < step.lo:
+                    return ()
+                when = _when_texts(domains, combo) if combo else ()
+                rows.append((when, tuple(str(card_id) for card_id in options)))
+                values.extend(options)
+            # 前序是多选步时，``when`` 只能按**单个**选项取键；若池确实随它变，
+            # 逐选项行就与"选中的那几张"对不上 ⇒ 退化成一行空候选（校验器仍按真池裁决）。
+            if multi_prior:
+                if not rows or len({options for _when, options in rows}) > 1:
+                    return ()
+                rows = [((), rows[0][1])]
+            maximum = (
+                min(step.hi, max((len(row) for _, row in rows), default=0))
+                if step.hi is not None
+                else max((len(row) for _, row in rows), default=0)
+            )
+            if maximum < step.lo:
+                return ()
+            steps.append(
+                Step(
+                    name=step.key,
+                    zones=step.zones,
+                    min=step.lo,
+                    max=maximum,
+                    pool=_pool_rows(rows),
+                    order=index,
+                )
+            )
+            domains.append((step, tuple(dict.fromkeys(values))))
+
+        elif isinstance(step, PickSeats):
+            for combo in combos:
+                answers = answer_map(combo)
+                framed = _with_answers(base, answers)
+                try:
+                    pool = tuple(int(seat) for seat in step.pool(state, framed, owner, ()))
+                except KeyError:
+                    if not degraded:
+                        raise
+                    # 退化路径没有前序答案可喂；不假装"没有目标"，改成不下发候选索引。
+                    rows = []
+                    break
+                if not pool and not domains:
+                    return ()
+                when = _when_texts(domains, combo) if combo else ()
+                rows.append((when, tuple(seat_choice(seat) for seat in pool)))
+                values.extend(pool)
+            if multi_prior:
+                if not rows:
+                    rows = []
+                elif len({options for _when, options in rows}) > 1:
+                    rows = []
+                else:
+                    rows = [((), rows[0][1])]
+            if step.ordered and step.hi > 1:
+                # 有序多选座位步的第二问依赖**本步已选**的座位；清单只能表达第一问，
+                # 故不下发候选索引（执行器按 ``chosen`` 逐步问，校验器也按真池验）。
+                rows = []
+            steps.append(
+                Step(
+                    name=step.key,
+                    min=step.lo,
+                    max=step.hi,
+                    pool=_pool_rows(rows),
+                    order=index,
+                )
+            )
+            domains.append((step, tuple(dict.fromkeys(values))))
+
+        elif isinstance(step, PickOption):
+            if not step.options:
+                return ()
+            steps.append(
+                Step(
+                    name=step.key,
+                    min=1,
+                    max=1,
+                    pool=(StepPool(when=(), options=tuple(step.options)),),
+                    order=index,
+                )
+            )
+            domains.append((step, tuple(step.options)))
+
+        elif isinstance(step, PickProvide):
+            for combo in combos:
+                answers = answer_map(combo)
+                framed = _with_answers(base, answers)
+                actor = _flow_actor(step, state, framed, owner, answers)
+                options = _provide_options(state, actor, step)
+                if len(options) < step.lo:
+                    return ()
+                when = _when_texts(domains, combo) if combo else ()
+                rows.append((when, tuple(str(card_id) for card_id in options)))
+                values.extend(options)
+            if multi_prior:
+                if not rows or len({options for _when, options in rows}) > 1:
+                    return ()
+                rows = [((), rows[0][1])]
+            steps.append(
+                Step(
+                    name=step.key,
+                    zones=step.zones,
+                    min=step.lo,
+                    max=min(step.hi, max((len(row) for _, row in rows), default=0)),
+                    pool=_pool_rows(rows),
+                    order=index,
+                )
+            )
+            domains.append((step, tuple(dict.fromkeys(values))))
+
+    return tuple(steps)
+
+
+def _picks_for_step(
+    flow: SkillFlow, index: int, step: PickCards | PickProvide, remaining: int
+) -> int:
+    """这一步从 ``picks`` 里吃掉几张。
+
+    ``hi`` 固定 ⇒ 取 ``min(hi, remaining)``。``hi=None``（"任意张"）⇒ 吃掉剩余，但**给后面
+    的选牌步留出它们的上限**（没有分隔符时，贪心地全吃掉会让后面的步骤永远缺牌）。
+    只把 ``actor is None``（本人应答）的后续选牌步计入预留；当前 A 族没有多选牌步的流程，
+    这条是为声明形状兜底，不改变既有行为。
+    """
+    if step.hi is not None:
+        return min(step.hi, remaining)
+    reserved = 0
+    for later in flow.steps[index + 1 :]:
+        if isinstance(later, (PickCards, PickProvide)) and later.actor is None:
+            reserved += later.hi if later.hi is not None else later.lo
+    return max(0, remaining - reserved)
+
+
+def _assign_activation(
+    flow: SkillFlow,
+    state: GameState,
+    owner: int,
+    picks: tuple[int, ...],
+    choices: tuple[str, ...],
+    *,
+    frame: Any,
+    check: bool,
+) -> tuple[FlowAnswers, str | None]:
+    """把复合动作摊回**逐步答案**；``check`` = 逐步校验（首个失败原因）。
+
+    唯一的拆分规则（清单与校验器共用）：``picks`` 按顺序喂给选牌 / 提供步，
+    ``choices`` 按顺序喂给选座位 / 选项步；遇到第一步的 ``actor`` 不是 ``owner`` 就停
+    （后续是换应答者的第二段，由引擎逐步问）。多余的载荷一律判错——否则复合动作会成为
+    绕过步骤声明的夹带通道。
+    """
+    base = frame if frame is not None else _ActivationFrame()
+    answers: dict[str, object] = {}
+    pick_index = 0
+    choice_index = 0
+    for index, step in enumerate(flow.steps):
+        framed = _with_answers(base, answers)
+        actor = _flow_actor(step, state, framed, owner, answers)
+        if actor != owner:
+            break
+
+        if isinstance(step, PickCards):
+            remaining = len(picks) - pick_index
+            if check and remaining < step.lo:
+                return answers, f"步骤 {step.key} 至少需要 {step.lo} 张牌，复合动作只给了 {remaining} 张"
+            take = _picks_for_step(flow, index, step, remaining)
+            chunk = tuple(int(card_id) for card_id in picks[pick_index : pick_index + take])
+            pick_index += take
+            if check:
+                if len(chunk) < step.lo:
+                    return answers, f"步骤 {step.key} 至少需要 {step.lo} 张牌"
+                if step.hi is not None and len(chunk) > step.hi:
+                    return answers, f"步骤 {step.key} 至多 {step.hi} 张牌"
+                if len(set(chunk)) != len(chunk):
+                    return answers, f"步骤 {step.key} 选了重复的牌"
+                face = _resolve_face(step.face, state, framed, owner, answers)
+                if face == ():
+                    return answers, f"步骤 {step.key} 此刻没有可选的牌"
+                options = _card_options(state, int(face), step)
+                for card_id in chunk:
+                    if card_id not in options:
+                        return answers, f"步骤 {step.key} 的牌 {card_id} 不在可选范围内"
+            answers[step.key] = chunk
+
+        elif isinstance(step, PickSeats):
+            remaining = len(choices) - choice_index
+            if check and remaining < step.lo:
+                return answers, f"步骤 {step.key} 至少需要 {step.lo} 名目标，复合动作只给了 {remaining} 个"
+            take = min(step.hi, remaining)
+            chunk = tuple(choices[choice_index : choice_index + take])
+            choice_index += take
+            chosen: list[int] = []
+            for text in chunk:
+                if not isinstance(text, str) or not text.startswith(SEAT_PREFIX):
+                    return answers, f"步骤 {step.key} 的选项必须是座位（seat:N）"
+                try:
+                    seat = int(text.removeprefix(SEAT_PREFIX))
+                except ValueError:
+                    return answers, f"步骤 {step.key} 的座位文本损坏：{text!r}"
+                if seat in chosen:
+                    return answers, f"步骤 {step.key} 选了重复的目标"
+                if check:
+                    try:
+                        pool = tuple(
+                            int(seat_value)
+                            for seat_value in step.pool(state, framed, owner, tuple(chosen))
+                        )
+                    except KeyError:
+                        # PLAY_PHASE 的校验没有真帧；池若硬读帧上下文，这是声明错误。
+                        # 报成"首个失败原因"而不是把 KeyError 漏给调用方（fail-closed）。
+                        return answers, f"步骤 {step.key} 的目标池缺少帧上下文，无法校验"
+                    if seat not in pool:
+                        return answers, f"步骤 {step.key} 的目标 {seat} 不在可选范围内"
+                chosen.append(seat)
+            answers[step.key] = tuple(chosen)
+
+        elif isinstance(step, PickOption):
+            if choice_index >= len(choices):
+                return answers, f"步骤 {step.key} 需要一个选项"
+            text = choices[choice_index]
+            choice_index += 1
+            if check and text not in step.options:
+                return answers, f"步骤 {step.key} 的选项 {text!r} 不在闭集内"
+            answers[step.key] = text
+
+        elif isinstance(step, PickProvide):
+            remaining = len(picks) - pick_index
+            if check and remaining < step.lo:
+                return answers, f"步骤 {step.key} 至少需要 {step.lo} 张牌"
+            take = _picks_for_step(flow, index, step, remaining)
+            chunk = tuple(int(card_id) for card_id in picks[pick_index : pick_index + take])
+            pick_index += take
+            slots, _ids = provide_face(state, actor, step.type_id, step.zones)
+            refs = {
+                int(slot.card.card_id): slot.card
+                for slot in slots
+                if slot.card is not None
+            }
+            if check:
+                for card_id in chunk:
+                    if card_id not in refs:
+                        return answers, f"步骤 {step.key} 的牌 {card_id} 不在可选范围内"
+            answers[step.key] = tuple(refs[card_id] for card_id in chunk)
+
+    if pick_index != len(picks):
+        return answers, "复合动作里有多余的 picks（本技能的预发动清单没有用到）"
+    if choice_index != len(choices):
+        return answers, "复合动作里有多余的 choices（本技能的预发动清单没有用到）"
+    return answers, None
+
+
+def validate_flow_activation(
+    flow: SkillFlow,
+    state: GameState,
+    owner: int,
+    picks: tuple[int, ...],
+    choices: tuple[str, ...],
+    *,
+    frame: Any = None,
+) -> str | None:
+    """逐步校验一个复合动作；返回**首个失败原因**，``None`` = 通过（W4-1）。
+
+    谓词只调现有函数：选牌面 = :func:`_card_options`（区域 + ``card_types`` /
+    ``slot_kinds`` 同一条过滤）、目标池 = 步骤自己的 ``pool``（与候选生成同源）、
+    提供面 = :func:`provide_face`。校验**只读状态**，失败时一个副作用都没有。
+    """
+    _answers, error = _assign_activation(
+        flow, state, owner, picks, choices, frame=frame, check=True
+    )
+    return error
+
+
+def activation_answers(
+    flow: SkillFlow,
+    state: GameState,
+    owner: int,
+    picks: tuple[int, ...],
+    choices: tuple[str, ...],
+    *,
+    frame: Any = None,
+) -> FlowAnswers:
+    """已校验的复合动作 → 逐步答案（``effect`` 直接读的形状）。
+
+    ``run_flow`` 用它跳过**本人应答的前缀步骤**；第二个应答者开始的段仍逐步问。
+    """
+    answers, error = _assign_activation(
+        flow, state, owner, picks, choices, frame=frame, check=False
+    )
+    if error is not None:  # pragma: no cover - 校验器已先拦下同一份载荷
+        raise ValueError(error)
+    return answers
+
+
+
 def run_flow(
     host: Any,
     frame: Any,
@@ -791,7 +1301,26 @@ def run_flow(
     # （票 12 §2 收紧后的契约；见 :class:`_Unset`）。
     seat = int(frame.data["source"]) if owner is _UNSET else int(owner)
     answers: dict[str, object] = {}
+    activation = frame.data.get("activation")
+    prefilled: FlowAnswers = {}
+    if activation:
+        # W4-1：复合动作报上来的（picks, choices）先摊回逐步答案；**本人应答的前缀**
+        # 因此一个询问都不发，第二个应答者开始的段仍走下面的逐步询问。
+        prefilled = activation_answers(
+            flow,
+            host.state,
+            seat,
+            tuple(int(card_id) for card_id in activation.get("picks", ())),
+            tuple(str(choice) for choice in activation.get("choices", ())),
+            frame=frame,
+        )
     for index, step in enumerate(flow.steps):
+        # 清单渲染器与执行器共用的通道：池 / 面回调若依赖前序答案，从这里读同一份
+        # （预填的复合动作与逐步询问两条路都写它，故声明只写一次）。
+        frame.data["preativation_answers"] = dict(answers)
+        if step.key in prefilled:
+            answers[step.key] = prefilled.pop(step.key)
+            continue
         status, value = _FLOW_STEP_RUNNERS[type(step)](
             host, frame, step, seat, answers, timing, (flow.name, index)
         )

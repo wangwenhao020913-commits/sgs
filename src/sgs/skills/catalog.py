@@ -214,6 +214,15 @@ class SkillDef:
     应答者队列由 :func:`~sgs.skills.rejudge_capable_seats` 读**存活实例**的定义字段得座位集合。
     """
 
+    preativated: bool = False
+    """本技能是否已迁到**预发动**（W4-1 的迁移开关，缺省 ``False``）。
+
+    ``True`` 时引擎把该技能在出牌阶段的 ``ActivateSkill`` 骨架从 ``legal_actions`` 里删掉，
+    可用性只由 ``PlayPhaseQuery.preactivations`` 表达；被动入口的清单随
+    ``SkillActivationContext.preactivation`` 下发。清单一律由该技能的 ``SkillFlow.steps``
+    渲染，本字段只是"哪条技能已经翻过去"的开关。本票只落机制，逐条技能由 W4-2 / W4-3 翻。
+    """
+
     requirement: str | None = None
     """这条技能**需要玩家做什么**的人话（item 4：询问文本提示）。
 

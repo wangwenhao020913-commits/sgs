@@ -23,6 +23,8 @@ import pytest
 from sgs.data import load_content_pack
 from sgs.engine import Engine
 from sgs.skills import Hook, Seam, catalog as catalog_module
+from sgs.skills.active import ActiveSkill
+from sgs.skills.preativation import _build_flows, preactivated_skill_ids
 from sgs.skills.damage_after import FANKUI_FLOW, fankui_step_key
 from sgs.skills.flow import (
     PickCards,
@@ -30,9 +32,12 @@ from sgs.skills.flow import (
     PickSeats,
     SkillFlow,
     _flow_step_cards,
+    manifest,
     run_flow,
+    validate_flow_activation,
 )
 from sgs.state import (
+    ActivateSkill,
     FrameKind,
     Pass,
     QueryKind,
@@ -40,6 +45,8 @@ from sgs.state import (
     SelectCardsQuery,
     Slot,
     SlotKind,
+    Step,
+    StepPool,
     Zone,
     ZoneRef,
 )
@@ -736,3 +743,359 @@ def test_a_flow_keeps_distinct_step_keys():
         effect=_noop,
     )
     assert [step.key for step in flow.steps] == ["card", "seat"]
+
+
+# ---------------------------------------------------------------------------
+# ⑪ W4-1：预发动清单 = SkillFlow.steps 的渲染（顺序 / 区域 / 张数 / 候选池）
+# ---------------------------------------------------------------------------
+
+
+def _manifest_state(*, hand: tuple[int, ...], seats: int = 3):
+    return build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=hand)] + [SeatSpec() for _ in range(seats - 1)],
+        deck=_deck_excluding(*hand),
+        turn_seat=0,
+    )
+
+
+def _two_step_flow(pool):
+    captured: dict[str, object] = {}
+
+    def effect(host, frame, answers):
+        captured.update(answers)
+        return None
+
+    flow = SkillFlow(
+        name="manifest_probe",
+        steps=(
+            PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="card"),
+            PickSeats(lo=1, hi=1, pool=pool, key="seat"),
+        ),
+        effect=effect,
+    )
+    return flow, captured
+
+
+def test_manifest_renders_the_flow_steps_in_order():
+    """清单字段 = ``{name, zones, min, max, pool, order}``，与步骤声明逐项同源。"""
+    card = _cards("slash")[0]
+    state = _manifest_state(hand=(card,))
+    flow, _captured = _two_step_flow(
+        lambda state, frame, owner, chosen: (1, 2)
+    )
+
+    steps = manifest(flow, state, 0)
+
+    assert [type(step) for step in steps] == [Step, Step]
+    assert [step.name for step in steps] == ["card", "seat"]
+    assert [step.order for step in steps] == [0, 1]
+    assert steps[0].zones == (Zone.HAND,)
+    assert (steps[0].min, steps[0].max) == (1, 1)
+    assert steps[0].pool == (StepPool(when=(), options=(str(card),)),)
+    assert steps[1].zones == ()
+    assert (steps[1].min, steps[1].max) == (1, 1)
+    assert steps[1].pool == (StepPool(when=(), options=("seat:1", "seat:2")),)
+
+
+def test_manifest_renders_a_per_option_sub_pool_once():
+    """池依赖前序选择 ⇒ 为**每个前序选项**各下一行 ``when``（流离的武器 / 离间的使用者）。"""
+    first, second = _cards("slash")[:2]
+    state = _manifest_state(hand=(first, second))
+
+    def pool(state, frame, owner, chosen):
+        del state, owner, chosen
+        # 池函数读**前序步骤答案**：这是清单与执行器共用的唯一通道。
+        pick = int(frame.data["preativation_answers"]["card"][0])
+        return (1,) if pick == first else (2,)
+
+    flow, _captured = _two_step_flow(pool)
+
+    steps = manifest(flow, state, 0)
+
+    assert steps[1].pool == (
+        StepPool(when=(str(first),), options=("seat:1",)),
+        StepPool(when=(str(second),), options=("seat:2",)),
+    ), "逐选项子池：每个前序选择一行，when = 前序答案的规范文本"
+
+
+def test_manifest_collapses_a_pool_that_does_not_depend_on_prior_steps():
+    """所有前序组合给出同一份候选 ⇒ 收成一行 ``when=()``（不按前序选择重复 N 遍）。"""
+    first, second = _cards("slash")[:2]
+    state = _manifest_state(hand=(first, second))
+    flow, _captured = _two_step_flow(
+        lambda state, frame, owner, chosen: (1, 2)
+    )
+
+    steps = manifest(flow, state, 0)
+
+    assert steps[1].pool == (StepPool(when=(), options=("seat:1", "seat:2")),)
+
+
+def test_manifest_degrades_to_one_row_over_the_pool_limit():
+    """前序组合数超过上限 ⇒ 退化：一行 ``when=()``、不下发候选（合法性仍走校验器）。"""
+    first, second = _cards("slash")[:2]
+    state = _manifest_state(hand=(first, second))
+
+    def pool(state, frame, owner, chosen):
+        del state, owner, chosen
+        return (int(frame.data["preativation_answers"]["card"][0]),)
+
+    flow, _captured = _two_step_flow(pool)
+
+    steps = manifest(flow, state, 0, limit=1)
+
+    assert steps[1].pool == (), (
+        "退化只削弱界面提示：**不下发候选索引**（接入层退化为全都点得动），"
+        "校验器仍按真谓词裁决"
+    )
+
+
+def test_manifest_stops_at_the_first_step_answered_by_someone_else():
+    """换应答者的第二段（反间猜花色 / 挑牌）**不进预发动**：清单只收本人应答的前缀。"""
+    state = _manifest_state(hand=(_cards("slash")[0],))
+    flow = SkillFlow(
+        name="two_segments",
+        steps=(
+            PickSeats(lo=1, hi=1, pool=lambda state, frame, owner, chosen: (1,), key="seat"),
+            PickCards(
+                zones=(Zone.HAND,),
+                lo=1,
+                hi=1,
+                key="card",
+                actor=lambda state, frame, owner, answers: 1,
+            ),
+            PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="tail"),
+        ),
+        effect=_noop,
+    )
+
+    steps = manifest(flow, state, 0)
+
+    assert [step.name for step in steps] == ["seat"], "第二段由目标应答，清单到此为止"
+
+
+# ---------------------------------------------------------------------------
+# ⑫ W4-1：复合动作校验器（区域 / 张数 / 目标池；首个失败原因）
+# ---------------------------------------------------------------------------
+
+
+def _validate_two_step(flow, state, picks, choices, *, owner=0):
+    return validate_flow_activation(flow, state, owner, tuple(picks), tuple(choices))
+
+
+def test_validate_activation_accepts_a_complete_composite_action():
+    first = _cards("slash")[0]
+    state = _manifest_state(hand=(first,))
+    flow, _captured = _two_step_flow(
+        lambda state, frame, owner, chosen: (1, 2)
+    )
+
+    assert _validate_two_step(flow, state, (first,), ("seat:1",)) is None
+    assert _validate_two_step(flow, state, (first,), ("seat:2",)) is None
+
+
+def test_validate_activation_rejects_the_first_reason_and_never_mutates_state():
+    first = _cards("slash")[0]
+    state = _manifest_state(hand=(first,))
+    flow, _captured = _two_step_flow(
+        lambda state, frame, owner, chosen: (1, 2)
+    )
+    before = state.model_dump()
+
+    missing_card = _validate_two_step(flow, state, (), ("seat:1",))
+    wrong_card = _validate_two_step(flow, state, (_cards("peach")[0],), ("seat:1",))
+    wrong_seat = _validate_two_step(flow, state, (first,), ("seat:0",))
+    duplicate = _validate_two_step(flow, state, (first, first), ("seat:1",))
+    extra = _validate_two_step(flow, state, (first,), ("seat:1", "seat:2"))
+    non_seat = _validate_two_step(flow, state, (first,), ("heart",))
+
+    assert "至少需要 1 张牌" in missing_card
+    assert "不在可选范围" in wrong_card
+    assert "目标 0 不在可选范围" in wrong_seat
+    assert "多余" in duplicate or "重复" in duplicate
+    assert "多余" in extra
+    assert "座位" in non_seat
+    assert state.model_dump() == before, "校验失败必须零状态改动"
+
+
+def test_validate_activation_enforces_the_exact_card_count():
+    """恰好两张的成本步（结姻 / 贯石斧）：多一张少一张都拒绝。"""
+    first, second, third = _cards("slash")[:3]
+    state = _manifest_state(hand=(first, second, third))
+    flow = SkillFlow(
+        name="exactly_two",
+        steps=(PickCards(zones=(Zone.HAND,), lo=2, hi=2, key="card"),),
+        effect=_noop,
+    )
+
+    assert validate_flow_activation(flow, state, 0, (first, second), ()) is None
+    assert "至少需要 2" in validate_flow_activation(flow, state, 0, (first,), ())
+    assert "多余" in validate_flow_activation(flow, state, 0, (first, second, third), ())
+
+
+# ---------------------------------------------------------------------------
+# ⑬ W4-1：已校验的复合动作 → 逐步答案（run_flow 跳过本人应答的步骤）
+# ---------------------------------------------------------------------------
+
+
+class _NoAskHost:
+    """只提供 ``run_flow`` 需要的最小面；任何发问都判失败（预填答案不该再问）。"""
+
+    def __init__(self, state) -> None:
+        self.state = state
+
+    @staticmethod
+    def suspended(value) -> bool:
+        return value == "SUSPEND"
+
+    @staticmethod
+    def ask_selection(*args, **kwargs):  # pragma: no cover - 预填路径不该走到
+        raise AssertionError("复合动作已带答案：本人应答的步骤不得再发问")
+
+    @staticmethod
+    def ask_option(*args, **kwargs):  # pragma: no cover - 预填路径不该走到
+        raise AssertionError("复合动作已带答案：本人应答的步骤不得再发问")
+
+
+def test_run_flow_consumes_the_composite_answers_without_asking():
+    first = _cards("slash")[0]
+    state = _manifest_state(hand=(first,))
+    flow, captured = _two_step_flow(
+        lambda state, frame, owner, chosen: (1,)
+    )
+    frame = _Frame(
+        source=0,
+        activation={"picks": (first,), "choices": ("seat:1",)},
+    )
+
+    assert run_flow(_NoAskHost(state), frame, flow, owner=0) is None
+
+    assert captured == {"card": (first,), "seat": (1,)}, (
+        "答案形状必须与逐步询问后 effect 读到的完全一致（卡牌 id 元组 / 座位元组）"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ⑭ W4-1：被动入口的清单随 SKILL_ACTIVATION 下发，复合动作照同一份声明执行
+# ---------------------------------------------------------------------------
+
+
+def test_a_passive_skill_executes_a_composite_action_from_its_manifest():
+    """【麒麟弓】的 DAMAGE_DEAL 询问随附清单；提交复合动作后效果照常落地。"""
+    bow = _cards("qilin_bow")[0]
+    horse = _cards("jueying")[0]
+    slash = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(equip=(bow,), hand=(slash,)),
+            SeatSpec(equip=(horse,)),
+        ],
+        deck=_deck_excluding(slash, bow, horse),
+        processing=(slash,),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    channel = state.card(slash)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": 0,
+            "targets": (1,),
+            "card": channel,
+            "use_timing": Timing.PHASE_PLAY_IDLE,
+            "target": 1,
+            "channel": channel,
+            "nature": "NORMAL",
+            "chain": False,
+            "amount": 1,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    for _ in range(100):
+        if engine.pending is not None:
+            break
+        engine._step()
+    query = engine.pending
+    assert query is not None and query.kind == QueryKind.SKILL_ACTIVATION
+    assert query.skill_id == "equip.qilin_bow"
+    assert [step.name for step in query.preactivation] == ["card"]
+    assert query.preactivation[0].pool[0].options == (str(horse),), (
+        "被动入口的清单也由 SkillFlow.steps 渲染：候选 = 目标装备区的坐骑"
+    )
+
+    engine.submit(
+        ActivateSkill(
+            skill_id="equip.qilin_bow",
+            picks=(horse,),
+            choices=(),
+            answers_seq=query.seq,
+        )
+    )
+
+    for _ in range(100):
+        if horse not in engine.state.player(1).equip:
+            break
+        engine._step()
+
+    assert horse not in engine.state.player(1).equip, "复合动作一次提交：坐骑被弃置"
+    assert horse in engine.state.discard
+
+
+def test_manifest_does_not_key_sub_pools_by_single_values_after_a_multi_select_step():
+    """前序是多选步（结姻两张 / 仁德任意张）且池确实随它变 ⇒ 不下发候选索引。
+
+    ``when`` 只能按单个选项取键，而前序答案是一组牌；逐单值行会与校验器读到的组合
+    不同源（"界面给的行 ≠ 校验器接受的组合"）。此时退化为 ``pool=()``，由校验器裁决。
+    """
+    first, second, third = _cards("slash")[:3]
+    state = _manifest_state(hand=(first, second, third))
+
+    def pool(state, frame, owner, chosen):
+        del state, owner, chosen
+        picks = tuple(frame.data["preativation_answers"]["cards"])
+        return (1,) if len(picks) == 2 else (2,)
+
+    captured: dict[str, object] = {}
+    flow = SkillFlow(
+        name="multi_select_probe",
+        steps=(
+            PickCards(zones=(Zone.HAND,), lo=2, hi=2, key="cards"),
+            PickSeats(lo=1, hi=1, pool=pool, key="seat"),
+        ),
+        effect=lambda host, frame, answers: captured.update(answers),
+    )
+
+    steps = manifest(flow, state, 0)
+
+    assert steps[1].pool == (), (
+        "多选步之后不应按单个 card id 下发子池：那与校验器读到的组合不同源"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ⑮ W4-1：登记表与"已翻预发动"集合都由**声明**派生（不手抄 id 名单）
+# ---------------------------------------------------------------------------
+
+
+def test_the_preativation_registry_and_the_flipped_set_are_derived_from_declarations():
+    """``FLOWS`` / ``preactivated_skill_ids`` 读声明，不维护第二份名单。
+
+    W4-1 不翻任何真实技能（``ACTIVE_SKILLS`` 里全为 ``False``），故这里用一份合成声明
+    证明"翻过去"这条派生是活的；逐条技能由 W4-2 / W4-3 改声明，不改引擎。
+    """
+    declaration = ActiveSkill(
+        "demo",
+        "preativated",
+        lambda state, ctx, current: current,
+        flow=_noop_flow(),
+        preativated=True,
+    )
+
+    flows = _build_flows(active=(declaration,), catalog={})
+    assert flows["hero.demo.preativated"][0][1] is declaration.flow
+    assert preactivated_skill_ids(active=(declaration,), catalog={}) == frozenset(
+        {"hero.demo.preativated"}
+    )

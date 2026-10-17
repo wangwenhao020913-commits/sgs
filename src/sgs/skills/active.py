@@ -873,6 +873,13 @@ class ActiveSkill(HeroSkillDecl):
     offers: Callable[[GameState, ModifierContext, Any], Any]
     activate: ActivationHandler | None = None
     flow: SkillFlow | None = None
+    preativated: bool = False
+    """本技能是否已迁到**预发动**（W4-1 的迁移开关，缺省 ``False``）。
+
+    ``True`` 时引擎在出牌阶段把它的 ``ActivateSkill`` 骨架从 ``legal_actions`` 里删掉、
+    只由 ``PlayPhaseQuery.preactivations`` 表达可用性（清单由 ``flow`` 渲染）。本票只落
+    机制，逐条技能由 W4-2 翻这个位——翻之前既有候选 / 测试 / 录像一字不改。
+    """
 
     def __post_init__(self) -> None:
         if (self.activate is None) == (self.flow is None):
@@ -968,6 +975,7 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
             modifiers=(Modifier(ModifierPoint.CANDIDATES, skill.offers),),
             requirement=_REQUIREMENTS[skill.short_id],
             step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
+            preativated=skill.preativated,
         )
         for skill in ACTIVE_SKILLS
     )
