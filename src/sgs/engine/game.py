@@ -2694,6 +2694,11 @@ class Engine:
             # 发过 ``TURN_END``；这里把 pc 直接拨到 ``_turn_after_end``（本步就执行它），
             # 只补 ``TURN_AFTER_END`` 并轮转到下一个存活座位，不再发第二条 ``TURN_END``、
             # 也不让阵亡者摸牌 / 出牌。
+            #
+            # 跳过阶段 = **放弃正在进行的那一段**，故它的收尾要在这里补做：被跳过的那段可能
+            # 正是判定阶段，而延时锦囊的 L5.6 收尾归那一段的循环（见 :meth:`_phase_judge`），
+            # 循环再也不会续跑（W4-fix-4）。
+            self._settle_abandoned_judgment()
             self._turn_pc = self._turn_steps.index(self._turn_after_end)
         step = self._turn_steps[self._turn_pc]
         if step() == "stay":
@@ -2868,6 +2873,24 @@ class Engine:
         else:
             to_zone, reason = ZoneRef(Zone.JUDGE, target), MoveReason.PUT
         self._move_cards((card_id,), to_zone=to_zone, reason=reason, owner=None, actor=seat)
+
+    def _settle_abandoned_judgment(self) -> None:
+        """回合在判定阶段里被**放弃**时补做那一轮的收尾（W4-fix-4）。
+
+        判定阶段是**自循环阶段步骤**：它压出 RESOLVE 帧后把"这一张判过了、收尾还没做"
+        记在 ``_turn_data["judge_inflight"]``，等循环下一轮自己回来收尾（:meth:`_phase_judge`
+        的第一支）。若被判定者被这一轮**打死**（【闪电】命中 = 3 点雷电），回合在该帧出栈后
+        立即结束（:meth:`_turn_is_over` 的跳过分支）——循环再也不会续跑，收尾就丢了：
+        牌留在处理区，直到终局清栈才被顺带搬走（手动验收：闪电生效后效果区一直挂着它）。
+        故"放弃一个回合"要把它的收尾一起做掉，而不是把收尾留给一个不会发生的下一轮。
+
+        幂等：``judge_inflight`` 取出即清（回合环走完一圈还会 ``_turn_data.clear()``）；
+        牌已不在处理区时 :meth:`_finish_judge_round` 也早退。没有在飞的那张 = 零动作。
+        """
+        card_id = self._turn_data.pop("judge_inflight", None)
+        if card_id is None:
+            return
+        self._finish_judge_round(self._turn_seat(), card_id)
 
     def _phase_draw_start(self) -> None:
         self.state.phase = Phase.DRAW

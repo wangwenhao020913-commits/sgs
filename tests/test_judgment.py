@@ -436,6 +436,51 @@ def test_lightning_hits_for_three_sourceless_thunder_damage_then_discards():
     assert damage_end < discard_index, "伤害结算完才入弃牌堆"
 
 
+def test_lightning_hit_that_kills_the_judged_seat_still_clears_the_processing_zone():
+    """命中**把被判定者打死**时，收尾照样要跑：牌进弃牌堆，处理区不留它（W4-fix-4）。
+
+    上一类形状（4 血吃 3 点、站着）走的是"判定循环下一轮自己续跑"，收尾自然发生；本用例
+    打的是**循环被放弃**那一支：非主公在自己的回合里阵亡 ⇒ 引擎把剩余阶段整体跳过
+    （:meth:`~sgs.engine.game.Engine._turn_is_over` 的回合结束分支），判定阶段循环**再也
+    不会续跑**，而延时锦囊的 L5.6 收尾（命中入弃牌堆 / 未命中顺延）是**循环**做的 ⇒
+    牌留在处理区，直到终局清栈才被顺带搬走（手动验收：闪电生效后效果区一直挂着它）。
+
+    3 人局是这条用例的前提：死一人**不终局**，否则终局清栈会顺手把牌搬走，缺陷被盖住。
+    阵亡者在记录流里是「先 `DEATH`、后收尾」——收尾仍须在 `DAMAGE_END` 之后。
+    """
+    engine = _judge_engine(
+        seat0=SeatSpec(hp=3, judge=(LIGHTNING[0],)),
+        seat1=SeatSpec(hp=4),
+        deck=(SPADE_IN_RANGE, 20, 21, 22),
+        players=3,
+    )
+    turn = _first_turn(engine)
+
+    assert not engine.state.player(0).alive, "3 血吃 3 点雷电 ⇒ 被判定者阵亡（本用例的前提）"
+    assert not engine.finished, "3 人局死一人不终局（终局清栈会顺手搬牌，测不到本缺陷）"
+    assert LIGHTNING[0] not in engine.state.processing, "判定循环被放弃，收尾也得补做"
+    assert LIGHTNING[0] in engine.state.discard, "命中后的去向仍是弃牌堆"
+
+    discard = [
+        record
+        for record in _moves(turn, reason=MoveReason.USE)
+        if record.to_zone.zone is Zone.DISCARD
+    ]
+    assert [record.cards[0].card_id for record in discard] == [LIGHTNING[0]]
+    damage_end = next(
+        index
+        for index, record in enumerate(turn)
+        if record.kind == "timing" and record.timing is Timing.DAMAGE_END
+    )
+    discard_index = next(index for index, record in enumerate(turn) if record is discard[0])
+    turn_after_end = next(
+        index
+        for index, record in enumerate(turn)
+        if record.kind == "timing" and record.timing is Timing.TURN_AFTER_END
+    )
+    assert damage_end < discard_index < turn_after_end, "伤害结算完、回合彻底结束前入弃牌堆"
+
+
 def test_lightning_damage_channel_is_not_the_judge_card():
     engine = _judge_engine(
         seat0=SeatSpec(hp=4, judge=(LIGHTNING[0],)),

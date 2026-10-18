@@ -25,7 +25,7 @@ def _bootstrap() -> None:
 _bootstrap()
 
 from sgs.agents import RandomPlayer, TapePlayer  # noqa: E402
-from sgs.data import validate_rule_config  # noqa: E402
+from sgs.data import Identity, Suit, validate_rule_config  # noqa: E402
 from sgs.engine import Engine, RandomSource, dump_journal  # noqa: E402
 from sgs.resolution import Frame, ResolutionStack  # noqa: E402
 from sgs.state import (  # noqa: E402
@@ -33,6 +33,7 @@ from sgs.state import (  # noqa: E402
     ArrangeQuery,
     FrameKind,
     PeachQuery,
+    Phase,
     RespondQuery,
     SelectCardsQuery,
     SelectionSpec,
@@ -57,6 +58,7 @@ from sgs_web.replay import list_runs, load_run, replay_journal, save_run  # noqa
 from sgs_web.session import Session, StaleAnswer  # noqa: E402
 from sgs_web.timeout import fallback_action  # noqa: E402
 from support.positions import SeatSpec, build_state, cards_of_type  # noqa: E402
+from support.scripts import PassPlayer, run_queries  # noqa: E402
 
 TWO_PLAYERS = {"player_count": 2}
 """2 人局：无身份 1v1，跑得快，且足以覆盖"挂起 → 应答 → 续跑"的全部分支。"""
@@ -2524,3 +2526,109 @@ def test_the_pending_payload_forwards_the_jijiu_manifest_in_the_peach_window() -
     assert [hint["name"] for hint in hints] == ["急救"]
     assert "当【桃】" in hints[0]["requirement"]
     assert "急救" not in labels[0][0], "手牌真【桃】的选项文案里没有急救"
+
+
+# ---------------------------------------------------------------------------
+# W4-fix-4：【闪电】命中打死被判定者之后，浏览器下一帧拿到的效果区必须是空的
+# ---------------------------------------------------------------------------
+
+
+def _lethal_lightning_session() -> Session:
+    """真会话：座位 1 判定区一张【闪电】、牌堆第三张是一张 ♠2~9，3 点雷电恰好打死 3 血的他。
+
+    4 人身份局（模式由座位数派生）：先手是主公（座位 0，也是人类座位），被判定者是**反贼**
+    —— 死他一个不终局，回合照常轮转（"非主公在自己回合内阵亡 ⇒ 剩余阶段整体跳过"那一支）。
+
+    推进到**被判定者阵亡之后**人类座位的第一问（此刻浏览器会收到下一份响应体）：
+
+    - 各家一律 :class:`PassPlayer`（出牌阶段结束、其余放弃）：濒死求桃**不许**旁人真去救，
+      否则"被判定者阵亡"这个前提不成立；
+    - 引擎换成人为局面（随机建局走不到这个形状），但会话壳、``GameRegistry.view`` 与
+      ``visible_record`` 这条**下发链路**一字不换（同 :func:`_yiji_real_session` 的手法）。
+    """
+    pack = _context_pack()
+    lightning = cards_of_type(pack, "lightning")[0]
+    spade = next(
+        index
+        for index, card in enumerate(pack.deck.cards)
+        if index != lightning and card.suit is Suit.SPADE and 2 <= card.rank <= 9
+    )
+    others = [index for index in range(len(pack.deck.cards)) if index not in (lightning, spade)]
+    # 先手是主公（座位 0，人类）⇒ 它在判定前先摸两张，判定牌必须排在**第三张**。
+    deck = tuple(others[:2]) + (spade,) + tuple(others[2:])
+    rule_config = validate_rule_config({"player_count": 4})
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, identity=Identity.LORD),
+            SeatSpec(hp=3, judge=(lightning,), identity=Identity.REBEL),
+            SeatSpec(hp=4, identity=Identity.LOYALIST),
+            SeatSpec(hp=4, identity=Identity.RENEGADE),
+        ],
+        deck=deck,
+        phase=Phase.PREPARE,
+        rule_config=rule_config,
+    )
+    session = Session(
+        pack=pack, seed=1, ai="random", timeout_seconds=None, player_count=4, human_seat=0
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = tuple(PassPlayer() for _ in range(4))
+    run_queries(session.engine, session.participants, _after_the_lethal_judgment)
+    return session
+
+
+def _after_the_lethal_judgment(engine: Engine) -> bool:
+    """停止条件：被判定者已经阵亡，且引擎停在了人类座位（0）的出牌阶段。"""
+    pending = engine.pending
+    return (
+        not engine.state.player(1).alive
+        and pending is not None
+        and pending.kind == "PLAY_PHASE"
+        and int(pending.actor) == 0
+    )
+
+
+def test_a_real_session_clears_the_effect_area_after_a_lethal_lightning_judgment() -> None:
+    """W4-fix-4 的复现（接入层那一半）：命中把人打死时，下发的记录流里也要有"离开处理区"。
+
+    手动验收：**【闪电】判定命中后，这张牌一直留在效果区**。根因在引擎（见
+    ``tests/test_judgment.py`` 的
+    ``test_lightning_hit_that_kills_the_judged_seat_still_clears_the_processing_zone``），
+    但报障看得见的那一层是**下发的响应体**：效果区在等新快照到达时按 ``card_move`` 逐事件
+    派生（``app.js::applyEffectDelta``），牌卡住 = 那条 delta 在记录流里根本没出现 / 快照里
+    还带着它。故这里钉的是 ``GameRegistry.view`` 这份**浏览器实际收下的 dict**：
+
+    - 快照 ``processing`` 里没有这张【闪电】；
+    - 记录流里有一条 ``processing → discard``（``reason = USE``）的 ``card_move``，且它排在
+      当前挂起的那条询问**之前** —— 浏览器收到这一批时就会把效果区那张牌拿掉（下一帧清空）。
+
+    修之前这条与引擎用例同时红（快照里还带着那张牌），修之后同时绿：一条复现钉两头。
+    """
+    from sgs_web.serve import GameRegistry
+
+    session = _lethal_lightning_session()
+    lightning = cards_of_type(_context_pack(), "lightning")[0]
+    query = session.pending
+    assert query is not None and query.kind == "PLAY_PHASE", "停在被判定者阵亡之后的下一问"
+    assert int(query.actor) == int(session.human_seat), "停的是人类座位自己的下一问"
+    assert not session.engine.state.player(1).alive, "前置：被判定者被这 3 点雷电打死"
+
+    body = GameRegistry(runs_dir="/tmp/unused").view(session, after=-1, logs_after=0)
+
+    processing = [card["card_id"] for card in body["snapshot"]["processing"]]
+    assert lightning not in processing, "命中生效后处理区（= 效果区）不得再留着它"
+
+    moves = [
+        record
+        for record in body["records"]
+        if record["kind"] == "delta"
+        and record["delta_type"] == "card_move"
+        and any(card["card_id"] == lightning for card in record["cards"])
+    ]
+    assert moves, "下发的记录流里一条【闪电】的 card_move 都没有（接线断了）"
+    leaving = [record for record in moves if record["from_zone"]["zone"] == "processing"]
+    assert leaving, "没有「离开处理区」的 delta，效果区只能一直挂着它"
+    assert leaving[-1]["to_zone"]["zone"] == "discard", leaving[-1]["to_zone"]
+    assert leaving[-1]["reason"] == "USE", "命中后的去向与既有约定一致（reason = USE）"
+    assert leaving[-1]["seq"] < query.seq, "这条 delta 必须在本批（停在下一问之前）里送达"
