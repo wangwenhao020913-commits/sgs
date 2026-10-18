@@ -624,7 +624,7 @@ PREACTIVATION_CANCEL_SKILL = "hero.sunquan.zhiheng"
 （``scenarios.py`` 从这里 import）。"""
 
 
-def _preativation_cancel_records_nothing(engine: Engine) -> bool:
+def _preactivation_cancel_records_nothing(engine: Engine) -> bool:
     """预发动**取消零副作用**（W4-5，脚本基准 44）：进得去、填得出、但一个 action 都没有。
 
     判据读**记录流里的询问与行动**：
@@ -652,7 +652,7 @@ def _preativation_cancel_records_nothing(engine: Engine) -> bool:
 
 M1_GOALS = {
     "43-double-sword-opposite-gender": _double_sword_chain,
-    "44-preativation-cancel-no-side-effect": _preativation_cancel_records_nothing,
+    "44-preactivation-cancel-no-side-effect": _preactivation_cancel_records_nothing,
 }
 """脚本基准的 slug → 事后判据（票 17 起；只收"脚本驱动 + 需要事后确认"的那条）。
 

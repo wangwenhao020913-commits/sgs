@@ -6,7 +6,7 @@
 
 - **哪条技能有清单**：主动技读 :data:`~sgs.skills.active.ACTIVE_SKILLS` 的 ``flow``，
   被动技读 :data:`~sgs.skills.catalog.CATALOG` 里钩子 / 接缝的 ``flow``；
-- **哪条技能已经翻到预发动**：声明上的 ``preativated`` 开关（本票只落机制，W4-2 逐条翻）。
+- **哪条技能已经翻到预发动**：声明上的 ``preactivated`` 开关（本票只落机制，W4-2 逐条翻）。
 
 不新增询问类型、不改 ``SkillFlow`` 的步骤声明字段：登记表是**派生**的（不手抄 id 名单），
 技能加一条 flow 就自动有清单。
@@ -88,15 +88,15 @@ def preactivated_skill_ids(
     active: tuple[ActiveSkill, ...] | list[ActiveSkill] = ACTIVE_SKILLS,
     catalog: Mapping[str, SkillDef] = CATALOG,
 ) -> frozenset[str]:
-    """已经翻到预发动的技能 id（声明上的 ``preativated`` 开关，**唯一真源**）。
+    """已经翻到预发动的技能 id（声明上的 ``preactivated`` 开关，**唯一真源**）。
 
     本票不翻任何一条（``frozenset()``）：引擎把"已翻过去的技能"的 ``ActivateSkill`` 骨架
     从出牌阶段候选里删掉，可用性只由 ``preactivations`` 表达。参数注入让"派生"这条判据
     能对一份声明单独验证，而不必改全局注册表。
     """
-    ids = {skill.skill_id for skill in active if skill.preativated}
+    ids = {skill.skill_id for skill in active if skill.preactivated}
     ids.update(
-        skill_id for skill_id, definition in catalog.items() if definition.preativated
+        skill_id for skill_id, definition in catalog.items() if definition.preactivated
     )
     return frozenset(ids)
 

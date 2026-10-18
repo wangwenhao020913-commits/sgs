@@ -24,7 +24,7 @@ from sgs.data import load_content_pack
 from sgs.engine import Engine
 from sgs.skills import Hook, Seam, catalog as catalog_module
 from sgs.skills.active import ActiveSkill
-from sgs.skills.preativation import _build_flows, preactivated_skill_ids
+from sgs.skills.preactivation import _build_flows, preactivated_skill_ids
 from sgs.skills.damage_after import FANKUI_FLOW, fankui_step_key
 from sgs.skills.flow import (
     PickCards,
@@ -806,7 +806,7 @@ def test_manifest_renders_a_per_option_sub_pool_once():
     def pool(state, frame, owner, chosen):
         del state, owner, chosen
         # 池函数读**前序步骤答案**：这是清单与执行器共用的唯一通道。
-        pick = int(frame.data["preativation_answers"]["card"][0])
+        pick = int(frame.data["preactivation_answers"]["card"][0])
         return (1,) if pick == first else (2,)
 
     flow, _captured = _two_step_flow(pool)
@@ -839,7 +839,7 @@ def test_manifest_degrades_to_one_row_over_the_pool_limit():
 
     def pool(state, frame, owner, chosen):
         del state, owner, chosen
-        return (int(frame.data["preativation_answers"]["card"][0]),)
+        return (int(frame.data["preactivation_answers"]["card"][0]),)
 
     flow, _captured = _two_step_flow(pool)
 
@@ -1082,7 +1082,7 @@ def test_manifest_does_not_key_sub_pools_by_single_values_after_a_multi_select_s
 
     def pool(state, frame, owner, chosen):
         del state, owner, chosen
-        picks = tuple(frame.data["preativation_answers"]["cards"])
+        picks = tuple(frame.data["preactivation_answers"]["cards"])
         return (1,) if len(picks) == 2 else (2,)
 
     captured: dict[str, object] = {}
@@ -1107,7 +1107,7 @@ def test_manifest_does_not_key_sub_pools_by_single_values_after_a_multi_select_s
 # ---------------------------------------------------------------------------
 
 
-def test_the_preativation_registry_and_the_flipped_set_are_derived_from_declarations():
+def test_the_preactivation_registry_and_the_flipped_set_are_derived_from_declarations():
     """``FLOWS`` / ``preactivated_skill_ids`` 读声明，不维护第二份名单。
 
     W4-1 不翻任何真实技能（``ACTIVE_SKILLS`` 里全为 ``False``），故这里用一份合成声明
@@ -1115,14 +1115,14 @@ def test_the_preativation_registry_and_the_flipped_set_are_derived_from_declarat
     """
     declaration = ActiveSkill(
         "demo",
-        "preativated",
+        "preactivated",
         lambda state, ctx, current: current,
         flow=_noop_flow(),
-        preativated=True,
+        preactivated=True,
     )
 
     flows = _build_flows(active=(declaration,), catalog={})
-    assert flows["hero.demo.preativated"][0][1] is declaration.flow
+    assert flows["hero.demo.preactivated"][0][1] is declaration.flow
     assert preactivated_skill_ids(active=(declaration,), catalog={}) == frozenset(
-        {"hero.demo.preativated"}
+        {"hero.demo.preactivated"}
     )

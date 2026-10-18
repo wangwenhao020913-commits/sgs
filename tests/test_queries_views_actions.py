@@ -581,7 +581,7 @@ def test_a_composite_for_a_skill_outside_the_manifest_still_follows_membership()
 def test_a_preactivated_skill_drops_its_skeleton_and_availability_moves_to_the_manifest(
     monkeypatch,
 ):
-    """W4-1 §5 的机制：``preativated=True`` 的技能不再有骨架候选，可用性只剩清单。
+    """W4-1 §5 的机制：``preactivated=True`` 的技能不再有骨架候选，可用性只剩清单。
 
     本票不翻任何一条真实技能（W4-2 逐条翻），故这里用声明派生的开关注入一份集合，
     验的是"翻过去之后引擎的读法"——骨架没了、清单还在、复合动作照样能提交。

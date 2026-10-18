@@ -41,7 +41,7 @@ from sgs.skills import (
 )
 from sgs.skills import active as active_module
 from sgs.skills import catalog as catalog_module
-from sgs.skills.preativation import preactivation_for
+from sgs.skills.preactivation import preactivation_for
 from sgs.state import (
     ActivateSkill,
     FrameKind,

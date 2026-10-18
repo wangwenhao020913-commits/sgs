@@ -214,7 +214,7 @@ class SkillDef:
     应答者队列由 :func:`~sgs.skills.rejudge_capable_seats` 读**存活实例**的定义字段得座位集合。
     """
 
-    preativated: bool = False
+    preactivated: bool = False
     """本技能是否已迁到**预发动**（W4-1 的迁移开关，缺省 ``False``）。
 
     ``True`` 时引擎把该技能在出牌阶段的 ``ActivateSkill`` 骨架从 ``legal_actions`` 里删掉，
@@ -1392,14 +1392,14 @@ def _equip(
     virtual_type_ids: tuple[str, ...] = (),
     virtual_source_count: int = 1,
     step_requirements: Mapping[str, str] | None = None,
-    preativated: bool = False,
+    preactivated: bool = False,
 ) -> SkillDef:
     """按牌名 id 造一条装备技能定义（``skill_id = "equip." + 牌名 id``，票 09 §1）。
 
     ``step_requirements``（票 09）：走步骤流水线的装备技逐步的"需要做什么"，与其余各族的
     :attr:`SkillDef.step_requirements` 同一形态（缺省 ``None`` = 不分步，既有 15 条定义
-    一字不改）。``preativated``（W4-2）：已迁到预发动的接缝技（【青龙偃月刀】/【贯石斧】）
-    翻这个位——被动入口的清单随 ``SkillActivationQuery.preativation`` 下发，成本由
+    一字不改）。``preactivated``（W4-2）：已迁到预发动的接缝技（【青龙偃月刀】/【贯石斧】）
+    翻这个位——被动入口的清单随 ``SkillActivationQuery.preactivation`` 下发，成本由
     复合动作一次提交（骨架候选是"是否发动"那一问，保留）。
     ``virtual_source_count``（W4-3）：虚拟牌候选每次消耗几张来源牌——【丈八蛇矛】是 2，
     其余（含一切非转化技）恒 1；清单归属据此区分"两张来源的【杀】是谁转出来的"。
@@ -1415,7 +1415,7 @@ def _equip(
         step_requirements=step_requirements,
         virtual_type_ids=virtual_type_ids,
         virtual_source_count=virtual_source_count,
-        preativated=preativated,
+        preactivated=preactivated,
     )
 
 
@@ -1449,7 +1449,7 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         requirement="选择一张【杀】继续使用",
         seams=(Seam(SeamKind.SLASH_CANCELED, flow=GREEN_DRAGON_FLOW),),
         step_requirements={"card": "提供一张【杀】继续使用（目标不变；可发动转化技）"},
-        preativated=True,
+        preactivated=True,
     ),
     _equip(
         "serpent_spear",
@@ -1465,7 +1465,7 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         requirement="弃两张牌，令被抵消的【杀】依然造成伤害",
         seams=(Seam(SeamKind.SLASH_CANCELED, flow=AXE_FLOW),),
         step_requirements={"card": "弃置两张牌（手牌 / 装备区）令此【杀】依然造成伤害"},
-        preativated=True,
+        preactivated=True,
     ),
     _equip(
         "halberd",

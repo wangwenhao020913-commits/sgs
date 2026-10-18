@@ -2318,7 +2318,7 @@ class Engine:
         preactivations: dict[str, tuple[Step, ...]] = {}
         if kind is QueryKind.PLAY_PHASE:
             # W4-1：可用性从**候选回调**来（骨架仍在），清单按同一批技能 id 渲染。
-            # 已翻到预发动的技能（``preativated``）把骨架从候选里删掉——可用性只剩这份
+            # 已翻到预发动的技能（``preactivated``）把骨架从候选里删掉——可用性只剩这份
             # 清单；清单渲不出来 ⇒ 该技能此刻不可用（声明错误应当可见，不 fail-open）。
             offered = tuple(
                 action.skill_id

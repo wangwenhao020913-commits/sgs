@@ -773,7 +773,7 @@ def test_rende_skill_entry_is_server_driven_not_manual() -> None:
     )
 
     assert entry["available"] is True, "骨架候选仍在出牌阶段池里（技能按钮可点）"
-    assert entry["preativated"] is True, "已翻预发动：界面走清单入口"
+    assert entry["preactivated"] is True, "已翻预发动：界面走清单入口"
     assert "manual" not in entry["ui"], "手选模式已删除（没有生产者）"
     assert entry["ui"]["requirement"] == "交给一名其他角色任意张手牌"
 
@@ -1556,12 +1556,12 @@ def test_every_skill_entry_carries_type_lock_and_availability() -> None:
             "locked",
             "carrier",
             "available",
-            "preativated",
+            "preactivated",
             "ui",
         }
         assert isinstance(entry["locked"], bool)
         assert isinstance(entry["available"], bool)
-        assert isinstance(entry["preativated"], bool)
+        assert isinstance(entry["preactivated"], bool)
         assert entry["skill_type"] in ("NORMAL", "LORD")
         assert entry["carrier"] in ("HERO", "EQUIPMENT")
         # `ui` 是**表现层契约**：改键名必须同时改 app.js 的读法（同候选索引的姿态）。
@@ -2311,10 +2311,10 @@ def test_the_pending_payload_carries_the_play_phase_preactivations() -> None:
     payload = pending_payload(session)
 
     assert payload is not None
-    assert "preativations" in payload and "preativation" in payload, (
+    assert "preactivations" in payload and "preactivation" in payload, (
         "两个键恒在（没有清单时给空值），读取方不必先判键存在"
     )
-    steps = payload["preativations"][RENDE]
+    steps = payload["preactivations"][RENDE]
     assert [step["name"] for step in steps] == ["card", "seat"]
     assert [step["order"] for step in steps] == [0, 1]
     # W4-fix-3：`wording` = 声明上的 `step_requirements`（界面据此画这一问的人话）。
@@ -2324,7 +2324,7 @@ def test_the_pending_payload_carries_the_play_phase_preactivations() -> None:
     assert steps[0]["max"] >= steps[0]["min"] >= 1
     assert steps[1]["wording"] == "选择交给哪名其他角色"
     assert steps[1]["pool"][0]["options"], "选座位步的候选（seat:N）也下发了"
-    assert payload["preativation"] == [], "主动入口没有单份清单"
+    assert payload["preactivation"] == [], "主动入口没有单份清单"
 
 
 def test_the_preactivation_manifest_is_not_written_into_the_journal() -> None:
@@ -2338,7 +2338,7 @@ def test_the_preactivation_manifest_is_not_written_into_the_journal() -> None:
 
     raw = record.query.model_dump(mode="json")
 
-    assert "preactivations" not in raw and "preativation" not in raw
+    assert "preactivations" not in raw and "preactivation" not in raw
 
 
 def test_the_pending_payload_forwards_a_passive_activation_manifest() -> None:
@@ -2346,8 +2346,8 @@ def test_the_pending_payload_forwards_a_passive_activation_manifest() -> None:
 
     真实产出路径：``Engine._build_query(SKILL_ACTIVATION)`` 把
     ``SkillActivationContext.preactivation``（模型字段）写进询问；这里用**同一个询问模型**
-    的形状验投影那一半（投影旧实现在 ``getattr(query, "preativation")`` 上取错名字 ⇒ 清单
-    恒空，前端永远进不了被动预发动）。读取方 = ``app.js:preactivationManifest``。
+    的形状验投影那一半（投影曾把询问字段读成另一个名字 ⇒ 清单恒空，前端永远进不了被动
+    预发动）。读取方 = ``app.js:preactivationManifest``。
     """
     from sgs.state import SkillActivationQuery, Step, StepPool
 
@@ -2373,19 +2373,19 @@ def test_the_pending_payload_forwards_a_passive_activation_manifest() -> None:
     payload = pending_payload(query, human_seat=0)
 
     assert payload is not None
-    assert payload["preativation"] and payload["preativation"][0]["name"] == "card"
-    assert payload["preativation"][0]["pool"][0]["options"] == ["7"]
-    assert payload["preativations"] == {}, "被动入口没有「技能 id → 清单」那张表"
+    assert payload["preactivation"] and payload["preactivation"][0]["name"] == "card"
+    assert payload["preactivation"][0]["pool"][0]["options"] == ["7"]
+    assert payload["preactivations"] == {}, "被动入口没有「技能 id → 清单」那张表"
 
 
 def test_the_skill_entry_is_available_through_the_manifest_and_carries_the_switch() -> None:
-    """W4-2：可用性只剩清单（骨架候选已删），且技能条目带上 `preativated` 供界面分流。"""
+    """W4-2：可用性只剩清单（骨架候选已删），且技能条目带上 `preactivated` 供界面分流。"""
     session = _session_at_rende_play_phase()
 
     entry = next(item for item in build_skills(session, 0) if item["skill_id"] == RENDE)
 
     assert entry["available"] is True
-    assert entry["preativated"] is True, "界面据这个键把入口切到清单驱动（读取方 = app.js）"
+    assert entry["preactivated"] is True, "界面据这个键把入口切到清单驱动（读取方 = app.js）"
     assert not any(
         action.kind == "ActivateSkill" and action.skill_id == RENDE
         for action in session.pending.legal_actions
@@ -2399,7 +2399,7 @@ def test_a_foreign_viewer_does_not_get_the_actors_hand_from_the_manifest() -> No
 
     payload = pending_payload(session.pending, human_seat=foreign)
 
-    steps = payload["preativations"][RENDE]
+    steps = payload["preactivations"][RENDE]
     assert steps, "步骤形状（区域 / 张数 / 顺序）是公开的，仍然下发"
     assert all(not row["options"] for row in steps[0]["pool"]), "选牌候选被抹掉"
     assert all(not row["when"] for row in steps[1]["pool"]), (
@@ -2412,7 +2412,7 @@ def test_a_foreign_viewer_does_not_get_the_actors_hand_from_the_manifest() -> No
 # W4-3：转化技的**本地入口清单**也要按 app.js 的键下发
 #
 # 写方 = 引擎的 ``_build_query``（``transform_preactivations``，`exclude` 不进记录流），
-# 读方 = ``app.js:preactivationManifest`` → ``pending.preativations[skill_id]``。
+# 读方 = ``app.js:preactivationManifest`` → ``pending.preactivations[skill_id]``。
 # 两侧各由这里的真产出路径与 ``ui_smoke`` 的合成载荷钉一次（`CODING_STANDARDS.md` §1）。
 # ---------------------------------------------------------------------------
 
@@ -2456,7 +2456,7 @@ def test_the_pending_payload_forwards_the_transform_preactivation_manifest() -> 
     payload = pending_payload(session)
 
     assert payload is not None
-    steps = payload["preativations"][WUSHENG]
+    steps = payload["preactivations"][WUSHENG]
     assert [step["name"] for step in steps] == ["card", "seat"]
     assert [step["order"] for step in steps] == [0, 1]
     assert steps[0]["min"] == steps[0]["max"] == 1, "一张红牌"
@@ -2537,7 +2537,7 @@ def test_the_pending_payload_forwards_the_jijiu_manifest_in_the_peach_window() -
     payload = pending_payload(query, human_seat=2)
 
     assert payload is not None
-    steps = payload["preativations"][JIJIU]
+    steps = payload["preactivations"][JIJIU]
     assert [step["name"] for step in steps] == ["card"], "无目标步：濒死者由窗口固定"
     assert steps[0]["pool"][0]["options"] == [str(red_peach), str(red_dodge)], (
         "急救的来源 = 两张红色牌（真【桃】也可以当来源）"

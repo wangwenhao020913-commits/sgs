@@ -120,12 +120,12 @@ def _liuli_target_pool(
 
     **攻击范围按"成本已付"重算**（W4-2，票面 §2 的同一条判据）：步骤只收集、成本在提交点
     才搬走，但规则读的是**弃掉那张牌之后**的场况——弃自己的武器时范围回落。已选的成本牌
-    从前序答案读（清单渲染与校验器共用的 ``preativation_answers`` 通道），交给
+    从前序答案读（清单渲染与校验器共用的 ``preactivation_answers`` 通道），交给
     :func:`~sgs.effects.targets_within_attack_range` 的 ``excluding`` 用同一公式重算。
     """
     del chosen
     user = frame.data.get("source")
-    answers = frame.data.get("preativation_answers") or {}
+    answers = frame.data.get("preactivation_answers") or {}
     cost = tuple(int(card_id) for card_id in (answers.get("card") or ()))
     return tuple(
         seat
@@ -290,6 +290,6 @@ def target_change_skill_definitions() -> tuple[SkillDef, ...]:
                 "card": "弃置一张牌（手牌 / 装备区）",
                 "seat": "选择将此【杀】转移给哪名其他角色",
             },
-            preativated=True,
+            preactivated=True,
         ),
     )

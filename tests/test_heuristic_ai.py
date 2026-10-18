@@ -48,7 +48,7 @@ from sgs.skills import (
     resolve_conversion_confirmation,
     transform_candidates,
 )
-from sgs.skills.preativation import (
+from sgs.skills.preactivation import (
     flow_for,
     preactivated_skill_ids,
     preactivation_for,
@@ -286,8 +286,8 @@ def _play_phase_query(state, seat: int = 0) -> PlayPhaseQuery:
 def _play_phase_with_preactivations(state, seat: int = 0) -> PlayPhaseQuery:
     """与引擎同形的 ``PLAY_PHASE`` 询问：清单下发、已翻技能的骨架从候选里删掉。
 
-    清单用引擎自己的 :func:`~sgs.skills.preativation.preactivations_for` 渲染（不手抄），
-    删骨架读声明上的 :func:`~sgs.skills.preativation.preactivated_skill_ids`——与
+    清单用引擎自己的 :func:`~sgs.skills.preactivation.preactivations_for` 渲染（不手抄），
+    删骨架读声明上的 :func:`~sgs.skills.preactivation.preactivated_skill_ids`——与
     ``Engine._build_query`` 的两步一致。AI 的填表判据因此跑在**真询问形状**上。
     """
     candidates = tuple(
@@ -1493,7 +1493,7 @@ _COVERAGE_CASES = {
 def _coverage_required() -> frozenset[str]:
     """每一条应当可被 AI 填表发动的技能。
 
-    = **已翻到预发动的技能**（``preativated`` 开关：6 条主动 + 流离 / 青龙 / 贯石）
+    = **已翻到预发动的技能**（``preactivated`` 开关：6 条主动 + 流离 / 青龙 / 贯石）
     ∪ **那 5 条会问"是否发动"的非锁定装备技**（麒麟 / 雌雄 / 寒冰也在内）。
 
     这个范围就是 `spec.md` §5 的**收窄后措辞**（裁定见 `spec.md` §1 第 10 条）：

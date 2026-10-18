@@ -812,14 +812,14 @@ class _ActivationFrame:
 
 
 def _with_answers(frame: Any, answers: FlowAnswers) -> _ActivationFrame:
-    """把**前序步骤的答案**挂到帧上再调用派生回调（``preativation_answers``）。
+    """把**前序步骤的答案**挂到帧上再调用派生回调（``preactivation_answers``）。
 
     这是清单渲染器与执行器共用的唯一通道：池函数若依赖前序选择（【离间】的受害者池
-    按使用者、【流离】的新目标池按弃掉的牌），从 ``frame.data["preativation_answers"]``
+    按使用者、【流离】的新目标池按弃掉的牌），从 ``frame.data["preactivation_answers"]``
     读，而不是自己再存一份。
     """
     data = dict(getattr(frame, "data", {}) or {})
-    data["preativation_answers"] = dict(answers)
+    data["preactivation_answers"] = dict(answers)
     return _ActivationFrame(data)
 
 
@@ -1033,7 +1033,7 @@ def manifest(
 
     ``step_requirements``（W4-fix-3）：技能声明上的**分步文案**（:attr:`Step.wording` 的
     来源）。本函数不 import 声明表（``flow`` 反向只依赖低层模块），故由调用方
-    :func:`~sgs.skills.preativation.preactivation_for` 从 ``SkillDef.step_requirements``
+    :func:`~sgs.skills.preactivation.preactivation_for` 从 ``SkillDef.step_requirements``
     传进来；缺失的步骤 ``wording`` 为空串，读取方退回通用文案。
     """
     base = frame if frame is not None else _ActivationFrame()
@@ -1467,7 +1467,7 @@ def run_flow(
     for index, step in enumerate(flow.steps):
         # 清单渲染器与执行器共用的通道：池 / 面回调若依赖前序答案，从这里读同一份
         # （预填的复合动作与逐步询问两条路都写它，故声明只写一次）。
-        frame.data["preativation_answers"] = dict(answers)
+        frame.data["preactivation_answers"] = dict(answers)
         if step.key in prefilled:
             answers[step.key] = prefilled.pop(step.key)
             continue

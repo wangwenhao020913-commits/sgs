@@ -53,7 +53,7 @@ M1_DECK_PROFILE = "basic_53"
 M2_DECK_PROFILE = "standard_108"
 """M2 的 28 条基准跑**标准版全表**（票 32 §1）。"""
 
-PREACTIVATION_CANCEL_SCENARIO = "44-preativation-cancel-no-side-effect"
+PREACTIVATION_CANCEL_SCENARIO = "44-preactivation-cancel-no-side-effect"
 """W4-5 的**预发动取消零副作用**专项基准（脚本驱动，座 0 = 孙权）。
 
 它证的不是某条技能的效果，而是**接入层本地态**：进入预发动 → 按清单填好复合动作（含

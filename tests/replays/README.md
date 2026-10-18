@@ -24,7 +24,7 @@ slug 恰属至少一类、索引 == 文件集合 == 类表"。
   在实机里凑不齐触发前提"的确定性复现（`43-double-sword-opposite-gender` = 需要某人装备
   【雌雄双股剑】、手里有【杀】、对**异性**目标使用，而标准牌堆只有一张雌雄）。驱动里
   **读局面事实**（性别）来挑目标，判据在 `goals.M1_GOALS`，录制期与回放期各验一遍。
-  `44-preativation-cancel-no-side-effect`（W4-5）证的是接入层本地态：进入预发动、按清单
+  `44-preactivation-cancel-no-side-effect`（W4-5）证的是接入层本地态：进入预发动、按清单
   填好复合动作并交给引擎同一个校验器、然后**取消**，与"从不进预发动"的同种子局逐字节相等
   （录制期由 `scenarios.preactivation_cancel_pair`、门禁期由 `tests/test_replays.py` 各判一次）。
 - M2 28 条走**随机驱动 + 事后判据**：录制期用与产品同源的 `RandomPlayer`（测试侧种子子流，
@@ -105,7 +105,7 @@ golden + 更快的回放）；候选最少的基准先做贪心去重。**人数
 | `41-hero-guanxing` | 【观星】排列 | 武将技能 | `standard_108` | 4 | G 族授予可见性与排列：`ARRANGE` 询问 + `ArrangeCards`（只记面内位置，无带牌面的 delta） |
 | `42-hero-transform` | 转化族（武圣 / 龙胆 / 国色 / 急救） | 武将技能 | `standard_108` | 4 | H 族转化牌泛化：`UseCard` / `PlayCard` 的 `virtual_sources` 非空；来源实体牌经使用链搬进处理区再进弃牌堆 |
 | `43-double-sword-opposite-gender` | 【雌雄双股剑】异性目标的二选一 | 装备/距离/转化 | `standard_108` | 4 | 装备牌在出牌阶段的 `UseCard` + 【杀】的 `USE_AFTER_DESIGNATE_TARGET`：`SELECT_OPTION` 的**选择权在目标**（`actor` = 目标）、选项 `(discard_one, draw_one)`；答 `draw_one` ⇒ 使用者摸一张（`to_zone=hand(0)`、`reason=draw`） |
-| `44-preativation-cancel-no-side-effect` | 预发动取消零副作用 | 武将技能 | `basic_53` | 2 | 接入层本地态不进记录流：`PLAY_PHASE` 随附【制衡】的预发动清单（`preactivations`）而整局没有任何被接受的 `ActivateSkill`；同种子下取消路径与「从不进预发动」路径的记录流逐字节相等 |
+| `44-preactivation-cancel-no-side-effect` | 预发动取消零副作用 | 武将技能 | `basic_53` | 2 | 接入层本地态不进记录流：`PLAY_PHASE` 随附【制衡】的预发动清单（`preactivations`）而整局没有任何被接受的 `ActivateSkill`；同种子下取消路径与「从不进预发动」路径的记录流逐字节相等 |
 
 ## 记录面 v2（施工票 21 落地后）
 

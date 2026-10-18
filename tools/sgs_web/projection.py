@@ -78,7 +78,7 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
         if action.kind == "ActivateSkill"
     }
     # W4-1：**预发动清单也是可用性的一份**。已翻到预发动的技能不再有骨架候选，可用性
-    # 只剩 ``PLAY_PHASE.preactivations``（主动入口）与 ``SKILL_ACTIVATION.preativation``
+    # 只剩 ``PLAY_PHASE.preactivations``（主动入口）与 ``SKILL_ACTIVATION.preactivation``
     # （被动入口）——两者都从询问里读，不另问引擎"满不满足条件"。
     # W4-fix-2：转化技的候选已从 ``legal_actions`` 收回，可用性同样由转化清单
     # （``transform_preactivations``）回答。
@@ -127,7 +127,7 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
                 "available": definition.skill_id in offered,
                 # W4-2：这条技能是否已翻到预发动。界面据此**只**走清单入口（不再把骨架
                 # 候选画成"发动技能 XXX"选项）；它是声明上的开关，不是第二条合法性判据。
-                "preativated": bool(definition.preativated),
+                "preactivated": bool(definition.preactivated),
                 # 界面怎么摆这个技能：转化来源牌（【龙胆】）。**纯表现层派生**，只读候选与
                 # 实例声明，不参与任何合法性判定。
                 "ui": _skill_ui(definition, actions, hand, virtual),
@@ -179,7 +179,7 @@ def _skill_ui(
     W4-2 删掉了 ``manual`` / ``pick_cards`` / ``pick_seats``：A 族六条主动技全部走
     **预发动清单**，候选恒为"是否发动"的裸骨架（不再带 ``picks`` / ``choices``），故
     "多选手牌 → 点一位在场角色"的手选模式**没有生产者**（票 05 起就只剩遗留路径）。
-    预发动清单本身由询问字段下发（``preativations`` / ``preativation``），不在这里。
+    预发动清单本身由询问字段下发（``preactivations`` / ``preactivation``），不在这里。
     """
     del actions, hand  # 手选模式删除后，界面提示只剩 requirement 与转化来源
     skill_id = definition.skill_id
@@ -846,7 +846,7 @@ def _steps_payload(steps: Any) -> list[dict[str, Any]]:
     return [step.model_dump(mode="json") for step in steps]
 
 
-def _preativation_payload(manifests: Any) -> dict[str, list[dict[str, Any]]]:
+def _preactivation_payload(manifests: Any) -> dict[str, list[dict[str, Any]]]:
     """``技能 id → 清单`` → JSON 形状；保持询问里的顺序（引擎已按技能 id 排序）。"""
     return {skill_id: _steps_payload(steps) for skill_id, steps in manifests.items()}
 
@@ -879,9 +879,9 @@ def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
                         options.append(option)
             step["pool"] = [{"when": [], "options": options}]
 
-    for steps in (payload.get("preativations") or {}).values():
+    for steps in (payload.get("preactivations") or {}).values():
         mask(steps)
-    mask(payload.get("preativation") or [])
+    mask(payload.get("preactivation") or [])
 
 
 def pending_payload(
@@ -923,14 +923,14 @@ def pending_payload(
     payload["candidate_index"] = candidate_index(query)
     # 预发动清单（W4-1）：**不进记录流**（询问字段 ``exclude``），故接入层显式下发。
     # 主动入口 = 技能 id → 清单；被动入口 = 单份清单。没有时给空值，键恒在（读取方契约）。
-    # 载荷键沿用 W4-1 已下发的拼写（``preativations`` / ``preativation``，读取方 = app.js），
-    # 与**询问模型字段**（`preactivations` / `preactivation`）不是同一个名字——改键要两头一起改。
+    # 载荷键与**询问模型字段**同名（``preactivations`` / ``preactivation``，读取方 = app.js）：
+    # W5-00 把两族拼写统一到正确写法，改键仍要两头一起改。
     # W4-3：转化技的清单是**本地入口**（确认 = 普通候选，不是复合动作），但载体同一个键：
-    # 界面按技能声明上的 ``preativated`` 分辨"复合动作 / 本地入口"，读取方因此只有一处。
+    # 界面按技能声明上的 ``preactivated`` 分辨"复合动作 / 本地入口"，读取方因此只有一处。
     manifests = dict(getattr(query, "preactivations", None) or {})
     manifests.update(getattr(query, "transform_preactivations", None) or {})
-    payload["preativations"] = _preativation_payload(manifests)
-    payload["preativation"] = _steps_payload(getattr(query, "preactivation", ()) or ())
+    payload["preactivations"] = _preactivation_payload(manifests)
+    payload["preactivation"] = _steps_payload(getattr(query, "preactivation", ()) or ())
     if foreign:
         _mask_foreign_preactivations(payload)
     # 询问窗口的"谁对谁做了什么"：从**结算栈顶帧 + 询问本身**派生的表现层事实。

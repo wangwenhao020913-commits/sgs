@@ -718,11 +718,11 @@ def _lijian_victims(
     """步 3 的池：步 2 选中那名**使用者**的合法受害者（真牌 ``check_targets`` 链）。
 
     池依赖前序答案 ⇒ 从 :func:`~sgs.skills.flow._with_answers` 挂上的
-    ``frame.data["preativation_answers"]`` 读（清单渲染与校验器共用的唯一通道，W4-1）。
+    ``frame.data["preactivation_answers"]`` 读（清单渲染与校验器共用的唯一通道，W4-1）。
     没有前序答案（清单退化 / 尚未选使用者）⇒ 空池，宁可少给候选也不瞎猜。
     """
     del chosen
-    answers = (getattr(frame, "data", {}) or {}).get("preativation_answers") or {}
+    answers = (getattr(frame, "data", {}) or {}).get("preactivation_answers") or {}
     users = answers.get("user") or ()
     if not users:
         return ()
@@ -859,7 +859,7 @@ class ActiveSkill(HeroSkillDecl):
     offers: Callable[[GameState, ModifierContext, Any], Any]
     activate: ActivationHandler | None = None
     flow: SkillFlow | None = None
-    preativated: bool = False
+    preactivated: bool = False
     """本技能是否已迁到**预发动**（W4-1 的迁移开关，缺省 ``False``）。
 
     ``True`` 时引擎在出牌阶段把它的 ``ActivateSkill`` 骨架从 ``legal_actions`` 里删掉、
@@ -874,19 +874,19 @@ class ActiveSkill(HeroSkillDecl):
 
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 孙权【制衡】：弃任意张（手牌 + 装备区）→ 摸等量（规则 1009）；票 04 的单步流水线。
-    ActiveSkill("sunquan", "zhiheng", _zhiheng_offers, flow=ZHIHENG_FLOW, preativated=True),
+    ActiveSkill("sunquan", "zhiheng", _zhiheng_offers, flow=ZHIHENG_FLOW, preactivated=True),
     # 刘备【仁德】：给一名其他角色任意张手牌；本阶段首次给到第 2 张回复 1 点（规则 976）。
-    ActiveSkill("liubei", "rende", _rende_offers, flow=RENDE_FLOW, preativated=True),
+    ActiveSkill("liubei", "rende", _rende_offers, flow=RENDE_FLOW, preactivated=True),
     # 周瑜【反间】：令一名其他角色选花色 → 获得并展示你的一张手牌 → 花色不同则受伤（规则 1017）。
     # W4-2：只把**第一段**（选谁）放进预发动；猜花色 / 挑牌仍由目标逐步应答。
-    ActiveSkill("zhouyu", "fanjian", _fanjian_offers, flow=FANJIAN_FLOW, preativated=True),
+    ActiveSkill("zhouyu", "fanjian", _fanjian_offers, flow=FANJIAN_FLOW, preactivated=True),
     # 华佗【青囊】：弃一张手牌 → 一名已受伤角色回复 1 点（规则 1040）；票 02 的流水线消费者。
-    ActiveSkill("huatuo", "qingnang", _qingnang_offers, flow=QINGNANG_FLOW, preativated=True),
+    ActiveSkill("huatuo", "qingnang", _qingnang_offers, flow=QINGNANG_FLOW, preactivated=True),
     # 貂蝉【离间】：弃一张牌 + 两名男性角色 → 视为其中一名对另一名使用【决斗】（规则 1049）。
     # W4-2：手写步骤流水线改成声明式（三步各有自己的池：受害者池按使用者）。
-    ActiveSkill("diaochan", "lijian", _lijian_offers, flow=LIJIAN_FLOW, preativated=True),
+    ActiveSkill("diaochan", "lijian", _lijian_offers, flow=LIJIAN_FLOW, preactivated=True),
     # 孙尚香【结姻】：弃两张手牌 + 一名已受伤男性 → 你与其各回复 1 点（规则 1033）。
-    ActiveSkill("sunshangxiang", "jieyin", _jieyin_offers, flow=JIEYIN_FLOW, preativated=True),
+    ActiveSkill("sunshangxiang", "jieyin", _jieyin_offers, flow=JIEYIN_FLOW, preactivated=True),
 )
 """A 族六条技能（票 04 §逐技能落位表；【苦肉】不在 16 名名单、只留形状，见模块 docstring）。"""
 
@@ -965,7 +965,7 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
             modifiers=(Modifier(ModifierPoint.CANDIDATES, skill.offers),),
             requirement=_REQUIREMENTS[skill.short_id],
             step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
-            preativated=skill.preativated,
+            preactivated=skill.preactivated,
         )
         for skill in ACTIVE_SKILLS
     )

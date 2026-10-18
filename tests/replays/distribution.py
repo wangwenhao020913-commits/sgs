@@ -71,7 +71,7 @@ SLUG_CLASSES: dict[str, tuple[str, ...]] = {
     # ---- 票 17 / W4-5 的脚本驱动专项基准（既不属于 M1 回归网，也不凑 M2 的七类计数） ----
     "43-double-sword-opposite-gender": ("装备/距离/转化",),
     # W4-5：被取消的是【制衡】（武将主动技）的预发动清单 ⇒ 归「武将技能」。
-    "44-preativation-cancel-no-side-effect": ("武将技能",),
+    "44-preactivation-cancel-no-side-effect": ("武将技能",),
     # ---- 7. 普通锦囊与打出 ----
     "31-play-card-response": ("普通锦囊与打出",),
     "32-five-grains-selection": ("普通锦囊与打出",),

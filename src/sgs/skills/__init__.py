@@ -119,7 +119,7 @@ from .active import (
     run_flow,
 )
 from .flow import manifest, validate_flow_activation
-from .preativation import (
+from .preactivation import (
     preactivation_for,
     preactivated_skill_ids,
     preactivations_for,

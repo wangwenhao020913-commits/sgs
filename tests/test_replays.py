@@ -499,7 +499,7 @@ def test_every_scripted_baseline_has_an_after_the_fact_goal() -> None:
     )
 
 
-def test_the_preativation_cancel_equals_the_not_activating_path() -> None:
+def test_the_preactivation_cancel_equals_the_not_activating_path() -> None:
     """W4-5：**取消零副作用**——取消与"从不进预发动"两条路径的后续记录逐字节相等。
 
     录制期 ``scenarios._record_scripted`` 已判一次；这里是**门禁期**的复算：同一颗种子

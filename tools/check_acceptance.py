@@ -7,7 +7,7 @@
 用法::
 
     .venv/bin/python tools/check_acceptance.py            # 扫全部 .scratch/*/issues/*.md
-    .venv/bin/python tools/check_acceptance.py .scratch/w4-fix .scratch/m4-preativation
+    .venv/bin/python tools/check_acceptance.py .scratch/w4-fix .scratch/w5-borrowed-sword
 
 判定：
 
