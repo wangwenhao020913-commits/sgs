@@ -48,7 +48,13 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .behaviors import CardBehavior, TargetCount, UseContext, behavior_for
+from .behaviors import (
+    CardBehavior,
+    DODGE_RESPONSE_CARD,
+    TargetCount,
+    UseContext,
+    behavior_for,
+)
 from .modifiers import (
     CandidateScope,
     ModifierContext,
@@ -520,7 +526,12 @@ def _discard(state: GameState, seat: int, answers_seq: int) -> list[Action]:
 def _dodge(
     state: GameState, seat: int, answers_seq: int, providers_used: tuple[str, ...] = ()
 ) -> list[Action]:
-    """【闪】的响应窗口：真牌候选 + "需要牌"提供者序列（票 10 §5 / 票 30）+ 放弃。
+    """【闪】的响应窗口：真【闪】候选 + "需要牌"提供者序列（票 10 §5 / 票 30）+ 放弃。
+
+    **候选按 ``required`` 牌名收口**（B1）：只有**能当【闪】**的牌进来——真【闪】与
+    转化【闪】（虚拟牌的类型就是 ``"dodge"``，与真牌同一条判据）。这里不能用
+    ``_usable_hand`` 的"语境 + 时机"：那两样【无懈可击】同样命中，于是无懈被请进
+    【闪】候选、再由窗口当成【闪】抵消掉【杀】（B1 的根因之一）。
 
     提供者（【八卦阵】）由 ``CANDIDATES`` 挂点追加为 ``ActivateSkill``；已经问过的
     提供者（``providers_used``）被过滤掉——"每个提供者只问一次"。选中才惰性判定。
@@ -528,7 +539,7 @@ def _dodge(
     """
     actions: list[Action] = [
         UseCard(card=card, targets=(), answers_seq=answers_seq)
-        for card in _usable_hand(state, seat, UseContext.RESPONSE, Timing.RESOLVE_BEFORE_EFFECT)
+        for card in _required_hand(state, seat, DODGE_RESPONSE_CARD)
     ]
     generated = apply_modifiers(
         ModifierPoint.CANDIDATES,
@@ -599,6 +610,10 @@ def _respond(
 ) -> list[Action]:
     """响应窗口：手牌里满足 ``required`` 的牌各一个候选，放弃恒在最后。
 
+    取牌走 :func:`_required_hand`——**与【闪】窗口同一道牌名闸门**（B1）。``required``
+    是牌名（``slash`` / ``dodge`` / ``nullify``），不是询问种类：同一个函数服务南蛮 /
+    万箭 / 决斗 / 借刀 / 无懈五种语境，按 ``QueryKind`` 分支就会漏掉其中一类。
+
     - ``mode = PLAY``（南蛮 / 万箭 / 决斗）：候选是 ``PlayCard``（打出，无目标、不占次数）；
     - ``mode = USE``（【借刀杀人】迫使的"使用【杀】"、无懈窗口）：候选是 ``UseCard``，
       目标走 :func:`forced_use_targets`（**与真牌同一条 ``TARGET_POOL`` 链**），
@@ -608,12 +623,7 @@ def _respond(
     手上没有所需牌者候选只有 ``Pass``——**仍发询问**（票 19 §9.2 的"各获一次机会"）。
     """
     actions: list[Action] = []
-    for card_id in state.player(seat).hand:
-        card = state.card(card_id)
-        if ctx.required is not None and card.type != ctx.required:
-            continue
-        if check_forbidden(state, seat, card):
-            continue
+    for card in _required_hand(state, seat, ctx.required):
         if ctx.mode is RespondMode.USE:
             if check_count(state, seat, card):
                 continue
@@ -729,6 +739,32 @@ def _arrange(answers_seq: int, ctx: ArrangeContext) -> list[Action]:
         for split in range(ctx.count + 1)
         for order in permutations(range(ctx.count))
     ]
+
+
+def _required_hand(
+    state: GameState, seat: int, required: str | None
+) -> list[CardRef]:
+    """手牌里**能当** ``required`` 牌名的牌（按手牌序）；``None`` = 不过滤牌名。
+
+    **这是所有"需要某张牌"的响应窗口共用的候选闸门**（B1）：``_dodge``（【闪】）与
+    ``_respond``（打出【杀】/ 打出【闪】/ 借刀的使用【杀】/【无懈可击】）都从这里取牌。
+
+    判据是**牌名**而不是 :class:`~sgs.state.QueryKind`：【闪】窗口是独立的 ``DODGE``，
+    其余五类挤在 ``RESPOND`` 里；按询问种类分支会让 DODGE 绕过闸门（B1 的根因）。
+    真牌与转化牌也不必区分——:func:`~sgs.skills.transformed_card` 把虚拟牌的类型写成
+    目标牌名，故【龙胆】的转化【闪】与真【闪】在这里同形。
+
+    ``required = None`` 是改判窗口（``WindowCause.REJUDGE``）：打出一张**任意**手牌。
+    """
+    cards: list[CardRef] = []
+    for card_id in state.player(seat).hand:
+        card = state.card(card_id)
+        if required is not None and card.type != required:
+            continue
+        if check_forbidden(state, seat, card):
+            continue
+        cards.append(card)
+    return cards
 
 
 def _usable_hand(

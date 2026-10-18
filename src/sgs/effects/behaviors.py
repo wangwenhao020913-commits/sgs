@@ -35,6 +35,7 @@ from sgs.timing import Timing
 
 __all__ = [
     "CARD_BEHAVIORS",
+    "DODGE_RESPONSE_CARD",
     "NULLIFY_RESPONSE_CARD",
     "CallOp",
     "CardBehavior",
@@ -99,6 +100,15 @@ NULLIFY_RESPONSE_CARD = "nullify"
 """无懈窗口里可用的牌名（票 11 §7 的 ``required``）。
 
 它是**牌面事实**：本文件是行为表的唯一真源，故约束值也住在这里，``engine/`` 不出现具体牌名。
+"""
+
+DODGE_RESPONSE_CARD = "dodge"
+"""【闪】窗口里可用的牌名（B1 的 ``required``）。
+
+与 :data:`NULLIFY_RESPONSE_CARD` 同姿态：它是**牌面事实**，候选生成与抵消判定都读这一处。
+两条响应路径（独立的 ``QueryKind.DODGE`` 与 ``RESPOND``）都按**牌名**而不是按询问种类
+收口——【无懈可击】的 ``use_timings`` 同样命中"响应 + 生效前"，只按语境取牌就会把它请进
+【闪】候选（B1 的根因之一）。
 """
 
 

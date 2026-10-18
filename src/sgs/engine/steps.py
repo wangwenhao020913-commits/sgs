@@ -39,6 +39,7 @@ from typing import Any, Protocol
 
 from sgs.data import Identity, Mode
 from sgs.effects import (
+    DODGE_RESPONSE_CARD,
     NULLIFY_RESPONSE_CARD,
     EffectStep,
     FinalZone,
@@ -498,7 +499,9 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
     - 提供者（【八卦阵】/【护驾】）在候选里以 ``ActivateSkill`` 出现；选中即**惰性展开**：
       【八卦阵】压判定帧（红 ⇒ 需要被满足）、【护驾】开**势力求助窗口**（同势力角色打出
       【闪】⇒ 需要被满足）。两条路都由技能层的提供者注册表分派，引擎不认具体技能 id。
-    - 真【闪】⇒ 抵消，【闪】自己照走 L4 / L5（M1 语义）。
+    - 真【闪】⇒ 抵消，【闪】自己照走 L4 / L5（M1 语义）。**只有能当【闪】的
+      ``UseCard`` 算响应**：候选生成已按 ``required`` 牌名收口（B1），这里按同一牌名
+      再判一次，避免把【无懈可击】这类牌当成【闪】抵消掉【杀】。
 
     **本次窗口需要几张**由 :func:`~sgs.effects.response_count` 给出（缺省 1；【无双】改成 2）：
     每成功一次（真【闪】或提供者）``dodges_done`` 加一，**攒够所需张数才算抵消**；
@@ -562,7 +565,7 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
             if done >= required:
                 frame.data["canceled"] = True
         return "stay"
-    if isinstance(action, UseCard):
+    if isinstance(action, UseCard) and action.card.type == DODGE_RESPONSE_CARD:
         done += 1
         frame.data["dodges_done"] = done
         if done >= required:
@@ -570,6 +573,9 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
         # 抵消是"被响应帧"的标志；【闪】自己作为一次**使用**照走 L4 / L5（票 07 §3）。
         host.start_use(action.card, source=target, targets=())
     else:
+        # ``Pass``，或一张**不是【闪】**的 ``UseCard``（B1 的第二道闸）：候选已按
+        # ``required`` 牌名收口（``actions._required_hand``），这里不再 fail-open——
+        # 不把别的牌记成响应，也不替它压使用帧；【杀】照常结算。
         frame.data["canceled"] = False
     # 重入本步：等【闪】的 USE 帧出栈后，由上一条 ``canceled`` 分支决定去向；
     # 张数没攒够则继续问下一次响应。

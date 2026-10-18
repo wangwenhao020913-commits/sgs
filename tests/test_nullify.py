@@ -26,15 +26,21 @@ from dataclasses import dataclass, field
 import pytest
 
 from sgs.data import RuleConfig, load_content_pack
-from sgs.effects import CARD_BEHAVIORS, FinalZone, ResponseWindow
+from sgs.effects import CARD_BEHAVIORS, FinalZone, ResponseWindow, legal_actions_for
 from sgs.engine import Engine, dump_journal, read_journal
+from sgs.engine.steps import _dodge_window
+from sgs.resolution import Frame
 from sgs.state import (
+    DodgeContext,
     EndPhase,
+    FrameKind,
     MoveReason,
     Pass,
     Phase,
     PlayCard,
     QueryKind,
+    RespondContext,
+    RespondMode,
     UseCard,
     WindowCause,
     Zone,
@@ -574,3 +580,212 @@ def test_the_nullify_chain_is_reproducible_and_round_trips(pack, tmp_path):
     )
     assert window.cause is WindowCause.NULLIFY
     assert window.required == "nullify"
+
+
+# ---------------------------------------------------------------------------
+# B1：无懈只响应锦囊——六类 ``required`` 响应窗口按**牌名**收口
+# ---------------------------------------------------------------------------
+#
+# 根因两条（`.scratch/w5-borrowed-sword/issues/01`）：`_dodge` 用 `_usable_hand` 只按
+# "语境 + 时机"取牌、不按牌名，而【无懈可击】的 `use_timings` 恰好命中 ⇒ 它进【闪】候选；
+# `_dodge_window` 又把任何 `UseCard` 都算一次【闪】。修法在**共用候选生成**上按 ``required``
+# 牌名收口（不是按 ``QueryKind`` 一刀切），拒绝【八卦阵】/【国色】这类合法路径被误修。
+
+
+def _response_state(pack):
+    """双人局面：座位 1 手里同时有【杀】【闪】【无懈可击】——六类窗口都从这里取候选。"""
+    slash = cards_of_type(pack, "slash")[0]
+    dodge = cards_of_type(pack, "dodge")[0]
+    nullify = cards_of_type(pack, "nullify")[0]
+    return build_state(
+        pack=pack,
+        seats=[SeatSpec(), SeatSpec(hand=(slash, dodge, nullify))],
+        deck=_deck_excluding(pack, slash, dodge, nullify),
+        turn_seat=0,
+    )
+
+
+_REQUIRED_RESPONSE_WINDOWS = (
+    (
+        "DODGE（闪）",
+        "dodge",
+        lambda state: legal_actions_for(
+            state, 1, QueryKind.DODGE, answers_seq=1, payload=DodgeContext()
+        ),
+    ),
+    (
+        "BARBARIAN（打出杀）",
+        "slash",
+        lambda state: legal_actions_for(
+            state,
+            1,
+            QueryKind.RESPOND,
+            answers_seq=1,
+            payload=RespondContext(
+                cause=WindowCause.BARBARIAN_INVASION, required="slash"
+            ),
+        ),
+    ),
+    (
+        "ARROW（打出闪）",
+        "dodge",
+        lambda state: legal_actions_for(
+            state,
+            1,
+            QueryKind.RESPOND,
+            answers_seq=1,
+            payload=RespondContext(cause=WindowCause.ARROW_BARRAGE, required="dodge"),
+        ),
+    ),
+    (
+        "DUEL（打出杀）",
+        "slash",
+        lambda state: legal_actions_for(
+            state,
+            1,
+            QueryKind.RESPOND,
+            answers_seq=1,
+            payload=RespondContext(cause=WindowCause.DUEL, required="slash"),
+        ),
+    ),
+    (
+        "BORROWED_SWORD（使用杀）",
+        "slash",
+        lambda state: legal_actions_for(
+            state,
+            1,
+            QueryKind.RESPOND,
+            answers_seq=1,
+            payload=RespondContext(
+                cause=WindowCause.BORROWED_SWORD,
+                required="slash",
+                target=1,
+                mode=RespondMode.USE,
+                use_targets=(0,),
+            ),
+        ),
+    ),
+    (
+        "NULLIFY（无懈）",
+        "nullify",
+        lambda state: legal_actions_for(
+            state,
+            1,
+            QueryKind.RESPOND,
+            answers_seq=1,
+            payload=RespondContext(
+                cause=WindowCause.NULLIFY,
+                required="nullify",
+                target=1,
+                mode=RespondMode.USE,
+            ),
+        ),
+    ),
+)
+"""六类带 ``required`` 的响应窗口：DODGE 走独立 kind，其余五类走 ``RESPOND``。
+
+两列的对应关系就是被测的契约：**候选牌的类型 == required 牌名**。【无懈可击】的
+``use_timings`` 命中"响应 + 生效前"，所以只在 DODGE 这一行里它是**非法**候选。"""
+
+
+@pytest.mark.parametrize(
+    ("label", "required", "window"),
+    _REQUIRED_RESPONSE_WINDOWS,
+    ids=[row[0] for row in _REQUIRED_RESPONSE_WINDOWS],
+)
+def test_every_required_response_window_offers_only_cards_of_that_name(
+    pack, label, required, window
+):
+    """表驱动：漏哪个窗口就红哪个参数——先测出真漏，再一处收口。"""
+    actions = window(_response_state(pack))
+
+    cards = [
+        action.card
+        for action in actions
+        if isinstance(action, (UseCard, PlayCard))
+    ]
+    assert cards, f"{label}：窗口没有真牌候选，表驱动没有测到东西"
+    assert {card.type for card in cards} == {required}, (
+        f"{label}：响应窗口只收 required={required!r} 的牌；"
+        f"实收 {sorted({card.type for card in cards})!r}"
+    )
+
+
+def test_the_dodge_window_never_offers_a_nullify(pack):
+    """【无懈可击】只在锦囊的结算里可用：手里有它也不能进【闪】候选。"""
+    slash = cards_of_type(pack, "slash")[0]
+    dodge = cards_of_type(pack, "dodge")[0]
+    nullify = cards_of_type(pack, "nullify")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(slash,)), SeatSpec(hand=(dodge, nullify))],
+        deck=_deck_excluding(pack, slash, dodge, nullify),
+        turn_seat=0,
+    )
+
+    actions = legal_actions_for(
+        state, 1, QueryKind.DODGE, answers_seq=1, payload=DodgeContext()
+    )
+
+    offered = [action.card.card_id for action in actions if isinstance(action, UseCard)]
+    assert offered == [dodge], "【闪】候选恰是那张真【闪】，【无懈可击】不在其中"
+
+
+class _DodgeWindowHost:
+    """``_dodge_window`` 的最小宿主：把剧本里那一条应答交回去，不压帧、不派发。
+
+    "无懈不能当【闪】"要测的是**抵消判定**本身（候选收口之后也不 fail-open）：
+    窗口拿到一张非【闪】的 ``UseCard`` 时不许把它记成响应，更不许替它压出使用帧。
+    """
+
+    def __init__(self, state, answer) -> None:
+        self.state = state
+        self.answer = answer
+        self.used = []
+
+    def advance_provider(self, frame, timing):
+        return None, None
+
+    def ask_query(self, kind, actor, timing, payload=None):
+        return self.answer
+
+    def suspended(self, action):
+        return False
+
+    def provider_registered(self, skill_id):
+        raise AssertionError("本用例不提供提供者")
+
+    def start_provider(self, frame, skill_id, actor, timing):
+        raise AssertionError("本用例不提供提供者")
+
+    def open_skill_judgment(self, frame, seat, skill_id):
+        raise AssertionError("本用例不提供提供者")
+
+    def start_use(self, card, **kwargs):
+        self.used.append(card)
+
+
+def test_a_nullify_cannot_be_the_dodge_that_cancels_a_slash(pack):
+    """即使窗口收到一张【无懈可击】，它也不构成响应：【杀】照常结算。"""
+    slash = cards_of_type(pack, "slash")[0]
+    nullify = cards_of_type(pack, "nullify")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(slash,)), SeatSpec(hand=(nullify,))],
+        deck=_deck_excluding(pack, slash, nullify),
+        turn_seat=0,
+    )
+    frame = Frame(
+        kind=FrameKind.RESOLVE,
+        data={"source": 0, "card": state.card(slash), "targets": (1,)},
+    )
+    host = _DodgeWindowHost(
+        state, UseCard(card=state.card(nullify), targets=(), answers_seq=1)
+    )
+
+    control = _dodge_window(host, frame, 1)
+
+    assert control == "stay"
+    assert frame.data.get("dodges_done", 0) == 0, "【无懈可击】不算一次【闪】"
+    assert frame.data["canceled"] is False, "【无懈可击】不能抵消【杀】"
+    assert host.used == [], "【无懈可击】不能被当成【闪】压进使用链"

@@ -205,8 +205,14 @@ M2_SCENARIOS: dict[str, Scenario] = {
     "27-slash-beyond-adjacent": _m2(
         "27-slash-beyond-adjacent", seed=89, player_count=6
     ),
+    # W5-01（B1）：种子 165 → 13。旧录像里有一条**非法动作**——【无懈可击】被当成
+    # 【闪】用出去抵消【杀】（保存下来的 bug 现场）。修后回放必然失配，故按本模块纪律
+    # **重新选种**而不是保留那条非法动作：13 命中同一判据（装备替换），且记录条数最少
+    # （1092；`PYTHONPATH=tests .venv/bin/python -m replays.seed_search --slug
+    # 28-equipment-replacement --limit 60` 的前 5 名里最少，旧种子 165 重录后涨到 4.83 MiB
+    # 会撞单文件体积绊线）。
     "28-equipment-replacement": _m2(
-        "28-equipment-replacement", seed=165, player_count=4
+        "28-equipment-replacement", seed=13, player_count=4
     ),
     # W4-fix-2：转化技只经预发动 ⇒ 随机驱动产不出转化动作，本条改**脚本驱动**
     # （目标段 = 装上丈八蛇矛后按清单确认一次）。种子见 `SCENARIOS` 处的说明。

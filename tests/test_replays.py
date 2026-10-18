@@ -358,6 +358,39 @@ def test_golden_replay_matches_byte_for_byte(slug: str, tmp_path: Path, update_g
         )
 
 
+def test_no_golden_replay_offers_a_non_dodge_card_in_a_dodge_window() -> None:
+    """B1 的**金录像扫描**（防"重录时又把 bug 录回去"）。
+
+    扫描全部金录像里的两类【闪】窗口——独立 ``DODGE`` 询问与 ``RESPOND`` +
+    ``required="dodge"``（【万箭齐发】）——断言每条真牌候选的牌面类型都是【闪】。
+    这条判据不依附某一条基准：删掉 / 重录 / 新增任何一条录像，泄漏都会被它抓住。
+    """
+    offenders: list[str] = []
+    for path in _golden_files():
+        for record in read_journal(path):
+            if record.kind != "query":
+                continue
+            query = record.query
+            is_dodge_window = query.kind is QueryKind.DODGE or (
+                query.kind is QueryKind.RESPOND
+                and query.required == DODGE_RESPONSE_CARD
+            )
+            if not is_dodge_window:
+                continue
+            for action in query.legal_actions:
+                if not isinstance(action, (UseCard, PlayCard)):
+                    continue
+                if action.card.type != DODGE_RESPONSE_CARD:
+                    offenders.append(
+                        f"{path.stem}:seq={query.seq}:{action.kind}"
+                        f"({action.card.name}:{action.card.type})"
+                    )
+
+    assert not offenders, (
+        "金录像的【闪】窗口里出现非【闪】候选（B1 回归）：" + "、".join(offenders)
+    )
+
+
 def test_readme_index_matches_the_golden_file_set() -> None:
     assert _readme_slugs() == {path.stem for path in _golden_files()}, (
         "索引表与基准文件集合互相等于（防孤儿基准 / 孤儿行）"

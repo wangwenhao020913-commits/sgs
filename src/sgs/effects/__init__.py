@@ -28,6 +28,7 @@ from .actions import (
 )
 from .behaviors import (
     CARD_BEHAVIORS,
+    DODGE_RESPONSE_CARD,
     NULLIFY_RESPONSE_CARD,
     CallOp,
     CardBehavior,
@@ -72,6 +73,7 @@ from .primitives import (
 
 __all__ = (
     "CARD_BEHAVIORS",
+    "DODGE_RESPONSE_CARD",
     "EFFECTIVENESS",
     "NULLIFY_RESPONSE_CARD",
     "OPS",

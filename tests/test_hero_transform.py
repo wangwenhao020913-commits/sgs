@@ -774,6 +774,53 @@ def test_guose_places_its_virtual_indulgence_in_the_judge_zone_and_it_judges():
     assert not engine.state.virtual_judge, "来源牌离开判定区后映射要清掉"
 
 
+def test_the_guose_virtual_indulgence_still_opens_a_nullify_window_offering_nullify():
+    """B1 的**合法**邻例：国色把方块牌当【乐不思蜀】不能被一起修掉。
+
+    判定阶段在**虚拟牌**的结算帧上照常开 ``NULLIFY`` 窗口；视图只投实体来源牌，所以
+    从记录流上看很像"无懈在响应杀"，但那是延时锦囊 ⇒ 候选里必须有【无懈可击】。
+    """
+    nullify = _cards("nullify")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(DIAMOND,), hero="daqiao"), SeatSpec(hand=(nullify,))],
+        deck=_deck_excluding(DIAMOND, nullify),
+        turn_seat=0,
+    )
+    engine = _FrameSpy.from_state(state, seed=3)
+    players = [_GuoseUser(), _GuoseUser()]
+    for _ in range(3000):
+        if engine.pending is None:
+            engine._step()
+            if engine.finished:
+                break
+            continue
+        query = engine.pending
+        engine.submit(players[query.actor].respond(query))
+
+    windows = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.RESPOND
+        and record.query.cause is WindowCause.NULLIFY
+    ]
+    assert windows, "虚拟【乐不思蜀】的结算必须开无懈窗口"
+    offered = {
+        action.card.card_id
+        for window in windows
+        for action in window.legal_actions
+        if isinstance(action, UseCard)
+    }
+    assert nullify in offered, "国色路径的【无懈可击】候选必须保留"
+    assert {
+        action.card.type
+        for window in windows
+        for action in window.legal_actions
+        if isinstance(action, (UseCard, PlayCard))
+    } == {"nullify"}, "无懈窗口只收【无懈可击】"
+
+
 # ---------------------------------------------------------------------------
 # 急救（华佗）：红色牌 →【桃】，限回合外（验收 6；时机判据用 ``turn_seat``）
 # ---------------------------------------------------------------------------
