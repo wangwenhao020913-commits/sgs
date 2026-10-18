@@ -37,6 +37,9 @@
     "preactivatedSkill", "isPassivePreativation", "renderPreativationEntry", "setActionLabels",
     // 报障 3：事件回放（步长按钮 0.1–0.5s，默认 0.1）+ 效果区逐事件派生 + 描述文本
     "flushPlayback", "stepPlayback", "renderProcessing", "applyEffectDelta", "DELAY_STEPS_MS", "describeEffect",
+    // W4-6：回放页（全区域增量重建 / 询问面板 / play-pause / 步长 / 空壳引导）
+    "renderEffectCards", "replayStep", "replaySeek", "toggleReplayPlay", "stopReplayPlay",
+    "renderRunList", "runRow",
     // 票 14：「提供一张 B」的就地渲染 + 置灰纯函数（cardFace）
     "isProvide", "provideSlotIndex", "cardFace", "activateCard", "renderProvide", "toggleProvidePick",
     // 票 15：选择面的张数上限（读服务端 spec.total）+ 槽位点选（【遗计】一次两张 / 取消）

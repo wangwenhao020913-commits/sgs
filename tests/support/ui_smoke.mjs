@@ -100,9 +100,31 @@ globalThis.fetch = async (path, options) => {
   return realFetch(path, options);
 };
 
+/* 计时器垫片：**只排队、不自动跑**。既有用例仍由 `flushPlayback()` 一次性冲刷；
+ * 回放 play/pause 的用例显式跑一条，才能断言"暂停后计时器被清掉、播放推进只留一个"。 */
+const pendingTimers = new Map();
+let nextTimerId = 1;
+const runNextTimer = () => {
+  const entry = pendingTimers.entries().next().value;
+  if (!entry) return false;
+  pendingTimers.delete(entry[0]);
+  entry[1]();
+  return true;
+};
+const windowShim = {
+  setTimeout: (fn) => {
+    const id = nextTimerId;
+    nextTimerId += 1;
+    pendingTimers.set(id, fn);
+    return id;
+  },
+  clearTimeout: (id) => { pendingTimers.delete(id); },
+  setInterval: () => 0,
+};
+
 const context = vm.createContext({
   document: documentShim,
-  window: { setTimeout: () => 0, setInterval: () => 0 },
+  window: windowShim,
   fetch: globalThis.fetch,
   performance: { timeOrigin: Date.now() },
   console, Date, JSON, Object, Array, Number, String, Math, encodeURIComponent,
@@ -959,6 +981,224 @@ check(`回放页渲染出 ${seats} 个座位`, $("r-seats").children.length === 
 check("回放页显示逐座位武将（侧车 meta）", $("r-heroes").textContent.split("  ").length === seats, $("r-heroes").textContent.slice(0, 70));
 check("回放页事件流有内容", $("r-log").children.length > 0, `${$("r-log").children.length} 条`);
 check("回放位置指示到末尾", $("r-pos").textContent.includes(String(ui.state.replay.records.length)), $("r-pos").textContent);
+
+/* W4-6：询问面板 / 全区域 / play-pause / 人类座位 / 空壳引导。
+ *
+ * 断言全部落在**真的 app.js + 真的录像**上。挑哪条记录来看，由这里一份**独立的**
+ * 增量重建决定（不是调 app.js 的派生函数）——否则"界面画了什么"与"测试算了什么"
+ * 是同一份实现，断言会自证。
+ */
+const replayRecords = ui.state.replay.records;
+const replayDerivedAt = (records, upto, count) => {
+  const zones = Array.from({ length: count }, () => ({ hand: [], equip: [], judge: [] }));
+  const processing = new Map();
+  const bucket = (ref) => {
+    if (!ref || ref.seat === null || ref.seat === undefined) return null;
+    if (!["hand", "equip", "judge"].includes(ref.zone)) return null;
+    return zones[ref.seat] ? zones[ref.seat][ref.zone] : null;
+  };
+  for (let i = 0; i <= upto; i += 1) {
+    const record = records[i];
+    if (!record || record.kind !== "delta" || record.delta_type !== "card_move") continue;
+    const cards = record.cards || [];
+    const from = bucket(record.from_zone);
+    if (from) for (const card of cards) {
+      const at = from.findIndex((held) => held.card_id === card.card_id);
+      if (at >= 0) from.splice(at, 1);
+    }
+    const to = bucket(record.to_zone);
+    if (to) for (const card of cards) {
+      if (!to.some((held) => held.card_id === card.card_id)) to.push(card);
+    }
+    if ((record.to_zone || {}).zone === "processing") {
+      for (const card of cards) processing.set(card.card_id, card);
+    }
+    if ((record.from_zone || {}).zone === "processing") {
+      for (const card of cards) processing.delete(card.card_id);
+    }
+  }
+  return { zones, processing };
+};
+const allZonesIndex = replayRecords.findIndex((_, index) => {
+  const { zones, processing } = replayDerivedAt(replayRecords, index, seats);
+  return zones.some((z) => z.hand.length > 0)
+    && zones.some((z) => z.equip.length > 0)
+    && zones.some((z) => z.judge.length > 0)
+    && processing.size > 0;
+});
+const seatNode = (seat) => $("r-seats").children.find(
+  (node) => node.getAttribute("data-seat") === String(seat));
+const zoneRow = (seat, zone) => {
+  const node = seatNode(seat);
+  return node ? node.children.find((child) => child.getAttribute("data-zone") === zone) : null;
+};
+const cardText = (card) => `${card.name}${card.suit || ""}${card.rank ?? ""}`;
+const cardsIn = (node) => (node ? node.children.filter(
+  (child) => child.tagName === "BUTTON" || String(child.className || "").split(/\s+/).includes("card"),
+) : []);
+const rowCards = (row) => cardsIn(row).map((child) => child.text());
+const expectedCards = (cards) => cards.map(cardText);
+
+check("录像里有一段同时有手牌 / 装备 / 判定 / 处理区（W4-6 断言的前置）",
+  allZonesIndex >= 0, `index=${allZonesIndex}`);
+if (allZonesIndex >= 0) {
+  const expected = replayDerivedAt(replayRecords, allZonesIndex, seats);
+  ui.state.replay.index = allZonesIndex;
+  ui.renderReplay();
+  for (const zone of ["hand", "equip", "judge"]) {
+    const mismatches = [];
+    expected.zones.forEach((seatState, seat) => {
+      const actual = rowCards(zoneRow(seat, zone));
+      const wanted = expectedCards(seatState[zone]);
+      if (actual.join("|") !== wanted.join("|")) mismatches.push(`座位${seat}: ${actual.join("|")} ≠ ${wanted.join("|")}`);
+    });
+    check(`回放页 ${zone} 区逐座位 = 从 card_move 重建的结果`,
+      mismatches.length === 0, mismatches.slice(0, 2).join("；"));
+  }
+  const opponent = expected.zones.findIndex(
+    (seatState, seat) => seat !== target.human_seat && seatState.hand.length > 0);
+  check("回放页上帝视角：非人类座位的手牌也画出牌面",
+    opponent >= 0 && rowCards(zoneRow(opponent, "hand")).length > 0,
+    `座位=${opponent} 手牌=${opponent >= 0 ? rowCards(zoneRow(opponent, "hand")).join("|") : "—"}`);
+  const expectedProcessing = [...expected.processing.values()].map(cardText);
+  check("回放页处理区 / 效果区 = 从 card_move 重建的结果",
+    cardsIn($("r-processing")).map((child) => child.text()).join("|")
+      === expectedProcessing.join("|"),
+    `面板=${cardsIn($("r-processing")).map((child) => child.text()).join("|")} / 记录=${expectedProcessing.join("|")}`);
+}
+
+const queryIndex = replayRecords.findIndex((record) => record.kind === "query"
+  && record.query.prompt && (record.query.legal_actions || []).length > 0);
+check("录像里有可渲染的询问记录", queryIndex >= 0, `index=${queryIndex}`);
+if (queryIndex >= 0) {
+  const query = replayRecords[queryIndex].query;
+  ui.state.replay.index = queryIndex;
+  ui.renderReplay();
+  check("回放页询问面板显示本次询问的文案",
+    $("r-query-prompt").textContent === query.prompt,
+    `面板="${$("r-query-prompt").textContent}" / 记录="${query.prompt}"`);
+  const firstLabel = ui.actionLabel(query.legal_actions[0]);
+  check("回放页询问面板列出候选",
+    $("r-query-candidates").text().includes(firstLabel),
+    `面板="${$("r-query-candidates").text().replace(/\s+/g, " ").slice(0, 90)}" / 首条="${firstLabel}"`);
+}
+
+const clickButton = (node) => (node.listeners.click || []).forEach((fn) => fn({ target: node }));
+
+// 预发动确认在记录流里是一条复合 `ActivateSkill`（`picks` / `choices` 都在）：
+// 回放事件流必须把它摊开，用户才看得见"确认发动"选了什么（清单本身不进记录流）。
+const compositeIndex = replayRecords.findIndex((record) => record.kind === "action"
+  && record.action && record.action.kind === "ActivateSkill"
+  && ((record.action.picks || []).length > 0 || (record.action.choices || []).length > 0));
+check("录像里有复合 ActivateSkill 的应答记录（W4-6 断言的前置）",
+  compositeIndex >= 0, `index=${compositeIndex}`);
+if (compositeIndex >= 0) {
+  const composite = replayRecords[compositeIndex].action;
+  ui.state.replay.index = compositeIndex;
+  ui.renderReplay();
+  const logText = $("r-log").text();
+  check("回放事件流展开复合 ActivateSkill（技能 id + picks / choices）",
+    logText.includes(String(composite.skill_id))
+      && (composite.choices || []).every((choice) => logText.includes(choice)),
+    `事件流="${logText.replace(/\s+/g, " ").slice(-140)}"`);
+}
+
+// 选择面的区域读 `spec.zones`（W4-fix-3 起青龙的提供步是 hand ∪ equip），不写死手牌。
+const cardsQueryIndex = replayRecords.findIndex((record) => record.kind === "query"
+  && record.query.kind === "SELECT_CARDS"
+  && ((record.query.spec && record.query.spec.zones) || []).length > 0);
+check("录像里有带 spec.zones 的选择面记录（W4-6 断言的前置）",
+  cardsQueryIndex >= 0, `index=${cardsQueryIndex}`);
+if (cardsQueryIndex >= 0) {
+  const query = replayRecords[cardsQueryIndex].query;
+  const zones = query.spec.zones;
+  ui.state.replay.index = cardsQueryIndex;
+  ui.renderReplay();
+  check("回放页询问面板按 spec.zones 展示区域（不写死手牌）",
+    zones.every((zone) => $("r-query-meta").textContent.includes(zone)),
+    `面板="${$("r-query-meta").textContent}" / zones=${zones.join("、")}`);
+  check("回放页选择面画出记录里的槽位",
+    slotsInQueryMatch(query), `${$("r-query-slots").children.length} / ${(query.slots || []).length}`);
+}
+function slotsInQueryMatch(query) {
+  const slots = query.slots || [];
+  const box = $("r-query-slots");
+  if (!box) return false;
+  if (!slots.length) return box.children.length === 0;
+  return box.children.length === slots.length
+    && slots.every((slot, index) => {
+      const name = slot.card ? slot.card.name : "？";
+      return box.children[index].text().includes(name);
+    });
+}
+
+// play / pause：计时器垫片只排队，这里显式跑一条——断言"推进一条"与"不叠第二个计时器"。
+pendingTimers.clear();
+ui.state.replay.index = 0;
+ui.renderReplay();
+clickButton($("btn-r-play"));
+check("回放可播放（按钮切成暂停）",
+  ui.state.replay.playing === true && $("btn-r-play").textContent.includes("暂停"),
+  `playing=${ui.state.replay.playing} / ${$("btn-r-play").textContent}`);
+check("播放只排一个计时器",
+  pendingTimers.size === 1, `${pendingTimers.size} 个`);
+check("播放按钮的 data-playing 跟着状态",
+  $("btn-r-play").getAttribute("data-playing") === "true",
+  $("btn-r-play").getAttribute("data-playing"));
+const playIndex = ui.state.replay.index;
+runNextTimer();
+check("播放一步真的前进了一条记录",
+  ui.state.replay.index === playIndex + 1,
+  `${playIndex} → ${ui.state.replay.index}`);
+check("推进后仍只有一个下一次计时器（再点不叠加）",
+  pendingTimers.size === 1 && ui.state.replay.playing === true,
+  `${pendingTimers.size} 个 / playing=${ui.state.replay.playing}`);
+clickButton($("btn-r-play"));
+check("回放可暂停（按钮切回播放）",
+  ui.state.replay.playing === false && $("btn-r-play").textContent.includes("播放"),
+  `playing=${ui.state.replay.playing} / ${$("btn-r-play").textContent}`);
+check("暂停清掉计时器",
+  pendingTimers.size === 0, `${pendingTimers.size} 个`);
+check("暂停后按钮 data-playing 也回到 false",
+  $("btn-r-play").getAttribute("data-playing") === "false",
+  $("btn-r-play").getAttribute("data-playing"));
+
+const originalHuman = ui.state.replay.meta.human_seat;
+ui.state.replay.meta.human_seat = 0;
+ui.renderReplay();
+check("回放页在座位上标出「本局人类」",
+  $("r-seats").text().includes("本局人类") && $("r-human").textContent.includes("座位 0"),
+  $("r-human").textContent);
+ui.state.replay.meta.human_seat = null;
+ui.renderReplay();
+check("录像没有人类座位时明确显示「全是 AI」",
+  $("r-human").textContent.includes("全是 AI") && !$("r-seats").text().includes("本局人类"),
+  $("r-human").textContent);
+ui.state.replay.meta.human_seat = originalHuman;
+
+const delayBefore = ui.state.eventDelayMs;
+clickButton($("btn-r-delay"));
+const delayAfter = ui.state.eventDelayMs;
+check("回放页沿用牌桌的 0.05–0.5s 六档步长",
+  delayAfter !== delayBefore && ui.DELAY_STEPS_MS.includes(delayAfter),
+  `${delayBefore}ms → ${delayAfter}ms`);
+// 步长是**全局一份**：把这六档再点回原档，免得把后面的牌桌断言改成另一档。
+for (let step = 1; step < ui.DELAY_STEPS_MS.length; step += 1) clickButton($("btn-r-delay"));
+check("六档循环一圈回到原档（回放页与牌桌共用同一份状态）",
+  ui.state.eventDelayMs === delayBefore, `${ui.state.eventDelayMs}ms`);
+
+ui.state.replay = null;
+ui.renderReplay();
+check("未选中录像时回放页有明确引导（不是空壳）",
+  !$("r-empty").hidden && $("r-empty-guide").textContent.includes("挑一局"),
+  `引导="${$("r-empty-guide").textContent}"`);
+check("未选中录像时页内直接列出录像",
+  !$("r-run-list").hidden && $("r-run-list").children.length > 0,
+  `${$("r-run-list").children.length} 条`);
+check("清空回放后播放按钮回到「播放」（不留暂停态）",
+  $("btn-r-play").textContent.includes("播放")
+    && $("btn-r-play").getAttribute("data-playing") === "false",
+  `${$("btn-r-play").textContent} / data-playing=${$("btn-r-play").getAttribute("data-playing")}`);
 
 /* ============ 本轮报障（合成局面）：公开处理区 + 询问上下文 + 遗计选座位 ============
  *

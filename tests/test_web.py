@@ -1463,6 +1463,45 @@ def test_listing_runs_reports_the_pair_and_the_outcome(tmp_path: Path) -> None:
     assert isinstance(runs[0]["human_seat_won"], bool)
 
 
+def test_the_replay_api_carries_the_queries_and_zone_moves_the_page_draws(tmp_path: Path) -> None:
+    """W4-6：回放页的询问面板 / 手牌 / 装备 / 判定 / 处理区**只能**从这份 API 读。
+
+    记录流是**全知**的（上帝视角），故回放页不需要第二份投影：``query`` 记录带询问文案与
+    候选，``card_move`` 记录带 ``from_zone`` / ``to_zone``，手牌与装备 / 判定 / 处理区都能
+    由增量重建。这里钉的是"API 不把这些字段裁掉"——裁掉时页面会静默变成空壳。
+    """
+    session = _finished_session(seed=1)
+    save_run(tmp_path, session)
+    name = next(tmp_path.glob("*.jsonl")).name[: -len(".jsonl")]
+
+    loaded = load_run(tmp_path, name)
+    records = loaded["records"]
+
+    queries = [record["query"] for record in records if record["kind"] == "query"]
+    assert queries, "回放页要画询问面板，记录流里必须有 query 记录"
+    assert any(query["prompt"] for query in queries), "询问记录必须带文案（回放页直接显示它）"
+    assert any(query["legal_actions"] for query in queries), "询问记录必须带候选（回放页列出它们）"
+    assert all(query["view"]["players"] for query in queries), (
+        "询问记录必须带逐座位公开事实（回放页的体力 / 存活初值读它）"
+    )
+    assert any(query.get("slots") for query in queries), (
+        "选择面询问必须带 slots（回放页画槽位与区域）"
+    )
+
+    moves = [record for record in records if record.get("delta_type") == "card_move"]
+    zones = {
+        zone
+        for record in moves
+        for zone in (record["from_zone"]["zone"], record["to_zone"]["zone"])
+    }
+    assert {"hand", "equip", "judge", "processing"} <= zones, (
+        f"回放页要画手牌 / 装备 / 判定 / 处理区，记录流里的牌移动必须覆盖这些区；实得 {sorted(zones)}"
+    )
+
+    assert loaded["meta"]["player_count"] == session.rule_config.player_count
+    assert loaded["meta"]["human_seat"] == session.human_seat, "回放页靠它标出「本局人类」"
+
+
 def test_the_three_hero_pool_states_stay_distinguishable() -> None:
     """``"enabled"``（标准局）/ ``None``（无武将）/ 序列，三态必须分得开（否则侧车会重放错局）。"""
     enabled = Session(seed=107, ai="random", timeout_seconds=None, **TWO_PLAYERS)

@@ -138,27 +138,54 @@
 
 <!-- 回放页 -->
 <main id="view-replay" class="view" hidden>
-  <div class="row space">
-    <div>
-      <span class="tag">录像</span> <code id="r-name"></code>
-      <span class="tag">种子</span> <code id="r-seed"></code>
-      <span class="tag">武将</span> <span id="r-heroes" class="dim"></span>
-    </div>
-    <div>
-      <button id="btn-r-first" type="button" class="ghost">⏮</button>
-      <button id="btn-r-prev" type="button" class="ghost">◀</button>
-      <button id="btn-r-play" type="button" class="ghost">▶</button>
-      <button id="btn-r-next" type="button" class="ghost">▶|</button>
-      <button id="btn-r-last" type="button" class="ghost">⏭</button>
-      <span id="r-pos" class="dim"></span>
-    </div>
-  </div>
-  <p class="dim">上帝视角：回放直接消费全知记录流（`06` §5 账本「回放页取上帝视角」）。</p>
-  <section id="r-seats" class="seats"></section>
-  <section class="panel">
-    <h2>事件流</h2>
-    <ol id="r-log" class="log"></ol>
+  <!-- 没选中录像时不留空壳：直接列出录像，点一局就进回放（W4-6）。 -->
+  <section id="r-empty" class="panel">
+    <h2>还没有选中录像</h2>
+    <p id="r-empty-guide" class="dim">提示：回放是「上帝视角」——能看见询问、每人的手牌 / 装备 / 判定区，
+      以及处理区 / 效果区。从下面挑一局；也可以去「开局」打完一局，终局后会存录像。</p>
+    <div id="r-run-list" class="runs"></div>
   </section>
+
+  <div id="r-body" hidden>
+    <div class="row space">
+      <div>
+        <span class="tag">录像</span> <code id="r-name"></code>
+        <span class="tag">种子</span> <code id="r-seed"></code>
+        <span class="tag">本局人类</span> <code id="r-human"></code>
+        <span class="tag">武将</span> <span id="r-heroes" class="dim"></span>
+      </div>
+      <div>
+        <button id="btn-r-first" type="button" class="ghost" title="回到开头">⏮</button>
+        <button id="btn-r-prev" type="button" class="ghost" title="上一条">◀</button>
+        <button id="btn-r-play" type="button" class="ghost" title="播放 / 暂停">▶ 播放</button>
+        <button id="btn-r-next" type="button" class="ghost" title="下一条">▶|</button>
+        <button id="btn-r-last" type="button" class="ghost" title="跳到结尾">⏭</button>
+        <button id="btn-r-delay" type="button" class="ghost" title="回放逐条停留的步长（0.05–0.5 秒，点一下换一档）">步长 0.1s</button>
+        <span id="r-pos" class="dim"></span>
+      </div>
+    </div>
+    <p class="dim">上帝视角：回放直接消费全知记录流（`06` §5 账本「回放页取上帝视角」）。</p>
+    <section id="r-seats" class="seats"></section>
+
+    <div class="cols">
+      <section class="panel grow">
+        <h2>询问 <span id="r-query-meta" class="dim">（还没到第一次询问）</span></h2>
+        <p id="r-query-prompt" class="prompt">（还没到第一次询问）</p>
+        <div id="r-query-candidates" class="options"></div>
+        <div id="r-query-slots" class="cards"></div>
+      </section>
+      <section class="panel grow">
+        <h2>处理区 / 效果区</h2>
+        <div id="r-processing" class="cards"></div>
+        <p id="r-effect" class="context"></p>
+      </section>
+    </div>
+
+    <section class="panel">
+      <h2>事件流</h2>
+      <ol id="r-log" class="log"></ol>
+    </section>
+  </div>
 </main>
 
 <script src="app.js"></script>

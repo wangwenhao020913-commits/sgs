@@ -98,6 +98,9 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   background: #fff; cursor: pointer;
 }
 .opt.sel { border-color: var(--accent); background: var(--accent-soft); }
+/* 回放页的候选是**记录**不是可点的应答：保留牌桌的版式，但去掉可点的视觉暗示。 */
+.opt.static { cursor: default; }
+.opt.static:hover { color: inherit; }
 .prompt { margin: 0 0 4px; }
 /* 询问窗口的"谁对谁做了什么"（服务端下发的 context.label）。 */
 .context { margin: 0 0 4px; font-weight: 600; color: var(--accent); }

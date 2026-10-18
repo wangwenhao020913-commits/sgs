@@ -119,6 +119,8 @@ function show(view) {
     $(`view-${name}`).hidden = name !== view;
     $(`nav-${name}`).classList.toggle("on", name === view);
   }
+  // 离开回放页就停掉播放：定时器不该在看不见的页面上继续跑。
+  if (view !== "replay") stopReplayPlay();
 }
 
 /* ------------------------------------------------------------------ 开局 */
@@ -254,7 +256,7 @@ function stepPlayback(immediate) {
   }
   state.logRecords.push(record);
   appendLog(record, playback.querySeat);
-  applyEffectDelta(record);
+  state.effectCards = applyEffectDelta(record, state.effectCards);
   renderProcessing();
   const logNode = $("t-log");
   if (logNode.lastChild) logNode.lastChild.scrollIntoView({ block: "nearest" });
@@ -312,25 +314,30 @@ const RESOLVE_TARGET_TIMINGS = new Set([
  * ``USE_DESIGNATE_TARGET`` 之前就进了处理区，那一刻这次使用的目标**还没定**；拿"上一次
  * 指定目标"去套会串味（【决斗】套到上一次【南蛮入侵】的 7 个目标，报障图 1）。
  * 目标在 :func:`applyUseTiming` 里等 ``USE_DESIGNATE_TARGET`` 到了再认领。
+ *
+ * **牌组作为参数传入、返回值就是新牌组**：牌桌与回放页各持一份，派生函数不读 / 不写
+ * ``state.effectCards``。旧签名在内部把 `state.effectCards` 整个换掉（`filter` 产生新数组），
+ * 回放页借来的那份会从第二条 "离开处理区" 起就和写方分家——页面于是停在一张早已离场的牌上。
  */
-function applyEffectDelta(record) {
-  if (!record) return;
+function applyEffectDelta(record, effectCards = state.effectCards) {
+  let held = effectCards || [];
+  if (!record) return held;
   if (record.kind === "timing") {
-    applyUseTiming(record);
-    return;
+    applyUseTiming(record, held);
+    return held;
   }
-  if (record.kind !== "delta" || record.delta_type !== "card_move") return;
+  if (record.kind !== "delta" || record.delta_type !== "card_move") return held;
   const cards = record.cards || [];
   const from = record.from_zone || {};
   const to = record.to_zone || {};
   if (from.zone === "processing") {
     const ids = new Set(cards.map((card) => card.card_id));
-    state.effectCards = state.effectCards.filter((card) => !ids.has(card.card_id));
+    held = held.filter((card) => !ids.has(card.card_id));
   }
   if (to.zone === "processing") {
     for (const card of cards) {
-      if (state.effectCards.some((held) => held.card_id === card.card_id)) continue;
-      state.effectCards.push({
+      if (held.some((existing) => existing.card_id === card.card_id)) continue;
+      held.push({
         ...card,
         source: record.reason === "USE" ? record.owner : null, // 使用者随这次使用已知
         targets: null,        // 目标等 USE_DESIGNATE_TARGET 认领
@@ -338,6 +345,7 @@ function applyEffectDelta(record) {
       });
     }
   }
+  return held;
 }
 
 /** 时机记录对描述文本的两个贡献：认领这次使用的目标、更新"当前结算到谁"。
@@ -345,8 +353,9 @@ function applyEffectDelta(record) {
  * 认领只看**栈顶那张处理区牌**（刚进来的那张）且要求使用者与时机 ``actor`` 相同、
  * 目标还没认领过；认领过一次就不再改，故一次使用的目标只认领自己那一份。
  */
-function applyUseTiming(record) {
-  const card = state.effectCards[state.effectCards.length - 1];
+function applyUseTiming(record, effectCards = state.effectCards) {
+  const held = effectCards || [];
+  const card = held[held.length - 1];
   if (!card) return;
   if (record.timing === "USE_DESIGNATE_TARGET") {
     if (card.source === record.actor && (card.targets === null || card.targets === undefined)) {
@@ -812,20 +821,27 @@ function renderTable() {
  * 描述文本曾经是服务端下发的"本窗口：谁对谁使用…"，只在询问到达时更新，回放期间会残留；
  * 现在它跟着效果区走：有牌写「处理中：【牌】（谁在使用）」，牌全走了**立即清空**。 */
 function renderProcessing() {
-  const box = $("t-processing");
+  renderEffectCards($("t-processing"), state.effectCards || []);
+  const contextNode = $("t-context");
+  if (contextNode) contextNode.textContent = describeEffect(state.effectCards || []);
+}
+
+/** 把一组"处理区牌"画进任意容器（牌桌 / 回放页共用同一份渲染）。
+ *
+ * 回放页的效果区**复用** :func:`applyEffectDelta` 的逐事件派生，渲染也复用这一处——
+ * "怎么画处理区"只有一份实现，两个页面不会漂开。
+ */
+function renderEffectCards(box, cards) {
   if (!box) return;
-  const cards = state.effectCards || [];
   box.innerHTML = "";
-  if (!cards.length) {
+  if (!cards || !cards.length) {
     const empty = document.createElement("span");
     empty.className = "dim";
     empty.textContent = "（空）";
     box.appendChild(empty);
-  } else {
-    for (const card of cards) box.appendChild(cardChip(card, false, true));
+    return;
   }
-  const contextNode = $("t-context");
-  if (contextNode) contextNode.textContent = describeEffect(cards);
+  for (const card of cards) box.appendChild(cardChip(card, false, true));
 }
 
 /** 技能按钮：三态由**数据**决定（`locked` 表类型、`available` 表此刻能不能发动）。
@@ -2130,7 +2146,9 @@ function describeRecord(record) {
     return `<span class="k">#${record.seq}</span> ${timingLabel(record.timing)}${who}`;
   }
   if (record.kind === "query") return `<span class="k">#${record.seq}</span> 询问 ${record.query.kind} → 座位 ${record.query.actor}`;
-  if (record.kind === "action") return `<span class="k">#${record.seq}</span> 应答 ${record.action ? record.action.kind : "？"} ${record.accepted ? "（接受）" : "（被拒）"}`;
+  if (record.kind === "action") {
+    return `<span class="k">#${record.seq}</span> 应答 ${describeAction(record.action)} ${record.accepted ? "（接受）" : "（被拒）"}`;
+  }
   if (record.kind === "frame") return `<span class="k">#${record.seq}</span> 结算帧 ${record.op} ${record.frame_kind}（深度 ${record.depth}）`;
   if (record.kind === "game_end") return `<span class="k">#${record.seq}</span> 终局 ${record.result} · 获胜座位 [${(record.winners || []).join("、")}] · ${record.reason}`;
   if (record.kind === "delta") {
@@ -2143,6 +2161,24 @@ function describeRecord(record) {
     return `<span class="k">#${record.seq}</span> 洗牌`;
   }
   return `<span class="k">#${record.seq || ""}</span> ${record.kind}`;
+}
+
+/** 一条应答的人话。牌桌下发的 `action` 可能只有 `kind`（对手的应答被投影裁掉了细节），
+ *  故先判"展开所需字段在不在"，再交给 :func:`actionLabel`——不为裁过的载荷猜内容。
+ *
+ *  预发动确认在记录流里的形态就是复合 `ActivateSkill`（`picks` / `choices` 都在）；
+ *  回放页的事件流把它摊开，用户才看得见"确认发动"选了什么。
+ */
+function describeAction(action) {
+  if (!action) return "？";
+  if ((action.kind === "UseCard" || action.kind === "PlayCard") && !action.card) return action.kind;
+  if (action.kind === "ArrangeCards" && !action.order) return action.kind;
+  if (action.kind === "SelectOption" && typeof action.choice !== "string") return action.kind;
+  let text = actionLabel(action);
+  if (action.kind === "ActivateSkill" && action.choices && action.choices.length) {
+    text += ` → ${action.choices.join("、")}`;
+  }
+  return text;
 }
 
 /** 时机枚举名 → 中文。只做**通用裁剪**（前缀 + 阶段专名），不逐条手抄 83 个名字。 */
@@ -2189,40 +2225,60 @@ function cardsLabel(cards) {
 
 /* ------------------------------------------------------------------ 录像 */
 
+/** 一条录像的摘要行（开局页「已有录像」与回放页空壳引导**共用**这一份）。 */
+function runRow(run) {
+  const row = document.createElement("div");
+  row.className = "run";
+  const result = run.human_seat_won === true ? `<span class="win">我赢</span>`
+    : run.human_seat_won === false ? `<span class="lose">我输</span>` : `<span class="dim">—</span>`;
+  row.innerHTML = `<span><code>${run.name}</code> <span class="dim">种子 ${run.seed} · ${run.player_count} 人</span></span>
+    <span>${result} <button type="button" class="ghost">看回放</button></span>`;
+  const button = row.querySelector("button");
+  if (button) button.addEventListener("click", () => openReplay(run.name));
+  return row;
+}
+
+function renderRunList(box, runs) {
+  if (!box) return;
+  box.innerHTML = "";
+  if (!runs || !runs.length) {
+    box.innerHTML = `<p class="dim">还没有录像。打完一局就会出现在这里。</p>`;
+    return;
+  }
+  for (const run of runs) box.appendChild(runRow(run));
+}
+
 async function loadRuns() {
   try {
     const body = await api("/api/runs");
     state.runs = body.runs || [];
-    const box = $("run-list");
-    box.innerHTML = "";
-    if (!state.runs.length) {
-      box.innerHTML = `<p class="dim">还没有录像。打完一局就会出现在这里。</p>`;
-      return;
-    }
-    for (const run of state.runs) {
-      const row = document.createElement("div");
-      row.className = "run";
-      const result = run.human_seat_won === true ? `<span class="win">我赢</span>`
-        : run.human_seat_won === false ? `<span class="lose">我输</span>` : `<span class="dim">—</span>`;
-      row.innerHTML = `<span><code>${run.name}</code> <span class="dim">种子 ${run.seed} · ${run.player_count} 人</span></span>
-        <span>${result} <button type="button" class="ghost">看回放</button></span>`;
-      const button = row.querySelector("button");
-      if (button) button.addEventListener("click", () => openReplay(run.name));
-      box.appendChild(row);
-    }
+    renderRunList($("run-list"), state.runs);
+    renderRunList($("r-run-list"), state.runs);
   } catch (error) {
-    $("run-list").innerHTML = `<p class="dim">读取录像列表失败：${error.message}</p>`;
+    const message = `读取录像列表失败：${error.message}`;
+    for (const id of ["run-list", "r-run-list"]) {
+      const box = $(id);
+      if (box) box.innerHTML = `<p class="dim">${message}</p>`;
+    }
   }
 }
 
 async function openReplay(name) {
+  stopReplayPlay();
   try {
     const body = await api(`/api/runs/${encodeURIComponent(name)}`);
-    state.replay = { name, meta: body.meta, records: body.records, index: 0 };
-    $("r-name").textContent = name;
-    $("r-seed").textContent = String(body.meta.seed);
-    $("r-heroes").textContent = (body.meta.heroes || []).map((hero, seat) => `${seat}:${hero || "—"}`).join("  ");
-    $("r-log").innerHTML = "";
+    state.replay = {
+      name,
+      meta: body.meta,
+      records: body.records,
+      index: 0,
+      seats: null,       // 逐座位：手牌 / 装备 / 判定 + 体力 / 上限 / 身份 / 存活
+      query: null,       // 当前位置之前最近的一条询问（询问面板显示它）
+      effectCards: [],   // 处理区 / 效果区（复用 applyEffectDelta 逐事件派生）
+      appliedIndex: -1,  // 已经应用到第几条记录（向前播放只追加，回跳才整体重来）
+      playing: false,
+      timer: null,
+    };
     show("replay");
     renderReplay();
   } catch (error) {
@@ -2230,40 +2286,197 @@ async function openReplay(name) {
   }
 }
 
-function renderReplay() {
-  const replay = state.replay;
-  if (!replay) return;
-  const counts = replay.meta.player_count;
-  const heroes = replay.meta.heroes || [];
-  const cards = new Map();
-  const hp = new Map();
-  const identity = new Map();
-  const record = replay.records[replay.index] || {};
-  for (let seat = 0; seat < counts; seat += 1) hp.set(seat, null);
+/** 回放页的派生状态清零：从第 0 条记录重新应用。 */
+function resetReplayDerived(replay) {
+  const count = Math.max(0, Number(replay.meta.player_count) || 0);
+  replay.seats = Array.from({ length: count }, () => ({
+    hand: [], equip: [], judge: [],
+    hp: null, hpMax: null, alive: null, identity: null,
+  }));
+  replay.effectCards = [];
+  replay.query = null;
+  replay.appliedIndex = -1;
+}
 
-  for (const item of replay.records.slice(0, replay.index + 1)) {
-    if (item.kind === "delta" && item.delta_type === "hp_change") hp.set(item.seat, `${item.before}→${item.after}`);
-    if (item.kind === "delta" && item.delta_type === "identity_deal") identity.set(item.seat, item.identity);
-    if (item.kind === "delta" && item.delta_type === "card_move") {
-      for (const card of item.cards || []) {
-        if (card.slot) cards.set(`座位${item.to_zone && item.to_zone.seat}:${card.slot}`, card.name);
-      }
+/** 逐座位区的**唯一**名单：牌移动落区与座位盒渲染都读它。 */
+const REPLAY_SEAT_ZONES = [["hand", "手牌"], ["equip", "装备"], ["judge", "判定"]];
+
+/** 这条牌移动落在哪个**逐座位**区；共享区（牌堆 / 弃牌堆 / 处理区）返回 `null`。 */
+function replayZoneBucket(replay, ref) {
+  if (!ref || ref.seat === null || ref.seat === undefined) return null;
+  const seat = replay.seats[ref.seat];
+  if (!seat) return null;
+  if (REPLAY_SEAT_ZONES.some(([zone]) => zone === ref.zone)) return seat[ref.zone];
+  return null;
+}
+
+/** 牌移动 → 逐座位区的增删（回放页的"全区域"就是这条增量重建）。 */
+function applyReplayCardMove(replay, record) {
+  if (!record || record.kind !== "delta" || record.delta_type !== "card_move") return;
+  const cards = record.cards || [];
+  const from = replayZoneBucket(replay, record.from_zone);
+  if (from) {
+    for (const card of cards) {
+      const at = from.findIndex((held) => held.card_id === card.card_id);
+      if (at >= 0) from.splice(at, 1);
     }
   }
-
-  const seats = $("r-seats");
-  seats.innerHTML = "";
-  for (let seat = 0; seat < counts; seat += 1) {
-    const box = document.createElement("div");
-    box.className = "seat";
-    box.innerHTML = `<div class="top"><span class="who">座位 ${seat}</span>
-      <span class="small">体力 ${hp.get(seat) || "—"}</span></div>
-      <div class="small">${heroes[seat] || "（无武将）"} · 身份 ${identity.get(seat) ? identityLabel(identity.get(seat)) : "未公开"}</div>`;
-    seats.appendChild(box);
+  const to = replayZoneBucket(replay, record.to_zone);
+  if (to) {
+    for (const card of cards) {
+      if (!to.some((held) => held.card_id === card.card_id)) to.push(card);
+    }
   }
+}
 
-  $("r-pos").textContent = `${replay.index + 1} / ${replay.records.length}（seq ${record.seq || "-"}）`;
+/** 体力 / 身份 / 存活：delta 是公开事实，询问视图补上"开局时就是满血"这类初值。 */
+function applyReplaySeatDelta(replay, record) {
+  if (!record || record.kind !== "delta") return;
+  if (record.delta_type === "hp_change") {
+    const seat = replay.seats[record.seat];
+    if (seat) seat.hp = record.after;
+    return;
+  }
+  if (record.delta_type === "identity_deal" || record.delta_type === "identity_reveal") {
+    const seat = replay.seats[record.seat];
+    if (seat) {
+      seat.identity = record.identity;
+      // 阵亡亮明身份是公开事实；它同时也说明这名角色已经不在场上了。
+      if (record.delta_type === "identity_reveal") seat.alive = false;
+    }
+  }
+}
+
+/** 询问记录附带的 `PlayerView`（参与者视角；hp / hp_max / alive 本身是公开事实）：
+ *  补上"开局就是满血"这类初值——记录流里没有一条"初始体力"delta。 */
+function noteReplayQuery(replay, query) {
+  replay.query = query;
+  const view = query && query.view;
+  for (const player of (view && view.players) || []) {
+    const seat = replay.seats[player.seat];
+    if (!seat) continue;
+    if (player.hp !== undefined) seat.hp = player.hp;
+    if (player.hp_max !== undefined) seat.hpMax = player.hp_max;
+    if (player.alive !== undefined) seat.alive = player.alive;
+  }
+}
+
+/** 把回放推进到 `index`：只应用**新**记录；往回跳时整体重建。
+ *
+ * 效果区**复用**牌桌的 :func:`applyEffectDelta`：它收一份牌组、返回新牌组，回放页和牌桌
+ * 各持自己那一份，谁都不读对方的全局状态。
+ */
+function applyReplayThrough(replay, index) {
+  if (replay.appliedIndex === undefined || replay.appliedIndex < 0 || index < replay.appliedIndex) {
+    resetReplayDerived(replay);
+  }
+  for (let i = replay.appliedIndex + 1; i <= index; i += 1) {
+    const record = replay.records[i];
+    if (!record) continue;
+    applyReplayCardMove(replay, record);
+    applyReplaySeatDelta(replay, record);
+    if (record.kind === "query") noteReplayQuery(replay, record.query);
+    replay.effectCards = applyEffectDelta(record, replay.effectCards);
+  }
+  replay.appliedIndex = index;
+}
+
+/** 一个逐座位区的牌面行：空区也画出来（"全区域"不是"有牌才出现"）。 */
+function replayZoneRow(cards, zone, seat) {
+  const row = document.createElement("div");
+  row.className = "cards mini";
+  row.setAttribute("data-zone", zone);
+  row.setAttribute("data-seat", String(seat));
+  if (!cards || !cards.length) {
+    const empty = document.createElement("span");
+    empty.className = "dim";
+    empty.textContent = "（空）";
+    row.appendChild(empty);
+    return row;
+  }
+  for (const card of cards) row.appendChild(cardChip(card, false, true));
+  return row;
+}
+
+function renderReplaySeats(replay) {
+  const box = $("r-seats");
+  if (!box) return;
+  box.innerHTML = "";
+  const heroes = replay.meta.heroes || [];
+  const humanSeat = replay.meta.human_seat;
+  replay.seats.forEach((seatState, seat) => {
+    const node = document.createElement("div");
+    node.className = "seat";
+    node.setAttribute("data-seat", String(seat));
+    const isHuman = humanSeat !== null && humanSeat !== undefined && Number(humanSeat) === seat;
+    if (isHuman) node.classList.add("me");
+    const hp = seatState.hp === null || seatState.hp === undefined
+      ? "—"
+      : `${seatState.hp} / ${seatState.hpMax === null || seatState.hpMax === undefined ? "?" : seatState.hpMax}`;
+    const identity = seatState.identity ? identityLabel(seatState.identity) : "—";
+    const alive = seatState.alive === false ? " · 已阵亡" : "";
+    node.innerHTML = `<div class="top"><span class="who">座位 ${seat}${isHuman ? "（本局人类）" : ""}</span>
+      <span class="small">体力 ${hp}${alive}</span></div>
+      <div class="small">${heroes[seat] || "（无武将）"} · 身份 ${identity}</div>`;
+    for (const [zone, label] of REPLAY_SEAT_ZONES) {
+      const cards = seatState[zone] || [];
+      const line = document.createElement("div");
+      line.className = "small";
+      line.textContent = `${label} ${cards.length}`;
+      node.appendChild(line);
+      node.appendChild(replayZoneRow(cards, zone, seat));
+    }
+    box.appendChild(node);
+  });
+}
+
+/** 询问面板：回放页把**记录里**的询问按牌桌的版式铺开（文案 + 候选 + 选择面）。
+ *
+ * 清单（`preactivations` / `preativation`）不在记录流里，这里**不**画清单；确认发动在
+ * 流里的形态就是一条复合 `ActivateSkill`，事件流照常显示它。
+ */
+function renderReplayQuery(query) {
+  const meta = $("r-query-meta");
+  const prompt = $("r-query-prompt");
+  const options = $("r-query-candidates");
+  const slots = $("r-query-slots");
+  if (!prompt || !options) return;
+  options.innerHTML = "";
+  if (slots) slots.innerHTML = "";
+  if (!query) {
+    if (meta) meta.textContent = "（还没到第一次询问）";
+    prompt.textContent = "（还没到第一次询问）";
+    return;
+  }
+  if (meta) {
+    const zones = (query.spec && query.spec.zones) || [];
+    const where = zones.length ? ` · 区域 ${zones.join("、")}` : "";
+    meta.textContent = `#${query.seq} · 座位 ${query.actor} · ${query.kind}${where}`;
+  }
+  prompt.textContent = query.prompt || "（本次询问没有文案）";
+  for (const action of query.legal_actions || []) {
+    const row = document.createElement("div");
+    row.className = "opt static";
+    row.setAttribute("data-kind", action.kind);
+    row.textContent = actionLabel(action);
+    options.appendChild(row);
+  }
+  if (!slots) return;
+  for (const slot of query.slots || []) {
+    const chip = document.createElement("div");
+    chip.className = "card static";
+    const ref = slot.ref || {};
+    const where = ref.seat === null || ref.seat === undefined
+      ? String(ref.zone || "")
+      : `${ref.zone} · 座位 ${ref.seat}`;
+    chip.innerHTML = `<span class="n">${slot.card ? slot.card.name : "？"}</span><span class="s">${where}</span>`;
+    slots.appendChild(chip);
+  }
+}
+
+function renderReplayLog(replay) {
   const log = $("r-log");
+  if (!log) return;
   log.innerHTML = "";
   const from = Math.max(0, replay.index - 60);
   for (let i = from; i <= replay.index; i += 1) {
@@ -2273,6 +2486,110 @@ function renderReplay() {
     log.appendChild(item);
   }
   if (log.lastChild) log.lastChild.scrollIntoView({ block: "nearest" });
+}
+
+function updateReplayPlayButton() {
+  const button = $("btn-r-play");
+  if (!button) return;
+  const playing = Boolean(state.replay && state.replay.playing);
+  button.textContent = playing ? "⏸ 暂停" : "▶ 播放";
+  button.setAttribute("data-playing", String(playing));
+}
+
+/** 停下回放播放并清掉计时器（可重复调用；离开回放页也会走这里）。 */
+function stopReplayPlay() {
+  const replay = state.replay;
+  if (!replay) return;
+  replay.playing = false;
+  if (replay.timer !== null && replay.timer !== undefined) {
+    if (window.clearTimeout) window.clearTimeout(replay.timer);
+    replay.timer = null;
+  }
+  updateReplayPlayButton();
+}
+
+function scheduleReplayTick() {
+  const replay = state.replay;
+  if (!replay || !replay.playing) return;
+  replay.timer = window.setTimeout(() => {
+    replay.timer = null;
+    if (!replay.playing || state.replay !== replay) return;
+    if (replay.index >= replay.records.length - 1) {
+      stopReplayPlay();
+      return;
+    }
+    replayStep(1);
+    if (replay.playing) scheduleReplayTick();
+  }, state.eventDelayMs);
+}
+
+/** 播放 / 暂停：再点一次就停，**不会**叠出第二个计时器。 */
+function toggleReplayPlay() {
+  const replay = state.replay;
+  if (!replay) return false;
+  if (replay.playing) {
+    stopReplayPlay();
+    return false;
+  }
+  if (replay.index >= replay.records.length - 1) {
+    replay.index = 0;
+    renderReplay();
+  }
+  replay.playing = true;
+  updateReplayPlayButton();
+  scheduleReplayTick();
+  return true;
+}
+
+function replaySeek(index) {
+  const replay = state.replay;
+  if (!replay) return;
+  replay.index = Math.max(0, Math.min(replay.records.length - 1, Number(index) || 0));
+  renderReplay();
+}
+
+/** 回放页总渲染：空壳引导 / 录像头 / 座位与全区域 / 询问面板 / 效果区 / 事件流。 */
+function renderReplay() {
+  const replay = state.replay;
+  const empty = $("r-empty");
+  const body = $("r-body");
+  if (!replay) {
+    if (empty) empty.hidden = false;
+    if (body) body.hidden = true;
+    const guide = $("r-empty-guide");
+    if (guide) {
+      guide.textContent = "提示：回放是「上帝视角」——能看见询问、每人的手牌 / 装备 / 判定区，"
+        + "以及处理区 / 效果区。从下面挑一局；也可以去「开局」打完一局，终局后会存录像。";
+    }
+    renderRunList($("r-run-list"), state.runs || []);
+    updateReplayPlayButton();
+    return;
+  }
+  if (empty) empty.hidden = true;
+  if (body) body.hidden = false;
+  replay.index = Math.max(0, Math.min(replay.records.length - 1, replay.index));
+  applyReplayThrough(replay, replay.index);
+
+  $("r-name").textContent = replay.name;
+  $("r-seed").textContent = String(replay.meta.seed);
+  $("r-heroes").textContent = (replay.meta.heroes || [])
+    .map((hero, seat) => `${seat}:${hero || "—"}`)
+    .join("  ");
+  const humanSeat = replay.meta.human_seat;
+  $("r-human").textContent = humanSeat === null || humanSeat === undefined
+    ? "全是 AI"
+    : `座位 ${humanSeat}`;
+
+  renderReplaySeats(replay);
+  renderReplayQuery(replay.query);
+  renderEffectCards($("r-processing"), replay.effectCards);
+  const effectText = $("r-effect");
+  if (effectText) effectText.textContent = describeEffect(replay.effectCards);
+
+  const record = replay.records[replay.index] || {};
+  $("r-pos").textContent = `${replay.index + 1} / ${replay.records.length}（seq ${record.seq || "-"}）`;
+  renderReplayLog(replay);
+  updateReplayPlayButton();
 }
 
 function replayStep(delta) {
@@ -2292,11 +2609,14 @@ function cycleDelay() {
 }
 
 function updateDelayButton() {
-  const button = $("btn-delay");
-  if (!button) return;
   // 0.05s 是亚 0.1 秒挡：一位小数会被 toFixed(1) 抹成 "0.1"，与 0.1 挡撞字，故两位。
   const seconds = state.eventDelayMs / 1000;
-  button.textContent = `步长 ${seconds < 0.1 ? seconds.toFixed(2) : seconds.toFixed(1)}s`;
+  const text = `步长 ${seconds < 0.1 ? seconds.toFixed(2) : seconds.toFixed(1)}s`;
+  // 牌桌与回放页共用同一份步长状态、同一组六档（W4-6）。
+  for (const id of ["btn-delay", "btn-r-delay"]) {
+    const button = $(id);
+    if (button) button.textContent = text;
+  }
 }
 
 function wire() {
@@ -2308,7 +2628,11 @@ function wire() {
   $("lobby-form").addEventListener("submit", startGame);
   $("nav-lobby").addEventListener("click", () => { show("lobby"); loadRuns(); });
   $("nav-table").addEventListener("click", () => show("table"));
-  $("nav-replay").addEventListener("click", () => { show("replay"); if (!state.replay) $("r-log").innerHTML = "<li class=\"dim\">从开局页选一局录像。</li>"; });
+  $("nav-replay").addEventListener("click", () => {
+    show("replay");
+    loadRuns();
+    renderReplay();
+  });
   const modeSelect = $("t-log-mode");
   if (modeSelect) modeSelect.addEventListener("change", () => {
     state.view = Object.assign({}, state.view, { records: state.logRecords });
@@ -2319,20 +2643,15 @@ function wire() {
   $("btn-refresh").addEventListener("click", refresh);
   $("btn-takeover").addEventListener("click", takeover);
   $("btn-delay").addEventListener("click", cycleDelay);
+  $("btn-r-delay").addEventListener("click", cycleDelay);
   updateDelayButton();
-  $("btn-r-first").addEventListener("click", () => { state.replay.index = 0; renderReplay(); });
+  $("btn-r-first").addEventListener("click", () => replaySeek(0));
   $("btn-r-prev").addEventListener("click", () => replayStep(-1));
   $("btn-r-next").addEventListener("click", () => replayStep(1));
-  $("btn-r-last").addEventListener("click", () => { if (state.replay) { state.replay.index = state.replay.records.length - 1; renderReplay(); } });
-  $("btn-r-play").addEventListener("click", () => {
-    const tick = () => {
-      if (!state.replay) return;
-      if (state.replay.index >= state.replay.records.length - 1) return;
-      replayStep(1);
-      window.setTimeout(tick, 120);
-    };
-    tick();
+  $("btn-r-last").addEventListener("click", () => {
+    if (state.replay) replaySeek(state.replay.records.length - 1);
   });
+  $("btn-r-play").addEventListener("click", toggleReplayPlay);
   loadRuns();
   // 倒计时每秒刷新（只在牌桌页可见时）；不改任何服务端状态。
   // 回放期间不刷：那时 `state.view` 还是上一条询问，倒计时会指向已经过去的那个窗口。
