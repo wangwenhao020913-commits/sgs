@@ -118,7 +118,7 @@ from .active import (
     activate_skill,
     run_flow,
 )
-from .flow import manifest, validate_flow_activation
+from .flow import card_preactivations, manifest, validate_flow_activation
 from .preactivation import (
     preactivation_for,
     preactivated_skill_ids,

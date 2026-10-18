@@ -39,6 +39,7 @@ from sgs.effects import (
     apply_hp,
     behavior_for,
     delayed_settle_target,
+    designation_actions_for,
     discard_count,
     draw_from_deck,
     legal_actions_for,
@@ -55,6 +56,7 @@ from sgs.skills import (
     SeamKind,
     SkillInstance,
     advance_provider,
+    card_preactivations,
     dispatch_move_after,
     dispatch_seam,
     dispatch_timing,
@@ -214,6 +216,13 @@ _NOT_CONVERSION: object = object()
 
 ``None`` = 清单解析通过（答案在 :attr:`Engine._conversion_answer`）；字符串 = 首个失败
 原因；本哨兵 = 不适用，继续走普通复合动作 / 成员判定。
+"""
+
+_NOT_DESIGNATION: object = object()
+"""``submit`` 的附带指定哨兵（W5-02a）：这条 ``UseCard`` **不带** ``designations``。
+
+``None`` = 它是本次 ``PlayPhaseQuery.designation_actions`` 的成员；字符串 = 首个失败
+原因（要写进拒绝记录）；本哨兵 = 不是附带指定动作，交给既有路径。
 """
 
 
@@ -924,6 +933,7 @@ class Engine:
         use_timing: Timing | None = None,
         cancel_target: tuple[int, int] | None = None,
         counts: bool = True,
+        designations: tuple[int, ...] = (),
     ) -> Frame:
         """开始一次使用：记一次本回合已用、压入 USE 帧（票 07 §6）。
 
@@ -940,6 +950,11 @@ class Engine:
         继承进它的 RESOLVE 帧，出栈时 :meth:`_propagate_cancel` 据此把那一层标成被抵消。
 
         ``counts=False`` 用于**不计次数**的使用（【青龙偃月刀】的续杀，票 12）。
+
+        ``designations``（W5-02a）是**附带指定**（借刀的 Bn）：原样带进 USE 帧，再随
+        :func:`~sgs.engine.steps.use_push_resolve` 的 ``dict(frame.data)`` 继承进 RESOLVE
+        帧，由 :func:`~sgs.effects.resolve_borrowed_sword` 读出。空元组不落帧键——没有
+        附带指定的每一条使用与旧路径的帧载荷逐键相同。
         """
         if counts:
             counts_by_type = self.state.player(source).card_use_counts
@@ -950,6 +965,8 @@ class Engine:
             "targets": order_targets(self.state, tuple(targets)),
             "use_timing": use_timing,
         }
+        if designations:
+            data["designations"] = tuple(designations)
         if cancel_target is not None:
             data["cancel_target"] = cancel_target
         return self.push_frame(
@@ -2121,6 +2138,11 @@ class Engine:
           普通使用 / 打出动作，通过即以**该动作**落账并执行；失败的首因同样落进拒绝记录；
         - **已解析的转化动作**：回放磁带（``TapePlayer``）与程序化提交直接给那条普通动作，
           成员判定改读内部池 ``transform_actions``——它本来就是本次询问的合法动作池。
+
+        **W5-02a 的第四条路**：``UseCard.designations`` 非空 = 借刀的**附带指定**动作。
+        它只对 ``PLAY_PHASE`` 开放，且必须是本次 ``PlayPhaseQuery.designation_actions``
+        的成员（同源池，不接受"牌名 + 任意 A/Bn"）；不合格照样写拒绝记录、零状态改动。
+        裸借刀的成员判定路径不变（暗发布，收回在 02b）。
         """
         pending = self.pending
         if pending is None:
@@ -2156,6 +2178,22 @@ class Engine:
                 got=str(action.answers_seq),
                 answers_seq=action.answers_seq,
             )
+        designation_failure = self._designation_failure(action, pending)
+        if designation_failure is not _NOT_DESIGNATION:
+            if designation_failure is not None:
+                # W5-02a：附带指定确实走了池校验，首个失败原因要落进记录（可观测）。
+                self._reject(action, reason=f"附带指定校验失败：{designation_failure}")
+                raise IllegalActionError(
+                    reason_code="IllegalAction",
+                    message=designation_failure,
+                    expected="按借刀附带指定清单填写的持刀者 / Bn 组合",
+                    got=action.kind,
+                    answers_seq=action.answers_seq,
+                )
+            self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
+            self._answer = action
+            self.pending = None
+            return
         if action not in pending.legal_actions:
             confirmation = self._conversion_confirmation(action, pending)
             if confirmation is not _NOT_CONVERSION:
@@ -2211,6 +2249,24 @@ class Engine:
         self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
         self._answer = action
         self.pending = None
+
+    def _designation_failure(
+        self, action: Action, pending: Query
+    ) -> str | None | object:
+        """附带指定（W5-02a）：``None`` = 池成员，``str`` = 首个失败原因，哨兵 = 不是这条路。
+
+        判据只有"提交带不带 ``designations``"与"它是不是**本次** ``PLAY_PHASE`` 的
+        ``designation_actions`` 成员"——池由 :func:`sgs.effects.designation_actions_for`
+        用既有目标谓词生成，故这里不写第二份 A / Bn 合法性。``answers_seq`` 已在
+        ``submit`` 前段校验；池里每项的序号就是这一问的序号，成员判定因此也覆盖它。
+        """
+        if not isinstance(action, UseCard) or not action.designations:
+            return _NOT_DESIGNATION
+        if pending.kind != QueryKind.PLAY_PHASE:
+            return "附带指定只在出牌阶段开放"
+        if action not in pending.designation_actions:
+            return "指定的持刀者 / 目标组合不在候选池内"
+        return None
 
     def _conversion_confirmation(
         self, action: Action, pending: Query
@@ -2316,6 +2372,8 @@ class Engine:
             self.state, actor, kind, answers_seq=seq, dying=dying, payload=payload
         )
         preactivations: dict[str, tuple[Step, ...]] = {}
+        designation_actions: tuple[UseCard, ...] = ()
+        card_preactivation_manifests: dict[str, tuple[Step, ...]] = {}
         if kind is QueryKind.PLAY_PHASE:
             # W4-1：可用性从**候选回调**来（骨架仍在），清单按同一批技能 id 渲染。
             # 已翻到预发动的技能（``preactivated``）把骨架从候选里删掉——可用性只剩这份
@@ -2338,6 +2396,11 @@ class Engine:
                         and action.skill_id in flagged
                     )
                 )
+            # W5-02a（暗发布）：借刀的**附带指定池**与从它派生的两步清单。两者都不进
+            # 记录流（``exclude``）：裸候选仍在 ``legal_actions``，旧路径原样可走；池只
+            # 服务第四条提交路，清单只服务 02b 起的接入层。
+            designation_actions = designation_actions_for(self.state, actor, seq)
+            card_preactivation_manifests = card_preactivations(designation_actions)
         # W4-fix-2：转化候选从**暴露面**收回（`legal_actions` 里不再有"红牌直接当
         # 【杀】"），但**内部池**照旧保留——清单 / 确认 / 回放成员判定都读这一份，故
         # "清单 = 候选"没有第二份谓词。
@@ -2374,6 +2437,8 @@ class Engine:
                 preactivations=preactivations,
                 transform_preactivations=transform_preactivations,
                 transform_actions=internal_transform_actions,
+                designation_actions=designation_actions,
+                card_preactivations=card_preactivation_manifests,
             )
         if kind is QueryKind.DISCARD:
             player = self.state.player(actor)
@@ -2972,7 +3037,13 @@ class Engine:
             self.start_skill(action, source=seat)
             return "stay"
         # 使用一张牌：压入 USE 帧；子帧结算完再回到本步重新询问（票 07 §3）。
-        self.start_use(action.card, source=seat, targets=action.targets)
+        # W5-02a：借刀的附带指定（Bn）随动作进帧，其余每一条使用都是空元组。
+        self.start_use(
+            action.card,
+            source=seat,
+            targets=action.targets,
+            designations=action.designations,
+        )
         return "stay"
 
     def _phase_play_end(self) -> None:

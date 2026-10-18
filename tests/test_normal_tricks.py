@@ -22,20 +22,28 @@ from dataclasses import dataclass, field
 import pytest
 
 from sgs.data import RuleConfig, load_content_pack
-from sgs.engine import Engine
+from sgs.engine import Engine, IllegalActionError
 from sgs.state import (
     EndPhase,
     Pass,
     PlayCard,
+    PlayPhaseQuery,
     QueryKind,
     SelectCards,
+    StepPool,
     UseCard,
     WindowCause,
     Zone,
 )
 from sgs.timing import Timing
 
-from support.positions import SeatSpec, build_state, cards_of_type, run_until
+from support.positions import (
+    RecordingPlayer,
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    run_until,
+)
 
 STANDARD = "standard_108"
 
@@ -590,6 +598,177 @@ def test_borrowed_sword_hands_over_the_weapon_when_refused(pack):
 
     assert weapon in engine.state.player(0).hand
     assert engine.state.player(1).equip == []
+
+
+# ---------------------------------------------------------------------------
+# W5-02a 借刀：附带指定（暗发布）
+# ---------------------------------------------------------------------------
+
+
+def _borrowed_designation_engine(pack):
+    """座位 1 持刀（雌雄双股剑，攻击范围 2）；座位 0 手里一张借刀。
+
+    4 个座位让座位 1 的攻击范围覆盖 0 / 2 / 3——旧路径的 Bn 候选因此有 3 个，
+    新路径固定到其中一个才有可观测差别。
+    """
+    borrowed = cards_of_type(pack, "borrowed_sword")[0]
+    weapon = cards_of_type(pack, "double_sword")[0]
+    slash = cards_of_type(pack, "slash")[0]
+    seats = [
+        SeatSpec(hand=(borrowed,)),
+        SeatSpec(hand=(slash,), equip=(weapon,)),
+        SeatSpec(),
+        SeatSpec(),
+    ]
+    used = [card for spec in seats for card in (*spec.hand, *spec.equip, *spec.judge)]
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=_deck_excluding(pack, *used),
+        turn_seat=0,
+        rule_config=RuleConfig(first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=1)
+    run_until(
+        engine,
+        [RecordingPlayer() for _ in seats],
+        lambda e: e.pending is not None,
+    )
+    assert isinstance(engine.pending, PlayPhaseQuery)
+    return engine, borrowed
+
+
+def _finish_borrowed_window(engine) -> None:
+    """从已提交的借刀继续跑到**持刀者使用的【杀】结算结束**。"""
+    players = [
+        _Planned(_Plan(play="__none__", respond="use", played=True)) for _ in range(4)
+    ]
+    run_until(engine, players, lambda e: _use_settled(e, "slash"))
+
+
+def test_the_borrowed_sword_designation_pool_and_manifest_shape(pack):
+    engine, borrowed = _borrowed_designation_engine(pack)
+    query = engine.pending
+    assert isinstance(query, PlayPhaseQuery)
+
+    pool = query.designation_actions
+    assert {(action.targets, action.designations) for action in pool} == {
+        ((1,), (0,)),
+        ((1,), (2,)),
+        ((1,), (3,)),
+    }, "每张借刀 × 合法持刀者 A × A 攻击范围内的每个 Bn"
+    assert all(action.card.card_id == borrowed for action in pool)
+    assert all(action.answers_seq == query.seq for action in pool), "池与本次询问同源"
+
+    steps = query.card_preactivations["borrowed_sword"]
+    assert [(step.name, step.min, step.max, step.order) for step in steps] == [
+        ("seat", 1, 1, 0),
+        ("seat", 1, 1, 1),
+    ], "两步清单：持刀者 → Bn"
+    assert steps[0].wording == "选择持刀者（装备区有武器、且有合法【杀】目标）"
+    assert steps[1].wording == "选择【杀】的目标（由你指定）"
+    assert steps[0].pool == (StepPool(when=(), options=("seat:1",)),)
+    assert steps[1].pool == (
+        StepPool(when=("seat:1",), options=("seat:0", "seat:2", "seat:3")),
+    ), "Bn 子池按 when='seat:A' 分列"
+
+    assert "designation_actions" not in query.model_dump(), "内部池不进记录流"
+    assert "card_preactivations" not in query.model_dump(), "清单不进记录流"
+    assert any(
+        isinstance(action, UseCard)
+        and action.card.type == "borrowed_sword"
+        and not action.designations
+        for action in query.legal_actions
+    ), "暗发布：裸借刀候选仍在 legal_actions"
+
+
+def test_a_submitted_designation_must_be_a_member_of_the_pool(pack):
+    engine, _borrowed = _borrowed_designation_engine(pack)
+    query = engine.pending
+    assert isinstance(query, PlayPhaseQuery)
+    action = next(
+        candidate for candidate in query.designation_actions if candidate.designations == (2,)
+    )
+
+    engine.submit(action)
+
+    assert engine.pending is None
+    accepted = engine.records[-1]
+    assert accepted.kind == "action" and accepted.accepted is True
+    assert accepted.action == action
+    assert accepted.action.designations == (2,)
+
+
+def test_a_designation_outside_the_pool_is_rejected_and_changes_nothing(pack):
+    engine, _borrowed = _borrowed_designation_engine(pack)
+    query = engine.pending
+    assert isinstance(query, PlayPhaseQuery)
+    candidate = query.designation_actions[0]
+    tampered = UseCard(
+        card=candidate.card,
+        targets=candidate.targets,
+        designations=(99,),
+        answers_seq=query.seq,
+    )
+    baseline = (engine.state.model_dump(), engine.stack.depth, engine.finished)
+
+    with pytest.raises(IllegalActionError) as caught:
+        engine.submit(tampered)
+
+    assert caught.value.reason_code == "IllegalAction"
+    assert "候选池" in caught.value.message
+    assert (engine.state.model_dump(), engine.stack.depth, engine.finished) == baseline, (
+        "附带指定校验失败必须零状态改动"
+    )
+    assert engine.pending is query
+    rejected = engine.records[-1]
+    assert rejected.kind == "action" and rejected.accepted is False
+    assert rejected.action == tampered
+    assert rejected.reason is not None and "附带指定" in rejected.reason
+
+
+def test_a_designation_fixes_the_holder_windows_target_to_bn(pack):
+    engine, _borrowed = _borrowed_designation_engine(pack)
+    query = engine.pending
+    assert isinstance(query, PlayPhaseQuery)
+    action = next(
+        candidate for candidate in query.designation_actions if candidate.designations == (2,)
+    )
+    engine.submit(action)
+
+    _finish_borrowed_window(engine)
+
+    window = _windows(engine, WindowCause.BORROWED_SWORD)[0]
+    assert window.target == 1, "窗口仍问持刀者"
+    assert {
+        candidate.targets
+        for candidate in window.legal_actions
+        if isinstance(candidate, UseCard)
+    } == {(2,)}, "有 designation 时目标固定为 Bn，持刀者只选 a / b"
+    assert [player.hp for player in engine.state.players] == [4, 4, 3, 4]
+
+
+def test_the_plain_borrowed_sword_still_lets_the_holder_choose_bn(pack):
+    """负向回归（暗发布）：不带 designations 的裸候选保持今天的持刀者自选。"""
+    engine, _borrowed = _borrowed_designation_engine(pack)
+    query = engine.pending
+    assert isinstance(query, PlayPhaseQuery)
+    plain = next(
+        action
+        for action in query.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "borrowed_sword"
+    )
+    assert plain.designations == ()
+    engine.submit(plain)
+
+    _finish_borrowed_window(engine)
+
+    window = _windows(engine, WindowCause.BORROWED_SWORD)[0]
+    assert {
+        candidate.targets
+        for candidate in window.legal_actions
+        if isinstance(candidate, UseCard)
+    } == {(0,), (2,), (3,)}, "旧路径：持刀者从自己的攻击范围里自选 Bn"
 
 
 def test_harvest_reveals_target_count_and_each_target_picks_one(pack):

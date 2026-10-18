@@ -42,7 +42,18 @@ from sgs.effects import (
     apply_modifiers,
     locate,
 )
-from sgs.state import GameState, Pass, SelectionSpec, Slot, SlotKind, Step, StepPool, Zone, ZoneRef
+from sgs.state import (
+    GameState,
+    Pass,
+    SelectionSpec,
+    Slot,
+    SlotKind,
+    Step,
+    StepPool,
+    UseCard,
+    Zone,
+    ZoneRef,
+)
 from sgs.timing import Timing
 
 __all__ = [
@@ -62,6 +73,7 @@ __all__ = [
     "activation_answers",
     "ask_key_of",
     "card_pool_size",
+    "card_preactivations",
     "manifest",
     "option_seat",
     "provide_source_id",
@@ -1007,6 +1019,68 @@ def _pool_rows(rows: list[tuple[tuple[str, ...], tuple[str, ...]]]) -> tuple[Ste
         seen.add(key)
         out.append(StepPool(when=when, options=options))
     return tuple(out)
+
+
+def card_preactivations(
+    designation_actions: tuple[UseCard, ...] | list[UseCard],
+) -> dict[str, tuple[Step, ...]]:
+    """把**借刀附带指定池**渲染成"牌名 → 两步清单"（W5-02a；``exclude``）。
+
+    键是**牌名**（``card.type``）：同名的两张借刀形状相同，投影与前端都只认牌名
+    （``spec.md`` §2.2；实例相关指定的升级点登记在 §6）。两步都是 ``name="seat"``、
+    ``min=max=1``：
+
+    1. **持刀者 A**：池里出现过的 A（一行 ``when=()``）；
+    2. **Bn**：``when="seat:A"`` 的子池 = 该 A 在池里的全部 Bn。
+
+    文案与 :class:`~sgs.state.Step` 的池形状沿用 W4-fix-3 / W4-1 的口径；清单整体
+    **不进记录流**（询问字段 ``exclude``），由接入层在 02b 起显式下发。
+    """
+    holders: dict[str, list[int]] = {}
+    designates: dict[str, dict[int, list[int]]] = {}
+    for action in designation_actions:
+        if not isinstance(action, UseCard) or not action.designations:
+            continue
+        if len(action.targets) != 1:
+            continue
+        name = action.card.type
+        holder = action.targets[0]
+        rows = designates.setdefault(name, {})
+        if holder not in holders.setdefault(name, []):
+            holders[name].append(holder)
+        options = rows.setdefault(holder, [])
+        for designate in action.designations:
+            if designate not in options:
+                options.append(designate)
+    out: dict[str, tuple[Step, ...]] = {}
+    for name in sorted(holders):
+        seat_options = tuple(seat_choice(holder) for holder in holders[name])
+        rows = tuple(
+            StepPool(
+                when=(seat_choice(holder),),
+                options=tuple(seat_choice(designate) for designate in designates[name][holder]),
+            )
+            for holder in holders[name]
+        )
+        out[name] = (
+            Step(
+                name="seat",
+                min=1,
+                max=1,
+                order=0,
+                pool=(StepPool(when=(), options=seat_options),),
+                wording="选择持刀者（装备区有武器、且有合法【杀】目标）",
+            ),
+            Step(
+                name="seat",
+                min=1,
+                max=1,
+                order=1,
+                pool=rows,
+                wording="选择【杀】的目标（由你指定）",
+            ),
+        )
+    return out
 
 
 def manifest(

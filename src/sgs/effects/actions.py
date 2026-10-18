@@ -71,6 +71,7 @@ __all__ = [
     "check_forbidden",
     "check_targets",
     "delayed_settle_target",
+    "designation_actions_for",
     "discard_count",
     "distance",
     "forced_use_targets",
@@ -339,6 +340,46 @@ def forced_use_targets(
         permitted = set(allowed)
         pool = tuple(target for target in pool if target in permitted)
     return pool
+
+
+def designation_actions_for(
+    state: GameState, seat: int, answers_seq: int
+) -> tuple[UseCard, ...]:
+    """本出牌阶段的**借刀附带指定池**（W5-02a；``exclude``，不进记录流）。
+
+    对**每张**手牌里的借刀 × 每个第 0 层合法的持刀者 A × A 攻击范围内的每个 Bn，各造一条
+    ``UseCard(card, targets=(A,), designations=(Bn,))``。这是"使用者一并指定 Bn"的候选面：
+    确认动作只要求它是本池的成员（``Engine.submit`` 的第四条路），主候选面
+    ``legal_actions`` 里的裸借刀一个字不改（暗发布，W5-02b 才收回）。
+
+    两条合法性都读**既有谓词**，不另写第二份规则：
+
+    - **A** 走 :func:`check_targets`——借刀的 ``borrowed_sword_target`` 滤子已内含
+      "装备区有武器 ∧ 攻击范围内有合法【杀】目标"；
+    - **Bn** 走 :func:`targets_within_attack_range`——与旧路径
+      :meth:`~sgs.engine.game.Engine.attack_range_targets` 传给持刀者窗口的预选集
+      是同一个函数，故"池里的 Bn"与"窗口允许的 Bn"同源。
+
+    借刀本身仍按出牌阶段可用性 / 次数闸门取（:func:`_usable_hand` + :func:`check_count`），
+    与裸候选同一条使用规则；牌名由**行为表的滤子**认出来，规则层不认具体牌名。
+    """
+    actions: list[UseCard] = []
+    for card in _usable_hand(state, seat, UseContext.PLAY_PHASE):
+        if "borrowed_sword_target" not in behavior_for(card).target_filters:
+            continue
+        if check_count(state, seat, card):
+            continue
+        for holder in check_targets(state, seat, card):
+            for designate in targets_within_attack_range(state, holder):
+                actions.append(
+                    UseCard(
+                        card=card,
+                        targets=(holder,),
+                        designations=(designate,),
+                        answers_seq=answers_seq,
+                    )
+                )
+    return tuple(actions)
 
 
 def _has_zone_cards(state: GameState, source: int, target: int) -> bool:

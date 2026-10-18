@@ -355,6 +355,22 @@ class UseCard(_ActionBase):
     kind: Literal["UseCard"] = "UseCard"
     card: CardRef
     targets: tuple[int, ...] = ()
+    designations: tuple[int, ...] = ()
+    """**附带指定**（W5 借刀杀人）：与 ``targets``（这张牌的目标）分列的座位。
+
+    借刀的官方形状是"你在选择 An 为目标的同时选择 Bn"：``targets=(A,)`` 是持刀者，
+    ``designations=(Bn,)`` 是**使用者**一并指定的【杀】目标。空元组 = 没有附带指定
+    （除借刀以外的每一条 ``UseCard``），**不落盘**（:meth:`_serialize`）：既有录像
+    因此逐字节不变。``extra="forbid"`` 只管多余键，缺省键由字段默认值补齐，
+    :func:`parse_action` 照常接受不含它的应答。
+    """
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> Any:
+        data = handler(self)
+        if not self.designations:
+            data.pop("designations", None)
+        return data
 
 
 class Pass(_ActionBase):
@@ -526,6 +542,26 @@ class PlayPhaseQuery(_QueryBase):
     **不进记录流**（``exclude``）：清单可由状态 + 技能声明重新渲染，落盘只是冗余；既有
     Golden Replay 因此逐字节不变。接入层在 :func:`sgs_web.projection.pending_payload`
     里显式下发它。
+    """
+
+    designation_actions: tuple[UseCard, ...] = Field(default=(), exclude=True)
+    """借刀的**附带指定池**（W5-02a）：每张手牌 × 合法持刀者 A × 合法 Bn 的变体。
+
+    这是"使用者一并指定 Bn"的合法候选面：``Engine.submit`` 的第四条路只要求提交的
+    ``UseCard.designations`` 非空且**是这一份的成员**。与 :attr:`transform_actions`
+    同姿态——**不进记录流**（``exclude``），重放时由同一份状态重建；裸借刀此刻仍在
+    ``legal_actions``（暗发布，收回在 W5-02b）。
+    """
+
+    card_preactivations: dict[str, tuple[Step, ...]] = Field(
+        default_factory=dict, exclude=True
+    )
+    """**牌名 → 预发动清单**（W5-02a）：借刀的 [持刀者 A, Bn] 两步。
+
+    从 :attr:`designation_actions` 派生（同源，不另写合法性）：键 = 牌名
+    （``card.type``；同名两张借刀同形），步骤 = 两个 ``name="seat"`` 的选座位步
+    （第二步按 ``when="seat:A"`` 分列 Bn 子池）。**不进记录流**（``exclude``），
+    02a 只在 query 侧下发；投影载荷在 02b 接。
     """
 
 

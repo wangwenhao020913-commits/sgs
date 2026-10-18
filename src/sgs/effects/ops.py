@@ -382,13 +382,21 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
     持刀者的候选由 ``RespondMode.USE`` 生成（目标 = 其攻击范围内的合法【杀】目标）；
     主动放弃（``Pass``）即"交出装备区里的武器牌"。第 0 层已保证目标有武器。
 
-    **Bn 由谁选（U-27-1，程序化约定）**：官方 `A/card_scroll.txt:56` 写"你在选择 An 为
-    目标的同时选择……An 使用【杀】的合法目标 Bn"（B 由**使用者**指定）；M2 按票 19 §10
-    不建独立的"选座位"询问，故把 Bn 烘进**持刀者**响应窗口的候选
-    （``UseCard(slash, targets=(Bn,))``）。官方的第二次合法性检测因此由构造保证。
+    **Bn 由谁选**：官方 `A/card_scroll.txt:56` 写"你在选择 An 为目标的同时选择……
+    An 使用【杀】的合法目标 Bn"（B 由**使用者**指定）。W5-02a 起使用者把 Bn 烘进
+    ``UseCard.designations``、随 USE 帧带进本帧（``frame.data["designations"]``）：
+    **有**附带指定时目标窗口固定为 ``use_targets=(Bn,)``，持刀者只选 a（使用【杀】）
+    或 b（``Pass``）；**没有**时保持旧路径（持刀者从自己攻击范围里自选 Bn，U-27-1 的
+    程序化约定，暗发布期仍可走）。翻转（缺失即 fail-closed）在 W5-02b。
     """
     holder = host.current_target(frame)
     source = frame.data["source"]
+    designations = tuple(frame.data.get("designations", ()))
+    if designations:
+        assert len(designations) == 1, "借刀的附带指定恰好一个 Bn（W5-02a）"
+        use_targets = (designations[0],)
+    else:
+        use_targets = host.attack_range_targets(holder)
     action = host.ask_respond(
         frame,
         holder,
@@ -398,7 +406,7 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
         target=holder,
         window_frame=frame.frame_id,
         mode=RespondMode.USE,
-        use_targets=host.attack_range_targets(holder),
+        use_targets=use_targets,
     )
     if host.suspended(action):
         return "stay"

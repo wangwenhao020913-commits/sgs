@@ -17,7 +17,16 @@ import pytest
 from sgs.agents import tape_from_journal
 from sgs.data import load_content_pack
 from sgs.effects import legal_actions_for
-from sgs.engine import Engine, IllegalActionError, MalformedAction, dump_journal, read_journal
+from sgs.engine import (
+    ActionRecord,
+    Engine,
+    IllegalActionError,
+    MalformedAction,
+    dump_journal,
+    instantiate_cards,
+    read_journal,
+    record_json,
+)
 from sgs.state import (
     ActivateSkill,
     DiscardQuery,
@@ -30,6 +39,7 @@ from sgs.state import (
     QueryKind,
     SelectOptionContext,
     UseCard,
+    parse_action,
     project,
 )
 from sgs.timing import Timing
@@ -97,6 +107,56 @@ def test_candidates_carry_the_answers_seq_of_their_own_query():
             continue
         for action in record.query.legal_actions:
             assert action.answers_seq == record.query.seq
+
+
+def test_use_card_designations_are_omitted_when_empty_and_written_when_present():
+    """W5-02a：空的附带指定**不落盘**（旧记录字节逐字不变），非空才多出这个键。"""
+    card = instantiate_cards(PACK)[SLASH[0]]
+    legacy_bytes = json.dumps(
+        {
+            "accepted": True,
+            "action": {
+                "answers_seq": 7,
+                "card": card.model_dump(mode="json"),
+                "kind": "UseCard",
+                "targets": [1],
+            },
+            "answers_seq": 7,
+            "kind": "action",
+            "reason": None,
+            "seq": 9,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    empty = ActionRecord(
+        seq=9, accepted=True, action=UseCard(card=card, targets=(1,), answers_seq=7)
+    )
+    assert record_json(empty) == legacy_bytes, "空 designations 的记录字节与旧值逐字相同"
+    assert '"designations"' not in record_json(empty)
+
+    full = ActionRecord(
+        seq=9,
+        accepted=True,
+        action=UseCard(card=card, targets=(1,), designations=(2, 3), answers_seq=7),
+    )
+    assert json.loads(record_json(full))["action"]["designations"] == [2, 3]
+    assert '"designations":[2,3]' in record_json(full)
+
+
+def test_parse_action_accepts_a_missing_designations_key_and_reads_a_present_one():
+    card = instantiate_cards(PACK)[SLASH[0]]
+    raw = {
+        "kind": "UseCard",
+        "card": card.model_dump(mode="json"),
+        "targets": [1],
+        "answers_seq": 7,
+    }
+
+    assert parse_action(raw).designations == (), "旧载荷（缺省键）照常解析"
+    assert parse_action({**raw, "designations": [2, 3]}).designations == (2, 3)
 
 
 def test_discard_candidates_are_all_subsets_of_the_required_size_in_stable_order():
