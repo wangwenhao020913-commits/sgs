@@ -1,9 +1,9 @@
-"""虚拟牌 id 的线上上限与单射（W4-fix-1）。
+"""虚拟牌 id 的线上上限与单射（W4-fix-1；上界常量见 W4-fix-5）。
 
-线上 id 是 JSON 数字：浏览器 ``JSON.parse`` 只把 ``|id| < 2**53`` 的整数读成精确
-整数，超过即变浮点、回传被 pydantic 拒绝（手动验收实测：``-7.006...e+183``）。
-故 ``kind >= 2`` 的泛化编码必须压进 ``2**53``，来源张数上限由"可证明 ``< 2**53``"
-反推——不是余量，也不是魔法数。
+线上 id 是 JSON 数字：浏览器 ``JSON.parse`` 只把 ``|id| < WIRE_INT_LIMIT`` 的整数读成
+精确整数，超过即变浮点、回传被 pydantic 拒绝（手动验收实测：``-7.006...e+183``）。
+故 ``kind >= 2`` 的泛化编码必须压进 ``WIRE_INT_LIMIT``（源码里的唯一真源），来源张数
+上限由"可证明小于它"反推——不是余量，也不是魔法数。
 
 判据全部走**公开缝**：``virtual_card_id`` / ``transformed_card`` / 公开常量。
 单射用穷举（单源全牌堆 + 多源抽样与端点）钉住，不靠注释保证。
@@ -22,12 +22,10 @@ from sgs.skills import (
     transformed_card,
     virtual_card_id,
 )
+from sgs.skills.virtual import WIRE_INT_LIMIT
 
 from support import SeatSpec, build_state
 from test_skills import PACK
-
-WIRE_LIMIT = 2**53
-"""JS ``Number`` 能精确表示的最大整数：虚拟 id 的线上天花板（``|id| < WIRE_LIMIT``）。"""
 
 BASE = len(PACK.deck.cards) + 1
 """编码进制 = 牌堆张数 + 1（标准包 108 张 ⇒ 109）。"""
@@ -50,30 +48,30 @@ def _over_limit_sources() -> tuple[int, ...]:
 
 
 # ---------------------------------------------------------------------------
-# 来源上限由 2^53 反推（验收 2；不是魔法数）
+# 来源上限由 WIRE_INT_LIMIT 反推（验收 2；不是魔法数）
 # ---------------------------------------------------------------------------
 
 
 def test_the_source_ceiling_is_the_largest_the_wire_limit_allows():
-    """``MAX_VIRTUAL_SOURCES`` = 使**全部 kind 段**仍 ``< 2**53`` 的最大来源张数。"""
+    """``MAX_VIRTUAL_SOURCES`` = 使**全部 kind 段**仍 ``< WIRE_INT_LIMIT`` 的最大来源张数。"""
     assert BASE == 109, "标准包 108 张 ⇒ 进制 109（本票的界推以此为准）"
     admissible = [
         source_count
         for source_count in range(1, 32)
-        if len(KINDS) * _capacity(source_count) < WIRE_LIMIT
+        if len(KINDS) * _capacity(source_count) < WIRE_INT_LIMIT
     ]
     assert admissible, "至少允许一张来源"
     assert MAX_VIRTUAL_SOURCES == max(admissible), (
-        f"来源上限应是从 2^53 反推的最大值 {max(admissible)}，实际 {MAX_VIRTUAL_SOURCES}"
+        f"来源上限应是从 WIRE_INT_LIMIT 反推的最大值 {max(admissible)}，实际 {MAX_VIRTUAL_SOURCES}"
     )
-    assert len(KINDS) * _capacity(MAX_VIRTUAL_SOURCES) < WIRE_LIMIT
-    assert len(KINDS) * _capacity(MAX_VIRTUAL_SOURCES + 1) >= WIRE_LIMIT, (
-        "再多一张来源就越过 2^53——上限必须紧到这一步"
+    assert len(KINDS) * _capacity(MAX_VIRTUAL_SOURCES) < WIRE_INT_LIMIT
+    assert len(KINDS) * _capacity(MAX_VIRTUAL_SOURCES + 1) >= WIRE_INT_LIMIT, (
+        "再多一张来源就越过 WIRE_INT_LIMIT——上限必须紧到这一步"
     )
 
 
 def test_every_allowed_kind_and_source_count_stays_under_the_wire_limit():
-    """``kind`` 全部取值 × 来源 ``0..MAX`` 张的**端点**：``|id| < 2^53``（断言）。"""
+    """``kind`` 全部取值 × 来源 ``0..MAX`` 张的**端点**：``|id| < WIRE_INT_LIMIT``（断言）。"""
     count = len(PACK.deck.cards)
     source_sets: list[tuple[int, ...]] = [()]
     for size in range(1, MAX_VIRTUAL_SOURCES + 1):
@@ -82,7 +80,7 @@ def test_every_allowed_kind_and_source_count_stays_under_the_wire_limit():
     for kind in KINDS:
         for sources in source_sets:
             card_id = virtual_card_id(kind=kind, sources=sources, card_count=count)
-            assert abs(card_id) < WIRE_LIMIT, (
+            assert abs(card_id) < WIRE_INT_LIMIT, (
                 f"kind={kind} sources={sources} 的 id {card_id} 越过浏览器整数精度"
             )
 
@@ -127,7 +125,7 @@ def _generalized_samples(count: int) -> set[tuple[int, ...]]:
 
 
 def test_generalized_ids_are_pairwise_distinct_for_every_source_count():
-    """``kind >= 2``：0..MAX 张的抽样与端点逐对不等，且 ``|id| < 2^53``。"""
+    """``kind >= 2``：0..MAX 张的抽样与端点逐对不等，且 ``|id| < WIRE_INT_LIMIT``。"""
     count = len(PACK.deck.cards)
     seen: dict[int, tuple[int, tuple[int, ...]]] = {}
     for kind in KINDS:
@@ -135,7 +133,7 @@ def test_generalized_ids_are_pairwise_distinct_for_every_source_count():
             continue
         for sources in sorted(_generalized_samples(count)):
             card_id = virtual_card_id(kind=kind, sources=sources, card_count=count)
-            assert abs(card_id) < WIRE_LIMIT, (kind, sources, card_id)
+            assert abs(card_id) < WIRE_INT_LIMIT, (kind, sources, card_id)
             assert card_id not in seen, (
                 f"撞 id：{card_id} 同时来自 {seen[card_id]} 与 {(kind, sources)}"
             )
@@ -203,3 +201,26 @@ def test_the_source_ceiling_is_enforced_at_construction_time():
         )
     with pytest.raises(VirtualSourceError):
         transformed_card(state, too_many, "peach")
+
+
+# ---------------------------------------------------------------------------
+# 上界要按**当前进制**校验（W4-fix-5）：票 01 的 ``base = 109`` 不再是"碰巧成立"
+# ---------------------------------------------------------------------------
+
+
+def test_the_current_pack_passes_the_base_check():
+    """正常牌堆 ``base = 109``：构造期检查通过（每个 ``kind`` 都产得出 id）。"""
+    count = len(PACK.deck.cards)
+    assert BASE == 109, "标准包 108 张 ⇒ 进制 109"
+    for kind in KINDS:
+        virtual_card_id(kind=kind, sources=(0,), card_count=count)
+
+
+def test_a_base_too_large_for_the_source_ceiling_is_rejected_at_construction_time():
+    """200 张的包 ⇒ ``base = 201``：撑不住 7 张来源，构造期抛错（不静默产 id）。"""
+    with pytest.raises(VirtualSourceError, match="当前进制撑不住这个来源上限"):
+        virtual_card_id(
+            kind=int(VirtualKind.PEACH),
+            sources=(0, 1),
+            card_count=200,
+        )

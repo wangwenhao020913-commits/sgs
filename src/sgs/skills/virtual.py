@@ -46,6 +46,7 @@ from sgs.state import (
 
 __all__ = [
     "MAX_VIRTUAL_SOURCES",
+    "WIRE_INT_LIMIT",
     "SourceFilter",
     "VirtualKind",
     "VirtualSourceError",
@@ -97,21 +98,33 @@ _KIND_BY_TYPE: dict[str, VirtualKind] = {
 """目标**牌名 id** → 命名空间；只登记本里程碑有生产者的牌（票 03 §表 / 票 04 加【决斗】）。"""
 
 KIND_COUNT = len(VirtualKind)
-"""命名空间的段数（只读事实，供测试与文档引用；id 算式不读它）。"""
-MAX_VIRTUAL_SOURCES = 7
-"""虚拟牌的**来源张数上界**（票 03 §验收 4；W4-fix-1 由 ``2**53`` 反推）。
+"""命名空间的段数（只读事实；id 算式不读它，构造期的上界检查读它作为段数）。"""
 
-线上的 id 是 JSON 数字，浏览器 ``JSON.parse`` 只把 ``|id| < 2**53`` 的整数读成精确
-整数。:func:`_generalized_block` 的一段容量是 ``(MAX+1) * base**MAX``（紧界），而
-全体 id 的上界是 ``KIND_COUNT * block``；标准包 ``base = 109``、``KIND_COUNT = 5`` 时
+WIRE_INT_LIMIT = 2**53
+"""虚拟 id 的**线上整数上限**：JS ``Number`` 只把 ``|id| < WIRE_INT_LIMIT`` 的整数读成精确整数。
+
+线上 id 是 JSON 数字，浏览器 ``JSON.parse`` 只精确到 ``Number.MAX_SAFE_INTEGER``
+（``2**53 - 1``）；超过即变浮点、回传被 pydantic 拒绝（手动验收实测 ``-7.006...e+183``）。
+这是**唯一**的真源：构造期的进制检查 :func:`_validate_base_supports_source_ceiling` 与
+``tests/test_virtual_ids.py`` 都从它取，不再各写一份 ``2**53`` 字面量（W4-fix-5）。
+"""
+
+MAX_VIRTUAL_SOURCES = 7
+"""虚拟牌的**来源张数上界**（票 03 §验收 4；W4-fix-1 由 :data:`WIRE_INT_LIMIT` 反推）。
+
+:func:`_generalized_block` 的一段容量是 ``(MAX+1) * base**MAX``（紧界），而全体 id 的
+上界是 ``KIND_COUNT * block``；标准包 ``base = 109``、``KIND_COUNT = 5`` 时
 
 - ``MAX = 7``：``5 * 8 * 109**7 ≈ 7.31e15 < 2**53 ≈ 9.01e15`` ✓
 - ``MAX = 8``：``5 * 9 * 109**8 ≈ 8.97e17`` ✗
 
-故 7 是编码撑得住的最大值。``tests/test_virtual_ids.py`` 从 ``2**53`` 重新推导它，
-不让这个数字成为魔法数。超过它由 :func:`transformed_card` / :func:`virtual_card_id`
-抛 :class:`VirtualSourceError`（构造期可定位错误），而不是静默产出撞 id 或会被浏览器
-变形的虚拟牌。标准版全部转化技能最多两张来源（【丈八蛇矛】），7 张的余量足够。
+故 7 是编码撑得住的最大值。``tests/test_virtual_ids.py`` 从 :data:`WIRE_INT_LIMIT`
+重新推导它，不让这个数字成为魔法数。超过它由 :func:`transformed_card` /
+:func:`virtual_card_id` 抛 :class:`VirtualSourceError`（构造期可定位错误），而不是静默
+产出撞 id 或会被浏览器变形的虚拟牌。**当前进制撑不住这个上限时同样抛错**——见
+:func:`_validate_base_supports_source_ceiling`（W4-fix-5：``base`` 来自当前牌堆，
+不再是票 01 那个"碰巧等于 109"的假设）。标准版全部转化技能最多两张来源
+（【丈八蛇矛】），7 张的余量足够。
 """
 
 
@@ -126,6 +139,27 @@ class VirtualSourceError(ValueError):
 def _base(card_count: int) -> int:
     """进制 = ``card_count + 1``：来源 id 全部落进 ``0..card_count-1``，故恒小于它。"""
     return card_count + 1
+
+
+def _validate_base_supports_source_ceiling(*, base: int, target: str) -> None:
+    """构造期上界检查（W4-fix-5）：当前**进制**必须撑得住 :data:`MAX_VIRTUAL_SOURCES`。
+
+    全体泛化 id 的紧界是 ``KIND_COUNT * _generalized_block(base)``，即票面那条
+    ``KIND_COUNT * (MAX_VIRTUAL_SOURCES + 1) * base**MAX_VIRTUAL_SOURCES``；它一旦不再
+    ``< WIRE_INT_LIMIT``，浏览器就会把 id 读成浮点、回传被拒。``base`` 来自**当前牌堆**
+    （``len(state.cards) + 1``），不是编码的常量：换一个更大的包，``base`` 随之变大，
+    这条界可能不再成立，故必须当场抛错而不是静默产 id。
+
+    兼容段（``kind < 2``）也走这条检查：这是**牌堆**的属性——同一局里泛化段
+    （【桃】/【乐不思蜀】/【决斗】）照样会出现，牌堆撑不住时任何虚拟 id 都不可信。
+    """
+    ceiling = KIND_COUNT * _generalized_block(base=base)
+    if ceiling >= WIRE_INT_LIMIT:
+        raise VirtualSourceError(
+            f"{target}: 当前进制撑不住这个来源上限——base={base}"
+            f"（牌堆 {base - 1} 张）时 {MAX_VIRTUAL_SOURCES} 张来源的编码上界 "
+            f"{ceiling} 已越过线上整数上限 {WIRE_INT_LIMIT}"
+        )
 
 
 def virtual_card_id(
@@ -145,16 +179,21 @@ def virtual_card_id(
       ``base`` 进制的紧凑折叠（:func:`_fold`），每段容量取紧界
       :func:`_generalized_block`。全体 id 因此严格小于
       ``KIND_COUNT * (MAX_VIRTUAL_SOURCES + 1) * base ** MAX_VIRTUAL_SOURCES``，
-      而来源上限 :data:`MAX_VIRTUAL_SOURCES` 正是按它 ``< 2**53`` 反推的。
+      而来源上限 :data:`MAX_VIRTUAL_SOURCES` 正是按它 ``< WIRE_INT_LIMIT`` 反推的。
 
     两段区间互不重叠：泛化段的起点 ``1 + 2 * block`` 大于兼容段的上界
     ``1 + base ** 2``（``block = (MAX+1) * base**MAX > base**2``，``MAX >= 2``）。
+
+    ``base`` 撑不住 :data:`MAX_VIRTUAL_SOURCES`（``KIND_COUNT * block >= WIRE_INT_LIMIT``）
+    时抛 :class:`VirtualSourceError`——"线上收得下"由**构造期**兜住，而不是交给牌堆大小
+    碰运气（W4-fix-5）。
 
     签名保持既有的 ``kind`` / ``sources`` / ``card_count`` 三个关键字——既有调用点与测试
     不破；``card_count`` 仍作进制用（"来源张数上限"那层由 :data:`MAX_VIRTUAL_SOURCES`
     显式承担）。
     """
     base = _base(card_count)
+    _validate_base_supports_source_ceiling(base=base, target=virtual_card_id.__name__)
     # 空来源是**合法的**（纯虚拟牌走这一段）；"转化牌至少一张来源"由
     # :func:`transformed_card` 把关，id 派生本身不区分二者。
     _validate_source_count(sources, max_sources=MAX_VIRTUAL_SOURCES, target="virtual_card_id")
@@ -172,7 +211,7 @@ def _generalized_block(*, base: int) -> int:
     :func:`_fold` 在 ``L`` 张来源时落在 ``[L * base**L, (L+1) * base**L - 1]``，
     故 ``L <= MAX_VIRTUAL_SOURCES`` 的全部编码严格小于本容量。这个界是**紧的**（只差
     1），不是旧版按 ``10`` 个十进制位撑出来的天文数——正因如此
-    ``MAX_VIRTUAL_SOURCES`` 才能压进 ``2**53``。各 ``kind`` 段因此首尾不相接：第 ``k``
+    ``MAX_VIRTUAL_SOURCES`` 才能压进 :data:`WIRE_INT_LIMIT`。各 ``kind`` 段因此首尾不相接：第 ``k``
     段的 ``|id|`` 落在 ``[1 + k * block, (k+1) * block]``，下一段从 ``1 + (k+1) * block``
     起算。
     """
