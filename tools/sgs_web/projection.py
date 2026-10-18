@@ -21,6 +21,7 @@ from sgs.effects import response_count
 from sgs.engine import record_json
 from sgs.skills import (
     CATALOG,
+    ModifierPoint,
     conversion_offers_by_source,
     resolve_instances,
 )
@@ -60,7 +61,9 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     - **谁的技能**：技能实例由 ``sgs.skills.resolve_instances`` 解析，它已经含身份门控
       （非主公的武将牌上**没有**主公技），故"有的技能"不是前端猜的；
     - **什么类型**：``locked`` 是官方"牌面有没有『可以』"的逐字判据，中文名与
-      ``skill_type`` 取自**武将面数据**（`HeroSkill.name` / `.skill_type`）；
+      ``skill_type`` 取自**武将面数据**（`HeroSkill.name` / `.skill_type`）；W4-fix-3 起
+      ``ui.passive`` 另标"触发技"（有钩子 / 接缝且无主动入口，见
+      :func:`_is_passive_skill`）——**不改** ``skill_type`` 的语义；
     - **此刻能不能用**：`available` = 当前挂起的询问里有没有针对这个技能的
       ``ActivateSkill`` 候选。**不去问引擎"这个技能满不满足条件"**——那是第二条真源。
 
@@ -134,6 +137,29 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     return out
 
 
+def _is_passive_skill(definition: Any) -> bool:
+    """这条技能是不是**触发技（被动）**（W4-fix-3）：界面徽标据此写"被动技"。
+
+    判据只看**声明面**的两件事：
+
+    1. 有触发时机——``hooks``（时机钩子）或 ``seams``（帧内接缝）；
+    2. **没有主动入口**——没有 :data:`~sgs.skills.ModifierPoint.CANDIDATES` 修饰器
+       （引擎靠它把技能自己挂进候选，界面据此画"发动技能"）。
+
+    刻意**不读** :attr:`SkillDef.skill_type`：那是 ``NORMAL`` / ``LORD`` 的身份门控闭集
+    （主公技派生等别的东西都读它），不能借它表达"这一条是不是触发技"。【流离】是
+    ``locked=False`` + 一个 ``USE_BECOME_TARGET`` 钩子的触发技，旧实现按
+    "``skill_type == NORMAL`` ⇒ 主动技"一律标成主动（用户实机报障）。
+
+    锁定技（``locked=True``）不在这里判：界面早已把锁定一律画成"锁定技 / 被动"。
+    """
+    if not (definition.hooks or definition.seams):
+        return False
+    return not any(
+        modifier.point is ModifierPoint.CANDIDATES for modifier in definition.modifiers
+    )
+
+
 def _skill_ui(
     definition: Any,
     actions: tuple[Any, ...],
@@ -146,6 +172,10 @@ def _skill_ui(
     "一张【闪】当【杀】"）。转牌没有 ``ActivateSkill`` 候选，界面据这份来源清单
     让技能按钮点得动、并只高亮可转化的手牌。
 
+    ``passive``（W4-fix-3）：这条技能是**触发技**（见 :func:`_is_passive_skill`）。
+    界面徽标读它写"被动技"——判据住在这里而不是 ``SkillDef.skill_type`` 里，因为后者
+    是身份门控的闭集、还要服务别的派生。
+
     W4-2 删掉了 ``manual`` / ``pick_cards`` / ``pick_seats``：A 族六条主动技全部走
     **预发动清单**，候选恒为"是否发动"的裸骨架（不再带 ``picks`` / ``choices``），故
     "多选手牌 → 点一位在场角色"的手选模式**没有生产者**（票 05 起就只剩遗留路径）。
@@ -155,6 +185,7 @@ def _skill_ui(
     skill_id = definition.skill_id
     return {
         "requirement": definition.requirement or "",
+        "passive": _is_passive_skill(definition),
         "convert_sources": sorted(
             int(source)
             for source, aliases in virtual.items()

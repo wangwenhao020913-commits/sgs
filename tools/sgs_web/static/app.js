@@ -44,13 +44,17 @@ function phaseLabel(phase) {
   return PHASE_LABELS[phase] || phase;
 }
 
-/** 走手选的询问类（本刀射程：出牌阶段 + 响应窗口）。
+/** 走手选的询问类（出牌阶段 / 响应窗口 / 【闪】窗口 / 求桃窗口）。
  *
  * 弃牌阶段的交互是**另一条**手选路（点手牌收进待弃置集合，没有目标要选），
  * 由 :func:`isDiscardPick` 单独认出来——它不进这里，免得 `pickerSeats` 去读候选索引。
- * 其余四类（排列 / 选择面 / 技能发动 / 单选）保留旧的候选列表按钮。
+ * 其余（排列 / 选择面 / 技能发动 / 单选）保留旧的候选列表按钮。
+ *
+ * 求桃（W4-fix-3）：`legal_actions` 里是**真【桃】**的使用（急救转化桃已收回到技能入口，
+ * `spec.md` §1 裁定 A），故"点手牌【桃】= 选中对应候选"；目标恒为濒死者，由候选的
+ * `combos` 自动选中。**只加可点，不改候选面**。
  */
-const HAND_PICK_KINDS = ["PLAY_PHASE", "RESPOND", "DODGE"];
+const HAND_PICK_KINDS = ["PLAY_PHASE", "RESPOND", "DODGE", "PEACH"];
 
 /** 事件回放的步长档位（毫秒）：每一条事件在事件流 / 效果区停留这么久。
  *
@@ -870,9 +874,14 @@ function renderSkills(view) {
     if (preactivated) button.setAttribute("data-preativated", "true");
     if (convertCards.length) button.setAttribute("data-convert", String(convertCards.length));
     if (manifest) button.setAttribute("data-preativation", String(manifest.length));
+    // 技能类别徽标（W4-fix-3）：**触发技**由服务端投影判（`ui.passive` = 有 hooks /
+    // 接缝且没有主动入口），界面不按 `skill_type` 猜——`NORMAL` 里既有主动技也有被动技。
+    const passive = Boolean(ui.passive);
     const kind = skill.carrier === "EQUIPMENT"
       ? (skill.locked ? "装备技 / 锁定" : "装备技")
-      : (skill.locked ? "锁定技 / 被动" : (skill.skill_type === "LORD" ? "主公技" : "主动技"));
+      : (skill.locked
+        ? "锁定技 / 被动"
+        : (skill.skill_type === "LORD" ? "主公技" : (passive ? "被动技" : "主动技")));
     const badge = preactivated
       ? (manifest ? " · 预发动" : "")
       : (manifest ? " · 预发动" : (convertCards.length ? " · 点它转化" : (skill.available ? " · 可发动" : "")));
@@ -1198,7 +1207,18 @@ function buildPreativationAction(pending, pa) {
   };
 }
 
+/** 这一步的**服务端文案**（W4-fix-3）：`Step.wording`；空 / 缺失 ⇒ `""`。
+ *
+ * 声明侧 = `SkillDef.step_requirements`（由 `flow.manifest` 填进清单），故界面不自己
+ * 编文案：离间第 2/3 步的"决斗使用者 / 决斗目标"就是服务端下发的这两句。
+ */
+function preactivationWording(step) {
+  return (step && typeof step.wording === "string") ? step.wording : "";
+}
+
 function preactivationStepLabel(step) {
+  const wording = preactivationWording(step);
+  if (wording) return wording;
   const kind = preactivationStepKind(step);
   if (kind === "card") return "选牌";
   if (kind === "seat") return "选目标";
@@ -1209,13 +1229,17 @@ function preactivationStepHint(pa, pending) {
   const step = pa.steps[pa.cursor];
   if (!step) return "清单已填完，可以确认发动。";
   const options = preactivationOptions(pa, pa.cursor);
+  const wording = preactivationWording(step);
   if (preactivationStepKind(step) === "card") {
     const count = pa.answers[pa.cursor].values.length;
-    return `第 ${pa.cursor + 1}/${pa.steps.length} 步：选牌（${step.min}–${step.max} 张，已选 ${count} 张）。`;
+    const what = wording || "选牌";
+    return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${what}（${step.min}–${step.max} 张，已选 ${count} 张）。`;
   }
   if (preactivationStepKind(step) === "seat") {
+    if (wording) return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${wording}（点场上武将选择）。`;
     return `第 ${pa.cursor + 1}/${pa.steps.length} 步：点场上武将选目标。`;
   }
+  if (wording) return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${wording}`;
   return `第 ${pa.cursor + 1}/${pa.steps.length} 步：选一项。`;
 }
 

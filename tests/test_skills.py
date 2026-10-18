@@ -14,14 +14,17 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
+
+import pytest
 
 from sgs.data import Color, Gender, RuleConfig, load_content_pack
 from sgs.effects import (
     legal_actions_for,
     target_is_effective,
 )
-from sgs.engine import Engine
+from sgs.engine import Engine, IllegalActionError
 from sgs.resolution import Tag, has_tag
 from sgs.skills import (
     CATALOG,
@@ -1938,6 +1941,7 @@ def test_axe_preactivation_costs_exactly_two_cards_as_one_composite():
             return _slash_use(query, SLASH, 1)
         if query.kind == "SKILL_ACTIVATION" and query.skill_id == "equip.axe":
             captured["steps"] = tuple(query.preactivation)
+            captured["hand"] = tuple(card.card_id for card in query.view.self_hand)
             return ActivateSkill(
                 skill_id="equip.axe",
                 picks=(extra, extra2),
@@ -1960,9 +1964,10 @@ def test_axe_preactivation_costs_exactly_two_cards_as_one_composite():
     assert [step.name for step in steps] == ["card"]
     assert steps[0].zones == (Zone.HAND, Zone.EQUIP)
     assert (steps[0].min, steps[0].max) == (2, 2)
-    assert set(_step_options(steps[0])) >= {str(extra), str(extra2), str(AXE)}, (
-        "手牌 ∪ 装备区都在候选里（【杀】已用掉，摸牌阶段又补了两张）"
+    assert set(_step_options(steps[0])) == {str(card_id) for card_id in captured["hand"]}, (
+        "同一局面下池 = **其余牌**（手牌；装备区只剩武器自己）；武器本身被排除"
     )
+    assert str(AXE) not in _step_options(steps[0]), "武器本身不能当成本（按装备卡 id 排除）"
 
     assert engine.state.player(1).hp == 3, "弃两张后此【杀】依然造成伤害"
     assert AXE in engine.state.player(0).equip, "武器本身不能当成本"
@@ -1978,3 +1983,209 @@ def test_axe_preactivation_costs_exactly_two_cards_as_one_composite():
     assert sorted(
         card.card_id for record in cost_moves for card in record.cards
     ) == sorted((extra, extra2)), "恰好两张手牌当成本"
+
+
+def test_axe_cannot_pay_with_its_own_equipment_card():
+    """【贯石斧】不能弃置**自身**（W4-fix-3 用户裁定，**偏离官方 FAQ**）。
+
+    代价步的池按"这张技能对应的装备卡 id"排除武器本身（不写死牌名）；校验器读同一份
+    池 ⇒ 把武器当成本提交会被拒，且零状态改动。
+    """
+    extra, extra2 = _cards("peach")[0], _cards("peach")[1]
+    dodge = _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH, extra, extra2), equip=(AXE,)),
+            SeatSpec(hand=(dodge,)),
+        ],
+        deck=_deck_excluding(SLASH, extra, extra2, AXE, dodge),
+        turn_seat=0,
+    )
+    def defender(query):
+        if query.kind == "DODGE":
+            return _find(query, lambda action: isinstance(action, UseCard))
+        return None
+
+    def driver(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _slash_use(query, SLASH, 1)
+        return None
+
+    engine = _run(
+        state,
+        [Scripted(driver), Scripted(defender)],
+        lambda running: running.pending is not None
+        and running.pending.kind == "SKILL_ACTIVATION"
+        and running.pending.skill_id == "equip.axe",
+    )
+    query = engine.pending
+    assert query is not None
+
+    steps = tuple(query.preactivation)
+    assert str(AXE) not in _step_options(steps[0]), "清单里也不铺武器自己"
+
+    baseline = json.dumps(engine.state.model_dump(mode="json"), sort_keys=True)
+    with pytest.raises(IllegalActionError) as caught:
+        engine.submit(
+            ActivateSkill(
+                skill_id="equip.axe",
+                picks=(AXE, extra),  # 武器本身当成本 ⇒ 不合法
+                answers_seq=query.seq,
+            )
+        )
+
+    assert "不在可选范围内" in caught.value.message
+    assert json.dumps(engine.state.model_dump(mode="json"), sort_keys=True) == baseline, (
+        "拒绝后零状态改动"
+    )
+    assert engine.pending is query, "询问原样还在"
+    rejected = engine.records[-1]
+    assert rejected.accepted is False and "预发动校验失败" in rejected.reason
+    assert AXE in engine.state.player(0).equip, "拒绝后武器仍装备着"
+
+
+def test_axe_with_only_its_own_card_plus_one_other_is_never_asked():
+    """池排除自身后，"手牌 1 张 + 武器自己"= **付不起** ⇒ 连发动询问都不发。
+
+    【借刀杀人】窗口里斧主用掉唯一一张【杀】后，手里还有 1 张牌、装备区只剩武器自己。
+    旧口径（武器可弃自身）池 = 2 ⇒ 会发询问；W4-fix-3 起池 = 1（只有那张手牌）。
+    """
+    from sgs.state import WindowCause
+
+    borrowed = _cards("borrowed_sword")[0]
+    dodge = _cards("dodge")[0]
+    extra = _cards("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH, extra), equip=(AXE,)),
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(hand=(dodge,)),
+        ],
+        deck=_deck_excluding(SLASH, AXE, borrowed, dodge, extra),
+        turn_seat=1,
+        rule_config=RuleConfig(first_seat=1),
+    )
+
+    def _borrowed_user(query):
+        if query.kind == "PLAY_PHASE":
+            return _find(
+                query,
+                lambda action: isinstance(action, UseCard)
+                and action.card.card_id == borrowed
+                and action.targets == (0,),
+            )
+        return None
+
+    def _axe_owner(query):
+        if getattr(query, "cause", None) is WindowCause.BORROWED_SWORD:
+            return _find(
+                query,
+                lambda action: isinstance(action, UseCard)
+                and action.card.type == "slash"
+                and action.targets == (2,),
+            )
+        return None
+
+    engine = _run(
+        state,
+        [Scripted(_axe_owner), Scripted(_borrowed_user), Scripted(_dodge_driver)],
+        lambda engine: SLASH in engine.state.discard,
+    )
+
+    assert not _has_query(engine, "SKILL_ACTIVATION", skill_id="equip.axe"), (
+        "排除自身后池 = 1（只剩那张手牌）⇒ 付不起 ⇒ 连发动询问都不发"
+    )
+    assert not _has_query(engine, "SELECT_CARDS"), "没有发动询问 ⇒ 更没有成本步询问"
+    assert AXE in engine.state.player(0).equip
+    assert extra in engine.state.player(0).hand
+
+
+# ---------------------------------------------------------------------------
+# W4-fix-3：求桃窗口的收口形状（真【桃】可直接点 / 急救只经技能入口）
+# ---------------------------------------------------------------------------
+
+JIJIU = "hero.huatuo.jijiu"
+
+
+def _real_red(type_id: str) -> int:
+    return _first_by_color(type_id, black=False)
+
+
+def test_the_peach_window_offers_only_real_peaches_and_a_hand_peach_rescues():
+    """求桃窗口（W4-fix-2 收口后）：候选面 = **真牌**的使用 + 放弃，转化【桃】只经【急救】清单。
+
+    这条同时钉三件事：
+    1. 真【桃】在候选里、可被"点手牌"选中（前端 ``PEACH`` 已进 ``HAND_PICK_KINDS``）；
+    2. ``legal_actions`` 里**没有**转化【桃】（``virtual_sources`` 非空的使用）；
+    3. 选项**不再重复**：同一张牌名 + 同一目标只有一条（旧形状是真桃 + 急救桃两条）。
+    """
+    real_peach = _real_red("peach")
+    red_dodge = _real_red("dodge")
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,)),
+            SeatSpec(hp=1),
+            SeatSpec(hand=(real_peach, red_dodge), hero="huatuo"),
+        ],
+        deck=_deck_excluding(SLASH, real_peach, red_dodge),
+        turn_seat=0,
+    )
+    captured: dict[str, object] = {}
+
+    def attacker(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _slash_use(query, SLASH, 1)
+        return None
+
+    def huatuo(query):
+        """华佗：点手牌【桃】= 选中候选里那条真牌使用（不点急救的转化入口）。"""
+        if query.kind != QueryKind.PEACH:
+            return None
+        captured["query"] = query
+        return _find(
+            query,
+            lambda action: isinstance(action, UseCard)
+            and action.card.card_id == real_peach
+            and action.targets == (1,),
+        )
+
+    engine = _run(
+        state,
+        [Scripted(attacker), Scripted(None), Scripted(huatuo)],
+        lambda running: running.state.player(1).hp == 1
+        and real_peach in running.state.discard,
+    )
+
+    query = captured["query"]
+    assert query.actor == 2, "求桃询问问到回合外的华佗"
+    assert query.legal_actions, "候选面不为空"
+
+    uses = [action for action in query.legal_actions if isinstance(action, UseCard)]
+    assert [action.card.card_id for action in uses] == [real_peach], (
+        "真【桃】是唯一的使用候选（转化【桃】不在候选面）"
+    )
+    assert all(action.card.type == "peach" and not action.card.is_virtual for action in uses)
+    assert not any(
+        action.card.is_virtual for action in query.legal_actions if getattr(action, "card", None)
+    ), "候选里没有虚拟牌（急救只经技能入口）"
+    assert any(isinstance(action, Pass) for action in query.legal_actions), "放弃仍在"
+
+    labels = [
+        (action.card.name, tuple(action.targets))
+        for action in query.legal_actions
+        if isinstance(action, (UseCard, PlayCard))
+    ]
+    assert len(labels) == len(set(labels)), f"选项不得重复：{labels}"
+    assert labels == [("桃", (1,))], "选项 = 一条『使用【桃】→ 座位 1』"
+
+    steps = query.transform_preactivations[JIJIU]
+    assert [step.name for step in steps] == ["card"], "急救无目标步（濒死者由窗口固定）"
+    assert set(_step_options(steps[0])) == {str(real_peach), str(red_dodge)}, (
+        "急救的来源 = 两张红色牌；它只出现在技能清单里，不进候选面"
+    )
+
+    assert engine.state.player(1).hp == 1, "真【桃】把濒死者救回 1 点"
+    assert real_peach in engine.state.discard, "用掉的是手牌里的那张真【桃】"

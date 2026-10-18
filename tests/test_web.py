@@ -1526,8 +1526,10 @@ def test_every_skill_entry_carries_type_lock_and_availability() -> None:
         # `ui` 是**表现层契约**：改键名必须同时改 app.js 的读法（同候选索引的姿态）。
         assert set(entry["ui"]) == {
             "requirement",
+            "passive",
             "convert_sources",
         }, f"技能界面提示的键集合变了：{sorted(entry['ui'])}"
+        assert isinstance(entry["ui"]["passive"], bool)
         assert isinstance(entry["ui"]["convert_sources"], list)
 
 
@@ -1651,10 +1653,13 @@ def _skill_step_option_query(state, *, skill_id: str, options: tuple[str, ...]):
 
 
 def test_query_context_walks_the_lijian_steps_with_their_own_wording() -> None:
-    """【离间】三步各有各的问法：先"弃置1张牌"，再"选择两名男性角色…"。
+    """【离间】三步各有各的问法：先"弃置1张牌"，再分别"决斗使用者 / 决斗目标"。
 
     步 1 是 ``SELECT_CARDS``（询问自带不了步骤名），步 2/3 是 ``SELECT_OPTION``（步骤名在
     ``skill_id`` 冒号后）。两处都只读**询问里已有的标识** ⇒ 询问协议与 Golden Replay 不动。
+
+    W4-fix-3：步 2/3 不再逐字相同（旧文案两键一模一样，界面分不出谁是使用者）——使用者
+    与目标各自写明。
     """
     engine, state = _context_fixture(
         [SeatSpec(hero="diaochan"), SeatSpec(), SeatSpec()],
@@ -1665,15 +1670,19 @@ def test_query_context_walks_the_lijian_steps_with_their_own_wording() -> None:
     cards_query = _skill_step_cards_query(
         state, zones=(Zone.HAND, Zone.EQUIP), optional=True
     )
-    assert query_context(engine, cards_query)["requirement"] == "弃置1张牌"
+    assert query_context(engine, cards_query)["requirement"] == (
+        "弃置1张牌（手牌 / 装备区）"
+    )
 
+    wording = {}
     for step in ("user", "victim"):
         option_query = _skill_step_option_query(
             state, skill_id=f"lijian:{step}", options=("seat:1", "seat:2")
         )
-        assert query_context(engine, option_query)["requirement"] == (
-            "选择场上两名男性角色，先点选的是决斗使用者，后点选的是决斗的目标"
-        ), f"步骤 {step} 的问法"
+        wording[step] = query_context(engine, option_query)["requirement"]
+    assert "使用者" in wording["user"], f"步 2 的问法：{wording['user']!r}"
+    assert "目标" in wording["victim"], f"步 3 的问法：{wording['victim']!r}"
+    assert wording["user"] != wording["victim"], "两问的文案必须能分辨"
 
 
 def test_query_context_walks_the_qingnang_steps_with_their_own_wording() -> None:
@@ -2267,9 +2276,12 @@ def test_the_pending_payload_carries_the_play_phase_preactivations() -> None:
     steps = payload["preativations"][RENDE]
     assert [step["name"] for step in steps] == ["card", "seat"]
     assert [step["order"] for step in steps] == [0, 1]
-    assert set(steps[0]) == {"name", "zones", "min", "max", "pool", "order"}
+    # W4-fix-3：`wording` = 声明上的 `step_requirements`（界面据此画这一问的人话）。
+    assert set(steps[0]) == {"name", "zones", "min", "max", "pool", "order", "wording"}
+    assert steps[0]["wording"] == "选择任意张要交给其他角色的手牌"
     assert steps[0]["zones"] == ["hand"]
     assert steps[0]["max"] >= steps[0]["min"] >= 1
+    assert steps[1]["wording"] == "选择交给哪名其他角色"
     assert steps[1]["pool"][0]["options"], "选座位步的候选（seat:N）也下发了"
     assert payload["preativation"] == [], "主动入口没有单份清单"
 
@@ -2418,7 +2430,12 @@ def test_the_pending_payload_forwards_the_transform_preactivation_manifest() -> 
 
 
 def test_the_pending_payload_forwards_the_jijiu_manifest_in_the_peach_window() -> None:
-    """求桃窗口：**急救**的清单 = 一张红牌，**无目标步**（濒死者由窗口固定）。"""
+    """求桃窗口：**急救**的清单 = 红色牌，**无目标步**（濒死者由窗口固定）。
+
+    W4-fix-3 起同一条真会话还钉**收口后的候选面**（写方 = 引擎的 ``_build_query``）：
+    只有真【桃】的使用 + 放弃；转化【桃】只经【急救】的技能入口，故 ``virtual_index`` 是
+    **空的**（候选里没有虚拟牌），选项也不再出现"使用【桃】→ 座位 1"两条。
+    """
     from sgs.data import Color, color_of_suit
     from sgs.state import QueryKind, UseCard
 
@@ -2429,17 +2446,22 @@ def test_the_pending_payload_forwards_the_jijiu_manifest_in_the_peach_window() -
         for card_id in cards_of_type(pack, "dodge")
         if color_of_suit(pack.deck.cards[card_id].suit) is Color.RED
     )
+    red_peach = next(
+        card_id
+        for card_id in cards_of_type(pack, "peach")
+        if color_of_suit(pack.deck.cards[card_id].suit) is Color.RED
+    )
     state = build_state(
         pack=pack,
         seats=[
             SeatSpec(hand=(slash,)),
             SeatSpec(hp=1),
-            SeatSpec(hand=(red_dodge,), hero="huatuo"),
+            SeatSpec(hand=(red_peach, red_dodge), hero="huatuo"),
         ],
         deck=tuple(
             card_id
             for card_id in range(len(pack.deck.cards))
-            if card_id not in (slash, red_dodge)
+            if card_id not in (slash, red_dodge, red_peach)
         ),
         turn_seat=0,
     )
@@ -2476,5 +2498,29 @@ def test_the_pending_payload_forwards_the_jijiu_manifest_in_the_peach_window() -
     assert payload is not None
     steps = payload["preativations"][JIJIU]
     assert [step["name"] for step in steps] == ["card"], "无目标步：濒死者由窗口固定"
-    assert steps[0]["pool"][0]["options"] == [str(red_dodge)]
+    assert steps[0]["pool"][0]["options"] == [str(red_peach), str(red_dodge)], (
+        "急救的来源 = 两张红色牌（真【桃】也可以当来源）"
+    )
     assert steps[0]["zones"] == ["hand"]
+
+    # 候选面：真【桃】一条 + 放弃；没有虚拟牌 ⇒ ``virtual_index`` 空。
+    legal = payload["legal_actions"]
+    assert [action["kind"] for action in legal] == ["UseCard", "Pass"], legal
+    assert legal[0]["card"]["card_id"] == red_peach
+    assert legal[0]["card"]["type"] == "peach"
+    assert legal[0]["targets"] == [1], "目标是濒死者"
+    assert payload["virtual_index"] == {}, "求桃窗口没有转化候选 ⇒ 来源索引为空（别读它）"
+    labels = [
+        (action["card"]["name"], tuple(action["targets"]))
+        for action in legal
+        if action.get("card")
+    ]
+    assert labels == [("桃", (1,))], f"选项不再重复：{labels}"
+
+    # 【急救】的入口文案：技能名 + "当【桃】"，与手牌真【桃】在界面上分得开。
+    context = query_context(engine, query)
+    assert context is not None
+    hints = [hint for hint in context["skill_hints"] if hint["skill_id"] == JIJIU]
+    assert [hint["name"] for hint in hints] == ["急救"]
+    assert "当【桃】" in hints[0]["requirement"]
+    assert "急救" not in labels[0][0], "手牌真【桃】的选项文案里没有急救"

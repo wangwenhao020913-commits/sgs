@@ -109,11 +109,23 @@ def preactivation_for(
     timing: Timing | None = None,
     frame: Any = None,
 ) -> tuple[Step, ...]:
-    """一条技能此刻的预发动清单；空元组 = 没有可下发的清单（未迁移 / 不可见 / 池为空）。"""
+    """一条技能此刻的预发动清单；空元组 = 没有可下发的清单（未迁移 / 不可见 / 池为空）。
+
+    分步文案（W4-fix-3）取自这条技能在 :data:`~sgs.skills.catalog.CATALOG` 里的声明
+    （:attr:`SkillDef.step_requirements`），由 :func:`~sgs.skills.flow.manifest` 填进
+    ``Step.wording``——声明只有一份，渲染器不 import 声明表。
+    """
     flow = flow_for(skill_id, timing)
     if flow is None:
         return ()
-    return manifest(flow, state, seat, frame=frame)
+    definition = CATALOG.get(skill_id)
+    return manifest(
+        flow,
+        state,
+        seat,
+        frame=frame,
+        step_requirements=getattr(definition, "step_requirements", None),
+    )
 
 
 def preactivations_for(

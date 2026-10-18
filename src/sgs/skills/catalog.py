@@ -64,9 +64,9 @@ from .flow import (
     PickCards,
     PickProvide,
     SkillFlow,
+    card_pool_size,
     provide_face,
     run_flow,
-    zone_pool_size,
 )
 from .virtual import card_ids, grouped_candidates
 
@@ -678,22 +678,49 @@ def _default_plan(state: GameState, frame: Frame, instance: SkillInstance) -> Ac
     return ActivationPlan()
 
 
+AXE_SKILL_ID = "equip.axe"
+"""【贯石斧】的技能 id（``equip.`` + 牌名 id）。
+
+只在 :func:`_axe_own_card` 里用来把"这条装备技的实例"从 ``resolve_instances`` 里认出来，
+**不是**牌名白名单——排除的是那张**装备牌的 id**（``SkillInstance.source.card_id``）。
+"""
+
+
+def _axe_own_card(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[int, ...]:
+    """【贯石斧】成本步的**实体牌黑名单** = 这张技能对应的装备牌自己（W4-fix-3）。
+
+    用户裁定（**偏离官方 FAQ**，见 `开发文档/06` §5「程序化约定与偏离一手」）：贯石斧**不能弃置自身**。身份取
+    ``SkillInstance.source.card_id`` —— 即"这条装备技挂在哪张装备牌上"，**不写死牌名**：
+    实例解析与技能生效读的是同一份真源，牌名 / 花色 / 牌 id 都不参与判据。
+    """
+    del frame, answers
+    return tuple(
+        int(instance.source.card_id)
+        for instance in resolve_instances(state)
+        if instance.owner == owner
+        and instance.skill_id == AXE_SKILL_ID
+        and instance.source.card_id is not None
+    )
+
+
 def _axe_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
-    """【贯石斧】：只有**自己的**【杀】被抵消、且能弃两张牌时才发动。
+    """【贯石斧】：只有**自己的**【杀】被抵消、且**付得起两张牌**时才发动。
 
     票 09 起发动询问是**裸"是否发动"**（``available`` 保留）：成本（弃两张）由发动后的
     一步 ``PickCards`` 问，候选因此不再枚举 C(手牌 + 装备, 2) 张两张组合。判据 =
-    :data:`AXE_FLOW` 那一步此刻铺出的槽位数 ≥ 2（**同源**，不写死）。
+    :func:`~sgs.skills.flow.card_pool_size` 对 :data:`AXE_FLOW` 那一步此刻铺出的
+    **过滤后**牌数 ≥ 2（与成本步**同源**，不写死）。
 
-    **有意保留**"武器牌也在成本面里"这一现状（工单 §要做什么第 4 条的口径）：迁移前的
-    ``zones=(HAND, EQUIP)`` 铺的就是同一份面，换掉它属于行为改动、不在本票范围内；
-    判据与面同源即可。
+    W4-fix-3：那一步的池**排除武器自己**（:func:`_axe_own_card`，用户裁定、偏离官方
+    FAQ）——所以"手里 1 张 + 武器自己"现在是**付不起**，连询问都不发。
     """
     step = AXE_FLOW.steps[0]
     assert isinstance(step, PickCards)  # 声明形状是编译期事实，写错要立刻炸
     available = (
         frame.data.get("source") == instance.owner
-        and zone_pool_size(state, instance.owner, step.zones) >= 2
+        and card_pool_size(state, instance.owner, step, frame=frame, owner=instance.owner) >= 2
     )
     return ActivationPlan(optional=True, available=available)
 
@@ -1287,6 +1314,8 @@ AXE_FLOW = SkillFlow(
             # "取消"的唯一出口是发动询问那一道。
             optional=False,
             key="card",
+            # W4-fix-3（用户裁定，偏离官方 FAQ）：成本池排除**这张技能对应的装备牌自己**。
+            exclude_cards=_axe_own_card,
         ),
     ),
     effect=_axe_effect,
@@ -1296,6 +1325,11 @@ AXE_FLOW = SkillFlow(
 票 09 前，两张牌是**烘进发动询问候选**的全部 C(n,2) 组合（手牌 + 装备一多就是成百条
 按钮）；迁移后发动询问回到裸"是否发动"（``available`` = 自己的【杀】被抵消 + 弃得起
 两张），成本改由 ``PickCards`` 问。成本搬牌与帧标签仍只在提交点发生（N6）。
+
+W4-fix-3：那一步的池**排除武器自己**（:func:`_axe_own_card`）——用户裁定，**偏离官方
+FAQ**（见 `开发文档/06` §5「程序化约定与偏离一手」的账本行）；清单候选、铺面、
+``hi=None`` 上限、校验器四处
+读同一份黑名单。
 """
 
 

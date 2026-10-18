@@ -2466,6 +2466,75 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 }
 
 
+
+/* ④b W4-fix-3：清单步骤承载**文案**（服务端 `Step.wording`）。
+ *
+ * 写方 = `flow.manifest`（取自 `SkillDef.step_requirements`，`tests/test_hero_active.py` 钉），
+ * 读方 = 这里的步骤条 / 提示行：有 `wording` 就画它，缺失时退回旧的通用文案（"选牌"/"选目标"）。
+ */
+{
+  const card = synthCard(21, "杀");
+  const makePending = (steps) => ({
+    kind: "PLAY_PHASE", actor: 0, seq: 78,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 78 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preativations: { "demo.wording": steps },
+    preactivation: [],
+  });
+  const worded = makePending([
+    { name: "card", zones: ["hand"], min: 1, max: 1, order: 0, wording: "弃掉一张牌",
+      pool: [{ when: [], options: ["21"] }] },
+    { name: "seat", zones: [], min: 1, max: 1, order: 1, wording: "选择决斗目标",
+      pool: [{ when: [], options: ["seat:1"] }] },
+  ]);
+  const plain = makePending([
+    { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: ["21"] }] },
+    { name: "seat", zones: [], min: 1, max: 1, order: 1,
+      pool: [{ when: [], options: ["seat:1"] }] },
+  ]);
+  const renderFor = (pending) => {
+    const view = synthView(pending);
+    view.snapshot.self_hand = [card];
+    view.skills = [{
+      skill_id: "demo.wording", name: "示例文案", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: true, preativated: true,
+      ui: { requirement: "", convert_sources: [] },
+    }];
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+    const button = $("t-skills").children.find(
+      (b) => b.getAttribute("data-skill-id") === "demo.wording");
+    (button.listeners.click || []).forEach((fn) => fn({ target: button }));
+  };
+  const stepRow = () => $("t-options").children.find((c) => c.tagName === "DIV");
+  const stepChipText = (index) => {
+    const chip = stepRow().children.find((c) => c.getAttribute("data-step") === String(index));
+    return chip ? chip.textContent : "";
+  };
+
+  renderFor(worded);
+  check("㉿WD1 有 wording：步骤条画的是这一问的人话（步 1）",
+    stepChipText(0).includes("弃掉一张牌") && !stepChipText(0).includes("选牌"),
+    stepChipText(0));
+  check("㉿WD2 有 wording：提示行也用它（步 1）",
+    $("t-target-hint").textContent.includes("弃掉一张牌"),
+    $("t-target-hint").textContent);
+  ($("t-hand").children[0].listeners.click || []).forEach((fn) => fn({ target: $("t-hand").children[0] }));
+  ui.advancePreativation();
+  check("㉿WD3 有 wording：目标步写明\"决斗目标\"（步 2）",
+    stepChipText(1).includes("选择决斗目标") && $("t-target-hint").textContent.includes("选择决斗目标"),
+    `${stepChipText(1)} / ${$("t-target-hint").textContent}`);
+
+  renderFor(plain);
+  check("㉿WD4 没有 wording 时退回旧通用文案（步骤条\"选牌\"、提示也一样）",
+    stepChipText(0).includes("选牌") && $("t-target-hint").textContent.includes("选牌"),
+    `${stepChipText(0)} / ${$("t-target-hint").textContent}`);
+}
+
 /* ⑤ W4-1：退化清单（服务端 `pool=()`）——不铺候选索引，座位步退化为"全都点得动"，
  *    仍能把复合动作拼出来（合法性由服务端校验器裁决，界面不裁决规则）。
  */
@@ -2788,6 +2857,161 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     ui.state.preativation.steps.length === 1
       && ui.state.preativation.steps[0].name === "card",
     JSON.stringify(ui.state.preativation.steps.map((step) => step.name)));
+}
+
+
+/* 求桃（W4-fix-3）：**真【桃】可直接点**，急救只以【急救】入口出现。
+ *
+ * 载荷 = W4-fix-2 收口后的形状：`legal_actions` 里只有真【桃】的使用 + 放弃；转化【桃】
+ * 不在候选面（`virtual_index` 因此是**空的**，不要读它）；急救的来源步只在
+ * `preativations["hero.huatuo.jijiu"]`。这里钉两件事：
+ *   ① 点手牌【桃】= 选中那条 `UseCard(桃, 濒死者)` 并可以提交（`PEACH` 进手选询问类）；
+ *   ② 选项**不再重复**（旧形状是"使用【桃】→ 座位 2"两条：真桃 + 急救转化桃）。
+ */
+{
+  const redPeach = { ...synthCard(41, "桃"), type: "peach", color: "red" };
+  const redDodge = { ...synthCard(42, "闪"), type: "dodge", color: "red" };
+  const pending = {
+    kind: "PEACH", actor: 0, seq: 930, dying: 2,
+    prompt: "座位 2 处于濒死状态：是否对其使用【桃】？",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 930, card: redPeach, targets: [2] },
+      { kind: "Pass", answers_seq: 930 },
+    ],
+    candidate_index: {
+      "41": { card: redPeach, pool: [2], combos: [[2]], min_targets: 1, max_targets: 1 },
+    },
+    virtual_index: {},
+    preativations: {
+      "hero.huatuo.jijiu": [
+        { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["41", "42"] }] },
+      ],
+    },
+    preactivation: [],
+    option_seats: {},
+    context: {
+      actor: 0, name: null, targets: [2], label: null,
+      requirement: "使用【桃】救回 2 号位",
+      skill_hints: [{
+        skill_id: "hero.huatuo.jijiu", name: "急救",
+        requirement: "选择1张红色牌当【桃】使用",
+      }],
+    },
+  };
+  const view = synthView(pending);
+  view.heroes = { 0: "huatuo", 1: "guanyu", 2: "diaochan" };
+  view.snapshot.self_hand = [redPeach, redDodge];
+  view.skills = [{
+    skill_id: "hero.huatuo.jijiu", name: "急救", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: false, preativated: false,
+    ui: { requirement: "选择1张红色牌当【桃】使用", convert_sources: [] },
+  }];
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  check("㉿PH1 求桃是**手选**询问（PEACH 进了可点手牌的询问类）",
+    ui.isHandPick(pending) === true, `kinds=${JSON.stringify(ui.HAND_PICK_KINDS)}`);
+  check("㉿PH2 手牌【桃】可点、红【闪】点不动（急救只经技能入口，`virtual_index` 为空）",
+    ui.cardFace(pending, redPeach).selectable === true
+      && ui.cardFace(pending, redDodge).selectable === false,
+    `peach=${ui.cardFace(pending, redPeach).selectable} dodge=${ui.cardFace(pending, redDodge).selectable}`);
+
+  const peachChip = $("t-hand").children.find((c) => c.text().includes("桃"));
+  (peachChip.listeners.click || []).forEach((fn) => fn({ target: peachChip }));
+  check("㉿PH3 点手牌【桃】= 选中它，目标自动选中濒死者（座位 2）",
+    ui.state.focusCardId === 41
+      && JSON.stringify(ui.state.selectedTargets) === "[2]"
+      && ui.state.view.pending === pending,
+    `focus=${ui.state.focusCardId} targets=${JSON.stringify(ui.state.selectedTargets)}`);
+  const action = ui.buildAction();
+  check("㉿PH4 点【桃】后拼出候选里的那条 `UseCard(桃, 2)`（不自己拼 Action），提交按钮可点",
+    !!action && action.kind === "UseCard" && action.card.card_id === 41
+      && JSON.stringify(action.targets) === "[2]" && $("btn-submit").disabled === false,
+    JSON.stringify(action));
+
+  const labels = (pending.legal_actions || []).map((item) => ui.actionLabel(item));
+  check("㉿PH5 选项**不再重复**：每张真牌 + 目标只有一条标签（真桃 / 急救转化桃不再并列）",
+    new Set(labels).size === labels.length
+      && labels.filter((label) => label === "使用【桃】 → 座位 2").length === 1,
+    JSON.stringify(labels));
+  check("㉿PH6 【急救】入口带自己的技能名与\"当【桃】\"文案（与手牌真【桃】分得开）",
+    (() => {
+      const button = $("t-skills").children.find(
+        (b) => b.getAttribute("data-skill-id") === "hero.huatuo.jijiu");
+      const hint = $("t-skill-hints").textContent;
+      return !!button && button.text().includes("急救")
+        && hint.includes("急救") && hint.includes("当【桃】")
+        && !labels.some((label) => label.includes("急救"));
+    })(),
+    `skills=${$("t-skills").children.map((b) => b.text()).join(" / ")} hints=${$("t-skill-hints").textContent}`);
+
+  const jijiu = $("t-skills").children.find(
+    (b) => b.getAttribute("data-skill-id") === "hero.huatuo.jijiu");
+  (jijiu.listeners.click || []).forEach((fn) => fn({ target: jijiu }));
+  check("㉿PH7 急救清单只有一张红色来源（无 seat 步）；确认 = ActivateSkill(来源)",
+    (() => {
+      const built = ui.buildAction();
+      return ui.state.preativation.steps.length === 1
+        && built === null;  // 还没选来源 ⇒ 不能确认
+    })(),
+    JSON.stringify(ui.state.preativation.steps.map((step) => step.name)));
+  const sourceChip = $("t-hand").children.find((c) => c.text().includes("闪"));
+  (sourceChip.listeners.click || []).forEach((fn) => fn({ target: sourceChip }));
+  ui.advancePreativation();
+  const rescue = ui.buildAction();
+  check("㉿PH8 急救确认 = ActivateSkill(来源 = 红【闪】)，目标由窗口固定（choices 为空）",
+    !!rescue && rescue.kind === "ActivateSkill"
+      && rescue.skill_id === "hero.huatuo.jijiu"
+      && JSON.stringify(rescue.picks) === "[42]"
+      && JSON.stringify(rescue.choices) === "[]",
+    JSON.stringify(rescue));
+  ui.cancelOrClear();
+}
+
+
+/* 技能标签（W4-fix-3）：**触发技（被动）**不得再标"主动技"。
+ *
+ * 判据在服务端投影（`build_skills` 的 `ui.passive`）：有钩子 / 接缝、且**没有主动入口**
+ * （候选修饰器）⇒ 被动。这里用**真会话**同时钉"写方"（响应体的 `ui.passive`）与"读方"
+ * （技能栏徽标）：流离（钩子：成为目标时）与反馈（钩子：受到伤害后）都是被动；
+ * 国色（转化技，有候选入口）仍是主动技——别的触发技 / 主动技不回归。
+ */
+{
+  const skillOf = (view, skillId) => (view.skills || []).find((s) => s.skill_id === skillId);
+  const buttonOf = (skillId) => $("t-skills").children.find(
+    (b) => b.getAttribute("data-skill-id") === skillId);
+
+  await openSession(await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null,
+    seed: 11, my_hero: "daqiao",
+  }));
+  const liuli = skillOf(ui.state.view, "hero.daqiao.liuli");
+  check("㉿PS1 流离在投影里是**触发技**（hooks / 接缝 + 无主动入口 ⇒ ui.passive）",
+    !!liuli && liuli.ui && liuli.ui.passive === true && liuli.locked === false,
+    JSON.stringify(liuli && { passive: liuli.ui.passive, locked: liuli.locked, type: liuli.skill_type }));
+  check("㉿PS2 流离的技能栏徽标写「被动」，不再写「主动技」",
+    !!buttonOf("hero.daqiao.liuli")
+      && buttonOf("hero.daqiao.liuli").text().includes("被动")
+      && !buttonOf("hero.daqiao.liuli").text().includes("主动技"),
+    buttonOf("hero.daqiao.liuli") && buttonOf("hero.daqiao.liuli").text());
+  const guose = skillOf(ui.state.view, "hero.daqiao.guose");
+  check("㉿PS3 国色（转化技，有候选入口）仍是主动技——主动侧不回归",
+    !!guose && guose.ui.passive === false
+      && buttonOf("hero.daqiao.guose").text().includes("主动技"),
+    JSON.stringify(guose && { passive: guose.ui.passive }));
+
+  await openSession(await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null,
+    seed: 11, my_hero: "simayi",
+  }));
+  const fankui = skillOf(ui.state.view, "hero.simayi.fankui");
+  check("㉿PS4 反馈（别的触发技）同样是被动——触发技一族不回归",
+    !!fankui && fankui.ui.passive === true
+      && buttonOf("hero.simayi.fankui").text().includes("被动"),
+    JSON.stringify(fankui && { passive: fankui.ui.passive }));
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

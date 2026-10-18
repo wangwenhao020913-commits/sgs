@@ -1794,3 +1794,20 @@ def test_jieyin_discards_exactly_two_cards_in_one_step_and_heals_both():
         for card in record.cards
     ]
     assert discarded == list(pair), "恰好两张手牌被弃（不是一张、也不是三张）"
+
+
+def test_lijian_manifest_steps_carry_their_own_wording():
+    """W4-fix-3：清单步骤承载**各自的文案**（取自声明的 ``step_requirements``）。
+
+    旧逐步流程里那句"先点选的是决斗使用者"住在 ``SkillDef.step_requirements``，而清单的
+    ``Step`` 没有承载文案的字段 ⇒ 界面只能画通用的"选目标"，看不出谁是使用者。现在
+    第 2/3 步分别写明"决斗使用者 / 决斗目标"。
+    """
+    _card, state = _lijian_state()
+
+    steps = preactivation_for(state, 0, LIJIAN)
+
+    assert "使用者" in steps[1].wording, f"步 2 要写明使用者：{steps[1].wording!r}"
+    assert "目标" in steps[2].wording, f"步 3 要写明目标：{steps[2].wording!r}"
+    assert steps[1].wording != steps[2].wording, "两问的文案必须能分辨（旧文案逐字相同）"
+    assert steps[0].wording, "步 1 的弃牌文案也随清单下发"

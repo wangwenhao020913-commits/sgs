@@ -61,6 +61,7 @@ __all__ = [
     "SkillFlow",
     "activation_answers",
     "ask_key_of",
+    "card_pool_size",
     "manifest",
     "option_seat",
     "provide_source_id",
@@ -172,6 +173,12 @@ class PickCards:
     过滤后的池重算）。它服务的是"选取面只铺某类槽"的技能 —— 【麒麟弓】只铺目标的
     **坐骑槽**（``(HORSE_DEFENSE, HORSE_OFFENSE)``），而牌名 id 认不出"这是不是坐骑"
     （坐骑是六个不同牌名）。两条白名单可同时给（依次作用）。
+
+    ``exclude_cards``（W4-fix-3）：**实体牌 id 黑名单**，从同一份选择面里排除（同步作用在
+    ``slots`` / ``card_ids``、``hi=None`` 的上限、清单的候选与校验器上）。可调用档收
+    ``(state, frame, owner, answers)`` —— 【贯石斧】据此排除**这张技能对应的装备牌自己**
+    （用户裁定，偏离官方 FAQ）：身份取 ``SkillInstance.source.card_id`` 的实例解析结果，
+    不写死牌名。
     """
 
     zones: tuple[Zone, ...]
@@ -185,6 +192,10 @@ class PickCards:
     cache_key: str | Callable[[Any], str] | None = None
     card_types: tuple[str, ...] = ()
     slot_kinds: tuple[SlotKind, ...] = ()
+    exclude_cards: (
+        tuple[int, ...]
+        | Callable[[GameState, Any, int, FlowAnswers], tuple[int, ...]]
+    ) = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,25 +415,51 @@ def _filtered_zone_pool_size(
     zones: tuple[Zone, ...],
     card_types: tuple[str, ...],
     slot_kinds: tuple[SlotKind, ...] = (),
+    exclude_cards: frozenset[int] = frozenset(),
 ) -> int:
-    """``card_types`` / ``slot_kinds`` 过滤后，``zones`` 此刻对 ``seat`` 真能挑的牌数。
+    """``card_types`` / ``slot_kinds`` / ``exclude_cards`` 过滤后，真能挑的牌数。
 
     只**读**区域列表（:meth:`GameState.zone`），不铺选择面 —— 故它可以在每次重入时安全
-    地现算（铺面会消耗 ``select`` 子流的随机数，绝不能重复跑）。两条白名单的空元组 =
-    不筛（同一份判据 :func:`_kept_by_whitelists` 与铺面过滤共用）。
+    地现算（铺面会消耗 ``select`` 子流的随机数，绝不能重复跑）。两条白名单与黑名单的空
+    元组 = 不筛（同一份判据 :func:`_kept_by_filters` 与铺面过滤共用）。
     """
     return sum(
         1
         for zone in zones
         for card_id in state.zone(ZoneRef(zone, seat))
-        if _kept_by_whitelists(state.card(card_id), card_types, slot_kinds)
+        if _kept_by_filters(state.card(card_id), card_id, card_types, slot_kinds, exclude_cards)
     )
 
 
-def _kept_by_whitelists(
-    card: Any, card_types: tuple[str, ...], slot_kinds: tuple[SlotKind, ...]
+def _excluded_card_ids(
+    step: PickCards,
+    state: GameState,
+    frame: Any,
+    owner: int,
+    answers: FlowAnswers,
+) -> frozenset[int]:
+    """这一步的**实体牌 id 黑名单**（``PickCards.exclude_cards`` 的唯一解析点，W4-fix-3）。
+
+    可调用档收 ``(state, frame, owner, answers)``：它要读声明之外的上下文（【贯石斧】的
+    "这张装备牌自己"由 ``SkillInstance.source.card_id`` 回答）。渲染清单、铺选择面、算
+    ``hi=None`` 的上限、校验复合动作**四处都读这一份**，故不存在第二个"排除谁"的谓词。
+    """
+    excluded = step.exclude_cards
+    if callable(excluded):
+        excluded = excluded(state, frame, owner, answers)
+    return frozenset(int(card_id) for card_id in excluded)
+
+
+def _kept_by_filters(
+    card: Any,
+    card_id: int,
+    card_types: tuple[str, ...],
+    slot_kinds: tuple[SlotKind, ...],
+    exclude_cards: frozenset[int] = frozenset(),
 ) -> bool:
-    """这张牌是否同时过**牌名**与**槽位种类**两条白名单（空元组 = 该维度不筛）。"""
+    """这张牌是否同时过**牌名 / 槽位种类**两条白名单与**实体牌 id 黑名单**（空 = 不筛）。"""
+    if int(card_id) in exclude_cards:
+        return False
     if card_types and card.type not in card_types:
         return False
     return not (slot_kinds and card.slot not in slot_kinds)
@@ -473,14 +510,41 @@ def _filter_slot_kinds(
     )
 
 
+def _filter_excluded_cards(
+    slots: tuple[Slot, ...],
+    card_ids: tuple[int, ...],
+    exclude_cards: frozenset[int],
+) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
+    """按**实体牌 id 黑名单**过滤选择面（``PickCards.exclude_cards`` 的铺面实现，W4-fix-3）。
+
+    与两条白名单逐字同姿态：``slots`` / ``card_ids`` 同步过滤（否则步骤读回的牌会错位）。
+    【贯石斧】是第一个消费者：排除这张技能对应的装备牌自己。
+    """
+    if not exclude_cards:
+        return slots, card_ids
+    kept = [
+        (slot, card_id)
+        for slot, card_id in zip(slots, card_ids)
+        if int(card_id) not in exclude_cards
+    ]
+    return (
+        tuple(slot for slot, _ in kept),
+        tuple(card_id for _, card_id in kept),
+    )
+
+
 def _filter_face(
     slots: tuple[Slot, ...],
     card_ids: tuple[int, ...],
     card_types: tuple[str, ...],
     slot_kinds: tuple[SlotKind, ...],
+    exclude_cards: frozenset[int] = frozenset(),
 ) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
-    """把两条白名单**依次**作用在同一份选择面上（票 09 的牌名 + 票 10 的槽位）。"""
-    return _filter_slot_kinds(*_filter_card_types(slots, card_ids, card_types), slot_kinds)
+    """把两条白名单与一条黑名单**依次**作用在同一份选择面上（票 09 / 票 10 / W4-fix-3）。"""
+    return _filter_excluded_cards(
+        *_filter_slot_kinds(*_filter_card_types(slots, card_ids, card_types), slot_kinds),
+        exclude_cards,
+    )
 
 
 def _flow_step_cards(
@@ -521,20 +585,18 @@ def _flow_step_cards(
     if face == ():
         return "cancel", ()
     cache_key = ask_key_of(step, frame)
-    if step.card_types or step.slot_kinds:
-        hi = (
-            step.hi
-            if step.hi is not None
-            else _filtered_zone_pool_size(
-                host.state, face, step.zones, step.card_types, step.slot_kinds
-            )
+    excluded = _excluded_card_ids(step, host.state, frame, owner, answers)
+    hi = (
+        step.hi
+        if step.hi is not None
+        else _filtered_zone_pool_size(
+            host.state, face, step.zones, step.card_types, step.slot_kinds, excluded
         )
-        if hi < step.lo:
-            # 与空池同形：一张能挑的都没有（或不够 ``lo``）⇒ 不发没有答案的询问；
-            # 同时也挡住 ``(lo, hi) = (1, 0)`` 这种会让 `_select_cards` 的 range 为空的形状。
-            return "cancel", ()
-    else:
-        hi = step.hi if step.hi is not None else _zone_pool_size(host.state, face, step.zones)
+    )
+    if (step.card_types or step.slot_kinds or excluded) and hi < step.lo:
+        # 与空池同形：一张能挑的都没有（或不够 ``lo``）⇒ 不发没有答案的询问；
+        # 同时也挡住 ``(lo, hi) = (1, 0)`` 这种会让 `_select_cards` 的 range 为空的形状。
+        return "cancel", ()
     picks = host.ask_selection(
         frame,
         owner=ask_owner,
@@ -546,6 +608,7 @@ def _flow_step_cards(
             *host.selection_face(face, step.zones, reveal_hand=step.reveal_hand),
             step.card_types,
             step.slot_kinds,
+            excluded,
         ),
     )
     if host.suspended(picks):
@@ -818,16 +881,55 @@ def _answer_text(step: FlowStep, value: object) -> str:
     return str(int(value))
 
 
-def _card_options(state: GameState, face: int, step: PickCards) -> tuple[int, ...]:
-    """``PickCards`` 此刻对该座位铺出的候选实体牌 id（与执行器同一份过滤）。"""
+def _card_options(
+    state: GameState,
+    face: int,
+    step: PickCards,
+    frame: Any = None,
+    owner: int | None = None,
+    answers: FlowAnswers | None = None,
+) -> tuple[int, ...]:
+    """``PickCards`` 此刻对该座位铺出的候选实体牌 id（与执行器同一份过滤）。
+
+    ``exclude_cards``（W4-fix-3）与 ``card_types`` / ``slot_kinds`` 走同一条链路：清单的
+    候选与校验器读同一个函数，故"选择面 = 校验面"这条契约不因黑名单而多一个谓词。
+    """
     if not isinstance(face, int):
         return ()
+    excluded = _excluded_card_ids(
+        step, state, frame, face if owner is None else owner, answers or {}
+    )
     out: list[int] = []
     for zone in step.zones:
         for card_id in state.zone(ZoneRef(zone, face)):
-            if _kept_by_whitelists(state.card(card_id), step.card_types, step.slot_kinds):
+            if _kept_by_filters(
+                state.card(card_id), card_id, step.card_types, step.slot_kinds, excluded
+            ):
                 out.append(int(card_id))
     return tuple(out)
+
+
+def card_pool_size(
+    state: GameState,
+    seat: int,
+    step: PickCards,
+    *,
+    frame: Any = None,
+    owner: int | None = None,
+    answers: FlowAnswers | None = None,
+) -> int:
+    """这一步对 ``seat`` 此刻**真能挑的牌数**（区域 + 两条白名单 + 黑名单，同一条过滤）。
+
+    **公开**（W4-fix-3）：被动技的 ``available`` 判据要与成本步的选择面同源，而判据住在
+    :mod:`sgs.skills.catalog` —— 把"排除谁"再抄一份就会有两个真源。【贯石斧】是第一个
+    消费者：`_axe_plan` 的"`≥ 2` 张"与成本步的池都由这里回答。
+    """
+    excluded = _excluded_card_ids(
+        step, state, frame, seat if owner is None else owner, answers or {}
+    )
+    return _filtered_zone_pool_size(
+        state, seat, step.zones, step.card_types, step.slot_kinds, excluded
+    )
 
 
 def provide_source_id(slot: Slot) -> int | None:
@@ -954,6 +1056,7 @@ def manifest(
     *,
     frame: Any = None,
     limit: int = MANIFEST_POOL_LIMIT,
+    step_requirements: Mapping[str, str] | None = None,
 ) -> tuple[Step, ...]:
     """把一条 :class:`SkillFlow` 的步骤声明渲染成**预发动清单**（W4-1）。
 
@@ -967,8 +1070,19 @@ def manifest(
 
     返回空元组 = 这条技能此刻没有可用的预发动清单（没有 flow / 首步无候选 /
     选取面不可见 / 由别人应答）。
+
+    ``step_requirements``（W4-fix-3）：技能声明上的**分步文案**（:attr:`Step.wording` 的
+    来源）。本函数不 import 声明表（``flow`` 反向只依赖低层模块），故由调用方
+    :func:`~sgs.skills.preativation.preactivation_for` 从 ``SkillDef.step_requirements``
+    传进来；缺失的步骤 ``wording`` 为空串，读取方退回通用文案。
     """
     base = frame if frame is not None else _ActivationFrame()
+    requirements = step_requirements or {}
+
+    def wording(step: FlowStep) -> str:
+        """这一步的人话（缺省空串 = 界面退回通用文案）。"""
+        return requirements.get(step.key, "")
+
     steps: list[Step] = []
     domains: list[tuple[FlowStep, tuple[object, ...]]] = []
 
@@ -1006,7 +1120,11 @@ def manifest(
                 if face == ():
                     return ()
                 hidden = _hidden_face(step, face, owner)
-                options = () if hidden else _card_options(state, int(face), step)
+                options = (
+                    ()
+                    if hidden
+                    else _card_options(state, int(face), step, framed, owner, answers)
+                )
                 if not hidden and len(options) < step.lo:
                     return ()
                 when = _when_texts(domains, combo) if combo else ()
@@ -1033,6 +1151,7 @@ def manifest(
                     max=maximum,
                     pool=_pool_rows(rows),
                     order=index,
+                    wording=wording(step),
                 )
             )
             domains.append((step, tuple(dict.fromkeys(values))))
@@ -1072,6 +1191,7 @@ def manifest(
                     max=step.hi,
                     pool=_pool_rows(rows),
                     order=index,
+                    wording=wording(step),
                 )
             )
             domains.append((step, tuple(dict.fromkeys(values))))
@@ -1086,6 +1206,7 @@ def manifest(
                     max=1,
                     pool=(StepPool(when=(), options=tuple(step.options)),),
                     order=index,
+                    wording=wording(step),
                 )
             )
             domains.append((step, tuple(step.options)))
@@ -1113,6 +1234,7 @@ def manifest(
                     max=min(step.hi, max((len(row) for _, row in rows), default=0)),
                     pool=_pool_rows(rows),
                     order=index,
+                    wording=wording(step),
                 )
             )
             domains.append((step, tuple(dict.fromkeys(values))))
@@ -1183,7 +1305,7 @@ def _assign_activation(
                 face = _resolve_face(step.face, state, framed, owner, answers)
                 if face == ():
                     return answers, f"步骤 {step.key} 此刻没有可选的牌"
-                options = _card_options(state, int(face), step)
+                options = _card_options(state, int(face), step, framed, owner, answers)
                 for card_id in chunk:
                     if card_id not in options:
                         return answers, f"步骤 {step.key} 的牌 {card_id} 不在可选范围内"

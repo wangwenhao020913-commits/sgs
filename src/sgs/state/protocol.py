@@ -176,7 +176,8 @@ class Step(_FrozenModel):
 
     清单由 ``SkillFlow.steps`` **渲染**而来（:func:`sgs.skills.flow.manifest`），校验器读
     同一份声明——两者不是两套规则。``pool`` 为空元组 = 本步没有（或退化掉了）候选索引，
-    接入层可退化为"全部都点得动、提交时由校验器裁决"。
+    接入层可退化为"全部都点得动、提交时由校验器裁决"。``wording`` 是本步的人话文案
+    （W4-fix-3，见字段注释）。
     """
 
     name: str
@@ -185,6 +186,15 @@ class Step(_FrozenModel):
     max: int | None = None
     pool: tuple[StepPool, ...] = ()
     order: int = 0
+    wording: str = ""
+    """这一步**要玩家做什么**的人话（W4-fix-3）；空串 = 没有专门文案，读取方退回通用文案。
+
+    取自技能声明上的 :attr:`~sgs.skills.catalog.SkillDef.step_requirements`（键 = 步骤名），
+    由 :func:`sgs.skills.flow.manifest` 渲染时填入（缺失 ⇒ 空串）。它让清单界面画得出
+    "选择决斗使用者 / 决斗目标"这类**分步文案**——旧逐步流程里这句话只住在
+    ``step_requirements``，而清单的 ``Step`` 没有承载它的字段，界面只能画通用的"选目标"。
+    与 ``pool`` 同姿态：清单整体在询问字段里 ``exclude``，故**不进记录流**。
+    """
 
 
 @dataclass(frozen=True, slots=True)
