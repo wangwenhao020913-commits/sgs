@@ -2341,13 +2341,24 @@ class Engine:
         # W4-fix-2：转化候选从**暴露面**收回（`legal_actions` 里不再有"红牌直接当
         # 【杀】"），但**内部池**照旧保留——清单 / 确认 / 回放成员判定都读这一份，故
         # "清单 = 候选"没有第二份谓词。
-        internal_transform_actions = transform_candidates(kind, actions)
+        #
+        # W4-fix-6（A）：响应窗口按**语境**（`RespondContext`）而不是按询问种类区分——
+        # 【万箭】的转化【闪】是 `UseCard`，借刀杀人的"被迫使用"才是唯一要排除的例外。
+        response = payload if isinstance(payload, RespondContext) else None
+        internal_transform_actions = transform_candidates(
+            kind, actions, respond=response
+        )
         transform_preactivations = conversion_preactivations(
             self.state,
             actor,
             internal_transform_actions,
-            # 求桃窗口的目标由窗口固定（濒死者）：清单只下发来源步（`spec.md` §2 急救行）。
-            fixed_target=kind == QueryKind.PEACH,
+            # 响应 / 求桃窗口的目标由窗口固定：清单只下发来源步（`spec.md` §2 急救行与
+            # W4-fix-6 的【万箭】行）。
+            fixed_target=kind in (
+                QueryKind.PEACH,
+                QueryKind.DODGE,
+                QueryKind.RESPOND,
+            ),
         )
         actions = tuple(action for action in actions if not is_transformed_action(action))
         view = project(self.state, actor)

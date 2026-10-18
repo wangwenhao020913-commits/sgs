@@ -457,80 +457,18 @@ def _kept_by_filters(
     slot_kinds: tuple[SlotKind, ...],
     exclude_cards: frozenset[int] = frozenset(),
 ) -> bool:
-    """这张牌是否同时过**牌名 / 槽位种类**两条白名单与**实体牌 id 黑名单**（空 = 不筛）。"""
+    """这张牌是否同时过**牌名 / 槽位种类**两条白名单与**实体牌 id 黑名单**（空 = 不筛）。
+
+    这是选择面过滤的**唯一判据**（W4-fix-6，D.3）：铺面（:func:`_filter_face`）与
+    ``hi=None`` 的上限（:func:`_filtered_zone_pool_size`）都读它。原先三条同形函数
+    （``_filter_card_types`` / ``_filter_slot_kinds`` / ``_filter_excluded_cards``）各抄
+    一遍 ``(slot, card_id)`` 的 zip 过滤，判据漂移时存在两份"什么算可挑"的风险。
+    """
     if int(card_id) in exclude_cards:
         return False
     if card_types and card.type not in card_types:
         return False
     return not (slot_kinds and card.slot not in slot_kinds)
-
-
-def _filter_card_types(
-    slots: tuple[Slot, ...], card_ids: tuple[int, ...], card_types: tuple[str, ...]
-) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
-    """按**牌名 id 白名单**过滤选择面（``PickCards.card_types`` 的唯一实现，票 09）。
-
-    ``slots`` 与 ``card_ids`` 是**同一份选择面**的两个投影，必须同步过滤——只改一个，
-    步骤读回的实体牌 id 就会错位（票 09 的【青龙偃月刀】是第一个消费者）。
-    与 :meth:`Engine.ask_skill_activation` 里那段"只铺这些牌名"的过滤同形（同一判据、
-    同一位置：``slot.card`` 的 ``type``）。
-    """
-    if not card_types:
-        return slots, card_ids
-    kept = [
-        (slot, card_id)
-        for slot, card_id in zip(slots, card_ids)
-        if slot.card is not None and slot.card.type in card_types
-    ]
-    return (
-        tuple(slot for slot, _ in kept),
-        tuple(card_id for _, card_id in kept),
-    )
-
-
-def _filter_slot_kinds(
-    slots: tuple[Slot, ...], card_ids: tuple[int, ...], slot_kinds: tuple[SlotKind, ...]
-) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
-    """按**槽位种类白名单**过滤选择面（``PickCards.slot_kinds`` 的唯一实现，票 10）。
-
-    与 :func:`_filter_card_types` 逐字同姿态：``slots`` / ``card_ids`` 同步过滤（否则步骤
-    读回的牌会错位）。判据取 ``slot.card.slot`` —— 坐骑是六个**不同牌名**共用的槽位种类，
-    牌名白名单表达不了"只铺坐骑"（【麒麟弓】是第一个消费者）。
-    """
-    if not slot_kinds:
-        return slots, card_ids
-    kept = [
-        (slot, card_id)
-        for slot, card_id in zip(slots, card_ids)
-        if slot.card is not None and slot.card.slot in slot_kinds
-    ]
-    return (
-        tuple(slot for slot, _ in kept),
-        tuple(card_id for _, card_id in kept),
-    )
-
-
-def _filter_excluded_cards(
-    slots: tuple[Slot, ...],
-    card_ids: tuple[int, ...],
-    exclude_cards: frozenset[int],
-) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
-    """按**实体牌 id 黑名单**过滤选择面（``PickCards.exclude_cards`` 的铺面实现，W4-fix-3）。
-
-    与两条白名单逐字同姿态：``slots`` / ``card_ids`` 同步过滤（否则步骤读回的牌会错位）。
-    【贯石斧】是第一个消费者：排除这张技能对应的装备牌自己。
-    """
-    if not exclude_cards:
-        return slots, card_ids
-    kept = [
-        (slot, card_id)
-        for slot, card_id in zip(slots, card_ids)
-        if int(card_id) not in exclude_cards
-    ]
-    return (
-        tuple(slot for slot, _ in kept),
-        tuple(card_id for _, card_id in kept),
-    )
 
 
 def _filter_face(
@@ -540,10 +478,32 @@ def _filter_face(
     slot_kinds: tuple[SlotKind, ...],
     exclude_cards: frozenset[int] = frozenset(),
 ) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
-    """把两条白名单与一条黑名单**依次**作用在同一份选择面上（票 09 / 票 10 / W4-fix-3）。"""
-    return _filter_excluded_cards(
-        *_filter_slot_kinds(*_filter_card_types(slots, card_ids, card_types), slot_kinds),
-        exclude_cards,
+    """把两条白名单与一条黑名单作用在同一份选择面上（票 09 / 票 10 / W4-fix-3）。
+
+    ``slots`` 与 ``card_ids`` 是**同一份选择面**的两个投影，必须同步过滤——只改一个，
+    步骤读回的实体牌 id 就会错位（【青龙偃月刀】是第一个消费者）。判据本身只有
+    :func:`_kept_by_filters` 一处；这里只剩**隐藏槽**这一条形状规则：没有白名单时隐藏槽
+    原样保留（他人手牌的选牌面），有白名单时它没有牌面可判、不能留在面里。
+    """
+    whitelisted = bool(card_types or slot_kinds)
+
+    def keep(slot: Slot, card_id: int) -> bool:
+        if int(card_id) in exclude_cards:
+            return False
+        if slot.card is None:
+            return not whitelisted
+        return _kept_by_filters(
+            slot.card, card_id, card_types, slot_kinds, exclude_cards
+        )
+
+    kept = [
+        (slot, card_id)
+        for slot, card_id in zip(slots, card_ids)
+        if keep(slot, card_id)
+    ]
+    return (
+        tuple(slot for slot, _ in kept),
+        tuple(card_id for _, card_id in kept),
     )
 
 
@@ -1417,10 +1377,15 @@ def activation_answers(
 
 _PREFILLED_KEY = "activation_prefilled"
 
-"""帧私有的"复合动作摊回结果"缓存键（W4-fix-2）：键 = 技能 id，值 = 步骤答案。
+"""帧私有的"复合动作摊回结果"缓存键（W4-fix-2）：值 = 步骤答案。
 
 ``run_flow`` 在 ``effect`` 挂起后的重入会从头再跑；复合动作的 picks 是**提交时的声明**，
 不能按重入时的状态重新解析（来源牌可能已经离场）。这份缓存只活在帧里、不进记录流。
+
+**键带上它缓存的那份载荷**（W4-fix-6，D.2）：``(skill_id, picks, choices)``。同一帧里
+同一技能第二次发动是**另一份载荷**，只按 skill id 作键会让它命中上一次的答案、重放旧
+picks（同一张【杀】的 RESOLVE 帧上先后开两次接缝就撞到这个）。载荷进键之后，第二次发动
+摊回的是它自己那份声明；缺缓存时重新解析也只会得到与提交一致的那份答案。
 """
 
 
@@ -1481,17 +1446,20 @@ def run_flow(
         # 整个 ``run_flow`` 从头再跑——若每次都按**当前状态**重新解析 picks，已经离场的
         # 来源牌（【青龙】刚把那张【杀】用掉）就不在面里了，``PickProvide`` 的 refs 索引
         # 会 KeyError。确认时的声明在**提交那一刻定格**，故答案缓存在帧上（帧私有数据，
-        # 不进记录流）。
+        # 不进记录流）。键 = **这份载荷本身**（W4-fix-6，D.2）：同一帧同一技能的第二次
+        # 发动是另一份声明，不能重放上一次的 picks。
+        picks = tuple(int(card_id) for card_id in activation.get("picks", ()))
+        choices = tuple(str(choice) for choice in activation.get("choices", ()))
         cache = frame.data.setdefault(_PREFILLED_KEY, {})
-        cache_key = str(activation.get("skill_id") or flow.name)
+        cache_key = (str(activation.get("skill_id") or flow.name), picks, choices)
         if cache_key not in cache:
             cache[cache_key] = dict(
                 activation_answers(
                     flow,
                     host.state,
                     seat,
-                    tuple(int(card_id) for card_id in activation.get("picks", ())),
-                    tuple(str(choice) for choice in activation.get("choices", ())),
+                    picks,
+                    choices,
                     frame=frame,
                 )
             )

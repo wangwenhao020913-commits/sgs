@@ -976,6 +976,33 @@ def test_run_flow_consumes_the_composite_answers_without_asking():
     )
 
 
+def test_a_second_composite_payload_in_the_same_frame_does_not_replay_the_first():
+    """同一帧里同一技能第二次发动是**另一份载荷**：缓存键带上载荷，不能重放旧 picks。
+
+    W4-fix-6（D.2）：旧缓存的键只是 skill id。一张【杀】的 RESOLVE 帧可以先后开两次
+    接缝（青龙 / 斧），第二次的 ``activation`` 若被第一次的缓存命中，摊回的答案就是
+    第一次那张牌——效果会拿旧来源重算。本用例在同一帧上先后跑两份声明，断言第二次
+    拿到的是**它自己**的答案。
+    """
+    first, second = _cards("slash")[:2]
+    state = _manifest_state(hand=(first, second))
+    flow, captured = _two_step_flow(lambda state, frame, owner, chosen: (1, 2))
+    frame = _Frame(
+        source=0,
+        activation={"picks": (first,), "choices": ("seat:1",)},
+    )
+
+    assert run_flow(_NoAskHost(state), frame, flow, owner=0) is None
+    assert captured == {"card": (first,), "seat": (1,)}
+
+    frame.data["activation"] = {"picks": (second,), "choices": ("seat:2",)}
+    assert run_flow(_NoAskHost(state), frame, flow, owner=0) is None
+
+    assert captured == {"card": (second,), "seat": (2,)}, (
+        "第二次发动必须摊回自己的声明，而不是命中第一次的缓存"
+    )
+
+
 # ---------------------------------------------------------------------------
 # ⑭ W4-1：被动入口的清单随 SKILL_ACTIVATION 下发，复合动作照同一份声明执行
 # ---------------------------------------------------------------------------

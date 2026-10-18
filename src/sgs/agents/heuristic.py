@@ -475,12 +475,6 @@ _HOSTILE_SEAT_STEPS = (
     "lijian:",
     "fanjian:",
     "liuli:",
-    # W4-fix-2：转化技的目标步（`<短 id>:seat`）——【杀】/【乐不思蜀】都是指向对手的。
-    # 急救没有目标步（濒死者由求桃窗口固定），故不在此列。
-    "wusheng:",
-    "longdan:",
-    "guose:",
-    "serpent_spear:",
 )
 """座位步的**语义分组**：这些步骤里的座位是"被指向的对手"，其余（治疗 / 给牌）是"被帮助的人"。
 
@@ -488,11 +482,20 @@ _HOSTILE_SEAT_STEPS = (
 【流离】（票 08 起走 ``PickSeats``）的座位是"把【杀】转嫁给谁"，属被指向的对手——**必须**
 登记在这里：不登记就落进"帮助类"，AI 会系统性地把【杀】转给盟友（迁移前是均匀分值的
 隐藏槽，至少是随机挑），比随机还差。
+
+**转化技的目标步不在这里手抄**（W4-fix-6，D.1）：它们由**清单来源**派生——询问把
+``transform_preactivations`` 的键交给 :func:`_fill_activation`（``conversion=True``），
+而清单本身由技能声明渲染。于是第五条转化技自动落进"被指向的对手"分支，不会静默变成
+"帮盟友"（旧实现用四条字面 id：``wusheng`` / ``longdan`` / ``guose`` / ``serpent_spear``）。
 """
 
 
 def _score_seat_option(
-    query: Query, choice: str, *, skill_id: str | None = None
+    query: Query,
+    choice: str,
+    *,
+    skill_id: str | None = None,
+    conversion: bool = False,
 ) -> float:
     """座位选项的敌我估值：帮助类避开敌人、决斗类瞄准敌人，``self`` 恒是好的帮助对象。
 
@@ -502,6 +505,10 @@ def _score_seat_option(
     ``skill_id``（W4-4）：预发动填表时答案不在 ``SELECT_OPTION`` 询问上（复合动作一次
     提交），故由调用方把"这一步属于哪条技能"（``<短 id>:<步骤键>``）显式传进来；逐步
     应答仍缺省读询问自带的 ``skill_id``。
+
+    ``conversion``（W4-fix-6，D.1）：这一步来自**转化技清单**（``transform_preactivations``）
+    ⇒ 座位是转化牌的目标（【杀】/【乐不思蜀】都指向对手）。判据由**清单来源**派生，
+    不手抄技能 id，第五条转化技因此不会再静默落进"帮盟友"分支。
     """
     view = query.view
     try:
@@ -516,7 +523,7 @@ def _score_seat_option(
         if skill_id is not None
         else str(getattr(query, "skill_id", "") or "")
     )
-    if skill.startswith(_HOSTILE_SEAT_STEPS):
+    if conversion or skill.startswith(_HOSTILE_SEAT_STEPS):
         return _SEAT_TARGET_VALUE if enemy else 0.0
     if seat == view.seat or _is_revealed_ally(view, seat):
         return _SEAT_TARGET_VALUE
@@ -635,7 +642,12 @@ def _pick_card_ids(
 
 
 def _pick_options(
-    step, options: tuple[str, ...], query: Query, short: str
+    step,
+    options: tuple[str, ...],
+    query: Query,
+    short: str,
+    *,
+    conversion: bool = False,
 ) -> tuple[str, ...] | None:
     """座位 / 选项步：取 :func:`_score_seat_option` 最高（座位）或特征表最高（选项）。"""
     remaining = list(options)
@@ -651,7 +663,12 @@ def _pick_options(
         best_score = 0.0
         for text in remaining:
             score = (
-                _score_seat_option(query, text, skill_id=f"{short}:{step.name}")
+                _score_seat_option(
+                    query,
+                    text,
+                    skill_id=f"{short}:{step.name}",
+                    conversion=conversion,
+                )
                 if text.startswith(_SEAT_PREFIX)
                 else _OPTION_VALUES.get(text, 0.0)
             )
@@ -668,8 +685,14 @@ def _fill_activation(
     skill_id: str,
     steps: tuple[object, ...],
     cards: Mapping[int, tuple[CardRef, int]],
+    *,
+    conversion: bool = False,
 ) -> ActivateSkill | None:
-    """按清单填一个复合动作；任何一步填不出来 ⇒ ``None``（不提交半成品）。"""
+    """按清单填一个复合动作；任何一步填不出来 ⇒ ``None``（不提交半成品）。
+
+    ``conversion``（W4-fix-6，D.1）：这份清单来自 ``transform_preactivations`` ⇒ 座位步的
+    目标是转化牌指向的对手，由 :func:`_score_seat_option` 的对敌分支估值。
+    """
     picks: list[int] = []
     choices: list[str] = []
     prior: list[str] = []
@@ -682,7 +705,9 @@ def _fill_activation(
         if not options:
             return None
         if all(text.startswith(_SEAT_PREFIX) for text in options):
-            chosen = _pick_options(step, options, query, short)
+            chosen = _pick_options(
+                step, options, query, short, conversion=conversion
+            )
             if chosen is None:
                 return None
             choices.extend(chosen)
@@ -694,7 +719,9 @@ def _fill_activation(
             picks.extend(picked)
             prior.extend(str(card_id) for card_id in picked)
         else:
-            chosen = _pick_options(step, options, query, short)
+            chosen = _pick_options(
+                step, options, query, short, conversion=conversion
+            )
             if chosen is None:
                 return None
             choices.extend(chosen)
@@ -713,26 +740,41 @@ def _preactivation_candidates(query: Query) -> tuple[ActivateSkill, ...]:
     W4-fix-2：**转化技也在这里**——它们的候选已从 ``legal_actions`` 收回（用户裁定 A），
     清单住 ``transform_preactivations``，确认同样是 ``ActivateSkill(来源, 目标)``，由引擎
     按同一份内部候选池解析成普通使用 / 打出。四类语境（出牌 / 【闪】/ 响应 / 求桃）都读它。
+
+    W4-fix-6（D.1）：转化清单的**来源**也是"这些座位步指向对手"的声明——填表时把它传给
+    :func:`_fill_activation`（``conversion=True``），不再从技能 id 字面表判断。
     """
     kind = QueryKind(query.kind)
+    transforms: dict[str, object] = {}
     if kind is QueryKind.PLAY_PHASE:
         manifests = dict(getattr(query, "preactivations", None) or {})
-        manifests.update(getattr(query, "transform_preactivations", None) or {})
+        transforms = dict(getattr(query, "transform_preactivations", None) or {})
+        manifests.update(transforms)
     elif kind is QueryKind.SKILL_ACTIVATION:
         skill_id = getattr(query, "skill_id", None)
         steps = tuple(getattr(query, "preactivation", None) or ())
         manifests = {str(skill_id): steps} if skill_id and steps else {}
     elif kind in (QueryKind.DODGE, QueryKind.RESPOND, QueryKind.PEACH):
-        manifests = dict(getattr(query, "transform_preactivations", None) or {})
+        transforms = dict(getattr(query, "transform_preactivations", None) or {})
+        manifests = transforms
     else:
         return ()
     if not manifests:
         return ()
     cards = _visible_cards(query.view)
+    conversion_skills = frozenset(transforms)
     return tuple(
         action
         for skill_id in sorted(manifests)
-        if (action := _fill_activation(query, skill_id, manifests[skill_id], cards))
+        if (
+            action := _fill_activation(
+                query,
+                skill_id,
+                manifests[skill_id],
+                cards,
+                conversion=skill_id in conversion_skills,
+            )
+        )
         is not None
     )
 

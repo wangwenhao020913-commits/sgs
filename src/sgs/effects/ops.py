@@ -477,6 +477,11 @@ def _resist_or_damage(
     if isinstance(action, PlayCard):
         host.play_card(action.card, source=target, timing=Timing.PLAY_DECLARE)
         return None
+    if isinstance(action, UseCard):
+        # W4-fix-6：转化【闪】由 ``CandidateScope.DODGE`` 产出（候选是 ``UseCard``，无目标）。
+        # 与 :func:`_dodge_window` 的"视为使用【闪】"同一条使用链：用掉它即满足需要、免伤。
+        host.start_use(action.card, source=target, targets=())
+        return None
     _push_damage(host, frame, source=frame.data["source"], target=target, amount=amount)
     return None
 

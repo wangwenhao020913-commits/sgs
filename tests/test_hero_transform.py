@@ -22,7 +22,12 @@ from typing import Any
 import pytest
 
 from sgs.data import Color, color_of_suit
-from sgs.effects import legal_actions_for, locate, target_is_effective
+from sgs.effects import (
+    legal_actions_for,
+    locate,
+    target_is_effective,
+    targets_within_attack_range,
+)
 from sgs.engine import Engine, IllegalActionError
 from sgs.skills import (
     MAX_VIRTUAL_SOURCES,
@@ -77,6 +82,7 @@ BLACK_SLASH = _first_by_color("slash", black=True)
 RED_SLASH = _first_by_color("slash", black=False)
 DIAMOND = [cid for cid in range(len(PACK.deck.cards)) if PACK.deck.cards[cid].suit == "diamond"][0]
 RENWANG = _cards("renwang_shield")[0]
+ARROW_BARRAGE = _cards("arrow_barrage")[0]
 
 
 def _virtual(actions, type_id: str) -> list[Any]:
@@ -1518,6 +1524,119 @@ def test_the_dodge_window_hides_the_longdan_candidate_but_still_carries_the_mani
 
     assert _transformed_uses(query.legal_actions, "dodge") == []
     assert [step.name for step in query.transform_preactivations[ZHAOYUN_SLASH]] == ["card"]
+
+
+def test_the_arrow_barrage_window_keeps_the_longdan_manifest_and_waives_the_damage():
+    """【万箭齐发】：转化【闪】仍是**内部**候选，入口只剩龙胆清单，确认后伤害被免除。
+
+    W4-fix-6 的 A 项：这扇窗口的候选由 ``CandidateScope.DODGE`` 产出（``UseCard(闪)``），
+    旧判据按 ``QueryKind.RESPOND`` 只收 ``PlayCard``，于是候选被删、清单也没了——
+    赵云的【杀】→【闪】能力**整个消失**。修法按 ``RespondContext`` 区分：只有借刀杀人
+    的"被迫使用"排除，其余响应窗口的转化候选照旧进内部池。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(ARROW_BARRAGE,)), SeatSpec(hand=(SLASH,), hero="zhaoyun")],
+        deck=_deck_excluding(ARROW_BARRAGE, SLASH),
+        turn_seat=0,
+    )
+    attacker = Scripted(
+        lambda query: _find(
+            query,
+            lambda action: isinstance(action, UseCard)
+            and action.card.card_id == ARROW_BARRAGE,
+        )
+        if query.kind == QueryKind.PLAY_PHASE
+        else None
+    )
+    engine = _run(
+        state,
+        [attacker, Scripted()],
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.RESPOND
+        and running.pending.cause == WindowCause.ARROW_BARRAGE,
+    )
+    query = engine.pending
+    assert query is not None and query.actor == 1
+
+    assert _transformed_uses(query.legal_actions, "dodge") == [], (
+        f"【万箭】窗口的候选里不得再有转化【闪】：{query.legal_actions}"
+    )
+    assert _transformed_uses(query.transform_actions, "dodge"), (
+        "内部池必须保留那条转化【闪】——清单与确认都从它派生"
+    )
+    assert ZHAOYUN_SLASH in query.transform_preactivations, (
+        f"【万箭】窗口必须下发龙胆清单：{query.transform_preactivations}"
+    )
+    assert [step.name for step in query.transform_preactivations[ZHAOYUN_SLASH]] == ["card"], (
+        "目标由窗口固定 ⇒ 清单只有来源步"
+    )
+
+    confirm = ActivateSkill(skill_id=ZHAOYUN_SLASH, picks=(SLASH,), answers_seq=query.seq)
+    assert confirm not in query.legal_actions
+    engine.submit(confirm)
+    _drive_until_pending(engine)
+
+    assert engine.state.player(1).hp == 4, "按清单确认的转化【闪】免除了【万箭】的伤害"
+    assert SLASH in engine.state.discard, "来源【杀】走正常使用路径进弃牌堆"
+
+
+def test_the_borrowed_sword_forced_use_stays_out_of_the_manifest():
+    """借刀杀人的"被迫使用"是 W5 的例外：转化候选既不暴露、也不下发清单。
+
+    这是 A 项修法的**负向**断言：除借刀之外所有响应窗口都保留转化入口，唯独这一条
+    仍按 W4-fix-2 收口（W5 才给"使用牌"的第二段预发动）。窗口里确实存在一条转化
+    ``UseCard`` 候选（直接问候选生成器可见），但引擎把它从暴露面与内部池一并收回。
+    """
+    borrowed = _cards("borrowed_sword")[0]
+    weapon = _cards("crossbow")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(hand=(RED_DODGE,), equip=(weapon,), hero="zhaoyun"),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(borrowed, weapon, RED_DODGE),
+        turn_seat=0,
+    )
+    attacker = Scripted(
+        lambda query: _find(
+            query,
+            lambda action: isinstance(action, UseCard)
+            and action.card.card_id == borrowed,
+        )
+        if query.kind == QueryKind.PLAY_PHASE
+        else None
+    )
+    engine = _run(
+        state,
+        [attacker, Scripted(), Scripted()],
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.RESPOND
+        and running.pending.cause == WindowCause.BORROWED_SWORD,
+    )
+    query = engine.pending
+    assert query is not None and query.actor == 1
+
+    generated = legal_actions_for(
+        engine.state,
+        1,
+        QueryKind.RESPOND,
+        answers_seq=query.seq,
+        payload=RespondContext(
+            cause=WindowCause.BORROWED_SWORD,
+            required="slash",
+            mode=RespondMode.USE,
+            use_targets=targets_within_attack_range(engine.state, 1),
+        ),
+    )
+    assert _transformed_uses(generated, "slash"), "候选生成器确实能转出【杀】（对照组）"
+    assert _transformed_uses(query.legal_actions, "slash") == [], (
+        "借刀窗口的转化候选仍从暴露面收回"
+    )
+    assert query.transform_actions == (), "借刀窗口不进内部池（W5）"
+    assert query.transform_preactivations == {}, "借刀窗口不下发转化清单（W5）"
 
 
 def test_the_respond_window_hides_the_wusheng_play_but_still_carries_the_manifest():

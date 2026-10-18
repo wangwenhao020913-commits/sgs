@@ -482,19 +482,25 @@ class _QueryBase(_FrozenModel):
     )
     """**转化技的预发动清单**（W4-3）：技能 id → 清单。
 
-    与 :attr:`PlayPhaseQuery.preactivations`（**复合动作**清单）分开：转化技的确认仍是
-    **一次普通的使用 / 打出**，不产生 ``ActivateSkill`` 复合动作；接入层据清单收集
-    来源 / 目标，由**服务端**解析成候选池里的那条动作（W4-fix-2）。
+    与 :attr:`PlayPhaseQuery.preactivations`（**复合动作**清单）同形，但确认的是转化：
+    W4-fix-2 起，按清单提交的是**复合动作** ``ActivateSkill(来源, 目标)``（引擎
+    :meth:`~sgs.engine.game.Engine.submit` 的第三条路 + 前端恒发 ``ActivateSkill``），
+    由**服务端**按与清单同源的内部候选池
+    （:attr:`transform_actions`）解析成那次普通的使用 / 打出并落账——客户端不拼虚拟牌 id。
+    接入层据清单收集来源 / 目标；确认动作本身**不要求**在 ``legal_actions`` 里。
 
     清单由 :func:`sgs.skills.conversion_preactivations` 从**这次询问的内部候选**
     （:attr:`transform_actions`）派生（来源组 = 候选的 ``virtual_sources``），四类语境
     都要下发：出牌阶段（主动使用）、``DODGE`` / ``RESPOND``（响应）、``PEACH``（求桃）。
+    响应窗口里只有借刀杀人的"被迫使用"不给入口（W5），其余照旧下发。
     **不进记录流**（``exclude``），由 :func:`sgs_web.projection.pending_payload` 显式下发。
     """
 
     transform_actions: tuple[Action, ...] = Field(default=(), exclude=True)
     """被**收回**的内部转化候选（W4-fix-2，用户裁定 A）：``virtual_sources`` 非空的使用 / 打出。
 
+    与 :func:`sgs.skills.is_transformed_action` 是**同一个判据**（W4-fix-6 收口）：这里的
+    每一项都是转化牌（来源集合非空），纯虚拟牌（【八卦阵】的视为【闪】，没有来源）不在其中。
     这些动作**不在** :attr:`legal_actions` 里（"红牌直接当【杀】"的可选候选已收口），
     但仍属于本次询问的合法动作池：确认路径与回放磁带的成员判定都读这一份，清单也从它
     派生。**不进记录流**（``exclude``）——它是候选的派生数据，重放时由同一份状态重建。

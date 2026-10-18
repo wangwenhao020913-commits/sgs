@@ -77,6 +77,8 @@ from sgs.state import (
     SkillActivationContext,
     SkillActivationQuery,
     Slot,
+    Step,
+    StepPool,
     UseCard,
     Zone,
     ZoneRef,
@@ -1034,6 +1036,37 @@ def test_the_liuli_seat_step_aims_at_the_revealed_enemy():
 
     assert _seat_choices(state, "liuli:seat", ("seat:1", "seat:2")) == {"seat:1"}, (
         "转移目标该挑主公（已明的敌人）"
+    )
+
+
+def test_a_conversion_skills_target_step_is_derived_hostile_without_a_literal_id_table():
+    """W4-fix-6（D.1）：转化清单的座位步按**清单来源**判"对敌"，不再手抄技能 id。
+
+    旧实现把 ``wusheng`` / ``longdan`` / ``guose`` / ``serpent_spear`` 四条字面前缀写进
+    :data:`_HOSTILE_SEAT_STEPS`，第五条转化技的目标步会**静默**落进"帮盟友"分支。这里用
+    一条转换技 id（``hero.huatuo.jijiu``，旧表里**没有**它，因为它本没有目标步）造一份
+    带座位步的清单：判据若来自清单来源 ⇒ 挑已明的敌人（座位 1）；若仍按技能 id 字面表 ⇒
+    落进帮助分支、挑身份未知的座位 2。
+    """
+    state = _rebel_and_lord()
+    base = _play_phase_with_preactivations(state)
+    seat_step = Step(
+        name="seat",
+        min=1,
+        max=1,
+        pool=(StepPool(when=(), options=("seat:1", "seat:2")),),
+        order=0,
+    )
+    query = base.model_copy(
+        update={"transform_preactivations": {"hero.huatuo.jijiu": (seat_step,)}}
+    )
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, ActivateSkill), f"该填这份转化清单，实得 {action!r}"
+    assert action.skill_id == "hero.huatuo.jijiu"
+    assert action.choices == ("seat:1",), (
+        "转化技的目标步应挑已明的敌人（主公）；落进帮助分支会挑座位 2"
     )
 
 

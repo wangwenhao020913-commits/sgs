@@ -39,7 +39,17 @@ from typing import Any
 
 from sgs.data import Color, SkillType, color_of_suit
 from sgs.effects import CandidateScope, CarrierKind, Modifier, ModifierPoint, locate
-from sgs.state import GameState, PlayCard, QueryKind, Step, StepPool, UseCard, Zone
+from sgs.state import (
+    GameState,
+    PlayCard,
+    QueryKind,
+    RespondContext,
+    Step,
+    StepPool,
+    UseCard,
+    WindowCause,
+    Zone,
+)
 
 from .catalog import HeroSkillDecl, ModifierContext, SkillDef, resolve_instances
 from .flow import seat_choice
@@ -317,23 +327,36 @@ def is_transformed_action(action: Any) -> bool:
     W4-fix-2 的候选收口判据（用户裁定 A）：转化技的候选从 ``legal_actions`` 收回到
     :func:`transform_candidates` 那份**内部**池；判据读**来源集合**而不是"虚拟牌"
     ——纯虚拟牌（【八卦阵】的视为【闪】，没有来源）不属于任何转化技，照常留在候选里。
+
+    W4-fix-6（D.4）：这是**唯一**的转化牌判据；:func:`transform_candidates` 也读它
+    （原先两处判据不一致：那里收 ``is_virtual``、这里收 ``virtual_sources`` 非空，
+    于是"纯虚拟牌照常留在候选里"的分支不可达）。
     """
     card = getattr(action, "card", None)
     return card is not None and card.is_virtual and bool(card.virtual_sources)
 
 
 def transform_candidates(
-    kind: QueryKind, actions: Iterable[Any]
+    kind: QueryKind,
+    actions: Iterable[Any],
+    *,
+    respond: RespondContext | None = None,
 ) -> tuple[Any, ...]:
     """这次询问里**属于转化技入口**的候选（W4-3 的清单 / W4-fix-2 的确认都读这一份）。
 
-    - 出牌阶段 / 【闪】窗口 / 求桃：``UseCard`` / ``PlayCard``；
-    - 响应窗口：只收**打出**（``PlayCard``）——"被迫使用"（借刀杀人）的第二段预发动
-      属 W5，且排除它之后"响应语境无目标步"这条清单形状才成立（`spec.md` §2）；
+    - 出牌阶段 / 【闪】窗口 / 求桃 / 响应窗口：``UseCard`` 与 ``PlayCard`` 都收
+      （构造子由候选生成侧决定：``mode=PLAY`` 通常给 ``PlayCard``，但【万箭齐发】的
+      "需要【闪】"走 ``CandidateScope.DODGE``，候选因此是 ``UseCard``）；
+    - **唯一的例外**是借刀杀人的"被迫使用"（``WindowCause.BORROWED_SWORD``）：
+      它的第二段预发动（选 Bn 目标）属 W5，本票不给清单入口，
+      故这一扇窗口的转化候选仍被收回（``transform_actions`` 为空）。
+      W4-fix-6 的 A 项：旧判据按 ``QueryKind.RESPOND`` 一刀切只收 ``PlayCard``，
+      把【万箭】窗口的 ``UseCard(闪)`` 一并删掉 ⇒ 赵云的龙胆**整个消失**；现在
+      按**响应语境**区分，只认这一条明确的"使用被强迫"例外；
     - 其余询问：没有转化技入口（返回空元组）。
 
-    这份池是**内部**的：调用方（引擎）只把其中的 ``virtual_sources`` 非空项从
-    ``legal_actions`` 收回，清单与确认校验仍从这一份读——"清单 = 候选"因此没有第二份谓词。
+    这份池是**内部**的：调用方（引擎）只把其中的转化牌（:func:`is_transformed_action`）
+    从 ``legal_actions`` 收回，清单与确认校验仍从这一份读——"清单 = 候选"因此没有第二份谓词。
     """
     if kind not in (
         QueryKind.PLAY_PHASE,
@@ -342,13 +365,17 @@ def transform_candidates(
         QueryKind.RESPOND,
     ):
         return ()
-    accepted = (PlayCard,) if kind == QueryKind.RESPOND else (UseCard, PlayCard)
+    if kind is QueryKind.RESPOND:
+        if respond is None:
+            raise ValueError("RESPOND 询问必须给出 RespondContext")
+        if respond.cause is WindowCause.BORROWED_SWORD:
+            # W5 的例外：被迫使用【杀】的目标（Bn）由借刀使用者选，清单无法用
+            # "来源步 + 固定目标"表达；那一段入口 W5 才做，这里不 fail-open。
+            return ()
     return tuple(
         action
         for action in actions
-        if isinstance(action, accepted)
-        and getattr(action, "card", None) is not None
-        and action.card.is_virtual
+        if isinstance(action, (UseCard, PlayCard)) and is_transformed_action(action)
     )
 
 
@@ -445,10 +472,11 @@ def conversion_preactivations(
     在这里重算一次——它们已经体现在"候选存在与否"里。空 dict = 这次询问没有可预发动的
     转化技。渲染**只读状态**：不铺选择面、不抽随机数、不搬牌。
 
-    ``actions`` 由调用方按语境给（出牌阶段 / 闪 / 响应 / 求桃的候选）；响应窗口里
-    "打出"与"被迫使用"的区别由调用方筛（借刀杀人的使用预发动是 W5，不在本票）。
-    ``fixed_target=True``：本次语境的**目标由窗口固定**（求桃的濒死者）——候选带着那个
-    目标，但玩家没有"选目标"这一步，故清单只下发来源步（`spec.md` §2 的急救行）。
+    ``actions`` 由调用方给：它是 :func:`transform_candidates` 那份**内部**候选池，
+    故这扇窗口是否收转化候选（借刀杀人的被迫使用属 W5）由那一处判据回答，这里不重判。
+    ``fixed_target=True``：本次语境的**目标由窗口固定**（求桃的濒死者、【万箭】/【南蛮】
+    这类响应窗口的被问者）——候选就算带着目标，玩家也没有"选目标"这一步，故清单只下发
+    来源步（`spec.md` §2 的急救行 / W4-fix-6 的【万箭】行）。
     """
     groups: dict[str, dict[tuple[int, ...], list[tuple[int, ...]]]] = {}
     source_zones: dict[int, Zone] = {}
