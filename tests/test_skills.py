@@ -1616,11 +1616,17 @@ def test_serpent_spear_consumes_both_source_cards_and_stays_out_of_conservation(
 
     def attacker(query):
         if query.kind == "PLAY_PHASE":
-            return _find(
-                query,
-                lambda action: isinstance(action, UseCard)
-                and action.card.virtual_sources == (first, second),
-            )
+            # W4-fix-2：转化候选已从 `legal_actions` 收回，按**清单**确认（服务端解析成
+            # 那条普通 `UseCard(虚拟牌, 目标)`）。
+            steps = query.transform_preactivations.get("equip.serpent_spear")
+            if steps:
+                target = steps[1].pool[0].options[0].removeprefix("seat:")
+                return ActivateSkill(
+                    skill_id="equip.serpent_spear",
+                    picks=(first, second),
+                    choices=(f"seat:{target}",),
+                    answers_seq=query.seq,
+                )
         return None
 
     engine = _run(

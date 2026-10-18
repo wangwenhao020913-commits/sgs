@@ -59,15 +59,19 @@ from sgs.skills import (
     dispatch_seam,
     dispatch_timing,
     conversion_preactivations,
+    is_transformed_action,
     move_after_providers,
+    owned_conversion_skill_ids,
     preactivation_for,
     preactivated_skill_ids,
     preactivations_for,
     provider_registered,
     prune_skill_state,
     reset_phase_skill_state,
+    resolve_conversion_confirmation,
     start_provider,
     timing_hooks_present,
+    transform_candidates,
     validate_activation,
 )
 from sgs.state import (
@@ -87,7 +91,6 @@ from sgs.state import (
     Pass,
     PeachQuery,
     Phase,
-    PlayCard,
     PlayPhaseQuery,
     Player,
     Query,
@@ -204,6 +207,13 @@ _NOT_STRUCTURED: object = object()
 ``None`` = 结构化校验通过；字符串 = 首个失败原因；本哨兵 = 走原来的成员判定路径
 （也含所有非 ``ActivateSkill`` 的行动）。三态必须分开，否则"不合格但也不是结构化入口"
 会被误当成"校验通过"。
+"""
+
+_NOT_CONVERSION: object = object()
+"""``submit`` 的转化确认哨兵（W4-fix-2）：这次提交**不是**转化技清单确认。
+
+``None`` = 清单解析通过（答案在 :attr:`Engine._conversion_answer`）；字符串 = 首个失败
+原因；本哨兵 = 不适用，继续走普通复合动作 / 成员判定。
 """
 
 
@@ -360,6 +370,8 @@ class Engine:
         ``start_skill`` / ``ask_skill_activation`` 据这个身份把载荷原样挂进帧，交给
         ``run_flow`` 跳过本人应答的步骤——而不是当成面内位置去索引。
         """
+        self._conversion_answer: Action | None = None
+        """最近一次**转化技确认**解析出的普通使用 / 打出动作（W4-fix-2）。"""
         self._started = False
         self._frame_seq = 0
         self._check_seq: int | None = None
@@ -992,7 +1004,8 @@ class Engine:
         }
         activation = self._take_structured_activation(action)
         if activation is not None:
-            data["activation"] = activation
+            # 归属随载荷一起走（W4-fix-2 的跨技能泄漏修复：见 `flow._activation_belongs`）。
+            data["activation"] = {**activation, "skill_id": action.skill_id}
         return data
 
     def _take_structured_activation(
@@ -1521,7 +1534,9 @@ class Engine:
             if activation is not None:
                 # W4-1：复合动作的 picks 是**实体牌 id**，不是面内位置；原样交给
                 # ``run_flow`` 摊回逐步答案，别拿它去索引 ``card_ids``。
-                frame.data["activation"] = activation
+                # W4-fix-2：归属随载荷一起走——同一帧上后续别的技能的流水线不得读它
+                # （`flow._activation_belongs`）。
+                frame.data["activation"] = {**activation, "skill_id": instance.skill_id}
             elif action.picks:
                 frame.data.setdefault("activation_picks", {})[instance.skill_id] = tuple(
                     card_ids[index] for index in action.picks
@@ -2097,6 +2112,15 @@ class Engine:
         通过 :func:`sgs.skills.validate_activation`。失败时首因写进拒绝记录的 ``reason``；
         通过时照常落一条 ``accepted = true``，并把动作身份记到
         :attr:`_structured_activation` 供执行侧摊回答案。
+
+        **W4-fix-2 的例外**（用户裁定 A：转化技只经预发动）：转化候选已从
+        ``legal_actions`` 收回，故 ``submit`` 的"候选或结构化动作"之外多两条**同源**的路：
+
+        - **转化确认**：``ActivateSkill(sources, targets)``（清单里的来源 / 目标）由
+          :func:`sgs.skills.resolve_conversion_confirmation` 对回**内部候选池**里的那条
+          普通使用 / 打出动作，通过即以**该动作**落账并执行；失败的首因同样落进拒绝记录；
+        - **已解析的转化动作**：回放磁带（``TapePlayer``）与程序化提交直接给那条普通动作，
+          成员判定改读内部池 ``transform_actions``——它本来就是本次询问的合法动作池。
         """
         pending = self.pending
         if pending is None:
@@ -2104,6 +2128,7 @@ class Engine:
         # 上一条经过校验器的复合动作若没被消费就进入了新的询问，标记不能跨询问存活
         # （它只服务"接受 → 建帧 / 派发"这一段）。
         self._structured_activation = None
+        self._conversion_answer = None
         try:
             action = parse_action(response)
         except ValidationError as error:
@@ -2132,6 +2157,32 @@ class Engine:
                 answers_seq=action.answers_seq,
             )
         if action not in pending.legal_actions:
+            confirmation = self._conversion_confirmation(action, pending)
+            if confirmation is not _NOT_CONVERSION:
+                if confirmation is not None:
+                    # W4-fix-2：转化确认确实走了清单解析，首个失败原因要落进记录。
+                    self._reject(action, reason=f"转化确认失败：{confirmation}")
+                    raise IllegalActionError(
+                        reason_code="IllegalAction",
+                        message=confirmation,
+                        expected="按转化技清单填写的来源 / 目标",
+                        got=action.kind,
+                        answers_seq=action.answers_seq,
+                    )
+                resolved = self._conversion_answer
+                assert resolved is not None
+                self._emit(
+                    ActionRecord(seq=self._next_seq(), accepted=True, action=resolved)
+                )
+                self._answer = resolved
+                self.pending = None
+                return
+            if action in pending.transform_actions:
+                # 回放磁带 / 程序化提交：转化动作不在**暴露面**里，但仍是本次询问的合法池。
+                self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
+                self._answer = action
+                self.pending = None
+                return
             failure = self._structured_activation_failure(action, pending)
             if failure is _NOT_STRUCTURED:
                 self._reject(action, reason="不在候选集合内")
@@ -2160,6 +2211,45 @@ class Engine:
         self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
         self._answer = action
         self.pending = None
+
+    def _conversion_confirmation(
+        self, action: Action, pending: Query
+    ) -> str | None | object:
+        """转化技确认（W4-fix-2）：``None`` = 通过（答案存 :attr:`_conversion_answer`）。
+
+        ``str`` = 首个失败原因；:data:`_NOT_CONVERSION` = 这不是一次转化技确认（不适用），
+        交给既有的两条路。判据只有"这条技能此刻算不算转化技"（声明上的
+        ``virtual_type_ids``）与"这一问有没有它的清单"——**合法性本身**由
+        :func:`sgs.skills.resolve_conversion_confirmation` 在**内部候选池**里解析，
+        与清单同源，不写第二份谓词。
+        """
+        if not isinstance(action, ActivateSkill):
+            return _NOT_CONVERSION
+        if pending.kind not in (
+            QueryKind.PLAY_PHASE,
+            QueryKind.DODGE,
+            QueryKind.PEACH,
+            QueryKind.RESPOND,
+        ):
+            return _NOT_CONVERSION
+        if action.skill_id not in owned_conversion_skill_ids(self.state, pending.actor):
+            return _NOT_CONVERSION
+        steps = (pending.transform_preactivations or {}).get(action.skill_id, ())
+        if not steps:
+            return f"技能 {action.skill_id} 此刻没有可用的转化清单"
+        resolution = resolve_conversion_confirmation(
+            self.state,
+            pending.actor,
+            action.skill_id,
+            action.picks,
+            action.choices,
+            pending.transform_actions,
+            steps=steps,
+        )
+        if isinstance(resolution, str):
+            return resolution
+        self._conversion_answer = resolution
+        return None
 
     def _structured_activation_failure(
         self, action: Action, pending: Query
@@ -2248,13 +2338,18 @@ class Engine:
                         and action.skill_id in flagged
                     )
                 )
+        # W4-fix-2：转化候选从**暴露面**收回（`legal_actions` 里不再有"红牌直接当
+        # 【杀】"），但**内部池**照旧保留——清单 / 确认 / 回放成员判定都读这一份，故
+        # "清单 = 候选"没有第二份谓词。
+        internal_transform_actions = transform_candidates(kind, actions)
         transform_preactivations = conversion_preactivations(
             self.state,
             actor,
-            _transform_actions(kind, actions),
+            internal_transform_actions,
             # 求桃窗口的目标由窗口固定（濒死者）：清单只下发来源步（`spec.md` §2 急救行）。
-            fixed_target=kind is QueryKind.PEACH,
+            fixed_target=kind == QueryKind.PEACH,
         )
+        actions = tuple(action for action in actions if not is_transformed_action(action))
         view = project(self.state, actor)
         if kind is QueryKind.PLAY_PHASE:
             return PlayPhaseQuery(
@@ -2267,6 +2362,7 @@ class Engine:
                 revealed=revealed,
                 preactivations=preactivations,
                 transform_preactivations=transform_preactivations,
+                transform_actions=internal_transform_actions,
             )
         if kind is QueryKind.DISCARD:
             player = self.state.player(actor)
@@ -2291,6 +2387,7 @@ class Engine:
                 view=view,
                 revealed=revealed,
                 transform_preactivations=transform_preactivations,
+                transform_actions=internal_transform_actions,
             )
         if kind is QueryKind.PEACH:
             if dying is None:
@@ -2305,6 +2402,7 @@ class Engine:
                 dying=dying,
                 revealed=revealed,
                 transform_preactivations=transform_preactivations,
+                transform_actions=internal_transform_actions,
             )
         if kind is QueryKind.RESPOND:
             if not isinstance(payload, RespondContext):
@@ -2326,6 +2424,7 @@ class Engine:
                 window_frame=payload.window_frame,
                 revealed=revealed,
                 transform_preactivations=transform_preactivations,
+                transform_actions=internal_transform_actions,
             )
         if kind is QueryKind.SELECT_CARDS:
             if not isinstance(payload, SelectContext):
@@ -2906,36 +3005,6 @@ _SLOT_BY_SUBCATEGORY: dict[str, SlotKind] = {
 宝物槽位（``treasure``）属界限突破、M2 不启用，故不进这张表：它的牌面事实会是
 ``slot = None``，置入装备区即触发编程错误兜底。
 """
-
-
-def _transform_actions(
-    kind: QueryKind, actions: tuple[Action, ...]
-) -> tuple[Action, ...]:
-    """这次询问里**属于转化技入口**的候选（W4-3 的清单从它们派生）。
-
-    清单（:func:`sgs.skills.conversion_preactivations`）只描述"这次询问里已经存在的
-    虚拟牌候选"，故先按语境把候选收窄：
-
-    - 出牌阶段 / 【闪】窗口 / 求桃：``UseCard``（使用或响应）；
-    - 响应窗口：只收**打出**（``PlayCard``）——"被迫使用"（借刀杀人）的第二段预发动
-      属 W5，且排除它之后"响应语境无目标步"这条清单形状才成立（`spec.md` §2）；
-    - 其余询问：没有转化技入口（返回空元组）。
-    """
-    if kind not in (
-        QueryKind.PLAY_PHASE,
-        QueryKind.DODGE,
-        QueryKind.PEACH,
-        QueryKind.RESPOND,
-    ):
-        return ()
-    accepted = (PlayCard,) if kind is QueryKind.RESPOND else (UseCard, PlayCard)
-    return tuple(
-        action
-        for action in actions
-        if isinstance(action, accepted)
-        and getattr(action, "card", None) is not None
-        and action.card.is_virtual
-    )
 
 
 def instantiate_cards(pack: ContentPack) -> tuple[CardRef, ...]:

@@ -22,7 +22,9 @@
 ``ActivateSkill(picks, choices)``：代价取 :func:`_card_value` 最低、目标取
 :func:`_score_seat_option` 最高、转化源取旧 :func:`_score_select_cards` 会挑的那张；
 提交后由引擎的**同一个校验器**（``sgs.skills.validate_activation``）放行。
-转化技**不填**——它们的清单住 ``transform_preactivations``，确认仍是普通 ``UseCard`` 候选。
+**转化技也走同一条路**（W4-fix-2）：候选已从 ``legal_actions`` 收回，AI 读
+``transform_preactivations`` 填 ``ActivateSkill(来源, 目标)``，由引擎按同一份内部候选池
+解析成普通使用 / 打出（`sgs.skills.resolve_conversion_confirmation`）。
 
 **技能语义表** :data:`SKILL_VALUES`：键 = 技能 id（含 ``hero.`` / ``equip.`` 前缀），值 =
 ``(打分函数, 默认策略说明)``；打分函数签名统一 ``(query, action, view) -> float``
@@ -294,13 +296,8 @@ def _score_respond(query: Query, action: Action) -> float:
     return 0.0
 
 
-def _score_peach(query: Query, action: Action) -> float:
-    """``PEACH``：救（桃用于救命几乎恒正收益），除非自己是濒死链的下一个。"""
-    assert isinstance(query, PeachQuery)
-    if isinstance(action, Pass):
-        return 0.0
-    if not isinstance(action, (UseCard, PlayCard)) or action.card.type != "peach":
-        return 0.0
+def _peach_save_value(query: PeachQuery) -> float:
+    """在求桃窗口里救 `query.dying` 的价值（真【桃】与急救的转化【桃】共用）。"""
     if query.dying == query.view.seat:
         return _SAVE_VALUE
     me = _me(query.view)
@@ -310,6 +307,22 @@ def _score_peach(query: Query, action: Action) -> float:
         # 已明的敌人（主公 ↔ 反贼）：救活他等于替对手续命。
         return -_SAVE_VALUE
     return _SAVE_VALUE
+
+
+def _score_peach(query: Query, action: Action) -> float:
+    """``PEACH``：救（桃用于救命几乎恒正收益），除非自己是濒死链的下一个。
+
+    W4-fix-2：急救的转化【桃】不再是候选，AI 从清单填出的 ``ActivateSkill`` 与真【桃】
+    按同一个救命价值打分——否则它会是 0 分、与「放弃」打平。
+    """
+    assert isinstance(query, PeachQuery)
+    if isinstance(action, Pass):
+        return 0.0
+    if isinstance(action, ActivateSkill):
+        return _peach_save_value(query)
+    if not isinstance(action, (UseCard, PlayCard)) or action.card.type != "peach":
+        return 0.0
+    return _peach_save_value(query)
 
 
 def _score_discard(query: Query, action: Action) -> float:
@@ -458,7 +471,17 @@ def _is_revealed_ally(view: PlayerView, seat: int) -> bool:
     return mine in _LORD_SIDE and theirs == _LORD
 
 
-_HOSTILE_SEAT_STEPS = ("lijian:", "fanjian:", "liuli:")
+_HOSTILE_SEAT_STEPS = (
+    "lijian:",
+    "fanjian:",
+    "liuli:",
+    # W4-fix-2：转化技的目标步（`<短 id>:seat`）——【杀】/【乐不思蜀】都是指向对手的。
+    # 急救没有目标步（濒死者由求桃窗口固定），故不在此列。
+    "wusheng:",
+    "longdan:",
+    "guose:",
+    "serpent_spear:",
+)
 """座位步的**语义分组**：这些步骤里的座位是"被指向的对手"，其余（治疗 / 给牌）是"被帮助的人"。
 
 键 = 执行器发的 ``skill_id`` 前缀（``lijian:victim`` / ``fanjian:seat`` / ``liuli:seat`` …）。
@@ -687,16 +710,20 @@ def _fill_activation(
 def _preactivation_candidates(query: Query) -> tuple[ActivateSkill, ...]:
     """本次询问可填的全部复合动作（主动读 ``preactivations``、被动读 ``preactivation``）。
 
-    转化技**不**在这里：它们的清单住 ``transform_preactivations``，确认仍是普通
-    ``UseCard`` 候选（`spec.md` §3；W4-3 的裁定），AI 照旧按候选挑。
+    W4-fix-2：**转化技也在这里**——它们的候选已从 ``legal_actions`` 收回（用户裁定 A），
+    清单住 ``transform_preactivations``，确认同样是 ``ActivateSkill(来源, 目标)``，由引擎
+    按同一份内部候选池解析成普通使用 / 打出。四类语境（出牌 / 【闪】/ 响应 / 求桃）都读它。
     """
     kind = QueryKind(query.kind)
     if kind is QueryKind.PLAY_PHASE:
         manifests = dict(getattr(query, "preactivations", None) or {})
+        manifests.update(getattr(query, "transform_preactivations", None) or {})
     elif kind is QueryKind.SKILL_ACTIVATION:
         skill_id = getattr(query, "skill_id", None)
         steps = tuple(getattr(query, "preactivation", None) or ())
         manifests = {str(skill_id): steps} if skill_id and steps else {}
+    elif kind in (QueryKind.DODGE, QueryKind.RESPOND, QueryKind.PEACH):
+        manifests = dict(getattr(query, "transform_preactivations", None) or {})
     else:
         return ()
     if not manifests:
@@ -912,6 +939,9 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "equip.axe": (_constant(2.0), "贯石斧：弃两张令被抵消的【杀】依然造成伤害"),
     "equip.qilin_bow": (_constant(2.0), "麒麟弓：造成伤害时弃目标的一匹坐骑"),
     "equip.ice_sword": (_constant(2.0), "寒冰剑：防止伤害并依次弃目标两张牌"),
+    # W4-fix-2：丈八蛇矛的转化【杀】候选已收回，AI 改从清单填 —— 没有条目就落在
+    # `_UNKNOWN_SKILL_VALUE = -1.0` 上、永不发动（五条转化技的覆盖判据会红）。
+    "equip.serpent_spear": (_constant(2.0), "丈八蛇矛：两张手牌当【杀】使用或打出"),
 }
 """技能 id → ``(打分函数, 默认策略说明)``（`map.md` R4-Q6 的统一签名）。
 

@@ -473,13 +473,21 @@ class _QueryBase(_FrozenModel):
     """**转化技的预发动清单**（W4-3）：技能 id → 清单。
 
     与 :attr:`PlayPhaseQuery.preactivations`（**复合动作**清单）分开：转化技的确认仍是
-    **普通候选** ``UseCard(虚拟牌, 目标)``（本来就一次动作），不产生 ``ActivateSkill``
-    复合动作；接入层据清单收集来源 / 目标，再从候选里查出那一条提交。
+    **一次普通的使用 / 打出**，不产生 ``ActivateSkill`` 复合动作；接入层据清单收集
+    来源 / 目标，由**服务端**解析成候选池里的那条动作（W4-fix-2）。
 
-    清单由 :func:`sgs.skills.conversion_preactivations` 从**这次询问的候选**派生
-    （来源组 = 候选的 ``virtual_sources``），四类语境都要下发：出牌阶段（主动使用）、
-    ``DODGE`` / ``RESPOND``（响应）、``PEACH``（求桃）。**不进记录流**（``exclude``），
-    由 :func:`sgs_web.projection.pending_payload` 显式下发。
+    清单由 :func:`sgs.skills.conversion_preactivations` 从**这次询问的内部候选**
+    （:attr:`transform_actions`）派生（来源组 = 候选的 ``virtual_sources``），四类语境
+    都要下发：出牌阶段（主动使用）、``DODGE`` / ``RESPOND``（响应）、``PEACH``（求桃）。
+    **不进记录流**（``exclude``），由 :func:`sgs_web.projection.pending_payload` 显式下发。
+    """
+
+    transform_actions: tuple[Action, ...] = Field(default=(), exclude=True)
+    """被**收回**的内部转化候选（W4-fix-2，用户裁定 A）：``virtual_sources`` 非空的使用 / 打出。
+
+    这些动作**不在** :attr:`legal_actions` 里（"红牌直接当【杀】"的可选候选已收口），
+    但仍属于本次询问的合法动作池：确认路径与回放磁带的成员判定都读这一份，清单也从它
+    派生。**不进记录流**（``exclude``）——它是候选的派生数据，重放时由同一份状态重建。
     """
 
     @model_serializer(mode="wrap")

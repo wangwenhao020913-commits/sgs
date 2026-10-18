@@ -16,13 +16,14 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
 
 from sgs.data import Color, color_of_suit
 from sgs.effects import legal_actions_for, locate, target_is_effective
-from sgs.engine import Engine
+from sgs.engine import Engine, IllegalActionError
 from sgs.skills import (
     MAX_VIRTUAL_SOURCES,
     VirtualKind,
@@ -443,18 +444,27 @@ def test_wusheng_is_not_offered_without_a_red_card_in_hand():
 # ---------------------------------------------------------------------------
 
 
-def _play_transformed(seat: int, card_type: str, *, additional: tuple[int, ...] = ()):
-    """在 ``PLAY_PHASE`` 挑该牌名的转化牌使用；其余询问退到最小应答。"""
+def _play_transformed(skill_id: str):
+    """在 ``PLAY_PHASE`` 按**清单**确认该转化技（W4-fix-2：候选已从 `legal_actions` 收回）。
+
+    来源取来源步的第一张可用牌、目标取目标池的第一项——与界面的"点技能 → 选牌 → 选目标
+    → 确认"同形，交出去的是 `ActivateSkill(sources, targets)`。
+    """
 
     def chooser(query):
-        if query.kind == QueryKind.PLAY_PHASE:
-            return _find(
-                query,
-                lambda action: isinstance(action, UseCard)
-                and action.card.card_id < 0
-                and action.card.type == card_type,
-            )
-        return None
+        if query.kind != QueryKind.PLAY_PHASE:
+            return None
+        steps = query.transform_preactivations.get(skill_id)
+        if not steps:
+            return None
+        source = int(steps[0].pool[0].options[0])
+        choices: tuple[str, ...] = ()
+        if len(steps) > 1:
+            seat = steps[1].pool[0].options[0].removeprefix("seat:")
+            choices = (f"seat:{seat}",)
+        return ActivateSkill(
+            skill_id=skill_id, picks=(source,), choices=choices, answers_seq=query.seq
+        )
 
     return Scripted(chooser)
 
@@ -478,7 +488,7 @@ def test_using_a_longdan_converted_slash_counts_against_the_slash_use_limit():
 
     engine = _run(
         state,
-        [_play_transformed(0, "slash"), Scripted(lambda q: None)],
+        [_play_transformed(ZHAOYUN_SLASH), Scripted(lambda q: None)],
         _use_frame_popped,
     )
 
@@ -678,21 +688,22 @@ def test_guose_does_not_offer_a_non_diamond_card():
 
 
 class _GuoseUser:
-    """座位 0：把手里的方块牌当【乐不思蜀】用掉；其余一律结束阶段 / 放弃。"""
+    """座位 0：按清单把方块牌当【乐不思蜀】用掉；其余一律结束阶段 / 放弃。"""
 
     def __init__(self) -> None:
         self.used = False
 
     def respond(self, query):
         if query.kind == QueryKind.PLAY_PHASE and not self.used:
-            for action in query.legal_actions:
-                if (
-                    isinstance(action, UseCard)
-                    and action.card.type == "indulgence"
-                    and action.card.is_virtual
-                ):
-                    self.used = True
-                    return action
+            steps = query.transform_preactivations.get(DAQIAO)
+            if steps:
+                self.used = True
+                return ActivateSkill(
+                    skill_id=DAQIAO,
+                    picks=(int(steps[0].pool[0].options[0]),),
+                    choices=("seat:1",),
+                    answers_seq=query.seq,
+                )
         for action in query.legal_actions:
             if getattr(action, "kind", None) == "EndPhase":
                 return action
@@ -872,12 +883,13 @@ def test_a_real_near_death_session_is_rescued_by_jijiu_out_of_turn():
 
     def huatuo(query):
         if query.kind == QueryKind.PEACH:
-            return _find(
-                query,
-                lambda action: isinstance(action, UseCard)
-                and action.card.card_id < 0
-                and action.card.type == "peach",
-            )
+            steps = query.transform_preactivations.get(HUATUO)
+            if steps:
+                return ActivateSkill(
+                    skill_id=HUATUO,
+                    picks=(int(steps[0].pool[0].options[0]),),
+                    answers_seq=query.seq,
+                )
         return None
 
     engine = _run(
@@ -899,16 +911,14 @@ def test_a_real_near_death_session_is_rescued_by_jijiu_out_of_turn():
         and record.query.actor == 2
     ]
     assert rescue, "濒死窗口必须问到回合外的座位 2（华佗）"
-    offered = [
+    assert not [
         action
         for action in rescue[0].legal_actions
-        if isinstance(action, UseCard)
-        and action.card.is_virtual
-        and action.card.type == "peach"
-    ]
-    assert [action.card.virtual_sources for action in offered] == [(RED_DODGE,)], (
-        f"求桃窗口里急救的候选 = 这张红牌转化的【桃】：{rescue[0].legal_actions}"
-    )
+        if isinstance(action, UseCard) and action.card.virtual_sources
+    ], "转化【桃】不再是候选：急救只经清单进入"
+    steps = rescue[0].transform_preactivations[HUATUO]
+    assert [step.name for step in steps] == ["card"]
+    assert tuple(steps[0].pool[0].options) == (str(RED_DODGE),)
     assert engine.state.player(1).hp == 1, "转化【桃】把濒死者救回 1 点体力"
     assert RED_DODGE not in engine.state.player(2).hand, "来源红牌走正常使用路径离手"
     assert RED_DODGE in engine.state.discard, "来源红牌使用后进弃牌堆"
@@ -1419,3 +1429,383 @@ def test_green_dragon_provide_zones_cover_every_source_zone_in_its_pool():
         f"Step.zones={tuple(zone.value for zone in step.zones)} 必须覆盖池里来源所在的区 "
         f"{sorted(zone.value for zone in source_zones)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# W4-fix-2：转化技只经预发动（用户裁定 A）
+#
+# 候选收口：四类语境的 `legal_actions` 里**不再有**任何 `virtual_sources` 非空的
+# 使用 / 打出动作；转化能力只由 `transform_preactivations`（从引擎**内部**候选池派生）
+# 表达。确认 = 按清单交出来源集合（＋目标集合）的 `ActivateSkill`，由**服务端**解析成
+# 那条普通 `UseCard(虚拟牌, 目标)`（与候选同源的那批内部动作）；校验失败零状态改动。
+# ---------------------------------------------------------------------------
+
+SERPENT_SKILL = "equip.serpent_spear"
+
+
+def _transformed_uses(actions, type_id: str | None = None):
+    """候选里 `virtual_sources` 非空的**使用 / 打出**动作（转化牌）。"""
+    return [
+        action
+        for action in actions
+        if isinstance(action, (UseCard, PlayCard))
+        and action.card.virtual_sources
+        and (type_id is None or action.card.type == type_id)
+    ]
+
+
+def _parked_at(state, kind: QueryKind, *, participants=None):
+    """跑到 `state` 上的第一个 `kind` 询问（引擎真的停下，`pending` 即它）。"""
+    players = participants or [Scripted(), Scripted()]
+    engine = _run(
+        state,
+        players,
+        lambda running: running.pending is not None and running.pending.kind == kind,
+    )
+    assert engine.pending is not None and engine.pending.kind == kind, (
+        f"没有走到 {kind} 询问，停在 {engine.pending}"
+    )
+    return engine
+
+
+def _drive_until_pending(engine, *, limit: int = 4000):
+    """提交后把引擎推到下一个询问（不判终局）。"""
+    for _ in range(limit):
+        if engine.pending is not None or engine.finished:
+            return engine
+        engine._step()
+    raise AssertionError(f"{limit} 步内没有回到询问")
+
+
+def test_the_play_phase_hides_transform_candidates_but_still_carries_the_manifest():
+    """出牌阶段：红牌不再"直接当【杀】"，但清单照旧由此刻的转化候选派生。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_PEACH,), hero="guanyu"), SeatSpec()],
+        deck=_deck_excluding(RED_PEACH),
+        turn_seat=0,
+    )
+
+    query = _parked_at(state, QueryKind.PLAY_PHASE).pending
+
+    assert _transformed_uses(query.legal_actions) == [], (
+        f"出牌阶段的候选里不得再有转化牌：{query.legal_actions}"
+    )
+    steps = query.transform_preactivations[GUANYU]
+    assert str(RED_PEACH) in steps[0].pool[0].options, (
+        "清单仍从**内部**候选池派生：来源红牌必须在来源步里"
+    )
+    assert [step.name for step in steps] == ["card", "seat"]
+
+
+def test_the_dodge_window_hides_the_longdan_candidate_but_still_carries_the_manifest():
+    """【闪】窗口：龙胆的虚拟【闪】不再直接可选，入口只剩清单。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(SLASH,)), SeatSpec(hand=(RED_SLASH,), hero="zhaoyun")],
+        deck=_deck_excluding(SLASH, RED_SLASH),
+        turn_seat=0,
+    )
+    attacker = Scripted(
+        lambda query: _slash_use(query, SLASH, 1)
+        if query.kind == QueryKind.PLAY_PHASE
+        else None
+    )
+
+    query = _parked_at(
+        state, QueryKind.DODGE, participants=[attacker, Scripted()]
+    ).pending
+
+    assert _transformed_uses(query.legal_actions, "dodge") == []
+    assert [step.name for step in query.transform_preactivations[ZHAOYUN_SLASH]] == ["card"]
+
+
+def test_the_respond_window_hides_the_wusheng_play_but_still_carries_the_manifest():
+    """响应窗口（南蛮入侵的**打出**）：红牌不再直接当【杀】打出。"""
+    barbarian = _cards("barbarian_invasion")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(barbarian,)), SeatSpec(hand=(RED_PEACH,), hero="guanyu")],
+        deck=_deck_excluding(barbarian, RED_PEACH),
+        turn_seat=0,
+    )
+    attacker = Scripted(
+        lambda query: _find(
+            query,
+            lambda action: isinstance(action, UseCard)
+            and action.card.card_id == barbarian,
+        )
+        if query.kind == QueryKind.PLAY_PHASE
+        else None
+    )
+
+    query = _run(
+        state,
+        [attacker, Scripted()],
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.RESPOND
+        and running.pending.cause == WindowCause.BARBARIAN_INVASION,
+    ).pending
+
+    assert query is not None and query.actor == 1
+    assert _transformed_uses(query.legal_actions, "slash") == [], (
+        f"响应窗口里不得再有转化【杀】：{query.legal_actions}"
+    )
+    assert str(RED_PEACH) in query.transform_preactivations[GUANYU][0].pool[0].options
+
+
+def test_the_peach_window_keeps_the_real_peach_and_hides_the_jijiu_candidate():
+    """求桃窗口：真【桃】照旧可直接点，急救的转化【桃】只经清单（濒死者由窗口固定）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,)),
+            SeatSpec(hp=1),
+            SeatSpec(hand=(RED_PEACH,), hero="huatuo"),
+        ],
+        deck=_deck_excluding(SLASH, RED_PEACH),
+        turn_seat=0,
+    )
+    attacker = Scripted(
+        lambda query: _slash_use(query, SLASH, 1)
+        if query.kind == QueryKind.PLAY_PHASE
+        else None
+    )
+
+    query = _run(
+        state,
+        [attacker, Scripted(), Scripted()],
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.PEACH
+        and running.pending.actor == 2,
+    ).pending
+
+    assert query is not None and query.actor == 2
+    real = [
+        action
+        for action in query.legal_actions
+        if isinstance(action, UseCard)
+        and action.card.card_id == RED_PEACH
+        and action.targets == (1,)
+    ]
+    assert real, "真【桃】仍是候选（可直接点）"
+    assert _transformed_uses(query.legal_actions, "peach") == [], (
+        "急救的转化【桃】不再作为候选出现"
+    )
+    steps = query.transform_preactivations[HUATUO]
+    assert [step.name for step in steps] == ["card"], "无目标步：濒死者由窗口固定"
+
+
+def test_a_wusheng_confirmation_from_the_manifest_uses_the_slash_normally():
+    """武圣：按清单交来源红牌 + 目标座位 ⇒ 服务端解析成普通的转化【杀】使用。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_PEACH,), hero="guanyu"), SeatSpec()],
+        deck=_deck_excluding(RED_PEACH),
+        turn_seat=0,
+    )
+    engine = _parked_at(state, QueryKind.PLAY_PHASE)
+    query = engine.pending
+    options = query.transform_preactivations[GUANYU][0].pool[0].options
+    assert str(RED_PEACH) in options, "清单的来源步由内部候选派生"
+
+    confirm = ActivateSkill(
+        skill_id=GUANYU, picks=(RED_PEACH,), choices=("seat:1",), answers_seq=query.seq
+    )
+    assert confirm not in query.legal_actions
+
+    engine.submit(confirm)
+    _drive_until_pending(engine)
+
+    assert engine.state.player(0).card_use_counts.get("slash") == 1, "解析出的是一次【杀】的使用"
+    assert RED_PEACH in engine.state.processing, "来源红牌走正常使用路径离开手牌、进处理区"
+    accepted = [record for record in engine.records if record.kind == "action" and record.accepted]
+    assert accepted, "确认被接受"
+
+
+def test_a_longdan_confirmation_from_the_manifest_cancels_the_slash():
+    """龙胆（【杀】→【闪】方向）：清单确认 ⇒ 服务端解析成普通的转化【闪】使用。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(SLASH,)), SeatSpec(hand=(RED_SLASH,), hero="zhaoyun")],
+        deck=_deck_excluding(SLASH, RED_SLASH),
+        turn_seat=0,
+    )
+    attacker = Scripted(
+        lambda query: _slash_use(query, SLASH, 1)
+        if query.kind == QueryKind.PLAY_PHASE
+        else None
+    )
+    engine = _parked_at(state, QueryKind.DODGE, participants=[attacker, Scripted()])
+    query = engine.pending
+    assert [step.name for step in query.transform_preactivations[ZHAOYUN_SLASH]] == ["card"]
+
+    confirm = ActivateSkill(
+        skill_id=ZHAOYUN_SLASH, picks=(RED_SLASH,), answers_seq=query.seq
+    )
+    engine.submit(confirm)
+    _drive_until_pending(engine)
+
+    assert engine.state.player(1).hp == 4, "转化【闪】抵消了这次【杀】"
+    assert RED_SLASH in engine.state.discard, "来源【杀】走正常使用路径进弃牌堆"
+
+
+def test_a_longdan_confirmation_from_the_manifest_uses_the_slash_normally():
+    """龙胆（【闪】→【杀】方向）：出牌阶段的清单确认解析成普通的转化【杀】使用。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_DODGE,), hero="zhaoyun"), SeatSpec()],
+        deck=_deck_excluding(RED_DODGE),
+        turn_seat=0,
+    )
+    engine = _parked_at(state, QueryKind.PLAY_PHASE)
+    query = engine.pending
+    options = query.transform_preactivations[ZHAOYUN_SLASH][0].pool[0].options
+    assert str(RED_DODGE) in options
+
+    confirm = ActivateSkill(
+        skill_id=ZHAOYUN_SLASH, picks=(RED_DODGE,), choices=("seat:1",), answers_seq=query.seq
+    )
+    engine.submit(confirm)
+    _drive_until_pending(engine)
+
+    assert engine.state.player(0).card_use_counts.get("slash") == 1
+    assert RED_DODGE in engine.state.processing
+
+
+def test_a_guose_confirmation_from_the_manifest_places_the_indulgence():
+    """国色：清单确认解析成普通的转化【乐不思蜀】使用（进判定区、来源方块牌离手）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(DIAMOND,), hero="daqiao"), SeatSpec()],
+        deck=_deck_excluding(DIAMOND),
+        turn_seat=0,
+    )
+    engine = _parked_at(state, QueryKind.PLAY_PHASE)
+    query = engine.pending
+    assert str(DIAMOND) in query.transform_preactivations[DAQIAO][0].pool[0].options
+
+    confirm = ActivateSkill(
+        skill_id=DAQIAO, picks=(DIAMOND,), choices=("seat:1",), answers_seq=query.seq
+    )
+    engine.submit(confirm)
+    _drive_until_pending(engine)
+
+    judge = tuple(engine.state.player(1).judge)
+    assert judge == (DIAMOND,), "【乐不思蜀】的来源方块牌进了被指定座位的判定区"
+    assert engine.state.virtual_judge[DIAMOND].type == "indulgence", (
+        "判定区里摆的是来源牌，映射记着它代表的那张虚拟【乐不思蜀】"
+    )
+
+
+def test_a_jijiu_confirmation_from_the_manifest_rescues_the_dying_seat():
+    """急救：求桃窗口的清单确认（一张红牌、无目标步）解析成目标固定的转化【桃】。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(SLASH,)),
+            SeatSpec(hp=1),
+            SeatSpec(hand=(RED_DODGE,), hero="huatuo"),
+        ],
+        deck=_deck_excluding(SLASH, RED_DODGE),
+        turn_seat=0,
+    )
+    attacker = Scripted(
+        lambda query: _slash_use(query, SLASH, 1)
+        if query.kind == QueryKind.PLAY_PHASE
+        else None
+    )
+    engine = _run(
+        state,
+        [attacker, Scripted(), Scripted()],
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.PEACH
+        and running.pending.actor == 2,
+    )
+    query = engine.pending
+    assert [step.name for step in query.transform_preactivations[HUATUO]] == ["card"]
+
+    confirm = ActivateSkill(skill_id=HUATUO, picks=(RED_DODGE,), answers_seq=query.seq)
+    engine.submit(confirm)
+    _drive_until_pending(engine)
+
+    assert engine.state.player(1).hp == 1, "转化【桃】把濒死者救回 1 点体力"
+    assert RED_DODGE not in engine.state.player(2).hand
+    assert RED_DODGE in engine.state.discard
+
+
+def test_a_serpent_spear_confirmation_from_the_manifest_takes_two_hand_cards():
+    """丈八蛇矛：清单确认 = 恰好两张手牌 + 目标，解析成普通的转化【杀】使用。"""
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(first, second), equip=(SERPENT,)), SeatSpec()],
+        deck=_deck_excluding(first, second, SERPENT),
+        turn_seat=0,
+    )
+    engine = _parked_at(state, QueryKind.PLAY_PHASE)
+    query = engine.pending
+    step = query.transform_preactivations[SERPENT_SKILL][0]
+    assert step.min == step.max == 2
+
+    confirm = ActivateSkill(
+        skill_id=SERPENT_SKILL,
+        picks=(first, second),
+        choices=("seat:1",),
+        answers_seq=query.seq,
+    )
+    engine.submit(confirm)
+    _drive_until_pending(engine)
+
+    assert engine.state.player(0).card_use_counts.get("slash") == 1
+    assert first in engine.state.processing and second in engine.state.processing
+
+
+def test_a_transform_confirmation_with_a_bad_source_changes_nothing():
+    """校验失败：零状态改动、`accepted=false`、首因写进拒绝记录。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_PEACH,), hero="guanyu"), SeatSpec()],
+        deck=_deck_excluding(RED_PEACH),
+        turn_seat=0,
+    )
+    engine = _parked_at(state, QueryKind.PLAY_PHASE)
+    query = engine.pending
+    baseline = json.dumps(engine.state.model_dump(mode="json"), sort_keys=True)
+
+    with pytest.raises(IllegalActionError) as caught:
+        engine.submit(
+            ActivateSkill(
+                skill_id=GUANYU, picks=(BLACK_SLASH,), choices=("seat:1",), answers_seq=query.seq
+            )
+        )
+
+    assert "来源牌不合法" in caught.value.message
+    assert json.dumps(engine.state.model_dump(mode="json"), sort_keys=True) == baseline
+    assert engine.pending is query
+    rejected = engine.records[-1]
+    assert rejected.accepted is False and "转化确认失败" in rejected.reason
+
+
+def test_a_transform_confirmation_with_a_target_outside_the_pool_changes_nothing():
+    """目标的合法性同样由候选池回答：不在池里的座位 ⇒ 目标不合法、零状态改动。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_PEACH,), hero="guanyu"), SeatSpec()],
+        deck=_deck_excluding(RED_PEACH),
+        turn_seat=0,
+    )
+    engine = _parked_at(state, QueryKind.PLAY_PHASE)
+    query = engine.pending
+    baseline = json.dumps(engine.state.model_dump(mode="json"), sort_keys=True)
+
+    with pytest.raises(IllegalActionError) as caught:
+        engine.submit(
+            ActivateSkill(
+                skill_id=GUANYU, picks=(RED_PEACH,), choices=("seat:0",), answers_seq=query.seq
+            )
+        )
+
+    assert "目标不合法" in caught.value.message
+    assert json.dumps(engine.state.model_dump(mode="json"), sort_keys=True) == baseline
+    assert engine.pending is query

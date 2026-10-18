@@ -1293,6 +1293,29 @@ def activation_answers(
     return answers
 
 
+_PREFILLED_KEY = "activation_prefilled"
+
+"""帧私有的"复合动作摊回结果"缓存键（W4-fix-2）：键 = 技能 id，值 = 步骤答案。
+
+``run_flow`` 在 ``effect`` 挂起后的重入会从头再跑；复合动作的 picks 是**提交时的声明**，
+不能按重入时的状态重新解析（来源牌可能已经离场）。这份缓存只活在帧里、不进记录流。
+"""
+
+
+def _activation_belongs(activation: Mapping[str, object], frame: Any, flow: SkillFlow) -> bool:
+    """这份预填的复合动作是**这条流水线自己**的吗（帧内 ``activation`` 会跨技能存活）。
+
+    ``frame.data["activation"]`` 挂在**发问的那一帧**上，供 :func:`run_flow` 重入时把
+    ``picks`` / ``choices`` 摊回逐步答案。同一帧上可以先后跑**不同技能**的流水线——
+    典型是【杀】的 RESOLVE 帧：【流离】在这里发动过，之后这张【杀】被抵消又在同一帧上开
+    「被抵消时」接缝（青龙 / 贯石斧）。没有归属判据时，后一条流水线会拿到前一条技能的
+    载荷去索引自己的选取面（牌 id 不在面里 ⇒ ``KeyError``）。
+    """
+    recorded = activation.get("skill_id", frame.data.get("skill_id"))
+    if recorded is None:
+        return True  # 旧形态没有归属字段：保持"谁读谁用"的原行为，不 fail-closed
+    return str(recorded).rsplit(".", 1)[-1] == flow.name
+
 
 def run_flow(
     host: Any,
@@ -1328,17 +1351,29 @@ def run_flow(
     answers: dict[str, object] = {}
     activation = frame.data.get("activation")
     prefilled: FlowAnswers = {}
-    if activation:
+    if activation and _activation_belongs(activation, frame, flow):
         # W4-1：复合动作报上来的（picks, choices）先摊回逐步答案；**本人应答的前缀**
         # 因此一个询问都不发，第二个应答者开始的段仍走下面的逐步询问。
-        prefilled = activation_answers(
-            flow,
-            host.state,
-            seat,
-            tuple(int(card_id) for card_id in activation.get("picks", ())),
-            tuple(str(choice) for choice in activation.get("choices", ())),
-            frame=frame,
-        )
+        #
+        # **摊回只做一次**（W4-fix-2）：``effect`` 会挂起（青龙续杀 / 贯石斧搬牌），重入时
+        # 整个 ``run_flow`` 从头再跑——若每次都按**当前状态**重新解析 picks，已经离场的
+        # 来源牌（【青龙】刚把那张【杀】用掉）就不在面里了，``PickProvide`` 的 refs 索引
+        # 会 KeyError。确认时的声明在**提交那一刻定格**，故答案缓存在帧上（帧私有数据，
+        # 不进记录流）。
+        cache = frame.data.setdefault(_PREFILLED_KEY, {})
+        cache_key = str(activation.get("skill_id") or flow.name)
+        if cache_key not in cache:
+            cache[cache_key] = dict(
+                activation_answers(
+                    flow,
+                    host.state,
+                    seat,
+                    tuple(int(card_id) for card_id in activation.get("picks", ())),
+                    tuple(str(choice) for choice in activation.get("choices", ())),
+                    frame=frame,
+                )
+            )
+        prefilled = dict(cache[cache_key])
     for index, step in enumerate(flow.steps):
         # 清单渲染器与执行器共用的通道：池 / 面回调若依赖前序答案，从这里读同一份
         # （预填的复合动作与逐步询问两条路都写它，故声明只写一次）。

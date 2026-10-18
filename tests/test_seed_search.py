@@ -169,7 +169,9 @@ def test_reseed_slug_refuses_scripted_baselines():
 
 def test_reseed_slug_returns_hits_sorted_by_record_count_within_range():
     """真跑引擎的冒烟（少量种子）：命中项都落在范围内，且**按记录条数最少**排序。"""
-    slug = "42-hero-transform"  # M3 专项基准里判据最容易命中的一条
+    # W4-fix-2：42（转化族）改脚本驱动、不能再搜种子；换 M3 随机档里判据最易命中的一条
+    # （8 个种子命中 7 个，已足够覆盖排序语义）。
+    slug = "36-hero-rejudge-cycle"
     hits = seed_search.reseed_slug(slug, limit=8)
 
     assert all(0 <= candidate.seed < 8 for candidate in hits)

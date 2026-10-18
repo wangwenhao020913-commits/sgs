@@ -77,8 +77,11 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     # W4-1：**预发动清单也是可用性的一份**。已翻到预发动的技能不再有骨架候选，可用性
     # 只剩 ``PLAY_PHASE.preactivations``（主动入口）与 ``SKILL_ACTIVATION.preativation``
     # （被动入口）——两者都从询问里读，不另问引擎"满不满足条件"。
+    # W4-fix-2：转化技的候选已从 ``legal_actions`` 收回，可用性同样由转化清单
+    # （``transform_preactivations``）回答。
     if pending is not None:
         offered.update((getattr(pending, "preactivations", None) or {}).keys())
+        offered.update((getattr(pending, "transform_preactivations", None) or {}).keys())
         if getattr(pending, "preactivation", ()):
             offered.add(str(getattr(pending, "skill_id", "")))
     hand = tuple(state.player(seat).hand)
@@ -544,6 +547,10 @@ def _skill_hints(state: Any, query: Query) -> list[dict[str, str]]:
     for action in query.legal_actions:
         if getattr(action, "kind", None) == "ActivateSkill":
             add(str(action.skill_id))
+    # W4-fix-2：转化技的候选已从 ``legal_actions`` 收回，技能文案改由**清单**的键给出
+    # （与"可用性 = 清单"同一真源；不再靠候选里的虚拟牌反推）。
+    for skill_id in getattr(query, "transform_preactivations", None) or {}:
+        add(str(skill_id))
     # 收**候选与选择面槽位**两处的虚拟牌（票 14）："提供一张 B"的虚拟 B 只在后者上，
     # 不收它这条窗口就列不出【龙胆】/【武圣】的文案。归属按
     # :func:`~sgs.skills.heroes.conversion_offers` **逐张核对来源**（需要【杀】只归【闪】、

@@ -1048,9 +1048,9 @@ function preactivationAnswerTexts(step, values) {
 
 /** 进入预发动：**不压帧、不计次数**，只把清单与本地答案摊开（W4-1）。
  *
- * `composite` = 确认时提交**复合动作**（已翻到预发动的技能，W4-2）；`false` = **转化技的
- * 本地入口**（W4-3）：确认时从这次询问的候选里查出那条普通的 `UseCard(虚拟牌, 目标)`，
- * 转化技的最终动作本来就一次动作。
+ * `composite` 只区分**文案**（"复合动作" / "这次的使用 / 响应"）：W4-fix-2 起两类入口的
+ * 确认形状都是 `ActivateSkill`，转化技那条由**服务端**解析成普通的 `UseCard(虚拟牌, 目标)`
+ * ——界面不再去候选里查它。
  */
 function enterPreativation(skill, manifest) {
   state.preativation = {
@@ -1170,29 +1170,25 @@ function preactivationReady(pa) {
   });
 }
 
-/** 预发动的提交载荷。
+/** 预发动的提交载荷：`ActivateSkill(picks, choices)`（**不**在 `legal_actions` 里拼候选）。
  *
- * - **复合动作**（已翻到预发动的技能）：`ActivateSkill(picks, choices)`——不要求出现在
- *   `legal_actions` 里，由服务端校验器按同一份步骤声明验；
- * - **转化技的本地入口**（W4-3）：从这次询问的候选里**查出**那条普通的
- *   `UseCard(虚拟牌, 目标)`（`findTransformAction`），不自己拼牌 / 目标——虚拟牌的 id
- *   由服务端派生，界面只按"来源集合 + 目标集合"对回原候选。
+ * 两类入口同一个形状（W4-fix-2 收口后**不再**去候选里查那条 `UseCard`）：
+ *
+ * - **复合动作**（已翻到预发动的技能）：`picks` = 代价牌、`choices` = 目标座位；
+ * - **转化技**（武圣 / 龙胆 / 国色 / 急救 / 丈八）：`picks` = **来源牌**、`choices` = 目标
+ *   座位（响应 / 求桃语境没有目标步，`choices` 为空）。虚拟牌的 id 与那条普通使用 / 打出
+ *   动作都由**服务端**按同一份清单声明解析，界面不拼牌、也不要求它出现在候选里。
  */
 function buildPreativationAction(pending, pa) {
   if (!pending || !pa || !preactivationReady(pa)) return null;
   const picks = [];
   const choices = [];
-  const targets = [];
   pa.steps.forEach((step, index) => {
     const answer = pa.answers[index];
     const kind = preactivationStepKind(step);
     if (kind === "card") picks.push(...answer.values);
-    else {
-      choices.push(...answer.texts);
-      if (kind === "seat") targets.push(...answer.values);
-    }
+    else choices.push(...answer.texts);
   });
-  if (!pa.composite) return findTransformAction(pending, picks, targets);
   return {
     kind: "ActivateSkill",
     skill_id: pa.skillId,
@@ -1200,27 +1196,6 @@ function buildPreativationAction(pending, pa) {
     choices,
     answers_seq: pending.seq,
   };
-}
-
-/** 转化技：按"来源实体牌集合（＋目标集合）"在候选里查那条虚拟牌行动。
- *
- * 唯一的合法性判据仍是**候选本身**：查不到 = 这组来源 / 目标没有候选（提交按钮不给点）。
- * 无目标步的语境（响应 / 求桃）不比较目标——响应窗口没有目标，求桃的目标由窗口固定。
- */
-function findTransformAction(pending, sources, targets) {
-  const sourceKey = sources.slice().sort((a, b) => a - b).join(",");
-  const targetKey = targets.slice().sort((a, b) => a - b).join(",");
-  return (pending.legal_actions || []).find((action) => {
-    if (action.kind !== "UseCard" && action.kind !== "PlayCard") return false;
-    const card = action.card;
-    if (!card) return false;
-    // 转化牌的判据读 `virtual_sources`（实体牌恒空、转化牌恒非空）：`is_virtual` 是
-    // pydantic 属性，**不进**下发的牌面（见 :func:`providePickStays` 同一条纪律）。
-    const got = (card.virtual_sources || []).slice().sort((a, b) => a - b).join(",");
-    if (got !== sourceKey) return false;
-    if (!targets.length) return true;
-    return (action.targets || []).slice().sort((a, b) => a - b).join(",") === targetKey;
-  }) || null;
 }
 
 function preactivationStepLabel(step) {
@@ -1727,7 +1702,7 @@ function refreshSubmit(pending) {
     } else {
       $("t-choice").textContent = pa.composite
         ? "可以确认发动（提交一个复合动作）。"
-        : "可以确认发动（提交这次的使用 / 响应）。";
+        : "可以确认发动（服务端会把它解析成这次的使用 / 响应）。";
     }
     return;
   }

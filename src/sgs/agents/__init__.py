@@ -10,6 +10,7 @@ from .participants import (
     TapeError,
     TapePlayer,
     is_structured_activation,
+    is_transform_use,
     tape_from_journal,
 )
 
@@ -21,5 +22,6 @@ __all__ = (
     "TapeError",
     "TapePlayer",
     "is_structured_activation",
+    "is_transform_use",
     "tape_from_journal",
 )

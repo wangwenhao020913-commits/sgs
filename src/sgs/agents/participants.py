@@ -19,18 +19,23 @@ __all__ = [
     "TapeError",
     "TapePlayer",
     "is_structured_activation",
+    "is_transform_use",
     "tape_from_journal",
 ]
 
 
 def is_structured_activation(query: Query, action: Action) -> bool:
-    """应答是不是"按预发动清单填的复合动作"（W4-4）。
+    """应答是不是"按预发动清单填的复合动作"（W4-4 / W4-fix-2）。
 
     预发动后复合 ``ActivateSkill`` **不在** ``legal_actions`` 里（`spec.md` §3 的
     "候选 = 接受"唯一让开处）。本谓词只回答"它命中了本次询问下发的清单吗"——真正的
     合法性由引擎的同一个 :func:`sgs.skills.validate_activation` 裁决（非法复合动作会在
     :meth:`Engine.submit` 里被拒并抛错）。回放执行器据此放行磁带上的复合动作；它不是
     "任何 ``ActivateSkill`` 都放行"。
+
+    **W4-fix-2**：转化技的清单（``transform_preactivations``）也是"下发过的清单"——
+    它的确认同样是 ``ActivateSkill(picks, choices)``（来源 + 目标），由引擎按同一份内部
+    候选池解析成普通使用 / 打出；这里放行的是**提交形状**，合法性仍在引擎。
 
     **必须真的填过表**（``picks`` / ``choices`` 至少一项非空）：W4-2 之前的旧磁带里
     「骨架」``ActivateSkill(skill_id=…, picks=(), choices=())`` 现在已不在候选里，放行它
@@ -45,11 +50,24 @@ def is_structured_activation(query: Query, action: Action) -> bool:
     manifests = getattr(query, "preactivations", None)
     if isinstance(manifests, dict) and action.skill_id in manifests:
         return True
+    transforms = getattr(query, "transform_preactivations", None)
+    if isinstance(transforms, dict) and action.skill_id in transforms:
+        return True
     return (
         str(getattr(query, "kind", "")) == "SKILL_ACTIVATION"
         and action.skill_id == getattr(query, "skill_id", None)
         and bool(getattr(query, "preactivation", ()))
     )
+
+
+def is_transform_use(query: Query, action: Action) -> bool:
+    """应答是不是**已解析的转化动作**（W4-fix-2）：命中询问保留的内部候选池。
+
+    转化候选已从 ``legal_actions`` 收回（用户裁定 A），但引擎落账的是服务端解析出的那条
+    普通使用 / 打出动作——回放磁带与程序化提交直接给这条动作，故成员判定改读
+    ``transform_actions``（与清单同源的内部池）。它只比"在这份池里"，不重算任何规则。
+    """
+    return action in (getattr(query, "transform_actions", ()) or ())
 
 
 class Participant(Protocol):
@@ -103,8 +121,10 @@ class TapePlayer:
                 f"行动序列分歧：询问 {query.kind} 的 seq={query.seq}，"
                 f"磁带上的应答 answers_seq={action.answers_seq}"
             )
-        if action not in query.legal_actions and not is_structured_activation(
-            query, action
+        if (
+            action not in query.legal_actions
+            and not is_structured_activation(query, action)
+            and not is_transform_use(query, action)
         ):
             raise TapeError(f"行动序列分歧：{action.kind} 不在 {query.kind} 的候选集合内")
         self._index += 1

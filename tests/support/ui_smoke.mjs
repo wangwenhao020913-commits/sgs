@@ -2266,7 +2266,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
         const p = view.pending;
         if (p && p.kind === "PLAY_PHASE" && p.actor === 0 && hero === "zhaoyun" && !longdan) {
           const dodge = (view.snapshot.self_hand || []).find((card) => card.type === "dodge");
-          if (dodge && ui.cardAliases(p, dodge.card_id).length > 0) {
+          // W4-fix-2：转化候选已从候选面收回，入口改由**清单**表达。
+          const manifest = (p.preativations || {})["hero.zhaoyun.longdan"];
+          if (dodge && manifest) {
             longdan = { seed, steps: step, cardId: dodge.card_id };
           }
         }
@@ -2293,9 +2295,15 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     await replayScanTo(found.longdan);
     const p = ui.state.view.pending;
     const dodge = (ui.state.view.snapshot.self_hand || []).find((card) => card.card_id === found.longdan.cardId);
-    check("㉿L9 真局里【闪】点得动（候选索引按来源牌命中虚拟【杀】）",
-      !!dodge && ui.cardSelectable(p, dodge.card_id),
+    check("㉿L9 真局里【闪】不再直接点成【杀】（候选面已收口）",
+      !!dodge && !ui.cardSelectable(p, dodge.card_id),
       `card=${dodge && dodge.name} selectable=${dodge && ui.cardSelectable(p, dodge.card_id)}`);
+    const longdanButton = $("t-skills").children.find(
+      (b) => b.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
+    check("㉿L9b 龙胆的唯一入口 = 清单（按钮可点、来源 → 目标两步）",
+      !!longdanButton && longdanButton.disabled === false
+        && longdanButton.getAttribute("data-preativation") === "2",
+      `disabled=${longdanButton && longdanButton.disabled} pre=${longdanButton && longdanButton.getAttribute("data-preativation")}`);
   }
 
   check("㉿R8 真局扫到「刘备出牌阶段仁德可发动」", !!found.rende,
@@ -2663,25 +2671,20 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 }
 
 
-/* ============ W4-3：转化技的**本地预发动入口**（点技能 → 选源牌 → 选目标 → 确认）
+/* ============ W4-3 / W4-fix-2：转化技的**预发动入口**（点技能 → 选源牌 → 选目标 → 确认）
  *
- * 清单由服务端从**这次询问的候选**派生（`tests/test_web.py` 钉写方），这里钉前端真的按
- * `pending.preativations` 的清单进入本地态，且**确认 = 普通候选 `UseCard(虚拟牌, 目标)`**
- * ——转化技的最终动作本来就一次动作，不产生复合动作。
+ * 清单由服务端从**这次询问的内部候选**派生（`tests/test_web.py` 钉写方），这里钉前端真的按
+ * `pending.preativations` 的清单进入本地态，且**确认 = `ActivateSkill(来源, 目标)`**——
+ * 虚拟牌的 id 与那条普通 `UseCard(虚拟牌, 目标)` 都由服务端解析，候选里已经**不再有**它
+ * （W4-fix-2 收口）。
  */
 {
   const red = { ...synthCard(2, "桃"), type: "peach", color: "red" };
-  const virtualSlash = { ...synthCard(-3, "杀"), type: "slash", color: "red", virtual_sources: [2] };
   const pending = {
     kind: "PLAY_PHASE", actor: 0, seq: 910,
     prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
-    legal_actions: [
-      { kind: "UseCard", answers_seq: 910, card: virtualSlash, targets: [1] },
-      { kind: "EndPhase", answers_seq: 910 },
-    ],
-    candidate_index: {
-      "-3": { card: virtualSlash, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
-    },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 910 }],
+    candidate_index: {},
     virtual_index: { "2": [{ card_id: -3, skill_ids: ["hero.guanyu.wusheng"] }] },
     preativations: {
       "hero.guanyu.wusheng": [
@@ -2727,10 +2730,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const seatBox = $("t-seats").children.find((b) => b.getAttribute("data-seat") === "1");
   (seatBox.listeners.click || []).forEach((fn) => fn({ target: seatBox }));
   const action = ui.buildAction();
-  check("㉿T4 清单填完 ⇒ 确认提交的是**普通的虚拟【杀】候选**（不是复合动作）",
-    !!action && action.kind === "UseCard"
-      && String(action.card.card_id) === "-3"
-      && JSON.stringify(action.targets) === "[1]",
+  check("㉿T4 清单填完 ⇒ 确认提交 **来源 + 目标**（ActivateSkill），不再去候选里查那条 UseCard",
+    !!action && action.kind === "ActivateSkill"
+      && action.skill_id === "hero.guanyu.wusheng"
+      && JSON.stringify(action.picks) === "[2]"
+      && JSON.stringify(action.choices) === "[\"seat:1\"]"
+      && !(view.pending.legal_actions || []).some((c) => c.kind === "UseCard"),
     JSON.stringify(action));
   check("㉿T5 只填了源牌、没选目标时不能确认",
     ui.state.preativation.cursor === 2 && ui.preactivationReady(ui.state.preativation) === true,
@@ -2740,17 +2745,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 /* 求桃窗口：急救的清单 = 一张红牌、**无目标步**（濒死者由窗口固定）。 */
 {
   const red = { ...synthCard(4, "闪"), type: "dodge", color: "red" };
-  const virtualPeach = { ...synthCard(-5, "桃"), type: "peach", color: "red", virtual_sources: [4] };
   const pending = {
     kind: "PEACH", actor: 0, seq: 920, dying: 2,
     prompt: "座位 2 处于濒死状态：是否对其使用【桃】？",
-    legal_actions: [
-      { kind: "UseCard", answers_seq: 920, card: virtualPeach, targets: [2] },
-      { kind: "Pass", answers_seq: 920 },
-    ],
-    candidate_index: {
-      "-5": { card: virtualPeach, pool: [2], combos: [[2]], min_targets: 1, max_targets: 1 },
-    },
+    legal_actions: [{ kind: "Pass", answers_seq: 920 }],
+    candidate_index: {},
     virtual_index: { "4": [{ card_id: -5, skill_ids: ["hero.huatuo.jijiu"] }] },
     preativations: {
       "hero.huatuo.jijiu": [
@@ -2780,9 +2779,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.advancePreativation();
   const action = ui.buildAction();
   check("㉿T6 急救：一张红牌填完即可确认（无目标步，目标是窗口固定的濒死者）",
-    !!action && action.kind === "UseCard"
-      && String(action.card.card_id) === "-5"
-      && JSON.stringify(action.targets) === "[2]",
+    !!action && action.kind === "ActivateSkill"
+      && action.skill_id === "hero.huatuo.jijiu"
+      && JSON.stringify(action.picks) === "[4]"
+      && JSON.stringify(action.choices) === "[]",
     JSON.stringify(action));
   check("㉿T7 急救清单只有一步（没有 seat 步）",
     ui.state.preativation.steps.length === 1

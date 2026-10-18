@@ -1595,7 +1595,11 @@ def test_the_lord_skill_gate_is_inherited_not_reimplemented() -> None:
 
 
 def test_availability_follows_the_pending_queries_candidates() -> None:
-    """`available` 只由"当前挂起里有没有这个技能的 ActivateSkill 候选"决定。"""
+    """`available` 只由**当前挂起**回答：候选里的骨架 ∪ 随询问下发的两份清单。
+
+    W4-fix-2：转化技的候选已从 ``legal_actions`` 收回，可用性改由
+    ``transform_preactivations`` 表达——它同样是"当前挂起里的那份数据"，不另问状态。
+    """
     session = Session(seed=20261012, ai="random", timeout_seconds=None, player_count=8)
     for _ in range(300):
         pending = session.pending
@@ -1606,6 +1610,8 @@ def test_availability_follows_the_pending_queries_candidates() -> None:
             for action in pending.legal_actions
             if action.kind == "ActivateSkill"
         }
+        offered.update((getattr(pending, "preactivations", None) or {}).keys())
+        offered.update((getattr(pending, "transform_preactivations", None) or {}).keys())
         for entry in build_skills(session, session.human_seat):
             assert entry["available"] is (entry["skill_id"] in offered), (
                 f"{entry['name']} 的 available 与挂起询问的候选不一致"

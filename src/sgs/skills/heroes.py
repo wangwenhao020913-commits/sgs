@@ -39,7 +39,7 @@ from typing import Any
 
 from sgs.data import Color, SkillType, color_of_suit
 from sgs.effects import CandidateScope, CarrierKind, Modifier, ModifierPoint, locate
-from sgs.state import GameState, Step, StepPool, Zone
+from sgs.state import GameState, PlayCard, QueryKind, Step, StepPool, UseCard, Zone
 
 from .catalog import HeroSkillDecl, ModifierContext, SkillDef, resolve_instances
 from .flow import seat_choice
@@ -51,6 +51,10 @@ __all__ = [
     "conversion_offers_by_source",
     "conversion_preactivations",
     "conversion_skill_definitions",
+    "is_transformed_action",
+    "owned_conversion_skill_ids",
+    "resolve_conversion_confirmation",
+    "transform_candidates",
 ]
 
 ZoneFilter = Callable[[GameState, int], tuple[int, ...]]
@@ -305,6 +309,116 @@ def _candidate_skill_ids(state: GameState, owner: int, card: Any) -> tuple[str, 
 
 _SOURCE_ZONE_ORDER: tuple[Zone, ...] = (Zone.HAND, Zone.EQUIP, Zone.JUDGE)
 """清单 ``Step.zones`` 的规范化次序（与 :func:`_hand_equip` 的区序一致，判定区垫底）。"""
+
+
+def is_transformed_action(action: Any) -> bool:
+    """这个候选是不是**转化牌**（``virtual_sources`` 非空的使用 / 打出）。
+
+    W4-fix-2 的候选收口判据（用户裁定 A）：转化技的候选从 ``legal_actions`` 收回到
+    :func:`transform_candidates` 那份**内部**池；判据读**来源集合**而不是"虚拟牌"
+    ——纯虚拟牌（【八卦阵】的视为【闪】，没有来源）不属于任何转化技，照常留在候选里。
+    """
+    card = getattr(action, "card", None)
+    return card is not None and card.is_virtual and bool(card.virtual_sources)
+
+
+def transform_candidates(
+    kind: QueryKind, actions: Iterable[Any]
+) -> tuple[Any, ...]:
+    """这次询问里**属于转化技入口**的候选（W4-3 的清单 / W4-fix-2 的确认都读这一份）。
+
+    - 出牌阶段 / 【闪】窗口 / 求桃：``UseCard`` / ``PlayCard``；
+    - 响应窗口：只收**打出**（``PlayCard``）——"被迫使用"（借刀杀人）的第二段预发动
+      属 W5，且排除它之后"响应语境无目标步"这条清单形状才成立（`spec.md` §2）；
+    - 其余询问：没有转化技入口（返回空元组）。
+
+    这份池是**内部**的：调用方（引擎）只把其中的 ``virtual_sources`` 非空项从
+    ``legal_actions`` 收回，清单与确认校验仍从这一份读——"清单 = 候选"因此没有第二份谓词。
+    """
+    if kind not in (
+        QueryKind.PLAY_PHASE,
+        QueryKind.DODGE,
+        QueryKind.PEACH,
+        QueryKind.RESPOND,
+    ):
+        return ()
+    accepted = (PlayCard,) if kind == QueryKind.RESPOND else (UseCard, PlayCard)
+    return tuple(
+        action
+        for action in actions
+        if isinstance(action, accepted)
+        and getattr(action, "card", None) is not None
+        and action.card.is_virtual
+    )
+
+
+def owned_conversion_skill_ids(state: GameState, seat: int) -> frozenset[str]:
+    """``seat`` 此刻拥有的全部**转化技 id**（声明上的 ``virtual_type_ids``，唯一真源）。
+
+    单源（武圣 / 龙胆 / 国色 / 急救）与多源（丈八蛇矛）都落在这条判据上：一条技能的
+    ``SkillDef`` 声明了自己的虚拟牌名，它就把"这张牌当那张牌"算作自己的入口。用途只有
+    一个——让确认路径认出"这次提交是转化技确认"，从而走 :func:`resolve_conversion_confirmation`
+    而不是普通复合动作校验；**不回答"这组来源此刻合不合法"**（那是候选池的事）。
+    """
+    return frozenset(
+        instance.skill_id
+        for instance in resolve_instances(state)
+        if instance.owner == seat and instance.definition.virtual_type_ids
+    )
+
+
+def resolve_conversion_confirmation(
+    state: GameState,
+    owner: int,
+    skill_id: str,
+    picks: Sequence[int],
+    choices: Sequence[str],
+    candidates: Iterable[Any],
+    *,
+    steps: Sequence[Step],
+) -> Any | str:
+    """把一次"按清单确认"解析成**候选池里的那条动作**；``str`` = 首个失败原因。
+
+    W4-fix-2 的唯一确认入口（引擎的 ``submit`` 与 AI 覆盖判据同读它）：
+
+    - **不建第二份合法性**：解析就是在这份**内部候选**（:func:`transform_candidates`，
+      清单也是它派生的）里按 ``(技能归属, 来源集合, 目标集合)`` 找那一条；找不到即失败。
+      来源集合与目标集合的顺序无关（来源在 ``virtual_sources`` 里本就已排序）；
+    - **是否需要目标步由清单回答**（``steps`` 里有没有 ``seat`` 步）：主动使用语境比较
+      目标，响应 / 求桃语境的目标由窗口承载 / 固定，不比较——同一条判据也是清单的形状；
+    - 失败原因分三档：来源组不在池里 / 目标不在池里 / 清单外的选项文本。
+
+    返回的动作自带本次询问的 ``answers_seq``，调用方把它当普通使用 / 打出动作执行。
+    """
+    wanted_sources = tuple(sorted(int(card_id) for card_id in picks))
+    needs_target = any(step.name == "seat" and step.min > 0 for step in steps)
+    wanted_targets: list[int] = []
+    for choice in choices:
+        text = str(choice)
+        if not text.startswith("seat:"):
+            return f"清单外的选项：{text}"
+        try:
+            wanted_targets.append(int(text[len("seat:") :]))
+        except ValueError:
+            return f"清单外的选项：{text}"
+    if wanted_targets and not needs_target:
+        return "这次转化没有目标步：来源之外的答案不被接受"
+    source_matched = False
+    for action in candidates:
+        card = getattr(action, "card", None)
+        if card is None or not card.virtual_sources:
+            continue
+        if skill_id not in _candidate_skill_ids(state, owner, card):
+            continue
+        if tuple(sorted(int(source) for source in card.virtual_sources)) != wanted_sources:
+            continue
+        source_matched = True
+        if needs_target and tuple(getattr(action, "targets", ())) != tuple(wanted_targets):
+            continue
+        return action
+    if not source_matched:
+        return "来源牌不合法：这组牌此刻不能这样转化"
+    return "目标不合法：这组来源没有那条目标"
 
 
 def conversion_preactivations(

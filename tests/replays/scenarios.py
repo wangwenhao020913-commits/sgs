@@ -79,6 +79,11 @@ class Scenario:
     发生）；M2 的 28 条用 ``"random"``（与产品同源的随机玩家跑完整局，事后判据只负责
     "这条基准要证的事真的发生过"）。磁带冻结决策内容，回放期一律 ``TapePlayer``。
 
+    **W4-fix-2 的两个例外**：``29-serpent-spear-virtual-slash`` 与 ``42-hero-transform``
+    改回 ``"scripted"``——转化候选已从 ``legal_actions`` 收回（用户裁定 A：转化技只经
+    预发动），随机驱动**不可能**再产出转化动作；脚本按预发动清单确认一次，记录流里落的
+    仍是服务端解析出的那条普通使用 / 打出（``goals.py`` 的判据因此一字不改）。
+
     ``heroes`` / ``hero_pool``（票 14 §8）：M3 的专项基准用**显式逐座位武将**
     （``heroes``）保证被测技能在场；缺省 ``None`` ⇒ 无武将模式，M2 的 34 条保持逐字节不变。
     """
@@ -159,7 +164,11 @@ M2_SCENARIOS: dict[str, Scenario] = {
         "09-identity-6p-renegade-win", seed=521, player_count=6
     ),
     "10-identity-7p-lord-win": _m2("10-identity-7p-lord-win", seed=49, player_count=7),
-    "11-identity-8p-rebel-win": _m2("11-identity-8p-rebel-win", seed=37, player_count=8),
+    # W4-fix-2：种子 37 → 99。转化候选从 `legal_actions` 收回后随机驱动的走向改变，
+    # 37 那局涨到 6.93 MiB（超单文件体积绊线）；按本模块纪律**重新选种**而不是调预算：
+    # 99 命中同一判据（8 人反贼胜）且在该档位搜索空间（0–199）里记录条数最少
+    # （约 2.3 MB / 17 回合）。
+    "11-identity-8p-rebel-win": _m2("11-identity-8p-rebel-win", seed=99, player_count=8),
     "12-indulgence-skips-play": _m2(
         "12-indulgence-skips-play", seed=258, player_count=4
     ),
@@ -199,8 +208,14 @@ M2_SCENARIOS: dict[str, Scenario] = {
     "28-equipment-replacement": _m2(
         "28-equipment-replacement", seed=165, player_count=4
     ),
-    "29-serpent-spear-virtual-slash": _m2(
-        "29-serpent-spear-virtual-slash", seed=106, player_count=4
+    # W4-fix-2：转化技只经预发动 ⇒ 随机驱动产不出转化动作，本条改**脚本驱动**
+    # （目标段 = 装上丈八蛇矛后按清单确认一次）。种子见 `SCENARIOS` 处的说明。
+    "29-serpent-spear-virtual-slash": Scenario(
+        slug="29-serpent-spear-virtual-slash",
+        seed=106,
+        max_turns=400,
+        player_count=4,
+        deck_profile=M2_DECK_PROFILE,
     ),
     "30-halberd-three-targets": _m2(
         "30-halberd-three-targets", seed=230, player_count=6
@@ -267,9 +282,11 @@ M3_SCENARIOS: dict[str, Scenario] = {
     # 【制衡】/【结姻】的 PLAY_PHASE 骨架候选，23 那局不再命中【连营】/【枭姬】/顶替三件事。
     # 按本模块纪律**重新选种**而不是放宽判据：579 在同样四名武将下命中判据，且记录条数最少
     # （897，`python -m replays.seed_search --slug 38-hero-lost-cards --limit 900` 扫 0–899 得到）。
+    # W4-fix-2：种子 579 → 364——收回转化候选后 579 那局不再命中三件事；364 命中判据且
+    # 记录条数最少（扫描 1–599 的候选集，约 874 KB / 11 回合）。
     "38-hero-lost-cards": _m3(
         "38-hero-lost-cards",
-        seed=579,
+        seed=364,
         heroes=("luxun", "sunshangxiang", "guanyu", "sunquan"),
     ),
     # C 族目标池真排除：【空城】+【谦逊】。
@@ -279,9 +296,11 @@ M3_SCENARIOS: dict[str, Scenario] = {
         heroes=("zhugeliang", "luxun", "sunquan", "lvbu"),
     ),
     # E 族响应窗口张数：吕布【无双】两张【闪】。
+    # W4-fix-2：种子 46 → 396——收回转化候选后 46 那局不再出现"连续两张【闪】"；
+    # 396 命中同一判据且记录条数最少（扫描 1–599，约 349 KB / 4 回合）。
     "40-hero-wushuang": _m3(
         "40-hero-wushuang",
-        seed=46,
+        seed=396,
         heroes=("lvbu", "guanyu", "zhaoyun", "luxun"),
     ),
     # G 族授予可见性与排列：诸葛亮【观星】。
@@ -293,13 +312,21 @@ M3_SCENARIOS: dict[str, Scenario] = {
         heroes=("zhugeliang", "sunquan", "luxun", "guojia"),
     ),
     # H 族转化牌泛化：武圣 / 龙胆 / 国色 / 急救。
-    "42-hero-transform": _m3(
-        "42-hero-transform",
+    # W4-fix-2：同 29——转化候选已从 `legal_actions` 收回，随机驱动产不出转化动作，
+    # 本条改**脚本驱动**（目标段 = 任意一名转化族武将按清单确认一次）。
+    "42-hero-transform": Scenario(
+        slug="42-hero-transform",
         seed=145,
+        max_turns=400,
+        player_count=4,
+        deck_profile=M2_DECK_PROFILE,
         heroes=("guanyu", "zhaoyun", "daqiao", "huatuo"),
     ),
 }
-"""8 条 M3 专项基准（票 14 §8）：每条 pin 一族机制的整局记录流，种子由开发期搜索得到。"""
+"""8 条 M3 专项基准（票 14 §8）：每条 pin 一族机制的整局记录流，种子由开发期搜索得到。
+
+W4-fix-2：``42-hero-transform`` 改脚本驱动（转化技的唯一入口 = 预发动清单），其余七条
+仍是随机驱动。"""
 
 SCENARIOS: dict[str, Scenario] = {
     **M1_SCENARIOS,
@@ -407,7 +434,43 @@ class ScenarioPlayer:
             if self.recording.goal_done:
                 return None
             return self._double_sword(query)
+        if self.slug == "29-serpent-spear-virtual-slash":
+            return self._serpent_spear_transform(query)
+        if self.slug == "42-hero-transform":
+            return self._enter_transform(query)
         raise AssertionError(f"没有为场景 {self.slug} 写目标段")  # pragma: no cover - 开发期护栏
+
+    # ---- 29 / 42（W4-fix-2）：转化技的唯一入口 = **预发动清单** ----
+    #
+    # 转化候选已从 ``legal_actions`` 收回（用户裁定 A），随机驱动**不可能**再产出转化动作。
+    # 这两条基准改为脚本驱动：按清单确认一次转化（来源 / 目标由清单给），记录流里落的是
+    # 服务端解析出的那条普通使用 / 打出——``goals.py`` 的判据因此一字不改。
+
+    def _serpent_spear_transform(self, query: Query) -> Action | None:
+        """29：先装上丈八蛇矛，再按清单确认一次"两张手牌当【杀】"。"""
+        if self.recording.goal_done:
+            return None
+        if query.kind == "PLAY_PHASE":
+            equip = _use(query, "serpent_spear")
+            if equip is not None:
+                return equip
+        return self._enter_transform(query, "equip.serpent_spear")
+
+    def _enter_transform(self, query: Query, skill_id: str | None = None) -> Action | None:
+        """按清单确认一条转化技（来源 / 目标取清单的首行）；没有清单 ⇒ ``None``（走收尾段）。"""
+        manifests = getattr(query, "transform_preactivations", None) or {}
+        for key in sorted(manifests):
+            if skill_id is not None and key != skill_id:
+                continue
+            answers = _manifest_first_answers(manifests[key])
+            if answers is None:
+                continue
+            picks, choices = answers
+            self.recording.announce(self.seat)
+            return ActivateSkill(
+                skill_id=key, picks=picks, choices=choices, answers_seq=query.seq
+            )
+        return None
 
     # ---- 01 / 02：座位 0 出【杀】，座位 1 在【闪】窗口给出互斥的两种应答 ----
 
@@ -582,6 +645,34 @@ def _filled_activation(query: Query) -> ActivateSkill:
         choices=(),
         answers_seq=query.seq,
     )
+
+
+def _manifest_first_answers(steps) -> tuple[tuple[int, ...], tuple[str, ...]] | None:
+    """清单的第一组答案（W4-fix-2 的脚本确认）：来源取来源步前 ``min`` 项、目标取首行。
+
+    逐选项子池按 ``when``（前序答案文本）匹配，与界面 / AI 读清单的方式同源；填不出来
+    （池被服务端退化 / 没有来源）返回 ``None``，调用方退回收尾段。
+    """
+    picks: list[int] = []
+    choices: list[str] = []
+    prior: list[str] = []
+    for step in sorted(steps, key=lambda item: item.order):
+        row = next((entry for entry in step.pool if tuple(entry.when) == tuple(prior)), None)
+        if row is None:
+            row = next((entry for entry in step.pool if not entry.when), None)
+        if row is None or not row.options:
+            return None
+        if step.name == "card":
+            take = max(1, step.min)
+            chosen = [str(option) for option in row.options[:take]]
+            picks.extend(int(text) for text in chosen)
+        else:
+            chosen = [str(row.options[0])]
+            choices.extend(chosen)
+        prior.extend(chosen)
+    if not picks:
+        return None
+    return tuple(picks), tuple(choices)
 
 
 def _use(query: Query, type_id: str, targets: tuple[int, ...] | None = None) -> Action | None:
