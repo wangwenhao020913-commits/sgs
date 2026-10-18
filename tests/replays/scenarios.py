@@ -28,7 +28,18 @@ from sgs.agents import RandomPlayer
 from sgs.data import RuleConfig, load_content_pack
 from sgs.engine import Engine, RandomSource, dump_journal
 from sgs.skills import validate_activation
-from sgs.state import Action, ActivateSkill, EndPhase, Pass, Query, SelectOption, UseCard
+from sgs.state import (
+    Action,
+    ActivateSkill,
+    DiscardCards,
+    EndPhase,
+    Pass,
+    Query,
+    SelectOption,
+    SlotKind,
+    UseCard,
+    WindowCause,
+)
 from sgs.timing import Timing
 
 from .goals import PREACTIVATION_CANCEL_SKILL, goal_for
@@ -51,7 +62,7 @@ M1_DECK_PROFILE = "basic_53"
 这里写死档位名，不让"默认档"的改动泄漏进基准录制。"""
 
 M2_DECK_PROFILE = "standard_108"
-"""M2 的 28 条基准跑**标准版全表**（票 32 §1）。"""
+"""M2 的随机基准跑**标准版全表**（票 32 §1）。"""
 
 PREACTIVATION_CANCEL_SCENARIO = "44-preactivation-cancel-no-side-effect"
 """W4-5 的**预发动取消零副作用**专项基准（脚本驱动，座 0 = 孙权）。
@@ -76,7 +87,7 @@ class Scenario:
     """一条基准的录制参数；``max_turns`` 是终止保证（票 12 §3）。
 
     ``driver`` 是录制期的驱动：M1 的六条用 ``"scripted"``（``ScenarioPlayer`` 迫使目标链
-    发生）；M2 的 28 条用 ``"random"``（与产品同源的随机玩家跑完整局，事后判据只负责
+    发生）；M2 的 27 条用 ``"random"``（与产品同源的随机玩家跑完整局，事后判据只负责
     "这条基准要证的事真的发生过"）。磁带冻结决策内容，回放期一律 ``TapePlayer``。
 
     **W4-fix-2 的两个例外**：``29-serpent-spear-virtual-slash`` 与 ``42-hero-transform``
@@ -84,8 +95,13 @@ class Scenario:
     预发动），随机驱动**不可能**再产出转化动作；脚本按预发动清单确认一次，记录流里落的
     仍是服务端解析出的那条普通使用 / 打出（``goals.py`` 的判据因此一字不改）。
 
+    **W5-02b 的例外**：``33-borrowed-sword-use-slash`` 仍是「普通锦囊与打出」的覆盖项
+    （类不变），但借刀入口只剩两步清单、随机驱动产不出借刀动作，驱动因此改成
+    ``"scripted"`` 并移出 M2 的“随机驱动 + 种子搜索”表；45/46 是同一改动的两条脚本专项
+    （auto-b / 窗口内转化【杀】）。
+
     ``heroes`` / ``hero_pool``（票 14 §8）：M3 的专项基准用**显式逐座位武将**
-    （``heroes``）保证被测技能在场；缺省 ``None`` ⇒ 无武将模式，M2 的 34 条保持逐字节不变。
+    （``heroes``）保证被测技能在场；缺省 ``None`` ⇒ 无武将模式，既有 M2 基准保持逐字节不变。
     """
 
     slug: str
@@ -140,6 +156,38 @@ SCRIPTED_SCENARIOS: dict[str, Scenario] = {
         player_count=2,
         heroes=PREACTIVATION_CANCEL_HEROES,
     ),
+    # W5-02b：【借刀杀人】的 auto-b（a 不可行 ⇒ 无窗口、持刀者交出武器）。
+    # 脚本驱动：座 1 装上武器并在自己的回合用掉【杀】（次数闸门挡住 a），座 0 下一回合
+    # 按清单指定 [A=1, Bn=0]；结算时非 Pass 候选为空 ⇒ 直接 b。种子 1：该牌序下座 1
+    # 有武器、座 0 有借刀（seed 0 目标段不命中，探针见本 effort 的 seed_probe.py）。
+    "45-borrowed-sword-auto-handover": Scenario(
+        slug="45-borrowed-sword-auto-handover",
+        seed=1,
+        max_turns=80,
+        player_count=2,
+        deck_profile=M2_DECK_PROFILE,
+    ),
+    # W5-02b：【借刀窗口里的转化【杀】】。座 1 = 赵云，装上武器后**不使用**真【杀】，
+    # 座 0 下一回合按清单指定 [A=1, Bn=0]；持刀者在窗口按【龙胆】清单确认那张转化【杀】。
+    "46-borrowed-sword-transform-slash": Scenario(
+        slug="46-borrowed-sword-transform-slash",
+        seed=0,
+        max_turns=80,
+        player_count=2,
+        deck_profile=M2_DECK_PROFILE,
+        heroes=("guanyu", "zhaoyun"),
+    ),
+    # W5-02b：借刀原来的 M2 随机基准。裸候选从 `legal_actions` 收回（入口只剩两步清单）
+    # 后，随机驱动产不出借刀动作，故改**脚本驱动**；它仍是「普通锦囊与打出」的覆盖项
+    # （`distribution.py` 的类不变），但不再属于 M2 的“随机驱动 + 种子搜索”面，故移到
+    # 本表。目标段 = 座 0 按清单指定 [持刀者, Bn]，持刀者用真【杀】。
+    "33-borrowed-sword-use-slash": Scenario(
+        slug="33-borrowed-sword-use-slash",
+        seed=0,
+        max_turns=80,
+        player_count=2,
+        deck_profile=M2_DECK_PROFILE,
+    ),
 }
 """票 17 起的**脚本驱动专项基准**：与 M1 六条同驱动（``ScenarioPlayer``），但不属于
 票 12 定格的回归网，故**单列**——M1 那张表被
@@ -159,16 +207,24 @@ def _m2(slug: str, *, seed: int, player_count: int, max_turns: int = 400) -> Sce
 
 M2_SCENARIOS: dict[str, Scenario] = {
     "07-identity-4p-rebel-win": _m2("07-identity-4p-rebel-win", seed=233, player_count=4),
-    "08-identity-5p-lord-win": _m2("08-identity-5p-lord-win", seed=148, player_count=5),
+    # W5-02b：借刀的裸候选收回后，seed 148 的随机局不再以主忠胜收局（判据 `_side_is("lord")`
+    # 未命中）；按 retro S6 的纪律重选 148 → 197（`seed_search --slug ... --limit 200` 的
+    # 最小候选，1593 条），不放松判据、不做脚本化。
+    "08-identity-5p-lord-win": _m2("08-identity-5p-lord-win", seed=197, player_count=5),
     "09-identity-6p-renegade-win": _m2(
         "09-identity-6p-renegade-win", seed=521, player_count=6
     ),
-    "10-identity-7p-lord-win": _m2("10-identity-7p-lord-win", seed=49, player_count=7),
+    # W5-02b：种子 49 → 68。借刀裸候选 / 转化清单改变随机驱动的走向后，49 重录涨到
+    # 6465 条 / 6.6 MiB（超单文件体积绊线）；按本模块纪律**重新选种**：68 命中同一判据
+    # （7 人主忠胜）且是 0–99 里记录条数最少的候选（2897 条），判据与人数档一字未改。
+    "10-identity-7p-lord-win": _m2("10-identity-7p-lord-win", seed=68, player_count=7),
     # W4-fix-2：种子 37 → 99。转化候选从 `legal_actions` 收回后随机驱动的走向改变，
     # 37 那局涨到 6.93 MiB（超单文件体积绊线）；按本模块纪律**重新选种**而不是调预算：
     # 99 命中同一判据（8 人反贼胜）且在该档位搜索空间（0–199）里记录条数最少
     # （约 2.3 MB / 17 回合）。
-    "11-identity-8p-rebel-win": _m2("11-identity-8p-rebel-win", seed=99, player_count=8),
+    # W5-02b：种子 99 → 35。02b 的候选面变化让 99 重录涨到 3501 条 / 4.4 MiB（超单文件
+    # 绊线）；0–99 里命中最少的是 35（1827 条），判据（8 人反贼胜）与人数档不变。
+    "11-identity-8p-rebel-win": _m2("11-identity-8p-rebel-win", seed=35, player_count=8),
     "12-indulgence-skips-play": _m2(
         "12-indulgence-skips-play", seed=258, player_count=4
     ),
@@ -230,17 +286,14 @@ M2_SCENARIOS: dict[str, Scenario] = {
     "32-five-grains-selection": _m2(
         "32-five-grains-selection", seed=170, player_count=4
     ),
-    "33-borrowed-sword-use-slash": _m2(
-        "33-borrowed-sword-use-slash", seed=105, player_count=5
-    ),
     "34-dismantle-or-snatch-equip-judge": _m2(
         "34-dismantle-or-snatch-equip-judge", seed=288, player_count=4
     ),
 }
-"""M2 的 28 条基准（票 32 §1）：随机驱动 + 事后判据，种子由开发期搜索得到。
+"""M2 的 27 条基准（票 32 §1）：随机驱动 + 事后判据，种子由开发期搜索得到。
 
 种子策略（票 17 §9 的实现期落点）：在允许的人数档里搜**记录条数最少**的命中局，
-再贪心分配使 28 个 ``(人数, 种子)`` 互不相同——更短的局 = 更小的 golden 文件 +
+再贪心分配使 27 个 ``(人数, 种子)`` 互不相同——更短的局 = 更小的 golden 文件 +
 更快的门禁回放。搜索脚手架在 ``.scratch/t32/``（被 gitignore，不进交付）。"""
 
 
@@ -290,9 +343,11 @@ M3_SCENARIOS: dict[str, Scenario] = {
     # （897，`python -m replays.seed_search --slug 38-hero-lost-cards --limit 900` 扫 0–899 得到）。
     # W4-fix-2：种子 579 → 364——收回转化候选后 579 那局不再命中三件事；364 命中判据且
     # 记录条数最少（扫描 1–599 的候选集，约 874 KB / 11 回合）。
+    # W5-02b：种子 364 → 388——借刀候选面改变后 364 那局不再命中三件事；在 0–699 的
+    # 扫描里 388 命中判据且记录条数最少（1355，同一组四名武将），判据一字未改。
     "38-hero-lost-cards": _m3(
         "38-hero-lost-cards",
-        seed=364,
+        seed=388,
         heroes=("luxun", "sunshangxiang", "guanyu", "sunquan"),
     ),
     # C 族目标池真排除：【空城】+【谦逊】。
@@ -444,6 +499,12 @@ class ScenarioPlayer:
             return self._serpent_spear_transform(query)
         if self.slug == "42-hero-transform":
             return self._enter_transform(query)
+        if self.slug == "33-borrowed-sword-use-slash":
+            return self._borrowed_use_slash(query)
+        if self.slug == "45-borrowed-sword-auto-handover":
+            return self._borrowed_auto_handover(query)
+        if self.slug == "46-borrowed-sword-transform-slash":
+            return self._borrowed_transform_slash(query)
         raise AssertionError(f"没有为场景 {self.slug} 写目标段")  # pragma: no cover - 开发期护栏
 
     # ---- 29 / 42（W4-fix-2）：转化技的唯一入口 = **预发动清单** ----
@@ -476,6 +537,97 @@ class ScenarioPlayer:
             return ActivateSkill(
                 skill_id=key, picks=picks, choices=choices, answers_seq=query.seq
             )
+        return None
+
+    # ---- 45 / 46 / 33（W5-02b）：借刀的两个入口 + a / b ----
+    #
+    # 借刀的裸候选已从 ``legal_actions`` 收回（入口只剩两步清单），随机驱动**不可能**再
+    # 产出借刀动作；三条基准改为脚本驱动：座 0 按清单指定 [持刀者 A=1, Bn=0]，
+    # 持刀者侧再决定 a（使用【杀】/ 转化【杀】）或 b（交出武器 / auto-b）。
+
+    def _borrowed_auto_handover(self, query: Query) -> Action | None:
+        """45：a 不可行 ⇒ 无窗口自动 b（持刀者交出武器，记录流里没有询问）。"""
+        return self._borrowed_segments(query, holder=1, window="none")
+
+    def _borrowed_transform_slash(self, query: Query) -> Action | None:
+        """46：持刀者在借刀窗口按转化清单确认【杀】（龙胆）。"""
+        return self._borrowed_segments(query, holder=1, window="transform")
+
+    def _borrowed_use_slash(self, query: Query) -> Action | None:
+        """33：持刀者在借刀窗口用**真【杀】**（a 支）。"""
+        return self._borrowed_segments(query, holder=1, window="slash")
+
+    def _borrowed_segments(self, query: Query, *, holder: int, window: str) -> Action | None:
+        if self.seat == 0:
+            return self._borrowed_user(query, holder)
+        if self.seat == holder:
+            return self._borrowed_holder(query, window)
+        return None
+
+    def _borrowed_user(self, query: Query, holder: int) -> Action | None:
+        """座 0：等持刀者装上武器，再按清单指定 [A=holder, Bn]；保留手里的借刀。
+
+        指定成功即目标段结束，本座位回到收尾段（它会用【杀】把对局推向终局）。
+        """
+        if self.recording.goal_done:
+            return None
+        if query.kind == "PLAY_PHASE":
+            if _seat_has_weapon(self.engine, holder):
+                action = _first_designation(query, "borrowed_sword")
+                if action is not None:
+                    self.recording.announce(self.seat)
+                    return action
+            return _find(query, EndPhase)
+        if query.kind == "DISCARD":
+            keep = _hand_card_of_type(self.engine, self.seat, "borrowed_sword")
+            return _discard_keeping(query, {keep} if keep is not None else set())
+        if query.kind == "DODGE":
+            return _use(query, "dodge") or _find(query, Pass)
+        if query.kind == "PEACH":
+            return _use(query, "peach") or _find(query, Pass)
+        return None
+
+    def _borrowed_holder(self, query: Query, window: str) -> Action | None:
+        """持刀者：先装武器；``window`` 决定它在借刀窗口里怎么答。
+
+        借刀窗口**先于** ``goal_done`` 判断：使用者已按清单指定（目标段命中）之后，
+        持刀者仍要把这一层 a / b 答完；答完才回到收尾段。
+        """
+        if query.kind == "RESPOND" and getattr(query, "cause", None) is WindowCause.BORROWED_SWORD:
+            if window == "transform":
+                action = self._enter_transform(query, "hero.zhaoyun.longdan")
+                if action is not None:
+                    self.recording.announce(self.seat)
+                    return action
+            if window == "slash":
+                action = _use(query, "slash")
+                if action is not None:
+                    self.recording.announce(self.seat)
+                    return action
+            return _find(query, Pass)
+        if self.recording.goal_done:
+            return None
+        if query.kind == "PLAY_PHASE":
+            weapon = _unequipped_weapon(query)
+            if weapon is not None:
+                return weapon
+            if window == "none":
+                # auto-b 的前提：本回合已用过【杀】（次数闸门挡住 a），或手里根本没有。
+                slash = _use(query, "slash")
+                if slash is not None:
+                    return slash
+            return _find(query, EndPhase)
+        if query.kind == "DISCARD":
+            keep = None
+            if window == "transform":
+                keep = _hand_card_of_type(self.engine, self.seat, "dodge")
+            elif window == "slash":
+                keep = _hand_card_of_type(self.engine, self.seat, "slash")
+            return _discard_keeping(query, {keep} if keep is not None else set())
+        if query.kind == "DODGE":
+            return _use(query, "dodge") or _find(query, Pass)
+        if query.kind == "PEACH":
+            return _use(query, "peach") or _find(query, Pass)
         return None
 
     # ---- 01 / 02：座位 0 出【杀】，座位 1 在【闪】窗口给出互斥的两种应答 ----
@@ -689,6 +841,54 @@ def _use(query: Query, type_id: str, targets: tuple[int, ...] | None = None) -> 
             continue
         return action
     return None
+
+
+def _seat_has_weapon(engine: Engine, seat: int) -> bool:
+    """``seat`` 的装备区里有没有武器（借刀第 0 层的第一个条件）。"""
+    state = engine.state
+    return any(
+        state.card(card_id).slot is SlotKind.WEAPON
+        for card_id in state.player(seat).equip
+    )
+
+
+def _hand_card_of_type(engine: Engine, seat: int, type_id: str) -> int | None:
+    """``seat`` 手里第一张该牌名的牌（脚本的"要留住它"）。"""
+    state = engine.state
+    for card_id in state.player(seat).hand:
+        if state.card(card_id).type == type_id:
+            return card_id
+    return None
+
+
+def _unequipped_weapon(query: Query) -> Action | None:
+    """出牌阶段里第一张可用的武器牌（装上它，借刀的第 0 层才成立）。"""
+    for action in query.legal_actions:
+        if isinstance(action, UseCard) and action.card.slot is SlotKind.WEAPON:
+            return action
+    return None
+
+
+def _first_designation(query: Query, type_id: str) -> Action | None:
+    """本次出牌阶段附带指定池里该牌名的第一条（脚本的"按清单指定 [A, Bn]"）。"""
+    for action in getattr(query, "designation_actions", ()):
+        if (
+            isinstance(action, UseCard)
+            and action.card.type == type_id
+            and action.designations
+        ):
+            return action
+    return None
+
+
+def _discard_keeping(query: Query, keep: set[int]) -> Action:
+    """弃牌阶段：挑一条**不弃 ``keep``** 的候选（保留借刀 / 转化源 /【杀】）。"""
+    for action in query.legal_actions:
+        if isinstance(action, DiscardCards) and not (
+            keep & {card.card_id for card in action.cards}
+        ):
+            return action
+    return query.legal_actions[0]
 
 
 def _idle(query: Query) -> Action:

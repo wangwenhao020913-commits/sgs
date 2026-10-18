@@ -77,6 +77,7 @@ __all__ = [
     "forced_use_targets",
     "hand_limit",
     "legal_actions_for",
+    "needs_designation",
     "seat_distance",
     "target_is_effective",
     "targets_within_attack_range",
@@ -342,6 +343,19 @@ def forced_use_targets(
     return pool
 
 
+def needs_designation(card: CardRef) -> bool:
+    """这张牌的使用是否**必须带附带指定**（借刀的 Bn 由使用者一并指定，W5-02b）。
+
+    判据 = 行为表上的第 0 层目标滤子 :data:`TARGET_FILTERS` 里有没有
+    ``borrowed_sword_target``——与 :func:`designation_actions_for` **同一个判据**，
+    故"哪些牌只经清单"与"哪些牌有附带指定池"不会各说各话。规则层不认具体牌名。
+
+    用途只有一处：出牌阶段的裸候选生成（:func:`_play_phase`）跳过这类牌——它们的
+    合法动作是三元组 ``(牌, A, Bn)``，单靠"牌 + 目标"表达不了，入口恒是清单。
+    """
+    return "borrowed_sword_target" in behavior_for(card).target_filters
+
+
 def designation_actions_for(
     state: GameState, seat: int, answers_seq: int
 ) -> tuple[UseCard, ...]:
@@ -350,7 +364,7 @@ def designation_actions_for(
     对**每张**手牌里的借刀 × 每个第 0 层合法的持刀者 A × A 攻击范围内的每个 Bn，各造一条
     ``UseCard(card, targets=(A,), designations=(Bn,))``。这是"使用者一并指定 Bn"的候选面：
     确认动作只要求它是本池的成员（``Engine.submit`` 的第四条路），主候选面
-    ``legal_actions`` 里的裸借刀一个字不改（暗发布，W5-02b 才收回）。
+    ``legal_actions`` 里的裸借刀由 W5-02b 收回（可用性只剩清单）。
 
     两条合法性都读**既有谓词**，不另写第二份规则：
 
@@ -361,11 +375,11 @@ def designation_actions_for(
       是同一个函数，故"池里的 Bn"与"窗口允许的 Bn"同源。
 
     借刀本身仍按出牌阶段可用性 / 次数闸门取（:func:`_usable_hand` + :func:`check_count`），
-    与裸候选同一条使用规则；牌名由**行为表的滤子**认出来，规则层不认具体牌名。
+    与 :func:`needs_designation` 同一判据认出"哪张牌要附带指定"。
     """
     actions: list[UseCard] = []
     for card in _usable_hand(state, seat, UseContext.PLAY_PHASE):
-        if "borrowed_sword_target" not in behavior_for(card).target_filters:
+        if not needs_designation(card):
             continue
         if check_count(state, seat, card):
             continue
@@ -512,9 +526,16 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
     技能**追加**候选（【方天画戟】的"额定 1 + 额外 k"组合）；回调只追加、不排序，
     全表仍由 :func:`legal_actions_for` 按票 05 的稳定键统一排序，故"候选与校验同源"
     不被打破。
+
+    **附带指定的牌**（借刀杀人，W5-02b）不在这里出裸候选：它的合法动作是"牌 + 持刀者 A
+    + Bn"三元组，只有 :func:`designation_actions_for` 那份内部池能表达。可用性因此只剩
+    询问上的 ``card_preactivations`` 清单——**清单渲不出来 = 此刻不可用**（不 fail-open，
+    声明错误应当可见）。
     """
     actions: list[Action] = []
     for card in _usable_hand(state, seat, UseContext.PLAY_PHASE):
+        if needs_designation(card):
+            continue
         if check_count(state, seat, card):
             continue
         rule = behavior_for(card).target_rule
@@ -659,7 +680,8 @@ def _respond(
     - ``mode = USE``（【借刀杀人】迫使的"使用【杀】"、无懈窗口）：候选是 ``UseCard``，
       目标走 :func:`forced_use_targets`（**与真牌同一条 ``TARGET_POOL`` 链**），
       **空预选集 = 无目标的响应使用**（无懈的目标是"这次结算 + 目标角色"，由窗口帧承载，
-      故行动只带牌），并按 L3.2 校验出牌次数。
+      故行动只带牌），并按 L3.2 校验出牌次数。预选集非空（借刀的 Bn）而这张牌够不着它
+      ⇒ 这张牌没有候选（W5-02b）。
 
     手上没有所需牌者候选只有 ``Pass``——**仍发询问**（票 19 §9.2 的"各获一次机会"）。
     """
@@ -669,6 +691,11 @@ def _respond(
             if check_count(state, seat, card):
                 continue
             pool = forced_use_targets(state, seat, card, ctx.use_targets)
+            if ctx.use_targets and not pool:
+                # 被迫使用的目标**已由窗口固定**（借刀的 Bn），而这张牌打不到它 ⇒
+                # 这张牌此刻没有候选（W5-02b）。不退回"无目标使用"：那是无懈一类的形状，
+                # 用在这里等于凭空造出一条打向空气的【杀】。
+                continue
             combos = tuple((target,) for target in pool) if pool else ((),)
             for combo in combos:
                 actions.append(UseCard(card=card, targets=combo, answers_seq=answers_seq))

@@ -25,6 +25,7 @@ from sgs.data import RuleConfig, load_content_pack
 from sgs.engine import Engine, IllegalActionError
 from sgs.state import (
     EndPhase,
+    FrameKind,
     Pass,
     PlayCard,
     PlayPhaseQuery,
@@ -67,6 +68,9 @@ class _Plan:
 
     pick: int = 0
     use_target: int | None = None
+    designations: tuple[int, ...] = ()
+    """借刀杀人的**附带指定** Bn（W5-02b）：入口只剩 ``designation_actions`` 池。"""
+
     played: bool = field(default=False)
 
 
@@ -80,6 +84,16 @@ class _Planned:
             if not plan.played:
                 for action in query.legal_actions:
                     if isinstance(action, UseCard) and action.card.type == plan.play:
+                        plan.played = True
+                        return action
+                # 借刀杀人的裸候选已收回（W5-02b）：合法动作是"牌 + A + Bn"三元组，
+                # 只在询问的**内部池**里；测试脚本与真实入口同一条路。
+                for action in getattr(query, "designation_actions", ()):
+                    if (
+                        isinstance(action, UseCard)
+                        and action.card.type == plan.play
+                        and action.designations == plan.designations
+                    ):
                         plan.played = True
                         return action
             return _find(query, EndPhase)
@@ -132,9 +146,16 @@ def _run_trick(
     respond: str = "pass",
     pick: int = 0,
     use_target: int | None = None,
+    designations: tuple[int, ...] = (),
 ) -> tuple[Engine, _Plan]:
     """构造局面 → 跑到"这张牌的使用结算结束后"即止。"""
-    plan = _Plan(play=play, respond=respond, pick=pick, use_target=use_target)
+    plan = _Plan(
+        play=play,
+        respond=respond,
+        pick=pick,
+        use_target=use_target,
+        designations=designations,
+    )
     used = [card for spec in seats for card in (*spec.hand, *spec.equip, *spec.judge)]
     state = build_state(
         pack=pack,
@@ -557,6 +578,7 @@ def test_duel_alternates_slash_until_someone_cannot_play(pack):
 
 
 def test_borrowed_sword_lets_the_holder_use_a_slash(pack):
+    """使用者按清单指定 [持刀者 A=1, Bn=2]；持刀者选 a（使用【杀】）⇒ 不交出武器。"""
     borrowed = cards_of_type(pack, "borrowed_sword")[0]
     weapon = cards_of_type(pack, "double_sword")[0]
     slash = cards_of_type(pack, "slash")[0]
@@ -568,6 +590,7 @@ def test_borrowed_sword_lets_the_holder_use_a_slash(pack):
         turn_seat=0,
         respond="use",
         use_target=2,
+        designations=(2,),
     )
 
     window = _windows(engine, WindowCause.BORROWED_SWORD)[0]
@@ -585,19 +608,27 @@ def test_borrowed_sword_lets_the_holder_use_a_slash(pack):
 
 
 def test_borrowed_sword_hands_over_the_weapon_when_refused(pack):
+    """b = ``Pass``：持刀者**能**使用【杀】却主动放弃 ⇒ 武器进使用者手牌。"""
     borrowed = cards_of_type(pack, "borrowed_sword")[0]
     weapon = cards_of_type(pack, "double_sword")[0]
+    slash = cards_of_type(pack, "slash")[0]
     engine, _ = _run_trick(
         pack,
         play="borrowed_sword",
-        seats=[SeatSpec(hand=(borrowed,)), SeatSpec(equip=(weapon,)), SeatSpec()],
-        deck=_deck_excluding(pack, borrowed, weapon),
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(hand=(slash,), equip=(weapon,)),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(pack, borrowed, weapon, slash),
         turn_seat=0,
         respond="pass",
+        designations=(2,),
     )
 
     assert weapon in engine.state.player(0).hand
     assert engine.state.player(1).equip == []
+    assert slash in engine.state.player(1).hand, "主动放弃 ⇒ 那张【杀】没被用掉"
 
 
 # ---------------------------------------------------------------------------
@@ -674,12 +705,11 @@ def test_the_borrowed_sword_designation_pool_and_manifest_shape(pack):
 
     assert "designation_actions" not in query.model_dump(), "内部池不进记录流"
     assert "card_preactivations" not in query.model_dump(), "清单不进记录流"
-    assert any(
-        isinstance(action, UseCard)
-        and action.card.type == "borrowed_sword"
-        and not action.designations
+    assert not any(
+        isinstance(action, UseCard) and action.card.type == "borrowed_sword"
         for action in query.legal_actions
-    ), "暗发布：裸借刀候选仍在 legal_actions"
+    ), "W5-02b：裸借刀候选已从 legal_actions 收回（入口只剩清单）"
+    assert "borrowed_sword" in query.card_preactivations, "可用性只剩这份两步清单"
 
 
 def test_a_submitted_designation_must_be_a_member_of_the_pool(pack):
@@ -748,27 +778,132 @@ def test_a_designation_fixes_the_holder_windows_target_to_bn(pack):
     assert [player.hp for player in engine.state.players] == [4, 4, 3, 4]
 
 
-def test_the_plain_borrowed_sword_still_lets_the_holder_choose_bn(pack):
-    """负向回归（暗发布）：不带 designations 的裸候选保持今天的持刀者自选。"""
-    engine, _borrowed = _borrowed_designation_engine(pack)
+def test_the_bare_borrowed_sword_is_no_longer_offered_or_submittable(pack):
+    """W5-02b 翻转：裸候选**收回**；仍然提交裸动作 ⇒ `IllegalAction` + 零状态改动。
+
+    旧路径（持刀者自选 Bn）已删除：``resolve_borrowed_sword`` 要求恰好一个 designation，
+    缺失即 fail-closed。入口因此只剩清单，提交也必须带 ``designations``。
+    """
+    engine, borrowed = _borrowed_designation_engine(pack)
     query = engine.pending
     assert isinstance(query, PlayPhaseQuery)
-    plain = next(
-        action
+    assert not any(
+        isinstance(action, UseCard) and action.card.type == "borrowed_sword"
         for action in query.legal_actions
-        if isinstance(action, UseCard) and action.card.type == "borrowed_sword"
+    ), "裸借刀候选不得再出现在 legal_actions"
+
+    plain = UseCard(
+        card=engine.state.card(borrowed), targets=(1,), answers_seq=query.seq
     )
-    assert plain.designations == ()
-    engine.submit(plain)
+    baseline = (engine.state.model_dump(), engine.stack.depth, engine.finished)
 
-    _finish_borrowed_window(engine)
+    with pytest.raises(IllegalActionError) as caught:
+        engine.submit(plain)
 
-    window = _windows(engine, WindowCause.BORROWED_SWORD)[0]
-    assert {
-        candidate.targets
-        for candidate in window.legal_actions
-        if isinstance(candidate, UseCard)
-    } == {(0,), (2,), (3,)}, "旧路径：持刀者从自己的攻击范围里自选 Bn"
+    assert caught.value.reason_code == "IllegalAction"
+    assert "候选集合" in caught.value.message
+    assert (engine.state.model_dump(), engine.stack.depth, engine.finished) == baseline, (
+        "旧路径的裸动作被拒后必须零状态改动"
+    )
+    assert engine.pending is query
+
+
+def test_the_borrowed_sword_is_unavailable_when_the_manifest_is_empty(pack):
+    """可用性只看清单：没有合法持刀者 ⇒ ``card_preactivations`` 为空，牌不可用。
+
+    不 fail-open：清单渲不出来就是此刻不可用（声明错误应当可见），也不许退回裸候选。
+    """
+    borrowed = cards_of_type(pack, "borrowed_sword")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(borrowed,)), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(pack, borrowed),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    run_until(
+        engine,
+        [RecordingPlayer() for _ in range(3)],
+        lambda e: e.pending is not None,
+    )
+    query = engine.pending
+    assert isinstance(query, PlayPhaseQuery)
+
+    assert query.card_preactivations == {}, "没有合法持刀者 ⇒ 清单为空"
+    assert query.designation_actions == (), "内部池同样为空"
+    assert not any(
+        isinstance(action, UseCard) and action.card.type == "borrowed_sword"
+        for action in query.legal_actions
+    ), "不可用时也不得退回裸候选（不 fail-open）"
+
+
+# ---------------------------------------------------------------------------
+# W5-02b：b 支与结算层的 fail-closed / no-op（``ops.resolve_borrowed_sword``）
+# ---------------------------------------------------------------------------
+
+
+class _BorrowedHost:
+    """``resolve_borrowed_sword`` 的最小宿主：只回答"有没有 a / 武器还在不在"。"""
+
+    def __init__(self, *, offers: tuple = (), weapon=None) -> None:
+        self.offers = tuple(offers)
+        self.weapon = weapon
+        self.moves: list[dict] = []
+        self.asked = 0
+
+    def current_target(self, frame):
+        return 1
+
+    def respond_candidates(self, actor, **kwargs):
+        return self.offers
+
+    def ask_respond(self, frame, actor, timing, **kwargs):
+        self.asked += 1
+        raise AssertionError("auto-b：没有非 Pass 候选就不许发询问")
+
+    def weapon_of(self, seat):
+        return self.weapon
+
+    def move_in_frame(self, frame, cards, **kwargs):
+        self.moves.append({"cards": tuple(cards), **kwargs})
+        return "moved"
+
+
+def _borrowed_frame(*designations):
+    from sgs.resolution import Frame
+
+    return Frame(
+        kind=FrameKind.RESOLVE,
+        data={"source": 0, "designations": tuple(designations)},
+    )
+
+
+def test_the_borrowed_sword_resolution_requires_exactly_one_designation():
+    """fail-closed：入口只经清单，缺失 / 多于一个即显式报错（不回落到持刀者自选）。
+
+    用 ``ValueError`` 而不是 ``assert``：``python -O`` 会删掉断言，而这条是产品路径上的
+    编程错误，必须无论优化级别都兜住。
+    """
+    from sgs.effects.ops import resolve_borrowed_sword
+
+    host = _BorrowedHost()
+
+    for designations in ((), (1, 2)):
+        with pytest.raises(ValueError):
+            resolve_borrowed_sword(host, _borrowed_frame(*designations))
+
+    assert host.asked == 0 and host.moves == [], "报错在问 / 搬牌之前"
+
+
+def test_the_borrowed_sword_b_branch_is_a_no_op_when_the_weapon_is_already_gone():
+    """a 不可行 ⇒ 不问；武器已离装备区 ⇒ 什么都不做、也不报错。"""
+    from sgs.effects.ops import resolve_borrowed_sword
+
+    host = _BorrowedHost(offers=(), weapon=None)
+
+    assert resolve_borrowed_sword(host, _borrowed_frame(2)) is None
+    assert host.asked == 0, "a 不可行（非 Pass 候选为空）⇒ 自动 b，不发询问"
+    assert host.moves == [], "武器已离区 ⇒ no-op"
 
 
 def test_harvest_reveals_target_count_and_each_target_picks_one(pack):

@@ -1,4 +1,4 @@
-"""M2 基准的种子搜索：从零搜出 28 条基准的 ``(n, seed)``（票 32）。
+"""M2 基准的种子搜索：从零搜出 27 条基准的 ``(n, seed)``（票 32）。
 
 **测试侧开发工具，不进 pytest**：搜索本身要跑上千局。它不做门禁断言、不参与回放，
 只把候选搜出来打印，并核对 ``scenarios.py`` 写死的值是否仍然有效。录制期的唯一入口
@@ -9,11 +9,11 @@
 1. 对每个 ``(n, seed)`` **只跑一次**引擎，把全部事后判据（``goals.M2_GOALS``）套一遍，
    收集每条基准的候选命中；
 2. 每条基准只留**记录条数最少**的候选——更短的局 = 更小的 golden + 更快的门禁回放；
-3. **贪心分配**：候选最少的基准先挑，拿"未被别的基准占用"的最小候选，使 28 个
+3. **贪心分配**：候选最少的基准先挑，拿"未被别的基准占用"的最小候选，使 27 个
    ``(n, seed)`` 互不相同。
 
 "人数档"由 :data:`TIERS` 表达：人数骨架（``07``–``11``）各自锁死 4/5/6/7/8 人
-（票 32 §1 的分布判据），其余 23 条在 4/5/6 人里自由选；"判据表"默认是
+（票 32 §1 的分布判据），其余 22 条在 4/5/6 人里自由选；"判据表"默认是
 ``goals.M2_GOALS``。搜索用的驱动就是录制路径本身（``scenarios.play_random``），
 否则"搜到的种子"与"录制时跑的局"会各跑各的。搜到的值写死回 ``scenarios.py``，
 录制期零搜索。
@@ -85,7 +85,7 @@ class Tier:
 
 
 FREE_TIERS: tuple[Tier, ...] = (Tier(4, 300), Tier(5, 300), Tier(6, 300))
-"""自由档：非人数骨架的 23 条基准可用的 ``(人数, 种子范围)`` 网格。"""
+"""自由档：非人数骨架的 22 条基准可用的 ``(人数, 种子范围)`` 网格。"""
 
 SKELETON_TIERS: dict[str, tuple[Tier, ...]] = {
     "07-identity-4p-rebel-win": (Tier(4, 400),),
@@ -105,7 +105,7 @@ def tiers_for(slug: str) -> tuple[Tier, ...]:
 TIERS: dict[str, tuple[Tier, ...]] = {
     slug: tiers_for(slug) for slug in scenarios.M2_SCENARIOS
 }
-"""28 条 M2 基准的完整搜索空间（默认值；``--seeds`` 只用于冒烟缩窄）。"""
+"""27 条 M2 基准的完整搜索空间（默认值；``--seeds`` 只用于冒烟缩窄）。"""
 
 
 def allowed_pairs(tiers: Mapping[str, Sequence[Tier]]) -> dict[str, set[Slot]]:
@@ -376,7 +376,9 @@ def _report_verification() -> int:
             print(f"  - {failure}")
         return 1
 
-    print("scenarios.py 的 28 个 (人数, 种子) 仍全部命中各自判据")
+    print(
+        f"scenarios.py 的 {len(scenarios.M2_SCENARIOS)} 个 (人数, 种子) 仍全部命中各自判据"
+    )
     return 0
 
 

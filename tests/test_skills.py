@@ -1423,12 +1423,22 @@ def test_axe_with_only_one_card_is_never_asked():
 
     def _borrowed_user(query):
         if query.kind == "PLAY_PHASE":
-            return _find(
+            direct = _find(
                 query,
                 lambda action: isinstance(action, UseCard)
                 and action.card.card_id == borrowed
                 and action.targets == (0,),
             )
+            if direct is not None:
+                return direct
+            # W5-02b：借刀入口只剩附带指定清单（裸候选已收回）。
+            for action in getattr(query, "designation_actions", ()):
+                if (
+                    isinstance(action, UseCard)
+                    and action.card.card_id == borrowed
+                    and action.targets == (0,)
+                ):
+                    return action
         return None
 
     def _axe_owner(query):
@@ -2070,12 +2080,22 @@ def test_axe_with_only_its_own_card_plus_one_other_is_never_asked():
 
     def _borrowed_user(query):
         if query.kind == "PLAY_PHASE":
-            return _find(
+            direct = _find(
                 query,
                 lambda action: isinstance(action, UseCard)
                 and action.card.card_id == borrowed
                 and action.targets == (0,),
             )
+            if direct is not None:
+                return direct
+            # W5-02b：借刀入口只剩附带指定清单（裸候选已收回）。
+            for action in getattr(query, "designation_actions", ()):
+                if (
+                    isinstance(action, UseCard)
+                    and action.card.card_id == borrowed
+                    and action.targets == (0,)
+                ):
+                    return action
         return None
 
     def _axe_owner(query):

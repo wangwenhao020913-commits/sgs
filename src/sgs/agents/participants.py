@@ -70,6 +70,19 @@ def is_transform_use(query: Query, action: Action) -> bool:
     return action in (getattr(query, "transform_actions", ()) or ())
 
 
+def is_designation_use(query: Query, action: Action) -> bool:
+    """应答是不是**附带指定的复合使用**（W5-02b 借刀）。
+
+    借刀的合法动作是 ``UseCard(card, targets=(A,), designations=(Bn,))``，裸候选已从
+    ``legal_actions`` 收回；它的接受条件 = 本次 ``PLAY_PHASE`` 询问的
+    ``designation_actions`` 池成员（引擎第四条路与这里是同一份池）。本谓词只回答
+    "在这份池里吗"，不重算 A / Bn 的合法性；回放执行器据此放行磁带上的复合使用。
+    """
+    if not getattr(action, "designations", ()):
+        return False
+    return action in (getattr(query, "designation_actions", ()) or ())
+
+
 class Participant(Protocol):
     """引擎只在询问处调用它；入参自带候选行动与该参与者的视角。
 
@@ -106,6 +119,10 @@ class TapePlayer:
     **复合动作**（W4-4）：预发动后 ``ActivateSkill`` 不在 ``legal_actions`` 里，磁带上的
     那一条由 :func:`is_structured_activation` 按"命中清单"放行；它是否真的合法仍由引擎的
     同一个校验器裁决（不在候选里且不命中清单才是回放分歧）。
+
+    **附带指定**（W5-02b 借刀）：``UseCard(..., designations=...)`` 同样不在
+    ``legal_actions`` 里，由 :func:`is_designation_use` 按"本次附带指定池成员"放行——
+    与引擎第四条路读同一份池；池外动作才会被引擎拒（回放分歧）。
     """
 
     def __init__(self, tape: Sequence[Action]) -> None:
@@ -125,6 +142,7 @@ class TapePlayer:
             action not in query.legal_actions
             and not is_structured_activation(query, action)
             and not is_transform_use(query, action)
+            and not is_designation_use(query, action)
         ):
             raise TapeError(f"行动序列分歧：{action.kind} 不在 {query.kind} 的候选集合内")
         self._index += 1

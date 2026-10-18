@@ -25,6 +25,7 @@ from sgs.agents import (
     HeuristicPlayer,
     RandomPlayer,
     TapePlayer,
+    is_designation_use,
     is_structured_activation,
     tape_from_journal,
 )
@@ -39,10 +40,11 @@ from sgs.data import (
     load_content_pack,
     load_heroes,
 )
-from sgs.effects import legal_actions_for, locate
+from sgs.effects import designation_actions_for, legal_actions_for, locate
 from sgs.engine import Engine, RandomSource
 from sgs.skills import (
     CATALOG,
+    card_preactivations,
     conversion_preactivations,
     is_transformed_action,
     resolve_conversion_confirmation,
@@ -80,6 +82,7 @@ from sgs.state import (
     Step,
     StepPool,
     UseCard,
+    WindowCause,
     Zone,
     ZoneRef,
     project,
@@ -307,6 +310,9 @@ def _play_phase_with_preactivations(state, seat: int = 0) -> PlayPhaseQuery:
         if not (isinstance(action, ActivateSkill) and action.skill_id in flagged)
         and not is_transformed_action(action)
     )
+    # W5-02b：借刀的附带指定池 + 从它派生的两步清单（裸候选已收回）。
+    designations = designation_actions_for(state, seat, 1)
+    card_manifests = card_preactivations(designations)
     return PlayPhaseQuery(
         seq=1,
         actor=seat,
@@ -317,6 +323,8 @@ def _play_phase_with_preactivations(state, seat: int = 0) -> PlayPhaseQuery:
         preactivations=preactivations,
         transform_preactivations=transforms,
         transform_actions=internal,
+        designation_actions=designations,
+        card_preactivations=card_manifests,
     )
 
 
@@ -659,6 +667,8 @@ class _IllegalAnswerScan:
     W4-4：预发动后复合动作本来就不在 ``legal_actions`` 里（`spec.md` §3 的"候选 = 接受"
     唯一让开处），故这里用 :func:`~sgs.agents.is_structured_activation` 认第二类；它是否真的合法
     由引擎的同一个校验器裁决——非法应答会让整局抛错。
+    W5-02b：借刀的复合使用同样不在 ``legal_actions`` 里，但必须是本次**附带指定池**
+    （``query.designation_actions``）的成员——池成员就是服务端第四条路的接受条件。
     """
 
     def __init__(self, inner) -> None:
@@ -669,8 +679,10 @@ class _IllegalAnswerScan:
     def respond(self, query):
         action = self._inner.respond(query)
         self.answers += 1
-        if action not in query.legal_actions and not is_structured_activation(
-            query, action
+        if (
+            action not in query.legal_actions
+            and not is_structured_activation(query, action)
+            and not is_designation_use(query, action)
         ):
             self.illegal += 1
         return action
@@ -1663,6 +1675,148 @@ def test_every_transform_skill_can_be_ai_filled_and_confirmed_at_least_once():
             f"{label}：解析出的虚拟牌名 = {resolved.card.type}"
         )
         assert resolved.card.virtual_sources, f"{label}：解析出的是转化牌"
+
+
+# ---------------------------------------------------------------------------
+# ⑦c 借刀的 AI 覆盖（W5-02b）：外层两步清单 + 持刀者侧的转化清单
+# ---------------------------------------------------------------------------
+
+
+def _borrowed_sword_play_phase(*, designate_hp: int = 4):
+    """座位 0 手里一张借刀；座位 1 装备武器（唯一合法持刀者）；座位 2 是 Bn 候选。
+
+    ``designate_hp`` 让 Bn 的"最低体力优先"可观测（座位 0 / 2 都在座位 1 的攻击范围内）。
+    """
+    borrowed = _ids("borrowed_sword")[0]
+    weapon = _ids("double_sword")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(equip=(weapon,)),
+            SeatSpec(hp=designate_hp),
+        ],
+        deck=_deck_excluding(borrowed, weapon),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state)
+
+
+def test_the_ai_fills_the_borrowed_sword_outer_manifest_and_the_pool_accepts_it():
+    """覆盖判据（W5-02b）：借刀的两步清单能由 AI 填完，拼出的复合使用是池成员。
+
+    A 取 ``_score_seat_option`` 最高的持刀者（本局面只有座位 1 有武器）；
+    Bn 取**体力最低**的候选（座位 2 的 2 点 vs 座位 0 的 4 点）。
+    """
+    state, query = _borrowed_sword_play_phase(designate_hp=2)
+    assert "borrowed_sword" in query.card_preactivations, "前提：清单下发"
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, UseCard), f"AI 该填复合使用，实得 {action!r}"
+    assert action.card.type == "borrowed_sword"
+    assert action.targets == (1,), "A = 唯一合法持刀者"
+    assert action.designations == (2,), "Bn = 体力最低的候选（座位 2）"
+    assert action not in query.legal_actions, "复合使用本来就不在候选里（裸候选已收回）"
+    assert action in query.designation_actions, (
+        "AI 拼出的 (牌, A, Bn) 必须是本次附带指定池的成员——引擎第四条路只认这一份"
+    )
+
+
+def test_the_engine_accepts_the_borrowed_sword_use_the_ai_builds():
+    """覆盖判据（W5-02b）：AI 拼出的复合使用**真的被引擎接受**（不止是池成员）。
+
+    真引擎 + 三席启发式、固定种子：座位 0 手里只有一张借刀，座位 1 装备武器、座位 2
+    体力最低 ⇒ AI 填 A=1 / Bn=2 并提交；引擎的第 4 条路按同一份附带指定池放行，
+    记录流里落的 ``UseCard`` 带 ``designations=(2,)``。这条把"AI 能发动借刀"
+    从"构造出的动作恰好是池成员"推进到"引擎真的收下了它"。
+    """
+    state, _query = _borrowed_sword_play_phase(designate_hp=2)
+    # 开局准备阶段会摸两张：把牌堆顶换成**出牌阶段用不出来**的【闪】，否则 AI 可能先出
+    # 别的牌（这条测的是"借刀被引擎收下"，不是 AI 的排序偏好）。
+    first_dodge, second_dodge = _ids("dodge")[:2]
+    state = state.model_copy(update={"deck": [first_dodge, second_dodge]})
+    engine = Engine.from_state(state, seed=1)
+    players = [HeuristicPlayer(_stream(1)) for _ in range(3)]
+    run_until(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.PLAY_PHASE,
+    )
+
+    action = HeuristicPlayer(_stream(0)).respond(engine.pending)
+    assert isinstance(action, UseCard) and action.designations == (2,), (
+        f"AI 该填借刀的两步清单，实得 {action!r}"
+    )
+
+    engine.submit(action)
+
+    accepted = engine.records[-1]
+    assert accepted.kind == "action" and accepted.accepted is True, "引擎拒绝了 AI 的复合使用"
+    assert isinstance(accepted.action, UseCard)
+    assert accepted.action.card.type == "borrowed_sword"
+    assert accepted.action.targets == (1,) and accepted.action.designations == (2,)
+
+
+def test_the_ai_fills_the_holder_side_transform_in_the_borrowed_window():
+    """持刀者侧的转化沿用既有填表：AI 在借刀窗口按清单确认【龙胆】，目标由窗口固定。"""
+    borrowed = _ids("borrowed_sword")[0]
+    dodge = _red_card("dodge")
+    weapon = _ids("crossbow")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(hand=(dodge,), equip=(weapon,), hero="zhaoyun"),
+            SeatSpec(hp=2),
+        ],
+        deck=_deck_excluding(borrowed, dodge, weapon),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    players = [HeuristicPlayer(_stream(1)) for _ in range(3)]
+    run_until(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.PLAY_PHASE,
+    )
+    # 外层两步这里**直接取池成员**（AI 填外层已由上一例覆盖）；本例只验持刀者侧的
+    # 转化填表在借刀窗口里仍走同一条清单路径。
+    play = engine.pending
+    outer = next(
+        candidate
+        for candidate in play.designation_actions
+        if candidate.card.type == "borrowed_sword" and candidate.designations == (2,)
+    )
+    engine.submit(outer)
+
+    run_until(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.RESPOND
+        and running.pending.cause is WindowCause.BORROWED_SWORD,
+    )
+    window = engine.pending
+    assert window is not None and window.actor == 1
+
+    action = HeuristicPlayer(_stream(2)).respond(window)
+
+    assert isinstance(action, ActivateSkill), f"AI 该填转化清单，实得 {action!r}"
+    assert action.skill_id == "hero.zhaoyun.longdan"
+    assert action.picks == (dodge,), "来源 = 那张【闪】"
+    assert action.choices == (), "目标由窗口固定（Bn），没有目标步"
+    assert action not in window.legal_actions, "转化候选已从暴露面收回"
+
+    engine.submit(action)
+    accepted = engine.records[-1]
+    assert accepted.kind == "action" and accepted.accepted is True
+    resolved = accepted.action
+    assert isinstance(resolved, UseCard)
+    assert resolved.card.type == "slash" and resolved.card.virtual_sources == (dodge,)
+    assert resolved.targets == outer.designations, "转化【杀】打向使用者指定的 Bn"
 
 
 def test_every_activatable_skill_can_be_ai_filled_and_validated_at_least_once():

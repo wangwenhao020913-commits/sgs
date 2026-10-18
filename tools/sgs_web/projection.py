@@ -538,7 +538,22 @@ def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) ->
         if cause is WindowCause.ARROW_BARRAGE:
             return "需要打出【闪】，否则受到使用者 1 点伤害"
         if cause is WindowCause.BORROWED_SWORD:
-            return "对合法目标使用【杀】，或放弃（放弃＝交出武器）"
+            # W5-02b：窗口的目标**固定为使用者指定的 Bn**。主源 = 结算帧的
+            # ``designations``（写入面：``UseCard.designations`` 随 USE → RESOLVE 继承）；
+            # 候选带 ``targets`` 只作回退（409 附带的裸 Query 拿不到栈）。转化候选已从
+            # ``legal_actions`` 收回，若只读候选，持刀者只有【龙胆】等 a 时 Bn 会写不出来。
+            fixed = sorted({int(seat) for seat in (data.get("designations") or ())})
+            if not fixed:
+                fixed = sorted(
+                    {
+                        int(target)
+                        for action in query.legal_actions
+                        for target in (getattr(action, "targets", None) or ())
+                    }
+                )
+            if len(fixed) == 1:
+                return f"对 {fixed[0]} 号位使用【杀】，或交出武器"
+            return "对合法目标使用【杀】，或交出武器"
         if cause is WindowCause.LORD_REQUEST:
             required = getattr(query, "required", None)
             card = {"slash": "【杀】", "dodge": "【闪】"}.get(required, "一张牌")
@@ -847,15 +862,20 @@ def _steps_payload(steps: Any) -> list[dict[str, Any]]:
 
 
 def _preactivation_payload(manifests: Any) -> dict[str, list[dict[str, Any]]]:
-    """``技能 id → 清单`` → JSON 形状；保持询问里的顺序（引擎已按技能 id 排序）。"""
-    return {skill_id: _steps_payload(steps) for skill_id, steps in manifests.items()}
+    """``键 → 清单`` → JSON 形状；保持询问里的顺序（引擎已按键排序）。
+
+    键的两种来源：技能清单 = 技能 id；附带指定清单（W5-02b）= **卡牌类型 id**
+    （``card.type``，如 ``borrowed_sword``）。接入层只转发，不解释键。
+    """
+    return {key: _steps_payload(steps) for key, steps in manifests.items()}
 
 
 def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
     """查看者不是询问者时，抹掉清单里**属于询问者**的牌面（W4-1；与观看私密同一条纪律）。
 
-    清单的选牌步候选用的是**实体牌 id**（本人手牌的 id）——把整份清单原样发给别人就等于
-    泄露手牌。这里按步类型收窄：
+    覆盖技能清单与附带指定清单（``card_preactivations``，W5-02b）两份载体。清单的选牌步
+    候选用的是**实体牌 id**（本人手牌的 id）——把整份清单原样发给别人就等于泄露手牌。
+    这里按步类型收窄：
 
     - 选牌步（``zones`` 非空）⇒ 候选清空（区 / 张数这些**公开形状**保留）；
     - 选座位 / 选项步 ⇒ ``when`` 里的前序答案（可能含被选中的牌 id）清空，候选（公开的
@@ -880,6 +900,8 @@ def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
             step["pool"] = [{"when": [], "options": options}]
 
     for steps in (payload.get("preactivations") or {}).values():
+        mask(steps)
+    for steps in (payload.get("card_preactivations") or {}).values():
         mask(steps)
     mask(payload.get("preactivation") or [])
 
@@ -930,6 +952,12 @@ def pending_payload(
     manifests = dict(getattr(query, "preactivations", None) or {})
     manifests.update(getattr(query, "transform_preactivations", None) or {})
     payload["preactivations"] = _preactivation_payload(manifests)
+    # 附带指定的**牌名清单**（W5-02b 借刀）：主动入口的第三种载体，键 = ``card.type``
+    # （如 ``borrowed_sword``）。界面点手牌时按这张表进入两步清单，再拼
+    # ``UseCard(card, targets=(A,), designations=(Bn,))``；接入层**不重算**池 / 合法性。
+    payload["card_preactivations"] = _preactivation_payload(
+        getattr(query, "card_preactivations", None) or {}
+    )
     payload["preactivation"] = _steps_payload(getattr(query, "preactivation", ()) or ())
     if foreign:
         _mask_foreign_preactivations(payload)

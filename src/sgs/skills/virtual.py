@@ -434,6 +434,11 @@ def virtual_card_use(
             if check_count(state, seat, card):
                 return []
             pool = forced_use_targets(state, seat, card, ctx.respond_targets)
+            if ctx.respond_targets and not pool:
+                # 目标已由窗口固定（借刀的 Bn）而这次转化够不着它 ⇒ 没有候选；
+                # 不退回"无目标使用"——那是无懈一类的形状，会造出一条打向空气的【杀】。
+                # 与真牌在 ``effects/actions.py::_respond`` 的同一条判据（W5-02b）。
+                return []
             combos = tuple((target,) for target in pool) if pool else ((),)
             return [
                 UseCard(card=card, targets=combo, answers_seq=ctx.answers_seq)

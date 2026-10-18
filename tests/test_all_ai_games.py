@@ -22,6 +22,7 @@ import pytest
 from sgs.agents import (
     HeuristicPlayer,
     TapePlayer,
+    is_designation_use,
     is_structured_activation,
     tape_from_journal,
 )
@@ -53,6 +54,9 @@ class _IllegalAnswerScan:
 
     W4-4：预发动后复合动作不在 ``legal_actions`` 里（`spec.md` §3），由引擎的同一个
     校验器裁决；``is_structured_activation`` 只认"命中本次询问下发的清单"的那一类。
+    W5-02b：借刀的复合使用同样不在 ``legal_actions`` 里，但必须是本次**附带指定池**
+    （``query.designation_actions``）的成员——``is_designation_use`` 与引擎第四条路
+    读同一份池。
     """
 
     def __init__(self, inner) -> None:
@@ -63,8 +67,10 @@ class _IllegalAnswerScan:
     def respond(self, query):
         action = self._inner.respond(query)
         self.answers += 1
-        if action not in query.legal_actions and not is_structured_activation(
-            query, action
+        if (
+            action not in query.legal_actions
+            and not is_structured_activation(query, action)
+            and not is_designation_use(query, action)
         ):
             self.illegal += 1
         return action

@@ -662,6 +662,10 @@ function cardFace(pending, card) {
       slotIndex: -1,
     };
   }
+  // 手牌入口的预发动（W5-02b 借刀）：点它进入两步清单，而不是设焦点 / 去候选索引里查。
+  if (cardPreactivationManifest(pending, card)) {
+    return { selectable: true, selected: false, slotIndex: -1 };
+  }
   const selectable = pending
     ? (isHandPick(pending) ? cardSelectable(pending, card.card_id) : cardUsable(pending, card.card_id))
     : false;
@@ -677,6 +681,8 @@ function activateCard(pending, card, face) {
   }
   if (isDiscardPick(pending)) { toggleDiscardPick(card.card_id); return; }
   if (state.preactivation) { togglePreativationCard(card.card_id); return; }
+  const manifest = cardPreactivationManifest(pending, card);
+  if (manifest) { enterCardPreativation(pending, card, manifest); return; }
   toggleFocus(card.card_id);
 }
 
@@ -1038,6 +1044,21 @@ function preactivationManifest(pending, skillId) {
   return null;
 }
 
+/** 这张手牌此刻的**两步预发动清单**（W5-02b 借刀杀人；`null` = 无）。
+ *
+ * 载体 = `pending.card_preactivations[card.type]`（键是**卡牌类型 id**，如 `borrowed_sword`；
+ * 两张借刀同型）。它由服务端从"附带指定池"派生并**原样下发**，界面不重算池。
+ *
+ * 与技能清单的区别只在**提交形状**：技能清单确认成 `ActivateSkill`，这张表确认成
+ * `UseCard(card, targets=(A,), designations=(Bn,))`——故两步共用同一个步骤渲染器。
+ */
+function cardPreactivationManifest(pending, card) {
+  if (!pending || !card) return null;
+  const table = pending.card_preactivations || {};
+  const steps = table[card.type];
+  return steps && steps.length ? steps : null;
+}
+
 /** 这一步选什么：`card` = 区域里的牌；`seat` = `seat:N` 闭集；`option` = 其余闭集文本。 */
 function preactivationStepKind(step) {
   if (step.zones && step.zones.length) return "card";
@@ -1082,6 +1103,34 @@ function enterPreativation(skill, manifest) {
     skillId: skill.skill_id,
     name: skill.name,
     composite: Boolean(skill.preactivated),
+    steps: manifest,
+    answers: manifest.map(() => ({ values: [], texts: [] })),
+    cursor: 0,
+  };
+  state.convertSkill = null;
+  state.picks = [];
+  state.focusCardId = null;
+  state.selectedTargets = [];
+  state.selectedOption = null;
+  state.lastRejectReason = "";
+  renderTable();
+  renderPending(state.view);
+}
+
+/** 进入**手牌入口**的预发动（W5-02b 借刀）：点手牌 ⇒ 两步清单（持刀者 A → Bn）。
+ *
+ * 与技能清单**共用**步骤渲染器 / 答案结构 / 重选与取消；区别只在确认：
+ * `buildPreativationAction` 见到 `cardId` 就拼 `UseCard(card, targets=(A,), designations=(Bn,))`
+ * ——牌是**实体牌**，不拼虚拟牌 id，也不去 `legal_actions` 里找那条（它只在服务端池里）。
+ */
+function enterCardPreativation(pending, card, manifest) {
+  state.preactivation = {
+    skillId: null,
+    cardId: card.card_id,
+    card,
+    name: card.name,
+    composite: false,
+    cardEntry: true,
     steps: manifest,
     answers: manifest.map(() => ({ values: [], texts: [] })),
     cursor: 0,
@@ -1206,6 +1255,20 @@ function preactivationReady(pa) {
  */
 function buildPreativationAction(pending, pa) {
   if (!pending || !pa || !preactivationReady(pa)) return null;
+  // 手牌入口（W5-02b 借刀）：两步座位答案 → 一次带**附带指定**的使用。
+  // 牌是实体牌（不拼虚拟 id），`targets` = 持刀者 A、`designations` = 使用者指定的 Bn。
+  if (pa.cardEntry) {
+    const holder = pa.answers[0] ? pa.answers[0].values[0] : undefined;
+    const designate = pa.answers[1] ? pa.answers[1].values[0] : undefined;
+    if (!Number.isInteger(holder) || !Number.isInteger(designate)) return null;
+    return {
+      kind: "UseCard",
+      card: pa.card,
+      targets: [holder],
+      designations: [designate],
+      answers_seq: pending.seq,
+    };
+  }
   const picks = [];
   const choices = [];
   pa.steps.forEach((step, index) => {
@@ -1243,7 +1306,9 @@ function preactivationStepLabel(step) {
 
 function preactivationStepHint(pa, pending) {
   const step = pa.steps[pa.cursor];
-  if (!step) return "清单已填完，可以确认发动。";
+  if (!step) {
+    return pa && pa.cardEntry ? "清单已填完，可以确认使用。" : "清单已填完，可以确认发动。";
+  }
   const options = preactivationOptions(pa, pa.cursor);
   const wording = preactivationWording(step);
   if (preactivationStepKind(step) === "card") {
@@ -1430,7 +1495,9 @@ function renderPending(view) {
   // 预发动 / 转化技正在等玩家点牌时，说清"现在要做什么"：
   // 这些是**界面自己**开的模式，服务端的通用 prompt 读不出它。
   if (state.preactivation) {
-    $("t-prompt").textContent = `预发动【${state.preactivation.name}】：按清单逐步选择。`;
+    $("t-prompt").textContent = state.preactivation.cardEntry
+      ? `使用【${state.preactivation.name}】：按清单选择持刀者与【杀】的目标。`
+      : `预发动【${state.preactivation.name}】：按清单逐步选择。`;
   } else if (state.convertSkill !== null) {
     const skill = (view.skills || []).find((item) => item.skill_id === state.convertSkill);
     const text = skill && skill.ui && skill.ui.requirement;
@@ -1476,7 +1543,7 @@ function renderPending(view) {
     // 选择面这一步可不可以取消（票 01 的技能流水线给出一条 `Pass`）。
     $("btn-cancel").disabled = state.picks.length === 0 && !cancelAction(pending);
   }
-  else if (kind === "direct") renderDirect(actions[0]);
+  else if (kind === "direct") renderDirect(actions[0], pending);
   else renderCandidateList(pending, actions);
 
   // 提交 / 取消两个按钮的**文案**跟着模式走（预发动 = 确认发动 / 取消预发动；被动入口 = 放弃）。
@@ -1487,15 +1554,21 @@ function renderPending(view) {
   renderCountdown(view);
 }
 
-/** 底部两个按钮的文案：预发动 = 「确认发动 / 取消预发动」，被动入口 = 「放弃」。 */
+/** 底部两个按钮的文案：预发动 = 「确认发动 / 取消预发动」；手牌入口 = 「确认使用 / 取消选择」；
+ *  被动入口 = 「放弃」。 */
 function setActionLabels(inPreativation, passiveEntry) {
   const submit = $("btn-submit");
   const cancel = $("btn-cancel");
-  if (submit) submit.textContent = inPreativation ? "确认发动" : "提交";
+  const cardEntry = Boolean(inPreativation && state.preactivation && state.preactivation.cardEntry);
+  if (submit) {
+    submit.textContent = inPreativation ? (cardEntry ? "确认使用" : "确认发动") : "提交";
+  }
   if (cancel) {
-    cancel.textContent = inPreativation
-      ? (passiveEntry ? "放弃" : "取消预发动")
-      : (passiveEntry ? "放弃" : "清空选择");
+    cancel.textContent = cardEntry
+      ? "取消选择"
+      : (inPreativation
+        ? (passiveEntry ? "放弃" : "取消预发动")
+        : (passiveEntry ? "放弃" : "清空选择"));
   }
 }
 
@@ -1684,6 +1757,18 @@ function renderSeatPick(pending) {
   $("btn-cancel").disabled = state.selectedOption === null && !cancelAction(pending);
 }
 
+/** 响应窗口里"非使用牌"候选的按钮文案（W5-02b）：借刀的 `Pass` = b（**交出武器**）。
+ *
+ * 只看窗口成因这一条公开事实，不改 `actionLabel` 的通用语义（同一个 `Pass` 在别的窗口
+ * 仍是"放弃"）。
+ */
+function alternativeLabel(pending, action) {
+  if (action.kind === "Pass" && pending && pending.cause === "BORROWED_SWORD") {
+    return "交出武器";
+  }
+  return actionLabel(action);
+}
+
 function renderPickerAlternatives(pending) {
   const box = $("t-options");
   (pending.legal_actions || []).forEach((action, index) => {
@@ -1692,7 +1777,7 @@ function renderPickerAlternatives(pending) {
     button.type = "button";
     button.className = "opt";
     if (state.selectedOption === index) button.classList.add("sel");
-    button.textContent = actionLabel(action);
+    button.textContent = alternativeLabel(pending, action);
     button.addEventListener("click", () => {
       state.selectedOption = index;
       state.focusCardId = null;
@@ -1706,8 +1791,8 @@ function renderPickerAlternatives(pending) {
 }
 
 /** 唯一且不需要选目标的候选：不铺按钮，直接说"将提交：…"（spec D9）。 */
-function renderDirect(only) {
-  $("t-choice").textContent = only ? `将提交：${actionLabel(only)}` : "";
+function renderDirect(only, pending) {
+  $("t-choice").textContent = only ? `将提交：${alternativeLabel(pending, only)}` : "";
 }
 
 /** 提交按钮的唯一判据：**能造出一个候选里真有的 Action** 时才可点。
@@ -1740,9 +1825,11 @@ function refreshSubmit(pending) {
         ? "清单里还有步骤没填完。"
         : preactivationStepHint(pa, pending);
     } else {
-      $("t-choice").textContent = pa.composite
-        ? "可以确认发动（提交一个复合动作）。"
-        : "可以确认发动（服务端会把它解析成这次的使用 / 响应）。";
+      $("t-choice").textContent = pa.cardEntry
+        ? "可以确认使用（提交一次带附带指定 [持刀者, Bn] 的使用）。"
+        : (pa.composite
+          ? "可以确认发动（提交一个复合动作）。"
+          : "可以确认发动（服务端会把它解析成这次的使用 / 响应）。");
     }
     return;
   }
@@ -1766,7 +1853,7 @@ function refreshSubmit(pending) {
     return;
   }
   if (directAction(pending)) {
-    renderDirect((pending.legal_actions || [])[0]);
+    renderDirect((pending.legal_actions || [])[0], pending);
     return;
   }
   $("t-choice").textContent = ready ? "" : "先选一项，或点一张可用的手牌再提交。";
@@ -2056,7 +2143,14 @@ async function submitAction() {
     $("t-choice").textContent = blocked;
     return;
   }
-  const composite = state.preactivation !== null && action.kind === "ActivateSkill";
+  // 预发动 / 手牌清单入口的确认动作**不在** `legal_actions` 里：
+  // - 技能清单 = `ActivateSkill`（复合动作，服务端校验器验）；
+  // - 手牌清单（W5-02b 借刀）= 带 `designations` 的 `UseCard`，服务端只认本次
+  //   `designation_actions` 池的成员（同一份清单派生），故这里同样让开。
+  // 只对这两类让开：其余动作仍走下面的逐字段自检（服务端也会再验一次）。
+  const cardEntry = Boolean(state.preactivation && state.preactivation.cardEntry);
+  const composite = state.preactivation !== null
+    && (action.kind === "ActivateSkill" || (cardEntry && action.kind === "UseCard"));
   if (
     !composite
     && !pending.legal_actions.some((candidate) => JSON.stringify(candidate) === JSON.stringify(action))

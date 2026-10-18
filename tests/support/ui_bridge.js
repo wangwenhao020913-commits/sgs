@@ -35,6 +35,8 @@
     "jumpPreativationStep", "preactivationReady", "buildPreativationAction",
     "preactivationStepKind", "preactivationOptions", "preactivationCardOptions",
     "preactivatedSkill", "isPassivePreativation", "renderPreativationEntry", "setActionLabels",
+    // W5-02b：手牌入口的预发动（借刀）——点手牌 ⇒ 两步清单 ⇒ 带 designations 的 UseCard
+    "cardPreactivationManifest", "enterCardPreativation", "alternativeLabel",
     // 报障 3：事件回放（步长按钮 0.1–0.5s，默认 0.1）+ 效果区逐事件派生 + 描述文本
     "flushPlayback", "stepPlayback", "renderProcessing", "applyEffectDelta", "DELAY_STEPS_MS", "describeEffect",
     // W4-6：回放页（全区域增量重建 / 询问面板 / play-pause / 步长 / 空壳引导）

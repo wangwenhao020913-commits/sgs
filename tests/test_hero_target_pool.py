@@ -39,7 +39,6 @@ from sgs.state import (
     UseCard,
     WindowCause,
 )
-from sgs.timing import Timing
 from sgs.skills import pure_virtual_card
 
 from support import SeatSpec, build_state, cards_of_type, run_until
@@ -322,6 +321,11 @@ class _Scripted:
                     if isinstance(action, UseCard) and action.card.type == "borrowed_sword":
                         self._play_borrowed = False
                         return action
+                # W5-02b：借刀的入口只剩附带指定清单（裸候选已收回）。
+                for action in getattr(query, "designation_actions", ()):
+                    if isinstance(action, UseCard) and action.card.type == "borrowed_sword":
+                        self._play_borrowed = False
+                        return action
             return _first(query, EndPhase) or query.legal_actions[0]
         if query.kind == QueryKind.RESPOND:
             for action in query.legal_actions:
@@ -340,11 +344,12 @@ def _first(query, action_type):
     return None
 
 
-def test_an_emptied_forced_use_pool_takes_the_existing_zero_target_path():
-    """全场唯一合法目标是空城诸葛亮 ⇒ 池空，走"目标减为 0"终止路径、牌进弃牌堆、不抛错。
+def test_an_unplayable_forced_use_window_hands_over_the_weapon_without_asking():
+    """a 不可行（Bn 在结算时已不合法）⇒ **不开窗口**、自动 b：武器进使用者手牌。
 
     场景：座位 0 打【借刀杀人】指定持刀的座位 1；座位 0 装了防御马（+1），故座位 1 的
-    攻击范围内只有座位 2（空城的诸葛亮）。座位 1 的 Bn 池因此被链清空。
+    攻击范围内只有座位 2（空城的诸葛亮）。座位 1 手里有【杀】，但【杀】的池被【空城】
+    清空 ⇒ 持刀者窗口的非 ``Pass`` 候选为空 ⇒ 不 ``ask_respond``，直接交出武器。
     """
     borrowed, slash = _cards("borrowed_sword")[0], _cards("slash")[0]
     weapon, horse = _cards("crossbow")[0], _cards("jueying")[0]
@@ -365,39 +370,59 @@ def test_an_emptied_forced_use_pool_takes_the_existing_zero_target_path():
     run_until(
         engine,
         [_Scripted(play_borrowed=True), _Scripted(), _Scripted()],
-        lambda e: slash in e.state.discard,
+        lambda e: weapon in e.state.player(0).hand,
     )
 
-    window = next(
-        record.query
+    assert not [
+        record
         for record in engine.records
         if record.kind == "query"
         and getattr(record.query, "cause", None) is WindowCause.BORROWED_SWORD
-    )
-    offered = {
-        action.targets
-        for action in window.legal_actions
-        if isinstance(action, UseCard) and action.card.type == "slash"
-    }
-    assert offered == {()}, "池空 ⇒ 无目标的响应使用，而非绕过【空城】指定诸葛亮"
+    ], "a 不可行 ⇒ 不发明询（自动 b）"
+    assert weapon in engine.state.player(0).hand, "b：武器从持刀者装备区进使用者手牌"
+    assert engine.state.player(1).equip == [], "武器已离区"
+    assert slash in engine.state.player(1).hand, "没有 a ⇒ 那张【杀】原样留在手里"
+    assert borrowed in engine.state.discard
 
-    slash_after_end = [
-        record.timing
+
+def test_an_unplayable_forced_use_window_ignores_a_targetless_transform_candidate():
+    """a 不可行（只有转化源、Bn 在结算时已不合法）⇒ 不发明询：转化候选不得退化成无目标使用。
+
+    场景同上一条，但持刀者座位 1 = 赵云、手里一张【闪】（【龙胆】当【杀】用）、装备武器；
+    座位 2 = 空城的诸葛亮。``forced_use_targets`` 对这张虚拟【杀】的池为空 ⇒
+    ``virtual_card_use`` 的 RESPOND/USE 分支不得再造无目标候选，否则 auto-b 的预览会把它
+    误算成"a 可行"，窗口里就会出现一条打向空气的【杀】。
+    """
+    borrowed, dodge = _cards("borrowed_sword")[0], _cards("dodge")[0]
+    weapon, horse = _cards("crossbow")[0], _cards("jueying")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(borrowed,), equip=(horse,)),
+            SeatSpec(hand=(dodge,), equip=(weapon,), hero="zhaoyun"),
+            SeatSpec(hero="zhugeliang"),
+        ],
+        deck=_deck_excluding(borrowed, dodge, weapon, horse),
+        turn_seat=0,
+    )
+    assert targets_within_attack_range(state, 1) == (2,), "持刀者够得着的只有空城诸葛亮"
+
+    engine = Engine.from_state(state, seed=1)
+    run_until(
+        engine,
+        [_Scripted(play_borrowed=True), _Scripted(), _Scripted()],
+        lambda e: weapon in e.state.player(0).hand,
+    )
+
+    assert not [
+        record
         for record in engine.records
-        if record.kind == "timing"
-        and record.timing is Timing.RESOLVE_AFTER_END
-        and slash in tuple(card.card_id for card in record.cards)
-    ]
-    slash_resolve_start = [
-        record.timing
-        for record in engine.records
-        if record.kind == "timing"
-        and record.timing is Timing.RESOLVE_START
-        and slash in tuple(card.card_id for card in record.cards)
-    ]
-    assert slash in engine.state.discard, "实体牌进弃牌堆"
-    assert slash_after_end == [Timing.RESOLVE_AFTER_END], "仍走『使用结算结束后』"
-    assert slash_resolve_start == [], "空目标不进入逐目标结算"
+        if record.kind == "query"
+        and getattr(record.query, "cause", None) is WindowCause.BORROWED_SWORD
+    ], "a 不可行 ⇒ 不发明询（转化候选也不得伪造无目标 a）"
+    assert weapon in engine.state.player(0).hand, "b：武器进使用者手牌"
+    assert engine.state.player(1).equip == []
+    assert dodge in engine.state.player(1).hand, "没有 a ⇒ 转化源原样留在手里"
 
 
 def test_a_play_phase_card_with_an_emptied_pool_is_simply_not_offered():

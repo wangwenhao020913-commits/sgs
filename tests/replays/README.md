@@ -13,21 +13,23 @@
 
 `≥30` 条只是门槛，不是目标。真源 = `tests/replays/distribution.py`：**类 → 最少条数**
 （人数骨架 5 / 判定与延时锦囊 4 / 无懈可击与响应链 5 / 死亡奖惩 3 / 多人濒死 3 /
-装备·距离·转化 4 / 普通锦囊与打出 4 = **28 条 M2 新增** + 武将技能 8 = **36 条新增**）
-+ M1 六条回归 + 脚本专项 2 条（票 17 的 `43`、W4-5 的 `44`）= **44 条**；判决"每类达标、每个
+装备·距离·转化 4 / 普通锦囊与打出 4 = **28 条 M2 主题新增** + 武将技能 8 = **36 条新增**）
++ M1 六条回归 + 脚本专项 5 条（`33` / `43` / `44` / `45` / `46`）= **46 条**；判决"每类达标、每个
 slug 恰属至少一类、索引 == 文件集合 == 类表"。
 
 ## 录制驱动（票 32 §1 / 票 14 §8）
 
 - M1 六条走 `ScenarioPlayer`：录制期精确迫使目标链发生（票 12 §3）。
-- **脚本专项**（票 17 起）同样走 `ScenarioPlayer`，但不属 M1 回归网：它们是"某个被动技能
-  在实机里凑不齐触发前提"的确定性复现（`43-double-sword-opposite-gender` = 需要某人装备
+- **脚本专项**（票 17 起）同样走 `ScenarioPlayer`，但不属 M1 回归网：它们是"某个机制
+  在随机驱动下凑不齐触发前提"的确定性复现（`43-double-sword-opposite-gender` = 需要某人装备
   【雌雄双股剑】、手里有【杀】、对**异性**目标使用，而标准牌堆只有一张雌雄）。驱动里
   **读局面事实**（性别）来挑目标，判据在 `goals.M1_GOALS`，录制期与回放期各验一遍。
   `44-preactivation-cancel-no-side-effect`（W4-5）证的是接入层本地态：进入预发动、按清单
   填好复合动作并交给引擎同一个校验器、然后**取消**，与"从不进预发动"的同种子局逐字节相等
   （录制期由 `scenarios.preactivation_cancel_pair`、门禁期由 `tests/test_replays.py` 各判一次）。
-- M2 28 条走**随机驱动 + 事后判据**：录制期用与产品同源的 `RandomPlayer`（测试侧种子子流，
+  W5-02b 起 `33`（借刀 a 支）也移入本表（裸候选收回后随机驱动产不出借刀动作，但它仍是
+  「普通锦囊与打出」的覆盖项），并新增 `45`（auto-b）与 `46`（窗口内转化【杀】）。
+- M2 27 条走**随机驱动 + 事后判据**：录制期用与产品同源的 `RandomPlayer`（测试侧种子子流，
   确定性）跑完整局，再断言"这条基准要证的事真的发生过"（判据在 `goals.py`）。
 - M3 8 条武将技能专项基准同样走随机驱动 + 事后判据，但用 `Scenario.heroes` **显式逐座位**
   指定武将（`heroes=()` 是"数据文件启用池随机发放"，无武将则缺省 `None`）；判据在
@@ -36,7 +38,7 @@ slug 恰属至少一类、索引 == 文件集合 == 类表"。
 
 ## 录制 M2 基准：先跑种子搜索（加基准 / 换种子时）
 
-**新增 M2 基准、或事后判据录制期没命中要换种子时，先读这里。** 从零搜出全部 28 条
+**新增 M2 基准、或事后判据录制期没命中要换种子时，先读这里。** 从零搜出全部 27 条
 `(n, seed)` 并核对下表写死的值：
 
 ```bash
@@ -46,7 +48,7 @@ PYTHONPATH=tests .venv/bin/python -m replays.seed_search
 它按三句话算法搜（`seed_search.py` 是唯一真源）：每个 `(n, seed)` 只跑一次引擎、把
 `goals.M2_GOALS` 全套一遍收集候选；每条基准只留**记录条数最少**的候选（更短的局 = 更小的
 golden + 更快的回放）；候选最少的基准先做贪心去重。**人数档**也写在那里：人数骨架
-`07`–`11` 锁死 4/5/6/7/8 人，其余 23 条在 4/5/6 人里自由选。
+`07`–`11` 锁死 4/5/6/7/8 人，其余 22 条在 4/5/6 人里自由选。
 
 退出码非零 = 有基准没搜到候选、或下表写死的值的**有效性**核对失败（`--verify` 单独跑）；
 要按票 32 Done when 的字面口径把"搜索 ≠ 写死值"也当失败，加 `--strict`。
@@ -94,7 +96,6 @@ golden + 更快的回放）；候选最少的基准先做贪心去重。**人数
 | `30-halberd-three-targets` | 方天画戟 · 多目标 | 装备/距离/转化 | `standard_108` | 6 | 此【杀】是你最后的手牌时可多指定至多两个目标 |
 | `31-play-card-response` | 打出链（南蛮 / 万箭 / 决斗） | 普通锦囊与打出 | `standard_108` | 4 | `PlayCard` 独立构造子：无目标、走 L6、**不占使用次数** |
 | `32-five-grains-selection` | 五谷丰登 · 选牌 | 普通锦囊与打出 | `standard_108` | 4 | `SELECT_CARDS` 选择面；X = 目标数、剩余牌进弃牌堆 |
-| `33-borrowed-sword-use-slash` | 借刀杀人 · 使用【杀】 | 普通锦囊与打出 | `standard_108` | 5 | `RESPOND/BORROWED_SWORD`，候选是 `UseCard`（使用而非打出） |
 | `34-dismantle-or-snatch-equip-judge` | 拆顺取装备区 / 判定区 | 普通锦囊与打出 | `standard_108` | 4 | `SELECT_CARDS` 选择面含装备区或判定区；判定区先入在前 |
 | `35-hero-damage-points` | 【遗计】逐点伤害 | 武将技能 | `standard_108` | 4 | B 族按点触发：一次多点伤害里同一时机被派发多次、各自问一次「是否发动」；`DAMAGE_AFTER_TAKE` 的两个时机实例 |
 | `36-hero-rejudge-cycle` | 【鬼才】改判循环 | 武将技能 | `standard_108` | 4 | I 族改判窗口（`WindowCause.REJUDGE`）：判定牌生效前打出代替；`JUDGE_CARD_BEFORE_EFFECT` 可循环重开 |
@@ -106,6 +107,9 @@ golden + 更快的回放）；候选最少的基准先做贪心去重。**人数
 | `42-hero-transform` | 转化族（武圣 / 龙胆 / 国色 / 急救） | 武将技能 | `standard_108` | 4 | H 族转化牌泛化：`UseCard` / `PlayCard` 的 `virtual_sources` 非空；来源实体牌经使用链搬进处理区再进弃牌堆 |
 | `43-double-sword-opposite-gender` | 【雌雄双股剑】异性目标的二选一 | 装备/距离/转化 | `standard_108` | 4 | 装备牌在出牌阶段的 `UseCard` + 【杀】的 `USE_AFTER_DESIGNATE_TARGET`：`SELECT_OPTION` 的**选择权在目标**（`actor` = 目标）、选项 `(discard_one, draw_one)`；答 `draw_one` ⇒ 使用者摸一张（`to_zone=hand(0)`、`reason=draw`） |
 | `44-preactivation-cancel-no-side-effect` | 预发动取消零副作用 | 武将技能 | `basic_53` | 2 | 接入层本地态不进记录流：`PLAY_PHASE` 随附【制衡】的预发动清单（`preactivations`）而整局没有任何被接受的 `ActivateSkill`；同种子下取消路径与「从不进预发动」路径的记录流逐字节相等 |
+| `45-borrowed-sword-auto-handover` | 【借刀杀人】a 不可行 → 自动交出武器 | 普通锦囊与打出 | `standard_108` | 2 | 借刀的附带指定清单（`designations` + `card_preactivations`，规则 6.5）；持刀者没有可用【杀】/**转化【杀】** ⇒ **不发**持刀者窗口，武器直接从装备区移进使用者手牌（`reason=LOSE`）；记录流里没有 `BORROWED_SWORD` 询问 |
+| `46-borrowed-sword-transform-slash` | 【借刀杀人】窗口内的转化【杀】 | 普通锦囊与打出、武将技能 | `standard_108` | 2 | 借刀窗口的目标固定为使用者指定的 Bn；持刀者按【龙胆】的预发动清单确认成 `UseCard(虚拟【杀】, (Bn,))`；转化技在响应窗口的清单只有**来源步**（`fixed_target=True`） |
+| `33-borrowed-sword-use-slash` | 借刀杀人 · 使用【杀】 | 普通锦囊与打出 | `standard_108` | 2 | 借刀的两步清单（`card_preactivations`）：使用者指定 [持刀者, Bn]，持刀者在 `RESPOND/BORROWED_SWORD` 窗口用真【杀】（`UseCard`，使用而非打出） |
 
 ## 记录面 v2（施工票 21 落地后）
 

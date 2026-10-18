@@ -71,7 +71,7 @@ NAMES: dict[str, tuple[str, str]] = {
     "30-halberd-three-targets": ("方天画戟 · 多目标", "此【杀】是你最后的手牌时可多指定至多两个目标"),
     "31-play-card-response": ("打出链（南蛮 / 万箭 / 决斗）", "`PlayCard` 独立构造子：无目标、走 L6、**不占使用次数**"),
     "32-five-grains-selection": ("五谷丰登 · 选牌", "`SELECT_CARDS` 选择面；X = 目标数、剩余牌进弃牌堆"),
-    "33-borrowed-sword-use-slash": ("借刀杀人 · 使用【杀】", "`RESPOND/BORROWED_SWORD`，候选是 `UseCard`（使用而非打出）"),
+    "33-borrowed-sword-use-slash": ("借刀杀人 · 使用【杀】", "借刀的两步清单（`card_preactivations`）：使用者指定 [持刀者, Bn]，持刀者在 `RESPOND/BORROWED_SWORD` 窗口用真【杀】（`UseCard`，使用而非打出）"),
     "34-dismantle-or-snatch-equip-judge": ("拆顺取装备区 / 判定区", "`SELECT_CARDS` 选择面含装备区或判定区；判定区先入在前"),
     # ---- 8. 武将技能（票 14 §8） ----
     "35-hero-damage-points": ("【遗计】逐点伤害", "B 族按点触发：一次多点伤害里同一时机被派发多次、各自问一次「是否发动」；`DAMAGE_AFTER_TAKE` 的两个时机实例"),
@@ -84,6 +84,8 @@ NAMES: dict[str, tuple[str, str]] = {
     "42-hero-transform": ("转化族（武圣 / 龙胆 / 国色 / 急救）", "H 族转化牌泛化：`UseCard` / `PlayCard` 的 `virtual_sources` 非空；来源实体牌经使用链搬进处理区再进弃牌堆"),
     "43-double-sword-opposite-gender": ("【雌雄双股剑】异性目标的二选一", "装备牌在出牌阶段的 `UseCard` + 【杀】的 `USE_AFTER_DESIGNATE_TARGET`：`SELECT_OPTION` 的**选择权在目标**（`actor` = 目标）、选项 `(discard_one, draw_one)`；答 `draw_one` ⇒ 使用者摸一张（`to_zone=hand(0)`、`reason=draw`）"),
     "44-preactivation-cancel-no-side-effect": ("预发动取消零副作用", "接入层本地态不进记录流：`PLAY_PHASE` 随附【制衡】的预发动清单（`preactivations`）而整局没有任何被接受的 `ActivateSkill`；同种子下取消路径与「从不进预发动」路径的记录流逐字节相等"),
+    "45-borrowed-sword-auto-handover": ("【借刀杀人】a 不可行 → 自动交出武器", "借刀的附带指定清单（`designations` + `card_preactivations`，规则 6.5）；持刀者没有可用【杀】/**转化【杀】** ⇒ **不发**持刀者窗口，武器直接从装备区移进使用者手牌（`reason=LOSE`）；记录流里没有 `BORROWED_SWORD` 询问"),
+    "46-borrowed-sword-transform-slash": ("【借刀杀人】窗口内的转化【杀】", "借刀窗口的目标固定为使用者指定的 Bn；持刀者按【龙胆】的预发动清单确认成 `UseCard(虚拟【杀】, (Bn,))`；转化技在响应窗口的清单只有**来源步**（`fixed_target=True`）"),
 }
 """slug → ``(中文场景名, 验证的规则条目)``：索引表里两列人工维护的**单一真源**。"""
 

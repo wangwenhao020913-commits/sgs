@@ -30,6 +30,7 @@ from sgs.state import (
     ActivateSkill,
     FrameKind,
     MoveReason,
+    Pass,
     PlayCard,
     RespondMode,
     SelectionSpec,
@@ -377,26 +378,46 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
 
 
 def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
-    """【借刀杀人】：持刀者**对合法目标使用【杀】**，否则把武器交给使用者。
+    """【借刀杀人】：持刀者**对 Bn 使用【杀】**，否则把武器交给使用者。
 
     持刀者的候选由 ``RespondMode.USE`` 生成（目标 = 其攻击范围内的合法【杀】目标）；
     主动放弃（``Pass``）即"交出装备区里的武器牌"。第 0 层已保证目标有武器。
 
     **Bn 由谁选**：官方 `A/card_scroll.txt:56` 写"你在选择 An 为目标的同时选择……
-    An 使用【杀】的合法目标 Bn"（B 由**使用者**指定）。W5-02a 起使用者把 Bn 烘进
-    ``UseCard.designations``、随 USE 帧带进本帧（``frame.data["designations"]``）：
-    **有**附带指定时目标窗口固定为 ``use_targets=(Bn,)``，持刀者只选 a（使用【杀】）
-    或 b（``Pass``）；**没有**时保持旧路径（持刀者从自己攻击范围里自选 Bn，U-27-1 的
-    程序化约定，暗发布期仍可走）。翻转（缺失即 fail-closed）在 W5-02b。
+    An 使用【杀】的合法目标 Bn"（B 由**使用者**指定）。W5-02b 起入口只有清单：使用者把
+    Bn 烘进 ``UseCard.designations``、随 USE 帧带进本帧（``frame.data["designations"]``），
+    目标窗口因此**固定为** ``use_targets=(Bn,)``，持刀者只选 a（使用【杀】）或 b（``Pass``）。
+    缺失 / 多于一个即 **fail-closed**（显式 ``ValueError``，不依赖 ``assert``）：没有
+    "持刀者自选 Bn"的回落路径了。
+
+    **a 不可行 ⇒ 自动 b**（`spec.md` §1.8）：先按**同一份候选生成器**预览这扇窗口，非
+    ``Pass`` 候选为空（手上没有可用【杀】/ 转化源，或 Bn 在结算时已不合法）⇒ **不问**，
+    直接走 b；武器已离装备区则 no-op。预览只读状态：不记询问、不耗序号、不搬牌。
     """
     holder = host.current_target(frame)
     source = frame.data["source"]
     designations = tuple(frame.data.get("designations", ()))
-    if designations:
-        assert len(designations) == 1, "借刀的附带指定恰好一个 Bn（W5-02a）"
-        use_targets = (designations[0],)
-    else:
-        use_targets = host.attack_range_targets(holder)
+    if len(designations) != 1:
+        # 显式异常而不是 assert（``python -O`` 会删掉 assert）：入口只经清单，
+        # 缺失 / 多于一个都是编程错误，必须 fail-closed，不得回落到"持刀者自选 Bn"。
+        raise ValueError(
+            "借刀的附带指定恰好一个 Bn（W5-02b）：入口只经清单，缺失即 fail-closed"
+        )
+    use_targets = (int(designations[0]),)
+    offers = [
+        action
+        for action in host.respond_candidates(
+            holder,
+            cause=WindowCause.BORROWED_SWORD,
+            required="slash",
+            target=holder,
+            mode=RespondMode.USE,
+            use_targets=use_targets,
+        )
+        if not isinstance(action, Pass)
+    ]
+    if not offers:
+        return _hand_over_weapon(host, frame, holder=holder, source=source)
     action = host.ask_respond(
         frame,
         holder,
@@ -418,17 +439,25 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
             use_timing=Timing.RESOLVE_AFTER_EFFECT,
         )
         return None
+    return _hand_over_weapon(host, frame, holder=holder, source=source)
+
+
+def _hand_over_weapon(host: Any, frame: Frame, *, holder: int, source: int) -> Any:
+    """b 支：把持刀者装备区里的武器移进**使用者**手牌（``reason=LOSE``）。
+
+    武器已不在装备区（例如结算期间被拆走）⇒ 什么都不做、也不报错（no-op）。
+    """
     weapon = host.weapon_of(holder)
-    if weapon is not None:
-        return host.move_in_frame(
-            frame,
-            (weapon,),
-            to_zone=ZoneRef(Zone.HAND, source),
-            reason=MoveReason.LOSE,
-            owner=source,
-            actor=holder,
-        )
-    return None
+    if weapon is None:
+        return None
+    return host.move_in_frame(
+        frame,
+        (weapon,),
+        to_zone=ZoneRef(Zone.HAND, source),
+        reason=MoveReason.LOSE,
+        owner=source,
+        actor=holder,
+    )
 
 
 def _resist_or_damage(

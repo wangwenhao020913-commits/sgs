@@ -5,7 +5,8 @@
 且 README 索引 == 文件集合 == 本表。
 
 - M1 的六条基准标 ``m1-regression``（回归网，不计入八类必需表）；
-- M2 的 28 条按七类必需表各就各位（一条 slug 可同属多类，本表里没有重叠）；
+- M2 主题的 28 条按七类必需表各就各位（一条 slug 可同属多类，本表里没有重叠；
+  W5-02b 起 ``33`` 由随机驱动改为脚本驱动，但类与条数不变）；
 - M3 的 8 条武将技能专项基准标 ``武将技能``（票 14 §8）。
 """
 
@@ -72,9 +73,14 @@ SLUG_CLASSES: dict[str, tuple[str, ...]] = {
     "43-double-sword-opposite-gender": ("装备/距离/转化",),
     # W4-5：被取消的是【制衡】（武将主动技）的预发动清单 ⇒ 归「武将技能」。
     "44-preactivation-cancel-no-side-effect": ("武将技能",),
+    # W5-02b：借刀入口只剩两步清单（随机驱动产不出借刀动作）⇒ 45/46 是脚本专项；
+    # 45 = auto-b（a 不可行 ⇒ 持刀者交出武器），46 = 窗口内的转化【杀】。
+    "45-borrowed-sword-auto-handover": ("普通锦囊与打出",),
+    "46-borrowed-sword-transform-slash": ("普通锦囊与打出", "武将技能"),
     # ---- 7. 普通锦囊与打出 ----
     "31-play-card-response": ("普通锦囊与打出",),
     "32-five-grains-selection": ("普通锦囊与打出",),
+    # W5-02b：借刀入口只剩清单 ⇒ 脚本驱动；仍计入「普通锦囊与打出」的覆盖。
     "33-borrowed-sword-use-slash": ("普通锦囊与打出",),
     "34-dismantle-or-snatch-equip-judge": ("普通锦囊与打出",),
     # ---- 8. 武将技能（票 14 §8：逐族一条专项基准） ----

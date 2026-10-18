@@ -242,6 +242,10 @@ def _play_phase_player(card_id: int, *, seat: int = 0):
             for action in query.legal_actions:
                 if isinstance(action, UseCard) and action.card.card_id == card_id:
                     return action
+            # 借刀（W5-02b）：裸候选已收回，合法动作只在附带指定池里。
+            for action in getattr(query, "designation_actions", ()):
+                if isinstance(action, UseCard) and action.card.card_id == card_id:
+                    return action
             for action in query.legal_actions:
                 if isinstance(action, EndPhase):
                     return action
@@ -767,13 +771,16 @@ def test_a_move_that_suspends_on_move_after_is_not_replayed_when_it_resumes():
     局面取 M3 基准同款的**多武将局**（含座位 0 的陆逊【连营】，它是 D 族提问的提供者），
     故本用例钉住的是基准里真实出现过的缺陷路径，而不是只在测试里成立的形状。
     """
-    # 种子 63 是**在当前实现下**仍能走到"承载帧上挂起"的那个（原用 76）。
-    # 76 依赖【遗计】在**别人**受伤时也触发（那是 bug，本轮已修）来把局面推成"陆逊手牌见底、
-    # 连营提问"；修掉之后同一颗种子的对局走向变了，承载帧挂起不再出现——测试会在
-    # `_advance` 的步数上限后读到 `_move_pending is None` 而以 TypeError 假红。
+    # 种子 63 → 26（W5-02b）：借刀裸候选收回 / 转化清单进借刀窗口后，63 那局的对局走向
+    # 改变，"承载帧上挂起"不再出现；按本仓纪律**重新选种**而不是放宽判据：26 在同样四名
+    # 武将下仍走到挂起，且记录条数更少（632）。判据一字未改。
+    # 更早的注释（保留来历）：种子 63 是**在当前实现下**仍能走到"承载帧上挂起"的那个
+    # （原用 76）。76 依赖【遗计】在**别人**受伤时也触发（那是 bug，本轮已修）来把局面推成
+    # "陆逊手牌见底、连营提问"；修掉之后同一颗种子的对局走向变了，承载帧挂起不再出现——
+    # 测试会在 `_advance` 的步数上限后读到 `_move_pending is None` 而以 TypeError 假红。
     # 换种子保住了这条判据针对的**回归路径**（挂起后不得重放 move_card / 幻影 delta）。
     engine = Engine.new_game(
-        seed=63,
+        seed=26,
         pack=PACK,
         heroes=("guojia", "caocao", "simayi", "luxun"),
         rule_config=RuleConfig(player_count=4),

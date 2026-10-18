@@ -1376,6 +1376,43 @@ class Engine:
             )
         )
 
+    def respond_candidates(
+        self,
+        actor: int,
+        *,
+        cause: WindowCause,
+        required: str | None = None,
+        target: int | None = None,
+        mode: RespondMode = RespondMode.PLAY,
+        use_targets: tuple[int, ...] = (),
+        providers_used: tuple[str, ...] = (),
+    ) -> tuple[Action, ...]:
+        """**预览**一次响应窗口的候选（W5-02b 的 auto-b）：不问、不记、不耗序号。
+
+        读的是与 :meth:`ask_respond` **同一个**候选生成器（``legal_actions_for``）——"此刻
+        有没有 a"因此不会与"窗口真发出来时给什么"漂移。补充说明两点：
+
+        - **只读状态**：不压帧、不搬牌、不抽随机数（转化候选的生成也全是纯谓词）；
+        - ``answers_seq`` 取 ``self._seq + 1``——这正是随后那次 ``ask`` 会拿到的序号；
+          预览的产物只是被丢弃的候选，序号在这里不承载语义，但也不造出一个"未来值"。
+        """
+        payload = RespondContext(
+            cause=cause,
+            required=required,
+            target=target,
+            window_frame=0,
+            mode=mode,
+            use_targets=tuple(use_targets),
+            providers_used=tuple(providers_used),
+        )
+        return legal_actions_for(
+            self.state,
+            actor,
+            QueryKind.RESPOND,
+            answers_seq=self._seq + 1,
+            payload=payload,
+        )
+
     def ask_selection(
         self,
         frame: Frame,
@@ -2396,21 +2433,19 @@ class Engine:
                         and action.skill_id in flagged
                     )
                 )
-            # W5-02a（暗发布）：借刀的**附带指定池**与从它派生的两步清单。两者都不进
-            # 记录流（``exclude``）：裸候选仍在 ``legal_actions``，旧路径原样可走；池只
-            # 服务第四条提交路，清单只服务 02b 起的接入层。
+            # W5-02b：借刀的**附带指定池**与从它派生的两步清单。两者都不进记录流
+            # （``exclude``）。裸候选已在候选生成处（`_play_phase`）收回 ⇒ 可用性只剩
+            # 这份清单；池服务第四条提交路。
             designation_actions = designation_actions_for(self.state, actor, seq)
             card_preactivation_manifests = card_preactivations(designation_actions)
         # W4-fix-2：转化候选从**暴露面**收回（`legal_actions` 里不再有"红牌直接当
         # 【杀】"），但**内部池**照旧保留——清单 / 确认 / 回放成员判定都读这一份，故
         # "清单 = 候选"没有第二份谓词。
         #
-        # W4-fix-6（A）：响应窗口按**语境**（`RespondContext`）而不是按询问种类区分——
-        # 【万箭】的转化【闪】是 `UseCard`，借刀杀人的"被迫使用"才是唯一要排除的例外。
-        response = payload if isinstance(payload, RespondContext) else None
-        internal_transform_actions = transform_candidates(
-            kind, actions, respond=response
-        )
+        # W4-fix-6（A）：响应窗口按**语境**（`RespondContext`）而不是按询问种类区分；
+        # W5-02b 起借刀杀人的"被迫使用"与其余响应窗口同形（目标由窗口固定 ⇒ 清单只有
+        # 来源步），故那条例外已删除。
+        internal_transform_actions = transform_candidates(kind, actions)
         transform_preactivations = conversion_preactivations(
             self.state,
             actor,

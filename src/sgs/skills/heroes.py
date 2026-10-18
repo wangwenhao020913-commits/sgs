@@ -43,11 +43,9 @@ from sgs.state import (
     GameState,
     PlayCard,
     QueryKind,
-    RespondContext,
     Step,
     StepPool,
     UseCard,
-    WindowCause,
     Zone,
 )
 
@@ -339,21 +337,18 @@ def is_transformed_action(action: Any) -> bool:
 def transform_candidates(
     kind: QueryKind,
     actions: Iterable[Any],
-    *,
-    respond: RespondContext | None = None,
 ) -> tuple[Any, ...]:
     """这次询问里**属于转化技入口**的候选（W4-3 的清单 / W4-fix-2 的确认都读这一份）。
 
     - 出牌阶段 / 【闪】窗口 / 求桃 / 响应窗口：``UseCard`` 与 ``PlayCard`` 都收
       （构造子由候选生成侧决定：``mode=PLAY`` 通常给 ``PlayCard``，但【万箭齐发】的
       "需要【闪】"走 ``CandidateScope.DODGE``，候选因此是 ``UseCard``）；
-    - **唯一的例外**是借刀杀人的"被迫使用"（``WindowCause.BORROWED_SWORD``）：
-      它的第二段预发动（选 Bn 目标）属 W5，本票不给清单入口，
-      故这一扇窗口的转化候选仍被收回（``transform_actions`` 为空）。
-      W4-fix-6 的 A 项：旧判据按 ``QueryKind.RESPOND`` 一刀切只收 ``PlayCard``，
-      把【万箭】窗口的 ``UseCard(闪)`` 一并删掉 ⇒ 赵云的龙胆**整个消失**；现在
-      按**响应语境**区分，只认这一条明确的"使用被强迫"例外；
     - 其余询问：没有转化技入口（返回空元组）。
+
+    W4-fix-6 的 A 项曾按**响应语境**排除借刀杀人的"被迫使用"（那时没有"使用牌"的第二段
+    预发动，清单表达不出"目标由窗口固定"）。W5-02b 起那扇窗口的清单就是
+    ``conversion_preactivations(..., fixed_target=True)`` 的**来源步**，确认解析成
+    ``UseCard(虚拟【杀】, (Bn,))``，故例外已删除——五条转化技在**所有**响应窗口同形。
 
     这份池是**内部**的：调用方（引擎）只把其中的转化牌（:func:`is_transformed_action`）
     从 ``legal_actions`` 收回，清单与确认校验仍从这一份读——"清单 = 候选"因此没有第二份谓词。
@@ -365,13 +360,6 @@ def transform_candidates(
         QueryKind.RESPOND,
     ):
         return ()
-    if kind is QueryKind.RESPOND:
-        if respond is None:
-            raise ValueError("RESPOND 询问必须给出 RespondContext")
-        if respond.cause is WindowCause.BORROWED_SWORD:
-            # W5 的例外：被迫使用【杀】的目标（Bn）由借刀使用者选，清单无法用
-            # "来源步 + 固定目标"表达；那一段入口 W5 才做，这里不 fail-open。
-            return ()
     return tuple(
         action
         for action in actions

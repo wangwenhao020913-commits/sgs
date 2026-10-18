@@ -1,7 +1,7 @@
 """种子搜索工具的**纯函数**判据（票 32）。
 
 搜索本身要跑上千局、不进 pytest；这里只钉住它的确定性部分：贪心分配语义、搜索空间
-形状，以及"写死的 28 个 ``(n, seed)`` 都落在声明的档位里"。唯一真的跑引擎的是
+形状，以及"写死的 M2 ``(n, seed)`` 都落在声明的档位里"。唯一真的跑引擎的是
 ``play_random`` 的一条冒烟判据（一局），用来钉住搜索与录制共用同一个驱动。
 """
 
@@ -40,7 +40,7 @@ def test_choose_gives_the_scarcest_baseline_first_pick_and_keeps_seeds_unique():
     assert chosen["rare"] == Candidate(50, 4, 1), "候选最少的先挑"
     assert chosen["common"] == Candidate(20, 4, 2), "最小候选被占用后顺延到下一个"
     assert len({(c.player_count, c.seed) for c in chosen.values()}) == len(chosen), (
-        "贪心必须让 28 个 (人数, 种子) 互不相同"
+        "贪心必须让各基准的 (人数, 种子) 互不相同"
     )
 
 
@@ -97,7 +97,7 @@ def test_tiers_cover_exactly_the_m2_baselines_and_pin_the_five_seat_counts():
 
 
 def test_every_recorded_seed_lies_inside_its_declared_tier():
-    """写死的 28 个 ``(n, seed)`` 必须落在 :data:`TIERS` 声明的搜索空间里。"""
+    """写死的 M2 基准 ``(n, seed)`` 必须落在 :data:`TIERS` 声明的搜索空间里。"""
     allowed = allowed_pairs(TIERS)
     for slug, scenario in scenarios.M2_SCENARIOS.items():
         assert (scenario.player_count, scenario.seed) in allowed[slug], slug

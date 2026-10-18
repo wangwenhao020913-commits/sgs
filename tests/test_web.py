@@ -2470,6 +2470,125 @@ def test_the_pending_payload_forwards_the_transform_preactivation_manifest() -> 
     assert steps[1]["pool"][0]["options"], "目标候选（seat:N）也下发了"
 
 
+def test_the_pending_payload_forwards_the_card_preactivation_manifest() -> None:
+    """W5-02b 跨线契约：借刀的**两步清单**由 ``pending_payload`` 显式下发。
+
+    写方 = 引擎的 ``_build_query``（``card_preactivations``，`exclude` 不进记录流），
+    读方 = ``app.js`` 的手牌入口（点借刀 ⇒ 按这张表进入两步清单）。键 = ``card.type``
+    （``borrowed_sword``，不是中文名），接入层**原样转发**、不另算一遍池。
+    """
+    pack = _context_pack()
+    borrowed = cards_of_type(pack, "borrowed_sword")[0]
+    weapon = cards_of_type(pack, "double_sword")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(equip=(weapon,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=tuple(
+            card_id
+            for card_id in range(len(pack.deck.cards))
+            if card_id not in {borrowed, weapon}
+        ),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    run_queries(
+        engine,
+        [PassPlayer() for _ in range(4)],
+        lambda running: running.pending is not None
+        and running.pending.kind == "PLAY_PHASE",
+    )
+
+    payload = pending_payload(engine.pending, human_seat=0)
+
+    assert payload is not None
+    assert set(payload["card_preactivations"]) == {"borrowed_sword"}, (
+        f"键 = 卡牌类型 id（两张借刀同型）：{set(payload['card_preactivations'])}"
+    )
+    steps = payload["card_preactivations"]["borrowed_sword"]
+    assert [step["name"] for step in steps] == ["seat", "seat"]
+    assert [step["order"] for step in steps] == [0, 1]
+    assert [step["min"] for step in steps] == [1, 1]
+    assert steps[0]["wording"] == "选择持刀者（装备区有武器、且有合法【杀】目标）"
+    assert steps[1]["wording"] == "选择【杀】的目标（由你指定）"
+    assert steps[0]["pool"] == [{"when": [], "options": ["seat:1"]}]
+    assert steps[1]["pool"] == [
+        {"when": ["seat:1"], "options": ["seat:0", "seat:2", "seat:3"]}
+    ], "Bn 子池按 when='seat:A' 分列"
+    assert steps == [
+        step.model_dump(mode="json")
+        for step in engine.pending.card_preactivations["borrowed_sword"]
+    ], "接入层原样转发，不重算池"
+    assert not any(
+        action.get("kind") == "UseCard"
+        and (action.get("card") or {}).get("type") == "borrowed_sword"
+        for action in payload["legal_actions"]
+    ), "裸借刀候选不在下发候选里（入口 = card_preactivations）"
+
+
+def test_the_borrowed_sword_prompt_names_bn_even_when_only_a_transform_can_use_it():
+    """W5-02b：持刀者只有转化【杀】时，投影的提示行仍写出使用者指定的 Bn。
+
+    真会话（与 ``pending_payload`` 同一条写入面）：座 0 按清单指定 [A=1, Bn=2]；
+    座 1 = 赵云、装备武器、手里只有一张【闪】（转化候选已从 ``legal_actions`` 收回）。
+    提示行必须从结算帧的 ``designations`` 读 Bn，不能只从候选的 ``targets`` 猜——否则
+    这条只可能由【龙胆】提供 a 的窗口会退化成"对合法目标"。
+    """
+    pack = _context_pack()
+    borrowed = cards_of_type(pack, "borrowed_sword")[0]
+    weapon = cards_of_type(pack, "crossbow")[0]
+    dodge = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(hand=(dodge,), equip=(weapon,), hero="zhaoyun"),
+            SeatSpec(),
+        ],
+        deck=tuple(
+            card_id
+            for card_id in range(len(pack.deck.cards))
+            if card_id not in {borrowed, weapon, dodge}
+        ),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    players = [PassPlayer() for _ in range(3)]
+    run_queries(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and running.pending.kind == "PLAY_PHASE",
+    )
+    play = engine.pending
+    designation = next(
+        action for action in play.designation_actions if action.designations == (2,)
+    )
+    engine.submit(designation)
+    run_queries(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and running.pending.kind == "RESPOND"
+        and running.pending.cause is WindowCause.BORROWED_SWORD,
+    )
+
+    window = engine.pending
+    assert window is not None and window.actor == 1
+    assert not any(
+        getattr(action, "targets", None) for action in window.legal_actions
+    ), "前提：这是一个没有真牌 a 的窗口（转化候选不在暴露面）"
+    context = query_context(engine, window)
+    assert context is not None
+    assert context["requirement"] == "对 2 号位使用【杀】，或交出武器", (
+        context["requirement"]
+    )
+
+
 def test_the_pending_payload_forwards_the_jijiu_manifest_in_the_peach_window() -> None:
     """求桃窗口：**急救**的清单 = 红色牌，**无目标步**（濒死者由窗口固定）。
 

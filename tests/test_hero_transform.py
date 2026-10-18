@@ -26,7 +26,6 @@ from sgs.effects import (
     legal_actions_for,
     locate,
     target_is_effective,
-    targets_within_attack_range,
 )
 from sgs.engine import Engine, IllegalActionError
 from sgs.skills import (
@@ -44,6 +43,7 @@ from sgs.state import (
     ActivateSkill,
     FrameKind,
     PlayCard,
+    PlayPhaseQuery,
     QueryKind,
     RespondContext,
     RespondMode,
@@ -1628,12 +1628,44 @@ def test_the_arrow_barrage_window_keeps_the_longdan_manifest_and_waives_the_dama
     assert SLASH in engine.state.discard, "来源【杀】走正常使用路径进弃牌堆"
 
 
-def test_the_borrowed_sword_forced_use_stays_out_of_the_manifest():
-    """借刀杀人的"被迫使用"是 W5 的例外：转化候选既不暴露、也不下发清单。
+def _borrowed_play_query(engine):
+    """引擎停在出牌阶段：返回询问（借刀入口 = 清单 + 内部附带指定池）。"""
+    assert engine.pending is not None and engine.pending.kind == QueryKind.PLAY_PHASE
+    assert isinstance(engine.pending, PlayPhaseQuery)
+    return engine.pending
 
-    这是 A 项修法的**负向**断言：除借刀之外所有响应窗口都保留转化入口，唯独这一条
-    仍按 W4-fix-2 收口（W5 才给"使用牌"的第二段预发动）。窗口里确实存在一条转化
-    ``UseCard`` 候选（直接问候选生成器可见），但引擎把它从暴露面与内部池一并收回。
+
+def _borrowed_window(state, designation: int = 2):
+    """驱动到**持刀者窗口**：先按清单指定 [A=1, Bn=designation]，再由持刀者决定 a / b。"""
+    engine = _run(
+        state,
+        [Scripted(), Scripted(), Scripted()],
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.PLAY_PHASE,
+    )
+    play = _borrowed_play_query(engine)
+    action = next(
+        candidate
+        for candidate in play.designation_actions
+        if candidate.designations == (designation,)
+    )
+    engine.submit(action)
+    run_until(
+        engine,
+        [Scripted(), Scripted(), Scripted()],
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.RESPOND
+        and running.pending.cause is WindowCause.BORROWED_SWORD,
+    )
+    return engine, play
+
+
+def test_the_borrowed_sword_holder_window_carries_the_source_only_transform_manifest():
+    """翻转（W5-02b）：借刀窗口的转化清单**下发了**，且只有来源步（目标固定 Bn）。
+
+    W4-fix-6 的 A 项曾把借刀窗口的转化候选从暴露面与内部池一并收回（W5 才做"使用牌"
+    的第二段预发动）。02b 把入口改成清单后，这扇窗口与其余响应窗口同形：
+    ``transform_preactivations[技能]`` = 来源步，确认解析成 ``UseCard(虚拟【杀】, (Bn,))``。
     """
     borrowed = _cards("borrowed_sword")[0]
     weapon = _cards("crossbow")[0]
@@ -1647,43 +1679,99 @@ def test_the_borrowed_sword_forced_use_stays_out_of_the_manifest():
         deck=_deck_excluding(borrowed, weapon, RED_DODGE),
         turn_seat=0,
     )
-    attacker = Scripted(
-        lambda query: _find(
-            query,
-            lambda action: isinstance(action, UseCard)
-            and action.card.card_id == borrowed,
-        )
-        if query.kind == QueryKind.PLAY_PHASE
-        else None
-    )
-    engine = _run(
-        state,
-        [attacker, Scripted(), Scripted()],
-        lambda running: running.pending is not None
-        and running.pending.kind == QueryKind.RESPOND
-        and running.pending.cause == WindowCause.BORROWED_SWORD,
-    )
-    query = engine.pending
-    assert query is not None and query.actor == 1
+    engine, play = _borrowed_window(state)
 
-    generated = legal_actions_for(
-        engine.state,
-        1,
-        QueryKind.RESPOND,
-        answers_seq=query.seq,
-        payload=RespondContext(
-            cause=WindowCause.BORROWED_SWORD,
-            required="slash",
-            mode=RespondMode.USE,
-            use_targets=targets_within_attack_range(engine.state, 1),
-        ),
+    assert not [
+        action
+        for action in play.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "borrowed_sword"
+    ], "裸借刀候选已收回：入口只剩清单"
+    assert [(step.name, step.min, step.max) for step in play.card_preactivations["borrowed_sword"]] == [
+        ("seat", 1, 1),
+        ("seat", 1, 1),
+    ], "外层两步清单：持刀者 A → Bn"
+    assert play.designation_actions, "内部附带指定池仍服务第 4 条提交路"
+
+    window = engine.pending
+    assert window is not None and window.actor == 1
+    assert window.cause is WindowCause.BORROWED_SWORD
+    assert _transformed_uses(window.legal_actions, "slash") == [], (
+        "转化候选仍从暴露面收回（入口 = 清单）"
     )
-    assert _transformed_uses(generated, "slash"), "候选生成器确实能转出【杀】（对照组）"
-    assert _transformed_uses(query.legal_actions, "slash") == [], (
-        "借刀窗口的转化候选仍从暴露面收回"
+    assert _transformed_uses(window.transform_actions, "slash"), (
+        "内部池必须保留那条转化【杀】——清单与确认都从它派生"
     )
-    assert query.transform_actions == (), "借刀窗口不进内部池（W5）"
-    assert query.transform_preactivations == {}, "借刀窗口不下发转化清单（W5）"
+    assert ZHAOYUN_SLASH in window.transform_preactivations, (
+        f"借刀窗口必须下发龙胆清单：{window.transform_preactivations}"
+    )
+    assert [step.name for step in window.transform_preactivations[ZHAOYUN_SLASH]] == ["card"], (
+        "目标由窗口固定 ⇒ 清单只有来源步"
+    )
+    assert {
+        action.targets
+        for action in window.legal_actions
+        if isinstance(action, UseCard) and not action.card.virtual_sources
+    } == set(), "这扇窗口里没有真牌候选"
+
+    confirm = ActivateSkill(
+        skill_id=ZHAOYUN_SLASH, picks=(RED_DODGE,), answers_seq=window.seq
+    )
+    assert confirm not in window.legal_actions
+    engine.submit(confirm)
+    accepted = engine.records[-1]
+    assert accepted.kind == "action" and accepted.accepted is True
+    resolved = accepted.action
+    assert isinstance(resolved, UseCard)
+    assert resolved.card.type == "slash" and resolved.card.virtual_sources == (RED_DODGE,)
+    assert resolved.targets == (2,), "目标固定为使用者指定的 Bn"
+
+
+_BORROWED_TRANSFORM_CASES = (
+    ("武圣", "guanyu", (RED_PEACH,), (RED_PEACH,), GUANYU),
+    ("龙胆", "zhaoyun", (RED_DODGE,), (RED_DODGE,), ZHAOYUN_SLASH),
+    ("丈八蛇矛", None, (RED_PEACH, RED_DODGE), (RED_PEACH, RED_DODGE), "equip.serpent_spear"),
+)
+"""``(标签, 武将, 手牌, 来源牌, 技能 id)``：三条转化技在借刀窗口里各确认一次。
+
+丈八蛇矛没有武将，武器就是它自己（``SERPENT``）；来源步要求**两张**手牌。
+"""
+
+
+def test_every_transformed_slash_in_the_borrowed_window_resolves_to_bn():
+    """【武圣】/【龙胆】/【丈八】的清单可确认，并解析成 ``UseCard(虚拟【杀】, (Bn,))``。"""
+    for label, hero, hand, picks, skill_id in _BORROWED_TRANSFORM_CASES:
+        equip = (SERPENT,) if skill_id == "equip.serpent_spear" else (_cards("crossbow")[0],)
+        borrowed = _cards("borrowed_sword")[0]
+        state = build_state(
+            pack=PACK,
+            seats=[
+                SeatSpec(hand=(borrowed,)),
+                SeatSpec(hand=hand, equip=equip, hero=hero),
+                SeatSpec(),
+            ],
+            deck=_deck_excluding(borrowed, *equip, *hand),
+            turn_seat=0,
+        )
+        engine, _play = _borrowed_window(state)
+        window = engine.pending
+        assert window is not None and window.cause is WindowCause.BORROWED_SWORD
+
+        steps = window.transform_preactivations[skill_id]
+        assert [step.name for step in steps] == ["card"], (
+            f"{label}：目标由窗口固定 ⇒ 清单只有来源步"
+        )
+        assert steps[0].min == len(picks), f"{label}：来源步张数 = 转化源的张数"
+
+        confirm = ActivateSkill(skill_id=skill_id, picks=picks, answers_seq=window.seq)
+        engine.submit(confirm)
+        accepted = engine.records[-1]
+        assert accepted.kind == "action" and accepted.accepted is True, f"{label}：确认被拒"
+        resolved = accepted.action
+        assert isinstance(resolved, UseCard), f"{label}：解析结果不是 UseCard"
+        assert resolved.card.type == "slash" and resolved.card.virtual_sources, (
+            f"{label}：解析出的不是转化【杀】"
+        )
+        assert resolved.targets == (2,), f"{label}：目标应固定为 Bn=2"
 
 
 def test_the_respond_window_hides_the_wusheng_play_but_still_carries_the_manifest():

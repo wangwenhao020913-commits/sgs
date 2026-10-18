@@ -779,6 +779,93 @@ def _preactivation_candidates(query: Query) -> tuple[ActivateSkill, ...]:
     )
 
 
+def _pick_designate(query: Query, options: tuple[str, ...]) -> str | None:
+    """借刀的 Bn：**已明敌人优先，其次体力最低**；同分取座位号小的（确定性）。
+
+    只读 ``query.view`` 的公开面（体力 / 已明身份），不猜隐藏身份。排序键的前半段复用
+    :func:`_score_seat_option` 的``conversion``口径（敌我估值），避免第二份"谁是敌人"的
+    判据；后半段再按体力 / 座位号决胜。
+    """
+    view = query.view
+
+    def rank(text: str) -> tuple[float, int, int]:
+        seat = int(str(text).removeprefix(_SEAT_PREFIX))
+        player = view.players[seat]
+        target_value = _score_seat_option(
+            query, text, skill_id="borrowed_sword:designate", conversion=True
+        )
+        return (target_value, -player.hp, -seat)
+
+    usable = [text for text in options if str(text).startswith(_SEAT_PREFIX)]
+    if not usable:
+        return None
+    return max(usable, key=rank)
+
+
+def _fill_card_manifest(query: Query, steps) -> tuple[int, int] | None:
+    """按**牌名清单**填外层两步：持刀者 A（``_score_seat_option``）→ Bn（敌人 / 低体力）。
+
+    清单形状由服务端下发（``card_preactivations[card.type]``，两步 ``seat``）；这一步
+    **不重算**合法性——A / Bn 都是服务端给出的候选，AI 只从中挑。任何一步填不出来 ⇒
+    ``None``（不交半成品）。
+    """
+    ordered = sorted(steps, key=lambda item: item.order)
+    if len(ordered) != 2:
+        return None
+    holder_row = _pool_row_for(ordered[0], ())
+    if holder_row is None or not holder_row.options:
+        return None
+    holder = _pick_options(
+        ordered[0], tuple(holder_row.options), query, "borrowed_sword", conversion=True
+    )
+    if not holder:
+        return None
+    designate_row = _pool_row_for(ordered[1], tuple(holder))
+    if designate_row is None or not designate_row.options:
+        return None
+    designate = _pick_designate(query, tuple(str(text) for text in designate_row.options))
+    if designate is None:
+        return None
+    return (
+        int(str(holder[0]).removeprefix(_SEAT_PREFIX)),
+        int(designate.removeprefix(_SEAT_PREFIX)),
+    )
+
+
+def _card_preactivation_candidates(query: Query) -> tuple[UseCard, ...]:
+    """本次出牌阶段可填的**附带指定**使用（W5-02b 借刀）。
+
+    键 = ``card.type``：手牌里每张同型牌 × 按清单填出的 ``(A, Bn)`` 各造一条
+    ``UseCard(card, targets=(A,), designations=(Bn,))``。提交后由引擎的第四条路按
+    **同一份附带指定池**校验（AI 不另写合法性）；持刀者窗口的 a / b 由它自己那一步
+    应答，不在这里。
+    """
+    if QueryKind(query.kind) is not QueryKind.PLAY_PHASE:
+        return ()
+    manifests = dict(getattr(query, "card_preactivations", None) or {})
+    if not manifests:
+        return ()
+    by_type: dict[str, list[CardRef]] = {}
+    for card in query.view.self_hand:
+        by_type.setdefault(card.type, []).append(card)
+    out: list[UseCard] = []
+    for card_type in sorted(manifests):
+        filled = _fill_card_manifest(query, manifests[card_type])
+        if filled is None:
+            continue
+        holder, designate = filled
+        for card in by_type.get(card_type, ()):
+            out.append(
+                UseCard(
+                    card=card,
+                    targets=(holder,),
+                    designations=(designate,),
+                    answers_seq=query.seq,
+                )
+            )
+    return tuple(out)
+
+
 def _score_arrange(query: Query, action: Action) -> float:
     """``ARRANGE``：最有用的牌留顶（按牌名价值表；越靠顶权重越高）。"""
     assert isinstance(query, ArrangeQuery)
@@ -1026,6 +1113,9 @@ class HeuristicPlayer:
                 )
             ]
             actions.extend(composites)
+        # W5-02b：借刀的**外层两步清单**（附带指定）——复合使用同样不在候选里，
+        # AI 读 ``card_preactivations`` 自己填 A / Bn；持刀者窗口的 a / b 由后续询问应答。
+        actions.extend(_card_preactivation_candidates(query))
         if not actions:
             raise ValueError(f"{query.kind} 询问没有候选行动，参与者无法应答")
         scorer = _SCORERS[QueryKind(query.kind)]

@@ -1,6 +1,6 @@
 """M2 基准的**事后判据**（票 32 §1）。
 
-M1 的六条基准用 ``ScenarioPlayer`` 在**录制期**迫使目标链发生；M2 的 28 条改用
+M1 的六条基准用 ``ScenarioPlayer`` 在**录制期**迫使目标链发生；M2 的 27 条改用
 **随机驱动 + 事后判据**：录制时用与产品同源的 :class:`~sgs.agents.RandomPlayer`
 （测试侧种子子流，确定性）跑完一整局，再断言"这条基准要证的那件事真的发生过"。
 磁带冻结的是**决策内容**，回放期一律 :class:`~sgs.agents.TapePlayer`，与驱动无关。
@@ -13,7 +13,17 @@ from __future__ import annotations
 
 from sgs.data import Identity
 from sgs.engine import Engine, JournalRecord
-from sgs.state import ActivateSkill, ArrangeCards, MoveReason, PlayCard, QueryKind, UseCard, WindowCause, Zone
+from sgs.state import (
+    ActivateSkill,
+    ArrangeCards,
+    MoveReason,
+    PlayCard,
+    QueryKind,
+    SlotKind,
+    UseCard,
+    WindowCause,
+    Zone,
+)
 from sgs.timing import Timing
 
 __all__ = [
@@ -189,7 +199,7 @@ def _multi_peach_window(engine: Engine) -> int:
 
 
 # ---------------------------------------------------------------------------
-# 28 条 M2 基准的判据
+# 27 条 M2 基准的判据
 # ---------------------------------------------------------------------------
 
 
@@ -394,10 +404,9 @@ M2_GOALS = {
     "30-halberd-three-targets": _halberd_three_targets,
     "31-play-card-response": _play_card,
     "32-five-grains-selection": _five_grains,
-    "33-borrowed-sword-use-slash": _borrowed_sword,
     "34-dismantle-or-snatch-equip-judge": _peel_equip_or_judge,
 }
-"""28 条 M2 基准的 slug → 事后判据。"""
+"""27 条 M2 基准的 slug → 事后判据。"""
 
 
 # ---------------------------------------------------------------------------
@@ -650,9 +659,71 @@ def _preactivation_cancel_records_nothing(engine: Engine) -> bool:
     return not _skill_activations(engine, PREACTIVATION_CANCEL_SKILL)
 
 
+def _borrowed_use_with_designation(engine: Engine) -> bool:
+    """借刀以**附带指定**的复合使用落账过（W5-02b 起入口只剩清单）。"""
+    return any(
+        isinstance(record.action, UseCard)
+        and record.action.card.type == "borrowed_sword"
+        and record.action.designations
+        for record in _accepted(engine)
+    )
+
+
+def _borrowed_auto_handover(engine: Engine) -> bool:
+    """auto-b（脚本基准 45）：**没有持刀者窗口**，但武器从装备区进了使用者手牌。
+
+    判据三条，缺一不可：
+    1. 借刀以带 ``designations`` 的复合使用落账（入口 = 清单）；
+    2. 整局**没有** ``BORROWED_SWORD`` 询问——a 不可行 ⇒ 不 ``ask_respond``；
+    3. 一次 ``reason = LOSE`` 的装备区 → 手牌移动，武器牌进座位 0（使用者）。
+    """
+    if not _borrowed_use_with_designation(engine):
+        return False
+    if _window_cause(engine, WindowCause.BORROWED_SWORD):
+        return False
+    return any(
+        move.reason is MoveReason.LOSE
+        and move.from_zone is not None
+        and move.from_zone.zone is Zone.EQUIP
+        and move.to_zone is not None
+        and move.to_zone.zone is Zone.HAND
+        and move.to_zone.seat == 0
+        and any(card.slot is SlotKind.WEAPON for card in move.cards)
+        for move in _card_moves(engine)
+    )
+
+
+def _borrowed_transform_slash(engine: Engine) -> bool:
+    """借刀窗口里的**转化【杀】**（脚本基准 46）：窗口开过，且之后落账的是虚拟【杀】。
+
+    判据只读记录流：``BORROWED_SWORD`` 询问之后有一条被接受的 ``UseCard``，
+    牌面是【杀】、``virtual_sources`` 非空（转化牌）、目标非空（固定为 Bn）。
+    """
+    windows = [
+        record.seq
+        for record in _queries(engine)
+        if record.query.kind == QueryKind.RESPOND
+        and record.query.cause is WindowCause.BORROWED_SWORD
+    ]
+    if not windows:
+        return False
+    first = min(windows)
+    return any(
+        record.seq > first
+        and isinstance(record.action, UseCard)
+        and record.action.card.type == "slash"
+        and record.action.card.virtual_sources
+        and record.action.targets
+        for record in _accepted(engine)
+    )
+
+
 M1_GOALS = {
+    "33-borrowed-sword-use-slash": _borrowed_sword,
     "43-double-sword-opposite-gender": _double_sword_chain,
     "44-preactivation-cancel-no-side-effect": _preactivation_cancel_records_nothing,
+    "45-borrowed-sword-auto-handover": _borrowed_auto_handover,
+    "46-borrowed-sword-transform-slash": _borrowed_transform_slash,
 }
 """脚本基准的 slug → 事后判据（票 17 起；只收"脚本驱动 + 需要事后确认"的那条）。
 

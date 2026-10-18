@@ -32,7 +32,7 @@ PACK = load_content_pack(deck_profile="basic_53")
 """回放对照用的档位：M1 的 ``play_standard`` 走 53 张切片（票 16 §9）。"""
 REPLAYS_DIR = Path(__file__).resolve().parent / "replays"
 
-REPLAYS_TOTAL_LIMIT_BYTES = 48 * 1024 * 1024
+REPLAYS_TOTAL_LIMIT_BYTES = 52 * 1024 * 1024
 REPLAY_SINGLE_LIMIT_BYTES = 4 * 1024 * 1024
 """``tests/replays/*.jsonl``（**基准记录流**，不含 README / 生成器代码）的体积预算（retro-02）：
 总量 48 MiB、单文件 4 MiB。
@@ -77,7 +77,15 @@ REPLAY_SINGLE_LIMIT_BYTES = 4 * 1024 * 1024
 ``11 / 38 / 40`` 重新选种（旧种子不再命中判据 / 11 的记录涨过单文件预算），``29 / 42`` 改**脚本驱动**
 （随机驱动产不出转化动作，脚本按预发动清单确认一次），``37 / 39 / 43 / 44`` 同种子重录（首个分歧
 都是"查询少了转化候选"，其后是下游动作序列 / 记录条数的变化）。``goals.py`` 一字未改，
-确认落账的仍是那条普通 ``UseCard(虚拟牌, 目标)`` / ``PlayCard``。"""
+确认落账的仍是那条普通 ``UseCard(虚拟牌, 目标)`` / ``PlayCard``。
+
+**W5-02b（借刀翻转）后的实测**：46 条合计 **51,080,844 字节 ≈ 48.71 MiB**，最大单文件
+**3,334,043 字节 ≈ 3.18 MiB**（``10-identity-7p-lord-win.jsonl``）——**总预算 48 → 52 MiB 的
+一次显式上调**（单文件上限仍为 4 MiB）。上调的两条理由都在实测里：一是新增两条合法基准
+（45 auto-b / 46 借刀窗口内的转化【杀】，合计约 1.6 MiB），二是 20 份受影响录像的重录。
+单文件绊线没有越过：10 / 11 / 38 在 02b 的候选面变化后旧种子不再命中判据（10 / 11 还会越过
+4 MiB），均按本模块纪律**重新选种**而不是调单文件上限（10: 49 → 68、11: 99 → 35、
+38: 364 → 388，判据与人数档不变）。"""
 
 
 def _write(path: Path, text: str) -> Path:
@@ -478,7 +486,11 @@ M2_BASELINES = tuple(
     and name not in set(M3_BASELINES)
     and name not in set(SCRIPTED_BASELINES)
 )
-"""M2 的 28 条基准：分布表里除 M1 六条、M3 八条与脚本专项以外的全部 slug（票 32 §1）。"""
+"""M2 的 27 条基准：分布表里除 M1 六条、M3 八条与脚本专项以外的全部 slug（票 32 §1）。
+
+W5-02b：``33-borrowed-sword-use-slash`` 随借刀入口的翻转移入脚本专项（随机驱动产不出借刀
+动作），故 M2 由 28 条变为 27 条。
+"""
 
 
 def test_the_baseline_distribution_meets_every_category_minimum() -> None:
@@ -509,7 +521,7 @@ def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
     assert files == set(scenarios.SCENARIOS), "场景表与基准文件集合互相等于"
     assert set(M2_BASELINES) == files - set(FROZEN_BASELINES) - set(M3_BASELINES) - set(
         SCRIPTED_BASELINES
-    ), "M2 恰为 44 − 6 − 8 − 2 = 28 条"
+    ), "M2 恰为 46 − 6 − 8 − 5 = 27 条"
     assert set(M3_BASELINES) == set(scenarios.M3_SCENARIOS) == set(goals.M3_GOALS), (
         "M3 的 8 条专项基准必须与场景表、判据表三方相等"
     )
@@ -519,7 +531,7 @@ def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
 
 
 def test_every_m2_baseline_has_an_after_the_fact_goal() -> None:
-    """28 条 M2 基准都必须有事后判据（goals.py 的登记不得漏）。"""
+    """27 条 M2 基准都必须有事后判据（goals.py 的登记不得漏）。"""
     assert set(M2_BASELINES) == set(goals.M2_GOALS), (
         "M2 基准集合与 goals.M2_GOALS 的键集必须相等"
     )

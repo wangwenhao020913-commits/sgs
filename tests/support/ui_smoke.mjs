@@ -3254,4 +3254,175 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(fankui && { passive: fankui.ui.passive }));
 }
 
+/* W5-02b：借刀杀人的两个入口（合成载荷，验**读取方**与服务端下发的键逐字一致）。
+ *
+ * ① 手牌入口：`pending.card_preactivations[card.type]`（键 = `borrowed_sword`）两步清单；
+ *    点手牌 ⇒ 本地态两步 ⇒ 确认拼 `UseCard(card, targets=(A,), designations=(Bn,))`，
+ *    **不拼虚拟牌 id**、也不要求在 `legal_actions` 里（服务端池成员校验）。
+ * ② 持刀者窗口：目标固定 Bn；转化清单由 `preactivations[技能]` 下发（来源步）；
+ *    `Pass` = b，按钮文案「交出武器」。
+ */
+{
+  const borrowed = { ...synthCard(31, "借刀杀人"), type: "borrowed_sword" };
+  const cardPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 91,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 91 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+    card_preactivations: {
+      borrowed_sword: [
+        {
+          name: "seat", zones: [], min: 1, max: 1, order: 0,
+          wording: "选择持刀者（装备区有武器、且有合法【杀】目标）",
+          pool: [{ when: [], options: ["seat:1"] }],
+        },
+        {
+          name: "seat", zones: [], min: 1, max: 1, order: 1,
+          wording: "选择【杀】的目标（由你指定）",
+          pool: [{ when: ["seat:1"], options: ["seat:0", "seat:2"] }],
+        },
+      ],
+    },
+  };
+  const cardView = synthView(cardPending);
+  cardView.snapshot.self_hand = [borrowed];
+  ui.state.view = cardView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(cardView);
+
+  const cardChipOf = () => $("t-hand").children[0];
+  const seatBoxOf = (seat) => $("t-seats").children.find(
+    (c) => c.getAttribute("data-seat") === String(seat),
+  );
+  check("㉿BS1 借刀手牌可点（可用性来自 card_preactivations，不在 candidate_index）",
+    ui.cardFace(cardPending, borrowed).selectable === true
+      && !cardChipOf().classList.contains("dis"),
+    `selectable=${ui.cardFace(cardPending, borrowed).selectable}`);
+
+  const beforeCard = calls.length;
+  (cardChipOf().listeners.click || []).forEach((fn) => fn({ target: cardChipOf() }));
+  check("㉿BS2 点借刀 = 进入两步清单（本地态、零提交、询问原样还在）",
+    !!ui.state.preactivation && ui.state.preactivation.cardEntry === true
+      && ui.state.preactivation.cardId === 31
+      && ui.state.preactivation.steps.length === 2
+      && ui.state.view.pending === cardPending
+      && calls.length === beforeCard,
+    `pre=${JSON.stringify(ui.state.preactivation && {
+      cardEntry: ui.state.preactivation.cardEntry,
+      cardId: ui.state.preactivation.cardId,
+      steps: ui.state.preactivation.steps.length,
+    })} calls=${calls.length - beforeCard}`);
+
+  check("㉿BS3 第 1 步只亮持刀者座位 1（Bn 子池要等 A 选完）",
+    seatBoxOf(1).classList.contains("targetable")
+      && !seatBoxOf(2).classList.contains("targetable"),
+    `seat1=${seatBoxOf(1).classList.contains("targetable")} seat2=${seatBoxOf(2).classList.contains("targetable")}`);
+  (seatBoxOf(1).listeners.click || []).forEach((fn) => fn({ target: seatBoxOf(1) }));
+  check("㉿BS4 选持刀者后自动进第 2 步：Bn 子池 = seat:0 / seat:2",
+    ui.state.preactivation.cursor === 1
+      && JSON.stringify(ui.preactivationOptions(ui.state.preactivation, 1)) === '["seat:0","seat:2"]',
+    `cursor=${ui.state.preactivation.cursor} options=${JSON.stringify(ui.preactivationOptions(ui.state.preactivation, 1))}`);
+  (seatBoxOf(2).listeners.click || []).forEach((fn) => fn({ target: seatBoxOf(2) }));
+  const cardAction = ui.buildAction();
+  check("㉿BS5 确认 = UseCard(实体借刀, targets=(A,), designations=(Bn,))，不拼虚拟 id",
+    !!cardAction && cardAction.kind === "UseCard"
+      && cardAction.card.card_id === 31
+      && JSON.stringify(cardAction.targets) === "[1]"
+      && JSON.stringify(cardAction.designations) === "[2]"
+      && cardAction.answers_seq === 91,
+    JSON.stringify(cardAction));
+  check("㉿BS6 提交按钮在清单填完 + 组合已拼出时可点",
+    $("btn-submit").disabled === false && $("btn-submit").textContent === "确认使用",
+    `disabled=${$("btn-submit").disabled} label="${$("btn-submit").textContent}"`);
+  const beforeCancel = calls.length;
+  ui.cancelOrClear();
+  check("㉿BS7 取消手牌清单 = 回到同一层询问、零 action 提交",
+    ui.state.preactivation === null && calls.length === beforeCancel,
+    `pre=${ui.state.preactivation} calls=${calls.length - beforeCancel}`);
+}
+
+{
+  const dodge = { ...synthCard(51, "闪"), type: "dodge" };
+  const realSlash = { ...synthCard(52, "杀"), type: "slash" };
+  const sourceStep = {
+    name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+    pool: [{ when: [], options: ["51"] }],
+  };
+  const holderPending = {
+    kind: "RESPOND", actor: 1, seq: 92, cause: "BORROWED_SWORD", required: "slash",
+    prompt: "【借刀杀人】：对 2 号位使用【杀】，或交出武器。",
+    legal_actions: [
+      { kind: "UseCard", card: realSlash, targets: [2], answers_seq: 92 },
+      { kind: "Pass", answers_seq: 92 },
+    ],
+    candidate_index: {
+      52: { card: realSlash, pool: [2], min_targets: 1, max_targets: 1, combos: [[2]] },
+    },
+    option_seats: {},
+    context: { requirement: "对 2 号位使用【杀】，或交出武器" },
+    preactivations: { "hero.zhaoyun.longdan": [sourceStep] },
+    preactivation: [],
+  };
+  const holderView = synthView(holderPending);
+  holderView.snapshot.self_hand = [dodge];
+  holderView.heroes = { 0: "guanyu", 1: "zhaoyun", 2: "diaochan" };
+  holderView.skills = [{
+    skill_id: "hero.zhaoyun.longdan", name: "龙胆", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: false, preactivated: false,
+    ui: { requirement: "你可以把【杀】当【闪】、把【闪】当【杀】使用或打出。", convert_sources: [51] },
+  }];
+  ui.state.view = holderView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(holderView);
+
+  const passButton = $("t-options").children.find((c) => c.textContent === "交出武器");
+  check("㉿BS8 持刀者窗口：`Pass` 按钮文案 =「交出武器」（不是「放弃」）",
+    !!passButton,
+    `options=${$("t-options").children.map((c) => c.textContent).join(" / ")}`);
+  check("㉿BS9 持刀者窗口：提示行写出「对 Bn 使用【杀】，或交出武器」",
+    $("t-prompt").textContent.includes("交出武器")
+      && $("t-prompt").textContent.includes("2 号位"),
+    `prompt="${$("t-prompt").textContent}"`);
+
+  const longdan = $("t-skills").children.find(
+    (b) => b.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
+  check("㉿BS10 持刀者窗口下发转化清单：龙胆按钮可点、步骤数 1（只有来源步）",
+    !!longdan && longdan.disabled === false
+      && longdan.getAttribute("data-preactivation") === "1",
+    `disabled=${longdan && longdan.disabled} pre=${longdan && longdan.getAttribute("data-preactivation")}`);
+  (longdan.listeners.click || []).forEach((fn) => fn({ target: longdan }));
+  const symbol = $("t-hand").children[0];
+  (symbol.listeners.click || []).forEach((fn) => fn({ target: symbol }));
+  ui.advancePreativation();
+  const transformed = ui.buildAction();
+  check("㉿BS11 清单填完 = ActivateSkill(龙胆, 来源=实体【闪】)，目标由窗口固定（choices 为空）",
+    !!transformed && transformed.kind === "ActivateSkill"
+      && transformed.skill_id === "hero.zhaoyun.longdan"
+      && JSON.stringify(transformed.picks) === "[51]"
+      && JSON.stringify(transformed.choices) === "[]",
+    JSON.stringify(transformed));
+  ui.cancelOrClear();
+
+  // 只有 `Pass` 的窗口（持刀者没有 a）走 direct 分支：文案同样写「交出武器」。
+  const directPending = {
+    ...holderPending,
+    legal_actions: [{ kind: "Pass", answers_seq: 92 }],
+    candidate_index: {},
+    preactivations: {},
+  };
+  const directView = synthView(directPending);
+  directView.snapshot.self_hand = [];
+  ui.state.view = directView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(directView);
+  check("㉿BS12 只有一个 `Pass` 时，direct 文案也写「交出武器」",
+    $("t-choice").textContent.includes("交出武器"),
+    `choice="${$("t-choice").textContent}"`);
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
