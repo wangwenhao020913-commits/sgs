@@ -49,6 +49,7 @@ from sgs.skills import (
     is_transformed_action,
     resolve_conversion_confirmation,
     transform_candidates,
+    transformed_card,
 )
 from sgs.skills.preactivation import (
     flow_for,
@@ -1162,6 +1163,88 @@ def test_a_conversion_skills_target_step_is_derived_hostile_without_a_literal_id
     assert action.skill_id == "hero.huatuo.jijiu"
     assert action.choices == ("seat:1",), (
         "转化技的目标步应挑已明的敌人（主公）；落进帮助分支会挑座位 2"
+    )
+
+
+def test_the_ai_fills_a_multi_select_seat_step_up_to_its_max():
+    """W7-01b：多选座位步按 ``max`` 填满，**首项必取**（其余按敌意估值降序）。
+
+    合成清单 = 一张【闪】当【杀】的来源步 + ``min=1 / max=2`` 的目标步（候选组合
+    ``(2,)`` / ``(2,1)`` / ``(2,3)``，池顺序 ``seat:2, seat:1, seat:3``）：首项
+    ``seat:2`` 身份未知（0 分）、``seat:1`` 是已明敌人（正分）——按分值贪心会漏掉首项，
+    而首项正是候选排序的自然结果（借刀窗口里就是 Bn）。填出的动作由**同一个**确认解析器
+    放行，解析成 ``(2, 1)``。
+    """
+    dodge = _red_card("dodge")
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(dodge,), hero="zhaoyun", identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LORD),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(dodge),
+        turn_seat=0,
+    )
+    card = transformed_card(state, (dodge,), "slash")
+    actions = tuple(
+        UseCard(card=card, targets=combo, answers_seq=1)
+        for combo in ((2,), (2, 1), (2, 3))
+    )
+    steps = conversion_preactivations(state, 0, actions)["hero.zhaoyun.longdan"]
+    target = steps[-1]
+    assert (target.min, target.max) == (1, 2), "目标步 = 1..最长目标数"
+    assert tuple(target.pool[0].options) == ("seat:2", "seat:1", "seat:3")
+    query = _play_phase_query(state).model_copy(
+        update={
+            "legal_actions": (EndPhase(answers_seq=1),),
+            "transform_preactivations": {"hero.zhaoyun.longdan": steps},
+            "transform_actions": actions,
+        }
+    )
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, ActivateSkill), f"该填转化清单，实得 {action!r}"
+    assert action.skill_id == "hero.zhaoyun.longdan"
+    assert action.picks == (dodge,), "来源步 = 那张【闪】"
+    assert action.choices[0] == "seat:2", "首项必取（尽管 seat:1 的分值更高）"
+    assert len(action.choices) == 2, f"填满到 max：{action.choices}"
+    assert set(action.choices) == {"seat:2", "seat:1"}
+    resolved = resolve_conversion_confirmation(
+        state, 0, "hero.zhaoyun.longdan", action.picks, action.choices, actions, steps=steps
+    )
+    assert not isinstance(resolved, str), f"AI 填出的多目标组合被确认解析器拒绝：{resolved}"
+    assert resolved.targets == (2, 1)
+
+
+def test_the_ai_fill_of_an_existing_single_select_seat_step_is_unchanged():
+    """对照面（W7-01b 不多做）：``min == max`` 的既有座位步仍只填一个、按分值挑。
+
+    【借刀杀人】外层的两步清单都是 ``min == max == 1``；``_pick_options`` 的新分支只认
+    ``max > min`` 的座位步，故 47 份金录像与既有动作序列不受影响。
+    """
+    borrowed = _ids("borrowed_sword")[0]
+    weapon = _ids("double_sword")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(equip=(weapon,)),
+            SeatSpec(hp=2),
+        ],
+        deck=_deck_excluding(borrowed, weapon),
+        turn_seat=0,
+    )
+    query = _play_phase_with_preactivations(state)
+    assert "borrowed_sword" in query.card_preactivations, "前提：清单下发"
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, UseCard) and action.card.type == "borrowed_sword"
+    assert action.targets == (1,) and action.designations == (2,), (
+        "两步单选清单的填法不变：A 取唯一持刀者、Bn 取体力最低的座位 2"
     )
 
 

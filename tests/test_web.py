@@ -35,11 +35,14 @@ from sgs.state import (  # noqa: E402
     FrameKind,
     PeachQuery,
     Phase,
+    PlayPhaseQuery,
     RespondQuery,
     SelectCardsQuery,
     SelectionSpec,
     SelectOptionQuery,
     Slot,
+    Step,
+    StepPool,
     WindowCause,
     Zone,
     ZoneRef,
@@ -2719,6 +2722,68 @@ def test_the_pending_payload_forwards_the_transform_preactivation_manifest() -> 
     )
     assert steps[0]["pool"][0]["when"] == []
     assert steps[1]["pool"][0]["options"], "目标候选（seat:N）也下发了"
+
+
+def test_the_pending_payload_forwards_a_multi_target_transform_manifest() -> None:
+    """W7-01b 跨线契约：目标步 ``1..max``、逐来源组全部目标、``wording`` 都**原样转发**。
+
+    写方 = ``conversion_preactivations``（本测试直接给一份与它同形的 ``Step``；多目标候选的
+    生成归 W7-02），读方 = ``app.js`` 的清单渲染 + 座位多选。接入层不重算池、不改键。
+    """
+    pack = _context_pack()
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(), SeatSpec(), SeatSpec(), SeatSpec()],
+        deck=tuple(range(len(pack.deck.cards))),
+        turn_seat=0,
+    )
+    source = cards_of_type(pack, "dodge")[0]
+    steps = (
+        Step(
+            name="card",
+            zones=(Zone.HAND,),
+            min=1,
+            max=1,
+            pool=(StepPool(when=(), options=(str(source),)),),
+            order=0,
+        ),
+        Step(
+            name="seat",
+            min=1,
+            max=3,
+            pool=(
+                StepPool(
+                    when=(str(source),),
+                    options=("seat:2", "seat:1", "seat:3"),
+                ),
+            ),
+            order=1,
+            wording="选择【杀】的目标",
+        ),
+    )
+    query = PlayPhaseQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="出牌阶段：使用一张牌，或结束出牌阶段。",
+        legal_actions=(),
+        view=project(state, 0),
+        transform_preactivations={"hero.zhaoyun.longdan": steps},
+    )
+
+    payload = pending_payload(query, human_seat=0)
+
+    assert payload is not None
+    forwarded = payload["preactivations"]["hero.zhaoyun.longdan"]
+    assert forwarded == [step.model_dump(mode="json") for step in steps], (
+        "接入层原样转发：不重算池、不改键"
+    )
+    target = forwarded[1]
+    assert (target["min"], target["max"]) == (1, 3), "目标步 = 1..max"
+    assert target["pool"] == [
+        {"when": [str(source)], "options": ["seat:2", "seat:1", "seat:3"]}
+    ], "逐来源组的全部目标（首项 = 候选排序的自然首条，借刀窗口里就是 Bn）"
+    assert target["wording"] == "选择【杀】的目标", "Step.wording 原样下发"
 
 
 def test_the_pending_payload_forwards_the_card_preactivation_manifest() -> None:

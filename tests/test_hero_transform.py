@@ -2069,6 +2069,230 @@ def test_a_transform_confirmation_with_a_target_outside_the_pool_changes_nothing
 
 
 # ---------------------------------------------------------------------------
+# W7-01b：转化清单多目标（合成候选，1..max；**不含方天专属规则**）
+# ---------------------------------------------------------------------------
+#
+# 方天的候选生成在 W7-02，本票只证明"清单 / 确认能表达 1..max"：多目标候选是**手写**的
+# ``UseCard(transformed_card(来源), targets=(…))``（合成局面），不是任何技能的产物。
+# 目标步的来源作用域 / 固定窗口收窄 / 完整目标集确认都在这份合成候选上钉住。
+
+
+SECOND_RED_DODGE = [
+    card_id
+    for card_id in _cards("dodge")
+    if card_id != RED_DODGE
+    and color_of_suit(PACK.deck.cards[card_id].suit) is Color.RED
+][0]
+"""第二张红【闪】：与 ``RED_DODGE`` 同为【龙胆】来源，让清单出现两个来源组。"""
+
+
+def _synthetic_multi_target_state():
+    """赵云手里两张红【闪】+ 三名其它座位（座位 1 / 2 / 3 都是合成目标）。"""
+    return (
+        build_state(
+            pack=PACK,
+            seats=[
+                SeatSpec(hand=(RED_DODGE, SECOND_RED_DODGE), hero="zhaoyun"),
+                SeatSpec(),
+                SeatSpec(),
+                SeatSpec(),
+            ],
+            deck=_deck_excluding(RED_DODGE, SECOND_RED_DODGE),
+            turn_seat=0,
+        ),
+        RED_DODGE,
+        SECOND_RED_DODGE,
+    )
+
+
+def _synthetic_multi_target_actions(state, first: int, second: int) -> list[UseCard]:
+    """手写 1 / 2 目标组合：两张来源各有**不同**的目标集合（来源作用域可观测）。
+
+    ``first`` 的组合 = ``(1,)`` / ``(1, 2)``；``second`` 的组合 = ``(3,)`` / ``(1, 3)``
+    ——两个来源组的目标池不同，清单因此必须逐行分列，不能合并成一份。
+    """
+    actions: list[UseCard] = []
+    for source, combos in ((first, ((1,), (1, 2))), (second, ((3,), (1, 3)))):
+        card = transformed_card(state, (source,), "slash")
+        actions.extend(
+            UseCard(card=card, targets=combo, answers_seq=1) for combo in combos
+        )
+    return actions
+
+
+def _borrow_like_multi_target_actions(state, source: int) -> list[UseCard]:
+    """借刀窗口形状的合成候选：Bn = 2，组合恒含 2（``(2,)`` / ``(2,1)`` / ``(2,1,3)``）。"""
+    card = transformed_card(state, (source,), "slash")
+    return [
+        UseCard(card=card, targets=combo, answers_seq=1)
+        for combo in ((2,), (2, 1), (2, 1, 3))
+    ]
+
+
+def test_a_synthetic_multi_target_manifest_lists_every_target_per_source():
+    """目标步 = 1..max；每行 options = 该来源组**全部组合的全部目标**（按候选顺序去重）。
+
+    旧实现把每个组合压成首目标（``targets[0]``），额外目标在清单里永远点不到；W7-01b 起
+    目标步表达"最多可选几个"，来源作用域仍由 ``when``（来源答案）分列。
+    """
+    state, first, second = _synthetic_multi_target_state()
+    actions = _synthetic_multi_target_actions(state, first, second)
+
+    steps = _manifest(state, actions, ZHAOYUN_SLASH)
+
+    assert [step.name for step in steps] == ["card", "seat"]
+    assert [step.order for step in steps] == [0, 1]
+    source = steps[0]
+    assert source.min == source.max == 1, "一张【闪】当【杀】"
+    assert tuple(source.pool[0].options) == (str(first), str(second))
+    target = steps[1]
+    assert (target.min, target.max) == (1, 2), "1..最长组合目标数"
+    rows = {row.when: row.options for row in target.pool}
+    assert rows == {
+        (str(first),): ("seat:1", "seat:2"),
+        (str(second),): ("seat:3", "seat:1"),
+    }, f"逐来源组的全部目标（不再只取首目标）：{rows}"
+
+
+def test_a_synthetic_multi_target_manifest_keeps_the_fixed_window_shape_when_targets_are_unique():
+    """``fixed_target=True`` 只在目标**完全唯一**时省掉目标步（既有响应 / 求桃形状）。
+
+    唯一的单目标 ⇒ 清单只有来源步（W5 借刀 / 【万箭】/ 求桃一字不改）；
+    出现多目标组合 ⇒ 仍下发目标步（W7-01b 的借刀窗口多目标）。
+    """
+    state, first, _second = _synthetic_multi_target_state()
+    card = transformed_card(state, (first,), "slash")
+
+    unique = [
+        UseCard(card=card, targets=(2,), answers_seq=1),
+        UseCard(card=card, targets=(2,), answers_seq=1),
+    ]
+    unique_steps = _manifest(state, unique, ZHAOYUN_SLASH, fixed_target=True)
+    assert [step.name for step in unique_steps] == ["card"], (
+        "目标无信息量（同一个单目标）⇒ 不下发目标步"
+    )
+
+    multi = _borrow_like_multi_target_actions(state, first)
+    multi_steps = _manifest(state, multi, ZHAOYUN_SLASH, fixed_target=True)
+    assert [step.name for step in multi_steps] == ["card", "seat"], (
+        "多目标候选在固定目标窗口里仍下发目标步"
+    )
+    target = multi_steps[1]
+    assert (target.min, target.max) == (1, 3)
+    assert tuple(target.pool[0].options) == ("seat:2", "seat:1", "seat:3"), (
+        "候选恒含 Bn ⇒ 逐来源组的目标并集首项就是 Bn（借刀指定的目标）"
+    )
+
+
+def test_a_synthetic_multi_target_confirmation_resolves_by_the_full_target_set():
+    """确认按**完整目标集**（顺序无关）：1 个 / 2 个 / 3 个目标各解析成那条 ``UseCard``。"""
+    from sgs.skills import resolve_conversion_confirmation
+
+    state, first, _second = _synthetic_multi_target_state()
+    actions = _borrow_like_multi_target_actions(state, first)
+    steps = _manifest(state, actions, ZHAOYUN_SLASH, fixed_target=True)
+
+    def resolve(choices):
+        return resolve_conversion_confirmation(
+            state, 0, ZHAOYUN_SLASH, (first,), choices, actions, steps=steps
+        )
+
+    single = resolve(("seat:2",))
+    assert isinstance(single, UseCard) and single.targets == (2,)
+    assert single.card.virtual_sources == (first,)
+
+    pair = resolve(("seat:1", "seat:2"))  # 点击顺序与候选目标次序相反
+    assert isinstance(pair, UseCard) and pair.targets == (2, 1)
+
+    triple = resolve(("seat:3", "seat:2", "seat:1"))
+    assert isinstance(triple, UseCard), triple
+    assert triple.targets == (2, 1, 3), "顺序无关：解析成候选池里那条 3 目标使用"
+    assert triple.card.virtual_sources == (first,)
+
+
+@pytest.mark.parametrize(
+    ("choices", "why"),
+    [
+        (("seat:2", "seat:1", "seat:2"), "重复选择（按集合看恰是 2 目标组合）"),
+        (("seat:1", "seat:3"), "不含 Bn 的组合不在候选池里"),
+        (("seat:2", "seat:1", "seat:3", "seat:0"), "多一个目标"),
+        (("seat:2", "seat:2"), "只剩重复的 Bn"),
+    ],
+)
+def test_a_synthetic_multi_target_confirmation_rejects_non_candidate_target_sets(
+    choices, why
+):
+    """缺 / 多 / 重复 / 不含 Bn 均拒，首个失败原因是**目标不合法**（不改任何状态）。"""
+    from sgs.skills import resolve_conversion_confirmation
+
+    state, first, _second = _synthetic_multi_target_state()
+    actions = _borrow_like_multi_target_actions(state, first)
+    steps = _manifest(state, actions, ZHAOYUN_SLASH, fixed_target=True)
+
+    resolved = resolve_conversion_confirmation(
+        state, 0, ZHAOYUN_SLASH, (first,), choices, actions, steps=steps
+    )
+
+    assert isinstance(resolved, str), f"{why}：不该被接受（{resolved!r}）"
+    assert "目标不合法" in resolved, why
+
+
+def test_a_synthetic_multi_target_confirmation_rejects_a_choice_outside_the_manifest():
+    """清单外的选项文本仍是第三档失败原因（错误分档不变）。"""
+    from sgs.skills import resolve_conversion_confirmation
+
+    state, first, _second = _synthetic_multi_target_state()
+    actions = _borrow_like_multi_target_actions(state, first)
+    steps = _manifest(state, actions, ZHAOYUN_SLASH, fixed_target=True)
+
+    resolved = resolve_conversion_confirmation(
+        state, 0, ZHAOYUN_SLASH, (first,), ("card:1",), actions, steps=steps
+    )
+
+    assert isinstance(resolved, str) and "清单外的选项" in resolved
+
+
+def test_a_synthetic_multi_target_engine_confirmation_uses_the_full_targets():
+    """引擎确认路径：注入合成多目标候选 + 清单 ⇒ 落账的正是解析出的 2 目标 ``UseCard``。
+
+    不新建引擎入口：只把本次询问的 ``transform_actions`` / ``transform_preactivations``
+    换成合成的那一份（与 W7-02 的候选生成无关），走的就是 ``Engine.submit`` 的转化确认路。
+    """
+    state, first, _second = _synthetic_multi_target_state()
+    engine = _parked_at(
+        state,
+        QueryKind.PLAY_PHASE,
+        participants=[Scripted(), Scripted(), Scripted(), Scripted()],
+    )
+    query = engine.pending
+    actions = _borrow_like_multi_target_actions(state, first)
+    steps = _manifest(state, actions, ZHAOYUN_SLASH, fixed_target=True)
+    engine.pending = query.model_copy(
+        update={
+            "transform_actions": tuple(actions),
+            "transform_preactivations": {ZHAOYUN_SLASH: steps},
+        }
+    )
+
+    engine.submit(
+        ActivateSkill(
+            skill_id=ZHAOYUN_SLASH,
+            picks=(first,),
+            choices=("seat:1", "seat:2"),
+            answers_seq=query.seq,
+        )
+    )
+
+    accepted = engine.records[-1]
+    assert accepted.kind == "action" and accepted.accepted is True
+    resolved = accepted.action
+    assert isinstance(resolved, UseCard)
+    assert resolved.card.virtual_sources == (first,)
+    assert resolved.targets == (2, 1), "按完整目标集解析成候选池里那条 2 目标使用"
+    _drive_until_pending(engine)
+
+
+# ---------------------------------------------------------------------------
 # W7-01：方天的"最后一张手牌"谓词（真 / 转化共用一份）
 # ---------------------------------------------------------------------------
 #

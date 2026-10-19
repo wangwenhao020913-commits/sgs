@@ -756,6 +756,9 @@ function renderTable() {
     if (state.preactivation) {
       if (preSeats && preSeats.includes(`${SEAT_PREFIX}${player.seat}`)) {
         const answer = state.preactivation.answers[state.preactivation.cursor];
+        const required = preactivationRequiredSeat(
+          state.preactivation, pendingNow, state.preactivation.cursor);
+        if (required === `${SEAT_PREFIX}${player.seat}`) box.classList.add("req");
         if (answer && answer.values.includes(player.seat)) box.classList.add("tsel");
         else box.classList.add("targetable");
       }
@@ -1130,6 +1133,7 @@ function enterPreativation(skill, manifest) {
   state.selectedTargets = [];
   state.selectedOption = null;
   state.lastRejectReason = "";
+  applyPreativationDefaults(state.preactivation, state.view ? state.view.pending : null);
   renderTable();
   renderPending(state.view);
 }
@@ -1158,6 +1162,7 @@ function enterCardPreativation(pending, card, manifest) {
   state.selectedTargets = [];
   state.selectedOption = null;
   state.lastRejectReason = "";
+  applyPreativationDefaults(state.preactivation, state.view ? state.view.pending : null);
   renderTable();
   renderPending(state.view);
 }
@@ -1201,13 +1206,57 @@ function advancePreativation() {
   if (count < step.min) return;
   if (step.max !== null && step.max !== undefined && count > step.max) return;
   pa.cursor += 1;
+  applyPreativationDefaults(pa, state.view ? state.view.pending : null);
   state.lastRejectReason = "";
   renderTable();
   renderPending(state.view);
 }
 
-/** 点场上武将：选座位步的答案；选完自动进下一步。 */
+/** 座位步是不是**多选**：`max` 是整数且大于 `min`（W7-01b 的 1..max 目标步）。
+ *
+ * 单选座位步（`min == max == 1`）保持既有交互——点一下就写单值并自动进下一步；
+ * 多选座位步改成"点座位 = 选 / 取消 + 下一步"，与选牌步同一个 `advancePreativation`。
+ */
+function preactivationSeatMulti(step) {
+  return Number.isInteger(step.max) && step.max > step.min;
+}
+
+/** 借刀窗口目标步的**必选首项** = Bn（候选排序的自然结果；无则 `null`）。
+ *
+ * 引擎的成员判定是最终裁判（不含 Bn 的组合被拒）；这里只做引导——进入该步时预选、
+ * 标成必选、点它不取消。**不新增询问、不新增协议字段**。
+ */
+function preactivationRequiredSeat(pa, pending, index) {
+  if (!pa || !pending || pending.cause !== "BORROWED_SWORD") return null;
+  const step = pa.steps[index];
+  if (!step || preactivationStepKind(step) !== "seat") return null;
+  const options = preactivationOptions(pa, index);
+  if (!options || !options.length) return null;
+  return options[0];
+}
+
+/** 进入座位步时把**必选首项**（借刀窗口的 Bn）预先放进答案：省掉一次没有信息量的点击。
+ *
+ * 只在答案为空时填——玩家取消其它座位不会把它抖回来（首项本身也不可取消）。
+ */
+function applyPreativationDefaults(pa, pending) {
+  if (!pa || pa.cursor >= pa.steps.length) return;
+  const required = preactivationRequiredSeat(pa, pending, pa.cursor);
+  if (required === null) return;
+  const answer = pa.answers[pa.cursor];
+  if (answer.values.length) return;
+  answer.values = [Number(required.slice(SEAT_PREFIX.length))];
+  answer.texts = [required];
+}
+
+/** 点场上武将：选座位步的答案。
+ *
+ * - **多选座位步**（W7-01b）：点座位 = 选 / 取消，`min..max` 计数，之后点「下一步」；
+ *   借刀窗口的必选首项（Bn）**预选且不可取消**。
+ * - **单选座位步**：既有形状——写单值并自动进下一步。
+ */
 function selectPreativationSeat(seat) {
+  const pending = state.view ? state.view.pending : null;
   const pa = state.preactivation;
   if (state.playback || !pa || pa.cursor >= pa.steps.length) return;
   const step = pa.steps[pa.cursor];
@@ -1215,8 +1264,25 @@ function selectPreativationSeat(seat) {
   const options = preactivationOptions(pa, pa.cursor);
   const text = `${SEAT_PREFIX}${seat}`;
   if (options && !options.includes(text)) return;
+  if (preactivationSeatMulti(step)) {
+    const answer = pa.answers[pa.cursor];
+    const at = answer.values.indexOf(seat);
+    const required = preactivationRequiredSeat(pa, pending, pa.cursor);
+    if (at >= 0) {
+      if (text === required) return;
+      answer.values.splice(at, 1);
+    } else if (step.max === null || step.max === undefined || answer.values.length < step.max) {
+      answer.values.push(seat);
+    }
+    answer.texts = preactivationAnswerTexts(step, answer.values);
+    state.lastRejectReason = "";
+    renderTable();
+    renderPending(state.view);
+    return;
+  }
   pa.answers[pa.cursor] = { values: [seat], texts: [text] };
   pa.cursor += 1;
+  applyPreativationDefaults(pa, pending);
   state.lastRejectReason = "";
   renderTable();
   renderPending(state.view);
@@ -1232,6 +1298,7 @@ function selectPreativationOption(text) {
   if (options && !options.includes(text)) return;
   pa.answers[pa.cursor] = { values: [text], texts: [text] };
   pa.cursor += 1;
+  applyPreativationDefaults(pa, state.view ? state.view.pending : null);
   state.lastRejectReason = "";
   renderTable();
   renderPending(state.view);
@@ -1245,6 +1312,7 @@ function jumpPreativationStep(index) {
     pa.answers[at] = { values: [], texts: [] };
   }
   pa.cursor = Math.max(0, Math.min(index, pa.steps.length));
+  applyPreativationDefaults(pa, state.view ? state.view.pending : null);
   state.lastRejectReason = "";
   renderTable();
   renderPending(state.view);
@@ -1326,7 +1394,6 @@ function preactivationStepHint(pa, pending) {
   if (!step) {
     return pa && pa.cardEntry ? "清单已填完，可以确认使用。" : "清单已填完，可以确认发动。";
   }
-  const options = preactivationOptions(pa, pa.cursor);
   const wording = preactivationWording(step);
   if (preactivationStepKind(step) === "card") {
     const count = pa.answers[pa.cursor].values.length;
@@ -1334,6 +1401,14 @@ function preactivationStepHint(pa, pending) {
     return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${what}（${step.min}–${step.max} 张，已选 ${count} 张）。`;
   }
   if (preactivationStepKind(step) === "seat") {
+    const count = pa.answers[pa.cursor].values.length;
+    const required = preactivationRequiredSeat(pa, pending, pa.cursor);
+    const requiredText = required === null ? "" : "；借刀指定的目标（必选）";
+    if (preactivationSeatMulti(step)) {
+      const what = wording || "选目标";
+      const upper = step.max === null || step.max === undefined ? "max" : step.max;
+      return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${what}（点场上武将多选，已选 ${count} / ${step.min}–${upper} 个${requiredText}）。`;
+    }
     if (wording) return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${wording}（点场上武将选择）。`;
     return `第 ${pa.cursor + 1}/${pa.steps.length} 步：点场上武将选目标。`;
   }
@@ -1378,7 +1453,9 @@ function renderPreativation(pending) {
       button.addEventListener("click", () => selectPreativationOption(option));
       box.appendChild(button);
     }
-  } else if (kind === "card") {
+  } else if (kind === "card" || (kind === "seat" && preactivationSeatMulti(step))) {
+    // 多选座位步与选牌步共用同一个「下一步」入口（W7-01b）：单选座位步仍由点座位直接
+    // 自动进下一步，不铺按钮。
     const next = document.createElement("button");
     next.type = "button";
     next.className = "opt";

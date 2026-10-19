@@ -3534,6 +3534,200 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.resetSelection();
 }
 
+/* ============ W7-01b：清单座位步多选（1..max；合成 pending，不依赖方天候选） ============
+ *
+ * 判据（自动化的那一半）：`preactivationSeatMulti(step)` = `max > min` 时座位步改成多选——
+ * 点座位 = 选 / 取消、超过 `max` 不再收、"下一步"按 `min..max` 放行、提示行写出
+ * 「已选 k / 1–max 个」；确认拼出的 `choices` 是**完整目标集**（顺序由点击决定，服务端
+ * 按集合比较）。单选座位步（`min == max`）的既有交互由 ㉿T4 / ㉿BS4 继续钉住。
+ */
+{
+  const red = { ...synthCard(2, "桃"), type: "peach", color: "red" };
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 930,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 930 }],
+    candidate_index: {},
+    virtual_index: { "2": [{ card_id: -3, skill_ids: ["hero.guanyu.wusheng"] }] },
+    preactivations: {
+      "hero.guanyu.wusheng": [
+        { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["2"] }] },
+        { name: "seat", min: 1, max: 3, order: 1,
+          pool: [{ when: ["2"], options: ["seat:0", "seat:1", "seat:2", "seat:3"] }] },
+      ],
+    },
+    preactivation: [], option_seats: {}, context: null,
+  };
+  const view = synthView(pending);
+  view.heroes = { 0: "guanyu", 1: "zhaoyun", 2: "diaochan", 3: "zhangfei" };
+  view.snapshot.players = [0, 1, 2, 3].map((seat) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 0, alive: true, equip: [], judge: [], identity: null,
+  }));
+  view.snapshot.self_hand = [red];
+  view.skills = [{
+    skill_id: "hero.guanyu.wusheng", name: "武圣", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: false, preactivated: false,
+    ui: { requirement: "选择1张红色牌当【杀】使用或打出", convert_sources: [2] },
+  }];
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const skillButton = () => $("t-skills").children.find(
+    (b) => b.getAttribute("data-skill-id") === "hero.guanyu.wusheng");
+  const seatBoxOf = (seat) => $("t-seats").children.find(
+    (c) => c.getAttribute("data-seat") === String(seat));
+  const nextButton = () => $("t-options").children.find((c) => c.textContent === "下一步");
+  const clickSeat = (seat) => (seatBoxOf(seat).listeners.click || []).forEach(
+    (fn) => fn({ target: seatBoxOf(seat) }));
+
+  (skillButton().listeners.click || []).forEach((fn) => fn({ target: skillButton() }));
+  const redChip = $("t-hand").children[0];
+  (redChip.listeners.click || []).forEach((fn) => fn({ target: redChip }));
+  (nextButton().listeners.click || []).forEach((fn) => fn({ target: nextButton() }));
+
+  const pa = ui.state.preactivation;
+  const seatStep = pa && pa.steps[1];
+  check("㉿MT1 座位步 max > min ⇒ 多选（同一个渲染器，不再点一下自动进下一步）",
+    !!seatStep && ui.preactivationSeatMulti(seatStep) === true
+      && pa.cursor === 1 && JSON.stringify(pa.answers[1].values) === "[]",
+    `cursor=${pa && pa.cursor} multi=${seatStep && ui.preactivationSeatMulti(seatStep)}`);
+  check("㉿MT2 提示行写「已选 k / 1–3 个」",
+    /已选 0 \/ 1–3 个/.test($("t-target-hint").textContent),
+    `hint="${$("t-target-hint").textContent}"`);
+  check("㉿MT3 min 未满足时「下一步」不可点", !!nextButton() && nextButton().disabled === true,
+    `next=${!!nextButton()} disabled=${nextButton() && nextButton().disabled}`);
+
+  clickSeat(2);
+  clickSeat(0);
+  clickSeat(1);
+  check("㉿MT4 点座位 = 选（可多选），提示行计数跟着走",
+    JSON.stringify(ui.state.preactivation.answers[1].values) === "[2,0,1]"
+      && /已选 3 \/ 1–3 个/.test($("t-target-hint").textContent),
+    `values=${JSON.stringify(ui.state.preactivation.answers[1].values)} hint="${$("t-target-hint").textContent}"`);
+
+  clickSeat(3);
+  check("㉿MT5 超过 max 的座位不再收（仍 3 个）",
+    JSON.stringify(ui.state.preactivation.answers[1].values) === "[2,0,1]",
+    JSON.stringify(ui.state.preactivation.answers[1].values));
+
+  clickSeat(0);
+  check("㉿MT6 再点已选座位 = 取消它",
+    JSON.stringify(ui.state.preactivation.answers[1].values) === "[2,1]",
+    JSON.stringify(ui.state.preactivation.answers[1].values));
+  clickSeat(0);
+
+  check("㉿MT7 未点「下一步」时清单未完成、不能确认",
+    ui.preactivationReady(ui.state.preactivation) === false && ui.buildAction() === null,
+    `cursor=${ui.state.preactivation.cursor}`);
+  (nextButton().listeners.click || []).forEach((fn) => fn({ target: nextButton() }));
+  const action = ui.buildAction();
+  check("㉿MT8 确认 = ActivateSkill(来源, **完整目标集**)，顺序 = 点击顺序",
+    !!action && action.kind === "ActivateSkill"
+      && action.skill_id === "hero.guanyu.wusheng"
+      && JSON.stringify(action.picks) === "[2]"
+      && JSON.stringify(action.choices) === '["seat:2","seat:1","seat:0"]'
+      && $("btn-submit").disabled === false,
+    JSON.stringify(action));
+  ui.resetSelection();
+}
+
+/* ============ W7-01b：借刀窗口的多目标步**预选 / 标出 Bn**（必选首项） ================
+ *
+ * 判据：`cause === "BORROWED_SWORD"` 的座位步首项 = Bn（候选排序的自然结果）⇒ 进入该步时
+ * **预选**、标 `req` 类、点它不取消；提示行写「借刀指定的目标（必选）」。引擎的成员判定
+ * 仍是最终裁判，界面只做引导（不新增询问 / 协议字段）。
+ */
+{
+  const dodge = { ...synthCard(52, "闪"), type: "dodge" };
+  const pending = {
+    kind: "RESPOND", actor: 0, seq: 931, cause: "BORROWED_SWORD", required: "slash",
+    prompt: "【借刀杀人】：对 3 号位使用【杀】，或交出武器。",
+    legal_actions: [{ kind: "Pass", answers_seq: 931 }],
+    candidate_index: {},
+    preactivations: {
+      "hero.zhaoyun.longdan": [
+        { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["52"] }] },
+        { name: "seat", min: 1, max: 3, order: 1,
+          pool: [{ when: ["52"], options: ["seat:2", "seat:0", "seat:3"] }] },
+      ],
+    },
+    preactivation: [], option_seats: {}, context: null,
+  };
+  const view = synthView(pending);
+  view.heroes = { 0: "zhaoyun", 1: "guanyu", 2: "diaochan", 3: "zhangfei" };
+  view.snapshot.players = [0, 1, 2, 3].map((seat) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 0, alive: true, equip: [], judge: [], identity: null,
+  }));
+  view.snapshot.self_hand = [dodge];
+  view.skills = [{
+    skill_id: "hero.zhaoyun.longdan", name: "龙胆", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: false, preactivated: false,
+    ui: { requirement: "你可以把【杀】当【闪】、把【闪】当【杀】使用或打出。", convert_sources: [52] },
+  }];
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const skillButton = () => $("t-skills").children.find(
+    (b) => b.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
+  const seatBoxOf = (seat) => $("t-seats").children.find(
+    (c) => c.getAttribute("data-seat") === String(seat));
+  const nextButton = () => $("t-options").children.find((c) => c.textContent === "下一步");
+  const clickSeat = (seat) => (seatBoxOf(seat).listeners.click || []).forEach(
+    (fn) => fn({ target: seatBoxOf(seat) }));
+
+  (skillButton().listeners.click || []).forEach((fn) => fn({ target: skillButton() }));
+  const dodgeChip = $("t-hand").children[0];
+  (dodgeChip.listeners.click || []).forEach((fn) => fn({ target: dodgeChip }));
+  (nextButton().listeners.click || []).forEach((fn) => fn({ target: nextButton() }));
+
+  check("㉿BN1 借刀窗口目标步：首项 = Bn 且**预选**（进入该步即有 1 个答案）",
+    ui.preactivationRequiredSeat(ui.state.preactivation, pending, 1) === "seat:2"
+      && JSON.stringify(ui.state.preactivation.answers[1].values) === "[2]",
+    `required=${ui.preactivationRequiredSeat(ui.state.preactivation, pending, 1)} values=${JSON.stringify(ui.state.preactivation.answers[1].values)}`);
+  check("㉿BN2 Bn 座位标成必选（`req` 类）且是已选态（`tsel`）",
+    seatBoxOf(2).classList.contains("req") && seatBoxOf(2).classList.contains("tsel"),
+    `req=${seatBoxOf(2).classList.contains("req")} tsel=${seatBoxOf(2).classList.contains("tsel")}`);
+  check("㉿BN3 提示行写出「借刀指定的目标（必选）」与「已选 1 / 1–3 个」",
+    $("t-target-hint").textContent.includes("借刀指定的目标（必选）")
+      && /已选 1 \/ 1–3 个/.test($("t-target-hint").textContent),
+    `hint="${$("t-target-hint").textContent}"`);
+
+  clickSeat(2);
+  check("㉿BN4 点必选首项（Bn）不会取消它",
+    JSON.stringify(ui.state.preactivation.answers[1].values) === "[2]",
+    JSON.stringify(ui.state.preactivation.answers[1].values));
+
+  clickSeat(0);
+  clickSeat(3);
+  check("㉿BN5 额外目标追加在后面，Bn 仍在首位",
+    JSON.stringify(ui.state.preactivation.answers[1].values) === "[2,0,3]",
+    JSON.stringify(ui.state.preactivation.answers[1].values));
+
+  (nextButton().listeners.click || []).forEach((fn) => fn({ target: nextButton() }));
+  const action = ui.buildAction();
+  check("㉿BN6 确认拼出完整目标集（Bn 第一、额外目标在后）",
+    !!action && action.kind === "ActivateSkill"
+      && action.skill_id === "hero.zhaoyun.longdan"
+      && JSON.stringify(action.picks) === "[52]"
+      && JSON.stringify(action.choices) === '["seat:2","seat:0","seat:3"]',
+    JSON.stringify(action));
+
+  // 重选第 1 步会清空来源与目标；重新选源、再进目标步时**预选**重新生效。
+  ui.jumpPreativationStep(0);
+  (dodgeChip.listeners.click || []).forEach((fn) => fn({ target: dodgeChip }));
+  (nextButton().listeners.click || []).forEach((fn) => fn({ target: nextButton() }));
+  check("㉿BN7 重选来源步后再进目标步，Bn 的预选重新生效",
+    JSON.stringify(ui.state.preactivation.answers[1].values) === "[2]",
+    JSON.stringify(ui.state.preactivation.answers[1].values));
+  ui.resetSelection();
+}
+
 /* ============ W6-03：观星双行拖拽面（合成 ARRANGE；S4：真实手势走人工验收） ============
  *
  * 判据（自动化的那一半）：两行容器渲染、上行 = 被观看的牌、下行 = 空槽、点选移动后

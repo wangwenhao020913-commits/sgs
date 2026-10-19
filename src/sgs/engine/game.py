@@ -2420,15 +2420,17 @@ class Engine:
         # "清单 = 候选"没有第二份谓词。
         #
         # W4-fix-6（A）：响应窗口按**语境**（`RespondContext`）而不是按询问种类区分；
-        # W5-02b 起借刀杀人的"被迫使用"与其余响应窗口同形（目标由窗口固定 ⇒ 清单只有
-        # 来源步），故那条例外已删除。
+        # W5-02b 起借刀杀人的"被迫使用"与其余响应窗口同形（目标由窗口承载）。
+        #
+        # W7-01b：`fixed_target=True` 只声明"本语境的目标由窗口承载"，**不再**无条件省掉
+        # 目标步——`_manifest_steps` 按候选回答：目标完全唯一（求桃 / 【万箭】 / 无方天的
+        # 借刀）⇒ 仍只有来源步；多目标候选（W7 的方天式额外目标）⇒ 下发 `1..max` 目标步
+        # （借刀窗口的首项 = Bn）。因此这里**不**把 RESPOND 一类简单设成 `False`。
         internal_transform_actions = transform_candidates(kind, actions)
         transform_preactivations = conversion_preactivations(
             self.state,
             actor,
             internal_transform_actions,
-            # 响应 / 求桃窗口的目标由窗口固定：清单只下发来源步（`spec.md` §2 急救行与
-            # W4-fix-6 的【万箭】行）。
             fixed_target=kind in (
                 QueryKind.PEACH,
                 QueryKind.DODGE,

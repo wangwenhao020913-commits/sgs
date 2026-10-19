@@ -382,6 +382,23 @@ def owned_conversion_skill_ids(state: GameState, seat: int) -> frozenset[str]:
     )
 
 
+def _confirmation_targets_match(
+    chosen: Sequence[int], targets: Iterable[int]
+) -> bool:
+    """确认的目标是否与候选的 ``targets`` **整组**相同（W7-01b）。
+
+    先比**原始选择个数**：重复的座位因此被拒——否则 ``{Bn, x, x}`` 会按集合相等混进
+    ``(Bn, x)``；再比去重后的集合，**与点击顺序无关**。清单目标步只表达 ``min..max``
+    与可达池，"这组目标到底存不存在"仍以候选池为唯一真源（本函数是那道判定）。
+    """
+    chosen = tuple(int(choice) for choice in chosen)
+    actual = tuple(int(target) for target in targets)
+    deduped = tuple(dict.fromkeys(chosen))
+    if len(chosen) != len(deduped):
+        return False
+    return len(deduped) == len(actual) and set(deduped) == set(actual)
+
+
 def resolve_conversion_confirmation(
     state: GameState,
     owner: int,
@@ -399,8 +416,13 @@ def resolve_conversion_confirmation(
     - **不建第二份合法性**：解析就是在这份**内部候选**（:func:`transform_candidates`，
       清单也是它派生的）里按 ``(技能归属, 来源集合, 目标集合)`` 找那一条；找不到即失败。
       来源集合与目标集合的顺序无关（来源在 ``virtual_sources`` 里本就已排序）；
-    - **是否需要目标步由清单回答**（``steps`` 里有没有 ``seat`` 步）：主动使用语境比较
-      目标，响应 / 求桃语境的目标由窗口承载 / 固定，不比较——同一条判据也是清单的形状；
+    - **是否需要目标步由清单回答**（``steps`` 里有没有 ``min > 0`` 的 ``seat`` 步）：
+      有目标步 ⇒ 按**完整目标集**比较（先比原始选择个数——重复选择因此被拒——再比
+      去重后的集合，见 :func:`_confirmation_targets_match`）；没有目标步 ⇒ 目标已被清单
+      判为唯一（或本就没有目标），不比较。同一条判据也是清单的形状；
+    - **W7-01b**：多目标组合同样走这里——``ActivateSkill(虚拟牌来源, 1..max 个目标)``
+      解析成候选池里那条 ``UseCard(虚拟牌, targets=…)``；清单只表达"最多可选几个"，
+      不在池里的组合由上面的比较拒绝。
     - 失败原因分三档：来源组不在池里 / 目标不在池里 / 清单外的选项文本。
 
     返回的动作自带本次询问的 ``answers_seq``，调用方把它当普通使用 / 打出动作执行。
@@ -428,7 +450,9 @@ def resolve_conversion_confirmation(
         if tuple(sorted(int(source) for source in card.virtual_sources)) != wanted_sources:
             continue
         source_matched = True
-        if needs_target and tuple(getattr(action, "targets", ())) != tuple(wanted_targets):
+        if needs_target and not _confirmation_targets_match(
+            wanted_targets, getattr(action, "targets", ())
+        ):
             continue
         return action
     if not source_matched:
@@ -452,9 +476,11 @@ def conversion_preactivations(
     - **来源步**（``name="card"``）：候选的 ``virtual_sources`` 就是来源组；每组的张数
       （单源 1 / 丈八 2）⇒ ``min = max = 组大小``。``zones`` = 这些来源**此刻**所在的区
       （判定区永不出现——区域默认不包含它）；
-    - **目标步**（``name="seat"``）：仅当候选带目标（主动使用）时下发，``pool`` 按前序
-      来源逐行给 ``seat:N``；响应 / 求桃语境**没有目标步**（目标由窗口承载 / 濒死者由窗口
-      固定）。
+    - **目标步**（``name="seat"``，W7-01b）：``min = 1``、``max`` = 本次候选组合的最长
+      目标数；``pool`` 按前序来源逐行给该来源组**全部组合的全部目标**（``seat:N``）。
+      目标完全唯一（所有候选都是同一个单目标、或根本就没有目标）时不下发——求桃 /
+      【万箭】 / 无方天的借刀等既有形状因此不变；出现多目标候选（W7 的方天式额外目标）
+      才下发，座位步在界面上是多选。
 
     **清单与候选同源**：张数、目标池、次数链（``check_count``）、区域与时机谓词都没有
     在这里重算一次——它们已经体现在"候选存在与否"里。空 dict = 这次询问没有可预发动的
@@ -462,9 +488,10 @@ def conversion_preactivations(
 
     ``actions`` 由调用方给：它是 :func:`transform_candidates` 那份**内部**候选池，
     故这扇窗口是否收转化候选（借刀杀人的被迫使用属 W5）由那一处判据回答，这里不重判。
-    ``fixed_target=True``：本次语境的**目标由窗口固定**（求桃的濒死者、【万箭】/【南蛮】
-    这类响应窗口的被问者）——候选就算带着目标，玩家也没有"选目标"这一步，故清单只下发
-    来源步（`spec.md` §2 的急救行 / W4-fix-6 的【万箭】行）。
+    ``fixed_target=True``：本次语境的**目标由窗口承载**（求桃的濒死者、【万箭】/【南蛮】
+    这类响应窗口的被问者、借刀的被迫使用）——候选目标**完全唯一**时清单只下来源步
+    （`spec.md` §2 的急救行 / W4-fix-6 的【万箭】行）；多目标候选仍下发目标步（借刀窗口
+    的 Bn 是该步的首项、必选）。
     """
     groups: dict[str, dict[tuple[int, ...], list[tuple[int, ...]]]] = {}
     source_zones: dict[int, Zone] = {}
@@ -489,7 +516,7 @@ def conversion_preactivations(
     out: dict[str, tuple[Step, ...]] = {}
     for skill_id in sorted(groups):
         steps = _manifest_steps(
-            groups[skill_id], source_zones, include_target=not fixed_target
+            groups[skill_id], source_zones, fixed_target=fixed_target
         )
         if steps is not None:
             out[skill_id] = steps
@@ -500,12 +527,22 @@ def _manifest_steps(
     per_source: dict[tuple[int, ...], list[tuple[int, ...]]],
     source_zones: dict[int, Zone],
     *,
-    include_target: bool = True,
+    fixed_target: bool = False,
 ) -> tuple[Step, ...] | None:
     """一个技能的"来源组 → 目标组合"表 → 清单步骤；不可表达的形状返回 ``None``。
 
-    不可表达的两档都**不下发清单**（不猜）：同一个技能出现不同张数的来源组；或目标数
-    不是 0 / 1（多目标组合的逐目标子池属于 W5 的借刀一类，本票的转化技都是一目标）。
+    - **来源步**：``min = max`` = 组大小（单源 1 / 丈八 2）。同一个技能出现不同张数的
+      来源组是**不可表达**的形状（不猜），返回 ``None``；
+    - **目标步**（W7-01b）：``min = 1``、``max = 该技能候选组合的最长目标数``；``pool``
+      仍按来源组（``when`` = 来源答案）分列，但每行 options = 该来源组**全部组合的全部
+      目标**（并集、按候选顺序去重），不再只列"每个组合的首目标"——否则额外目标在清单
+      里永远点不到。不同来源组的上限不同时步上 ``max`` 取最大、逐行池各自限定；越界组合
+      由确认的成员判定拒绝（清单只表达"最多可选几个"，不是第二份合法性）；
+    - ``fixed_target=True``（目标由窗口承载：求桃的濒死者 / 【万箭】·【南蛮】的响应 /
+      借刀的被迫使用）**只在目标完全唯一时**省掉目标步——所有候选都是同一个单目标
+      （或无目标）⇒ 没有可选的第二步。出现第二个目标、或任一组合的目标数 > 1（W7 的
+      方天式多目标）⇒ 仍下发目标步（座位步因此可多选；借刀窗口的候选恒含 Bn，
+      ``(Bn,)`` 是候选排序的自然首条，故目标步首项 = Bn）。
     """
     sizes = {len(sources) for sources in per_source}
     if len(sizes) != 1:
@@ -525,17 +562,21 @@ def _manifest_steps(
             order=0,
         )
     ]
-    if not include_target:
-        return tuple(steps)
     combos = [targets for rows in per_source.values() for targets in rows]
     if not combos or all(not targets for targets in combos):
         return tuple(steps)
-    if any(len(targets) != 1 for targets in combos):
-        return None
+    if fixed_target and _targets_are_truly_unique(combos):
+        return tuple(steps)
     rows = [
         (
             tuple(str(source) for source in sources),
-            tuple(dict.fromkeys(seat_choice(targets[0]) for targets in targets_list)),
+            tuple(
+                dict.fromkeys(
+                    seat_choice(target)
+                    for targets in targets_list
+                    for target in targets
+                )
+            ),
         )
         for sources, targets_list in per_source.items()
     ]
@@ -545,12 +586,23 @@ def _manifest_steps(
         Step(
             name="seat",
             min=1,
-            max=1,
+            max=max(len(targets) for targets in combos),
             pool=tuple(StepPool(when=when, options=options) for when, options in rows),
             order=1,
         )
     )
     return tuple(steps)
+
+
+def _targets_are_truly_unique(combos: Iterable[tuple[int, ...]]) -> bool:
+    """这些候选组合是否都是**同一个单目标**（``fixed_target`` 语境省掉目标步的判据）。
+
+    空组合由调用方先处理；这里回答"目标步有没有信息量"：全是同一个单目标 ⇒ 没有。
+    """
+    combos = tuple(combos)
+    if any(len(targets) > 1 for targets in combos):
+        return False
+    return len(set(combos)) == 1
 
 
 def conversion_skill_definitions() -> tuple[SkillDef, ...]:

@@ -653,7 +653,37 @@ def _pick_options(
     *,
     conversion: bool = False,
 ) -> tuple[str, ...] | None:
-    """座位 / 选项步：取 :func:`_score_seat_option` 最高（座位）或特征表最高（选项）。"""
+    """座位 / 选项步：取 :func:`_score_seat_option` 最高（座位）或特征表最高（选项）。
+
+    **多选座位步**（W7-01b：`step.max` 是整数且 `> step.min`，如转化【杀】的 `1..max`
+    目标步）按 ``min(step.max, len(options))`` 填满；**首项必取**——多目标清单的首项是
+    候选排序的自然结果（借刀窗口就是 Bn），不选它拼出的组合必然被引擎拒绝；其余按
+    :func:`_score_seat_option` 降序补（同分保持清单顺序，与既有单选的 tie-break 一致）。
+    ``max is None``、``min == max`` 的既有步与**非座位步**（选项步）一律走旧填法，
+    故既有 47 份金录像的动作序列不变。
+    """
+    seat_options = bool(options) and all(
+        text.startswith(_SEAT_PREFIX) for text in options
+    )
+    if (
+        seat_options
+        and isinstance(step.max, int)
+        and step.max > step.min
+    ):
+        wanted = min(step.max, len(options))
+        if wanted < step.min:
+            return None
+        first = options[0]
+        rest = sorted(
+            options[1:],
+            key=lambda text: -_score_seat_option(
+                query,
+                text,
+                skill_id=f"{short}:{step.name}",
+                conversion=conversion,
+            ),
+        )
+        return (first, *rest[: max(0, wanted - 1)])
     remaining = list(options)
     wanted = max(step.min, 1) if step.min else 1
     if step.max is not None:
