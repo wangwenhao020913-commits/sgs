@@ -3425,4 +3425,233 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.resetSelection();
 }
 
+/* ============ W6-03：观星双行拖拽面（合成 ARRANGE；S4：真实手势走人工验收） ============
+ *
+ * 判据（自动化的那一半）：两行容器渲染、上行 = 被观看的牌、下行 = 空槽、点选移动后
+ * `buildAction()` 拼出的正是 `ArrangeCards(order, split)`（且键序 answers_seq 最先，
+ * 能通过 `submitAction` 的 JSON.stringify 自检）、确认按钮只在顺序完整时可点、
+ * 取消按钮**不存在**（强制、无取消）、规格缺失时 fail-closed 显示「排列不可用，请刷新」。
+ * 拖拽手势本身不在这里断言（S4：DOM 垫片不模拟真手势，人工实机验收）。
+ */
+{
+  const revealed = [
+    { ...synthCard(71, "八卦阵"), suit: "spade", rank: 2 },
+    { ...synthCard(72, "闪"), suit: "heart", rank: 11 },
+    { ...synthCard(73, "雌雄双股剑"), suit: "club", rank: 2 },
+  ];
+  const arrangePending = {
+    kind: "ARRANGE", actor: 0, seq: 77, timing: "PHASE_PREPARE",
+    prompt: "请排列这些牌：给出顺序与前几张置于牌堆顶。",
+    revealed,
+    legal_actions: [
+      { answers_seq: 77, kind: "ArrangeCards", order: [0, 1, 2], split: 3 },
+      { answers_seq: 77, kind: "ArrangeCards", order: [1, 2, 0], split: 2 },
+      { answers_seq: 77, kind: "ArrangeCards", order: [2, 1, 0], split: 2 },
+      { answers_seq: 77, kind: "ArrangeCards", order: [2, 0, 1], split: 1 },
+    ],
+    candidate_index: {}, option_seats: {},
+    context: {
+      requirement: "观看牌堆顶若干张牌，以任意顺序放回牌堆顶 / 牌堆底",
+      label: null, skill_hints: [],
+    },
+    preactivations: {}, preactivation: [],
+    arrange: { count: 3, split: "free", cards: revealed },
+  };
+  const arrangeView = synthView(arrangePending);
+  const rowOf = (name) => $("t-options").children.find(
+    (node) => node.getAttribute && node.getAttribute("data-row") === name);
+  const cardsBox = (row) => row.children[1];
+  const cardIndexes = (row) => cardsBox(row).children
+    .filter((node) => node.getAttribute && node.getAttribute("data-card-index") !== undefined)
+    .map((node) => Number(node.getAttribute("data-card-index")));
+  const slots = (row) => cardsBox(row).children.filter(
+    (node) => node.getAttribute && node.getAttribute("data-empty") === "1");
+  const cardNode = (row, index) => cardsBox(row).children.find(
+    (node) => node.getAttribute && node.getAttribute("data-card-index") === String(index));
+  const clickNode = (node) => (node.listeners.click || []).forEach((fn) => fn({ target: node, preventDefault() {} }));
+
+  ui.state.view = arrangeView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(arrangeView);
+
+  const topRow = rowOf("top");
+  const bottomRow = rowOf("bottom");
+  check("㉿GX1 排列面 = 上下两行，标签是「牌堆顶 / 牌堆底」（不是「获得牌」）",
+    !!topRow && !!bottomRow
+      && topRow.children[0].textContent.includes("牌堆顶")
+      && bottomRow.children[0].textContent.includes("牌堆底")
+      && !bottomRow.children[0].textContent.includes("获得牌"),
+    `top=${topRow && topRow.children[0].textContent} bottom=${bottomRow && bottomRow.children[0].textContent}`);
+  check("㉿GX2 ARRANGE 走唯一的新渲染路径（两行，不铺候选按钮）",
+    ui.renderKind(arrangePending, arrangePending.legal_actions) === "arrange"
+      && $("t-options").children.length === 2,
+    `kind=${ui.renderKind(arrangePending, arrangePending.legal_actions)} 顶层子节点=${$("t-options").children.length}`);
+  check("㉿GX3 上行 = 被观看的 3 张牌，顺序与 revealed 一致",
+    JSON.stringify(cardIndexes(topRow)) === "[0,1,2]"
+      && ["八卦阵", "闪", "雌雄双股剑"].every((name) => cardsBox(topRow).text().includes(name)),
+    `上行=${cardsBox(topRow).text()}`);
+  check("㉿GX4 下行 = 3 个空槽（自由切分下留 count 个落点）",
+    slots(bottomRow).length === 3 && cardIndexes(bottomRow).length === 0,
+    `下行槽=${slots(bottomRow).length} 牌=${cardIndexes(bottomRow).length}`);
+  check("㉿GX5 初始顺序完整 ⇒ 确认可点；取消按钮不存在（强制、无取消）",
+    $("btn-submit").disabled === false
+      && $("btn-submit").textContent === "确认"
+      && $("btn-cancel").hidden === true,
+    `disabled=${$("btn-submit").disabled} submit="${$("btn-submit").textContent}" cancelHidden=${$("btn-cancel").hidden}`);
+  const initialAction = ui.buildAction();
+  check("㉿GX6 初始提交 = ArrangeCards(order [0,1,2], split 3)，键序 answers_seq 最先",
+    !!initialAction
+      && Object.keys(initialAction).join(",") === "answers_seq,kind,order,split"
+      && JSON.stringify(initialAction) === JSON.stringify(
+        { answers_seq: 77, kind: "ArrangeCards", order: [0, 1, 2], split: 3 }),
+    JSON.stringify(initialAction));
+
+  // 点牌 → 点下行空槽 = 拖到牌堆底（跨行）；点牌 → 点同行的牌 = 行内排序。
+  clickNode(cardNode(topRow, 0));
+  const topAfterSelect = rowOf("top");
+  check("㉿GX7 点牌 = 选中它（第一下只选中，不移动）",
+    ui.state.arrange && ui.state.arrange.selected === 0
+      && cardNode(topAfterSelect, 0).classList.contains("sel"),
+    `selected=${ui.state.arrange && ui.state.arrange.selected}`);
+  clickNode(slots(rowOf("bottom"))[0]);
+  check("㉿GX8 选中后点下行空槽 = 把这张牌移到牌堆底",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[1,2]"
+      && JSON.stringify(cardIndexes(rowOf("bottom"))) === "[0]"
+      && slots(rowOf("bottom")).length === 2,
+    `上=${cardIndexes(rowOf("top"))} 下=${cardIndexes(rowOf("bottom"))} 槽=${slots(rowOf("bottom")).length}`);
+  const movedDown = ui.buildAction();
+  check("㉿GX9 跨行后的载荷 = order [1,2,0] / split 2（上行再接下行）",
+    !!movedDown
+      && JSON.stringify(movedDown) === JSON.stringify(
+        { answers_seq: 77, kind: "ArrangeCards", order: [1, 2, 0], split: 2 })
+      && arrangePending.legal_actions.some(
+        (candidate) => JSON.stringify(candidate) === JSON.stringify(movedDown)),
+    JSON.stringify(movedDown));
+
+  // 行内排序：选第 2 张、点第 1 张 ⇒ 插到它前面，上行变 [2,1]。
+  clickNode(cardNode(rowOf("top"), 2));
+  clickNode(cardNode(rowOf("top"), 1));
+  check("㉿GX10 点另一张牌 = 行内排序（插到它前面），载荷 order [2,1,0] / split 2",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[2,1]"
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(
+        { answers_seq: 77, kind: "ArrangeCards", order: [2, 1, 0], split: 2 }),
+    `上=${cardIndexes(rowOf("top"))} action=${JSON.stringify(ui.buildAction())}`);
+
+  // 再移一张到下行 ⇒ 最终载荷 order [2,0,1] / split 1。
+  clickNode(cardNode(rowOf("top"), 1));
+  clickNode(slots(rowOf("bottom"))[0]);
+  const finalAction = ui.buildAction();
+  check("㉿GX11 最终载荷 = order [2,0,1] / split 1, 且逐字节是候选里的那一条",
+    !!finalAction
+      && JSON.stringify(finalAction) === JSON.stringify(
+        { answers_seq: 77, kind: "ArrangeCards", order: [2, 0, 1], split: 1 })
+      && arrangePending.legal_actions.some(
+        (candidate) => JSON.stringify(candidate) === JSON.stringify(finalAction)),
+    JSON.stringify(finalAction));
+
+  // 顺序不完整（重复 / 缺一张）⇒ 确认必须置灰（buildAction 的完整性闸）。
+  const brokenLayout = { ...ui.state.arrange, top: [2, 2], bottom: [0] };
+  ui.state.arrange = brokenLayout;
+  ui.renderPending(arrangeView);
+  check("㉿GX12 顺序不完整时确认按钮置灰（buildAction 返回 null）",
+    ui.buildAction() === null && $("btn-submit").disabled === true,
+    `action=${JSON.stringify(ui.buildAction())} disabled=${$("btn-submit").disabled}`);
+  ui.state.arrange = null;
+  ui.renderPending(arrangeView);
+
+  // 409 / 无技能定义 ⇒ 投影不下发规格：画「排列不可用，请刷新」，不铺任何可提交的牌。
+  const noSpecView = synthView({ ...arrangePending, arrange: null });
+  ui.state.view = noSpecView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(noSpecView);
+  check("㉿GX13 规格缺失（409 裸 Query / 无定义）⇒ fail-closed：只有「排列不可用，请刷新」",
+    ui.renderKind(noSpecView.pending, noSpecView.pending.legal_actions) === "arrange"
+      && $("t-options").children.length === 1
+      && $("t-options").text().includes("排列不可用，请刷新")
+      && !rowOf("top") && !rowOf("bottom")
+      && $("btn-submit").disabled === true
+      && $("btn-cancel").hidden === true,
+    `options="${$("t-options").text()}" disabled=${$("btn-submit").disabled}`);
+
+  // 固定切分（未来的李典 2/2）：两行各按声明铺开，跨行移动被拒绝。
+  const fixedCards = revealed.concat([synthCard(74, "桃")]);
+  const fixedPending = {
+    ...arrangePending, seq: 78, revealed: fixedCards,
+    legal_actions: [{ answers_seq: 78, kind: "ArrangeCards", order: [0, 1, 2, 3], split: 2 }],
+    arrange: { count: 4, split: { top: 2, bottom: 2 }, cards: fixedCards },
+  };
+  const fixedView = synthView(fixedPending);
+  ui.state.view = fixedView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(fixedView);
+  const fixedTop = rowOf("top");
+  const fixedBottom = rowOf("bottom");
+  check("㉿GX14 固定切分：上行 2 张 / 下行 2 张，初始载荷 order [0,1,2,3] / split 2",
+    JSON.stringify(cardIndexes(fixedTop)) === "[0,1]"
+      && JSON.stringify(cardIndexes(fixedBottom)) === "[2,3]"
+      && slots(fixedBottom).length === 0
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(
+        { answers_seq: 78, kind: "ArrangeCards", order: [0, 1, 2, 3], split: 2 }),
+    `上=${cardIndexes(fixedTop)} 下=${cardIndexes(fixedBottom)} action=${JSON.stringify(ui.buildAction())}`);
+  clickNode(cardNode(fixedTop, 0));
+  clickNode(cardNode(fixedBottom, 2));
+  check("㉿GX15 固定切分拒绝跨行移动（张数由服务端声明，前端不改）",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[0,1]"
+      && JSON.stringify(cardIndexes(rowOf("bottom"))) === "[2,3]",
+    `上=${cardIndexes(rowOf("top"))} 下=${cardIndexes(rowOf("bottom"))}`);
+
+  // 真服务器回环：投影下发规格 ⇒ 前端拼的 action 通过 `submitAction` 的逐字段自检。
+  // 固定 4 人 / 种子 7 / 人类 0 号位诸葛亮：第一问就是「是否发动【观星】」（实测）。
+  const guanxing = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null,
+    seed: 7, my_hero: "zhugeliang",
+  });
+  await openSession(guanxing);
+  const activation = ui.state.view.pending;
+  check("㉿GX16 真会话（4 人 / 种子 7 / 诸葛亮）：第一问是【观星】的发动询问",
+    !!activation && activation.kind === "SKILL_ACTIVATION"
+      && activation.skill_id === "hero.zhugeliang.guanxing",
+    `kind=${activation && activation.kind} skill=${activation && activation.skill_id}`);
+  const activateButton = $("t-options").children.find(
+    (node) => node.textContent.includes("发动技能")
+      && node.textContent.includes("hero.zhugeliang.guanxing"),
+  );
+  if (activateButton) clickNode(activateButton);
+  await ui.submitAction();
+  const realArrange = ui.state.view.pending;
+  check("㉿GX17 确认发动后 ARRANGE 询问带投影规格（count 4 / free / 4 张牌面）",
+    !!realArrange && realArrange.kind === "ARRANGE"
+      && !!realArrange.arrange
+      && realArrange.arrange.count === 4
+      && realArrange.arrange.split === "free"
+      && realArrange.arrange.cards.length === 4,
+    `kind=${realArrange && realArrange.kind} arrange=${JSON.stringify(realArrange && realArrange.arrange && {
+      count: realArrange.arrange.count, split: realArrange.arrange.split,
+    })}`);
+  ui.renderTable();
+  ui.renderPending(ui.state.view);
+  const realTop = rowOf("top");
+  if (realTop) clickNode(cardNode(realTop, 0));
+  const realBottom = rowOf("bottom");
+  if (realBottom && slots(realBottom)[0]) clickNode(slots(realBottom)[0]);
+  const realAction = ui.buildAction();
+  const beforeAnswer = calls.length;
+  await ui.submitAction();
+  const sent = calls.slice(beforeAnswer).find((call) => call.path.includes("/answer"));
+  check("㉿GX18 真服务器接受这条 ArrangeCards（投影 + 前端载荷闭环），下一问不再是 ARRANGE",
+    !!realAction
+      && !!sent
+      && JSON.stringify(sent.body.action) === JSON.stringify(realAction)
+      && sent.body.action.kind === "ArrangeCards"
+      && sent.body.action.order.length === 4
+      && sent.body.action.split === 3
+      && !!ui.state.view.pending && ui.state.view.pending.kind !== "ARRANGE",
+    `action=${JSON.stringify(realAction)} next=${ui.state.view.pending && ui.state.view.pending.kind} choice="${$("t-choice").textContent}"`);
+
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

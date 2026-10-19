@@ -1357,6 +1357,133 @@ def test_requirement_names_the_guanxing_arrange_even_though_its_frame_is_not_on_
     assert context["label"] is None, "阶段体帧不压栈 ⇒ 事件行为空，但不该因此丢掉 requirement"
 
 
+# ---------------------------------------------------------------------------
+# W6-03：观星排列的 count / split 由**投影**读 SkillDef.deck_arrange 下发（spec S2）
+#
+# 写方 = 技能声明（与 `Arrange` 步**同一个** `DeckTopArrange` 对象）；读方 = `app.js`
+# 的双行排列面（`pending.arrange`）。`ARRANGE` 询问自己只带 `revealed`（`ArrangeContext`
+# 被 `_build_query` 丢掉、不进记录流），所以规格只能由接入层补。
+# ---------------------------------------------------------------------------
+
+GUANXING = "hero.zhugeliang.guanxing"
+
+
+def _session_at_guanxing_arrange() -> Session:
+    """真会话：4 人局、人类座位 0 号位诸葛亮；种子 7 的第一问就是「是否发动【观星】」。
+
+    答发动 ⇒ 引擎停在 ``ARRANGE``（X = min(存活 4, 5) = 4）。这条路径不碰引擎：只是
+    把人类座位的应答送回，然后读投影。
+    """
+    session = Session(
+        seed=7,
+        ai="random",
+        timeout_seconds=None,
+        player_count=4,
+        human_seat=0,
+        my_hero="zhugeliang",
+    )
+    query = session.pending
+    assert query is not None and query.kind == "SKILL_ACTIVATION", (
+        f"种子 7 的 4 人局第一问应是技能发动（实际 {getattr(query, 'kind', None)}）"
+    )
+    assert int(query.actor) == 0 and int(session.human_seat) == 0
+    assert query.skill_id == GUANXING
+    activate = next(
+        action
+        for action in query.legal_actions
+        if action.kind == "ActivateSkill" and action.skill_id == GUANXING
+    )
+    session.submit_answer(activate)
+    pending = session.pending
+    assert pending is not None and pending.kind == "ARRANGE"
+    assert len(pending.revealed) == 4, "X = min(存活 4, 5) = 4"
+    return session
+
+
+def test_the_pending_payload_carries_the_guanxing_arrange_spec() -> None:
+    """S2：``pending_payload['arrange']`` = 投影从 ``SkillDef.deck_arrange`` 读出的
+    张数 / 切分，加上询问自己带的牌面；**同一份** ``revealed``，不另造第二来源。
+    """
+    session = _session_at_guanxing_arrange()
+    query = session.pending
+
+    payload = pending_payload(session)
+
+    assert payload is not None
+    spec = payload["arrange"]
+    assert spec is not None, "观星的 ARRANGE 必须下发排列规格（否则前端只能猜）"
+    assert spec["count"] == len(query.revealed) == 4
+    assert spec["split"] == "free", "观星 = 自由切分（DeckTopArrange 的缺省档）"
+    assert [card["card_id"] for card in spec["cards"]] == [
+        card.card_id for card in query.revealed
+    ], "cards 就是询问的 revealed（同一份牌面，不复制第二来源）"
+
+    # 规格是**投影派生**：询问模型里没有 arrange / count / split 三个顶层字段。
+    record = next(
+        record
+        for record in reversed(session.engine.records)
+        if record.kind == "query" and record.query is query
+    )
+    dumped = record.query.model_dump(mode="json")
+    assert "arrange" not in dumped and "count" not in dumped and "split" not in dumped, (
+        f"排列规格不得进记录流：顶层键 = {sorted(dumped)}"
+    )
+
+
+def test_the_arrange_spec_reports_the_skill_definition_split_and_fails_closed(monkeypatch) -> None:
+    """``fixed`` 档原样下发声明；规格缺失 / 张数对不上 ⇒ ``None``（不猜、不静默截断）。
+
+    ``CATALOG`` 是只读 ``MappingProxyType``，故在投影的**定义查询**这一层换一份
+    ``SkillDef``（真实会话 + 真实询问不变，只替换声明的 ``deck_arrange``）。
+    """
+    from dataclasses import replace
+
+    import sgs_web.projection as projection
+    from sgs.skills import CATALOG
+    from sgs.skills.flow import DeckTopArrange, FixedSplit
+
+    session = _session_at_guanxing_arrange()
+    definition = CATALOG[GUANXING]
+
+    def use(spec: object) -> None:
+        replaced = replace(definition, deck_arrange=spec)
+        monkeypatch.setattr(projection, "_definition_of", lambda _state, _skill: replaced)
+
+    use(DeckTopArrange(count=4, split=FixedSplit(2, 2)))
+    fixed = pending_payload(session)["arrange"]
+    assert fixed is not None
+    assert fixed["split"] == {"top": 2, "bottom": 2}, "fixed 档原样下发声明，不猜切分"
+
+    use(DeckTopArrange(count=5, split=FixedSplit(2, 3)))
+    assert pending_payload(session)["arrange"] is None, (
+        "声明张数（5）与实际牌数（4）对不上 ⇒ fail-closed"
+    )
+
+    use(None)
+    assert pending_payload(session)["arrange"] is None, (
+        "没有 deck_arrange 的技能 ⇒ 投影不凭空造规格"
+    )
+
+
+def test_the_409_bare_query_does_not_get_an_arrange_spec() -> None:
+    """409 附带的是**裸 ``Query``**（拿不到引擎）：不能猜规格，前端显示「排列不可用」。"""
+    session = _session_at_guanxing_arrange()
+    query = session.pending
+    stale = query.legal_actions[0].model_copy(update={"answers_seq": -1})
+
+    with pytest.raises(StaleAnswer) as info:
+        session.submit_answer(stale)
+    error = info.value
+    assert error.pending is query, "409 附带的就是引擎当前挂起（原样）"
+
+    payload = pending_payload(error.pending, human_seat=error.human_seat)
+
+    assert payload is not None
+    assert payload["arrange"] is None, (
+        "没有引擎 ⇒ 没有 SkillDef.deck_arrange ⇒ 投影不得凭空造一份排列规格"
+    )
+
+
 def test_the_candidate_index_never_carries_rule_judgements() -> None:
     """③ 索引无规则：它只聚合候选里已有的座位，不算距离 / 攻击范围 / 花色 / 体力 / 存活。
 

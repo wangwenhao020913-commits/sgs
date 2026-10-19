@@ -906,6 +906,56 @@ def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
     mask(payload.get("preactivation") or [])
 
 
+def _arrange_spec(
+    engine: Any, query: Query, revealed: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """``ARRANGE`` 询问的**排列规格**（W6-03；spec §4.3 / S2）。
+
+    询问体只带被授予的牌面：``ArrangeContext.count`` / ``split`` 由 ``_build_query``
+    丢掉（不进记录流），故界面要的张数 / 切分只能由**投影**读
+    :attr:`~sgs.skills.catalog.SkillDef.deck_arrange` —— 与 ``Arrange`` 步引用**同一个**
+    :class:`~sgs.skills.flow.DeckTopArrange` 对象（一份声明，不是两份）。技能归属走
+    :func:`_skill_of_query` 的**阶段体**先例（与【观星】的 ``requirement`` 同一条判据：
+    阶段体帧不压栈，读 ``Engine.phase_body_skill()``），不另翻栈帧。
+
+    返回 ``{count, split, cards}``：``split`` = ``"free"``（``flow.FREE_SPLIT`` 的线上取值）
+    或 ``{"top": int, "bottom": int}``；``cards`` = 本次询问的 ``revealed``（查看者就是
+    询问者时才非空，见 :func:`_mask_watched_faces`）。
+
+    **fail-closed**（S2）：拿不到引擎（409 的裸 ``Query``）/ 技能归属 / 排列规格、``fixed``
+    的形状不完整、或声明张数与实际牌数对不上 ⇒ ``None``。前端据此画"排列不可用，请刷新"，
+    而不是从候选里猜一个规格。
+    """
+    if engine is None or str(getattr(query, "kind", "")) != "ARRANGE":
+        return None
+    if not revealed:
+        # 不是询问者（或裸 Query 且调用方没声明查看者）⇒ 没有牌面就没有可摆的排列面。
+        return None
+    frames = getattr(getattr(engine, "stack", None), "frames", ()) or ()
+    data = frames[-1].data if frames else {}
+    skill_id = _skill_of_query(engine, query, data)
+    definition = _definition_of(engine.state, skill_id) if skill_id is not None else None
+    spec = getattr(definition, "deck_arrange", None) if definition is not None else None
+    if spec is None:
+        return None
+    count = len(revealed)
+    declared = getattr(spec, "count", None)
+    if isinstance(declared, int) and declared != count:
+        # 声明的是定数、实际发到的牌数不同 ⇒ 规格对不上，不拿它猜（可调用张数交给执行器）。
+        return None
+    split_spec = getattr(spec, "split", None)
+    split: str | dict[str, int]
+    if split_spec == "free":  # = ``flow.FREE_SPLIT``；线上取值就是这一个字符串
+        split = "free"
+    else:
+        top = getattr(split_spec, "top", None)
+        bottom = getattr(split_spec, "bottom", None)
+        if not isinstance(top, int) or not isinstance(bottom, int):
+            return None
+        split = {"top": top, "bottom": bottom}
+    return {"count": count, "split": split, "cards": revealed}
+
+
 def pending_payload(
     session: Session | Query | None, *, human_seat: int | None = None
 ) -> dict[str, Any] | None:
@@ -965,6 +1015,15 @@ def pending_payload(
     # 只有拿得到 ``Session``（= 拿得到引擎）时才算；409 里附带的那份现状（裸 ``Query``）为 None。
     payload["context"] = (
         query_context(session.engine, query) if isinstance(session, Session) else None
+    )
+    # 排列规格（W6-03 / S2）：``ARRANGE`` 询问只带牌面，张数 / 切分由投影读
+    # ``SkillDef.deck_arrange``（与 ``Arrange`` 步同一对象）。只有收 ``Session`` 才拿得到
+    # 引擎；409 里附带的裸 ``Query`` ⇒ ``None``（fail-closed，前端画"排列不可用"）。
+    # 与 ``context`` 同姿态：派生数据**不进记录流**，既有 Golden Replay 一行不改。
+    payload["arrange"] = (
+        _arrange_spec(session.engine, query, payload.get("revealed") or [])
+        if isinstance(session, Session)
+        else None
     )
     payload["option_seats"] = option_seats(query)
     # 这一步是不是"提供一张 B"（票 14）：非空 = B 的牌名 id。字段在记录流里被 ``exclude``，

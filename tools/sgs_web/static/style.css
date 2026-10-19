@@ -92,6 +92,29 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .card.dis { opacity: .38; cursor: not-allowed; }
 .card.static { cursor: default; }
 
+/* 排列（W6-03）：上行 = 牌堆顶、下行 = 牌堆底；下行空槽是拖拽 / 点选的落点。 */
+.arrange-row {
+  border: 1px dashed var(--line); border-radius: 10px; padding: 7px 9px;
+  background: #fbfaf7;
+}
+.arrange-row[data-row="top"] { border-color: #d9c8bc; }
+.arrange-row[data-row="bottom"] { border-color: #c9cfd6; }
+.arrange-row.drop { border-color: var(--accent); background: var(--accent-soft); }
+.arrange-label {
+  display: flex; align-items: baseline; gap: 6px; margin-bottom: 6px;
+  font-size: 13px; font-weight: 600; color: var(--ink);
+}
+.arrange-label .dim { font-weight: 400; }
+.arrange-cards { display: flex; flex-wrap: wrap; gap: 6px; min-height: 52px; align-items: stretch; }
+.arrange-card { cursor: grab; }
+.arrange-card:active { cursor: grabbing; }
+.arrange-slot {
+  min-width: 62px; min-height: 48px; border-style: dashed; color: var(--dim);
+  background: #f2efe9; cursor: pointer;
+}
+.arrange-slot:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.arrange-unavailable { padding: 8px 0; }
+
 .options { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
 .opt {
   text-align: left; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;

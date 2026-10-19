@@ -76,6 +76,7 @@ const state = {
   selectedTargets: [], // 已选目标座位
   selectedOption: null,// 旧路径：选中的 legal_action 下标（弃牌 / 排列 / 单选 / 技能）
   picks: [],           // 手选槽位下标 / 弃牌 card_id / 提供面的面内位置
+  arrange: null,       // 排列（W6-03）：{key,cards,count,free,fixed,top,bottom,selected,dragging}
   preactivation: null, // 预发动（W4-1）：{skillId,name,steps,answers,cursor}；本地态，取消零提交
   convertSkill: null,  // 转化技"挑来源牌"模式（【龙胆】）：正在等玩家点一张可转化的手牌
   playback: null,      // 事件回放：{body, records, index, querySeat}
@@ -437,12 +438,13 @@ function commitView(body) {
   renderPending(body);
 }
 
-/** 清空全部未提交的选择（焦点 / 已选目标 / 旧路径的候选与槽位 / 预发动本地态）。 */
+/** 清空全部未提交的选择（焦点 / 已选目标 / 旧路径的候选与槽位 / 预发动本地态 / 排列面）。 */
 function resetSelection() {
   state.focusCardId = null;
   state.selectedTargets = [];
   state.selectedOption = null;
   state.picks = [];
+  state.arrange = null;
   state.preactivation = null;
   state.convertSkill = null;
   state.lastRejectReason = "";
@@ -1515,6 +1517,9 @@ function renderPending(view) {
   }
   $("btn-submit").disabled = true;
   $("btn-cancel").disabled = true;
+  // 排列是**强制、无取消**（spec §4.3 / Q9(d)）：进入排列面时把取消按钮整个藏起来；
+  // 其余询问路径照旧显示（本行是唯一的复位点，分支只负责按需隐藏）。
+  $("btn-cancel").hidden = false;
   $("t-choice").textContent = "";
   const targetHint = $("t-target-hint");
   if (targetHint) targetHint.textContent = "";
@@ -1544,10 +1549,17 @@ function renderPending(view) {
     $("btn-cancel").disabled = state.picks.length === 0 && !cancelAction(pending);
   }
   else if (kind === "direct") renderDirect(actions[0], pending);
+  else if (kind === "arrange") {
+    // 排列（W6-03）：双行拖拽面；强制、无取消——唯一出口是「确认」。
+    $("btn-cancel").hidden = true;
+    $("btn-cancel").disabled = true;
+    renderArrange(pending);
+  }
   else renderCandidateList(pending, actions);
 
-  // 提交 / 取消两个按钮的**文案**跟着模式走（预发动 = 确认发动 / 取消预发动；被动入口 = 放弃）。
-  setActionLabels(state.preactivation !== null, isPassivePreativation(pending));
+  // 提交 / 取消两个按钮的**文案**跟着模式走（预发动 = 确认发动 / 取消预发动；被动入口 = 放弃；
+  // 排列 = 确认）。
+  setActionLabels(state.preactivation !== null, isPassivePreativation(pending), kind === "arrange");
   // 提交按钮的启用与否**只算一次**（每个分支只管"铺界面"）：分散在各分支里写过一次
   // 就会漏掉一条路径（`SELECT_CARDS` 的选择面就因此永远灰着）。
   refreshSubmit(pending);
@@ -1555,13 +1567,15 @@ function renderPending(view) {
 }
 
 /** 底部两个按钮的文案：预发动 = 「确认发动 / 取消预发动」；手牌入口 = 「确认使用 / 取消选择」；
- *  被动入口 = 「放弃」。 */
-function setActionLabels(inPreativation, passiveEntry) {
+ *  被动入口 = 「放弃」；排列 = 「确认」（取消按钮在排列面里整个隐藏）。 */
+function setActionLabels(inPreativation, passiveEntry, arrange = false) {
   const submit = $("btn-submit");
   const cancel = $("btn-cancel");
   const cardEntry = Boolean(inPreativation && state.preactivation && state.preactivation.cardEntry);
   if (submit) {
-    submit.textContent = inPreativation ? (cardEntry ? "确认使用" : "确认发动") : "提交";
+    submit.textContent = arrange
+      ? "确认"
+      : (inPreativation ? (cardEntry ? "确认使用" : "确认发动") : "提交");
   }
   if (cancel) {
     cancel.textContent = cardEntry
@@ -1577,6 +1591,7 @@ function setActionLabels(inPreativation, passiveEntry) {
  * - `picker`：出牌阶段 / 响应窗口 —— 点牌 + 点目标（本刀新增）；
  * - `direct`：只有一条候选、且它**没有目标要选** —— 不铺按钮，直接显示"将提交：…"；
  * - `slots`：`SELECT_CARDS` 的选择面（下一刀再统一）；
+ * - `arrange`：`ARRANGE` 的双行拖拽面（W6-03；规格由投影下发）；
  * - `list`：其余询问类保留旧的候选列表按钮（逃生梯，下一刀抹平）。
  */
 function renderKind(pending, actions) {
@@ -1586,6 +1601,10 @@ function renderKind(pending, actions) {
   if (pending.kind === "SELECT_CARDS") return "slots";
   // 弃牌阶段：不铺候选按钮，点手牌收进待弃置集合（`buildAction` 按 picks 找候选）。
   if (pending.kind === "DISCARD") return "discard";
+  // 排列（W6-03）：**唯一**的渲染路径 —— 双行拖拽面；不在候选上铺 720 个按钮。
+  // 规格缺失（409 裸 Query / 无技能定义）时也只走这条路径，由 `renderArrange` 画
+  // "排列不可用"（fail-closed），**不**退回旧的候选列表猜一个顺序。
+  if (pending.kind === "ARRANGE") return "arrange";
   // 预发动（W4-1）：清单驱动，不铺候选列表、不走手选。
   if (state.preactivation) return "preactivation";
   // 被动入口（W4-2）：已翻预发动的技能在时机上只发一次询问并随询问下发清单。界面给它
@@ -1837,6 +1856,15 @@ function refreshSubmit(pending) {
     $("t-choice").textContent = ready ? "可以提交：放弃。" : "点技能进入预发动，或点「放弃」。";
     return;
   }
+  if (pending.kind === "ARRANGE") {
+    // 规格缺失 = 409 裸 Query / 无技能定义（投影 fail-closed）：不猜顺序，只说刷新。
+    $("t-choice").textContent = !arrangeSpec(pending)
+      ? "排列不可用，请刷新"
+      : (ready
+        ? "可以确认：提交你摆放的顺序（上行左→右，再接下行左→右）。"
+        : "先把全部卡牌排成一个完整顺序。");
+    return;
+  }
   if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) {
     $("t-choice").textContent = ready ? "可以提交。" : "点场上武将选择交给谁。";
     return;
@@ -2053,6 +2081,279 @@ function toggleProvidePick(slotIndex) {
   renderPending(state.view);
 }
 
+/* ------------------------------------------------------- 排列（W6-03） */
+
+/** 排列规格的**读取口**：只认服务端下发的 `pending.arrange`（投影读 `SkillDef.deck_arrange`）。
+ *
+ * 返回 `null` ⇒ fail-closed：没有规格就不画双行面、也不拼 Action（409 裸 Query /
+ * 无技能定义 / 形状不完整）。形状 = `{count, split: "free" | {top, bottom}, cards}`；
+ * `count` / `split` **不是**前端自己算的规则（S2：投影从技能定义读）。
+ */
+function arrangeSpec(pending) {
+  if (!pending || pending.kind !== "ARRANGE") return null;
+  const spec = pending.arrange;
+  if (!spec || !Array.isArray(spec.cards)) return null;
+  const count = Number(spec.count);
+  if (!Number.isInteger(count) || count <= 0 || spec.cards.length !== count) return null;
+  if (spec.split === "free") return spec;
+  const split = spec.split || {};
+  const top = Number(split.top);
+  const bottom = Number(split.bottom);
+  if (!Number.isInteger(top) || !Number.isInteger(bottom)) return null;
+  if (top < 0 || bottom < 0 || top + bottom !== count) return null;
+  return spec;
+}
+
+/** 排列面的本地布局：`top` / `bottom` 装的是**面内位置**（`order` 的元素），不是牌 id。
+ * 键 = 询问序号 + 切分声明 + 牌面 id 序列：换询问 / 换规格 / 换牌就重建，同一询问的
+ * 刷新保留玩家摆好的顺序。 */
+function arrangeKey(pending, spec) {
+  return `${pending.seq}:${JSON.stringify(spec.split)}:${spec.cards.map((card) => card.card_id).join(",")}`;
+}
+
+/** 初始布局：自由切分 = 全部在牌堆顶（参考图的样子，下行全是空槽）；固定切分按声明铺开。 */
+function initialArrange(spec, key) {
+  const count = spec.cards.length;
+  const free = spec.split === "free";
+  const fixed = free ? null : { top: Number(spec.split.top), bottom: Number(spec.split.bottom) };
+  const topCount = free ? count : fixed.top;
+  return {
+    key,
+    cards: spec.cards,
+    count,
+    free,
+    fixed,
+    top: Array.from({ length: topCount }, (_, at) => at),
+    bottom: Array.from({ length: count - topCount }, (_, at) => topCount + at),
+    selected: null,
+    dragging: null,
+  };
+}
+
+/** 双行布局 → 一条 `ArrangeCards`；`null` = 还没排成完整顺序（提交按钮据此置灰）。
+ *
+ * `order` = 上行左→右 **再接** 下行左→右，`split` = 上行张数（Q9(c) 的裁定）。
+ * **`answers_seq` 必须写在最前**：它是 `_ActionBase` 的第一个字段，服务端候选的 JSON 也以
+ * 它开头；`submitAction` 的 `JSON.stringify` 自检逐字节比键序，顺序错了会把一条合法的排列
+ * 判成"不在候选里"。
+ */
+function arrangeAction(pending) {
+  const spec = arrangeSpec(pending);
+  const layout = state.arrange;
+  if (!spec || !layout) return null;
+  if (layout.key !== arrangeKey(pending, spec)) return null;
+  const order = layout.top.concat(layout.bottom);
+  if (order.length !== layout.count) return null;
+  const seen = new Set();
+  for (const index of order) {
+    if (!Number.isInteger(index) || index < 0 || index >= layout.count || seen.has(index)) {
+      return null;
+    }
+    seen.add(index);
+  }
+  if (!layout.free) {
+    if (layout.top.length !== layout.fixed.top) return null;
+    if (layout.bottom.length !== layout.fixed.bottom) return null;
+  }
+  return { answers_seq: pending.seq, kind: "ArrangeCards", order, split: layout.top.length };
+}
+
+/** 这张**面内位置**现在在哪一行（`null` = 布局坏了，调用方按无效处理）。 */
+function arrangeRowOf(layout, index) {
+  if (!layout) return null;
+  if (layout.top.includes(index)) return "top";
+  if (layout.bottom.includes(index)) return "bottom";
+  return null;
+}
+
+/** 把 `index` 移到 `row`：`beforeIndex` = 插到那张牌之前，`null` = 该行末尾。
+ * 固定切分只允许**行内**排序（跨行会破坏服务端声明的 top / bottom），越界即拒绝。 */
+function arrangeMoveTo(index, row, beforeIndex) {
+  const layout = state.arrange;
+  if (!layout || !Number.isInteger(index)) return false;
+  const from = arrangeRowOf(layout, index);
+  if (from === null || (from !== row && !layout.free)) return false;
+  const source = from === "top" ? layout.top : layout.bottom;
+  source.splice(source.indexOf(index), 1);
+  const target = row === "top" ? layout.top : layout.bottom;
+  if (beforeIndex === null || beforeIndex === undefined || beforeIndex < 0) {
+    target.push(index);
+  } else {
+    const at = target.indexOf(beforeIndex);
+    target.splice(at < 0 ? target.length : at, 0, index);
+  }
+  return true;
+}
+
+/** 点牌 / 点空槽：第一下**选中**，第二下把它移到目标位置（同行的牌 = 插到它前面；
+ * 另一行的牌 = 跨行插入；空槽 = 追加到那一行末尾）。拖动之外的点击 / 键盘后备。 */
+function arrangePick(index) {
+  const pending = state.view ? state.view.pending : null;
+  const layout = state.arrange;
+  if (state.playback || !pending || pending.kind !== "ARRANGE" || !layout) return;
+  if (layout.selected === null || layout.selected === undefined) {
+    layout.selected = index;
+  } else if (layout.selected === index) {
+    layout.selected = null;
+  } else {
+    const target = arrangeRowOf(layout, index);
+    if (target !== null) arrangeMoveTo(layout.selected, target, index);
+    layout.selected = null;
+  }
+  renderPending(state.view);
+}
+
+/** 落到某一行（拖拽的 drop / 空槽点击）：把当前拖动或选中的牌移过去。 */
+function arrangeDrop(row, beforeIndex) {
+  const pending = state.view ? state.view.pending : null;
+  const layout = state.arrange;
+  if (state.playback || !pending || pending.kind !== "ARRANGE" || !layout) return;
+  const from = layout.dragging !== null && layout.dragging !== undefined
+    ? layout.dragging
+    : layout.selected;
+  if (from === null || from === undefined) return;
+  arrangeMoveTo(from, row, beforeIndex);
+  layout.dragging = null;
+  layout.selected = null;
+  renderPending(state.view);
+}
+
+/** 排列面里一张**被观看的牌**：可拖、可点选（点选后点目标位置 = 移动）。 */
+function arrangeCardNode(layout, index) {
+  const card = layout.cards[index];
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "card arrange-card";
+  chip.setAttribute("data-card-index", String(index));
+  chip.setAttribute("data-row", arrangeRowOf(layout, index));
+  if (layout.selected === index) chip.classList.add("sel");
+  chip.draggable = true;
+  chip.innerHTML = `<span class="n">${card.name}</span><span class="s">${card.suit || ""}${card.rank ?? ""}</span>`;
+  chip.addEventListener("click", () => arrangePick(index));
+  chip.addEventListener("dragstart", (event) => {
+    if (state.playback) return;
+    layout.dragging = index;
+    if (event && event.dataTransfer && event.dataTransfer.setData) {
+      event.dataTransfer.setData("text/plain", String(index));
+    }
+  });
+  chip.addEventListener("dragend", () => { layout.dragging = null; });
+  chip.addEventListener("dragover", (event) => {
+    if (event && event.preventDefault) event.preventDefault();
+  });
+  chip.addEventListener("drop", (event) => {
+    if (event && event.preventDefault) event.preventDefault();
+    const row = arrangeRowOf(layout, index);
+    const from = layout.dragging !== null && layout.dragging !== undefined
+      ? layout.dragging
+      : layout.selected;
+    if (from !== null && from !== undefined && row !== null) arrangeMoveTo(from, row, index);
+    layout.dragging = null;
+    layout.selected = null;
+    renderPending(state.view);
+  });
+  return chip;
+}
+
+/** 排列面的一个空槽：点 / 拖到它 = 追加到这一行的末尾。 */
+function arrangeSlotNode(row) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "card arrange-slot";
+  chip.setAttribute("data-empty", "1");
+  chip.setAttribute("data-row", row);
+  chip.textContent = "空槽";
+  chip.addEventListener("click", () => arrangeDrop(row, null));
+  chip.addEventListener("dragover", (event) => {
+    if (event && event.preventDefault) event.preventDefault();
+  });
+  chip.addEventListener("drop", (event) => {
+    if (event && event.preventDefault) event.preventDefault();
+    arrangeDrop(row, null);
+  });
+  return chip;
+}
+
+/** 双行容器：标签行（牌堆顶 / 牌堆底）+ 牌 / 空槽行；整行也是拖拽落点（追加到行末）。 */
+function arrangeRowNode(name, label, hint) {
+  const row = document.createElement("div");
+  row.className = "arrange-row";
+  row.setAttribute("data-row", name);
+  const head = document.createElement("div");
+  head.className = "arrange-label";
+  head.textContent = label;
+  const note = document.createElement("span");
+  note.className = "dim";
+  note.textContent = hint;
+  head.appendChild(note);
+  const cards = document.createElement("div");
+  cards.className = "arrange-cards";
+  cards.setAttribute("data-row", name);
+  row.appendChild(head);
+  row.appendChild(cards);
+  row.addEventListener("dragover", (event) => {
+    if (event && event.preventDefault) event.preventDefault();
+    row.classList.add("drop");
+  });
+  row.addEventListener("dragleave", () => row.classList.remove("drop"));
+  row.addEventListener("drop", (event) => {
+    if (event && event.preventDefault) event.preventDefault();
+    row.classList.remove("drop");
+    arrangeDrop(name, null);
+  });
+  return { row, cards };
+}
+
+/** `ARRANGE` 的双行拖拽面（W6-03）：**唯一**的排列渲染路径。
+ *
+ * 上行 = 牌堆顶（左 → 右 = 从最上往下），下行 = 牌堆底（左 → 右 = 先接在现有牌堆底
+ * 之下）；确认提交的 `order` 就是上行左→右再接下行左→右（Q9(c)）。自由切分的下行始终
+ * 留 `count` 个位置（用户参考图的布局：全部在顶上时下行全是空槽），固定切分按声明的
+ * `bottom` 收口。规格缺失时只画"排列不可用，请刷新"（fail-closed），不铺可提交的牌。
+ */
+function renderArrange(pending) {
+  const box = $("t-options");
+  const hint = $("t-target-hint");
+  const spec = arrangeSpec(pending);
+  if (!spec) {
+    const line = document.createElement("div");
+    line.className = "hint arrange-unavailable";
+    line.textContent = "排列不可用，请刷新";
+    box.appendChild(line);
+    state.arrange = null;
+    if (hint) {
+      hint.textContent = "这一份排列缺少规格（可能是 409 的陈旧询问）：请点「刷新」重新取当前询问。";
+    }
+    return;
+  }
+  if (!state.arrange || state.arrange.key !== arrangeKey(pending, spec)) {
+    state.arrange = initialArrange(spec, arrangeKey(pending, spec));
+  }
+  const layout = state.arrange;
+  const top = arrangeRowNode("top", "牌堆顶", "（左 = 最上）");
+  const bottom = arrangeRowNode(
+    "bottom",
+    "牌堆底",
+    layout.free ? "（左起接在现有牌堆底之下）" : `（固定 ${layout.fixed.top} 顶 / ${layout.fixed.bottom} 底）`,
+  );
+  box.appendChild(top.row);
+  box.appendChild(bottom.row);
+  for (const index of layout.top) top.cards.appendChild(arrangeCardNode(layout, index));
+  if (layout.free && layout.top.length < layout.count) {
+    top.cards.appendChild(arrangeSlotNode("top"));
+  }
+  for (const index of layout.bottom) bottom.cards.appendChild(arrangeCardNode(layout, index));
+  const capacity = layout.free ? layout.count : layout.fixed.bottom;
+  for (let at = layout.bottom.length; at < capacity; at += 1) {
+    bottom.cards.appendChild(arrangeSlotNode("bottom"));
+  }
+  if (hint) {
+    hint.textContent = layout.free
+      ? "拖动卡牌在牌堆顶 / 牌堆底之间切换，行内拖动排序；也可先点一张牌再点目标位置。"
+      : "固定切分：只能在上行 / 下行内排序（跨行移动会改变服务端声明的张数）。";
+  }
+}
+
 function renderCountdown(view) {
   const timer = $("t-timer");
   if (!view || !view.pending || view.timeout_seconds === null) {
@@ -2074,6 +2375,9 @@ function buildAction() {
   // 预发动（W4-1）：确认 = **复合动作**，由清单的本地答案拼出（不在 `legal_actions` 里；
   // 服务端校验器按同一份步骤声明验）。取消走 :func:`cancelOrClear` 的本地分支。
   if (state.preactivation) return buildPreativationAction(pending, state.preactivation);
+  // 排列（W6-03）：由服务端下发的 `arrange` 规格 + 本地双行布局拼一条 `ArrangeCards`。
+  // **键序**必须是 answers_seq 在前（见 :func:`arrangeAction`），否则下面的逐字段自检会拒。
+  if (pending.kind === "ARRANGE") return arrangeAction(pending);
   const actions = pending.legal_actions;
   // 选择面的候选里**没有**具体 picks（引擎只发一条骨架），要按已点槽位补上。
   const withPicks = (action) => (action.kind === "SelectCards" ? Object.assign({}, action, { picks: state.picks.slice() }) : action);
