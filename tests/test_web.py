@@ -693,6 +693,61 @@ def test_the_candidate_index_is_derived_from_the_legal_actions() -> None:
     assert checked > 200, f"取样太少（{checked} 次询问），断言谈不上机械"
 
 
+def test_the_candidate_index_for_a_halberd_borrowed_window_keeps_bn_in_every_combo() -> None:
+    """W7-01：借刀窗口（方天 + 最后一张手牌【杀】）的索引 = 1..3 目标，且 combo 恒含 Bn。
+
+    界面据 ``min_targets`` / ``max_targets`` 说"还要选几个"、据 ``combos`` 判提交可否；
+    Bn **不需要**第二个协议字段：它已经写在每一组组合里（W7 spec §3.6 / 评审 S10）。
+    """
+    from sgs.effects import legal_actions_for
+    from sgs.state import QueryKind, RespondContext, RespondMode
+
+    pack = _context_pack()
+    borrowed = cards_of_type(pack, "borrowed_sword")[0]
+    slash = cards_of_type(pack, "slash")[0]
+    halberd = cards_of_type(pack, "halberd")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(hand=(slash,), equip=(halberd,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        turn_seat=0,
+    )
+    query = RespondQuery(
+        seq=1,
+        actor=1,
+        timing=Timing.RESOLVE_AFTER_EFFECT,
+        prompt="【借刀杀人】：对 1 号位使用【杀】，或交出武器。",
+        legal_actions=legal_actions_for(
+            state,
+            1,
+            QueryKind.RESPOND,
+            answers_seq=1,
+            payload=RespondContext(
+                cause=WindowCause.BORROWED_SWORD,
+                required="slash",
+                mode=RespondMode.USE,
+                use_targets=(0,),
+            ),
+        ),
+        view=project(state, 1),
+        cause=WindowCause.BORROWED_SWORD,
+        required="slash",
+        target=1,
+    )
+
+    entry = candidate_index(query)[str(slash)]
+
+    assert entry["min_targets"] == 1, "额定 1 目标"
+    assert entry["max_targets"] == 3, "方天在最后一张手牌时放宽到 3"
+    assert all(0 in combo for combo in entry["combos"]), "每一组组合都含 Bn（借刀指定的目标）"
+    assert {len(combo) for combo in entry["combos"]} == {1, 2, 3}, "1 / 2 / 3 目标的组合都在"
+    assert entry["pool"] == [0, 2, 3], "池是完整的 check_targets 池（含额外目标）"
+
+
 # ---------------------------------------------------------------------------
 # 5c. 转化来源索引（报障 4）：点【闪】要命中"当【杀】"的那条虚拟候选
 # ---------------------------------------------------------------------------

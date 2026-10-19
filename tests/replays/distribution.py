@@ -77,6 +77,8 @@ SLUG_CLASSES: dict[str, tuple[str, ...]] = {
     # 45 = auto-b（a 不可行 ⇒ 持刀者交出武器），46 = 窗口内的转化【杀】。
     "45-borrowed-sword-auto-handover": ("普通锦囊与打出",),
     "46-borrowed-sword-transform-slash": ("普通锦囊与打出", "武将技能"),
+    # W7-01：借刀窗口里的方天（真【杀】）——既是「借刀的打出 / 使用」也是「装备 / 目标数」。
+    "47-halberd-borrowed-sword": ("普通锦囊与打出", "装备/距离/转化"),
     # ---- 7. 普通锦囊与打出 ----
     "31-play-card-response": ("普通锦囊与打出",),
     "32-five-grains-selection": ("普通锦囊与打出",),

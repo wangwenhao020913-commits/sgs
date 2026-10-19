@@ -74,6 +74,22 @@ PREACTIVATION_CANCEL_SCENARIO = "44-preactivation-cancel-no-side-effect"
 PREACTIVATION_CANCEL_HEROES: tuple[str, ...] = ("sunquan", "guanyu")
 """座 0 孙权给出【制衡】的预发动清单（本专项的取消对象）；座 1 关羽只是填满 2 人局。"""
 
+HALBERD_BORROW_SCENARIO = "47-halberd-borrowed-sword"
+"""W7-01 的脚本专项：**借刀窗口里的方天（真【杀】）**——Bn + 2 个额外目标。
+
+场景（4 人局，座 0 = 使用者、座 1 = 持刀者）：座 0 起手有【借刀杀人】；座 1 起手有
+【方天画戟】与恰好一张【杀】，其余全是可在出牌阶段装上 / 用掉的牌（用不掉的牌 ⇒ 淘汰该
+种子，见本模块的录制纪律）。座 1 先装其它装备、**最后**换上方天（保证它留在武器槽），
+把手牌用到只剩那张【杀】；座 0 在座 1 有武器后的出牌阶段按清单指定 `[A=1, Bn=0]`，
+持刀者在窗口选**目标数最多**的 `UseCard`（3 目标），不是首条单目标候选。
+"""
+
+HALBERD_BORROW_HOLDER = 1
+"""持刀者的座位（方天 + 最后一张手牌【杀】）。"""
+
+HALBERD_BORROW_USER = 0
+"""使用者的座位（起手有【借刀杀人】；Bn = 0 指向他自己）。"""
+
 DOUBLE_SWORD_HEROES: tuple[str, ...] = ("liubei", "sunshangxiang", "guanyu", "luxun")
 """票 17 的脚本基准写死的逐座位武将（座 0 刘备男 / 座 1 孙尚香女 ⇒ 异性目标**必然**在场）。
 
@@ -176,6 +192,16 @@ SCRIPTED_SCENARIOS: dict[str, Scenario] = {
         player_count=2,
         deck_profile=M2_DECK_PROFILE,
         heroes=("guanyu", "zhaoyun"),
+    ),
+    # W7-01：借刀窗口里的方天（真【杀】）——Bn + 2 个额外目标。种子由开发期搜索得到
+    # （`.scratch/w7-fangtian/search47.py`，被 gitignore）：4 人局、座 0 有借刀、座 1 拿到
+    # 方天 + 恰好一张【杀】且其余牌都能在出牌阶段用掉 / 装上（用不掉 ⇒ 淘汰该种子）。
+    HALBERD_BORROW_SCENARIO: Scenario(
+        slug=HALBERD_BORROW_SCENARIO,
+        seed=1733,
+        max_turns=200,
+        player_count=4,
+        deck_profile=M2_DECK_PROFILE,
     ),
     # W5-02b：借刀原来的 M2 随机基准。裸候选从 `legal_actions` 收回（入口只剩两步清单）
     # 后，随机驱动产不出借刀动作，故改**脚本驱动**；它仍是「普通锦囊与打出」的覆盖项
@@ -505,6 +531,8 @@ class ScenarioPlayer:
             return self._borrowed_auto_handover(query)
         if self.slug == "46-borrowed-sword-transform-slash":
             return self._borrowed_transform_slash(query)
+        if self.slug == HALBERD_BORROW_SCENARIO:
+            return self._halberd_borrow(query)
         raise AssertionError(f"没有为场景 {self.slug} 写目标段")  # pragma: no cover - 开发期护栏
 
     # ---- 29 / 42（W4-fix-2）：转化技的唯一入口 = **预发动清单** ----
@@ -629,6 +657,102 @@ class ScenarioPlayer:
         if query.kind == "PEACH":
             return _use(query, "peach") or _find(query, Pass)
         return None
+
+    # ---- 47（W7-01）：借刀窗口里的方天（真【杀】）----
+    #
+    # 座 0 = 使用者（起手借刀，指定 [A=1, Bn=0]）；座 1 = 持刀者（方天 + 最后一张手牌【杀】）。
+    # 持刀者在窗口里**选目标数最多**的候选——这条不能用 `_manifest_first_answers`：真【杀】
+    # 走的是 `legal_actions`（不是清单），首条候选是单目标的 `(Bn,)`。
+
+    def _halberd_borrow(self, query: Query) -> Action | None:
+        if self.seat == HALBERD_BORROW_USER:
+            return self._halberd_borrow_user(query)
+        if self.seat == HALBERD_BORROW_HOLDER:
+            return self._halberd_borrow_holder(query)
+        return None
+
+    def _halberd_borrow_user(self, query: Query) -> Action | None:
+        """座 0：等持刀者装上武器，再按清单指定 `[A=1, Bn=0]`；借刀一路留着。"""
+        if self.recording.goal_done:
+            return None
+        if query.kind == "PLAY_PHASE":
+            holder_slash = _hand_card_of_type(self.engine, HALBERD_BORROW_HOLDER, "slash")
+            if _seat_has_weapon(self.engine, HALBERD_BORROW_HOLDER) and holder_slash is not None:
+                action = _designation_for(
+                    query,
+                    "borrowed_sword",
+                    holder=HALBERD_BORROW_HOLDER,
+                    designate=HALBERD_BORROW_USER,
+                )
+                if action is not None:
+                    self.recording.announce(self.seat)
+                    return action
+            return _find(query, EndPhase)
+        if query.kind == "DISCARD":
+            keep = _hand_card_of_type(self.engine, self.seat, "borrowed_sword")
+            return _discard_keeping(query, {keep} if keep is not None else set())
+        if query.kind == "DODGE":
+            return _use(query, "dodge") or _find(query, Pass)
+        if query.kind == "PEACH":
+            return _use(query, "peach") or _find(query, Pass)
+        return None
+
+    def _halberd_borrow_holder(self, query: Query) -> Action | None:
+        """座 1：先把自己打空到只剩【杀】，再在借刀窗口选**目标数最多**的组合。
+
+        出牌顺序是判据的一部分：**其它装备先装、方天最后装**（后装的武器占槽，方天必须
+        是最终留在武器槽里的那张）；自指的延时锦囊顺手用掉；多余的【杀】只用一张
+        （次数闸门限制），剩下的牌只要能用的都用——用不掉就说明这颗种子该淘汰。
+        """
+        if (
+            query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.BORROWED_SWORD
+        ):
+            slashes = [
+                action
+                for action in query.legal_actions
+                if isinstance(action, UseCard) and action.card.type == "slash"
+            ]
+            if slashes:
+                self.recording.announce(self.seat)
+                return max(slashes, key=lambda action: (len(action.targets), action.targets))
+            return _find(query, Pass)
+        if self.recording.goal_done:
+            return None
+        if query.kind == "PLAY_PHASE":
+            other_equipment = _use_equipment(query, excluding_type="halberd")
+            if other_equipment is not None:
+                return other_equipment
+            halberd = _use(query, "halberd")
+            if halberd is not None:
+                return halberd
+            delayed = _use_one_of(query, ("indulgence", "lightning"))
+            if delayed is not None:
+                return delayed
+            spare = self._spare_slash(query)
+            if spare is not None:
+                return spare
+            return _find(query, EndPhase)
+        if query.kind == "DISCARD":
+            keep = _hand_card_of_type(self.engine, self.seat, "slash")
+            return _discard_keeping(query, {keep} if keep is not None else set())
+        if query.kind == "DODGE":
+            return _use(query, "dodge") or _find(query, Pass)
+        if query.kind == "PEACH":
+            return _use(query, "peach") or _find(query, Pass)
+        return None
+
+    def _spare_slash(self, query: Query) -> Action | None:
+        """手里还有**不止一张**【杀】时，用掉多余的那张（留一张给借刀窗口的方天）。"""
+        state = self.engine.state
+        slashes = [
+            card_id
+            for card_id in state.player(self.seat).hand
+            if state.card(card_id).type == "slash"
+        ]
+        if len(slashes) <= 1:
+            return None
+        return _use(query, "slash")
 
     # ---- 01 / 02：座位 0 出【杀】，座位 1 在【闪】窗口给出互斥的两种应答 ----
 
@@ -877,6 +1001,41 @@ def _first_designation(query: Query, type_id: str) -> Action | None:
             and action.card.type == type_id
             and action.designations
         ):
+            return action
+    return None
+
+
+def _designation_for(
+    query: Query, type_id: str, *, holder: int, designate: int
+) -> Action | None:
+    """本次出牌阶段附带指定池里**精确**的那一条 ``[A=holder, Bn=designate]``。"""
+    for action in getattr(query, "designation_actions", ()):
+        if (
+            isinstance(action, UseCard)
+            and action.card.type == type_id
+            and action.targets == (holder,)
+            and action.designations == (designate,)
+        ):
+            return action
+    return None
+
+
+def _use_equipment(query: Query, *, excluding_type: str | None = None) -> Action | None:
+    """出牌阶段里第一张可用的装备牌（``excluding_type``：把某张牌名的装备留到最后装）。"""
+    for action in query.legal_actions:
+        if (
+            isinstance(action, UseCard)
+            and action.card.slot is not None
+            and action.card.type != excluding_type
+        ):
+            return action
+    return None
+
+
+def _use_one_of(query: Query, type_ids: tuple[str, ...]) -> Action | None:
+    """出牌阶段里第一张牌名命中 ``type_ids`` 的可用牌。"""
+    for action in query.legal_actions:
+        if isinstance(action, UseCard) and action.card.type in type_ids:
             return action
     return None
 

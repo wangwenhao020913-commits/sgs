@@ -86,6 +86,7 @@ NAMES: dict[str, tuple[str, str]] = {
     "44-preactivation-cancel-no-side-effect": ("预发动取消零副作用", "接入层本地态不进记录流：`PLAY_PHASE` 随附【制衡】的预发动清单（`preactivations`）而整局没有任何被接受的 `ActivateSkill`；同种子下取消路径与「从不进预发动」路径的记录流逐字节相等"),
     "45-borrowed-sword-auto-handover": ("【借刀杀人】a 不可行 → 自动交出武器", "借刀的附带指定清单（`designations` + `card_preactivations`，规则 6.5）；持刀者没有可用【杀】/**转化【杀】** ⇒ **不发**持刀者窗口，武器直接从装备区移进使用者手牌（`reason=LOSE`）；记录流里没有 `BORROWED_SWORD` 询问"),
     "46-borrowed-sword-transform-slash": ("【借刀杀人】窗口内的转化【杀】", "借刀窗口的目标固定为使用者指定的 Bn；持刀者按【龙胆】的预发动清单确认成 `UseCard(虚拟【杀】, (Bn,))`；转化技在响应窗口的清单只有**来源步**（`fixed_target=True`）"),
+    "47-halberd-borrowed-sword": ("【借刀杀人】+【方天画戟】· 多目标", "【方天画戟】的 `TARGET_COUNT` 修饰器：持刀者的【杀】是**最后一张手牌**时最大目标数 +2 ⇒ 借刀窗口的候选恒含 Bn、另加 0..2 个其它合法目标（`targets` 里）；外层借刀的 `designations=(Bn,)` 不变，持刀者【杀】的 `designations` 为空"),
 }
 """slug → ``(中文场景名, 验证的规则条目)``：索引表里两列人工维护的**单一真源**。"""
 

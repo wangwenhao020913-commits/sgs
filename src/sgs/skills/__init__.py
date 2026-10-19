@@ -3,8 +3,8 @@
 模块级内容分两层：
 
 - :mod:`sgs.effects.modifiers`（``effects`` 层）装**修饰器管道的词汇与派发**：
-  ``ModifierPoint`` 五挂点 / ``ModifierContext`` / ``Modifier`` / ``apply_modifiers``。
-  它们住下层，是因为五个挂点都由 ``effects/actions.py`` 的规则函数直接读；本子包把
+  ``ModifierPoint`` 六个挂点 / ``ModifierContext`` / ``Modifier`` / ``apply_modifiers``。
+  它们住下层，是因为六个挂点都由 ``effects/actions.py`` 的规则函数直接读；本子包把
   这些名字连同 :class:`~sgs.skills.catalog.SkillDef` / ``CATALOG`` 一起再导出，外部
   仍只认 ``sgs.skills`` 这一个入口。
 - :mod:`sgs.skills.catalog` 装**定义与派发**：``SkillDef`` / ``Hook`` / ``Seam`` /

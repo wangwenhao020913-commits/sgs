@@ -806,7 +806,8 @@ def candidate_index(query: Query) -> dict[str, dict[str, Any]]:
     - **不重排**：``pool`` 与 ``combos`` 保持候选的**首次出现顺序**（候选本身由引擎稳定排序）。
     - **不收无牌的候选**：``SelectOption`` / ``ActivateSkill`` 不是"牌 → 目标"，不进索引。
 
-    ``min_targets`` / ``max_targets`` 是**这张牌这次使用**要选几个目标（【杀】恒 1；
+    ``min_targets`` / ``max_targets`` 是**这张牌这次使用**要选几个目标，**由候选组合派生**
+    （【杀】额定 1；【方天画戟】等 ``TARGET_COUNT`` 修饰器成立时可放宽到 ``1..max``；
     【南蛮入侵】类等于池大小），界面据此说"还要选 N 个"。
     """
     grouped: dict[str, dict[str, Any]] = {}

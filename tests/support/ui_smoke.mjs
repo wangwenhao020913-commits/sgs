@@ -3444,6 +3444,96 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.resetSelection();
 }
 
+/* ============ W7-01：借刀窗口的多目标（方天 + 最后一张手牌【杀】） ============
+ *
+ * 判据（自动化的那一半）：`candidate_index` 的 combos 恒含 Bn、`min/max_targets` = 1 / 3；
+ * 既有 picker 直接能点 Bn + 额外（组合恰在候选里才可提交）、**不**自动选中；
+ * **只允许含 Bn 的组合**（不选 Bn 的组合不可提交）。真实拖拽 / 实机验收不在这里断言。
+ */
+{
+  const slash = { ...synthCard(61, "杀"), type: "slash" };
+  const bn = 2;
+  const borrowPending = {
+    kind: "RESPOND", actor: 1, seq: 93, cause: "BORROWED_SWORD", required: "slash",
+    prompt: "【借刀杀人】：对 3 号位使用【杀】，或交出武器。",
+    legal_actions: [
+      { kind: "UseCard", card: slash, targets: [bn], answers_seq: 93 },
+      { kind: "UseCard", card: slash, targets: [bn, 0], answers_seq: 93 },
+      { kind: "UseCard", card: slash, targets: [bn, 0, 3], answers_seq: 93 },
+      { kind: "UseCard", card: slash, targets: [bn, 3], answers_seq: 93 },
+      { kind: "Pass", answers_seq: 93 },
+    ],
+    candidate_index: {
+      61: {
+        card: slash, pool: [bn, 0, 3], min_targets: 1, max_targets: 3,
+        combos: [[bn], [bn, 0], [bn, 0, 3], [bn, 3]],
+      },
+    },
+    option_seats: {},
+    context: { requirement: "对 3 号位使用【杀】，或交出武器" },
+    preactivations: {}, preactivation: [],
+  };
+  const borrowView = synthView(borrowPending);
+  borrowView.human_seat = 1;
+  borrowView.snapshot.seat = 1;
+  borrowView.snapshot.self_hand = [slash];
+  borrowView.snapshot.players = [0, 1, 2, 3].map((seat) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 0, alive: true, equip: [], judge: [], identity: null,
+  }));
+  ui.state.view = borrowView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(borrowView);
+
+  const entry = ui.cardEntry(borrowPending, 61);
+  check("㉿FT1 借刀多目标：索引读的是 min=1 / max=3，且每组 combo 恒含 Bn",
+    !!entry && entry.min_targets === 1 && entry.max_targets === 3
+      && entry.combos.every((combo) => combo.includes(bn)),
+    entry ? `min=${entry.min_targets} max=${entry.max_targets} combos=${JSON.stringify(entry.combos)}` : "没有候选条目");
+
+  const slashChip = $("t-hand").children[0];
+  (slashChip.listeners.click || []).forEach((fn) => fn({ target: slashChip }));
+  check("㉿FT2 多组合时**不**自动选中（方天的 1..3 要玩家自己选）",
+    String(ui.state.focusCardId) === "61" && ui.state.selectedTargets.length === 0
+      && $("btn-submit").disabled === true,
+    `focus=${ui.state.focusCardId} selected=${JSON.stringify(ui.state.selectedTargets)}`);
+
+  const seatBoxOf = (seat) => $("t-seats").children.find(
+    (c) => c.getAttribute("data-seat") === String(seat),
+  );
+  check("㉿FT3 池里的座位（Bn 与两个额外目标）都标成可点",
+    [bn, 0, 3].every((seat) => seatBoxOf(seat).classList.contains("targetable")),
+    [bn, 0, 3].map((seat) => `${seat}:${seatBoxOf(seat).classList.contains("targetable")}`).join(" "));
+
+  // 只点额外目标、不点 Bn ⇒ 不是合法组合（**只有含 Bn 的组合被允许**）。
+  for (const seat of [0, 3]) {
+    (seatBoxOf(seat).listeners.click || []).forEach((fn) => fn({ target: seatBoxOf(seat) }));
+  }
+  check("㉿FT4 不含 Bn 的组合**不可提交**（picker 只放行含 Bn 的组合）",
+    JSON.stringify(ui.state.selectedTargets) === "[0,3]" && $("btn-submit").disabled === true
+      && ui.buildAction() === null,
+    `selected=${JSON.stringify(ui.state.selectedTargets)} disabled=${$("btn-submit").disabled}`);
+
+  // 点 Bn 补上 ⇒ 恰好是候选里的 3 目标组合。
+  (seatBoxOf(bn).listeners.click || []).forEach((fn) => fn({ target: seatBoxOf(bn) }));
+  const chosen = ui.buildAction();
+  check("㉿FT5 Bn + 两个额外目标 = 候选里的 3 目标组合（提交按钮可点）",
+    !!chosen && JSON.stringify(chosen.targets.slice().sort((a, b) => a - b)) === "[0,2,3]"
+      && chosen.card.card_id === 61 && $("btn-submit").disabled === false,
+    JSON.stringify(chosen && chosen.targets));
+
+  // 取消 Bn ⇒ 又回到"不含 Bn"的非法组合。
+  (seatBoxOf(bn).listeners.click || []).forEach((fn) => fn({ target: seatBoxOf(bn) }));
+  check("㉿FT6 取消 Bn 后提交按钮重新不可点",
+    $("btn-submit").disabled === true && ui.buildAction() === null,
+    `selected=${JSON.stringify(ui.state.selectedTargets)}`);
+
+  check("㉿FT7 借刀窗口的 `Pass` 仍写作「交出武器」（b 支不变）",
+    $("t-options").children.some((c) => c.textContent === "交出武器"),
+    `options=${$("t-options").children.map((c) => c.textContent).join(" / ")}`);
+  ui.resetSelection();
+}
+
 /* ============ W6-03：观星双行拖拽面（合成 ARRANGE；S4：真实手势走人工验收） ============
  *
  * 判据（自动化的那一半）：两行容器渲染、上行 = 被观看的牌、下行 = 空槽、点选移动后

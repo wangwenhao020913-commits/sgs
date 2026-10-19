@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from sgs.data import Gender
+from sgs.data import Gender, RuleConfig
 from sgs.effects import (
     CARD_BEHAVIORS,
     UseContext,
@@ -304,6 +304,144 @@ def test_borrowed_sword_target_candidates_read_the_target_pool_chain():
 
 
 # ---------------------------------------------------------------------------
+# W7-01：方天 × 借刀——Bn + 0..2 个额外目标（真【杀】）
+# ---------------------------------------------------------------------------
+
+
+def _halberd_borrow_candidates(state, holder: int, bn: int) -> set[tuple[int, ...]]:
+    """持刀者窗口里该【杀】的全部目标组合（借刀的固定目标是 ``bn``）。"""
+    actions = legal_actions_for(
+        state,
+        holder,
+        QueryKind.RESPOND,
+        answers_seq=1,
+        payload=RespondContext(
+            cause=WindowCause.BORROWED_SWORD,
+            required="slash",
+            mode=RespondMode.USE,
+            use_targets=(bn,),
+        ),
+    )
+    return {
+        action.targets
+        for action in actions
+        if isinstance(action, UseCard) and action.card.type == "slash"
+    }
+
+
+def test_a_halberd_holder_can_add_zero_one_or_two_targets_in_the_borrowed_window():
+    """方天 + 最后一张手牌 ⇒ 借刀窗口的候选是 ``(Bn,)`` + 0..2 个其它合法目标（W7-01）。
+
+    三档用**池大小**区分：0 个额外（2 人局，池只有 Bn）/ 1 个额外（空城把座位 3 滤掉）/
+    2 个额外（4 人局全池）。每一条都恒含 Bn，且额外目标取自**同一个** ``check_targets`` 池。
+    """
+    slash = _cards("slash")[0]
+    halberd = _cards("halberd")[0]
+
+    two_player = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_cards("borrowed_sword")[0],)),
+            SeatSpec(hand=(slash,), equip=(halberd,)),
+        ],
+        deck=_deck_excluding(slash, halberd),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    assert _halberd_borrow_candidates(two_player, 1, 0) == {(0,)}, "只有 Bn：0 个额外目标"
+
+    one_extra = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_cards("borrowed_sword")[0],)),
+            SeatSpec(hand=(slash,), equip=(halberd,)),
+            SeatSpec(),
+            SeatSpec(hero="zhugeliang"),
+        ],
+        deck=_deck_excluding(slash, halberd),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    assert _halberd_borrow_candidates(one_extra, 1, 0) == {(0,), (0, 2)}, (
+        "空城把座位 3 从池里去掉 ⇒ 只能加 1 个额外目标"
+    )
+
+    two_extra = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_cards("borrowed_sword")[0],)),
+            SeatSpec(hand=(slash,), equip=(halberd,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(slash, halberd),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    candidates = _halberd_borrow_candidates(two_extra, 1, 0)
+    assert candidates == {(0,), (0, 2), (0, 3), (0, 2, 3)}, "Bn + 至多两个其它合法目标"
+    pool = check_targets(two_extra, 1, two_extra.card(slash))
+    assert all(set(combo) <= set(pool) for combo in candidates), "额外目标过同一个 check_targets 池"
+    assert all(0 in combo for combo in candidates), "每条候选都恒含 Bn"
+
+
+def test_the_halberd_does_not_add_targets_when_the_slash_is_not_the_last_hand_card():
+    """同样的持刀者窗口，手里还有别的牌 ⇒ 方天不成立：候选只有 ``(Bn,)``（W7-01）。"""
+    slash, peach = _cards("slash")[0], _cards("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_cards("borrowed_sword")[0],)),
+            SeatSpec(hand=(slash, peach), equip=(_cards("halberd")[0],)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(slash, peach),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+
+    assert _halberd_borrow_candidates(state, 1, 0) == {(0,)}, (
+        "此【杀】不是最后一张手牌 ⇒ 最大目标数仍为 1"
+    )
+
+
+def test_an_illegal_bn_leaves_no_halberd_candidate_and_the_preview_agrees():
+    """Bn 在结算时已不合法（空城把它滤掉）⇒ 无 a 候选；auto-b 的预览读同一生成器（W7-01）。"""
+    slash = _cards("slash")[0]
+    halberd = _cards("halberd")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_cards("borrowed_sword")[0],)),
+            SeatSpec(hand=(slash,), equip=(halberd,)),
+            SeatSpec(hero="zhugeliang"),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(slash, halberd),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    assert 2 not in check_targets(state, 1, state.card(slash)), "Bn=2 被【空城】滤掉"
+
+    assert _halberd_borrow_candidates(state, 1, 2) == set(), "Bn 不合法 ⇒ 这张牌没有候选"
+
+    engine = Engine.from_state(state, seed=1)
+    preview = engine.respond_candidates(
+        1,
+        cause=WindowCause.BORROWED_SWORD,
+        required="slash",
+        target=1,
+        mode=RespondMode.USE,
+        use_targets=(2,),
+    )
+    assert not [
+        action for action in preview if isinstance(action, UseCard)
+    ], "auto-b 预览（与 ask_respond 同一生成器）同样没有 a ⇒ 直接交出武器"
+    assert any(isinstance(action, Pass) for action in preview)
+
+
+# ---------------------------------------------------------------------------
 # 池被清空 ⇒ 走既有的"目标减为 0"终止路径（票 06 §验收 4）
 # ---------------------------------------------------------------------------
 
@@ -521,7 +659,12 @@ def test_lijian_is_not_offered_when_no_ordered_pair_is_legal():
 
 
 def test_halberd_extra_targets_also_read_the_filtered_pool():
-    """【方天画戟】的 ``TARGET_POOL`` 处理器仍不改池，但它的额外目标取自**过滤后**的池。"""
+    """【方天画戟】的 ``TARGET_POOL`` 处理器仍不改池，但它的额外目标取自**过滤后**的池。
+
+    W7-01 起方天不再用 ``CANDIDATES`` 枚举追加组合，而是声明 ``TARGET_COUNT``（最后一张
+    手牌 ⇒ 最大目标数 +2），候选由 ``effects.target_combos`` 按 ``额定..max`` 从**同一个**
+    ``check_targets`` 池一次摊开——"额外目标过同一套合法性检测"因此仍是结构事实。
+    """
     slash = _cards("slash")[0]
     halberd, filler = _cards("halberd")[0], _cards("peach")[0]
 

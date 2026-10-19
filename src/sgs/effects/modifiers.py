@@ -1,7 +1,7 @@
 """修饰器管道的**词汇与派发**（票 07 §1–§3；施工票 29 落其静态面）。
 
-本模块住 ``effects`` 层（`开发文档/01` §5「模块划分」：``effects`` 只依赖 ``state``），因为五个挂点
-都由 :mod:`sgs.effects.actions` 的规则函数直接读（次数 / 目标池 / 距离 / 有效性 / 候选）。
+本模块住 ``effects`` 层（`开发文档/01` §5「模块划分」：``effects`` 只依赖 ``state``），因为六个挂点
+都由 :mod:`sgs.effects.actions` 的规则函数直接读（次数 / 目标池 / 目标数 / 距离 / 有效性 / 候选）。
 技能**定义**（``SkillDef`` / ``Hook`` / ``CATALOG``）仍住 ``skills/``——``skills`` 依赖
 ``effects``，方向因此保持"上层依赖下层、反向不依赖"。
 
@@ -94,15 +94,26 @@ class ModifierPoint(str, Enum):
 
     - ``COUNT_LIMIT``：本回合使用次数上限（诸葛连弩）；
     - ``TARGET_POOL``：目标池（方天画戟的"额外目标合法性同标准"挂点）；
+    - ``TARGET_COUNT``：本牌**最大目标数**（方天画戟 +2；只对 ``TargetCount.RATED``
+      的牌查链，见下）；
     - ``DISTANCE``：座位距离（六坐骑：客体 +1 / 主体 −1）；
     - ``EFFECTIVENESS``：第 2 层"无效"（仁王盾）；
-    - ``CANDIDATES``：候选行动的追加（方天画戟的额外目标组合）；
+    - ``CANDIDATES``：候选行动的追加（丈八蛇矛 / 八卦阵的候选注入）；
     - ``RESPONSE_COUNT``：本次响应窗口**需要几张**（缺省 1；票 08 的 M3 加法）；
     - ``RECOVER_AMOUNT``：本次回复**回复几点**（缺省 1；票 09 的 M3 加法，【救援】）。
+
+    ``TARGET_COUNT`` 的语义（W7-01）：查询期修正"本牌**最大**目标数"，``current`` 从
+    **额定目标数**起（``TargetRule.rated_targets``；【借刀杀人】的被迫使用窗口 base = 1，
+    不是池大小），回调返回新的最大值（方天 = ``current + 2``，未来天义 = ``current + 1``
+    ——可叠加）；链序仍是 ``(priority_class, skill_id, owner)``。**只对
+    ``TargetCount.RATED`` 的牌生效**：``ALL_ALIVE`` / ``ALL_ALIVE_WITH_SELF``（南蛮 /
+    万箭 / 桃园 / 五谷）的目标数由候选池决定，查链会造出**非法子集**，故读者
+    （``_play_phase`` / ``_respond`` 的 USE 趟 / ``virtual_card_use``）只在 RATED 档派发。
     """
 
     COUNT_LIMIT = "COUNT_LIMIT"
     TARGET_POOL = "TARGET_POOL"
+    TARGET_COUNT = "TARGET_COUNT"
     DISTANCE = "DISTANCE"
     EFFECTIVENESS = "EFFECTIVENESS"
     CANDIDATES = "CANDIDATES"
@@ -133,9 +144,10 @@ class ModifierContext:
     ``owner`` 由 :func:`apply_modifiers` 在派发时填写——它就是"当前这条修饰器属于谁"，
     回调据此判定本实例是否作用于本次查询（如 +1 坐骑要求 ``owner == target``）。
 
-    ``pool`` / ``rated_targets`` 只给 ``CANDIDATES`` 挂点用：候选生成时把**已过
-    TARGET_POOL 的目标池**与**本牌额定目标数**一并交给回调，回调便不必回头 import
-    行为表（那会与 ``effects`` 成环），"额外目标过同一套合法性检测"由共用同一个池保证。
+    ``pool`` / ``rated_targets`` 只给 ``CANDIDATES`` 与 ``TARGET_COUNT`` 两个挂点用：
+    候选生成时把**已过 TARGET_POOL 的目标池**与**本牌额定目标数**一并交给回调——``CANDIDATES``
+    据此追加组合（回调便不必回头 import 行为表，那会与 ``effects`` 成环），``TARGET_COUNT``
+    据此把"额定数"修正成"最大数"（W7-01：方天在"最后一张手牌"时 ``rated + 2``）。
 
     票 30 追加四样**派发期载荷**（都由 :func:`apply_modifiers` 或调用点填写）：
 

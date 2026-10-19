@@ -924,6 +924,41 @@ def test_the_candidate_cap_checker_catches_a_query_above_the_cap():
     _check_candidate_cap(green, 1, 2)
 
 
+def test_the_halberd_target_count_stays_under_the_candidate_cap():
+    """W7-01：方天把【杀】放宽到 1..3，仍在 ``CANDIDATE_CAP`` 之内（spec §7 的组合数上界）。
+
+    8 人局（座位 0 的【杀】池 7 人）、max = 3 ⇒ 7 + 21 + 35 = **63** 条目标组合（再加一条
+    结束阶段）≤ 128；借刀窗口是 1 + 6 + 15 = **22** 条。两条上界都用**确定性**样本量出来，
+    不靠随机局恰好撞上：
+    前者过检查器本身（与随机 fuzz 同一口径），后者用共享组合构建子直接数。
+    """
+    from sgs.effects import legal_actions_for, target_combos
+    from sgs.state import QueryKind, UseCard
+
+    slash = next(i for i, card in enumerate(PACK.deck.cards) if card.type == "slash")
+    halberd = next(i for i, card in enumerate(PACK.deck.cards) if card.type == "halberd")
+    seats = [SeatSpec(hand=(slash,), equip=(halberd,))]
+    seats.extend(SeatSpec() for _ in range(7))
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=8),
+    )
+    actions = legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+    combos = [
+        action.targets
+        for action in actions
+        if isinstance(action, UseCard) and action.card.type == "slash"
+    ]
+
+    assert len(combos) == 63, "7 人池、1..3 目标 ⇒ 7 + 21 + 35 条"
+    _check_candidate_cap(_query_record(state, actions), 1, 8)  # 不抛 = 在闸值内
+    assert len(target_combos(tuple(range(7)), 1, 3, required=(0,))) == 22, (
+        "借刀窗口：Bn + 0..2 个其它目标 ⇒ 1 + 6 + 15 条"
+    )
+
+
 def test_the_candidate_cap_checker_catches_a_two_dimensional_skill_above_the_cap():
     """两维相乘的技能候选超闸必红（票 14 §3：豁免变宽之后咬合力还在）。
 

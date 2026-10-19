@@ -79,6 +79,7 @@ __all__ = [
     "legal_actions_for",
     "needs_designation",
     "seat_distance",
+    "target_combos",
     "target_is_effective",
     "targets_within_attack_range",
 ]
@@ -335,12 +336,53 @@ def forced_use_targets(
     故真源仍是 :func:`check_targets`：``allowed`` 只作**上界**（引擎预选集的语义保留），
     链上删掉的目标一律不出现。真实牌与转化牌共用本函数（``skills/virtual.py`` 的
     ``RESPOND`` + ``USE`` 路径），故两条候选生成路不会各写一份。
+
+    **W7-01 起只作 a 可达性 / auto-b 判据**：它把池与 ``allowed=(Bn,)`` 求交，故结果至多
+    ``{Bn}``——"够不够得着固定 Bn"正是要问的事；但**不再作枚举池**（那会把方天/未来的
+    ``TARGET_COUNT`` 额外目标挡在门外）。持刀者的【杀】候选池是**完整**
+    :func:`check_targets`，组合由 :func:`target_combos` 恒含 Bn 地生成。
     """
     pool = check_targets(state, seat, card)
     if allowed:
         permitted = set(allowed)
         pool = tuple(target for target in pool if target in permitted)
     return pool
+
+
+def target_combos(
+    pool: tuple[int, ...],
+    low: int,
+    high: int,
+    *,
+    required: tuple[int, ...] = (),
+) -> tuple[tuple[int, ...], ...]:
+    """**目标组合**的唯一构建子（W7-01）：大小 ``low..high``、每组恒含 ``required``。
+
+    与 :func:`check_targets` 同姿态——规则层只在这一处把"一次使用要指定哪些座位"摊成
+    组合，M3 的三条读点共用同一份实现，不各写一遍（漏一处就会出现"界面可选 3、引擎只给 1"
+    的漂移）：
+
+    - **出牌阶段**（:func:`_play_phase`）：``low = 额定目标数``、``high = TARGET_COUNT``
+      链值、``required=()`` ⇒ 方天成立时 1..3；
+    - **借刀窗口**（:func:`_respond` 的 USE 趟）：``low = 1``、``high = TARGET_COUNT``
+      链值、``required=(Bn,)`` ⇒ 每条组合恒含 Bn，另加 0..2 个其它目标；
+    - **转化【杀】**（W7-02 的 ``skills/virtual.py:virtual_card_use``）：同上，直接复用。
+
+    组合内元素的次序 = ``required`` 的次序 + ``pool`` 的次序；``required`` 里含不在
+    ``pool`` 里的座位 ⇒ **没有任何组合**（fail-closed：那条组合不合法，不能造出来）。
+    ``high`` 超过池大小时多余的部分自然为空（``itertools.combinations`` 的语义），
+    调用方不必先夹一遍。
+    """
+    required = tuple(dict.fromkeys(required))  # 去重、保序（Bn 恒在首位）
+    if any(seat not in pool for seat in required):
+        return ()
+    optional = tuple(seat for seat in pool if seat not in required)
+    start = max(low, len(required))  # 不能比 required 的张数还小（combinations 不接受负 r）
+    return tuple(
+        (*required, *combo)
+        for total in range(start, high + 1)
+        for combo in combinations(optional, total - len(required))
+    )
 
 
 def needs_designation(card: CardRef) -> bool:
@@ -522,10 +564,13 @@ def legal_actions_for(
 def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
     """出牌阶段：逐张开出可用牌 × 每个合法目标组合，最后是结束阶段。
 
-    每张牌的额定组合生成后过 :data:`~sgs.skills.ModifierPoint.CANDIDATES` 链，让装备
-    技能**追加**候选（【方天画戟】的"额定 1 + 额外 k"组合）；回调只追加、不排序，
-    全表仍由 :func:`legal_actions_for` 按票 05 的稳定键统一排序，故"候选与校验同源"
-    不被打破。
+    每张牌的目标组合由 :func:`target_combos` 一次摊开：``low = 额定目标数``、
+    ``high = 该牌的最大目标数``。最大数只在 ``TargetCount.RATED`` 档读
+    :data:`~sgs.skills.ModifierPoint.TARGET_COUNT` 链（W7-01：方天画戟在"最后一张手牌"
+    时把 1 放宽到 3）；``ALL_ALIVE*`` 档的目标数由池决定，**不查链**。额定组合生成后仍过
+    :data:`~sgs.skills.ModifierPoint.CANDIDATES` 链（【丈八蛇矛】的转化【杀】等**整段
+    候选期的追加**）；回调只追加、不排序，全表仍由 :func:`legal_actions_for` 按票 05 的
+    稳定键统一排序，故"候选与校验同源"不被打破。
 
     **附带指定的牌**（借刀杀人，W5-02b）不在这里出裸候选：它的合法动作是"牌 + 持刀者 A
     + Bn"三元组，只有 :func:`designation_actions_for` 那份内部池能表达。可用性因此只剩
@@ -543,11 +588,24 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
         count = rule.target_count(len(pool))
         if count <= 0:
             # 空池的"全体存活"牌（唯一存活者）没有合法候选；M1 的额定牌由
-            # ``combinations(pool, 1)`` 自然为空，这里只补上零目标那档。
+            # ``target_combos`` 自然为空，这里只补上零目标那档。
             continue
+        high = count
+        if rule.count is TargetCount.RATED:
+            high = apply_modifiers(
+                ModifierPoint.TARGET_COUNT,
+                state,
+                ModifierContext(
+                    subject=seat,
+                    card=card,
+                    pool=tuple(pool),
+                    rated_targets=count,
+                ),
+                count,
+            )
         generated: tuple[Action, ...] = tuple(
-            UseCard(card=card, targets=tuple(combo), answers_seq=answers_seq)
-            for combo in combinations(pool, count)
+            UseCard(card=card, targets=combo, answers_seq=answers_seq)
+            for combo in target_combos(pool, count, high)
         )
         ctx = ModifierContext(
             subject=seat,
@@ -678,10 +736,13 @@ def _respond(
 
     - ``mode = PLAY``（南蛮 / 万箭 / 决斗）：候选是 ``PlayCard``（打出，无目标、不占次数）；
     - ``mode = USE``（【借刀杀人】迫使的"使用【杀】"、无懈窗口）：候选是 ``UseCard``，
-      目标走 :func:`forced_use_targets`（**与真牌同一条 ``TARGET_POOL`` 链**），
-      **空预选集 = 无目标的响应使用**（无懈的目标是"这次结算 + 目标角色"，由窗口帧承载，
-      故行动只带牌），并按 L3.2 校验出牌次数。预选集非空（借刀的 Bn）而这张牌够不着它
-      ⇒ 这张牌没有候选（W5-02b）。
+      并按 L3.2 校验出牌次数。**窗口固定了目标**（借刀的 Bn）时先问
+      :func:`forced_use_targets`"够不够得着 Bn"（W5-02b 的 a 可行性 / auto-b 语义），
+      再拿**完整** :func:`check_targets` 池 + :func:`target_combos` 造
+      ``(Bn,) + 0..2`` 个其它目标的组合（W7-01：每条恒含 Bn；``TARGET_COUNT`` 链在这一趟
+      里读，方天成立时最大数 1 → 3）；**空预选集 = 无目标的响应使用**（无懈的目标是
+      "这次结算 + 目标角色"，由窗口帧承载，故行动只带牌）。预选集非空而这张牌够不着它
+      ⇒ 这张牌没有候选。
 
     手上没有所需牌者候选只有 ``Pass``——**仍发询问**（票 19 §9.2 的"各获一次机会"）。
     """
@@ -690,13 +751,40 @@ def _respond(
         if ctx.mode is RespondMode.USE:
             if check_count(state, seat, card):
                 continue
-            pool = forced_use_targets(state, seat, card, ctx.use_targets)
-            if ctx.use_targets and not pool:
-                # 被迫使用的目标**已由窗口固定**（借刀的 Bn），而这张牌打不到它 ⇒
-                # 这张牌此刻没有候选（W5-02b）。不退回"无目标使用"：那是无懈一类的形状，
-                # 用在这里等于凭空造出一条打向空气的【杀】。
-                continue
-            combos = tuple((target,) for target in pool) if pool else ((),)
+            if ctx.use_targets:
+                # a 可达性（W5-02b）：forced_use_targets 只作"够不够得着固定 Bn"的判据，
+                # **不再作枚举池**（W7-01）——否则池至多 {Bn}，额外目标永远进不来。
+                if not forced_use_targets(state, seat, card, ctx.use_targets):
+                    continue
+                # 固定目标是**唯一**的 Bn（`ctx.use_targets[0]`，W5-02b 的附带指定）：
+                # 预选集里可能还有别的座位（M2 的合成姿态），它们不是本次的目标。
+                bn = ctx.use_targets[0]
+                pool = check_targets(state, seat, card)
+                if bn not in pool:
+                    # Bn 在结算时已不合法（TARGET_POOL 链删掉了它）⇒ 这张牌没有候选；
+                    # 不退回"无目标使用"：那是无懈一类的形状，等于凭空造一条打向空气的【杀】。
+                    continue
+                count = 1  # 被迫使用窗口的 base = 1（固定 Bn），不是池大小
+                high = count
+                if behavior_for(card).target_rule.count is TargetCount.RATED:
+                    high = apply_modifiers(
+                        ModifierPoint.TARGET_COUNT,
+                        state,
+                        ModifierContext(
+                            subject=seat,
+                            card=card,
+                            pool=tuple(pool),
+                            rated_targets=count,
+                            respond_required=ctx.required,
+                            respond_mode=ctx.mode,
+                            respond_targets=(bn,),
+                        ),
+                        count,
+                    )
+                combos = target_combos(pool, count, high, required=(bn,))
+            else:
+                pool = check_targets(state, seat, card)
+                combos = tuple((target,) for target in pool) if pool else ((),)
             for combo in combos:
                 actions.append(UseCard(card=card, targets=combo, answers_seq=answers_seq))
         else:

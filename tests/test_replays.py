@@ -24,7 +24,7 @@ from sgs.engine import (
     dump_journal,
     read_journal,
 )
-from sgs.state import ActivateSkill, QueryKind
+from sgs.state import ActivateSkill, QueryKind, UseCard, WindowCause
 
 from support import play_standard
 
@@ -85,7 +85,14 @@ REPLAY_SINGLE_LIMIT_BYTES = 4 * 1024 * 1024
 （45 auto-b / 46 借刀窗口内的转化【杀】，合计约 1.6 MiB），二是 20 份受影响录像的重录。
 单文件绊线没有越过：10 / 11 / 38 在 02b 的候选面变化后旧种子不再命中判据（10 / 11 还会越过
 4 MiB），均按本模块纪律**重新选种**而不是调单文件上限（10: 49 → 68、11: 99 → 35、
-38: 364 → 388，判据与人数档不变）。"""
+38: 364 → 388，判据与人数档不变）。
+
+**W7-01（方天 × 借刀）后的实测**：47 条合计 **51,931,524 字节 ≈ 49.53 MiB**，最大单文件
+**3,334,043 字节 ≈ 3.18 MiB**（``10-identity-7p-lord-win.jsonl``）——仍在两句上限之内，
+故**不动预算**。本轮只新增一条脚本专项 ``47-halberd-borrowed-sword``（约 0.81 MiB；方天的
+``CANDIDATES`` 枚举换成 ``TARGET_COUNT`` + 共享组合构建子）：``30``（出牌阶段的方天）的候选
+集合与顺序**逐字节不变**，``33 / 45 / 46``（无方天）同样不变，其余 42 条也没有变化——
+``--update-golden`` 后 ``git status`` 只报这一个新文件。"""
 
 
 def _write(path: Path, text: str) -> Path:
@@ -489,7 +496,8 @@ M2_BASELINES = tuple(
 """M2 的 27 条基准：分布表里除 M1 六条、M3 八条与脚本专项以外的全部 slug（票 32 §1）。
 
 W5-02b：``33-borrowed-sword-use-slash`` 随借刀入口的翻转移入脚本专项（随机驱动产不出借刀
-动作），故 M2 由 28 条变为 27 条。
+动作），故 M2 由 28 条变为 27 条。W7-01 的 ``47-halberd-borrowed-sword`` 同属脚本专项
+（新增），M2 仍是 27 条。
 """
 
 
@@ -521,7 +529,7 @@ def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
     assert files == set(scenarios.SCENARIOS), "场景表与基准文件集合互相等于"
     assert set(M2_BASELINES) == files - set(FROZEN_BASELINES) - set(M3_BASELINES) - set(
         SCRIPTED_BASELINES
-    ), "M2 恰为 46 − 6 − 8 − 5 = 27 条"
+    ), "M2 恰为 47 − 6 − 8 − 6 = 27 条"
     assert set(M3_BASELINES) == set(scenarios.M3_SCENARIOS) == set(goals.M3_GOALS), (
         "M3 的 8 条专项基准必须与场景表、判据表三方相等"
     )
@@ -573,6 +581,65 @@ def test_the_preactivation_cancel_equals_the_not_activating_path() -> None:
         and isinstance(record.action, ActivateSkill)
         and record.action.skill_id == goals.PREACTIVATION_CANCEL_SKILL
     ], "取消（不提交）⇒ 记录流里没有该技能的 ActivateSkill"
+
+
+def test_the_halberd_borrowed_baseline_records_a_three_target_slash() -> None:
+    """W7-01 的脚本专项 47：回放后的记录流里，借刀窗口真的给出 Bn + 2 个额外目标。
+
+    与 ``goals.M1_GOALS`` 的判据同源（回放后独立复读一次），这里再把**形状**写成人可读的
+    断言：窗口候选恒含 Bn；结算的【杀】``designations`` 为空、Bn 与额外目标都在 ``targets``；
+    外层借刀仍是 ``targets=(A,)`` + ``designations=(Bn,)``。
+    """
+    slug = "47-halberd-borrowed-sword"
+    records = read_journal(REPLAYS_DIR / f"{slug}.jsonl")
+    pack = load_content_pack(records[0].pack_id, deck_profile=records[0].deck_profile)
+    seed, tape = tape_from_journal(records)
+    scenario = scenarios.SCENARIOS[slug]
+    engine = Engine.new_game(
+        seed=seed,
+        rule_config=records[0].rule_config,
+        pack=pack,
+        heroes=scenario.heroes,
+        hero_pool=scenario.hero_pool,
+    )
+    engine.run([TapePlayer(tape)] * records[0].rule_config.player_count)
+
+    assert goals.goal_for(slug)(engine), (
+        "47 的判据必须在**回放后**仍命中，而不是只由 --update-golden 时的脚本宣布"
+    )
+    window_record = next(
+        record
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.RESPOND
+        and record.query.cause is WindowCause.BORROWED_SWORD
+    )
+    window = window_record.query
+    offers = {
+        action.targets
+        for action in window.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "slash"
+    }
+    assert offers == {(0,), (0, 2), (0, 3), (0, 2, 3)}, "Bn=0 + 0..2 个其它合法目标"
+
+    accepted = [
+        record.action
+        for record in engine.records
+        if record.kind == "action" and record.accepted and isinstance(record.action, UseCard)
+    ]
+    outer = next(action for action in accepted if action.card.type == "borrowed_sword")
+    assert (outer.targets, outer.designations) == ((1,), (0,)), "外层借刀的主体分列不变"
+    holder = next(
+        record.action
+        for record in engine.records
+        if record.kind == "action"
+        and record.seq > window_record.seq
+        and record.accepted
+        and isinstance(record.action, UseCard)
+        and record.action.card.type == "slash"
+    )
+    assert holder.targets == (0, 2, 3), "Bn 与两个额外目标都在 targets 里"
+    assert holder.designations == (), "持刀者的【杀】没有附带指定"
 
 
 M1_FROZEN_TRAJECTORIES: dict[str, tuple[int, int, str]] = {

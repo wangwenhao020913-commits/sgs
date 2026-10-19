@@ -69,6 +69,9 @@ from sgs.state import (
     PlayCard,
     PlayPhaseQuery,
     QueryKind,
+    RespondContext,
+    RespondMode,
+    RespondQuery,
     SelectCards,
     SelectCardsQuery,
     SelectContext,
@@ -473,6 +476,86 @@ def test_play_phase_prefers_damage_over_equipment_and_passing():
 
     assert isinstance(action, UseCard) and action.card.type == "slash"
     assert action.targets == (1,), "目标非己方"
+
+
+def test_the_ai_picks_the_halberd_three_target_combo_in_the_play_phase():
+    """方天 + 唯一手牌【杀】、恰好 3 个可达目标 ⇒ AI 选**唯一最高分**的 3 目标组合。
+
+    ``_score_attack`` 对每个非己方目标加正分，故 3 目标组合严格高于 1 / 2 目标的组合；
+    没有随机扰动、也不靠 tie-break（W7-01 的确定性 AI 判据）。
+    """
+    slash, halberd = _ids("slash")[0], _ids("halberd")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(slash,), equip=(halberd,)),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(slash, halberd),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+
+    action = HeuristicPlayer(_stream(0)).respond(_play_phase_query(state))
+
+    assert isinstance(action, UseCard) and action.card.type == "slash"
+    assert action.targets == (1, 2, 3), "只有这一条 3 目标组合（恰好 3 名可达目标）"
+
+
+def test_the_ai_answers_the_borrowed_sword_holder_window_with_bn_inside_the_targets():
+    """借刀窗口：判据只到"选 a（不是 Pass）且 ``targets`` 含 Bn"。
+
+    ``RESPOND`` 的评分对目标组合是**平的**（``_score_respond`` 只给"能抵消就抵消"这一个
+    常数），tie-break 走种子 ⇒ 不承诺 AI 一定多选（多目标填表属 W7-01b）。
+    """
+    borrowed, slash, halberd = (
+        _ids("borrowed_sword")[0],
+        _ids("slash")[0],
+        _ids("halberd")[0],
+    )
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(hand=(slash,), equip=(halberd,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(borrowed, slash, halberd),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    actions = legal_actions_for(
+        state,
+        1,
+        QueryKind.RESPOND,
+        answers_seq=1,
+        payload=RespondContext(
+            cause=WindowCause.BORROWED_SWORD,
+            required="slash",
+            mode=RespondMode.USE,
+            use_targets=(0,),
+        ),
+    )
+    query = RespondQuery(
+        seq=1,
+        actor=1,
+        timing=Timing.RESOLVE_AFTER_EFFECT,
+        prompt="【借刀杀人】：对 1 号位使用【杀】，或交出武器。",
+        legal_actions=actions,
+        view=project(state, 1),
+        cause=WindowCause.BORROWED_SWORD,
+        required="slash",
+        target=1,
+    )
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert not isinstance(action, Pass), "a 可行 ⇒ 选 a，不交出武器"
+    assert isinstance(action, UseCard) and action.card.type == "slash"
+    assert 0 in action.targets, "Bn 必选（候选恒含 Bn）"
 
 
 def test_dodge_cancels_instead_of_passing():

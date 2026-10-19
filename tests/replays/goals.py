@@ -718,12 +718,66 @@ def _borrowed_transform_slash(engine: Engine) -> bool:
     )
 
 
+def _halberd_borrowed_multi(engine: Engine) -> bool:
+    """借刀窗口里的**方天多目标真【杀】**（W7-01，脚本基准 47）：窗口形状 + 结算落点。
+
+    判据只读记录流，四条缺一不可：
+
+    1. **外层**借刀以 ``designations=(0,)``、``targets=(1,)`` 落账——附带指定与目标的主体
+       分列不变（W5 语义）；
+    2. 持刀者窗口（``BORROWED_SWORD``）的【杀】候选里**恰好一组 3 目标**组合，且每条候选
+       都恒含 Bn=0（方天"最后一张手牌"的 max = 3）；
+    3. 窗口的 ``view`` 是**持刀者**的，且其 ``self_hand`` 恰是那张【杀】——"使用前是最后
+       一张手牌"这个触发条件在窗口那一刻成立；
+    4. 窗口之后落账的【杀】``UseCard`` 的 ``targets`` 恰是那组 3 目标、``designations``
+       **为空**（Bn 与额外目标都在 ``targets`` 里）。
+    """
+    outer = [
+        record.action
+        for record in _accepted(engine)
+        if isinstance(record.action, UseCard)
+        and record.action.card.type == "borrowed_sword"
+    ]
+    if not outer or outer[-1].designations != (0,) or outer[-1].targets != (1,):
+        return False
+    windows = [
+        record.query
+        for record in _queries(engine)
+        if record.query.kind == QueryKind.RESPOND
+        and record.query.cause is WindowCause.BORROWED_SWORD
+    ]
+    if len(windows) != 1:
+        return False
+    window = windows[0]
+    offers = [
+        action
+        for action in window.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "slash"
+    ]
+    three = [action for action in offers if len(action.targets) == 3]
+    if len(three) != 1 or any(0 not in action.targets for action in offers):
+        return False
+    chosen = three[0]
+    hand = [card.card_id for card in window.view.self_hand]
+    if hand != [chosen.card.card_id]:
+        return False
+    return any(
+        record.seq > window.seq
+        and isinstance(record.action, UseCard)
+        and record.action.card.card_id == chosen.card.card_id
+        and record.action.targets == chosen.targets
+        and record.action.designations == ()
+        for record in _accepted(engine)
+    )
+
+
 M1_GOALS = {
     "33-borrowed-sword-use-slash": _borrowed_sword,
     "43-double-sword-opposite-gender": _double_sword_chain,
     "44-preactivation-cancel-no-side-effect": _preactivation_cancel_records_nothing,
     "45-borrowed-sword-auto-handover": _borrowed_auto_handover,
     "46-borrowed-sword-transform-slash": _borrowed_transform_slash,
+    "47-halberd-borrowed-sword": _halberd_borrowed_multi,
 }
 """脚本基准的 slug → 事后判据（票 17 起；只收"脚本驱动 + 需要事后确认"的那条）。
 

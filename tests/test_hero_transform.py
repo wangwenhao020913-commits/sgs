@@ -23,6 +23,9 @@ import pytest
 
 from sgs.data import Color, color_of_suit
 from sgs.effects import (
+    ModifierContext,
+    ModifierPoint,
+    apply_modifiers,
     legal_actions_for,
     locate,
     target_is_effective,
@@ -2063,3 +2066,144 @@ def test_a_transform_confirmation_with_a_target_outside_the_pool_changes_nothing
     assert "目标不合法" in caught.value.message
     assert json.dumps(engine.state.model_dump(mode="json"), sort_keys=True) == baseline
     assert engine.pending is query
+
+
+# ---------------------------------------------------------------------------
+# W7-01：方天的"最后一张手牌"谓词（真 / 转化共用一份）
+# ---------------------------------------------------------------------------
+#
+# 转化【杀】的候选接线归 W7-02；本票只测**谓词层**——用公开的 ``apply_modifiers`` +
+# ``ModifierContext`` + ``transformed_card`` 构造合成局面，**不生成**转化【杀】的候选
+# （W7 spec §3.2 / §3.7）。丈八两来源 / 装备区来源在自然局不可达（同武器槽 / 【闪】不可能
+# 合法进装备区），故这些 false 分支只在这里的合成局面里钉住。
+
+HALBERD = _cards("halberd")[0]
+
+
+def _halberd_target_count(state, card, *, seat: int = 0) -> int:
+    """方天在 ``TARGET_COUNT`` 链上给这张牌算出的最大目标数（从额定 1 起算）。"""
+    return apply_modifiers(
+        ModifierPoint.TARGET_COUNT,
+        state,
+        ModifierContext(subject=seat, card=card, pool=(1, 2, 3), rated_targets=1),
+        1,
+    )
+
+
+def test_the_last_hand_card_predicate_accepts_a_single_source_in_hand():
+    """单源转化【杀】的来源在手里且是**最后一张手牌** ⇒ 方天 +2（1 → 3）。
+
+    同一份谓词的真牌分支（`hand == (card_id,)`）也在这里复核：真 / 转化不该各写一份。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_PEACH,), equip=(HALBERD,)), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(RED_PEACH, HALBERD),
+        turn_seat=0,
+    )
+    transformed = transformed_card(state, (RED_PEACH,), "slash")
+
+    assert _halberd_target_count(state, transformed) == 3, "单源、在手、最后一张 ⇒ +2"
+
+    last_real = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(SLASH,), equip=(HALBERD,)), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(SLASH, HALBERD),
+        turn_seat=0,
+    )
+    assert _halberd_target_count(last_real, last_real.card(SLASH)) == 3, (
+        "真【杀】是最后一张手牌 ⇒ 同一份谓词返回真"
+    )
+
+
+def test_the_last_hand_card_predicate_needs_the_source_to_be_the_only_card():
+    """来源在手里但**还剩别的牌** ⇒ 不是最后一张手牌，方天不追加。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(RED_PEACH, BLACK_SLASH), equip=(HALBERD,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(RED_PEACH, BLACK_SLASH, HALBERD),
+        turn_seat=0,
+    )
+    transformed = transformed_card(state, (RED_PEACH,), "slash")
+
+    assert _halberd_target_count(state, transformed) == 1
+
+
+def test_the_last_hand_card_predicate_rejects_a_multi_source_transformed_slash():
+    """【丈八蛇矛】两张手牌转化的【杀】：多来源 ⇒ 不满足"来源恰好一张"，方天不追加。
+
+    自然局不可达（丈八与方天抢武器槽），故只用合成局面钉住谓词的 false 分支。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(RED_PEACH,), equip=(HALBERD,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(RED_PEACH, RED_DODGE, HALBERD),
+        turn_seat=0,
+    )
+    multi = transformed_card(state, (RED_PEACH, RED_DODGE), "slash")
+
+    assert len(multi.virtual_sources) == 2
+    assert _halberd_target_count(state, multi) == 1
+
+
+def test_the_last_hand_card_predicate_rejects_a_source_outside_the_hand():
+    """来源在**装备区 / 判定区**（武圣红牌 / 龙胆装备区【闪】）⇒ 手牌里没有它，方天不追加。
+
+    两个分支都不可达自然局（非装备牌不可能合法进入装备区；【闪】同理），故是合成局面：
+    谓词只认"手牌恰是那一张来源"，区域不是手牌 ⇒ false。
+    """
+    filler = BLACK_SLASH
+    with_wusheng_equip = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(filler,), equip=(HALBERD, RED_PEACH)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(filler, RED_PEACH, HALBERD),
+        turn_seat=0,
+    )
+    from_equip = transformed_card(with_wusheng_equip, (RED_PEACH,), "slash")
+    assert _halberd_target_count(with_wusheng_equip, from_equip) == 1
+
+    with_longdan_equip = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(), equip=(HALBERD, RED_DODGE)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(RED_DODGE, HALBERD),
+        turn_seat=0,
+    )
+    dodge_from_equip = transformed_card(with_longdan_equip, (RED_DODGE,), "slash")
+    assert _halberd_target_count(with_longdan_equip, dodge_from_equip) == 1
+
+    # 对照：同一张来源**在手里**且是最后一张 ⇒ +2（证明上面两条的 false 来自区域，不是别的）
+    in_hand = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_DODGE,), equip=(HALBERD,)), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(RED_DODGE, HALBERD),
+        turn_seat=0,
+    )
+    assert _halberd_target_count(in_hand, transformed_card(in_hand, (RED_DODGE,), "slash")) == 3
+
+
+def test_the_last_hand_card_predicate_needs_the_halberd():
+    """没有【方天画戟】就没有这条修饰器：同一张"最后一张手牌"转化【杀】仍是 1。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_PEACH,)), SeatSpec(), SeatSpec()],
+        deck=_deck_excluding(RED_PEACH),
+        turn_seat=0,
+    )
+
+    assert _halberd_target_count(state, transformed_card(state, (RED_PEACH,), "slash")) == 1

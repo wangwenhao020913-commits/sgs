@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from sgs.data import RuleConfig, load_content_pack
+from sgs.effects import check_targets
 from sgs.engine import Engine, IllegalActionError
 from sgs.state import (
     EndPhase,
@@ -776,6 +777,141 @@ def test_a_designation_fixes_the_holder_windows_target_to_bn(pack):
         if isinstance(candidate, UseCard)
     } == {(2,)}, "有 designation 时目标固定为 Bn，持刀者只选 a / b"
     assert [player.hp for player in engine.state.players] == [4, 4, 3, 4]
+
+
+def _borrowed_halberd_engine(pack, *, holder_extra: tuple[int, ...] = ()):
+    """座位 1 = 持刀者，装备【方天画戟】、手里**恰好一张**【杀】（+ ``holder_extra``）。
+
+    4 个座位 ⇒ 座位 1 的【杀】池是 {0, 2, 3}：0 是使用者指定的 Bn，2 / 3 是两个额外目标。
+    ``holder_extra`` 非空 ⇒ 这张【杀】不再是"最后一张手牌"，方天不成立（对照组）。
+    """
+    borrowed = cards_of_type(pack, "borrowed_sword")[0]
+    halberd = cards_of_type(pack, "halberd")[0]
+    slash = cards_of_type(pack, "slash")[0]
+    seats = [
+        SeatSpec(hand=(borrowed,)),
+        SeatSpec(hand=(slash, *holder_extra), equip=(halberd,)),
+        SeatSpec(),
+        SeatSpec(),
+    ]
+    used = [card for spec in seats for card in (*spec.hand, *spec.equip, *spec.judge)]
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=_deck_excluding(pack, *used),
+        turn_seat=0,
+        rule_config=RuleConfig(first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=1)
+    run_until(
+        engine,
+        [RecordingPlayer() for _ in seats],
+        lambda e: e.pending is not None,
+    )
+    assert isinstance(engine.pending, PlayPhaseQuery)
+    return engine, borrowed, slash
+
+
+class _MaxTargetsHolder:
+    """借刀窗口里选**目标数最多**的【杀】候选（W7-01 的 3 目标组合）；其余同 ``_Planned``。"""
+
+    def __init__(self) -> None:
+        self._rest = _Planned(_Plan(play="__none__", respond="use", played=True))
+
+    def respond(self, query):
+        if (
+            query.kind == QueryKind.RESPOND
+            and getattr(query, "cause", None) is WindowCause.BORROWED_SWORD
+        ):
+            slashes = [
+                action
+                for action in query.legal_actions
+                if isinstance(action, UseCard) and action.card.type == "slash"
+            ]
+            assert slashes, "持刀者窗口必须有 a（使用【杀】）"
+            return max(slashes, key=lambda action: (len(action.targets), action.targets))
+        return self._rest.respond(query)
+
+
+def test_the_borrowed_sword_holder_with_the_halberd_can_add_two_more_targets(pack):
+    """借刀 × 方天（W7-01）：持刀者的【杀】恒含 Bn，另加 0..2 个其它合法目标。
+
+    主体分列照旧：**外层**借刀的 ``designations=(Bn,)`` 不变；**持刀者的【杀】**
+    ``designations`` 为空，Bn 与额外目标都在 ``targets`` 里。结算断言三名目标各受 1 点
+    伤害（全场都放弃【闪】）。
+    """
+    engine, _borrowed, slash = _borrowed_halberd_engine(pack)
+    query = engine.pending
+    assert isinstance(query, PlayPhaseQuery)
+    action = next(
+        candidate for candidate in query.designation_actions if candidate.designations == (0,)
+    )
+    engine.submit(action)
+
+    before = len(_queries(engine, QueryKind.PLAY_PHASE))
+    run_until(
+        engine,
+        [
+            _Planned(_Plan(play="__none__", played=True)),
+            _MaxTargetsHolder(),
+            _Planned(_Plan(play="__none__", played=True)),
+            _Planned(_Plan(play="__none__", played=True)),
+        ],
+        lambda e: len(_queries(e, QueryKind.PLAY_PHASE)) > before,
+    )
+
+    window = _windows(engine, WindowCause.BORROWED_SWORD)[0]
+    assert window.target == 1, "窗口仍问持刀者"
+    offers = {
+        candidate.targets
+        for candidate in window.legal_actions
+        if isinstance(candidate, UseCard) and candidate.card.type == "slash"
+    }
+    assert offers == {(0,), (0, 2), (0, 3), (0, 2, 3)}, "Bn + 0..2 个其它合法目标"
+    assert all(0 in targets for targets in offers), "每条候选都恒含 Bn"
+    pool = check_targets(engine.state, 1, engine.state.card(slash))
+    assert all(set(combo) <= set(pool) for combo in offers), "额外目标过同一个 check_targets 池"
+
+    accepted = [
+        record.action
+        for record in engine.records
+        if record.kind == "action" and record.accepted and isinstance(record.action, UseCard)
+    ]
+    outer = next(card for card in accepted if card.card.type == "borrowed_sword")
+    assert outer.targets == (1,), "外层借刀的目标仍只有持刀者"
+    assert outer.designations == (0,), "外层附带指定不变（W5 语义）"
+    holder_slash = next(card for card in accepted if card.card.type == "slash")
+    assert holder_slash.designations == (), "持刀者的【杀】**没有**附带指定"
+    assert holder_slash.targets == (0, 2, 3), "Bn 与两个额外目标都在 targets 里"
+    assert [player.hp for player in engine.state.players] == [3, 4, 3, 3], (
+        "三名目标各结算一次【杀】"
+    )
+
+
+def test_the_halberd_needs_the_slash_to_be_the_last_hand_card_in_the_borrow_window(pack):
+    """对照组：持刀者手里还有别的牌 ⇒ 方天不成立，借刀窗口仍只固定 Bn（W5 形状不变）。"""
+    extra = cards_of_type(pack, "peach")[0]
+    engine, _borrowed, _slash = _borrowed_halberd_engine(pack, holder_extra=(extra,))
+    query = engine.pending
+    assert isinstance(query, PlayPhaseQuery)
+    action = next(
+        candidate for candidate in query.designation_actions if candidate.designations == (0,)
+    )
+    engine.submit(action)
+
+    run_until(
+        engine,
+        [_Planned(_Plan(play="__none__", played=True)) for _ in range(4)],
+        lambda e: bool(_windows(e, WindowCause.BORROWED_SWORD)),
+    )
+
+    window = _windows(engine, WindowCause.BORROWED_SWORD)[0]
+    offers = {
+        candidate.targets
+        for candidate in window.legal_actions
+        if isinstance(candidate, UseCard) and candidate.card.type == "slash"
+    }
+    assert offers == {(0,)}, "不是最后一张手牌 ⇒ 最大目标数仍为 1"
 
 
 def test_the_bare_borrowed_sword_is_no_longer_offered_or_submittable(pack):

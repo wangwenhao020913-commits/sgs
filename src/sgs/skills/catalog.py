@@ -2,7 +2,7 @@
 
 一张装备 = 一个 :class:`SkillDef`（稳定 id = ``equip.<牌名 id>``），内部可带多条
 :class:`Hook`（键 = 时机枚举本身）、多条 :class:`Seam`（帧内接缝）与多条
-:class:`Modifier`（五个挂点）。M3 票 01 起，**武将牌**成为与装备区并列的载体
+:class:`Modifier`（六个挂点）。M3 票 01 起，**武将牌**成为与装备区并列的载体
 （``CarrierKind.HERO``、``SkillSourceKind.HERO_CARD``、``SkillDef.skill_type`` 的身份门控），
 故同一套定义 / 派发路径服务两类载体。定义目录 :data:`CATALOG` 是**模块级不可变**的；
 "谁持有哪一份"由 :func:`resolve_instances` 在派发时按**载体**
@@ -15,7 +15,7 @@
 - **帧内接缝**（``Timing`` 里没有"需要【闪】""杀被抵消时"两节点，而派发键就是 ``Timing``）：
   【八卦阵】（``CANDIDATES`` 进"需要【闪】"窗口 + 选中才惰性压判定帧）、
   【青龙偃月刀】/【贯石斧】（``SeamKind.SLASH_CANCELED``）；
-- **修饰器**（五挂点）：诸葛连弩 / 仁王盾 / 青釭剑 / 坐骑 / 方天画戟 / 丈八蛇矛 / 八卦阵；
+- **修饰器**（六个挂点）：诸葛连弩 / 仁王盾 / 青釭剑 / 坐骑 / 方天画戟 / 丈八蛇矛 / 八卦阵；
 - **``OPS``**（多步主体）：判定后果等。
 
 **静态 vs 触发 = 修饰器 vs 钩子**（票 07 §3，官方 `A/rule_forced.txt:5`：锁定技只是
@@ -30,7 +30,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from itertools import combinations
 from types import MappingProxyType
 from typing import Any, TypeAlias
 
@@ -49,11 +48,11 @@ from sgs.effects import (
 from sgs.resolution import Control, Frame, Tag, add_tag
 from sgs.state import (
     ActivateSkill,
+    CardRef,
     GameState,
     MoveReason,
     SelectionSpec,
     SlotKind,
-    UseCard,
     Zone,
     ZoneRef,
 )
@@ -888,33 +887,45 @@ def _halberd_same_target_pool(state: GameState, ctx: ModifierContext, current: A
     return current
 
 
-def _halberd_extra_targets(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """方天画戟：此【杀】是你**最后的手牌**时可多指定至多两个目标（`A/glossary_gamecard.txt:103-105`）。"""
+def _halberd_last_hand_card(state: GameState, player: int, card: CardRef) -> bool:
+    """此牌是不是 ``player`` 的**最后一张手牌**（方天的触发条件，真 / 转化共用一份）。
+
+    `A/glossary_gamecard.txt:103-105`："当你使用的【杀】是你最后的手牌时……"（使用前口径；
+    2023 线下 / 界方天的"使用后无手牌"版本**不采用**，W7 spec §1.4）。两个分支同住这里，
+    免得真牌与转化牌各写一份谓词：
+
+    - **真牌**：手牌恰是这一张（``hand == (card_id,)``）；
+    - **转化牌**：来源**恰好一张**、该来源是**实体牌**、且手牌恰是这一张来源
+      （``hand == (source,)``，来源在手牌区因此是蕴含的）。多来源（【丈八蛇矛】）、
+      装备区 / 判定区来源（【武圣】红牌、【龙胆】装备区【闪】）都返回 ``False``——
+      后两者在自然局不可达（同武器槽 / 【闪】不可能合法进装备区），谓词分支保留、
+      只在谓词级合成局面里测（W7 spec §0 第 9 条 / §3.7）。
+    """
+    hand = tuple(state.player(player).hand)
+    if card.is_virtual:
+        sources = card.virtual_sources
+        if len(sources) != 1:
+            return False
+        source = sources[0]
+        if source < 0:  # 来源必须是**实体牌**（虚拟牌再转化不构成"最后一张手牌"）
+            return False
+        return hand == (source,)
+    return hand == (card.card_id,)
+
+
+def _halberd_target_count(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """方天画戟：此【杀】是你**最后的手牌**时，最大目标数 +2（W7-01 的 ``TARGET_COUNT``）。
+
+    `A/glossary_gamecard.txt:103-105`："可额外指定至多两个目标" ⇒ 额定 1 变成 1..3。
+    这是**不询问的自动修正**（用户 Q8(b)），不是"额外目标步"；候选由
+    :func:`sgs.effects.target_combos` 按 ``rated..max`` 一次枚举。
+    """
     if not _own_slash(ctx, holder=ctx.subject):
         return current
     assert ctx.card is not None  # _own_slash 已保证
-    if list(state.player(ctx.subject).hand) != [ctx.card.card_id]:
+    if not _halberd_last_hand_card(state, ctx.subject, ctx.card):
         return current
-    base = next(
-        (
-            action
-            for action in current
-            if isinstance(action, UseCard) and action.card.card_id == ctx.card.card_id
-        ),
-        None,
-    )
-    if base is None:
-        return current
-    extras: list[Any] = []
-    for extra in (1, 2):
-        total = ctx.rated_targets + extra
-        if len(ctx.pool) < total:
-            continue
-        extras.extend(
-            base.model_copy(update={"targets": tuple(combo)})
-            for combo in combinations(ctx.pool, total)
-        )
-    return (*current, *extras)
+    return current + 2
 
 
 def _eight_diagrams_candidate(state: GameState, ctx: ModifierContext, current: Any) -> Any:
@@ -1481,7 +1492,7 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         requirement="最后一张手牌【杀】可指定至多 3 个目标",
         modifiers=(
             Modifier(ModifierPoint.TARGET_POOL, _halberd_same_target_pool),
-            Modifier(ModifierPoint.CANDIDATES, _halberd_extra_targets),
+            Modifier(ModifierPoint.TARGET_COUNT, _halberd_target_count),
         ),
     ),
     _equip(

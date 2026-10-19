@@ -714,7 +714,7 @@ SKILL_SHAPE: dict[str, str] = {
     "equip.serpent_spear": "转化技",
     # 能力位 1（rejudge_capable，没有对持有者的询问）
     "hero.simayi.guicai": "能力位",
-    # 候选生成器 1（TARGET_POOL + CANDIDATES，从不发「是否发动」）
+    # 候选生成器 1（TARGET_POOL + TARGET_COUNT，从不发「是否发动」）
     "equip.halberd": "候选生成器",
     # 候选提供者 3（CANDIDATES + 势力求助窗口 / 引擎回退）
     "hero.caocao.hujia": "候选提供者",
@@ -841,7 +841,7 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
     )
     generator = skills(
         lambda definition: {modifier.point for modifier in definition.modifiers}
-        == {ModifierPoint.TARGET_POOL, ModifierPoint.CANDIDATES}
+        == {ModifierPoint.TARGET_POOL, ModifierPoint.TARGET_COUNT}
     )
     providers = frozenset(PROVIDERS) | {"equip.eight_diagrams"}
 
@@ -863,6 +863,22 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
         any(hook.handler is not None for hook in CATALOG[skill_id].hooks)
         for skill_id in multi_round
     ), "三条多轮技能都保持手写钩子（flow_for is None）"
+
+
+def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
+    """W7-01：【方天画戟】的声明 = ``TARGET_POOL``（空操作）+ ``TARGET_COUNT``（+2）。
+
+    不再有 ``CANDIDATES`` 回调——枚举型追加换成"查询期修正最大目标数"，否则两套会生成
+    重复候选（W7 spec §0 第 3 条 / S1）。这条把声明形状本身钉住，形态分类由
+    :func:`test_every_shape_has_the_documented_count_and_members` 的谓词复核。
+    """
+    definition = CATALOG["equip.halberd"]
+
+    assert {modifier.point for modifier in definition.modifiers} == {
+        ModifierPoint.TARGET_POOL,
+        ModifierPoint.TARGET_COUNT,
+    }
+    assert not definition.hooks and not definition.seams and not definition.locked
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:

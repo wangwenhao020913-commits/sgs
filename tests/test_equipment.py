@@ -561,3 +561,115 @@ def test_halberd_extra_targets_must_pass_the_same_attack_range_check():
         "距离 5 > 范围 4 的座位 4 连额定目标都不是，更不会出现在额外目标里"
     )
     assert (3,) in combos, "距离 3（+0）仍在范围 4 内"
+
+
+# ---------------------------------------------------------------------------
+# W7-01：目标数修饰点（TARGET_COUNT）与"可叠加"
+# ---------------------------------------------------------------------------
+
+
+def _fake_target_count(monkeypatch, step: int) -> str:
+    """装一条**非武器槽**的虚拟装备，它的 ``TARGET_COUNT`` 回调把最大目标数 +``step``。
+
+    W7-01 用它证两件事：``TARGET_COUNT`` 只对 ``TargetCount.RATED`` 的牌查链、且修饰器
+    **可叠加**（1 + 1 + 2 = 4 的那个"1"）。虚拟装备不占武器槽 ⇒ 不与【方天画戟】抢槽
+    （票 07 §6 / 票 30 的既有姿态）；未来【天义】落地时换掉这个合成回调即可。
+    """
+    from types import MappingProxyType
+
+    from sgs.effects import CarrierKind, Modifier, ModifierPoint
+    from sgs.skills import catalog as catalog_module
+    from sgs.skills.catalog import SkillDef
+    from sgs.state import SlotKind
+
+    def handler(state, ctx, current):
+        del state, ctx
+        return current + step
+
+    fake = SkillDef(
+        skill_id="test.target_count",
+        locked=True,
+        carrier=CarrierKind.EQUIPMENT,
+        virtual_slot=SlotKind.ARMOR,
+        modifiers=(Modifier(ModifierPoint.TARGET_COUNT, handler),),
+    )
+    monkeypatch.setattr(
+        catalog_module,
+        "CATALOG",
+        MappingProxyType({**catalog_module.CATALOG, fake.skill_id: fake}),
+    )
+    return fake.skill_id
+
+
+def _combos_of(state, card_id: int, seat: int = 0) -> list[tuple[int, ...]]:
+    """``seat`` 出牌阶段里该牌的全部目标组合（排序后）。"""
+    actions = legal_actions_for(state, seat, QueryKind.PLAY_PHASE, answers_seq=1)
+    return sorted(
+        action.targets
+        for action in actions
+        if isinstance(action, UseCard) and action.card.card_id == card_id
+    )
+
+
+def test_target_count_is_only_read_for_rated_cards(monkeypatch):
+    """``TARGET_COUNT`` 只对 ``TargetCount.RATED`` 的牌查链（W7-01 / 评审 S9）。
+
+    反例是"全体存活"档：【南蛮入侵】【万箭齐发】的目标数由池决定，若也读链，就会切出
+    "只打一半人"的**非法子集**。正例是 RATED 的【顺手牵羊】：同一个合成 +2 修饰器确实
+    把它的候选从 1 目标放宽到 1..2（池只有两名相邻角色）。
+    """
+    fake = _fake_target_count(monkeypatch, step=2)
+    barbarian = _cards("barbarian_invasion")[0]
+    barrage = _cards("arrow_barrage")[0]
+    snatch = _cards("snatch")[0]
+    filler = _cards("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hand=(barbarian, barrage, snatch),
+                virtual_equipment=(fake,),
+            ),
+            SeatSpec(hand=(filler,)),
+            SeatSpec(hand=(filler,)),
+            SeatSpec(hand=(filler,)),
+        ],
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+
+    assert _combos_of(state, barbarian) == [(1, 2, 3)], "南蛮：目标数 = 池，不读 TARGET_COUNT"
+    assert _combos_of(state, barrage) == [(1, 2, 3)], "万箭：同上"
+    assert _combos_of(state, snatch) == [(1,), (1, 3), (3,)], (
+        "RATED 的【顺手牵羊】读链：额定 1 → 最大 3，池只有相邻的 1 / 3 ⇒ 1..2 目标"
+    )
+
+
+def test_target_count_modifiers_stack_with_the_halberd(monkeypatch):
+    """``TARGET_COUNT`` 可叠加：合成 +1 与方天 +2 一起 ⇒ 1 + 1 + 2 = 4（W7-01 / 评审 S8）。
+
+    只证明"可叠加"这一件事，不实现【天义】（它还差"无距离限制"，见 W7 spec §7）。
+    """
+    from sgs.effects import ModifierContext, ModifierPoint, apply_modifiers
+
+    fake = _fake_target_count(monkeypatch, step=1)
+    slash = SLASH[0]
+    seats = [SeatSpec(hand=(slash,), equip=(HALBERD,), virtual_equipment=(fake,))]
+    seats.extend(SeatSpec() for _ in range(6))  # 7 人：池 6 人，距离都 ≤ 方天范围 4
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=7),
+    )
+
+    high = apply_modifiers(
+        ModifierPoint.TARGET_COUNT,
+        state,
+        ModifierContext(subject=0, card=state.card(slash), pool=tuple(range(1, 7)), rated_targets=1),
+        1,
+    )
+
+    assert high == 4, "方天 +2 与合成 +1 在链上相加"
+    assert (1, 2, 3, 4) in _combos_of(state, slash), "4 目标组合真的进了候选"
+    assert all(len(combo) <= 4 for combo in _combos_of(state, slash))
