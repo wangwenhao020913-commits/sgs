@@ -755,23 +755,17 @@ def _select_cards(
 def _skill_activation(
     seat: int, answers_seq: int, ctx: SkillActivationContext
 ) -> list[Action]:
-    """"是否发动"：一次询问、载荷烘进候选（票 19 §5 / 票 30）。
+    """"是否发动"：一次询问、候选恒一条**裸** ``ActivateSkill``（票 19 §5 / 票 30；W6-06a）。
 
-    ``max_picks == 0`` ⇒ 裸发动（后续强制步自己再问）；否则把"取 k 张面内位置"的全部
-    组合烘进 ``ActivateSkill.picks``。**付不起的组合不进候选**（``min_picks`` 大于面大小
-    时一个都不造）；``optional`` 决定放弃候选（"可以 / 必须"是效果属性，与 ``locked`` 正交）。
+    成本 / 载荷由发动后的 ``SkillFlow`` 步骤询问，故这里不再按 ``min_picks`` /
+    ``max_picks`` 把"取 k 张面内位置"的组合烘进 ``picks``（那条两维路径随
+    ``ActivationPlan`` 的载荷字段一起删除，见 W6-06a）。``optional`` 决定放弃候选
+    （"可以 / 必须"是效果属性，与 ``locked`` 正交）。
     """
     del seat
-    actions: list[Action] = []
-    if ctx.max_picks <= 0:
-        actions.append(ActivateSkill(skill_id=ctx.skill_id, answers_seq=answers_seq))
-    else:
-        high = min(ctx.max_picks, len(ctx.slots))
-        for count in range(ctx.min_picks, high + 1):
-            actions.extend(
-                ActivateSkill(skill_id=ctx.skill_id, picks=picks, answers_seq=answers_seq)
-                for picks in combinations(range(len(ctx.slots)), count)
-            )
+    actions: list[Action] = [
+        ActivateSkill(skill_id=ctx.skill_id, answers_seq=answers_seq)
+    ]
     if ctx.optional:
         actions.append(Pass(answers_seq=answers_seq))
     return actions

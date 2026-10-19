@@ -249,11 +249,13 @@ class DodgeContext:
 
 @dataclass(frozen=True, slots=True)
 class SkillActivationContext:
-    """``SKILL_ACTIVATION`` 候选生成的类型化载荷（票 19 §5 / 票 30）。
+    """``SKILL_ACTIVATION`` 候选生成的类型化载荷（票 19 §5 / 票 30；W6-06a 收窄）。
 
     发动 = **一次询问**：``optional`` 决定候选里有没有 ``Pass``（"可以 / 必须"是效果属性，
-    与 ``locked`` 正交）；``picks`` 型载荷（【贯石斧】弃两张）把面内位置烘进候选，
-    **付不起的组合不进候选**（池 < ``min_picks`` ⇒ 候选为空 ⇒ 不构造询问）。
+    与 ``locked`` 正交）；候选恒为**一条裸 ``ActivateSkill``** —— 成本 / 载荷在发动后由
+    ``SkillFlow`` 的步骤询问。``min_picks`` / ``max_picks`` / ``slots`` 仍随冻结报文
+    ``SkillActivationQuery`` 下传（A-4 协议清理另立票）；当前生产者恒传 ``0 / 0 / ()``，
+    保 15 份录像逐字节。``zones`` / ``card_types`` 一类候选烘焙字段已在 W6-06a 删除。
     """
 
     skill_id: str
@@ -619,7 +621,12 @@ class SelectCardsQuery(_QueryBase):
 
 
 class SkillActivationQuery(_QueryBase):
-    """是否发动（票 19 §5 / 票 30）：载荷（选项 / 成本面）随询问一并给出。"""
+    """是否发动（票 19 §5 / 票 30）：候选恒一条裸 ``ActivateSkill``；载荷由技能步骤问。
+
+    ``min_picks`` / ``max_picks`` / ``slots`` 是 **A-4 待清理的冻结报文**：当前生产者恒传
+    ``0 / 0 / ()``（W6-06a 删除了候选烘焙路径），但 15 份录像逐字节带着这三个字段，
+    故协议清理另立票。
+    """
 
     kind: Literal["SKILL_ACTIVATION"] = "SKILL_ACTIVATION"
     skill_id: str

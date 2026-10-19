@@ -1,34 +1,31 @@
-r"""出牌阶段**主动技**（A 族）的候选与发动（票 04）。
+r"""出牌阶段**主动技**（A 族）的候选与发动（票 04；W6 收口）。
 
 A 族与其他族的形态差别只有一处：它的候选**不是某张牌的**使用 / 打出，而是**技能本身**
-作为出牌阶段空闲时间点的一个行动（票 04 §要做什么 1）。于是落点是：
+作为出牌阶段空闲时间点的一个行动（票 04 §要做什么 1）。W4-1 起六条技能都已是
+**骨架候选 + 步骤流水线**，候选与载荷只有一份声明：
 
 - **候选**：每条技能一个 ``Modifier(ModifierPoint.CANDIDATES, …)``，只在
-  ``CandidateScope.PLAY`` 的**整段追加**里生效（与 H 族的虚拟牌同一姿态）。
-  载荷（弃哪些牌 / 给哪些牌 / 选哪名角色）**一律烘进候选**：
-  ``picks`` = 实体牌 id（出牌阶段没有"选择面"，回调拿到的就是实体牌），
-  ``choices`` = 目标座位（``"seat:<座位号>"``，结构见 :func:`sgs.skills.flow.seat_choice`）。
-  **付不起的组合不进池**（手牌不足 / 没有合法目标 ⇒ 一个候选都不造）。
+  ``CandidateScope.PLAY`` 的**整段追加**里生效（与 H 族的虚拟牌同一姿态）。候选恒为
+  一条 ``ActivateSkill(skill_id=…)`` **骨架**（``picks == ()``、``choices == ()``）：
+  给哪些牌 / 选哪名角色由该技能的 :class:`SkillFlow` 在**发动之后**逐步询问
+  （``PickCards`` / ``PickSeats`` / ``PickOption`` …），候选数因此与手牌数 / 目标数无关。
+  **付不起 / 没有合法目标 ⇒ 一个候选都不造**（`available` 判据在派发前挡掉）。
+- **清单 / 预发动**：六条都 ``preactivated=True``（W4-2）——出牌阶段可用性只由
+  ``PlayPhaseQuery.preactivations`` 的清单表达，骨架不再进 ``legal_actions``；
+  确认 = 一个**复合动作**（W4-1），校验器与步骤声明同源。
 - **发动**：引擎收到 ``ActivateSkill`` 后压一个 ``FrameKind.SKILL`` 帧，步骤表按
   ``skill_id`` 查 :data:`ACTIVATIONS` 通用派发（:func:`activate_skill`）。回调签名与
   ``OPS`` 相同（``(host, frame) -> Control``），故提问让出控制权、压子帧都能自然沿用
   既有的帧内游标范式（票 19 §8）。
 - **每阶段限一次**：per-instance ``state.skill_state`` 的**位标记**（:data:`_USED`），
-  在**候选生成期**就挡掉用过的技能（不是进池后拒绝）；复位走
-  :func:`sgs.skills.reset_phase_skill_state`（引擎在 ``PHASE_PLAY_START`` 调用）。
+  由 :func:`_activation_handler` 在**流水线提交点**现算并落位（不在装配处烘死）；
+  复位走 :func:`sgs.skills.reset_phase_skill_state`（引擎在 ``PHASE_PLAY_START`` 调用）。
+  【仁德】是例外：规则 976 没有"出牌阶段限一次"，
+  ``RENDE_FLOW.once_per_phase=False`` ⇒ 一个 `_USED` 位都不落。
 
-**组合上限闸**（票 04 §要做什么 3）：**两维相乘**的技能（旧【结姻】2 张 × 目标）在
-组合数 > :data:`CANDIDATE_CAP` 时**降级为顺序多轮**——候选只保留"目标"这一维，张数由
-发动后的 ``SelectionSpec(sequential=True)`` 逐张询问补齐；**结果集合不变**（逐张给与一次
-给到达同一终局）。一维的目标对（【反间】）按票面**不设闸**。
-【离间】（票 01）、【青囊】（票 02）、【结姻】（票 03）与【制衡】（票 04）先后改走骨架候选 +
-:class:`SkillFlow` 步骤流水线 ⇒ 候选恒一条、与手牌数无关；**这条降级路径在本族已无消费者**
-（:func:`_over_cap` / :func:`_pay_sequential` 按 design.md §7 Q4 先留，待后置票统一清除）。
-
-**【仁德】是闸门的例外**（用户裁定）：它的前端交互是"直接多选手牌 + 直接点座位、一步
-交出去"，界面必须能一次提交"这组牌 → 这个座位"，故它**不降级**、非空子集 × 目标全部
-进池（手牌 8 张 × 7 目标约 1800 条候选，换掉闸门换来交互）。它同时**没有"出牌阶段限
-一次"**（规则 976）：``_can_offer(..., once_per_phase=False)``，每轮出牌阶段都在池里。
+**候选上界**：``CANDIDATE_CAP`` 仍是 fuzz 的候选数上界（``tests/test_fuzz.py``）；
+旧的两维枚举 / 顺序多轮付成本路径（按 design.md §7 Q4 曾"先留、之后再清"）已在
+W6-06a 删除，本族不再有降级分支。
 
 **苦肉的形状**（裸发动 + 失去体力）：本模块不登记【苦肉】（黄盖不在 16 名名单，
 票 12 的 46 条计数也不含它），但机制支持——``ActivateSkill`` 的载荷可全空
@@ -58,7 +55,6 @@ from sgs.state import (
     FrameKind,
     GameState,
     MoveReason,
-    SelectionSpec,
     Zone,
     ZoneRef,
 )
@@ -90,11 +86,11 @@ __all__ = [
 ]
 
 CANDIDATE_CAP = 128
-"""单次询问候选数的组合上限（票 04 §要做什么 3 / `spec.md` §机制面的统一约定）。
+"""单次询问候选数的组合上界（票 04 §要做什么 3 / `spec.md` §机制面的统一约定）。
 
-只对**两维相乘**的技能启用；本批 A 族已无消费者——【结姻】（票 03）迁走后，"牌 × 目标"
-的枚举在本族绝迹（【离间】/【青囊】/【结姻】/【制衡】恒骨架候选，【反间】按票面不设闸）。
-旧原语按 design.md §7 Q4 **先留**，待后置票统一清除。
+A 族迁到骨架候选后没有降级路径，故这个常量只剩**候选数审计**这一个读取方：
+``tests/test_fuzz.py`` 断言任一技能 / 非技能候选组 ≤ 128。W6-06a 删除两维降级原语时
+**保留**它（fuzz 上界，不是旧路径的残留）。
 """
 
 _USED = 1
@@ -162,66 +158,6 @@ def _can_offer(state: GameState, ctx: ModifierContext, *, once_per_phase: bool =
     if not once_per_phase:
         return True
     return not (_phase_flags(state, ctx.owner, ctx.skill_id) & _USED)
-
-
-def _over_cap(*dimensions: int) -> bool:
-    """这些维度相乘是否超过 :data:`CANDIDATE_CAP`（两维相乘技能的过闸判据）。"""
-    total = 1
-    for dimension in dimensions:
-        total *= dimension
-    return total > CANDIDATE_CAP
-
-
-_ASK_PAY_SEQUENTIAL = "active.pay_sequential"
-"""手写询问位置（票 22）：:func:`_pay_sequential` 的顺序多轮付成本询问（逐轮各改一次
-**询问名**——位置只管"这是哪一处询问"，轮次由 ``key`` 的 ``:<index>`` 承担）。"""
-
-
-def _pay_sequential(
-    host: Any,
-    frame: Any,
-    owner: int,
-    *,
-    needed: int,
-    key_prefix: str,
-    zones: tuple[Zone, ...],
-) -> tuple[int, ...] | None:
-    """顺序多轮付成本：一次问一张、**问中即弃置**，凑够 ``needed`` 张。
-
-    返回 ``None`` = 已让出控制权（调用方 ``return "stay"``）；否则返回累计弃置的实体牌 id。
-    进度（``round`` / ``chosen``）存帧私有载荷，故重入从原处接着走（票 19 §8 的帧内游标）。
-
-    **逐张立即搬走**是必须的：若先把位置攒起来再统一移动，下一轮会用同一份手牌重铺选择面，
-    同一个位置会被选中两次（同一个成本付两遍）。
-    """
-    index = frame.data.get("round", 0)
-    chosen = list(frame.data.get("chosen", ()))
-    while len(chosen) < needed:
-        picked = host.ask_selection(
-            frame,
-            owner=_ASK_PAY_SEQUENTIAL,
-            key=f"{key_prefix}:{index}",
-            actor=owner,
-            timing=Timing.PHASE_PLAY_IDLE,
-            spec=SelectionSpec(zones=zones, total=(1, 1), sequential=True),
-            build_face=lambda: host.selection_face(owner, zones, reveal_hand=True),
-        )
-        if host.suspended(picked):
-            return None
-        if not picked:
-            break
-        if (
-            _move_to_discard(
-                host, frame, picked, owner=owner, key=f"{key_prefix}:{index}"
-            )
-            == "stay"
-        ):
-            return None
-        chosen.extend(picked)
-        index += 1
-        frame.data["chosen"] = tuple(chosen)
-        frame.data["round"] = index
-    return tuple(chosen)
 
 
 def _move_to_discard(
@@ -777,8 +713,7 @@ LIJIAN_FLOW = SkillFlow(
 # 票 03：本技能是 :class:`SkillFlow` 的**第三个实例**（【离间】手写、【青囊】声明式），
 # 也是确认"``PickCards(lo, hi)`` 能表达恰好 2 张"的那一个：``lo=hi=2`` ⇒
 # ``SelectionSpec(total=(2, 2))`` 只枚举恰好两张的组合。旧的"两维过闸降级为顺序多轮"
-# 分支删除（同一个技能不再有两种交互形状），`_over_cap` / `_pay_sequential` 由此
-# 再无消费者，但按 design.md §7 Q4 **先留、之后再清**。
+# 分支已删除（同一个技能不再有两种交互形状）；那批零调用原语也在 W6-06a 一并清掉。
 # ---------------------------------------------------------------------------
 
 

@@ -325,19 +325,18 @@ class SkillInstance:
 
 @dataclass(frozen=True, slots=True)
 class ActivationPlan:
-    """一次"是否发动"询问的声明式形态（票 19 §5 / §6）。
+    """一次"是否发动"询问的声明式形态（票 19 §5 / §6；W6-06a 收窄）。
 
-    ``zones`` 非空时，"付得起"的载荷是这些区里的面内位置组合（【贯石斧】弃两张）；
-    ``available=False`` 表示**当前付不起** ⇒ 该技能不进候选、连询问都不构造。
+    ``available=False`` 表示**当前付不起** ⇒ 该技能不进候选、连询问都不构造；
+    ``optional`` 决定候选里有没有 ``Pass``。成本 / 载荷**不在计划里**：它们由发动后的
+    ``SkillFlow`` 步骤询问，故原先的 ``zones`` / ``card_types`` / ``min_picks`` /
+    ``max_picks`` 四个无生产者字段已在 W6-06a 删除。`SkillActivationQuery` 的
+    ``min_picks`` / ``max_picks`` / ``slots`` 仍是冻结报文（A-4 另立票；当前生产者恒传
+    ``0 / 0 / ()``，15 份录像逐字节）。
     """
 
-    zones: tuple[Zone, ...] = ()
-    min_picks: int = 0
-    max_picks: int = 0
     optional: bool = True
     available: bool = True
-    card_types: tuple[str, ...] = ()
-    """选取面只铺这些**牌名 id**；空元组 = 不筛（【青龙偃月刀】只让挑【杀】）。"""
 
 
 # ---------------------------------------------------------------------------

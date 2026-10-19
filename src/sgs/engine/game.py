@@ -1532,37 +1532,19 @@ class Engine:
         *,
         key: str | None = None,
     ) -> Any:
-        """发一次 ``SKILL_ACTIVATION`` 询问（票 19 §5 / 票 30）：候选 = 付得起的载荷组合。
+        """发一次 ``SKILL_ACTIVATION`` 询问（票 19 §5 / 票 30；W6-06a 收窄）。
 
-        载荷（面内位置）烘进 ``ActivateSkill`` 候选；返回 ``ActivateSkill`` / ``Pass``
-        / ``SUSPEND``；答案按 ``(skill_id, key)`` 帧内缓存，重入不重发（``key`` 让同一时机
-        上的真钩子与帧内接缝不共用缓存槽）。``plan.card_types`` 非空时选取面只铺这些牌名
-        （【青龙偃月刀】只让挑【杀】）。选中后的位置解析成实体牌 id，存进
-        ``activation_picks`` 供 handler 读。
+        候选恒为**一条裸 ``ActivateSkill``**：成本 / 载荷由发动后的 ``SkillFlow`` 步骤问，
+        故这里不再把面内位置烘进候选（`ActivationPlan` 的载荷字段已删）。``plan`` 只决定
+        ``optional``；``available=False`` 由 ``_dispatch`` 在调用前挡掉。答案按
+        ``(skill_id, key)`` 帧内缓存，重入不重发（``key`` 让同一时机上的真钩子与帧内
+        接缝不共用缓存槽）。询问模型仍带 ``min_picks=0 / max_picks=0 / slots=()`` 的
+        冻结报文（A-4 另立票；15 份录像逐字节）。
         """
         answers = frame.data.setdefault("ask_answers", {})
         answer_key = ("activate", instance.skill_id, key or str(timing))
         if answer_key in answers:
             return answers[answer_key]
-        slots: tuple[Slot, ...] = ()
-        card_ids: tuple[int, ...] = ()
-        face_key: str | None = None
-        if plan.zones:
-            store = frame.data.setdefault("asks", {})
-            face_key = f"activation:{key or timing.value}:{instance.skill_id}"
-            if face_key not in store:
-                store[face_key] = self.selection_face(
-                    instance.owner, plan.zones, reveal_hand=True
-                )
-            slots, card_ids = store[face_key]
-            if plan.card_types:
-                kept = [
-                    (slot, card_id)
-                    for slot, card_id in zip(slots, card_ids)
-                    if slot.card is not None and slot.card.type in plan.card_types
-                ]
-                slots = tuple(slot for slot, _ in kept)
-                card_ids = tuple(card_id for _, card_id in kept)
         action = self.ask(
             lambda seq: self._build_query(
                 QueryKind.SKILL_ACTIVATION,
@@ -1572,9 +1554,9 @@ class Engine:
                 payload=SkillActivationContext(
                     skill_id=instance.skill_id,
                     optional=plan.optional,
-                    min_picks=plan.min_picks,
-                    max_picks=plan.max_picks,
-                    slots=tuple(slots),
+                    min_picks=0,
+                    max_picks=0,
+                    slots=(),
                     preactivation=preactivation_for(
                         self.state,
                         instance.owner,
@@ -1587,26 +1569,15 @@ class Engine:
         )
         if action is SUSPEND:
             return SUSPEND
-        if face_key is not None:
-            frame.data.setdefault("asks", {}).pop(face_key, None)
         if isinstance(action, ActivateSkill):
             activation = self._take_structured_activation(action)
             if activation is not None:
                 # W4-1：复合动作的 picks 是**实体牌 id**，不是面内位置；原样交给
-                # ``run_flow`` 摊回逐步答案，别拿它去索引 ``card_ids``。
-                # W4-fix-2：归属随载荷一起走——同一帧上后续别的技能的流水线不得读它
-                # （`flow._activation_belongs`）。
+                # ``run_flow`` 摊回逐步答案。W4-fix-2：归属随载荷一起走——同一帧上后续
+                # 别的技能的流水线不得读它（`flow._activation_belongs`）。
                 frame.data["activation"] = {**activation, "skill_id": instance.skill_id}
-            elif action.picks:
-                frame.data.setdefault("activation_picks", {})[instance.skill_id] = tuple(
-                    card_ids[index] for index in action.picks
-                )
         answers[answer_key] = action
         return action
-
-    def activation_picks(self, frame: Frame, skill_id: str) -> tuple[int, ...]:
-        """上一次"是否发动"询问里烘进候选的成本载荷（实体牌 id 元组）。"""
-        return tuple(frame.data.get("activation_picks", {}).get(skill_id, ()))
 
     def ask_option(
         self,

@@ -311,7 +311,7 @@ def _check_candidate_cap(record: JournalRecord | None, seed: int, n: int) -> Non
     余下的：两维相乘的 ``ActivateSkill`` **按技能分别计数**（同一询问里几条互不相关的技能
     合法地各有自己的候选，票 14 实测一局 6 手牌的【仁德】126 条 + 3 条普通候选 = 129 总数）；
     其余非技能候选按总数查。豁免表因此**仍有咬合力**：两维相乘的技能一旦忘了降级，它自己
-    的那一组立刻判红（``test_the_candidate_cap_checker_catches_an_over_cap_two_dimensional_skill``）。
+    的那一组立刻判红（``test_the_candidate_cap_checker_catches_a_two_dimensional_skill_above_the_cap``）。
     :data:`OVER_CAP_BY_DESIGN` 是留给"按裁定豁免"的落点，**现在是空集**。
     """
     if record is None or record.kind != "query":
@@ -910,7 +910,7 @@ def _query_record(state, actions) -> QueryRecord:
     return QueryRecord(seq=1, query=query)
 
 
-def test_the_candidate_cap_checker_catches_an_over_cap_query():
+def test_the_candidate_cap_checker_catches_a_query_above_the_cap():
     """合成反例：超过闸值的询问必红（票 04 §验收 7 不空转）。"""
     state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
     record = _query_record(
@@ -924,7 +924,7 @@ def test_the_candidate_cap_checker_catches_an_over_cap_query():
     _check_candidate_cap(green, 1, 2)
 
 
-def test_the_candidate_cap_checker_catches_an_over_cap_two_dimensional_skill():
+def test_the_candidate_cap_checker_catches_a_two_dimensional_skill_above_the_cap():
     """两维相乘的技能候选超闸必红（票 14 §3：豁免变宽之后咬合力还在）。
 
     ``picks``（成本）与 ``choices``（目标）两个维度都在变的 ``ActivateSkill`` 是上界
@@ -960,7 +960,7 @@ def test_the_decline_sorts_last_checker_passes_when_pass_is_last():
     _check_decline_sorts_last(record, 1, 2)  # 不抛 = 放行
 
 
-def test_the_over_cap_by_design_exemption_is_empty_after_the_rende_migration():
+def test_the_by_design_cap_exemption_is_empty_after_the_rende_migration():
     """retro：例外集合已**空** —— 票 05 把【仁德】改成骨架候选后，"有意超上界"的裁定失去了对象。
 
     这条取代 `test_the_candidate_cap_checker_exempts_rende_by_design`（它当时钉的是"例外集合

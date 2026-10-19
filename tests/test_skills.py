@@ -1532,24 +1532,6 @@ def test_eight_diagrams_is_offered_in_the_arrow_barrage_dodge_window():
     )
 
 
-def test_a_cost_that_cannot_be_paid_produces_no_activation_candidate():
-    """付不起 ⇒ 候选为空、不构造询问（票 19 §6 的候选生成契约）。"""
-    from sgs.effects import legal_actions_for
-    from sgs.state import SkillActivationContext
-
-    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
-    empty_face = SkillActivationContext(
-        skill_id="equip.axe", optional=True, min_picks=2, max_picks=2, slots=()
-    )
-
-    actions = legal_actions_for(
-        state, 0, QueryKind.SKILL_ACTIVATION, answers_seq=1, payload=empty_face
-    )
-
-    assert not any(isinstance(action, ActivateSkill) for action in actions)
-    assert all(isinstance(action, Pass) for action in actions)
-
-
 # ---------------------------------------------------------------------------
 # 丈八蛇矛：转化牌 / 虚拟牌
 # ---------------------------------------------------------------------------
