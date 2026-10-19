@@ -25,8 +25,9 @@ from sgs.data import (
     load_content_pack,
     load_heroes,
 )
+from sgs.effects import ModifierPoint
 from sgs.engine import DRAW_COUNT, Engine
-from sgs.skills import CATALOG, flow_for
+from sgs.skills import CATALOG, PROVIDERS, flow_for
 from sgs.skills.catalog import MATCH_OWNER_KEY
 from sgs.skills.move_after import MOVE_EVENT_KEY, MoveEvent
 from sgs.state import EndPhase, GameState, MoveReason, Pass, Zone, ZoneRef
@@ -658,3 +659,275 @@ def test_the_seven_zero_step_skills_are_registered_flows_with_no_steps():
         assert CATALOG[skill_id].preactivated is False, (
             f"{skill_id} 只统一执行路径，不翻预发动（spec Q5=A）"
         )
+
+
+# ---------------------------------------------------------------------------
+# W6-04：46 条技能的**形态**分类（静态表 + 全量覆盖）
+#
+# 形态是**读法**：`SkillDef` 上没有 shape 字段，也不该有。形态由既有声明读出来
+# （`locked` / `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` /
+# `rejudge_capable`），这张表把那次阅读机械化钉住：新增 / 删除技能时先缺键 / 多键变红，
+# 逼出一次重新分类。**不要**把这张表与 `SKILL_FILES` 混用——后者是 29 条启用技能 →
+# 点名它的族级单测文件（票 14），语义不同。
+# ---------------------------------------------------------------------------
+
+SKILL_SHAPE: dict[str, str] = {
+    # 主动技能 6（出牌阶段主动发动：有 SkillFlow、无钩子 / 接缝）
+    "hero.sunquan.zhiheng": "主动技能",
+    "hero.liubei.rende": "主动技能",
+    "hero.zhouyu.fanjian": "主动技能",
+    "hero.huatuo.qingnang": "主动技能",
+    "hero.diaochan.lijian": "主动技能",
+    "hero.sunshangxiang.jieyin": "主动技能",
+    # 触发技能 5（钩子 / 接缝驱动的非零步流水线）
+    "hero.simayi.fankui": "触发技能",
+    "hero.daqiao.liuli": "触发技能",
+    "equip.green_dragon_blade": "触发技能",
+    "equip.axe": "触发技能",
+    "equip.qilin_bow": "触发技能",
+    # 零步技能 7（SkillFlow(steps=())；执行路径统一，preactivated 不翻）
+    "hero.luxun.lianying": "零步技能",
+    "hero.sunshangxiang.xiaoji": "零步技能",
+    "hero.caocao.jianxiong": "零步技能",
+    "hero.guojia.tiandu": "零步技能",
+    "hero.zhouyu.yingzi": "零步技能",
+    "hero.diaochan.biyue": "零步技能",
+    "hero.machao.tieqi": "零步技能",
+    # 排列技能 1（deck_arrange + Arrange 步）
+    "hero.zhugeliang.guanxing": "排列技能",
+    # 多轮技能 3（手写帧内游标循环；flow_for is None）
+    "hero.guojia.yiji": "多轮技能",
+    "equip.ice_sword": "多轮技能",
+    "equip.double_sword": "多轮技能",
+    # 锁定技 14（locked=True，含带目标池 / 修饰器的锁定技）
+    "equip.crossbow": "锁定技",
+    "equip.qinggang_sword": "锁定技",
+    "equip.renwang_shield": "锁定技",
+    "equip.chitu": "锁定技",
+    "equip.jueying": "锁定技",
+    "equip.dilu": "锁定技",
+    "equip.zhuahuang_feidian": "锁定技",
+    "equip.dawan": "锁定技",
+    "equip.zixing": "锁定技",
+    "hero.zhugeliang.kongcheng": "锁定技",
+    "hero.luxun.qianxun": "锁定技",
+    "hero.lvbu.wushuang": "锁定技",
+    "hero.sunquan.jiuyuan": "锁定技",
+    "hero.machao.mashu": "锁定技",
+    # 转化技 5（virtual_type_ids 的 CANDIDATES）
+    "hero.guanyu.wusheng": "转化技",
+    "hero.zhaoyun.longdan": "转化技",
+    "hero.daqiao.guose": "转化技",
+    "hero.huatuo.jijiu": "转化技",
+    "equip.serpent_spear": "转化技",
+    # 能力位 1（rejudge_capable，没有对持有者的询问）
+    "hero.simayi.guicai": "能力位",
+    # 候选生成器 1（TARGET_POOL + CANDIDATES，从不发「是否发动」）
+    "equip.halberd": "候选生成器",
+    # 候选提供者 3（CANDIDATES + 势力求助窗口 / 引擎回退）
+    "hero.caocao.hujia": "候选提供者",
+    "hero.liubei.jijiang": "候选提供者",
+    "equip.eight_diagrams": "候选提供者",
+}
+"""46 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
+
+`SkillDef` 上没有 shape 字段，也不该有：形态是从既有声明读出来的归类（`locked` /
+`hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` / `rejudge_capable`），不是
+第二份真源。这张表把那次阅读**机械化钉住**：新增 / 删除技能时先缺键 / 多键变红，逼出一次
+重新分类；改表 = 重新裁定形态。
+
+**不要**把这张表与 `SKILL_FILES` 混用：后者是 29 条启用技能 → 点名它的族级单测文件
+（票 14 的机械覆盖表），语义完全不同。
+"""
+
+SHAPE_COUNTS: dict[str, int] = {
+    "主动技能": 6,
+    "触发技能": 5,
+    "零步技能": 7,
+    "排列技能": 1,
+    "多轮技能": 3,
+    "锁定技": 14,
+    "转化技": 5,
+    "能力位": 1,
+    "候选生成器": 1,
+    "候选提供者": 3,
+}
+"""每格的条数（spec §4.4）：6 + 5 + 7 + 1 + 3 + 14 + 5 + 1 + 1 + 3 = 46。"""
+
+STEP_LANGUAGE_SHAPES: frozenset[str] = frozenset(
+    {"主动技能", "触发技能", "零步技能", "排列技能"}
+)
+"""在步骤语言内的四个形态（19 条 = 6 + 5 + 7 + 1）。"""
+
+IN_STEP_LANGUAGE: frozenset[str] = frozenset(
+    {
+        # 主动技能 6
+        "hero.sunquan.zhiheng",
+        "hero.liubei.rende",
+        "hero.zhouyu.fanjian",
+        "hero.huatuo.qingnang",
+        "hero.diaochan.lijian",
+        "hero.sunshangxiang.jieyin",
+        # 触发技能 5
+        "hero.simayi.fankui",
+        "hero.daqiao.liuli",
+        "equip.green_dragon_blade",
+        "equip.axe",
+        "equip.qilin_bow",
+        # 零步技能 7
+        "hero.luxun.lianying",
+        "hero.sunshangxiang.xiaoji",
+        "hero.caocao.jianxiong",
+        "hero.guojia.tiandu",
+        "hero.zhouyu.yingzi",
+        "hero.diaochan.biyue",
+        "hero.machao.tieqi",
+        # 排列技能 1
+        "hero.zhugeliang.guanxing",
+    }
+)
+"""在步骤语言内（19）：有 `SkillFlow` 的技能；spec §4.4 的「在内」。"""
+
+OUTSIDE_STEP_LANGUAGE: frozenset[str] = frozenset(
+    {
+        # 多轮技能 3
+        "hero.guojia.yiji",
+        "equip.ice_sword",
+        "equip.double_sword",
+        # 锁定技 14
+        "equip.crossbow",
+        "equip.qinggang_sword",
+        "equip.renwang_shield",
+        "equip.chitu",
+        "equip.jueying",
+        "equip.dilu",
+        "equip.zhuahuang_feidian",
+        "equip.dawan",
+        "equip.zixing",
+        "hero.zhugeliang.kongcheng",
+        "hero.luxun.qianxun",
+        "hero.lvbu.wushuang",
+        "hero.sunquan.jiuyuan",
+        "hero.machao.mashu",
+        # 转化技 5
+        "hero.guanyu.wusheng",
+        "hero.zhaoyun.longdan",
+        "hero.daqiao.guose",
+        "hero.huatuo.jijiu",
+        "equip.serpent_spear",
+        # 能力位 1
+        "hero.simayi.guicai",
+        # 候选生成器 1
+        "equip.halberd",
+        # 候选提供者 3
+        "hero.caocao.hujia",
+        "hero.liubei.jijiang",
+        "equip.eight_diagrams",
+    }
+)
+"""不在步骤语言内（27）：多轮 3 + 锁定 14 + 转化 5 + 能力位 1 + 候选生成器 1 + 候选提供者 3。"""
+
+
+def _shape_members(shape: str) -> frozenset[str]:
+    """某个形态在静态表里的技能集合。"""
+    return frozenset(
+        skill_id for skill_id, assigned in SKILL_SHAPE.items() if assigned == shape
+    )
+
+
+def _flow_steps(skill_id: str):
+    """``flow_for`` 的步骤元组；没有流水线 ⇒ ``None``（零步技能是 ``()``，不是 ``None``）。"""
+    flow = flow_for(skill_id)
+    return None if flow is None else flow.steps
+
+
+def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
+    """46 条恰好一形态：键 = ``CATALOG`` 的键、值 = 10 个形态闭集之一。"""
+    assert set(SKILL_SHAPE) == set(CATALOG)
+    assert len(SKILL_SHAPE) == len(CATALOG) == 46
+    assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
+    assert len(SHAPE_COUNTS) == 10
+    assert all(SKILL_SHAPE.values()), "表里没有空形态"
+
+
+def test_every_shape_has_the_documented_count_and_members() -> None:
+    """逐格核条数，并用既有声明复核能机械读出的形态（读法不是手抄愿望）。"""
+    actual_counts = {shape: len(_shape_members(shape)) for shape in SHAPE_COUNTS}
+    assert actual_counts == SHAPE_COUNTS
+
+    def skills(predicate) -> frozenset[str]:
+        return frozenset(
+            skill_id
+            for skill_id, definition in CATALOG.items()
+            if predicate(definition)
+        )
+
+    active = frozenset(
+        skill_id
+        for skill_id in CATALOG
+        if (_steps := _flow_steps(skill_id)) is not None
+        and _steps != ()
+        and not CATALOG[skill_id].hooks
+        and not CATALOG[skill_id].seams
+    )
+    triggered = frozenset(
+        skill_id
+        for skill_id in CATALOG
+        if (_steps := _flow_steps(skill_id)) is not None
+        and _steps != ()
+        and (CATALOG[skill_id].hooks or CATALOG[skill_id].seams)
+        and CATALOG[skill_id].deck_arrange is None
+    )
+    zero_step = frozenset(skill_id for skill_id in CATALOG if _flow_steps(skill_id) == ())
+    arranged = skills(lambda definition: definition.deck_arrange is not None)
+    locked = skills(lambda definition: definition.locked)
+    conversion = skills(lambda definition: bool(definition.virtual_type_ids))
+    ability = skills(
+        lambda definition: definition.rejudge_capable
+        and not definition.hooks
+        and not definition.modifiers
+        and not definition.seams
+    )
+    generator = skills(
+        lambda definition: {modifier.point for modifier in definition.modifiers}
+        == {ModifierPoint.TARGET_POOL, ModifierPoint.CANDIDATES}
+    )
+    providers = frozenset(PROVIDERS) | {"equip.eight_diagrams"}
+
+    assert _shape_members("主动技能") == active
+    assert _shape_members("触发技能") == triggered
+    assert _shape_members("零步技能") == zero_step
+    assert _shape_members("排列技能") == arranged
+    assert _shape_members("锁定技") == locked
+    assert _shape_members("转化技") == conversion
+    assert _shape_members("能力位") == ability
+    assert _shape_members("候选生成器") == generator
+    assert _shape_members("候选提供者") == providers
+    assert set(PROVIDERS) == {"hero.caocao.hujia", "hero.liubei.jijiang"}
+
+    multi_round = _shape_members("多轮技能")
+    assert len(multi_round) == 3
+    assert all(_flow_steps(skill_id) is None for skill_id in multi_round)
+    assert all(
+        any(hook.handler is not None for hook in CATALOG[skill_id].hooks)
+        for skill_id in multi_round
+    ), "三条多轮技能都保持手写钩子（flow_for is None）"
+
+
+def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
+    """19 在内 / 27 在外：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    inside = frozenset(
+        skill_id
+        for skill_id, shape in SKILL_SHAPE.items()
+        if shape in STEP_LANGUAGE_SHAPES
+    )
+    outside = frozenset(SKILL_SHAPE) - inside
+
+    assert inside == IN_STEP_LANGUAGE
+    assert outside == OUTSIDE_STEP_LANGUAGE
+    assert len(inside) == 19
+    assert len(outside) == 27
+    assert inside.isdisjoint(outside)
+    assert inside | outside == set(CATALOG)
+    assert {skill_id for skill_id in CATALOG if flow_for(skill_id) is not None} == inside
+    assert {skill_id for skill_id in CATALOG if flow_for(skill_id) is None} == outside
