@@ -174,9 +174,13 @@ _PLAY_PHASE_IDLE = "PHASE_PLAY_IDLE"
 """
 
 _SEAT_PREFIX = "seat:"
-"""座位选项的规范文本前缀（与 `sgs.skills.flow.SEAT_PREFIX` 同值）。
+"""座位选项的规范文本前缀；**规范声明** = `sgs.skills.flow.SEAT_PREFIX`（本处是被边界允许的副本）。
 
-同 :data:`_PLAY_PHASE_IDLE` 的理由：``sgs.skills`` 不在可见面白名单里，故按字面量读。
+为什么抄一个**字面量**而不 import：``sgs.skills`` 不在
+``tests/test_source_discipline.py`` 的可见面白名单里（`HEURISTIC_ALLOWED_SGS_MODULES`
+只有 ``sgs.effects`` / ``sgs.state``），本模块连公开入口都不许碰。改前缀时必须同步
+`flow.SEAT_PREFIX`、本副本与 ``tools/sgs_web/static/app.js`` 的跨语言副本（W6-06b）；
+边界不是"全场单一真源"，而是"接入层导规范值 + 两个被边界允许的带注释副本"。
 """
 
 _LORD_SIDE = frozenset({"lord", "loyalist"})
@@ -540,7 +544,7 @@ def _score_select_option(query: Query, action: Action) -> float:
     assert isinstance(query, SelectOptionQuery)
     if not isinstance(action, SelectOption):
         return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
-    if action.choice.startswith("seat:"):
+    if action.choice.startswith(_SEAT_PREFIX):
         return _score_seat_option(query, action.choice)
     return _OPTION_VALUES.get(action.choice, 0.0)
 

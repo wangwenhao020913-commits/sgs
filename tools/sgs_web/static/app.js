@@ -720,6 +720,7 @@ function renderTable() {
   const preStep = state.preactivation && state.preactivation.cursor < state.preactivation.steps.length
     ? state.preactivation.steps[state.preactivation.cursor]
     : null;
+  // seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
   const preSeats = preStep && preactivationStepKind(preStep) === "seat"
     ? (preactivationOptions(state.preactivation, state.preactivation.cursor)
       || snapshot.players.filter((player) => player.alive).map((player) => `seat:${player.seat}`))
@@ -739,6 +740,7 @@ function renderTable() {
       && state.selectedOption !== null
       && (pendingNow.legal_actions[state.selectedOption] || {}).choice === optionChoice;
     if (state.preactivation) {
+      // seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
       if (preSeats && preSeats.includes(`seat:${player.seat}`)) {
         const answer = state.preactivation.answers[state.preactivation.cursor];
         if (answer && answer.values.includes(player.seat)) box.classList.add("tsel");
@@ -789,6 +791,7 @@ function renderTable() {
       box.appendChild(row);
     }
     if (state.preactivation) {
+      // seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
       if (preSeats && preSeats.includes(`seat:${player.seat}`)) {
         box.addEventListener("click", () => selectPreativationSeat(player.seat));
       }
@@ -1068,6 +1071,7 @@ function preactivationStepKind(step) {
   // 选项步的候选是常量、不会退化，故这条 fallback 不会把选项步误判成座位。
   if (!step.pool || !step.pool.length) return "seat";
   const first = (step.pool[0].options || [])[0];
+  // seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
   if (typeof first === "string" && first.startsWith("seat:")) return "seat";
   return "option";
 }
@@ -1090,6 +1094,7 @@ function preactivationOptions(pa, index) {
 
 function preactivationAnswerTexts(step, values) {
   const kind = preactivationStepKind(step);
+  // seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
   if (kind === "seat") return values.map((seat) => `seat:${seat}`);
   return values.map((value) => String(value));
 }
@@ -1198,6 +1203,7 @@ function selectPreativationSeat(seat) {
   const step = pa.steps[pa.cursor];
   if (preactivationStepKind(step) !== "seat") return;
   const options = preactivationOptions(pa, pa.cursor);
+  // seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
   const text = `seat:${seat}`;
   if (options && !options.includes(text)) return;
   pa.answers[pa.cursor] = { values: [seat], texts: [text] };
@@ -1430,6 +1436,7 @@ function selectTarget(seat) {
 function selectOptionSeat(seat) {
   const pending = state.view ? state.view.pending : null;
   if (state.playback || !pending || pending.kind !== "SELECT_OPTION") return;
+  // 选项串的 seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
   const index = (pending.legal_actions || []).findIndex(
     (action) => action.kind === "SelectOption" && action.choice === `seat:${seat}`,
   );
@@ -1969,6 +1976,7 @@ function actionLabel(action) {
   }
   if (action.kind === "SelectCards") return "选牌";
   if (action.kind === "SelectOption") {
+    // 正则里的 seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
     const seat = /^seat:(\d+)$/.exec(action.choice);
     return seat ? `选择座位 ${seat[1]}` : `选项：${action.choice}`;
   }

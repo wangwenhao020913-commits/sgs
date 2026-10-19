@@ -118,7 +118,7 @@ from .active import (
     activate_skill,
     run_flow,
 )
-from .flow import card_preactivations, manifest, validate_flow_activation
+from .flow import SEAT_PREFIX, card_preactivations, manifest, validate_flow_activation
 from .preactivation import (
     flow_for,
     preactivation_for,
@@ -245,6 +245,7 @@ __all__ = (
     "PROVIDER_SKILL_KEY",
     "REJUDGE_SKILL_IDS",
     "RUNNING_SKILL_KEY",
+    "SEAT_PREFIX",
     "ActivationPlan",
     "ActiveSkill",
     "Arrange",

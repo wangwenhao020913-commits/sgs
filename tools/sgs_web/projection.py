@@ -21,6 +21,7 @@ from sgs.effects import response_count
 from sgs.engine import record_json
 from sgs.skills import (
     CATALOG,
+    SEAT_PREFIX,
     ModifierPoint,
     conversion_offers_by_source,
     resolve_instances,
@@ -311,15 +312,16 @@ def option_seats(query: Query) -> dict[str, int]:
 
     界面据此把座位画成**可点的**（【遗计】的"交给谁"），省得玩家去读 ``选项：seat:3``
     这种报文串。解析放在服务端、前端只读数据——"界面不裁决规则"这条纪律因此不受影响。
+    前缀读 :data:`sgs.skills.SEAT_PREFIX`（W6-06b：接入层的单一真源，不在这里抄字面量）。
     """
     options = getattr(query, "options", None)
     if options is None:
         return {}
     out: dict[str, int] = {}
     for option in options:
-        if isinstance(option, str) and option.startswith("seat:"):
+        if isinstance(option, str) and option.startswith(SEAT_PREFIX):
             try:
-                out[option] = int(option.split(":", 1)[1])
+                out[option] = int(option.removeprefix(SEAT_PREFIX))
             except ValueError:
                 continue
     return out
