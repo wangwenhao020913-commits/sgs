@@ -632,16 +632,8 @@ def test_every_conditional_hook_goes_false_when_the_owner_is_someone_else() -> N
 # W6-01：7 条零步技能登记成**模块级** ``SkillFlow``，且仍走旧候选路径
 # ---------------------------------------------------------------------------
 
-ZERO_STEP_SKILL_IDS = (
-    "hero.luxun.lianying",
-    "hero.sunshangxiang.xiaoji",
-    "hero.caocao.jianxiong",
-    "hero.guojia.tiandu",
-    "hero.zhouyu.yingzi",
-    "hero.diaochan.biyue",
-    "hero.machao.tieqi",
-)
-"""W6-01 的 7 条零步技能（spec §4.1）：连营 / 枭姬 / 奸雄 / 天妒 / 英姿 / 闭月 / 铁骑。"""
+# ``ZERO_STEP_SKILL_IDS`` 由 ``SKILL_SHAPE`` 派生（定义在下面那张表之后，W6-07 / 评审 J7）：
+# 手抄第二份名单只会与形态表漂移，而"零步技能"本来就等于 ``SKILL_SHAPE`` 里那一格。
 
 
 def test_the_seven_zero_step_skills_are_registered_flows_with_no_steps():
@@ -760,72 +752,31 @@ STEP_LANGUAGE_SHAPES: frozenset[str] = frozenset(
 """在步骤语言内的四个形态（19 条 = 6 + 5 + 7 + 1）。"""
 
 IN_STEP_LANGUAGE: frozenset[str] = frozenset(
-    {
-        # 主动技能 6
-        "hero.sunquan.zhiheng",
-        "hero.liubei.rende",
-        "hero.zhouyu.fanjian",
-        "hero.huatuo.qingnang",
-        "hero.diaochan.lijian",
-        "hero.sunshangxiang.jieyin",
-        # 触发技能 5
-        "hero.simayi.fankui",
-        "hero.daqiao.liuli",
-        "equip.green_dragon_blade",
-        "equip.axe",
-        "equip.qilin_bow",
-        # 零步技能 7
-        "hero.luxun.lianying",
-        "hero.sunshangxiang.xiaoji",
-        "hero.caocao.jianxiong",
-        "hero.guojia.tiandu",
-        "hero.zhouyu.yingzi",
-        "hero.diaochan.biyue",
-        "hero.machao.tieqi",
-        # 排列技能 1
-        "hero.zhugeliang.guanxing",
-    }
+    skill_id
+    for skill_id, shape in SKILL_SHAPE.items()
+    if shape in STEP_LANGUAGE_SHAPES
 )
-"""在步骤语言内（19）：有 `SkillFlow` 的技能；spec §4.4 的「在内」。"""
+"""在步骤语言内（19）：**派生**自 :data:`SKILL_SHAPE` 的四个步骤语言形态。
 
-OUTSIDE_STEP_LANGUAGE: frozenset[str] = frozenset(
-    {
-        # 多轮技能 3
-        "hero.guojia.yiji",
-        "equip.ice_sword",
-        "equip.double_sword",
-        # 锁定技 14
-        "equip.crossbow",
-        "equip.qinggang_sword",
-        "equip.renwang_shield",
-        "equip.chitu",
-        "equip.jueying",
-        "equip.dilu",
-        "equip.zhuahuang_feidian",
-        "equip.dawan",
-        "equip.zixing",
-        "hero.zhugeliang.kongcheng",
-        "hero.luxun.qianxun",
-        "hero.lvbu.wushuang",
-        "hero.sunquan.jiuyuan",
-        "hero.machao.mashu",
-        # 转化技 5
-        "hero.guanyu.wusheng",
-        "hero.zhaoyun.longdan",
-        "hero.daqiao.guose",
-        "hero.huatuo.jijiu",
-        "equip.serpent_spear",
-        # 能力位 1
-        "hero.simayi.guicai",
-        # 候选生成器 1
-        "equip.halberd",
-        # 候选提供者 3
-        "hero.caocao.hujia",
-        "hero.liubei.jijiang",
-        "equip.eight_diagrams",
-    }
+W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同一份事实的两份拷贝——
+形态表一改，第二份名单就悄悄过期。现在它只是那张表的一个投影；真正的判据留在
+:func:`test_the_step_language_boundary_is_exactly_the_flow_backed_skills`（"内 == 有
+`flow_for`"），不是这行的规模。
+"""
+
+OUTSIDE_STEP_LANGUAGE: frozenset[str] = frozenset(SKILL_SHAPE) - IN_STEP_LANGUAGE
+"""不在步骤语言内（27）：多轮 3 + 锁定 14 + 转化 5 + 能力位 1 + 候选生成器 1 + 候选提供者 3。
+
+同样**派生**（:data:`SKILL_SHAPE` 减 :data:`IN_STEP_LANGUAGE`）；27 这个数由
+`SHAPE_COUNTS` 的其余六格加出来，测试里另有一条规模断言。
+"""
+
+ZERO_STEP_SKILL_IDS: tuple[str, ...] = tuple(
+    skill_id for skill_id, shape in SKILL_SHAPE.items() if shape == "零步技能"
 )
-"""不在步骤语言内（27）：多轮 3 + 锁定 14 + 转化 5 + 能力位 1 + 候选生成器 1 + 候选提供者 3。"""
+"""W6-01 的 7 条零步技能（spec §4.1）：连营 / 枭姬 / 奸雄 / 天妒 / 英姿 / 闭月 / 铁骑。
+
+W6-07 / 评审 J7：**派生**自 :data:`SKILL_SHAPE` 的「零步技能」那一格（原先手抄 7 个 id）。"""
 
 
 def _shape_members(shape: str) -> frozenset[str]:
@@ -923,11 +874,14 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     )
     outside = frozenset(SKILL_SHAPE) - inside
 
+    # 两侧集合是 ``SKILL_SHAPE`` 的投影（W6-07 / 评审 J7：不再手抄第二份名单）……
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
+    # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
     assert len(inside) == 19
     assert len(outside) == 27
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     assert {skill_id for skill_id in CATALOG if flow_for(skill_id) is not None} == inside
     assert {skill_id for skill_id in CATALOG if flow_for(skill_id) is None} == outside
+    assert ZERO_STEP_SKILL_IDS and set(ZERO_STEP_SKILL_IDS) <= inside

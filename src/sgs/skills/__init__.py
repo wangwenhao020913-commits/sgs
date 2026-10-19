@@ -118,7 +118,13 @@ from .active import (
     activate_skill,
     run_flow,
 )
-from .flow import SEAT_PREFIX, card_preactivations, manifest, validate_flow_activation
+from .flow import (
+    FREE_SPLIT,
+    SEAT_PREFIX,
+    card_preactivations,
+    manifest,
+    validate_flow_activation,
+)
 from .preactivation import (
     flow_for,
     preactivation_for,
@@ -224,6 +230,7 @@ __all__ = (
     "DAMAGE_RECORDED_KEY",
     "EQUIPMENT_CARD_TYPE_IDS",
     "EQUIPMENT_SKILL_IDS",
+    "FREE_SPLIT",
     "GUANXING",
     "GUANXING_MAX",
     "GUICAI",

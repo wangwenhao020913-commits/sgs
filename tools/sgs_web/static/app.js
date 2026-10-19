@@ -56,6 +56,21 @@ function phaseLabel(phase) {
  */
 const HAND_PICK_KINDS = ["PLAY_PHASE", "RESPOND", "DODGE", "PEACH"];
 
+/** `seat:` 前缀 = **跨语言副本**（W6-07 / 评审 J4）。
+ *
+ * 规范声明住 `sgs.skills.flow.SEAT_PREFIX`（经公开入口 `sgs.skills` 给接入层用）；JS 与
+ * Python 之间没有共享常量的通道，故这里是**唯一**的 JS 副本，全文件只此一处字面量。
+ * 改前缀 = 两头一起改。
+ */
+const SEAT_PREFIX = "seat:";
+
+/** `"free"` = 自由切分的**线上取值**（`DeckTopArrange.split` 的 `FREE_SPLIT`，W6-07 / J5）。
+ *
+ * 与 Python 的 `sgs.skills.FREE_SPLIT` 同一个值、同一处语义（投影原样转发）；同
+ * `SEAT_PREFIX`，跨语言只能各留一份常量，别在别处再写字符串字面量。
+ */
+const FREE_SPLIT = "free";
+
 /** 事件回放的步长档位（毫秒）：每一条事件在事件流 / 效果区停留这么久。
  *
  * 报障 3：AI 一回合的结算在一次响应里全部返回，界面**一次性**画完，于是【杀】【闪】
@@ -720,10 +735,9 @@ function renderTable() {
   const preStep = state.preactivation && state.preactivation.cursor < state.preactivation.steps.length
     ? state.preactivation.steps[state.preactivation.cursor]
     : null;
-  // seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
   const preSeats = preStep && preactivationStepKind(preStep) === "seat"
     ? (preactivationOptions(state.preactivation, state.preactivation.cursor)
-      || snapshot.players.filter((player) => player.alive).map((player) => `seat:${player.seat}`))
+      || snapshot.players.filter((player) => player.alive).map((player) => `${SEAT_PREFIX}${player.seat}`))
     : null;
 
   const ring = $("t-seats");
@@ -740,8 +754,7 @@ function renderTable() {
       && state.selectedOption !== null
       && (pendingNow.legal_actions[state.selectedOption] || {}).choice === optionChoice;
     if (state.preactivation) {
-      // seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
-      if (preSeats && preSeats.includes(`seat:${player.seat}`)) {
+      if (preSeats && preSeats.includes(`${SEAT_PREFIX}${player.seat}`)) {
         const answer = state.preactivation.answers[state.preactivation.cursor];
         if (answer && answer.values.includes(player.seat)) box.classList.add("tsel");
         else box.classList.add("targetable");
@@ -791,8 +804,7 @@ function renderTable() {
       box.appendChild(row);
     }
     if (state.preactivation) {
-      // seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
-      if (preSeats && preSeats.includes(`seat:${player.seat}`)) {
+      if (preSeats && preSeats.includes(`${SEAT_PREFIX}${player.seat}`)) {
         box.addEventListener("click", () => selectPreativationSeat(player.seat));
       }
     } else if (seatState && !selfOnly) {
@@ -1071,8 +1083,7 @@ function preactivationStepKind(step) {
   // 选项步的候选是常量、不会退化，故这条 fallback 不会把选项步误判成座位。
   if (!step.pool || !step.pool.length) return "seat";
   const first = (step.pool[0].options || [])[0];
-  // seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
-  if (typeof first === "string" && first.startsWith("seat:")) return "seat";
+  if (typeof first === "string" && first.startsWith(SEAT_PREFIX)) return "seat";
   return "option";
 }
 
@@ -1094,8 +1105,7 @@ function preactivationOptions(pa, index) {
 
 function preactivationAnswerTexts(step, values) {
   const kind = preactivationStepKind(step);
-  // seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
-  if (kind === "seat") return values.map((seat) => `seat:${seat}`);
+  if (kind === "seat") return values.map((seat) => `${SEAT_PREFIX}${seat}`);
   return values.map((value) => String(value));
 }
 
@@ -1203,8 +1213,7 @@ function selectPreativationSeat(seat) {
   const step = pa.steps[pa.cursor];
   if (preactivationStepKind(step) !== "seat") return;
   const options = preactivationOptions(pa, pa.cursor);
-  // seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
-  const text = `seat:${seat}`;
+  const text = `${SEAT_PREFIX}${seat}`;
   if (options && !options.includes(text)) return;
   pa.answers[pa.cursor] = { values: [seat], texts: [text] };
   pa.cursor += 1;
@@ -1436,9 +1445,8 @@ function selectTarget(seat) {
 function selectOptionSeat(seat) {
   const pending = state.view ? state.view.pending : null;
   if (state.playback || !pending || pending.kind !== "SELECT_OPTION") return;
-  // 选项串的 seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
   const index = (pending.legal_actions || []).findIndex(
-    (action) => action.kind === "SelectOption" && action.choice === `seat:${seat}`,
+    (action) => action.kind === "SelectOption" && action.choice === `${SEAT_PREFIX}${seat}`,
   );
   if (index < 0) return;
   state.selectedOption = index;
@@ -1976,8 +1984,7 @@ function actionLabel(action) {
   }
   if (action.kind === "SelectCards") return "选牌";
   if (action.kind === "SelectOption") {
-    // 正则里的 seat: 前缀 = 跨语言副本；规范声明 = sgs.skills.flow.SEAT_PREFIX（同步改）。
-    const seat = /^seat:(\d+)$/.exec(action.choice);
+    const seat = new RegExp(`^${SEAT_PREFIX}(\\d+)$`).exec(action.choice);
     return seat ? `选择座位 ${seat[1]}` : `选项：${action.choice}`;
   }
   if (action.kind === "ArrangeCards") return `排列（${action.order.length} 张）`;
@@ -2091,19 +2098,32 @@ function toggleProvidePick(slotIndex) {
 
 /* ------------------------------------------------------- 排列（W6-03） */
 
+/** 排列的**牌面**：只认本次询问的 `pending.revealed`（= 引擎授予这次询问的牌堆顶）。
+ *
+ * W6-07 / 评审 J9：规格里**不再重发**同一份牌面（`arrange.cards` 已删），牌面只有这一个
+ * 真源。非空校验与 `_mask_watched_faces` 同姿态：不是询问者就没有牌面 ⇒ `null`。
+ */
+function arrangeCards(pending) {
+  if (!pending || pending.kind !== "ARRANGE") return null;
+  const cards = pending.revealed;
+  return Array.isArray(cards) && cards.length ? cards : null;
+}
+
 /** 排列规格的**读取口**：只认服务端下发的 `pending.arrange`（投影读 `SkillDef.deck_arrange`）。
  *
  * 返回 `null` ⇒ fail-closed：没有规格就不画双行面、也不拼 Action（409 裸 Query /
- * 无技能定义 / 形状不完整）。形状 = `{count, split: "free" | {top, bottom}, cards}`；
- * `count` / `split` **不是**前端自己算的规则（S2：投影从技能定义读）。
+ * 无技能定义 / 形状不完整 / 张数或切分对不上）。形状 = `{count, split: FREE_SPLIT |
+ * {top, bottom}}`；`count` / `split` **不是**前端自己算的规则（S2：投影从技能定义读）。
+ * 牌面从 `pending.revealed` 取（:func:`arrangeCards`），不在这里。
  */
 function arrangeSpec(pending) {
   if (!pending || pending.kind !== "ARRANGE") return null;
+  const cards = arrangeCards(pending);
   const spec = pending.arrange;
-  if (!spec || !Array.isArray(spec.cards)) return null;
+  if (!cards || !spec) return null;
   const count = Number(spec.count);
-  if (!Number.isInteger(count) || count <= 0 || spec.cards.length !== count) return null;
-  if (spec.split === "free") return spec;
+  if (!Number.isInteger(count) || count <= 0 || cards.length !== count) return null;
+  if (spec.split === FREE_SPLIT) return spec;
   const split = spec.split || {};
   const top = Number(split.top);
   const bottom = Number(split.bottom);
@@ -2116,18 +2136,20 @@ function arrangeSpec(pending) {
  * 键 = 询问序号 + 切分声明 + 牌面 id 序列：换询问 / 换规格 / 换牌就重建，同一询问的
  * 刷新保留玩家摆好的顺序。 */
 function arrangeKey(pending, spec) {
-  return `${pending.seq}:${JSON.stringify(spec.split)}:${spec.cards.map((card) => card.card_id).join(",")}`;
+  const cards = arrangeCards(pending) || [];
+  return `${pending.seq}:${JSON.stringify(spec.split)}:${cards.map((card) => card.card_id).join(",")}`;
 }
 
 /** 初始布局：自由切分 = 全部在牌堆顶（参考图的样子，下行全是空槽）；固定切分按声明铺开。 */
-function initialArrange(spec, key) {
-  const count = spec.cards.length;
-  const free = spec.split === "free";
+function initialArrange(pending, spec, key) {
+  const cards = arrangeCards(pending) || [];
+  const count = cards.length;
+  const free = spec.split === FREE_SPLIT;
   const fixed = free ? null : { top: Number(spec.split.top), bottom: Number(spec.split.bottom) };
   const topCount = free ? count : fixed.top;
   return {
     key,
-    cards: spec.cards,
+    cards,
     count,
     free,
     fixed,
@@ -2317,7 +2339,16 @@ function arrangeRowNode(name, label, hint) {
  * 上行 = 牌堆顶（左 → 右 = 从最上往下），下行 = 牌堆底（左 → 右 = 先接在现有牌堆底
  * 之下）；确认提交的 `order` 就是上行左→右再接下行左→右（Q9(c)）。自由切分的下行始终
  * 留 `count` 个位置（用户参考图的布局：全部在顶上时下行全是空槽），固定切分按声明的
- * `bottom` 收口。规格缺失时只画"排列不可用，请刷新"（fail-closed），不铺可提交的牌。
+ * `bottom` 收口。
+ *
+ * **fail-closed 的触发面**（W6-07）：规格或牌面缺失时只画"排列不可用，请刷新"，不铺
+ * 任何可提交的牌。两种载荷都走到这里 ——
+ * ① **200 但服务端给不出规格**：投影的 ``_arrange_spec`` 返回 ``null``（无技能定义 /
+ *    固定切分形状不完整 / 声明张数与实际牌数对不上 / 查看者不是询问者）；
+ * ② **409 的陈旧询问**：`submitAction` 收到 409 后 `refresh()` 会丢掉这份陈旧载荷并
+ *    取当前询问；若刷新回来的仍是 ``ARRANGE`` 而规格仍拿不到，就落到这里。
+ *    故"刷新"这个动作**就是** 409 的 fail-closed 出口：陈旧询问永远不排，刷新后的状态
+ *    才排；而不是把陈旧载荷硬画成一份能提交的排列面。
  */
 function renderArrange(pending) {
   const box = $("t-options");
@@ -2335,7 +2366,7 @@ function renderArrange(pending) {
     return;
   }
   if (!state.arrange || state.arrange.key !== arrangeKey(pending, spec)) {
-    state.arrange = initialArrange(spec, arrangeKey(pending, spec));
+    state.arrange = initialArrange(pending, spec, arrangeKey(pending, spec));
   }
   const layout = state.arrange;
   const top = arrangeRowNode("top", "牌堆顶", "（左 = 最上）");

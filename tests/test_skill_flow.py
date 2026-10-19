@@ -38,10 +38,10 @@ from sgs.skills.flow import (
     PickSeats,
     SkillFlow,
     _flow_step_cards,
-    arranged_cards,
     manifest,
     run_flow,
     validate_flow_activation,
+    watched_cards,
 )
 from sgs.state import (
     ActivateSkill,
@@ -1231,6 +1231,32 @@ def test_a_fixed_split_only_offers_the_declared_cut():
         )
 
 
+def test_a_fixed_split_must_add_up_to_the_declared_count():
+    """固定切分的两行必须**恰好**排完这次排列的牌（W6-07 / 评审 J6）。
+
+    旧实现让 ``split_point`` 只回 ``top``，于是 ``FixedSplit(3, 2)`` 配 4 张牌会一路走到
+    ``_arrange`` 的越界检查才炸（"固定切分点 3 不在 0..4 内"）—— 症状离错误来源很远。
+    现在两个入口都先核对 ``top + bottom == count``：
+
+    - 定数张数在**构造期**（声明写错了，import 期就该炸）；
+    - 可调用张数在 ``split_point``（实际张数那时才知道，执行器在发问之前调它）。
+
+    ``FixedSplit.bottom`` 因此是有读取方的字段，不是死配置。
+    """
+    with pytest.raises(ValueError, match="top=3 \\+ bottom=2"):
+        DeckTopArrange(count=4, split=FixedSplit(3, 2))
+
+    # 可调用张数读不到声明期 ⇒ 在 split_point 用**本次实际张数**核对。
+    spec = DeckTopArrange(count=lambda _state, _frame: 4, split=FixedSplit(2, 2))
+    assert spec.split_point(4) == 2
+    with pytest.raises(ValueError, match="与张数 5 不一致"):
+        spec.split_point(5)
+
+    # free 档不受影响（没有声明切分，就没有可核对的半区）。
+    assert DeckTopArrange(count=4).split_point(4) is None
+    assert DeckTopArrange(count=4).split_point(3) is None
+
+
 def test_a_synthetic_fixed_split_consumer_runs_the_arrange_step():
     """**test-only** 合成消费者（固定 2 张顶 / 2 张底）证明 ``DeckTopArrange`` 可复用。
 
@@ -1281,7 +1307,7 @@ def test_a_synthetic_fixed_split_consumer_runs_the_arrange_step():
     answer = captured["cards"]
     assert isinstance(answer, ArrangeCards), "答案形状 = ArrangeCards 本身（spec S12）"
     assert (answer.order, answer.split) == ((3, 2, 1, 0), 2)
-    assert tuple(card.card_id for card in arranged_cards(frame, flow, "cards")) == deck[:4], (
+    assert tuple(card.card_id for card in watched_cards(frame, flow, "cards")) == deck[:4], (
         "位置 → 实体牌读帧私有 peek 缓存"
     )
     assert (

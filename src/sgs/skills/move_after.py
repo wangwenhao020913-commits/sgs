@@ -52,7 +52,7 @@ from .catalog import (
     dispatch_timing,
     resolve_instances,
 )
-from .flow import FlowAnswers, SkillFlow
+from .flow import SkillFlow, zero_step_effect
 
 __all__ = [
     "LIANYING_FLOW",
@@ -197,30 +197,27 @@ def _lost_equipment(state: GameState, move: MoveEvent, owner: int) -> bool:
     return move.from_zone.zone is Zone.EQUIP and move.from_zone.seat == owner
 
 
-def _lianying_effect(host: Any, frame: Any, answers: FlowAnswers) -> None:
-    """【连营】的零步流水线效果（W6-01）：包住旧回调 :meth:`MoveAfterSkill.handle`。
-
-    ``steps=()`` ⇒ ``answers`` 恒为空；执行路径与迁移前的 ``Hook(handler=...)`` 逐字等价
-    （是否发动仍由派发器先问一次）。
-    """
-    del answers
+# W6-01 / W6-07：零步流水线的 effect 由 :func:`sgs.skills.flow.zero_step_effect` 生成，
+# 只把旧回调 :meth:`MoveAfterSkill.handle` 包一层。**晚绑定**是必须的：``_LIANYING`` /
+# ``_XIAOJI`` 又要引用这两条流水线（``flow=…``），故绑定方法只能在它们定义**之后**取。
+def _lianying_delegate(host: Any, frame: Any) -> None:
+    """【连营】的旧回调（``_LIANYING`` 在下方定义 ⇒ 取绑定方法要晚一步）。"""
     return _LIANYING.handle(host, frame)
 
 
-def _xiaoji_effect(host: Any, frame: Any, answers: FlowAnswers) -> None:
-    """【枭姬】的零步流水线效果（W6-01）：同 :func:`_lianying_effect`。"""
-    del answers
+def _xiaoji_delegate(host: Any, frame: Any) -> None:
+    """【枭姬】的旧回调（同 :func:`_lianying_delegate`）。"""
     return _XIAOJI.handle(host, frame)
 
 
-LIANYING_FLOW = SkillFlow(name="lianying", steps=(), effect=_lianying_effect)
+LIANYING_FLOW = SkillFlow(name="lianying", steps=(), effect=zero_step_effect(_lianying_delegate))
 """【连营】的零步流水线（W6-01）：[是否发动] → 摸一张牌（无步骤）。
 
 必须是**模块级具名常量**：``tests/test_ask_points.py`` 只发现模块级 ``SkillFlow`` 实例，
 并拒绝"注册了但不在模块里"的 flow（先例 :data:`~sgs.skills.damage_after.FANKUI_FLOW`）。
 """
 
-XIAOJI_FLOW = SkillFlow(name="xiaoji", steps=(), effect=_xiaoji_effect)
+XIAOJI_FLOW = SkillFlow(name="xiaoji", steps=(), effect=zero_step_effect(_xiaoji_delegate))
 """【枭姬】的零步流水线（W6-01）：[是否发动] → 摸两张牌（无步骤）。"""
 
 

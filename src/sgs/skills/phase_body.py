@@ -37,7 +37,7 @@ from sgs.state import GameState
 from sgs.timing import Timing
 
 from .catalog import ActivationPlan, HeroSkillDecl, Hook, SkillDef
-from .flow import FlowAnswers, SkillFlow
+from .flow import SkillFlow, zero_step_effect
 
 __all__ = [
     "BIYUE_FLOW",
@@ -66,32 +66,27 @@ class PhaseBodySkill(HeroSkillDecl):
         return None
 
 
-# W6-01：零步流水线。effect 是本模块的顶层函数（``FlowEffect``），只把旧回调
-# ``PhaseBodySkill.handler`` 包一层；声明在下方，**调用期**才解析（import 期不读）。
-def _yingzi_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
-    """【英姿】的零步流水线效果（W6-01）：转调旧回调 :meth:`PhaseBodySkill.handler`。
-
-    ``steps=()`` ⇒ ``answers`` 恒为空；执行路径与迁移前的 ``Hook(handler=...)`` 逐字等价
-    （是否发动仍由派发器先问一次）。
-    """
-    del answers
+# W6-01 / W6-07：零步流水线。effect 由 :func:`sgs.skills.flow.zero_step_effect` 生成，只把
+# 旧回调 :meth:`PhaseBodySkill.handler` 包一层。**晚绑定**是必须的：``_YINGZI`` / ``_BIYUE``
+# 又要引用这两条流水线（``flow=…``），故绑定方法只能在它们定义**之后**取（import 期不读）。
+def _yingzi_delegate(host: Any, frame: Frame) -> Control:
+    """【英姿】的旧回调（``_YINGZI`` 在下方定义 ⇒ 取绑定方法要晚一步）。"""
     return _YINGZI.handler(host, frame)
 
 
-def _biyue_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
-    """【闭月】的零步流水线效果（W6-01）：同 :func:`_yingzi_effect`。"""
-    del answers
+def _biyue_delegate(host: Any, frame: Frame) -> Control:
+    """【闭月】的旧回调（同 :func:`_yingzi_delegate`）。"""
     return _BIYUE.handler(host, frame)
 
 
-YINGZI_FLOW = SkillFlow(name="yingzi", steps=(), effect=_yingzi_effect)
+YINGZI_FLOW = SkillFlow(name="yingzi", steps=(), effect=zero_step_effect(_yingzi_delegate))
 """【英姿】的零步流水线（W6-01）：[是否发动] → 多摸一张牌（无步骤）。
 
 必须是**模块级具名常量**：``tests/test_ask_points.py`` 只发现模块级 ``SkillFlow`` 实例，
 并拒绝"注册了但不在模块里"的 flow（先例 :data:`~sgs.skills.damage_after.FANKUI_FLOW`）。
 """
 
-BIYUE_FLOW = SkillFlow(name="biyue", steps=(), effect=_biyue_effect)
+BIYUE_FLOW = SkillFlow(name="biyue", steps=(), effect=zero_step_effect(_biyue_delegate))
 """【闭月】的零步流水线（W6-01）：[是否发动] → 摸一张牌（无步骤）。"""
 
 

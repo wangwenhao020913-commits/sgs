@@ -28,6 +28,7 @@ from sgs.agents import RandomPlayer, TapePlayer  # noqa: E402
 from sgs.data import Identity, Suit, validate_rule_config  # noqa: E402
 from sgs.engine import Engine, RandomSource, dump_journal  # noqa: E402
 from sgs.resolution import Frame, ResolutionStack  # noqa: E402
+from sgs.skills import FREE_SPLIT  # noqa: E402
 from sgs.state import (  # noqa: E402
     Action,
     ArrangeQuery,
@@ -1402,7 +1403,10 @@ def _session_at_guanxing_arrange() -> Session:
 
 def test_the_pending_payload_carries_the_guanxing_arrange_spec() -> None:
     """S2：``pending_payload['arrange']`` = 投影从 ``SkillDef.deck_arrange`` 读出的
-    张数 / 切分，加上询问自己带的牌面；**同一份** ``revealed``，不另造第二来源。
+    张数 / 切分；牌面**只下发一次**（``payload['revealed']``），规格里不再重发。
+
+    W6-07 / 评审 J9：``arrange.cards`` 已删 —— 同一张列表序列化两次会让"哪一份是真源"
+    变含混，前端读 ``pending.revealed`` 即可。
     """
     session = _session_at_guanxing_arrange()
     query = session.pending
@@ -1413,10 +1417,11 @@ def test_the_pending_payload_carries_the_guanxing_arrange_spec() -> None:
     spec = payload["arrange"]
     assert spec is not None, "观星的 ARRANGE 必须下发排列规格（否则前端只能猜）"
     assert spec["count"] == len(query.revealed) == 4
-    assert spec["split"] == "free", "观星 = 自由切分（DeckTopArrange 的缺省档）"
-    assert [card["card_id"] for card in spec["cards"]] == [
+    assert spec["split"] == FREE_SPLIT, "观星 = 自由切分（DeckTopArrange 的缺省档）"
+    assert "cards" not in spec, f"牌面只在 revealed 里下发一次（实际键 = {sorted(spec)}）"
+    assert [card["card_id"] for card in payload["revealed"]] == [
         card.card_id for card in query.revealed
-    ], "cards 就是询问的 revealed（同一份牌面，不复制第二来源）"
+    ], "revealed 就是询问授予的牌面（唯一真源）"
 
     # 规格是**投影派生**：询问模型里没有 arrange / count / split 三个顶层字段。
     record = next(
@@ -1462,6 +1467,70 @@ def test_the_arrange_spec_reports_the_skill_definition_split_and_fails_closed(mo
     use(None)
     assert pending_payload(session)["arrange"] is None, (
         "没有 deck_arrange 的技能 ⇒ 投影不凭空造规格"
+    )
+
+
+def test_the_arrange_spec_evaluates_a_callable_count_and_fails_closed(monkeypatch) -> None:
+    """W6-07（评审 SPEC-a）：**可调用**张数也要与实际牌数比对，对不上就 ``None``。
+
+    旧实现只比 ``isinstance(declared, int)``，而唯一消费者观星的 ``count`` 是
+    ``_guanxing_count``（可调用）⇒ 那条分支在生产里从未被执行过（旧测试靠 monkeypatch
+    一个 int 才走到）。这条用可调用档重新钉住它，并单独钉"求值抛异常 ⇒ 不猜"。
+    """
+    from dataclasses import replace
+
+    import sgs_web.projection as projection
+    from sgs.skills import CATALOG
+    from sgs.skills.flow import DeckTopArrange, FixedSplit
+
+    session = _session_at_guanxing_arrange()
+    definition = CATALOG[GUANXING]
+    seen: list[tuple[object, object]] = []
+
+    def use(spec: object) -> None:
+        replaced = replace(definition, deck_arrange=spec)
+        monkeypatch.setattr(projection, "_definition_of", lambda _state, _skill: replaced)
+
+    def counted(value: int):
+        def count(state: object, frame: object) -> int:
+            seen.append((state, frame))
+            return value
+
+        return count
+
+    # 可调用档：与本次实际牌数（4）一致 ⇒ 下发；投影把 state 与**当前帧**都喂给声明。
+    use(DeckTopArrange(count=counted(4)))
+    assert pending_payload(session)["arrange"] == {"count": 4, "split": FREE_SPLIT}
+    assert seen, "可调用张数必须被求值（否则比对整段失效）"
+    assert seen[-1][0] is session.engine.state, "求值喂的是引擎状态"
+    assert seen[-1][1] is None, (
+        "阶段体的排列询问不压栈 ⇒ 当前帧就是 None（声明自己决定用不用）"
+    )
+    # 有帧时按**栈顶**原样转发（纯函数直测；上面那条真实会话恰好是空栈）。
+    sentinel = object()
+    known, value = projection._declared_arrange_count(
+        lambda state, frame: 7 if (state is session.engine.state and frame is sentinel) else 0,
+        session.engine.state,
+        sentinel,
+    )
+    assert (known, value) == (True, 7), "求值把 state 与栈顶帧原样喂给声明"
+
+    # 可调用档与牌数对不上 ⇒ fail-closed（旧实现这里会放行）。
+    use(DeckTopArrange(count=counted(5)))
+    assert pending_payload(session)["arrange"] is None, (
+        "可调用张数（5）与实际牌数（4）对不上 ⇒ fail-closed，不拿声明猜"
+    )
+
+    def broken(_state: object, _frame: object) -> int:
+        raise KeyError("frame context")
+
+    use(DeckTopArrange(count=broken))
+    assert pending_payload(session)["arrange"] is None, "求值抛异常 ⇒ 判定不了 ⇒ fail-closed"
+
+    # 固定切分的两行必须恰好排完这几张牌（评审 J6）：3 + 2 != 4 ⇒ 不下发。
+    use(DeckTopArrange(count=counted(4), split=FixedSplit(3, 2)))
+    assert pending_payload(session)["arrange"] is None, (
+        "top + bottom != count ⇒ 投影 fail-closed（错误切分不进 _arrange 的 ValueError）"
     )
 
 

@@ -21,6 +21,7 @@ from sgs.effects import response_count
 from sgs.engine import record_json
 from sgs.skills import (
     CATALOG,
+    FREE_SPLIT,
     SEAT_PREFIX,
     ModifierPoint,
     conversion_offers_by_source,
@@ -908,6 +909,30 @@ def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
     mask(payload.get("preactivation") or [])
 
 
+def _declared_arrange_count(declared: Any, state: Any, frame: Any) -> tuple[bool, int | None]:
+    """声明的排列张数 → ``(是否可判定, 声明值)``（W6-07；评审 SPEC-a 的 fail-closed 补齐）。
+
+    ``DeckTopArrange.count`` 有两档：``int``（定数）与 ``(state, frame) -> int``（观星 =
+    ``min(存活数, 5)``）。旧实现只比 ``isinstance(declared, int)``，于是**唯一消费者**观星的
+    张数走的是可调用档 ⇒ "声明与实际牌数对不上"那条分支在生产里**从未被执行过**（测试靠
+    monkeypatch 一个 int 才走到）。
+
+    可调用档要拿**当前局面 + 当前帧**求值，才能与本次实际牌数比较：``state`` 是引擎状态，
+    ``frame`` 就是本函数已经读的栈顶帧（与 ``_skill_of_query`` 读的是同一帧）。排列询问
+    来自**阶段体**，此时结算栈可以**是空的**（阶段体帧不压栈）⇒ ``frame`` 允许为 ``None``，
+    由声明自己决定用不用它（观星的 ``_guanxing_count`` 只读 ``state``）。求值抛异常
+    （声明硬读帧上下文 / 写错）按"判定不了"处理 —— 投影宁可不给规格，也不猜一个。
+    """
+    if isinstance(declared, int):
+        return True, int(declared)
+    if declared is None or not callable(declared):
+        return False, None
+    try:
+        return True, int(declared(state, frame))
+    except Exception:  # noqa: BLE001 —— 声明回调的异常一律折算成"判定不了"，不冒到 HTTP 层
+        return False, None
+
+
 def _arrange_spec(
     engine: Any, query: Query, revealed: list[dict[str, Any]]
 ) -> dict[str, Any] | None:
@@ -920,13 +945,14 @@ def _arrange_spec(
     :func:`_skill_of_query` 的**阶段体**先例（与【观星】的 ``requirement`` 同一条判据：
     阶段体帧不压栈，读 ``Engine.phase_body_skill()``），不另翻栈帧。
 
-    返回 ``{count, split, cards}``：``split`` = ``"free"``（``flow.FREE_SPLIT`` 的线上取值）
-    或 ``{"top": int, "bottom": int}``；``cards`` = 本次询问的 ``revealed``（查看者就是
-    询问者时才非空，见 :func:`_mask_watched_faces`）。
+    返回 ``{count, split}``：``count`` = 本次实际张数（``revealed`` 的长度）；``split`` =
+    :data:`~sgs.skills.FREE_SPLIT`（线上取值 ``"free"``）或 ``{"top": int, "bottom": int}``。
+    牌面**不在这里重发**（W6-07 / 评审 J9）：它已经在同一份载荷的 ``revealed`` 里，前端读
+    那一份；同一张列表序列化两次只会让"哪一份是真源"变含混。
 
     **fail-closed**（S2）：拿不到引擎（409 的裸 ``Query``）/ 技能归属 / 排列规格、``fixed``
-    的形状不完整、或声明张数与实际牌数对不上 ⇒ ``None``。前端据此画"排列不可用，请刷新"，
-    而不是从候选里猜一个规格。
+    的形状不完整或 ``top + bottom != count``、声明张数（**含可调用档**）与实际牌数对不上
+    ⇒ ``None``。前端据此画"排列不可用，请刷新"，而不是从候选里猜一个规格。
     """
     if engine is None or str(getattr(query, "kind", "")) != "ARRANGE":
         return None
@@ -934,28 +960,32 @@ def _arrange_spec(
         # 不是询问者（或裸 Query 且调用方没声明查看者）⇒ 没有牌面就没有可摆的排列面。
         return None
     frames = getattr(getattr(engine, "stack", None), "frames", ()) or ()
-    data = frames[-1].data if frames else {}
+    frame = frames[-1] if frames else None
+    data = frame.data if frame is not None else {}
     skill_id = _skill_of_query(engine, query, data)
     definition = _definition_of(engine.state, skill_id) if skill_id is not None else None
     spec = getattr(definition, "deck_arrange", None) if definition is not None else None
     if spec is None:
         return None
     count = len(revealed)
-    declared = getattr(spec, "count", None)
-    if isinstance(declared, int) and declared != count:
-        # 声明的是定数、实际发到的牌数不同 ⇒ 规格对不上，不拿它猜（可调用张数交给执行器）。
+    known, declared = _declared_arrange_count(getattr(spec, "count", None), engine.state, frame)
+    if not known or declared != count:
+        # 声明张数不可判定，或与实际发到的牌数不同 ⇒ 规格对不上，不拿它猜。
         return None
     split_spec = getattr(spec, "split", None)
     split: str | dict[str, int]
-    if split_spec == "free":  # = ``flow.FREE_SPLIT``；线上取值就是这一个字符串
-        split = "free"
+    if split_spec == FREE_SPLIT:
+        split = FREE_SPLIT
     else:
         top = getattr(split_spec, "top", None)
         bottom = getattr(split_spec, "bottom", None)
         if not isinstance(top, int) or not isinstance(bottom, int):
             return None
+        if top < 0 or bottom < 0 or top + bottom != count:
+            # 固定切分的两行必须恰好排完这几张牌（评审 J6）；声明与实际张数对不上就不下发。
+            return None
         split = {"top": top, "bottom": bottom}
-    return {"count": count, "split": split, "cards": revealed}
+    return {"count": count, "split": split}
 
 
 def pending_payload(
@@ -1022,6 +1052,7 @@ def pending_payload(
     # ``SkillDef.deck_arrange``（与 ``Arrange`` 步同一对象）。只有收 ``Session`` 才拿得到
     # 引擎；409 里附带的裸 ``Query`` ⇒ ``None``（fail-closed，前端画"排列不可用"）。
     # 与 ``context`` 同姿态：派生数据**不进记录流**，既有 Golden Replay 一行不改。
+    # W6-07：牌面**不在这里重发**——前端读同一份载荷的 ``revealed``（评审 J9）。
     payload["arrange"] = (
         _arrange_spec(session.engine, query, payload.get("revealed") or [])
         if isinstance(session, Session)

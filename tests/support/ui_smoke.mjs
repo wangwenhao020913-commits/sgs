@@ -92,10 +92,29 @@ const documentShim = {
 
 const calls = [];
 const realFetch = globalThis.fetch;
+/* 两个**一次性注入**（W6-07 的 409 用例）：让"服务端返回 409 + 刷新取回一份给不出规格的
+ * 现状"这条只在真实竞态里出现的路径，也能在烟测里被跑到。注入用完即清。 */
+let staleAnswerStatus = null;   // 下一次 `/answer` 直接回这个状态码（409）
+let nextGetPending = null;      // 下一次 `GET /api/sessions` 把 `pending` 换成这一份
 globalThis.fetch = async (path, options) => {
   if (typeof path === "string" && path.startsWith("/api/")) {
     calls.push({ path, body: options && options.body ? JSON.parse(options.body) : null });
-    return realFetch(`${BASE}${path}`, options);
+    if (staleAnswerStatus && path.includes("/answer")) {
+      const status = staleAnswerStatus;
+      staleAnswerStatus = null;
+      const text = JSON.stringify({ error: "这个询问已过期" });
+      return { ok: false, status, text: async () => text, json: async () => JSON.parse(text) };
+    }
+    const response = await realFetch(`${BASE}${path}`, options);
+    if (nextGetPending && !(options && options.method && options.method !== "GET")) {
+      const body = await response.json();
+      const pending = nextGetPending;
+      nextGetPending = null;
+      body.pending = pending;
+      const text = JSON.stringify(body);
+      return { ok: response.ok, status: response.status, text: async () => text, json: async () => JSON.parse(text) };
+    }
+    return response;
   }
   return realFetch(path, options);
 };
@@ -3455,7 +3474,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       label: null, skill_hints: [],
     },
     preactivations: {}, preactivation: [],
-    arrange: { count: 3, split: "free", cards: revealed },
+    arrange: { count: 3, split: "free" },
   };
   const arrangeView = synthView(arrangePending);
   const rowOf = (name) => $("t-options").children.find(
@@ -3487,6 +3506,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     ui.renderKind(arrangePending, arrangePending.legal_actions) === "arrange"
       && $("t-options").children.length === 2,
     `kind=${ui.renderKind(arrangePending, arrangePending.legal_actions)} 顶层子节点=${$("t-options").children.length}`);
+  check("㉿GX3a 牌面只由 `pending.revealed` 下发（规格里没有 cards 副本）",
+    !("cards" in arrangePending.arrange)
+      && JSON.stringify(ui.arrangeCards(arrangePending)) === JSON.stringify(revealed)
+      && ui.arrangeCards({ ...arrangePending, revealed: [] }) === null,
+    `spec=${JSON.stringify(arrangePending.arrange)}`);
   check("㉿GX3 上行 = 被观看的 3 张牌，顺序与 revealed 一致",
     JSON.stringify(cardIndexes(topRow)) === "[0,1,2]"
       && ["八卦阵", "闪", "雌雄双股剑"].every((name) => cardsBox(topRow).text().includes(name)),
@@ -3580,7 +3604,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const fixedPending = {
     ...arrangePending, seq: 78, revealed: fixedCards,
     legal_actions: [{ answers_seq: 78, kind: "ArrangeCards", order: [0, 1, 2, 3], split: 2 }],
-    arrange: { count: 4, split: { top: 2, bottom: 2 }, cards: fixedCards },
+    arrange: { count: 4, split: { top: 2, bottom: 2 } },
   };
   const fixedView = synthView(fixedPending);
   ui.state.view = fixedView;
@@ -3622,15 +3646,39 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   if (activateButton) clickNode(activateButton);
   await ui.submitAction();
   const realArrange = ui.state.view.pending;
-  check("㉿GX17 确认发动后 ARRANGE 询问带投影规格（count 4 / free / 4 张牌面）",
+  check("㉿GX17 确认发动后 ARRANGE 询问带投影规格（count 4 / free）与 4 张 revealed 牌面",
     !!realArrange && realArrange.kind === "ARRANGE"
       && !!realArrange.arrange
       && realArrange.arrange.count === 4
       && realArrange.arrange.split === "free"
-      && realArrange.arrange.cards.length === 4,
+      && !("cards" in realArrange.arrange)
+      && (realArrange.revealed || []).length === 4,
     `kind=${realArrange && realArrange.kind} arrange=${JSON.stringify(realArrange && realArrange.arrange && {
       count: realArrange.arrange.count, split: realArrange.arrange.split,
     })}`);
+  // 409 的 fail-closed 出口（W6-07 / 评审 SPEC-a 的 409 半边）：提交一条**陈旧的**排列
+  // ⇒ 服务端 409 ⇒ `submitAction` 不猜、改为 `refresh()` 重取当前询问；刷新回来的载荷若
+  // 仍给不出规格（真实 409 = 裸 `Query`，投影 `arrange: null`），界面必须落到
+  // 「排列不可用，请刷新」，而不是把陈旧那份画成可提交的面。
+  const beforeStale = calls.length;
+  staleAnswerStatus = 409;
+  nextGetPending = { ...realArrange, arrange: null };
+  await ui.submitAction();
+  if (ui.flushPlayback) ui.flushPlayback();
+  const staleCalls = calls.slice(beforeStale);
+  // 注：那句"这个询问已过期…已为你刷新"随后会被 `refreshSubmit` 的模式提示覆盖，故这里不
+  // 断言它（瞬态文案），只断言**行为**：先答一次、失败后只刷新、界面落到 fail-closed。
+  check("㉿GX19 409 ⇒ 不提交陈旧排列、改走 refresh()；刷新后无规格 ⇒ fail-closed",
+    staleCalls.some((call) => call.path.includes("/answer"))
+      && staleCalls.some((call) => !call.path.includes("/answer"))
+      && $("t-options").text().includes("排列不可用，请刷新")
+      && !rowOf("top") && !rowOf("bottom")
+      && $("btn-submit").disabled === true,
+    `calls=${staleCalls.map((call) => call.path).join(" | ")} options="${$("t-options").text()}"`
+      + ` disabled=${$("btn-submit").disabled} top=${!!rowOf("top")}`);
+  // 复原真询问，后面的成功提交（㉿GX18）照旧。
+  ui.state.view.pending = realArrange;
+  ui.resetSelection();
   ui.renderTable();
   ui.renderPending(ui.state.view);
   const realTop = rowOf("top");

@@ -57,7 +57,7 @@ from .flow import (
     DeckTopArrange,
     FlowAnswers,
     SkillFlow,
-    arranged_cards,
+    watched_cards,
 )
 
 __all__ = [
@@ -76,7 +76,7 @@ GUANXING_MAX = 5
 """观星的 X 封顶（规则 991 的"至多为 5"），是**技能的参数**、不是排列类型的字段。"""
 
 _CARDS_STEP = "cards"
-"""``Arrange`` 步的步骤键（效果读 ``answers`` 的键，也是 :func:`arranged_cards` 的定位）。"""
+"""``Arrange`` 步的步骤键（效果读 ``answers`` 的键，也是 :func:`watched_cards` 的定位）。"""
 
 _DONE_KEY = "guanxing_done"
 """放回完成的帧私有幂等位（旧 ``_DONE_KEY``）：``run_flow`` 重入时不得重复放回。"""
@@ -127,7 +127,7 @@ def _guanxing_effect(host: Any, frame: Frame, answers: FlowAnswers) -> None:
     """【观星】的流水线效果（W6-02）：按答案里的 ``ArrangeCards`` 把牌放回牌堆。
 
     答案形状 = ``ArrangeCards`` 本身（``order`` + ``split``）；面内位置 → 实体牌读
-    ``Arrange`` 步首跑时存下的牌面（:func:`arranged_cards`），不二次看牌（spec B3）。
+    ``Arrange`` 步首跑时存下的牌面（:func:`watched_cards`），不二次看牌（spec B3）。
 
     ``_DONE_KEY`` 短路与迁移前逐字同源：``run_flow`` 的续跑会重入 effect，置牌只做一次。
     """
@@ -137,7 +137,7 @@ def _guanxing_effect(host: Any, frame: Frame, answers: FlowAnswers) -> None:
     assert isinstance(action, ArrangeCards)  # 候选只有 ArrangeCards，成员判定已保证
     _apply_arrangement(
         host.state,
-        arranged_cards(frame, GUANXING_FLOW, _CARDS_STEP),
+        watched_cards(frame, GUANXING_FLOW, _CARDS_STEP),
         action.order,
         action.split,
     )

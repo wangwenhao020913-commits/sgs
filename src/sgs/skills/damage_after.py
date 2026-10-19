@@ -54,7 +54,7 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .catalog import MATCH_OWNER_KEY, HeroSkillDecl, Hook, SkillDef
-from .flow import FlowAnswers, PickCards, SkillFlow
+from .flow import FlowAnswers, PickCards, SkillFlow, zero_step_effect
 
 __all__ = [
     "DAMAGE_AFTER_SKILLS",
@@ -182,17 +182,7 @@ def _jianxiong(host: Any, frame: Any) -> None:
     )
 
 
-def _jianxiong_effect(host: Any, frame: Any, answers: FlowAnswers) -> None:
-    """【奸雄】的零步流水线效果（W6-01）：包住旧回调 :func:`_jianxiong`。
-
-    ``steps=()`` ⇒ ``answers`` 恒为空；执行路径与迁移前的 ``Hook(handler=...)`` 逐字等价
-    （是否发动仍由派发器先问一次）。
-    """
-    del answers
-    return _jianxiong(host, frame)
-
-
-JIANXIONG_FLOW = SkillFlow(name="jianxiong", steps=(), effect=_jianxiong_effect)
+JIANXIONG_FLOW = SkillFlow(name="jianxiong", steps=(), effect=zero_step_effect(_jianxiong))
 """【奸雄】的零步流水线（W6-01）：[是否发动] → 获得造成伤害的牌（无步骤）。
 
 与 :data:`FANKUI_FLOW` 同一形态：**模块级具名常量**，与 Hook 同住本模块

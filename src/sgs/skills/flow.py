@@ -77,7 +77,6 @@ __all__ = [
     "SeatPool",
     "SkillFlow",
     "activation_answers",
-    "arranged_cards",
     "ask_key_of",
     "card_pool_size",
     "card_preactivations",
@@ -87,6 +86,8 @@ __all__ = [
     "run_flow",
     "seat_choice",
     "validate_flow_activation",
+    "watched_cards",
+    "zero_step_effect",
     "zone_pool_size",
 ]
 
@@ -119,7 +120,7 @@ FlowAnswers = Mapping[str, object]
 - :class:`PickProvide` → ``tuple[CardRef, ...]``（**牌面**，因为虚拟 B 背后没有实体牌）；
 - :class:`PickOption` → ``str``（选中的选项文本，原样）；
 - :class:`Arrange` → :class:`~sgs.state.ArrangeCards` **行动本身**（``order`` + ``split``；
-  面内位置 → 实体牌的映射读 :func:`arranged_cards`，不重复塞进答案）。
+  面内位置 → 实体牌的映射读 :func:`watched_cards`，不重复塞进答案）。
 """
 
 SeatPool = Callable[[GameState, Any, int, tuple[int, ...]], tuple[int, ...]]
@@ -290,7 +291,12 @@ FREE_SPLIT: Literal["free"] = "free"
 
 @dataclass(frozen=True, slots=True)
 class FixedSplit:
-    """**固定切分**：``top`` 张置于牌堆顶、``bottom`` 张置于牌堆底（``DeckTopArrange.split``）。"""
+    """**固定切分**：``top`` 张置于牌堆顶、``bottom`` 张置于牌堆底（``DeckTopArrange.split``）。
+
+    两个半区都**有读取方**（W6-07 / 评审 J6）：``top`` 是候选生成的唯一合法切分点
+    （``_arrange`` 的置顶张数），``bottom`` 由 :meth:`DeckTopArrange.split_point` 与接入层
+    投影用来核对"两行恰好排完这几张牌"——它不是一个只写不读的字段。
+    """
 
     top: int
     bottom: int
@@ -321,15 +327,38 @@ class DeckTopArrange:
     count: ArrangeCount
     split: ArrangeSplit = FREE_SPLIT
 
+    def __post_init__(self) -> None:
+        """定数张数就在**声明期**核对固定切分拼得成一次排列（W6-07 / 评审 J6）。
+
+        ``FixedSplit(2, 2)`` 配 ``count = 5`` 是**写错了声明**，不是运行期状态：在构造期
+        炸掉，比等到某一帧的候选生成发现"切分点越界"更早、也更接近错误来源。可调用张数
+        在这里读不到（没有局面），交给 :meth:`split_point` 在实际张数已知时核对。
+        """
+        if isinstance(self.count, int):
+            self._check_fixed(self.count)
+
+    def _check_fixed(self, count: int) -> None:
+        """固定切分的两个半区必须**恰好**拼成 ``count``（否则是声明错误，不是规则状态）。"""
+        if self.split == FREE_SPLIT:
+            return
+        total = self.split.top + self.split.bottom
+        if total != count:
+            raise ValueError(
+                f"DeckTopArrange 的固定切分 top={self.split.top} + bottom={self.split.bottom}"
+                f" = {total} 与张数 {count} 不一致（声明写错了：两行必须恰好排完这几张牌）"
+            )
+
     def split_point(self, count: int) -> int | None:
         """候选生成用的置顶张数：``free`` ⇒ ``None``（全部切分），``fixed`` ⇒ ``top``。
 
-        ``fixed`` 只是"只铺这一个切分点"，不替声明校验 ``top + bottom == count``：
-        张数可能随局面变（观察者少 / 牌堆不足），那是声明与实际张数的语义问题，
-        要收口的是**候选面的形状**（spec S3）。
+        ``count`` 是**本次实际张数**（可调用档在这里才求值完）。``fixed`` 档只要
+        ``top + bottom != count`` 就抛 ``ValueError``：那是声明与实际张数对不上
+        （评审 J6），必须在候选生成**之前**可见 —— 不能拖到 ``_arrange`` 的越界检查才
+        成为第一个症状。``FixedSplit.bottom`` 在这里被读取，故它不是死字段。
         """
         if self.split == FREE_SPLIT:
             return None
+        self._check_fixed(count)
         return self.split.top
 
 
@@ -339,16 +368,24 @@ class Arrange:
 
     答案 = :class:`~sgs.state.ArrangeCards` **行动本身**（``order`` + ``split``），不是位置
     元组：排列是"顺序 + 切分"的一份决策，拆成牌 id 序列会丢掉切分点。位置 → 实体牌由
-    效果读 :func:`arranged_cards`（帧私有 peek 缓存）。
+    效果读 :func:`watched_cards`（帧私有 peek 缓存）。
 
-    ``key`` 是效果读答案的键（同一条流水线里唯一）。``actor`` 与其它步骤同义（``None`` =
-    发动者）；**它必须在场**：``manifest`` 的 ``_flow_actor`` 会读 ``step.actor``，而观星
-    每帧问"是否发动"时 ``preactivation_for`` 都会走到（spec B2）。``manifest`` 另有分支：
-    排列无法用 ``Step.pool`` 表达，含 ``Arrange`` 的流水线**不下发清单**（返回空元组）。
+    ``key`` 是效果读答案的键（同一条流水线里唯一）。``actor`` 与其它步骤**同义**
+    （``None`` = 发动者，``int`` = 该座位，可调用 = 由前序答案派生），读它的地方是
+    :func:`_flow_step_arrange` 的 ``_flow_actor`` —— 排列的应答者因此可以不是发动者，
+    与选牌 / 选座位步同一条通道（W6-07 评审 HARD 2 修的就是这半句旧说法）。
+
+    **它不进清单、也不进复合动作**：``manifest`` 对含 ``Arrange`` 的流水线**整条**返回空
+    元组（排列的候选是"全部排列 × 切分点"，``Step.pool`` 表达不了），且那个分支在
+    ``_flow_actor`` 之前就返回 —— 故"``manifest`` 会读 ``step.actor`` 所以字段必须在场"的
+    旧说法是错的；``_assign_activation`` 也在 ``Arrange`` 处 ``break``（复合动作的
+    ``picks`` / ``choices`` 装不下 ``ArrangeCards``）。两处都走不到本步，不是因为本步缺席。
 
     **重入**：``run_flow`` 挂起后从头重跑步骤，故这一步看的牌存在帧私有缓存里
-    （:data:`ARRANGE_CARDS_KEY`），第二次跑读缓存、不再调 ``Engine.peek_deck``；答案本身由
-    ``ask_arrange`` 的帧内缓存命中。两者的键都是**询问位置**，同帧多条流水线不串。
+    （:data:`ARRANGE_CARDS_KEY`，键 = ``(flow.name, 步骤序号)``），第二次跑读缓存、不再调
+    ``Engine.peek_deck``。答案则由 ``ask_arrange`` 的帧内缓存命中，**它的键不是询问位置**
+    —— 是 ``("arrange", actor, timing, 牌 id 元组)``（``Engine.ask_arrange``）。两者键形状
+    不同是既有事实，不要按"都是询问位置"去读。
     """
 
     key: str
@@ -867,15 +904,23 @@ ARRANGE_CARDS_KEY = "arrange_cards"
 故"看了哪些牌"必须在**第一次**跑时定格、重入读缓存（spec B3）。缓存按**询问位置**
 ``(flow.name, index)`` 分桶（与 ``ask_selection`` 的答案缓存同一口径），同一帧上跑两条
 流水线也不会串。它只活在帧里、不进记录流。
+
+**已知边界（W6-07 记录，不修）**：键里**没有**"第几次发动"。同一帧里同一条流水线发动
+**第二次**会命中第一次的缓存 —— 第二次拿到的仍是第一次看的牌。当前**没有消费者**会这样
+（观星一回合只走一个准备阶段、一帧一次排列），故 W6 不为此改键形状；将来若出现"同一帧
+二次排列"，键必须补上发动序号（届时同时要看 ``Engine.ask_arrange`` 的答案键，那个键含
+牌 id 元组，会随新牌自然分开）。
 """
 
 
-def arranged_cards(frame: Any, flow: SkillFlow, step_key: str) -> tuple[CardRef, ...]:
-    """``Arrange`` 步在本帧里观看的牌（帧私有 peek 缓存的**读取口**，W6-02）。
+def watched_cards(frame: Any, flow: SkillFlow, step_key: str) -> tuple[CardRef, ...]:
+    """``Arrange`` 步在本帧里**观看**的牌（帧私有 peek 缓存的读取口，W6-02）。
 
-    效果拿到的答案是 :class:`~sgs.state.ArrangeCards`（只有面内位置），位置 → 实体牌要读
-    这一步第一次跑时存下的牌面。``flow`` + ``step_key`` 定位缓存槽：步骤键在一条流水线里
-    两两不同（:meth:`SkillFlow.__post_init__`），故不必让调用方再拼询问位置。
+    名字取 ``GLOSSARY.md``「观看牌堆顶」的动词（W6-07 / 评审 J8）：这些牌是**看**到的、
+    还没被拿走，叫 ``arranged_cards`` 会让人以为它们已经排好。效果拿到的答案是
+    :class:`~sgs.state.ArrangeCards`（只有面内位置），位置 → 实体牌要读这一步第一次跑时
+    存下的牌面。``flow`` + ``step_key`` 定位缓存槽：步骤键在一条流水线里两两不同
+    （:meth:`SkillFlow.__post_init__`），故不必让调用方再拼询问位置。
     """
     for index, step in enumerate(flow.steps):
         if isinstance(step, Arrange) and step.key == step_key:
@@ -1720,3 +1765,24 @@ def run_flow(
     if on_commit is not None:
         on_commit()
     return flow.effect(host, frame, answers)
+
+
+def zero_step_effect(handler: Callable[[Any, Any], Any]) -> FlowEffect:
+    """把**零步技能**的旧回调包成 :data:`FlowEffect`（W6-07；评审 J3 的去重）。
+
+    零步技能（``steps=()``）的 effect 恒等于"丢掉空答案、原样转调旧回调"：W6-01 迁移时
+    七条（连营 / 枭姬 / 奸雄 / 天妒 / 英姿 / 闭月 / 铁骑）各抄了一份一模一样的
+    ``del answers; return handler(host, frame)`` 与同一句 docstring。形状只有这一种，
+    故收成一个工厂 —— 后来者加零步技能时不该再抄第八份。
+
+    ``handler`` 是**旧回调**（``(host, frame) -> Control``）：迁移只换执行路径，回调体
+    一字不改（各自帧内游标 / 幂等守卫都还在里面）。返回的闭包仍是
+    ``(host, frame, answers)``，由 :class:`SkillFlow` 的 ``effect`` 字段持有。
+    """
+
+    def effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+        """零步 ⇒ ``answers`` 恒为空：丢掉它，转调旧回调。"""
+        del answers
+        return handler(host, frame)
+
+    return effect

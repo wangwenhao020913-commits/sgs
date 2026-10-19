@@ -36,7 +36,7 @@ from sgs.state import GameState
 from sgs.timing import Timing
 
 from .catalog import HeroSkillDecl, Hook, HookHandler, SkillDef
-from .flow import FlowAnswers, SkillFlow
+from .flow import SkillFlow, zero_step_effect
 
 __all__ = ["RESPONSE_WINDOW_SKILLS", "TIEQI_FLOW", "response_window_skill_definitions"]
 
@@ -131,17 +131,7 @@ TIEQI = FrameTagSkill(
 """马超【铁骑】：非锁定技，判定为红 ⇒ 该目标不能使用【闪】响应此【杀】（规则 987）。"""
 
 
-def _tieqi_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
-    """【铁骑】的零步流水线效果（W6-01）：转调旧钩子回调 ``TIEQI.handler``。
-
-    ``steps=()`` ⇒ ``answers`` 恒为空；逐目标判定、帧内游标（``tieqi_cursor``）与
-    ``add_tag`` 都在旧回调里，一个字不动——这里只换执行路径。
-    """
-    del answers
-    return TIEQI.handler(host, frame)
-
-
-TIEQI_FLOW = SkillFlow(name="tieqi", steps=(), effect=_tieqi_effect)
+TIEQI_FLOW = SkillFlow(name="tieqi", steps=(), effect=zero_step_effect(TIEQI.handler))
 """【铁骑】的零步流水线（W6-01）：[是否发动] → 判定 + 逐目标打 ``UNRESPONSIVE``（无步骤）。
 
 必须是**模块级具名常量**：``tests/test_ask_points.py`` 只发现模块级 ``SkillFlow`` 实例，
