@@ -26,7 +26,7 @@ from sgs.data import (
     load_heroes,
 )
 from sgs.engine import DRAW_COUNT, Engine
-from sgs.skills import CATALOG
+from sgs.skills import CATALOG, flow_for
 from sgs.skills.catalog import MATCH_OWNER_KEY
 from sgs.skills.move_after import MOVE_EVENT_KEY, MoveEvent
 from sgs.state import EndPhase, GameState, MoveReason, Pass, Zone, ZoneRef
@@ -624,4 +624,37 @@ def test_every_conditional_hook_goes_false_when_the_owner_is_someone_else() -> N
         frame.data[MATCH_OWNER_KEY] = OTHER
         assert condition(host, frame) is False, (
             f"{skill_id}：持有者换成别人后条件仍成立 ⇒ 触发条件没自校持有者"
+        )
+
+
+# ---------------------------------------------------------------------------
+# W6-01：7 条零步技能登记成**模块级** ``SkillFlow``，且仍走旧候选路径
+# ---------------------------------------------------------------------------
+
+ZERO_STEP_SKILL_IDS = (
+    "hero.luxun.lianying",
+    "hero.sunshangxiang.xiaoji",
+    "hero.caocao.jianxiong",
+    "hero.guojia.tiandu",
+    "hero.zhouyu.yingzi",
+    "hero.diaochan.biyue",
+    "hero.machao.tieqi",
+)
+"""W6-01 的 7 条零步技能（spec §4.1）：连营 / 枭姬 / 奸雄 / 天妒 / 英姿 / 闭月 / 铁骑。"""
+
+
+def test_the_seven_zero_step_skills_are_registered_flows_with_no_steps():
+    """7 条零步技能：``flow_for`` 非空、``steps == ()``、``preactivated`` 仍 ``False``。
+
+    这条钉的是 W6-01 的**执行路径统一**判据（spec §7）：迁移只把 ``Hook(handler=…)``
+    换成 ``Hook(flow=…)``，不翻预发动开关（Q5=A）——界面 / 候选 / 记录流因此一行不改。
+    ``flow_for`` 读 :data:`~sgs.skills.preactivation.FLOWS`（由 ``CATALOG`` 的钩子派生），
+    故"非 ``None``"同时证明该流水线已被某条 ``Hook`` 登记（不是模块级死常量）。
+    """
+    for skill_id in ZERO_STEP_SKILL_IDS:
+        flow = flow_for(skill_id)
+        assert flow is not None, f"{skill_id} 没有登记流水线（W6-01 迁移漏了？）"
+        assert flow.steps == (), f"{skill_id} 是零步技能，流水线不该有步骤"
+        assert CATALOG[skill_id].preactivated is False, (
+            f"{skill_id} 只统一执行路径，不翻预发动（spec Q5=A）"
         )

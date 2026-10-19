@@ -62,6 +62,7 @@ __all__ = [
     "DAMAGE_RECORDED_KEY",
     "DamageAfterSkill",
     "FANKUI_FLOW",
+    "JIANXIONG_FLOW",
     "damage_after_skill_definitions",
     "damage_point_index",
     "fankui_step_key",
@@ -179,6 +180,24 @@ def _jianxiong(host: Any, frame: Any) -> None:
         owner=owner,
         actor=owner,
     )
+
+
+def _jianxiong_effect(host: Any, frame: Any, answers: FlowAnswers) -> None:
+    """【奸雄】的零步流水线效果（W6-01）：包住旧回调 :func:`_jianxiong`。
+
+    ``steps=()`` ⇒ ``answers`` 恒为空；执行路径与迁移前的 ``Hook(handler=...)`` 逐字等价
+    （是否发动仍由派发器先问一次）。
+    """
+    del answers
+    return _jianxiong(host, frame)
+
+
+JIANXIONG_FLOW = SkillFlow(name="jianxiong", steps=(), effect=_jianxiong_effect)
+"""【奸雄】的零步流水线（W6-01）：[是否发动] → 获得造成伤害的牌（无步骤）。
+
+与 :data:`FANKUI_FLOW` 同一形态：**模块级具名常量**，与 Hook 同住本模块
+（``tests/test_ask_points.py`` 只发现模块级 ``SkillFlow`` 实例）。
+"""
 
 
 def _fankui_condition(host: Any, frame: Any) -> bool:
@@ -429,7 +448,8 @@ YIJI_GIVEN_KEY = "yiji_given"
 
 DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
     # 曹操【奸雄】：你可以获得造成此伤害的牌（规则 972）——每次伤害事件一次。
-    DamageAfterSkill("caocao", "jianxiong", False, _jianxiong_condition, _jianxiong),
+    # W6-01：零步技能迁 ``run_flow``（模块级 ``JIANXIONG_FLOW``），行为与旧回调逐字等价。
+    DamageAfterSkill("caocao", "jianxiong", False, _jianxiong_condition, None, JIANXIONG_FLOW),
     # 司马懿【反馈】：你可以获得伤害来源的一张牌（规则 1014）——每次伤害事件一次。
     # 票 07：它是**被动技步骤流水线**（``SkillFlow``）的第一个消费者。
     DamageAfterSkill("simayi", "fankui", False, _fankui_condition, None, FANKUI_FLOW),

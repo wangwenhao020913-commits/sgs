@@ -52,12 +52,15 @@ from .catalog import (
     dispatch_timing,
     resolve_instances,
 )
+from .flow import FlowAnswers, SkillFlow
 
 __all__ = [
+    "LIANYING_FLOW",
     "MOVE_AFTER_SKILLS",
     "MOVE_EVENT_KEY",
     "MoveAfterSkill",
     "MoveEvent",
+    "XIAOJI_FLOW",
     "dispatch_move_after",
     "move_after_providers",
     "move_after_skill_definitions",
@@ -131,10 +134,16 @@ def dispatch_move_after(host: Any, frame: Any) -> None:
 
 @dataclass(frozen=True, slots=True)
 class MoveAfterSkill(HeroSkillDecl):
-    """D 族一条技能的**声明**：触发条件 + 摸牌数（票 07 §要做什么 6 一行）。"""
+    """D 族一条技能的**声明**：触发条件 + 摸牌数 + 执行路径（票 07 §要做什么 6 一行）。
+
+    ``flow``（W6-01）：零步技能的 ``SkillFlow``（``steps=()``），与
+    :class:`~sgs.skills.damage_after.DamageAfterSkill` 的字段同形；旧回调
+    :meth:`handle` 保留并由 flow 的 ``effect`` 原样转调。
+    """
 
     draws: int
     trigger: Any
+    flow: Any = None
 
     def fires(self, state: GameState, move: MoveEvent, owner: int | None) -> bool:
         """本次移动对这条技能（持有者 ``owner``）算不算"失去"（只看区域与**移动后**的持有）。"""
@@ -188,14 +197,51 @@ def _lost_equipment(state: GameState, move: MoveEvent, owner: int) -> bool:
     return move.from_zone.zone is Zone.EQUIP and move.from_zone.seat == owner
 
 
-MOVE_AFTER_SKILLS: tuple[MoveAfterSkill, ...] = (
+def _lianying_effect(host: Any, frame: Any, answers: FlowAnswers) -> None:
+    """【连营】的零步流水线效果（W6-01）：包住旧回调 :meth:`MoveAfterSkill.handle`。
+
+    ``steps=()`` ⇒ ``answers`` 恒为空；执行路径与迁移前的 ``Hook(handler=...)`` 逐字等价
+    （是否发动仍由派发器先问一次）。
+    """
+    del answers
+    return _LIANYING.handle(host, frame)
+
+
+def _xiaoji_effect(host: Any, frame: Any, answers: FlowAnswers) -> None:
+    """【枭姬】的零步流水线效果（W6-01）：同 :func:`_lianying_effect`。"""
+    del answers
+    return _XIAOJI.handle(host, frame)
+
+
+LIANYING_FLOW = SkillFlow(name="lianying", steps=(), effect=_lianying_effect)
+"""【连营】的零步流水线（W6-01）：[是否发动] → 摸一张牌（无步骤）。
+
+必须是**模块级具名常量**：``tests/test_ask_points.py`` 只发现模块级 ``SkillFlow`` 实例，
+并拒绝"注册了但不在模块里"的 flow（先例 :data:`~sgs.skills.damage_after.FANKUI_FLOW`）。
+"""
+
+XIAOJI_FLOW = SkillFlow(name="xiaoji", steps=(), effect=_xiaoji_effect)
+"""【枭姬】的零步流水线（W6-01）：[是否发动] → 摸两张牌（无步骤）。"""
+
+
+_LIANYING = MoveAfterSkill(
     # 陆逊【连营】：当你失去最后的手牌时，你可以摸一张牌（规则 1030）。
-    MoveAfterSkill(hero_id="luxun", short_id="lianying", draws=1, trigger=_emptied_hand),
-    # 孙尚香【枭姬】：当你失去装备区里的一张牌后，你可以摸两张牌（规则 1054）。
-    MoveAfterSkill(
-        hero_id="sunshangxiang", short_id="xiaoji", draws=2, trigger=_lost_equipment
-    ),
+    hero_id="luxun",
+    short_id="lianying",
+    draws=1,
+    trigger=_emptied_hand,
+    flow=LIANYING_FLOW,
 )
+_XIAOJI = MoveAfterSkill(
+    # 孙尚香【枭姬】：当你失去装备区里的一张牌后，你可以摸两张牌（规则 1054）。
+    hero_id="sunshangxiang",
+    short_id="xiaoji",
+    draws=2,
+    trigger=_lost_equipment,
+    flow=XIAOJI_FLOW,
+)
+
+MOVE_AFTER_SKILLS: tuple[MoveAfterSkill, ...] = (_LIANYING, _XIAOJI)
 """D 族两条技能的逐字声明（票 07 §要做什么 6 的表）。"""
 
 _REQUIREMENTS: dict[str, str] = {
@@ -217,7 +263,9 @@ def move_after_skill_definitions() -> tuple[SkillDef, ...]:
             locked=False,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
-            hooks=(Hook(Timing.MOVE_AFTER, skill.handle, skill.condition),),
+            hooks=(
+                Hook(Timing.MOVE_AFTER, condition=skill.condition, flow=skill.flow),
+            ),
             requirement=_REQUIREMENTS[skill.short_id],
         )
         for skill in MOVE_AFTER_SKILLS

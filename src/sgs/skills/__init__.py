@@ -120,6 +120,7 @@ from .active import (
 )
 from .flow import card_preactivations, manifest, validate_flow_activation
 from .preactivation import (
+    flow_for,
     preactivation_for,
     preactivated_skill_ids,
     preactivations_for,
@@ -289,6 +290,7 @@ __all__ = (
     "dispatch_seam",
     "dispatch_timing",
     "equipment_skill_ids",
+    "flow_for",
     "guanxing_handler",
     "instance_key",
     "is_equipped",

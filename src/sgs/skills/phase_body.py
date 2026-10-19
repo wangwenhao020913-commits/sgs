@@ -37,16 +37,28 @@ from sgs.state import GameState
 from sgs.timing import Timing
 
 from .catalog import ActivationPlan, HeroSkillDecl, Hook, SkillDef
+from .flow import FlowAnswers, SkillFlow
 
-__all__ = ["PHASE_BODY_SKILLS", "PhaseBodySkill", "phase_body_skill_definitions"]
+__all__ = [
+    "BIYUE_FLOW",
+    "PHASE_BODY_SKILLS",
+    "PhaseBodySkill",
+    "YINGZI_FLOW",
+    "phase_body_skill_definitions",
+]
 
 
 @dataclass(frozen=True, slots=True)
 class PhaseBodySkill(HeroSkillDecl):
-    """L 族一条技能的**声明**：阶段体时机 + 摸牌数（票 12 §落地表第 17/27 行）。"""
+    """L 族一条技能的**声明**：阶段体时机 + 摸牌数 + 执行路径。
+
+    ``flow``（W6-01）：零步技能的 ``SkillFlow``（``steps=()``）；旧回调
+    :meth:`handler` 保留，由 flow 的 ``effect`` 原样转调。
+    """
 
     timing: Timing
     draws: int
+    flow: Any = None
 
     def handler(self, host: Any, frame: Frame) -> Control:
         """阶段体钩子：是否发动已由派发器问过；这里把 ``draws`` 张摸进持有者手里。"""
@@ -54,12 +66,53 @@ class PhaseBodySkill(HeroSkillDecl):
         return None
 
 
-PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
+# W6-01：零步流水线。effect 是本模块的顶层函数（``FlowEffect``），只把旧回调
+# ``PhaseBodySkill.handler`` 包一层；声明在下方，**调用期**才解析（import 期不读）。
+def _yingzi_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
+    """【英姿】的零步流水线效果（W6-01）：转调旧回调 :meth:`PhaseBodySkill.handler`。
+
+    ``steps=()`` ⇒ ``answers`` 恒为空；执行路径与迁移前的 ``Hook(handler=...)`` 逐字等价
+    （是否发动仍由派发器先问一次）。
+    """
+    del answers
+    return _YINGZI.handler(host, frame)
+
+
+def _biyue_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
+    """【闭月】的零步流水线效果（W6-01）：同 :func:`_yingzi_effect`。"""
+    del answers
+    return _BIYUE.handler(host, frame)
+
+
+YINGZI_FLOW = SkillFlow(name="yingzi", steps=(), effect=_yingzi_effect)
+"""【英姿】的零步流水线（W6-01）：[是否发动] → 多摸一张牌（无步骤）。
+
+必须是**模块级具名常量**：``tests/test_ask_points.py`` 只发现模块级 ``SkillFlow`` 实例，
+并拒绝"注册了但不在模块里"的 flow（先例 :data:`~sgs.skills.damage_after.FANKUI_FLOW`）。
+"""
+
+BIYUE_FLOW = SkillFlow(name="biyue", steps=(), effect=_biyue_effect)
+"""【闭月】的零步流水线（W6-01）：[是否发动] → 摸一张牌（无步骤）。"""
+
+
+_YINGZI = PhaseBodySkill(
     # 周瑜【英姿】：摸牌阶段，你可以多摸一张牌（规则 1018）。
-    PhaseBodySkill(hero_id="zhouyu", short_id="yingzi", timing=Timing.PHASE_DRAW, draws=1),
-    # 貂蝉【闭月】：结束阶段（回合结束阶段）开始时，你可以摸一张牌（规则 1054）。
-    PhaseBodySkill(hero_id="diaochan", short_id="biyue", timing=Timing.PHASE_FINISH, draws=1),
+    hero_id="zhouyu",
+    short_id="yingzi",
+    timing=Timing.PHASE_DRAW,
+    draws=1,
+    flow=YINGZI_FLOW,
 )
+_BIYUE = PhaseBodySkill(
+    # 貂蝉【闭月】：结束阶段（回合结束阶段）开始时，你可以摸一张牌（规则 1054）。
+    hero_id="diaochan",
+    short_id="biyue",
+    timing=Timing.PHASE_FINISH,
+    draws=1,
+    flow=BIYUE_FLOW,
+)
+
+PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (_YINGZI, _BIYUE)
 """L 族两条技能的逐字声明（票 12 §落地表第 17/27 行）。"""
 
 _REQUIREMENTS: dict[str, str] = {
@@ -97,7 +150,7 @@ def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
             locked=False,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
-            hooks=(Hook(skill.timing, skill.handler),),
+            hooks=(Hook(skill.timing, flow=skill.flow),),
             requirement=_REQUIREMENTS[skill.short_id],
         )
         for skill in PHASE_BODY_SKILLS

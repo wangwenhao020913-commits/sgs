@@ -34,10 +34,12 @@ from sgs.state import GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
 from .catalog import ActivationPlan, Hook, SkillDef
+from .flow import FlowAnswers, SkillFlow
 
 __all__ = [
     "GUICAI",
     "TIANDU",
+    "TIANDU_FLOW",
     "rejudge_activation_plans",
     "rejudge_skill_definitions",
     "tiandu_handler",
@@ -86,6 +88,24 @@ def tiandu_handler(host: Any, frame: Frame) -> Control:
     )
 
 
+def _tiandu_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
+    """【天妒】的零步流水线效果（W6-01）：包住旧钩子回调 :func:`tiandu_handler`。
+
+    ``steps=()`` ⇒ ``answers`` 恒为空；执行路径与迁移前的 ``Hook(handler=...)`` 逐字等价
+    （是否发动仍由派发器先问一次）。旧回调保留原名 / 原导出（``sgs.skills.tiandu_handler``）。
+    """
+    del answers
+    return tiandu_handler(host, frame)
+
+
+TIANDU_FLOW = SkillFlow(name="tiandu", steps=(), effect=_tiandu_effect)
+"""【天妒】的零步流水线（W6-01）：[是否发动] → 获得此判定牌（无步骤）。
+
+必须是**模块级具名常量**：``tests/test_ask_points.py`` 只发现模块级 ``SkillFlow`` 实例，
+并拒绝"注册了但不在模块里"的 flow（先例 :data:`~sgs.skills.damage_after.FANKUI_FLOW`）。
+"""
+
+
 def rejudge_skill_definitions() -> tuple[SkillDef, ...]:
     """I 族两条技能的 :class:`~sgs.skills.catalog.SkillDef`。
 
@@ -107,7 +127,7 @@ def rejudge_skill_definitions() -> tuple[SkillDef, ...]:
             locked=False,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
-            hooks=(Hook(Timing.JUDGE_CARD_AFTER_EFFECT, tiandu_handler),),
+            hooks=(Hook(Timing.JUDGE_CARD_AFTER_EFFECT, flow=TIANDU_FLOW),),
             requirement="获得此判定牌",
         ),
     )
