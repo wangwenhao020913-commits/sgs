@@ -78,6 +78,7 @@ __all__ = [
     "ACTIVE_SKILLS",
     "CANDIDATE_CAP",
     "ActiveSkill",
+    "Arrange",
     "PickCards",
     "PickOption",
     "PickProvide",
@@ -290,6 +291,7 @@ def _push_damage(host: Any, frame: Any, *, source: int, target: int, amount: int
 
 from .flow import (  # noqa: F401  （重导出：既有 import 点与 __all__ 不变）
     ActorRef,
+    Arrange,
     FlowAnswers,
     FlowEffect,
     FlowStep,

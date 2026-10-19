@@ -18,26 +18,35 @@
 
 from __future__ import annotations
 
+from itertools import permutations
+
 import pytest
 
 from sgs.data import load_content_pack
 from sgs.engine import Engine
+from sgs.effects import legal_actions_for
 from sgs.skills import Hook, Seam, catalog as catalog_module
 from sgs.skills.active import ActiveSkill
 from sgs.skills.preactivation import _build_flows, preactivated_skill_ids
 from sgs.skills.damage_after import FANKUI_FLOW, fankui_step_key
 from sgs.skills.flow import (
+    Arrange,
+    DeckTopArrange,
+    FixedSplit,
     PickCards,
     PickProvide,
     PickSeats,
     SkillFlow,
     _flow_step_cards,
+    arranged_cards,
     manifest,
     run_flow,
     validate_flow_activation,
 )
 from sgs.state import (
     ActivateSkill,
+    ArrangeCards,
+    ArrangeContext,
     FrameKind,
     Pass,
     QueryKind,
@@ -1126,3 +1135,162 @@ def test_the_preactivation_registry_and_the_flipped_set_are_derived_from_declara
     assert preactivated_skill_ids(active=(declaration,), catalog={}) == frozenset(
         {"hero.demo.preactivated"}
     )
+
+
+# ---------------------------------------------------------------------------
+# ⑯ W6-02：``Arrange`` 步（排列不能用 pool 表达；固定切分在候选生成里收口）
+# ---------------------------------------------------------------------------
+
+
+def _noop_effect(host, frame, answers):
+    """三参的**效果**替身（``FlowEffect`` 的形状）；``_noop`` 是钩子回调的两参形状。"""
+    del host, frame, answers
+    return None
+
+
+def _arrange_flow(name: str, spec: DeckTopArrange) -> SkillFlow:
+    """一条只含排列步的 test-only 流水线（不是李典：``CATALOG`` 里没有这种技能）。"""
+    return SkillFlow(
+        name=name,
+        steps=(Arrange(key="cards", spec=spec),),
+        effect=_noop_effect,
+    )
+
+
+def test_manifest_returns_no_steps_when_the_flow_contains_an_arrange_step():
+    """含 ``Arrange`` 的流水线**整条**不下发清单：排列不是 ``Step.pool`` 能表达的形状。
+
+    观星每帧问"是否发动"时 ``preactivation_for`` 都会走到这条路径（spec B2），故这里钉住
+    "不炸"与"返回空元组"两件事：``Arrange`` 分支必须先于 ``_flow_actor``（后者会读
+    ``step.actor``）。``Arrange`` 排在普通步骤**之后**也一样返回空 —— 排列之后的步骤依赖
+    答案，不能把前缀清单单独下发。
+    """
+    card = _cards("slash")[0]
+    state = _manifest_state(hand=(card,))
+
+    assert manifest(
+        _arrange_flow("arrange_manifest_probe", DeckTopArrange(count=2)), state, 0
+    ) == ()
+
+    prefixed = SkillFlow(
+        name="arrange_manifest_prefix_probe",
+        steps=(
+            PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="card"),
+            Arrange(key="cards", spec=DeckTopArrange(count=2)),
+        ),
+        effect=_noop,
+    )
+    assert manifest(prefixed, state, 0) == ()
+
+
+def test_a_composite_activation_does_not_prefill_an_arrange_step():
+    """排列的答案是 ``ArrangeCards``（顺序 + 切分），不是 picks / choices ⇒ 不能预填。
+
+    空载荷不算"预填"（``_assign_activation`` 在 ``Arrange`` 处停下，执行器随后逐步问）；
+    多带一个 pick 就是"用复合动作夹带排列载荷"，必须判错。
+    """
+    card = _cards("slash")[0]
+    state = _manifest_state(hand=(card,))
+    flow = _arrange_flow("arrange_activation_probe", DeckTopArrange(count=2))
+
+    assert validate_flow_activation(flow, state, 0, (), ()) is None
+    assert validate_flow_activation(flow, state, 0, (card,), ()) == (
+        "复合动作里有多余的 picks（本技能的预发动清单没有用到）"
+    )
+
+
+def test_a_fixed_split_only_offers_the_declared_cut():
+    """``free`` = 全部切分点（票 10 行为不变）；``fixed`` = 只铺声明的那个（spec S3）。"""
+    state = _manifest_state(hand=(_cards("slash")[0],))
+
+    free = legal_actions_for(
+        state, 0, QueryKind.ARRANGE, answers_seq=7, payload=ArrangeContext(count=3)
+    )
+    assert {action.split for action in free} == {0, 1, 2, 3}
+    assert len(free) == 6 * 4
+
+    fixed = legal_actions_for(
+        state,
+        0,
+        QueryKind.ARRANGE,
+        answers_seq=7,
+        payload=ArrangeContext(count=4, split=2),
+    )
+    assert {action.split for action in fixed} == {2}, "fixed：只有声明的切分点"
+    assert {action.order for action in fixed} == set(permutations(range(4)))
+    assert len(fixed) == 24, "4! 个排列 × 唯一的切分点"
+    assert all(action.answers_seq == 7 for action in fixed)
+
+    with pytest.raises(ValueError):
+        legal_actions_for(
+            state,
+            0,
+            QueryKind.ARRANGE,
+            answers_seq=7,
+            payload=ArrangeContext(count=2, split=3),
+        )
+
+
+def test_a_synthetic_fixed_split_consumer_runs_the_arrange_step():
+    """**test-only** 合成消费者（固定 2 张顶 / 2 张底）证明 ``DeckTopArrange`` 可复用。
+
+    不是【李典】：这里不往 ``CATALOG`` 加任何技能定义，只在本用例里建一条流水线。钉四件事：
+    首跑 ``peek_deck`` 拿牌面、``ARRANGE`` 只铺声明的切分点、答案形状 = ``ArrangeCards``、
+    帧私有 peek 缓存把面内位置映射回实体牌（重入不重发询问）。
+    """
+    deck = _deck_excluding()
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=3)
+    frame = engine.push_frame(
+        FrameKind.USE, {"source": 0}, timing=Timing.RESOLVE_BEFORE_EFFECT
+    )
+    captured: dict[str, object] = {}
+
+    def effect(host, frame, answers):
+        captured.update(answers)
+        return None
+
+    flow = SkillFlow(
+        name="fixed_split_probe",
+        steps=(
+            Arrange(
+                key="cards",
+                spec=DeckTopArrange(count=4, split=FixedSplit(2, 2)),
+            ),
+        ),
+        effect=effect,
+    )
+
+    assert run_flow(engine, frame, flow, owner=0) == "stay"
+    query = engine.pending
+    assert query is not None and query.kind == "ARRANGE"
+    assert tuple(card.card_id for card in query.revealed) == deck[:4], "看牌堆顶 count 张"
+    assert {action.split for action in query.legal_actions} == {2}
+    assert len(query.legal_actions) == 24
+
+    engine.submit(
+        next(action for action in query.legal_actions if action.order == (3, 2, 1, 0))
+    )
+    assert run_flow(engine, frame, flow, owner=0) is None
+
+    answer = captured["cards"]
+    assert isinstance(answer, ArrangeCards), "答案形状 = ArrangeCards 本身（spec S12）"
+    assert (answer.order, answer.split) == ((3, 2, 1, 0), 2)
+    assert tuple(card.card_id for card in arranged_cards(frame, flow, "cards")) == deck[:4], (
+        "位置 → 实体牌读帧私有 peek 缓存"
+    )
+    assert (
+        len(
+            [
+                record
+                for record in engine.records
+                if record.kind == "query" and record.query.kind == "ARRANGE"
+            ]
+        )
+        == 1
+    ), "重入命中 ask_arrange 的帧内缓存，不重发询问"

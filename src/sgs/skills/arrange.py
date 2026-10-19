@@ -1,4 +1,4 @@
-r"""G 族：授予可见性与排列（票 10）。
+r"""G 族：授予可见性与排列（票 10；W6-02 迁步骤流水线）。
 
 一件今天完全不存在的能力：**把牌堆顶的牌面授予某一次询问**。`04`（§2「信息可见性」）明写
 "牌堆顺序仅引擎（技能'观看牌堆顶'按效果逐张授予）"，而授予通道一直只有 ``PlayerView.deck_count``
@@ -25,6 +25,20 @@ r"""G 族：授予可见性与排列（票 10）。
 
 牌面只出现在那次 ``ARRANGE`` 询问的 ``revealed`` 里；排列本身在记录流里只以
 ``ArrangeCards`` 的**面内位置**出现，不另发带牌面的 delta（票 10 §验收 2 / 用户故事 47）。
+
+**W6-02 的执行形状**（纯重构，记录流逐字节不变）：
+
+- 可复用的**牌堆顶排列**规格 :class:`~sgs.skills.flow.DeckTopArrange` 住 ``flow`` 模块；
+  观星声明 :data:`GUANXING_ARRANGE`（X = min(存活数, 5)、自由切分），**同一个对象**既被
+  :data:`GUANXING_FLOW` 的 ``Arrange`` 步引用、也被 ``SkillDef.deck_arrange`` 引用
+  （一份声明，票 03 的投影读后者）。
+- 看牌 / 排列 / 放回从手写回调改成一条**模块级**流水线：``Arrange`` 步看牌并问排列，
+  effect 只负责放回（旧 :func:`_apply_arrangement`）。
+- **看的牌必须只由首跑定格**（spec B3）：``run_flow`` 在挂起后从头重跑步骤，而
+  ``Engine.peek_deck`` 在牌堆不够时会重洗并落一条 ``deck_shuffle``。缓存由 ``Arrange``
+  步自己维护（``flow.ARRANGE_CARDS_KEY``，帧私有、不进记录流），重入读缓存。
+- 放回用 ``guanxing_done`` 守卫（旧 ``_DONE_KEY``）：effect 可能随 ``run_flow`` 重入，
+  置牌只能发生一次。
 """
 
 from __future__ import annotations
@@ -33,28 +47,39 @@ from typing import Any
 
 from sgs.data import SkillType, hero_skill_id
 from sgs.effects import CarrierKind, place_on_deck
-from sgs.resolution import Control, Frame
+from sgs.resolution import Frame
 from sgs.state import ArrangeCards, CardRef, GameState, alive_seats
 from sgs.timing import Timing
 
 from .catalog import ActivationPlan, Hook, SkillDef
+from .flow import (
+    Arrange,
+    DeckTopArrange,
+    FlowAnswers,
+    SkillFlow,
+    arranged_cards,
+)
 
 __all__ = [
     "GUANXING",
+    "GUANXING_ARRANGE",
+    "GUANXING_FLOW",
     "GUANXING_MAX",
     "arrange_activation_plans",
     "arrange_skill_definitions",
-    "guanxing_handler",
 ]
 
 GUANXING = hero_skill_id("zhugeliang", "guanxing")
 """诸葛亮【观星】的全限定技能 id（前缀派生走 :func:`sgs.data.hero_skill_id`）。"""
 
 GUANXING_MAX = 5
-"""观星的 X 封顶（规则 991 的"至多为 5"）。"""
+"""观星的 X 封顶（规则 991 的"至多为 5"），是**技能的参数**、不是排列类型的字段。"""
 
-_CARDS_KEY = "guanxing_cards"
+_CARDS_STEP = "cards"
+"""``Arrange`` 步的步骤键（效果读 ``answers`` 的键，也是 :func:`arranged_cards` 的定位）。"""
+
 _DONE_KEY = "guanxing_done"
+"""放回完成的帧私有幂等位（旧 ``_DONE_KEY``）：``run_flow`` 重入时不得重复放回。"""
 
 
 def _guanxing_plan(state: GameState, frame: Frame, instance: Any) -> ActivationPlan:
@@ -74,6 +99,20 @@ def arrange_activation_plans() -> dict[str, Any]:
     return {GUANXING: _guanxing_plan}
 
 
+def _guanxing_count(state: GameState, frame: Frame) -> int:
+    """观星的 X = ``min(存活角色数, 5)``（规则 991）。``frame`` 只是规格的统一签名，不用。"""
+    del frame
+    return min(len(alive_seats(state)), GUANXING_MAX)
+
+
+GUANXING_ARRANGE = DeckTopArrange(count=_guanxing_count)
+"""观星的牌堆顶排列规格（W6-02）：X = min(存活数, 5)、**自由切分**。
+
+同一个对象同时被 :data:`GUANXING_FLOW` 的 ``Arrange`` 步与
+``SkillDef.deck_arrange`` 引用——执行器与接入层读的是**同一份声明**，不复制。
+"""
+
+
 def _apply_arrangement(
     state: GameState, cards: tuple[CardRef, ...], order: tuple[int, ...], split: int
 ) -> None:
@@ -84,39 +123,47 @@ def _apply_arrangement(
     place_on_deck(state, bottom, to_top=False)
 
 
-def guanxing_handler(host: Any, frame: Frame) -> Control:
-    """【观星】的钩子回调：是否发动已由派发器问过；这里看牌堆顶 X 张、请其排列、放回。
+def _guanxing_effect(host: Any, frame: Frame, answers: FlowAnswers) -> None:
+    """【观星】的流水线效果（W6-02）：按答案里的 ``ArrangeCards`` 把牌放回牌堆。
 
-    ``_dispatch`` 的帧内答案缓存让"钩子重入"不会重看、重问、重放；``_DONE_KEY`` 是
-    放回后的短路，避免同一帧里二次进入。
+    答案形状 = ``ArrangeCards`` 本身（``order`` + ``split``）；面内位置 → 实体牌读
+    ``Arrange`` 步首跑时存下的牌面（:func:`arranged_cards`），不二次看牌（spec B3）。
+
+    ``_DONE_KEY`` 短路与迁移前逐字同源：``run_flow`` 的续跑会重入 effect，置牌只做一次。
     """
     if frame.data.get(_DONE_KEY):
         return None
-    state = host.state
-    seat = frame.data["skill_owner"]
-    cards = frame.data.get(_CARDS_KEY)
-    if cards is None:
-        count = min(len(alive_seats(state)), GUANXING_MAX)
-        cards = host.peek_deck(frame, count)
-        frame.data[_CARDS_KEY] = cards
-    if not cards:
-        # 两堆皆空的短观看：没有可排列的牌，这次发动无事发生（终局判定由摸牌路径负责）。
-        frame.data[_DONE_KEY] = True
-        return None
-    action = host.ask_arrange(frame, seat, Timing.PHASE_PREPARE, cards=cards)
-    if host.suspended(action):
-        return "stay"
+    action = answers[_CARDS_STEP]
     assert isinstance(action, ArrangeCards)  # 候选只有 ArrangeCards，成员判定已保证
-    _apply_arrangement(state, cards, action.order, action.split)
+    _apply_arrangement(
+        host.state,
+        arranged_cards(frame, GUANXING_FLOW, _CARDS_STEP),
+        action.order,
+        action.split,
+    )
     frame.data[_DONE_KEY] = True
     return None
+
+
+GUANXING_FLOW = SkillFlow(
+    name="guanxing",
+    steps=(Arrange(key=_CARDS_STEP, spec=GUANXING_ARRANGE),),
+    effect=_guanxing_effect,
+)
+"""【观星】的一步流水线（W6-02）：排列（自由切分）→ 按答案放回牌堆顶 / 牌堆底。
+
+**模块级具名常量**：``tests/test_ask_points.py`` 只发现模块级 ``SkillFlow``，并要求它被
+某个 ``Hook.flow`` 登记、``name`` 两两不同。唯一的步骤是 :class:`Arrange` ⇒
+``manifest`` 对这条流水线返回空元组（排列无法用 ``Step.pool`` 表达），故观星不翻预发动。
+"""
 
 
 def arrange_skill_definitions() -> tuple[SkillDef, ...]:
     """G 族的技能定义（本票只有【观星】一条；【遗计】归票 05 并复用同一通道）。
 
     非锁定（技能面写了"你可以"）、``carrier = HERO``（优先级档由载体派生）、
-    ``skill_type = NORMAL``（不是主公技）。
+    ``skill_type = NORMAL``（不是主公技）。``deck_arrange`` 与流水线里的 ``Arrange`` 步
+    引用**同一个** :data:`GUANXING_ARRANGE` 对象（票 03 的投影读它）。
     """
     return (
         SkillDef(
@@ -124,7 +171,8 @@ def arrange_skill_definitions() -> tuple[SkillDef, ...]:
             locked=False,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
-            hooks=(Hook(Timing.PHASE_PREPARE, guanxing_handler),),
+            hooks=(Hook(Timing.PHASE_PREPARE, flow=GUANXING_FLOW),),
+            deck_arrange=GUANXING_ARRANGE,
             requirement="观看牌堆顶若干张牌，以任意顺序放回牌堆顶 / 牌堆底",
         ),
     )

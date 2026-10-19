@@ -33,7 +33,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from itertools import product
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from sgs.effects import (
     CandidateScope,
@@ -42,7 +42,9 @@ from sgs.effects import (
     apply_modifiers,
     locate,
 )
+from sgs.resolution import Frame
 from sgs.state import (
+    CardRef,
     GameState,
     Pass,
     SelectionSpec,
@@ -57,10 +59,14 @@ from sgs.state import (
 from sgs.timing import Timing
 
 __all__ = [
+    "FREE_SPLIT",
     "MANIFEST_POOL_LIMIT",
     "SEAT_PREFIX",
     "ActorRef",
+    "Arrange",
     "AskIdentity",
+    "DeckTopArrange",
+    "FixedSplit",
     "FlowAnswers",
     "FlowEffect",
     "FlowStep",
@@ -71,6 +77,7 @@ __all__ = [
     "SeatPool",
     "SkillFlow",
     "activation_answers",
+    "arranged_cards",
     "ask_key_of",
     "card_pool_size",
     "card_preactivations",
@@ -110,7 +117,9 @@ FlowAnswers = Mapping[str, object]
 
 - :class:`PickCards` / :class:`PickSeats` → ``tuple[int, ...]``（实体牌 id / 座位号）；
 - :class:`PickProvide` → ``tuple[CardRef, ...]``（**牌面**，因为虚拟 B 背后没有实体牌）；
-- :class:`PickOption` → ``str``（选中的选项文本，原样）。
+- :class:`PickOption` → ``str``（选中的选项文本，原样）；
+- :class:`Arrange` → :class:`~sgs.state.ArrangeCards` **行动本身**（``order`` + ``split``；
+  面内位置 → 实体牌的映射读 :func:`arranged_cards`，不重复塞进答案）。
 """
 
 SeatPool = Callable[[GameState, Any, int, tuple[int, ...]], tuple[int, ...]]
@@ -273,7 +282,82 @@ class PickOption:
     key: str = "option"
 
 
-FlowStep = PickCards | PickSeats | PickOption | PickProvide
+ArrangeCount = int | Callable[[GameState, Frame], int]
+"""牌堆顶排列的张数：定数，或 ``(state, frame) -> int``（观星 = ``min(存活数, 5)``）。"""
+
+FREE_SPLIT: Literal["free"] = "free"
+"""**自由切分**（``DeckTopArrange.split`` 的缺省档）：置顶张数由玩家在 ``0..count`` 里选。"""
+
+
+@dataclass(frozen=True, slots=True)
+class FixedSplit:
+    """**固定切分**：``top`` 张置于牌堆顶、``bottom`` 张置于牌堆底（``DeckTopArrange.split``）。"""
+
+    top: int
+    bottom: int
+
+
+ArrangeSplit = Literal["free"] | FixedSplit
+"""``DeckTopArrange.split`` 的两档：:data:`FREE_SPLIT` 或 :class:`FixedSplit`。"""
+
+
+@dataclass(frozen=True, slots=True)
+class DeckTopArrange:
+    """**牌堆顶排列**的可复用规格（W6-02；观星是第一个消费者）。
+
+    只声明两件事（`GLOSSARY.md`「牌堆顶排列」）：
+
+    - ``count``：本次排列几张（``int`` 或 ``(state, frame) -> int``）。
+    - ``split``：切分方式 —— :data:`FREE_SPLIT`（全部切分点都合法，观星）或
+      :class:`FixedSplit`（只合法一个切分点，候选生成按它收口）。
+
+    **同一个对象**同时被 ``Arrange`` 步与 ``SkillDef.deck_arrange`` 引用（一份声明，不是
+    两份拷贝）：执行器读它求张数 / 切分，接入层读后者做投影。它**不进记录流**——记录流里
+    只有 ``ARRANGE`` 询问与 ``ArrangeCards`` 答案，故既有基准不受影响。
+
+    没有 ``destination`` 字段：本期只有牌堆顶 / 牌堆底两个去处，没有读取方的配置不落
+    （设计纪律；spec S3）。
+    """
+
+    count: ArrangeCount
+    split: ArrangeSplit = FREE_SPLIT
+
+    def split_point(self, count: int) -> int | None:
+        """候选生成用的置顶张数：``free`` ⇒ ``None``（全部切分），``fixed`` ⇒ ``top``。
+
+        ``fixed`` 只是"只铺这一个切分点"，不替声明校验 ``top + bottom == count``：
+        张数可能随局面变（观察者少 / 牌堆不足），那是声明与实际张数的语义问题，
+        要收口的是**候选面的形状**（spec S3）。
+        """
+        if self.split == FREE_SPLIT:
+            return None
+        return self.split.top
+
+
+@dataclass(frozen=True, slots=True)
+class Arrange:
+    """排列步骤（W6-02）：看牌堆顶 ``spec.count`` 张，问一次 ``ARRANGE``，答案原样进 ``answers``。
+
+    答案 = :class:`~sgs.state.ArrangeCards` **行动本身**（``order`` + ``split``），不是位置
+    元组：排列是"顺序 + 切分"的一份决策，拆成牌 id 序列会丢掉切分点。位置 → 实体牌由
+    效果读 :func:`arranged_cards`（帧私有 peek 缓存）。
+
+    ``key`` 是效果读答案的键（同一条流水线里唯一）。``actor`` 与其它步骤同义（``None`` =
+    发动者）；**它必须在场**：``manifest`` 的 ``_flow_actor`` 会读 ``step.actor``，而观星
+    每帧问"是否发动"时 ``preactivation_for`` 都会走到（spec B2）。``manifest`` 另有分支：
+    排列无法用 ``Step.pool`` 表达，含 ``Arrange`` 的流水线**不下发清单**（返回空元组）。
+
+    **重入**：``run_flow`` 挂起后从头重跑步骤，故这一步看的牌存在帧私有缓存里
+    （:data:`ARRANGE_CARDS_KEY`），第二次跑读缓存、不再调 ``Engine.peek_deck``；答案本身由
+    ``ask_arrange`` 的帧内缓存命中。两者的键都是**询问位置**，同帧多条流水线不串。
+    """
+
+    key: str
+    spec: DeckTopArrange
+    actor: ActorRef = None
+
+
+FlowStep = PickCards | PickSeats | PickOption | PickProvide | Arrange
 
 
 @dataclass(frozen=True, slots=True)
@@ -773,6 +857,70 @@ def _flow_step_option(
     return "ok", answer.choice
 
 
+ARRANGE_CARDS_KEY = "arrange_cards"
+"""``Arrange`` 步的**帧私有 peek 缓存**键（W6-02）：``{(flow 名, 步骤序号): tuple[CardRef, ...]}``。
+
+``run_flow`` 挂起后的续跑会从第一步重跑，而"看牌堆顶"（``Engine.peek_deck``）在牌堆不够时
+会**重洗**并落一条 ``deck_shuffle`` delta（``effects/primitives.py`` / ``Engine.peek_deck``）——
+故"看了哪些牌"必须在**第一次**跑时定格、重入读缓存（spec B3）。缓存按**询问位置**
+``(flow.name, index)`` 分桶（与 ``ask_selection`` 的答案缓存同一口径），同一帧上跑两条
+流水线也不会串。它只活在帧里、不进记录流。
+"""
+
+
+def arranged_cards(frame: Any, flow: SkillFlow, step_key: str) -> tuple[CardRef, ...]:
+    """``Arrange`` 步在本帧里观看的牌（帧私有 peek 缓存的**读取口**，W6-02）。
+
+    效果拿到的答案是 :class:`~sgs.state.ArrangeCards`（只有面内位置），位置 → 实体牌要读
+    这一步第一次跑时存下的牌面。``flow`` + ``step_key`` 定位缓存槽：步骤键在一条流水线里
+    两两不同（:meth:`SkillFlow.__post_init__`），故不必让调用方再拼询问位置。
+    """
+    for index, step in enumerate(flow.steps):
+        if isinstance(step, Arrange) and step.key == step_key:
+            return frame.data[ARRANGE_CARDS_KEY][(flow.name, index)]
+    raise KeyError(f"{flow.name!r} 里没有 key={step_key!r} 的 Arrange 步")
+
+
+def _flow_step_arrange(
+    host: Any,
+    frame: Any,
+    step: Arrange,
+    owner: int,
+    answers: FlowAnswers,
+    timing: Timing,
+    ask_owner: Any,
+) -> tuple[str, object]:
+    """跑一步排列：看牌（**首跑**）→ ``ARRANGE`` 询问 → ``ArrangeCards`` 原样回传。
+
+    看牌走 :meth:`Engine.peek_deck`（授予可见性，不搬牌）；重入时读帧私有缓存
+    （:data:`ARRANGE_CARDS_KEY`），故重洗副作用与 ``deck_shuffle`` delta **只发生一次**。
+
+    两堆皆空 ⇒ ``"cancel"``：不发零张的排列询问、``effect`` 不跑（迁移前
+    ``arrange.guanxing_handler`` 的空牌短路）。切分固定时由 ``spec.split_point`` 给出唯一
+    合法的置顶张数，候选生成据此收口（``effects/actions.py::_arrange``）。
+    """
+    actor = _flow_actor(step, host.state, frame, owner, answers)
+    cache = frame.data.setdefault(ARRANGE_CARDS_KEY, {})
+    if ask_owner not in cache:
+        count = step.spec.count
+        if callable(count):
+            count = count(host.state, frame)
+        cache[ask_owner] = host.peek_deck(frame, int(count))
+    cards: tuple[CardRef, ...] = cache[ask_owner]
+    if not cards:
+        return "cancel", None
+    action = host.ask_arrange(
+        frame,
+        actor,
+        timing,
+        cards=cards,
+        split=step.spec.split_point(len(cards)),
+    )
+    if host.suspended(action):
+        return "stay", None
+    return "ok", action
+
+
 _FLOW_STEP_RUNNERS: MappingProxyType[type, Callable[..., tuple[str, object]]] = (
     MappingProxyType(
         {
@@ -780,6 +928,7 @@ _FLOW_STEP_RUNNERS: MappingProxyType[type, Callable[..., tuple[str, object]]] = 
             PickSeats: _flow_step_seats,
             PickOption: _flow_step_option,
             PickProvide: _flow_step_provide,
+            Arrange: _flow_step_arrange,
         }
     )
 )
@@ -1103,7 +1252,9 @@ def manifest(
     按技能显式收窄，而不是让清单按 2ⁿ 行下发。
 
     返回空元组 = 这条技能此刻没有可用的预发动清单（没有 flow / 首步无候选 /
-    选取面不可见 / 由别人应答）。
+    选取面不可见 / 由别人应答 / **含** :class:`Arrange` 步）。最后一档是 W6-02 的裁定：
+    排列的候选是"全部排列 × 切分点"，``Step.pool`` 表达不了，故整条不下发——
+    排列技能因此不进预发动（观星 ``preactivated is False``）。
 
     ``step_requirements``（W4-fix-3）：技能声明上的**分步文案**（:attr:`Step.wording` 的
     来源）。本函数不 import 声明表（``flow`` 反向只依赖低层模块），故由调用方
@@ -1135,6 +1286,12 @@ def manifest(
         }
 
     for index, step in enumerate(flow.steps):
+        if isinstance(step, Arrange):
+            # 排列无法用 ``Step.pool`` 表达（候选 = 全部排列 × 切分点，不是可选池），
+            # 故含 ``Arrange`` 的流水线**整条不下发清单**：观星因此不翻预发动。
+            # 必须先于 ``_flow_actor`` 分支：本步若继续往下走，后面的 if 级联没有它的
+            # 分支，会把"没渲染"当成"这一步没有清单"悄悄放过（spec B2）。
+            return ()
         answers = probe_answers()
         if _flow_actor(step, state, _with_answers(base, answers), owner, answers) != owner:
             break
@@ -1309,14 +1466,18 @@ def _assign_activation(
 
     唯一的拆分规则（清单与校验器共用）：``picks`` 按顺序喂给选牌 / 提供步，
     ``choices`` 按顺序喂给选座位 / 选项步；遇到第一步的 ``actor`` 不是 ``owner`` 就停
-    （后续是换应答者的第二段，由引擎逐步问）。多余的载荷一律判错——否则复合动作会成为
-    绕过步骤声明的夹带通道。
+    （后续是换应答者的第二段，由引擎逐步问）。``Arrange`` 步**不能由复合动作预填**
+    （答案是 ``ArrangeCards``，不是 picks / choices）——也停在这里；含 ``Arrange`` 的
+    流水线不下发清单（:func:`manifest` 返回 ``()``），故正常路径走不到它。
+    多余的载荷一律判错——否则复合动作会成为绕过步骤声明的夹带通道。
     """
     base = frame if frame is not None else _ActivationFrame()
     answers: dict[str, object] = {}
     pick_index = 0
     choice_index = 0
     for index, step in enumerate(flow.steps):
+        if isinstance(step, Arrange):
+            break
         framed = _with_answers(base, answers)
         actor = _flow_actor(step, state, framed, owner, answers)
         if actor != owner:

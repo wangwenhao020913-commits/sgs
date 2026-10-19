@@ -439,3 +439,67 @@ def test_the_default_random_participant_can_answer_the_arrangement_query():
         for record in engine.records
     ), "默认随机玩家答下了一次排列询问，对局继续"
 
+
+# ---------------------------------------------------------------------------
+# ⑦ W6-02：观星迁模块级 SkillFlow（一份 DeckTopArrange 声明；peek 只一次）
+# ---------------------------------------------------------------------------
+
+
+def test_the_peek_deck_happens_once_across_the_arrange_suspension(monkeypatch):
+    """spec B3：``run_flow`` 挂起后从头重跑，但看的牌由**首跑**定格（帧私有缓存）。
+
+    ``Engine.peek_deck`` 在牌堆不够时会重洗并落一条 ``deck_shuffle``；naive 的"重入再
+    peek 一次"会把那次副作用做两遍。这里直接数调用次数：一次观星只 peek 一次。
+    """
+    engine = _prepare_engine(hero=ZHUGELIANG, seats=2)
+    player = GuanxingPlayer(order=(1, 0), split=1)
+    calls: list[int] = []
+    original = Engine.peek_deck
+
+    def counting(self, frame, n):
+        calls.append(n)
+        return original(self, frame, n)
+
+    monkeypatch.setattr(Engine, "peek_deck", counting)
+    _run_guanxing(engine, player, seats=2)
+
+    assert calls == [2], "X = min(存活数, 5) = 2；重入读缓存、不再 peek"
+
+
+def test_guanxing_is_a_registered_module_level_flow_with_one_shared_arrange_spec():
+    """W6-02：观星 = **模块级** ``GUANXING_FLOW``（一步 ``Arrange``）＋ ``SkillDef.deck_arrange``。
+
+    两处引用**同一个** ``DeckTopArrange`` 对象（一份声明，票 03 的投影读后者）；
+    ``preactivated`` 仍 ``False``，且 ``manifest`` / ``preactivation_for`` 对含 ``Arrange``
+    的流**不炸、返回空清单**（spec B2）——观星每帧问"是否发动"时都会走到。
+    """
+    from sgs.skills import Arrange as PackageArrange
+    from sgs.skills import CATALOG, flow_for
+    from sgs.skills.active import Arrange as ActiveArrange
+    from sgs.skills.arrange import GUANXING_ARRANGE, GUANXING_FLOW
+    from sgs.skills.flow import FREE_SPLIT, Arrange, DeckTopArrange, manifest
+    from sgs.skills.preactivation import preactivation_for
+
+    definition = CATALOG[GUANXING]
+    flow = flow_for(GUANXING, Timing.PHASE_PREPARE)
+
+    assert flow is GUANXING_FLOW, "模块级具名常量 + Hook 登记（test_ask_points 的机械闸）"
+    assert isinstance(GUANXING_ARRANGE, DeckTopArrange)
+    assert GUANXING_ARRANGE.split == FREE_SPLIT, "观星是自由切分"
+    assert len(flow.steps) == 1 and isinstance(flow.steps[0], Arrange)
+    assert flow.steps[0].spec is GUANXING_ARRANGE, "步与 SkillDef 一份声明，不是两份拷贝"
+    assert definition.deck_arrange is GUANXING_ARRANGE
+    assert definition.preactivated is False, "观星不翻预发动（manifest 表达不了排列）"
+    assert definition.hooks[0].flow is GUANXING_FLOW
+    assert definition.hooks[0].handler is None
+
+    # S12：新步骤类型要同步 active 与包入口的重导出（同一个对象，不另建名字）。
+    assert ActiveArrange is Arrange
+    assert PackageArrange is Arrange
+
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()])
+    assert callable(GUANXING_ARRANGE.count)
+    assert GUANXING_ARRANGE.count(state, None) == 2, "X = min(存活数, 5)；规格不读帧"
+    assert manifest(GUANXING_FLOW, state, 0) == ()
+    assert preactivation_for(state, 0, GUANXING, timing=Timing.PHASE_PREPARE) == ()
+

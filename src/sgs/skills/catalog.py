@@ -60,6 +60,7 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .flow import (
+    DeckTopArrange,
     FlowAnswers,
     PickCards,
     PickProvide,
@@ -221,6 +222,14 @@ class SkillDef:
     可用性只由 ``PlayPhaseQuery.preactivations`` 表达；被动入口的清单随
     ``SkillActivationContext.preactivation`` 下发。清单一律由该技能的 ``SkillFlow.steps``
     渲染，本字段只是"哪条技能已经翻过去"的开关。本票只落机制，逐条技能由 W4-2 / W4-3 翻。
+    """
+
+    deck_arrange: DeckTopArrange | None = None
+    """这条技能的**牌堆顶排列规格**（W6-02；观星是第一个消费者），没有排列时为 ``None``。
+
+    与 ``SkillFlow`` 里那个 ``Arrange`` 步引用**同一个规格对象**（一份声明，不是两份拷贝）：
+    执行器读它求张数 / 切分，接入层读本字段做投影（``ARRANGE`` 询问只带牌面与张数，
+    ``_build_query`` 会丢掉载荷 —— spec S2）。``SkillDef`` 不被序列化 ⇒ 不进记录流。
     """
 
     requirement: str | None = None

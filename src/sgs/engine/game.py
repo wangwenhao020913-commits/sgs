@@ -885,6 +885,7 @@ class Engine:
         timing: Timing,
         *,
         cards: tuple[CardRef, ...],
+        split: int | None = None,
     ) -> Any:
         """发一次 ``ARRANGE`` 询问（票 10 §②）：把 ``cards`` 授予 ``actor`` 并请其排列。
 
@@ -892,6 +893,11 @@ class Engine:
         全部排列 × 全部切分点（:class:`~sgs.state.ArrangeContext`）。答案按
         ``(actor, timing, 牌 id 元组)`` 帧内缓存，钩子重入时不重发（票 07 的帧内记忆姿态）。
         返回 ``ArrangeCards`` / ``SUSPEND``。
+
+        ``split``（W6-02）：``None`` = 自由切分（全部切分点，观星与既有行为逐字相同）；
+        整数 = 固定切分（只铺这一个置顶张数，来自 ``DeckTopArrange.split`` 的 ``fixed``
+        档）。它**不进**答案缓存键：一帧一次排列，键的口径保持票 10 的
+        ``("arrange", actor, timing, cards)``（spec S1）。
         """
         answers = frame.data.setdefault("ask_answers", {})
         answer_key = ("arrange", actor, timing.value, tuple(card.card_id for card in cards))
@@ -903,7 +909,7 @@ class Engine:
                 actor,
                 timing,
                 seq,
-                payload=ArrangeContext(count=len(cards)),
+                payload=ArrangeContext(count=len(cards), split=split),
                 revealed=cards,
             )
         )

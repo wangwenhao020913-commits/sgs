@@ -795,16 +795,29 @@ def _select_option(
 
 
 def _arrange(answers_seq: int, ctx: ArrangeContext) -> list[Action]:
-    """排列：``X`` 个面内位置的**全部排列** × **全部切分点**（票 10 §②）。
+    """排列：``X`` 个面内位置的**全部排列** × **切分点**（票 10 §②；W6-02 收口 fixed）。
 
     授予了几张牌就排几张（``ctx.count``）；强制选择，没有 ``Pass``——"答了发动"之后的
     排列是这次发动的载荷，玩家想不排就应当在上一步的"是否发动"里放弃。``X`` 至多 5
     （观星的上限），故候选至多 ``5! × 6 = 720``；这是**询问级**候选，不占票 04 给
     "两维相乘的技能候选"设的 128 闸（那道闸管的是技能组合，不是排列的全枚举）。
+
+    ``ctx.split``（W6-02，spec S3）：``None`` = **自由切分**，切分点 ``0..count`` 全部进
+    候选（观星与票 10 逐条相同）；整数 = **固定切分**，只给这一个置顶张数。固定值越界
+    （``split > count``）是声明 / 实际张数对不上的编程错误 ⇒ fail-closed，不静默截断。
     """
+    if ctx.split is None:
+        splits: tuple[int, ...] = tuple(range(ctx.count + 1))
+    else:
+        if not 0 <= ctx.split <= ctx.count:
+            raise ValueError(
+                f"固定切分点 {ctx.split} 不在 0..{ctx.count} 内（DeckTopArrange 的声明与"
+                "实际牌数不一致）"
+            )
+        splits = (ctx.split,)
     return [
         ArrangeCards(order=order, split=split, answers_seq=answers_seq)
-        for split in range(ctx.count + 1)
+        for split in splits
         for order in permutations(range(ctx.count))
     ]
 

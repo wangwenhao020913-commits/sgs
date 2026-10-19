@@ -286,13 +286,19 @@ class SelectOptionContext:
 
 @dataclass(frozen=True, slots=True)
 class ArrangeContext:
-    """``ARRANGE`` 候选生成的类型化载荷（票 10）：本次授予了几张牌。
+    """``ARRANGE`` 候选生成的类型化载荷（票 10；W6-02 加 ``split``）。
 
     候选 = ``count`` 个**面内位置**的全部排列 × 全部切分点，故候选生成只需要张数；
     牌面本身由询问的 :attr:`_QueryBase.revealed` 承载（对参与者可见、对其它座位不可见）。
+
+    ``split``（W6-02）是**只铺哪些切分点**：``None`` = 自由切分（``0..count`` 全部，
+    观星与既有行为逐字相同）；整数 = 固定切分，候选只给这一个置顶张数
+    （``DeckTopArrange.split`` 的 ``fixed`` 档，spec S3）。它只影响候选生成、**不进询问 /
+    记录流**（``_build_query`` 对 ``ARRANGE`` 不序列化本载荷）。
     """
 
     count: int
+    split: int | None = None
 
 
 class PlayerPublic(_FrozenModel):
