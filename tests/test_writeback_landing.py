@@ -54,6 +54,17 @@ def _is_defined(source: str, symbol: str, *, js: bool) -> bool:
         found = found or f"function {symbol}" in source or f"const {symbol} " in source
     return found
 
+
+_DEF_RE = re.compile(r"^\s*def\s+(test_[A-Za-z0-9_]+)\s*\(", re.MULTILINE)
+
+
+def _defined_tests() -> set[str]:
+    """``tests/`` 下所有 ``def test_...`` 的名字（``06``（§5「程序化约定与偏离一手」）的裸 ``::test`` 也核）。"""
+    names: set[str] = set()
+    for path in sorted((REPO_ROOT / "tests").rglob("*.py")):
+        names.update(_DEF_RE.findall(path.read_text(encoding="utf-8")))
+    return names
+
 # 覆盖元断言（绊线）：账本 = 主表 33 行 + §1b 追加/升格 11 行 = 44 行、44 个锚点。
 # 少掉一整张子表就会低于绊线 ⇒ 判红，防「表被改格式 / 删表 ⇒ 一行没扫到也算通过」。
 MIN_ROWS = 44
@@ -176,9 +187,12 @@ PSEUDO_PATH_RE = re.compile(r"^(?:\d+(?:\.\d+)*|[A-Za-z]+://)")
 MIN_DOC_CITATIONS = 40
 
 
-def section5_rows() -> list[tuple[int, str]]:
-    """返回 §5 账本的 (行号, 行文本)；表头与分隔行不在内。"""
-    lines = DOC06.read_text(encoding="utf-8").splitlines()
+def section5_rows(text: str | None = None) -> list[tuple[int, str]]:
+    """返回 §5 账本的 (行号, 行文本)；表头与分隔行不在内。
+
+    ``text`` 只给合成反例用；缺省读真实 ``06``。
+    """
+    lines = (text if text is not None else DOC06.read_text(encoding="utf-8")).splitlines()
     start = next(i for i, line in enumerate(lines) if line.startswith(SECTION5_HEADING))
     rows: list[tuple[int, str]] = []
     for index in range(start + 1, len(lines)):
@@ -191,6 +205,97 @@ def section5_rows() -> list[tuple[int, str]]:
             continue
         rows.append((index + 1, line))  # 真实行号，报错时能直接跳过去
     return rows
+
+
+_DOC06_SOURCE_TYPES = frozenset({"程序化约定", "偏离一手", "无一手源"})
+BARE_TEST_RE = re.compile(r"::(test_[A-Za-z0-9_]+)")
+
+
+def _table_cells(line: str) -> list[str]:
+    """按 Markdown 表格拆单元格，**忽略反引号里的 ``|``**。
+
+    账本里有一行把 ``|id| < 2**53`` 写在反引号里；裸 ``split("|")`` 会把那行拆成
+    7 列，来源类型列随之错位。反引号内的竖线是代码字面量，不是列分隔符。
+    """
+    text = line.strip()
+    if text.startswith("|"):
+        text = text[1:]
+    if text.endswith("|"):
+        text = text[:-1]
+    cells: list[str] = []
+    current: list[str] = []
+    in_code = False
+    for char in text:
+        if char == "`":
+            in_code = not in_code
+        if char == "|" and not in_code:
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    cells.append("".join(current).strip())
+    return cells
+
+
+def _landing_cell(line: str) -> str:
+    """§5 表行的「落地位置」列；列数不对时返回空串（结构问题由来源类型检查报告）。"""
+    cells = _table_cells(line)
+    return cells[4] if len(cells) == 5 else ""
+
+
+def _source_type_errors(text: str | None = None) -> list[str]:
+    """来源类型列必须**恰好**是三词之一；限定语属于「一手出处」列，不塞进类型列。"""
+    errors: list[str] = []
+    for line_no, line in section5_rows(text):
+        cells = _table_cells(line)
+        if len(cells) != 5:
+            errors.append(f"§5:{line_no}: 表行不是 5 列（{len(cells)}）")
+            continue
+        source = cells[1].replace("*", "").strip()
+        if source not in _DOC06_SOURCE_TYPES:
+            errors.append(
+                f"§5:{line_no}: 来源类型「{source}」不在三词表 "
+                f"{sorted(_DOC06_SOURCE_TYPES)}"
+            )
+    return errors
+
+
+def _bare_test_citation_errors(landing: str, defined: set[str]) -> list[str]:
+    """landing cell 里的每个 ``::test_*`` 都必须在 tests/ 里定义。
+
+    与 ``CITATION_RE`` 的区别：后者只认带 ``.py`` 路径的 ``path::test``；账本里常用
+    ``path::test_a`` / ``::test_b`` 的简写，裸 ``::test_b`` 曾整段逃过检查。
+    """
+    return [name for name in BARE_TEST_RE.findall(landing) if name not in defined]
+
+
+BARE_SUPERSEDED_RE = re.compile(r"superseded-by(?!\s*:)")
+SUPERSEDED_BY_RE = re.compile(r"superseded-by:\s*([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _superseded_by_errors(
+    defined: set[str] | None = None, text: str | None = None
+) -> list[str]:
+    """landing cell 里的 ``superseded-by`` 必须是 ``superseded-by: <已定义符号>``。
+
+    旧写法曾把 ``superseded-by 本行`` 塞进票号列——既不是锚点格式，也逃过了检查。
+    """
+    known = _defined_tests() if defined is None else defined
+    errors: list[str] = []
+    for line_no, line in section5_rows(text):
+        landing = _landing_cell(line)
+        if "superseded-by" not in landing:
+            continue
+        if BARE_SUPERSEDED_RE.search(landing):
+            errors.append(f"§5:{line_no}: superseded-by 必须写成 superseded-by: <符号>")
+            continue
+        targets = SUPERSEDED_BY_RE.findall(landing)
+        if not targets:
+            errors.append(f"§5:{line_no}: superseded-by: 缺少 <符号>")
+        for name in targets:
+            if name not in known:
+                errors.append(f"§5:{line_no}: superseded-by 指向不存在的测试：{name}")
+    return errors
 
 
 def test_the_doc06_citation_pattern_also_reads_double_colon_test_names() -> None:
@@ -229,7 +334,7 @@ def test_doc06_ledger_landing_points_exist() -> None:
     errors: list[str] = []
     checked = 0
     for line_no, line in section5_rows():
-        landing = line.rsplit("|", 2)[1] if line.endswith("|") else line
+        landing = _landing_cell(line)
         for rel, symbol in CITATION_RE.findall(landing):
             if PSEUDO_PATH_RE.match(rel) or not CONVENTIONAL_PATH_RE.match(rel):
                 continue          # 文档号的引用（不是仓库路径）——它们由文档门禁自己核
@@ -250,6 +355,73 @@ def test_doc06_ledger_landing_points_exist() -> None:
     assert checked >= MIN_DOC_CITATIONS, (
         f"只核到 {checked} 条文件引用（< {MIN_DOC_CITATIONS}）：表结构可能变了，本条已失效"
     )
+
+
+def test_doc06_source_types_use_the_three_word_vocabulary() -> None:
+    """来源类型列只放三词之一；限定语（如「规则面回归官方」）写在旁边一列。
+
+    反例：B1 曾是 ``**偏离一手**（实现缺陷，已回归官方）``——括号里的限定语让
+    「这是不是一条现存偏离」变得含混，评审才会把它当规则裁定争论。
+    """
+    errors = _source_type_errors()
+    assert errors == [], "\n".join(errors)
+
+
+def test_doc06_bare_test_references_must_exist() -> None:
+    """`path::test_a` / `::test_b` 两种写法都核；裸 `::test_b` 曾整段逃过检查。"""
+    defined = _defined_tests()
+    errors: list[str] = []
+    for line_no, line in section5_rows():
+        landing = _landing_cell(line)
+        for name in _bare_test_citation_errors(landing, defined):
+            errors.append(f"§5:{line_no}: 引用的测试不存在：{name}")
+    assert errors == [], "\n".join(errors)
+
+
+def test_bare_test_citation_helper_flags_a_missing_name() -> None:
+    """合成反例：同一 landing cell 里 `test_ok` 放行、裸 `::test_missing` 判红。"""
+    landing = "`tests/test_demo.py::test_ok` / `::test_missing`"
+    assert _bare_test_citation_errors(landing, {"test_ok"}) == ["test_missing"]
+
+
+def test_doc06_superseded_by_in_landing_cells_is_well_formed() -> None:
+    errors = _superseded_by_errors()
+    assert errors == [], "\n".join(errors)
+
+
+def test_bare_superseded_by_helper_flags_prose() -> None:
+    text = (
+        "## 5. 程序化约定与偏离一手\n"
+        "| 裁定 | 来源类型 | 一手出处与偏离点 | 票号 | 落地位置 |\n"
+        "|---|---|---|---|---|\n"
+        "| **旧行** | 程序化约定 | 官方 | W4 | `tests/test_demo.py::test_ok`（superseded-by 本行） |\n"
+        "\n---\n"
+    )
+    errors = _superseded_by_errors(text=text)
+    assert any("superseded-by" in error for error in errors), errors
+
+
+def test_table_cells_ignores_pipes_inside_code_spans() -> None:
+    """`|id| < 2**53` 在反引号里，拆列时不能把它当分隔符。"""
+    cells = _table_cells(
+        "| **虚拟牌 id**：`|id| < 2**53` | 程序化约定 | 说明 | W4 | 落点 |"
+    )
+    assert len(cells) == 5
+    assert cells[1] == "程序化约定"
+
+
+def test_source_type_helper_flags_a_qualified_value() -> None:
+    """合成反例：`**偏离一手**（实现缺陷…）` 不是三词之一，必须判红。"""
+    text = (
+        "## 5. 程序化约定与偏离一手\n"
+        "| 裁定 | 来源类型 | 一手出处与偏离点 | 票号 | 落地位置 |\n"
+        "|---|---|---|---|---|\n"
+        "| **B1** | **偏离一手**（实现缺陷，已回归官方） | 官方 | W5-01 | "
+        "`tests/test_demo.py::test_ok` |\n"
+        "\n---\n"
+    )
+    errors = _source_type_errors(text)
+    assert any("不在三词表" in error for error in errors), errors
 
 
 def anchor_count(claims: list[Claim]) -> int:

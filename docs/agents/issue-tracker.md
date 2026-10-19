@@ -22,6 +22,9 @@
   `/implement-spec` 据此**机械**判断前沿上的票能不能并行（文件不重叠才并行）；
   它也让"票面说可并行、实际全撞同一个文件"在**写票时**就暴露，而不是等执行时才发现。
   写了就必须每条路径都存在（`tests/test_agent_skills.sh` 核）。
+- **`Ruling:`**（可选）：写回票在 `Touches:` 下加一行 `Ruling: <原文票或路径>`，指向裁定原文。
+  `06`（§5「程序化约定与偏离一手」）的账本行用 `tools/ledger_index.py --grep <票号/关键词>` 定位；票面说「某行」但账本
+  里没有时，先查原票，不要假设行存在。
 
 ## 当某个技能说“publish to the issue tracker”
 
@@ -30,6 +33,17 @@
 ## 当某个技能说“fetch the relevant ticket”
 
 读取所引用路径的文件。通常你会直接拿到路径或工单号。
+
+## 验收 / 实机票
+
+- 实机验收票必须带 `## 复现配方`：人数 / 种子 / 点将 / 操作步骤。没有配方就用
+  `.venv/bin/python tools/acceptance_seed.py --players 4 --card <type> [--other-slot weapon] [--other-card <type>]`
+  扫起始手牌（只读，不模拟出牌）。
+- 多步人工验收准备好服务器 + 配方后**结束 turn**，不要用 `ask_user_question` 阻塞等待。
+- 浏览器自动化先跑 `bash tools/check_env.sh`；缺 `bsk` 时 browser-skill 不可用，由用户手动验收。
+- 写回/收口前先跑
+  `.venv/bin/pytest -q tests/test_writeback_landing.py && bash tests/test_dev_docs.sh`；
+  全量门禁等文档冻结后只跑一次；失败先 `grep -nE 'FAIL|失败'` 看全部失败，不要只 `tail`。
 
 ## Wayfinding 操作
 
@@ -63,3 +77,5 @@
   把"找复现"和"改代码"塞进同一个上下文，本波在**同一张 2 文件的票**上连死两位实现者。
 - **等实现者时不要轮询**：让"子代理已结束"的通知驱动下一步；间隙只做**只读**工作
   （验收面 sweep、文档订正、核断言是否真实存在），别隔几分钟起一个等待循环。
+  `code-review` 的两轴子代理同样：**不要 `list_agents` 轮询**；docs-only diff 把 diff 内联、
+  限定读两份改动文档 + 票面，别让子代理通读大 `.scratch` 文件。

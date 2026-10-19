@@ -1,29 +1,17 @@
 #!/usr/bin/env bash
-# 门禁 hook（M3 retro 落地）。
+# 门禁 hook（M3 retro 落地；W5-03 retro 加 docs 快路径）。
 #
 # 这个仓库没有 CI、也没有远端，唯一能替人跑门禁的地方就是这里：
 # `tests/run_all.sh` 再全，没人跑它等于零。默认**不装**——每个 clone 跑一次
 # `bash tools/install-hooks.sh` 把它接到 pre-commit 上。
 #
-# 只在改动落在 `src/` 或 `tests/` 时才跑全量门禁：纯文档提交不值得等两分半。
+# 分级在 `tools/gate-staged.sh`：
+# - `src/` / `tests/`          → 全量 `tests/run_all.sh`；
+# - `开发文档/` / `GLOSSARY.md` / `AGENTS.md` / `CODING_STANDARDS.md` / `docs/`
+#                              → 快速文档检查（含账本 06 §5 的机械校验）；
+# - 其它                       → 跳过。
+#
 # 门禁跑的是**工作树**而不是暂存区，所以提交前确认没有别的半成品改动混在里面。
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
-
-staged="$(git diff --cached --name-only)"
-case "$staged" in
-  *src/* | *tests/*) ;;
-  *)
-    echo "门禁 hook：本次改动不含 src/ 或 tests/，跳过。"
-    exit 0
-    ;;
-esac
-
-echo "门禁 hook：跑 bash tests/run_all.sh（约 2.5 分钟）……"
-if bash tests/run_all.sh; then
-  echo "门禁 hook：通过。"
-else
-  echo "门禁 hook：门禁失败，本次提交被拒。"
-  echo "  修好之后再提交。确要提交未过门禁的状态，用 --no-verify。"
-  exit 1
-fi
+ROOT="$(git rev-parse --show-toplevel)"
+exec bash "$ROOT/tools/gate-staged.sh" --run "门禁 hook"
