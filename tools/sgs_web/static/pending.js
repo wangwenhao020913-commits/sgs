@@ -4,11 +4,56 @@
  */
 "use strict";
 
+/* ------------------------------------------------------------ 询问归属 */
+
+/** 这一问是不是**自己**的（U1-03）：只有询问者 = 查看者座位时才铺可点控件。
+ *
+ * 查看者真源与服务端同一条：会话载荷的 `human_seat`（缺省退回投影快照的 `seat`）。
+ * 其他座位的询问只在那个座位块下方显示一行文本（spec §3.3）。查看者缺失 / 未声明时
+ * **不认作自己的**（fail-closed，与服务端 `viewer is None ⇒ foreign` 同姿态）；旧载荷
+ * 没有 `actor` 时才按"自己的"处理（回放 / 合成载荷的兜底）。
+ */
+function isOwnPending(pending, view = state.view) {
+  if (!pending) return false;
+  if (pending.actor === null || pending.actor === undefined) return true;
+  const viewer = view ? (view.human_seat ?? (view.snapshot && view.snapshot.seat)) : null;
+  if (viewer === null || viewer === undefined) return false;
+  return Number(pending.actor) === Number(viewer);
+}
+
+/** 倒计时锚点：同一询问序号在轮询刷新时**不**重置（只有新询问才重新起表）。 */
+function syncPendingClock(view) {
+  const seq = view && view.pending ? view.pending.seq : null;
+  const clock = state.pendingClock;
+  if (seq === null || seq === undefined) {
+    clock.seq = null;
+    clock.receivedAt = 0;
+    return;
+  }
+  if (seq !== clock.seq) {
+    clock.seq = seq;
+    clock.receivedAt = Date.now();
+  }
+}
+
+/** 右端动作（结束出牌 / 放弃）的稳定报文值：**唯一**一份前端常量。
+ *
+ * 这两个动作不占"简单询问的浮动选项行"，统一由提示条右端画（`renderRightActions`）；
+ * 主按钮绑定与候选查找都读这里，别在别处再写字符串字面量。
+ */
+const RIGHT_ACTION_KINDS = Object.freeze({ endPhase: "EndPhase", pass: "Pass" });
+
+function isRightAction(action) {
+  return !!action
+    && (action.kind === RIGHT_ACTION_KINDS.endPhase || action.kind === RIGHT_ACTION_KINDS.pass);
+}
+
 /* ------------------------------------------------------------ 询问渲染 */
 
 /** 手选路径：点牌设焦点、点座位选目标、选出一组**候选里真有**的组合才可提交。 */
 function renderPending(view) {
-  const pending = view.pending;
+  const pending = view && view.pending;
+  syncPendingClock(view);
   $("t-options").innerHTML = "";
   // 询问文本：**需要做什么**（服务端 `context.requirement`）优先；没有就退回引擎的通用 prompt。
   const requirement = pending && pending.context && pending.context.requirement;
@@ -44,8 +89,24 @@ function renderPending(view) {
   const targetHint = $("t-target-hint");
   if (targetHint) targetHint.textContent = "";
   if (!pending) {
-    $("t-timer").textContent = "";
     setActionLabels(false, false);
+    resetRightActions();
+    resetCountdown();
+    syncModal();
+    return;
+  }
+  // 其他座位的询问（U1-03）：提示条只写"等待"，可点控件一律不铺；该座位的武将块下方
+  // 由 `renderRingSeats` 显示“正在响应…”。倒计时也不显示（AI 即时回答 / 他人窗口）。
+  if (!isOwnPending(pending)) {
+    $("t-prompt").textContent = "等待其他座位响应…";
+    if (hintsNode) hintsNode.textContent = "";
+    if (targetHint) targetHint.textContent = "";
+    $("t-choice").textContent = "";
+    $("btn-submit").disabled = true;
+    $("btn-cancel").disabled = true;
+    resetRightActions();
+    resetCountdown();
+    syncModal();
     return;
   }
   const actions = pending.legal_actions || [];
@@ -83,7 +144,9 @@ function renderPending(view) {
   // 提交按钮的启用与否**只算一次**（每个分支只管"铺界面"）：分散在各分支里写过一次
   // 就会漏掉一条路径（`SELECT_CARDS` 的选择面就因此永远灰着）。
   refreshSubmit(pending);
+  renderRightActions(pending, view);
   renderCountdown(view);
+  syncModal();
 }
 
 /** 底部两个按钮的文案：预发动 = 「确认发动 / 取消预发动」；手牌入口 = 「确认使用 / 取消选择」；
@@ -260,27 +323,22 @@ function renderDiscard(pending) {
  */
 function renderPreativationEntry(pending) {
   const skill = preactivatedSkill(pending);
+  const manifest = skill ? preactivationManifest(pending, skill.skill_id) : null;
   const hint = $("t-target-hint");
   if (hint) {
     hint.textContent = `点技能【${skill ? skill.name : pending.skill_id}】进入预发动；`
-      + "或点「放弃」跳过这次时机（放弃后不再询问）。";
+      + "或点右端「放弃」跳过这次时机（放弃后不再询问）。";
   }
-  const actions = pending.legal_actions || [];
-  const node = $("t-options");
-  actions.forEach((action, index) => {
-    if (action.kind !== "Pass") return;
+  // 「是否发动」的浮动选项行：进入清单是唯一选项；`Pass` 是右端动作（U1-03），
+  // `取消` 的文案在这里就是「放弃」（`setActionLabels` 的被动入口分支）。
+  if (skill && manifest) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "opt";
-    if (state.selectedOption === index) button.classList.add("sel");
-    button.textContent = actionLabel(action);
-    button.addEventListener("click", () => {
-      state.selectedOption = index;
-      state.lastRejectReason = "";
-      renderPending(state.view);
-    });
-    node.appendChild(button);
-  });
+    button.textContent = `进入预发动【${skill.name}】`;
+    button.addEventListener("click", () => enterPreativation(skill, manifest));
+    $("t-options").appendChild(button);
+  }
   $("btn-cancel").disabled = false;
   $("btn-submit").disabled = true;
 }
@@ -312,6 +370,8 @@ function renderPickerAlternatives(pending) {
   const box = $("t-options");
   (pending.legal_actions || []).forEach((action, index) => {
     if (action.card || action.kind === "ActivateSkill" || action.kind === "SelectCards") return;
+    // `Pass` / `EndPhase` 是右端动作（提交 / 取消 / 结束出牌 / 放弃），不再占浮动选项行。
+    if (isRightAction(action)) return;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "opt";

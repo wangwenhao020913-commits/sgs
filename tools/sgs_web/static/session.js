@@ -27,6 +27,9 @@ function applyView(body) {
   $("btn-submit").disabled = true;
   $("btn-cancel").disabled = true;
   $("t-choice").textContent = "";
+  // 回放期间倒计时与右端动作都收起：`state.view` 还停在上一条询问，继续画会误导。
+  resetCountdown();
+  resetRightActions();
   // 回放期间**响应文本清空**：它属于"下方询问界面"的那一问，等播完、新询问提交后再显示。
   // 描述文本不在这里清——它由 renderProcessing 按效果区逐事件改写。
   $("t-prompt").textContent = "";
@@ -208,6 +211,13 @@ function useText(card) {
 
 /** 提交这份视图：装快照 / 游标，重画牌桌与询问（回放播完后的落点）。 */
 function commitView(body) {
+  // 换会话（开新局 / 从录像回到牌桌）时倒计时锚点必须作废：不同会话的询问序号会重复，
+  // 沿用旧锚点会把上一局已经过去的秒数算到新局的第一个询问上。
+  if (state.view && body && state.view.session_id && body.session_id
+    && state.view.session_id !== body.session_id) {
+    state.pendingClock.seq = null;
+    state.pendingClock.receivedAt = 0;
+  }
   state.view = body;
   state.cursor = body.cursor;
   state.logSeq = body.log_seq;
@@ -223,7 +233,9 @@ function commitView(body) {
   if (logNode.lastChild) logNode.lastChild.scrollIntoView({ block: "nearest" });
   if (body.finished) {
     state.timer = null;
-    $("t-timer").textContent = "";
+    resetCountdown();
+    resetRightActions();
+    syncModal();
     $("t-prompt").textContent = "本局已结束。";
     $("btn-submit").disabled = true;
     $("btn-cancel").disabled = true;
@@ -246,6 +258,10 @@ function resetSelection() {
   state.preactivation = null;
   state.convertSkill = null;
   state.lastRejectReason = "";
+  // U1-03：新视图 = 新询问。模态的重开状态归零；`syncModal()` 会按需要重新打开 / 收起。
+  state.modal.kind = null;
+  state.modal.open = false;
+  state.modal.dismissed = false;
 }
 
 async function refresh() {

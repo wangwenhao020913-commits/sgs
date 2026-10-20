@@ -537,9 +537,36 @@ function renderPreativation(pending) {
       button.addEventListener("click", () => selectPreativationOption(option));
       box.appendChild(button);
     }
-  } else if (kind === "card" || (kind === "seat" && preactivationSeatMulti(step))) {
-    // 多选座位步与选牌步共用同一个「下一步」入口（W7-01b）：单选座位步仍由点座位直接
-    // 自动进下一步，不铺按钮。
+  }
+  if (kind === "seat") {
+    // 座位步的候选在**模态正文里也铺一遍**（U1-03 / 评审 P0）：模态窗口居中后可能挡住
+    // 环上某几个座位，只靠点场上武将就点不到被挡的那个。两份入口调同一个
+    // `selectPreativationSeat`，环上高亮不变（舞台不 inert）。
+    const options = preactivationOptions(pa, pa.cursor);
+    const seats = options
+      ? options
+        .map((value) => Number(String(value).slice(SEAT_PREFIX.length)))
+        .filter((seat) => Number.isInteger(seat))
+      : ((state.view && state.view.snapshot && state.view.snapshot.players) || [])
+        .filter((player) => player.alive)
+        .map((player) => Number(player.seat));
+    const answer = pa.answers[pa.cursor];
+    for (const seat of seats) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "opt seat-opt";
+      button.setAttribute("data-seat", String(seat));
+      const chosen = answer.values.includes(seat);
+      if (chosen) button.classList.add("sel");
+      const hero = (state.view && state.view.heroes && state.view.heroes[seat]) || "";
+      button.textContent = `座位 ${seat}${hero ? ` ${hero}` : ""}${chosen ? " ✓" : ""}`;
+      button.addEventListener("click", () => selectPreativationSeat(seat));
+      box.appendChild(button);
+    }
+  }
+  if (kind === "card" || (kind === "seat" && preactivationSeatMulti(step))) {
+    // 多选座位步与选牌步共用同一个「下一步」入口（W7-01b）：单选座位步仍由点座位 / 点
+    // 模态里的座位按钮直接自动进下一步，不铺按钮。
     const next = document.createElement("button");
     next.type = "button";
     next.className = "opt";

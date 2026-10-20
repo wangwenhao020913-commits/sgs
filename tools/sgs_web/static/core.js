@@ -141,6 +141,12 @@ const state = {
   eventDelayMs: 100,   // 回放步长（牌桌按钮切档）；缺省 0.1s **不随档位表首位走**
   effectCards: [],     // 效果区里当前可见的牌；回放期间由 card_move delta 逐事件派生
   timer: null,
+  // U1-03：倒计时的本地锚点。服务端的 `pending_since` 是单调时钟，浏览器不能直接比；
+  // 这里只记**第一次见到这个询问序号**的本地时刻，轮询刷新同一询问时不重置。
+  pendingClock: { seq: null, receivedAt: 0 },
+  // U1-03：共享模态的本地态（kind = preactivation / arrange / null；dismissed 只对
+  // 强制选择（排列）生效——关掉模态后仍可从提示条右端重新打开）。
+  modal: { kind: null, open: false, dismissed: false },
   runs: [],
   replay: null,
   heroCatalog: [],     // 点将列表（`GET /api/heroes` 的启用池）；开局页的选项来源
@@ -180,4 +186,11 @@ function show(view) {
   }
   // 离开回放页就停掉播放：定时器不该在看不见的页面上继续跑。
   if (view !== "replay") stopReplayPlay();
+  // U1-03：牌桌的三段布局不在屏幕上时，共享模态也收起（不在别的页面上留一层遮罩）；
+  // 回到牌桌时按当前询问重新挂上（预发动 / 排列的本地态不因切页丢失）。
+  if (view === "table") {
+    if (state.view) syncModal();
+  } else {
+    closeModalForView();
+  }
 }

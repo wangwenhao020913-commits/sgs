@@ -22,7 +22,12 @@ function renderCandidateList(pending, actions) {
     // 把"焦点内的下标"翻译回原候选下标（选项点击要落回原数组）
     groups.forEach((group, i) => { group.actionIndex = focused[i].index; });
   }
-  for (const group of groups) {
+  // 右端动作（结束出牌 / 放弃）不占浮动选项行；过滤发生在**下标翻译之后**，
+  // 于是 remaining 的 actionIndex 仍指向原 `legal_actions`。
+  const visibleGroups = groups.filter(
+    (group) => group.actionIndex === null || !isRightAction(actions[group.actionIndex]),
+  );
+  for (const group of visibleGroups) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "opt";
@@ -94,6 +99,45 @@ function actionLabel(action) {
   if (action.kind === "EndPhase") return "结束出牌阶段";
   if (action.kind === "Pass") return "放弃";
   return action.kind;
+}
+
+/** 右端动作在候选里的下标；`-1` = 当前询问没有这一条（按钮隐藏）。 */
+function rightActionIndex(pending, kind) {
+  const actions = (pending && pending.legal_actions) || [];
+  return actions.findIndex((action) => action.kind === kind);
+}
+
+/** 提示条右端：结束出牌 / 放弃只在**自己的**询问里、且候选真有那一条时出现。 */
+function renderRightActions(pending, view = state.view) {
+  const own = isOwnPending(pending, view);
+  const endIndex = own ? rightActionIndex(pending, RIGHT_ACTION_KINDS.endPhase) : -1;
+  const passIndex = own ? rightActionIndex(pending, RIGHT_ACTION_KINDS.pass) : -1;
+  // 被动入口的「取消」本身就是「放弃」（送出那条 Pass）：不再复制一个同义的右端按钮。
+  const cancelIsPass = passIndex >= 0 && isPassivePreativation(pending);
+  const end = $("btn-end-phase");
+  const pass = $("btn-pass");
+  if (end) {
+    end.hidden = endIndex < 0;
+    end.disabled = state.playback || endIndex < 0;
+  }
+  if (pass) {
+    pass.hidden = passIndex < 0 || cancelIsPass;
+    pass.disabled = state.playback || passIndex < 0 || cancelIsPass;
+    pass.textContent = passIndex >= 0
+      ? alternativeLabel(pending, pending.legal_actions[passIndex])
+      : "放弃";
+  }
+}
+
+/** 无询问 / 其他座位的询问：右端两个动作位收起（不让界面留下上一问的按钮）。 */
+function resetRightActions() {
+  for (const [id, label] of [["btn-end-phase", "结束出牌"], ["btn-pass", "放弃"]]) {
+    const button = $(id);
+    if (!button) continue;
+    button.hidden = true;
+    button.disabled = true;
+    button.textContent = label;
+  }
 }
 
 /** 候选 → 可点选项。**每条候选一个选项**（不再按标签去重）：

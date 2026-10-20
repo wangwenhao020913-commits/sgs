@@ -40,6 +40,7 @@ class ClassList {
 class El {
   constructor(tag = "div", id = "") {
     this.tagName = tag.toUpperCase(); this.id = id; this.children = []; this.listeners = {};
+    this.parentNode = null;
     this.classList = new ClassList(); this._text = ""; this._html = ""; this.value = "";
     this.hidden = false; this.disabled = false; this.type = ""; this.className = "";
     // 真 DOM 的 `element.style` 是个可写对象；垫片补一个扁平副本，供断言"写进去了什么"。
@@ -48,12 +49,26 @@ class El {
     this.checked = false;
   }
   get textContent() { return this._text + this.children.map((c) => c.textContent || c.text()).join(""); }
-  set textContent(v) { this._text = String(v); this._html = ""; this.children = []; }
+  set textContent(v) { this._text = String(v); this._html = ""; this._detachChildren(); }
   get innerHTML() { return this._html + this.children.map((c) => c.dump()).join(""); }
   // 垫片的 innerHTML 赋值要**真的清空子节点**（真 DOM 就是这么干的；不清空会造出
   // "元素累积"这种假 bug —— 第一版垫片在这里骗过我一次）。
-  set innerHTML(v) { this._html = String(v); this.children = []; this._text = ""; }
-  appendChild(c) { this.children.push(c); return c; }
+  set innerHTML(v) { this._html = String(v); this._detachChildren(); this._text = ""; }
+  _detachChildren() {
+    for (const child of this.children) child.parentNode = null;
+    this.children = [];
+  }
+  appendChild(c) {
+    // 真 DOM 的 appendChild = **移动**（不是复制）。模态把 `#t-options` 搬进正文、
+    // 关闭再搬回来，若垫片只 push，会造出"同一个节点在两个父节点的 children 里"的假象。
+    if (c && c.parentNode) {
+      const at = c.parentNode.children.indexOf(c);
+      if (at >= 0) c.parentNode.children.splice(at, 1);
+    }
+    c.parentNode = this;
+    this.children.push(c);
+    return c;
+  }
   addEventListener(k, fn) { (this.listeners[k] ||= []).push(fn); }
   // 静态节点（U1-01 起自己的座位块常驻 DOM）用 `onclick` 属性覆盖式绑定：
   // 真 DOM 里它是"同一个处理器"，垫片把它映射到 listeners.click，语义一致。
@@ -61,6 +76,7 @@ class El {
   get onclick() { return (this.listeners.click || [])[0] || null; }
   setAttribute(name, value) { (this.attrs ||= {})[name] = String(value); }
   getAttribute(name) { return (this.attrs || {})[name]; }
+  removeAttribute(name) { if (this.attrs) delete this.attrs[name]; }
   querySelector(selector) {
     const tag = String(selector).toLowerCase();
     return this.children.find((c) => c.tagName.toLowerCase() === tag) || null;
@@ -89,11 +105,14 @@ Object.assign(byId.get("in-seat"), { value: "0" });
 Object.assign(byId.get("in-timeout"), { value: "0" });
 Object.assign(byId.get("in-seed"), { value: "20261012" });
 
+const documentListeners = {};
 const documentShim = {
   getElementById: (id) => byId.get(id) || (byId.set(id, el("div", id)), byId.get(id)),
   createElement: (tag) => new El(tag),
-  addEventListener: () => {},
+  // 模态的 ESC 关闭挂在 document 的 keydown 上；垫片记下来交给用例显式触发。
+  addEventListener: (name, fn) => { (documentListeners[name] ||= []).push(fn); },
 };
+const fireDocument = (name, event) => (documentListeners[name] || []).forEach((fn) => fn(event));
 
 /* -------------------------------------------------- 只记录前端发出的请求 */
 
@@ -759,19 +778,30 @@ if (multi) {
   ui.renderPending(ui.state.view);
 
   const buttons = $("t-options").children;
-  const giveUp = buttons.find((b) => (b.textContent || "").includes("放弃"));
-  check("㉿R1 响应窗口里『放弃』是一个**看得见**的按钮", !!giveUp,
-    `选项=${JSON.stringify(buttons.map((b) => b.textContent))}`);
+  const savedSession = ui.state.sessionId;
+  const giveUp = $("btn-pass");
+  check("㉿R1 响应窗口里『放弃』是提示条**右端**看得见的按钮",
+    !!giveUp && giveUp.hidden === false && (giveUp.textContent || "").includes("放弃"),
+    `hidden=${giveUp && giveUp.hidden} text="${giveUp && giveUp.textContent}" options=${JSON.stringify(buttons.map((b) => b.textContent))}`);
   check("㉿R2 有【杀】可出时，未选任何东西**不可**提交（别替玩家出牌）",
     $("btn-submit").disabled === true && ui.buildAction() === null);
+  check("㉿R2b 放弃不在浮动选项行里（选项行只放简单询问）",
+    !buttons.some((b) => (b.textContent || "").includes("放弃")),
+    `选项=${JSON.stringify(buttons.map((b) => b.textContent))}`);
+  check("㉿R3 右端『放弃』指向那条 Pass 候选",
+    !!ui.rightActionIndex && ui.rightActionIndex(nanman, "Pass")
+      === nanman.legal_actions.findIndex((action) => action.kind === "Pass"),
+    `index=${ui.rightActionIndex ? ui.rightActionIndex(nanman, "Pass") : "n/a"}`);
   if (giveUp) {
+    // 合成载荷没有会话 id：右端按钮只负责**选中**那条候选，提交仍由玩家按。
+    ui.state.sessionId = null;
     (giveUp.listeners.click || []).forEach((fn) => fn({ target: giveUp }));
-    check("㉿R3 点『放弃』= 选中那条 Pass 候选", (() => {
+    check("㉿R4 点右端『放弃』= 选中 Pass、提交按钮可点（不越权提交）", (() => {
       const picked = ui.buildAction();
-      return picked !== null && picked.kind === "Pass";
-    })(), `buildAction=${JSON.stringify(ui.buildAction())}`);
-    check("㉿R4 点『放弃』后提交按钮可点", $("btn-submit").disabled === false);
+      return picked !== null && picked.kind === "Pass" && $("btn-submit").disabled === false;
+    })(), `buildAction=${JSON.stringify(ui.buildAction())} disabled=${$("btn-submit").disabled}`);
   }
+  ui.state.sessionId = savedSession;
   ui.state.view = saved;
   ui.resetSelection();
 }
@@ -2357,6 +2387,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   });
   suitView.skills = [fanjianSkill];
   suitView.heroes = { 0: "zhouyu", 1: "guanyu" };
+  // U1-03：界面只在**询问者就是自己**时铺可点控件；这一问的 actor 是 1 号位，
+  // 故把查看者也放在 1 号位（真实会话里 human_seat 就是询问者）。
+  suitView.snapshot.seat = 1;
+  suitView.human_seat = 1;
   ui.state.view = suitView;
   ui.resetSelection();
   ui.renderTable();
@@ -2392,6 +2426,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   });
   fanCardView.skills = [fanjianSkill];
   fanCardView.heroes = { 0: "zhouyu", 1: "guanyu" };
+  fanCardView.snapshot.seat = 1;
+  fanCardView.human_seat = 1;
   fanCardView.snapshot.self_hand = [];
   ui.state.view = fanCardView;
   ui.resetSelection();
@@ -2926,8 +2962,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(passiveView);
 
-  check("㉿PZ13 被动入口：没有「发动技能 XXX」选项，技能按钮标出清单",
-    !$("t-options").children.some((b) => /发动技能/.test(b.textContent))
+  check("㉿PZ13 被动入口：浮动选项行只给「进入预发动」，没有「发动技能 XXX」选项，技能按钮标出清单",
+    $("t-options").children.some((b) => /进入预发动/.test(b.textContent))
+      && !$("t-options").children.some((b) => /发动技能/.test(b.textContent))
       && (() => {
         const b = $("t-skills").children.find((x) => x.getAttribute("data-skill-id") === "demo.passive");
         return !!b && b.disabled === false && b.getAttribute("data-preactivation") === "1";
@@ -3423,7 +3460,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     pool: [{ when: [], options: ["51"] }],
   };
   const holderPending = {
-    kind: "RESPOND", actor: 1, seq: 92, cause: "BORROWED_SWORD", required: "slash",
+    kind: "RESPOND", actor: 0, seq: 92, cause: "BORROWED_SWORD", required: "slash",
     prompt: "【借刀杀人】：对 2 号位使用【杀】，或交出武器。",
     legal_actions: [
       { kind: "UseCard", card: realSlash, targets: [2], answers_seq: 92 },
@@ -3450,10 +3487,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(holderView);
 
-  const passButton = $("t-options").children.find((c) => c.textContent === "交出武器");
-  check("㉿BS8 持刀者窗口：`Pass` 按钮文案 =「交出武器」（不是「放弃」）",
-    !!passButton,
-    `options=${$("t-options").children.map((c) => c.textContent).join(" / ")}`);
+  const passButton = $("btn-pass");
+  check("㉿BS8 持刀者窗口：`Pass` 按钮在右端、文案 =「交出武器」（不是「放弃」）",
+    !!passButton && passButton.hidden === false && passButton.textContent === "交出武器",
+    `hidden=${passButton && passButton.hidden} text="${passButton && passButton.textContent}" options=${$("t-options").children.map((c) => c.textContent).join(" / ")}`);
   check("㉿BS9 持刀者窗口：提示行写出「对 Bn 使用【杀】，或交出武器」",
     $("t-prompt").textContent.includes("交出武器")
       && $("t-prompt").textContent.includes("2 号位"),
@@ -3579,8 +3616,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `selected=${JSON.stringify(ui.state.selectedTargets)}`);
 
   check("㉿FT7 借刀窗口的 `Pass` 仍写作「交出武器」（b 支不变）",
-    $("t-options").children.some((c) => c.textContent === "交出武器"),
-    `options=${$("t-options").children.map((c) => c.textContent).join(" / ")}`);
+    $("btn-pass").hidden === false && $("btn-pass").textContent === "交出武器",
+    `btn-pass="${$("btn-pass").textContent}" hidden=${$("btn-pass").hidden} options=${$("t-options").children.map((c) => c.textContent).join(" / ")}`);
   ui.resetSelection();
 }
 
@@ -4561,6 +4598,478 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.state.view = saved;
   ui.resetSelection();
   ui.renderTable();
+}
+
+/* ============ U1-03：提示条 / 倒计时 / 选项行 / 模态 ============
+ *
+ * 判据来自票面 `03` 与 spec §3.3 / §3.4：
+ * - 自己的提示条在手牌区正上方、只横跨手牌区；其他座位的询问只在**其武将块下方**
+ *   显示文本，不给可点按钮、不给倒计时；
+ * - 简单询问走浮动选项行；提交 / 取消 / 结束出牌 / 放弃在提示条右端；
+ * - 倒计时共用 lobby timeout，进度条 + 剩余秒 + 默认动作，绿 / 黄 / 红、最后 5 秒闪烁；
+ * - 模态：正中 / 可滚 / 背景与 ESC 可关 / 打开时背景不可操作 / 不暂停倒计时且内部不显示。
+ *
+ * 这里先钉**归属**（自己 vs 其他座位）与静态骨架；颜色 / 模态开关在同文件后面的
+ * U1-03 小节续钉。
+ */
+
+{
+  const handAreaAt = html.indexOf('class="hand-area"');
+  const bottomAt = html.indexOf('id="table-bottom"');
+  const promptbarAt = html.indexOf('id="t-promptbar"');
+  const handAt = html.indexOf('id="t-hand"');
+  check("U1-03a 提示条在手牌区正上方、只横跨手牌区（在 .hand-area 内、#t-hand 之前）",
+    bottomAt >= 0 && bottomAt < handAreaAt && handAreaAt < promptbarAt && promptbarAt < handAt,
+    `bottom=${bottomAt} handArea=${handAreaAt} promptbar=${promptbarAt} hand=${handAt}`);
+  check("U1-03b 提示条右端有 提交 / 取消 / 结束出牌 / 放弃 四个动作位",
+    ['btn-submit', 'btn-cancel', 'btn-end-phase', 'btn-pass']
+      .every((id) => html.includes(`id="${id}"`)),
+    `submit=${html.includes('id="btn-submit"')} cancel=${html.includes('id="btn-cancel"')} end=${html.includes('id="btn-end-phase"')} pass=${html.includes('id="btn-pass"')}`);
+  check("U1-03b2 时长进度条与默认动作文案的容器存在",
+    html.includes('id="t-countdown"') && html.includes('id="t-timer-fill"')
+      && html.includes('id="t-default-label"'),
+    `countdown=${html.includes('id="t-countdown"')} fill=${html.includes('id="t-timer-fill"')} label=${html.includes('id="t-default-label"')}`);
+}
+
+{
+  const pending = {
+    kind: "RESPOND", actor: 1, seq: 9001, prompt: "响应窗口：请打出一张牌，或放弃。",
+    prompt_display: { text: "响应窗口：请打出一张牌，或放弃。", default_label: "超时将自动放弃", default_action: { kind: "Pass", answers_seq: 9001 } },
+    legal_actions: [{ kind: "Pass", answers_seq: 9001 }],
+    candidate_index: {}, option_seats: {}, context: null,
+  };
+  const view = synthView(pending);
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  const foreign = seatBox(1) && seatBox(1).children.find(
+    (node) => (node.className || "").includes("seat-prompt"),
+  );
+  check("U1-03c 其他座位的询问文本显示在其武将块下方（只有“正在响应…”，不复述询问内容）",
+    !!foreign && foreign.textContent.includes("正在响应")
+      && !foreign.textContent.includes("响应窗口"),
+    `seat1="${seatBox(1) && seatBox(1).text()}"`);
+  check("U1-03d 其他座位的提示不显示可点按钮、也不接管自己的提示条动作",
+    !!foreign
+      && foreign.children.every((node) => node.tagName !== "BUTTON")
+      && !foreign.onclick
+      && $("btn-submit").disabled === true
+      && $("btn-cancel").disabled === true
+      && $("btn-pass").hidden === true,
+    `children=${foreign && foreign.children.map((node) => node.tagName).join(",")} submit=${$("btn-submit").disabled}`);
+  check("U1-03e 其他座位的询问不铺选项行、不显示倒计时",
+    $("t-options").children.length === 0
+      && ($("t-countdown").hidden === true || $("t-timer").textContent === "")
+      && $("t-prompt").textContent.includes("等待其他座位响应"),
+    `options=${$("t-options").children.length} timer="${$("t-timer").textContent}" prompt="${$("t-prompt").textContent}"`);
+}
+
+{
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 9002,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段", default_action: { kind: "EndPhase", answers_seq: 9002 } },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9002 }],
+    candidate_index: {}, option_seats: {}, context: null,
+  };
+  const view = synthView(pending);
+  view.timeout_seconds = 60;
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  check("U1-03f 自己的询问在提示条里，不在座位块下方",
+    $("t-prompt").textContent.includes("出牌阶段")
+      && !(seatBox(0) && seatBox(0).children.some(
+        (node) => (node.className || "").includes("seat-prompt"))),
+    `prompt="${$("t-prompt").textContent}"`);
+}
+
+/* 查看者座位缺失（坏报文 / 未来的观战载荷）：**fail-closed**，不认作自己的询问。 */
+{
+  const view = synthView({
+    kind: "RESPOND", actor: 0, seq: 9005, prompt: "响应窗口：请打出一张牌，或放弃。",
+    prompt_display: { text: "响应窗口：请打出一张牌，或放弃。", default_label: "超时将自动放弃" },
+    legal_actions: [{ kind: "Pass", answers_seq: 9005 }],
+    candidate_index: {}, option_seats: {}, context: null,
+  });
+  delete view.snapshot.seat;
+  view.human_seat = null;
+  view.timeout_seconds = 60;
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderPending(view);
+  check("U1-03f2 查看者座位缺失 ⇒ fail-closed（不铺选项 / 右端动作 / 倒计时）",
+    $("t-options").children.length === 0
+      && $("btn-pass").hidden === true
+      && $("btn-submit").disabled === true
+      && $("t-countdown").hidden === true
+      && $("t-prompt").textContent.includes("等待其他座位响应"),
+    `options=${$("t-options").children.length} passHidden=${$("btn-pass").hidden} submit=${$("btn-submit").disabled} countdown=${$("t-countdown").hidden} prompt="${$("t-prompt").textContent}"`);
+}
+
+/* ---- 简单询问：浮动选项行（是否发动 / 二选一 / 花色） ---- */
+
+{
+  const pending = {
+    kind: "SELECT_OPTION", actor: 0, seq: 9004, prompt: "请选择一项。",
+    prompt_display: { text: "请选择一项。", default_label: "超时将自动选择第一项" },
+    legal_actions: [
+      { kind: "SelectOption", choice: "heart", answers_seq: 9004 },
+      { kind: "SelectOption", choice: "spade", answers_seq: 9004 },
+    ],
+    candidate_index: {}, option_seats: {}, context: null,
+  };
+  const view = synthView(pending);
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  const options = $("t-options").children;
+  check("U1-03g0 简单询问（二选一 / 花色）出浮动选项行，且回到提示条内",
+    options.length === 2
+      && $("t-options-home").children.includes($("t-options")),
+    `options=${options.length} home=${$("t-options-home").children.includes($("t-options"))}`);
+  (options[0].listeners.click || []).forEach((fn) => fn({ target: options[0] }));
+  const picked = ui.buildAction();
+  check("U1-03g1 点浮动选项 = 选中候选里的那条 SelectOption（提交仍由玩家按）",
+    !!picked && picked.kind === "SelectOption" && picked.choice === "heart"
+      && $("btn-submit").disabled === false,
+    JSON.stringify(picked));
+}
+
+/* ---- 右端动作：结束出牌 / 放弃 是候选里的原动作，不在浮动选项行里 ---- */
+
+{
+  const slash = { ...synthCard(84, "杀"), type: "slash" };
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 9003,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [
+      { answers_seq: 9003, kind: "UseCard", card: slash, targets: [] },
+      { answers_seq: 9003, kind: "EndPhase" },
+    ],
+    candidate_index: {
+      84: { card: slash, pool: [], min_targets: 0, max_targets: 0, combos: [[]] },
+    },
+    option_seats: {}, context: null,
+  };
+  const view = synthView(pending);
+  view.snapshot.self_hand = [slash];
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  check("U1-03aa 结束出牌在提示条右端，不出现在浮动选项行",
+    $("btn-end-phase").hidden === false
+      && $("btn-pass").hidden === true
+      && !$("t-options").children.some((node) => /结束出牌/.test(node.textContent || "")),
+    `endHidden=${$("btn-end-phase").hidden} passHidden=${$("btn-pass").hidden} options=${JSON.stringify($("t-options").children.map((node) => node.textContent))}`);
+  const savedSession = ui.state.sessionId;
+  ui.state.sessionId = null;
+  const before = calls.length;
+  ($("btn-end-phase").listeners.click || []).forEach((fn) => fn({ target: $("btn-end-phase") }));
+  check("U1-03ab 点右端「结束出牌」= 选中候选里的那条 EndPhase（不自己拼 Action、合成态不提交）",
+    (() => {
+      const action = ui.buildAction();
+      return !!action && action.kind === "EndPhase" && $("btn-submit").disabled === false;
+    })() && calls.length === before,
+    `action=${JSON.stringify(ui.buildAction())} calls=${calls.length - before}`);
+  ui.state.sessionId = savedSession;
+}
+
+/* ---- 倒计时：进度条 / 三色 / 最后 5 秒闪烁 / 默认动作 / 前端不代答 ---- */
+
+{
+  const timedPending = (label, seq) => ({
+    kind: "PLAY_PHASE", actor: 0, seq,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: {
+      text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      default_label: label,
+      default_action: { kind: "EndPhase", answers_seq: seq },
+    },
+    legal_actions: [{ kind: "EndPhase", answers_seq: seq }],
+    candidate_index: {}, option_seats: {}, context: null,
+  });
+  const renderTimed = (pending, timeout, elapsedSeconds) => {
+    const view = synthView(pending);
+    view.timeout_seconds = timeout;
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+    ui.state.pendingClock.receivedAt = Date.now() - elapsedSeconds * 1000;
+    ui.renderCountdown(view);
+    return view;
+  };
+
+  check("U1-03g 倒计时三色是剩余比例的纯函数（绿 > 50% > 黄 > 20% ≥ 红）",
+    typeof ui.countdownPhase === "function"
+      && ui.countdownPhase(60, 60) === "green"
+      && ui.countdownPhase(31, 60) === "green"
+      && ui.countdownPhase(30, 60) === "yellow"
+      && ui.countdownPhase(20, 60) === "yellow"
+      && ui.countdownPhase(10, 60) === "red"
+      && ui.countdownPhase(0, 60) === "red",
+    ["green", "yellow", "red"].map((phase, at) => `${phase}:${ui.countdownPhase ? ui.countdownPhase([60, 30, 10][at], 60) : "n/a"}`).join(" "));
+
+  renderTimed(timedPending("超时将自动结束出牌阶段", 9101), 60, 0);
+  check("U1-03h 倒计时初始：绿、满格、剩余秒 + 默认动作文案都在提示条右端",
+    $("t-countdown").hidden === false
+      && $("t-countdown").getAttribute("data-phase") === "green"
+      && parseFloat($("t-timer-fill").style.width) > 95
+      && /剩余 60 秒/.test($("t-timer").textContent)
+      && $("t-default-label").textContent === "超时将自动结束出牌阶段",
+    `phase=${$("t-countdown").getAttribute("data-phase")} fill=${$("t-timer-fill").style.width} timer="${$("t-timer").textContent}" label="${$("t-default-label").textContent}"`);
+
+  renderTimed(timedPending("超时将自动放弃", 9102), 60, 35);
+  check("U1-03i 剩余 25 秒（< 50%）转黄",
+    $("t-countdown").getAttribute("data-phase") === "yellow"
+      && $("t-countdown").classList.contains("blink") === false
+      && /剩余 25 秒/.test($("t-timer").textContent)
+      && $("t-default-label").textContent === "超时将自动放弃",
+    `phase=${$("t-countdown").getAttribute("data-phase")} blink=${$("t-countdown").classList.contains("blink")} timer="${$("t-timer").textContent}"`);
+
+  renderTimed(timedPending("超时将自动选择第一项", 9103), 60, 56);
+  check("U1-03j 最后 5 秒转红并闪烁；默认动作是「选择第一项」（强制选择）",
+    $("t-countdown").getAttribute("data-phase") === "red"
+      && $("t-countdown").classList.contains("blink") === true
+      && /剩余 4 秒/.test($("t-timer").textContent)
+      && $("t-default-label").textContent === "超时将自动选择第一项",
+    `phase=${$("t-countdown").getAttribute("data-phase")} blink=${$("t-countdown").classList.contains("blink")} timer="${$("t-timer").textContent}" label="${$("t-default-label").textContent}"`);
+
+  const beforeExpire = calls.length;
+  renderTimed(timedPending("超时将自动放弃", 9104), 60, 61);
+  check("U1-03k 到时限只显示「服务端即将代答」，前端不发任何请求（代答唯一真源在服务端）",
+    /服务端即将代答/.test($("t-timer").textContent)
+      && $("t-countdown").getAttribute("data-phase") === "red"
+      && $("t-countdown").classList.contains("blink") === false
+      && calls.length === beforeExpire,
+    `timer="${$("t-timer").textContent}" calls=${calls.length - beforeExpire}`);
+
+  // 其他座位的询问 / 回放 / 时限关闭：都不显示倒计时。
+  const foreignTimed = synthView({
+    kind: "RESPOND", actor: 1, seq: 9105, prompt: "响应窗口：请打出一张牌，或放弃。",
+    prompt_display: { text: "响应窗口：请打出一张牌，或放弃。", default_label: "超时将自动放弃" },
+    legal_actions: [{ kind: "Pass", answers_seq: 9105 }],
+    candidate_index: {}, option_seats: {}, context: null,
+  });
+  foreignTimed.timeout_seconds = 60;
+  ui.state.view = foreignTimed;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(foreignTimed);
+  check("U1-03l 其他座位 / AI 的询问不显示倒计时",
+    $("t-countdown").hidden === true && $("t-timer").textContent === "",
+    `hidden=${$("t-countdown").hidden} timer="${$("t-timer").textContent}"`);
+
+  const playbackView = renderTimed(timedPending("超时将自动放弃", 9106), 60, 0);
+  ui.state.playback = { body: {}, records: [], index: 0 };
+  ui.renderCountdown(playbackView);
+  check("U1-03m 回放期间不显示倒计时",
+    $("t-countdown").hidden === true && $("t-timer").textContent === "",
+    `hidden=${$("t-countdown").hidden} timer="${$("t-timer").textContent}"`);
+  ui.state.playback = null;
+
+  const noTimeoutView = renderTimed(timedPending("超时将自动放弃", 9107), null, 0);
+  check("U1-03n 时限关闭（null）时不显示倒计时",
+    $("t-countdown").hidden === true && $("t-timer").textContent === "",
+    `hidden=${$("t-countdown").hidden} timer="${$("t-timer").textContent}"`);
+  ui.renderCountdown(noTimeoutView);
+
+  // 真会话：服务端下发 prompt_display（默认动作文案）+ lobby 时限，界面据此起表。
+  const timedSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: 45, seed: 5,
+  });
+  await openSession(timedSession);
+  const timedPendingReal = ui.state.view.pending;
+  check("U1-03o 真会话：自己的询问带服务端默认动作文案，倒计时开始走",
+    !!timedPendingReal
+      && !!timedPendingReal.prompt_display
+      && ["超时将自动放弃", "超时将自动结束出牌阶段", "超时将自动选择第一项"]
+        .includes(timedPendingReal.prompt_display.default_label)
+      && $("t-countdown").hidden === false
+      && ["green", "yellow", "red"].includes($("t-countdown").getAttribute("data-phase"))
+      && $("t-default-label").textContent === timedPendingReal.prompt_display.default_label,
+    `label=${timedPendingReal && timedPendingReal.prompt_display && timedPendingReal.prompt_display.default_label} phase=${$("t-countdown").getAttribute("data-phase")} timer="${$("t-timer").textContent}"`);
+}
+
+/* ---- 共享模态：正中 / 可滚 / 背景与 ESC 可关 / 背景不可操作 / 不暂停倒计时 ---- */
+
+{
+  const card = synthCard(81, "杀");
+  const makePending = (seq) => ({
+    kind: "PLAY_PHASE", actor: 0, seq,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: seq }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {
+      "demo.modal": [
+        {
+          name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["81"] }],
+        },
+        {
+          name: "seat", zones: [], min: 1, max: 1, order: 1,
+          pool: [{ when: [], options: ["seat:1", "seat:2"] }],
+        },
+      ],
+    },
+    preactivation: [],
+  });
+  const makeView = (seq) => {
+    const view = synthView(makePending(seq));
+    view.timeout_seconds = 60;
+    view.snapshot.self_hand = [card];
+    view.skills = [{
+      skill_id: "demo.modal", name: "示例模态", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: true, preactivated: true,
+      ui: { requirement: "", convert_sources: [] },
+    }];
+    return view;
+  };
+  const enterModal = () => {
+    const view = makeView(9201);
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+    const button = $("t-skills").children.find(
+      (node) => node.getAttribute("data-skill-id") === "demo.modal");
+    (button.listeners.click || []).forEach((fn) => fn({ target: button }));
+    return view;
+  };
+
+  let view = enterModal();
+  check("U1-03p 多步技能清单打开中央模态（标题 + 清单在模态正文里）",
+    $("t-modal").hidden === false
+      && /预发动/.test($("t-modal-title").textContent)
+      && $("t-modal-body").children.includes($("t-options")),
+    `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" bodyChildren=${$("t-modal-body").children.length}`);
+  check("U1-03q 模态打开时顶栏不可操作（inert），舞台 / 底部仍可点（选目标 + 手牌）",
+    $("table-topbar").getAttribute("inert") !== undefined
+      && $("table-stage").getAttribute("inert") === undefined
+      && $("table-bottom").getAttribute("inert") === undefined
+      && $("t-modal").getAttribute("inert") === undefined
+      && $("table-shell").classList.contains("modal-open")
+      && $("t-modal-backdrop").hidden === false,
+    `topbar=${$("table-topbar").getAttribute("inert")} stage=${$("table-stage").getAttribute("inert")} bottom=${$("table-bottom").getAttribute("inert")} openClass=${$("table-shell").classList.contains("modal-open")} backdropHidden=${$("t-modal-backdrop").hidden}`);
+  check("U1-03r 模态内不显示倒计时（倒计时留在提示条上）",
+    !$("t-modal-body").text().includes("剩余")
+      && $("t-countdown").hidden === false
+      && $("t-default-label").textContent.includes("超时")
+      && !$("t-modal-body").children.includes($("t-countdown")),
+    `bodyText="${$("t-modal-body").text().slice(0, 60)}" countdownHidden=${$("t-countdown").hidden} countdownInBody=${$("t-modal-body").children.includes($("t-countdown"))}`);
+
+  // 不暂停：模态开着时只挪本地锚点，倒计时照常从绿 → 黄 → 红。
+  ui.state.pendingClock.receivedAt = Date.now() - 35 * 1000;
+  ui.renderCountdown(view);
+  const yellowWhileOpen = $("t-countdown").getAttribute("data-phase");
+  ui.state.pendingClock.receivedAt = Date.now() - 56 * 1000;
+  ui.renderCountdown(view);
+  check("U1-03s 模态打开不暂停倒计时（黄 → 红 + 闪烁仍在提示条上走）",
+    yellowWhileOpen === "yellow"
+      && $("t-countdown").getAttribute("data-phase") === "red"
+      && $("t-countdown").classList.contains("blink") === true
+      && $("t-countdown").hidden === false,
+    `yellow=${yellowWhileOpen} now=${$("t-countdown").getAttribute("data-phase")} blink=${$("t-countdown").classList.contains("blink")}`);
+
+  // 第 1 步选牌：模态外的**手牌**仍可点（底部面板不 inert）。
+  const handChip = $("t-hand").children[0];
+  (handChip.listeners.click || []).forEach((fn) => fn({ target: handChip }));
+  check("U1-03t 模态打开时仍能手牌选来源牌（底部提示条 / 手牌交互未被挡）",
+    JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[0].values) === "[81]",
+    JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[0].values));
+
+  // 第 2 步是**选目标**：模态可能挡住环上某几个座位，故模态正文里同时铺座位按钮；
+  // 环上高亮也仍在（舞台不 inert）。两条入口写同一个答案。
+  const next = $("t-options").children.find((node) => node.textContent === "下一步");
+  (next.listeners.click || []).forEach((fn) => fn({ target: next }));
+  const seatOption = $("t-options").children.find(
+    (node) => (node.className || "").includes("seat-opt")
+      && (node.textContent || "").includes("座位 1"));
+  check("U1-03t2 模态里的座位按钮与环上座位都可选目标（被窗口挡住的座位也有入口）",
+    !!seatOption && seatBox(1).classList.contains("targetable"),
+    `seatOption="${seatOption && seatOption.textContent}" targetable=${seatBox(1).classList.contains("targetable")}`);
+  (seatOption.listeners.click || []).forEach((fn) => fn({ target: seatOption }));
+  check("U1-03t3 点模态里的座位按钮 = 写入同一个答案（可拼出复合 ActivateSkill）",
+    (() => {
+      const action = ui.buildAction();
+      return !!action && action.kind === "ActivateSkill"
+        && JSON.stringify(action.choices) === '["seat:1"]';
+    })(),
+    JSON.stringify(ui.buildAction()));
+
+  // ESC = 关闭（预发动 = 取消本地态，零提交）；再进一次，点背景遮罩同样关闭。
+  const beforeEsc = calls.length;
+  fireDocument("keydown", { key: "Escape" });
+  check("U1-03u ESC 关闭模态；预发动关闭 = 取消本地态、零 action 提交",
+    $("t-modal").hidden === true
+      && ui.state.preactivation === null
+      && calls.length === beforeEsc,
+    `hidden=${$("t-modal").hidden} pre=${ui.state.preactivation} calls=${calls.length - beforeEsc}`);
+
+  view = enterModal();
+  const beforeBackdrop = calls.length;
+  ($("t-modal-backdrop").listeners.click || []).forEach((fn) => fn({ target: $("t-modal-backdrop") }));
+  check("U1-03v 点背景遮罩也能关闭模态（同样零提交）",
+    $("t-modal").hidden === true
+      && ui.state.preactivation === null
+      && calls.length === beforeBackdrop,
+    `hidden=${$("t-modal").hidden} pre=${ui.state.preactivation} calls=${calls.length - beforeBackdrop}`);
+
+  // 排列（强制选择）：同一个模态壳；关闭只收起，右端出现「查看排列」可重开。
+  const arrangePending = {
+    kind: "ARRANGE", actor: 0, seq: 9202, timing: "PHASE_PREPARE",
+    prompt: "请排列这些牌：给出顺序与前几张置于牌堆顶。",
+    revealed: [synthCard(82, "八卦阵"), synthCard(83, "闪")],
+    legal_actions: [{ answers_seq: 9202, kind: "ArrangeCards", order: [0, 1], split: 2 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+    arrange: { count: 2, split: "free" },
+  };
+  const arrangeView = synthView(arrangePending);
+  arrangeView.timeout_seconds = 60;
+  ui.state.view = arrangeView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(arrangeView);
+  check("U1-03w 编排 / 排列面也走同一个中央模态",
+    $("t-modal").hidden === false
+      && $("t-modal-title").textContent === "排列"
+      && $("t-modal-body").children.includes($("t-options")),
+    `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}"`);
+  const arrangeActionBefore = JSON.stringify(ui.buildAction());
+  fireDocument("keydown", { key: "Escape" });
+  check("U1-03x 排列模态可收起（强制选择无取消，但保留已摆顺序 + 重开入口）",
+    $("t-modal").hidden === true
+      && $("btn-show-modal").hidden === false
+      && $("table-stage").getAttribute("inert") === undefined
+      && JSON.stringify(ui.buildAction()) === arrangeActionBefore,
+    `hidden=${$("t-modal").hidden} reopenHidden=${$("btn-show-modal").hidden} action=${JSON.stringify(ui.buildAction())}`);
+  ($("btn-show-modal").listeners.click || []).forEach((fn) => fn({ target: $("btn-show-modal") }));
+  check("U1-03y 「查看排列」重新打开模态，顺序不变",
+    $("t-modal").hidden === false
+      && $("btn-show-modal").hidden === true
+      && JSON.stringify(ui.buildAction()) === arrangeActionBefore,
+    `hidden=${$("t-modal").hidden} reopenHidden=${$("btn-show-modal").hidden}`);
+
+  // 静态规范：屏幕正中 / 正文可滚 / 遮罩不挡底部操作条。
+  const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  check("U1-03z 模态 CSS：舞台区正中、正文可滚、遮罩只盖舞台且不挡底部操作条",
+    /\.modal\s*\{[^}]*align-items:\s*center[^}]*justify-content:\s*center/s.test(css)
+      && /\.modal\s*\{[^}]*bottom:\s*27\.5%/s.test(css)
+      && /\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)
+      && /\.modal-backdrop\s*\{[^}]*bottom:\s*27\.5%/s.test(css)
+      && /\.modal\s*\{[^}]*pointer-events:\s*none/s.test(css)
+      && /\.modal-window\s*\{[^}]*pointer-events:\s*auto/s.test(css),
+    `modal=${/\.modal\s*\{[^}]*align-items:\s*center[^}]*justify-content:\s*center/s.test(css)} body=${/\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)} backdrop=${/\.modal-backdrop\s*\{[^}]*bottom:\s*27\.5%/s.test(css)}`);
+  ui.resetSelection();
+  ui.state.view = null;
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

@@ -126,13 +126,24 @@
             <p id="t-prompt" class="prompt">（等引擎提问）</p>
             <p id="t-skill-hints" class="hint"></p>
             <p id="t-target-hint" class="hint"></p>
-            <div id="t-options" class="options"></div>
+            <div id="t-options-home" class="options-home">
+              <div id="t-options" class="options"></div>
+            </div>
           </div>
           <div class="prompt-side">
-            <span id="t-timer" class="timer"></span>
+            <!-- 倒计时：进度条 + 剩余秒 + 默认动作（U1-03）。服务端 `prompt_display` 给
+                 默认动作文案；前端只显示，不自己代答（timeout.py 是唯一真源）。 -->
+            <div id="t-countdown" class="countdown" data-phase="off" hidden>
+              <div class="timer-bar"><span id="t-timer-fill" class="timer-fill"></span></div>
+              <span id="t-timer" class="timer"></span>
+              <span id="t-default-label" class="default-label"></span>
+            </div>
             <div class="prompt-actions">
               <button id="btn-submit" type="button" class="primary" disabled>提交</button>
               <button id="btn-cancel" type="button" class="ghost" disabled>清空选择</button>
+              <button id="btn-end-phase" type="button" class="ghost" hidden>结束出牌</button>
+              <button id="btn-pass" type="button" class="ghost" hidden>放弃</button>
+              <button id="btn-show-modal" type="button" class="ghost" hidden>查看</button>
             </div>
             <span id="t-choice" class="dim"></span>
           </div>
@@ -168,6 +179,21 @@
         </select>
       </div>
       <ol id="t-log" class="log"></ol>
+    </div>
+
+    <!-- 共享模态（U1-03）：多步技能清单 / 排列 / 武将详情共用一套规范。
+         屏幕正中、正文可滚轮翻阅、背景或 ESC 可关；遮罩与弹窗是**两个节点**——
+         遮罩压在舞台背景 / 顶栏之上、座位之下，于是选目标仍能点场上武将，空白背景点击仍可关。
+         倒计时仍在提示条上继续走，模态内**不**显示倒计时。 -->
+    <div id="t-modal-backdrop" class="modal-backdrop" hidden></div>
+    <div id="t-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="t-modal-title" hidden>
+      <div class="modal-window">
+        <header class="modal-head">
+          <h2 id="t-modal-title" class="modal-title"></h2>
+          <button id="t-modal-close" type="button" class="ghost" title="关闭（Esc）">关闭</button>
+        </header>
+        <div id="t-modal-body" class="modal-body"></div>
+      </div>
     </div>
   </div>
 </main>
@@ -236,6 +262,7 @@
 <script src="interaction.js"></script>
 <script src="pending.js"></script>
 <script src="options.js"></script>
+<script src="modal.js"></script>
 <script src="arrange.js"></script>
 <script src="answer.js"></script>
 <script src="log.js"></script>

@@ -4,17 +4,81 @@
  */
 "use strict";
 
-function renderCountdown(view) {
+/** 倒计时着色分界（剩余 / 总时限）：≤ 20% 红、≤ 50% 黄、其余绿；最后 5 秒必红 + 闪烁。 */
+const COUNTDOWN_RED_AT = 0.2;
+const COUNTDOWN_YELLOW_AT = 0.5;
+const COUNTDOWN_BLINK_SECONDS = 5;
+
+/** 剩余秒 → 进度条颜色阶段（纯函数：便于烟测钉住三色与闪烁边界）。 */
+function countdownPhase(remain, total) {
+  const left = Number(remain);
+  const limit = Number(total);
+  if (!Number.isFinite(left) || !Number.isFinite(limit) || limit <= 0) return "off";
+  if (left <= 0) return "red";
+  const ratio = left / limit;
+  if (left <= COUNTDOWN_BLINK_SECONDS || ratio <= COUNTDOWN_RED_AT) return "red";
+  if (ratio <= COUNTDOWN_YELLOW_AT) return "yellow";
+  return "green";
+}
+
+function resetCountdown() {
+  const box = $("t-countdown");
+  if (box) {
+    box.hidden = true;
+    box.setAttribute("data-phase", "off");
+    box.classList.remove("blink");
+  }
   const timer = $("t-timer");
-  if (!view || !view.pending || view.timeout_seconds === null) {
-    timer.textContent = "";
+  if (timer) timer.textContent = "";
+  const fill = $("t-timer-fill");
+  if (fill) {
+    fill.style.width = "0%";
+  }
+  const label = $("t-default-label");
+  if (label) label.textContent = "";
+}
+
+/** 倒计时（U1-03）：进度条 + 剩余秒 + 默认动作；只显示**自己的**人类询问。
+ *
+ * 时间锚点住在 `state.pendingClock`（同一 `pending.seq` 轮询刷新不重置）。真正
+ * 代答在服务端（`timeout.py`）；本函数**只读**，不提交、不刷新、不碰 `legal_actions`。
+ */
+function renderCountdown(view) {
+  const box = $("t-countdown");
+  const timer = $("t-timer");
+  if (!box || !timer) return;
+  const pending = view && view.pending;
+  const timeout = view ? view.timeout_seconds : null;
+  if (
+    !pending
+    || !isOwnPending(pending, view)
+    || timeout === null || timeout === undefined || Number(timeout) <= 0
+    || state.playback
+    || (view && view.finished)
+  ) {
+    resetCountdown();
     return;
   }
-  // 服务端用的是单调时钟，与浏览器时钟不可比；这里只用"收到的本地时刻 + 时限"做倒计时。
-  // 真正的代答**在服务端**（纯函数，见 timeout.py）：前端只显示、绝不自己代答。
-  const received = view.received_at || (view.received_at = Date.now());
-  const remain = Math.max(0, view.timeout_seconds - (Date.now() - received) / 1000);
-  timer.textContent = remain > 0 ? `剩余 ${remain.toFixed(0)} 秒` : "已到时限，服务端即将代答";
+  const total = Number(timeout);
+  // 服务端用的是单调时钟，与浏览器时钟不可比；这里只用"第一次见到这一问的本地时刻 + 时限"。
+  const received = state.pendingClock.receivedAt || Date.now();
+  const remain = Math.max(0, total - (Date.now() - received) / 1000);
+  const phase = countdownPhase(remain, total);
+  box.hidden = false;
+  box.setAttribute("data-phase", phase);
+  box.classList.toggle("blink", remain > 0 && remain <= COUNTDOWN_BLINK_SECONDS);
+  const fill = $("t-timer-fill");
+  if (fill) {
+    const ratio = Math.max(0, Math.min(1, remain / total));
+    fill.style.width = `${(ratio * 100).toFixed(1)}%`;
+  }
+  timer.textContent = remain > 0
+    ? `剩余 ${Math.ceil(remain)} 秒`
+    : "已到时限，服务端即将代答";
+  const label = $("t-default-label");
+  if (label) {
+    label.textContent = (pending.prompt_display && pending.prompt_display.default_label) || "";
+  }
 }
 
 /* ------------------------------------------------------------------ 提交 */
@@ -82,6 +146,29 @@ function buildAction() {
     ) || null;
   }
   return null;
+}
+
+/** 提示条右端的两个动作按钮：选中候选里的那条 `EndPhase` / `Pass` 并提交。
+ *
+ * 与浮动选项行里的按钮不同，它们表示"这一问就到此为止"，所以点一下 = 选中 + 提交；
+ * 合成载荷 / 尚未建局（`state.sessionId` 为空）时只选中，不朝不存在的会话发请求。
+ * 提交的仍是**原样取自** `legal_actions` 的那一条——前端不自己拼 Action。
+ */
+async function submitRightAction(kind) {
+  if (state.playback) return;
+  const pending = state.view ? state.view.pending : null;
+  const index = rightActionIndex(pending, kind);
+  if (index < 0) return;
+  state.selectedOption = index;
+  state.focusCardId = null;
+  state.selectedTargets = [];
+  state.picks = [];
+  state.preactivation = null;
+  state.lastRejectReason = "";
+  renderTable();
+  renderPending(state.view);
+  if (!state.sessionId) return;
+  await submitAction();
 }
 
 async function submitAction() {

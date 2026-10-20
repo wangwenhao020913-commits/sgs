@@ -348,14 +348,46 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .promptbar .prompt { margin: 0; font-size: 13px; font-weight: 600; }
 .promptbar .hint { margin: 0; font-size: 11px; }
 .promptbar .options { flex-direction: row; flex-wrap: wrap; gap: 6px; margin: 4px 0 0; }
+.options-home { min-width: 0; }
 .prompt-side {
-  flex: 0 0 auto; display: flex; flex-direction: row; align-items: center;
-  justify-content: flex-end; flex-wrap: wrap; gap: 6px;
+  flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end;
+  justify-content: flex-end; flex-wrap: wrap; gap: 4px;
 }
-.prompt-actions { display: flex; gap: 6px; }
+.prompt-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .prompt-actions button { padding: 4px 10px; font-size: 12px; }
-.prompt-side .timer { font-size: 12px; }
 .prompt-side .dim { font-size: 11px; }
+
+/* 倒计时（U1-03）：进度条 + 剩余秒 + 默认动作；绿 → 黄 → 红，最后 5 秒闪烁。
+ * 真源是服务端 timeout.py；这里只画 `view.timeout_seconds` 与 `pending.prompt_display`。 */
+.countdown { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
+.countdown[hidden] { display: none !important; }
+.timer-bar {
+  flex: 0 0 92px; height: 6px; border-radius: 999px;
+  background: #e6e1d8; overflow: hidden;
+}
+.timer-fill {
+  display: block; width: 100%; height: 100%;
+  background: var(--ok);
+  transition: width .25s linear, background-color .25s ease;
+}
+.countdown[data-phase="yellow"] .timer-fill { background: #b8860b; }
+.countdown[data-phase="red"] .timer-fill { background: var(--accent); }
+.countdown .timer { font-size: 12px; color: var(--ink); }
+.countdown[data-phase="yellow"] .timer { color: #8a6508; }
+.countdown[data-phase="red"] .timer { color: var(--accent); }
+.countdown .default-label { font-size: 11px; color: var(--dim); max-width: 170px; }
+.countdown.blink { animation: countdown-blink .6s steps(2, start) infinite; }
+@keyframes countdown-blink { 50% { opacity: .3; } }
+
+/* 其他座位的询问：只在**其武将块下方**显示文本，不给按钮、不给倒计时。 */
+.seat-prompt {
+  margin-top: 2px; padding-top: 4px;
+  border-top: 1px dashed var(--line);
+  font-size: 11px; line-height: 1.35; color: var(--accent);
+  overflow: hidden; text-overflow: ellipsis;
+}
+.ring .seat { justify-content: flex-start; }
+.ring .seat .seat-prompt { max-height: 3.8em; }
 
 .hand-head { display: flex; align-items: baseline; gap: 8px; padding: 0 2px; }
 .hand-head .tag { margin-left: 0; }
@@ -438,6 +470,59 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 }
 .log-head select { font-size: 12px; padding: 3px 6px; }
 .log-panel .log { flex: 1 1 auto; max-height: none; overflow: auto; font-size: 12px; padding: 8px 10px 8px 26px; }
+
+/* ---------- 共享模态（U1-03）：屏幕正中 / 正文可滚 / 背景或 ESC 可关 ---------- */
+
+.modal {
+  /* 舞台区（顶栏以下、底部面板以上）里居中：窗口再高也不盖住提示条 / 手牌。 */
+  position: absolute; left: 0; right: 0; top: 6.2%; bottom: 27.5%;
+  z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  padding: 2% 4%;
+  /* 底部操作条要留在模态之外可点（手牌选择 / 确认取消），故容器本身不吃指针；
+     真正拦截点击的是遮罩与模态窗口。 */
+  pointer-events: none;
+}
+.modal[hidden] { display: none !important; }
+/* 遮罩在**座位之下**（座位 z-index: 3）：多步技能的选择目标仍要点场上武将，
+ * 空白背景 / 顶栏则落在遮罩上（点击 = 关闭）。 */
+.modal-backdrop {
+  position: absolute; left: 0; right: 0; top: 0; bottom: 27.5%;
+  z-index: 2;
+  background: rgba(28, 26, 23, .42);
+  pointer-events: auto;
+}
+.modal-backdrop[hidden] { display: none !important; }
+/* 模态打开时顶栏 / 舞台中央 / 事件流浮层压到遮罩之下：看得见、点不到。 */
+.table-shell.modal-open .table-topbar,
+.table-shell.modal-open .stage-center,
+.table-shell.modal-open .log-panel { z-index: 1; }
+.modal-window {
+  position: relative;
+  pointer-events: auto;
+  width: min(680px, 66%);
+  max-height: 96%;
+  display: flex; flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(43, 36, 28, .32);
+  overflow: hidden;
+}
+.modal-head {
+  flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 9px 14px; border-bottom: 1px solid var(--line);
+}
+.modal-title { margin: 0; font-size: 15px; }
+.modal-head button { padding: 3px 10px; font-size: 12px; }
+.modal-body {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px 16px;
+}
+.modal-body .options { margin: 0; }
+.modal-body .arrange-row + .arrange-row { margin-top: 10px; }
 
 @media (max-height: 560px) {
   .table-hint { display: block; }

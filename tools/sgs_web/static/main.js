@@ -60,6 +60,10 @@ function wire() {
   });
   $("btn-submit").addEventListener("click", submitAction);
   $("btn-cancel").addEventListener("click", cancelOrClear);
+  // U1-03：提示条右端的两个"到此为止"动作（结束出牌 / 放弃），词表由服务端候选决定。
+  $("btn-end-phase").addEventListener("click", () => submitRightAction(RIGHT_ACTION_KINDS.endPhase));
+  $("btn-pass").addEventListener("click", () => submitRightAction(RIGHT_ACTION_KINDS.pass));
+  wireModal();
   $("btn-refresh").addEventListener("click", refresh);
   $("btn-takeover").addEventListener("click", takeover);
   $("btn-delay").addEventListener("click", cycleDelay);

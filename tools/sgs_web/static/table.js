@@ -120,6 +120,8 @@ function applySeatState(box, flags) {
 /** 座位卡的交互态（可指定 / 已选 / 必选）与点击行为，对手与自己的面板共用一份判据。 */
 function seatInteraction(player, ctx) {
   const { seatOf, handPick, selfOnly, optionChoiceAt, preSeats, pendingNow } = ctx;
+  // 其他座位的询问只显示文本（U1-03）：座位不给可指定 / 可点语义。
+  if (pendingNow && !ctx.ownPending) return { classes: [], handler: null };
   const classes = [];
   let handler = null;
   const seatState = seatOf(player.seat);
@@ -195,6 +197,15 @@ function renderRingSeats(view, ctx) {
       <div class="small">${hero}${identity}</div>
       <div class="small">手牌 ${player.hand_count}　装备 ${(player.equip || []).length}　判定 ${(player.judge || []).length}</div>
       <div class="small">${player.alive ? "" : "已阵亡"}</div>`;
+    // 其他座位的询问（U1-03）：紧贴武将信息下方显示文本，不给按钮 / 倒计时，
+    // 也不复述询问内容（座位块已经写了“座位 N + 武将”）。
+    if (ctx.pendingNow && !ctx.ownPending && Number(ctx.pendingNow.actor) === Number(player.seat)) {
+      const line = document.createElement("div");
+      line.className = "seat-prompt";
+      line.setAttribute("data-seat", String(player.seat));
+      line.textContent = "正在响应…";
+      box.appendChild(line);
+    }
     for (const row of seatZoneRows(player, snapshot, ctx.pendingNow)) box.appendChild(row);
     box.onclick = handler || null;
     ring.appendChild(box);
@@ -271,6 +282,7 @@ function renderTable() {
   renderIdentityPanel(snapshot.players.length);
 
   const pendingNow = view.pending || null;
+  const ownPending = isOwnPending(pendingNow);
   const handPick = isHandPick(pendingNow);
   const seats = pickerSeats(pendingNow);
   const seatOf = (seat) => seats.find((item) => item.seat === seat) || null;
@@ -290,7 +302,7 @@ function renderTable() {
     ? (preactivationOptions(state.preactivation, state.preactivation.cursor)
       || snapshot.players.filter((player) => player.alive).map((player) => `${SEAT_PREFIX}${player.seat}`))
     : null;
-  const ctx = { seatOf, handPick, selfOnly, optionChoiceAt, preSeats, pendingNow };
+  const ctx = { seatOf, handPick, selfOnly, optionChoiceAt, preSeats, pendingNow, ownPending };
 
   renderRingSeats(view, ctx);
   renderSelfSeat(view, ctx);
@@ -385,6 +397,7 @@ function renderSkills(view) {
     return;
   }
   const pending = view.pending;
+  const ownPending = isOwnPending(pending);
   for (const skill of skills) {
     const ui = skill.ui || {};
     const convertCards = ui.convert_sources || [];
@@ -395,9 +408,11 @@ function renderSkills(view) {
     const manifest = preactivationManifest(pending, skill.skill_id);
     // 已翻预发动：**可用性只剩清单**（清单渲不出来 = 此刻不可用，与服务端同一判据）。
     // 转化技：候选或清单任一存在即点得动（清单为空 ⇒ 此刻没有可转化的使用 / 响应）。
-    const usable = preactivated
-      ? Boolean(manifest)
-      : (Boolean(skill.available) || convertCards.length > 0 || Boolean(manifest));
+    const usable = ownPending && (
+      preactivated
+        ? Boolean(manifest)
+        : (Boolean(skill.available) || convertCards.length > 0 || Boolean(manifest))
+    );
     const button = document.createElement("button");
     button.type = "button";
     button.className = "skill";

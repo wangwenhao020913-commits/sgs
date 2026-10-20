@@ -56,6 +56,8 @@
     "arrangeRowOf", "arrangeMoveTo", "arrangePick", "arrangeDrop",
     // 票 19：开局点将——列表拉取 + 开关（关了 = 置灰 + 建局不带 my_hero）
     "loadHeroCatalog", "fillHeroOptions", "syncPointjiang",
+    // U1-03：提示条右端动作的候选下标 + 倒计时的三色纯函数 / 渲染（烟测只读这三口）
+    "rightActionIndex", "countdownPhase", "renderCountdown",
   ];
   const out = {};
   for (const name of names) {
