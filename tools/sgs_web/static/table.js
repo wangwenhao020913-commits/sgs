@@ -77,45 +77,7 @@ function roundNumber(records) {
   return round;
 }
 
-/** 座位卡的装备区 / 判定区行（公开信息，逐座位下发；只写数量分不清"谁的判定区"）。
- *
- * **本人自己**的可见区在「提供一张 B」（票 14）与预发动（W4-1）的选牌步里就地可点；
- * 别人的区与其余窗口保持静态。返回直接可挂到座位节点（或自己面板右块）的行节点。
- */
-function seatZoneRows(player, snapshot, pendingNow) {
-  const rows = [];
-  for (const [zone, cards] of [["equip", player.equip || []], ["judge", player.judge || []]]) {
-    if (!cards.length) continue;
-    const row = document.createElement("div");
-    row.className = "cards mini";
-    row.setAttribute("data-zone", zone);
-    row.setAttribute("data-seat", String(player.seat));
-    for (const card of cards) {
-      const ownInteractive = player.seat === snapshot.seat
-        && (isProvide(pendingNow) || state.preactivation);
-      if (!ownInteractive) {
-        row.appendChild(cardChip(card, false, true));
-        continue;
-      }
-      const face = cardFace(pendingNow, card);
-      row.appendChild(
-        cardChip(card, face.selected, false, face.selectable, () => activateCard(pendingNow, card, face)),
-      );
-    }
-    rows.push(row);
-  }
-  return rows;
-}
-
-/** 座位交互态的类全集：环上与底部面板共用一份（`seatInteraction` 新增状态只改这里）。
- *
- * 环上节点每次重建、底部节点常驻；两边都用 `classList.toggle` 处理，语义一致。
- */
-const SEAT_STATE_CLASSES = ["me", "dead", "turn", "targetable", "tsel", "req"];
-
-function applySeatState(box, flags) {
-  for (const name of SEAT_STATE_CLASSES) box.classList.toggle(name, flags.includes(name));
-}
+/** 座位交互态的类全集 / `applySeatState` 住 `seat-view.js`（U1-02）；环上与底部面板共用一份。 */
 
 /** 座位卡的交互态（可指定 / 已选 / 必选）与点击行为，对手与自己的面板共用一份判据。 */
 function seatInteraction(player, ctx) {
@@ -168,54 +130,8 @@ function renderRingSeats(view, ctx) {
     const player = bySeat.get((snapshot.seat + offset) % snapshot.players.length);
     const position = layout[offset - 1];
     if (!player || !position) continue;
-    const box = document.createElement("div");
-    box.className = "seat opponent";
-    const { classes, handler } = seatInteraction(player, ctx);
-    applySeatState(box, [
-      ...(player.alive ? [] : ["dead"]),
-      ...(player.seat === snapshot.turn_seat ? ["turn"] : []),
-      ...classes,
-    ]);
-    const hero = view.heroes[player.seat] || "（无武将）";
-    // 身份标签优先读服务端展示契约（U1-04）；旧载荷 / 合成局面退回本地映射。
-    const identityLabelText = player.identity
-      ? (player.identity_label || identityLabel(player.identity))
-      : "";
-    const identity = identityLabelText ? ` · ${identityLabelText}` : "";
-    box.setAttribute("data-seat", String(player.seat));
-    // 环桌几何：设计坐标落成属性（烟测据此断言均布 / 无重叠），百分比落成定位。
-    box.setAttribute("data-ring-angle", position.angle.toFixed(2));
-    box.setAttribute("data-ring-x", position.x.toFixed(2));
-    box.setAttribute("data-ring-y", position.y.toFixed(2));
-    box.style.left = `${(position.x / RING_STAGE.width) * 100}%`;
-    box.style.top = `${(position.y / RING_STAGE.height) * 100}%`;
-    box.innerHTML = `
-      <div class="top">
-        <span class="who">座位 ${player.seat}</span>
-        <span class="hp">${hpMarks(player)}</span>
-      </div>
-      <div class="small">${hero}${identity}</div>
-      <div class="small">手牌 ${player.hand_count}　装备 ${(player.equip || []).length}　判定 ${(player.judge || []).length}</div>
-      <div class="small">${player.alive ? "" : "已阵亡"}</div>`;
-    // 其他座位的询问（U1-03）：紧贴武将信息下方显示文本，不给按钮 / 倒计时，
-    // 也不复述询问内容（座位块已经写了“座位 N + 武将”）。
-    if (ctx.pendingNow && !ctx.ownPending && Number(ctx.pendingNow.actor) === Number(player.seat)) {
-      const line = document.createElement("div");
-      line.className = "seat-prompt";
-      line.setAttribute("data-seat", String(player.seat));
-      line.textContent = "正在响应…";
-      box.appendChild(line);
-    }
-    for (const row of seatZoneRows(player, snapshot, ctx.pendingNow)) box.appendChild(row);
-    box.onclick = handler || null;
-    ring.appendChild(box);
+    ring.appendChild(seatCardNode(player, position, view, ctx));
   }
-}
-
-function hpMarks(player) {
-  const hp = Math.max(0, player.hp || 0);
-  const max = Math.max(hp, player.hp_max || 0);
-  return `${"●".repeat(hp)}${"○".repeat(max - hp)}`;
 }
 
 /** 自己的底部面板：武将块（左）+ 判定 / 装备区（右）。节点是常驻的，故只改内容不重建，
@@ -227,25 +143,37 @@ function renderSelfSeat(view, ctx) {
   if (!player || !box) return;
   const { classes, handler } = seatInteraction(player, ctx);
   box.setAttribute("data-seat", String(snapshot.seat));
-  applySeatState(box, [
-    "me",
-    ...(player.alive ? [] : ["dead"]),
-    ...(player.seat === snapshot.turn_seat ? ["turn"] : []),
-    ...classes,
-  ]);
+  applySeatState(box, ctx.flagsFor(player, classes));
   // 静态节点复用：`onclick` 是覆盖式绑定；环上节点也用同一条路，避免两套接法。
   box.onclick = handler || null;
-  $("t-self-seatno").textContent = `座位 ${player.seat}`;
-  $("t-self-identity").textContent = player.identity
-    ? (player.identity_label || identityLabel(player.identity))
-    : "";
-  $("t-self-hp").textContent = hpMarks(player);
+  const kingdom = $("t-self-kingdom");
+  if (kingdom) {
+    kingdom.textContent = player.kingdom_label || "";
+    kingdom.className = `kingdom ${player.kingdom || ""}`;
+    kingdom.setAttribute("title", player.kingdom_label ? `势力：${player.kingdom_label}` : "");
+  }
+  // 武将名读服务端展示契约（U1-02），旧载荷退回武将 id。
+  $("t-hero").textContent = heroNameOf(player, view);
+  const badge = identityBadgeView(player, ctx.identityMode);
+  const identity = $("t-self-identity");
+  identity.textContent = badge.label;
+  identity.className = badge.className;
+  identity.setAttribute("title", badge.title);
+  const hp = hpBarNode(player);
+  const hpBox = $("t-self-hp");
+  hpBox.innerHTML = "";
+  hpBox.className = hp.className;
+  // `hp.children` 是**活集合**：appendChild 会把它搬走，边遍历边搬会漏掉一半节点。
+  for (const segment of [...hp.children]) hpBox.appendChild(segment);
+  fillSeatTags($("t-self-tags"), ctx.flagsFor(player, classes));
+  if ($("t-self-chain")) $("t-self-chain").hidden = !player.chained;
+  if ($("t-self-dead")) $("t-self-dead").hidden = Boolean(player.alive);
   $("t-self-hand").textContent = String(player.hand_count);
-  $("t-hero").textContent = view.heroes[snapshot.seat] || "（无武将）";
+  $("t-self-seatno").textContent = String(player.seat);
   const zones = $("t-self-zones");
   if (zones) {
     zones.innerHTML = "";
-    for (const row of seatZoneRows(player, snapshot, ctx.pendingNow)) zones.appendChild(row);
+    for (const row of sideBlockRows(player, ctx)) zones.appendChild(row);
   }
 }
 
@@ -302,7 +230,26 @@ function renderTable() {
     ? (preactivationOptions(state.preactivation, state.preactivation.cursor)
       || snapshot.players.filter((player) => player.alive).map((player) => `${SEAT_PREFIX}${player.seat}`))
     : null;
-  const ctx = { seatOf, handPick, selfOnly, optionChoiceAt, preSeats, pendingNow, ownPending };
+  // U1-02：座位卡的状态类（自己 / 阵亡 / 当前回合 / 横置 / 酒）+ 交互态（可指定 / 已选 /
+  // 必选）在一处拼齐，环上与底部面板因此不会各写一套判据。2 人局 = 无身份局 ⇒ 不画「?」。
+  const identityMode = snapshot.players.length > 2;
+  const turnSeatNow = snapshot.turn_seat;
+  // `turn_seat` 可以是 null（回合之外 / 终局）：`Number(null) === 0` 会把 0 号位误标成
+  // 「行动中」，故先显式排除空值再比。
+  const isTurnSeat = (seat) => turnSeatNow !== null && turnSeatNow !== undefined
+    && Number(seat) === Number(turnSeatNow);
+  const flagsFor = (player, extra = []) => [
+    ...(Number(player.seat) === Number(snapshot.seat) ? ["me"] : ["opponent"]),
+    ...(player.alive ? [] : ["dead"]),
+    ...(isTurnSeat(player.seat) ? ["turn"] : []),
+    ...(player.chained ? ["chained"] : []),
+    ...(player.wine_active ? ["wine"] : []),
+    ...extra,
+  ];
+  const ctx = {
+    seatOf, handPick, selfOnly, optionChoiceAt, preSeats, pendingNow, ownPending,
+    snapshot, identityMode, flagsFor,
+  };
 
   renderRingSeats(view, ctx);
   renderSelfSeat(view, ctx);
@@ -320,7 +267,10 @@ function renderTable() {
     // 弃牌、技能手选、提供 B、普通手选四条路都在那一个函数里分流，这里不再各写一份。
     const face = cardFace(pendingNow, card);
     hand.appendChild(
-      cardChip(card, face.selected, false, face.selectable, () => activateCard(pendingNow, card, face)),
+      cardChip(
+        card, face.selected, false, face.selectable,
+        () => activateCard(pendingNow, card, face), face.picked,
+      ),
     );
   }
   renderSkills(view);

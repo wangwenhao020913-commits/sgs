@@ -202,10 +202,13 @@ const $ = (id) => documentShim.getElementById(id);
 const seatNodes = () => [...$("t-seats").children, $("t-self-seat")];
 const seatBox = (seat) => seatNodes().find(
   (node) => node.getAttribute("data-seat") === String(seat)) || null;
-/** 自己装备区里的第一张牌（就地高亮的用例共用一处查找）。 */
+/** 自己装备区里的第一张牌（就地高亮的用例共用一处查找）。
+ *
+ * U1-02 起自己的装备区是**固定四槽**（武器 / 防具 / 攻马 / 防马），槽位节点自己带
+ * `data-card-id`；这里找"第一个装了牌的槽"，而不是第一个槽（空槽不该被点）。 */
 const selfEquipChip = () => {
   const row = $("t-self-zones").children.find((c) => c.getAttribute("data-zone") === "equip");
-  return row ? row.children[0] : null;
+  return row ? row.children.find((slot) => slot.getAttribute("data-card-id")) || null : null;
 };
 const setSelect = (id, value) => {
   const node = $(id);
@@ -395,8 +398,12 @@ check("自己在底部独立面板，带 me 标记",
   $("t-self-seat").classList.contains("me")
     && $("t-self-seat").getAttribute("data-seat") === "0",
   `data-seat=${$("t-self-seat").getAttribute("data-seat")} me=${$("t-self-seat").classList.contains("me")}`);
-check("对手座位块显示武将（公开信息）", /[a-z_]{4,}/.test($("t-seats").children[0].text()), $("t-seats").children[0].text().replace(/\s+/g, " ").trim().slice(0, 40));
-check("自己的武将块显示武将", /[a-z_]{4,}/.test($("t-hero").textContent), $("t-hero").textContent);
+// U1-02：武将块显示的是**中文名 + 势力**（服务端 `snapshot.players[].hero_name`），不是引擎 id。
+check("对手座位块显示武将（公开信息）",
+  $("t-seats").children[0].text().includes(created.snapshot.players[1].hero_name),
+  $("t-seats").children[0].text().replace(/\s+/g, " ").trim().slice(0, 40));
+check("自己的武将块显示武将",
+  $("t-hero").textContent === created.snapshot.players[0].hero_name, $("t-hero").textContent);
 check("手牌渲染出牌面且张数一致", $("t-hand").children.length === created.snapshot.self_hand.length && $("t-hand").children.length > 0, `${$("t-hand").children.length} 张`);
 check("对手座位不出现牌面名", !["杀", "闪", "桃", "无懈可击"].some((n) => $("t-seats").children[1].text().includes(n)), $("t-seats").children[1].text().replace(/\s+/g, " ").trim().slice(0, 40));
 check("种子已显示", $("t-seed").textContent === String(created.seed), $("t-seed").textContent);
@@ -461,7 +468,7 @@ if (partial) {
   check("㉿2a 用不出的牌**不成为焦点**", ui.state.focusCardId !== partial.unusable.card_id,
     `focusCardId=${ui.state.focusCardId}`);
   check("㉿2b 用不出的牌被置灰（dis 类）", (() => {
-    const chip = $("t-hand").children.find((c) => (c._html || "").includes(partial.unusable.name) && c.classList.contains("dis"));
+    const chip = $("t-hand").children.find((c) => c.text().includes(partial.unusable.name) && c.classList.contains("dis"));
     return !!chip;
   })(), `手牌里的【${partial.unusable.name}】应当是 dis`);
   check("㉿2c 提交按钮**不可点**", $("btn-submit").disabled === true, `disabled=${$("btn-submit").disabled}`);
@@ -1111,15 +1118,38 @@ const allZonesIndex = replayRecords.findIndex((_, index) => {
 });
 const seatNode = (seat) => $("r-seats").children.find(
   (node) => node.getAttribute("data-seat") === String(seat));
+/** 逐座位区的行：`data-zone` 在行上（回放页仍是旧版 `.cards.mini` 结构）。 */
 const zoneRow = (seat, zone) => {
   const node = seatNode(seat);
   return node ? node.children.find((child) => child.getAttribute("data-zone") === zone) : null;
 };
-const cardText = (card) => `${card.name}${card.suit || ""}${card.rank ?? ""}`;
+/** 回放页的卡面：**名称 + 花色符号 + 点数**仍要逐张比对（U1-02 只是把文本换成卡面，
+ *  不是把「这张牌是什么」的断言降级成 id）。符号 / 点数映射是测试自己的独立对照表。 */
+const REPLAY_SUIT = { spade: "♠", heart: "♥", club: "♣", diamond: "♦" };
+const REPLAY_RANK = { 1: "A", 11: "J", 12: "Q", 13: "K" };
+const cardText = (card) => ({
+  id: String(card.card_id),
+  name: card.name,
+  suit: REPLAY_SUIT[card.suit] || "",
+  rank: REPLAY_RANK[card.rank] || (card.rank === null || card.rank === undefined ? "" : String(card.rank)),
+});
 const cardsIn = (node) => (node ? node.children.filter(
   (child) => child.tagName === "BUTTON" || String(child.className || "").split(/\s+/).includes("card"),
 ) : []);
-const rowCards = (row) => cardsIn(row).map((child) => child.text());
+const cardParts = (child) => {
+  const part = (name) => {
+    const span = (child.children || []).find(
+      (item) => String(item.className || "").split(/\s+/).includes(name));
+    return span ? span.textContent : "";
+  };
+  return {
+    id: child.getAttribute("data-card-id"),
+    name: part("cname"),
+    suit: part("suit"),
+    rank: part("rank"),
+  };
+};
+const rowCards = (row) => cardsIn(row).map(cardParts);
 const expectedCards = (cards) => cards.map(cardText);
 
 check("录像里有一段同时有手牌 / 装备 / 判定 / 处理区（W4-6 断言的前置）",
@@ -1133,7 +1163,9 @@ if (allZonesIndex >= 0) {
     expected.zones.forEach((seatState, seat) => {
       const actual = rowCards(zoneRow(seat, zone));
       const wanted = expectedCards(seatState[zone]);
-      if (actual.join("|") !== wanted.join("|")) mismatches.push(`座位${seat}: ${actual.join("|")} ≠ ${wanted.join("|")}`);
+      const actualText = actual.map((card) => JSON.stringify(card)).join("|");
+      const wantedText = wanted.map((card) => JSON.stringify(card)).join("|");
+      if (actualText !== wantedText) mismatches.push(`座位${seat}: ${actualText} ≠ ${wantedText}`);
     });
     check(`回放页 ${zone} 区逐座位 = 从 card_move 重建的结果`,
       mismatches.length === 0, mismatches.slice(0, 2).join("；"));
@@ -1142,12 +1174,12 @@ if (allZonesIndex >= 0) {
     (seatState, seat) => seat !== target.human_seat && seatState.hand.length > 0);
   check("回放页上帝视角：非人类座位的手牌也画出牌面",
     opponent >= 0 && rowCards(zoneRow(opponent, "hand")).length > 0,
-    `座位=${opponent} 手牌=${opponent >= 0 ? rowCards(zoneRow(opponent, "hand")).join("|") : "—"}`);
+    `座位=${opponent} 手牌=${opponent >= 0 ? rowCards(zoneRow(opponent, "hand")).map((card) => card.name).join("|") : "—"}`);
   const expectedProcessing = [...expected.processing.values()].map(cardText);
-  check("回放页处理区 / 效果区 = 从 card_move 重建的结果",
-    cardsIn($("r-processing")).map((child) => child.text()).join("|")
-      === expectedProcessing.join("|"),
-    `面板=${cardsIn($("r-processing")).map((child) => child.text()).join("|")} / 记录=${expectedProcessing.join("|")}`);
+  const processingCards = () => cardsIn($("r-processing")).map(cardParts);
+  check("回放页处理区 / 效果区 = 从 card_move 重建的结果（名称 / 花色 / 点数 / id）",
+    JSON.stringify(processingCards()) === JSON.stringify(expectedProcessing),
+    `面板=${JSON.stringify(processingCards())} / 记录=${JSON.stringify(expectedProcessing)}`);
 }
 
 const queryIndex = replayRecords.findIndex((record) => record.kind === "query"
@@ -1399,10 +1431,21 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   const boxes = $("t-seats").children;
   const selfSeat = ui.state.view.snapshot.seat;
+  // U1-02：座位卡是「左武将块 + 右判定 / 装备块」，行不再挂在座位节点的一层。
+  // 逐层找带 `data-zone` 的容器（自己的在 `#t-self-zones`，对手的在 `.side-block`）。
+  const findZone = (node, zone) => {
+    if (!node || !node.children) return null;
+    for (const child of node.children) {
+      if (child.getAttribute && child.getAttribute("data-zone") === zone) return child;
+      const found = findZone(child, zone);
+      if (found) return found;
+    }
+    return null;
+  };
   const zoneRow = (seat, zone) => {
     // 自己的判定 / 装备区在底部面板的 `#t-self-zones` 里（U1-01 起不在环上）。
     const box = Number(seat) === Number(selfSeat) ? $("t-self-zones") : seatBox(seat);
-    return box ? (box.children || []).find((c) => c.getAttribute && c.getAttribute("data-zone") === zone) : null;
+    return box ? findZone(box, zone) : null;
   };
   const rowText = (seat, zone) => (zoneRow(seat, zone) ? zoneRow(seat, zone).text() : "");
   check("㉿Q1 0 号位的装备区画出牌面【八卦阵】",
@@ -4512,6 +4555,332 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   // 复原：后面的收尾断言（若有）仍看得到最后一局的真视图。
   ui.state.view = savedView;
   ui.state.logRecords = savedLog;
+  ui.renderTable();
+}
+
+
+/* ============ U1-02 座位卡 / 武将块 / 卡面 ============
+ *
+ * 票面判据（`issues/02`）：
+ * - 对手 210×150、自己 292×210；左武将块收窄 30%（右块 100 / 130）；槽高 38 / 50；
+ * - 体力分段 + current/max，上限 ≥6 只显 x/x；判定 3 槽、装备四槽；手牌数 / 座位号在 footer；
+ * - 身份：主公明置、其余暗置 `?`、自己恒可见、阵亡亮明；无身份局不画 `?`；
+ * - 横置「-------」虚线 / 酒泛红（无「酒」字）/ 大号「阵亡」叠加不互挡；
+ * - 高亮：金框行动中 / 5px 绿外圈可指定 / 4px 内圈 + 填充 + 勾已选 / 悬停浅绿 / 两者都写；
+ * - 卡面 88×124（设计单位）：左上花色 + 点数、顶部中间牌名、底部类型 / 属性 / 范围；三态；
+ * - 场上牌（装备 / 判定 / 处理区）悬停全文；手牌与场上区域不重复显示。
+ *
+ * CSS 判据读 style.css（DOM 垫片没有布局引擎）；尺寸用 `var(--dsu)` 的设计单位
+ * （1 单位 = 1600×900 设计稿 1px，1280 / 1920 下比例一致）。
+ */
+{
+  const savedView = ui.state.view;
+  const savedLog = ui.state.logRecords;
+  const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) {
+      out.push(child);
+      walk(child, out);
+    }
+    return out;
+  };
+  const hasClass = (child, name) => child.classList.contains(name)
+    || String(child.className || "").split(/\s+/).includes(name);
+  const byClass = (node, name) => walk(node).filter((child) => hasClass(child, name));
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const click = (node) => (node.listeners.click || []).forEach(
+    (fn) => fn({ target: node, stopPropagation() {} }));
+
+  const card = (id, name, extra = {}) => ({
+    ...synthCard(id, name), slot: null, attribute: "普通", kind: "normal",
+    description: `【${name}】的全文描述`, ...extra,
+  });
+  const slash = card(1, "杀");
+  const peach = card(4, "桃");
+  const weapon = card(21, "青釭剑", { type: "qinggang_sword", slot: "weapon", attack_range: 2 });
+  const armor = card(22, "八卦阵", { type: "eight_diagrams", slot: "armor" });
+  const horse = card(23, "赤兔", { type: "chitu", slot: "horse_offense" });
+  const lightning = card(24, "闪电", { type: "lightning" });
+  const indulgence = card(25, "乐不思蜀", { type: "indulgence" });
+  const supply = card(26, "兵粮寸断", { type: "supply_shortage" });
+  const players = (identityMode = true) => [
+    {
+      seat: 0, hp: 3, hp_max: 3, hand_count: 2, alive: true,
+      equip: [weapon], judge: [indulgence], chained: true, wine_active: false,
+      identity: identityMode ? "rebel" : null, identity_label: identityMode ? "反贼" : null,
+      hero_name: "大乔", kingdom: "wu", kingdom_label: "吴",
+    },
+    {
+      seat: 1, hp: 5, hp_max: 5, hand_count: 4, alive: true,
+      equip: [armor], judge: [lightning], chained: false, wine_active: false,
+      identity: null, identity_label: null,
+      hero_name: "吕布", kingdom: "qun", kingdom_label: "群",
+    },
+    {
+      seat: 2, hp: 6, hp_max: 6, hand_count: 0, alive: true,
+      equip: [horse], judge: [], chained: true, wine_active: true,
+      identity: identityMode ? "lord" : null, identity_label: identityMode ? "主公" : null,
+      hero_name: "曹操", kingdom: "wei", kingdom_label: "魏",
+    },
+    {
+      seat: 3, hp: 0, hp_max: 4, hand_count: 0, alive: false,
+      equip: [], judge: [supply], chained: true, wine_active: true,
+      identity: identityMode ? "loyalist" : null, identity_label: identityMode ? "忠臣" : null,
+      hero_name: "刘备", kingdom: "shu", kingdom_label: "蜀",
+    },
+  ];
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 10,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { answers_seq: 10, kind: "UseCard", card: slash, targets: [1] },
+      { answers_seq: 10, kind: "UseCard", card: slash, targets: [2] },
+      { answers_seq: 10, kind: "EndPhase" },
+    ],
+    candidate_index: {
+      "1": { card: slash, pool: [1, 2], combos: [[1], [2]], min_targets: 1, max_targets: 1 },
+    },
+    context: null, option_seats: {},
+  };
+  const table = (identityMode = true) => ({
+    seed: 1, player_count: 4, human_seat: 0, finished: false, timeout_seconds: null,
+    heroes: ["daqiao", "lvbu", "caocao", "liubei"],
+    skills: [],
+    pending,
+    snapshot: {
+      seat: 0, phase: "play", turn_seat: 2,
+      players: players(identityMode),
+      self_hand: [slash, peach], deck_count: 40, discard: [],
+      processing: [lightning],
+    },
+  });
+  const show = (view) => {
+    ui.state.view = view;
+    ui.state.logRecords = [];
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+
+  /* ---- CSS：设计尺寸 / 收窄 / 槽高 / 高亮环 ---- */
+  check("U1-02a CSS：对手 210×150、自己 292×210（设计比例 + 设计舞台）",
+    /\.ring \.seat\s*\{[^}]*width:\s*13\.125%[^}]*aspect-ratio:\s*210\s*\/\s*150/s.test(css)
+      && /\.seat\.self\s*\{[^}]*flex:\s*0 0 18\.25%[^}]*aspect-ratio:\s*292\s*\/\s*210/s.test(css),
+    `ring=${/\.ring \.seat\s*\{[^}]*aspect-ratio:\s*210\s*\/\s*150/s.test(css)} self=${/\.seat\.self\s*\{[^}]*aspect-ratio:\s*292\s*\/\s*210/s.test(css)}`);
+  check("U1-02b CSS：左武将块收窄 30%（右块 100 / 130 = 47.62% / 44.52%）",
+    /\.seat \.side-block\s*\{[^}]*flex:\s*0 0 47\.62%/s.test(css)
+      && /\.self \.side-block\s*\{[^}]*flex:\s*0 0 44\.52%/s.test(css),
+    `ring=${/\.seat \.side-block\s*\{[^}]*flex:\s*0 0 47\.62%/s.test(css)} self=${/\.self \.side-block\s*\{[^}]*flex:\s*0 0 44\.52%/s.test(css)}`);
+  check("U1-02c CSS：装备槽高 38 / 50、卡面 88×124（设计单位）",
+    /grid-auto-rows:\s*calc\(38 \* var\(--dsu\)\)/.test(css)
+      && /grid-auto-rows:\s*calc\(50 \* var\(--dsu\)\)/.test(css)
+      && /width:\s*calc\(88 \* var\(--dsu\)\);\s*height:\s*calc\(124 \* var\(--dsu\)\)/.test(css),
+    `38=${/grid-auto-rows:\s*calc\(38 \* var\(--dsu\)\)/.test(css)} 50=${/grid-auto-rows:\s*calc\(50 \* var\(--dsu\)\)/.test(css)} card=${/calc\(88 \* var\(--dsu\)\)/.test(css)}`);
+  check("U1-02d CSS：可指定 = 5px 绿外圈、已选 = 4px 绿内圈、悬停浅绿、行动中 = 金框，当前 + 合法有绿角点",
+    /\.seat\.targetable:not\(\.tsel\)\s*\{[^}]*0 0 0 5px var\(--ok\)/s.test(css)
+      && /\.seat\.tsel::before\s*\{[^}]*inset 0 0 0 4px var\(--ok\)/s.test(css)
+      && /\.seat\.targetable:not\(\.tsel\):hover\s*\{\s*background:\s*#eef7f1/.test(css)
+      && /\.seat\.turn\s*\{[^}]*#b8860b/s.test(css)
+      && /\.seat\.turn\.targetable:not\(\.tsel\)::after\s*\{[^}]*background:\s*var\(--ok\)/s.test(css),
+    `legal=${/0 0 0 5px var\(--ok\)/.test(css)} selected=${/inset 0 0 0 4px var\(--ok\)/.test(css)} hover=${/background:\s*#eef7f1/.test(css)} dot=${/background:\s*var\(--ok\)/.test(css)}`);
+
+  /* ---- DOM：尺寸 / 槽位 / 体力 / 身份 ---- */
+  show(table());
+  const seat1 = seatBox(1);
+  const seat2 = seatBox(2);
+  const seat3 = seatBox(3);
+  const self = $("t-self-seat");
+  check("U1-02e 环上仍是 3 个对手，自己在底部面板（U1-01 的座位归属不变）",
+    $("t-seats").children.length === 3 && attr(self, "data-seat") === "0" && self.classList.contains("me"));
+
+  check("U1-02f 武将块：势力 / 中文名 / 身份 / 手牌数 / 座位号（不是引擎 id）",
+    seat1.text().includes("群") && seat1.text().includes("吕布") && seat1.text().includes("手牌 4")
+      && seat1.text().includes("座位 1") && !seat1.text().includes("lvbu"),
+    `seat1="${seat1.text().replace(/\s+/g, " ").trim()}"`);
+
+  check("U1-02g 体力 5/5 = 5 段 + 5/5 文本；上限 6 只显示 6/6 文本、不画方块",
+    byClass(seat1, "hp-seg").length === 5
+      && seat1.text().includes("5/5")
+      && byClass(seat2, "hp-seg").length === 0
+      && byClass(seat2, "hp-text").length === 1
+      && seat2.text().includes("6/6"),
+    `seat1 segs=${byClass(seat1, "hp-seg").length} seat2 segs=${byClass(seat2, "hp-seg").length} seat2="${seat2.text().replace(/\s+/g, " ").trim()}"`);
+
+  check("U1-02h 判定区固定 3 槽（空槽暗色占位），装备四槽按武器 / 防具 / 攻马 / 防马",
+    byClass(seat1, "judge-slot").length === 3
+      && byClass(seat1, "judge-slot").filter((slot) => hasClass(slot, "empty")).length === 2
+      && byClass(seat1, "equip-slot").length === 4
+      && byClass(seat1, "equip-slot").map((slot) => attr(slot, "data-slot")).join(",")
+        === "weapon,armor,horse_offense,horse_defense",
+    `judge=${byClass(seat1, "judge-slot").length} equip=${byClass(seat1, "equip-slot").map((s) => attr(s, "data-slot")).join(",")}`);
+  check("U1-02h2 槽里的牌画牌名；空槽画槽名（判定 / 武器 / 防具 / 攻马 / 防马）",
+    seat1.text().includes("八卦阵") && seat1.text().includes("闪电")
+      && seat2.text().includes("赤兔")
+      && byClass(seat1, "equip-slot").filter((slot) => byClass(slot, "slot-k").length > 0)
+        .every((slot) => /武器|防具|攻马|防马/.test(slot.text())),
+    `seat1="${seat1.text().replace(/\s+/g, " ").trim()}"`);
+
+  check("U1-02i 身份：暗置显示 ?、主公明置、阵亡亮明；自己恒可见（全称，`GLOSSARY「身份」`四值）",
+    byClass(seat1, "identity-badge").some((b) => b.textContent === "?")
+      && byClass(seat2, "identity-badge").some(
+        (b) => b.textContent === "主公" && b.getAttribute("title") === "身份：主公")
+      && byClass(seat3, "identity-badge").some(
+        (b) => b.textContent === "忠臣" && b.getAttribute("title") === "身份：忠臣")
+      && $("t-self-identity").textContent === "反贼"
+      && $("t-self-identity").getAttribute("title") === "身份：反贼",
+    `seat1=${byClass(seat1, "identity-badge").map((b) => b.textContent)} seat2=${byClass(seat2, "identity-badge").map((b) => b.textContent)} self="${$("t-self-identity").textContent}"`);
+
+  check("U1-02i2 自己的武将块与 footer 读同一份展示契约：大乔 / 吴 / 反贼 / 3/3 / 手牌 2 / 座位 0",
+    $("t-hero").textContent === "大乔" && $("t-self-kingdom").textContent === "吴"
+      && $("t-self-hp").text().includes("3/3")
+      && $("t-self-hand").textContent === "2" && $("t-self-seatno").textContent === "0",
+    `hero=${$("t-hero").textContent} kingdom=${$("t-self-kingdom").textContent} hp=${$("t-self-hp").text()}`);
+
+  check("U1-02j 横置 = 中央虚线、酒 = 泛红（无「酒」字）、阵亡 = 蒙灰 + 大号「阵亡」",
+    seat2.classList.contains("chained") && byClass(seat2, "chain-line").length === 1
+      && seat2.classList.contains("wine") && !seat2.text().includes("酒")
+      && seat3.classList.contains("dead") && byClass(seat3, "dead-tag").some((t) => t.textContent === "阵亡"),
+    `seat2=${[...seat2.classList.set].join(",")} seat3=${[...seat3.classList.set].join(",")}`);
+  check("U1-02j2 三态叠加不互相遮挡：同一个座位同时有铁索线、「阵亡」牌与酒的红色",
+    seat3.classList.contains("chained") && seat3.classList.contains("dead")
+      && seat3.classList.contains("wine")
+      && byClass(seat3, "chain-line").length === 1
+      && byClass(seat3, "dead-tag").length === 1
+      && byClass(seat3, "dead-text").length === 1
+      && !/\.seat\.dead\s*\{[^}]*filter:\s*grayscale/s.test(css),
+    `seat3=${[...seat3.classList.set].join(",")}`);
+
+  /* ---- 高亮：当前回合金框行动中 / 合法目标可指定 / 已选内圈 + 勾 ---- */
+  check("U1-02k 当前回合金框 + 「行动中」（还没点牌时没有可指定的座位）",
+    seat2.classList.contains("turn") && !seat2.classList.contains("targetable")
+      && seat2.text().includes("行动中") && !seat2.text().includes("可指定"),
+    `seat2="${seat2.text().replace(/\s+/g, " ").trim()}"`);
+  click($("t-hand").children[0]);
+  check("U1-02k2 当前回合 + 合法目标：金框与绿圈同时成立，文字两行都写",
+    seatBox(2).classList.contains("turn") && seatBox(2).classList.contains("targetable")
+      && seatBox(2).text().includes("行动中") && seatBox(2).text().includes("可指定"),
+    `seat2="${seatBox(2).text().replace(/\s+/g, " ").trim()}"`);
+  check("U1-02l 点手牌 = 焦点 + 手牌画选中态（.sel）",
+    String(ui.state.focusCardId) === "1" && $("t-hand").children[0].classList.contains("sel"),
+    `focus=${ui.state.focusCardId} sel=${$("t-hand").children[0].classList.contains("sel")}`);
+  check("U1-02m 用不出的牌置灰（.dis）",
+    $("t-hand").children[1].classList.contains("dis"),
+    `classes=${[...$("t-hand").children[1].classList.set].join(",")}`);
+  click(seatBox(1));
+  check("U1-02n 点座位 = 已选：.tsel + 绿内圈 + 勾「✓ 已选」",
+    seatBox(1).classList.contains("tsel")
+      && seatBox(1).text().includes("✓ 已选")
+      && !seatBox(1).text().includes("可指定"),
+    `seat1="${seatBox(1).text().replace(/\s+/g, " ").trim()}" targets=${JSON.stringify(ui.state.selectedTargets)} focus=${ui.state.focusCardId}`);
+
+  // 弃牌面：点手牌 = **已选**态（绿框 + 勾），与焦点牌的红色 `.sel` 区分开。
+  const discardView = table();
+  discardView.pending = {
+    kind: "DISCARD", actor: 0, seq: 50, timing: "PHASE_DISCARD",
+    prompt: "弃牌阶段：请弃置 1 张手牌。", count: 1,
+    legal_actions: [{ kind: "DiscardCards", answers_seq: 50, cards: [slash] }],
+    candidate_index: {}, context: null, option_seats: {},
+  };
+  discardView.snapshot.self_hand = [slash, peach];
+  show(discardView);
+  click($("t-hand").children[0]);
+  const pickedCard = $("t-hand").children[0];
+  check("U1-02m2 弃牌面点牌 = 已选态（.picked + 勾；不是焦点 .sel）",
+    pickedCard.classList.contains("picked") && !pickedCard.classList.contains("sel")
+      && JSON.stringify(ui.state.picks) === "[1]"
+      && /\.card\.face\.picked::after\s*\{[^}]*content:\s*"✓"/s.test(css),
+    `classes=${[...pickedCard.classList.set].join(",")} picks=${JSON.stringify(ui.state.picks)}`);
+  show(table());
+
+  /* ---- 卡面：88×124、花色 + 点数、牌名、类型 / 属性 / 范围、悬停全文 ---- */
+  const handCard = $("t-hand").children[0];
+  check("U1-02o 卡面：花色 + 点数 + 牌名 + 底行（类型 / 属性 / 范围）",
+    hasClass(handCard, "face")
+      && byClass(handCard, "suit")[0].textContent === "♠"
+      && byClass(handCard, "rank")[0].textContent === "7"
+      && byClass(handCard, "cname")[0].textContent === "杀"
+      && byClass(handCard, "ctype")[0].textContent === "普通",
+    `html="${handCard.text()}"`);
+  // 底行的三类事实：装备槽 / 属性 / 攻击范围（都来自服务端展示契约，不在 JS 里猜）。
+  const fireSlash = card(-7, "火杀", {
+    type: "fire_slash", display_name: "杀", attribute: "火焰", kind: "normal",
+  });
+  const bottomView = table();
+  bottomView.snapshot.self_hand = [weapon, fireSlash];
+  show(bottomView);
+  const weaponFace = $("t-hand").children[0];
+  const fireFace = $("t-hand").children[1];
+  check("U1-02o3 卡面底行：武器 = 武器 · 范围 2；火杀 = 普通 · 火焰（红）",
+    byClass(weaponFace, "ctype")[0].textContent === "武器 · 范围 2"
+      && byClass(fireFace, "ctype")[0].textContent === "普通 · 火焰"
+      && hasClass(fireFace, "attr-fire")
+      && byClass(fireFace, "cname")[0].textContent === "杀",
+    `weapon="${byClass(weaponFace, "ctype")[0].textContent}" fire="${byClass(fireFace, "ctype")[0].textContent}"`);
+  show(table());
+
+  const liveSeat1 = seatBox(1);
+  check("U1-02o2 卡面悬停 title 读服务端描述（手牌 / 装备 / 判定 / 处理区同一份）",
+    handCard.getAttribute("title") === slash.description
+      && byClass(liveSeat1, "equip-slot").find((s) => attr(s, "data-card-id") === "22").getAttribute("title")
+        === `八卦阵\n${armor.description}`
+      && byClass(liveSeat1, "judge-slot").find((s) => attr(s, "data-card-id") === "24").getAttribute("title")
+        === `闪电\n${lightning.description}`
+      && byClass($("t-processing"), "card")[0].getAttribute("title") === lightning.description,
+    `hand="${handCard.getAttribute("title")}"`);
+
+  /* ---- 手牌与场上区域不重复显示 ---- */
+  const handIds = $("t-hand").children.map((node) => attr(node, "data-card-id"));
+  const fieldIds = byClass($("t-self-zones"), "mini-slot")
+    .map((slot) => attr(slot, "data-card-id")).filter(Boolean);
+  check("U1-02p 自己装备区里的一张牌（青釭剑）不在手牌区重复出现",
+    handIds.join(",") === "1,4"
+      && new Set(fieldIds).size === 2
+      && fieldIds.includes("21") && fieldIds.includes("25")
+      && !handIds.some((id) => fieldIds.includes(id)),
+    `hand=${handIds.join(",")} field=${fieldIds.join(",")}`);
+
+  /* ---- 无身份局：不画「?」 ---- */
+  const twoPlayer = table(false);
+  twoPlayer.player_count = 2;
+  twoPlayer.heroes = ["daqiao", "lvbu"];
+  twoPlayer.snapshot.players = twoPlayer.snapshot.players.slice(0, 2);
+  show(twoPlayer);
+  const noIdentity = [...$("t-seats").children, self]
+    .flatMap((box) => byClass(box, "identity-badge"))
+    .filter((badge) => !badge.classList.contains("none"));
+  // 自己的徽标是 index.html 的静态节点（DOM 垫片不建父子关系），故按 id 直接断：
+  // 无身份局里它必须是 `.none` 且没有文字。
+  const selfIdentity = $("t-self-identity");
+  check("U1-02q 2 人无身份局：座位上不画「?」（身份徽标只对身份局显示）",
+    noIdentity.length === 0
+      && selfIdentity.textContent === ""
+      && /(^|\s)none(\s|$)/.test(selfIdentity.className),
+    `badges=${noIdentity.map((b) => b.textContent).join(",")} self="${selfIdentity.textContent}" selfClass="${selfIdentity.className}"`);
+
+  /* ---- 真会话载荷：kingdom / kingdom_label 的读取方不是只靠合成形状自证 ---- */
+  show(created);
+  const realOpponent = created.snapshot.players[1];
+  const realBox = seatBox(realOpponent.seat);
+  check("U1-02s 真会话载荷：座位卡读 hero_name + kingdom_label（服务端已下发）",
+    Boolean(realOpponent.hero_name && realOpponent.kingdom_label && realBox)
+      && realBox.text().includes(realOpponent.hero_name)
+      && realBox.text().includes(realOpponent.kingdom_label)
+      && $("t-self-kingdom").textContent === created.snapshot.players[0].kingdom_label,
+    `hero=${realOpponent.hero_name} kingdom=${realOpponent.kingdom_label} selfKingdom=${$("t-self-kingdom").textContent}`);
+
+  /* ---- turn_seat = null（回合之外 / 终局）不得把 0 号位误标成行动中 ---- */
+  const noTurn = table();
+  noTurn.snapshot.turn_seat = null;
+  show(noTurn);
+  check("U1-02r turn_seat=null 时不误标「行动中」",
+    !$("t-self-seat").classList.contains("turn")
+      && !$("t-self-seat").text().includes("行动中")
+      && $("t-seats").children.every((box) => !box.classList.contains("turn")),
+    `selfTurn=${$("t-self-seat").classList.contains("turn")} ring=${$("t-seats").children.map((b) => [...b.classList.set].join("+")).join(",")}`);
+
+  ui.state.view = savedView;
+  ui.state.logRecords = savedLog;
+  ui.resetSelection();
   ui.renderTable();
 }
 

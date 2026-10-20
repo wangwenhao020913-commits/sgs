@@ -27,7 +27,7 @@ def _bootstrap() -> None:
 _bootstrap()
 
 from sgs.agents import RandomPlayer, TapePlayer  # noqa: E402
-from sgs.data import Identity, Suit, load_content_pack, validate_rule_config  # noqa: E402
+from sgs.data import Identity, Kingdom, Suit, load_content_pack, validate_rule_config  # noqa: E402
 from sgs.engine import Engine, RandomSource, dump_journal  # noqa: E402
 from sgs.resolution import Frame, ResolutionStack  # noqa: E402
 from sgs.skills import FREE_SPLIT  # noqa: E402
@@ -3455,6 +3455,58 @@ def test_the_seat_contract_maps_the_identity_label_and_live_state() -> None:
     assert lord["chained"] is True and lord["wine_active"] is False
     assert rebel["identity_label"] is None, "查看者 0 看不到反贼的身份 ⇒ 标签也是 None"
     assert rebel["wine_active"] is True
+
+
+def test_the_seat_contract_names_the_hero_and_kingdom() -> None:
+    """座位卡的武将块要写**名称与势力**，不是引擎 id（U1-02）。
+
+    名称来自武将表（`load_heroes`），势力是 ``PlayerPublic`` 已有的公开字段；
+    没有武将的座位（无武将模式 / 人为局面）两栏都是 ``None``，界面据此退回"（无武将）"。
+    """
+    from sgs.data import load_heroes
+    from sgs_web.display import seat_display
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hero="guojia", kingdom=Kingdom.WEI),
+            SeatSpec(hp=4, hero="zhaoyun", kingdom=Kingdom.SHU),
+            SeatSpec(hp=4),
+        ],
+        deck=tuple(range(10)),
+    )
+    view = project(state, 0)
+    heroes = load_heroes()
+
+    guojia = seat_display(view.players[0], heroes=heroes)
+    zhaoyun = seat_display(view.players[1], heroes=heroes)
+    empty = seat_display(view.players[2], heroes=heroes)
+
+    assert guojia["hero_name"] == "郭嘉"
+    assert guojia["kingdom"] == "wei"
+    assert guojia["kingdom_label"] == "魏"
+    assert zhaoyun["hero_name"] == "赵云"
+    assert zhaoyun["kingdom_label"] == "蜀"
+    assert empty["hero_name"] is None and empty["kingdom"] is None
+    assert empty["kingdom_label"] is None
+
+
+def test_the_web_snapshot_carries_each_seats_hero_name_and_kingdom() -> None:
+    """真值走完整 ``visible_snapshot``：前端不需要自己把 id 翻成名称 / 势力。"""
+    from sgs.data import load_heroes
+
+    session = Session(seed=61, ai="random", timeout_seconds=None, player_count=5)
+    heroes = load_heroes()
+
+    snapshot = visible_snapshot(session)
+    for payload in snapshot["players"]:
+        hero_id = session.hero_assignments[payload["seat"]]
+        hero = heroes.by_id(hero_id)
+        assert hero is not None
+        assert payload["hero_name"] == hero.name, f"座位 {payload['seat']} 的武将名"
+        assert payload["kingdom"] == hero.kingdom.value
+        assert payload["kingdom_label"] in ("魏", "蜀", "吴", "群")
 
 
 def test_the_web_snapshot_reveals_a_seat_marked_identity_visible() -> None:

@@ -8,20 +8,19 @@ function identityLabel(identity) {
   return { lord: "主公", loyalist: "忠臣", rebel: "反贼", traitor: "内奸" }[identity] || identity;
 }
 
-function cardChip(card, selected, isStatic, usable = true, onClick = null) {
-  const chip = document.createElement("button");
-  chip.type = "button";
-  chip.className = "card";
-  if (selected) chip.classList.add("sel");
-  if (isStatic) chip.classList.add("static");
-  if (!isStatic && !usable) chip.classList.add("dis");
-  chip.innerHTML = `<span class="n">${cardName(card)}</span><span class="s">${card.suit || ""}${card.rank ?? ""}</span>`;
-  // 悬停全文（U1-04b）：只读服务端下发的 description，前端不存文案。旧回放载荷没有
-  // 这个字段时不挂空提示（U2 再接回放页）；牌桌载荷的缺条目由服务端填「暂无描述」。
-  if (card.description) chip.setAttribute("title", cardDescription(card));
-  // 静态牌（装备 / 判定 / 处理区）不可点；其余默认走"点牌设焦点"，弃牌阶段另给入口。
-  if (!isStatic) chip.addEventListener("click", onClick || (() => toggleFocus(card.card_id)));
-  return chip;
+/** 一张卡片的节点：U1-02 起是**完整卡面**（88×124，`card-view.js` 的 `cardFaceNode`）。
+ *
+ * 手牌 / 处理区 / 中央舞台 / 回放页共用这一份；`static` 牌不可点（公开信息），但仍带
+ * 悬停全文。置灰 / 选中 / 已选只由调用方给（手牌走 `cardFace` 的纯函数结果）。
+ */
+function cardChip(card, selected, isStatic, usable = true, onClick = null, picked = false) {
+  return cardFaceNode(card, {
+    selected,
+    picked,
+    static: isStatic,
+    usable,
+    onClick: onClick || (() => toggleFocus(card.card_id)),
+  });
 }
 
 /** 弃牌阶段：点手牌 = 收进 / 移出待弃置集合；收够 `pending.count` 张后不再多收。 */

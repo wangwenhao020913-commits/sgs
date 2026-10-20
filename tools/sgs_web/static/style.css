@@ -7,6 +7,9 @@
   --accent: #9c2b1b;
   --accent-soft: #f3e2dd;
   --ok: #1d6b3a;
+  /* 设计单位：1 单位 = 1600×900 设计稿 1px。牌桌壳里按**壳宽**覆盖（cqw），
+   * 回放页等壳外区域按视口宽兜底——卡面在哪儿都不会因为缺变量而丢掉尺寸。 */
+  --dsu: calc(100vw / 1600);
 }
 * { box-sizing: border-box; }
 body {
@@ -65,12 +68,6 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: #fff;
 }
 .seat.me { border-color: var(--accent); background: var(--accent-soft); }
-.seat.dead { opacity: .5; }
-.seat.turn { box-shadow: inset 3px 0 0 var(--accent); }
-/* 手选目标：可点的座位有轮廓，已选的实心描边（**数据**给的类，不是猜的）。 */
-.seat.targetable { border-color: var(--ok); cursor: pointer; }
-.seat.targetable:hover { background: #eef7f1; }
-.seat.tsel { border-color: var(--ok); box-shadow: inset 0 0 0 2px var(--ok); }
 .seat .top { display: flex; justify-content: space-between; gap: 8px; }
 .seat .who { font-weight: 600; }
 .seat .small { font-size: 12px; color: var(--dim); }
@@ -91,6 +88,73 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .card.sel { border-color: var(--accent); background: var(--accent-soft); }
 .card.dis { opacity: .38; cursor: not-allowed; }
 .card.static { cursor: default; }
+
+/* ---------- 卡面（U1-02）：88×124，左上花色 + 点数、顶部中间牌名、底部类型 / 属性 / 范围 ----------
+ * 只有 `cardChip` 造出来的节点带 `.face`；选择面 / 排列 / 回放槽位的旧 `.card` 仍是紧凑芯片，
+ * 两者不共享尺寸。 */
+.card.face {
+  position: relative;
+  flex: 0 0 calc(88 * var(--dsu)); width: calc(88 * var(--dsu)); height: calc(124 * var(--dsu));
+  padding: 0;
+  border: 1px solid #bfae92;
+  border-radius: 7px;
+  background: linear-gradient(180deg, #fffef9 0%, #f6ecd9 100%);
+  box-shadow: 0 2px 5px rgba(43, 36, 28, .12);
+  transition: transform .12s, box-shadow .12s, border-color .12s;
+}
+.card.face:hover:not(.dis) { transform: translateY(-4px); box-shadow: 0 7px 14px rgba(43, 36, 28, .18); }
+.card.face .suit {
+  position: absolute; left: calc(6 * var(--dsu)); top: calc(4 * var(--dsu));
+  font-size: calc(14 * var(--dsu)); font-weight: 700; line-height: 1;
+}
+.card.face .suit.red { color: var(--accent); }
+.card.face .suit.black { color: var(--ink); }
+.card.face .rank {
+  position: absolute; left: calc(6 * var(--dsu)); top: calc(21 * var(--dsu));
+  font-size: calc(11 * var(--dsu)); color: var(--dim);
+  font-variant-numeric: tabular-nums; line-height: 1;
+}
+.card.face .cname {
+  position: absolute; left: 2px; right: 2px; top: calc(43 * var(--dsu));
+  text-align: center; font-size: calc(21 * var(--dsu)); font-weight: 700;
+  letter-spacing: .06em; line-height: 1.15;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.card.face .ctype {
+  position: absolute; left: 2px; right: 2px; bottom: calc(8 * var(--dsu));
+  text-align: center; font-size: calc(9 * var(--dsu)); line-height: 1.3; color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.card.face.attr-fire .cname { color: #b3261e; }
+.card.face.attr-thunder .cname { color: #1d4e9c; }
+.card.face.sel {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft), 0 0 0 3px var(--accent);
+  transform: translateY(-6px);
+}
+/* 已选（弃牌 / 提供 B / 预发动选中的牌）：绿框 + 右上勾，与焦点牌的红色区分开。 */
+.card.face.picked {
+  border-color: var(--ok);
+  box-shadow: 0 0 0 2px rgba(29, 107, 58, .25), 0 0 0 3px var(--ok);
+  transform: translateY(-6px);
+}
+.card.face.picked::after {
+  content: "✓"; position: absolute; right: calc(4 * var(--dsu)); top: calc(2 * var(--dsu));
+  width: calc(16 * var(--dsu)); height: calc(16 * var(--dsu));
+  display: grid; place-items: center; border-radius: 50%;
+  background: var(--ok); color: #fff; font-size: calc(10 * var(--dsu)); font-weight: 700;
+}
+.card.face.dis { opacity: .42; }
+.card.face.static { cursor: default; }
+.card.face.static:hover { transform: none; box-shadow: 0 2px 5px rgba(43, 36, 28, .12); }
+/* 迷你行（装备 / 判定 / 回放区）里的卡面按小一号画，不参与手牌的 88×124 版式。 */
+.cards.mini .card.face {
+  flex-basis: calc(44 * var(--dsu)); width: calc(44 * var(--dsu)); height: calc(62 * var(--dsu));
+}
+.cards.mini .card.face .suit { left: calc(3 * var(--dsu)); top: calc(2 * var(--dsu)); font-size: calc(10 * var(--dsu)); }
+.cards.mini .card.face .rank { left: calc(3 * var(--dsu)); top: calc(13 * var(--dsu)); font-size: calc(8 * var(--dsu)); }
+.cards.mini .card.face .cname { top: calc(24 * var(--dsu)); font-size: calc(11 * var(--dsu)); letter-spacing: 0; }
+.cards.mini .card.face .ctype { display: none; }
 
 /* 排列（W6-03）：上行 = 牌堆顶、下行 = 牌堆底；下行空槽是拖拽 / 点选的落点。 */
 .arrange-row {
@@ -175,6 +239,10 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   background: radial-gradient(ellipse at 50% 55%, #f8f0df 0%, #f2e7d2 62%, #eaddc4 100%);
   border-left: 1px solid var(--line);
   border-right: 1px solid var(--line);
+  /* 设计单位：1 单位 = 1600×900 设计稿的 1px。卡面 / 槽位等**固定设计尺寸**乘上它，
+   * 于是 1280 宽与 1920 宽下比例一致（U1-02；壳整体不缩放，环桌仍是百分比定位）。 */
+  container-type: inline-size;
+  --dsu: calc(100cqw / 1600);
 }
 
 /* ---------- 顶栏：左身份配比 / 中轮次与当前行动者 / 右牌堆弃牌堆 + 设置 + 回放 ---------- */
@@ -242,29 +310,188 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 
 .seats.ring { position: absolute; inset: 0; display: block; }
 
+/* ---------- 座位卡（U1-02）：左武将块 + 右判定 / 装备区 ----------
+ * 对手 210×150（左 110 / 右 100）；自己 292×210（左 162 / 右 130）。
+ * 壳随视口缩放，故宽度用设计比例、槽高用设计像素。 */
 .ring .seat {
   position: absolute;
-  width: 13.125%;
+  width: 13.125%;                 /* 210 / 1600 设计舞台 */
   aspect-ratio: 210 / 150;
   transform: translate(-50%, -50%);
   display: flex;
-  flex-direction: column;
-  padding: 5px 7px;
+  flex-direction: row;
+  padding: 0;
   overflow: hidden;
   background: #fffdf8;
   z-index: 3;
 }
-.ring .seat .top { align-items: baseline; }
-.ring .seat .who { font-size: 12px; }
-.ring .seat .small { font-size: 10px; line-height: 1.35; }
-.ring .seat .hp { font-size: 10px; letter-spacing: 0; }
-.ring .seat .cards.mini { gap: 3px; margin-top: 2px; }
-.ring .seat .cards.mini .card { min-width: 0; padding: 1px 4px; font-size: 9px; }
-.ring .seat.targetable { border-color: var(--ok); box-shadow: 0 0 0 4px rgba(29, 107, 58, .55); cursor: pointer; }
-.ring .seat.tsel { border-color: var(--ok); background: #e7f5ec; box-shadow: inset 0 0 0 4px var(--ok); }
-.ring .seat.turn { border-color: #b8860b; box-shadow: 0 0 0 2px #f0dca8, 0 0 0 4px #b8860b; }
-.ring .seat.turn.targetable { box-shadow: 0 0 0 2px #f0dca8, 0 0 0 5px var(--ok); }
-.ring .seat.req { outline: 2px dashed #b8860b; }
+
+/* 左武将块 */
+.seat .hero-block {
+  position: relative;
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: calc(6 * var(--dsu)) calc(7 * var(--dsu));
+  background: linear-gradient(180deg, #fffdf7 0%, #f4ead8 100%);
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+}
+.seat-head { display: flex; align-items: center; gap: calc(3 * var(--dsu)); min-width: 0; }
+.kingdom {
+  flex: 0 0 auto;
+  width: calc(19 * var(--dsu)); height: calc(19 * var(--dsu)); border-radius: 6px;
+  display: grid; place-items: center;
+  font-size: calc(10 * var(--dsu)); font-weight: 700; color: #fff;
+  background: #6b5b4b;
+}
+.kingdom.wei { background: #2f5d8a; }
+.kingdom.shu { background: #9c2b1b; }
+.kingdom.wu { background: #1d6b3a; }
+.kingdom.qun { background: #6b5b4b; }
+.kingdom:empty { display: none; }
+.seat .hero-name {
+  flex: 1 1 auto; min-width: 0;
+  font-size: calc(13 * var(--dsu)); font-weight: 700; letter-spacing: .04em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.identity-badge {
+  flex: 0 0 auto;
+  min-width: calc(19 * var(--dsu)); height: calc(19 * var(--dsu)); padding: 0 calc(3 * var(--dsu));
+  display: grid; place-items: center;
+  border: 1px solid var(--line); border-radius: 6px;
+  font-size: calc(9 * var(--dsu)); font-weight: 700; background: #fff; color: var(--ink);
+}
+.identity-badge.lord { color: #fff; background: #b8860b; border-color: #b8860b; }
+.identity-badge.loyalist { color: #fff; background: #2f5d8a; border-color: #2f5d8a; }
+.identity-badge.rebel { color: #fff; background: var(--accent); border-color: var(--accent); }
+.identity-badge.traitor { color: #fff; background: #6b5b4b; border-color: #6b5b4b; }
+.identity-badge.hidden { color: #a89780; background: #f4eee2; border-style: dashed; }
+.identity-badge.none { display: none; }
+
+/* 体力条：分段方块 + current/max；上限 ≥6 只画 x/x 文本。 */
+.hp-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; margin-top: 2px; }
+.hp-seg { width: calc(9 * var(--dsu)); height: calc(7 * var(--dsu)); border-radius: 2px; background: var(--ok); }
+.hp-seg.empty { background: #e3d9c8; }
+.hp-seg.low { background: var(--accent); }
+.hp-num {
+  margin-left: calc(3 * var(--dsu)); font-size: calc(10 * var(--dsu)); color: var(--dim);
+  font-variant-numeric: tabular-nums; line-height: 1;
+}
+.hp-bar.hp-text .hp-num {
+  margin-left: 0; font-size: calc(13 * var(--dsu)); font-weight: 700; color: var(--ink);
+}
+
+.seat .seat-foot {
+  margin-top: auto; display: flex; justify-content: space-between; gap: 6px;
+  font-size: calc(10 * var(--dsu)); color: var(--dim); padding-top: 3px;
+}
+.seat .seat-foot b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+/* 高亮文字：行动中 / 可指定 / ✓ 已选（当前 + 合法两者都写）。 */
+.seat-tags { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 1px; }
+.seat-tags:empty { display: none; }
+.seat-flag {
+  display: inline-block; padding: 0 calc(5 * var(--dsu)); border-radius: 999px;
+  font-size: calc(9 * var(--dsu)); line-height: 1.5; white-space: nowrap;
+}
+.flag-turn { background: #b8860b; color: #fff; }
+.flag-legal, .flag-selected { background: var(--ok); color: #fff; }
+.flag-req { background: #8a6508; color: #fff; }
+
+/* 状态叠加：横置虚线 / 酒泛红 / 阵亡蒙灰 + 大号「阵亡」。三层各自定位、互不遮挡。 */
+.chain-line {
+  position: absolute; left: 8px; right: 8px; top: 50%; height: 0;
+  border-top: 2px dashed #8b6b3e; opacity: .9;
+  pointer-events: none; z-index: 3;
+}
+.seat.wine .hero-block { background: linear-gradient(180deg, #fbe4de 0%, #f6d9d2 100%); }
+.seat.dead { opacity: .72; }
+/* 蒙灰用**灰覆盖层**而不是 `filter: grayscale`：后者会把「酒」的红一起抹掉，
+ * 三态叠加时两个状态就只剩一个可见。 */
+.seat.dead .hero-block::after {
+  content: ""; position: absolute; inset: 0; z-index: 1;
+  background: rgba(120, 116, 108, .35); pointer-events: none;
+}
+.dead-tag {
+  position: absolute; inset: 0; z-index: 4;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+.dead-text {
+  padding: 0 .18em; border-radius: 6px;
+  background: rgba(255, 253, 247, .9);
+  color: rgba(96, 38, 30, .9); font-size: calc(28 * var(--dsu)); font-weight: 700; letter-spacing: .16em;
+  text-shadow: 0 2px 0 rgba(255, 255, 255, .55);
+}
+
+/* 右侧判定 / 装备区：判定 3 槽、装备四槽（武器 / 防具 / 攻马 / 防马）。 */
+.seat .side-block {
+  flex: 0 0 47.62%;              /* 100 / 210 */
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 5px; background: #fbf6ea; overflow: hidden;
+}
+.seat .judge-row { display: flex; gap: 3px; flex: 0 0 calc(30 * var(--dsu)); }
+.seat .equip-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  grid-auto-rows: calc(38 * var(--dsu)); gap: 4px; flex: 1 1 auto;
+  align-content: start;
+}
+.mini-slot {
+  min-width: 0; height: calc(38 * var(--dsu));
+  border: 1px dashed var(--line); border-radius: 5px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; padding: 1px 2px; overflow: hidden;
+  font: inherit; font-size: calc(9 * var(--dsu)); line-height: 1.2;
+  color: var(--ink); background: rgba(255, 255, 255, .55);
+}
+.mini-slot.judge-slot { height: calc(30 * var(--dsu)); }
+.mini-slot.empty { color: #9b8f7d; background: #e9e2d6; border-color: #d3c8b6; }
+.mini-slot.filled { border-style: solid; border-color: #c8b795; background: #fffdf8; cursor: help; }
+.mini-slot.judge-slot.filled { border-color: #c39a5f; background: #fff8e9; }
+.mini-slot .slot-k { font-size: calc(8 * var(--dsu)); color: #9b8f7d; }
+.mini-slot .slot-v {
+  display: block; max-width: 100%; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+button.mini-slot { cursor: pointer; }
+.mini-slot.sel { border-color: var(--accent); background: var(--accent-soft); }
+.mini-slot.picked { border-color: var(--ok); background: #e7f5ec; box-shadow: inset 0 0 0 2px var(--ok); }
+.mini-slot.dis { opacity: .4; cursor: not-allowed; }
+
+/* 行高亮：金框行动中 / 加粗绿外圈可指定 / 绿内圈 + 填充已选 / 悬停浅绿。 */
+.seat.turn {
+  border-color: #b8860b;
+  box-shadow: 0 0 0 2px #f0dca8, 0 0 0 4px #b8860b;
+}
+.seat.targetable:not(.tsel) {
+  border-color: var(--ok);
+  box-shadow: 0 0 0 3px rgba(29, 107, 58, .30), 0 0 0 5px var(--ok);
+  cursor: pointer;
+}
+.seat.targetable:not(.tsel):hover { background: #eef7f1; }
+.seat.tsel {
+  border-color: var(--ok); background: #e7f5ec;
+  cursor: pointer;
+}
+/* 绿内圈 / 填充必须画在**子块之上**：座位卡内部是不透明卡片，盒阴影的内阴影会被盖住。 */
+.seat.tsel::before {
+  content: ""; position: absolute; inset: 0; z-index: 5; pointer-events: none;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 4px var(--ok);
+  background: rgba(29, 107, 58, .10);
+}
+.seat.turn.targetable:not(.tsel) {
+  box-shadow: 0 0 0 2px #f0dca8, 0 0 0 4px #b8860b, 0 0 0 5px var(--ok);
+}
+.seat.turn.targetable:not(.tsel)::after {
+  content: ""; position: absolute; right: -6px; top: -6px; z-index: 6;
+  width: 12px; height: 12px; border-radius: 50%; background: var(--ok);
+  border: 2px solid #fff;
+}
+.seat.turn.tsel {
+  box-shadow: 0 0 0 2px #f0dca8, 0 0 0 4px #b8860b;
+}
+.seat.req { outline: 2px dashed #b8860b; outline-offset: 2px; }
 
 .stage-center {
   position: absolute; left: 50%; top: 60.85%;
@@ -288,6 +515,14 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .stage-divider { width: 100%; border-top: 1px dashed rgba(150, 122, 82, .36); margin: 4px 0; }
 .stage-center .processing { justify-content: center; gap: 5px; min-height: 18px; }
 .stage-center .processing .card { min-width: 0; padding: 2px 7px; font-size: 11px; }
+/* 中央舞台 / 处理区的卡面按小一号画（88×124 的 0.63 版），不撑破舞台。 */
+.stage-center .processing .card.face {
+  flex-basis: calc(56 * var(--dsu)); width: calc(56 * var(--dsu)); height: calc(79 * var(--dsu)); padding: 0;
+}
+.stage-center .processing .card.face .suit { left: calc(4 * var(--dsu)); top: calc(2 * var(--dsu)); font-size: calc(10 * var(--dsu)); }
+.stage-center .processing .card.face .rank { left: calc(4 * var(--dsu)); top: calc(14 * var(--dsu)); font-size: calc(8 * var(--dsu)); }
+.stage-center .processing .card.face .cname { top: calc(27 * var(--dsu)); font-size: calc(14 * var(--dsu)); }
+.stage-center .processing .card.face .ctype { bottom: calc(4 * var(--dsu)); font-size: calc(7 * var(--dsu)); }
 .stage-center .context { margin: 2px 0 0; font-size: 11px; text-align: center; }
 
 .table-hint {
@@ -335,27 +570,30 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   display: flex; flex-direction: column; justify-content: flex-end; gap: 3px;
 }
 .promptbar {
-  display: flex; align-items: flex-end; gap: 10px;
-  padding: 4px 9px;
+  display: flex; align-items: flex-end; gap: calc(10 * var(--dsu));
+  padding: calc(4 * var(--dsu)) calc(9 * var(--dsu));
   border: 1px solid var(--line);
   border-radius: 10px;
   background: rgba(255, 253, 247, .92);
-  min-height: 40px;
+  min-height: calc(40 * var(--dsu));
   max-height: 48%;
   overflow: auto;
 }
 .promptbar .prompt-main { flex: 1 1 auto; min-width: 0; }
-.promptbar .prompt { margin: 0; font-size: 13px; font-weight: 600; }
-.promptbar .hint { margin: 0; font-size: 11px; }
-.promptbar .options { flex-direction: row; flex-wrap: wrap; gap: 6px; margin: 4px 0 0; }
+.promptbar .prompt { margin: 0; font-size: calc(13 * var(--dsu)); font-weight: 600; }
+.promptbar .hint { margin: 0; font-size: calc(11 * var(--dsu)); }
+.promptbar .options {
+  flex-direction: row; flex-wrap: wrap;
+  gap: calc(6 * var(--dsu)); margin: calc(4 * var(--dsu)) 0 0;
+}
 .options-home { min-width: 0; }
 .prompt-side {
   flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end;
-  justify-content: flex-end; flex-wrap: wrap; gap: 4px;
+  justify-content: flex-end; flex-wrap: wrap; gap: calc(4 * var(--dsu));
 }
-.prompt-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-.prompt-actions button { padding: 4px 10px; font-size: 12px; }
-.prompt-side .dim { font-size: 11px; }
+.prompt-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: calc(6 * var(--dsu)); }
+.prompt-actions button { padding: calc(4 * var(--dsu)) calc(10 * var(--dsu)); font-size: calc(12 * var(--dsu)); }
+.prompt-side .dim { font-size: calc(11 * var(--dsu)); }
 
 /* 倒计时（U1-03）：进度条 + 剩余秒 + 默认动作；绿 → 黄 → 红，最后 5 秒闪烁。
  * 真源是服务端 timeout.py；这里只画 `view.timeout_seconds` 与 `pending.prompt_display`。 */
@@ -379,26 +617,32 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .countdown.blink { animation: countdown-blink .6s steps(2, start) infinite; }
 @keyframes countdown-blink { 50% { opacity: .3; } }
 
-/* 其他座位的询问：只在**其武将块下方**显示文本，不给按钮、不给倒计时。 */
+/* 其他座位的询问：只在**其武将块下方**显示文本，不给按钮、不给倒计时。
+ * 座位卡是固定的 210×150，故这条文本压在卡片底部（不挤压武将块 / 判定装备区）。 */
 .seat-prompt {
   margin-top: 2px; padding-top: 4px;
   border-top: 1px dashed var(--line);
   font-size: 11px; line-height: 1.35; color: var(--accent);
   overflow: hidden; text-overflow: ellipsis;
 }
-.ring .seat { justify-content: flex-start; }
-.ring .seat .seat-prompt { max-height: 3.8em; }
+.ring .seat .seat-prompt {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 5;
+  margin: 0; padding: 3px 6px;
+  background: rgba(255, 253, 247, .96);
+  max-height: 3.8em;
+}
 
-.hand-head { display: flex; align-items: baseline; gap: 8px; padding: 0 2px; }
-.hand-head .tag { margin-left: 0; }
+.hand-head { display: flex; align-items: baseline; gap: 8px; padding: 0 calc(2 * var(--dsu)); }
+.hand-head .tag { margin-left: 0; font-size: calc(11 * var(--dsu)); }
+.hand-head .dim { font-size: calc(11 * var(--dsu)); }
 .hand {
   flex: 1 1 auto; min-height: 0;
-  display: flex; flex-wrap: nowrap; align-items: flex-end; gap: 6px;
+  display: flex; flex-wrap: nowrap; align-items: flex-end; gap: calc(6 * var(--dsu));
   /* 先 center 再 safe center：老浏览器忽略第二行；溢出时 safe 不会把左边裁掉。 */
   justify-content: center;
   justify-content: safe center;
   overflow-x: auto; overflow-y: hidden;
-  padding: 2px;
+  padding: calc(2 * var(--dsu));
 }
 .hand .card { flex: 0 0 auto; line-height: 1.2; }
 
@@ -411,12 +655,13 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 }
 #t-skills .skill { font-size: 12px; padding: 4px 8px; white-space: nowrap; }
 
-/* 自己的座位块：左武将块 + 右判定 / 装备区（3 行同构；U1-02 再做细化）。 */
+/* 自己的座位块（U1-02）：292×210 设计尺寸，左武将块 + 右判定 / 装备区（右块 130）。 */
 .seat.self {
-  flex: 0 0 18.25%;
-  height: 89%;
+  flex: 0 0 18.25%;               /* 292 / 1600 设计舞台 */
+  aspect-ratio: 292 / 210;
   align-self: flex-end;
   display: flex;
+  flex-direction: row;
   padding: 0;
   overflow: hidden;
   background: #fffdf8;
@@ -424,32 +669,37 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 }
 .self .hero-block {
   flex: 1 1 auto; min-width: 0;
-  display: flex; flex-direction: column; gap: 3px;
-  padding: 8px 9px;
-}
-.seat-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-.self .who { font-size: 12px; }
-.self .identity-chip {
-  font-size: 10px; color: var(--accent); border: 1px solid var(--accent-soft);
-  background: var(--accent-soft); border-radius: 999px; padding: 0 7px;
-}
-.self .identity-chip:empty { display: none; }
-.self .hp { font-size: 12px; }
-.self .hero-name { font-size: 15px; font-weight: 700; }
-.self .seat-foot { margin-top: auto; font-size: 11px; color: var(--dim); }
-.self .side-block {
-  flex: 0 0 44.5%;
-  border-left: 1px solid var(--line);
   display: flex; flex-direction: column; gap: 5px;
-  padding: 6px;
+  padding: 9px 10px;
+}
+.self .kingdom {
+  width: calc(24 * var(--dsu)); height: calc(24 * var(--dsu)); font-size: calc(12 * var(--dsu));
+}
+.self .hero-name { font-size: calc(18 * var(--dsu)); }
+.self .identity-badge {
+  min-width: calc(24 * var(--dsu)); height: calc(24 * var(--dsu));
+  padding: 0 calc(5 * var(--dsu)); font-size: calc(12 * var(--dsu));
+}
+.self .hp-bar { gap: 3px; margin-top: 4px; }
+.self .hp-seg { width: calc(13 * var(--dsu)); height: calc(9 * var(--dsu)); }
+.self .hp-num { margin-left: calc(5 * var(--dsu)); font-size: calc(11 * var(--dsu)); }
+.self .hp-bar.hp-text .hp-num { font-size: calc(15 * var(--dsu)); }
+.self .seat-tags { margin-top: 2px; }
+.self .seat-flag { font-size: calc(11 * var(--dsu)); padding: 0 calc(7 * var(--dsu)); }
+.self .seat-foot { margin-top: auto; font-size: calc(11 * var(--dsu)); padding-top: 5px; }
+.self .chain-line { left: 10px; right: 10px; }
+.self .dead-text { font-size: calc(36 * var(--dsu)); }
+.self .side-block {
+  flex: 0 0 44.52%;              /* 130 / 292 */
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px; background: #fbf6ea;
   overflow: hidden;
 }
-.self .side-block .cards.mini { gap: 4px; margin-top: 0; }
-.self .side-block .cards.mini[data-zone="judge"] .card { border-style: dashed; }
-.seat.self.targetable { border-color: var(--ok); box-shadow: 0 0 0 4px rgba(29, 107, 58, .55); cursor: pointer; }
-.seat.self.tsel { border-color: var(--ok); background: #e7f5ec; box-shadow: inset 0 0 0 4px var(--ok); }
-.seat.self.req { outline: 2px dashed #b8860b; }
-.seat.self.turn { border-color: #b8860b; box-shadow: 0 0 0 2px #f0dca8, 0 0 0 4px #b8860b; }
+.self .judge-row { flex: 0 0 calc(40 * var(--dsu)); gap: 4px; }
+.self .equip-grid { grid-auto-rows: calc(50 * var(--dsu)); gap: 5px; }
+.self .mini-slot { height: calc(50 * var(--dsu)); font-size: calc(11 * var(--dsu)); }
+.self .mini-slot.judge-slot { height: calc(40 * var(--dsu)); }
+.self .mini-slot .slot-k { font-size: calc(10 * var(--dsu)); }
 
 /* ---------- 事件流浮层 ---------- */
 

@@ -9,12 +9,15 @@
   一份 "火杀 / 雷杀叫杀" 的映射（读取口 = ``static/core.js: cardName``）。
 - 身份标签（``主公 / 忠臣 / 反贼 / 内奸``）也在这里映射一次；投影里的
   ``PlayerPublic.identity`` 仍是过滤后的枚举值（不可见时 ``None``）。
+- 武将块的**名称 / 势力**（U1-02）：``hero_name`` 从武将表翻一次（引擎只给 id），
+  ``kingdom`` / ``kingdom_label`` 取公开的 ``PlayerPublic.kingdom`` 再映射成中文；两者都
+  不进记录流，只在网页载荷里出现。
 - **描述全文**（U1-04b）住在 :mod:`sgs_web.descriptions`（内容文件
   ``descriptions.json``），这里只按牌名 id 查一次并并入 ``description``；文案本身
   不抄进本模块，更不进引擎 / 记录流。
-- **消费节奏**：``display_name`` 已由 U1-04 的前端读取；``attribute`` / ``kind`` /
-  ``source_cards`` 归 U1-02（卡面）/ U1-07（虚拟 / 转化牌）；``description`` 归
-  U1-02（牌面悬停）/ U1-06（技能详情）；``prompt_display`` 归 U1-03（提示条）。
+- **消费节奏**：``display_name`` 由 U1-04 的前端读取；``attribute`` / ``kind`` 由
+  U1-02 的卡面读取，``source_cards`` 归 U1-07（虚拟 / 转化牌）；``description`` 由
+  U1-02（牌面悬停）/ U1-06（技能详情）读取；``prompt_display`` 归 U1-03（提示条）。
   本模块先把契约发出去，不在前端提前造表现。
 
 **不塞进** :mod:`sgs_web.projection`：投影负责"哪些事实可见"，本模块负责"可见事实怎么显示"。
@@ -25,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from sgs.data import IDENTITY_LABELS
+from sgs.data import IDENTITY_LABELS, HeroTable
 from sgs.state import CardRef, EndPhase, Pass, PlayerPublic, Query
 
 from .descriptions import card_description
@@ -34,6 +37,7 @@ from .timeout import fallback_action
 __all__ = [
     "CARD_ATTRIBUTES",
     "CARD_KINDS",
+    "KINGDOM_LABELS",
     "card_display",
     "card_lookup_from_query",
     "decorate_pending",
@@ -47,6 +51,9 @@ CARD_KINDS: tuple[str, ...] = ("normal", "virtual", "transformed")
 
 CARD_ATTRIBUTES: tuple[str, ...] = ("普通", "火焰", "雷电")
 """牌面的属性（中文展示值；U1-02 的卡面据此分色）。"""
+
+KINGDOM_LABELS: dict[str, str] = {"wei": "魏", "shu": "蜀", "wu": "吴", "qun": "群"}
+"""势力枚举值 → 中文展示值（`GLOSSARY.md`「势力」：中文只出现在渲染层）。"""
 
 _SLASH_TYPES = frozenset({"slash", "fire_slash", "thunder_slash"})
 """都显示成「杀」的牌名 id：普通杀 / 火杀 / 雷杀。"""
@@ -105,19 +112,32 @@ def _source_card(card: CardRef) -> dict[str, Any]:
     return payload
 
 
-def seat_display(player: PlayerPublic) -> dict[str, Any]:
-    """座位卡的展示字段：横置 / 酒状态 + 身份中文标签（不可见时 ``None``）。
+def seat_display(
+    player: PlayerPublic, *, heroes: HeroTable | None = None
+) -> dict[str, Any]:
+    """座位卡的展示字段：横置 / 酒状态 + 身份标签 + 武将名称 / 势力。
 
     ``chained`` / ``wine_active`` 来自投影（U1-04 起是 ``PlayerPublic`` 字段）；
     网页载荷里的身份标签由这里统一给出，前端可优先读它；旧的 ``identityLabel`` 仅作
     回放 / 合成载荷兜底。
+
+    ``hero_name`` / ``kingdom`` / ``kingdom_label``（U1-02）：引擎只给武将 id
+    （``PlayerPublic.hero``）与势力枚举；``heroes`` 是 :func:`sgs.data.load_heroes` 的
+    武将表，给了才翻得出中文名，缺表 / 未发放武将时给 ``None``（界面退回「（无武将）」）。
     """
+    hero = None
+    if heroes is not None and player.hero:
+        hero = heroes.by_id(player.hero)
+    kingdom = player.kingdom.value if player.kingdom is not None else None
     return {
         "chained": bool(player.chained),
         "wine_active": bool(player.wine_active),
         "identity_label": (
             IDENTITY_LABELS.get(player.identity) if player.identity is not None else None
         ),
+        "hero_name": hero.name if hero is not None else None,
+        "kingdom": kingdom,
+        "kingdom_label": KINGDOM_LABELS.get(kingdom) if kingdom is not None else None,
     }
 
 
@@ -195,11 +215,13 @@ def decorate_snapshot(
     players: tuple[PlayerPublic, ...] | list[PlayerPublic],
     *,
     lookup: Mapping[int, CardRef] | None = None,
+    heroes: HeroTable | None = None,
 ) -> dict[str, Any]:
     """给一份 ``PlayerView`` 的 JSON 形态补展示字段（原地改，返回同一个 dict）。
 
     ``players`` 与载荷里的 ``players`` 同序（投影按座位序输出）；座位字段由
-    :func:`seat_display` 给出，卡面字段由 :func:`card_display` 给出。
+    :func:`seat_display` 给出，卡面字段由 :func:`card_display` 给出。``heroes``
+    是武将表（U1-02 的 ``hero_name`` 要用），缺省时名称留空、界面退回 id。
     """
     for key in ("self_hand", "discard", "processing"):
         payload[key] = _extend_card_list(payload.get(key), lookup=lookup)
@@ -210,7 +232,7 @@ def decorate_snapshot(
                 player_payload[key] = _extend_card_list(
                     player_payload.get(key), lookup=lookup
                 )
-            player_payload.update(seat_display(player))
+            player_payload.update(seat_display(player, heroes=heroes))
     return payload
 
 
@@ -219,6 +241,7 @@ def decorate_pending(
     query: Query,
     *,
     lookup: Mapping[int, CardRef] | None = None,
+    heroes: HeroTable | None = None,
 ) -> dict[str, Any]:
     """给一份 ``pending_payload`` 补展示字段（询问里的所有牌面 + 内嵌视角 + 提示条）。"""
     for entry in (payload.get("candidate_index") or {}).values():
@@ -234,7 +257,7 @@ def decorate_pending(
     payload["revealed"] = _extend_card_list(payload.get("revealed"), lookup=lookup)
     view = payload.get("view")
     if isinstance(view, dict):
-        decorate_snapshot(view, query.view.players, lookup=lookup)
+        decorate_snapshot(view, query.view.players, lookup=lookup, heroes=heroes)
     # 没有候选是引擎不该出现的状态；显式给 None，不让展示派生抛异常，也不伪造默认动作。
     payload["prompt_display"] = prompt_display(query) if query.legal_actions else None
     return payload

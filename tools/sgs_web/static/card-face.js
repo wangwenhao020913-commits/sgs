@@ -45,7 +45,8 @@ function provideSlotIndex(pending, cardId) {
   return -1;
 }
 
-/** 这张牌此刻的 ``{selectable, selected, slotIndex}``——**唯一**的置灰派生（票 14 §D）。
+/** 这张牌此刻的 ``{selectable, selected, picked, slotIndex}``——**唯一**的置灰 / 选中派生
+ *  （票 14 §D）。``selected`` = 焦点牌；``picked`` = 已收进待弃置 / 面内已选 / 预发动已选。
  *
  * 输入只有"当前询问 + 这张牌"：没有一处缓存上一问的置灰，:func:`renderTable` 每次
  * 整体重算，`state.picks` 又在新询问到达时由 :func:`resetSelection` 清空 ⇒
@@ -56,15 +57,17 @@ function cardFace(pending, card) {
   const slotIndex = provideSlotIndex(pending, card.card_id);
   if (slotIndex >= 0) {
     const total = (pending.spec && pending.spec.total) || [1, 1];
-    const selected = state.picks.includes(slotIndex);
-    return { selectable: selected || state.picks.length < total[1], selected, slotIndex };
+    const picked = state.picks.includes(slotIndex);
+    return {
+      selectable: picked || state.picks.length < total[1],
+      selected: false, picked, slotIndex,
+    };
   }
   if (isDiscardPick(pending)) {
-    const selected = state.picks.includes(card.card_id);
+    const picked = state.picks.includes(card.card_id);
     return {
-      selectable: selected || state.picks.length < (pending.count || 0),
-      selected,
-      slotIndex: -1,
+      selectable: picked || state.picks.length < (pending.count || 0),
+      selected: false, picked, slotIndex: -1,
     };
   }
   if (state.preactivation) {
@@ -72,18 +75,21 @@ function cardFace(pending, card) {
     const answer = state.preactivation.answers[state.preactivation.cursor];
     return {
       selectable: options === undefined ? false : (options === null || options.includes(String(card.card_id))),
-      selected: Boolean(answer && answer.values.includes(card.card_id)),
+      selected: false,
+      picked: Boolean(answer && answer.values.includes(card.card_id)),
       slotIndex: -1,
     };
   }
   // 手牌入口的预发动（W5-02b 借刀）：点它进入两步清单，而不是设焦点 / 去候选索引里查。
   if (cardPreactivationManifest(pending, card)) {
-    return { selectable: true, selected: false, slotIndex: -1 };
+    return { selectable: true, selected: false, picked: false, slotIndex: -1 };
   }
   const selectable = pending
     ? (isHandPick(pending) ? cardSelectable(pending, card.card_id) : cardUsable(pending, card.card_id))
     : false;
-  return { selectable, selected: state.focusCardId === card.card_id, slotIndex: -1 };
+  return {
+    selectable, selected: state.focusCardId === card.card_id, picked: false, slotIndex: -1,
+  };
 }
 
 /** 点一张牌：按 :func:`cardFace` 给出的**当前模式**分派（提供 B / 弃牌 / 预发动 / 设焦点）。 */

@@ -64,7 +64,13 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
     payload = view.model_dump(mode="json")
     # U1-04 展示契约：牌面色 / 属性 / 种类 / 来源牌 + 座位身份标签。派生在 display.py，
     # 投影只负责"哪些可见"；下发的仍然是**同一份可见快照**，不新增真源。
-    decorate_snapshot(payload, view.players, lookup=_card_lookup(state))
+    # U1-02：武将块要名称 / 势力，引擎只给 id —— 武将表由接入层传进去，界面不自己翻。
+    decorate_snapshot(
+        payload,
+        view.players,
+        lookup=_card_lookup(state),
+        heroes=load_heroes(session.pack.pack_id),
+    )
     return payload
 
 
@@ -1104,7 +1110,9 @@ def pending_payload(
         lookup = _card_lookup(session.engine.state)
     else:
         lookup = card_lookup_from_query(query)
-    decorate_pending(payload, query, lookup=lookup)
+    # U1-02：内嵌视角里的座位也要武将名称 / 势力；裸 Query（409）拿不到包，传 None。
+    heroes = load_heroes(session.pack.pack_id) if isinstance(session, Session) else None
+    decorate_pending(payload, query, lookup=lookup, heroes=heroes)
     return payload
 
 

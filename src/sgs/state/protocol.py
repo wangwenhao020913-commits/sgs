@@ -332,8 +332,9 @@ class PlayerPublic(_FrozenModel):
 
     ``hero`` / ``kingdom`` / ``chained`` / ``wine_active`` **不进记录流**（``exclude``）：
     记录流里的询问视角不带这些字段，故标准 47 条金录像逐字节不变。``hero`` / ``kingdom``
-    走会话顶层的 ``heroes`` 名单；``chained`` / ``wine_active`` 由
-    ``sgs_web.display.decorate_snapshot`` 补进**网页载荷**。
+    由 ``sgs_web.display.seat_display`` 翻成 ``hero_name`` / ``kingdom`` / ``kingdom_label``
+    补进**网页载荷**（U1-02 的座位卡读这三个键）；``chained`` / ``wine_active`` 同样由
+    ``decorate_snapshot`` 补。会话顶层的 ``heroes`` 名单仍是逐座位武将 id 的真源。
     """
 
     seat: int
