@@ -226,7 +226,7 @@ function enterCardPreativation(pending, card, manifest) {
     skillId: null,
     cardId: card.card_id,
     card,
-    name: card.name,
+    name: cardName(card),
     composite: false,
     cardEntry: true,
     steps: manifest,

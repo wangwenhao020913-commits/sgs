@@ -25,7 +25,7 @@ def _bootstrap() -> None:
 _bootstrap()
 
 from sgs.agents import RandomPlayer, TapePlayer  # noqa: E402
-from sgs.data import Identity, Suit, validate_rule_config  # noqa: E402
+from sgs.data import Identity, Suit, load_content_pack, validate_rule_config  # noqa: E402
 from sgs.engine import Engine, RandomSource, dump_journal  # noqa: E402
 from sgs.resolution import Frame, ResolutionStack  # noqa: E402
 from sgs.skills import FREE_SPLIT  # noqa: E402
@@ -35,6 +35,7 @@ from sgs.state import (  # noqa: E402
     FrameKind,
     PeachQuery,
     Phase,
+    PlayerPublic,
     PlayPhaseQuery,
     RespondQuery,
     SelectCardsQuery,
@@ -49,6 +50,7 @@ from sgs.state import (  # noqa: E402
     project,
 )
 from sgs.timing import Timing  # noqa: E402
+from sgs_web.display import card_display, prompt_display  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
     candidate_index,
@@ -647,6 +649,9 @@ def test_the_candidate_index_is_derived_from_the_legal_actions() -> None:
                 index = candidate_index(query)
                 payload = pending_payload(session)
                 assert payload is not None
+                # `legal_actions` 保持可回传（不带 display_*），`candidate_index(query)`
+                # 是未装饰的纯索引 ⇒ 两边都是牌面事实，可以直接比。展示字段的补充由
+                # `pending_payload` 单独做（`test_the_pending_payload_carries_display_fields...`）。
 
                 # ② 候选 ⊆ 索引：每条带牌的候选都在索引里，且挂在**自己那张牌**下
                 for action in payload["legal_actions"]:
@@ -3250,3 +3255,188 @@ def test_a_real_session_clears_the_effect_area_after_a_lethal_lightning_judgment
     assert leaving[-1]["to_zone"]["zone"] == "discard", leaving[-1]["to_zone"]
     assert leaving[-1]["reason"] == "USE", "命中后的去向与既有约定一致（reason = USE）"
     assert leaving[-1]["seq"] < query.seq, "这条 delta 必须在本批（停在下一问之前）里送达"
+
+
+# ---------------------------------------------------------------------------
+# U1-04 展示契约：座位状态字段（chained / wine_active）
+# ---------------------------------------------------------------------------
+
+
+def test_the_public_seat_exposes_chained_and_wine_defaults() -> None:
+    """U1 先下发默认值：新局所有人 ``chained=False`` / ``wine_active=False``。"""
+    session = Session(seed=61, ai="random", timeout_seconds=None, player_count=5)
+    snapshot = visible_snapshot(session)
+
+    assert snapshot["players"], "快照必须有座位"
+    for player in snapshot["players"]:
+        assert player["chained"] is False, f"座位 {player['seat']} 的横置默认未下发"
+        assert player["wine_active"] is False, f"座位 {player['seat']} 的酒状态默认未下发"
+
+
+def test_the_public_seat_reads_chained_and_wine_from_engine_state() -> None:
+    """字段是真状态：引擎状态置真时投影读得到（M5 接状态时只写状态，不改投影）。"""
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4), SeatSpec(hp=4)],
+        deck=tuple(range(10)),
+    )
+    state.players[0].chained = True
+    state.players[1].wine_active = True
+
+    view = project(state, 0)
+
+    assert view.players[0].chained is True and view.players[0].wine_active is False
+    assert view.players[1].wine_active is True and view.players[1].chained is False
+    assert "chained" in PlayerPublic.model_fields
+    assert "wine_active" in PlayerPublic.model_fields
+
+
+# ---------------------------------------------------------------------------
+# U1-04 展示契约：纯函数（牌面 / 提示条）
+# ---------------------------------------------------------------------------
+
+
+def test_the_card_contract_maps_fire_and_thunder_slashes_to_the_product_name() -> None:
+    """火杀 / 雷杀都显示「杀」；属性分开（火焰 / 雷电），转化牌带来源牌。"""
+    from sgs.state import CardRef
+    from sgs_web.display import card_display
+
+    source = CardRef(card_id=2, type="dodge", name="闪", suit="heart", rank=2, color="red")
+    fire = CardRef(
+        card_id=-3, type="fire_slash", name="火杀", virtual_sources=(2,)
+    )
+    thunder = CardRef(card_id=-4, type="thunder_slash", name="雷杀")
+    plain = CardRef(card_id=1, type="slash", name="杀", suit="spade", rank=7, color="black")
+    peach = CardRef(card_id=5, type="peach", name="桃", suit="heart", rank=3, color="red")
+
+    fire_fields = card_display(fire, lookup={2: source})
+    assert fire_fields["display_name"] == "杀", "火杀显示产物名「杀」，不是「火杀」"
+    assert fire_fields["attribute"] == "火焰"
+    assert fire_fields["kind"] == "transformed"
+    assert [card["card_id"] for card in fire_fields["source_cards"]] == [2]
+    assert fire_fields["source_cards"][0]["display_name"] == "闪"
+
+    thunder_fields = card_display(thunder)
+    assert thunder_fields["display_name"] == "杀"
+    assert thunder_fields["attribute"] == "雷电"
+    assert thunder_fields["kind"] == "virtual", "无实体来源的虚拟牌是 virtual"
+
+    assert card_display(plain)["display_name"] == "杀"
+    assert card_display(plain)["attribute"] == "普通"
+    assert card_display(plain)["kind"] == "normal"
+    assert card_display(peach)["display_name"] == "桃"
+    assert card_display(peach)["source_cards"] == []
+
+
+def test_the_prompt_contract_carries_the_text_and_the_timeout_default() -> None:
+    """提示条契约：文本 + 超时默认动作 + 给人看的默认动作说明。"""
+    from sgs_web.display import prompt_display
+    from sgs_web.timeout import fallback_action
+
+    session = Session(seed=5, ai="random", timeout_seconds=None, player_count=4)
+    pending = session.pending
+    assert pending is not None
+
+    contract = prompt_display(pending)
+
+    assert contract["text"] == pending.prompt
+    assert contract["default_action"]["kind"] == fallback_action(pending).kind
+    assert contract["default_label"].startswith("超时将自动")
+    if contract["default_action"]["kind"] == "Pass":
+        assert "放弃" in contract["default_label"]
+    elif contract["default_action"]["kind"] == "EndPhase":
+        assert "结束出牌阶段" in contract["default_label"]
+    else:
+        assert "第一项" in contract["default_label"]
+
+
+# ---------------------------------------------------------------------------
+# U1-04 展示契约：投影 / 当前挂起真的把展示字段发下去
+# ---------------------------------------------------------------------------
+
+
+def _visible_cards(snapshot: dict) -> list[dict]:
+    """快照里所有**看得见的**牌（自己手牌 / 公共区 / 逐座位装备判定区）。"""
+    cards: list[dict] = []
+    for key in ("self_hand", "discard", "processing"):
+        cards.extend(snapshot.get(key) or [])
+    for player in snapshot.get("players") or []:
+        for key in ("equip", "judge"):
+            cards.extend(player.get(key) or [])
+    return cards
+
+
+def test_every_visible_card_carries_the_display_contract() -> None:
+    session = Session(seed=61, ai="random", timeout_seconds=None, player_count=5)
+    snapshot = visible_snapshot(session)
+
+    cards = _visible_cards(snapshot)
+    assert cards, "快照里必须有牌，否则这条断言是空转"
+    for card in cards:
+        assert card["display_name"], f"牌 {card['card_id']} 缺 display_name"
+        assert card["attribute"] in ("普通", "火焰", "雷电"), card
+        assert card["kind"] in ("normal", "virtual", "transformed"), card
+        assert isinstance(card["source_cards"], list), card
+
+    for player in snapshot["players"]:
+        assert "chained" in player and "wine_active" in player
+        assert "identity_label" in player, "座位身份标签由服务端映射一次，前端不再另抄"
+    me = next(p for p in snapshot["players"] if p["seat"] == session.human_seat)
+    assert me["identity_label"] in ("主公", "忠臣", "反贼", "内奸"), me
+
+
+def test_the_pending_payload_carries_display_fields_and_the_prompt_contract() -> None:
+    session = Session(seed=5, ai="random", timeout_seconds=None, player_count=4)
+    pending = session.pending
+    assert pending is not None
+    payload = pending_payload(session)
+
+    assert payload["prompt_display"]["text"] == pending.prompt
+    assert payload["prompt_display"]["default_label"].startswith("超时将自动")
+    assert payload["prompt_display"]["default_action"]["kind"] == fallback_action(pending).kind
+
+    seen = 0
+    for entry in payload["candidate_index"].values():
+        assert "display_name" in entry["card"]
+        seen += 1
+    # `legal_actions` 必须保持**可回传**：Action 模型 extra="forbid"，多一个 display_* 键
+    # 就会让提交变成 400。展示字段只放只读载体上。
+    for action in payload["legal_actions"]:
+        card = action.get("card")
+        if isinstance(card, dict):
+            assert "display_name" not in card, f"候选卡被写了展示字段，回传会 400：{card}"
+            seen += 1
+    assert seen > 0, "这条询问必须至少有一张牌，否则展示契约没有消费者"
+
+    view = payload["view"]
+    for player in view["players"]:
+        assert "identity_label" in player
+        assert "chained" in player and "wine_active" in player
+    for card in view["self_hand"]:
+        assert "display_name" in card
+
+
+def test_the_seat_contract_maps_the_identity_label_and_live_state() -> None:
+    """座位展示契约：身份中文标签只映射一次；横置 / 酒读引擎状态。"""
+    from sgs_web.display import seat_display
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, identity=Identity.LORD),
+            SeatSpec(hp=4, identity=Identity.REBEL),
+        ],
+        deck=tuple(range(10)),
+    )
+    state.players[0].chained = True
+    state.players[1].wine_active = True
+    view = project(state, 0)
+
+    lord = seat_display(view.players[0])
+    rebel = seat_display(view.players[1])
+    assert lord["identity_label"] == "主公"
+    assert lord["chained"] is True and lord["wine_active"] is False
+    assert rebel["identity_label"] is None, "查看者 0 看不到反贼的身份 ⇒ 标签也是 None"
+    assert rebel["wine_active"] is True

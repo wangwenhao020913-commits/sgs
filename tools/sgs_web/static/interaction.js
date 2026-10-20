@@ -15,7 +15,7 @@ function cardChip(card, selected, isStatic, usable = true, onClick = null) {
   if (selected) chip.classList.add("sel");
   if (isStatic) chip.classList.add("static");
   if (!isStatic && !usable) chip.classList.add("dis");
-  chip.innerHTML = `<span class="n">${card.name}</span><span class="s">${card.suit || ""}${card.rank ?? ""}</span>`;
+  chip.innerHTML = `<span class="n">${cardName(card)}</span><span class="s">${card.suit || ""}${card.rank ?? ""}</span>`;
   // 静态牌（装备 / 判定 / 处理区）不可点；其余默认走"点牌设焦点"，弃牌阶段另给入口。
   if (!isStatic) chip.addEventListener("click", onClick || (() => toggleFocus(card.card_id)));
   return chip;
@@ -86,7 +86,7 @@ function toggleFocus(cardId) {
     state.focusCardId = null;
     state.selectedTargets = [];
     const card = (state.view.snapshot.self_hand || []).find((c) => c.card_id === cardId);
-    state.lastRejectReason = `【${card ? card.name : cardId}】不能用于当前询问（${pending.prompt}）`;
+    state.lastRejectReason = `【${card ? cardName(card) : cardId}】不能用于当前询问（${pending.prompt}）`;
   } else {
     state.focusCardId = cardId;
     state.selectedTargets = [];

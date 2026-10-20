@@ -4473,4 +4473,49 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
 }
 
+
+/* ============ U1-04 展示契约：前端读服务端的 display_name（不再自己映射） ============
+ *
+ * 服务端下发 `display_name`（火杀 / 雷杀都叫「杀」）与 `kind` / `attribute` / `source_cards`；
+ * 界面只读这些键。这里喂一张**转化火杀**，断言手牌与候选文案都显示「杀」而不是「火杀」。
+ */
+{
+  const saved = ui.state.view;
+  const source = synthCard(2, "闪");
+  const fire = {
+    ...synthCard(-9, "火杀"),
+    type: "fire_slash",
+    virtual_sources: [2],
+    display_name: "杀",
+    attribute: "火焰",
+    kind: "transformed",
+    source_cards: [{ ...source, display_name: "闪", attribute: "普通", kind: "normal", source_cards: [] }],
+  };
+  const firePending = {
+    kind: "PLAY_PHASE", actor: 0, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ answers_seq: 1, kind: "UseCard", card: fire, targets: [1] }],
+    candidate_index: {
+      "-9": { card: fire, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
+    },
+    context: null, option_seats: {},
+  };
+  const view = synthView(firePending);
+  view.snapshot.self_hand = [fire];
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const chipText = $("t-hand").children[0].text();
+  check("U1-04a 手牌卡名读 display_name（转化火杀显示「杀」）",
+    chipText.includes("杀") && !chipText.includes("火杀"), `手牌="${chipText}"`);
+  const label = ui.actionLabel({ kind: "UseCard", card: fire, targets: [1] });
+  check("U1-04b 候选文案读 display_name（不是「火杀」）",
+    label.includes("杀") && !label.includes("火杀"), `label="${label}"`);
+
+  ui.state.view = saved;
+  ui.resetSelection();
+  ui.renderTable();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

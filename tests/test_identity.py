@@ -280,3 +280,46 @@ def test_the_lord_skill_gate_reads_identity_and_skill_type(identity):
     assert lord_skill_allowed(identity, "hero.caocao.hujia") is (identity is Identity.LORD)
 
 
+
+
+# ---------------------------------------------------------------------------
+# 身份可见性成为**引擎状态**（U1-04）：主公默认亮明，其余默认暗置
+# ---------------------------------------------------------------------------
+
+
+def test_a_new_identity_game_marks_only_the_lord_as_identity_visible():
+    """``Player.identity_visible``：主公 ``True``、其余 ``False``（M5 的亮明效果写它）。"""
+    engine = _new(6)
+    lord = _lord_seat(engine)
+
+    assert [player.identity_visible for player in engine.state.players].count(True) == 1
+    assert engine.state.players[lord].identity_visible is True
+    for player in engine.state.players:
+        if player.seat != lord:
+            assert player.identity_visible is False, f"非主公 {player.seat} 不得默认亮明"
+
+
+def test_no_identity_mode_marks_nobody_identity_visible():
+    engine = _new(2)
+
+    assert all(player.identity is None for player in engine.state.players)
+    assert all(player.identity_visible is False for player in engine.state.players)
+
+
+def test_the_projection_honours_the_identity_visible_field():
+    """``identity_visible=True`` 的存活非主公对**所有**参与者可见（U1-04 的第四种可见情形）。"""
+    state = _four_seat_projection()
+    state.players[3].identity_visible = True
+
+    for viewer in range(4):
+        assert project(state, viewer).players[3].identity is Identity.RENEGADE, (
+            f"查看者 {viewer} 应看到被字段亮明的座位 3"
+        )
+
+
+def test_the_projection_still_hides_a_seat_whose_field_is_false():
+    state = _four_seat_projection()
+    state.players[3].identity_visible = False
+
+    assert project(state, 0).players[3].identity is None
+    assert project(state, 1).players[3].identity is None

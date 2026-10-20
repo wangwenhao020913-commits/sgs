@@ -3190,6 +3190,7 @@ def _initial_player(
         hp=hp_max,
         hp_max=hp_max,
         identity=identity,
+        identity_visible=identity is Identity.LORD,
         gender=None if hero is None else hero.gender,
         hero=None if hero is None else hero.id,
         kingdom=None if hero is None else hero.kingdom,

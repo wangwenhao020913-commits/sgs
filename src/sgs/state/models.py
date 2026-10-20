@@ -187,6 +187,10 @@ class Player(BaseModel):
     """装备区（一个整体区）；列表序 = 槽位枚举序（票 12 §Q2），每槽至多一张。"""
     judge: list[int] = Field(default_factory=list)
     """判定区（**先入在前**）；"最后置入"的读取端用 ``reversed()`` 表达（票 08 §8）。"""
+    chained: bool = False
+    """是否横置（铁索连环，U1-04 先落座位字段；**状态接线归 M5**）。"""
+    wine_active: bool = False
+    """【酒】的"下一张【杀】+1"是否生效（U1-04 先落座位字段；**状态接线归 M5**）。"""
     card_use_counts: dict[str, int] = Field(default_factory=dict)
     """本回合各牌名（card type id）的已用次数；该座位自己的 ``TURN_START`` 重置（票 07 §6）。
 
@@ -196,6 +200,13 @@ class Player(BaseModel):
     """座位级身份（票 13 §3）：无身份局恒 ``None``，身份局由 ``build_initial`` 一次发放。
 
     判定一律比枚举成员；主公在开局即亮明（投影侧负责可见性，票 13 §6）。
+    """
+    identity_visible: bool = False
+    """是否已对**所有人**亮明身份（U1-04）。
+
+    引擎状态而不是投影派生：主公在 ``_initial_player`` 置 ``True``；阵亡亮明仍由投影按
+    ``alive`` 派生（既有口径），未来 M5 的"亮明"效果写这个字段即可，不必改投影。
+    **不发 delta**（M5 不新增亮明效果前它只在开局写一次），故标准 47 条金录像逐字节不变。
     """
     gender: Gender | None = None
     """座位级性别（票 30 / 票 05 §7.1 的【雌雄双股剑】判据）。

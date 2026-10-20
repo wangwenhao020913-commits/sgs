@@ -79,7 +79,7 @@ function selectionError(action, pending) {
 function actionLabel(action) {
   if (action.kind === "UseCard" || action.kind === "PlayCard") {
     const targets = action.targets && action.targets.length ? ` → 座位 ${action.targets.join("、")}` : "";
-    return `使用【${action.card.name}】${targets}`;
+    return `使用【${cardName(action.card)}】${targets}`;
   }
   if (action.kind === "ActivateSkill") {
     return `发动技能 ${action.skill_id}${action.picks && action.picks.length ? `（选 ${action.picks.length} 张）` : ""}`;
@@ -128,7 +128,7 @@ function renderSlots(pending) {
     chip.type = "button";
     chip.className = "card";
     if (state.picks.includes(index)) chip.classList.add("sel");
-    const face = slot.card ? `${slot.card.name}` : "？";
+    const face = slot.card ? cardName(slot.card) : "？";
     const where = slot.ref && slot.ref.seat !== null && slot.ref.seat !== undefined ? `座${slot.ref.seat}` : "";
     chip.innerHTML = `<span class="n">${face}</span><span class="s">${where} ${slot.ref ? slot.ref.zone : ""}</span>`;
     chip.addEventListener("click", () => {

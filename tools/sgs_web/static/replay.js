@@ -250,7 +250,7 @@ function renderReplayQuery(query) {
     const where = ref.seat === null || ref.seat === undefined
       ? String(ref.zone || "")
       : `${ref.zone} · 座位 ${ref.seat}`;
-    chip.innerHTML = `<span class="n">${slot.card ? slot.card.name : "？"}</span><span class="s">${where}</span>`;
+    chip.innerHTML = `<span class="n">${slot.card ? cardName(slot.card) : "？"}</span><span class="s">${where}</span>`;
     slots.appendChild(chip);
   }
 }

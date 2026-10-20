@@ -166,7 +166,7 @@ function arrangeCardNode(layout, index) {
   chip.setAttribute("data-row", arrangeRowOf(layout, index));
   if (layout.selected === index) chip.classList.add("sel");
   chip.draggable = true;
-  chip.innerHTML = `<span class="n">${card.name}</span><span class="s">${card.suit || ""}${card.rank ?? ""}</span>`;
+  chip.innerHTML = `<span class="n">${cardName(card)}</span><span class="s">${card.suit || ""}${card.rank ?? ""}</span>`;
   chip.addEventListener("click", () => arrangePick(index));
   chip.addEventListener("dragstart", (event) => {
     if (state.playback) return;

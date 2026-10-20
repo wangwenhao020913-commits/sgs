@@ -188,7 +188,7 @@ function describeEffect(cards) {
     const who = (card.source === null || card.source === undefined)
       ? ""
       : `（${useText(card)}）`;
-    return `【${card.name}】${who}`;
+    return `【${cardName(card)}】${who}`;
   });
   return `处理中：${parts.join("、")}`;
 }

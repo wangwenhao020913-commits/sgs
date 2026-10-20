@@ -330,8 +330,9 @@ class PlayerPublic(_FrozenModel):
     默认——与"暗置武将"（国战：发了牌但别人看不见）**不是一回事**：前者是"这张座位上没有
     武将牌"，后者是"有牌但不公开"，将来做国战时两者必须能同时存在。
 
-    两条新字段**不进记录流**（``exclude``）：无武将模式下加字段不改 M2 的记录流字节
-    （票 02 §验收 5 的"34 条基准逐行通过"）；带武将的记录形态留给定票按需立项。
+    ``hero`` / ``kingdom`` / ``chained`` / ``wine_active`` **不进记录流**（``exclude``）：
+    记录流里的询问视角不带这些网页展示字段，故标准 47 条金录像逐字节不变；网页载荷由
+    ``sgs_web.display`` 按需补下。
     """
 
     seat: int
@@ -341,6 +342,17 @@ class PlayerPublic(_FrozenModel):
     alive: bool
     equip: tuple[CardRef, ...]
     judge: tuple[CardRef, ...]
+    chained: bool = Field(default=False, exclude=True)
+    """横置状态（U1-04 下发的座位事实；M5 接状态前恒 ``False``）。
+
+    ``exclude`` 与 ``hero`` / ``kingdom`` 同一条纪律：**不进记录流**，标准 47 条金录像
+    逐字节不变。它由 ``visible_snapshot`` 经 ``display.decorate_snapshot`` 写进网页载荷。
+    """
+    wine_active: bool = Field(default=False, exclude=True)
+    """【酒】的下一张【杀】+1 是否生效（U1-04 下发的座位事实；M5 接状态前恒 ``False``）。
+
+    同 ``chained``：``exclude`` 不进记录流，网页载荷由展示层补下。
+    """
     identity: Identity | None = None
     hero: str | None = Field(default=None, exclude=True)
     kingdom: Kingdom | None = Field(default=None, exclude=True)

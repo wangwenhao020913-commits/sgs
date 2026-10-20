@@ -18,10 +18,18 @@ __all__ = ["project"]
 def _visible_identity(player: Player, *, viewer: int) -> Identity | None:
     """``viewer`` 能看到 ``player`` 的身份吗（票 13 §6）。
 
-    可见 ⇔ 本人 ∨ 主公（开局立即亮明）∨ 已死亡（阵亡即亮明）；其余存活者不可见。
-    用 ``alive`` 派生而不是新状态字段：M2 该窗口内没有询问，派生是精确的。
+    可见 ⇔ 本人 ∨ 主公（开局立即亮明）∨ **已亮明字段为真**（U1-04）∨ 已死亡
+    （阵亡即亮明）；其余存活者不可见。
+
+    主公与阵亡仍按既有口径派生（字段是 U1-04 新增的"亮明"入口，不替换它们）；字段让
+    M5 的亮明效果只需写状态、不用改投影。
     """
-    if player.seat == viewer or player.identity is Identity.LORD or not player.alive:
+    if (
+        player.seat == viewer
+        or player.identity is Identity.LORD
+        or player.identity_visible
+        or not player.alive
+    ):
         return player.identity
     return None
 
@@ -41,6 +49,8 @@ def project(state: GameState, seat: int) -> PlayerView:
             alive=player.alive,
             equip=state.refs(player.equip),
             judge=state.refs(player.judge),
+            chained=player.chained,
+            wine_active=player.wine_active,
             identity=_visible_identity(player, viewer=seat),
             hero=player.hero,
             kingdom=player.kingdom,

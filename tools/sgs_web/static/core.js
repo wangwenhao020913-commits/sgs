@@ -30,6 +30,26 @@
 
 const $ = (id) => document.getElementById(id);
 
+/** 卡名：服务端展示契约优先（火杀 / 雷杀 → 「杀」）。**不自己映射牌名**。
+ *
+ * 展示字段挂在**只读载体**上（`candidate_index` / 快照 / 选择面 / 授予的牌面）；
+ * `legal_actions` 里的牌故意不带 `display_*`——界面会把选中的候选原样回传，
+ * 而 Action 模型 `extra="forbid"`，多一个键就让提交 400。故候选的卡名按 `card_id`
+ * 回查 `candidate_index`（那里是展示副本）；旧录像 / 合成载荷退回卡面自带的 `name`。
+ */
+function cardName(card) {
+  if (!card) return "？";
+  if (card.display_name) return card.display_name;
+  const pending = state.view && state.view.pending;
+  const index = (pending && pending.candidate_index) || {};
+  const entry = index[String(card.card_id)];
+  // 只认同 id 且**同名**的索引项：回放页消费的是录像里的牌，别拿当前对局的同号牌
+  // （换内容包时 id 可能撞）去改它的牌名。
+  const display = entry && entry.card;
+  if (display && display.display_name && display.name === card.name) return display.display_name;
+  return card.name || "？";
+}
+
 /** `Phase` 枚举的字面值 → 中文阶段名。
  *
  * 枚举值（`prepare` / `judge` / `draw` / `play` / `discard` / `finish`）是**稳定报文值**，

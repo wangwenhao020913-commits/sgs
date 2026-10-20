@@ -30,6 +30,7 @@ from sgs.skills import (
 from sgs.state import FrameKind, Query, WindowCause, project
 from sgs.timing import Timing
 
+from .display import decorate_pending, decorate_snapshot
 from .session import Session
 
 __all__ = [
@@ -51,8 +52,17 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
     这是 ``tests/test_web.py`` 的"不泄露"判据盯住的那个对象：对手只有 ``hand_count``、
     身份只出现"本人 / 主公 / 已阵亡"三种可见情形、牌堆只有数量无顺序。
     """
-    view = project(session.engine.state, session.human_seat)
-    return view.model_dump(mode="json")
+    state = session.engine.state
+    view = project(state, session.human_seat)
+    payload = view.model_dump(mode="json")
+    # U1-04 展示契约：牌面色 / 属性 / 种类 / 来源牌 + 座位身份标签。派生在 display.py，
+    # 投影只负责"哪些可见"；下发的仍然是**同一份可见快照**，不新增真源。
+    decorate_snapshot(
+        payload,
+        view.players,
+        lookup={card.card_id: card for card in state.cards},
+    )
+    return payload
 
 
 def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
@@ -1076,6 +1086,17 @@ def pending_payload(
         query,
         session.engine.state if isinstance(session, Session) else None,
         owner=int(query.actor),
+    )
+    # U1-04 展示契约：询问里的每张牌（候选 / 候选索引 / 选择面 / 授予的牌面）+ 内嵌视角
+    # + 提示条（文本 / 超时默认动作）。裸 ``Query``（409）拿不到引擎 ⇒ 来源牌留空，不猜。
+    decorate_pending(
+        payload,
+        query,
+        lookup=(
+            {card.card_id: card for card in session.engine.state.cards}
+            if isinstance(session, Session)
+            else None
+        ),
     )
     return payload
 
