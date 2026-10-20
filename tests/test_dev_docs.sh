@@ -499,7 +499,7 @@ check "$GLOSSARY" '**焦点**：' "手选术语：焦点"
 check "$DOC06" '**ADR-012 变更说明（第二次' "牌桌交互重构：ADR-012 第二次变更块"
 check "$DOC06" '**自动选中的判据 = 合法组合恰好一组且等于池的全部**' "手选账本：自动选中判据"
 check "$DOC06" '**牌桌的合法性只在「候选索引」里问**' "手选账本：合法性只问候选索引"
-check "$DOC06" '`tools/sgs_web/static/app.js:toggleFocus`（判据命中即填入已选目标）与 `tools/sgs_web/static/app.js:selectTarget`（确定态' \
+check "$DOC06" '`tools/sgs_web/static/interaction.js:toggleFocus`（判据命中即填入已选目标）与 `tools/sgs_web/static/interaction.js:selectTarget`（确定态' \
   "手选账本：自动选中落点写在调用方（不是纯判据 autoCombo）"
 check "$DOC06" '`autoCombo` 只是**纯判据**，不含这两条行为' \
   "手选账本：点明 autoCombo 不是行为落点"

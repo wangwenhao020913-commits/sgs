@@ -1,4 +1,4 @@
-/* 把 app.js 的入口挂到 globalThis.__bridge，**对缺失项容错**。
+/* 把前端脚本的入口挂到 globalThis.__bridge，**对缺失项容错**。
  *
  * 为什么要容错：`/tdd` 的红必须落在**断言**上。若桥硬引用一个尚未实现的函数，红会变成
  * 加载期的 ReferenceError，测试就分不清"功能没写"与"桥写错了"。
@@ -7,7 +7,7 @@
  * 未必是 vm 全局对象的属性（用 `name in globalThis` 会漏），而 `eval` 看得见它们；
  * 取不到就是 undefined，不抛错。
  *
- * **回放（报障 3）**：app.js 的 `applyView` / `submitAction` 现在会先播事件再提交视图。
+ * **回放（报障 3）**：前端的 `applyView` / `submitAction` 现在会先播事件再提交视图。
  * 烟测不跑真实计时器（`window.setTimeout` 是空实现），故这里把这两个入口包一层：
  * 默认**立刻把回放跑完**（等价于"等动画播完再断言"），需要观察中间态的用例改用
  * `applyViewRaw` / `submitActionRaw` 配合 `stepPlayback`。

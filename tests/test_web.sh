@@ -51,14 +51,28 @@ if [ -z "$PORT" ]; then
 fi
 echo "PASS: 服务已监听 127.0.0.1:$PORT"
 
-# ① 静态资源（界面本身）
+# ① 静态资源（界面本身）：脚本清单**只认 index.html** 的 `<script src>` 顺序（U1-00）。
+SCRIPT_SRCS="$(sed -n 's/.*<script[^>]*src="\([^"]*\)".*/\1/p' tools/sgs_web/static/index.html)"
+if [ -z "$SCRIPT_SRCS" ]; then
+  echo "FAIL: index.html 里找不到任何 <script src>"
+  exit 1
+fi
+if printf '%s\n' "$SCRIPT_SRCS" | grep -qx 'app.js'; then
+  echo "FAIL: index.html 仍在加载旧的单文件 app.js（U1-00 已拆成按职责命名的脚本）"
+  exit 1
+fi
 INDEX_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/")"
-JS_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/app.js")"
 CSS_CODE="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/style.css")"
-if [ "$INDEX_CODE" = "200" ] && [ "$JS_CODE" = "200" ] && [ "$CSS_CODE" = "200" ]; then
-  echo "PASS: 静态资源可取（index / app.js / style.css）"
+STATIC_FAIL=""
+while IFS= read -r src; do
+  [ -z "$src" ] && continue
+  code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/$src")"
+  [ "$code" = "200" ] || STATIC_FAIL="$STATIC_FAIL $src=$code"
+done <<< "$SCRIPT_SRCS"
+if [ "$INDEX_CODE" = "200" ] && [ "$CSS_CODE" = "200" ] && [ -z "$STATIC_FAIL" ]; then
+  echo "PASS: 静态资源可取（index / style.css / $(printf '%s\n' "$SCRIPT_SRCS" | tr '\n' ' ')）"
 else
-  echo "FAIL: 静态资源取不到（index=$INDEX_CODE app.js=$JS_CODE style.css=$CSS_CODE）"
+  echo "FAIL: 静态资源取不到（index=$INDEX_CODE style=$CSS_CODE 脚本:$STATIC_FAIL）"
   exit 1
 fi
 
@@ -134,15 +148,25 @@ else
   exit 1
 fi
 
-# ⑥ 前端渲染冒烟：把**真的 app.js** 跑在最小 DOM 垫片上，喂真服务器响应
-# （判据 2 的界面侧：对手不出现牌面；以及"提交的 Action 必须原样取自 legal_actions"）。
+# ⑥ 前端渲染冒烟：把**真的前端脚本**（按 index.html 顺序拼接）跑在最小 DOM 垫片上，
+# 喂真服务器响应（判据 2 的界面侧：对手不出现牌面；以及"提交的 Action 必须原样取自
+# legal_actions"）。
 # node 是这一步的运行时：缺失即判红——与 test_session_decoder.sh 对 Node 的态度一致，
 # 不回退、不静默通过（本仓库已有 Node 门禁先例，故不是新增依赖）。
 if ! command -v node >/dev/null 2>&1; then
   echo "FAIL: 前端冒烟需要 node 运行时，PATH 里找不到 node"
   exit 1
 fi
-echo "=== 前端渲染冒烟（真 app.js + 最小 DOM 垫片）==="
+while IFS= read -r src; do
+  [ -z "$src" ] && continue
+  if ! node --check "tools/sgs_web/static/$src" >/dev/null 2>&1; then
+    echo "FAIL: 脚本语法检查未通过：$src"
+    node --check "tools/sgs_web/static/$src"
+    exit 1
+  fi
+done <<< "$SCRIPT_SRCS"
+echo "PASS: $(printf '%s\n' "$SCRIPT_SRCS" | wc -l | tr -d ' ') 份脚本各自 node --check 通过"
+echo "=== 前端渲染冒烟（真前端脚本 + 最小 DOM 垫片）==="
 if ! node tests/support/ui_smoke.mjs "http://127.0.0.1:$PORT"; then
   echo "FAIL: 前端渲染冒烟未通过"
   exit 1

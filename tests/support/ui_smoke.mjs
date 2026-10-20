@@ -1,7 +1,8 @@
 /* M4 前端渲染烟测（一次性工作产物，不入库）。
  *
  * 浏览器工具在这台机器上不可用（无 `bsk`、无 Chromium、无 cargo），所以这里用
- * **最小 DOM 垫片 + node:vm** 把**真的 `tools/sgs_web/static/app.js`** 跑起来，
+ * **最小 DOM 垫片 + node:vm** 把 `tools/sgs_web/static/` 下的**真脚本**跑起来
+ * （按 `index.html` 的 `<script src>` 顺序拼接，与页面共用同一份清单——U1-00），
  * 喂**真的服务器响应**，断言它：
  *   ① 三个页面都能渲染（座位、手牌、询问候选、事件流、回放）；
  *   ② 每类询问的渲染路径**不抛错**、且都能提交；
@@ -41,7 +42,7 @@ class El {
     this.tagName = tag.toUpperCase(); this.id = id; this.children = []; this.listeners = {};
     this.classList = new ClassList(); this._text = ""; this._html = ""; this.value = "";
     this.hidden = false; this.disabled = false; this.type = ""; this.className = "";
-    // 真 DOM 的 `<input type=checkbox>` 缺省未勾选；app.js 读的是 `.checked`（不是 `.value`）。
+    // 真 DOM 的 `<input type=checkbox>` 缺省未勾选；前端读的是 `.checked`（不是 `.value`）。
     this.checked = false;
   }
   get textContent() { return this._text + this.children.map((c) => c.textContent || c.text()).join(""); }
@@ -88,7 +89,7 @@ const documentShim = {
   addEventListener: () => {},
 };
 
-/* -------------------------------------------------- 只记录 app.js 发出的请求 */
+/* -------------------------------------------------- 只记录前端发出的请求 */
 
 const calls = [];
 const realFetch = globalThis.fetch;
@@ -149,9 +150,18 @@ const context = vm.createContext({
   console, Date, JSON, Object, Array, Number, String, Math, encodeURIComponent,
 });
 context.globalThis = context;
-const source = readFileSync("tools/sgs_web/static/app.js", "utf8");
+/* 加载契约（U1-00）：脚本清单**只认** index.html 的 `<script src>` 顺序。
+ * 页面怎么加载，这里就按同样的顺序加载——不在测试里另维护一份文件名清单。
+ * 每份脚本**单独** `runInContext`（不拼接）：这与浏览器的经典脚本语义一致——
+ * 同一个 context 的全局词法作用域跨脚本可见，而每份脚本自己编译，于是顶层
+ * `const` 重名、以及 `main.js` 末尾 `wire()` 的执行顺序都会被真正走到。 */
+const scriptSrcs = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map((match) => match[1]);
+if (!scriptSrcs.length) throw new Error("index.html 没有 <script src> 清单，无法加载前端");
+for (const src of scriptSrcs) {
+  vm.runInContext(readFileSync(`tools/sgs_web/static/${src}`, "utf8"), context, { filename: src });
+}
 const bridge = readFileSync("tests/support/ui_bridge.js", "utf8");
-vm.runInContext(`${source}\n${bridge}`, context, { filename: "app.js" });
+vm.runInContext(bridge, context, { filename: "ui_bridge.js" });
 const ui = context.__bridge;
 
 /* ------------------------------------------------------------------ 断言工具 */
@@ -660,7 +670,7 @@ if (multi) {
  */
 {
   // **先清掉前一个块残留的选中态**：`renderKind` / `buildAction` 把 `state.selectedOption`
-  // 当作"我显式选了这条候选"的输入（`app.js` 的 `renderKind` 在它非空时直接返回 `list`）。
+  // 当作"我显式选了这条候选"的输入（前端的 `renderKind` 在它非空时直接返回 `list`）。
   // 本块断言的是**合成的 `lone` 询问**本身该走 `picker`，与前面哪个真局块最后停在什么选择上无关；
   // 不先清，断言就变成 order-dependent（票 13 收窄【反馈】/【流离】条件后，前面的扫种子块落到
   // 别的 seed、留下的选中态不同，本块才暴露出来）。
@@ -1003,8 +1013,8 @@ check("回放位置指示到末尾", $("r-pos").textContent.includes(String(ui.s
 
 /* W4-6：询问面板 / 全区域 / play-pause / 人类座位 / 空壳引导。
  *
- * 断言全部落在**真的 app.js + 真的录像**上。挑哪条记录来看，由这里一份**独立的**
- * 增量重建决定（不是调 app.js 的派生函数）——否则"界面画了什么"与"测试算了什么"
+ * 断言全部落在**真的前端脚本 + 真的录像**上。挑哪条记录来看，由这里一份**独立的**
+ * 增量重建决定（不是调前端的派生函数）——否则"界面画了什么"与"测试算了什么"
  * 是同一份实现，断言会自证。
  */
 const replayRecords = ui.state.replay.records;
@@ -1636,7 +1646,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 /* ============ ㉿ 遗计：一次选两张 / 取消（票 15 的用户口径） ============
  *
  * 用户原话（`acceptance.md` §C）："一次给出这两张牌时就需要**允许同时选择两张牌**
- * （目前不行）"。这里用**真 app.js** 的 `renderSlots` 点击路径验四件事：
+ * （目前不行）"。这里用**真前端**的 `renderSlots` 点击路径验四件事：
  * 面上每张牌都能点、点两张 = picks 收两个面内位置、提交的是那条候选补上 picks、
  * 再点第三张**不越界**（上限 = 服务端 `spec.total` 的纯函数）。
  * 面里铺三张（比上限多一张）就是为了让"越界拒绝"可观察——它是"允许两张"的另一半。

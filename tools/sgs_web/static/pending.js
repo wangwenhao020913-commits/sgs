@@ -1,0 +1,408 @@
+/* SGS 前端 · 询问渲染：按询问种类分派到手选 / 弃牌 / 直提 / 候选列表。
+ *
+ * 加载顺序见 index.html（U1-00 拆分）；本文件不需要构建步骤。
+ */
+"use strict";
+
+/* ------------------------------------------------------------ 询问渲染 */
+
+/** 手选路径：点牌设焦点、点座位选目标、选出一组**候选里真有**的组合才可提交。 */
+function renderPending(view) {
+  const pending = view.pending;
+  $("t-options").innerHTML = "";
+  // 询问文本：**需要做什么**（服务端 `context.requirement`）优先；没有就退回引擎的通用 prompt。
+  const requirement = pending && pending.context && pending.context.requirement;
+  $("t-prompt").textContent = requirement
+    || (pending ? pending.prompt : "（没有待应答的询问）");
+  // 预发动 / 转化技正在等玩家点牌时，说清"现在要做什么"：
+  // 这些是**界面自己**开的模式，服务端的通用 prompt 读不出它。
+  if (state.preactivation) {
+    $("t-prompt").textContent = state.preactivation.cardEntry
+      ? `使用【${state.preactivation.name}】：按清单选择持刀者与【杀】的目标。`
+      : `预发动【${state.preactivation.name}】：按清单逐步选择。`;
+  } else if (state.convertSkill !== null) {
+    const skill = (view.skills || []).find((item) => item.skill_id === state.convertSkill);
+    const text = skill && skill.ui && skill.ui.requirement;
+    if (text) $("t-prompt").textContent = text;
+  }
+  // 描述文本 = 效果区（处理区）当前内容的说明，**不**再写服务端的"本窗口：谁对谁使用…"。
+  // 那条只在询问到达时更新，回放期间会残留；效果区那行才与牌桌同步（用户裁定）。
+  const contextNode = $("t-context");
+  if (contextNode) contextNode.textContent = describeEffect(state.effectCards);
+  // 这条窗口里**被提供**的技能（主动技 / 提供者 / 转化技）的"需要做什么"文案。
+  const hintsNode = $("t-skill-hints");
+  if (hintsNode) {
+    const hints = (pending && pending.context && pending.context.skill_hints) || [];
+    hintsNode.textContent = hints.map((hint) => `【${hint.name}】${hint.requirement}`).join("　");
+  }
+  $("btn-submit").disabled = true;
+  $("btn-cancel").disabled = true;
+  // 排列是**强制、无取消**（spec §4.3 / Q9(d)）：进入排列面时把取消按钮整个藏起来；
+  // 其余询问路径照旧显示（本行是唯一的复位点，分支只负责按需隐藏）。
+  $("btn-cancel").hidden = false;
+  $("t-choice").textContent = "";
+  const targetHint = $("t-target-hint");
+  if (targetHint) targetHint.textContent = "";
+  if (!pending) {
+    $("t-timer").textContent = "";
+    setActionLabels(false, false);
+    return;
+  }
+  const actions = pending.legal_actions || [];
+  const kind = renderKind(pending, actions);
+
+  if (kind === "picker") renderPicker(pending);
+  else if (kind === "discard") renderDiscard(pending);
+  else if (kind === "preactivation") renderPreativation(pending);
+  else if (kind === "preactivation-entry") renderPreativationEntry(pending);
+  else if (kind === "seat") renderSeatPick(pending);
+  else if (kind === "slots") {
+    // 选择面也要**指到那条候选**：引擎只发一条 `SelectCards` 骨架，具体 `picks` 由
+    // `buildAction()` 补上；不指过去它就没有可补的对象 ⇒ `buildAction()` 返回 null ⇒
+    // 点完槽位提交按钮仍然是灰的（本轮实测：点第 1 个槽位后 picks=[0] 而按钮不可点）。
+    const index = actions.findIndex((action) => action.kind === "SelectCards");
+    if (index >= 0) state.selectedOption = index;
+    // 「提供一张 B」（票 14）：**就地**渲染（不铺选择面块），候选牌在牌桌上直接亮起。
+    if (isProvide(pending)) renderProvide(pending);
+    else renderSlots(pending);
+    // 选择面这一步可不可以取消（票 01 的技能流水线给出一条 `Pass`）。
+    $("btn-cancel").disabled = state.picks.length === 0 && !cancelAction(pending);
+  }
+  else if (kind === "direct") renderDirect(actions[0], pending);
+  else if (kind === "arrange") {
+    // 排列（W6-03）：双行拖拽面；强制、无取消——唯一出口是「确认」。
+    $("btn-cancel").hidden = true;
+    $("btn-cancel").disabled = true;
+    renderArrange(pending);
+  }
+  else renderCandidateList(pending, actions);
+
+  // 提交 / 取消两个按钮的**文案**跟着模式走（预发动 = 确认发动 / 取消预发动；被动入口 = 放弃；
+  // 排列 = 确认）。
+  setActionLabels(state.preactivation !== null, isPassivePreativation(pending), kind === "arrange");
+  // 提交按钮的启用与否**只算一次**（每个分支只管"铺界面"）：分散在各分支里写过一次
+  // 就会漏掉一条路径（`SELECT_CARDS` 的选择面就因此永远灰着）。
+  refreshSubmit(pending);
+  renderCountdown(view);
+}
+
+/** 底部两个按钮的文案：预发动 = 「确认发动 / 取消预发动」；手牌入口 = 「确认使用 / 取消选择」；
+ *  被动入口 = 「放弃」；排列 = 「确认」（取消按钮在排列面里整个隐藏）。 */
+function setActionLabels(inPreativation, passiveEntry, arrange = false) {
+  const submit = $("btn-submit");
+  const cancel = $("btn-cancel");
+  const cardEntry = Boolean(inPreativation && state.preactivation && state.preactivation.cardEntry);
+  if (submit) {
+    submit.textContent = arrange
+      ? "确认"
+      : (inPreativation ? (cardEntry ? "确认使用" : "确认发动") : "提交");
+  }
+  if (cancel) {
+    cancel.textContent = cardEntry
+      ? "取消选择"
+      : (inPreativation
+        ? (passiveEntry ? "放弃" : "取消预发动")
+        : (passiveEntry ? "放弃" : "清空选择"));
+  }
+}
+
+/** 这次询问该走哪条渲染路径。
+ *
+ * - `picker`：出牌阶段 / 响应窗口 —— 点牌 + 点目标（本刀新增）；
+ * - `direct`：只有一条候选、且它**没有目标要选** —— 不铺按钮，直接显示"将提交：…"；
+ * - `slots`：`SELECT_CARDS` 的选择面（下一刀再统一）；
+ * - `arrange`：`ARRANGE` 的双行拖拽面（W6-03；规格由投影下发）；
+ * - `list`：其余询问类保留旧的候选列表按钮（逃生梯，下一刀抹平）。
+ */
+function renderKind(pending, actions) {
+  // 选择面**永远**要渲染：它的交互在 `slots` 上（点槽位），不在候选条数上。
+  // 引擎为 `SELECT_CARDS` 只生成**一条**候选（`SelectCards` + 全部 picks 的组合是前端拼的），
+  // 所以"只有一条候选"绝不能理解成"没什么可选的、直接提交"。
+  if (pending.kind === "SELECT_CARDS") return "slots";
+  // 弃牌阶段：不铺候选按钮，点手牌收进待弃置集合（`buildAction` 按 picks 找候选）。
+  if (pending.kind === "DISCARD") return "discard";
+  // 排列（W6-03）：**唯一**的渲染路径 —— 双行拖拽面；不在候选上铺 720 个按钮。
+  // 规格缺失（409 裸 Query / 无技能定义）时也只走这条路径，由 `renderArrange` 画
+  // "排列不可用"（fail-closed），**不**退回旧的候选列表猜一个顺序。
+  if (pending.kind === "ARRANGE") return "arrange";
+  // 预发动（W4-1）：清单驱动，不铺候选列表、不走手选。
+  if (state.preactivation) return "preactivation";
+  // 被动入口（W4-2）：已翻预发动的技能在时机上只发一次询问并随询问下发清单。界面给它
+  // 一个**入口**（技能按钮）与一条"放弃"（= `Pass`），不把骨架候选画成"发动技能 XXX"。
+  if (isPassivePreativation(pending)) return "preactivation-entry";
+  // `SELECT_OPTION` 的"选座位"形态（【遗计】"交给谁"）：**取消选项按钮**，只点场上武将。
+  if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) return "seat";
+  // **显式选中的候选优先**：技能按钮（`ActivateSkill`）在出牌阶段里与手选并存，
+  // 点了它就等于"我就要发这个技能"，界面必须画那条候选的选中态，不能再画手选提示。
+  if (state.selectedOption !== null && actions[state.selectedOption]) return "list";
+  // 唯一且不需要选目标（放弃 / 结束阶段 / 唯一的无目标响应牌）：直接说"将提交：…"。
+  // 判据用 `needsPicker`，**不能**只看"只有一条候选"——一条 `UseCard{杀, targets=(4,)}`
+  // 也是唯一候选，但它必须让玩家先看见"打的是谁"。
+  if (directAction(pending)) return "direct";
+  // 手选询问（出牌阶段 / 响应窗口）**一律**走 picker：点牌 + 点目标。
+  if (isHandPick(pending)) return "picker";
+  return "list";
+}
+
+/** ``SELECT_OPTION`` 里形如 ``seat:N`` 的选项（服务端已解析成 ``option_seats``）。 */
+function seatChoices(pending) {
+  return Object.keys((pending && pending.option_seats) || {});
+}
+
+/** 这一步能不能**取消**（票 01 的技能流水线）：候选里真有一条 `Pass` 吗。
+ *
+ * 与「清空选择」的区别：清空只动界面本地状态；取消要**送出一条合法候选**，服务端据此
+ * 中止这一步（选中的牌不会被搬走、技能使用次数不消耗）。故只有候选里真有 `Pass` 时，
+ * 取消按钮才接到提交上——其余情形仍是原来的"清空选择"，既有询问一字不改。
+ */
+function cancelAction(pending) {
+  if (!pending) return null;
+  if (pending.kind !== "SELECT_CARDS" && pending.kind !== "SELECT_OPTION") return null;
+  return (pending.legal_actions || []).find((action) => action.kind === "Pass") || null;
+}
+
+/** 取消：候选里真有 `Pass` 就送出去（服务端据此中止这一步），否则只清本地选择。 */
+async function cancelOrClear() {
+  if (state.playback) return;
+  const pending = state.view ? state.view.pending : null;
+  // 预发动（W4-1 / W4-2）：主动入口的取消只是退出**接入层**的本地态，**一个 action 都
+  // 不提交**（回到同一个出牌阶段询问）。被动入口的取消是「放弃」——**送出那条 `Pass`**，
+  // 时机随之消费、不重问（`GLOSSARY.md`「放弃」）；没进入本地态时同样可以直接放弃。
+  if (state.preactivation || isPassivePreativation(pending)) {
+    const passive = isPassivePreativation(pending);
+    if (passive) {
+      const pass = (pending.legal_actions || []).find((action) => action.kind === "Pass");
+      if (pass) {
+        state.selectedOption = (pending.legal_actions || []).indexOf(pass);
+        state.preactivation = null;
+        state.focusCardId = null;
+        state.selectedTargets = [];
+        state.picks = [];
+        state.lastRejectReason = "";
+        await submitAction();
+        return;
+      }
+    }
+    state.preactivation = null;
+    state.lastRejectReason = "";
+    renderTable();
+    renderPending(state.view);
+    return;
+  }
+  const pass = cancelAction(pending);
+  if (!pass) {
+    clearSelection();
+    return;
+  }
+  state.selectedOption = (pending.legal_actions || []).indexOf(pass);
+  state.focusCardId = null;
+  state.selectedTargets = [];
+  state.picks = [];
+  state.preactivation = null;
+  state.lastRejectReason = "";
+  await submitAction();
+}
+
+/** 这条询问是不是"唯一一条候选、且不需要选目标"——是则返回那条候选，否则 `null`。
+ *
+ * 界面（:func:`renderKind` / :func:`refreshSubmit`）与提交（:func:`buildAction`）**必须**用
+ * 同一个判据：各写一遍时，改一处漏一处就会出现"界面显示将提交：…、而 buildAction 返回 null"
+ * 这种失配（本刀在 `SELECT_CARDS` 与技能按钮上各踩过一次）。
+ */
+function directAction(pending) {
+  const actions = (pending && pending.legal_actions) || [];
+  if (actions.length !== 1) return null;
+  return needsPicker(pending) ? null : actions[0];
+}
+
+/** 这条询问是否必须让玩家手选（点牌 / 点目标）。 */
+function needsPicker(pending) {
+  if (!isHandPick(pending)) return false;
+  const lone = (pending.legal_actions || [])[0];
+  if (lone && lone.card) {
+    const entry = cardEntry(pending, lone.card.card_id);
+    if (entry && entry.max_targets > 0) return true;   // 有目标要选 ⇒ 必须手选
+  }
+  return false;
+}
+
+/** 手选路径：点牌设焦点、点座位选目标（提交按钮由 :func:`refreshSubmit` 统一算）。
+ *
+ * 另外把**不是"用某张牌"的候选**（`Pass` / `EndPhase`）也渲染成按钮：响应窗口里
+ * "放弃"是一个**真候选**，只把它藏在提交按钮后面，玩家会以为"必须出牌"——
+ * 报障原文：「响应南蛮入侵时强制出杀，没有放弃选项」。引擎侧 `_respond` 恒追加 `Pass`
+ * （`effects/actions.py`），所以这不是缺候选，是缺入口。
+ */
+function renderPicker(pending) {
+  const hint = $("t-target-hint");
+  if (hint) hint.textContent = pickerTargetHint(pending);
+  $("btn-cancel").disabled = state.focusCardId === null;
+  renderPickerAlternatives(pending);
+}
+
+/** 弃牌阶段：不铺候选按钮（引擎按 C(n,k) 枚举组合，会铺出几十个「弃牌（N张）」），
+ * 只提示"还要弃几张"，实际交互是 `renderTable` 里手牌的点选（`toggleDiscardPick`）。
+ * 提交态由 :func:`refreshSubmit` 统一算——`buildAction` 按 `picks` 反查那条候选。
+ */
+function renderDiscard(pending) {
+  const hint = $("t-target-hint");
+  if (hint) {
+    const need = pending.count || 0;
+    hint.textContent = `点手牌选要弃置的牌：共 ${need} 张（已选 ${state.picks.length} 张）。`;
+  }
+  $("btn-cancel").disabled = state.picks.length === 0;
+}
+
+/** 被动入口（W4-2）：时机询问已带清单，界面只给**进入预发动**的入口与「放弃」。
+
+ * 入口 = 技能栏里那条按钮（`data-preactivation` 已标出步骤数）；这里**不**把骨架候选
+ * 画成"发动技能 XXX"选项（验收：界面上不再出现这种选项），只留一条真候选 `Pass`。
+ */
+function renderPreativationEntry(pending) {
+  const skill = preactivatedSkill(pending);
+  const hint = $("t-target-hint");
+  if (hint) {
+    hint.textContent = `点技能【${skill ? skill.name : pending.skill_id}】进入预发动；`
+      + "或点「放弃」跳过这次时机（放弃后不再询问）。";
+  }
+  const actions = pending.legal_actions || [];
+  const node = $("t-options");
+  actions.forEach((action, index) => {
+    if (action.kind !== "Pass") return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "opt";
+    if (state.selectedOption === index) button.classList.add("sel");
+    button.textContent = actionLabel(action);
+    button.addEventListener("click", () => {
+      state.selectedOption = index;
+      state.lastRejectReason = "";
+      renderPending(state.view);
+    });
+    node.appendChild(button);
+  });
+  $("btn-cancel").disabled = false;
+  $("btn-submit").disabled = true;
+}
+
+/** `SELECT_OPTION` 的"选座位"形态（【遗计】"交给谁" / 【离间】选使用者与目标）：只点场上武将。 */
+function renderSeatPick(pending) {
+  const hint = $("t-target-hint");
+  if (hint) {
+    hint.textContent = cancelAction(pending)
+      ? "点场上武将选择；可点「取消」放弃这一步。"
+      : "点场上武将，选择把这张牌交给谁。";
+  }
+  $("btn-cancel").disabled = state.selectedOption === null && !cancelAction(pending);
+}
+
+/** 响应窗口里"非使用牌"候选的按钮文案（W5-02b）：借刀的 `Pass` = b（**交出武器**）。
+ *
+ * 只看窗口成因这一条公开事实，不改 `actionLabel` 的通用语义（同一个 `Pass` 在别的窗口
+ * 仍是"放弃"）。
+ */
+function alternativeLabel(pending, action) {
+  if (action.kind === "Pass" && pending && pending.cause === "BORROWED_SWORD") {
+    return "交出武器";
+  }
+  return actionLabel(action);
+}
+
+function renderPickerAlternatives(pending) {
+  const box = $("t-options");
+  (pending.legal_actions || []).forEach((action, index) => {
+    if (action.card || action.kind === "ActivateSkill" || action.kind === "SelectCards") return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "opt";
+    if (state.selectedOption === index) button.classList.add("sel");
+    button.textContent = alternativeLabel(pending, action);
+    button.addEventListener("click", () => {
+      state.selectedOption = index;
+      state.focusCardId = null;
+      state.selectedTargets = [];
+      state.lastRejectReason = "";
+      renderTable();
+      renderPending(state.view);
+    });
+    box.appendChild(button);
+  });
+}
+
+/** 唯一且不需要选目标的候选：不铺按钮，直接说"将提交：…"（spec D9）。 */
+function renderDirect(only, pending) {
+  $("t-choice").textContent = only ? `将提交：${alternativeLabel(pending, only)}` : "";
+}
+
+/** 提交按钮的唯一判据：**能造出一个候选里真有的 Action** 时才可点。
+ *
+ * 空选提交会被引擎拒（400），所以界面必须自己拦住——但**不能替引擎裁决**（`04` §4.1）：
+ * `buildAction()` 只做"查找"，最后一道逐字段核对在 :func:`submitAction` 里。
+ */
+function refreshSubmit(pending) {
+  if (state.playback) {
+    // 严格顺序：这批事件播完之前不接任何提交。
+    $("btn-submit").disabled = true;
+    $("btn-cancel").disabled = true;
+    $("t-choice").textContent = "正在播放事件…";
+    if (state.lastRejectReason) $("t-choice").textContent = state.lastRejectReason;
+    return;
+  }
+  const selected = state.selectedOption === null ? null : (pending.legal_actions || [])[state.selectedOption];
+  const blocked = selected === null ? null : selectionError(selected, pending);
+  const ready = blocked === null && buildAction() !== null;
+  $("btn-submit").disabled = !ready;
+  if (state.lastRejectReason) { $("t-choice").textContent = state.lastRejectReason; return; }
+  if (blocked) { $("t-choice").textContent = blocked; return; }
+  if (state.preactivation) {
+    const pa = state.preactivation;
+    // 复合动作：填完就交（服务端校验器裁决）；转化技的本地入口：填完还得**查得到候选**
+    // （查不到 = 这组来源 / 目标此刻不合法，按钮不给点）。
+    $("btn-submit").disabled = !preactivationReady(pa) || buildAction() === null;
+    if (!preactivationReady(pa)) {
+      $("t-choice").textContent = pa.cursor >= pa.steps.length
+        ? "清单里还有步骤没填完。"
+        : preactivationStepHint(pa, pending);
+    } else {
+      $("t-choice").textContent = pa.cardEntry
+        ? "可以确认使用（提交一次带附带指定 [持刀者, Bn] 的使用）。"
+        : (pa.composite
+          ? "可以确认发动（提交一个复合动作）。"
+          : "可以确认发动（服务端会把它解析成这次的使用 / 响应）。");
+    }
+    return;
+  }
+  if (isPassivePreativation(pending) && state.preactivation === null) {
+    $("t-choice").textContent = ready ? "可以提交：放弃。" : "点技能进入预发动，或点「放弃」。";
+    return;
+  }
+  if (pending.kind === "ARRANGE") {
+    // 规格缺失 = 409 裸 Query / 无技能定义（投影 fail-closed）：不猜顺序，只说刷新。
+    $("t-choice").textContent = !arrangeSpec(pending)
+      ? "排列不可用，请刷新"
+      : (ready
+        ? "可以确认：提交你摆放的顺序（上行左→右，再接下行左→右）。"
+        : "先把全部卡牌排成一个完整顺序。");
+    return;
+  }
+  if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) {
+    $("t-choice").textContent = ready ? "可以提交。" : "点场上武将选择交给谁。";
+    return;
+  }
+  if (isDiscardPick(pending)) {
+    const need = pending.count || 0;
+    $("t-choice").textContent = ready
+      ? "可以提交。"
+      : `还要选 ${Math.max(0, need - state.picks.length)} 张手牌弃置。`;
+    return;
+  }
+  if (state.focusCardId !== null && isHandPick(pending)) {
+    $("t-choice").textContent = ready ? "可以提交。" : pickerTargetHint(pending);
+    return;
+  }
+  if (directAction(pending)) {
+    renderDirect((pending.legal_actions || [])[0], pending);
+    return;
+  }
+  $("t-choice").textContent = ready ? "" : "先选一项，或点一张可用的手牌再提交。";
+}

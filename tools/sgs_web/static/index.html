@@ -188,6 +188,22 @@
   </div>
 </main>
 
-<script src="app.js"></script>
+<!-- U1-00：前端按职责拆成普通脚本，**这里的顺序就是运行顺序**；页面与
+     tests/support/ui_smoke.mjs 共用这一份清单（不引入 npm / 打包 / ES module）。 -->
+<script src="core.js"></script>
+<script src="lobby.js"></script>
+<script src="session.js"></script>
+<script src="candidates.js"></script>
+<script src="card-face.js"></script>
+<script src="table.js"></script>
+<script src="preactivation.js"></script>
+<script src="interaction.js"></script>
+<script src="pending.js"></script>
+<script src="options.js"></script>
+<script src="arrange.js"></script>
+<script src="answer.js"></script>
+<script src="log.js"></script>
+<script src="replay.js"></script>
+<script src="main.js"></script>
 </body>
 </html>

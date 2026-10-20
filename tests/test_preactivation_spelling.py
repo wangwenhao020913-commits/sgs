@@ -83,7 +83,7 @@ def test_the_scan_reaches_the_module_and_the_wiring_files() -> None:
     must_scan = {
         REPO_ROOT / "src" / "sgs" / "skills" / (RIGHT_FAMILY + "ation.py"),
         REPO_ROOT / "tools" / "sgs_web" / "projection.py",
-        REPO_ROOT / "tools" / "sgs_web" / "static" / "app.js",
+        REPO_ROOT / "tools" / "sgs_web" / "static" / "preactivation.js",
         REPO_ROOT / "tests" / "replays" / "scenarios.py",
         REPO_ROOT / "GLOSSARY.md",
     }
