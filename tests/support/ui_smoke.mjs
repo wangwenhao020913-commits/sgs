@@ -42,6 +42,8 @@ class El {
     this.tagName = tag.toUpperCase(); this.id = id; this.children = []; this.listeners = {};
     this.classList = new ClassList(); this._text = ""; this._html = ""; this.value = "";
     this.hidden = false; this.disabled = false; this.type = ""; this.className = "";
+    // 真 DOM 的 `element.style` 是个可写对象；垫片补一个扁平副本，供断言"写进去了什么"。
+    this.style = {};
     // 真 DOM 的 `<input type=checkbox>` 缺省未勾选；前端读的是 `.checked`（不是 `.value`）。
     this.checked = false;
   }
@@ -71,7 +73,8 @@ class El {
 
 const byId = new Map();
 const el = (tag, id) => { const n = new El(tag, id); if (id) byId.set(id, n); return n; };
-const html = readFileSync("tools/sgs_web/static/index.html", "utf8");for (const m of html.matchAll(/<(input|select|button|span|div|ol|section|main|form|p|h1|h2|h3|nav|code|a)\b[^>]*\bid="([^"]+)"/g)) {
+const html = readFileSync("tools/sgs_web/static/index.html", "utf8");
+for (const m of html.matchAll(/<(input|select|button|span|div|ol|section|main|form|p|h1|h2|h3|nav|code|a)\b[^>]*\bid="([^"]+)"/g)) {
   const node = el(m[1], m[2]);
   if (m[1] === "input") node.value = "0";
   if (m[1] === "main") node.hidden = m[2] !== "view-lobby";
@@ -179,6 +182,11 @@ const $ = (id) => documentShim.getElementById(id);
 const seatNodes = () => [...$("t-seats").children, $("t-self-seat")];
 const seatBox = (seat) => seatNodes().find(
   (node) => node.getAttribute("data-seat") === String(seat)) || null;
+/** 自己装备区里的第一张牌（就地高亮的用例共用一处查找）。 */
+const selfEquipChip = () => {
+  const row = $("t-self-zones").children.find((c) => c.getAttribute("data-zone") === "equip");
+  return row ? row.children[0] : null;
+};
 const setSelect = (id, value) => {
   const node = $(id);
   node.value = value;
@@ -1451,7 +1459,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && at('id="t-prompt"') < at('id="t-hand"'),
     `handArea=${at('class="hand-area"')} promptbar=${at('id="t-promptbar"')} prompt=${at('id="t-prompt"')} hand=${at('id="t-hand"')}`);
   check("㉿X1e 没有右侧固定栏（牌桌里不再有 .cols）",
-    !tableView.includes('class="cols"') && !tableView.includes('class="panel grow"'));
+    tableView.includes('id="table-bottom"')
+      && !tableView.includes('class="cols"') && !tableView.includes('class="panel grow"'));
   check("㉿X1f 顶栏：左身份配比 / 中轮次与行动者 / 右牌堆弃牌堆 + 设置 + 回放，且不放计时器",
     (() => {
       const topbar = tableView.slice(at('id="table-topbar"'), at('id="table-stage"'));
@@ -1598,10 +1607,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     },
   ];
   const handChips = () => $("t-hand").children;
-  const equipChip = () => {
-    const row = $("t-self-zones").children.find((c) => c.getAttribute("data-zone") === "equip");
-    return row ? row.children[0] : null;
-  };
+  const equipChip = selfEquipChip;
   const skillButton = (id) => $("t-skills").children.find((b) => b.getAttribute("data-skill-id") === id);
   ui.state.view = view;
   ui.resetSelection();
@@ -2029,10 +2035,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿H5 步 2 的询问区文案就是服务端那句「选择一名已受伤角色回复1点体力」",
     $("t-prompt").textContent === "选择一名已受伤角色回复1点体力",
     `"${$("t-prompt").textContent}"`);
-  const seatBox = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "2");
-  check("㉿H6 已受伤角色画成可点", !!seatBox && seatBox.classList.contains("targetable"),
-    `targetable=${seatBox && seatBox.classList.contains("targetable")}`);
-  (seatBox.listeners.click || []).forEach((fn) => fn({ target: seatBox }));
+  const woundedSeat = seatBox(2);
+  check("㉿H6 已受伤角色画成可点", !!woundedSeat && woundedSeat.classList.contains("targetable"),
+    `targetable=${woundedSeat && woundedSeat.classList.contains("targetable")}`);
+  (woundedSeat.listeners.click || []).forEach((fn) => fn({ target: woundedSeat }));
   const seatAction = ui.buildAction();
   check("㉿H7 点它 = 选中那条 seat:N 候选（提交才送出去）",
     !!seatAction && seatAction.kind === "SelectOption" && seatAction.choice === "seat:2",
@@ -2125,11 +2131,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿Y5 步 2 的询问区文案就是服务端那句「选择一名已受伤男性角色回复1点体力」",
     $("t-prompt").textContent === "选择一名已受伤男性角色回复1点体力",
     `"${$("t-prompt").textContent}"`);
-  const seatBox = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "1");
+  const woundedMaleSeat = seatBox(1);
   check("㉿Y6 已受伤男性画成可点（自己不在池里）",
-    !!seatBox && seatBox.classList.contains("targetable"),
-    `targetable=${seatBox && seatBox.classList.contains("targetable")}`);
-  (seatBox.listeners.click || []).forEach((fn) => fn({ target: seatBox }));
+    !!woundedMaleSeat && woundedMaleSeat.classList.contains("targetable"),
+    `targetable=${woundedMaleSeat && woundedMaleSeat.classList.contains("targetable")}`);
+  (woundedMaleSeat.listeners.click || []).forEach((fn) => fn({ target: woundedMaleSeat }));
   const seatAction = ui.buildAction();
   check("㉿Y7 点它 = 选中那条 seat:N 候选（提交才送出去）",
     !!seatAction && seatAction.kind === "SelectOption" && seatAction.choice === "seat:1",
@@ -2647,9 +2653,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     const next = $("t-options").children.find((b) => b.textContent === "下一步");
     if (next) (next.listeners.click || []).forEach((fn) => fn({ target: next }));
     const seats = pa ? ui.preactivationOptions(pa, 1) : null;
-    const seatBox = $("t-seats").children.find(
+    const firstListedSeat = $("t-seats").children.find(
       (c) => seats && seats.includes(`seat:${c.getAttribute("data-seat")}`));
-    if (seatBox) (seatBox.listeners.click || []).forEach((fn) => fn({ target: seatBox }));
+    if (firstListedSeat) {
+      (firstListedSeat.listeners.click || []).forEach((fn) => fn({ target: firstListedSeat }));
+    }
     const composite = ui.buildAction();
     check("㉿R10b 真局里清单填完 = 复合动作（不要求是候选）",
       !!composite && composite.kind === "ActivateSkill"
@@ -3103,8 +3111,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(ui.state.preactivation.answers[0].values) === "[2]",
     JSON.stringify(ui.state.preactivation.answers[0]));
   ui.advancePreativation();
-  const seatBox = $("t-seats").children.find((b) => b.getAttribute("data-seat") === "1");
-  (seatBox.listeners.click || []).forEach((fn) => fn({ target: seatBox }));
+  const listedSeat = seatBox(1);
+  (listedSeat.listeners.click || []).forEach((fn) => fn({ target: listedSeat }));
   const action = ui.buildAction();
   check("㉿T4 清单填完 ⇒ 确认提交 **来源 + 目标**（ActivateSkill），不再去候选里查那条 UseCard",
     !!action && action.kind === "ActivateSkill"
@@ -3360,7 +3368,6 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderPending(cardView);
 
   const cardChipOf = () => $("t-hand").children[0];
-  const seatBoxOf = (seat) => seatBox(seat);
   check("㉿BS1 借刀手牌可点（可用性来自 card_preactivations，不在 candidate_index）",
     ui.cardFace(cardPending, borrowed).selectable === true
       && !cardChipOf().classList.contains("dis"),
@@ -3381,15 +3388,15 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     })} calls=${calls.length - beforeCard}`);
 
   check("㉿BS3 第 1 步只亮持刀者座位 1（Bn 子池要等 A 选完）",
-    seatBoxOf(1).classList.contains("targetable")
-      && !seatBoxOf(2).classList.contains("targetable"),
-    `seat1=${seatBoxOf(1).classList.contains("targetable")} seat2=${seatBoxOf(2).classList.contains("targetable")}`);
-  (seatBoxOf(1).listeners.click || []).forEach((fn) => fn({ target: seatBoxOf(1) }));
+    seatBox(1).classList.contains("targetable")
+      && !seatBox(2).classList.contains("targetable"),
+    `seat1=${seatBox(1).classList.contains("targetable")} seat2=${seatBox(2).classList.contains("targetable")}`);
+  (seatBox(1).listeners.click || []).forEach((fn) => fn({ target: seatBox(1) }));
   check("㉿BS4 选持刀者后自动进第 2 步：Bn 子池 = seat:0 / seat:2",
     ui.state.preactivation.cursor === 1
       && JSON.stringify(ui.preactivationOptions(ui.state.preactivation, 1)) === '["seat:0","seat:2"]',
     `cursor=${ui.state.preactivation.cursor} options=${JSON.stringify(ui.preactivationOptions(ui.state.preactivation, 1))}`);
-  (seatBoxOf(2).listeners.click || []).forEach((fn) => fn({ target: seatBoxOf(2) }));
+  (seatBox(2).listeners.click || []).forEach((fn) => fn({ target: seatBox(2) }));
   const cardAction = ui.buildAction();
   check("㉿BS5 确认 = UseCard(实体借刀, targets=(A,), designations=(Bn,))，不拼虚拟 id",
     !!cardAction && cardAction.kind === "UseCard"
@@ -3544,14 +3551,13 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && $("btn-submit").disabled === true,
     `focus=${ui.state.focusCardId} selected=${JSON.stringify(ui.state.selectedTargets)}`);
 
-  const seatBoxOf = (seat) => seatBox(seat);
   check("㉿FT3 池里的座位（Bn 与两个额外目标）都标成可点",
-    [bn, 0, 3].every((seat) => seatBoxOf(seat).classList.contains("targetable")),
-    [bn, 0, 3].map((seat) => `${seat}:${seatBoxOf(seat).classList.contains("targetable")}`).join(" "));
+    [bn, 0, 3].every((seat) => seatBox(seat).classList.contains("targetable")),
+    [bn, 0, 3].map((seat) => `${seat}:${seatBox(seat).classList.contains("targetable")}`).join(" "));
 
   // 只点额外目标、不点 Bn ⇒ 不是合法组合（**只有含 Bn 的组合被允许**）。
   for (const seat of [0, 3]) {
-    (seatBoxOf(seat).listeners.click || []).forEach((fn) => fn({ target: seatBoxOf(seat) }));
+    (seatBox(seat).listeners.click || []).forEach((fn) => fn({ target: seatBox(seat) }));
   }
   check("㉿FT4 不含 Bn 的组合**不可提交**（picker 只放行含 Bn 的组合）",
     JSON.stringify(ui.state.selectedTargets) === "[0,3]" && $("btn-submit").disabled === true
@@ -3559,7 +3565,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `selected=${JSON.stringify(ui.state.selectedTargets)} disabled=${$("btn-submit").disabled}`);
 
   // 点 Bn 补上 ⇒ 恰好是候选里的 3 目标组合。
-  (seatBoxOf(bn).listeners.click || []).forEach((fn) => fn({ target: seatBoxOf(bn) }));
+  (seatBox(bn).listeners.click || []).forEach((fn) => fn({ target: seatBox(bn) }));
   const chosen = ui.buildAction();
   check("㉿FT5 Bn + 两个额外目标 = 候选里的 3 目标组合（提交按钮可点）",
     !!chosen && JSON.stringify(chosen.targets.slice().sort((a, b) => a - b)) === "[0,2,3]"
@@ -3567,7 +3573,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(chosen && chosen.targets));
 
   // 取消 Bn ⇒ 又回到"不含 Bn"的非法组合。
-  (seatBoxOf(bn).listeners.click || []).forEach((fn) => fn({ target: seatBoxOf(bn) }));
+  (seatBox(bn).listeners.click || []).forEach((fn) => fn({ target: seatBox(bn) }));
   check("㉿FT6 取消 Bn 后提交按钮重新不可点",
     $("btn-submit").disabled === true && ui.buildAction() === null,
     `selected=${JSON.stringify(ui.state.selectedTargets)}`);
@@ -3621,10 +3627,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   const skillButton = () => $("t-skills").children.find(
     (b) => b.getAttribute("data-skill-id") === "hero.guanyu.wusheng");
-  const seatBoxOf = (seat) => seatBox(seat);
   const nextButton = () => $("t-options").children.find((c) => c.textContent === "下一步");
-  const clickSeat = (seat) => (seatBoxOf(seat).listeners.click || []).forEach(
-    (fn) => fn({ target: seatBoxOf(seat) }));
+  const clickSeat = (seat) => (seatBox(seat).listeners.click || []).forEach(
+    (fn) => fn({ target: seatBox(seat) }));
 
   (skillButton().listeners.click || []).forEach((fn) => fn({ target: skillButton() }));
   const redChip = $("t-hand").children[0];
@@ -3718,10 +3723,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   const skillButton = () => $("t-skills").children.find(
     (b) => b.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
-  const seatBoxOf = (seat) => seatBox(seat);
   const nextButton = () => $("t-options").children.find((c) => c.textContent === "下一步");
-  const clickSeat = (seat) => (seatBoxOf(seat).listeners.click || []).forEach(
-    (fn) => fn({ target: seatBoxOf(seat) }));
+  const clickSeat = (seat) => (seatBox(seat).listeners.click || []).forEach(
+    (fn) => fn({ target: seatBox(seat) }));
 
   (skillButton().listeners.click || []).forEach((fn) => fn({ target: skillButton() }));
   const dodgeChip = $("t-hand").children[0];
@@ -3733,8 +3737,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && JSON.stringify(ui.state.preactivation.answers[1].values) === "[2]",
     `required=${ui.preactivationRequiredSeat(ui.state.preactivation, pending, 1)} values=${JSON.stringify(ui.state.preactivation.answers[1].values)}`);
   check("㉿BN2 Bn 座位标成必选（`req` 类）且是已选态（`tsel`）",
-    seatBoxOf(2).classList.contains("req") && seatBoxOf(2).classList.contains("tsel"),
-    `req=${seatBoxOf(2).classList.contains("req")} tsel=${seatBoxOf(2).classList.contains("tsel")}`);
+    seatBox(2).classList.contains("req") && seatBox(2).classList.contains("tsel"),
+    `req=${seatBox(2).classList.contains("req")} tsel=${seatBox(2).classList.contains("tsel")}`);
   check("㉿BN3 提示行写出「借刀指定的目标（必选）」与「已选 1 / 1–3 个」",
     $("t-target-hint").textContent.includes("借刀指定的目标（必选）")
       && /已选 1 \/ 1–3 个/.test($("t-target-hint").textContent),
@@ -3814,10 +3818,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   const skillButton = () => $("t-skills").children.find(
     (b) => b.getAttribute("data-skill-id") === "hero.guanyu.wusheng");
-  const seatBoxOf = (seat) => seatBox(seat);
   const nextButton = () => $("t-options").children.find((c) => c.textContent === "下一步");
-  const clickSeat = (seat) => (seatBoxOf(seat).listeners.click || []).forEach(
-    (fn) => fn({ target: seatBoxOf(seat) }));
+  const clickSeat = (seat) => (seatBox(seat).listeners.click || []).forEach(
+    (fn) => fn({ target: seatBox(seat) }));
   const clickNext = () => (nextButton().listeners.click || []).forEach(
     (fn) => fn({ target: nextButton() }));
 
@@ -3889,10 +3892,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   const skillButton = () => $("t-skills").children.find(
     (b) => b.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
-  const seatBoxOf = (seat) => seatBox(seat);
   const nextButton = () => $("t-options").children.find((c) => c.textContent === "下一步");
-  const clickSeat = (seat) => (seatBoxOf(seat).listeners.click || []).forEach(
-    (fn) => fn({ target: seatBoxOf(seat) }));
+  const clickSeat = (seat) => (seatBox(seat).listeners.click || []).forEach(
+    (fn) => fn({ target: seatBox(seat) }));
 
   (skillButton().listeners.click || []).forEach((fn) => fn({ target: skillButton() }));
   const dodgeChip = $("t-hand").children[0];
@@ -3901,7 +3903,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   check("㉿TS4 借刀窗口的转化【杀】目标步首项 = Bn，预选并标为必选",
     JSON.stringify(ui.state.preactivation.answers[1].values) === "[0]"
-      && seatBoxOf(0).classList.contains("req")
+      && seatBox(0).classList.contains("req")
       && $("t-target-hint").textContent.includes("借刀指定的目标（必选）"),
     `values=${JSON.stringify(ui.state.preactivation.answers[1].values)} hint="${$("t-target-hint").textContent}"`);
 
@@ -3970,16 +3972,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   const skillButton = () => $("t-skills").children.find(
     (b) => b.getAttribute("data-skill-id") === "hero.guanyu.wusheng");
-  const seatBoxOf = (seat) => seatBox(seat);
   const nextButton = () => $("t-options").children.find((c) => c.textContent === "下一步");
-  const clickSeat = (seat) => (seatBoxOf(seat).listeners.click || []).forEach(
-    (fn) => fn({ target: seatBoxOf(seat) }));
+  const clickSeat = (seat) => (seatBox(seat).listeners.click || []).forEach(
+    (fn) => fn({ target: seatBox(seat) }));
   const clickNext = () => (nextButton().listeners.click || []).forEach(
     (fn) => fn({ target: nextButton() }));
-  const equipChip = () => {
-    const row = $("t-self-zones").children.find((c) => c.getAttribute("data-zone") === "equip");
-    return row ? row.children[0] : null;
-  };
+  const equipChip = selfEquipChip;
   const handChip = () => $("t-hand").children[0];
 
   (skillButton().listeners.click || []).forEach((fn) => fn({ target: skillButton() }));
@@ -4307,7 +4305,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const seatH = 150;
   const ringView = (count, selfSeat = 0) => ({
     seed: 1, player_count: count, human_seat: selfSeat, finished: false, timeout_seconds: null,
-    heroes: Object.fromEntries(Array.from({ length: count }, (_, seat) => [seat, "guojia"])),
+    // `serve.py` 的响应里 `heroes` 是 list（按座位下标取）；合成视图同形，别用对象冒充。
+    heroes: Array.from({ length: count }, () => "guojia"),
     skills: [],
     pending: {
       kind: "PLAY_PHASE", actor: selfSeat, prompt: "", legal_actions: [],
@@ -4364,11 +4363,16 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
           && Math.abs(seats[0].y - Math.max(...seats.map((item) => item.y))) < 0.01
           && seats[seats.length - 1].x < designStage.width / 2,
       seats.map((item) => `${item.seat}:${item.angle}° x=${item.x.toFixed(1)}`).join(" "));
+    // "均布"不能只断单调：相邻角差必须相等（票面「按 N 边形均布」）。
+    const gaps = seats.slice(1).map((item, index) => item.angle - seats[index].angle);
     check(`U1-01c ${count} 人：对手沿上半弧按座号逆时针均布`,
       seats.every((item, index) => (index === 0 ? true : item.angle > seats[index - 1].angle))
         && seats.every((item) => item.angle >= -30.01 && item.angle <= 210.01)
-        && (count === 2 ? seats[0].angle === 90 : Math.abs((seats[seats.length - 1].angle - seats[0].angle) - 240) < 0.01),
-      seats.map((item) => `${item.seat}:${item.angle}`).join(" "));
+        && (count === 2
+          ? seats[0].angle === 90
+          : Math.abs((seats[seats.length - 1].angle - seats[0].angle) - 240) < 0.01)
+        && (gaps.length === 0 || gaps.every((gap) => Math.abs(gap - gaps[0]) < 0.01)),
+      `${seats.map((item) => `${item.seat}:${item.angle}`).join(" ")} / 间距 ${gaps.map((gap) => gap.toFixed(2)).join(",")}`);
     check(`U1-01d ${count} 人：对手座位无正面积重叠（210×150 设计尺寸）`,
       overlaps(seats).length === 0, overlaps(seats).join("、") || "无重叠");
     if (count > 2) {
@@ -4378,14 +4382,17 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
         Math.abs(first.x + last.x - designStage.width) < 0.01 && Math.abs(first.y - last.y) < 0.01,
         `${first.x.toFixed(1)}+${last.x.toFixed(1)} / y ${first.y.toFixed(1)}、${last.y.toFixed(1)}`);
     }
+    // 渲染路径：`left/top` 百分比必须就是设计坐标 / 1600×608（CSS 的尺寸 / 位移由
+    // 真浏览器截图核，DOM 垫片没有布局引擎）。
+    const placed = $("t-seats").children.map((node) => ({
+      left: parseFloat(node.style.left),
+      top: parseFloat(node.style.top),
+    }));
+    check(`U1-01e2 ${count} 人：座位定位 = 设计坐标换算的百分比`,
+      placed.every((item, index) => Math.abs(item.left - (seats[index].x / designStage.width) * 100) < 0.01
+        && Math.abs(item.top - (seats[index].y / designStage.height) * 100) < 0.01),
+      placed.map((item) => `${item.left}%/${item.top}%`).join(" "));
   }
-
-  // 8 人局专项：7 个对手、无重叠（原型 verdict 的判据）。
-  show(ringView(8));
-  const eight = ringSeats();
-  check("U1-01f 8 人局：7 个对手沿上半弧均布且无正面积重叠",
-    eight.length === 7 && overlaps(eight).length === 0,
-    `对手 ${eight.length} / 重叠 ${overlaps(eight).join("、") || "无"}`);
 
   // 自己不是 0 号位时，环从「自己 + 1」开始编号（座位 +1 仍在右手边）。
   show(ringView(4, 2));
@@ -4399,8 +4406,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   // 顶栏身份配比：4~8 人公开配比；2 人局（无身份局）整块隐藏。
   show(ringView(8));
-  check("U1-01h 8 人局顶栏身份配比 = 主×1 忠×2 反×4 内×1",
-    $("t-identity-ratio").textContent === "主×1 忠×2 反×4 内×1"
+  check("U1-01h 8 人局顶栏身份配比 = 主公×1 忠臣×2 反贼×4 内奸×1",
+    $("t-identity-ratio").textContent === "主公×1 忠臣×2 反贼×4 内奸×1"
       && !$("t-identity-panel").classList.contains("hidden"),
     `"${$("t-identity-ratio").textContent}"`);
   show(ringView(2));
@@ -4408,13 +4415,17 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     $("t-identity-ratio").textContent === "" && $("t-identity-panel").classList.contains("hidden"),
     `"${$("t-identity-ratio").textContent}" hidden=${$("t-identity-panel").classList.contains("hidden")}`);
 
-  // 顶栏轮次：每满一圈 TURN_START 进一轮（显示近似）。
+  // 顶栏轮次：同一座位第二次 TURN_START 才进下一轮（不是"次数 ÷ 人数"）。
   show(ringView(8));
   ui.state.logRecords = Array.from({ length: 8 }, (_, index) => ({
     kind: "timing", timing: "TURN_START", actor: index % 8, seq: index + 1,
   }));
   ui.renderTable();
-  check("U1-01j 顶栏轮次随 TURN_START 推进（8 人走满一圈 = 第 2 轮）",
+  check("U1-01j 8 人各行动一次仍在第 1 轮（最后一人的回合不提前进轮）",
+    $("t-round").textContent === "1", `t-round="${$("t-round").textContent}"`);
+  ui.state.logRecords.push({ kind: "timing", timing: "TURN_START", actor: 0, seq: 9 });
+  ui.renderTable();
+  check("U1-01j2 回到座位 0 = 进入第 2 轮",
     $("t-round").textContent === "2", `t-round="${$("t-round").textContent}"`);
 
   // 中央舞台：处理区有牌 = 正在结算；牌全走了 = 淡出（无计时器判据）。
@@ -4430,7 +4441,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   // 事件流按钮默认折叠；点一下展开、再点收起。设置浮层同理。
   check("U1-01m 事件流面板默认折叠（index.html 带 hidden）",
-    html.includes('id="t-log-panel" class="log-panel" hidden'));
+    /<div[^>]*id="t-log-panel"[^>]*\bhidden\b/.test(html));
   $("t-log-panel").hidden = true;
   (($("t-log-toggle").listeners.click) || []).forEach((fn) => fn({ target: $("t-log-toggle") }));
   const opened = $("t-log-panel").hidden === false;
@@ -4443,6 +4454,18 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("U1-01o 设置按钮展开浮层（步长 / 服务端判定 / 刷新住在这里）",
     $("t-settings").hidden === false
       && !!$("btn-delay") && !!$("btn-takeover") && !!$("btn-refresh"));
+
+  // 顶栏「回放」入口 = 真切页（不是只在 HTML 里有个 id）；顶部「牌桌」能回来。
+  $("view-table").hidden = false;
+  $("view-replay").hidden = true;
+  (($("btn-go-replay").listeners.click) || []).forEach((fn) => fn({ target: $("btn-go-replay") }));
+  check("U1-01p 顶栏回放入口切到回放页",
+    $("view-replay").hidden === false && $("view-table").hidden === true,
+    `table=${$("view-table").hidden} replay=${$("view-replay").hidden}`);
+  (($("nav-table").listeners.click) || []).forEach((fn) => fn({ target: $("nav-table") }));
+  check("U1-01p2 顶部「牌桌」切回牌桌",
+    $("view-table").hidden === false && $("view-replay").hidden === true,
+    `table=${$("view-table").hidden} replay=${$("view-replay").hidden}`);
 
   // 复原：后面的收尾断言（若有）仍看得到最后一局的真视图。
   ui.state.view = savedView;

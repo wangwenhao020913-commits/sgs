@@ -11,12 +11,12 @@ function seedOptions() {
   const select = $("in-seat");
   const previous = select.value;
   select.innerHTML = "";
-  // 2 人局 = 无身份局（`RuleConfig.mode`）：没有主公位，别给座位 0 挂身份标签。
-  const identityMode = count >= 4;
+  // 身份由 `_deal_identities` 按 seed 洗牌后逐座发放（座位只有下标固定）：座位 0
+  // **不是**固定的主公；2 人局则是无身份局。两种情况都不该在座位号后面挂身份标签。
   for (let seat = 0; seat < count; seat += 1) {
     const option = document.createElement("option");
     option.value = String(seat);
-    option.textContent = identityMode && seat === 0 ? "0（主公位）" : String(seat);
+    option.textContent = String(seat);
     select.appendChild(option);
   }
   if (previous && Number(previous) < count) select.value = previous;
@@ -78,6 +78,11 @@ async function startGame(event) {
     state.sessionId = body.session_id;
     state.cursor = -1;
     state.logSeq = 0;
+    // 先把上一局还在播的事件收尾，再清空；否则旧记录会漏进新一局的轮次计数。
+    if (state.playback) flushPlayback();
+    // 新的一局：事件流与轮次计数都从零开始（顶栏轮次按 TURN_START 累计）。
+    state.logRecords = [];
+    state.lastQuerySeat = null;
     $("t-log").innerHTML = "";
     applyView(body);
     show("table");

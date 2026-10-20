@@ -7,8 +7,14 @@ U1-00 把单文件 `tools/sgs_web/static/app.js` 拆成一组按职责命名、�
 - `tests/support/ui_smoke.mjs` 按它逐份加载（同一份清单，脚本边界与浏览器一致）；
 - `tests/test_web.sh` 按它取静态资源，并逐份 `node --check`。
 
-本文件只钉**清单契约**（存在、完整、无 `app.js`、每份都 strict），不钉 DOM 行为——
-行为归 `tests/support/ui_smoke.mjs`（真脚本 + 真服务端响应）。
+本文件钉两件**跨文件契约**：
+
+1. **清单契约**（存在、完整、无 `app.js`、每份都 strict）；
+2. **身份配比的显示副本**：`table.js` 的 `IDENTITY_RATIOS` 必须与
+   `src/sgs/data/identities.py:IDENTITY_ROSTERS` 一致（前端没有构建步骤，
+   显示表只能复制一份；漂移由本测试拦住）。
+
+不钉 DOM 行为——行为归 `tests/support/ui_smoke.mjs`（真脚本 + 真服务端响应）。
 """
 
 from __future__ import annotations
@@ -82,3 +88,43 @@ def test_every_script_is_a_classic_strict_script() -> None:
         assert not re.search(r"^\s*(?:import|export)\b", text, re.M), (
             f"{name} 使用了 ES module 语法；U1-00 只允许按顺序加载的普通脚本"
         )
+
+
+_RATIO_BLOCK = re.compile(r"const IDENTITY_RATIOS = \{(?P<body>.*?)\n\};", re.S)
+_RATIO_LINE = re.compile(
+    r"^\s*(?P<count>\d+):\s*\[\s*(?P<lord>\d+),\s*(?P<loyalist>\d+),"
+    r"\s*(?P<rebel>\d+),\s*(?P<renegade>\d+)\s*\],\s*$",
+    re.M,
+)
+
+
+def test_identity_ratio_display_copy_matches_the_engine_rosters() -> None:
+    """`table.js` 的公开配比表是**显示副本**，但不得与引擎真源漂移。
+
+    前端没有构建步骤（U1-00：普通脚本顺序加载），顶栏的公开身份配比只能在 JS 里
+    再写一份；这里把那份字面量解析出来，与 `src/sgs/data/identities.py` 的
+    :data:`IDENTITY_ROSTERS` 逐人数比对。改配比时两边必须同批改。
+    """
+    from sgs.data.identities import IDENTITY_ROSTERS, Identity
+
+    text = (STATIC_DIR / "table.js").read_text(encoding="utf-8")
+    block = _RATIO_BLOCK.search(text)
+    assert block is not None, "table.js 里找不到 `const IDENTITY_RATIOS = { ... };`"
+    display = {
+        int(match.group("count")): [
+            int(match.group("lord")),
+            int(match.group("loyalist")),
+            int(match.group("rebel")),
+            int(match.group("renegade")),
+        ]
+        for match in _RATIO_LINE.finditer(block.group("body"))
+    }
+    order = (Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.RENEGADE)
+    expected = {
+        count: [sum(1 for identity in roster if identity is label) for label in order]
+        for count, roster in IDENTITY_ROSTERS.items()
+    }
+    assert display == expected, (
+        "table.js:IDENTITY_RATIOS 与 identities.py:IDENTITY_ROSTERS 漂移："
+        f"界面 {display} / 引擎 {expected}"
+    )

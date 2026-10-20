@@ -38,7 +38,8 @@ function ringLayout(playerCount) {
 }
 
 /** 公开身份配比（4~8 人身份局）。**显示副本**：真源住 `src/sgs/data/identities.py`，
- *  这里只用于顶栏那块公开信息，不参与任何合法性判定。2 人局 = 无身份局，返回 null。 */
+ *  这里只用于顶栏那块公开信息，不参与任何合法性判定。2 人局 = 无身份局，返回 null。
+ *  与 `IDENTITY_ROSTERS` 的一致性由 `tests/test_web_static.py` 机械核（漂移即红）。 */
 const IDENTITY_RATIOS = {
   4: [1, 1, 1, 1],
   5: [1, 1, 2, 1],
@@ -51,20 +52,29 @@ function identityRatioText(playerCount) {
   const counts = IDENTITY_RATIOS[playerCount];
   if (!counts) return null;
   const [lord, loyalist, rebel, renegade] = counts;
-  return `主×${lord} 忠×${loyalist} 反×${rebel} 内×${renegade}`;
+  return `主公×${lord} 忠臣×${loyalist} 反贼×${rebel} 内奸×${renegade}`;
 }
 
-/** 当前是第几轮：**显示用**的近似——记一次 `TURN_START` 走一格，按人数折回。
+/** 当前是第几轮：**显示用**的计数——同一座位第二次 `TURN_START` 即进入下一轮。
  *
- * 引擎侧没有轮次计数器（`PlayerView` 只给 `turn_seat` / `phase`），座位阵亡会跳过回合，
- * 故它可能比真实轮次略大；等 U2 的回放工作台再加服务端轮次字段。顶栏不拿它做任何判据。
+ * 引擎侧没有轮次计数器（`PlayerView` 只给 `turn_seat` / `phase`），阵亡座位会跳过回合；
+ * 因此不能用"次数 ÷ 人数"（那会在最后一人的回合就提前进轮）。按「本轮已经行动过的座位」
+ * 记：座位重复出现 = 转了一圈。顶栏不拿它做任何判据，等 U2 有服务端轮次字段再换。
  */
-function roundNumber(records, playerCount) {
-  const starts = (records || []).filter(
-    (record) => record && record.kind === "timing" && record.timing === "TURN_START",
-  ).length;
-  if (!playerCount || starts === 0) return 1;
-  return Math.floor(starts / playerCount) + 1;
+function roundNumber(records) {
+  let round = 1;
+  const seen = new Set();
+  for (const record of records || []) {
+    if (!record || record.kind !== "timing" || record.timing !== "TURN_START") continue;
+    const seat = record.actor;
+    if (seat === null || seat === undefined) continue;
+    if (seen.has(seat)) {
+      round += 1;
+      seen.clear();
+    }
+    seen.add(seat);
+  }
+  return round;
 }
 
 /** 座位卡的装备区 / 判定区行（公开信息，逐座位下发；只写数量分不清"谁的判定区"）。
@@ -95,6 +105,16 @@ function seatZoneRows(player, snapshot, pendingNow) {
     rows.push(row);
   }
   return rows;
+}
+
+/** 座位交互态的类全集：环上与底部面板共用一份（`seatInteraction` 新增状态只改这里）。
+ *
+ * 环上节点每次重建、底部节点常驻；两边都用 `classList.toggle` 处理，语义一致。
+ */
+const SEAT_STATE_CLASSES = ["me", "dead", "turn", "targetable", "tsel", "req"];
+
+function applySeatState(box, flags) {
+  for (const name of SEAT_STATE_CLASSES) box.classList.toggle(name, flags.includes(name));
 }
 
 /** 座位卡的交互态（可指定 / 已选 / 必选）与点击行为，对手与自己的面板共用一份判据。 */
@@ -148,10 +168,12 @@ function renderRingSeats(view, ctx) {
     if (!player || !position) continue;
     const box = document.createElement("div");
     box.className = "seat opponent";
-    if (!player.alive) box.classList.add("dead");
-    if (player.seat === snapshot.turn_seat) box.classList.add("turn");
     const { classes, handler } = seatInteraction(player, ctx);
-    for (const name of classes) box.classList.add(name);
+    applySeatState(box, [
+      ...(player.alive ? [] : ["dead"]),
+      ...(player.seat === snapshot.turn_seat ? ["turn"] : []),
+      ...classes,
+    ]);
     const hero = view.heroes[player.seat] || "（无武将）";
     const identity = player.identity ? ` · ${identityLabel(player.identity)}` : "";
     box.setAttribute("data-seat", String(player.seat));
@@ -159,10 +181,8 @@ function renderRingSeats(view, ctx) {
     box.setAttribute("data-ring-angle", position.angle.toFixed(2));
     box.setAttribute("data-ring-x", position.x.toFixed(2));
     box.setAttribute("data-ring-y", position.y.toFixed(2));
-    if (box.style) {
-      box.style.left = `${(position.x / RING_STAGE.width) * 100}%`;
-      box.style.top = `${(position.y / RING_STAGE.height) * 100}%`;
-    }
+    box.style.left = `${(position.x / RING_STAGE.width) * 100}%`;
+    box.style.top = `${(position.y / RING_STAGE.height) * 100}%`;
     box.innerHTML = `
       <div class="top">
         <span class="who">座位 ${player.seat}</span>
@@ -172,7 +192,7 @@ function renderRingSeats(view, ctx) {
       <div class="small">手牌 ${player.hand_count}　装备 ${(player.equip || []).length}　判定 ${(player.judge || []).length}</div>
       <div class="small">${player.alive ? "" : "已阵亡"}</div>`;
     for (const row of seatZoneRows(player, snapshot, ctx.pendingNow)) box.appendChild(row);
-    if (handler) box.addEventListener("click", handler);
+    box.onclick = handler || null;
     ring.appendChild(box);
   }
 }
@@ -192,13 +212,13 @@ function renderSelfSeat(view, ctx) {
   if (!player || !box) return;
   const { classes, handler } = seatInteraction(player, ctx);
   box.setAttribute("data-seat", String(snapshot.seat));
-  box.classList.add("me");
-  box.classList.toggle("dead", !player.alive);
-  box.classList.toggle("turn", player.seat === snapshot.turn_seat);
-  for (const name of ["targetable", "tsel", "req"]) {
-    box.classList.toggle(name, classes.includes(name));
-  }
-  // 静态节点复用：用 onclick 属性覆盖，避免每次渲染再叠一个监听器。
+  applySeatState(box, [
+    "me",
+    ...(player.alive ? [] : ["dead"]),
+    ...(player.seat === snapshot.turn_seat ? ["turn"] : []),
+    ...classes,
+  ]);
+  // 静态节点复用：`onclick` 是覆盖式绑定；环上节点也用同一条路，避免两套接法。
   box.onclick = handler || null;
   $("t-self-seatno").textContent = `座位 ${player.seat}`;
   $("t-self-identity").textContent = player.identity ? identityLabel(player.identity) : "";
@@ -212,7 +232,7 @@ function renderSelfSeat(view, ctx) {
   }
 }
 
-/** 顶栏那块公开身份配比：1v1 无身份局整块隐藏。 */
+/** 顶栏那块公开身份配比：2 人局（无身份局）整块隐藏。 */
 function renderIdentityPanel(playerCount) {
   const panel = $("t-identity-panel");
   const ratio = $("t-identity-ratio");
@@ -240,7 +260,6 @@ function renderTable() {
   if (rounds) {
     rounds.textContent = String(roundNumber(
       state.logRecords.length ? state.logRecords : (view.records || []),
-      snapshot.players.length,
     ));
   }
   renderIdentityPanel(snapshot.players.length);

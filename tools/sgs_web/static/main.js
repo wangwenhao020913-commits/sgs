@@ -24,6 +24,19 @@ function updateDelayButton() {
   }
 }
 
+/** 浮层开关（设置 / 事件流）：按钮 ↔ 面板的 hidden 与 aria-expanded 只在这一处同步。
+ *
+ * `onOpen` 是"展开之后"的钩子（事件流要用它滚到底），收起时不调用。
+ */
+function wireOverlayToggle(button, panel, onOpen) {
+  if (!button || !panel) return;
+  button.addEventListener("click", () => {
+    panel.hidden = !panel.hidden;
+    button.setAttribute("aria-expanded", String(!panel.hidden));
+    if (!panel.hidden && onOpen) onOpen();
+  });
+}
+
 function wire() {
   seedOptions();
   $("in-players").addEventListener("change", seedOptions);
@@ -33,11 +46,13 @@ function wire() {
   $("lobby-form").addEventListener("submit", startGame);
   $("nav-lobby").addEventListener("click", () => { show("lobby"); loadRuns(); });
   $("nav-table").addEventListener("click", () => show("table"));
-  $("nav-replay").addEventListener("click", () => {
+  // 顶部导航与牌桌顶栏的「回放」入口是同一条路：切页 + 刷新录像列表 + 画回放页。
+  const openReplayPage = () => {
     show("replay");
     loadRuns();
     renderReplay();
-  });
+  };
+  $("nav-replay").addEventListener("click", openReplayPage);
   const modeSelect = $("t-log-mode");
   if (modeSelect) modeSelect.addEventListener("change", () => {
     state.view = Object.assign({}, state.view, { records: state.logRecords });
@@ -49,34 +64,13 @@ function wire() {
   $("btn-takeover").addEventListener("click", takeover);
   $("btn-delay").addEventListener("click", cycleDelay);
   // U1-01 壳：设置浮层 / 事件流浮层 / 回放入口（顶栏右侧）。
-  const settingsButton = $("btn-settings");
-  const settingsPanel = $("t-settings");
-  if (settingsButton && settingsPanel) {
-    settingsButton.addEventListener("click", () => {
-      settingsPanel.hidden = !settingsPanel.hidden;
-      settingsButton.setAttribute("aria-expanded", String(!settingsPanel.hidden));
-    });
-  }
-  const logButton = $("t-log-toggle");
-  const logPanel = $("t-log-panel");
-  if (logButton && logPanel) {
-    logButton.addEventListener("click", () => {
-      logPanel.hidden = !logPanel.hidden;
-      logButton.setAttribute("aria-expanded", String(!logPanel.hidden));
-      if (!logPanel.hidden) {
-        const last = $("t-log").lastChild;
-        if (last) last.scrollIntoView({ block: "nearest" });
-      }
-    });
-  }
+  wireOverlayToggle($("btn-settings"), $("t-settings"));
+  wireOverlayToggle($("t-log-toggle"), $("t-log-panel"), () => {
+    const last = $("t-log").lastChild;
+    if (last) last.scrollIntoView({ block: "nearest" });
+  });
   const replayEntry = $("btn-go-replay");
-  if (replayEntry) {
-    replayEntry.addEventListener("click", () => {
-      show("replay");
-      loadRuns();
-      renderReplay();
-    });
-  }
+  if (replayEntry) replayEntry.addEventListener("click", openReplayPage);
   $("btn-r-delay").addEventListener("click", cycleDelay);
   updateDelayButton();
   $("btn-r-first").addEventListener("click", () => replaySeek(0));
