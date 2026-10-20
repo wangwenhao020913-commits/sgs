@@ -62,6 +62,9 @@ async function openReplay(name) {
       playing: false,
       timer: null,
     };
+    // 每次打开录像都从**简易档**起步（票面默认）；选过完整档是本地偏好，不跨录像沿用。
+    const modeNode = $("r-log-mode");
+    if (modeNode) modeNode.value = "simple";
     show("replay");
     renderReplay();
   } catch (error) {
@@ -257,15 +260,15 @@ function renderReplayQuery(query) {
   }
 }
 
-/** 回放事件流的详略：默认 `all`（上帝视角的逐条记录，旧行为不变）。
+/** 回放事件流的详略：默认 `simple`（与牌桌同一份服务端叙事、按**录像的人类座位**过滤）。
  *
- * 简易档消费服务端 `narrative`（与牌桌同一份生成器、按**录像的人类座位**过滤）；
- * 完整两档仍是记录流。U2 的座位选择器 / 上帝视角开关接入后，只需换查看者。
+ * `all` 是既有的上帝视角逐条记录；U1 没有座位选择器 / 上帝视角开关（U2），故这里只有
+ * 两档——不给完整档加一套新的过滤语义。U2 接查看者时只需换 `viewer` 与选项。
  */
 function replayLogMode() {
   const node = $("r-log-mode");
-  const mode = node && node.value ? node.value : "all";
-  return LOG_MODES.includes(mode) ? mode : "all";
+  const mode = node && node.value ? node.value : "simple";
+  return mode === "all" ? "all" : "simple";
 }
 
 function renderReplayLog(replay) {
@@ -281,7 +284,6 @@ function renderReplayLog(replay) {
     const from = Math.max(0, entries.length - 60);
     for (let i = from; i < entries.length; i += 1) appendNarrativeEntry(entries[i], log);
   } else {
-    const mode = replayLogMode();
     const from = Math.max(0, replay.index - 60);
     let querySeat = null;
     for (let i = 0; i <= replay.index; i += 1) {
@@ -289,14 +291,15 @@ function renderReplayLog(replay) {
       if (!record) continue;
       if (record.kind === "query") querySeat = record.query.actor;
       if (i < from) continue;
-      if (!keepRecord(record, querySeat, mode, replay.meta.human_seat)) continue;
-      const item = document.createElement("li");
-      if (i === replay.index) item.className = "banner";
-      item.innerHTML = describeRecord(record);
-      log.appendChild(item);
+      appendLog(record, querySeat, {
+        log,
+        mode: "all",
+        humanSeat: replay.meta.human_seat,
+        banner: i === replay.index,
+      });
     }
   }
-  if (log.lastChild) log.lastChild.scrollIntoView({ block: "nearest" });
+  scrollLogToBottom(log);
 }
 
 function updateReplayPlayButton() {

@@ -65,8 +65,7 @@ function stepPlayback(immediate) {
   else appendLog(record, playback.querySeat);
   state.effectCards = applyEffectDelta(record, state.effectCards);
   renderProcessing();
-  const logNode = $("t-log");
-  if (logNode.lastChild) logNode.lastChild.scrollIntoView({ block: "nearest" });
+  scrollLogToBottom();
   playback.index += 1;
   if (!immediate) playbackTimer = window.setTimeout(() => stepPlayback(false), state.eventDelayMs);
 }
@@ -236,8 +235,7 @@ function commitView(body) {
   renderTable();
   // 回放收尾 / 纯刷新：把这一批里还没铺的叙事条目补齐（简易档；其它档是空操作）。
   appendNarrativeThrough(Infinity);
-  const logNode = $("t-log");
-  if (logNode.lastChild) logNode.lastChild.scrollIntoView({ block: "nearest" });
+  scrollLogToBottom();
   if (body.finished) {
     state.timer = null;
     resetCountdown();

@@ -99,7 +99,7 @@ for (const id of ["in-players", "in-ai", "in-seat", "in-timeout", "in-seed"]) if
 // `<select>` 的初值 = 带 `selected` 的那个 option（真 DOM 语义）；垫片不解析 option 结构，
 // 故这里给一个显式初值，由下方 `setSelect` 在测试里改。
 byId.get("t-log-mode").value = "simple";
-byId.get("r-log-mode").value = "all";
+byId.get("r-log-mode").value = "simple";
 Object.assign(byId.get("in-players"), { value: "8" });
 Object.assign(byId.get("in-ai"), { value: "heuristic" });
 Object.assign(byId.get("in-seat"), { value: "0" });
@@ -1056,6 +1056,8 @@ check("录像条目带胜负标记", /我赢|我输|—/.test($("run-list").text
 const target = runs.runs.find((run) => run.player_count === 8) || runs.runs[0];
 const seats = target.player_count;
 await ui.openReplay(target.name);
+// 回放页默认是简易档；下面这些 W4-6 断言读的是**逐条记录**，显式切到完整全部。
+setSelect("r-log-mode", "all");
 ui.state.replay.index = ui.state.replay.records.length - 1;
 ui.renderReplay();
 check(`回放页渲染出 ${seats} 个座位`, $("r-seats").children.length === seats, `${$("r-seats").children.length}`);
@@ -5098,10 +5100,14 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("U1-05b 事件流顶部三档：简易 / 完整重点 / 完整全部",
     JSON.stringify(modeValues) === JSON.stringify(["simple", "focus", "all"]),
     `options=${JSON.stringify(modeValues)}`);
-  check("U1-05c 回放页事件流同样有三档开关",
-    html.includes('id="r-log-mode"')
-      && ["simple", "focus", "all"].every((mode) => html.includes(`value="${mode}"`)),
-    `r-log-mode=${html.includes('id="r-log-mode"')}`);
+  const replayModeHtml = html.match(/<select[^>]*id="r-log-mode"[^>]*>([\s\S]*?)<\/select>/);
+  const replayModeValues = replayModeHtml
+    ? [...replayModeHtml[1].matchAll(/value="([^"]+)"/g)].map((match) => match[1])
+    : [];
+  check("U1-05c 回放页事件流默认简易档（两档：简易 / 完整全部）",
+    JSON.stringify(replayModeValues) === JSON.stringify(["simple", "all"])
+      && /<option value="simple" selected>/.test(replayModeHtml ? replayModeHtml[1] : ""),
+    `options=${JSON.stringify(replayModeValues)}`);
 
   const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
   check("U1-05d 事件流浮层 420×560、左下角（默认折叠由 U1-01m/n 另钉）",
@@ -5121,9 +5127,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     { kind: "divider", seq: 11, text: "出牌阶段" },
     {
       kind: "line", seq: 11,
-      text: "座位0 郭嘉 使用【杀】 → 座位1",
+      text: "郭嘉 使用【杀】 → 座位1",
       segments: [
-        { text: "座位0", cls: "seat" }, { text: " 郭嘉", cls: "hero" },
+        { text: "郭嘉", cls: "hero" },
         { text: " 使用", cls: "act" }, { text: "【杀】", cls: "card-fire" },
         { text: " → ", cls: "act" }, { text: "座位1", cls: "seat" },
       ],
@@ -5139,9 +5145,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     },
     {
       kind: "line", seq: 13,
-      text: "座位0 郭嘉 发动【遗计】",
+      text: "郭嘉 发动【遗计】",
       segments: [
-        { text: "座位0", cls: "seat" }, { text: " 郭嘉", cls: "hero" },
+        { text: "郭嘉", cls: "hero" },
         { text: " 发动", cls: "act" }, { text: "【遗计】", cls: "skill" },
       ],
     },
@@ -5180,9 +5186,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && logItems[1].textContent === "出牌阶段",
     `[0]=${logItems[0].className}:${logItems[0].textContent} [1]=${logItems[1].className}:${logItems[1].textContent}`);
   const lineClasses = logItems[2].children.map((node) => node.className);
-  check("U1-05h 服务端的颜色类原样落到 span（座位 / 武将黄、卡名红、动作粗、伤害红、技能蓝）",
-    lineClasses.includes("nar-seat") && lineClasses.includes("nar-hero")
-      && lineClasses.includes("nar-card-fire") && lineClasses.includes("nar-act")
+  check("U1-05h 服务端的颜色类原样落到 span（武将黄、卡名红、动作粗、伤害红、技能蓝）",
+    lineClasses.includes("nar-hero") && lineClasses.includes("nar-card-fire")
+      && lineClasses.includes("nar-act")
+      && logItems[3].children.some((node) => node.className === "nar-seat")
+      && logItems[3].children.some((node) => node.className === "nar-hero")
       && logItems[3].children.some((node) => node.className === "nar-dmg-fire")
       && logItems[4].children.some((node) => node.className === "nar-skill"),
     `line2=${lineClasses.join(",")}`);
@@ -5203,14 +5211,14 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     logCount() === narrative.length && logText().includes("发动【遗计】"),
     `count=${logCount()} text="${logText().replace(/\s+/g, " ").slice(0, 100)}"`);
 
-  /* ---- 自动滚到底（展开浮层时滚到最后一 条） ---- */
-  let scrolled = false;
-  $("t-log").lastChild.scrollIntoView = () => { scrolled = true; };
+  /* ---- 自动滚到底（展开浮层时把 scrollTop 推到底） ---- */
+  $("t-log").scrollHeight = 777;
+  $("t-log").scrollTop = 0;
   $("t-log-panel").hidden = true;
   (($("t-log-toggle").listeners.click) || []).forEach((fn) => fn({ target: $("t-log-toggle") }));
-  check("U1-05l 展开事件流自动滚到底",
-    scrolled && $("t-log-panel").hidden === false,
-    `scrolled=${scrolled} hidden=${$("t-log-panel").hidden}`);
+  check("U1-05l 展开事件流自动滚到底（scrollTop = scrollHeight）",
+    $("t-log").scrollTop === 777 && $("t-log-panel").hidden === false,
+    `scrollTop=${$("t-log").scrollTop} scrollHeight=${$("t-log").scrollHeight} hidden=${$("t-log-panel").hidden}`);
   // 展开后常驻：点页面别处不会自动收起（只有再次点事件流按钮才关）。
   fireDocument("click", { target: $("table-stage") });
   check("U1-05l2 展开后点别处不自动关（常驻到再次点击）",
@@ -5219,7 +5227,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("U1-05m 再次点击收起（展开常驻，不自动关）", $("t-log-panel").hidden === true);
 }
 
-/* ---- 回放页：简易档读同一份服务端叙事（默认仍为完整全部，保住上帝视角） ---- */
+/* ---- 回放页：默认简易档，读同一份服务端叙事；完整全部仍可切 ---- */
 {
   // 前面的 W4-6 用例收尾时清掉了 `state.replay`；这里**重新打开**一局真录像，
   // 让断言落在真服务端载荷上（`narrative` 由 `load_run` 生成）。
@@ -5229,6 +5237,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("U1-05n 回放载荷带服务端叙事（牌桌与回放共用同一份生成器）",
     !!replay && Array.isArray(replay.narrative) && replay.narrative.length > 0,
     `narrative=${replay && replay.narrative ? replay.narrative.length : "缺"}`);
+  check("U1-05n2 打开回放默认简易档（票面「简易流是默认档」）",
+    $("r-log-mode").value === "simple", `r-log-mode=${$("r-log-mode").value}`);
   if (replay && Array.isArray(replay.narrative) && replay.narrative.length) {
     // 回放位置回到第 0 条（header）时，简易档不能提前铺出整局（序列跟随播放进度）。
     replay.index = 0;
@@ -5249,6 +5259,15 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
         && simpleText.includes("对局结束")
         && !simpleText.includes("结算帧"),
       `simple="${simpleText.replace(/\s+/g, " ").slice(-120)}"`);
+    // 真服务端叙事（不是手写夹具）也要真的落到颜色 span 上。
+    const realClasses = new Set();
+    for (const item of $("r-log").children) {
+      for (const span of item.children) realClasses.add(span.className);
+    }
+    check("U1-05o2 真服务端叙事渲染出颜色类（座位 / 武将 / 卡名 / 技能 / 伤害）",
+      ["nar-seat", "nar-hero", "nar-card", "nar-skill", "nar-dmg"]
+        .every((name) => realClasses.has(name)),
+      [...realClasses].join(","));
     check("U1-05p 回放完整全部仍是既有逐条记录（切档不改已有行为）",
       /#\d+/.test(allText) && allText.includes("询问"),
       `all="${allText.replace(/\s+/g, " ").slice(-120)}"`);

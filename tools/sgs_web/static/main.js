@@ -55,7 +55,6 @@ function wire() {
   $("nav-replay").addEventListener("click", openReplayPage);
   const modeSelect = $("t-log-mode");
   if (modeSelect) modeSelect.addEventListener("change", () => {
-    state.view = Object.assign({}, state.view, { records: state.logRecords });
     renderLog();
   });
   const replayModeSelect = $("r-log-mode");
@@ -74,8 +73,7 @@ function wire() {
   // U1-01 壳：设置浮层 / 事件流浮层 / 回放入口（顶栏右侧）。
   wireOverlayToggle($("btn-settings"), $("t-settings"));
   wireOverlayToggle($("t-log-toggle"), $("t-log-panel"), () => {
-    const last = $("t-log").lastChild;
-    if (last) last.scrollIntoView({ block: "nearest" });
+    scrollLogToBottom();
   });
   const replayEntry = $("btn-go-replay");
   if (replayEntry) replayEntry.addEventListener("click", openReplayPage);

@@ -44,7 +44,14 @@ from sgs.state import CardRef
 
 from .display import card_display
 
-__all__ = ["NARRATIVE_SEGMENT_CLASSES", "build_narrative", "narrative_after"]
+__all__ = ["NARRATIVE_SEGMENT_CLASSES", "NO_VIEWER", "build_narrative", "narrative_after"]
+
+NO_VIEWER: Final[int] = -1
+"""没有人类座位的**观察者**（全是 AI 的录像）：公开区照写，隐藏区只给张数。
+
+它不是"全知"：全知是 ``viewer=None``，只留给 U2 的上帝视角开关。U1 的回放页在没有
+人类座位的录像上用它，避免"查不到座位"退化成把对手手牌 / 牌堆顺序写进叙事。
+"""
 
 NARRATIVE_SEGMENT_CLASSES: Final[tuple[str, ...]] = (
     "seat",
@@ -58,7 +65,12 @@ NARRATIVE_SEGMENT_CLASSES: Final[tuple[str, ...]] = (
     "dmg-fire",
     "dmg-thunder",
 )
-"""``segments[].cls`` 的闭集；CSS 的 ``.nar-*`` 类名与它逐字对应（跨线契约，改要两头改）。"""
+"""``segments[].cls`` 的闭集；CSS 的 ``.nar-*`` 类名与它逐字对应（跨线契约）。
+
+这个闭集在**四处**各有一份副本：本常量、``tests/test_web.py`` 的契约断言、
+``tests/support/ui_smoke.mjs`` 的 ``colorClasses``、``static/style.css`` 的 ``.nar-*``。
+新增一种颜色要四处同批改；任何一处单独漂移都不会被编译期拦住。
+"""
 
 PUBLIC_ZONES: Final[frozenset[str]] = frozenset(
     {"discard", "processing", "equip", "judge"}
@@ -96,6 +108,7 @@ def build_narrative(
     """把一局记录流翻成**观察者视角**的叙事条目（按 ``seq`` 升序）。
 
     ``viewer`` = 查看者座位（牌桌 = 人类座位；回放 = 录像的人类座位）；
+    :data:`NO_VIEWER` = 没有人类座位的观察者（只写公开区，隐藏区只给张数）；
     ``None`` = 全知（U2 的上帝视角；U1 没有入口）。
     ``heroes`` = 逐座位武将 id（``Session.hero_assignments`` / 录像 meta），只用于把座位
     换成武将中文名；空序列时只写座位号。``pack_id`` 决定武将名 / 装备技能名 / 牌名的数据源。
@@ -354,11 +367,11 @@ class _Narrator:
         seat = to_zone.get("seat")
         if seat is None:
             return
-        segments = [*self._seat(seat), _act(" 获得")]
+        segments = [*self._subject(seat), _act(" 获得")]
         if _cards_visible(record, self.viewer):
             segments.extend(_cards(cards))
         else:
-            segments.extend([_act(" "), _act(f"{len(cards)} 张牌")])
+            segments.append(_act(f" {len(cards)} 张牌"))
         self._line(seq, segments)
 
     def _discard(
@@ -373,15 +386,15 @@ class _Narrator:
             self._line(seq, [_act("弃置"), *_cards(cards)])
             return
         if origin is not None and int(origin) != int(owner):
-            # 过河拆桥这类：牌从别人的区域离开，写成"座位X 的【牌】被弃置"。
+            # 过河拆桥这类：牌从别人的区域离开，写成"武将 的【牌】被弃置"。
             segments = [
-                *self._seat(origin),
+                *self._subject(origin),
                 _act(" 的"),
                 *_cards(cards),
                 _act("被弃置"),
             ]
         else:
-            segments = [*self._seat(owner), _act(" 弃置"), *_cards(cards)]
+            segments = [*self._subject(owner), _act(" 弃置"), *_cards(cards)]
         self._line(seq, segments)
 
     # -- 应答 ---------------------------------------------------------------
@@ -398,14 +411,14 @@ class _Narrator:
             name = self._skill_name(str(action.get("skill_id") or ""))
             self._line(
                 seq,
-                [*self._seat(actor), _act(" 发动"), _span(f"【{name}】", "skill")],
+                [*self._subject(actor), _act(" 发动"), _span(f"【{name}】", "skill")],
             )
             return
         card = action.get("card")
         if not isinstance(card, dict):
             return
         if kind == "UseCard":
-            segments = [*self._seat(actor), _act(" 使用"), *_cards((card,))]
+            segments = [*self._subject(actor), _act(" 使用"), *_cards((card,))]
             targets = tuple(int(target) for target in action.get("targets") or ())
             if targets and targets != (actor,):
                 segments.append(_act(" → "))
@@ -415,7 +428,7 @@ class _Narrator:
                     segments.append(_span(f"座位{target}", "seat"))
             self._line(seq, segments)
         elif kind == "PlayCard":
-            self._line(seq, [*self._seat(actor), _act(" 打出"), *_cards((card,))])
+            self._line(seq, [*self._subject(actor), _act(" 打出"), *_cards((card,))])
 
     # -- 终局 ---------------------------------------------------------------
 
@@ -448,6 +461,19 @@ class _Narrator:
         if name := self.seat_names.get(index):
             segments.append(_span(f" {name}", "hero"))
         return segments
+
+    def _subject(self, seat: object) -> list[dict[str, str]]:
+        """行动者：有武将名时只写武将名（票面示例 ``郭嘉 发动【遗计】``），没有才写座位号。
+
+        受动的一侧（受伤 / 阵亡 / 判定）仍用 :meth:`_seat` 写"座位N 武将"，让"谁在场上的
+        哪个位置"一眼可见。
+        """
+        if seat is None:
+            return []
+        index = int(seat)
+        if name := self.seat_names.get(index):
+            return [_span(name, "hero")]
+        return [_span(f"座位{index}", "seat")]
 
     def _skill_name(self, skill_id: str) -> str:
         base = skill_id.split(":", 1)[0]
@@ -489,15 +515,22 @@ def _number(amount: int, cls: str) -> dict[str, str]:
     return _span(str(amount), cls)
 
 
+def _display(card: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """一张记录里的牌 → 展示契约；坏牌面返回 ``None``（调用方显式占位，不猜牌名）。"""
+    try:
+        return card_display(CardRef.model_validate(dict(card)))
+    except (ValueError, TypeError):
+        return None
+
+
 def _cards(cards: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
     """牌名分段：火杀 / 雷杀显示「杀」并按展示契约的 ``attribute`` 分色。"""
     segments: list[dict[str, str]] = []
     for index, card in enumerate(cards):
         if index:
             segments.append(_act("、"))
-        try:
-            display = card_display(CardRef.model_validate(dict(card)))
-        except (ValueError, TypeError):  # 坏牌面：不猜牌名，显式占位（不让整条叙事断掉）
+        display = _display(card)
+        if display is None:
             segments.append(_span("【？】", "card"))
             continue
         segments.append(_span(f"【{display['display_name']}】", _card_class(display)))
@@ -513,9 +546,8 @@ def _card_class(display: Mapping[str, Any]) -> str:
 def _damage_class(cards: Sequence[Mapping[str, Any]]) -> str:
     """伤害数字的颜色：火伤红 / 雷伤蓝；读的是伤害来源牌的展示属性。"""
     for card in cards:
-        try:
-            display = card_display(CardRef.model_validate(dict(card)))
-        except (ValueError, TypeError):
+        display = _display(card)
+        if display is None:
             continue
         if display.get("attribute") == "火焰":
             return "dmg-fire"

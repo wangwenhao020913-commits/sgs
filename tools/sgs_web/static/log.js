@@ -77,15 +77,29 @@ function appendNarrativeThrough(limit) {
   }
 }
 
-function appendLog(record, querySeat) {
-  if (!keepRecord(record, querySeat)) return;
+/** 一条记录 → `<li>`（牌桌与回放共用；`banner` 只用于回放当前位置）。
+ *
+ * 简易档不消费记录流，故 `appendLog` 只为完整档服务。`log` / `mode` / `humanSeat`
+ * 让回放页显式传入自己的容器与查看者，不再复制一套 DOM 拼接。
+ */
+function appendLog(
+  record,
+  querySeat,
+  { log = $("t-log"), mode = logMode(), humanSeat = undefined, banner = false } = {},
+) {
+  if (!keepRecord(record, querySeat, mode, humanSeat)) return false;
   const item = document.createElement("li");
+  if (banner) item.className = "banner";
   item.innerHTML = describeRecord(record);
-  $("t-log").appendChild(item);
+  log.appendChild(item);
+  return true;
 }
 
-function scrollLogToBottom() {
-  const last = $("t-log").lastChild;
+/** 滚到底：先写 `scrollTop`（可被烟测直接断言），再让最后一条进入视口。 */
+function scrollLogToBottom(log = $("t-log")) {
+  if (!log) return;
+  log.scrollTop = log.scrollHeight;
+  const last = log.lastChild;
   if (last) last.scrollIntoView({ block: "nearest" });
 }
 

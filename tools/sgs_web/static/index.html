@@ -228,7 +228,9 @@
         <span id="r-pos" class="dim"></span>
       </div>
     </div>
-    <p class="dim">上帝视角：回放直接消费全知记录流（`06` §5 账本「回放页取上帝视角」）。</p>
+    <p class="dim">上帝视角：回放直接消费全知记录流（`06` §5 账本「回放页取上帝视角」）。
+      事件流的「简易」档按本局人类座位过滤；座位 / 手牌 / 判定区仍是上帝视角，
+      座位视角与上帝视角开关归 U2。</p>
     <section id="r-seats" class="seats"></section>
 
     <div class="cols">
@@ -249,9 +251,8 @@
       <div class="log-head">
         <h2>事件流</h2>
         <select id="r-log-mode" title="回放事件流的详略">
-          <option value="all" selected>完整 · 全部（逐条，上帝视角）</option>
-          <option value="focus">完整 · 重点（隐藏对手的响应往来）</option>
-          <option value="simple">简易（一条行动一行，人类座位视角）</option>
+          <option value="simple" selected>简易（一条行动一行，人类座位视角）</option>
+          <option value="all">完整 · 全部（逐条记录）</option>
         </select>
       </div>
       <ol id="r-log" class="log"></ol>

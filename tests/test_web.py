@@ -4136,6 +4136,7 @@ def test_a_replay_without_a_human_seat_is_not_omniscient(tmp_path: Path) -> None
     回放页的简易档在 U1 仍按观察者过滤；``viewer=-1`` 是一个不存在的座位——公开区与
     阵亡亮明照写，隐藏手牌 / 牌堆顺序一条都不写。U2 的上帝视角开关才传 ``None``。
     """
+    from sgs_web.narrative import NO_VIEWER
     from sgs_web.replay import load_run, save_run
 
     session = Session(seed=11, ai="random", timeout_seconds=None, player_count=4)
@@ -4152,12 +4153,12 @@ def test_a_replay_without_a_human_seat_is_not_omniscient(tmp_path: Path) -> None
     run = load_run(tmp_path, name)
 
     expected = _narrative(
-        run["records"], viewer=-1, heroes=meta["heroes"], pack_id=meta["pack_id"]
+        run["records"], viewer=NO_VIEWER, heroes=meta["heroes"], pack_id=meta["pack_id"]
     )
     assert run["narrative"] == expected, "无人类座位时回放简易流没有走无视角过滤"
     assert run["narrative"] != _narrative(
         run["records"], viewer=None, heroes=meta["heroes"], pack_id=meta["pack_id"]
-    ), "viewer=-1 与上帝视角（None）必须是两套结果"
+    ), "NO_VIEWER 与上帝视角（None）必须是两套结果"
 
     checked = 0
     for record in run["records"]:
@@ -4190,3 +4191,51 @@ def test_the_narrative_game_end_names_the_winner_once() -> None:
     assert end is not None, "完整一局必须有终局行"
     assert end["text"].count("获胜座位") == 1, end["text"]
     assert end["text"].count("获胜") == 1, end["text"]
+
+
+def test_the_narrative_only_reveals_identities_the_journal_revealed() -> None:
+    """身份行只由 ``identity_reveal``（阵亡亮明）驱动；开局暗发的座位一条都不写。
+
+    与 :func:`test_the_narrative_hides_opponent_hand_and_deck_while_revealing_public_card_moves`
+    的早期快照互补：那条钉"还没亮明时没有身份"，这条钉"亮明之后只写亮明了的那一座"。
+    """
+    from sgs.data import IDENTITY_LABELS
+
+    session = Session(seed=11, ai="random", timeout_seconds=None, player_count=4)
+    _play_to_end(session)
+    entries = _narrative(
+        session.records(),
+        viewer=session.human_seat,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    payloads = [_record_payload(record) for record in session.records()]
+    revealed = {
+        payload["seat"]: payload["identity"]
+        for payload in payloads
+        if payload.get("kind") == "delta" and payload.get("delta_type") == "identity_reveal"
+    }
+    assert revealed, "这一局必须有阵亡亮明，否则这条断言是空转"
+    label_by_value = {
+        getattr(identity, "value", str(identity)): label
+        for identity, label in IDENTITY_LABELS.items()
+    }
+
+    lines = [entry for entry in entries if "亮明身份" in entry["text"]]
+    assert len(lines) == len(revealed), (
+        f"亮明行数 {len(lines)} 与 identity_reveal 数 {len(revealed)} 不一致："
+        f"{[line['text'] for line in lines]}"
+    )
+    for line in lines:
+        match = re.match(r"座位(\d+) .+亮明身份：(.+)$", line["text"])
+        assert match is not None, line["text"]
+        seat = int(match.group(1))
+        assert seat in revealed, f"未亮明的座位 {seat} 出现在叙事里：{line['text']}"
+        assert match.group(2) == label_by_value[revealed[seat]], line["text"]
+
+    for seat in range(session.rule_config.player_count):
+        if seat in revealed:
+            continue
+        assert not any(
+            f"座位{seat}" in line["text"] and "亮明身份" in line["text"] for line in lines
+        ), f"座位 {seat} 没有亮明记录，却有亮明行"
