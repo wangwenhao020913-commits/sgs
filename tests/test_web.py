@@ -1821,8 +1821,10 @@ def test_every_skill_entry_carries_type_lock_and_availability() -> None:
             "carrier",
             "available",
             "preactivated",
+            "description",
             "ui",
         }
+        assert entry["description"], "U1-04b：每条技能都要带服务端下发的全文"
         assert isinstance(entry["locked"], bool)
         assert isinstance(entry["available"], bool)
         assert isinstance(entry["preactivated"], bool)
@@ -3520,3 +3522,194 @@ def test_a_bare_query_rebuilds_transformed_source_cards_from_the_query_itself() 
     assert card["kind"] == "transformed"
     assert [item["card_id"] for item in card["source_cards"]] == [source_id]
     assert payload["prompt_display"] is None, "没有候选时显式不给提示契约，不伪造默认动作"
+
+
+# ---------------------------------------------------------------------------
+# U1-04b 描述全文：43 个牌名 + 46 条技能（独立内容文件，不进引擎 / 录像）
+# ---------------------------------------------------------------------------
+
+MILITARY_CARD_TYPE_IDS = frozenset(
+    {
+        "fire_slash",
+        "thunder_slash",
+        "wine",
+        "supply_shortage",
+        "fire_attack",
+        "iron_chain",
+        "silver_lion",
+        "vine_armor",
+        "ancient_scimitar",
+        "vermilion_feather_fan",
+        "hualiu",
+    }
+)
+"""U1-04b 预写的 11 个军争牌名 id（M5 落地前只写描述，不建牌堆条目）。"""
+
+
+def test_every_card_name_and_skill_id_has_a_description() -> None:
+    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 46 条技能一条不缺。
+
+    缺一条时断言消息**直接列出缺的 key**（不是只报一个总数）——这是票面的验收判据。
+    多余 / 拼错的 key 也一并拦：否则「43 条」可以是 42 条真条目 + 1 条错拼。
+    """
+    from sgs.skills import CATALOG
+
+    from sgs_web.descriptions import CARD_DESCRIPTIONS, SKILL_DESCRIPTIONS
+
+    standard = {card_type.id for card_type in load_content_pack(deck_profile="standard_108").card_types}
+    expected_cards = standard | MILITARY_CARD_TYPE_IDS
+    assert len(expected_cards) == 43, f"牌名边界漂了：标准 {len(standard)} + 军争 {len(MILITARY_CARD_TYPE_IDS)}"
+
+    missing_cards = sorted(expected_cards - set(CARD_DESCRIPTIONS))
+    assert not missing_cards, f"descriptions.json 缺牌名条目：{missing_cards}"
+    stale_cards = sorted(set(CARD_DESCRIPTIONS) - expected_cards)
+    assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
+
+    expected_skills = set(CATALOG)
+    assert len(expected_skills) == 46, f"CATALOG 技能数变了：{len(expected_skills)}"
+    missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
+    assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
+    stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)
+    assert not stale_skills, f"descriptions.json 有陈旧 / 拼错的技能条目：{stale_skills}"
+
+    for key, text in {**CARD_DESCRIPTIONS, **SKILL_DESCRIPTIONS}.items():
+        assert isinstance(text, str) and text.strip(), f"{key} 的描述是空串"
+        assert len(text) >= 10, f"{key} 的描述过短，疑似占位：{text!r}"
+
+
+def test_the_transformation_entries_distinguish_product_and_source() -> None:
+    """票面判据：纯虚拟牌 / 转化牌的描述要说清「产物」与「来源」的区别。
+
+    这些条目会被 U1-02 的悬停原样显示；只断言“有文本”会让文案退化成官方牌面而不再
+    解释产物 / 来源，玩家就分不清「【闪】当【杀】」到底是哪张牌在生效。
+    """
+    from sgs_web.descriptions import CARD_DESCRIPTIONS, SKILL_DESCRIPTIONS
+
+    card_keys = (
+        "slash",
+        "dodge",
+        "peach",
+        "indulgence",
+        "duel",
+        "fire_slash",
+        "thunder_slash",
+        "serpent_spear",
+        "vermilion_feather_fan",
+    )
+    for key in card_keys:
+        text = CARD_DESCRIPTIONS[key]
+        assert "产物" in text and "来源" in text, f"{key} 没写清产物 / 来源：{text}"
+
+    skill_keys = (
+        "hero.guanyu.wusheng",
+        "hero.zhaoyun.longdan",
+        "hero.daqiao.guose",
+        "hero.huatuo.jijiu",
+        "hero.diaochan.lijian",
+        "equip.serpent_spear",
+        "equip.eight_diagrams",
+    )
+    for key in skill_keys:
+        text = SKILL_DESCRIPTIONS[key]
+        assert "产物" in text and "来源" in text, f"{key} 没写清产物 / 来源：{text}"
+
+
+def test_the_description_lookup_fails_closed_to_the_explicit_placeholder() -> None:
+    """未知 key 必须显式得到「暂无描述」；查表键就是 ``CATALOG`` 的完整 skill_id。"""
+    from sgs_web.descriptions import (
+        CARD_DESCRIPTIONS,
+        DESCRIPTION_FALLBACK,
+        SKILL_DESCRIPTIONS,
+        card_description,
+        skill_description,
+    )
+
+    assert DESCRIPTION_FALLBACK == "暂无描述", "缺条目文案是界面契约的一部分，不能悄悄改"
+    assert card_description("slash") == CARD_DESCRIPTIONS["slash"]
+    assert card_description("no_such_card") == DESCRIPTION_FALLBACK
+    assert card_description(None) == DESCRIPTION_FALLBACK, "空 key 也走同一条兜底，不返回空串"
+
+    yiji = "hero.guojia.yiji"
+    assert skill_description(yiji) == SKILL_DESCRIPTIONS[yiji]
+    assert skill_description("hero.nobody.skill") == DESCRIPTION_FALLBACK
+    assert skill_description(None) == DESCRIPTION_FALLBACK
+
+
+def test_the_card_and_skill_contracts_carry_the_server_side_description() -> None:
+    """展示契约下发全文：快照 / 候选 / 技能清单都带同一条 description。"""
+    from sgs.state import CardRef
+
+    from sgs_web.descriptions import card_description, skill_description
+    from sgs_web.display import card_display
+
+    session = Session(seed=5, ai="random", timeout_seconds=None, player_count=4)
+    snapshot = visible_snapshot(session)
+
+    # 真产品路径：HTTP 门面拼的响应体（serve.GameRegistry.view）里就得有全文。
+    from sgs_web.serve import GameRegistry
+
+    body = GameRegistry(runs_dir="/tmp/unused").view(session, after=-1, logs_after=0)
+    assert body["skills"], "响应体里没有技能清单，描述没有消费者"
+    assert all(skill["description"] != "暂无描述" for skill in body["skills"]), body["skills"]
+    assert all(card["description"] for card in body["snapshot"]["self_hand"]), "手牌描述没下发"
+
+    cards = _visible_cards(snapshot)
+    assert cards, "快照里必须有牌，否则这条断言是空转"
+    for card in cards:
+        assert card["description"] == card_description(card["type"]), card
+
+    skills = build_skills(session, session.human_seat)
+    assert skills, "人类座位至少有一条武将技能"
+    for skill in skills:
+        assert skill["description"] == skill_description(skill["skill_id"]), skill
+        assert skill["description"] != "暂无描述", f"CATALOG 里的技能不该缺条目：{skill['skill_id']}"
+
+    pending = session.pending
+    assert pending is not None
+    payload = pending_payload(session)
+    seen = 0
+    for entry in payload["candidate_index"].values():
+        card = entry["card"]
+        assert card["description"] == card_description(card["type"]), card
+        seen += 1
+    assert seen > 0, "这条询问必须至少有一张候选牌，否则候选描述没有消费者"
+
+    unknown = CardRef(card_id=-77, type="no_such_card", name="？")
+    assert card_display(unknown)["description"] == "暂无描述", "缺条目路径由展示层显式兜底"
+
+
+def test_the_description_content_stays_out_of_the_engine_journal() -> None:
+    """描述只住接入层内容文件：不进引擎数据、不进记录流（金录像因此不变）。"""
+    from sgs.data.models import CardType
+
+    from sgs_web.descriptions import (
+        CARD_DESCRIPTIONS,
+        DESCRIPTIONS_PATH,
+        SKILL_DESCRIPTIONS,
+    )
+
+    assert DESCRIPTIONS_PATH.is_relative_to(REPO_ROOT / "tools" / "sgs_web"), (
+        f"描述必须住接入层 tools/sgs_web/，实际 {DESCRIPTIONS_PATH}"
+    )
+    assert "description" not in CardType.model_fields, "描述不得进引擎的牌名数据模型"
+
+    session = Session(seed=5, ai="random", timeout_seconds=None, player_count=4)
+    journal = dump_journal(session.records())
+    assert '"description"' not in journal, "记录流里出现了 description 键（会打翻金录像）"
+    for text in (*CARD_DESCRIPTIONS.values(), *SKILL_DESCRIPTIONS.values()):
+        assert text not in journal, f"描述全文进了记录流：{text[:24]}…"
+
+
+def test_the_static_frontend_does_not_copy_the_description_text() -> None:
+    """文案只有一份：服务端的 ``descriptions.json``；static/*.js 不抄任何全文。
+
+    读取行为（牌面 / 技能按钮的悬停 title）归 ``tests/support/ui_smoke.mjs`` 的
+    U1-04d / U1-04e——它跑真前端脚本 + 真服务端形状，不是源码字符串断言。
+    """
+    from sgs_web.descriptions import CARD_DESCRIPTIONS, SKILL_DESCRIPTIONS
+
+    static = REPO_ROOT / "tools" / "sgs_web" / "static"
+    scripts = {path.name: path.read_text(encoding="utf-8") for path in static.glob("*.js")}
+    for key, text in {**CARD_DESCRIPTIONS, **SKILL_DESCRIPTIONS}.items():
+        for name, source in scripts.items():
+            assert text not in source, f"{name} 硬编码了 {key} 的描述全文（必须由服务端下发）"

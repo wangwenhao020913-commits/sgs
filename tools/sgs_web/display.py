@@ -4,17 +4,20 @@
 
 - 这里只做**表现层派生**，不读 DOM、不读录像、不裁决规则；输入是已经过滤好的
   :class:`~sgs.state.CardRef` / :class:`~sgs.state.PlayerPublic` / :class:`~sgs.state.Query`。
-- 卡面的 ``display_name`` / ``attribute`` / ``kind`` / ``source_cards`` 与提示条的
-  ``text`` / ``default_action`` / ``default_label`` 都从这里出；前端不再另抄一份
-  "火杀 / 雷杀叫杀"的映射（读取口 = ``static/core.js: cardName``）。
+- 卡面的 ``display_name`` / ``attribute`` / ``kind`` / ``source_cards`` / ``description``
+  与提示条的 ``text`` / ``default_action`` / ``default_label`` 都从这里出；前端不再另抄
+  一份 "火杀 / 雷杀叫杀" 的映射（读取口 = ``static/core.js: cardName``）。
 - 身份标签（``主公 / 忠臣 / 反贼 / 内奸``）也在这里映射一次；投影里的
   ``PlayerPublic.identity`` 仍是过滤后的枚举值（不可见时 ``None``）。
+- **描述全文**（U1-04b）住在 :mod:`sgs_web.descriptions`（内容文件
+  ``descriptions.json``），这里只按牌名 id 查一次并并入 ``description``；文案本身
+  不抄进本模块，更不进引擎 / 记录流。
 - **消费节奏**：``display_name`` 已由 U1-04 的前端读取；``attribute`` / ``kind`` /
-  ``source_cards`` 归 U1-02（卡面）/ U1-07（虚拟 / 转化牌），``prompt_display`` 归
-  U1-03（提示条）。本模块先把契约发出去，不在前端提前造表现。
+  ``source_cards`` 归 U1-02（卡面）/ U1-07（虚拟 / 转化牌）；``description`` 归
+  U1-02（牌面悬停）/ U1-06（技能详情）；``prompt_display`` 归 U1-03（提示条）。
+  本模块先把契约发出去，不在前端提前造表现。
 
-**不塞进** :mod:`sgs_web.projection`：投影负责"哪些事实可见"，本模块负责"可见事实怎么显示"；
-描述全文（`descriptions.json`）归 U1-04b，不在本模块。
+**不塞进** :mod:`sgs_web.projection`：投影负责"哪些事实可见"，本模块负责"可见事实怎么显示"。
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from typing import Any
 from sgs.data import IDENTITY_LABELS
 from sgs.state import CardRef, EndPhase, Pass, PlayerPublic, Query
 
+from .descriptions import card_description
 from .timeout import fallback_action
 
 __all__ = [
@@ -57,13 +61,16 @@ _THUNDER_TYPES = frozenset({"thunder_slash"})
 def card_display(
     card: CardRef, *, lookup: Mapping[int, CardRef] | None = None
 ) -> dict[str, Any]:
-    """一张牌的展示字段：``display_name`` / ``attribute`` / ``kind`` / ``source_cards``。
+    """一张牌的展示字段：``display_name`` / ``attribute`` / ``kind`` / ``source_cards`` /
+    ``description``。
 
     ``display_name``：普通杀、火杀、雷杀**都**是「杀」；其余牌用内容包给的牌名。
     ``attribute``：普通 / 火焰 / 雷电（中文展示值）。
     ``kind``：``normal``（实体牌）/ ``virtual``（无实体来源的虚拟牌）/
     ``transformed``（带 ``virtual_sources`` 的转化牌）。
     ``source_cards``：转化牌的来源实体牌（完整牌面 + 展示字段）；纯虚拟牌为空列表。
+    ``description``：按 ``card.type`` 查 :mod:`sgs_web.descriptions` 的全文；缺条目时是
+    显式的「暂无描述」，不返回空串。
     没有 ``lookup``（409 里附带的裸询问拿不到引擎）时只给空来源，**不猜**。
     """
     if card.is_virtual:
@@ -87,6 +94,7 @@ def card_display(
         "attribute": attribute,
         "kind": kind,
         "source_cards": sources,
+        "description": card_description(card.type),
     }
 
 

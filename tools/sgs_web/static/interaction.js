@@ -16,6 +16,9 @@ function cardChip(card, selected, isStatic, usable = true, onClick = null) {
   if (isStatic) chip.classList.add("static");
   if (!isStatic && !usable) chip.classList.add("dis");
   chip.innerHTML = `<span class="n">${cardName(card)}</span><span class="s">${card.suit || ""}${card.rank ?? ""}</span>`;
+  // 悬停全文（U1-04b）：只读服务端下发的 description，前端不存文案。旧回放载荷没有
+  // 这个字段时不挂空提示（U2 再接回放页）；牌桌载荷的缺条目由服务端填「暂无描述」。
+  if (card.description) chip.setAttribute("title", cardDescription(card));
   // 静态牌（装备 / 判定 / 处理区）不可点；其余默认走"点牌设焦点"，弃牌阶段另给入口。
   if (!isStatic) chip.addEventListener("click", onClick || (() => toggleFocus(card.card_id)));
   return chip;

@@ -30,6 +30,7 @@ from sgs.skills import (
 from sgs.state import FrameKind, Query, WindowCause, project
 from sgs.timing import Timing
 
+from .descriptions import skill_description
 from .display import card_lookup_from_query, decorate_pending, decorate_snapshot
 from .session import Session
 
@@ -139,6 +140,8 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
                 "locked": bool(definition.locked),
                 "carrier": getattr(definition.carrier, "value", str(definition.carrier)),
                 "available": definition.skill_id in offered,
+                # U1-04b：技能详情 / 悬停的全文，与牌面描述同住一份内容文件。
+                "description": skill_description(definition.skill_id),
                 # W4-2：这条技能是否已翻到预发动。界面据此**只**走清单入口（不再把骨架
                 # 候选画成"发动技能 XXX"选项）；它是声明上的开关，不是第二条合法性判据。
                 "preactivated": bool(definition.preactivated),

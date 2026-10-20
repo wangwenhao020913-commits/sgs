@@ -50,6 +50,23 @@ function cardName(card) {
   return card.name || "？";
 }
 
+/** 描述全文（U1-04b）：服务端把 `descriptions.json` 的条目并入每张牌 / 每条技能。
+ *
+ * 文案是**内容**，只住 `tools/sgs_web/descriptions.json`；前端**不抄文案**。
+ * 缺条目时显式显示「暂无描述」——不返回空串，免得界面静默留白。
+ */
+const DESCRIPTION_FALLBACK = "暂无描述";
+
+function cardDescription(card) {
+  if (!card) return DESCRIPTION_FALLBACK;
+  return card.description || DESCRIPTION_FALLBACK;
+}
+
+function skillDescription(skill) {
+  if (!skill) return DESCRIPTION_FALLBACK;
+  return skill.description || DESCRIPTION_FALLBACK;
+}
+
 /** `Phase` 枚举的字面值 → 中文阶段名。
  *
  * 枚举值（`prepare` / `judge` / `draw` / `play` / `discard` / `finish`）是**稳定报文值**，

@@ -408,6 +408,8 @@ function renderSkills(view) {
     button.setAttribute("data-available", String(skill.available));
     button.setAttribute("data-usable", String(usable));
     button.setAttribute("data-locked", String(skill.locked));
+    // 悬停全文（U1-04b）：技能详情 / 悬停都读服务端下发的同一份 description。
+    if (skill.description) button.setAttribute("title", skillDescription(skill));
     if (preactivated) button.setAttribute("data-preactivated", "true");
     if (convertCards.length) button.setAttribute("data-convert", String(convertCards.length));
     if (manifest) button.setAttribute("data-preactivation", String(manifest.length));

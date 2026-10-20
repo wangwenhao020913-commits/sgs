@@ -4489,6 +4489,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     display_name: "杀",
     attribute: "火焰",
     kind: "transformed",
+    description: "【杀】的一种，造成火焰伤害。本仓裁定：卡面显示为「杀」并标红色。",
     source_cards: [{ ...source, display_name: "闪", attribute: "普通", kind: "normal", source_cards: [] }],
   };
   // 真实载荷的形状：`legal_actions` 是可回传的**裸**卡（Action extra=forbid，不能带
@@ -4512,11 +4513,37 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const chipText = $("t-hand").children[0].text();
   check("U1-04a 手牌卡名读 display_name（转化火杀显示「杀」）",
     chipText.includes("杀") && !chipText.includes("火杀"), `手牌="${chipText}"`);
+  check("U1-04d 牌面悬停 title 读服务端下发的 description",
+    $("t-hand").children[0].getAttribute("title") === fire.description,
+    `title="${$("t-hand").children[0].getAttribute("title")}"`);
   // 候选里的卡是裸卡：文案按 card_id 回查 candidate_index 的展示副本才拿到「杀」。
   const label = ui.actionLabel({ kind: "UseCard", card: fireRaw, targets: [1] });
   check("U1-04b 候选文案按 card_id 回查 display_name（不是「火杀」）",
     !fireRaw.display_name && label.includes("杀") && !label.includes("火杀"),
     `raw=${fireRaw.display_name} label="${label}"`);
+
+  // 技能按钮悬停（U1-04b）：与牌面同一份服务端 description，不在 JS 里另抄。
+  const skillView = synthView({
+    kind: "PLAY_PHASE", actor: 0, prompt: "", legal_actions: [],
+    candidate_index: {}, context: null, option_seats: {},
+  });
+  skillView.skills = [{
+    skill_id: "hero.guojia.yiji",
+    name: "遗计",
+    skill_type: "NORMAL",
+    locked: false,
+    carrier: "HERO",
+    available: false,
+    preactivated: false,
+    description: "当你每受到 1 点伤害后，你可以观看牌堆顶的两张牌，然后交给任意角色。",
+    ui: { requirement: "", passive: true, convert_sources: [] },
+  }];
+  ui.state.view = skillView;
+  ui.resetSelection();
+  ui.renderTable();
+  check("U1-04e 技能按钮悬停 title 读服务端下发的 description",
+    $("t-skills").children[0].getAttribute("title") === skillView.skills[0].description,
+    `title="${$("t-skills").children[0].getAttribute("title")}"`);
 
   // 座位身份标签：服务端 identity_label 优先于本地 identityLabel 映射（U1-04）。
   const identityView = synthView({
