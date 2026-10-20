@@ -152,6 +152,8 @@ const state = {
   heroCatalog: [],     // 点将列表（`GET /api/heroes` 的启用池）；开局页的选项来源
   logRecords: [],
   lastQuerySeat: null, // 事件流里"上一条询问的 actor"（action 记录靠它归属）
+  narrative: [],       // U1-05：服务端下发的叙事条目（简易事件流；按 seq 升序）
+  narrativeShown: 0,   // 已经铺进 DOM 的叙事条目数（增量 / 切换详略时接着铺）
   lastRejectReason: "",   // 已收到的全部下发记录（切换详略时重画用）
 };
 

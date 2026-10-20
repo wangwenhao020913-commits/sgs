@@ -58,6 +58,10 @@ function wire() {
     state.view = Object.assign({}, state.view, { records: state.logRecords });
     renderLog();
   });
+  const replayModeSelect = $("r-log-mode");
+  if (replayModeSelect) replayModeSelect.addEventListener("change", () => {
+    if (state.replay) renderReplayLog(state.replay);
+  });
   $("btn-submit").addEventListener("click", submitAction);
   $("btn-cancel").addEventListener("click", cancelOrClear);
   // U1-03：提示条右端的两个"到此为止"动作（结束出牌 / 放弃），词表由服务端候选决定。

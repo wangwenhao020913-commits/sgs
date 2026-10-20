@@ -82,6 +82,8 @@ async function startGame(event) {
     if (state.playback) flushPlayback();
     // 新的一局：事件流与轮次计数都从零开始（顶栏轮次按 TURN_START 累计）。
     state.logRecords = [];
+    state.narrative = [];
+    state.narrativeShown = 0;
     state.lastQuerySeat = null;
     $("t-log").innerHTML = "";
     applyView(body);

@@ -41,6 +41,7 @@ ensure_engine_importable()
 
 from sgs.data import enabled_hero_ids, load_heroes  # noqa: E402
 from sgs.engine import IllegalActionError  # noqa: E402
+from sgs_web.narrative import narrative_after  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
     pending_payload,
@@ -135,6 +136,7 @@ class GameRegistry:
 
     def view(self, session: Session, *, after: int, logs_after: int) -> dict[str, Any]:
         """会话视角的响应体（建局 / 取增量 / 应答三处**共用同一个形状**）。"""
+        all_records = session.records()
         records = [
             payload
             for record in session.records_after(after)
@@ -155,6 +157,15 @@ class GameRegistry:
             "skills": build_skills(session, session.human_seat),
             "pending": pending_payload(session),
             "records": records,
+            # U1-05 叙事契约：简易事件流的条目由服务端生成、按查看者过滤；前端只渲染。
+            # 游标复用记录流的 `after`——条目自带产生它的记录 `seq`，两批拼接 = 全量。
+            "narrative": narrative_after(
+                all_records,
+                after=after,
+                viewer=session.human_seat,
+                heroes=session.hero_assignments,
+                pack_id=session.pack.pack_id,
+            ),
             "session_log": [entry.as_dict() for entry in session.logs_after(logs_after)],
         }
 

@@ -27,6 +27,7 @@ from sgs.agents import TapePlayer, tape_from_journal
 from sgs.data import load_content_pack, validate_rule_config
 from sgs.engine import Engine, dump_journal, read_journal
 
+from .narrative import build_narrative
 from .session import Session
 
 __all__ = ["META_VERSION", "list_runs", "load_run", "read_run_meta", "save_run", "replay_journal"]
@@ -178,10 +179,23 @@ def load_run(runs_dir: Path, name: str) -> dict[str, Any]:
     header = records[0]
     if getattr(header, "kind", None) != "header":
         raise ValueError(f"记录流首行不是 header：{journal_path.name}")
+    payloads = [json.loads(line) for line in dump_journal(records).splitlines()]
+    # U1-05：牌桌与回放共用同一个叙事生成器；回放按**录像的人类座位**过滤
+    # （U2 的座位选择器 / 上帝视角开关接入时再传具体查看者或 ``None``）。
+    # 没有人类座位的录像（全是 AI）不能因为"查不到座位"退化成全知：``-1`` 是一个
+    # 不存在的座位，只留公开区 / 阵亡亮明，隐藏手牌与牌堆顺序照样不写。
+    human_seat = meta.get("human_seat")
+    viewer = int(human_seat) if human_seat is not None else -1
     return {
         "name": name,
         "meta": meta,
-        "records": [json.loads(line) for line in dump_journal(records).splitlines()],
+        "records": payloads,
+        "narrative": build_narrative(
+            payloads,
+            viewer=viewer,
+            heroes=meta.get("heroes") or (),
+            pack_id=meta["pack_id"],
+        ),
     }
 
 

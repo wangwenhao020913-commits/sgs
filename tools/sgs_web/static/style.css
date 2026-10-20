@@ -455,7 +455,8 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 
 .log-panel {
   position: absolute; left: 0.9%; bottom: 27.2%;
-  width: 26.25%; max-height: 62%;
+  /* U1-05：设计基准 1600×900 下 420×560；窄屏按比例收，不盖住底部操作条。 */
+  width: 420px; height: 560px; max-width: 26.25%; max-height: 62%;
   display: flex; flex-direction: column;
   background: rgba(255, 253, 247, .98);
   border: 1px solid var(--line);
@@ -468,8 +469,26 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 7px 10px; border-bottom: 1px solid var(--line); font-size: 13px;
 }
+.log-head h2 { margin: 0; font-size: 15px; }
 .log-head select { font-size: 12px; padding: 3px 6px; }
 .log-panel .log { flex: 1 1 auto; max-height: none; overflow: auto; font-size: 12px; padding: 8px 10px 8px 26px; }
+
+/* U1-05 简易事件流：服务端生成的叙事条目只按 `segments[].cls` 上色。
+ * 座位 / 武将黄、普通卡名黑、火杀红 / 雷杀蓝、技能蓝、动作黑粗、火伤红 / 雷伤蓝。 */
+.nar-seat, .nar-hero { color: #a5720b; }
+.nar-card { color: var(--ink); }
+.nar-card-fire, .nar-dmg-fire { color: #b3261e; }
+.nar-card-thunder, .nar-dmg-thunder { color: #1d4e9c; }
+.nar-skill { color: #1d4e9c; }
+.nar-act { font-weight: 600; color: var(--ink); }
+.nar-dmg { font-weight: 600; }
+.log li.nar-divider {
+  list-style: none; margin: 7px 0 2px; padding: 4px 0 0;
+  border-top: 1px solid var(--line);
+  color: var(--dim); font-size: 11px; text-align: center;
+}
+/* 叙事行是"一条行动一行"，不要 `<ol>` 的序号（序号属于完整档的引擎记录）。 */
+.log li.nar-line { list-style: none; margin: 2px 0; }
 
 /* ---------- 共享模态（U1-03）：屏幕正中 / 正文可滚 / 背景或 ESC 可关 ---------- */
 

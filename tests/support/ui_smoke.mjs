@@ -98,7 +98,8 @@ for (const m of html.matchAll(/<(input|select|button|span|div|ol|section|main|fo
 for (const id of ["in-players", "in-ai", "in-seat", "in-timeout", "in-seed"]) if (!byId.has(id)) el("input", id);
 // `<select>` 的初值 = 带 `selected` 的那个 option（真 DOM 语义）；垫片不解析 option 结构，
 // 故这里给一个显式初值，由下方 `setSelect` 在测试里改。
-byId.get("t-log-mode").value = "focus";
+byId.get("t-log-mode").value = "simple";
+byId.get("r-log-mode").value = "all";
 Object.assign(byId.get("in-players"), { value: "8" });
 Object.assign(byId.get("in-ai"), { value: "heuristic" });
 Object.assign(byId.get("in-seat"), { value: "0" });
@@ -216,6 +217,8 @@ const openSession = async (body) => {
   ui.state.sessionId = body.session_id;
   ui.state.view = null;
   ui.state.logRecords = [];
+  ui.state.narrative = [];
+  ui.state.narrativeShown = 0;
   ui.state.cursor = -1;
   ui.state.logSeq = 0;
   ui.resetSelection();
@@ -5070,6 +5073,187 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `modal=${/\.modal\s*\{[^}]*align-items:\s*center[^}]*justify-content:\s*center/s.test(css)} body=${/\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)} backdrop=${/\.modal-backdrop\s*\{[^}]*bottom:\s*27\.5%/s.test(css)}`);
   ui.resetSelection();
   ui.state.view = null;
+}
+
+
+/* ============ U1-05 叙事与事件流：简易 / 完整重点 / 完整全部 ============
+ *
+ * 票面判据：
+ * - 简易流是默认档，一条行动一行；条目由**服务端**生成（`view.narrative`），前端只按
+ *   `segments[].cls` 上色，不在 JS 里判断隐藏信息；
+ * - 完整重点 / 完整全部沿用现有 `focus` / `all` 的 `describeRecord` 渲染；
+ * - 浮层 420×560、左下角按钮、默认折叠、再次点击关闭、展开常驻、自动滚到底；
+ * - 牌桌与回放共用同一份条目生成器（回放的简易档读同一批 `narrative`）。
+ */
+
+{
+  /* ---- 静态契约：三档在顶部切换 + 浮层尺寸 ---- */
+  const simpleOption = html.match(/<option value="simple"[^>]*selected[^>]*>/);
+  check("U1-05a 事件流默认简易档（index.html 的 simple 选项带 selected）",
+    !!simpleOption, `simple=${!!simpleOption}`);
+  const modeSelectHtml = html.match(/<select[^>]*id="t-log-mode"[^>]*>([\s\S]*?)<\/select>/);
+  const modeValues = modeSelectHtml
+    ? [...modeSelectHtml[1].matchAll(/value="([^"]+)"/g)].map((match) => match[1])
+    : [];
+  check("U1-05b 事件流顶部三档：简易 / 完整重点 / 完整全部",
+    JSON.stringify(modeValues) === JSON.stringify(["simple", "focus", "all"]),
+    `options=${JSON.stringify(modeValues)}`);
+  check("U1-05c 回放页事件流同样有三档开关",
+    html.includes('id="r-log-mode"')
+      && ["simple", "focus", "all"].every((mode) => html.includes(`value="${mode}"`)),
+    `r-log-mode=${html.includes('id="r-log-mode"')}`);
+
+  const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  check("U1-05d 事件流浮层 420×560、左下角（默认折叠由 U1-01m/n 另钉）",
+    /\.log-panel\s*\{[^}]*width:\s*420px/s.test(css)
+      && /\.log-panel\s*\{[^}]*height:\s*560px/s.test(css)
+      && /\.log-panel\s*\{[^}]*left:\s*0\.9%/s.test(css)
+      && /\.log-panel\s*\{[^}]*bottom:\s*27\.2%/s.test(css),
+    `width=${/\.log-panel\s*\{[^}]*width:\s*420px/s.test(css)} height=${/\.log-panel\s*\{[^}]*height:\s*560px/s.test(css)}`);
+  const colorClasses = ["seat", "hero", "card", "card-fire", "card-thunder", "skill", "act", "dmg", "dmg-fire", "dmg-thunder"];
+  const missingColors = colorClasses.filter((name) => !new RegExp(`\\.nar-${name}\\b`).test(css));
+  check("U1-05e 叙事颜色闭集都有 CSS（黄 / 黑 / 红 / 蓝 / 粗体）",
+    missingColors.length === 0, missingColors.join(",") || "全部存在");
+
+  /* ---- 简易流：服务端条目 → DOM（只渲染，不判断隐藏信息） ---- */
+  const narrative = [
+    { kind: "divider", seq: 10, text: "第 1 轮 · 座位0 郭嘉 的回合" },
+    { kind: "divider", seq: 11, text: "出牌阶段" },
+    {
+      kind: "line", seq: 11,
+      text: "座位0 郭嘉 使用【杀】 → 座位1",
+      segments: [
+        { text: "座位0", cls: "seat" }, { text: " 郭嘉", cls: "hero" },
+        { text: " 使用", cls: "act" }, { text: "【杀】", cls: "card-fire" },
+        { text: " → ", cls: "act" }, { text: "座位1", cls: "seat" },
+      ],
+    },
+    {
+      kind: "line", seq: 12,
+      text: "座位1 司马懿 受到 1 点伤害",
+      segments: [
+        { text: "座位1", cls: "seat" }, { text: " 司马懿", cls: "hero" },
+        { text: " 受到 ", cls: "act" }, { text: "1", cls: "dmg-fire" },
+        { text: " 点伤害", cls: "act" },
+      ],
+    },
+    {
+      kind: "line", seq: 13,
+      text: "座位0 郭嘉 发动【遗计】",
+      segments: [
+        { text: "座位0", cls: "seat" }, { text: " 郭嘉", cls: "hero" },
+        { text: " 发动", cls: "act" }, { text: "【遗计】", cls: "skill" },
+      ],
+    },
+  ];
+  const fullRecords = [
+    { kind: "timing", seq: 1, timing: "TURN_START", actor: 0 },
+    { kind: "query", seq: 2, query: { kind: "RESPOND", actor: 1 } },
+    { kind: "action", seq: 3, accepted: true, action: { kind: "Pass", answers_seq: 2 } },
+  ];
+  const view = {
+    ...synthView(null), cursor: 13, log_seq: 0, records: [], narrative, finished: false,
+    pending: {
+      kind: "PLAY_PHASE", actor: 0, seq: 13, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      legal_actions: [{ kind: "EndPhase", answers_seq: 13 }],
+      candidate_index: {}, option_seats: {}, context: null,
+    },
+  };
+  ui.state.narrative = [];
+  ui.state.narrativeShown = 0;
+  ui.state.logRecords = fullRecords;
+  ui.state.sessionId = null;   // 合成视图：不让提交 / 刷新碰到别的会话
+  setSelect("t-log-mode", "simple");
+  ui.applyView(view);
+
+  check("U1-05f 简易流是默认档，渲染服务端叙事而不是引擎日志",
+    logCount() === narrative.length
+      && logText().includes("受到 1 点伤害")
+      && logText().includes("发动【遗计】")
+      && !logText().includes("#"),
+    `count=${logCount()} text="${logText().replace(/\s+/g, " ").slice(0, 120)}"`);
+  const logItems = $("t-log").children;
+  check("U1-05g 轮次 / 阶段分隔是独立的暗灰分隔行（不做树）",
+    logItems[0].className === "nar-divider"
+      && logItems[0].textContent.startsWith("第 1 轮")
+      && logItems[1].className === "nar-divider"
+      && logItems[1].textContent === "出牌阶段",
+    `[0]=${logItems[0].className}:${logItems[0].textContent} [1]=${logItems[1].className}:${logItems[1].textContent}`);
+  const lineClasses = logItems[2].children.map((node) => node.className);
+  check("U1-05h 服务端的颜色类原样落到 span（座位 / 武将黄、卡名红、动作粗、伤害红、技能蓝）",
+    lineClasses.includes("nar-seat") && lineClasses.includes("nar-hero")
+      && lineClasses.includes("nar-card-fire") && lineClasses.includes("nar-act")
+      && logItems[3].children.some((node) => node.className === "nar-dmg-fire")
+      && logItems[4].children.some((node) => node.className === "nar-skill"),
+    `line2=${lineClasses.join(",")}`);
+
+  /* ---- 完整两档沿用现有行为；切回简易重新渲染叙事 ---- */
+  setSelect("t-log-mode", "focus");
+  check("U1-05i 完整重点 = 现有 focus 渲染（保留自己的行动，隐藏对手响应往来）",
+    logText().includes("回合开始")
+      && !logText().includes("询问 RESPOND")
+      && !logText().includes("受到 1 点伤害"),
+    `text="${logText().replace(/\s+/g, " ").slice(0, 120)}"`);
+  setSelect("t-log-mode", "all");
+  check("U1-05j 完整全部 = 现有 all 渲染（含对手的响应往来）",
+    logText().includes("询问 RESPOND") && logText().includes("应答"),
+    `text="${logText().replace(/\s+/g, " ").slice(0, 120)}"`);
+  setSelect("t-log-mode", "simple");
+  check("U1-05k 切回简易档：叙事重新铺开（不需要重新请求）",
+    logCount() === narrative.length && logText().includes("发动【遗计】"),
+    `count=${logCount()} text="${logText().replace(/\s+/g, " ").slice(0, 100)}"`);
+
+  /* ---- 自动滚到底（展开浮层时滚到最后一 条） ---- */
+  let scrolled = false;
+  $("t-log").lastChild.scrollIntoView = () => { scrolled = true; };
+  $("t-log-panel").hidden = true;
+  (($("t-log-toggle").listeners.click) || []).forEach((fn) => fn({ target: $("t-log-toggle") }));
+  check("U1-05l 展开事件流自动滚到底",
+    scrolled && $("t-log-panel").hidden === false,
+    `scrolled=${scrolled} hidden=${$("t-log-panel").hidden}`);
+  // 展开后常驻：点页面别处不会自动收起（只有再次点事件流按钮才关）。
+  fireDocument("click", { target: $("table-stage") });
+  check("U1-05l2 展开后点别处不自动关（常驻到再次点击）",
+    $("t-log-panel").hidden === false, `hidden=${$("t-log-panel").hidden}`);
+  (($("t-log-toggle").listeners.click) || []).forEach((fn) => fn({ target: $("t-log-toggle") }));
+  check("U1-05m 再次点击收起（展开常驻，不自动关）", $("t-log-panel").hidden === true);
+}
+
+/* ---- 回放页：简易档读同一份服务端叙事（默认仍为完整全部，保住上帝视角） ---- */
+{
+  // 前面的 W4-6 用例收尾时清掉了 `state.replay`；这里**重新打开**一局真录像，
+  // 让断言落在真服务端载荷上（`narrative` 由 `load_run` 生成）。
+  const replayRuns = await get("/api/runs");
+  await ui.openReplay((replayRuns.runs[0] || runs.runs[0]).name);
+  const replay = ui.state.replay;
+  check("U1-05n 回放载荷带服务端叙事（牌桌与回放共用同一份生成器）",
+    !!replay && Array.isArray(replay.narrative) && replay.narrative.length > 0,
+    `narrative=${replay && replay.narrative ? replay.narrative.length : "缺"}`);
+  if (replay && Array.isArray(replay.narrative) && replay.narrative.length) {
+    // 回放位置回到第 0 条（header）时，简易档不能提前铺出整局（序列跟随播放进度）。
+    replay.index = 0;
+    setSelect("r-log-mode", "simple");
+    ui.renderReplay();
+    check("U1-05q 回放简易档不提前播未来事件（第 0 条 = 空）",
+      $("r-log").children.length === 0,
+      `children=${$("r-log").children.length}`);
+    replay.index = replay.records.length - 1;
+    setSelect("r-log-mode", "all");
+    ui.renderReplay();
+    const allText = $("r-log").text();
+    setSelect("r-log-mode", "simple");
+    ui.renderReplay();
+    const simpleText = $("r-log").text();
+    check("U1-05o 回放简易档只渲染叙事条目（不含 #seq / 引擎帧）",
+      simpleText.length > 0 && !/#\d+/.test(simpleText)
+        && simpleText.includes("对局结束")
+        && !simpleText.includes("结算帧"),
+      `simple="${simpleText.replace(/\s+/g, " ").slice(-120)}"`);
+    check("U1-05p 回放完整全部仍是既有逐条记录（切档不改已有行为）",
+      /#\d+/.test(allText) && allText.includes("询问"),
+      `all="${allText.replace(/\s+/g, " ").slice(-120)}"`);
+    setSelect("r-log-mode", "all");
+  }
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

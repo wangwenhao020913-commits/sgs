@@ -169,13 +169,15 @@
       </div>
     </div>
 
-    <!-- 事件流浮层：默认折叠；按钮在底部最左，浮层在它上方。 -->
+    <!-- 事件流浮层：默认折叠；按钮在底部最左，浮层在它上方。
+         U1-05：默认简易档（服务端生成的叙事条目），完整重点 / 完整全部沿用旧两档。 -->
     <div id="t-log-panel" class="log-panel" hidden>
       <div class="log-head">
         <b>事件流</b>
         <select id="t-log-mode" title="事件流的详略">
-          <option value="focus" selected>重点（隐藏对手的响应往来）</option>
-          <option value="all">全部（逐条，含对手响应）</option>
+          <option value="simple" selected>简易（一条行动一行）</option>
+          <option value="focus">完整 · 重点（隐藏对手的响应往来）</option>
+          <option value="all">完整 · 全部（逐条，含对手响应）</option>
         </select>
       </div>
       <ol id="t-log" class="log"></ol>
@@ -244,7 +246,14 @@
     </div>
 
     <section class="panel">
-      <h2>事件流</h2>
+      <div class="log-head">
+        <h2>事件流</h2>
+        <select id="r-log-mode" title="回放事件流的详略">
+          <option value="all" selected>完整 · 全部（逐条，上帝视角）</option>
+          <option value="focus">完整 · 重点（隐藏对手的响应往来）</option>
+          <option value="simple">简易（一条行动一行，人类座位视角）</option>
+        </select>
+      </div>
       <ol id="r-log" class="log"></ol>
     </section>
   </div>

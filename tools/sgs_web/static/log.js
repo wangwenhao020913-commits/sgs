@@ -1,29 +1,80 @@
-/* SGS 前端 · 事件流：重点 / 全部两档的过滤与渲染。
+/* SGS 前端 · 事件流：简易（服务端叙事）/ 完整重点 / 完整全部三档的渲染。
  *
  * 加载顺序见 index.html（U1-00 拆分）；本文件不需要构建步骤。
+ *
+ * **简易档的纪律（U1-05）**：条目由服务端 `narrative.py` 生成并已按查看者过滤；前端
+ * 只按 `segments[].cls` 上色，**不读快照 / 记录去补事实、也不判断隐藏信息**。完整两档
+ * 仍是既有的记录流渲染（`describeRecord`），行为不变。
  */
 "use strict";
 
 /* ------------------------------------------------------------------ 日志 */
 
-/** 事件流的详略；`focus` = 隐藏对手之间的响应往来（一局 268 次 RESPOND 会把阶段埋掉）。 */
-const LOG_MODES = ["focus", "all"];
+/** 事件流的详略；`simple` = 默认的服务端叙事，`focus` = 隐藏对手之间的响应往来。 */
+const LOG_MODES = ["simple", "focus", "all"];
 
 function logMode() {
   const node = $("t-log-mode");
-  const mode = node && node.value ? node.value : "focus";
-  return LOG_MODES.includes(mode) ? mode : "focus";
+  const mode = node && node.value ? node.value : "simple";
+  return LOG_MODES.includes(mode) ? mode : "simple";
 }
 
-/** 这条记录在**重点**模式下要不要显示。回放页不走这个函数（那边是上帝视角、逐条看）。 */
-function keepRecord(record, querySeat) {
-  if (logMode() === "all") return true;
+/** 这条记录在**重点**模式下要不要显示。回放页用同一判据（显式传模式与查看者）。
+ *
+ * `mode` / `humanSeat` 是给回放页的显式参数：回放的查看者来自录像侧车 meta，而不是
+ * 当前牌桌的 `state.view`。`simple` 档不消费记录流，故这里直接放行。
+ */
+function keepRecord(record, querySeat, mode = logMode(), humanSeat = undefined) {
+  if (mode !== "focus") return true;
   // `action` 记录不带座位，故用"上一条询问的 actor"当它的座位（记录流里询问与应答严格相邻）。
   const seat = record.kind === "query" ? record.query.actor : querySeat;
-  const me = state.view ? state.view.human_seat : null;
+  const me = humanSeat === undefined
+    ? (state.view ? state.view.human_seat : null)
+    : humanSeat;
   if (record.kind === "query" || record.kind === "action") return seat === me;
   if (record.kind === "delta" && record.delta_type === "deck_shuffle") return false;
   return true;
+}
+
+/** 本地回放已经走到哪条记录：叙事条目只播到这一刻（切档不会提前泄露下一批）。 */
+function playbackSeqLimit() {
+  const playback = state.playback;
+  if (!playback) return Infinity;
+  const index = playback.index - 1;
+  if (index < 0) return -1;
+  const record = playback.records[index];
+  return record && typeof record.seq === "number" ? record.seq : -1;
+}
+
+/** 一条叙事条目 → `<li>`：分隔线只写文本；行动行把服务端的颜色类原样搬到 span 上。 */
+function appendNarrativeEntry(entry, log = $("t-log")) {
+  if (!log || !entry) return null;
+  const item = document.createElement("li");
+  if (entry.kind === "divider") {
+    item.className = "nar-divider";
+    item.textContent = entry.text || "";
+  } else {
+    item.className = "nar-line";
+    for (const segment of entry.segments || []) {
+      const span = document.createElement("span");
+      span.className = `nar-${segment.cls || "act"}`;
+      span.textContent = segment.text || "";
+      item.appendChild(span);
+    }
+  }
+  log.appendChild(item);
+  return item;
+}
+
+/** 把已收到的叙事条目追加到当前 `<li>` 流里，直到记录 `seq` 达到 `limit`。 */
+function appendNarrativeThrough(limit) {
+  if (logMode() !== "simple") return;
+  while (state.narrativeShown < state.narrative.length) {
+    const entry = state.narrative[state.narrativeShown];
+    if (!entry || !(entry.seq <= limit)) break;
+    appendNarrativeEntry(entry);
+    state.narrativeShown += 1;
+  }
 }
 
 function appendLog(record, querySeat) {
@@ -33,16 +84,33 @@ function appendLog(record, querySeat) {
   $("t-log").appendChild(item);
 }
 
-/** 重画整条事件流（切换详略时需要把已渲染的清掉重来）。 */
+function scrollLogToBottom() {
+  const last = $("t-log").lastChild;
+  if (last) last.scrollIntoView({ block: "nearest" });
+}
+
+/** 重画整条事件流（切换详略时需要把已渲染的清掉重来）。
+ *
+ * 简易档只画服务端叙事（`state.narrative`）；完整两档沿用记录流渲染。**切回简易档
+ * 不会重新请求**：叙事条目随视图增量一起收下，已经够整屏重画。
+ */
 function renderLog() {
   const log = $("t-log");
   log.innerHTML = "";
+  state.narrativeShown = 0;
   if (!state.view) return;
+  if (logMode() === "simple") {
+    appendNarrativeThrough(playbackSeqLimit());
+    scrollLogToBottom();
+    return;
+  }
   let querySeat = null;
-  for (const record of state.view.records || []) {
+  const records = state.logRecords.length ? state.logRecords : (state.view.records || []);
+  for (const record of records) {
     if (record.kind === "query") querySeat = record.query.actor;
     appendLog(record, querySeat);
   }
+  scrollLogToBottom();
 }
 
 function describeRecord(record) {

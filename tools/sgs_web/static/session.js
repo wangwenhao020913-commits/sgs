@@ -15,6 +15,9 @@ let playbackTimer = null;
  */
 function applyView(body) {
   if (state.playback) flushPlayback();
+  // U1-05：叙事条目随视图增量下发（服务端已按查看者过滤）。先收进本地序列，
+  // 再按记录回放的进度逐条铺——不在前端补事实 / 判断隐藏信息。
+  for (const entry of body.narrative || []) state.narrative.push(entry);
   const incoming = body.records || [];
   const first = state.view === null;
   if (!incoming.length) {
@@ -57,7 +60,9 @@ function stepPlayback(immediate) {
     state.lastQuerySeat = record.query.actor;
   }
   state.logRecords.push(record);
-  appendLog(record, playback.querySeat);
+  // 简易档铺服务端叙事（与记录同 seq 的条目在这一步出现）；完整两档铺记录。
+  if (logMode() === "simple") appendNarrativeThrough(record.seq);
+  else appendLog(record, playback.querySeat);
   state.effectCards = applyEffectDelta(record, state.effectCards);
   renderProcessing();
   const logNode = $("t-log");
@@ -229,6 +234,8 @@ function commitView(body) {
   // 新询问到达 ⇒ 未提交的选择一律作废（spec D14：不弹确认、不尝试提交）。
   resetSelection();
   renderTable();
+  // 回放收尾 / 纯刷新：把这一批里还没铺的叙事条目补齐（简易档；其它档是空操作）。
+  appendNarrativeThrough(Infinity);
   const logNode = $("t-log");
   if (logNode.lastChild) logNode.lastChild.scrollIntoView({ block: "nearest" });
   if (body.finished) {

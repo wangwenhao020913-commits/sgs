@@ -52,6 +52,8 @@ async function openReplay(name) {
       name,
       meta: body.meta,
       records: body.records,
+      // U1-05：服务端已按录像的人类座位过滤好的简易叙事；回放页只渲染。
+      narrative: body.narrative || [],
       index: 0,
       seats: null,       // 逐座位：手牌 / 装备 / 判定 + 体力 / 上限 / 身份 / 存活
       query: null,       // 当前位置之前最近的一条询问（询问面板显示它）
@@ -255,16 +257,44 @@ function renderReplayQuery(query) {
   }
 }
 
+/** 回放事件流的详略：默认 `all`（上帝视角的逐条记录，旧行为不变）。
+ *
+ * 简易档消费服务端 `narrative`（与牌桌同一份生成器、按**录像的人类座位**过滤）；
+ * 完整两档仍是记录流。U2 的座位选择器 / 上帝视角开关接入后，只需换查看者。
+ */
+function replayLogMode() {
+  const node = $("r-log-mode");
+  const mode = node && node.value ? node.value : "all";
+  return LOG_MODES.includes(mode) ? mode : "all";
+}
+
 function renderReplayLog(replay) {
   const log = $("r-log");
   if (!log) return;
   log.innerHTML = "";
-  const from = Math.max(0, replay.index - 60);
-  for (let i = from; i <= replay.index; i += 1) {
-    const item = document.createElement("li");
-    if (i === replay.index) item.className = "banner";
-    item.innerHTML = describeRecord(replay.records[i]);
-    log.appendChild(item);
+  if (replayLogMode() === "simple") {
+    const current = replay.records[replay.index] || {};
+    // 首条 `header` 没有 `seq`：它之前没有叙事（不能把 `Infinity` 当成"已到终局"，
+    // 否则刚打开回放就会把整局事件流提前铺完）。
+    const limit = typeof current.seq === "number" ? current.seq : 0;
+    const entries = (replay.narrative || []).filter((entry) => entry.seq <= limit);
+    const from = Math.max(0, entries.length - 60);
+    for (let i = from; i < entries.length; i += 1) appendNarrativeEntry(entries[i], log);
+  } else {
+    const mode = replayLogMode();
+    const from = Math.max(0, replay.index - 60);
+    let querySeat = null;
+    for (let i = 0; i <= replay.index; i += 1) {
+      const record = replay.records[i];
+      if (!record) continue;
+      if (record.kind === "query") querySeat = record.query.actor;
+      if (i < from) continue;
+      if (!keepRecord(record, querySeat, mode, replay.meta.human_seat)) continue;
+      const item = document.createElement("li");
+      if (i === replay.index) item.className = "banner";
+      item.innerHTML = describeRecord(record);
+      log.appendChild(item);
+    }
   }
   if (log.lastChild) log.lastChild.scrollIntoView({ block: "nearest" });
 }

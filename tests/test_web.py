@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -3713,3 +3715,478 @@ def test_the_static_frontend_does_not_copy_the_description_text() -> None:
     for key, text in {**CARD_DESCRIPTIONS, **SKILL_DESCRIPTIONS}.items():
         for name, source in scripts.items():
             assert text not in source, f"{name} 硬编码了 {key} 的描述全文（必须由服务端下发）"
+
+
+# ---------------------------------------------------------------------------
+# U1-05 叙事契约：观察者过滤后的简易事件流（服务端生成，前端只渲染）
+# ---------------------------------------------------------------------------
+
+NARRATIVE_LINE = frozenset({"line", "divider"})
+"""叙事条目的两种形态；前端只按 ``segments[].cls`` 上色，不再自己判断事实。"""
+
+NARRATIVE_SEGMENT_CLASSES = frozenset(
+    {
+        "seat",
+        "hero",
+        "card",
+        "card-fire",
+        "card-thunder",
+        "skill",
+        "act",
+        "dmg",
+        "dmg-fire",
+        "dmg-thunder",
+    }
+)
+"""跨线颜色契约（U1-05）：``segments[].cls`` 的闭集 = ``static/style.css`` 里 ``.nar-*`` 的类名。
+
+新增一种颜色要同时改这里与 CSS；不断言的话，服务端拼错一个类名只会安静地掉回默认色。
+"""
+
+
+def _record_payload(record: object) -> dict:
+    """一条记录 → JSON 形态（真记录走 ``record_json``，已下发的录像记录原样返回）。"""
+    if isinstance(record, dict):
+        return record
+    from sgs.engine import record_json
+
+    return json.loads(record_json(record))
+
+
+def _narrative(records, *, viewer, heroes, pack_id="standard"):
+    from sgs_web.narrative import build_narrative
+
+    return build_narrative(
+        records, viewer=viewer, heroes=tuple(heroes), pack_id=pack_id
+    )
+
+
+def _line_at(entries: list[dict], seq: int) -> dict | None:
+    """某条记录对应的叙事行（同一 seq 只应有一行；分隔线与它共享 seq 时优先取 line）。"""
+    matches = [entry for entry in entries if entry["seq"] == seq and entry["kind"] == "line"]
+    return matches[0] if matches else None
+
+
+def _line_text(entries: list[dict]) -> str:
+    return "\n".join(entry["text"] for entry in entries if entry["kind"] == "line")
+
+
+def test_the_narrative_is_a_flat_observer_readable_stream() -> None:
+    """简易流 = 一条行动一行、只有人话：没有询问 / 帧 / 结算深度这些引擎话术。"""
+    session = Session(seed=11, ai="random", timeout_seconds=None, player_count=4)
+    _play_to_end(session)
+
+    entries = _narrative(
+        session.records(),
+        viewer=session.human_seat,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+
+    assert entries, "完整一局必须生成叙事条目"
+    assert {entry["kind"] for entry in entries} <= NARRATIVE_LINE
+    for entry in entries:
+        assert isinstance(entry["seq"], int) and entry["seq"] > 0, entry
+        assert entry["text"], f"空条目：{entry}"
+        if entry["kind"] == "line":
+            assert entry["segments"], f"行没有分段：{entry}"
+            assert "".join(seg["text"] for seg in entry["segments"]) == entry["text"], (
+                f"text 与 segments 漂了：{entry}"
+            )
+            for segment in entry["segments"]:
+                assert segment["cls"] in NARRATIVE_SEGMENT_CLASSES, segment
+        else:
+            assert "segments" not in entry, f"分隔线不该带颜色分段：{entry}"
+
+    text = _line_text(entries)
+    assert re.search(r"受到 \d+ 点伤害", text), f"没有伤害行：\n{text[:800]}"
+    assert "发动【" in text, f"没有技能发动行：\n{text[:800]}"
+    assert re.search(r"获得 \d+ 张牌|获得【", text), f"没有获得牌行：\n{text[:800]}"
+    for forbidden in ("RESPOND", "SKILL_ACTIVATION", "PLAY_PHASE", "结算帧", "#"):
+        assert forbidden not in text, f"叙事里漏出引擎话术 {forbidden!r}：\n{text[:800]}"
+
+
+def test_the_narrative_uses_the_display_contract_for_cards_and_damage_colors() -> None:
+    """火杀 / 雷杀显示「杀」且牌名 / 伤害数字分色（服务端查同一份展示契约）。"""
+    from sgs.state import CardRef
+
+    fire = CardRef(card_id=-9, type="fire_slash", name="火杀")
+    thunder = CardRef(card_id=-10, type="thunder_slash", name="雷杀")
+
+    def timing(seq: int, name: str, **extra) -> dict:
+        return {
+            "kind": "timing",
+            "seq": seq,
+            "timing": name,
+            "frame_id": 1,
+            "depth": 0,
+            **extra,
+        }
+
+    def action(seq: int, kind: str, card: CardRef, targets: tuple[int, ...]) -> dict:
+        return {
+            "kind": "action",
+            "seq": seq,
+            "accepted": True,
+            "action": {
+                "kind": kind,
+                "answers_seq": 0,
+                "card": card.model_dump(mode="json"),
+                "targets": list(targets),
+            },
+        }
+
+    def hp(seq: int, seat: int, amount: int) -> dict:
+        return {
+            "kind": "delta",
+            "seq": seq,
+            "delta_type": "hp_change",
+            "frame_id": 1,
+            "depth": 0,
+            "seat": seat,
+            "before": 4,
+            "after": 4 + amount,
+            "amount": amount,
+        }
+
+    def query(seq: int, actor: int) -> dict:
+        return {
+            "kind": "query",
+            "seq": seq,
+            "query": {"kind": "PLAY_PHASE", "actor": actor, "prompt": ""},
+        }
+
+    records = [
+        timing(1, "TURN_START", actor=0),
+        timing(2, "PHASE_PLAY_START", actor=0),
+        query(3, 0),
+        action(4, "UseCard", fire, (1,)),
+        timing(5, "DAMAGE_TAKE", actor=1, source=0, targets=[1], cards=[fire.model_dump(mode="json")]),
+        hp(6, 1, -1),
+        query(7, 1),
+        action(8, "UseCard", thunder, (0,)),
+        timing(9, "DAMAGE_TAKE", actor=0, source=1, targets=[0], cards=[thunder.model_dump(mode="json")]),
+        hp(10, 0, -1),
+    ]
+
+    entries = _narrative(records, viewer=0, heroes=("guojia", "simayi"))
+    use_fire = _line_at(entries, 4)
+    use_thunder = _line_at(entries, 8)
+    hurt_fire = _line_at(entries, 6)
+    hurt_thunder = _line_at(entries, 10)
+    assert use_fire is not None and hurt_fire is not None
+    assert use_thunder is not None and hurt_thunder is not None
+
+    assert "【杀】" in use_fire["text"] and "火杀" not in use_fire["text"]
+    assert any(seg["text"] == "【杀】" and seg["cls"] == "card-fire" for seg in use_fire["segments"]), use_fire
+    assert any(seg["text"] == "1" and seg["cls"] == "dmg-fire" for seg in hurt_fire["segments"]), hurt_fire
+    assert any(seg["text"] == "【杀】" and seg["cls"] == "card-thunder" for seg in use_thunder["segments"]), use_thunder
+    assert any(seg["text"] == "1" and seg["cls"] == "dmg-thunder" for seg in hurt_thunder["segments"]), hurt_thunder
+    # 座位号 / 武将名 / 技能 / 动作的分色也在同一条契约里。
+    assert any(seg["cls"] == "seat" for seg in hurt_fire["segments"]), hurt_fire
+    assert any(seg["cls"] == "hero" and seg["text"].strip() == "司马懿" for seg in hurt_fire["segments"]), hurt_fire
+    assert any(seg["cls"] == "act" for seg in hurt_fire["segments"]), hurt_fire
+
+
+def test_the_narrative_hides_opponent_hand_and_deck_while_revealing_public_card_moves() -> None:
+    """观察者过滤：牌堆 / 对手手牌只给张数，公开区的牌才给牌名；同一份记录换观察者会变。"""
+    session = Session(seed=11, ai="random", timeout_seconds=None, player_count=4)
+    _play_to_end(session)
+    records = session.records()
+    payloads = [_record_payload(record) for record in records]
+    first_turn = next(
+        payload["seq"]
+        for payload in payloads
+        if payload.get("kind") == "timing" and payload.get("timing") == "TURN_START"
+    )
+
+    entries = _narrative(
+        records,
+        viewer=session.human_seat,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    checked = 0
+    for payload in payloads:
+        if payload.get("kind") != "delta" or payload.get("delta_type") != "card_move":
+            continue
+        if payload["seq"] <= first_turn:
+            continue  # 开局发牌：不进叙事（见模块注释）
+        to_zone = payload["to_zone"]
+        from_zone = payload["from_zone"]
+        if to_zone["zone"] != "hand" or int(to_zone["seat"]) == session.human_seat:
+            continue
+        if from_zone["zone"] not in ("deck", "hand"):
+            continue
+        line = _line_at(entries, payload["seq"])
+        assert line is not None, f"对手摸 / 拿牌的 {payload['seq']} 没有叙事行"
+        assert "【" not in line["text"], f"对手手牌牌名漏进叙事：{line['text']}"
+        assert re.search(r"获得 \d+ 张牌", line["text"]), line["text"]
+        checked += 1
+    assert checked >= 5, f"覆盖太少（只检查到 {checked} 次对手摸牌），断言谈不上机械"
+
+    # 身份：开局逐座暗发；没有阵亡亮明时一条都不能出现。
+    early = Session(seed=11, ai="random", timeout_seconds=None, player_count=4)
+    early_entries = _narrative(
+        early.records(),
+        viewer=early.human_seat,
+        heroes=early.hero_assignments,
+        pack_id=early.pack.pack_id,
+    )
+    early_text = _line_text(early_entries)
+    for label in ("主公", "忠臣", "反贼", "内奸"):
+        assert label not in early_text, f"暗置身份 {label} 漏进叙事：\n{early_text[:800]}"
+
+    # 牌堆：洗牌记录不进叙事（顺序只归引擎）。
+    shuffle_seqs = {
+        payload["seq"] for payload in payloads if payload.get("delta_type") == "deck_shuffle"
+    }
+    assert shuffle_seqs, "真一局里应当有洗牌记录，否则这条断言是空转"
+    assert all(entry["seq"] not in shuffle_seqs for entry in entries), "洗牌记录进了叙事"
+
+    # 同一份记录、换观察者：别人手里转手的牌对第三个座位仍然只显示张数。
+    hidden_give = next(
+        payload
+        for payload in payloads
+        if payload.get("kind") == "delta"
+        and payload.get("delta_type") == "card_move"
+        and payload["from_zone"]["zone"] == "hand"
+        and payload["to_zone"]["zone"] == "hand"
+        and payload["from_zone"]["seat"] is not None
+        and payload["to_zone"]["seat"] is not None
+    )
+    outsider = next(
+        seat
+        for seat in range(session.rule_config.player_count)
+        if seat not in (hidden_give["from_zone"]["seat"], hidden_give["to_zone"]["seat"])
+    )
+    outsider_entries = _narrative(
+        records,
+        viewer=outsider,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    outsider_line = _line_at(outsider_entries, hidden_give["seq"])
+    assert outsider_line is not None and "【" not in outsider_line["text"], outsider_line
+    receiver_entries = _narrative(
+        records,
+        viewer=hidden_give["to_zone"]["seat"],
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    receiver_line = _line_at(receiver_entries, hidden_give["seq"])
+    assert receiver_line is not None and "【" in receiver_line["text"], (
+        f"收牌的人看得到自己拿到的牌：{receiver_line}"
+    )
+
+
+def test_the_narrative_has_round_and_phase_dividers_before_the_lines_they_introduce() -> None:
+    session = Session(seed=11, ai="random", timeout_seconds=None, player_count=4)
+    _play_to_end(session)
+    entries = _narrative(
+        session.records(),
+        viewer=session.human_seat,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+
+    dividers = [entry for entry in entries if entry["kind"] == "divider"]
+    assert dividers, "简易流必须有轮次 / 阶段分隔"
+    assert any("第 1 轮" in entry["text"] for entry in dividers), [e["text"] for e in dividers]
+    assert any("出牌阶段" in entry["text"] for entry in dividers), [e["text"] for e in dividers]
+
+    # 分隔线在它所引出的第一行**之前**（同一批增量里也不会反过来）。
+    phase_index = next(
+        index
+        for index, entry in enumerate(entries)
+        if entry["kind"] == "divider" and "出牌阶段" in entry["text"]
+    )
+    assert phase_index + 1 < len(entries)
+    after = entries[phase_index + 1]
+    assert after["seq"] >= entries[phase_index]["seq"], (entries[phase_index], after)
+
+    # 轮次按 TURN_START 的“同一座位再次出现”累计——与服务端顶栏 / 前端 roundNumber 同口径：
+    # 一个座位第一次行动时轮次不变（同一轮里每个座位都标「第 1 轮」），座位重复才进下一轮。
+    round_dividers = [
+        entry["text"] for entry in entries if entry["kind"] == "divider" and "轮" in entry["text"]
+    ]
+    assert round_dividers[0].startswith("第 1 轮"), round_dividers[:3]
+    assert any(text.startswith("第 2 轮") for text in round_dividers), round_dividers[-5:]
+    # 第 1 轮的标号只在真正回到第一个座位之前出现：每名玩家一次。
+    first_round = [text for text in round_dividers if text.startswith("第 1 轮")]
+    assert len(first_round) == session.rule_config.player_count, first_round
+
+
+def test_the_card_seat_and_skill_names_come_from_the_data_tables() -> None:
+    session = Session(seed=11, ai="random", timeout_seconds=None, player_count=4)
+    _play_to_end(session)
+    entries = _narrative(
+        session.records(),
+        viewer=session.human_seat,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    text = _line_text(entries)
+
+    from sgs.data import load_heroes
+
+    table = load_heroes(session.pack.pack_id)
+    names = []
+    for hero_id in session.hero_assignments:
+        hero = table.by_id(hero_id) if hero_id else None
+        if hero is not None:
+            names.append(hero.name)
+    assert names, "本局必须有武将"
+    for name in names:
+        assert name in text, f"武将名 {name} 没进叙事：\n{text[:800]}"
+
+    # 技能名从武将面数据来（不是 skill_id / 描述全文）。
+    skill_actions = [
+        record
+        for record in session.records()
+        if getattr(record, "kind", None) == "action"
+        and getattr(getattr(record, "action", None), "kind", None) == "ActivateSkill"
+    ]
+    assert skill_actions, "本局必须有技能发动"
+    assert "观星" in text, f"技能中文名没进叙事：\n{text[:800]}"
+
+
+def test_the_session_view_carries_incremental_narrative_by_the_record_cursor() -> None:
+    """HTTP 载荷：`after` 是**记录 seq 游标**；下一批只带 seq 更大的叙事，拼起来等于全量。"""
+    from sgs_web.serve import GameRegistry
+
+    session = Session(seed=11, ai="random", timeout_seconds=None, player_count=4)
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    first = registry.view(session, after=-1, logs_after=0)
+    assert first["narrative"], "建局响应必须带叙事"
+    assert all(entry["seq"] > -1 for entry in first["narrative"])
+
+    pending = session.pending
+    assert pending is not None
+    session.submit_answer(pending.legal_actions[0])
+    after = first["cursor"]
+    second = registry.view(session, after=after, logs_after=0)
+
+    assert all(entry["seq"] > after for entry in second["narrative"]), (
+        "增量里出现了已下发过的叙事条目"
+    )
+    full = _narrative(
+        session.records(),
+        viewer=session.human_seat,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    merged = first["narrative"] + second["narrative"]
+    assert [entry["seq"] for entry in merged] == [entry["seq"] for entry in full], (
+        "两批拼接后的序号 / 顺序与全量不一致"
+    )
+    assert [entry["text"] for entry in merged] == [entry["text"] for entry in full]
+
+
+def test_the_replay_payload_uses_the_same_observer_filtered_narrative(tmp_path: Path) -> None:
+    """录像接口也下发叙事（同一份生成器）；按人类座位过滤，不把对手手牌写进条目。"""
+    from sgs_web.replay import load_run, save_run
+
+    session = Session(seed=11, ai="random", timeout_seconds=None, player_count=4)
+    _play_to_end(session)
+    save_run(tmp_path, session)
+    run = load_run(tmp_path, next(path.stem for path in tmp_path.glob("*.jsonl")))
+
+    assert run["narrative"], "回放载荷必须带叙事条目"
+    expected = _narrative(
+        run["records"],
+        viewer=run["meta"]["human_seat"],
+        heroes=run["meta"]["heroes"],
+        pack_id=run["meta"]["pack_id"],
+    )
+    assert run["narrative"] == expected, "录像叙事与生成器 / 人类座位不一致"
+
+    # 载入的 JSON 记录与引擎模型走的是同一条生成路径：两侧结果逐条相同。
+    engine_entries = _narrative(
+        session.records(),
+        viewer=session.human_seat,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    assert run["narrative"] == engine_entries, "模型记录与 JSON 记录生成了不同的叙事"
+
+    # 观察者过滤在回放载入路径上也成立：对手摸牌只给张数。
+    records = run["records"]
+    checked = 0
+    for record in records:
+        if record.get("kind") != "delta" or record.get("delta_type") != "card_move":
+            continue
+        if record["to_zone"]["zone"] != "hand":
+            continue
+        if record["to_zone"]["seat"] == run["meta"]["human_seat"]:
+            continue
+        if record["from_zone"]["zone"] not in ("deck", "hand"):
+            continue
+        line = _line_at(run["narrative"], record["seq"])
+        if line is None:
+            continue  # 开局发牌不进叙事
+        assert "【" not in line["text"], line
+        checked += 1
+    assert checked >= 5, f"回放观测过滤覆盖太少：{checked}"
+
+
+def test_a_replay_without_a_human_seat_is_not_omniscient(tmp_path: Path) -> None:
+    """没有人类座位的录像（全是 AI）不能因为"查不到查看者"退化成全知。
+
+    回放页的简易档在 U1 仍按观察者过滤；``viewer=-1`` 是一个不存在的座位——公开区与
+    阵亡亮明照写，隐藏手牌 / 牌堆顺序一条都不写。U2 的上帝视角开关才传 ``None``。
+    """
+    from sgs_web.replay import load_run, save_run
+
+    session = Session(seed=11, ai="random", timeout_seconds=None, player_count=4)
+    _play_to_end(session)
+    save_run(tmp_path, session)
+    name = next(path.stem for path in tmp_path.glob("*.jsonl"))
+    meta_path = tmp_path / f"{name}.meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["human_seat"] = None
+    meta_path.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    run = load_run(tmp_path, name)
+
+    expected = _narrative(
+        run["records"], viewer=-1, heroes=meta["heroes"], pack_id=meta["pack_id"]
+    )
+    assert run["narrative"] == expected, "无人类座位时回放简易流没有走无视角过滤"
+    assert run["narrative"] != _narrative(
+        run["records"], viewer=None, heroes=meta["heroes"], pack_id=meta["pack_id"]
+    ), "viewer=-1 与上帝视角（None）必须是两套结果"
+
+    checked = 0
+    for record in run["records"]:
+        if record.get("kind") != "delta" or record.get("delta_type") != "card_move":
+            continue
+        if record["to_zone"]["zone"] != "hand":
+            continue
+        if record["from_zone"]["zone"] not in ("deck", "hand"):
+            continue
+        line = _line_at(run["narrative"], record["seq"])
+        if line is None:
+            continue  # 开局发牌不进叙事
+        assert "【" not in line["text"], line
+        checked += 1
+    assert checked >= 5, f"无人类座位的过滤覆盖太少：{checked}"
+
+
+def test_the_narrative_game_end_names_the_winner_once() -> None:
+    """2 人局（无身份）的终局行不能把同一个赢家写两遍（"座位N 获胜 · 获胜座位：座位N"）。"""
+    session = Session(seed=7, ai="random", timeout_seconds=None, player_count=2)
+    _play_to_end(session)
+
+    entries = _narrative(
+        session.records(),
+        viewer=session.human_seat,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    end = next((entry for entry in entries if entry["text"].startswith("对局结束")), None)
+    assert end is not None, "完整一局必须有终局行"
+    assert end["text"].count("获胜座位") == 1, end["text"]
+    assert end["text"].count("获胜") == 1, end["text"]
