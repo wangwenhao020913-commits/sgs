@@ -31,9 +31,15 @@ from itertools import combinations
 from sgs.data import Color
 from sgs.effects import (
     CandidateScope,
+    ModifierContext,
+    ModifierPoint,
+    TargetCount,
+    apply_modifiers,
+    behavior_for,
     check_count,
     check_targets,
     forced_use_targets,
+    target_combos,
 )
 from sgs.state import (
     CardRef,
@@ -406,10 +412,18 @@ def virtual_card_use(
     与真牌**同一条**合法性检测（票 03 §要做什么 4：「目标池走与真牌同一套
     ``check_targets``（【丈八蛇矛】的先例）」）：
 
-    - ``PLAY``：按目标池逐目标 ``UseCard``，并先过 ``COUNT_LIMIT``（按**目标牌名**
-      计数，与真牌同一条链——票 03 §要做什么 4 / 规则 16.4「按目标牌名统计使用次数」）；
+    - ``PLAY``：按目标池枚举 ``额定..最大目标数`` 的组合——最大数只在
+      ``TargetCount.RATED`` 档读 :data:`~sgs.skills.ModifierPoint.TARGET_COUNT` 链
+      （W7-02：方天画戟在"最后一张手牌"的转化【杀】上把 1 放宽到 3，与出牌阶段真牌的
+      :func:`~sgs.effects.actions._play_phase` 读**同一份**链值 / 同一个组合构建子），
+      并先过 ``COUNT_LIMIT``（按**目标牌名**计数，与真牌同一条链——票 03 §要做什么 4 /
+      规则 16.4「按目标牌名统计使用次数」）；
     - ``RESPOND`` + ``mode = PLAY``：一个 ``PlayCard``（打出不占次数）；
-    - ``RESPOND`` + ``mode = USE``：按 ``respond_targets`` 逐目标 ``UseCard``，过次数链；
+    - ``RESPOND`` + ``mode = USE``：窗口固定了目标（借刀的 Bn）时先问
+      :func:`forced_use_targets`"够不够得着 Bn"（W5-02b 的 a 可行性 / auto-b 语义），
+      再拿**完整** :func:`check_targets` 池 + :func:`target_combos` 造
+      ``(Bn,) + 0..2`` 个其它目标的组合（W7-02：与 ``_respond`` 的 USE 趟同形，
+      ``TARGET_COUNT`` 链读在同一处）；空预选集 = 无目标的响应使用（无懈一类的形状）；
     - ``DODGE``：无目标的 ``UseCard``（真实【闪】的候选正是这么生成的）。
 
     **本函数只读状态、不移动任何牌**：来源牌的移出由 :func:`virtual_candidates` 在整批
@@ -419,9 +433,26 @@ def virtual_card_use(
         if check_count(state, seat, card):
             return []
         pool = check_targets(state, seat, card)
+        rule = behavior_for(card).target_rule
+        count = rule.target_count(len(pool))
+        if count <= 0:
+            return []
+        high = count
+        if rule.count is TargetCount.RATED:
+            high = apply_modifiers(
+                ModifierPoint.TARGET_COUNT,
+                state,
+                ModifierContext(
+                    subject=seat,
+                    card=card,
+                    pool=tuple(pool),
+                    rated_targets=count,
+                ),
+                count,
+            )
         return [
-            UseCard(card=card, targets=(target,), answers_seq=ctx.answers_seq)
-            for target in pool
+            UseCard(card=card, targets=combo, answers_seq=ctx.answers_seq)
+            for combo in target_combos(pool, count, high)
         ]
     if ctx.scope is CandidateScope.DODGE:
         targets = tuple((target,) for target in check_targets(state, seat, card)) or ((),)
@@ -433,13 +464,39 @@ def virtual_card_use(
         if ctx.respond_mode is RespondMode.USE:
             if check_count(state, seat, card):
                 return []
-            pool = forced_use_targets(state, seat, card, ctx.respond_targets)
-            if ctx.respond_targets and not pool:
-                # 目标已由窗口固定（借刀的 Bn）而这次转化够不着它 ⇒ 没有候选；
-                # 不退回"无目标使用"——那是无懈一类的形状，会造出一条打向空气的【杀】。
-                # 与真牌在 ``effects/actions.py::_respond`` 的同一条判据（W5-02b）。
-                return []
-            combos = tuple((target,) for target in pool) if pool else ((),)
+            if ctx.respond_targets:
+                # a 可达性（W5-02b）：forced_use_targets 只作"够不够得着固定 Bn"的判据，
+                # **不再作枚举池**（W7-01）——否则池至多 {Bn}，额外目标永远进不来。
+                if not forced_use_targets(state, seat, card, ctx.respond_targets):
+                    # 目标已由窗口固定（借刀的 Bn）而这次转化够不着它 ⇒ 没有候选；
+                    # 不退回"无目标使用"——那是无懈一类的形状，会造出一条打向空气的【杀】。
+                    return []
+                bn = ctx.respond_targets[0]
+                pool = check_targets(state, seat, card)
+                if bn not in pool:
+                    # Bn 在结算时已不合法（TARGET_POOL 链删掉了它）⇒ 这张牌没有候选。
+                    return []
+                count = 1  # 被迫使用窗口的 base = 1（固定 Bn），不是池大小
+                high = count
+                if behavior_for(card).target_rule.count is TargetCount.RATED:
+                    high = apply_modifiers(
+                        ModifierPoint.TARGET_COUNT,
+                        state,
+                        ModifierContext(
+                            subject=seat,
+                            card=card,
+                            pool=tuple(pool),
+                            rated_targets=count,
+                            respond_required=ctx.respond_required,
+                            respond_mode=ctx.respond_mode,
+                            respond_targets=(bn,),
+                        ),
+                        count,
+                    )
+                combos = target_combos(pool, count, high, required=(bn,))
+            else:
+                pool = check_targets(state, seat, card)
+                combos = tuple((target,) for target in pool) if pool else ((),)
             return [
                 UseCard(card=card, targets=combo, answers_seq=ctx.answers_seq)
                 for combo in combos

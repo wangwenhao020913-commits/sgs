@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from sgs.data import Color, color_of_suit
+from sgs.data import Color, Identity, RuleConfig, color_of_suit
 from sgs.effects import (
     ModifierContext,
     ModifierPoint,
@@ -1192,11 +1192,11 @@ def _virtual_actions(state, seat: int = 0):
     ]
 
 
-def _manifest(state, actions, skill_id: str, *, fixed_target: bool = False):
+def _manifest(state, actions, skill_id: str, *, fixed_target: bool = False, seat: int = 0):
     from sgs.skills import conversion_preactivations
 
     return conversion_preactivations(
-        state, 0, actions, fixed_target=fixed_target
+        state, seat, actions, fixed_target=fixed_target
     )[skill_id]
 
 
@@ -1638,11 +1638,12 @@ def _borrowed_play_query(engine):
     return engine.pending
 
 
-def _borrowed_window(state, designation: int = 2):
+def _borrowed_window(state, designation: int = 2, *, seats: int = 3):
     """驱动到**持刀者窗口**：先按清单指定 [A=1, Bn=designation]，再由持刀者决定 a / b。"""
+    players = [Scripted() for _ in range(seats)]
     engine = _run(
         state,
-        [Scripted(), Scripted(), Scripted()],
+        players,
         lambda running: running.pending is not None
         and running.pending.kind == QueryKind.PLAY_PHASE,
     )
@@ -1655,7 +1656,7 @@ def _borrowed_window(state, designation: int = 2):
     engine.submit(action)
     run_until(
         engine,
-        [Scripted(), Scripted(), Scripted()],
+        players,
         lambda running: running.pending is not None
         and running.pending.kind == QueryKind.RESPOND
         and running.pending.cause is WindowCause.BORROWED_SWORD,
@@ -2431,3 +2432,499 @@ def test_the_last_hand_card_predicate_needs_the_halberd():
     )
 
     assert _halberd_target_count(state, transformed_card(state, (RED_PEACH,), "slash")) == 1
+
+
+# ---------------------------------------------------------------------------
+# W7-02：方天 × 转化【杀】（出牌阶段 + 借刀窗口）
+# ---------------------------------------------------------------------------
+#
+# 读点 = `virtual.py:virtual_card_use`：与出牌阶段真牌（`_play_phase`）和借刀 USE 趟
+# （`_respond`）读**同一份** `TARGET_COUNT` 链、用**同一个** `target_combos`。方天的
+# "最后一张手牌"谓词是 W7-01 的同一份（单源 / 实体 / 在手 / `hand == (source,)`），
+# 故这里只验证"虚拟牌被送进那条链"与"清单 / 确认 / 结算"三面。
+#
+# 装备区来源（武圣把已装备的红牌当【杀】）在自然局可达；**丈八两来源 + 方天**（同抢武器槽）
+# 与**龙胆装备区【闪】**（【闪】不可能合法进装备区）自然局不可达，只在合成局面里钉 false
+# 分支（W7 spec §0 第 9 条 / §7）。
+
+BORROWED_SWORD = _cards("borrowed_sword")[0]
+CHITU = _cards("chitu")[0]
+"""赤兔（红桃 5，进攻马）：武圣的**装备区**红色来源，自然局可达。"""
+
+
+def _combos_by_source(actions) -> dict[tuple[int, ...], set[tuple[int, ...]]]:
+    """``{来源组: {目标组合}}``：只收**转化【杀】**的使用候选。"""
+    out: dict[tuple[int, ...], set[tuple[int, ...]]] = {}
+    for action in actions:
+        if (
+            isinstance(action, UseCard)
+            and action.card.is_virtual
+            and action.card.type == "slash"
+        ):
+            out.setdefault(tuple(action.card.virtual_sources), set()).add(action.targets)
+    return out
+
+
+def _transform_slash_combos(state, seat: int = 0):
+    """出牌阶段候选里转化【杀】的全部 ``(来源组, 目标组合)``（`virtual_card_use` 的产物）。"""
+    actions = legal_actions_for(state, seat, QueryKind.PLAY_PHASE, answers_seq=1)
+    virtual = [
+        action
+        for action in actions
+        if isinstance(action, UseCard)
+        and action.card.is_virtual
+        and action.card.type == "slash"
+    ]
+    return _combos_by_source(virtual), virtual
+
+
+def _transform_borrow_actions(state, holder: int, bn: int):
+    """持刀者窗口里**转化【杀】**的候选（借刀的固定目标是 ``bn``）。"""
+    actions = legal_actions_for(
+        state,
+        holder,
+        QueryKind.RESPOND,
+        answers_seq=1,
+        payload=RespondContext(
+            cause=WindowCause.BORROWED_SWORD,
+            required="slash",
+            mode=RespondMode.USE,
+            use_targets=(bn,),
+        ),
+    )
+    return [
+        action
+        for action in actions
+        if isinstance(action, UseCard)
+        and action.card.is_virtual
+        and action.card.type == "slash"
+    ]
+
+
+def test_the_halberd_widens_a_wusheng_transformed_slash_to_three_targets():
+    """武圣：手牌红牌当【杀】、它是**最后一张手牌** ⇒ 1..3 目标（与真【杀】同一条链）。
+
+    同一局面里**方天画戟自己**（方块 = 红色，装备区）也是武圣的合法来源——它在装备区、
+    不是"最后一张手牌"，故只产出单目标。两条判据因此在一个**自然局面**里并排可观测：
+    手牌来源 1..3，装备区来源 1。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(RED_PEACH,), equip=(HALBERD,), hero="guanyu"),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(RED_PEACH, HALBERD),
+        turn_seat=0,
+    )
+
+    combos, actions = _transform_slash_combos(state)
+
+    assert combos[(RED_PEACH,)] == {
+        (1,),
+        (2,),
+        (3,),
+        (1, 2),
+        (1, 3),
+        (2, 3),
+        (1, 2, 3),
+    }, "最后一张手牌的转化来源 ⇒ 额定 1 放宽到 1..3"
+    assert combos[(HALBERD,)] == {(1,), (2,), (3,)}, (
+        "装备区来源（方天自己也是红色）不是最后一张手牌 ⇒ 只有单目标"
+    )
+    assert all(action.designations == () for action in actions), (
+        "转化【杀】的 UseCard 不带附带指定：目标全在 targets 里"
+    )
+
+    steps = _manifest(state, _virtual_actions(state), GUANYU)
+    assert [step.name for step in steps] == ["card", "seat"]
+    assert (steps[1].min, steps[1].max) == (1, 3), "清单目标步 = 1..3（W7-01b 的 1..max）"
+    assert set(steps[1].pool[0].options) == {"seat:1", "seat:2", "seat:3"}
+    assert {str(RED_PEACH), str(HALBERD)} <= set(steps[0].pool[0].options), (
+        "来源步同时列出两张红牌：手牌的最后一张 + 装备区的方天"
+    )
+
+
+def test_the_halberd_widens_a_longdan_transformed_slash_to_three_targets():
+    """龙胆：手牌【闪】当【杀】、它是最后一张手牌 ⇒ 1..3（只有这一个转化来源）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(RED_DODGE,), equip=(HALBERD,), hero="zhaoyun"),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(RED_DODGE, HALBERD),
+        turn_seat=0,
+    )
+
+    combos, _actions = _transform_slash_combos(state)
+
+    assert combos == {
+        (RED_DODGE,): {
+            (1,),
+            (2,),
+            (3,),
+            (1, 2),
+            (1, 3),
+            (2, 3),
+            (1, 2, 3),
+        }
+    }
+    steps = _manifest(state, _virtual_actions(state), ZHAOYUN_SLASH)
+    assert (steps[1].min, steps[1].max) == (1, 3)
+
+
+def test_the_halberd_does_not_widen_a_transformed_slash_when_another_hand_card_remains():
+    """来源在手里但还有别的牌 ⇒ 不是最后一张手牌：转化【杀】只有单目标（来源同源）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(RED_PEACH, BLACK_SLASH), equip=(HALBERD,), hero="guanyu"),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(RED_PEACH, BLACK_SLASH, HALBERD),
+        turn_seat=0,
+    )
+
+    combos, _actions = _transform_slash_combos(state)
+
+    assert combos[(RED_PEACH,)] == {(1,), (2,), (3,)}
+    steps = _manifest(state, _virtual_actions(state), GUANYU)
+    assert (steps[1].min, steps[1].max) == (1, 1), "不是最后一张 ⇒ 清单也只有单目标"
+
+
+def test_the_halberd_does_not_widen_a_wusheng_slash_from_the_equipment_zone():
+    """武圣用**装备区**的红牌（赤兔 / 方天）当【杀】：来源不在手牌 ⇒ 不满足最后一张手牌。
+
+    自然局面（手牌为空、两件红装备）；同时用谓词层复核——候选与谓词读的是同一份判据。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(), equip=(HALBERD, CHITU), hero="guanyu"),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(HALBERD, CHITU),
+        turn_seat=0,
+    )
+
+    combos, _actions = _transform_slash_combos(state)
+
+    assert set(combos) == {(HALBERD,), (CHITU,)}, "两张红色装备都是武圣的来源"
+    assert all(targets == {(1,), (2,), (3,)} for targets in combos.values()), (
+        "装备区来源 ⇒ 不追加目标（1 目标）"
+    )
+    assert _halberd_target_count(state, transformed_card(state, (CHITU,), "slash")) == 1
+    steps = _manifest(state, _virtual_actions(state), GUANYU)
+    assert (steps[1].min, steps[1].max) == (1, 1)
+
+
+def test_the_halberd_does_not_widen_a_multi_source_transformed_slash():
+    """【丈八蛇矛】两张手牌转化的【杀】：多来源 ⇒ 不满足"来源恰好一张"，方天不追加。
+
+    **合成局面**（自然局不可达：丈八与方天同抢武器槽，W7 spec §0 第 9 条）。谓词与
+    候选两处都复核，证明"不追加"来自那一条谓词，不是候选生成漏看。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(RED_PEACH, RED_DODGE), equip=(SERPENT, HALBERD)),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(RED_PEACH, RED_DODGE, SERPENT, HALBERD),
+        turn_seat=0,
+    )
+    multi = transformed_card(state, (RED_PEACH, RED_DODGE), "slash")
+
+    assert len(multi.virtual_sources) == 2
+    assert _halberd_target_count(state, multi) == 1
+    combos, _actions = _transform_slash_combos(state)
+    assert combos[tuple(sorted((RED_PEACH, RED_DODGE)))] == {(1,), (2,), (3,)}, (
+        "多来源只有单目标"
+    )
+
+
+def test_the_halberd_does_not_widen_a_longdan_slash_from_the_equipment_zone():
+    """【龙胆】的【闪】若在**装备区**（合成局面，自然局不可达）⇒ 方天同样不追加。
+
+    W7-01 已做谓词级；这里复核 **`virtual_card_use` 的端到端**（spec §5.2 的"02 复核
+    端到端不追加"）——候选生成读的是同一份谓词。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(), equip=(HALBERD, RED_DODGE), hero="zhaoyun"),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(RED_DODGE, HALBERD),
+        turn_seat=0,
+    )
+    from_equip = transformed_card(state, (RED_DODGE,), "slash")
+
+    assert _halberd_target_count(state, from_equip) == 1
+    combos, _actions = _transform_slash_combos(state)
+    assert combos == {(RED_DODGE,): {(1,), (2,), (3,)}}
+
+
+def test_a_halberd_holder_can_add_zero_one_or_two_targets_to_a_transformed_slash():
+    """借刀窗口：龙胆转化【杀】+ 方天 + 最后一张手牌 ⇒ ``(Bn,)`` + 0..2 个其它合法目标。
+
+    三档用**池大小**区分（与 W7-01 真【杀】用例同形）：2 人局 0 个额外 / 空城把座位 3
+    滤掉 ⇒ 1 个 / 4 人全池 ⇒ 2 个。每条候选恒含 Bn，且 `designations` 为空。
+    """
+    two_player = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(BORROWED_SWORD,)),
+            SeatSpec(hand=(RED_DODGE,), equip=(HALBERD,), hero="zhaoyun"),
+        ],
+        deck=_deck_excluding(BORROWED_SWORD, RED_DODGE, HALBERD),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    assert _combos_by_source(_transform_borrow_actions(two_player, 1, 0)) == {
+        (RED_DODGE,): {(0,)}
+    }, "只有 Bn：0 个额外目标"
+
+    one_extra = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(BORROWED_SWORD,)),
+            SeatSpec(hand=(RED_DODGE,), equip=(HALBERD,), hero="zhaoyun"),
+            SeatSpec(),
+            SeatSpec(hero="zhugeliang"),
+        ],
+        deck=_deck_excluding(BORROWED_SWORD, RED_DODGE, HALBERD),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    assert _combos_by_source(_transform_borrow_actions(one_extra, 1, 0)) == {
+        (RED_DODGE,): {(0,), (0, 2)}
+    }, "空城把座位 3 从池里去掉 ⇒ 只能加 1 个额外目标"
+
+    two_extra = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(BORROWED_SWORD,)),
+            SeatSpec(hand=(RED_DODGE,), equip=(HALBERD,), hero="zhaoyun"),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(BORROWED_SWORD, RED_DODGE, HALBERD),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    actions = _transform_borrow_actions(two_extra, 1, 0)
+    combos = _combos_by_source(actions)
+    assert combos == {(RED_DODGE,): {(0,), (0, 2), (0, 3), (0, 2, 3)}}
+    assert all(0 in action.targets for action in actions), "每条候选都恒含 Bn"
+    assert all(action.designations == () for action in actions), (
+        "持刀者【杀】的 designations 为空：Bn 与额外目标都在 targets 里"
+    )
+
+
+def test_the_borrowed_transform_manifest_puts_bn_first_and_lists_one_to_three_targets():
+    """借刀窗口的转化清单：来源步 + 目标步 ``1..3``，首项 = Bn（候选排序的自然结果）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(BORROWED_SWORD,)),
+            SeatSpec(hand=(RED_DODGE,), equip=(HALBERD,), hero="zhaoyun"),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(BORROWED_SWORD, RED_DODGE, HALBERD),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    actions = _transform_borrow_actions(state, 1, 0)
+
+    steps = _manifest(state, actions, ZHAOYUN_SLASH, fixed_target=True, seat=1)
+
+    assert [step.name for step in steps] == ["card", "seat"]
+    target = steps[1]
+    assert (target.min, target.max) == (1, 3)
+    assert target.pool[0].options[0] == "seat:0", "首项 = Bn（候选排序的自然结果）"
+    assert set(target.pool[0].options) == {"seat:0", "seat:2", "seat:3"}
+
+
+class _UseTheDrawnEquipment:
+    """脚本玩家：按次序用掉指定的装备牌（把出牌阶段多余的手牌清空），其余走最小应答。"""
+
+    def __init__(self, card_ids: tuple[int, ...]) -> None:
+        self._pending = list(card_ids)
+        self._fallback = Scripted()
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE and self._pending:
+            wanted = self._pending[0]
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == wanted:
+                    self._pending.pop(0)
+                    return action
+        return self._fallback.respond(query)
+
+
+def _play_phase_with_the_last_card(state, drawn: tuple[int, ...], *, seat: int = 0):
+    """跑到"手牌恰剩最后一张（转化源）"的出牌阶段询问。
+
+    摸牌阶段会摸两张（``drawn`` 指定为装备牌，由 :class:`_UseTheDrawnEquipment` 用掉），
+    故 ``state`` 的牌堆必须以它们开头；其余座位走最小应答。
+    """
+    players = [_UseTheDrawnEquipment(drawn)] + [Scripted() for _ in range(3)]
+
+    def stop(running) -> bool:
+        pending = running.pending
+        if pending is None or pending.kind != QueryKind.PLAY_PHASE:
+            return False
+        steps = pending.transform_preactivations.get(GUANYU, ())
+        return any(step.name == "seat" and step.max == 3 for step in steps)
+
+    return _run(state, players, stop)
+
+
+def test_a_wusheng_three_target_confirmation_hits_three_seats():
+    """出牌阶段：清单确认 3 目标组合 ⇒ 三名目标各结算一次【杀】（引擎真结算）。
+
+    摸牌摸到两件装备（赤兔 / 八卦阵），先由脚本玩家装上，手牌只剩最后一张红牌；此时
+    方天的 1..3 才成立。确认的目标顺序与点击顺序无关，落账的 ``UseCard.targets`` 取自
+    候选（按候选目标次序）。
+    """
+    rest = tuple(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in {RED_PEACH, HALBERD, CHITU, _cards("eight_diagrams")[0]}
+    )
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(RED_PEACH,), equip=(HALBERD,), hero="guanyu"),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=(CHITU, _cards("eight_diagrams")[0], *rest),
+        turn_seat=0,
+    )
+    engine = _play_phase_with_the_last_card(state, (CHITU, _cards("eight_diagrams")[0]))
+    query = engine.pending
+    assert query is not None and query.kind == QueryKind.PLAY_PHASE
+    assert engine.state.player(0).hand == [RED_PEACH], "前提：转化源就是最后一张手牌"
+
+    confirm = ActivateSkill(
+        skill_id=GUANYU,
+        picks=(RED_PEACH,),
+        choices=("seat:2", "seat:1", "seat:3"),
+        answers_seq=query.seq,
+    )
+    engine.submit(confirm)
+    accepted = engine.records[-1]
+    assert accepted.kind == "action" and accepted.accepted is True
+    resolved = accepted.action
+    assert isinstance(resolved, UseCard)
+    assert resolved.card.type == "slash" and resolved.card.virtual_sources == (RED_PEACH,)
+    assert resolved.targets == (1, 2, 3), "三名目标一次使用（1..3 的 3 目标组合）"
+
+    run_until(
+        engine,
+        [Scripted() for _ in range(4)],
+        lambda running: all(running.state.player(seat).hp == 3 for seat in (1, 2, 3)),
+    )
+    assert [player.hp for player in engine.state.players] == [4, 3, 3, 3], (
+        "三名目标各结算一次【杀】的 1 点伤害"
+    )
+    assert engine.state.player(0).card_use_counts.get("slash") == 1
+    assert RED_PEACH in engine.state.discard, "来源红牌走正常使用路径进弃牌堆"
+
+
+def _borrowed_transform_state() -> object:
+    """4 人局：座位 0 借刀、座位 1 赵云（手牌仅一张红【闪】+ 方天）——持刀者窗口的自然局面。"""
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(BORROWED_SWORD,), identity=Identity.LORD),
+            SeatSpec(
+                hand=(RED_DODGE,),
+                equip=(HALBERD,),
+                hero="zhaoyun",
+                identity=Identity.REBEL,
+            ),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+        ],
+        deck=_deck_excluding(BORROWED_SWORD, RED_DODGE, HALBERD),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+
+
+def test_a_transformed_borrowed_confirmation_without_bn_is_rejected():
+    """借刀窗口的转化确认不含 Bn ⇒ "目标不合法"、零状态改动（引擎的成员判定是最终裁判）。"""
+    state = _borrowed_transform_state()
+    engine, _play = _borrowed_window(state, designation=0, seats=4)
+    window = engine.pending
+    assert window is not None and window.cause is WindowCause.BORROWED_SWORD
+    baseline = json.dumps(engine.state.model_dump(mode="json"), sort_keys=True)
+
+    with pytest.raises(IllegalActionError) as caught:
+        engine.submit(
+            ActivateSkill(
+                skill_id=ZHAOYUN_SLASH,
+                picks=(RED_DODGE,),
+                choices=("seat:2", "seat:3"),
+                answers_seq=window.seq,
+            )
+        )
+
+    assert "目标不合法" in caught.value.message
+    assert json.dumps(engine.state.model_dump(mode="json"), sort_keys=True) == baseline
+    assert engine.pending is window
+    rejected = engine.records[-1]
+    assert rejected.accepted is False and "转化确认失败" in rejected.reason
+
+
+def test_a_transformed_borrowed_confirmation_resolves_bn_plus_two_extra_targets():
+    """借刀窗口：确认 Bn + 2 个额外目标 ⇒ 解析成 3 目标转化【杀】，三名目标各掉 1 点体力。
+
+    主体分列复核：持刀者【杀】的 ``designations == ()``，Bn 与额外目标都在 ``targets``。
+    """
+    state = _borrowed_transform_state()
+    engine, _play = _borrowed_window(state, designation=0, seats=4)
+    window = engine.pending
+    assert window is not None and window.cause is WindowCause.BORROWED_SWORD
+
+    engine.submit(
+        ActivateSkill(
+            skill_id=ZHAOYUN_SLASH,
+            picks=(RED_DODGE,),
+            choices=("seat:0", "seat:2", "seat:3"),
+            answers_seq=window.seq,
+        )
+    )
+    accepted = engine.records[-1]
+    assert accepted.kind == "action" and accepted.accepted is True
+    resolved = accepted.action
+    assert isinstance(resolved, UseCard)
+    assert resolved.targets == (0, 2, 3)
+    assert resolved.designations == (), "Bn 与额外目标都在 targets 里"
+
+    run_until(
+        engine,
+        [Scripted() for _ in range(4)],
+        lambda running: all(running.state.player(seat).hp == 3 for seat in (0, 2, 3)),
+    )
+    assert [player.hp for player in engine.state.players] == [3, 4, 3, 3], (
+        "Bn（座位 0）+ 两个额外目标（2 / 3）各结算一次【杀】"
+    )

@@ -1248,6 +1248,173 @@ def test_the_ai_fill_of_an_existing_single_select_seat_step_is_unchanged():
     )
 
 
+# ---------------------------------------------------------------------------
+# W7-02：方天 × 转化【杀】的 AI 填表（含 01b 缺陷的修复：逐来源上限不同不越界）
+# ---------------------------------------------------------------------------
+#
+# 读点 = 真清单（`_play_phase_with_preactivations` / 引擎同形的 `RespondQuery`），
+# 判据 = `resolve_conversion_confirmation` 放行（引擎的确认是最终裁判）。
+# 关键回归：转化技的**来源组可以有不同目标数上限**（方天只放宽"最后一张手牌"的来源；
+# 装备区来源不追加），而清单目标步的 `max` 是全局最大 ⇒ AI 按全局 `max` 填满、用上限更低
+# 的来源就会拼出**不在候选池里**的组合。修复后 AI 在提交前做只读池成员校验，越界即缩到
+# 该来源允许的最多张（保留首项 / Bn），绝不提交非法确认。
+
+HALBERD = _ids("halberd")[0]
+BORROWED_SWORD = _ids("borrowed_sword")[0]
+RED_DODGE = [index for index in _ids("dodge") if color_of_suit(PACK.deck.cards[index].suit) is Color.RED][0]
+RED_PEACH = [index for index in _ids("peach") if color_of_suit(PACK.deck.cards[index].suit) is Color.RED][0]
+LONGDAN = "hero.zhaoyun.longdan"
+WUSHENG = "hero.guanyu.wusheng"
+
+
+def _halberd_transform_play_state(*, hero: str, hand: tuple[int, ...]):
+    """4 人局：出牌阶段、手中只剩转化源（最后一张手牌）、已装方天。"""
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=hand, equip=(HALBERD,), hero=hero),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(*hand, HALBERD),
+        turn_seat=0,
+    )
+
+
+def test_the_ai_fills_the_halberd_transformed_slash_to_three_targets():
+    """龙胆 + 方天 + 最后一张手牌【闪】⇒ AI 按清单填出 3 目标组合，确认解析器放行。"""
+    state = _halberd_transform_play_state(hero="zhaoyun", hand=(RED_DODGE,))
+    query = _play_phase_with_preactivations(state)
+    steps = query.transform_preactivations[LONGDAN]
+    assert steps[-1].max == 3, "前提：目标步放宽到 3"
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, ActivateSkill), f"该填转化清单，实得 {action!r}"
+    assert action.skill_id == LONGDAN
+    assert action.picks == (RED_DODGE,)
+    assert len(action.choices) == 3, f"应填满 3 目标：{action.choices}"
+    resolved = resolve_conversion_confirmation(
+        state, 0, LONGDAN, action.picks, action.choices, query.transform_actions, steps=steps
+    )
+    assert not isinstance(resolved, str), f"AI 填出的 3 目标组合被拒：{resolved}"
+    assert resolved.targets == (1, 2, 3)
+
+
+def _borrow_query_for(state, *, holder: int = 1):
+    """引擎同形的持刀者窗口询问（内部池 + 清单都下发）。"""
+    actions = legal_actions_for(
+        state,
+        holder,
+        QueryKind.RESPOND,
+        answers_seq=1,
+        payload=RespondContext(
+            cause=WindowCause.BORROWED_SWORD,
+            required="slash",
+            mode=RespondMode.USE,
+            use_targets=(0,),
+        ),
+    )
+    internal = transform_candidates(QueryKind.RESPOND, actions)
+    steps = conversion_preactivations(state, holder, internal, fixed_target=True)
+    return RespondQuery(
+        seq=1,
+        actor=holder,
+        timing=Timing.RESOLVE_AFTER_EFFECT,
+        prompt="【借刀杀人】：对 0 号位使用【杀】，或交出武器。",
+        legal_actions=tuple(a for a in actions if not is_transformed_action(a)),
+        view=project(state, holder),
+        cause=WindowCause.BORROWED_SWORD,
+        required="slash",
+        target=holder,
+        transform_preactivations=steps,
+        transform_actions=internal,
+    ), internal
+
+
+def test_the_ai_fills_the_halberd_transformed_borrow_combo_with_bn():
+    """借刀窗口：龙胆转化【杀】+ 方天 ⇒ AI 填出含 Bn 的 3 目标组合，确认解析器放行。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(BORROWED_SWORD,)),
+            SeatSpec(hand=(RED_DODGE,), equip=(HALBERD,), hero="zhaoyun"),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(BORROWED_SWORD, RED_DODGE, HALBERD),
+        turn_seat=1,
+        rule_config=RuleConfig(player_count=4),
+    )
+    query, internal = _borrow_query_for(state)
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, ActivateSkill), f"该填转化清单，实得 {action!r}"
+    assert action.picks == (RED_DODGE,)
+    assert "seat:0" in action.choices, "Bn 必选（候选排序的自然首项）"
+    assert len(action.choices) == 3, f"应填满 Bn + 2 个额外目标：{action.choices}"
+    steps = query.transform_preactivations[LONGDAN]
+    resolved = resolve_conversion_confirmation(
+        state, 1, LONGDAN, action.picks, action.choices, internal, steps=steps
+    )
+    assert not isinstance(resolved, str), f"AI 填出的借刀组合被拒：{resolved}"
+    assert resolved.targets == (0, 2, 3)
+
+
+def test_the_ai_never_overfills_a_conversion_whose_sources_have_different_caps():
+    """逐来源上限不同（自然局：关羽 + 方天 + 唯一红手牌）⇒ AI 不越界、确认解析器放行。
+
+    清单来源步同时列出方天（装备区：1 目标）与手牌红牌（最后一张：1..3）；目标步的
+    ``max`` 是全局 3。AI 按便宜取舍选了方天时，填 3 目标就会越界——修复后它缩到该来源
+    允许的最多张（1 目标），提交的仍是候选池里的组合。
+    """
+    state = _halberd_transform_play_state(hero="guanyu", hand=(RED_PEACH,))
+    query = _play_phase_with_preactivations(state)
+    steps = query.transform_preactivations[WUSHENG]
+    assert steps[-1].max == 3, "前提：全局上限是 3"
+    assert len(steps[0].pool[0].options) == 2, "前提：来源步有两条（方天 + 红桃）"
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, ActivateSkill), f"该填转化清单，实得 {action!r}"
+    resolved = resolve_conversion_confirmation(
+        state, 0, WUSHENG, action.picks, action.choices, query.transform_actions, steps=steps
+    )
+    assert not isinstance(resolved, str), f"AI 提交了池外的目标集：{resolved}"
+    assert isinstance(resolved, UseCard) and len(resolved.targets) == 1, (
+        f"选中的来源上限更低 ⇒ 缩到该来源允许的 1 目标，实得 {resolved.targets}"
+    )
+
+
+def test_the_ai_never_overfills_a_borrowed_wusheng_conversion():
+    """借刀窗口的武圣变体：来源组上限不同 ⇒ AI 填出的组合仍在候选池里（确认放行）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(BORROWED_SWORD,)),
+            SeatSpec(hand=(RED_PEACH,), equip=(HALBERD,), hero="guanyu"),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(BORROWED_SWORD, RED_PEACH, HALBERD),
+        turn_seat=1,
+        rule_config=RuleConfig(player_count=4),
+    )
+    query, internal = _borrow_query_for(state)
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, ActivateSkill), f"该填转化清单，实得 {action!r}"
+    steps = query.transform_preactivations[WUSHENG]
+    resolved = resolve_conversion_confirmation(
+        state, 1, WUSHENG, action.picks, action.choices, internal, steps=steps
+    )
+    assert not isinstance(resolved, str), f"AI 提交了池外的目标集：{resolved}"
+    assert isinstance(resolved, UseCard) and 0 in resolved.targets, "Bn 恒为目标之一"
+
+
 def test_an_optional_pick_outside_the_play_phase_may_still_be_declined():
     """对照面：别的时机（【遗计】伤害后看牌那类）仍可放弃 —— 惩罚只落在"已发动的技能步骤"。"""
     state, slash = _committed_step_state()

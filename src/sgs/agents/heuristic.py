@@ -36,7 +36,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 
 from sgs.effects import Randomness
@@ -714,6 +714,86 @@ def _pick_options(
     return tuple(chosen)
 
 
+def _conversion_choices_within_pool(
+    query: Query,
+    picks: Sequence[int],
+    choices: Sequence[str],
+    *,
+    step: object,
+    options: Sequence[str],
+) -> tuple[str, ...] | None:
+    """把转化清单填出的目标集收进**内部候选池**（W7-02 发现 / 01b 修复）。
+
+    一个转化技的**来源组可以有不同目标数上限**：方天画戟只对"最后一张手牌"的转化源 +2，
+    装备区来源（武圣把已装备的红牌当【杀】）不追加——而清单目标步的 ``max`` 是**全局**
+    最大值。按全局 ``max`` 填满、却用了上限更低的来源，拼出的组合就不在候选池里：引擎的
+    确认会拒绝它，而 AI 没有重试的机会（那会是一条非法应答）。故提交前做一次**只读的池
+    成员校验**：
+
+    1. 命中内部池（``query.transform_actions``，与清单同源的候选）⇒ 原样返回；
+    2. 否则把目标集缩到该来源在池里**真实存在的最多张**（保留清单首项 / 借刀的 Bn，且不
+       少于 ``step.min``）；
+    3. 池里没有可用组合 ⇒ ``None``（不交半成品，回退到候选 / 骨架路径）。
+
+    它只比"在不在池里"，**不重算任何规则**；上限的真源只能是候选池本身（清单的逐来源
+    ``pool`` 行只表达"该来源能选哪些目标"，协议里没有"每个来源最多几张"这一格）。判定
+    与 :func:`sgs.agents.participants.is_transform_use` 同姿态：成员校验读的是询问自带的
+    公开候选面，引擎的确认仍是最终裁判。
+    """
+    pool = tuple(getattr(query, "transform_actions", ()) or ())
+    if not pool:
+        return tuple(choices)
+    seat_choices = tuple(str(text) for text in choices if str(text).startswith(_SEAT_PREFIX))
+    if not seat_choices:
+        return tuple(choices)
+    wanted_sources = tuple(sorted(int(card_id) for card_id in picks))
+    prefix = tuple(choices[: len(choices) - len(seat_choices)])
+
+    def targets_of(action: object) -> tuple[int, ...]:
+        return tuple(int(target) for target in (getattr(action, "targets", None) or ()))
+
+    def sources_of(action: object) -> tuple[int, ...]:
+        card = getattr(action, "card", None)
+        return tuple(
+            sorted(int(source) for source in (getattr(card, "virtual_sources", None) or ()))
+        )
+
+    def matches(chosen: Sequence[str], targets: Sequence[int]) -> bool:
+        selected = [int(text.removeprefix(_SEAT_PREFIX)) for text in chosen]
+        return len(selected) == len(set(selected)) and set(selected) == set(targets)
+
+    available = [
+        targets_of(action) for action in pool if sources_of(action) == wanted_sources
+    ]
+    if not available:
+        return None
+    if any(matches(seat_choices, targets) for targets in available):
+        return tuple(choices)
+
+    order = {str(text): index for index, text in enumerate(options)}
+    shrinkable = [
+        targets
+        for targets in available
+        if step.min <= len(targets) <= len(seat_choices)
+        and all(f"{_SEAT_PREFIX}{target}" in order for target in targets)
+    ]
+    shrinkable.sort(
+        key=lambda targets: (
+            -len(targets),
+            min(order[f"{_SEAT_PREFIX}{target}"] for target in targets),
+        )
+    )
+    for targets in shrinkable:
+        shrunk = tuple(
+            text
+            for text in options
+            if int(str(text).removeprefix(_SEAT_PREFIX)) in set(targets)
+        )
+        if matches(shrunk, targets):
+            return (*prefix, *shrunk)
+    return None
+
+
 def _fill_activation(
     query: Query,
     skill_id: str,
@@ -726,11 +806,17 @@ def _fill_activation(
 
     ``conversion``（W4-fix-6，D.1）：这份清单来自 ``transform_preactivations`` ⇒ 座位步的
     目标是转化牌指向的对手，由 :func:`_score_seat_option` 的对敌分支估值。
+
+    **多选目标步 + 逐来源上限**（W7-02）：``conversion`` 清单里出现 ``max > min`` 的座位步
+    时，填出的目标集还要过 :func:`_conversion_choices_within_pool`——来源组上限不同（方天
+    只放宽"最后一张手牌"的来源）时，按全局 ``max`` 填满可能越界；越界即缩到池里真实的
+    最多张，仍填不出 ⇒ ``None``。
     """
     picks: list[int] = []
     choices: list[str] = []
     prior: list[str] = []
     short = str(skill_id).rsplit(".", 1)[-1]
+    multi_target: tuple[object, tuple[str, ...]] | None = None
     for step in sorted(steps, key=lambda item: item.order):
         row = _pool_row_for(step, tuple(prior))
         if row is None:
@@ -744,6 +830,8 @@ def _fill_activation(
             )
             if chosen is None:
                 return None
+            if isinstance(step.max, int) and step.max > step.min:
+                multi_target = (step, options)
             choices.extend(chosen)
             prior.extend(chosen)
         elif all(text.isdigit() for text in options):
@@ -760,6 +848,14 @@ def _fill_activation(
                 return None
             choices.extend(chosen)
             prior.extend(chosen)
+    if conversion and multi_target is not None:
+        step, options = multi_target
+        shrunk = _conversion_choices_within_pool(
+            query, picks, choices, step=step, options=options
+        )
+        if shrunk is None:
+            return None
+        choices = list(shrunk)
     return ActivateSkill(
         skill_id=skill_id,
         picks=tuple(picks),

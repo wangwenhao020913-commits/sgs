@@ -2786,6 +2786,148 @@ def test_the_pending_payload_forwards_a_multi_target_transform_manifest() -> Non
     assert target["wording"] == "选择【杀】的目标", "Step.wording 原样下发"
 
 
+# ---------------------------------------------------------------------------
+# W7-02：方天 × 转化【杀】的接入层面（清单 1..3 原样转发 / 借刀窗口的候选索引）
+# ---------------------------------------------------------------------------
+
+
+def _halberd_wusheng_play_state():
+    """4 人局：关羽手里只剩一张红牌、已装方天（自然局：方天自己也是红色来源）。"""
+    pack = _context_pack()
+    halberd = cards_of_type(pack, "halberd")[0]
+    red = next(
+        card_id
+        for card_id in cards_of_type(pack, "dodge")
+        if pack.deck.cards[card_id].suit in (Suit.HEART, Suit.DIAMOND)
+    )
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(red,), equip=(halberd,), hero="guanyu"),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=tuple(
+            card_id
+            for card_id in range(len(pack.deck.cards))
+            if card_id not in {red, halberd}
+        ),
+        turn_seat=0,
+    )
+    return state, red, halberd
+
+
+def test_the_pending_payload_forwards_a_halberd_transformed_slash_manifest() -> None:
+    """W7-02 跨线契约：出牌阶段转化【杀】的清单（方天 ⇒ 目标步 1..3）原样转发。
+
+    写方 = 引擎同形的构造（``legal_actions_for`` → ``transform_candidates`` →
+    ``conversion_preactivations``；多目标候选来自 W7-02 的 ``virtual_card_use``），
+    读方 = ``app.js`` 的清单多选（W7-01b）。接入层不重算池、不改键。
+    """
+    from sgs.effects import legal_actions_for
+    from sgs.skills import (
+        conversion_preactivations,
+        is_transformed_action,
+        transform_candidates,
+    )
+    from sgs.state import QueryKind as _QueryKind
+
+    state, red, halberd = _halberd_wusheng_play_state()
+    candidates = legal_actions_for(state, 0, _QueryKind.PLAY_PHASE, answers_seq=1)
+    internal = transform_candidates(_QueryKind.PLAY_PHASE, candidates)
+    manifests = conversion_preactivations(state, 0, internal)
+    query = PlayPhaseQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="出牌阶段：使用一张牌，或结束出牌阶段。",
+        legal_actions=tuple(
+            action for action in candidates if not is_transformed_action(action)
+        ),
+        view=project(state, 0),
+        transform_preactivations=manifests,
+        transform_actions=internal,
+    )
+
+    payload = pending_payload(query, human_seat=0)
+
+    assert payload is not None
+    steps = payload["preactivations"]["hero.guanyu.wusheng"]
+    assert [step["name"] for step in steps] == ["card", "seat"]
+    target = steps[1]
+    assert (target["min"], target["max"]) == (1, 3), "目标步 = 1..3"
+    assert target["pool"] == [
+        {"when": [], "options": ["seat:1", "seat:2", "seat:3"]}
+    ], "目标池按候选顺序原样下发"
+    assert set(steps[0]["pool"][0]["options"]) == {str(red), str(halberd)}, (
+        "来源步两条：手牌的最后一张红牌 + 装备区的方天"
+    )
+
+
+def test_the_candidate_index_for_a_halberd_transformed_borrow_window_keeps_bn_in_every_combo() -> None:
+    """W7-02：借刀窗口的**转化【杀】**候选索引 = 1..3 目标，且 combo 恒含 Bn。
+
+    与 W7-01 的真【杀】用例同形，只是候选来自``virtual_card_use``（龙胆：【闪】当【杀】）。
+    """
+    from sgs.effects import legal_actions_for
+    from sgs.skills import transformed_card
+    from sgs.state import QueryKind as _QueryKind
+    from sgs.state import RespondContext, RespondMode
+
+    pack = _context_pack()
+    borrowed = cards_of_type(pack, "borrowed_sword")[0]
+    dodge = cards_of_type(pack, "dodge")[0]
+    halberd = cards_of_type(pack, "halberd")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(borrowed,)),
+            SeatSpec(hand=(dodge,), equip=(halberd,), hero="zhaoyun"),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=tuple(
+            card_id
+            for card_id in range(len(pack.deck.cards))
+            if card_id not in {borrowed, dodge, halberd}
+        ),
+        turn_seat=0,
+    )
+    query = RespondQuery(
+        seq=1,
+        actor=1,
+        timing=Timing.RESOLVE_AFTER_EFFECT,
+        prompt="【借刀杀人】：对 0 号位使用【杀】，或交出武器。",
+        legal_actions=legal_actions_for(
+            state,
+            1,
+            _QueryKind.RESPOND,
+            answers_seq=1,
+            payload=RespondContext(
+                cause=WindowCause.BORROWED_SWORD,
+                required="slash",
+                mode=RespondMode.USE,
+                use_targets=(0,),
+            ),
+        ),
+        view=project(state, 1),
+        cause=WindowCause.BORROWED_SWORD,
+        required="slash",
+        target=1,
+    )
+    virtual_id = str(transformed_card(state, (dodge,), "slash").card_id)
+
+    entry = candidate_index(query)[virtual_id]
+
+    assert entry["min_targets"] == 1
+    assert entry["max_targets"] == 3, "方天在最后一张手牌时放宽到 3"
+    assert all(0 in combo for combo in entry["combos"]), "每一组组合都含 Bn"
+    assert {len(combo) for combo in entry["combos"]} == {1, 2, 3}
+    assert entry["pool"] == [0, 2, 3], "完整 check_targets 池（含额外目标）"
+    assert entry["card"]["virtual_sources"] == [dodge], "键仍是那张虚拟【杀】（负 id）"
+
+
 def test_the_pending_payload_forwards_the_card_preactivation_manifest() -> None:
     """W5-02b 跨线契约：借刀的**两步清单**由 ``pending_payload`` 显式下发。
 
