@@ -2857,9 +2857,11 @@ def test_the_pending_payload_forwards_a_halberd_transformed_slash_manifest() -> 
     assert [step["name"] for step in steps] == ["card", "seat"]
     target = steps[1]
     assert (target["min"], target["max"]) == (1, 3), "目标步 = 1..3"
+    # W7-03 / D4：逐来源一行，且行上带该来源的**上限**（`options` 两行相同，说不出上限）。
     assert target["pool"] == [
-        {"when": [], "options": ["seat:1", "seat:2", "seat:3"]}
-    ], "目标池按候选顺序原样下发"
+        {"when": [str(halberd)], "options": ["seat:1", "seat:2", "seat:3"], "max": 1},
+        {"when": [str(red)], "options": ["seat:1", "seat:2", "seat:3"], "max": 3},
+    ], "目标池按来源 / 候选顺序原样下发，每行带逐来源上限"
     assert set(steps[0]["pool"][0]["options"]) == {str(red), str(halberd)}, (
         "来源步两条：手牌的最后一张红牌 + 装备区的方天"
     )

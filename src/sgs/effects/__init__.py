@@ -26,6 +26,7 @@ from .actions import (
     seat_distance,
     target_combos,
     target_is_effective,
+    target_sets_match,
     targets_within_attack_range,
 )
 from .behaviors import (
@@ -128,5 +129,6 @@ __all__ = (
     "swap_judge_card",
     "target_combos",
     "target_is_effective",
+    "target_sets_match",
     "targets_within_attack_range",
 )

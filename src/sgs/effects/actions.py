@@ -16,7 +16,7 @@ M1 已接线四类询问：出牌阶段（【杀】/【桃】）、【闪】响�
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from itertools import combinations, permutations
 from typing import Any
 
@@ -385,6 +385,26 @@ def target_combos(
     )
 
 
+def target_sets_match(chosen: Iterable[int], targets: Iterable[int]) -> bool:
+    """选择的座位集合是否与候选的 ``targets`` **整组**相同（W7-01b / W7-03 的唯一判据）。
+
+    两处消费者共用这一份比较，免得"确认解析器"与"AI 的只读池校验"各判一套：
+
+    - :func:`sgs.skills.heroes.resolve_conversion_confirmation`（确认解析器）；
+    - :func:`sgs.agents.heuristic._conversion_choices_within_pool`（AI 提交前的池成员校验）。
+
+    先比**原始选择个数**——重复的座位因此被拒（否则 ``{Bn, x, x}`` 会按集合相等混进
+    ``(Bn, x)``）；再比去重后的集合，**与点击顺序无关**。清单只表达"最多可选几个"，
+    "这组目标到底存不存在"仍以候选池为唯一真源（本函数只做那一步比较，不碰规则）。
+    """
+    chosen = tuple(int(choice) for choice in chosen)
+    actual = tuple(int(target) for target in targets)
+    deduped = tuple(dict.fromkeys(chosen))
+    if len(chosen) != len(deduped):
+        return False
+    return len(deduped) == len(actual) and set(deduped) == set(actual)
+
+
 def needs_designation(card: CardRef) -> bool:
     """这张牌的使用是否**必须带附带指定**（借刀的 Bn 由使用者一并指定，W5-02b）。
 
@@ -595,24 +615,14 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
             high = apply_modifiers(
                 ModifierPoint.TARGET_COUNT,
                 state,
-                ModifierContext(
-                    subject=seat,
-                    card=card,
-                    pool=tuple(pool),
-                    rated_targets=count,
-                ),
+                ModifierContext(subject=seat, card=card),
                 count,
             )
         generated: tuple[Action, ...] = tuple(
             UseCard(card=card, targets=combo, answers_seq=answers_seq)
             for combo in target_combos(pool, count, high)
         )
-        ctx = ModifierContext(
-            subject=seat,
-            card=card,
-            pool=tuple(pool),
-            rated_targets=count,
-        )
+        ctx = ModifierContext(subject=seat, card=card)
         actions.extend(
             apply_modifiers(ModifierPoint.CANDIDATES, state, ctx, generated)
         )
@@ -761,7 +771,9 @@ def _respond(
                 bn = ctx.use_targets[0]
                 pool = check_targets(state, seat, card)
                 if bn not in pool:
-                    # Bn 在结算时已不合法（TARGET_POOL 链删掉了它）⇒ 这张牌没有候选；
+                    # **不是**上面那条的重复（D2）：forced_use_targets 只证明预选集里
+                    # **有**一个座位够得着；多座位载荷下它可能不是 Bn。Bn 自己仍须在池里：
+                    # 在结算时已不合法（TARGET_POOL 链删掉了它）⇒ 这张牌没有候选；
                     # 不退回"无目标使用"：那是无懈一类的形状，等于凭空造一条打向空气的【杀】。
                     continue
                 count = 1  # 被迫使用窗口的 base = 1（固定 Bn），不是池大小
@@ -773,8 +785,6 @@ def _respond(
                         ModifierContext(
                             subject=seat,
                             card=card,
-                            pool=tuple(pool),
-                            rated_targets=count,
                             respond_required=ctx.required,
                             respond_mode=ctx.mode,
                             respond_targets=(bn,),

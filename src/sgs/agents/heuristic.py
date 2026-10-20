@@ -39,7 +39,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 
-from sgs.effects import Randomness
+from sgs.effects import Randomness, target_sets_match
 from sgs.state import (
     Action,
     ActivateSkill,
@@ -759,8 +759,10 @@ def _conversion_choices_within_pool(
         )
 
     def matches(chosen: Sequence[str], targets: Sequence[int]) -> bool:
-        selected = [int(text.removeprefix(_SEAT_PREFIX)) for text in chosen]
-        return len(selected) == len(set(selected)) and set(selected) == set(targets)
+        # 与确认解析器**同一个**比较（D5）：重复选择被拒、与点击顺序无关。
+        return target_sets_match(
+            (int(text.removeprefix(_SEAT_PREFIX)) for text in chosen), targets
+        )
 
     available = [
         targets_of(action) for action in pool if sources_of(action) == wanted_sources

@@ -37,6 +37,8 @@
     "preactivatedSkill", "isPassivePreativation", "renderPreativationEntry", "setActionLabels",
     // W7-01b：清单座位步多选（max > min）+ 借刀窗口首项（Bn）预选 / 必选
     "preactivationSeatMulti", "preactivationRequiredSeat", "applyPreativationDefaults",
+    // W7-03（D4）：逐来源上限——命中池行的 `max` 收住座位步的可选数
+    "preactivationPoolRow", "preactivationStepCap", "preactivationSeatCap",
     // W5-02b：手牌入口的预发动（借刀）——点手牌 ⇒ 两步清单 ⇒ 带 designations 的 UseCard
     "cardPreactivationManifest", "enterCardPreativation", "alternativeLabel",
     // 报障 3：事件回放（步长按钮 0.1–0.5s，默认 0.1）+ 效果区逐事件派生 + 描述文本

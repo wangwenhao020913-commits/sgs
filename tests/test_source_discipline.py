@@ -497,7 +497,8 @@ HEURISTIC_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
     "__future__": frozenset({"annotations"}),
     "collections.abc": frozenset({"Callable", "Mapping", "Sequence"}),
     "types": frozenset({"MappingProxyType"}),
-    "sgs.effects": frozenset({"Randomness"}),
+    # W7-03（D5）：目标集合比较与确认解析器共用一份（纯函数，不碰状态 / 规则）。
+    "sgs.effects": frozenset({"Randomness", "target_sets_match"}),
     "sgs.state": frozenset(
         {
             # 协议 / 视角那一半（可见面），**不含** GameState / Player / Frame 等全知面。

@@ -442,12 +442,7 @@ def virtual_card_use(
             high = apply_modifiers(
                 ModifierPoint.TARGET_COUNT,
                 state,
-                ModifierContext(
-                    subject=seat,
-                    card=card,
-                    pool=tuple(pool),
-                    rated_targets=count,
-                ),
+                ModifierContext(subject=seat, card=card),
                 count,
             )
         return [
@@ -474,7 +469,9 @@ def virtual_card_use(
                 bn = ctx.respond_targets[0]
                 pool = check_targets(state, seat, card)
                 if bn not in pool:
-                    # Bn 在结算时已不合法（TARGET_POOL 链删掉了它）⇒ 这张牌没有候选。
+                    # **不是**上面那条的重复（D2）：forced_use_targets 只证明预选集里
+                    # **有**一个座位够得着，多座位载荷下它可能不是 Bn；Bn 自己仍须在池里。
+                    # 在结算时已不合法（TARGET_POOL 链删掉了它）⇒ 这张牌没有候选。
                     return []
                 count = 1  # 被迫使用窗口的 base = 1（固定 Bn），不是池大小
                 high = count
@@ -485,8 +482,6 @@ def virtual_card_use(
                         ModifierContext(
                             subject=seat,
                             card=card,
-                            pool=tuple(pool),
-                            rated_targets=count,
                             respond_required=ctx.respond_required,
                             respond_mode=ctx.respond_mode,
                             respond_targets=(bn,),

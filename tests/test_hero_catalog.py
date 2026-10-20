@@ -871,6 +871,12 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
     不再有 ``CANDIDATES`` 回调——枚举型追加换成"查询期修正最大目标数"，否则两套会生成
     重复候选（W7 spec §0 第 3 条 / S1）。这条把声明形状本身钉住，形态分类由
     :func:`test_every_shape_has_the_documented_count_and_members` 的谓词复核。
+
+    ``TARGET_POOL`` 是**有意的空操作**（W7 spec §3.2 的"合法性同标准"明写落点），
+    W7-03 / D6 复核后保留；它不是靠本测试自证——行为面由
+    :func:`test_halberd_target_pool_is_unchanged_by_the_modifier`（池与是否装备方天无关）
+    与 :func:`test_halberd_extra_targets_also_read_the_filtered_pool` 两条真行为断言钉住，
+    本测试只钉**声明形状**（G2 的形态表同样要求它同时具备这两个点）。
     """
     definition = CATALOG["equip.halberd"]
 

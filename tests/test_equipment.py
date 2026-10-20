@@ -583,7 +583,6 @@ def _fake_target_count(monkeypatch, step: int) -> str:
     from sgs.state import SlotKind
 
     def handler(state, ctx, current):
-        del state, ctx
         return current + step
 
     fake = SkillDef(
@@ -666,7 +665,7 @@ def test_target_count_modifiers_stack_with_the_halberd(monkeypatch):
     high = apply_modifiers(
         ModifierPoint.TARGET_COUNT,
         state,
-        ModifierContext(subject=0, card=state.card(slash), pool=tuple(range(1, 7)), rated_targets=1),
+        ModifierContext(subject=0, card=state.card(slash)),
         1,
     )
 

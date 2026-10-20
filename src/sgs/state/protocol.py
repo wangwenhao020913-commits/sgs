@@ -159,10 +159,24 @@ class StepPool(_FrozenModel):
     :data:`~sgs.skills.flow.MANIFEST_POOL_LIMIT`、或前序是**多选**步且池确实随它变时，
     引擎**退化**为该步不下发候选（``Step.pool = ()``），由校验器裁决——退化只削弱界面
     提示，不改变合法性。
+
+    ``max``（W7-03）是**这一行**最多可选几个：``None`` = 与步骤的 ``Step.max`` 相同。
+    多选座位步的 ``Step.max`` 是**全局**最大值，而同一个技能的不同来源组可以有不同上限
+    （【方天画戟】只放宽"最后一张手牌"的转化源）。``options`` 只回答"哪些目标能点"，
+    不回答"最多点几个"，故逐来源上限必须由行自己带出——界面据此把可选数收在该来源的
+    合法数目内。值不进记录流（清单整体 ``exclude``），且缺省 ``None`` 时不序列化。
     """
 
     when: tuple[str, ...] = ()
     options: tuple[str, ...] = ()
+    max: int | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> Any:
+        data = handler(self)
+        if data.get("max") is None:
+            data.pop("max", None)
+        return data
 
 
 class Step(_FrozenModel):

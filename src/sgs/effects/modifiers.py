@@ -139,15 +139,15 @@ ModifierHandler: TypeAlias = Callable[[GameState, "ModifierContext", Any], Any]
 
 @dataclass(frozen=True, slots=True)
 class ModifierContext:
-    """修饰器回调的上下文：**主体 / 客体 / 角色 / 牌**，外加候选生成的两项载荷。
+    """修饰器回调的上下文：**主体 / 客体 / 角色 / 牌**，外加派发期的载荷。
 
     ``owner`` 由 :func:`apply_modifiers` 在派发时填写——它就是"当前这条修饰器属于谁"，
     回调据此判定本实例是否作用于本次查询（如 +1 坐骑要求 ``owner == target``）。
 
-    ``pool`` / ``rated_targets`` 只给 ``CANDIDATES`` 与 ``TARGET_COUNT`` 两个挂点用：
-    候选生成时把**已过 TARGET_POOL 的目标池**与**本牌额定目标数**一并交给回调——``CANDIDATES``
-    据此追加组合（回调便不必回头 import 行为表，那会与 ``effects`` 成环），``TARGET_COUNT``
-    据此把"额定数"修正成"最大数"（W7-01：方天在"最后一张手牌"时 ``rated + 2``）。
+    ``CANDIDATES`` / ``TARGET_COUNT`` 回调**不读**候选池或额定目标数：候选由调用方按
+    已过 ``TARGET_POOL`` 的池生成，``TARGET_COUNT`` 的 ``current`` 已经是额定目标数
+    （W7-01 曾把 ``pool`` / ``rated_targets`` 写进本上下文，但没有任何回调读它们；
+    W7-03 按"零读者即死字段"删掉，额定数 / 池仍由调用方自己算）。
 
     票 30 追加四样**派发期载荷**（都由 :func:`apply_modifiers` 或调用点填写）：
 
@@ -166,8 +166,6 @@ class ModifierContext:
     role: ModifierRole = ModifierRole.SUBJECT
     card: CardRef | None = None
     owner: int = -1
-    pool: tuple[int, ...] = ()
-    rated_targets: int = 0
     skill_id: str = ""
     answers_seq: int = 0
     providers_used: tuple[str, ...] = ()

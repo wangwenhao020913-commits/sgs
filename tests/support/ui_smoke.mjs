@@ -3878,6 +3878,125 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.resetSelection();
 }
 
+/* ============ W7-03（D4）：清单目标步的**逐来源上限** =================================
+ *
+ * 自然局（关羽 + 方天 + 唯一红手牌）：来源步两条——装备区的方天画戟（红色 ⇒ 武圣的合法
+ * 来源，但不在手牌 ⇒ 不是"最后一张手牌"，上限 1）与手里的最后一张红牌（1..3）。清单目标
+ * 步的 `max` 是**全局** 3，而两行的 `options` 完全相同（可达目标与来源无关）⇒ 上限只能读
+ * 行上的 `max`。界面必须在**选了来源之后**把可选数收在该来源的合法数目内：选方天只许 1 个，
+ * 选手牌红牌才许 3 个；确认因此拼不出引擎会拒绝的组合（D4）。
+ */
+{
+  const red = { ...synthCard(2, "桃"), type: "peach", color: "red" };
+  const halberd = { ...synthCard(77, "方天画戟"), type: "halberd", slot: "weapon", attack_range: 4 };
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 950,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 950 }],
+    candidate_index: {},
+    virtual_index: {
+      "2": [{ card_id: -5, skill_ids: ["hero.guanyu.wusheng"] }],
+      "77": [{ card_id: -6, skill_ids: ["hero.guanyu.wusheng"] }],
+    },
+    preactivations: {
+      "hero.guanyu.wusheng": [
+        { name: "card", zones: ["hand", "equip"], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["77", "2"] }] },
+        { name: "seat", min: 1, max: 3, order: 1,
+          pool: [
+            { when: ["77"], options: ["seat:1", "seat:2", "seat:3"], max: 1 },
+            { when: ["2"], options: ["seat:1", "seat:2", "seat:3"], max: 3 },
+          ] },
+      ],
+    },
+    preactivation: [], option_seats: {}, context: null,
+  };
+  const view = synthView(pending);
+  view.heroes = { 0: "guanyu", 1: "zhaoyun", 2: "diaochan", 3: "zhangfei" };
+  view.snapshot.players = [0, 1, 2, 3].map((seat) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 0, alive: true, equip: [], judge: [], identity: null,
+  }));
+  view.snapshot.self_hand = [red];
+  view.snapshot.players[0].equip = [halberd];
+  view.skills = [{
+    skill_id: "hero.guanyu.wusheng", name: "武圣", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: false, preactivated: false,
+    ui: { requirement: "选择1张红色牌当【杀】使用或打出", convert_sources: [2, 77] },
+  }];
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const skillButton = () => $("t-skills").children.find(
+    (b) => b.getAttribute("data-skill-id") === "hero.guanyu.wusheng");
+  const seatBoxOf = (seat) => $("t-seats").children.find(
+    (c) => c.getAttribute("data-seat") === String(seat));
+  const nextButton = () => $("t-options").children.find((c) => c.textContent === "下一步");
+  const clickSeat = (seat) => (seatBoxOf(seat).listeners.click || []).forEach(
+    (fn) => fn({ target: seatBoxOf(seat) }));
+  const clickNext = () => (nextButton().listeners.click || []).forEach(
+    (fn) => fn({ target: nextButton() }));
+  const equipChip = () => {
+    const row = $("t-seats").children
+      .find((c) => c.getAttribute("data-seat") === "0")
+      .children.find((c) => c.getAttribute("data-zone") === "equip");
+    return row ? row.children[0] : null;
+  };
+  const handChip = () => $("t-hand").children[0];
+
+  (skillButton().listeners.click || []).forEach((fn) => fn({ target: skillButton() }));
+  check("㉿WC1 来源步把**装备区**的方天画戟列成可点（武圣的红色装备来源）",
+    !!equipChip() && !equipChip().classList.contains("dis"),
+    `chip=${!!equipChip()} dis=${equipChip() && equipChip().classList.contains("dis")}`);
+
+  (equipChip().listeners.click || []).forEach((fn) => fn({ target: equipChip() }));
+  clickNext();
+  const paEquip = ui.state.preactivation;
+  check("㉿WC2 选方天 ⇒ 目标步上限收到该来源的 1（不是全局 3）",
+    ui.preactivationSeatCap(paEquip) === 1
+      && ui.preactivationStepCap(paEquip, 1) === 1
+      && /已选 0 \/ 1 个/.test($("t-target-hint").textContent),
+    `cap=${ui.preactivationSeatCap(paEquip)} hint="${$("t-target-hint").textContent}"`);
+
+  clickSeat(1);
+  clickSeat(2);
+  check("㉿WC3 上限 1：再点第二个座位不再收",
+    JSON.stringify(paEquip.answers[1].values) === "[1]"
+      && /已选 1 \/ 1 个/.test($("t-target-hint").textContent),
+    `values=${JSON.stringify(paEquip.answers[1].values)} hint="${$("t-target-hint").textContent}"`);
+
+  clickNext();
+  const cappedAction = ui.buildAction();
+  check("㉿WC4 选方天的确认 = 1 目标（不会拼出引擎会拒绝的组合）",
+    !!cappedAction && cappedAction.kind === "ActivateSkill"
+      && JSON.stringify(cappedAction.picks) === "[77]"
+      && JSON.stringify(cappedAction.choices) === '["seat:1"]',
+    JSON.stringify(cappedAction));
+
+  // 重选来源：手牌的最后一张红牌 ⇒ 同一目标步的上限变成 3。
+  ui.jumpPreativationStep(0);
+  (handChip().listeners.click || []).forEach((fn) => fn({ target: handChip() }));
+  clickNext();
+  const paHand = ui.state.preactivation;
+  check("㉿WC5 选手牌红牌（最后一张手牌）⇒ 目标步上限 3",
+    ui.preactivationSeatCap(paHand) === 3
+      && /已选 0 \/ 1–3 个/.test($("t-target-hint").textContent),
+    `cap=${ui.preactivationSeatCap(paHand)} hint="${$("t-target-hint").textContent}"`);
+
+  clickSeat(1);
+  clickSeat(2);
+  clickSeat(3);
+  clickNext();
+  const fullAction = ui.buildAction();
+  check("㉿WC6 手牌来源可点满 3 个目标并确认",
+    !!fullAction && fullAction.kind === "ActivateSkill"
+      && JSON.stringify(fullAction.picks) === "[2]"
+      && JSON.stringify(fullAction.choices) === '["seat:1","seat:2","seat:3"]',
+    JSON.stringify(fullAction));
+  ui.resetSelection();
+}
+
 /* ============ W6-03：观星双行拖拽面（合成 ARRANGE；S4：真实手势走人工验收） ============
  *
  * 判据（自动化的那一半）：两行容器渲染、上行 = 被观看的牌、下行 = 空槽、点选移动后

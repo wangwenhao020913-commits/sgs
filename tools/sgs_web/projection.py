@@ -897,11 +897,18 @@ def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
                 ]
                 continue
             options: list[Any] = []
+            row_max: int | None = None
             for entry in step.get("pool") or []:
                 for option in entry.get("options") or []:
                     if option not in options:
                         options.append(option)
-            step["pool"] = [{"when": [], "options": options}]
+                if isinstance(entry.get("max"), int):
+                    row_max = entry["max"] if row_max is None else max(row_max, entry["max"])
+            masked_row: dict[str, Any] = {"when": [], "options": options}
+            if row_max is not None:
+                # 逐来源上限是公开形状（来源已抹掉 ⇒ 只能取各行最大，与 Step.max 同量级）。
+                masked_row["max"] = row_max
+            step["pool"] = [masked_row]
 
     for steps in (payload.get("preactivations") or {}).values():
         mask(steps)

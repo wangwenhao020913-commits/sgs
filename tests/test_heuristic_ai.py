@@ -1415,6 +1415,141 @@ def test_the_ai_never_overfills_a_borrowed_wusheng_conversion():
     assert isinstance(resolved, UseCard) and 0 in resolved.targets, "Bn 恒为目标之一"
 
 
+def test_the_ai_does_not_submit_a_conversion_whose_overfill_cannot_shrink():
+    """W7-03（c2-i）：越界目标集**缩不到**合法组合时，AI 不交半成品（``return None`` 档）。
+
+    ``_conversion_choices_within_pool`` 的第三条出口是"池里没有可用组合"——正常清单下
+    缩一档总能命中（来源组的组合按 1..max 连续存在），故只有**池与清单不一致**时可达：
+    这里把内部池换成一条 4 目标组合（5 人局才有 4 个对手），而清单目标步的全局上限是 3
+    ⇒ 选出的 3 个目标既不在池里、也没有更小的组合可缩。AI 必须放弃这条清单（回退到普通
+    候选 / 骨架路径），而不是提交一条引擎注定拒绝的 ``ActivateSkill``。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_red_card("dodge"),), equip=(HALBERD,), hero="zhaoyun"),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(_red_card("dodge"), HALBERD),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=5),
+    )
+    query = _play_phase_with_preactivations(state)
+    card = transformed_card(state, (_red_card("dodge"),), "slash")
+    bad_action = UseCard(card=card, targets=(1, 2, 3, 4), answers_seq=1)
+    query = query.model_copy(
+        update={
+            "legal_actions": (EndPhase(answers_seq=1),),
+            "transform_actions": (bad_action,),
+        }
+    )
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, EndPhase), (
+        f"越界且缩不到合法组合时 AI 不该提交转化：{action!r}"
+    )
+
+
+def test_the_play_phase_shrink_keeps_the_manifests_first_target():
+    """W7-03（c2-ii）：AI 的池内收缩必须**保留清单首项目标**（借刀窗口里首项就是 Bn）。
+
+    两半：
+
+    - **自然局**（关羽 + 方天 + 唯一红手牌）：AI 选方天（装备区来源，上限 1）⇒ 从全局
+      上限 3 缩到该来源的 1 张，且这一张 = 该来源池行的**首项目标**（清单里就是候选排序
+      的自然首项）；
+    - **合成界**（来源上限 2）：选 3 个目标后缩到池里最大的 2 目标组合，仍然从清单首项
+      开始（``seat:3`` 在候选顺序里排第一）——收缩只减尾部，不换首项。
+    """
+    state = _halberd_transform_play_state(hero="guanyu", hand=(RED_PEACH,))
+    query = _play_phase_with_preactivations(state)
+    steps = query.transform_preactivations[WUSHENG]
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, ActivateSkill), f"该填转化清单，实得 {action!r}"
+    assert action.picks == (HALBERD,), "自然局的前提：AI 选的是装备区来源（上限 1）"
+    rows = {row.when: row for row in steps[-1].pool}
+    row = rows[(str(HALBERD),)]
+    assert (row.max, len(row.options)) == (1, 3), (
+        "该来源上限 1，但可达目标有 3 个 ⇒ 上限只能从行上的 max 读"
+    )
+    assert action.choices == (row.options[0],), (
+        f"收缩保留清单首项目标：{action.choices}"
+    )
+    resolved = resolve_conversion_confirmation(
+        state, 0, WUSHENG, action.picks, action.choices, query.transform_actions, steps=steps
+    )
+    assert not isinstance(resolved, str), f"缩出来的目标集被确认拒绝：{resolved}"
+    assert resolved.targets == (int(row.options[0].removeprefix("seat:")),)
+
+    # 合成界：来源上限 2、候选组合都是 2 目标；选 3 个后收缩为"含首项的最大组合"。
+    dodge = _red_card("dodge")
+    synthetic_state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(dodge,), hero="zhaoyun", identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LORD),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(dodge),
+        turn_seat=0,
+    )
+    card = transformed_card(synthetic_state, (dodge,), "slash")
+    actions = tuple(
+        UseCard(card=card, targets=combo, answers_seq=1)
+        for combo in ((3, 1), (3, 2), (1, 2))
+    )
+    target = Step(
+        name="seat",
+        min=1,
+        max=3,
+        pool=(
+            StepPool(
+                when=(str(dodge),),
+                options=("seat:3", "seat:1", "seat:2"),
+                max=2,
+            ),
+        ),
+        order=1,
+    )
+    source = Step(
+        name="card", zones=(Zone.HAND,), min=1, max=1, order=0,
+        pool=(StepPool(when=(), options=(str(dodge),)),),
+    )
+    synthetic = _play_phase_query(synthetic_state).model_copy(
+        update={
+            "legal_actions": (EndPhase(answers_seq=1),),
+            "transform_preactivations": {"hero.zhaoyun.longdan": (source, target)},
+            "transform_actions": actions,
+        }
+    )
+
+    shrunk = HeuristicPlayer(_stream(0)).respond(synthetic)
+
+    assert isinstance(shrunk, ActivateSkill), f"该填合成清单，实得 {shrunk!r}"
+    assert shrunk.choices[0] == "seat:3", "首项（清单第一项）在收缩后仍在"
+    assert shrunk.choices == ("seat:3", "seat:1"), (
+        f"收缩到含首项的最大可用组合（2 张）：{shrunk.choices}"
+    )
+    resolved = resolve_conversion_confirmation(
+        synthetic_state,
+        0,
+        "hero.zhaoyun.longdan",
+        shrunk.picks,
+        shrunk.choices,
+        actions,
+        steps=(source, target),
+    )
+    assert not isinstance(resolved, str), f"缩出来的目标集被确认拒绝：{resolved}"
+    assert resolved.targets == (3, 1)
+
+
 def test_an_optional_pick_outside_the_play_phase_may_still_be_declined():
     """对照面：别的时机（【遗计】伤害后看牌那类）仍可放弃 —— 惩罚只落在"已发动的技能步骤"。"""
     state, slash = _committed_step_state()

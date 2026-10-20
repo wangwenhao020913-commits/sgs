@@ -882,7 +882,14 @@ def _qinggang_ignore_armor(state: GameState, ctx: ModifierContext, current: Any)
 
 
 def _halberd_same_target_pool(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """方天画戟的 ``TARGET_POOL`` 挂点：**池不改**（票 12 §4 的"合法性同标准"）。"""
+    """方天画戟的 ``TARGET_POOL`` 挂点：**池不改**（票 12 §4 的"合法性同标准"）。
+
+    这是**有意的空操作**，不是漏删的死代码（W7 spec §3.2 明写"空操作保留"作
+    "额外目标合法性同标准"的声明落点；W7-03 / D6 的复核保留它）。行为面由
+    :func:`test_halberd_target_pool_is_unchanged_by_the_modifier`（池与是否装备方天无关）
+    与 :func:`test_halberd_extra_targets_also_read_the_filtered_pool`（额外目标取自过滤后
+    的池）两条**真实行为**断言钉住；声明形状另由 `test_hero_catalog` 的谓词复核。
+    """
     del state, ctx
     return current
 
@@ -897,9 +904,13 @@ def _halberd_last_hand_card(state: GameState, player: int, card: CardRef) -> boo
     - **真牌**：手牌恰是这一张（``hand == (card_id,)``）；
     - **转化牌**：来源**恰好一张**、该来源是**实体牌**、且手牌恰是这一张来源
       （``hand == (source,)``，来源在手牌区因此是蕴含的）。多来源（【丈八蛇矛】）、
-      装备区 / 判定区来源（【武圣】红牌、【龙胆】装备区【闪】）都返回 ``False``——
-      后两者在自然局不可达（同武器槽 / 【闪】不可能合法进装备区），谓词分支保留、
-      只在谓词级合成局面里测（W7 spec §0 第 9 条 / §3.7）。
+      装备区 / 判定区来源（【武圣】红牌、【龙胆】装备区【闪】）都返回 ``False``。
+
+    三条 false 分支的**可达性不同**（W7-03 / H2 的订正）：【武圣】的装备区红牌是
+    **自然局面**（如已装备的【赤兔】），谓词 false 分支在自然局可达，W7-02 的端到端测试
+    就建在这个局面上；只有**龙胆的装备区【闪】**（【闪】不可能合法进入装备区）与
+    **丈八两来源 + 方天**（同抢武器槽）不可达自然局，谓词分支保留、只在谓词级合成局面里
+    测（W7 spec §0 第 9 条 / §3.7）。
     """
     hand = tuple(state.player(player).hand)
     if card.is_virtual:

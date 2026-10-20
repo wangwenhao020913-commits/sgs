@@ -38,7 +38,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from sgs.data import Color, SkillType, color_of_suit
-from sgs.effects import CandidateScope, CarrierKind, Modifier, ModifierPoint, locate
+from sgs.effects import (
+    CandidateScope,
+    CarrierKind,
+    Modifier,
+    ModifierPoint,
+    locate,
+    target_sets_match,
+)
 from sgs.state import (
     GameState,
     PlayCard,
@@ -382,23 +389,6 @@ def owned_conversion_skill_ids(state: GameState, seat: int) -> frozenset[str]:
     )
 
 
-def _confirmation_targets_match(
-    chosen: Sequence[int], targets: Iterable[int]
-) -> bool:
-    """确认的目标是否与候选的 ``targets`` **整组**相同（W7-01b）。
-
-    先比**原始选择个数**：重复的座位因此被拒——否则 ``{Bn, x, x}`` 会按集合相等混进
-    ``(Bn, x)``；再比去重后的集合，**与点击顺序无关**。清单目标步只表达 ``min..max``
-    与可达池，"这组目标到底存不存在"仍以候选池为唯一真源（本函数是那道判定）。
-    """
-    chosen = tuple(int(choice) for choice in chosen)
-    actual = tuple(int(target) for target in targets)
-    deduped = tuple(dict.fromkeys(chosen))
-    if len(chosen) != len(deduped):
-        return False
-    return len(deduped) == len(actual) and set(deduped) == set(actual)
-
-
 def resolve_conversion_confirmation(
     state: GameState,
     owner: int,
@@ -418,7 +408,7 @@ def resolve_conversion_confirmation(
       来源集合与目标集合的顺序无关（来源在 ``virtual_sources`` 里本就已排序）；
     - **是否需要目标步由清单回答**（``steps`` 里有没有 ``min > 0`` 的 ``seat`` 步）：
       有目标步 ⇒ 按**完整目标集**比较（先比原始选择个数——重复选择因此被拒——再比
-      去重后的集合，见 :func:`_confirmation_targets_match`）；没有目标步 ⇒ 目标已被清单
+      去重后的集合，见 :func:`sgs.effects.target_sets_match`）；没有目标步 ⇒ 目标已被清单
       判为唯一（或本就没有目标），不比较。同一条判据也是清单的形状；
     - **W7-01b**：多目标组合同样走这里——``ActivateSkill(虚拟牌来源, 1..max 个目标)``
       解析成候选池里那条 ``UseCard(虚拟牌, targets=…)``；清单只表达"最多可选几个"，
@@ -450,7 +440,7 @@ def resolve_conversion_confirmation(
         if tuple(sorted(int(source) for source in card.virtual_sources)) != wanted_sources:
             continue
         source_matched = True
-        if needs_target and not _confirmation_targets_match(
+        if needs_target and not target_sets_match(
             wanted_targets, getattr(action, "targets", ())
         ):
             continue
@@ -533,11 +523,13 @@ def _manifest_steps(
 
     - **来源步**：``min = max`` = 组大小（单源 1 / 丈八 2）。同一个技能出现不同张数的
       来源组是**不可表达**的形状（不猜），返回 ``None``；
-    - **目标步**（W7-01b）：``min = 1``、``max = 该技能候选组合的最长目标数``；``pool``
-      仍按来源组（``when`` = 来源答案）分列，但每行 options = 该来源组**全部组合的全部
-      目标**（并集、按候选顺序去重），不再只列"每个组合的首目标"——否则额外目标在清单
-      里永远点不到。不同来源组的上限不同时步上 ``max`` 取最大、逐行池各自限定；越界组合
-      由确认的成员判定拒绝（清单只表达"最多可选几个"，不是第二份合法性）；
+    - **目标步**（W7-01b / W7-03）：``min = 1``、``max = 该技能候选组合的最长目标数``；
+      ``pool`` 仍按来源组（``when`` = 来源答案）分列，但每行 options = 该来源组**全部组合
+      的全部目标**（并集、按候选顺序去重），不再只列"每个组合的首目标"——否则额外目标在
+      清单里永远点不到。不同来源组的上限不同时步上 ``max`` 取最大、逐行池各自限定；越界组合
+      由确认的成员判定拒绝（清单只表达"最多可选几个"，不是第二份合法性）；每行还带出
+      该来源组的**逐来源上限** ``StepPool.max``——``options`` 只说"哪些目标能点"，不说
+      "最多点几个"，界面要收住逐来源上限只能读这一格（W7-03 的 D4）；行相同才并成一行；
     - ``fixed_target=True``（目标由窗口承载：求桃的濒死者 / 【万箭】·【南蛮】的响应 /
       借刀的被迫使用）**只在目标完全唯一时**省掉目标步——所有候选都是同一个单目标
       （或无目标）⇒ 没有可选的第二步。出现第二个目标、或任一组合的目标数 > 1（W7 的
@@ -577,17 +569,23 @@ def _manifest_steps(
                     for target in targets
                 )
             ),
+            max(len(targets) for targets in targets_list),
         )
         for sources, targets_list in per_source.items()
     ]
-    if len({options for _when, options in rows}) == 1:
-        rows = [((), rows[0][1])]
+    # 行相同才并成一行：``when`` 只回答"哪组来源"，而**逐来源上限**（``StepPool.max``）
+    # 可能不同（方天只放宽"最后一张手牌"的转化源）——上游相同也必须分开，界面才收得住。
+    if len({(row_options, row_max) for _when, row_options, row_max in rows}) == 1:
+        rows = [((), rows[0][1], rows[0][2])]
     steps.append(
         Step(
             name="seat",
             min=1,
-            max=max(len(targets) for targets in combos),
-            pool=tuple(StepPool(when=when, options=options) for when, options in rows),
+            max=max(row_max for _when, _options, row_max in rows),
+            pool=tuple(
+                StepPool(when=when, options=row_options, max=row_max)
+                for when, row_options, row_max in rows
+            ),
             order=1,
         )
     )

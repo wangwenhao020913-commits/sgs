@@ -22,7 +22,9 @@ from sgs.data import Gender, RuleConfig
 from sgs.effects import (
     CARD_BEHAVIORS,
     UseContext,
+    attack_range,
     check_targets,
+    distance,
     legal_actions_for,
     targets_within_attack_range,
 )
@@ -383,6 +385,49 @@ def test_a_halberd_holder_can_add_zero_one_or_two_targets_in_the_borrowed_window
     pool = check_targets(two_extra, 1, two_extra.card(slash))
     assert all(set(combo) <= set(pool) for combo in candidates), "额外目标过同一个 check_targets 池"
     assert all(0 in combo for combo in candidates), "每条候选都恒含 Bn"
+
+
+def test_the_borrowed_halberd_extras_each_pass_the_same_check_targets():
+    """W7-03（c3）：借刀 × 方天 × 空城——每个**额外目标**逐个过 ``check_targets``。
+
+    旧断言只写 ``set(combo) ⊆ set(pool)``（在同一个池变量上几乎自证）；这里改成：
+    4 人局的持刀者是座 1（方天 + 最后一张【杀】）、Bn = 0，座 3 是空手的诸葛亮。
+    座 3 在**攻击范围内**（距离 ≤ 方天范围 4），却被【空城】的 ``TARGET_POOL`` 链挡在
+    【杀】的池外——所以候选里 3 的缺席**只能**来自 ``check_targets``，不是距离；并且
+    候选 ``(0,)`` / ``(0, 2)`` 里的每个目标都逐次复核为同一次 ``check_targets`` 的成员。
+    攻击范围是 ``check_targets`` 的同一个池入口（方天范围 4 在 4 人局覆盖全场，故本用例
+    用 TARGET_POOL 那一半来证明"额外目标过同一套合法性检测"）。
+    """
+    slash = _cards("slash")[0]
+    halberd = _cards("halberd")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_cards("borrowed_sword")[0],)),
+            SeatSpec(hand=(slash,), equip=(halberd,)),
+            SeatSpec(),
+            SeatSpec(hero="zhugeliang"),
+        ],
+        deck=_deck_excluding(slash, halberd),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    pool = check_targets(state, 1, state.card(slash))
+    assert pool == (0, 2), "空城把座 3 从【杀】的目标池里删掉"
+    assert 3 not in pool
+    assert distance(state, 1, 3) <= attack_range(state, 1), (
+        "座 3 在攻击范围内 ⇒ 它的缺席来自 TARGET_POOL 链，不是距离"
+    )
+
+    candidates = _halberd_borrow_candidates(state, 1, 0)
+    assert candidates == {(0,), (0, 2)}, "Bn + 至多一个其它合法目标（座 3 被空城滤掉）"
+    for combo in candidates:
+        assert 0 in combo, "每条候选都恒含 Bn"
+        for target in combo:
+            assert target in check_targets(state, 1, state.card(slash)), (
+                f"组合 {combo} 的目标 {target} 不在同一次 check_targets 的池里"
+            )
+        assert 3 not in combo, "空城的座位不能作为额外目标（不是只靠池变量包含关系）"
 
 
 def test_the_halberd_does_not_add_targets_when_the_slash_is_not_the_last_hand_card():

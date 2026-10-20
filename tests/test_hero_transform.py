@@ -2299,8 +2299,10 @@ def test_a_synthetic_multi_target_engine_confirmation_uses_the_full_targets():
 #
 # 转化【杀】的候选接线归 W7-02；本票只测**谓词层**——用公开的 ``apply_modifiers`` +
 # ``ModifierContext`` + ``transformed_card`` 构造合成局面，**不生成**转化【杀】的候选
-# （W7 spec §3.2 / §3.7）。丈八两来源 / 装备区来源在自然局不可达（同武器槽 / 【闪】不可能
-# 合法进装备区），故这些 false 分支只在这里的合成局面里钉住。
+# （W7 spec §3.2 / §3.7）。三条 false 分支的**可达性不同**（W7-03 / H2）：【武圣】的装备区
+# 红牌是自然局面（如已装备的【赤兔】），谓词 false 分支可达；只有**丈八两来源 + 方天**
+# （同抢武器槽）与**龙胆装备区【闪】**（【闪】不可能合法进装备区）不可达自然局，故后两者
+# 只在这里的合成局面里钉住。
 
 HALBERD = _cards("halberd")[0]
 
@@ -2310,7 +2312,7 @@ def _halberd_target_count(state, card, *, seat: int = 0) -> int:
     return apply_modifiers(
         ModifierPoint.TARGET_COUNT,
         state,
-        ModifierContext(subject=seat, card=card, pool=(1, 2, 3), rated_targets=1),
+        ModifierContext(subject=seat, card=card),
         1,
     )
 
@@ -2380,23 +2382,26 @@ def test_the_last_hand_card_predicate_rejects_a_multi_source_transformed_slash()
 
 
 def test_the_last_hand_card_predicate_rejects_a_source_outside_the_hand():
-    """来源在**装备区 / 判定区**（武圣红牌 / 龙胆装备区【闪】）⇒ 手牌里没有它，方天不追加。
+    """来源在**装备区**（武圣红牌 / 龙胆装备区【闪】）⇒ 手牌里没有它，方天不追加。
 
-    两个分支都不可达自然局（非装备牌不可能合法进入装备区；【闪】同理），故是合成局面：
+    **武圣的装备区红牌是自然局面**（W7-03 / H2：如已装备的【赤兔】；W7-02 的
+    ``test_the_halberd_does_not_widen_a_wusheng_slash_from_the_equipment_zone`` 建在同一种
+    局面上）；龙胆的装备区【闪】则不可达自然局（【闪】不可能合法进入装备区），只能合成。
     谓词只认"手牌恰是那一张来源"，区域不是手牌 ⇒ false。
     """
     filler = BLACK_SLASH
+    chitu = _cards("chitu")[0]
     with_wusheng_equip = build_state(
         pack=PACK,
         seats=[
-            SeatSpec(hand=(filler,), equip=(HALBERD, RED_PEACH)),
+            SeatSpec(hand=(filler,), equip=(HALBERD, chitu)),
             SeatSpec(),
             SeatSpec(),
         ],
-        deck=_deck_excluding(filler, RED_PEACH, HALBERD),
+        deck=_deck_excluding(filler, chitu, HALBERD),
         turn_seat=0,
     )
-    from_equip = transformed_card(with_wusheng_equip, (RED_PEACH,), "slash")
+    from_equip = transformed_card(with_wusheng_equip, (chitu,), "slash")
     assert _halberd_target_count(with_wusheng_equip, from_equip) == 1
 
     with_longdan_equip = build_state(
@@ -2540,11 +2545,55 @@ def test_the_halberd_widens_a_wusheng_transformed_slash_to_three_targets():
 
     steps = _manifest(state, _virtual_actions(state), GUANYU)
     assert [step.name for step in steps] == ["card", "seat"]
-    assert (steps[1].min, steps[1].max) == (1, 3), "清单目标步 = 1..3（W7-01b 的 1..max）"
-    assert set(steps[1].pool[0].options) == {"seat:1", "seat:2", "seat:3"}
+    target = steps[1]
+    assert (target.min, target.max) == (1, 3), "清单目标步 = 1..3（W7-01b 的 1..max）"
+    # W7-03 / D4：目标步**逐来源**一行，行上带该来源的上限——两行的 options 一模一样
+    # （可达目标与来源无关），故 `options` 说不出"该来源最多几个"，上限必须是单独一格。
+    rows = {row.when: row for row in target.pool}
+    assert set(rows) == {(str(HALBERD),), (str(RED_PEACH),)}
+    assert rows[(str(HALBERD),)].max == 1, "装备区来源（方天自己也是红色）只允许 1 个目标"
+    assert rows[(str(RED_PEACH),)].max == 3, "最后一张手牌来源放宽到 1..3"
+    assert all(
+        set(row.options) == {"seat:1", "seat:2", "seat:3"} for row in target.pool
+    ), "两行的可达目标相同 ⇒ 逐来源上限不能从 options 推出"
     assert {str(RED_PEACH), str(HALBERD)} <= set(steps[0].pool[0].options), (
         "来源步同时列出两张红牌：手牌的最后一张 + 装备区的方天"
     )
+
+
+def test_the_manifest_caps_each_source_at_its_own_target_count():
+    """W7-03（D4）：目标步**逐来源一行**，行上带该来源的真实上限（界面据此收住可选数）。
+
+    自然局（关羽 + 方天 + 唯一红手牌）：最后一张手牌的来源 1..3、装备区来源（方天自己
+    也是红色）1；两行的 ``options`` 完全相同（可达目标与来源无关）⇒ "该来源最多几个"只能
+    由行上的 ``max`` 回答。这是界面修复（D4）的数据前提：全局 ``Step.max`` = 3，选错来源
+    时按全局值填满就会拼出引擎会拒绝的确认。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(RED_PEACH,), equip=(HALBERD,), hero="guanyu"),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(RED_PEACH, HALBERD),
+        turn_seat=0,
+    )
+
+    steps = _manifest(state, _virtual_actions(state), GUANYU)
+
+    target = steps[1]
+    assert target.max == 3, "步骤上的 max 仍是全局最大（1..3）"
+    rows = {row.when: row for row in target.pool}
+    assert set(rows) == {(str(HALBERD),), (str(RED_PEACH),)}, (
+        f"逐来源各一行（不因 options 相同而合并）：{list(rows)}"
+    )
+    assert rows[(str(HALBERD),)].max == 1, "装备区来源：上限 1"
+    assert rows[(str(RED_PEACH),)].max == 3, "最后一张手牌来源：上限 3"
+    assert all(
+        set(row.options) == {"seat:1", "seat:2", "seat:3"} for row in target.pool
+    ), "两行可达目标相同 ⇒ 上限不能从 options 推出，必须由行上的 max 带出"
 
 
 def test_the_halberd_widens_a_longdan_transformed_slash_to_three_targets():

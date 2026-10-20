@@ -1090,10 +1090,9 @@ function preactivationStepKind(step) {
   return "option";
 }
 
-/** 一步的候选：先找**精确匹配前序答案**的那一行，其次找 `when=()` 的（与前序无关）。
- *  `null` = 服务端退化掉了候选索引（或本步没有池）——界面退化为"全都点得动"，
- *  合法性仍由服务端校验器裁决（`04` §4.1：前端不裁决规则）。 */
-function preactivationOptions(pa, index) {
+/** 命中**前序答案**的那一行池：先找精确匹配 `when` 的，其次 `when=()` 的（与前序无关）。
+ *  `null` = 服务端退化掉了候选索引（或本步没有池）。 */
+function preactivationPoolRow(pa, index) {
   const step = pa && pa.steps[index];
   if (!step || !step.pool || !step.pool.length) return null;
   const prior = [];
@@ -1102,8 +1101,36 @@ function preactivationOptions(pa, index) {
     (row) => row.when.length === prior.length && row.when.every((value, at) => value === prior[at]),
   );
   const any = step.pool.find((row) => row.when.length === 0);
-  const row = exact || any || null;
+  return exact || any || null;
+}
+
+/** 一步的候选：命中行的 `options`。
+ *  `null` = 服务端退化掉了候选索引（或本步没有池）——界面退化为"全都点得动"，
+ *  合法性仍由服务端校验器裁决（`04` §4.1：前端不裁决规则）。 */
+function preactivationOptions(pa, index) {
+  const row = preactivationPoolRow(pa, index);
   return row ? (row.options || []) : null;
+}
+
+/** 一步**允许选几个**（W7-03 / D4）：座位步的 `step.max` 是**全局**最大值，而同一个技能
+ *  的不同来源组上限可以不同（方天只放宽"最后一张手牌"的转化源）⇒ 逐来源上限由命中池行的
+ *  `max` 带出，这里取两者较小。行上没有 `max`（既有清单 / 服务端退化）⇒ 沿用 `step.max`。
+ *  `null` = 没有上限（`max = null` 的"全部可选"形状）。
+ */
+function preactivationStepCap(pa, index) {
+  const step = pa && pa.steps[index];
+  if (!step) return null;
+  const globalMax = Number.isInteger(step.max) ? step.max : null;
+  const row = preactivationPoolRow(pa, index);
+  const rowMax = row && Number.isInteger(row.max) ? row.max : null;
+  if (rowMax === null) return globalMax;
+  if (globalMax === null) return rowMax;
+  return Math.min(globalMax, rowMax);
+}
+
+/** 当前这一步的允许数（座位步用；`null` = 不限）。 */
+function preactivationSeatCap(pa) {
+  return pa ? preactivationStepCap(pa, pa.cursor) : null;
 }
 
 function preactivationAnswerTexts(step, values) {
@@ -1204,7 +1231,8 @@ function advancePreativation() {
   const step = pa.steps[pa.cursor];
   const count = pa.answers[pa.cursor].values.length;
   if (count < step.min) return;
-  if (step.max !== null && step.max !== undefined && count > step.max) return;
+  const cap = preactivationStepCap(pa, pa.cursor);
+  if (cap !== null && count > cap) return;
   pa.cursor += 1;
   applyPreativationDefaults(pa, state.view ? state.view.pending : null);
   state.lastRejectReason = "";
@@ -1271,8 +1299,9 @@ function selectPreativationSeat(seat) {
     if (at >= 0) {
       if (text === required) return;
       answer.values.splice(at, 1);
-    } else if (step.max === null || step.max === undefined || answer.values.length < step.max) {
-      answer.values.push(seat);
+    } else {
+      const cap = preactivationSeatCap(pa);
+      if (cap === null || answer.values.length < cap) answer.values.push(seat);
     }
     answer.texts = preactivationAnswerTexts(step, answer.values);
     state.lastRejectReason = "";
@@ -1325,7 +1354,8 @@ function preactivationReady(pa) {
     const answer = pa.answers[index];
     const count = answer ? answer.values.length : 0;
     if (count < step.min) return false;
-    return step.max === null || step.max === undefined || count <= step.max;
+    const cap = preactivationStepCap(pa, index);
+    return cap === null || count <= cap;
   });
 }
 
@@ -1406,7 +1436,11 @@ function preactivationStepHint(pa, pending) {
     const requiredText = required === null ? "" : "；借刀指定的目标（必选）";
     if (preactivationSeatMulti(step)) {
       const what = wording || "选目标";
-      const upper = step.max === null || step.max === undefined ? "max" : step.max;
+      const cap = preactivationSeatCap(pa);
+      if (cap !== null && cap <= step.min) {
+        return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${what}（点场上武将多选，已选 ${count} / ${cap} 个${requiredText}）。`;
+      }
+      const upper = cap === null ? "max" : cap;
       return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${what}（点场上武将多选，已选 ${count} / ${step.min}–${upper} 个${requiredText}）。`;
     }
     if (wording) return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${wording}（点场上武将选择）。`;
@@ -1461,7 +1495,8 @@ function renderPreativation(pending) {
     next.className = "opt";
     next.textContent = "下一步";
     const count = pa.answers[pa.cursor].values.length;
-    next.disabled = count < step.min || (step.max !== null && step.max !== undefined && count > step.max);
+    const cap = preactivationStepCap(pa, pa.cursor);
+    next.disabled = count < step.min || (cap !== null && count > cap);
     next.addEventListener("click", advancePreativation);
     box.appendChild(next);
   }
