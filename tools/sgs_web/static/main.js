@@ -48,6 +48,35 @@ function wire() {
   $("btn-refresh").addEventListener("click", refresh);
   $("btn-takeover").addEventListener("click", takeover);
   $("btn-delay").addEventListener("click", cycleDelay);
+  // U1-01 壳：设置浮层 / 事件流浮层 / 回放入口（顶栏右侧）。
+  const settingsButton = $("btn-settings");
+  const settingsPanel = $("t-settings");
+  if (settingsButton && settingsPanel) {
+    settingsButton.addEventListener("click", () => {
+      settingsPanel.hidden = !settingsPanel.hidden;
+      settingsButton.setAttribute("aria-expanded", String(!settingsPanel.hidden));
+    });
+  }
+  const logButton = $("t-log-toggle");
+  const logPanel = $("t-log-panel");
+  if (logButton && logPanel) {
+    logButton.addEventListener("click", () => {
+      logPanel.hidden = !logPanel.hidden;
+      logButton.setAttribute("aria-expanded", String(!logPanel.hidden));
+      if (!logPanel.hidden) {
+        const last = $("t-log").lastChild;
+        if (last) last.scrollIntoView({ block: "nearest" });
+      }
+    });
+  }
+  const replayEntry = $("btn-go-replay");
+  if (replayEntry) {
+    replayEntry.addEventListener("click", () => {
+      show("replay");
+      loadRuns();
+      renderReplay();
+    });
+  }
   $("btn-r-delay").addEventListener("click", cycleDelay);
   updateDelayButton();
   $("btn-r-first").addEventListener("click", () => replaySeek(0));

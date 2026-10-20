@@ -11,10 +11,12 @@ function seedOptions() {
   const select = $("in-seat");
   const previous = select.value;
   select.innerHTML = "";
+  // 2 人局 = 无身份局（`RuleConfig.mode`）：没有主公位，别给座位 0 挂身份标签。
+  const identityMode = count >= 4;
   for (let seat = 0; seat < count; seat += 1) {
     const option = document.createElement("option");
     option.value = String(seat);
-    option.textContent = seat === 0 ? "0（主公位）" : String(seat);
+    option.textContent = identityMode && seat === 0 ? "0（主公位）" : String(seat);
     select.appendChild(option);
   }
   if (previous && Number(previous) < count) select.value = previous;

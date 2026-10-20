@@ -4,6 +4,223 @@
  */
 "use strict";
 
+/* ------------------------------------------------------------------ 牌桌布局 */
+
+/** 环桌几何（U1-01）：1600×608 的设计舞台 + 椭圆 rx 680 / ry 235、圆心 (800, 370)。
+ *
+ * 数字来自原型 verdict（`.scratch/u1-table-foundation/prototype-notes.md`）：
+ * 8 人局 7 个对手沿**上半弧**均布、卡面 210×150 时无正面积重叠。上半弧 = −30° → 210°，
+ * **座位号 +1 在自己的右手边**（−30° 在屏幕右下），因此对手按「自己 + 1、+2 …」逆时针排。
+ * 2 人局只有一个对手：正上方（90°）。
+ *
+ * 只算**设计坐标**（相对 1600×608 舞台的像素）；渲染时再换算成百分比，
+ * 于是 16:9 壳整体缩放时座位比例不变（`data-ring-x` / `data-ring-y` 落的就是这个坐标，
+ * 烟测用它算矩形、断言无重叠）。
+ */
+const RING_STAGE = { width: 1600, height: 608, cx: 800, cy: 370, rx: 680, ry: 235 };
+
+function ringLayout(playerCount) {
+  const count = Number(playerCount) || 0;
+  if (count < 2) return [];
+  const opponents = count - 1;
+  const out = [];
+  for (let index = 0; index < opponents; index += 1) {
+    const angle = opponents === 1 ? 90 : -30 + (240 * index) / (opponents - 1);
+    const rad = (angle * Math.PI) / 180;
+    out.push({
+      seatOffset: index + 1,
+      angle,
+      x: RING_STAGE.cx + RING_STAGE.rx * Math.cos(rad),
+      y: RING_STAGE.cy - RING_STAGE.ry * Math.sin(rad),
+    });
+  }
+  return out;
+}
+
+/** 公开身份配比（4~8 人身份局）。**显示副本**：真源住 `src/sgs/data/identities.py`，
+ *  这里只用于顶栏那块公开信息，不参与任何合法性判定。2 人局 = 无身份局，返回 null。 */
+const IDENTITY_RATIOS = {
+  4: [1, 1, 1, 1],
+  5: [1, 1, 2, 1],
+  6: [1, 1, 3, 1],
+  7: [1, 2, 3, 1],
+  8: [1, 2, 4, 1],
+};
+
+function identityRatioText(playerCount) {
+  const counts = IDENTITY_RATIOS[playerCount];
+  if (!counts) return null;
+  const [lord, loyalist, rebel, renegade] = counts;
+  return `主×${lord} 忠×${loyalist} 反×${rebel} 内×${renegade}`;
+}
+
+/** 当前是第几轮：**显示用**的近似——记一次 `TURN_START` 走一格，按人数折回。
+ *
+ * 引擎侧没有轮次计数器（`PlayerView` 只给 `turn_seat` / `phase`），座位阵亡会跳过回合，
+ * 故它可能比真实轮次略大；等 U2 的回放工作台再加服务端轮次字段。顶栏不拿它做任何判据。
+ */
+function roundNumber(records, playerCount) {
+  const starts = (records || []).filter(
+    (record) => record && record.kind === "timing" && record.timing === "TURN_START",
+  ).length;
+  if (!playerCount || starts === 0) return 1;
+  return Math.floor(starts / playerCount) + 1;
+}
+
+/** 座位卡的装备区 / 判定区行（公开信息，逐座位下发；只写数量分不清"谁的判定区"）。
+ *
+ * **本人自己**的可见区在「提供一张 B」（票 14）与预发动（W4-1）的选牌步里就地可点；
+ * 别人的区与其余窗口保持静态。返回直接可挂到座位节点（或自己面板右块）的行节点。
+ */
+function seatZoneRows(player, snapshot, pendingNow) {
+  const rows = [];
+  for (const [zone, cards] of [["equip", player.equip || []], ["judge", player.judge || []]]) {
+    if (!cards.length) continue;
+    const row = document.createElement("div");
+    row.className = "cards mini";
+    row.setAttribute("data-zone", zone);
+    row.setAttribute("data-seat", String(player.seat));
+    for (const card of cards) {
+      const ownInteractive = player.seat === snapshot.seat
+        && (isProvide(pendingNow) || state.preactivation);
+      if (!ownInteractive) {
+        row.appendChild(cardChip(card, false, true));
+        continue;
+      }
+      const face = cardFace(pendingNow, card);
+      row.appendChild(
+        cardChip(card, face.selected, false, face.selectable, () => activateCard(pendingNow, card, face)),
+      );
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+/** 座位卡的交互态（可指定 / 已选 / 必选）与点击行为，对手与自己的面板共用一份判据。 */
+function seatInteraction(player, ctx) {
+  const { seatOf, handPick, selfOnly, optionChoiceAt, preSeats, pendingNow } = ctx;
+  const classes = [];
+  let handler = null;
+  const seatState = seatOf(player.seat);
+  if (state.preactivation) {
+    if (preSeats && preSeats.includes(`${SEAT_PREFIX}${player.seat}`)) {
+      const answer = state.preactivation.answers[state.preactivation.cursor];
+      const required = preactivationRequiredSeat(
+        state.preactivation, pendingNow, state.preactivation.cursor);
+      if (required === `${SEAT_PREFIX}${player.seat}`) classes.push("req");
+      if (answer && answer.values.includes(player.seat)) classes.push("tsel");
+      else classes.push("targetable");
+      handler = () => selectPreativationSeat(player.seat);
+    }
+  } else if (handPick && !selfOnly) {
+    if (seatState && seatState.selected) {
+      classes.push("tsel");
+      handler = () => selectTarget(player.seat);
+    } else if (seatState && seatState.isTargetable) {
+      classes.push("targetable");
+      handler = () => selectTarget(player.seat);
+    }
+  } else {
+    const optionChoice = optionChoiceAt(player.seat);
+    if (optionChoice !== null) {
+      // 选座位形态（【遗计】"交给谁"）：座位可点，选中的那座画成确定态。
+      const optionSelected = state.selectedOption !== null
+        && (pendingNow.legal_actions[state.selectedOption] || {}).choice === optionChoice;
+      if (optionSelected) classes.push("tsel");
+      else classes.push("targetable");
+      handler = () => selectOptionSeat(player.seat);
+    }
+  }
+  return { classes, handler };
+}
+
+/** 环上座位：只画**对手**（自己 = 底部独立面板，不占环上座位）。 */
+function renderRingSeats(view, ctx) {
+  const snapshot = view.snapshot;
+  const ring = $("t-seats");
+  ring.innerHTML = "";
+  const layout = ringLayout(snapshot.players.length);
+  const bySeat = new Map(snapshot.players.map((player) => [player.seat, player]));
+  for (let offset = 1; offset < snapshot.players.length; offset += 1) {
+    const player = bySeat.get((snapshot.seat + offset) % snapshot.players.length);
+    const position = layout[offset - 1];
+    if (!player || !position) continue;
+    const box = document.createElement("div");
+    box.className = "seat opponent";
+    if (!player.alive) box.classList.add("dead");
+    if (player.seat === snapshot.turn_seat) box.classList.add("turn");
+    const { classes, handler } = seatInteraction(player, ctx);
+    for (const name of classes) box.classList.add(name);
+    const hero = view.heroes[player.seat] || "（无武将）";
+    const identity = player.identity ? ` · ${identityLabel(player.identity)}` : "";
+    box.setAttribute("data-seat", String(player.seat));
+    // 环桌几何：设计坐标落成属性（烟测据此断言均布 / 无重叠），百分比落成定位。
+    box.setAttribute("data-ring-angle", position.angle.toFixed(2));
+    box.setAttribute("data-ring-x", position.x.toFixed(2));
+    box.setAttribute("data-ring-y", position.y.toFixed(2));
+    if (box.style) {
+      box.style.left = `${(position.x / RING_STAGE.width) * 100}%`;
+      box.style.top = `${(position.y / RING_STAGE.height) * 100}%`;
+    }
+    box.innerHTML = `
+      <div class="top">
+        <span class="who">座位 ${player.seat}</span>
+        <span class="hp">${hpMarks(player)}</span>
+      </div>
+      <div class="small">${hero}${identity}</div>
+      <div class="small">手牌 ${player.hand_count}　装备 ${(player.equip || []).length}　判定 ${(player.judge || []).length}</div>
+      <div class="small">${player.alive ? "" : "已阵亡"}</div>`;
+    for (const row of seatZoneRows(player, snapshot, ctx.pendingNow)) box.appendChild(row);
+    if (handler) box.addEventListener("click", handler);
+    ring.appendChild(box);
+  }
+}
+
+function hpMarks(player) {
+  const hp = Math.max(0, player.hp || 0);
+  const max = Math.max(hp, player.hp_max || 0);
+  return `${"●".repeat(hp)}${"○".repeat(max - hp)}`;
+}
+
+/** 自己的底部面板：武将块（左）+ 判定 / 装备区（右）。节点是常驻的，故只改内容不重建，
+ *  以免抹掉 `#t-hero` 这类稳定 id（回放 / 烟测都按 id 找它）。 */
+function renderSelfSeat(view, ctx) {
+  const snapshot = view.snapshot;
+  const player = snapshot.players.find((item) => item.seat === snapshot.seat);
+  const box = $("t-self-seat");
+  if (!player || !box) return;
+  const { classes, handler } = seatInteraction(player, ctx);
+  box.setAttribute("data-seat", String(snapshot.seat));
+  box.classList.add("me");
+  box.classList.toggle("dead", !player.alive);
+  box.classList.toggle("turn", player.seat === snapshot.turn_seat);
+  for (const name of ["targetable", "tsel", "req"]) {
+    box.classList.toggle(name, classes.includes(name));
+  }
+  // 静态节点复用：用 onclick 属性覆盖，避免每次渲染再叠一个监听器。
+  box.onclick = handler || null;
+  $("t-self-seatno").textContent = `座位 ${player.seat}`;
+  $("t-self-identity").textContent = player.identity ? identityLabel(player.identity) : "";
+  $("t-self-hp").textContent = hpMarks(player);
+  $("t-self-hand").textContent = String(player.hand_count);
+  $("t-hero").textContent = view.heroes[snapshot.seat] || "（无武将）";
+  const zones = $("t-self-zones");
+  if (zones) {
+    zones.innerHTML = "";
+    for (const row of seatZoneRows(player, snapshot, ctx.pendingNow)) zones.appendChild(row);
+  }
+}
+
+/** 顶栏那块公开身份配比：1v1 无身份局整块隐藏。 */
+function renderIdentityPanel(playerCount) {
+  const panel = $("t-identity-panel");
+  const ratio = $("t-identity-ratio");
+  const text = identityRatioText(playerCount);
+  if (panel) panel.classList.toggle("hidden", text === null);
+  if (ratio) ratio.textContent = text === null ? "" : text;
+}
+
 /* ------------------------------------------------------------------ 牌桌 */
 
 function renderTable() {
@@ -19,6 +236,14 @@ function renderTable() {
   // 都是公开事实；这里只画数量，不泄露牌堆顺序）。
   $("t-deck").textContent = String(snapshot.deck_count ?? 0);
   $("t-discard").textContent = String((snapshot.discard || []).length);
+  const rounds = $("t-round");
+  if (rounds) {
+    rounds.textContent = String(roundNumber(
+      state.logRecords.length ? state.logRecords : (view.records || []),
+      snapshot.players.length,
+    ));
+  }
+  renderIdentityPanel(snapshot.players.length);
 
   const pendingNow = view.pending || null;
   const handPick = isHandPick(pendingNow);
@@ -40,87 +265,10 @@ function renderTable() {
     ? (preactivationOptions(state.preactivation, state.preactivation.cursor)
       || snapshot.players.filter((player) => player.alive).map((player) => `${SEAT_PREFIX}${player.seat}`))
     : null;
+  const ctx = { seatOf, handPick, selfOnly, optionChoiceAt, preSeats, pendingNow };
 
-  const ring = $("t-seats");
-  ring.innerHTML = "";
-  for (const player of snapshot.players) {
-    const box = document.createElement("div");
-    box.className = "seat";
-    if (player.seat === snapshot.seat) box.classList.add("me");
-    if (!player.alive) box.classList.add("dead");
-    if (player.seat === snapshot.turn_seat) box.classList.add("turn");
-    const seatState = seatOf(player.seat);
-    const optionChoice = optionChoiceAt(player.seat);
-    const optionSelected = optionChoice !== null
-      && state.selectedOption !== null
-      && (pendingNow.legal_actions[state.selectedOption] || {}).choice === optionChoice;
-    if (state.preactivation) {
-      if (preSeats && preSeats.includes(`${SEAT_PREFIX}${player.seat}`)) {
-        const answer = state.preactivation.answers[state.preactivation.cursor];
-        const required = preactivationRequiredSeat(
-          state.preactivation, pendingNow, state.preactivation.cursor);
-        if (required === `${SEAT_PREFIX}${player.seat}`) box.classList.add("req");
-        if (answer && answer.values.includes(player.seat)) box.classList.add("tsel");
-        else box.classList.add("targetable");
-      }
-    } else if (handPick && !selfOnly) {
-      if (seatState && seatState.selected) box.classList.add("tsel");
-      else if (seatState && seatState.isTargetable) box.classList.add("targetable");
-    } else if (optionChoice !== null) {
-      // 选座位形态（【遗计】"交给谁"）：座位可点，选中的那座画成确定态。
-      if (optionSelected) box.classList.add("tsel");
-      else box.classList.add("targetable");
-    }
-    const hero = view.heroes[player.seat] || "（无武将）";
-    const identity = player.identity ? ` · ${identityLabel(player.identity)}` : "";
-    box.setAttribute("data-seat", String(player.seat));
-    box.innerHTML = `
-      <div class="top">
-        <span class="who">座位 ${player.seat}${player.seat === snapshot.seat ? "（我）" : ""}</span>
-        <span class="hp">${"●".repeat(Math.max(0, player.hp))}${"○".repeat(Math.max(0, player.hp_max - Math.max(0, player.hp)))}</span>
-      </div>
-      <div class="small">${hero}${identity}</div>
-      <div class="small">手牌 ${player.hand_count}　装备 ${player.equip.length}　判定 ${player.judge.length}</div>
-      <div class="small">${player.alive ? "" : "已阵亡"}</div>`;
-    // 装备区 / 判定区是**公开信息且逐座位**（`PlayerPublic.equip/judge` 早就下发了）：
-    // 只写数量会让"谁的判定区里有乐不思蜀"看不见，进而把别人的判定误读成自己的。
-    for (const [zone, cards] of [["equip", player.equip || []], ["judge", player.judge || []]]) {
-      if (!cards.length) continue;
-      const row = document.createElement("div");
-      row.className = "cards mini";
-      row.setAttribute("data-zone", zone);
-      row.setAttribute("data-seat", String(player.seat));
-      for (const card of cards) {
-        // 「提供一张 B」面（票 14）：**本人自己**可见区域里的候选牌**就地**亮起、可点
-        // （【武圣】的来源可以是装备 / 判定区的红牌）；别人的区与其余窗口保持静态不可点。
-        // 预发动（W4-1）的选牌步同样在本人的装备区就地高亮（【制衡】/【贯石】的代价牌）。
-        const ownInteractive = player.seat === snapshot.seat
-          && (isProvide(pendingNow) || state.preactivation);
-        if (!ownInteractive) {
-          row.appendChild(cardChip(card, false, true));
-          continue;
-        }
-        const face = cardFace(pendingNow, card);
-        row.appendChild(
-          cardChip(card, face.selected, false, face.selectable, () => activateCard(pendingNow, card, face)),
-        );
-      }
-      box.appendChild(row);
-    }
-    if (state.preactivation) {
-      if (preSeats && preSeats.includes(`${SEAT_PREFIX}${player.seat}`)) {
-        box.addEventListener("click", () => selectPreativationSeat(player.seat));
-      }
-    } else if (seatState && !selfOnly) {
-      if (seatState.selected || seatState.isTargetable) {
-        box.addEventListener("click", () => selectTarget(player.seat));
-      }
-    } else if (optionChoiceAt(player.seat)) {
-      // 选座位形态：只在座位上点，不在手牌上点（本窗口没有"选牌"这一步）。
-      box.addEventListener("click", () => selectOptionSeat(player.seat));
-    }
-    ring.appendChild(box);
-  }
+  renderRingSeats(view, ctx);
+  renderSelfSeat(view, ctx);
 
   // 快照到达时把处理区并进 `state.effectCards`（同一张牌保留回放期间的使用者标注）；
   // 回放期间不并——那份是逐事件派生的，快照要等播完才提交。
@@ -138,7 +286,6 @@ function renderTable() {
       cardChip(card, face.selected, false, face.selectable, () => activateCard(pendingNow, card, face)),
     );
   }
-  $("t-hero").textContent = view.heroes[snapshot.seat] || "（无武将）";
   renderSkills(view);
 }
 
@@ -151,6 +298,28 @@ function renderProcessing() {
   renderEffectCards($("t-processing"), state.effectCards || []);
   const contextNode = $("t-context");
   if (contextNode) contextNode.textContent = describeEffect(state.effectCards || []);
+  renderStageAction();
+}
+
+/** 中央舞台上层 = 当前动作（最近一条应答的人话；没有就写"等待行动"）。
+ *
+ * **结算完淡出**用「处理区是否为空」当判据（无计时器）：牌还在处理区 = 正在结算（不透明），
+ * 牌全走了 = 这条动作已经落定（`.faded` 半透明 + CSS 过渡）。历史仍进事件流。
+ */
+function renderStageAction() {
+  const textNode = $("t-action-text");
+  if (!textNode) return;
+  const records = state.logRecords || [];
+  let lastAction = null;
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    if (records[index] && records[index].kind === "action") {
+      lastAction = records[index];
+      break;
+    }
+  }
+  textNode.textContent = lastAction ? describeAction(lastAction.action) : "等待行动";
+  const layer = $("t-action-layer");
+  if (layer) layer.classList.toggle("faded", !(state.effectCards || []).length);
 }
 
 /** 把一组"处理区牌"画进任意容器（牌桌 / 回放页共用同一份渲染）。

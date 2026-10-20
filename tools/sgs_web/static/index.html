@@ -29,6 +29,7 @@
           <option value="6">6</option>
           <option value="5">5</option>
           <option value="4">4</option>
+          <option value="2">2（1v1 无身份局）</option>
         </select>
       </label>
       <label>AI 档位
@@ -64,76 +65,111 @@
   </section>
 </main>
 
-<!-- 牌桌页 -->
-<main id="view-table" class="view" hidden>
-  <div class="row space">
-    <div>
-      <span class="tag">种子</span> <code id="t-seed"></code>
-      <span class="tag">座位</span> <code id="t-seat"></code>
-      <span class="tag">回合计</span> <code id="t-phase"></code>
-      <span class="tag">轮到</span> <code id="t-turn"></code>
-      <span class="tag">牌堆</span> <code id="t-deck"></code>
-      <span class="tag">弃牌堆</span> <code id="t-discard"></code>
-    </div>
-    <div>
-      <span id="t-timer" class="timer"></span>
-      <button id="btn-delay" type="button" class="ghost" title="事件逐条回放的步长（0.05–0.5 秒，点一下换一档）">步长 0.1s</button>
-      <button id="btn-takeover" type="button" class="ghost" title="到时限由服务端确定性代答">请服务端判定</button>
-      <button id="btn-refresh" type="button" class="ghost">刷新</button>
-    </div>
-  </div>
-
-  <section id="t-seats" class="seats"></section>
-
-  <div class="cols">
-    <section class="panel grow">
-      <h2>我的区域</h2>
-      <div class="zone">
-        <h3>手牌 <span id="t-hand-count" class="dim"></span></h3>
-        <div id="t-hand" class="cards"></div>
+<!-- 牌桌页（U1-01 布局壳）
+     16:9 壳内三段：顶栏 / 中央舞台 / 底部面板。自己**不占环上座位**：对手沿上半弧均布，
+     自己在底部独立面板里；没有右侧固定栏。提示条只横跨手牌区。 -->
+<main id="view-table" class="view table-view" hidden>
+  <div id="table-shell" class="table-shell">
+    <!-- 顶栏：左身份配比 / 中轮次与当前行动者 / 右牌堆弃牌堆 + 设置 + 回放入口。不放计时器。 -->
+    <div id="table-topbar" class="table-topbar">
+      <div id="t-identity-panel" class="topbar-left">
+        <span class="tag">身份</span>
+        <span id="t-identity-ratio" class="ratio">—</span>
       </div>
-      <div class="zone">
-        <h3>我的武将</h3>
-        <div id="t-hero" class="dim"></div>
+      <div class="topbar-center">
+        <span class="round">第 <span id="t-round">—</span> 轮</span>
+        <span class="sep">·</span>
+        <span class="tag">回合计</span><code id="t-phase"></code>
+        <span class="tag">轮到</span><code id="t-turn"></code>
       </div>
-    </section>
+      <div class="topbar-right">
+        <span class="count" title="牌堆剩余">牌堆 <span id="t-deck"></span></span>
+        <span class="count" title="弃牌堆">弃牌 <span id="t-discard"></span></span>
+        <button id="btn-settings" type="button" class="icon-btn" title="牌桌设置">设置</button>
+        <button id="btn-go-replay" type="button" class="icon-btn" title="打开回放页">回放</button>
+        <div id="t-settings" class="settings" hidden>
+          <div class="settings-row">
+            <span class="tag">种子</span> <code id="t-seed"></code>
+            <span class="tag">座位</span> <code id="t-seat"></code>
+          </div>
+          <div class="settings-row">
+            <button id="btn-delay" type="button" class="ghost" title="事件逐条回放的步长（0.05–0.5 秒，点一下换一档）">步长 0.1s</button>
+            <button id="btn-takeover" type="button" class="ghost" title="到时限由服务端确定性代答">请服务端判定</button>
+            <button id="btn-refresh" type="button" class="ghost">刷新</button>
+          </div>
+        </div>
+      </div>
+    </div>
 
-    <section class="panel grow">
-      <h2>技能 <span class="dim">（绿色=现在能发动；深灰=主动技但现在不满足；银灰=锁定/被动，引擎在时机上自动派发）</span></h2>
+    <!-- 中央舞台：上层 = 当前动作，下层 = 处理区。结算完淡出（CSS 过渡）。 -->
+    <div id="table-stage" class="table-stage">
+      <section id="t-seats" class="seats ring" aria-label="对手座位"></section>
+      <div id="stage-center" class="stage-center">
+        <div id="t-action-layer" class="action-layer">
+          <div class="stage-title">当前动作</div>
+          <div id="t-action-text" class="action-text">等待行动</div>
+        </div>
+        <div class="stage-divider"></div>
+        <div class="stage-title">处理区</div>
+        <div id="t-processing" class="cards processing"></div>
+        <p id="t-context" class="context"></p>
+      </div>
+      <div id="table-hint" class="table-hint">建议横屏平板 / 桌面</div>
+    </div>
+
+    <!-- 底部面板（自己）：事件流按钮 | 手牌区 | 技能按钮区 | 自己的武将块 | 自己的判定 / 装备区 -->
+    <div id="table-bottom" class="table-bottom">
+      <button id="t-log-toggle" type="button" class="log-btn" aria-expanded="false" title="展开 / 收起事件流"><b>≡</b><span>记录</span></button>
+      <div class="hand-area">
+        <div id="t-promptbar" class="promptbar">
+          <div class="prompt-main">
+            <p id="t-prompt" class="prompt">（等引擎提问）</p>
+            <p id="t-skill-hints" class="hint"></p>
+            <p id="t-target-hint" class="hint"></p>
+            <div id="t-options" class="options"></div>
+          </div>
+          <div class="prompt-side">
+            <span id="t-timer" class="timer"></span>
+            <div class="prompt-actions">
+              <button id="btn-submit" type="button" class="primary" disabled>提交</button>
+              <button id="btn-cancel" type="button" class="ghost" disabled>清空选择</button>
+            </div>
+            <span id="t-choice" class="dim"></span>
+          </div>
+        </div>
+        <div class="hand-head">
+          <span class="tag">手牌</span>
+          <span id="t-hand-count" class="dim"></span>
+        </div>
+        <div id="t-hand" class="cards hand"></div>
+      </div>
       <div id="t-skills" class="skills"></div>
-    </section>
+      <div id="t-self-seat" class="seat self" data-seat="0">
+        <div class="hero-block">
+          <div class="seat-head">
+            <span id="t-self-seatno" class="who">座位 0</span>
+            <span id="t-self-identity" class="identity-chip"></span>
+            <span id="t-self-hp" class="hp"></span>
+          </div>
+          <div id="t-hero" class="hero-name">（无武将）</div>
+          <div class="seat-foot"><b><span id="t-self-hand">0</span> 张手牌</b></div>
+        </div>
+        <div id="t-self-zones" class="side-block"></div>
+      </div>
+    </div>
 
-    <section class="panel grow">
-      <h2>询问</h2>
-      <div class="zone">
-        <h3>效果区 / 处理区
-          <span class="dim">（公开：亮出的牌所有人都看得见，不只在轮到自己时）</span>
-        </h3>
-        <div id="t-processing" class="cards"></div>
+    <!-- 事件流浮层：默认折叠；按钮在底部最左，浮层在它上方。 -->
+    <div id="t-log-panel" class="log-panel" hidden>
+      <div class="log-head">
+        <b>事件流</b>
+        <select id="t-log-mode" title="事件流的详略">
+          <option value="focus" selected>重点（隐藏对手的响应往来）</option>
+          <option value="all">全部（逐条，含对手响应）</option>
+        </select>
       </div>
-      <p id="t-context" class="context"></p>
-      <p id="t-prompt" class="prompt">（等引擎提问）</p>
-      <p id="t-skill-hints" class="hint"></p>
-      <p id="t-target-hint" class="hint"></p>
-      <div id="t-options" class="options"></div>
-      <div class="row">
-        <button id="btn-submit" type="button" class="primary" disabled>提交</button>
-        <button id="btn-cancel" type="button" class="ghost" disabled>清空选择</button>
-        <span id="t-choice" class="dim"></span>
-      </div>
-    </section>
+      <ol id="t-log" class="log"></ol>
+    </div>
   </div>
-
-  <section class="panel">
-    <h2>事件流
-      <span class="dim">（只显示公开事实；对手手牌只有数量）</span>
-      <select id="t-log-mode" title="事件流的详略">
-        <option value="focus" selected>重点（隐藏对手的响应往来）</option>
-        <option value="all">全部（逐条，含对手响应）</option>
-      </select>
-    </h2>
-    <ol id="t-log" class="log"></ol>
-  </section>
 </main>
 
 <!-- 回放页 -->

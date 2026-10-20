@@ -155,3 +155,288 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 }
 .skill.ready:hover { background: #d3ecdd; }
 .skill .kind { display: block; font-size: 11px; color: inherit; opacity: .75; }
+
+/* ==========================================================================
+   U1-01 牌桌布局壳：16:9 · 顶栏 / 中央舞台 / 底部面板（自己不在环上）
+   ========================================================================== */
+
+[hidden] { display: none !important; }
+
+.table-view { max-width: none; padding: 0; }
+
+.table-shell {
+  position: relative;
+  width: min(100%, calc((100vh - 64px) * 16 / 9));
+  aspect-ratio: 16 / 9;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: radial-gradient(ellipse at 50% 55%, #f8f0df 0%, #f2e7d2 62%, #eaddc4 100%);
+  border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+}
+
+/* ---------- 顶栏：左身份配比 / 中轮次与当前行动者 / 右牌堆弃牌堆 + 设置 + 回放 ---------- */
+
+.table-topbar {
+  flex: 0 0 6.2%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 0.9%;
+  background: rgba(255, 253, 247, .9);
+  border-bottom: 1px solid var(--line);
+  position: relative;
+  z-index: 20;
+}
+.topbar-left, .topbar-center, .topbar-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.topbar-left { flex: 1 1 auto; }
+.topbar-left.hidden { visibility: hidden; }
+/* 中间真正居中：轮次 / 行动者不随左右两块的长度漂移。 */
+.topbar-center {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  flex: 0 0 auto; font-size: 13px; white-space: nowrap;
+}
+.topbar-center .round { font-weight: 700; }
+.topbar-center .round #t-round { font-weight: 700; font-variant-numeric: tabular-nums; }
+.topbar-center .sep { color: var(--line); }
+.topbar-right { flex: 1 1 auto; justify-content: flex-end; position: relative; }
+.ratio { font-size: 12px; color: var(--ink); letter-spacing: .02em; }
+.topbar-center .tag { margin-left: 0; }
+.topbar-right .count {
+  font-size: 12px; color: var(--dim); border: 1px solid var(--line);
+  border-radius: 7px; padding: 2px 8px; background: #fff; white-space: nowrap;
+}
+.topbar-right .count span { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.icon-btn {
+  font: inherit; font-size: 12px; padding: 3px 9px; border: 1px solid var(--line);
+  background: #fff; border-radius: 7px; color: var(--dim); cursor: pointer;
+}
+.icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.settings {
+  position: absolute; right: 0; top: calc(100% + 6px); width: 250px;
+  display: flex; flex-direction: column; gap: 8px; padding: 10px;
+  background: #fffdf8; border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 12px 30px rgba(43, 36, 28, .18); z-index: 40;
+}
+.settings-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+/* ---------- 中央舞台：上层当前动作 / 下层处理区 ---------- */
+
+.table-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+/* 环桌椭圆 = 座位中心所在的 rx 680 / ry 235 椭圆（1600×608 设计舞台的 85% × 77.3%）。 */
+.table-stage::before {
+  content: "";
+  position: absolute; left: 50%; top: 60.85%;
+  width: 85%; height: 77.3%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 2px solid rgba(150, 122, 82, .26);
+  background: radial-gradient(ellipse at center, rgba(255, 251, 239, .88) 0%, rgba(231, 215, 186, .55) 58%, rgba(205, 184, 148, .32) 100%);
+  box-shadow: inset 0 0 80px rgba(120, 92, 54, .10);
+  pointer-events: none;
+}
+
+.seats.ring { position: absolute; inset: 0; display: block; }
+
+.ring .seat {
+  position: absolute;
+  width: 13.125%;
+  aspect-ratio: 210 / 150;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  padding: 5px 7px;
+  overflow: hidden;
+  background: #fffdf8;
+  z-index: 3;
+}
+.ring .seat .top { align-items: baseline; }
+.ring .seat .who { font-size: 12px; }
+.ring .seat .small { font-size: 10px; line-height: 1.35; }
+.ring .seat .hp { font-size: 10px; letter-spacing: 0; }
+.ring .seat .cards.mini { gap: 3px; margin-top: 2px; }
+.ring .seat .cards.mini .card { min-width: 0; padding: 1px 4px; font-size: 9px; }
+.ring .seat.targetable { border-color: var(--ok); box-shadow: 0 0 0 4px rgba(29, 107, 58, .55); cursor: pointer; }
+.ring .seat.tsel { border-color: var(--ok); background: #e7f5ec; box-shadow: inset 0 0 0 4px var(--ok); }
+.ring .seat.turn { border-color: #b8860b; box-shadow: 0 0 0 2px #f0dca8, 0 0 0 4px #b8860b; }
+.ring .seat.turn.targetable { box-shadow: 0 0 0 2px #f0dca8, 0 0 0 5px var(--ok); }
+
+.stage-center {
+  position: absolute; left: 50%; top: 60.85%;
+  transform: translate(-50%, -50%);
+  width: 24%; min-height: 22%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; padding: 8px 10px;
+  background: rgba(255, 252, 243, .86);
+  border: 1px solid rgba(150, 122, 82, .38);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(43, 36, 28, .10);
+  z-index: 4;
+}
+.stage-title { font-size: 10px; letter-spacing: .14em; color: var(--dim); text-align: center; }
+.action-layer { width: 100%; transition: opacity .5s ease; }
+.action-layer.faded { opacity: .32; }
+.action-text {
+  font-size: 12px; font-weight: 600; text-align: center; margin: 3px 0 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.stage-divider { width: 100%; border-top: 1px dashed rgba(150, 122, 82, .36); margin: 4px 0; }
+.stage-center .processing { justify-content: center; gap: 5px; min-height: 18px; }
+.stage-center .processing .card { min-width: 0; padding: 2px 7px; font-size: 11px; }
+.stage-center .context { margin: 2px 0 0; font-size: 11px; text-align: center; }
+
+.table-hint {
+  display: none;
+  position: absolute; left: 50%; bottom: 4px; transform: translateX(-50%);
+  font-size: 10px; color: var(--dim); background: rgba(255, 253, 247, .9);
+  border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px;
+}
+
+/* ---------- 底部面板：事件流按钮 | 手牌区 | 技能 | 自己的武将块 | 自己的判定 / 装备 ---------- */
+
+.table-bottom {
+  flex: 0 0 27.5%;
+  min-height: 130px;
+  display: flex;
+  align-items: stretch;
+  gap: 0.6%;
+  padding: 0.55% 0.9% 0.65%;
+  background: linear-gradient(180deg, #f3ead9 0%, #eee1ca 100%);
+  border-top: 1px solid var(--line);
+  position: relative;
+  z-index: 10;
+}
+
+.log-btn {
+  flex: 0 0 40px;
+  padding: 0;
+  align-self: flex-end;
+  height: 64%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fffdf8;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+}
+.log-btn b { font-size: 17px; line-height: 1; }
+.log-btn span { font-size: 10px; color: var(--dim); white-space: nowrap; word-break: keep-all; }
+.log-btn:hover { border-color: var(--accent); color: var(--accent); }
+.log-btn[aria-expanded="true"] { border-color: var(--accent); }
+
+.hand-area {
+  flex: 1 1 auto; min-width: 0; min-height: 0;
+  display: flex; flex-direction: column; justify-content: flex-end; gap: 3px;
+}
+.promptbar {
+  display: flex; align-items: flex-end; gap: 10px;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 253, 247, .92);
+  min-height: 40px;
+  max-height: 48%;
+  overflow: auto;
+}
+.promptbar .prompt-main { flex: 1 1 auto; min-width: 0; }
+.promptbar .prompt { margin: 0; font-size: 13px; font-weight: 600; }
+.promptbar .hint { margin: 0; font-size: 11px; }
+.promptbar .options { flex-direction: row; flex-wrap: wrap; gap: 6px; margin: 4px 0 0; }
+.prompt-side {
+  flex: 0 0 auto; display: flex; flex-direction: row; align-items: center;
+  justify-content: flex-end; flex-wrap: wrap; gap: 6px;
+}
+.prompt-actions { display: flex; gap: 6px; }
+.prompt-actions button { padding: 4px 10px; font-size: 12px; }
+.prompt-side .timer { font-size: 12px; }
+.prompt-side .dim { font-size: 11px; }
+
+.hand-head { display: flex; align-items: baseline; gap: 8px; padding: 0 2px; }
+.hand-head .tag { margin-left: 0; }
+.hand {
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-wrap: nowrap; align-items: flex-end; justify-content: center;
+  justify-content: safe center; gap: 6px;
+  overflow-x: auto; overflow-y: hidden;
+  padding: 2px;
+}
+.hand .card { flex: 0 0 auto; line-height: 1.2; }
+
+#t-skills {
+  flex: 0 0 10.5%;
+  min-width: 88px;
+  align-content: flex-end;
+  overflow-y: auto;
+  padding-bottom: 2px;
+}
+#t-skills .skill { font-size: 12px; padding: 4px 8px; white-space: nowrap; }
+
+/* 自己的座位块：左武将块 + 右判定 / 装备区（3 行同构；U1-02 再做细化）。 */
+.seat.self {
+  flex: 0 0 18.25%;
+  height: 89%;
+  align-self: flex-end;
+  display: flex;
+  padding: 0;
+  overflow: hidden;
+  background: #fffdf8;
+  border-color: #c8a96b;
+}
+.self .hero-block {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 8px 9px;
+}
+.seat-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.self .who { font-size: 12px; }
+.self .identity-chip {
+  font-size: 10px; color: var(--accent); border: 1px solid var(--accent-soft);
+  background: var(--accent-soft); border-radius: 999px; padding: 0 7px;
+}
+.self .identity-chip:empty { display: none; }
+.self .hp { font-size: 12px; }
+.self .hero-name { font-size: 15px; font-weight: 700; }
+.self .seat-foot { margin-top: auto; font-size: 11px; color: var(--dim); }
+.self .side-block {
+  flex: 0 0 44.5%;
+  border-left: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 6px;
+  overflow: hidden;
+}
+.self .side-block .cards.mini { gap: 4px; margin-top: 0; }
+.self .side-block .cards.mini[data-zone="judge"] .card { border-style: dashed; }
+.seat.self.targetable { border-color: var(--ok); box-shadow: 0 0 0 4px rgba(29, 107, 58, .55); cursor: pointer; }
+.seat.self.tsel { border-color: var(--ok); background: #e7f5ec; box-shadow: inset 0 0 0 4px var(--ok); }
+.seat.self.req { outline: 2px dashed #b8860b; }
+.seat.self.turn { border-color: #b8860b; box-shadow: 0 0 0 2px #f0dca8, 0 0 0 4px #b8860b; }
+
+/* ---------- 事件流浮层 ---------- */
+
+.log-panel {
+  position: absolute; left: 0.9%; bottom: 27.2%;
+  width: 26.25%; max-height: 62%;
+  display: flex; flex-direction: column;
+  background: rgba(255, 253, 247, .98);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 18px 44px rgba(43, 36, 28, .24);
+  overflow: hidden;
+  z-index: 30;
+}
+.log-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 7px 10px; border-bottom: 1px solid var(--line); font-size: 13px;
+}
+.log-head select { font-size: 12px; padding: 3px 6px; }
+.log-panel .log { flex: 1 1 auto; max-height: none; overflow: auto; font-size: 12px; padding: 8px 10px 8px 26px; }
+
+@media (max-height: 560px) {
+  .table-hint { display: block; }
+}
