@@ -50,7 +50,12 @@ from sgs.state import (  # noqa: E402
     project,
 )
 from sgs.timing import Timing  # noqa: E402
-from sgs_web.display import card_display, prompt_display  # noqa: E402
+from sgs_web.display import (  # noqa: E402
+    CARD_ATTRIBUTES,
+    CARD_KINDS,
+    card_display,
+    prompt_display,
+)
 from sgs_web.projection import (  # noqa: E402
     build_skills,
     candidate_index,
@@ -3298,7 +3303,13 @@ def test_the_public_seat_reads_chained_and_wine_from_engine_state() -> None:
 
 
 def test_the_card_contract_maps_fire_and_thunder_slashes_to_the_product_name() -> None:
-    """火杀 / 雷杀都显示「杀」；属性分开（火焰 / 雷电），转化牌带来源牌。"""
+    """火杀 / 雷杀都显示「杀」；属性分开（火焰 / 雷电），转化牌带来源牌。
+
+    标准包还没有军争的 ``fire_slash`` / ``thunder_slash``（U1-04b 只预写描述），
+    故这里是**契约单元**的合成牌面；真实载荷路径（普通杀 / 闪 / 桃）由
+    ``test_every_visible_card_carries_the_display_contract`` 与
+    ``test_the_pending_payload_carries_display_fields...`` 覆盖。
+    """
     from sgs.state import CardRef
     from sgs_web.display import card_display
 
@@ -3375,8 +3386,8 @@ def test_every_visible_card_carries_the_display_contract() -> None:
     assert cards, "快照里必须有牌，否则这条断言是空转"
     for card in cards:
         assert card["display_name"], f"牌 {card['card_id']} 缺 display_name"
-        assert card["attribute"] in ("普通", "火焰", "雷电"), card
-        assert card["kind"] in ("normal", "virtual", "transformed"), card
+        assert card["attribute"] in CARD_ATTRIBUTES, card
+        assert card["kind"] in CARD_KINDS, card
         assert isinstance(card["source_cards"], list), card
 
     for player in snapshot["players"]:
@@ -3440,3 +3451,72 @@ def test_the_seat_contract_maps_the_identity_label_and_live_state() -> None:
     assert lord["chained"] is True and lord["wine_active"] is False
     assert rebel["identity_label"] is None, "查看者 0 看不到反贼的身份 ⇒ 标签也是 None"
     assert rebel["wine_active"] is True
+
+
+def test_the_web_snapshot_reveals_a_seat_marked_identity_visible() -> None:
+    """M5 亮明效果的投影入口：字段一旦写进状态，网页快照立刻带标签。
+
+    本票不新增亮明效果（不加 delta），故写字段的**产品调用点**要等 M5；这里用真的
+    ``visible_snapshot`` 走完整投影 / 展示链路，证明读取方不是只读合成 ``project``。
+    """
+    session = Session(seed=67, ai="random", timeout_seconds=None, player_count=5)
+    target = next(
+        player
+        for player in session.engine.state.players
+        if player.identity is not Identity.LORD and player.alive
+    )
+    target.identity_visible = True
+
+    snapshot = visible_snapshot(session)
+    payload = next(p for p in snapshot["players"] if p["seat"] == target.seat)
+
+    assert payload["identity"] == target.identity.value, "字段为真 ⇒ 身份可见"
+    assert payload["identity_label"] in ("主公", "忠臣", "反贼", "内奸")
+
+
+def test_the_web_snapshot_reads_true_chained_and_wine_from_the_state() -> None:
+    """真值走完整 ``visible_snapshot``：座位字段不是只在 ``project`` 里可读。"""
+    session = Session(seed=61, ai="random", timeout_seconds=None, player_count=5)
+    target = session.engine.state.players[1]
+    target.chained = True
+    target.wine_active = True
+
+    snapshot = visible_snapshot(session)
+    payload = next(p for p in snapshot["players"] if p["seat"] == target.seat)
+
+    assert payload["chained"] is True
+    assert payload["wine_active"] is True
+
+
+def test_a_bare_query_rebuilds_transformed_source_cards_from_the_query_itself() -> None:
+    """409 拿不到引擎：来源牌从询问自己的视角 / 选择面里找，不给空来源就完事。"""
+    from sgs.state import CardRef, Slot, Zone, ZoneRef
+
+    pack = load_content_pack(deck_profile="standard_108")
+    source_id = cards_of_type(pack, "slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hand=(source_id,)), SeatSpec(hp=4)],
+        deck=tuple(range(10)),
+    )
+    view = project(state, 0)
+    virtual = CardRef(
+        card_id=-3, type="slash", name="杀", virtual_sources=(source_id,)
+    )
+    query = SelectCardsQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="提供一张【杀】继续使用",
+        legal_actions=(),
+        view=view,
+        spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1)),
+        slots=(Slot(ref=ZoneRef(Zone.HAND, 0), card=virtual),),
+    )
+
+    payload = pending_payload(query, human_seat=0)
+
+    card = payload["slots"][0]["card"]
+    assert card["kind"] == "transformed"
+    assert [item["card_id"] for item in card["source_cards"]] == [source_id]
+    assert payload["prompt_display"] is None, "没有候选时显式不给提示契约，不伪造默认动作"

@@ -6,9 +6,12 @@
   :class:`~sgs.state.CardRef` / :class:`~sgs.state.PlayerPublic` / :class:`~sgs.state.Query`。
 - 卡面的 ``display_name`` / ``attribute`` / ``kind`` / ``source_cards`` 与提示条的
   ``text`` / ``default_action`` / ``default_label`` 都从这里出；前端不再另抄一份
-  "火杀 / 雷杀叫杀"的映射。
-- 身份标签（``主公 / 忠臣 / 反贼 / 内奸``）也只在这里映射一次；投影里的
+  "火杀 / 雷杀叫杀"的映射（读取口 = ``static/core.js: cardName``）。
+- 身份标签（``主公 / 忠臣 / 反贼 / 内奸``）也在这里映射一次；投影里的
   ``PlayerPublic.identity`` 仍是过滤后的枚举值（不可见时 ``None``）。
+- **消费节奏**：``display_name`` 已由 U1-04 的前端读取；``attribute`` / ``kind`` /
+  ``source_cards`` 归 U1-02（卡面）/ U1-07（虚拟 / 转化牌），``prompt_display`` 归
+  U1-03（提示条）。本模块先把契约发出去，不在前端提前造表现。
 
 **不塞进** :mod:`sgs_web.projection`：投影负责"哪些事实可见"，本模块负责"可见事实怎么显示"；
 描述全文（`descriptions.json`）归 U1-04b，不在本模块。
@@ -28,6 +31,7 @@ __all__ = [
     "CARD_ATTRIBUTES",
     "CARD_KINDS",
     "card_display",
+    "card_lookup_from_query",
     "decorate_pending",
     "decorate_snapshot",
     "prompt_display",
@@ -35,16 +39,16 @@ __all__ = [
 ]
 
 CARD_KINDS: tuple[str, ...] = ("normal", "virtual", "transformed")
-"""牌面的三种展示种类（稳定报文值；读取方 = 前端卡面）。"""
+"""牌面的三种展示种类（稳定报文值；读取口落在 U1-02 / U1-07 的卡面）。"""
 
 CARD_ATTRIBUTES: tuple[str, ...] = ("普通", "火焰", "雷电")
-"""牌面的属性（中文展示值；火杀 / 雷杀的产物按属性分色）。"""
+"""牌面的属性（中文展示值；U1-02 的卡面据此分色）。"""
 
 _SLASH_TYPES = frozenset({"slash", "fire_slash", "thunder_slash"})
 """都显示成「杀」的牌名 id：普通杀 / 火杀 / 雷杀。"""
 
-_FIRE_TYPES = frozenset({"fire_slash", "fire_attack"})
-"""火焰属性：火杀（军争）与火攻（军争）；军争落地前只有测试会构造它们。"""
+_FIRE_TYPES = frozenset({"fire_slash"})
+"""火焰属性：火杀（军争）；军争落地前只有测试会构造它（火攻的属性等 M5 落地时再补）。"""
 
 _THUNDER_TYPES = frozenset({"thunder_slash"})
 """雷电属性：雷杀（军争）。"""
@@ -97,7 +101,8 @@ def seat_display(player: PlayerPublic) -> dict[str, Any]:
     """座位卡的展示字段：横置 / 酒状态 + 身份中文标签（不可见时 ``None``）。
 
     ``chained`` / ``wine_active`` 来自投影（U1-04 起是 ``PlayerPublic`` 字段）；
-    网页载荷里的身份标签由这里统一映射（前端的旧 ``identityLabel`` 仅作合成 / 旧载荷兜底）。
+    网页载荷里的身份标签由这里统一给出，前端可优先读它；旧的 ``identityLabel`` 仅作
+    回放 / 合成载荷兜底。
     """
     return {
         "chained": bool(player.chained),
@@ -113,16 +118,10 @@ def prompt_display(query: Query) -> dict[str, Any]:
 
     默认动作的真源仍是 :func:`sgs_web.timeout.fallback_action`（``Pass → EndPhase →
     legal_actions[0]``）；这里只把它序列化成前端可直接显示的形状，不自己重新选。
-
-    没有候选（引擎不该出现的状态，但合成载荷 / 损坏报文里会有）时**不抛**：下发
-    ``default_action = None`` + 一句"超时由服务端判定"，别让展示派生把整份载荷打红。
+    没有候选是引擎不该出现的状态：与 ``fallback_action`` 一致直接抛，**不**编一个
+    ``None`` 默认动作把契约打成半截；调用方（``decorate_pending``）对损坏报文显式
+    下发 ``prompt_display = None``。
     """
-    if not query.legal_actions:
-        return {
-            "text": query.prompt,
-            "default_action": None,
-            "default_label": "超时由服务端判定",
-        }
     default = fallback_action(query)
     if isinstance(default, Pass):
         label = "超时将自动放弃"
@@ -137,7 +136,7 @@ def prompt_display(query: Query) -> dict[str, Any]:
     }
 
 
-def extend_card_dict(
+def _extend_card_dict(
     card: dict[str, Any], *, lookup: Mapping[int, CardRef] | None = None
 ) -> dict[str, Any]:
     """把展示字段并进一份**已序列化**的牌面 dict；幂等（已有 ``display_name`` 即原样返回）。"""
@@ -152,7 +151,35 @@ def _extend_card_list(
 ) -> list[Any]:
     if not isinstance(cards, list):
         return cards
-    return [extend_card_dict(card, lookup=lookup) for card in cards]
+    return [_extend_card_dict(card, lookup=lookup) for card in cards]
+
+
+def card_lookup_from_query(query: Query) -> dict[int, CardRef]:
+    """从**裸 Query**（409 里附带的现状）收集 ``card_id → CardRef``。
+
+    409 拿不到 ``Session.engine``，但询问自己带着视角 / 授予牌面 / 选择面槽位 / 候选牌；
+    转化牌的来源牌通常就在这些位置。只收询问里已经出现的牌，不额外读引擎、不越权。
+    """
+    cards: dict[int, CardRef] = {}
+
+    def add(card: CardRef | None) -> None:
+        if card is not None:
+            cards[card.card_id] = card
+
+    for card in query.view.self_hand:
+        add(card)
+    for player in query.view.players:
+        for card in (*player.equip, *player.judge):
+            add(card)
+    for card in query.revealed:
+        add(card)
+    for slot in getattr(query, "slots", ()) or ():
+        add(slot.card)
+    for action in query.legal_actions:
+        add(getattr(action, "card", None))
+        for card in getattr(action, "cards", ()) or ():
+            add(card)
+    return cards
 
 
 def decorate_snapshot(
@@ -188,17 +215,18 @@ def decorate_pending(
     """给一份 ``pending_payload`` 补展示字段（询问里的所有牌面 + 内嵌视角 + 提示条）。"""
     for entry in (payload.get("candidate_index") or {}).values():
         if isinstance(entry, dict):
-            entry["card"] = extend_card_dict(entry.get("card"), lookup=lookup)
+            entry["card"] = _extend_card_dict(entry.get("card"), lookup=lookup)
     # `legal_actions` **不装饰**：界面会把选中的候选**原样**回传，而 Action 模型
     # `extra="forbid"`——多出的 display_* 键会让提交变成 400。展示字段只挂在只读载体
     # （候选索引 / 选择面 / 授予的牌面 / 视角）上；候选文案由前端按 card_id 从
     # `candidate_index` 取展示名（见 `static/core.js: cardName`）。
     for slot in payload.get("slots") or []:
         if isinstance(slot, dict) and isinstance(slot.get("card"), dict):
-            slot["card"] = extend_card_dict(slot["card"], lookup=lookup)
+            slot["card"] = _extend_card_dict(slot["card"], lookup=lookup)
     payload["revealed"] = _extend_card_list(payload.get("revealed"), lookup=lookup)
     view = payload.get("view")
     if isinstance(view, dict):
         decorate_snapshot(view, query.view.players, lookup=lookup)
-    payload["prompt_display"] = prompt_display(query)
+    # 没有候选是引擎不该出现的状态；显式给 None，不让展示派生抛异常，也不伪造默认动作。
+    payload["prompt_display"] = prompt_display(query) if query.legal_actions else None
     return payload

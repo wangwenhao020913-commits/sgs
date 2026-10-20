@@ -126,5 +126,5 @@ function zoneLabel(ref) {
 
 function cardsLabel(cards) {
   if (!cards || !cards.length) return "";
-  return ` · ${cards.map((card) => cardName(card)).join("、")}`;
+  return ` · ${cards.map((card) => card.name).join("、")}`;
 }

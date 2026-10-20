@@ -4491,9 +4491,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     kind: "transformed",
     source_cards: [{ ...source, display_name: "闪", attribute: "普通", kind: "normal", source_cards: [] }],
   };
+  // 真实载荷的形状：`legal_actions` 是可回传的**裸**卡（Action extra=forbid，不能带
+  // display_*）；展示字段只在只读载体（快照 / `candidate_index`）上。
+  const fireRaw = { ...synthCard(-9, "火杀"), type: "fire_slash", virtual_sources: [2] };
   const firePending = {
     kind: "PLAY_PHASE", actor: 0, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
-    legal_actions: [{ answers_seq: 1, kind: "UseCard", card: fire, targets: [1] }],
+    legal_actions: [{ answers_seq: 1, kind: "UseCard", card: fireRaw, targets: [1] }],
     candidate_index: {
       "-9": { card: fire, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
     },
@@ -4509,9 +4512,24 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const chipText = $("t-hand").children[0].text();
   check("U1-04a 手牌卡名读 display_name（转化火杀显示「杀」）",
     chipText.includes("杀") && !chipText.includes("火杀"), `手牌="${chipText}"`);
-  const label = ui.actionLabel({ kind: "UseCard", card: fire, targets: [1] });
-  check("U1-04b 候选文案读 display_name（不是「火杀」）",
-    label.includes("杀") && !label.includes("火杀"), `label="${label}"`);
+  // 候选里的卡是裸卡：文案按 card_id 回查 candidate_index 的展示副本才拿到「杀」。
+  const label = ui.actionLabel({ kind: "UseCard", card: fireRaw, targets: [1] });
+  check("U1-04b 候选文案按 card_id 回查 display_name（不是「火杀」）",
+    !fireRaw.display_name && label.includes("杀") && !label.includes("火杀"),
+    `raw=${fireRaw.display_name} label="${label}"`);
+
+  // 座位身份标签：服务端 identity_label 优先于本地 identityLabel 映射（U1-04）。
+  const identityView = synthView({
+    kind: "PLAY_PHASE", actor: 0, prompt: "", legal_actions: [],
+    candidate_index: {}, context: null, option_seats: {},
+  });
+  identityView.snapshot.players[1].identity = "lord";
+  identityView.snapshot.players[1].identity_label = "主公X";
+  ui.state.view = identityView;
+  ui.resetSelection();
+  ui.renderTable();
+  check("U1-04c 座位身份标签读服务端 identity_label",
+    seatBox(1).text().includes("主公X"), `seat1="${seatBox(1).text()}"`);
 
   ui.state.view = saved;
   ui.resetSelection();

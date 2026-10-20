@@ -30,7 +30,7 @@ from sgs.skills import (
 from sgs.state import FrameKind, Query, WindowCause, project
 from sgs.timing import Timing
 
-from .display import decorate_pending, decorate_snapshot
+from .display import card_lookup_from_query, decorate_pending, decorate_snapshot
 from .session import Session
 
 __all__ = [
@@ -46,22 +46,24 @@ __all__ = [
 ]
 
 
+def _card_lookup(state: Any) -> dict[int, Any]:
+    """``card_id → CardRef``：展示层解析转化牌来源牌的唯一查找表。"""
+    return {card.card_id: card for card in state.cards}
+
+
 def visible_snapshot(session: Session) -> dict[str, Any]:
     """人类座位的**玩家视角**快照（每次现算、不缓存）。
 
     这是 ``tests/test_web.py`` 的"不泄露"判据盯住的那个对象：对手只有 ``hand_count``、
-    身份只出现"本人 / 主公 / 已阵亡"三种可见情形、牌堆只有数量无顺序。
+    身份只出现"本人 / 主公 / 已阵亡 / ``identity_visible`` 为真"四种可见情形、牌堆只有
+    数量无顺序。
     """
     state = session.engine.state
     view = project(state, session.human_seat)
     payload = view.model_dump(mode="json")
     # U1-04 展示契约：牌面色 / 属性 / 种类 / 来源牌 + 座位身份标签。派生在 display.py，
     # 投影只负责"哪些可见"；下发的仍然是**同一份可见快照**，不新增真源。
-    decorate_snapshot(
-        payload,
-        view.players,
-        lookup={card.card_id: card for card in state.cards},
-    )
+    decorate_snapshot(payload, view.players, lookup=_card_lookup(state))
     return payload
 
 
@@ -1089,15 +1091,17 @@ def pending_payload(
     )
     # U1-04 展示契约：询问里的每张牌（候选 / 候选索引 / 选择面 / 授予的牌面）+ 内嵌视角
     # + 提示条（文本 / 超时默认动作）。裸 ``Query``（409）拿不到引擎 ⇒ 来源牌留空，不猜。
-    decorate_pending(
-        payload,
-        query,
-        lookup=(
-            {card.card_id: card for card in session.engine.state.cards}
-            if isinstance(session, Session)
-            else None
-        ),
-    )
+    # 来源牌查找表只在**查看者就是询问者**时给：409 的裸 Query 从询问自己已出现的牌里找
+    # （拿不到引擎），Session 走引擎牌表；查看者不是询问者时 fail-closed，别借 `source_cards`
+    # 把别人的隐藏手牌带出来。
+    same_viewer = viewer is not None and int(query.actor) == int(viewer)
+    if not same_viewer:
+        lookup = None
+    elif isinstance(session, Session):
+        lookup = _card_lookup(session.engine.state)
+    else:
+        lookup = card_lookup_from_query(query)
+    decorate_pending(payload, query, lookup=lookup)
     return payload
 
 

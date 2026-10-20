@@ -175,7 +175,11 @@ function renderRingSeats(view, ctx) {
       ...classes,
     ]);
     const hero = view.heroes[player.seat] || "（无武将）";
-    const identity = player.identity ? ` · ${identityLabel(player.identity)}` : "";
+    // 身份标签优先读服务端展示契约（U1-04）；旧载荷 / 合成局面退回本地映射。
+    const identityLabelText = player.identity
+      ? (player.identity_label || identityLabel(player.identity))
+      : "";
+    const identity = identityLabelText ? ` · ${identityLabelText}` : "";
     box.setAttribute("data-seat", String(player.seat));
     // 环桌几何：设计坐标落成属性（烟测据此断言均布 / 无重叠），百分比落成定位。
     box.setAttribute("data-ring-angle", position.angle.toFixed(2));
@@ -221,7 +225,9 @@ function renderSelfSeat(view, ctx) {
   // 静态节点复用：`onclick` 是覆盖式绑定；环上节点也用同一条路，避免两套接法。
   box.onclick = handler || null;
   $("t-self-seatno").textContent = `座位 ${player.seat}`;
-  $("t-self-identity").textContent = player.identity ? identityLabel(player.identity) : "";
+  $("t-self-identity").textContent = player.identity
+    ? (player.identity_label || identityLabel(player.identity))
+    : "";
   $("t-self-hp").textContent = hpMarks(player);
   $("t-self-hand").textContent = String(player.hand_count);
   $("t-hero").textContent = view.heroes[snapshot.seat] || "（无武将）";

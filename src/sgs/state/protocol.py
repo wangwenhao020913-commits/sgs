@@ -331,8 +331,9 @@ class PlayerPublic(_FrozenModel):
     武将牌"，后者是"有牌但不公开"，将来做国战时两者必须能同时存在。
 
     ``hero`` / ``kingdom`` / ``chained`` / ``wine_active`` **不进记录流**（``exclude``）：
-    记录流里的询问视角不带这些网页展示字段，故标准 47 条金录像逐字节不变；网页载荷由
-    ``sgs_web.display`` 按需补下。
+    记录流里的询问视角不带这些字段，故标准 47 条金录像逐字节不变。``hero`` / ``kingdom``
+    走会话顶层的 ``heroes`` 名单；``chained`` / ``wine_active`` 由
+    ``sgs_web.display.decorate_snapshot`` 补进**网页载荷**。
     """
 
     seat: int
