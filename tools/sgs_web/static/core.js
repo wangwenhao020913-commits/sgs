@@ -67,6 +67,20 @@ function skillDescription(skill) {
   return skill.description || DESCRIPTION_FALLBACK;
 }
 
+/** 技能类别徽标（W4-fix-3 / U1-06）：**触发技**由服务端投影判（`ui.passive` = 有 hooks /
+ * 接缝且没有主动入口），界面不按 `skill_type` 猜——`NORMAL` 里既有主动技也有被动技。
+ * 技能按钮区与武将详情共用这一份文案，两处不会各自漂。 */
+function skillKindLabel(skill) {
+  const ui = (skill && skill.ui) || {};
+  const passive = Boolean(ui.passive);
+  if (skill && skill.carrier === "EQUIPMENT") {
+    return skill.locked ? "装备技 / 锁定" : "装备技";
+  }
+  if (skill && skill.locked) return "锁定技 / 被动";
+  if (skill && skill.skill_type === "LORD") return "主公技";
+  return passive ? "被动技" : "主动技";
+}
+
 /** `Phase` 枚举的字面值 → 中文阶段名。
  *
  * 枚举值（`prepare` / `judge` / `draw` / `play` / `discard` / `finish`）是**稳定报文值**，
@@ -144,9 +158,10 @@ const state = {
   // U1-03：倒计时的本地锚点。服务端的 `pending_since` 是单调时钟，浏览器不能直接比；
   // 这里只记**第一次见到这个询问序号**的本地时刻，轮询刷新同一询问时不重置。
   pendingClock: { seq: null, receivedAt: 0 },
-  // U1-03：共享模态的本地态（kind = preactivation / arrange / null；dismissed 只对
-  // 强制选择（排列）生效——关掉模态后仍可从提示条右端重新打开）。
-  modal: { kind: null, open: false, dismissed: false },
+  // U1-03：共享模态的本地态（kind = preactivation / arrange / hero / null；dismissed 只对
+  // 强制选择（排列）生效——关掉模态后仍可从提示条右端重新打开）。U1-06 的武将详情用
+  // `heroSeat` 记座位：它独立于询问，右键任何武将块都能开。
+  modal: { kind: null, open: false, dismissed: false, heroSeat: null },
   runs: [],
   replay: null,
   heroCatalog: [],     // 点将列表（`GET /api/heroes` 的启用池）；开局页的选项来源

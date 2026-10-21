@@ -221,6 +221,8 @@ function commitView(body) {
     && state.view.session_id !== body.session_id) {
     state.pendingClock.seq = null;
     state.pendingClock.receivedAt = 0;
+    // U1-06：换会话时详情窗口的座位号属于上一局，必须作废（同一局的刷新则保留）。
+    state.modal.heroSeat = null;
   }
   state.view = body;
   state.cursor = body.cursor;

@@ -327,12 +327,23 @@ function renderEffectCards(box, cards) {
   for (const card of cards) box.appendChild(cardChip(card, false, true));
 }
 
+/** 技能按钮右下角的状态补充（预发动 / 点它转化 / 可发动）；详情模态不读它。 */
+function skillBadgeText(skill, manifest, convertCards) {
+  if (!skill) return "";
+  if (skill.preactivated || manifest) return " · 预发动";
+  if (convertCards.length) return " · 点它转化";
+  return skill.available ? " · 可发动" : "";
+}
+
 /** 技能按钮：三态由**数据**决定（`locked` 表类型、`available` 表此刻能不能发动）。
  *
- * 纪律：不发动的技能**不给点**——它是"引擎在时机上自动派发/弹询问"的东西，
- * 界面上点它没有意义。
+ * 纪律：
+ * - **被动 / 锁定技**（`ui.passive` / `locked`）按钮只做说明：左键 / 右键都不动作，
+ *   悬停出描述（U1-06）。被动预发动的入口在提示条的浮动选项行，不靠点按钮；
+ * - 可发动的主动技 / 装备技：绿（`.ready`）且可点；此刻不可用：深灰（`.unavailable`）；
+ * - 清单顺序由服务端给（武将在前、装备在后），这里**只渲染**，不自己重排。
  *
- * **预发动（W4-1 / W4-2）**：`skill.preactivated` 的技能只剩**清单入口**——点它进入
+ * **预发动（W4-1 / W4-2）**：`skill.preactivated` 的技能走**清单入口**——点它进入
  * 清单驱动的本地态（确认 = 复合动作、取消零提交），不再去 `legal_actions` 里找
  * 骨架候选（已翻的技能连骨架都没有）。未翻的技能照旧：转化技亮点选来源牌，其余
  * 点一下 = 选中那条 `ActivateSkill` 候选。
@@ -363,40 +374,41 @@ function renderSkills(view) {
         ? Boolean(manifest)
         : (Boolean(skill.available) || convertCards.length > 0 || Boolean(manifest))
     );
+    // U1-06 三态：可用（绿）/ 不可用（深灰）/ 锁定 / 被动（银灰）。被动 / 锁定技
+    // **按钮不动作**——它们是引擎在时机上自动派发的东西，点它没有意义（悬停看描述）。
+    const passive = Boolean(ui.passive);
+    const inert = Boolean(skill.locked) || passive;
+    const clickable = usable && !inert;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "skill";
     if (skill.locked) button.classList.add("locked");
-    if (usable) button.classList.add("ready");
-    button.disabled = !usable;
+    if (passive && !skill.locked) button.classList.add("passive");
+    if (clickable) button.classList.add("ready");
+    else if (!inert) button.classList.add("unavailable");
+    button.disabled = !clickable;
     button.setAttribute("data-skill-id", skill.skill_id);
     button.setAttribute("data-available", String(skill.available));
     button.setAttribute("data-usable", String(usable));
     button.setAttribute("data-locked", String(skill.locked));
-    // 悬停全文（U1-04b）：技能详情 / 悬停都读服务端下发的同一份 description。
-    if (skill.description) button.setAttribute("title", skillDescription(skill));
+    // 悬停全文（U1-04b / U1-06）：技能详情 / 悬停都读服务端下发的同一份 description；
+    // 缺条目时显式「暂无描述」，不留空 title，也不在 JS 里抄文案。
+    button.setAttribute("title", skillDescription(skill));
     if (preactivated) button.setAttribute("data-preactivated", "true");
     if (convertCards.length) button.setAttribute("data-convert", String(convertCards.length));
     if (manifest) button.setAttribute("data-preactivation", String(manifest.length));
-    // 技能类别徽标（W4-fix-3）：**触发技**由服务端投影判（`ui.passive` = 有 hooks /
-    // 接缝且没有主动入口），界面不按 `skill_type` 猜——`NORMAL` 里既有主动技也有被动技。
-    const passive = Boolean(ui.passive);
-    const kind = skill.carrier === "EQUIPMENT"
-      ? (skill.locked ? "装备技 / 锁定" : "装备技")
-      : (skill.locked
-        ? "锁定技 / 被动"
-        : (skill.skill_type === "LORD" ? "主公技" : (passive ? "被动技" : "主动技")));
+    const kind = skillKindLabel(skill);
     const badge = preactivated
       ? (manifest ? " · 预发动" : "")
-      : (manifest ? " · 预发动" : (convertCards.length ? " · 点它转化" : (skill.available ? " · 可发动" : "")));
+      : skillBadgeText(skill, manifest, convertCards);
     button.innerHTML = `${skill.name}<span class="kind">${kind}${badge}</span>`;
-    if (state.playback) {
+    if (!clickable || state.playback) {
       // 回放期间不接任何操作（严格顺序：这批事件播完才轮到下一次询问）。
-    } else if (usable && pending && manifest) {
+    } else if (pending && manifest) {
       // 清单驱动的本地态（W4-2 复合动作 / W4-3 转化技本地入口）：取消 = 什么都不提交
       // （被动入口 = 放弃）。转化技在"提供一张 B"的面里没有清单，仍走下面的转化模式。
       button.addEventListener("click", () => enterPreativation(skill, manifest));
-    } else if (usable && pending && convertCards.length) {
+    } else if (pending && convertCards.length) {
       // 转化技（【龙胆】）：点它进入"挑一张来源牌"的模式（再点一次退出）。
       button.addEventListener("click", () => toggleConvertSkill(skill));
     } else if (skill.available && pending) {

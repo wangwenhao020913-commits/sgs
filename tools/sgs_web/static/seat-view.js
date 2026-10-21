@@ -46,6 +46,14 @@ function heroNameOf(player, view) {
   return assigned || "（无武将）";
 }
 
+/** 视角快照里的座位（详情标题 / 详情头 / 右键入口共用这一处查找）。 */
+function playerAt(view, seat) {
+  if (!view || !view.snapshot || seat === null) return null;
+  return (view.snapshot.players || []).find(
+    (item) => Number(item.seat) === Number(seat),
+  ) || null;
+}
+
 /** 身份徽标：明置给**全称**（`GLOSSARY「身份」`的四值），暗置给 `?`；
  *  2 人无身份局整块不显示（票面「无身份局」）。 */
 function identityBadgeView(player, identityMode) {
@@ -254,6 +262,9 @@ function heroBlockNode(player, view, ctx, flags) {
   // 阵亡 = 蒙灰 + 大号「阵亡」覆盖中心。三个状态可以同时存在、互不遮挡（CSS 分层）。
   if (player.chained) block.appendChild(chainLineNode());
   if (!player.alive) block.appendChild(deadTagNode());
+  // U1-06：右键**武将块** = 武将详情；装备 / 判定 / 手牌不响应右键（它们只悬停出描述）。
+  // 接线与自己的静态块共用 `bindHeroDetailContext`（止冒泡：外壳只负责屏蔽浏览器菜单）。
+  bindHeroDetailContext(block, player.seat);
   return block;
 }
 

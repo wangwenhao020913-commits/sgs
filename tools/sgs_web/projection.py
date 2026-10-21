@@ -16,15 +16,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sgs.data import load_content_pack, load_heroes
+from sgs.data import hero_skill_id, load_content_pack, load_heroes
 from sgs.effects import response_count
 from sgs.engine import record_json
 from sgs.skills import (
     CATALOG,
     FREE_SPLIT,
+    LORD_SKILL_IDS,
     SEAT_PREFIX,
     ModifierPoint,
     conversion_offers_by_source,
+    lord_skill_allowed,
     resolve_instances,
 )
 from sgs.state import FrameKind, Query, WindowCause, project
@@ -40,6 +42,7 @@ __all__ = [
     "option_seats",
     "pending_payload",
     "query_context",
+    "seat_skill_display",
     "serialize_record",
     "virtual_index",
     "visible_record",
@@ -50,6 +53,21 @@ __all__ = [
 def _card_lookup(state: Any) -> dict[int, Any]:
     """``card_id → CardRef``：展示层解析转化牌来源牌的唯一查找表。"""
     return {card.card_id: card for card in state.cards}
+
+
+def _skill_entry(
+    definition: Any, name: str, *, skill_type: str | None = None
+) -> dict[str, Any]:
+    """技能条目的**公共只读键**（可操作清单 / 详情清单共用，避免两边各抄一份）。"""
+    return {
+        "skill_id": definition.skill_id,
+        "name": name,
+        "skill_type": skill_type
+        or getattr(definition.skill_type, "value", str(definition.skill_type)),
+        "locked": bool(definition.locked),
+        "carrier": getattr(definition.carrier, "value", str(definition.carrier)),
+        "description": skill_description(definition.skill_id),
+    }
 
 
 def visible_snapshot(session: Session) -> dict[str, Any]:
@@ -71,7 +89,68 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         lookup=_card_lookup(state),
         heroes=load_heroes(session.pack.pack_id),
     )
+    # U1-06：武将详情对**任意**座位可开，故每个座位都带一份只读技能清单
+    # （武将牌 + 装备区 + 虚拟装备）。它与顶层的 `skills`（可操作清单）不同源：
+    # 顶层带 `available` / `ui.convert_sources`，读的是**查看者当前询问与手牌**。
+    for player_payload, player in zip(payload["players"], view.players, strict=True):
+        player_payload["skills"] = seat_skill_display(session, player.seat)
     return payload
+
+
+def seat_skill_display(session: Session, seat: int) -> list[dict[str, Any]]:
+    """一个座位**详情模态**的只读技能清单（U1-06）。
+
+    口径（spec §3.2「详情里的装备技能 = 当前装备区 + 虚拟装备」）：
+
+    - **武将技能**读公开武将面（``Hero.skills``），**不**经 ``resolve_instances``——
+      后者只解析**存活实例**（死者不能发动技能），而阵亡武将的详情仍要开得出来；
+      主公技照旧按 ``player.identity`` 门控（非主公的武将牌上没有它）。
+    - **装备技能** = 装备区里的实体牌（``equip.<牌名 id>``）+ ``virtual_equipment``
+      的虚拟授予（不占牌守恒，如【八阵】）。顺序 = 武将技能 → 实体装备 → 虚拟装备。
+    - **只读展示**：不带 ``available`` / ``preactivated`` / ``ui.convert_sources``；
+      那三样会读出当前询问与本人手牌，给到别的座位就是暗置信息。``ui.passive``
+      是技能定义上的公开类别，详情用它标「被动技」。
+    """
+    state = session.engine.state
+    player = state.player(seat)
+    heroes = load_heroes(state.pack_id)
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(definition: Any, name: str | None) -> None:
+        if definition is None or name is None or definition.skill_id in seen:
+            return
+        seen.add(definition.skill_id)
+        entry = _skill_entry(definition, name)
+        entry["ui"] = {"passive": _is_passive_skill(definition)}
+        out.append(entry)
+
+    hero = heroes.by_id(player.hero) if player.hero else None
+    if hero is not None:
+        for skill in hero.skills:
+            skill_id = hero_skill_id(hero.id, skill.id)
+            definition = CATALOG.get(skill_id)
+            if definition is None:
+                continue
+            if skill_id in LORD_SKILL_IDS and not lord_skill_allowed(
+                player.identity, skill_id
+            ):
+                continue
+            add(definition, skill.name)
+    for card_id in player.equip:
+        card = state.card(card_id)
+        add(CATALOG.get(f"equip.{card.type}"), _card_type_name(state, card.type))
+    for grant in player.virtual_equipment:
+        definition = CATALOG.get(grant)
+        if definition is None:
+            continue
+        type_id = (
+            definition.skill_id[len("equip.") :]
+            if definition.skill_id.startswith("equip.")
+            else None
+        )
+        add(definition, _card_type_name(state, type_id) if type_id else definition.skill_id)
+    return out
 
 
 def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
@@ -88,7 +167,9 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     - **此刻能不能用**：`available` = 当前挂起的询问里有没有针对这个技能的
       ``ActivateSkill`` 候选。**不去问引擎"这个技能满不满足条件"**——那是第二条真源。
 
-    只列 ``seat`` 自己的实例：别人的技能是**暗置**信息，不下发。
+    只列 ``seat`` 自己的**可操作**实例（带可用性 / 转化来源）；武将详情用的**公开只读**
+    清单是 :func:`seat_skill_display`——它按武将牌 + 装备区给所有座位，不含可用性，
+    故不会把当前询问或本人手牌带给别人。
     """
     state = session.engine.state
     pending = session.pending
@@ -138,16 +219,10 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
             name = _card_type_name(state, definition.skill_id[len("equip.") :])
         if name is None:
             continue
-        out.append(
+        entry = _skill_entry(definition, name, skill_type=skill_type)
+        entry.update(
             {
-                "skill_id": definition.skill_id,
-                "name": name,
-                "skill_type": skill_type,
-                "locked": bool(definition.locked),
-                "carrier": getattr(definition.carrier, "value", str(definition.carrier)),
                 "available": definition.skill_id in offered,
-                # U1-04b：技能详情 / 悬停的全文，与牌面描述同住一份内容文件。
-                "description": skill_description(definition.skill_id),
                 # W4-2：这条技能是否已翻到预发动。界面据此**只**走清单入口（不再把骨架
                 # 候选画成"发动技能 XXX"选项）；它是声明上的开关，不是第二条合法性判据。
                 "preactivated": bool(definition.preactivated),
@@ -156,7 +231,10 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
                 "ui": _skill_ui(definition, actions, hand, virtual),
             }
         )
-    out.sort(key=lambda item: (item["locked"], item["skill_id"]))
+        out.append(entry)
+    # U1-06：按钮区顺序 = 武将技能在前、装备技能在后；同组内沿用原来的
+    # （锁定 / 被动靠后、id 稳定）键，故既有读取口不会因排序改动而漂。
+    out.sort(key=lambda item: (item["carrier"] != "HERO", item["locked"], item["skill_id"]))
     return out
 
 

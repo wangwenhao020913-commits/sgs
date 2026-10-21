@@ -318,16 +318,23 @@ function renderDiscard(pending) {
 
 /** 被动入口（W4-2）：时机询问已带清单，界面只给**进入预发动**的入口与「放弃」。
 
- * 入口 = 技能栏里那条按钮（`data-preactivation` 已标出步骤数）；这里**不**把骨架候选
- * 画成"发动技能 XXX"选项（验收：界面上不再出现这种选项），只留一条真候选 `Pass`。
+ * 入口 = 提示条浮动选项行的「进入预发动」（主动技按钮也仍可点；被动 / 锁定技按钮
+ * 按 U1-06 只做说明、不接 click）；这里**不**把骨架候选画成"发动技能 XXX"选项
+ * （验收：界面上不再出现这种选项），只留一条真候选 `Pass`。
  */
 function renderPreativationEntry(pending) {
   const skill = preactivatedSkill(pending);
   const manifest = skill ? preactivationManifest(pending, skill.skill_id) : null;
   const hint = $("t-target-hint");
   if (hint) {
-    hint.textContent = `点技能【${skill ? skill.name : pending.skill_id}】进入预发动；`
-      + "或点右端「放弃」跳过这次时机（放弃后不再询问）。";
+    const name = skill ? skill.name : pending.skill_id;
+    const passive = Boolean(skill && skill.ui && skill.ui.passive);
+    // U1-06：被动 / 锁定技按钮本身不动作（只悬停看描述）；被动入口走浮动选项行。
+    hint.textContent = passive
+      ? `点下方「进入预发动【${name}】」；被动技按钮本身只说明，悬停可看描述。`
+        + "或点右端「放弃」跳过这次时机（放弃后不再询问）。"
+      : `点技能【${name}】进入预发动；`
+        + "或点右端「放弃」跳过这次时机（放弃后不再询问）。";
   }
   // 「是否发动」的浮动选项行：进入清单是唯一选项；`Pass` 是右端动作（U1-03），
   // `取消` 的文案在这里就是「放弃」（`setActionLabels` 的被动入口分支）。
@@ -433,7 +440,7 @@ function refreshSubmit(pending) {
     return;
   }
   if (isPassivePreativation(pending) && state.preactivation === null) {
-    $("t-choice").textContent = ready ? "可以提交：放弃。" : "点技能进入预发动，或点「放弃」。";
+    $("t-choice").textContent = ready ? "可以提交：放弃。" : "点「进入预发动」，或点「放弃」。";
     return;
   }
   if (pending.kind === "ARRANGE") {

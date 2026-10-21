@@ -157,8 +157,9 @@
       <div id="t-skills" class="skills"></div>
       <div id="t-self-seat" class="seat self">
         <!-- 左武将块（U1-02）：势力 / 名称 / 身份 / 体力条 / 高亮文字 / 手牌数 / 座位号。
-             id 是稳定读取口（烟测 / 回放），故节点常驻、只改内容。 -->
-        <div class="hero-block">
+             id 是稳定读取口（烟测 / 回放），故节点常驻、只改内容。
+             U1-06：右键这块 = 武将详情（装备 / 判定槽与手牌不响应右键）。 -->
+        <div id="t-self-hero" class="hero-block">
           <div class="seat-head">
             <span id="t-self-kingdom" class="kingdom"></span>
             <span id="t-hero" class="hero-name">（无武将）</span>
@@ -284,6 +285,7 @@
 <script src="pending.js"></script>
 <script src="options.js"></script>
 <script src="modal.js"></script>
+<script src="hero-detail.js"></script>
 <script src="arrange.js"></script>
 <script src="answer.js"></script>
 <script src="log.js"></script>

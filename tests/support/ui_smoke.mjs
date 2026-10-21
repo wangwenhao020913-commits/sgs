@@ -5644,4 +5644,369 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   }
 }
 
+/* ============ U1-06：技能按钮三态 + 武将详情模态 ============
+ *
+ * 票面判据：
+ * - 技能按钮区列出全部技能（武将 + 装备 + 被动 / 锁定）；顺序武将在前、装备在后；
+ * - 三态：可用（绿）/ 不可用（深灰）/ 锁定 / 被动（银灰）；
+ * - 被动 / 锁定技按钮左键 / 右键都不动作，悬停出描述；
+ * - 右键武将块 = 详情模态：武将技能在上、分割线、装备技能在下；背景 / ESC 可关、模态；
+ * - 打开详情不暂停倒计时，模态内不显示倒计时；阵亡武将也能点开。
+ */
+
+{
+  ui.state.sessionId = null;   // 纯合成视图：不让按钮 / 提交碰到别的会话
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 9301,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9301 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  };
+  const view = synthView(pending);
+  view.timeout_seconds = 60;
+  view.skills = [
+    {
+      skill_id: "hero.demo.active", name: "可发动", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: true, preactivated: false,
+      description: "可发动的主动技描述。", ui: { requirement: "", passive: false, convert_sources: [] },
+    },
+    {
+      skill_id: "hero.demo.off", name: "不可用", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: false, preactivated: false,
+      description: "此刻不可用的主动技描述。", ui: { requirement: "", passive: false, convert_sources: [] },
+    },
+    {
+      skill_id: "hero.demo.passive", name: "被动", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: true, preactivated: false,
+      description: "触发技描述。", ui: { requirement: "", passive: true, convert_sources: [] },
+    },
+    {
+      skill_id: "hero.demo.nodesc", name: "缺描述", skill_type: "NORMAL", locked: true,
+      carrier: "HERO", available: false, preactivated: false, ui: { requirement: "", passive: false, convert_sources: [] },
+    },
+    {
+      skill_id: "equip.demo.locked", name: "锁定装备", skill_type: "NORMAL", locked: true,
+      carrier: "EQUIPMENT", available: false, preactivated: false,
+      description: "锁定装备技描述。", ui: { requirement: "", passive: false, convert_sources: [] },
+    },
+    {
+      skill_id: "equip.demo.active", name: "装备主动", skill_type: "NORMAL", locked: false,
+      carrier: "EQUIPMENT", available: true, preactivated: false,
+      description: "装备主动技描述。", ui: { requirement: "", passive: false, convert_sources: [] },
+    },
+  ];
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const skillButtons = $("t-skills").children.filter((node) => node.tagName === "BUTTON");
+  const skillButton = (id) => skillButtons.find((node) => node.getAttribute("data-skill-id") === id);
+  check("U1-06a 技能按钮区列出全部技能（武将 + 装备 + 被动 / 锁定）",
+    skillButtons.length === view.skills.length,
+    `按钮 ${skillButtons.length} / 清单 ${view.skills.length}`);
+  check("U1-06b 顺序 = 武将技能在前、装备技能在后（服务端清单顺序原样落到 DOM）",
+    skillButtons.map((node) => node.getAttribute("data-skill-id")).join(",")
+      === view.skills.map((skill) => skill.skill_id).join(",")
+      && (() => {
+        const carriers = skillButtons.map((node) => {
+          const skill = view.skills.find((item) => item.skill_id === node.getAttribute("data-skill-id"));
+          return skill ? skill.carrier : "";
+        });
+        const firstEquip = carriers.indexOf("EQUIPMENT");
+        return firstEquip < 0 || carriers.slice(firstEquip).every((carrier) => carrier === "EQUIPMENT");
+      })(),
+    skillButtons.map((node) => node.getAttribute("data-skill-id")).join(","));
+
+  const active = skillButton("hero.demo.active");
+  const off = skillButton("hero.demo.off");
+  const passive = skillButton("hero.demo.passive");
+  const locked = skillButton("equip.demo.locked");
+  const equipActive = skillButton("equip.demo.active");
+  check("U1-06c 可用（绿）态：可点、ready 类",
+    !!active && active.classList.contains("ready") && active.disabled === false,
+    `ready=${active && active.classList.contains("ready")} disabled=${active && active.disabled}`);
+  check("U1-06d 不可用（深灰）态：不可点、unavailable 类、非 ready",
+    !!off && off.classList.contains("unavailable") && !off.classList.contains("ready") && off.disabled === true,
+    `classes=${off && [...off.classList.set].join(",")} disabled=${off && off.disabled}`);
+  check("U1-06e 被动（银灰）与锁定（银灰）都不可点、都不进 ready",
+    !!passive && passive.classList.contains("passive") && passive.disabled === true
+      && !passive.classList.contains("ready")
+      && !!locked && locked.classList.contains("locked") && locked.disabled === true
+      && !locked.classList.contains("ready"),
+    `passive=${passive && [...passive.classList.set].join(",")} locked=${locked && [...locked.classList.set].join(",")}`);
+  check("U1-06f 装备技能不因载体而一律变灰：可发动的装备技仍可点（绿）",
+    !!equipActive && equipActive.classList.contains("ready") && equipActive.disabled === false,
+    `classes=${equipActive && [...equipActive.classList.set].join(",")} disabled=${equipActive && equipActive.disabled}`);
+  check("U1-06g 技能 / 牌面悬停全文：缺条目显示「暂无描述」",
+    active.getAttribute("title") === "可发动的主动技描述。"
+      && skillButton("hero.demo.nodesc").getAttribute("title") === "暂无描述",
+    `active="${active.getAttribute("title")}" nodesc="${skillButton("hero.demo.nodesc").getAttribute("title")}"`);
+
+  const selectedBefore = ui.state.selectedOption;
+  const callsBefore = calls.length;
+  (passive.listeners.click || []).forEach((fn) => fn({ target: passive }));
+  (locked.listeners.click || []).forEach((fn) => fn({ target: locked }));
+  check("U1-06h 被动 / 锁定技按钮左键不动作（不选中候选、不发请求）",
+    ui.state.selectedOption === selectedBefore && calls.length === callsBefore,
+    `option=${ui.state.selectedOption} calls=${calls.length - callsBefore}`);
+  check("U1-06i 被动 / 锁定技按钮没有 contextmenu 动作（右键也不动作）",
+    (passive.listeners.contextmenu || []).length === 0
+      && (locked.listeners.contextmenu || []).length === 0);
+
+  /* ---- 武将详情模态：右键武将块 / 背景与 ESC 关闭 / 阵亡 / 倒计时 ---- */
+
+  const heroBlockOf = (seat) => {
+    if (Number(seat) === Number(ui.state.view.snapshot.seat)) return $("t-self-hero");
+    const box = seatBox(seat);
+    return box ? box.children.find((node) => (node.className || "").split(" ").includes("hero-block")) || null : null;
+  };
+  /** 右键一个节点：只走该节点自己的 contextmenu 监听（真 DOM 里由它冒泡到牌桌外壳）。 */
+  const fireContext = (node) => {
+    const event = { target: node, prevented: false, stopPropagation() {} };
+    event.preventDefault = () => { event.prevented = true; };
+    if (node) (node.listeners.contextmenu || []).forEach((fn) => fn(event));
+    return event;
+  };
+  const detailSkill = (id, name, carrier = "HERO", extra = {}) => ({
+    skill_id: id, name, skill_type: "NORMAL", locked: false, carrier,
+    description: `${name}的描述。`, ui: { passive: false }, ...extra,
+  });
+  const detailView = synthView(pending);
+  detailView.timeout_seconds = 60;
+  detailView.snapshot.players[0].skills = [
+    detailSkill("hero.demo.own", "己方技"),
+    detailSkill("equip.demo.own", "己方装备", "EQUIPMENT"),
+  ];
+  detailView.snapshot.players[1].skills = [
+    detailSkill("hero.demo.enemy", "敌方技"),
+    detailSkill("equip.demo.enemy", "敌方武器", "EQUIPMENT"),
+    detailSkill("equip.eight_diagrams", "八卦阵", "EQUIPMENT"),
+  ];
+  detailView.snapshot.players[1].hero_name = "张飞";
+  detailView.snapshot.players[1].kingdom_label = "蜀";
+  ui.state.view = detailView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(detailView);
+
+  check("U1-06j 右键武将块打开详情模态（标题 / 遮罩 / 正在对话）",
+    $("t-modal").hidden === true
+      && (() => {
+        fireContext(heroBlockOf(0));
+        return $("t-modal").hidden === false
+          && $("t-modal-backdrop").hidden === false
+          && /武将详情/.test($("t-modal-title").textContent);
+      })(),
+    `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}"`);
+  const ownDetail = $("t-modal-body").children[0];
+  const ownSections = ownDetail ? ownDetail.children.map((node) => node.className) : [];
+  check("U1-06k 详情结构：武将技能在上 → 分割线 → 装备技能在下",
+    ownSections.includes("detail-section hero-skills")
+      && ownSections.includes("detail-divider")
+      && ownSections.includes("detail-section equip-skills")
+      && ownSections.indexOf("detail-section hero-skills") < ownSections.indexOf("detail-divider")
+      && ownSections.indexOf("detail-divider") < ownSections.indexOf("detail-section equip-skills"),
+    ownSections.join(","));
+  check("U1-06l 详情读到该座位的技能与描述（武将技 + 装备技）",
+    $("t-modal-body").text().includes("己方技")
+      && $("t-modal-body").text().includes("己方技的描述。")
+      && $("t-modal-body").text().includes("己方装备")
+      && !$("t-modal-body").text().includes("敌方技"),
+    $("t-modal-body").text().replace(/\s+/g, " ").slice(0, 120));
+  check("U1-06m 详情是模态：背景顶栏 / 舞台 / 底部全部 inert，遮罩覆盖全壳",
+    $("table-topbar").getAttribute("inert") !== undefined
+      && $("table-stage").getAttribute("inert") !== undefined
+      && $("table-bottom").getAttribute("inert") !== undefined
+      && $("table-shell").classList.contains("modal-blocking"),
+    `topbar=${$("table-topbar").getAttribute("inert")} stage=${$("table-stage").getAttribute("inert")} bottom=${$("table-bottom").getAttribute("inert")} blocking=${$("table-shell").classList.contains("modal-blocking")}`);
+  check("U1-06n 详情不暂停倒计时，且模态内不显示倒计时（进度条仍在提示条上）",
+    (() => {
+      ui.state.pendingClock.receivedAt = Date.now() - 35 * 1000;
+      ui.renderCountdown(detailView);
+      return $("t-countdown").hidden === false
+        && $("t-countdown").getAttribute("data-phase") === "yellow"
+        && !$("t-modal-body").text().includes("剩余")
+        && !$("t-modal-body").children.includes($("t-countdown"));
+    })(),
+    `hidden=${$("t-countdown").hidden} phase=${$("t-countdown").getAttribute("data-phase")}`);
+
+  // 正文可滚轮翻阅：同一询问里重画（轮询 / 刷新）不把用户读到的位置拉回顶部。
+  $("t-modal-body").scrollTop = 77;
+  ui.renderPending(detailView);
+  check("U1-06n2 详情重画保留滚动位置（可滚轮翻阅不被打断）",
+    $("t-modal").hidden === false && $("t-modal-body").scrollTop === 77,
+    `hidden=${$("t-modal").hidden} scrollTop=${$("t-modal-body").scrollTop}`);
+
+  const beforeDetailEsc = calls.length;
+  fireDocument("keydown", { key: "Escape" });
+  check("U1-06o ESC 关闭详情（零提交、背景恢复可操作）",
+    $("t-modal").hidden === true
+      && $("table-stage").getAttribute("inert") === undefined
+      && $("table-bottom").getAttribute("inert") === undefined
+      && calls.length === beforeDetailEsc,
+    `hidden=${$("t-modal").hidden} stage=${$("table-stage").getAttribute("inert")} bottom=${$("table-bottom").getAttribute("inert")} calls=${calls.length - beforeDetailEsc}`);
+
+  // 旧载荷 / 合成视图没有 `player.skills`：**只对自己的座位**退回顶层 `view.skills`，
+  // 不拿自己的技能去冒充别人的（对手仍为空）。
+  {
+    const oldView = synthView(pending);
+    oldView.skills = [detailSkill("hero.demo.own", "旧载荷技")];
+    delete oldView.snapshot.players[0].skills;
+    ui.state.view = oldView;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(oldView);
+    fireContext(heroBlockOf(0));
+    check("U1-06o2 旧载荷没有 player.skills 时自己的详情退回顶层 skills",
+      $("t-modal").hidden === false && $("t-modal-body").text().includes("旧载荷技"),
+      `hidden=${$("t-modal").hidden} body="${$("t-modal-body").text().replace(/\s+/g, " ").slice(0, 80)}"`);
+    fireDocument("keydown", { key: "Escape" });
+    ui.state.view = detailView;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(detailView);
+  }
+
+  // 换座位：滚动位置不沿用（上一个详情的 offset 不该带到另一个武将身上）。
+  $("t-modal-body").scrollTop = 77;
+  fireContext(heroBlockOf(1));
+  const enemyText = $("t-modal-body").text();
+  check("U1-06p 右键对手武将块 = 对手详情（读到对手的技能，不串到自己的）",
+    $("t-modal").hidden === false
+      && enemyText.includes("敌方技")
+      && enemyText.includes("敌方武器")
+      && enemyText.includes("八卦阵")
+      && !enemyText.includes("己方技")
+      && $("t-modal-body").scrollTop === 0,
+    `${enemyText.replace(/\s+/g, " ").slice(0, 140)} scrollTop=${$("t-modal-body").scrollTop}`);
+  const beforeBackdrop = calls.length;
+  ($("t-modal-backdrop").listeners.click || []).forEach((fn) => fn({ target: $("t-modal-backdrop") }));
+  check("U1-06q 点背景遮罩关闭详情（零提交）",
+    $("t-modal").hidden === true && calls.length === beforeBackdrop,
+    `hidden=${$("t-modal").hidden} calls=${calls.length - beforeBackdrop}`);
+
+  // 阵亡武将：座位卡蒙灰，但详情仍开得出来（详情读公开武将面，不读存活实例）。
+  detailView.snapshot.players[1].alive = false;
+  ui.renderTable();
+  fireContext(heroBlockOf(1));
+  check("U1-06r 阵亡武将可点开详情（蒙灰 + 详情仍列技能）",
+    !!seatBox(1) && seatBox(1).classList.contains("dead")
+      && $("t-modal").hidden === false
+      && $("t-modal-body").text().includes("阵亡")
+      && $("t-modal-body").text().includes("敌方技"),
+    `dead=${!!seatBox(1) && seatBox(1).classList.contains("dead")} body="${$("t-modal-body").text().replace(/\s+/g, " ").slice(0, 100)}"`);
+  fireDocument("keydown", { key: "Escape" });
+
+  // 右键装备 / 判定 / 手牌不动作；牌桌外壳仍屏蔽浏览器右键菜单。
+  {
+    const equipSlot = $("t-self-zones").children
+      .find((row) => row.getAttribute("data-zone") === "equip").children[0];
+    const judgeSlot = $("t-self-zones").children
+      .find((row) => row.getAttribute("data-zone") === "judge").children[0];
+    const handChip = $("t-hand").children[0];
+    fireContext(equipSlot);
+    fireContext(judgeSlot);
+    fireContext(handChip);
+    check("U1-06s 右键装备 / 判定 / 手牌不动作（不开详情）",
+      $("t-modal").hidden === true,
+      `hidden=${$("t-modal").hidden}`);
+
+    const shell = $("table-shell");
+    const prevented = {};
+    for (const [name, node] of [["equip", equipSlot], ["judge", judgeSlot], ["hand", handChip]]) {
+      const event = { target: node, preventDefault() { prevented[name] = true; } };
+      (shell.listeners.contextmenu || []).forEach((fn) => fn(event));
+    }
+    check("U1-06t 牌桌屏蔽浏览器右键菜单（装备 / 判定 / 手牌都 preventDefault）",
+      prevented.equip === true && prevented.judge === true && prevented.hand === true,
+      JSON.stringify(prevented));
+  }
+
+  const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  check("U1-06u 详情正文沿用共享模态的滚动容器，且阻断态遮罩覆盖全壳",
+    /\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)
+      && /\.table-shell\.modal-blocking\s+\.modal-backdrop\s*\{[^}]*bottom:\s*0/s.test(css)
+      && /\.skill\.unavailable\s*\{/s.test(css)
+      && /\.skill\.locked,\s*\.skill\.passive\s*\{/s.test(css),
+    `modalBody=${/\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)} blocking=${/\.table-shell\.modal-blocking\s+\.modal-backdrop\s*\{[^}]*bottom:\s*0/s.test(css)}`);
+
+  // 详情是**叠加**在询问模态上的临时窗口：不能把 `#t-options` 从文档里摘掉，也不能
+  // 把排列模态的「收起」状态抹掉（ticket 03 的「查看排列」出口）。
+  {
+    const arrangePending = {
+      kind: "ARRANGE", actor: 0, seq: 9302, timing: "PHASE_PREPARE",
+      prompt: "请排列这些牌：给出顺序与前几张置于牌堆顶。",
+      revealed: [synthCard(82, "八卦阵"), synthCard(83, "闪")],
+      legal_actions: [{ answers_seq: 9302, kind: "ArrangeCards", order: [0, 1], split: 2 }],
+      candidate_index: {}, option_seats: {}, context: null,
+      preactivations: {}, preactivation: [], arrange: { count: 2, split: "free" },
+    };
+    const arrangeView = synthView(arrangePending);
+    arrangeView.timeout_seconds = 60;
+    arrangeView.snapshot.players[0].skills = [detailSkill("hero.demo.own", "己方技")];
+    ui.state.view = arrangeView;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(arrangeView);
+    check("U1-06w0 排列模态先打开（详情叠加测试的前置）",
+      $("t-modal").hidden === false && $("t-modal-title").textContent === "排列",
+      `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}"`);
+
+    fireContext(heroBlockOf(0));
+    check("U1-06w 详情盖在排列模态上：共享的 #t-options 被送回提示条（不随正文清空丢失）",
+      $("t-modal").hidden === false
+        && /武将详情/.test($("t-modal-title").textContent)
+        && $("t-options-home").children.includes($("t-options")),
+      `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" optionsHome=${$("t-options-home").children.includes($("t-options"))}`);
+
+    fireDocument("keydown", { key: "Escape" });
+    check("U1-06w2 关闭详情后排列模态恢复（选项行回到正文、提交仍可拼）",
+      $("t-modal").hidden === false
+        && $("t-modal-title").textContent === "排列"
+        && $("t-modal-body").children.includes($("t-options"))
+        && ui.buildAction() !== null,
+      `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" action=${JSON.stringify(ui.buildAction())}`);
+
+    fireDocument("keydown", { key: "Escape" });
+    check("U1-06w3 排列收起：只给「查看排列」入口",
+      $("t-modal").hidden === true && $("btn-show-modal").hidden === false,
+      `hidden=${$("t-modal").hidden} reopen=${$("btn-show-modal").hidden}`);
+
+    fireContext(heroBlockOf(0));
+    fireDocument("keydown", { key: "Escape" });
+    check("U1-06w4 详情关闭不重开已收起的排列（「查看排列」仍在）",
+      $("t-modal").hidden === true && $("btn-show-modal").hidden === false,
+      `hidden=${$("t-modal").hidden} reopen=${$("btn-show-modal").hidden}`);
+
+    ($("btn-show-modal").listeners.click || []).forEach((fn) => fn({ target: $("btn-show-modal") }));
+    check("U1-06w5 「查看排列」仍能重开（详情没有抹掉重开状态）",
+      $("t-modal").hidden === false && $("t-modal-title").textContent === "排列",
+      `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}"`);
+    fireDocument("keydown", { key: "Escape" });
+  }
+
+  // 真会话（不是合成夹具）：服务端给**每个座位**下发详情清单，读取方（详情）读到它。
+  const realDetail = await post("/api/sessions", {
+    player_count: 4, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261012,
+  });
+  await openSession(realDetail);
+  ui.renderTable();
+  const realPlayers = realDetail.snapshot.players;
+  const realOpponent = realPlayers[1];
+  const realSkills = realOpponent.skills || [];
+  fireContext(heroBlockOf(1));
+  const realBody = $("t-modal-body").text();
+  check("U1-06v 真会话：每个座位都带详情技能清单，右键对手读到服务端下发的名字与描述",
+    realPlayers.every((player) => Array.isArray(player.skills))
+      && realSkills.length > 0
+      && realBody.includes(realSkills[0].name)
+      && realBody.includes(realSkills[0].description)
+      && $("t-modal").hidden === false,
+    `seats=${realPlayers.length} opponentSkills=${realSkills.map((skill) => skill.name).join("、")}`);
+  fireDocument("keydown", { key: "Escape" });
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

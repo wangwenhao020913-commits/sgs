@@ -67,6 +67,8 @@ function wire() {
   $("btn-end-phase").addEventListener("click", () => submitRightAction(RIGHT_ACTION_KINDS.endPhase));
   $("btn-pass").addEventListener("click", () => submitRightAction(RIGHT_ACTION_KINDS.pass));
   wireModal();
+  // U1-06：牌桌右键——外壳屏蔽浏览器菜单，武将块开详情（装备 / 判定 / 手牌只悬停）。
+  wireHeroDetail();
   $("btn-refresh").addEventListener("click", refresh);
   $("btn-takeover").addEventListener("click", takeover);
   $("btn-delay").addEventListener("click", cycleDelay);

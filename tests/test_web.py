@@ -58,12 +58,14 @@ from sgs_web.display import (  # noqa: E402
     card_display,
     prompt_display,
 )
+from sgs_web.descriptions import skill_description  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
     candidate_index,
     option_seats,
     pending_payload,
     query_context,
+    seat_skill_display,
     visible_record,
     visible_snapshot,
 )
@@ -1871,8 +1873,182 @@ def test_equipment_skills_are_listed_under_the_equipment_card_name() -> None:
     assert any(entry["carrier"] == "HERO" for entry in entries), "武将技能与它同列"
 
 
+def test_every_seat_carries_the_public_skill_list_for_the_detail_window() -> None:
+    """U1-06：详情模态对**每个**座位都要有武将技能 / 装备技能。
+
+    武将牌是公开信息（`PlayerPublic.hero` 的 docstring），故详情里的技能清单也可以对
+    所有座位下发；它是**只读展示**清单，不带 `available` / `preactivated` /
+    `ui.convert_sources`——那三样读的是**当前询问与本人手牌**，对别人就是暗置信息。
+    """
+    session = Session(seed=20261012, ai="heuristic", timeout_seconds=None, player_count=4)
+    snapshot = visible_snapshot(session)
+
+    assert len(snapshot["players"]) == 4
+    for payload, player in zip(snapshot["players"], session.engine.state.players, strict=True):
+        skills = payload["skills"]
+        operable = {entry["skill_id"]: entry for entry in build_skills(session, player.seat)}
+        assert skills, f"座位 {player.seat} 的详情没有技能"
+        assert {skill["skill_id"] for skill in skills} == set(operable), (
+            f"座位 {player.seat} 的详情清单与可操作清单的技能 id 必须一致"
+        )
+        for skill in skills:
+            assert skill["name"] == operable[skill["skill_id"]]["name"], (
+                f"{skill['skill_id']} 的名字在两个清单里漂了"
+            )
+            assert skill["locked"] == operable[skill["skill_id"]]["locked"]
+            assert skill["carrier"] == operable[skill["skill_id"]]["carrier"]
+        assert [skill["carrier"] for skill in skills] == ["HERO"] * len(skills)
+        for skill in skills:
+            assert set(skill) == {
+                "skill_id",
+                "name",
+                "skill_type",
+                "locked",
+                "carrier",
+                "description",
+                "ui",
+            }, f"详情技能的键集合变了：{sorted(skill)}"
+            assert set(skill["ui"]) == {"passive"}
+            assert skill["description"] != "暂无描述", f"{skill['skill_id']} 没有描述"
+
+
+def test_the_detail_skill_list_puts_hero_skills_before_equipment_and_keeps_virtual_grants() -> None:
+    """U1-06：「装备技能」= 装备区 + 虚拟装备；顺序武将在前、装备在后。
+
+    合成局面（`build_state`）里给关羽一张【诸葛连弩】+ 一条虚拟【八阵】授予：
+    详情清单必须是「武将技能 → 实体装备技 → 虚拟装备技」，且名字取装备牌名。
+    """
+    from types import SimpleNamespace
+
+    pack = _context_pack()
+    crossbow = cards_of_type(pack, "crossbow")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(
+                hero="guanyu",
+                equip=(crossbow,),
+                virtual_equipment=("equip.eight_diagrams",),
+            ),
+            SeatSpec(hero="sunquan"),
+        ],
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    entries = seat_skill_display(SimpleNamespace(engine=engine), 0)
+
+    assert [entry["skill_id"] for entry in entries] == [
+        "hero.guanyu.wusheng",
+        "equip.crossbow",
+        "equip.eight_diagrams",
+    ], "详情必须武将技能在前、装备技能（含虚拟授予）在后"
+    assert [entry["carrier"] for entry in entries] == ["HERO", "EQUIPMENT", "EQUIPMENT"]
+    by_id = {entry["skill_id"]: entry for entry in entries}
+    assert by_id["equip.crossbow"]["name"] == "诸葛连弩"
+    assert by_id["equip.crossbow"]["locked"] is True
+    assert by_id["equip.eight_diagrams"]["name"] == "八卦阵"
+    assert by_id["equip.eight_diagrams"]["description"] == skill_description(
+        "equip.eight_diagrams"
+    )
+    # 名字 / 锁定 / 载体与可操作清单同源（两张清单允许字段不同，但公开事实不能漂）。
+    operable = {
+        entry["skill_id"]: entry
+        for entry in build_skills(SimpleNamespace(engine=engine, pending=None), 0)
+    }
+    for skill_id, entry in by_id.items():
+        assert entry["name"] == operable[skill_id]["name"]
+        assert entry["locked"] == operable[skill_id]["locked"]
+        assert entry["carrier"] == operable[skill_id]["carrier"]
+
+
+def test_the_actionable_skill_list_puts_hero_skills_before_equipment() -> None:
+    """技能按钮区（U1-06）的排序：武将技能在前、装备技能在后，同组内沿用原稳定键。"""
+    from types import SimpleNamespace
+
+    pack = _context_pack()
+    crossbow = cards_of_type(pack, "crossbow")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="guanyu", equip=(crossbow,), virtual_equipment=("equip.eight_diagrams",)),
+            SeatSpec(hero="sunquan"),
+        ],
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    entries = build_skills(SimpleNamespace(engine=engine, pending=None), 0)
+
+    carriers = [entry["carrier"] for entry in entries]
+    assert carriers[0] == "HERO", f"武将技能必须排在最前：{carriers}"
+    assert set(carriers[1:]) == {"EQUIPMENT"}, f"装备技能必须排在武将技能之后：{carriers}"
+    assert len(entries) == 3
+
+
+def test_a_dead_hero_still_carries_its_hero_skills_in_the_detail_list() -> None:
+    """U1-06：阵亡武将也要能点开详情，故详情清单不能复用「存活实例」那条路。
+
+    ``resolve_instances`` 跳过死者是**派发**口径（死人不能发动技能）；详情读的是
+    公开武将面，故与生死无关。这里同时钉住两条口径的差：可操作清单为空，详情不为空。
+    """
+    from types import SimpleNamespace
+
+    pack = _context_pack()
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hero="guanyu", alive=False, hp=0), SeatSpec(hero="sunquan")],
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    entries = seat_skill_display(SimpleNamespace(engine=engine), 0)
+
+    assert [entry["skill_id"] for entry in entries] == ["hero.guanyu.wusheng"]
+    assert entries[0]["name"] == "武圣"
+    assert build_skills(SimpleNamespace(engine=engine, pending=None), 0) == [], (
+        "可操作清单读存活实例：死者为空；详情若复用它就会开出一张空窗口"
+    )
+
+    # 读取方走**真实产出路径**（CODING_STANDARDS §1/§6）：`visible_snapshot` 才是
+    # `players[].skills` 的写入者；只测裸 helper 不能证明详情拿到的是这一份。
+    snapshot = visible_snapshot(SimpleNamespace(engine=engine, human_seat=0, pack=pack))
+    assert [entry["skill_id"] for entry in snapshot["players"][0]["skills"]] == [
+        "hero.guanyu.wusheng"
+    ], "阵亡武将的详情清单没有从 visible_snapshot 下发到前端"
+
+
+
+def test_the_public_detail_list_applies_the_lord_skill_gate() -> None:
+    """详情清单也要过主公技门控：非主公的武将牌上看不到主公技。
+
+    与 `build_skills` 的 `resolve_instances` 门控同一口径，但详情读的是公开武将面
+    （死者也要列），故门控必须在这里显式再核一次。
+    """
+    from types import SimpleNamespace
+
+    pack = _context_pack()
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="caocao", identity=Identity.LOYALIST),
+            SeatSpec(hero="liubei", identity=Identity.LORD),
+        ],
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine)
+
+    loyalist = {entry["skill_id"] for entry in seat_skill_display(session, 0)}
+    lord = {entry["skill_id"] for entry in seat_skill_display(session, 1)}
+
+    assert "hero.caocao.jianxiong" in loyalist
+    assert "hero.caocao.hujia" not in loyalist, "非主公不该看到主公技"
+    assert "hero.liubei.jijiang" in lord
+
+
 def test_skills_never_leak_another_seats_inventory() -> None:
-    """别人的技能是**暗置**信息：清单里只能有 `seat` 自己的实例。"""
+    """**可操作**清单只列该座位自己的实例：别座位的可用性 / 转化来源不下发。
+
+    武将详情另有一份**公开只读**清单（`seat_skill_display`，只含武将牌 / 装备区，
+    不带可用性）；两者不是同一个面，别把这条测试当成"对手技能完全不下发"。
+    """
     session = Session(seed=20261012, ai="heuristic", timeout_seconds=None, player_count=8)
     mine = {entry["skill_id"] for entry in build_skills(session, session.human_seat)}
 
