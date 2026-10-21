@@ -5,7 +5,8 @@
  * 票面（spec §3.1–3.2）：
  *  - 右键**武将块** = 详情；右键装备 / 判定 / 手牌不动作，牌桌整体屏蔽浏览器右键菜单；
  *  - 详情里武将技能在上、分割线、装备技能在下；技能多 / 描述长时滚轮翻阅；
- *  - 背景 / ESC 可关；打开时其他窗口不可操作（模态），但倒计时不暂停、模态内不显示；
+ *  - 关闭按钮 / ESC 只关它自己（U2-06 起它是**唯一**可叠加的检视窗：盖在询问弹窗上，
+ *    关掉后底下的询问弹窗原样恢复）；倒计时不暂停、窗口内不显示；
  *  - 阵亡武将也能点开。
  *
  * 纪律：
@@ -87,10 +88,8 @@ function detailSection(className, title, skills, emptyText) {
 function renderHeroDetailBody() {
   const body = $("t-modal-body");
   if (!body) return;
-  // `#t-options` 可能被预发动 / 排列模态搬进了正文；详情替换正文前先把它送回提示条，
-  // 否则 `innerHTML = ""` 会把这个共享节点从文档里摘掉（之后 `$("t-options")` 找不到）。
-  showOptionsHome();
-  // 滚动位置只在**同一座位**的重新渲染时保留；换座位（右键另一块武将）从顶部开始。
+  // U2-06 起详情窗口不再承载询问内容（`#t-options` 留在 `#t-dialog` 里），正文清空不会
+  // 摘掉共享节点。滚动位置只在**同一座位**的重新渲染时保留；换座位从顶部开始。
   const first = body.children[0];
   const previousSeat = first && first.getAttribute ? first.getAttribute("data-seat") : null;
   const sameSeat = previousSeat !== null
@@ -149,31 +148,27 @@ function renderHeroDetailBody() {
   body.scrollTop = scrollTop;
 }
 
-/** 打开一个座位的详情：只记本地座位号并交给共享模态（`syncModal`）统一开窗。
+/** 打开一个座位的详情：只记本地座位号并交给 `syncHeroModal` 开窗。
  *
  * 回放期间不开（回放页没有这份详情数据，且播放是严格顺序的）。
- * **不动** `state.modal.dismissed`：它属于底下的排列模态（“收起后给查看排列入口”）。
+ * **不动**询问弹窗（`#t-dialog`）的任何状态：详情是叠加的检视窗，关掉它时底下原样恢复。
  */
 function openHeroDetail(seat) {
   if (state.playback || !state.view || !state.view.snapshot) return;
-  if (seat === null) return;
+  if (seat === null || seat === undefined) return;
   if (!playerAt(state.view, seat)) return;
   state.modal.heroSeat = Number(seat);
-  syncModal();
+  syncHeroModal();
 }
 
-/** 关闭详情：清掉本地座位号，再把位置交还给可能还开着的询问模态（预发动 / 排列）。
+/** 关闭详情：清掉本地座位号、收起 `#t-modal`。
  *
- * 不提交任何 action、不动 `state.preactivation` / `state.arrange` / `state.modal.dismissed`
- * （排列的“收起”状态因此保留：关闭详情后仍只给「查看排列」入口）。
- * 刻意**不清** `state.modal.kind`：调用 `syncModal` 时它仍是 `"hero"`（`hideModalDom`
- * 只把 `open` 置 false），`syncModal` 据此看到 `wasHero`、不重置底下的 dismissed。
+ * 不提交任何 action、不动 `state.preactivation` / `state.arrange` / 询问弹窗的折叠状态
+ * ——排列的「收起」因此保留：关闭详情后仍只给「查看排列」入口。
  */
 function closeHeroDetail() {
   state.modal.heroSeat = null;
-  hideModalDom();
-  showOptionsHome();
-  syncModal();
+  syncHeroModal();
 }
 
 /** 牌桌的右键接线：外壳屏蔽浏览器菜单；武将块（自己的静态块 + 环上每个对手块）开详情。

@@ -98,7 +98,7 @@ function renderPending(view) {
     setActionLabels(false, false);
     resetRightActions();
     resetCountdown();
-    syncModal();
+    syncDialog();
     return;
   }
   // 其他座位的询问（U1-03）：提示条只写"等待"，可点控件一律不铺；该座位的武将块下方
@@ -112,7 +112,7 @@ function renderPending(view) {
     $("btn-cancel").disabled = true;
     resetRightActions();
     resetCountdown();
-    syncModal();
+    syncDialog();
     return;
   }
   const actions = pending.legal_actions || [];
@@ -154,7 +154,7 @@ function renderPending(view) {
     $("btn-cancel").disabled = true;
     resetRightActions();
     resetCountdown();
-    syncModal();
+    syncDialog();
     enforceActionFreeze();
     return;
   }
@@ -167,7 +167,9 @@ function renderPending(view) {
   refreshSubmit(pending);
   renderRightActions(pending, view);
   renderCountdown(view);
-  syncModal();
+  // U2-06：询问弹窗的生命周期在**每次渲染末尾**按当前步骤的表面同步一次（开 / 关 /
+  // 同一问只换正文）。它必须是最后一步：上面的渲染器刚把内容写进 `#t-options`。
+  syncDialog();
   // 请求在飞期间四键保持禁用（这一条盖住任何在飞期间发生的重绘）。
   enforceActionFreeze();
 }

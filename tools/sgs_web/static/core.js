@@ -159,10 +159,13 @@ const state = {
   // U1-03：倒计时的本地锚点。服务端的 `pending_since` 是单调时钟，浏览器不能直接比；
   // 这里只记**第一次见到这个询问序号**的本地时刻，轮询刷新同一询问时不重置。
   pendingClock: { seq: null, receivedAt: 0 },
-  // U1-03：共享模态的本地态（kind = preactivation / arrange / hero / null；dismissed 只对
-  // 强制选择（排列）生效——关掉模态后仍可从提示条右端重新打开）。U1-06 的武将详情用
-  // `heroSeat` 记座位：它独立于询问，右键任何武将块都能开。
-  modal: { kind: null, open: false, dismissed: false, heroSeat: null },
+  // U2-06：询问弹窗（`#t-dialog`）的本地态。`kind` = `stepDialogKind()` 的种类或
+  // `"preactivation"`（预发动清单借同一个容器，但仍是牌桌表面）；`key` = 当前窗口实例
+  // （同一问的重复渲染保留折叠，换问关旧开新）；`collapsed` 只改遮挡、不参与只读判据。
+  dialog: { open: false, collapsed: false, kind: null, key: null },
+  // U1-06：武将详情是**唯一**可叠加的检视窗（独立的 `#t-modal`），`heroSeat` 记座位：
+  // 它独立于询问，右键任何武将块都能开；开合不改变只读态。
+  modal: { heroSeat: null },
   runs: [],
   replay: null,
   heroCatalog: [],     // 点将列表（`GET /api/heroes` 的启用池）；开局页的选项来源
@@ -253,10 +256,13 @@ function show(view) {
   syncNavState();
   // 离开回放页就停掉播放：定时器不该在看不见的页面上继续跑。
   if (view !== "replay") stopReplayPlay();
-  // U1-03：牌桌的三段布局不在屏幕上时，共享模态也收起（不在别的页面上留一层遮罩）；
-  // 回到牌桌时按当前询问重新挂上（预发动 / 排列的本地态不因切页丢失）。
+  // U1-03 / U2-06：牌桌的三段布局不在屏幕上时，询问弹窗与武将详情都收起（不在别的页面上
+  // 留一层遮罩）；回到牌桌时按当前询问重新挂上（预发动 / 排列的本地态不因切页丢失）。
   if (view === "table") {
-    if (state.view) syncModal();
+    if (state.view) {
+      syncDialog();
+      syncHeroModal();
+    }
   } else {
     closeModalForView();
   }

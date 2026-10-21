@@ -6161,13 +6161,14 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   };
 
   let view = enterModal();
-  check("U1-03p 多步技能清单打开中央模态（标题 + 清单在模态正文里）",
-    $("t-modal").hidden === false
-      && /预发动/.test($("t-modal-title").textContent)
-      && $("t-modal-body").children.includes($("t-options")),
-    `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" bodyChildren=${$("t-modal-body").children.length}`);
-  const modalRegions = ["table-topbar", "table-stage", "table-bottom", "t-modal"];
-  check("U1-03q 模态打开时没有任何区域 inert / aria-hidden：顶栏 / 舞台 / 底部都可检视",
+  check("U1-03p 多步技能清单打开询问弹窗（标题 + 清单在正文里；详情窗保持关闭）",
+    $("t-dialog").hidden === false
+      && /预发动/.test($("t-dialog-title").textContent)
+      && $("t-dialog-body").children.includes($("t-options"))
+      && $("t-modal").hidden === true,
+    `dialogHidden=${$("t-dialog").hidden} title="${$("t-dialog-title").textContent}" bodyChildren=${$("t-dialog-body").children.length} detailHidden=${$("t-modal").hidden}`);
+  const modalRegions = ["table-topbar", "table-stage", "table-bottom", "t-dialog", "t-modal"];
+  check("U1-03q 询问弹窗打开时没有任何区域 inert / aria-hidden：顶栏 / 舞台 / 底部都可检视",
     modalRegions.every((id) => $(id).getAttribute("inert") === undefined
       && $(id).getAttribute("aria-hidden") === undefined)
       && $("table-shell").classList.contains("modal-open")
@@ -6176,47 +6177,47 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U1-03q2 预发动清单是牌桌表面（D2 的 C 形），不是只读态：selectionEnabled() 仍为真",
     ui.stepDialogKind(view.pending) === null
       && ui.selectionEnabled() === true
-      && ui.state.modal.kind === "preactivation",
-    `surface=${ui.stepDialogKind(view.pending)} enabled=${ui.selectionEnabled()} modal=${ui.state.modal.kind}`);
-  check("U1-03r 模态内不显示倒计时（倒计时留在提示条上）",
-    !$("t-modal-body").text().includes("剩余")
+      && ui.state.dialog.kind === "preactivation",
+    `surface=${ui.stepDialogKind(view.pending)} enabled=${ui.selectionEnabled()} dialog=${ui.state.dialog.kind}`);
+  check("U1-03r 询问弹窗内不显示倒计时（倒计时留在提示条上）",
+    !$("t-dialog-body").text().includes("剩余")
       && $("t-countdown").hidden === false
       && $("t-default-label").textContent.includes("超时")
-      && !$("t-modal-body").children.includes($("t-countdown")),
-    `bodyText="${$("t-modal-body").text().slice(0, 60)}" countdownHidden=${$("t-countdown").hidden} countdownInBody=${$("t-modal-body").children.includes($("t-countdown"))}`);
+      && !$("t-dialog-body").children.includes($("t-countdown")),
+    `bodyText="${$("t-dialog-body").text().slice(0, 60)}" countdownHidden=${$("t-countdown").hidden} countdownInBody=${$("t-dialog-body").children.includes($("t-countdown"))}`);
 
-  // 不暂停：模态开着时只挪本地锚点，倒计时照常从绿 → 黄 → 红。
+  // 不暂停：弹窗开着时只挪本地锚点，倒计时照常从绿 → 黄 → 红。
   ui.state.pendingClock.receivedAt = Date.now() - 35 * 1000;
   ui.renderCountdown(view);
   const yellowWhileOpen = $("t-countdown").getAttribute("data-phase");
   ui.state.pendingClock.receivedAt = Date.now() - 56 * 1000;
   ui.renderCountdown(view);
-  check("U1-03s 模态打开不暂停倒计时（黄 → 红 + 闪烁仍在提示条上走）",
+  check("U1-03s 询问弹窗打开不暂停倒计时（黄 → 红 + 闪烁仍在提示条上走）",
     yellowWhileOpen === "yellow"
       && $("t-countdown").getAttribute("data-phase") === "red"
       && $("t-countdown").classList.contains("blink") === true
       && $("t-countdown").hidden === false,
     `yellow=${yellowWhileOpen} now=${$("t-countdown").getAttribute("data-phase")} blink=${$("t-countdown").classList.contains("blink")}`);
 
-  // 第 1 步选牌：模态外的**手牌**仍可点（预发动是牌桌表面：selectionEnabled 不拦它）。
+  // 第 1 步选牌：弹窗外的**手牌**仍可点（预发动是牌桌表面：selectionEnabled 不拦它）。
   const handChip = $("t-hand").children[0];
   (handChip.listeners.click || []).forEach((fn) => fn({ target: handChip }));
-  check("U1-03t 模态打开时仍能手牌选来源牌（底部提示条 / 手牌交互未被挡）",
+  check("U1-03t 弹窗打开时仍能手牌选来源牌（底部提示条 / 手牌交互未被挡）",
     JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[0].values) === "[81]",
     JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[0].values));
 
-  // 第 2 步是**选目标**：模态可能挡住环上某几个座位，故模态正文里同时铺座位按钮；
+  // 第 2 步是**选目标**：弹窗可能挡住环上某几个座位，故正文里同时铺座位按钮；
   // 环上高亮也仍在（没有 inert，D8）。两条入口写同一个答案。
   const next = $("t-options").children.find((node) => node.textContent === "下一步");
   (next.listeners.click || []).forEach((fn) => fn({ target: next }));
   const seatOption = $("t-options").children.find(
     (node) => (node.className || "").includes("seat-opt")
       && (node.textContent || "").includes("座位 1"));
-  check("U1-03t2 模态里的座位按钮与环上座位都可选目标（被窗口挡住的座位也有入口）",
+  check("U1-03t2 弹窗里的座位按钮与环上座位都可选目标（被窗口挡住的座位也有入口）",
     !!seatOption && seatBox(1).classList.contains("targetable"),
     `seatOption="${seatOption && seatOption.textContent}" targetable=${seatBox(1).classList.contains("targetable")}`);
   (seatOption.listeners.click || []).forEach((fn) => fn({ target: seatOption }));
-  check("U1-03t3 点模态里的座位按钮 = 写入同一个答案（可拼出复合 ActivateSkill）",
+  check("U1-03t3 点弹窗里的座位按钮 = 写入同一个答案（可拼出复合 ActivateSkill）",
     (() => {
       const action = ui.buildAction();
       return !!action && action.kind === "ActivateSkill"
@@ -6224,29 +6225,35 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     })(),
     JSON.stringify(ui.buildAction()));
 
-  // ESC = 关闭（预发动 = 取消本地态，零提交）；再进一次，验证遮罩不再是关闭出口。
+  // ESC 不再是询问弹窗的出口（D3）：预发动靠提示条右端「取消预发动」退出，零提交。
   const beforeEsc = calls.length;
   fireDocument("keydown", { key: "Escape" });
-  check("U1-03u ESC 关闭模态；预发动关闭 = 取消本地态、零 action 提交",
-    $("t-modal").hidden === true
+  const escKeptOpen = $("t-dialog").hidden === false
+    && Boolean(ui.state.preactivation)
+    && calls.length === beforeEsc;
+  await clickAndWait($("btn-cancel"));
+  check("U1-03u ESC 对询问弹窗是 no-op；右端「取消预发动」退出本地态、零 action 提交",
+    escKeptOpen
+      && $("t-dialog").hidden === true
       && ui.state.preactivation === null
+      && $("t-dialog-body").children.length === 0
       && calls.length === beforeEsc,
-    `hidden=${$("t-modal").hidden} pre=${ui.state.preactivation} calls=${calls.length - beforeEsc}`);
+    `escKeptOpen=${escKeptOpen} hidden=${$("t-dialog").hidden} pre=${ui.state.preactivation} body=${$("t-dialog-body").children.length} calls=${calls.length - beforeEsc}`);
 
   view = enterModal();
   const backdropClicks = ($("t-modal-backdrop").listeners.click || []).length;
   const beforeBackdrop = calls.length;
   ($("t-modal-backdrop").listeners.click || []).forEach((fn) => fn({ target: $("t-modal-backdrop") }));
-  // 新行为（D8）：遮罩是 `pointer-events: none` 的暗化层，没有自己的点击——
-  // 「点背景 = 关闭」不再存在；真实点击穿透到牌桌，由 selectionEnabled() 判据拦下。
-  check("U1-03v 遮罩不再吞指针 / 不再承担关闭（无 click 监听；模态保持打开、零提交）",
+  // 遮罩是 `pointer-events: none` 的暗化层，没有自己的点击——「点背景 = 关闭」不存在；
+  // 真实点击穿透到牌桌，由 selectionEnabled() 判据拦下。
+  check("U1-03v 遮罩不再吞指针 / 不再承担关闭（无 click 监听；询问弹窗保持打开、零提交）",
     backdropClicks === 0
-      && $("t-modal").hidden === false
+      && $("t-dialog").hidden === false
       && Boolean(ui.state.preactivation)
       && calls.length === beforeBackdrop,
-    `backdropClicks=${backdropClicks} hidden=${$("t-modal").hidden} pre=${Boolean(ui.state.preactivation)} calls=${calls.length - beforeBackdrop}`);
+    `backdropClicks=${backdropClicks} hidden=${$("t-dialog").hidden} pre=${Boolean(ui.state.preactivation)} calls=${calls.length - beforeBackdrop}`);
 
-  // 排列（强制选择）：同一个模态壳；关闭只收起，右端出现「查看排列」可重开。
+  // 排列（强制选择）：同一个询问弹窗；折叠只收起正文，标题条与「查看排列」入口仍在。
   const arrangePending = {
     kind: "ARRANGE", actor: 0, seq: 9202, timing: "PHASE_PREPARE",
     prompt: "请排列这些牌：给出顺序与前几张置于牌堆顶。",
@@ -6262,41 +6269,49 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(arrangeView);
-  check("U1-03w 编排 / 排列面也走同一个中央模态",
-    $("t-modal").hidden === false
-      && $("t-modal-title").textContent === "排列"
-      && $("t-modal-body").children.includes($("t-options")),
-    `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}"`);
+  check("U1-03w 排列面走同一个询问弹窗（标题 + 正文都在 #t-dialog 里；详情窗不掺和）",
+    $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "排列"
+      && $("t-dialog-body").children.includes($("t-options"))
+      && $("t-modal").hidden === true,
+    `dialogHidden=${$("t-dialog").hidden} detailHidden=${$("t-modal").hidden} title="${$("t-dialog-title").textContent}"`);
   const arrangeActionBefore = JSON.stringify(ui.buildAction());
-  fireDocument("keydown", { key: "Escape" });
-  check("U1-03x 排列收起：仍只读（selectionEnabled false）、无 inert、保留已摆顺序 + 重开入口",
-    $("t-modal").hidden === true
+  (($("t-dialog-collapse").listeners.click) || []).forEach((fn) => fn({ target: $("t-dialog-collapse") }));
+  check("U1-03x 排列折叠：仍是只读（selectionEnabled false）、正文撤下、保留已摆顺序 + 「查看排列」入口",
+    $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === true
+      && $("t-dialog-collapse").textContent === "展开"
       && $("btn-show-modal").hidden === false
+      && $("btn-show-modal").textContent === "查看排列"
       && ui.selectionEnabled() === false
       && modalRegions.every((id) => $(id).getAttribute("inert") === undefined)
       && JSON.stringify(ui.buildAction()) === arrangeActionBefore,
-    `hidden=${$("t-modal").hidden} reopenHidden=${$("btn-show-modal").hidden} enabled=${ui.selectionEnabled()} action=${JSON.stringify(ui.buildAction())}`);
-  ($("btn-show-modal").listeners.click || []).forEach((fn) => fn({ target: $("btn-show-modal") }));
-  check("U1-03y 「查看排列」重新打开模态，顺序不变",
-    $("t-modal").hidden === false
+    `bodyHidden=${$("t-dialog-body").hidden} collapse="${$("t-dialog-collapse").textContent}" reopenHidden=${$("btn-show-modal").hidden} enabled=${ui.selectionEnabled()} action=${JSON.stringify(ui.buildAction())}`);
+  (($("btn-show-modal").listeners.click) || []).forEach((fn) => fn({ target: $("btn-show-modal") }));
+  check("U1-03y 「查看排列」展开折叠的排列弹窗，顺序不变",
+    $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === false
+      && $("t-dialog-collapse").textContent === "收起"
       && $("btn-show-modal").hidden === true
       && JSON.stringify(ui.buildAction()) === arrangeActionBefore,
-    `hidden=${$("t-modal").hidden} reopenHidden=${$("btn-show-modal").hidden}`);
+    `bodyHidden=${$("t-dialog-body").hidden} reopenHidden=${$("btn-show-modal").hidden}`);
 
-  // 静态规范：屏幕正中 / 正文可滚 / 遮罩 = pointer-events: none 的暗化层（D8）。
+  // 静态规范：询问弹窗与详情窗同几何；遮罩 = pointer-events: none 的暗化层（D8）。
   const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
-  check("U1-03z 模态 CSS：舞台区正中、正文可滚、遮罩不吞指针（pointer-events: none）",
-    /\.modal\s*\{[^}]*align-items:\s*center[^}]*justify-content:\s*center/s.test(css)
-      && /\.modal\s*\{[^}]*bottom:\s*27\.5%/s.test(css)
-      && /\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)
+  check("U1-03z 询问弹窗 CSS：舞台区正中、正文可滚、折叠只撤正文、遮罩不吞指针",
+    /\.dialog\s*\{[^}]*align-items:\s*center[^}]*justify-content:\s*center/s.test(css)
+      && /\.dialog\s*\{[^}]*bottom:\s*27\.5%/s.test(css)
+      && /\.dialog-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)
+      && /\.dialog-body\[hidden\]\s*\{[^}]*display:\s*none/s.test(css)
       && /\.modal-backdrop\s*\{[^}]*bottom:\s*27\.5%/s.test(css)
       && /\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)
       && !/\.modal-backdrop\s*\{[^}]*pointer-events:\s*auto/s.test(css)
-      && /\.modal\s*\{[^}]*pointer-events:\s*none/s.test(css)
-      && /\.modal-window\s*\{[^}]*pointer-events:\s*auto/s.test(css),
-    `modal=${/\.modal\s*\{[^}]*align-items:\s*center[^}]*justify-content:\s*center/s.test(css)} body=${/\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)} backdrop=${/\.modal-backdrop\s*\{[^}]*bottom:\s*27\.5%/s.test(css)} backdropPENone=${/\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)}`);
+      && /\.dialog\s*\{[^}]*pointer-events:\s*none/s.test(css)
+      && /\.dialog-window\s*\{[^}]*pointer-events:\s*auto/s.test(css),
+    `dialog=${/\.dialog\s*\{[^}]*align-items:\s*center[^}]*justify-content:\s*center/s.test(css)} body=${/\.dialog-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)} collapsed=${/\.dialog-body\[hidden\]\s*\{[^}]*display:\s*none/s.test(css)} backdrop=${/\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)}`);
   ui.resetSelection();
   ui.state.view = null;
+  ui.renderPending(null);
 }
 
 
@@ -6797,8 +6812,8 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && /\.skill\.locked,\s*\.skill\.passive\s*\{/s.test(css),
     `modalBody=${/\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)} backdropPE=${/\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)} blockingLeft=${/modal-blocking/.test(css)}`);
 
-  // 详情是**叠加**在询问模态上的临时窗口：不能把 `#t-options` 从文档里摘掉，也不能
-  // 把排列模态的「收起」状态抹掉（ticket 03 的「查看排列」出口）。
+  // 详情是**叠加**在询问弹窗上的检视窗（U2-06）：开合它不碰 `#t-dialog` 的正文 / 折叠，
+  // 也不改只读态；`#t-options` 始终留在询问弹窗里（不再被详情搬走）。
   {
     const arrangePending = {
       kind: "ARRANGE", actor: 0, seq: 9302, timing: "PHASE_PREPARE",
@@ -6815,45 +6830,61 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     ui.resetSelection();
     ui.renderTable();
     ui.renderPending(arrangeView);
-    check("U1-06w0 排列模态先打开（详情叠加测试的前置）",
-      $("t-modal").hidden === false && $("t-modal-title").textContent === "排列",
-      `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}"`);
+    check("U1-06w0 排列弹窗先打开（详情叠加测试的前置；详情窗保持关闭）",
+      $("t-dialog").hidden === false
+        && $("t-dialog-title").textContent === "排列"
+        && $("t-modal").hidden === true,
+      `dialogHidden=${$("t-dialog").hidden} detailHidden=${$("t-modal").hidden} title="${$("t-dialog-title").textContent}"`);
+    const arrangeActionBefore = JSON.stringify(ui.buildAction());
+    const dialogBodyBefore = $("t-dialog-body").children.length;
 
     fireContext(heroBlockOf(0));
-    check("U1-06w 详情盖在排列模态上：共享的 #t-options 被送回提示条；只读态不变（详情是检视窗）",
-      $("t-modal").hidden === false
+    check("U1-06w 详情盖在排列弹窗上：两个节点各自独立，询问弹窗正文 / 只读态原样",
+      $("t-dialog").hidden === false
+        && $("t-dialog-title").textContent === "排列"
+        && $("t-dialog-body").children.includes($("t-options"))
+        && $("t-modal").hidden === false
         && /武将详情/.test($("t-modal-title").textContent)
-        && $("t-options-home").children.includes($("t-options"))
+        && $("t-dialog-body").children.length === dialogBodyBefore
+        && JSON.stringify(ui.buildAction()) === arrangeActionBefore
         && ui.selectionEnabled() === false,
-      `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" optionsHome=${$("t-options-home").children.includes($("t-options"))} enabled=${ui.selectionEnabled()}`);
+      `dialog="${$("t-dialog-title").textContent}" detail="${$("t-modal-title").textContent}" optionsInDialog=${$("t-dialog-body").children.includes($("t-options"))} enabled=${ui.selectionEnabled()}`);
 
     fireDocument("keydown", { key: "Escape" });
-    check("U1-06w2 关闭详情后排列模态原样恢复（正文只剩排列、选项行回到正文、仍只读）",
-      $("t-modal").hidden === false
-        && $("t-modal-title").textContent === "排列"
-        && $("t-modal-body").children.includes($("t-options"))
-        && !$("t-modal-body").children.some(
+    check("U1-06w2 ESC 只关详情：排列弹窗原样恢复（正文仍是排列、无详情残留、仍只读）",
+      $("t-modal").hidden === true
+        && $("t-dialog").hidden === false
+        && $("t-dialog-title").textContent === "排列"
+        && $("t-dialog-body").children.includes($("t-options"))
+        && !$("t-dialog-body").children.some(
           (node) => (node.className || "").includes("hero-detail"))
-        && ui.buildAction() !== null
+        && JSON.stringify(ui.buildAction()) === arrangeActionBefore
         && ui.selectionEnabled() === false,
-      `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" bodyClasses=${JSON.stringify($("t-modal-body").children.map((node) => node.className))} enabled=${ui.selectionEnabled()}`);
+      `dialogHidden=${$("t-dialog").hidden} title="${$("t-dialog-title").textContent}" bodyClasses=${JSON.stringify($("t-dialog-body").children.map((node) => node.className))} enabled=${ui.selectionEnabled()}`);
 
-    fireDocument("keydown", { key: "Escape" });
-    check("U1-06w3 排列收起：只给「查看排列」入口",
-      $("t-modal").hidden === true && $("btn-show-modal").hidden === false,
-      `hidden=${$("t-modal").hidden} reopen=${$("btn-show-modal").hidden}`);
+    (($("t-dialog-collapse").listeners.click) || []).forEach((fn) => fn({ target: $("t-dialog-collapse") }));
+    check("U1-06w3 排列折叠：标题条留下，右端仍给「查看排列」入口",
+      $("t-dialog").hidden === false
+        && $("t-dialog-body").hidden === true
+        && $("btn-show-modal").hidden === false
+        && $("btn-show-modal").textContent === "查看排列",
+      `dialogHidden=${$("t-dialog").hidden} bodyHidden=${$("t-dialog-body").hidden} reopen=${$("btn-show-modal").hidden}`);
 
     fireContext(heroBlockOf(0));
     fireDocument("keydown", { key: "Escape" });
-    check("U1-06w4 详情关闭不重开已收起的排列（「查看排列」仍在）",
-      $("t-modal").hidden === true && $("btn-show-modal").hidden === false,
-      `hidden=${$("t-modal").hidden} reopen=${$("btn-show-modal").hidden}`);
+    check("U1-06w4 详情在折叠的排列上开合：关闭详情不重开正文（仍只给「查看排列」）",
+      $("t-modal").hidden === true
+        && $("t-dialog-body").hidden === true
+        && $("btn-show-modal").hidden === false,
+      `detailHidden=${$("t-modal").hidden} bodyHidden=${$("t-dialog-body").hidden} reopen=${$("btn-show-modal").hidden}`);
 
     ($("btn-show-modal").listeners.click || []).forEach((fn) => fn({ target: $("btn-show-modal") }));
-    check("U1-06w5 「查看排列」仍能重开（详情没有抹掉重开状态）",
-      $("t-modal").hidden === false && $("t-modal-title").textContent === "排列",
-      `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}"`);
-    fireDocument("keydown", { key: "Escape" });
+    check("U1-06w5 「查看排列」展开后正文回来（详情没有把折叠 / 正文抹掉）",
+      $("t-dialog").hidden === false
+        && $("t-dialog-body").hidden === false
+        && $("t-dialog-title").textContent === "排列"
+        && $("t-dialog-body").children.includes($("t-options")),
+      `dialogHidden=${$("t-dialog").hidden} bodyHidden=${$("t-dialog-body").hidden} title="${$("t-dialog-title").textContent}"`);
   }
 
   // 真会话（不是合成夹具）：服务端给**每个座位**下发详情清单，读取方（详情）读到它。
@@ -7417,13 +7448,15 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U2-05a 排列弹窗 = 只读态：stepDialogKind=arrange、selectionEnabled false、暗化层可见、全程无 inert",
     ui.stepDialogKind(view.pending) === "arrange"
       && ui.selectionEnabled() === false
-      && $("t-modal").hidden === false
+      && $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "排列"
+      && $("t-modal").hidden === true
       && $("t-modal-backdrop").hidden === false
       && $("table-shell").classList.contains("modal-open")
-      && ["table-topbar", "table-stage", "table-bottom", "t-modal"].every(
+      && ["table-topbar", "table-stage", "table-bottom", "t-dialog", "t-modal"].every(
         (id) => $(id).getAttribute("inert") === undefined
           && $(id).getAttribute("aria-hidden") === undefined),
-    `surface=${ui.stepDialogKind(view.pending)} enabled=${ui.selectionEnabled()} modalHidden=${$("t-modal").hidden} backdropHidden=${$("t-modal-backdrop").hidden}`);
+    `surface=${ui.stepDialogKind(view.pending)} enabled=${ui.selectionEnabled()} dialogHidden=${$("t-dialog").hidden} detailHidden=${$("t-modal").hidden} backdropHidden=${$("t-modal-backdrop").hidden}`);
 
   /* ---- ② 点手牌 / 座位 / 槽位：不产生选择态、提交键不变、目标高亮不出现 ---- */
   const beforeBlocked = selectionFingerprint();
@@ -7465,10 +7498,10 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U2-05c2 只读态里事件流照常展开 / 收起；顶栏导航不在 inert 里",
     logOpenedWhileReadonly
       && $("t-log-panel").hidden === true
-      && $("t-modal").hidden === false
+      && $("t-dialog").hidden === false
       && $("table-topbar").getAttribute("inert") === undefined
       && $("nav-lobby").getAttribute("inert") === undefined,
-    `opened=${logOpenedWhileReadonly} closedAgain=${$("t-log-panel").hidden} modalHidden=${$("t-modal").hidden}`);
+    `opened=${logOpenedWhileReadonly} closedAgain=${$("t-log-panel").hidden} dialogHidden=${$("t-dialog").hidden}`);
   fireContext(heroBlockOf(1));
   check("U2-05d 只读态里右键武将块照开详情（检视窗开合不改变只读态）",
     $("t-modal").hidden === false
@@ -7477,15 +7510,16 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" enabled=${ui.selectionEnabled()}`);
   const arrangeActionBefore = JSON.stringify(ui.buildAction());
   fireDocument("keydown", { key: "Escape" });
-  check("U2-05d2 关闭详情后排列弹窗原样恢复（正文只剩排列、已摆顺序在，仍只读）",
-    $("t-modal").hidden === false
-      && $("t-modal-title").textContent === "排列"
-      && $("t-modal-body").children.includes($("t-options"))
-      && !$("t-modal-body").children.some(
+  check("U2-05d2 关闭详情后排列弹窗原样恢复（正文仍是排列、已摆顺序在，仍只读）",
+    $("t-modal").hidden === true
+      && $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "排列"
+      && $("t-dialog-body").children.includes($("t-options"))
+      && !$("t-dialog-body").children.some(
         (node) => (node.className || "").includes("hero-detail"))
       && JSON.stringify(ui.buildAction()) === arrangeActionBefore
       && ui.selectionEnabled() === false,
-    `title="${$("t-modal-title").textContent}" bodyClasses=${JSON.stringify($("t-modal-body").children.map((node) => node.className))} action=${JSON.stringify(ui.buildAction())}`);
+    `detailHidden=${$("t-modal").hidden} title="${$("t-dialog-title").textContent}" bodyClasses=${JSON.stringify($("t-dialog-body").children.map((node) => node.className))} action=${JSON.stringify(ui.buildAction())}`);
 
   /* ---- ④ 键盘：blocked 态回车不选；卡面是 button（可聚焦）但 click 被拦 ---- */
   check("U2-05e 阻断态键盘激活不产生选择：手牌是 <button>（Tab 到它再回车 = 一次 click）却无焦点；座位无键盘入口",
@@ -7496,40 +7530,59 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && seatBox(1).getAttribute("tabindex") === undefined,
     `tag=${handChip().tagName} focus=${ui.state.focusCardId} seatKeys=${(seatBox(1).listeners.keydown || []).length} tabindex=${seatBox(1).getAttribute("tabindex")}`);
 
-  /* ---- ⑤ 收起（查看排列）仍是只读；检视照常；不擅自重开 ---- */
-  fireDocument("keydown", { key: "Escape" });
-  check("U2-05f 收起（查看排列）仍是只读：selectionEnabled false、重开入口可见",
-    $("t-modal").hidden === true
+  /* ---- ⑤ 折叠（只撤正文）仍是只读；检视照常；不擅自重开；ESC 不是出口 ---- */
+  const collapseClicksBefore = ($("t-dialog-collapse").listeners.click || []).length;
+  (($("t-dialog-collapse").listeners.click) || []).forEach((fn) => fn({ target: $("t-dialog-collapse") }));
+  check("U2-05f 折叠按钮把弹窗缩成标题条（标题 + 步骤提示 + 展开）；仍是只读、详情窗不掺和",
+    collapseClicksBefore === 1
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === true
+      && $("t-dialog-title").textContent === "排列"
+      && $("t-dialog-hint").textContent.length > 0
+      && $("t-dialog-collapse").textContent === "展开"
       && $("btn-show-modal").hidden === false
+      && $("t-modal").hidden === true
       && ui.selectionEnabled() === false,
-    `hidden=${$("t-modal").hidden} reopen=${$("btn-show-modal").hidden} enabled=${ui.selectionEnabled()}`);
+    `bodyHidden=${$("t-dialog-body").hidden} collapse="${$("t-dialog-collapse").textContent}" hint="${$("t-dialog-hint").textContent}" reopen=${$("btn-show-modal").hidden} enabled=${ui.selectionEnabled()}`);
+  const collapsedActionBefore = JSON.stringify(ui.buildAction());
   const beforeDismissed = selectionFingerprint();
+  fireDocument("keydown", { key: "Escape" });
   await clickAndWait(handChip());
   pressEnter(handChip());
   pressEnter(seatBox(1));
-  check("U2-05f2 收起后点牌点座仍不生效（折叠只改遮挡，不改只读态）",
-    selectionFingerprint() === beforeDismissed
+  check("U2-05f2 折叠后点牌点座仍不生效、ESC 也不关 / 不展开（折叠只改遮挡，不改只读态）",
+    $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === true
+      && selectionFingerprint() === beforeDismissed
+      && JSON.stringify(ui.buildAction()) === collapsedActionBefore
       && ui.state.focusCardId === null
       && ui.state.selectedTargets.length === 0,
-    `now=${selectionFingerprint()}`);
-  check("U2-05f3 收起后悬停 title 仍可用（检视不随折叠关闭）",
+    `now=${selectionFingerprint()} action=${JSON.stringify(ui.buildAction())}`);
+  check("U2-05f3 折叠后悬停 title 仍可用（检视不随折叠关闭）",
     handChip().getAttribute("title") === "【杀】的全文描述",
     `hand="${handChip().getAttribute("title")}"`);
   fireContext(heroBlockOf(0));
-  check("U2-05f4 收起后右键详情仍可开（检视窗）",
-    /武将详情/.test($("t-modal-title").textContent),
-    `title="${$("t-modal-title").textContent}"`);
-  fireDocument("keydown", { key: "Escape" });
-  check("U2-05f5 关闭详情后不擅自重开已收起的排列：仍只给「查看排列」入口",
-    $("t-modal").hidden === true && $("btn-show-modal").hidden === false,
-    `hidden=${$("t-modal").hidden} reopen=${$("btn-show-modal").hidden}`);
-  (($("btn-show-modal").listeners.click) || []).forEach((fn) => fn({ target: $("btn-show-modal") }));
-  check("U2-05f6 「查看排列」重开：仍是只读态、排列正文回到窗口里",
+  check("U2-05f4 折叠后右键详情仍可开（检视窗叠在标题条上）",
     $("t-modal").hidden === false
-      && $("t-modal-title").textContent === "排列"
-      && $("t-modal-body").children.includes($("t-options"))
+      && /武将详情/.test($("t-modal-title").textContent)
+      && $("t-dialog-body").hidden === true,
+    `detailHidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" bodyHidden=${$("t-dialog-body").hidden}`);
+  fireDocument("keydown", { key: "Escape" });
+  check("U2-05f5 关闭详情后不擅自展开已折叠的排列：仍只给「查看排列」入口",
+    $("t-modal").hidden === true
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === true
+      && $("btn-show-modal").hidden === false,
+    `detailHidden=${$("t-modal").hidden} bodyHidden=${$("t-dialog-body").hidden} reopen=${$("btn-show-modal").hidden}`);
+  (($("btn-show-modal").listeners.click) || []).forEach((fn) => fn({ target: $("btn-show-modal") }));
+  check("U2-05f6 「查看排列」展开：仍是只读态、排列正文回到窗口里",
+    $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === false
+      && $("t-dialog-title").textContent === "排列"
+      && $("t-dialog-body").children.includes($("t-options"))
+      && $("btn-show-modal").hidden === true
       && ui.selectionEnabled() === false,
-    `title="${$("t-modal-title").textContent}" enabled=${ui.selectionEnabled()}`);
+    `bodyHidden=${$("t-dialog-body").hidden} title="${$("t-dialog-title").textContent}" reopen=${$("btn-show-modal").hidden} enabled=${ui.selectionEnabled()}`);
 
   /* ---- ⑥ 遮罩不吞指针：没有自己的 click；穿透到牌桌的点击由只读判据拦下 ---- */
   const beforePassThrough = selectionFingerprint();
@@ -7537,12 +7590,12 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   (($("t-modal-backdrop").listeners.click) || []).forEach((fn) => fn({ target: $("t-modal-backdrop") }));
   // 真实点击穿过遮罩落到牌桌手牌上（同一份可点节点）：
   await clickAndWait(handChip());
-  check("U2-05g 遮罩不吞指针：无 click 监听 + CSS pointer-events: none；穿透的点击被只读判据拦下、模态不被点关",
+  check("U2-05g 遮罩不吞指针：无 click 监听 + CSS pointer-events: none；穿透的点击被只读判据拦下、弹窗不被点关",
     backdropClicks === 0
       && /\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)
-      && $("t-modal").hidden === false
+      && $("t-dialog").hidden === false
       && selectionFingerprint() === beforePassThrough,
-    `backdropClicks=${backdropClicks} peNone=${/\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)} modalHidden=${$("t-modal").hidden} now=${selectionFingerprint()}`);
+    `backdropClicks=${backdropClicks} peNone=${/\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)} dialogHidden=${$("t-dialog").hidden} now=${selectionFingerprint()}`);
   // 收尾：让后面几个状态从干净的一面开始（不能留一个开着的弹窗）。
   ui.resetSelection();
   ui.renderTable();
@@ -7612,10 +7665,11 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     (node) => node.getAttribute("data-skill-id") === "demo.modal");
   (modalSkill.listeners.click || []).forEach((fn) => fn({ target: modalSkill }));
   check("U2-05i 预发动清单打开仍是牌桌表面：弹窗在、selectionEnabled 为真（不是只读）",
-    $("t-modal").hidden === false
-      && ui.state.modal.kind === "preactivation"
+    $("t-dialog").hidden === false
+      && ui.state.dialog.kind === "preactivation"
+      && /预发动/.test($("t-dialog-title").textContent)
       && ui.selectionEnabled() === true,
-    `modalKind=${ui.state.modal.kind} enabled=${ui.selectionEnabled()}`);
+    `dialogKind=${ui.state.dialog.kind} title="${$("t-dialog-title").textContent}" enabled=${ui.selectionEnabled()}`);
   await clickAndWait(handChip());
   check("U2-05i2 预发动选牌步：点手牌仍生效（C 形：点自己的牌）",
     JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[0].values) === "[1]",
@@ -7626,16 +7680,407 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U2-05i3 预发动选座步：点座位仍生效（C 形：点自己的座位）",
     JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[1].values) === "[1]",
     JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[1].values));
-  check("U2-05i4 预发动弹窗开合不改变只读判据（关掉清单后仍为可选的牌桌表面）",
-    (() => {
-      fireDocument("keydown", { key: "Escape" });
-      return ui.state.preactivation === null && ui.selectionEnabled() === true;
-    })(),
-    `pre=${ui.state.preactivation} enabled=${ui.selectionEnabled()}`);
+  const beforePreCancel = calls.length;
+  fireDocument("keydown", { key: "Escape" });
+  const escKeptPreactivation = ui.state.preactivation !== null && $("t-dialog").hidden === false;
+  (($("t-dialog-collapse").listeners.click) || []).forEach((fn) => fn({ target: $("t-dialog-collapse") }));
+  const collapsedKeptPicks = $("t-dialog-body").hidden === true
+    && JSON.stringify(ui.state.preactivation.answers.map((answer) => answer.values)) === "[[1],[1]]";
+  (($("t-dialog-collapse").listeners.click) || []).forEach((fn) => fn({ target: $("t-dialog-collapse") }));
+  await clickAndWait($("btn-cancel"));
+  check("U2-05i4 ESC 不退出预发动；折叠不动答案；右端「取消预发动」退出且零提交、弹窗清正文",
+    escKeptPreactivation
+      && collapsedKeptPicks
+      && ui.state.preactivation === null
+      && $("t-dialog").hidden === true
+      && $("t-dialog-body").children.length === 0
+      && $("btn-show-modal").hidden === true
+      && calls.length === beforePreCancel
+      && ui.selectionEnabled() === true,
+    `escKept=${escKeptPreactivation} collapsedKept=${collapsedKeptPicks} pre=${ui.state.preactivation} calls=${calls.length - beforePreCancel} enabled=${ui.selectionEnabled()}`);
 
   ui.state.sessionId = null;
   ui.state.view = null;
   ui.resetSelection();
+}
+
+/* ============ U2-06 询问弹窗框架（spec D3）：无关闭 / 可折叠 / 随询问开关 ============
+ *
+ * 判据（票面验收）：
+ * - 询问弹窗没有关闭按钮；ESC 与点背景都不关；弹窗里没有提交 / 放弃 / 取消 / 结束出牌；
+ * - 折叠把窗口缩成标题条（标题 + 步骤提示 + 展开），展开恢复；折叠不改只读态；
+ * - 生命周期：表面不是弹窗 ⇒ 关；同一问重复渲染 ⇒ 只换正文、保留折叠；换问 ⇒ 关旧开新，
+ *   不留上一问的窗口 / 正文；跨步骤（弹窗 → 牌桌 → 弹窗）必须关过再开；
+ * - 排列与预发动都迁移到同一个容器：排列保留「查看排列」折叠态入口，预发动保留牌桌点选
+ *   与「取消预发动」零提交；预发动仍然**不是**只读态；
+ * - 武将详情仍是唯一可叠加的检视窗：它自己的关闭按钮 / ESC 只关它自己，关掉后询问弹窗
+ *   原样恢复，开合不改只读判据。
+ */
+{
+  ui.state.sessionId = null;   // 全程合成视图：不碰真会话
+  ui.show("table");
+
+  const cardA = { ...synthCard(82, "八卦阵"), suit: "spade", rank: 2, description: "【八卦阵】的全文描述" };
+  const cardB = { ...synthCard(83, "闪"), suit: "heart", rank: 11, description: "【闪】的全文描述" };
+  const cardC = { ...synthCard(84, "桃"), suit: "club", rank: 3, description: "【桃】的全文描述" };
+  const arrangePending = (seq, cards = [cardA, cardB]) => ({
+    kind: "ARRANGE", actor: 0, seq, timing: "PHASE_PREPARE",
+    prompt: "请排列这些牌：给出顺序与前几张置于牌堆顶。",
+    prompt_display: { text: "请排列这些牌。", default_label: "超时按当前排列提交" },
+    revealed: cards,
+    legal_actions: [{ answers_seq: seq, kind: "ArrangeCards", order: cards.map((_, at) => at), split: cards.length }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+    arrange: { count: cards.length, split: "free" },
+  });
+  const arrangeView = (seq, cards = [cardA, cardB]) => {
+    const view = synthView(arrangePending(seq, cards));
+    view.timeout_seconds = 60;
+    view.snapshot.self_hand = [{ ...synthCard(1, "杀"), description: "【杀】的全文描述" }];
+    view.snapshot.players[0].skills = [{
+      skill_id: "hero.demo.own", name: "己方技", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", description: "己方技的描述。", ui: { requirement: "", convert_sources: [] },
+    }];
+    return view;
+  };
+  const tablePending = (seq) => ({
+    kind: "PLAY_PHASE", actor: 0, seq,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: seq }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  const tableView = (seq) => synthView(tablePending(seq));
+  const render = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const openArrange = (seq, cards) => {
+    const view = arrangeView(seq, cards);
+    render(view);
+    return view;
+  };
+  const closeDialogPress = () => (($("t-dialog-collapse").listeners.click) || [])
+    .forEach((fn) => fn({ target: $("t-dialog-collapse") }));
+  const openDialogEntry = () => (($("btn-show-modal").listeners.click) || [])
+    .forEach((fn) => fn({ target: $("btn-show-modal") }));
+  const handChip = () => $("t-hand").children[0];
+  const heroBlockOf = (seat) => {
+    if (Number(seat) === Number(ui.state.view.snapshot.seat)) return $("t-self-hero");
+    const box = seatBox(seat);
+    return box ? box.children.find((node) => (node.className || "").split(" ").includes("hero-block")) || null : null;
+  };
+  const fireContext = (node) => {
+    const event = { target: node, prevented: false, stopPropagation() {} };
+    event.preventDefault = () => { event.prevented = true; };
+    if (node) (node.listeners.contextmenu || []).forEach((fn) => fn(event));
+    return event;
+  };
+  const fireEscape = () => fireDocument("keydown", { key: "Escape" });
+  const pressEnter = (node) => {
+    if (!node) return;
+    if (node.tagName === "BUTTON") {
+      (node.listeners.click || []).forEach((fn) => fn({ target: node, type: "click" }));
+      return;
+    }
+    (node.listeners.keydown || []).forEach((fn) => fn({
+      key: "Enter", target: node, preventDefault() {},
+    }));
+  };
+  const actionIds = ["btn-submit", "btn-cancel", "btn-end-phase", "btn-pass"];
+  // 静态结构：`#t-dialog` 到 `#t-modal` 之间就是询问弹窗的全部标记。
+  const dialogHtml = html.slice(html.indexOf('<div id="t-dialog"'), html.indexOf('<div id="t-modal"'));
+  const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
+
+  /* ---- ① 无关闭 / 无操作型按钮 / 折叠按钮 ---- */
+  let view = openArrange(9601);
+  check("U2-06a 询问弹窗没有关闭按钮、弹窗里没有四个操作键（标题 / 折叠按钮 / 内容槽之外无动作）",
+    !/t-dialog-close|>关闭<|title="关闭/.test(dialogHtml)
+      && actionIds.every((id) => !dialogHtml.includes(`id="${id}"`))
+      && actionIds.every((id) => html.includes(`id="${id}"`))
+      && $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "排列"
+      && $("t-dialog-body").children.includes($("t-options"))
+      && !actionIds.some((id) => $("t-dialog-body").children.includes($(id))),
+    `htmlClose=${/t-dialog-close|>关闭</.test(dialogHtml)} actionInDialog=${actionIds.filter((id) => dialogHtml.includes(`id="${id}"`)).join(",")} bodyChildren=${JSON.stringify($("t-dialog-body").children.map((node) => node.id || node.className))}`);
+  check("U2-06a2 折叠按钮在标题条里（展开时写「收起」），标题条还带步骤提示",
+    ($("t-dialog-collapse").listeners.click || []).length === 1
+      && $("t-dialog-collapse").textContent === "收起"
+      && $("t-dialog-collapse").getAttribute("aria-expanded") === "true"
+      && $("t-dialog-hint").hidden === false
+      && /牌堆/.test($("t-dialog-hint").textContent)
+      && $("t-dialog-body").hidden === false,
+    `collapse="${$("t-dialog-collapse").textContent}" aria=${$("t-dialog-collapse").getAttribute("aria-expanded")} hint="${$("t-dialog-hint").textContent}" bodyHidden=${$("t-dialog-body").hidden}`);
+
+  /* ---- ② ESC / 点背景都不关，也不提交 ---- */
+  const beforeEsc = calls.length;
+  const actionBeforeEsc = JSON.stringify(ui.buildAction());
+  fireEscape();
+  check("U2-06b ESC 对询问弹窗是 no-op：不关、不改正文、不提交",
+    $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === false
+      && ui.state.dialog.kind === "arrange"
+      && JSON.stringify(ui.buildAction()) === actionBeforeEsc
+      && calls.length === beforeEsc,
+    `dialogHidden=${$("t-dialog").hidden} kind=${ui.state.dialog.kind} calls=${calls.length - beforeEsc}`);
+  const backdropClicks = ($("t-modal-backdrop").listeners.click || []).length;
+  (($("t-modal-backdrop").listeners.click) || []).forEach((fn) => fn({ target: $("t-modal-backdrop") }));
+  check("U2-06b2 点背景不关询问弹窗（遮罩没有 click 监听；弹窗保持打开、零提交）",
+    backdropClicks === 0
+      && $("t-dialog").hidden === false
+      && calls.length === beforeEsc,
+    `backdropClicks=${backdropClicks} dialogHidden=${$("t-dialog").hidden} calls=${calls.length - beforeEsc}`);
+
+  /* ---- ③ 折叠 / 展开：只撤正文，标题 + 提示 + 展开留下；只读态不变 ---- */
+  closeDialogPress();
+  const collapseActionBefore = JSON.stringify(ui.buildAction());
+  check("U2-06c 折叠 = 缩成标题条：正文撤下、标题 + 步骤提示 + 「展开」留下；暗化层收起（遮挡变小）",
+    $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === true
+      && $("t-dialog-title").textContent === "排列"
+      && $("t-dialog-hint").hidden === false
+      && $("t-dialog-collapse").textContent === "展开"
+      && $("t-dialog-collapse").getAttribute("aria-expanded") === "false"
+      && $("btn-show-modal").hidden === false
+      && $("btn-show-modal").textContent === "查看排列"
+      && $("t-modal-backdrop").hidden === true
+      && $("table-shell").classList.contains("modal-open") === false
+      && ui.state.dialog.collapsed === true,
+    `bodyHidden=${$("t-dialog-body").hidden} collapse="${$("t-dialog-collapse").textContent}" backdropHidden=${$("t-modal-backdrop").hidden} collapsed=${ui.state.dialog.collapsed}`);
+  check("U2-06c2 折叠不改变只读态：selectionEnabled 仍为 false，已摆顺序不变",
+    ui.stepDialogKind(view.pending) === "arrange"
+      && ui.selectionEnabled() === false
+      && JSON.stringify(ui.buildAction()) === collapseActionBefore,
+    `surface=${ui.stepDialogKind(view.pending)} enabled=${ui.selectionEnabled()} action=${JSON.stringify(ui.buildAction())}`);
+  const beforeCollapsedPick = JSON.stringify({
+    focus: ui.state.focusCardId, targets: ui.state.selectedTargets, option: ui.state.selectedOption,
+  });
+  await clickAndWait(handChip());
+  pressEnter(handChip());
+  pressEnter(seatBox(1));
+  check("U2-06c3 折叠后点牌点座仍 no-op（折叠只改遮挡，不改只读判据）",
+    JSON.stringify({
+      focus: ui.state.focusCardId, targets: ui.state.selectedTargets, option: ui.state.selectedOption,
+    }) === beforeCollapsedPick
+      && ui.state.focusCardId === null
+      && ui.state.selectedTargets.length === 0,
+    `focus=${ui.state.focusCardId} targets=${JSON.stringify(ui.state.selectedTargets)}`);
+  closeDialogPress();
+  check("U2-06c4 标题条里的「展开」恢复正文：折叠状态复位、暗化层回来、只读不变",
+    $("t-dialog-body").hidden === false
+      && $("t-dialog-collapse").textContent === "收起"
+      && $("t-dialog-collapse").getAttribute("aria-expanded") === "true"
+      && $("btn-show-modal").hidden === true
+      && $("t-modal-backdrop").hidden === false
+      && $("table-shell").classList.contains("modal-open")
+      && ui.selectionEnabled() === false,
+    `bodyHidden=${$("t-dialog-body").hidden} collapse="${$("t-dialog-collapse").textContent}" reopen=${$("btn-show-modal").hidden} enabled=${ui.selectionEnabled()}`);
+  closeDialogPress();
+  openDialogEntry();
+  check("U2-06c5 折叠后仍可从右端「查看排列」展开（排列的收起态入口保留）",
+    $("t-dialog-body").hidden === false
+      && $("btn-show-modal").hidden === true
+      && $("t-dialog-collapse").textContent === "收起",
+    `bodyHidden=${$("t-dialog-body").hidden} reopen=${$("btn-show-modal").hidden}`);
+
+  /* ---- ④ 同一问重复渲染保留折叠；换问 / 表面不再是弹窗 ⇒ 关旧开新、清正文 ---- */
+  closeDialogPress();
+  // 让渲染器**真的**重画一次正文（选中第一张牌），再断言折叠没被这次重画抹掉。
+  if (ui.state.arrange) ui.state.arrange.selected = 0;
+  ui.renderPending(view);
+  const renderedWhileCollapsed = $("t-options").children
+    .flatMap((row) => (row.children || []))
+    .flatMap((box) => (box.children || []))
+    .some((node) => node.getAttribute && node.getAttribute("data-card-index") === "0"
+      && node.classList.contains("sel"));
+  check("U2-06d 同一问（同 seq）的重复渲染只换正文、保留折叠状态",
+    $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === true
+      && ui.state.dialog.collapsed === true
+      && $("t-dialog-title").textContent === "排列"
+      && $("t-dialog-body").children.includes($("t-options"))
+      && renderedWhileCollapsed
+      && JSON.stringify(ui.buildAction()) === collapseActionBefore,
+    `bodyHidden=${$("t-dialog-body").hidden} collapsed=${ui.state.dialog.collapsed} rendered=${renderedWhileCollapsed} action=${JSON.stringify(ui.buildAction())}`);
+  closeDialogPress();   // 展开，后面按"展开态"继续
+
+  const tableView1 = tableView(9602);
+  render(tableView1);
+  check("U2-06e 表面不再是弹窗（牌桌步）⇒ 询问弹窗关闭、正文清空、选项行回到提示条",
+    $("t-dialog").hidden === true
+      && $("t-dialog-body").children.length === 0
+      && $("t-dialog-title").textContent === ""
+      && $("t-options-home").children.includes($("t-options"))
+      && $("btn-show-modal").hidden === true
+      && ui.selectionEnabled() === true
+      && ui.state.dialog.key === null,
+    `hidden=${$("t-dialog").hidden} body=${$("t-dialog-body").children.length} home=${$("t-options-home").children.includes($("t-options"))} enabled=${ui.selectionEnabled()}`);
+
+  const reopened = openArrange(9603, [cardC]);
+  check("U2-06e2 新的弹窗步重新打开：折叠复位、正文换成本问的牌（上一问的窗口不残留）",
+    $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === false
+      && $("t-dialog-collapse").textContent === "收起"
+      && $("t-dialog-body").children.includes($("t-options"))
+      && $("t-options").text().includes("桃")
+      && !$("t-options").text().includes("八卦阵")
+      && $("t-options").text().includes("牌堆顶")
+      && $("t-modal").hidden === true
+      && ui.state.dialog.key === `arrange:${reopened.pending.seq}`,
+    `collapsed=${ui.state.dialog.collapsed} key=${ui.state.dialog.key} options="${$("t-options").text().slice(0, 80)}"`);
+
+  /* ---- ⑤ 跨步骤闭环：弹窗 → 牌桌 → 弹窗 = 关一次、再开一次，且不带走旧正文 ---- */
+  openArrange(9604, [cardA]);
+  const firstDialogText = $("t-options").text();
+  render(tableView(9605));
+  const closedInBetween = $("t-dialog").hidden === true && $("t-dialog-body").children.length === 0;
+  openArrange(9606, [cardC]);
+  check("U2-06e3 两步技能跨步骤（弹窗 → 牌桌 → 弹窗）先关后开，旧询问的正文不留在新窗口里",
+    closedInBetween
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").children.length === 1
+      && $("t-dialog-body").children[0] === $("t-options")
+      && $("t-options").text().includes("桃")
+      && !$("t-options").text().includes("八卦阵")
+      && firstDialogText.includes("八卦阵"),
+    `closedInBetween=${closedInBetween} body=${JSON.stringify($("t-dialog-body").children.map((node) => node.id || node.className))} options="${$("t-options").text().slice(0, 80)}"`);
+
+  /* ---- ⑥ 预发动迁移：同一个容器、仍是牌桌表面；无关闭，右端取消零提交 ---- */
+  const prePending = (seq) => ({
+    kind: "PLAY_PHASE", actor: 0, seq,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: seq }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {
+      "demo.modal": [
+        { name: "card", zones: ["hand"], min: 1, max: 1, order: 0, pool: [{ when: [], options: ["1"] }] },
+        { name: "seat", zones: [], min: 1, max: 1, order: 1, pool: [{ when: [], options: ["seat:1"] }] },
+      ],
+    },
+    preactivation: [],
+  });
+  const preView = synthView(prePending(9607));
+  preView.snapshot.self_hand = [{ ...synthCard(1, "杀"), description: "【杀】的全文描述" }];
+  preView.skills = [{
+    skill_id: "demo.modal", name: "示例模态", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "", convert_sources: [] },
+  }];
+  render(preView);
+  const preSkill = $("t-skills").children.find(
+    (node) => node.getAttribute("data-skill-id") === "demo.modal");
+  (preSkill.listeners.click || []).forEach((fn) => fn({ target: preSkill }));
+  check("U2-06f 预发动清单迁移到询问弹窗：标题 / 正文在里面，但仍是牌桌表面（不是只读）",
+    $("t-dialog").hidden === false
+      && /预发动【示例模态】/.test($("t-dialog-title").textContent)
+      && $("t-dialog-body").children.includes($("t-options"))
+      && ui.state.dialog.kind === "preactivation"
+      && ui.stepDialogKind(ui.state.view.pending) === null
+      && ui.selectionEnabled() === true
+      && actionIds.every((id) => html.includes(`id="${id}"`)),
+    `title="${$("t-dialog-title").textContent}" kind=${ui.state.dialog.kind} surface=${ui.stepDialogKind(ui.state.view.pending)} enabled=${ui.selectionEnabled()}`);
+  await clickAndWait(handChip());
+  check("U2-06f2 预发动清单打开时点自己的手牌仍生效（C 形牌桌表面；弹窗不是只读闸）",
+    JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[0].values) === "[1]",
+    JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[0].values));
+  closeDialogPress();
+  check("U2-06f3 预发动弹窗也能折叠：正文撤下、答案不丢、牌桌仍可点（只改遮挡）",
+    $("t-dialog-body").hidden === true
+      && JSON.stringify(ui.state.preactivation.answers[0].values) === "[1]"
+      && ui.selectionEnabled() === true,
+    `bodyHidden=${$("t-dialog-body").hidden} answers=${JSON.stringify(ui.state.preactivation.answers.map((answer) => answer.values))} enabled=${ui.selectionEnabled()}`);
+  closeDialogPress();
+  const beforePreEsc = calls.length;
+  fireEscape();
+  check("U2-06f4 ESC 不退出预发动（旧「关闭 = 取消本地态」已改由右端取消承担）",
+    $("t-dialog").hidden === false
+      && ui.state.preactivation !== null
+      && calls.length === beforePreEsc,
+    `dialogHidden=${$("t-dialog").hidden} pre=${ui.state.preactivation !== null} calls=${calls.length - beforePreEsc}`);
+  await clickAndWait($("btn-cancel"));
+  check("U2-06f5 右端「取消预发动」退出：零提交、弹窗关闭、正文清空",
+    ui.state.preactivation === null
+      && $("t-dialog").hidden === true
+      && $("t-dialog-body").children.length === 0
+      && calls.length === beforePreEsc,
+    `pre=${ui.state.preactivation} hidden=${$("t-dialog").hidden} body=${$("t-dialog-body").children.length} calls=${calls.length - beforePreEsc}`);
+
+  /* ---- ⑦ 武将详情 = 唯一可叠加的检视窗：开合不改只读，关掉后弹窗原样 ---- */
+  openArrange(9608);
+  const arrangeBodyBeforeDetail = JSON.stringify($("t-options").text());
+  const arrangeActionBeforeDetail = JSON.stringify(ui.buildAction());
+  const beforeDetailCalls = calls.length;
+  fireContext(heroBlockOf(0));
+  check("U2-06g 详情叠在询问弹窗上：两个独立节点同时打开，弹窗正文 / 只读态不变",
+    $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "排列"
+      && $("t-dialog-body").children.includes($("t-options"))
+      && $("t-modal").hidden === false
+      && /武将详情/.test($("t-modal-title").textContent)
+      && $("t-modal-body").text().includes("己方技")
+      && JSON.stringify($("t-options").text()) === arrangeBodyBeforeDetail
+      && JSON.stringify(ui.buildAction()) === arrangeActionBeforeDetail
+      && ui.selectionEnabled() === false
+      && calls.length === beforeDetailCalls,
+    `dialogHidden=${$("t-dialog").hidden} detailHidden=${$("t-modal").hidden} detailTitle="${$("t-modal-title").textContent}" enabled=${ui.selectionEnabled()}`);
+  fireEscape();
+  check("U2-06g2 ESC 只关详情、不关询问弹窗；底下的排列原样恢复",
+    $("t-modal").hidden === true
+      && $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "排列"
+      && JSON.stringify($("t-options").text()) === arrangeBodyBeforeDetail
+      && JSON.stringify(ui.buildAction()) === arrangeActionBeforeDetail
+      && ui.selectionEnabled() === false,
+    `detailHidden=${$("t-modal").hidden} dialogHidden=${$("t-dialog").hidden} enabled=${ui.selectionEnabled()}`);
+  fireContext(heroBlockOf(0));
+  (($("t-modal-close").listeners.click) || []).forEach((fn) => fn({ target: $("t-modal-close") }));
+  check("U2-06g3 详情的关闭按钮也只关它自己（询问弹窗仍然原样、仍只读）",
+    $("t-modal").hidden === true
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").children.includes($("t-options"))
+      && ui.selectionEnabled() === false,
+    `detailHidden=${$("t-modal").hidden} dialogHidden=${$("t-dialog").hidden} enabled=${ui.selectionEnabled()}`);
+  closeDialogPress();
+  fireContext(heroBlockOf(0));
+  fireEscape();
+  check("U2-06g4 折叠态下开合详情：不擅自展开，折叠状态原样保留",
+    $("t-modal").hidden === true
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === true
+      && $("btn-show-modal").hidden === false
+      && ui.selectionEnabled() === false,
+    `bodyHidden=${$("t-dialog-body").hidden} detailHidden=${$("t-modal").hidden} reopen=${$("btn-show-modal").hidden}`);
+
+  /* ---- ⑧ 关闭后没有上一问的窗口 / 正文残留 ---- */
+  render(tableView(9609));
+  check("U2-06h 关闭清正文：窗口隐藏、body / 标题 / 步骤提示全空、选项行归位、无重开入口",
+    $("t-dialog").hidden === true
+      && $("t-dialog-body").children.length === 0
+      && $("t-dialog-title").textContent === ""
+      && $("t-dialog-hint").textContent === ""
+      && $("t-dialog-hint").hidden === true
+      && $("t-options-home").children.includes($("t-options"))
+      && $("btn-show-modal").hidden === true
+      && ui.state.dialog.open === false
+      && ui.state.dialog.key === null,
+    `hidden=${$("t-dialog").hidden} body=${$("t-dialog-body").children.length} title="${$("t-dialog-title").textContent}" home=${$("t-options-home").children.includes($("t-options"))}`);
+  check("U2-06i 弹窗与遮罩 CSS：只剩标题条时暗化层可收起；询问弹窗不吃指针、窗口可点；无 inert 复用",
+    /\.dialog\s*\{[^}]*pointer-events:\s*none/s.test(css)
+      && /\.dialog-window\s*\{[^}]*pointer-events:\s*auto/s.test(css)
+      && /\.dialog-body\[hidden\]\s*\{[^}]*display:\s*none/s.test(css)
+      && /\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)
+      && /\.modal\s*\{[^}]*pointer-events:\s*none/s.test(css)
+      && /\.modal-window\s*\{[^}]*pointer-events:\s*auto/s.test(css)
+      && !/modal-blocking/.test(css),
+    `dialogPE=${/\.dialog\s*\{[^}]*pointer-events:\s*none/s.test(css)} windowPE=${/\.dialog-window\s*\{[^}]*pointer-events:\s*auto/s.test(css)} bodyHidden=${/\.dialog-body\[hidden\]\s*\{[^}]*display:\s*none/s.test(css)}`);
+
+  ui.resetSelection();
+  ui.state.view = null;
+  ui.state.sessionId = null;
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

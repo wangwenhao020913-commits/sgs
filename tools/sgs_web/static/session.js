@@ -289,7 +289,7 @@ function commitView(body) {
     state.timer = null;
     resetCountdown();
     resetRightActions();
-    syncModal();
+    syncDialog();
     $("t-prompt").textContent = "本局已结束。";
     $("btn-submit").disabled = true;
     $("btn-cancel").disabled = true;
@@ -337,10 +337,9 @@ function resetSelection() {
   state.preactivation = null;
   state.convertSkill = null;
   state.lastRejectReason = "";
-  // U1-03：新视图 = 新询问。模态的重开状态归零；`syncModal()` 会按需要重新打开 / 收起。
-  state.modal.kind = null;
-  state.modal.open = false;
-  state.modal.dismissed = false;
+  // U2-06：询问弹窗的生命周期**只**跟"这一步的表面"走——`syncDialog()` 在每次渲染末尾
+  // 按新询问开 / 关 / 换正文。这里不直接改窗口与折叠状态：同一问的轮询刷新必须保留折叠。
+  // 武将详情（`state.modal.heroSeat`）属于用户，不因新询问被动关闭。
 }
 
 async function refresh(force = false) {

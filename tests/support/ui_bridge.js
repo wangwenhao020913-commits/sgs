@@ -63,8 +63,8 @@
     // U2-01（D7）：三页共用一条顶栏的导航态（show 是高亮 / 禁用 / 切页的唯一落点）
     "show", "syncNavState", "NAV_BUTTONS",
     // U2-05（D8）：只读态的唯一判据（selectionEnabled）与"这一步的表面"（stepDialogKind）。
-    // 票 06 接四类弹窗模板时只改 stepDialogKind；烟测把两口都钉住。
-    "selectionEnabled", "stepDialogKind",
+    // U2-06：询问弹窗的四种模板种类名（票 07–12 只往 stepDialogKind 里加分支）。
+    "selectionEnabled", "stepDialogKind", "DIALOG_KINDS",
   ];
   const out = {};
   for (const name of names) {

@@ -1,33 +1,57 @@
-/* SGS 前端 · 共享模态（U1-03）：多步技能清单 / 排列 / 武将详情共用一套规范。
+/* SGS 前端 · 询问弹窗框架（U2-06 / spec D3）+ 武将详情检视窗（U1-06 / D8）。
  *
- * 纪律（票面 `03` / spec D8）：
- *  - 屏幕正中；正文可滚轮翻阅；`#t-modal-close` 与 ESC 可关；
- *  - **没有"阻断弹窗"**：打开模态**不**给顶栏 / 舞台 / 底部加 `inert`，也不设
- *    `aria-hidden`。遮罩是 `pointer-events: none` 的暗化层——点击直接穿透到牌桌，
- *    能不能选由 :func:`selectionEnabled` 那**一条**判据拦下。**倒计时不暂停**：
- *    进度条仍在提示条上走，模态正文里**不**放倒计时；
- *  - 模态只负责“摆哪里 / 怎么关”，内容仍由各自的渲染器画（预发动清单 / 排列面 /
- *    武将详情）。当前实现把提示区的 `#t-options` 节点整体搬进模态正文，
- *    于是“简单询问走浮动选项行、多步面走模态”是两个**位置**，不是两套渲染。
+ * 两个窗口、两条纪律：
  *
- * 关闭语义分两类：
- *  - 预发动：关闭 = 取消本地态，**零 action 提交**（与「取消预发动」同一条路）；
- *  - 排列：强制选择、没有取消。关闭只收起窗口，右端出现「查看排列」可再打开，
- *    `state.arrange` 与已摆的顺序保留。
+ *  - **`#t-dialog` = 询问弹窗**（唯一的询问表面容器）。标题 + 可选步骤提示 + 内容槽 +
+ *    折叠按钮。**没有关闭按钮、没有 ESC 关闭、没有点背景关闭**——退出只有两条路：
+ *    完成选择（提示条右端「提交 / 确认」）或该步有 Pass 时的「放弃」（同样在右端）。
+ *    弹窗里**没有**提交 / 取消 / 结束出牌 / 放弃，操作型按钮永远在提示条右端（D3）。
+ *    折叠只隐藏正文（标题 + 步骤提示 + 展开按钮留下），不改只读态。
+ *  - **`#t-modal` = 武将详情**：唯一可叠加在询问弹窗之上的检视窗；它自己的关闭按钮 /
+ *    ESC 只关它自己，底下的询问弹窗原样恢复；开合它不改变只读态。
+ *
+ * 生命周期：询问弹窗只在「当前步骤的表面是弹窗」时存在（`stepDialogKind`），另外本地态的
+ * 预发动清单也借这个容器（它仍是**牌桌表面**，D2 的 C 形，不进只读判据）。同一问的重复
+ * 渲染只更新正文、保留折叠；换问（新 `seq`）或表面不再是弹窗时**关旧开新 / 直接关**，
+ * 关闭时清空正文——上一问的窗口 / 内容不会留在下一问里。跨步骤（弹窗步 → 牌桌步 →
+ * 弹窗步）因此会先关后开。
+ *
+ * 只读态的唯一判据仍是 `stepDialogKind()`（只看这一步的表面）：票 07–12 接四类模板时
+ * **只在这一处加分支**（`DIALOG_KINDS` 已把四种稳定种类名留好），`selectionEnabled()`
+ * 与全部选择入口都不用动。`state.dialog.collapsed` 不参与判据（折叠只改遮挡）。
+ *
+ * 遮罩是 `pointer-events: none` 的暗化层：没有自己的点击（D8），不吞指针；它由询问弹窗
+ * 展开或武将详情打开时显示，折叠 / 关闭后收起。
  */
 "use strict";
 
+/** 四类询问模板的稳定种类名（spec D3）。票 06 只接「排列」；票 08（选择型）/
+ *  09（未知区域）/ 11（亮牌·五谷）/ 12（亮牌·遗计）在 `stepDialogKind` 里各加一条
+ *  `pending.kind` 判据即可，**不要**另写只读判据或另起容器。 */
+const DIALOG_KINDS = Object.freeze({
+  arrange: "arrange",
+  choice: "choice",
+  unknown: "unknown",
+  reveal: "reveal",
+});
+
 /** 当前**步骤**的表面若是弹窗就返回它的种类（spec D8「只读态」的唯一判据源）。
  *
- * 现在只有排列（`ARRANGE`）是弹窗表面。另外两类模态**不**进这里：
+ * 现在只有排列（`ARRANGE`）是弹窗表面。另外两类窗口**不**进这里：
  *  - 预发动清单是**牌桌表面**（D2 的 C 形：点自己的牌 / 点自己的座位），打开时牌桌
  *    照常接选择——它只是把选项搬进了窗口，不是"这一步的答案在窗内"；
  *  - 武将详情是叠加的**检视窗**：开合不改变只读态，所以这里读的是**底下那一步**的
- *    表面，而不是"哪个模态正开着"。
- * 票 06 把四类询问模板接进来时，只改这个函数（`selectionEnabled` 不用动）。
+ *    表面，而不是"哪个窗口正开着"。
+ *
+ * 票 07–12 的四个模板在这里加分支（槽位已写在 `DIALOG_KINDS` 里）：
+ *   - 选择型（花色 / 牌名枚举）→ `DIALOG_KINDS.choice`（票 08）；
+ *   - 未知区域（他人手牌 / 装备）→ `DIALOG_KINDS.unknown`（票 09）；
+ *   - 亮牌（五谷 / 遗计）→ `DIALOG_KINDS.reveal`（票 11 / 12）。
+ * 判据仍然只看 `pending`，不看 `state.dialog` / 折叠状态。
  */
 function stepDialogKind(pending) {
-  if (pending && pending.kind === "ARRANGE") return "arrange";
+  if (!pending) return null;
+  if (pending.kind === "ARRANGE") return DIALOG_KINDS.arrange;
   return null;
 }
 
@@ -37,45 +61,49 @@ function stepDialogKind(pending) {
  * 折叠 / 顶栏 / 事件流）与操作（提示条右端的四键）都不走这里。所有选择入口
  * （点手牌 / 点座位 / 点槽位 / 提供 B / 弃牌 / 预发动选牌选座）都先问它一次；
  * 键盘回车 / 空格触发的 click 走同一批函数，故同一判据。
- * 收起（`modal.dismissed`）只改遮挡，不改只读态——判据只看这一步的表面。
+ * 折叠（`state.dialog.collapsed`）只改遮挡，不改只读态——判据只看这一步的表面。
  */
 function selectionEnabled(view = state.view) {
   if (state.playback) return false;
   return stepDialogKind(view ? view.pending : null) === null;
 }
 
-/** 当前询问 / 本地态是否需要模态：武将详情 > 预发动清单 > ARRANGE。`null` = 不需要。 */
-function modalWantedKind(pending) {
-  if (state.modal.heroSeat !== null) return "hero";
+/** 当前是否需要询问弹窗：本地态（预发动清单）优先，其次看这一步的表面。`null` = 不需要。 */
+function dialogWantedKind(pending) {
   if (state.preactivation) return "preactivation";
-  if (pending && pending.kind === "ARRANGE") return "arrange";
-  return null;
+  return stepDialogKind(pending);
 }
 
-function modalTitleFor(kind) {
-  if (kind === "hero") {
-    const player = playerAt(state.view, state.modal.heroSeat);
-    return player ? `武将详情 · ${heroNameOf(player, state.view)}` : "武将详情";
+/** 弹窗实例键：**同一键 = 同一「步」的重复渲染**（保留折叠、只换内容）；
+ *  换键 = 新的一问（关旧开新、清正文、折叠复位）。
+ *
+ * 排列按询问序号；预发动按询问序号 + 技能（同一问里换步骤不清窗口）。
+ * 票 07–12 的模板若一步内还有自己的子状态，可在键里补；**不要**把折叠状态写进键。
+ */
+function dialogKeyFor(kind, pending) {
+  const seq = pending && pending.seq !== undefined && pending.seq !== null ? pending.seq : "";
+  if (kind === "preactivation") {
+    const pa = state.preactivation;
+    const skill = pa ? (pa.skillId || pa.cardId || "") : "";
+    return `preactivation:${seq}:${skill}`;
   }
+  return `${kind}:${seq}`;
+}
+
+/** 标题：模板自报；票 08 / 09 / 11 / 12 接进来时换成各自模板的文案。 */
+function dialogTitleFor(kind) {
   if (kind === "preactivation") {
     const pa = state.preactivation;
     return pa ? `预发动【${pa.name}】` : "预发动";
   }
-  return "排列";
+  if (kind === DIALOG_KINDS.arrange) return "排列";
+  if (kind === DIALOG_KINDS.choice) return "选择";
+  if (kind === DIALOG_KINDS.unknown) return "选择一张牌";
+  if (kind === DIALOG_KINDS.reveal) return "亮牌";
+  return "询问";
 }
 
-/** 遮罩 / 页面态的唯一开关：暗化层只负责"看得见"，**不吞指针**（D8）。
- *
- * 点击落在遮罩上会穿透到牌桌（`.modal-backdrop { pointer-events: none }`），再由
- * :func:`selectionEnabled` 判据拦下；模态窗口自己保留 `pointer-events: auto`。
- * 遮罩因此不再有 click 监听、也不再是"点背景 = 关闭"的出口。
- */
-function setModalChrome(on) {
-  const backdrop = $("t-modal-backdrop");
-  if (backdrop) backdrop.hidden = !on;
-  const shell = $("table-shell");
-  if (shell) shell.classList.toggle("modal-open", on);
-}
+/* ------------------------------------------------------------ 暗化层 / 显隐 */
 
 /** 把提示区的 `#t-options` 搬回浮动选项行（真 DOM 的 appendChild = 移动）。 */
 function showOptionsHome() {
@@ -84,159 +112,244 @@ function showOptionsHome() {
   if (home && options) home.appendChild(options);
 }
 
-function hideModalDom() {
+/** 武将详情窗口是否开着（`#t-modal` 是检视窗自己的节点，和询问弹窗分开）。 */
+function heroDetailVisible() {
   const modal = $("t-modal");
-  if (modal) modal.hidden = true;
-  setModalChrome(false);
-  state.modal.open = false;
+  return !!modal && modal.hidden === false;
 }
 
-/** 强制选择被收起后，右端出现重开入口（预发动不用它：关闭即取消）。 */
+/** 暗化层 / 页面态的唯一开关：询问弹窗**展开**或武将详情打开时显示。
+ *
+ * 折叠只改遮挡 ⇒ 只剩标题条时暗化层一并收起（牌桌重新亮起来，但仍是只读）；
+ * 详情叠在弹窗上时保持暗化。遮罩没有 click 监听（D8：点背景不是关闭出口）。
+ */
+function syncModalChrome() {
+  const dialog = $("t-dialog");
+  const occluding = (!!dialog && dialog.hidden === false && !state.dialog.collapsed)
+    || heroDetailVisible();
+  const backdrop = $("t-modal-backdrop");
+  if (backdrop) backdrop.hidden = !occluding;
+  const shell = $("table-shell");
+  if (shell) shell.classList.toggle("modal-open", occluding);
+}
+
+/* ------------------------------------------------------------ 折叠 */
+
+/** 折叠按钮 / 重开入口的文案与可用态（只读判据不在这里）。 */
+function applyDialogCollapseChrome() {
+  const body = $("t-dialog-body");
+  const button = $("t-dialog-collapse");
+  if (body) body.hidden = state.dialog.collapsed;
+  if (button) {
+    button.textContent = state.dialog.collapsed ? "展开" : "收起";
+    button.setAttribute("aria-expanded", String(!state.dialog.collapsed));
+  }
+  // 排列保留既有的「查看排列」收起态入口（提示条右端）；折叠后点了就是展开。
+  showReopenButton(
+    state.dialog.kind,
+    state.dialog.collapsed && state.dialog.kind === DIALOG_KINDS.arrange,
+  );
+}
+
+/** 折叠 / 展开：**只**隐藏正文，不动只读判据、不动任何选择态、不提交。 */
+function setDialogCollapsed(collapsed) {
+  if (!state.dialog.open) return;
+  state.dialog.collapsed = Boolean(collapsed);
+  applyDialogCollapseChrome();
+  syncModalChrome();
+}
+
+function toggleDialogCollapse() {
+  if (!state.dialog.open) return;
+  setDialogCollapsed(!state.dialog.collapsed);
+}
+
+/** 「查看排列」入口 = 展开（不是关闭 / 重开一个本地态）。 */
+function expandDialog() {
+  if (!state.dialog.open || !state.dialog.collapsed) return;
+  setDialogCollapsed(false);
+}
+
+/** 强制选择被收起后，右端出现重开入口；询问弹窗默认用它自己的「展开」。 */
 function showReopenButton(kind, visible) {
   const reopen = $("btn-show-modal");
   if (!reopen) return;
   reopen.hidden = !visible;
-  if (visible) reopen.textContent = kind === "arrange" ? "查看排列" : "继续";
+  if (visible) reopen.textContent = kind === DIALOG_KINDS.arrange ? "查看排列" : "继续";
 }
 
-/** 打开 / 刷新模态：标题 + 正文节点 + 暗化层都只在这里写一次。
+/* ------------------------------------------------------------ 询问弹窗 */
+
+/** 步骤提示：模板把"现在要做什么"写在提示条的 `#t-target-hint`；折叠后它必须还在，
+ *  所以这里镜像一份到标题条。空文本时整个提示隐藏（"可选"的步骤提示）。 */
+function syncDialogHint() {
+  const hint = $("t-dialog-hint");
+  if (!hint) return;
+  const source = $("t-target-hint");
+  const text = source ? source.textContent : "";
+  hint.textContent = text;
+  hint.hidden = !text;
+}
+
+/** 打开询问弹窗：标题 + 正文节点 + 暗化层都只在这里写一次。
  *
- * 两类正文：武将详情由 `hero-detail.js` 现画（不搬 `#t-options`）；预发动 / 排列仍把
- * 提示区的 `#t-options` 整体搬进正文（“简单询问走浮动选项行、多步面走模态”）。
- *
- * **回到询问弹窗时先清正文**：详情是叠加的检视窗，关掉它再打开底下那个弹窗时必须把
- * 正文里残留的详情内容清掉，否则「关闭详情后弹窗原样恢复」会变成详情 + 弹窗两段。
- * `#t-options` 是共享节点（可能正被清掉的正文包含），清完再 append 回来。
+ * 正文 = 提示区的 `#t-options` 整体搬进内容槽（内容仍由各自的渲染器画）；关闭时搬回去。
+ * 打开总是展开态（折叠复位）——由 `syncDialog()` 在"换问"时调用，不会抹掉同一问的折叠。
  */
-function openModalDom(kind) {
-  const modal = $("t-modal");
-  const body = $("t-modal-body");
+function openDialogDom(kind) {
+  const dialog = $("t-dialog");
+  const body = $("t-dialog-body");
+  const title = $("t-dialog-title");
   const options = $("t-options");
-  const title = $("t-modal-title");
-  if (!modal || !body) return;
-  if (title) title.textContent = modalTitleFor(kind);
-  if (kind === "hero") {
-    renderHeroDetailBody();
-  } else {
-    if (!options) return;
-    // 正文里若有叠加详情留下的内容，清掉再放询问内容；只有 #t-options 时**不清**
-    // （清空 = 每次轮询重绘都把窗口滚动位置拉回顶部）。`#t-options` 是共享节点，
-    // 可能正被清掉的正文包含，清完再 append 回来。
-    if (Array.from(body.children || []).some((child) => child !== options)) {
+  if (!dialog || !body) return;
+  if (title) title.textContent = dialogTitleFor(kind);
+  if (options) body.appendChild(options);
+  state.dialog.open = true;
+  state.dialog.kind = kind;
+  state.dialog.collapsed = false;
+  dialog.hidden = false;
+  applyDialogCollapseChrome();
+  syncDialogHint();
+  syncModalChrome();
+}
+
+/** 同一问的重复渲染：更新标题 / 步骤提示 / 正文归属，**保留折叠**。
+ *
+ * 不清正文：内容由 `renderPending` 的渲染器就地重画（`#t-options` 是共享节点）；
+ * 清正文只发生在关闭（换问 / 表面不再是弹窗）时，见 :func:`closeDialogDom`。
+ */
+function updateDialogDom(kind) {
+  const dialog = $("t-dialog");
+  const body = $("t-dialog-body");
+  const title = $("t-dialog-title");
+  const options = $("t-options");
+  if (!dialog || dialog.hidden) {
+    openDialogDom(kind);
+    return;
+  }
+  if (title) title.textContent = dialogTitleFor(kind);
+  if (options && body && options.parentNode !== body) body.appendChild(options);
+  applyDialogCollapseChrome();
+  syncDialogHint();
+  syncModalChrome();
+}
+
+/** 关闭询问弹窗：隐藏窗口、清空正文、把 `#t-options` 送回提示区、折叠复位。
+ *
+ * **清正文是生命周期的一部分**：跨步骤后重新打开时不能留下上一问的内容。
+ */
+function closeDialogDom() {
+  const dialog = $("t-dialog");
+  const body = $("t-dialog-body");
+  const title = $("t-dialog-title");
+  const hint = $("t-dialog-hint");
+  if (dialog) dialog.hidden = true;
+  showOptionsHome();
+  if (body) {
+    body.innerHTML = "";
+    body.scrollTop = 0;
+    body.hidden = false;
+  }
+  if (title) title.textContent = "";
+  if (hint) {
+    hint.textContent = "";
+    hint.hidden = true;
+  }
+  state.dialog.open = false;
+  state.dialog.collapsed = false;
+  state.dialog.kind = null;
+  state.dialog.key = null;
+  showReopenButton(null, false);
+  syncModalChrome();
+}
+
+/** 在每次 `renderPending` 末尾调用：按"当前步骤的表面"决定开 / 关 / 换内容。
+ *
+ * - 表面不是弹窗（且没有预发动本地态）⇒ 关；
+ * - 同一问的重复渲染（键相同）⇒ 只更新正文 / 提示，保留折叠；
+ * - 换问（键不同）⇒ 先关旧（清正文、折叠复位），再开新。
+ *
+ * 末尾顺带刷新一次叠加的武将详情（开着的才画）：它独立于询问弹窗，但不该在轮询 / 刷新时
+ * 停在旧数据上；同座位重画保留滚动位置（U1-06）。
+ */
+function syncDialog() {
+  const pending = state.view ? state.view.pending : null;
+  const kind = state.playback ? null : dialogWantedKind(pending);
+  if (!kind) {
+    closeDialogDom();
+    syncHeroModal();
+    return;
+  }
+  const key = dialogKeyFor(kind, pending);
+  if (key !== state.dialog.key || !state.dialog.open) {
+    closeDialogDom();
+    state.dialog.key = key;
+    openDialogDom(kind);
+    syncHeroModal();
+    return;
+  }
+  updateDialogDom(kind);
+  syncHeroModal();
+}
+
+/* ------------------------------------------------------------ 武将详情窗口 */
+
+/** 武将详情 = 叠加的检视窗：只按 `state.modal.heroSeat` 开 / 关 `#t-modal`。
+ *  它不碰询问弹窗的正文、折叠与只读判据；关闭后底下的询问弹窗原样恢复。 */
+function syncHeroModal() {
+  const modal = $("t-modal");
+  if (!modal) return;
+  if (state.playback || state.modal.heroSeat === null || !state.view) {
+    modal.hidden = true;
+    const body = $("t-modal-body");
+    if (body) {
       body.innerHTML = "";
       body.scrollTop = 0;
     }
-    body.appendChild(options);
+    syncModalChrome();
+    return;
   }
+  const title = $("t-modal-title");
+  const player = playerAt(state.view, state.modal.heroSeat);
+  if (title) title.textContent = player ? `武将详情 · ${heroNameOf(player, state.view)}` : "武将详情";
+  renderHeroDetailBody();
   modal.hidden = false;
-  setModalChrome(true);
-  state.modal.kind = kind;
-  state.modal.open = true;
-  // `dismissed` 属于**底下的**排列模态；打开详情时不能把它抹掉（关闭详情后仍只给
-  // 「查看排列」入口）。预发动 / 排列本身重新打开时重置。
-  if (kind !== "hero") state.modal.dismissed = false;
-  showReopenButton(kind, false);
+  syncModalChrome();
 }
 
-function closeModalDom({ restoreContent = true } = {}) {
-  hideModalDom();
-  if (restoreContent) showOptionsHome();
-}
+/* ------------------------------------------------------------ 键盘 / 切页 / 装配 */
 
-/** 在每次 `renderPending` 末尾调用：把内容送到正确的位置（浮动选项行 / 模态正文）。
+/** document 的 keydown 入口：ESC **只**关武将详情（检视窗）。
  *
- * 优先级：武将详情（本地态，独立于询问）> 预发动 > 排列。详情关掉后再按当前询问
- * 回到它自己的模态；详情开着时它**不被** `renderPending` 掉。
- */
-function syncModal() {
-  const pending = state.view ? state.view.pending : null;
-  // 回放期间不挂任何模态（详情也是本地态，播放开始前就收起）。
-  if (state.playback) state.modal.heroSeat = null;
-  const kind = state.playback ? null : modalWantedKind(pending);
-  if (!kind) {
-    state.modal.kind = null;
-    state.modal.dismissed = false;
-    // 幂等：内容可能仍在模态正文里（上一问的模态被 `resetSelection` 清掉本地态）。
-    closeModalDom();
-    showReopenButton(null, false);
-    return;
-  }
-  if (state.modal.kind !== kind) {
-    // 详情是**叠加**在询问模态之上的本地窗口：打开 / 关闭它都不该重置底下排列模态的
-    // 「收起」状态（ticket 03：收起后只给「查看排列」）。
-    const wasHero = state.modal.kind === "hero";
-    if (kind !== "hero" && !wasHero) state.modal.dismissed = false;
-    state.modal.kind = kind;
-    state.modal.open = false;
-  }
-  // 排列收起后只给「查看排列」；武将详情是叠加的检视窗，没有"收起"这回事。
-  if (state.modal.dismissed && kind !== "hero") {
-    hideModalDom();
-    showReopenButton(kind, true);
-    return;
-  }
-  openModalDom(kind);
-}
-
-/** 关闭模态：武将详情 = 只关本地窗口（零提交）；预发动 = 取消本地态（零提交）；
- *  排列 = 收起并给出「查看排列」入口。 */
-function dismissModal() {
-  const kind = state.modal.kind;
-  if (!kind || !state.modal.open) return;
-  if (kind === "hero") {
-    closeHeroDetail();
-    return;
-  }
-  if (kind === "preactivation") {
-    state.preactivation = null;
-    state.convertSkill = null;
-    state.picks = [];
-    state.focusCardId = null;
-    state.selectedTargets = [];
-    state.lastRejectReason = "";
-    state.modal.kind = null;
-    state.modal.dismissed = false;
-    closeModalDom();
-    showReopenButton(null, false);
-    renderTable();
-    renderPending(state.view);
-    return;
-  }
-  state.modal.dismissed = true;
-  hideModalDom();
-  showReopenButton(kind, true);
-}
-
-/** 「查看排列」：强制选择被收起后重新打开（`state.arrange` 原样保留）。 */
-function reopenModal() {
-  if (!state.modal.kind) return;
-  openModalDom(state.modal.kind);
-}
-
-/** document 的 keydown 入口：ESC / Esc 关闭当前模态（并阻止浏览器默认的 Esc 行为）。 */
+ * 询问弹窗没有 ESC 出口（D3）：没开详情时这里什么都不做——不是"先 preventDefault 再
+ * 找不到可关的东西"，ESC 在询问弹窗上就是 no-op。 */
 function handleModalKey(event) {
   if (!event || (event.key !== "Escape" && event.key !== "Esc")) return;
-  if (!state.modal.open) return;
+  if (state.modal.heroSeat === null) return;
   if (event.preventDefault) event.preventDefault();
-  dismissModal();
+  closeHeroDetail();
 }
 
-/** 离开牌桌页 / 回放期间：收起模态并恢复浮动选项行（不提交任何 action）。 */
+/** 离开牌桌页 / 回放期间：收起两个窗口（不提交任何 action）。 */
 function closeModalForView() {
-  if (!state.modal.kind && !state.modal.open && state.modal.heroSeat === null) return;
-  state.modal.kind = null;
-  state.modal.dismissed = false;
+  closeDialogDom();
   state.modal.heroSeat = null;
-  closeModalDom();
-  showReopenButton(null, false);
+  syncHeroModal();
 }
 
 function wireModal() {
   // 遮罩**不接 click**：`pointer-events: none` 的暗化层没有自己的点击，穿透到牌桌的
-  // 点击由 `selectionEnabled()` 判据拦下（D8：「点背景 = 关闭」不再存在）。
-  const close = $("t-modal-close");
-  if (close) close.addEventListener("click", dismissModal);
+  // 点击由 `selectionEnabled()` 判据拦下（D8：「点背景 = 关闭」不存在）。
+  const collapse = $("t-dialog-collapse");
+  if (collapse) collapse.addEventListener("click", toggleDialogCollapse);
+  // 「查看排列」= 展开折叠的排列弹窗（不是重新开一个本地态，也不清已摆的顺序）。
   const reopen = $("btn-show-modal");
-  if (reopen) reopen.addEventListener("click", reopenModal);
+  if (reopen) reopen.addEventListener("click", expandDialog);
+  // 武将详情自己的关闭按钮：只关细节，不动询问弹窗。
+  const close = $("t-modal-close");
+  if (close) close.addEventListener("click", closeHeroDetail);
   document.addEventListener("keydown", handleModalKey);
+  // 初始两个窗口都收起（真浏览器由 HTML 的 hidden 属性保证；DOM 垫片不解析属性）。
+  closeDialogDom();
+  syncHeroModal();
 }

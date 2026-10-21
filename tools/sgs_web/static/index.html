@@ -203,12 +203,30 @@
       <ol id="t-log" class="log"></ol>
     </div>
 
-    <!-- 共享模态（U1-03）：多步技能清单 / 排列 / 武将详情共用一套规范。
-         屏幕正中、正文可滚轮翻阅、关闭按钮或 ESC 可关；遮罩与弹窗是**两个节点**——
-         遮罩是 `pointer-events: none` 的暗化层（D8）：点击穿透到牌桌，能不能选由
-         `selectionEnabled()` 判据拦下；座位仍在遮罩之上，选目标照常点场上武将。
-         倒计时仍在提示条上继续走，模态内**不**显示倒计时。 -->
+    <!-- 暗化层（U2-06 / D8）：询问弹窗与武将详情**共用**的一层纯视觉遮挡。
+         `pointer-events: none`：点击穿透到牌桌，能不能选由 `selectionEnabled()` 判据拦下；
+         座位仍在它之上，选目标照常点场上武将。它没有 click 监听（「点背景 = 关闭」不存在）。 -->
     <div id="t-modal-backdrop" class="modal-backdrop" hidden></div>
+
+    <!-- 询问弹窗（U2-06 / spec D3）：标题 + 可选的步骤提示 + 内容槽 + 折叠按钮。
+         **没有关闭按钮**，ESC 与点背景都不关；提交 / 取消 / 结束出牌 / 放弃只在提示条右端，
+         弹窗里一个操作型按钮都没有。折叠只隐藏正文（标题 + 步骤提示 + 展开留下），
+         不改只读态。现有用户 = 排列（观星）与预发动清单；票 07–12 的四个模板复用这个容器。 -->
+    <div id="t-dialog" class="dialog" role="dialog" aria-modal="true" aria-labelledby="t-dialog-title" hidden>
+      <div class="dialog-window">
+        <header class="dialog-head">
+          <h2 id="t-dialog-title" class="dialog-title"></h2>
+          <span id="t-dialog-hint" class="dialog-hint" hidden></span>
+          <button id="t-dialog-collapse" type="button" class="ghost"
+                  aria-expanded="true" title="折叠 / 展开弹窗（只改遮挡，不影响可选择性）">收起</button>
+        </header>
+        <div id="t-dialog-body" class="dialog-body"></div>
+      </div>
+    </div>
+
+    <!-- 武将详情（U1-06）：**唯一**可叠加在询问弹窗之上的检视窗。它有自己的
+         `#t-modal` 节点与关闭按钮 / ESC——这些关闭语义**不**适用于询问弹窗（D3）。
+         打开 / 关闭详情不改变只读态；关闭后底下的询问弹窗原样恢复。 -->
     <div id="t-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="t-modal-title" hidden>
       <div class="modal-window">
         <header class="modal-head">
