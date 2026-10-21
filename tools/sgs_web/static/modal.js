@@ -62,6 +62,7 @@ function stepDialogKind(pending) {
   // 长出第二份枚举表。
   if (isChoiceStep(pending)) return DIALOG_KINDS.choice;
   if (isUnknownZoneStep(pending)) return DIALOG_KINDS.unknown;
+  if (isRevealStep(pending)) return DIALOG_KINDS.reveal;
   return null;
 }
 
@@ -127,6 +128,33 @@ function isUnknownZoneStep(pending) {
   return seat !== null && seat !== actor;
 }
 
+/** 亮牌模板的**唯一判据**（票 11 五谷；票 12 的遗计两牌亮牌复用同一渲染器）。
+ *
+ * 两个来源，都是**载荷**而不是技能 id：
+ *
+ *  - ``pending.harvest``：服务端为五谷派生的结算状态（U2-11 / D10）。它只在五谷的
+ *    ``SELECT_CARDS`` 取牌步骤上开窗（``spec.zones`` 含 ``processing`` 或槽位全在处理区），
+ *    且必须还有**当前目标**（``harvest.current`` 非空）——结算末尾没有当前目标时不开。
+ *  - ``pending.dialog === "reveal"``：给票 12 的**显式模板标记**（遗计亮的是牌堆顶两张，
+ *    没有五谷的 target 列表）。目前没有生产者；先留判据，12 接进来时只喂这个键即可，
+ *    不必再改这里。
+ *
+ * 判据只看"这一步是不是亮牌面"，不看 actor 是不是人类（`syncDialog` 另问 `isOwnPending`；
+ * 五谷的 AI 拿牌阶段要显示在人类屏幕上，见 `syncDialog` 的 harvest 例外）。
+ */
+function isRevealStep(pending) {
+  if (!pending || pending.kind !== "SELECT_CARDS") return false;
+  if (pending.dialog === DIALOG_KINDS.reveal) return true;
+  const harvest = pending.harvest;
+  if (!harvest || typeof harvest !== "object" || harvest.active === false) return false;
+  if (!Array.isArray(harvest.revealed) || !harvest.revealed.length) return false;
+  if (harvest.current === null || harvest.current === undefined) return false;
+  const zones = (pending.spec && pending.spec.zones) || [];
+  if (zones.includes("processing")) return true;
+  const slots = pending.slots || [];
+  return slots.length > 0 && slots.every((slot) => slot && slot.ref && slot.ref.zone === "processing");
+}
+
 /** 只读态判据（spec D8）：当前步骤的表面是弹窗 ⇒ 牌桌选择入口一律 no-op。
  *
  * 与既有的 `state.playback` 判据同型，但只回答"现在能不能选"：检视（悬停 / 右键详情 /
@@ -171,11 +199,21 @@ function dialogKeyFor(kind, pending) {
     const chain = pending && pending.context && pending.context.name;
     if (chain) return `chain:${chain}:${pending.actor ?? ""}`;
   }
+  // 亮牌（票 11 / 12）：五谷的整段结算跨 X 个目标、每个目标一个新 `seq`，按 `${kind}:${seq}`
+  // 会每拿一张就关窗重开。链键取**服务端派生**的 `harvest.key`（帧 + 牌 + 使用者），
+  // 整段结算不变；没有它（合成载荷 / 非五谷亮牌）才退回 `kind:seq`，fail-visible 不猜链。
+  if (kind === DIALOG_KINDS.reveal) {
+    const key = pending && pending.harvest && pending.harvest.key;
+    if (key) return `reveal:${key}`;
+  }
   return `${kind}:${seq}`;
 }
 
-/** 标题：模板自报；票 08 / 09 / 11 / 12 接进来时换成各自模板的文案。 */
-function dialogTitleFor(kind) {
+/** 标题：模板自报；票 08 / 09 / 11 / 12 接进来时换成各自模板的文案。
+ *
+ * 亮牌模板（票 11 / 12）的标题读**载荷**：五谷是 `harvest.title`（服务端从使用的牌面翻成
+ * 「五谷丰登」，前端不抄牌名）；没有时退回中性的「亮牌」。 */
+function dialogTitleFor(kind, pending) {
   if (kind === "preactivation") {
     const pa = state.preactivation;
     return pa ? `预发动【${pa.name}】` : "预发动";
@@ -183,7 +221,10 @@ function dialogTitleFor(kind) {
   if (kind === DIALOG_KINDS.arrange) return "排列";
   if (kind === DIALOG_KINDS.choice) return "选择";
   if (kind === DIALOG_KINDS.unknown) return "选择一张牌";
-  if (kind === DIALOG_KINDS.reveal) return "亮牌";
+  if (kind === DIALOG_KINDS.reveal) {
+    const title = pending && pending.harvest && pending.harvest.title;
+    return title || "亮牌";
+  }
   return "询问";
 }
 
@@ -286,7 +327,7 @@ function openDialogDom(kind) {
   const title = $("t-dialog-title");
   const options = $("t-options");
   if (!dialog || !body) return;
-  if (title) title.textContent = dialogTitleFor(kind);
+  if (title) title.textContent = dialogTitleFor(kind, state.view ? state.view.pending : null);
   if (options) body.appendChild(options);
   state.dialog.open = true;
   state.dialog.kind = kind;
@@ -313,7 +354,7 @@ function updateDialogDom(kind) {
     openDialogDom(kind);
     return;
   }
-  if (title) title.textContent = dialogTitleFor(kind);
+  if (title) title.textContent = dialogTitleFor(kind, state.view ? state.view.pending : null);
   if (options && body && options.parentNode !== body) body.appendChild(options);
   state.dialog.kind = kind;
   applyDialogCollapseChrome();
@@ -336,6 +377,7 @@ function closeDialogDom() {
     body.innerHTML = "";
     body.scrollTop = 0;
     body.hidden = false;
+    body.classList.remove("reveal-body");
   }
   if (title) title.textContent = "";
   if (hint) {
@@ -364,8 +406,15 @@ function syncDialog() {
   // 只有**自己的**询问才在自己的屏幕上开弹窗：目标座位是 AI 时（人类是周瑜、目标是 AI），
   // 花色 / 盲挑这两问会出现在视图里，但它们不是给人类答的——不在这里开一个人工弹窗
   // （牌桌仍按 `selectionEnabled` 只读，等 AI 答完下一步）。
+  //
+  // **五谷例外**（票 11 / D4）：亮牌是公开处理区，AI 目标拿牌时弹窗也要留在人类屏幕上。
+  // 判据只认服务端派生的 `harvest`（不是"所有 reveal"）——遗计（票 12）的观看是私有授予，
+  // 仍然只在本人应答时开窗。
   const own = pending ? isOwnPending(pending) : false;
-  const kind = state.playback || !own ? null : dialogWantedKind(pending);
+  const publicHarvest = !!pending && !!pending.harvest
+    && pending.harvest.active !== false
+    && stepDialogKind(pending) === DIALOG_KINDS.reveal;
+  const kind = state.playback || (!own && !publicHarvest) ? null : dialogWantedKind(pending);
   if (!kind) {
     closeDialogDom();
     syncHeroModal();

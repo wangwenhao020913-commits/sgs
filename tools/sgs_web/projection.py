@@ -29,7 +29,7 @@ from sgs.skills import (
     lord_skill_allowed,
     resolve_instances,
 )
-from sgs.state import FrameKind, Query, WindowCause, project
+from sgs.state import FrameKind, Query, WindowCause, Zone, project
 from sgs.timing import Timing
 
 from .descriptions import skill_description
@@ -43,8 +43,10 @@ from .display import (
 from .session import Session
 
 __all__ = [
+    "HARVEST_REQUIREMENT",
     "build_skills",
     "candidate_index",
+    "harvest_state",
     "option_seats",
     "pending_payload",
     "query_context",
@@ -54,6 +56,14 @@ __all__ = [
     "visible_record",
     "visible_snapshot",
 ]
+
+HARVEST_REQUIREMENT = "从亮出的牌里选一张获得"
+"""【五谷丰登】取牌这一步的「需要做什么」（U2-11 / D10）。
+
+公开处理区的正确口径：亮出的牌**牌面可见**，因此不是「隐藏区域的槽位只有位置」，
+也不是通用的「请从选择面里选择一张牌」。`_card_window_requirement` 与询问载荷的
+``harvest.hint`` 读同一个常量——前端只显示，不抄第二份文案。
+"""
 
 
 def _card_lookup(state: Any) -> dict[int, Any]:
@@ -678,7 +688,7 @@ def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) ->
         if card_type in ("dismantlement", "snatch"):
             return "选择目标区域里的一张牌"
         if card_type == "harvest":
-            return "从亮出的牌里选一张获得"
+            return HARVEST_REQUIREMENT
         return "从选择面里选择要交出的牌"
     if kind == "RESPOND":
         cause = getattr(query, "cause", None)
@@ -1001,12 +1011,22 @@ def _mask_watched_faces(payload: dict[str, Any]) -> None:
 
     公开事实（谁在看、有几个位置）保留：``slots`` 仍按**位置**下发（``card=None``），
     与 :func:`~sgs.state.project` 对隐藏区域的"只有位置"是同一形状。
+
+    **处理区是公开的**（U2-11 / D4）：五谷亮在 ``processing`` 区，牌面对所有人生效，故
+    ``ref.zone == processing`` 的槽位**不抹**——五谷取牌这一步在"AI 目标应答"时也会被
+    下发（亮牌模板要看得出剩什么），抹掉就只剩位置了。其余区域（手牌 / 装备 / 判定）照旧
+    按查看者归属收口；``revealed`` 仍整份抹掉（它是【遗计】这类**观看授予**，不是公开区）。
     """
     slots = payload.get("slots")
     if isinstance(slots, list):
-        payload["slots"] = [
-            {**slot, "card": None} if isinstance(slot, dict) else slot for slot in slots
-        ]
+        masked: list[Any] = []
+        for slot in slots:
+            ref = slot.get("ref") if isinstance(slot, dict) else None
+            public_processing = isinstance(ref, dict) and ref.get("zone") == Zone.PROCESSING.value
+            masked.append(slot if public_processing else (
+                {**slot, "card": None} if isinstance(slot, dict) else slot
+            ))
+        payload["slots"] = masked
     payload["revealed"] = []
 
 
@@ -1146,6 +1166,181 @@ def _arrange_spec(
     return {"count": count, "split": split}
 
 
+def _harvest_resolve_frame(engine: Any) -> Any:
+    """结算栈上**最内层**的【五谷丰登】``RESOLVE`` 帧；没有就 ``None``。
+
+    五谷的逐目标取牌是一个 ``RESOLVE`` 帧 + 游标（票 27），目标之间只推进 ``cursor``；
+    无懈用**帧上叠帧**的方式结算（票 11 §2），故搜索整条栈而不是只看栈顶——被问无懈时
+    栈顶是那张【无懈可击】的 ``USE`` / ``RESOLVE`` 帧，五谷帧在它下面。
+    """
+    frames = getattr(getattr(engine, "stack", None), "frames", ()) or ()
+    for frame in reversed(frames):
+        if getattr(frame, "kind", None) is not FrameKind.RESOLVE:
+            continue
+        card = frame.data.get("card")
+        if getattr(card, "type", None) == "harvest":
+            return frame
+    return None
+
+
+def _harvest_revealed_ids(engine: Any, frames: list[Any], frame: Any) -> tuple[int, ...]:
+    """本次五谷**亮出的全部牌**，按亮牌顺序（``card_id`` 元组）。
+
+    帧私有 ``revealed`` 每取走一张就缩短一次（``pick_harvest`` 写回），故它只够表达"还剩
+    什么"，**不是**完整集合、更保不住位置。完整集合从**记录流**里取：亮牌是一条
+    ``deck → processing`` 的 ``card_move``（B5 的 ``reveal_harvest`` 发出），``cards``
+    的顺序就是亮牌顺序。拿不到记录时退回同一 ``USE`` 帧的 ``revealed``（它不缩短）；
+    再拿不到才用结算帧当前那份（fail-soft，至少不编牌）。
+    """
+    use_frame = None
+    at = next((index for index, candidate in enumerate(frames) if candidate is frame), None)
+    if at is not None:
+        for candidate in reversed(frames[:at]):
+            if getattr(candidate, "kind", None) is FrameKind.USE:
+                use_frame = candidate
+                break
+    use_frame_id = use_frame.frame_id if use_frame is not None else None
+    ids: list[int] = []
+    for record in getattr(engine, "records", ()) or ():
+        if getattr(record, "kind", None) != "delta":
+            continue
+        if getattr(record, "delta_type", None) != "card_move":
+            continue
+        if use_frame_id is not None and record.frame_id != use_frame_id:
+            continue
+        from_zone = getattr(record.from_zone, "zone", None)
+        to_zone = getattr(record.to_zone, "zone", None)
+        if from_zone is not Zone.DECK or to_zone is not Zone.PROCESSING:
+            continue
+        ids.extend(int(card.card_id) for card in record.cards)
+    if ids:
+        return tuple(ids)
+    if use_frame is not None:
+        return tuple(int(cid) for cid in use_frame.data.get("revealed", ()))
+    return tuple(int(cid) for cid in frame.data.get("revealed", ()))
+
+
+def _harvest_taken(engine: Any, frame: Any, revealed: tuple[int, ...]) -> dict[int, int]:
+    """``card_id → 拿牌者座位``：折叠本帧里记录过的 ``processing → hand`` 移动。
+
+    ``pick_harvest`` 的搬牌落在五谷的 ``RESOLVE`` 帧（``move_in_frame`` 用帧 id 记账），
+    故只收 ``frame_id == 本帧`` 的 ``card_move``。取到的牌一定在亮牌集合里；其余移动
+    （无懈进弃牌堆、结算完弃余牌）不是"被拿走"，不收。
+    """
+    known = set(revealed)
+    taken: dict[int, int] = {}
+    for record in getattr(engine, "records", ()) or ():
+        if getattr(record, "kind", None) != "delta":
+            continue
+        if getattr(record, "delta_type", None) != "card_move":
+            continue
+        if getattr(record, "frame_id", None) != frame.frame_id:
+            continue
+        if getattr(record.from_zone, "zone", None) is not Zone.PROCESSING:
+            continue
+        if getattr(record.to_zone, "zone", None) is not Zone.HAND:
+            continue
+        seat = getattr(record.to_zone, "seat", None)
+        if seat is None:
+            seat = getattr(record, "owner", None)
+        if seat is None:
+            continue
+        for card in record.cards:
+            card_id = int(card.card_id)
+            if card_id in known and card_id not in taken:
+                taken[card_id] = int(seat)
+    return taken
+
+
+def harvest_state(engine: Any) -> dict[str, Any] | None:
+    """【五谷丰登】结算的**服务端派生状态**（U2-11 / D10）：只读公开事实，进询问载荷。
+
+    数据源只有两处：
+
+    - **结算栈**上那个五谷 ``RESOLVE`` 帧：``targets``（取牌顺序）、``cursor``（当前目标）、
+      ``canceled``（当前目标刚被无懈）、``source`` / ``card``；
+    - **记录流**：亮牌那条 ``deck → processing`` 的 ``card_move``（完整集合 + 亮牌顺序）与
+      每次取牌的 ``processing → hand`` 移动（``card_id → 座位``）。
+
+    它**不改记录流、不进金录像**：字段只在下发时现算，引擎的帧 / delta / 查询一个字节不动。
+
+    状态口径（D4 / D10）：
+
+    - ``pending``：还没轮到；
+    - ``current``：``cursor`` 指到的目标（本轮正在取牌 / 正在被问无懈）；
+    - ``taken``：已取走一张牌，``card`` 是那张牌的 id；
+    - ``invalid``：**最终没拿到牌**——被无懈且未被反无懈救回，或这一步被跳过。反无懈救回
+      的目标会照常被问、照常拿到牌，故天然落在 ``taken``；判定只读"这个目标处理完了没有"
+      与"记录里有没有它的 ``processing → hand`` 移动"，不解析无懈链。
+    - 每个目标另带 ``cancelled`` / ``reason`` 两个**保留位**：将来"先被指定、后被取消"
+      （如界甘宁【奋威】）由生产者置 ``cancelled``，界面按同一种红显示；标准包没有该技能，
+      故现在恒为 ``false`` / ``null``。
+
+    取不到五谷帧 / 一张亮牌都没有 ⇒ ``None``（界面据此不开亮牌弹窗）。
+    """
+    frame = _harvest_resolve_frame(engine)
+    if frame is None:
+        return None
+    frames = list(getattr(getattr(engine, "stack", None), "frames", ()) or ())
+    revealed = _harvest_revealed_ids(engine, frames, frame)
+    if not revealed:
+        return None
+    taken = _harvest_taken(engine, frame, revealed)
+    state = getattr(engine, "state", None)
+    lookup = _card_lookup(state) if state is not None else {}
+    card = frame.data.get("card")
+    card_face = card_payload(card, lookup=lookup) if card is not None else None
+
+    revealed_payload: list[dict[str, Any]] = []
+    for card_id in revealed:
+        model = lookup.get(card_id)
+        if model is None:
+            continue
+        entry = card_payload(model, lookup=lookup)
+        entry["taken_by"] = taken.get(card_id)
+        revealed_payload.append(entry)
+
+    target_seats = tuple(int(seat) for seat in frame.data.get("targets", ()))
+    cursor = frame.data.get("cursor")
+    if not isinstance(cursor, int):
+        cursor = 0
+    current_canceled = bool(frame.data.get("canceled"))
+    taken_by_seat: dict[int, int] = {}
+    for card_id, seat in taken.items():
+        taken_by_seat.setdefault(seat, card_id)
+    targets_payload: list[dict[str, Any]] = []
+    for index, seat in enumerate(target_seats):
+        card_id = taken_by_seat.get(seat)
+        if index < cursor:
+            status = "taken" if card_id is not None else "invalid"
+        elif index == cursor:
+            status = "invalid" if current_canceled else "current"
+        else:
+            status = "pending"
+        targets_payload.append(
+            {
+                "seat": seat,
+                "status": status,
+                "card": card_id,
+                "cancelled": False,
+                "reason": None,
+            }
+        )
+    current = target_seats[cursor] if 0 <= cursor < len(target_seats) else None
+    source = frame.data.get("source")
+    return {
+        "active": True,
+        "key": f"harvest:{frame.frame_id}:{getattr(card, 'card_id', '')}:{source}",
+        "title": getattr(card, "name", None) or "五谷丰登",
+        "hint": HARVEST_REQUIREMENT,
+        "source": int(source) if source is not None else None,
+        "card": card_face,
+        "revealed": revealed_payload,
+        "targets": targets_payload,
+        "current": current,
+    }
+
+
 def pending_payload(
     session: Session | Query | None, *, human_seat: int | None = None
 ) -> dict[str, Any] | None:
@@ -1221,6 +1416,13 @@ def pending_payload(
     # 选项闭集里只要不全是花色就是 ``None``（界面据此决定画选择型弹窗还是小选项组）。
     # 与 ``option_seats`` 分开两个键：一个回答"这是谁"，一个回答"这项怎么显示"。
     payload["option_labels"] = suit_labels(getattr(query, "options", ()) or ())
+    # U2-11（D4 / D10）：【五谷丰登】结算的服务端派生状态（亮牌 + taken_by + 目标条 + 当前
+    # 目标）。只读结算栈与记录流，**不进**记录流 / 金录像。这是**公开处理区**的事实，故不按
+    # 查看者收口：AI 目标拿牌时，人类屏幕上的亮牌弹窗也要显示同一份状态。取不到引擎
+    # （409 里附带的裸 ``Query``）⇒ ``None``（键恒在，前端 fail-closed 不开窗）。
+    payload["harvest"] = (
+        harvest_state(session.engine) if isinstance(session, Session) else None
+    )
     # 这一步是不是"提供一张 B"（票 14）：非空 = B 的牌名 id。字段在记录流里被 ``exclude``，
     # 故**不进** Golden Replay 的字节；界面靠它把这一类选择面**就地**铺到本人的可见区域上。
     payload["provide_type"] = getattr(query, "provide_type", None)

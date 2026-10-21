@@ -953,6 +953,42 @@ button.mini-slot { cursor: pointer; }
 .dialog-body .options { margin: 0; }
 .dialog-body .arrange-row + .arrange-row { margin-top: 10px; }
 
+/* ---------- 亮牌模板（U2-11 五谷 / 票 12 遗计复用；spec D3 / D4） ----------
+ * 正文 = 全部亮牌（按亮牌顺序，被拿走的牌**留在原位**）+ 左下角目标条。
+ * 被拿走的牌置灰、牌面仍可读，右下角标写拿牌者座位号；目标条按拿牌顺序四态：
+ * 未轮到（灰虚）/ 已拿（绿勾）/ 当前（高亮）/ 无效（红叉，含将来的"指定后取消"）。 */
+.reveal { display: flex; flex-direction: column; gap: 10px; }
+.reveal .reveal-cards { margin: 0; }
+.card.face.reveal-card { cursor: pointer; }
+.card.face.reveal-card.taken {
+  cursor: default; opacity: .55; filter: grayscale(1);
+  box-shadow: none;
+}
+.card.face.taken .taken-by {
+  position: absolute; right: calc(4 * var(--dsu)); bottom: calc(5 * var(--dsu));
+  min-width: calc(24 * var(--dsu)); padding: 1px calc(4 * var(--dsu));
+  border-radius: 999px; background: var(--ink); color: #fff;
+  font-size: calc(10 * var(--dsu)); font-weight: 700; line-height: 1.4;
+}
+/* 目标条钉在弹窗左下角（`.dialog-window` 已是 position:relative）；
+ * 正文给条留一条下内边距，内容滚到底时不遮住目标。 */
+.dialog-body.reveal-body { padding-bottom: 52px; }
+.reveal-targets {
+  position: absolute; left: 14px; bottom: 10px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 5px;
+  max-width: calc(100% - 28px);
+}
+.reveal-targets-label { font-size: 11px; color: var(--dim); margin-right: 2px; }
+.reveal-target {
+  min-width: 34px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px;
+  font-size: 12px; line-height: 1.35; text-align: center;
+  color: var(--dim); background: #f5efe3; white-space: nowrap;
+}
+.reveal-target.is-pending { border-style: dashed; }
+.reveal-target.is-taken { color: var(--ok); border-color: var(--ok); background: rgba(29, 107, 58, .1); }
+.reveal-target.is-current { color: #fff; background: var(--accent); border-color: var(--accent); font-weight: 700; }
+.reveal-target.is-invalid { color: #fff; background: #b3261e; border-color: #b3261e; }
+
 /* ---------- 武将详情（U1-06）：武将技能在上、分割线、装备技能在下 ---------- */
 
 .hero-detail { display: flex; flex-direction: column; gap: 4px; }

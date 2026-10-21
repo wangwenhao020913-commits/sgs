@@ -1015,7 +1015,10 @@ while (ui.state.view.pending && steps < 4000) {
   const chosenAt = p.legal_actions.findIndex((a) => a.kind === chosen.kind);
   if (chosenAt < 0) { renderErrors.push(`${p.kind}: 选不出一个候选`); break; }
   ui.state.selectedOption = chosenAt;
-  if (chosen.kind === "SelectCards") {
+  if (chosen.kind === "SelectCards" && ui.stepDialogKind(p) !== ui.DIALOG_KINDS.reveal) {
+    // 亮牌模板（U2-11 / 五谷）是内容按钮**一击即提交**：右端提交键恒灰，由
+    // `renderReveal` 的牌面 click 送出那一条 `SelectCards`。驱动方在这里只补 `picks`
+    // （等价于点了第 N 张亮牌），不拿右端按钮当判据。
     const least = (p.spec && p.spec.total && p.spec.total[0]) || 1;
     ui.state.picks = Array.from({ length: least }, (_, i) => i);
     const disabled = $("btn-submit").disabled;
@@ -1029,6 +1032,11 @@ while (ui.state.view.pending && steps < 4000) {
       renderErrors.push(`SelectCards 选够 ${least} 张后提交按钮仍不可点 [spec.total=${JSON.stringify(p.spec && p.spec.total)} slots=${(p.slots||[]).length} picks=${ui.state.picks.length} selectedOption=${ui.state.selectedOption} choice="${$("t-choice").textContent}"]`);
       break;
     }
+  } else if (chosen.kind === "SelectCards") {
+    // 亮牌：等价于"点了第 least 张亮牌"——补 `picks` 后由 `buildAction()` 造同一条
+    // `SelectCards`；右端按钮**本来就该是灰的**（一击提交，没有第二个提交点）。
+    const least = (p.spec && p.spec.total && p.spec.total[0]) || 1;
+    ui.state.picks = Array.from({ length: least }, (_, i) => i);
   }
   if (chosen.kind === "DiscardCards") {
     // 弃牌没有"手选"路径（spec D10），由旧候选列表路径处理；`picks` 装的是**手牌下标**，
@@ -5472,11 +5480,24 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
     ["五谷", {
       kind: "SELECT_CARDS", actor: 0, seq: 9405,
       prompt: "请从选择面里选择一张牌。",
-      legal_actions: [{ kind: "SelectCards", answers_seq: 9405, picks: [] }],
-      candidate_index: {}, option_seats: {}, context: null,
+      legal_actions: [{ kind: "SelectCards", answers_seq: 9405, picks: [0] }],
+      // U2-11：五谷取牌已是**亮牌弹窗**（公开处理区），不再是旧的选择面块；本用例钉
+      // 新表面同样没有「放弃」。目标条 / 置灰由 U2-11 段单独钉。
+      candidate_index: {}, option_seats: {},
+      context: {
+        actor: 0, name: "五谷丰登", targets: [0], label: "0号位使用五谷丰登",
+        requirement: "从亮出的牌里选一张获得", skill_hints: [],
+      },
       preactivations: {}, preactivation: [],
       spec: { zones: ["processing"], total: [1, 1] },
       slots: [{ ref: { zone: "processing", seat: null }, card: synthCard(2, "桃") }],
+      harvest: {
+        active: true, key: "harvest:1:5:0", title: "五谷丰登",
+        hint: "从亮出的牌里选一张获得", source: 0,
+        revealed: [synthCard(2, "桃")],
+        targets: [{ seat: 0, status: "current", card: null, cancelled: false, reason: null }],
+        current: 0,
+      },
     }],
     ["观星排列", {
       kind: "ARRANGE", actor: 0, seq: 9406,
@@ -9199,6 +9220,324 @@ const bottomSkillIds = () => $("t-skills").children.filter(
         && zoneSections()[0].getAttribute("data-zone") === "hand",
       `key=${ui.state.dialog.key} before=${chainKey} hidden=${$("t-dialog").hidden} 块=${zoneSections().map((n) => n.getAttribute("data-zone")).join(",")}`);
   }
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ U2-11（D3 / D4 / D10）：五谷丰登亮牌弹窗 + 目标条 ============
+ *
+ * 载荷形状与真会话同形（`harvest` 的字段名 / 状态值由 `tests/test_web.py` 的真会话断言钉）：
+ * `harvest.revealed` 是**全部**亮牌（按亮牌顺序，带 `taken_by`），`harvest.targets` 是全部
+ * 目标（按拿牌顺序，带 `status` / `card` / 保留的 `cancelled`），`harvest.current` 是当前目标。
+ *
+ * 本段只钉**界面读法**：置灰 + 座位号 + 位置保持、目标条四态（含"取消"红）、点一张亮牌 = 一次
+ * `SelectCards`、没有「放弃」、AI 拿牌时弹窗不关且不可点、整段结算共用链键、折叠 / 只读 / 检视。
+ */
+{
+  const STYLE = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const cardOf = (id, name, type, description) => ({
+    ...synthCard(id, name),
+    type,
+    display_name: name,
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description,
+  });
+  const wuguCard = cardOf(5, "五谷丰登", "harvest", "五谷丰登的描述：亮出牌堆顶 X 张。");
+  const takenCard = cardOf(2, "闪", "dodge", "闪的描述：抵消一张杀。");
+  const secondCard = cardOf(3, "桃", "peach", "桃的描述：回复 1 点体力。");
+  const thirdCard = cardOf(4, "杀", "slash", "杀的描述：造成 1 点伤害。");
+  const fourthCard = cardOf(6, "无懈可击", "nullify", "无懈可击的描述：抵消一张锦囊。");
+  const withTaker = (card, takenBy = null) => ({ ...card, taken_by: takenBy });
+  const targetRow = (seat, status, card = null, cancelled = false) => ({
+    seat, status, card, cancelled, reason: null,
+  });
+  /** 一份与 `/api/sessions` 的 `pending` 同形的五谷取牌询问（harvest 字段见 test_web 真会话）。 */
+  const wuguPending = ({ seq, actor, current, key = "harvest:2:5:0", revealed, targets, slots }) => ({
+    kind: "SELECT_CARDS", actor, seq, prompt: "请从选择面里选择一张牌。",
+    legal_actions: slots.map((_, index) => ({
+      kind: "SelectCards", answers_seq: seq, picks: [index],
+    })),
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: slots.map((card) => ({ ref: { seat: null, zone: "processing" }, card })),
+    spec: { zones: ["processing"], total: [1, 1], sequential: false, optional: false },
+    harvest: {
+      active: true, key, title: "五谷丰登", hint: "从亮出的牌里选一张获得",
+      source: 0, card: wuguCard, revealed, targets, current,
+    },
+    context: {
+      actor: 0, name: "五谷丰登",
+      targets: slots.map(() => 0).slice(0, 1),
+      label: "0号位使用五谷丰登",
+      requirement: "从亮出的牌里选一张获得", skill_hints: [],
+    },
+    prompt_display: { text: "请从选择面里选择一张牌。", default_label: "超时将自动选择第一项" },
+    preactivations: {}, preactivation: [],
+  });
+  const wuguView = (pending, seat) => {
+    const view = synthView(pending);
+    view.snapshot.seat = seat;
+    view.human_seat = seat;
+    return view;
+  };
+  const render = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const insideDialog = (node) => {
+    let at = node ? node.parentNode : null;
+    while (at) {
+      if (at === $("t-dialog")) return true;
+      at = at.parentNode;
+    }
+    return false;
+  };
+  const revealWrap = () => $("t-options").children[0];
+  const revealCards = () => (revealWrap() ? revealWrap().children[0].children : []);
+  const revealBar = () => (revealWrap()
+    ? revealWrap().children.find((node) => node.classList.contains("reveal-targets")) || null
+    : null);
+  const targetChips = () => (revealBar()
+    ? revealBar().children.filter((node) => node.classList.contains("reveal-target"))
+    : []);
+  const chipStates = () => targetChips().map((node) => node.getAttribute("data-state")).join(",");
+  const chipSeats = () => targetChips().map((node) => node.getAttribute("data-seat")).join(",");
+  const clickCollapse = () => ($("t-dialog-collapse").listeners.click || [])
+    .forEach((fn) => fn({ target: $("t-dialog-collapse") }));
+  const heroBlockOf = (seat) => {
+    const box = seatBox(seat);
+    return box
+      ? box.children.find((node) => (node.className || "").split(" ").includes("hero-block")) || null
+      : null;
+  };
+  const fireContext = (node) => {
+    const event = { target: node, prevented: false, stopPropagation() {} };
+    event.preventDefault = () => { event.prevented = true; };
+    if (node) (node.listeners.contextmenu || []).forEach((fn) => fn(event));
+    return event;
+  };
+  /** `cardFaceNode` 的 click 包装是**同步**转发（不 return `onClick()` 的 promise）：
+   *  等"提交在飞"结束再断言 / 进入下一段，避免撞进四键冻结态（U2-09i 的同一写法）。 */
+  const settleSubmit = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261014,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  ui.state.modal.heroSeat = null;
+
+  // ---- ① 人类是当前目标：全部亮牌 + 拿走的牌置灰 + 座位号 + 目标条四态 ----
+  const ownTargets = [
+    targetRow(0, "taken", 2),
+    targetRow(1, "invalid"),                       // 被无懈（最终没拿到）
+    targetRow(2, "current"),
+    targetRow(3, "pending"),
+    targetRow(4, "pending", null, true),            // 未来：先被指定、后被取消 ⇒ 同一种红
+  ];
+  const ownPending = wuguPending({
+    seq: 1101, actor: 2, current: 2,
+    revealed: [withTaker(takenCard, 0), withTaker(secondCard), withTaker(thirdCard), withTaker(fourthCard)],
+    targets: ownTargets,
+    slots: [secondCard, thirdCard, fourthCard],
+  });
+  render(wuguView(ownPending, 2));
+
+  check("U2-11a 五谷取牌步 = 亮牌弹窗：标题「五谷丰登」、公开处理区文案、正文在弹窗里",
+    ui.stepDialogKind(ownPending) === "reveal"
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").children.includes($("t-options"))
+      && $("t-dialog-title").textContent === "五谷丰登"
+      && $("t-prompt").textContent === "从亮出的牌里选一张获得"
+      && $("t-dialog-hint").textContent.includes("从亮出的牌里选一张获得")
+      && $("t-dialog-hint").textContent.includes("点一张亮牌即提交")
+      && !/隐藏区域/.test($("t-dialog").text())
+      && !/请从选择面里选择一张牌/.test($("t-dialog").text()),
+    `kind=${ui.stepDialogKind(ownPending)} title="${$("t-dialog-title").textContent}" prompt="${$("t-prompt").textContent}" hint="${$("t-dialog-hint").textContent}"`);
+
+  check("U2-11b 全部亮牌按亮牌顺序铺出：位置不动、牌面可读",
+    revealCards().length === 4
+      && revealCards().map((node) => node.getAttribute("data-card-id")).join(",") === "2,3,4,6"
+      && revealCards().map((node) => node.text()).join(",").includes("闪")
+      && revealCards().map((node) => node.text()).join(",").includes("无懈可击"),
+    `卡=${revealCards().map((node) => `${node.getAttribute("data-card-id")}:${node.text().replace(/\s+/g, "")}`).join("/")}`);
+
+  check("U2-11c 被拿走的牌留在原位、置灰、标座号 0，牌面描述仍在（检视可用）",
+    revealCards()[0].classList.contains("taken")
+      && revealCards()[0].getAttribute("data-taken-by") === "0"
+      && (revealCards()[0].children.find((node) => node.classList.contains("taken-by")) || {}).textContent === "座0"
+      && revealCards()[0].getAttribute("title").includes("闪的描述")
+      && !revealCards()[1].classList.contains("taken")
+      && revealCards()[1].getAttribute("data-taken-by") === "",
+    `taken=${revealCards()[0].classList.contains("taken")} by=${revealCards()[0].getAttribute("data-taken-by")} title="${revealCards()[0].getAttribute("title")}"`);
+
+  check("U2-11d 目标条按拿牌顺序铺全部座位：已拿（勾）/ 无效（红）/ 当前（高亮）/ 未轮到（灰）",
+    targetChips().length === 5
+      && chipSeats() === "0,1,2,3,4"
+      && chipStates() === "taken,invalid,current,pending,invalid"
+      && targetChips()[0].classList.contains("is-taken")
+      && targetChips()[0].textContent === "座0✓"
+      && targetChips()[1].classList.contains("is-invalid")
+      && targetChips()[1].textContent === "座1✕"
+      && targetChips()[2].classList.contains("is-current")
+      && targetChips()[2].textContent === "座2◀"
+      && targetChips()[3].classList.contains("is-pending")
+      && targetChips()[3].textContent === "座3"
+      && revealBar().getAttribute("data-current") === "2",
+    `seats=${chipSeats()} states=${chipStates()} texts=${JSON.stringify(targetChips().map((node) => node.textContent))}`);
+
+  check("U2-11d2 「先被指定、后被取消」保留位与无懈同一种红（本轮没有生产者，样式 / 字段先接好）",
+    targetChips()[4].getAttribute("data-state") === "invalid"
+      && targetChips()[4].classList.contains("is-invalid")
+      && targetChips()[4].textContent === "座4✕",
+    `state=${targetChips()[4].getAttribute("data-state")} class=${targetChips()[4].className}`);
+
+  check("U2-11e 五谷步没有「放弃」：右端隐藏、取消 / 提交都不抢跑，弹窗里没有操作四键",
+    $("btn-pass").hidden === true
+      && $("btn-cancel").disabled === true
+      && $("btn-submit").disabled === true
+      && !/放弃/.test($("t-dialog").text())
+      && ["btn-submit", "btn-cancel", "btn-pass", "btn-end-phase", "t-countdown"]
+        .every((id) => !insideDialog($(id))),
+    `passHidden=${$("btn-pass").hidden} cancel=${$("btn-cancel").disabled} submit=${$("btn-submit").disabled} actionsInDialog=${["btn-submit", "btn-cancel", "btn-pass", "btn-end-phase", "t-countdown"].filter((id) => insideDialog($(id))).join(",")}`);
+
+  check("U2-11f 弹窗打开时牌桌只读，但检视（牌面描述 / 右键武将详情）照常",
+    ui.selectionEnabled() === false
+      && revealCards()[0].getAttribute("title").includes("闪的描述")
+      && (() => {
+        fireContext(heroBlockOf(0));
+        return $("t-modal").hidden === false && $("t-dialog").hidden === false;
+      })(),
+    `enabled=${ui.selectionEnabled()} detailHidden=${$("t-modal").hidden} dialogHidden=${$("t-dialog").hidden} title="${revealCards()[0].getAttribute("title")}"`);
+  fireDocument("keydown", { key: "Escape", preventDefault() {} });
+  check("U2-11f2 ESC 只关武将详情；亮牌弹窗无关闭 / ESC / 点背景出口",
+    $("t-modal").hidden === true
+      && $("t-dialog").hidden === false
+      && !($("t-modal-backdrop").listeners.click || []).length,
+    `detailHidden=${$("t-modal").hidden} dialogHidden=${$("t-dialog").hidden} backdropClicks=${($("t-modal-backdrop").listeners.click || []).length}`);
+
+  // 牌桌选择入口 no-op：点自己的手牌不会设焦点（只读判据没有为亮牌开小门）。
+  const handNode = $("t-hand").children[0];
+  if (handNode) (handNode.listeners.click || []).forEach((fn) => fn({ target: handNode }));
+  check("U2-11f3 只读态：点自己的手牌不产生选择（selectionEnabled 未为亮牌改判据）",
+    ui.state.focusCardId === null && !(handNode && handNode.classList.contains("sel")),
+    `focus=${ui.state.focusCardId} sel=${handNode && handNode.classList.contains("sel")}`);
+
+  // ---- ② 折叠仍留标题 + 步骤提示；展开恢复 ----
+  clickCollapse();
+  check("U2-11g 折叠只撤正文：标题「五谷丰登」与公开处理区提示仍在标题条、暗化层收起",
+    $("t-dialog-body").hidden === true
+      && $("t-dialog-title").textContent === "五谷丰登"
+      && $("t-dialog-hint").textContent.includes("从亮出的牌里选一张获得")
+      && $("t-dialog-collapse").textContent === "展开"
+      && $("t-modal-backdrop").hidden === true,
+    `bodyHidden=${$("t-dialog-body").hidden} title="${$("t-dialog-title").textContent}" hint="${$("t-dialog-hint").textContent}"`);
+  clickCollapse();
+  check("U2-11g2 展开恢复正文与暗化层，只读判据不变",
+    $("t-dialog-body").hidden === false
+      && $("t-modal-backdrop").hidden === false
+      && ui.selectionEnabled() === false);
+
+  // ---- ③ 点一张亮牌 = 恰好一条 SelectCards POST（picks = 槽位位置） ----
+  const beforePick = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait(revealCards()[1]);
+  await settleSubmit();
+  staleAnswerStatus = null;
+  const pickAnswers = calls.slice(beforePick).filter((call) => call.path.includes("/answer"));
+  check("U2-11h 点一张亮牌 = 一次提交（一条 SelectCards POST，picks 填该牌在剩余亮牌里的位置）",
+    pickAnswers.length === 1
+      && JSON.stringify(pickAnswers[0].body.action) === JSON.stringify(ownPending.legal_actions[0])
+      && JSON.stringify(pickAnswers[0].body.action.picks) === "[0]"
+      && pickAnswers[0].body.action.kind === "SelectCards",
+    `answers=${pickAnswers.length} action=${JSON.stringify(pickAnswers[0] && pickAnswers[0].body.action)}`);
+
+  // ---- ④ 整段结算的链键：AI 目标拿牌 → 人类目标拿牌，弹窗不关（只换正文 / 状态） ----
+  const foreignTargets = [
+    targetRow(0, "taken", 2),
+    targetRow(1, "current"),
+    targetRow(2, "pending"),
+    targetRow(3, "pending"),
+  ];
+  const foreignPending = wuguPending({
+    seq: 1102, actor: 1, current: 1,
+    revealed: [withTaker(takenCard, 0), withTaker(secondCard), withTaker(thirdCard), withTaker(fourthCard)],
+    targets: foreignTargets,
+    slots: [secondCard, thirdCard, fourthCard],
+  });
+  render(wuguView(foreignPending, 0));
+  const chainKey = ui.state.dialog.key;
+  const foreignCalls = calls.length;
+  const untakenNode = revealCards()[1];
+  (untakenNode.listeners.click || []).forEach((fn) => fn({ target: untakenNode }));
+  check("U2-11i AI 目标拿牌时弹窗仍显示、仍只读、不可点；提示写明在等谁",
+    ui.state.dialog.key === `reveal:${foreignPending.harvest.key}`
+      && $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "五谷丰登"
+      && chipStates() === "taken,current,pending,pending"
+      && $("t-dialog-hint").textContent.includes("等待1号位拿牌")
+      && $("t-prompt").textContent.includes("等待其他座位响应")
+      && ui.selectionEnabled() === false
+      && (untakenNode.listeners.click || []).length === 0
+      && calls.length === foreignCalls,
+    `key=${ui.state.dialog.key} hidden=${$("t-dialog").hidden} chips=${chipStates()} hint="${$("t-dialog-hint").textContent}" clicks=${(untakenNode.listeners.click || []).length} calls=${calls.length - foreignCalls}`);
+
+  const ownNextTargets = [
+    targetRow(0, "taken", 2),
+    targetRow(1, "taken", 3),
+    targetRow(2, "current"),
+    targetRow(3, "pending"),
+  ];
+  const ownNext = wuguPending({
+    seq: 1103, actor: 2, current: 2,
+    revealed: [withTaker(takenCard, 0), withTaker(secondCard, 1), withTaker(thirdCard), withTaker(fourthCard)],
+    targets: ownNextTargets,
+    slots: [thirdCard, fourthCard],
+  });
+  render(wuguView(ownNext, 2));
+  check("U2-11j 换 actor / 换 seq 不关窗：同一个链键、同一容器，正文与目标条随拿牌更新",
+    chainKey === `reveal:${ownNext.harvest.key}`
+      && ui.state.dialog.key === chainKey
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").children.includes($("t-options"))
+      && revealCards()[1].classList.contains("taken")
+      && (revealCards()[1].children.find((node) => node.classList.contains("taken-by")) || {}).textContent === "座1"
+      && chipStates() === "taken,taken,current,pending"
+      && $("t-dialog-hint").textContent.includes("点一张亮牌即提交"),
+    `key=${ui.state.dialog.key} before=${chainKey} hidden=${$("t-dialog").hidden} chips=${chipStates()} hint="${$("t-dialog-hint").textContent}"`);
+
+  const beforeNextPick = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait(revealCards()[2]);
+  await settleSubmit();
+  staleAnswerStatus = null;
+  const nextAnswers = calls.slice(beforeNextPick).filter((call) => call.path.includes("/answer"));
+  check("U2-11k 人类轮到时点一张亮牌同样一击提交（换步骤后的提交点没漂）",
+    nextAnswers.length === 1
+      && JSON.stringify(nextAnswers[0].body.action) === JSON.stringify(ownNext.legal_actions[0])
+      && JSON.stringify(nextAnswers[0].body.action.picks) === "[0]",
+    `answers=${nextAnswers.length} action=${JSON.stringify(nextAnswers[0] && nextAnswers[0].body.action)} busy=${ui.state.submitBusy} session=${Boolean(ui.state.sessionId)} listeners=${(revealCards()[2].listeners.click || []).length} kind=${ui.stepDialogKind(ownNext)} picks=${JSON.stringify(ui.state.picks)}`);
+
+  check("U2-11l 亮牌 / 目标条的样式落地（置灰、四态、左下角）",
+    STYLE.includes(".card.face.reveal-card.taken")
+      && STYLE.includes("filter: grayscale(1)")
+      && STYLE.includes(".reveal-targets")
+      && STYLE.includes("position: absolute")
+      && STYLE.includes(".reveal-target.is-invalid")
+      && STYLE.includes("background: #b3261e")
+      && STYLE.includes(".reveal-target.is-current")
+      && STYLE.includes(".reveal-target.is-pending")
+      && STYLE.includes(".dialog-body.reveal-body"),
+    `taken=${STYLE.includes(".card.face.reveal-card.taken")} invalid=${STYLE.includes(".reveal-target.is-invalid")} bar=${STYLE.includes(".reveal-targets")}`);
 
   ui.state.sessionId = null;
   ui.state.view = null;

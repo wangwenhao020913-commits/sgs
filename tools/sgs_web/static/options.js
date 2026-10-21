@@ -174,8 +174,8 @@ function rightActionIndex(pending, kind) {
 
 /** 提示条右端：结束出牌 / 放弃只在**自己的**询问里、且候选真有那一条时出现。
  *
- * 选择型 / 未知区域弹窗（票 08 / 09）**没有「放弃」**：引擎给这两步的候选可能带 `Pass`
- * （流水线语义的"取消这一步"），但界面上弹窗内不可放弃——右端放弃一并藏起，
+ * 选择型 / 未知区域 / 亮牌弹窗（票 08 / 09 / 11）**没有「放弃」**：引擎给这几步的候选可能
+ * 带 `Pass`（流水线语义的"取消这一步"），但界面上弹窗内不可放弃——右端放弃一并藏起，
  * `cancelAction` 也不再读它（见 `pending.js`）。放弃只留在**发动询问**那一步
  * （反馈 / 寒冰剑的"是否发动"、拆 / 顺是普通用牌）。
  */
@@ -183,7 +183,8 @@ function renderRightActions(pending, view = state.view) {
   const own = isOwnPending(pending, view);
   const dialogKind = pending ? stepDialogKind(pending) : null;
   const dialogWithoutPass = dialogKind === DIALOG_KINDS.choice
-    || dialogKind === DIALOG_KINDS.unknown;
+    || dialogKind === DIALOG_KINDS.unknown
+    || dialogKind === DIALOG_KINDS.reveal;
   const endIndex = own ? rightActionIndex(pending, RIGHT_ACTION_KINDS.endPhase) : -1;
   const passIndex = own && !dialogWithoutPass
     ? rightActionIndex(pending, RIGHT_ACTION_KINDS.pass)
@@ -217,10 +218,17 @@ function resetRightActions() {
 }
 
 function renderSlots(pending) {
+  // 亮牌模板（票 11 五谷 / 票 12 遗计）：全部亮牌 + 目标条；**不**走下面那条
+  // 「隐藏区域的槽位只有位置」的旧选择面（公开处理区的牌面是可见的）。
+  const dialogKind = stepDialogKind(pending);
+  if (dialogKind === DIALOG_KINDS.reveal) {
+    renderReveal(pending, { interactive: true });
+    return;
+  }
   // 未知区域弹窗（票 08 盲挑 → 票 09 推广到反馈 / 拆 / 顺 / 寒冰剑，见 `isUnknownZoneStep`）：
   // 内容画成「?」槽位 + 可见牌面，点一张即提交；其余选择面（五谷 / 遗计 / 自己的牌）仍走
   // 下面的既有槽位面——它们各有自己的模板（票 11 / 12）。
-  if (stepDialogKind(pending) === DIALOG_KINDS.unknown) {
+  if (dialogKind === DIALOG_KINDS.unknown) {
     renderUnknownZone(pending);
     return;
   }

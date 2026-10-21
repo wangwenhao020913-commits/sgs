@@ -64,8 +64,14 @@ function renderPending(view) {
   // 弹窗模板可能给选项组换版式（选择型的 2×2 网格）；每个询问重新渲染时先复位，
   // 避免上一问的模板类名留在下一问。
   $("t-options").classList.remove("suit-options");
+  // 亮牌模板（票 11）给正文加了下内边距（给左下角目标条让位）：换询问时复位。
+  if ($("t-dialog-body")) $("t-dialog-body").classList.remove("reveal-body");
   // 询问文本：**需要做什么**（服务端 `context.requirement`）优先；没有就退回引擎的通用 prompt。
-  const requirement = pending && pending.context && pending.context.requirement;
+  // 亮牌（票 11）另有一条派生文案 `harvest.hint`：409 裸 Query 没有 `context` 时也用它，
+  // 不会掉回引擎那句通用的「请从选择面里选择一张牌」（公开处理区的文案 bug）。
+  const requirement = (pending && pending.context && pending.context.requirement)
+    || (pending && pending.harvest && pending.harvest.hint)
+    || null;
   $("t-prompt").textContent = requirement
     || (pending ? pending.prompt : "（没有待应答的询问）");
   // 预发动 / 转化技正在等玩家点牌时，说清"现在要做什么"：
@@ -110,6 +116,11 @@ function renderPending(view) {
     $("t-prompt").textContent = "等待其他座位响应…";
     if (hintsNode) hintsNode.textContent = "";
     if (targetHint) targetHint.textContent = "";
+    // 五谷（票 11 / D4）：AI 目标拿牌时亮牌弹窗仍留在人类屏幕上（只读、不可点）。
+    // 正文照画、目标条按新状态更新；`interactive:false` 保证一张牌都不接 click。
+    if (stepDialogKind(pending) === DIALOG_KINDS.reveal) {
+      renderReveal(pending, { interactive: false });
+    }
     $("t-choice").textContent = "";
     $("btn-submit").disabled = true;
     $("btn-cancel").disabled = true;
@@ -298,11 +309,13 @@ function seatChoices(pending) {
 function cancelAction(pending) {
   if (!pending) return null;
   if (pending.kind !== "SELECT_CARDS" && pending.kind !== "SELECT_OPTION") return null;
-  // 弹窗表面**没有「放弃」**（spec D3 / 票 08 / 09）：选择型与未知区域步骤即便引擎给了
-  // Pass，界面也不读它——右端放弃被藏起，取消键因此只剩"清空本地选择"（这里的 null 让
-  // `cancelOrClear` 走清空分支，而不是偷偷替玩家送出一条 Pass）。
+  // 弹窗表面**没有「放弃」**（spec D3 / 票 08 / 09 / 11）：选择型、未知区域与亮牌步骤
+  // 即便引擎给了 Pass，界面也不读它——右端放弃被藏起，取消键因此只剩"清空本地选择"
+  // （这里的 null 让 `cancelOrClear` 走清空分支，而不是偷偷替玩家送出一条 Pass）。
   const kind = stepDialogKind(pending);
-  if (kind === DIALOG_KINDS.choice || kind === DIALOG_KINDS.unknown) return null;
+  if (kind === DIALOG_KINDS.choice
+    || kind === DIALOG_KINDS.unknown
+    || kind === DIALOG_KINDS.reveal) return null;
   return (pending.legal_actions || []).find((action) => action.kind === "Pass") || null;
 }
 
@@ -509,12 +522,16 @@ function refreshSubmit(pending) {
   // 放在 `blocked` 判定**之前**：未知区域会把第一条 `SelectCards` 预选进
   // `state.selectedOption`，否则这里会显示旧的"还要选 1 张牌"而不是弹窗读法。
   const dialogKind = stepDialogKind(pending);
-  if (dialogKind === DIALOG_KINDS.choice || dialogKind === DIALOG_KINDS.unknown) {
+  if (dialogKind === DIALOG_KINDS.choice
+    || dialogKind === DIALOG_KINDS.unknown
+    || dialogKind === DIALOG_KINDS.reveal) {
     $("btn-submit").disabled = true;
     $("t-choice").textContent = state.lastRejectReason
       || (dialogKind === DIALOG_KINDS.choice
         ? "点一个选项即提交（这一步不能放弃）。"
-        : "点一张牌即提交（这一步不能放弃）。");
+        : (dialogKind === DIALOG_KINDS.unknown
+          ? "点一张牌即提交（这一步不能放弃）。"
+          : "点一张亮牌即提交（这一步不能放弃）。"));
     return;
   }
   const selected = state.selectedOption === null ? null : (pending.legal_actions || [])[state.selectedOption];

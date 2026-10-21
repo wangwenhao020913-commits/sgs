@@ -35,19 +35,23 @@ from sgs.state import (  # noqa: E402
     Action,
     ActivateSkill,
     ArrangeQuery,
+    EndPhase,
     FrameKind,
+    Pass,
     PeachQuery,
     Phase,
     PlayerPublic,
     PlayPhaseQuery,
     QueryKind,
     RespondQuery,
+    SelectCards,
     SelectCardsQuery,
     SelectionSpec,
     SelectOptionQuery,
     Slot,
     Step,
     StepPool,
+    UseCard,
     WindowCause,
     Zone,
     ZoneRef,
@@ -64,8 +68,10 @@ from sgs_web.display import (  # noqa: E402
 )
 from sgs_web.descriptions import skill_description  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
+    HARVEST_REQUIREMENT,
     build_skills,
     candidate_index,
+    harvest_state,
     option_seats,
     pending_payload,
     query_context,
@@ -4842,3 +4848,278 @@ def test_the_narrative_only_reveals_identities_the_journal_revealed() -> None:
         assert not any(
             f"座位{seat}" in line["text"] and "亮明身份" in line["text"] for line in lines
         ), f"座位 {seat} 没有亮明记录，却有亮明行"
+
+
+# ---------------------------------------------------------------------------
+# U2-11（D4 / D10）：【五谷丰登】的服务端派生状态
+#
+# 这是**最高缝**：一次断言同时覆盖"亮牌弹窗能看见什么"（完整亮牌 + 获得者 + 目标条 +
+# 当前目标）与"公开处理区不被查看者过滤误伤"。派生只读结算栈与记录流，**不改记录流**：
+# 金录像 / 记录流字节在派生前后逐字节相等（本段最后一条钉住）。
+# ---------------------------------------------------------------------------
+
+
+class _HarvestDriver:
+    """4 座构造局面的脚本参与者：座位 0 打五谷；可选在目标 0 上用无懈（及反无懈）。
+
+    只用于构造"真会话走到五谷取牌步"的前置，不测规则本身；无懈窗口的识别用
+    "栈顶帧是不是无懈"（反无懈窗口里栈顶是那张无懈的 USE / RESOLVE 帧）。
+    """
+
+    def __init__(self, *, nullify: bool, reverse: bool) -> None:
+        self.nullify = nullify
+        self.reverse = reverse
+        self.used: set[str] = set()
+
+    def respond(self, engine, query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.type == "harvest":
+                    return action
+            return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        if query.kind == QueryKind.SELECT_CARDS:
+            return query.legal_actions[0]
+        if query.kind == QueryKind.RESPOND and query.cause is WindowCause.NULLIFY:
+            top = engine.stack.frames[-1] if engine.stack.frames else None
+            reversing = getattr(getattr(top, "data", {}).get("card"), "type", None) == "nullify"
+            if (
+                self.nullify
+                and query.actor == 1
+                and not reversing
+                and getattr(query, "target", None) == 0
+                and "first" not in self.used
+            ):
+                for action in query.legal_actions:
+                    if isinstance(action, UseCard) and action.card.type == "nullify":
+                        self.used.add("first")
+                        return action
+            if self.reverse and query.actor == 2 and reversing and "reverse" not in self.used:
+                for action in query.legal_actions:
+                    if isinstance(action, UseCard) and action.card.type == "nullify":
+                        self.used.add("reverse")
+                        return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _harvest_game(*, nullify: bool = False, reverse: bool = False):
+    """构造一局 4 座局面并返回 ``(engine, driver)``：座位 0 手牌是五谷，牌堆有序。
+
+    座位 1 / 2 的手牌按需放无懈（反无懈需要两张）。牌堆 = 其余实体牌，顺序即数据表顺序，
+    故亮出的牌可预测；测试只比较"记录里亮出的集合 / 顺序"与载荷，不硬编码牌 id。
+    """
+    from sgs.data import RuleConfig as _RuleConfig
+
+    pack = _context_pack()
+    harvest = cards_of_type(pack, "harvest")[0]
+    nullifies = cards_of_type(pack, "nullify")
+    used = {harvest}
+    seats = [SeatSpec(hand=(harvest,)), SeatSpec(), SeatSpec(), SeatSpec()]
+    if nullify or reverse:
+        used.add(nullifies[0])
+        seats[1] = SeatSpec(hand=(nullifies[0],))
+    if reverse:
+        used.add(nullifies[1])
+        seats[2] = SeatSpec(hand=(nullifies[1],))
+    deck = tuple(card_id for card_id in range(len(pack.deck.cards)) if card_id not in used)
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=deck,
+        turn_seat=0,
+        rule_config=_RuleConfig(first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=1)
+    return engine, _HarvestDriver(nullify=nullify, reverse=reverse)
+
+
+def _drive_to_harvest_pick(engine, driver, seat: int):
+    """推进到**指定座位**的五谷取牌询问并返回它；其余询问由 ``driver`` 脚本应答。"""
+    for _ in range(4_000):
+        query = engine.pending
+        if query is not None and query.kind == QueryKind.SELECT_CARDS and query.actor == seat:
+            return query
+        if query is None:
+            engine._step()
+            if engine.finished:  # pragma: no cover - 构造局面不会走到终局
+                raise AssertionError(f"还没走到座位 {seat} 的五谷取牌步，对局已结束")
+            continue
+        engine.submit(driver.respond(engine, query))
+    raise AssertionError(f"步数上限内没有走到座位 {seat} 的五谷取牌步")
+
+
+def _web_session_for(engine, *, human_seat: int) -> Session:
+    """把**构造出来的引擎**包进一个真 :class:`Session`（``pending_payload`` 需要真会话）。
+
+    只替换 ``engine``：``human_seat`` / ``pack`` 由会话自己的构造参数给；``participants``
+    在本段之后不再使用（驱动由 :func:`_drive_to_harvest_pick` 负责）。
+    """
+    session = Session(
+        seed=0,
+        player_count=4,
+        ai="random",
+        human_seat=human_seat,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=_context_pack(),
+    )
+    session.engine = engine
+    return session
+
+
+def test_a_real_session_derives_the_full_harvest_state_and_the_chain_key() -> None:
+    """真会话（4 座构造局面）走到目标 1 的取牌步：载荷带齐亮牌 / 获得者 / 目标条 / 当前目标。
+
+    目标 0 已取走第一张亮牌；目标 1 正在取牌。完整亮牌集合必须来自记录里那条
+    ``deck → processing`` 的移动（帧私有 ``revealed`` 会每取一张缩短一次），位置不能变。
+    """
+    engine, driver = _harvest_game()
+    first = _drive_to_harvest_pick(engine, driver, 0)
+    first_payload = pending_payload(_web_session_for(engine, human_seat=0))
+    first_harvest = first_payload["harvest"]
+    assert first_harvest is not None
+    key = first_harvest["key"]
+    revealed_ids = [card["card_id"] for card in first_harvest["revealed"]]
+    assert len(revealed_ids) == 4, "X = 存活角色数（4 座）"
+    assert [card["taken_by"] for card in first_harvest["revealed"]] == [None] * 4
+    assert [target["status"] for target in first_harvest["targets"]] == [
+        "current", "pending", "pending", "pending",
+    ]
+    assert first_harvest["current"] == 0
+    assert first_harvest["active"] is True
+
+    # 目标 0 取第一张（= 第一张剩余亮牌）；同时钉"超时取第一张剩余亮牌"的服务端口径。
+    fallback = fallback_action(first)
+    assert isinstance(fallback, SelectCards), fallback
+    assert fallback.picks == (0,)
+    engine.submit(fallback)
+
+    second = _drive_to_harvest_pick(engine, driver, 1)
+    session = _web_session_for(engine, human_seat=1)
+    before = dump_journal(session.records())
+    payload = pending_payload(session)
+    after = dump_journal(session.records())
+
+    harvest = payload["harvest"]
+    assert harvest is not None, "五谷结算中必须下发派生状态"
+    assert harvest["key"] == key, "同一个链键跨 X 个目标（不同 seq / actor）不变"
+    assert harvest["title"] == "五谷丰登", "标题读牌面名，前端不抄第二份"
+    assert harvest["hint"] == HARVEST_REQUIREMENT
+    assert harvest["source"] == 0
+    assert [card["card_id"] for card in harvest["revealed"]] == revealed_ids, (
+        "完整亮牌集合 + 亮牌顺序（含已被取走的）"
+    )
+    assert [card["taken_by"] for card in harvest["revealed"]] == [0, None, None, None]
+    assert harvest["revealed"][0]["description"], "卡面展示字段随亮牌下发（悬停可读）"
+    assert [target["seat"] for target in harvest["targets"]] == [0, 1, 2, 3]
+    assert [target["status"] for target in harvest["targets"]] == [
+        "taken", "current", "pending", "pending",
+    ]
+    assert harvest["targets"][0]["card"] == revealed_ids[0], "目标条带已拿走的牌 id"
+    assert harvest["targets"][0]["seat"] == 0
+    assert harvest["targets"][-1]["cancelled"] is False
+    assert harvest["targets"][-1]["reason"] is None, "'先指定后取消'的保留位暂为 null"
+    assert harvest["current"] == 1
+    assert [slot["card"]["card_id"] for slot in payload["slots"]] == revealed_ids[1:], (
+        "当前取牌面 = 剩余亮牌（按亮牌顺序）"
+    )
+    fallback = fallback_action(second)
+    assert isinstance(fallback, SelectCards)
+    assert fallback.picks == (0,), "超时 = 第一张剩余亮牌（服务端 fallback_action）"
+    assert second.slots[0].card.card_id == revealed_ids[1]
+
+    assert payload["context"]["requirement"] == HARVEST_REQUIREMENT
+    assert payload["context"]["name"] == "五谷丰登"
+    assert payload["harvest"]["revealed"][0]["card_id"] == revealed_ids[0]
+    assert after == before, "派生是只读的：调用前后记录流逐字节不变"
+
+    # 409 里附带的裸 Query 拿不到引擎 ⇒ 键仍在、值为 None（前端 fail-closed 不开窗）。
+    bare = pending_payload(second, human_seat=1)
+    assert bare["harvest"] is None
+
+
+@pytest.mark.parametrize(("reverse", "expected"), [(False, "invalid"), (True, "taken")])
+def test_the_harvest_state_tells_a_nullified_target_from_a_reverse_nullified_one(
+    reverse: bool, expected: str
+) -> None:
+    """被无懈（最终没拿到）⇒ ``invalid``；无懈后被反无懈救回（照常拿牌）⇒ ``taken``。
+
+    两者都由**记录**派生：目标处理完了没有（帧游标）+ 有没有它的 ``processing → hand``
+    移动；不解析无懈链，故反无懈救回天然落在正常态（D10 的判定口径）。
+    """
+    engine, driver = _harvest_game(nullify=True, reverse=reverse)
+    query = _drive_to_harvest_pick(engine, driver, 1)
+    assert query.actor == 1
+    payload = pending_payload(_web_session_for(engine, human_seat=1))
+    harvest = payload["harvest"]
+    assert harvest is not None
+    first = harvest["targets"][0]
+    assert first["seat"] == 0
+    assert first["status"] == expected, harvest["targets"]
+    if reverse:
+        assert first["card"] == harvest["revealed"][0]["card_id"]
+        assert harvest["revealed"][0]["taken_by"] == 0
+        assert harvest["revealed"][1]["taken_by"] is None, "其余亮牌还没被拿走"
+    else:
+        assert first["card"] is None
+        assert harvest["revealed"][0]["taken_by"] is None, "被无懈的目标一张都没拿"
+    assert [target["status"] for target in harvest["targets"][1:]] == [
+        "current", "pending", "pending",
+    ]
+    assert all(target["cancelled"] is False for target in harvest["targets"])
+
+
+def test_the_public_processing_slots_survive_foreign_masking_but_watched_faces_do_not() -> None:
+    """D4 / D10 的两难分开钉：**处理区是公开的**（AI 目标拿牌时亮牌不能被抹），
+    **观看授予**仍只在应答者手里（【遗计】牌堆顶的牌面继续 fail-closed，票 12 不改判）。"""
+    engine, driver = _harvest_game()
+    _drive_to_harvest_pick(engine, driver, 1)
+    session = _web_session_for(engine, human_seat=0)  # 查看者 0，询问者 1 ⇒ foreign
+    payload = pending_payload(session)
+    assert payload["harvest"] is not None and payload["harvest"]["revealed"]
+    assert all(slot["card"] is not None for slot in payload["slots"]), (
+        "五谷的处理区槽位是公开事实，foreign 下也要带牌面"
+    )
+    assert payload["revealed"] == [], "观看授予仍整份抹掉"
+
+    # 非处理区的槽位 + 观看授予：同一条 masking 仍要隐藏牌面。
+    state = engine.state
+    pack = _context_pack()
+    hand_card = cards_of_type(pack, "slash")[0]
+    processing_card = state.processing[0]
+    slots = (
+        Slot(ref=ZoneRef(Zone.PROCESSING), card=state.card(processing_card)),
+        Slot(ref=ZoneRef(Zone.HAND, 1), card=state.card(hand_card)),
+    )
+    query = SelectCardsQuery(
+        seq=99,
+        actor=1,
+        timing=Timing.RESOLVE_AFTER_EFFECT,
+        prompt="请从选择面里选择一张牌。",
+        legal_actions=(),
+        view=project(state, 1),
+        spec=SelectionSpec(zones=(Zone.PROCESSING, Zone.HAND), total=(1, 1)),
+        slots=slots,
+        revealed=(state.card(hand_card),),
+    )
+    masked = pending_payload(query, human_seat=None)
+    assert masked["slots"][0]["card"]["card_id"] == processing_card
+    assert masked["slots"][1]["card"] is None, "别人的手牌槽位照旧 only-position"
+    assert masked["revealed"] == [], "观看授予照旧不下发"
+
+
+def test_harvest_state_is_none_when_no_harvest_frame_is_on_the_stack() -> None:
+    """没有五谷结算帧 ⇒ ``None``；调用方（前端）据此 fail-closed 不开亮牌弹窗。"""
+    engine, driver = _harvest_game()
+    _drive_to_harvest_pick(engine, driver, 1)
+    assert harvest_state(engine) is not None
+    # 取完最后一张后帧会出栈：这里用"把栈清空"模拟结算结束后的状态（同一函数、只读）。
+    frames = engine.stack.frames
+    saved = list(frames)
+    frames.clear()
+    try:
+        assert harvest_state(engine) is None
+    finally:
+        frames.extend(saved)
