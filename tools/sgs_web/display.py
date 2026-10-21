@@ -35,10 +35,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from sgs.data import IDENTITY_LABELS, HeroTable, Suit, color_of_suit
-from sgs.state import CardRef, EndPhase, Pass, PlayerPublic, Query, SelectCards, SelectOption
+from sgs.state import CardRef, EndPhase, Pass, PlayerPublic, Query, SelectCards
 
 from .descriptions import card_description
-from .timeout import YIJI_GIVE_PREFIX, fallback_action
+from .timeout import fallback_action, yiji_give_self_choice
 
 __all__ = [
     "CARD_ATTRIBUTES",
@@ -262,18 +262,21 @@ def prompt_display(query: Query) -> dict[str, Any]:
     显式下发 ``prompt_display = None``。
 
     **【遗计】的文案特判**（U2-12 / spec D2「超时 = 剩下的交给自己」）：只在默认动作**真的**
-    是那条 ``seat:{actor}`` 时才说"交给自己"——不按技能名猜，也不改任何规则。选牌步同理：
-    亮牌面的默认动作是第一张亮牌，文案就说第一张亮牌（仍是纯展示）。
+    是那条 ``seat:{actor}`` 时才说"交给自己"——判据与代答共用
+    :func:`~sgs_web.timeout.yiji_give_self_choice`，不按技能名猜，也不改任何规则。选牌步
+    同理：亮牌面的默认动作是第一张亮牌，文案就说第一张亮牌（仍是纯展示）。
+
+    **【观星】排列的文案特判**（U2-07 / spec D9.3）：排列到时限不是服务端取第一项，而是
+    **前端自动提交当前排列**（`answer.js:maybeAutoSubmitArrange`，本仓「前端不代答」的唯一
+    例外）。文案因此说"按当前排列提交"；服务端的 ``fallback_action`` 仍是 ``ArrangeCards``
+    候选里的第一条，契约本身不改。
     """
     default = fallback_action(query)
-    skill_id = getattr(query, "skill_id", None)
-    if (
-        isinstance(default, SelectOption)
-        and isinstance(skill_id, str)
-        and skill_id.startswith(YIJI_GIVE_PREFIX)
-        and default.choice == f"seat:{query.actor}"
-    ):
+    give_self = yiji_give_self_choice(query)
+    if give_self is not None:
         label = "超时将把剩下的牌交给自己"
+    elif str(getattr(query, "kind", "")) == "ARRANGE":
+        label = "超时将按当前排列提交"
     elif (
         isinstance(default, SelectCards)
         and str(getattr(query, "kind", "")) == "SELECT_CARDS"

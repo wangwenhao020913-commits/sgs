@@ -19,7 +19,12 @@ from __future__ import annotations
 
 from sgs.state import Action, EndPhase, Pass, Query, SelectOption
 
-__all__ = ["fallback_action", "FALLBACK_ORDER", "YIJI_GIVE_PREFIX"]
+__all__ = [
+    "fallback_action",
+    "FALLBACK_ORDER",
+    "YIJI_GIVE_PREFIX",
+    "yiji_give_self_choice",
+]
 
 
 FALLBACK_ORDER: tuple[type[Action], ...] = (Pass, EndPhase)
@@ -34,8 +39,12 @@ YIJI_GIVE_PREFIX = "yiji:give:"
 """
 
 
-def _yiji_give_self(query: Query) -> SelectOption | None:
-    """【遗计】"交给谁"步 → 候选里那条 ``seat:{actor}``；不是该步 / 候选里没有则 ``None``。"""
+def yiji_give_self_choice(query: Query) -> SelectOption | None:
+    """【遗计】"交给谁"步 → 候选里那条 ``seat:{actor}``；不是该步 / 候选里没有则 ``None``。
+
+    代答（:func:`fallback_action`）与倒计时文案（``display.prompt_display``）共用这一条
+    谓词：两处各写一遍时，"文案说交给自己、代答却选了座位 0" 这种漂移不会被测试抓住。
+    """
     if getattr(query, "kind", None) != "SELECT_OPTION":
         return None
     skill_id = getattr(query, "skill_id", None)
@@ -57,7 +66,7 @@ def fallback_action(query: Query) -> Action:
     if not query.legal_actions:
         raise ValueError(f"{query.kind} 询问没有候选行动，超时兜底无从代答")
 
-    give_self = _yiji_give_self(query)
+    give_self = yiji_give_self_choice(query)
     if give_self is not None:
         return give_self
 

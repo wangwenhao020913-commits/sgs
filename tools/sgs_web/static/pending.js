@@ -313,9 +313,7 @@ function cancelAction(pending) {
   // 即便引擎给了 Pass，界面也不读它——右端放弃被藏起，取消键因此只剩"清空本地选择"
   // （这里的 null 让 `cancelOrClear` 走清空分支，而不是偷偷替玩家送出一条 Pass）。
   const kind = stepDialogKind(pending);
-  if (kind === DIALOG_KINDS.choice
-    || kind === DIALOG_KINDS.unknown
-    || kind === DIALOG_KINDS.reveal) return null;
+  if (dialogDisablesPass(kind)) return null;
   return (pending.legal_actions || []).find((action) => action.kind === "Pass") || null;
 }
 
@@ -546,9 +544,7 @@ function refreshSubmit(pending) {
     }
     return;
   }
-  if (dialogKind === DIALOG_KINDS.choice
-    || dialogKind === DIALOG_KINDS.unknown
-    || dialogKind === DIALOG_KINDS.reveal) {
+  if (dialogDisablesPass(dialogKind)) {
     $("btn-submit").disabled = true;
     $("t-choice").textContent = state.lastRejectReason
       || (dialogKind === DIALOG_KINDS.choice
@@ -588,11 +584,8 @@ function refreshSubmit(pending) {
   }
   if (pending.kind === "ARRANGE") {
     // 规格缺失 = 409 裸 Query / 无技能定义（投影 fail-closed）：不猜顺序，只说刷新。
-    // 票 07：出口按**实际候选**说话——引擎的 `_arrange` 不给 `Pass` ⇒ 强制，右端「确认」
-    // 是唯一出口（「放弃」不出现）；若某条排列技能给了 `Pass`，右端「放弃」也按当前排列执行。
-    const exit = arrangeHasPass(pending)
-      ? "右端「确认」与「放弃」等价：都按当前排列执行。"
-      : "这一步是强制的：排列不能放弃，右端「确认」是唯一出口。";
+    // 票 07：出口按**实际候选**说话（文案唯一一份住 `arrange.js:arrangeExitHint`）。
+    const exit = arrangeExitHint(pending);
     $("t-choice").textContent = !arrangeSpec(pending)
       ? "排列不可用，请刷新"
       : (ready

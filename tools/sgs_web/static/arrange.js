@@ -27,6 +27,17 @@ function arrangeHasPass(pending) {
   return ((pending && pending.legal_actions) || []).some((action) => action.kind === "Pass");
 }
 
+/** 排列的**退出说明**（唯一一份文案）：`refreshSubmit` 的提示条与排列面里的步骤提示
+ *  原先逐字重复这两句，抽到这里避免改一处漏一处。
+ *
+ *  按**实际候选**说话：引擎的 `_arrange` 不给 `Pass` ⇒ 强制、唯一出口是「确认」；
+ *  若某条排列技能给了 `Pass`，右端「放弃」也按当前排列执行（见 `submitRightAction`）。 */
+function arrangeExitHint(pending) {
+  return arrangeHasPass(pending)
+    ? "右端「确认」与「放弃」等价：都按当前排列执行。"
+    : "这一步是强制的：排列不能放弃，右端「确认」是唯一出口。";
+}
+
 /** 排列规格的**读取口**：只认服务端下发的 `pending.arrange`（投影读 `SkillDef.deck_arrange`）。
  *
  * 返回 `null` ⇒ fail-closed：没有规格就不画双行面、也不拼 Action（409 裸 Query /
@@ -310,10 +321,7 @@ function renderArrange(pending) {
     const how = layout.free
       ? "拖动卡牌在牌堆顶 / 牌堆底之间切换，行内拖动排序；也可先点一张牌再点目标位置。"
       : "固定切分：只能在上行 / 下行内排序（跨行移动会改变服务端声明的张数）。";
-    // 票 07：按**实际候选**说明出口。引擎的 `_arrange` 现在不给 `Pass` ⇒ 这一步是强制的，
-    // 唯一出口是右端「确认」；若某条排列技能给了 `Pass`，右端「放弃」也按当前排列提交。
-    hint.textContent = arrangeHasPass(pending)
-      ? `${how} 右端「确认」与「放弃」等价：都按当前排列执行。`
-      : `${how} 这一步是强制的：排列不能放弃，右端「确认」是唯一出口。`;
+    // 票 07：出口说明按**实际候选**说话（文案唯一一份住 :func:`arrangeExitHint`）。
+    hint.textContent = `${how} ${arrangeExitHint(pending)}`;
   }
 }

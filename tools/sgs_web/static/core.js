@@ -168,7 +168,17 @@ const state = {
   // U2-06：询问弹窗（`#t-dialog`）的本地态。`kind` = `stepDialogKind()` 的种类或
   // `"preactivation"`（预发动清单借同一个容器，但仍是牌桌表面）；`key` = 当前窗口实例
   // （同一问的重复渲染保留折叠，换问关旧开新）；`collapsed` 只改遮挡、不参与只读判据。
-  dialog: { open: false, collapsed: false, kind: null, key: null },
+  // `persistent` = 五谷整段结算的**持久展示**（review-fix / D4）：这一步的表面是牌桌
+  // （无懈 / 反无懈的 RESPOND）但结算帧还活着，窗口只展示亮牌 + 目标条；它不进只读判据。
+  // `hintOverride` = 持久展示时标题条要镜像的步骤提示（普通模式为 null，读 `#t-target-hint`）。
+  dialog: {
+    open: false,
+    collapsed: false,
+    kind: null,
+    key: null,
+    persistent: false,
+    hintOverride: null,
+  },
   // U1-06：武将详情是**唯一**可叠加的检视窗（独立的 `#t-modal`），`heroSeat` 记座位：
   // 它独立于询问，右键任何武将块都能开；开合不改变只读态。
   modal: { heroSeat: null },

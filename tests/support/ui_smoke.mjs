@@ -9544,6 +9544,347 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.resetSelection();
 }
 
+/* ============ U2-review-fix（D4）：五谷弹窗跨无懈 / 反无懈 RESPOND 窗口持续 ============
+ *
+ * **生产时序证据**（真引擎复核，见 `tests/test_web.py` 的 harvest 真会话段）：亮牌发生在
+ * `USE_AFTER_DESIGNATE_TARGET`，收集式无懈窗口在 `RESOLVE_BEFORE_EFFECT`——即亮牌**之后**；
+ * `projection.pending_payload` 在无懈 / 反无懈的 `RESPOND` pending 上仍带 `harvest`。
+ * 故 `RESPOND` 步是"这一步的表面是牌桌、结算帧还活着"：亮牌 + 目标条必须继续显示，
+ * 但 `#t-options` / 手牌 / 座位仍归牌桌（无懈照常可出、可放弃，只读判据不翻）。
+ *
+ * 两段：
+ *   ① 合成载荷（字段与真 payload 同形）：窗口不关、不占选项行、无懈可提交、下一次取牌
+ *      复用同一个链键；
+ *   ② **真生产路径**（种子 198、5 人、random AI、人类座位 0）：开局就是"人类手里有【无懈】、
+ *      五谷已亮牌"的 RESPOND 窗口；逐字段断言 DOM 读的是 `harvest.revealed / taken_by /
+ *      targets / current`，再驱动到真实取牌步，断言同一窗口切回正常取牌模式。
+ */
+{
+  const harvestCard = (id, name, type, description) => ({
+    ...synthCard(id, name),
+    type,
+    display_name: name,
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description,
+  });
+  const revealCard = (id, name, type) => harvestCard(id, name, type, `${name}的描述：悬停可读。`);
+  const withSeat = (card, seat) => ({ ...card, taken_by: seat });
+  const dodge = revealCard(11, "闪", "dodge");
+  const peach = revealCard(12, "桃", "peach");
+  const slash = revealCard(13, "杀", "slash");
+  const nullify = revealCard(78, "无懈可击", "nullify");
+  const harvestCardFace = revealCard(7, "五谷丰登", "harvest");
+  const target = (seat, status, card = null, cancelled = false) => ({
+    seat, status, card, cancelled, reason: null,
+  });
+  /** 与真 payload 同形的五谷结算状态（字段见 tests/test_web.py 的真会话断言）。 */
+  const harvest = (key, current, revealed, targets) => ({
+    active: true, key, title: "五谷丰登", hint: "从亮出的牌里选一张获得",
+    source: 2, card: harvestCardFace, revealed, targets, current,
+  });
+  const view = (pending) => {
+    const made = synthView(pending);
+    made.snapshot.seat = 0;
+    made.human_seat = 0;
+    made.snapshot.self_hand = [nullify, synthCard(1, "杀")];
+    return made;
+  };
+  const render = (pending) => {
+    ui.state.view = view(pending);
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(ui.state.view);
+  };
+  const insideDialog = (node) => {
+    let at = node ? node.parentNode : null;
+    while (at) {
+      if (at === $("t-dialog")) return true;
+      at = at.parentNode;
+    }
+    return false;
+  };
+  /** 亮牌正文的根：持久模式住 `#t-dialog-reveal`，正常取牌住在 `#t-options`（被搬进正文）。 */
+  const revealRoot = () => {
+    const persistent = $("t-dialog-reveal");
+    if (persistent.hidden === false && persistent.children.length) return persistent.children[0];
+    return $("t-options").children[0] || null;
+  };
+  const cards = () => (revealRoot() ? revealRoot().children[0].children : []);
+  const bar = () => (revealRoot()
+    ? revealRoot().children.find((node) => node.classList.contains("reveal-targets")) || null
+    : null);
+  const chips = () => (bar()
+    ? bar().children.filter((node) => node.classList.contains("reveal-target"))
+    : []);
+  const chipStates = () => chips().map((node) => node.getAttribute("data-state")).join(",");
+  const chipSeats = () => chips().map((node) => node.getAttribute("data-seat")).join(",");
+  const takenBy = () => cards().map((node) => node.getAttribute("data-taken-by")).join(",");
+  const settleSubmit = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+
+  // ---- ① 合成 RESPOND/nullify pending：窗口持续、不抢选项行、无懈可击可提交 ----
+  const responsePending = {
+    kind: "RESPOND", actor: 0, seq: 1201, cause: "NULLIFY", target: 2,
+    prompt: "响应窗口：请使用一张牌，或放弃。",
+    legal_actions: [
+      { answers_seq: 1201, kind: "UseCard", card: nullify, targets: [] },
+      { answers_seq: 1201, kind: "Pass" },
+    ],
+    candidate_index: {
+      [String(nullify.card_id)]: {
+        card: nullify, pool: [], min_targets: 0, max_targets: 0, combos: [[]],
+      },
+    },
+    virtual_index: {}, option_seats: {}, option_labels: null,
+    preactivations: {}, card_preactivations: {}, preactivation: [],
+    harvest: harvest(
+      "harvest:9:7:2", 2,
+      [withSeat(dodge, null), withSeat(peach, null), withSeat(slash, 1), withSeat(nullify, null)],
+      [target(2, "current"), target(0, "pending"), target(1, "taken", slash.card_id)],
+    ),
+    context: {
+      actor: 2, name: "五谷丰登", targets: [2],
+      label: "2号位使用五谷丰登", requirement: "需要使用【无懈可击】", skill_hints: [],
+    },
+    prompt_display: { text: "响应窗口：请使用一张牌，或放弃。", default_label: "超时将自动放弃" },
+  };
+  const scratchSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261014,
+  });
+  ui.state.sessionId = scratchSession.session_id;
+  const bareReveal = {
+    ...responsePending,
+    harvest: { ...responsePending.harvest, hint: null },
+    context: null,
+  };
+  check("U2-R0 亮牌提示缺服务端文案时是中性兜底（前端不抄 HARVEST_REQUIREMENT）",
+    ui.revealHintText(bareReveal, true) === "从亮出的牌里选择：点一张亮牌即提交。",
+    ui.revealHintText(bareReveal, true));
+  render(responsePending);
+  const persistentKey = ui.state.dialog.key;
+
+  check("U2-R1 无懈 RESPOND 步的表面仍是牌桌（只读判据不翻），但五谷亮牌窗继续显示",
+    ui.stepDialogKind(responsePending) === null
+      && ui.selectionEnabled() === true
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === true
+      && $("t-dialog-reveal").hidden === false
+      && $("t-dialog-title").textContent === "五谷丰登"
+      && $("t-modal-backdrop").hidden === true,
+    `surface=${ui.stepDialogKind(responsePending)} enabled=${ui.selectionEnabled()} dialogHidden=${$("t-dialog").hidden} bodyHidden=${$("t-dialog-body").hidden} revealHidden=${$("t-dialog-reveal").hidden} backdropHidden=${$("t-modal-backdrop").hidden}`);
+
+  check("U2-R2 持久亮牌 + 目标条照读 harvest 字段（位置 / 获得者 / 四态 / 当前目标）",
+    cards().length === 4
+      && takenBy() === ",,1,"
+      && chips().length === 3
+      && chipSeats() === "2,0,1"
+      && chipStates() === "current,pending,taken"
+      && bar().getAttribute("data-current") === "2"
+      && $("t-dialog-hint").textContent.includes("等待2号位拿牌"),
+    `cards=${cards().length} takenBy=${takenBy()} seats=${chipSeats()} states=${chipStates()} current=${bar() && bar().getAttribute("data-current")} hint="${$("t-dialog-hint").textContent}"`);
+
+  check("U2-R3 持久展示不抢 #t-options：选项行仍在提示区，无懈界面不被搬进弹窗",
+    $("t-options-home").children.includes($("t-options"))
+      && !insideDialog($("t-options"))
+      && !insideDialog($("btn-submit")),
+    `home=${$("t-options-home").children.includes($("t-options"))} optionsInDialog=${insideDialog($("t-options"))}`);
+
+  // 提示区选项行的**内容**不能被持久同步清掉。真实的无懈窗口只有 UseCard + Pass
+  // （picker 的选项行本来就是空的），故给同一份合成载荷补一条 `SelectOption` 备选，
+  // 让正常 picker 铺出一个按钮；持久同步之后它必须还在提示区。窗口表面 / `harvest`
+  // 字段仍与真 payload 同形——这条只钉"同步不得清空提示区"这一条回归。
+  const responseWithAlternative = {
+    ...responsePending,
+    legal_actions: [
+      ...responsePending.legal_actions,
+      { answers_seq: 1201, kind: "SelectOption", choice: "seat:1" },
+    ],
+  };
+  render(responseWithAlternative);
+  const promptButtons = $("t-options").children.filter((node) => node.tagName === "BUTTON");
+  check("U2-R3b 持久同步不清提示区选项行：无懈窗口的 picker 按钮仍在 #t-options",
+    promptButtons.length === 1
+      && promptButtons[0].textContent.includes("选择座位 1")
+      && $("t-options-home").children.includes($("t-options"))
+      && !insideDialog($("t-options")),
+    `buttons=${JSON.stringify(promptButtons.map((node) => node.textContent))} home=${$("t-options-home").children.includes($("t-options"))} inDialog=${insideDialog($("t-options"))}`);
+  render(responsePending);
+
+  // 无懈可提交：点手里的【无懈可击】→ 提交；用 400 注入截住 POST，不改服务端状态。
+  const beforeNullify = calls.length;
+  staleAnswerStatus = 400;
+  ui.toggleFocus(nullify.card_id);
+  await ui.submitAction();
+  await settleSubmit();
+  staleAnswerStatus = null;
+  const nullifyAnswers = calls.slice(beforeNullify).filter((call) => call.path.includes("/answer"));
+  check("U2-R4 无懈仍可提交：点手牌 + 提交 = 一条原样的 UseCard(无懈可击) POST",
+    nullifyAnswers.length === 1
+      && nullifyAnswers[0].body.action.kind === "UseCard"
+      && nullifyAnswers[0].body.action.card.type === "nullify"
+      && JSON.stringify(nullifyAnswers[0].body.action)
+        === JSON.stringify(responsePending.legal_actions[0]),
+    `answers=${nullifyAnswers.length} action=${JSON.stringify(nullifyAnswers[0] && nullifyAnswers[0].body.action)}`);
+
+  // ---- ② 下一次取牌：同一个链键 / 同一个容器，切回正常取牌模式 ----
+  const pickHarvest = harvest(
+    "harvest:9:7:2", 2,
+    [withSeat(dodge, null), withSeat(peach, 0), withSeat(slash, 1), withSeat(nullify, null)],
+    [target(2, "current"), target(0, "taken", peach.card_id), target(1, "taken", slash.card_id)],
+  );
+  const pickPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 1202, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { answers_seq: 1202, kind: "SelectCards", picks: [0] },
+      { answers_seq: 1202, kind: "SelectCards", picks: [1] },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, option_labels: null,
+    slots: [dodge, nullify].map((card) => ({ ref: { seat: null, zone: "processing" }, card })),
+    spec: { zones: ["processing"], total: [1, 1], sequential: false, optional: false },
+    harvest: pickHarvest, context: {
+      actor: 0, name: "五谷丰登", targets: [2],
+      label: "从亮出的牌里选一张获得", requirement: "从亮出的牌里选一张获得", skill_hints: [],
+    },
+    prompt_display: { text: "请从选择面里选择一张牌。", default_label: "超时将自动选择第一项" },
+  };
+  render(pickPending);
+  check("U2-R5 下一次取牌复用同一个链键：窗口不关，正文从持久展示切回取牌模式",
+    persistentKey === "reveal:harvest:9:7:2"
+      && ui.state.dialog.key === persistentKey
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === false
+      && $("t-dialog-body").children.includes($("t-options"))
+      && $("t-dialog-reveal").hidden === true
+      && $("t-modal-backdrop").hidden === false
+      && ui.selectionEnabled() === false,
+    `key=${ui.state.dialog.key} before=${persistentKey} bodyHidden=${$("t-dialog-body").hidden} optionsInBody=${$("t-dialog-body").children.includes($("t-options"))} revealHidden=${$("t-dialog-reveal").hidden} enabled=${ui.selectionEnabled()}`);
+
+  // ---- ③ harvest 消失（结算结束）⇒ 关窗 ----
+  const afterHarvest = {
+    kind: "PLAY_PHASE", actor: 0, seq: 1203, prompt: "出牌阶段。",
+    legal_actions: [{ answers_seq: 1203, kind: "EndPhase" }],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, option_labels: null,
+    preactivations: {}, card_preactivations: {}, preactivation: [],
+    harvest: null, context: null,
+    prompt_display: { text: "出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+  };
+  render(afterHarvest);
+  check("U2-R6 结算结束（harvest 消失）⇒ 亮牌窗关闭、正文清空",
+    $("t-dialog").hidden === true
+      && $("t-dialog-reveal").hidden === true
+      && $("t-dialog-reveal").children.length === 0
+      && ui.state.dialog.key === null
+      && $("t-options-home").children.includes($("t-options")),
+    `dialogHidden=${$("t-dialog").hidden} revealHidden=${$("t-dialog-reveal").hidden} revealChildren=${$("t-dialog-reveal").children.length} key=${ui.state.dialog.key}`);
+
+  // ---- ④ 真生产路径：种子 198（5 人）开局 = 人类持有【无懈】的五谷无懈窗口 ----
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  await newSession(198, { player_count: 5 });
+  const realResponse = ui.state.view.pending;
+  const realHarvest = realResponse && realResponse.harvest;
+  const realKey = ui.state.dialog.key;
+  check("U2-R7 真会话（种子 198 / 5 人 / random AI）：开局 pending 就是带 harvest 的无懈 RESPOND",
+    !!realResponse && realResponse.kind === "RESPOND" && realResponse.cause === "NULLIFY"
+      && !!realHarvest && realHarvest.active === true
+      && realHarvest.revealed.length === 5 && realHarvest.current === 3,
+    `kind=${realResponse && realResponse.kind} cause=${realResponse && realResponse.cause} harvest=${realHarvest && realHarvest.key} revealed=${realHarvest && realHarvest.revealed.length} current=${realHarvest && realHarvest.current}`);
+
+  check("U2-R8 真 payload 的 DOM 读法：窗口 / 亮牌 / 获得者 / 目标条 / 当前目标全部对上",
+    realResponse && realHarvest
+      && $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "五谷丰登"
+      && cards().length === realHarvest.revealed.length
+      && takenBy() === realHarvest.revealed.map((card) => (
+        card.taken_by === null || card.taken_by === undefined ? "" : String(card.taken_by)
+      )).join(",")
+      && chipSeats() === realHarvest.targets.map((item) => String(item.seat)).join(",")
+      && chipStates() === realHarvest.targets.map((item) => (
+        item.cancelled ? "invalid" : (item.status || "pending")
+      )).join(",")
+      && bar().getAttribute("data-current") === String(realHarvest.current),
+    `title="${$("t-dialog-title").textContent}" cards=${cards().length}/${realHarvest && realHarvest.revealed.length} takenBy=${takenBy()} seats=${chipSeats()} states=${chipStates()} current=${bar() && bar().getAttribute("data-current")}`);
+
+  check("U2-R9 真会话的无懈窗口仍是牌桌表面：#t-options 在提示区、点手牌可提交无懈",
+    ui.stepDialogKind(realResponse) === null
+      && ui.selectionEnabled() === true
+      && !insideDialog($("t-options"))
+      && $("t-modal-backdrop").hidden === true,
+    `surface=${ui.stepDialogKind(realResponse)} enabled=${ui.selectionEnabled()} optionsInDialog=${insideDialog($("t-options"))}`);
+
+  const beforeRealNullify = calls.length;
+  await advanceOnce();
+  const realNullifyAnswers = calls.slice(beforeRealNullify).filter((call) => call.path.includes("/answer"));
+  check("U2-R10 真会话：界面把【无懈可击】作为一条原样的 UseCard 真的送了出去",
+    realNullifyAnswers.length === 1
+      && realNullifyAnswers[0].body.action.kind === "UseCard"
+      && realNullifyAnswers[0].body.action.card.type === "nullify",
+    `answers=${realNullifyAnswers.length} action=${JSON.stringify(realNullifyAnswers[0] && realNullifyAnswers[0].body.action)}`);
+
+  // 拒绝后续每个目标的无懈窗口（选 Pass），直到人类自己的真实取牌询问。
+  let declined = 0;
+  for (let step = 0; step < 40; step += 1) {
+    const pending = ui.state.view ? ui.state.view.pending : null;
+    if (!pending) break;
+    if (pending.kind === "SELECT_CARDS" && pending.harvest) break;
+    if (pending.kind !== "RESPOND" || !pending.harvest) break;
+    const pass = (pending.legal_actions || []).findIndex((action) => action.kind === "Pass");
+    if (pass < 0) break;
+    ui.state.selectedOption = pass;
+    await ui.submitAction();
+    declined += 1;
+  }
+  const realPick = ui.state.view ? ui.state.view.pending : null;
+  const realPickHarvest = realPick && realPick.harvest;
+  check("U2-R11 真会话驱动到真实取牌步：同一个链键 / 同一个窗口，正文切回取牌模式",
+    declined > 0
+      && !!realPick && realPick.kind === "SELECT_CARDS"
+      && !!realPickHarvest && realPickHarvest.key === (realHarvest && realHarvest.key)
+      && ui.state.dialog.key === realKey
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === false
+      && $("t-dialog-body").children.includes($("t-options"))
+      && $("t-dialog-reveal").hidden === true,
+    `declined=${declined} kind=${realPick && realPick.kind} key=${ui.state.dialog.key} before=${realKey} bodyHidden=${$("t-dialog-body").hidden} optionsInBody=${$("t-dialog-body").children.includes($("t-options"))}`);
+
+  check("U2-R12 真实取牌载荷在 DOM 里逐字段可读（taken_by / targets / current 都不是手写夹具）",
+    !!realPickHarvest
+      && cards().length === realPickHarvest.revealed.length
+      && takenBy() === realPickHarvest.revealed.map((card) => (
+        card.taken_by === null || card.taken_by === undefined ? "" : String(card.taken_by)
+      )).join(",")
+      && takenBy().split(",").filter(Boolean).length >= 1
+      && chipSeats() === realPickHarvest.targets.map((item) => String(item.seat)).join(",")
+      && chipStates() === realPickHarvest.targets.map((item) => (
+        item.cancelled ? "invalid" : (item.status || "pending")
+      )).join(",")
+      && bar().getAttribute("data-current") === String(realPickHarvest.current),
+    `cards=${cards().length} takenBy=${takenBy()} seats=${chipSeats()} states=${chipStates()} current=${bar() && bar().getAttribute("data-current")}`);
+
+  // 真取牌一击提交（400 注入截住 POST，断言 Action 原样取自候选）。
+  const beforeRealPick = calls.length;
+  staleAnswerStatus = 400;
+  const firstPickable = cards().find((node) => node.getAttribute("data-taken-by") === "");
+  if (firstPickable) await clickAndWait(firstPickable);
+  await settleSubmit();
+  staleAnswerStatus = null;
+  const realPickAnswers = calls.slice(beforeRealPick).filter((call) => call.path.includes("/answer"));
+  check("U2-R13 真实取牌：点一张亮牌 = 一条原样取自候选的 SelectCards",
+    !!firstPickable
+      && realPickAnswers.length === 1
+      && realPickAnswers[0].body.action.kind === "SelectCards",
+    `got=${Boolean(firstPickable)} answers=${realPickAnswers.length} action=${JSON.stringify(realPickAnswers[0] && realPickAnswers[0].body.action)}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 /* ============ U2-12（D3 / D9.1）：遗计亮牌弹窗（选 1~2 张 + 右端提交） ============
  *
  * 载荷与真会话同形（字段由 `tests/test_web.py` 的真会话断言钉）：

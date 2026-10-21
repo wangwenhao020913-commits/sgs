@@ -973,6 +973,15 @@ button.mini-slot { cursor: pointer; }
 /* 目标条钉在弹窗左下角（`.dialog-window` 已是 position:relative）；
  * 正文给条留一条下内边距，内容滚到底时不遮住目标。 */
 .dialog-body.reveal-body { padding-bottom: 52px; }
+/* 五谷整段结算的**持久展示**（review-fix / D4）：无懈 / 反无懈的 RESPOND 窗口是牌桌
+ * 表面，正文槽整个收起，亮牌内容改住这个兄弟节点。它是 `.dialog-window` 的弹性子项，
+ * 自己滚动；目标条仍钉在 `.dialog-window` 左下角，故下方留 52px。 */
+.dialog-reveal {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px 52px;
+}
+.dialog-reveal[hidden] { display: none !important; }
 .reveal-targets {
   position: absolute; left: 14px; bottom: 10px;
   display: flex; align-items: center; flex-wrap: wrap; gap: 5px;

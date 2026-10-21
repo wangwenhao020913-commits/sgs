@@ -63,17 +63,15 @@ function isPickRevealStep(pending) {
  *
  * 规则话术读载荷：`context.requirement`（服务端给「从亮出的牌里选一张获得」）优先，
  * 其次 `harvest.hint`（同一个常量的下发副本）。前端只补一句"怎么点 / 在等谁"的交互说明。
+ * 两处都缺（合成载荷 / 旧载荷）时只说**中性**的"从亮出的牌里选择"——不抄服务端的
+ * `HARVEST_REQUIREMENT`，否则"前端不抄第二份文案"的声明就成了假话。
  * 公开处理区的牌面是可见的，所以这里**不写**「隐藏区域的槽位只有位置」。
  */
 function revealHintText(pending, interactive) {
   const data = revealData(pending);
   const requirement = (pending && pending.context && pending.context.requirement)
     || data.hint
-    || (
-      isPickRevealStep(pending)
-        ? "从亮出的牌里选择一至两张"
-        : "从亮出的牌里选一张获得"
-    );
+    || "从亮出的牌里选择";
   if (isPickRevealStep(pending)) {
     if (!interactive) return `${requirement}：等待其他座位响应…`;
     const total = (pending.spec && pending.spec.total) || [1, 1];
@@ -88,21 +86,43 @@ function revealHintText(pending, interactive) {
   return `${requirement}：等待${current}号位拿牌…`;
 }
 
+/** 五谷**持久展示**（无懈 / 反无懈的 RESPOND 窗口）的步骤提示。
+ *
+ * 只读 `harvest.hint`（公开处理区的规则话术），**不读** `context.requirement`：那一步的
+ * 上下文属于无懈窗口（"需要使用【无懈可击】"），不是亮牌窗要说的"在等谁拿牌"。
+ * 缺 `hint` 时用中性句，不抄服务端的 `HARVEST_REQUIREMENT`。
+ */
+function harvestWaitHint(pending) {
+  const data = revealData(pending);
+  const requirement = data.hint || "从亮出的牌里选择";
+  const current = data.current;
+  return current === null || current === undefined
+    ? `${requirement}：等待其他座位拿牌…`
+    : `${requirement}：等待${current}号位拿牌…`;
+}
+
 /** 亮牌模板的正文：全部亮牌（按亮牌顺序）+ 可选的目标条。
  *
  * `opts.interactive` 缺省 = 只有**自己的**询问才可点（与服务端"谁应答谁铺控件"同一判据）；
  * AI 目标拿牌时传 `interactive: false`：牌与目标条照画，但没有 click。
  *
+ * `opts.container` 缺省 = 提示区的 `#t-options`（正常弹窗内容）。五谷的**持久展示**
+ * （无懈 / 反无懈的 RESPOND 窗口）把它改成 `#t-dialog-reveal`，并同时传
+ * `promptHint: false` / `bodyClass: false`：不抢提示条的步骤提示、不给隐藏的正文槽加
+ * 内边距（那一步的 `#t-options` 仍留在提示区，牌桌照常可操作）。
+ *
  * 遗计式多选（:func:`isPickRevealStep`）的牌面 click = **切换选中**（`.sel`），不提交；
  * 提交点只有提示条右端的「提交」。
  */
 function renderReveal(pending, opts = {}) {
-  const box = $("t-options");
+  const box = opts.container || $("t-options");
   const data = revealData(pending);
   const multi = isPickRevealStep(pending);
   const interactive = opts.interactive !== false && isOwnPending(pending);
-  const hint = $("t-target-hint");
-  if (hint) hint.textContent = revealHintText(pending, interactive);
+  if (opts.promptHint !== false) {
+    const hint = $("t-target-hint");
+    if (hint) hint.textContent = revealHintText(pending, interactive);
+  }
 
   const wrap = document.createElement("div");
   wrap.className = "reveal";
@@ -179,8 +199,10 @@ function renderReveal(pending, opts = {}) {
     wrap.appendChild(bar);
   }
   box.appendChild(wrap);
-  const body = $("t-dialog-body");
-  if (body) body.classList.add("reveal-body");
+  if (opts.bodyClass !== false) {
+    const body = $("t-dialog-body");
+    if (body) body.classList.add("reveal-body");
+  }
 }
 
 /** 遗计式多选：点一张亮牌 = **切换**它在本次选择里的位置（`picks`），**不提交**。

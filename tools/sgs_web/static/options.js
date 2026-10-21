@@ -182,9 +182,9 @@ function rightActionIndex(pending, kind) {
 function renderRightActions(pending, view = state.view) {
   const own = isOwnPending(pending, view);
   const dialogKind = pending ? stepDialogKind(pending) : null;
-  const dialogWithoutPass = dialogKind === DIALOG_KINDS.choice
-    || dialogKind === DIALOG_KINDS.unknown
-    || dialogKind === DIALOG_KINDS.reveal;
+  // 弹窗步骤没有「放弃」：判据与 `cancelAction` / `refreshSubmit` 共用一处
+  // （`modal.js:dialogDisablesPass`，评审 Standards：重复谓词）。
+  const dialogWithoutPass = dialogDisablesPass(dialogKind);
   const endIndex = own ? rightActionIndex(pending, RIGHT_ACTION_KINDS.endPhase) : -1;
   const passIndex = own && !dialogWithoutPass
     ? rightActionIndex(pending, RIGHT_ACTION_KINDS.pass)

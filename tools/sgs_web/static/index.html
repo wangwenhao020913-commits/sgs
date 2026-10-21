@@ -221,6 +221,11 @@
                   aria-expanded="true" title="折叠 / 展开弹窗（只改遮挡，不影响可选择性）">收起</button>
         </header>
         <div id="t-dialog-body" class="dialog-body"></div>
+        <!-- 五谷整段结算的持久展示（D4 / review-fix）：无懈 / 反无懈的 RESPOND 窗口是
+             **牌桌表面**，亮牌 + 目标条只做展示——正文槽（`#t-dialog-body`）在该模式下
+             整个收起，`#t-options` 留在提示区，牌桌照常可点。内容由 `modal.js:syncDialog`
+             经 `reveal.js:renderReveal({container})` 每帧重画。 -->
+        <div id="t-dialog-reveal" class="dialog-reveal" hidden></div>
       </div>
     </div>
 

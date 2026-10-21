@@ -403,6 +403,7 @@ def test_the_yiji_timeout_gives_the_remaining_cards_to_the_owner() -> None:
     """
     from sgs.state import SelectOption
     from sgs_web.display import prompt_display
+    from sgs_web.timeout import yiji_give_self_choice
 
     session = _yiji_real_session()
     pick = session.pending
@@ -440,6 +441,9 @@ def test_the_yiji_timeout_gives_the_remaining_cards_to_the_owner() -> None:
         f"超时把剩下的牌交给自己：{target}"
     )
     assert fallback_action(give) == target, "兜底必须是纯函数"
+    assert yiji_give_self_choice(give) == target, (
+        "代答与倒计时文案共用同一条谓词（评审 Standards：display.py 不再重算它）"
+    )
     assert prompt_display(give)["default_label"] == "超时将把剩下的牌交给自己", (
         "提示条文案要说清超时的落点（D2）"
     )
@@ -4053,6 +4057,29 @@ def test_the_prompt_contract_carries_the_text_and_the_timeout_default() -> None:
         assert "第一项" in contract["default_label"]
 
 
+def test_the_arrange_prompt_says_the_timeout_submits_the_current_arrangement() -> None:
+    """D9.3 / 票 07：观星到时限 = **前端**提交当前排列，倒计时文案必须这么说。
+
+    反例（本轮评审发现）：通用兜底把 `ARRANGE` 写成「超时将自动选择第一项」，与
+    `answer.js:maybeAutoSubmitArrange` 的实际行为相反。服务端 `fallback_action` 仍是
+    `ArrangeCards` 候选第一条，所以契约的 `default_action` 照旧由它派生；改的只是给人
+    看的那句话。
+    """
+    from sgs_web.display import prompt_display
+
+    session = _session_at_guanxing_arrange()
+    pending = session.pending
+    assert pending is not None and pending.kind == "ARRANGE"
+
+    contract = prompt_display(pending)
+
+    assert contract["default_action"]["kind"] == "ArrangeCards"
+    assert contract["default_label"] == "超时将按当前排列提交"
+    assert "第一项" not in contract["default_label"], (
+        "排列到时限提交的是当前排列，不是候选里的第一项"
+    )
+
+
 # ---------------------------------------------------------------------------
 # U1-04 展示契约：投影 / 当前挂起真的把展示字段发下去
 # ---------------------------------------------------------------------------
@@ -4417,6 +4444,23 @@ def test_the_card_and_skill_contracts_carry_the_server_side_description() -> Non
 
     unknown = CardRef(card_id=-77, type="no_such_card", name="？")
     assert card_display(unknown)["description"] == "暂无描述", "缺条目路径由展示层显式兜底"
+
+
+def test_the_ice_sword_description_says_two_cards_not_at_most_two() -> None:
+    """D9.2 / 票 13：寒冰剑有牌必须弃满两张——展示内容不得再写「至多两张」。
+
+    规则侧早已强制两张（`optional=False`、两轮逐张弃置），票 13 只改逐步文案；这句
+    描述是同一口径的第二处文案，评审判定它仍停在「至多」。内容文件没有金录像，故这条
+    只是内容断言：两个键都在、都把「至多」去掉。
+    """
+    from sgs_web.descriptions import card_description, skill_description
+
+    card_text = card_description("ice_sword")
+    skill_text = skill_description("equip.ice_sword")
+    assert card_text and skill_text, "两处寒冰剑文案都必须有内容，否则这条断言是空转"
+    for text in (card_text, skill_text):
+        assert "至多两张" not in text, f"寒冰剑不得再写「至多两张」：{text}"
+        assert "两张" in text, f"寒冰剑文案要写清是两张：{text}"
 
 
 def test_the_description_content_stays_out_of_the_engine_journal() -> None:
@@ -5168,6 +5212,43 @@ def test_a_real_session_derives_the_full_harvest_state_and_the_chain_key() -> No
     # 409 里附带的裸 Query 拿不到引擎 ⇒ 键仍在、值为 None（前端 fail-closed 不开窗）。
     bare = pending_payload(second, human_seat=1)
     assert bare["harvest"] is None
+
+
+def test_a_nullify_window_in_a_harvest_resolution_still_carries_the_active_harvest_state() -> None:
+    """D4 / review-fix 的生产时序证据：无懈窗口发生在**亮牌之后**。
+
+    引擎的 ``reveal_harvest`` 落在 ``USE_AFTER_DESIGNATE_TARGET``，收集式无懈窗口落在
+    ``RESOLVE_BEFORE_EFFECT``——所以无懈 / 反无懈的 ``RESPOND`` pending 上 ``harvest``
+    仍然活跃、还有当前目标。前端"整段结算持续显示"因此不是为不可达状态加的 hack。
+    若将来把亮牌挪到无懈窗口之后，这条会红：到时持久展示路径必须重新评估。
+    """
+    engine, driver = _harvest_game(nullify=True)
+    window = None
+    for _ in range(400):
+        pending = engine.pending
+        if pending is None:
+            engine._step()
+            if engine.finished:  # pragma: no cover - 构造局面不会走到终局
+                break
+            continue
+        if pending.kind == QueryKind.RESPOND and pending.cause is WindowCause.NULLIFY:
+            window = pending
+            break
+        engine.submit(driver.respond(engine, pending))
+    assert window is not None, "没走到五谷的无懈窗口"
+
+    harvest = harvest_state(engine)
+    assert harvest is not None, "无懈窗口必须已经在亮牌帧之后"
+    assert harvest["active"] is True
+    assert harvest["revealed"], "无懈窗口打开时亮牌已经发生（D4 的持续显示依赖这一点）"
+    assert harvest["current"] is not None
+
+    payload = pending_payload(_web_session_for(engine, human_seat=window.actor))
+    assert payload["kind"] == "RESPOND"
+    assert payload["cause"] == "NULLIFY"
+    assert payload["harvest"] is not None, "RESPOND 载荷同样要带 harvest（前端持久显示读它）"
+    assert payload["harvest"]["key"] == harvest["key"]
+    assert payload["harvest"]["current"] == harvest["current"]
 
 
 @pytest.mark.parametrize(("reverse", "expected"), [(False, "invalid"), (True, "taken")])

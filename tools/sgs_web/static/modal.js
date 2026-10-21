@@ -10,9 +10,11 @@
  *  - **`#t-modal` = 武将详情**：唯一可叠加在询问弹窗之上的检视窗；它自己的关闭按钮 /
  *    ESC 只关它自己，底下的询问弹窗原样恢复；开合它不改变只读态。
  *
- * 生命周期：询问弹窗只在「当前步骤的表面是弹窗」时存在（`stepDialogKind`），另外本地态的
- * 预发动清单也借这个容器（它仍是**牌桌表面**，D2 的 C 形，不进只读判据）。同一问的重复
- * 渲染只更新正文、保留折叠；换问（新 `seq`）或表面不再是弹窗时**关旧开新 / 直接关**，
+ * 生命周期：询问弹窗只在「当前步骤的表面是弹窗」时存在（`stepDialogKind`）。另外两个
+ * **牌桌表面**的用户也借这个容器、都不进只读判据：本地态的预发动清单（D2 的 C 形），
+ * 以及五谷整段结算的**持久展示**（无懈 / 反无懈的 RESPOND 期间只展示亮牌 + 目标条，
+ * 见 `persistentRevealPending`）。同一问的重复渲染只更新正文、保留折叠；换问（新 `seq`）
+ * 或表面不再是弹窗时**关旧开新 / 直接关**，
  * 关闭时清空正文——上一问的窗口 / 内容不会留在下一问里。跨步骤（弹窗步 → 牌桌步 →
  * 弹窗步）因此会先关后开；同一条技能链上的连续弹窗步（反间：花色 → 盲挑）走**链键**，
  * 容器不关、只换正文 / 标题（见 :func:`dialogKeyFor`）。
@@ -35,6 +37,18 @@ const DIALOG_KINDS = Object.freeze({
   unknown: "unknown",
   reveal: "reveal",
 });
+
+/** 这几类弹窗步骤**没有「放弃」**（spec D3 / 票 08 / 09 / 11）：即便引擎给了 `Pass`，
+ *  界面也不读它——选择型、未知区域、亮牌三类都是"点内容即完成 / 必答"。
+ *
+ *  `renderRightActions` / `cancelAction` / `refreshSubmit` 三处原先各写一遍同一条析取；
+ *  抽成这里是为了改一处即三处一致（评审 Standards：重复谓词）。
+ */
+function dialogDisablesPass(kind) {
+  return kind === DIALOG_KINDS.choice
+    || kind === DIALOG_KINDS.unknown
+    || kind === DIALOG_KINDS.reveal;
+}
 
 /** 当前**步骤**的表面若是弹窗就返回它的种类（spec D8「只读态」的唯一判据源）。
  *
@@ -128,6 +142,18 @@ function isUnknownZoneStep(pending) {
   return seat !== null && seat !== actor;
 }
 
+/** 五谷结算帧还在、且还有当前目标：`pending.harvest` 的**活跃判据**（票 11 / D4）。
+ *
+ * 只认服务端派生的字段（`active` / `revealed` / `current`），不看询问种类；亮牌步与
+ * 无懈窗口共用它。`revealed` 为空或没有 `current` ⇒ 结算末尾 / 没亮牌，不算活跃。
+ */
+function isHarvestActive(pending) {
+  const harvest = pending && pending.harvest;
+  if (!harvest || typeof harvest !== "object" || harvest.active === false) return false;
+  if (!Array.isArray(harvest.revealed) || !harvest.revealed.length) return false;
+  return harvest.current !== null && harvest.current !== undefined;
+}
+
 /** 亮牌模板的**唯一判据**（票 11 五谷；票 12 的遗计两牌亮牌复用同一渲染器）。
  *
  * 两个来源，都是**载荷**而不是技能 id：
@@ -145,14 +171,24 @@ function isUnknownZoneStep(pending) {
 function isRevealStep(pending) {
   if (!pending || pending.kind !== "SELECT_CARDS") return false;
   if (pending.dialog === DIALOG_KINDS.reveal) return true;
-  const harvest = pending.harvest;
-  if (!harvest || typeof harvest !== "object" || harvest.active === false) return false;
-  if (!Array.isArray(harvest.revealed) || !harvest.revealed.length) return false;
-  if (harvest.current === null || harvest.current === undefined) return false;
+  if (!isHarvestActive(pending)) return false;
   const zones = (pending.spec && pending.spec.zones) || [];
   if (zones.includes("processing")) return true;
   const slots = pending.slots || [];
   return slots.length > 0 && slots.every((slot) => slot && slot.ref && slot.ref.zone === "processing");
+}
+
+/** 五谷整段结算的**持久展示**（review-fix / D4）：这一步的表面不是弹窗（无懈 / 反无懈的
+ *  `RESPOND` 是**牌桌表面**），但结算帧还活着、还有当前目标 ⇒ 亮牌 + 目标条继续显示。
+ *
+ * 与 :func:`isRevealStep` 分开是**只读判据的要求**：`stepDialogKind` 仍只看这一步的表面，
+ * 无懈窗口因此照常可出牌 / 放弃；持久展示不进 `selectionEnabled()`。返回 `null` = 不需要
+ * 持久展示（正常取牌步由 `isRevealStep` 走弹窗的既有生命周期）。
+ */
+function persistentRevealPending(pending) {
+  if (!isHarvestActive(pending)) return null;
+  if (stepDialogKind(pending) !== null) return null;
+  return pending;
 }
 
 /** 只读态判据（spec D8）：当前步骤的表面是弹窗 ⇒ 牌桌选择入口一律 no-op。
@@ -168,10 +204,13 @@ function selectionEnabled(view = state.view) {
   return stepDialogKind(view ? view.pending : null) === null;
 }
 
-/** 当前是否需要询问弹窗：本地态（预发动清单）优先，其次看这一步的表面。`null` = 不需要。 */
+/** 当前是否需要询问弹窗：本地态（预发动清单）优先，其次看这一步的表面，最后才是
+ *  五谷的**持久展示**（表面是牌桌、但结算帧还活着）。`null` = 不需要。 */
 function dialogWantedKind(pending) {
   if (state.preactivation) return "preactivation";
-  return stepDialogKind(pending);
+  const stepKind = stepDialogKind(pending);
+  if (stepKind !== null) return stepKind;
+  return persistentRevealPending(pending) ? DIALOG_KINDS.reveal : null;
 }
 
 /** 弹窗实例键：**同一键 = 同一「步」的重复渲染**（保留折叠、只换内容）；
@@ -239,20 +278,26 @@ function showOptionsHome() {
   if (home && options) home.appendChild(options);
 }
 
-/** 武将详情窗口是否开着（`#t-modal` 是检视窗自己的节点，和询问弹窗分开）。 */
+/** 武将详情窗口是否开着：真源是 `state.modal.heroSeat`（不是 DOM 的 hidden 属性）。
+ *
+ * 开窗判据与 `syncHeroModal` 同一条（回放 / 无视图时它不显示），故这里也读同一组条件；
+ * `#t-modal.hidden` 只是这条状态的渲染结果，不能反过来当判据（评审 Standards：DOM 读法）。
+ */
 function heroDetailVisible() {
-  const modal = $("t-modal");
-  return !!modal && modal.hidden === false;
+  return state.modal.heroSeat !== null && !state.playback && !!state.view;
 }
 
 /** 暗化层 / 页面态的唯一开关：询问弹窗**展开**或武将详情打开时显示。
  *
  * 折叠只改遮挡 ⇒ 只剩标题条时暗化层一并收起（牌桌重新亮起来，但仍是只读）；
  * 详情叠在弹窗上时保持暗化。遮罩没有 click 监听（D8：点背景不是关闭出口）。
+ * **五谷持久展示不暗化**：这一步的表面是牌桌（无懈 / 反无懈的 RESPOND），界面必须
+ * 看起来可操作——亮牌窗只占中央，不宣称"现在不能选"。
  */
 function syncModalChrome() {
   const dialog = $("t-dialog");
-  const occluding = (!!dialog && dialog.hidden === false && !state.dialog.collapsed)
+  const occluding = (!!dialog && dialog.hidden === false && !state.dialog.collapsed
+      && !state.dialog.persistent)
     || heroDetailVisible();
   const backdrop = $("t-modal-backdrop");
   if (backdrop) backdrop.hidden = !occluding;
@@ -262,11 +307,37 @@ function syncModalChrome() {
 
 /* ------------------------------------------------------------ 折叠 */
 
-/** 折叠按钮 / 重开入口的文案与可用态（只读判据不在这里）。 */
+/** 五谷持久展示的专用正文节点（`#t-dialog-reveal`，静态标记在 index.html）。
+ *
+ * 它**不在** `#t-dialog-body` 里：持久展示时正文槽整个收起，`#t-options` 留在提示区
+ * （无懈窗口的选项 / 手牌选择用），亮牌内容只画在这个节点里。 */
+function dialogRevealNode() {
+  return $("t-dialog-reveal");
+}
+
+/** 清空持久亮牌节点并收起（关闭 / 切回正常弹窗内容时调用）。 */
+function clearDialogReveal() {
+  const node = dialogRevealNode();
+  if (!node) return;
+  node.innerHTML = "";
+  node.hidden = true;
+}
+
+/** 折叠按钮 / 重开入口的文案与可用态（只读判据不在这里）。
+ *
+ *  两种正文二选一：普通模式 = `#t-dialog-body`（折叠只隐藏它）；持久展示 =
+ *  `#t-dialog-reveal`（正文槽收起，折叠隐藏亮牌节点）。 */
 function applyDialogCollapseChrome() {
   const body = $("t-dialog-body");
+  const reveal = dialogRevealNode();
   const button = $("t-dialog-collapse");
-  if (body) body.hidden = state.dialog.collapsed;
+  if (state.dialog.persistent) {
+    if (body) body.hidden = true;
+    if (reveal) reveal.hidden = state.dialog.collapsed;
+  } else {
+    if (body) body.hidden = state.dialog.collapsed;
+    if (reveal) reveal.hidden = true;
+  }
   if (button) {
     button.textContent = state.dialog.collapsed ? "展开" : "收起";
     button.setAttribute("aria-expanded", String(!state.dialog.collapsed));
@@ -276,6 +347,39 @@ function applyDialogCollapseChrome() {
     state.dialog.kind,
     state.dialog.collapsed && state.dialog.kind === DIALOG_KINDS.arrange,
   );
+}
+
+/** 弹窗正文的归属：**正常内容**（`#t-options` 搬进正文槽）还是**五谷持久展示**
+ *  （亮牌 + 目标条画进 `#t-dialog-reveal`，`#t-options` 留在提示区）。
+ *
+ *  正常模式不在这里重画内容——`renderPending` 的渲染器已经把内容写进 `#t-options`，
+ *  这里只决定它挂在哪。持久模式则每帧重画一次：目标条 / 置灰要跟着结算走。
+ *  步骤提示在持久模式读亮牌自己的文案（不覆盖提示条里无懈窗口的提示）。
+ */
+function applyDialogContentMode(kind) {
+  const body = $("t-dialog-body");
+  const options = $("t-options");
+  const reveal = dialogRevealNode();
+  const persistent = state.dialog.persistent && kind === DIALOG_KINDS.reveal;
+  const pending = state.view ? state.view.pending : null;
+  state.dialog.hintOverride = null;
+  if (persistent && pending) {
+    showOptionsHome();
+    clearDialogReveal();
+    if (reveal) {
+      reveal.hidden = state.dialog.collapsed;
+      renderReveal(pending, {
+        container: reveal,
+        interactive: false,
+        promptHint: false,
+        bodyClass: false,
+      });
+    }
+    state.dialog.hintOverride = harvestWaitHint(pending);
+    return;
+  }
+  clearDialogReveal();
+  if (options && body && options.parentNode !== body) body.appendChild(options);
 }
 
 /** 折叠 / 展开：**只**隐藏正文，不动只读判据、不动任何选择态、不提交。 */
@@ -308,33 +412,39 @@ function showReopenButton(kind, visible) {
 /* ------------------------------------------------------------ 询问弹窗 */
 
 /** 步骤提示：模板把"现在要做什么"写在提示条的 `#t-target-hint`；折叠后它必须还在，
- *  所以这里镜像一份到标题条。空文本时整个提示隐藏（"可选"的步骤提示）。 */
+ *  所以这里镜像一份到标题条。空文本时整个提示隐藏（"可选"的步骤提示）。
+ *  五谷的持久展示例外：那一步的提示条属于无懈窗口，亮牌窗读自己的提示
+ *  （`state.dialog.hintOverride`），不抢提示条的文案。 */
 function syncDialogHint() {
   const hint = $("t-dialog-hint");
   if (!hint) return;
   const source = $("t-target-hint");
-  const text = source ? source.textContent : "";
+  const text = state.dialog.hintOverride !== null
+    ? state.dialog.hintOverride
+    : (source ? source.textContent : "");
   hint.textContent = text;
   hint.hidden = !text;
 }
 
 /** 打开询问弹窗：标题 + 正文节点 + 暗化层都只在这里写一次。
  *
- * 正文 = 提示区的 `#t-options` 整体搬进内容槽（内容仍由各自的渲染器画）；关闭时搬回去。
- * 打开总是展开态（折叠复位）——由 `syncDialog()` 在"换问"时调用，不会抹掉同一问的折叠。
+ * 正文归属由 :func:`applyDialogContentMode` 决定：普通模板把提示区的 `#t-options`
+ * 整体搬进内容槽（内容仍由各自的渲染器画）；五谷持久展示则画进 `#t-dialog-reveal`、
+ * `#t-options` 留在提示区。打开总是展开态（折叠复位）——由 `syncDialog()` 在"换问"时
+ * 调用，不会抹掉同一问的折叠。
  */
 function openDialogDom(kind) {
   const dialog = $("t-dialog");
   const body = $("t-dialog-body");
   const title = $("t-dialog-title");
-  const options = $("t-options");
   if (!dialog || !body) return;
   if (title) title.textContent = dialogTitleFor(kind, state.view ? state.view.pending : null);
-  if (options) body.appendChild(options);
   state.dialog.open = true;
   state.dialog.kind = kind;
   state.dialog.collapsed = false;
+  state.dialog.hintOverride = null;
   dialog.hidden = false;
+  applyDialogContentMode(kind);
   applyDialogCollapseChrome();
   syncDialogHint();
   syncModalChrome();
@@ -346,19 +456,19 @@ function openDialogDom(kind) {
  * 清正文只发生在关闭（换问 / 表面不再是弹窗）时，见 :func:`closeDialogDom`。
  * 两步链会在这里从 `choice` 切到 `unknown`，故 `state.dialog.kind` 也要跟着换——
  * 它决定折叠按钮旁边的重开文案，不能停在上一模板的种类上。
+ * 五谷的持久展示（RESPOND）↔ 正常取牌步也走这里：**键相同**（`reveal:${harvest.key}`），
+ * 只换正文归属，窗口不闪。
  */
 function updateDialogDom(kind) {
   const dialog = $("t-dialog");
-  const body = $("t-dialog-body");
   const title = $("t-dialog-title");
-  const options = $("t-options");
   if (!dialog || dialog.hidden) {
     openDialogDom(kind);
     return;
   }
   if (title) title.textContent = dialogTitleFor(kind, state.view ? state.view.pending : null);
-  if (options && body && options.parentNode !== body) body.appendChild(options);
   state.dialog.kind = kind;
+  applyDialogContentMode(kind);
   applyDialogCollapseChrome();
   syncDialogHint();
   syncModalChrome();
@@ -375,6 +485,7 @@ function closeDialogDom() {
   const hint = $("t-dialog-hint");
   if (dialog) dialog.hidden = true;
   showOptionsHome();
+  clearDialogReveal();
   if (body) {
     body.innerHTML = "";
     body.scrollTop = 0;
@@ -390,15 +501,22 @@ function closeDialogDom() {
   state.dialog.collapsed = false;
   state.dialog.kind = null;
   state.dialog.key = null;
+  state.dialog.persistent = false;
+  state.dialog.hintOverride = null;
   showReopenButton(null, false);
   syncModalChrome();
 }
 
 /** 在每次 `renderPending` 末尾调用：按"当前步骤的表面"决定开 / 关 / 换内容。
  *
- * - 表面不是弹窗（且没有预发动本地态）⇒ 关；
+ * - 表面不是弹窗、也没有五谷的持久展示（且没有预发动本地态）⇒ 关；
  * - 同一问的重复渲染（键相同）⇒ 只更新正文 / 提示，保留折叠；
  * - 换问（键不同）⇒ 先关旧（清正文、折叠复位），再开新。
+ *
+ * 五谷整段结算跨两类步骤：取牌步是弹窗表面（正常亮牌窗），无懈 / 反无懈的 `RESPOND`
+ * 是**牌桌表面**（`persistentRevealPending`）。两类的键同为 `reveal:${harvest.key}`，
+ * 故窗口不关，只切换正文归属；`RESPOND` 期间 `selectionEnabled()` 仍看 `stepDialogKind`
+ * （= null）⇒ 无懈照常可出牌 / 放弃。
  *
  * 末尾顺带刷新一次叠加的武将详情（开着的才画）：它独立于询问弹窗，但不该在轮询 / 刷新时
  * 停在旧数据上；同座位重画保留滚动位置（U1-06）。
@@ -411,11 +529,12 @@ function syncDialog() {
   //
   // **五谷例外**（票 11 / D4）：亮牌是公开处理区，AI 目标拿牌时弹窗也要留在人类屏幕上。
   // 判据只认服务端派生的 `harvest`（不是"所有 reveal"）——遗计（票 12）的观看是私有授予，
-  // 仍然只在本人应答时开窗。
+  // 仍然只在本人应答时开窗。持久展示（无懈窗口）同样对两个座位都显示：亮牌是公开事实。
   const own = pending ? isOwnPending(pending) : false;
-  const publicHarvest = !!pending && !!pending.harvest
-    && pending.harvest.active !== false
+  const persistent = persistentRevealPending(pending) !== null;
+  const harvestStepped = !!pending && isHarvestActive(pending)
     && stepDialogKind(pending) === DIALOG_KINDS.reveal;
+  const publicHarvest = harvestStepped || persistent;
   const kind = state.playback || (!own && !publicHarvest) ? null : dialogWantedKind(pending);
   if (!kind) {
     closeDialogDom();
@@ -426,10 +545,12 @@ function syncDialog() {
   if (key !== state.dialog.key || !state.dialog.open) {
     closeDialogDom();
     state.dialog.key = key;
+    state.dialog.persistent = persistent;
     openDialogDom(kind);
     syncHeroModal();
     return;
   }
+  state.dialog.persistent = persistent;
   updateDialogDom(kind);
   syncHeroModal();
 }
