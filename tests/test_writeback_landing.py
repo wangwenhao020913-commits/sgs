@@ -435,6 +435,56 @@ def test_the_u1_ledger_rows_are_present_and_carry_a_test_landing() -> None:
         )
 
 
+# U2-14 的十一条账本行。与 U1 同一姿态：标题逐条钉住 + 落点必须是正式测试名或**存在**的
+# `ui_smoke` 用例 id。U2-02（尺寸）复用 U1-02a–U1-02c4 的用例 id（票 02 只改了那些断言），
+# 故这条按 `U1-` / `U2-` 两族 id 一起核；其它行以 `U2-` 为主。
+U2_LEDGER_HEADINGS: tuple[str, ...] = (
+    "**U2 顶栏 =",
+    "**U2 询问控件区 =",
+    "**U2 询问弹窗 =",
+    "**U2 只读态 =",
+    "**U2 尺寸 =",
+    "**U2【遗计】=",
+    "**U2【寒冰剑】=",
+    "**U2 观星超时 =",
+    "**U2 反间花色 =",
+    "**U2 五谷亮牌窗 =",
+    "**U2 记录在案的反间超时偏差 =",
+)
+
+SMOKE_CASE_ID_RE = re.compile(r"\bU[12]-0[1-9][A-Za-z0-9]*\b")
+
+
+def test_the_u2_ledger_rows_are_present_and_carry_a_test_landing() -> None:
+    """U2-14 的十一条收口账本行必须逐条在 §5，且「落地位置」列有可核的测试落点。
+
+    动机与 U1 那条相同：删掉一整行不会让任何通用断言变红（表还有别的行），于是“这条裁定
+    哪来的”就悄悄丢了。这里逐条钉标题，并要求每条至少有一个 ``tests/`` 下的正式 pytest 名
+    或**具体** ``ui_smoke`` 用例 id；id 还必须真的出现在烟测文件里——只写文件名不算落点。
+    """
+    rows = section5_rows()
+    smoke = SMOKE_TEST.read_text(encoding="utf-8")
+    for heading in U2_LEDGER_HEADINGS:
+        matches = [
+            (line_no, line) for line_no, line in rows if line.startswith(f"| {heading}")
+        ]
+        assert len(matches) == 1, (
+            f"`06`（§5「程序化约定与偏离一手」）应恰好有一条以 {heading!r} 开头的 U2 账本行，"
+            f"实际 {len(matches)} 条"
+        )
+        line_no, line = matches[0]
+        landing = _landing_cell(line)
+        assert "tests/" in landing, f"§5:{line_no}: U2 账本行的落点缺少 tests/ 引用：{landing}"
+        case_ids = SMOKE_CASE_ID_RE.findall(landing)
+        assert "::test_" in landing or case_ids, (
+            f"§5:{line_no}: U2 账本行的落点没有正式测试名或具体 ui_smoke 用例 id：{landing}"
+        )
+        missing = [case_id for case_id in case_ids if case_id not in smoke]
+        assert not missing, (
+            f"§5:{line_no}: U2 账本行引用的 ui_smoke 用例不存在：{missing}"
+        )
+
+
 def test_doc06_superseded_by_in_landing_cells_is_well_formed() -> None:
     errors = _superseded_by_errors()
     assert errors == [], "\n".join(errors)
