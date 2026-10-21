@@ -174,9 +174,10 @@ function rightActionIndex(pending, kind) {
 
 /** 提示条右端：结束出牌 / 放弃只在**自己的**询问里、且候选真有那一条时出现。
  *
- * 选择型 / 未知区域弹窗（票 08）**没有「放弃」**：引擎给这两步的候选可能带 `Pass`
+ * 选择型 / 未知区域弹窗（票 08 / 09）**没有「放弃」**：引擎给这两步的候选可能带 `Pass`
  * （流水线语义的"取消这一步"），但界面上弹窗内不可放弃——右端放弃一并藏起，
- * `cancelAction` 也不再读它（见 `pending.js`）。
+ * `cancelAction` 也不再读它（见 `pending.js`）。放弃只留在**发动询问**那一步
+ * （反馈 / 寒冰剑的"是否发动"、拆 / 顺是普通用牌）。
  */
 function renderRightActions(pending, view = state.view) {
   const own = isOwnPending(pending, view);
@@ -216,9 +217,9 @@ function resetRightActions() {
 }
 
 function renderSlots(pending) {
-  // 未知区域弹窗（票 08 先接反间盲挑的单一形状；见 `isUnknownZoneStep`）：内容画成
-  // 「?」槽位 + 可见牌面，点一张即提交；其余选择面（五谷 / 反馈 / 拆 / 顺 / 遗计）仍走
-  // 下面的既有槽位面——票 09 再把它们接进模板。
+  // 未知区域弹窗（票 08 盲挑 → 票 09 推广到反馈 / 拆 / 顺 / 寒冰剑，见 `isUnknownZoneStep`）：
+  // 内容画成「?」槽位 + 可见牌面，点一张即提交；其余选择面（五谷 / 遗计 / 自己的牌）仍走
+  // 下面的既有槽位面——它们各有自己的模板（票 11 / 12）。
   if (stepDialogKind(pending) === DIALOG_KINDS.unknown) {
     renderUnknownZone(pending);
     return;
@@ -251,26 +252,36 @@ function renderSlots(pending) {
   box.appendChild(row);
 }
 
-/** 未知区域弹窗的正文（票 08 / D3）：按**实际提供的区域**分组，手牌画「?」、
- *  可见的装备 / 判定牌画牌面；点一张即提交（不经过"选中 → 再点提交"）。
+/** 未知区域弹窗的正文（票 08 / D3；票 09 推广到反馈 / 拆 / 顺 / 寒冰剑）：按**实际提供的
+ *  区域**分组，手牌画「?」、可见的装备 / 判定牌画牌面；点一张即提交（不经过"选中 → 再点提交"）。
  *
  * 分组完全由 `pending.slots` 的 `ref.zone` 推出：这一步没提供的区域**不画**
- * （反间盲挑只提供发动者手牌 ⇒ 没有装备区；票 09 的反馈 / 拆 / 顺带装备槽时才出现）。
+ * （反间盲挑只提供发动者手牌 ⇒ 没有装备区；反馈 / 拆 / 顺带装备 / 判定槽时才出现）。
  * 槽位顺序 = 载荷顺序，不重排——「位置」本身是公开事实。
+ *
+ * 步骤提示（`#t-target-hint`，折叠后镜像进标题条）里的**规则话术**读载荷的
+ * `context.requirement`（服务端派生：反馈 =「获得伤害来源的一张牌」、拆 / 顺 =
+ * 「选择目标区域里的一张牌」），前端只补一句"怎么点"的通用交互说明；没有载荷文案时
+ * 才退回纯交互说明——不在这里抄第二份规则文本。
  */
 function renderUnknownZone(pending) {
   const box = $("t-options");
   const cap = selectionCap(pending);
   const hint = $("t-target-hint");
   if (hint) {
-    hint.textContent = cap === 1
-      ? "点一张牌即提交：看不到牌面，选中后才揭晓。"
-      : `点选至多 ${cap} 张牌即提交：看不到牌面，选中后才揭晓。`;
+    const action = cap === 1 ? "点一张牌即提交。" : `点选至多 ${cap} 张牌即提交。`;
+    const requirement = pending.context && pending.context.requirement;
+    hint.textContent = requirement
+      ? `${requirement}：${action}`
+      : `${action}看不到牌面，选中后才揭晓。`;
   }
   for (const group of unknownSlotGroups(pending)) {
     const section = document.createElement("section");
     section.className = "unknown-zone";
     section.setAttribute("data-zone", group.zone);
+    if (group.seat !== null && group.seat !== undefined) {
+      section.setAttribute("data-seat", String(group.seat));
+    }
     const head = document.createElement("div");
     head.className = "zone-head";
     head.textContent = group.label;

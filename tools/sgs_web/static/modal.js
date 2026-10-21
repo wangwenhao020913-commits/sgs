@@ -39,7 +39,8 @@ const DIALOG_KINDS = Object.freeze({
 /** 当前**步骤**的表面若是弹窗就返回它的种类（spec D8「只读态」的唯一判据源）。
  *
  * 排列（`ARRANGE`）、选择型（服务端带 `option_labels` 的 `SELECT_OPTION`）、未知区域
- * （`SELECT_CARDS` 的盲挑形状）都是弹窗表面。另外两类窗口**不**进这里：
+ * （`SELECT_CARDS` 里"挑另一名角色三区里的一张牌"的形状）都是弹窗表面。另外两类窗口
+ * **不**进这里：
  *  - 预发动清单是**牌桌表面**（D2 的 C 形：点自己的牌 / 点自己的座位），打开时牌桌
  *    照常接选择——它只是把选项搬进了窗口，不是"这一步的答案在窗内"；
  *  - 武将详情是叠加的**检视窗**：开合不改变只读态，所以这里读的是**底下那一步**的
@@ -47,8 +48,8 @@ const DIALOG_KINDS = Object.freeze({
  *
  * 票 07–12 的四个模板在这里加分支（槽位已写在 `DIALOG_KINDS` 里）：
  *   - 选择型（花色 / 牌名枚举）→ `DIALOG_KINDS.choice`（票 08）；
- *   - 未知区域（他人手牌 / 装备）→ `DIALOG_KINDS.unknown`（票 08 先接反间盲挑，
- *     票 09 再接反馈 / 拆 / 顺的多区形状）；
+ *   - 未知区域（他人手牌 / 装备 / 判定）→ `DIALOG_KINDS.unknown`（票 08 接反间盲挑，
+ *     票 09 推广到反馈 / 拆 / 顺 / 寒冰剑的"从别人的三区挑一张"形状）；
  *   - 亮牌（五谷 / 遗计）→ `DIALOG_KINDS.reveal`（票 11 / 12）。
  * 判据仍然只看 `pending`，不看 `state.dialog` / 折叠状态；"这一步是不是自己的询问"
  * 由调用方（`syncDialog`）另问一次 `isOwnPending`。
@@ -79,21 +80,51 @@ function hasServerOptionLabels(pending) {
   return !!labels && typeof labels === "object" && Object.keys(labels).length > 0;
 }
 
-/** 未知区域的**盲挑形状**（票 08）：单区（手牌）、槽位只有位置、铺的是**别人的**牌。
+/** 未知区域模板认得的区域（D3）：他人手牌 / 装备 / 判定三区。
+ *  自己的手牌与处理区（五谷亮牌）不在此列——前者是牌桌表面，后者是亮牌模板（票 11）。 */
+const UNKNOWN_ZONE_NAMES = Object.freeze(["hand", "equip", "judge"]);
+
+/** 未知区域模板的**唯一判据**（票 08 的盲挑形状 → 票 09 推广到全部"挑别人一张牌"的步骤）。
  *
- * 只接这一种形状是**有意收窄**：反馈（手牌 + 装备两区）、拆 / 顺（三区）属于票 09 的
- * 未知区域弹窗，它们的 `spec.zones` 不是单区手牌，故这里不会把它们的旧选择面抢过来画。
- * 判据全部读载荷（`kind` / `slots` / `spec.zones` / `ref.seat`），不写技能 id。
+ * 认的是**一副形状**而不是技能 id，故反馈 / 过河拆桥 / 顺手牵羊 / 寒冰剑 / 反间盲挑
+ * 共用同一份渲染（`renderUnknownZone`），不必逐个接线。形状全部读载荷：
+ *
+ *  - `SELECT_CARDS`，且 `spec.zones` 非空、只由**逐座位的三区**（手牌 / 装备 / 判定）组成；
+ *  - **必须提供手牌区**：`spec.zones` 含 `hand`。这一条把"另一名角色的可见装备区"
+ *    （【麒麟弓】= 只有 `equip`）留在牌桌表面（D2），也把【五谷】的 `processing` 排除；
+ *  - 槽位**全来自同一个别的座位**（`ref.seat` 一致且 ≠ `actor`）——挑自己的牌（制衡 / 仁德 /
+ *    青囊 / 结姻 / 离间 / 流离 / 雌雄 / 贯石斧 / 青龙）因此不进来；
+ *  - 没有 `revealed`（【遗计】观看牌堆顶的亮牌）、没有 `provide_type`（"提供一张 B"）、
+ *    没有排列规格——这三类各有自己的表面（票 11 / 12 / 14）。
+ *
+ * **不要求"至少有一个隐藏槽"是有意的**：来源手牌为空时反馈 / 拆 / 顺只剩可见的装备 /
+ * 判定槽，仍是同一步、同一个模板（`renderUnknownZone` 只按实际给的区域画块）。判据只看
+ * 公开形状，不写技能 id、不读 `actor` 是不是人类（`syncDialog` 另问 `isOwnPending`）。
  */
 function isUnknownZoneStep(pending) {
   if (!pending || pending.kind !== "SELECT_CARDS") return false;
   const slots = pending.slots || [];
   if (!slots.length) return false;
+  if (pending.actor === null || pending.actor === undefined) return false;
+  // 亮牌（遗计 / 观看牌堆顶）与"提供一张 B"各有自己的模板，绝不抢。
+  if ((pending.revealed || []).length) return false;
+  if (pending.provide_type) return false;
+  if (pending.arrange) return false;
   const zones = (pending.spec && pending.spec.zones) || [];
-  if (zones.length !== 1 || zones[0] !== "hand") return false;
-  return slots.every((slot) => slot && slot.card === null
-    && slot.ref && slot.ref.seat !== null && slot.ref.seat !== undefined
-    && Number(slot.ref.seat) !== Number(pending.actor));
+  if (!zones.length) return false;
+  if (!zones.every((zone) => UNKNOWN_ZONE_NAMES.includes(zone))) return false;
+  if (!zones.includes("hand")) return false;
+  const actor = Number(pending.actor);
+  let seat = null;
+  for (const slot of slots) {
+    const ref = slot && slot.ref;
+    if (!ref || ref.seat === null || ref.seat === undefined) return false;
+    if (!UNKNOWN_ZONE_NAMES.includes(ref.zone)) return false;
+    const at = Number(ref.seat);
+    if (seat === null) seat = at;
+    else if (at !== seat) return false;
+  }
+  return seat !== null && seat !== actor;
 }
 
 /** 只读态判据（spec D8）：当前步骤的表面是弹窗 ⇒ 牌桌选择入口一律 no-op。

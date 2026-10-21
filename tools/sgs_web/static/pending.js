@@ -298,8 +298,8 @@ function seatChoices(pending) {
 function cancelAction(pending) {
   if (!pending) return null;
   if (pending.kind !== "SELECT_CARDS" && pending.kind !== "SELECT_OPTION") return null;
-  // 弹窗表面**没有「放弃」**（spec D3 / 票 08）：花色 / 盲挑这两步即便引擎给了 Pass，
-  // 界面也不读它——右端放弃被藏起，取消键因此只剩"清空本地选择"（这里的 null 让
+  // 弹窗表面**没有「放弃」**（spec D3 / 票 08 / 09）：选择型与未知区域步骤即便引擎给了
+  // Pass，界面也不读它——右端放弃被藏起，取消键因此只剩"清空本地选择"（这里的 null 让
   // `cancelOrClear` 走清空分支，而不是偷偷替玩家送出一条 Pass）。
   const kind = stepDialogKind(pending);
   if (kind === DIALOG_KINDS.choice || kind === DIALOG_KINDS.unknown) return null;

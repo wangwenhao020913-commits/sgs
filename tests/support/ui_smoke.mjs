@@ -8723,4 +8723,486 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.resetSelection();
 }
 
+/* ============ U2-09（D2 / D3 / D8）：未知区域弹窗推广到反馈 / 拆 / 顺 ============
+ *
+ * 08 的模板已按 `slots[].ref.zone` 分组；本段钉的是**判据的推广**：凡是"从另一名角色的
+ * 手牌 / 装备 / 判定三区里挑一张"的 `SELECT_CARDS`（反馈 / 过河拆桥 / 顺手牵羊 / 寒冰剑 /
+ * 反间盲挑）都进同一个 `#t-dialog` 模板：手牌画「?」、可见的装备 / 判定照常画牌面、
+ * 一击即提交、弹窗内没有「放弃」。亮牌（遗计）、处理区（五谷）、只挑可见装备（麒麟弓）、
+ * "提供一张 B"（青龙 / 丈八）与自己的牌**不进**这个模板（判据见 `modal.js`）。
+ *
+ * 载荷形状与真会话同形：`slots[].ref` / `spec.zones` / `context.requirement` 都由服务端
+ * 下发（反馈的 requirement =「获得伤害来源的一张牌」，拆 / 顺 =「选择目标区域里的一张牌」）。
+ * 激活询问（是否发动）仍是牌桌表面：放弃留在那一步；弹窗这一步没有 Pass。
+ */
+{
+  const render = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  /** 某节点是不是 `#t-dialog` 的子孙（钉"弹窗内容里没有操作四键"）。 */
+  const insideDialog = (node) => {
+    let at = node ? node.parentNode : null;
+    while (at) {
+      if (at === $("t-dialog")) return true;
+      at = at.parentNode;
+    }
+    return false;
+  };
+  const zoneSections = () => $("t-options").children;
+  const zoneSlots = (section) => section.children[1].children;
+  const allSlots = () => zoneSections().flatMap((section) => zoneSlots(section));
+  const fireContext = (node) => {
+    const event = { target: node, prevented: false, stopPropagation() {} };
+    event.preventDefault = () => { event.prevented = true; };
+    if (node) (node.listeners.contextmenu || []).forEach((fn) => fn(event));
+    return event;
+  };
+  const heroBlockOf = (seat) => {
+    const box = seatBox(seat);
+    return box
+      ? box.children.find((node) => (node.className || "").split(" ").includes("hero-block")) || null
+      : null;
+  };
+  const clickCollapse = () => (($("t-dialog-collapse").listeners.click) || [])
+    .forEach((fn) => fn({ target: $("t-dialog-collapse") }));
+  /** 可见牌面的点击由 `cardFaceNode` 的同步包装转发（不等于 `await` 内部那次提交）。
+   *  这里等"提交在飞"结束，避免下一段撞进四键冻结态（用 Node 自己的计时器，不碰 vm 垫片）。 */
+  const settleSubmit = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 1, timeout_seconds: null, seed: 20261013,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  // 上一段可能留着开着的武将详情；本段从"弹窗 + 无详情"这一面开始。
+  ui.state.modal.heroSeat = null;
+
+  // ---- 0 数据：来源 / 目标是座位 0，人类是座位 1（反馈的持有者 / 拆顺的使用者） ----
+  const armor = {
+    ...synthCard(95, "八卦阵"), type: "armor", slot: "armor", color: "black",
+    description: "防具描述：需要时打出一张【闪】。",
+  };
+  const horse = {
+    ...synthCard(96, "赤兔"), type: "horse", slot: "horse_defense", color: "red",
+    description: "坐骑描述：距离 -1。",
+  };
+  const judgeCard = {
+    ...synthCard(97, "乐不思蜀"), type: "indulgence", slot: null,
+    description: "判定描述。",
+  };
+  const fankuiPending = (seq) => ({
+    kind: "SELECT_CARDS", actor: 1, seq, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      ...[0, 1, 2, 3, 4].map(
+        (index) => ({ kind: "SelectCards", answers_seq: seq, picks: [index] })),
+      // 引擎这一步是 optional=False（没有 Pass）；这里仍塞一条，钉"弹窗内即便有也不画"。
+      { kind: "Pass", answers_seq: seq },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      ...[0, 1, 2].map(() => ({ ref: { seat: 0, zone: "hand" }, card: null })),
+      { ref: { seat: 0, zone: "equip" }, card: armor },
+      { ref: { seat: 0, zone: "equip" }, card: horse },
+    ],
+    spec: { zones: ["hand", "equip"], total: [1, 1], sequential: false, optional: true },
+    context: {
+      actor: 1, name: "杀", targets: [1],
+      label: "0号位张飞对1号位司马懿使用杀",
+      requirement: "获得伤害来源的一张牌", skill_hints: [],
+    },
+    prompt_display: { text: "请从选择面里选择一张牌。", default_label: "超时将自动放弃" },
+    preactivations: {}, preactivation: [],
+  });
+  const fankuiView = (seq) => {
+    const view = synthView(fankuiPending(seq));
+    // 人类是**反馈的持有者**（座位 1）：询问者 = 查看者，界面才铺可点控件。
+    view.snapshot.seat = 1;
+    view.human_seat = 1;
+    view.snapshot.self_hand = [synthCard(1, "杀")];
+    view.snapshot.players[0].hero_name = "张飞";
+    view.snapshot.players[0].skills = [{
+      skill_id: "hero.zhangfei.paoxiao", name: "咆哮", skill_type: "NORMAL", locked: true,
+      carrier: "HERO", description: "锁定技：出杀没有次数限制。", ui: { passive: true },
+    }];
+    return view;
+  };
+
+  // ---- ① 发动询问仍拥有「放弃」；弹窗这一步没有 ----
+  {
+    const activation = {
+      kind: "SKILL_ACTIVATION", actor: 1, seq: 9900, skill_id: "hero.simayi.fankui",
+      prompt: "是否发动【反馈】？",
+      legal_actions: [
+        { kind: "ActivateSkill", skill_id: "hero.simayi.fankui", answers_seq: 9900, choices: [], picks: [] },
+        { kind: "Pass", answers_seq: 9900 },
+      ],
+      candidate_index: {}, virtual_index: {}, option_seats: {},
+      context: {
+        actor: 1, name: "反馈", targets: [1], label: "0号位张飞对1号位司马懿使用杀",
+        requirement: "获得伤害来源的一张牌", skill_hints: [],
+      },
+      preactivations: {}, preactivation: [],
+    };
+    const view = synthView(activation);
+    view.snapshot.seat = 1;
+    view.human_seat = 1;
+    view.skills = [{
+      skill_id: "hero.simayi.fankui", name: "反馈", skill_type: "NORMAL", locked: false,
+      description: "反馈的描述。", ui: { passive: true },
+    }];
+    render(view);
+    check("U2-09a 发动询问仍是牌桌表面：「放弃」在发动这一步（不是弹窗）",
+      ui.stepDialogKind(activation) === null
+        && $("t-dialog").hidden === true
+        && $("btn-pass").hidden === false
+        && $("btn-pass").textContent === "放弃",
+      `kind=${ui.stepDialogKind(activation)} dialogHidden=${$("t-dialog").hidden} passHidden=${$("btn-pass").hidden} pass="${$("btn-pass").textContent}"`);
+  }
+
+  // ---- ② 反馈：来源手牌「?」+ 可见装备，同一个弹窗、两区分组 ----
+  let view = fankuiView(9901);
+  render(view);
+  const handSection = zoneSections()[0];
+  const equipSection = zoneSections()[1];
+  check("U2-09b 反馈 = 未知区域弹窗：来源手牌「?」+ 可见装备，两区分组、归属 / 区域可读",
+    ui.stepDialogKind(view.pending) === "unknown"
+      && $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "选择一张牌"
+      && $("t-dialog-body").children.includes($("t-options"))
+      && zoneSections().length === 2
+      && handSection.getAttribute("data-zone") === "hand"
+      && handSection.getAttribute("data-seat") === "0"
+      && handSection.children[0].textContent.includes("座位0 手牌")
+      && handSection.children[0].textContent.includes("牌面未知")
+      && zoneSlots(handSection).length === 3
+      && zoneSlots(handSection).every((node) => node.textContent === "?"
+        && node.classList.contains("unknown"))
+      && equipSection.getAttribute("data-zone") === "equip"
+      && equipSection.children[0].textContent.includes("座位0 装备区")
+      && zoneSlots(equipSection).length === 2
+      && zoneSlots(equipSection).every((node) => /八卦阵|赤兔/.test(node.text()))
+      && $("t-dialog-hint").textContent.includes("获得伤害来源的一张牌")
+      && $("t-dialog-hint").textContent.includes("点一张牌即提交")
+      && candidateRowButtons().length === 0,
+    `kind=${ui.stepDialogKind(view.pending)} 块=${zoneSections().map((n) => n.getAttribute("data-zone")).join(",")} 手牌=${zoneSlots(handSection).length} 装备=${zoneSlots(equipSection).map((n) => n.text()).join(",")} hint="${$("t-dialog-hint").textContent}"`);
+
+  // ---- ③ 弹窗内没有「放弃」/ 四键；可折叠、无关闭 / ESC / 点背景出口 ----
+  const actionIds = ["btn-submit", "btn-pass", "btn-cancel", "btn-end-phase", "t-countdown"];
+  check("U2-09c 弹窗内没有「放弃」/ 提交 / 取消 / 结束出牌 / 倒计时（操作键只在提示条右端）",
+    $("btn-pass").hidden === true
+      && $("btn-cancel").disabled === true
+      && $("btn-submit").disabled === true
+      && actionIds.every((id) => !insideDialog($(id)))
+      && !/放弃/.test($("t-dialog").text()),
+    `passHidden=${$("btn-pass").hidden} cancel=${$("btn-cancel").disabled} inDialog=${actionIds.map((id) => `${id}:${insideDialog($(id))}`).join(",")}`);
+
+  const beforeEsc = calls.length;
+  fireDocument("keydown", { key: "Escape", preventDefault() {} });
+  check("U2-09d 弹窗没有关闭 / ESC / 点背景出口（零提交、遮罩没有 click 监听）",
+    $("t-dialog").hidden === false
+      && calls.length === beforeEsc
+      && !($("t-modal-backdrop").listeners.click || []).length,
+    `dialogHidden=${$("t-dialog").hidden} calls=${calls.length - beforeEsc} backdropClicks=${($("t-modal-backdrop").listeners.click || []).length}`);
+
+  clickCollapse();
+  check("U2-09e 弹窗可折叠：正文撤下、标题与载荷步骤提示留下、暗化层收起",
+    $("t-dialog-body").hidden === true
+      && $("t-dialog-title").textContent === "选择一张牌"
+      && $("t-dialog-hint").textContent.includes("获得伤害来源的一张牌")
+      && $("t-dialog-collapse").textContent === "展开"
+      && $("t-modal-backdrop").hidden === true,
+    `bodyHidden=${$("t-dialog-body").hidden} title="${$("t-dialog-title").textContent}" hint="${$("t-dialog-hint").textContent}"`);
+  clickCollapse();
+  check("U2-09e2 再点「展开」恢复正文与暗化层（折叠不改只读判据）",
+    $("t-dialog-body").hidden === false
+      && $("t-modal-backdrop").hidden === false
+      && ui.selectionEnabled() === false,
+    `bodyHidden=${$("t-dialog-body").hidden} backdropHidden=${$("t-modal-backdrop").hidden} enabled=${ui.selectionEnabled()}`);
+
+  // ---- ④ 弹窗打开时牌桌只读，但检视（悬停 / 右键武将详情）照常 ----
+  const beforeHandClick = $("t-hand").children[0];
+  (beforeHandClick.listeners.click || []).forEach((fn) => fn({ target: beforeHandClick }));
+  check("U2-09f 只读态：点自己的手牌 / 座位不产生选择（焦点 / 目标 / 高亮都不变）",
+    ui.selectionEnabled() === false
+      && ui.state.focusCardId === null
+      && ui.state.selectedTargets.length === 0
+      && !beforeHandClick.classList.contains("sel")
+      && (seatBox(0).listeners.click || []).length === 0
+      && !seatBox(0).classList.contains("targetable")
+      && !seatBox(0).classList.contains("tsel"),
+    `focus=${ui.state.focusCardId} targets=${JSON.stringify(ui.state.selectedTargets)} handSel=${beforeHandClick.classList.contains("sel")} seatClicks=${(seatBox(0).listeners.click || []).length}`);
+
+  const equipFace = zoneSlots(equipSection)[0];
+  const detailBody = () => $("t-modal-body").text();
+  fireContext(heroBlockOf(0));
+  check("U2-09g 检视照常：装备牌面仍带服务端描述（悬停），右键武将详情叠在弹窗上、只读态不变",
+    equipFace.getAttribute("title").includes("防具描述")
+      && $("t-modal").hidden === false
+      && /武将详情/.test($("t-modal-title").textContent)
+      && detailBody().includes("咆哮")
+      && $("t-dialog").hidden === false
+      && ui.selectionEnabled() === false,
+    `title="${equipFace.getAttribute("title")}" detailHidden=${$("t-modal").hidden} detailTitle="${$("t-modal-title").textContent}" enabled=${ui.selectionEnabled()}`);
+  const sectionsBeforeDetail = zoneSections().length;
+  fireDocument("keydown", { key: "Escape", preventDefault() {} });
+  check("U2-09g2 ESC 只关武将详情；底下的未知区域弹窗原样恢复、仍只读",
+    $("t-modal").hidden === true
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === false
+      && zoneSections().length === sectionsBeforeDetail
+      && ui.selectionEnabled() === false,
+    `detailHidden=${$("t-modal").hidden} dialogHidden=${$("t-dialog").hidden} sections=${zoneSections().length} enabled=${ui.selectionEnabled()}`);
+
+  // ---- ⑤ 点一张「?」= 恰好一条 SelectCards POST（picks = 槽位位置）；装备牌面同样一击提交 ----
+  {
+    const beforePick = calls.length;
+    staleAnswerStatus = 400;
+    await clickAndWait(zoneSlots(handSection)[1]);
+    staleAnswerStatus = null;
+    const answers = calls.slice(beforePick).filter((call) => call.path.includes("/answer"));
+    check("U2-09h 点第 2 张「?」= 恰一条 SelectCards POST，picks 填该槽位位置、不是 Pass",
+      answers.length === 1
+        && JSON.stringify(answers[0].body.action)
+          === JSON.stringify(fankuiPending(9901).legal_actions[1])
+        && answers[0].body.action.kind === "SelectCards"
+        && JSON.stringify(answers[0].body.action.picks) === "[1]",
+      `answers=${answers.length} action=${JSON.stringify(answers[0] && answers[0].body.action)}`);
+  }
+  {
+    // 400 之后界面会刷新回真会话的询问；重新喂同一份合成视图再点装备槽。
+    render(fankuiView(9901));
+    const beforePick = calls.length;
+    staleAnswerStatus = 400;
+    await clickAndWait(zoneSlots(zoneSections()[1])[1]);
+    await settleSubmit();
+    staleAnswerStatus = null;
+    const answers = calls.slice(beforePick).filter((call) => call.path.includes("/answer"));
+    check("U2-09i 装备牌面一击也提交（可见牌面不是只读展示）：picks = 装备槽位置",
+      answers.length === 1
+        && JSON.stringify(answers[0].body.action)
+          === JSON.stringify(fankuiPending(9901).legal_actions[4])
+        && JSON.stringify(answers[0].body.action.picks) === "[4]",
+      `answers=${answers.length} action=${JSON.stringify(answers[0] && answers[0].body.action)}`);
+  }
+
+  // ---- ⑥ 过河拆桥 / 顺手牵羊：目标三区在同一弹窗，判定 / 装备可见、手牌「?」 ----
+  const zonePending = (seq, name) => ({
+    kind: "SELECT_CARDS", actor: 1, seq, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [0, 1, 2, 3].map(
+      (index) => ({ kind: "SelectCards", answers_seq: seq, picks: [index] })),
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "hand" }, card: null },
+      { ref: { seat: 0, zone: "hand" }, card: null },
+      { ref: { seat: 0, zone: "equip" }, card: armor },
+      { ref: { seat: 0, zone: "judge" }, card: judgeCard },
+    ],
+    spec: { zones: ["hand", "equip", "judge"], total: [1, 1], sequential: false, optional: false },
+    context: {
+      actor: 1, name, targets: [0],
+      label: `1号位关羽对0号位张飞使用${name}`,
+      requirement: "选择目标区域里的一张牌", skill_hints: [],
+    },
+    prompt_display: { text: "请从选择面里选择一张牌。", default_label: "" },
+    preactivations: {}, preactivation: [],
+  });
+  const zoneView = (seq, name) => {
+    const view = synthView(zonePending(seq, name));
+    view.snapshot.seat = 1;
+    view.human_seat = 1;
+    return view;
+  };
+
+  for (const [seq, name] of [[9910, "过河拆桥"], [9920, "顺手牵羊"]]) {
+    const targetView = zoneView(seq, name);
+    render(targetView);
+    const zones = zoneSections().map((node) => node.getAttribute("data-zone")).join(",");
+    check(`U2-09j ${name} = 目标三区同一弹窗（手牌「?」+ 可见装备 / 判定），步骤提示读载荷`,
+      ui.stepDialogKind(targetView.pending) === "unknown"
+        && $("t-dialog").hidden === false
+        && $("t-dialog-title").textContent === "选择一张牌"
+        && ui.state.dialog.key === `chain:${name}:1`
+        && zones === "hand,equip,judge"
+        && zoneSections().every((node) => node.getAttribute("data-seat") === "0")
+        && zoneSlots(zoneSections()[0]).length === 2
+        && zoneSlots(zoneSections()[0]).every((node) => node.textContent === "?")
+        && zoneSlots(zoneSections()[1])[0].text().includes("八卦阵")
+        && zoneSlots(zoneSections()[2])[0].text().includes("乐不思蜀")
+        && $("t-dialog-hint").textContent.includes("选择目标区域里的一张牌")
+        && $("btn-pass").hidden === true
+        && $("btn-cancel").disabled === true
+        && candidateRowButtons().length === 0,
+      `kind=${ui.stepDialogKind(targetView.pending)} key=${ui.state.dialog.key} 块=${zones} hint="${$("t-dialog-hint").textContent}"`);
+  }
+
+  {
+    const judgeView = zoneView(9930, "顺手牵羊");
+    render(judgeView);
+    const judgeNode = zoneSlots(zoneSections()[2])[0];
+    const beforePick = calls.length;
+    staleAnswerStatus = 400;
+    await clickAndWait(judgeNode);
+    await settleSubmit();
+    staleAnswerStatus = null;
+    const answers = calls.slice(beforePick).filter((call) => call.path.includes("/answer"));
+    check("U2-09k 拆 / 顺：点判定区的一张可见牌也一击提交（三区都是同一个提交点）",
+      answers.length === 1
+        && JSON.stringify(answers[0].body.action)
+          === JSON.stringify(zonePending(9930, "顺手牵羊").legal_actions[3])
+        && JSON.stringify(answers[0].body.action.picks) === "[3]",
+      `answers=${answers.length} action=${JSON.stringify(answers[0] && answers[0].body.action)} clicks=${(judgeNode.listeners.click || []).length} kind=${ui.stepDialogKind(judgeView.pending)} busy=${ui.state.submitBusy} session=${Boolean(ui.state.sessionId)}`);
+  }
+
+  // ---- ⑦ 08 的反间盲挑（单区手牌）不回归：仍是同一个模板，不多画装备区 ----
+  {
+    const blind = zoneView(9940, "反间");
+    blind.pending.slots = [0, 1, 2, 3, 4].map(
+      () => ({ ref: { seat: 0, zone: "hand" }, card: null }));
+    blind.pending.spec = { zones: ["hand"], total: [1, 1], sequential: false, optional: true };
+    blind.pending.context.requirement = "由目标从你的手牌中选择一张";
+    blind.pending.legal_actions = [
+      ...[0, 1, 2, 3, 4].map(
+        (index) => ({ kind: "SelectCards", answers_seq: 9940, picks: [index] })),
+      { kind: "Pass", answers_seq: 9940 },
+    ];
+    render(blind);
+    check("U2-09l 08 的反间盲挑单区形状照旧：五个「?」、只有手牌一区、无装备区、无「放弃」",
+      ui.stepDialogKind(blind.pending) === "unknown"
+        && zoneSections().length === 1
+        && zoneSections()[0].getAttribute("data-zone") === "hand"
+        && zoneSlots(zoneSections()[0]).length === 5
+        && !/装备区/.test($("t-options").text())
+        && $("btn-pass").hidden === true
+        && $("t-dialog-hint").textContent.includes("由目标从你的手牌中选择一张"),
+      `kind=${ui.stepDialogKind(blind.pending)} 块=${zoneSections().length} 槽=${zoneSlots(zoneSections()[0]).length} hint="${$("t-dialog-hint").textContent}"`);
+  }
+
+  // ---- ⑧ 判据的**排除面**：亮牌 / 处理区 / 可见装备 / 提供 B / 自己的牌不进未知区域模板 ----
+  {
+    const card = synthCard(501, "桃");
+    const pick = (seq, action) => ({ kind: "SelectCards", answers_seq: seq, picks: [0] });
+    const yiji = {
+      kind: "SELECT_CARDS", actor: 0, seq: 9950,
+      legal_actions: [pick(9950)], candidate_index: {},
+      slots: [{ ref: { seat: 0, zone: "hand" }, card }],
+      spec: { zones: ["hand"], total: [1, 2] }, revealed: [card],
+    };
+    const wugu = {
+      kind: "SELECT_CARDS", actor: 0, seq: 9951,
+      legal_actions: [pick(9951)], candidate_index: {},
+      slots: [{ ref: { seat: null, zone: "processing" }, card }],
+      spec: { zones: ["processing"], total: [1, 1] },
+    };
+    const qilin = {
+      kind: "SELECT_CARDS", actor: 0, seq: 9952,
+      legal_actions: [pick(9952)], candidate_index: {},
+      slots: [{ ref: { seat: 1, zone: "equip" }, card: horse }],
+      spec: { zones: ["equip"], total: [1, 1] },
+    };
+    const provide = {
+      kind: "SELECT_CARDS", actor: 0, seq: 9953, provide_type: "slash",
+      legal_actions: [pick(9953)], candidate_index: {},
+      slots: [{ ref: { seat: 1, zone: "hand" }, card: null }],
+      spec: { zones: ["hand"], total: [1, 1] },
+    };
+    const ownPick = {
+      kind: "SELECT_CARDS", actor: 0, seq: 9954,
+      legal_actions: [pick(9954)], candidate_index: {},
+      slots: [{ ref: { seat: 0, zone: "hand" }, card: null }],
+      spec: { zones: ["hand"], total: [1, 1] },
+    };
+    const twoSeats = {
+      kind: "SELECT_CARDS", actor: 0, seq: 9955,
+      legal_actions: [pick(9955)], candidate_index: {},
+      slots: [
+        { ref: { seat: 1, zone: "hand" }, card: null },
+        { ref: { seat: 2, zone: "hand" }, card: null },
+      ],
+      spec: { zones: ["hand"], total: [1, 1] },
+    };
+    check("U2-09m 判据排除面：遗计亮牌 / 五谷处理区 / 麒麟弓可见装备 / 提供 B / 自己的牌 / 跨座位都不抢成未知区域",
+      ui.stepDialogKind(yiji) === null
+        && ui.stepDialogKind(wugu) === null
+        && ui.stepDialogKind(qilin) === null
+        && ui.stepDialogKind(provide) === null
+        && ui.stepDialogKind(ownPick) === null
+        && ui.stepDialogKind(twoSeats) === null,
+      `yiji=${ui.stepDialogKind(yiji)} wugu=${ui.stepDialogKind(wugu)} qilin=${ui.stepDialogKind(qilin)} provide=${ui.stepDialogKind(provide)} own=${ui.stepDialogKind(ownPick)} twoSeats=${ui.stepDialogKind(twoSeats)}`);
+
+    // 来源手牌为空时反馈 / 拆 / 顺只剩可见装备 / 判定：仍是同一步、同一个模板（不退回旧选择面）。
+    const emptyHand = {
+      kind: "SELECT_CARDS", actor: 1, seq: 9956,
+      legal_actions: [pick(9956)], candidate_index: {},
+      slots: [{ ref: { seat: 0, zone: "equip" }, card: armor }],
+      spec: { zones: ["hand", "equip"], total: [1, 1] },
+      context: { actor: 1, name: "反馈", targets: [1], requirement: "获得伤害来源的一张牌" },
+    };
+    check("U2-09n 手牌为空的来源（只剩可见装备）仍走未知区域模板：区域按实际提供的画",
+      ui.stepDialogKind(emptyHand) === "unknown"
+        && (() => {
+          const v = synthView(emptyHand);
+          v.snapshot.seat = 1;
+          v.human_seat = 1;
+          render(v);
+          return zoneSections().length === 1
+            && zoneSections()[0].getAttribute("data-zone") === "equip"
+            && zoneSlots(zoneSections()[0])[0].text().includes("八卦阵");
+        })(),
+      `kind=${ui.stepDialogKind(emptyHand)} 块=${zoneSections().map((n) => n.getAttribute("data-zone")).join(",")}`);
+  }
+
+  // ---- ⑨ 同一条链上的连续两次未知区域询问共用一个容器（寒冰剑两轮 / 票 13 的底座） ----
+  {
+    const chainPending = (seq, slots) => ({
+      kind: "SELECT_CARDS", actor: 1, seq, prompt: "请从选择面里选择一张牌。",
+      legal_actions: slots.map(
+        (_, index) => ({ kind: "SelectCards", answers_seq: seq, picks: [index] })),
+      candidate_index: {}, virtual_index: {}, option_seats: {},
+      slots,
+      spec: { zones: ["hand", "equip"], total: [1, 1], sequential: false, optional: false },
+      context: {
+        actor: 1, name: "杀", targets: [1],
+        label: "0号位张飞对1号位司马懿使用杀",
+        requirement: "获得伤害来源的一张牌", skill_hints: [],
+      },
+      preactivations: {}, preactivation: [],
+    });
+    const chainView = (seq, slots) => {
+      const v = synthView(chainPending(seq, slots));
+      v.snapshot.seat = 1;
+      v.human_seat = 1;
+      return v;
+    };
+    render(chainView(9960, [
+      { ref: { seat: 0, zone: "hand" }, card: null },
+      { ref: { seat: 0, zone: "hand" }, card: null },
+      { ref: { seat: 0, zone: "equip" }, card: armor },
+    ]));
+    const chainKey = ui.state.dialog.key;
+    render(chainView(9961, [
+      { ref: { seat: 0, zone: "hand" }, card: null },
+      { ref: { seat: 0, zone: "hand" }, card: null },
+    ]));
+    check("U2-09o 同一技能链的先后两次未知区域询问共用键：容器不关、正文换成新一步",
+      chainKey === "chain:杀:1"
+        && ui.state.dialog.key === chainKey
+        && $("t-dialog").hidden === false
+        && $("t-dialog-body").children.includes($("t-options"))
+        && zoneSections().length === 1
+        && zoneSections()[0].getAttribute("data-zone") === "hand",
+      `key=${ui.state.dialog.key} before=${chainKey} hidden=${$("t-dialog").hidden} 块=${zoneSections().map((n) => n.getAttribute("data-zone")).join(",")}`);
+  }
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
