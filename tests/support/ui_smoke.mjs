@@ -1539,7 +1539,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿X1e 没有右侧固定栏（牌桌里不再有 .cols）",
     tableView.includes('id="table-bottom"')
       && !tableView.includes('class="cols"') && !tableView.includes('class="panel grow"'));
-  check("㉿X1f 顶栏：左身份配比 / 中轮次与行动者 / 右牌堆弃牌堆 + 设置 + 回放，且不放计时器",
+  check("㉿X1f 顶栏：左身份配比 / 中轮次与行动者 / 右牌堆弃牌堆 + 设置 + 导航三键，且不放计时器",
     (() => {
       const topbar = tableView.slice(at('id="table-topbar"'), at('id="table-stage"'));
       return topbar.includes('id="t-identity-panel"')
@@ -1548,7 +1548,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
         && topbar.includes('id="t-deck"')
         && topbar.includes('id="t-discard"')
         && topbar.includes('id="btn-settings"')
-        && topbar.includes('id="btn-go-replay"')
+        && topbar.includes('id="nav-lobby"')
+        && topbar.includes('id="nav-table"')
+        && topbar.includes('id="nav-replay"')
+        && !topbar.includes('id="btn-go-replay"')
         && !topbar.includes('id="t-timer"');
     })(),
     `计时器在顶栏=${tableView.slice(at('id="table-topbar"'), at('id="table-stage"')).includes('id="t-timer"')}`);
@@ -4540,15 +4543,15 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     $("t-settings").hidden === false
       && !!$("btn-delay") && !!$("btn-takeover") && !!$("btn-refresh"));
 
-  // 顶栏「回放」入口 = 真切页（不是只在 HTML 里有个 id）；顶部「牌桌」能回来。
+  // 牌桌顶栏的导航三键 = 真切页（D7：旧「回放」图标按钮已删，回放入口就是导航里的「回放」）。
   $("view-table").hidden = false;
   $("view-replay").hidden = true;
-  (($("btn-go-replay").listeners.click) || []).forEach((fn) => fn({ target: $("btn-go-replay") }));
-  check("U1-01p 顶栏回放入口切到回放页",
+  (($("nav-replay").listeners.click) || []).forEach((fn) => fn({ target: $("nav-replay") }));
+  check("U1-01p 牌桌顶栏「回放」导航切到回放页",
     $("view-replay").hidden === false && $("view-table").hidden === true,
     `table=${$("view-table").hidden} replay=${$("view-replay").hidden}`);
   (($("nav-table").listeners.click) || []).forEach((fn) => fn({ target: $("nav-table") }));
-  check("U1-01p2 顶部「牌桌」切回牌桌",
+  check("U1-01p2 顶栏「牌桌」切回牌桌",
     $("view-table").hidden === false && $("view-replay").hidden === true,
     `table=${$("view-table").hidden} replay=${$("view-replay").hidden}`);
 
@@ -6358,6 +6361,109 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.state.view = faceView;
   ui.resetSelection();
   ui.renderTable();
+}
+
+/* ============ U2-01 顶栏接管导航（spec D7） ============
+ *
+ * 判据（票面验收）：
+ * - 三页都不再有全局 header（品牌文本 / 导航 / #status），`<title>` = 「SGS · 三国杀」；
+ * - 牌桌顶栏右端顺序 = 牌堆 / 弃牌 / 设置 / 开局 / 牌桌 / 回放，旧「回放」图标按钮消失；
+ * - 开局页 / 回放页各有一条同款顶栏，导航三键与牌桌同序、当前页高亮；
+ * - 无会话时三处「牌桌」禁用，有会话可点；回放页能一键回开局 / 牌桌；
+ * - 16:9 壳宽 = min(100%, 100vh × 16/9)（1080p 吃满 1920、720p 无横向溢出）。
+ *
+ * 放在文件末尾：这一段会真的调 `show()` 切页（前面的用例只断言各自的渲染），
+ * 放最后不会把别的用例留在非预期页面上。
+ */
+{
+  const bodyHtml = html.slice(html.indexOf("<body>") + "<body>".length, html.indexOf("<script"));
+  const firstBodyTag = bodyHtml.replace(/<!--[\s\S]*?-->/g, "").trimStart();
+  const tableStart = html.indexOf('id="view-table"');
+  const replayStart = html.indexOf('id="view-replay"');
+  const lobbyView = html.slice(html.indexOf('id="view-lobby"'), tableStart);
+  const replayView = html.slice(replayStart, html.indexOf("<script"));
+  const navIds = (prefix) => ["lobby", "table", "replay"].map((name) => `${prefix}nav-${name}`);
+  const positionsIn = (text, ids) => ids.map((id) => text.indexOf(`id="${id}"`));
+  const inOrder = (positions) => positions.every((pos, i) => pos >= 0 && (i === 0 || pos > positions[i - 1]));
+  const isOn = (id) => $(id).classList.contains("on");
+
+  check("U2-01a 三页都没有全局 header；<title> = SGS · 三国杀；内容从视口顶部开始",
+    /<title>SGS · 三国杀<\/title>/.test(html)
+      && firstBodyTag.startsWith("<main")
+      && !/<header[^>]*class="bar"/.test(html)
+      && !/id="status"/.test(html)
+      && !html.includes("极简界面"),
+    `title=${(html.match(/<title>([^<]*)<\/title>/) || [])[1]} first=${firstBodyTag.slice(0, 40)}`);
+
+  const tableTopbar = html.slice(tableStart, html.indexOf('id="table-stage"', tableStart));
+  const tableRightOrder = ["t-deck", "t-discard", "btn-settings", "nav-lobby", "nav-table", "nav-replay"]
+    .map((id) => tableTopbar.indexOf(`id="${id}"`));
+  check("U2-01b 牌桌顶栏右端顺序 = 牌堆 / 弃牌 / 设置 / 开局 / 牌桌 / 回放；旧「回放」图标按钮已删",
+    inOrder(tableRightOrder)
+      && tableTopbar.indexOf('class="topbar-right"') < tableRightOrder[0]
+      && !tableTopbar.includes('id="btn-go-replay"'),
+    `顺序=${tableRightOrder.join(",")}`);
+
+  const lobbyTopbar = lobbyView.slice(0, lobbyView.indexOf('id="lobby-form"'));
+  const replayTopbar = replayView.slice(0, replayView.indexOf('id="r-empty"'));
+  check("U2-01c 开局页 / 回放页各有一条同款顶栏，导航三键与牌桌同序",
+    inOrder(positionsIn(lobbyTopbar, navIds("lobby-")))
+      && inOrder(positionsIn(replayTopbar, navIds("replay-")))
+      && /class="[^"]*\btopbar\b/.test(lobbyTopbar)
+      && /class="[^"]*\btopbar\b/.test(replayTopbar)
+      && /class="[^"]*\btopbar\b/.test(tableTopbar),
+    `lobby=${positionsIn(lobbyTopbar, navIds("lobby-")).join(",")} replay=${positionsIn(replayTopbar, navIds("replay-")).join(",")}`);
+
+  ui.show("lobby");
+  const lobbyOn = ["nav-lobby", "lobby-nav-lobby", "replay-nav-lobby"].every(isOn)
+    && ["nav-table", "lobby-nav-table", "replay-nav-table",
+      "nav-replay", "lobby-nav-replay", "replay-nav-replay"].every((id) => !isOn(id));
+  ui.show("replay");
+  const replayOn = ["nav-replay", "lobby-nav-replay", "replay-nav-replay"].every(isOn)
+    && ["nav-lobby", "lobby-nav-lobby", "replay-nav-lobby"].every((id) => !isOn(id));
+  check("U2-01d 当前页在导航里高亮：三处顶栏同步（开局 / 回放）", lobbyOn && replayOn,
+    `lobby=${lobbyOn} replay=${replayOn}`);
+
+  const savedSession = ui.state.sessionId;
+  const savedActive = $("view-replay").hidden === false ? "replay"
+    : $("view-lobby").hidden === false ? "lobby" : "table";
+  const tableNavIds = ["nav-table", "lobby-nav-table", "replay-nav-table"];
+  ui.state.sessionId = null;
+  ui.show("lobby");
+  const disabledWithoutSession = tableNavIds.every((id) => $(id).disabled === true);
+  ui.state.sessionId = "stub-session";
+  ui.show("lobby");
+  const enabledWithSession = tableNavIds.every((id) => $(id).disabled === false);
+  ui.show("replay");
+  (($("replay-nav-lobby").listeners.click) || []).forEach((fn) => fn({ target: $("replay-nav-lobby") }));
+  const backToLobby = $("view-lobby").hidden === false && $("view-replay").hidden === true
+    && isOn("nav-lobby");
+  ui.show("replay");
+  (($("replay-nav-table").listeners.click) || []).forEach((fn) => fn({ target: $("replay-nav-table") }));
+  const backToTable = $("view-table").hidden === false && $("view-replay").hidden === true;
+  check("U2-01e 无会话时三处「牌桌」禁用；有会话可点；回放页能一键回开局 / 牌桌",
+    disabledWithoutSession && enabledWithSession && backToLobby && backToTable,
+    `无会话禁用=${disabledWithoutSession} 有会话可点=${enabledWithSession} 回开局=${backToLobby} 回牌桌=${backToTable}`);
+  ui.state.sessionId = savedSession;
+  ui.show(savedActive);
+
+  const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const shellRule = css.match(/\.table-shell\s*\{[^}]*\}/s);
+  const shellWidth = (vw, vh) => Math.min(vw, (vh * 16) / 9);
+  check("U2-01f 16:9 壳宽 = min(100%, 100vh × 16/9)：1080p 吃满 1920、720p 无横向溢出",
+    !!shellRule
+      && /width:\s*min\(100%,\s*calc\(100vh \* 16 \/ 9\)\)/.test(shellRule[0])
+      && !shellRule[0].includes("100vh - 64px")
+      && shellWidth(1920, 1080) === 1920
+      && shellWidth(1280, 720) === 1280
+      && /\.table-view\s*\{[^}]*max-width:\s*none/s.test(css),
+    shellRule ? (shellRule[0].match(/width:[^;]+;/) || ["(无 width)"])[0] : "找不到 .table-shell 规则");
+
+  // 当前页高亮的红底按钮被 hover 时，通用 button:hover 的红色文字会与红底同色（实测"牌桌"消失）；
+  // 顶栏导航因此必须有一条 hover 仍白字的覆盖规则（U2-01 实机截图时发现）。
+  check("U2-01g 当前页高亮按钮 hover 时仍白字（红底红字不可读）",
+    /\.tab\.on:hover:not\(:disabled\)\s*\{[^}]*color:\s*#fff/s.test(css),
+    (css.match(/\.tab\.on:hover[^{]*\{[^}]*\}/s) || ["(无覆盖规则)"])[0].replace(/\s+/g, " "));
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

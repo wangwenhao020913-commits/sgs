@@ -295,7 +295,7 @@ function commitView(body) {
     $("btn-cancel").disabled = true;
     $("t-options").innerHTML = "";
     $("t-target-hint").textContent = "";
-    $("status").textContent = "已结束（录像已存）";
+    showPageNotice("已结束（录像已存）");
     loadRuns();
     return;
   }
@@ -324,7 +324,7 @@ async function refresh() {
     const body = await api(`/api/sessions/${state.sessionId}?after=${state.cursor}&logs=${state.logSeq}`);
     applyView(body);
   } catch (error) {
-    $("status").textContent = `取增量失败：${error.message}`;
+    showPageNotice(`取增量失败：${error.message}`);
   }
 }
 

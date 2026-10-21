@@ -18,24 +18,34 @@ body {
   color: var(--ink);
   font: 15px/1.65 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
 }
-.bar {
-  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-  padding: 10px 20px; background: var(--card); border-bottom: 1px solid var(--line);
-  position: sticky; top: 0; z-index: 5;
-}
-.bar h1 { font-size: 17px; margin: 0; }
 .dim { color: var(--dim); font-size: 13px; }
+/* 顶栏（U2-01 / spec D7）：三个页面共用同一条；开局 / 回放页是 .page-topbar，
+ * 牌桌壳里是 .table-topbar。旧的全局 header（.bar / #status / 品牌文本）已删除。 */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  background: rgba(255, 253, 247, .9); border-bottom: 1px solid var(--line);
+  position: relative; z-index: 20;
+}
+/* 开局 / 回放页的顶栏与牌桌同高同宽：牌桌顶栏是壳高的 6.2%，而 16:9 壳吃满视口时
+ * 壳高 = 100vh，故这里用 6.2vh 镜像同一条高度；左右留白也沿用牌桌的 0.9%。 */
+.page-topbar { flex: 0 0 auto; min-height: 6.2vh; padding: 0 0.9%; position: sticky; top: 0; z-index: 30; }
+/* 开局 / 回放页：顶栏贴视口顶，内容沿用旧的 1180 居中栏（.view 的 padding 由 .page-body 承担）。 */
+.view.page-view { max-width: none; padding: 0; }
+.page-body { max-width: 1180px; margin: 0 auto; padding: 18px 20px 60px; }
 .tag {
   display: inline-block; margin-left: 10px; padding: 1px 7px; border: 1px solid var(--line);
   border-radius: 99px; font-size: 12px; color: var(--dim);
 }
-nav { margin-left: auto; display: flex; gap: 6px; }
+/* 导航三键：三页同一套（顺序见 core.js:NAV_BUTTONS；当前页 .on 高亮）。 */
 .tab {
-  font: inherit; padding: 5px 12px; border: 1px solid var(--line); background: #fff;
-  border-radius: 8px; cursor: pointer;
+  font: inherit; font-size: 13px; padding: 3px 10px; border: 1px solid var(--line);
+  background: #fff; border-radius: 7px; color: var(--dim); cursor: pointer;
 }
+.tab:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .tab.on { background: var(--accent); border-color: var(--accent); color: #fff; }
-.tab:disabled { opacity: .5; cursor: default; }
+/* 当前页在 hover 时也必须保持白字：通用 `button:hover` 的红色文字落在红底上会"消失"。 */
+.tab.on:hover:not(:disabled) { color: #fff; }
+.tab:disabled { opacity: .5; cursor: not-allowed; }
 .view { max-width: 1180px; margin: 0 auto; padding: 18px 20px 60px; }
 .panel {
   background: var(--card); border: 1px solid var(--line); border-radius: 12px;
@@ -255,7 +265,9 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 
 .table-shell {
   position: relative;
-  width: min(100%, calc((100vh - 64px) * 16 / 9));
+  /* U2-01 / D6：全局 header 删掉后，16:9 壳吃满视口（1080p 下 1806 → 1920）。
+   * 1080p：min(1920, 1080×16/9) = 1920；720p：min(1280, 720×16/9) = 1280，无横向溢出。 */
+  width: min(100%, calc(100vh * 16 / 9));
   aspect-ratio: 16 / 9;
   margin: 0 auto;
   display: flex;

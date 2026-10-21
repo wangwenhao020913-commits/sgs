@@ -3,22 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SGS · 三国杀（M4 极简界面）</title>
+<title>SGS · 三国杀</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header class="bar">
-  <h1>SGS <span class="dim">极简界面</span></h1>
-  <nav>
-    <button id="nav-lobby" class="tab on" type="button">开局</button>
-    <button id="nav-table" class="tab" type="button" disabled>牌桌</button>
-    <button id="nav-replay" class="tab" type="button">回放</button>
-  </nav>
-  <span id="status" class="dim"></span>
-</header>
 
-<!-- 开局页 -->
-<main id="view-lobby" class="view">
+<!-- 开局页（U2-01 / spec D7）：全局 header 已删，导航三键住在页面自己的顶栏里；
+     三页（开局 / 牌桌 / 回放）使用同一顺序、同一套样式，当前页高亮。 -->
+<main id="view-lobby" class="view page-view">
+  <div id="lobby-topbar" class="topbar page-topbar">
+    <div class="topbar-left"></div>
+    <div class="topbar-center"></div>
+    <div class="topbar-right">
+      <button id="lobby-nav-lobby" class="tab on" type="button" aria-current="page">开局</button>
+      <button id="lobby-nav-table" class="tab" type="button" disabled>牌桌</button>
+      <button id="lobby-nav-replay" class="tab" type="button">回放</button>
+    </div>
+  </div>
+  <div class="page-body">
   <form id="lobby-form" class="panel">
     <h2>开一局</h2>
     <div class="grid">
@@ -63,15 +65,17 @@
     <h2>已有录像</h2>
     <div id="run-list" class="runs"></div>
   </section>
+  </div>
 </main>
 
 <!-- 牌桌页（U1-01 布局壳）
      16:9 壳内三段：顶栏 / 中央舞台 / 底部面板。自己**不占环上座位**：对手沿上半弧均布，
-     自己在底部独立面板里；没有右侧固定栏。提示条只横跨手牌区。 -->
+     自己在底部独立面板里；没有右侧固定栏。提示条只横跨手牌区。
+     U2-01：导航三键搬进顶栏右端，旧的「回放」图标按钮删除。 -->
 <main id="view-table" class="view table-view" hidden>
   <div id="table-shell" class="table-shell">
-    <!-- 顶栏：左身份配比 / 中轮次与当前行动者 / 右牌堆弃牌堆 + 设置 + 回放入口。不放计时器。 -->
-    <div id="table-topbar" class="table-topbar">
+    <!-- 顶栏：左身份配比 / 中轮次与当前行动者 / 右牌堆弃牌堆 + 设置 + 导航三键。不放计时器。 -->
+    <div id="table-topbar" class="topbar table-topbar">
       <div id="t-identity-panel" class="topbar-left">
         <span class="tag">身份</span>
         <span id="t-identity-ratio" class="ratio">—</span>
@@ -86,7 +90,11 @@
         <span class="count" title="牌堆剩余">牌堆 <span id="t-deck"></span></span>
         <span class="count" title="弃牌堆">弃牌 <span id="t-discard"></span></span>
         <button id="btn-settings" type="button" class="icon-btn" title="牌桌设置">设置</button>
-        <button id="btn-go-replay" type="button" class="icon-btn" title="打开回放页">回放</button>
+        <!-- U2-01：导航三键（D7 右端顺序：牌堆 / 弃牌 / 设置 / 开局 / 牌桌 / 回放）。
+             无会话时「牌桌」禁用；当前页高亮由 core.js:show() 统一维护。 -->
+        <button id="nav-lobby" class="tab on" type="button" aria-current="page">开局</button>
+        <button id="nav-table" class="tab" type="button" disabled>牌桌</button>
+        <button id="nav-replay" class="tab" type="button">回放</button>
         <div id="t-settings" class="settings" hidden>
           <div class="settings-row">
             <span class="tag">种子</span> <code id="t-seed"></code>
@@ -210,8 +218,18 @@
   </div>
 </main>
 
-<!-- 回放页 -->
-<main id="view-replay" class="view" hidden>
+<!-- 回放页（U2-01 / D7）：同款顶栏 + 同一顺序的导航三键，回放页因此有返回开局 / 牌桌的入口。 -->
+<main id="view-replay" class="view page-view" hidden>
+  <div id="replay-topbar" class="topbar page-topbar">
+    <div class="topbar-left"></div>
+    <div class="topbar-center"></div>
+    <div class="topbar-right">
+      <button id="replay-nav-lobby" class="tab on" type="button" aria-current="page">开局</button>
+      <button id="replay-nav-table" class="tab" type="button" disabled>牌桌</button>
+      <button id="replay-nav-replay" class="tab" type="button">回放</button>
+    </div>
+  </div>
+  <div class="page-body">
   <!-- 没选中录像时不留空壳：直接列出录像，点一局就进回放（W4-6）。 -->
   <section id="r-empty" class="panel">
     <h2>还没有选中录像</h2>
@@ -267,6 +285,7 @@
       </div>
       <ol id="r-log" class="log"></ol>
     </section>
+  </div>
   </div>
 </main>
 

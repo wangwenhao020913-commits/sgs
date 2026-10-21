@@ -68,7 +68,7 @@ async function openReplay(name) {
     show("replay");
     renderReplay();
   } catch (error) {
-    $("status").textContent = `回放失败：${error.message}`;
+    showPageNotice(`回放失败：${error.message}`);
   }
 }
 

@@ -87,8 +87,7 @@ async function startGame(event) {
     state.lastQuerySeat = null;
     $("t-log").innerHTML = "";
     applyView(body);
-    show("table");
-    $("nav-table").disabled = false;
+    show("table");   // 同时放开三处顶栏的「牌桌」（state.sessionId 已非空）
     $("lobby-hint").textContent = "";
   } catch (error) {
     $("lobby-hint").textContent = `建局失败：${error.message}`;

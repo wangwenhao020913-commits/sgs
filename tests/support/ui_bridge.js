@@ -58,6 +58,8 @@
     "loadHeroCatalog", "fillHeroOptions", "syncPointjiang",
     // U1-03：提示条右端动作的候选下标 + 倒计时的三色纯函数 / 渲染（烟测只读这三口）
     "rightActionIndex", "countdownPhase", "renderCountdown",
+    // U2-01（D7）：三页共用一条顶栏的导航态（show 是高亮 / 禁用 / 切页的唯一落点）
+    "show", "syncNavState", "NAV_BUTTONS",
   ];
   const out = {};
   for (const name of names) {

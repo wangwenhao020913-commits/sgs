@@ -44,15 +44,22 @@ function wire() {
   syncPointjiang();
   loadHeroCatalog();
   $("lobby-form").addEventListener("submit", startGame);
-  $("nav-lobby").addEventListener("click", () => { show("lobby"); loadRuns(); });
-  $("nav-table").addEventListener("click", () => show("table"));
-  // 顶部导航与牌桌顶栏的「回放」入口是同一条路：切页 + 刷新录像列表 + 画回放页。
+  // U2-01（D7）：三页顶栏共用同一组导航（顺序 / 高亮 / 禁用都归 core.js:show()）；
+  // 这里只按 NAV_BUTTONS 逐个挂同一份处理器。回放入口就是导航三键之一，旧图标按钮已删。
   const openReplayPage = () => {
     show("replay");
     loadRuns();
     renderReplay();
   };
-  $("nav-replay").addEventListener("click", openReplayPage);
+  const wireNav = (view, handler) => {
+    for (const id of NAV_BUTTONS[view]) {
+      const button = $(id);
+      if (button) button.addEventListener("click", handler);
+    }
+  };
+  wireNav("lobby", () => { show("lobby"); loadRuns(); });
+  wireNav("table", () => show("table"));
+  wireNav("replay", openReplayPage);
   const modeSelect = $("t-log-mode");
   if (modeSelect) modeSelect.addEventListener("change", () => {
     renderLog();
@@ -72,13 +79,11 @@ function wire() {
   $("btn-refresh").addEventListener("click", refresh);
   $("btn-takeover").addEventListener("click", takeover);
   $("btn-delay").addEventListener("click", cycleDelay);
-  // U1-01 壳：设置浮层 / 事件流浮层 / 回放入口（顶栏右侧）。
+  // U1-01 壳：设置浮层 / 事件流浮层（顶栏右侧）；回放入口是导航三键之一（见上）。
   wireOverlayToggle($("btn-settings"), $("t-settings"));
   wireOverlayToggle($("t-log-toggle"), $("t-log-panel"), () => {
     scrollLogToBottom();
   });
-  const replayEntry = $("btn-go-replay");
-  if (replayEntry) replayEntry.addEventListener("click", openReplayPage);
   $("btn-r-delay").addEventListener("click", cycleDelay);
   updateDelayButton();
   $("btn-r-first").addEventListener("click", () => replaySeek(0));
@@ -88,6 +93,8 @@ function wire() {
     if (state.replay) replaySeek(state.replay.records.length - 1);
   });
   $("btn-r-play").addEventListener("click", toggleReplayPlay);
+  // 首屏「牌桌」禁用态与 state 同步（无会话 = 禁用）；首屏高亮已写在 index.html 里。
+  syncNavState();
   loadRuns();
   // 倒计时每秒刷新（只在牌桌页可见时）；不改任何服务端状态。
   // 回放期间不刷：那时 `state.view` 还是上一条询问，倒计时会指向已经过去的那个窗口。
