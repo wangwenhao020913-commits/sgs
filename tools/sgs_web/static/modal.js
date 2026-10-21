@@ -14,7 +14,8 @@
  * 预发动清单也借这个容器（它仍是**牌桌表面**，D2 的 C 形，不进只读判据）。同一问的重复
  * 渲染只更新正文、保留折叠；换问（新 `seq`）或表面不再是弹窗时**关旧开新 / 直接关**，
  * 关闭时清空正文——上一问的窗口 / 内容不会留在下一问里。跨步骤（弹窗步 → 牌桌步 →
- * 弹窗步）因此会先关后开。
+ * 弹窗步）因此会先关后开；同一条技能链上的连续弹窗步（反间：花色 → 盲挑）走**链键**，
+ * 容器不关、只换正文 / 标题（见 :func:`dialogKeyFor`）。
  *
  * 只读态的唯一判据仍是 `stepDialogKind()`（只看这一步的表面）：票 07–12 接四类模板时
  * **只在这一处加分支**（`DIALOG_KINDS` 已把四种稳定种类名留好），`selectionEnabled()`
@@ -25,9 +26,9 @@
  */
 "use strict";
 
-/** 四类询问模板的稳定种类名（spec D3）。票 06 只接「排列」；票 08（选择型）/
- *  09（未知区域）/ 11（亮牌·五谷）/ 12（亮牌·遗计）在 `stepDialogKind` 里各加一条
- *  `pending.kind` 判据即可，**不要**另写只读判据或另起容器。 */
+/** 四类询问模板的稳定种类名（spec D3）。票 06 接「排列」、票 08 接「选择型」与
+ *  「未知区域（盲挑形状）」；票 09 / 11 / 12 继续在 `stepDialogKind` 里加判据即可，
+ *  **不要**另写只读判据或另起容器。 */
 const DIALOG_KINDS = Object.freeze({
   arrange: "arrange",
   choice: "choice",
@@ -37,7 +38,8 @@ const DIALOG_KINDS = Object.freeze({
 
 /** 当前**步骤**的表面若是弹窗就返回它的种类（spec D8「只读态」的唯一判据源）。
  *
- * 现在只有排列（`ARRANGE`）是弹窗表面。另外两类窗口**不**进这里：
+ * 排列（`ARRANGE`）、选择型（服务端带 `option_labels` 的 `SELECT_OPTION`）、未知区域
+ * （`SELECT_CARDS` 的盲挑形状）都是弹窗表面。另外两类窗口**不**进这里：
  *  - 预发动清单是**牌桌表面**（D2 的 C 形：点自己的牌 / 点自己的座位），打开时牌桌
  *    照常接选择——它只是把选项搬进了窗口，不是"这一步的答案在窗内"；
  *  - 武将详情是叠加的**检视窗**：开合不改变只读态，所以这里读的是**底下那一步**的
@@ -45,14 +47,53 @@ const DIALOG_KINDS = Object.freeze({
  *
  * 票 07–12 的四个模板在这里加分支（槽位已写在 `DIALOG_KINDS` 里）：
  *   - 选择型（花色 / 牌名枚举）→ `DIALOG_KINDS.choice`（票 08）；
- *   - 未知区域（他人手牌 / 装备）→ `DIALOG_KINDS.unknown`（票 09）；
+ *   - 未知区域（他人手牌 / 装备）→ `DIALOG_KINDS.unknown`（票 08 先接反间盲挑，
+ *     票 09 再接反馈 / 拆 / 顺的多区形状）；
  *   - 亮牌（五谷 / 遗计）→ `DIALOG_KINDS.reveal`（票 11 / 12）。
- * 判据仍然只看 `pending`，不看 `state.dialog` / 折叠状态。
+ * 判据仍然只看 `pending`，不看 `state.dialog` / 折叠状态；"这一步是不是自己的询问"
+ * 由调用方（`syncDialog`）另问一次 `isOwnPending`。
  */
 function stepDialogKind(pending) {
   if (!pending) return null;
   if (pending.kind === "ARRANGE") return DIALOG_KINDS.arrange;
+  // 选择型（票 08）：服务端在载荷里给了选项标签（花色是第一个复用枚举），或选项 ≥4
+  // （D3 的模板判据）⇒ 画弹窗。前端不按选项值自己判断"这是不是花色"——那会在这里
+  // 长出第二份枚举表。
+  if (isChoiceStep(pending)) return DIALOG_KINDS.choice;
+  if (isUnknownZoneStep(pending)) return DIALOG_KINDS.unknown;
   return null;
+}
+
+/** 选择型模板的判据（D3）：`SELECT_OPTION` 且（有服务端选项标签 或 选项 ≥4），
+ *  但**排除选座位形态**（`option_seats` 非空 = 牌桌上点武将，不是窗内列表）。 */
+function isChoiceStep(pending) {
+  if (!pending || pending.kind !== "SELECT_OPTION") return false;
+  if (pending.option_seats && Object.keys(pending.option_seats).length) return false;
+  const options = (pending.legal_actions || []).filter((action) => action.kind === "SelectOption");
+  return hasServerOptionLabels(pending) || options.length >= 4;
+}
+
+/** 载荷里的选项展示标签是否可用（`option_labels` 是服务端派生的 `{值: {name, symbol, color}}`）。 */
+function hasServerOptionLabels(pending) {
+  const labels = pending && pending.option_labels;
+  return !!labels && typeof labels === "object" && Object.keys(labels).length > 0;
+}
+
+/** 未知区域的**盲挑形状**（票 08）：单区（手牌）、槽位只有位置、铺的是**别人的**牌。
+ *
+ * 只接这一种形状是**有意收窄**：反馈（手牌 + 装备两区）、拆 / 顺（三区）属于票 09 的
+ * 未知区域弹窗，它们的 `spec.zones` 不是单区手牌，故这里不会把它们的旧选择面抢过来画。
+ * 判据全部读载荷（`kind` / `slots` / `spec.zones` / `ref.seat`），不写技能 id。
+ */
+function isUnknownZoneStep(pending) {
+  if (!pending || pending.kind !== "SELECT_CARDS") return false;
+  const slots = pending.slots || [];
+  if (!slots.length) return false;
+  const zones = (pending.spec && pending.spec.zones) || [];
+  if (zones.length !== 1 || zones[0] !== "hand") return false;
+  return slots.every((slot) => slot && slot.card === null
+    && slot.ref && slot.ref.seat !== null && slot.ref.seat !== undefined
+    && Number(slot.ref.seat) !== Number(pending.actor));
 }
 
 /** 只读态判据（spec D8）：当前步骤的表面是弹窗 ⇒ 牌桌选择入口一律 no-op。
@@ -78,7 +119,15 @@ function dialogWantedKind(pending) {
  *  换键 = 新的一问（关旧开新、清正文、折叠复位）。
  *
  * 排列按询问序号；预发动按询问序号 + 技能（同一问里换步骤不清窗口）。
- * 票 07–12 的模板若一步内还有自己的子状态，可在键里补；**不要**把折叠状态写进键。
+ *
+ * **两步链（票 08 / 反间：花色 → 盲挑）**：这是同一条技能链上的两个**服务端驱动**询问，
+ * 但 `seq` 每步都会变，`kind` 也不同（choice → unknown）。按 `${kind}:${seq}` 建键会把
+ * 它们拆成"关旧开新"两次生命周期，屏幕上等于闪一下牌桌步。故这两个模板改用**链键**：
+ * 服务端下发的 `context.name`（技能展示名）+ 应答者；同一技能的同一次询问链因此共用
+ * 一个窗口，只换正文 / 标题 / 步骤提示。`context` 缺失（409 的裸 Query / 合成载荷）时
+ * 退回 `kind:seq`（fail-visible，不猜链）。
+ *
+ * **不要**把折叠状态写进键。
  */
 function dialogKeyFor(kind, pending) {
   const seq = pending && pending.seq !== undefined && pending.seq !== null ? pending.seq : "";
@@ -86,6 +135,10 @@ function dialogKeyFor(kind, pending) {
     const pa = state.preactivation;
     const skill = pa ? (pa.skillId || pa.cardId || "") : "";
     return `preactivation:${seq}:${skill}`;
+  }
+  if (kind === DIALOG_KINDS.choice || kind === DIALOG_KINDS.unknown) {
+    const chain = pending && pending.context && pending.context.name;
+    if (chain) return `chain:${chain}:${pending.actor ?? ""}`;
   }
   return `${kind}:${seq}`;
 }
@@ -213,10 +266,12 @@ function openDialogDom(kind) {
   syncModalChrome();
 }
 
-/** 同一问的重复渲染：更新标题 / 步骤提示 / 正文归属，**保留折叠**。
+/** 同一问的重复渲染（或两步链的下一步）：更新标题 / 步骤提示 / 正文归属，**保留折叠**。
  *
  * 不清正文：内容由 `renderPending` 的渲染器就地重画（`#t-options` 是共享节点）；
  * 清正文只发生在关闭（换问 / 表面不再是弹窗）时，见 :func:`closeDialogDom`。
+ * 两步链会在这里从 `choice` 切到 `unknown`，故 `state.dialog.kind` 也要跟着换——
+ * 它决定折叠按钮旁边的重开文案，不能停在上一模板的种类上。
  */
 function updateDialogDom(kind) {
   const dialog = $("t-dialog");
@@ -229,6 +284,7 @@ function updateDialogDom(kind) {
   }
   if (title) title.textContent = dialogTitleFor(kind);
   if (options && body && options.parentNode !== body) body.appendChild(options);
+  state.dialog.kind = kind;
   applyDialogCollapseChrome();
   syncDialogHint();
   syncModalChrome();
@@ -274,7 +330,11 @@ function closeDialogDom() {
  */
 function syncDialog() {
   const pending = state.view ? state.view.pending : null;
-  const kind = state.playback ? null : dialogWantedKind(pending);
+  // 只有**自己的**询问才在自己的屏幕上开弹窗：目标座位是 AI 时（人类是周瑜、目标是 AI），
+  // 花色 / 盲挑这两问会出现在视图里，但它们不是给人类答的——不在这里开一个人工弹窗
+  // （牌桌仍按 `selectionEnabled` 只读，等 AI 答完下一步）。
+  const own = pending ? isOwnPending(pending) : false;
+  const kind = state.playback || !own ? null : dialogWantedKind(pending);
   if (!kind) {
     closeDialogDom();
     syncHeroModal();

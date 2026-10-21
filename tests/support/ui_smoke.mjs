@@ -2444,16 +2444,36 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿V1 步 1 的文案 =「选择一名其他角色」（由发动者应答）",
     $("t-prompt").textContent === "选择一名其他角色", `"${$("t-prompt").textContent}"`);
 
+  // 真实会话 id 只用于让"一击即提交"真的走 `submitAction`；请求本身由 400 拦截器挡下，
+  // 不进引擎（与 U2-03 的注入用法一致）。
+  const fanSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261012,
+  });
+
   // ② 步 2：**目标**猜花色（`pending.actor` 是别人 ⇒ 文案必须写出归属）。
+  // 颜色 / 中文名 / 符号都是服务端 `option_labels` 下发的（票 08 / D10）。
   const suitView = synthView({
     kind: "SELECT_OPTION", actor: 1, seq: 961, prompt: "请选择一项。",
+    options: ["heart", "diamond", "spade", "club"],
+    option_labels: {
+      heart: { name: "红桃", symbol: "♥", color: "red" },
+      diamond: { name: "方块", symbol: "♦", color: "red" },
+      spade: { name: "黑桃", symbol: "♠", color: "black" },
+      club: { name: "梅花", symbol: "♣", color: "black" },
+    },
     legal_actions: [
       { kind: "SelectOption", choice: "heart", answers_seq: 961 },
+      { kind: "SelectOption", choice: "diamond", answers_seq: 961 },
       { kind: "SelectOption", choice: "spade", answers_seq: 961 },
+      { kind: "SelectOption", choice: "club", answers_seq: 961 },
       { kind: "Pass", answers_seq: 961 },
     ],
     candidate_index: {}, virtual_index: {},
-    context: { requirement: "由目标选择一种花色", skill_hints: [] },
+    context: {
+      actor: 1, name: "反间", targets: [1],
+      label: "0号位周瑜对1号位关羽使用反间",
+      requirement: "由目标选择一种花色", skill_hints: [],
+    },
   });
   suitView.skills = [fanjianSkill];
   suitView.heroes = { 0: "zhouyu", 1: "guanyu" };
@@ -2462,43 +2482,69 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   suitView.snapshot.seat = 1;
   suitView.human_seat = 1;
   ui.state.view = suitView;
+  ui.state.sessionId = fanSession.session_id;
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(suitView);
 
   check("㉿V2 步 2 的文案写明归属 =「由目标选择一种花色」",
     $("t-prompt").textContent === "由目标选择一种花色", `"${$("t-prompt").textContent}"`);
-  // 候选列表形态的 `SELECT_OPTION`（花色不是座位）：未选任何一项时取消按钮先不可点，
-  // 选中一项后可点 —— 与座位步 `renderSeatPick`（有 Pass 即可取消）略有差别，是既有形态。
-  const suitButton = $("t-options").children[0];
-  (suitButton.listeners.click || []).forEach((fn) => fn({ target: suitButton }));
-  check("㉿V3 步 2 选中一项花色后取消按钮可点", $("btn-cancel").disabled === false,
-    `disabled=${$("btn-cancel").disabled}`);
+  check("㉿V2b 花色步走选择型弹窗：四个中文按钮 + 服务端符号 / 红黑，无「放弃」",
+    ui.stepDialogKind(suitView.pending) === "choice"
+      && $("t-dialog").hidden === false
+      && $("t-options").children.length === 4
+      && $("t-options").children.map((node) => node.textContent).join(",")
+        === "♥红桃,♦方块,♠黑桃,♣梅花"
+      && $("t-options").children.map((node) => node.getAttribute("data-color")).join(",")
+        === "red,red,black,black"
+      && $("btn-pass").hidden === true
+      && !/heart|diamond|spade|club/.test($("t-options").text()),
+    `kind=${ui.stepDialogKind(suitView.pending)} 选项=${JSON.stringify($("t-options").children.map((node) => node.textContent))} passHidden=${$("btn-pass").hidden}`);
 
-  ui.state.sessionId = "smoke-missing-session";
+  // 一击即提交：点一张花色 = 恰好一条 `SelectOption` POST（没有「下一步」要按），
+  // 送出的就是 `legal_actions` 里那一条。
+  const suitButton = $("t-options").children[2];
   const beforeSuit = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait(suitButton);
+  staleAnswerStatus = null;
+  const suitAnswers = calls.slice(beforeSuit).filter((call) => call.path.includes("/answer"));
+  check("㉿V3 点一张花色 = 直接提交（一次 POST，动作原样取自候选；无「下一步」）",
+    suitAnswers.length === 1
+      && JSON.stringify(suitAnswers[0].body.action)
+        === JSON.stringify(suitView.pending.legal_actions[2])
+      && /提交被拒/.test($("t-choice").textContent),
+    `answers=${suitAnswers.length} action=${JSON.stringify(suitAnswers[0] && suitAnswers[0].body.action)}`);
+
+  const beforeCancel = calls.length;
   await clickAndWait($("btn-cancel"));
-  const sentSuit = calls.length > beforeSuit ? calls[calls.length - 1].body.action : null;
-  check("㉿V4 步 2 点取消 = 送出 Pass", !!sentSuit && sentSuit.kind === "Pass",
-    JSON.stringify(sentSuit));
+  const cancelAnswers = calls.slice(beforeCancel).filter((call) => call.path.includes("/answer"));
+  check("㉿V4 花色步的取消键不送 Pass（没有隐藏的「放弃」）",
+    $("btn-pass").hidden === true && cancelAnswers.length === 0,
+    `passHidden=${$("btn-pass").hidden} answers=${cancelAnswers.length}`);
 
   // ③ 步 3：**目标**从**发动者**手里盲挑一张（槽位只有位置、没有牌面）。
   const fanCardView = synthView({
     kind: "SELECT_CARDS", actor: 1, seq: 962, prompt: "请从选择面里选择一张牌。",
     legal_actions: [
-      { kind: "SelectCards", answers_seq: 962, picks: [0] },
+      ...[0, 1, 2, 3, 4].map((index) => ({ kind: "SelectCards", answers_seq: 962, picks: [index] })),
       { kind: "Pass", answers_seq: 962 },
     ],
     candidate_index: {}, virtual_index: {}, option_seats: {},
-    slots: [{ ref: { seat: 0, zone: "hand" }, card: null }],
+    slots: [0, 1, 2, 3, 4].map(() => ({ ref: { seat: 0, zone: "hand" }, card: null })),
     spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: true },
-    context: { requirement: "由目标从你的手牌中选择一张", skill_hints: [] },
+    context: {
+      actor: 1, name: "反间", targets: [1],
+      label: "0号位周瑜对1号位关羽使用反间",
+      requirement: "由目标从你的手牌中选择一张", skill_hints: [],
+    },
   });
   fanCardView.skills = [fanjianSkill];
   fanCardView.heroes = { 0: "zhouyu", 1: "guanyu" };
   fanCardView.snapshot.seat = 1;
   fanCardView.human_seat = 1;
   fanCardView.snapshot.self_hand = [];
+  const keyBeforeCard = ui.state.dialog.key;
   ui.state.view = fanCardView;
   ui.resetSelection();
   ui.renderTable();
@@ -2507,15 +2553,46 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿V5 步 3 的文案写明归属 =「由目标从你的手牌中选择一张」",
     $("t-prompt").textContent === "由目标从你的手牌中选择一张",
     `"${$("t-prompt").textContent}"`);
-  check("㉿V6 步 3 铺出发动者（座位 0）的**隐藏**槽位（盲挑，不亮牌面）",
-    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 1,
-    `块=${$("t-options").children.length}`);
+  check("㉿V6 步 3 是未知区域弹窗：五个「?」槽位、同一容器继续、无「放弃」",
+    ui.stepDialogKind(fanCardView.pending) === "unknown"
+      && $("t-dialog").hidden === false
+      && ui.state.dialog.key === keyBeforeCard
+      && $("t-options").children.length === 1
+      && $("t-options").children[0].text().includes("?")
+      && $("t-options").children[0].children[1].children.length === 5
+      && $("btn-pass").hidden === true
+      && !/heart|diamond|spade|club/.test($("t-options").text()),
+    `kind=${ui.stepDialogKind(fanCardView.pending)} key=${ui.state.dialog.key} 块=${$("t-options").children.length}`);
 
   const beforeFanCard = calls.length;
-  await clickAndWait($("btn-cancel"));
-  const sentFanCard = calls.length > beforeFanCard ? calls[calls.length - 1].body.action : null;
-  check("㉿V7 步 3 点取消 = 送出 Pass（中途退出这一步）",
-    !!sentFanCard && sentFanCard.kind === "Pass", JSON.stringify(sentFanCard));
+  staleAnswerStatus = 400;
+  await clickAndWait($("t-options").children[0].children[1].children[2]);
+  staleAnswerStatus = null;
+  const cardAnswers = calls.slice(beforeFanCard).filter((call) => call.path.includes("/answer"));
+  check("㉿V7 点一张「?」= 直接提交（一次 SelectCards POST，picks = 槽位位置）",
+    cardAnswers.length === 1
+      && JSON.stringify(cardAnswers[0].body.action)
+        === JSON.stringify(fanCardView.pending.legal_actions[2]),
+    `answers=${cardAnswers.length} action=${JSON.stringify(cardAnswers[0] && cardAnswers[0].body.action)}`);
+
+  // 人类是周瑜时：花色 / 盲挑选牌问的是 **AI 目标**（actor ≠ 查看者），不该在人类屏幕上
+  // 开一个人工弹窗；牌桌等对方答完。
+  const foreignView = synthView({
+    ...suitView.pending, actor: 1, seq: 963,
+  });
+  foreignView.human_seat = 0;
+  foreignView.snapshot.seat = 0;
+  ui.state.view = foreignView;
+  ui.resetSelection();
+  ui.renderPending(foreignView);
+  check("㉿V8 目标不是人类时不开人工弹窗（等 AI 目标应答）",
+    $("t-dialog").hidden === true
+      && $("t-prompt").textContent.includes("等待其他座位响应"),
+    `dialogHidden=${$("t-dialog").hidden} prompt="${$("t-prompt").textContent}"`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
 }
 
 /* ============ 报障 3（合成局面）：事件逐个回放 + 效果区逐事件派生 ============ */
@@ -5168,15 +5245,19 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `options=${$("t-options").children.length} passHidden=${$("btn-pass").hidden} submit=${$("btn-submit").disabled} countdown=${$("t-countdown").hidden} prompt="${$("t-prompt").textContent}"`);
 }
 
-/* ---- 简单询问：浮动选项行（是否发动 / 二选一 / 花色） ---- */
+/* ---- 简单询问：浮动选项行（是否发动 / 一次性二选一） ----
+ *
+ * 票 08 起花色是**复用枚举**，走选择型弹窗（服务端下发 `option_labels`），不再占这条
+ * 浮动选项行；这里保留的是"≤3 且一次性"的普通选项面（用非枚举值当样本）。
+ */
 
 {
   const pending = {
     kind: "SELECT_OPTION", actor: 0, seq: 9004, prompt: "请选择一项。",
     prompt_display: { text: "请选择一项。", default_label: "超时将自动选择第一项" },
     legal_actions: [
-      { kind: "SelectOption", choice: "heart", answers_seq: 9004 },
-      { kind: "SelectOption", choice: "spade", answers_seq: 9004 },
+      { kind: "SelectOption", choice: "alpha", answers_seq: 9004 },
+      { kind: "SelectOption", choice: "beta", answers_seq: 9004 },
     ],
     candidate_index: {}, option_seats: {}, context: null,
   };
@@ -5186,14 +5267,14 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(view);
   const options = $("t-options").children;
-  check("U1-03g0 简单询问（二选一 / 花色）出浮动选项行，且回到提示条内",
+  check("U1-03g0 简单询问（一次性二选一）出浮动选项行，且回到提示条内",
     options.length === 2
       && $("t-options-home").children.includes($("t-options")),
     `options=${options.length} home=${$("t-options-home").children.includes($("t-options"))}`);
   (options[0].listeners.click || []).forEach((fn) => fn({ target: options[0] }));
   const picked = ui.buildAction();
   check("U1-03g1 点浮动选项 = 选中候选里的那条 SelectOption（提交仍由玩家按）",
-    !!picked && picked.kind === "SelectOption" && picked.choice === "heart"
+    !!picked && picked.kind === "SelectOption" && picked.choice === "alpha"
       && $("btn-submit").disabled === false,
     JSON.stringify(picked));
 }
@@ -5263,12 +5344,13 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
 
 /* ---- ① `SELECT_OPTION` 非座位形态：一选项一个按钮，不是候选行 ---- */
 {
+  // 样本用非枚举值：花色自票 08 起是**复用枚举**，走选择型弹窗（U2-08 段）。
   const pending = {
     kind: "SELECT_OPTION", actor: 0, seq: 9401, prompt: "请选择一项。",
     prompt_display: { text: "请选择一项。", default_label: "超时将自动选择第一项" },
     legal_actions: [
-      { kind: "SelectOption", choice: "heart", answers_seq: 9401 },
-      { kind: "SelectOption", choice: "spade", answers_seq: 9401 },
+      { kind: "SelectOption", choice: "alpha", answers_seq: 9401 },
+      { kind: "SelectOption", choice: "beta", answers_seq: 9401 },
     ],
     candidate_index: {}, option_seats: {}, context: null,
     preactivations: {}, preactivation: [],
@@ -5283,7 +5365,7 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
   check("U2-03a SELECT_OPTION 非座位形态 = 专用小选项按钮组（原值、无「选项：」前缀）",
     ui.renderKind(pending, pending.legal_actions) === "options"
       && buttons.length === 2
-      && buttons.map((node) => node.textContent).join(",") === "heart,spade"
+      && buttons.map((node) => node.textContent).join(",") === "alpha,beta"
       && !buttons.some((node) => /选项：/.test(node.textContent || "")),
     `kind=${ui.renderKind(pending, pending.legal_actions)} 选项=${JSON.stringify(buttons.map((node) => node.textContent))}`);
   check("U2-03a2 选项面没有候选按钮；点一个选项 = 内部选中 + 提交可点",
@@ -5408,9 +5490,20 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
     ["反间花色", {
       kind: "SELECT_OPTION", actor: 0, seq: 9407,
       prompt: "请选择一种花色。",
+      options: ["heart", "diamond", "spade", "club"],
+      option_labels: {
+        heart: { name: "红桃", symbol: "♥", color: "red" },
+        diamond: { name: "方块", symbol: "♦", color: "red" },
+        spade: { name: "黑桃", symbol: "♠", color: "black" },
+        club: { name: "梅花", symbol: "♣", color: "black" },
+      },
+      // 真引擎在这一步给了一条 Pass（流水线语义的"取消这一步"）；界面必须把它藏起来。
       legal_actions: [
         { kind: "SelectOption", choice: "heart", answers_seq: 9407 },
+        { kind: "SelectOption", choice: "diamond", answers_seq: 9407 },
         { kind: "SelectOption", choice: "spade", answers_seq: 9407 },
+        { kind: "SelectOption", choice: "club", answers_seq: 9407 },
+        { kind: "Pass", answers_seq: 9407 },
       ],
       candidate_index: {}, option_seats: {}, context: null,
       preactivations: {}, preactivation: [],
@@ -5879,14 +5972,20 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && !$("t-options").text().includes("弃置 1 张手牌"),
     `选项=${JSON.stringify(optionLabels())}`);
 
-  // 可复用的枚举标签（花色 / 牌名）属票 08 的服务端契约：本票不翻译，原值照旧。
+  // 可复用的枚举标签（花色）自票 08 起由服务端下发 `option_labels`：前端只读它摆版面，
+  // 不抄第二份中文表；有标签就是选择型弹窗，没有标签才退回原值（fail-visible）。
   const suits = optionView(["heart", "spade"], 9432);
+  suits.pending.option_labels = {
+    heart: { name: "红桃", symbol: "♥", color: "red" },
+    spade: { name: "黑桃", symbol: "♠", color: "black" },
+  };
   ui.state.view = suits;
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(suits);
-  check("U2-04k 其余选项值原样显示（花色等复用枚举留给票 08 的服务端标签）",
-    optionLabels().join(",") === "heart,spade",
+  check("U2-04k 花色选项读服务端标签（中文 + 符号，前端不抄第二份表）",
+    optionLabels().join(",") === "♥红桃,♠黑桃"
+      && !/heart|spade/.test($("t-options").text()),
     `选项=${JSON.stringify(optionLabels())}`);
   ui.state.view = null;
   ui.resetSelection();
@@ -8399,6 +8498,229 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.state.sessionId = null;
   ui.state.playback = null;
   ui.state.arrangeAutoSeq = null;
+}
+
+/* ============ U2-08（D3 / D10）：选择型弹窗 + 反间 · 未知区域弹窗 ============
+ *
+ * 两个模板都住在 06 的同一个 `#t-dialog` 容器里：标题 + 步骤提示 + 正文（`#t-options`
+ * 搬进 `#t-dialog-body`）+ 折叠；没有关闭 / ESC / 点背景出口；内容按钮一击即提交
+ * （送出的动作原样取自 `legal_actions`）；弹窗里没有「放弃」，引擎给的 `Pass` 也不读。
+ * 合成载荷与真会话响应同形（`option_labels` / `slots[].card=None` 的字段名见
+ * `tests/test_web.py` 的真会话断言）。
+ */
+{
+  const STYLE = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const SUIT_LABELS = {
+    heart: { name: "红桃", symbol: "♥", color: "red" },
+    diamond: { name: "方块", symbol: "♦", color: "red" },
+    spade: { name: "黑桃", symbol: "♠", color: "black" },
+    club: { name: "梅花", symbol: "♣", color: "black" },
+  };
+  const suitPending = (seq) => ({
+    kind: "SELECT_OPTION", actor: 1, seq, skill_id: "fanjian:suit",
+    prompt: "请选择一项。",
+    options: ["heart", "diamond", "spade", "club"],
+    option_labels: SUIT_LABELS,
+    legal_actions: [
+      ...["heart", "diamond", "spade", "club"].map(
+        (choice) => ({ kind: "SelectOption", choice, answers_seq: seq })),
+      { kind: "Pass", answers_seq: seq },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    context: {
+      actor: 1, name: "反间", targets: [1],
+      label: "0号位周瑜对1号位关羽使用反间",
+      requirement: "由目标选择一种花色", skill_hints: [],
+    },
+    prompt_display: { text: "请选择一项。", default_label: "超时将自动放弃" },
+    preactivations: {}, preactivation: [],
+  });
+  const blindPending = (seq) => ({
+    kind: "SELECT_CARDS", actor: 1, seq, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      ...[0, 1, 2, 3, 4].map((index) => ({ kind: "SelectCards", answers_seq: seq, picks: [index] })),
+      { kind: "Pass", answers_seq: seq },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [0, 1, 2, 3, 4].map(() => ({ ref: { seat: 0, zone: "hand" }, card: null })),
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: true },
+    context: {
+      actor: 1, name: "反间", targets: [1],
+      label: "0号位周瑜对1号位关羽使用反间",
+      requirement: "由目标从你的手牌中选择一张", skill_hints: [],
+    },
+    prompt_display: { text: "请从选择面里选择一张牌。", default_label: "超时将自动放弃" },
+    preactivations: {}, preactivation: [],
+  });
+  const ownSuitView = (pending) => {
+    const view = synthView(pending);
+    // 人类是**反间目标**（座位 1）：询问者 = 查看者，界面才铺可点控件。
+    view.snapshot.seat = 1;
+    view.human_seat = 1;
+    view.snapshot.self_hand = [];
+    return view;
+  };
+  const render = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const dialogText = () => ["t-dialog", "t-prompt", "t-target-hint", "t-choice"]
+    .map((id) => $(id).text()).join(" ");
+  const buttons = (id = "t-options") => $(id).children;
+
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261012,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+
+  // ---- ① 选择型：四张中文花色按钮（符号 + 红黑），没有放弃 / 没有下一步 ----
+  const suitView = ownSuitView(suitPending(9801));
+  render(suitView);
+  check("U2-08a 花色步 = 选择型弹窗：四个中文按钮（符号 + 红黑），零英文枚举、零「选项：」",
+    ui.stepDialogKind(suitView.pending) === "choice"
+      && $("t-dialog").hidden === false
+      && $("t-options-home").children.includes($("t-options")) === false
+      && $("t-dialog-body").children.includes($("t-options"))
+      && $("t-options").classList.contains("suit-options")
+      && $("t-options").children.length === 4
+      && $("t-options").children.map((node) => node.textContent).join(",")
+        === "♥红桃,♦方块,♠黑桃,♣梅花"
+      && $("t-options").children.map((node) => node.getAttribute("data-color")).join(",")
+        === "red,red,black,black"
+      && $("t-options").children.every((node) => node.classList.contains("suit"))
+      && !/heart|diamond|spade|club|选项：/.test(dialogText())
+      && candidateRowButtons().length === 0,
+    `kind=${ui.stepDialogKind(suitView.pending)} 选项=${JSON.stringify($("t-options").children.map((node) => node.textContent))} text=${dialogText()}`);
+  check("U2-08b 花色步没有「放弃」（引擎给了 Pass 也不显示）；提交 / 清空都不抢跑",
+    $("btn-pass").hidden === true
+      && $("btn-cancel").disabled === true
+      && $("btn-submit").disabled === true
+      && $("t-choice").textContent.includes("点一个选项即提交"),
+    `passHidden=${$("btn-pass").hidden} cancel=${$("btn-cancel").disabled} submit=${$("btn-submit").disabled} choice="${$("t-choice").textContent}"`);
+  check("U2-08c 选择型按钮的红 / 黑落地在 CSS（颜色值本身读服务端 data-color）",
+    STYLE.includes('.opt.suit[data-color="red"]')
+      && STYLE.includes('.opt.suit[data-color="black"]')
+      && STYLE.includes("var(--accent)")
+      && STYLE.includes("var(--ink)"),
+    `red=${STYLE.includes('.opt.suit[data-color="red"]')} black=${STYLE.includes('.opt.suit[data-color="black"]')}`);
+  check("U2-08c2 选择型模板判据：选项 ≥4 也进弹窗（不要求先有中文标签）；选座位形态除外",
+    ui.stepDialogKind({
+      kind: "SELECT_OPTION", actor: 1, seq: 9804, option_seats: {},
+      legal_actions: ["alpha", "beta", "gamma", "delta"].map(
+        (choice) => ({ kind: "SelectOption", choice, answers_seq: 9804 })),
+    }) === "choice"
+      && ui.stepDialogKind({
+        kind: "SELECT_OPTION", actor: 1, seq: 9805,
+        option_seats: { "seat:0": 0, "seat:1": 1, "seat:2": 2, "seat:3": 3 },
+        legal_actions: [0, 1, 2, 3].map(
+          (seat) => ({ kind: "SelectOption", choice: `seat:${seat}`, answers_seq: 9805 })),
+      }) === null,
+    `4options=${ui.stepDialogKind({ kind: "SELECT_OPTION", legal_actions: [1, 2, 3, 4].map((i) => ({ kind: "SelectOption", choice: `o${i}` })), option_seats: {} })} seats=${ui.stepDialogKind({ kind: "SELECT_OPTION", option_seats: { "seat:0": 0 }, legal_actions: [1, 2, 3, 4].map((i) => ({ kind: "SelectOption", choice: `seat:${i - 1}` })) })}`);
+
+  // ---- ② 无关闭 / ESC / 点背景出口；可折叠 ----
+  const beforeEsc = calls.length;
+  fireDocument("keydown", { key: "Escape", preventDefault() {} });
+  check("U2-08d 选择型弹窗没有关闭 / ESC / 点背景出口",
+    $("t-dialog").hidden === false
+      && calls.length === beforeEsc
+      && !($("t-modal-backdrop").listeners.click || []).length,
+    `dialogHidden=${$("t-dialog").hidden} calls=${calls.length - beforeEsc}`);
+  (($("t-dialog-collapse").listeners.click) || []).forEach(
+    (fn) => fn({ target: $("t-dialog-collapse") }));
+  check("U2-08e 选择型弹窗可折叠：正文撤下、标题与步骤提示留下、暗化层收起",
+    $("t-dialog-body").hidden === true
+      && $("t-dialog-title").textContent === "选择"
+      && $("t-dialog-hint").textContent.includes("点一个选项即提交")
+      && $("t-dialog-collapse").textContent === "展开"
+      && $("t-modal-backdrop").hidden === true,
+    `bodyHidden=${$("t-dialog-body").hidden} title="${$("t-dialog-title").textContent}" hint="${$("t-dialog-hint").textContent}"`);
+  (($("t-dialog-collapse").listeners.click) || []).forEach(
+    (fn) => fn({ target: $("t-dialog-collapse") }));
+  check("U2-08e2 再点「展开」恢复正文与暗化层",
+    $("t-dialog-body").hidden === false && $("t-modal-backdrop").hidden === false);
+
+  // ---- ③ 一击即提交：点「黑桃」= 恰好一条 SelectOption POST ----
+  const beforeSuitClick = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("t-options").children[2]);
+  staleAnswerStatus = null;
+  const suitAnswers = calls.slice(beforeSuitClick).filter((call) => call.path.includes("/answer"));
+  check("U2-08f 点一张花色 = 一次提交（一条 POST、动作逐字段取自候选、无需「下一步」）",
+    suitAnswers.length === 1
+      && JSON.stringify(suitAnswers[0].body.action)
+        === JSON.stringify(suitView.pending.legal_actions[2])
+      && /提交被拒/.test($("t-choice").textContent),
+    `answers=${suitAnswers.length} action=${JSON.stringify(suitAnswers[0] && suitAnswers[0].body.action)}`);
+
+  // ---- ④ 链：花色 → 盲挑，同一个 #t-dialog、同一个键，只换正文 ----
+  const blindView = ownSuitView(blindPending(9802));
+  blindView.skills = suitView.skills;
+  const keyBeforeBlind = ui.state.dialog.key;
+  render(blindView);
+  check("U2-08g 链上两步共用同一容器（键不变、不关窗、正文换成盲挑）",
+    ui.stepDialogKind(blindView.pending) === "unknown"
+      && $("t-dialog").hidden === false
+      && ui.state.dialog.key === keyBeforeBlind
+      && $("t-dialog-body").children.includes($("t-options"))
+      && $("t-dialog-title").textContent === "选择一张牌"
+      && $("t-dialog-hint").textContent.includes("点一张牌即提交"),
+    `kind=${ui.stepDialogKind(blindView.pending)} key=${ui.state.dialog.key} before=${keyBeforeBlind} title="${$("t-dialog-title").textContent}"`);
+  const blindZone = $("t-options").children[0];
+  const blindSlots = blindZone.children[1].children;
+  check("U2-08h 盲挑 = 五个「?」槽位 + 归属 / 区域提示；不画没提供的装备区",
+    $("t-options").children.length === 1
+      && blindZone.getAttribute("data-zone") === "hand"
+      && blindZone.children[0].textContent.includes("座位0 手牌")
+      && blindZone.children[0].textContent.includes("牌面未知")
+      && blindSlots.length === 5
+      && blindSlots.every((node) => node.textContent === "?" && node.classList.contains("unknown"))
+      && !/装备区/.test($("t-options").text())
+      && !/heart|diamond|spade|club/.test(dialogText())
+      && candidateRowButtons().length === 0,
+    `块=${$("t-options").children.length} 槽=${blindSlots.length} 文本=${$("t-options").text()}`);
+  check("U2-08i 盲挑步没有「放弃」（引擎给了 Pass 也不显示）；取消键不送 Pass",
+    $("btn-pass").hidden === true
+      && $("btn-cancel").disabled === true
+      && $("t-choice").textContent.includes("点一张牌即提交"),
+    `passHidden=${$("btn-pass").hidden} cancel=${$("btn-cancel").disabled} choice="${$("t-choice").textContent}"`);
+
+  // ---- ⑤ 一击即提交：点第 3 个「?」= 恰好一条 SelectCards POST（picks = 位置） ----
+  const beforeBlindClick = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait(blindSlots[2]);
+  staleAnswerStatus = null;
+  const blindAnswers = calls.slice(beforeBlindClick).filter((call) => call.path.includes("/answer"));
+  check("U2-08j 点一张「?」= 一次提交（一条 SelectCards POST，picks 填该槽位位置）",
+    blindAnswers.length === 1
+      && JSON.stringify(blindAnswers[0].body.action)
+        === JSON.stringify(blindView.pending.legal_actions[2])
+      && !/Pass/.test(JSON.stringify(blindAnswers[0].body.action)),
+    `answers=${blindAnswers.length} action=${JSON.stringify(blindAnswers[0] && blindAnswers[0].body.action)}`);
+
+  // ---- ⑥ 未知区域模板：装备区只在**这一步真的提供**时出现（模板级，不接线 09） ----
+  $("t-options").innerHTML = "";
+  ui.renderUnknownZone({
+    kind: "SELECT_CARDS", actor: 0, seq: 9803,
+    legal_actions: [{ kind: "SelectCards", answers_seq: 9803, picks: [0] }],
+    slots: [
+      { ref: { seat: 1, zone: "hand" }, card: null },
+      { ref: { seat: 1, zone: "equip" }, card: { ...synthCard(95, "八卦阵"), slot: "armor" } },
+    ],
+    spec: { zones: ["hand", "equip"], total: [1, 1] },
+  });
+  check("U2-08k 未知区域模板只为实际提供的区域画块：手牌「?」+ 装备可见",
+    $("t-options").children.length === 2
+      && $("t-options").children[1].getAttribute("data-zone") === "equip"
+      && $("t-options").children[1].text().includes("装备区")
+      && $("t-options").children[1].text().includes("八卦阵"),
+    `块=${$("t-options").children.map((node) => node.getAttribute("data-zone")).join(",")} 文本=${$("t-options").text()}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

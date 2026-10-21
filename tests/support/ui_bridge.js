@@ -67,7 +67,8 @@
     "show", "syncNavState", "NAV_BUTTONS",
     // U2-05（D8）：只读态的唯一判据（selectionEnabled）与"这一步的表面"（stepDialogKind）。
     // U2-06：询问弹窗的四种模板种类名（票 07–12 只往 stepDialogKind 里加分支）。
-    "selectionEnabled", "stepDialogKind", "DIALOG_KINDS",
+    // U2-08：未知区域模板的渲染口（装备分组只由载荷决定，模板级用例直接喂载荷）。
+    "selectionEnabled", "stepDialogKind", "DIALOG_KINDS", "renderUnknownZone",
   ];
   const out = {};
   for (const name of names) {

@@ -12,6 +12,9 @@
 - 武将块的**名称 / 势力**（U1-02）：``hero_name`` 从武将表翻一次（引擎只给 id），
   ``kingdom`` / ``kingdom_label`` 取公开的 ``PlayerPublic.kingdom`` 再映射成中文；两者都
   不进记录流，只在网页载荷里出现。
+- **花色标签**（U2-08 / D10）：``SUIT_LABELS`` 是中文名 + 符号 + 红黑的**唯一**映射表，
+  ``option_labels`` 把它派生成询问载荷（只对全是花色的选项闭集）。前端的花色按钮只读
+  这份下发值，不再抄第二份中文表；颜色仍读引擎的 :func:`sgs.data.color_of_suit`。
 - **描述全文**（U1-04b）住在 :mod:`sgs_web.descriptions`（内容文件
   ``descriptions.json``），这里只按牌名 id 查一次并并入 ``description``；文案本身
   不抄进本模块，更不进引擎 / 记录流。
@@ -31,7 +34,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from sgs.data import IDENTITY_LABELS, HeroTable
+from sgs.data import IDENTITY_LABELS, HeroTable, Suit, color_of_suit
 from sgs.state import CardRef, EndPhase, Pass, PlayerPublic, Query
 
 from .descriptions import card_description
@@ -41,6 +44,7 @@ __all__ = [
     "CARD_ATTRIBUTES",
     "CARD_KINDS",
     "KINGDOM_LABELS",
+    "SUIT_LABELS",
     "card_display",
     "card_lookup_from_query",
     "card_payload",
@@ -48,6 +52,7 @@ __all__ = [
     "decorate_snapshot",
     "prompt_display",
     "seat_display",
+    "suit_labels",
 ]
 
 CARD_KINDS: tuple[str, ...] = ("normal", "virtual", "transformed")
@@ -58,6 +63,53 @@ CARD_ATTRIBUTES: tuple[str, ...] = ("普通", "火焰", "雷电")
 
 KINGDOM_LABELS: dict[str, str] = {"wei": "魏", "shu": "蜀", "wu": "吴", "qun": "群"}
 """势力枚举值 → 中文展示值（`GLOSSARY.md`「势力」：中文只出现在渲染层）。"""
+
+_SUIT_TEXT: dict[Suit, tuple[str, str]] = {
+    Suit.HEART: ("红桃", "♥"),
+    Suit.DIAMOND: ("方块", "♦"),
+    Suit.SPADE: ("黑桃", "♠"),
+    Suit.CLUB: ("梅花", "♣"),
+}
+"""花色的中文名 + 符号（U2-08 / D10）：**唯一**的映射表，颜色不在这里抄。"""
+
+
+def _suit_label(suit: Suit) -> dict[str, str]:
+    """一类花色的展示字段；颜色读引擎的 :func:`sgs.data.color_of_suit`（同一份真源）。"""
+    name, symbol = _SUIT_TEXT[suit]
+    color = color_of_suit(suit)
+    if color is None:  # pragma: no cover - Suit 是闭集，本条只为全函数性保留
+        raise ValueError(f"花色 {suit!r} 没有颜色")
+    return {"name": name, "symbol": symbol, "color": color.value}
+
+
+SUIT_LABELS: dict[str, dict[str, str]] = {
+    suit.value: _suit_label(suit) for suit in Suit
+}
+"""四类花色的展示契约（U2-08 / D10）：``{花色值: {name, symbol, color}}``。
+
+颜色（``red`` / ``black``）与卡面的 ``CardRef.color`` 同一套字符串；中文名与符号只
+在这里写一次，前端的花色按钮**只读**这份下发值，不另抄第二份表。
+"""
+
+
+def suit_labels(options: Any) -> dict[str, dict[str, str]] | None:
+    """一**组选项值**若全是花色，返回它们的展示标签；否则 ``None``（fail-closed）。
+
+    这是询问载荷 ``option_labels`` 的唯一派生点（票 08）：花色是第一个会被复用的枚举
+    模板，将来【杀】的类型 / 锦囊牌名同样从这里出标签。选项闭集里只要有一个不是已知
+    花色就整组不翻（不给出半份标签让前端去补），非 ``SELECT_OPTION``（没有
+    ``options``）也返回 ``None``。返回值是副本，调用方改它不会污染 :data:`SUIT_LABELS`。
+    """
+    if not options:
+        return None
+    labels: dict[str, dict[str, str]] = {}
+    for option in options:
+        label = SUIT_LABELS.get(option) if isinstance(option, str) else None
+        if label is None:
+            return None
+        labels[option] = dict(label)
+    return labels
+
 
 _SLASH_TYPES = frozenset({"slash", "fire_slash", "thunder_slash"})
 """都显示成「杀」的牌名 id：普通杀 / 火杀 / 雷杀。"""

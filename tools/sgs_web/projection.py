@@ -33,7 +33,13 @@ from sgs.state import FrameKind, Query, WindowCause, project
 from sgs.timing import Timing
 
 from .descriptions import skill_description
-from .display import card_lookup_from_query, card_payload, decorate_pending, decorate_snapshot
+from .display import (
+    card_lookup_from_query,
+    card_payload,
+    decorate_pending,
+    decorate_snapshot,
+    suit_labels,
+)
 from .session import Session
 
 __all__ = [
@@ -1211,6 +1217,10 @@ def pending_payload(
         else None
     )
     payload["option_seats"] = option_seats(query)
+    # U2-08（D10）：花色是**会被复用的枚举模板**，中文名 / 符号 / 红黑由服务端派生一次；
+    # 选项闭集里只要不全是花色就是 ``None``（界面据此决定画选择型弹窗还是小选项组）。
+    # 与 ``option_seats`` 分开两个键：一个回答"这是谁"，一个回答"这项怎么显示"。
+    payload["option_labels"] = suit_labels(getattr(query, "options", ()) or ())
     # 这一步是不是"提供一张 B"（票 14）：非空 = B 的牌名 id。字段在记录流里被 ``exclude``，
     # 故**不进** Golden Replay 的字节；界面靠它把这一类选择面**就地**铺到本人的可见区域上。
     payload["provide_type"] = getattr(query, "provide_type", None)

@@ -159,6 +159,17 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   border: 1px dashed var(--dim); background: transparent;
 }
 .card.face.has-mark .suit, .card.face.has-mark .rank { left: calc(18 * var(--dsu)); }
+/* 未知区域弹窗（U2-08 / D3）：手牌只有位置 ⇒ 与牌面同尺寸的「?」；
+ * 装备 / 判定区若这一步真的提供，就照常用牌面画（`renderUnknownZone` 按区域分组）。 */
+.card.face.unknown {
+  display: grid; place-items: center;
+  font-size: calc(34 * var(--dsu)); font-weight: 700; color: var(--dim);
+  background: repeating-linear-gradient(135deg, #f5efe3 0 8px, #ece2ce 8px 16px);
+  cursor: pointer;
+}
+.unknown-zone + .unknown-zone { margin-top: 12px; }
+.unknown-zone .zone-head { margin-bottom: 6px; font-weight: 600; }
+.unknown-zone .cards { margin: 0; }
 .card.face.kind-virtual { background: linear-gradient(180deg, #fffdf4 0%, #eef3ff 100%); }
 .card.face.kind-transformed { background: linear-gradient(180deg, #fffef9 0%, #efe8f7 100%); }
 .card.face.sel {
@@ -226,6 +237,21 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   background: #fff; cursor: pointer;
 }
 .opt.sel { border-color: var(--accent); background: var(--accent-soft); }
+/* 选择型弹窗（U2-08 / spec D3）：选项 ≥4 或复用枚举（花色）走 2×2 按钮网格。
+ * 中文名 / 符号 / 红黑**全部**来自服务端 `option_labels`，这里只负责版式与颜色落地。 */
+.options.suit-options {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+}
+.opt.suit {
+  display: inline-flex; align-items: baseline; justify-content: center;
+  gap: 7px; padding: 10px 12px;
+  font-size: 16px; font-weight: 600;
+}
+.opt.suit .suit-symbol { font-size: 22px; line-height: 1; }
+.opt.suit[data-color="red"] .suit-symbol,
+.opt.suit[data-color="red"] .suit-name { color: var(--accent); }
+.opt.suit[data-color="black"] .suit-symbol,
+.opt.suit[data-color="black"] .suit-name { color: var(--ink); }
 /* 回放页的候选是**记录**不是可点的应答：保留牌桌的版式，但去掉可点的视觉暗示。 */
 .opt.static { cursor: default; }
 .opt.static:hover { color: inherit; }

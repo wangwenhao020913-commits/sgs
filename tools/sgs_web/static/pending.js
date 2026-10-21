@@ -61,6 +61,9 @@ function renderPending(view) {
   // `submitBusy` 为真，快照留着由 `enforceActionFreeze()` 继续压住四键）。
   if (!state.submitBusy) releaseActionButtons(false);
   $("t-options").innerHTML = "";
+  // 弹窗模板可能给选项组换版式（选择型的 2×2 网格）；每个询问重新渲染时先复位，
+  // 避免上一问的模板类名留在下一问。
+  $("t-options").classList.remove("suit-options");
   // 询问文本：**需要做什么**（服务端 `context.requirement`）优先；没有就退回引擎的通用 prompt。
   const requirement = pending && pending.context && pending.context.requirement;
   $("t-prompt").textContent = requirement
@@ -295,6 +298,11 @@ function seatChoices(pending) {
 function cancelAction(pending) {
   if (!pending) return null;
   if (pending.kind !== "SELECT_CARDS" && pending.kind !== "SELECT_OPTION") return null;
+  // 弹窗表面**没有「放弃」**（spec D3 / 票 08）：花色 / 盲挑这两步即便引擎给了 Pass，
+  // 界面也不读它——右端放弃被藏起，取消键因此只剩"清空本地选择"（这里的 null 让
+  // `cancelOrClear` 走清空分支，而不是偷偷替玩家送出一条 Pass）。
+  const kind = stepDialogKind(pending);
+  if (kind === DIALOG_KINDS.choice || kind === DIALOG_KINDS.unknown) return null;
   return (pending.legal_actions || []).find((action) => action.kind === "Pass") || null;
 }
 
@@ -496,6 +504,19 @@ function refreshSubmit(pending) {
     if (state.lastRejectReason) $("t-choice").textContent = state.lastRejectReason;
     return;
   }
+  // 弹窗模板（票 08）：内容按钮**一击即提交**，右端没有"下一步"要按；这里只把
+  // 这一步的读法说清楚。提交按钮保持灰（选择由点击内容完成，防两个提交点各算一次）。
+  // 放在 `blocked` 判定**之前**：未知区域会把第一条 `SelectCards` 预选进
+  // `state.selectedOption`，否则这里会显示旧的"还要选 1 张牌"而不是弹窗读法。
+  const dialogKind = stepDialogKind(pending);
+  if (dialogKind === DIALOG_KINDS.choice || dialogKind === DIALOG_KINDS.unknown) {
+    $("btn-submit").disabled = true;
+    $("t-choice").textContent = state.lastRejectReason
+      || (dialogKind === DIALOG_KINDS.choice
+        ? "点一个选项即提交（这一步不能放弃）。"
+        : "点一张牌即提交（这一步不能放弃）。");
+    return;
+  }
   const selected = state.selectedOption === null ? null : (pending.legal_actions || [])[state.selectedOption];
   const blocked = selected === null ? null : selectionError(selected, pending);
   const ready = blocked === null && buildAction() !== null;
@@ -538,6 +559,8 @@ function refreshSubmit(pending) {
         : `先把全部卡牌排成一个完整顺序。${exit}`);
     return;
   }
+  // 弹窗模板（票 08）的分支在函数开头（`blocked` 之前）已经返回：这里不会再走到
+  // choice / unknown。
   if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) {
     $("t-choice").textContent = ready ? "可以提交。" : "点场上武将选择交给谁。";
     return;

@@ -57,8 +57,10 @@ from sgs.timing import Timing  # noqa: E402
 from sgs_web.display import (  # noqa: E402
     CARD_ATTRIBUTES,
     CARD_KINDS,
+    SUIT_LABELS,
     card_display,
     prompt_display,
+    suit_labels,
 )
 from sgs_web.descriptions import skill_description  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
@@ -424,14 +426,13 @@ def test_fallback_action_answers_the_target_of_a_fanjian_step() -> None:
     assert isinstance(fallback_action(query), Pass), "超时代答 = 取消这一步，不是非法动作"
 
 
-def test_a_timeout_answers_the_target_of_fanjian_in_a_real_session() -> None:
-    """票 06：反间的步 2/3 由**目标**应答。真实会话里（AI 周瑜反间人类座位）超时兜底要能
-    在"等目标作答"时替**目标**代答一次，且代答之后该局仍能跑完。
+def _session_at_the_fanjian_suit_step(*, timeout_seconds: float | None) -> Session:
+    """一局 AI 周瑜（座位 0）/ 人类目标（座位 1）的会话，停在【反间】的**花色步**。
 
-    W4-2 起第一段是**预发动清单**（AI 的随机档不会填表 ⇒ W4-4 才补），故这里给座位 0
-    注入一个会确认复合动作的参与者；第二段仍由引擎逐步问**目标**（人类座位）。
+    W4-2 起第一段是**预发动清单**（AI 的随机档不会填表），故给座位 0 注入一个会确认
+    复合动作的参与者；之后引擎逐步把花色 / 盲挑选牌问**目标**（人类座位）。
     """
-    from sgs.state import ActivateSkill, Pass
+    human_seat = 1
 
     class _Activator:
         """座位 0：**第一次**见到【反间】清单就确认第一段（选人类座位），其余交给随机档。"""
@@ -454,14 +455,13 @@ def test_a_timeout_answers_the_target_of_fanjian_in_a_real_session() -> None:
                 )
             return self._fallback.respond(query)
 
-    human_seat = 1
     session = Session(
         seed=0,
         player_count=2,
         ai="random",
         human_seat=human_seat,
         heroes=("zhouyu", "guanyu"),
-        timeout_seconds=1.0,
+        timeout_seconds=timeout_seconds,
     )
     session.participants = (
         _Activator(session.participants[0]),
@@ -471,9 +471,22 @@ def test_a_timeout_answers_the_target_of_fanjian_in_a_real_session() -> None:
         pending = session.pending
         if pending is None:
             break
-        if pending.kind == "SELECT_OPTION" and str(pending.skill_id).startswith("fanjian:"):
-            break
+        if pending.kind == "SELECT_OPTION" and str(pending.skill_id) == "fanjian:suit":
+            return session
         session.submit_answer(fallback_action(pending))
+    raise AssertionError("没有走到【反间】的花色步（AI 座位 0 的发动/清单没跑通）")
+
+
+def test_a_timeout_answers_the_target_of_fanjian_in_a_real_session() -> None:
+    """票 06：反间的步 2/3 由**目标**应答。真实会话里（AI 周瑜反间人类座位）超时兜底要能
+    在"等目标作答"时替**目标**代答一次，且代答之后该局仍能跑完。
+
+    W4-2 起第一段是**预发动清单**（AI 的随机档不会填表 ⇒ W4-4 才补），故这里给座位 0
+    注入一个会确认复合动作的参与者；第二段仍由引擎逐步问**目标**（人类座位）。
+    """
+    from sgs.state import Pass
+
+    session = _session_at_the_fanjian_suit_step(timeout_seconds=1.0)
 
     pending = session.pending
     assert pending is not None and pending.skill_id == "fanjian:suit", (
@@ -494,6 +507,79 @@ def test_a_timeout_answers_the_target_of_fanjian_in_a_real_session() -> None:
         session.submit_answer(fallback_action(session.pending))
 
     assert session.pending is None, "被代答之后该局仍能跑完"
+
+
+def test_the_pending_payload_labels_the_fanjian_suits_and_masks_the_blind_pick() -> None:
+    """票 08（D10）：反间的两步在同一份**询问载荷**里带齐界面要的东西。
+
+    花色步：``option_labels`` 是服务端派生的中文名 + 符号 + 红黑（前端不抄第二份表）；
+    盲挑步：``slots[].card`` 全为 ``None``（牌面不可见），槽位仍按**位置**下发、且指向
+    发动者的手牌。两步都是**真会话**（AI 周瑜反间人类目标），不是合成形状。
+    """
+    from sgs.state import Pass, SelectOption
+
+    session = _session_at_the_fanjian_suit_step(timeout_seconds=None)
+
+    suit = pending_payload(session)
+    assert suit is not None
+    assert suit["kind"] == "SELECT_OPTION"
+    assert suit["skill_id"] == "fanjian:suit"
+    assert suit["actor"] == session.human_seat, "花色步由**目标**应答"
+    assert list(suit["options"]) == ["heart", "diamond", "spade", "club"]
+    assert suit["option_labels"] == {
+        "heart": {"name": "红桃", "symbol": "♥", "color": "red"},
+        "diamond": {"name": "方块", "symbol": "♦", "color": "red"},
+        "spade": {"name": "黑桃", "symbol": "♠", "color": "black"},
+        "club": {"name": "梅花", "symbol": "♣", "color": "black"},
+    }
+    assert suit["option_seats"] == {}, "花色不是座位选项"
+    assert any(action["kind"] == "Pass" for action in suit["legal_actions"]), (
+        "引擎仍给了一条 Pass（本票不改规则 / 超时策略）；界面负责把它**藏起来**"
+    )
+
+    session.submit_answer(
+        next(action for action in session.pending.legal_actions if isinstance(action, SelectOption))
+    )
+    blind = pending_payload(session)
+    assert blind is not None
+    assert blind["kind"] == "SELECT_CARDS"
+    assert blind["option_labels"] is None, "盲挑不是选项枚举，没有可复用的展示标签"
+    assert list(blind["spec"]["zones"]) == ["hand"]
+    assert blind["spec"]["optional"] is True, "引擎侧可 Pass（超时策略见票面的已知偏差）"
+    hand = session.engine.state.player(0).hand
+    assert len(blind["slots"]) == len(hand), "槽位数 = 发动者手牌数（位置公开、牌面隐藏）"
+    assert all(slot["card"] is None for slot in blind["slots"]), "盲挑：一个牌面都不下发"
+    assert {slot["ref"]["seat"] for slot in blind["slots"]} == {0}
+    assert {slot["ref"]["zone"] for slot in blind["slots"]} == {"hand"}
+    assert blind["context"]["requirement"] == "由目标从你的手牌中选择一张"
+    assert isinstance(fallback_action(session.pending), Pass), (
+        "已知偏差（票面记录）：引擎这一步仍可 Pass、超时仍按 Pass 代答（取消这一步）；"
+        "本票只让界面不提供「放弃」，不改服务端超时策略"
+    )
+
+
+def test_suit_labels_cover_the_four_suits_and_fail_closed_on_mixed_options() -> None:
+    """票 08（D10）：花色标签是**纯展示派生**，四种齐全、红黑由颜色真源派生。
+
+    非花色选项 / 混进非花色的闭集一律 ``None``——不给出半份标签让前端去补齐（那样前端
+    就会长出第二份表）。
+    """
+    assert SUIT_LABELS == {
+        "heart": {"name": "红桃", "symbol": "♥", "color": "red"},
+        "diamond": {"name": "方块", "symbol": "♦", "color": "red"},
+        "spade": {"name": "黑桃", "symbol": "♠", "color": "black"},
+        "club": {"name": "梅花", "symbol": "♣", "color": "black"},
+    }
+    assert suit_labels(("heart", "diamond", "spade", "club")) == SUIT_LABELS
+    assert suit_labels(("heart", "spade")) == {
+        "heart": SUIT_LABELS["heart"],
+        "spade": SUIT_LABELS["spade"],
+    }
+    assert suit_labels(("discard_one", "draw_one")) is None
+    assert suit_labels(("heart", "discard_one")) is None, "混入非花色 ⇒ 整组不翻"
+    assert suit_labels(()) is None
+    assert suit_labels(None) is None
+
 
 
 def test_a_timeout_touches_the_session_log_but_not_the_journal() -> None:
