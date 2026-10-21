@@ -83,6 +83,48 @@ function renderCountdown(view) {
 
 /* ------------------------------------------------------------------ 提交 */
 
+/** 提示区右端 / 左端的四个操作键（U2-03 的冻结范围）。 */
+const ACTION_BUTTON_IDS = ["btn-submit", "btn-cancel", "btn-end-phase", "btn-pass"];
+
+/** 冻结四键：请求在飞期间**全部** disabled；快照留到请求结束，失败时原样恢复。 */
+function freezeActionButtons() {
+  if (state.actionFreeze) return;
+  state.actionFreeze = ACTION_BUTTON_IDS.map((id) => {
+    const button = $(id);
+    return {
+      id,
+      disabled: button.disabled,
+      hidden: button.hidden,
+      text: button.textContent,
+    };
+  });
+  enforceActionFreeze();
+}
+
+/** 在飞期间任何重绘之后再把四键压回 disabled（`renderPending` 末尾调用）。 */
+function enforceActionFreeze() {
+  if (!state.actionFreeze) return;
+  for (const id of ACTION_BUTTON_IDS) {
+    const button = $(id);
+    if (button) button.disabled = true;
+  }
+}
+
+/** 解除冻结。``restore`` = 恢复点击前那一面（失败且界面没有换掉时）；
+ *  重新渲染过的界面会先丢弃快照，四键状态由那次渲染决定。 */
+function releaseActionButtons(restore) {
+  const snapshot = state.actionFreeze;
+  state.actionFreeze = null;
+  if (!restore || !snapshot) return;
+  for (const saved of snapshot) {
+    const button = $(saved.id);
+    if (!button) continue;
+    button.disabled = saved.disabled;
+    button.hidden = saved.hidden;
+    button.textContent = saved.text;
+  }
+}
+
 function buildAction() {
   const pending = state.view.pending;
   if (!pending) return null;
@@ -150,29 +192,37 @@ function buildAction() {
 
 /** 提示条右端的两个动作按钮：选中候选里的那条 `EndPhase` / `Pass` 并提交。
  *
- * 与浮动选项行里的按钮不同，它们表示"这一问就到此为止"，所以点一下 = 选中 + 提交；
- * 合成载荷 / 尚未建局（`state.sessionId` 为空）时只选中，不朝不存在的会话发请求。
+ * 「放弃」严格**一击即弃**（U2-03）：提交前**不重绘**（不重铺候选 / 选项），POST 在飞时
+ * 四键冻结；被拒（400 / 409）回到点击前的内部选择与四键状态。合成载荷 / 尚未建局
+ * （`state.sessionId` 为空）时只留下内部选中态，不朝不存在的会话发请求。
  * 提交的仍是**原样取自** `legal_actions` 的那一条——前端不自己拼 Action。
  */
 async function submitRightAction(kind) {
-  if (state.playback) return;
+  if (state.playback || state.submitBusy) return;
   const pending = state.view ? state.view.pending : null;
   const index = rightActionIndex(pending, kind);
   if (index < 0) return;
+  // 先留一份**点击前**的选择快照：失败时原样还回去（界面 DOM 本来就没动）。
+  const before = selectionSnapshot();
   state.selectedOption = index;
   state.focusCardId = null;
   state.selectedTargets = [];
   state.picks = [];
   state.preactivation = null;
   state.lastRejectReason = "";
-  renderTable();
-  renderPending(state.view);
-  if (!state.sessionId) return;
-  await submitAction();
+  if (!state.sessionId) {
+    // 合成载荷 / 尚未建局：只同步内部选中态与按钮状态，不发请求、也不重绘内容区。
+    refreshSubmit(pending);
+    renderRightActions(pending, state.view);
+    return;
+  }
+  await submitAction(before);
 }
 
-async function submitAction() {
-  if (state.playback) return;
+/** 提交当前选择。``restoreSelection`` = 点右端动作（或取消）时点击前的选择快照：
+ *  非 409 失败时恢复它，界面就仍是点击前那一面（400 只加一行错误文案）。 */
+async function submitAction(restoreSelection = null) {
+  if (state.playback || state.submitBusy) return;
   const action = buildAction();
   if (!action) {
     $("t-choice").textContent = "没有可提交的候选：先选一张牌或一个选项。";
@@ -201,19 +251,37 @@ async function submitAction() {
     $("t-choice").textContent = "这个组合不在合法候选里，请换一个选择。";
     return;
   }
+  // U2-03：POST 在飞 = 提示区四键全部禁用（快照留到结束）；轮询刷新也让路（见 refresh）。
+  const viewBefore = state.view;
+  freezeActionButtons();
+  state.submitBusy = true;
   try {
     const body = await post(
       `/api/sessions/${state.sessionId}/answer?after=${state.cursor}&logs=${state.logSeq}`,
       { action },
     );
+    state.submitBusy = false;
+    releaseActionButtons(false);
     resetSelection();
     applyView(body);
   } catch (error) {
+    state.submitBusy = false;
     if (error.status === 409) {
+      // 409 = 询问过期：允许刷新到**新的**询问；刷新失败才退回点击前那一面。
       $("t-choice").textContent = "这个询问已过期（可能刚被代答）：已为你刷新。";
-      await refresh();
+      await refresh(true);
+      if (state.view === viewBefore && !state.playback) {
+        if (restoreSelection) restoreSelectionState(restoreSelection);
+        releaseActionButtons(true);
+      } else {
+        // 新视图 / 回放已接管界面：旧快照不能盖上去。
+        releaseActionButtons(false);
+      }
       return;
     }
+    // 400 / 其它拒绝：恢复点击前的选择与四键，DOM 只多一行错误文案。
+    if (restoreSelection) restoreSelectionState(restoreSelection);
+    releaseActionButtons(true);
     $("t-choice").textContent = `提交被拒：${error.message}`;
   }
 }

@@ -1,52 +1,37 @@
-/* SGS 前端 · 选项面：候选按钮、选择面槽位、「提供一张 B」面。
+/* SGS 前端 · 选项面：小选项按钮组、选择面槽位、「提供一张 B」面。
  *
  * 加载顺序见 index.html（U1-00 拆分）；本文件不需要构建步骤。
  */
 "use strict";
 
-/** 旧路径：每条候选一个按钮（`SelectOption` / `SKILL_ACTIVATION` / `DISCARD` 等）。 */
-function renderCandidateList(pending, actions) {
-  const options = $("t-options");
-  // 候选太多时（转化 / 多目标组合）不逐条铺开：先按"用哪张牌"聚合。
-  // 点了手牌就**只**显示它的候选：点牌 → 出目标 → 点目标（这是玩家的心智模型）。
-  const focused = state.focusCardId !== null
-    ? actions.map((action, index) => ({ action, index }))
-        .filter(({ action }) => {
-          if (!action.card) return false;
-          const entry = cardEntry(pending, state.focusCardId);
-          return entry !== null && String(action.card.card_id) === String(entry.card.card_id);
-        })
-    : null;
-  const groups = groupActions(focused ? focused.map(({ action }) => action) : actions);
-  if (focused) {
-    // 把"焦点内的下标"翻译回原候选下标（选项点击要落回原数组）
-    groups.forEach((group, i) => { group.actionIndex = focused[i].index; });
-  }
-  // 右端动作（结束出牌 / 放弃）不占浮动选项行；过滤发生在**下标翻译之后**，
-  // 于是 remaining 的 actionIndex 仍指向原 `legal_actions`。
-  const visibleGroups = groups.filter(
-    (group) => group.actionIndex === null || !isRightAction(actions[group.actionIndex]),
-  );
-  for (const group of visibleGroups) {
+/** `SELECT_OPTION` 的**小选项按钮组**（花色 / 二选一）：一个选项一个按钮。
+ *
+ * 它是询问控件区左栏的专用面，**不是**旧的候选列表：按钮只写选项本身，不带
+ * 「选项：…」的候选标签；选中仍记在 `state.selectedOption`，提交由右端「提交」走。
+ * 选座位形态（``option_seats`` 非空）不走这里——那一形态只点场上武将。
+ */
+function renderOptionButtons(pending) {
+  const box = $("t-options");
+  (pending.legal_actions || []).forEach((action, index) => {
+    if (action.kind !== "SelectOption" || isRightAction(action)) return;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "opt";
-    button.textContent = group.label;
-    if (group.targets && group.targets.length) button.setAttribute("data-targets", JSON.stringify(group.targets));
-    if (group.actionIndex !== null && state.selectedOption === group.actionIndex) button.classList.add("sel");
+    if (state.selectedOption === index) button.classList.add("sel");
+    button.textContent = optionText(action);
     button.addEventListener("click", () => {
-      state.selectedOption = group.actionIndex;
+      state.selectedOption = index;
       state.lastRejectReason = "";
       renderPending(state.view);
     });
-    options.appendChild(button);
-  }
+    box.appendChild(button);
+  });
+  $("btn-cancel").disabled = state.selectedOption === null && !cancelAction(pending);
+}
 
-  if (state.selectedOption !== null) {
-    const chosen = actions[state.selectedOption];
-    if (chosen && chosen.kind === "SelectCards") renderSlots(pending);
-  }
-  $("btn-cancel").disabled = state.selectedOption === null && state.focusCardId === null && state.picks.length === 0;
+/** 选项按钮上的文字：选项闭集的**原值**（中文花色标签由服务端后续下发，前端不另抄）。 */
+function optionText(action) {
+  return action.choice;
 }
 
 /** 这次选择的**未就绪原因**；``null`` = 可以提交。
@@ -79,6 +64,15 @@ function selectionError(action, pending) {
     return null;
   }
   return null;
+}
+
+/** 技能候选的动作短语（U2-03 直提态）：技能名读服务端下发的 `view.skills`，
+ *  前端不在这里抄中文名；查不到时退回技能 id（fail-visible，不猜名字）。 */
+function skillActionLabel(action) {
+  const skill = (((state.view && state.view.skills) || []).find(
+    (item) => item.skill_id === action.skill_id,
+  ));
+  return `发动【${skill && skill.name ? skill.name : action.skill_id}】`;
 }
 
 function actionLabel(action) {
@@ -138,21 +132,6 @@ function resetRightActions() {
     button.disabled = true;
     button.textContent = label;
   }
-}
-
-/** 候选 → 可点选项。**每条候选一个选项**（不再按标签去重）：
- *
- * 引擎把每个目标组合枚举成一条独立候选，所以"指定目标"就是"点那一条候选"。
- * 去重会把同一张牌的多个目标组合并成一条，玩家就没法选目标了。
- * 带 `targets` 的候选在选项上打 `data-targets`，好让界面与测试都能"看见目标"。
- */
-function groupActions(actions) {
-  return actions.map((action, index) => ({
-    label: actionLabel(action),
-    actionIndex: index,
-    targets: action.targets === undefined ? null : action.targets,
-    cardId: action.card ? action.card.card_id : null,
-  }));
 }
 
 function renderSlots(pending) {

@@ -92,6 +92,9 @@ function toggleFocus(cardId) {
   } else {
     state.focusCardId = cardId;
     state.selectedTargets = [];
+    // 点牌 = 改用这张牌：先前选中的技能 / 小选项必须让位（U2-03 删掉候选行后，
+    // 再没有"另点一条候选"来改选中项；`buildAction()` 里 `selectedOption` 优先于手选）。
+    state.selectedOption = null;
     const auto = autoCombo(pending, cardId);
     if (auto) state.selectedTargets = auto.slice();
     state.lastRejectReason = "";
@@ -100,7 +103,7 @@ function toggleFocus(cardId) {
   renderPending(state.view);
 }
 
-/** 本次询问里"用这张牌"的候选（旧路径：候选列表按钮用）。 */
+/** 本次询问里"用这张牌"的候选（非手选面里卡片置灰判据用；候选按钮行已删除）。 */
 function cardCandidates(pending, cardId) {
   if (!pending) return [];
   return (pending.legal_actions || []).filter(

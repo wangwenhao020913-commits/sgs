@@ -1,4 +1,7 @@
-/* SGS 前端 · 询问渲染：按询问种类分派到手选 / 弃牌 / 直提 / 候选列表。
+/* SGS 前端 · 询问渲染：按询问种类分派到各自的专用面。
+ *
+ * 没有「合法行动逐条铺按钮」的候选列表逃生梯（U2-03）：能答的九类询问各有专用面，
+ * 其余一律 fail-closed（「这一步没有可用的界面」）。
  *
  * 加载顺序见 index.html（U1-00 拆分）；本文件不需要构建步骤。
  */
@@ -54,6 +57,9 @@ function isRightAction(action) {
 function renderPending(view) {
   const pending = view && view.pending;
   syncPendingClock(view);
+  // 重新渲染的界面是四键状态的**新真源**：丢弃上一次提交留下的冻结快照（请求还在飞时
+  // `submitBusy` 为真，快照留着由 `enforceActionFreeze()` 继续压住四键）。
+  if (!state.submitBusy) releaseActionButtons(false);
   $("t-options").innerHTML = "";
   // 询问文本：**需要做什么**（服务端 `context.requirement`）优先；没有就退回引擎的通用 prompt。
   const requirement = pending && pending.context && pending.context.requirement;
@@ -130,13 +136,28 @@ function renderPending(view) {
     $("btn-cancel").disabled = state.picks.length === 0 && !cancelAction(pending);
   }
   else if (kind === "direct") renderDirect(actions[0], pending);
+  // 技能候选的直提态：无清单 = 「将提交：发动【技能名】」；有清单 = 既有预发动入口。
+  else if (kind === "skill") renderDirectSkill(pending, actions);
+  // `SELECT_OPTION` 的非座位形态：一选项一个按钮的专用小选项组（不是候选列表）。
+  else if (kind === "options") renderOptionButtons(pending);
   else if (kind === "arrange") {
     // 排列（W6-03）：双行拖拽面；强制、无取消——唯一出口是「确认」。
     $("btn-cancel").hidden = true;
     $("btn-cancel").disabled = true;
     renderArrange(pending);
   }
-  else renderCandidateList(pending, actions);
+  else {
+    // fail-closed：没有专用面的询问不铺任何按钮，也不给右端动作（不发明合法性）。
+    renderUnsupported(pending);
+    setActionLabels(false, false);
+    $("btn-submit").disabled = true;
+    $("btn-cancel").disabled = true;
+    resetRightActions();
+    resetCountdown();
+    syncModal();
+    enforceActionFreeze();
+    return;
+  }
 
   // 提交 / 取消两个按钮的**文案**跟着模式走（预发动 = 确认发动 / 取消预发动；被动入口 = 放弃；
   // 排列 = 确认）。
@@ -147,6 +168,8 @@ function renderPending(view) {
   renderRightActions(pending, view);
   renderCountdown(view);
   syncModal();
+  // 请求在飞期间四键保持禁用（这一条盖住任何在飞期间发生的重绘）。
+  enforceActionFreeze();
 }
 
 /** 底部两个按钮的文案：预发动 = 「确认发动 / 取消预发动」；手牌入口 = 「确认使用 / 取消选择」；
@@ -171,11 +194,17 @@ function setActionLabels(inPreativation, passiveEntry, arrange = false) {
 
 /** 这次询问该走哪条渲染路径。
  *
- * - `picker`：出牌阶段 / 响应窗口 —— 点牌 + 点目标（本刀新增）；
- * - `direct`：只有一条候选、且它**没有目标要选** —— 不铺按钮，直接显示"将提交：…"；
- * - `slots`：`SELECT_CARDS` 的选择面（下一刀再统一）；
+ * - `picker`：出牌阶段 / 响应窗口 —— 点牌 + 点目标；
+ * - `discard`：弃牌阶段 —— 点手牌收进待弃置集合；
+ * - `slots`：`SELECT_CARDS` 的选择面（点槽位）；
  * - `arrange`：`ARRANGE` 的双行拖拽面（W6-03；规格由投影下发）；
- * - `list`：其余询问类保留旧的候选列表按钮（逃生梯，下一刀抹平）。
+ * - `preactivation` / `preactivation-entry`：清单驱动的本地态 / 被动入口；
+ * - `seat` / `options`：`SELECT_OPTION` 的选座位形态 / 小选项按钮组；
+ * - `skill`：技能候选的直提态（无清单，如 B 形"是否发动"）；
+ * - `direct`：唯一且无需选目标的候选 —— 不铺按钮，只说"将提交：…"；
+ * - `unsupported`：没有专用面 —— fail-closed（不退回候选列表，不发明合法性）。
+ *
+ * **`list` 逃生梯已删除**（U2-03 / spec D5）：界面不再把 `legal_actions` 逐条铺成按钮。
  */
 function renderKind(pending, actions) {
   // 选择面**永远**要渲染：它的交互在 `slots` 上（点槽位），不在候选条数上。
@@ -186,7 +215,7 @@ function renderKind(pending, actions) {
   if (pending.kind === "DISCARD") return "discard";
   // 排列（W6-03）：**唯一**的渲染路径 —— 双行拖拽面；不在候选上铺 720 个按钮。
   // 规格缺失（409 裸 Query / 无技能定义）时也只走这条路径，由 `renderArrange` 画
-  // "排列不可用"（fail-closed），**不**退回旧的候选列表猜一个顺序。
+  // "排列不可用"（fail-closed），**不**退回候选列表猜一个顺序。
   if (pending.kind === "ARRANGE") return "arrange";
   // 预发动（W4-1）：清单驱动，不铺候选列表、不走手选。
   if (state.preactivation) return "preactivation";
@@ -195,16 +224,59 @@ function renderKind(pending, actions) {
   if (isPassivePreativation(pending)) return "preactivation-entry";
   // `SELECT_OPTION` 的"选座位"形态（【遗计】"交给谁"）：**取消选项按钮**，只点场上武将。
   if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) return "seat";
-  // **显式选中的候选优先**：技能按钮（`ActivateSkill`）在出牌阶段里与手选并存，
-  // 点了它就等于"我就要发这个技能"，界面必须画那条候选的选中态，不能再画手选提示。
-  if (state.selectedOption !== null && actions[state.selectedOption]) return "list";
+  // 其余 `SELECT_OPTION`（花色 / 二选一）：专用的小选项按钮组。
+  if (pending.kind === "SELECT_OPTION" && actions.some((action) => action.kind === "SelectOption")) {
+    return "options";
+  }
+  // 技能候选（点了底部技能按钮 / B 形"是否发动"）：无清单 = 直提态；有清单 = 既有入口。
+  // 判据只看候选自己的 `skill_id` 与清单，不读技能名、不做第二条合法性。
+  const skillAction = selectedSkillAction(pending, actions);
+  if (skillAction) {
+    return preactivationManifest(pending, skillAction.skill_id)
+      ? "preactivation-entry"
+      : "skill";
+  }
   // 唯一且不需要选目标（放弃 / 结束阶段 / 唯一的无目标响应牌）：直接说"将提交：…"。
   // 判据用 `needsPicker`，**不能**只看"只有一条候选"——一条 `UseCard{杀, targets=(4,)}`
   // 也是唯一候选，但它必须让玩家先看见"打的是谁"。
   if (directAction(pending)) return "direct";
   // 手选询问（出牌阶段 / 响应窗口）**一律**走 picker：点牌 + 点目标。
   if (isHandPick(pending)) return "picker";
-  return "list";
+  return "unsupported";
+}
+
+/** 这一次询问里"要直提的那条技能候选"：显式选中优先；B 形"是否发动"询问里那条裸
+ *  `ActivateSkill` 本身就是这一步的答案（技能按钮只说明、不接 click，见 U1-06）。
+ *  `null` = 这一问没有技能直提态。 */
+function selectedSkillAction(pending, actions) {
+  const selected = state.selectedOption === null ? null : actions[state.selectedOption];
+  if (selected && selected.kind === "ActivateSkill") return selected;
+  if (pending && pending.kind === "SKILL_ACTIVATION") {
+    const skills = actions.filter((action) => action.kind === "ActivateSkill");
+    if (skills.length === 1) return skills[0];
+  }
+  return null;
+}
+
+/** 技能直提态（无预发动清单）：不铺任何按钮，只把"这一步将提交什么"写清楚。
+ *
+ * 内部仍把 `state.selectedOption` 指到那条 `ActivateSkill`（底部技能按钮设的是同一个
+ * 值）：提交按钮据此启用，`buildAction()` 原样返回候选里的那一条（不拼 Action）。
+ */
+function renderDirectSkill(pending, actions) {
+  const action = selectedSkillAction(pending, actions);
+  if (!action) {
+    renderUnsupported(pending);
+    return;
+  }
+  const index = actions.indexOf(action);
+  if (index >= 0 && state.selectedOption === null) state.selectedOption = index;
+  $("t-choice").textContent = `将提交：${skillActionLabel(action)}`;
+}
+
+/** 没有专用面的询问：fail-closed。一句明话，不铺任何可点控件（含右端动作）。 */
+function renderUnsupported() {
+  $("t-choice").textContent = "这一步没有可用的界面";
 }
 
 /** ``SELECT_OPTION`` 里形如 ``seat:N`` 的选项（服务端已解析成 ``option_seats``）。 */
@@ -226,7 +298,7 @@ function cancelAction(pending) {
 
 /** 取消：候选里真有 `Pass` 就送出去（服务端据此中止这一步），否则只清本地选择。 */
 async function cancelOrClear() {
-  if (state.playback) return;
+  if (state.playback || state.submitBusy) return;
   const pending = state.view ? state.view.pending : null;
   // 预发动（W4-1 / W4-2）：主动入口的取消只是退出**接入层**的本地态，**一个 action 都
   // 不提交**（回到同一个出牌阶段询问）。被动入口的取消是「放弃」——**送出那条 `Pass`**，
@@ -236,13 +308,15 @@ async function cancelOrClear() {
     if (passive) {
       const pass = (pending.legal_actions || []).find((action) => action.kind === "Pass");
       if (pass) {
+        // 「放弃」一击即弃：不重绘；失败时把点击前的选择快照还回去（U2-03）。
+        const before = selectionSnapshot();
         state.selectedOption = (pending.legal_actions || []).indexOf(pass);
         state.preactivation = null;
         state.focusCardId = null;
         state.selectedTargets = [];
         state.picks = [];
         state.lastRejectReason = "";
-        await submitAction();
+        await submitAction(before);
         return;
       }
     }
@@ -257,13 +331,14 @@ async function cancelOrClear() {
     clearSelection();
     return;
   }
+  const before = selectionSnapshot();
   state.selectedOption = (pending.legal_actions || []).indexOf(pass);
   state.focusCardId = null;
   state.selectedTargets = [];
   state.picks = [];
   state.preactivation = null;
   state.lastRejectReason = "";
-  await submitAction();
+  await submitAction(before);
 }
 
 /** 这条询问是不是"唯一一条候选、且不需要选目标"——是则返回那条候选，否则 `null`。
@@ -396,9 +471,13 @@ function renderPickerAlternatives(pending) {
   });
 }
 
-/** 唯一且不需要选目标的候选：不铺按钮，直接说"将提交：…"（spec D9）。 */
+/** 唯一且不需要选目标的候选：不铺按钮，直接说"将提交：…"（spec D9）。
+ *  技能候选写中文技能名（`view.skills`），不再拼「发动技能 hero.xxx」的报文 id。 */
 function renderDirect(only, pending) {
-  $("t-choice").textContent = only ? `将提交：${alternativeLabel(pending, only)}` : "";
+  const label = only && only.kind === "ActivateSkill"
+    ? skillActionLabel(only)
+    : (only ? alternativeLabel(pending, only) : "");
+  $("t-choice").textContent = only ? `将提交：${label}` : "";
 }
 
 /** 提交按钮的唯一判据：**能造出一个候选里真有的 Action** 时才可点。
@@ -454,6 +533,20 @@ function refreshSubmit(pending) {
   }
   if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) {
     $("t-choice").textContent = ready ? "可以提交。" : "点场上武将选择交给谁。";
+    return;
+  }
+  // 技能直提态：把下一条要提交的技能候选写成中文技能名（不重铺候选行）。
+  const skillAction = selectedSkillAction(pending, pending.legal_actions || []);
+  if (skillAction) {
+    const built = ready ? buildAction() : null;
+    $("t-choice").textContent = built && built.kind === "ActivateSkill"
+      ? `将提交：${skillActionLabel(skillAction)}`
+      : "";
+    return;
+  }
+  // `SELECT_OPTION` 的非座位形态：小选项按钮组。
+  if (pending.kind === "SELECT_OPTION") {
+    $("t-choice").textContent = ready ? "可以提交。" : "点一个选项。";
     return;
   }
   if (isDiscardPick(pending)) {

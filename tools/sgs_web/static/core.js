@@ -105,7 +105,7 @@ function phaseLabel(phase) {
  *
  * 弃牌阶段的交互是**另一条**手选路（点手牌收进待弃置集合，没有目标要选），
  * 由 :func:`isDiscardPick` 单独认出来——它不进这里，免得 `pickerSeats` 去读候选索引。
- * 其余（排列 / 选择面 / 技能发动 / 单选）保留旧的候选列表按钮。
+ * 其余询问各走自己的专用面（选择面 / 排列 / 技能直提 / 小选项组），**没有**候选列表逃生梯。
  *
  * 求桃（W4-fix-3）：`legal_actions` 里是**真【桃】**的使用（急救转化桃已收回到技能入口，
  * `spec.md` §1 裁定 A），故"点手牌【桃】= 选中对应候选"；目标恒为濒死者，由候选的
@@ -146,7 +146,7 @@ const state = {
   view: null,          // 服务端最近一次下发的会话视图
   focusCardId: null,   // **焦点**：正在挑目标的那张候选牌（再点一次取消）
   selectedTargets: [], // 已选目标座位
-  selectedOption: null,// 旧路径：选中的 legal_action 下标（弃牌 / 排列 / 单选 / 技能）
+  selectedOption: null,// 内部选中态：选中的 legal_action 下标（技能 / 小选项 / 右端动作）
   picks: [],           // 手选槽位下标 / 弃牌 card_id / 提供面的面内位置
   arrange: null,       // 排列（W6-03）：{key,cards,count,free,fixed,top,bottom,selected,dragging}
   preactivation: null, // 预发动（W4-1）：{skillId,name,steps,answers,cursor}；本地态，取消零提交
@@ -171,6 +171,10 @@ const state = {
   narrative: [],       // U1-05：服务端下发的叙事条目（简易事件流；按 seq 升序）
   narrativeShown: 0,   // 已经铺进 DOM 的叙事条目数（增量 / 切换详略时接着铺）
   lastRejectReason: "",   // 已收到的全部下发记录（切换详略时重画用）
+  // U2-03：提交在飞时冻结提示区四键。`actionFreeze` = 点击前四键的 disabled / hidden /
+  // 文案快照（失败时原样恢复）；`submitBusy` = 有 POST 在飞（挡住重复提交与轮询重绘）。
+  submitBusy: false,
+  actionFreeze: null,
 };
 
 /* ------------------------------------------------------------------ 网络 */

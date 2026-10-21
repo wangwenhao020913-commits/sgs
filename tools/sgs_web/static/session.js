@@ -302,6 +302,31 @@ function commitView(body) {
   renderPending(body);
 }
 
+/** 选择态快照 / 恢复（U2-03）：右端动作点击前先留一份，提交被拒时还回点击前那一面。
+ *
+ * 只覆盖**本地选择**——候选 /  legality 始终以服务端最近一次下发为准。
+ */
+function selectionSnapshot() {
+  return {
+    focusCardId: state.focusCardId,
+    selectedTargets: state.selectedTargets.slice(),
+    selectedOption: state.selectedOption,
+    picks: state.picks.slice(),
+    preactivation: state.preactivation,
+    lastRejectReason: state.lastRejectReason,
+  };
+}
+
+function restoreSelectionState(snapshot) {
+  if (!snapshot) return;
+  state.focusCardId = snapshot.focusCardId;
+  state.selectedTargets = snapshot.selectedTargets.slice();
+  state.selectedOption = snapshot.selectedOption;
+  state.picks = snapshot.picks.slice();
+  state.preactivation = snapshot.preactivation;
+  state.lastRejectReason = snapshot.lastRejectReason;
+}
+
 /** 清空全部未提交的选择（焦点 / 已选目标 / 旧路径的候选与槽位 / 预发动本地态 / 排列面）。 */
 function resetSelection() {
   state.focusCardId = null;
@@ -318,8 +343,11 @@ function resetSelection() {
   state.modal.dismissed = false;
 }
 
-async function refresh() {
+async function refresh(force = false) {
   if (!state.sessionId || state.playback) return;
+  // 提交在飞时不取增量：轮询重绘会把"点击前那一面"换掉，失败后就没得恢复（U2-03）。
+  // 409 的刷新走 `refresh(true)`——那是请求**结束后**才发生的，必须放行。
+  if (state.submitBusy && !force) return;
   try {
     const body = await api(`/api/sessions/${state.sessionId}?after=${state.cursor}&logs=${state.logSeq}`);
     applyView(body);

@@ -16,7 +16,7 @@
   const names = [
     "state", "applyView", "renderPending", "buildAction", "submitAction",
     "loadRuns", "openReplay", "renderReplay", "renderLog", "phaseLabel",
-    "cardUsable", "cardCandidates", "clearSelection", "groupActions", "renderTable", "actionLabel", "renderSkills",
+    "cardUsable", "cardCandidates", "clearSelection", "renderTable", "actionLabel", "renderSkills",
     "PHASE_LABELS", "keepRecord", "timingLabel",
     // 手选（票 01）：候选索引 + 焦点/目标 + 自动选中 + 渲染路径分派
     "cardIndex", "cardEntry", "cardSelectable", "isLegalCombo", "autoCombo",

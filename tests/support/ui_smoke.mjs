@@ -198,6 +198,17 @@ const check = (label, ok, detail = "") => {
   else { failures += 1; console.log(`FAIL ${label}${detail ? ` — ${detail}` : ""}`); }
 };
 const $ = (id) => documentShim.getElementById(id);
+/** 触发一次 click 并**等它跑完**：右上动作 / 取消里发请求的处理器是 async 的，
+ *  不等完就进下一个块，会把下一个块撞进"请求在飞"的冻结态（U2-03 起四键会冻结）。 */
+const clickAndWait = async (node, event = null) => {
+  for (const fn of node.listeners.click || []) await fn(event || { target: node });
+};
+/** 候选行的文本指纹（U2-03 起界面**不再**把 `legal_actions` 逐条铺成按钮）：
+ *  任何一条命中都说明旧的逃生梯又长回来了。 */
+const CANDIDATE_ROW_PATTERN = /发动技能 |选项：|选择座位 |使用【|弃牌（\d|排列（\d/;
+const candidateRowButtons = () => $("t-options").children.filter(
+  (node) => node.tagName === "BUTTON" && CANDIDATE_ROW_PATTERN.test(node.textContent || ""),
+);
 /** 牌桌座位节点：对手在 `#t-seats` 环上，自己在底部 `#t-self-seat`（U1-01 起不在环上）。 */
 const seatNodes = () => [...$("t-seats").children, $("t-self-seat")];
 const seatBox = (seat) => seatNodes().find(
@@ -803,13 +814,14 @@ if (multi) {
       === nanman.legal_actions.findIndex((action) => action.kind === "Pass"),
     `index=${ui.rightActionIndex ? ui.rightActionIndex(nanman, "Pass") : "n/a"}`);
   if (giveUp) {
-    // 合成载荷没有会话 id：右端按钮只负责**选中**那条候选，提交仍由玩家按。
+    // 合成载荷没有会话 id：右端按钮只留下**内部选中态**，不发请求、也不重绘内容区（U2-03）。
     ui.state.sessionId = null;
     (giveUp.listeners.click || []).forEach((fn) => fn({ target: giveUp }));
-    check("㉿R4 点右端『放弃』= 选中 Pass、提交按钮可点（不越权提交）", (() => {
+    check("㉿R4 点右端『放弃』= 选中 Pass、提交按钮可点（不越权提交、不铺候选行）", (() => {
       const picked = ui.buildAction();
-      return picked !== null && picked.kind === "Pass" && $("btn-submit").disabled === false;
-    })(), `buildAction=${JSON.stringify(ui.buildAction())} disabled=${$("btn-submit").disabled}`);
+      return picked !== null && picked.kind === "Pass" && $("btn-submit").disabled === false
+        && $("t-options").children.length === 0 && candidateRowButtons().length === 0;
+    })(), `buildAction=${JSON.stringify(ui.buildAction())} disabled=${$("btn-submit").disabled} options=${JSON.stringify($("t-options").children.map((node) => node.textContent))}`);
   }
   ui.state.sessionId = savedSession;
   ui.state.view = saved;
@@ -950,6 +962,10 @@ while (ui.state.view.pending && steps < 4000) {
       ui.state.selectedOption = p.legal_actions.findIndex((a) => a.kind === "SelectCards");
       ui.renderPending(ui.state.view);
       if ($("t-options").children.length === 0) renderErrors.push("SELECT_CARDS 没有渲染出选择面");
+    }
+    // U2-03：任何一类询问的初始面都不许出现逐条候选按钮（含点过技能 / 选项之后的面）。
+    if (candidateRowButtons().length) {
+      renderErrors.push(`${p.kind}: 出现候选行按钮 ${JSON.stringify(candidateRowButtons().map((b) => b.textContent))}`);
     }
   } catch (error) {
     renderErrors.push(`${p.kind}: ${error.message}`);
@@ -1996,7 +2012,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   ui.state.sessionId = "smoke-missing-session";
   const beforePick = calls.length;
-  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  await clickAndWait($("btn-cancel"));
   const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
   check("㉿J4 步 1 点取消 = **送出一条 Pass 候选**",
     !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
@@ -2036,7 +2052,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(seatAction));
 
   const beforeSeat = calls.length;
-  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  await clickAndWait($("btn-cancel"));
   const sentSeat = calls.length > beforeSeat ? calls[calls.length - 1].body.action : null;
   check("㉿J8 座位步点取消 = 送出 Pass（中途退出这一步）",
     !!sentSeat && sentSeat.kind === "Pass", JSON.stringify(sentSeat));
@@ -2089,7 +2105,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   ui.state.sessionId = "smoke-missing-session";
   const beforePick = calls.length;
-  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  await clickAndWait($("btn-cancel"));
   const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
   check("㉿H4 步 1 点取消 = **送出一条 Pass 候选**",
     !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
@@ -2126,7 +2142,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(seatAction));
 
   const beforeQingnangSeat = calls.length;
-  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  await clickAndWait($("btn-cancel"));
   const sentQingnangSeat = calls.length > beforeQingnangSeat
     ? calls[calls.length - 1].body.action : null;
   check("㉿H8 步 2 点取消 = 送出 Pass（中途退出这一步）",
@@ -2185,7 +2201,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   ui.state.sessionId = "smoke-missing-session";
   const beforePick = calls.length;
-  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  await clickAndWait($("btn-cancel"));
   const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
   check("㉿Y4 步 1 点取消 = **送出一条 Pass 候选**",
     !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
@@ -2223,7 +2239,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(seatAction));
 
   const beforeJieyinSeat = calls.length;
-  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  await clickAndWait($("btn-cancel"));
   const sentJieyinSeat = calls.length > beforeJieyinSeat
     ? calls[calls.length - 1].body.action : null;
   check("㉿Y8 步 2 点取消 = 送出 Pass（中途退出这一步）",
@@ -2286,7 +2302,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   ui.state.sessionId = "smoke-missing-session";
   const beforePick = calls.length;
-  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  await clickAndWait($("btn-cancel"));
   const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
   check("㉿Z5 点取消 = **送出一条 Pass 候选**",
     !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
@@ -2346,7 +2362,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   ui.state.sessionId = "smoke-missing-session";
   const beforePick = calls.length;
-  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  await clickAndWait($("btn-cancel"));
   const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
   check("㉿W4 步 1 点取消 = **送出一条 Pass 候选**",
     !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
@@ -2383,7 +2399,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(rendeAction));
 
   const beforeRendeSeat = calls.length;
-  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  await clickAndWait($("btn-cancel"));
   const sentRendeSeat = calls.length > beforeRendeSeat
     ? calls[calls.length - 1].body.action : null;
   check("㉿W8 步 2 点取消 = 送出 Pass（中途退出这一步）",
@@ -2458,7 +2474,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   ui.state.sessionId = "smoke-missing-session";
   const beforeSuit = calls.length;
-  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  await clickAndWait($("btn-cancel"));
   const sentSuit = calls.length > beforeSuit ? calls[calls.length - 1].body.action : null;
   check("㉿V4 步 2 点取消 = 送出 Pass", !!sentSuit && sentSuit.kind === "Pass",
     JSON.stringify(sentSuit));
@@ -2493,7 +2509,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `块=${$("t-options").children.length}`);
 
   const beforeFanCard = calls.length;
-  ($("btn-cancel").listeners.click || []).forEach((fn) => fn({ target: $("btn-cancel") }));
+  await clickAndWait($("btn-cancel"));
   const sentFanCard = calls.length > beforeFanCard ? calls[calls.length - 1].body.action : null;
   check("㉿V7 步 3 点取消 = 送出 Pass（中途退出这一步）",
     !!sentFanCard && sentFanCard.kind === "Pass", JSON.stringify(sentFanCard));
@@ -3023,8 +3039,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `选项=${JSON.stringify($("t-options").children.map((b) => b.textContent))}`);
   const beforePass = calls.length;
   const cancel = $("btn-cancel");
-  (cancel.listeners.click || []).forEach((fn) => fn({ target: cancel }));
-  await new Promise((resolve) => setImmediate(resolve));
+  await clickAndWait(cancel);
   const passSent = calls.length > beforePass ? calls[calls.length - 1].body.action : null;
   check("㉿PZ14 被动入口点「放弃」= 送出 Pass（时机消费，不重问）",
     !!passSent && passSent.kind === "Pass", JSON.stringify(passSent));
@@ -4315,11 +4330,17 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!activation && activation.kind === "SKILL_ACTIVATION"
       && activation.skill_id === "hero.zhugeliang.guanxing",
     `kind=${activation && activation.kind} skill=${activation && activation.skill_id}`);
-  const activateButton = $("t-options").children.find(
-    (node) => node.textContent.includes("发动技能")
-      && node.textContent.includes("hero.zhugeliang.guanxing"),
-  );
-  if (activateButton) clickNode(activateButton);
+  const guanxingButton = $("t-skills").children.find(
+    (node) => node.getAttribute("data-skill-id") === "hero.zhugeliang.guanxing");
+  // 观星是**触发技**（有钩子、无主动候选入口）⇒ 底部技能按钮只说明、不接 click（U1-06）。
+  // 它的"是否发动"由**询问自己的直提态**回答：这就是 B 形技能的新表面（U2-03）。
+  check("㉿GX16b 观星这类 B 形发动询问 = 直提态（不再铺「发动技能 hero.…」候选行）",
+    !!guanxingButton
+      && $("t-options").children.length === 0
+      && candidateRowButtons().length === 0
+      && /将提交：发动【观星】/.test($("t-choice").textContent)
+      && $("btn-submit").disabled === false,
+    `button=${!!guanxingButton} choice="${$("t-choice").textContent}" submit=${$("btn-submit").disabled} cand=${candidateRowButtons().length} kind=${ui.renderKind(activation, activation && activation.legal_actions)} options=${JSON.stringify($("t-options").children.map((node) => node.textContent))}`);
   await ui.submitAction();
   const realArrange = ui.state.view.pending;
   check("㉿GX17 确认发动后 ARRANGE 询问带投影规格（count 4 / free）与 4 张 revealed 牌面",
@@ -5205,14 +5226,386 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const savedSession = ui.state.sessionId;
   ui.state.sessionId = null;
   const before = calls.length;
-  ($("btn-end-phase").listeners.click || []).forEach((fn) => fn({ target: $("btn-end-phase") }));
+  await clickAndWait($("btn-end-phase"));
   check("U1-03ab 点右端「结束出牌」= 选中候选里的那条 EndPhase（不自己拼 Action、合成态不提交）",
     (() => {
       const action = ui.buildAction();
       return !!action && action.kind === "EndPhase" && $("btn-submit").disabled === false;
     })() && calls.length === before,
     `action=${JSON.stringify(ui.buildAction())} calls=${calls.length - before}`);
+  // U2-03：右端动作**不重绘**内容区——点完「结束出牌」不应铺出任何候选 / 选项。
+  check("U1-03ab2 点右端动作不重绘内容区（选项行仍为空、无候选按钮）",
+    $("t-options").children.length === 0 && candidateRowButtons().length === 0,
+    `options=${JSON.stringify($("t-options").children.map((node) => node.textContent))}`);
   ui.state.sessionId = savedSession;
+}
+
+/* ============ U2-03：删除候选按钮行 + 右端动作「一击即弃」 ============
+ *
+ * 判据（票面验收 / spec D5、Problem 3）：
+ * - 任何询问、任何点击序列下都不再有逐条候选按钮（含点过技能 / 选项之后）；
+ * - `SELECT_OPTION` 非座位形态 = 一选项一个按钮；技能候选 = 直提态「将提交：发动【技能名】」；
+ * - 「放弃」一击 = 一次 POST：提交前不重绘、在飞时四键全禁用、被拒（400 / 409）回到点击前
+ *   那一面（409 可刷新到新询问，但不留下展开的选项）；
+ * - 没有合法 `Pass` 的询问不显示「放弃」（弃牌 / 五谷 / 观星排列 / 反间花色），
+ *   `EndPhase` 与它相互独立；没有专用面的询问 fail-closed。
+ */
+
+/** 四键当前态（disabled / hidden / 文案）：冻结 / 恢复的逐字段快照。 */
+const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "btn-pass"]
+  .map((id) => {
+    const button = $(id);
+    return [id, button.disabled, button.hidden, button.textContent];
+  });
+
+/* ---- ① `SELECT_OPTION` 非座位形态：一选项一个按钮，不是候选行 ---- */
+{
+  const pending = {
+    kind: "SELECT_OPTION", actor: 0, seq: 9401, prompt: "请选择一项。",
+    prompt_display: { text: "请选择一项。", default_label: "超时将自动选择第一项" },
+    legal_actions: [
+      { kind: "SelectOption", choice: "heart", answers_seq: 9401 },
+      { kind: "SelectOption", choice: "spade", answers_seq: 9401 },
+    ],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  };
+  const view = synthView(pending);
+  ui.state.view = view;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  const buttons = $("t-options").children;
+  check("U2-03a SELECT_OPTION 非座位形态 = 专用小选项按钮组（原值、无「选项：」前缀）",
+    ui.renderKind(pending, pending.legal_actions) === "options"
+      && buttons.length === 2
+      && buttons.map((node) => node.textContent).join(",") === "heart,spade"
+      && !buttons.some((node) => /选项：/.test(node.textContent || "")),
+    `kind=${ui.renderKind(pending, pending.legal_actions)} 选项=${JSON.stringify(buttons.map((node) => node.textContent))}`);
+  check("U2-03a2 选项面没有候选按钮；点一个选项 = 内部选中 + 提交可点",
+    (() => {
+      (buttons[0].listeners.click || []).forEach((fn) => fn({ target: buttons[0] }));
+      return candidateRowButtons().length === 0
+        && ui.state.selectedOption === 0
+        && $("btn-submit").disabled === false
+        && $("t-options").children.length === 2;
+    })(),
+    `selectedOption=${ui.state.selectedOption} submit=${$("btn-submit").disabled} options=${$("t-options").children.length}`);
+}
+
+/* ---- ② 技能候选的直提态：B 形「是否发动」与点过底部技能按钮之后 ---- */
+{
+  const pending = {
+    kind: "SKILL_ACTIVATION", actor: 0, seq: 9402, skill_id: "hero.caocao.jianxiong",
+    prompt: "是否发动【奸雄】？",
+    prompt_display: { text: "是否发动【奸雄】？", default_label: "超时将自动放弃" },
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: "hero.caocao.jianxiong", answers_seq: 9402, picks: [], choices: [] },
+      { kind: "Pass", answers_seq: 9402 },
+    ],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  };
+  const view = synthView(pending);
+  view.skills = [{
+    skill_id: "hero.caocao.jianxiong", name: "奸雄", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: false,
+    ui: { passive: true, requirement: "", convert_sources: [] },
+  }];
+  ui.state.view = view;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  const index = pending.legal_actions.findIndex((action) => action.kind === "ActivateSkill");
+  const built = ui.buildAction();
+  check("U2-03b B 形「是否发动」= 直提态：中文技能名、无候选行、「放弃」仍独立出现",
+    ui.renderKind(pending, pending.legal_actions) === "skill"
+      && $("t-options").children.length === 0
+      && candidateRowButtons().length === 0
+      && $("t-choice").textContent.includes("将提交：发动【奸雄】")
+      && ui.state.selectedOption === index
+      && $("btn-submit").disabled === false
+      && $("btn-pass").hidden === false,
+    `kind=${ui.renderKind(pending, pending.legal_actions)} choice="${$("t-choice").textContent}" option=${ui.state.selectedOption} submit=${$("btn-submit").disabled} passHidden=${$("btn-pass").hidden}`);
+  check("U2-03b2 直提态提交的正是候选里的那条 ActivateSkill（不拼 Action）",
+    !!built && built.kind === "ActivateSkill" && built.skill_id === "hero.caocao.jianxiong"
+      && pending.legal_actions.includes(built),
+    JSON.stringify(built));
+}
+
+{
+  const activeSkill = {
+    skill_id: "hero.demo.active", name: "示例主动", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: false,
+    ui: { passive: false, requirement: "", convert_sources: [] },
+  };
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 9403,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: "hero.demo.active", answers_seq: 9403, picks: [], choices: [] },
+      { kind: "EndPhase", answers_seq: 9403 },
+    ],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  };
+  const view = synthView(pending);
+  view.skills = [activeSkill];
+  ui.state.view = view;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  const skillButton = $("t-skills").children.find(
+    (node) => node.getAttribute("data-skill-id") === "hero.demo.active");
+  check("U2-03c 点过底部技能按钮 = 直提态（不再铺「发动技能 hero.xxx」候选行）",
+    (() => {
+      if (!skillButton) return false;
+      (skillButton.listeners.click || []).forEach((fn) => fn({ target: skillButton }));
+      return ui.renderKind(pending, pending.legal_actions) === "skill"
+        && $("t-options").children.length === 0
+        && candidateRowButtons().length === 0
+        && $("t-choice").textContent.includes("将提交：发动【示例主动】")
+        && $("btn-submit").disabled === false;
+    })(),
+    `kind=${ui.renderKind(pending, pending.legal_actions)} choice="${$("t-choice").textContent}" options=${JSON.stringify($("t-options").children.map((node) => node.textContent))}`);
+}
+
+/* ---- ③ 强制询问不出现「放弃」；EndPhase 与它相互独立 ---- */
+{
+  const forcedCases = [
+    ["弃牌", {
+      kind: "DISCARD", actor: 0, seq: 9404, count: 1,
+      prompt: "弃牌阶段：请弃置 1 张手牌。",
+      legal_actions: [{ kind: "DiscardCards", answers_seq: 9404, cards: [synthCard(1, "杀")] }],
+      candidate_index: {}, option_seats: {}, context: null,
+      preactivations: {}, preactivation: [],
+    }],
+    ["五谷", {
+      kind: "SELECT_CARDS", actor: 0, seq: 9405,
+      prompt: "请从选择面里选择一张牌。",
+      legal_actions: [{ kind: "SelectCards", answers_seq: 9405, picks: [] }],
+      candidate_index: {}, option_seats: {}, context: null,
+      preactivations: {}, preactivation: [],
+      spec: { zones: ["processing"], total: [1, 1] },
+      slots: [{ ref: { zone: "processing", seat: null }, card: synthCard(2, "桃") }],
+    }],
+    ["观星排列", {
+      kind: "ARRANGE", actor: 0, seq: 9406,
+      prompt: "请排列这些牌。",
+      legal_actions: [{ kind: "ArrangeCards", answers_seq: 9406, order: [0], split: 1 }],
+      candidate_index: {}, option_seats: {}, context: null,
+      preactivations: {}, preactivation: [],
+      revealed: [synthCard(3, "闪")],
+      arrange: { count: 1, split: "free" },
+    }],
+    ["反间花色", {
+      kind: "SELECT_OPTION", actor: 0, seq: 9407,
+      prompt: "请选择一种花色。",
+      legal_actions: [
+        { kind: "SelectOption", choice: "heart", answers_seq: 9407 },
+        { kind: "SelectOption", choice: "spade", answers_seq: 9407 },
+      ],
+      candidate_index: {}, option_seats: {}, context: null,
+      preactivations: {}, preactivation: [],
+    }],
+  ];
+  let forcedFailures = [];
+  for (const [name, pending] of forcedCases) {
+    const view = synthView(pending);
+    ui.state.view = view;
+    ui.state.sessionId = null;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+    if ($("btn-pass").hidden !== true || $("btn-end-phase").hidden !== true) {
+      forcedFailures.push(`${name}: passHidden=${$("btn-pass").hidden} endHidden=${$("btn-end-phase").hidden}`);
+    }
+    if (candidateRowButtons().length) {
+      forcedFailures.push(`${name}: 候选行 ${JSON.stringify(candidateRowButtons().map((node) => node.textContent))}`);
+    }
+  }
+  check("U2-03d 强制询问（弃牌 / 五谷 / 观星排列 / 反间花色）不显示「放弃」",
+    forcedFailures.length === 0, forcedFailures.join("；"));
+
+  const endOnly = {
+    kind: "PLAY_PHASE", actor: 0, seq: 9408,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9408 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  };
+  ui.state.view = synthView(endOnly);
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(ui.state.view);
+  check("U2-03d2 EndPhase 独立出现：只有结束出牌、没有放弃",
+    $("btn-end-phase").hidden === false && $("btn-pass").hidden === true,
+    `endHidden=${$("btn-end-phase").hidden} passHidden=${$("btn-pass").hidden}`);
+
+  const both = { ...endOnly, seq: 9409, legal_actions: [
+    { kind: "EndPhase", answers_seq: 9409 },
+    { kind: "Pass", answers_seq: 9409 },
+  ] };
+  ui.state.view = synthView(both);
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(ui.state.view);
+  check("U2-03d3 两条都合法时各自出现（互不遮蔽）",
+    $("btn-end-phase").hidden === false && $("btn-pass").hidden === false,
+    `endHidden=${$("btn-end-phase").hidden} passHidden=${$("btn-pass").hidden}`);
+}
+
+/* ---- ④ 没有专用面的询问：fail-closed（明话 + 零按钮） ---- */
+{
+  const pending = {
+    kind: "FUTURE_KIND", actor: 0, seq: 9410, prompt: "未来的询问。",
+    legal_actions: [
+      { kind: "SomethingNew", answers_seq: 9410 },
+      { kind: "AnotherNew", answers_seq: 9410 },
+    ],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  };
+  ui.state.view = synthView(pending);
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(ui.state.view);
+  check("U2-03e 没有专用面的询问 fail-closed：明话 + 零内容按钮 + 无右端动作",
+    ui.renderKind(pending, pending.legal_actions) === "unsupported"
+      && $("t-options").children.length === 0
+      && $("t-choice").textContent.includes("这一步没有可用的界面")
+      && $("btn-submit").disabled === true
+      && $("btn-cancel").disabled === true
+      && $("btn-end-phase").hidden === true
+      && $("btn-pass").hidden === true,
+    `kind=${ui.renderKind(pending, pending.legal_actions)} choice="${$("t-choice").textContent}" options=${$("t-options").children.length}`);
+}
+
+/* ---- ⑤ 「放弃」一击即弃：不重绘 / 在飞冻结 / 400 回到点击前那一面 ---- */
+{
+  // 合成载荷 + 真会话 id：400 由拦截器注入，请求不会真的走到引擎。
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261012,
+  });
+  const slash = { ...synthCard(84, "杀"), type: "slash" };
+  const pending = {
+    kind: "RESPOND", actor: 0, seq: 9411, cause: "BARBARIAN_INVASION", required: "slash",
+    prompt: "响应窗口：请打出一张牌，或放弃。",
+    prompt_display: { text: "响应窗口：请打出一张牌，或放弃。", default_label: "超时将自动放弃" },
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 9411, card: slash, targets: [] },
+      { kind: "Pass", answers_seq: 9411 },
+    ],
+    candidate_index: {
+      84: { card: slash, pool: [], min_targets: 0, max_targets: 0, combos: [[]] },
+    },
+    option_seats: {}, context: null, preactivations: {}, preactivation: [],
+  };
+  const view = synthView(pending);
+  view.snapshot.self_hand = [slash];
+  ui.state.view = view;
+  ui.state.sessionId = session.session_id;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  ui.toggleFocus(84);   // 点击前那一面：焦点在【杀】上、提交可点
+  const beforeState = actionButtonsState();
+  const beforeOptions = $("t-options").children.length;
+  const beforeCalls = calls.length;
+  staleAnswerStatus = 400;
+  const clickPromise = ($("btn-pass").listeners.click || [])[0]({ target: $("btn-pass") });
+  check("U2-03f 在飞期间提交 / 取消 / 结束出牌 / 放弃全部禁用",
+    ["btn-submit", "btn-cancel", "btn-end-phase", "btn-pass"]
+      .every((id) => $(id).disabled === true),
+    ["btn-submit", "btn-cancel", "btn-end-phase", "btn-pass"]
+      .map((id) => `${id}=${$(id).disabled}`).join(" "));
+  check("U2-03g 点「放弃」不展开任何候选 / 选项（内容区原样）",
+    $("t-options").children.length === beforeOptions
+      && candidateRowButtons().length === 0,
+    `before=${beforeOptions} now=${$("t-options").children.length} 候选行=${candidateRowButtons().length}`);
+  await clickPromise;
+  staleAnswerStatus = null;
+  nextGetPending = null;
+  const answerCalls = calls.slice(beforeCalls).filter((call) => call.path.includes("/answer"));
+  check("U2-03h 「放弃」只发一次提交，送出的正是那条 Pass",
+    answerCalls.length === 1 && answerCalls[0].body.action.kind === "Pass",
+    `calls=${calls.slice(beforeCalls).map((call) => call.path).join(" | ")}`);
+  check("U2-03i 400 被拒后回到点击前那一面（焦点 / 选中 / 四键 / 内容区全恢复）",
+    ui.state.focusCardId === 84
+      && ui.state.selectedOption === null
+      && JSON.stringify(actionButtonsState()) === JSON.stringify(beforeState)
+      && $("t-options").children.length === beforeOptions
+      && /提交被拒/.test($("t-choice").textContent),
+    `focus=${ui.state.focusCardId} option=${ui.state.selectedOption} buttons=${JSON.stringify(actionButtonsState())} choice="${$("t-choice").textContent}"`);
+  ui.state.sessionId = null;
+  ui.resetSelection();
+}
+
+/* ---- ⑥ 「放弃」成功 = 一次 POST + 新询问；409 = 刷新到新询问、不留展开选项 ---- */
+{
+  // 8 人 / heuristic / 该 seed 的建局首问 = 只有一条 Pass 的响应窗口（实测）。
+  const fresh = await post("/api/sessions", {
+    player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261012,
+  });
+  await openSession(fresh);
+  ui.renderPending(ui.state.view);
+  const beforeCalls = calls.length;
+  const successPromise = ($("btn-pass").listeners.click || [])[0]({ target: $("btn-pass") });
+  check("U2-03j 成功路径在飞时四键也冻结",
+    ["btn-submit", "btn-cancel", "btn-end-phase", "btn-pass"]
+      .every((id) => $(id).disabled === true));
+  await successPromise;
+  ui.flushPlayback();
+  const successCalls = calls.slice(beforeCalls).filter((call) => call.path.includes("/answer"));
+  check("U2-03k 成功路径「放弃」只发一次 POST，新询问面不出现候选行",
+    successCalls.length === 1
+      && successCalls[0].body.action.kind === "Pass"
+      && candidateRowButtons().length === 0,
+    `answers=${successCalls.length} options=${JSON.stringify($("t-options").children.map((node) => node.textContent))}`);
+
+  // 409：下一次 /answer 回 409；刷新取回的新询问换成"只有 EndPhase"的出牌阶段。
+  const fresh2 = await post("/api/sessions", {
+    player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261012,
+  });
+  await openSession(fresh2);
+  ui.renderPending(ui.state.view);
+  const nextPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 9412,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9412 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  };
+  const staleBefore = calls.length;
+  staleAnswerStatus = 409;
+  nextGetPending = nextPending;
+  const stalePromise = ($("btn-pass").listeners.click || [])[0]({ target: $("btn-pass") });
+  await stalePromise;
+  staleAnswerStatus = null;
+  nextGetPending = null;
+  ui.flushPlayback();
+  const staleCalls = calls.slice(staleBefore);
+  check("U2-03l 409 = 一次提交 + 刷新到新询问，不留下展开的选项 / 候选行",
+    staleCalls.filter((call) => call.path.includes("/answer")).length === 1
+      && staleCalls.some((call) => !call.path.includes("/answer"))
+      && !!ui.state.view.pending && ui.state.view.pending.seq === 9412
+      && ui.state.view.pending.kind === "PLAY_PHASE"
+      && ui.state.selectedOption === null
+      && $("t-options").children.length === 0
+      && candidateRowButtons().length === 0
+      && $("btn-pass").hidden === true
+      && $("btn-end-phase").hidden === false,
+    `calls=${staleCalls.map((call) => call.path).join(" | ")} pending=${ui.state.view.pending && ui.state.view.pending.kind} seq=${ui.state.view.pending && ui.state.view.pending.seq} option=${ui.state.selectedOption} options=${JSON.stringify($("t-options").children.map((node) => node.textContent))} passHidden=${$("btn-pass").hidden} endHidden=${$("btn-end-phase").hidden}`);
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.state.view = null;
 }
 
 /* ---- 倒计时：进度条 / 三色 / 最后 5 秒闪烁 / 默认动作 / 前端不代答 ---- */
