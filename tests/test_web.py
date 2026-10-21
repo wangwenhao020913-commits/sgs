@@ -445,6 +445,60 @@ def test_the_yiji_timeout_gives_the_remaining_cards_to_the_owner() -> None:
     )
 
 
+def test_the_ice_sword_timeout_takes_the_first_legal_slot_of_the_round() -> None:
+    """U2-13 / D9.2：【寒冰剑】轮内的超时落点 = 第一个合法槽位。
+
+    这一轮的形状与【反馈】相同（``SELECT_CARDS``、``total=(1, 1)``、``optional=False``、
+    槽位在**目标**的区里，手牌是隐藏槽），因此同样没有 ``Pass``；兜底按既有顺序落到
+    ``legal_actions[0]`` = 面内第一个槽位。本票**只改文案**、不特判技能，故这里把
+    "第一个合法"钉在寒冰剑的形状上，防止以后有人为"必须两张"另加一条非确定性的兜底。
+    """
+    from sgs.effects import legal_actions_for
+    from sgs.state import SelectContext
+
+    armor = cards_of_type(_context_pack(), "eight_diagrams")[0]
+    _, state = _context_fixture(
+        [SeatSpec(), SeatSpec()],
+        frame_kind=FrameKind.DAMAGE,
+        frame_data={
+            "source": 0,
+            "target": 1,
+            "targets": (1,),
+            "running_skill": "equip.ice_sword",
+        },
+    )
+    slots = (
+        Slot(ref=ZoneRef(Zone.HAND, 1), card=None),
+        Slot(ref=ZoneRef(Zone.HAND, 1), card=None),
+        Slot(ref=ZoneRef(Zone.EQUIP, 1), card=state.card(armor)),
+    )
+    spec = SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1), optional=False)
+    actions = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_CARDS,
+        answers_seq=1,
+        payload=SelectContext(spec=spec, slots=slots),
+    )
+    query = SelectCardsQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.DAMAGE_DEAL,
+        prompt="请从选择面里选择一张牌。",
+        legal_actions=actions,
+        view=project(state, 0),
+        spec=spec,
+        slots=slots,
+    )
+
+    assert not any(isinstance(action, Pass) for action in actions), "轮内没有 Pass（D9.2）"
+    first = fallback_action(query)
+    assert isinstance(first, SelectCards) and first == actions[0], (
+        f"超时取第一个合法槽位：{first}"
+    )
+    assert fallback_action(query) == first, "兜底必须是纯函数"
+
+
 def test_fallback_action_answers_the_target_of_a_fanjian_step() -> None:
     """票 06：反间的步 2/3 由**目标**应答（不是发动者）。超时兜底要在"等目标作答"时给出
     一个**合法**代答 —— 带 ``Pass`` 的选牌步落到"取消这一步"，而不是发出非法动作。"""
@@ -2509,6 +2563,9 @@ def test_query_context_reads_the_qilin_bow_and_ice_sword_step_wording() -> None:
     （与【反馈】/【流离】/票 09 两条接缝同一条链），步骤键仍是 ``SELECT_CARDS`` 的既有
     约定 ``"card"``。【麒麟弓】迁上流水线、【寒冰剑】按票 10 的裁定保持手写，但逐步文案
     同落一处（:attr:`~sgs.skills.catalog.SkillDef.step_requirements`）。
+
+    U2-13：寒冰剑从"至多两张"改为**两张**——轮内没有收手出口（``optional=False``、
+    两轮强制），文案必须与规则一致；这是同一批改动的落点，不是回归。
     """
     engine, state = _context_fixture(
         [SeatSpec(equip=(cards_of_type(_context_pack(), "qilin_bow")[0],)), SeatSpec()],
@@ -2539,7 +2596,7 @@ def test_query_context_reads_the_qilin_bow_and_ice_sword_step_wording() -> None:
     )
     cards_query = _skill_step_cards_query(state, zones=(Zone.HAND, Zone.EQUIP))
     assert query_context(engine, cards_query)["requirement"] == (
-        "依次弃置目标的一张牌（手牌 / 装备区），至多两张"
+        "依次弃置目标的两张牌（手牌 / 装备区）"
     )
 
 

@@ -9870,4 +9870,295 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.resetSelection();
 }
 
+/* ============ U2-13（D2 / D3 / D9.2）：寒冰剑 = 未知区域弹窗 + 两轮保持 ============
+ *
+ * 载荷与真会话同形（服务端的 `context` / `slots` 字段由 `tests/test_web.py` 的投影断言钉，
+ * 两轮形状由 golden 38 的回放实测确认）：
+ *   - **一次 `SELECT_CARDS` = 一轮**：`spec.zones = [hand, equip]`、`total = [1, 1]`、
+ *     `optional: false`（轮内没有 Pass）；`slots` 是目标**此刻**的牌——第一轮搬走的那张，
+ *     第二轮的面里已经不在（引擎逐轮立即搬牌，不是先收两张再一起弃）。
+ *   - `context.name` 是**投影**给的帧内牌名（这里 = 造成伤害的【杀】），两轮相同；
+ *     `context.actor` = 弃牌的应答者（= 伤害来源）。链键
+ *     `chain:${context.name}:${actor}` 因此跨两轮不变 ⇒ 同一容器只换正文、不关窗。
+ *     注意：不是"寒冰剑"这个名字——投影读的是结算帧的牌面（实测：`3号位孙权对0号位
+ *     陆逊使用杀`，name =「杀」），但它在两轮之间**稳定**，这才是链键要的性质。
+ *   - `context.requirement` 是本票改后的逐步文案（有牌必须弃满两张，没有"至多"）。
+ *
+ * 本段只钉界面读法：两轮共用弹窗、第一张从第二轮消失、第二次提交后关窗；目标只有一张
+ * 时一轮即关；目标没牌（引擎根本不发问）没有弹窗；全程没有「放弃」/「收手」出口、
+ * 右端提交恒灰；折叠 / ESC / 只读 / 检视照旧。
+ */
+{
+  const armor = {
+    ...synthCard(90, "八卦阵"), type: "armor", slot: "armor", color: "black",
+    description: "防具描述：需要时打出一张【闪】。",
+  };
+  const hidden = () => ({ ref: { seat: 0, zone: "hand" }, card: null });
+  const visibleArmor = () => ({ ref: { seat: 0, zone: "equip" }, card: armor });
+  /** 一轮寒冰剑弃牌：与真会话同形（**没有** Pass；槽位全在目标的区里，手牌是隐藏槽）。 */
+  const iceRound = ({ seq, slots }) => ({
+    kind: "SELECT_CARDS", actor: 1, seq, prompt: "请从选择面里选择一张牌。",
+    legal_actions: slots.map((_, index) => ({
+      kind: "SelectCards", answers_seq: seq, picks: [index],
+    })),
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots,
+    spec: { zones: ["hand", "equip"], total: [1, 1], sequential: false, optional: false },
+    context: {
+      actor: 1, name: "杀", targets: [0],
+      label: "1号位关羽对0号位张飞使用杀",
+      requirement: "依次弃置目标的两张牌（手牌 / 装备区）", skill_hints: [],
+    },
+    prompt_display: { text: "请从选择面里选择一张牌。", default_label: "超时将自动选择第一项" },
+    preactivations: {}, preactivation: [],
+  });
+  const iceView = (pending) => {
+    const view = synthView(pending);
+    // 人类 = 弃牌的应答者（座位 1，伤害来源），目标 = 座位 0（他的手牌是隐藏槽）。
+    view.snapshot.seat = 1;
+    view.human_seat = 1;
+    return view;
+  };
+  const render = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const zoneSections = () => $("t-options").children;
+  const zoneSlots = (section) => section.children[1].children;
+  const insideDialog = (node) => {
+    let at = node ? node.parentNode : null;
+    while (at) {
+      if (at === $("t-dialog")) return true;
+      at = at.parentNode;
+    }
+    return false;
+  };
+  const clickCollapse = () => ($("t-dialog-collapse").listeners.click || [])
+    .forEach((fn) => fn({ target: $("t-dialog-collapse") }));
+  const settleSubmit = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const heroBlockOf = (seat) => {
+    const box = seatBox(seat);
+    return box
+      ? box.children.find((node) => (node.className || "").split(" ").includes("hero-block")) || null
+      : null;
+  };
+  const fireContext = (node) => {
+    const event = { target: node, prevented: false, stopPropagation() {} };
+    event.preventDefault = () => { event.prevented = true; };
+    if (node) (node.listeners.contextmenu || []).forEach((fn) => fn(event));
+    return event;
+  };
+  const answersSince = (from) => calls.slice(from).filter((call) => call.path.includes("/answer"));
+
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 1, timeout_seconds: null, seed: 20261016,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  ui.state.modal.heroSeat = null;
+
+  // ---- ① 第一轮：目标手牌「?」+ 装备可见；没有放弃 / 收手；右端提交恒灰 ----
+  const round1 = iceRound({
+    seq: 1401, slots: [hidden(), hidden(), visibleArmor()],
+  });
+  render(iceView(round1));
+  const firstDialog = $("t-dialog");
+  const firstKey = ui.state.dialog.key;
+  const handSection = zoneSections()[0];
+  const equipSection = zoneSections()[1];
+  check("U2-13a 寒冰剑第一轮 = 未知区域弹窗：目标手牌「?」、装备可见、文案是「两张」而不是「至多两张」",
+    ui.stepDialogKind(round1) === "unknown"
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").children.includes($("t-options"))
+      && $("t-dialog-title").textContent === "选择一张牌"
+      && firstKey === "chain:杀:1"
+      && firstKey === `chain:${round1.context.name}:${round1.actor}`
+      && zoneSections().length === 2
+      && handSection.getAttribute("data-zone") === "hand"
+      && handSection.getAttribute("data-seat") === "0"
+      && handSection.children[0].textContent.includes("座位0 手牌")
+      && handSection.children[0].textContent.includes("牌面未知")
+      && zoneSlots(handSection).length === 2
+      && zoneSlots(handSection).every((node) => node.textContent === "?"
+        && node.classList.contains("unknown"))
+      && equipSection.getAttribute("data-zone") === "equip"
+      && equipSection.getAttribute("data-seat") === "0"
+      && zoneSlots(equipSection).length === 1
+      && zoneSlots(equipSection)[0].text().includes("八卦阵")
+      && zoneSlots(equipSection)[0].getAttribute("data-slot-index") === "2"
+      && $("t-prompt").textContent === "依次弃置目标的两张牌（手牌 / 装备区）"
+      && $("t-dialog-hint").textContent.includes("依次弃置目标的两张牌（手牌 / 装备区）")
+      && $("t-dialog-hint").textContent.includes("点一张牌即提交")
+      && !/至多/.test($("t-dialog-hint").textContent)
+      && !/至多/.test($("t-prompt").textContent)
+      && candidateRowButtons().length === 0,
+    `kind=${ui.stepDialogKind(round1)} key=${firstKey} 块=${zoneSections().map((n) => `${n.getAttribute("data-zone")}@${n.getAttribute("data-seat")}`).join(",")} 手槽=${zoneSlots(handSection).length} 装备=${zoneSlots(equipSection).map((n) => n.text()).join(",")} hint="${$("t-dialog-hint").textContent}"`);
+
+  check("U2-13a2 轮内没有「放弃 / 收手」出口：右端放弃隐藏、提交 / 取消都灰、弹窗里没有操作四键",
+    $("btn-pass").hidden === true
+      && $("btn-pass").disabled === true
+      && $("btn-submit").disabled === true
+      && $("btn-cancel").disabled === true
+      && !/放弃|收手/.test($("t-dialog").text())
+      && /不能放弃/.test($("t-choice").textContent)
+      && ["btn-submit", "btn-cancel", "btn-pass", "btn-end-phase", "t-countdown"]
+        .every((id) => !insideDialog($(id))),
+    `passHidden=${$("btn-pass").hidden} submit=${$("btn-submit").disabled} cancel=${$("btn-cancel").disabled} choice="${$("t-choice").textContent}"`);
+
+  // ---- ② 第一张：点一个「?」= 一条 SelectCards（picks = 槽位位置） ----
+  {
+    const beforePick = calls.length;
+    staleAnswerStatus = 400;
+    await clickAndWait(zoneSlots(handSection)[1]);
+    await settleSubmit();
+    staleAnswerStatus = null;
+    const answers = answersSince(beforePick);
+    check("U2-13b 第一轮点第 2 个「?」= 恰一条 SelectCards，picks 填该槽位位置",
+      answers.length === 1
+        && JSON.stringify(answers[0].body.action)
+          === JSON.stringify(round1.legal_actions[1])
+        && answers[0].body.action.kind === "SelectCards"
+        && JSON.stringify(answers[0].body.action.picks) === "[1]",
+      `answers=${answers.length} action=${JSON.stringify(answers[0] && answers[0].body.action)}`);
+  }
+
+  // ---- ③ 第二轮：同一链键 / 同一容器、第一张已从正文消失；第二张点完关窗 ----
+  const round2 = iceRound({ seq: 1402, slots: [hidden(), visibleArmor()] });
+  render(iceView(round2));
+  check("U2-13c 第二轮同一链键：弹窗不关、同一容器，第一张（少了一张手牌）已从正文消失",
+    ui.state.dialog.key === firstKey
+      && firstKey === "chain:杀:1"
+      && $("t-dialog") === firstDialog
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").children.includes($("t-options"))
+      && $("t-dialog-body").hidden === false
+      && zoneSections().length === 2
+      && zoneSlots(zoneSections()[0]).length === 1
+      && zoneSlots(zoneSections()[0])[0].textContent === "?"
+      && zoneSlots(zoneSections()[1]).length === 1
+      && zoneSlots(zoneSections()[1])[0].getAttribute("data-slot-index") === "1"
+      && zoneSlots(zoneSections()[1])[0].text().includes("八卦阵")
+      && $("t-dialog-title").textContent === "选择一张牌"
+      && $("btn-pass").hidden === true
+      && $("btn-submit").disabled === true,
+    `key=${ui.state.dialog.key} 前=${firstKey} hidden=${$("t-dialog").hidden} 手槽=${zoneSlots(zoneSections()[0]).length} 装备槽=${zoneSlots(zoneSections()[1]).length} 装备索引=${zoneSlots(zoneSections()[1])[0].getAttribute("data-slot-index")}`);
+
+  {
+    const beforePick = calls.length;
+    staleAnswerStatus = 400;
+    await clickAndWait(zoneSlots(zoneSections()[1])[0]);
+    await settleSubmit();
+    staleAnswerStatus = null;
+    const answers = answersSince(beforePick);
+    check("U2-13d 第二轮点剩下那张装备 = 恰一条 SelectCards（picks 用第二轮的面内位置）",
+      answers.length === 1
+        && JSON.stringify(answers[0].body.action)
+          === JSON.stringify(round2.legal_actions[1])
+        && JSON.stringify(answers[0].body.action.picks) === "[1]",
+      `answers=${answers.length} action=${JSON.stringify(answers[0] && answers[0].body.action)}`);
+  }
+
+  render(iceView(null));
+  check("U2-13e 第二张弃完、询问链结束 ⇒ 弹窗关闭、正文清空、牌桌恢复可选",
+    $("t-dialog").hidden === true
+      && ui.state.dialog.key === null
+      && $("t-dialog-body").children.length === 0
+      && $("t-dialog-title").textContent === ""
+      && ui.stepDialogKind(null) === null
+      && ui.selectionEnabled() === true,
+    `hidden=${$("t-dialog").hidden} key=${ui.state.dialog.key} body=${$("t-dialog-body").children.length} title="${$("t-dialog-title").textContent}" enabled=${ui.selectionEnabled()}`);
+
+  // ---- ④ 目标只有一张牌：自然只有一轮，点掉即关 ----
+  const single = iceRound({ seq: 1403, slots: [hidden()] });
+  render(iceView(single));
+  check("U2-13f 目标只有一张牌 ⇒ 只有一轮：弹窗打开、一个「?」、没有放弃",
+    ui.stepDialogKind(single) === "unknown"
+      && $("t-dialog").hidden === false
+      && zoneSections().length === 1
+      && zoneSections()[0].getAttribute("data-zone") === "hand"
+      && zoneSlots(zoneSections()[0]).length === 1
+      && $("btn-pass").hidden === true
+      && $("btn-submit").disabled === true,
+    `kind=${ui.stepDialogKind(single)} 块=${zoneSections().length} 槽=${zoneSections()[0] ? zoneSlots(zoneSections()[0]).length : "n/a"}`);
+  {
+    const beforePick = calls.length;
+    staleAnswerStatus = 400;
+    await clickAndWait(zoneSlots(zoneSections()[0])[0]);
+    await settleSubmit();
+    staleAnswerStatus = null;
+    const answers = answersSince(beforePick);
+    check("U2-13g 只有一张时点掉即提交（picks=[0]），之后链结束、弹窗关闭",
+      answers.length === 1
+        && JSON.stringify(answers[0].body.action)
+          === JSON.stringify(single.legal_actions[0])
+        && JSON.stringify(answers[0].body.action.picks) === "[0]"
+        && (() => {
+          render(iceView(null));
+          return $("t-dialog").hidden === true && ui.state.dialog.key === null;
+        })(),
+      `answers=${answers.length} action=${JSON.stringify(answers[0] && answers[0].body.action)} hidden=${$("t-dialog").hidden} key=${ui.state.dialog.key}`);
+  }
+
+  // ---- ⑤ 目标没有牌：引擎根本不发选牌询问（test_skills 已钉），界面没有弹窗 / 正文 ----
+  render(iceView(null));
+  check("U2-13h 目标没有牌（无选牌询问）⇒ 没有未知区域弹窗，也没有任何「?」正文",
+    ui.stepDialogKind(null) === null
+      && $("t-dialog").hidden === true
+      && $("t-options").children.length === 0
+      && $("t-dialog-body").children.length === 0
+      && $("btn-pass").hidden === true,
+    `kind=${ui.stepDialogKind(null)} hidden=${$("t-dialog").hidden} options=${$("t-options").children.length} body=${$("t-dialog-body").children.length}`);
+
+  // ---- ⑥ 折叠 / 无关闭 / 只读 / 检视（未知区域模板的既有性质，寒冰剑沿用） ----
+  render(iceView(round1));
+  clickCollapse();
+  check("U2-13i 寒冰剑弹窗可折叠：正文撤下、标题与「两张」提示留下、暗化层收起",
+    $("t-dialog-body").hidden === true
+      && $("t-dialog-title").textContent === "选择一张牌"
+      && $("t-dialog-hint").textContent.includes("依次弃置目标的两张牌（手牌 / 装备区）")
+      && $("t-dialog-collapse").textContent === "展开"
+      && $("t-modal-backdrop").hidden === true,
+    `bodyHidden=${$("t-dialog-body").hidden} title="${$("t-dialog-title").textContent}" hint="${$("t-dialog-hint").textContent}"`);
+  clickCollapse();
+  const beforeEsc = calls.length;
+  fireDocument("keydown", { key: "Escape", preventDefault() {} });
+  check("U2-13j 无关闭出口：展开恢复正文；ESC 是 no-op、点背景没有 click 监听、零提交",
+    $("t-dialog-body").hidden === false
+      && $("t-modal-backdrop").hidden === false
+      && $("t-dialog").hidden === false
+      && calls.length === beforeEsc
+      && !($("t-modal-backdrop").listeners.click || []).length
+      && ui.selectionEnabled() === false,
+    `bodyHidden=${$("t-dialog-body").hidden} hidden=${$("t-dialog").hidden} calls=${calls.length - beforeEsc} backdropClicks=${($("t-modal-backdrop").listeners.click || []).length}`);
+
+  const ownHand = $("t-hand").children[0];
+  if (ownHand) (ownHand.listeners.click || []).forEach((fn) => fn({ target: ownHand }));
+  fireContext(heroBlockOf(0));
+  check("U2-13k 只读态：点自己的手牌不产生选择；右键武将详情照常叠在弹窗上、只读判断不变",
+    ui.state.focusCardId === null
+      && !(ownHand && ownHand.classList.contains("sel"))
+      && $("t-modal").hidden === false
+      && /武将详情/.test($("t-modal-title").textContent)
+      && $("t-dialog").hidden === false
+      && ui.selectionEnabled() === false,
+    `focus=${ui.state.focusCardId} detailHidden=${$("t-modal").hidden} dialogHidden=${$("t-dialog").hidden} enabled=${ui.selectionEnabled()}`);
+  fireDocument("keydown", { key: "Escape", preventDefault() {} });
+  check("U2-13k2 ESC 只关武将详情；底下的寒冰剑弹窗原样恢复",
+    $("t-modal").hidden === true
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").hidden === false
+      && ui.selectionEnabled() === false,
+    `detailHidden=${$("t-modal").hidden} dialogHidden=${$("t-dialog").hidden} enabled=${ui.selectionEnabled()}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

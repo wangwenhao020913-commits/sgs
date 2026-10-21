@@ -1518,7 +1518,7 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         locked=False,
         requirement="防止此伤害，并依次弃置目标的两张牌",
         hooks=(Hook(Timing.DAMAGE_DEAL, _ice_sword),),
-        step_requirements={"card": "依次弃置目标的一张牌（手牌 / 装备区），至多两张"},
+        step_requirements={"card": "依次弃置目标的两张牌（手牌 / 装备区）"},
     ),
     # 3 防具
     _equip(
