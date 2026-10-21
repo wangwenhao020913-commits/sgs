@@ -9,6 +9,18 @@ const COUNTDOWN_RED_AT = 0.2;
 const COUNTDOWN_YELLOW_AT = 0.5;
 const COUNTDOWN_BLINK_SECONDS = 5;
 
+/** 观星排列**提前**多少秒自动提交（票 07 / spec D9.3）。
+ *
+ * 为什么要提前：客户端的倒计时锚点（`state.pendingClock.receivedAt`）是**第一次渲染**
+ * 这一问的本地时刻，比服务端的 `pending_since` 晚（服务端在响应发出前就起表，客户端还要
+ * 等事件回放播完才渲染；实测普通响应约 0.2–1.0 秒）；而 `serve.py:advance_clock` 在每次
+ * 取增量 GET（每 1.2 秒轮询一次）里判超时，到点后先代答、后到的 POST 会 409。故必须比
+ * **本机**剩余时间提前一点发：2 秒 ≥ 1 秒 tick 粒度 + 正常回放 / 网络偏差，触发时服务端
+ * 通常还剩约 1–2 秒，抢在 `advance_clock` 之前。取 1.5 秒在 0.5 秒步长 + 多记录回放时
+ * 余量太薄；2 秒是既够早又不至于在玩家还在摆牌时误触的值。
+ */
+const ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS = 2;
+
 /** 剩余秒 → 进度条颜色阶段（纯函数：便于烟测钉住三色与闪烁边界）。 */
 function countdownPhase(remain, total) {
   const left = Number(remain);
@@ -38,10 +50,63 @@ function resetCountdown() {
   if (label) label.textContent = "";
 }
 
+/** 这一问按本机锚点还剩几秒；`null` = 不是本机上有时限的询问。 */
+function arrangeAutoSubmitRemain(view) {
+  const pending = view && view.pending;
+  const timeout = view ? Number(view.timeout_seconds) : NaN;
+  if (!pending || !Number.isFinite(timeout) || timeout <= 0) return null;
+  const received = state.pendingClock.receivedAt;
+  if (!received) return null;
+  return timeout - (Date.now() - received) / 1000;
+}
+
+/** 观星排列是否**到了该自动提交**的时刻（票 07 / spec D9.3 的唯一例外）。
+ *
+ * 只对 `pending.kind === "ARRANGE"` 为真；其余询问（含到时限）永远返回 false ⇒ 前端
+ * 仍然零请求。另外四条闸门：
+ *  - `pending.seq` 已自动提交过（`state.arrangeAutoSeq`）⇒ 不再发第二次；
+ *  - 提交在飞（`state.submitBusy`）⇒ 让路，不并发；
+ *  - 回放 / 不是自己的询问 / 已结束 / 无时限 ⇒ 不代答；
+ *  - 本地排列还没排成完整顺序（`arrangeAction` 为 null，含规格缺失）⇒ 没有可提交的
+ *    `ArrangeCards`，交给服务端默认，不发半截请求。
+ *
+ * 提前量见 :data:`ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS`：本机剩余时间 ≤ 2 秒即触发，
+ * 不等 `remain === 0`（那时服务端的轮询 GET 往往已先代答）。
+ */
+function arrangeAutoSubmitDue(view) {
+  const pending = view && view.pending;
+  if (!pending || pending.kind !== "ARRANGE") return false;
+  // 只回答**界面上当前这一问**：测试 / 旧视图调用 renderCountdown 不会替别的视图提交。
+  if (view !== state.view) return false;
+  if (state.playback || (view && view.finished)) return false;
+  if (!isOwnPending(pending, view)) return false;
+  if (state.arrangeAutoSeq === pending.seq) return false;
+  if (state.submitBusy || state.preactivation) return false;
+  const remain = arrangeAutoSubmitRemain(view);
+  if (remain === null || remain > ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS) return false;
+  return arrangeAction(pending) !== null;
+}
+
+/** 到点就提交**一次**当前排列；返回 `false`（没到点 / 不能提交）或提交的 Promise。
+ *
+ * 先落 `state.arrangeAutoSeq = pending.seq` **再**发请求：即使请求失败、或同一 tick 里
+ * 又被重复调用，也不会重试（服务端的 `advance_clock` 超时代答是安全网）。409 的刷新
+ * 由 :func:`submitAction` 的既有分支处理。
+ */
+function maybeAutoSubmitArrange(view) {
+  if (!state.sessionId) return false;   // 合成载荷 / 尚未建局：不朝不存在的会话发请求
+  if (!arrangeAutoSubmitDue(view)) return false;
+  state.arrangeAutoSeq = view.pending.seq;
+  return submitAction();
+}
+
 /** 倒计时（U1-03）：进度条 + 剩余秒 + 默认动作；只显示**自己的**人类询问。
  *
  * 时间锚点住在 `state.pendingClock`（同一 `pending.seq` 轮询刷新不重置）。真正
- * 代答在服务端（`timeout.py`）；本函数**只读**，不提交、不刷新、不碰 `legal_actions`。
+ * 代答在服务端（`timeout.py`）；本函数对**所有非排列询问**都只读，不提交、不刷新、
+ * 不碰 `legal_actions`。**唯一例外**是观星排列（`ARRANGE`）：到时限前
+ * :data:`ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS` 秒，前端自动提交一次当前排列
+ * （spec D9.3 / 票 07，见 :func:`arrangeAutoSubmitDue`）。
  */
 function renderCountdown(view) {
   const box = $("t-countdown");
@@ -79,6 +144,8 @@ function renderCountdown(view) {
   if (label) {
     label.textContent = (pending.prompt_display && pending.prompt_display.default_label) || "";
   }
+  // 票 07：唯一例外——排列到点自动提交（其它询问在这里恒为 false，零请求）。
+  return maybeAutoSubmitArrange(view);
 }
 
 /* ------------------------------------------------------------------ 提交 */
@@ -196,12 +263,22 @@ function buildAction() {
  * 四键冻结；被拒（400 / 409）回到点击前的内部选择与四键状态。合成载荷 / 尚未建局
  * （`state.sessionId` 为空）时只留下内部选中态，不朝不存在的会话发请求。
  * 提交的仍是**原样取自** `legal_actions` 的那一条——前端不自己拼 Action。
+ *
+ * **排列（票 07）**：`ARRANGE` 的右端「放弃」（若该技能真给了 `Pass`）不是送出 `Pass`，
+ * 而是与「确认」等价地提交**当前排列**（`buildAction` 对 `ARRANGE` 优先返回
+ * `ArrangeCards`）。引擎当前的观星排列是强制的（无 `Pass`），故这个按钮根本不出现。
  */
 async function submitRightAction(kind) {
   if (state.playback || state.submitBusy) return;
   const pending = state.view ? state.view.pending : null;
   const index = rightActionIndex(pending, kind);
   if (index < 0) return;
+  // 票 07：排列没有可用布局（规格缺失 / 顺序不完整）时不要退回成"送 Pass"。
+  if (pending && pending.kind === "ARRANGE" && kind === RIGHT_ACTION_KINDS.pass
+    && !arrangeAction(pending)) {
+    $("t-choice").textContent = "排列不可用，请刷新";
+    return;
+  }
   // 先留一份**点击前**的选择快照：失败时原样还回去（界面 DOM 本来就没动）。
   const before = selectionSnapshot();
   state.selectedOption = index;

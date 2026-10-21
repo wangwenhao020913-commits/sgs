@@ -526,11 +526,16 @@ function refreshSubmit(pending) {
   }
   if (pending.kind === "ARRANGE") {
     // 规格缺失 = 409 裸 Query / 无技能定义（投影 fail-closed）：不猜顺序，只说刷新。
+    // 票 07：出口按**实际候选**说话——引擎的 `_arrange` 不给 `Pass` ⇒ 强制，右端「确认」
+    // 是唯一出口（「放弃」不出现）；若某条排列技能给了 `Pass`，右端「放弃」也按当前排列执行。
+    const exit = arrangeHasPass(pending)
+      ? "右端「确认」与「放弃」等价：都按当前排列执行。"
+      : "这一步是强制的：排列不能放弃，右端「确认」是唯一出口。";
     $("t-choice").textContent = !arrangeSpec(pending)
       ? "排列不可用，请刷新"
       : (ready
-        ? "可以确认：提交你摆放的顺序（上行左→右，再接下行左→右）。"
-        : "先把全部卡牌排成一个完整顺序。");
+        ? `可以确认：提交你摆放的顺序（上行左→右，再接下行左→右）。${exit}`
+        : `先把全部卡牌排成一个完整顺序。${exit}`);
     return;
   }
   if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) {

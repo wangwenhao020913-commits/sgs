@@ -6059,12 +6059,45 @@ const bottomSkillIds = () => $("t-skills").children.filter(
 
   const beforeExpire = calls.length;
   renderTimed(timedPending("超时将自动放弃", 9104), 60, 61);
-  check("U1-03k 到时限只显示「服务端即将代答」，前端不发任何请求（代答唯一真源在服务端）",
+  check("U1-03k 非排列询问到时限只显示「服务端即将代答」，前端不发任何请求（代答真源仍在服务端）",
     /服务端即将代答/.test($("t-timer").textContent)
       && $("t-countdown").getAttribute("data-phase") === "red"
       && $("t-countdown").classList.contains("blink") === false
       && calls.length === beforeExpire,
     `timer="${$("t-timer").textContent}" calls=${calls.length - beforeExpire}`);
+
+  // U1-03k2（票 07 / spec D9.3 的改写）：**唯一例外** = 自己的排列到时限自动提交一次
+  // 当前排列；重复 tick 不重复提交。用真会话（4 人 / 种子 7 / 诸葛亮）走到 ARRANGE，
+  // 再把本机锚点拨到"剩余 1 秒"（< 2 秒的提前量），数 `/answer` 的调用次数。
+  const deadlineSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: 60, seed: 7,
+    my_hero: "zhugeliang",
+  });
+  await openSession(deadlineSession);
+  await ui.submitAction();   // 答"发动观星" ⇒ 引擎停在 ARRANGE（X = 4）
+  ui.state.arrangeAutoSeq = null;
+  const deadlineArrange = ui.state.view.pending;
+  const deadlineAction = ui.buildAction();
+  const beforeArrangeExpire = calls.length;
+  ui.state.pendingClock.receivedAt = Date.now() - 59000;
+  const expireTick1 = ui.renderCountdown(ui.state.view);
+  const expireTick2 = ui.renderCountdown(ui.state.view);
+  await expireTick1;
+  await expireTick2;
+  const arrangeAnswers = calls.slice(beforeArrangeExpire)
+    .filter((call) => call.path.includes("/answer"));
+  check("U1-03k2 自己的排列到时限只自动提交一次当前排列（重复 tick 不重复发；唯一例外）",
+    !!deadlineArrange && deadlineArrange.kind === "ARRANGE"
+      && deadlineArrange.legal_actions.every((action) => action.kind === "ArrangeCards")
+      && !!deadlineAction && deadlineAction.kind === "ArrangeCards"
+      && arrangeAnswers.length === 1
+      && JSON.stringify(arrangeAnswers[0].body.action) === JSON.stringify(deadlineAction)
+      && ui.state.arrangeAutoSeq === deadlineArrange.seq,
+    `pending=${deadlineArrange && deadlineArrange.kind} actions=${deadlineArrange && deadlineArrange.legal_actions.length} pass=${deadlineArrange && deadlineArrange.legal_actions.some((action) => action.kind === "Pass")} action=${JSON.stringify(deadlineAction)} answers=${arrangeAnswers.length} body=${JSON.stringify(arrangeAnswers[0] && arrangeAnswers[0].body.action)} autoSeq=${ui.state.arrangeAutoSeq}`);
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.state.arrangeAutoSeq = null;
+  ui.resetSelection();
 
   // 其他座位的询问 / 回放 / 时限关闭：都不显示倒计时。
   const foreignTimed = synthView({
@@ -8081,6 +8114,291 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.resetSelection();
   ui.state.view = null;
   ui.state.sessionId = null;
+}
+
+/* ============ U2-07 观星（排列）接入：满卡面弹窗 + 超时自动提交（spec D9.3） ============
+ *
+ * 判据（票面验收）：
+ * - 排列仍在 `#t-dialog`（标题「排列」/ 步骤提示 / 折叠 / 无关闭），两行牌面是**完整
+ *   88×124 卡面**；X = min(存活数, 5) 张在 1920×1080 与 1280×720 都放得下；
+ * - 拖拽与「点选后点目标」两种搬牌手势都仍可用；提交 = 当前 `ArrangeCards`；
+ * - 引擎的排列候选**没有 Pass** ⇒ 界面明说"强制、唯一出口是右端确认"，右端「放弃」隐藏；
+ *   若某条排列技能真给了 Pass，右端「放弃」也按**当前排列**提交，不是 no-op；
+ * - 到时限自动提交**只**对自家 ARRANGE 生效，按 seq 去重、失败不重试、折叠照常、回放不发；
+ *   非排列询问到时限仍零请求（U1-03k）。
+ */
+{
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.state.arrangeAutoSeq = null;
+  ui.state.playback = null;
+  ui.show("table");
+
+  const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const makeCard = (id, name, suit, rank) => ({
+    ...synthCard(id, name), suit, rank, kind: "normal", attribute: "普通",
+    description: `【${name}】的全文描述`,
+  });
+  const cards = [
+    makeCard(91, "八卦阵", "spade", 2),
+    makeCard(92, "闪", "heart", 11),
+    makeCard(93, "桃", "club", 3),
+    makeCard(94, "雌雄双股剑", "diamond", 5),
+    makeCard(95, "杀", "spade", 7),
+  ];
+  /** 合成 ARRANGE：`withPass` 用来演"引擎真给了 Pass"的另一半语义。 */
+  const arrangePending = (seq, revealed, withPass = false) => ({
+    kind: "ARRANGE", actor: 0, seq, timing: "PHASE_PREPARE",
+    prompt: "请排列这些牌：给出顺序与前几张置于牌堆顶。",
+    prompt_display: { text: "请排列这些牌。", default_label: "超时将自动选择第一项" },
+    revealed,
+    legal_actions: [
+      { answers_seq: seq, kind: "ArrangeCards", order: revealed.map((_, at) => at), split: revealed.length },
+      ...(withPass ? [{ answers_seq: seq, kind: "Pass" }] : []),
+    ],
+    candidate_index: {}, option_seats: {},
+    context: {
+      requirement: "观看牌堆顶若干张牌，以任意顺序放回牌堆顶 / 牌堆底",
+      label: null, skill_hints: [],
+    },
+    preactivations: {}, preactivation: [],
+    arrange: { count: revealed.length, split: "free" },
+  });
+  const render = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const rowOf = (name) => $("t-options").children.find(
+    (node) => node.getAttribute && node.getAttribute("data-row") === name);
+  const cardsBox = (row) => row.children[1];
+  const cardNode = (row, index) => cardsBox(row).children.find(
+    (node) => node.getAttribute && node.getAttribute("data-card-index") === String(index));
+  const cardNodes = (row) => cardsBox(row).children.filter(
+    (node) => node.getAttribute && node.getAttribute("data-card-index") !== undefined);
+  const cardIndexes = (row) => cardNodes(row).map((node) => Number(node.getAttribute("data-card-index")));
+  const slots = (row) => cardsBox(row).children.filter(
+    (node) => node.getAttribute && node.getAttribute("data-empty") === "1");
+  const clickNode = (node) => (node.listeners.click || []).forEach(
+    (fn) => fn({ target: node, preventDefault() {}, stopPropagation() {} }));
+  // 垫片的 `className` 是普通属性、`classList.add` 只改 Set（真 DOM 两者同步）；断言两种都认。
+  const hasClass = (node, name) => node.classList.contains(name)
+    || String(node.className || "").split(/\s+/).includes(name);
+
+  /* ---- ① 完整 88×124 卡面 + 询问弹窗 + 5 张的宽度 / 高度预算 ---- */
+  const fiveView = synthView(arrangePending(9701, cards));
+  fiveView.timeout_seconds = 60;
+  render(fiveView);
+  const topRow = rowOf("top");
+  const bottomRow = rowOf("bottom");
+  const topCards = cardNodes(topRow);
+  check("U2-07a 观星走询问弹窗：标题「排列」/ 步骤提示 / 折叠按钮 / 无关闭；两行都在窗内",
+    $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "排列"
+      && $("t-dialog-hint").hidden === false
+      && $("t-dialog-hint").textContent.length > 0
+      && (($("t-dialog-collapse").listeners.click) || []).length === 1
+      && $("t-dialog-body").children.includes($("t-options"))
+      && !!topRow && !!bottomRow
+      && $("t-dialog-body").text().includes("牌堆顶")
+      && $("t-dialog-body").text().includes("牌堆底"),
+    `title="${$("t-dialog-title").textContent}" hint="${$("t-dialog-hint").textContent}" bodyChildren=${JSON.stringify($("t-dialog-body").children.map((node) => node.id || node.className))}`);
+
+  check("U2-07b 两行牌面是完整卡面（.card.face，牌名 / 花色在脸内），不是旧的紧凑排列芯片",
+    topCards.length === 5
+      && topCards.every((node) => hasClass(node, "card")
+        && hasClass(node, "face")
+        && hasClass(node, "arrange-card")
+        && node.getAttribute("data-card-id") !== undefined
+        && node.children.some((child) => hasClass(child, "cname"))
+        && node.children.some((child) => hasClass(child, "suit")))
+      && !topCards.some((node) => node.children.some((child) => hasClass(child, "n"))),
+    `cards=${topCards.length} classes=${JSON.stringify(topCards.map((node) => node.className))}`);
+
+  // 几何：牌面宽 = 88 设计单位、高 = 124；缝隙 / 行内边距 / 正文边距是 px。
+  // 1920（--dsu 1.2）与 1280（0.8）两个视口都要放得下 5 张 + 两行。
+  const windowMatch = /\.dialog-window\s*\{[^}]*width:\s*min\((\d+)px,\s*66%\)/s.exec(css);
+  const windowMax = Number(windowMatch && windowMatch[1]);
+  const fit = (width, height) => {
+    const dsu = width / 1600;
+    const windowWidth = Math.min(windowMax, width * (1 - 0.08) * 0.66);
+    const neededWidth = 5 * 88 * dsu + 4 * 6 + 2 * 9 + 2 * 14;
+    const rowHeight = 124 * dsu + 13 * 1.65 + 6 + 2 * 7 + 2;
+    const neededHeight = 2 * rowHeight + 10 + (12 + 16) + (15 * 1.65 + 2 * 9 + 1);
+    const availHeight = (height * (1 - 0.062 - 0.275) - 0.04 * width) * 0.96;
+    return {
+      dsu, windowWidth, neededWidth, neededHeight, availHeight,
+      ok: neededWidth <= windowWidth && neededHeight <= availHeight,
+    };
+  };
+  const at1080 = fit(1920, 1080);
+  const at720 = fit(1280, 720);
+  check("U2-07c 对话框容得下 X = 5 张满卡面：1920×1080 与 1280×720 的宽 / 高都够（行高预留 124）",
+    !!windowMatch
+      && /\.card\.face\s*\{[^}]*width:\s*calc\(88 \* var\(--dsu\)\);\s*height:\s*calc\(124 \* var\(--dsu\)\)/s.test(css)
+      && /\.arrange-cards\s*\{[^}]*min-height:\s*calc\(124 \* var\(--dsu\)\)/s.test(css)
+      && !/\.arrange-card\s*\{[^}]*(?:width|height|flex-basis):/s.test(css)
+      && at1080.ok && at720.ok,
+    `window=${windowMatch && windowMax}px 1080p=${JSON.stringify(at1080)} 720p=${JSON.stringify(at720)}`);
+
+  /* ---- ② 出口语义按引擎实际候选：无 Pass ⇒ 强制；有 Pass ⇒ 放弃也按当前排列 ---- */
+  const forcedView = synthView(arrangePending(9702, cards.slice(0, 2)));
+  forcedView.timeout_seconds = 60;
+  render(forcedView);
+  check("U2-07d 引擎的排列没有 Pass ⇒ 明说强制、唯一出口是右端「确认」；「放弃」保持隐藏",
+    ui.arrangeHasPass(forcedView.pending) === false
+      && $("btn-pass").hidden === true
+      && $("btn-pass").disabled === true
+      && $("btn-submit").textContent === "确认"
+      && /强制/.test($("t-target-hint").textContent)
+      && /唯一出口/.test($("t-target-hint").textContent)
+      && /「确认」/.test($("t-target-hint").textContent)
+      && /强制/.test($("t-choice").textContent)
+      && /「确认」/.test($("t-choice").textContent),
+    `hasPass=${ui.arrangeHasPass(forcedView.pending)} passHidden=${$("btn-pass").hidden} hint="${$("t-target-hint").textContent}" choice="${$("t-choice").textContent}"`);
+
+  const passView = synthView(arrangePending(9703, cards.slice(0, 2), true));
+  passView.timeout_seconds = 60;
+  render(passView);
+  const passAction = ui.buildAction();
+  check("U2-07e 排列若带 Pass：右端「放弃」出现，但语义是「按当前排列提交」（与确认同一条）",
+    ui.arrangeHasPass(passView.pending) === true
+      && $("btn-pass").hidden === false
+      && $("btn-pass").textContent === "放弃"
+      && JSON.stringify(passAction) === JSON.stringify(
+        { answers_seq: 9703, kind: "ArrangeCards", order: [0, 1], split: 2 }),
+    `hasPass=${ui.arrangeHasPass(passView.pending)} passHidden=${$("btn-pass").hidden} text="${$("btn-pass").textContent}" action=${JSON.stringify(passAction)}`);
+  const beforePassClick = calls.length;
+  ui.state.sessionId = "u2-07-pass-no-session";   // 只为捕获 POST 体（服务端会 404，界面按拒绝处理）
+  await clickAndWait($("btn-pass"));
+  const passSent = calls.slice(beforePassClick).find((call) => call.path.includes("/answer"));
+  ui.state.sessionId = null;
+  check("U2-07e2 点右端「放弃」送出的就是当前 ArrangeCards（不是 Pass、不是 no-op）",
+    !!passSent
+      && JSON.stringify(passSent.body.action) === JSON.stringify(passAction)
+      && passSent.body.action.kind === "ArrangeCards",
+    `sent=${JSON.stringify(passSent && passSent.body.action)}`);
+
+  /* ---- ③ 拖拽与「点选后点目标」都仍可用（卡面换了，手势不能丢） ---- */
+  const dragView = synthView(arrangePending(9704, cards.slice(0, 3)));
+  dragView.timeout_seconds = 60;
+  render(dragView);
+  const dragCard = cardNode(rowOf("top"), 0);
+  (dragCard.listeners.dragstart || []).forEach((fn) => fn({ dataTransfer: { setData() {} } }));
+  (slots(rowOf("bottom"))[0].listeners.drop || []).forEach((fn) => fn({ preventDefault() {} }));
+  check("U2-07f 拖拽仍可用：dragstart 起拖 → 空槽 drop = 移到牌堆底（完整卡面不挡手势）",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[1,2]"
+      && JSON.stringify(cardIndexes(rowOf("bottom"))) === "[0]",
+    `top=${JSON.stringify(cardIndexes(rowOf("top")))} bottom=${JSON.stringify(cardIndexes(rowOf("bottom")))}`);
+  clickNode(cardNode(rowOf("top"), 1));
+  const selectedByClick = ui.state.arrange && ui.state.arrange.selected;
+  clickNode(slots(rowOf("bottom"))[0]);
+  const clickedAction = ui.buildAction();
+  check("U2-07g 点选后点目标仍可用：第一下选中、第二下移到牌堆底，载荷是当前排列",
+    selectedByClick === 1
+      && JSON.stringify(cardIndexes(rowOf("top"))) === "[2]"
+      && JSON.stringify(cardIndexes(rowOf("bottom"))) === "[0,1]"
+      && !!clickedAction
+      && JSON.stringify(clickedAction.order) === "[2,0,1]"
+      && clickedAction.split === 1,
+    `selected=${selectedByClick} top=${JSON.stringify(cardIndexes(rowOf("top")))} bottom=${JSON.stringify(cardIndexes(rowOf("bottom")))} action=${JSON.stringify(clickedAction)}`);
+
+  /* ---- ④ 提前量：2 秒；剩余 2.4 秒不动、1.9 秒判到点（纯判断不发请求） ---- */
+  const marginView = synthView(arrangePending(9705, cards.slice(0, 2)));
+  marginView.timeout_seconds = 60;
+  render(marginView);
+  ui.state.arrangeAutoSeq = null;
+  const beforeMargin = calls.length;
+  ui.state.pendingClock.receivedAt = Date.now() - (60 - 2.4) * 1000;
+  const dueAt24 = ui.arrangeAutoSubmitDue(marginView);
+  ui.state.pendingClock.receivedAt = Date.now() - (60 - 1.9) * 1000;
+  const dueAt19 = ui.arrangeAutoSubmitDue(marginView);
+  check("U2-07h 提前量 = 2 秒：剩余 2.4 秒不提交、剩余 1.9 秒判到点；纯判断不发请求",
+    ui.ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS === 2
+      && calls.length === beforeMargin
+      && dueAt24 === false && dueAt19 === true,
+    `margin=${ui.ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS} due@2.4=${dueAt24} due@1.9=${dueAt19} calls=${calls.length - beforeMargin}`);
+
+  /* ---- ⑤ 折叠 / 失败 / 回放：自动提交只看询问，不看弹窗是否展开 ---- */
+  const realArrangePending = async () => {
+    const body = await post("/api/sessions", {
+      player_count: 4, ai: "random", human_seat: 0, timeout_seconds: 60, seed: 7,
+      my_hero: "zhugeliang",
+    });
+    await openSession(body);
+    await ui.submitAction();   // 发动观星 → ARRANGE
+    ui.state.arrangeAutoSeq = null;
+    return ui.state.view.pending;
+  };
+
+  const collapsedPending = await realArrangePending();
+  (($("t-dialog-collapse").listeners.click) || []).forEach(
+    (fn) => fn({ target: $("t-dialog-collapse") }));
+  const collapsedBeforeSubmit = $("t-dialog-body").hidden === true
+    && $("t-dialog-collapse").textContent === "展开";
+  const collapsedBefore = calls.length;
+  ui.state.pendingClock.receivedAt = Date.now() - 59000;
+  await ui.renderCountdown(ui.state.view);
+  const collapsedAnswers = calls.slice(collapsedBefore)
+    .filter((call) => call.path.includes("/answer"));
+  check("U2-07i 折叠不影响自动提交：弹窗缩成标题条、正文已撤下，到点仍只发一次当前排列",
+    !!collapsedPending && collapsedPending.kind === "ARRANGE"
+      && collapsedBeforeSubmit
+      && collapsedAnswers.length === 1
+      && collapsedAnswers[0].body.action.kind === "ArrangeCards"
+      && ui.state.arrangeAutoSeq === collapsedPending.seq,
+    `pending=${collapsedPending && collapsedPending.kind} bodyHidden=${collapsedBeforeSubmit} answers=${collapsedAnswers.length} action=${JSON.stringify(collapsedAnswers[0] && collapsedAnswers[0].body.action)}`);
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+  ui.state.arrangeAutoSeq = null;
+
+  const retryPending = await realArrangePending();
+  const retryBefore = calls.length;
+  staleAnswerStatus = 409;
+  ui.state.pendingClock.receivedAt = Date.now() - 59000;
+  await ui.renderCountdown(ui.state.view);
+  const retryWindow = calls.slice(retryBefore);
+  const retryAnswers = retryWindow.filter((call) => call.path.includes("/answer"));
+  const retryRefreshes = retryWindow.filter((call) => !call.path.includes("/answer"));
+  const retryAfter = calls.length;
+  await ui.renderCountdown(ui.state.view);
+  const retriedAnswers = calls.slice(retryAfter).filter((call) => call.path.includes("/answer"));
+  check("U2-07j 失败不重试：被拒（409）只发一次 POST + 一次刷新；之后再 tick 也不补发（交给服务端超时）",
+    !!retryPending && retryPending.kind === "ARRANGE"
+      && retryAnswers.length === 1
+      && retryRefreshes.length >= 1
+      && retriedAnswers.length === 0
+      && ui.state.arrangeAutoSeq === retryPending.seq,
+    `answers=${retryAnswers.length} refresh=${retryRefreshes.length} retried=${retriedAnswers.length} autoSeq=${ui.state.arrangeAutoSeq} choice="${$("t-choice").textContent}"`);
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+  ui.state.arrangeAutoSeq = null;
+
+  const playbackView = synthView(arrangePending(9706, cards.slice(0, 2)));
+  playbackView.timeout_seconds = 60;
+  render(playbackView);
+  ui.state.arrangeAutoSeq = null;
+  ui.state.pendingClock.receivedAt = Date.now() - 59000;
+  ui.state.playback = { body: {}, records: [], index: 0 };
+  const playbackBefore = calls.length;
+  await ui.renderCountdown(playbackView);
+  const playbackAnswers = calls.slice(playbackBefore)
+    .filter((call) => call.path.includes("/answer"));
+  ui.state.playback = null;
+  check("U2-07k 回放期间不自动提交（倒计时也不显示）：零请求",
+    playbackAnswers.length === 0
+      && $("t-countdown").hidden === true
+      && ui.state.arrangeAutoSeq === null,
+    `answers=${playbackAnswers.length} countdownHidden=${$("t-countdown").hidden}`);
+
+  ui.resetSelection();
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.playback = null;
+  ui.state.arrangeAutoSeq = null;
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

@@ -17,6 +17,16 @@ function arrangeCards(pending) {
   return Array.isArray(cards) && cards.length ? cards : null;
 }
 
+/** 这一步有没有 `Pass`（票 07：提交 / 放弃的语义按**引擎实际候选**决定）。
+ *
+ * 引擎当前的 `_arrange` 是**强制**的（只给 `ArrangeCards`，没有 `Pass`）：观星想不排，
+ * 应当在上一步「是否发动」里放弃。若将来某条排列技能真给了 `Pass`，右端「放弃」也按
+ * **当前排列**提交（见 :func:`submitRightAction`），不是送出一条 `Pass`。
+ */
+function arrangeHasPass(pending) {
+  return ((pending && pending.legal_actions) || []).some((action) => action.kind === "Pass");
+}
+
 /** 排列规格的**读取口**：只认服务端下发的 `pending.arrange`（投影读 `SkillDef.deck_arrange`）。
  *
  * 返回 `null` ⇒ fail-closed：没有规格就不画双行面、也不拼 Action（409 裸 Query /
@@ -156,17 +166,19 @@ function arrangeDrop(row, beforeIndex) {
   renderPending(state.view);
 }
 
-/** 排列面里一张**被观看的牌**：可拖、可点选（点选后点目标位置 = 移动）。 */
+/** 排列面里一张**被观看的牌**：可拖、可点选（点选后点目标位置 = 移动）。
+ *
+ * 票 07（spec D6）：牌面与手牌 / 处理区**同一套 88×124**（:func:`cardFaceNode`），不再
+ * 画成紧凑的 `.card` 芯片。拖拽与点击两种搬牌手势都保留：`draggable` + 四个 drag 事件；
+ * 点击走 :func:`arrangePick`（第一下选中、第二下移到目标位置）。
+ */
 function arrangeCardNode(layout, index) {
   const card = layout.cards[index];
-  const chip = document.createElement("button");
-  chip.type = "button";
-  chip.className = "card arrange-card";
+  const chip = cardFaceNode(card, { selected: layout.selected === index });
+  chip.classList.add("arrange-card");
   chip.setAttribute("data-card-index", String(index));
   chip.setAttribute("data-row", arrangeRowOf(layout, index));
-  if (layout.selected === index) chip.classList.add("sel");
   chip.draggable = true;
-  chip.innerHTML = `<span class="n">${cardName(card)}</span><span class="s">${card.suit || ""}${card.rank ?? ""}</span>`;
   chip.addEventListener("click", () => arrangePick(index));
   chip.addEventListener("dragstart", (event) => {
     if (state.playback) return;
@@ -295,8 +307,13 @@ function renderArrange(pending) {
     bottom.cards.appendChild(arrangeSlotNode("bottom"));
   }
   if (hint) {
-    hint.textContent = layout.free
+    const how = layout.free
       ? "拖动卡牌在牌堆顶 / 牌堆底之间切换，行内拖动排序；也可先点一张牌再点目标位置。"
       : "固定切分：只能在上行 / 下行内排序（跨行移动会改变服务端声明的张数）。";
+    // 票 07：按**实际候选**说明出口。引擎的 `_arrange` 现在不给 `Pass` ⇒ 这一步是强制的，
+    // 唯一出口是右端「确认」；若某条排列技能给了 `Pass`，右端「放弃」也按当前排列提交。
+    hint.textContent = arrangeHasPass(pending)
+      ? `${how} 右端「确认」与「放弃」等价：都按当前排列执行。`
+      : `${how} 这一步是强制的：排列不能放弃，右端「确认」是唯一出口。`;
   }
 }

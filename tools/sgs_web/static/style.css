@@ -100,8 +100,8 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .card.static { cursor: default; }
 
 /* ---------- 卡面（U1-02）：88×124，左上花色 + 点数、顶部中间牌名、底部类型 / 属性 / 范围 ----------
- * 只有 `cardChip` 造出来的节点带 `.face`；选择面 / 排列 / 回放槽位的旧 `.card` 仍是紧凑芯片，
- * 两者不共享尺寸。 */
+ * 只有 `cardFaceNode` 造出来的节点带 `.face`；选择面 / 回放槽位的旧 `.card` 仍是紧凑
+ * 芯片。**排列（观星）自票 07 起也用这一套 88×124**，不再有自己的一张小牌面。 */
 .card.face {
   position: relative;
   flex: 0 0 calc(88 * var(--dsu)); width: calc(88 * var(--dsu)); height: calc(124 * var(--dsu));
@@ -190,7 +190,9 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .cards.mini .card.face .cname { top: calc(24 * var(--dsu)); font-size: calc(11 * var(--dsu)); letter-spacing: 0; }
 .cards.mini .card.face .ctype { display: none; }
 
-/* 排列（W6-03）：上行 = 牌堆顶、下行 = 牌堆底；下行空槽是拖拽 / 点选的落点。 */
+/* 排列（W6-03 / 票 07）：上行 = 牌堆顶、下行 = 牌堆底；下行空槽是拖拽 / 点选的落点。
+ * 牌面自票 07 起是**完整 88×124**（`.card.face`，与手牌同一套），空槽按同一尺寸预留，
+ * 故一行最多 5 张时也不会把两行撑出弹窗（见 `.dialog-window` 的宽度注释）。 */
 .arrange-row {
   border: 1px dashed var(--line); border-radius: 10px; padding: 7px 9px;
   background: #fbfaf7;
@@ -203,11 +205,16 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   font-size: 13px; font-weight: 600; color: var(--ink);
 }
 .arrange-label .dim { font-weight: 400; }
-.arrange-cards { display: flex; flex-wrap: wrap; gap: 6px; min-height: 52px; align-items: stretch; }
+.arrange-cards {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  min-height: calc(124 * var(--dsu)); align-items: stretch;
+}
 .arrange-card { cursor: grab; }
 .arrange-card:active { cursor: grabbing; }
 .arrange-slot {
-  min-width: 62px; min-height: 48px; border-style: dashed; color: var(--dim);
+  display: grid; place-items: center;
+  min-width: calc(88 * var(--dsu)); min-height: calc(124 * var(--dsu));
+  border-style: dashed; color: var(--dim);
   background: #f2efe9; cursor: pointer;
 }
 .arrange-slot:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
@@ -880,6 +887,11 @@ button.mini-slot { cursor: pointer; }
 .dialog-window {
   position: relative;
   pointer-events: auto;
+  /* 680px 是**排列 5 张满卡面**的宽度预算（票 07 / spec D2：X = min(存活数, 5)）：
+   * 5×88×--dsu + 4×6（缝）+ 2×9（行内边距）+ 2×14（正文边距）。
+   * 1920 宽（--dsu = 1.2）⇒ 5×105.6 + 70 = 598px；1280 宽（0.8）⇒ 5×70.4 + 70 = 422px；
+   * 都 < 680。高度侧两行 124 卡面 + 行标签 / 内边距在 720p 下约 367px < 可用 409px
+   * （`max-height: 96%`），1280 / 1920 都放得下。 */
   width: min(680px, 66%);
   max-height: 96%;
   display: flex; flex-direction: column;

@@ -264,10 +264,15 @@ function useText(card) {
 function commitView(body) {
   // 换会话（开新局 / 从录像回到牌桌）时倒计时锚点必须作废：不同会话的询问序号会重复，
   // 沿用旧锚点会把上一局已经过去的秒数算到新局的第一个询问上。
-  if (state.view && body && state.view.session_id && body.session_id
-    && state.view.session_id !== body.session_id) {
+  // `state.view === null` 也算换会话（首屏 / 测试重开一局）：自动提交的去重键不能跨局沿用。
+  const sessionChanged = !state.view
+    || (body && state.view.session_id && body.session_id
+      && state.view.session_id !== body.session_id);
+  if (sessionChanged) {
     state.pendingClock.seq = null;
     state.pendingClock.receivedAt = 0;
+    // U2-07：自动提交的去重键是询问序号；换会话后序号会重复，必须作废。
+    state.arrangeAutoSeq = null;
     // U1-06：换会话时详情窗口的座位号属于上一局，必须作废（同一局的刷新则保留）。
     state.modal.heroSeat = null;
   }
