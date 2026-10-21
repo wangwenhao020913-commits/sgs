@@ -23,10 +23,14 @@ function cardChip(card, selected, isStatic, usable = true, onClick = null, picke
   });
 }
 
-/** 弃牌阶段：点手牌 = 收进 / 移出待弃置集合；收够 `pending.count` 张后不再多收。 */
+/** 弃牌阶段：点手牌 = 收进 / 移出待弃置集合；收够 `pending.count` 张后不再多收。
+ *
+ * 选择入口：只读态（D8，当前步骤的表面是弹窗）里 no-op——判据与点牌 / 点座共用
+ * :func:`selectionEnabled`，不在这里另写一份。
+ */
 function toggleDiscardPick(cardId) {
   const pending = state.view ? state.view.pending : null;
-  if (state.playback || !isDiscardPick(pending)) return;
+  if (!selectionEnabled() || !isDiscardPick(pending)) return;
   const at = state.picks.indexOf(cardId);
   if (at >= 0) state.picks.splice(at, 1);
   else if (state.picks.length < (pending.count || 0)) state.picks.push(cardId);
@@ -35,10 +39,11 @@ function toggleDiscardPick(cardId) {
   renderPending(state.view);
 }
 
-/** 点座位 = 选 / 取消目标。**自动选中**的目标是确定态，点单个座位不取消它（spec D6）。 */
+/** 点座位 = 选 / 取消目标。**自动选中**的目标是确定态，点单个座位不取消它（spec D6）。
+ *  选择入口：只读态（D8）里 no-op（`selectionEnabled()`）。 */
 function selectTarget(seat) {
   const pending = state.view ? state.view.pending : null;
-  if (state.playback || !isHandPick(pending) || state.focusCardId === null) return;
+  if (!selectionEnabled() || !isHandPick(pending) || state.focusCardId === null) return;
   const here = pickerSeats(pending).find((item) => item.seat === seat);
   // 只有"池里的座位"能点：池外的点了没反应（置灰）；已选的座位**始终**能再点一次取消。
   if (!here || (!here.selected && !here.isTargetable)) return;
@@ -58,7 +63,7 @@ function selectTarget(seat) {
  */
 function selectOptionSeat(seat) {
   const pending = state.view ? state.view.pending : null;
-  if (state.playback || !pending || pending.kind !== "SELECT_OPTION") return;
+  if (!selectionEnabled() || !pending || pending.kind !== "SELECT_OPTION") return;
   const index = (pending.legal_actions || []).findIndex(
     (action) => action.kind === "SelectOption" && action.choice === `${SEAT_PREFIX}${seat}`,
   );
@@ -75,10 +80,13 @@ function selectOptionSeat(seat) {
  * `legal_actions` 的候选列表驱动，点牌不设焦点。本刀之前 `toggleCard` 承担这个入口，
  * 但它与 `toggleFocus` 互相委托会让非手选询问一点牌面就**无限递归**
  * （`toggleFocus` → `toggleCard` → `toggleFocus` → …），故收成一个函数、不再互调。
+ *
+ * 只读态（D8）里 no-op：判据是 `selectionEnabled()`，键盘回车 / 空格触发的 click 走的
+ * 也是这里（卡面是 `<button>`，原生激活 = click）。
  */
 function toggleFocus(cardId) {
   const pending = state.view ? state.view.pending : null;
-  if (state.playback || !isHandPick(pending)) return;
+  if (!selectionEnabled() || !isHandPick(pending)) return;
   if (state.focusCardId === cardId) {
     state.focusCardId = null;
     state.selectedTargets = [];

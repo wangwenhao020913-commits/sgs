@@ -68,7 +68,11 @@ function wire() {
   if (replayModeSelect) replayModeSelect.addEventListener("change", () => {
     if (state.replay) renderReplayLog(state.replay);
   });
-  $("btn-submit").addEventListener("click", submitAction);
+  // U2-03 的回归修复（U2-05 一并收）：`submitAction(restoreSelection = null)` 的形参是
+  // **选择快照**，不是事件。直接挂 `submitAction` 会让真实点击把 `MouseEvent` 当快照传进去，
+  // 400 回滚时 `restoreSelectionState(event)` 读 `event.selectedTargets` 抛异常、四键停在
+  // 冻结态。改成无参箭头：点击不再冒充快照。
+  $("btn-submit").addEventListener("click", () => submitAction());
   $("btn-cancel").addEventListener("click", cancelOrClear);
   // U1-03：提示条右端的两个"到此为止"动作（结束出牌 / 放弃），词表由服务端候选决定。
   $("btn-end-phase").addEventListener("click", () => submitRightAction(RIGHT_ACTION_KINDS.endPhase));

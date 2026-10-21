@@ -189,6 +189,8 @@ function selectionCap(pending) {
  * 故这里只做越界拒绝，不做任何跨询问的记账。
  */
 function toggleSlotPick(pending, index) {
+  // 选择面槽位是牌桌选择入口（D8）：只读态里 no-op，与点牌 / 点座共用一条判据。
+  if (!selectionEnabled()) return;
   const at = state.picks.indexOf(index);
   if (at >= 0) {
     state.picks.splice(at, 1);
@@ -222,7 +224,7 @@ function renderProvide(pending) {
  */
 function toggleProvidePick(slotIndex) {
   const pending = state.view ? state.view.pending : null;
-  if (state.playback || !isProvide(pending)) return;
+  if (!selectionEnabled() || !isProvide(pending)) return;
   const at = state.picks.indexOf(slotIndex);
   if (at >= 0) {
     state.picks.splice(at, 1);

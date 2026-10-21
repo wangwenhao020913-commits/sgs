@@ -50,6 +50,8 @@
     "isProvide", "provideSlotIndex", "cardFace", "activateCard", "renderProvide", "toggleProvidePick",
     // 票 15：选择面的张数上限（读服务端 spec.total）+ 槽位点选（【遗计】一次两张 / 取消）
     "selectionCap", "toggleSlotPick",
+    // 弃牌阶段的点手牌收进待弃置集合（U2-05 只读态要逐入口钉 no-op）
+    "toggleDiscardPick",
     // W6-03：观星双行排列（规格 / 布局 / 点选移动 / 提交载荷）
     // W6-07：牌面只读 `pending.revealed`（`arrangeCards` 是唯一读取口）
     "renderArrange", "arrangeCards", "arrangeSpec", "arrangeAction", "arrangeKey", "initialArrange",
@@ -60,6 +62,9 @@
     "rightActionIndex", "countdownPhase", "renderCountdown",
     // U2-01（D7）：三页共用一条顶栏的导航态（show 是高亮 / 禁用 / 切页的唯一落点）
     "show", "syncNavState", "NAV_BUTTONS",
+    // U2-05（D8）：只读态的唯一判据（selectionEnabled）与"这一步的表面"（stepDialogKind）。
+    // 票 06 接四类弹窗模板时只改 stepDialogKind；烟测把两口都钉住。
+    "selectionEnabled", "stepDialogKind",
   ];
   const out = {};
   for (const name of names) {

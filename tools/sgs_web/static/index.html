@@ -204,8 +204,9 @@
     </div>
 
     <!-- 共享模态（U1-03）：多步技能清单 / 排列 / 武将详情共用一套规范。
-         屏幕正中、正文可滚轮翻阅、背景或 ESC 可关；遮罩与弹窗是**两个节点**——
-         遮罩压在舞台背景 / 顶栏之上、座位之下，于是选目标仍能点场上武将，空白背景点击仍可关。
+         屏幕正中、正文可滚轮翻阅、关闭按钮或 ESC 可关；遮罩与弹窗是**两个节点**——
+         遮罩是 `pointer-events: none` 的暗化层（D8）：点击穿透到牌桌，能不能选由
+         `selectionEnabled()` 判据拦下；座位仍在遮罩之上，选目标照常点场上武将。
          倒计时仍在提示条上继续走，模态内**不**显示倒计时。 -->
     <div id="t-modal-backdrop" class="modal-backdrop" hidden></div>
     <div id="t-modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="t-modal-title" hidden>

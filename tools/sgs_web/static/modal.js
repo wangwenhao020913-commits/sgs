@@ -1,16 +1,14 @@
 /* SGS 前端 · 共享模态（U1-03）：多步技能清单 / 排列 / 武将详情共用一套规范。
  *
- * 纪律（票面 `03` / spec §3.2–3.3）：
- *  - 屏幕正中；正文可滚轮翻阅；背景或 ESC 可关；
- *  - 打开时**顶栏 / 事件流浮层**整体 `inert`，空白舞台被遮罩挡住（点击 = 关闭）；
- *    座位与底部面板留在遮罩之上——多步技能要选目标 / 选来源牌。**倒计时不暂停**：
+ * 纪律（票面 `03` / spec D8）：
+ *  - 屏幕正中；正文可滚轮翻阅；`#t-modal-close` 与 ESC 可关；
+ *  - **没有"阻断弹窗"**：打开模态**不**给顶栏 / 舞台 / 底部加 `inert`，也不设
+ *    `aria-hidden`。遮罩是 `pointer-events: none` 的暗化层——点击直接穿透到牌桌，
+ *    能不能选由 :func:`selectionEnabled` 那**一条**判据拦下。**倒计时不暂停**：
  *    进度条仍在提示条上走，模态正文里**不**放倒计时；
  *  - 模态只负责“摆哪里 / 怎么关”，内容仍由各自的渲染器画（预发动清单 / 排列面 /
- *    未来的武将详情）。当前实现把提示区的 `#t-options` 节点整体搬进模态正文，
+ *    武将详情）。当前实现把提示区的 `#t-options` 节点整体搬进模态正文，
  *    于是“简单询问走浮动选项行、多步面走模态”是两个**位置**，不是两套渲染。
- *
- * **底部面板不 inert**：多步技能清单的第 1 步就是“点手牌选来源牌”，排列/技能的确认与
- * 取消也按 spec §3.3 留在提示条右端。故模态挡的是背景窗口，不是当前这一问的操作条。
  *
  * 关闭语义分两类：
  *  - 预发动：关闭 = 取消本地态，**零 action 提交**（与「取消预发动」同一条路）；
@@ -19,20 +17,32 @@
  */
 "use strict";
 
-/** 打开模态时要对背景设置的 `inert` 区域（顶栏 / 事件流浮层）。
+/** 当前**步骤**的表面若是弹窗就返回它的种类（spec D8「只读态」的唯一判据源）。
  *
- * **舞台不 inert**：多步技能清单的座位步要点场上武将选目标；遮罩压在座位之下（CSS），
- * 空白背景与顶栏仍被挡住。**底部面板也不 inert**：模态里的多步技能清单第 1 步就是
- * “点手牌选来源牌”，排列/技能的确认与取消也按 spec §3.3 留在提示条右端。
+ * 现在只有排列（`ARRANGE`）是弹窗表面。另外两类模态**不**进这里：
+ *  - 预发动清单是**牌桌表面**（D2 的 C 形：点自己的牌 / 点自己的座位），打开时牌桌
+ *    照常接选择——它只是把选项搬进了窗口，不是"这一步的答案在窗内"；
+ *  - 武将详情是叠加的**检视窗**：开合不改变只读态，所以这里读的是**底下那一步**的
+ *    表面，而不是"哪个模态正开着"。
+ * 票 06 把四类询问模板接进来时，只改这个函数（`selectionEnabled` 不用动）。
  */
-const MODAL_BACKGROUND_IDS = ["table-topbar", "t-log-panel"];
+function stepDialogKind(pending) {
+  if (pending && pending.kind === "ARRANGE") return "arrange";
+  return null;
+}
 
-/** 武将详情（U1-06）是**阻断**模态：舞台与底部面板也要 inert（选目标 / 点手牌都不行）。
+/** 只读态判据（spec D8）：当前步骤的表面是弹窗 ⇒ 牌桌选择入口一律 no-op。
  *
- * 预发动 / 排列不阻断它们（多步技能要选目标、选来源牌）；两条口径由
- * :func:`setModalBackgroundInert` 的 `blocking` 参数分开，CSS 同步遮罩高度。
+ * 与既有的 `state.playback` 判据同型，但只回答"现在能不能选"：检视（悬停 / 右键详情 /
+ * 折叠 / 顶栏 / 事件流）与操作（提示条右端的四键）都不走这里。所有选择入口
+ * （点手牌 / 点座位 / 点槽位 / 提供 B / 弃牌 / 预发动选牌选座）都先问它一次；
+ * 键盘回车 / 空格触发的 click 走同一批函数，故同一判据。
+ * 收起（`modal.dismissed`）只改遮挡，不改只读态——判据只看这一步的表面。
  */
-const MODAL_BLOCKING_IDS = ["table-stage", "table-bottom"];
+function selectionEnabled(view = state.view) {
+  if (state.playback) return false;
+  return stepDialogKind(view ? view.pending : null) === null;
+}
 
 /** 当前询问 / 本地态是否需要模态：武将详情 > 预发动清单 > ARRANGE。`null` = 不需要。 */
 function modalWantedKind(pending) {
@@ -54,41 +64,17 @@ function modalTitleFor(kind) {
   return "排列";
 }
 
-/** 遮罩 / 背景态的唯一开关：`inert` 挡操作，遮罩挡空白背景，座位留在遮罩之上。
+/** 遮罩 / 页面态的唯一开关：暗化层只负责"看得见"，**不吞指针**（D8）。
  *
- * ``blocking`` = 武将详情的**全阻断**：舞台与底部面板一起 inert，遮罩盖满整个牌桌外壳；
- * 预发动 / 排列仍只挡顶栏与事件流浮层（选择目标 / 来源牌要用座位与手牌）。
+ * 点击落在遮罩上会穿透到牌桌（`.modal-backdrop { pointer-events: none }`），再由
+ * :func:`selectionEnabled` 判据拦下；模态窗口自己保留 `pointer-events: auto`。
+ * 遮罩因此不再有 click 监听、也不再是"点背景 = 关闭"的出口。
  */
-function setModalBackgroundInert(on, blocking = false) {
-  for (const id of MODAL_BACKGROUND_IDS) {
-    const node = $(id);
-    if (!node) continue;
-    if (on) {
-      node.setAttribute("inert", "");
-      node.setAttribute("aria-hidden", "true");
-    } else {
-      node.removeAttribute("inert");
-      node.removeAttribute("aria-hidden");
-    }
-  }
-  for (const id of MODAL_BLOCKING_IDS) {
-    const node = $(id);
-    if (!node) continue;
-    if (on && blocking) {
-      node.setAttribute("inert", "");
-      node.setAttribute("aria-hidden", "true");
-    } else {
-      node.removeAttribute("inert");
-      node.removeAttribute("aria-hidden");
-    }
-  }
+function setModalChrome(on) {
   const backdrop = $("t-modal-backdrop");
   if (backdrop) backdrop.hidden = !on;
   const shell = $("table-shell");
-  if (shell) {
-    shell.classList.toggle("modal-open", on);
-    shell.classList.toggle("modal-blocking", on && blocking);
-  }
+  if (shell) shell.classList.toggle("modal-open", on);
 }
 
 /** 把提示区的 `#t-options` 搬回浮动选项行（真 DOM 的 appendChild = 移动）。 */
@@ -101,7 +87,7 @@ function showOptionsHome() {
 function hideModalDom() {
   const modal = $("t-modal");
   if (modal) modal.hidden = true;
-  setModalBackgroundInert(false);
+  setModalChrome(false);
   state.modal.open = false;
 }
 
@@ -113,10 +99,14 @@ function showReopenButton(kind, visible) {
   if (visible) reopen.textContent = kind === "arrange" ? "查看排列" : "继续";
 }
 
-/** 打开 / 刷新模态：标题 + 正文节点 + 背景 inert 都只在这里写一次。
+/** 打开 / 刷新模态：标题 + 正文节点 + 暗化层都只在这里写一次。
  *
  * 两类正文：武将详情由 `hero-detail.js` 现画（不搬 `#t-options`）；预发动 / 排列仍把
  * 提示区的 `#t-options` 整体搬进正文（“简单询问走浮动选项行、多步面走模态”）。
+ *
+ * **回到询问弹窗时先清正文**：详情是叠加的检视窗，关掉它再打开底下那个弹窗时必须把
+ * 正文里残留的详情内容清掉，否则「关闭详情后弹窗原样恢复」会变成详情 + 弹窗两段。
+ * `#t-options` 是共享节点（可能正被清掉的正文包含），清完再 append 回来。
  */
 function openModalDom(kind) {
   const modal = $("t-modal");
@@ -129,10 +119,17 @@ function openModalDom(kind) {
     renderHeroDetailBody();
   } else {
     if (!options) return;
+    // 正文里若有叠加详情留下的内容，清掉再放询问内容；只有 #t-options 时**不清**
+    // （清空 = 每次轮询重绘都把窗口滚动位置拉回顶部）。`#t-options` 是共享节点，
+    // 可能正被清掉的正文包含，清完再 append 回来。
+    if (Array.from(body.children || []).some((child) => child !== options)) {
+      body.innerHTML = "";
+      body.scrollTop = 0;
+    }
     body.appendChild(options);
   }
   modal.hidden = false;
-  setModalBackgroundInert(true, kind === "hero");
+  setModalChrome(true);
   state.modal.kind = kind;
   state.modal.open = true;
   // `dismissed` 属于**底下的**排列模态；打开详情时不能把它抹掉（关闭详情后仍只给
@@ -172,7 +169,7 @@ function syncModal() {
     state.modal.kind = kind;
     state.modal.open = false;
   }
-  // 武将详情是阻断模态：没有“收起后继续”这回事，背景 / ESC 直接关。
+  // 排列收起后只给「查看排列」；武将详情是叠加的检视窗，没有"收起"这回事。
   if (state.modal.dismissed && kind !== "hero") {
     hideModalDom();
     showReopenButton(kind, true);
@@ -235,8 +232,8 @@ function closeModalForView() {
 }
 
 function wireModal() {
-  const backdrop = $("t-modal-backdrop");
-  if (backdrop) backdrop.addEventListener("click", dismissModal);
+  // 遮罩**不接 click**：`pointer-events: none` 的暗化层没有自己的点击，穿透到牌桌的
+  // 点击由 `selectionEnabled()` 判据拦下（D8：「点背景 = 关闭」不再存在）。
   const close = $("t-modal-close");
   if (close) close.addEventListener("click", dismissModal);
   const reopen = $("btn-show-modal");

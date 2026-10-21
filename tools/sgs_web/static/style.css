@@ -808,7 +808,7 @@ button.mini-slot { cursor: pointer; }
 /* 叙事行是"一条行动一行"，不要 `<ol>` 的序号（序号属于完整档的引擎记录）。 */
 .log li.nar-line { list-style: none; margin: 2px 0; }
 
-/* ---------- 共享模态（U1-03）：屏幕正中 / 正文可滚 / 背景或 ESC 可关 ---------- */
+/* ---------- 共享模态（U1-03）：屏幕正中 / 正文可滚 / 关闭按钮或 ESC 可关 ---------- */
 
 .modal {
   /* 舞台区（顶栏以下、底部面板以上）里居中：窗口再高也不盖住提示条 / 手牌。 */
@@ -817,20 +817,22 @@ button.mini-slot { cursor: pointer; }
   display: flex; align-items: center; justify-content: center;
   padding: 2% 4%;
   /* 底部操作条要留在模态之外可点（手牌选择 / 确认取消），故容器本身不吃指针；
-     真正拦截点击的是遮罩与模态窗口。 */
+     真正接点击的只有模态窗口，暗化层不吞指针（D8）。 */
   pointer-events: none;
 }
 .modal[hidden] { display: none !important; }
-/* 遮罩在**座位之下**（座位 z-index: 3）：多步技能的选择目标仍要点场上武将，
- * 空白背景 / 顶栏则落在遮罩上（点击 = 关闭）。 */
+/* 遮罩 = 纯暗化层（D8）：`pointer-events: none` ⇒ 点击穿透到牌桌，再由
+ * `selectionEnabled()` 判据拦下——「点背景 = 关闭」不再是出口（没有"阻断弹窗"）。
+ * 遮罩在**座位之下**（座位 z-index: 3）：预发动清单的目标步仍要点场上武将。 */
 .modal-backdrop {
   position: absolute; left: 0; right: 0; top: 0; bottom: 27.5%;
   z-index: 2;
   background: rgba(28, 26, 23, .42);
-  pointer-events: auto;
+  pointer-events: none;
 }
 .modal-backdrop[hidden] { display: none !important; }
-/* 模态打开时顶栏 / 舞台中央 / 事件流浮层压到遮罩之下：看得见、点不到。 */
+/* 模态打开时顶栏 / 舞台中央 / 事件流浮层压到遮罩之下：看得见（暗化），也点得到
+ * （遮罩 `pointer-events: none`；能不能选由只读判据决定，不由层级决定）。 */
 .table-shell.modal-open .table-topbar,
 .table-shell.modal-open .stage-center,
 .table-shell.modal-open .log-panel { z-index: 1; }
@@ -892,11 +894,8 @@ button.mini-slot { cursor: pointer; }
 .hero-detail .detail-divider { height: 1px; background: var(--line); margin: 8px 0 2px; }
 .hero-detail .detail-empty { padding: 3px 0 5px; font-size: calc(12 * var(--dsu)); color: var(--dim); }
 
-/* 武将详情是**阻断**模态（U1-06）：遮罩盖满整个牌桌外壳（含底部手牌区），
- * 舞台 / 底部由 JS 加 `inert`；预发动 / 排列不套这个类。 */
-.table-shell.modal-blocking .modal-backdrop {
-  top: 0; bottom: 0; z-index: 50;
-}
+/* 武将详情是**叠加的检视窗**（D8）：没有单独的"全壳阻断遮罩"——遮罩只有一层暗化层，
+ * 开合详情不改变只读态（是否只读由这一步的表面决定，见 modal.js:selectionEnabled）。 */
 
 @media (max-height: 560px) {
   .table-hint { display: block; }

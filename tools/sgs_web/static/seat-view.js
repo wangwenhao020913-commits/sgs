@@ -34,6 +34,31 @@ function applySeatState(box, flags) {
   for (const name of SEAT_STATE_CLASSES) box.classList.toggle(name, flags.includes(name));
 }
 
+/** 座位卡的可点绑定：点击与键盘（回车 / 空格）走**同一个** handler。
+ *
+ * 座位是 `<div>`（不是 `<button>`），故可点时补 `tabindex` + `role` + keydown，不可点时
+ * 一起摘掉。这里**不**判断"现在能不能选"——能不能选由 handler 自己问
+ * `selectionEnabled()`（D8：选择入口共用一条判据），键盘激活因此天然被同一判据拦下。
+ */
+function bindSeatActivation(box, handler) {
+  if (!box) return;
+  box.onclick = handler || null;
+  box.onkeydown = handler
+    ? (event) => {
+      if (!event || (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar")) return;
+      if (event.preventDefault) event.preventDefault();
+      handler();
+    }
+    : null;
+  if (handler) {
+    box.setAttribute("tabindex", "0");
+    box.setAttribute("role", "button");
+  } else {
+    box.removeAttribute("tabindex");
+    box.removeAttribute("role");
+  }
+}
+
 /** 环上 / 底部共用的武将 id：`view.heroes` 在服务端是 list，合成视图可能是对象。 */
 function heroIdAt(view, seat) {
   const heroes = (view && view.heroes) || [];
@@ -309,6 +334,7 @@ function seatCardNode(player, position, view, ctx) {
     line.textContent = "正在响应…";
     box.appendChild(line);
   }
-  box.onclick = handler || null;
+  // 点击 / 键盘（Tab + 回车 / 空格）走同一个 handler（`bindSeatActivation`）。
+  bindSeatActivation(box, handler);
   return box;
 }

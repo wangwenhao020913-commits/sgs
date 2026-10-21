@@ -257,7 +257,7 @@ function preactivationCardOptions(pending) {
 function togglePreativationCard(cardId) {
   const pending = state.view ? state.view.pending : null;
   const pa = state.preactivation;
-  if (state.playback || !pa || pa.cursor >= pa.steps.length) return;
+  if (!selectionEnabled() || !pa || pa.cursor >= pa.steps.length) return;
   const step = pa.steps[pa.cursor];
   if (preactivationStepKind(step) !== "card") return;
   const options = preactivationOptions(pa, pa.cursor);
@@ -336,7 +336,7 @@ function applyPreativationDefaults(pa, pending) {
 function selectPreativationSeat(seat) {
   const pending = state.view ? state.view.pending : null;
   const pa = state.preactivation;
-  if (state.playback || !pa || pa.cursor >= pa.steps.length) return;
+  if (!selectionEnabled() || !pa || pa.cursor >= pa.steps.length) return;
   const step = pa.steps[pa.cursor];
   if (preactivationStepKind(step) !== "seat") return;
   const options = preactivationOptions(pa, pa.cursor);
@@ -563,7 +563,7 @@ function renderPreativation(pending) {
   if (kind === "seat") {
     // 座位步的候选在**模态正文里也铺一遍**（U1-03 / 评审 P0）：模态窗口居中后可能挡住
     // 环上某几个座位，只靠点场上武将就点不到被挡的那个。两份入口调同一个
-    // `selectPreativationSeat`，环上高亮不变（舞台不 inert）。
+    // `selectPreativationSeat`；牌桌不再 inert（D8），环上高亮照旧。
     const options = preactivationOptions(pa, pa.cursor);
     const seats = options
       ? options

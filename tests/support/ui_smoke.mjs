@@ -74,6 +74,9 @@ class El {
   // 真 DOM 里它是"同一个处理器"，垫片把它映射到 listeners.click，语义一致。
   set onclick(fn) { this.listeners.click = fn ? [fn] : []; }
   get onclick() { return (this.listeners.click || [])[0] || null; }
+  // U2-05：座位是 `<div>`，可点时用 `onkeydown` 补键盘入口（真 DOM 的同一个处理器）。
+  set onkeydown(fn) { this.listeners.keydown = fn ? [fn] : []; }
+  get onkeydown() { return (this.listeners.keydown || [])[0] || null; }
   setAttribute(name, value) { (this.attrs ||= {})[name] = String(value); }
   getAttribute(name) { return (this.attrs || {})[name]; }
   removeAttribute(name) { if (this.attrs) delete this.attrs[name]; }
@@ -5547,6 +5550,62 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
   ui.resetSelection();
 }
 
+/* ---- ⑤b 回归（U2-03 的接线 bug）：真实点击 `#btn-submit` 时 MouseEvent 不能冒充选择快照 ---- */
+{
+  // 真实浏览器里点 `<button>` 会把 MouseEvent 传进监听器。`submitAction(restoreSelection)`
+  // 的形参是**点击前的选择快照**；若 main.js 直接挂 `submitAction`，400 回滚会把 MouseEvent
+  // 当快照读 `selectedTargets` ⇒ 抛异常、四键停在冻结态。这里直接调 wire() 挂的监听器，
+  // 复现"真实点击"的实参形状（合成载荷 + 真会话 id，400 由拦截器注入）。
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261012,
+  });
+  const slash = { ...synthCard(84, "杀"), type: "slash" };
+  const pending = {
+    kind: "RESPOND", actor: 0, seq: 9413, cause: "BARBARIAN_INVASION", required: "slash",
+    prompt: "响应窗口：请打出一张牌，或放弃。",
+    prompt_display: { text: "响应窗口：请打出一张牌，或放弃。", default_label: "超时将自动放弃" },
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 9413, card: slash, targets: [] },
+      { kind: "Pass", answers_seq: 9413 },
+    ],
+    candidate_index: {
+      84: { card: slash, pool: [], min_targets: 0, max_targets: 0, combos: [[]] },
+    },
+    option_seats: {}, context: null, preactivations: {}, preactivation: [],
+  };
+  const view = synthView(pending);
+  view.snapshot.self_hand = [slash];
+  ui.state.view = view;
+  ui.state.sessionId = session.session_id;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  ui.toggleFocus(84);   // 点击前那一面：焦点在【杀】上、提交可点
+  const beforeState = actionButtonsState();
+  const beforeCalls = calls.length;
+  staleAnswerStatus = 400;
+  let clickError = null;
+  try {
+    for (const fn of $("btn-submit").listeners.click || []) {
+      await fn({ target: $("btn-submit"), type: "click" });
+    }
+  } catch (error) {
+    clickError = error;
+  }
+  staleAnswerStatus = null;
+  nextGetPending = null;
+  const answerCalls = calls.slice(beforeCalls).filter((call) => call.path.includes("/answer"));
+  check("U2-03m 真实点击「提交」被 400 拒：1 条 POST、不抛异常、四键回到点击前、错误文案可见",
+    clickError === null
+      && answerCalls.length === 1
+      && JSON.stringify(actionButtonsState()) === JSON.stringify(beforeState)
+      && ui.state.focusCardId === 84
+      && /提交被拒/.test($("t-choice").textContent),
+    `error=${clickError && clickError.message} answers=${answerCalls.length} buttons=${JSON.stringify(actionButtonsState())} choice="${$("t-choice").textContent}"`);
+  ui.state.sessionId = null;
+  ui.resetSelection();
+}
+
 /* ---- ⑥ 「放弃」成功 = 一次 POST + 新询问；409 = 刷新到新询问、不留展开选项 ---- */
 {
   // 8 人 / heuristic / 该 seed 的建局首问 = 只有一条 Pass 的响应窗口（实测）。
@@ -6054,7 +6113,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     `label=${timedPendingReal && timedPendingReal.prompt_display && timedPendingReal.prompt_display.default_label} phase=${$("t-countdown").getAttribute("data-phase")} timer="${$("t-timer").textContent}"`);
 }
 
-/* ---- 共享模态：正中 / 可滚 / 背景与 ESC 可关 / 背景不可操作 / 不暂停倒计时 ---- */
+/* ---- 共享模态：正中 / 可滚 / 关闭按钮与 ESC 可关 / 背景不吞指针（D8）/ 不暂停倒计时 ---- */
 
 {
   const card = synthCard(81, "杀");
@@ -6107,14 +6166,18 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && /预发动/.test($("t-modal-title").textContent)
       && $("t-modal-body").children.includes($("t-options")),
     `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" bodyChildren=${$("t-modal-body").children.length}`);
-  check("U1-03q 模态打开时顶栏不可操作（inert），舞台 / 底部仍可点（选目标 + 手牌）",
-    $("table-topbar").getAttribute("inert") !== undefined
-      && $("table-stage").getAttribute("inert") === undefined
-      && $("table-bottom").getAttribute("inert") === undefined
-      && $("t-modal").getAttribute("inert") === undefined
+  const modalRegions = ["table-topbar", "table-stage", "table-bottom", "t-modal"];
+  check("U1-03q 模态打开时没有任何区域 inert / aria-hidden：顶栏 / 舞台 / 底部都可检视",
+    modalRegions.every((id) => $(id).getAttribute("inert") === undefined
+      && $(id).getAttribute("aria-hidden") === undefined)
       && $("table-shell").classList.contains("modal-open")
       && $("t-modal-backdrop").hidden === false,
-    `topbar=${$("table-topbar").getAttribute("inert")} stage=${$("table-stage").getAttribute("inert")} bottom=${$("table-bottom").getAttribute("inert")} openClass=${$("table-shell").classList.contains("modal-open")} backdropHidden=${$("t-modal-backdrop").hidden}`);
+    `regions=${modalRegions.map((id) => `${id}:${$(id).getAttribute("inert")}`).join(",")} openClass=${$("table-shell").classList.contains("modal-open")} backdropHidden=${$("t-modal-backdrop").hidden}`);
+  check("U1-03q2 预发动清单是牌桌表面（D2 的 C 形），不是只读态：selectionEnabled() 仍为真",
+    ui.stepDialogKind(view.pending) === null
+      && ui.selectionEnabled() === true
+      && ui.state.modal.kind === "preactivation",
+    `surface=${ui.stepDialogKind(view.pending)} enabled=${ui.selectionEnabled()} modal=${ui.state.modal.kind}`);
   check("U1-03r 模态内不显示倒计时（倒计时留在提示条上）",
     !$("t-modal-body").text().includes("剩余")
       && $("t-countdown").hidden === false
@@ -6135,7 +6198,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && $("t-countdown").hidden === false,
     `yellow=${yellowWhileOpen} now=${$("t-countdown").getAttribute("data-phase")} blink=${$("t-countdown").classList.contains("blink")}`);
 
-  // 第 1 步选牌：模态外的**手牌**仍可点（底部面板不 inert）。
+  // 第 1 步选牌：模态外的**手牌**仍可点（预发动是牌桌表面：selectionEnabled 不拦它）。
   const handChip = $("t-hand").children[0];
   (handChip.listeners.click || []).forEach((fn) => fn({ target: handChip }));
   check("U1-03t 模态打开时仍能手牌选来源牌（底部提示条 / 手牌交互未被挡）",
@@ -6143,7 +6206,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[0].values));
 
   // 第 2 步是**选目标**：模态可能挡住环上某几个座位，故模态正文里同时铺座位按钮；
-  // 环上高亮也仍在（舞台不 inert）。两条入口写同一个答案。
+  // 环上高亮也仍在（没有 inert，D8）。两条入口写同一个答案。
   const next = $("t-options").children.find((node) => node.textContent === "下一步");
   (next.listeners.click || []).forEach((fn) => fn({ target: next }));
   const seatOption = $("t-options").children.find(
@@ -6161,7 +6224,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     })(),
     JSON.stringify(ui.buildAction()));
 
-  // ESC = 关闭（预发动 = 取消本地态，零提交）；再进一次，点背景遮罩同样关闭。
+  // ESC = 关闭（预发动 = 取消本地态，零提交）；再进一次，验证遮罩不再是关闭出口。
   const beforeEsc = calls.length;
   fireDocument("keydown", { key: "Escape" });
   check("U1-03u ESC 关闭模态；预发动关闭 = 取消本地态、零 action 提交",
@@ -6171,13 +6234,17 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     `hidden=${$("t-modal").hidden} pre=${ui.state.preactivation} calls=${calls.length - beforeEsc}`);
 
   view = enterModal();
+  const backdropClicks = ($("t-modal-backdrop").listeners.click || []).length;
   const beforeBackdrop = calls.length;
   ($("t-modal-backdrop").listeners.click || []).forEach((fn) => fn({ target: $("t-modal-backdrop") }));
-  check("U1-03v 点背景遮罩也能关闭模态（同样零提交）",
-    $("t-modal").hidden === true
-      && ui.state.preactivation === null
+  // 新行为（D8）：遮罩是 `pointer-events: none` 的暗化层，没有自己的点击——
+  // 「点背景 = 关闭」不再存在；真实点击穿透到牌桌，由 selectionEnabled() 判据拦下。
+  check("U1-03v 遮罩不再吞指针 / 不再承担关闭（无 click 监听；模态保持打开、零提交）",
+    backdropClicks === 0
+      && $("t-modal").hidden === false
+      && Boolean(ui.state.preactivation)
       && calls.length === beforeBackdrop,
-    `hidden=${$("t-modal").hidden} pre=${ui.state.preactivation} calls=${calls.length - beforeBackdrop}`);
+    `backdropClicks=${backdropClicks} hidden=${$("t-modal").hidden} pre=${Boolean(ui.state.preactivation)} calls=${calls.length - beforeBackdrop}`);
 
   // 排列（强制选择）：同一个模态壳；关闭只收起，右端出现「查看排列」可重开。
   const arrangePending = {
@@ -6202,12 +6269,13 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}"`);
   const arrangeActionBefore = JSON.stringify(ui.buildAction());
   fireDocument("keydown", { key: "Escape" });
-  check("U1-03x 排列模态可收起（强制选择无取消，但保留已摆顺序 + 重开入口）",
+  check("U1-03x 排列收起：仍只读（selectionEnabled false）、无 inert、保留已摆顺序 + 重开入口",
     $("t-modal").hidden === true
       && $("btn-show-modal").hidden === false
-      && $("table-stage").getAttribute("inert") === undefined
+      && ui.selectionEnabled() === false
+      && modalRegions.every((id) => $(id).getAttribute("inert") === undefined)
       && JSON.stringify(ui.buildAction()) === arrangeActionBefore,
-    `hidden=${$("t-modal").hidden} reopenHidden=${$("btn-show-modal").hidden} action=${JSON.stringify(ui.buildAction())}`);
+    `hidden=${$("t-modal").hidden} reopenHidden=${$("btn-show-modal").hidden} enabled=${ui.selectionEnabled()} action=${JSON.stringify(ui.buildAction())}`);
   ($("btn-show-modal").listeners.click || []).forEach((fn) => fn({ target: $("btn-show-modal") }));
   check("U1-03y 「查看排列」重新打开模态，顺序不变",
     $("t-modal").hidden === false
@@ -6215,16 +6283,18 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && JSON.stringify(ui.buildAction()) === arrangeActionBefore,
     `hidden=${$("t-modal").hidden} reopenHidden=${$("btn-show-modal").hidden}`);
 
-  // 静态规范：屏幕正中 / 正文可滚 / 遮罩不挡底部操作条。
+  // 静态规范：屏幕正中 / 正文可滚 / 遮罩 = pointer-events: none 的暗化层（D8）。
   const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
-  check("U1-03z 模态 CSS：舞台区正中、正文可滚、遮罩只盖舞台且不挡底部操作条",
+  check("U1-03z 模态 CSS：舞台区正中、正文可滚、遮罩不吞指针（pointer-events: none）",
     /\.modal\s*\{[^}]*align-items:\s*center[^}]*justify-content:\s*center/s.test(css)
       && /\.modal\s*\{[^}]*bottom:\s*27\.5%/s.test(css)
       && /\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)
       && /\.modal-backdrop\s*\{[^}]*bottom:\s*27\.5%/s.test(css)
+      && /\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)
+      && !/\.modal-backdrop\s*\{[^}]*pointer-events:\s*auto/s.test(css)
       && /\.modal\s*\{[^}]*pointer-events:\s*none/s.test(css)
       && /\.modal-window\s*\{[^}]*pointer-events:\s*auto/s.test(css),
-    `modal=${/\.modal\s*\{[^}]*align-items:\s*center[^}]*justify-content:\s*center/s.test(css)} body=${/\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)} backdrop=${/\.modal-backdrop\s*\{[^}]*bottom:\s*27\.5%/s.test(css)}`);
+    `modal=${/\.modal\s*\{[^}]*align-items:\s*center[^}]*justify-content:\s*center/s.test(css)} body=${/\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)} backdrop=${/\.modal-backdrop\s*\{[^}]*bottom:\s*27\.5%/s.test(css)} backdropPENone=${/\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)}`);
   ui.resetSelection();
   ui.state.view = null;
 }
@@ -6599,12 +6669,13 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && $("t-modal-body").text().includes("己方装备")
       && !$("t-modal-body").text().includes("敌方技"),
     $("t-modal-body").text().replace(/\s+/g, " ").slice(0, 120));
-  check("U1-06m 详情是模态：背景顶栏 / 舞台 / 底部全部 inert，遮罩覆盖全壳",
-    $("table-topbar").getAttribute("inert") !== undefined
-      && $("table-stage").getAttribute("inert") !== undefined
-      && $("table-bottom").getAttribute("inert") !== undefined
-      && $("table-shell").classList.contains("modal-blocking"),
-    `topbar=${$("table-topbar").getAttribute("inert")} stage=${$("table-stage").getAttribute("inert")} bottom=${$("table-bottom").getAttribute("inert")} blocking=${$("table-shell").classList.contains("modal-blocking")}`);
+  const detailRegions = ["table-topbar", "table-stage", "table-bottom", "t-modal"];
+  check("U1-06m 详情是检视窗：没有任何区域 inert / aria-hidden；开合不改变只读态（无弹窗 ⇒ 选择仍可用）",
+    detailRegions.every((id) => $(id).getAttribute("inert") === undefined
+      && $(id).getAttribute("aria-hidden") === undefined)
+      && $("table-shell").classList.contains("modal-open")
+      && ui.selectionEnabled() === true,
+    `regions=${detailRegions.map((id) => `${id}:${$(id).getAttribute("inert")}`).join(",")} openClass=${$("table-shell").classList.contains("modal-open")} enabled=${ui.selectionEnabled()}`);
   check("U1-06n 详情不暂停倒计时，且模态内不显示倒计时（进度条仍在提示条上）",
     (() => {
       ui.state.pendingClock.receivedAt = Date.now() - 35 * 1000;
@@ -6625,12 +6696,12 @@ const bottomSkillIds = () => $("t-skills").children.filter(
 
   const beforeDetailEsc = calls.length;
   fireDocument("keydown", { key: "Escape" });
-  check("U1-06o ESC 关闭详情（零提交、背景恢复可操作）",
+  check("U1-06o ESC 关闭详情（零提交；没有 inert 可恢复——只读态只看这一步的表面）",
     $("t-modal").hidden === true
-      && $("table-stage").getAttribute("inert") === undefined
-      && $("table-bottom").getAttribute("inert") === undefined
+      && detailRegions.every((id) => $(id).getAttribute("inert") === undefined)
+      && ui.selectionEnabled() === true
       && calls.length === beforeDetailEsc,
-    `hidden=${$("t-modal").hidden} stage=${$("table-stage").getAttribute("inert")} bottom=${$("table-bottom").getAttribute("inert")} calls=${calls.length - beforeDetailEsc}`);
+    `hidden=${$("t-modal").hidden} enabled=${ui.selectionEnabled()} calls=${calls.length - beforeDetailEsc}`);
 
   // 旧载荷 / 合成视图没有 `player.skills`：**只对自己的座位**退回顶层 `view.skills`，
   // 不拿自己的技能去冒充别人的（对手仍为空）。
@@ -6666,8 +6737,17 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && $("t-modal-body").scrollTop === 0,
     `${enemyText.replace(/\s+/g, " ").slice(0, 140)} scrollTop=${$("t-modal-body").scrollTop}`);
   const beforeBackdrop = calls.length;
+  const detailBackdropClicks = ($("t-modal-backdrop").listeners.click || []).length;
   ($("t-modal-backdrop").listeners.click || []).forEach((fn) => fn({ target: $("t-modal-backdrop") }));
-  check("U1-06q 点背景遮罩关闭详情（零提交）",
+  check("U1-06q 遮罩不再关闭详情（D8 新行为：没有 click 监听；详情保持打开、零提交）",
+    detailBackdropClicks === 0
+      && $("t-modal").hidden === false
+      && /武将详情/.test($("t-modal-title").textContent)
+      && calls.length === beforeBackdrop,
+    `backdropClicks=${detailBackdropClicks} hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" calls=${calls.length - beforeBackdrop}`);
+  // 背景点击不再是出口 ⇒ 关闭按钮就是「详情」的常规出口（ESC 在 U1-06o / U1-06w4 另有覆盖）。
+  (($("t-modal-close").listeners.click) || []).forEach((fn) => fn({ target: $("t-modal-close") }));
+  check("U1-06q2 关闭按钮仍能关闭详情（零提交）",
     $("t-modal").hidden === true && calls.length === beforeBackdrop,
     `hidden=${$("t-modal").hidden} calls=${calls.length - beforeBackdrop}`);
 
@@ -6709,12 +6789,13 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   }
 
   const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
-  check("U1-06u 详情正文沿用共享模态的滚动容器，且阻断态遮罩覆盖全壳",
+  check("U1-06u 详情沿用共享模态的滚动容器；没有单独的阻断遮罩（单层 pointer-events: none 暗化层）",
     /\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)
-      && /\.table-shell\.modal-blocking\s+\.modal-backdrop\s*\{[^}]*bottom:\s*0/s.test(css)
+      && /\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)
+      && !/modal-blocking/.test(css)
       && /\.skill\.unavailable\s*\{/s.test(css)
       && /\.skill\.locked,\s*\.skill\.passive\s*\{/s.test(css),
-    `modalBody=${/\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)} blocking=${/\.table-shell\.modal-blocking\s+\.modal-backdrop\s*\{[^}]*bottom:\s*0/s.test(css)}`);
+    `modalBody=${/\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)} backdropPE=${/\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)} blockingLeft=${/modal-blocking/.test(css)}`);
 
   // 详情是**叠加**在询问模态上的临时窗口：不能把 `#t-options` 从文档里摘掉，也不能
   // 把排列模态的「收起」状态抹掉（ticket 03 的「查看排列」出口）。
@@ -6739,19 +6820,23 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}"`);
 
     fireContext(heroBlockOf(0));
-    check("U1-06w 详情盖在排列模态上：共享的 #t-options 被送回提示条（不随正文清空丢失）",
+    check("U1-06w 详情盖在排列模态上：共享的 #t-options 被送回提示条；只读态不变（详情是检视窗）",
       $("t-modal").hidden === false
         && /武将详情/.test($("t-modal-title").textContent)
-        && $("t-options-home").children.includes($("t-options")),
-      `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" optionsHome=${$("t-options-home").children.includes($("t-options"))}`);
+        && $("t-options-home").children.includes($("t-options"))
+        && ui.selectionEnabled() === false,
+      `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" optionsHome=${$("t-options-home").children.includes($("t-options"))} enabled=${ui.selectionEnabled()}`);
 
     fireDocument("keydown", { key: "Escape" });
-    check("U1-06w2 关闭详情后排列模态恢复（选项行回到正文、提交仍可拼）",
+    check("U1-06w2 关闭详情后排列模态原样恢复（正文只剩排列、选项行回到正文、仍只读）",
       $("t-modal").hidden === false
         && $("t-modal-title").textContent === "排列"
         && $("t-modal-body").children.includes($("t-options"))
-        && ui.buildAction() !== null,
-      `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" action=${JSON.stringify(ui.buildAction())}`);
+        && !$("t-modal-body").children.some(
+          (node) => (node.className || "").includes("hero-detail"))
+        && ui.buildAction() !== null
+        && ui.selectionEnabled() === false,
+      `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" bodyClasses=${JSON.stringify($("t-modal-body").children.map((node) => node.className))} enabled=${ui.selectionEnabled()}`);
 
     fireDocument("keydown", { key: "Escape" });
     check("U1-06w3 排列收起：只给「查看排列」入口",
@@ -7244,6 +7329,313 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U2-01g 当前页高亮按钮 hover 时仍白字（红底红字不可读）",
     /\.tab\.on:hover:not\(:disabled\)\s*\{[^}]*color:\s*#fff/s.test(css),
     (css.match(/\.tab\.on:hover[^{]*\{[^}]*\}/s) || ["(无覆盖规则)"])[0].replace(/\s+/g, " "));
+}
+
+/* ============ U2-05 只读态（spec D8）：选择 no-op + 检视照常 ============
+ *
+ * 判据（票面验收）：
+ * - 询问弹窗打开时点手牌 / 座位 / 槽位不产生选择态，提交键不变、目标高亮不出现；
+ * - 只读态里检视照常：悬停 title、右键武将详情、折叠（查看排列）、顶栏 / 事件流；
+ * - 收起后仍是只读；没有弹窗时选择恢复；键盘（回车 / 空格）走同一批选择函数；
+ * - 遮罩 `pointer-events: none`（不吞指针），穿透到牌桌的点击由 `selectionEnabled()` 拦下；
+ * - 预发动清单是**牌桌表面**（D2 C 形），不是只读：打开时点牌点座仍生效（回归守卫）；
+ * - 武将详情是叠加的检视窗：开合不改变只读态，关闭后底下弹窗原样恢复。
+ *
+ * 当前唯一"表面是弹窗"的步骤是 ARRANGE（票 06 把四类模板接进来时只改 `stepDialogKind`）。
+ * 断言的是**外部可观察行为**（DOM / 选择态 / 提交键），不钉内部实现。
+ */
+{
+  ui.state.sessionId = null;   // 全程合成视图：不碰上一段的真会话
+  ui.show("table");
+
+  const arrangeCardA = { ...synthCard(82, "八卦阵"), description: "【八卦阵】的全文描述" };
+  const arrangeCardB = { ...synthCard(83, "闪"), description: "【闪】的全文描述" };
+  const arrangePending = (seq = 9501) => ({
+    kind: "ARRANGE", actor: 0, seq, timing: "PHASE_PREPARE",
+    prompt: "请排列这些牌：给出顺序与前几张置于牌堆顶。",
+    prompt_display: { text: "请排列这些牌。", default_label: "超时按当前排列提交" },
+    revealed: [arrangeCardA, arrangeCardB],
+    legal_actions: [{ answers_seq: seq, kind: "ArrangeCards", order: [0, 1], split: 2 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+    arrange: { count: 2, split: "free" },
+  });
+  const arrangeView = () => {
+    const view = synthView(arrangePending());
+    view.timeout_seconds = 60;
+    view.snapshot.self_hand = [{ ...synthCard(1, "杀"), description: "【杀】的全文描述" }];
+    view.snapshot.players[0].equip = [
+      { ...synthCard(5, "青釭剑"), slot: "weapon", description: "【青釭剑】的全文描述" },
+    ];
+    return view;
+  };
+  const heroBlockOf = (seat) => {
+    if (Number(seat) === Number(ui.state.view.snapshot.seat)) return $("t-self-hero");
+    const box = seatBox(seat);
+    return box ? box.children.find((node) => (node.className || "").split(" ").includes("hero-block")) || null : null;
+  };
+  const fireContext = (node) => {
+    const event = { target: node, prevented: false, stopPropagation() {} };
+    event.preventDefault = () => { event.prevented = true; };
+    if (node) (node.listeners.contextmenu || []).forEach((fn) => fn(event));
+    return event;
+  };
+  /** 键盘激活一座/一张：手牌 / 槽位是 `<button>`（原生回车 = 一次 click）；座位是 `<div>`
+   *  （键盘入口 = `bindSeatActivation` 挂的 keydown）。按真浏览器各走一条，别双触发。 */
+  const pressEnter = (node) => {
+    if (!node) return;
+    if (node.tagName === "BUTTON") {
+      (node.listeners.click || []).forEach((fn) => fn({ target: node, type: "click" }));
+      return;
+    }
+    (node.listeners.keydown || []).forEach((fn) => fn({
+      key: "Enter", target: node, preventDefault() {},
+    }));
+  };
+  const selectionFingerprint = () => JSON.stringify({
+    focus: ui.state.focusCardId,
+    targets: ui.state.selectedTargets,
+    option: ui.state.selectedOption,
+    picks: ui.state.picks,
+    pre: ui.state.preactivation,
+    submit: $("btn-submit").disabled,
+  });
+  const seatHighlighted = (seat) => {
+    const box = seatBox(seat);
+    return !!box && (box.classList.contains("targetable") || box.classList.contains("tsel")
+      || box.classList.contains("req"));
+  };
+  const handChip = () => $("t-hand").children[0];
+  const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
+
+  /* ---- ① 排列弹窗打开 = 只读态 ---- */
+  let view = arrangeView();
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  check("U2-05a 排列弹窗 = 只读态：stepDialogKind=arrange、selectionEnabled false、暗化层可见、全程无 inert",
+    ui.stepDialogKind(view.pending) === "arrange"
+      && ui.selectionEnabled() === false
+      && $("t-modal").hidden === false
+      && $("t-modal-backdrop").hidden === false
+      && $("table-shell").classList.contains("modal-open")
+      && ["table-topbar", "table-stage", "table-bottom", "t-modal"].every(
+        (id) => $(id).getAttribute("inert") === undefined
+          && $(id).getAttribute("aria-hidden") === undefined),
+    `surface=${ui.stepDialogKind(view.pending)} enabled=${ui.selectionEnabled()} modalHidden=${$("t-modal").hidden} backdropHidden=${$("t-modal-backdrop").hidden}`);
+
+  /* ---- ② 点手牌 / 座位 / 槽位：不产生选择态、提交键不变、目标高亮不出现 ---- */
+  const beforeBlocked = selectionFingerprint();
+  await clickAndWait(handChip());
+  await clickAndWait(seatBox(1));
+  pressEnter(handChip());
+  pressEnter(seatBox(1));
+  // 每个选择入口的直接调用也一并钉住（它们还有键盘 / 脚本调用方）：
+  ui.toggleFocus(1);
+  ui.selectTarget(1);
+  ui.selectOptionSeat(1);
+  ui.toggleDiscardPick(1);
+  ui.toggleSlotPick(view.pending, 0);
+  ui.toggleProvidePick(0);
+  ui.togglePreativationCard(1);
+  ui.selectPreativationSeat(1);
+  check("U2-05b 弹窗打开时点手牌 / 座位 / 槽位不产生选择态：焦点 / 目标 / picks / 选中项都不动、提交键不变",
+    selectionFingerprint() === beforeBlocked
+      && ui.state.focusCardId === null
+      && ui.state.selectedTargets.length === 0
+      && ui.state.picks.length === 0,
+    `now=${selectionFingerprint()} before=${beforeBlocked}`);
+  check("U2-05b2 目标高亮不出现：任何座位都不是可指定 / 已选 / 必选",
+    [0, 1, 2].every((seat) => !seatHighlighted(seat)),
+    [0, 1, 2].map((seat) => `${seat}:${seatHighlighted(seat)}`).join(" "));
+
+  /* ---- ③ 检视照常：悬停 title / 右键详情 ---- */
+  check("U2-05c 只读态里悬停照常：手牌与装备槽的 title 仍是服务端描述",
+    handChip().getAttribute("title") === "【杀】的全文描述"
+      && (() => {
+        const slot = selfEquipChip();
+        return !!slot && /青釭剑/.test(slot.getAttribute("title") || "");
+      })(),
+    `hand="${handChip().getAttribute("title")}" equip="${selfEquipChip() && selfEquipChip().getAttribute("title")}"`);
+  // 检视还包括顶栏 / 事件流：弹窗开着时都不 inert、都能点（D8）。
+  (($("t-log-toggle").listeners.click) || []).forEach((fn) => fn({ target: $("t-log-toggle") }));
+  const logOpenedWhileReadonly = $("t-log-panel").hidden === false;
+  (($("t-log-toggle").listeners.click) || []).forEach((fn) => fn({ target: $("t-log-toggle") }));
+  check("U2-05c2 只读态里事件流照常展开 / 收起；顶栏导航不在 inert 里",
+    logOpenedWhileReadonly
+      && $("t-log-panel").hidden === true
+      && $("t-modal").hidden === false
+      && $("table-topbar").getAttribute("inert") === undefined
+      && $("nav-lobby").getAttribute("inert") === undefined,
+    `opened=${logOpenedWhileReadonly} closedAgain=${$("t-log-panel").hidden} modalHidden=${$("t-modal").hidden}`);
+  fireContext(heroBlockOf(1));
+  check("U2-05d 只读态里右键武将块照开详情（检视窗开合不改变只读态）",
+    $("t-modal").hidden === false
+      && /武将详情/.test($("t-modal-title").textContent)
+      && ui.selectionEnabled() === false,
+    `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}" enabled=${ui.selectionEnabled()}`);
+  const arrangeActionBefore = JSON.stringify(ui.buildAction());
+  fireDocument("keydown", { key: "Escape" });
+  check("U2-05d2 关闭详情后排列弹窗原样恢复（正文只剩排列、已摆顺序在，仍只读）",
+    $("t-modal").hidden === false
+      && $("t-modal-title").textContent === "排列"
+      && $("t-modal-body").children.includes($("t-options"))
+      && !$("t-modal-body").children.some(
+        (node) => (node.className || "").includes("hero-detail"))
+      && JSON.stringify(ui.buildAction()) === arrangeActionBefore
+      && ui.selectionEnabled() === false,
+    `title="${$("t-modal-title").textContent}" bodyClasses=${JSON.stringify($("t-modal-body").children.map((node) => node.className))} action=${JSON.stringify(ui.buildAction())}`);
+
+  /* ---- ④ 键盘：blocked 态回车不选；卡面是 button（可聚焦）但 click 被拦 ---- */
+  check("U2-05e 阻断态键盘激活不产生选择：手牌是 <button>（Tab 到它再回车 = 一次 click）却无焦点；座位无键盘入口",
+    handChip().tagName === "BUTTON"
+      && ui.state.focusCardId === null
+      && ui.state.selectedTargets.length === 0
+      && (seatBox(1).listeners.keydown || []).length === 0
+      && seatBox(1).getAttribute("tabindex") === undefined,
+    `tag=${handChip().tagName} focus=${ui.state.focusCardId} seatKeys=${(seatBox(1).listeners.keydown || []).length} tabindex=${seatBox(1).getAttribute("tabindex")}`);
+
+  /* ---- ⑤ 收起（查看排列）仍是只读；检视照常；不擅自重开 ---- */
+  fireDocument("keydown", { key: "Escape" });
+  check("U2-05f 收起（查看排列）仍是只读：selectionEnabled false、重开入口可见",
+    $("t-modal").hidden === true
+      && $("btn-show-modal").hidden === false
+      && ui.selectionEnabled() === false,
+    `hidden=${$("t-modal").hidden} reopen=${$("btn-show-modal").hidden} enabled=${ui.selectionEnabled()}`);
+  const beforeDismissed = selectionFingerprint();
+  await clickAndWait(handChip());
+  pressEnter(handChip());
+  pressEnter(seatBox(1));
+  check("U2-05f2 收起后点牌点座仍不生效（折叠只改遮挡，不改只读态）",
+    selectionFingerprint() === beforeDismissed
+      && ui.state.focusCardId === null
+      && ui.state.selectedTargets.length === 0,
+    `now=${selectionFingerprint()}`);
+  check("U2-05f3 收起后悬停 title 仍可用（检视不随折叠关闭）",
+    handChip().getAttribute("title") === "【杀】的全文描述",
+    `hand="${handChip().getAttribute("title")}"`);
+  fireContext(heroBlockOf(0));
+  check("U2-05f4 收起后右键详情仍可开（检视窗）",
+    /武将详情/.test($("t-modal-title").textContent),
+    `title="${$("t-modal-title").textContent}"`);
+  fireDocument("keydown", { key: "Escape" });
+  check("U2-05f5 关闭详情后不擅自重开已收起的排列：仍只给「查看排列」入口",
+    $("t-modal").hidden === true && $("btn-show-modal").hidden === false,
+    `hidden=${$("t-modal").hidden} reopen=${$("btn-show-modal").hidden}`);
+  (($("btn-show-modal").listeners.click) || []).forEach((fn) => fn({ target: $("btn-show-modal") }));
+  check("U2-05f6 「查看排列」重开：仍是只读态、排列正文回到窗口里",
+    $("t-modal").hidden === false
+      && $("t-modal-title").textContent === "排列"
+      && $("t-modal-body").children.includes($("t-options"))
+      && ui.selectionEnabled() === false,
+    `title="${$("t-modal-title").textContent}" enabled=${ui.selectionEnabled()}`);
+
+  /* ---- ⑥ 遮罩不吞指针：没有自己的 click；穿透到牌桌的点击由只读判据拦下 ---- */
+  const beforePassThrough = selectionFingerprint();
+  const backdropClicks = ($("t-modal-backdrop").listeners.click || []).length;
+  (($("t-modal-backdrop").listeners.click) || []).forEach((fn) => fn({ target: $("t-modal-backdrop") }));
+  // 真实点击穿过遮罩落到牌桌手牌上（同一份可点节点）：
+  await clickAndWait(handChip());
+  check("U2-05g 遮罩不吞指针：无 click 监听 + CSS pointer-events: none；穿透的点击被只读判据拦下、模态不被点关",
+    backdropClicks === 0
+      && /\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)
+      && $("t-modal").hidden === false
+      && selectionFingerprint() === beforePassThrough,
+    `backdropClicks=${backdropClicks} peNone=${/\.modal-backdrop\s*\{[^}]*pointer-events:\s*none/s.test(css)} modalHidden=${$("t-modal").hidden} now=${selectionFingerprint()}`);
+  // 收尾：让后面几个状态从干净的一面开始（不能留一个开着的弹窗）。
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  /* ---- ⑦ 没有弹窗时选择恢复（同一条判据的两个方向） ---- */
+  const pickCard = { ...synthCard(1, "杀"), description: "【杀】的全文描述" };
+  const pickPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 9502, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [{ kind: "UseCard", answers_seq: 9502, card: pickCard, targets: [1] }],
+    candidate_index: {
+      1: { card: pickCard, pool: [1, 2], combos: [[1], [2]], min_targets: 1, max_targets: 1 },
+    },
+    option_seats: {}, context: null, preactivations: {}, preactivation: [],
+  };
+  const pickView = synthView(pickPending);
+  pickView.snapshot.self_hand = [pickCard];
+  ui.state.view = pickView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pickView);
+  check("U2-05h 没有弹窗（牌桌表面）时 selectionEnabled 为真，选择入口全部恢复",
+    ui.stepDialogKind(pickPending) === null && ui.selectionEnabled() === true,
+    `surface=${ui.stepDialogKind(pickPending)} enabled=${ui.selectionEnabled()}`);
+  pressEnter(handChip());
+  check("U2-05h2 键盘回车点手牌 = 设焦点（非只读态）", ui.state.focusCardId === 1,
+    `focus=${ui.state.focusCardId}`);
+  const pickSeat = seatBox(1);
+  check("U2-05h3 可点的座位是键盘可达的（tabindex=0 + role=button + keydown）",
+    pickSeat.getAttribute("tabindex") === "0"
+      && pickSeat.getAttribute("role") === "button"
+      && (pickSeat.listeners.keydown || []).length === 1,
+    `tabindex=${pickSeat.getAttribute("tabindex")} role=${pickSeat.getAttribute("role")} keys=${(pickSeat.listeners.keydown || []).length}`);
+  pressEnter(pickSeat);
+  check("U2-05h4 键盘回车点座位 = 选中目标，提交键启用（与鼠标同一条 selectTarget）",
+    JSON.stringify(ui.state.selectedTargets) === "[1]"
+      && $("btn-submit").disabled === false,
+    `targets=${JSON.stringify(ui.state.selectedTargets)} submitDisabled=${$("btn-submit").disabled}`);
+
+  /* ---- ⑧ 回归守卫：预发动清单打开时牌桌仍接选择（C 形牌桌表面，不得被只读判据误伤） ---- */
+  const preView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9503,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9503 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {
+      "demo.modal": [
+        { name: "card", zones: ["hand"], min: 1, max: 1, order: 0, pool: [{ when: [], options: ["1"] }] },
+        { name: "seat", zones: [], min: 1, max: 1, order: 1, pool: [{ when: [], options: ["seat:1", "seat:2"] }] },
+      ],
+    },
+    preactivation: [],
+  });
+  preView.snapshot.self_hand = [{ ...synthCard(1, "杀"), description: "【杀】的全文描述" }];
+  preView.skills = [{
+    skill_id: "demo.modal", name: "示例模态", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "", convert_sources: [] },
+  }];
+  ui.state.view = preView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(preView);
+  const modalSkill = $("t-skills").children.find(
+    (node) => node.getAttribute("data-skill-id") === "demo.modal");
+  (modalSkill.listeners.click || []).forEach((fn) => fn({ target: modalSkill }));
+  check("U2-05i 预发动清单打开仍是牌桌表面：弹窗在、selectionEnabled 为真（不是只读）",
+    $("t-modal").hidden === false
+      && ui.state.modal.kind === "preactivation"
+      && ui.selectionEnabled() === true,
+    `modalKind=${ui.state.modal.kind} enabled=${ui.selectionEnabled()}`);
+  await clickAndWait(handChip());
+  check("U2-05i2 预发动选牌步：点手牌仍生效（C 形：点自己的牌）",
+    JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[0].values) === "[1]",
+    JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[0].values));
+  const nextStep = $("t-options").children.find((node) => node.textContent === "下一步");
+  (nextStep.listeners.click || []).forEach((fn) => fn({ target: nextStep }));
+  await clickAndWait(seatBox(1));
+  check("U2-05i3 预发动选座步：点座位仍生效（C 形：点自己的座位）",
+    JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[1].values) === "[1]",
+    JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[1].values));
+  check("U2-05i4 预发动弹窗开合不改变只读判据（关掉清单后仍为可选的牌桌表面）",
+    (() => {
+      fireDocument("keydown", { key: "Escape" });
+      return ui.state.preactivation === null && ui.selectionEnabled() === true;
+    })(),
+    `pre=${ui.state.preactivation} enabled=${ui.selectionEnabled()}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

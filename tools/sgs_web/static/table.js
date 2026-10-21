@@ -86,6 +86,8 @@ function seatInteraction(player, ctx) {
   const { seatOf, handPick, selfOnly, optionChoiceAt, preSeats, pendingNow } = ctx;
   // 其他座位的询问只显示文本（U1-03）：座位不给可指定 / 可点语义。
   if (pendingNow && !ctx.ownPending) return { classes: [], handler: null };
+  // 只读态（D8）：这一步的表面是弹窗 ⇒ 不给可指定 / 已选高亮，也不接点击 / 键盘。
+  if (!selectionEnabled()) return { classes: [], handler: null };
   const classes = [];
   let handler = null;
   const seatState = seatOf(player.seat);
@@ -147,7 +149,8 @@ function renderSelfSeat(view, ctx) {
   box.setAttribute("data-seat", String(snapshot.seat));
   applySeatState(box, ctx.flagsFor(player, classes));
   // 静态节点复用：`onclick` 是覆盖式绑定；环上节点也用同一条路，避免两套接法。
-  box.onclick = handler || null;
+  // 点击 / 键盘（Tab + 回车 / 空格）走同一个 handler（`bindSeatActivation`）。
+  bindSeatActivation(box, handler);
   const kingdom = $("t-self-kingdom");
   if (kingdom) {
     kingdom.textContent = player.kingdom_label || "";

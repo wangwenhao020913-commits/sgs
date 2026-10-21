@@ -92,9 +92,13 @@ function cardFace(pending, card) {
   };
 }
 
-/** 点一张牌：按 :func:`cardFace` 给出的**当前模式**分派（提供 B / 弃牌 / 预发动 / 设焦点）。 */
+/** 点一张牌：按 :func:`cardFace` 给出的**当前模式**分派（提供 B / 弃牌 / 预发动 / 设焦点）。
+ *
+ * 牌桌选择入口的**总闸**：只读态（D8，当前步骤的表面是弹窗）里一次都不分派；被分派到的
+ * 四个函数也各自再问一次 `selectionEnabled()`（它们还有别的调用方，例如键盘 / 烟测）。
+ */
 function activateCard(pending, card, face) {
-  if (state.playback) return;
+  if (!selectionEnabled()) return;
   if (isProvide(pending)) {
     if (face.slotIndex >= 0) toggleProvidePick(face.slotIndex);
     return;
