@@ -349,7 +349,9 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 
 /* ---------- 座位卡（U1-02）：左武将块 + 右判定 / 装备区 ----------
  * 对手 210×150（左 110 / 右 100）；自己 292×210（左 162 / 右 130）。
- * 壳随视口缩放，故宽度用设计比例、槽高用设计像素。 */
+ * 壳随视口缩放，故宽度用设计比例、槽高用设计像素。
+ * U2-02 / D6：对手的 +8%（228×163）在 8 人环上与相邻座位重叠（40° 相邻角的 |dy| ≈ 158.3 < 163），
+ * 故对手**外形保持 210×150、只放大内容**（判定 33 / 装备 42 / 槽位字 10 / 标签 9）。 */
 .ring .seat {
   position: absolute;
   width: 13.125%;                 /* 210 / 1600 设计舞台 */
@@ -467,25 +469,26 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   display: flex; flex-direction: column; gap: 4px;
   padding: 5px; background: #fbf6ea; overflow: hidden;
 }
-.seat .judge-row { display: flex; gap: 3px; flex: 0 0 calc(30 * var(--dsu)); }
+/* U2-02 / D6：对手内容 +8%（外形回退不变，见座位卡块注释）。 */
+.seat .judge-row { display: flex; gap: 3px; flex: 0 0 calc(33 * var(--dsu)); }
 .seat .equip-grid {
   display: grid; grid-template-columns: 1fr 1fr;
-  grid-auto-rows: calc(38 * var(--dsu)); gap: 4px; flex: 1 1 auto;
+  grid-auto-rows: calc(42 * var(--dsu)); gap: 4px; flex: 1 1 auto;
   align-content: start;
 }
 .mini-slot {
-  min-width: 0; height: calc(38 * var(--dsu));
+  min-width: 0; height: calc(42 * var(--dsu));
   border: 1px dashed var(--line); border-radius: 5px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   text-align: center; padding: 1px 2px; overflow: hidden;
-  font: inherit; font-size: calc(9 * var(--dsu)); line-height: 1.2;
+  font: inherit; font-size: calc(10 * var(--dsu)); line-height: 1.2;
   color: var(--ink); background: rgba(255, 255, 255, .55);
 }
-.mini-slot.judge-slot { height: calc(30 * var(--dsu)); }
+.mini-slot.judge-slot { height: calc(33 * var(--dsu)); }
 .mini-slot.empty { color: #9b8f7d; background: #e9e2d6; border-color: #d3c8b6; }
 .mini-slot.filled { border-style: solid; border-color: #c8b795; background: #fffdf8; cursor: help; }
 .mini-slot.judge-slot.filled { border-color: #c39a5f; background: #fff8e9; }
-.mini-slot .slot-k { font-size: calc(8 * var(--dsu)); color: #9b8f7d; }
+.mini-slot .slot-k { font-size: calc(9 * var(--dsu)); color: #9b8f7d; }
 .mini-slot .slot-v {
   display: block; max-width: 100%; font-weight: 600;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -534,6 +537,11 @@ button.mini-slot { cursor: pointer; }
   position: absolute; left: 50%; top: 60.85%;
   transform: translate(-50%, -50%);
   width: 24%; min-height: 22%;
+  /* U2-02 / D6：处理区卡面放大到 88×124 后，面板高度必须封顶，否则「顶边 = 370 − h/2」会向上
+   * 长进环桌、盖住顶部对手座位。上限 300 ⇒ 顶边 220 > 顶座（90°）下沿 210
+   * （370 − 235 + 150/2）。处理区内部再限一行卡面（124）、其余纵向滚动，卡片边缘不被面板裁切。 */
+  max-height: calc(300 * var(--dsu));
+  overflow: hidden;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 2px; padding: 8px 10px;
   background: rgba(255, 252, 243, .86);
@@ -550,28 +558,24 @@ button.mini-slot { cursor: pointer; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .stage-divider { width: 100%; border-top: 1px dashed rgba(150, 122, 82, .36); margin: 4px 0; }
-.stage-center .processing { justify-content: center; gap: 5px; min-height: 18px; }
-.stage-center .processing .card { min-width: 0; padding: 2px 7px; font-size: 11px; }
-/* 中央舞台 / 处理区的卡面按小一号画（88×124 的 0.63 版），不撑破舞台。 */
-.stage-center .processing .card.face {
-  flex-basis: calc(56 * var(--dsu)); width: calc(56 * var(--dsu)); height: calc(79 * var(--dsu)); padding: 0;
+/* U2-02 / D6：处理区 / 舞台卡面与手牌**共用同一套** `.card.face`（88×124、字号 14/11/21/9）。
+ * 「0.63 版」的小牌面覆盖已删除——这里不再有第二套卡面规则。
+ * 一行放不下时纵向滚动（`max-height` = 一张卡面高，行从顶部排），面板高度因此被钉住。 */
+.stage-center .processing {
+  justify-content: center; align-content: flex-start;
+  gap: 5px; min-height: 18px;
+  flex: 0 0 auto;
+  /* 一张卡面 124 + 1 设计单位余量：避免子像素把第一行的下边框裁掉；第 2 行从 129 开始，仍整行在框外。 */
+  max-height: calc(125 * var(--dsu));
+  overflow-y: auto;
 }
-.stage-center .processing .card.face .suit { left: calc(4 * var(--dsu)); top: calc(2 * var(--dsu)); font-size: calc(10 * var(--dsu)); }
-.stage-center .processing .card.face .rank { left: calc(4 * var(--dsu)); top: calc(14 * var(--dsu)); font-size: calc(8 * var(--dsu)); }
-.stage-center .processing .card.face.has-mark .suit,
-.stage-center .processing .card.face.has-mark .rank { left: calc(13 * var(--dsu)); }
-.stage-center .processing .card.face .color-mark {
-  left: calc(4 * var(--dsu)); top: calc(4 * var(--dsu));
-  width: calc(6 * var(--dsu)); height: calc(6 * var(--dsu));
+.stage-center .context {
+  margin: 2px 0 0; width: 100%; font-size: 11px; text-align: center;
+  /* 处理中的牌一多说明就长：最多 2 行（省略号）。1280 下舞台里的内边距 / 字号是固定 px，
+   * 4 行会把面板推到 300 上限外并被裁成半行；2 行让整块始终落在上限内。 */
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden;
 }
-.stage-center .processing .card.face .corner {
-  right: calc(4 * var(--dsu)); top: calc(2 * var(--dsu));
-  min-width: calc(10 * var(--dsu)); height: calc(10 * var(--dsu));
-  font-size: calc(7 * var(--dsu)); border-radius: calc(3 * var(--dsu));
-}
-.stage-center .processing .card.face .cname { top: calc(27 * var(--dsu)); font-size: calc(14 * var(--dsu)); }
-.stage-center .processing .card.face .ctype { bottom: calc(4 * var(--dsu)); font-size: calc(7 * var(--dsu)); }
-.stage-center .context { margin: 2px 0 0; font-size: 11px; text-align: center; }
 
 .table-hint {
   display: none;
@@ -723,14 +727,14 @@ button.mini-slot { cursor: pointer; }
 .self .kingdom {
   width: calc(24 * var(--dsu)); height: calc(24 * var(--dsu)); font-size: calc(12 * var(--dsu));
 }
-.self .hero-name { font-size: calc(18 * var(--dsu)); }
+.self .hero-name { font-size: calc(20 * var(--dsu)); }
 .self .identity-badge {
   min-width: calc(24 * var(--dsu)); height: calc(24 * var(--dsu));
   padding: 0 calc(5 * var(--dsu)); font-size: calc(12 * var(--dsu));
 }
 .self .hp-bar { gap: 3px; margin-top: 4px; }
 .self .hp-seg { width: calc(13 * var(--dsu)); height: calc(9 * var(--dsu)); }
-.self .hp-num { margin-left: calc(5 * var(--dsu)); font-size: calc(11 * var(--dsu)); }
+.self .hp-num { margin-left: calc(5 * var(--dsu)); font-size: calc(13 * var(--dsu)); }
 .self .hp-bar.hp-text .hp-num { font-size: calc(15 * var(--dsu)); }
 .self .seat-tags { margin-top: 2px; }
 .self .seat-flag { font-size: calc(11 * var(--dsu)); padding: 0 calc(7 * var(--dsu)); }
@@ -743,11 +747,12 @@ button.mini-slot { cursor: pointer; }
   padding: 8px; background: #fbf6ea;
   overflow: hidden;
 }
-.self .judge-row { flex: 0 0 calc(40 * var(--dsu)); gap: 4px; }
-.self .equip-grid { grid-auto-rows: calc(50 * var(--dsu)); gap: 5px; }
-.self .mini-slot { height: calc(50 * var(--dsu)); font-size: calc(11 * var(--dsu)); }
-.self .mini-slot.judge-slot { height: calc(40 * var(--dsu)); }
-.self .mini-slot .slot-k { font-size: calc(10 * var(--dsu)); }
+/* U2-02 / D6：自己武将块**外形 292×210 不变**、内容放大（判定 48 / 装备 60 / 槽位字 13 / 标签 12）。 */
+.self .judge-row { flex: 0 0 calc(48 * var(--dsu)); gap: 4px; }
+.self .equip-grid { grid-auto-rows: calc(60 * var(--dsu)); gap: 5px; }
+.self .mini-slot { height: calc(60 * var(--dsu)); font-size: calc(13 * var(--dsu)); }
+.self .mini-slot.judge-slot { height: calc(48 * var(--dsu)); }
+.self .mini-slot .slot-k { font-size: calc(12 * var(--dsu)); }
 
 /* ---------- 事件流浮层 ---------- */
 

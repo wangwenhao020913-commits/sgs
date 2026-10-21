@@ -4384,13 +4384,19 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
  * 判据落在 **renderTable 写出的 `data-ring-*` 设计坐标**上（不是另算一份布局）：
  * 座位数 = 总人数 − 1（自己不在环上）、座号 +1 在最右、角度沿上半弧递增、
  * 8 人局 7 个对手在 210×150 下**无正面积重叠**、2 人局只有正上方一个对手。
+ * U2-02 / D6：+8% 的 228×163 只在 8 人局破功（U1-01d2 钉住），故实际外形保持 210×150。
+ * 设计坐标无重叠 ⇔ 1920×1080 与 1280×720 都无重叠：座位宽 / 高随壳宽与设计单位同比例缩放。
  */
 {
   const savedView = ui.state.view;
   const savedLog = ui.state.logRecords;
   const designStage = { width: 1600, height: 608 };
+  // U2-02 / D6：对手「+8%」的 228×163 在 8 人环上会重叠（见 U1-01d2），故取票面允许的回退——
+  // 座位卡**外形保持 210×150**、只放大内容；矩形判据因此按实际外形算。
   const seatW = 210;
   const seatH = 150;
+  const grownSeatW = 228;
+  const grownSeatH = 163;
   const ringView = (count, selfSeat = 0) => ({
     seed: 1, player_count: count, human_seat: selfSeat, finished: false, timeout_seconds: null,
     // `serve.py` 的响应里 `heroes` 是 list（按座位下标取）；合成视图同形，别用对象冒充。
@@ -4420,14 +4426,14 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     x: Number(node.getAttribute("data-ring-x")),
     y: Number(node.getAttribute("data-ring-y")),
   }));
-  const overlaps = (boxes) => {
+  const overlaps = (boxes, w = seatW, h = seatH) => {
     const found = [];
     for (let i = 0; i < boxes.length; i += 1) {
       for (let j = i + 1; j < boxes.length; j += 1) {
         const a = boxes[i];
         const b = boxes[j];
-        const overlapX = Math.abs(a.x - b.x) < seatW;
-        const overlapY = Math.abs(a.y - b.y) < seatH;
+        const overlapX = Math.abs(a.x - b.x) < w;
+        const overlapY = Math.abs(a.y - b.y) < h;
         if (overlapX && overlapY) found.push(`${a.seat}/${b.seat}`);
       }
     }
@@ -4461,8 +4467,16 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
           : Math.abs((seats[seats.length - 1].angle - seats[0].angle) - 240) < 0.01)
         && (gaps.length === 0 || gaps.every((gap) => Math.abs(gap - gaps[0]) < 0.01)),
       `${seats.map((item) => `${item.seat}:${item.angle}`).join(" ")} / 间距 ${gaps.map((gap) => gap.toFixed(2)).join(",")}`);
-    check(`U1-01d ${count} 人：对手座位无正面积重叠（210×150 设计尺寸）`,
+    check(`U1-01d ${count} 人：对手座位无正面积重叠（210×150 回退外形 / 设计尺寸）`,
       overlaps(seats).length === 0, overlaps(seats).join("、") || "无重叠");
+    if (count === 8) {
+      // 把票面 D6 的原尺寸跑同一套矩形判据：相邻角 40° ⇒ |dx| = 680·(cos(-30°) − cos 10°) ≈ 80.8、
+      // |dy| = 235·(sin 10° + sin 30°) ≈ 158.3，两者都小于 228×163 → 外形不变的回退有据可依。
+      const grown = overlaps(seats, grownSeatW, grownSeatH);
+      check("U1-01d2 8 人：D6 的 228×163 会与两组相邻座位重叠 → 回退为外形不变的依据",
+        grown.join("、") === "1/2、6/7",
+        grown.join("、") || "（228×163 也不重叠——回退就无从谈起）");
+    }
     if (count > 2) {
       const first = seats[0];
       const last = seats[seats.length - 1];
@@ -4564,8 +4578,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
 /* ============ U1-02 座位卡 / 武将块 / 卡面 ============
  *
- * 票面判据（`issues/02`）：
- * - 对手 210×150、自己 292×210；左武将块收窄 30%（右块 100 / 130）；槽高 38 / 50；
+ * 票面判据（`issues/02`；U2-02 按 D6 放大）：
+ * - 对手**外形** 210×150（D6 的 228×163 在 8 人环上重叠，回退为外形不变、只放大内容）、
+ *   自己 292×210；左武将块收窄 30%（右块 100 / 130）；判定行 33 / 48、装备行 42 / 60；
+ * - 处理区 / 舞台卡面与手牌**同一套** 88×124 + 字号 14/11/21/9（不再有第二套小牌面规则）；
+ *   舞台面板封顶 300（顶边 220 > 顶座下沿 210）、处理区一行 124 纵向滚动，不盖住环桌顶座；
  * - 体力分段 + current/max，上限 ≥6 只显 x/x；判定 3 槽、装备四槽；手牌数 / 座位号在 footer；
  * - 身份：主公明置、其余暗置 `?`、自己恒可见、阵亡亮明；无身份局不画 `?`；
  * - 横置「-------」虚线 / 酒泛红（无「酒」字）/ 大号「阵亡」叠加不互挡；
@@ -4666,19 +4683,60 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   };
 
   /* ---- CSS：设计尺寸 / 收窄 / 槽高 / 高亮环 ---- */
-  check("U1-02a CSS：对手 210×150、自己 292×210（设计比例 + 设计舞台）",
+  check("U1-02a CSS：对手外形 210×150（D6 的 228×163 回退为外形不变）、自己 292×210（设计比例 + 设计舞台）",
     /\.ring \.seat\s*\{[^}]*width:\s*13\.125%[^}]*aspect-ratio:\s*210\s*\/\s*150/s.test(css)
+      && !/aspect-ratio:\s*228\s*\/\s*163/.test(css)
       && /\.seat\.self\s*\{[^}]*flex:\s*0 0 18\.25%[^}]*aspect-ratio:\s*292\s*\/\s*210/s.test(css),
-    `ring=${/\.ring \.seat\s*\{[^}]*aspect-ratio:\s*210\s*\/\s*150/s.test(css)} self=${/\.seat\.self\s*\{[^}]*aspect-ratio:\s*292\s*\/\s*210/s.test(css)}`);
-  check("U1-02b CSS：左武将块收窄 30%（右块 100 / 130 = 47.62% / 44.52%）",
+    `ring=${/\.ring \.seat\s*\{[^}]*aspect-ratio:\s*210\s*\/\s*150/s.test(css)} grown=${/aspect-ratio:\s*228\s*\/\s*163/.test(css)} self=${/\.seat\.self\s*\{[^}]*aspect-ratio:\s*292\s*\/\s*210/s.test(css)}`);
+  check("U1-02b CSS：左武将块收窄 30%（右块 100 / 130 = 47.62% / 44.52%；对手外形回退不变）",
     /\.seat \.side-block\s*\{[^}]*flex:\s*0 0 47\.62%/s.test(css)
       && /\.self \.side-block\s*\{[^}]*flex:\s*0 0 44\.52%/s.test(css),
     `ring=${/\.seat \.side-block\s*\{[^}]*flex:\s*0 0 47\.62%/s.test(css)} self=${/\.self \.side-block\s*\{[^}]*flex:\s*0 0 44\.52%/s.test(css)}`);
-  check("U1-02c CSS：装备槽高 38 / 50、卡面 88×124（设计单位）",
-    /grid-auto-rows:\s*calc\(38 \* var\(--dsu\)\)/.test(css)
-      && /grid-auto-rows:\s*calc\(50 \* var\(--dsu\)\)/.test(css)
-      && /width:\s*calc\(88 \* var\(--dsu\)\);\s*height:\s*calc\(124 \* var\(--dsu\)\)/.test(css),
-    `38=${/grid-auto-rows:\s*calc\(38 \* var\(--dsu\)\)/.test(css)} 50=${/grid-auto-rows:\s*calc\(50 \* var\(--dsu\)\)/.test(css)} card=${/calc\(88 \* var\(--dsu\)\)/.test(css)}`);
+  check("U1-02c CSS：对手内容放大（判定行 33 / 装备行 42、槽位字 10 / 标签 9）——外形仍 210×150",
+    /\.seat \.judge-row\s*\{[^}]*calc\(33 \* var\(--dsu\)\)/s.test(css)
+      && /\.seat \.equip-grid\s*\{[^}]*grid-auto-rows:\s*calc\(42 \* var\(--dsu\)\)/s.test(css)
+      && /\.mini-slot\s*\{[^}]*font-size:\s*calc\(10 \* var\(--dsu\)\)/s.test(css)
+      && /\.mini-slot\.judge-slot\s*\{[^}]*height:\s*calc\(33 \* var\(--dsu\)\)/s.test(css)
+      && /\.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(9 \* var\(--dsu\)\)/s.test(css),
+    `judge=${/calc\(33 \* var\(--dsu\)\)/.test(css)} equip=${/calc\(42 \* var\(--dsu\)\)/.test(css)} slot=${/\.mini-slot\s*\{[^}]*font-size:\s*calc\(10/s.test(css)} label=${/\.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(9/s.test(css)}`);
+  check("U1-02c2 CSS：自己武将块内容放大（名 20 / 体力数字 13 / 判定 48 / 装备 60 / 槽位字 13 / 标签 12）",
+    /\.self \.hero-name\s*\{[^}]*font-size:\s*calc\(20 \* var\(--dsu\)\)/s.test(css)
+      && /\.self \.hp-num\s*\{[^}]*font-size:\s*calc\(13 \* var\(--dsu\)\)/s.test(css)
+      && /\.self \.judge-row\s*\{[^}]*calc\(48 \* var\(--dsu\)\)/s.test(css)
+      && /\.self \.equip-grid\s*\{[^}]*grid-auto-rows:\s*calc\(60 \* var\(--dsu\)\)/s.test(css)
+      && /\.self \.mini-slot\s*\{[^}]*font-size:\s*calc\(13 \* var\(--dsu\)\)/s.test(css)
+      && /\.self \.mini-slot\.judge-slot\s*\{[^}]*height:\s*calc\(48 \* var\(--dsu\)\)/s.test(css)
+      && /\.self \.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(12 \* var\(--dsu\)\)/s.test(css),
+    `name=${/\.self \.hero-name\s*\{[^}]*calc\(20/s.test(css)} hp=${/\.self \.hp-num\s*\{[^}]*calc\(13/s.test(css)} judge=${/\.self \.judge-row\s*\{[^}]*calc\(48/s.test(css)} equip=${/\.self \.equip-grid\s*\{[^}]*calc\(60/s.test(css)} slot=${/\.self \.mini-slot\s*\{[^}]*font-size:\s*calc\(13/s.test(css)} label=${/\.self \.mini-slot \.slot-k\s*\{[^}]*calc\(12/s.test(css)}`);
+  check("U1-02c3 CSS：处理区 / 舞台卡面与手牌同一套 88×124 + 字号 14/11/21/9（0.63 版覆盖已删，只有一套卡面规则）",
+    /\.card\.face\s*\{[^}]*width:\s*calc\(88 \* var\(--dsu\)\);\s*height:\s*calc\(124 \* var\(--dsu\)\)/s.test(css)
+      && /\.card\.face \.suit\s*\{[^}]*font-size:\s*calc\(14 \* var\(--dsu\)\)/s.test(css)
+      && /\.card\.face \.rank\s*\{[^}]*font-size:\s*calc\(11 \* var\(--dsu\)\)/s.test(css)
+      && /\.card\.face \.cname\s*\{[^}]*font-size:\s*calc\(21 \* var\(--dsu\)\)/s.test(css)
+      && /\.card\.face \.ctype\s*\{[^}]*font-size:\s*calc\(9 \* var\(--dsu\)\)/s.test(css)
+      && !/\.stage-center \.processing \.card/.test(css)
+      && !/calc\(56 \* var\(--dsu\)\)/.test(css)
+      && !/calc\(79 \* var\(--dsu\)\)/.test(css)
+      && /\.hand \.card\s*\{[^}]*flex:\s*0 0 auto/s.test(css)
+      && /\.table-bottom\s*\{[^}]*flex:\s*0 0 27\.5%/s.test(css),
+    `card=${/calc\(88 \* var\(--dsu\)\)/.test(css)} stageOverride=${/\.stage-center \.processing \.card/.test(css)} small=${/calc\(56 \* var\(--dsu\)\)/.test(css) || /calc\(79 \* var\(--dsu\)\)/.test(css)} hand=${/\.hand \.card\s*\{[^}]*flex:\s*0 0 auto/s.test(css)} bottom=${/\.table-bottom\s*\{[^}]*27\.5%/s.test(css)}`);
+  // U2-02：卡面统一放大后，60.85% 居中的舞台面板会向上长进环桌、盖住顶部座位；故给面板封顶。
+  // 几何算式（`table.js:RING_STAGE`）：圆心 y=370、ry=235；顶部座位（90°）下沿 = 370 − 235 + 150/2 = 210。
+  // 面板 max-height 300 ⇒ 顶边 370 − 300/2 = 220 > 210；处理区再限一行卡面（125 含 1 设计单位余量）+ 纵向滚动，
+  // 保证第一行卡面的上 / 下边框都在滚动框内（不裁切），第 2 行起整体在框外、不出半张牌；
+  // 处理中说明最多 2 行（省略号），1280 下也不越过 300 上限。
+  const stageRule = css.match(/\.stage-center\s*\{[^}]*\}/s);
+  const stageMax = stageRule && /max-height:\s*calc\((\d+) \* var\(--dsu\)\)/.exec(stageRule[0]);
+  const ringCenterY = 370;
+  const topSeatBottom = ringCenterY - 235 + 150 / 2;
+  const panelTop = ringCenterY - Number(stageMax ? stageMax[1] : 0) / 2;
+  check("U1-02c4 CSS：舞台面板封顶 300（顶边 220 > 顶座下沿 210），处理区一行卡面（125 含余量）纵向滚动、说明最多 2 行",
+    !!stageMax && panelTop > topSeatBottom
+      && /\.stage-center\s*\{[^}]*overflow:\s*hidden/s.test(css)
+      && /\.stage-center \.processing\s*\{[^}]*flex:\s*0 0 auto[^}]*max-height:\s*calc\(125 \* var\(--dsu\)\)[^}]*overflow-y:\s*auto/s.test(css)
+      && /\.stage-center \.processing\s*\{[^}]*align-content:\s*flex-start/s.test(css)
+      && /\.stage-center \.context\s*\{[^}]*-webkit-line-clamp:\s*2/s.test(css),
+    `panelTop=${panelTop} topSeatBottom=${topSeatBottom} max=${stageMax ? stageMax[1] : "无"} clip=${/\.stage-center\s*\{[^}]*overflow:\s*hidden/s.test(css)} row=${/max-height:\s*calc\(125 \* var\(--dsu\)\)/.test(css)} scroll=${/\.stage-center \.processing\s*\{[^}]*overflow-y:\s*auto/s.test(css)}`);
   check("U1-02d CSS：可指定 = 5px 绿外圈、已选 = 4px 绿内圈、悬停浅绿、行动中 = 金框，当前 + 合法有绿角点",
     /\.seat\.targetable:not\(\.tsel\)\s*\{[^}]*0 0 0 5px var\(--ok\)/s.test(css)
       && /\.seat\.tsel::before\s*\{[^}]*inset 0 0 0 4px var\(--ok\)/s.test(css)
