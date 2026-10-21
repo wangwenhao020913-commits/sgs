@@ -29,9 +29,23 @@ function renderOptionButtons(pending) {
   $("btn-cancel").disabled = state.selectedOption === null && !cancelAction(pending);
 }
 
-/** 选项按钮上的文字：选项闭集的**原值**（中文花色标签由服务端后续下发，前端不另抄）。 */
+/** 一次性二选一的**中文标签**（U2-04）：【雌雄双股剑】的 `discard_one` / `draw_one`。
+ *
+ * 这两个是**一次性**的小选项（spec D3「≤3 且一次性 ⇒ 提示区左侧按钮」），中文名写在
+ * 这里；可复用的枚举（花色 / 【杀】的类型 / 锦囊牌名）中文标签属服务端展示契约
+ * （票 08），前端不另抄第二份——查不到的值原样显示。
+ *
+ * `discard_one` 只在目标**有手牌**时由引擎发出（`skills/catalog.py`），界面不自己补；
+ * 载荷里没有它就不画这个按钮。
+ */
+const OPTION_LABELS = Object.freeze({
+  discard_one: "弃置 1 张手牌",
+  draw_one: "令其摸一张牌",
+});
+
+/** 选项按钮上的文字：已知的一次性选项用中文；其余选项保留**原值**（复用标签待票 08）。 */
 function optionText(action) {
-  return action.choice;
+  return OPTION_LABELS[action.choice] || action.choice;
 }
 
 /** 这次选择的**未就绪原因**；``null`` = 可以提交。

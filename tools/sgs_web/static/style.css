@@ -638,6 +638,21 @@ button.mini-slot { cursor: pointer; }
   flex-direction: row; flex-wrap: wrap;
   gap: calc(6 * var(--dsu)); margin: calc(4 * var(--dsu)) 0 0;
 }
+/* 提示区技能按钮组（U2-04 / spec D5）：与底部技能区共用 `.skill` 三态；
+ * 横向并列、`flex-wrap` 换行、`gap` 留缝——flex 项不会互相覆盖（没有绝对定位）。
+ * 空组不占位（多数询问没有可用技能）。 */
+.promptbar .prompt-skills {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: calc(6 * var(--dsu)); margin: calc(4 * var(--dsu)) 0 0;
+}
+.promptbar .prompt-skills:empty { display: none; }
+.promptbar .prompt-skills .skill {
+  flex: 0 0 auto; padding: calc(2 * var(--dsu)) calc(8 * var(--dsu));
+  font-size: calc(12 * var(--dsu)); white-space: nowrap;
+}
+.promptbar .prompt-skills .prompt-skill-hint {
+  font-size: calc(11 * var(--dsu)); color: var(--dim);
+}
 .options-home { min-width: 0; }
 .prompt-side {
   flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end;

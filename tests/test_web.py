@@ -1064,6 +1064,69 @@ def test_query_context_names_the_skill_and_its_owner() -> None:
     assert context["requirement"] == "选择将这些牌交给哪名角色", "合成键要能查回技能定义"
 
 
+def test_the_rejudge_window_links_guicai_by_the_shared_requirement_text() -> None:
+    """U2-04：提示区技能组靠「这一步的 requirement = 技能声明的 requirement」认出【鬼才】。
+
+    改判窗口是 ``RESPOND`` / ``REJUDGE``：候选是手牌的 ``PlayCard``（没有
+    ``ActivateSkill``），故底部技能区的 ``available`` 判据看不见它。前端因此只做一次
+    **服务端字符串相等**——两条都是声明面的"需要做什么"。这个测试走**真的判定帧**
+    （座位 0 的【乐不思蜀】判定 → 座位 1 的司马懿被问改判），把那份相等钉住：改任一句
+    都红，提示区的鬼才入口不会静默消失（它不是合法性判据）。
+    """
+    from types import SimpleNamespace
+
+    pack = _context_pack()
+    indulgence = cards_of_type(pack, "indulgence")[0]
+    hand = cards_of_type(pack, "slash")[0]
+    judge_card = next(
+        card_id for card_id in range(len(pack.deck.cards)) if card_id not in {indulgence, hand}
+    )
+    deck = (
+        judge_card,
+        *(
+            card_id
+            for card_id in range(len(pack.deck.cards))
+            if card_id not in {indulgence, hand, judge_card}
+        ),
+    )
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, judge=(indulgence,)), SeatSpec(hp=4, hero="simayi", hand=(hand,))],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    def reached(engine) -> bool:
+        query = engine.pending
+        return (
+            query is not None
+            and query.kind == "RESPOND"
+            and getattr(query, "cause", None) is WindowCause.REJUDGE
+        )
+
+    run_queries(engine, [PassPlayer(), PassPlayer()], reached)
+    query = engine.pending
+    assert query is not None and query.actor == 1, "改判询问弹给有能力的座位（司马懿）"
+    context = query_context(engine, query)
+    skills = {
+        entry["skill_id"]: entry
+        for entry in build_skills(SimpleNamespace(engine=engine, pending=query), 1)
+    }
+
+    assert context is not None
+    assert {action.kind for action in query.legal_actions} == {"PlayCard", "Pass"}, (
+        "改判窗口的候选是手牌 PlayCard + Pass（没有 ActivateSkill）"
+    )
+    guicai = skills["hero.simayi.guicai"]
+    assert guicai["available"] is False, "没有 ActivateSkill ⇒ 底部技能区的 available 是假"
+    assert guicai["ui"]["passive"] is False, "鬼才不是触发技 / 锁定技"
+    assert context["requirement"], "改判窗口要有『需要做什么』的文案"
+    assert guicai["ui"]["requirement"] == context["requirement"], (
+        "提示区鬼才入口的判据：窗口 requirement 与技能声明 requirement 是同一句"
+    )
+
+
 def test_query_context_names_the_card_user_and_the_current_target() -> None:
     """牌询问要写得出"0号位张飞对2号位貂蝉使用五谷丰登"（用**当前目标**，不是全部目标）。
 

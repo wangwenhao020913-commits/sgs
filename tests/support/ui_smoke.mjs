@@ -5608,6 +5608,335 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
   ui.state.view = null;
 }
 
+/* ============ U2-04：提示区技能按钮组 + 选项按钮组（left column） ============
+ *
+ * 判据（票面验收 / spec D5）：
+ * - 询问里中文技能按钮可点，点后进入预发动清单 / 直提态 / 转化来源模式（与底部技能区
+ *   同一动作，判据抽成一处 `skillOffer`）；被动 / 锁定技在组里但不可点；
+ * - 多个技能同时可发动时并列、可换行、不重叠（flex 行 + wrap + gap；无绝对定位）；
+ * - 雌雄双股剑的 `SELECT_OPTION` = 两个中文按钮（无手牌时引擎只发 `draw_one`，界面不补）；
+ * - 鬼才改判窗口（`RESPOND` / `REJUDGE`，候选是手牌 `PlayCard`）只加**入口 + 说明**，
+ *   选择仍是既有的「点手牌 → 提交」；清空零提交；
+ * - 底部技能区三态 / 顺序 / 点击行为不变（U1-06 仍绿）。
+ */
+
+const promptSkillButtons = () => $("t-prompt-skills").children.filter(
+  (node) => node.tagName === "BUTTON",
+);
+const promptSkillIds = () => promptSkillButtons().map(
+  (node) => node.getAttribute("data-skill-id"),
+);
+const promptSkill = (id) => promptSkillButtons().find(
+  (node) => node.getAttribute("data-skill-id") === id,
+);
+const clickNode = (node) => (node.listeners.click || []).forEach((fn) => fn({ target: node }));
+const bottomSkillIds = () => $("t-skills").children.filter(
+  (node) => node.tagName === "BUTTON",
+).map((node) => node.getAttribute("data-skill-id"));
+
+/* ---- ① 多个技能同时可发动：并列 / 换行 / 不重叠 + 点它 = 底部同一动作 ---- */
+{
+  const hand = synthCard(31, "杀");
+  const manifest = [{
+    name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+    pool: [{ when: [], options: ["31"] }],
+  }];
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 9420,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: "hero.demo.alpha", answers_seq: 9420, picks: [], choices: [] },
+      { kind: "ActivateSkill", skill_id: "hero.demo.beta", answers_seq: 9420, picks: [], choices: [] },
+      { kind: "ActivateSkill", skill_id: "hero.demo.passive", answers_seq: 9420, picks: [], choices: [] },
+      { kind: "ActivateSkill", skill_id: "hero.demo.locked", answers_seq: 9420, picks: [], choices: [] },
+      { kind: "EndPhase", answers_seq: 9420 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+    preactivations: { "hero.demo.flow": manifest }, preactivation: [],
+  };
+  const skill = (id, name, extra = {}) => ({
+    skill_id: id, name, skill_type: "NORMAL", locked: false, carrier: "HERO",
+    available: false, preactivated: false,
+    description: `${name}的描述。`, ui: { requirement: "", passive: false, convert_sources: [] },
+    ...extra,
+  });
+  const view = synthView(pending);
+  view.snapshot.self_hand = [hand];
+  view.skills = [
+    skill("hero.demo.alpha", "甲技", { available: true }),
+    skill("hero.demo.beta", "乙技", { available: true }),
+    skill("hero.demo.flow", "流程技", { available: true, preactivated: true }),
+    skill("hero.demo.convert", "转化技", { ui: { requirement: "", passive: false, convert_sources: [31] } }),
+    skill("hero.demo.passive", "被动技", { available: true, ui: { requirement: "", passive: true, convert_sources: [] } }),
+    skill("hero.demo.locked", "锁定技", { available: true, locked: true }),
+    skill("hero.demo.off", "不可用技"),
+  ];
+  ui.state.view = view;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const shown = "hero.demo.alpha,hero.demo.beta,hero.demo.flow,hero.demo.convert,hero.demo.passive,hero.demo.locked";
+  check("U2-04a 提示区技能组 = 这条询问给了入口的技能（中文名、服务端顺序；不可用技不出现）",
+    promptSkillIds().join(",") === shown
+      && promptSkillButtons().every((node) => {
+        const entry = view.skills.find((item) => item.skill_id === node.getAttribute("data-skill-id"));
+        return !!entry && node.textContent === entry.name && node.parentNode === $("t-prompt-skills");
+      })
+      && !promptSkill("hero.demo.off"),
+    `组=${JSON.stringify(promptSkillIds())} 文本=${JSON.stringify(promptSkillButtons().map((node) => node.textContent))}`);
+
+  // CSS 是"并列 / 换行 / 不重叠"的机械判据（DOM 垫片没有布局引擎，与 U1-02c 同姿态）：
+  // flex 容器逐项排布 + wrap 换行 + gap 留缝；没有绝对定位 / 负 margin 能把按钮叠起来。
+  const groupCss = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  check("U2-04b CSS：技能按钮组横向并列、可换行、留 gap（flex 项不重叠、无绝对定位 / 负 margin）",
+    /\.promptbar\s+\.prompt-skills\s*\{[^}]*display:\s*flex[^}]*flex-wrap:\s*wrap[^}]*gap:\s*calc\(6 \* var\(--dsu\)\)/s.test(groupCss)
+      && /\.promptbar\s+\.prompt-skills\s+\.skill\s*\{[^}]*flex:\s*0 0 auto/s.test(groupCss)
+      && !/\.promptbar\s+\.prompt-skills[^{]*\{[^}]*position:\s*absolute/s.test(groupCss)
+      && !/\.promptbar\s+\.prompt-skills[^{]*\{[^}]*margin[^;}]*-\d/s.test(groupCss),
+    `flex=${/\.promptbar\s+\.prompt-skills\s*\{[^}]*display:\s*flex/s.test(groupCss)} wrap=${/flex-wrap:\s*wrap/s.test(groupCss)}`);
+
+  check("U2-04c 点提示区「甲技」= 与底部同一动作（直提态：选中那条 ActivateSkill + 「将提交：发动【甲技】」）",
+    (() => {
+      clickNode(promptSkill("hero.demo.alpha"));
+      return ui.state.selectedOption === 0
+        && ui.renderKind(pending, pending.legal_actions) === "skill"
+        && $("t-choice").textContent.includes("将提交：发动【甲技】")
+        && $("btn-submit").disabled === false
+        && candidateRowButtons().length === 0;
+    })(),
+    `option=${ui.state.selectedOption} kind=${ui.renderKind(pending, pending.legal_actions)} choice="${$("t-choice").textContent}"`);
+
+  check("U2-04d 点提示区预发动技能「流程技」= 进入清单（与底部入口一致、零提交）",
+    (() => {
+      ui.resetSelection();
+      ui.renderTable();
+      ui.renderPending(view);
+      const before = calls.length;
+      clickNode(promptSkill("hero.demo.flow"));
+      return !!ui.state.preactivation
+        && ui.state.preactivation.skillId === "hero.demo.flow"
+        && /预发动【流程技】/.test($("t-prompt").textContent)
+        && $("t-options").children.length > 0
+        && calls.length === before;
+    })(),
+    `pre=${ui.state.preactivation && ui.state.preactivation.skillId} prompt="${$("t-prompt").textContent}" calls=${calls.length}`);
+
+  check("U2-04e 点提示区转化技 = 切来源模式（再点退出，与底部入口一致）",
+    (() => {
+      ui.resetSelection();
+      ui.renderTable();
+      ui.renderPending(view);
+      clickNode(promptSkill("hero.demo.convert"));
+      const on = ui.state.convertSkill === "hero.demo.convert";
+      clickNode(promptSkill("hero.demo.convert"));
+      const off = ui.state.convertSkill === null;
+      return on && off;
+    })(),
+    `convertSkill=${ui.state.convertSkill}`);
+
+  check("U2-04f 被动 / 锁定技在组里但不可点（三态不变：被动银灰、锁定银灰、无 click）",
+    (() => {
+      ui.resetSelection();
+      ui.renderTable();
+      ui.renderPending(view);
+      const passive = promptSkill("hero.demo.passive");
+      const locked = promptSkill("hero.demo.locked");
+      const before = calls.length;
+      const option = ui.state.selectedOption;
+      clickNode(passive);
+      clickNode(locked);
+      return !!passive && passive.disabled === true && passive.classList.contains("passive")
+        && !!locked && locked.disabled === true && locked.classList.contains("locked")
+        && ui.state.selectedOption === option && calls.length === before;
+    })(),
+    `passive=${promptSkill("hero.demo.passive").disabled}/${[...promptSkill("hero.demo.passive").classList.set].join(",")} locked=${promptSkill("hero.demo.locked").disabled}`);
+
+  check("U2-04g 底部技能区原样：顺序 / 全部技能 / 与提示区点出同一个选中项",
+    (() => {
+      const order = bottomSkillIds().join(",") === view.skills.map((item) => item.skill_id).join(",");
+      ui.resetSelection();
+      ui.renderTable();
+      ui.renderPending(view);
+      const bottom = $("t-skills").children.find(
+        (node) => node.getAttribute("data-skill-id") === "hero.demo.alpha");
+      clickNode(bottom);
+      const fromBottom = ui.state.selectedOption;
+      ui.resetSelection();
+      ui.renderTable();
+      ui.renderPending(view);
+      clickNode(promptSkill("hero.demo.alpha"));
+      return order && fromBottom === 0 && ui.state.selectedOption === fromBottom;
+    })(),
+    `底部=${JSON.stringify(bottomSkillIds())}`);
+  ui.resetSelection();
+}
+
+/* ---- ② 雌雄双股剑：两个中文选项按钮；无手牌时只有「令其摸一张牌」 ---- */
+{
+  const optionView = (options, seq) => synthView({
+    kind: "SELECT_OPTION", actor: 0, seq, skill_id: "equip.double_sword",
+    prompt: "请选择一项。",
+    legal_actions: options.map((choice) => ({ kind: "SelectOption", choice, answers_seq: seq })),
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  const optionLabels = () => $("t-options").children
+    .filter((node) => node.tagName === "BUTTON")
+    .map((node) => node.textContent);
+
+  const both = optionView(["discard_one", "draw_one"], 9430);
+  ui.state.view = both;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(both);
+  check("U2-04h 雌雄双股剑 = 两个中文选项按钮（原值不显示、无候选行）",
+    optionLabels().join(",") === "弃置 1 张手牌,令其摸一张牌"
+      && !/discard_one|draw_one/.test($("t-options").text())
+      && candidateRowButtons().length === 0,
+    `选项=${JSON.stringify(optionLabels())}`);
+  const drawButton = $("t-options").children.find((node) => node.textContent === "令其摸一张牌");
+  check("U2-04i 点「令其摸一张牌」= 选中那条 SelectOption(draw_one)，提交原样取候选",
+    (() => {
+      clickNode(drawButton);
+      const action = ui.buildAction();
+      return ui.state.selectedOption === 1 && $("btn-submit").disabled === false
+        && !!action && action.kind === "SelectOption" && action.choice === "draw_one"
+        && both.pending.legal_actions.includes(action);
+    })(),
+    `option=${ui.state.selectedOption} action=${JSON.stringify(ui.buildAction())}`);
+
+  // 引擎在目标**没有手牌**时不发 `discard_one`（`skills/catalog.py::_double_sword`）；
+  // 界面不补——载荷里只有 `draw_one` 就只画一个按钮（判据是载荷，不是前端规则）。
+  const drawOnly = optionView(["draw_one"], 9431);
+  ui.state.view = drawOnly;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(drawOnly);
+  check("U2-04j 无手牌时只显示「令其摸一张牌」（不出现「弃置 1 张手牌」，界面不补规则）",
+    optionLabels().join(",") === "令其摸一张牌"
+      && !$("t-options").text().includes("弃置 1 张手牌"),
+    `选项=${JSON.stringify(optionLabels())}`);
+
+  // 可复用的枚举标签（花色 / 牌名）属票 08 的服务端契约：本票不翻译，原值照旧。
+  const suits = optionView(["heart", "spade"], 9432);
+  ui.state.view = suits;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(suits);
+  check("U2-04k 其余选项值原样显示（花色等复用枚举留给票 08 的服务端标签）",
+    optionLabels().join(",") === "heart,spade",
+    `选项=${JSON.stringify(optionLabels())}`);
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ---- ③ 鬼才：改判窗口的提示区入口 + 既有手牌路径 + 清空零提交 ---- */
+{
+  const judgeCard = { ...synthCard(41, "桃"), type: "peach" };
+  const pending = {
+    kind: "RESPOND", actor: 0, seq: 9440, cause: "REJUDGE", required: null,
+    prompt: "响应窗口：请打出一张牌，或放弃。",
+    legal_actions: [
+      { kind: "PlayCard", answers_seq: 9440, card: judgeCard },
+      { kind: "Pass", answers_seq: 9440 },
+    ],
+    candidate_index: {
+      41: { card: judgeCard, pool: [], min_targets: 0, max_targets: 0, combos: [[]] },
+    },
+    option_seats: {}, context: { requirement: "打出一张手牌，代替此判定牌", skill_hints: [] },
+    preactivations: {}, preactivation: [],
+  };
+  const view = synthView(pending);
+  view.snapshot.self_hand = [judgeCard];
+  view.skills = [
+    { skill_id: "hero.simayi.fankui", name: "反馈", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: false, preactivated: false,
+      description: "反馈的描述。",
+      ui: { requirement: "获得伤害来源的一张牌", passive: true, convert_sources: [] } },
+    { skill_id: "hero.simayi.guicai", name: "鬼才", skill_type: "NORMAL", locked: false,
+      carrier: "HERO", available: false, preactivated: false,
+      description: "鬼才的描述。",
+      ui: { requirement: "打出一张手牌，代替此判定牌", passive: false, convert_sources: [] } },
+  ];
+  ui.state.view = view;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const entry = promptSkill("hero.simayi.guicai");
+  const hintNode = $("t-prompt-skills").children.find(
+    (node) => String(node.className || "").split(/\s+/).includes("prompt-skill-hint"));
+  const before = calls.length;
+  check("U2-04l 鬼才改判窗口：提示区只有一个只说明的「鬼才」入口（+ 点手牌提示；无第二套选择）",
+    ui.renderKind(pending, pending.legal_actions) === "picker"
+      && promptSkillIds().join(",") === "hero.simayi.guicai"
+      && !!entry && entry.getAttribute("data-window-entry") === "true"
+      && entry.disabled === false
+      && !!hintNode && /点一张手牌/.test(hintNode.textContent) && /提交/.test(hintNode.textContent),
+    `kind=${ui.renderKind(pending, pending.legal_actions)} 组=${JSON.stringify(promptSkillIds())} entry=${entry && entry.getAttribute("data-window-entry")} hint="${hintNode && hintNode.textContent}"`);
+  check("U2-04m 点「鬼才」只写提示：不选中候选、不设焦点、不发请求（不是第二套选择方式）",
+    (() => {
+      clickNode(entry);
+      return ui.state.selectedOption === null
+        && ui.state.focusCardId === null
+        && calls.length === before
+        && /点一张手牌/.test($("t-target-hint").textContent);
+    })(),
+    `option=${ui.state.selectedOption} focus=${ui.state.focusCardId} calls=${calls.length - before} hint="${$("t-target-hint").textContent}"`);
+
+  const handChip = () => $("t-hand").children[0];
+  check("U2-04n 点一张手牌 = 既有手选路径：焦点 + 提交可点 + 提交的就是那条 PlayCard 候选",
+    (() => {
+      clickNode(handChip());
+      const action = ui.buildAction();
+      return ui.state.focusCardId === 41 && $("btn-submit").disabled === false
+        && $("btn-pass").hidden === false
+        && !!action && action.kind === "PlayCard" && action.card.card_id === 41
+        && pending.legal_actions.includes(action);
+    })(),
+    `focus=${ui.state.focusCardId} submit=${$("btn-submit").disabled} action=${JSON.stringify(ui.buildAction())}`);
+
+  check("U2-04o 清空 = 零 action 提交；「放弃」仍只在右端（Pass 原样在候选里）",
+    (() => {
+      const callsBefore = calls.length;
+      clickNode($("btn-cancel"));
+      return ui.state.focusCardId === null
+        && calls.length === callsBefore
+        && $("btn-pass").hidden === false
+        && pending.legal_actions.some((action) => action.kind === "Pass");
+    })(),
+    `focus=${ui.state.focusCardId} calls=${calls.length} passHidden=${$("btn-pass").hidden}`);
+
+  // 提交路径：一次 POST、载荷就是那条 PlayCard（400 由拦截器注入，不依赖真引擎）。
+  // 走 `submitAction` 入口而不是 DOM 事件：按钮的监听器会把 MouseEvent 当"选择快照"
+  // 传进来（main.js 的既有接线），与本票无关，见交付说明里的 known issue。
+  ui.state.sessionId = "smoke-u2-04-rejudge";
+  clickNode(handChip());
+  staleAnswerStatus = 400;
+  const callsBefore = calls.length;
+  const submitPromise = ui.submitAction();
+  check("U2-04p 鬼才提交在飞时四键冻结（与既有提交路径同一冻结）",
+    ["btn-submit", "btn-cancel", "btn-end-phase", "btn-pass"].every((id) => $(id).disabled === true),
+    ["btn-submit", "btn-cancel", "btn-end-phase", "btn-pass"].map((id) => `${id}=${$(id).disabled}`).join(" "));
+  await submitPromise;
+  staleAnswerStatus = null;
+  const answerCalls = calls.slice(callsBefore).filter((call) => call.path.includes("/answer"));
+  check("U2-04q 点手牌 + 提交 = 恰好 1 条 POST，载荷是那条 PlayCard（被拒后回到点击前）",
+    answerCalls.length === 1
+      && answerCalls[0].body.action.kind === "PlayCard"
+      && answerCalls[0].body.action.card.card_id === 41
+      && ui.state.focusCardId === 41
+      && /提交被拒/.test($("t-choice").textContent),
+    `answers=${answerCalls.length} body=${JSON.stringify(answerCalls[0] && answerCalls[0].body)} focus=${ui.state.focusCardId}`);
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 /* ---- 倒计时：进度条 / 三色 / 最后 5 秒闪烁 / 默认动作 / 前端不代答 ---- */
 
 {

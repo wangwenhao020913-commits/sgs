@@ -276,6 +276,8 @@ function renderTable() {
     );
   }
   renderSkills(view);
+  // 提示区左栏的技能按钮组：与底部技能区同一份清单 / 判据（U2-04），additive。
+  renderPromptSkills(view);
 }
 
 /** 效果区 / 处理区：画 `state.effectCards`（回放期间逐事件派生、快照到达时并进来），
@@ -337,6 +339,60 @@ function skillBadgeText(skill, manifest, convertCards) {
   return skill.available ? " · 可发动" : "";
 }
 
+/** 一条技能**在这份询问里**的可点性与点击动作；底部技能区与提示区技能组共用这一处。
+ *
+ * U1-06 的三态判据只在这里实现一次（各写一遍就会一个绿一个灰）：
+ *
+ * - `usable`：这条询问真的给了入口——已翻预发动 = 预发动清单在；其余 = 骨架
+ *   `ActivateSkill` 候选 / 转化来源 / 转化清单任一在（与 `view.skills.available` 同源）。
+ *   清单有两类消费者（W4-2 / W4-3）：已翻到预发动的技能（`preactivated`）= **复合动作**
+ *   清单；转化技 = **本地入口**清单——两者都由 `pending.preactivations[skill_id]` 下发。
+ * - `inert`：被动技（`ui.passive`）/ 锁定技——按钮只说明（悬停出描述），不接 click；
+ * - `clickable` = `usable && !inert`。回放期间 `handler` 为 `null`（外观不变）。
+ *
+ * 点击动作与旧入口完全一致：清单 → 进入预发动；转化来源 → 切来源模式；
+ * 骨架候选 → 直提态（选中那条候选）。`handler === null` = 此刻不给 click。
+ */
+function skillOffer(pending, skill) {
+  const ui = skill.ui || {};
+  const convertCards = ui.convert_sources || [];
+  const preactivated = Boolean(skill.preactivated);
+  const manifest = preactivationManifest(pending, skill.skill_id);
+  const usable = isOwnPending(pending) && (
+    preactivated
+      ? Boolean(manifest)
+      : (Boolean(skill.available) || convertCards.length > 0 || Boolean(manifest))
+  );
+  const passive = Boolean(ui.passive);
+  const inert = Boolean(skill.locked) || passive;
+  const clickable = usable && !inert;
+  let handler = null;
+  if (clickable && pending && !state.playback) {
+    if (manifest) {
+      handler = () => enterPreativation(skill, manifest);
+    } else if (convertCards.length) {
+      handler = () => toggleConvertSkill(skill);
+    } else if (skill.available) {
+      const index = (pending.legal_actions || []).findIndex(
+        (action) => action.kind === "ActivateSkill" && action.skill_id === skill.skill_id,
+      );
+      if (index >= 0) handler = () => selectSkillCandidate(index);
+    }
+  }
+  return { convertCards, preactivated, manifest, usable, passive, inert, clickable, handler };
+}
+
+/** 选中一条 `ActivateSkill` 候选 = 技能直提态（「将提交：发动【X】」）。
+ *  底部技能按钮与提示区技能组共用这一处状态写入（`buildAction` 原样返回那条候选）。 */
+function selectSkillCandidate(index) {
+  state.selectedOption = index;
+  state.focusCardId = null;
+  state.selectedTargets = [];
+  state.lastRejectReason = "";
+  renderTable();
+  renderPending(state.view);
+}
+
 /** 技能按钮：三态由**数据**决定（`locked` 表类型、`available` 表此刻能不能发动）。
  *
  * 纪律：
@@ -347,8 +403,8 @@ function skillBadgeText(skill, manifest, convertCards) {
  *
  * **预发动（W4-1 / W4-2）**：`skill.preactivated` 的技能走**清单入口**——点它进入
  * 清单驱动的本地态（确认 = 复合动作、取消零提交），不再去 `legal_actions` 里找
- * 骨架候选（已翻的技能连骨架都没有）。未翻的技能照旧：转化技亮点选来源牌，其余
- * 点一下 = 选中那条 `ActivateSkill` 候选。
+ * 骨架候选（已翻的技能连骨架都没有）。未翻的技能照旧：转化技点它进入来源模式，其余
+ * 点一下 = 选中那条 `ActivateSkill` 候选。判据与点击动作都住在 :func:`skillOffer`。
  */
 function renderSkills(view) {
   const box = $("t-skills");
@@ -360,34 +416,16 @@ function renderSkills(view) {
     return;
   }
   const pending = view.pending;
-  const ownPending = isOwnPending(pending);
   for (const skill of skills) {
-    const ui = skill.ui || {};
-    const convertCards = ui.convert_sources || [];
-    const preactivated = Boolean(skill.preactivated);
-    // 清单有两类消费者（W4-2 / W4-3）：已翻到预发动的技能（`preactivated`）= **复合动作**
-    // 清单；转化技 = **本地入口**清单（确认仍是普通候选 `UseCard(虚拟牌, 目标)`）。
-    // 两者都由 `pending.preactivations[skill_id]` 下发，界面据 `preactivated` 分派。
-    const manifest = preactivationManifest(pending, skill.skill_id);
-    // 已翻预发动：**可用性只剩清单**（清单渲不出来 = 此刻不可用，与服务端同一判据）。
-    // 转化技：候选或清单任一存在即点得动（清单为空 ⇒ 此刻没有可转化的使用 / 响应）。
-    const usable = ownPending && (
-      preactivated
-        ? Boolean(manifest)
-        : (Boolean(skill.available) || convertCards.length > 0 || Boolean(manifest))
-    );
-    // U1-06 三态：可用（绿）/ 不可用（深灰）/ 锁定 / 被动（银灰）。被动 / 锁定技
-    // **按钮不动作**——它们是引擎在时机上自动派发的东西，点它没有意义（悬停看描述）。
-    const passive = Boolean(ui.passive);
-    const inert = Boolean(skill.locked) || passive;
-    const clickable = usable && !inert;
+    const offer = skillOffer(pending, skill);
+    const { convertCards, preactivated, manifest, usable, passive, clickable } = offer;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "skill";
     if (skill.locked) button.classList.add("locked");
     if (passive && !skill.locked) button.classList.add("passive");
     if (clickable) button.classList.add("ready");
-    else if (!inert) button.classList.add("unavailable");
+    else if (!offer.inert) button.classList.add("unavailable");
     button.disabled = !clickable;
     button.setAttribute("data-skill-id", skill.skill_id);
     button.setAttribute("data-available", String(skill.available));
@@ -404,28 +442,78 @@ function renderSkills(view) {
       ? (manifest ? " · 预发动" : "")
       : skillBadgeText(skill, manifest, convertCards);
     button.innerHTML = `${skill.name}<span class="kind">${kind}${badge}</span>`;
-    if (!clickable || state.playback) {
-      // 回放期间不接任何操作（严格顺序：这批事件播完才轮到下一次询问）。
-    } else if (pending && manifest) {
-      // 清单驱动的本地态（W4-2 复合动作 / W4-3 转化技本地入口）：取消 = 什么都不提交
-      // （被动入口 = 放弃）。转化技在"提供一张 B"的面里没有清单，仍走下面的转化模式。
-      button.addEventListener("click", () => enterPreativation(skill, manifest));
-    } else if (pending && convertCards.length) {
-      // 转化技（【龙胆】）：点它进入"挑一张来源牌"的模式（再点一次退出）。
-      button.addEventListener("click", () => toggleConvertSkill(skill));
-    } else if (skill.available && pending) {
-      const index = pending.legal_actions.findIndex((a) => a.kind === "ActivateSkill" && a.skill_id === skill.skill_id);
-      if (index >= 0) {
-        button.addEventListener("click", () => {
-          state.selectedOption = index;
-          state.focusCardId = null;
-          state.selectedTargets = [];
-          state.lastRejectReason = "";
-          renderTable();
-          renderPending(state.view);
-        });
-      }
+    if (offer.handler) button.addEventListener("click", offer.handler);
+    box.appendChild(button);
+  }
+}
+
+/** 改判窗口的**只说明**入口文案：【鬼才】的选择是「点一张手牌 → 提交」，没有第二套选择方式。 */
+const REJUDGE_ENTRY_HINT = "点一张手牌打出，然后点「提交」（改判不需要选目标）。";
+
+/** 这条技能是不是**改判窗口**（`RESPOND` / `REJUDGE`）里的那个只说明入口。
+ *
+ * 改判窗口的候选是手牌的 `PlayCard`（没有 `ActivateSkill`），所以 `available` 恒为假
+ * ——底部技能区的旧判据看不见它。这里只做一次**服务端字符串相等**：询问的
+ * `context.requirement`（这一步要做什么）与本技能的 `ui.requirement`（技能声明上的
+ * 需要做什么）写成同一句时，说明这条技能就是当前窗口的来源。它不是合法性判据：
+ * 能不能打某张牌仍只由候选 / 候选索引决定；被动 / 锁定技不在此列。
+ */
+function rejudgeWindowEntry(pending, skill) {
+  if (!pending || pending.kind !== "RESPOND" || pending.cause !== "REJUDGE") return false;
+  const ui = skill.ui || {};
+  if (skill.locked || ui.passive) return false;
+  const requirement = pending.context && pending.context.requirement;
+  return Boolean(requirement) && ui.requirement === requirement;
+}
+
+/** 提示区左栏的**技能按钮组**（U2-04 / spec D5）：这条询问真正给了入口的技能，中文名横排。
+ *
+ * 与底部技能区**共用** :func:`skillOffer`（可点性 / 点击动作只有一份）：清单 → 预发动、
+ * 转化来源 → 来源模式、可用 `ActivateSkill` → 直提态；被动 / 锁定技照旧只说明——
+ * 出现在组里但 `disabled`，点不动（三态不变）。
+ *
+ * 多出来的一个**只说明**的入口是改判窗口（见 :func:`rejudgeWindowEntry`）：按钮只补一句
+ * 提示，真正的选择仍走既有的「点手牌 → 提交」（本函数不写任何选择态）。
+ */
+function renderPromptSkills(view) {
+  const box = $("t-prompt-skills");
+  if (!box) return;
+  box.innerHTML = "";
+  const pending = view && view.pending;
+  if (!pending || !isOwnPending(pending)) return;
+  for (const skill of view.skills || []) {
+    const offer = skillOffer(pending, skill);
+    const windowEntry = rejudgeWindowEntry(pending, skill);
+    if (!offer.usable && !windowEntry) continue;
+    const actionable = offer.clickable || windowEntry;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "skill";
+    if (skill.locked) button.classList.add("locked");
+    if (offer.passive && !skill.locked) button.classList.add("passive");
+    if (offer.inert) {
+      // 被动 / 锁定技：画在组里，但只说明（与底部技能区同一姿态）。
+    } else if (actionable) button.classList.add("ready");
+    else button.classList.add("unavailable");
+    button.disabled = !actionable || Boolean(state.playback);
+    button.setAttribute("data-skill-id", skill.skill_id);
+    if (windowEntry) button.setAttribute("data-window-entry", "true");
+    button.setAttribute("title", windowEntry ? REJUDGE_ENTRY_HINT : skillDescription(skill));
+    button.textContent = skill.name;
+    if (offer.handler) button.addEventListener("click", offer.handler);
+    else if (windowEntry && !state.playback) {
+      // 只把"怎么点"写明白：不选中候选、不改焦点、不发请求（不是第二套选择方式）。
+      button.addEventListener("click", () => {
+        const hint = $("t-target-hint");
+        if (hint) hint.textContent = REJUDGE_ENTRY_HINT;
+      });
     }
     box.appendChild(button);
+    if (windowEntry) {
+      const hint = document.createElement("span");
+      hint.className = "prompt-skill-hint";
+      hint.textContent = REJUDGE_ENTRY_HINT;
+      box.appendChild(hint);
+    }
   }
 }
