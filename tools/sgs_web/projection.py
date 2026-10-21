@@ -1423,6 +1423,19 @@ def pending_payload(
     payload["harvest"] = (
         harvest_state(session.engine) if isinstance(session, Session) else None
     )
+    # U2-12（D3 / D10）：**观看牌面**的选牌步 = 亮牌弹窗。判据读**形状**而不是技能 id：
+    # ``SELECT_CARDS`` 且这一问带着**授予的牌面**（``revealed`` 非空，票 15 的私密观看通道）。
+    # 当前唯一生产者是【遗计】的牌堆顶两张；将来同形状的观看技能自动套同一模板。
+    #
+    # 只在**查看者就是挂起者**时给（上面 :func:`_mask_watched_faces` 已把别人的 ``revealed``
+    # 抹空，故这里读的是抹后的载荷）：它不是牌面数据，也不必发给他人的屏幕——别人的那一份
+    # 连"这一步是私密亮牌"都不需要知道。取不到查看者（409 裸 ``Query`` 且没声明）同样为
+    # ``None``（fail-closed）。键恒在；**不进记录流 / 金录像**（纯派生展示字段）。
+    payload["dialog"] = (
+        "reveal"
+        if str(query.kind) == "SELECT_CARDS" and payload.get("revealed")
+        else None
+    )
     # 这一步是不是"提供一张 B"（票 14）：非空 = B 的牌名 id。字段在记录流里被 ``exclude``，
     # 故**不进** Golden Replay 的字节；界面靠它把这一类选择面**就地**铺到本人的可见区域上。
     payload["provide_type"] = getattr(query, "provide_type", None)

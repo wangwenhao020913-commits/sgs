@@ -9544,4 +9544,330 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.resetSelection();
 }
 
+/* ============ U2-12（D3 / D9.1）：遗计亮牌弹窗（选 1~2 张 + 右端提交） ============
+ *
+ * 载荷与真会话同形（字段由 `tests/test_web.py` 的真会话断言钉）：
+ *   - `dialog: "reveal"`：服务端按 **SELECT_CARDS + 授予牌面**这个**形状**派生的表面提示
+ *     （不认技能 id）；遗计没有五谷的 `harvest` 目标条。
+ *   - `revealed` 是两张牌堆顶（私密授予），`slots` 是面内位置，`spec.total = [1, 2]`；
+ *     选牌步**没有** `Pass`（D9.1）。
+ *
+ * 本段只钉界面读法：两张牌只在弹窗里、点牌切换 `.sel`、右端「提交」是唯一提交点；
+ * 提交后弹窗关闭（选座步在牌桌）、点座位 + 提交后交出；还有余牌时下一轮自动开窗；
+ * 两张交完关窗；没有「放弃」；折叠 / ESC / 只读 / 检视；别人的载荷永远看不到这两张牌。
+ */
+{
+  const cardOf = (id, name, type, description) => ({
+    ...synthCard(id, name),
+    type,
+    display_name: name,
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description,
+  });
+  const topA = cardOf(31, "杀", "slash", "杀的描述：造成 1 点伤害。");
+  const topB = cardOf(32, "闪", "dodge", "闪的描述：抵消一张杀。");
+  const yijiContext = (actor) => ({
+    actor, name: "遗计", targets: [],
+    label: `${actor}号位郭嘉使用遗计`,
+    requirement: "从亮出的牌里选择一至两张",
+    skill_hints: [],
+  });
+  /** 与真会话同形的选牌步（`remaining` = 还没交出的亮牌）。 */
+  const yijiPick = ({ seq, actor = 0, remaining }) => {
+    const combos = remaining.length > 1 ? [[0], [1], [0, 1]] : [[0]];
+    return {
+      kind: "SELECT_CARDS", actor, seq,
+      prompt: "请从选择面里选择一至两张牌。",
+      legal_actions: combos.map((picks) => ({ kind: "SelectCards", answers_seq: seq, picks })),
+      candidate_index: {}, virtual_index: {}, option_seats: {},
+      slots: remaining.map((card) => ({ ref: { seat: actor, zone: "hand" }, card })),
+      spec: { zones: ["hand"], total: [1, 2], sequential: false, optional: false },
+      revealed: remaining,
+      dialog: "reveal",
+      harvest: null,
+      context: yijiContext(actor),
+      prompt_display: {
+        text: "请从选择面里选择一至两张牌。",
+        default_action: { kind: "SelectCards", answers_seq: seq, picks: [0] },
+        default_label: "超时将自动选择第一张亮牌",
+      },
+      preactivations: {}, preactivation: [],
+    };
+  };
+  /** 「交给谁」步：牌桌表面（`option_seats` 非空 ⇒ 不弹窗），没有 Pass。 */
+  const yijiGive = ({ seq, actor = 0, seats }) => ({
+    kind: "SELECT_OPTION", actor, seq,
+    prompt: "请选择一项。",
+    legal_actions: seats.map((seat) => ({
+      kind: "SelectOption", answers_seq: seq, choice: `seat:${seat}`,
+    })),
+    candidate_index: {}, virtual_index: {},
+    option_seats: Object.fromEntries(seats.map((seat) => [`seat:${seat}`, seat])),
+    context: {
+      actor, name: "遗计", targets: [],
+      label: `${actor}号位郭嘉使用遗计`,
+      requirement: "选择将这些牌交给哪名角色",
+      skill_hints: [],
+    },
+    prompt_display: {
+      text: "请选择一项。",
+      default_action: { kind: "SelectOption", answers_seq: seq, choice: `seat:${actor}` },
+      default_label: "超时将把剩下的牌交给自己",
+    },
+    preactivations: {}, preactivation: [],
+  });
+  const yijiView = (pending, seat = 0, timeout = null) => {
+    const view = synthView(pending);
+    view.human_seat = seat;
+    view.snapshot.seat = seat;
+    if (timeout !== null) view.timeout_seconds = timeout;
+    return view;
+  };
+  const render = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const insideDialog = (node) => {
+    let at = node ? node.parentNode : null;
+    while (at) {
+      if (at === $("t-dialog")) return true;
+      at = at.parentNode;
+    }
+    return false;
+  };
+  const revealWrap = () => $("t-options").children[0];
+  const revealCards = () => (revealWrap() ? revealWrap().children[0].children : []);
+  const clickCard = (index) => {
+    const node = revealCards()[index];
+    (node.listeners.click || []).forEach((fn) => fn({ target: node }));
+  };
+  const clickCollapse = () => ($("t-dialog-collapse").listeners.click || [])
+    .forEach((fn) => fn({ target: $("t-dialog-collapse") }));
+  const clickSubmit = async () => {
+    for (const fn of $("btn-submit").listeners.click || []) {
+      await fn({ target: $("btn-submit"), type: "click" });
+    }
+  };
+  const settleSubmit = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261015,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  ui.state.modal.heroSeat = null;
+
+  // ---- ① 选牌步：两张亮牌只在弹窗里；右端「提交」是唯一提交点 ----
+  const pick = yijiPick({ seq: 1301, actor: 0, remaining: [topA, topB] });
+  render(yijiView(pick, 0, 45));
+
+  check("U2-12a 遗计选牌步 = 亮牌弹窗：标题「遗计」、选 1~2 张口径、两张牌在窗内、无放弃",
+    ui.stepDialogKind(pick) === "reveal"
+      && $("t-dialog").hidden === false
+      && $("t-dialog-body").children.includes($("t-options"))
+      && $("t-dialog-title").textContent === "遗计"
+      && $("t-prompt").textContent === "从亮出的牌里选择一至两张"
+      && $("t-dialog-hint").textContent.includes("选 1~2 张后点右端「提交」")
+      && $("t-dialog-hint").textContent.includes("已选 0 张")
+      && revealCards().length === 2
+      && revealCards().map((node) => node.getAttribute("data-card-id")).join(",") === "31,32"
+      && !revealWrap().children.some((node) => node.classList.contains("reveal-targets"))
+      && $("btn-pass").hidden === true
+      && !/放弃/.test($("t-dialog").text())
+      && ["btn-submit", "btn-cancel", "btn-pass", "btn-end-phase", "t-countdown"]
+        .every((id) => !insideDialog($(id)))
+      && candidateRowButtons().length === 0
+      && $("btn-submit").disabled === true
+      && $("btn-submit").textContent === "提交"
+      && $("t-choice").textContent.includes("选 1~2 张后点右端「提交」"),
+    `kind=${ui.stepDialogKind(pick)} title="${$("t-dialog-title").textContent}" hint="${$("t-dialog-hint").textContent}" cards=${revealCards().length} passHidden=${$("btn-pass").hidden} submit="${$("btn-submit").textContent}" disabled=${$("btn-submit").disabled}`);
+
+  check("U2-12a2 选牌步的超时文案读服务端：第一张亮牌（超时行为在服务端）",
+    $("t-default-label").textContent === "超时将自动选择第一张亮牌"
+      && /剩余/.test($("t-timer").textContent),
+    `label="${$("t-default-label").textContent}" timer="${$("t-timer").textContent}"`);
+
+  // ---- ② 点牌 = 切换选中（不提交）；右端提交键是唯一提交点 ----
+  const beforeToggle = calls.length;
+  clickCard(0);
+  check("U2-12b 点第一张 = 选中（.sel）且**不提交**；第二张仍可继续选",
+    JSON.stringify(ui.state.picks) === "[0]"
+      && revealCards()[0].classList.contains("sel")
+      && !revealCards()[1].classList.contains("sel")
+      && $("btn-submit").disabled === false
+      && $("t-dialog-hint").textContent.includes("已选 1 张")
+      && calls.length === beforeToggle,
+    `picks=${JSON.stringify(ui.state.picks)} sel=${revealCards().map((n) => n.classList.contains("sel")).join(",")} submitDisabled=${$("btn-submit").disabled} calls=${calls.length - beforeToggle}`);
+
+  clickCard(1);
+  check("U2-12c 选第二张 ⇒ picks 保持面内升序 [0,1]，可以提交",
+    JSON.stringify(ui.state.picks) === "[0,1]"
+      && revealCards().every((node) => node.classList.contains("sel"))
+      && ui.buildAction() !== null
+      && ui.buildAction().kind === "SelectCards"
+      && JSON.stringify(ui.buildAction().picks) === "[0,1]",
+    `picks=${JSON.stringify(ui.state.picks)} action=${JSON.stringify(ui.buildAction())}`);
+
+  clickCard(0);
+  check("U2-12d 再点已选中的牌 = 取消它（剩 [1]，仍可提交）",
+    JSON.stringify(ui.state.picks) === "[1]"
+      && !revealCards()[0].classList.contains("sel")
+      && $("btn-submit").disabled === false,
+    `picks=${JSON.stringify(ui.state.picks)} sel=${revealCards().map((n) => n.classList.contains("sel")).join(",")}`);
+  clickCard(0);
+  check("U2-12d2 取消后重新选中 ⇒ 提交的仍是升序 [0,1]（不是点击顺序）",
+    JSON.stringify(ui.state.picks) === "[0,1]"
+      && JSON.stringify(ui.buildAction().picks) === "[0,1]",
+    `picks=${JSON.stringify(ui.state.picks)} action=${JSON.stringify(ui.buildAction())}`);
+
+  // ---- ③ 提交：一条 SelectCards POST（picks = 面内位置） ----
+  const beforeSubmit = calls.length;
+  staleAnswerStatus = 400;
+  await clickSubmit();
+  await settleSubmit();
+  staleAnswerStatus = null;
+  const twoAnswers = calls.slice(beforeSubmit).filter((call) => call.path.includes("/answer"));
+  const twoAction = pick.legal_actions.find((action) => action.picks.length === 2);
+  check("U2-12e 点右端「提交」= 恰一条 SelectCards POST（两张一起交），没有第二个提交点",
+    twoAnswers.length === 1
+      && JSON.stringify(twoAnswers[0].body.action) === JSON.stringify(twoAction)
+      && JSON.stringify(twoAnswers[0].body.action.picks) === "[0,1]",
+    `answers=${twoAnswers.length} action=${JSON.stringify(twoAnswers[0] && twoAnswers[0].body.action)}`);
+
+  // ---- ④ 提交后弹窗关闭：选座步在牌桌（点座位 + 提交），超时交给自己 ----
+  const give = yijiGive({ seq: 1302, actor: 0, seats: [0, 1, 2, 3] });
+  render(yijiView(give, 0, 45));
+  check("U2-12f 提交后弹窗关闭：『交给谁』回到牌桌表面，右端没有放弃",
+    $("t-dialog").hidden === true
+      && !$("t-dialog-body").children.includes($("t-options"))
+      && ui.stepDialogKind(give) === null
+      && $("t-prompt").textContent === "选择将这些牌交给哪名角色"
+      && $("t-target-hint").textContent === "点场上武将，选择把这张牌交给谁。"
+      && $("btn-pass").hidden === true
+      && $("btn-submit").disabled === true
+      && ui.selectionEnabled() === true,
+    `dialogHidden=${$("t-dialog").hidden} kind=${ui.stepDialogKind(give)} prompt="${$("t-prompt").textContent}" passHidden=${$("btn-pass").hidden} enabled=${ui.selectionEnabled()}`);
+
+  check("U2-12f2 选座步的超时文案：剩下的牌交给自己（服务端 default_label）",
+    $("t-default-label").textContent === "超时将把剩下的牌交给自己"
+      && /剩余/.test($("t-timer").textContent),
+    `label="${$("t-default-label").textContent}" timer="${$("t-timer").textContent}"`);
+
+  const seatNode = seatBox(2);
+  check("U2-12g 可交给的座位可点（targetable）",
+    !!seatNode && seatNode.classList.contains("targetable"),
+    `seat=${!!seatNode} classes=${seatNode && seatNode.className}`);
+  (seatNode.listeners.click || []).forEach((fn) => fn({ target: seatNode }));
+  check("U2-12h 点座位 = 选中 seat:2，提交键可点",
+    ui.state.selectedOption !== null
+      && (give.legal_actions[ui.state.selectedOption] || {}).choice === "seat:2"
+      && $("btn-submit").disabled === false,
+    `selected=${ui.state.selectedOption} submitDisabled=${$("btn-submit").disabled}`);
+
+  const beforeGive = calls.length;
+  staleAnswerStatus = 400;
+  await clickSubmit();
+  await settleSubmit();
+  staleAnswerStatus = null;
+  const giveAnswers = calls.slice(beforeGive).filter((call) => call.path.includes("/answer"));
+  check("U2-12h2 点「提交」= 一条 SelectOption POST（seat:2），牌进入其手牌由服务端负责",
+    giveAnswers.length === 1
+      && JSON.stringify(giveAnswers[0].body.action) === JSON.stringify(
+        give.legal_actions.find((action) => action.choice === "seat:2"),
+      ),
+    `answers=${giveAnswers.length} action=${JSON.stringify(giveAnswers[0] && giveAnswers[0].body.action)}`);
+
+  // ---- ⑤ 还有余牌 ⇒ 下一轮自动重新开窗（只剩那张），两张交完关窗 ----
+  const nextPick = yijiPick({ seq: 1303, actor: 0, remaining: [topB] });
+  render(yijiView(nextPick, 0));
+  check("U2-12i 还有余牌 ⇒ 下一轮自动重新开窗（新 seq = 新键），只剩没交出的那张",
+    $("t-dialog").hidden === false
+      && ui.state.dialog.key === "reveal:1303"
+      && revealCards().length === 1
+      && revealCards()[0].getAttribute("data-card-id") === "32"
+      && $("btn-submit").disabled === true,
+    `hidden=${$("t-dialog").hidden} key=${ui.state.dialog.key} cards=${revealCards().length}`);
+
+  clickCard(0);
+  const beforeLast = calls.length;
+  staleAnswerStatus = 400;
+  await clickSubmit();
+  await settleSubmit();
+  staleAnswerStatus = null;
+  const lastAnswers = calls.slice(beforeLast).filter((call) => call.path.includes("/answer"));
+  check("U2-12j 最后一张同样只走右端「提交」（picks=[0]）",
+    lastAnswers.length === 1
+      && JSON.stringify(lastAnswers[0].body.action) === JSON.stringify(nextPick.legal_actions[0]),
+    `answers=${lastAnswers.length} action=${JSON.stringify(lastAnswers[0] && lastAnswers[0].body.action)}`);
+
+  render(yijiView(null, 0));
+  check("U2-12k 两张都交完、询问结束 ⇒ 弹窗关闭、正文清空，不留上一问的牌",
+    $("t-dialog").hidden === true
+      && $("t-dialog-body").children.length === 0
+      && $("t-dialog-title").textContent === "",
+    `hidden=${$("t-dialog").hidden} bodyChildren=${$("t-dialog-body").children.length} title="${$("t-dialog-title").textContent}"`);
+
+  // ---- ⑥ 折叠 / ESC / 只读 / 检视；没有关闭按钮 ----
+  const own2 = yijiPick({ seq: 1304, actor: 0, remaining: [topA, topB] });
+  render(yijiView(own2, 0));
+  check("U2-12l 弹窗打开时牌桌只读，但牌面描述（检视）仍可读",
+    ui.selectionEnabled() === false
+      && revealCards()[0].getAttribute("title").includes("杀的描述")
+      && revealCards()[1].getAttribute("title").includes("闪的描述"),
+    `enabled=${ui.selectionEnabled()} titles=${revealCards().map((n) => n.getAttribute("title")).join("|")}`);
+
+  fireDocument("keydown", { key: "Escape", preventDefault() {} });
+  check("U2-12m ESC 不关亮牌弹窗（没有关闭出口）；点背景也没有 click 监听",
+    $("t-dialog").hidden === false
+      && !($("t-modal-backdrop").listeners.click || []).length,
+    `hidden=${$("t-dialog").hidden} backdropClicks=${($("t-modal-backdrop").listeners.click || []).length}`);
+
+  const handNode = $("t-hand").children[0];
+  if (handNode) (handNode.listeners.click || []).forEach((fn) => fn({ target: handNode }));
+  check("U2-12n 只读态：点自己的手牌不产生选择（选择只在弹窗里）",
+    ui.state.focusCardId === null && !(handNode && handNode.classList.contains("sel")),
+    `focus=${ui.state.focusCardId}`);
+
+  clickCollapse();
+  check("U2-12o 折叠只撤正文：标题「遗计」与选牌口径仍在标题条、暗化层收起",
+    $("t-dialog-body").hidden === true
+      && $("t-dialog-title").textContent === "遗计"
+      && $("t-dialog-hint").textContent.includes("选 1~2 张后点右端「提交」")
+      && $("t-dialog-collapse").textContent === "展开"
+      && $("t-modal-backdrop").hidden === true,
+    `bodyHidden=${$("t-dialog-body").hidden} title="${$("t-dialog-title").textContent}" hint="${$("t-dialog-hint").textContent}"`);
+  clickCollapse();
+  check("U2-12p 展开恢复正文与暗化层，只读判据不变",
+    $("t-dialog-body").hidden === false
+      && $("t-modal-backdrop").hidden === false
+      && ui.selectionEnabled() === false);
+
+  // ---- ⑦ 别人的载荷永远看不到这两张牌（私密观看） ----
+  const maskedPick = {
+    ...yijiPick({ seq: 1305, actor: 1, remaining: [topA, topB] }),
+    dialog: null,
+    revealed: [],
+    slots: [topA, topB].map(() => ({ ref: { seat: 1, zone: "hand" }, card: null })),
+  };
+  render(yijiView(maskedPick, 0));
+  check("U2-12q 别人的载荷（revealed / slots 已抹）不开窗、不画牌面：两张牌只归持有者",
+    $("t-dialog").hidden === true
+      && ui.stepDialogKind(maskedPick) === null
+      && $("t-options").children.length === 0
+      && $("t-prompt").textContent.includes("等待其他座位响应"),
+    `hidden=${$("t-dialog").hidden} kind=${ui.stepDialogKind(maskedPick)} options=${$("t-options").children.length} prompt="${$("t-prompt").textContent}"`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

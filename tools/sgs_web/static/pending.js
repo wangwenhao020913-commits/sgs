@@ -521,7 +521,31 @@ function refreshSubmit(pending) {
   // 这一步的读法说清楚。提交按钮保持灰（选择由点击内容完成，防两个提交点各算一次）。
   // 放在 `blocked` 判定**之前**：未知区域会把第一条 `SelectCards` 预选进
   // `state.selectedOption`，否则这里会显示旧的"还要选 1 张牌"而不是弹窗读法。
+  //
+  // **遗计式多选亮牌是例外**（U2-12）：牌面只切换选中态，右端「提交」是**唯一**提交点，
+  // 故这一支按既有 `selectionError` / `buildAction` 算可点态（判据仍是"能造出候选里真有
+  // 的那条 Action"），不把提交键恒置灰。
   const dialogKind = stepDialogKind(pending);
+  if (dialogKind === DIALOG_KINDS.reveal && isPickRevealStep(pending)) {
+    const selected = state.selectedOption === null
+      ? null
+      : (pending.legal_actions || [])[state.selectedOption];
+    const blocked = selected === null ? null : selectionError(selected, pending);
+    const ready = blocked === null && buildAction() !== null;
+    $("btn-submit").disabled = !ready;
+    if (state.lastRejectReason) {
+      $("t-choice").textContent = state.lastRejectReason;
+    } else if (blocked) {
+      const total = (pending.spec && pending.spec.total) || [1, 1];
+      const least = Math.max(1, Number(total[0]) || 1);
+      const most = Math.max(least, Number(total[1]) || least);
+      const howMany = least === most ? `${least} 张` : `${least}~${most} 张`;
+      $("t-choice").textContent = `选 ${howMany}后点右端「提交」（已选 ${state.picks.length} 张）。`;
+    } else {
+      $("t-choice").textContent = "可以提交。";
+    }
+    return;
+  }
   if (dialogKind === DIALOG_KINDS.choice
     || dialogKind === DIALOG_KINDS.unknown
     || dialogKind === DIALOG_KINDS.reveal) {

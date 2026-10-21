@@ -391,6 +391,60 @@ def test_fallback_action_prefers_pass_when_the_query_offers_it() -> None:
     pytest.skip("本局没走到带 Pass 的询问（不变量由构造局面单测覆盖）")
 
 
+def test_the_yiji_timeout_gives_the_remaining_cards_to_the_owner() -> None:
+    """U2-12 / D9.1：遗计两步的超时落点。
+
+    - **选牌步**：本轮删掉了 ``Pass``，候选按面内位置枚举 ⇒ 兜底落到第一条 = 第一张亮牌；
+    - **"交给谁"步**：``skill_id`` 前缀 ``yiji:give:``，兜底是 ``seat:{actor}``（把剩下的牌
+      交给自己）。候选第一条通常是 ``seat:0``、不一定是持有者，故必须特判；
+    - 两步都是**纯函数**（同一询问两次调用同一答案），且都不再提供 ``Pass``。
+
+    这是**真会话**：真引擎走到【遗计】的选牌步，再把选牌答案送回去拿到真的给牌询问。
+    """
+    from sgs.state import SelectOption
+    from sgs_web.display import prompt_display
+
+    session = _yiji_real_session()
+    pick = session.pending
+    assert pick is not None and pick.kind == "SELECT_CARDS"
+    assert not any(action.kind == "Pass" for action in pick.legal_actions), (
+        "选牌步不可放弃（D9.1）"
+    )
+    first = fallback_action(pick)
+    assert isinstance(first, SelectCards) and first.picks == (0,), (
+        f"选牌步兜底 = 面内第一张亮牌：{first}"
+    )
+    assert first == pick.legal_actions[0], "候选按面内位置枚举，第一条就是选位置 0"
+    assert fallback_action(pick) == first, "兜底必须是纯函数"
+    assert prompt_display(pick)["default_label"] == "超时将自动选择第一张亮牌"
+
+    # 直接把选牌答案交给**引擎**（不走 `Session.submit_answer`：会话壳的 `drive()` 会让
+    # 脚本参与者把下一问一起答掉，这里要停在真的『交给谁』询问上）。
+    session.engine.submit(first)
+    for _ in range(100):
+        if session.engine.pending is not None:
+            break
+        session.engine._step()  # noqa: SLF001 - 与 `_advance_to_the_yiji_card_step` 同一手法
+    give = session.engine.pending
+    assert give is not None and give.kind == "SELECT_OPTION"
+    assert str(give.skill_id).startswith("yiji:give:"), "这一步就是『交给谁』"
+    assert give.actor == 1, "前置：持有者 / 应答者是座位 1（不是第一个座位）"
+    assert give.legal_actions[0].choice != f"seat:{give.actor}", (
+        "候选第一条不是自己——证明下面的落点来自特判，不是『取第一条』"
+    )
+    assert not any(action.kind == "Pass" for action in give.legal_actions), (
+        "『交给谁』也不可放弃"
+    )
+    target = fallback_action(give)
+    assert isinstance(target, SelectOption) and target.choice == f"seat:{give.actor}", (
+        f"超时把剩下的牌交给自己：{target}"
+    )
+    assert fallback_action(give) == target, "兜底必须是纯函数"
+    assert prompt_display(give)["default_label"] == "超时将把剩下的牌交给自己", (
+        "提示条文案要说清超时的落点（D2）"
+    )
+
+
 def test_fallback_action_answers_the_target_of_a_fanjian_step() -> None:
     """票 06：反间的步 2/3 由**目标**应答（不是发动者）。超时兜底要在"等目标作答"时给出
     一个**合法**代答 —— 带 ``Pass`` 的选牌步落到"取消这一步"，而不是发出非法动作。"""
@@ -2539,7 +2593,7 @@ def test_query_context_walks_the_yiji_steps_with_their_own_wording() -> None:
         },
     )
 
-    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,), optional=True)
+    cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,), optional=False)
     assert query_context(engine, cards_query)["requirement"] == "从亮出的牌里选择一至两张"
 
     give_query = _skill_step_option_query(state, skill_id="yiji:give:0:1", options=("seat:1",))
@@ -2635,12 +2689,23 @@ def test_a_real_session_reaches_the_yiji_card_step_wording() -> None:
     assert data.get("running_skill") == "hero.guojia.yiji"
     assert "skill_id" not in data, "被动帧从不写 skill_id —— 这正是旧判据读不到的原因"
 
+    # 载荷这一段的断言（dialog / 不可放弃 / 超时文案）要以**挂起者本人**的视角看：默认的
+    # 人类座位 0 不是挂起者，那份载荷会把亮牌与弹窗提示一起抹掉（票 15 的私密收口）。
+    session.human_seat = int(query.actor)
     payload = pending_payload(session)
 
     assert payload is not None and payload["context"] is not None
     assert payload["context"]["requirement"] == "从亮出的牌里选择一至两张", (
         "读取方必须真的读到分步文案；退回一句话 summary 就说明判据又读错了键"
     )
+    # U2-12：这一步的表面是**亮牌弹窗**，由服务端以**形状**标记（SELECT_CARDS + 授予牌面），
+    # 前端不抄技能 id。同一份载荷还钉了「不可放弃」与超时文案。
+    assert payload["dialog"] == "reveal"
+    assert all(action["kind"] != "Pass" for action in payload["legal_actions"]), (
+        "选牌步不可放弃（U2-12 / D9.1）：界面因此没有『放弃』键"
+    )
+    assert payload["spec"]["optional"] is False
+    assert payload["prompt_display"]["default_label"] == "超时将自动选择第一张亮牌"
 
 
 def test_the_watched_cards_are_private_to_the_pending_seat() -> None:
@@ -2670,11 +2735,15 @@ def test_the_watched_cards_are_private_to_the_pending_seat() -> None:
         f"别人的载荷里不得出现观看的牌面：{stranger['slots']}"
     )
     assert stranger["revealed"] == [], "观看授予本身就是牌面，别人的载荷里必须为空"
+    assert stranger["dialog"] is None, (
+        "亮牌弹窗提示也只发给挂起者本人：别人的屏幕连『这是私密亮牌』都不用知道"
+    )
 
     # 反向对照：把人类座位换成挂起者本人 ⇒ 同一个载荷**必须**带牌面。
     session.human_seat = 1
     owner = pending_payload(session)
     assert owner is not None
+    assert owner["dialog"] == "reveal", "持有者本人这一步走亮牌弹窗"
     assert {slot["card"]["card_id"] for slot in owner["slots"] if slot["card"]} == watched, (
         "持有者本人必须看得到那两张牌（否则'私密'变成了'谁都不能看'）"
     )
@@ -2714,6 +2783,7 @@ def test_the_409_path_does_not_hand_the_watched_faces_to_a_query_without_a_viewe
         f"裸 Query（409 路径）拿不到查看者 ⇒ 默认不得带牌面：{payload['slots']}"
     )
     assert payload["revealed"] == [], "观看授予本身就是牌面，拿不到查看者时须为空"
+    assert payload["dialog"] is None, "拿不到查看者时也不下发亮牌弹窗提示（fail-closed）"
 
     # 产品调用点（``serve.py`` 的 409 分支）：查看者 = 这个会话的人类座位（0）≠ 挂起者（1）
     # ⇒ 照样抹掉。异常自己带着 human_seat，那条路径因此判得出归属。
@@ -2722,6 +2792,7 @@ def test_the_409_path_does_not_hand_the_watched_faces_to_a_query_without_a_viewe
     assert all(slot["card"] is None for slot in product["slots"]), (
         "409 的下发方只需原样转交 StaleAnswer.human_seat，不得再漏牌面"
     )
+    assert product["dialog"] is None, "非挂起者的 409 载荷同样不带亮牌弹窗提示"
 
     # 反向对照：把查看者声明成挂起者本人 ⇒ 同一份裸 Query 必须带牌面。
     owner = pending_payload(error.pending, human_seat=int(query.actor))
@@ -2729,6 +2800,7 @@ def test_the_409_path_does_not_hand_the_watched_faces_to_a_query_without_a_viewe
     assert {slot["card"]["card_id"] for slot in owner["slots"] if slot["card"]} == watched, (
         "持有者本人必须看得到那两张牌（否则'私密'变成了'谁都不能看'）"
     )
+    assert owner["dialog"] == "reveal", "持有者本人的 409 载荷照常开亮牌弹窗"
 
 
 def test_the_hanging_payload_still_shows_the_watched_faces_to_the_owner() -> None:
@@ -2747,6 +2819,7 @@ def test_the_hanging_payload_still_shows_the_watched_faces_to_the_owner() -> Non
     assert payload is not None
     assert {slot["card"]["card_id"] for slot in payload["slots"] if slot["card"]} == watched
     assert {card["card_id"] for card in payload["revealed"]} == watched
+    assert payload["dialog"] == "reveal", "正常挂起路径：持有者本人的选牌步走亮牌弹窗"
 
 
 def test_the_context_fixture_refuses_a_key_that_damage_frames_never_carry() -> None:

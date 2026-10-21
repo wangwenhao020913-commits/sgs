@@ -340,8 +340,8 @@ def _yiji(host: Any, frame: Any) -> Any:
     故本回调在**同一个伤害点**内循环：
 
         while 还有没交出的亮牌：
-            选牌（``SELECT_CARDS``，面里只铺**剩余**亮牌，``total=(1, 2)``、可选 ``Pass`` 收尾）
-            → 选座次（``SELECT_OPTION``，选项 ``seat:N`` = 任意存活角色）
+            选牌（``SELECT_CARDS``，面里只铺**剩余**亮牌，``total=(1, 2)``、**不可放弃**）
+            → 选座次（``SELECT_OPTION``，选项 ``seat:N`` = 任意存活角色，**不可放弃**）
             → 把这批牌一起移进收牌人的手牌
 
     选一张 = 现有的一轮一张路径（两张分两轮、每轮可换人）；选两张 = **一次交出两张**
@@ -350,9 +350,13 @@ def _yiji(host: Any, frame: Any) -> Any:
     旧实现把"下一张"交给**下一个伤害点**驱动：1 点伤害只有一轮 ⇒ 第二张永远发不出去；
     2 点伤害则第二轮**重新观看牌堆顶**（第一张已被移走）⇒ 两张亮牌被换成另一对。
 
-    ``Pass``（选牌面上放弃）= 剩下的亮牌留在牌堆顶、本点收尾。进度落在**帧私有键**里
-    （点号 + 已交牌 id），故"挂起 → 应答 → 续跑"重入本回调时既不复述也不重发询问；
-    移动本身由 ``move_in_frame`` 的重入守卫保证只发生一次（`CODING_STANDARDS.md` 规则 3）。
+    **两步都不可放弃**（U2-12 / spec D2 + D9.1）：官方原文是"可以将这些牌交给任意角色"，
+    是"交给谁"的选择，不是"可以不交"——技能一旦发动就必然把两张都分配出去。旧实现在选牌
+    步给 ``optional=True``，``Pass`` = 剩下的亮牌留在牌堆顶；本轮按 D9.1 删掉它（超时兜底改
+    由接入层"把剩下的牌交给自己"，见 ``sgs_web.timeout.fallback_action``）。进度落在**帧
+    私有键**里（点号 + 已交牌 id），故"挂起 → 应答 → 续跑"重入本回调时既不复述也不重发
+    询问；移动本身由 ``move_in_frame`` 的重入守卫保证只发生一次（`CODING_STANDARDS.md`
+    规则 3）。
     """
     owner = frame.data["skill_owner"]
     point = damage_point_index(frame)
@@ -376,7 +380,9 @@ def _yiji(host: Any, frame: Any) -> Any:
     # ``total=(1, 2)`` ⇒ 面内同时铺 1 张与 2 张两种候选：选 2 张 = 一次交同一名角色；
     # 选 1 张 = 现有的一轮一张路径（两张分两轮、每轮可换人）。两条路径共用下面同一段
     # "选座 → 移动"，故"分两次给"的行为一字不改。
-    spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 2), optional=True)
+    # U2-12（spec D9.1）：**不可放弃**——``optional=False``，候选面里不再有 ``Pass``。
+    # "你可以"只到技能发动询问为止（那一问的 ``optional`` 仍为真）；发动之后必然要分配。
+    spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 2), optional=False)
     picked = host.ask_selection(
         frame,
         owner=_ASK_YIJI_PICK,
@@ -393,7 +399,8 @@ def _yiji(host: Any, frame: Any) -> Any:
     if host.suspended(picked):
         return "stay"
     if not picked:
-        # "可以不交给任何人"：剩下的亮牌留在牌堆顶，本点收尾（键照留，重入仍返回空）。
+        # 防御分支：``optional=False`` 时引擎不会给出空答案（候选面里没有 ``Pass``）；
+        # 宿主级直接调回调的测试若硬塞空元组，按"本点收尾"处理而不是死循环。
         return None
     # ---- 交给谁（官方："将这些牌**交给任意角色**"）--------------------------------
     # 用 ``SELECT_OPTION`` 承载：它的 ``options`` 是**开放闭集**（任意字符串元组），

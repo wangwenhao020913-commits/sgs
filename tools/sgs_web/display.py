@@ -35,10 +35,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from sgs.data import IDENTITY_LABELS, HeroTable, Suit, color_of_suit
-from sgs.state import CardRef, EndPhase, Pass, PlayerPublic, Query
+from sgs.state import CardRef, EndPhase, Pass, PlayerPublic, Query, SelectCards, SelectOption
 
 from .descriptions import card_description
-from .timeout import fallback_action
+from .timeout import YIJI_GIVE_PREFIX, fallback_action
 
 __all__ = [
     "CARD_ATTRIBUTES",
@@ -255,14 +255,32 @@ def seat_display(
 def prompt_display(query: Query) -> dict[str, Any]:
     """提示条契约：询问文本 + 服务端超时默认动作 + 给人看的默认动作说明。
 
-    默认动作的真源仍是 :func:`sgs_web.timeout.fallback_action`（``Pass → EndPhase →
-    legal_actions[0]``）；这里只把它序列化成前端可直接显示的形状，不自己重新选。
-    没有候选是引擎不该出现的状态：与 ``fallback_action`` 一致直接抛，**不**编一个
-    ``None`` 默认动作把契约打成半截；调用方（``decorate_pending``）对损坏报文显式
-    下发 ``prompt_display = None``。
+    默认动作的真源仍是 :func:`sgs_web.timeout.fallback_action`（遗计给牌特判 →
+    ``Pass`` → ``EndPhase`` → ``legal_actions[0]``）；这里只把它序列化成前端可直接显示的
+    形状，不自己重新选。没有候选是引擎不该出现的状态：与 ``fallback_action`` 一致直接抛，
+    **不**编一个 ``None`` 默认动作把契约打成半截；调用方（``decorate_pending``）对损坏报文
+    显式下发 ``prompt_display = None``。
+
+    **【遗计】的文案特判**（U2-12 / spec D2「超时 = 剩下的交给自己」）：只在默认动作**真的**
+    是那条 ``seat:{actor}`` 时才说"交给自己"——不按技能名猜，也不改任何规则。选牌步同理：
+    亮牌面的默认动作是第一张亮牌，文案就说第一张亮牌（仍是纯展示）。
     """
     default = fallback_action(query)
-    if isinstance(default, Pass):
+    skill_id = getattr(query, "skill_id", None)
+    if (
+        isinstance(default, SelectOption)
+        and isinstance(skill_id, str)
+        and skill_id.startswith(YIJI_GIVE_PREFIX)
+        and default.choice == f"seat:{query.actor}"
+    ):
+        label = "超时将把剩下的牌交给自己"
+    elif (
+        isinstance(default, SelectCards)
+        and str(getattr(query, "kind", "")) == "SELECT_CARDS"
+        and getattr(query, "revealed", ())
+    ):
+        label = "超时将自动选择第一张亮牌"
+    elif isinstance(default, Pass):
         label = "超时将自动放弃"
     elif isinstance(default, EndPhase):
         label = "超时将自动结束出牌阶段"

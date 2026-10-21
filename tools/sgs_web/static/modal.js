@@ -135,9 +135,9 @@ function isUnknownZoneStep(pending) {
  *  - ``pending.harvest``：服务端为五谷派生的结算状态（U2-11 / D10）。它只在五谷的
  *    ``SELECT_CARDS`` 取牌步骤上开窗（``spec.zones`` 含 ``processing`` 或槽位全在处理区），
  *    且必须还有**当前目标**（``harvest.current`` 非空）——结算末尾没有当前目标时不开。
- *  - ``pending.dialog === "reveal"``：给票 12 的**显式模板标记**（遗计亮的是牌堆顶两张，
- *    没有五谷的 target 列表）。目前没有生产者；先留判据，12 接进来时只喂这个键即可，
- *    不必再改这里。
+ *  - ``pending.dialog === "reveal"``：服务端给**观看牌面**的选牌步打上的**显式模板标记**
+ *    （U2-12：【遗计】的牌堆顶两张没有五谷的 target 列表；``projection.pending_payload``
+ *    以``SELECT_CARDS`` + 授予牌面这个**形状**派生，前端不认技能 id）。
  *
  * 判据只看"这一步是不是亮牌面"，不看 actor 是不是人类（`syncDialog` 另问 `isOwnPending`；
  * 五谷的 AI 拿牌阶段要显示在人类屏幕上，见 `syncDialog` 的 harvest 例外）。
@@ -212,7 +212,8 @@ function dialogKeyFor(kind, pending) {
 /** 标题：模板自报；票 08 / 09 / 11 / 12 接进来时换成各自模板的文案。
  *
  * 亮牌模板（票 11 / 12）的标题读**载荷**：五谷是 `harvest.title`（服务端从使用的牌面翻成
- * 「五谷丰登」，前端不抄牌名）；没有时退回中性的「亮牌」。 */
+ * 「五谷丰登」），遗计是 `context.name`（服务端从技能面翻成「遗计」）；前端不抄牌名 / 技能名。
+ * 两者都没有时退回中性的「亮牌」。 */
 function dialogTitleFor(kind, pending) {
   if (kind === "preactivation") {
     const pa = state.preactivation;
@@ -223,7 +224,8 @@ function dialogTitleFor(kind, pending) {
   if (kind === DIALOG_KINDS.unknown) return "选择一张牌";
   if (kind === DIALOG_KINDS.reveal) {
     const title = pending && pending.harvest && pending.harvest.title;
-    return title || "亮牌";
+    const contextName = pending && pending.context && pending.context.name;
+    return title || contextName || "亮牌";
   }
   return "询问";
 }
