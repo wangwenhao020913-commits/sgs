@@ -210,6 +210,26 @@ def section5_rows(text: str | None = None) -> list[tuple[int, str]]:
 _DOC06_SOURCE_TYPES = frozenset({"程序化约定", "偏离一手", "无一手源"})
 BARE_TEST_RE = re.compile(r"::(test_[A-Za-z0-9_]+)")
 
+# U1-09 的八条账本行（`06`（§5「程序化约定与偏离一手」））。收口票要求“逐条入账”，
+# 这里钉住每条都还在、且「落地位置」列至少有一个测试落点；否则下一轮只改文档措辞
+# 就能把一条裁定悄悄删掉，而只读账本检查仍全绿。
+U1_LEDGER_HEADINGS: tuple[str, ...] = (
+    "**U1 牌桌空间",
+    "**U1 高亮语义",
+    "**U1 倒计时统一",
+    "**U1 简易事件流",
+    "**U1 身份明置 / 暗置",
+    "**U1 详情 = 右键只读模态",
+    "**U1 虚拟 / 转化牌只在中央舞台",
+    "**U1 展示契约由服务端派生",
+)
+
+# `ui_smoke` 的用例 id（U1-01a / U1-06w5 …）。账本落点引用它时必须真的能在烟测里找到，
+# 否则"引用了测试文件"只是把整份文件当锚点——这正是 `CODING_STANDARDS.md` §1 反对的
+# "存在不等于行为落点"。
+U1_CASE_ID_RE = re.compile(r"\bU1-0[1-9][A-Za-z0-9]*\b")
+SMOKE_TEST = REPO_ROOT / "tests" / "support" / "ui_smoke.mjs"
+
 
 def _table_cells(line: str) -> list[str]:
     """按 Markdown 表格拆单元格，**忽略反引号里的 ``|``**。
@@ -382,6 +402,37 @@ def test_bare_test_citation_helper_flags_a_missing_name() -> None:
     """合成反例：同一 landing cell 里 `test_ok` 放行、裸 `::test_missing` 判红。"""
     landing = "`tests/test_demo.py::test_ok` / `::test_missing`"
     assert _bare_test_citation_errors(landing, {"test_ok"}) == ["test_missing"]
+
+
+def test_the_u1_ledger_rows_are_present_and_carry_a_test_landing() -> None:
+    """U1-09 的八条收口账本行必须逐条在 §5，且「落地位置」列有可核的测试落点。
+
+    只靠 ``section5_rows`` 的通用检查抓不到“某一整行被删掉”：少一行不会让任何现有断言
+    变红。这里对 U1 的八个主题各钉一条标题，并要求每条都引用 ``tests/`` 下的正式 pytest
+    名或**具体** ``ui_smoke`` 用例 id（不接受只写文件名）；引用的 U1 用例 id 还必须真的
+    出现在烟测里。删一条、把落点改成纯散文、或引一个不存在的用例，都直接判红。
+    """
+    rows = section5_rows()
+    smoke = SMOKE_TEST.read_text(encoding="utf-8")
+    for heading in U1_LEDGER_HEADINGS:
+        matches = [
+            (line_no, line) for line_no, line in rows if line.startswith(f"| {heading}")
+        ]
+        assert len(matches) == 1, (
+            f"`06`（§5「程序化约定与偏离一手」）应恰好有一条以 {heading!r} 开头的 U1 账本行，"
+            f"实际 {len(matches)} 条"
+        )
+        line_no, line = matches[0]
+        landing = _landing_cell(line)
+        assert "tests/" in landing, f"§5:{line_no}: U1 账本行的落点缺少 tests/ 引用：{landing}"
+        case_ids = U1_CASE_ID_RE.findall(landing)
+        assert "::test_" in landing or case_ids, (
+            f"§5:{line_no}: U1 账本行的落点没有正式测试名或具体 ui_smoke 用例 id：{landing}"
+        )
+        missing = [case_id for case_id in case_ids if case_id not in smoke]
+        assert not missing, (
+            f"§5:{line_no}: U1 账本行引用的 ui_smoke 用例不存在：{missing}"
+        )
 
 
 def test_doc06_superseded_by_in_landing_cells_is_well_formed() -> None:
