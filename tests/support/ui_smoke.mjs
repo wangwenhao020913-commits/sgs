@@ -4924,8 +4924,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const chipText = $("t-hand").children[0].text();
   check("U1-04a 手牌卡名读 display_name（转化火杀显示「杀」）",
     chipText.includes("杀") && !chipText.includes("火杀"), `手牌="${chipText}"`);
-  check("U1-04d 牌面悬停 title 读服务端下发的 description",
-    $("t-hand").children[0].getAttribute("title") === fire.description,
+  check("U1-04d 牌面悬停 title 读服务端下发的 description（转化牌另外列出源牌）",
+    $("t-hand").children[0].getAttribute("title").includes(fire.description),
     `title="${$("t-hand").children[0].getAttribute("title")}"`);
   // 候选里的卡是裸卡：文案按 card_id 回查 candidate_index 的展示副本才拿到「杀」。
   const label = ui.actionLabel({ kind: "UseCard", card: fireRaw, targets: [1] });
@@ -6007,6 +6007,357 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && $("t-modal").hidden === false,
     `seats=${realPlayers.length} opponentSkills=${realSkills.map((skill) => skill.name).join("、")}`);
   fireDocument("keydown", { key: "Escape" });
+}
+
+/* ============ U1-07：虚拟牌 / 转化牌（产物卡面 / 悬停源牌 / 火雷颜色 / 将以使用） ============
+ *
+ * 判据来自票面 `07` 与 spec §2.5：
+ * - 虚拟牌：右上「虚」、三空角、中间牌名；纯虚拟牌悬停显示「虚拟牌」；
+ * - 转化牌：右上「转」、左上红 / 黑 / 无、中间产物；单源继承花色 / 点数，多源只显示颜色；
+ *   悬停列全部来源牌；
+ * - 手牌 / 候选仍是源牌（不另加角标）；选中源牌时提示条写「将以【杀】使用」；
+ * - 火杀 / 雷杀 / 普通杀都显示「杀」，火杀红、雷杀蓝；转化 / 虚拟产物同样；
+ * - 中央 / 处理区只显示产物，不重复显示源牌；历史进事件流。
+ *
+ * 前半段喂与响应体同形的合成载荷（界面读法只由这一份决定）；后半段用**真会话**走
+ * 龙胆 / 丈八 / 八卦三条真实路径。
+ */
+{
+  const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) {
+      out.push(child);
+      walk(child, out);
+    }
+    return out;
+  };
+  const hasClass = (child, name) => child.classList.contains(name)
+    || String(child.className || "").split(/\s+/).includes(name);
+  const byClass = (node, name) => walk(node).filter((child) => hasClass(child, name));
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const mk = (id, name, extra = {}) => ({
+    ...synthCard(id, name), slot: null, attribute: "普通", kind: "normal",
+    description: `【${name}】的全文描述`, ...extra,
+  });
+  const sourceDodge = mk(2, "闪", { type: "dodge", suit: "heart", rank: 10, color: "red" });
+  const sourceSlash = mk(3, "杀", { type: "slash", suit: "spade", rank: 7, color: "black" });
+  const sourceOf = (card) => ({
+    ...card, display_name: card.name, attribute: "普通", kind: "normal", source_cards: [],
+  });
+  const virtual = mk(-9, "闪", {
+    type: "dodge", suit: null, rank: null, color: null, display_name: "闪",
+    kind: "virtual", virtual_sources: [], source_cards: [], description: "虚拟【闪】的全文描述",
+  });
+  const single = mk(-10, "杀", {
+    type: "slash", suit: "heart", rank: 10, color: "red", display_name: "杀",
+    kind: "transformed", virtual_sources: [2], source_cards: [sourceOf(sourceDodge)],
+    description: "转化【杀】的全文描述",
+  });
+  const multi = mk(-11, "杀", {
+    type: "slash", suit: null, rank: null, color: null, display_name: "杀",
+    kind: "transformed", virtual_sources: [2, 3],
+    source_cards: [sourceOf(sourceDodge), sourceOf(sourceSlash)],
+    description: "多源转化【杀】的全文描述",
+  });
+  const fire = mk(-12, "火杀", {
+    type: "fire_slash", suit: "heart", rank: 10, color: "red", display_name: "杀",
+    attribute: "火焰", kind: "transformed", virtual_sources: [2],
+    source_cards: [sourceOf(sourceDodge)], description: "转化火【杀】的全文描述",
+  });
+  const thunder = mk(-13, "雷杀", {
+    type: "thunder_slash", suit: null, rank: null, color: null, display_name: "杀",
+    attribute: "雷电", kind: "virtual", virtual_sources: [], source_cards: [],
+    description: "虚拟雷【杀】的全文描述",
+  });
+
+  const faceView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 900, prompt: "",
+    legal_actions: [], candidate_index: {}, virtual_index: {}, context: null, option_seats: {},
+  });
+  faceView.snapshot.self_hand = [sourceDodge, sourceSlash];
+  faceView.snapshot.processing = [virtual, single, multi, fire, thunder];
+  ui.state.view = faceView;
+  ui.resetSelection();
+  ui.renderTable();
+  const faces = $("t-processing").children;
+  const faceOf = (id) => faces.find((face) => attr(face, "data-card-id") === String(id));
+
+  check("U1-07a 处理区只画产物：五张产物牌，来源实体牌（2 / 3）不再重复出现",
+    faces.length === 5
+      && faces.every((face) => ["-9", "-10", "-11", "-12", "-13"].includes(attr(face, "data-card-id")))
+      && !faces.some((face) => ["2", "3"].includes(attr(face, "data-card-id"))),
+    `ids=${faces.map((face) => attr(face, "data-card-id")).join(",")}`);
+
+  const virtualFace = faceOf(-9);
+  check("U1-07b 虚拟牌：右上「虚」、左上 / 左下 / 右下空、中间牌名",
+    byClass(virtualFace, "corner")[0].textContent === "虚"
+      && byClass(virtualFace, "suit").length === 0
+      && byClass(virtualFace, "rank").length === 0
+      && byClass(virtualFace, "color-mark").length === 0
+      && byClass(virtualFace, "cname")[0].textContent === "闪"
+      && attr(virtualFace, "data-kind") === "virtual",
+    `text="${virtualFace.text()}"`);
+  check("U1-07b2 纯虚拟牌悬停显示「虚拟牌」+ 服务端描述",
+    virtualFace.getAttribute("title").startsWith("虚拟牌\n")
+      && virtualFace.getAttribute("title").includes(virtual.description),
+    `title="${virtualFace.getAttribute("title")}"`);
+
+  const singleFace = faceOf(-10);
+  check("U1-07c 单源转化：右上「转」、左上红色 + 继承花色 / 点数、中间产物「杀」",
+    byClass(singleFace, "corner")[0].textContent === "转"
+      && hasClass(byClass(singleFace, "color-mark")[0], "red")
+      && byClass(singleFace, "suit")[0].textContent === "♥"
+      && byClass(singleFace, "rank")[0].textContent === "10"
+      && byClass(singleFace, "cname")[0].textContent === "杀"
+      && attr(singleFace, "data-kind") === "transformed",
+    `text="${singleFace.text()}"`);
+
+  const multiFace = faceOf(-11);
+  check("U1-07d 多源转化：只显示颜色（无色虚线），花色 / 点数为空、角标仍是「转」",
+    byClass(multiFace, "corner")[0].textContent === "转"
+      && hasClass(byClass(multiFace, "color-mark")[0], "none")
+      && byClass(multiFace, "suit").length === 0
+      && byClass(multiFace, "rank").length === 0
+      && byClass(multiFace, "cname")[0].textContent === "杀",
+    `text="${multiFace.text()}"`);
+  check("U1-07e 转化牌悬停列出全部来源牌（单源 / 多源都列）",
+    singleFace.getAttribute("title").includes("源牌：♥10【闪】")
+      && multiFace.getAttribute("title").includes("源牌：♥10【闪】、♠7【杀】")
+      && multiFace.getAttribute("title").includes(multi.description),
+    `single="${singleFace.getAttribute("title")}" multi="${multiFace.getAttribute("title")}"`);
+  check("U1-07e2 转化牌本身的牌名 / 颜色标在左上：红 / 黑 / 无三种类都有 CSS",
+    /\.card\.face \.color-mark\.red\s*\{[^}]*var\(--accent\)/s.test(css)
+      && /\.card\.face \.color-mark\.black\s*\{[^}]*var\(--ink\)/s.test(css)
+      && /\.card\.face \.color-mark\.none\s*\{[^}]*dashed/s.test(css),
+    "红 / 黑 / 无 三条规则");
+
+  check("U1-07f 火杀 / 雷杀 / 普通杀都显示「杀」；火红、雷蓝（转化 / 虚拟产物同样）",
+    byClass(faceOf(-12), "cname")[0].textContent === "杀"
+      && hasClass(faceOf(-12), "attr-fire")
+      && byClass(faceOf(-13), "cname")[0].textContent === "杀"
+      && hasClass(faceOf(-13), "attr-thunder")
+      && /\.card\.face\.attr-fire \.cname\s*\{[^}]*#b3261e/s.test(css)
+      && /\.card\.face\.attr-thunder \.cname\s*\{[^}]*#1d4e9c/s.test(css),
+    `fire="${byClass(faceOf(-12), "cname")[0].textContent}" thunder="${byClass(faceOf(-13), "cname")[0].textContent}"`);
+
+  check("U1-07g 手牌仍是源实体牌、**不加角标**（两张普通牌都没有「虚 / 转」）",
+    $("t-hand").children.length === 2
+      && $("t-hand").children.every((card) => byClass(card, "corner").length === 0)
+      && $("t-hand").children.map((card) => attr(card, "data-kind")).join(",") === "normal,normal",
+    `kinds=${$("t-hand").children.map((card) => attr(card, "data-kind")).join(",")}`);
+
+  // 选中源牌（【闪】）→ 提交的其实是虚拟【杀】；提示条写「将以【杀】使用」。
+  const convertPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 901,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ answers_seq: 901, kind: "UseCard", card: { ...single, source_cards: [] }, targets: [1] }],
+    candidate_index: {
+      "-10": { card: single, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
+    },
+    virtual_index: { "2": [{ card_id: -10, skill_ids: ["hero.zhaoyun.longdan"] }] },
+    context: null, option_seats: {},
+  };
+  const convertView = synthView(convertPending);
+  convertView.snapshot.self_hand = [sourceDodge];
+  convertView.snapshot.processing = [];
+  ui.state.view = convertView;
+  ui.resetSelection();
+  ui.toggleFocus(2);
+  ui.renderTable();
+  ui.renderPending(convertView);
+  const hintText = $("t-target-hint").textContent;
+  check("U1-07h 选中源牌：提示条写「将以【杀】使用」（不是源牌的牌名）",
+    hintText.includes("将以【杀】使用") && !hintText.includes("将以【闪】使用"),
+    `hint="${hintText}"`);
+  check("U1-07h2 仍是手牌里的源牌被选中；提交的候选是虚拟【杀】",
+    $("t-hand").children[0].classList.contains("sel")
+      && byClass($("t-hand").children[0], "corner").length === 0
+      && ui.buildAction() && String(ui.buildAction().card.card_id) === "-10",
+    `focus=${ui.state.focusCardId} card=${ui.buildAction() && ui.buildAction().card.card_id}`);
+
+  // 回放：来源牌进处理区的那条 card_move 也画产物（快照的 processing 是产物映射的来源）。
+  faceView.snapshot.processing = [];
+  ui.state.view = faceView;
+  ui.resetSelection();
+  ui.renderTable();
+  const playbackBody = {
+    session_id: "u1-07-playback", seed: 1, human_seat: 0, finished: false, timeout_seconds: null,
+    heroes: [], skills: [], pending: null, cursor: 3, log_seq: 0, narrative: [],
+    snapshot: { ...faceView.snapshot, processing: [single] },
+    records: [{
+      kind: "delta", delta_type: "card_move", seq: 2,
+      cards: [{ ...sourceDodge }],
+      from_zone: { zone: "hand", seat: 0 }, to_zone: { zone: "processing", seat: null },
+      reason: "USE", owner: 0,
+    }],
+  };
+  ui.applyViewRaw(playbackBody);
+  ui.stepPlayback(true);
+  check("U1-07i 回放期间来源牌进处理区 = 画产物（不先闪两张源牌）",
+    ui.state.effectCards.length === 1
+      && String(ui.state.effectCards[0].card_id) === "-10"
+      && ui.state.effectCards[0].source === 0,
+    `effect=${JSON.stringify(ui.state.effectCards.map((card) => card.card_id))}`);
+  ui.flushPlayback();
+  check("U1-07i2 快照落地后处理区仍是产物（来源牌不重复显示）",
+    $("t-processing").children.length === 1
+      && attr($("t-processing").children[0], "data-card-id") === "-10",
+    `ids=${$("t-processing").children.map((child) => attr(child, "data-card-id")).join(",")}`);
+
+  /* ---- 真会话：龙胆 / 丈八 / 八卦各一条 ---- */
+  const submitEquip = async (typeId) => {
+    const pending = ui.state.view.pending;
+    if (!pending) return false;
+    const hit = Object.entries(pending.candidate_index || {}).find(
+      ([, entry]) => entry.card && entry.card.type === typeId);
+    if (!hit) return false;
+    ui.resetSelection();
+    ui.toggleFocus(Number(hit[0]));
+    ui.renderPending(ui.state.view);
+    if (!ui.buildAction()) return false;
+    await ui.submitAction();
+    return true;
+  };
+  const passResponse = async () => {
+    const pending = ui.state.view.pending;
+    if (!pending) return false;
+    const index = (pending.legal_actions || []).findIndex((action) => action.kind === "Pass");
+    if (index < 0) return false;
+    ui.resetSelection();
+    ui.state.selectedOption = index;
+    await ui.submitAction();
+    return true;
+  };
+
+  // ① 龙胆：seed 5 的赵云起始手牌里有【闪】；出牌阶段真会话给出龙胆清单。
+  await newSession(5);
+  let longdanPending = null;
+  for (let step = 0; step < 40; step += 1) {
+    const pending = ui.state.view.pending;
+    if (!pending) break;
+    if (pending.actor === 0 && pending.kind === "PLAY_PHASE"
+      && pending.preactivations && pending.preactivations["hero.zhaoyun.longdan"]) {
+      longdanPending = pending;
+      break;
+    }
+    if (!(await passResponse())) await advanceOnce();
+  }
+  const longdanHandDodge = (ui.state.view.snapshot.self_hand || [])
+    .find((card) => card.type === "dodge");
+  const longdanButton = $("t-skills").children.find(
+    (node) => node.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
+  if (longdanButton) (longdanButton.listeners.click || []).forEach((fn) => fn({ target: longdanButton }));
+  const longdanOptions = ui.state.preactivation
+    ? (ui.preactivationOptions(ui.state.preactivation, 0) || [])
+    : [];
+  check("U1-07j 真会话【龙胆】：技能按钮进清单，来源步列出真手牌里的【闪】",
+    Boolean(longdanPending) && Boolean(longdanButton)
+      && Boolean(longdanHandDodge)
+      && longdanOptions.map(String).includes(String(longdanHandDodge.card_id)),
+    `dodge=${longdanHandDodge && longdanHandDodge.card_id} options=${longdanOptions.join(",")}`);
+  if (longdanHandDodge) {
+    ui.togglePreativationCard(Number(longdanHandDodge.card_id));
+    ui.renderPending(ui.state.view);
+  }
+  check("U1-07j2 真会话【龙胆】：选中真手牌的【闪】后提示条写「将以【杀】使用」",
+    Boolean(longdanHandDodge) && $("t-target-hint").textContent.includes("将以【杀】使用"),
+    `hint="${$("t-target-hint").textContent}" products=${longdanPending && (longdanPending.transform_products || []).length}`);
+  ui.cancelOrClear();
+
+  // ② 丈八蛇矛：seed 9 起始手牌有它；装备后真会话给出两来源步的转化清单。
+  await newSession(9);
+  let equippedSerpent = false;
+  for (let step = 0; step < 80 && !equippedSerpent; step += 1) {
+    const pending = ui.state.view.pending;
+    if (!pending) break;
+    if (pending.actor === 0 && pending.kind === "PLAY_PHASE"
+      && await submitEquip("serpent_spear")) {
+      equippedSerpent = true;
+      break;
+    }
+    if (!(await passResponse())) await advanceOnce();
+  }
+  const serpentPending = ui.state.view.pending;
+  const serpentEquip = (ui.state.view.snapshot.players[0].equip || [])
+    .map((card) => card.type);
+  const serpentSteps = (serpentPending && serpentPending.preactivations
+    && serpentPending.preactivations["equip.serpent_spear"]) || null;
+  const serpentButton = $("t-skills").children.find(
+    (node) => node.getAttribute("data-skill-id") === "equip.serpent_spear");
+  check("U1-07k 真会话【丈八】：seed 9 装备后服务端下发两来源步清单，技能按钮可点",
+    equippedSerpent && serpentEquip.includes("serpent_spear")
+      && Boolean(serpentSteps) && serpentSteps.length >= 1
+      && serpentSteps[0].min === 2 && serpentSteps[0].max === 2
+      && Boolean(serpentButton) && serpentButton.disabled === false
+      && serpentButton.getAttribute("data-preactivation") === "2",
+    `equipped=${serpentEquip.join(",")} steps=${serpentSteps && JSON.stringify(serpentSteps.map((s) => [s.name, s.min, s.max]))} button=${serpentButton && serpentButton.disabled}`);
+  if (serpentButton) (serpentButton.listeners.click || []).forEach((fn) => fn({ target: serpentButton }));
+  const serpentOptions = ui.state.preactivation
+    ? (ui.preactivationOptions(ui.state.preactivation, 0) || []).map(String)
+    : [];
+  const serpentProducts = (serpentPending && serpentPending.transform_products) || [];
+  // 真会话的产物 = 一张虚拟【杀】+ 两张来源牌面；挑一组两来源都在清单里的。
+  const serpentProduct = serpentProducts.find(
+    (candidate) => (candidate.source_cards || []).length === 2
+      && candidate.source_cards.every(
+        (card) => serpentOptions.includes(String(card.card_id))));
+  const serpentPair = serpentProduct
+    ? serpentProduct.source_cards.map((card) => Number(card.card_id))
+    : [];
+  for (const id of serpentPair) ui.togglePreativationCard(id);
+  if (serpentProduct) ui.renderPending(ui.state.view);
+  const chosenSources = ui.state.preactivation
+    ? (ui.state.preactivation.answers[0].values || []).map(Number)
+    : [];
+  check("U1-07k2 真会话【丈八】：产物带两张来源牌面；选齐来源后提示条写「将以【杀】使用」",
+    Boolean(serpentProduct)
+      && chosenSources.slice().sort().join(",") === serpentPair.slice().sort().join(",")
+      && serpentPair.every((id) => serpentOptions.includes(String(id)))
+      && $("t-target-hint").textContent.includes("将以【杀】使用"),
+    `sources=${serpentPair.join(",")} chosen=${chosenSources.join(",")} hint="${$("t-target-hint").textContent}"`);
+
+  // ③ 八卦阵：seed 7 的起始手牌有它；装上后真会话走到需要【闪】的窗口，候选里有八卦。
+  await newSession(7);
+  let equippedBagua = false;
+  let sawBaguaDodge = false;
+  for (let step = 0; step < 160; step += 1) {
+    const pending = ui.state.view.pending;
+    if (!pending) break;
+    if (pending.actor === 0 && pending.kind === "PLAY_PHASE" && !equippedBagua
+      && await submitEquip("eight_diagrams")) {
+      equippedBagua = true;
+      continue;
+    }
+    if (pending.actor === 0 && pending.kind === "DODGE"
+      && (pending.legal_actions || []).some(
+        (action) => action.kind === "ActivateSkill" && action.skill_id === "equip.eight_diagrams")) {
+      sawBaguaDodge = true;
+      break;
+    }
+    if (!(await passResponse())) await advanceOnce();
+  }
+  const baguaPending = ui.state.view.pending;
+  const baguaEquip = (ui.state.view.snapshot.players[0].equip || []).map((card) => card.type);
+  check("U1-07l 真会话【八卦】：seed 7 装上后走到 DODGE 窗口，候选里出现八卦阵的 ActivateSkill",
+    equippedBagua && baguaEquip.includes("eight_diagrams") && sawBaguaDodge
+      && (baguaPending.legal_actions || []).some(
+        (action) => action.kind === "ActivateSkill" && action.skill_id === "equip.eight_diagrams"),
+    `equip=${baguaEquip.join(",")} dodge=${sawBaguaDodge} legal=${(baguaPending.legal_actions || []).map((a) => a.kind + ":" + (a.skill_id || "")).join(",")}`);
+  const baguaIndex = (baguaPending.legal_actions || []).findIndex(
+    (action) => action.kind === "ActivateSkill" && action.skill_id === "equip.eight_diagrams");
+  if (baguaIndex >= 0) {
+    ui.resetSelection();
+    ui.state.selectedOption = baguaIndex;
+    await ui.submitAction();
+  }
+  check("U1-07l2 真会话【八卦】：选中八卦阵候选并提交，服务端接受（没有 4xx 拒绝）",
+    baguaIndex >= 0 && ui.state.lastRejectReason === ""
+      && Boolean(ui.state.view && (ui.state.view.finished || ui.state.view.pending)),
+    `index=${baguaIndex} reject="${ui.state.lastRejectReason}" pending=${ui.state.view && (ui.state.view.pending && ui.state.view.pending.kind)}`);
+
+  ui.state.view = faceView;
+  ui.resetSelection();
+  ui.renderTable();
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

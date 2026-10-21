@@ -127,6 +127,30 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 }
 .card.face.attr-fire .cname { color: #b3261e; }
 .card.face.attr-thunder .cname { color: #1d4e9c; }
+/* 虚拟 / 转化牌（U1-07）：右上角标「虚 / 转」；转化牌左上另有红 / 黑 / 无的颜色标记，
+ * 单源继承的花色 / 点数往右让一格。手牌 / 候选拿到的始终是源实体牌，故没有角标。 */
+.card.face .corner {
+  position: absolute; right: calc(6 * var(--dsu)); top: calc(3 * var(--dsu));
+  min-width: calc(14 * var(--dsu)); height: calc(14 * var(--dsu));
+  display: grid; place-items: center;
+  font-size: calc(10 * var(--dsu)); font-weight: 700; line-height: 1;
+  border-radius: calc(4 * var(--dsu));
+  color: #fff; background: var(--ink);
+}
+.card.face.kind-virtual .corner { background: var(--accent); }
+.card.face.picked .corner { display: none; }
+.card.face .color-mark {
+  position: absolute; left: calc(6 * var(--dsu)); top: calc(6 * var(--dsu));
+  width: calc(8 * var(--dsu)); height: calc(8 * var(--dsu)); border-radius: 50%;
+}
+.card.face .color-mark.red { background: var(--accent); }
+.card.face .color-mark.black { background: var(--ink); }
+.card.face .color-mark.none {
+  border: 1px dashed var(--dim); background: transparent;
+}
+.card.face.has-mark .suit, .card.face.has-mark .rank { left: calc(18 * var(--dsu)); }
+.card.face.kind-virtual { background: linear-gradient(180deg, #fffdf4 0%, #eef3ff 100%); }
+.card.face.kind-transformed { background: linear-gradient(180deg, #fffef9 0%, #efe8f7 100%); }
 .card.face.sel {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft), 0 0 0 3px var(--accent);
@@ -522,6 +546,17 @@ button.mini-slot { cursor: pointer; }
 }
 .stage-center .processing .card.face .suit { left: calc(4 * var(--dsu)); top: calc(2 * var(--dsu)); font-size: calc(10 * var(--dsu)); }
 .stage-center .processing .card.face .rank { left: calc(4 * var(--dsu)); top: calc(14 * var(--dsu)); font-size: calc(8 * var(--dsu)); }
+.stage-center .processing .card.face.has-mark .suit,
+.stage-center .processing .card.face.has-mark .rank { left: calc(13 * var(--dsu)); }
+.stage-center .processing .card.face .color-mark {
+  left: calc(4 * var(--dsu)); top: calc(4 * var(--dsu));
+  width: calc(6 * var(--dsu)); height: calc(6 * var(--dsu));
+}
+.stage-center .processing .card.face .corner {
+  right: calc(4 * var(--dsu)); top: calc(2 * var(--dsu));
+  min-width: calc(10 * var(--dsu)); height: calc(10 * var(--dsu));
+  font-size: calc(7 * var(--dsu)); border-radius: calc(3 * var(--dsu));
+}
 .stage-center .processing .card.face .cname { top: calc(27 * var(--dsu)); font-size: calc(14 * var(--dsu)); }
 .stage-center .processing .card.face .ctype { bottom: calc(4 * var(--dsu)); font-size: calc(7 * var(--dsu)); }
 .stage-center .context { margin: 2px 0 0; font-size: 11px; text-align: center; }

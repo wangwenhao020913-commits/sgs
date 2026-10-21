@@ -162,7 +162,7 @@ function applyReplayThrough(replay, index) {
     applyReplayCardMove(replay, record);
     applyReplaySeatDelta(replay, record);
     if (record.kind === "query") noteReplayQuery(replay, record.query);
-    replay.effectCards = applyEffectDelta(record, replay.effectCards);
+    replay.effectCards = applyEffectDelta(record, replay.effectCards, null);
   }
   replay.appliedIndex = index;
 }

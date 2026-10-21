@@ -108,20 +108,52 @@ function pickerSeats(pending) {
   }));
 }
 
+/** 选中的源牌会以哪张**产物**使用（U1-07）：转化技的候选是虚拟牌，手牌里点的是
+ * 源实体牌。返回一句「将以【杀】使用」；不是转化来源时返回空串。
+ *
+ * **只看候选索引**（服务端 `candidate_index` + `virtual_index`）：来源牌的判据是
+ * 它对应的候选带 ``virtual_sources``，本函数不读规则、不自己拼牌名。焦点牌本身
+ * 就是候选（没有转化）时不写这句。
+ */
+function sourceConversionHint(pending) {
+  if (!pending || state.focusCardId === null) return "";
+  const entry = cardEntry(pending, state.focusCardId);
+  const product = entry && entry.card;
+  if (!product || !product.virtual_sources || !product.virtual_sources.length) return "";
+  if (String(product.card_id) === String(state.focusCardId)) return "";
+  return `将以【${cardName(product)}】使用。`;
+}
+
 /** 目标区的一句人话（不推荐、不排序，只说"还差什么"）。 */
 function pickerTargetHint(pending) {
   if (!isHandPick(pending)) return "";
   if (state.focusCardId === null) return "点一张手牌 = 选牌；点座位 = 选目标。";
   const entry = cardEntry(pending, state.focusCardId);
   if (!entry) return "";
-  if (entry.max_targets === 0) return "本窗口无需指定目标。";
-  if (autoCombo(pending, state.focusCardId)) return "目标由规则唯一确定，已自动选中（点牌可整张取消）。";
-  const have = state.selectedTargets.length;
-  if (isLegalCombo(pending, state.focusCardId, state.selectedTargets)) return "目标已选好，可以提交。";
-  const rest = entry.combos.filter((combo) => state.selectedTargets.every((seat) => combo.includes(seat)));
-  if (!rest.length) return "这组目标不是合法组合，点座位取消再选。";
-  const need = Math.max(...rest.map((combo) => combo.length)) - have;
-  return need > 0 ? `还要选 ${need} 个目标（已选 ${have}）。` : "这组目标不是合法组合，点座位取消再选。";
+  let suffix = "";
+  if (entry.max_targets === 0) {
+    suffix = "本窗口无需指定目标。";
+  } else if (autoCombo(pending, state.focusCardId)) {
+    suffix = "目标由规则唯一确定，已自动选中（点牌可整张取消）。";
+  } else {
+    const have = state.selectedTargets.length;
+    if (isLegalCombo(pending, state.focusCardId, state.selectedTargets)) {
+      suffix = "目标已选好，可以提交。";
+    } else {
+      const rest = entry.combos.filter(
+        (combo) => state.selectedTargets.every((seat) => combo.includes(seat)),
+      );
+      if (!rest.length) {
+        suffix = "这组目标不是合法组合，点座位取消再选。";
+      } else {
+        const need = Math.max(...rest.map((combo) => combo.length)) - have;
+        suffix = need > 0
+          ? `还要选 ${need} 个目标（已选 ${have}）。`
+          : "这组目标不是合法组合，点座位取消再选。";
+      }
+    }
+  }
+  return `${sourceConversionHint(pending)}${suffix}`;
 }
 
 /** 目标座位是否**就是自己或空集**：这类牌（【无中生有】【桃】、装备牌）不画座位高亮。 */

@@ -500,13 +500,35 @@ function preactivationStepHint(pa, pending) {
   return `第 ${pa.cursor + 1}/${pa.steps.length} 步：选一项。`;
 }
 
+/** 清单已经选中的来源牌会以哪张**产物**使用（U1-07）：读服务端 `transform_products`。
+ *
+ * 转化技的清单只说"选哪些来源牌"；选完（或单源选到一张）时提示条要能写
+ * 「将以【杀】使用」。产物的匹配键是**来源牌组**（`session.js:sourceGroupKey`），
+ * 故多源要把两张都选齐才命中；同一组来源能产出多张不同产物时 fail-closed、不猜。
+ */
+function preactivationProductHint(pa, pending) {
+  const products = (pending && pending.transform_products) || [];
+  const chosen = [];
+  for (let index = 0; index < pa.steps.length; index += 1) {
+    if (preactivationStepKind(pa.steps[index]) !== "card") continue;
+    chosen.push(...(pa.answers[index].values || []));
+  }
+  if (!chosen.length) return "";
+  const key = sourceGroupKey(chosen);
+  const matches = products.filter(
+    (product) => sourceGroupKey(product.virtual_sources || []) === key,
+  );
+  if (matches.length !== 1) return "";
+  return `将以【${cardName(matches[0])}】使用。`;
+}
+
 /** 清单驱动的预发动界面（W4-1）：步骤条 + 当前的选牌 / 选目标 / 选项。 */
 function renderPreativation(pending) {
   const pa = state.preactivation;
   const box = $("t-options");
   box.innerHTML = "";
   const hint = $("t-target-hint");
-  if (hint) hint.textContent = preactivationStepHint(pa, pending);
+  if (hint) hint.textContent = `${preactivationProductHint(pa, pending)}${preactivationStepHint(pa, pending)}`;
   const row = document.createElement("div");
   row.className = "cards";
   pa.steps.forEach((step, index) => {

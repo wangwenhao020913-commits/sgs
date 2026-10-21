@@ -20,6 +20,11 @@ function applyView(body) {
   for (const entry of body.narrative || []) state.narrative.push(entry);
   const incoming = body.records || [];
   const first = state.view === null;
+  // U1-07：快照的处理区已经是**产物**（服务端把转化来源组换成了虚拟牌），回放期间也要
+  // 按同一份映射把"来源牌进处理区"渲染成产物，否则用户会先看到两张源牌再被快照纠正。
+  state.processingProducts = processingProductMap(
+    body.snapshot ? body.snapshot.processing : [],
+  );
   if (!incoming.length) {
     commitView(body);
     return;
@@ -111,6 +116,37 @@ const RESOLVE_TARGET_TIMINGS = new Set([
   "RESOLVE_END",
 ]);
 
+/** 来源牌组的稳定键：按 id 排序后拼成 `"2,18"`（顺序不是判据，牌组才是）。
+ *
+ * 服务端 `display.py:_processing_display` 用同一条"整组来源"规则把实体牌换成产物；
+ * JS 与 Python 没有共享常量的通道，这里是**唯一**的 JS 副本。改分组规则 = 两头一起改。
+ */
+function sourceGroupKey(cardIds) {
+  return (cardIds || []).map(Number).sort((a, b) => a - b).join(",");
+}
+
+/** 处理区里的**产物**映射（U1-07）：`{来源牌组 → 虚拟 / 转化牌}`。
+ *
+ * 引擎的处理区只装实体牌；服务端展示层把正在结算的转化牌换成产物（带
+ * `source_cards` 字段）。回放期间的 `card_move` 仍是来源实体牌，故用这份映射把
+ * "进处理区"的那组来源牌画成产物。纯虚拟牌没有来源组，不在这张表里。
+ */
+function processingProductMap(cards) {
+  const map = {};
+  for (const card of cards || []) {
+    const sources = card && card.virtual_sources;
+    if (!sources || !sources.length) continue;
+    map[sourceGroupKey(sources)] = card;
+  }
+  return map;
+}
+
+/** 这一批 `card_move` 是否正好是一组转化来源：是则返回它的产物，否则 `null`。 */
+function processingProductFor(cards, products = state.processingProducts) {
+  if (!products) return null;
+  return products[sourceGroupKey((cards || []).map((card) => card.card_id))] || null;
+}
+
 /** 效果区的逐事件派生：``card_move`` 进 / 出处理区时增删牌面。
  *
  * 处理区是**公开区**（`snapshot.processing`），但一次响应只给**终态**；回放期间要看见
@@ -121,11 +157,15 @@ const RESOLVE_TARGET_TIMINGS = new Set([
  * 指定目标"去套会串味（【决斗】套到上一次【南蛮入侵】的 7 个目标，报障图 1）。
  * 目标在 :func:`applyUseTiming` 里等 ``USE_DESIGNATE_TARGET`` 到了再认领。
  *
+ * **转化来源（U1-07）**：一组来源牌进处理区时画的是产物（`state.processingProducts`），
+ * 不是来源牌本身；离场时也按同一组来源把产物移走。事件流仍是引擎原文，不受影响。
+ * 回放页传 `products = null`：录像里没有"当前快照产物"这份展示派生，按原始 `card_move` 画。
+ *
  * **牌组作为参数传入、返回值就是新牌组**：牌桌与回放页各持一份，派生函数不读 / 不写
  * ``state.effectCards``。旧签名在内部把 `state.effectCards` 整个换掉（`filter` 产生新数组），
  * 回放页借来的那份会从第二条 "离开处理区" 起就和写方分家——页面于是停在一张早已离场的牌上。
  */
-function applyEffectDelta(record, effectCards = state.effectCards) {
+function applyEffectDelta(record, effectCards = state.effectCards, products = state.processingProducts) {
   let held = effectCards || [];
   if (!record) return held;
   if (record.kind === "timing") {
@@ -138,10 +178,17 @@ function applyEffectDelta(record, effectCards = state.effectCards) {
   const to = record.to_zone || {};
   if (from.zone === "processing") {
     const ids = new Set(cards.map((card) => card.card_id));
-    held = held.filter((card) => !ids.has(card.card_id));
+    held = held.filter((card) => {
+      if (ids.has(card.card_id)) return false;
+      // 产物自己不在区域里：它的来源组全部离场时才把产物移走。
+      const sources = card.virtual_sources || [];
+      return !(sources.length && sources.every((source) => ids.has(source)));
+    });
   }
   if (to.zone === "processing") {
-    for (const card of cards) {
+    const product = processingProductFor(cards, products);
+    const added = product ? [product] : cards;
+    for (const card of added) {
       if (held.some((existing) => existing.card_id === card.card_id)) continue;
       held.push({
         ...card,

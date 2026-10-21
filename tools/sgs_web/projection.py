@@ -33,7 +33,7 @@ from sgs.state import FrameKind, Query, WindowCause, project
 from sgs.timing import Timing
 
 from .descriptions import skill_description
-from .display import card_lookup_from_query, decorate_pending, decorate_snapshot
+from .display import card_lookup_from_query, card_payload, decorate_pending, decorate_snapshot
 from .session import Session
 
 __all__ = [
@@ -53,6 +53,50 @@ __all__ = [
 def _card_lookup(state: Any) -> dict[int, Any]:
     """``card_id → CardRef``：展示层解析转化牌来源牌的唯一查找表。"""
     return {card.card_id: card for card in state.cards}
+
+
+def _active_virtual_cards(engine: Any) -> tuple[Any, ...]:
+    """正在结算的虚拟 / 转化牌（U1-07）：结算栈里带 ``card`` 的帧，去重后按压栈序。
+
+    这些牌**从不进任何区域**（``CardRef.is_virtual``），故 ``state.processing`` 里只有
+    转化牌的来源实体牌；展示层要画产物，就必须从结算栈拿这一份。读的是公开的栈载荷
+    （``Frame.data["card"]``），不改记录流、不新增真源。
+    """
+    out: list[Any] = []
+    seen: set[int] = set()
+    for frame in engine.stack.frames:
+        card = frame.data.get("card")
+        if card is None or not card.is_virtual or card.card_id in seen:
+            continue
+        seen.add(card.card_id)
+        out.append(card)
+    return tuple(out)
+
+
+def _transform_products(
+    query: Query, *, lookup: dict[int, Any] | None = None
+) -> list[dict[str, Any]]:
+    """转化清单的**产物索引**（U1-07）：正在这次询问里的全部产物牌面。
+
+    清单只描述"选哪些来源牌"，不含产物牌名；界面要写「将以【杀】使用」、也要知道产物
+    是红 / 黑 / 无，必须读这份展示派生。数据只来自**本次询问内部的转化候选**
+    （``Query.transform_actions``）——它们已经从 ``legal_actions`` 收回，不会重新打开
+    "手牌直接点一下就当【杀】"的老路径。
+
+    按产物 ``card_id`` 去重（同一来源组 / 同一目标类型只出现一次）。界面按选中来源
+    牌组匹配（与 `session.js:sourceGroupKey` 同一份分组规则）；若同一组来源牌能产出
+    两张不同产物（多转化技重叠），界面 fail-closed、不猜名字。查看者不是询问者时
+    调用方传空列表（不把别人的转化方向带出去）。
+    """
+    out: dict[int, dict[str, Any]] = {}
+    for action in getattr(query, "transform_actions", ()) or ():
+        card = getattr(action, "card", None)
+        if card is None or not card.is_virtual or not card.virtual_sources:
+            continue
+        if card.card_id in out:
+            continue
+        out[card.card_id] = card_payload(card, lookup=lookup)
+    return list(out.values())
 
 
 def _skill_entry(
@@ -88,6 +132,7 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         view.players,
         lookup=_card_lookup(state),
         heroes=load_heroes(session.pack.pack_id),
+        virtual_cards=_active_virtual_cards(session.engine),
     )
     # U1-06：武将详情对**任意**座位可开，故每个座位都带一份只读技能清单
     # （武将牌 + 装备区 + 虚拟装备）。它与顶层的 `skills`（可操作清单）不同源：
@@ -1190,7 +1235,20 @@ def pending_payload(
         lookup = card_lookup_from_query(query)
     # U1-02：内嵌视角里的座位也要武将名称 / 势力；裸 Query（409）拿不到包，传 None。
     heroes = load_heroes(session.pack.pack_id) if isinstance(session, Session) else None
-    decorate_pending(payload, query, lookup=lookup, heroes=heroes)
+    # U1-07：转化清单的产物索引（全部产物牌面）。清单本身只说"选哪些来源牌"，
+    # 界面要写「将以【X】使用」只能读这份派生；不是查看者的询问 ⇒ 空列表（fail-closed）。
+    payload["transform_products"] = (
+        _transform_products(query, lookup=lookup) if same_viewer else []
+    )
+    decorate_pending(
+        payload,
+        query,
+        lookup=lookup,
+        heroes=heroes,
+        virtual_cards=(
+            _active_virtual_cards(session.engine) if isinstance(session, Session) else ()
+        ),
+    )
     return payload
 
 

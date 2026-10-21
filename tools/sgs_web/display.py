@@ -15,10 +15,13 @@
 - **描述全文**（U1-04b）住在 :mod:`sgs_web.descriptions`（内容文件
   ``descriptions.json``），这里只按牌名 id 查一次并并入 ``description``；文案本身
   不抄进本模块，更不进引擎 / 记录流。
-- **消费节奏**：``display_name`` 由 U1-04 的前端读取；``attribute`` / ``kind`` 由
-  U1-02 的卡面读取，``source_cards`` 归 U1-07（虚拟 / 转化牌）；``description`` 由
-  U1-02（牌面悬停）/ U1-06（技能详情）读取；``prompt_display`` 归 U1-03（提示条）。
-  本模块先把契约发出去，不在前端提前造表现。
+- **消费节奏**：``display_name`` / ``attribute`` / ``kind`` / ``source_cards`` /
+  ``description`` 由 U1-02 / U1-07 的卡面读取（U1-07 读虚拟 / 转化牌的角标、颜色与
+  来源牌悬停）；``prompt_display`` 归 U1-03（提示条）。本模块先把契约发出去，
+  不在前端提前造表现。
+- **处理区显示产物**（U1-07）：``decorate_snapshot(virtual_cards=...)`` 把正在结算的
+  虚拟 / 转化牌并入 ``processing`` —— 转化牌的来源实体牌被替换成产物，纯虚拟牌在它
+  结算期间直接出现；引擎的 ``state.processing`` 与记录流都不动（历史照旧进事件流）。
 
 **不塞进** :mod:`sgs_web.projection`：投影负责"哪些事实可见"，本模块负责"可见事实怎么显示"。
 """
@@ -40,6 +43,7 @@ __all__ = [
     "KINGDOM_LABELS",
     "card_display",
     "card_lookup_from_query",
+    "card_payload",
     "decorate_pending",
     "decorate_snapshot",
     "prompt_display",
@@ -95,7 +99,7 @@ def card_display(
         for source_id in card.virtual_sources:
             source = lookup.get(int(source_id))
             if source is not None:
-                sources.append(_source_card(source))
+                sources.append(card_payload(source, lookup=lookup))
     return {
         "display_name": "杀" if card.type in _SLASH_TYPES else card.name,
         "attribute": attribute,
@@ -105,11 +109,66 @@ def card_display(
     }
 
 
-def _source_card(card: CardRef) -> dict[str, Any]:
-    """转化牌的来源牌：完整牌面事实 + 它自己的展示字段（来源恒为实体牌，不再递归）。"""
+def card_payload(
+    card: CardRef, *, lookup: Mapping[int, CardRef] | None = None
+) -> dict[str, Any]:
+    """一张牌的完整卡面事实 + 展示字段（转化牌来源 / 处理区产物共用）。
+
+    产物自己也要带 ``source_cards``（悬停要看全部来源），故 ``lookup`` 必须继续传下去；
+    来源恒为实体牌，递归只走一层。
+    """
     payload = card.model_dump(mode="json")
-    payload.update(card_display(card))
+    payload.update(card_display(card, lookup=lookup))
     return payload
+
+
+def _processing_display(
+    cards: Any,
+    *,
+    lookup: Mapping[int, CardRef] | None,
+    virtual_cards: tuple[CardRef, ...] | list[CardRef],
+) -> list[Any]:
+    """处理区要画的牌：**正在结算的虚拟 / 转化牌**顶掉它们的来源实体牌。
+
+    ``cards`` 是 ``PlayerView.processing`` 的序列化形态（引擎只把**实体牌**放进区域）；
+    转化牌的来源牌正在处理区时，界面要画的是产物（U1-07 / spec §2.5），故按
+    ``virtual_sources`` 把来源整组换成那张虚拟牌。纯虚拟牌没有来源、从不进区域，
+    在它结算期间直接追加进处理区。同一个来源组只换一次；来源不齐（已有一张离场）
+    就不换，避免把半组来源错画成产物。
+    """
+    if not isinstance(cards, list):
+        return cards
+    by_id = {
+        int(card["card_id"]): index
+        for index, card in enumerate(cards)
+        if isinstance(card, dict) and "card_id" in card
+    }
+    replacements: dict[int, dict[str, Any]] = {}
+    covered: set[int] = set()
+    extras: list[dict[str, Any]] = []
+    for virtual in virtual_cards:
+        sources = tuple(int(source) for source in virtual.virtual_sources)
+        if not sources:
+            extras.append(card_payload(virtual, lookup=lookup))
+            continue
+        if not all(source in by_id for source in sources) or any(
+            source in covered for source in sources
+        ):
+            continue
+        replacements[min(by_id[source] for source in sources)] = card_payload(
+            virtual, lookup=lookup
+        )
+        covered.update(sources)
+    out: list[Any] = []
+    for index, card in enumerate(cards):
+        replacement = replacements.get(index)
+        if replacement is not None:
+            out.append(replacement)
+        if isinstance(card, dict) and int(card.get("card_id", 0)) in covered:
+            continue
+        out.append(_extend_card_dict(card, lookup=lookup))
+    out.extend(extras)
+    return out
 
 
 def seat_display(
@@ -216,15 +275,21 @@ def decorate_snapshot(
     *,
     lookup: Mapping[int, CardRef] | None = None,
     heroes: HeroTable | None = None,
+    virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
 ) -> dict[str, Any]:
     """给一份 ``PlayerView`` 的 JSON 形态补展示字段（原地改，返回同一个 dict）。
 
     ``players`` 与载荷里的 ``players`` 同序（投影按座位序输出）；座位字段由
     :func:`seat_display` 给出，卡面字段由 :func:`card_display` 给出。``heroes``
     是武将表（U1-02 的 ``hero_name`` 要用），缺省时名称留空、界面退回 id。
+    ``virtual_cards`` 是**当前正在结算**的虚拟 / 转化牌（U1-07）：``processing``
+    按它换成产物（见 :func:`_processing_display`），其余区域只补展示字段。
     """
-    for key in ("self_hand", "discard", "processing"):
+    for key in ("self_hand", "discard"):
         payload[key] = _extend_card_list(payload.get(key), lookup=lookup)
+    payload["processing"] = _processing_display(
+        payload.get("processing"), lookup=lookup, virtual_cards=virtual_cards
+    )
     seated = payload.get("players")
     if isinstance(seated, list):
         for player_payload, player in zip(seated, players, strict=True):
@@ -242,6 +307,7 @@ def decorate_pending(
     *,
     lookup: Mapping[int, CardRef] | None = None,
     heroes: HeroTable | None = None,
+    virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
 ) -> dict[str, Any]:
     """给一份 ``pending_payload`` 补展示字段（询问里的所有牌面 + 内嵌视角 + 提示条）。"""
     for entry in (payload.get("candidate_index") or {}).values():
@@ -257,7 +323,13 @@ def decorate_pending(
     payload["revealed"] = _extend_card_list(payload.get("revealed"), lookup=lookup)
     view = payload.get("view")
     if isinstance(view, dict):
-        decorate_snapshot(view, query.view.players, lookup=lookup, heroes=heroes)
+        decorate_snapshot(
+            view,
+            query.view.players,
+            lookup=lookup,
+            heroes=heroes,
+            virtual_cards=virtual_cards,
+        )
     # 没有候选是引擎不该出现的状态；显式给 None，不让展示派生抛异常，也不伪造默认动作。
     payload["prompt_display"] = prompt_display(query) if query.legal_actions else None
     return payload

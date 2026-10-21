@@ -33,12 +33,14 @@ from sgs.resolution import Frame, ResolutionStack  # noqa: E402
 from sgs.skills import FREE_SPLIT  # noqa: E402
 from sgs.state import (  # noqa: E402
     Action,
+    ActivateSkill,
     ArrangeQuery,
     FrameKind,
     PeachQuery,
     Phase,
     PlayerPublic,
     PlayPhaseQuery,
+    QueryKind,
     RespondQuery,
     SelectCardsQuery,
     SelectionSpec,
@@ -3518,6 +3520,230 @@ def test_the_card_contract_maps_fire_and_thunder_slashes_to_the_product_name() -
     assert card_display(plain)["kind"] == "normal"
     assert card_display(peach)["display_name"] == "桃"
     assert card_display(peach)["source_cards"] == []
+
+
+def test_the_card_contract_keeps_single_source_suit_and_rank() -> None:
+    """单源转化继承原牌的花色 / 点数（引擎构造器已经把两者带上，展示层原样给）。"""
+    from sgs.skills import transformed_card
+    from sgs_web.display import card_display
+
+    pack = _context_pack()
+    source_id = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hand=(source_id,)), SeatSpec()],
+        deck=tuple(card_id for card_id in range(len(pack.deck.cards)) if card_id != source_id),
+        turn_seat=0,
+    )
+    source = state.card(source_id)
+    virtual = transformed_card(state, (source_id,), "slash")
+
+    fields = card_display(virtual, lookup={source_id: source})
+
+    assert virtual.suit == source.suit and virtual.rank == source.rank, "单源继承花色 / 点数"
+    assert virtual.color == source.color
+    assert fields["kind"] == "transformed"
+    assert fields["source_cards"][0]["suit"] == source.suit
+    assert fields["source_cards"][0]["rank"] == source.rank
+
+
+def test_the_card_contract_shows_a_multi_source_transform_without_suit_or_rank() -> None:
+    """多源转化（【丈八蛇矛】）：花色 / 点数恒无，颜色按来源同色派生；来源全列。
+
+    单源形态（继承花色 / 点数）与火 / 雷属性由
+    ``test_the_card_contract_maps_fire_and_thunder_slashes_to_the_product_name``
+    覆盖；这里补的是**唯一另一条分支** —— 多来源。
+    """
+    from sgs.state import CardRef
+    from sgs_web.display import card_display
+
+    first = CardRef(card_id=2, type="dodge", name="闪", suit="heart", rank=2, color="red")
+    second = CardRef(card_id=18, type="slash", name="杀", suit="heart", rank=10, color="red")
+    transformed = CardRef(
+        card_id=-237,
+        type="slash",
+        name="杀",
+        suit=None,
+        rank=None,
+        color="red",
+        virtual_sources=(2, 18),
+    )
+
+    fields = card_display(transformed, lookup={2: first, 18: second})
+
+    assert fields["display_name"] == "杀"
+    assert fields["attribute"] == "普通"
+    assert fields["kind"] == "transformed"
+    assert fields["source_cards"] and [card["card_id"] for card in fields["source_cards"]] == [2, 18]
+    assert fields["source_cards"][1]["display_name"] == "杀", "来源牌自己的展示字段也要有"
+    assert transformed.suit is None and transformed.rank is None, "多源不继承花色 / 点数"
+    assert fields["description"], "产物牌名有描述全文（悬停用）"
+
+
+def _real_transform_engine() -> tuple[object, Engine, int, int]:
+    """真引擎的丈八转化【杀】局面：停在出牌阶段，清单里有两来源。
+
+    返回 ``(pack, engine, first_source_id, second_source_id)``。
+    """
+    pack = _context_pack()
+    first = cards_of_type(pack, "slash")[0]
+    second = cards_of_type(pack, "dodge")[0]
+    serpent = cards_of_type(pack, "serpent_spear")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(first, second), equip=(serpent,)),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=tuple(
+            card_id
+            for card_id in range(len(pack.deck.cards))
+            if card_id not in {first, second, serpent}
+        ),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    for _ in range(200):
+        if engine.pending is not None and engine.pending.kind == QueryKind.PLAY_PHASE:
+            break
+        engine._step()  # noqa: SLF001 - 与 test_hero_transform.py 同一推进手法
+    query = engine.pending
+    assert query is not None and "equip.serpent_spear" in query.transform_preactivations
+    return pack, engine, first, second
+
+
+def _real_transform_use_session() -> tuple[Session, int, int]:
+    """一个**真引擎**的丈八转化【杀】局面：停在目标的 DODGE 窗口。
+
+    返回 ``(session, first_source_id, second_source_id)``。来源牌已由引擎移入处理区、
+    结算栈顶的 USE / RESOLVE 帧带着那张虚拟【杀】——这正是网页载荷要读的产出路径。
+    """
+    pack, engine, first, second = _real_transform_engine()
+    query = engine.pending
+    assert query is not None
+    engine.submit(
+        ActivateSkill(
+            skill_id="equip.serpent_spear",
+            picks=(first, second),
+            choices=("seat:1",),
+            answers_seq=query.seq,
+        )
+    )
+    for _ in range(200):
+        if engine.pending is not None or engine.finished:
+            break
+        engine._step()  # noqa: SLF001
+    assert engine.pending is not None and engine.pending.kind == QueryKind.DODGE, (
+        "真引擎应当停在目标出【闪】的窗口（此时来源牌还在处理区）"
+    )
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, player_count=4)
+    session.engine = engine
+    session.human_seat = engine.pending.actor
+    return session, first, second
+
+
+def test_the_pending_payload_lists_the_transform_product_for_each_source() -> None:
+    """U1-07 跨线契约：转化清单的来源牌 → 产物（给「将以【X】使用」读）。
+
+    清单只说"选哪些来源牌"；产物牌名 / 颜色由这份**展示派生**给出。同一来源组的两张牌
+    指向同一张虚拟【杀】；查看者不是询问者时整份为空（fail-closed）。
+    """
+    pack, engine, first, second = _real_transform_engine()
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, player_count=4)
+    session.engine = engine
+    session.human_seat = 0
+
+    payload = pending_payload(session)
+    assert payload is not None
+    products = payload["transform_products"]
+    product = next(
+        (
+            candidate
+            for candidate in products
+            if {card["card_id"] for card in candidate["source_cards"]} == {first, second}
+        ),
+        None,
+    )
+    assert product is not None, f"来源组 {first},{second} 的产物必须下发：{len(products)} 张"
+    assert product["kind"] == "transformed"
+    assert product["display_name"] == "杀"
+    assert len({candidate["card_id"] for candidate in products}) == len(products), (
+        "同一产物只下发一次"
+    )
+
+    assert engine.pending is not None
+    foreign = pending_payload(engine.pending, human_seat=1)
+    assert foreign is not None and foreign["transform_products"] == [], (
+        "别人的转化方向不随询问下发"
+    )
+
+
+def test_a_real_transform_use_shows_the_product_in_the_processing_area() -> None:
+    """U1-07：真引擎用过丈八之后，网页处理区画的是**产物**，不是两张来源牌。
+
+    读取方是 ``visible_snapshot`` / ``pending_payload`` 的内嵌视角；两条都查，免得只有
+    刷新快照对了、应答载荷还画着来源牌。记录流仍是引擎原有的事实（历史进事件流）。
+    """
+    session, first, second = _real_transform_use_session()
+    product_id = next(
+        int(frame.data["card"].card_id)
+        for frame in session.engine.stack.frames
+        if getattr(frame.data.get("card"), "is_virtual", False)
+    )
+    assert set(session.engine.state.processing) == {first, second}, "引擎处理区里是来源实体牌"
+
+    snapshot = visible_snapshot(session)
+    assert [card["card_id"] for card in snapshot["processing"]] == [product_id]
+    product = snapshot["processing"][0]
+    assert product["kind"] == "transformed"
+    assert product["display_name"] == "杀"
+    assert product["attribute"] == "普通"
+    source_ids = [card["card_id"] for card in product["source_cards"]]
+    assert len(source_ids) == 2 and set(source_ids) == {first, second}, (
+        "两组来源牌都在（集合相等；顺序不是这条断言的判据）"
+    )
+    assert all("display_name" in card for card in product["source_cards"])
+    assert {first, second}.isdisjoint({card["card_id"] for card in snapshot["processing"]}), (
+        "来源牌不得在处理区重复出现"
+    )
+
+    payload = pending_payload(session)
+    assert payload is not None
+    embedded = payload["view"]["processing"]
+    assert [card["card_id"] for card in embedded] == [product_id]
+    assert embedded[0]["source_cards"][0]["card_id"] in {first, second}
+
+
+def test_a_real_pure_virtual_use_shows_as_the_processing_product() -> None:
+    """U1-07：纯虚拟牌（【八卦阵】的视为【闪】）没有来源实体牌，结算期间直接进处理区。
+
+    引擎的 ``state.processing`` 仍是空的（虚拟牌不落区域）；展示层从结算栈读出这张牌，
+    让中央舞台 / 处理区显示产物。
+    """
+    from sgs.skills import virtual_dodge
+
+    pack = _context_pack()
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=tuple(range(len(pack.deck.cards))),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    virtual = virtual_dodge(state)
+    engine.start_use(virtual, source=0, targets=(), use_timing=Timing.RESOLVE_BEFORE_EFFECT)
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, player_count=2)
+    session.engine = engine
+    session.human_seat = 0
+
+    assert engine.state.processing == []
+    processing = visible_snapshot(session)["processing"]
+    assert [card["card_id"] for card in processing] == [virtual.card_id]
+    assert processing[0]["kind"] == "virtual"
+    assert processing[0]["display_name"] == "闪"
+    assert processing[0]["source_cards"] == []
 
 
 def test_the_prompt_contract_carries_the_text_and_the_timeout_default() -> None:
