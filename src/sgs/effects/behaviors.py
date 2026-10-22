@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from sgs.state import CardRef, FrameKind
 from sgs.timing import Timing
@@ -174,20 +174,32 @@ class TargetRule:
 
 @dataclass(frozen=True, slots=True)
 class UseLimit:
-    """额定 / 额外两个上限；``rated=None`` 表示不限次数（票 07 §6）。"""
+    """额定 / 额外两个上限；``rated=None`` 表示不限次数（票 07 §6）。
+
+    ``count_key`` 是**本回合次数计数的键**：``None`` = 按牌型计（``card.type``）；
+    非空 = 若干牌型共用一个键（M5-02：普通【杀】/ 火【杀】/ 雷【杀】共用 ``"slash"``，
+    规则 5.1 + 5.4「作为【杀】使用或打出时作用完全相同」）。键是牌面事实，故住行为表；
+    ``engine/`` 只读这个键，不认识具体牌名。
+    """
 
     rated: int | None
     extra: int = 0
     counts: bool = True
     ignore_distance: bool = False
+    count_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class PushFrame:
-    """压出一个带时机的子帧；``scalars`` 是标量字面量（如 ``amount=1``）。"""
+    """压出一个带时机的子帧；``scalars`` 是标量字面量（如 ``amount=1``）。
+
+    伤害步可以再带一个 ``nature`` 标量声明这次伤害的属性（火杀 = ``DamageNature.FIRE``、
+    雷杀 = ``THUNDER``）；不声明即普通伤害。属性是**伤害步的事实**而不是 ``CardRef``
+    的字段（ADR-003），故转化 / 虚拟牌按产物牌型读到的是产物行为表里的这一步。
+    """
 
     kind: FrameKind
-    scalars: tuple[tuple[str, int], ...] = ()
+    scalars: tuple[tuple[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +253,11 @@ class CardBehavior:
 
     response_window: ResponseWindow | None = None
     """"生效前"给响应者开的窗口（票 11 §7 / 票 28）：【杀】= 闪、锦囊 = 无懈、其余无。"""
+
+    @property
+    def count_key(self) -> str:
+        """本回合次数计数的键：行为表声明的共用键，缺省 = 牌型 id（M5-02）。"""
+        return self.use_limit.count_key or self.card_type_id
 
     @property
     def is_delayed(self) -> bool:
@@ -340,18 +357,23 @@ def _response(
     )
 
 
-def _slash_variant(card_type_id: str) -> CardBehavior:
-    """火【杀】/ 雷【杀】的**静态面**：与【杀】一字不差，属性由 M5-02 声明。
+def _slash_variant(card_type_id: str, *, nature: DamageNature) -> CardBehavior:
+    """火【杀】/ 雷【杀】的静态面与【杀】一字不差，伤害步声明自己的属性（M5-02）。
 
-    D2 把它们建成独立牌型（而不是在 ``CardRef`` 上加属性字段）；在 M5-02 的伤害属性
-    管线落地前，行为骨架必须让 160 张局能完整跑完，故这里先按普通【杀】结算 1 点伤害。
+    D2 把它们建成独立牌型（而不是在 ``CardRef`` 上加属性字段）：属性落在**产物牌型的
+    行为表**里，转化 / 虚拟牌因此按产物牌型自动带出属性（朱雀羽扇的普通杀 → 火杀由
+    M5-05 产出 ``fire_slash`` 产物即可，不需要另开声明通道）。
     """
     return CardBehavior(
         card_type_id=card_type_id,
         use_timings=(_PLAY_PHASE,),
         target_rule=TargetRule(rated_targets=1, includes_self=False, needs_distance=True),
-        use_limit=UseLimit(rated=1, extra=0, counts=True, ignore_distance=False),
-        effects=(PushFrame(FrameKind.DAMAGE, (("amount", 1),)),),
+        use_limit=UseLimit(
+            rated=1, extra=0, counts=True, ignore_distance=False, count_key="slash"
+        ),
+        effects=(
+            PushFrame(FrameKind.DAMAGE, (("amount", 1), ("nature", nature))),
+        ),
         response_window=ResponseWindow.DODGE,
     )
 
@@ -362,7 +384,9 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
         card_type_id="slash",
         use_timings=(_PLAY_PHASE,),
         target_rule=TargetRule(rated_targets=1, includes_self=False, needs_distance=True),
-        use_limit=UseLimit(rated=1, extra=0, counts=True, ignore_distance=False),
+        use_limit=UseLimit(
+            rated=1, extra=0, counts=True, ignore_distance=False, count_key="slash"
+        ),
         effects=(PushFrame(FrameKind.DAMAGE, (("amount", 1),)),),
         response_window=ResponseWindow.DODGE,
     ),
@@ -457,9 +481,9 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
     "dawan": _self_only("dawan", final_zone=FinalZone.EQUIP),
     "zixing": _self_only("zixing", final_zone=FinalZone.EQUIP),
     # ---- 军争篇（M5-01a 的静态骨架；规则效果由 M5-02–06 落地）----
-    # 火杀 / 雷杀：独立牌型，静态面同【杀】；FIRE / THUNDER 由 M5-02 声明。
-    "fire_slash": _slash_variant("fire_slash"),
-    "thunder_slash": _slash_variant("thunder_slash"),
+    # 火杀 / 雷杀：独立牌型，静态面同【杀】；伤害步各自声明 FIRE / THUNDER（M5-02）。
+    "fire_slash": _slash_variant("fire_slash", nature=DamageNature.FIRE),
+    "thunder_slash": _slash_variant("thunder_slash", nature=DamageNature.THUNDER),
     # 酒：自己 + 出牌阶段 / 濒死；加伤与酒状态由 M5-04，濒死自救走求桃窗口的统一回复。
     "wine": CardBehavior(
         card_type_id="wine",

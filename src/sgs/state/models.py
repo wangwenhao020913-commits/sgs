@@ -192,9 +192,11 @@ class Player(BaseModel):
     wine_active: bool = False
     """【酒】的"下一张【杀】+1"是否生效（U1-04 先落座位字段；**状态接线归 M5**）。"""
     card_use_counts: dict[str, int] = Field(default_factory=dict)
-    """本回合各牌名（card type id）的已用次数；该座位自己的 ``TURN_START`` 重置（票 07 §6）。
+    """本回合各**计数键**的已用次数；该座位自己的 ``TURN_START`` 重置（票 07 §6）。
 
     只存总已用次数：额定 / 额外两个上限记在行为表里，M1 的判定只用总数（票 07 §6）。
+    键通常是牌型 id，也可以是行为表声明的**共用键**（M5-02：普通【杀】/ 火【杀】/
+    雷【杀】共用 ``"slash"``）；读写的唯一真源是 ``CardBehavior.count_key``。
     """
     identity: Identity | None = None
     """座位级身份（票 13 §3）：无身份局恒 ``None``，身份局由 ``build_initial`` 一次发放。

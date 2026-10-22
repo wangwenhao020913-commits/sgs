@@ -199,7 +199,11 @@ def check_count(state: GameState, seat: int, card: CardRef) -> bool:
 
     额定上限先过 :data:`~sgs.skills.ModifierPoint.COUNT_LIMIT` 链：【诸葛连弩】把
     【杀】的上限改成"无限"（``None``）；``extra`` 是牌面给的额外额度，链后相加。
+
+    已用次数读**行为表声明的计数键**（``CardBehavior.count_key``）：普通【杀】/ 火【杀】/
+    雷【杀】共用 ``"slash"``，转化 / 虚拟【杀】按产物牌型（也是 ``"slash"``）读同一键。
     """
+
     behavior = behavior_for(card)
     limit = behavior.use_limit
     rated = apply_modifiers(
@@ -210,7 +214,7 @@ def check_count(state: GameState, seat: int, card: CardRef) -> bool:
     )
     if rated is None:
         return False
-    used = state.player(seat).card_use_counts.get(card.type, 0)
+    used = state.player(seat).card_use_counts.get(behavior.count_key, 0)
     return used >= rated + limit.extra
 
 

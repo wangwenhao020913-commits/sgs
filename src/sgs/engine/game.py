@@ -256,7 +256,8 @@ def _child_payload(
     ``use_timing`` 一路带着走，好让"这次使用是从哪个窗口开的"在后面每一层都读得到
     （濒死求桃开的【桃】用它把自己的回复结算与行为表的效果帧区分开，票 21）。
     伤害帧再规范化成官方**六要素**（票 07 §6）：``target`` = 唯一目标、
-    ``channel`` = 使用的实体牌、``nature`` 恒 ``NORMAL``、``chain`` 恒 ``False``。
+    ``channel`` = 使用的实体牌、``chain`` 恒 ``False``；``nature`` 读伤害步的声明
+    （火杀 FIRE / 雷杀 THUNDER），未声明即 ``NORMAL``——属性住行为表，``CardRef`` 无此字段。
 
     ``targets`` 由效果执行器显式给**当前目标**（票 27）：多目标结算里每一层效果都只
     作用于 ``targets[cursor]``，子帧因此不会把整张牌的目标列表继承下去。
@@ -275,7 +276,7 @@ def _child_payload(
         targets_value = data["targets"]
         data["target"] = targets_value[0] if targets_value else None
         data["channel"] = data["card"]
-        data["nature"] = DamageNature.NORMAL
+        data.setdefault("nature", DamageNature.NORMAL)
         data["chain"] = False
     return data
 
@@ -957,6 +958,9 @@ class Engine:
 
         ``counts=False`` 用于**不计次数**的使用（【青龙偃月刀】的续杀，票 12）。
 
+        计数写在**行为表声明的计数键**上（``CardBehavior.count_key``），而不是写死牌型：
+        普通【杀】/ 火【杀】/ 雷【杀】因此共用一个「本回合已用【杀】」计数（M5-02）。
+
         ``designations``（W5-02a）是**附带指定**（借刀的 Bn）：原样带进 USE 帧，再随
         :func:`~sgs.engine.steps.use_push_resolve` 的 ``dict(frame.data)`` 继承进 RESOLVE
         帧，由 :func:`~sgs.effects.resolve_borrowed_sword` 读出。空元组不落帧键——没有
@@ -964,7 +968,8 @@ class Engine:
         """
         if counts:
             counts_by_type = self.state.player(source).card_use_counts
-            counts_by_type[card.type] = counts_by_type.get(card.type, 0) + 1
+            key = behavior_for(card).count_key
+            counts_by_type[key] = counts_by_type.get(key, 0) + 1
         data: dict[str, Any] = {
             "card": card,
             "source": source,
