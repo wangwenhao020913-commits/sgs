@@ -7,15 +7,19 @@
 - M1 的六条基准标 ``m1-regression``（回归网，不计入八类必需表）；
 - M2 主题的 28 条按七类必需表各就各位（一条 slug 可同属多类，本表里没有重叠；
   W5-02b 起 ``33`` 由随机驱动改为脚本驱动，但类与条数不变）；
-- M3 的 8 条武将技能专项基准标 ``武将技能``（票 14 §8）。
+- M3 的 8 条武将技能专项基准标 ``武将技能``（票 14 §8）；
+- M5 的 8 条军争构造基准标 ``军争机制``（M5-09a / spec §6 A3）。
 """
 
 from __future__ import annotations
 
-__all__ = ["CATEGORY_MINIMUMS", "M1_CLASS", "SLUG_CLASSES"]
+__all__ = ["CATEGORY_MINIMUMS", "M1_CLASS", "M5_CLASS", "SLUG_CLASSES"]
 
 M1_CLASS = "m1-regression"
 """M1 六条回归基线的类标签：它们是回归网，不是身份局路径。"""
+
+M5_CLASS = "军争机制"
+"""M5 的 8 条构造基准：每个新牌名 / A3 覆盖项至少落一条（M5-09a）。"""
 
 
 CATEGORY_MINIMUMS: dict[str, int] = {
@@ -27,8 +31,10 @@ CATEGORY_MINIMUMS: dict[str, int] = {
     "装备/距离/转化": 4,
     "普通锦囊与打出": 4,
     "武将技能": 8,
+    M5_CLASS: 8,
 }
-"""八类必需表：类 → 最少条数；合计 = 28 条 M2 新增 + 8 条 M3 专项 + M1 六条 = 42 条。"""
+"""九类必需表：类 → 最少条数；合计 = 28 条 M2 新增 + 8 条 M3 专项 + M1 六条
++ 8 条 M5 军争构造基准 = 50 条。"""
 
 
 SLUG_CLASSES: dict[str, tuple[str, ...]] = {
@@ -94,5 +100,14 @@ SLUG_CLASSES: dict[str, tuple[str, ...]] = {
     "40-hero-wushuang": ("武将技能",),
     "41-hero-guanxing": ("武将技能",),
     "42-hero-transform": ("武将技能",),
+    # ---- 9. 军争机制（M5-09a：11 个新牌名 + spec §6 A3 的 10 个覆盖项） ----
+    "48-fire-slash-vine-armor": (M5_CLASS,),
+    "49-iron-chain-thunder-conduction": (M5_CLASS,),
+    "50-wine-silver-lion-cap": (M5_CLASS,),
+    "51-fire-attack-reveal-discard": (M5_CLASS,),
+    "52-scimitar-empty-hand-hualiu": (M5_CLASS,),
+    "53-supply-shortage-skips-draw": (M5_CLASS,),
+    "54-reforge-iron-chain": (M5_CLASS,),
+    "55-fan-converts-normal-slash": (M5_CLASS,),
 }
 """slug → 类（**每个 slug 至少一类**；新增基准必须在这里登记）。"""

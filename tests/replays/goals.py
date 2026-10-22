@@ -30,6 +30,7 @@ __all__ = [
     "M1_GOALS",
     "M2_GOALS",
     "M3_GOALS",
+    "M5_GOALS",
     "PREACTIVATION_CANCEL_SKILL",
     "goal_for",
 ]
@@ -771,6 +772,254 @@ def _halberd_borrowed_multi(engine: Engine) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# M5 军争构造基准的判据（M5-09a / spec §6 A3）
+#
+# 8 条基准从**构造局面**起跑（``replays/m5.py``），判据只读记录流与终局态：
+# 每个覆盖项都落到一条可观测事实（牌名使用 / 一条 delta / 装备区 / 时机序列），
+# 而不是"场景脚本宣布命中"。
+# ---------------------------------------------------------------------------
+
+
+def _m5_uses(engine: Engine, *type_ids: str) -> list[tuple[int, UseCard]]:
+    """被接受、且牌名在 ``type_ids`` 里的 ``UseCard``：``(seq, action)``。"""
+    return [
+        (record.seq, record.action)
+        for record in _accepted(engine)
+        if isinstance(record.action, UseCard) and record.action.card.type in type_ids
+    ]
+
+
+def _m5_moved_to_equip(engine: Engine, seat: int, type_id: str) -> bool:
+    """装备是**这局里真的装上**的：记录流里有 ``PUT → EQUIP(seat)`` 的移动。
+
+    不看终局装备区：目标阵亡后装备随死亡结算进弃牌堆，终局态读不到它。
+    """
+    return any(
+        move.to_zone.zone is Zone.EQUIP
+        and move.to_zone.seat == seat
+        and any(card.type == type_id for card in move.cards)
+        for move in _card_moves(engine)
+    )
+
+
+def _m5_hp(engine: Engine, seat: int) -> list[JournalRecord]:
+    return [record for record in _hp_changes(engine) if record.seat == seat]
+
+
+def _m5_chained(engine: Engine) -> list[tuple[int, bool]]:
+    return [(record.seat, record.chained) for record in _deltas(engine, "chained_change")]
+
+
+def _m5_wine(engine: Engine) -> list[tuple[int, bool]]:
+    return [(record.seat, record.active) for record in _deltas(engine, "wine_change")]
+
+
+def _m5_reveals(engine: Engine) -> list[JournalRecord]:
+    return _deltas(engine, "card_reveal")
+
+
+def _m5_card_moves(engine: Engine) -> list[JournalRecord]:
+    return _card_moves(engine)
+
+
+def _m5_fire_vs_vine(engine: Engine) -> bool:
+    """48：普通【杀】对藤甲无效（零伤害）⇒ 火【杀】+1（2 点伤害）。"""
+    normal = _m5_uses(engine, "slash")
+    fire = _m5_uses(engine, "fire_slash")
+    hp = _m5_hp(engine, 1)
+    return (
+        bool(normal)
+        and bool(fire)
+        and len(hp) == 1
+        and hp[0].amount == -2
+        and _m5_moved_to_equip(engine, 1, "vine_armor")
+    )
+
+
+def _m5_chain_conduction(engine: Engine) -> bool:
+    """49：铁索横置双方 → 雷【杀】的属性伤害沿连环传导，命中后各座重置。"""
+    iron = [action for _seq, action in _m5_uses(engine, "iron_chain")]
+    thunder = _m5_uses(engine, "thunder_slash")
+    chained = _m5_chained(engine)
+    hp = _m5_hp(engine, 0) + _m5_hp(engine, 1)
+    return (
+        bool(iron)
+        and iron[0].targets == (0, 1)
+        and bool(thunder)
+        and thunder[0][1].targets == (1,)
+        and {(seat, True) for seat in (0, 1)} <= set(chained)
+        and {(seat, False) for seat in (0, 1)} <= set(chained)
+        and {record.seat for record in hp} == {0, 1}
+    )
+
+
+def _m5_wine_silver_cap(engine: Engine) -> bool:
+    """50：【酒】置位 → 那一张【杀】的伤害被白银狮子从 2 压回 1。"""
+    wine = _m5_uses(engine, "wine")
+    slash = _m5_uses(engine, "slash")
+    changes = _m5_wine(engine)
+    hp = _m5_hp(engine, 1)
+    if not (wine and slash and changes and hp):
+        return False
+    wine_on = [seat for seat, active in changes if active]
+    wine_off = [seat for seat, active in changes if not active]
+    first_slash_seq = slash[0][0]
+    after = [record for record in hp if record.seq > first_slash_seq]
+    return (
+        wine[0][1].targets == (0,)
+        and 0 in wine_on
+        and 0 in wine_off
+        and bool(after)
+        and after[0].amount == -1
+        and _m5_moved_to_equip(engine, 1, "silver_lion")
+    )
+
+
+def _m5_fire_attack(engine: Engine) -> bool:
+    """51：火攻亮出目标的一张手牌（公开事实）→ 同花色弃牌 → 1 点火焰伤害。"""
+    use = _m5_uses(engine, "fire_attack")
+    reveals = _m5_reveals(engine)
+    if not use or not reveals:
+        return False
+    reveal = reveals[0]
+    hp = _m5_hp(engine, reveal.seat)
+    return (
+        use[0][1].targets == (reveal.seat,)
+        and reveal.seat == 1
+        and bool(hp)
+        and hp[0].amount == -1
+        and hp[0].seq > reveal.seq
+    )
+
+
+def _m5_scimitar_hualiu(engine: Engine) -> bool:
+    """52：古锭刀（目标无手牌 +1）造成 2 点伤害；骅骝的 +1 距离被攻击范围 2 抵消。"""
+    slash = _m5_uses(engine, "slash")
+    hp = _m5_hp(engine, 1)
+    return (
+        bool(slash)
+        and slash[0][1].targets == (1,)
+        and len(hp) == 1
+        and hp[0].amount == -2
+        and _m5_moved_to_equip(engine, 0, "ancient_scimitar")
+        and _m5_moved_to_equip(engine, 1, "hualiu")
+    )
+
+
+def _m5_turn_spans(engine: Engine) -> list[tuple[int, int, int]]:
+    """每个回合的 ``(回合角色, TURN_START seq, 下一个 TURN_START seq)``；末回合以流末 seq 收尾。"""
+    starts = [
+        (record.actor, record.seq)
+        for record in _timings(engine)
+        if record.timing is Timing.TURN_START
+    ]
+    last = _records(engine)[-1].seq
+    return [
+        (actor, seq, starts[index + 1][1] if index + 1 < len(starts) else last + 1)
+        for index, (actor, seq) in enumerate(starts)
+    ]
+
+
+def _m5_supply_shortage(engine: Engine) -> bool:
+    """53：兵粮寸断判定非梅花 ⇒ 该回合跳过摸牌阶段（判定牌序列里没有 DRAW）。
+
+    判定牌本身是一条 ``reason=JUDGE`` 的 ``card_move``（兵粮本体随后以 ``USE`` 进弃牌堆），
+    故这里只认"这个回合里出现过 JUDGE 移动"，再看同一回合有没有该角色的摸牌。
+    """
+    put = [
+        move
+        for move in _m5_card_moves(engine)
+        if move.to_zone.zone is Zone.JUDGE
+        and any(card.type == "supply_shortage" for card in move.cards)
+    ]
+    if not put:
+        return False
+    for actor, start, end in _m5_turn_spans(engine):
+        span = [move for move in _m5_card_moves(engine) if start <= move.seq < end]
+        judged = any(move.reason is MoveReason.JUDGE for move in span)
+        drew = [
+            move
+            for move in span
+            if move.reason is MoveReason.DRAW and move.owner == actor
+        ]
+        if judged and not drew:
+            return True
+    return False
+
+
+def _m5_reforge(engine: Engine) -> bool:
+    """54：重铸是独立 Action，牌按 ``REFORGE`` 进弃牌堆、随后摸一张，且不开无懈窗口。"""
+    reforges = [
+        record for record in _accepted(engine) if record.action.kind == "Reforge"
+    ]
+    if not reforges:
+        return False
+    reforge = reforges[0]
+    if reforge.action.card.type != "iron_chain":
+        return False
+    moved = next(
+        (
+            move.seq
+            for move in _m5_card_moves(engine)
+            if move.reason is MoveReason.REFORGE
+            and any(card.card_id == reforge.action.card.card_id for card in move.cards)
+        ),
+        None,
+    )
+    if moved is None:
+        return False
+    drew = any(
+        move.reason is MoveReason.DRAW
+        and move.owner == 0
+        and move.seq > moved
+        for move in _m5_card_moves(engine)
+    )
+    no_nullify = not any(
+        record.kind == "query"
+        and record.query.kind == QueryKind.RESPOND
+        and record.query.cause is WindowCause.NULLIFY
+        and reforge.seq < record.seq < moved + 2
+        for record in _records(engine)
+    )
+    return drew and no_nullify
+
+
+def _m5_fan(engine: Engine) -> bool:
+    """55：羽扇按清单把普通【杀】转化成火【杀】（虚拟牌 + 来源实体牌）并造成火焰伤害。"""
+    products = [
+        (seq, action)
+        for seq, action in _m5_uses(engine, "fire_slash")
+        if action.card.is_virtual and action.card.virtual_sources
+    ]
+    if not products:
+        return False
+    seq, product = products[0]
+    hp = _m5_hp(engine, 1)
+    return (
+        bool(product.targets)
+        and any(
+            engine.state.card(card_id).type == "slash"
+            for card_id in product.card.virtual_sources
+        )
+        and _m5_moved_to_equip(engine, 0, "vermilion_feather_fan")
+        and any(record.seq > seq and record.amount == -1 for record in hp)
+    )
+
+
+M5_GOALS = {
+    "48-fire-slash-vine-armor": _m5_fire_vs_vine,
+    "49-iron-chain-thunder-conduction": _m5_chain_conduction,
+    "50-wine-silver-lion-cap": _m5_wine_silver_cap,
+    "51-fire-attack-reveal-discard": _m5_fire_attack,
+    "52-scimitar-empty-hand-hualiu": _m5_scimitar_hualiu,
+    "53-supply-shortage-skips-draw": _m5_supply_shortage,
+    "54-reforge-iron-chain": _m5_reforge,
+    "55-fan-converts-normal-slash": _m5_fan,
+}
+"""8 条 M5 构造基准的 slug → 事后判据（spec §6 A3 的 10 个覆盖项）。"""
+
+
 M1_GOALS = {
     "33-borrowed-sword-use-slash": _borrowed_sword,
     "43-double-sword-opposite-gender": _double_sword_chain,
@@ -789,7 +1038,7 @@ M1_GOALS = {
 
 def goal_for(slug: str):
     """取一条基准的判据；未登记即抛（录制期护栏）。"""
-    table = {**M1_GOALS, **M2_GOALS, **M3_GOALS}
+    table = {**M1_GOALS, **M2_GOALS, **M3_GOALS, **M5_GOALS}
     try:
         return table[slug]
     except KeyError:  # pragma: no cover - 开发期护栏

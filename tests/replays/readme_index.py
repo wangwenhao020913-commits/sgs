@@ -86,6 +86,15 @@ NAMES: dict[str, tuple[str, str]] = {
     "44-preactivation-cancel-no-side-effect": ("预发动取消零副作用", "接入层本地态不进记录流：`PLAY_PHASE` 随附【制衡】的预发动清单（`preactivations`）而整局没有任何被接受的 `ActivateSkill`；同种子下取消路径与「从不进预发动」路径的记录流逐字节相等"),
     "45-borrowed-sword-auto-handover": ("【借刀杀人】a 不可行 → 自动交出武器", "借刀的附带指定清单（`designations` + `card_preactivations`，规则 6.5）；持刀者没有可用【杀】/**转化【杀】** ⇒ **不发**持刀者窗口，武器直接从装备区移进使用者手牌（`reason=LOSE`）；记录流里没有 `BORROWED_SWORD` 询问"),
     "46-borrowed-sword-transform-slash": ("【借刀杀人】窗口内的转化【杀】", "借刀窗口的目标固定为使用者指定的 Bn；持刀者按【龙胆】的预发动清单确认成 `UseCard(虚拟【杀】, (Bn,))`；转化技在响应窗口的清单只有**来源步**（`fixed_target=True`）"),
+    # ---- 9. 军争机制（M5-09a：构造局面，覆盖 11 个新牌名与 spec §6 A3 的 10 项） ----
+    "48-fire-slash-vine-armor": ("火【杀】× 藤甲", "属性【杀】是独立牌型（火 / 雷）；普通【杀】对藤甲无效（零伤害）而火【杀】+1（`hp_change.amount = -2`）——两条 `UseCard` 各自落账，装备经 `PUT → EQUIP` 记录"),
+    "49-iron-chain-thunder-conduction": ("铁索连环 · 雷【杀】传导", "【铁索连环】的 1–2 目标横置（两次 `chained_change=true`）；雷【杀】的属性伤害沿连环传导到另一横置角色，命中后各座 `chained_change=false`（同一伤害事件内重置）"),
+    "50-wine-silver-lion-cap": ("【酒】+【白银狮子】上限", "【酒】把伤害 +1（`wine_change=true`，兑现后 `false`）；【白银狮子】把这次伤害压回 1（只有一条 `hp_change=-1`），装备经 `PUT → EQUIP` 记录"),
+    "51-fire-attack-reveal-discard": ("【火攻】亮牌 + 同花色弃牌", "目标亮出 1 张手牌（`card_reveal` 公开 delta，牌不移动）；使用者弃一张**同花色**手牌 ⇒ 1 点火焰伤害；未亮出的手牌不进记录流"),
+    "52-scimitar-empty-hand-hualiu": ("【古锭刀】+【骅骝】+【兵粮寸断】", "【兵粮寸断】判定非梅花 ⇒ 跳过摸牌阶段（该回合零 DRAW）；目标因此空手牌 ⇒ 【古锭刀】+1（2 点伤害）；【骅骝】的 +1 距离（2）仍被攻击范围 2 够到"),
+    "53-supply-shortage-skips-draw": ("【兵粮寸断】跳过摸牌阶段", "延时锦囊 `PUT → JUDGE(座位 1)`；判定牌非梅花 ⇒ `hp` 不变但该回合没有该角色的 DRAW 移动（跳过摸牌阶段）"),
+    "54-reforge-iron-chain": ("【铁索连环】重铸", "重铸是独立 `Reforge` Action（不是 `UseCard`）：牌按 `reason=REFORGE` 进弃牌堆、随后摸一张，且**不开**无懈窗口、不占使用次数"),
+    "55-fan-converts-normal-slash": ("【朱雀羽扇】转化火【杀】", "按预发动清单（`equip.vermilion_feather_fan`）确认：普通【杀】当成虚拟火【杀】（`virtual_sources` 非空、产物牌型 `fire_slash`）并造成火焰伤害"),
     "47-halberd-borrowed-sword": ("【借刀杀人】+【方天画戟】· 多目标", "【方天画戟】的 `TARGET_COUNT` 修饰器：持刀者的【杀】是**最后一张手牌**时最大目标数 +2 ⇒ 借刀窗口的候选恒含 Bn、另加 0..2 个其它合法目标（`targets` 里）；外层借刀的 `designations=(Bn,)` 不变，持刀者【杀】的 `designations` 为空"),
 }
 """slug → ``(中文场景名, 验证的规则条目)``：索引表里两列人工维护的**单一真源**。"""
