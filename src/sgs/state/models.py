@@ -201,7 +201,8 @@ class Player(BaseModel):
     toggle 与属性伤害的"结算后立即重置"），每次变化发一条 ``chained_change`` delta。
     """
     wine_active: bool = False
-    """【酒】的"下一张【杀】+1"是否生效（U1-04 先落座位字段；**状态接线归 M5**）。"""
+    """【酒】的"下一张【杀】+1"是否生效（M5-04 接线：出牌阶段的【酒】写入，回合末清空；
+    每次变化发一条 ``wine_change`` delta）。"""
     card_use_counts: dict[str, int] = Field(default_factory=dict)
     """本回合各**计数键**的已用次数；该座位自己的 ``TURN_START`` 重置（票 07 §6）。
 

@@ -4,14 +4,14 @@
 复用同一份 HTTP 门面（``make_server`` 的注册表与处理器），只把 ``GameRegistry.create``
 换成一个**按名字取构造局面**的注册表：
 
-- ``fire_attack``：人类座位手里有【火攻】+ 三种花色的牌；对手有 2 张手牌（只能亮出 1 张）
-  且 1 点体力 ⇒ 亮牌 + 同花色弃牌 = 1 点火焰伤害直接收局；
+- ``fire_attack``：人类座位手里有【火攻】+ 三种花色的牌 +【杀】。人类**对自己**用火攻：
+  亮牌与同花色弃牌两步都由**人类**经 HTTP 回答（各一次真实 POST），随后【杀】收局；
+  对手有 2 张暗手（只用于"未亮出的手牌不外泄"的负断言）；
 - ``reforge``：人类手里有【铁索连环】+【杀】 ⇒ 一次 ``Reforge`` 真实往返 + 一次【杀】收局；
 - ``wine``：人类手里有【酒】+【杀】 ⇒ 一次【酒】（出牌阶段）真实往返 + 一次【杀】收局。
 
 三条 tape **都不依赖随机种子**：手牌 / 体力 / 牌堆都是写死的 ``card_id``，种子只喂给
-AI 子流（亮牌选择仍由 AI 决定，客户端按公开的亮牌结果出同花色牌）。每次询问都走
-``POST /api/sessions/<id>/answer``，与产品服务同一条路径。
+AI 子流。每次询问都走 ``POST /api/sessions/<id>/answer``，与产品服务同一条路径。
 """
 
 from __future__ import annotations
@@ -70,26 +70,38 @@ def _first_of_suit(pack: ContentPack, suit, *, exclude: set[int]) -> int:
 
 
 def _fire_attack_fixture(pack: ContentPack) -> Fixture:
-    """人类【火攻】对手（2 张手牌、1 体力）：亮 1 张 + 同花色弃牌 ⇒ 收局。"""
+    """人类【火攻】**自己**：自己亮 1 张 + 弃同花色 ⇒ 1 点火焰伤害；随后【杀】收局。
+
+    亮牌与弃牌两步都由**人类**应答（A2 要的是真人经 HTTP 的亮牌往返，不是 AI 亮牌）。
+    对手的 2 张暗手只服务"未亮出的手牌不外泄"的负断言：人类作为亮牌者时，自己的手牌
+    本来就是本人可见，故负断言盯的是**对手**的暗手。
+    """
     from sgs.data import Suit
 
     fire = cards_of_type(pack, "fire_attack")[0]
-    used = {fire}
-    # 人类手里三种花色各一张：无论 AI 亮出哪种花色，都能弃一张同花色。
+    slash = cards_of_type(pack, "slash")[0]
+    used = {fire, slash}
+    # 人类手里三种花色各一张：亮出哪一种花色，弃牌步都有同花色候选；【杀】放最后，
+    # 弃牌步只碰得到亮出的那张花色牌（不误弃收局用的【杀】）。
     hand0 = [fire]
     for suit in (Suit.SPADE, Suit.CLUB, Suit.HEART):
         pick = _first_of_suit(pack, suit, exclude=used)
         used.add(pick)
         hand0.append(pick)
-    reveal = _first_of_suit(pack, Suit.SPADE, exclude=used)
-    used.add(reveal)
-    hidden = _first_of_suit(pack, Suit.CLUB, exclude=used)
-    used.add(hidden)
+    hand0.append(slash)
+    # 对手的暗手：两张非【闪】、非【桃】（不会响应【杀】、也不会自救），只作负断言。
+    hand1: list[int] = []
+    for type_id in ("duel", "barbarian_invasion"):
+        pick = next(
+            index for index in cards_of_type(pack, type_id) if index not in used
+        )
+        used.add(pick)
+        hand1.append(pick)
     state = build_state(
         pack=pack,
         seats=[
             SeatSpec(hp=4, hand=tuple(hand0)),
-            SeatSpec(hp=1, hp_max=4, hand=(reveal, hidden)),
+            SeatSpec(hp=1, hp_max=4, hand=tuple(hand1)),
         ],
         deck=_deck(pack, used),
         turn_seat=0,
@@ -98,7 +110,7 @@ def _fire_attack_fixture(pack: ContentPack) -> Fixture:
     return Fixture(
         "fire_attack",
         state,
-        note="火攻亮牌（对手 2 张手牌只亮 1 张）+ 同花色弃牌 → 1 点火焰伤害收局",
+        note="人类火攻自己（真人亮牌 + 同花色弃牌，各一次 HTTP 往返）→ 1 点火焰伤害；【杀】收局",
     )
 
 

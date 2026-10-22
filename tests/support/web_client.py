@@ -568,7 +568,8 @@ def wine_tape(base: str) -> int:
 #
 # 三条 tape 都连**同一份产品 HTTP 门面**（``tests/support/m5_fixture_server.py`` 只把
 # 「按种子开局」换成「按名字取构造局面」），每次询问一条真实 POST：
-#   - ``fire_attack``：火攻亮牌（对手 2 张手牌只公开 1 张）+ 同花色弃牌 ⇒ 1 点火焰伤害；
+#   - ``fire_attack``：人类**对自己**用火攻 ⇒ 亮牌 / 同花色弃牌两步都是**人类**的真 POST，
+#     随后【杀】收局；对手的暗手在整个过程中不外泄；
 #   - ``reforge``：一次 ``Reforge`` 真实往返（独立 Action、弃一张摸一张、无无懈窗口）；
 #   - ``wine``：出牌阶段一次【酒】真实往返（``wine_change`` / ``wine_active``）+【杀】收局。
 # 与 08a / 08c 的 seed 4/37/16 tape 的区别：这三条**不经过种子扫描**，手牌 / 体力 /
@@ -710,72 +711,169 @@ def _m5_play(
 
 
 def _fire_attack_fixed(base: str) -> int:
-    """火攻：亮牌是公开信息；未亮出的手牌不外泄；不残留「已知」状态。"""
-    # 只用于负断言「另一张没有泄露」；夹具是构造局面，不参与 HTTP。
+    """火攻：人类**自己**亮牌（真 HTTP 的 SelectCards POST）；对手的暗手不外泄。"""
+    # 只用于断言亮牌归属 / 负断言「对手的暗手没有泄露」；夹具是构造局面，不参与 HTTP。
     from m5_fixture_server import build_fixture
 
     fixture_state = build_fixture("fire_attack").state
-    candidates = [
+    opponent_hand = [
         {
             "card_id": fixture_state.card(card_id).card_id,
             "name": fixture_state.card(card_id).name,
         }
         for card_id in fixture_state.players[1].hand
     ]
-    assert len(candidates) == 2, "火攻夹具的目标必须恰有两张手牌（一张亮、一张藏）"
-    state: dict[str, Any] = {"candidates": candidates}
+    assert len(opponent_hand) == 2, "火攻夹具的对手必须恰有两张暗手（负断言用）"
+
+    def mentions_card(value, card_id: int) -> bool:
+        """载荷里有没有 ``card_id`` 这张牌面（按 ``card_id`` 键判，不扫裸整数）。"""
+        stack = [value]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                if item.get("card_id") == card_id:
+                    return True
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
+        return False
+
+    def opponent_hand_not_leaked(body) -> bool:  # noqa: ANN001
+        leaked = [
+            entry for entry in opponent_hand if mentions_card(body, entry["card_id"])
+        ]
+        if leaked:
+            print(f"FAIL 火攻固定 tape：对手未亮出的手牌泄露了：{leaked}")
+            return False
+        return True
+
+    def accepted_actions(records, seq):  # noqa: ANN001
+        return [
+            record.get("action") or {}
+            for record in records
+            if record.get("kind") == "action"
+            and record.get("accepted")
+            and (record.get("action") or {}).get("answers_seq") == seq
+        ]
 
     def choose(pending, state):  # noqa: ANN001
         if pending.get("kind") == "PLAY_PHASE":
-            fire = _pick_action(pending, card_type="fire_attack", targets=[1])
-            if fire is not None and not state.get("fire_used"):
-                return fire
+            if not state.get("fire_used"):
+                fire = _pick_action(pending, card_type="fire_attack", targets=[0])
+                if fire is not None:
+                    state["fire_used"] = True
+                    return fire
+            slash = _pick_action(pending, kind="UseCard", card_type="slash", targets=[1])
+            if slash is not None:
+                return slash
             return _pick_action(pending, kind="EndPhase")
-        if pending.get("kind") == "SELECT_CARDS" and pending.get("reveal") is not None:
+        if pending.get("kind") == "SELECT_CARDS":
+            # 亮牌步（人类选自己 1 张，必选）与弃牌步（人类弃同花色）：都取 SelectCards，
+            # 弃牌步不取 Pass——这一步也要有一条真人 POST。
             return _pick_action(pending, kind="SelectCards")
         return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
 
     def observe(kind, body, pending, state) -> bool:  # noqa: ANN001
+        records = body.get("records") or []
         if kind == "answer":
-            for record in body.get("records") or []:
+            for record in records:
                 if record.get("delta_type") == "card_reveal":
                     state["reveal"] = record.get("card") or {}
                     state["reveal_count"] = state.get("reveal_count", 0) + 1
-            if state.get("fire_used") is None:
-                if any(
-                    (record.get("action") or {}).get("kind") == "UseCard"
-                    for record in body.get("records") or []
-                    if record.get("kind") == "action" and record.get("accepted")
+                    state["reveal_seat"] = record.get("seat")
+            if pending is not None and pending.get("dialog") == "reveal":
+                # A2：亮牌必须是一条**人类**的 SelectCards POST（不是 AI 亮牌）：人类座位
+                # 自己的应答记录 + 紧接着的 card_reveal 公开 delta 都落在这一次 POST 的响应里。
+                accepted = accepted_actions(records, pending.get("seq"))
+                if len(accepted) != 1 or accepted[0].get("kind") != "SelectCards":
+                    print(f"FAIL 火攻固定 tape：亮牌应答不是一条人类 SelectCards：{accepted}")
+                    return False
+                faces = {
+                    card.get("card_id") for card in pending.get("revealed") or []
+                }
+                revealed = [
+                    (record.get("card") or {}).get("card_id")
+                    for record in records
+                    if record.get("delta_type") == "card_reveal"
+                ]
+                if len(revealed) != 1 or revealed[0] not in faces:
+                    print(
+                        "FAIL 火攻固定 tape：亮牌 delta 不是人类手牌里被选中/公开的那一张："
+                        f"{revealed} vs {sorted(faces)}"
+                    )
+                    return False
+                state["human_reveal"] = revealed[0]
+                state["human_reveal_answered"] = True
+            if pending is not None and pending.get("reveal") is not None:
+                accepted = accepted_actions(records, pending.get("seq"))
+                if len(accepted) != 1 or accepted[0].get("kind") != "SelectCards":
+                    print(f"FAIL 火攻固定 tape：同花色弃牌不是一条人类 SelectCards：{accepted}")
+                    return False
+                revealed = (pending.get("reveal") or {}).get("card") or {}
+                moves = [
+                    move
+                    for move in records
+                    if move.get("delta_type") == "card_move"
+                    and move.get("reason") == "DISCARD"
+                    and move.get("owner") == 0
+                    and (move.get("from_zone") or {}).get("zone") == "hand"
+                ]
+                discarded = (moves[0].get("cards") or []) if len(moves) == 1 else []
+                if len(discarded) != 1 or discarded[0].get("suit") != revealed.get("suit"):
+                    print(
+                        "FAIL 火攻固定 tape：弃掉的牌与亮牌不同花色 / 没有弃牌："
+                        f"{discarded} vs {revealed}"
+                    )
+                    return False
+                state["discard_answered"] = True
+        if kind == "pending" and pending is not None:
+            if not opponent_hand_not_leaked(body):
+                return False
+            if pending.get("dialog") == "reveal":
+                if pending.get("actor") != 0:
+                    print(f"FAIL 火攻固定 tape：亮牌询问不是人类座位：{pending.get('actor')}")
+                    return False
+                slots = pending.get("slots") or []
+                faces = [card.get("card_id") for card in pending.get("revealed") or []]
+                if not faces or any(
+                    (slot.get("ref") or {}).get("seat") != 0
+                    or (slot.get("ref") or {}).get("zone") != "hand"
+                    for slot in slots
                 ):
-                    state["fire_used"] = True
-        if kind == "pending" and pending is not None and pending.get("reveal") is not None:
-            reveal = pending["reveal"]
-            card = reveal.get("card") or {}
-            if not card.get("display_name") or not card.get("description"):
-                print(f"FAIL 火攻固定 tape：亮牌没有展示契约：{card}")
-                return False
-            shown = card.get("card_id")
-            if shown not in {entry["card_id"] for entry in candidates}:
-                print(f"FAIL 火攻固定 tape：亮出的牌不在目标手牌里：{card}")
-                return False
-            hidden = next(entry for entry in candidates if entry["card_id"] != shown)
-            text = json.dumps(body, ensure_ascii=False)
-            if f'"card_id": {hidden["card_id"]}' in text:
-                print(f"FAIL 火攻固定 tape：未亮出的手牌泄露了：{hidden}")
-                return False
-            state["hidden_checked"] = True
-            target = next(
-                player for player in body["snapshot"]["players"] if player["seat"] == 1
-            )
-            if target.get("hand_count") != 2:
-                print(f"FAIL 火攻固定 tape：亮牌后目标手牌数不是 2：{target}")
-                return False
-            if any(
-                key in target for key in ("known", "revealed_cards", "self_hand", "hand")
-            ):
-                print(f"FAIL 火攻固定 tape：目标手牌区出现牌面 / 已知状态：{target}")
-                return False
-            state["discard_pending"] = True
+                    print(f"FAIL 火攻固定 tape：亮牌步的选择面不是人类自己的手牌：{faces}")
+                    return False
+                state["human_faces"] = set(faces)
+                state["hand_count_before_discard"] = len(slots)
+                state["reveal_pending"] = True
+            if pending.get("reveal") is not None:
+                reveal = pending["reveal"]
+                card = reveal.get("card") or {}
+                if not card.get("display_name") or not card.get("description"):
+                    print(f"FAIL 火攻固定 tape：亮牌没有展示契约：{card}")
+                    return False
+                shown = card.get("card_id")
+                if shown not in state.get("human_faces", set()):
+                    print(f"FAIL 火攻固定 tape：亮出的牌不在人类手牌里：{card}")
+                    return False
+                if state.get("human_reveal") != shown:
+                    print(
+                        "FAIL 火攻固定 tape：弃牌步展示的亮牌不是人类刚亮出的那张："
+                        f"{shown} != {state.get('human_reveal')}"
+                    )
+                    return False
+                target = next(
+                    player for player in body["snapshot"]["players"] if player["seat"] == 0
+                )
+                if target.get("hand_count") != state.get("hand_count_before_discard"):
+                    print(f"FAIL 火攻固定 tape：亮牌后人类手牌数不对：{target}")
+                    return False
+                if any(
+                    key in target
+                    for key in ("known", "revealed_cards", "self_hand", "hand")
+                ):
+                    print(f"FAIL 火攻固定 tape：手牌区出现牌面 / 已知状态：{target}")
+                    return False
+                state["discard_pending"] = True
         if kind == "end":
             if not state.get("reveal"):
                 print("FAIL 火攻固定 tape：整局没有 card_reveal 公开记录")
@@ -783,13 +881,26 @@ def _fire_attack_fixed(base: str) -> int:
             if state.get("reveal_count") != 1:
                 print(f"FAIL 火攻固定 tape：card_reveal 不是恰一条：{state.get('reveal_count')}")
                 return False
-            if not state.get("discard_pending") or not state.get("hidden_checked"):
-                print("FAIL 火攻固定 tape：没有走到同花色弃牌询问 / 未检查未亮出的手牌")
+            if state.get("reveal_seat") != 0:
+                print(f"FAIL 火攻固定 tape：亮牌者不是人类座位：{state.get('reveal_seat')}")
+                return False
+            if not state.get("reveal_pending") or not state.get("human_reveal_answered"):
+                print("FAIL 火攻固定 tape：亮牌不是一次真实的人类 HTTP 往返")
+                return False
+            if not state.get("discard_pending") or not state.get("discard_answered"):
+                print("FAIL 火攻固定 tape：没有走到同花色弃牌的人类应答")
                 return False
             if not state.get("fire_used"):
                 print("FAIL 火攻固定 tape：整局没有用出【火攻】")
                 return False
-            for player in body["snapshot"]["players"]:
+            players = body["snapshot"]["players"]
+            if players[0].get("hp") != 3:
+                print(f"FAIL 火攻固定 tape：同花色弃牌后的火焰伤害不对：{players[0]}")
+                return False
+            if players[1].get("alive") is not False:
+                print(f"FAIL 火攻固定 tape：收局前对手还活着：{players[1]}")
+                return False
+            for player in players:
                 if "known" in player or "revealed_cards" in player:
                     print(f"FAIL 火攻固定 tape：结算后手牌区残留「已知」：{player}")
                     return False

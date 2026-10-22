@@ -50,6 +50,8 @@ WINE = cards_of_type(PACK, "wine")
 IRON_CHAIN = cards_of_type(PACK, "iron_chain")
 FIRE_ATTACK = cards_of_type(PACK, "fire_attack")
 VINE_ARMOR = cards_of_type(PACK, "vine_armor")
+SILVER_LION = cards_of_type(PACK, "silver_lion")
+QINGGANG_SWORD = cards_of_type(PACK, "qinggang_sword")
 
 AI_SEED = 7
 """构造局面用的 AI 子流种子（同种子逐字节可复现；平分由它打破）。"""
@@ -235,6 +237,48 @@ def test_the_ai_plays_wine_before_a_lethal_slash_and_conserves_it_otherwise():
 
     assert isinstance(action, UseCard) and action.card.card_id == slash, (
         "杀不掉时不浪费【酒】：这一手先出【杀】"
+    )
+
+
+def _silver_lion_wine_engine(*, qinggang: bool) -> Engine:
+    """座位 0（AI）握【酒】+【杀】；座位 1 穿白银狮子、2 体力。
+
+    ``qinggang=True`` 时座位 0 另装备【青釭剑】——它越过白银狮子的封顶。
+    """
+    wine, slash, lion = WINE[0], SLASH[0], SILVER_LION[0]
+    equip = (QINGGANG_SWORD[0],) if qinggang else ()
+    used = (wine, slash, lion, *equip)
+    return _engine(
+        [
+            SeatSpec(hand=(wine, slash), equip=equip),
+            SeatSpec(hp=2, hp_max=4, equip=(lion,)),
+        ],
+        deck=_deck_with_top(*_inert_draw(*used), exclude=used),
+    )
+
+
+def test_wine_is_not_lethal_through_the_silver_lion_cap_without_qinggang():
+    """白银狮子把【酒】的 +1 也封在 1 点：没有青釭剑 ⇒ 不喝酒；有青釭剑 ⇒ 正好斩杀。"""
+    wine, slash = WINE[0], SLASH[0]
+
+    capped = _silver_lion_wine_engine(qinggang=False)
+    ai = _ai()
+    _advance(capped, [ai, _Minimal()], _at_play_phase(0))
+
+    action = ai.respond(capped.pending)
+
+    assert isinstance(action, UseCard) and action.card.card_id == slash, (
+        "白银狮子封顶吃掉【酒】的 +1：这一口不是斩杀，AI 先出【杀】"
+    )
+
+    piercing = _silver_lion_wine_engine(qinggang=True)
+    ai = _ai()
+    _advance(piercing, [ai, _Minimal()], _at_play_phase(0))
+
+    action = ai.respond(piercing.pending)
+
+    assert isinstance(action, UseCard) and action.card.card_id == wine, (
+        "青釭剑越过白银狮子：【酒】+【杀】= 2 点正好斩杀，先喝酒"
     )
 
 

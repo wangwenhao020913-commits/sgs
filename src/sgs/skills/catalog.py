@@ -945,9 +945,11 @@ def _qinggang_ignore_armor(state: GameState, ctx: ModifierContext, current: Any)
 
     M5-05a 起同一条回调挂**三个挂点**：``EFFECTIVENESS``（仁王盾式"无效"）、
     ``DAMAGE_TAKE_AMOUNT`` 与 ``DAMAGE_CAP``（藤甲的火焰 +1、白银狮子的封顶）。
-    "无视防具"是**防具的整体效果**，不只第一条链：伤害链是另一次 ``apply_modifiers``
-    （新的 ``flags``），同一条修正必须自己把标志再置一遍，后跑的防具回调才读得到。
-    链序仍保证青釭剑在前（``equip.qinggang_sword`` 按 skill_id 排在防具之前）。
+    "无视防具"是**防具的整体效果**，不只第一条链：:func:`~sgs.effects.damage_amount`
+    只建**一个** ``ModifierContext``，三条链经 ``replace(ctx, role=...)`` 共用同一个
+    可变 ``flags`` 字典——这里置一次就够，后两条链的防具回调读到的是同一份标志。
+    链序仍保证青釭剑在前（``equip.qinggang_sword`` 按 skill_id 排在防具之前），
+    故第一次（``EFFECTIVENESS``）派发就把标志写进了共享字典。
     """
     del state
     if not _own_slash(ctx, holder=ctx.subject):

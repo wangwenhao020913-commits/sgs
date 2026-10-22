@@ -144,7 +144,7 @@ MAX_VIRTUAL_SOURCES = 7
 
 
 class VirtualSourceError(ValueError):
-    """来源集合不合法（空 / 超过 :data:`MAX_VIRTUAL_SOURCES`）。
+    """来源集合不合法（空 / 超过本副牌堆的来源张数上界）。
 
     继承 ``ValueError``：这是构造期的编程错误，与数据加载期的聚合报错同姿态——
     早抛、能定位，而不是让一张撞 id 的虚拟牌流进对局。
@@ -274,7 +274,7 @@ def _validate_source_count(
     if len(sources) > max_sources:
         raise VirtualSourceError(
             f"{target}: 来源 {len(sources)} 张超过上界 {max_sources}"
-            f"（MAX_VIRTUAL_SOURCES）"
+            f"（本副牌堆的上界由 _source_ceiling_for_base 收紧）"
         )
 
 
@@ -533,17 +533,19 @@ def virtual_candidates(
     ``move_in_frame`` 搬到处理区再进弃牌堆——那条路径才记 delta。早先在这里就地
     ``move_card`` 不落记录，会让记录流重建的牌堆与活状态分叉（票 14 的 fuzz 开启武将后
     实测：从装备区转化【杀】后，下一次从弃牌堆的移动对不上重建结果）。
+
+    来源张数超过**本副牌堆**的上界（108 张 ⇒ 7、160 张 ⇒ 6，与
+    :func:`transformed_card` 读同一个 :func:`_source_ceiling_for_base`）时在这里就抛
+    :class:`VirtualSourceError`，不把 7 张组放行到构造器才失败。
     """
     if ctx.card is not None or ctx.owner != ctx.subject:
         return []
     if ctx.scope not in scopes:
         return []
+    ceiling = _source_ceiling_for_base(_base(len(state.cards)))
     actions: list[Any] = []
     for group in sources:
-        if len(group) > MAX_VIRTUAL_SOURCES:
-            raise VirtualSourceError(
-                f"{target_type_id}: 来源 {len(group)} 张超过上界 {MAX_VIRTUAL_SOURCES}"
-            )
+        _validate_source_count(group, max_sources=ceiling, target="virtual_candidates")
         card = transformed_card(state, group, target_type_id)
         if ctx.scope is CandidateScope.RESPOND and (
             ctx.respond_required is None

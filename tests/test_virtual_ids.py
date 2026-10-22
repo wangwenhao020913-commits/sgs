@@ -16,17 +16,22 @@ from itertools import combinations
 import pytest
 
 from sgs.data import load_content_pack
+from sgs.effects import CandidateScope
 from sgs.skills import (
     MAX_VIRTUAL_SOURCES,
+    ModifierContext,
     VirtualKind,
     VirtualSourceError,
     transformed_card,
     virtual_card_id,
 )
-from sgs.skills.virtual import LEGACY_KIND_COUNT, WIRE_INT_LIMIT
+from sgs.skills.virtual import LEGACY_KIND_COUNT, WIRE_INT_LIMIT, virtual_candidates
 
 from support import SeatSpec, build_state
 from test_skills import PACK
+
+PACK_EX_160 = load_content_pack(deck_profile="standard_ex_160")
+"""160 张军争档：本副牌堆的来源上界被收紧到 6（M5-01a）。"""
 
 BASE = len(PACK.deck.cards) + 1
 """编码进制 = 牌堆张数 + 1（标准包 108 张 ⇒ 109）。"""
@@ -278,6 +283,35 @@ def test_the_military_160_deck_narrows_the_source_ceiling_but_keeps_ids_safe():
             kind=int(VirtualKind.PEACH),
             sources=tuple(range(ceiling + 1)),
             card_count=count,
+        )
+
+
+def test_the_candidate_guard_uses_the_deck_specific_source_ceiling():
+    """160 张档：7 张来源的组在**候选阶段**就抛；108 张档仍按 7 张编码。
+
+    候选守卫必须与 :func:`transformed_card` 读**同一个** ``_source_ceiling_for_base``：
+    否则 160 档的 7 张组会先过守卫、再到构造器才抛，"第几道闸拦住"随调用路径漂移。
+    """
+    ctx = ModifierContext(subject=0, owner=0, scope=CandidateScope.DODGE)
+
+    standard = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()])
+    actions = virtual_candidates(
+        standard,
+        ctx,
+        target_type_id="peach",
+        sources=(tuple(range(MAX_VIRTUAL_SOURCES)),),
+        scopes=(CandidateScope.DODGE,),
+    )
+    assert actions, "108 张档的 7 张来源仍是合法候选组（编码上界 7）"
+
+    military = build_state(pack=PACK_EX_160, seats=[SeatSpec(), SeatSpec()])
+    with pytest.raises(VirtualSourceError, match="virtual_candidates"):
+        virtual_candidates(
+            military,
+            ctx,
+            target_type_id="peach",
+            sources=(tuple(range(MAX_VIRTUAL_SOURCES)),),
+            scopes=(CandidateScope.DODGE,),
         )
 
 

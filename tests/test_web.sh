@@ -206,9 +206,10 @@ if ! "$PYTHON" tests/support/web_client.py --base "http://127.0.0.1:$PORT" --tap
   exit 1
 fi
 
-# ⑥d M5-09a：三条**固定 tape**（火攻亮牌 / 铁索重铸 / 酒）——spec D12 / §6 A2。
+# ⑥d M5-09a：三条**固定 tape**（火攻人类亮牌 / 铁索重铸 / 酒）——spec D12 / §6 A2。
 # tape 由构造局面生成（`tests/support/m5_fixture_server.py`），不依赖随机种子；
-# 每次询问都是对同一份产品 HTTP 门面的真实往返。
+# 火攻的亮牌 + 同花色弃牌两步都由**人类**经 HTTP 应答（不是 AI 亮牌），其余每次询问
+# 也都是对同一份产品 HTTP 门面的真实往返。
 echo "=== 固定 tape：火攻 / 重铸 / 酒（构造局面，真 HTTP） ==="
 FIXLOG="$TMP/fixtures.log"
 "$PYTHON" tests/support/m5_fixture_server.py --port 0 --runs-dir "$RUNS" > "$FIXLOG" 2>&1 &

@@ -365,16 +365,20 @@ def _ignores_armour(me: PlayerPublic) -> bool:
     return _wears(me, _QINGGANG_SWORD)
 
 
-def _damage_to(card: CardRef | None, view: PlayerView, seat: int) -> int:
+def _damage_to(
+    card: CardRef | None, view: PlayerView, seat: int, *, wine: bool | None = None
+) -> int:
     """这张伤害牌落到 ``seat`` 身上大约造成几点伤害（只读公开的装备与状态）。
 
     只建模**公开可读**的修正，不做概率：
 
     - **藤甲**：普通【杀】无效（0）；火【杀】+1（火伤 +1）；雷【杀】照常。我装备
       【青釭剑】时整条让开（"无视防具"）；
-    - **【酒】**：``me.wine_active`` 的下一张【杀】+1（公开状态）；
+    - **【酒】**：``me.wine_active`` 的下一张【杀】+1（公开状态）；``wine=True`` 表示
+      "假设这一口已经喝下"（``_wine_enables_kill`` 推演斩杀线时用），缺省读当前状态；
     - **古锭刀**：目标**没有手牌**时 +1（手牌张数是公开信息）；
-    - **白银狮子**：每次伤害至多 1 点（封顶在最后一步）。
+    - **白银狮子**：每次伤害至多 1 点（封顶在最后一步），**青釭剑**越过它——与
+      ``catalog._silver_lion_damage_cap`` 同一条口径；【酒】的 +1 也吃这道封顶。
 
     非【杀】的伤害牌（【决斗】/【南蛮】/【万箭】）不参与装备交互，按 1 点计。
     """
@@ -390,11 +394,12 @@ def _damage_to(card: CardRef | None, view: PlayerView, seat: int) -> int:
                 return 0
             if card.type == "fire_slash":
                 damage += 1
-        if me.wine_active:
+        add_wine = me.wine_active if wine is None else wine
+        if add_wine:
             damage += 1
         if _wears(me, _ANCIENT_SCIMITAR) and target.hand_count == 0:
             damage += 1
-    if _wears(target, _SILVER_LION):
+    if _wears(target, _SILVER_LION) and not _ignores_armour(me):
         damage = min(damage, 1)
     return damage
 
@@ -451,7 +456,9 @@ def _wine_enables_kill(query: Query) -> bool:
 
     只读公开面：目标体力、目标装备（藤甲 / 白银狮子 / 古锭刀）、自己的 ``wine_active``
     与**手里的【杀】候选**（候选由引擎从真局面生成）。判据是"这一刀打不死、加【酒】
-    正好打死"：目标体力 > 当前伤害、且 ≤ 当前伤害 + 1。已经能一刀打死（体力 ≤ 伤害）
+    正好打死"：目标体力 > 当前伤害、且 ≤ **喝下酒之后**的伤害
+    （``_damage_to(..., wine=True)``）。白银狮子的封顶把【酒】的 +1 也封在 1 点里
+    （除非我装备青釭剑越过防具），故那种局面下酒不是斩杀。已经能一刀打死（体力 ≤ 伤害）
     时【酒】是多余的——那条不算"能击杀"，故 AI 不会为补刀白白扔掉【酒】。
     """
     view = query.view
@@ -466,8 +473,10 @@ def _wine_enables_kill(query: Query) -> bool:
             if not target.alive:
                 continue
             damage = _damage_to(action.card, view, seat)
+            after_wine = _damage_to(action.card, view, seat, wine=True)
             # ``damage == 0``（普通【杀】打藤甲）时【酒】也救不了这一刀：它无效，不是差 1 点。
-            if 0 < damage < target.hp <= damage + 1:
+            # ``after_wine == damage``（白银狮子把 +1 封掉）同样不算"加酒正好打死"。
+            if damage < target.hp <= after_wine:
                 return True
     return False
 
