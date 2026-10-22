@@ -11,6 +11,7 @@ from .deltas import (
     HpChangeDelta,
     IdentityDealDelta,
     IdentityRevealDelta,
+    WineChangeDelta,
 )
 from .models import (
     CardRef,
@@ -122,6 +123,7 @@ __all__ = (
     "StepPool",
     "SlotKind",
     "UseCard",
+    "WineChangeDelta",
     "WindowCause",
     "Zone",
     "ZoneRef",

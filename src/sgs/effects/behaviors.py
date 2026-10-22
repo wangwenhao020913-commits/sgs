@@ -155,6 +155,14 @@ class TargetRule:
     needs_distance: bool = False
     self_only: bool = False
     requires_wounded_self: bool = False
+    near_death_self_only: bool = False
+    """**濒死语境**下是否只能对**濒死者自己**使用（M5-04 的【酒】）。
+
+    与 ``self_only`` 分开：``self_only`` 管**出牌阶段**的目标池（【桃】/【酒】都只能对自己），
+    而濒死求桃窗口对【桃】允许**他人**对濒死者使用——目标由求桃询问直接给出，不走本规则
+    （票 21）。【酒】的濒死用法只允许自救，故需要这条独立的、只影响求桃候选的声明。
+    标准 108 的【桃】保持 ``False``，候选面因此一字不变。
+    """
     max_distance: int | None = None
     min_targets: int | None = None
     """**目标数区间**的下界（M5-03；``None`` = 不启用区间规则）。
@@ -310,6 +318,23 @@ _PLAY_PHASE = UseTiming(UseContext.PLAY_PHASE)
 _NEAR_DEATH = UseTiming(UseContext.NEAR_DEATH)
 _RESPONSE_BEFORE_EFFECT = UseTiming(UseContext.RESPONSE, Timing.RESOLVE_BEFORE_EFFECT)
 _UNLIMITED = UseLimit(rated=None)
+
+SLASH_FAMILY_KEY = "slash"
+"""【杀】家族**共享的计数键**（M5-02）：普通 / 火 / 雷与转化、虚拟产物都归它。
+
+它同时是"这次使用算不算一张【杀】"的唯一判据（:func:`is_slash`）：`engine/` 只调本
+函数决定"酒加伤兑现给哪次使用"，不认识任何具体牌名 / 牌型 id。
+"""
+
+
+def is_slash(behavior: CardBehavior) -> bool:
+    """这次使用是不是一张【杀】——含普通 / 火 / 雷与**转化、虚拟产物**。
+
+    判据 = 行为表的共享计数键（M5-02 把三种【杀】的 ``count_key`` 都声明成 ``"slash"``；
+    转化 / 虚拟牌按**产物牌型**查行为表，故同一个键覆盖整个家族）。【酒】的加伤因此
+    只认"是不是【杀】"，不认打出去的是哪张实体牌。
+    """
+    return behavior.count_key == SLASH_FAMILY_KEY
 
 
 def _one_other(
@@ -522,13 +547,19 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
     # 火杀 / 雷杀：独立牌型，静态面同【杀】；伤害步各自声明 FIRE / THUNDER（M5-02）。
     "fire_slash": _slash_variant("fire_slash", nature=DamageNature.FIRE),
     "thunder_slash": _slash_variant("thunder_slash", nature=DamageNature.THUNDER),
-    # 酒：自己 + 出牌阶段 / 濒死；加伤与酒状态由 M5-04，濒死自救走求桃窗口的统一回复。
+    # 酒：自己 + 出牌阶段 / 濒死；出牌阶段置加伤（M5-04 的 resolve_wine），濒死自救走
+    # 求桃窗口的统一回复（与【桃】同一骨架），两种用法共用一个每回合一次的计数键。
     "wine": CardBehavior(
         card_type_id="wine",
         use_timings=(_PLAY_PHASE, _NEAR_DEATH),
-        target_rule=TargetRule(rated_targets=1, includes_self=True, self_only=True),
+        target_rule=TargetRule(
+            rated_targets=1,
+            includes_self=True,
+            self_only=True,
+            near_death_self_only=True,
+        ),
         use_limit=UseLimit(rated=1),
-        effects=(),
+        effects=(CallOp("resolve_wine"),),
     ),
     # 火攻 / 铁索 / 兵粮：先立最小骨架（目标规则与窗口按牌面），
     # 亮牌 + 同花色弃牌 = M5-06；1–2 目标 + 重铸 = M5-03；判定跳摸牌 = M5-06。

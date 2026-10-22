@@ -709,6 +709,14 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
     濒死语境的目标由求桃询问直接给出（官方 4.17"对濒死角色使用"）。放弃恒在最后，
     且**永远可选**——"放弃"是 PEACH 询问的一个候选而不是独立询问（票 05 §1）。
 
+    两处**语境专属**的过滤（M5-04）：
+
+    - ``TargetRule.near_death_self_only`` 的牌（【酒】）只在**濒死者自己**被问时进候选；
+      【桃】不声明它，故"他人对濒死者出【桃】"不受影响。——单靠 ``self_only`` 会误伤
+      【桃】（它的 ``self_only`` 只描述出牌阶段的目标池）。
+    - 次数上限照走 ``check_count``：本回合已用过【酒】（无论出牌阶段加伤还是上一次濒死
+      自救）⇒ 这次求桃不再给【酒】候选，出牌阶段与濒死自救因此共用**同一个**计数键。
+
     **转化源路径**（W4-3）：除了真牌，**能把牌当【桃】的转化技**（当前只有华佗【急救】）
     也在这里产出候选——红牌（手牌 ∪ 装备）当【桃】，目标仍是濒死者。候选集合与
     ``GLOSSARY.md``「预发动清单」里的那一步**同源**：来源由
@@ -719,6 +727,8 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
     actions: list[Action] = [
         UseCard(card=card, targets=(dying,), answers_seq=answers_seq)
         for card in _usable_hand(state, seat, UseContext.NEAR_DEATH)
+        if (seat == dying or not behavior_for(card).target_rule.near_death_self_only)
+        and not check_count(state, seat, card)
     ]
     actions.extend(_transformed_peaches(state, seat, dying, answers_seq))
     actions.append(Pass(answers_seq=answers_seq))

@@ -46,6 +46,7 @@ from .behaviors import (
     UseLimit,
     UseTiming,
     behavior_for,
+    is_slash,
 )
 from .modifiers import (
     CandidateScope,
@@ -55,6 +56,7 @@ from .modifiers import (
     ModifierPoint,
     ModifierRole,
     PriorityClass,
+    WINE_DAMAGE_BONUS,
     apply_modifiers,
     damage_amount,
     priority_class_of,
@@ -104,6 +106,7 @@ __all__ = (
     "UseContext",
     "UseLimit",
     "UseTiming",
+    "WINE_DAMAGE_BONUS",
     "apply_hp",
     "apply_modifiers",
     "attack_range",
@@ -119,6 +122,7 @@ __all__ = (
     "draw_from_deck",
     "forced_use_targets",
     "hand_limit",
+    "is_slash",
     "legal_actions_for",
     "locate",
     "move_card",

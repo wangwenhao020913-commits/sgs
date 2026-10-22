@@ -228,6 +228,23 @@ def resolve_peach_garden(host: Any, frame: Frame) -> None:
     )
 
 
+def resolve_wine(host: Any, frame: Frame) -> None:
+    """【酒】（M5-04）：出牌阶段置"下一张【杀】+1"；濒死语境**不产生**加伤。
+
+    两种用法共用 ``start_use`` 与同一个计数键，效果按 ``frame.data["use_timing"]`` 分叉：
+
+    - 出牌阶段（``use_timing = None``）：把来源座位的 ``wine_active`` 写成 ``True``
+      （唯一写入口 ``Engine.set_wine_active``，落一条 ``wine_change``）；
+    - 濒死（``use_timing = NEAR_DEATH_AT``）：回复 1 已由求桃窗口的既有骨架
+      （``Engine.recover_from_peach`` 先压好的 RECOVER 帧）落地——濒死语境的 RESOLVE
+      在"生效前"就跳过效果步骤，本分支因此只保证**不写** ``wine_active``：不产生任何
+      留给下一张【杀】的加伤，也不产生跨回合残留。
+    """
+    if frame.data.get("use_timing") is Timing.NEAR_DEATH_AT:
+        return None
+    host.set_wine_active(frame, frame.data["source"], True)
+
+
 _ASK_DISMANTLEMENT = "ops.dismantlement"
 """手写询问位置（票 22）：【过河拆桥】目标区选一张牌。"""
 
@@ -645,6 +662,7 @@ OPS: dict[str, Callable[[Any, Frame], Any]] = {
     resolve_ex_nihilo.__name__: resolve_ex_nihilo,
     resolve_iron_chain.__name__: resolve_iron_chain,
     resolve_peach_garden.__name__: resolve_peach_garden,
+    resolve_wine.__name__: resolve_wine,
     resolve_dismantlement.__name__: resolve_dismantlement,
     resolve_snatch.__name__: resolve_snatch,
     resolve_duel.__name__: resolve_duel,

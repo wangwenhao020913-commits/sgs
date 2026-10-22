@@ -1,10 +1,11 @@
 """变化事件（delta）的载荷类型：一次状态变化的纯事实（票 06 §2 / §3）。
 
-六种 ``delta_type``（``card_move`` / ``hp_change`` / ``chained_change`` / ``deck_shuffle`` /
-``identity_deal`` / ``identity_reveal``）：它们是记录流 schema 的一部分，后补会动事件版本，
-所以即使 M1 的骨架期只用得到 ``card_move`` 也先建位；``chained_change`` 是 M5-03 的就地
-追加（横置状态，记录流仍为事件版本 2）。记录层（``engine``）在这些模型上**继承**出带
-``seq`` / ``frame_id`` / ``depth`` 的记录子类，从而 JSON 是平铺的。
+七种 ``delta_type``（``card_move`` / ``hp_change`` / ``chained_change`` / ``wine_change`` /
+``deck_shuffle`` / ``identity_deal`` / ``identity_reveal``）：它们是记录流 schema 的一部分，
+后补会动事件版本，所以即使 M1 的骨架期只用得到 ``card_move`` 也先建位；``chained_change``
+（M5-03 横置）与 ``wine_change``（M5-04 酒）都是就地追加，记录流仍为事件版本 2。记录层
+（``engine``）在这些模型上**继承**出带 ``seq`` / ``frame_id`` / ``depth`` 的记录子类，
+从而 JSON 是平铺的。
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ __all__ = [
     "HpChangeDelta",
     "IdentityDealDelta",
     "IdentityRevealDelta",
+    "WineChangeDelta",
 ]
 
 
@@ -70,6 +72,22 @@ class ChainedChangeDelta(_FrozenModel):
     chained: bool
 
 
+class WineChangeDelta(_FrozenModel):
+    """一个座位的【酒】加伤状态被写成某个值（M5-04 / 决策 D5）。
+
+    写入口唯一：``Engine.set_wine_active``。出牌阶段使用【酒】把它写成 ``True``；兑现给
+    下一张【杀】的使用、以及回合末清理都经它写成 ``False``。与 ``chained_change`` 同形
+    （只记**新值**：``active``），因为它同样是"回合内的临时状态 + 网页座位卡读投影"。
+
+    加伤只在本回合有效，故它不会跨回合出现在记录流里；标准 108 无【酒】，故标准基准
+    一条都不会出现这条 delta。
+    """
+
+    delta_type: Literal["wine_change"] = "wine_change"
+    seat: int
+    active: bool
+
+
 class DeckShuffleDelta(_FrozenModel):
     """一次洗牌置换；``cards`` 是**洗后**自顶向下的牌堆顺序，不记洗前顺序。
 
@@ -112,6 +130,7 @@ Delta = Annotated[
     CardMoveDelta
     | HpChangeDelta
     | ChainedChangeDelta
+    | WineChangeDelta
     | DeckShuffleDelta
     | IdentityDealDelta
     | IdentityRevealDelta,

@@ -861,6 +861,7 @@ def damage_finalize_amount(host: FrameHost, frame: Frame) -> None:
             card=frame.data.get("channel"),
             base=amount,
             chain=bool(frame.data.get("chain")),
+            deal_bonus=int(frame.data.get("deal_bonus", 0)),
         )
         reset = (
             amount > 0

@@ -36,12 +36,14 @@ from sgs.effects import (
     EffectStep,
     PushFrame,
     Randomness,
+    WINE_DAMAGE_BONUS,
     apply_hp,
     behavior_for,
     delayed_settle_target,
     designation_actions_for,
     discard_count,
     draw_from_deck,
+    is_slash,
     legal_actions_for,
     locate,
     move_card,
@@ -116,6 +118,7 @@ from sgs.state import (
     Step,
     UseCard,
     WindowCause,
+    WineChangeDelta,
     Zone,
     ZoneRef,
     next_alive_seat,
@@ -270,6 +273,10 @@ def _child_payload(
         "card": parent_data.get("card"),
         "use_timing": parent_data.get("use_timing"),
     }
+    if "deal_bonus" in parent_data:
+        # 使用级的来源侧伤害加伤（M5-04 的【酒】+1）：随使用帧 → RESOLVE → DAMAGE 一路带走。
+        # 只在**有**这个键时继承，故其它牌的子帧载荷与旧路径逐键相同（帧私有，不进记录流）。
+        data["deal_bonus"] = parent_data["deal_bonus"]
     for key, value in scalars:
         if key in data:
             raise ValueError(f"行为表的标量 {key!r} 会覆盖子帧继承的字段")
@@ -1064,26 +1071,43 @@ class Engine:
         :func:`~sgs.engine.steps.use_push_resolve` 的 ``dict(frame.data)`` 继承进 RESOLVE
         帧，由 :func:`~sgs.effects.resolve_borrowed_sword` 读出。空元组不落帧键——没有
         附带指定的每一条使用与旧路径的帧载荷逐键相同。
+
+        **【酒】的加伤在"使用"时兑现**（M5-04，spec §5.1 酒）：若来源座位正处于
+        ``wine_active`` 且这次使用属于【杀】家族（:func:`~sgs.effects.is_slash`，含转化 /
+        虚拟产物），就把 +1 作为本次使用的**来源侧**加伤写进帧（``deal_bonus``，随子帧
+        一路传到伤害帧的 :func:`~sgs.effects.damage_amount`），并**立刻消费**状态
+        （落一条 ``wine_change``）。兑现点必须是使用而不是造成伤害：被【闪】抵消 / 未造成
+        伤害的那张【杀】同样消耗掉加伤，不能留给下一张。其它牌（锦囊 / 其它基本牌）与
+        打出都不消费、也不加伤。引擎只问"是不是【杀】家族"，不认识"酒"这个牌名。
         """
+        behavior = behavior_for(card)
         if counts:
             counts_by_type = self.state.player(source).card_use_counts
-            key = behavior_for(card).count_key
+            key = behavior.count_key
             counts_by_type[key] = counts_by_type.get(key, 0) + 1
+        deal_bonus = 0
+        if is_slash(behavior) and self.state.player(source).wine_active:
+            deal_bonus = WINE_DAMAGE_BONUS
         data: dict[str, Any] = {
             "card": card,
             "source": source,
             "targets": order_targets(self.state, tuple(targets)),
             "use_timing": use_timing,
         }
+        if deal_bonus:
+            data["deal_bonus"] = deal_bonus
         if designations:
             data["designations"] = tuple(designations)
         if cancel_target is not None:
             data["cancel_target"] = cancel_target
-        return self.push_frame(
+        frame = self.push_frame(
             FrameKind.USE,
             data,
             timing=use_timing if use_timing is not None else Timing.USE_CHOOSE_TARGET,
         )
+        if deal_bonus:
+            self.set_wine_active(frame, source, False)
+        return frame
 
     def current_target(self, frame: Frame) -> int:
         """C 段的**当前目标**：``targets[cursor]``；空目标（响应牌）退回使用者。"""
@@ -2258,6 +2282,30 @@ class Engine:
         )
         return True
 
+    def set_wine_active(self, frame: Frame | None, seat: int, active: bool) -> bool:
+        """写一个座位的【酒】加伤状态并落一条 ``wine_change``（M5-04 的唯一写入口）。
+
+        返回值 = 状态真的变了吗。三处调用点：出牌阶段的【酒】效果置位（RESOLVE 帧）、
+        下一张【杀】被使用时消费（USE 帧）、回合末（含回合内阵亡跳段）与下一回合开始时的
+        清理（帧外，``frame=None`` → 记录坐标 ``frame_id = 0``）。集中到这一个口子，
+        "状态变化必有 delta"与"回放可重建"因此不靠调用点自觉。
+        """
+        player = self.state.player(seat)
+        if player.wine_active == active:
+            return False
+        player.wine_active = active
+        self.emit_delta(
+            WineChangeDelta(seat=seat, active=active),
+            frame_id=(frame.frame_id if frame is not None else 0),
+            depth=self.stack.depth,
+        )
+        return True
+
+    def _clear_wine_active(self, seat: int) -> None:
+        """把一个座位的【酒】加伤清掉（回合的收尾点与下一回合起点各调一次，幂等）。"""
+        if self.state.player(seat).wine_active:
+            self.set_wine_active(None, seat, False)
+
     # -- 询问 ---------------------------------------------------------------
 
     def ask(self, build: Callable[[int], Query]) -> Action | _Suspend:
@@ -2964,6 +3012,9 @@ class Engine:
         seat = self.state.turn_seat
         if seat is not None:
             self.state.player(seat).card_use_counts.clear()
+            # 【酒】加伤只在本回合有效（M5-04）：回合收尾已清，这里再幂等兜一次——
+            # 两处都走唯一写入口，故"清掉"与"从来没置过"的记录形态相同（无 delta）。
+            self._clear_wine_active(seat)
         self.emit_timing(Timing.TURN_START, actor=seat)
 
     def _phase_prepare(self) -> str | None:
@@ -3249,6 +3300,12 @@ class Engine:
         self.emit_timing(Timing.TURN_END, actor=self.state.turn_seat)
 
     def _turn_after_end(self) -> None:
+        # 回合彻底走完（含"回合内阵亡 ⇒ 跳过整段、直接落到本步"的路径）才清【酒】加伤：
+        # 它只在**本回合**有效，不能留到别人的回合里（M5-04）。清理走唯一写入口，
+        # 故置过而没用掉的那一份会留下一条 ``wine_change = false``（回放据此重建）。
+        seat = self.state.turn_seat
+        if seat is not None:
+            self._clear_wine_active(seat)
         self.emit_timing(Timing.TURN_AFTER_END, actor=self.state.turn_seat)
 
     def _turn_seat(self) -> int:

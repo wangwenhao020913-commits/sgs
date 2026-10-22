@@ -30,6 +30,7 @@ from sgs.state import (
     IdentityDealDelta,
     IdentityRevealDelta,
     Query,
+    WineChangeDelta,
 )
 from sgs.timing import Timing
 
@@ -54,6 +55,7 @@ __all__ = [
     "MalformedAction",
     "QueryRecord",
     "TimingRecord",
+    "WineChangeRecord",
     "dump_journal",
     "read_journal",
     "record_json",
@@ -123,6 +125,15 @@ class ChainedChangeRecord(ChainedChangeDelta):
     depth: int
 
 
+class WineChangeRecord(WineChangeDelta):
+    """一次【酒】加伤状态变化（M5-04）：出牌阶段置位 / 下一张【杀】兑现 / 回合末清理。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
 class DeckShuffleRecord(DeckShuffleDelta):
     kind: Literal["delta"] = "delta"
     seq: int
@@ -152,6 +163,7 @@ DeltaRecord = Annotated[
     CardMoveRecord
     | HpChangeRecord
     | ChainedChangeRecord
+    | WineChangeRecord
     | DeckShuffleRecord
     | IdentityDealRecord
     | IdentityRevealRecord,
@@ -270,6 +282,8 @@ def wrap_delta(delta: Delta, *, seq: int, frame_id: int, depth: int) -> DeltaRec
         return HpChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, ChainedChangeDelta):
         return ChainedChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, WineChangeDelta):
+        return WineChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, IdentityDealDelta):
         return IdentityDealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, IdentityRevealDelta):

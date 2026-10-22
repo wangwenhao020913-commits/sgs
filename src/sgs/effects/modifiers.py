@@ -33,6 +33,7 @@ __all__ = [
     "ModifierPoint",
     "ModifierRole",
     "PriorityClass",
+    "WINE_DAMAGE_BONUS",
     "apply_modifiers",
     "damage_amount",
     "priority_class_of",
@@ -77,6 +78,10 @@ class PriorityClass(IntEnum):
     HERO = 0
     EQUIPMENT = 1
     CARD_USE = 2
+
+
+WINE_DAMAGE_BONUS = 1
+"""【酒】的加伤值（spec §5.1 酒）：出牌阶段使用后，本回合**下一张【杀】**的来源侧 +1。"""
 
 
 _CARRIER_PRIORITY: dict[CarrierKind, PriorityClass] = {
@@ -266,6 +271,7 @@ def damage_amount(
     card: CardRef | None,
     base: int,
     chain: bool,
+    deal_bonus: int = 0,
 ) -> int:
     """本次伤害的**最终数值**（M5-03）：来源侧只在源头帧算一次，目标侧每一帧都算。
 
@@ -277,6 +283,12 @@ def damage_amount(
        重算就会翻倍（spec §5.1.1 第 6 条）。派发时 ``ctx.role = SUBJECT``（主体 = 来源）。
     2. ``DAMAGE_TAKE_AMOUNT``（**目标侧**：藤甲 / 白银）——**每一帧**都派发，包括传导帧；
        回调按 ``ctx.target == ctx.owner`` 认自己。``ctx.role = TARGET``。
+
+    ``deal_bonus``（M5-04）是**使用级**的来源侧加伤（【酒】兑现给本回合下一张【杀】的 +1，
+    由 ``Engine.start_use`` 消费 ``wine_active`` 时写进使用帧、随帧传到伤害帧）。它和
+    ``DAMAGE_DEAL_AMOUNT`` 链上的技能修正一样只在源头帧生效：先烘进 ``base`` 再交给链，
+    加法可交换，故与古锭刀等来源侧 +1 的先后次序不影响总和；``chain=True`` 的门槛把它与
+    链一起挡在外面（传导不重算来源侧）。
 
     链序仍是 ``(priority_class, skill_id, owner)``；没有命中任何修饰器时返回 ``base``
     （标准 108 无任何伤害数值修饰器 ⇒ 逐字节不变）。
@@ -293,6 +305,6 @@ def damage_amount(
             ModifierPoint.DAMAGE_DEAL_AMOUNT,
             state,
             replace(ctx, role=ModifierRole.SUBJECT),
-            value,
+            value + deal_bonus,
         )
     return apply_modifiers(ModifierPoint.DAMAGE_TAKE_AMOUNT, state, ctx, value)
