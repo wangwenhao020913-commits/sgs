@@ -45,6 +45,7 @@ from .behaviors import (
     UseContext,
     UseLimit,
     UseTiming,
+    WINE_COUNT_KEY,
     behavior_for,
     is_slash,
 )
@@ -106,6 +107,7 @@ __all__ = (
     "UseContext",
     "UseLimit",
     "UseTiming",
+    "WINE_COUNT_KEY",
     "WINE_DAMAGE_BONUS",
     "apply_hp",
     "apply_modifiers",

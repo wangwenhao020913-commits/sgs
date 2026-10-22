@@ -36,6 +36,7 @@ from sgs.effects import (
     EffectStep,
     PushFrame,
     Randomness,
+    WINE_COUNT_KEY,
     WINE_DAMAGE_BONUS,
     apply_hp,
     behavior_for,
@@ -3306,6 +3307,12 @@ class Engine:
         seat = self.state.turn_seat
         if seat is not None:
             self._clear_wine_active(seat)
+        # 【酒】的"每回合一次"按**游戏回合**记（spec §5.1 酒）：濒死自救可能发生在别人的
+        # 回合、记在濒死者身上，故回合末必须清**所有座位**的 wine 计数键，不能只清回合角色。
+        # 只动这一个键：其它键（【杀】等）仍按座位自己的 ``TURN_START`` 重置，回合外
+        # ``check_count``（【借刀杀人】迫使的【杀】）的可见面因此一字不变。
+        for player in self.state.players:
+            player.card_use_counts.pop(WINE_COUNT_KEY, None)
         self.emit_timing(Timing.TURN_AFTER_END, actor=self.state.turn_seat)
 
     def _turn_seat(self) -> int:

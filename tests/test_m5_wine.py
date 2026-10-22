@@ -1030,6 +1030,105 @@ def test_a_near_death_self_rescue_uses_up_the_play_phase_wine_for_that_turn():
 # ---------------------------------------------------------------------------
 
 
+def test_a_wine_used_in_a_previous_turn_does_not_block_a_near_death_self_rescue():
+    """spec §5.1 酒：「每回合一次」按**游戏回合**记——上一回合用过，不妨碍本回合濒死自救。
+
+    P 在自己的出牌阶段喝【酒】、回合结束；Q 的回合里 P 被打到濒死：P 的 wine 计数必须
+    已在**回合末**清掉（不是等 P 的下一个 ``TURN_START``），【酒】因此重新进自救候选；
+    自救后计数记在 Q 的这个回合上；P 的下一个回合再清一次、【酒】又可用。
+    """
+    first, second, third = WINE[0], WINE[1], WINE[2]
+    barbarian, slash = BARBARIAN[0], SLASH[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=2, hand=(first, second, third)),
+            SeatSpec(hand=(barbarian, slash)),
+        ],
+        deck=_deck_excluding(first, second, third, barbarian, slash),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    rescued: list[str] = []
+
+    def p_side(query):
+        if (
+            query.kind == QueryKind.PLAY_PHASE
+            and engine.state.player(0).card_use_counts.get("wine", 0) == 0
+        ):
+            action = _find(
+                query, lambda a: isinstance(a, UseCard) and a.card.type == "wine"
+            )
+            if action is not None:
+                return action
+        if query.kind == QueryKind.RESPOND:
+            return _find(query, lambda a: isinstance(a, Pass))
+        return None
+
+    used: list[str] = []
+
+    def q_side(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            if "barbarian" not in used:
+                action = _use(query, barbarian, 0)
+                if action is not None:
+                    used.append("barbarian")
+                    return action
+            if "slash" not in used:
+                action = _use(query, slash, 0)
+                if action is not None:
+                    used.append("slash")
+                    return action
+        if query.kind == QueryKind.PEACH:
+            return _find(query, lambda a: isinstance(a, Pass))
+        return None
+
+    players = [_Scripted(p_side), _Scripted(q_side)]
+    _advance(
+        engine,
+        players,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PEACH
+        and e.pending.actor == 0,
+    )
+
+    assert engine.state.player(0).hp == 0, "P 在 Q 的回合里进入濒死"
+    assert engine.state.player(0).card_use_counts.get("wine", 0) == 0, (
+        "P 上一回合的【酒】计数已在回合末清掉（不是等到 P 的下一个 TURN_START）"
+    )
+    offers = [
+        action
+        for action in engine.pending.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "wine"
+    ]
+    assert offers, "上一回合的酒不该挡住这一回合的濒死自救"
+    assert {action.targets for action in offers} == {(0,)}, "自救目标恒为濒死者自己"
+    engine.submit(offers[0])
+    _advance(engine, players, lambda e: e.state.player(0).hp == 1 and not e.stack)
+
+    assert engine.state.player(0).hp == 1, "跨回合濒死自救成功（回复 1）"
+    assert engine.state.player(0).wine_active is False, "自救不产生加伤"
+    assert engine.state.player(0).card_use_counts.get("wine") == 1, (
+        "这一次自救记在 Q 的回合上，仍是每回合一次"
+    )
+
+    _advance(
+        engine,
+        players,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 0,
+    )
+    assert engine.state.player(0).card_use_counts.get("wine", 0) == 0, (
+        "Q 的回合结束后计数再次清空"
+    )
+    assert [
+        action
+        for action in engine.pending.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "wine"
+    ], "P 的下一个回合【酒】再次可用"
+
+
 class _DrinkOncePerTurn:
     """每个自己的出牌阶段喝一张【酒】（按座位计数键为 0 才喝），其余最小应答。
 
@@ -1074,6 +1173,9 @@ def test_wine_active_is_cleared_at_turn_end_and_usable_again_next_turn():
     run_turns(engine, players, turns=1)
     assert drinker.uses == 1
     assert engine.state.player(0).wine_active is False, "回合末加伤必须清掉"
+    assert "wine" not in engine.state.player(0).card_use_counts, (
+        "「本回合已用」的记账也在回合末清掉（不等下一个 TURN_START）"
+    )
     assert _wine_changes(engine) == [(0, True), (0, False)], (
         "置过而没用掉的那份在回合末由唯一写入口清掉（有 false delta）"
     )

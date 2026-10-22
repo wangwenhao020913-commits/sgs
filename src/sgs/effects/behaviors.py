@@ -326,6 +326,15 @@ SLASH_FAMILY_KEY = "slash"
 函数决定"酒加伤兑现给哪次使用"，不认识任何具体牌名 / 牌型 id。
 """
 
+WINE_COUNT_KEY = "wine"
+"""【酒】的**每回合一次**计数键（M5-04 / spec §5.1 酒）。
+
+它按**游戏回合**结算，而不是按座位自己的回合：出牌阶段的加伤用法记在回合角色身上，
+而濒死自救可能发生在**别人的回合**、记在濒死者身上。故回合末要清掉**所有座位**的这个键
+（``Engine._turn_after_end``），不能只依赖座位自己的 ``TURN_START`` 重置。键只在这里
+定义一次：酒的 ``UseLimit.count_key`` 与引擎的回合末清理都读它，``engine/`` 不写死牌名。
+"""
+
 
 def is_slash(behavior: CardBehavior) -> bool:
     """这次使用是不是一张【杀】——含普通 / 火 / 雷与**转化、虚拟产物**。
@@ -558,7 +567,7 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
             self_only=True,
             near_death_self_only=True,
         ),
-        use_limit=UseLimit(rated=1),
+        use_limit=UseLimit(rated=1, count_key=WINE_COUNT_KEY),
         effects=(CallOp("resolve_wine"),),
     ),
     # 火攻 / 铁索 / 兵粮：先立最小骨架（目标规则与窗口按牌面），
