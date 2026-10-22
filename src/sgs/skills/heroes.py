@@ -43,6 +43,8 @@ from sgs.effects import (
     CarrierKind,
     Modifier,
     ModifierPoint,
+    behavior_for,
+    is_slash,
     locate,
     target_sets_match,
 )
@@ -189,8 +191,12 @@ def _diamond(state: GameState, card_id: int) -> bool:
 
 
 def _slash(state: GameState, card_id: int) -> bool:
-    """牌名谓词：【杀】（【龙胆】的【杀】→【闪】）。"""
-    return _convertible(state, card_id, card_type="slash")
+    """牌名谓词：【杀】（【龙胆】的【杀】→【闪】）。
+
+    M5-05b-fix：按【杀】**家族**判据（:func:`~sgs.effects.is_slash`）——火【杀】/ 雷【杀】
+    也能被龙胆转成【闪】。另一条方向 ``_dodge``（【闪】→【杀】的源）仍逐字相等。
+    """
+    return is_slash(behavior_for(state.card(card_id)))
 
 
 def _dodge(state: GameState, card_id: int) -> bool:

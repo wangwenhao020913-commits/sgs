@@ -30,7 +30,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from sgs.data import SkillType
-from sgs.effects import CarrierKind, Modifier, ModifierContext, ModifierPoint
+from sgs.effects import (
+    CarrierKind,
+    Modifier,
+    ModifierContext,
+    ModifierPoint,
+    satisfies_required,
+)
 from sgs.resolution import Control, Frame, Tag, add_tag
 from sgs.state import GameState
 from sgs.timing import Timing
@@ -66,10 +72,16 @@ class ResponseCountSkill(HeroSkillDecl):
         """``RESPONSE_COUNT`` 回调：**自己使用**那张牌时把所需张数改成 ``count``。
 
         ``ctx.subject`` = 本次使用的来源（谁出的牌），``ctx.owner`` = 本实例的持有者，
-        故"只有牌的使用者才改这个值"由一次相等判定表达；牌名读 ``ctx.card.type``。
+        故"只有牌的使用者才改这个值"由一次相等判定表达；牌名闭集按
+        :func:`~sgs.effects.satisfies_required` 逐项匹配（【杀】族按共享计数键，
+        M5-05b-fix；【决斗】仍逐字相等）。
         """
         del state
-        if ctx.card is None or ctx.card.type not in self.card_types:
+        if ctx.card is None:
+            return current
+        if not any(
+            satisfies_required(ctx.card, type_id) for type_id in self.card_types
+        ):
             return current
         if ctx.owner != ctx.subject:
             return current

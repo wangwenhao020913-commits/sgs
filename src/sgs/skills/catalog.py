@@ -791,9 +791,10 @@ def _green_dragon_plan(state: GameState, frame: Frame, instance: SkillInstance) 
 
     票 09 起发动询问是**裸"是否发动"**；票 14 起这一步问的是"**提供一张【杀】**"
     （``PickProvide``），故"付得起"的判据与那一步的候选面**同源**
-    （:func:`provide_face`）：手里的实体【杀】∨ **任一转化技能此刻能转出的虚拟【杀】**
-    （赵云的【闪】、【武圣】的红牌）。少了虚拟那一半，只有【闪】的赵云就**连询问都不发**——
-    正是用户实机"青龙追问时想点龙胆却没有入口"的那一幕。
+    （:func:`provide_face`）：手里的实体【杀】（M5-05b-fix 起含火【杀】/ 雷【杀】——按
+    【杀】族判据，见 :func:`~sgs.effects.satisfies_required`）∨ **任一转化技能此刻能转出的
+    虚拟【杀】**（赵云的【闪】、【武圣】的红牌）。少了虚拟那一半，只有【闪】的赵云就
+    **连询问都不发**——正是用户实机"青龙追问时想点龙胆却没有入口"的那一幕。
     """
     available = frame.data.get("source") == instance.owner and bool(
         provide_face(state, instance.owner, "slash", (Zone.HAND,))[0]
@@ -830,7 +831,7 @@ def _tieji_plan(state: GameState, frame: Frame, instance: SkillInstance) -> Acti
     available = (
         frame.data.get("source") == instance.owner
         and card is not None
-        and card.type == "slash"
+        and is_slash(behavior_for(card))
         and bool(frame.data.get("targets"))
     )
     return ActivationPlan(optional=True, available=available)
@@ -1223,11 +1224,15 @@ def _opposite_genders(state: GameState, source: int, target: int) -> bool:
 
 
 def _is_owner_slash_damage(frame: Frame, instance: SkillInstance) -> bool:
-    """这次伤害是**该实例持有者**用【杀】造成的吗（票 12 §Q12 的触发前提）。"""
+    """这次伤害是**该实例持有者**用【杀】造成的吗（票 12 §Q12 的触发前提）。
+
+    M5-05b-fix：按【杀】**家族**判据（:func:`~sgs.effects.is_slash`）——寒冰剑 / 麒麟弓
+    对火【杀】/ 雷【杀】的伤害同样触发；非【杀】的渠道牌（锦囊 / 传导帧的渠道）仍不触发。
+    """
     if frame.data.get("source") != instance.owner:
         return False
     card = frame.data.get("card")
-    return card is not None and card.type == "slash"
+    return card is not None and is_slash(behavior_for(card))
 
 
 _ASK_DOUBLE_SWORD_DISCARD = "equip.double_sword.discard"

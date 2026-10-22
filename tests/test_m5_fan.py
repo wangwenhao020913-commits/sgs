@@ -20,16 +20,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from sgs.data import Color, RuleConfig, color_of_suit, load_content_pack
+from sgs.data import Color, Identity, Kingdom, RuleConfig, color_of_suit, load_content_pack
 from sgs.effects import (
     DamageNature,
     attack_range,
     check_count,
+    check_targets,
     damage_amount,
     legal_actions_for,
+    response_count,
     target_is_effective,
 )
 from sgs.engine import Engine
+from sgs.skills import preactivation_for, validate_flow_activation
+from sgs.skills.catalog import GREEN_DRAGON_FLOW
 from sgs.state import (
     ActivateSkill,
     EndPhase,
@@ -63,6 +67,10 @@ CROSSBOW = cards_of_type(PACK, "crossbow")
 QINGGANG = cards_of_type(PACK, "qinggang_sword")
 RENWANG = cards_of_type(PACK, "renwang_shield")
 VINE = cards_of_type(PACK, "vine_armor")
+ICE_SWORD = cards_of_type(PACK, "ice_sword")
+QILIN_BOW = cards_of_type(PACK, "qilin_bow")
+JUYING = cards_of_type(PACK, "jueying")
+BARBARIAN = cards_of_type(PACK, "barbarian_invasion")
 
 RED_PEACH = next(
     card_id for card_id in PEACH if color_of_suit(PACK.deck.cards[card_id].suit) is Color.RED
@@ -461,8 +469,14 @@ def test_the_fan_does_not_change_the_products_of_wusheng_longdan_or_the_serpent_
 # ---------------------------------------------------------------------------
 
 
-def _seam_player(used_card: int, provide: int | None = None):
-    """出牌阶段用 ``used_card``；接缝发动；必要时提供 ``provide`` 那张【杀】。"""
+def _seam_player(
+    used_card: int, provide: int | None = None, pay: tuple[int, ...] | None = None
+):
+    """出牌阶段用 ``used_card``；接缝发动；必要时提供 ``provide`` 那张【杀】/ 付 ``pay``。
+
+    ``provide`` = 青龙"提供一张【杀】"的答案（按槽位取那张牌）；``pay`` = 贯石斧"弃两张"
+    的答案（按槽位取这组牌）。两者都读询问自带的 ``slots``，与界面同一条路。
+    """
 
     def respond(query):
         if query.kind == QueryKind.PLAY_PHASE:
@@ -488,12 +502,57 @@ def _seam_player(used_card: int, provide: int | None = None):
                         )
                         if action is not None:
                             return action
+            if pay is not None:
+                wanted = set(pay)
+                for candidate in query.legal_actions:
+                    if not isinstance(candidate, SelectCards):
+                        continue
+                    picked = {
+                        query.slots[index].card.card_id
+                        for index in candidate.picks
+                        if query.slots[index].card is not None
+                    }
+                    if picked == wanted:
+                        return candidate
             action = _find(query, lambda candidate: isinstance(candidate, SelectCards))
             if action is not None:
                 return action
         return _end_or_pass(query)
 
     return respond
+
+
+def _play_card(card_id: int):
+    """出牌阶段使用 ``card_id``（单目标牌目标为座位 1、多目标牌用它自己的目标表）。"""
+
+    def respond(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return (
+                _find(
+                    query,
+                    lambda action: isinstance(action, UseCard)
+                    and action.card.card_id == card_id
+                    and action.targets == (1,),
+                )
+                or _find(
+                    query,
+                    lambda action: isinstance(action, UseCard)
+                    and action.card.card_id == card_id,
+                )
+                or _end_or_pass(query)
+            )
+        return _end_or_pass(query)
+
+    return respond
+
+
+def _hit(engine, seat: int) -> bool:
+    return any(
+        record.kind == "delta"
+        and record.delta_type == "hp_change"
+        and record.seat == seat
+        for record in engine.records
+    )
 
 
 class _DodgeOnce:
@@ -780,3 +839,350 @@ def test_the_card_ref_model_still_has_no_attribute_field():
     assert "nature" not in CardRef.model_fields
     assert "attribute" not in CardRef.model_fields
     assert "damage_type" not in CardRef.model_fields
+
+
+# ---------------------------------------------------------------------------
+# M5-05b-fix：【杀】族判据补齐（提供 / 触发 / 响应）
+#
+# 票面 review 结论：M5-04 的 ``is_slash`` 是"这次使用算不算一张【杀】"的唯一判据，
+# 凡"用 / 提供 / 造成伤害的【杀】"都必须按**家族**判——不是只有接缝 / 响应 / 装备门控
+# 三处。下面逐面钉住：青龙·贯石斧的成本步、寒冰剑 / 麒麟弓 / 铁骑的触发、空城 / 流离 /
+# 无双的牌名闭集、龙胆的源谓词；【激将】只补确认（它走 ``required="slash"``，无需改码）。
+# ---------------------------------------------------------------------------
+
+
+def _green_dragon_provide_options(state, seat: int = 0) -> set[int]:
+    """青龙"提供一张【杀】"清单里的来源 id（与成本步的面同源）。"""
+    steps = preactivation_for(state, seat, "equip.green_dragon_blade")
+    assert steps, "青龙的预发动清单不该是空的"
+    return {int(option) for option in steps[0].pool[0].options}
+
+
+def test_a_fire_slash_can_be_provided_to_the_green_dragon_continuation():
+    """青龙的成本步吃**属性【杀】**：火【杀】进提供面，引擎按清单确认后续杀命中。"""
+    state = _state(
+        [
+            SeatSpec(hand=(FIRE_SLASH[0], THUNDER_SLASH[0]), equip=(GREEN_DRAGON[0],)),
+            SeatSpec(hand=(DODGE[0],)),
+        ]
+    )
+
+    assert _green_dragon_provide_options(state) == {FIRE_SLASH[0], THUNDER_SLASH[0]}, (
+        "提供面 = 手里的属性【杀】（普通【杀】同族；非【杀】不进）"
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    run_until(
+        engine,
+        [_Scripted(_seam_player(FIRE_SLASH[0], provide=THUNDER_SLASH[0])), _DodgeOnce()],
+        _use_chain_done,
+    )
+
+    assert _has_activation(engine, "equip.green_dragon_blade")
+    assert engine.state.player(1).hp == 3, "提供的雷【杀】作为续杀命中"
+    assert THUNDER_SLASH[0] in engine.state.discard, "被提供的来源实体牌进弃牌堆"
+
+
+def test_a_non_slash_card_cannot_be_provided_to_the_green_dragon_continuation():
+    """成对反例：面与**答案校验器**都不收非【杀】（桃不在面里，提交也被拒）。"""
+    state = _state(
+        [
+            SeatSpec(hand=(FIRE_SLASH[0], PEACH[0]), equip=(GREEN_DRAGON[0],)),
+            SeatSpec(),
+        ]
+    )
+
+    options = _green_dragon_provide_options(state)
+    assert FIRE_SLASH[0] in options
+    assert PEACH[0] not in options, "桃不是【杀】，不进提供面"
+
+    error = validate_flow_activation(GREEN_DRAGON_FLOW, state, 0, (PEACH[0],), ())
+    assert error is not None and "不在可选范围内" in error, (
+        f"答案校验器必须与面同源地拒绝非【杀】；实际：{error}"
+    )
+
+
+def test_a_fire_slash_can_pay_the_axe_continuation():
+    """贯石斧的成本步收**属性【杀】**作两张成本之一（与接缝成对）。"""
+    paid = THUNDER_SLASH[0]
+    state = _state(
+        [
+            SeatSpec(hand=(FIRE_SLASH[0], paid, PEACH[0]), equip=(AXE[0],)),
+            SeatSpec(hand=(DODGE[0],)),
+        ]
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    run_until(
+        engine,
+        [_Scripted(_seam_player(FIRE_SLASH[0], pay=(paid, PEACH[0]))), _DodgeOnce()],
+        _use_chain_done,
+    )
+
+    assert _has_activation(engine, "equip.axe")
+    assert paid in engine.state.discard, "雷【杀】作成本被弃置"
+    assert engine.state.player(1).hp == 3, "贯石斧跳『生效时』照常造成伤害"
+
+
+def test_the_ice_sword_triggers_on_a_fire_slash_but_not_on_a_trick():
+    """寒冰剑的"造成伤害"前提按【杀】族判：火【杀】触发，非【杀】的伤害不触发。"""
+    armed = _state([SeatSpec(hand=(FIRE_SLASH[0],), equip=(ICE_SWORD[0],)), SeatSpec()])
+    engine = Engine.from_state(armed, seed=1)
+    run_until(engine, [_Scripted(_play_card(FIRE_SLASH[0])), _EndPhaseOrPass()], _use_chain_done)
+    assert _has_activation(engine, "equip.ice_sword"), "火【杀】造成伤害 ⇒ 寒冰剑照常询问"
+
+    trick = _state(
+        [SeatSpec(hand=(BARBARIAN[0],), equip=(ICE_SWORD[0],)), SeatSpec()]
+    )
+    engine = Engine.from_state(trick, seed=1)
+    run_until(engine, [_Scripted(_play_card(BARBARIAN[0])), _EndPhaseOrPass()], _use_chain_done)
+    assert _hit(engine, 1), "南蛮确实造成了伤害（否则反例不说明问题）"
+    assert not _has_activation(engine, "equip.ice_sword"), "非【杀】的伤害不触发寒冰剑"
+
+
+def test_the_qilin_bow_triggers_on_a_fire_slash_but_not_on_a_trick():
+    """麒麟弓同理：火【杀】对带坐骑的目标造成伤害 ⇒ 询问；非【杀】不询问。"""
+    armed = _state(
+        [
+            SeatSpec(hand=(FIRE_SLASH[0],), equip=(QILIN_BOW[0],)),
+            SeatSpec(equip=(JUYING[0],)),
+        ]
+    )
+    engine = Engine.from_state(armed, seed=1)
+    run_until(engine, [_Scripted(_play_card(FIRE_SLASH[0])), _EndPhaseOrPass()], _use_chain_done)
+    assert _has_activation(engine, "equip.qilin_bow"), "火【杀】伤害 ⇒ 麒麟弓照常询问"
+
+    trick = _state(
+        [
+            SeatSpec(hand=(BARBARIAN[0],), equip=(QILIN_BOW[0],)),
+            SeatSpec(equip=(JUYING[0],)),
+        ]
+    )
+    engine = Engine.from_state(trick, seed=1)
+    run_until(engine, [_Scripted(_play_card(BARBARIAN[0])), _EndPhaseOrPass()], _use_chain_done)
+    assert _hit(engine, 1)
+    assert not _has_activation(engine, "equip.qilin_bow"), "非【杀】的伤害不触发麒麟弓"
+
+
+def test_tieqi_triggers_on_a_fire_slash_but_not_on_a_trick():
+    """铁骑的发动形态按【杀】族判：火【杀】指定目标 ⇒ 询问；【决斗】不询问。"""
+    armed = _state(
+        [SeatSpec(hand=(FIRE_SLASH[0],), hero="machao"), SeatSpec()]
+    )
+    engine = Engine.from_state(armed, seed=1)
+    run_until(engine, [_Scripted(_play_card(FIRE_SLASH[0])), _EndPhaseOrPass()], _use_chain_done)
+    assert _has_activation(engine, "hero.machao.tieqi"), "火【杀】指定目标 ⇒ 铁骑照常询问"
+
+    trick = _state([SeatSpec(hand=(DUEL[0],), hero="machao"), SeatSpec()])
+    engine = Engine.from_state(trick, seed=1)
+    run_until(engine, [_Scripted(_play_card(DUEL[0])), _EndPhaseOrPass()], _use_chain_done)
+    assert not _has_activation(engine, "hero.machao.tieqi"), "【决斗】不触发铁骑"
+
+
+def test_kongcheng_excludes_fire_and_thunder_slashes_but_not_other_cards():
+    """空城的牌名闭集按【杀】族读：火 / 雷【杀】与普通【杀】、决斗同档，其它牌名照常。"""
+    state = _state(
+        [SeatSpec(), SeatSpec(hero="zhugeliang", equip=(RENWANG[0],))]
+    )
+
+    for card_id in (
+        SLASH[0],
+        FIRE_SLASH[0],
+        THUNDER_SLASH[0],
+        DUEL[0],
+    ):
+        assert 1 not in check_targets(state, 0, state.card(card_id)), (
+            f"{state.card(card_id).name} 不该能指定空手诸葛亮"
+        )
+    dismantlement = cards_of_type(PACK, "dismantlement")[0]
+    assert check_targets(state, 0, state.card(dismantlement)) == (1,), (
+        "过河拆桥不在空城闭集里：装备区的防具让它仍有合法目标"
+    )
+
+    with_hand = _state(
+        [SeatSpec(), SeatSpec(hand=(PEACH[0],), hero="zhugeliang", equip=(RENWANG[0],))]
+    )
+    assert 1 in check_targets(with_hand, 0, with_hand.card(FIRE_SLASH[0])), (
+        "诸葛亮有手牌 ⇒ 空城不生效，火【杀】可以指定他"
+    )
+
+
+class _LiuliDriver:
+    """座位 0 出牌；座位 1（大乔）发动【流离】把【杀】转到座位 2；其余放弃。"""
+
+    def __init__(self, *, used: int, cost: int, new_target: int = 2) -> None:
+        self.used = used
+        self.cost = cost
+        self.new_target = new_target
+
+    def respond(self, query):
+        if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == "hero.daqiao.liuli":
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
+        if query.kind == QueryKind.SELECT_CARDS and query.actor == 1:
+            for index, slot in enumerate(query.slots):
+                if slot.card is not None and slot.card.card_id == self.cost:
+                    action = _find(
+                        query,
+                        lambda candidate, i=index: isinstance(candidate, SelectCards)
+                        and candidate.picks == (i,),
+                    )
+                    if action is not None:
+                        return action
+        if query.kind == "SELECT_OPTION" and query.actor == 1:
+            return _find(
+                query,
+                lambda action: getattr(action, "choice", None) == f"seat:{self.new_target}",
+            )
+        if query.kind == QueryKind.PLAY_PHASE and query.actor == 0:
+            return (
+                _find(
+                    query,
+                    lambda action: isinstance(action, UseCard)
+                    and action.card.card_id == self.used
+                    and action.targets == (1,),
+                )
+                or _end_or_pass(query)
+            )
+        return _end_or_pass(query)
+
+
+def test_liuli_diverts_a_fire_slash_but_not_a_non_slash_card():
+    """流离的三个"渠道牌仍是【杀】"守卫按家族判：火【杀】可被转移，拆不触发。"""
+    paid = THUNDER_SLASH[0]
+    state = _state(
+        [
+            SeatSpec(hand=(FIRE_SLASH[0],)),
+            SeatSpec(hero="daqiao", hand=(paid,)),
+            SeatSpec(),
+        ]
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    driver = _LiuliDriver(used=FIRE_SLASH[0], cost=paid)
+    run_until(
+        engine,
+        [driver, driver, _EndPhaseOrPass()],
+        lambda e: _hit(e, 2) or _use_chain_done(e),
+    )
+
+    assert _has_activation(engine, "hero.daqiao.liuli"), "火【杀】成为目标 ⇒ 流离照常询问"
+    assert engine.state.player(1).hp == 4, "大乔不再结算此【杀】"
+    assert engine.state.player(2).hp == 3, "被转移的目标结算此【杀】"
+    assert paid in engine.state.discard, "流离的成本被弃置"
+
+    trick = _state(
+        [
+            SeatSpec(hand=(BARBARIAN[0],)),
+            SeatSpec(hero="daqiao", hand=(paid,)),
+            SeatSpec(),
+        ]
+    )
+    engine = Engine.from_state(trick, seed=1)
+
+    run_until(
+        engine,
+        [_Scripted(_play_card(BARBARIAN[0])), _EndPhaseOrPass(), _EndPhaseOrPass()],
+        _use_chain_done,
+    )
+
+    assert _hit(engine, 1), "南蛮确实对目标结算了（否则反例不说明问题）"
+    assert not _has_activation(engine, "hero.daqiao.liuli"), "非【杀】不触发流离"
+
+
+def test_wushuang_requires_two_responses_for_a_fire_slash_but_not_for_a_trick():
+    """无双的牌名闭集按【杀】族读：火 / 雷【杀】与普通【杀】、决斗都要两张响应。"""
+    state = _state([SeatSpec(hero="lvbu"), SeatSpec()])
+    for card_id in (SLASH[0], FIRE_SLASH[0], THUNDER_SLASH[0], DUEL[0]):
+        assert (
+            response_count(state, source=0, card=state.card(card_id), target=1) == 2
+        ), f"{state.card(card_id).name} 触发无双：需要两张响应"
+    assert (
+        response_count(state, source=0, card=state.card(BARBARIAN[0]), target=1) == 1
+    ), "南蛮不在无双闭集里：仍只要求 1 张"
+
+
+def test_longdan_turns_a_fire_slash_into_a_dodge_but_its_slash_product_stays_normal():
+    """龙胆的源谓词按【杀】族读：火 / 雷【杀】可当【闪】；闪→杀的产物仍是普通【杀】。"""
+    state = _state(
+        [
+            SeatSpec(
+                hand=(FIRE_SLASH[0], THUNDER_SLASH[0], DODGE[0]),
+                hero="zhaoyun",
+            ),
+            SeatSpec(),
+        ]
+    )
+
+    dodge_actions = legal_actions_for(state, 0, QueryKind.DODGE, answers_seq=1)
+    dodge_products = {
+        action.card.virtual_sources
+        for action in dodge_actions
+        if isinstance(action, UseCard)
+        and action.card.is_virtual
+        and action.card.type == "dodge"
+    }
+    assert dodge_products == {(FIRE_SLASH[0],), (THUNDER_SLASH[0],)}, (
+        "属性【杀】都能被龙胆转成【闪】"
+    )
+
+    assert _virtual_sources(_play_candidates(state), "slash") == {(DODGE[0],)}, (
+        "闪→杀的源仍是逐字相等的【闪】；属性【杀】不会反过来当源"
+    )
+
+
+def test_jijiang_accepts_a_fire_slash_from_a_shu_ally():
+    """【激将】的求助窗口读 ``required="slash"``：属性【杀】可以代打满足请求。"""
+    state = _state(
+        [
+            SeatSpec(hand=(BARBARIAN[0],)),
+            SeatSpec(hero="liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(hand=(FIRE_SLASH[0],), kingdom=Kingdom.SHU),
+            SeatSpec(kingdom=Kingdom.WEI),
+        ]
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    def lord(query):
+        if query.kind == QueryKind.RESPOND:
+            action = _find(query, lambda candidate: isinstance(candidate, ActivateSkill))
+            if action is not None:
+                return action
+        return _end_or_pass(query)
+
+    def ally(query):
+        if (
+            query.kind == QueryKind.RESPOND
+            and query.cause is WindowCause.LORD_REQUEST
+        ):
+            return (
+                _find(
+                    query,
+                    lambda action: isinstance(action, PlayCard)
+                    and action.card.type == "fire_slash",
+                )
+                or _end_or_pass(query)
+            )
+        return _end_or_pass(query)
+
+    run_until(
+        engine,
+        [
+            _Scripted(_play_card(BARBARIAN[0])),
+            _Scripted(lord),
+            _Scripted(ally),
+            _EndPhaseOrPass(),
+        ],
+        lambda e: FIRE_SLASH[0] in e.state.discard or _use_chain_done(e),
+    )
+
+    requests = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.RESPOND
+        and record.query.cause is WindowCause.LORD_REQUEST
+    ]
+    assert requests, "南蛮窗口里刘备必须能发动【激将】"
+    assert all(query.required == "slash" for query in requests)
+    assert FIRE_SLASH[0] in engine.state.discard, "蜀势力角色的火【杀】被代打消耗"
+    assert engine.state.player(1).hp == 4, "请求被满足 ⇒ 刘备不受南蛮伤害"
