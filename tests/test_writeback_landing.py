@@ -449,7 +449,7 @@ U2_LEDGER_HEADINGS: tuple[str, ...] = (
     "**U2 观星超时 =",
     "**U2 反间花色 =",
     "**U2 五谷亮牌窗 =",
-    "**U2 记录在案的反间超时偏差 =",
+    "**U2 反间 =",
 )
 
 SMOKE_CASE_ID_RE = re.compile(r"\bU[12]-0[1-9][A-Za-z0-9]*\b")

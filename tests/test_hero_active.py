@@ -41,11 +41,12 @@ from sgs.skills import (
 )
 from sgs.skills import active as active_module
 from sgs.skills import catalog as catalog_module
-from sgs.skills.preactivation import preactivation_for
+from sgs.skills.preactivation import preactivation_for, preactivations_for
 from sgs.state import (
     ActivateSkill,
     FrameKind,
     Pass,
+    Phase,
     QueryKind,
     SelectCards,
     SelectOption,
@@ -847,33 +848,27 @@ def test_rende_a_rejected_confirmation_does_not_spend_the_first_recovery():
 # ---------------------------------------------------------------------------
 
 
-def _fanjian_driver(
-    *, suit: str, target: int = 1, card_pick: int = 0, cancel_at: str | None = None
-):
+def _fanjian_driver(*, suit: str, target: int = 1, card_pick: int = 0):
     """按**预发动流程**应答：座位 0 在出牌阶段确认第一段（选谁）；目标逐步答花色 / 挑牌。
 
     同一个驱动器给两个座位用：座位 0 只在 PLAY_PHASE 里提交复合动作（``choices = seat:N``），
     座位 1 只在步 2/3 的询问上应答 —— 这正是"选择权在目标"的形状（票 06）。
-    ``cancel_at="seat"`` = **本地取消**第一段（不提交任何 action）。
+
+    步 2/3 **没有** `Pass`（用户验收：确认目标后不可退回），故驱动器不再有"取消花色 /
+    取消挑牌"两档；唯一可取消的是第一段的本地预发动（不提交任何 action）。
     """
 
     def driver(query):
         if query.kind == QueryKind.PLAY_PHASE:
-            if cancel_at == "seat":
-                return _find(query, lambda action: action.kind == "EndPhase")
             if FANJIAN not in query.preactivations:
                 return _find(query, lambda action: action.kind == "EndPhase")
             return _composite(query, FANJIAN, choices=(f"seat:{target}",))
         if query.kind == QueryKind.SELECT_OPTION:
-            if cancel_at == "suit":
-                return _find(query, lambda action: isinstance(action, Pass))
             return _find(
                 query,
                 lambda action: isinstance(action, SelectOption) and action.choice == suit,
             )
         if query.kind == QueryKind.SELECT_CARDS:
-            if cancel_at == "card":
-                return _find(query, lambda action: isinstance(action, Pass))
             return _find(
                 query,
                 lambda action: isinstance(action, SelectCards)
@@ -1005,53 +1000,53 @@ def test_fanjian_first_segment_in_the_manifest_then_the_target_answers():
         "**盲挑**：槽位只有位置、没有牌面 —— 官方口径是「获得之后才展示」，"
         "挑的时候不亮牌（迁移前 selection_face 的缺省就是隐藏槽）"
     )
-
-
-def _fanjian_offered_after_cancel(engine) -> bool:
-    """取消之后**同一出牌阶段**又挂起了带【反间】清单的 PLAY_PHASE 询问。"""
-    if not _skill_frame_popped(engine):
-        return False
-    pending = engine.pending
-    return (
-        pending is not None
-        and pending.kind == QueryKind.PLAY_PHASE.value
-        and FANJIAN in pending.preactivations
+    # 用户验收：确认目标之后**不可退回**。两步都没有 `Pass`，超时兜底因此自然落到
+    # 第一个合法项（第一个花色 / 面内第一张手牌）。
+    assert not any(isinstance(action, Pass) for action in suit_q.legal_actions), (
+        "花色步不可放弃（确认目标后不可退回）"
+    )
+    assert not any(isinstance(action, Pass) for action in card_q.legal_actions), (
+        "盲挑步不可放弃（确认目标后不可退回）"
     )
 
 
-def _run_fanjian_cancel(cancel_at: str):
-    state, hearts = _fanjian_state()
-    driver = _fanjian_driver(suit="spade", cancel_at=cancel_at)
+def test_fanjian_local_cancel_before_the_target_leaves_the_table_untouched():
+    """唯一可放弃的是**第一段本地预发动**（不提交任何 action）：牌桌原样、技能仍在。
 
-    if cancel_at == "seat":
-        # 第一段是本地预发动：取消 = 一个 action 都不提交 ⇒ 停在出牌阶段那一刻。
-        engine = _park_at_play_phase(state)
-        return hearts, engine, None
-    engine = _run(
-        state,
-        [Scripted(driver), Scripted(driver)],
-        _fanjian_offered_after_cancel,
-    )
-    return hearts, engine, driver
-
-
-@pytest.mark.parametrize("cancel_at", ["seat", "suit", "card"])
-def test_fanjian_cancel_leaves_the_table_untouched_and_the_skill_available(cancel_at):
-    """任何一段取消 ⇒ 没有牌移动、没有伤害、同一阶段还能再发动。
-
-    ``seat`` 那档取消的是**第一段的本地预发动**（不提交、引擎看不到）；``suit`` / ``card``
-    仍是第二段逐步询问里的 ``Pass``（换应答者的第二段不套预发动，保留原有取消出口）。
+    用户验收：从确认目标、点击提交的那一刻起，花色 / 盲挑都不可退回（见上一条的 no-Pass
+    断言），故这里只保留"还没提交"的取消。
     """
-    hearts, engine, _driver = _run_fanjian_cancel(cancel_at)
+    state, hearts = _fanjian_state()
+    engine = _park_at_play_phase(state)
 
+    assert _manifest(engine.pending, FANJIAN), "本地取消前清单仍在，同一阶段可再确认"
     assert set(hearts) <= set(engine.state.player(0).hand), "选择只收集：那几张牌仍在手里"
     assert not engine.state.player(1).hand, "一张都没交出去"
     assert engine.state.player(1).hp == 4, "目标没有受伤"
     assert engine.state.processing == [], "处理区为空 —— 没有亮过牌"
-    if cancel_at == "seat":
-        assert _manifest(engine.pending, FANJIAN), "本地取消后清单仍在（同一阶段可再确认）"
-    else:
-        assert _fanjian_offered_after_cancel(engine), "取消不消耗次数：同一阶段仍可再发动"
+
+
+def test_fanjian_is_not_offered_without_a_hand():
+    """用户验收：周瑜**没有手牌**时不能发动反间（候选与预发动清单都不产出）。
+
+    反间的代价是交出一张手牌；``_fanjian_offers`` 在构造候选时就挡掉，故引擎的
+    ``preactivations`` 也不会有它（清单从 offered 派生）。测试用**查询构造**的公共缝：
+    ``legal_actions_for`` → offered → ``preactivations_for``，与 ``_build_query`` 同形。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="zhouyu"), SeatSpec()],
+        deck=_deck_excluding(),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    actions = legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+    offered = tuple(
+        action.skill_id for action in actions if isinstance(action, ActivateSkill)
+    )
+    assert FANJIAN not in offered, "没有手牌不得产出【反间】发动的骨架候选"
+    manifests = preactivations_for(state, 0, offered, timing=Timing.PHASE_PLAY_IDLE)
+    assert FANJIAN not in manifests, "没有手牌也不得下发【反间】的预发动清单"
 
 
 # ---------------------------------------------------------------------------
@@ -1654,22 +1649,26 @@ def test_a_cancelable_option_step_offers_pass_last_so_a_first_choice_actor_commi
     技能立刻重新进池。候选次序的真源是 ``effects.actions._sort_key``：``SelectOption``
     原先落进与 ``Pass`` 相同的兜底键 ``(1, (), kind)``，而 ``"Pass" < "SelectOption"``。
 
-    W4-2 之后 A 族主动技第一段进了预发动（不再发 ``SELECT_OPTION``）；反间的**第二段**
-    （目标猜花色）仍是逐步询问，故活锁面在那里仍然真实存在。
+    反间花色步自用户验收起 `optional=False`（确认目标后不可退回），故这里改用**合成**
+    `SelectOptionContext(optional=True)` 钉同一份排序不变量——它仍是"取消能力"的活锁面
+    （将来任何 `PickOption` 打开 `optional` 都走这条键）。
     """
+    from sgs.state import SelectOptionContext
+
     state, _hearts = _fanjian_state()
-    order: list[list[str]] = []
-
-    def driver(query):
-        if query.kind == QueryKind.SELECT_OPTION and str(query.skill_id) == "fanjian:suit":
-            order.append([action.kind for action in query.legal_actions])
-        return _fanjian_driver(suit="spade")(query)
-
-    _run(state, [Scripted(driver), Scripted(driver)], _skill_frame_popped)
-
-    assert order, "花色步确实发过一次询问"
-    assert order[0][-1] == "Pass", f"放弃候选恒在最后（实际 {order[0]}）"
-    assert "SelectOption" in order[0], "真候选仍要在（不能只剩 Pass）"
+    actions = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_OPTION,
+        answers_seq=1,
+        payload=SelectOptionContext(
+            skill_id="fanjian:suit", options=("heart", "spade"), optional=True
+        ),
+    )
+    kinds = [action.kind for action in actions]
+    assert kinds, "花色步确实有候选"
+    assert kinds[-1] == "Pass", f"放弃候选恒在最后（实际 {kinds}）"
+    assert "SelectOption" in kinds, "真候选仍要在（不能只剩 Pass）"
 
 
 # ---------------------------------------------------------------------------

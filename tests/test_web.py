@@ -504,23 +504,25 @@ def test_the_ice_sword_timeout_takes_the_first_legal_slot_of_the_round() -> None
 
 
 def test_fallback_action_answers_the_target_of_a_fanjian_step() -> None:
-    """票 06：反间的步 2/3 由**目标**应答（不是发动者）。超时兜底要在"等目标作答"时给出
-    一个**合法**代答 —— 带 ``Pass`` 的选牌步落到"取消这一步"，而不是发出非法动作。"""
+    """票 06 / 用户验收：反间的步 2/3 由**目标**应答（不是发动者）。
+
+    确认目标之后不可退回：选牌步 ``optional=False``，候选里没有 ``Pass``；超时兜底
+    **取第一个合法项**（面内第一张手牌），不是"取消这一步"。"""
     from sgs.effects import legal_actions_for
-    from sgs.state import Pass, QueryKind, SelectContext
+    from sgs.state import QueryKind, SelectContext
 
     pack = _context_pack()
-    hearts = cards_of_type(pack, "heart")[:2]
+    cards = cards_of_type(pack, "slash")[:2]
     state = build_state(
         pack=pack,
-        seats=[SeatSpec(hand=tuple(hearts), hero="zhouyu"), SeatSpec()],
+        seats=[SeatSpec(hand=tuple(cards), hero="zhouyu"), SeatSpec()],
         turn_seat=0,
     )
     # 步 3 的形状：**目标**（座位 1）应答，选择面铺的是**发动者**（座位 0）的手牌。
     slots = tuple(
-        Slot(ref=ZoneRef(Zone.HAND, 0), card=state.card(card_id)) for card_id in hearts
+        Slot(ref=ZoneRef(Zone.HAND, 0), card=state.card(card_id)) for card_id in cards
     )
-    spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=True)
+    spec = SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=False)
     actions = legal_actions_for(
         state,
         1,
@@ -540,8 +542,12 @@ def test_fallback_action_answers_the_target_of_a_fanjian_step() -> None:
         skill_id="hero.zhouyu.fanjian",
     )
 
-    assert any(isinstance(action, Pass) for action in actions), "这一步可取消（流水线语义）"
-    assert isinstance(fallback_action(query), Pass), "超时代答 = 取消这一步，不是非法动作"
+    assert not any(action.kind == "Pass" for action in actions), "盲挑步不可放弃"
+    first = fallback_action(query)
+    assert isinstance(first, SelectCards) and first == actions[0], (
+        f"超时取第一个合法项（面内第一张手牌）：{first}"
+    )
+    assert fallback_action(query) == first, "兜底必须是纯函数"
 
 
 def _session_at_the_fanjian_suit_step(*, timeout_seconds: float | None) -> Session:
@@ -596,14 +602,13 @@ def _session_at_the_fanjian_suit_step(*, timeout_seconds: float | None) -> Sessi
 
 
 def test_a_timeout_answers_the_target_of_fanjian_in_a_real_session() -> None:
-    """票 06：反间的步 2/3 由**目标**应答。真实会话里（AI 周瑜反间人类座位）超时兜底要能
-    在"等目标作答"时替**目标**代答一次，且代答之后该局仍能跑完。
+    """票 06 / 用户验收：反间的步 2/3 由**目标**应答。真实会话里（AI 周瑜反间人类座位）
+    超时兜底要在"等目标作答"时替**目标**代答一次，且代答之后该局仍能跑完。
 
+    确认目标后不可退回：花色步没有 ``Pass``，超时取**第一个合法花色**（``heart``）。
     W4-2 起第一段是**预发动清单**（AI 的随机档不会填表 ⇒ W4-4 才补），故这里给座位 0
     注入一个会确认复合动作的参与者；第二段仍由引擎逐步问**目标**（人类座位）。
     """
-    from sgs.state import Pass
-
     session = _session_at_the_fanjian_suit_step(timeout_seconds=1.0)
 
     pending = session.pending
@@ -611,7 +616,14 @@ def test_a_timeout_answers_the_target_of_fanjian_in_a_real_session() -> None:
         "扫到了【反间】的第二段（第一段已由复合动作确认）"
     )
     assert pending.actor == session.human_seat, "这一步问的正是**目标**（人类座位）"
-    assert isinstance(fallback_action(pending), Pass)
+    assert not any(action.kind == "Pass" for action in pending.legal_actions), (
+        "花色步不可放弃（确认目标后不可退回）"
+    )
+    first = fallback_action(pending)
+    assert first == pending.legal_actions[0], "超时取第一个合法花色"
+    assert getattr(first, "choice", None) == "heart", (
+        "第一个合法花色 = Suit 枚举序的红桃"
+    )
 
     session.mark_pending(100.0)
     assert session.expire_if_due(101.0, fallback_action) is True, "到点替目标代答"
@@ -634,7 +646,7 @@ def test_the_pending_payload_labels_the_fanjian_suits_and_masks_the_blind_pick()
     盲挑步：``slots[].card`` 全为 ``None``（牌面不可见），槽位仍按**位置**下发、且指向
     发动者的手牌。两步都是**真会话**（AI 周瑜反间人类目标），不是合成形状。
     """
-    from sgs.state import Pass, SelectOption
+    from sgs.state import SelectOption
 
     session = _session_at_the_fanjian_suit_step(timeout_seconds=None)
 
@@ -651,8 +663,8 @@ def test_the_pending_payload_labels_the_fanjian_suits_and_masks_the_blind_pick()
         "club": {"name": "梅花", "symbol": "♣", "color": "black"},
     }
     assert suit["option_seats"] == {}, "花色不是座位选项"
-    assert any(action["kind"] == "Pass" for action in suit["legal_actions"]), (
-        "引擎仍给了一条 Pass（本票不改规则 / 超时策略）；界面负责把它**藏起来**"
+    assert not any(action["kind"] == "Pass" for action in suit["legal_actions"]), (
+        "用户验收：确认目标后花色步不可退回，引擎不再给 Pass"
     )
 
     session.submit_answer(
@@ -663,16 +675,19 @@ def test_the_pending_payload_labels_the_fanjian_suits_and_masks_the_blind_pick()
     assert blind["kind"] == "SELECT_CARDS"
     assert blind["option_labels"] is None, "盲挑不是选项枚举，没有可复用的展示标签"
     assert list(blind["spec"]["zones"]) == ["hand"]
-    assert blind["spec"]["optional"] is True, "引擎侧可 Pass（超时策略见票面的已知偏差）"
+    assert blind["spec"]["optional"] is False, "用户验收：盲挑步不可退回"
     hand = session.engine.state.player(0).hand
     assert len(blind["slots"]) == len(hand), "槽位数 = 发动者手牌数（位置公开、牌面隐藏）"
     assert all(slot["card"] is None for slot in blind["slots"]), "盲挑：一个牌面都不下发"
     assert {slot["ref"]["seat"] for slot in blind["slots"]} == {0}
     assert {slot["ref"]["zone"] for slot in blind["slots"]} == {"hand"}
     assert blind["context"]["requirement"] == "由目标从你的手牌中选择一张"
-    assert isinstance(fallback_action(session.pending), Pass), (
-        "已知偏差（票面记录）：引擎这一步仍可 Pass、超时仍按 Pass 代答（取消这一步）；"
-        "本票只让界面不提供「放弃」，不改服务端超时策略"
+    assert not any(action["kind"] == "Pass" for action in blind["legal_actions"]), (
+        "用户验收：盲挑步不可退回，超时取第一个合法项"
+    )
+    first = fallback_action(session.pending)
+    assert isinstance(first, SelectCards) and first.picks == (0,), (
+        f"盲挑超时 = 面内第一张手牌：{first}"
     )
 
 

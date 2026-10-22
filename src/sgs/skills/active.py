@@ -454,6 +454,8 @@ def _fanjian_target(state: GameState, frame: Any, owner: int, answers: FlowAnswe
 def _fanjian_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     if not _can_offer(state, ctx):
         return current
+    # **没有手牌不能发动**（用户验收）：反间的代价是"交出一张手牌"，手牌为空时
+    # 候选 / 预发动清单都不产出，技能按钮不可点（不是进游戏后才失败）。
     if not state.player(ctx.subject).hand:
         return current
     if not _fanjian_targets(state, None, ctx.subject, ()):
@@ -515,13 +517,18 @@ FANJIAN_FLOW = SkillFlow(
     name="fanjian",
     steps=(
         PickSeats(lo=1, hi=1, pool=_fanjian_targets, key="seat"),
-        PickOption(options=_SUIT_OPTIONS, actor=_fanjian_target, key="suit"),
+        # 票 08 复盘 / 用户验收：**目标确认之后不可退回**。花色与盲挑都 `optional=False`
+        # ——候选里没有 `Pass`，超时兜底自然落到第一个合法项（花色按 `Suit` 枚举序，
+        # 盲挑按面内槽位序）。"你可以"只到第一段（预发动选目标）为止；选的这一刻起
+        # 必定交出一张手牌，故"放弃"只留在第 1 步。
+        PickOption(options=_SUIT_OPTIONS, actor=_fanjian_target, key="suit", optional=False),
         PickCards(
             zones=(Zone.HAND,),
             lo=1,
             hi=1,
             key="card",
             actor=_fanjian_target,
+            optional=False,
             face=lambda state, frame, owner, answers: owner,
             # **盲挑**：目标只看得到槽位、看不到牌面（`reveal_hand=False`，与迁移前
             # `selection_face(owner, (HAND,))` 的缺省一字同形）。官方口径是"获得你的一张
@@ -532,7 +539,12 @@ FANJIAN_FLOW = SkillFlow(
     ),
     effect=_fanjian_effect,
 )
-"""【反间】的三步流水线：选谁 →（目标）猜花色 →（目标）从**发动者手牌**挑一张（票 06）。"""
+"""【反间】的三步流水线：选谁 →（目标）猜花色 →（目标）从**发动者手牌**挑一张（票 06）。
+
+U2 验收修正（用户裁定）：第一段（预发动选目标）仍可本地取消；**确认之后花色 / 盲挑两步
+不可放弃**——`optional=False` 去掉了 `Pass`，超时兜底因此取第一个合法项（第一个花色 /
+面内第一张手牌）。周瑜没有手牌时 `_fanjian_offers` 不产出候选 / 清单，技能不发动。
+"""
 
 
 # ---------------------------------------------------------------------------
