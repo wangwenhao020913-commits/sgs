@@ -181,7 +181,7 @@ class GameRegistry:
         records = [
             payload
             for record in session.records_after(after)
-            if (payload := visible_record(record)) is not None
+            if (payload := visible_record(record, viewer=session.human_seat)) is not None
         ]
         return {
             "session_id": session.session_id,

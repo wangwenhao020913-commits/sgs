@@ -43,6 +43,7 @@ from sgs.engine import record_json
 from sgs.state import CardRef
 
 from .display import card_display
+from .visibility import cards_visible
 
 __all__ = ["NARRATIVE_SEGMENT_CLASSES", "NO_VIEWER", "build_narrative", "narrative_after"]
 
@@ -71,11 +72,6 @@ NARRATIVE_SEGMENT_CLASSES: Final[tuple[str, ...]] = (
 ``tests/support/ui_smoke.mjs`` 的 ``colorClasses``、``static/style.css`` 的 ``.nar-*``。
 新增一种颜色要四处同批改；任何一处单独漂移都不会被编译期拦住。
 """
-
-PUBLIC_ZONES: Final[frozenset[str]] = frozenset(
-    {"discard", "processing", "equip", "judge"}
-)
-"""牌面一旦进入这些区域就是公开事实；手牌 / 牌堆仍是隐藏区。"""
 
 _SIDE_LABELS: Final[dict[str, str]] = {
     "lord": "主公方",
@@ -464,7 +460,7 @@ class _Narrator:
         if seat is None:
             return
         segments = [*self._subject(seat), _act(" 获得")]
-        if _cards_visible(record, self.viewer):
+        if cards_visible(record, self.viewer):
             segments.extend(_cards(cards))
         else:
             segments.append(_act(f" {len(cards)} 张牌"))
@@ -665,27 +661,6 @@ def _damage_class(cards: Sequence[Mapping[str, Any]]) -> str:
         if display.get("attribute") == "雷电":
             return "dmg-thunder"
     return "dmg"
-
-
-def _cards_visible(record: Mapping[str, Any], viewer: int | None) -> bool:
-    """这条牌移动的**牌面身份**对查看者是否公开。
-
-    公开区（弃牌堆 / 处理区 / 装备区 / 判定区）里出现过的牌是公开事实；只进出隐藏区
-    （牌堆 / 手牌）的牌只给张数。查看者本人的手牌与他经手转交的牌仍可见——那不是泄露。
-    """
-    if viewer is None:
-        return True
-    to_zone = record.get("to_zone") or {}
-    from_zone = record.get("from_zone") or {}
-    to = to_zone.get("zone")
-    source = from_zone.get("zone")
-    if to in PUBLIC_ZONES or source in PUBLIC_ZONES:
-        return True
-    if to == "hand" and to_zone.get("seat") == viewer:
-        return True
-    if source == "hand" and from_zone.get("seat") == viewer:
-        return True
-    return False
 
 
 def _divider(seq: int, text: str) -> dict[str, Any]:

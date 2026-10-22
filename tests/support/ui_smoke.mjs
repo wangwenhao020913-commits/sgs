@@ -11819,6 +11819,14 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && revealLine.includes("铁索连环")
       && !/REFORGE|Reforge|chained_change|wine_change|card_reveal|洗牌/.test(allLines),
     allLines);
+  const hiddenMoveLine = describe({
+    kind: "delta", delta_type: "card_move", seq: 3426, reason: "DRAW",
+    from_zone: { zone: "deck" }, to_zone: { seat: 1, zone: "hand" },
+    cards: [], card_count: 2,
+  });
+  check("M5-09c-e3 隐藏区牌移动只写张数、不写牌名（脱敏在服务端，前端只按下发值渲染）",
+    hiddenMoveLine.includes("2 张牌") && !hiddenMoveLine.includes("【"),
+    hiddenMoveLine);
   ui.state.narrative = [{
     kind: "line", seq: 3425, text: "座位0 重铸【铁索连环】",
     segments: [

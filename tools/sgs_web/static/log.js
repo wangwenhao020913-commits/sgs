@@ -146,7 +146,12 @@ function describeRecord(record) {
   if (record.kind === "delta") {
     if (record.delta_type === "card_move") {
       const reason = MOVE_REASON_LABELS[record.reason] || record.reason;
-      return `<span class="k">#${record.seq}</span> 牌移动 ${zoneLabel(record.from_zone)} → ${zoneLabel(record.to_zone)}（${reason}）${cardsLabel(record.cards)}`;
+      // M5-09c：隐藏区（牌堆 / 手牌）之间的移动在服务端已脱敏——`cards` 为空、`card_count`
+      // 给张数（公开区 / 自己经手的移动仍带牌面）。完整档只按下发值渲染，不做可见性判断。
+      const moved = (record.cards || []).length
+        ? cardsLabel(record.cards)
+        : (record.card_count ? ` · ${record.card_count} 张牌` : "");
+      return `<span class="k">#${record.seq}</span> 牌移动 ${zoneLabel(record.from_zone)} → ${zoneLabel(record.to_zone)}（${reason}）${moved}`;
     }
     if (record.delta_type === "hp_change") return `<span class="k">#${record.seq}</span> 体力 座位 ${record.seat} ${record.before} → ${record.after}`;
     if (record.delta_type === "chained_change") {

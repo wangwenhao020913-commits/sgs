@@ -8,7 +8,11 @@
    所以逐条过 :func:`visible_record`：
    - ``query`` 记录**不带** ``view`` 与 ``legal_actions``：非人类座位的询问带的是**别人的视角**，
      而人类座位的候选在"当前挂起"那一条里单独给（前端只需要能点的那一份）；
-   - ``action`` / ``timing`` / ``delta`` / ``frame`` / ``game_end`` 是公开事实，原样下发。
+   - ``card_move`` 的牌面按**区域可见性**裁剪（M5-09c / spec §6 A3）：公开区照常可见，
+     隐藏区（牌堆 / 手牌）只给数量（``cards`` 抹空 + ``card_count``）。判据与叙事同源，
+     见 :mod:`sgs_web.visibility`；
+   - ``action`` / ``timing`` / ``delta``（除 ``card_move`` 的牌面）/ ``frame`` / ``game_end``
+     是公开事实，原样下发。
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ from .display import (
     suit_labels,
 )
 from .session import Session
+from .visibility import cards_visible
 
 __all__ = [
     "HARVEST_REQUIREMENT",
@@ -1558,18 +1563,38 @@ def pending_payload(
     return payload
 
 
-def visible_record(record: object) -> dict[str, Any] | None:
-    """把一条记录转成可下发的 JSON；``None`` = 这一条不下发。"""
+def visible_record(record: object, *, viewer: int | None = None) -> dict[str, Any] | None:
+    """把一条记录转成**查看者可下发**的 JSON；``None`` = 这一条不下发。
+
+    ``viewer`` = 人类座位（``serve.GameRegistry.view`` 传 ``session.human_seat``）；
+    ``None`` = 没有查看者 / 全知——**不裁剪**（内部调用与测试需要原始记录）。
+
+    ``card_move`` 的牌面按 spec §6 A3 的**区域可见性**脱敏（M5-09c）：公开区
+    （弃牌堆 / 处理区 / 装备区 / 判定区）照常下发牌面；隐藏区（牌堆 / 手牌）之间的移动，
+    除查看者自己的手牌 / 自己经手的移动外，``cards`` 抹成空列表并补 ``card_count``，
+    让界面仍能说"移动了几张"。判据与事件流（``sgs_web.narrative``）共用
+    :func:`sgs_web.visibility.cards_visible`——一处规则，两个下发口。
+
+    **只过滤这一份下发**：引擎记录流保持全信息（回放 / 裁判需要），本函数不写任何状态、
+    不改 schema、不碰金录像。``card_reveal``（M5-06 火攻亮牌）是公开事实，额外补展示字段。
+    """
     kind = getattr(record, "kind", None)
     if kind == "query":
         return {"kind": "query", "seq": record.seq, "query": _query_summary(record.query)}
     raw = json.loads(record_json(record))
-    if kind == "delta" and raw.get("delta_type") == "card_reveal":
-        # M5-08a：亮牌是公开事实，中央舞台按**同一份卡面契约**画它（牌名 / 属性 / 描述）。
-        # 只补展示字段，不移动、不写任何「已知」状态。
-        card = raw.get("card")
-        if isinstance(card, dict):
-            raw["card"] = card_payload(CardRef.model_validate(card))
+    if kind == "delta":
+        delta_type = raw.get("delta_type")
+        if delta_type == "card_reveal":
+            # M5-08a：亮牌是公开事实，中央舞台按**同一份卡面契约**画它（牌名 / 属性 / 描述）。
+            # 只补展示字段，不移动、不写任何「已知」状态。
+            card = raw.get("card")
+            if isinstance(card, dict):
+                raw["card"] = card_payload(CardRef.model_validate(card))
+        elif delta_type == "card_move" and raw.get("cards"):
+            if not cards_visible(raw, viewer):
+                # M5-09c：隐藏区的牌面不下发，只给张数——界面 / 事件流仍能说"移动了几张"。
+                raw["card_count"] = len(raw["cards"])
+                raw["cards"] = []
     if kind == "action":
         # 公开事实：谁应答了、被接受与否；**具体选了什么**只对人类座位自己的应答展开。
         action = raw.get("action")
@@ -1578,6 +1603,8 @@ def visible_record(record: object) -> dict[str, Any] | None:
     return raw
 
 
-def serialize_record(record: object) -> dict[str, Any] | None:
+def serialize_record(
+    record: object, *, viewer: int | None = None
+) -> dict[str, Any] | None:
     """``visible_record`` 的别名，名字更贴近"序列化"的调用点。"""
-    return visible_record(record)
+    return visible_record(record, viewer=viewer)
