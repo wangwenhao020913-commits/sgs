@@ -30,7 +30,7 @@ from sgs.engine import DRAW_COUNT, Engine
 from sgs.skills import CATALOG, PROVIDERS, flow_for
 from sgs.skills.catalog import MATCH_OWNER_KEY
 from sgs.skills.move_after import MOVE_EVENT_KEY, MoveEvent
-from sgs.state import EndPhase, GameState, MoveReason, Pass, Zone, ZoneRef
+from sgs.state import CardRef, EndPhase, GameState, MoveReason, Pass, Zone, ZoneRef
 from sgs.timing import DISPATCH_WHITELIST, Timing
 
 from support import (
@@ -561,6 +561,19 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         after_holder=None,
         actor=ME,
     )
+    # M5-05a：装备技能也有"关于我"的时机钩子（白银狮子只认**它自己**离开装备区）。
+    # 合成一张牌面即可——条件只读 ``move.cards`` 的牌名 id 与 ``from_zone``，不查牌堆。
+    move_silver_lion = MoveEvent(
+        cards=(
+            CardRef(card_id=0, type="silver_lion", name="白银狮子", suit="spade", rank=1),
+        ),
+        from_zone=ZoneRef(Zone.EQUIP, ME),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.LOSE,
+        owner=ME,
+        after_holder=None,
+        actor=ME,
+    )
     return {
         "hero.caocao.jianxiong": _HookFrame(
             target=ME, source=0, card=state.card(_PROBE_PROCESSING_SLASH)
@@ -572,6 +585,7 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         ),
         "hero.luxun.lianying": _HookFrame(**{MOVE_EVENT_KEY: move_lianying}),
         "hero.sunshangxiang.xiaoji": _HookFrame(**{MOVE_EVENT_KEY: move_xiaoji}),
+        "equip.silver_lion": _HookFrame(**{MOVE_EVENT_KEY: move_silver_lion}),
     }
 
 
@@ -596,7 +610,8 @@ def _conditional_hook_skills() -> set[str]:
 def test_the_owner_self_check_exemption_table_is_empty() -> None:
     """豁免表**现在是空集**：这条挡住"顺手往例外里塞一条"而没人看见。"""
     assert EXEMPT_OWNER_SELF_CHECK == {}, (
-        "六条带条件的钩子全是『关于我』的 ⇒ 一条例外都不该有；要加必须写明理由并同步本条"
+        "带条件的钩子（六条武将技 + M5-05a 的白银狮子）全是『关于我』的 ⇒ 一条例外都不该有；"
+        "要加必须写明理由并同步本条"
     )
 
 

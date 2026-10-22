@@ -844,7 +844,7 @@ def damage_finalize_amount(host: FrameHost, frame: Frame) -> None:
     数值"的位置，``frame.data["amount"]`` 从此是**实际要扣的**数值。三件事：
 
     1. 数值 = :func:`~sgs.effects.damage_amount`（来源侧只在 ``chain=False`` 的源头帧算，
-       目标侧每帧都算）；
+       目标侧每帧都算；M5-05a 起目标侧链在加法之后还有一段封顶 ``DAMAGE_CAP``）；
     2. ``chain_reset`` = 受伤害者此刻横置 ∧ 属性伤害（火 / 雷）∧ 数值 > 0 ∧ 未防止；
     3. ``chain_trigger`` = ``chain_reset`` ∧ **不是传导伤害**（``chain=True`` 不再传导）。
 
@@ -862,6 +862,7 @@ def damage_finalize_amount(host: FrameHost, frame: Frame) -> None:
             base=amount,
             chain=bool(frame.data.get("chain")),
             deal_bonus=int(frame.data.get("deal_bonus", 0)),
+            nature=frame.data.get("nature"),
         )
         reset = (
             amount > 0

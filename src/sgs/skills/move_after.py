@@ -51,6 +51,9 @@ from .catalog import (
     HeroSkillDecl,
     Hook,
     SkillDef,
+    SkillInstance,
+    SkillSource,
+    SkillSourceKind,
     dispatch_timing,
     resolve_instances,
 )
@@ -64,6 +67,7 @@ __all__ = [
     "MoveEvent",
     "XIAOJI_FLOW",
     "dispatch_move_after",
+    "lost_equipment_instances",
     "move_after_providers",
     "move_after_skill_definitions",
     "move_event",
@@ -106,16 +110,66 @@ def move_event(frame: Any) -> MoveEvent | None:
     return frame.data.get(MOVE_EVENT_KEY)
 
 
-def move_after_providers(state: GameState, *, timing: Timing = Timing.MOVE_AFTER) -> bool:
+def lost_equipment_instances(
+    state: GameState, event: MoveEvent | None
+) -> tuple[SkillInstance, ...]:
+    """**刚离开装备区**的实体装备，把它们自己的技能补成一次性的技能实例（M5-05a）。
+
+    装备技能挂在装备牌上：``move_card`` 之后这张牌已不在装备区，
+    :func:`~sgs.skills.resolve_instances` 因此看不见它——而"失去这张装备时回复 1 点"的
+    【白银狮子】正需要在自己的**失去**上被派发。本函数按本次移动补出这些实例：
+
+    - 只认 ``from_zone == EQUIP``（牌从装备区离开才算"失去装备"）；
+    - 归属 = 失去它的座位（``from_zone.seat``），来源仍是那张**实体牌**
+      （``source.card_id``，与载体解析同一份声明）；
+    - 定义取 ``CATALOG["equip." + 牌名 id]`` —— 与 ``resolve_instances`` 同一个键规则，
+      不写死任何牌名。没有装备技能的牌（或本来就没有钩子）自然不产出。
+
+    这些实例**只在这一次派发里存在**（引擎不写 ``skill_state``，`prune_skill_state` 已经
+    在搬牌后跑过），故不会在别处变成"幽灵装备"。
+    """
+    if event is None or event.from_zone.zone is not Zone.EQUIP:
+        return ()
+    seat = event.from_zone.seat
+    if seat is None:
+        return ()
+    # 延迟导入 ``CATALOG``：它在 catalog 模块**末尾**才装配（本模块在那一行被 import），
+    # 模块级取会在半初始化时撞上"没有 CATALOG"。
+    from .catalog import CATALOG
+
+    found: list[SkillInstance] = []
+    for card in event.cards:
+        definition = CATALOG.get(f"equip.{card.type}")
+        if definition is None:
+            continue
+        found.append(
+            SkillInstance(
+                owner=seat,
+                skill_id=definition.skill_id,
+                source=SkillSource(SkillSourceKind.EQUIPMENT_CARD, card_id=card.card_id),
+                definition=definition,
+            )
+        )
+    return tuple(found)
+
+
+def move_after_providers(
+    state: GameState, *, timing: Timing = Timing.MOVE_AFTER, event: MoveEvent | None = None
+) -> bool:
     """**惰性守卫**：当前局面有没有注册在 ``timing`` 上的实例（票 07 §要做什么 2）。
 
     ``False`` ⇒ ``move_in_frame`` 一个时机事件都不发、一个钩子都不跑——无武将模式的
     记录流因此逐字节不变（M2 的 34 条基准不重录）。判据用 ``resolve_instances``
     （载体并集 ∪ 身份门控的唯一真源），故"武将牌上根本没有这个技能"的角色不会把守卫点亮。
+
+    ``event``（M5-05a 的加法，缺省 ``None``）：**刚被失去的装备**也是提供者——它的实例
+    已不在 ``resolve_instances`` 里（见 :func:`lost_equipment_instances`），但这一次移动
+    仍要替它派发"失去装备时"的钩子（白银狮子）。标准 108 没有任何装备带 ``MOVE_AFTER``
+    钩子，故这条加法对既有记录流零影响。
     """
     return any(
         hook.timing is timing
-        for instance in resolve_instances(state)
+        for instance in (*resolve_instances(state), *lost_equipment_instances(state, event))
         for hook in instance.definition.hooks
     )
 
@@ -125,8 +179,16 @@ def dispatch_move_after(host: Any, frame: Any) -> None:
 
     守卫在 ``Engine.move_in_frame`` 一侧已经判过，这里只做通用派发；返回值被刻意丢弃——
     本族的钩子不得暂停（见模块 docstring）。
+
+    M5-05a 起**刚离开装备区的装备**也参与本次派发（:func:`lost_equipment_instances`）：
+    它们是"这一次移动"的提供者，而不是当前状态里的装备。
     """
-    return dispatch_timing(host, frame, Timing.MOVE_AFTER)
+    return dispatch_timing(
+        host,
+        frame,
+        Timing.MOVE_AFTER,
+        extra_instances=lost_equipment_instances(host.state, move_event(frame)),
+    )
 
 
 # ---------------------------------------------------------------------------

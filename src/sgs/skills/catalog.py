@@ -37,11 +37,14 @@ from sgs.data import Color, Identity, SkillType, color_of_suit, hero_skill_id, h
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
+    DamageNature,
     Modifier,
     ModifierContext,
     ModifierPoint,
     PriorityClass,
+    behavior_for,
     check_targets,
+    is_slash,
     locate,
     priority_class_of,
 )
@@ -49,6 +52,7 @@ from sgs.resolution import Control, Frame, Tag, add_tag
 from sgs.state import (
     ActivateSkill,
     CardRef,
+    FrameKind,
     GameState,
     MoveReason,
     SelectionSpec,
@@ -596,14 +600,54 @@ def _matching_seams(instance: SkillInstance, kind: SeamKind) -> tuple[Seam, ...]
     return tuple(seam for seam in instance.definition.seams if seam.kind is kind)
 
 
-def _dispatch(host: Any, frame: Frame, *, match: Any, timing: Timing, key: str) -> Control:
+def _instances_for(
+    state: GameState, extra_instances: tuple[SkillInstance, ...]
+) -> tuple[SkillInstance, ...]:
+    """本次派发的实例集合 = 存活实例 ∪ **这一次的临时实例**（M5-05a）。
+
+    临时实例是"刚刚失去的装备"（:func:`~sgs.skills.move_after.lost_equipment_instances`）：
+    它们已经不在装备区、故不在 :func:`resolve_instances` 的集合里，但这一次 ``MOVE_AFTER``
+    仍要替它们派发。合并后仍按 ``(priority_class, skill_id, owner)`` 全序；同一
+    ``(owner, skill_id)`` 以存活实例为准（临时实例不重复派发）。身份门控对临时实例同样生效
+    （与 :func:`resolve_instances` 同一条判据）。
+    """
+    instances = list(resolve_instances(state))
+    if not extra_instances:
+        return tuple(instances)
+    seen = {(instance.owner, instance.skill_id) for instance in instances}
+    for instance in extra_instances:
+        if _identity_gates_out(instance.definition, state.player(instance.owner).identity):
+            continue
+        key = (instance.owner, instance.skill_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        instances.append(instance)
+    instances.sort(
+        key=lambda item: (int(item.definition.priority_class), item.skill_id, item.owner)
+    )
+    return tuple(instances)
+
+
+def _dispatch(
+    host: Any,
+    frame: Frame,
+    *,
+    match: Any,
+    timing: Timing,
+    key: str,
+    extra_instances: tuple[SkillInstance, ...] = (),
+) -> Control:
     """钩子与接缝共用的派发环（唯一一份）：锁定直接跑，非锁定先问"是否发动"。
 
     **只有答 ``ActivateSkill`` 才执行**——``Pass``（不发动）与 ``plan.available=False``
     （付不起）都跳过；这是"非锁定技的发动是询问出来的"这条规则（`GLOSSARY.md` 的**发动**）
     的唯一落点。暂停 = ``"stay"`，重入时整条链从头跑，但 `ask` 的应答按帧内键缓存。
+
+    ``extra_instances``（M5-05a）只由"失去牌后"的派发传入：刚离开装备区的装备技能仍是
+    这一次移动的提供者（见 :func:`_instances_for`）。
     """
-    for instance in resolve_instances(host.state):
+    for instance in _instances_for(host.state, extra_instances):
         items = match(instance)
         if not items:
             continue
@@ -643,12 +687,21 @@ def _run_item(host: Any, frame: Frame, item: Any, instance: SkillInstance, timin
     return item.handler(host, frame)
 
 
-def dispatch_timing(host: Any, frame: Frame, timing: Timing) -> Control:
+def dispatch_timing(
+    host: Any,
+    frame: Frame,
+    timing: Timing,
+    *,
+    extra_instances: tuple[SkillInstance, ...] = (),
+) -> Control:
     """在 ``timing`` 上按链序派发钩子；**第一个返回非 ``None`` 的钩子即短路**。
 
     答案缓存键带上 :func:`~sgs.skills.damage_after.damage_point_index`（票 05）：逐点触发的
     时机里"第 1 点"与"第 2 点"是**两个**时机实例，非锁定技在每一轮各自问一次"是否发动"；
     其余时机里该序号恒为 0，键与既有形态逐字相同（M2 基准不受影响）。
+
+    ``extra_instances``（M5-05a）：本次派发额外参与的**临时实例**（失去装备派发用）；
+    缺省为空 ⇒ 既有调用点的行为与集合逐字不变。
     """
     point = damage_point_index(frame)
     return _dispatch(
@@ -657,6 +710,7 @@ def dispatch_timing(host: Any, frame: Frame, timing: Timing) -> Control:
         match=lambda instance: _matching_hooks(instance, timing, host, frame),
         timing=timing,
         key=timing.value if point == 0 else f"{timing.value}:{point}",
+        extra_instances=extra_instances,
     )
 
 
@@ -873,12 +927,135 @@ def _qinggang_ignore_armor(state: GameState, ctx: ModifierContext, current: Any)
 
     只压制"目标身上的防具"（``ctx.owner == ctx.subject``，即使用者自己的青釭剑），
     且只对【杀】生效；置的是链内旁路标志，不落任何状态（票 07 §3）。
+
+    M5-05a 起同一条回调挂**三个挂点**：``EFFECTIVENESS``（仁王盾式"无效"）、
+    ``DAMAGE_TAKE_AMOUNT`` 与 ``DAMAGE_CAP``（藤甲的火焰 +1、白银狮子的封顶）。
+    "无视防具"是**防具的整体效果**，不只第一条链：伤害链是另一次 ``apply_modifiers``
+    （新的 ``flags``），同一条修正必须自己把标志再置一遍，后跑的防具回调才读得到。
+    链序仍保证青釭剑在前（``equip.qinggang_sword`` 按 skill_id 排在防具之前）。
     """
     del state
     if not _own_slash(ctx, holder=ctx.subject):
         return current
     ctx.flags["ignore_armor"] = True
     return current
+
+
+_VINE_ARMOR_IMMUNE_CARD_TYPES = frozenset({"slash", "barbarian_invasion", "arrow_barrage"})
+"""藤甲"对你无效"的牌名闭集（D9：普通【杀】**按产物牌型** ``slash`` 判）。
+
+火杀 / 雷杀是独立牌型，因此不在此列——不读伤害帧、不读 ``CardRef`` 属性，也不复用
+:func:`~sgs.effects.is_slash`（那是【杀】**家族**判据，会把属性【杀】一起挡掉）。
+"""
+
+
+def _vine_armor_effectiveness(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """藤甲（一）：普通【杀】/【南蛮入侵】/【万箭齐发】对你**无效**（``EFFECTIVENESS``）。
+
+    与【仁王盾】同款读法：``ctx.owner == ctx.target`` 只压自己身上的防具；链上先跑的
+    【青釭剑】置了 ``ignore_armor`` 就整条让开（"无视防具"越过藤甲）。
+    """
+    del state
+    if not current:
+        return current
+    if ctx.owner != ctx.target or ctx.card is None:
+        return current
+    if ctx.flags.get("ignore_armor"):
+        return current
+    if ctx.card.type in _VINE_ARMOR_IMMUNE_CARD_TYPES:
+        return False
+    return current
+
+
+def _vine_armor_fire_bonus(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """藤甲（二）：你受到的**火焰**伤害 +1（``DAMAGE_TAKE_AMOUNT``，目标侧）。
+
+    与（一）同一次查询里的旁路标志：``ignore_armor`` 为真时（青釭剑）这条 +1 也不生效。
+    属性读 ``ctx.nature``（DAMAGE 帧的属性透传），不读牌面 / ``CardRef``。
+    """
+    del state
+    if ctx.owner != ctx.target:
+        return current
+    if ctx.nature is not DamageNature.FIRE:
+        return current
+    if ctx.flags.get("ignore_armor"):
+        return current
+    return current + 1
+
+
+def _silver_lion_damage_cap(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """白银狮子：你受到的伤害**最多 1 点**（``DAMAGE_CAP``，在加伤之后封顶）。
+
+    ``DAMAGE_CAP`` 是 M5-05a 新加的第三个伤害数值挂点，:func:`~sgs.effects.damage_amount`
+    在 ``DAMAGE_TAKE_AMOUNT`` 之后派发它，故古锭刀 / 酒 / 藤甲的加法都先落地。
+    青釭剑的 ``ignore_armor`` 同样越过这条（防具的整体效果，M5-05a 的读法）。
+    """
+    del state
+    if ctx.owner != ctx.target:
+        return current
+    if ctx.flags.get("ignore_armor"):
+        return current
+    return min(current, 1)
+
+
+def _lost_this_equipment(card_type_id: str) -> HookCondition:
+    """装备技能「失去**这张**装备」的触发条件（M5-05a 的装备技能用）。
+
+    读本次 ``MOVE_AFTER`` 的载荷（:func:`~sgs.skills.move_after.move_event`）：
+    ``from_zone == EQUIP`` ∧ 失去者 = 技能持有者（:data:`MATCH_OWNER_KEY`）∧
+    **这批被移动的牌里就有这张牌**（按牌名 id 判——它决定了"失去的是不是它自己"）。
+
+    这是装备技能与【枭姬】的关键差别：枭姬是"失去**任意**装备"，白银狮子只认**它自己**
+    这一张。牌名 id 是装备技能 id 的派生源（``equip.<牌名 id>``），故这里与载体解析同键。
+    """
+
+    def condition(host: Any, frame: Frame) -> bool:
+        del host
+        # 延迟导入：``move_after`` 在 catalog **文件末尾**才并入技能表（模块级循环）。
+        from .move_after import move_event
+
+        move = move_event(frame)
+        if move is None or move.from_zone.zone is not Zone.EQUIP:
+            return False
+        owner = frame.data.get(MATCH_OWNER_KEY)
+        if owner is None or move.from_zone.seat != owner:
+            return False
+        return any(card.type == card_type_id for card in move.cards)
+
+    return condition
+
+
+def _silver_lion_lost(host: Any, frame: Frame) -> None:
+    """失去白银狮子：**走正常 RECOVER 帧**回复 1 点（不直接改 HP）。
+
+    压帧而不是原地写 ``hp``：回复量的修正（``RECOVER_AMOUNT``）、体力上限夹取与
+    ``RECOVER_VALUE`` / ``RECOVER_AFTER`` 两个时机都仍由 :mod:`sgs.engine.steps` 的
+    ``RECOVER`` 步骤表统一处理——与【桃】/【桃园结义】/主动技的回复是同一条流程。
+    持有者 = :data:`skill_owner`（``_dispatch`` 在回调前写入）。
+    """
+    owner = frame.data["skill_owner"]
+    host.push_frame(
+        FrameKind.RECOVER,
+        {"source": owner, "targets": (owner,), "card": None, "amount": 1},
+        timing=Timing.RECOVER_VALUE,
+    )
+
+
+def _scimitar_no_hand_bonus(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """古锭刀：你使用【杀】对**没有手牌**的目标造成伤害时，伤害 +1（M5-05a，来源侧）。
+
+    挂点是 ``DAMAGE_DEAL_AMOUNT``，:func:`~sgs.effects.damage_amount` **只在
+    ``chain=False`` 的源头帧**派发它，故传导帧不会把这一刀重算一遍（结构事实，回调里
+    没有"这是不是传导"的分支）。"是不是【杀】"按 M5-04 的共享计数键判
+    （:func:`~sgs.effects.is_slash`：普通 / 火 / 雷与转化、虚拟产物同族），不读具体牌名。
+    """
+    if ctx.owner != ctx.subject or ctx.target is None or ctx.card is None:
+        return current
+    if not is_slash(behavior_for(ctx.card)):
+        return current
+    if state.player(ctx.target).hand:
+        return current
+    return current + 1
 
 
 def _halberd_same_target_pool(state: GameState, ctx: ModifierContext, current: Any) -> Any:
@@ -1464,7 +1641,11 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         "qinggang_sword",
         locked=True,
         requirement="使用【杀】时无视目标的防具",
-        modifiers=(Modifier(ModifierPoint.EFFECTIVENESS, _qinggang_ignore_armor),),
+        modifiers=(
+            Modifier(ModifierPoint.EFFECTIVENESS, _qinggang_ignore_armor),
+            Modifier(ModifierPoint.DAMAGE_TAKE_AMOUNT, _qinggang_ignore_armor),
+            Modifier(ModifierPoint.DAMAGE_CAP, _qinggang_ignore_armor),
+        ),
     ),
     _equip(
         "double_sword",
@@ -1578,16 +1759,29 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         "silver_lion",
         locked=True,
         requirement="受到的伤害最多为 1 点；失去装备时回复 1 点体力",
+        modifiers=(Modifier(ModifierPoint.DAMAGE_CAP, _silver_lion_damage_cap),),
+        hooks=(
+            Hook(
+                Timing.MOVE_AFTER,
+                condition=_lost_this_equipment("silver_lion"),
+                handler=_silver_lion_lost,
+            ),
+        ),
     ),
     _equip(
         "vine_armor",
         locked=True,
         requirement="普通【杀】/【南蛮入侵】/【万箭齐发】对你无效；火焰伤害 +1",
+        modifiers=(
+            Modifier(ModifierPoint.EFFECTIVENESS, _vine_armor_effectiveness),
+            Modifier(ModifierPoint.DAMAGE_TAKE_AMOUNT, _vine_armor_fire_bonus),
+        ),
     ),
     _equip(
         "ancient_scimitar",
         locked=True,
         requirement="目标没有手牌时，你使用【杀】造成的伤害 +1",
+        modifiers=(Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _scimitar_no_hand_bonus),),
     ),
     _equip(
         "vermilion_feather_fan",
@@ -1599,6 +1793,7 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         "hualiu",
         locked=True,
         requirement="其他角色计算与你的距离时 +1",
+        modifiers=_DISTANCE_PLUS_ONE,
     ),
 )
 

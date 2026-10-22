@@ -541,7 +541,7 @@ class Engine:
         )
         if not dispatch_frame:
             return None
-        if not move_after_providers(self.state):
+        if not move_after_providers(self.state, event=event):
             return None
         frame = Frame(
             kind=FrameKind.RESOLVE,
@@ -2115,7 +2115,7 @@ class Engine:
         上层帧出栈），故不使用帧自己的私有标记；载荷写进 ``frame.data`` 供钩子读。
         """
         if frame is not None:
-            if not move_after_providers(self.state):
+            if not move_after_providers(self.state, event=event):
                 # **惰性守卫**（票 07 §要做什么 2）：没有提供者 ⇒ 一个时机事件都不发、
                 # 一个钩子都不跑。无武将模式的记录流因此**逐字节不变**（M2 的 34 条基准
                 # 不重录）——这是本票的硬约束，比"每条移动都落一条记录"更重要。
@@ -2150,7 +2150,7 @@ class Engine:
                 frame.data.pop("_pending_move_timing", None)
             return result
         # 无承载帧（弃牌阶段等）：先判惰性守卫，再落记录并派发。
-        if not move_after_providers(self.state):
+        if not move_after_providers(self.state, event=event):
             return None
         if self._move_recorded != key:
             self.emit_timing(
