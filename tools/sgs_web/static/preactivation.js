@@ -422,13 +422,17 @@ function buildPreativationAction(pending, pa) {
   if (!pending || !pa || !preactivationReady(pa)) return null;
   // 手牌入口（W5-02b 借刀）：两步座位答案 → 一次带**附带指定**的使用。
   // 牌是实体牌（不拼虚拟 id），`targets` = 持刀者 A、`designations` = 使用者指定的 Bn。
+  // `pa.card` 是**展示卡**（快照里带 display_name / attribute / description …），
+  // 提交前必须过 `bareCardRef` 收成纯 CardRef——服务端的 Action 模型是 extra="forbid"
+  // （M5-bugfix：借刀预发动曾被拒为 `UseCard.card.attribute Extra inputs are not
+  // permitted`）。其余字段（targets / designations）本来就只有报文字段。
   if (pa.cardEntry) {
     const holder = pa.answers[0] ? pa.answers[0].values[0] : undefined;
     const designate = pa.answers[1] ? pa.answers[1].values[0] : undefined;
     if (!Number.isInteger(holder) || !Number.isInteger(designate)) return null;
     return {
       kind: "UseCard",
-      card: pa.card,
+      card: bareCardRef(pa.card),
       targets: [holder],
       designations: [designate],
       answers_seq: pending.seq,

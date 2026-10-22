@@ -13,6 +13,12 @@
  * 按钮写服务端下发的中文名 + 符号，并按 ``color`` 标红黑；前端不另抄花色表。这类步骤
  * **一击即提交**（spec D3「选完即提交」）：按钮的 click 直接送出一条候选里的
  * ``SelectOption``，不再需要「下一步」。
+ *
+ * **一次性二选一（M5-bugfix / 雌雄双股剑）**：引擎只发**付得起的**选项（目标无手牌时
+ * 没有 ``discard_one``），但这一面仍把已知的另一项画成**禁用**控件（见
+ * :func:`optionChoices`）——它是控件区的可及性展示，不是候选：点它不提交任何东西。
+ * 禁用与否只看"这条在不在 ``legal_actions`` 里"，前端不重算"为什么不可支付"
+ * （那是引擎的规则）。
  */
 function renderOptionButtons(pending) {
   const box = $("t-options");
@@ -22,13 +28,20 @@ function renderOptionButtons(pending) {
     const hint = $("t-target-hint");
     if (hint) hint.textContent = "点一个选项即提交；这一步不能放弃。";
   }
-  (pending.legal_actions || []).forEach((action, index) => {
-    if (action.kind !== "SelectOption" || isRightAction(action)) return;
+  const actions = pending.legal_actions || [];
+  optionChoices(pending).forEach((choice) => {
+    // 候选下标 = 提交时要指过去的那一条；-1 = 引擎没发（画成禁用，点它零提交）。
+    const index = actions.findIndex(
+      (action) => action.kind === "SelectOption"
+        && action.choice === choice
+        && !isRightAction(action),
+    );
     const button = document.createElement("button");
     button.type = "button";
     button.className = "opt";
-    if (state.selectedOption === index) button.classList.add("sel");
-    const label = optionLabel(pending, action.choice);
+    button.disabled = index < 0;
+    if (index >= 0 && state.selectedOption === index) button.classList.add("sel");
+    const label = optionLabel(pending, choice);
     if (label) {
       // 中文名 / 符号 / 红黑全部读服务端 `option_labels`：前端只负责摆版面。
       button.classList.add("suit");
@@ -42,9 +55,10 @@ function renderOptionButtons(pending) {
       button.appendChild(symbol);
       button.appendChild(name);
     } else {
-      button.textContent = optionText(action);
+      button.textContent = optionText(choice, pending);
     }
     button.addEventListener("click", async () => {
+      if (index < 0) return; // 禁用项：不是候选，绝不提交（真 DOM 也不向 disabled 派发 click）
       if (dialog) {
         await submitDialogChoice(pending, index);
         return;
@@ -56,6 +70,21 @@ function renderOptionButtons(pending) {
     box.appendChild(button);
   });
   $("btn-cancel").disabled = state.selectedOption === null && !cancelAction(pending);
+}
+
+/** 这一面要画哪些选项值（M5-bugfix）：一次性二选一画**完整的一对**，其余只画候选真有的。
+ *
+ * 配对来自**已知的一次性选项标签**（:data:`OPTION_LABELS`）——只要候选里有其中一项，
+ * 就把整对都画出来；另一项是否可提交仍只看它在不在 ``legal_actions`` 里（引擎裁决），
+ * 这里只决定"要不要把另一条画成禁用"。没有一次性选项的步骤（花色等复用枚举）原样。
+ */
+function optionChoices(pending) {
+  const legal = ((pending && pending.legal_actions) || [])
+    .filter((action) => action.kind === "SelectOption" && !isRightAction(action))
+    .map((action) => action.choice);
+  const known = Object.keys(OPTION_LABELS);
+  if (!known.some((choice) => legal.includes(choice))) return legal;
+  return [...new Set([...known, ...legal])];
 }
 
 /** 服务端下发的选项标签（`{值: {name, symbol, color}}`）；没有就是 `null`。 */
@@ -92,8 +121,12 @@ async function submitDialogChoice(pending, index) {
  * 票 08 起花色由载荷的 `option_labels` 下发（见 :func:`optionLabel`），前端不另抄第二份。
  * 查不到标签的值原样显示（fail-visible，不猜中文）。
  *
- * `discard_one` 只在目标**有手牌**时由引擎发出（`skills/catalog.py`），界面不自己补；
- * 载荷里没有它就不画这个按钮。
+ * `discard_one` 只在目标**有手牌**时由引擎发出（`skills/catalog.py`）；界面不自己补
+ * 这条**合法性**，但会把已知的另一项画成禁用（见 :func:`optionChoices`）。
+ *
+ * `draw_one` 的"令谁摸"读服务端派生的 `option_source`（M5-bugfix）：
+ * `{"seat": N, "name": <武将名或 None>}` = 雌雄双股剑的持有者。没有这份展示事实时
+ * 退回旧文案「令其摸一张牌」——前端不按回合 / 使用者自己推来源。
  */
 const OPTION_LABELS = Object.freeze({
   discard_one: "弃置 1 张手牌",
@@ -101,8 +134,14 @@ const OPTION_LABELS = Object.freeze({
 });
 
 /** 选项按钮上的文字：已知的一次性选项用中文；其余选项保留**原值**（复用标签待票 08）。 */
-function optionText(action) {
-  return OPTION_LABELS[action.choice] || action.choice;
+function optionText(choice, pending) {
+  if (choice === "draw_one" && pending && pending.option_source) {
+    const source = pending.option_source;
+    return source.name
+      ? `令座位号 ${source.seat} ${source.name}摸一张牌`
+      : `令座位号 ${source.seat} 摸一张牌`;
+  }
+  return OPTION_LABELS[choice] || choice;
 }
 
 /** 这次选择的**未就绪原因**；``null`` = 可以提交。

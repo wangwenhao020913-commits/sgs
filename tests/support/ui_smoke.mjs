@@ -3648,6 +3648,80 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `pre=${ui.state.preactivation} calls=${calls.length - beforeCancel}`);
 }
 
+/* ---- M5-bugfix（D）：借刀预发动提交的 `card` 必须是**纯 CardRef** ----
+ *
+ * 报障（用户实机）：预发动确认时报
+ * `UseCard.card.attribute Extra inputs are not permitted`。根因是界面把**展示副本**
+ * （`display_name` / `attribute` / `description` / `kind` / `source_cards` …）原样塞进
+ * `UseCard.card`，而服务端的 `CardRef` 是 `extra="forbid"` 的严格模型。
+ *
+ * 判据：任何从**展示卡**拼出来的 `UseCard` / `PlayCard` 都先过 `bareCardRef`
+ * （`core.js`，字段闭集 = 服务端 `CardRef` 的九个键）；其余字段（来源牌 / 展示文案）
+ * 一个都不许随提交上行。**不放宽服务端模型**。
+ */
+{
+  const borrowedDisplay = {
+    ...synthCard(31, "借刀杀人"),
+    type: "borrowed_sword",
+    display_name: "借刀杀人",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "借刀杀人的描述：令持刀者对其攻击范围内的一名角色使用【杀】。",
+  };
+  const borrowedRaw = {
+    card_id: 31, type: "borrowed_sword", name: "借刀杀人", suit: "spade",
+    rank: 7, slot: null, attack_range: null, color: "black", virtual_sources: [],
+  };
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 93,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 93 }],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [], card_preactivations: {},
+  };
+  const pa = {
+    skillId: null, cardId: 31, card: borrowedDisplay, name: "借刀杀人",
+    composite: false, cardEntry: true,
+    steps: [
+      {
+        name: "seat", zones: [], min: 1, max: 1, order: 0,
+        pool: [{ when: [], options: ["seat:1"] }],
+      },
+      {
+        name: "seat", zones: [], min: 1, max: 1, order: 1,
+        pool: [{ when: [], options: ["seat:2"] }],
+      },
+    ],
+    answers: [
+      { values: [1], texts: ["seat:1"] },
+      { values: [2], texts: ["seat:2"] },
+    ],
+    cursor: 2,
+  };
+
+  const action = ui.buildPreativationAction(pending, pa);
+  const cardKeys = action && action.card ? Object.keys(action.card).sort() : [];
+  const forbidden = ["display_name", "attribute", "description", "kind", "source_cards"];
+  check("M5-bugfix-d1 借刀预发动提交的 card 只剩 CardRef 字段（展示副本字段全部剔除）",
+    !!action && action.kind === "UseCard"
+      && JSON.stringify(action.card) === JSON.stringify(borrowedRaw)
+      && JSON.stringify(cardKeys) === JSON.stringify(Object.keys(borrowedRaw).sort())
+      && forbidden.every((key) => !(key in action.card))
+      && JSON.stringify(action.targets) === "[1]"
+      && JSON.stringify(action.designations) === "[2]"
+      && action.answers_seq === 93,
+    `card=${JSON.stringify(action && action.card)} keys=${JSON.stringify(cardKeys)}`);
+
+  const projected = ui.bareCardRef ? ui.bareCardRef(borrowedDisplay) : undefined;
+  check("M5-bugfix-d2 bareCardRef = CardRef 字段闭集的唯一投影口（九键，缺省不补）",
+    !!projected
+      && JSON.stringify(projected) === JSON.stringify(borrowedRaw)
+      && !("description" in projected)
+      && !("source_cards" in projected),
+    `projected=${JSON.stringify(projected)}`);
+}
+
 {
   const dodge = { ...synthCard(51, "闪"), type: "dodge" };
   const realSlash = { ...synthCard(52, "杀"), type: "slash" };
@@ -6023,17 +6097,20 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     })(),
     `option=${ui.state.selectedOption} action=${JSON.stringify(ui.buildAction())}`);
 
-  // 引擎在目标**没有手牌**时不发 `discard_one`（`skills/catalog.py::_double_sword`）；
-  // 界面不补——载荷里只有 `draw_one` 就只画一个按钮（判据是载荷，不是前端规则）。
+  // 引擎在目标**没有手牌**时不发 `discard_one`（`skills/catalog.py::_double_sword`）。
+  // M5-bugfix 起界面按**完整的一对**画控件：付不起的那条是**禁用**控件（不是候选），
+  // 可点的只有引擎真发了的 `draw_one`（判据是 `legal_actions`，不是前端规则）。
   const drawOnly = optionView(["draw_one"], 9431);
   ui.state.view = drawOnly;
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(drawOnly);
-  check("U2-04j 无手牌时只显示「令其摸一张牌」（不出现「弃置 1 张手牌」，界面不补规则）",
-    optionLabels().join(",") === "令其摸一张牌"
-      && !$("t-options").text().includes("弃置 1 张手牌"),
-    `选项=${JSON.stringify(optionLabels())}`);
+  const drawOnlyButtons = $("t-options").children.filter((node) => node.tagName === "BUTTON");
+  check("U2-04j 无手牌时「弃置 1 张手牌」是禁用控件、「令其摸一张牌」仍可点（引擎不发不可支付的选项）",
+    optionLabels().join(",") === "弃置 1 张手牌,令其摸一张牌"
+      && drawOnlyButtons.find((node) => node.textContent === "弃置 1 张手牌").disabled === true
+      && drawOnlyButtons.find((node) => node.textContent === "令其摸一张牌").disabled === false,
+    `选项=${JSON.stringify(optionLabels())} disabled=${JSON.stringify(drawOnlyButtons.map((node) => [node.textContent, node.disabled]))}`);
 
   // 可复用的枚举标签（花色）自票 08 起由服务端下发 `option_labels`：前端只读它摆版面，
   // 不抄第二份中文表；有标签就是选择型弹窗，没有标签才退回原值（fail-visible）。
@@ -6050,6 +6127,142 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     optionLabels().join(",") === "♥红桃,♠黑桃"
       && !/heart|spade/.test($("t-options").text()),
     `选项=${JSON.stringify(optionLabels())}`);
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ M5-bugfix（B）：雌雄双股剑 · 目标无手牌 ============
+ *
+ * 用户验收（逐字）：
+ *   - 目标**没有手牌**时引擎只发 `draw_one`（付不起的组合不进候选），但左侧控制区仍要
+ *     列出两条一次性选项：「弃置 1 张手牌」**禁用**（点了零提交），
+ *     「令座位号 N <name>摸一张牌」可点并提交那条 `SelectOption(draw_one)`；
+ *   - 来源座位 / 名称读服务端派生的 `option_source`（`{"seat", "name"}`）——前端不按
+ *     "谁的回合 / 谁用了【杀】"推（那会是第二份规则）；
+ *   - **不是**新的弹窗种类：`modal.js:stepDialogKind` 仍是只读判据的唯一来源，
+ *     这一步仍是牌桌表面（对话框不打开）；
+ *   - 目标有手牌时两条都可点（既有两选项行为不变）。
+ */
+{
+  const doubleSword = {
+    ...synthCard(129, "雌雄双股剑"),
+    type: "double_sword", display_name: "雌雄双股剑", kind: "normal",
+    attribute: "普通", source_cards: [],
+    description: "雌雄双股剑：使用【杀】指定异性目标后，令其选择弃一张手牌或你摸一张牌。",
+  };
+  const doubleSwordView = (options, seq, { optionSource = { seat: 3, name: "张飞" } } = {}) => {
+    const view = synthView({
+      kind: "SELECT_OPTION", actor: 0, seq, skill_id: "equip.double_sword",
+      prompt: "请选择一项。",
+      options,
+      legal_actions: options.map((choice) => ({
+        kind: "SelectOption", choice, answers_seq: seq,
+      })),
+      candidate_index: {}, virtual_index: {}, option_seats: {},
+      context: {
+        actor: 3, name: "雌雄双股剑", targets: [0],
+        label: "3号位张飞对0号位使用雌雄双股剑", requirement: "选择：弃一张手牌 / 令使用者摸一张",
+        skill_hints: [],
+      },
+      option_source: optionSource,
+      preactivations: {}, preactivation: [],
+    });
+    view.human_seat = 0;
+    view.snapshot.seat = 0;
+    view.snapshot.self_hand = [];
+    view.snapshot.players = [0, 1, 2, 3].map((seat) => ({
+      seat, hp: 4, hp_max: 4,
+      hand_count: seat === 0 ? 0 : 2,
+      hero_name: seat === 3 ? "张飞" : null,
+      alive: true, equip: seat === 3 ? [doubleSword] : [], judge: [], identity: null,
+      chained: false,
+    }));
+    return view;
+  };
+  const optionButtons = () => $("t-options").children.filter(
+    (node) => node.tagName === "BUTTON",
+  );
+  const optionButton = (text) => optionButtons().find((node) => node.textContent === text) || null;
+  const settle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261019,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  ui.state.modal.heroSeat = null;
+
+  const renderOptionView = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+
+  // ---- ① 目标无手牌：两条选项（弃牌禁用 + 令座位 3 张飞摸一张） ----
+  const empty = doubleSwordView(["draw_one"], 9450);
+  renderOptionView(empty);
+  const discard = optionButton("弃置 1 张手牌");
+  const draw = optionButton("令座位号 3 张飞摸一张牌");
+  check("M5-bugfix-b1 无手牌目标：左侧两条选项（「弃置 1 张手牌」禁用、「令座位号 3 张飞摸一张牌」可点）",
+    !!discard && !!draw
+      && discard.disabled === true
+      && !draw.disabled
+      && ui.stepDialogKind(empty.pending) === null
+      && $("t-dialog").hidden === true
+      && $("t-options").text().includes("弃置 1 张手牌"),
+    `选项=${JSON.stringify(optionButtons().map((node) => node.textContent))} discardDisabled=${discard && discard.disabled} drawDisabled=${draw && draw.disabled} dialog=${ui.stepDialogKind(empty.pending)} hidden=${$("t-dialog").hidden}`);
+
+  // ---- ② 点禁用项 = 零提交、不改变选择 ----
+  const beforeDisabled = calls.length;
+  const beforeSelected = ui.state.selectedOption;
+  (discard.listeners.click || []).forEach((fn) => fn({ target: discard }));
+  check("M5-bugfix-b2 点禁用「弃置 1 张手牌」= 零提交且不改变选择",
+    calls.length === beforeDisabled
+      && ui.state.selectedOption === beforeSelected
+      && (ui.buildAction() || {}).choice !== "discard_one",
+    `calls=${calls.length - beforeDisabled} option=${ui.state.selectedOption} built=${JSON.stringify(ui.buildAction())}`);
+
+  // ---- ③ 点「令座位号 3 张飞摸一张牌」= 选中那条 SelectOption(draw_one)；提交恰一条 ----
+  (draw.listeners.click || []).forEach((fn) => fn({ target: draw }));
+  const builtDraw = ui.buildAction();
+  check("M5-bugfix-b3 点「令座位号 3 张飞摸一张牌」= 选中 legal_actions 里的 SelectOption(draw_one)",
+    !!builtDraw && builtDraw.kind === "SelectOption" && builtDraw.choice === "draw_one"
+      && empty.pending.legal_actions.includes(builtDraw)
+      && $("btn-submit").disabled === false,
+    `built=${JSON.stringify(builtDraw)} submit=${$("btn-submit").disabled}`);
+  const beforeDraw = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  await settle();
+  staleAnswerStatus = null;
+  const drawAnswers = calls.slice(beforeDraw).filter((call) => call.path.includes("/answer"));
+  check("M5-bugfix-b4 提交恰一条 SelectOption(draw_one)，原样取自 legal_actions",
+    drawAnswers.length === 1
+      && JSON.stringify(drawAnswers[0].body.action)
+        === JSON.stringify({ kind: "SelectOption", choice: "draw_one", answers_seq: 9450 }),
+    `answers=${drawAnswers.length} action=${JSON.stringify(drawAnswers[0] && drawAnswers[0].body.action)}`);
+
+  // ---- ④ 正常情况下两条都可点（既有行为不变） ----
+  const both = doubleSwordView(["discard_one", "draw_one"], 9451);
+  renderOptionView(both);
+  const discardBoth = optionButton("弃置 1 张手牌");
+  const drawBoth = optionButton("令座位号 3 张飞摸一张牌");
+  (drawBoth.listeners.click || []).forEach((fn) => fn({ target: drawBoth }));
+  const builtDrawBoth = ui.buildAction();
+  (discardBoth.listeners.click || []).forEach((fn) => fn({ target: discardBoth }));
+  const builtDiscardBoth = ui.buildAction();
+  check("M5-bugfix-b5 目标有手牌时两条都可点（皆可提交对应 SelectOption）",
+    !!discardBoth && !!drawBoth
+      && !discardBoth.disabled && !drawBoth.disabled
+      && !!builtDiscardBoth && builtDiscardBoth.choice === "discard_one"
+      && builtDrawBoth.choice === "draw_one",
+    `discard=${JSON.stringify(builtDiscardBoth)} draw=${JSON.stringify(builtDrawBoth)}`);
+
+  ui.state.sessionId = null;
   ui.state.view = null;
   ui.resetSelection();
 }
@@ -11272,6 +11485,132 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && ui.state.focusCardId === null
       && reforgeNode() === null,
     `kind=${ui.stepDialogKind(dialogPending)} enabled=${ui.selectionEnabled()} dialogHidden=${$("t-dialog").hidden} focus=${ui.state.focusCardId} reforge=${reforgeNode() && reforgeNode().textContent}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ M5-bugfix（C）：铁索按**点击顺序**提交 ============
+ *
+ * 引擎侧（`effects/actions.py:target_combos(..., ordered=True)`）对声明了
+ * `preserve_target_order` 的牌同时给出两种顺序的候选；界面这一侧还必须**保留点击顺序**：
+ * `buildAction` 先按点击顺序找候选，找不到才退回排序后的匹配（普通牌不受影响）。
+ *
+ * 判据（用户逐字要求）：
+ *   - 先点座位 4、再点座位 3 ⇒ 提交的是 `UseCard.targets = [4, 3]`（不是升序的 [3, 4]）；
+ *   - 提交的仍是 `legal_actions` 里**原样**的那一条（不手拼 Action）；
+ *   - 候选里 (3, 4) 与 (4, 3) 都存在（引擎 preserve_target_order 的下发形状）。
+ */
+{
+  const iron = {
+    ...synthCard(130, "铁索连环"),
+    type: "iron_chain", display_name: "铁索连环", kind: "normal", attribute: "普通",
+    source_cards: [], description: "铁索连环的描述：横置或重置至多两名角色。",
+  };
+  const ironRaw = {
+    card_id: iron.card_id, type: iron.type, name: iron.name, suit: iron.suit,
+    rank: iron.rank, slot: iron.slot, attack_range: iron.attack_range,
+    color: iron.color, virtual_sources: [],
+  };
+  // 5 座：全部 1 元组 + 全部 2 元组的**两种点击顺序**（服务端 preserve_target_order 的形状）。
+  const combos = [];
+  for (let a = 0; a <= 4; a += 1) {
+    combos.push([a]);
+    for (let b = a + 1; b <= 4; b += 1) combos.push([a, b], [b, a]);
+  }
+  const play = {
+    kind: "PLAY_PHASE", actor: 0, seq: 3201,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      ...combos.map((targets) => ({
+        kind: "UseCard", answers_seq: 3201, card: ironRaw, targets,
+      })),
+      { kind: "EndPhase", answers_seq: 3201 },
+    ],
+    candidate_index: {
+      130: {
+        card: iron, pool: [0, 1, 2, 3, 4], combos, min_targets: 1, max_targets: 2,
+      },
+    },
+    virtual_index: {}, option_seats: {},
+    context: {
+      actor: 0, name: null, targets: [], label: null,
+      requirement: "使用一张牌（或发动技能），或结束出牌阶段", skill_hints: [],
+    },
+    prompt_display: {
+      text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      default_action: { kind: "EndPhase", answers_seq: 3201 },
+      default_label: "超时将自动结束出牌阶段",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const view = synthView(play);
+  view.human_seat = 0;
+  view.snapshot.seat = 0;
+  view.snapshot.phase = "play";
+  view.snapshot.turn_seat = 0;
+  view.snapshot.self_hand = [iron];
+  view.snapshot.players = [0, 1, 2, 3, 4].map((seat) => ({
+    seat, hp: 4, hp_max: 4, hand_count: seat === 0 ? 1 : 2,
+    alive: true, equip: [], judge: [], identity: null, chained: false,
+  }));
+  const session = await post("/api/sessions", {
+    player_count: 5, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261018,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  ui.state.modal.heroSeat = null;
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const handNode = $("t-hand").children.find(
+    (node) => node.getAttribute("data-card-id") === "130",
+  );
+  for (const fn of handNode.listeners.click || []) fn({ target: handNode });
+  const clickSeat = (seat) => {
+    const node = seatBox(seat);
+    (node.listeners.click || []).forEach((fn) => fn({ target: node, stopPropagation() {} }));
+  };
+  const settle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const useOn = (targets) => play.legal_actions.find(
+    (action) => action.kind === "UseCard"
+      && action.card.card_id === 130
+      && action.targets.join(",") === targets.join(","),
+  );
+
+  check("M5-bugfix-c1 载荷里 (3,4) 与 (4,3) 都是合法候选（引擎 preserve_target_order 的形状）",
+    !!useOn([3, 4]) && !!useOn([4, 3]),
+    `4,3=${JSON.stringify(useOn([4, 3]))} 3,4=${JSON.stringify(useOn([3, 4]))}`);
+
+  clickSeat(4);
+  clickSeat(3);
+  const clicked = ui.state.selectedTargets.join(",");
+  const built = ui.buildAction();
+  check("M5-bugfix-c2 先点 4 再点 3 ⇒ 提交的 UseCard.targets 是点击顺序 [4,3]（不是升序）",
+    clicked === "4,3"
+      && !!built && built.kind === "UseCard"
+      && JSON.stringify(built.targets) === "[4,3]"
+      && JSON.stringify(built) === JSON.stringify(useOn([4, 3])),
+    `clicked=${clicked} built=${JSON.stringify(built)}`);
+
+  const before = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  await settle();
+  staleAnswerStatus = null;
+  const answers = calls.slice(before).filter((call) => call.path.includes("/answer"));
+  check("M5-bugfix-c3 提交恰一条 UseCard，targets 原样是点击顺序 [4,3] 且取自 legal_actions",
+    answers.length === 1
+      && JSON.stringify(answers[0].body.action) === JSON.stringify(useOn([4, 3]))
+      && play.legal_actions.includes(useOn([4, 3])),
+    `answers=${answers.length} action=${JSON.stringify(answers[0] && answers[0].body.action)}`);
 
   ui.state.sessionId = null;
   ui.state.view = null;

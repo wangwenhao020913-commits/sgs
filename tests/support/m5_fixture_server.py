@@ -12,6 +12,11 @@
 
 三条 tape **都不依赖随机种子**：手牌 / 体力 / 牌堆都是写死的 ``card_id``，种子只喂给
 AI 子流。每次询问都走 ``POST /api/sessions/<id>/answer``，与产品服务同一条路径。
+
+M5-bugfix 另加两条**只给 ``tests/test_web.py`` 用例用**的固定局面（不进 A2 的 tape 清单
+``web_client._M5_FIXTURES``）：``iron_chain``（铁索按点击顺序 ``[3, 2]`` 经 HTTP 提交、
+记录流里的 ``chained_change`` 顺序 = 3 → 2）与 ``borrowed_sword``（借刀预发动的
+``UseCard`` 必须用纯 ``CardRef``；展示副本会被服务端严格模型 400 拒绝）。
 """
 
 from __future__ import annotations
@@ -156,10 +161,69 @@ def _wine_fixture(pack: ContentPack) -> Fixture:
     )
 
 
+def _iron_chain_fixture(pack: ContentPack) -> Fixture:
+    """人类手里一张【铁索连环】的 4 人局（首回合出牌阶段）。
+
+    M5-bugfix（C）的真 HTTP 判据用：两个目标按**点击顺序**结算，故经 HTTP 提交
+    ``targets=[3, 2]``（逆序）时，记录流里的 ``chained_change`` 也必须是 3 → 2。
+    """
+    iron = cards_of_type(pack, "iron_chain")[0]
+    used = {iron}
+    # 4 人局是**身份局**：先得有一个主公座位（`Engine._first_seat` 的真源）。
+    from sgs.data import Identity
+
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hand=(iron,), identity=Identity.LORD),
+            SeatSpec(hp=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, identity=Identity.REBEL),
+        ],
+        deck=_deck(pack, used),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    return Fixture(
+        "iron_chain",
+        state,
+        note="铁索连环：按点击顺序 [3, 2] 提交（无懈窗口由人类放弃）→ chained_change 顺序 = 3, 2",
+    )
+
+
+def _borrowed_sword_fixture(pack: ContentPack) -> Fixture:
+    """人类手里一张【借刀杀人】的 2 人局：座位 1 装备武器（有合法【杀】目标）。
+
+    M5-bugfix（D）的真 HTTP 判据用：预发动确认 = ``UseCard(借刀, targets=(1,),
+    designations=(0,))``；提交的 ``card`` 必须是**纯 CardRef**（展示副本会让服务端的
+    严格模型报 ``UseCard.card.attribute Extra inputs are not permitted``）。
+    """
+    borrowed = cards_of_type(pack, "borrowed_sword")[0]
+    weapon = cards_of_type(pack, "crossbow")[0]
+    used = {borrowed, weapon}
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hand=(borrowed,)),
+            SeatSpec(hp=1, hp_max=4, equip=(weapon,)),
+        ],
+        deck=_deck(pack, used),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    return Fixture(
+        "borrowed_sword",
+        state,
+        note="借刀预发动：两步座位答案 → UseCard(借刀, targets=(1,), designations=(0,))，card 为纯 CardRef",
+    )
+
+
 FIXTURES: dict[str, Callable[[ContentPack], Fixture]] = {
     "fire_attack": _fire_attack_fixture,
     "reforge": _reforge_fixture,
     "wine": _wine_fixture,
+    "iron_chain": _iron_chain_fixture,
+    "borrowed_sword": _borrowed_sword_fixture,
 }
 FIXTURE_NAMES = tuple(FIXTURES)
 

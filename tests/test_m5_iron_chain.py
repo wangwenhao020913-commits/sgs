@@ -143,25 +143,65 @@ def _four_seats(*, hand=(IRON_CHAIN[0],), chained=(), dead=()):
 
 
 def test_iron_chain_offers_every_one_or_two_target_combo_including_self():
-    """4 人全存活：目标组合 = 全部 1 元组 + 全部 2 元组（含自己、无距离）。"""
+    """4 人全存活：候选 = 全部 1 元组 + 全部 2 元组的**两种点击顺序**（含自己、无距离）。
+
+    M5-bugfix：铁索的行为表声明了 ``preserve_target_order``（按使用者选择的顺序结算），
+    故合法动作必须保留**顺序**——``(3, 4)`` 与 ``(4, 3)`` 是两条不同的候选（引擎按
+    提交的顺序结算）。其余牌（多目标【杀】）仍只有升序，见下一条用例。
+    """
     state = _four_seats()
 
+    singles = [(0,), (1,), (2,), (3,)]
+    pairs = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
     expected = sorted(
-        [
-            (0,),
-            (1,),
-            (2,),
-            (3,),
-            (0, 1),
-            (0, 2),
-            (0, 3),
-            (1, 2),
-            (1, 3),
-            (2, 3),
-        ]
+        singles
+        + [combo for pair in pairs for combo in (pair, pair[::-1])]
     )
     assert _chain_combos(state) == expected, (
-        "铁索是 1–2 目标的普通锦囊：可指定自己、不受距离限制（4 人全在池里）"
+        "铁索是 1–2 目标的普通锦囊：可指定自己、不受距离限制（4 人全在池里），"
+        "且 preserve_target_order ⇒ 两个目标的两种点击顺序都是候选"
+    )
+
+
+def _five_seats(*, hand, equip=()) -> GameState:
+    """5 座：0 号手里是 ``hand``、装备 ``equip``（座位 3 / 4 都在池里）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=tuple(hand), equip=tuple(equip))]
+        + [SeatSpec() for _ in range(4)],
+        deck=_deck_excluding(*hand, *equip),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=5),
+    )
+    return state
+
+
+def _play_combos(state: GameState, card_type: str) -> set[tuple[int, ...]]:
+    return {
+        action.targets
+        for action in legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+        if isinstance(action, UseCard) and action.card.type == card_type
+    }
+
+
+def test_a_preserve_order_card_keeps_both_orders_but_a_multi_target_slash_does_not():
+    """M5-bugfix：``preserve_target_order`` 只对声明了它的牌生效（铁索），不波及【杀】。
+
+    方天画戟把最后一张手牌【杀】的目标数放宽到 1..3，于是 ``(3, 4)`` 这条组合存在；
+    但【杀】没有 ``preserve_target_order`` ⇒ 引擎仍按逆时针排目标，候选里**只有**
+    升序的 ``(3, 4)``，没有 ``(4, 3)``。这是"引擎排法保持不变"的钉子。
+    """
+    halberd = cards_of_type(PACK, "halberd")[0]
+    slash_combos = _play_combos(
+        _five_seats(hand=(cards_of_type(PACK, "slash")[0],), equip=(halberd,)), "slash"
+    )
+
+    assert (3, 4) in slash_combos, "方天放宽目标数后，(3, 4) 是一条合法的多目标【杀】"
+    assert (4, 3) not in slash_combos, "【杀】没有 preserve_target_order ⇒ 不出现逆序组合"
+
+    iron_combos = _play_combos(_five_seats(hand=(IRON_CHAIN[0],)), "iron_chain")
+    assert (3, 4) in iron_combos and (4, 3) in iron_combos, (
+        "铁索声明了 preserve_target_order ⇒ 两种点击顺序都在出牌阶段候选里"
     )
 
 

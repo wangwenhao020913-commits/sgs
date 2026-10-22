@@ -361,6 +361,7 @@ def target_combos(
     high: int,
     *,
     required: tuple[int, ...] = (),
+    ordered: bool = False,
 ) -> tuple[tuple[int, ...], ...]:
     """**目标组合**的唯一构建子（W7-01）：大小 ``low..high``、每组恒含 ``required``。
 
@@ -378,16 +379,30 @@ def target_combos(
     ``pool`` 里的座位 ⇒ **没有任何组合**（fail-closed：那条组合不合法，不能造出来）。
     ``high`` 超过池大小时多余的部分自然为空（``itertools.combinations`` 的语义），
     调用方不必先夹一遍。
+
+    ``ordered=True``（M5-bugfix）只给声明了
+    :attr:`~sgs.effects.CardBehavior.preserve_target_order` 的牌用（当前 =【铁索连环】）：
+    每个组合再摊成**全部排列**——"按使用者选择的顺序结算"的牌，(3, 4) 与 (4, 3) 是
+    两条不同的合法动作。``required`` 前缀（借刀的 Bn）**不参与**排列，仍恒在首位；
+    目标数至多 2（铁索），故排列代价可忽略。缺省 ``False`` = 既有行为逐条不变
+    （多目标【杀】仍只有升序）。
     """
     required = tuple(dict.fromkeys(required))  # 去重、保序（Bn 恒在首位）
     if any(seat not in pool for seat in required):
         return ()
     optional = tuple(seat for seat in pool if seat not in required)
     start = max(low, len(required))  # 不能比 required 的张数还小（combinations 不接受负 r）
-    return tuple(
+    combos = tuple(
         (*required, *combo)
         for total in range(start, high + 1)
         for combo in combinations(optional, total - len(required))
+    )
+    if not ordered:
+        return combos
+    return tuple(
+        (*required, *tail)
+        for combo in combos
+        for tail in permutations(combo[len(required) :])
     )
 
 
@@ -608,6 +623,11 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
     候选期的追加**）；回调只追加、不排序，全表仍由 :func:`legal_actions_for` 按票 05 的
     稳定键统一排序，故"候选与校验同源"不被打破。
 
+    **点击顺序**（M5-bugfix）：声明了
+    :attr:`~sgs.effects.CardBehavior.preserve_target_order` 的牌（【铁索连环】）把每组
+    目标再摊成全部排列（``target_combos(..., ordered=True)``），两种点击顺序都是合法动作；
+    其余牌保持引擎排好的逆时针升序。
+
     **附带指定的牌**（借刀杀人，W5-02b）不在这里出裸候选：它的合法动作是"牌 + 持刀者 A
     + Bn"三元组，只有 :func:`designation_actions_for` 那份内部池能表达。可用性因此只剩
     询问上的 ``card_preactivations`` 清单——**清单渲不出来 = 此刻不可用**（不 fail-open，
@@ -619,7 +639,8 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
             continue
         if check_count(state, seat, card):
             continue
-        rule = behavior_for(card).target_rule
+        behavior = behavior_for(card)
+        rule = behavior.target_rule
         pool = check_targets(state, seat, card)
         low, high = rule.target_range(len(pool))
         if high <= 0:
@@ -635,7 +656,14 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
             )
         generated: tuple[Action, ...] = tuple(
             UseCard(card=card, targets=combo, answers_seq=answers_seq)
-            for combo in target_combos(pool, low, high)
+            for combo in target_combos(
+                pool,
+                low,
+                high,
+                # M5-bugfix：声明了 ``preserve_target_order`` 的牌（【铁索连环】）按
+                # **点击顺序**结算，故两种顺序都是合法动作；其余牌仍只给引擎排好的升序。
+                ordered=behavior.preserve_target_order,
+            )
         )
         ctx = ModifierContext(subject=seat, card=card)
         actions.extend(

@@ -53,6 +53,7 @@ __all__ = [
     "candidate_index",
     "harvest_state",
     "option_seats",
+    "option_source",
     "pending_payload",
     "query_context",
     "seat_skill_display",
@@ -377,14 +378,20 @@ def _query_summary(query: Query) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _seat_label(state: Any, seat: int) -> str:
-    """座位的中文人话："0号位郭嘉"（没发武将时退化成"0号位"）。"""
+def _seat_name(state: Any, seat: int) -> str | None:
+    """座位上的武将中文名（没发武将 / 未知武将 ⇒ ``None``，不编名字）。"""
     hero_id = state.player(seat).hero
     if hero_id:
         hero = load_heroes(state.pack_id).by_id(hero_id)
         if hero is not None and hero.name:
-            return f"{seat}号位{hero.name}"
-    return f"{seat}号位"
+            return hero.name
+    return None
+
+
+def _seat_label(state: Any, seat: int) -> str:
+    """座位的中文人话："0号位郭嘉"（没发武将时退化成"0号位"）。"""
+    name = _seat_name(state, seat)
+    return f"{seat}号位{name}" if name else f"{seat}号位"
 
 
 def _card_type_name(state: Any, type_id: str) -> str | None:
@@ -491,6 +498,34 @@ def option_seats(query: Query) -> dict[str, int]:
             except ValueError:
                 continue
     return out
+
+
+def option_source(engine: Any, query: Query | None) -> dict[str, Any] | None:
+    """``SELECT_OPTION`` 的"这项令谁做"的**展示事实**（M5-bugfix：雌雄双股剑）。
+
+    一次性选项步（当前唯一生产者 = ``equip.double_sword``）的应答者是**目标**，而
+    「令……摸一张牌」里的"……"是**这次使用的来源**（雌雄的持有者）。前端不能按"谁的回合 /
+    谁用了【杀】"去推（那是第二份规则），故由投影从结算栈顶帧的 ``source`` 派生：
+    ``{"seat": N, "name": <武将名或 None>}``。
+
+    只给**装备技能的** ``SELECT_OPTION``（``skill_id`` 以 ``equip.`` 开头）——其余
+    ``SELECT_OPTION``（花色 / 遗计的交给谁）的"来源"没有这项展示语义。取不到引擎
+    （409 里的裸 ``Query``）或栈顶帧没有 ``source`` ⇒ ``None``（界面退回不带来源的旧文案）。
+
+    纯派生、只读公开事实：不进记录流，不参与合法性判定。
+    """
+    if query is None or str(getattr(query, "kind", "")) != "SELECT_OPTION":
+        return None
+    skill_id = getattr(query, "skill_id", None)
+    if not isinstance(skill_id, str) or not skill_id.startswith("equip."):
+        return None
+    frames = getattr(getattr(engine, "stack", None), "frames", ()) or ()
+    data: dict[str, Any] = frames[-1].data if frames else {}
+    source = data.get("source")
+    if source is None:
+        return None
+    seat = int(source)
+    return {"seat": seat, "name": _seat_name(engine.state, seat)}
 
 
 def _event_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
@@ -1473,6 +1508,12 @@ def pending_payload(
         else None
     )
     payload["option_seats"] = option_seats(query)
+    # M5-bugfix（雌雄双股剑）：一次性选项步的**来源**展示事实（`{"seat", "name"}`）。键恒在
+    # （读取方契约）；只对装备技能的一次性选项有值，其余为 None（界面不画来源文案）。
+    # 与 `context` 同姿态：派生数据不进记录流 / 金录像。
+    payload["option_source"] = (
+        option_source(session.engine, query) if isinstance(session, Session) else None
+    )
     # M5-08a（D10 / §5.1.4）：【火攻】的两步选牌。读取方 = 亮牌模板 / 牌桌点手牌：
     #   - 亮牌步：``dialog = "reveal"`` + ``revealed``（**只发给目标本人**；他点一张即亮出）；
     #   - 弃牌步：``reveal`` = 已经公开的那一张（使用者据此在中央舞台看到亮牌）。

@@ -2809,6 +2809,106 @@ def test_query_context_reads_the_double_sword_step_wording() -> None:
     assert query_context(engine, cards_query)["requirement"] == "由目标选择弃置一张手牌"
 
 
+def test_the_double_sword_option_payload_names_the_source_seat() -> None:
+    """【雌雄双股剑】的选项步：载荷要下发"令谁摸牌"的展示事实（来源座位 + 武将名）。
+
+    M5-bugfix（用户验收）：目标**没有手牌**时引擎只发一条 ``draw_one``（付不起的组合
+    不进候选），界面却要把左侧的两条一次性选项都画出来——「弃置 1 张手牌」是**禁用**
+    控件，「令座位号 N <name>摸一张牌」可点并提交那条 ``SelectOption(draw_one)``。
+
+    "N 是谁"不能由前端按"谁的回合 / 谁用了【杀】"推（那是第二份规则）：它是投影从结算栈
+    顶帧（这次使用的 ``source``）派生的展示事实，故由 ``option_source`` 随载荷下发。
+    它**不进记录流**、不参与合法性；目标有手牌时两条选项都在，来源仍是同一个座位。
+    """
+    empty = _double_sword_option_session()
+    pending = empty.pending
+    assert pending is not None and pending.kind == QueryKind.SELECT_OPTION
+    assert pending.actor == 1, "选择权在目标"
+    assert pending.options == ("draw_one",), "无手牌 ⇒ 引擎不发 discard_one"
+
+    payload = pending_payload(empty)
+
+    assert [action["choice"] for action in payload["legal_actions"]] == ["draw_one"]
+    assert payload["option_source"] == {"seat": 0, "name": "张飞"}, (
+        "选项步的来源座位 / 名称 = 雌雄双股剑的持有者（展示事实，不是前端规则）"
+    )
+    assert payload["option_seats"] == {}, "一次性二选一不是选座位形态"
+
+    with_hand = _double_sword_option_session(
+        target_hand=(cards_of_type(_iron_pack(), "peach")[0],)
+    )
+    both = pending_payload(with_hand)
+    assert [action["choice"] for action in both["legal_actions"]] == [
+        "discard_one",
+        "draw_one",
+    ]
+    assert both["option_source"] == {"seat": 0, "name": "张飞"}, (
+        "有手牌时两条都可提交，来源不变"
+    )
+
+
+class _DoubleSwordDriver:
+    """把座位 0 推到"用【杀】指定异性目标 + 发动雌雄双股剑"，不测规则本身。"""
+
+    def __init__(self, slash: int) -> None:
+        self.slash = slash
+
+    def respond(self, query):  # noqa: ANN001 - Participant 协议
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == self.slash:
+                    return action
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill):
+                    return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _double_sword_option_session(*, target_hand: tuple[int, ...] = ()):
+    """2 座构造局面：座位 0（张飞）用【杀】指定座位 1（异性目标、人类）⇒ 挂起 SELECT_OPTION。
+
+    与 :func:`_iron_session` 同一姿态：引擎行为真跑，只有人类座位（= 目标）的询问被挂起。
+    """
+    from sgs.data import Gender, RuleConfig as _RuleConfig
+
+    pack = _iron_pack()
+    slash = cards_of_type(pack, "slash")[0]
+    sword = cards_of_type(pack, "double_sword")[0]
+    used = {slash, sword, *target_hand}
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(slash,), equip=(sword,), gender=Gender.MALE, hero="zhangfei"),
+            SeatSpec(hand=tuple(target_hand), gender=Gender.FEMALE),
+        ],
+        deck=tuple(i for i in range(len(pack.deck.cards)) if i not in used),
+        turn_seat=0,
+        rule_config=_RuleConfig(player_count=2, first_seat=0),
+    )
+    from sgs_web.session import Session as _Session
+
+    session = _Session(
+        seed=1,
+        player_count=2,
+        ai="random",
+        human_seat=1,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=pack,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = (_DoubleSwordDriver(slash), _HaltSeat())
+    session.drive()
+    return session
+
+
 def test_query_context_walks_the_yiji_steps_with_their_own_wording() -> None:
     """【遗计】分配两步各有各的问法（票 11 / 票 15）：先"从亮出的牌里选择一至两张"，再"给谁"。
 
@@ -6907,3 +7007,167 @@ def test_m5_real_chained_and_wine_states_reach_the_seat_display_contract() -> No
     view = project(wine.engine.state, 0)
     assert view.players[0].wine_active is False
     assert seat_display(view.players[0])["wine_active"] is False
+
+
+# ---------------------------------------------------------------------------
+# M5-bugfix（C / D）：真 HTTP 的点击顺序与预发动纯 CardRef
+#
+# 两条固定构造局面（`tests/support/m5_fixture_server.py`）经**真的** `serve._Handler`
+# 建局 + 应答：不起端口、不起线程，但 HTTP 报文、路由、解析、状态码与 JSON 都是产品代码
+# （与 :func:`_post_with_the_real_handler` 同一条缝）。
+# ---------------------------------------------------------------------------
+
+_FIXTURE_CARD_REF_KEYS = (
+    "card_id",
+    "type",
+    "name",
+    "suit",
+    "rank",
+    "slot",
+    "attack_range",
+    "color",
+    "virtual_sources",
+)
+
+
+def _fixture_session_over_http(name: str):
+    """经真 handler 建一局构造局面；返回 ``(registry, session_id, 建局响应体)``。"""
+    from support.m5_fixture_server import FixtureRegistry
+
+    registry = FixtureRegistry(runs_dir="/tmp/unused")
+    status, body = _post_with_the_real_handler(registry, "/api/sessions", {"fixture": name})
+    assert status == 200, body
+    return registry, body["session_id"], body
+
+
+def _fixture_answer(registry, session_id: str, after: int, action: dict):
+    return _post_with_the_real_handler(
+        registry,
+        f"/api/sessions/{session_id}/answer?after={after}&logs=0",
+        {"action": action},
+    )
+
+
+def test_a_real_http_iron_chain_answer_keeps_the_click_order() -> None:
+    """M5-bugfix（C）：经真 HTTP 提交 ``targets=[3, 2]`` ⇒ 记录里的结算顺序也是 3 → 2。
+
+    界面侧按点击顺序取候选（`answer.js`），服务端这一侧必须**照单接受**并原样结算：
+    记录流里这次 ``UseCard`` 的 ``targets`` 是 ``(3, 2)``，随后两条 ``chained_change``
+    的座位顺序 = 3、2（不是引擎默认的逆时针升序）。无懈窗口由人类放弃（同一局真窗口）。
+    """
+    registry, session_id, body = _fixture_session_over_http("iron_chain")
+    pending = body["pending"]
+    assert pending["kind"] == "PLAY_PHASE"
+    seq = pending["seq"]
+    iron_actions = [
+        action
+        for action in pending["legal_actions"]
+        if action["kind"] == "UseCard" and action["card"]["type"] == "iron_chain"
+    ]
+    orders = {tuple(action["targets"]) for action in iron_actions}
+    assert (3, 2) in orders and (2, 3) in orders, (
+        "铁索声明了 preserve_target_order ⇒ 两种点击顺序都必须是合法候选"
+    )
+    clicked = next(action for action in iron_actions if tuple(action["targets"]) == (3, 2))
+
+    status, answer = _fixture_answer(registry, session_id, body["cursor"], clicked)
+    assert status == 200, answer
+    records = list(answer["records"])
+    cursor, pending = answer["cursor"], answer["pending"]
+    # 无懈窗口是真询问：人类逐个「放弃」，直到铁索的两个目标都结算完。
+    for _ in range(6):
+        if pending is None:
+            break
+        passes = [
+            action for action in pending["legal_actions"] if action["kind"] == "Pass"
+        ]
+        if not passes:
+            break
+        status, answer = _fixture_answer(registry, session_id, cursor, passes[0])
+        assert status == 200, answer
+        records.extend(answer["records"])
+        cursor, pending = answer["cursor"], answer["pending"]
+
+    changed = [
+        record for record in records if record.get("delta_type") == "chained_change"
+    ]
+    assert [record["seat"] for record in changed] == [3, 2], (
+        "铁索按使用者的点击顺序结算：先 3 后 2（记录流里的 chained_change 顺序）"
+    )
+
+    session = registry.get(session_id)
+    accepted = [
+        record
+        for record in session.engine.records
+        if record.kind == "action"
+        and record.accepted
+        and record.action.answers_seq == seq
+    ]
+    assert accepted, "这次使用必须作为 accepted=true 的 action 记录写进记录流"
+    assert accepted[0].action.kind == "UseCard"
+    assert accepted[0].action.targets == (3, 2), "记录里的目标顺序 = 提交的点击顺序"
+
+
+def test_a_real_http_borrowed_sword_preactivation_needs_a_bare_card_ref() -> None:
+    """M5-bugfix（D）：借刀预发动的应答必须用**纯 CardRef**（展示副本被服务端 400 拒绝）。
+
+    报障原文 = ``UseCard.card.attribute Extra inputs are not permitted``：界面曾把展示卡
+    原样塞进 ``UseCard.card``。修复在界面（``core.js:bareCardRef``），**不放宽**服务端
+    ``CardRef``；这条真 HTTP 用例钉住两端：装饰过的应答 400、纯 CardRef 200，且这次使用
+    出现在记录流里（accepted=true），卡面与提交的纯 CardRef 逐字段相同。
+    """
+    registry, session_id, body = _fixture_session_over_http("borrowed_sword")
+    pending = body["pending"]
+    assert pending["kind"] == "PLAY_PHASE"
+    assert "borrowed_sword" in pending["card_preactivations"], (
+        "借刀的可用性只在预发动清单上（裸候选已被收回）"
+    )
+    card = next(
+        face
+        for face in body["snapshot"]["self_hand"]
+        if face["type"] == "borrowed_sword"
+    )
+    assert "display_name" in card and "attribute" in card, "快照里的手牌是带展示字段的副本"
+    seq = pending["seq"]
+
+    decorated = {
+        "kind": "UseCard",
+        "card": card,
+        "targets": [1],
+        "designations": [0],
+        "answers_seq": seq,
+    }
+    status, rejected = _fixture_answer(registry, session_id, body["cursor"], decorated)
+    assert status == 400, rejected
+    assert "Extra inputs are not permitted" in rejected["error"], (
+        "服务端的 CardRef 是严格模型：这正是界面必须投影成纯 CardRef 的原因"
+    )
+
+    bare = {key: card[key] for key in _FIXTURE_CARD_REF_KEYS if key in card}
+    status, answer = _fixture_answer(
+        registry,
+        session_id,
+        body["cursor"],
+        {"kind": "UseCard", "card": bare, "targets": [1], "designations": [0], "answers_seq": seq},
+    )
+    assert status == 200, answer
+    accepted = [
+        record
+        for record in answer["records"]
+        if record["kind"] == "action"
+        and record.get("accepted")
+        and (record.get("action") or {}).get("answers_seq") == seq
+    ]
+    assert accepted, "这次使用必须出现在下发的记录流里（accepted=true）"
+
+    session = registry.get(session_id)
+    action_records = [
+        record
+        for record in session.engine.records
+        if record.kind == "action" and record.accepted and record.action.answers_seq == seq
+    ]
+    assert action_records, "这次使用必须写进记录流"
+    use = action_records[0].action
+    assert use.kind == "UseCard"
+    assert use.card.model_dump(mode="json") == bare, "记录里的牌面就是提交的纯 CardRef"
+    assert use.targets == (1,) and use.designations == (0,), "持刀者 A / 附带指定 Bn 原样落账"

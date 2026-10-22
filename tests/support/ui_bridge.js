@@ -79,6 +79,8 @@
     "applyRevealDelta", "stageRevealCards", "renderRevealedCards", "describeReveals",
     // M5-08b：铁索 1–2 目标（沿用点座位多选）+ 重铸入口（独立 Reforge，一击即提交）
     "reforgeAction", "renderReforgeEntry", "submitReforge", "describeRecord",
+    // M5-bugfix（借刀预发动）：展示卡 → 纯 CardRef 的唯一投影口
+    "bareCardRef",
   ];
   const out = {};
   for (const name of names) {

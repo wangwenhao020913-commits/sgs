@@ -307,7 +307,11 @@ def test_the_ai_uses_iron_chain_and_fire_attack_only_when_they_pay_and_reforges_
     )
     _advance(paying, [_Minimal(), _Minimal()], _at_play_phase(0))
 
-    action = _ai().respond(paying.pending)
+    # M5-bugfix：铁索声明了 preserve_target_order ⇒ 出牌阶段把 (0,1) 与 (1,0) 都发成候选。
+    # 未明身份座位的重置在打分里是 0，于是 (0,) / (0,1) / (1,0) 同分、由种子打破——
+    # 换一个在**三强并列**下仍落在 (0,) 的种子（平分由它打破，AI_SEED 不变：
+    # 其余三条局面仍按各自的平分结果断言）。
+    action = _ai(seed=3).respond(paying.pending)
 
     assert isinstance(action, UseCard), "有收益时铁索应当真的使用"
     assert action.card.card_id == chain
