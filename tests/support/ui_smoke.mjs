@@ -10940,4 +10940,343 @@ const bottomSkillIds = () => $("t-skills").children.filter(
 }
 
 
+/* ============ M5-08b（D6 / D7 / §5.1.2–5.1.3）：铁索 1–2 目标 + 重铸入口 ============
+ *
+ * 载荷与真会话同形（字段由 `tests/test_web.py` 的真会话断言钉）：
+ *   - 铁索 = 手选路 + 候选索引 `min_targets: 1` / `max_targets: 2`：点座位切换选中，
+ *     同一个座位再点一次 = 取消；0 目标时提交键不可用；可点自己；不会提交重复目标；
+ *   - 重铸 = `legal_actions` 里独立的 `Reforge`（不是 `UseCard` 变体、没有 targets）：
+ *     选中该牌时控件区出现「重铸」，点一下 = 恰一条 Reforge 提交；
+ *   - 非出牌阶段 / 不可重铸的牌没有 Reforge 候选 ⇒ 没有入口；
+ *   - 无懈窗口走既有的 RESPOND 面（右端「放弃」），不新增计数器 / 提示条 / 只读判据。
+ */
+{
+  const iron = {
+    ...synthCard(130, "铁索连环"),
+    type: "iron_chain",
+    display_name: "铁索连环",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "铁索连环的描述：横置或重置至多两名角色。",
+    suit: "club",
+    color: "black",
+  };
+  const slash = {
+    ...synthCard(5, "杀"),
+    type: "slash",
+    display_name: "杀",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "杀的描述",
+  };
+  const nullify = {
+    ...synthCard(140, "无懈可击"),
+    type: "nullify",
+    display_name: "无懈可击",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "无懈可击的描述",
+  };
+  const raw = (card) => ({
+    card_id: card.card_id, type: card.type, name: card.name, suit: card.suit,
+    rank: card.rank, slot: card.slot, attack_range: card.attack_range,
+    color: card.color, virtual_sources: [],
+  });
+  const ironRaw = raw(iron);
+  const slashRaw = raw(slash);
+  const nullifyRaw = raw(nullify);
+  const ironContext = {
+    actor: 0, name: null, targets: [], label: null,
+    requirement: "使用一张牌（或发动技能），或结束出牌阶段", skill_hints: [],
+  };
+  const ironView = (pending, { hand = [iron, slash] } = {}) => {
+    const view = synthView(pending);
+    view.human_seat = 0;
+    view.snapshot.seat = 0;
+    view.snapshot.phase = "play";
+    view.snapshot.turn_seat = 0;
+    view.snapshot.self_hand = hand;
+    view.snapshot.processing = [];
+    view.snapshot.players = [0, 1, 2, 3].map((seat) => ({
+      seat, hp: 4, hp_max: 4, hand_count: seat === 2 ? 0 : 2,
+      alive: true, equip: [], judge: [], identity: null,
+      chained: seat === 1,
+    }));
+    return view;
+  };
+  const renderIron = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const handNode = (cardId) => $("t-hand").children.find(
+    (node) => node.getAttribute("data-card-id") === String(cardId),
+  ) || null;
+  const clickHand = async (cardId) => {
+    const node = handNode(cardId);
+    if (!node) return false;
+    for (const fn of node.listeners.click || []) await fn({ target: node, stopPropagation() {} });
+    return true;
+  };
+  const clickSeat = (seat) => {
+    const node = seatBox(seat);
+    (node.listeners.click || []).forEach((fn) => fn({ target: node, stopPropagation() {} }));
+  };
+  const reforgeNode = () => $("t-options").children.find(
+    (node) => node.getAttribute("data-reforge") === "true") || null;
+  const settle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const answersSince = (mark) => calls.slice(mark).filter((call) => call.path.includes("/answer"));
+  const selected = () => ui.state.selectedTargets.join(",");
+  const builtTargets = () => {
+    const action = ui.buildAction();
+    return action && action.targets ? action.targets.join(",") : null;
+  };
+
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261017,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  ui.state.modal.heroSeat = null;
+
+  const combos = [[0], [0, 1], [0, 2], [0, 3], [1], [1, 2], [1, 3], [2], [2, 3], [3]];
+  const play = {
+    kind: "PLAY_PHASE", actor: 0, seq: 3101,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      ...combos.map((targets) => ({
+        kind: "UseCard", answers_seq: 3101, card: ironRaw, targets,
+      })),
+      { kind: "UseCard", answers_seq: 3101, card: slashRaw, targets: [1] },
+      { kind: "Reforge", answers_seq: 3101, card: ironRaw },
+      { kind: "EndPhase", answers_seq: 3101 },
+    ],
+    candidate_index: {
+      130: {
+        card: iron, pool: [0, 1, 2, 3], combos, min_targets: 1, max_targets: 2,
+      },
+      5: { card: slash, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
+    },
+    virtual_index: {}, option_seats: {}, context: ironContext,
+    prompt_display: {
+      text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      default_action: { kind: "EndPhase", answers_seq: 3101 },
+      default_label: "超时将自动结束出牌阶段",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const useOn = (targets) => play.legal_actions.find(
+    (action) => action.kind === "UseCard" && action.card.card_id === 130
+      && action.targets.join(",") === targets.join(","),
+  );
+
+  // ---- ① 选中铁索：可点自己与所有座位；0 目标提交键不可用；重铸入口并列出现 ----
+  renderIron(ironView(play));
+  await clickHand(130);
+  check("M5-08b-a1 选中铁索：1–2 目标（含自己）、0 目标提交键不可用、重铸入口并列出现",
+    ui.state.focusCardId === 130
+      && [0, 1, 2, 3].every((seat) => seatBox(seat).classList.contains("targetable"))
+      && $("btn-submit").disabled === true
+      && $("t-target-hint").textContent.includes("还要选 1–2 个目标")
+      && ui.reforgeAction(play, 130) !== null
+      && reforgeNode() !== null
+      && reforgeNode().textContent.includes("重铸")
+      && reforgeNode().textContent.includes("铁索连环"),
+    `focus=${ui.state.focusCardId} hint="${$("t-target-hint").textContent}" submit=${$("btn-submit").disabled} reforge="${reforgeNode() && reforgeNode().textContent}"`);
+
+  // ---- ② 点座位切换 / 再点取消；不会产生重复目标 ----
+  clickSeat(1);
+  check("M5-08b-a2 点座位 1 = 选中 1 个目标，提交候选原样来自 legal_actions",
+    selected() === "1" && builtTargets() === "1"
+      && $("btn-submit").disabled === false
+      && seatBox(1).classList.contains("tsel"),
+    `targets=${selected()} built=${builtTargets()} submit=${$("btn-submit").disabled}`);
+  clickSeat(1);
+  check("M5-08b-a3 同一座位再点一次 = 取消该目标，0 目标提交键回到不可用",
+    selected() === "" && ui.buildAction() === null && $("btn-submit").disabled === true,
+    `targets=${selected()} submit=${$("btn-submit").disabled}`);
+  clickSeat(1);
+  clickSeat(2);
+  check("M5-08b-a4 2 个目标独立选中；两个座位都画成已选",
+    selected() === "1,2" && builtTargets() === "1,2"
+      && seatBox(1).classList.contains("tsel") && seatBox(2).classList.contains("tsel"),
+    `targets=${selected()} built=${builtTargets()}`);
+  clickSeat(1);
+  check("M5-08b-a5 取消其中一个 = 只剩另一个（不会残留重复目标）",
+    selected() === "2" && builtTargets() === "2"
+      && !seatBox(1).classList.contains("tsel") && seatBox(2).classList.contains("tsel"),
+    `targets=${selected()} built=${builtTargets()}`);
+  clickSeat(2);
+  check("M5-08b-a6 再点最后一个也取消 ⇒ 回到 0 目标、提交键不可用",
+    selected() === "" && ui.buildAction() === null && $("btn-submit").disabled === true,
+    `targets=${selected()} submit=${$("btn-submit").disabled}`);
+
+  // ---- ③ 可指定自己：点座位 0（底部自己的面板） = 选中自己 ----
+  clickSeat(0);
+  check("M5-08b-a7 可指定自己：点座位 0 = 选中自己，提交候选的 targets 就是 0",
+    selected() === "0" && builtTargets() === "0"
+      && seatBox(0).classList.contains("tsel")
+      && ($("btn-submit").disabled === false),
+    `targets=${selected()} built=${builtTargets()} submit=${$("btn-submit").disabled}`);
+
+  // ---- ④ 1 目标 / 2 目标各提交一次：恰一条 UseCard，原样取自 legal_actions ----
+  renderIron(ironView(play));
+  await clickHand(130);
+  clickSeat(1);
+  const beforeOne = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  await settle();
+  staleAnswerStatus = null;
+  const oneAnswers = answersSince(beforeOne);
+  check("M5-08b-a8 1 目标提交 = 恰一条 UseCard（targets=[1]）",
+    oneAnswers.length === 1
+      && JSON.stringify(oneAnswers[0].body.action) === JSON.stringify(useOn([1])),
+    `answers=${oneAnswers.length} action=${JSON.stringify(oneAnswers[0] && oneAnswers[0].body.action)}`);
+
+  renderIron(ironView(play));
+  await clickHand(130);
+  clickSeat(1);
+  clickSeat(2);
+  const beforeTwo = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  await settle();
+  staleAnswerStatus = null;
+  const twoAnswers = answersSince(beforeTwo);
+  check("M5-08b-a9 2 目标提交 = 恰一条 UseCard（targets=[1,2]），不是两条",
+    twoAnswers.length === 1
+      && JSON.stringify(twoAnswers[0].body.action) === JSON.stringify(useOn([1, 2])),
+    `answers=${twoAnswers.length} action=${JSON.stringify(twoAnswers[0] && twoAnswers[0].body.action)}`);
+
+  // ---- ⑤ 无懈窗口：既有 RESPOND 面；右端「放弃」是唯一出口，不出现重铸入口 ----
+  const nullifyPending = {
+    kind: "RESPOND", actor: 0, seq: 3102, cause: "NULLIFY",
+    prompt: "是否使用【无懈可击】？",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 3102, card: nullifyRaw, targets: [1] },
+      { kind: "Pass", answers_seq: 3102 },
+    ],
+    candidate_index: {
+      140: {
+        card: nullify, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1,
+      },
+    },
+    virtual_index: {}, option_seats: {},
+    context: { ...ironContext, requirement: "使用【无懈可击】抵消这张锦囊，或放弃" },
+    prompt_display: {
+      text: "是否使用【无懈可击】？",
+      default_action: { kind: "Pass", answers_seq: 3102 },
+      default_label: "超时将自动放弃",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  renderIron(ironView(nullifyPending, { hand: [iron, nullify] }));
+  check("M5-08b-b1 无懈窗口沿用既有 RESPOND 面：右端「放弃」可用、不铺目标、无重铸入口",
+    $("btn-pass").hidden === false
+      && $("btn-pass").textContent.includes("放弃")
+      && $("btn-submit").disabled === true
+      && ui.state.selectedTargets.length === 0
+      && ui.reforgeAction(nullifyPending, 130) === null
+      && reforgeNode() === null,
+    `passHidden=${$("btn-pass").hidden} pass="${$("btn-pass").textContent}" submit=${$("btn-submit").disabled} reforge=${reforgeNode() && reforgeNode().textContent}`);
+
+  // ---- ⑥ 重铸：点一次 = 恰一条 Reforge；不进入目标选择；不产生无懈 / 使用次数 ----
+  renderIron(ironView(play));
+  check("M5-08b-c1 未选牌时控件区没有重铸入口（零提交）",
+    reforgeNode() === null && ui.reforgeAction(play, 130) !== null,
+    `entry=${reforgeNode() && reforgeNode().textContent}`);
+  await clickHand(130);
+  check("M5-08b-c2 不可重铸的牌（杀）没有重铸入口",
+    (await (async () => { await clickHand(5); return true; })())
+      && ui.state.focusCardId === 5
+      && ui.reforgeAction(play, 5) === null
+      && reforgeNode() === null,
+    `focus=${ui.state.focusCardId} reforge=${reforgeNode() && reforgeNode().textContent}`);
+
+  renderIron(ironView(play));
+  const beforeCancel = calls.length;
+  await clickAndWait($("btn-cancel"));
+  check("M5-08b-c3 未选牌时点「取消」= 零提交（不发明 Action）",
+    answersSince(beforeCancel).length === 0 && ui.state.focusCardId === null,
+    `answers=${answersSince(beforeCancel).length} focus=${ui.state.focusCardId}`);
+
+  await clickHand(130);
+  clickSeat(1);
+  clickSeat(2);
+  const entryWithTargets = reforgeNode();
+  const beforeReforge = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait(reforgeNode());
+  await settle();
+  staleAnswerStatus = null;
+  const reforgeAnswers = answersSince(beforeReforge);
+  const reforgeAction = play.legal_actions.find((action) => action.kind === "Reforge");
+  check("M5-08b-c4 点一次「重铸」= 恰一条 Reforge POST（保留选中的目标也不进目标步）",
+    reforgeAnswers.length === 1
+      && JSON.stringify(reforgeAnswers[0].body.action) === JSON.stringify(reforgeAction)
+      && !("targets" in reforgeAnswers[0].body.action)
+      && !("designations" in reforgeAnswers[0].body.action),
+    `answers=${reforgeAnswers.length} action=${JSON.stringify(reforgeAnswers[0] && reforgeAnswers[0].body.action)}`);
+  check("M5-08b-c5 目标选择不改变重铸入口（独立动作）：已选 2 个目标时点重铸只发 Reforge，不发 UseCard",
+    entryWithTargets !== null
+      && reforgeAnswers.every((answer) => answer.body.action.kind === "Reforge"),
+    `entry="${entryWithTargets && entryWithTargets.textContent}" kinds=${reforgeAnswers.map((answer) => answer.body.action.kind).join(",")}`);
+
+  // ---- ⑦ 事件流的人话：完整档也不能把 Reforge / REFORGE 英文漏给玩家 ----
+  const reforgeLabel = ui.actionLabel({ kind: "Reforge", card: ironRaw });
+  // 投影对非本方应答只下发 `kind` / `answers_seq`（`visible_record`）：没有卡面时写动作本身。
+  const maskedReforgeLabel = ui.actionLabel({ kind: "Reforge", answers_seq: 3101 });
+  const moveLine = ui.describeRecord({
+    kind: "delta", delta_type: "card_move", seq: 3104, reason: "REFORGE",
+    from_zone: { seat: 0, zone: "hand" }, to_zone: { zone: "discard" }, cards: [iron],
+  });
+  check("M5-08b-d1 重铸在事件流 / 候选文案里都写「重铸」，不落 Reforge / REFORGE 英文",
+    reforgeLabel.includes("重铸") && reforgeLabel.includes("铁索连环")
+      && !reforgeLabel.includes("Reforge")
+      && maskedReforgeLabel === "重铸"
+      && moveLine.includes("重铸") && !moveLine.includes("REFORGE"),
+    `label="${reforgeLabel}" masked="${maskedReforgeLabel}" line="${moveLine}"`);
+
+  // ---- ⑧ 弹窗步骤沿 U2：只读判据仍是 selectionEnabled()，重铸入口不出现 ----
+  const dialogPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 3103, dialog: "reveal",
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [{ kind: "SelectCards", answers_seq: 3103, picks: [0] }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [{ ref: { seat: 0, zone: "hand" }, card: slash }],
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: false },
+    revealed: [slash], harvest: null, reveal: null,
+    context: { ...ironContext, requirement: "从自己的手牌里亮出一张（公开）" },
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 3103, picks: [0] },
+      default_label: "超时将自动选择第一张亮牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  renderIron(ironView(dialogPending, { hand: [iron, slash] }));
+  await clickHand(130);
+  check("M5-08b-e1 弹窗步骤沿 U2 只读：牌桌不可选、重铸入口不出现（不新写第二套判据）",
+    ui.stepDialogKind(dialogPending) === "reveal"
+      && ui.selectionEnabled() === false
+      && $("t-dialog").hidden === false
+      && ui.state.focusCardId === null
+      && reforgeNode() === null,
+    `kind=${ui.stepDialogKind(dialogPending)} enabled=${ui.selectionEnabled()} dialogHidden=${$("t-dialog").hidden} focus=${ui.state.focusCardId} reforge=${reforgeNode() && reforgeNode().textContent}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

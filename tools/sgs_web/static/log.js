@@ -13,6 +13,10 @@
 /** 事件流的详略；`simple` = 默认的服务端叙事，`focus` = 隐藏对手之间的响应往来。 */
 const LOG_MODES = ["simple", "focus", "all"];
 
+/** 移动原因的中文（M5-08b）：完整档也不把 `REFORGE` 英文漏给玩家；其余原因保留报文值
+ *  （完整档本来就是记录流原文，不在这里另翻一套规则话术）。 */
+const MOVE_REASON_LABELS = Object.freeze({ REFORGE: "重铸" });
+
 function logMode() {
   const node = $("t-log-mode");
   const mode = node && node.value ? node.value : "simple";
@@ -141,7 +145,8 @@ function describeRecord(record) {
   if (record.kind === "game_end") return `<span class="k">#${record.seq}</span> 终局 ${record.result} · 获胜座位 [${(record.winners || []).join("、")}] · ${record.reason}`;
   if (record.kind === "delta") {
     if (record.delta_type === "card_move") {
-      return `<span class="k">#${record.seq}</span> 牌移动 ${zoneLabel(record.from_zone)} → ${zoneLabel(record.to_zone)}（${record.reason}）${cardsLabel(record.cards)}`;
+      const reason = MOVE_REASON_LABELS[record.reason] || record.reason;
+      return `<span class="k">#${record.seq}</span> 牌移动 ${zoneLabel(record.from_zone)} → ${zoneLabel(record.to_zone)}（${reason}）${cardsLabel(record.cards)}`;
     }
     if (record.delta_type === "hp_change") return `<span class="k">#${record.seq}</span> 体力 座位 ${record.seat} ${record.before} → ${record.after}`;
     if (record.delta_type === "identity_deal") return `<span class="k">#${record.seq}</span> 身份 座位 ${record.seat}（只有自己 / 主公 / 阵亡者公开）`;

@@ -151,6 +151,11 @@ function actionLabel(action) {
     const targets = action.targets && action.targets.length ? ` → 座位 ${action.targets.join("、")}` : "";
     return `使用【${cardName(action.card)}】${targets}`;
   }
+  if (action.kind === "Reforge") {
+    // 重铸不是使用（M5-08b / D6）：事件流与任何候选文案都写「重铸」，不落英文构造子名。
+    // 投影对**别人的**应答会裁掉 card（只留 kind / answers_seq）：没有牌面时只写动作。
+    return action.card ? `重铸【${cardName(action.card)}】` : "重铸";
+  }
   if (action.kind === "ActivateSkill") {
     return `发动技能 ${action.skill_id}${action.picks && action.picks.length ? `（选 ${action.picks.length} 张）` : ""}`;
   }
@@ -248,6 +253,65 @@ async function submitOwnHandSinglePick(pending, slotIndex) {
   state.focusCardId = null;
   state.selectedTargets = [];
   state.picks = [slotIndex];
+  state.preactivation = null;
+  state.lastRejectReason = "";
+  if (!state.sessionId) {
+    renderPending(state.view);
+    return;
+  }
+  await submitAction(before);
+}
+
+/** 焦点手牌此刻的**重铸**候选；`null` = 这张牌不能重铸 / 不在出牌阶段。
+ *
+ * 唯一判据是 `legal_actions` 里真的有一条 ``Reforge`` 且牌号相同（M5-08b / D6）：
+ * 前端**不**写"这张牌可重铸"的牌名表，也不读阶段名。服务端只在出牌阶段、且手里有
+ * 可重铸牌时才发这个构造子（`effects/actions.py`）。
+ */
+function reforgeAction(pending, cardId) {
+  if (!pending || cardId === null || cardId === undefined) return null;
+  return (pending.legal_actions || []).find(
+    (action) => action.kind === "Reforge"
+      && action.card
+      && String(action.card.card_id) === String(cardId),
+  ) || null;
+}
+
+/** 控件区里的**重铸入口**（M5-08b）：与「使用」并列的另一个动作，不是它的一个目标。
+ *
+ * 只在手选路（出牌阶段）且**已选中一张可重铸的牌**时出现；按钮点一下即提交一条
+ * ``Reforge``（见 :func:`submitReforge`）。它不铺目标、不进目标选择，也不开门。
+ * 弹窗步骤里 `selectionEnabled()` 为假，入口不出现（只读判据不另写一份）。
+ */
+function renderReforgeEntry(pending) {
+  if (!isHandPick(pending) || state.focusCardId === null) return;
+  if (!selectionEnabled()) return;
+  const action = reforgeAction(pending, state.focusCardId);
+  if (!action) return;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "opt reforge";
+  button.setAttribute("data-reforge", "true");
+  button.textContent = `重铸【${cardName(action.card)}】`;
+  button.title = "重铸：弃置这张牌并摸一张牌（不算使用，不消耗使用次数）。";
+  button.addEventListener("click", () => submitReforge(pending, action));
+  $("t-options").appendChild(button);
+}
+
+/** 点一次「重铸」= **恰一次**真实 `Reforge` 提交（M5-08b / §5.1.3）。
+ *
+ * 提交的仍是 `legal_actions` 里扫描到的那一条（不手拼 Action）；选中目标一律丢弃
+ * ——重铸没有目标。合成载荷 / 尚未建局时只留内部选中态，不发请求。
+ */
+async function submitReforge(pending, action) {
+  if (state.playback || state.submitBusy || !selectionEnabled()) return;
+  const at = (pending.legal_actions || []).indexOf(action);
+  if (at < 0) return;
+  const before = selectionSnapshot();
+  state.selectedOption = at;
+  state.focusCardId = null;
+  state.selectedTargets = [];
+  state.picks = [];
   state.preactivation = null;
   state.lastRejectReason = "";
   if (!state.sessionId) {

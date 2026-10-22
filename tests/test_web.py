@@ -1025,7 +1025,8 @@ def test_the_candidate_index_is_derived_from_the_legal_actions() -> None:
                 # 是未装饰的纯索引 ⇒ 两边都是牌面事实，可以直接比。展示字段的补充由
                 # `pending_payload` 单独做（`test_the_pending_payload_carries_display_fields...`）。
 
-                # ② 候选 ⊆ 索引：每条带牌的候选都在索引里，且挂在**自己那张牌**下
+                # ② 候选 ⊆ 索引：每条带牌的候选都在索引里，且挂在**自己那张牌**下。
+                #    重铸是独立 Action（M5-08b / D6），没有 targets，不贡献 combos。
                 for action in payload["legal_actions"]:
                     card = action.get("card")
                     if card is None:
@@ -1033,6 +1034,8 @@ def test_the_candidate_index_is_derived_from_the_legal_actions() -> None:
                     entry = index.get(str(card["card_id"]))
                     assert entry is not None, f"{action['kind']} 的牌不在候选索引里"
                     assert entry["card"] == card, "索引里的牌面必须与候选里的是同一张"
+                    if action["kind"] == "Reforge":
+                        continue
                     assert action.get("targets", []) in entry["combos"], (
                         f"{card['name']} 的候选 targets={action.get('targets')} 不在 combos 里"
                     )
@@ -5932,3 +5935,282 @@ def test_fire_attack_without_a_same_suit_card_has_no_discard_query_and_narrates_
     assert "亮出" in text
     assert "放弃（无可弃的同花色牌）" in text, text
     assert "受到 1 点伤害" not in text
+
+
+# ---------------------------------------------------------------------------
+# M5-08b：铁索 1–2 目标 + 重铸入口（真会话 / 投影 / 叙事）
+#
+# 引擎侧（M5-03）已经保证：铁索是 1–2 目标的普通锦囊（可指定自己、无距离、0 目标非法、
+# 同座不可重复、开无懈窗口、无次数限制），重铸是独立的 `Reforge` Action（仅出牌阶段、
+# 不算使用、不开无懈、不消耗次数、牌进弃牌堆并摸一张、移动原因 `REFORGE`）。
+# 本段钉的是**界面读取方**：候选索引里「使用」的组合与「重铸」分离、提交后两个目标
+# 按各自状态独立翻转、重铸恰一次且不经过目标 / 无懈、事件流写「重铸」。
+# ---------------------------------------------------------------------------
+
+_IRON_PACK = None
+
+
+def _iron_pack():
+    """军争 160 档（惰性加载；铁索不在此档之外）。"""
+    global _IRON_PACK
+    if _IRON_PACK is None:
+        from sgs.data import load_content_pack
+
+        _IRON_PACK = load_content_pack(deck_profile="standard_ex_160")
+    return _IRON_PACK
+
+
+def _iron_card_id() -> int:
+    return cards_of_type(_iron_pack(), "iron_chain")[0]
+
+
+def _iron_card_ids() -> set[int]:
+    return set(cards_of_type(_iron_pack(), "iron_chain"))
+
+
+def _iron_session(*, hand=None, chained=(False, False, False, False)):
+    """4 座构造局面：座位 0 = 人类、首回合出牌阶段；``chained`` 给各座初始横置态。
+
+    与 :func:`_fire_session` 同一姿态：引擎行为真跑，只有人类座位的询问被挂起、由用例
+    显式应答；其余座位走最小合法应答。``hand`` 缺省只有一张【铁索连环】。
+    """
+    from sgs.data import RuleConfig as _RuleConfig
+
+    pack = _iron_pack()
+    iron = _iron_card_id()
+    user_hand = (iron,) if hand is None else tuple(hand)
+    used = set(user_hand)
+    seats = [
+        SeatSpec(hp=4, hand=user_hand, chained=chained[0]),
+        SeatSpec(hp=4, chained=chained[1]),
+        SeatSpec(hp=4, chained=chained[2]),
+        SeatSpec(hp=4, chained=chained[3]),
+    ]
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=tuple(i for i in range(len(pack.deck.cards)) if i not in used),
+        turn_seat=0,
+        rule_config=_RuleConfig(first_seat=0),
+    )
+    from sgs_web.session import Session as _Session
+
+    session = _Session(
+        seed=1,
+        player_count=4,
+        ai="random",
+        human_seat=0,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=pack,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = tuple(
+        _HaltSeat() if seat == 0 else _FireDriver() for seat in range(4)
+    )
+    session.drive()
+    return session
+
+
+def _iron_use_action(pending, targets):
+    iron = _iron_card_id()
+    for action in pending.legal_actions:
+        if (
+            isinstance(action, UseCard)
+            and action.card.card_id == iron
+            and action.targets == tuple(targets)
+        ):
+            return action
+    raise AssertionError(f"出牌阶段没有对 {targets} 使用铁索的候选")
+
+
+def _drive_until_human_play(session) -> list:
+    """把人类座位推回出牌阶段；返回途中经过的无懈询问（真窗口，不是替身）。"""
+    nullifies = []
+    for _ in range(300):
+        pending = session.pending
+        if pending is None:
+            break
+        if pending.kind == QueryKind.PLAY_PHASE and pending.actor == 0:
+            return nullifies
+        if getattr(pending, "cause", None) == WindowCause.NULLIFY:
+            nullifies.append(pending)
+        session.submit_answer(_FireDriver().answer(pending))
+    raise AssertionError("300 步内没有回到人类座位的出牌阶段")
+
+
+def test_iron_chain_candidate_index_offers_self_and_one_or_two_targets() -> None:
+    """候选索引：铁索可指定自己，组合只有 1 个或 2 个目标；重铸不冒充「使用」组合。"""
+    session = _iron_session()
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    payload = pending_payload(session)
+    iron = _iron_card_id()
+
+    entry = payload["candidate_index"][str(iron)]
+    assert entry["pool"] == [0, 1, 2, 3], "4 座存活 ⇒ 池是全部座位（含自己）"
+    assert [0] in entry["combos"], "可以只指定自己"
+    assert [0, 1] in entry["combos"] and [1, 2] in entry["combos"], "两个目标的组合都在"
+    assert entry["min_targets"] == 1 and entry["max_targets"] == 2, "min=1 / max=2"
+    assert [] not in entry["combos"], "重铸是独立 Action，不得把 0 目标混进使用组合"
+
+    reforge = [
+        action for action in payload["legal_actions"] if action["kind"] == "Reforge"
+    ]
+    assert len(reforge) == 1, "可重铸的牌各给一条独立 Reforge 候选"
+    assert reforge[0]["card"]["card_id"] == iron
+    assert "targets" not in reforge[0], "重铸没有目标字段（不是 UseCard 的变体）"
+
+
+def test_iron_chain_single_self_target_toggles_and_opens_the_nullify_window() -> None:
+    """1 个目标（自己）：横置状态翻转、开无懈窗口、不消耗使用次数。"""
+    session = _iron_session(chained=(False, True, False, False))
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    session.submit_answer(_iron_use_action(pending, (0,)))
+
+    nullifies = _drive_until_human_play(session)
+
+    assert nullifies, "普通锦囊 ⇒ 使用后必须经过无懈窗口（真询问）"
+    assert all(pending.kind == QueryKind.RESPOND for pending in nullifies)
+    assert all(pending.cause == WindowCause.NULLIFY for pending in nullifies)
+    assert all(
+        any(action.kind == "Pass" for action in pending.legal_actions)
+        for pending in nullifies
+    ), "无懈窗口里至少有「放弃」"
+    assert session.engine.state.player(0).chained is True, "自己：未横置 → 横置"
+    assert session.engine.state.player(1).chained is True, "未指定的目标保持原状"
+    assert _iron_card_id() in session.engine.state.discard, "结算后进弃牌堆"
+
+
+def test_iron_chain_two_targets_toggle_each_seat_independently() -> None:
+    """2 个目标：每个目标独立 toggle（已横置 → 重置、未横置 → 横置）。"""
+    session = _iron_session(chained=(False, True, False, False))
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    session.submit_answer(_iron_use_action(pending, (1, 2)))
+
+    nullifies = _drive_until_human_play(session)
+
+    assert nullifies, "2 目标同样开无懈窗口"
+    assert session.engine.state.player(1).chained is False, "已横置 → 重置"
+    assert session.engine.state.player(2).chained is True, "未横置 → 横置"
+    assert session.engine.state.player(0).chained is False, "未指定的自己不动"
+    assert session.engine.state.player(3).chained is False, "未指定的座位不动"
+
+
+def test_reforge_moves_the_card_to_discard_and_draws_one_without_nullify() -> None:
+    """重铸 = 恰一次真实提交：弃置 + 摸一张、不经过目标步 / 无懈窗口、不消耗使用次数。"""
+    from sgs.state import Reforge
+
+    session = _iron_session(hand=(_iron_card_id(),))
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    payload = pending_payload(session)
+    reforge = [action for action in pending.legal_actions if isinstance(action, Reforge)]
+    assert len(reforge) == 1, "手里有可重铸的牌 ⇒ 恰一条 Reforge 候选"
+    assert reforge[0].card.card_id == _iron_card_id()
+    assert payload["legal_actions"].count(
+        next(
+            action for action in payload["legal_actions"]
+            if action["kind"] == "Reforge"
+        )
+    ) == 1
+
+    before_hand = tuple(session.engine.state.player(0).hand)
+    before_deck = len(session.engine.state.deck)
+    before_discard = tuple(session.engine.state.discard)
+    before_counts = dict(session.engine.state.player(0).card_use_counts)
+
+    session.submit_answer(reforge[0])
+
+    after = session.pending
+    assert after is not None and after.kind == QueryKind.PLAY_PHASE and after.actor == 0, (
+        "重铸后直接回到出牌阶段：不进入目标选择、不开无懈窗口"
+    )
+    hand = tuple(session.engine.state.player(0).hand)
+    assert _iron_card_id() not in hand, "重铸后牌离开手牌"
+    assert len(hand) == len(before_hand), "弃一张 + 摸一张 ⇒ 手牌数不变"
+    assert len(session.engine.state.deck) == before_deck - 1, "摸的那一张来自牌堆"
+    assert _iron_card_id() in session.engine.state.discard, "牌进弃牌堆"
+    assert set(session.engine.state.discard) - set(before_discard) == {_iron_card_id()}
+    assert dict(session.engine.state.player(0).card_use_counts) == before_counts, (
+        "重铸不算使用 ⇒ 不消耗任何使用次数"
+    )
+
+    moves = [
+        record
+        for record in (_record_payload(item) for item in session.records())
+        if record.get("kind") == "delta"
+        and record.get("delta_type") == "card_move"
+        and record.get("reason") == "REFORGE"
+    ]
+    assert len(moves) == 1, "重铸只落一条 REFORGE 的移动记录"
+    assert moves[0]["to_zone"]["zone"] == "discard"
+
+
+def test_reforge_is_narrated_as_reforge_not_discard() -> None:
+    """事件流（简易档）写「重铸」：既不写「弃置」，也不泄露 REFORGE / Reforge 英文。"""
+    from sgs.state import Reforge
+
+    session = _iron_session(hand=(_iron_card_id(),))
+    session.submit_answer(next(
+        action for action in session.pending.legal_actions if isinstance(action, Reforge)
+    ))
+    _drive_until_human_play(session)
+
+    entries = _narrative(
+        session.records(),
+        viewer=0,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    text = _line_text(entries)
+    reforge_move = next(
+        record
+        for record in (_record_payload(item) for item in session.records())
+        if record.get("kind") == "delta"
+        and record.get("delta_type") == "card_move"
+        and record.get("reason") == "REFORGE"
+    )
+    line = _line_at(entries, reforge_move["seq"])
+    assert line is not None, "重铸必须有一行事件流"
+    assert "重铸" in line["text"] and "铁索连环" in line["text"], line["text"]
+    assert "弃置" not in line["text"], line["text"]
+    assert "REFORGE" not in text and "Reforge" not in text, text
+
+
+def test_reforge_is_not_offered_for_non_reforgeable_cards() -> None:
+    """重铸入口以 `legal_actions` 里的 Reforge 为唯一判据：不可重铸的牌没有。"""
+    pack = _iron_pack()
+    slash = cards_of_type(pack, "slash")[0]
+    session = _iron_session(hand=(_iron_card_id(), slash))
+    payload = pending_payload(session)
+    reforge_cards = {
+        action["card"]["card_id"]
+        for action in payload["legal_actions"]
+        if action["kind"] == "Reforge"
+    }
+    assert reforge_cards == {_iron_card_id()}, "只有可重铸的【铁索连环】有 Reforge 候选"
+    assert slash not in reforge_cards
+
+
+def test_reforge_is_not_offered_outside_the_play_phase() -> None:
+    """非出牌阶段（真会话的【闪】窗口）里，手里有铁索也没有 Reforge 候选。"""
+    session = Session(
+        seed=17,
+        player_count=8,
+        ai="heuristic",
+        timeout_seconds=None,
+        pack=_iron_pack(),
+    )
+    pending = session.pending
+    assert pending is not None and pending.kind != QueryKind.PLAY_PHASE, (
+        "这个种子的人类首个询问不是出牌阶段（前置断言）"
+    )
+    hand = tuple(session.engine.state.player(session.human_seat).hand)
+    assert _iron_card_ids() & set(hand), "手里确实有铁索，否则这条断言是空转"
+    payload = pending_payload(session)
+    assert all(action["kind"] != "Reforge" for action in payload["legal_actions"]), (
+        "非出牌阶段不出现重铸候选"
+    )

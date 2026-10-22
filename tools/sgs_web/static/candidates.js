@@ -170,10 +170,19 @@ function pickerTargetHint(pending) {
       if (!rest.length) {
         suffix = "这组目标不是合法组合，点座位取消再选。";
       } else {
-        const need = Math.max(...rest.map((combo) => combo.length)) - have;
-        suffix = need > 0
-          ? `还要选 ${need} 个目标（已选 ${have}）。`
-          : "这组目标不是合法组合，点座位取消再选。";
+        // 目标数是一个**区间**（铁索 1–2；方天画戟 1–3）：先说最少、再说最多。
+        const sizes = rest.map((combo) => combo.length);
+        const least = Math.max(1, Math.min(...sizes));
+        const most = Math.max(...sizes);
+        const needLeast = Math.max(0, least - have);
+        const needMost = Math.max(0, most - have);
+        if (needMost <= 0) {
+          suffix = "这组目标不是合法组合，点座位取消再选。";
+        } else if (needLeast === needMost) {
+          suffix = `还要选 ${needMost} 个目标（已选 ${have}）。`;
+        } else {
+          suffix = `还要选 ${needLeast}–${needMost} 个目标（已选 ${have}）。`;
+        }
       }
     }
   }

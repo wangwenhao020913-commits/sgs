@@ -29,7 +29,7 @@ from sgs.skills import (
     lord_skill_allowed,
     resolve_instances,
 )
-from sgs.state import CardRef, FrameKind, Query, WindowCause, Zone, project
+from sgs.state import CardRef, FrameKind, Query, Reforge, WindowCause, Zone, project
 from sgs.timing import Timing
 
 from .descriptions import skill_description
@@ -1017,6 +1017,11 @@ def candidate_index(query: Query) -> dict[str, dict[str, Any]]:
     ``min_targets`` / ``max_targets`` 是**这张牌这次使用**要选几个目标，**由候选组合派生**
     （【杀】额定 1；【方天画戟】等 ``TARGET_COUNT`` 修饰器成立时可放宽到 ``1..max``；
     【南蛮入侵】类等于池大小），界面据此说"还要选 N 个"。
+
+    **重铸不参与目标聚合**（M5-08b / D6）：``Reforge`` 是独立 Action、不是 ``UseCard`` 的
+    变体，它没有目标。索引仍为它保留**这张牌的条目**（手牌因此可点、重铸入口读
+    ``legal_actions`` 是否出现该 Action），但**不贡献** ``combos`` / ``pool``——否则 0 目标
+    会被当成一条合法的「使用」组合（min_targets 变 0、界面显示"目标已选好"）。
     """
     grouped: dict[str, dict[str, Any]] = {}
     for action in query.legal_actions:
@@ -1032,6 +1037,9 @@ def candidate_index(query: Query) -> dict[str, dict[str, Any]]:
                 "_sizes": set(),
             }
             grouped[str(card.card_id)] = entry
+        # 重铸：只保留"这张牌可点"的条目，不把它的空目标并进使用组合。
+        if isinstance(action, Reforge):
+            continue
         combo = tuple(getattr(action, "targets", ()))
         if combo not in entry["combos"]:
             entry["combos"].append(combo)

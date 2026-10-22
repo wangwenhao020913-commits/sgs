@@ -411,7 +411,12 @@ class _Narrator:
         if to == "discard":
             # 使用 / 判定牌离开处理区已有各自的行；其余弃置（弃牌阶段、拆牌、死亡清场）
             # 是公开事实，牌名可以写。
-            if record.get("reason") in ("USE", "JUDGE"):
+            reason = record.get("reason")
+            if reason == "REFORGE":
+                # 重铸是**失去**不是弃置（M5-08b / §5.1.3）：事件流写「重铸」。
+                self._reforge(record, seq, cards)
+                return
+            if reason in ("USE", "JUDGE"):
                 return
             self._discard(record, seq, cards)
             return
@@ -453,6 +458,20 @@ class _Narrator:
         else:
             segments = [*self._subject(owner), _act(" 弃置"), *_cards(cards)]
         self._line(seq, segments)
+
+    def _reforge(
+        self, record: dict[str, Any], seq: int, cards: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """重铸（M5-08b / §5.1.3）：**失去**一张牌并摸一张，事件流写「重铸」不写「弃置」。"""
+        from_zone = record.get("from_zone") or {}
+        owner = record.get("owner")
+        origin = from_zone.get("seat")
+        if owner is None:
+            owner = origin
+        if owner is None:
+            self._line(seq, [_act("重铸"), *_cards(cards)])
+            return
+        self._line(seq, [*self._subject(owner), _act(" 重铸"), *_cards(cards)])
 
     # -- 应答 ---------------------------------------------------------------
 

@@ -399,6 +399,8 @@ function renderPicker(pending) {
   if (hint) hint.textContent = pickerTargetHint(pending);
   $("btn-cancel").disabled = state.focusCardId === null;
   renderPickerAlternatives(pending);
+  // 焦点牌若有独立的重铸候选，控件区并列给一个「重铸」入口（M5-08b / D6）。
+  renderReforgeEntry(pending);
 }
 
 /** 弃牌阶段：不铺候选按钮（引擎按 C(n,k) 枚举组合，会铺出几十个「弃牌（N张）」），
