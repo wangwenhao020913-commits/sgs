@@ -19,9 +19,10 @@ M2 的三处结构变化：
 - :class:`CardBehavior` 增 ``response_window``（票 11 §7 / 票 28）：这张牌在自己的
   "生效前"给谁开窗口——【杀】= ``DODGE``（M1 的【闪】窗口一字不动）、锦囊 = ``NULLIFY``
   （收集式无懈窗口）、其余 ``None``。它取代原先"效果里有没有伤害帧"的布尔判据。
-- 牌名扩到标准版全表 32 个；本票先把**静态面**（使用时机 / 目标规则 / 次数限制 /
-  最终去向区 / 响应窗口）补齐，需询问或多步的**效果**由后续票落进 ``effects``
-  （票 26 / 27 / 29 / 30）。
+- 牌名扩到标准版全表 32 个；M5-01a 再补军争篇 11 个（行为表 43 条）。本票先把**静态面**
+  （使用时机 / 目标规则 / 次数限制 / 最终去向区 / 响应窗口）补齐，需询问或多步的**效果**
+  由后续票落进 ``effects``（票 26 / 27 / 29 / 30）；军争的属性 / 连环 / 酒 / 装备效果
+  分别由 M5-02–06 落地，本文件只放可加载的骨架。
 """
 
 from __future__ import annotations
@@ -339,6 +340,22 @@ def _response(
     )
 
 
+def _slash_variant(card_type_id: str) -> CardBehavior:
+    """火【杀】/ 雷【杀】的**静态面**：与【杀】一字不差，属性由 M5-02 声明。
+
+    D2 把它们建成独立牌型（而不是在 ``CardRef`` 上加属性字段）；在 M5-02 的伤害属性
+    管线落地前，行为骨架必须让 160 张局能完整跑完，故这里先按普通【杀】结算 1 点伤害。
+    """
+    return CardBehavior(
+        card_type_id=card_type_id,
+        use_timings=(_PLAY_PHASE,),
+        target_rule=TargetRule(rated_targets=1, includes_self=False, needs_distance=True),
+        use_limit=UseLimit(rated=1, extra=0, counts=True, ignore_distance=False),
+        effects=(PushFrame(FrameKind.DAMAGE, (("amount", 1),)),),
+        response_window=ResponseWindow.DODGE,
+    )
+
+
 CARD_BEHAVIORS: dict[str, CardBehavior] = {
     # ---- 基本牌（M1 三条，字段一字不改）----
     "slash": CardBehavior(
@@ -439,8 +456,43 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
     "zhuahuang_feidian": _self_only("zhuahuang_feidian", final_zone=FinalZone.EQUIP),
     "dawan": _self_only("dawan", final_zone=FinalZone.EQUIP),
     "zixing": _self_only("zixing", final_zone=FinalZone.EQUIP),
+    # ---- 军争篇（M5-01a 的静态骨架；规则效果由 M5-02–06 落地）----
+    # 火杀 / 雷杀：独立牌型，静态面同【杀】；FIRE / THUNDER 由 M5-02 声明。
+    "fire_slash": _slash_variant("fire_slash"),
+    "thunder_slash": _slash_variant("thunder_slash"),
+    # 酒：自己 + 出牌阶段 / 濒死；加伤与酒状态由 M5-04，濒死自救走求桃窗口的统一回复。
+    "wine": CardBehavior(
+        card_type_id="wine",
+        use_timings=(_PLAY_PHASE, _NEAR_DEATH),
+        target_rule=TargetRule(rated_targets=1, includes_self=True, self_only=True),
+        use_limit=UseLimit(rated=1),
+        effects=(),
+    ),
+    # 火攻 / 铁索 / 兵粮：先立最小骨架（目标规则与窗口按牌面），
+    # 亮牌 + 同花色弃牌 = M5-06；1–2 目标 + 重铸 = M5-03；判定跳摸牌 = M5-06。
+    "fire_attack": _one_other("fire_attack"),
+    "iron_chain": CardBehavior(
+        card_type_id="iron_chain",
+        use_timings=(_PLAY_PHASE,),
+        target_rule=TargetRule(rated_targets=1, includes_self=True),
+        use_limit=_UNLIMITED,
+        effects=(),
+        response_window=ResponseWindow.NULLIFY,
+    ),
+    "supply_shortage": _one_other(
+        "supply_shortage", final_zone=FinalZone.JUDGE, max_distance=1
+    ),
+    # 5 件装备：使用面 = 置入装备区；技能占位住 ``sgs.skills``（键 = ``equip.<id>``），
+    # 效果由 M5-05 落地。
+    "silver_lion": _self_only("silver_lion", final_zone=FinalZone.EQUIP),
+    "vine_armor": _self_only("vine_armor", final_zone=FinalZone.EQUIP),
+    "ancient_scimitar": _self_only("ancient_scimitar", final_zone=FinalZone.EQUIP),
+    "vermilion_feather_fan": _self_only(
+        "vermilion_feather_fan", final_zone=FinalZone.EQUIP
+    ),
+    "hualiu": _self_only("hualiu", final_zone=FinalZone.EQUIP),
 }
-"""标准版全表 32 个牌名的行为；装备牌的**技能**在 ``sgs.skills`` 注册（键 = ``equip.<id>``）。"""
+"""43 个牌名的行为（标准 32 + 军争 11）；装备牌的**技能**在 ``sgs.skills`` 注册（键 = ``equip.<id>``）。"""
 
 
 def behavior_for(card: CardRef) -> CardBehavior:

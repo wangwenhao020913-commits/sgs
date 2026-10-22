@@ -166,11 +166,16 @@ def test_kongcheng_does_not_remove_its_owner_from_the_snatch_pool():
 
 
 def _play_phase_card_types() -> list[str]:
-    """牌行为表里**在出牌阶段可用**的全部牌名（"每一张需要目标的牌"的枚举面）。"""
+    """牌行为表里**在本档牌堆中实际存在**、且在出牌阶段可用的全部牌名。
+
+    M5 起牌名表是全包的（160 档才有军争 11 张），而这里的 ``PACK`` 是 108 档；
+    只枚举牌堆里真有实体牌的牌名，避免对"有行为、无实体牌"的军争牌取牌失败。
+    """
     return sorted(
         type_id
         for type_id, behavior in CARD_BEHAVIORS.items()
         if any(use.context is UseContext.PLAY_PHASE for use in behavior.use_timings)
+        and _cards(type_id)
     )
 
 

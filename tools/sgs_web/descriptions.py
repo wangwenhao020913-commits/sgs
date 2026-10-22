@@ -9,8 +9,8 @@
 - 缺条目时**显式**返回 :data:`DESCRIPTION_FALLBACK`（“暂无描述”），不返回空串——
   空串会让界面静默留白，看起来像渲染坏了。
 
-**覆盖**：43 个牌名 = 标准包 32 个 + 军争篇 11 个（军争落地前只预写文案）；46 条技能 =
-``CATALOG`` 的全部装备技能与武将技能。覆盖由
+**覆盖**：43 个牌名（标准 32 + 军争 11，M5-01a 起同一内容包）；51 条技能 =
+``CATALOG`` 的全部装备技能（22）与武将技能（29）。覆盖由
 ``tests/test_web.py::test_every_card_name_and_skill_id_has_a_description`` 逐 key 核。
 
 **消费方**：服务端展示层把它并入载荷——:func:`sgs_web.display.card_display` 给每张牌加
@@ -84,10 +84,10 @@ def _load() -> dict[str, Any]:
 _DOCUMENT = _load()
 
 CARD_DESCRIPTIONS: Mapping[str, str] = _load_table(_DOCUMENT, "cards")
-"""``CardType.id`` → 描述全文（43 条：标准 32 + 军争预写 11）。"""
+"""``CardType.id`` → 描述全文（43 条：标准 32 + 军争 11）。"""
 
 SKILL_DESCRIPTIONS: Mapping[str, str] = _load_table(_DOCUMENT, "skills")
-"""``SkillDef.skill_id`` → 描述全文（46 条：装备 17 + 武将 29）。"""
+"""``SkillDef.skill_id`` → 描述全文（51 条：装备 22 + 武将 29）。"""
 
 
 def card_description(card_type: str | None) -> str:

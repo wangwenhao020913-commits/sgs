@@ -4308,7 +4308,7 @@ def test_a_bare_query_rebuilds_transformed_source_cards_from_the_query_itself() 
 
 
 # ---------------------------------------------------------------------------
-# U1-04b 描述全文：43 个牌名 + 46 条技能（独立内容文件，不进引擎 / 录像）
+# U1-04b 描述全文：43 个牌名 + 51 条技能（独立内容文件，不进引擎 / 录像）
 # ---------------------------------------------------------------------------
 
 MILITARY_CARD_TYPE_IDS = frozenset(
@@ -4326,11 +4326,11 @@ MILITARY_CARD_TYPE_IDS = frozenset(
         "hualiu",
     }
 )
-"""U1-04b 预写的 11 个军争牌名 id（M5 落地前只写描述，不建牌堆条目）。"""
+"""U1-04b 预写的 11 个军争牌名 id；M5-01a 起已并入内容包，本清单保留作独立核对。"""
 
 
 def test_every_card_name_and_skill_id_has_a_description() -> None:
-    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 46 条技能一条不缺。
+    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 51 条技能一条不缺。
 
     缺一条时断言消息**直接列出缺的 key**（不是只报一个总数）——这是票面的验收判据。
     多余 / 拼错的 key 也一并拦：否则「43 条」可以是 42 条真条目 + 1 条错拼。
@@ -4349,7 +4349,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 46, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 51, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

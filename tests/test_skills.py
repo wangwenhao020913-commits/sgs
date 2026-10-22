@@ -1753,7 +1753,7 @@ def test_virtual_equipment_unions_with_physical_equipment_without_occupying_a_zo
 
 
 def test_every_equipment_card_has_a_skill_and_vice_versa():
-    """``CATALOG`` 的两半：装备技能 = 17 张装备牌名，武将技能 = 票 03 起的 H 族。
+    """``CATALOG`` 的两半：装备技能 = 22 张装备牌名（M5-01a 起含军争 5 张），武将技能 = 票 03 起的 H 族。
 
     票 03 之前武将那半是空的，故这条断言当时写作"``CATALOG`` 恰等于装备集合"；
     现在改成按 ``carrier`` 分区（载体是技能定义上的字段），M3 的后续票再往武将那半

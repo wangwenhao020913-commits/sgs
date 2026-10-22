@@ -32,6 +32,8 @@ from sgs.engine import Engine, RandomSource
 from support import ACCEPTANCE_SEEDS
 
 PACK = load_content_pack(deck_profile="standard_108")
+PACK_EX_160 = load_content_pack(deck_profile="standard_ex_160")
+"""M5-01a：军争 160 张档只在**显式选档**时使用；下面的 108 基准组仍读默认口径。"""
 
 SEEDS: tuple[int, ...] = ACCEPTANCE_SEEDS
 """验收写死的 32 个种子（``python -m sgs --seed S --players 5 --hero-pool "" --ai heuristic``）。
@@ -76,12 +78,12 @@ class _IllegalAnswerScan:
         return action
 
 
-def _new_engine(seed: int) -> Engine:
+def _new_engine(seed: int, *, pack=PACK) -> Engine:
     """与命令行同源的建局：5 人、标准版全表、**武将开启**（``hero_pool=()`` = 启用池）。"""
     return Engine.new_game(
         seed=seed,
         rule_config=RuleConfig(player_count=PLAYERS),
-        pack=PACK,
+        pack=pack,
         hero_pool=(),
     )
 
@@ -147,5 +149,39 @@ def test_the_all_ai_heuristic_group_finishes_consistently_and_replays(seed: int)
     replay = _new_engine(replayed_seed)
     player = TapePlayer(tape)
     replay.run([player] * PLAYERS)
+
+    assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"
+
+
+MILITARY_SEEDS: tuple[int, ...] = (ACCEPTANCE_SEEDS[0], ACCEPTANCE_SEEDS[-1])
+"""M5-01a 的 160 档冒烟：只挑 2 个固定种子（新效果未落，门禁时间要小）。"""
+
+
+@pytest.mark.parametrize("seed", MILITARY_SEEDS)
+def test_the_standard_ex_160_group_finishes_cleanly_and_replays(seed: int) -> None:
+    """验收 5：160 张档（108 + 军争 52）引擎层直连跑完一局全 AI。
+
+    判据与上面的 108 基准组同四条（跑完 / 身份胜负一致 / 零非法应答 / 可回放）。
+    M5-02–06 的军争规则效果尚未落地，故本测试**不**要求军争规则正确——只要求
+    「装得进、跑得动」：牌堆换成 160 档后，行为骨架与加载期校验都不拦路。
+    """
+    engine = _new_engine(seed, pack=PACK_EX_160)
+    scans = _participants(seed)
+
+    engine.run(scans)
+
+    assert engine.records[0].deck_profile == "standard_ex_160", "这局必须真的用了 160 档"
+    assert engine.finished, "必达终局"
+    tail = engine.records[-1]
+    assert tail.kind == "game_end", "最后一条记录必须是 game_end"
+    assert tail.result in ("winner", "draw"), f"终局结果非法：{tail.result!r}"
+    _assert_endgame_identity_consistency(engine, seed)
+    assert all(scan.illegal == 0 for scan in scans), "出现了候选集合之外的应答"
+    assert sum(scan.answers for scan in scans) > 0, "整局没有任何应答（断言不空转）"
+
+    replayed_seed, tape = tape_from_journal(engine.records)
+    assert replayed_seed == seed and tape, "磁带必须带上种子与行动序列"
+    replay = _new_engine(replayed_seed, pack=PACK_EX_160)
+    replay.run([TapePlayer(tape)] * PLAYERS)
 
     assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"

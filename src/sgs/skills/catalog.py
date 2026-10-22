@@ -1571,6 +1571,35 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         requirement="计算与其他角色的距离时 -1",
         modifiers=_DISTANCE_MINUS_ONE,
     ),
+    # ---- M5-01a：军争 5 件装备的技能**占位**（可加载的空壳；效果由 M5-05 落地）----
+    # 4 条锁定技按牌面锁定标记、无挂点；朱雀羽扇是转化技，占位只声明 ``virtual_type_ids``
+    # （形态表据此把它读成「转化技」），CANDIDATES / 伤害属性等效果留给 M5-05。
+    _equip(
+        "silver_lion",
+        locked=True,
+        requirement="受到的伤害最多为 1 点；失去装备时回复 1 点体力",
+    ),
+    _equip(
+        "vine_armor",
+        locked=True,
+        requirement="普通【杀】/【南蛮入侵】/【万箭齐发】对你无效；火焰伤害 +1",
+    ),
+    _equip(
+        "ancient_scimitar",
+        locked=True,
+        requirement="目标没有手牌时，你使用【杀】造成的伤害 +1",
+    ),
+    _equip(
+        "vermilion_feather_fan",
+        locked=False,
+        requirement="你可以将一张普通【杀】当【火杀】使用或打出",
+        virtual_type_ids=("fire_slash",),
+    ),
+    _equip(
+        "hualiu",
+        locked=True,
+        requirement="其他角色计算与你的距离时 +1",
+    ),
 )
 
 # 武将技能定义（票 03 的 H 族、票 04 的 A 族；票 12 起全表）在**文件末尾**并入：
@@ -1642,7 +1671,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
 )
 """定义目录：``skill_id`` → :class:`SkillDef`，**模块级不可变**（票 07 §1 / §6）。
 
-装备技能（17 条）与武将技能（票 03 起逐族落地，票 12 起 29 条齐）**共用同一张表**：
+装备技能（22 条：标准 17 + 军争 5）与武将技能（票 03 起逐族落地，票 12 起 29 条齐）**共用同一张表**：
 载体解析、优先级档、修饰器链、时机派发都只认这张表，不区分两类载体。合并点在**文件末尾**
 （而不是模块头部的 import）是为了让 :mod:`sgs.skills.heroes` 能反向 import 本模块的
 :class:`SkillDef`——`heroes` 在 import 期读到的 :data:`CATALOG` 是装备那半张，而它的定义由

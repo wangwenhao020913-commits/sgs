@@ -192,7 +192,7 @@ EQUIPMENT_CARD_TYPE_IDS: tuple[str, ...] = tuple(
     for skill_id, definition in CATALOG.items()
     if definition.carrier is CarrierKind.EQUIPMENT
 )
-"""标准版 17 张装备的**牌名 id**（9 武器 + 2 防具 + 6 坐骑），不带前缀。"""
+"""22 张装备的**牌名 id**（11 武器 + 4 防具 + 7 坐骑；M5-01a 起含军争 5 张），不带前缀。"""
 
 EQUIPMENT_SKILL_IDS: frozenset[str] = frozenset(
     definition.skill_id

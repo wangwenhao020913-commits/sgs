@@ -204,23 +204,78 @@ def test_the_source_ceiling_is_enforced_at_construction_time():
 
 
 # ---------------------------------------------------------------------------
-# 上界要按**当前进制**校验（W4-fix-5）：票 01 的 ``base = 109`` 不再是"碰巧成立"
+# 上界要按**当前进制**校验（W4-fix-5 / M5-01a）：票 01 的 ``base = 109`` 不再是
+# "碰巧成立"，更大的牌堆按同一条界**收紧**来源上界
 # ---------------------------------------------------------------------------
 
 
 def test_the_current_pack_passes_the_base_check():
-    """正常牌堆 ``base = 109``：构造期检查通过（每个 ``kind`` 都产得出 id）。"""
+    """正常牌堆 ``base = 109``：7 张来源的编码仍撑得住（每个 ``kind`` 都产得出 id）。"""
     count = len(PACK.deck.cards)
     assert BASE == 109, "标准包 108 张 ⇒ 进制 109"
     for kind in KINDS:
         virtual_card_id(kind=kind, sources=(0,), card_count=count)
 
 
-def test_a_base_too_large_for_the_source_ceiling_is_rejected_at_construction_time():
-    """200 张的包 ⇒ ``base = 201``：撑不住 7 张来源，构造期抛错（不静默产 id）。"""
-    with pytest.raises(VirtualSourceError, match="当前进制撑不住这个来源上限"):
+def test_the_standard_108_ids_stay_on_the_frozen_seven_source_block():
+    """108 张档的段容量**一字不改**：仍是 ``8 * 109**7`` 的 7 张来源紧界。
+
+    牌堆自适应只能**收紧**（160 张掉到 6），不能因 53 张档数学上容得下 8 张就改大。
+    这里用冻结算式值直接对账（除了 47 条金录像之外的第二道锁）。
+    """
+    block = 8 * 109**7
+    assert block == 1_462_431_296_653_352, "7 张来源的段容量是 W4 时代冻结的算式值"
+    assert (
+        virtual_card_id(kind=2, sources=(18,), card_count=108)
+        == -2_924_862_593_306_832
+    ), "kind=2 / 单源 18 的 id = -(1 + 2*block + (1*109+18))"
+    assert virtual_card_id(kind=4, sources=(), card_count=108) == -(1 + 4 * block)
+
+
+def test_a_smaller_deck_does_not_raise_the_source_ceiling_above_seven():
+    """53 张档（base=54）数学上容得下 8 张来源，但上限冻结在 7——旧 id 不漂移。"""
+    count = 53
+    virtual_card_id(
+        kind=int(VirtualKind.PEACH), sources=tuple(range(7)), card_count=count
+    )
+    with pytest.raises(VirtualSourceError):
+        virtual_card_id(
+            kind=int(VirtualKind.PEACH), sources=tuple(range(8)), card_count=count
+        )
+
+
+def test_the_military_160_deck_narrows_the_source_ceiling_but_keeps_ids_safe():
+    """160 张军争 ⇒ ``base = 161``：7 张来源越过线上上限，故按 6 张编码。
+
+    这是 M5-01a 的 160 档能跑全 AI 的结构前提：不收紧的话任何转化牌
+    （关羽 / 赵云 / 大乔 / 华佗 / 丈八蛇矛 / 八卦阵）都会在构造期抛错。
+    6 张仍远大于本里程碑的最多两张来源（【丈八蛇矛】）。
+    """
+    count = 160
+    ceiling = 6
+    assert len(KINDS) * (ceiling + 1) * 161**ceiling < WIRE_INT_LIMIT
+    assert len(KINDS) * (ceiling + 2) * 161 ** (ceiling + 1) >= WIRE_INT_LIMIT, (
+        "160 进制下 7 张必须撑不住，否则这条测试没有钉住收紧的边界"
+    )
+
+    for kind in KINDS:
+        for sources in ((), (0,), (0, 1), tuple(range(ceiling))):
+            card_id = virtual_card_id(kind=kind, sources=sources, card_count=count)
+            assert abs(card_id) < WIRE_INT_LIMIT, (kind, sources, card_id)
+
+    with pytest.raises(VirtualSourceError):
         virtual_card_id(
             kind=int(VirtualKind.PEACH),
-            sources=(0, 1),
-            card_count=200,
+            sources=tuple(range(ceiling + 1)),
+            card_count=count,
+        )
+
+
+def test_an_absurd_base_is_rejected_at_construction_time():
+    """牌堆大到连一张来源的编码都撑不住 ⇒ 构造期 fail-closed（不静默产 id）。"""
+    with pytest.raises(VirtualSourceError, match="撑不住"):
+        virtual_card_id(
+            kind=int(VirtualKind.PEACH),
+            sources=(0,),
+            card_count=2**53,
         )
