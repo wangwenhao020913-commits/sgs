@@ -51,6 +51,8 @@ class SeatSpec:
     hero: str | None = None
     kingdom: Kingdom | None = None
     virtual_equipment: tuple[str, ...] = ()
+    chained: bool = False
+    """是否横置（M5-03 的连环状态；构造局面时直接给定，不必先打一张铁索）。"""
 
 
 def cards_of_type(pack: ContentPack, type_id: str) -> list[int]:
@@ -85,6 +87,7 @@ def build_state(
             hero=spec.hero,
             kingdom=spec.kingdom,
             virtual_equipment=tuple(spec.virtual_equipment),
+            chained=spec.chained,
         )
         for seat, spec in enumerate(seats)
     )

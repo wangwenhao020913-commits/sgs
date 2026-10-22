@@ -48,7 +48,8 @@ def test_the_zone_enum_is_exactly_the_six_m2_zones():
     }
 
 
-def test_move_reasons_are_exactly_the_six_m2_values():
+def test_move_reasons_are_exactly_the_m2_values_plus_reforge():
+    """M5-03 追加 ``REFORGE``（重铸：不算弃置、算失去，§5.1.3）；其余六个 M2 取值不变。"""
     assert {reason.value for reason in MoveReason} == {
         "DRAW",
         "USE",
@@ -56,6 +57,7 @@ def test_move_reasons_are_exactly_the_six_m2_values():
         "PUT",
         "JUDGE",
         "LOSE",
+        "REFORGE",
     }
 
 

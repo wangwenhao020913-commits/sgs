@@ -22,6 +22,7 @@ from sgs.state import (
     Action,
     CardMoveDelta,
     CardRef,
+    ChainedChangeDelta,
     DeckShuffleDelta,
     Delta,
     FrameKind,
@@ -40,6 +41,7 @@ __all__ = [
     "SUPPORTED_EVENT_VERSIONS",
     "ActionRecord",
     "CardMoveRecord",
+    "ChainedChangeRecord",
     "DeckShuffleRecord",
     "DeltaRecord",
     "FrameRecord",
@@ -112,6 +114,15 @@ class HpChangeRecord(HpChangeDelta):
     depth: int
 
 
+class ChainedChangeRecord(ChainedChangeDelta):
+    """一次横置状态变化（M5-03）：铁索的 toggle 与属性伤害命中的"结算后立即重置"。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
 class DeckShuffleRecord(DeckShuffleDelta):
     kind: Literal["delta"] = "delta"
     seq: int
@@ -140,6 +151,7 @@ class IdentityRevealRecord(IdentityRevealDelta):
 DeltaRecord = Annotated[
     CardMoveRecord
     | HpChangeRecord
+    | ChainedChangeRecord
     | DeckShuffleRecord
     | IdentityDealRecord
     | IdentityRevealRecord,
@@ -256,6 +268,8 @@ def wrap_delta(delta: Delta, *, seq: int, frame_id: int, depth: int) -> DeltaRec
         return CardMoveRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, HpChangeDelta):
         return HpChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, ChainedChangeDelta):
+        return ChainedChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, IdentityDealDelta):
         return IdentityDealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, IdentityRevealDelta):

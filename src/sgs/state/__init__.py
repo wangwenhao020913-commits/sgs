@@ -5,6 +5,7 @@
 
 from .deltas import (
     CardMoveDelta,
+    ChainedChangeDelta,
     DeckShuffleDelta,
     Delta,
     HpChangeDelta,
@@ -42,6 +43,7 @@ from .protocol import (
     PlayerView,
     Query,
     QueryKind,
+    Reforge,
     RespondContext,
     RespondMode,
     RespondQuery,
@@ -78,6 +80,7 @@ __all__ = (
     "ArrangeQuery",
     "CardMoveDelta",
     "CardRef",
+    "ChainedChangeDelta",
     "DeckShuffleDelta",
     "Delta",
     "DiscardCards",
@@ -101,6 +104,7 @@ __all__ = (
     "PlayerView",
     "Query",
     "QueryKind",
+    "Reforge",
     "RespondContext",
     "RespondMode",
     "RespondQuery",

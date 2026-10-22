@@ -41,10 +41,12 @@ from sgs.data import Identity, Mode
 from sgs.effects import (
     DODGE_RESPONSE_CARD,
     NULLIFY_RESPONSE_CARD,
+    DamageNature,
     EffectStep,
     FinalZone,
     ResponseWindow,
     behavior_for,
+    damage_amount,
     recover_amount,
     response_count,
     target_is_effective,
@@ -64,11 +66,14 @@ from sgs.state import (
     DodgeContext,
     FrameKind,
     GameState,
+    MoveReason,
     PlayCard,
     QueryKind,
     RespondMode,
     UseCard,
     WindowCause,
+    Zone,
+    ZoneRef,
     rejudge_askers,
     seats_from,
 )
@@ -187,6 +192,21 @@ class FrameHost(StepHost, Protocol):
     ) -> Any: ...
 
     def apply_hp_change(self, frame: Frame, seat: int, value: int) -> Any: ...
+
+    def move_in_frame(
+        self,
+        frame: Frame | None,
+        cards: tuple[CardRef, ...],
+        *,
+        to_zone: ZoneRef,
+        reason: MoveReason,
+        owner: int | None,
+        actor: int | None = None,
+    ) -> Control: ...
+
+    def draw_for_hand(self, frame: Frame, seat: int, n: int) -> bool: ...
+
+    def set_chained(self, frame: Frame | None, seat: int, chained: bool) -> bool: ...
 
 
 def _emit(
@@ -799,6 +819,60 @@ def damage_take(host: FrameHost, frame: Frame) -> Control:
     return _emit_damage(host, frame, Timing.DAMAGE_TAKE, frame.data["target"])
 
 
+CHAIN_TRIGGER_KEY = "chain_trigger"
+"""帧私有槽名：这次伤害是**源头属性伤害**且命中了横置角色（M5-03 的传导触发判据）。
+
+写在 DAMAGE 帧上、进 ``_after_pop`` 的引擎规则读它。**帧私有数据不进记录流**，故标准 108
+（无属性牌型、无人横置）逐字节不变。
+"""
+
+CHAIN_RESET_KEY = "chain_reset"
+"""帧私有槽名：这次伤害的**受伤害者**是横置的，伤害值落地后要立即重置（M5-03）。
+
+由 DAMAGE 帧在数值定稿时算出、随载荷交给 LIFE_DECREASE 帧：重置因此发生在**同一伤害
+事件内**、先于 ``DAMAGE_AFTER_TAKE`` / 濒死 / 死亡，不另开事件帧。
+"""
+
+_ATTRIBUTE_NATURES = (DamageNature.FIRE, DamageNature.THUNDER)
+"""会触发连环传导的伤害属性（普通伤害不触发，spec §5.1.1）。"""
+
+
+def damage_finalize_amount(host: FrameHost, frame: Frame) -> None:
+    """**伤害数值定稿**（M5-03）：过伤害修饰器链，并判定横置重置 / 传导触发。
+
+    时机在"受到伤害时"整步之后（含它的钩子与追问）、扣减体力之前：这正是官方"确定伤害
+    数值"的位置，``frame.data["amount"]`` 从此是**实际要扣的**数值。三件事：
+
+    1. 数值 = :func:`~sgs.effects.damage_amount`（来源侧只在 ``chain=False`` 的源头帧算，
+       目标侧每帧都算）；
+    2. ``chain_reset`` = 受伤害者此刻横置 ∧ 属性伤害（火 / 雷）∧ 数值 > 0 ∧ 未防止；
+    3. ``chain_trigger`` = ``chain_reset`` ∧ **不是传导伤害**（``chain=True`` 不再传导）。
+
+    这一步**不 dispatch 任何时机**（``Step(damage_finalize_amount, None)``）：它是数值结算，
+    不是新时机；对标准 108 是零动作（没有伤害数值修饰器、无人横置）。
+    """
+    amount = frame.data["amount"]
+    reset = False
+    if not has_tag(frame, Tag.PREVENTED):
+        amount = damage_amount(
+            host.state,
+            source=frame.data.get("source"),
+            target=frame.data["target"],
+            card=frame.data.get("channel"),
+            base=amount,
+            chain=bool(frame.data.get("chain")),
+        )
+        reset = (
+            amount > 0
+            and frame.data.get("nature") in _ATTRIBUTE_NATURES
+            and host.state.player(frame.data["target"]).chained
+        )
+    frame.data["amount"] = amount
+    frame.data[CHAIN_RESET_KEY] = reset
+    frame.data[CHAIN_TRIGGER_KEY] = reset and not bool(frame.data.get("chain"))
+    return None
+
+
 def damage_push_life_decrease(host: FrameHost, frame: Frame) -> None:
     """"受到伤害时"之后进入扣减体力结算；**帧标签 ``PREVENTED`` 为真时跳过**。
 
@@ -813,6 +887,7 @@ def damage_push_life_decrease(host: FrameHost, frame: Frame) -> None:
             "target": frame.data["target"],
             "source": frame.data["source"],
             "amount": frame.data["amount"],
+            CHAIN_RESET_KEY: bool(frame.data.get(CHAIN_RESET_KEY)),
         },
         timing=Timing.LIFE_DECREASE_BEFORE,
     )
@@ -875,6 +950,8 @@ def damage_end(host: FrameHost, frame: Frame) -> Control:
 DAMAGE_STEPS = (
     Step(damage_deal, Timing.DAMAGE_DEAL),
     Step(damage_take, Timing.DAMAGE_TAKE),
+    # 数值定稿：非 dispatch（不对应任何时机枚举位）；横置重置 / 传导触发的判据在这里算。
+    Step(damage_finalize_amount, None),
     # 压栈步骤的 `timing` 只作子帧 `return_to` 的可读标签：LIFE_DECREASE_BEFORE
     # 由 LIFE_DECREASE 帧自己 dispatch。
     Step(damage_push_life_decrease, Timing.LIFE_DECREASE_BEFORE),
@@ -907,6 +984,23 @@ def life_decrease_on(host: FrameHost, frame: Frame) -> Control:
     return None
 
 
+def life_decrease_reset_chain(host: FrameHost, frame: Frame) -> None:
+    """**属性伤害命中横置者 ⇒ 伤害值落地后立即重置**（M5-03 / spec §5.1.1）。
+
+    插入点是"扣减体力时"整步之后、濒死帧之前：官方顺序"伤害值落地 → 重置横置 →
+    受到伤害后 / 濒死 / 死亡"因此由步骤表直接表达，钩子在 ``DAMAGE_AFTER_TAKE``、
+    濒死、死亡里读到的都是**已重置**。重置是**同一伤害事件内**的一步（本 LIFE_DECREASE
+    帧），不压新帧、不 dispatch 新时机；状态写入走引擎的 ``set_chained``（唯一写入口），
+    故记录流里 ``chained_change`` 与那条 ``hp_change`` 同帧、且排在 ``DAMAGE_AFTER_TAKE`` 之前。
+
+    判据（``chain_reset``）由 DAMAGE 帧在数值定稿时算好并随载荷传来：横置 ∧ 属性伤害
+    （火 / 雷）∧ 实际伤害 > 0 ∧ 未被防止。普通伤害与未被横置的受伤害者都是零动作。
+    """
+    if not frame.data.get(CHAIN_RESET_KEY):
+        return
+    host.set_chained(frame, frame.data["target"], False)
+
+
 def life_decrease_trigger_near_death(host: FrameHost, frame: Frame) -> None:
     """体力 ≤ 0 ⇒ 插入濒死结算（官方 4.17 第 1 条）。
 
@@ -936,6 +1030,8 @@ def life_decrease_after(host: FrameHost, frame: Frame) -> Control:
 LIFE_DECREASE_STEPS = (
     Step(life_decrease_before, Timing.LIFE_DECREASE_BEFORE),
     Step(life_decrease_on, Timing.LIFE_DECREASE_ON),
+    # 横置重置：非 dispatch（不对应任何时机枚举位），在濒死 / after-take 之前（M5-03）。
+    Step(life_decrease_reset_chain, None),
     # 压栈步骤的 `timing` 只作子帧 `return_to` 的可读标签：NEAR_DEATH_ENTER
     # 由 NEAR_DEATH 帧自己 dispatch。
     Step(life_decrease_trigger_near_death, Timing.NEAR_DEATH_ENTER),
@@ -1391,6 +1487,37 @@ SKILL_STEPS = (Step(skill_activate, None),)
 """主动技帧：非 dispatch 的单步（``None`` = 这一步本身不对应任何时机枚举位）。"""
 
 
+# ---- MOVE 帧：重铸的结算主体（M5-03）----------------------------------------
+#
+# 重铸**不是使用**，故不能借 USE / RESOLVE 帧；但它要"弃置 → 摸一张"，其中弃置会派发
+# `MOVE_AFTER`、可能提问而让出控制权。用游离步骤（回合环）做会让摸牌抢在「失去牌后」
+# 之前落地；这里压一个 MOVE 帧（既有枚举位）把两件事排成帧内两步：提问暂停后从
+# `pc` 续跑，摸牌自然排在「失去牌后」整条派发之后。
+
+
+def reforge_lose_card(host: FrameHost, frame: Frame) -> Control:
+    """重铸第一步：这张牌手牌 → 弃牌堆（``reason = REFORGE``，算失去不算弃置）。"""
+    seat = frame.data["source"]
+    return host.move_in_frame(
+        frame,
+        (frame.data["card"],),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.REFORGE,
+        owner=seat,
+        actor=seat,
+    )
+
+
+def reforge_draw(host: FrameHost, frame: Frame) -> Control:
+    """重铸第二步：摸一张牌（与其它摸牌同一 ``shuffle`` 子流、同一短摸口径）。"""
+    host.draw_for_hand(frame, frame.data["source"], 1)
+    return None
+
+
+MOVE_STEPS = (Step(reforge_lose_card, None), Step(reforge_draw, None))
+"""重铸帧：两个非 dispatch 的步骤（``None`` = 不对应任何时机枚举位）。"""
+
+
 def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
     """按模式装配步骤表：只有 DEATH 帧的形状分叉（票 25）。"""
     return {
@@ -1398,6 +1525,7 @@ def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
         FrameKind.RESOLVE: RESOLVE_STEPS,
         FrameKind.PLAY: PLAY_STEPS,
         FrameKind.SKILL: SKILL_STEPS,
+        FrameKind.MOVE: MOVE_STEPS,
         FrameKind.DAMAGE: DAMAGE_STEPS,
         FrameKind.LIFE_DECREASE: LIFE_DECREASE_STEPS,
         FrameKind.NEAR_DEATH: NEAR_DEATH_STEPS,

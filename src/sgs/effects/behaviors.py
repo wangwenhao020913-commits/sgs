@@ -156,6 +156,22 @@ class TargetRule:
     self_only: bool = False
     requires_wounded_self: bool = False
     max_distance: int | None = None
+    min_targets: int | None = None
+    """**目标数区间**的下界（M5-03；``None`` = 不启用区间规则）。
+
+    区间规则与 ``rated_targets`` 的"额定 N 个"是**两种形状**：区间给的是"一次使用可指定
+    ``min..max`` 个"（铁索连环 = 1–2），组合由 :func:`sgs.effects.target_combos` 摊开。
+    ``min_targets`` 同时就是"**0 目标非法**"的落点（铁索 = 1）。两个都为 ``None`` 时行为
+    与 M2 逐字相同（额定 / 全体存活两档），故既有牌型一行不改。
+    """
+
+    max_targets: int | None = None
+    """**目标数区间**的上界（``None`` = 不设上限，取候选池大小）。"""
+
+    @property
+    def is_range(self) -> bool:
+        """这条规则是否用**目标数区间**（``min_targets`` / ``max_targets``）表达。"""
+        return self.min_targets is not None or self.max_targets is not None
 
     def includes_self_in_pool(self) -> bool:
         """候选池是否含使用者自己（由目标数来源 + ``includes_self`` 派生）。"""
@@ -166,10 +182,25 @@ class TargetRule:
         return self.includes_self
 
     def target_count(self, pool_size: int) -> int:
-        """本牌这一问要指定几个目标；``ALL_ALIVE*`` 档取整个候选池。"""
+        """本牌这一问**至少**要指定几个目标；``ALL_ALIVE*`` 档取整个候选池。
+
+        区间规则返回下界（铁索 = 1）：它同时是"0 目标非法"的读点
+        （``steps.use_push_resolve`` 用 ``> 0`` 判"要不要压 RESOLVE"）。
+        """
+        if self.is_range:
+            return self.min_targets or 0
         if self.count is TargetCount.RATED:
             return self.rated_targets
         return pool_size
+
+    def target_range(self, pool_size: int) -> tuple[int, int]:
+        """``(下界, 上界)``：区间规则的候选组合由此摊开；其余档退化为"恰好 N 个"。"""
+        if self.is_range:
+            low = self.min_targets or 0
+            high = self.max_targets if self.max_targets is not None else pool_size
+            return low, high
+        count = self.target_count(pool_size)
+        return count, count
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +284,13 @@ class CardBehavior:
 
     response_window: ResponseWindow | None = None
     """"生效前"给响应者开的窗口（票 11 §7 / 票 28）：【杀】= 闪、锦囊 = 无懈、其余无。"""
+
+    reforgeable: bool = False
+    """这张牌能否**重铸**（M5-03 / 决策 D6）。
+
+    重铸是牌面声明的一条**独立动作**（不是使用）：出牌阶段里可重铸的牌各给一条
+    ``Reforge`` 候选，结算 = 弃置 + 摸一张。目前只有【铁索连环】声明为真。
+    """
 
     @property
     def count_key(self) -> str:
@@ -498,10 +536,11 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
     "iron_chain": CardBehavior(
         card_type_id="iron_chain",
         use_timings=(_PLAY_PHASE,),
-        target_rule=TargetRule(rated_targets=1, includes_self=True),
+        target_rule=TargetRule(min_targets=1, max_targets=2, includes_self=True),
         use_limit=_UNLIMITED,
-        effects=(),
+        effects=(CallOp("resolve_iron_chain"),),
         response_window=ResponseWindow.NULLIFY,
+        reforgeable=True,
     ),
     "supply_shortage": _one_other(
         "supply_shortage", final_zone=FinalZone.JUDGE, max_distance=1

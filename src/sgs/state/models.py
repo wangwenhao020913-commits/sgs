@@ -134,6 +134,13 @@ class MoveReason(str, Enum):
     """判定：牌堆 → 处理区 → 弃牌堆（亮判定牌与判定牌生效后入弃牌堆，`11.6`）。"""
     LOSE = "LOSE"
     """失去：判定区 / 装备区 → 弃牌堆或他处（替换失去旧装备、拆 / 顺，`4.10` / `11.5`）。"""
+    REFORGE = "REFORGE"
+    """重铸（M5-03）：手牌 → 弃牌堆，**不算弃置、算失去**（§5.1.3）。
+
+    "失去"一侧的判据与 :class:`MoveReason` 无关（``move_after`` 只看区域与移动后的持有），
+    故 REFORGE 照常触发【连营】/【枭姬】；"弃置"类触发若出现，必须显式比较原因、把
+    REFORGE 排除在外。事件流据此写「重铸」，不写「弃置」。
+    """
 
 
 class Phase(str, Enum):
@@ -151,8 +158,8 @@ class FrameKind(str, Enum):
     """结算事件的帧类型（票 04 §6）。
 
     前八个是 M2 真的会走到 `push` 的结算单元（``JUDGE`` 自票 26 从占位转真帧）；
-    其余是留位（触发它们的机制在本里程碑被排除），只作 ``frame`` 记录
-    ``frame_kind`` 的合法取值。
+    ``MOVE`` 自 M5-03 起承载**重铸**的"弃置 + 摸一张"；其余是留位（触发它们的机制在
+    本里程碑被排除），只作 ``frame`` 记录 ``frame_kind`` 的合法取值。
     """
 
     # M2 会走到
@@ -164,9 +171,9 @@ class FrameKind(str, Enum):
     DEATH = "DEATH"
     RECOVER = "RECOVER"
     JUDGE = "JUDGE"
+    MOVE = "MOVE"
     # 留枚举位
     PLAY = "PLAY"
-    MOVE = "MOVE"
     LIFE_LOSE = "LIFE_LOSE"
     MAXLIFE = "MAXLIFE"
     RANK_COMPARE = "RANK_COMPARE"
@@ -188,7 +195,11 @@ class Player(BaseModel):
     judge: list[int] = Field(default_factory=list)
     """判定区（**先入在前**）；"最后置入"的读取端用 ``reversed()`` 表达（票 08 §8）。"""
     chained: bool = False
-    """是否横置（铁索连环，U1-04 先落座位字段；**状态接线归 M5**）。"""
+    """是否横置（铁索连环）。
+
+    U1-04 先落座位字段；**M5-03 接线**：写入唯一入口是 ``Engine.set_chained``（铁索连环的
+    toggle 与属性伤害的"结算后立即重置"），每次变化发一条 ``chained_change`` delta。
+    """
     wine_active: bool = False
     """【酒】的"下一张【杀】+1"是否生效（U1-04 先落座位字段；**状态接线归 M5**）。"""
     card_use_counts: dict[str, int] = Field(default_factory=dict)

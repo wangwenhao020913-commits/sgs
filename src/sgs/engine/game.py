@@ -82,6 +82,7 @@ from sgs.state import (
     ArrangeContext,
     ArrangeQuery,
     CardRef,
+    ChainedChangeDelta,
     DiscardQuery,
     DodgeContext,
     DodgeQuery,
@@ -97,6 +98,7 @@ from sgs.state import (
     Player,
     Query,
     QueryKind,
+    Reforge,
     RespondContext,
     RespondMode,
     RespondQuery,
@@ -139,7 +141,7 @@ from .journal import (
     wrap_delta,
 )
 from .rng import RandomSource
-from .steps import build_steps
+from .steps import CHAIN_TRIGGER_KEY, build_steps
 from .victory import DeathFact, Side, solve_identity_outcome
 
 __all__ = ["DRAW_COUNT", "INITIAL_HP", "Engine", "Outcome", "instantiate_cards", "new_game"]
@@ -404,6 +406,13 @@ class Engine:
         重入**不一定落在同一个步骤上**（拆顺会继续跑效果帧的后续步骤、使用链会继续跑
         L4/L5），故挂起状态存在引擎上，由 :meth:`_flush_pending_move` 在"引擎空闲"处
         接着派发完——这是"移动入口不建帧"（R1-Q2）的代价，也是它的唯一落点。
+        """
+        self._conduction: dict[str, Any] | None = None
+        """进行中的**连环传导**（M5-03 / spec §5.1.1）：名单 + 游标 + 源伤害事实。
+
+        名单在传导开始时**一次锁定**（``seats`` 元组），此后中途新横置的角色不会进来；
+        轮到时已重置 / 已阵亡的座位在派发前跳过。它是引擎规则处理，不是 ``Timing`` /
+        技能钩子，故不进记录流：回放重跑引擎时会按同一份状态重建。
         """
         self._turn_data: dict[str, Any] = {}
         self._turn_steps: tuple[Callable[[], Any], ...] = (
@@ -726,10 +735,100 @@ class Engine:
         """唯一的出栈收尾：记一条 ``pop``，再跑响应型使用的**成败传播**（票 11 §2）。
 
         ``pop_frame`` 与 :meth:`_step` 都经这里，故"帧的生命周期"在记录流里没有缺口、
-        传播也只可能跑一次。
+        传播也只可能跑一次。DAMAGE 帧出栈后另跑**连环传导**的引擎规则（M5-03）：它是
+        "初始目标的伤害事件处理完之后"由系统决定派发的属性伤害，不是新时机。
         """
         self._emit_frame("pop", popped)
         self._propagate_cancel(popped)
+        if popped.kind is FrameKind.DAMAGE:
+            self._settle_chain_conduction(popped)
+
+    def _conduction_order(self) -> tuple[int, ...]:
+        """**锁定名单**：从当前回合角色起、座位号递增（逆时针、绕环）扫描仍横置的座位。
+
+        扫描**只看横置**（存活与否留给轮到时跳过）：这样"名单里的角色在轮到他之前死亡"
+        与"一开始就阵亡"走同一条跳过路径。当前回合角色若仍横置则排第一，否则第一个
+        横置角色自然成为起点。初始目标此刻已重置，故不会出现在名单里。
+        """
+        total = len(self.state.players)
+        if total <= 0:
+            return ()
+        start = self.state.turn_seat if self.state.turn_seat is not None else 0
+        return tuple(
+            (start + offset) % total
+            for offset in range(total)
+            if self.state.player((start + offset) % total).chained
+        )
+
+    def _settle_chain_conduction(self, popped: Frame) -> None:
+        """DAMAGE 帧出栈后的连环传导（M5-03 / spec §5.1.1 的逐条裁定）。
+
+        - **触发**：只有源头属性伤害（``chain=False``、火 / 雷）命中横置角色——判据由
+          :func:`~sgs.engine.steps.damage_finalize_amount` 写进帧私有 ``chain_trigger``；
+        - **锁定**：初始目标的伤害事件处理完之后才建名单（``_conduction_order``），此后
+          中途新横置的不进名单；轮到时已重置 / 已阵亡的跳过；
+        - **派发**：名单逐个压 **DAMAGE 帧**（``chain=True``）：来源 / 属性 / 渠道沿用源伤害，
+          数量 = 初始目标**实际受到**的伤害值（帧私有 ``amount`` 已过修饰器链）；
+        - **不再传导**：传导帧的 ``chain_trigger`` 恒假（``chain=True``），故本方法只会在
+          下一帧出栈时推进游标，不会开第二轮。
+        """
+        conduction = self._conduction
+        if conduction is not None and conduction["frame_id"] == popped.frame_id:
+            conduction["cursor"] += 1
+            self._push_next_conduction()
+            return
+        if self.finished or self.pending_outcome is not None:
+            return
+        if not popped.data.get(CHAIN_TRIGGER_KEY):
+            return
+        seats = self._conduction_order()
+        if not seats:
+            return
+        self._conduction = {
+            "seats": seats,
+            "cursor": 0,
+            "frame_id": 0,
+            "source": popped.data.get("source"),
+            "nature": popped.data.get("nature"),
+            "amount": popped.data["amount"],
+            "channel": popped.data.get("channel"),
+            "card": popped.data.get("card"),
+            "use_timing": popped.data.get("use_timing"),
+        }
+        self._push_next_conduction()
+
+    def _push_next_conduction(self) -> None:
+        """按锁定名单派发下一个传导伤害；名单走完即清空传导状态。"""
+        conduction = self._conduction
+        assert conduction is not None
+        if self.finished or self.pending_outcome is not None:
+            self._conduction = None
+            return
+        while conduction["cursor"] < len(conduction["seats"]):
+            seat = conduction["seats"][conduction["cursor"]]
+            player = self.state.player(seat)
+            if not player.alive or not player.chained:
+                # 轮到时已阵亡 / 已解除横置 ⇒ 跳过（名单本身不重算）。
+                conduction["cursor"] += 1
+                continue
+            frame = self.push_frame(
+                FrameKind.DAMAGE,
+                {
+                    "source": conduction["source"],
+                    "targets": (seat,),
+                    "card": conduction["card"],
+                    "channel": conduction["channel"],
+                    "use_timing": conduction["use_timing"],
+                    "target": seat,
+                    "nature": conduction["nature"],
+                    "chain": True,
+                    "amount": conduction["amount"],
+                },
+                timing=Timing.DAMAGE_DEAL,
+            )
+            conduction["frame_id"] = frame.frame_id
+            return
+        self._conduction = None
 
     def _propagate_cancel(self, popped: Frame) -> None:
         """出栈钩子：响应型使用的 RESOLVE 帧出栈即向**它指向的那一层**传播成败（票 11 §2）。
@@ -1012,6 +1111,24 @@ class Engine:
         return self.push_frame(
             FrameKind.SKILL,
             self._skill_payload(action, source),
+            timing=Timing.PHASE_PLAY_IDLE,
+        )
+
+    def start_reforge(self, action: Reforge, *, source: int) -> Frame:
+        """发动重铸：压一个 **MOVE 帧**跑"弃置 → 摸一张"（M5-03 / 决策 D6）。
+
+        重铸不是使用，故不建 USE / RESOLVE 帧（不算使用锦囊、不进 use count、不开无懈窗口）。
+        MOVE 帧只做两件帧内的事：``reason = REFORGE`` 的移动（会派发「失去牌后」，钩子可
+        提问并暂停）与随后的摸一张——两步走保证重铸自己的摸牌排在「失去牌后」之后。
+        """
+        return self.push_frame(
+            FrameKind.MOVE,
+            {
+                "source": source,
+                "targets": (),
+                "card": action.card,
+                "use_timing": Timing.PHASE_PLAY_IDLE,
+            },
             timing=Timing.PHASE_PLAY_IDLE,
         )
 
@@ -2122,6 +2239,25 @@ class Engine:
         self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
         return delta
 
+    def set_chained(self, frame: Frame | None, seat: int, chained: bool) -> bool:
+        """写一个座位的**横置**状态并落一条 ``chained_change``（M5-03 的唯一写入口）。
+
+        返回值 = 状态真的变了吗。铁索连环的 toggle 与属性伤害的"结算后立即重置"都经这里，
+        故"重置在伤害事件内、先于 `DAMAGE_AFTER_TAKE`"由**调用点**决定，这里只管写状态 +
+        记 delta：``frame`` 是承载帧（重置 = LIFE_DECREASE 帧，记录流里因此与那条
+        ``hp_change`` 同帧），帧外写状态时为 ``None``（记录坐标 ``frame_id = 0``）。
+        """
+        player = self.state.player(seat)
+        if player.chained == chained:
+            return False
+        player.chained = chained
+        self.emit_delta(
+            ChainedChangeDelta(seat=seat, chained=chained),
+            frame_id=(frame.frame_id if frame is not None else 0),
+            depth=self.stack.depth,
+        )
+        return True
+
     # -- 询问 ---------------------------------------------------------------
 
     def ask(self, build: Callable[[int], Query]) -> Action | _Suspend:
@@ -3054,6 +3190,10 @@ class Engine:
         if isinstance(action, ActivateSkill):
             # 主动技（票 04）：压 SKILL 帧跑发动主体，出栈后回到本步重新询问。
             self.start_skill(action, source=seat)
+            return "stay"
+        if isinstance(action, Reforge):
+            # 重铸（M5-03）：压 MOVE 帧跑"弃置 + 摸一张"，出栈后回到本步重新询问。
+            self.start_reforge(action, source=seat)
             return "stay"
         # 使用一张牌：压入 USE 帧；子帧结算完再回到本步重新询问（票 07 §3）。
         # W5-02a：借刀的附带指定（Bn）随动作进帧，其余每一条使用都是空元组。

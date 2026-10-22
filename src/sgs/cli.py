@@ -165,6 +165,10 @@ def render(record: JournalRecord) -> str:
                 f"#{record.seq:<4} 体力 座位={record.seat} "
                 f"{record.before}→{record.after}（{record.amount:+d}）"
             )
+        if record.delta_type == "chained_change":
+            # 横置 / 解除横置（M5-03）：只作调试转写；面向玩家的措辞归 M5-08d。
+            state = "横置" if record.chained else "解除横置"
+            return f"#{record.seq:<4} 连环 座位={record.seat} {state}"
         if record.delta_type == "identity_deal":
             return (
                 f"#{record.seq:<4} 身份 座位={record.seat} "

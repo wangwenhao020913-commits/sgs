@@ -197,6 +197,17 @@ def resolve_ex_nihilo(host: Any, frame: Frame) -> None:
     host.draw_for_hand(frame, host.current_target(frame), EX_NIHILO_DRAW)
 
 
+def resolve_iron_chain(host: Any, frame: Frame) -> None:
+    """【铁索连环】：**当前目标**独立 toggle 横置状态（M5-03 / 规格 §5.1.2）。
+
+    每个目标各自结算（RESOLVE 帧逐目标走 C1–C5），故这里只翻**当前目标**：
+    "可指定 1–2 个、每个独立 toggle"因此不需要第二份多目标循环，也不产生额外帧。
+    状态写入走引擎的 ``set_chained``（唯一写入口），delta 落在本 RESOLVE 帧上。
+    """
+    target = host.current_target(frame)
+    host.set_chained(frame, target, not host.state.player(target).chained)
+
+
 def resolve_peach_garden(host: Any, frame: Frame) -> None:
     """【桃园结义】：当前目标回复 1 点体力。
 
@@ -632,6 +643,7 @@ OPS: dict[str, Callable[[Any, Frame], Any]] = {
     after_lightning.__name__: after_lightning,
     after_skill_judgment.__name__: after_skill_judgment,
     resolve_ex_nihilo.__name__: resolve_ex_nihilo,
+    resolve_iron_chain.__name__: resolve_iron_chain,
     resolve_peach_garden.__name__: resolve_peach_garden,
     resolve_dismantlement.__name__: resolve_dismantlement,
     resolve_snatch.__name__: resolve_snatch,

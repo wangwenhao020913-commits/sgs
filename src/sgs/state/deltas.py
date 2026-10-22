@@ -1,8 +1,9 @@
 """变化事件（delta）的载荷类型：一次状态变化的纯事实（票 06 §2 / §3）。
 
-五种 ``delta_type``（``card_move`` / ``hp_change`` / ``deck_shuffle`` / ``identity_deal`` /
-``identity_reveal``）：它们是记录流 schema 的一部分，后补会动事件版本，所以即使 M1 的
-骨架期只用得到 ``card_move`` 也先建位。记录层（``engine``）在这些模型上**继承**出带
+六种 ``delta_type``（``card_move`` / ``hp_change`` / ``chained_change`` / ``deck_shuffle`` /
+``identity_deal`` / ``identity_reveal``）：它们是记录流 schema 的一部分，后补会动事件版本，
+所以即使 M1 的骨架期只用得到 ``card_move`` 也先建位；``chained_change`` 是 M5-03 的就地
+追加（横置状态，记录流仍为事件版本 2）。记录层（``engine``）在这些模型上**继承**出带
 ``seq`` / ``frame_id`` / ``depth`` 的记录子类，从而 JSON 是平铺的。
 """
 
@@ -18,6 +19,7 @@ from .models import CardRef, MoveReason, ZoneRef, _FrozenModel
 
 __all__ = [
     "CardMoveDelta",
+    "ChainedChangeDelta",
     "DeckShuffleDelta",
     "Delta",
     "HpChangeDelta",
@@ -53,6 +55,19 @@ class HpChangeDelta(_FrozenModel):
     before: int
     after: int
     amount: int
+
+
+class ChainedChangeDelta(_FrozenModel):
+    """一个座位的**横置**状态被写成某个值（M5-03 / 决策 D5）。
+
+    写入口唯一：``Engine.set_chained``。铁索连环的 toggle 与属性伤害的"结算后立即重置"
+    都经它发这条 delta——重置因此发生在**同一伤害事件内**（记录流里与那条
+    ``hp_change`` 同帧），不另开事件帧，也不产生第二个时机。
+    """
+
+    delta_type: Literal["chained_change"] = "chained_change"
+    seat: int
+    chained: bool
 
 
 class DeckShuffleDelta(_FrozenModel):
@@ -94,6 +109,11 @@ class IdentityRevealDelta(_FrozenModel):
 
 
 Delta = Annotated[
-    CardMoveDelta | HpChangeDelta | DeckShuffleDelta | IdentityDealDelta | IdentityRevealDelta,
+    CardMoveDelta
+    | HpChangeDelta
+    | ChainedChangeDelta
+    | DeckShuffleDelta
+    | IdentityDealDelta
+    | IdentityRevealDelta,
     Field(discriminator="delta_type"),
 ]

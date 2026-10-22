@@ -34,6 +34,7 @@ __all__ = [
     "ModifierRole",
     "PriorityClass",
     "apply_modifiers",
+    "damage_amount",
     "priority_class_of",
     "recover_amount",
     "response_count",
@@ -100,7 +101,9 @@ class ModifierPoint(str, Enum):
     - ``EFFECTIVENESS``：第 2 层"无效"（仁王盾）；
     - ``CANDIDATES``：候选行动的追加（丈八蛇矛 / 八卦阵的候选注入）；
     - ``RESPONSE_COUNT``：本次响应窗口**需要几张**（缺省 1；票 08 的 M3 加法）；
-    - ``RECOVER_AMOUNT``：本次回复**回复几点**（缺省 1；票 09 的 M3 加法，【救援】）。
+    - ``RECOVER_AMOUNT``：本次回复**回复几点**（缺省 1；票 09 的 M3 加法，【救援】）；
+    - ``DAMAGE_DEAL_AMOUNT`` / ``DAMAGE_TAKE_AMOUNT``：本次伤害的**来源侧 / 目标侧**数值
+      （M5-03 的加法；【酒】/【古锭刀】与【藤甲】/【白银狮子】的落点）。
 
     ``TARGET_COUNT`` 的语义（W7-01）：查询期修正"本牌**最大**目标数"，``current`` 从
     **额定目标数**起（``TargetRule.rated_targets``；【借刀杀人】的被迫使用窗口 base = 1，
@@ -109,6 +112,12 @@ class ModifierPoint(str, Enum):
     ``TargetCount.RATED`` 的牌生效**：``ALL_ALIVE`` / ``ALL_ALIVE_WITH_SELF``（南蛮 /
     万箭 / 桃园 / 五谷）的目标数由候选池决定，查链会造出**非法子集**，故读者
     （``_play_phase`` / ``_respond`` 的 USE 趟 / ``virtual_card_use``）只在 RATED 档派发。
+
+    **伤害数值为什么分成两个挂点**（M5-03）：连环传导的合同要求"来源侧加伤只算一次、
+    传导目标只再吃自己的受到伤害修正"（spec §5.1.1 第 6 条）。两个挂点把这条读法变成
+    **结构事实**：:func:`damage_amount` 只在 ``chain=False`` 的源头伤害帧上派发
+    ``DAMAGE_DEAL_AMOUNT``，而 ``DAMAGE_TAKE_AMOUNT`` 每一帧都派发——传导帧因此不可能
+    重算来源侧加成，不需要任何回调自己判"这次是不是传导"。
     """
 
     COUNT_LIMIT = "COUNT_LIMIT"
@@ -119,6 +128,8 @@ class ModifierPoint(str, Enum):
     CANDIDATES = "CANDIDATES"
     RESPONSE_COUNT = "RESPONSE_COUNT"
     RECOVER_AMOUNT = "RECOVER_AMOUNT"
+    DAMAGE_DEAL_AMOUNT = "DAMAGE_DEAL_AMOUNT"
+    DAMAGE_TAKE_AMOUNT = "DAMAGE_TAKE_AMOUNT"
 
 
 class ModifierRole(str, Enum):
@@ -245,3 +256,43 @@ def recover_amount(
     """
     ctx = ModifierContext(subject=source, target=target, card=card)
     return apply_modifiers(ModifierPoint.RECOVER_AMOUNT, state, ctx, base)
+
+
+def damage_amount(
+    state: GameState,
+    *,
+    source: int | None,
+    target: int,
+    card: CardRef | None,
+    base: int,
+    chain: bool,
+) -> int:
+    """本次伤害的**最终数值**（M5-03）：来源侧只在源头帧算一次，目标侧每一帧都算。
+
+    两段链、一个读者，`DAMAGE` 帧的"受到伤害时"之后（``steps.damage_finalize_amount``）
+    是唯一调用点：
+
+    1. ``DAMAGE_DEAL_AMOUNT``（**来源侧**：酒 / 古锭刀）——只有 ``chain=False`` 的源头伤害
+       才派发。传导帧的基数是初始目标**实际受到**的伤害值，来源侧加成已经烘进那个数里，
+       重算就会翻倍（spec §5.1.1 第 6 条）。派发时 ``ctx.role = SUBJECT``（主体 = 来源）。
+    2. ``DAMAGE_TAKE_AMOUNT``（**目标侧**：藤甲 / 白银）——**每一帧**都派发，包括传导帧；
+       回调按 ``ctx.target == ctx.owner`` 认自己。``ctx.role = TARGET``。
+
+    链序仍是 ``(priority_class, skill_id, owner)``；没有命中任何修饰器时返回 ``base``
+    （标准 108 无任何伤害数值修饰器 ⇒ 逐字节不变）。
+    """
+    ctx = ModifierContext(
+        subject=source if source is not None else -1,
+        target=target,
+        role=ModifierRole.TARGET,
+        card=card,
+    )
+    value = base
+    if not chain:
+        value = apply_modifiers(
+            ModifierPoint.DAMAGE_DEAL_AMOUNT,
+            state,
+            replace(ctx, role=ModifierRole.SUBJECT),
+            value,
+        )
+    return apply_modifiers(ModifierPoint.DAMAGE_TAKE_AMOUNT, state, ctx, value)

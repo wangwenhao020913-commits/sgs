@@ -345,7 +345,7 @@ class PlayerPublic(_FrozenModel):
     equip: tuple[CardRef, ...]
     judge: tuple[CardRef, ...]
     chained: bool = Field(default=False, exclude=True)
-    """横置状态（U1-04 下发的座位事实；M5 接状态前恒 ``False``）。
+    """横置状态（U1-04 下发的座位事实；M5-03 起由铁索连环 / 传导重置真实写入）。
 
     ``exclude`` 与 ``hero`` / ``kingdom`` 同一条纪律：**不进记录流**，标准 47 条金录像
     逐字节不变。它由 ``visible_snapshot`` 经 ``display.decorate_snapshot`` 写进网页载荷。
@@ -433,6 +433,18 @@ class PlayCard(_ActionBase):
     card: CardRef
 
 
+class Reforge(_ActionBase):
+    """重铸（M5-03 / 决策 D6）：这张牌离开手牌进弃牌堆，摸一张；**不是使用**。
+
+    必须是独立构造子：重铸不算使用锦囊、不进 ``use_count``、不走使用结算栈、不能被无懈
+    ——把它做成 ``UseCard`` 的变体会让这四条在记录流与规则层同时失守。载荷沿用其它行动的
+    线形：``card``（这张实体牌）+ ``answers_seq``（本行动应答的询问）。
+    """
+
+    kind: Literal["Reforge"] = "Reforge"
+    card: CardRef
+
+
 class SelectCards(_ActionBase):
     """选牌：``picks`` 是**选择面内的位置**（``Slot`` 的下标），不携带牌面身份。"""
 
@@ -484,6 +496,7 @@ Action = Annotated[
     | EndPhase
     | DiscardCards
     | PlayCard
+    | Reforge
     | SelectCards
     | ActivateSkill
     | SelectOption

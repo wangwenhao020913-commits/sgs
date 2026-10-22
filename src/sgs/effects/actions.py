@@ -34,6 +34,7 @@ from sgs.state import (
     PlayCard,
     Player,
     QueryKind,
+    Reforge,
     RespondContext,
     RespondMode,
     SelectCards,
@@ -235,7 +236,7 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
     """
     behavior = behavior_for(card)
     rule = behavior.target_rule
-    if rule.count is TargetCount.RATED and rule.rated_targets == 0:
+    if rule.count is TargetCount.RATED and not rule.is_range and rule.rated_targets == 0:
         return ()
     if rule.self_only:
         me = state.player(seat)
@@ -609,22 +610,21 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
             continue
         rule = behavior_for(card).target_rule
         pool = check_targets(state, seat, card)
-        count = rule.target_count(len(pool))
-        if count <= 0:
+        low, high = rule.target_range(len(pool))
+        if high <= 0:
             # 空池的"全体存活"牌（唯一存活者）没有合法候选；M1 的额定牌由
             # ``target_combos`` 自然为空，这里只补上零目标那档。
             continue
-        high = count
-        if rule.count is TargetCount.RATED:
+        if rule.count is TargetCount.RATED and not rule.is_range:
             high = apply_modifiers(
                 ModifierPoint.TARGET_COUNT,
                 state,
                 ModifierContext(subject=seat, card=card),
-                count,
+                high,
             )
         generated: tuple[Action, ...] = tuple(
             UseCard(card=card, targets=combo, answers_seq=answers_seq)
-            for combo in target_combos(pool, count, high)
+            for combo in target_combos(pool, low, high)
         )
         ctx = ModifierContext(subject=seat, card=card)
         actions.extend(
@@ -640,6 +640,13 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
             ModifierContext(subject=seat, card=None, answers_seq=answers_seq, scope=CandidateScope.PLAY),
             (),
         )
+    )
+    # 重铸（M5-03）：可重铸的牌各给一条**独立构造子**——它不是使用，故不过可用性 /
+    # 次数 / 目标 / 无懈任何一道使用闸门（规格 §5.1.3：无次数限制、不算使用锦囊）。
+    actions.extend(
+        Reforge(card=card, answers_seq=answers_seq)
+        for card in state.refs(state.player(seat).hand)
+        if behavior_for(card).reforgeable
     )
     actions.append(EndPhase(answers_seq=answers_seq))
     return actions
@@ -976,6 +983,10 @@ def _sort_key(action: Action) -> tuple[Any, ...]:
     if isinstance(action, UseCard):
         return (0, (action.card.card_id, *action.targets), action.kind)
     if isinstance(action, PlayCard):
+        return (0, (action.card.card_id,), action.kind)
+    if isinstance(action, Reforge):
+        # 重铸带牌实例但没有目标：与其它带牌的构造子同档（先按牌 id），仍排在
+        # ``EndPhase``（兜底键）之前——"结束阶段排最后"的既有口径不破（M5-03）。
         return (0, (action.card.card_id,), action.kind)
     if isinstance(action, SelectCards):
         return (0, action.picks, action.kind)

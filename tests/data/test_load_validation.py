@@ -468,8 +468,11 @@ def test_the_military_behaviors_declare_the_static_skeleton():
     assert wine.final_zone is FinalZone.DISCARD
 
     iron_chain = CARD_BEHAVIORS["iron_chain"]
-    assert iron_chain.target_rule.rated_targets == 1, "1–2 目标由 M5-03 扩"
+    assert (iron_chain.target_rule.min_targets, iron_chain.target_rule.max_targets) == (1, 2), (
+        "1–2 目标 = M5-03 的 min/max 区间规则（0 目标非法、可指定自己）"
+    )
     assert iron_chain.target_rule.includes_self_in_pool() is True, "可指定自己（D7）"
+    assert iron_chain.reforgeable is True, "重铸是牌面声明（M5-03 / D6）"
     assert iron_chain.final_zone is FinalZone.DISCARD
     assert iron_chain.response_window is ResponseWindow.NULLIFY
 
