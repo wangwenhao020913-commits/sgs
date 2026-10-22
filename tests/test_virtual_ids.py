@@ -15,6 +15,7 @@ from itertools import combinations
 
 import pytest
 
+from sgs.data import load_content_pack
 from sgs.skills import (
     MAX_VIRTUAL_SOURCES,
     VirtualKind,
@@ -22,7 +23,7 @@ from sgs.skills import (
     transformed_card,
     virtual_card_id,
 )
-from sgs.skills.virtual import WIRE_INT_LIMIT
+from sgs.skills.virtual import LEGACY_KIND_COUNT, WIRE_INT_LIMIT
 
 from support import SeatSpec, build_state
 from test_skills import PACK
@@ -31,6 +32,15 @@ BASE = len(PACK.deck.cards) + 1
 """编码进制 = 牌堆张数 + 1（标准包 108 张 ⇒ 109）。"""
 
 KINDS = tuple(range(len(VirtualKind)))
+
+FIRE_KIND = int(VirtualKind.FIRE_SLASH)
+"""M5-05b 新增的火【杀】命名空间（本票唯一允许追加的 kind）。"""
+
+STANDARD_108_BLOCK = 8 * 109**7
+"""108 张 / 7 张来源的泛化段容量（W4 冻结值；追加 kind 后一字不改）。"""
+
+MILITARY_160_BLOCK = 7 * 161**6
+"""160 张 / 6 张来源的泛化段容量（M5-01a 的收紧；追加 kind 后一字不改）。"""
 
 
 def _capacity(source_count: int, base: int = BASE) -> int:
@@ -279,3 +289,114 @@ def test_an_absurd_base_is_rejected_at_construction_time():
             sources=(0,),
             card_count=2**53,
         )
+
+
+# ---------------------------------------------------------------------------
+# M5-05b：火【杀】命名空间（只追加一个 kind；旧 kind 的 block / offset 一字不改）
+# ---------------------------------------------------------------------------
+
+
+def test_appending_the_fire_slash_kind_does_not_move_the_old_kind_ids():
+    """旧 kind 0–4 的 block / offset 逐字节不变：108 仍按 7 张来源的紧界分块。
+
+    这是本票的硬约束（票面「108 的既有 id 逐字节不变」）：新 kind **只能追加在
+    ``5 * old_block`` 之后**；把 ``KIND_COUNT`` 从 5 加 1 再让 108 的来源上限掉到 6
+    会挪动旧泛化段的 block，这里用冻结算式值逐段对账。
+    """
+    count = 108
+    block = STANDARD_108_BLOCK
+    assert block == 1_462_431_296_653_352, "7 张来源的段容量是 W4 时代冻结的算式值"
+    assert (
+        abs(virtual_card_id(kind=int(VirtualKind.PEACH), sources=(), card_count=count))
+        == 1 + 2 * block
+    )
+    assert (
+        abs(
+            virtual_card_id(
+                kind=int(VirtualKind.PEACH), sources=(18,), card_count=count
+            )
+        )
+        == 1 + 2 * block + (1 * 109 + 18)
+    )
+    assert (
+        abs(
+            virtual_card_id(
+                kind=int(VirtualKind.INDULGENCE), sources=(), card_count=count
+            )
+        )
+        == 1 + 3 * block
+    )
+    assert (
+        abs(virtual_card_id(kind=int(VirtualKind.DUEL), sources=(), card_count=count))
+        == 1 + 4 * block
+    )
+
+
+def test_the_fire_slash_kind_opens_the_next_generalized_block_without_overlap():
+    """新 kind 整段排在旧泛化段之后：``[1+5*block, 6*block]``，且上界仍在线内。
+
+    ``min(|id|) = 1 + 5 * block`` 恰是【决斗】段上界 + 1；段容量仍按 **7 张来源**
+    （108）/ **6 张来源**（160）取紧界——追加 kind 只加段数，不改来源上限。
+    """
+    for count, block in ((108, STANDARD_108_BLOCK), (160, MILITARY_160_BLOCK)):
+        new_min = abs(
+            virtual_card_id(kind=FIRE_KIND, sources=(), card_count=count)
+        )
+        assert new_min == 1 + 5 * block, (count, new_min)
+        assert 6 * block < WIRE_INT_LIMIT, (
+            f"{count} 张档的全体 kind 上界 6*block 必须仍 < WIRE_INT_LIMIT"
+        )
+
+
+def test_the_fire_slash_kind_is_wire_safe_and_does_not_collide_with_the_old_kinds():
+    """108 / 160 两档：新 kind × 0..来源上限的端点 id 全部在线内且不撞旧 kind。"""
+    for count, ceiling in ((108, 7), (160, 6)):
+        seen: dict[int, tuple[int, tuple[int, ...]]] = {}
+        for kind in range(LEGACY_KIND_COUNT, FIRE_KIND + 1):
+            for size in range(ceiling + 1):
+                sources = tuple(range(count - size, count))  # 编码最大的端点
+                card_id = virtual_card_id(
+                    kind=kind, sources=sources, card_count=count
+                )
+                assert abs(card_id) < WIRE_INT_LIMIT, (count, kind, sources, card_id)
+                assert card_id not in seen, (
+                    f"{count} 张档撞 id：{card_id} 同时来自 {seen[card_id]} 与 "
+                    f"{(kind, sources)}"
+                )
+                seen[card_id] = (kind, sources)
+
+
+def test_the_source_ceilings_stay_seven_for_108_and_six_for_160_after_the_new_kind():
+    """追加 kind 后来源上限的读数不变：108 = 7、160 = 6（每个 kind 都产得出 id）。"""
+    for count, ceiling in ((108, 7), (160, 6)):
+        for kind in KINDS:
+            virtual_card_id(
+                kind=kind, sources=tuple(range(ceiling)), card_count=count
+            )
+            with pytest.raises(VirtualSourceError):
+                virtual_card_id(
+                    kind=kind, sources=tuple(range(ceiling + 1)), card_count=count
+                )
+
+
+def test_a_fire_slash_virtual_product_is_constructible_in_the_160_deck():
+    """160 档能构造火【杀】产物：单源继承花色 / 点数 / 颜色，id 在线内且不与普通【杀】撞。"""
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    state = build_state(pack=pack, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    source = next(card.card_id for card in state.cards if card.type == "fire_slash")
+    origin = state.card(source)
+
+    product = transformed_card(state, (source,), "fire_slash")
+
+    assert product.type == "fire_slash" and product.is_virtual
+    assert product.name == "火杀"
+    assert product.virtual_sources == (source,)
+    assert (product.suit, product.rank, product.color) == (
+        origin.suit,
+        origin.rank,
+        origin.color,
+    )
+    assert abs(product.card_id) < WIRE_INT_LIMIT
+    assert product.card_id != transformed_card(state, (source,), "slash").card_id, (
+        "同一来源的普通【杀】产物与火【杀】产物必须分处两个 kind 段"
+    )

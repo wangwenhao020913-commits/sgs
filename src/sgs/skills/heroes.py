@@ -56,7 +56,13 @@ from sgs.state import (
     Zone,
 )
 
-from .catalog import HeroSkillDecl, ModifierContext, SkillDef, resolve_instances
+from .catalog import (
+    HeroSkillDecl,
+    ModifierContext,
+    SkillDef,
+    SkillSourceKind,
+    resolve_instances,
+)
 from .flow import seat_choice
 from .virtual import card_ids, single_conversion
 
@@ -305,14 +311,28 @@ def _candidate_skill_ids(state: GameState, owner: int, card: Any) -> tuple[str, 
     """一张**虚拟牌候选**归属哪些已拥有的转化技（清单渲染的技能归属判据）。
 
     - **单来源**：读 :func:`conversion_offers_by_source`——区域 / 颜色 / 花色 / 牌名 /
-      时机谓词全在那份声明表里，故"这张【闪】能不能当【杀】"不会在这里有第二份答案；
+      时机谓词全在那份声明表里，故"这张【闪】能不能当【杀】"不会在这里有第二份答案。
+      **装备转化技**（M5-05b 的朱雀羽扇）不在 H 族声明表里，另按"载体 = 装备区实体牌 +
+      产物牌名 + 单来源"归属（见下方内联注释）；
     - **多来源**（【丈八蛇矛】）：单源声明表不覆盖它，改按定义上的
       :attr:`~sgs.skills.catalog.SkillDef.virtual_source_count` + ``virtual_type_ids``
       归属——两张来源的虚拟【杀】只有张数是 2 的那条技能能转出来。
     """
     sources = tuple(int(source) for source in card.virtual_sources)
     if len(sources) == 1:
-        return conversion_offers_by_source(state, owner, card.type).get(sources[0], ())
+        offered = conversion_offers_by_source(state, owner, card.type).get(sources[0], ())
+        # 装备转化技（M5-05b 的朱雀羽扇）不在 H 族声明表里：来源谓词内联在
+        # ``CANDIDATES`` 回调里，声明上只有产物牌名，故按"产物牌名 + 单来源"归属
+        # ——候选存在本身已证明来源筛过（清单与确认都从这份内部候选池派生）。
+        declared = tuple(
+            instance.skill_id
+            for instance in resolve_instances(state)
+            if instance.owner == owner
+            and instance.source.kind is SkillSourceKind.EQUIPMENT_CARD
+            and card.type in instance.definition.virtual_type_ids
+            and instance.definition.virtual_source_count == 1
+        )
+        return tuple(dict.fromkeys((*offered, *declared)))
     return tuple(
         instance.skill_id
         for instance in resolve_instances(state)

@@ -72,7 +72,7 @@ from .flow import (
     provide_face,
     run_flow,
 )
-from .virtual import card_ids, grouped_candidates
+from .virtual import card_ids, grouped_candidates, single_conversion
 
 __all__ = [
     "ACTIVATION_PLANS",
@@ -876,8 +876,22 @@ def activation_plan(state: GameState, frame: Frame, instance: SkillInstance) -> 
 
 
 def _own_slash(ctx: ModifierContext, *, holder: int | None) -> bool:
-    """``holder`` 是否**持有一张【杀】**且它就是本次查询的牌。"""
-    return ctx.owner == holder and ctx.card is not None and ctx.card.type == "slash"
+    """``holder`` 是否**持有一张【杀】**且它就是本次查询的牌。
+
+    M5-05b 起按【杀】**家族**判据（:func:`~sgs.effects.is_slash` = 共享 ``count_key``）
+    而不是产物牌型相等：火【杀】/ 雷【杀】与转化、虚拟【杀】因此也命中依赖本判据的四条
+    装备效果——诸葛连弩的无次数限制、青釭剑的无视防具、方天画戟的最后一张手牌 +2、
+    仁王盾的黑色【杀】无效。
+
+    藤甲的"普通【杀】对你无效"**不**读本判据（`_VINE_ARMOR_IMMUNE_CARD_TYPES` 是
+    **normal-only** 的牌型闭集，D9 / M5-05a）：家族判据与"是不是属性【杀】"方向相反，
+    不能互换。
+    """
+    return (
+        ctx.owner == holder
+        and ctx.card is not None
+        and is_slash(behavior_for(ctx.card))
+    )
 
 
 def _unlimited_slash(state: GameState, ctx: ModifierContext, current: Any) -> Any:
@@ -1148,6 +1162,47 @@ def _serpent_spear_candidate(state: GameState, ctx: ModifierContext, current: An
             target_type_id="slash",
             cards=card_ids(state, ctx.subject, Zone.HAND),
             group_size=2,
+            scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
+        ),
+    )
+
+
+def _normal_slash(state: GameState, card_id: int) -> bool:
+    """朱雀羽扇的**源筛选**：产物之外的牌型一律不收，只收 ``slash``（普通【杀】）。
+
+    火【杀】/ 雷【杀】是**独立牌型**（D2 / D9），不能再被羽扇转化——否则产物属性会
+    按来源递归漂移。"普通【杀】"因此是牌型相等，不是 :func:`~sgs.effects.is_slash`
+    的家族判据：家族判据用于**产物能不能当【杀】**（接缝 / 响应 / 装备门控），
+    两者方向相反，不能混用。
+    """
+    return state.card(card_id).type == "slash"
+
+
+def _vermilion_fan_candidate(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """朱雀羽扇：一张普通【杀】当火【杀】**使用或打出**（M5-05b；D2 / D8 / D9）。
+
+    与 H 族单源转化**同一份**候选构造（:func:`~sgs.skills.virtual.single_conversion`）：
+    - 源 = **普通【杀】**（手牌 ∪ 装备，`GLOSSARY.md`「区域默认」）；
+    - 产物牌型 ``fire_slash``——FIRE 伤害由**产物牌型的行为表**声明（M5-02），故本技能
+      没有第二套属性通道；
+    - 语境 = ``PLAY`` + ``RESPOND``：出牌阶段使用，南蛮 / 决斗 / 借刀的响应窗口打出；
+    - 来源实体牌由引擎的虚拟源移动路径（``Engine._move_virtual_sources``）进弃牌堆。
+    """
+    sources = tuple(
+        card_id
+        for card_id in (
+            card_ids(state, ctx.subject, Zone.HAND)
+            + card_ids(state, ctx.subject, Zone.EQUIP)
+        )
+        if _normal_slash(state, card_id)
+    )
+    return (
+        *current,
+        *single_conversion(
+            state,
+            ctx,
+            target_type_id="fire_slash",
+            cards=sources,
             scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
         ),
     )
@@ -1752,9 +1807,9 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         requirement="计算与其他角色的距离时 -1",
         modifiers=_DISTANCE_MINUS_ONE,
     ),
-    # ---- M5-01a：军争 5 件装备的技能**占位**（可加载的空壳；效果由 M5-05 落地）----
-    # 4 条锁定技按牌面锁定标记、无挂点；朱雀羽扇是转化技，占位只声明 ``virtual_type_ids``
-    # （形态表据此把它读成「转化技」），CANDIDATES / 伤害属性等效果留给 M5-05。
+    # ---- M5-01a 的五件军争装备（M5-05a 落四件数值效果；M5-05b 落朱雀羽扇转化）----
+    # 4 条锁定技按牌面锁定标记；朱雀羽扇的 CANDIDATES 走单源转化（产物 ``fire_slash``），
+    # ``virtual_type_ids`` 供接入层把候选对回技能（形态表也据此读成「转化技」）。
     _equip(
         "silver_lion",
         locked=True,
@@ -1787,6 +1842,7 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         "vermilion_feather_fan",
         locked=False,
         requirement="你可以将一张普通【杀】当【火杀】使用或打出",
+        modifiers=(Modifier(ModifierPoint.CANDIDATES, _vermilion_fan_candidate),),
         virtual_type_ids=("fire_slash",),
     ),
     _equip(

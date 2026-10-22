@@ -51,6 +51,7 @@ __all__ = [
     "UseLimit",
     "UseTiming",
     "behavior_for",
+    "satisfies_required",
 ]
 
 
@@ -344,6 +345,24 @@ def is_slash(behavior: CardBehavior) -> bool:
     只认"是不是【杀】"，不认打出去的是哪张实体牌。
     """
     return behavior.count_key == SLASH_FAMILY_KEY
+
+
+def satisfies_required(card: CardRef, required: str) -> bool:
+    """:class:`CardRef` 能不能充当 ``required`` 牌名的响应（**牌名闸门的唯一判据**）。
+
+    ``required`` 的语义是"这次需要一张什么牌"（B1 的 ``_required_hand``、转化候选的
+    ``respond_required`` 都读它）。判据默认是**逐字相等的牌名**；唯一放宽的是【杀】族：
+    ``required == "slash"`` 时火【杀】/ 雷【杀】/ 转化与虚拟【杀】都算——它们与普通【杀】
+    共享 :data:`SLASH_FAMILY_KEY`，故 M5-05b 起直接读 :func:`is_slash`，不写具体牌名。
+
+    **不放宽其它牌名**：``required == "dodge"`` 仍只接受产物牌型 ``dodge``（藤甲的
+    "普通【杀】无效"同理是 normal-only 判据，见 ``skills/catalog.py`` 的
+    ``_VINE_ARMOR_IMMUNE_CARD_TYPES``）。两个调用点（真牌响应窗口 / 转化候选）因此
+    不可能各写一份"什么牌能当什么牌"。
+    """
+    return card.type == required or (
+        required == SLASH_FAMILY_KEY and is_slash(behavior_for(card))
+    )
 
 
 def _one_other(

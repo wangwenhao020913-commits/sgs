@@ -55,6 +55,7 @@ from .behaviors import (
     TargetCount,
     UseContext,
     behavior_for,
+    satisfies_required,
 )
 from .modifiers import (
     CandidateScope,
@@ -948,12 +949,16 @@ def _required_hand(
     真牌与转化牌也不必区分——:func:`~sgs.skills.transformed_card` 把虚拟牌的类型写成
     目标牌名，故【龙胆】的转化【闪】与真【闪】在这里同形。
 
+    **牌名判据只有一处**：:func:`~sgs.effects.satisfies_required`（M5-05b 起【杀】族按
+    共享计数键放宽——火【杀】/ 雷【杀】因此出现在南蛮 / 决斗 / 借刀的响应窗口里；其余
+    ``required`` 仍逐字相等）。
+
     ``required = None`` 是改判窗口（``WindowCause.REJUDGE``）：打出一张**任意**手牌。
     """
     cards: list[CardRef] = []
     for card_id in state.player(seat).hand:
         card = state.card(card_id)
-        if required is not None and card.type != required:
+        if required is not None and not satisfies_required(card, required):
             continue
         if check_forbidden(state, seat, card):
             continue

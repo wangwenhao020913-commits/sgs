@@ -39,6 +39,7 @@ from sgs.effects import (
     check_count,
     check_targets,
     forced_use_targets,
+    satisfies_required,
     target_combos,
 )
 from sgs.state import (
@@ -82,6 +83,7 @@ class VirtualKind(IntEnum):
     PEACH = 2
     INDULGENCE = 3
     DUEL = 4
+    FIRE_SLASH = 5
 
 
 LEGACY_KIND_COUNT = 2
@@ -100,8 +102,11 @@ _KIND_BY_TYPE: dict[str, VirtualKind] = {
     "peach": VirtualKind.PEACH,
     "indulgence": VirtualKind.INDULGENCE,
     "duel": VirtualKind.DUEL,
+    "fire_slash": VirtualKind.FIRE_SLASH,
 }
-"""目标**牌名 id** → 命名空间；只登记本里程碑有生产者的牌（票 03 §表 / 票 04 加【决斗】）。"""
+"""目标**牌名 id** → 命名空间；只登记本里程碑有生产者的牌（票 03 §表 / 票 04 加【决斗】；
+M5-05b 加朱雀羽扇的火【杀】产物）。雷杀当前没有生产者，故**不登记**——空段会白占
+``KIND_COUNT``，把 108 的来源上限从 7 压到 6 并移动旧泛化段。"""
 
 KIND_COUNT = len(VirtualKind)
 """命名空间的段数（只读事实；id 算式不读它，构造期的上界检查读它作为段数）。"""
@@ -119,16 +124,17 @@ MAX_VIRTUAL_SOURCES = 7
 """虚拟牌的**来源张数上界**（108 张基准包；票 03 §验收 4；W4-fix-1 由 :data:`WIRE_INT_LIMIT` 反推）。
 
 :func:`_generalized_block` 的一段容量是 ``(MAX+1) * base**MAX``（紧界），而全体 id 的
-上界是 ``KIND_COUNT * block``；标准包 ``base = 109``、``KIND_COUNT = 5`` 时
+上界是 ``KIND_COUNT * block``；标准包 ``base = 109``、``KIND_COUNT = 6``（M5-05b 追加
+火【杀】段后）时
 
-- ``MAX = 7``：``5 * 8 * 109**7 ≈ 7.31e15 < 2**53 ≈ 9.01e15`` ✓
-- ``MAX = 8``：``5 * 9 * 109**8 ≈ 8.97e17`` ✗
+- ``MAX = 7``：``6 * 8 * 109**7 ≈ 8.77e15 < 2**53 ≈ 9.01e15`` ✓
+- ``MAX = 8``：``6 * 9 * 109**8 ≈ 1.07e18`` ✗
 
 故 7 是 108 张牌堆下编码撑得住的最大值。``tests/test_virtual_ids.py`` 从
 :data:`WIRE_INT_LIMIT` 重新推导它，不让这个数字成为魔法数。
 
 **更大的牌堆**（M5 的 160 张军争，``base = 161``）撑不住 7 张来源的编码；构造期由
-:func:`_source_ceiling_for_base` 按同一条界**收紧**到 6 张（``5 * 7 * 161**6 ≈ 6.1e14``）。
+:func:`_source_ceiling_for_base` 按同一条界**收紧**到 6 张（``6 * 7 * 161**6 ≈ 7.31e14``）。
 上界是 ``min(7, 撑得住的最大 m)``：更小的牌堆（53 张 ⇒ ``base = 54``）数学上容得下
 8 张，也**不**改大——兼容段与既有金录像按 7 冻结。这是按线上整数上限收紧，不是放宽：
 160 张的实际上界 6 仍远大于本里程碑的最多两张来源（【丈八蛇矛】）。超过上界的来源集合
@@ -532,8 +538,6 @@ def virtual_candidates(
         return []
     if ctx.scope not in scopes:
         return []
-    if ctx.scope is CandidateScope.RESPOND and ctx.respond_required != target_type_id:
-        return []
     actions: list[Any] = []
     for group in sources:
         if len(group) > MAX_VIRTUAL_SOURCES:
@@ -541,6 +545,15 @@ def virtual_candidates(
                 f"{target_type_id}: 来源 {len(group)} 张超过上界 {MAX_VIRTUAL_SOURCES}"
             )
         card = transformed_card(state, group, target_type_id)
+        if ctx.scope is CandidateScope.RESPOND and (
+            ctx.respond_required is None
+            or not satisfies_required(card, ctx.respond_required)
+        ):
+            # 牌名闸门（M5-05b）：响应窗口要的是 ``respond_required``，**产物牌型**必须
+            # 当得了它；判据与 ``effects/actions._required_hand`` 共用
+            # :func:`~sgs.effects.satisfies_required`，故【杀】族按共享计数键放宽
+            # （朱雀羽扇的火【杀】产物因此能打向南蛮 / 决斗 / 借刀），其余牌名逐字相等。
+            continue
         actions.extend(virtual_card_use(state, ctx.subject, card, ctx))
     return actions
 

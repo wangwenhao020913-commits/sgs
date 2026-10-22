@@ -48,6 +48,7 @@ from .behaviors import (
     WINE_COUNT_KEY,
     behavior_for,
     is_slash,
+    satisfies_required,
 )
 from .modifiers import (
     CandidateScope,
@@ -132,6 +133,7 @@ __all__ = (
     "priority_class_of",
     "recover_amount",
     "response_count",
+    "satisfies_required",
     "seat_distance",
     "substitute_judge_card",
     "swap_judge_card",

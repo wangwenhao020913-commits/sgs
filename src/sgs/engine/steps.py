@@ -47,6 +47,7 @@ from sgs.effects import (
     ResponseWindow,
     behavior_for,
     damage_amount,
+    is_slash,
     recover_amount,
     response_count,
     target_is_effective,
@@ -497,7 +498,9 @@ def _slash_canceled_seam(host: FrameHost, frame: Frame) -> Control:
     **被【闪】抵消的【杀】**上开，且提供者（青龙偃月刀 / 贯石斧）互斥（同为武器槽）。
     """
     card = frame.data.get("card")
-    if card is None or card.type != "slash":
+    if card is None or not is_slash(behavior_for(card)):
+        # M5-05b：按【杀】族判据（共享 ``count_key``）而不是产物牌型相等——火【杀】/
+        # 雷【杀】被【闪】抵消时与普通【杀】同形地进接缝。引擎仍不认识任何具体牌名。
         return None
     return host.dispatch_seam(frame, SeamKind.SLASH_CANCELED)
 
