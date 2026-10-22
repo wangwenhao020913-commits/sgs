@@ -478,12 +478,14 @@ def test_the_military_behaviors_declare_the_static_skeleton():
 
     fire_attack = CARD_BEHAVIORS["fire_attack"]
     assert fire_attack.target_rule.rated_targets == 1
-    assert fire_attack.target_rule.includes_self_in_pool() is False
+    assert fire_attack.target_rule.includes_self_in_pool() is True, "可指定自己（M5-06 / D10）"
+    assert fire_attack.target_filters == ("has_hand_cards",), "目标须有手牌（M5-06）"
     assert fire_attack.response_window is ResponseWindow.NULLIFY
 
     shortage = CARD_BEHAVIORS["supply_shortage"]
     assert shortage.is_delayed is True
     assert shortage.target_rule.max_distance == 1, "兵粮寸断：距离 1"
+    assert shortage.target_rule.includes_self_in_pool() is False, "只能对其他角色（M5-06）"
     assert shortage.response_window is ResponseWindow.NULLIFY
 
     for type_id in (

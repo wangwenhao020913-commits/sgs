@@ -471,6 +471,15 @@ def _has_zone_cards(state: GameState, source: int, target: int) -> bool:
     return bool(player.hand or player.equip or player.judge)
 
 
+def _has_hand_cards(state: GameState, source: int, target: int) -> bool:
+    """目标**手里有牌**（M5-06 的【火攻】"目标须有手牌才能被指定"）。
+
+    只读手牌：装备区 / 判定区有牌不算——火攻要亮的是手牌（spec §5.1.4 / D10）。
+    """
+    del source
+    return bool(state.player(target).hand)
+
+
 def _borrowed_sword_target(state: GameState, source: int, target: int) -> bool:
     """【借刀杀人】的第 0 层合法性：目标有**武器**且攻击范围内有合法【杀】目标。
 
@@ -492,6 +501,7 @@ def _wounded(state: GameState, source: int, target: int) -> bool:
 
 TARGET_FILTERS: dict[str, "Callable[[GameState, int, int], bool]"] = {
     "has_zone_cards": _has_zone_cards,
+    "has_hand_cards": _has_hand_cards,
     "borrowed_sword_target": _borrowed_sword_target,
 }
 """第 0 层附加谓词名 → 回调（``(state, source, target) -> bool``）。"""

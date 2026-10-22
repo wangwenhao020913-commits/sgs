@@ -22,6 +22,7 @@ from sgs.state import (
     Action,
     CardMoveDelta,
     CardRef,
+    CardRevealDelta,
     ChainedChangeDelta,
     DeckShuffleDelta,
     Delta,
@@ -42,6 +43,7 @@ __all__ = [
     "SUPPORTED_EVENT_VERSIONS",
     "ActionRecord",
     "CardMoveRecord",
+    "CardRevealRecord",
     "ChainedChangeRecord",
     "DeckShuffleRecord",
     "DeltaRecord",
@@ -141,6 +143,15 @@ class DeckShuffleRecord(DeckShuffleDelta):
     depth: int
 
 
+class CardRevealRecord(CardRevealDelta):
+    """一张手牌成为公开事实（M5-06）：【火攻】亮出的那一张，牌仍留在手里。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
 class IdentityDealRecord(IdentityDealDelta):
     """一次身份发放（票 13 §3 / 票 24）：开局逐座各一条、落在发牌之前。"""
 
@@ -164,6 +175,7 @@ DeltaRecord = Annotated[
     | HpChangeRecord
     | ChainedChangeRecord
     | WineChangeRecord
+    | CardRevealRecord
     | DeckShuffleRecord
     | IdentityDealRecord
     | IdentityRevealRecord,
@@ -284,6 +296,8 @@ def wrap_delta(delta: Delta, *, seq: int, frame_id: int, depth: int) -> DeltaRec
         return ChainedChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, WineChangeDelta):
         return WineChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, CardRevealDelta):
+        return CardRevealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, IdentityDealDelta):
         return IdentityDealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, IdentityRevealDelta):

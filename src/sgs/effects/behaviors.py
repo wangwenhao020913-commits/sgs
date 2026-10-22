@@ -589,9 +589,18 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
         use_limit=UseLimit(rated=1, count_key=WINE_COUNT_KEY),
         effects=(CallOp("resolve_wine"),),
     ),
-    # 火攻 / 铁索 / 兵粮：先立最小骨架（目标规则与窗口按牌面），
-    # 亮牌 + 同花色弃牌 = M5-06；1–2 目标 + 重铸 = M5-03；判定跳摸牌 = M5-06。
-    "fire_attack": _one_other("fire_attack"),
+    # 军争三张需询问 / 判定的牌：火攻 / 铁索 / 兵粮。
+    # 火攻（M5-06 / D10 / §5.1.4）：目标须**有手牌**（第 0 层 target filter），**可指定自己**；
+    # 效果 = 目标亮 1 张手牌 + 使用者可选弃一张同花色手牌 → 1 点火焰伤害（op 名见 OPS）。
+    "fire_attack": CardBehavior(
+        card_type_id="fire_attack",
+        use_timings=(_PLAY_PHASE,),
+        target_rule=TargetRule(rated_targets=1, includes_self=True),
+        use_limit=_UNLIMITED,
+        effects=(CallOp("resolve_fire_attack"),),
+        target_filters=("has_hand_cards",),
+        response_window=ResponseWindow.NULLIFY,
+    ),
     "iron_chain": CardBehavior(
         card_type_id="iron_chain",
         use_timings=(_PLAY_PHASE,),
@@ -602,7 +611,10 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
         reforgeable=True,
     ),
     "supply_shortage": _one_other(
-        "supply_shortage", final_zone=FinalZone.JUDGE, max_distance=1
+        "supply_shortage",
+        final_zone=FinalZone.JUDGE,
+        max_distance=1,
+        effects=(CallOp("resolve_supply_shortage"),),
     ),
     # 5 件装备：使用面 = 置入装备区；技能占位住 ``sgs.skills``（键 = ``equip.<id>``），
     # 效果由 M5-05 落地。

@@ -85,6 +85,7 @@ from sgs.state import (
     ArrangeContext,
     ArrangeQuery,
     CardRef,
+    CardRevealDelta,
     ChainedChangeDelta,
     DiscardQuery,
     DodgeContext,
@@ -1954,6 +1955,17 @@ class Engine:
         if self.state.turn_seat == seat:
             self._turn_data["skip_play"] = True
 
+    def skip_draw_phase(self, seat: int) -> None:
+        """让 ``seat`` 的**摸牌阶段**整体跳过（M5-06【兵粮寸断】的判定后果）。
+
+        与 :meth:`skip_play_phase` 同姿态：只对**当前回合角色**生效（判定阶段跑在该角色
+        自己的回合里），跳过由 :meth:`_phase_draw_start` 消费——连阶段体（多摸牌类技能）
+        与两条边界一并越过，直奔出牌阶段。**不是**技能钩子，故不新增 ``Timing``：
+        它是阶段推进的状态（spec §5.1.4 / 票面纪律）。
+        """
+        if self.state.turn_seat == seat:
+            self._turn_data["skip_draw"] = True
+
     def consume_delayed_card(self, frame: Frame) -> None:
         """把**延时锦囊本体**标记为"已消耗"：判定阶段循环的收尾据此送它进弃牌堆。
 
@@ -2306,6 +2318,20 @@ class Engine:
         """把一个座位的【酒】加伤清掉（回合的收尾点与下一回合起点各调一次，幂等）。"""
         if self.state.player(seat).wine_active:
             self.set_wine_active(None, seat, False)
+
+    def reveal_card(self, frame: Frame | None, seat: int, card: CardRef) -> None:
+        """把 ``seat`` 的一张**手牌**标成公开事实并落一条 ``card_reveal``（M5-06）。
+
+        唯一写入口：目前只有【火攻】的"目标亮 1 张"调它。**只揭示、不移动**——牌仍留在
+        原区（所以不是 ``card_move``、不进牌守恒），也**不写任何"已知"状态**：亮牌不是
+        持久知识，记录流里的这一条就是全部公开事实（spec §5.1.4 / D10）。``frame`` 是承载
+        帧（【火攻】的 RESOLVE 帧），记录坐标因此与那次结算的其它 delta 同帧。
+        """
+        self.emit_delta(
+            CardRevealDelta(seat=seat, card=card),
+            frame_id=(frame.frame_id if frame is not None else 0),
+            depth=self.stack.depth,
+        )
 
     # -- 询问 ---------------------------------------------------------------
 
@@ -3177,6 +3203,11 @@ class Engine:
 
     def _phase_draw_start(self) -> None:
         self.state.phase = Phase.DRAW
+        if self._turn_data.pop("skip_draw", False):
+            # 【兵粮寸断】判定非梅花 ⇒ **跳过摸牌阶段**（官方"跳过其摸牌阶段"）：
+            # 阶段体与边界一并越过，直奔出牌阶段（M5-06；与【乐不思蜀】跳过出牌阶段同形）。
+            self._skip_to(self._phase_play_start)
+            return
         self.emit_timing(Timing.PHASE_DRAW_START, actor=self.state.turn_seat)
 
     def _phase_draw(self) -> str | None:

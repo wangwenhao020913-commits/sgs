@@ -5,6 +5,7 @@
 
 from .deltas import (
     CardMoveDelta,
+    CardRevealDelta,
     ChainedChangeDelta,
     DeckShuffleDelta,
     Delta,
@@ -81,6 +82,7 @@ __all__ = (
     "ArrangeQuery",
     "CardMoveDelta",
     "CardRef",
+    "CardRevealDelta",
     "ChainedChangeDelta",
     "DeckShuffleDelta",
     "Delta",
