@@ -802,11 +802,27 @@ def _green_dragon_plan(state: GameState, frame: Frame, instance: SkillInstance) 
     return ActivationPlan(optional=True, available=available)
 
 
-def _double_sword_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
+def _double_sword_triggered(state: GameState, frame: Frame) -> bool:
+    """【雌雄双股剑】该不该管**这次使用**：来源用一张【杀】指定了异性目标（M5-bugfix）。
+
+    判据只看**使用**（``frame.data["card"]``）的牌型是不是【杀】族——含普通 / 火 / 雷与
+    转化、虚拟产物（:func:`~sgs.effects.is_slash`）；**不是**牌名白名单。火攻等普通锦囊
+    因此不得进那条选择（实机缺陷：双股剑对火攻也开出了"弃一张 / 令使用者摸一张"）。
+
+    发动形态（``_double_sword_plan``）与钩子体（``_double_sword``）共用本函数：前者决定
+    "要不要问是否发动"，后者在真正执行时再核一次同一条前提（锁定 / 直调路径也不漏）。
+    """
+    card = frame.data.get("card")
     source = frame.data.get("source")
+    if source is None or card is None or not is_slash(behavior_for(card)):
+        return False
     targets = tuple(frame.data.get("targets", ()))
-    available = source == instance.owner and any(
-        _opposite_genders(state, source, target) for target in targets
+    return any(_opposite_genders(state, source, target) for target in targets)
+
+
+def _double_sword_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
+    available = frame.data.get("source") == instance.owner and _double_sword_triggered(
+        state, frame
     )
     return ActivationPlan(optional=True, available=available)
 
@@ -1247,10 +1263,15 @@ def _double_sword(host: Any, frame: Frame) -> Control:
     选择权在**目标**（票 12 §Q17）：选项 = 弃一张手牌 / 令你摸一张；目标无手牌时
     "弃一张手牌"**不进候选**（付不起的组合不进候选，票 19 §6）。多目标时逐个目标处理，
     游标存帧内 ``double_sword_cursor``。
+
+    前提与 :func:`_double_sword_plan` **同源**（M5-bugfix）：必须是来源用【杀】指定了
+    异性目标的那次使用——火攻等非【杀】的使用不进本循环。
     """
     source = frame.data.get("source")
     targets = tuple(frame.data.get("targets", ()))
     state = host.state
+    if not _double_sword_triggered(state, frame):
+        return None
     cursor = frame.data.get("double_sword_cursor", 0)
     while cursor < len(targets):
         target = targets[cursor]

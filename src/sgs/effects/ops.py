@@ -77,6 +77,20 @@ _ZONE_SELECTION_SPEC = SelectionSpec(zones=_HAND_EQUIP_JUDGE, total=(1, 1))
 _HARVEST_SELECTION_SPEC = SelectionSpec(zones=(Zone.PROCESSING,), total=(1, 1))
 """五谷丰登：从亮出的牌里取一张（处理区、可见槽）。"""
 
+_BORROWED_SWORD_USE = "use"
+"""借刀持刀者已答 a（使用【杀】）——重入时不再发问、也不再交出武器。"""
+
+_BORROWED_SWORD_HAND_OVER = "hand_over"
+"""借刀持刀者已答 b（交出武器 / auto-b）——重入时只补做那次移动。"""
+
+_BORROWED_SWORD_RESOLVED = "borrowed_sword_resolved"
+"""借刀持刀者的决定（帧私有，M5-bugfix）。
+
+「出杀 / 交出武器」的应答由一次 ``ask`` 的**一次性**缓存交出，而 b 支的移动会内联派发
+「失去牌后」（孙尚香【枭姬】）并挂起——挂起的续跑重新进入本 op 时缓存已空，没有这个
+标记就会把同一个窗口再问一遍。标记在**拿到应答之后**才写，故首次询问挂起时不受影响。
+"""
+
 
 def _judge_payload(frame: Frame, *, subject: int, after: str) -> dict[str, Any]:
     """JUDGE 帧的私有载荷（票 10 §1）：``subject`` 与 ``judge_card`` **与渠道牌分列**。
@@ -552,9 +566,21 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
     **a 不可行 ⇒ 自动 b**（`spec.md` §1.8）：先按**同一份候选生成器**预览这扇窗口，非
     ``Pass`` 候选为空（手上没有可用【杀】/ 转化源，或 Bn 在结算时已不合法）⇒ **不问**，
     直接走 b；武器已离装备区则 no-op。预览只读状态：不记询问、不耗序号、不搬牌。
+
+    **持刀者的决定只做一次**（M5-bugfix）：b 支的移动会内联派发「失去牌后」（孙尚香
+    【枭姬】摸两张会提问），挂起的续跑重新进入本 op；``ask`` 的应答缓存是一次性的，
+    没有 :data:`_BORROWED_SWORD_RESOLVED` 就会把同一个窗口再问一遍——实机缺陷的根因。
+    标记在拿到应答 / 判定 auto-b **之后**才写，故首次询问挂起时不受影响。
     """
     holder = host.current_target(frame)
     source = frame.data["source"]
+    resolved = frame.data.get(_BORROWED_SWORD_RESOLVED)
+    if resolved == _BORROWED_SWORD_USE:
+        return None
+    if resolved == _BORROWED_SWORD_HAND_OVER:
+        # 重入：决定已经做过。b 支的移动可能挂在【枭姬】上，挂起续跑回到本 op 时
+        # ``weapon_of`` 已为空 ⇒ 补做的那次移动是 no-op；**绝不再问一次**持刀者。
+        return _hand_over_weapon(host, frame, holder=holder, source=source)
     designations = tuple(frame.data.get("designations", ()))
     if len(designations) != 1:
         # 显式异常而不是 assert（``python -O`` 会删掉 assert）：入口只经清单，
@@ -576,6 +602,7 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
         if not isinstance(action, Pass)
     ]
     if not offers:
+        frame.data[_BORROWED_SWORD_RESOLVED] = _BORROWED_SWORD_HAND_OVER
         return _hand_over_weapon(host, frame, holder=holder, source=source)
     action = host.ask_respond(
         frame,
@@ -591,6 +618,7 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
     if host.suspended(action):
         return "stay"
     if isinstance(action, UseCard):
+        frame.data[_BORROWED_SWORD_RESOLVED] = _BORROWED_SWORD_USE
         host.start_use(
             action.card,
             source=holder,
@@ -598,6 +626,7 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
             use_timing=Timing.RESOLVE_AFTER_EFFECT,
         )
         return None
+    frame.data[_BORROWED_SWORD_RESOLVED] = _BORROWED_SWORD_HAND_OVER
     return _hand_over_weapon(host, frame, holder=holder, source=source)
 
 

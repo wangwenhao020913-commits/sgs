@@ -1056,9 +1056,11 @@ class Engine:
         ``USE_CHOOSE_TARGET``，濒死求桃里出【桃】时是 ``NEAR_DEATH_AT``
         （票 04 §4 的"从哪回来"要读得出是哪个窗口开的使用）。
 
-        **目标顺序在这里定格为"从当前回合角色起、逆时针"**（票 15 §4）：B / C 两段都读
-        同一个排好序的列表；使用者与当前回合角色不同（【借刀杀人】迫使的【杀】）时仍按
-        当前回合角色起算（U-15-1，程序化约定）。
+        **目标顺序在这里定格**（票 15 §4）：B / C 两段都读同一个列表；缺省是“从当前回合
+        角色起、逆时针”（使用者与当前回合角色不同（【借刀杀人】迫使的【杀】）时仍按当前
+        回合角色起算，U-15-1）。行为表声明了 ``preserve_target_order`` 的牌（【铁索连环】）
+        例外——它的特殊规则是“按使用者选择的顺序结算”（spec §5.1.2），故原样使用
+        ``targets``；多目标【杀】没有这条声明，仍走通用排法。
 
         ``cancel_target`` 只给**响应型使用**（无懈一类的牌）用（票 11 §2）：记下这次使用指向
         "哪一层的哪个目标"（``(被挂起帧 id, 目标座位)``），由子帧随 ``use_push_resolve``
@@ -1093,7 +1095,11 @@ class Engine:
         data: dict[str, Any] = {
             "card": card,
             "source": source,
-            "targets": order_targets(self.state, tuple(targets)),
+            "targets": (
+                tuple(targets)
+                if behavior.preserve_target_order
+                else order_targets(self.state, tuple(targets))
+            ),
             "use_timing": use_timing,
         }
         if deal_bonus:

@@ -934,7 +934,9 @@ def test_double_sword_asks_each_opposite_gender_target_once():
         turn_seat=0,
     )
     host = _DoubleSwordHost(state, choices={1: "discard_one", 3: "draw_one"})
-    frame = SimpleNamespace(data={"source": 0, "targets": (1, 2, 3)})
+    frame = SimpleNamespace(
+        data={"source": 0, "targets": (1, 2, 3), "card": state.card(SLASH)}
+    )
 
     assert catalog_module._double_sword(host, frame) is None
 

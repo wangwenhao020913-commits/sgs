@@ -301,6 +301,15 @@ class CardBehavior:
     ``Reforge`` 候选，结算 = 弃置 + 摸一张。目前只有【铁索连环】声明为真。
     """
 
+    preserve_target_order: bool = False
+    """这张牌是否**按使用者的选择顺序**结算目标（M5-bugfix）。
+
+    缺省 ``False`` = 引擎的通用排法（从当前回合角色起、逆时针，见
+    :func:`~sgs.state.seating.order_targets`）；【铁索连环】声明为真——它的特殊规则是
+    “按使用者选择的顺序结算”（spec §5.1.2），而多目标【杀】（【方天画戟】）仍走通用排法。
+    这是**牌面事实**，故落在行为表，``engine/`` 不出现牌名分支。
+    """
+
     @property
     def count_key(self) -> str:
         """本回合次数计数的键：行为表声明的共用键，缺省 = 牌型 id（M5-02）。"""
@@ -609,6 +618,7 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
         effects=(CallOp("resolve_iron_chain"),),
         response_window=ResponseWindow.NULLIFY,
         reforgeable=True,
+        preserve_target_order=True,
     ),
     "supply_shortage": _one_other(
         "supply_shortage",
