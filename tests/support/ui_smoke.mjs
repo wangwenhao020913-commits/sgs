@@ -11279,4 +11279,308 @@ const bottomSkillIds = () => $("t-skills").children.filter(
 }
 
 
+/* ============ M5-08c（D5 / §5.1 酒）：酒界面（出牌阶段 / 濒死自救 / 每回合一次） ============
+ *
+ * 载荷与真会话同形（字段由 `tests/test_web.py` 的真会话断言钉）：
+ *   - 出牌阶段【酒】= 手选路 + 候选索引 `pool: [0]` / `combos: [[0]]`（**自己为目标**）：
+ *     点牌自动选中自己，**没有目标步 / 座位目标高亮**；再点控件区「提交」= 恰一条 UseCard。
+ *     这是 U2 的自我目标路径（与【桃】/装备同形）——本票**不**改成"点牌即提交"。
+ *   - 使用后本回合第二张【酒】没有候选条目 ⇒ 牌置灰、点它零提交。
+ *   - 自己濒死：【酒】进求桃窗口（目标恒为自己，无目标步）；他人濒死：没有【酒】入口。
+ *   - 只读判据仍只住 `modal.js:stepDialogKind`；弹窗步骤里点牌不选、零提交。
+ *   - 事件流文案读 `actionLabel`（「使用【酒】」），不出现英文枚举。
+ */
+{
+  const wine = {
+    ...synthCard(123, "酒"),
+    type: "wine", display_name: "酒", kind: "normal", attribute: "普通",
+    source_cards: [], description: "酒：出牌阶段对自己使用，令下一张【杀】伤害 +1。",
+    suit: "club", rank: 3, color: "black",
+  };
+  const wine2 = {
+    ...wine, card_id: 124, suit: "heart", rank: 9, color: "red",
+  };
+  const peach = {
+    ...synthCard(4, "桃"),
+    type: "peach", display_name: "桃", kind: "normal", attribute: "普通",
+    source_cards: [], description: "桃：回复 1 点体力。",
+    suit: "heart", rank: 3, color: "red",
+  };
+  const slash = {
+    ...synthCard(5, "杀"),
+    type: "slash", display_name: "杀", kind: "normal", attribute: "普通",
+    source_cards: [], description: "杀的描述。",
+  };
+  const raw = (card) => ({
+    card_id: card.card_id, type: card.type, name: card.name, suit: card.suit,
+    rank: card.rank, slot: card.slot, attack_range: card.attack_range,
+    color: card.color, virtual_sources: [],
+  });
+  const wineRaw = raw(wine);
+  const wine2Raw = raw(wine2);
+  const peachRaw = raw(peach);
+  const slashRaw = raw(slash);
+  const context = {
+    actor: 0, name: null, targets: [], label: null,
+    requirement: "使用一张牌（或发动技能），或结束出牌阶段", skill_hints: [],
+  };
+  const promptDisplay = (seq, label) => ({
+    text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    default_action: { kind: "EndPhase", answers_seq: seq },
+    default_label: label,
+  });
+  const wineView = (pending, { hand = [wine, wine2, slash], dyingSeat = null } = {}) => {
+    const view = synthView(pending);
+    view.human_seat = 0;
+    view.snapshot.seat = 0;
+    view.snapshot.phase = "play";
+    view.snapshot.turn_seat = 0;
+    view.snapshot.self_hand = hand;
+    view.snapshot.processing = [];
+    view.snapshot.players = [0, 1, 2, 3].map((seat) => ({
+      seat, hp: dyingSeat === seat ? 0 : 4, hp_max: 4, hand_count: 2,
+      alive: true, equip: [], judge: [], identity: null,
+      chained: false, wine_active: false,
+    }));
+    view.timeout_seconds = null;
+    return view;
+  };
+  const renderWine = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const handNode = (cardId) => $("t-hand").children.find(
+    (node) => node.getAttribute("data-card-id") === String(cardId),
+  ) || null;
+  const clickHand = async (cardId) => {
+    const node = handNode(cardId);
+    if (!node) return false;
+    for (const fn of node.listeners.click || []) {
+      await fn({ target: node, stopPropagation() {} });
+    }
+    return true;
+  };
+  const seatFlags = (seat) => {
+    const node = seatBox(seat);
+    return node ? ["targetable", "tsel"].filter((name) => node.classList.contains(name)) : [];
+  };
+  const settle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const answersSince = (mark) => calls.slice(mark).filter((call) => call.path.includes("/answer"));
+
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261018,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  ui.state.modal.heroSeat = null;
+
+  const playWine = (seq = 3301) => ({
+    kind: "PLAY_PHASE", actor: 0, seq,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: seq, card: wineRaw, targets: [0] },
+      { kind: "UseCard", answers_seq: seq, card: wine2Raw, targets: [0] },
+      { kind: "UseCard", answers_seq: seq, card: slashRaw, targets: [1] },
+      { kind: "EndPhase", answers_seq: seq },
+    ],
+    candidate_index: {
+      123: { card: wine, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+      124: { card: wine2, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+      5: { card: slash, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
+    },
+    virtual_index: {}, option_seats: {}, context,
+    prompt_display: promptDisplay(seq, "超时将自动结束出牌阶段"),
+    preactivations: {}, preactivation: [],
+  });
+
+  // ---- ① 出牌阶段：点【酒】只选中自己，没有目标步 / 座位高亮；再点「提交」= 1 条 POST ----
+  const playPending = playWine();
+  renderWine(wineView(playPending));
+  const beforeClick = calls.length;
+  await clickHand(123);
+  check("M5-08c-a1 出牌阶段点【酒】：自动选中自己、没有目标步、没有座位目标高亮、提交可点",
+    ui.state.focusCardId === 123
+      && JSON.stringify(ui.state.selectedTargets) === "[0]"
+      && ui.cardEntry(playPending, 123).max_targets === 1
+      && [0, 1, 2, 3].every((seat) => seatFlags(seat).length === 0)
+      && $("btn-submit").disabled === false
+      && /自动选中|唯一确定/.test($("t-target-hint").textContent)
+      && answersSince(beforeClick).length === 0,
+    `focus=${ui.state.focusCardId} targets=${JSON.stringify(ui.state.selectedTargets)} flags=${[0, 1, 2, 3].map((seat) => seatFlags(seat).join("/")).join(",")} submit=${$("btn-submit").disabled} hint="${$("t-target-hint").textContent}" answers=${answersSince(beforeClick).length}`);
+  ui.selectTarget(1);
+  check("M5-08c-a2 没有目标步：点其他座位不改变目标（只对自己）",
+    JSON.stringify(ui.state.selectedTargets) === "[0]" && ui.buildAction() !== null
+      && ui.buildAction().kind === "UseCard"
+      && String(ui.buildAction().card.card_id) === "123"
+      && JSON.stringify(ui.buildAction().targets) === "[0]",
+    `targets=${JSON.stringify(ui.state.selectedTargets)} built=${JSON.stringify(ui.buildAction())}`);
+  const beforeSubmit = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  await settle();
+  staleAnswerStatus = null;
+  const playAnswers = answersSince(beforeSubmit);
+  check("M5-08c-a3 点一次控件区「提交」= 恰一条 UseCard【酒】POST（原样取自候选、目标为自己）",
+    playAnswers.length === 1
+      && JSON.stringify(playAnswers[0].body.action) === JSON.stringify(playPending.legal_actions[0]),
+    `answers=${playAnswers.length} action=${JSON.stringify(playAnswers[0] && playAnswers[0].body.action)}`);
+
+  // ---- ② 使用后本回合第二张【酒】不可用：候选消失 ⇒ 置灰、点它零提交 ----
+  const secondPending = {
+    ...playWine(3302),
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 3302, card: slashRaw, targets: [1] },
+      { kind: "EndPhase", answers_seq: 3302 },
+    ],
+    candidate_index: {
+      5: { card: slash, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
+    },
+  };
+  renderWine(wineView(secondPending, { hand: [wine2, slash] }));
+  const beforeSecond = calls.length;
+  const secondNode = handNode(124);
+  check("M5-08c-a4 本回合第二张【酒】没有候选、牌置灰（明确不可用）",
+    ui.cardSelectable(secondPending, 124) === false
+      && Boolean(secondNode) && secondNode.classList.contains("dis")
+      && $("btn-submit").disabled === true,
+    `selectable=${ui.cardSelectable(secondPending, 124)} dis=${secondNode && secondNode.classList.contains("dis")} submit=${$("btn-submit").disabled}`);
+  await clickHand(124);
+  check("M5-08c-a5 点不可用的第二张【酒】= 零提交、焦点不落下，提示说清原因",
+    answersSince(beforeSecond).length === 0
+      && ui.state.focusCardId === null
+      && /酒/.test(ui.state.lastRejectReason),
+    `answers=${answersSince(beforeSecond).length} focus=${ui.state.focusCardId} reason="${ui.state.lastRejectReason}"`);
+
+  // ---- ③ 自己濒死：求桃窗口里的【酒】目标恒为自己，无目标步；一次提交 = 1 条 POST ----
+  const selfPeach = {
+    kind: "PEACH", actor: 0, seq: 3303,
+    prompt: "你处于濒死状态：是否使用【桃】或【酒】自救？",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 3303, card: wineRaw, targets: [0] },
+      { kind: "UseCard", answers_seq: 3303, card: peachRaw, targets: [0] },
+      { kind: "Pass", answers_seq: 3303 },
+    ],
+    candidate_index: {
+      123: { card: wine, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+      4: { card: peach, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+    },
+    virtual_index: {}, option_seats: {},
+    context: { ...context, requirement: "你处于濒死状态：使用【桃】或【酒】自救，或放弃" },
+    prompt_display: {
+      text: "你处于濒死状态：是否使用【桃】或【酒】自救？",
+      default_action: { kind: "Pass", answers_seq: 3303 },
+      default_label: "超时将自动放弃",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  renderWine(wineView(selfPeach, { hand: [wine, peach], dyingSeat: 0 }));
+  await clickHand(123);
+  check("M5-08c-b1 自己濒死：点【酒】= 选中自己、无目标步 / 无目标高亮，提交可点",
+    ui.state.focusCardId === 123
+      && JSON.stringify(ui.state.selectedTargets) === "[0]"
+      && [0, 1, 2, 3].every((seat) => seatFlags(seat).length === 0)
+      && $("btn-submit").disabled === false,
+    `focus=${ui.state.focusCardId} targets=${JSON.stringify(ui.state.selectedTargets)} flags=${[0, 1, 2, 3].map((seat) => seatFlags(seat).join("/")).join(",")} submit=${$("btn-submit").disabled}`);
+  const beforeSelf = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  await settle();
+  staleAnswerStatus = null;
+  const selfAnswers = answersSince(beforeSelf);
+  check("M5-08c-b2 濒死自救点一次「提交」= 恰一条 UseCard【酒】POST（目标为自己；不产生加伤由 pytest 钉）",
+    selfAnswers.length === 1
+      && JSON.stringify(selfAnswers[0].body.action) === JSON.stringify(selfPeach.legal_actions[0]),
+    `answers=${selfAnswers.length} action=${JSON.stringify(selfAnswers[0] && selfAnswers[0].body.action)}`);
+
+  // ---- ④ 他人濒死：手里有【酒】也没有入口；【桃】仍可救（对照） ----
+  const otherPeach = {
+    ...selfPeach,
+    seq: 3304,
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 3304, card: peachRaw, targets: [2] },
+      { kind: "Pass", answers_seq: 3304 },
+    ],
+    candidate_index: {
+      4: { card: peach, pool: [2], combos: [[2]], min_targets: 1, max_targets: 1 },
+    },
+    context: { ...context, requirement: "座位 2 处于濒死状态：是否对其使用【桃】？" },
+    prompt_display: {
+      text: "座位 2 处于濒死状态：是否对其使用【桃】？",
+      default_action: { kind: "Pass", answers_seq: 3304 },
+      default_label: "超时将自动放弃",
+    },
+  };
+  renderWine(wineView(otherPeach, { hand: [wine, peach], dyingSeat: 2 }));
+  const beforeOther = calls.length;
+  check("M5-08c-b3 他人濒死：手里【酒】置灰、没有候选，【桃】仍可点（对照）",
+    ui.cardSelectable(otherPeach, 123) === false
+      && Boolean(handNode(123)) && handNode(123).classList.contains("dis")
+      && ui.cardSelectable(otherPeach, 4) === true,
+    `wineSelectable=${ui.cardSelectable(otherPeach, 123)} peachSelectable=${ui.cardSelectable(otherPeach, 4)}`);
+  await clickHand(123);
+  check("M5-08c-b4 点他人濒死窗口里的【酒】= 零提交、不设焦点",
+    answersSince(beforeOther).length === 0 && ui.state.focusCardId === null,
+    `answers=${answersSince(beforeOther).length} focus=${ui.state.focusCardId}`);
+
+  // ---- ⑤ 取消 / 未选牌 = 零提交 ----
+  renderWine(wineView(playWine(3305)));
+  const beforeCancel = calls.length;
+  await clickAndWait($("btn-cancel"));
+  check("M5-08c-c1 未选牌点「取消」= 零提交（不发明 Action，也不自动使用【酒】）",
+    answersSince(beforeCancel).length === 0
+      && ui.state.focusCardId === null
+      && $("btn-submit").disabled === true,
+    `answers=${answersSince(beforeCancel).length} focus=${ui.state.focusCardId} submit=${$("btn-submit").disabled}`);
+
+  // ---- ⑥ 只读态：弹窗步骤里点【酒】不选、零提交（判据仍是 stepDialogKind） ----
+  const dialogPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 3306, dialog: "reveal",
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [{ kind: "SelectCards", answers_seq: 3306, picks: [0] }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [{ ref: { seat: 0, zone: "hand" }, card: wine }],
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: false },
+    revealed: [wine], harvest: null, reveal: null,
+    context: { ...context, requirement: "从自己的手牌里亮出一张（公开）" },
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 3306, picks: [0] },
+      default_label: "超时将自动选择第一张亮牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  renderWine(wineView(dialogPending, { hand: [wine, slash] }));
+  const beforeDialog = calls.length;
+  await clickHand(123);
+  check("M5-08c-d1 只读态：弹窗步骤里点【酒】不设焦点、零提交（没有第二套只读判据）",
+    ui.stepDialogKind(dialogPending) === "reveal"
+      && ui.selectionEnabled() === false
+      && $("t-dialog").hidden === false
+      && ui.state.focusCardId === null
+      && answersSince(beforeDialog).length === 0,
+    `kind=${ui.stepDialogKind(dialogPending)} enabled=${ui.selectionEnabled()} hidden=${$("t-dialog").hidden} focus=${ui.state.focusCardId} answers=${answersSince(beforeDialog).length}`);
+
+  // ---- ⑦ 事件流 / 候选文案：写「使用【酒】」，不落英文枚举 ----
+  const wineLabel = ui.actionLabel({ kind: "UseCard", card: wineRaw });
+  const wineLine = ui.describeRecord({
+    kind: "action", seq: 3307, accepted: true,
+    action: { kind: "UseCard", card: wineRaw, targets: [0], answers_seq: 3301 },
+  });
+  check("M5-08c-e1 事件流 / 候选文案写「使用【酒】」，不出现 UseCard / wine 英文枚举",
+    wineLabel.includes("使用【酒】") && wineLine.includes("使用【酒】")
+      && !wineLabel.includes("UseCard") && !wineLabel.includes("wine")
+      && !wineLine.includes("UseCard") && !wineLine.includes("wine"),
+    `label="${wineLabel}" line="${wineLine}"`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

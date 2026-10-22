@@ -326,6 +326,214 @@ def fire_attack_tape(base: str) -> int:
     return 1 if failures else 0
 
 
+# ---------------------------------------------------------------------------
+# M5-08c：固定【酒】tape（spec D12 / §6 A2）
+#
+# 一个固定种子（160 档 / 8 人 / 人类座位 0）跑两段**真 HTTP**：
+#   ① 出牌阶段：人类起始手牌就有【酒】；提交一次 = 恰一条 UseCard（目标为自己）+
+#      wine_change，下一问里【酒】不再进候选；
+#   ② 濒死自救：同一种子按固定策略（出牌阶段结束 / 能放弃就放弃 / 否则首个候选）
+#      打到人类 0 血，求桃窗口里的【酒】目标恒为自己；提交后回复 1、wine_active 仍为
+#      false、零 wine_change。
+# 种子 16 由 ``tools/acceptance_seed.py --players 8 --deck-profile standard_ex_160
+# --card wine`` 起步，再按上面两段脚本确认（同 seed 可复现）。
+# ---------------------------------------------------------------------------
+
+_WINE_TAPE_SEED = 16
+
+
+def _wine_tape_create(base: str) -> tuple[str, int, int, dict[str, Any]] | None:
+    status, body = call(
+        f"{base}/api/sessions",
+        {
+            "player_count": 8,
+            "ai": "heuristic",
+            "seed": _WINE_TAPE_SEED,
+            "human_seat": 0,
+            "timeout_seconds": None,
+            "deck_profile": "standard_ex_160",
+        },
+    )
+    if status != 200:
+        print(f"FAIL 酒 tape：建局失败 HTTP {status} {body}")
+        return None
+    if body.get("deck_profile") != "standard_ex_160":
+        print(f"FAIL 酒 tape：档位不是 standard_ex_160：{body.get('deck_profile')}")
+        return None
+    return body["session_id"], body["cursor"], body["log_seq"], body
+
+
+def _wine_tape_answer(
+    base: str, session: tuple[str, int, int], action: dict[str, Any]
+) -> tuple[int, Any]:
+    session_id, cursor, log_seq = session
+    return call(
+        f"{base}/api/sessions/{session_id}/answer?after={cursor}&logs={log_seq}",
+        {"action": action},
+    )
+
+
+def _wine_offers(pending: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        action
+        for action in pending.get("legal_actions") or []
+        if action.get("kind") == "UseCard"
+        and (action.get("card") or {}).get("type") == "wine"
+    ]
+
+
+def _wine_tape_play(base: str) -> int:
+    """出牌阶段：一次真实 UseCard【酒】往返 + 候选 / wine_change / 下一问读数。"""
+    created = _wine_tape_create(base)
+    if created is None:
+        return 1
+    session_id, cursor, log_seq, body = created
+    session = (session_id, cursor, log_seq)
+    pending = body.get("pending") or {}
+    offers = _wine_offers(pending)
+    if pending.get("kind") != "PLAY_PHASE" or pending.get("actor") != 0 or len(offers) != 1:
+        print(
+            "FAIL 酒 tape（出牌阶段）：首问不是人类出牌阶段 / 没有唯一一张【酒】："
+            f"{pending.get('kind')}"
+        )
+        return 1
+    wine_action = offers[0]
+    if wine_action.get("targets") != [0]:
+        print(f"FAIL 酒 tape（出牌阶段）：【酒】的目标不是自己：{wine_action.get('targets')}")
+        return 1
+    entry = (pending.get("candidate_index") or {}).get(str(wine_action["card"]["card_id"]))
+    if entry is None or entry.get("pool") != [0] or entry.get("combos") != [[0]]:
+        print(f"FAIL 酒 tape（出牌阶段）：候选索引不是「只对自己」：{entry}")
+        return 1
+
+    status, body = _wine_tape_answer(base, session, wine_action)
+    if status != 200:
+        print(f"FAIL 酒 tape（出牌阶段）：应答被拒 HTTP {status} {body}")
+        return 1
+    records = body.get("records") or []
+    accepted = [
+        record for record in records
+        if record.get("kind") == "action" and record.get("accepted")
+    ]
+    if len(accepted) != 1:
+        print(f"FAIL 酒 tape（出牌阶段）：本次应答的 action 记录不是恰一条：{len(accepted)}")
+        return 1
+    action = accepted[0].get("action") or {}
+    # 投影对**所有** action 记录只下发 kind / answers_seq（`visible_record`）：具体牌与
+    # 目标不回放；这里能钉的是"恰一条被接受的 UseCard"，具体牌 / 目标由提交体与
+    # wine_change / 手牌读数共同证明。
+    if action.get("kind") != "UseCard":
+        print(f"FAIL 酒 tape（出牌阶段）：记录流里的动作不是 UseCard：{action}")
+        return 1
+    changes = [record for record in records if record.get("delta_type") == "wine_change"]
+    if len(changes) != 1 or changes[0].get("seat") != 0 or changes[0].get("active") is not True:
+        print(f"FAIL 酒 tape（出牌阶段）：wine_change 不是「座位 0 置位」恰一条：{changes}")
+        return 1
+    next_pending = body.get("pending") or {}
+    if _wine_offers(next_pending):
+        print("FAIL 酒 tape（出牌阶段）：使用后同一回合里【酒】仍在候选里")
+        return 1
+    if (body.get("snapshot") or {}).get("players", [{}])[0].get("wine_active") is not True:
+        print("FAIL 酒 tape（出牌阶段）：投影没有下发 wine_active=true")
+        return 1
+    narrative = "\n".join(entry["text"] for entry in body.get("narrative") or [])
+    if "使用【酒】" not in narrative:
+        print(f"FAIL 酒 tape（出牌阶段）：事件流读不出「使用【酒】」：{narrative}")
+        return 1
+    print(
+        "PASS 酒 tape（出牌阶段）：1 次真实 POST 的 UseCard【酒】目标为自己、"
+        "wine_change=true、下一问不再有【酒】、事件流「使用【酒】」"
+    )
+    return 0
+
+
+def _wine_tape_near_death(base: str) -> int:
+    """濒死自救：固定策略打到 0 血，窗口里点一次【酒】= 回复 1、无 wine_change。"""
+    created = _wine_tape_create(base)
+    if created is None:
+        return 1
+    session_id, cursor, log_seq, body = created
+    session = (session_id, cursor, log_seq)
+    answers = 0
+    while not body.get("finished"):
+        pending = body.get("pending") or {}
+        if not pending:
+            print("FAIL 酒 tape（濒死）：未终局但也没有待应答的询问")
+            return 1
+        offers = _wine_offers(pending)
+        if pending.get("kind") == "PEACH" and pending.get("actor") == 0 and offers:
+            if (body.get("snapshot") or {}).get("players", [{}])[0].get("hp") != 0:
+                print("FAIL 酒 tape（濒死）：自救窗口里人类不是 0 血")
+                return 1
+            if offers[0].get("targets") != [0]:
+                print(f"FAIL 酒 tape（濒死）：自救的【酒】目标不是自己：{offers[0].get('targets')}")
+                return 1
+            status, body = _wine_tape_answer(base, session, offers[0])
+            if status != 200:
+                print(f"FAIL 酒 tape（濒死）：自救应答被拒 HTTP {status} {body}")
+                return 1
+            player = (body.get("snapshot") or {}).get("players", [{}])[0]
+            if player.get("hp") != 1:
+                print("FAIL 酒 tape（濒死）：【酒】自救没有回复到 1")
+                return 1
+            if player.get("wine_active") is not False:
+                print("FAIL 酒 tape（濒死）：自救产生了加伤状态")
+                return 1
+            records = body.get("records") or []
+            if any(record.get("delta_type") == "wine_change" for record in records):
+                print("FAIL 酒 tape（濒死）：自救产生了 wine_change")
+                return 1
+            accepted = [
+                record for record in records
+                if record.get("kind") == "action" and record.get("accepted")
+            ]
+            if len(accepted) != 1 or (accepted[0].get("action") or {}).get("kind") != "UseCard":
+                print(f"FAIL 酒 tape（濒死）：自救不是恰一条 UseCard：{accepted}")
+                return 1
+            narrative = "\n".join(entry["text"] for entry in body.get("narrative") or [])
+            if "使用【酒】" not in narrative or "回复 1 点体力" not in narrative:
+                print(f"FAIL 酒 tape（濒死）：事件流读不出使用【酒】/ 回复 1：{narrative}")
+                return 1
+            print(
+                f"PASS 酒 tape（濒死自救）：{answers} 次真实 POST 推进到 0 血，窗口里一次"
+                " UseCard【酒】回复 1、无 wine_change、事件流可读"
+            )
+            return 0
+        action = None
+        if pending.get("kind") == "PLAY_PHASE":
+            action = next(
+                (item for item in pending.get("legal_actions") or [] if item.get("kind") == "EndPhase"),
+                None,
+            )
+        if action is None:
+            action = next(
+                (item for item in pending.get("legal_actions") or [] if item.get("kind") == "Pass"),
+                None,
+            )
+        if action is None:
+            action = (pending.get("legal_actions") or [None])[0]
+        if action is None:
+            print("FAIL 酒 tape（濒死）：这一步没有可提交的候选")
+            return 1
+        status, body = _wine_tape_answer(base, session, action)
+        if status != 200:
+            print(f"FAIL 酒 tape（濒死）：应答被拒 HTTP {status} {body}")
+            return 1
+        cursor, log_seq = body["cursor"], body["log_seq"]
+        session = (session_id, cursor, log_seq)
+        answers += 1
+        if answers > 200:
+            print("FAIL 酒 tape（濒死）：200 次应答内没有走到人类的自救窗口")
+            return 1
+    print("FAIL 酒 tape（濒死）：对局在出现自救窗口前结束")
+    return 1
+
+
+def wine_tape(base: str) -> int:
+    """两段固定【酒】tape（出牌阶段 / 濒死自救），全部经真 HTTP。"""
+    return _wine_tape_play(base) or _wine_tape_near_death(base)
+
+
 def probe_skills(base: str) -> int:
     """建局响应必须带**本人**技能清单（刀 4）；引擎的可见面里没有技能。"""
     status, body = call(
@@ -359,12 +567,14 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--timeout", type=float, default=None)
     parser.add_argument("--max-answers", type=int, default=4000)
     parser.add_argument("--probe-skills", action="store_true")
-    parser.add_argument("--tape", choices=("fire_attack",), default=None)
+    parser.add_argument("--tape", choices=("fire_attack", "wine"), default=None)
     args = parser.parse_args(argv)
     if args.probe_skills:
         return probe_skills(args.base)
     if args.tape == "fire_attack":
         return fire_attack_tape(args.base)
+    if args.tape == "wine":
+        return wine_tape(args.base)
     if args.seed is None:
         parser.error("--seed 必填（除非用 --probe-skills）")
     return play(

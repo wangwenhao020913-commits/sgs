@@ -6214,3 +6214,367 @@ def test_reforge_is_not_offered_outside_the_play_phase() -> None:
     assert all(action["kind"] != "Reforge" for action in payload["legal_actions"]), (
         "非出牌阶段不出现重铸候选"
     )
+
+
+# ---------------------------------------------------------------------------
+# M5-08c：酒界面（出牌阶段 / 濒死自救 / 每回合一次）
+#
+# 引擎侧（M5-04）已经保证：出牌阶段【酒】是**自己为目标**的 UseCard（目标恒为
+# ``(source,)``）、每游戏回合一次（两种用法共用计数键）、回合末清 ``wine_active`` 与
+# 计数、濒死自救只在**濒死者自己**的求桃窗口里出现且不产生加伤。本段钉的是**界面
+# 读取方**：候选索引里「自己为目标 / 无目标步」、使用后本回合第二张【酒】从
+# ``legal_actions`` 消失、求桃窗口里的【酒】可被自救、他人濒死没有【酒】入口、
+# 回合末清理后下回合重新可用，以及仅「呈现」不等于自动提交。
+# ---------------------------------------------------------------------------
+
+_WINE_PACK = None
+
+
+def _wine_pack():
+    """军争 160 档（惰性加载；酒在标准 108 与 160 两档都有）。"""
+    global _WINE_PACK
+    if _WINE_PACK is None:
+        _WINE_PACK = load_content_pack(deck_profile="standard_ex_160")
+    return _WINE_PACK
+
+
+def _wine_card_ids() -> list[int]:
+    return cards_of_type(_wine_pack(), "wine")
+
+
+def _wine_slash_id() -> int:
+    return cards_of_type(_wine_pack(), "slash")[0]
+
+
+class _WineDriver:
+    """把 AI 座位推过「攻击 / 弃牌 / 响应」的脚本；人类座位的询问由用例自己答。
+
+    ``slash_target`` 非空时，首个出牌阶段对那个座位用一张【杀】——用来把**真会话**
+    推到求桃窗口，不测规则本身。其它时机一律「有 Pass 就 Pass，否则首个候选」。
+    """
+
+    def __init__(self, *, slash_target: int | None = None) -> None:
+        self.slash_target = slash_target
+        self.used_slash = False
+
+    def respond(self, query):  # noqa: ANN001 - Participant 协议
+        return self.answer(query)
+
+    def answer(self, query):  # noqa: ANN001
+        if query.kind == QueryKind.PLAY_PHASE and self.slash_target is not None and not self.used_slash:
+            for action in query.legal_actions:
+                if (
+                    isinstance(action, UseCard)
+                    and action.card.type == "slash"
+                    and action.targets == (self.slash_target,)
+                ):
+                    self.used_slash = True
+                    return action
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _wine_session(*, player_count: int = 4, hand: tuple[int, ...] | None = None):
+    """构造局面：座位 0 = 人类、首回合出牌阶段；``hand`` 缺省两张【酒】+ 一张【杀】。
+
+    与 :func:`_iron_session` 同一姿态：引擎行为真跑，只有人类座位的询问挂起、由用例
+    显式应答；其余座位走 :class:`_WineDriver` 的最小合法应答。
+    """
+    from sgs.data import RuleConfig as _RuleConfig
+
+    pack = _wine_pack()
+    wines = _wine_card_ids()
+    user_hand = (
+        (wines[0], wines[1], _wine_slash_id()) if hand is None else tuple(hand)
+    )
+    used = set(user_hand)
+    seats = [SeatSpec(hp=4, hand=user_hand)]
+    seats.extend(SeatSpec(hp=4) for _ in range(player_count - 1))
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=tuple(i for i in range(len(pack.deck.cards)) if i not in used),
+        turn_seat=0,
+        rule_config=_RuleConfig(first_seat=0),
+    )
+    from sgs_web.session import Session as _Session
+
+    session = _Session(
+        seed=1,
+        player_count=player_count,
+        ai="random",
+        human_seat=0,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=pack,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = tuple(
+        _HaltSeat() if seat == 0 else _WineDriver() for seat in range(player_count)
+    )
+    session.drive()
+    return session
+
+
+def _wine_near_death_session(*, human_seat: int, human_hand: tuple[int, ...]):
+    """构造 4 座：座位 0 对座位 1 用【杀】把 1 号打到濒死。
+
+    ``human_seat`` = 1 时人类是濒死者（自救窗口）；= 2 时人类是旁观者（他人濒死窗口）。
+    座位 1 的濒死者手里另有一张【酒】（仅人类为 2 时用来钉「不出现」）。
+    """
+    from sgs.data import RuleConfig as _RuleConfig
+
+    pack = _wine_pack()
+    wines = _wine_card_ids()
+    slash = _wine_slash_id()
+    hand0 = tuple(human_hand) if human_seat == 0 else (slash,)
+    hand1 = tuple(human_hand) if human_seat == 1 else (wines[4],)
+    hand2 = tuple(human_hand) if human_seat == 2 else ()
+    seats = [
+        SeatSpec(hp=4, hand=hand0),
+        SeatSpec(hp=1, hand=hand1),
+        SeatSpec(hp=4, hand=hand2),
+        SeatSpec(hp=4),
+    ]
+    used = set()
+    for spec in seats:
+        used.update(spec.hand)
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=tuple(i for i in range(len(pack.deck.cards)) if i not in used),
+        turn_seat=0,
+        rule_config=_RuleConfig(first_seat=0),
+    )
+    from sgs_web.session import Session as _Session
+
+    session = _Session(
+        seed=1,
+        player_count=4,
+        ai="random",
+        human_seat=human_seat,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=pack,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = tuple(
+        _HaltSeat() if seat == human_seat
+        else (_WineDriver(slash_target=1) if seat == 0 else _WineDriver())
+        for seat in range(4)
+    )
+    session.drive()
+    return session
+
+
+def _wine_actions(pending, card_id: int | None = None) -> list:
+    return [
+        action
+        for action in pending.legal_actions
+        if isinstance(action, UseCard)
+        and action.card.type == "wine"
+        and (card_id is None or action.card.card_id == card_id)
+    ]
+
+
+def _wine_use_records(session) -> list[dict]:
+    """记录流里所有**被接受**的【酒】使用（按 seq 升序）。"""
+    out = []
+    for record in session.records():
+        payload = _record_payload(record)
+        if payload.get("kind") != "action" or not payload.get("accepted"):
+            continue
+        action = payload.get("action") or {}
+        card = action.get("card") or {}
+        if action.get("kind") == "UseCard" and card.get("type") == "wine":
+            out.append(payload)
+    return out
+
+
+def _wine_change_records(session) -> list[dict]:
+    return [
+        _record_payload(record)
+        for record in session.records()
+        if _record_payload(record).get("delta_type") == "wine_change"
+    ]
+
+
+def test_wine_play_phase_needs_no_target_step_and_one_use_card_submits() -> None:
+    """出牌阶段【酒】= 自己为目标、无目标步；提交一次 = 恰一条 UseCard，事件流可读。"""
+    wines = _wine_card_ids()
+    session = _wine_session()
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE and pending.actor == 0
+    payload = pending_payload(session)
+
+    # 候选索引：两张【酒】都只有「自己」这一组；没有第二个座位可点（= 无目标步）。
+    for wine in wines[:2]:
+        entry = payload["candidate_index"][str(wine)]
+        assert entry["pool"] == [0], "【酒】的池只有自己（不给座位加目标高亮）"
+        assert entry["combos"] == [[0]], "唯一的合法组合 = 对自己使用"
+        assert entry["min_targets"] == 1 and entry["max_targets"] == 1
+    wine_offers = _wine_actions(pending)
+    assert len(wine_offers) == 2 and all(action.targets == (0,) for action in wine_offers), (
+        "出牌阶段两张【酒】各一条候选，目标恒为自己"
+    )
+
+    first = next(action for action in wine_offers if action.card.card_id == wines[0])
+    session.submit_answer(first)
+
+    assert session.engine.state.player(0).wine_active is True, "出牌阶段使用 ⇒ 置加伤状态"
+    uses = _wine_use_records(session)
+    assert len(uses) == 1, "一次提交只产生一条被接受的 UseCard【酒】"
+    assert uses[0]["action"]["targets"] == [0], "提交出去的就是对自己使用（原样取自候选）"
+    changes = _wine_change_records(session)
+    assert len(changes) == 1 and changes[0]["active"] is True and changes[0]["seat"] == 0
+
+    entries = _narrative(
+        session.records(),
+        viewer=0,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    text = _line_text(entries)
+    assert "使用【酒】" in text, f"事件流要能读出「使用【酒】」：{text}"
+    assert "UseCard" not in text and "wine" not in text.lower(), text
+
+
+def test_the_second_wine_is_not_offered_in_the_same_game_turn() -> None:
+    """使用后本回合第二张【酒】从 legal_actions / 候选索引消失（牌仍留手里、置灰）。"""
+    wines = _wine_card_ids()
+    session = _wine_session()
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    first = next(action for action in _wine_actions(pending) if action.card.card_id == wines[0])
+    session.submit_answer(first)
+
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE and pending.actor == 0
+    payload = pending_payload(session)
+    assert not _wine_actions(pending), "同一游戏回合的第二张【酒】不得再进合法候选"
+    assert str(wines[1]) not in payload["candidate_index"], (
+        "第二张【酒】没有候选条目 ⇒ 界面按「候选消失」置灰，不产生非法应答"
+    )
+    snapshot = visible_snapshot(session)
+    hand_ids = [card["card_id"] for card in snapshot["self_hand"]]
+    assert wines[1] in hand_ids, "牌还在手里（只是本回合不能用）"
+    assert dict(session.engine.state.player(0).card_use_counts).get("wine") == 1
+
+
+def test_near_death_wine_self_rescue_recovers_one_without_the_bonus() -> None:
+    """自己濒死：求桃窗口里有【酒】；提交一次 = 回复 1、不产生任何加伤 / wine_change。"""
+    wines = _wine_card_ids()
+    session = _wine_near_death_session(human_seat=1, human_hand=(wines[0],))
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.DODGE and pending.actor == 1
+    session.submit_answer(next(action for action in pending.legal_actions if isinstance(action, Pass)))
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PEACH and pending.actor == 1, (
+        "人类（濒死者）的求桃窗口"
+    )
+    payload = pending_payload(session)
+    entry = payload["candidate_index"][str(wines[0])]
+    assert entry["pool"] == [1] and entry["combos"] == [[1]], "目标恒为濒死者自己"
+    offers = _wine_actions(pending)
+    assert len(offers) == 1 and offers[0].targets == (1,)
+
+    session.submit_answer(offers[0])
+
+    assert session.engine.state.player(1).hp == 1, "【酒】自救回复 1 点"
+    assert session.engine.state.player(1).wine_active is False, "濒死用法不产生加伤"
+    assert not _wine_change_records(session), "濒死自救不得留下任何 wine_change"
+    uses = _wine_use_records(session)
+    assert len(uses) == 1 and uses[0]["action"]["targets"] == [1]
+
+    entries = _narrative(
+        session.records(),
+        viewer=1,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    text = _line_text(entries)
+    assert "使用【酒】" in text, text
+    assert "回复 1 点体力" in text, f"自救要读得出回复 1 点：{text}"
+
+
+def test_wine_is_not_offered_for_another_seats_near_death() -> None:
+    """他人濒死：人类手里有【酒】也不进候选；界面因此没有【酒】入口、零 wine_change。"""
+    wines = _wine_card_ids()
+    peach_id = cards_of_type(_wine_pack(), "peach")[0]
+    session = _wine_near_death_session(human_seat=2, human_hand=(wines[0], peach_id))
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PEACH and pending.actor == 2
+    payload = pending_payload(session)
+    assert not _wine_actions(pending), "对他人的濒死不能用【酒】"
+    assert str(wines[0]) not in payload["candidate_index"], "没有【酒】的候选条目"
+    snapshot = visible_snapshot(session)
+    assert wines[0] in [card["card_id"] for card in snapshot["self_hand"]], (
+        "牌仍在手里，只是这个窗口不能用"
+    )
+    peach = next(
+        action
+        for action in pending.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "peach"
+    )
+    assert peach.targets == (1,), "仍然可以用【桃】救别人（对照）"
+
+    session.submit_answer(peach)
+
+    assert session.engine.state.player(1).hp == 1
+    assert not _wine_change_records(session)
+    assert wines[0] in list(session.engine.state.player(2).hand), "【酒】未被误用 / 误弃"
+
+
+def test_wine_is_available_again_after_turn_end_cleanup() -> None:
+    """回合末清掉 wine_active 与「本回合已用」；下个自己的回合【酒】重新可用。"""
+    wines = _wine_card_ids()
+    session = _wine_session(player_count=2)
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE and pending.actor == 0
+    first = next(action for action in _wine_actions(pending) if action.card.card_id == wines[0])
+    session.submit_answer(first)
+    assert session.engine.state.player(0).wine_active is True
+
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    session.submit_answer(next(action for action in pending.legal_actions if isinstance(action, EndPhase)))
+    # 2 人局：AI 的整个回合也跑完，挂起停在人类的下一个出牌阶段。
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE and pending.actor == 0
+    assert session.engine.state.turn_seat == 0
+    assert session.engine.state.player(0).wine_active is False, "回合末清理加伤状态"
+    assert "wine" not in dict(session.engine.state.player(0).card_use_counts), (
+        "回合末清理「本回合已用【酒】」"
+    )
+    payload = pending_payload(session)
+    entry = payload["candidate_index"][str(wines[1])]
+    assert entry["pool"] == [0] and entry["combos"] == [[0]]
+    offers = _wine_actions(pending)
+    assert [action.card.card_id for action in offers] == [wines[1]], (
+        "下个自己的回合，手里剩下那张【酒】重新可用"
+    )
+    assert any(payload_record.get("timing") == "TURN_END" for payload_record in map(
+        _record_payload, session.records()
+    )), "确实经过了回合末（不是同一个回合的错觉）"
+
+
+def test_offering_wine_submits_nothing_until_the_player_answers() -> None:
+    """只把【酒】放进候选不等于提交：没有玩家应答时零 action、零 wine_change、牌不动。"""
+    wines = _wine_card_ids()
+    session = _wine_session()
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    records = [_record_payload(record) for record in session.records()]
+    assert not [record for record in records if record.get("kind") == "action"], (
+        "候选里出现【酒】不会替玩家自动使用"
+    )
+    assert not _wine_change_records(session)
+    assert wines[0] in list(session.engine.state.player(0).hand)
+    assert session.engine.state.player(0).wine_active is False
+    assert session.pending is pending, "询问原样挂着，等玩家自己决定"

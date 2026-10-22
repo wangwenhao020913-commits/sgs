@@ -182,6 +182,16 @@ if ! "$PYTHON" tests/support/web_client.py --base "http://127.0.0.1:$PORT" --tap
   exit 1
 fi
 
+# ⑥c M5-08c：固定【酒】tape（spec D12 / §6 A2）——出牌阶段一次真实 UseCard（目标自己）+
+# 濒死自救一次真实 UseCard（回复 1、无 wine_change）；固定种子，动作原样取自 legal_actions。
+echo "=== 酒 tape：出牌阶段 / 濒死自救（真 HTTP） ==="
+if ! "$PYTHON" tests/support/web_client.py --base "http://127.0.0.1:$PORT" --tape wine; then
+  echo "FAIL: 酒 tape 未通过"
+  echo "--- 服务输出 ---"
+  cat "$LOG"
+  exit 1
+fi
+
 # ⑦ `--host 0.0.0.0` 必须真的绑全部网卡（WSL 里从 Windows 打开界面就靠它）。
 # 只多起一个进程、只发两个请求，然后立刻杀掉——它防的是"host 参数被写死回环"这种回归。
 echo "=== 跨机可达：--host 0.0.0.0 ==="
