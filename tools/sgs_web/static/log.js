@@ -149,6 +149,16 @@ function describeRecord(record) {
       return `<span class="k">#${record.seq}</span> 牌移动 ${zoneLabel(record.from_zone)} → ${zoneLabel(record.to_zone)}（${reason}）${cardsLabel(record.cards)}`;
     }
     if (record.delta_type === "hp_change") return `<span class="k">#${record.seq}</span> 体力 座位 ${record.seat} ${record.before} → ${record.after}`;
+    if (record.delta_type === "chained_change") {
+      // M5-08d：横置 / 重置的状态变化在完整档也写人话（U1-05 的简易档由服务端叙事写）。
+      return `<span class="k">#${record.seq}</span> 座位 ${record.seat} ${record.chained ? "横置" : "重置"}`;
+    }
+    if (record.delta_type === "wine_change") {
+      return `<span class="k">#${record.seq}</span> 座位 ${record.seat} ${record.active ? "进入【酒】状态" : "【酒】加伤消失"}`;
+    }
+    if (record.delta_type === "card_reveal") {
+      return `<span class="k">#${record.seq}</span> 亮牌 座位 ${record.seat}${record.card ? cardsLabel([record.card]) : ""}`;
+    }
     if (record.delta_type === "identity_deal") return `<span class="k">#${record.seq}</span> 身份 座位 ${record.seat}（只有自己 / 主公 / 阵亡者公开）`;
     if (record.delta_type === "identity_reveal") return `<span class="k">#${record.seq}</span> 亮明身份 座位 ${record.seat}`;
     return `<span class="k">#${record.seq}</span> 洗牌`;

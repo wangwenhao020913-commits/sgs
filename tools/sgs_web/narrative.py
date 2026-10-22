@@ -293,6 +293,10 @@ class _Narrator:
             self._card_move(record, seq)
         elif delta_type == "card_reveal":
             self._card_reveal(record, seq)
+        elif delta_type == "chained_change":
+            self._chained_change(record, seq)
+        elif delta_type == "wine_change":
+            self._wine_change(record, seq)
         elif delta_type == "identity_reveal":
             label = _IDENTITY_BY_VALUE.get(str(record.get("identity")))
             if label is None:
@@ -318,6 +322,36 @@ class _Narrator:
         frame_id = record.get("frame_id")
         if isinstance(frame_id, int):
             self.reveal_frames[frame_id] = {"passed": False, "discarded": False}
+
+    def _chained_change(self, record: dict[str, Any], seq: int) -> None:
+        """横置 / 重置（M5-03 的 ``chained_change``）：一行中文，不读牌名、不判原因。
+
+        delta 只给"哪个座位、新值是什么"；铁索的 toggle 与属性伤害命中的结算后重置
+        都是同一个状态变化，事件流因此只写「横置」/「重置」，不替引擎解释是谁造成的。
+        """
+        if not self.started:
+            return
+        seat = record.get("seat")
+        if seat is None:
+            return
+        self._line(
+            seq,
+            [*self._seat(seat), _act(" 横置" if record.get("chained") else " 重置")],
+        )
+
+    def _wine_change(self, record: dict[str, Any], seq: int) -> None:
+        """【酒】加伤状态（M5-04 的 ``wine_change``）：置位 / 消失各一行中文。
+
+        ``active=True`` = 出牌阶段使用【酒】置上加伤（濒死自救不产生这条）；
+        ``active=False`` = 下一张【杀】兑现或回合末清理——玩家因此看得见"加伤还在不在"。
+        """
+        if not self.started:
+            return
+        seat = record.get("seat")
+        if seat is None:
+            return
+        text = " 进入【酒】状态" if record.get("active") else " 的【酒】加伤消失"
+        self._line(seq, [*self._seat(seat), _act(text)])
 
     def _mark_reveal_action(self, kind: str) -> None:
         """亮牌之后、结算结束之前的 ``Pass`` ⇒ 显式放弃（有同花色也可以放弃）。"""

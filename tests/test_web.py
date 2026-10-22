@@ -6578,3 +6578,332 @@ def test_offering_wine_submits_nothing_until_the_player_answers() -> None:
     assert wines[0] in list(session.engine.state.player(0).hand)
     assert session.engine.state.player(0).wine_active is False
     assert session.pending is pending, "询问原样挂着，等玩家自己决定"
+
+
+# ---------------------------------------------------------------------------
+# M5-08d：新状态显示（新卡面 / 横置 / 酒 / 伤害飘字 / 事件流中文）
+#
+# 本票**只做展示**：`src/sgs/` 一行不改，`display.py` / `narrative.py` / `static/` 只读
+# 服务端已下发的事实。本段钉的是服务端的**展示契约**：新牌名 / 属性的翻法、横置与酒的
+# 状态字段、伤害数字的颜色（火红 / 雷蓝 / 普通白），以及新 delta 在事件流里的中文。
+# DOM（虚线与泛红）由 `tests/support/ui_smoke.mjs` 的 M5-08d 组钉。
+# ---------------------------------------------------------------------------
+
+
+def _damage_classes(entries: list[dict], seat: int) -> list[str]:
+    """某座位「受到 N 点伤害」那一条里的伤害数字颜色类（``dmg`` / ``dmg-fire`` / ...）。"""
+    for entry in entries:
+        segments = entry.get("segments") or []
+        if entry.get("kind") != "line" or not segments:
+            continue
+        if segments[0].get("text") != f"座位{seat}" or "受到" not in entry["text"]:
+            continue
+        return [seg["cls"] for seg in segments if seg["cls"].startswith("dmg")]
+    raise AssertionError(f"事件流里没有座位 {seat} 的受伤行：{[e['text'] for e in entries]}")
+
+
+def _fire_attack_damage_session(*, target: int = 1):
+    """真会话：人类（0）对 ``target`` 用火攻，弃一张同花色牌 ⇒ 目标吃 1 点火焰伤害。"""
+    spades = _fire_suit_cards(Suit.SPADE)
+    session = _fire_session(
+        user_hand=(spades[0], spades[1]),
+        target_hand=(spades[2],),
+    )
+    session.submit_answer(_fire_use_action(session.pending, target=target))
+    discard = _step_until(
+        session,
+        lambda pending: pending.kind == QueryKind.SELECT_CARDS
+        and pending.actor == session.human_seat,
+    )
+    discard_action = next(
+        action
+        for action in discard.legal_actions
+        if isinstance(action, SelectCards)
+        and discard.slots[action.picks[0]].card is not None
+        and discard.slots[action.picks[0]].card.card_id == spades[1]
+    )
+    session.submit_answer(discard_action)
+    _step_until(
+        session,
+        lambda pending: pending.kind == QueryKind.PLAY_PHASE
+        and pending.actor == session.human_seat,
+    )
+    return session, target
+
+
+def _attribute_slash_conduction_session(card_type: str):
+    """真会话：0 号位对横置的 1 号位打出 ``card_type``，1 号位吃属性伤害后传导给 2 号位。"""
+    card = cards_of_type(_iron_pack(), card_type)[0]
+    session = _iron_session(hand=(card,), chained=(False, True, True, False))
+    pending = session.pending
+    action = next(
+        item
+        for item in pending.legal_actions
+        if isinstance(item, UseCard) and item.card.card_id == card and item.targets == (1,)
+    )
+    session.submit_answer(action)
+    _drive_until_human_play(session)
+    return session
+
+
+def test_m5_fire_slash_fire_attack_and_conduction_damage_floats_are_red() -> None:
+    """火焰伤害飘红：火杀、火攻、以及“渠道牌沿用源伤害”的连环传导都取火焰色。"""
+    fire_slash = _attribute_slash_conduction_session("fire_slash")
+    entries = _narrative(
+        fire_slash.records(),
+        viewer=0,
+        heroes=fire_slash.hero_assignments,
+        pack_id=fire_slash.pack.pack_id,
+    )
+    assert _damage_classes(entries, 1) == ["dmg-fire"], "火杀命中 ⇒ 红"
+    assert _damage_classes(entries, 2) == ["dmg-fire"], "传导沿用源渠道牌 ⇒ 仍红"
+    conduction = _line_at(
+        entries,
+        next(
+            record["seq"]
+            for record in _delta_records(fire_slash, "hp_change")
+            if record["seat"] == 2
+        ),
+    )
+    assert conduction is not None and "受到 1 点伤害" in conduction["text"], conduction
+
+    fire_attack, target = _fire_attack_damage_session()
+    entries = _narrative(
+        fire_attack.records(),
+        viewer=0,
+        heroes=fire_attack.hero_assignments,
+        pack_id=fire_attack.pack.pack_id,
+    )
+    assert _damage_classes(entries, target) == ["dmg-fire"], "火攻的火焰伤害 ⇒ 红"
+
+
+def test_m5_thunder_slash_and_lightning_damage_floats_are_blue() -> None:
+    """雷电伤害飘蓝：雷杀（含传导）与既有的【闪电】都不回归成普通白。"""
+    thunder_slash = _attribute_slash_conduction_session("thunder_slash")
+    entries = _narrative(
+        thunder_slash.records(),
+        viewer=0,
+        heroes=thunder_slash.hero_assignments,
+        pack_id=thunder_slash.pack.pack_id,
+    )
+    assert _damage_classes(entries, 1) == ["dmg-thunder"], "雷杀命中 ⇒ 蓝"
+    assert _damage_classes(entries, 2) == ["dmg-thunder"], "传导沿用源渠道牌 ⇒ 仍蓝"
+
+    lightning = _lethal_lightning_session()
+    entries = _narrative(
+        lightning.records(),
+        viewer=0,
+        heroes=lightning.hero_assignments,
+        pack_id=lightning.pack.pack_id,
+    )
+    assert _damage_classes(entries, 1) == ["dmg-thunder"], "【闪电】命中 ⇒ 蓝（既有雷电伤害）"
+
+
+def test_m5_plain_damage_floats_stay_white() -> None:
+    """普通伤害不变色：普通【杀】的伤害数字仍是默认色。"""
+    session = _attribute_slash_conduction_session("slash")
+    entries = _narrative(
+        session.records(),
+        viewer=0,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    assert _damage_classes(entries, 1) == ["dmg"], "普通伤害 ⇒ 白"
+    assert not [entry for entry in entries if _damage_classes(entries, 1) != ["dmg"]]
+
+
+def _delta_records(session, delta_type: str) -> list[dict]:
+    return [
+        payload
+        for payload in (_record_payload(record) for record in session.records())
+        if payload.get("kind") == "delta" and payload.get("delta_type") == delta_type
+    ]
+
+
+def test_m5_narrative_reads_chain_reset_reveal_wine_and_reforge_in_chinese() -> None:
+    """事件流（简易档）：横置 / 重置 / 亮牌 / 酒 / 重铸各有一行可读中文，没有英文枚举。"""
+    # 横置 / 重置：同一张铁索让两个目标独立翻转 ⇒ 两个 chained_change 各一行。
+    iron = _iron_session(hand=(_iron_card_id(),), chained=(False, True, False, False))
+    iron.submit_answer(_iron_use_action(iron.pending, (1, 2)))
+    _drive_until_human_play(iron)
+    entries = _narrative(
+        iron.records(),
+        viewer=0,
+        heroes=iron.hero_assignments,
+        pack_id=iron.pack.pack_id,
+    )
+    changes = {record["seat"]: record for record in _delta_records(iron, "chained_change")}
+    assert changes[1]["chained"] is False and changes[2]["chained"] is True, changes
+    reset_line = _line_at(entries, changes[1]["seq"])
+    chain_line = _line_at(entries, changes[2]["seq"])
+    assert reset_line is not None and "重置" in reset_line["text"], reset_line
+    assert chain_line is not None and "横置" in chain_line["text"], chain_line
+    assert "chained_change" not in _line_text(entries)
+
+    # 亮牌：火攻亮出的那一张，事件流写「亮出【牌名】」。
+    fire_attack, _target = _fire_attack_damage_session()
+    reveals = _delta_records(fire_attack, "card_reveal")
+    assert len(reveals) == 1, "前置：火攻恰好公开一张"
+    entries = _narrative(
+        fire_attack.records(),
+        viewer=0,
+        heroes=fire_attack.hero_assignments,
+        pack_id=fire_attack.pack.pack_id,
+    )
+    reveal_line = _line_at(entries, reveals[0]["seq"])
+    assert reveal_line is not None and "亮出" in reveal_line["text"], reveal_line
+    assert "【" in reveal_line["text"] and "】" in reveal_line["text"], reveal_line
+    assert "card_reveal" not in _line_text(entries)
+
+    # 酒：状态变化有中文行（置位 / 加伤消失），且不落 wine / wine_change 英文。
+    wine = _wine_session()
+    first = next(
+        action for action in _wine_actions(wine.pending) if action.card.card_id == _wine_card_ids()[0]
+    )
+    wine.submit_answer(first)
+    entries = _narrative(
+        wine.records(),
+        viewer=0,
+        heroes=wine.hero_assignments,
+        pack_id=wine.pack.pack_id,
+    )
+    changes = _delta_records(wine, "wine_change")
+    assert len(changes) == 1 and changes[0]["active"] is True, changes
+    wine_line = _line_at(entries, changes[0]["seq"])
+    assert wine_line is not None and "酒" in wine_line["text"], wine_line
+    text = _line_text(entries)
+    assert "wine_change" not in text and "wine" not in text.lower()
+
+    # 重铸：写「重铸」不写「弃置」，也不落 REFORGE / Reforge / iron_chain 英文。
+    reforge = _iron_session(hand=(_iron_card_id(),))
+    from sgs.state import Reforge
+
+    reforge.submit_answer(next(
+        action for action in reforge.pending.legal_actions if isinstance(action, Reforge)
+    ))
+    _drive_until_human_play(reforge)
+    entries = _narrative(
+        reforge.records(),
+        viewer=0,
+        heroes=reforge.hero_assignments,
+        pack_id=reforge.pack.pack_id,
+    )
+    moves = [
+        record
+        for record in _delta_records(reforge, "card_move")
+        if record.get("reason") == "REFORGE"
+    ]
+    assert len(moves) == 1, moves
+    reforge_line = _line_at(entries, moves[0]["seq"])
+    assert reforge_line is not None and "重铸" in reforge_line["text"], reforge_line
+    assert "弃置" not in reforge_line["text"], reforge_line
+    text = _line_text(entries)
+    for forbidden in ("REFORGE", "Reforge", "iron_chain", "FIRE"):
+        assert forbidden not in text, f"事件流漏出英文枚举 {forbidden!r}：{text}"
+
+
+_M5_NEW_CARD_TYPES = (
+    "fire_slash",
+    "thunder_slash",
+    "wine",
+    "iron_chain",
+    "vine_armor",
+    "silver_lion",
+    "ancient_scimitar",
+    "vermilion_feather_fan",
+    "hualiu",
+)
+"""M5 新牌名（展示契约要逐张核对的闭集；【火攻】/【闪电】的**伤害属性**另由飘字测试钉）。"""
+
+
+def test_m5_new_card_faces_come_from_the_server_display_contract() -> None:
+    """新卡面：火杀 / 雷杀 = 「杀」+ 红 / 蓝；酒 / 铁索 / 五件装备 = 服务端牌名 + 描述 + 槽位 / 范围。"""
+    from sgs_web.display import card_payload
+
+    pack = _iron_pack()
+    names = {card_type.id: card_type.name for card_type in pack.card_types}
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=tuple(range(len(pack.deck.cards))),
+    )
+    faces = {
+        card_type: card_payload(state.card(cards_of_type(pack, card_type)[0]))
+        for card_type in _M5_NEW_CARD_TYPES
+    }
+
+    assert faces["fire_slash"]["display_name"] == "杀", "火杀卡面显示「杀」，不是「火杀」"
+    assert faces["fire_slash"]["attribute"] == "火焰"
+    assert faces["thunder_slash"]["display_name"] == "杀", "雷杀卡面显示「杀」"
+    assert faces["thunder_slash"]["attribute"] == "雷电"
+    for card_type in ("fire_slash", "thunder_slash"):
+        assert faces[card_type]["description"], f"{card_type} 要带服务端描述（悬停读它）"
+
+    for card_type in _M5_NEW_CARD_TYPES[2:]:
+        face = faces[card_type]
+        assert face["display_name"] == names[card_type], (
+            f"{card_type} 的卡面名必须逐字取内容包的牌名：{face['display_name']!r}"
+        )
+        assert face["description"], f"{card_type} 的服务端描述为空"
+
+    equipment = {
+        "ancient_scimitar": ("weapon", 2),
+        "vermilion_feather_fan": ("weapon", 4),
+        "vine_armor": ("armor", None),
+        "silver_lion": ("armor", None),
+        "hualiu": ("horse_defense", None),
+    }
+    for card_type, (slot, attack_range) in equipment.items():
+        face = faces[card_type]
+        assert face["slot"] == slot, f"{card_type} 槽位 = {slot}（服务端 CardRef 派生）"
+        assert face["attack_range"] == attack_range, (
+            f"{card_type} 攻击范围 = {attack_range}（服务端 CardRef 派生）"
+        )
+
+    # 描述只有服务端一份：前端脚本不抄任何新牌名的描述全文（与既有 U1-04d 同一判据）。
+    from sgs_web.descriptions import CARD_DESCRIPTIONS
+
+    static = REPO_ROOT / "tools" / "sgs_web" / "static"
+    scripts = {path.name: path.read_text(encoding="utf-8") for path in static.glob("*.js")}
+    for card_type in _M5_NEW_CARD_TYPES:
+        text = CARD_DESCRIPTIONS[card_type]
+        for name, source in scripts.items():
+            assert text not in source, f"{name} 硬编码了 {card_type} 的描述全文"
+
+
+def test_m5_real_chained_and_wine_states_reach_the_seat_display_contract() -> None:
+    """横置 / 酒是**投影事实**：真实铁索 toggle 与【酒】使用后，座位字段与展示契约同步。"""
+    from sgs_web.display import seat_display
+
+    iron = _iron_session(hand=(_iron_card_id(),), chained=(False, True, False, False))
+    iron.submit_answer(_iron_use_action(iron.pending, (1, 2)))
+    _drive_until_human_play(iron)
+    view = project(iron.engine.state, 0)
+    assert [player.chained for player in view.players[:3]] == [False, False, True], (
+        "座位 1 已横置 ⇒ 重置；座位 2 未横置 ⇒ 横置"
+    )
+    assert seat_display(view.players[0])["chained"] is False
+    assert seat_display(view.players[2])["chained"] is True
+    snapshot = visible_snapshot(iron)
+    assert [player["chained"] for player in snapshot["players"][:3]] == [False, False, True]
+
+    wine = _wine_session()
+    wine.submit_answer(next(
+        action for action in _wine_actions(wine.pending)
+        if action.card.card_id == _wine_card_ids()[0]
+    ))
+    view = project(wine.engine.state, 0)
+    assert view.players[0].wine_active is True, "使用【酒】后投影为真"
+    assert seat_display(view.players[0])["wine_active"] is True
+    assert visible_snapshot(wine)["players"][0]["wine_active"] is True
+
+    pending = wine.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    wine.submit_answer(next(
+        action for action in pending.legal_actions if isinstance(action, EndPhase)
+    ))
+    # 其余 AI 座位的回合也跑完，挂起停在人类的下一个出牌阶段。
+    assert wine.engine.state.player(0).wine_active is False, "回合末清理"
+    view = project(wine.engine.state, 0)
+    assert view.players[0].wine_active is False
+    assert seat_display(view.players[0])["wine_active"] is False

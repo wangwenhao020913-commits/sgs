@@ -114,11 +114,21 @@ def suit_labels(options: Any) -> dict[str, dict[str, str]] | None:
 _SLASH_TYPES = frozenset({"slash", "fire_slash", "thunder_slash"})
 """都显示成「杀」的牌名 id：普通杀 / 火杀 / 雷杀。"""
 
-_FIRE_TYPES = frozenset({"fire_slash"})
-"""火焰属性：火杀（军争）；军争落地前只有测试会构造它（火攻的属性等 M5 落地时再补）。"""
+_FIRE_TYPES = frozenset({"fire_slash", "fire_attack"})
+"""**火焰伤害**的牌名 id：火杀（军争）与火攻（锦囊）。
 
-_THUNDER_TYPES = frozenset({"thunder_slash"})
-"""雷电属性：雷杀（军争）。"""
+这是**展示事实**（这张牌造成的伤害是火焰），不是规则分支：引擎的属性仍由
+``CardBehavior`` / ``ops`` 声明，展示层只把同一事实翻成界面用的 ``attribute``。
+``narrative._damage_class`` 读的就是渠道牌的这份 ``attribute``——火攻的伤害帧
+渠道牌是【火攻】本体、传导伤害帧沿用源伤害的渠道牌（M5-03 裁定），两条因此都取得到色。
+"""
+
+_THUNDER_TYPES = frozenset({"thunder_slash", "lightning"})
+"""**雷电伤害**的牌名 id：雷杀（军争）与闪电（标准包延时锦囊）。
+
+与 :data:`_FIRE_TYPES` 同一姿态：只翻展示事实。既有的【闪电】伤害（3 点雷电）
+由此从"普通白"回到雷电色，不回归。
+"""
 
 
 def card_display(

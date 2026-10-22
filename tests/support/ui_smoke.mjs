@@ -11583,4 +11583,260 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.resetSelection();
 }
 
+/* ============ M5-08d（D2 / D5 / D12 / §6 A2 A3）：新卡面 / 横置 / 酒 / 伤害飘字 ============
+ *
+ * 本组只钉**界面读法**（服务端那一半由 `tests/test_web.py` 的 M5-08d 组钉）：
+ *   - 火杀 / 雷杀 = 服务端 `display_name`「杀」+ `attribute` 火焰 / 雷电（红 / 蓝）；
+ *   - 酒 / 铁索 / 藤甲 / 白银狮子 / 古锭刀 / 朱雀羽扇 / 骅骝：牌名、描述、槽位、攻击范围
+ *     全部来自载荷（前端没有第二份牌名 / 描述表）；
+ *   - 横置 = 投影的 `chained` ⇒ 座位中央虚线（自己的静态块 `#t-self-chain` 也画），
+ *     重置后消失；
+ *   - 酒 = 投影的 `wine_active` ⇒ 席位泛红（无「酒」字徽章），与当前回合 / 横置 / 阵亡
+ *     叠加不互挡，回合末清除后恢复；
+ *   - 伤害数字只按服务端给的 `segments[].cls`（dmg-fire / dmg-thunder / dmg）上色；
+ *   - 事件流：重铸 / 横置 / 重置 / 亮牌 / 酒 都是中文，完整档不漏英文枚举。
+ */
+{
+  const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const hasClass = (node, name) => Boolean(node)
+    && (node.classList.contains(name) || String(node.className || "").split(/\s+/).includes(name));
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) {
+      out.push(child);
+      walk(child, out);
+    }
+    return out;
+  };
+  const byClass = (node, name) => walk(node).filter((child) => hasClass(child, name));
+  const card = (id, type, name, extra = {}) => ({
+    ...synthCard(id, name), type, display_name: name, kind: "normal",
+    attribute: "普通", source_cards: [], slot: null, attack_range: null,
+    description: `服务端描述：${name}`, ...extra,
+  });
+  // 载荷形状 = 服务端 `card_payload`（`display_name` / `attribute` / `description` /
+  // `slot` / `attack_range` 都来自服务端；界面不兜任何一张牌名的表）。
+  const fireSlash = card(201, "fire_slash", "火杀", { display_name: "杀", attribute: "火焰" });
+  const thunderSlash = card(202, "thunder_slash", "雷杀", { display_name: "杀", attribute: "雷电" });
+  const wine = card(203, "wine", "酒");
+  const iron = card(204, "iron_chain", "铁索连环");
+  const vine = card(205, "vine_armor", "藤甲", { slot: "armor" });
+  const silver = card(206, "silver_lion", "白银狮子", { slot: "armor" });
+  const scimitar = card(207, "ancient_scimitar", "古锭刀", { slot: "weapon", attack_range: 2 });
+  const fan = card(208, "vermilion_feather_fan", "朱雀羽扇", { slot: "weapon", attack_range: 4 });
+  const hualiu = card(209, "hualiu", "骅骝", { slot: "horse_defense" });
+  const hand = [fireSlash, thunderSlash, wine, iron, vine, silver, scimitar, fan, hualiu];
+
+  const playPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 3401,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 3401 }],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+    prompt_display: {
+      text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      default_action: { kind: "EndPhase", answers_seq: 3401 },
+      default_label: "超时将自动结束出牌阶段",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const seatState = (seat, extra = {}) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, chained: false, wine_active: false, ...extra,
+  });
+  const displayView = () => {
+    const view = synthView(playPending);
+    view.human_seat = 0;
+    view.snapshot.seat = 0;
+    view.snapshot.phase = "play";
+    view.snapshot.turn_seat = 1;
+    view.snapshot.self_hand = [...hand];
+    view.snapshot.players = [
+      seatState(0, { chained: true, wine_active: true }),
+      seatState(1, { chained: true, wine_active: true }),  // turn + chained + wine
+      seatState(2),                                       // 干净对照
+      seatState(3, { alive: false, chained: true, wine_active: true }),  // dead + chained + wine
+    ];
+    return view;
+  };
+  const renderDisplay = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+  };
+
+  const view = displayView();
+  renderDisplay(view);
+  const faces = $("t-hand").children;
+  check("M5-08d-a1 火杀 / 雷杀卡面 = 服务端「杀」+ 火焰 / 雷电（红 / 蓝），不在前端另起牌名",
+    faces.length === hand.length
+      && byClass(faces[0], "cname")[0].textContent === "杀"
+      && byClass(faces[0], "ctype")[0].textContent === "普通 · 火焰"
+      && hasClass(faces[0], "attr-fire")
+      && byClass(faces[1], "cname")[0].textContent === "杀"
+      && byClass(faces[1], "ctype")[0].textContent === "普通 · 雷电"
+      && hasClass(faces[1], "attr-thunder")
+      && /\.card\.face\.attr-fire \.cname\s*\{[^}]*#b3261e/s.test(css)
+      && /\.card\.face\.attr-thunder \.cname\s*\{[^}]*#1d4e9c/s.test(css),
+    `fire="${byClass(faces[0], "cname")[0].textContent}/${byClass(faces[0], "ctype")[0].textContent}" thunder="${byClass(faces[1], "cname")[0].textContent}/${byClass(faces[1], "ctype")[0].textContent}"`);
+
+  const expectedFaces = [
+    { name: "酒", type: "普通" },
+    { name: "铁索连环", type: "普通" },
+    { name: "藤甲", type: "防具" },
+    { name: "白银狮子", type: "防具" },
+    { name: "古锭刀", type: "武器 · 范围 2" },
+    { name: "朱雀羽扇", type: "武器 · 范围 4" },
+    { name: "骅骝", type: "防马" },
+  ];
+  const faceFacts = faces.slice(2).map((node) => ({
+    name: byClass(node, "cname")[0].textContent,
+    type: byClass(node, "ctype")[0].textContent,
+    title: node.getAttribute("title"),
+  }));
+  check("M5-08d-a2 酒 / 铁索 / 五件装备的牌名、描述、槽位 / 攻击范围全部读载荷（前端没有第二份表）",
+    faceFacts.every((fact, index) => fact.name === expectedFaces[index].name
+      && fact.type === expectedFaces[index].type
+      && fact.title === hand[index + 2].description),
+    `faces=${JSON.stringify(faceFacts)}`);
+
+  /* ---- 横置：投影字段 ⇒ 虚线；自己的静态块也有；重置后消失 ---- */
+  check("M5-08d-b1 投影 chained=true ⇒ 座位中央虚线；自己的静态块 #t-self-chain 也画",
+    byClass(seatBox(1), "chain-line").length === 1
+      && byClass(seatBox(2), "chain-line").length === 0
+      && seatBox(1).classList.contains("chained")
+      && $("t-self-seat").classList.contains("chained")
+      && $("t-self-chain").hidden === false
+      && /id="t-self-chain" class="chain-line"/.test(readFileSync("tools/sgs_web/static/index.html", "utf8"))
+      && /\.chain-line\s*\{[^}]*dashed/s.test(css),
+    `seat1=${[...seatBox(1).classList.set].join(",")} self=${[...$("t-self-seat").classList.set].join(",")} selfChainHidden=${$("t-self-chain").hidden} lines=${byClass(seatBox(1), "chain-line").length}/${byClass(seatBox(2), "chain-line").length} css=${/\.chain-line\s*\{[^}]*dashed/s.test(css)}`);
+  const resetView = displayView();
+  resetView.snapshot.players[0].chained = false;
+  resetView.snapshot.players[1].chained = false;
+  resetView.snapshot.players[3].chained = false;
+  renderDisplay(resetView);
+  check("M5-08d-b2 重置后（同一份投影 chained=false）虚线与静态块一起消失——状态只读投影",
+    byClass(seatBox(1), "chain-line").length === 0
+      && !seatBox(1).classList.contains("chained")
+      && !$("t-self-seat").classList.contains("chained")
+      && $("t-self-chain").hidden === true,
+    `seat1=${[...seatBox(1).classList.set].join(",")} self=${[...$("t-self-seat").classList.set].join(",")} selfChainHidden=${$("t-self-chain").hidden}`);
+
+  /* ---- 酒：席位泛红 + 三态叠加不互挡；回合末清除后恢复 ---- */
+  renderDisplay(displayView());
+  const seat1 = seatBox(1);
+  const seat3 = seatBox(3);
+  check("M5-08d-c1 投影 wine_active=true ⇒ 席位泛红（无「酒」字徽章），与当前回合 / 横置 / 阵亡叠加不互挡",
+    seat1.classList.contains("wine") && seat1.classList.contains("turn")
+      && seat1.classList.contains("chained")
+      && byClass(seat1, "chain-line").length === 1
+      && !seat1.text().includes("酒")
+      && seat3.classList.contains("wine") && seat3.classList.contains("chained")
+      && seat3.classList.contains("dead")
+      && byClass(seat3, "chain-line").length === 1
+      && byClass(seat3, "dead-tag").length === 1
+      && byClass(seat3, "dead-text").length === 1
+      && $("t-self-seat").classList.contains("wine")
+      && !$("t-self-seat").text().includes("酒")
+      && /\.seat\.wine \.hero-block\s*\{[^}]*#fbe4de/s.test(css)
+      && !/\.seat\.dead\s*\{[^}]*filter:\s*grayscale/s.test(css),
+    `seat1=${[...seat1.classList.set].join(",")} seat3=${[...seat3.classList.set].join(",")} self=${[...$("t-self-seat").classList.set].join(",")}`);
+  const soberView = displayView();
+  soberView.snapshot.players[0].wine_active = false;
+  soberView.snapshot.players[1].wine_active = false;
+  soberView.snapshot.players[3].wine_active = false;
+  renderDisplay(soberView);
+  check("M5-08d-c2 回合末清除 wine_active 后席位恢复：泛红类撤下，横置 / 阵亡不受影响",
+    !seatBox(1).classList.contains("wine")
+      && !seatBox(3).classList.contains("wine")
+      && !$("t-self-seat").classList.contains("wine")
+      && seatBox(3).classList.contains("dead")
+      && byClass(seatBox(1), "chain-line").length === 1,
+    `seat1=${[...seatBox(1).classList.set].join(",")} seat3=${[...seatBox(3).classList.set].join(",")}`);
+
+  /* ---- 伤害飘字：服务端 cls ⇒ 火红 / 雷蓝 / 普通白（前端只搬类名 + CSS 上色） ---- */
+  const damageLine = (seq, seat, amount, cls) => ({
+    kind: "line", seq, text: `座位${seat} 受到 ${amount} 点伤害`,
+    segments: [
+      { text: `座位${seat}`, cls: "seat" },
+      { text: " 受到 ", cls: "act" },
+      { text: String(amount), cls },
+      { text: " 点伤害", cls: "act" },
+    ],
+  });
+  ui.state.narrative = [
+    damageLine(3410, 1, 1, "dmg-fire"),       // 火杀
+    damageLine(3411, 1, 1, "dmg-fire"),       // 火攻
+    damageLine(3412, 2, 1, "dmg-fire"),       // 连环传导（沿用源伤害属性）
+    damageLine(3413, 1, 1, "dmg-thunder"),    // 雷杀
+    damageLine(3414, 1, 3, "dmg-thunder"),    // 闪电（既有雷电伤害）
+    damageLine(3415, 1, 1, "dmg"),            // 普通伤害
+  ];
+  ui.state.narrativeShown = 0;
+  ui.renderLog();
+  const damageSpans = byClass($("t-log"), "nar-dmg-fire")
+    .concat(byClass($("t-log"), "nar-dmg-thunder"))
+    .concat(byClass($("t-log"), "nar-dmg"));
+  const fireSpans = byClass($("t-log"), "nar-dmg-fire");
+  const thunderSpans = byClass($("t-log"), "nar-dmg-thunder");
+  const plainSpans = byClass($("t-log"), "nar-dmg");
+  check("M5-08d-d1 伤害数字按服务端 cls 上色：火杀 / 火攻 / 传导红、雷杀 / 闪电蓝、普通白",
+    damageSpans.length === 6
+      && fireSpans.length === 3 && fireSpans.every((span) => span.textContent === "1")
+      && thunderSpans.length === 2
+      && thunderSpans.some((span) => span.textContent === "3")
+      && plainSpans.length === 1
+      && /\.nar-card-fire, \.nar-dmg-fire\s*\{[^}]*#b3261e/s.test(css)
+      && /\.nar-card-thunder, \.nar-dmg-thunder\s*\{[^}]*#1d4e9c/s.test(css)
+      && /\.nar-dmg\s*\{[^}]*font-weight:\s*600/s.test(css),
+    `fire=${fireSpans.map((span) => span.textContent)} thunder=${thunderSpans.map((span) => span.textContent)} plain=${plainSpans.map((span) => span.textContent)}`);
+
+  /* ---- 事件流：重铸 / 横置 / 重置 / 亮牌 / 酒 都是中文，没有英文枚举 ---- */
+  const describe = ui.describeRecord;
+  const reforgeLine = describe({
+    kind: "delta", delta_type: "card_move", seq: 3420, reason: "REFORGE",
+    from_zone: { seat: 0, zone: "hand" }, to_zone: { zone: "discard" }, cards: [iron],
+  });
+  const chainLine = describe({
+    kind: "delta", delta_type: "chained_change", seq: 3421, frame_id: 7, depth: 0,
+    seat: 1, chained: true,
+  });
+  const resetLine = describe({
+    kind: "delta", delta_type: "chained_change", seq: 3422, frame_id: 7, depth: 0,
+    seat: 1, chained: false,
+  });
+  const wineLine = describe({
+    kind: "delta", delta_type: "wine_change", seq: 3423, frame_id: 7, depth: 0,
+    seat: 0, active: true,
+  });
+  const revealLine = describe({
+    kind: "delta", delta_type: "card_reveal", seq: 3424, frame_id: 7, depth: 0,
+    seat: 1, card: iron,
+  });
+  const allLines = [reforgeLine, chainLine, resetLine, wineLine, revealLine].join(" | ");
+  check("M5-08d-e1 完整事件流：重铸 / 横置 / 重置 / 酒 / 亮牌都是中文，不落 REFORGE / *_change 英文枚举",
+    reforgeLine.includes("重铸") && reforgeLine.includes("铁索连环")
+      && chainLine.includes("横置") && resetLine.includes("重置")
+      && wineLine.includes("酒") && revealLine.includes("亮牌")
+      && revealLine.includes("铁索连环")
+      && !/REFORGE|Reforge|chained_change|wine_change|card_reveal|洗牌/.test(allLines),
+    allLines);
+  ui.state.narrative = [{
+    kind: "line", seq: 3425, text: "座位0 重铸【铁索连环】",
+    segments: [
+      { text: "座位0", cls: "seat" },
+      { text: " 重铸", cls: "act" },
+      { text: "【铁索连环】", cls: "card" },
+    ],
+  }];
+  ui.state.narrativeShown = 0;
+  ui.renderLog();
+  check("M5-08d-e2 简易事件流也写「重铸」（不是「弃置」），服务端叙事原样渲染",
+    logText().includes("重铸") && logText().includes("铁索连环")
+      && !logText().includes("弃置"),
+    `log="${logText()}"`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
