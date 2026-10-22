@@ -185,6 +185,7 @@ const state = {
   runs: [],
   replay: null,
   heroCatalog: [],     // 点将列表（`GET /api/heroes` 的启用池）；开局页的选项来源
+  deckCatalog: [],     // 牌堆档位列表（`GET /api/decks`）；标签 / 说明也由服务端下发
   logRecords: [],
   lastQuerySeat: null, // 事件流里"上一条询问的 actor"（action 记录靠它归属）
   narrative: [],       // U1-05：服务端下发的叙事条目（简易事件流；按 seq 升序）

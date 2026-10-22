@@ -2,8 +2,9 @@
 
 参数有 ``--seed``（票 02 §2）与 ``--players``（票 23：2/4/5/6/7/8、默认 2），
 武将发放的 ``--heroes a,b,c`` / ``--hero-pool x,y,z``（票 02：显式指定 / 换启用池），
-以及参与者档位 ``--ai random|heuristic``（票 13：**缺省仍是随机**——默认参与者不动，
-M2 的 34 条基准磁带一行不改）。
+参与者档位 ``--ai random|heuristic``（票 13：**缺省仍是随机**——默认参与者不动，
+M2 的 34 条基准磁带一行不改），以及牌堆档位 ``--deck-profile``（M5-01b：缺省 = 内容包
+默认档 ``standard_108``；``standard_ex_160`` 要显式选，非法档位照加载器报错退出 1）。
 种子省略时按票 08 现生成 64 位种子、写进 header 并在 stdout 打印，事后可原样重跑。
 坏数据、非法人数与非法行动都走 stderr + 退出码 1。
 """
@@ -82,6 +83,11 @@ def main(argv: list[str] | None = None) -> int:
         default="random",
         help="参与者档位：random（缺省，均匀随机）或 heuristic（规则启发式）。",
     )
+    parser.add_argument(
+        "--deck-profile",
+        default=None,
+        help="牌堆档位（内容包 decks 的键）；省略 = 内容包默认档（standard_108）。",
+    )
     args = parser.parse_args(argv)
 
     # 人数值域只在规则配置里有第二份；这里直接用它的加载期校验，不再抄一遍 2/4/5/6/7/8。
@@ -101,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        pack = load_content_pack()
+        pack = load_content_pack(deck_profile=args.deck_profile)
     except DataLoadError as error:
         print(error.report(), file=sys.stderr)
         return 1

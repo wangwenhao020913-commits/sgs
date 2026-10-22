@@ -43,6 +43,7 @@ function wire() {
   $("in-pointjiang").addEventListener("change", syncPointjiang);
   syncPointjiang();
   loadHeroCatalog();
+  loadDeckCatalog();
   $("lobby-form").addEventListener("submit", startGame);
   // U2-01（D7）：三页顶栏共用同一组导航（顺序 / 高亮 / 禁用都归 core.js:show()）；
   // 这里只按 NAV_BUTTONS 逐个挂同一份处理器。回放入口就是导航三键之一，旧图标按钮已删。

@@ -8,9 +8,12 @@
         --other-slot weapon --limit 5000 --show 5
     .venv/bin/python tools/acceptance_seed.py --players 4 --card slash \
         --other-card slash --limit 5000 --show 5
+    .venv/bin/python tools/acceptance_seed.py --players 4 --card fire_slash \
+        --deck-profile standard_ex_160 --limit 5000 --show 5
 
 输出每行一个种子：人类座位的起始手牌 + 满足附加条件的其他座位手牌。只扫**起始手牌**，
-不模拟出牌；装备 / 摸牌仍取决于实际对局。
+不模拟出牌；装备 / 摸牌仍取决于实际对局。``--deck-profile`` 缺省 ``standard_108``；
+军争牌（如【火杀】）只在 ``standard_ex_160`` 档里出现。
 """
 
 from __future__ import annotations
@@ -18,11 +21,14 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 
-from sgs.data import RuleConfig, load_content_pack
+from sgs.data import DataLoadError, RuleConfig, load_content_pack
 from sgs.engine import new_game
 from sgs.state import SlotKind
 
 __all__ = ["Match", "find_seeds", "main"]
+
+DEFAULT_DECK_PROFILE = "standard_108"
+"""实机验收默认按标准 108 档找种子（M5 之前的行为）；军争种子显式传 160 档。"""
 
 
 @dataclass(frozen=True)
@@ -51,17 +57,20 @@ def find_seeds(
     other_slot: SlotKind | None = None,
     limit: int = 5000,
     show: int = 5,
+    deck_profile: str = DEFAULT_DECK_PROFILE,
 ) -> list[Match]:
     """扫 ``0..limit-1``，返回人类手牌含 ``card`` 的前 ``show`` 个种子。
 
     ``other_card`` / ``other_slot`` 是**可选**的附加条件：只保留「至少一个其他座位
     手牌里有该牌 / 该槽位牌」的种子。两个条件同时给时按 AND 过滤。
+    ``deck_profile`` 选内容包里的牌堆档位（缺省 ``standard_108``；军争传
+    ``standard_ex_160``，未知档位照加载器的 ``decks.unknown_profile`` 报错）。
     """
     if players < 2 or not 0 <= human_seat < players:
         raise ValueError("players 必须 ≥ 2，human_seat 必须落在座位范围内")
     if limit < 1 or show < 1:
         raise ValueError("limit / show 必须 ≥ 1")
-    pack = load_content_pack(deck_profile="standard_108")
+    pack = load_content_pack(deck_profile=deck_profile)
     rule = RuleConfig(player_count=players)
     need_other = other_card is not None or other_slot is not None
     matches: list[Match] = []
@@ -115,6 +124,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--other-slot", type=_slot, default=None, help="另一座位手牌里的槽位")
     parser.add_argument("--limit", type=int, default=5000, help="扫描的种子数，缺省 5000")
     parser.add_argument("--show", type=int, default=5, help="最多输出几个命中，缺省 5")
+    parser.add_argument(
+        "--deck-profile",
+        default=DEFAULT_DECK_PROFILE,
+        help=f"牌堆档位（内容包 decks 的键）；缺省 {DEFAULT_DECK_PROFILE}。军争用 standard_ex_160。",
+    )
     args = parser.parse_args(argv)
     try:
         matches = find_seeds(
@@ -125,8 +139,9 @@ def main(argv: list[str] | None = None) -> int:
             other_slot=args.other_slot,
             limit=args.limit,
             show=args.show,
+            deck_profile=args.deck_profile,
         )
-    except ValueError as exc:
+    except (ValueError, DataLoadError) as exc:
         parser.error(str(exc))
     print(_format(matches))
     return 0

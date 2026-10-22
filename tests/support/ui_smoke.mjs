@@ -320,6 +320,48 @@ check("⓪11 关了开关 ⇒ 六个 seed 里出现过不是我已点的那名�
 check("⓪12 关了开关 ⇒ 我的武将随 seed 变（真的是随机发将）",
   new Set(seatZero).size > 1, seatZero.join(","));
 
+/* ------------------------------------------- ⓪b 牌堆档位（M5-01b）
+ *
+ * 同样走**真的开局表单**（submit → startGame → POST /api/sessions）。选项来自服务端
+ * `GET /api/decks`（前端不抄第二份档位文案表），请求体从烟测自己的 `calls` 拦截器里读，
+ * 响应体里的 `deck_profile` 是会话真档位（`GameRegistry.view` 下发）。
+ */
+
+await ui.loadDeckCatalog();
+const deckOptions = $("in-deck-profile").children;
+check("⓪13 牌堆档位选项来自服务端（标准 108 / 军争 160）",
+  calls.some((call) => call.path === "/api/decks")
+    && deckOptions.length === 2
+    && deckOptions.some((option) => option.value === "standard_108")
+    && deckOptions.some((option) => option.value === "standard_ex_160"),
+  deckOptions.map((option) => `${option.value}:${option.textContent}`).join(","));
+check("⓪14 档位缺省选中 standard_108（默认对局不变）",
+  $("in-deck-profile").value === "standard_108", $("in-deck-profile").value);
+
+mark = calls.length;
+await submitLobby();
+ui.flushPlayback();  // startGame 里的 applyView 走真计时器（垫片只排队）；冲完才提交新视图
+const standardDeck = ui.state.view;
+check("⓪15 未选档也把 standard_108 带进建局请求体",
+  sessionBodiesSince(mark).pop().deck_profile === "standard_108",
+  JSON.stringify(sessionBodiesSince(mark)));
+check("⓪16 未选档建出的仍是 108 档",
+  standardDeck.deck_profile === "standard_108", String(standardDeck.deck_profile));
+
+setSelect("in-deck-profile", "standard_ex_160");
+check("⓪17 切到军争 160 后选择器的值是 160 档",
+  $("in-deck-profile").value === "standard_ex_160");
+mark = calls.length;
+await submitLobby();
+ui.flushPlayback();
+const expandedDeck = ui.state.view;
+check("⓪18 160 档的建局请求体带 deck_profile",
+  sessionBodiesSince(mark).pop().deck_profile === "standard_ex_160",
+  JSON.stringify(sessionBodiesSince(mark)));
+check("⓪19 开局页能建出 standard_ex_160 的局",
+  expandedDeck.deck_profile === "standard_ex_160", String(expandedDeck.deck_profile));
+setSelect("in-deck-profile", "standard_108");
+
 /** 推进一条对局到一个干净局面。
  *
  * 取**第一条候选**（`legal_actions[0]`）：这是"与引擎扫描路径一致"的那条路——

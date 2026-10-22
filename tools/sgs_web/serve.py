@@ -12,6 +12,7 @@
 ``GET``          ``/api/sessions/<id>?after=&logs=`` 取增量；**顺带判定超时**
 ``POST``         ``/api/sessions/<id>/answer``       提交应答；推进到下一个挂起或终局
 ``GET``          ``/api/heroes``                     开局页点将列表（启用池的 id + 名称）
+``GET``          ``/api/decks``                      开局页牌堆档位列表（内容包 decks 的键 + 文案）
 ``GET``          ``/api/runs``                       录像列表
 ``GET``          ``/api/runs/<name>``                某局录像（meta + 记录流）
 ===============  ==================================  ==================================
@@ -39,7 +40,7 @@ from sgs_web import REPO_ROOT, ensure_engine_importable
 
 ensure_engine_importable()
 
-from sgs.data import enabled_hero_ids, load_heroes  # noqa: E402
+from sgs.data import DataLoadError, enabled_hero_ids, load_content_pack, load_heroes  # noqa: E402
 from sgs.engine import IllegalActionError  # noqa: E402
 from sgs_web.narrative import narrative_after  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
@@ -57,7 +58,7 @@ from sgs_web.session import (  # noqa: E402
 )
 from sgs_web.timeout import fallback_action  # noqa: E402
 
-__all__ = ["GameRegistry", "hero_catalog", "make_server", "main"]
+__all__ = ["GameRegistry", "deck_catalog", "hero_catalog", "make_server", "main"]
 
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
 DEFAULT_PORT = 8100
@@ -94,6 +95,38 @@ def hero_catalog() -> list[dict[str, str]]:
     return catalog
 
 
+DECK_PROFILE_DISPLAY: dict[str, tuple[str, str]] = {
+    "standard_108": ("标准 108", "标准版全部 108 张牌（默认档）。"),
+    "standard_ex_160": ("军争 160", "标准 108 张 + 军争 52 张，共 160 张。"),
+}
+"""开局页**提供给人选**的牌堆档位与文案（标签 + 说明）。
+
+这不是第二份档位来源：会话 / CLI 的值域仍是内容包 ``decks`` 的全部键（加载器校验）；
+这里只决定**开局页铺哪几项**。``basic_53`` 是 M1 回归网的 53 张测试切片
+（``tests/data/test_deck_snapshot.py``），不对人开放，故不在此表。
+"""
+
+
+def deck_catalog() -> list[dict[str, object]]:
+    """开局页「牌堆档位」的只读面：可选档位 + 服务端文案 + 默认标记。"""
+    pack = load_content_pack()
+    catalog: list[dict[str, object]] = []
+    for profile_id, (name, description) in DECK_PROFILE_DISPLAY.items():
+        deck = pack.decks.get(profile_id)
+        if deck is None:  # 数据删了档位而文案表没跟：开局页不出现死选项（测试会报漂移）
+            continue
+        catalog.append(
+            {
+                "id": profile_id,
+                "name": name,
+                "description": description,
+                "cards": len(deck.cards),
+                "default": profile_id == pack.deck_profile,
+            }
+        )
+    return catalog
+
+
 class GameRegistry:
     """内存里的会话表；**一局一个会话**，进程重启即丢（D15、`06` §2"单机跑通再谈"）。"""
 
@@ -105,6 +138,13 @@ class GameRegistry:
     # -- 建局 ---------------------------------------------------------------
 
     def create(self, body: dict[str, Any]) -> Session:
+        deck_profile = body.get("deck_profile") or None
+        if deck_profile is not None and not isinstance(deck_profile, str):
+            raise ValueError(f"牌堆档位必须是字符串：{deck_profile!r}")
+        # 档位的唯一来源 = 内容包 ``decks`` 的键；缺省（None）= 包自带默认档。
+        # 未知档位在这里抛 DataLoadError，由 HTTP 层映射成 400——**先加载、后登记**，
+        # 故失败的请求不会在 registry 里留下半局会话。
+        pack = load_content_pack(deck_profile=deck_profile)
         self._counter += 1
         session = create_session(
             seed=body.get("seed"),
@@ -113,6 +153,7 @@ class GameRegistry:
             human_seat=int(body.get("human_seat", 0)),
             my_hero=body.get("my_hero") or None,
             timeout_seconds=body.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS),
+            pack=pack,
             session_id=f"s{self._counter}",
         )
         session.mark_pending(time.monotonic())
@@ -148,6 +189,7 @@ class GameRegistry:
             "player_count": session.rule_config.player_count,
             "human_seat": session.human_seat,
             "heroes": list(session.hero_assignments),
+            "deck_profile": session.pack.deck_profile,
             "timeout_seconds": session.timeout_seconds,
             "pending_since": session.pending_since,
             "finished": session.finished,
@@ -254,6 +296,9 @@ class _Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/heroes":
                 self._send_json(200, {"heroes": hero_catalog()})
                 return
+            if parsed.path == "/api/decks":
+                self._send_json(200, {"decks": deck_catalog()})
+                return
             if parsed.path.startswith("/api/runs/"):
                 name = parsed.path[len("/api/runs/") :]
                 self._send_json(200, load_run(self.registry.runs_dir, name))
@@ -317,6 +362,11 @@ class _Handler(BaseHTTPRequestHandler):
             return
         except IllegalActionError as error:
             self._send_json(400, {"error": str(error), "reason_code": error.reason_code})
+            return
+        except DataLoadError as error:
+            # 未知牌堆档位等加载期错误：400。建局是"先加载内容包、后登记会话"，
+            # 故这条路径不会留下半局（D15 的"结构非法不改状态"同理）。
+            self._send_json(400, {"error": str(error)})
             return
         except ValueError as error:
             self._send_json(400, {"error": str(error)})

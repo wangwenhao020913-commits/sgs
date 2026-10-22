@@ -58,6 +58,8 @@
     "arrangeRowOf", "arrangeMoveTo", "arrangePick", "arrangeDrop",
     // 票 19：开局点将——列表拉取 + 开关（关了 = 置灰 + 建局不带 my_hero）
     "loadHeroCatalog", "fillHeroOptions", "syncPointjiang",
+    // M5-01b：开局页牌堆档位——列表拉取（选项/文案全来自服务端 GET /api/decks）
+    "loadDeckCatalog", "fillDeckOptions",
     // U1-03：提示条右端动作的候选下标 + 倒计时的三色纯函数 / 渲染（烟测只读这三口）
     "rightActionIndex", "countdownPhase", "renderCountdown",
     // U2-07（票 07）：排列超时自动提交（唯一例外）+ 提交 / 放弃按当前排列执行。

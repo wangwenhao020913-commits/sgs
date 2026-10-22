@@ -329,6 +329,148 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
     assert all(entry["name"] for entry in catalog), "列表要能给人看（名称非空）"
 
 
+# ---------------------------------------------------------------------------
+# 3b. 牌堆档位：建局读 body / 未知档 400 / 开局页文案（M5-01b）
+# ---------------------------------------------------------------------------
+
+
+def _post_with_the_real_handler(registry, path: str, body: dict) -> tuple[int, dict]:
+    """把一条 POST 交给**真的** ``serve._Handler``（进程内；不开端口、不起线程）。
+
+    未知档位的 400 是 **HTTP 层**的判据，只能从 handler 的响应里读。假 socket 只补
+    stdlib handler 需要的两个动作（``makefile`` / ``sendall``）：请求 / 响应仍按 HTTP
+    报文走，解析、路由、状态码与 JSON 都是产品代码给出的。
+    """
+
+    import io as _io
+
+    from sgs_web.serve import _Handler
+
+    class _Buffer(_io.BytesIO):
+        def close(self):  # handler.finish() 会关流；响应还要读，故忽略关闭
+            pass
+
+    class _Socket:
+        def __init__(self, raw: bytes) -> None:
+            self._reader = _Buffer(raw)
+            self._writer = _Buffer()
+
+        def makefile(self, mode, *args, **kwargs):  # noqa: ANN002, ANN003 - 基类签名
+            return self._reader if "r" in mode else self._writer
+
+        def sendall(self, data: bytes) -> None:
+            self._writer.write(data)
+
+    payload = json.dumps(body).encode("utf-8")
+    raw = (
+        f"POST {path} HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {len(payload)}\r\n\r\n"
+    ).encode("ascii") + payload
+    handler_cls = type("_BoundHandler", (_Handler,), {"registry": registry})
+    socket = _Socket(raw)
+    handler_cls(socket, ("127.0.0.1", 0), None)
+    response = socket._writer.getvalue()
+    head, _, response_body = response.partition(b"\r\n\r\n")
+    status = int(head.split(b" ", 2)[1])
+    return status, json.loads(response_body.decode("utf-8"))
+
+
+def test_the_registry_builds_the_deck_profile_from_the_request_body() -> None:
+    """打 ``GameRegistry.create`` 这一缝：建局请求里的档位真的进了会话与下发体。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {
+            "player_count": 2,
+            "ai": "random",
+            "seed": 20261012,
+            "timeout_seconds": None,
+            "deck_profile": "standard_ex_160",
+        }
+    )
+    payload = registry.view(session, after=-1, logs_after=0)
+
+    assert session.pack.deck_profile == "standard_ex_160"
+    assert len(session.pack.deck.cards) == 160
+    assert payload["deck_profile"] == "standard_ex_160"
+
+
+def test_the_registry_defaults_to_standard_108_without_a_deck_profile() -> None:
+    """不传档位 = 内容包默认档；M5 之前每一局走的就是这条路。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 20261012, "timeout_seconds": None}
+    )
+
+    assert session.pack.deck_profile == "standard_108"
+    assert len(session.pack.deck.cards) == 108
+
+
+def test_an_unknown_deck_profile_is_a_400_and_creates_no_session() -> None:
+    """未知档位：HTTP 400，且 registry 里**不留半局会话**。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    status, body = _post_with_the_real_handler(
+        registry,
+        "/api/sessions",
+        {
+            "player_count": 2,
+            "ai": "random",
+            "seed": 20261012,
+            "timeout_seconds": None,
+            "deck_profile": "standard_999",
+        },
+    )
+
+    assert status == 400
+    assert "decks.unknown_profile" in body["error"]
+    assert registry.sessions == {}, "未知档位不得留下半局会话"
+
+
+def test_the_deck_catalog_lists_the_packs_profiles_with_server_labels() -> None:
+    """开局页的档位选项由服务端给：标准 108 / 军争 160，缺省档带标记。
+
+    ``basic_53`` 是 M1 回归网的 53 张测试切片，不给人选——但会话层仍接受它
+    （值域 = 内容包 ``decks`` 的全部键），这里只钉开局页铺哪几项。
+    """
+    from sgs_web.serve import deck_catalog
+
+    pack = load_content_pack()
+    catalog = deck_catalog()
+
+    assert [entry["id"] for entry in catalog] == ["standard_108", "standard_ex_160"]
+    assert "basic_53" not in {entry["id"] for entry in catalog}
+    assert all(entry["id"] in pack.decks for entry in catalog), "文案表里的档位必须真在数据里"
+    assert [entry["id"] for entry in catalog if entry["default"]] == ["standard_108"]
+    assert all(entry["name"] for entry in catalog), "每个档位都要有人看的标签"
+    assert all(entry["description"] for entry in catalog), "每个档位都要有说明文案"
+
+
+def test_the_lobby_form_offers_the_deck_profile_from_server_content() -> None:
+    """开局页「牌堆档位」的静态契约：选择器在位、建局带字段、**前端不抄档位文案表**。
+
+    行为由 ``tests/support/ui_smoke.mjs`` 的 ⓪13–⓪19 驱动**真表单**覆盖（真 HTTP）；
+    这里钉的是接线本身，以及"选项 / 标签只从 `GET /api/decks` 来"这条票面纪律。
+    """
+    static = REPO_ROOT / "tools" / "sgs_web" / "static"
+    html = (static / "index.html").read_text(encoding="utf-8")
+    lobby = (static / "lobby.js").read_text(encoding="utf-8")
+    main = (static / "main.js").read_text(encoding="utf-8")
+
+    assert 'id="in-deck-profile"' in html, "开局页缺「牌堆档位」选择器"
+    assert "deck_profile:" in lobby, "建局请求体没带 deck_profile"
+    assert "loadDeckCatalog" in lobby and "loadDeckCatalog();" in main, "开局时没拉档位列表"
+    scripts = "\n".join(path.read_text(encoding="utf-8") for path in static.glob("*.js"))
+    assert not re.search(r"""["']standard_(?:108|ex_160)["']""", scripts), (
+        "前端抄了第二份档位 id / 文案表；选项与标签只能由服务端 GET /api/decks 下发"
+    )
+    assert "军争 160" not in scripts and "标准 108" not in scripts
+
+
 def test_the_session_log_stays_out_of_the_journal() -> None:
     """侧车日志是接入层事实：写它**不得**动记录流一个字节（地图 D10）。"""
     session = Session(seed=31, ai="random", timeout_seconds=None, **TWO_PLAYERS)
@@ -1973,6 +2115,23 @@ def test_the_replay_closes_the_loop_from_the_sidecar_meta(tmp_path: Path) -> Non
     assert meta["heroes"] == list(session.hero_assignments), "逐座位武将必须能从侧车放回原位"
     replayed = replay_journal(meta)
 
+    assert dump_journal(replayed) == dump_journal(session.records())
+
+
+def test_a_160_profile_session_replays_as_standard_ex_160(tmp_path: Path) -> None:
+    """M5-01b：160 局存档后从侧车重建仍是 160 档，不回落内容包默认档。"""
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    session = _finished_session(seed=83, pack=pack)
+    save_run(tmp_path, session)
+    name = next(tmp_path.glob("*.jsonl")).name[: -len(".jsonl")]
+
+    meta = load_run(tmp_path, name)["meta"]
+    assert meta["pack_id"] == "standard"
+    assert meta["deck_profile"] == "standard_ex_160"
+
+    replayed = replay_journal(meta)
+    assert replayed[0].deck_profile == "standard_ex_160", "重放不得静默回落到 standard_108"
+    assert len(load_content_pack(meta["pack_id"], deck_profile=meta["deck_profile"]).deck.cards) == 160
     assert dump_journal(replayed) == dump_journal(session.records())
 
 
