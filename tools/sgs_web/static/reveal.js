@@ -56,7 +56,11 @@ function revealData(pending) {
  */
 function isPickRevealStep(pending) {
   if (!pending || pending.dialog !== DIALOG_KINDS.reveal) return false;
-  return !(pending.harvest && pending.harvest.active !== false);
+  if (pending.harvest && pending.harvest.active !== false) return false;
+  // 只有**允许选多张**的亮牌步才走「切换选中 + 右端提交」（遗计 1~2 张）。
+  // 火攻的亮牌步（M5-08a）是 `total=[1,1]`：点一张即提交，与五谷的同一种读法；
+  // 这个判据只读服务端下发的 `spec.total`，不是第二份规则。
+  return selectionCap(pending) > 1;
 }
 
 /** 亮牌这一步的步骤提示（弹窗标题条里也镜像一份，折叠后仍可见）。

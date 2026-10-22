@@ -63,6 +63,14 @@ function cardFace(pending, card) {
       selected: false, picked, slotIndex,
     };
   }
+  if (isOwnHandSinglePick(pending)) {
+    // 火攻的同花色弃牌（M5-08a）：只有面里那几张（同花色）可点；点一张即提交。
+    const slots = pending.slots || [];
+    const slotIndex = slots.findIndex(
+      (slot) => slot.card && String(slot.card.card_id) === String(card.card_id),
+    );
+    return { selectable: slotIndex >= 0, selected: false, picked: false, slotIndex };
+  }
   if (isDiscardPick(pending)) {
     const picked = state.picks.includes(card.card_id);
     return {
@@ -101,6 +109,10 @@ function activateCard(pending, card, face) {
   if (!selectionEnabled()) return;
   if (isProvide(pending)) {
     if (face.slotIndex >= 0) toggleProvidePick(face.slotIndex);
+    return;
+  }
+  if (isOwnHandSinglePick(pending)) {
+    if (face.slotIndex >= 0) submitOwnHandSinglePick(pending, face.slotIndex);
     return;
   }
   if (isDiscardPick(pending)) { toggleDiscardPick(card.card_id); return; }

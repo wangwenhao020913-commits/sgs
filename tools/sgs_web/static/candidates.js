@@ -88,6 +88,30 @@ function isDiscardPick(pending) {
   return Boolean(pending) && pending.kind === "DISCARD";
 }
 
+/** **只从自己的手里选一张**的牌桌步（M5-08a 的【火攻】同花色弃牌）。
+ *
+ * 形状全部读载荷：`SELECT_CARDS`、**服务端下发了一个已亮出的牌**（`pending.reveal`，
+ * 火攻弃牌步的公开事实）、上限 1、面里每一槽都是**应答者本人**的手牌且牌面可见，且这一步
+ * 不是「提供一张 B」/ 弹窗模板。命中时点一张手牌 = **一次提交**（与亮牌模板的「选完即提交」
+ * 同一口径），右端「放弃」是另一个合法出口；没有多选态要清、也没有第二个提交点。
+ * 判据只是**渲染路径**，不裁决合法性（候选仍由 `legal_actions` 给）；`pending.reveal`
+ * 把"可选一张自己的手牌"里这一类（青囊 / 结姻 / 雌雄的普通选牌）挡在外面。
+ */
+function isOwnHandSinglePick(pending) {
+  if (!pending || pending.kind !== "SELECT_CARDS") return false;
+  if (!pending.reveal || !pending.reveal.card) return false;
+  if (isProvide(pending) || stepDialogKind(pending) !== null) return false;
+  const slots = pending.slots || [];
+  if (!slots.length || selectionCap(pending) !== 1) return false;
+  return slots.every((slot) => {
+    const ref = slot && slot.ref;
+    return Boolean(ref)
+      && Number(ref.seat) === Number(pending.actor)
+      && ref.zone === "hand"
+      && Boolean(slot.card);
+  });
+}
+
 /** 出牌阶段 / 响应窗口下"哪些座位此刻可点"（**数据**给的，不是 CSS 猜的）。
  *
  * 返回**池里的每一个座位**并标出它此刻是什么状态，而不是只返回"可点的那些"——

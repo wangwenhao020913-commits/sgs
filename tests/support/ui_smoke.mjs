@@ -10544,4 +10544,400 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.resetSelection();
 }
 
+
+/* ============ M5-08a（D10 / §5.1.4）：火攻界面 ============
+ *
+ * 载荷与真会话同形（字段由 `tests/test_web.py` 的真会话断言钉）：
+ *   - 目标过滤 = 候选索引的池：只有有手牌的角色（含自己）；空手牌座位不在池里 ⇒ 不可点；
+ *   - 人类被指定：`dialog: "reveal"` + `revealed`（本人的手牌）+ `total: [1, 1]` ⇒ 亮牌模板，
+ *     点一张即提交；牌桌只读，但悬停描述照常；
+ *   - 使用者弃同花色：`SELECT_CARDS` + `pending.reveal`（已公开的亮牌）+ `optional: true`
+ *     ⇒ 点自己手里那张同花色牌即提交；右端「放弃」是另一个出口；
+ *   - 无同花色：引擎不发询问（自动放弃），事件流由服务端叙事写「放弃（无可弃的同花色牌）」；
+ *   - 公开亮牌进中央舞台的**同一处理区行**，结算帧出栈即撤下；手牌区不留「已知」。
+ */
+{
+  const fire = {
+    ...synthCard(109, "火攻"),
+    type: "fire_attack",
+    display_name: "火攻",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "火攻的描述：亮一张手牌，弃同花色造成 1 点火焰伤害。",
+  };
+  const revealed = {
+    ...synthCard(5, "闪电"),
+    type: "lightning",
+    display_name: "闪电",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "闪电的描述",
+  };
+  const sameSuitA = {
+    ...synthCard(5, "闪电"),
+    type: "lightning",
+    display_name: "闪电",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "闪电的描述",
+  };
+  const sameSuitB = {
+    ...synthCard(7, "杀"),
+    type: "slash",
+    display_name: "杀",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "杀的描述",
+  };
+  const heartCard = {
+    ...synthCard(8, "桃"),
+    type: "peach",
+    display_name: "桃",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "桃的描述",
+    suit: "heart",
+    color: "red",
+  };
+  const clubCard = {
+    ...synthCard(9, "闪"),
+    type: "dodge",
+    display_name: "闪",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "闪的描述",
+    suit: "club",
+    color: "black",
+  };
+  const fireContext = (requirement) => ({
+    actor: 0, name: "火攻", targets: [0],
+    label: "0号位对0号位使用火攻", requirement, skill_hints: [],
+  });
+  const fireView = (pending, { hand = [], processing = [fire], seats = 4 } = {}) => {
+    const view = synthView(pending);
+    view.human_seat = 0;
+    view.snapshot.seat = 0;
+    view.snapshot.phase = "play";
+    view.snapshot.turn_seat = 0;
+    view.snapshot.self_hand = hand;
+    view.snapshot.processing = processing;
+    view.snapshot.players = Array.from({ length: seats }, (_, seat) => ({
+      seat, hp: 4, hp_max: 4,
+      hand_count: seat === 2 ? 0 : 2,
+      alive: true, equip: [], judge: [], identity: null,
+    }));
+    return view;
+  };
+  const renderFire = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const handNode = (cardId) => $("t-hand").children.find(
+    (node) => node.getAttribute("data-card-id") === String(cardId),
+  ) || null;
+  const clickHand = async (cardId) => {
+    const node = handNode(cardId);
+    if (!node) return false;
+    for (const fn of node.listeners.click || []) await fn({ target: node, stopPropagation() {} });
+    return true;
+  };
+  const settle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const answersSince = (mark) => calls.slice(mark).filter((call) => call.path.includes("/answer"));
+
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261016,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  ui.state.modal.heroSeat = null;
+
+  // ---- ① 目标过滤：只有有手牌的角色可点（含自己；座位 2 空手牌不可点） ----
+  const play = {
+    kind: "PLAY_PHASE", actor: 0, seq: 2101,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 2101, card: fire, targets: [0] },
+      { kind: "UseCard", answers_seq: 2101, card: fire, targets: [1] },
+      { kind: "UseCard", answers_seq: 2101, card: fire, targets: [3] },
+      { kind: "EndPhase", answers_seq: 2101 },
+    ],
+    candidate_index: {
+      109: {
+        card: fire, pool: [0, 1, 3], combos: [[0], [1], [3]], min_targets: 1, max_targets: 1,
+      },
+    },
+    virtual_index: {}, option_seats: {}, context: fireContext("使用一张牌（或发动技能），或结束出牌阶段"),
+    prompt_display: {
+      text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      default_action: { kind: "EndPhase", answers_seq: 2101 },
+      default_label: "超时将自动结束出牌阶段",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  renderFire(fireView(play, { hand: [fire] }));
+  await clickHand(109);
+  check("M5-08a-a1 选中火攻后：有手牌的座位（含自己）可点，空手牌座位 2 不可点",
+    ui.state.focusCardId === 109
+      && seatBox(0).classList.contains("targetable")
+      && seatBox(1).classList.contains("targetable")
+      && seatBox(3).classList.contains("targetable")
+      && !seatBox(2).classList.contains("targetable")
+      && ui.pickerSeats(play).map((item) => item.seat).join(",") === "0,1,3",
+    `focus=${ui.state.focusCardId} seats=${ui.pickerSeats(play).map((item) => item.seat).join(",")} s2=${seatBox(2).className}`);
+  (seatBox(2).listeners.click || []).forEach((fn) => fn({ target: seatBox(2) }));
+  check("M5-08a-a2 点空手牌座位 = 没有目标（不会提交空目标）",
+    ui.state.selectedTargets.length === 0 && ui.buildAction() === null,
+    `targets=${JSON.stringify(ui.state.selectedTargets)}`);
+  (seatBox(0).listeners.click || []).forEach((fn) => fn({ target: seatBox(0) }));
+  check("M5-08a-a3 可指定自己：点座位 0 = 选中自己，提交候选原样来自 legal_actions",
+    JSON.stringify(ui.state.selectedTargets) === "[0]"
+      && ui.buildAction() !== null
+      && ui.buildAction().targets.join(",") === "0",
+    `targets=${JSON.stringify(ui.state.selectedTargets)} action=${JSON.stringify(ui.buildAction())}`);
+
+  // ---- ② 人类被指定：亮牌模板（点一张即提交；只读；悬停可读；其余手牌不外泄） ----
+  const revealPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 2102,
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 2102, picks: [0] },
+      { kind: "SelectCards", answers_seq: 2102, picks: [1] },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "hand" }, card: sameSuitA },
+      { ref: { seat: 0, zone: "hand" }, card: sameSuitB },
+    ],
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: false },
+    revealed: [sameSuitA, sameSuitB],
+    dialog: "reveal", harvest: null, reveal: null,
+    context: fireContext("从自己的手牌里亮出一张（公开）"),
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 2102, picks: [0] },
+      default_label: "超时将自动选择第一张亮牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const revealView = fireView(revealPending, { hand: [sameSuitA, sameSuitB] });
+  renderFire(revealView);
+  const revealCards = () => $("t-options").children[0].children[0].children;
+  check("M5-08a-b1 被指定者（人类）看到亮牌模板：标题「火攻」、两张自己的手牌、没有放弃",
+    ui.stepDialogKind(revealPending) === "reveal"
+      && $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "火攻"
+      && ui.isPickRevealStep(revealPending) === false
+      && revealCards().length === 2
+      && revealCards().map((node) => node.getAttribute("data-card-id")).join(",") === "5,7"
+      && $("btn-pass").hidden === true
+      && $("btn-submit").disabled === true,
+    `kind=${ui.stepDialogKind(revealPending)} title="${$("t-dialog-title").textContent}" cards=${revealCards().length} submit=${$("btn-submit").disabled}`);
+  check("M5-08a-b2 亮牌弹窗打开时牌桌只读，但牌面悬停描述照常可读",
+    ui.selectionEnabled() === false
+      && revealCards()[0].getAttribute("title").includes("闪电的描述")
+      && revealCards()[1].getAttribute("title").includes("杀的描述")
+      && $("t-modal-backdrop").hidden === false,
+    `enabled=${ui.selectionEnabled()} backdrop=${$("t-modal-backdrop").hidden} titles=${revealCards().map((n) => n.getAttribute("title")).join("|")}`);
+  const focusBefore = ui.state.focusCardId;
+  await clickHand(5);
+  check("M5-08a-b3 只读态：点自己的手牌不产生选择（选择只在亮牌窗里）",
+    ui.state.focusCardId === focusBefore && ui.state.picks.length === 0,
+    `focus=${ui.state.focusCardId} picks=${JSON.stringify(ui.state.picks)}`);
+  const beforeReveal = calls.length;
+  staleAnswerStatus = 400;
+  (revealCards()[0].listeners.click || []).forEach((fn) => fn({ target: revealCards()[0] }));
+  await settle();
+  staleAnswerStatus = null;
+  const revealAnswers = answersSince(beforeReveal);
+  check("M5-08a-b4 点一张亮牌 = 恰一条 SelectCards（picks 填面内位置），不手拼 Action",
+    revealAnswers.length === 1
+      && JSON.stringify(revealAnswers[0].body.action) === JSON.stringify(revealPending.legal_actions[0]),
+    `answers=${revealAnswers.length} action=${JSON.stringify(revealAnswers[0] && revealAnswers[0].body.action)}`);
+
+  // 别人的载荷：不是询问者 ⇒ 不开窗、不放牌面（未亮出的牌一张都不出现）。
+  const foreignPending = {
+    ...revealPending,
+    seq: 2103,
+    actor: 1,
+    dialog: null,
+    revealed: [],
+    slots: revealPending.slots.map(() => ({ ref: { seat: 1, zone: "hand" }, card: null })),
+  };
+  const foreignView = fireView(foreignPending, { hand: [sameSuitA, sameSuitB] });
+  foreignView.human_seat = 0;
+  renderFire(foreignView);
+  check("M5-08a-b5 别人的亮牌步（revealed / 槽位已抹）不开窗、不画牌面",
+    $("t-dialog").hidden === true
+      && ui.stepDialogKind(foreignPending) === null
+      && $("t-prompt").textContent.includes("等待其他座位响应")
+      && $("t-options").children.length === 0,
+    `hidden=${$("t-dialog").hidden} kind=${ui.stepDialogKind(foreignPending)} prompt="${$("t-prompt").textContent}"`);
+
+  // ---- ③ 同花色弃牌：点自己的同花色手牌 = 一次提交；也可右端放弃 ----
+  const discardPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 2104,
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 2104, picks: [0] },
+      { kind: "SelectCards", answers_seq: 2104, picks: [1] },
+      { kind: "Pass", answers_seq: 2104 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "hand" }, card: sameSuitA },
+      { ref: { seat: 0, zone: "hand" }, card: sameSuitB },
+    ],
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: true },
+    revealed: [], dialog: null, harvest: null,
+    reveal: { seat: 0, card: sameSuitA },
+    context: fireContext("弃一张与亮出的牌同花色的手牌，造成 1 点火焰伤害，或放弃"),
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "Pass", answers_seq: 2104 },
+      default_label: "超时将自动放弃",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const discardView = fireView(discardPending, {
+    hand: [sameSuitA, sameSuitB, heartCard, clubCard],
+  });
+  renderFire(discardView);
+  check("M5-08a-c1 弃牌步回到牌桌：只有同花色手牌可点，其余置灰；这一步不是弹窗",
+    ui.stepDialogKind(discardPending) === null
+      && ui.isOwnHandSinglePick(discardPending) === true
+      && ui.selectionEnabled() === true
+      && $("t-hand").children[0].classList.contains("static") === false
+      && !$("t-hand").children[0].classList.contains("dis")
+      && !$("t-hand").children[1].classList.contains("dis")
+      && $("t-hand").children[2].classList.contains("dis")
+      && $("t-hand").children[3].classList.contains("dis")
+      && $("t-target-hint").textContent.includes("同花色")
+      && $("btn-pass").hidden === false
+      && $("btn-submit").disabled === true
+      && $("btn-cancel").disabled === true,
+    `kind=${ui.stepDialogKind(discardPending)} dis=${$("t-hand").children.map((n) => n.classList.contains("dis")).join(",")} passHidden=${$("btn-pass").hidden} hint="${$("t-target-hint").textContent}"`);
+  check("M5-08a-c2 中央舞台看得见亮出的那一张（公开事实；与处理区同一行、不可点）",
+    $("t-processing").children.some((node) => node.classList.contains("revealed-card")
+      && node.getAttribute("data-card-id") === "5")
+      && $("t-context").textContent.includes("亮牌")
+      && $("t-context").textContent.includes("闪电"),
+    `processing=${$("t-processing").text() } context="${$("t-context").textContent}"`);
+
+  const beforeDiscardClick = calls.length;
+  await clickHand(8);  // 桃（不同花色）：不可点
+  check("M5-08a-c3 点不同花色的手牌 = 无提交（没有非法动作可发）",
+    answersSince(beforeDiscardClick).length === 0,
+    `answers=${answersSince(beforeDiscardClick).length}`);
+  const beforeSuit = calls.length;
+  staleAnswerStatus = 400;
+  await clickHand(7);  // 同花色的杀
+  await settle();
+  staleAnswerStatus = null;
+  const suitAnswers = answersSince(beforeSuit);
+  check("M5-08a-c4 点同花色手牌 = 恰一条 SelectCards（同花色那张的面内位置）",
+    suitAnswers.length === 1
+      && JSON.stringify(suitAnswers[0].body.action) === JSON.stringify(discardPending.legal_actions[1]),
+    `answers=${suitAnswers.length} action=${JSON.stringify(suitAnswers[0] && suitAnswers[0].body.action)}`);
+
+  // 再渲染一次（提交被 400 拒后回到点击前那一面）：右端「放弃」= 一条 Pass，且不留选择态。
+  renderFire(discardView);
+  const beforePass = calls.length;
+  await clickAndWait($("btn-pass"));
+  await settle();
+  const passAnswers = answersSince(beforePass);
+  check("M5-08a-c5 右端「放弃」= 恰一条 Pass，不重绘、不残留选择态",
+    passAnswers.length === 1
+      && JSON.stringify(passAnswers[0].body.action) === JSON.stringify(
+        discardPending.legal_actions.find((action) => action.kind === "Pass"),
+      )
+      && ui.state.focusCardId === null
+      && ui.state.picks.length === 0,
+    `answers=${passAnswers.length} action=${JSON.stringify(passAnswers[0] && passAnswers[0].body.action)} picks=${JSON.stringify(ui.state.picks)}`);
+
+  // ---- ④ 无同花色：没有弃牌询问；事件流有「放弃（无可弃的同花色牌）」；舞台亮牌随帧撤下 ----
+  const noSuitPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 2105,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 2105 }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    context: fireContext("使用一张牌（或发动技能），或结束出牌阶段"),
+    prompt_display: {
+      text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      default_action: { kind: "EndPhase", answers_seq: 2105 },
+      default_label: "超时将自动结束出牌阶段",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const revealRecord = {
+    kind: "delta", delta_type: "card_reveal", seat: 1, card: revealed, frame_id: 2, seq: 2106,
+  };
+  const autoPassRecord = {
+    kind: "timing", timing: "RESOLVE_END", frame_id: 2, source: 0, seq: 2107,
+  };
+  const logWithReveal = (line, seq) => ({
+    kind: "line", seq, text: line,
+    segments: [{ text: line, cls: "act" }],
+  });
+  const noSuitBody = {
+    session_id: session.session_id, seed: 20261016, player_count: 4, human_seat: 0,
+    heroes: [], deck_profile: "standard_ex_160", timeout_seconds: null,
+    pending_since: 0, finished: false, cursor: 2107, log_seq: 0,
+    snapshot: fireView(noSuitPending).snapshot,
+    skills: [], pending: noSuitPending,
+    records: [revealRecord, autoPassRecord],
+    narrative: [
+      logWithReveal("座位1 亮出【闪电】", 2106),
+      logWithReveal("座位0 放弃（无可弃的同花色牌）", 2107),
+    ],
+    session_log: [],
+  };
+  noSuitBody.snapshot.processing = [fire];
+  ui.applyViewRaw(noSuitBody);
+  ui.flushPlayback();
+  check("M5-08a-d1 无同花色：没有弃牌询问；事件流写出「放弃（无可弃的同花色牌）」",
+    ui.state.view.pending.kind === "PLAY_PHASE"
+      && logText().includes("放弃（无可弃的同花色牌）")
+      && !$("t-prompt").textContent.includes("选择一张手牌"),
+    `log="${logText()}" prompt="${$("t-prompt").textContent}"`);
+  check("M5-08a-d2 亮牌仍在中央舞台（公开事实），手牌区没有「已知」标记 / 属性",
+    $("t-processing").children.some((node) => node.classList.contains("revealed-card")
+      && node.getAttribute("data-card-id") === "5")
+      && !$("t-hand").text().includes("已知")
+      && $("t-hand").children.every((node) => !node.classList.contains("known")
+        && !node.classList.contains("revealed")
+        && node.getAttribute("data-known") === undefined),
+    `processing=${$("t-processing").text()} hand="${$("t-hand").text()}"`);
+
+  const clearedBody = {
+    ...noSuitBody,
+    cursor: 2108,
+    records: [{ kind: "frame", op: "pop", frame_id: 2, depth: 1, seq: 2108 }],
+    narrative: [],
+  };
+  clearedBody.snapshot = { ...noSuitBody.snapshot, processing: [] };
+  ui.applyViewRaw(clearedBody);
+  ui.flushPlayback();
+  check("M5-08a-d3 结算帧出栈 ⇒ 舞台撤下亮牌（只在中央舞台留那一瞬）",
+    !$("t-processing").children.some((node) => node.classList.contains("revealed-card"))
+      && !$("t-context").textContent.includes("亮牌"),
+    `processing=${$("t-processing").text()} context="${$("t-context").textContent}"`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

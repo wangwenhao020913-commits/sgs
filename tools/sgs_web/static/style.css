@@ -594,6 +594,11 @@ button.mini-slot { cursor: pointer; }
 /* U2-02 / D6：处理区 / 舞台卡面与手牌**共用同一套** `.card.face`（88×124、字号 14/11/21/9）。
  * 「0.63 版」的小牌面覆盖已删除——这里不再有第二套卡面规则。
  * 一行放不下时纵向滚动（`max-height` = 一张卡面高，行从顶部排），面板高度因此被钉住。 */
+/* M5-08a：公开亮牌与处理区同排渲染，用一圈金色描边区分「亮出的事实」（不可点、悬停可读）。 */
+.stage-center .processing .revealed-card {
+  outline: 2px solid #b8860b;
+  outline-offset: 2px;
+}
 .stage-center .processing {
   justify-content: center; align-content: flex-start;
   gap: 5px; min-height: 18px;

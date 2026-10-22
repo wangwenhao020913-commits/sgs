@@ -217,6 +217,46 @@ function resetRightActions() {
   }
 }
 
+/** 只从自己手里选一张的**牌桌步**（M5-08a 火攻同花色弃牌）：不铺槽位块，直接点手牌。
+ *
+ * 提交键恒灰（点手牌就是一次提交）；「放弃」在右端，是候选里真有的那条 `Pass`。
+ */
+function renderOwnHandPick(pending) {
+  const index = (pending.legal_actions || []).findIndex((action) => action.kind === "SelectCards");
+  if (index >= 0) state.selectedOption = index;
+  const hint = $("t-target-hint");
+  if (hint) {
+    const requirement = (pending.context && pending.context.requirement) || "选择一张手牌";
+    hint.textContent = `${requirement}：点一张亮起的手牌即提交；也可以点右端「放弃」。`;
+  }
+  $("btn-cancel").disabled = true;
+}
+
+/** 只从自己手里选一张：点一张手牌 = **恰一条** `SelectCards`（面内位置）。
+ *
+ * 送出的仍是 `legal_actions` 里的那条骨架（`buildAction` 补 `picks`），不手拼 Action；
+ * 与未知区域 / 亮牌模板的「一击即提交」同一姿态。合成载荷 / 尚未建局时只留内部态。
+ */
+async function submitOwnHandSinglePick(pending, slotIndex) {
+  if (state.playback || state.submitBusy) return;
+  if (!isOwnHandSinglePick(pending)) return;
+  const actions = pending.legal_actions || [];
+  const at = actions.findIndex((action) => action.kind === "SelectCards");
+  if (at < 0) return;
+  const before = selectionSnapshot();
+  state.selectedOption = at;
+  state.focusCardId = null;
+  state.selectedTargets = [];
+  state.picks = [slotIndex];
+  state.preactivation = null;
+  state.lastRejectReason = "";
+  if (!state.sessionId) {
+    renderPending(state.view);
+    return;
+  }
+  await submitAction(before);
+}
+
 function renderSlots(pending) {
   // 亮牌模板（票 11 五谷 / 票 12 遗计）：全部亮牌 + 目标条；**不**走下面那条
   // 「隐藏区域的槽位只有位置」的旧选择面（公开处理区的牌面是可见的）。

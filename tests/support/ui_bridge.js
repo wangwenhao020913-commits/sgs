@@ -74,6 +74,9 @@
     // U2-11（D4 / D10）：亮牌模板（五谷 + 票 12 遗计复用）——判据 / 数据 / 渲染 / 一击提交。
     // `isRevealStep` 住在 modal.js（只读判据源），渲染口在 reveal.js；烟测直接喂合成载荷。
     "isRevealStep", "revealData", "revealHintText", "renderReveal", "submitRevealPick",
+    // M5-08a：火攻 —— 亮牌步（亮牌模板 / 一击提交）+ 同花色弃牌（点自己的手牌）+ 舞台亮牌
+    "isPickRevealStep", "isOwnHandSinglePick", "renderOwnHandPick", "submitOwnHandSinglePick",
+    "applyRevealDelta", "stageRevealCards", "renderRevealedCards", "describeReveals",
   ];
   const out = {};
   for (const name of names) {

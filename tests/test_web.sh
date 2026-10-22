@@ -172,6 +172,16 @@ if ! node tests/support/ui_smoke.mjs "http://127.0.0.1:$PORT"; then
   exit 1
 fi
 
+# ⑥b M5-08a：固定【火攻】tape（spec D12 / §6 A2）——亮牌 / 同花色弃牌 / 放弃 / 无同花色
+# 自动放弃，两条固定种子全走真 HTTP；每次提交的动作必须原样取自 legal_actions。
+echo "=== 火攻 tape：亮牌 / 同花色 / 放弃（真 HTTP） ==="
+if ! "$PYTHON" tests/support/web_client.py --base "http://127.0.0.1:$PORT" --tape fire_attack; then
+  echo "FAIL: 火攻 tape 未通过"
+  echo "--- 服务输出 ---"
+  cat "$LOG"
+  exit 1
+fi
+
 # ⑦ `--host 0.0.0.0` 必须真的绑全部网卡（WSL 里从 Windows 打开界面就靠它）。
 # 只多起一个进程、只发两个请求，然后立刻杀掉——它防的是"host 参数被写死回环"这种回归。
 echo "=== 跨机可达：--host 0.0.0.0 ==="

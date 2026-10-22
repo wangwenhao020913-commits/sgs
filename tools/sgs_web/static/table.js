@@ -289,10 +289,57 @@ function renderTable() {
  * 描述文本曾经是服务端下发的"本窗口：谁对谁使用…"，只在询问到达时更新，回放期间会残留；
  * 现在它跟着效果区走：有牌写「处理中：【牌】（谁在使用）」，牌全走了**立即清空**。 */
 function renderProcessing() {
-  renderEffectCards($("t-processing"), state.effectCards || []);
+  const box = $("t-processing");
+  const effects = state.effectCards || [];
+  const reveals = stageRevealCards();
+  // 只有亮牌、没有处理区牌时不再画一个「（空）」占位：两者同排，空占位会喧宾夺主。
+  if (effects.length || !reveals.length) renderEffectCards(box, effects);
+  renderRevealedCards(box, reveals);
   const contextNode = $("t-context");
-  if (contextNode) contextNode.textContent = describeEffect(state.effectCards || []);
+  if (contextNode) contextNode.textContent = describeStage();
   renderStageAction();
+}
+
+/** 中央舞台描述文本的**唯一派生点**：处理区 + 公开亮牌（`renderPending` 也读它）。 */
+function describeStage() {
+  return [describeEffect(state.effectCards || []), describeReveals(stageRevealCards())]
+    .filter(Boolean)
+    .join("　");
+}
+
+/** 中央舞台要画的**公开亮牌**（M5-08a）：记录流派生的那一份 + 当前询问自带的公开事实。
+ *
+ * 后者（``pending.reveal``）是服务端为「火攻弃牌步」下发的已亮牌：用户刷新 / 断线重连时
+ * 记录可能已不在增量里，但这一步仍要看得见亮出的那一张。两者按牌 id 去重。
+ */
+function stageRevealCards() {
+  const cards = (state.revealedCards || []).slice();
+  const pending = state.view && state.view.pending;
+  const reveal = pending && pending.reveal;
+  const card = reveal && reveal.card;
+  if (card && !cards.some((existing) => String(existing.card_id) === String(card.card_id))) {
+    cards.push({ ...card, revealSeat: reveal.seat });
+  }
+  return cards;
+}
+
+/** 亮牌那一行的说明（与处理区说明同一处渲染，不抢 `describeEffect` 的口径）。 */
+function describeReveals(cards) {
+  if (!cards || !cards.length) return "";
+  return `亮牌：${cards.map((card) => `【${cardName(card)}】`).join("、")}`;
+}
+
+/** 把公开亮牌画进**同一个**处理区行：复用 `cardChip`（88×124 卡面契约）。
+ * 静态牌 → 不可点、悬停仍可读描述；右上角标 `data-reveal-seat` 供烟测 / 样式读取。 */
+function renderRevealedCards(box, cards) {
+  if (!box) return;
+  for (const card of cards || []) {
+    const node = cardChip(card, false, true);
+    node.classList.add("revealed-card");
+    const seat = card.revealSeat !== undefined ? card.revealSeat : card.revealedBy;
+    if (seat !== undefined && seat !== null) node.setAttribute("data-reveal-seat", String(seat));
+    box.appendChild(node);
+  }
 }
 
 /** 中央舞台上层 = 当前动作（最近一条应答的人话；没有就写"等待行动"）。

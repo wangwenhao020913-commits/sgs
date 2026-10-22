@@ -5508,3 +5508,427 @@ def test_harvest_state_is_none_when_no_harvest_frame_is_on_the_stack() -> None:
         assert harvest_state(engine) is None
     finally:
         frames.extend(saved)
+
+
+# ---------------------------------------------------------------------------
+# M5-08a：火攻界面（真会话 / 记录流 / 投影 / 叙事）
+#
+# 引擎侧（M5-06）已经保证：目标过滤 `has_hand_cards`、目标亮 1 张（`card_reveal` 公开
+# delta）、同花色弃牌可选（`Pass`）、无同花色时**不发询问**（自动放弃）。本段钉的是
+# **界面读取方**：目标过滤只出现在有手牌的角色上（含自己）、亮牌走 U2 的亮牌模板、
+# 亮出的那一张才公开、弃一张同花色 = 1 点火焰伤害、放弃 / 无同花色 = 0 伤害且事件流
+# 可读、手牌区不残留「已知」。
+# ---------------------------------------------------------------------------
+
+_FIRE_PACK = None
+
+
+def _fire_pack():
+    """军争 160 档（惰性加载；火攻不在此档之外）。"""
+    global _FIRE_PACK
+    if _FIRE_PACK is None:
+        from sgs.data import load_content_pack
+
+        _FIRE_PACK = load_content_pack(deck_profile="standard_ex_160")
+    return _FIRE_PACK
+
+
+def _fire_card_id() -> int:
+    return cards_of_type(_fire_pack(), "fire_attack")[0]
+
+
+def _fire_suit_cards(suit) -> list[int]:
+    return [
+        index
+        for index, card in enumerate(_fire_pack().deck.cards)
+        if card.suit is suit and card.type != "fire_attack"
+    ]
+
+
+class _FireDriver:
+    """火攻脚本：座位 1 = 目标（亮牌），其余 AI 座位按最小合法应答。
+
+    只用于把**真会话**推到界面要读的那一步，不测规则本身；人类座位的询问由用例自己答。
+    """
+
+    def __init__(self, *, reveal=None, discard=None) -> None:
+        self.reveal = reveal
+        self.discard = discard
+
+    def _pick(self, query, wanted):
+        for action in query.legal_actions:
+            if not isinstance(action, SelectCards) or len(action.picks) != 1:
+                continue
+            slot = query.slots[action.picks[0]]
+            card = slot.card
+            if card is None:
+                continue
+            if wanted(card):
+                return action
+        return None
+
+    def respond(self, query):  # noqa: ANN001 - Participant 协议
+        return self.answer(query)
+
+    def answer(self, query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+            return query.legal_actions[0]
+        if query.kind == QueryKind.SELECT_CARDS:
+            if self.reveal is not None:
+                action = self._pick(query, lambda card: card.card_id == self.reveal)
+                if action is not None:
+                    return action
+            if self.discard is not None:
+                action = self._pick(query, lambda card: card.card_id == self.discard)
+                if action is not None:
+                    return action
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+            return query.legal_actions[0]
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+class _FireSpyEngine(Engine):
+    """记下每一次压栈的 ``DAMAGE`` 帧：属性（FIRE）与渠道牌只能这样从真会话观测。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.damage_frames: list[dict] = []
+
+    def push_frame(self, kind, data, *, timing):  # type: ignore[no-untyped-def]
+        frame = super().push_frame(kind, data, timing=timing)
+        if kind is FrameKind.DAMAGE:
+            self.damage_frames.append(dict(data))
+        return frame
+
+
+class _HaltSeat:
+    """人类座位：把询问交给 ``Session.pending``，由用例显式应答（与产品同一条挂起驱动）。"""
+
+    def respond(self, query):  # noqa: ANN001
+        from sgs_web.session import Halt
+
+        raise Halt(query)
+
+
+def _fire_session(
+    *,
+    user_hand: tuple[int, ...],
+    target_hand: tuple[int, ...] = (),
+    other_hands: tuple[tuple[int, ...], ...] = ((), ()),
+    top: tuple[int, ...] = (),
+    human_seat: int = 0,
+    spy: bool = False,
+):
+    """4 座构造局面：座位 0 = 火攻使用者、1 = 首个目标、2 / 3 = 其它（默认空手牌）。
+
+    ``other_hands`` 给座位 2 / 3 的手牌；空手牌座位用来钉"不可指定"。
+    """
+    from sgs.data import RuleConfig as _RuleConfig
+
+    pack = _fire_pack()
+    fire = _fire_card_id()
+    used = {fire, *user_hand, *target_hand, *top}
+    for hand in other_hands:
+        used.update(hand)
+    seats = [
+        SeatSpec(hp=4, hand=(fire, *user_hand)),
+        SeatSpec(hp=4, hand=target_hand),
+        SeatSpec(hp=4, hand=other_hands[0] if other_hands else ()),
+        SeatSpec(hp=4, hand=other_hands[1] if len(other_hands) > 1 else ()),
+    ]
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=(*top, *tuple(i for i in range(len(pack.deck.cards)) if i not in used)),
+        turn_seat=0,
+        rule_config=_RuleConfig(first_seat=0),
+    )
+    from sgs_web.session import Session as _Session
+
+    session = _Session(
+        seed=1,
+        player_count=4,
+        ai="random",
+        human_seat=human_seat,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=pack,
+    )
+    engine_cls = _FireSpyEngine if spy else Engine
+    session.engine = engine_cls.from_state(state, seed=1)
+    session.participants = tuple(
+        _HaltSeat() if seat == human_seat else _FireDriver(reveal=None)
+        for seat in range(4)
+    )
+    session.drive()
+    return session
+
+
+def _step_until(session: Session, predicate, answer=None):
+    """推进到 ``predicate(pending)`` 成立的询问；其余询问按 ``answer`` 应答。"""
+    for _ in range(500):
+        pending = session.pending
+        if pending is None:
+            break
+        if predicate(pending):
+            return pending
+        session.submit_answer(answer(pending) if answer is not None else _FireDriver().answer(pending))
+    raise AssertionError("500 步内没有走到目标询问")
+
+
+def _fire_use_action(pending, *, target: int):
+    fire = _fire_card_id()
+    for action in pending.legal_actions:
+        if isinstance(action, UseCard) and action.card.card_id == fire and action.targets == (target,):
+            return action
+    raise AssertionError(f"出牌阶段没有对座位 {target} 使用火攻的候选")
+
+
+def _reveal_deltas(session: Session) -> list[dict]:
+    out = []
+    for record in session.records():
+        payload = _record_payload(record)
+        if payload.get("kind") == "delta" and payload.get("delta_type") == "card_reveal":
+            out.append(payload)
+    return out
+
+
+def test_fire_attack_target_index_lists_only_seats_with_hand_cards_including_self() -> None:
+    """第 0 层目标过滤的读取方：候选索引的池只有有手牌的角色（含自己），空手牌不可点。"""
+    spade = _fire_suit_cards(Suit.SPADE)[0]
+    session = _fire_session(
+        user_hand=(spade,),
+        target_hand=(_fire_suit_cards(Suit.HEART)[0],),
+        other_hands=(()),  # 座位 2 空手牌
+    )
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    payload = pending_payload(session)
+    entry = payload["candidate_index"][str(_fire_card_id())]
+    assert entry["pool"] == [0, 1], "只有有手牌的角色在池里（座位 2 空手牌）"
+    assert entry["combos"] == [[0], [1]], "可指定自己；空手牌座位 2 没有候选"
+    assert entry["min_targets"] == 1 and entry["max_targets"] == 1
+
+    snapshot = visible_snapshot(session)
+    assert snapshot["players"][2]["hand_count"] == 0
+
+
+def test_the_human_targets_fire_attack_reveal_step_uses_the_reveal_dialog_without_leaking() -> None:
+    """人类被指定：亮牌步 = U2 亮牌模板（dialog=reveal），只有本人的手牌；外人拿不到牌面。"""
+    spade = _fire_suit_cards(Suit.SPADE)[0]
+    heart = _fire_suit_cards(Suit.HEART)[0]
+    session = _fire_session(user_hand=(spade, heart), target_hand=())
+    # 对自己使用：在候选区里把目标改成 0（用法仍原样取自 legal_actions）。
+    use = _fire_use_action(session.pending, target=0)
+    session.submit_answer(use)
+    reveal = _step_until(
+        session,
+        lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0,
+    )
+    assert reveal is not None
+    payload = pending_payload(session)
+    assert payload["dialog"] == "reveal", "人类被指定 ⇒ 亮牌模板（四类弹窗之一）"
+    assert payload["harvest"] is None, "火攻没有五谷的 harvest 状态"
+    assert payload["context"]["name"] == "火攻"
+    assert "亮出" in payload["context"]["requirement"]
+    own_hand = [card["card_id"] for card in payload["view"]["self_hand"]]
+    revealed = [card["card_id"] for card in payload["revealed"]]
+    assert revealed == [slot["card"]["card_id"] for slot in payload["slots"]]
+    assert set(revealed) == set(own_hand), "亮牌窗里是本人手牌；牌面只发给询问者本人"
+    assert all(card["description"] for card in payload["revealed"]), "卡面契约随亮牌下发"
+
+    # 外人的载荷：不是询问者 ⇒ 没有 dialog / revealed，槽位只剩位置。
+    foreign = pending_payload(session.pending, human_seat=1)
+    assert foreign["dialog"] is None
+    assert foreign["revealed"] == []
+    assert foreign["slots"] and all(slot["card"] is None for slot in foreign["slots"])
+
+
+def test_the_human_targets_reveal_is_public_and_leaves_no_known_marker() -> None:
+    """亮牌只有那一张成为公开事实；未亮出的手牌不泄露；结算后没有「已知」残留。"""
+    spade = _fire_suit_cards(Suit.SPADE)[0]
+    heart = _fire_suit_cards(Suit.HEART)[0]
+    session = _fire_session(user_hand=(spade, heart), target_hand=(), other_hands=((spade,),))
+    session.submit_answer(_fire_use_action(session.pending, target=0))
+    reveal = _step_until(session, lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0)
+    chosen = next(
+        action
+        for action in reveal.legal_actions
+        if isinstance(action, SelectCards)
+        and reveal.slots[action.picks[0]].card is not None
+        and reveal.slots[action.picks[0]].card.card_id == spade
+    )
+    session.submit_answer(chosen)
+    _step_until(session, lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0)
+
+    reveals = _reveal_deltas(session)
+    assert len(reveals) == 1, "亮牌只落一条 card_reveal"
+    assert reveals[0]["seat"] == 0 and reveals[0]["card"]["card_id"] == spade
+    assert reveals[0]["card"]["name"] == session.engine.state.card(spade).name
+
+    snapshot = visible_snapshot(session)
+    for player in snapshot["players"]:
+        assert "known" not in player and "revealed_cards" not in player, (
+            "手牌区不写「已知」状态"
+        )
+        if player["seat"] != session.human_seat:
+            assert "self_hand" not in player
+    shown = visible_record(next(
+        record
+        for record in session.records()
+        if getattr(record, "delta_type", None) == "card_reveal"
+    ))
+    assert shown["card"]["display_name"] == session.engine.state.card(spade).name
+    assert shown["card"]["description"], "中央舞台的牌面沿展示契约（悬停可读）"
+
+
+def test_fire_attack_same_suit_discard_deals_one_fire_damage() -> None:
+    """点一张同花色手牌 = 一次真实提交 → 恰 1 点火焰伤害；亮牌进事件流 / 叙事。"""
+    spades = _fire_suit_cards(Suit.SPADE)
+    hearts = _fire_suit_cards(Suit.HEART)
+    session = _fire_session(
+        user_hand=(spades[0], spades[1], hearts[0]),
+        target_hand=(),
+        spy=True,
+    )
+    session.submit_answer(_fire_use_action(session.pending, target=0))
+    reveal = _step_until(session, lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0)
+    reveal_action = next(
+        action
+        for action in reveal.legal_actions
+        if isinstance(action, SelectCards)
+        and reveal.slots[action.picks[0]].card is not None
+        and reveal.slots[action.picks[0]].card.card_id == spades[0]
+    )
+    session.submit_answer(reveal_action)
+
+    discard = _step_until(session, lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0)
+    payload = pending_payload(session)
+    assert payload["spec"]["optional"] is True
+    assert payload["context"]["name"] == "火攻"
+    assert "同花色" in payload["context"]["requirement"]
+    assert payload["reveal"]["seat"] == 0
+    assert payload["reveal"]["card"]["card_id"] == spades[0], "使用者看得见亮出的那一张"
+    assert [slot["card"]["card_id"] for slot in payload["slots"]] == [spades[0], spades[1]], (
+        "选择面只铺同花色手牌"
+    )
+    assert any(action["kind"] == "Pass" for action in payload["legal_actions"])
+
+    discard_action = next(
+        action
+        for action in discard.legal_actions
+        if isinstance(action, SelectCards)
+        and discard.slots[action.picks[0]].card is not None
+        and discard.slots[action.picks[0]].card.card_id == spades[1]
+    )
+    session.submit_answer(discard_action)
+    _step_until(session, lambda p: p.kind == QueryKind.PLAY_PHASE and p.actor == 0)
+
+    from sgs.effects import DamageNature
+
+    assert session.engine.state.player(0).hp == 3, "对自己使用 ⇒ 自己受到 1 点火焰伤害"
+    assert session.engine.state.player(0).hp_max == 4
+    frames = session.engine.damage_frames
+    assert len(frames) == 1, "一次火攻伤害只压一个伤害帧"
+    assert frames[0]["nature"] is DamageNature.FIRE, "属性 = 火焰（WEB 会话的真实帧）"
+    assert frames[0]["channel"].card_id == _fire_card_id(), "渠道牌 = 火攻本体"
+    assert spades[1] in session.engine.state.discard, "弃掉的那张进弃牌堆"
+    assert _fire_card_id() in session.engine.state.discard, "火攻本体随后也进弃牌堆"
+    assert any(
+        record.get("kind") == "delta"
+        and record.get("delta_type") == "hp_change"
+        and record.get("seat") == 0
+        and record.get("amount") == -1
+        for record in (_record_payload(r) for r in session.records())
+    ), "目标受到 1 点伤害"
+
+    entries = _narrative(
+        session.records(),
+        viewer=0,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    text = _line_text(entries)
+    assert "亮出" in text and "弃置" in text and "受到 1 点伤害" in text
+
+
+def test_fire_attack_pass_with_a_same_suit_card_deals_no_damage() -> None:
+    """有同花色也可以放弃：一条 Pass = 零伤害，手牌 / 弃牌堆都不动。"""
+    spades = _fire_suit_cards(Suit.SPADE)
+    session = _fire_session(user_hand=(spades[0], spades[1]))
+    session.submit_answer(_fire_use_action(session.pending, target=0))
+    reveal = _step_until(session, lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0)
+    session.submit_answer(reveal.legal_actions[0])
+    discard = _step_until(session, lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0)
+
+    before_discard = tuple(session.engine.state.discard)
+    pass_action = next(action for action in discard.legal_actions if isinstance(action, Pass))
+    session.submit_answer(pass_action)
+    _step_until(session, lambda p: p.kind == QueryKind.PLAY_PHASE and p.actor == 0)
+
+    assert session.engine.state.player(0).hp == 4, "放弃 ⇒ 零伤害"
+    hand = tuple(session.engine.state.player(0).hand)
+    assert spades[0] in hand and spades[1] in hand, "同花色手牌留在手里"
+    assert spades[0] not in session.engine.state.discard
+    assert spades[1] not in session.engine.state.discard
+    assert set(session.engine.state.discard) - set(before_discard) == {_fire_card_id()}, (
+        "只有火攻本体进弃牌堆"
+    )
+    assert not any(
+        record.get("delta_type") == "hp_change"
+        for record in (_record_payload(r) for r in session.records())
+    ), "放弃不产生任何体力变化"
+    entries = _narrative(
+        session.records(),
+        viewer=0,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    assert "放弃" in _line_text(entries)
+
+
+def test_fire_attack_without_a_same_suit_card_has_no_discard_query_and_narrates_auto_pass() -> None:
+    """无同花色 ⇒ 引擎不发弃牌询问（自动放弃）；事件流写「放弃（无可弃的同花色牌）」。"""
+    club = _fire_suit_cards(Suit.CLUB)[0]
+    spade = _fire_suit_cards(Suit.SPADE)[0]
+    heart = _fire_suit_cards(Suit.HEART)[0]
+    club2 = _fire_suit_cards(Suit.CLUB)[1]
+    spade2 = _fire_suit_cards(Suit.SPADE)[1]
+    # 人类：梅花 + 黑桃（无红桃）；摸牌也只摸梅花 / 黑桃；目标亮一张红桃 ⇒ 没有同花色。
+    session = _fire_session(
+        user_hand=(club, spade), target_hand=(heart,), top=(club2, spade2)
+    )
+    driver = _FireDriver(reveal=heart)
+    session.participants = (_HaltSeat(), driver, _FireDriver(), _FireDriver())
+    session.submit_answer(_fire_use_action(session.pending, target=1))
+    selection_queries = []
+    for _ in range(200):
+        pending = session.pending
+        if pending is None:
+            break
+        if pending.kind == QueryKind.SELECT_CARDS and pending.actor == 0:
+            selection_queries.append(pending)
+        if pending.kind == QueryKind.PLAY_PHASE and pending.actor == 0:
+            break
+        session.submit_answer(_FireDriver().answer(pending))
+    assert selection_queries == [], "没有同花色 ⇒ 使用者收不到弃牌询问（不是死步骤）"
+    assert session.engine.state.player(1).hp == 4, "零伤害"
+
+    entries = _narrative(
+        session.records(),
+        viewer=0,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    text = _line_text(entries)
+    assert "亮出" in text
+    assert "放弃（无可弃的同花色牌）" in text, text
+    assert "受到 1 点伤害" not in text

@@ -69,6 +69,7 @@ function stepPlayback(immediate) {
   if (logMode() === "simple") appendNarrativeThrough(record.seq);
   else appendLog(record, playback.querySeat);
   state.effectCards = applyEffectDelta(record, state.effectCards);
+  state.revealedCards = applyRevealDelta(record, state.revealedCards);
   renderProcessing();
   scrollLogToBottom();
   playback.index += 1;
@@ -145,6 +146,28 @@ function processingProductMap(cards) {
 function processingProductFor(cards, products = state.processingProducts) {
   if (!products) return null;
   return products[sourceGroupKey((cards || []).map((card) => card.card_id))] || null;
+}
+
+/** 公开亮牌的逐事件派生（M5-08a）：``card_reveal`` 上舞台，结算帧出栈时撤下。
+ *
+ * 亮牌不移动、也不写任何「已知」状态；它只在**中央舞台 + 事件流**留痕。舞台这一份按
+ * 帧记账（``revealFrame``），``frame`` 的 ``pop`` 到达即撤下——所以它不会在效果结束后
+ * 粘在手牌区，也不会活过下一次使用。服务端已按展示契约补好牌面字段（``visible_record``）。
+ */
+function applyRevealDelta(record, cards = state.revealedCards) {
+  const held = cards || [];
+  if (!record) return held;
+  if (record.kind === "frame" && record.op !== "push") {
+    return held.filter((card) => String(card.revealFrame) !== String(record.frame_id));
+  }
+  if (record.kind !== "delta" || record.delta_type !== "card_reveal" || !record.card) return held;
+  const card = record.card;
+  const already = held.some(
+    (existing) => String(existing.card_id) === String(card.card_id)
+      && String(existing.revealFrame) === String(record.frame_id),
+  );
+  if (already) return held;
+  return [...held, { ...card, revealFrame: record.frame_id, revealedBy: record.seat }];
 }
 
 /** 效果区的逐事件派生：``card_move`` 进 / 出处理区时增删牌面。
@@ -277,6 +300,8 @@ function commitView(body) {
     state.modal.heroSeat = null;
   }
   state.view = body;
+  // 亮牌只在【火攻】结算期间挂舞台上：处理区空了 = 那一帧已经走完（快照是权威终态）。
+  if (!(body.snapshot && (body.snapshot.processing || []).length)) state.revealedCards = [];
   state.cursor = body.cursor;
   state.logSeq = body.log_seq;
   $("t-seed").textContent = String(body.seed);

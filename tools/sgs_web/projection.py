@@ -29,7 +29,7 @@ from sgs.skills import (
     lord_skill_allowed,
     resolve_instances,
 )
-from sgs.state import FrameKind, Query, WindowCause, Zone, project
+from sgs.state import CardRef, FrameKind, Query, WindowCause, Zone, project
 from sgs.timing import Timing
 
 from .descriptions import skill_description
@@ -689,6 +689,11 @@ def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) ->
             return "选择目标区域里的一张牌"
         if card_type == "harvest":
             return HARVEST_REQUIREMENT
+        if card_type == "fire_attack":
+            # M5-08a：火攻的两步各有自己的问法（亮牌是公开动作；弃牌可选）。
+            if data.get("revealed") is not None:
+                return "弃一张与亮出的牌同花色的手牌，造成 1 点火焰伤害，或放弃"
+            return "从自己的手牌里亮出一张（公开）"
         return "从选择面里选择要交出的牌"
     if kind == "RESPOND":
         cause = getattr(query, "cause", None)
@@ -835,6 +840,49 @@ def _step_requirement(definition: Any, query: Query) -> str | None:
     if getattr(query, "kind", None) == "SELECT_CARDS":
         return steps.get("card")
     return None
+
+
+def _fire_attack_step(engine: Any, query: Query) -> dict[str, Any] | None:
+    """【火攻】的两步选牌（M5-08a 的界面读取方，纯展示派生）。
+
+    引擎侧（M5-06）把亮牌与同花色弃牌都表达成普通的 ``SELECT_CARDS``；界面要把它们
+    分别走**亮牌模板**与**牌桌点手牌**，故这里只读结算栈顶帧 + 询问本身，派生出：
+
+    - ``{"step": "reveal"}``：目标选**自己**的 1 张手牌亮出（``reveal_hand=True``）；
+    - ``{"step": "discard", "revealed": CardRef, "target": seat}``：使用者看到亮出的那一张，
+      可弃一张同花色手牌（或放弃）。
+
+    不是火攻的选牌步 / 帧已不在 / 应答者不是这一步该问的人 ⇒ ``None``（fail-closed）。
+    只读公开事实（帧载荷 + 询问），不裁决规则、不改记录流。
+    """
+    if str(getattr(query, "kind", "")) != "SELECT_CARDS":
+        return None
+    frames = getattr(getattr(engine, "stack", None), "frames", ()) or ()
+    if not frames:
+        return None
+    data = frames[-1].data
+    if getattr(data.get("card"), "type", None) != "fire_attack":
+        return None
+    spec = getattr(query, "spec", None)
+    zones = tuple(getattr(spec, "zones", ()) or ())
+    if zones != (Zone.HAND,):
+        return None
+    targets = tuple(data.get("targets", ()) or ())
+    cursor = int(data.get("cursor", 0) or 0)
+    if not 0 <= cursor < len(targets):
+        return None
+    target = int(targets[cursor])
+    if data.get("revealed") is None:
+        if int(query.actor) != target:
+            return None
+        return {"step": "reveal", "target": target}
+    if int(query.actor) != int(data.get("source", -1)):
+        return None
+    return {
+        "step": "discard",
+        "target": target,
+        "revealed": engine.state.card(int(data["revealed"])),
+    }
 
 
 def query_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
@@ -1412,6 +1460,20 @@ def pending_payload(
         else None
     )
     payload["option_seats"] = option_seats(query)
+    # M5-08a（D10 / §5.1.4）：【火攻】的两步选牌。读取方 = 亮牌模板 / 牌桌点手牌：
+    #   - 亮牌步：``dialog = "reveal"`` + ``revealed``（**只发给目标本人**；他点一张即亮出）；
+    #   - 弃牌步：``reveal`` = 已经公开的那一张（使用者据此在中央舞台看到亮牌）。
+    # 两步的牌面都只在本座位载荷里；别人的载荷由既有的 ``_mask_watched_faces`` 抹掉。
+    fire_attack = _fire_attack_step(session.engine, query) if isinstance(session, Session) else None
+    payload["reveal"] = None
+    if fire_attack is not None and not foreign:
+        if fire_attack["step"] == "reveal":
+            payload["revealed"] = [
+                slot.card.model_dump(mode="json")
+                for slot in query.slots
+                if getattr(slot, "card", None) is not None
+            ]
+
     # U2-08（D10）：花色是**会被复用的枚举模板**，中文名 / 符号 / 红黑由服务端派生一次；
     # 选项闭集里只要不全是花色就是 ``None``（界面据此决定画选择型弹窗还是小选项组）。
     # 与 ``option_seats`` 分开两个键：一个回答"这是谁"，一个回答"这项怎么显示"。
@@ -1458,6 +1520,17 @@ def pending_payload(
         lookup = _card_lookup(session.engine.state)
     else:
         lookup = card_lookup_from_query(query)
+    # 弃牌步的公开亮牌：只发给使用者本人（他是这一步的应答者）；牌来自帧载荷，不进记录流。
+    if (
+        fire_attack is not None
+        and fire_attack["step"] == "discard"
+        and not foreign
+        and lookup is not None
+    ):
+        payload["reveal"] = {
+            "seat": int(fire_attack["target"]),
+            "card": card_payload(fire_attack["revealed"], lookup=lookup),
+        }
     # U1-02：内嵌视角里的座位也要武将名称 / 势力；裸 Query（409）拿不到包，传 None。
     heroes = load_heroes(session.pack.pack_id) if isinstance(session, Session) else None
     # U1-07：转化清单的产物索引（全部产物牌面）。清单本身只说"选哪些来源牌"，
@@ -1483,6 +1556,12 @@ def visible_record(record: object) -> dict[str, Any] | None:
     if kind == "query":
         return {"kind": "query", "seq": record.seq, "query": _query_summary(record.query)}
     raw = json.loads(record_json(record))
+    if kind == "delta" and raw.get("delta_type") == "card_reveal":
+        # M5-08a：亮牌是公开事实，中央舞台按**同一份卡面契约**画它（牌名 / 属性 / 描述）。
+        # 只补展示字段，不移动、不写任何「已知」状态。
+        card = raw.get("card")
+        if isinstance(card, dict):
+            raw["card"] = card_payload(CardRef.model_validate(card))
     if kind == "action":
         # 公开事实：谁应答了、被接受与否；**具体选了什么**只对人类座位自己的应答展开。
         action = raw.get("action")

@@ -185,6 +185,11 @@ class _Narrator:
         self.pending_damage: tuple[int, str] | None = None
         self.damage_class = "dmg"
         self.last_query_actor: int | None = None
+        # M5-08a：【火攻】亮牌（`card_reveal`）按**帧**记「亮出后有没有弃牌 / 放弃」。
+        # 引擎在"无同花色"时根本不发弃牌询问（自动放弃），故这条只能从记录流派生：
+        # 同一帧里出现 Pass 动作 = 显式放弃；出现手牌 → 弃牌堆的移动 = 弃置；
+        # 两者都没有 ⇒ 自动放弃（无可弃的同花色牌）。纯展示派生，不写状态。
+        self.reveal_frames: dict[int, dict[str, bool]] = {}
 
     # -- 单条记录 -----------------------------------------------------------
 
@@ -251,6 +256,9 @@ class _Narrator:
         if timing == "DEATH_ON":
             self._line(seq, [*self._seat(record.get("actor")), _act(" 阵亡")])
             return
+        if timing == "RESOLVE_END":
+            self._fire_attack_end(record, seq)
+            return
         if timing in ("DAMAGE_END", "TURN_END"):
             self.pending_damage = None
 
@@ -283,6 +291,8 @@ class _Narrator:
             self._hp_change(record, seq)
         elif delta_type == "card_move":
             self._card_move(record, seq)
+        elif delta_type == "card_reveal":
+            self._card_reveal(record, seq)
         elif delta_type == "identity_reveal":
             label = _IDENTITY_BY_VALUE.get(str(record.get("identity")))
             if label is None:
@@ -294,6 +304,46 @@ class _Narrator:
                     _act(" 亮明身份："),
                     _act(label),
                 ],
+            )
+
+    def _card_reveal(self, record: dict[str, Any], seq: int) -> None:
+        """一张手牌成为公开事实（M5-06 的【火攻】亮牌）：写一行，并记住它所在帧。"""
+        if not self.started:
+            return
+        seat = record.get("seat")
+        card = record.get("card")
+        if seat is None or not isinstance(card, dict):
+            return
+        self._line(seq, [*self._seat(seat), _act(" 亮出"), *_cards((card,))])
+        frame_id = record.get("frame_id")
+        if isinstance(frame_id, int):
+            self.reveal_frames[frame_id] = {"passed": False, "discarded": False}
+
+    def _mark_reveal_action(self, kind: str) -> None:
+        """亮牌之后、结算结束之前的 ``Pass`` ⇒ 显式放弃（有同花色也可以放弃）。"""
+        if kind != "Pass":
+            return
+        for state in self.reveal_frames.values():
+            state["passed"] = True
+
+    def _fire_attack_end(self, record: dict[str, Any], seq: int) -> None:
+        """【火攻】结算结束：把「亮出之后发生了什么」补成一行。
+
+        - 弃了一张同花色牌 ⇒ 弃置行已经由 ``card_move`` 写过，这里不再补；
+        - 显式放弃 ⇒ 写「放弃」；
+        - 两者都没有 ⇒ 引擎没发弃牌询问（没有同花色）⇒「放弃（无可弃的同花色牌）」。
+        """
+        frame_id = record.get("frame_id")
+        state = self.reveal_frames.pop(frame_id, None) if isinstance(frame_id, int) else None
+        if state is None or state["discarded"]:
+            return
+        source = record.get("source")
+        if state["passed"]:
+            self._line(seq, [*self._subject(source), _act(" 放弃")])
+        else:
+            self._line(
+                seq,
+                [*self._subject(source), _act(" 放弃（无可弃的同花色牌）")],
             )
 
     def _hp_change(self, record: dict[str, Any], seq: int) -> None:
@@ -348,6 +398,13 @@ class _Narrator:
             return
         to_zone = record.get("to_zone") or {}
         to = to_zone.get("zone")
+        frame_id = record.get("frame_id")
+        if (
+            to == "discard"
+            and isinstance(frame_id, int)
+            and frame_id in self.reveal_frames
+        ):
+            self.reveal_frames[frame_id]["discarded"] = True
         if to == "hand":
             self._gain(record, seq, cards)
             return
@@ -407,6 +464,7 @@ class _Narrator:
         actor = self.last_query_actor
         if actor is None:
             return
+        self._mark_reveal_action(str(kind))
         if kind == "ActivateSkill":
             name = self._skill_name(str(action.get("skill_id") or ""))
             self._line(
