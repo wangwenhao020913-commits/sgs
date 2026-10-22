@@ -153,17 +153,24 @@ def test_the_all_ai_heuristic_group_finishes_consistently_and_replays(seed: int)
     assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"
 
 
-MILITARY_SEEDS: tuple[int, ...] = (ACCEPTANCE_SEEDS[0], ACCEPTANCE_SEEDS[-1])
-"""M5-01a 的 160 档冒烟：只挑 2 个固定种子（新效果未落，门禁时间要小）。"""
+MILITARY_SEEDS: tuple[int, ...] = ACCEPTANCE_SEEDS[:8]
+"""M5-07 的 160 档全 AI 基准组：**8 个固定种子**（票面「至少 8 个」的最低线）。
+
+取验收批 :data:`~support.ACCEPTANCE_SEEDS` 的前 8 个（136–143）：与 108 基准组**同批**，
+故军争牌加进来后 108 / 160 两档读的是同一组局面；32 种子是选做（票面允许时间够再加，
+本票按门禁预算只跑 8 个）。每局判定与 108 基准组**同四条**（跑完 / 身份胜负一致 /
+零非法应答 / 可回放），见下面的测试。
+"""
 
 
 @pytest.mark.parametrize("seed", MILITARY_SEEDS)
 def test_the_standard_ex_160_group_finishes_cleanly_and_replays(seed: int) -> None:
-    """验收 5：160 张档（108 + 军争 52）引擎层直连跑完一局全 AI。
+    """M5-07 / spec §6 A2：160 张档（108 + 军争 52）的全 AI 局，四条第据逐种子复核。
 
-    判据与上面的 108 基准组同四条（跑完 / 身份胜负一致 / 零非法应答 / 可回放）。
-    M5-02–06 的军争规则效果尚未落地，故本测试**不**要求军争规则正确——只要求
-    「装得进、跑得动」：牌堆换成 160 档后，行为骨架与加载期校验都不拦路。
+    判据与上面的 108 基准组同四条（跑完 / 终局与身份胜负一致 / 零非法应答 / 可回放）。
+    M5-02–06 的军争规则已全部落地，故这也是"AI 会答新询问形状"的整局实测：重铸、
+    铁索 1–2 目标、【酒】（出牌 / 濒死）、火攻的亮牌与同花色弃牌、兵粮的判定与跳过摸牌
+    都在牌堆里，任何一条答不出候选都会被第 3 条判红。
     """
     engine = _new_engine(seed, pack=PACK_EX_160)
     scans = _participants(seed)
