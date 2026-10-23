@@ -37,9 +37,35 @@ class ClassList {
   contains(x) { return this.set.has(x); }
 }
 
+/* 真 DOM 的 `element.children` 是**活的 HTMLCollection**：只有 `length`、数字下标、
+ * `item(i)` 和迭代器；`find` / `map` / `filter` / `includes` 这些数组方法一概没有。
+ * 垫片此前把 children 做成真数组，于是「对 children 直接调 `.find`」在真浏览器里抛
+ * `TypeError` 的 bug（U3 实机验收的舞台卡缺陷）在烟测里全绿。这里用 Proxy 包住活的
+ * `_children`，只放行上述读法：数组方法和赋值一律不存在，同一条 bug 在垫片里也会红。 */
+const htmlCollectionView = (children) => new Proxy(children, {
+  get(target, prop) {
+    if (prop === "length") return target.length;
+    if (prop === "item") return (index) => target[index] ?? null;
+    if (prop === Symbol.iterator) return target[Symbol.iterator].bind(target);
+    if (typeof prop === "string" && /^(?:0|[1-9]\d*)$/.test(prop)) return target[Number(prop)];
+    // find / map / filter / forEach / includes / push / splice …… 一概不提供。
+    return undefined;
+  },
+  has(target, prop) {
+    if (prop === "length" || prop === "item" || prop === Symbol.iterator) return true;
+    return typeof prop === "string" && /^(?:0|[1-9]\d*)$/.test(prop) && Number(prop) < target.length;
+  },
+  // 只读：真 DOM 的 children 也没有 setter，`el.children = ...` 应当失败。
+  set() { return false; },
+});
+
 class El {
   constructor(tag = "div", id = "") {
-    this.tagName = tag.toUpperCase(); this.id = id; this.children = []; this.listeners = {};
+    this.tagName = tag.toUpperCase(); this.id = id;
+    // 子节点本身放在 `_children`（垫片内部读写它）；对外的 children 是上面的活视图。
+    this._children = [];
+    this._childrenView = htmlCollectionView(this._children);
+    this.listeners = {};
     this.parentNode = null;
     this.classList = new ClassList(); this._text = ""; this._html = ""; this.value = "";
     this.hidden = false; this.disabled = false; this.type = ""; this.className = "";
@@ -50,32 +76,35 @@ class El {
     // 滚动容器的三个度量：舞台「粘底」断言直接写这几个数（不读布局）。
     this.scrollTop = 0; this.scrollHeight = 0; this.clientHeight = 0;
   }
-  get textContent() { return this._text + this.children.map((c) => c.textContent || c.text()).join(""); }
+  /** 活的 HTMLCollection 形状视图（真 DOM 的 `element.children`）。 */
+  get children() { return this._childrenView; }
+  get textContent() { return this._text + this._children.map((c) => c.textContent || c.text()).join(""); }
   set textContent(v) { this._text = String(v); this._html = ""; this._detachChildren(); }
-  get innerHTML() { return this._html + this.children.map((c) => c.dump()).join(""); }
+  get innerHTML() { return this._html + this._children.map((c) => c.dump()).join(""); }
   // 垫片的 innerHTML 赋值要**真的清空子节点**（真 DOM 就是这么干的；不清空会造出
   // "元素累积"这种假 bug —— 第一版垫片在这里骗过我一次）。
   set innerHTML(v) { this._html = String(v); this._detachChildren(); this._text = ""; }
   _detachChildren() {
-    for (const child of this.children) child.parentNode = null;
-    this.children = [];
+    for (const child of this._children) child.parentNode = null;
+    // 原地清空：children 是活集合，视图不能换目标。
+    this._children.length = 0;
   }
   appendChild(c) {
     // 真 DOM 的 appendChild = **移动**（不是复制）。模态把 `#t-options` 搬进正文、
     // 关闭再搬回来，若垫片只 push，会造出"同一个节点在两个父节点的 children 里"的假象。
     if (c && c.parentNode) {
-      const at = c.parentNode.children.indexOf(c);
-      if (at >= 0) c.parentNode.children.splice(at, 1);
+      const at = c.parentNode._children.indexOf(c);
+      if (at >= 0) c.parentNode._children.splice(at, 1);
     }
     c.parentNode = this;
-    this.children.push(c);
+    this._children.push(c);
     return c;
   }
   // 舞台卡面按 `data-stage-key` 复用节点（淡出靠同一个节点上的 CSS 过渡），
   // 故垫片必须有真正的 removeChild —— 被撤下的旧项要真的从父节点消失。
   removeChild(c) {
-    const at = this.children.indexOf(c);
-    if (at >= 0) this.children.splice(at, 1);
+    const at = this._children.indexOf(c);
+    if (at >= 0) this._children.splice(at, 1);
     if (c) c.parentNode = null;
     return c;
   }
@@ -92,12 +121,12 @@ class El {
   removeAttribute(name) { if (this.attrs) delete this.attrs[name]; }
   querySelector(selector) {
     const tag = String(selector).toLowerCase();
-    return this.children.find((c) => c.tagName.toLowerCase() === tag) || null;
+    return this._children.find((c) => c.tagName.toLowerCase() === tag) || null;
   }
-  dump() { return `<${this.tagName.toLowerCase()}>${this._html}${this.children.map((c) => c.dump()).join("")}</${this.tagName.toLowerCase()}>`; }
+  dump() { return `<${this.tagName.toLowerCase()}>${this._html}${this._children.map((c) => c.dump()).join("")}</${this.tagName.toLowerCase()}>`; }
   scrollIntoView() {}
-  get lastChild() { return this.children[this.children.length - 1] || null; }
-  text() { return (this._html || this._text).replace(/<[^>]*>/g, "") + this.children.map((c) => c.text()).join(""); }
+  get lastChild() { return this._children[this._children.length - 1] || null; }
+  text() { return (this._html || this._text).replace(/<[^>]*>/g, "") + this._children.map((c) => c.text()).join(""); }
 }
 
 const byId = new Map();
@@ -231,7 +260,7 @@ const clickAndWait = async (node, event = null) => {
 /** 候选行的文本指纹（U2-03 起界面**不再**把 `legal_actions` 逐条铺成按钮）：
  *  任何一条命中都说明旧的逃生梯又长回来了。 */
 const CANDIDATE_ROW_PATTERN = /发动技能 |选项：|选择座位 |使用【|弃牌（\d|排列（\d/;
-const candidateRowButtons = () => $("t-options").children.filter(
+const candidateRowButtons = () => Array.from($("t-options").children).filter(
   (node) => node.tagName === "BUTTON" && CANDIDATE_ROW_PATTERN.test(node.textContent || ""),
 );
 /** 牌桌座位节点：对手在 `#t-seats` 环上，自己在底部 `#t-self-seat`（U1-01 起不在环上）。 */
@@ -243,8 +272,8 @@ const seatBox = (seat) => seatNodes().find(
  * U1-02 起自己的装备区是**固定四槽**（武器 / 防具 / 攻马 / 防马），槽位节点自己带
  * `data-card-id`；这里找"第一个装了牌的槽"，而不是第一个槽（空槽不该被点）。 */
 const selfEquipChip = () => {
-  const row = $("t-self-zones").children.find((c) => c.getAttribute("data-zone") === "equip");
-  return row ? row.children.find((slot) => slot.getAttribute("data-card-id")) || null : null;
+  const row = Array.from($("t-self-zones").children).find((c) => c.getAttribute("data-zone") === "equip");
+  return row ? Array.from(row.children).find((slot) => slot.getAttribute("data-card-id")) || null : null;
 };
 const setSelect = (id, value) => {
   const node = $(id);
@@ -350,7 +379,7 @@ check("⓪12 关了开关 ⇒ 我的武将随 seed 变（真的是随机发将�
  */
 
 await ui.loadDeckCatalog();
-const deckOptions = $("in-deck-profile").children;
+const deckOptions = Array.from($("in-deck-profile").children);
 check("⓪13 牌堆档位选项来自服务端（标准 108 / 军争 160）",
   calls.some((call) => call.path === "/api/decks")
     && deckOptions.length === 2
@@ -404,7 +433,7 @@ const advanceOnce = async () => {
       ui.toggleFocus(Number(cardId));
       const combo = (index[String(cardId)].combos || [])[0] || [];
       for (const seat of combo) {
-        const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(seat));
+        const box = Array.from($("t-seats").children).find((c) => c.getAttribute("data-seat") === String(seat));
         if (box) (box.listeners.click || []).forEach((fn) => fn({ target: box }));
       }
     }
@@ -546,7 +575,7 @@ if (partial) {
   check("㉿2a 用不出的牌**不成为焦点**", ui.state.focusCardId !== partial.unusable.card_id,
     `focusCardId=${ui.state.focusCardId}`);
   check("㉿2b 用不出的牌被置灰（dis 类）", (() => {
-    const chip = $("t-hand").children.find((c) => c.text().includes(partial.unusable.name) && c.classList.contains("dis"));
+    const chip = Array.from($("t-hand").children).find((c) => c.text().includes(partial.unusable.name) && c.classList.contains("dis"));
     return !!chip;
   })(), `手牌里的【${partial.unusable.name}】应当是 dis`);
   check("㉿2c 提交按钮**不可点**", $("btn-submit").disabled === true, `disabled=${$("btn-submit").disabled}`);
@@ -595,7 +624,7 @@ if (partial) {
     const locked = ui.state.view.skills.filter((s) => s.locked);
     if (!locked.length) return true;  // 该武将没有锁定技时不判
     return locked.every((s) => {
-      const b = $("t-skills").children.find((c) => c.getAttribute && c.getAttribute("data-skill-id") === s.skill_id);
+      const b = Array.from($("t-skills").children).find((c) => c.getAttribute && c.getAttribute("data-skill-id") === s.skill_id);
       return b && b.classList.contains("locked") && b.disabled === true;
     });
   })(), `锁定技 ${ui.state.view.skills.filter((s) => s.locked).map((s) => s.name).join("、") || "（无）"}`);
@@ -604,22 +633,22 @@ if (partial) {
     const off = ui.state.view.skills.filter((s) => !s.locked && !s.available);
     if (!off.length) return true;
     return off.every((s) => {
-      const b = $("t-skills").children.find((c) => c.getAttribute && c.getAttribute("data-skill-id") === s.skill_id);
+      const b = Array.from($("t-skills").children).find((c) => c.getAttribute && c.getAttribute("data-skill-id") === s.skill_id);
       return b && !b.classList.contains("ready") && b.disabled === true;
     });
   })(), `不可用主动技 ${ui.state.view.skills.filter((s) => !s.locked && !s.available).map((s) => s.name).join("、") || "（无）"}`);
 
   check("㉿4 每个技能都渲染成一个按钮（清单来自响应体）", (() => {
-    const buttons = $("t-skills").children.filter((c) => c.tagName === "BUTTON");
+    const buttons = Array.from($("t-skills").children).filter((c) => c.tagName === "BUTTON");
     const skills = ui.state.view.skills || [];
     return skills.length > 0 && buttons.length === skills.length;
-  })(), `按钮 ${$("t-skills").children.filter((c) => c.tagName === "BUTTON").length} 个 / 清单 ${(ui.state.view.skills || []).length} 条`);
+  })(), `按钮 ${Array.from($("t-skills").children).filter((c) => c.tagName === "BUTTON").length} 个 / 清单 ${(ui.state.view.skills || []).length} 条`);
 
   check("㉿4 找到一个技能可发动的前置", skillCase !== null, skillCase ? `seed=${skillCase.seed} 可发动=${skillCase.offered.map((s) => s.name).join("、")}` : "10 个种子内没找到");
 
   if (skillCase) {
     const target = skillCase.offered[0];
-    const button = $("t-skills").children.find((c) => c.getAttribute && c.getAttribute("data-skill-id") === target.skill_id);
+    const button = Array.from($("t-skills").children).find((c) => c.getAttribute && c.getAttribute("data-skill-id") === target.skill_id);
     check("㉿4c 可发动的技能是绿色高亮且**可点**",
       !!button && button.classList.contains("ready") && button.disabled === false,
       `按钮存在=${!!button} ready=${button && button.classList.contains("ready")} disabled=${button && button.disabled}`);
@@ -660,7 +689,7 @@ if (partial) {
     { skill_id: "hero.guanyu.wusheng", name: "武圣", skill_type: "NORMAL", locked: false, carrier: "HERO", available: true },
     { skill_id: "equip.crossbow", name: "诸葛连弩", skill_type: "NORMAL", locked: true, carrier: "EQUIPMENT", available: false },
   ] });
-  const mixedButtons = $("t-skills").children.filter((c) => c.tagName === "BUTTON");
+  const mixedButtons = Array.from($("t-skills").children).filter((c) => c.tagName === "BUTTON");
   check("㉿4f 装备技能与武将技能同列渲染", mixedButtons.length === 2, `按钮 ${mixedButtons.length} 个`);
   const equipButton = mixedButtons.find((c) => c.getAttribute("data-skill-id") === "equip.crossbow");
   check("㉿4f 装备技能标注为「装备技」且锁定态不可点",
@@ -689,14 +718,14 @@ if (multi) {
     `selectedTargets=${JSON.stringify(ui.state.selectedTargets)}`);
   check("㉿M4 未选目标时提交按钮不可点", $("btn-submit").disabled === true);
 
-  const targetable = $("t-seats").children.filter((c) => c.classList.contains("targetable"));
+  const targetable = Array.from($("t-seats").children).filter((c) => c.classList.contains("targetable"));
   check("㉿M5 合法目标座位被标成可点（**数据**给的类）", targetable.length === multi.entry.pool.length,
     `可点座位 ${targetable.length} 个 / 池 ${multi.entry.pool.length} 个`);
 
   // 手选路径：点出**第一组组合**要求的那些座位（多目标牌就得点够）
   const want = multi.entry.combos[0];
   for (const seat of want) {
-    const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(seat));
+    const box = Array.from($("t-seats").children).find((c) => c.getAttribute("data-seat") === String(seat));
     if (box) (box.listeners.click || []).forEach((fn) => fn({ target: box }));
   }
   check("㉿M6 点座位 = 选目标", JSON.stringify(ui.state.selectedTargets) === JSON.stringify(want),
@@ -709,7 +738,7 @@ if (multi) {
     `chosen=${JSON.stringify(chosen && chosen.targets)}`);
 
   // 再点一次已选座位 = 取消该目标
-  const firstSeat = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(want[0]));
+  const firstSeat = Array.from($("t-seats").children).find((c) => c.getAttribute("data-seat") === String(want[0]));
   if (firstSeat) (firstSeat.listeners.click || []).forEach((fn) => fn({ target: firstSeat }));
   check("㉿M9 再点一次已选座位 = 取消该目标", !ui.state.selectedTargets.includes(want[0]),
     `selectedTargets=${JSON.stringify(ui.state.selectedTargets)}`);
@@ -722,7 +751,7 @@ if (multi) {
   // 走真 HTTP：重选一遍并提交，断言发出去的字节
   ui.toggleFocus(Number(multi.cardId));
   for (const seat of want) {
-    const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(seat));
+    const box = Array.from($("t-seats").children).find((c) => c.getAttribute("data-seat") === String(seat));
     if (box) (box.listeners.click || []).forEach((fn) => fn({ target: box }));
   }
   const before = calls.length;
@@ -740,7 +769,7 @@ if (multi) {
   await replayTo(multi);
   ui.toggleFocus(Number(multi.cardId));
   for (const seat of want) {
-    const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(seat));
+    const box = Array.from($("t-seats").children).find((c) => c.getAttribute("data-seat") === String(seat));
     if (box) (box.listeners.click || []).forEach((fn) => fn({ target: box }));
   }
   const picked = ui.buildAction();
@@ -865,7 +894,7 @@ if (multi) {
   ui.renderTable();
   ui.renderPending(ui.state.view);
 
-  const buttons = $("t-options").children;
+  const buttons = Array.from($("t-options").children);
   const savedSession = ui.state.sessionId;
   const giveUp = $("btn-pass");
   check("㉿R1 响应窗口里『放弃』是提示条**右端**看得见的按钮",
@@ -888,7 +917,7 @@ if (multi) {
       const picked = ui.buildAction();
       return picked !== null && picked.kind === "Pass" && $("btn-submit").disabled === false
         && $("t-options").children.length === 0 && candidateRowButtons().length === 0;
-    })(), `buildAction=${JSON.stringify(ui.buildAction())} disabled=${$("btn-submit").disabled} options=${JSON.stringify($("t-options").children.map((node) => node.textContent))}`);
+    })(), `buildAction=${JSON.stringify(ui.buildAction())} disabled=${$("btn-submit").disabled} options=${JSON.stringify(Array.from($("t-options").children).map((node) => node.textContent))}`);
   }
   ui.state.sessionId = savedSession;
   ui.state.view = saved;
@@ -921,7 +950,7 @@ if (multi) {
   ui.state.view = { pending: face, snapshot: { self_hand: [], players: [], seat: 0 }, human_seat: 0, heroes: {} };
   ui.resetSelection();
   ui.renderPending(ui.state.view);
-  const row = $("t-options").children.find((c) => c.className === "cards");
+  const row = Array.from($("t-options").children).find((c) => c.className === "cards");
   check("㉿S1 选择面渲染出 4 个槽位", !!row && row.children.length === 4, `槽位=${row ? row.children.length : 0}`);
   check("㉿S2 未选槽位时不可提交", $("btn-submit").disabled === true);
   if (row) {
@@ -934,7 +963,7 @@ if (multi) {
       return picked !== null && picked.kind === "SelectCards" && JSON.stringify(picked.picks) === "[2]";
     })(), `buildAction=${JSON.stringify(ui.buildAction())}`);
     // 再点一次取消
-    const again = $("t-options").children.find((c) => c.className === "cards");
+    const again = Array.from($("t-options").children).find((c) => c.className === "cards");
     (again.children[2].listeners.click || []).forEach((fn) => fn({ target: again.children[2] }));
     check("㉿S6 再点一次取消槽位", JSON.stringify(ui.state.picks) === "[]" && $("btn-submit").disabled === true);
   }
@@ -953,7 +982,7 @@ if (auto) {
     `已选 ${JSON.stringify(ui.state.selectedTargets)} / 池 ${JSON.stringify(auto.entry.pool)}`);
   check("㉿M14 自动选中后提交按钮直接可点", $("btn-submit").disabled === false);
   check("㉿M15 自动选中的目标是**确定态**：点单个座位不取消它（否则组合就非法了）", (() => {
-    const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(auto.entry.pool[0]));
+    const box = Array.from($("t-seats").children).find((c) => c.getAttribute("data-seat") === String(auto.entry.pool[0]));
     if (box) (box.listeners.click || []).forEach((fn) => fn({ target: box }));
     return ui.state.selectedTargets.length === auto.entry.pool.length;
   })(), `已选 ${JSON.stringify(ui.state.selectedTargets)}`);
@@ -1061,7 +1090,7 @@ while (ui.state.view.pending && steps < 4000) {
       ui.toggleFocus(Number(cardId));
       const combo = (index[String(cardId)].combos || [])[0] || [];
       for (const seat of combo) {
-        const box = $("t-seats").children.find((c) => c.getAttribute("data-seat") === String(seat));
+        const box = Array.from($("t-seats").children).find((c) => c.getAttribute("data-seat") === String(seat));
         if (box) (box.listeners.click || []).forEach((fn) => fn({ target: box }));
       }
     }
@@ -1207,12 +1236,12 @@ const allZonesIndex = replayRecords.findIndex((_, index) => {
     && zones.some((z) => z.judge.length > 0)
     && processing.size > 0;
 });
-const seatNode = (seat) => $("r-seats").children.find(
+const seatNode = (seat) => Array.from($("r-seats").children).find(
   (node) => node.getAttribute("data-seat") === String(seat));
 /** 逐座位区的行：`data-zone` 在行上（回放页仍是旧版 `.cards.mini` 结构）。 */
 const zoneRow = (seat, zone) => {
   const node = seatNode(seat);
-  return node ? node.children.find((child) => child.getAttribute("data-zone") === zone) : null;
+  return node ? Array.from(node.children).find((child) => child.getAttribute("data-zone") === zone) : null;
 };
 /** 回放页的卡面：**名称 + 花色符号 + 点数**仍要逐张比对（U1-02 只是把文本换成卡面，
  *  不是把「这张牌是什么」的断言降级成 id）。符号 / 点数映射是测试自己的独立对照表。 */
@@ -1224,12 +1253,12 @@ const cardText = (card) => ({
   suit: REPLAY_SUIT[card.suit] || "",
   rank: REPLAY_RANK[card.rank] || (card.rank === null || card.rank === undefined ? "" : String(card.rank)),
 });
-const cardsIn = (node) => (node ? node.children.filter(
+const cardsIn = (node) => (node ? Array.from(node.children).filter(
   (child) => child.tagName === "BUTTON" || String(child.className || "").split(/\s+/).includes("card"),
 ) : []);
 const cardParts = (child) => {
   const part = (name) => {
-    const span = (child.children || []).find(
+    const span = Array.from(child.children || []).find(
       (item) => String(item.className || "").split(/\s+/).includes(name));
     return span ? span.textContent : "";
   };
@@ -1454,7 +1483,7 @@ check("㉿P1 处理区渲染出五谷亮牌（不只轮到自己才看得见）"
   processingText.includes("五谷丰登") && processingText.includes("闪"),
   `处理区="${processingText.replace(/\s+/g, " ").trim()}"`);
 check("㉿P2 处理区的牌不可点（公开信息，不是我的选择）",
-  $("t-processing").children.length > 0 && $("t-processing").children.every((c) => !(c.listeners.click || []).length));
+  $("t-processing").children.length > 0 && Array.from($("t-processing").children).every((c) => !(c.listeners.click || []).length));
 
 // ② 描述文本：跟效果区（处理区）走，不再写服务端的"本窗口：谁对谁做了什么"。
 ui.state.view = synthView({
@@ -1491,7 +1520,7 @@ check("㉿P4 可交给的座位画成可点（targetable）",
 check("㉿P4b 遗计选座位不再铺『选择座位 N』按钮",
   ui.renderKind(ui.state.view.pending, ui.state.view.pending.legal_actions) === "seat"
     && $("t-options").children.length === 0,
-  `kind=${ui.renderKind(ui.state.view.pending, ui.state.view.pending.legal_actions)} 选项=${JSON.stringify($("t-options").children.map((b) => b.textContent))}`);
+  `kind=${ui.renderKind(ui.state.view.pending, ui.state.view.pending.legal_actions)} 选项=${JSON.stringify(Array.from($("t-options").children).map((b) => b.textContent))}`);
 (selectedSeatBox.listeners.click || []).forEach((fn) => fn({ target: selectedSeatBox }));
 check("㉿P5 点座位 = 选中那条 seat:2 候选", ui.state.selectedOption === 1,
   `selectedOption=${ui.state.selectedOption}`);
@@ -1529,7 +1558,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.state.view = zoneView;
   ui.resetSelection();
   ui.renderTable();
-  const boxes = $("t-seats").children;
+  const boxes = Array.from($("t-seats").children);
   const selfSeat = ui.state.view.snapshot.seat;
   // U1-02：座位卡是「左武将块 + 右判定 / 装备块」，行不再挂在座位节点的一层。
   // 逐层找带 `data-zone` 的容器（自己的在 `#t-self-zones`，对手的在 `.side-block`）。
@@ -1557,7 +1586,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿Q4 装备/判定行的牌不可点（公开信息，不是我的选择）",
     [zoneRow(0, "equip"), zoneRow(0, "judge"), zoneRow(1, "judge")]
       .filter(Boolean)
-      .every((row) => (row.children || []).every((chip) => !(chip.listeners.click || []).length)));
+      .every((row) => Array.from(row.children || []).every((chip) => !(chip.listeners.click || []).length)));
 }
 
 // ② 弃牌阶段：从手牌点选，直到"未选张数 == 手牌上限"（= 选够 `pending.count` 张）。
@@ -1585,8 +1614,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     (chip.listeners.click || []).forEach((fn) => fn({ target: chip }));
   };
   check("㉿D1 弃牌阶段不再逐条铺『弃牌（N张）』按钮",
-    $("t-options").children.filter((b) => /弃牌（/.test(b.textContent || "")).length === 0,
-    `选项=${JSON.stringify($("t-options").children.map((b) => b.textContent))}`);
+    Array.from($("t-options").children).filter((b) => /弃牌（/.test(b.textContent || "")).length === 0,
+    `选项=${JSON.stringify(Array.from($("t-options").children).map((b) => b.textContent))}`);
   check("㉿D2 未选牌时不可提交", $("btn-submit").disabled === true && ui.buildAction() === null,
     `disabled=${$("btn-submit").disabled} action=${JSON.stringify(ui.buildAction())}`);
   clickHand(1);
@@ -1708,7 +1737,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(view);
 
-  const skillButton = $("t-skills").children.find((b) => b.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
+  const skillButton = Array.from($("t-skills").children).find((b) => b.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
   check("㉿L1 龙胆按钮此刻是**可点**的（转牌不是 ActivateSkill 候选，靠 convert_sources 点亮）",
     !!skillButton && skillButton.disabled === false && skillButton.getAttribute("data-convert") === "1",
     `disabled=${skillButton && skillButton.disabled} convert=${skillButton && skillButton.getAttribute("data-convert")}`);
@@ -1787,9 +1816,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       },
     },
   ];
-  const handChips = () => $("t-hand").children;
+  const handChips = () => Array.from($("t-hand").children);
   const equipChip = selfEquipChip;
-  const skillButton = (id) => $("t-skills").children.find((b) => b.getAttribute("data-skill-id") === id);
+  const skillButton = (id) => Array.from($("t-skills").children).find((b) => b.getAttribute("data-skill-id") === id);
   ui.state.view = view;
   ui.resetSelection();
   ui.renderTable();
@@ -1915,8 +1944,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   // 每次点击都会重铺选择面（`renderPending` 清空 `t-options`），故槽位要**重新取**，
   // 否则断言读的是被换掉的旧节点（第一版就在这里红了）。
   const slotChips = () => {
-    const row = $("t-options").children.find((c) => c.className === "cards");
-    return row ? row.children : [];
+    const row = Array.from($("t-options").children).find((c) => c.className === "cards");
+    return row ? Array.from(row.children) : [];
   };
   const click = (index) => (slotChips()[index].listeners.click || []).forEach((fn) => fn({ target: slotChips()[index] }));
 
@@ -1983,15 +2012,15 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(view);
 
-  const button = $("t-skills").children.find((b) => b.getAttribute("data-skill-id") === "hero.liubei.rende");
+  const button = Array.from($("t-skills").children).find((b) => b.getAttribute("data-skill-id") === "hero.liubei.rende");
   check("㉿R1 仁德是**预发动**入口（按钮可点、标出步骤数）",
     !!button && button.disabled === false
       && button.getAttribute("data-preactivated") === "true"
       && button.getAttribute("data-preactivation") === "2",
     `disabled=${button && button.disabled} pre=${button && button.getAttribute("data-preactivation")}`);
   check("㉿R1b 出牌阶段没有「发动技能 XXX」选项",
-    !$("t-options").children.some((b) => /发动技能/.test(b.textContent)),
-    `选项=${JSON.stringify($("t-options").children.map((b) => b.textContent))}`);
+    !Array.from($("t-options").children).some((b) => /发动技能/.test(b.textContent)),
+    `选项=${JSON.stringify(Array.from($("t-options").children).map((b) => b.textContent))}`);
   (button.listeners.click || []).forEach((fn) => fn({ target: button }));
   check("㉿R2 点仁德 = 进入预发动（提示 = 预发动【仁德】：按清单逐步选择）",
     !!ui.state.preactivation && ui.state.preactivation.skillId === "hero.liubei.rende"
@@ -2013,14 +2042,14 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿R3c 再点一次 = 追加回来",
     JSON.stringify(ui.state.preactivation.answers[0].values) === "[12,11]",
     JSON.stringify(ui.state.preactivation.answers[0]));
-  const next = $("t-options").children.find((b) => b.textContent === "下一步");
+  const next = Array.from($("t-options").children).find((b) => b.textContent === "下一步");
   check("㉿R4 张数达标后「下一步」可点", !!next && next.disabled === false);
   (next.listeners.click || []).forEach((fn) => fn({ target: next }));
   check("㉿R5 进第 2 步：只高亮清单给的两名其他角色",
     ui.state.preactivation.cursor === 1
       && ui.preactivationOptions(ui.state.preactivation, 1).join(",") === "seat:1,seat:2",
     `cursor=${ui.state.preactivation.cursor}`);
-  const targetBox = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "2");
+  const targetBox = Array.from($("t-seats").children).find((c) => c.getAttribute("data-seat") === "2");
   check("㉿R6 目标武将画成可点（直接点场上武将）",
     !!targetBox && targetBox.classList.contains("targetable"));
   ui.state.sessionId = "smoke-missing-session";
@@ -2126,7 +2155,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿J5 座位步的询问区文案是服务端那句「先点选的是决斗使用者…」",
     $("t-prompt").textContent === "选择场上两名男性角色，先点选的是决斗使用者，后点选的是决斗的目标",
     `"${$("t-prompt").textContent}"`);
-  const targetBox = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "1");
+  const targetBox = Array.from($("t-seats").children).find((c) => c.getAttribute("data-seat") === "1");
   check("㉿J6 男性武将画成可点", !!targetBox && targetBox.classList.contains("targetable"),
     `targetable=${targetBox && targetBox.classList.contains("targetable")}`);
   (targetBox.listeners.click || []).forEach((fn) => fn({ target: targetBox }));
@@ -2473,7 +2502,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿W5 步 2 的询问区文案就是服务端那句「选择交给哪名其他角色」",
     $("t-prompt").textContent === "选择交给哪名其他角色",
     `"${$("t-prompt").textContent}"`);
-  const rendeSeat = $("t-seats").children.find((c) => c.getAttribute("data-seat") === "2");
+  const rendeSeat = Array.from($("t-seats").children).find((c) => c.getAttribute("data-seat") === "2");
   check("㉿W6 其他角色画成可点", !!rendeSeat && rendeSeat.classList.contains("targetable"),
     `targetable=${rendeSeat && rendeSeat.classList.contains("targetable")}`);
   (rendeSeat.listeners.click || []).forEach((fn) => fn({ target: rendeSeat }));
@@ -2574,13 +2603,13 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     ui.stepDialogKind(suitView.pending) === "choice"
       && $("t-dialog").hidden === false
       && $("t-options").children.length === 4
-      && $("t-options").children.map((node) => node.textContent).join(",")
+      && Array.from($("t-options").children).map((node) => node.textContent).join(",")
         === "♥红桃,♦方块,♠黑桃,♣梅花"
-      && $("t-options").children.map((node) => node.getAttribute("data-color")).join(",")
+      && Array.from($("t-options").children).map((node) => node.getAttribute("data-color")).join(",")
         === "red,red,black,black"
       && $("btn-pass").hidden === true
       && !/heart|diamond|spade|club/.test($("t-options").text()),
-    `kind=${ui.stepDialogKind(suitView.pending)} 选项=${JSON.stringify($("t-options").children.map((node) => node.textContent))} passHidden=${$("btn-pass").hidden}`);
+    `kind=${ui.stepDialogKind(suitView.pending)} 选项=${JSON.stringify(Array.from($("t-options").children).map((node) => node.textContent))} passHidden=${$("btn-pass").hidden}`);
 
   // 一击即提交：点一张花色 = 恰好一条 `SelectOption` POST（没有「下一步」要按），
   // 送出的就是 `legal_actions` 里那一条。
@@ -2739,7 +2768,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   // U3-01：离区不再瞬删——牌留在舞台上淡出（`.fading`），描述文本立即清空。
   check("㉿E5 播到「离开处理区」⇒ 牌从「处理中」转入淡出（不再瞬间消失）",
     $("t-processing").text().includes("杀")
-      && (($("t-processing").children.find(
+      && ((Array.from($("t-processing").children).find(
         (node) => node.getAttribute("data-card-id") === "6",
       ) || {}).classList || { contains: () => false }).contains("fading"),
     `处理区="${$("t-processing").text().trim()}"`);
@@ -2887,7 +2916,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     check("㉿L9 真局里【闪】不再直接点成【杀】（候选面已收口）",
       !!dodge && !ui.cardSelectable(p, dodge.card_id),
       `card=${dodge && dodge.name} selectable=${dodge && ui.cardSelectable(p, dodge.card_id)}`);
-    const longdanButton = $("t-skills").children.find(
+    const longdanButton = Array.from($("t-skills").children).find(
       (b) => b.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
     check("㉿L9b 龙胆的唯一入口 = 清单（按钮可点、来源 → 目标两步）",
       !!longdanButton && longdanButton.disabled === false
@@ -2899,12 +2928,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     found.rende ? `seed=${found.rende.seed} steps=${found.rende.steps}` : "16 个种子内没找到");
   if (found.rende) {
     await replayScanTo(found.rende);
-    const button = $("t-skills").children.find((b) => b.getAttribute("data-skill-id") === "hero.liubei.rende");
+    const button = Array.from($("t-skills").children).find((b) => b.getAttribute("data-skill-id") === "hero.liubei.rende");
     check("㉿R9 真局里仁德是**预发动**入口（按钮可点、清单两步、没有「发动技能」选项）",
       !!button && button.disabled === false
         && button.getAttribute("data-preactivated") === "true"
         && button.getAttribute("data-preactivation") === "2"
-        && !$("t-options").children.some((b) => /发动技能/.test(b.textContent)),
+        && !Array.from($("t-options").children).some((b) => /发动技能/.test(b.textContent)),
       `disabled=${button && button.disabled} pre=${button && button.getAttribute("data-preactivation")}`);
     (button.listeners.click || []).forEach((fn) => fn({ target: button }));
     const pa = ui.state.preactivation;
@@ -2920,10 +2949,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     check("㉿R10 真局里点清单候选 = 收进本地答案（不提交）",
       !!pa && JSON.stringify(pa.answers[0].values) === JSON.stringify([cardId]),
       `answers=${pa && JSON.stringify(pa.answers[0])}`);
-    const next = $("t-options").children.find((b) => b.textContent === "下一步");
+    const next = Array.from($("t-options").children).find((b) => b.textContent === "下一步");
     if (next) (next.listeners.click || []).forEach((fn) => fn({ target: next }));
     const seats = pa ? ui.preactivationOptions(pa, 1) : null;
-    const firstListedSeat = $("t-seats").children.find(
+    const firstListedSeat = Array.from($("t-seats").children).find(
       (c) => seats && seats.includes(`seat:${c.getAttribute("data-seat")}`));
     if (firstListedSeat) {
       (firstListedSeat.listeners.click || []).forEach((fn) => fn({ target: firstListedSeat }));
@@ -2983,10 +3012,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(preView);
 
-  const skillButton = () => $("t-skills").children.find(
+  const skillButton = () => Array.from($("t-skills").children).find(
     (b) => b.getAttribute("data-skill-id") === "demo.preactivate",
   );
-  const handChips = () => $("t-hand").children;
+  const handChips = () => Array.from($("t-hand").children);
 
   check("㉿PZ1 清单驱动：没有骨架候选也能从 preactivations 点亮技能按钮",
     !!skillButton() && skillButton().disabled === false
@@ -3009,7 +3038,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && ui.state.view.pending === prePending,
     JSON.stringify(ui.state.preactivation.answers[0]));
 
-  const next = $("t-options").children.find((c) => c.textContent === "下一步");
+  const next = Array.from($("t-options").children).find((c) => c.textContent === "下一步");
   check("㉿PZ5 选牌步的「下一步」在张数达标后可点", !!next && next.disabled === false);
   (next.listeners.click || []).forEach((fn) => fn({ target: next }));
   check("㉿PZ6 进第 2 步：座位 1 / 2 可点、座位 0 不可点",
@@ -3019,8 +3048,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `seat1=${seatBox(1).classList.contains("targetable")} seat0=${seatBox(0).classList.contains("targetable")}`);
 
   // 重选第 1 步：清空第 1..N 步（用户裁定的"重选第 K 步清空 K..N"）。
-  const stepRow = $("t-options").children.find((c) => c.tagName === "DIV");
-  const stepChip = stepRow && stepRow.children.find(
+  const stepRow = Array.from($("t-options").children).find((c) => c.tagName === "DIV");
+  const stepChip = stepRow && Array.from(stepRow.children).find(
     (c) => c.getAttribute && c.getAttribute("data-step") === "0",
   );
   (stepChip.listeners.click || []).forEach((fn) => fn({ target: stepChip }));
@@ -3031,7 +3060,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   // 再走一遍，确认复合动作的拼装。
   (handChips()[0].listeners.click || []).forEach((fn) => fn({ target: handChips()[0] }));
-  const next2 = $("t-options").children.find((c) => c.textContent === "下一步");
+  const next2 = Array.from($("t-options").children).find((c) => c.textContent === "下一步");
   (next2.listeners.click || []).forEach((fn) => fn({ target: next2 }));
   (seatBox(2).listeners.click || []).forEach((fn) => fn({ target: seatBox(2) }));
   const composite = ui.buildAction();
@@ -3094,13 +3123,13 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     ui.resetSelection();
     ui.renderTable();
     ui.renderPending(view);
-    const button = $("t-skills").children.find(
+    const button = Array.from($("t-skills").children).find(
       (b) => b.getAttribute("data-skill-id") === "demo.wording");
     (button.listeners.click || []).forEach((fn) => fn({ target: button }));
   };
-  const stepRow = () => $("t-options").children.find((c) => c.tagName === "DIV");
+  const stepRow = () => Array.from($("t-options").children).find((c) => c.tagName === "DIV");
   const stepChipText = (index) => {
-    const chip = stepRow().children.find((c) => c.getAttribute("data-step") === String(index));
+    const chip = Array.from(stepRow().children).find((c) => c.getAttribute("data-step") === String(index));
     return chip ? chip.textContent : "";
   };
 
@@ -3149,7 +3178,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(degradedView);
-  const button = () => $("t-skills").children.find(
+  const button = () => Array.from($("t-skills").children).find(
     (b) => b.getAttribute("data-skill-id") === "demo.degraded",
   );
   (button().listeners.click || []).forEach((fn) => fn({ target: button() }));
@@ -3197,13 +3226,13 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderPending(passiveView);
 
   check("㉿PZ13 被动入口：浮动选项行只给「进入预发动」，没有「发动技能 XXX」选项，技能按钮标出清单",
-    $("t-options").children.some((b) => /进入预发动/.test(b.textContent))
-      && !$("t-options").children.some((b) => /发动技能/.test(b.textContent))
+    Array.from($("t-options").children).some((b) => /进入预发动/.test(b.textContent))
+      && !Array.from($("t-options").children).some((b) => /发动技能/.test(b.textContent))
       && (() => {
-        const b = $("t-skills").children.find((x) => x.getAttribute("data-skill-id") === "demo.passive");
+        const b = Array.from($("t-skills").children).find((x) => x.getAttribute("data-skill-id") === "demo.passive");
         return !!b && b.disabled === false && b.getAttribute("data-preactivation") === "1";
       })(),
-    `选项=${JSON.stringify($("t-options").children.map((b) => b.textContent))}`);
+    `选项=${JSON.stringify(Array.from($("t-options").children).map((b) => b.textContent))}`);
   const beforePass = calls.length;
   const cancel = $("btn-cancel");
   await clickAndWait(cancel);
@@ -3258,8 +3287,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(provideView);
-  const skillButton = (id) => $("t-skills").children.find((b) => b.getAttribute("data-skill-id") === id);
-  const handChips = () => $("t-hand").children;
+  const skillButton = (id) => Array.from($("t-skills").children).find((b) => b.getAttribute("data-skill-id") === id);
+  const handChips = () => Array.from($("t-hand").children);
 
   // ① 先点【闪】（只在龙胆方向合法）→ 切到武圣 ⇒ 不合法、清空。
   (skillButton("hero.zhaoyun.longdan").listeners.click || []).forEach((fn) =>
@@ -3363,7 +3392,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(view);
 
-  const wusheng = $("t-skills").children.find(
+  const wusheng = Array.from($("t-skills").children).find(
     (b) => b.getAttribute("data-skill-id") === "hero.guanyu.wusheng");
   check("㉿T1 转化技有清单时按清单入口点亮（data-preactivation = 步骤数）",
     !!wusheng && wusheng.disabled === false && wusheng.getAttribute("data-preactivation") === "2",
@@ -3425,7 +3454,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(view);
-  const jijiu = $("t-skills").children.find(
+  const jijiu = Array.from($("t-skills").children).find(
     (b) => b.getAttribute("data-skill-id") === "hero.huatuo.jijiu");
   (jijiu.listeners.click || []).forEach((fn) => fn({ target: jijiu }));
   const chip = $("t-hand").children[0];
@@ -3504,7 +3533,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && ui.cardFace(pending, redDodge).selectable === false,
     `peach=${ui.cardFace(pending, redPeach).selectable} dodge=${ui.cardFace(pending, redDodge).selectable}`);
 
-  const peachChip = $("t-hand").children.find((c) => c.text().includes("桃"));
+  const peachChip = Array.from($("t-hand").children).find((c) => c.text().includes("桃"));
   (peachChip.listeners.click || []).forEach((fn) => fn({ target: peachChip }));
   check("㉿PH3 点手牌【桃】= 选中它，目标自动选中濒死者（座位 2）",
     ui.state.focusCardId === 41
@@ -3524,16 +3553,16 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(labels));
   check("㉿PH6 【急救】入口带自己的技能名与\"当【桃】\"文案（与手牌真【桃】分得开）",
     (() => {
-      const button = $("t-skills").children.find(
+      const button = Array.from($("t-skills").children).find(
         (b) => b.getAttribute("data-skill-id") === "hero.huatuo.jijiu");
       const hint = $("t-skill-hints").textContent;
       return !!button && button.text().includes("急救")
         && hint.includes("急救") && hint.includes("当【桃】")
         && !labels.some((label) => label.includes("急救"));
     })(),
-    `skills=${$("t-skills").children.map((b) => b.text()).join(" / ")} hints=${$("t-skill-hints").textContent}`);
+    `skills=${Array.from($("t-skills").children).map((b) => b.text()).join(" / ")} hints=${$("t-skill-hints").textContent}`);
 
-  const jijiu = $("t-skills").children.find(
+  const jijiu = Array.from($("t-skills").children).find(
     (b) => b.getAttribute("data-skill-id") === "hero.huatuo.jijiu");
   (jijiu.listeners.click || []).forEach((fn) => fn({ target: jijiu }));
   check("㉿PH7 急救清单只有一张红色来源（无 seat 步）；确认 = ActivateSkill(来源)",
@@ -3543,7 +3572,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
         && built === null;  // 还没选来源 ⇒ 不能确认
     })(),
     JSON.stringify(ui.state.preactivation.steps.map((step) => step.name)));
-  const sourceChip = $("t-hand").children.find((c) => c.text().includes("闪"));
+  const sourceChip = Array.from($("t-hand").children).find((c) => c.text().includes("闪"));
   (sourceChip.listeners.click || []).forEach((fn) => fn({ target: sourceChip }));
   ui.advancePreativation();
   const rescue = ui.buildAction();
@@ -3566,7 +3595,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
  */
 {
   const skillOf = (view, skillId) => (view.skills || []).find((s) => s.skill_id === skillId);
-  const buttonOf = (skillId) => $("t-skills").children.find(
+  const buttonOf = (skillId) => Array.from($("t-skills").children).find(
     (b) => b.getAttribute("data-skill-id") === skillId);
 
   await openSession(await post("/api/sessions", {
@@ -3797,13 +3826,13 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const passButton = $("btn-pass");
   check("㉿BS8 持刀者窗口：`Pass` 按钮在右端、文案 =「交出武器」（不是「放弃」）",
     !!passButton && passButton.hidden === false && passButton.textContent === "交出武器",
-    `hidden=${passButton && passButton.hidden} text="${passButton && passButton.textContent}" options=${$("t-options").children.map((c) => c.textContent).join(" / ")}`);
+    `hidden=${passButton && passButton.hidden} text="${passButton && passButton.textContent}" options=${Array.from($("t-options").children).map((c) => c.textContent).join(" / ")}`);
   check("㉿BS9 持刀者窗口：提示行写出「对 Bn 使用【杀】，或交出武器」",
     $("t-prompt").textContent.includes("交出武器")
       && $("t-prompt").textContent.includes("2 号位"),
     `prompt="${$("t-prompt").textContent}"`);
 
-  const longdan = $("t-skills").children.find(
+  const longdan = Array.from($("t-skills").children).find(
     (b) => b.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
   check("㉿BS10 持刀者窗口下发转化清单：龙胆按钮可点、步骤数 1（只有来源步）",
     !!longdan && longdan.disabled === false
@@ -3924,7 +3953,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   check("㉿FT7 借刀窗口的 `Pass` 仍写作「交出武器」（b 支不变）",
     $("btn-pass").hidden === false && $("btn-pass").textContent === "交出武器",
-    `btn-pass="${$("btn-pass").textContent}" hidden=${$("btn-pass").hidden} options=${$("t-options").children.map((c) => c.textContent).join(" / ")}`);
+    `btn-pass="${$("btn-pass").textContent}" hidden=${$("btn-pass").hidden} options=${Array.from($("t-options").children).map((c) => c.textContent).join(" / ")}`);
   ui.resetSelection();
 }
 
@@ -3969,9 +3998,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(view);
 
-  const skillButton = () => $("t-skills").children.find(
+  const skillButton = () => Array.from($("t-skills").children).find(
     (b) => b.getAttribute("data-skill-id") === "hero.guanyu.wusheng");
-  const nextButton = () => $("t-options").children.find((c) => c.textContent === "下一步");
+  const nextButton = () => Array.from($("t-options").children).find((c) => c.textContent === "下一步");
   const clickSeat = (seat) => (seatBox(seat).listeners.click || []).forEach(
     (fn) => fn({ target: seatBox(seat) }));
 
@@ -4065,9 +4094,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(view);
 
-  const skillButton = () => $("t-skills").children.find(
+  const skillButton = () => Array.from($("t-skills").children).find(
     (b) => b.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
-  const nextButton = () => $("t-options").children.find((c) => c.textContent === "下一步");
+  const nextButton = () => Array.from($("t-options").children).find((c) => c.textContent === "下一步");
   const clickSeat = (seat) => (seatBox(seat).listeners.click || []).forEach(
     (fn) => fn({ target: seatBox(seat) }));
 
@@ -4160,9 +4189,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(view);
 
-  const skillButton = () => $("t-skills").children.find(
+  const skillButton = () => Array.from($("t-skills").children).find(
     (b) => b.getAttribute("data-skill-id") === "hero.guanyu.wusheng");
-  const nextButton = () => $("t-options").children.find((c) => c.textContent === "下一步");
+  const nextButton = () => Array.from($("t-options").children).find((c) => c.textContent === "下一步");
   const clickSeat = (seat) => (seatBox(seat).listeners.click || []).forEach(
     (fn) => fn({ target: seatBox(seat) }));
   const clickNext = () => (nextButton().listeners.click || []).forEach(
@@ -4234,9 +4263,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(view);
 
-  const skillButton = () => $("t-skills").children.find(
+  const skillButton = () => Array.from($("t-skills").children).find(
     (b) => b.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
-  const nextButton = () => $("t-options").children.find((c) => c.textContent === "下一步");
+  const nextButton = () => Array.from($("t-options").children).find((c) => c.textContent === "下一步");
   const clickSeat = (seat) => (seatBox(seat).listeners.click || []).forEach(
     (fn) => fn({ target: seatBox(seat) }));
 
@@ -4314,9 +4343,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderTable();
   ui.renderPending(view);
 
-  const skillButton = () => $("t-skills").children.find(
+  const skillButton = () => Array.from($("t-skills").children).find(
     (b) => b.getAttribute("data-skill-id") === "hero.guanyu.wusheng");
-  const nextButton = () => $("t-options").children.find((c) => c.textContent === "下一步");
+  const nextButton = () => Array.from($("t-options").children).find((c) => c.textContent === "下一步");
   const clickSeat = (seat) => (seatBox(seat).listeners.click || []).forEach(
     (fn) => fn({ target: seatBox(seat) }));
   const clickNext = () => (nextButton().listeners.click || []).forEach(
@@ -4409,15 +4438,15 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     arrange: { count: 3, split: "free" },
   };
   const arrangeView = synthView(arrangePending);
-  const rowOf = (name) => $("t-options").children.find(
+  const rowOf = (name) => Array.from($("t-options").children).find(
     (node) => node.getAttribute && node.getAttribute("data-row") === name);
   const cardsBox = (row) => row.children[1];
-  const cardIndexes = (row) => cardsBox(row).children
+  const cardIndexes = (row) => Array.from(cardsBox(row).children)
     .filter((node) => node.getAttribute && node.getAttribute("data-card-index") !== undefined)
     .map((node) => Number(node.getAttribute("data-card-index")));
-  const slots = (row) => cardsBox(row).children.filter(
+  const slots = (row) => Array.from(cardsBox(row).children).filter(
     (node) => node.getAttribute && node.getAttribute("data-empty") === "1");
-  const cardNode = (row, index) => cardsBox(row).children.find(
+  const cardNode = (row, index) => Array.from(cardsBox(row).children).find(
     (node) => node.getAttribute && node.getAttribute("data-card-index") === String(index));
   const clickNode = (node) => (node.listeners.click || []).forEach((fn) => fn({ target: node, preventDefault() {} }));
 
@@ -4571,7 +4600,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!activation && activation.kind === "SKILL_ACTIVATION"
       && activation.skill_id === "hero.zhugeliang.guanxing",
     `kind=${activation && activation.kind} skill=${activation && activation.skill_id}`);
-  const guanxingButton = $("t-skills").children.find(
+  const guanxingButton = Array.from($("t-skills").children).find(
     (node) => node.getAttribute("data-skill-id") === "hero.zhugeliang.guanxing");
   // 观星是**触发技**（有钩子、无主动候选入口）⇒ 底部技能按钮只说明、不接 click（U1-06）。
   // 它的"是否发动"由**询问自己的直提态**回答：这就是 B 形技能的新表面（U2-03）。
@@ -4581,7 +4610,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && candidateRowButtons().length === 0
       && /将提交：发动【观星】/.test($("t-choice").textContent)
       && $("btn-submit").disabled === false,
-    `button=${!!guanxingButton} choice="${$("t-choice").textContent}" submit=${$("btn-submit").disabled} cand=${candidateRowButtons().length} kind=${ui.renderKind(activation, activation && activation.legal_actions)} options=${JSON.stringify($("t-options").children.map((node) => node.textContent))}`);
+    `button=${!!guanxingButton} choice="${$("t-choice").textContent}" submit=${$("btn-submit").disabled} cand=${candidateRowButtons().length} kind=${ui.renderKind(activation, activation && activation.legal_actions)} options=${JSON.stringify(Array.from($("t-options").children).map((node) => node.textContent))}`);
   await ui.submitAction();
   const realArrange = ui.state.view.pending;
   check("㉿GX17 确认发动后 ARRANGE 询问带投影规格（count 4 / free）与 4 张 revealed 牌面",
@@ -4686,7 +4715,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     ui.resetSelection();
     ui.renderTable();
   };
-  const ringSeats = () => $("t-seats").children.map((node) => ({
+  const ringSeats = () => Array.from($("t-seats").children).map((node) => ({
     seat: Number(node.getAttribute("data-seat")),
     angle: Number(node.getAttribute("data-ring-angle")),
     x: Number(node.getAttribute("data-ring-x")),
@@ -4752,7 +4781,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     }
     // 渲染路径：`left/top` 百分比必须就是设计坐标 / 1600×608（CSS 的尺寸 / 位移由
     // 真浏览器截图核，DOM 垫片没有布局引擎）。
-    const placed = $("t-seats").children.map((node) => ({
+    const placed = Array.from($("t-seats").children).map((node) => ({
       left: parseFloat(node.style.left),
       top: parseFloat(node.style.top),
     }));
@@ -5161,7 +5190,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `hand="${handCard.getAttribute("title")}"`);
 
   /* ---- 手牌与场上区域不重复显示 ---- */
-  const handIds = $("t-hand").children.map((node) => attr(node, "data-card-id"));
+  const handIds = Array.from($("t-hand").children).map((node) => attr(node, "data-card-id"));
   const fieldIds = byClass($("t-self-zones"), "mini-slot")
     .map((slot) => attr(slot, "data-card-id")).filter(Boolean);
   check("U1-02p 自己装备区里的一张牌（青釭剑）不在手牌区重复出现",
@@ -5207,8 +5236,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("U1-02r turn_seat=null 时不误标「行动中」",
     !$("t-self-seat").classList.contains("turn")
       && !$("t-self-seat").text().includes("行动中")
-      && $("t-seats").children.every((box) => !box.classList.contains("turn")),
-    `selfTurn=${$("t-self-seat").classList.contains("turn")} ring=${$("t-seats").children.map((b) => [...b.classList.set].join("+")).join(",")}`);
+      && Array.from($("t-seats").children).every((box) => !box.classList.contains("turn")),
+    `selfTurn=${$("t-self-seat").classList.contains("turn")} ring=${Array.from($("t-seats").children).map((b) => [...b.classList.set].join("+")).join(",")}`);
 
   ui.state.view = savedView;
   ui.state.logRecords = savedLog;
@@ -5349,7 +5378,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(view);
-  const foreign = seatBox(1) && seatBox(1).children.find(
+  const foreign = seatBox(1) && Array.from(seatBox(1).children).find(
     (node) => (node.className || "").includes("seat-prompt"),
   );
   check("U1-03c 其他座位的询问文本显示在其武将块下方（只有“正在响应…”，不复述询问内容）",
@@ -5358,12 +5387,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `seat1="${seatBox(1) && seatBox(1).text()}"`);
   check("U1-03d 其他座位的提示不显示可点按钮、也不接管自己的提示条动作",
     !!foreign
-      && foreign.children.every((node) => node.tagName !== "BUTTON")
+      && Array.from(foreign.children).every((node) => node.tagName !== "BUTTON")
       && !foreign.onclick
       && $("btn-submit").disabled === true
       && $("btn-cancel").disabled === true
       && $("btn-pass").hidden === true,
-    `children=${foreign && foreign.children.map((node) => node.tagName).join(",")} submit=${$("btn-submit").disabled}`);
+    `children=${foreign && Array.from(foreign.children).map((node) => node.tagName).join(",")} submit=${$("btn-submit").disabled}`);
   check("U1-03e 其他座位的询问不铺选项行、不显示倒计时",
     $("t-options").children.length === 0
       && ($("t-countdown").hidden === true || $("t-timer").textContent === "")
@@ -5387,7 +5416,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.renderPending(view);
   check("U1-03f 自己的询问在提示条里，不在座位块下方",
     $("t-prompt").textContent.includes("出牌阶段")
-      && !(seatBox(0) && seatBox(0).children.some(
+      && !(seatBox(0) && Array.from(seatBox(0).children).some(
         (node) => (node.className || "").includes("seat-prompt"))),
     `prompt="${$("t-prompt").textContent}"`);
 }
@@ -5436,11 +5465,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(view);
-  const options = $("t-options").children;
+  const options = Array.from($("t-options").children);
   check("U1-03g0 简单询问（一次性二选一）出浮动选项行，且回到提示条内",
     options.length === 2
-      && $("t-options-home").children.includes($("t-options")),
-    `options=${options.length} home=${$("t-options-home").children.includes($("t-options"))}`);
+      && Array.from($("t-options-home").children).includes($("t-options")),
+    `options=${options.length} home=${Array.from($("t-options-home").children).includes($("t-options"))}`);
   (options[0].listeners.click || []).forEach((fn) => fn({ target: options[0] }));
   const picked = ui.buildAction();
   check("U1-03g1 点浮动选项 = 选中候选里的那条 SelectOption（提交仍由玩家按）",
@@ -5475,8 +5504,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("U1-03aa 结束出牌在提示条右端，不出现在浮动选项行",
     $("btn-end-phase").hidden === false
       && $("btn-pass").hidden === true
-      && !$("t-options").children.some((node) => /结束出牌/.test(node.textContent || "")),
-    `endHidden=${$("btn-end-phase").hidden} passHidden=${$("btn-pass").hidden} options=${JSON.stringify($("t-options").children.map((node) => node.textContent))}`);
+      && !Array.from($("t-options").children).some((node) => /结束出牌/.test(node.textContent || "")),
+    `endHidden=${$("btn-end-phase").hidden} passHidden=${$("btn-pass").hidden} options=${JSON.stringify(Array.from($("t-options").children).map((node) => node.textContent))}`);
   const savedSession = ui.state.sessionId;
   ui.state.sessionId = null;
   const before = calls.length;
@@ -5490,7 +5519,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   // U2-03：右端动作**不重绘**内容区——点完「结束出牌」不应铺出任何候选 / 选项。
   check("U1-03ab2 点右端动作不重绘内容区（选项行仍为空、无候选按钮）",
     $("t-options").children.length === 0 && candidateRowButtons().length === 0,
-    `options=${JSON.stringify($("t-options").children.map((node) => node.textContent))}`);
+    `options=${JSON.stringify(Array.from($("t-options").children).map((node) => node.textContent))}`);
   ui.state.sessionId = savedSession;
 }
 
@@ -5531,7 +5560,7 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(view);
-  const buttons = $("t-options").children;
+  const buttons = Array.from($("t-options").children);
   check("U2-03a SELECT_OPTION 非座位形态 = 专用小选项按钮组（原值、无「选项：」前缀）",
     ui.renderKind(pending, pending.legal_actions) === "options"
       && buttons.length === 2
@@ -5614,7 +5643,7 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(view);
-  const skillButton = $("t-skills").children.find(
+  const skillButton = Array.from($("t-skills").children).find(
     (node) => node.getAttribute("data-skill-id") === "hero.demo.active");
   check("U2-03c 点过底部技能按钮 = 直提态（不再铺「发动技能 hero.xxx」候选行）",
     (() => {
@@ -5626,7 +5655,7 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
         && $("t-choice").textContent.includes("将提交：发动【示例主动】")
         && $("btn-submit").disabled === false;
     })(),
-    `kind=${ui.renderKind(pending, pending.legal_actions)} choice="${$("t-choice").textContent}" options=${JSON.stringify($("t-options").children.map((node) => node.textContent))}`);
+    `kind=${ui.renderKind(pending, pending.legal_actions)} choice="${$("t-choice").textContent}" options=${JSON.stringify(Array.from($("t-options").children).map((node) => node.textContent))}`);
 }
 
 /* ---- ③ 强制询问不出现「放弃」；EndPhase 与它相互独立 ---- */
@@ -5902,7 +5931,7 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
     successCalls.length === 1
       && successCalls[0].body.action.kind === "Pass"
       && candidateRowButtons().length === 0,
-    `answers=${successCalls.length} options=${JSON.stringify($("t-options").children.map((node) => node.textContent))}`);
+    `answers=${successCalls.length} options=${JSON.stringify(Array.from($("t-options").children).map((node) => node.textContent))}`);
 
   // 409：下一次 /answer 回 409；刷新取回的新询问换成"只有 EndPhase"的出牌阶段。
   const fresh2 = await post("/api/sessions", {
@@ -5937,7 +5966,7 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
       && candidateRowButtons().length === 0
       && $("btn-pass").hidden === true
       && $("btn-end-phase").hidden === false,
-    `calls=${staleCalls.map((call) => call.path).join(" | ")} pending=${ui.state.view.pending && ui.state.view.pending.kind} seq=${ui.state.view.pending && ui.state.view.pending.seq} option=${ui.state.selectedOption} options=${JSON.stringify($("t-options").children.map((node) => node.textContent))} passHidden=${$("btn-pass").hidden} endHidden=${$("btn-end-phase").hidden}`);
+    `calls=${staleCalls.map((call) => call.path).join(" | ")} pending=${ui.state.view.pending && ui.state.view.pending.kind} seq=${ui.state.view.pending && ui.state.view.pending.seq} option=${ui.state.selectedOption} options=${JSON.stringify(Array.from($("t-options").children).map((node) => node.textContent))} passHidden=${$("btn-pass").hidden} endHidden=${$("btn-end-phase").hidden}`);
   ui.state.sessionId = null;
   ui.resetSelection();
   ui.state.view = null;
@@ -5955,7 +5984,7 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
  * - 底部技能区三态 / 顺序 / 点击行为不变（U1-06 仍绿）。
  */
 
-const promptSkillButtons = () => $("t-prompt-skills").children.filter(
+const promptSkillButtons = () => Array.from($("t-prompt-skills").children).filter(
   (node) => node.tagName === "BUTTON",
 );
 const promptSkillIds = () => promptSkillButtons().map(
@@ -5965,7 +5994,7 @@ const promptSkill = (id) => promptSkillButtons().find(
   (node) => node.getAttribute("data-skill-id") === id,
 );
 const clickNode = (node) => (node.listeners.click || []).forEach((fn) => fn({ target: node }));
-const bottomSkillIds = () => $("t-skills").children.filter(
+const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   (node) => node.tagName === "BUTTON",
 ).map((node) => node.getAttribute("data-skill-id"));
 
@@ -6094,7 +6123,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       ui.resetSelection();
       ui.renderTable();
       ui.renderPending(view);
-      const bottom = $("t-skills").children.find(
+      const bottom = Array.from($("t-skills").children).find(
         (node) => node.getAttribute("data-skill-id") === "hero.demo.alpha");
       clickNode(bottom);
       const fromBottom = ui.state.selectedOption;
@@ -6117,7 +6146,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
     preactivations: {}, preactivation: [],
   });
-  const optionLabels = () => $("t-options").children
+  const optionLabels = () => Array.from($("t-options").children)
     .filter((node) => node.tagName === "BUTTON")
     .map((node) => node.textContent);
 
@@ -6132,7 +6161,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && !/discard_one|draw_one/.test($("t-options").text())
       && candidateRowButtons().length === 0,
     `选项=${JSON.stringify(optionLabels())}`);
-  const drawButton = $("t-options").children.find((node) => node.textContent === "令其摸一张牌");
+  const drawButton = Array.from($("t-options").children).find((node) => node.textContent === "令其摸一张牌");
   check("U2-04i 点「令其摸一张牌」= 选中那条 SelectOption(draw_one)，提交原样取候选",
     (() => {
       clickNode(drawButton);
@@ -6151,7 +6180,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(drawOnly);
-  const drawOnlyButtons = $("t-options").children.filter((node) => node.tagName === "BUTTON");
+  const drawOnlyButtons = Array.from($("t-options").children).filter((node) => node.tagName === "BUTTON");
   check("U2-04j 无手牌时「弃置 1 张手牌」是禁用控件、「令其摸一张牌」仍可点（引擎不发不可支付的选项）",
     optionLabels().join(",") === "弃置 1 张手牌,令其摸一张牌"
       && drawOnlyButtons.find((node) => node.textContent === "弃置 1 张手牌").disabled === true
@@ -6225,7 +6254,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     }));
     return view;
   };
-  const optionButtons = () => $("t-options").children.filter(
+  const optionButtons = () => Array.from($("t-options").children).filter(
     (node) => node.tagName === "BUTTON",
   );
   const optionButton = (text) => optionButtons().find((node) => node.textContent === text) || null;
@@ -6348,7 +6377,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.renderPending(view);
 
   const entry = promptSkill("hero.simayi.guicai");
-  const hintNode = $("t-prompt-skills").children.find(
+  const hintNode = Array.from($("t-prompt-skills").children).find(
     (node) => String(node.className || "").split(/\s+/).includes("prompt-skill-hint"));
   const before = calls.length;
   check("U2-04l 鬼才改判窗口：提示区只有一个只说明的「鬼才」入口（+ 点手牌提示；无第二套选择）",
@@ -6608,7 +6637,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     ui.resetSelection();
     ui.renderTable();
     ui.renderPending(view);
-    const button = $("t-skills").children.find(
+    const button = Array.from($("t-skills").children).find(
       (node) => node.getAttribute("data-skill-id") === "demo.modal");
     (button.listeners.click || []).forEach((fn) => fn({ target: button }));
     return view;
@@ -6618,7 +6647,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U1-03p 多步技能清单打开询问弹窗（标题 + 清单在正文里；详情窗保持关闭）",
     $("t-dialog").hidden === false
       && /预发动/.test($("t-dialog-title").textContent)
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && $("t-modal").hidden === true,
     `dialogHidden=${$("t-dialog").hidden} title="${$("t-dialog-title").textContent}" bodyChildren=${$("t-dialog-body").children.length} detailHidden=${$("t-modal").hidden}`);
   const modalRegions = ["table-topbar", "table-stage", "table-bottom", "t-dialog", "t-modal"];
@@ -6637,8 +6666,8 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     !$("t-dialog-body").text().includes("剩余")
       && $("t-countdown").hidden === false
       && $("t-default-label").textContent.includes("超时")
-      && !$("t-dialog-body").children.includes($("t-countdown")),
-    `bodyText="${$("t-dialog-body").text().slice(0, 60)}" countdownHidden=${$("t-countdown").hidden} countdownInBody=${$("t-dialog-body").children.includes($("t-countdown"))}`);
+      && !Array.from($("t-dialog-body").children).includes($("t-countdown")),
+    `bodyText="${$("t-dialog-body").text().slice(0, 60)}" countdownHidden=${$("t-countdown").hidden} countdownInBody=${Array.from($("t-dialog-body").children).includes($("t-countdown"))}`);
 
   // 不暂停：弹窗开着时只挪本地锚点，倒计时照常从绿 → 黄 → 红。
   ui.state.pendingClock.receivedAt = Date.now() - 35 * 1000;
@@ -6662,9 +6691,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
 
   // 第 2 步是**选目标**：弹窗可能挡住环上某几个座位，故正文里同时铺座位按钮；
   // 环上高亮也仍在（没有 inert，D8）。两条入口写同一个答案。
-  const next = $("t-options").children.find((node) => node.textContent === "下一步");
+  const next = Array.from($("t-options").children).find((node) => node.textContent === "下一步");
   (next.listeners.click || []).forEach((fn) => fn({ target: next }));
-  const seatOption = $("t-options").children.find(
+  const seatOption = Array.from($("t-options").children).find(
     (node) => (node.className || "").includes("seat-opt")
       && (node.textContent || "").includes("座位 1"));
   check("U1-03t2 弹窗里的座位按钮与环上座位都可选目标（被窗口挡住的座位也有入口）",
@@ -6726,7 +6755,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U1-03w 排列面走同一个询问弹窗（标题 + 正文都在 #t-dialog 里；详情窗不掺和）",
     $("t-dialog").hidden === false
       && $("t-dialog-title").textContent === "排列"
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && $("t-modal").hidden === true,
     `dialogHidden=${$("t-dialog").hidden} detailHidden=${$("t-modal").hidden} title="${$("t-dialog-title").textContent}"`);
   const arrangeActionBefore = JSON.stringify(ui.buildAction());
@@ -6869,21 +6898,21 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && logText().includes("发动【遗计】")
       && !logText().includes("#"),
     `count=${logCount()} text="${logText().replace(/\s+/g, " ").slice(0, 120)}"`);
-  const logItems = $("t-log").children;
+  const logItems = Array.from($("t-log").children);
   check("U1-05g 轮次 / 阶段分隔是独立的暗灰分隔行（不做树）",
     logItems[0].className === "nar-divider"
       && logItems[0].textContent.startsWith("第 1 轮")
       && logItems[1].className === "nar-divider"
       && logItems[1].textContent === "出牌阶段",
     `[0]=${logItems[0].className}:${logItems[0].textContent} [1]=${logItems[1].className}:${logItems[1].textContent}`);
-  const lineClasses = logItems[2].children.map((node) => node.className);
+  const lineClasses = Array.from(logItems[2].children).map((node) => node.className);
   check("U1-05h 服务端的颜色类原样落到 span（武将黄、卡名红、动作粗、伤害红、技能蓝）",
     lineClasses.includes("nar-hero") && lineClasses.includes("nar-card-fire")
       && lineClasses.includes("nar-act")
-      && logItems[3].children.some((node) => node.className === "nar-seat")
-      && logItems[3].children.some((node) => node.className === "nar-hero")
-      && logItems[3].children.some((node) => node.className === "nar-dmg-fire")
-      && logItems[4].children.some((node) => node.className === "nar-skill"),
+      && Array.from(logItems[3].children).some((node) => node.className === "nar-seat")
+      && Array.from(logItems[3].children).some((node) => node.className === "nar-hero")
+      && Array.from(logItems[3].children).some((node) => node.className === "nar-dmg-fire")
+      && Array.from(logItems[4].children).some((node) => node.className === "nar-skill"),
     `line2=${lineClasses.join(",")}`);
 
   /* ---- 完整两档沿用现有行为；切回简易重新渲染叙事 ---- */
@@ -7024,7 +7053,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.renderTable();
   ui.renderPending(view);
 
-  const skillButtons = $("t-skills").children.filter((node) => node.tagName === "BUTTON");
+  const skillButtons = Array.from($("t-skills").children).filter((node) => node.tagName === "BUTTON");
   const skillButton = (id) => skillButtons.find((node) => node.getAttribute("data-skill-id") === id);
   check("U1-06a 技能按钮区列出全部技能（武将 + 装备 + 被动 / 锁定）",
     skillButtons.length === view.skills.length,
@@ -7083,7 +7112,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   const heroBlockOf = (seat) => {
     if (Number(seat) === Number(ui.state.view.snapshot.seat)) return $("t-self-hero");
     const box = seatBox(seat);
-    return box ? box.children.find((node) => (node.className || "").split(" ").includes("hero-block")) || null : null;
+    return box ? Array.from(box.children).find((node) => (node.className || "").split(" ").includes("hero-block")) || null : null;
   };
   /** 右键一个节点：只走该节点自己的 contextmenu 监听（真 DOM 里由它冒泡到牌桌外壳）。 */
   const fireContext = (node) => {
@@ -7124,7 +7153,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       })(),
     `hidden=${$("t-modal").hidden} title="${$("t-modal-title").textContent}"`);
   const ownDetail = $("t-modal-body").children[0];
-  const ownSections = ownDetail ? ownDetail.children.map((node) => node.className) : [];
+  const ownSections = ownDetail ? Array.from(ownDetail.children).map((node) => node.className) : [];
   check("U1-06k 详情结构：武将技能在上 → 分割线 → 装备技能在下",
     ownSections.includes("detail-section hero-skills")
       && ownSections.includes("detail-divider")
@@ -7152,7 +7181,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       return $("t-countdown").hidden === false
         && $("t-countdown").getAttribute("data-phase") === "yellow"
         && !$("t-modal-body").text().includes("剩余")
-        && !$("t-modal-body").children.includes($("t-countdown"));
+        && !Array.from($("t-modal-body").children).includes($("t-countdown"));
     })(),
     `hidden=${$("t-countdown").hidden} phase=${$("t-countdown").getAttribute("data-phase")}`);
 
@@ -7234,9 +7263,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
 
   // 右键装备 / 判定 / 手牌不动作；牌桌外壳仍屏蔽浏览器右键菜单。
   {
-    const equipSlot = $("t-self-zones").children
+    const equipSlot = Array.from($("t-self-zones").children)
       .find((row) => row.getAttribute("data-zone") === "equip").children[0];
-    const judgeSlot = $("t-self-zones").children
+    const judgeSlot = Array.from($("t-self-zones").children)
       .find((row) => row.getAttribute("data-zone") === "judge").children[0];
     const handChip = $("t-hand").children[0];
     fireContext(equipSlot);
@@ -7296,25 +7325,25 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     check("U1-06w 详情盖在排列弹窗上：两个节点各自独立，询问弹窗正文 / 只读态原样",
       $("t-dialog").hidden === false
         && $("t-dialog-title").textContent === "排列"
-        && $("t-dialog-body").children.includes($("t-options"))
+        && Array.from($("t-dialog-body").children).includes($("t-options"))
         && $("t-modal").hidden === false
         && /武将详情/.test($("t-modal-title").textContent)
         && $("t-dialog-body").children.length === dialogBodyBefore
         && JSON.stringify(ui.buildAction()) === arrangeActionBefore
         && ui.selectionEnabled() === false,
-      `dialog="${$("t-dialog-title").textContent}" detail="${$("t-modal-title").textContent}" optionsInDialog=${$("t-dialog-body").children.includes($("t-options"))} enabled=${ui.selectionEnabled()}`);
+      `dialog="${$("t-dialog-title").textContent}" detail="${$("t-modal-title").textContent}" optionsInDialog=${Array.from($("t-dialog-body").children).includes($("t-options"))} enabled=${ui.selectionEnabled()}`);
 
     fireDocument("keydown", { key: "Escape" });
     check("U1-06w2 ESC 只关详情：排列弹窗原样恢复（正文仍是排列、无详情残留、仍只读）",
       $("t-modal").hidden === true
         && $("t-dialog").hidden === false
         && $("t-dialog-title").textContent === "排列"
-        && $("t-dialog-body").children.includes($("t-options"))
-        && !$("t-dialog-body").children.some(
+        && Array.from($("t-dialog-body").children).includes($("t-options"))
+        && !Array.from($("t-dialog-body").children).some(
           (node) => (node.className || "").includes("hero-detail"))
         && JSON.stringify(ui.buildAction()) === arrangeActionBefore
         && ui.selectionEnabled() === false,
-      `dialogHidden=${$("t-dialog").hidden} title="${$("t-dialog-title").textContent}" bodyClasses=${JSON.stringify($("t-dialog-body").children.map((node) => node.className))} enabled=${ui.selectionEnabled()}`);
+      `dialogHidden=${$("t-dialog").hidden} title="${$("t-dialog-title").textContent}" bodyClasses=${JSON.stringify(Array.from($("t-dialog-body").children).map((node) => node.className))} enabled=${ui.selectionEnabled()}`);
 
     (($("t-dialog-collapse").listeners.click) || []).forEach((fn) => fn({ target: $("t-dialog-collapse") }));
     check("U1-06w3 排列折叠：标题条留下，右端仍给「查看排列」入口",
@@ -7337,7 +7366,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       $("t-dialog").hidden === false
         && $("t-dialog-body").hidden === false
         && $("t-dialog-title").textContent === "排列"
-        && $("t-dialog-body").children.includes($("t-options")),
+        && Array.from($("t-dialog-body").children).includes($("t-options")),
       `dialogHidden=${$("t-dialog").hidden} bodyHidden=${$("t-dialog-body").hidden} title="${$("t-dialog-title").textContent}"`);
   }
 
@@ -7435,7 +7464,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.state.view = faceView;
   ui.resetSelection();
   ui.renderTable();
-  const faces = $("t-processing").children;
+  const faces = Array.from($("t-processing").children);
   const faceOf = (id) => faces.find((face) => attr(face, "data-card-id") === String(id));
 
   check("U1-07a 处理区只画产物：五张产物牌，来源实体牌（2 / 3）不再重复出现",
@@ -7498,9 +7527,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
 
   check("U1-07g 手牌仍是源实体牌、**不加角标**（两张普通牌都没有「虚 / 转」）",
     $("t-hand").children.length === 2
-      && $("t-hand").children.every((card) => byClass(card, "corner").length === 0)
-      && $("t-hand").children.map((card) => attr(card, "data-kind")).join(",") === "normal,normal",
-    `kinds=${$("t-hand").children.map((card) => attr(card, "data-kind")).join(",")}`);
+      && Array.from($("t-hand").children).every((card) => byClass(card, "corner").length === 0)
+      && Array.from($("t-hand").children).map((card) => attr(card, "data-kind")).join(",") === "normal,normal",
+    `kinds=${Array.from($("t-hand").children).map((card) => attr(card, "data-kind")).join(",")}`);
 
   // 选中源牌（【闪】）→ 提交的其实是虚拟【杀】；提示条写「将以【杀】使用」。
   const convertPending = {
@@ -7561,7 +7590,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U1-07i2 快照落地后处理区仍是产物（来源牌不重复显示）",
     $("t-processing").children.length === 1
       && attr($("t-processing").children[0], "data-card-id") === "-10",
-    `ids=${$("t-processing").children.map((child) => attr(child, "data-card-id")).join(",")}`);
+    `ids=${Array.from($("t-processing").children).map((child) => attr(child, "data-card-id")).join(",")}`);
 
   /* ---- 真会话：龙胆 / 丈八 / 八卦各一条 ---- */
   const submitEquip = async (typeId) => {
@@ -7603,7 +7632,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   }
   const longdanHandDodge = (ui.state.view.snapshot.self_hand || [])
     .find((card) => card.type === "dodge");
-  const longdanButton = $("t-skills").children.find(
+  const longdanButton = Array.from($("t-skills").children).find(
     (node) => node.getAttribute("data-skill-id") === "hero.zhaoyun.longdan");
   if (longdanButton) (longdanButton.listeners.click || []).forEach((fn) => fn({ target: longdanButton }));
   const longdanOptions = ui.state.preactivation
@@ -7641,7 +7670,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     .map((card) => card.type);
   const serpentSteps = (serpentPending && serpentPending.preactivations
     && serpentPending.preactivations["equip.serpent_spear"]) || null;
-  const serpentButton = $("t-skills").children.find(
+  const serpentButton = Array.from($("t-skills").children).find(
     (node) => node.getAttribute("data-skill-id") === "equip.serpent_spear");
   check("U1-07k 真会话【丈八】：seed 9 装备后服务端下发两来源步清单，技能按钮可点",
     equippedSerpent && serpentEquip.includes("serpent_spear")
@@ -7863,7 +7892,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   const heroBlockOf = (seat) => {
     if (Number(seat) === Number(ui.state.view.snapshot.seat)) return $("t-self-hero");
     const box = seatBox(seat);
-    return box ? box.children.find((node) => (node.className || "").split(" ").includes("hero-block")) || null : null;
+    return box ? Array.from(box.children).find((node) => (node.className || "").split(" ").includes("hero-block")) || null : null;
   };
   const fireContext = (node) => {
     const event = { target: node, prevented: false, stopPropagation() {} };
@@ -7974,12 +8003,12 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     $("t-modal").hidden === true
       && $("t-dialog").hidden === false
       && $("t-dialog-title").textContent === "排列"
-      && $("t-dialog-body").children.includes($("t-options"))
-      && !$("t-dialog-body").children.some(
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
+      && !Array.from($("t-dialog-body").children).some(
         (node) => (node.className || "").includes("hero-detail"))
       && JSON.stringify(ui.buildAction()) === arrangeActionBefore
       && ui.selectionEnabled() === false,
-    `detailHidden=${$("t-modal").hidden} title="${$("t-dialog-title").textContent}" bodyClasses=${JSON.stringify($("t-dialog-body").children.map((node) => node.className))} action=${JSON.stringify(ui.buildAction())}`);
+    `detailHidden=${$("t-modal").hidden} title="${$("t-dialog-title").textContent}" bodyClasses=${JSON.stringify(Array.from($("t-dialog-body").children).map((node) => node.className))} action=${JSON.stringify(ui.buildAction())}`);
 
   /* ---- ④ 键盘：blocked 态回车不选；卡面是 button（可聚焦）但 click 被拦 ---- */
   check("U2-05e 阻断态键盘激活不产生选择：手牌是 <button>（Tab 到它再回车 = 一次 click）却无焦点；座位无键盘入口",
@@ -8039,7 +8068,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     $("t-dialog").hidden === false
       && $("t-dialog-body").hidden === false
       && $("t-dialog-title").textContent === "排列"
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && $("btn-show-modal").hidden === true
       && ui.selectionEnabled() === false,
     `bodyHidden=${$("t-dialog-body").hidden} title="${$("t-dialog-title").textContent}" reopen=${$("btn-show-modal").hidden} enabled=${ui.selectionEnabled()}`);
@@ -8121,7 +8150,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(preView);
-  const modalSkill = $("t-skills").children.find(
+  const modalSkill = Array.from($("t-skills").children).find(
     (node) => node.getAttribute("data-skill-id") === "demo.modal");
   (modalSkill.listeners.click || []).forEach((fn) => fn({ target: modalSkill }));
   check("U2-05i 预发动清单打开仍是牌桌表面：弹窗在、selectionEnabled 为真（不是只读）",
@@ -8134,7 +8163,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U2-05i2 预发动选牌步：点手牌仍生效（C 形：点自己的牌）",
     JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[0].values) === "[1]",
     JSON.stringify(ui.state.preactivation && ui.state.preactivation.answers[0].values));
-  const nextStep = $("t-options").children.find((node) => node.textContent === "下一步");
+  const nextStep = Array.from($("t-options").children).find((node) => node.textContent === "下一步");
   (nextStep.listeners.click || []).forEach((fn) => fn({ target: nextStep }));
   await clickAndWait(seatBox(1));
   check("U2-05i3 预发动选座步：点座位仍生效（C 形：点自己的座位）",
@@ -8231,7 +8260,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   const heroBlockOf = (seat) => {
     if (Number(seat) === Number(ui.state.view.snapshot.seat)) return $("t-self-hero");
     const box = seatBox(seat);
-    return box ? box.children.find((node) => (node.className || "").split(" ").includes("hero-block")) || null : null;
+    return box ? Array.from(box.children).find((node) => (node.className || "").split(" ").includes("hero-block")) || null : null;
   };
   const fireContext = (node) => {
     const event = { target: node, prevented: false, stopPropagation() {} };
@@ -8263,9 +8292,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && actionIds.every((id) => html.includes(`id="${id}"`))
       && $("t-dialog").hidden === false
       && $("t-dialog-title").textContent === "排列"
-      && $("t-dialog-body").children.includes($("t-options"))
-      && !actionIds.some((id) => $("t-dialog-body").children.includes($(id))),
-    `htmlClose=${/t-dialog-close|>关闭</.test(dialogHtml)} actionInDialog=${actionIds.filter((id) => dialogHtml.includes(`id="${id}"`)).join(",")} bodyChildren=${JSON.stringify($("t-dialog-body").children.map((node) => node.id || node.className))}`);
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
+      && !actionIds.some((id) => Array.from($("t-dialog-body").children).includes($(id))),
+    `htmlClose=${/t-dialog-close|>关闭</.test(dialogHtml)} actionInDialog=${actionIds.filter((id) => dialogHtml.includes(`id="${id}"`)).join(",")} bodyChildren=${JSON.stringify(Array.from($("t-dialog-body").children).map((node) => node.id || node.className))}`);
   check("U2-06a2 折叠按钮在标题条里（展开时写「收起」），标题条还带步骤提示",
     ($("t-dialog-collapse").listeners.click || []).length === 1
       && $("t-dialog-collapse").textContent === "收起"
@@ -8351,9 +8380,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   // 让渲染器**真的**重画一次正文（选中第一张牌），再断言折叠没被这次重画抹掉。
   if (ui.state.arrange) ui.state.arrange.selected = 0;
   ui.renderPending(view);
-  const renderedWhileCollapsed = $("t-options").children
-    .flatMap((row) => (row.children || []))
-    .flatMap((box) => (box.children || []))
+  const renderedWhileCollapsed = Array.from($("t-options").children)
+    .flatMap((row) => Array.from(row.children || []))
+    .flatMap((box) => Array.from(box.children || []))
     .some((node) => node.getAttribute && node.getAttribute("data-card-index") === "0"
       && node.classList.contains("sel"));
   check("U2-06d 同一问（同 seq）的重复渲染只换正文、保留折叠状态",
@@ -8361,7 +8390,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && $("t-dialog-body").hidden === true
       && ui.state.dialog.collapsed === true
       && $("t-dialog-title").textContent === "排列"
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && renderedWhileCollapsed
       && JSON.stringify(ui.buildAction()) === collapseActionBefore,
     `bodyHidden=${$("t-dialog-body").hidden} collapsed=${ui.state.dialog.collapsed} rendered=${renderedWhileCollapsed} action=${JSON.stringify(ui.buildAction())}`);
@@ -8373,18 +8402,18 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     $("t-dialog").hidden === true
       && $("t-dialog-body").children.length === 0
       && $("t-dialog-title").textContent === ""
-      && $("t-options-home").children.includes($("t-options"))
+      && Array.from($("t-options-home").children).includes($("t-options"))
       && $("btn-show-modal").hidden === true
       && ui.selectionEnabled() === true
       && ui.state.dialog.key === null,
-    `hidden=${$("t-dialog").hidden} body=${$("t-dialog-body").children.length} home=${$("t-options-home").children.includes($("t-options"))} enabled=${ui.selectionEnabled()}`);
+    `hidden=${$("t-dialog").hidden} body=${$("t-dialog-body").children.length} home=${Array.from($("t-options-home").children).includes($("t-options"))} enabled=${ui.selectionEnabled()}`);
 
   const reopened = openArrange(9603, [cardC]);
   check("U2-06e2 新的弹窗步重新打开：折叠复位、正文换成本问的牌（上一问的窗口不残留）",
     $("t-dialog").hidden === false
       && $("t-dialog-body").hidden === false
       && $("t-dialog-collapse").textContent === "收起"
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && $("t-options").text().includes("桃")
       && !$("t-options").text().includes("八卦阵")
       && $("t-options").text().includes("牌堆顶")
@@ -8406,7 +8435,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && $("t-options").text().includes("桃")
       && !$("t-options").text().includes("八卦阵")
       && firstDialogText.includes("八卦阵"),
-    `closedInBetween=${closedInBetween} body=${JSON.stringify($("t-dialog-body").children.map((node) => node.id || node.className))} options="${$("t-options").text().slice(0, 80)}"`);
+    `closedInBetween=${closedInBetween} body=${JSON.stringify(Array.from($("t-dialog-body").children).map((node) => node.id || node.className))} options="${$("t-options").text().slice(0, 80)}"`);
 
   /* ---- ⑥ 预发动迁移：同一个容器、仍是牌桌表面；无关闭，右端取消零提交 ---- */
   const prePending = (seq) => ({
@@ -8431,13 +8460,13 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     ui: { requirement: "", convert_sources: [] },
   }];
   render(preView);
-  const preSkill = $("t-skills").children.find(
+  const preSkill = Array.from($("t-skills").children).find(
     (node) => node.getAttribute("data-skill-id") === "demo.modal");
   (preSkill.listeners.click || []).forEach((fn) => fn({ target: preSkill }));
   check("U2-06f 预发动清单迁移到询问弹窗：标题 / 正文在里面，但仍是牌桌表面（不是只读）",
     $("t-dialog").hidden === false
       && /预发动【示例模态】/.test($("t-dialog-title").textContent)
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && ui.state.dialog.kind === "preactivation"
       && ui.stepDialogKind(ui.state.view.pending) === null
       && ui.selectionEnabled() === true
@@ -8478,7 +8507,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U2-06g 详情叠在询问弹窗上：两个独立节点同时打开，弹窗正文 / 只读态不变",
     $("t-dialog").hidden === false
       && $("t-dialog-title").textContent === "排列"
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && $("t-modal").hidden === false
       && /武将详情/.test($("t-modal-title").textContent)
       && $("t-modal-body").text().includes("己方技")
@@ -8501,7 +8530,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U2-06g3 详情的关闭按钮也只关它自己（询问弹窗仍然原样、仍只读）",
     $("t-modal").hidden === true
       && $("t-dialog").hidden === false
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && ui.selectionEnabled() === false,
     `detailHidden=${$("t-modal").hidden} dialogHidden=${$("t-dialog").hidden} enabled=${ui.selectionEnabled()}`);
   closeDialogPress();
@@ -8523,11 +8552,11 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && $("t-dialog-title").textContent === ""
       && $("t-dialog-hint").textContent === ""
       && $("t-dialog-hint").hidden === true
-      && $("t-options-home").children.includes($("t-options"))
+      && Array.from($("t-options-home").children).includes($("t-options"))
       && $("btn-show-modal").hidden === true
       && ui.state.dialog.open === false
       && ui.state.dialog.key === null,
-    `hidden=${$("t-dialog").hidden} body=${$("t-dialog-body").children.length} title="${$("t-dialog-title").textContent}" home=${$("t-options-home").children.includes($("t-options"))}`);
+    `hidden=${$("t-dialog").hidden} body=${$("t-dialog-body").children.length} title="${$("t-dialog-title").textContent}" home=${Array.from($("t-options-home").children).includes($("t-options"))}`);
   check("U2-06i 弹窗与遮罩 CSS：只剩标题条时暗化层可收起；询问弹窗不吃指针、窗口可点；无 inert 复用",
     /\.dialog\s*\{[^}]*pointer-events:\s*none/s.test(css)
       && /\.dialog-window\s*\{[^}]*pointer-events:\s*auto/s.test(css)
@@ -8597,15 +8626,15 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     ui.renderTable();
     ui.renderPending(view);
   };
-  const rowOf = (name) => $("t-options").children.find(
+  const rowOf = (name) => Array.from($("t-options").children).find(
     (node) => node.getAttribute && node.getAttribute("data-row") === name);
   const cardsBox = (row) => row.children[1];
-  const cardNode = (row, index) => cardsBox(row).children.find(
+  const cardNode = (row, index) => Array.from(cardsBox(row).children).find(
     (node) => node.getAttribute && node.getAttribute("data-card-index") === String(index));
-  const cardNodes = (row) => cardsBox(row).children.filter(
+  const cardNodes = (row) => Array.from(cardsBox(row).children).filter(
     (node) => node.getAttribute && node.getAttribute("data-card-index") !== undefined);
   const cardIndexes = (row) => cardNodes(row).map((node) => Number(node.getAttribute("data-card-index")));
-  const slots = (row) => cardsBox(row).children.filter(
+  const slots = (row) => Array.from(cardsBox(row).children).filter(
     (node) => node.getAttribute && node.getAttribute("data-empty") === "1");
   const clickNode = (node) => (node.listeners.click || []).forEach(
     (fn) => fn({ target: node, preventDefault() {}, stopPropagation() {} }));
@@ -8626,11 +8655,11 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && $("t-dialog-hint").hidden === false
       && $("t-dialog-hint").textContent.length > 0
       && (($("t-dialog-collapse").listeners.click) || []).length === 1
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && !!topRow && !!bottomRow
       && $("t-dialog-body").text().includes("牌堆顶")
       && $("t-dialog-body").text().includes("牌堆底"),
-    `title="${$("t-dialog-title").textContent}" hint="${$("t-dialog-hint").textContent}" bodyChildren=${JSON.stringify($("t-dialog-body").children.map((node) => node.id || node.className))}`);
+    `title="${$("t-dialog-title").textContent}" hint="${$("t-dialog-hint").textContent}" bodyChildren=${JSON.stringify(Array.from($("t-dialog-body").children).map((node) => node.id || node.className))}`);
 
   check("U2-07b 两行牌面是完整卡面（.card.face，牌名 / 花色在脸内），不是旧的紧凑排列芯片",
     topCards.length === 5
@@ -8638,9 +8667,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
         && hasClass(node, "face")
         && hasClass(node, "arrange-card")
         && node.getAttribute("data-card-id") !== undefined
-        && node.children.some((child) => hasClass(child, "cname"))
-        && node.children.some((child) => hasClass(child, "suit")))
-      && !topCards.some((node) => node.children.some((child) => hasClass(child, "n"))),
+        && Array.from(node.children).some((child) => hasClass(child, "cname"))
+        && Array.from(node.children).some((child) => hasClass(child, "suit")))
+      && !topCards.some((node) => Array.from(node.children).some((child) => hasClass(child, "n"))),
     `cards=${topCards.length} classes=${JSON.stringify(topCards.map((node) => node.className))}`);
 
   // 几何：牌面宽 = 88 设计单位、高 = 124；缝隙 / 行内边距 / 正文边距是 px。
@@ -8896,7 +8925,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   };
   const dialogText = () => ["t-dialog", "t-prompt", "t-target-hint", "t-choice"]
     .map((id) => $(id).text()).join(" ");
-  const buttons = (id = "t-options") => $(id).children;
+  const buttons = (id = "t-options") => Array.from($(id).children);
 
   const session = await post("/api/sessions", {
     player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261012,
@@ -8910,18 +8939,18 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U2-08a 花色步 = 选择型弹窗：四个中文按钮（符号 + 红黑），零英文枚举、零「选项：」",
     ui.stepDialogKind(suitView.pending) === "choice"
       && $("t-dialog").hidden === false
-      && $("t-options-home").children.includes($("t-options")) === false
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-options-home").children).includes($("t-options")) === false
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && $("t-options").classList.contains("suit-options")
       && $("t-options").children.length === 4
-      && $("t-options").children.map((node) => node.textContent).join(",")
+      && Array.from($("t-options").children).map((node) => node.textContent).join(",")
         === "♥红桃,♦方块,♠黑桃,♣梅花"
-      && $("t-options").children.map((node) => node.getAttribute("data-color")).join(",")
+      && Array.from($("t-options").children).map((node) => node.getAttribute("data-color")).join(",")
         === "red,red,black,black"
-      && $("t-options").children.every((node) => node.classList.contains("suit"))
+      && Array.from($("t-options").children).every((node) => node.classList.contains("suit"))
       && !/heart|diamond|spade|club|选项：/.test(dialogText())
       && candidateRowButtons().length === 0,
-    `kind=${ui.stepDialogKind(suitView.pending)} 选项=${JSON.stringify($("t-options").children.map((node) => node.textContent))} text=${dialogText()}`);
+    `kind=${ui.stepDialogKind(suitView.pending)} 选项=${JSON.stringify(Array.from($("t-options").children).map((node) => node.textContent))} text=${dialogText()}`);
   check("U2-08b 花色步没有「放弃」（引擎给了 Pass 也不显示）；提交 / 清空都不抢跑",
     $("btn-pass").hidden === true
       && $("btn-cancel").disabled === true
@@ -8992,12 +9021,12 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     ui.stepDialogKind(blindView.pending) === "unknown"
       && $("t-dialog").hidden === false
       && ui.state.dialog.key === keyBeforeBlind
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && $("t-dialog-title").textContent === "选择一张牌"
       && $("t-dialog-hint").textContent.includes("点一张牌即提交"),
     `kind=${ui.stepDialogKind(blindView.pending)} key=${ui.state.dialog.key} before=${keyBeforeBlind} title="${$("t-dialog-title").textContent}"`);
   const blindZone = $("t-options").children[0];
-  const blindSlots = blindZone.children[1].children;
+  const blindSlots = Array.from(blindZone.children[1].children);
   check("U2-08h 盲挑 = 五个「?」槽位 + 归属 / 区域提示；不画没提供的装备区",
     $("t-options").children.length === 1
       && blindZone.getAttribute("data-zone") === "hand"
@@ -9044,7 +9073,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && $("t-options").children[1].getAttribute("data-zone") === "equip"
       && $("t-options").children[1].text().includes("装备区")
       && $("t-options").children[1].text().includes("八卦阵"),
-    `块=${$("t-options").children.map((node) => node.getAttribute("data-zone")).join(",")} 文本=${$("t-options").text()}`);
+    `块=${Array.from($("t-options").children).map((node) => node.getAttribute("data-zone")).join(",")} 文本=${$("t-options").text()}`);
 
   ui.state.sessionId = null;
   ui.state.view = null;
@@ -9079,8 +9108,8 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     }
     return false;
   };
-  const zoneSections = () => $("t-options").children;
-  const zoneSlots = (section) => section.children[1].children;
+  const zoneSections = () => Array.from($("t-options").children);
+  const zoneSlots = (section) => Array.from(section.children[1].children);
   const allSlots = () => zoneSections().flatMap((section) => zoneSlots(section));
   const fireContext = (node) => {
     const event = { target: node, prevented: false, stopPropagation() {} };
@@ -9091,7 +9120,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   const heroBlockOf = (seat) => {
     const box = seatBox(seat);
     return box
-      ? box.children.find((node) => (node.className || "").split(" ").includes("hero-block")) || null
+      ? Array.from(box.children).find((node) => (node.className || "").split(" ").includes("hero-block")) || null
       : null;
   };
   const clickCollapse = () => (($("t-dialog-collapse").listeners.click) || [])
@@ -9203,7 +9232,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     ui.stepDialogKind(view.pending) === "unknown"
       && $("t-dialog").hidden === false
       && $("t-dialog-title").textContent === "选择一张牌"
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && zoneSections().length === 2
       && handSection.getAttribute("data-zone") === "hand"
       && handSection.getAttribute("data-seat") === "0"
@@ -9522,7 +9551,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       chainKey === "chain:杀:1"
         && ui.state.dialog.key === chainKey
         && $("t-dialog").hidden === false
-        && $("t-dialog-body").children.includes($("t-options"))
+        && Array.from($("t-dialog-body").children).includes($("t-options"))
         && zoneSections().length === 1
         && zoneSections()[0].getAttribute("data-zone") === "hand",
       `key=${ui.state.dialog.key} before=${chainKey} hidden=${$("t-dialog").hidden} 块=${zoneSections().map((n) => n.getAttribute("data-zone")).join(",")}`);
@@ -9605,12 +9634,12 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     return false;
   };
   const revealWrap = () => $("t-options").children[0];
-  const revealCards = () => (revealWrap() ? revealWrap().children[0].children : []);
+  const revealCards = () => (revealWrap() ? Array.from(revealWrap().children[0].children) : []);
   const revealBar = () => (revealWrap()
-    ? revealWrap().children.find((node) => node.classList.contains("reveal-targets")) || null
+    ? Array.from(revealWrap().children).find((node) => node.classList.contains("reveal-targets")) || null
     : null);
   const targetChips = () => (revealBar()
-    ? revealBar().children.filter((node) => node.classList.contains("reveal-target"))
+    ? Array.from(revealBar().children).filter((node) => node.classList.contains("reveal-target"))
     : []);
   const chipStates = () => targetChips().map((node) => node.getAttribute("data-state")).join(",");
   const chipSeats = () => targetChips().map((node) => node.getAttribute("data-seat")).join(",");
@@ -9619,7 +9648,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   const heroBlockOf = (seat) => {
     const box = seatBox(seat);
     return box
-      ? box.children.find((node) => (node.className || "").split(" ").includes("hero-block")) || null
+      ? Array.from(box.children).find((node) => (node.className || "").split(" ").includes("hero-block")) || null
       : null;
   };
   const fireContext = (node) => {
@@ -9662,7 +9691,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U2-11a 五谷取牌步 = 亮牌弹窗：标题「五谷丰登」、公开处理区文案、正文在弹窗里",
     ui.stepDialogKind(ownPending) === "reveal"
       && $("t-dialog").hidden === false
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && $("t-dialog-title").textContent === "五谷丰登"
       && $("t-prompt").textContent === "从亮出的牌里选一张获得"
       && $("t-dialog-hint").textContent.includes("从亮出的牌里选一张获得")
@@ -9681,7 +9710,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U2-11c 被拿走的牌留在原位、置灰、标座号 0，牌面描述仍在（检视可用）",
     revealCards()[0].classList.contains("taken")
       && revealCards()[0].getAttribute("data-taken-by") === "0"
-      && (revealCards()[0].children.find((node) => node.classList.contains("taken-by")) || {}).textContent === "座0"
+      && (Array.from(revealCards()[0].children).find((node) => node.classList.contains("taken-by")) || {}).textContent === "座0"
       && revealCards()[0].getAttribute("title").includes("闪的描述")
       && !revealCards()[1].classList.contains("taken")
       && revealCards()[1].getAttribute("data-taken-by") === "",
@@ -9815,9 +9844,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     chainKey === `reveal:${ownNext.harvest.key}`
       && ui.state.dialog.key === chainKey
       && $("t-dialog").hidden === false
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && revealCards()[1].classList.contains("taken")
-      && (revealCards()[1].children.find((node) => node.classList.contains("taken-by")) || {}).textContent === "座1"
+      && (Array.from(revealCards()[1].children).find((node) => node.classList.contains("taken-by")) || {}).textContent === "座1"
       && chipStates() === "taken,taken,current,pending"
       && $("t-dialog-hint").textContent.includes("点一张亮牌即提交"),
     `key=${ui.state.dialog.key} before=${chainKey} hidden=${$("t-dialog").hidden} chips=${chipStates()} hint="${$("t-dialog-hint").textContent}"`);
@@ -9918,12 +9947,12 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     if (persistent.hidden === false && persistent.children.length) return persistent.children[0];
     return $("t-options").children[0] || null;
   };
-  const cards = () => (revealRoot() ? revealRoot().children[0].children : []);
+  const cards = () => (revealRoot() ? Array.from(revealRoot().children[0].children) : []);
   const bar = () => (revealRoot()
-    ? revealRoot().children.find((node) => node.classList.contains("reveal-targets")) || null
+    ? Array.from(revealRoot().children).find((node) => node.classList.contains("reveal-targets")) || null
     : null);
   const chips = () => (bar()
-    ? bar().children.filter((node) => node.classList.contains("reveal-target"))
+    ? Array.from(bar().children).filter((node) => node.classList.contains("reveal-target"))
     : []);
   const chipStates = () => chips().map((node) => node.getAttribute("data-state")).join(",");
   const chipSeats = () => chips().map((node) => node.getAttribute("data-seat")).join(",");
@@ -9996,10 +10025,10 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     `cards=${cards().length} takenBy=${takenBy()} seats=${chipSeats()} states=${chipStates()} current=${bar() && bar().getAttribute("data-current")} hint="${$("t-dialog-hint").textContent}"`);
 
   check("U2-R3 持久展示不抢 #t-options：选项行仍在提示区，无懈界面不被搬进弹窗",
-    $("t-options-home").children.includes($("t-options"))
+    Array.from($("t-options-home").children).includes($("t-options"))
       && !insideDialog($("t-options"))
       && !insideDialog($("btn-submit")),
-    `home=${$("t-options-home").children.includes($("t-options"))} optionsInDialog=${insideDialog($("t-options"))}`);
+    `home=${Array.from($("t-options-home").children).includes($("t-options"))} optionsInDialog=${insideDialog($("t-options"))}`);
 
   // 提示区选项行的**内容**不能被持久同步清掉。真实的无懈窗口只有 UseCard + Pass
   // （picker 的选项行本来就是空的），故给同一份合成载荷补一条 `SelectOption` 备选，
@@ -10013,13 +10042,13 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     ],
   };
   render(responseWithAlternative);
-  const promptButtons = $("t-options").children.filter((node) => node.tagName === "BUTTON");
+  const promptButtons = Array.from($("t-options").children).filter((node) => node.tagName === "BUTTON");
   check("U2-R3b 持久同步不清提示区选项行：无懈窗口的 picker 按钮仍在 #t-options",
     promptButtons.length === 1
       && promptButtons[0].textContent.includes("选择座位 1")
-      && $("t-options-home").children.includes($("t-options"))
+      && Array.from($("t-options-home").children).includes($("t-options"))
       && !insideDialog($("t-options")),
-    `buttons=${JSON.stringify(promptButtons.map((node) => node.textContent))} home=${$("t-options-home").children.includes($("t-options"))} inDialog=${insideDialog($("t-options"))}`);
+    `buttons=${JSON.stringify(promptButtons.map((node) => node.textContent))} home=${Array.from($("t-options-home").children).includes($("t-options"))} inDialog=${insideDialog($("t-options"))}`);
   render(responsePending);
 
   // 无懈可提交：点手里的【无懈可击】→ 提交；用 400 注入截住 POST，不改服务端状态。
@@ -10065,11 +10094,11 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && ui.state.dialog.key === persistentKey
       && $("t-dialog").hidden === false
       && $("t-dialog-body").hidden === false
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && $("t-dialog-reveal").hidden === true
       && $("t-modal-backdrop").hidden === false
       && ui.selectionEnabled() === false,
-    `key=${ui.state.dialog.key} before=${persistentKey} bodyHidden=${$("t-dialog-body").hidden} optionsInBody=${$("t-dialog-body").children.includes($("t-options"))} revealHidden=${$("t-dialog-reveal").hidden} enabled=${ui.selectionEnabled()}`);
+    `key=${ui.state.dialog.key} before=${persistentKey} bodyHidden=${$("t-dialog-body").hidden} optionsInBody=${Array.from($("t-dialog-body").children).includes($("t-options"))} revealHidden=${$("t-dialog-reveal").hidden} enabled=${ui.selectionEnabled()}`);
 
   // ---- ③ harvest 消失（结算结束）⇒ 关窗 ----
   const afterHarvest = {
@@ -10086,7 +10115,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && $("t-dialog-reveal").hidden === true
       && $("t-dialog-reveal").children.length === 0
       && ui.state.dialog.key === null
-      && $("t-options-home").children.includes($("t-options")),
+      && Array.from($("t-options-home").children).includes($("t-options")),
     `dialogHidden=${$("t-dialog").hidden} revealHidden=${$("t-dialog-reveal").hidden} revealChildren=${$("t-dialog-reveal").children.length} key=${ui.state.dialog.key}`);
 
   // ---- ④ 真生产路径：种子 198（5 人）开局 = 人类持有【无懈】的五谷无懈窗口 ----
@@ -10155,9 +10184,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && ui.state.dialog.key === realKey
       && $("t-dialog").hidden === false
       && $("t-dialog-body").hidden === false
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && $("t-dialog-reveal").hidden === true,
-    `declined=${declined} kind=${realPick && realPick.kind} key=${ui.state.dialog.key} before=${realKey} bodyHidden=${$("t-dialog-body").hidden} optionsInBody=${$("t-dialog-body").children.includes($("t-options"))}`);
+    `declined=${declined} kind=${realPick && realPick.kind} key=${ui.state.dialog.key} before=${realKey} bodyHidden=${$("t-dialog-body").hidden} optionsInBody=${Array.from($("t-dialog-body").children).includes($("t-options"))}`);
 
   check("U2-R12 真实取牌载荷在 DOM 里逐字段可读（taken_by / targets / current 都不是手写夹具）",
     !!realPickHarvest
@@ -10288,7 +10317,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     return false;
   };
   const revealWrap = () => $("t-options").children[0];
-  const revealCards = () => (revealWrap() ? revealWrap().children[0].children : []);
+  const revealCards = () => (revealWrap() ? Array.from(revealWrap().children[0].children) : []);
   const clickCard = (index) => {
     const node = revealCards()[index];
     (node.listeners.click || []).forEach((fn) => fn({ target: node }));
@@ -10320,14 +10349,14 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U2-12a 遗计选牌步 = 亮牌弹窗：标题「遗计」、选 1~2 张口径、两张牌在窗内、无放弃",
     ui.stepDialogKind(pick) === "reveal"
       && $("t-dialog").hidden === false
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && $("t-dialog-title").textContent === "遗计"
       && $("t-prompt").textContent === "从亮出的牌里选择一至两张"
       && $("t-dialog-hint").textContent.includes("选 1~2 张后点右端「提交」")
       && $("t-dialog-hint").textContent.includes("已选 0 张")
       && revealCards().length === 2
       && revealCards().map((node) => node.getAttribute("data-card-id")).join(",") === "31,32"
-      && !revealWrap().children.some((node) => node.classList.contains("reveal-targets"))
+      && !Array.from(revealWrap().children).some((node) => node.classList.contains("reveal-targets"))
       && $("btn-pass").hidden === true
       && !/放弃/.test($("t-dialog").text())
       && ["btn-submit", "btn-cancel", "btn-pass", "btn-end-phase", "t-countdown"]
@@ -10395,7 +10424,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   render(yijiView(give, 0, 45));
   check("U2-12f 提交后弹窗关闭：『交给谁』回到牌桌表面，右端没有放弃",
     $("t-dialog").hidden === true
-      && !$("t-dialog-body").children.includes($("t-options"))
+      && !Array.from($("t-dialog-body").children).includes($("t-options"))
       && ui.stepDialogKind(give) === null
       && $("t-prompt").textContent === "选择将这些牌交给哪名角色"
       && $("t-target-hint").textContent === "点场上武将，选择把这张牌交给谁。"
@@ -10573,8 +10602,8 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     ui.renderTable();
     ui.renderPending(view);
   };
-  const zoneSections = () => $("t-options").children;
-  const zoneSlots = (section) => section.children[1].children;
+  const zoneSections = () => Array.from($("t-options").children);
+  const zoneSlots = (section) => Array.from(section.children[1].children);
   const insideDialog = (node) => {
     let at = node ? node.parentNode : null;
     while (at) {
@@ -10593,7 +10622,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   const heroBlockOf = (seat) => {
     const box = seatBox(seat);
     return box
-      ? box.children.find((node) => (node.className || "").split(" ").includes("hero-block")) || null
+      ? Array.from(box.children).find((node) => (node.className || "").split(" ").includes("hero-block")) || null
       : null;
   };
   const fireContext = (node) => {
@@ -10623,7 +10652,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("U2-13a 寒冰剑第一轮 = 未知区域弹窗：目标手牌「?」、装备可见、文案是「两张」而不是「至多两张」",
     ui.stepDialogKind(round1) === "unknown"
       && $("t-dialog").hidden === false
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && $("t-dialog-title").textContent === "选择一张牌"
       && firstKey === "chain:杀:1"
       && firstKey === `chain:${round1.context.name}:${round1.actor}`
@@ -10684,7 +10713,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && firstKey === "chain:杀:1"
       && $("t-dialog") === firstDialog
       && $("t-dialog").hidden === false
-      && $("t-dialog-body").children.includes($("t-options"))
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
       && $("t-dialog-body").hidden === false
       && zoneSections().length === 2
       && zoneSlots(zoneSections()[0]).length === 1
@@ -10908,7 +10937,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     ui.renderTable();
     ui.renderPending(view);
   };
-  const handNode = (cardId) => $("t-hand").children.find(
+  const handNode = (cardId) => Array.from($("t-hand").children).find(
     (node) => node.getAttribute("data-card-id") === String(cardId),
   ) || null;
   const clickHand = async (cardId) => {
@@ -11001,7 +11030,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   };
   const revealView = fireView(revealPending, { hand: [sameSuitA, sameSuitB] });
   renderFire(revealView);
-  const revealCards = () => $("t-options").children[0].children[0].children;
+  const revealCards = () => Array.from($("t-options").children[0].children[0].children);
   check("M5-08a-b1 被指定者（人类）看到亮牌模板：标题「火攻」、两张自己的手牌、没有放弃",
     ui.stepDialogKind(revealPending) === "reveal"
       && $("t-dialog").hidden === false
@@ -11095,9 +11124,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && $("btn-pass").hidden === false
       && $("btn-submit").disabled === true
       && $("btn-cancel").disabled === true,
-    `kind=${ui.stepDialogKind(discardPending)} dis=${$("t-hand").children.map((n) => n.classList.contains("dis")).join(",")} passHidden=${$("btn-pass").hidden} hint="${$("t-target-hint").textContent}"`);
+    `kind=${ui.stepDialogKind(discardPending)} dis=${Array.from($("t-hand").children).map((n) => n.classList.contains("dis")).join(",")} passHidden=${$("btn-pass").hidden} hint="${$("t-target-hint").textContent}"`);
   check("M5-08a-c2 中央舞台的「展示」组看得见亮出的那一张（公开事实；同一行、不可点）",
-    $("t-processing").children.some((node) => node.classList.contains("revealed-card")
+    Array.from($("t-processing").children).some((node) => node.classList.contains("revealed-card")
       && node.getAttribute("data-card-id") === "5"
       && node.getAttribute("data-stage-lane") === "showcase")
       && $("t-context").textContent.includes("展示")
@@ -11181,11 +11210,11 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && !$("t-prompt").textContent.includes("选择一张手牌"),
     `log="${logText()}" prompt="${$("t-prompt").textContent}"`);
   check("M5-08a-d2 亮牌仍在中央舞台的「展示」组（公开事实），手牌区没有「已知」标记 / 属性",
-    $("t-processing").children.some((node) => node.classList.contains("revealed-card")
+    Array.from($("t-processing").children).some((node) => node.classList.contains("revealed-card")
       && node.getAttribute("data-card-id") === "5"
       && node.getAttribute("data-stage-lane") === "showcase")
       && !$("t-hand").text().includes("已知")
-      && $("t-hand").children.every((node) => !node.classList.contains("known")
+      && Array.from($("t-hand").children).every((node) => !node.classList.contains("known")
         && !node.classList.contains("revealed")
         && node.getAttribute("data-known") === undefined),
     `processing=${$("t-processing").text()} hand="${$("t-hand").text()}"`);
@@ -11201,7 +11230,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.flushPlayback();
   // U3-01：pop 不再瞬删——展示项开始 1s 淡出（`.fading`），描述还留着「展示」。
   check("M5-08a-d3 结算帧出栈 ⇒ 展示项进入 1s 淡出（不瞬删、不提前撤下）",
-    $("t-processing").children.some((node) => node.classList.contains("revealed-card")
+    Array.from($("t-processing").children).some((node) => node.classList.contains("revealed-card")
       && node.getAttribute("data-card-id") === "5"
       && node.classList.contains("fading"))
       && $("t-context").textContent.includes("展示"),
@@ -11286,7 +11315,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     ui.renderTable();
     ui.renderPending(view);
   };
-  const handNode = (cardId) => $("t-hand").children.find(
+  const handNode = (cardId) => Array.from($("t-hand").children).find(
     (node) => node.getAttribute("data-card-id") === String(cardId),
   ) || null;
   const clickHand = async (cardId) => {
@@ -11299,7 +11328,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     const node = seatBox(seat);
     (node.listeners.click || []).forEach((fn) => fn({ target: node, stopPropagation() {} }));
   };
-  const reforgeNode = () => $("t-options").children.find(
+  const reforgeNode = () => Array.from($("t-options").children).find(
     (node) => node.getAttribute("data-reforge") === "true") || null;
   const settle = async () => {
     for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
@@ -11626,7 +11655,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.renderTable();
   ui.renderPending(view);
 
-  const handNode = $("t-hand").children.find(
+  const handNode = Array.from($("t-hand").children).find(
     (node) => node.getAttribute("data-card-id") === "130",
   );
   for (const fn of handNode.listeners.click || []) fn({ target: handNode });
@@ -11750,7 +11779,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     ui.renderTable();
     ui.renderPending(view);
   };
-  const handNode = (cardId) => $("t-hand").children.find(
+  const handNode = (cardId) => Array.from($("t-hand").children).find(
     (node) => node.getAttribute("data-card-id") === String(cardId),
   ) || null;
   const clickHand = async (cardId) => {
@@ -12064,7 +12093,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
 
   const view = displayView();
   renderDisplay(view);
-  const faces = $("t-hand").children;
+  const faces = Array.from($("t-hand").children);
   check("M5-08d-a1 火杀 / 雷杀卡面 = 服务端「杀」+ 火焰 / 雷电（红 / 蓝），不在前端另起牌名",
     faces.length === hand.length
       && byClass(faces[0], "cname")[0].textContent === "杀"
@@ -12262,7 +12291,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   const byClass = (node, name) => walk(node).filter(
     (child) => child.classList.contains(name)
       || String(child.className || "").split(/\s+/).includes(name));
-  const stageNodes = () => $("t-processing").children.filter(
+  const stageNodes = () => Array.from($("t-processing").children).filter(
     (node) => node.classList.contains("stage-card"));
   const stageNode = (id) => stageNodes().find(
     (node) => attr(node, "data-card-id") === String(id));
@@ -12555,7 +12584,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     timer: null,
   };
   ui.renderReplay();
-  const replayNodes = $("r-processing").children.filter(
+  const replayNodes = Array.from($("r-processing").children).filter(
     (node) => node.classList.contains("stage-card"));
   const replayLane = (id) => {
     const node = replayNodes.find((child) => attr(child, "data-card-id") === String(id));
@@ -12575,10 +12604,11 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && byClass($("table-stage"), "hero-flash").length === 0,
     `lines=${byClass($("table-stage"), "target-line").length} floats=${byClass($("table-stage"), "skill-float").length}`);
 
-  // 真 DOM 回归（U3 验收缺陷）：`node.children` 是 HTMLCollection——只有 length / item，
-  // **没有 `.find`**。舞台卡复用更新（renderEffectCards → updateStageCardNode）曾写成
-  // `(node.children || []).find(...)`，真浏览器里每次更新都抛 TypeError、整场舞台不渲染；
-  // 垫片的 children 是数组，所以这里显式换成没有 `.find` 的类数组，喂同一条更新路径。
+  // 真 DOM 回归（U3 验收缺陷）：`node.children` 是 HTMLCollection——只有 length / item /
+  // 索引 / 迭代，**没有 `.find`**。舞台卡复用更新（renderEffectCards → updateStageCardNode）
+  // 曾直接对 children 调 `.find`，真浏览器里每次更新都抛 TypeError、整场舞台不渲染。
+  // 垫片现在也把 children 做成 HTMLCollection 形状；这里同时钉：①形状；②旧写法在垫片上
+  // 确实会抛；③现行更新路径在真实垫片节点与「只有 length / 下标的类数组假节点」上都更新底行。
   const reused = documentShim.createElement("button");
   reused.className = "card face kind-normal static stage-card";
   reused.setAttribute("data-stage-key", "903");
@@ -12586,9 +12616,30 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   reusedLine.className = "ctype";
   reusedLine.textContent = "旧底行";
   reused.appendChild(reusedLine);
-  reused.children = { 0: reusedLine, length: 1 };  // 类数组：没有 find
-  const reusedBox = documentShim.createElement("div");
-  reusedBox.appendChild(reused);
+  const collection = reused.children;
+  // 活集合：同一个视图随 appendChild / removeChild 变化（真 HTMLCollection 的语义）。
+  const probeChild = documentShim.createElement("i");
+  reused.appendChild(probeChild);
+  const liveAppend = collection.length === 2 && collection[1] === probeChild;
+  reused.removeChild(probeChild);
+  const liveRemove = collection.length === 1 && collection[0] === reusedLine;
+  let assignedError = null;
+  try {
+    reused.children = [];  // 真 DOM 的 children 是只读 getter
+  } catch (error) {
+    assignedError = error;
+  }
+  check("U3-01v 垫片 children = HTMLCollection 形状：无数组方法、只读、活集合、可迭代",
+    !("find" in collection) && !("map" in collection) && !("includes" in collection)
+      && reused.children === collection
+      && collection.length === 1 && collection[0] === reusedLine
+      && collection.item(0) === reusedLine
+      && Array.from(collection)[0] === reusedLine
+      && [...collection][0] === reusedLine
+      && liveAppend && liveRemove
+      && assignedError instanceof TypeError,
+    `find=${"find" in collection} map=${"map" in collection} length=${collection.length} live=${liveAppend && liveRemove} assigned=${assignedError ? assignedError.name : "no-throw"}`);
+
   const guardItem = {
     ...card(903, "闪"),
     stage: {
@@ -12596,17 +12647,67 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       fromZone: { seat: 1, zone: "hand" },
     },
   };
-  let arrayLikeError = null;
+  // 旧实现的等价探针：把 children 当数组直接 `.find`，在垫片上必须抛 TypeError。
+  let oldStyleError = null;
+  try {
+    collection.find((child) => child === reusedLine);
+  } catch (error) {
+    oldStyleError = error;
+  }
+  const reusedBox = documentShim.createElement("div");
+  reusedBox.appendChild(reused);
+  let updateError = null;
   try {
     ui.renderEffectCards(reusedBox, [guardItem], Date.now(), () => "周瑜");
   } catch (error) {
-    arrayLikeError = error;
+    updateError = error;
   }
-  check("U3-01v 类数组 children（HTMLCollection 无 .find）也更新底行：不抛错、data-zone-label / 文本更新",
-    !arrayLikeError
+  check("U3-01v 舞台卡复用更新：旧写法在垫片上抛 TypeError；现行路径在 HTMLCollection 形状上更新底行",
+    oldStyleError instanceof TypeError && !updateError
       && reusedLine.getAttribute("data-zone-label") === "1·周瑜·手牌"
       && reusedLine.textContent === "1·周瑜·手牌",
-    `threw=${arrayLikeError ? arrayLikeError.message : "(none)"} label=${reusedLine.getAttribute("data-zone-label")} text="${reusedLine.textContent}"`);
+    `old=${oldStyleError ? oldStyleError.message : "(none)"} threw=${updateError ? updateError.message : "(none)"} label=${reusedLine.getAttribute("data-zone-label")} text="${reusedLine.textContent}"`);
+
+  // 老烟测的类数组夹具继续保留：修复靠 Array.from，既要吃真 HTMLCollection（迭代器），
+  // 也要吃只有 length / 下标的类数组（下标），不能只对其中一种形状成立。
+  const fakeLine = {
+    className: "ctype",
+    textContent: "旧底行",
+    attrs: {},
+    getAttribute(name) { return this.attrs[name]; },
+    setAttribute(name, value) { this.attrs[name] = String(value); },
+    removeAttribute(name) { delete this.attrs[name]; },
+  };
+  const fakeNode = {
+    tagName: "BUTTON",
+    className: "card face kind-normal static stage-card",
+    classList: new ClassList(),
+    attrs: { "data-stage-key": "904" },
+    getAttribute(name) { return this.attrs[name]; },
+    setAttribute(name, value) { this.attrs[name] = String(value); },
+    removeAttribute(name) { delete this.attrs[name]; },
+    children: { 0: fakeLine, length: 1 },  // 类数组：没有 .find / 没有迭代器
+  };
+  const fakeItem = {
+    ...card(904, "桃"),
+    stage: {
+      lane: "processing", frameId: 0, enteredAt: Date.now(), fadeAt: null,
+      fromZone: { seat: 2, zone: "equip" },
+    },
+  };
+  const fakeBox = documentShim.createElement("div");
+  fakeBox.appendChild(fakeNode);
+  let fakeError = null;
+  try {
+    ui.renderEffectCards(fakeBox, [fakeItem], Date.now(), () => "周瑜");
+  } catch (error) {
+    fakeError = error;
+  }
+  check("U3-01v 类数组 children（无 .find / 无迭代器）也更新底行：不抛错、data-zone-label / 文本更新",
+    !fakeError
+      && fakeLine.getAttribute("data-zone-label") === "2·周瑜·装备"
+      && fakeLine.textContent === "2·周瑜·装备",
+    `threw=${fakeError ? fakeError.message : "(none)"} label=${fakeLine.getAttribute("data-zone-label")} text="${fakeLine.textContent}"`);
   ui.state.replay = null;
   ui.renderReplay();
   ui.state.effectCards = [];
@@ -12630,7 +12731,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
     return out;
   };
-  const stageNodes = () => $("t-processing").children.filter(
+  const stageNodes = () => Array.from($("t-processing").children).filter(
     (node) => node.classList.contains("stage-card"));
   const nodesOf = (id) => stageNodes().filter(
     (node) => attr(node, "data-card-id") === String(id));
@@ -12847,7 +12948,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     const right = new Set((expected || []).map(String));
     return left.size === right.size && [...right].every((value) => left.has(value));
   };
-  const linePart = (node, name) => Boolean(node && node.children.find(
+  const linePart = (node, name) => Boolean(node && Array.from(node.children).find(
     (child) => hasClass(child, name)));
   const seatPlayer = (seat, heroName, extra = {}) => ({
     seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
@@ -13412,7 +13513,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   step();  // 103 自己摸一张
   check("U3-05c 自己的手牌数 / 手牌面随事件更新",
     $("t-hand-count").textContent === "3 张" && $("t-hand").children.length === 3
-      && $("t-hand").children.some((node) => attr(node, "data-card-id") === "14"),
+      && Array.from($("t-hand").children).some((node) => attr(node, "data-card-id") === "14"),
     `count="${$("t-hand-count").textContent}" hand=${$("t-hand").children.length}`);
   step();  // 104 装备置入
   check("U3-05d 装备区牌面随 card_move 更新",
@@ -13729,7 +13830,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     (node) => attr(node, "data-seat") === String(seat)) || null;
   const lineNodes = () => walk($("t-target-lines")).filter(
     (node) => hasClass(node, "target-line") && attr(node, "data-line-to") !== undefined);
-  const stageNodes = () => $("t-processing").children.filter(
+  const stageNodes = () => Array.from($("t-processing").children).filter(
     (node) => node.classList.contains("stage-card"));
   const stageNode = (id) => stageNodes().find(
     (node) => attr(node, "data-card-id") === String(id));
