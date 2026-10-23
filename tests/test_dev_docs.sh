@@ -1003,6 +1003,55 @@ scan_blacklist_tree_absent() { # 退役串全树 absent；返回 1 = 有错
   [ "$errors" -eq 0 ]
 }
 
+# ===========================================================================
+# GLOSSARY 定义-only（CODING_STANDARDS §2 / M5 retro）
+#
+# 词条 = 术语定义 + `_Avoid_`；票号、源码路径、`本项目的落点` 这类**行为落点**属于
+# `06`（§5「程序化约定与偏离一手」）的账本，不属于术语表。判据只扫**词条正文**：
+#   - `_Avoid_` 行放行（它约束的是措辞，冻结字段名 `owner` / `CardMoveDelta` 也常在那里）；
+#   - 条目之间的空行 / 章节标题不归任何词条；
+#   - 词条头 `**术语**：` 本身不扫，正文逐行扫票号 / `src/` / `tests/` / `tools/` / 落点短语。
+# 09b（bc064f9）清掉的三条是这类漂移的前科；这条检查防它再长回来。
+# ===========================================================================
+GLOSSARY_FORBIDDEN_RE='M[0-9]+-[0-9]+|src/|tests/|tools/|本项目的落点'
+
+scan_glossary_definition_only() { # $1=GLOSSARY 路径；返回 1 = 词条正文含实现细节
+  local path="$1" errors=0 lineno=0 line entry=""
+  if [ ! -f "$path" ]; then
+    echo "FAIL: GLOSSARY 定义-only 检查找不到文件：$path"
+    return 1
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno+1))
+    case "$line" in
+      _Avoid_:*) continue ;;
+    esac
+    # 词条头：整行只有 `**术语**：`（半角 / 全角冒号均可）。
+    if [[ "$line" =~ ^\*\*[^*].*\*\*[：:]?[[:space:]]*$ ]]; then
+      entry="$line"
+      continue
+    fi
+    [ -n "$entry" ] || continue
+    if printf '%s' "$line" | grep -qE "$GLOSSARY_FORBIDDEN_RE"; then
+      echo "FAIL: GLOSSARY.md:${lineno} 词条『${entry}』含实现细节（票号 / 源码路径 / 『本项目的落点』）：${line}"
+      errors=$((errors+1))
+    fi
+  done < "$path"
+  if [ "$errors" -eq 0 ]; then
+    echo "PASS: GLOSSARY.md 词条只写定义与 _Avoid_（$path）"
+  fi
+  [ "$errors" -eq 0 ]
+}
+
+glossary_probe() { # $1=词条正文 $2=red|green
+  local probe out
+  probe="$(probe_mktemp)" || return 1
+  printf '# 假术语表\n\n**假术语**：\n%s\n_Avoid_: 不要叫法\n' "$1" > "$probe/GLOSSARY.md"
+  out="$(scan_glossary_definition_only "$probe/GLOSSARY.md" 2>&1 || true)"
+  rm -rf "$probe"
+  if [ "$2" = red ]; then output_has_fail "$out"; else ! output_has_fail "$out"; fi
+}
+
 # 合成反例①a：把 06 的 `## 6.` 挪成 `## 7.`（= 前面插了一节把清单挤走），
 # 引用它的锚定断言必须变红——这正是 §5/§6 那次静默错位的机械复现。
 anchor_rename_goes_red() {
@@ -1045,6 +1094,7 @@ blacklist_tree_goes_red() {
 
 if ! scan_doc_refs; then fail=1; fi
 if ! scan_blacklist_tree_absent; then fail=1; fi
+if ! scan_glossary_definition_only GLOSSARY.md; then fail=1; fi
 if ! anchor_rename_goes_red; then
   echo "FAIL: 合成反例未变红：把 06 的 \`## 6.\` 挪号后，引用它的锚定断言仍通过"
   fail=1
@@ -1055,6 +1105,22 @@ if ! anchor_retitle_goes_red; then
 fi
 if ! blacklist_tree_goes_red; then
   echo "FAIL: 合成反例未变红：把退役串写进另一份开发文档后，全树 absent 仍通过"
+  fail=1
+fi
+if ! glossary_probe '见 M5-03 与本项目的落点。' red; then
+  echo "FAIL: 合成反例未变红：GLOSSARY 词条带票号 / 『本项目的落点』未被判红"
+  fail=1
+fi
+if ! glossary_probe '这条定义提到 src/sgs/effects/ops.py。' red; then
+  echo "FAIL: 合成反例未变红：GLOSSARY 词条带源码路径未被判红"
+  fail=1
+fi
+if ! glossary_probe '只写定义，不写落点。' green; then
+  echo "FAIL: 合成反例未变绿：纯定义词条被判红"
+  fail=1
+fi
+if ! glossary_probe '_Avoid_: 本项目的落点（这是禁用措辞，允许出现在 _Avoid_ 行）' green; then
+  echo "FAIL: 合成反例未变绿：_Avoid_ 行里的实现细节被误判"
   fail=1
 fi
 

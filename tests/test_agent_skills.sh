@@ -94,6 +94,7 @@ STATUS_ALLOWED="open|claimed|resolved"
 STATUS_RE="^Status: (${STATUS_ALLOWED})[[:space:]]*$"
 
 out_is_red() { case "$1" in *FAIL*) return 0;; *) return 1;; esac; }
+out_has_warn() { case "$1" in *WARN:*) return 0;; *) return 1;; esac; }
 
 scan_issue_status() { # $1=仓库根；返回 1 = 有错
   local root="$1" errors=0 count=0 dirs=0 f strays canonical
@@ -225,9 +226,13 @@ scan_issue_answers() { # $1=仓库根；返回 1 = 有错
 # 工单 `Touches:`（retro S8）：声明本票会改哪些文件，让"前沿能不能并行"成为机械判断
 # （`/implement-spec` 的规则是"文件不重叠才并行"）。字段**可选**；写了就必须每条路径都
 # 存在 —— 写错的声明比不写更坏（会让人据此做出错误的并行决定）。
+#
+# 票宽警告（M5 retro）：`open` / `claimed` 的票，`Touches:` 跨 >2 个顶层模块或 >10 个文件
+# 时打一行**非失败** WARN。判据是"派发前该不该拆"，不是"声明合不合法"——历史 resolved
+# 票（含很宽的重构票）保持安静；门禁只拦"路径不存在"，宽度只提醒。
 scan_issue_touches() { # $1=仓库根；返回 1 = 有错
   local root="$1" errors=0 declared=0
-  local files=() f line item
+  local files=() f line item status modules count
   if [ -d "$root/.scratch" ]; then
     while IFS= read -r f; do files+=("$f"); done < <(
       find "$root/.scratch" -mindepth 3 -maxdepth 3 -type f -path '*/issues/*.md' 2>/dev/null | sort
@@ -238,15 +243,31 @@ scan_issue_touches() { # $1=仓库根；返回 1 = 有错
     [ -n "$line" ] || continue
     declared=$((declared+1))
     item="${line#Touches:}"
+    local items=()
     local IFS=','
     for item in $item; do
       item="$(printf '%s' "$item" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
       [ -n "$item" ] || continue
+      items+=("$item")
       if [ ! -e "$root/$item" ]; then
         echo "FAIL: ${f#"$root"/} 的『Touches:』列了不存在的路径：$item"
         errors=$((errors+1))
       fi
     done
+    # 票宽：只对**尚未收口**的票出声；`resolved` 票是历史事实，宽度已无派发意义。
+    status="$(grep -m1 '^Status:' "$f" | sed -e 's/^Status:[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    case "$status" in
+      open | claimed) ;;
+      *) continue ;;
+    esac
+    [ "${#items[@]}" -gt 0 ] || continue
+    count="${#items[@]}"
+    modules="$(
+      printf '%s\n' "${items[@]}" | sed -e 's#/.*$##' | sort -u | wc -l | tr -d '[:space:]'
+    )"
+    if [ "$modules" -gt 2 ] || [ "$count" -gt 10 ]; then
+      echo "WARN: ticket ${f#"$root"/} spans $modules top-level modules / $count files — split before dispatch"
+    fi
   done
   if [ "$errors" -eq 0 ]; then
     echo "PASS: 工单 Touches 声明全部可解析（$declared 张票声明了 Touches）"
@@ -342,6 +363,43 @@ if ! touches_probe red; then
 fi
 if ! touches_probe green; then
   echo "FAIL: 合成反例未变绿：Touches 全是存在的路径仍被判红"
+  fail=1
+fi
+
+# 票宽警告的合成反例（M5 retro）：宽票要 WARN 但**不许** FAIL；窄票 / 历史 resolved 静默。
+touches_width_probe() { # $1=Status $2=warn|quiet $3=Touches 值
+  local probe out
+  probe="$(probe_mktemp)" || return 1
+  mkdir -p "$probe/.scratch/demo/issues" "$probe/src" "$probe/tests" "$probe/tools"
+  : > "$probe/src/a.py"
+  : > "$probe/src/a2.py"
+  : > "$probe/tests/b.py"
+  : > "$probe/tools/c.py"
+  local i
+  for i in $(seq 1 11); do : > "$probe/src/f$i.py"; done
+  printf 'Type: task\nStatus: %s\nTouches: %s\n' "$1" "$3" \
+    > "$probe/.scratch/demo/issues/01-a.md"
+  out="$(scan_issue_touches "$probe" 2>&1 || true)"
+  rm -rf "$probe"
+  # 宽度只提醒：任何一档都不许出现 FAIL（那会把"建议拆票"变成门禁失败）。
+  if out_is_red "$out"; then return 1; fi
+  if [ "$2" = warn ]; then out_has_warn "$out"; else ! out_has_warn "$out"; fi
+}
+WIDE_FILES="$(printf 'src/f%d.py, ' $(seq 1 11) | sed 's/, $//')"
+if ! touches_width_probe open warn "src/a.py, tests/b.py, tools/c.py"; then
+  echo "FAIL: 合成反例未触发：open 票跨 3 个顶层模块没有 WARN（或误判成 FAIL）"
+  fail=1
+fi
+if ! touches_width_probe claimed warn "$WIDE_FILES"; then
+  echo "FAIL: 合成反例未触发：claimed 票同模块 11 个文件没有 WARN（或误判成 FAIL）"
+  fail=1
+fi
+if ! touches_width_probe open quiet "src/a.py, src/a2.py"; then
+  echo "FAIL: 合成反例未静默：open 票 1 个模块 2 个文件不应 WARN"
+  fail=1
+fi
+if ! touches_width_probe resolved quiet "src/a.py, tests/b.py, tools/c.py"; then
+  echo "FAIL: 历史票未静默：resolved 票跨 3 个顶层模块不应 WARN"
   fail=1
 fi
 if ! scan_issue_touches "$PWD"; then fail=1; fi

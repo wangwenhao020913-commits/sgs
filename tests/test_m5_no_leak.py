@@ -23,6 +23,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -34,14 +36,29 @@ def _bootstrap() -> None:
 
 _bootstrap()
 
-from sgs.data import RuleConfig, load_content_pack  # noqa: E402
-from sgs.engine import Engine, record_json  # noqa: E402
+from sgs.data import Identity, RuleConfig, load_content_pack  # noqa: E402
+from sgs.engine import (  # noqa: E402
+    CardMoveRecord,
+    CardRevealRecord,
+    ChainedChangeRecord,
+    DeckShuffleRecord,
+    Engine,
+    HpChangeRecord,
+    IdentityDealRecord,
+    IdentityRevealRecord,
+    WineChangeRecord,
+    record_json,
+)
 from sgs.state import (  # noqa: E402
+    CardRef,
     EndPhase,
+    MoveReason,
     Pass,
     QueryKind,
     SelectCards,
     UseCard,
+    Zone,
+    ZoneRef,
 )
 from sgs_web.projection import (  # noqa: E402
     pending_payload,
@@ -325,6 +342,43 @@ def test_the_served_view_payload_filters_hidden_card_moves_for_the_human_seat() 
     assert stats["hidden_hand_to_hand"] >= 1, f"下发口没有隐藏手牌移动样本：{stats}"
     assert stats["public"] >= 1, f"下发口没有公开区移动样本：{stats}"
 
+    # 同一下发口的两条新面（M5 retro）：牌堆只给数量、身份只按 A3 可见。
+    raw_deltas = {
+        record.seq: json.loads(record_json(record))
+        for record in session.records()
+        if getattr(record, "kind", None) == "delta"
+    }
+    shuffles = [
+        payload
+        for payload in view["records"]
+        if payload.get("kind") == "delta"
+        and payload.get("delta_type") == "deck_shuffle"
+    ]
+    assert shuffles, "真一局必有洗牌记录（否则牌堆判据是空转）"
+    for payload in shuffles:
+        raw = raw_deltas[payload["seq"]]
+        assert payload["cards"] == [], f"下发口仍带整副牌序：{payload}"
+        assert payload["card_count"] == len(raw["cards"]), (
+            f"洗牌必须给张数（引擎记录有 {len(raw['cards'])} 张）：{payload}"
+        )
+        assert payload["from_zone"] == raw["from_zone"]
+        assert payload["to_zone"] == raw["to_zone"]
+    deals = [
+        payload
+        for payload in view["records"]
+        if payload.get("kind") == "delta"
+        and payload.get("delta_type") == "identity_deal"
+    ]
+    assert len(deals) == session.rule_config.player_count, (
+        f"身份发放应逐座一条：{len(deals)} 条"
+    )
+    for payload in deals:
+        seat = payload["seat"]
+        if seat == human or payload["identity"] == "lord":
+            assert payload["identity"] is not None, f"本人 / 主公身份不该被裁：{payload}"
+        else:
+            assert payload["identity"] is None, f"下发口仍带他人身份：{payload}"
+
 
 # ---------------------------------------------------------------------------
 # 火攻亮牌：公开的那一张 vs 未亮出的手牌
@@ -497,4 +551,198 @@ def test_the_fire_attack_reveal_is_public_in_the_log_records_but_the_other_hand_
             assert card_move["cards"], (
                 f"火攻这一刻只有公开移动；隐藏区移动被误下发：{card_move}"
             )
+
+
+# ---------------------------------------------------------------------------
+# 八种 delta 的**逐类**不泄露判据（M5 retro：09c 只查了 card_move）
+# ---------------------------------------------------------------------------
+#
+# 09c 的教训不是"card_move 漏了"，而是"只查了一种 delta"。这里把 ``sgs.state.deltas``
+# 的**全部** delta_type 枚举出来，逐类构造一条带隐藏信息的合成记录，断言人类查看者
+# 收到的下发只留公开事实：
+#
+# - ``deck_shuffle``：整副牌序 → 只给 ``card_count``；
+# - ``identity_deal``：A3 可见性（本人 / 主公 / 已由 ``identity_reveal`` 亮明 / 阵亡）；
+# - ``card_reveal``：**公开事实**，不得被顺手藏掉；
+# - 其余（体力 / 横置 / 酒 / 牌移动 / 身份亮明）各按既有口径。
+#
+# 新增一种 delta 时，``test_every_delta_type_has_a_no_leak_case`` 会要求在这里登记判据。
+
+VIEWER = 0
+"""人类座位：所有"下发给人的载荷"判据都从这个查看者出发。"""
+
+HIDDEN_CARD = CardRef(
+    card_id=9001, type="peach", name="桃", suit="heart", rank=3, color="red"
+)
+"""一张只该以**数量**出现在下发里的隐藏牌（牌堆 / 他人手牌）。"""
+
+HIDDEN_CARD_2 = CardRef(
+    card_id=9002, type="slash", name="杀", suit="spade", rank=7, color="black"
+)
+
+REVEALED_CARD = CardRef(
+    card_id=9003, type="dodge", name="闪", suit="diamond", rank=2, color="red"
+)
+
+
+def _delta_records() -> dict[str, object]:
+    """每种 delta_type 一条**带隐藏信息**的合成记录（引擎记录模型，非手写 JSON）。"""
+    return {
+        "card_move": CardMoveRecord(
+            seq=101,
+            frame_id=0,
+            depth=0,
+            cards=(HIDDEN_CARD,),
+            from_zone=ZoneRef(Zone.DECK),
+            to_zone=ZoneRef(Zone.HAND, 1),
+            reason=MoveReason.DRAW,
+            owner=1,
+        ),
+        "hp_change": HpChangeRecord(
+            seq=102, frame_id=0, depth=0, seat=1, before=4, after=3, amount=1
+        ),
+        "chained_change": ChainedChangeRecord(
+            seq=103, frame_id=0, depth=0, seat=1, chained=True
+        ),
+        "wine_change": WineChangeRecord(
+            seq=104, frame_id=0, depth=0, seat=1, active=True
+        ),
+        "deck_shuffle": DeckShuffleRecord(
+            seq=105,
+            frame_id=0,
+            depth=0,
+            cards=(HIDDEN_CARD, HIDDEN_CARD_2),
+            from_zone=ZoneRef(Zone.DISCARD),
+            to_zone=ZoneRef(Zone.DECK),
+        ),
+        "card_reveal": CardRevealRecord(
+            seq=106, frame_id=0, depth=0, seat=1, card=REVEALED_CARD
+        ),
+        "identity_deal": IdentityDealRecord(
+            seq=107, frame_id=0, depth=0, seat=1, identity=Identity.REBEL
+        ),
+        "identity_reveal": IdentityRevealRecord(
+            seq=108, frame_id=0, depth=0, seat=1, identity=Identity.REBEL
+        ),
+    }
+
+
+def _delta_schema_types() -> dict[str, type]:
+    """``sgs.state.deltas`` 里**全部** delta 模型：``delta_type`` → 类（新增类会进这里）。"""
+    import sgs.state.deltas as schema
+    from pydantic import BaseModel
+
+    out: dict[str, type] = {}
+    for name in schema.__all__:
+        cls = getattr(schema, name)
+        if name == "Delta" or not (isinstance(cls, type) and issubclass(cls, BaseModel)):
+            continue
+        out[cls.model_fields["delta_type"].default] = cls
+    return out
+
+
+def _assert_identity_hidden(payload: dict, identity_value: str) -> None:
+    """身份不可见：字段置空，且下发字节里没有那个身份枚举值。"""
+    assert payload.get("identity") is None, f"隐藏身份未脱敏：{payload}"
+    text = json.dumps(payload, ensure_ascii=False)
+    assert f'"{identity_value}"' not in text, f"脱敏记录仍带身份值 {identity_value}：{payload}"
+
+
+def test_every_delta_type_has_a_no_leak_case() -> None:
+    """delta 类型表与判据表**双向**对齐：新增类型必须登记一条不泄露判据。"""
+    schema_types = _delta_schema_types()
+    cases = _delta_records()
+    assert len(schema_types) == 8, (
+        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 8 种写）："
+        f"{sorted(schema_types)}"
+    )
+    missing = sorted(set(schema_types) - set(cases))
+    stale = sorted(set(cases) - set(schema_types))
+    assert not missing and not stale, (
+        "delta 类型与不泄露判据表不同步：\n"
+        f"  未登记判据：{missing}\n"
+        f"  判据表多出（schema 已删）：{stale}\n"
+        "新增一种 delta 时，在 _delta_records() 里补一条带隐藏信息的合成记录，"
+        "并在 test_every_delta_record_is_redacted_for_a_human_viewer 里写明它的公开面。"
+    )
+
+
+def test_the_delta_coverage_check_bites() -> None:
+    """探针：从判据表里拿掉一种 delta，覆盖检查必须报出它（防"8 种"断言空转）。"""
+    cases = _delta_records()
+    cases.pop("deck_shuffle")
+    missing = sorted(set(_delta_schema_types()) - set(cases))
+    assert missing == ["deck_shuffle"], missing
+
+
+def test_every_delta_record_is_redacted_for_a_human_viewer() -> None:
+    """逐类检查：人类查看者的下发里没有隐藏牌面 / 整副牌序 / 他人身份。"""
+    for delta_type, record in _delta_records().items():
+        raw = json.loads(record_json(record))
+        payload = visible_record(record, viewer=VIEWER)
+        assert payload is not None, f"{delta_type} 被整条丢弃（不是裁剪）"
+        assert payload["seq"] == raw["seq"]
+        if delta_type == "deck_shuffle":
+            assert raw["cards"], "夹具必须带牌序，否则判据是空转"
+            _assert_card_faces_absent(payload, tuple(raw["cards"]))
+            assert payload["from_zone"] == raw["from_zone"]
+            assert payload["to_zone"] == raw["to_zone"]
+        elif delta_type == "identity_deal":
+            assert payload["seat"] == 1
+            _assert_identity_hidden(payload, "rebel")
+        elif delta_type == "card_reveal":
+            # 公开事实：亮出的那一张照发，且按既有展示契约补好牌名。
+            assert payload["card"]["card_id"] == raw["card"]["card_id"]
+            assert payload["card"].get("display_name")
+        elif delta_type == "identity_reveal":
+            # 阵亡亮明身份是公开事实（A3 的 revealed / dead 那一支）。
+            assert payload["identity"] == "rebel"
+        elif delta_type == "card_move":
+            _assert_card_faces_absent(payload, tuple(raw["cards"]))
+        else:
+            assert payload == raw, f"{delta_type} 是公开事实，不该被裁剪：{payload}"
+        if delta_type in ("deck_shuffle", "identity_deal"):
+            # 全知通道（内部调用 / 测试）不裁剪——裁剪只发生在这一个下发口。
+            assert visible_record(record, viewer=None) == raw
+
+
+def test_identity_deal_visibility_follows_a3() -> None:
+    """A3：身份按「本人 / 主公 / 已亮明 / 阵亡」可见；其余暗置。
+
+    ``identity_deal`` 是**开局暗发**那一条，故只放行本人与主公；"已亮明 / 阵亡"由后一条
+    公开的 ``identity_reveal`` 承载（同一份记录流里下发，不需要读者回读引擎状态）。
+    """
+
+    def deal(seat: int, identity: Identity) -> object:
+        return IdentityDealRecord(
+            seq=200 + seat, frame_id=0, depth=0, seat=seat, identity=identity
+        )
+
+    own = visible_record(deal(VIEWER, Identity.LOYALIST), viewer=VIEWER)
+    assert own["identity"] == "loyalist", "本人身份必须可见"
+    lord = visible_record(deal(2, Identity.LORD), viewer=VIEWER)
+    assert lord["identity"] == "lord", "主公身份公开"
+    other = visible_record(deal(1, Identity.REBEL), viewer=VIEWER)
+    _assert_identity_hidden(other, "rebel")
+    as_self = visible_record(deal(3, Identity.RENEGADE), viewer=3)
+    assert as_self["identity"] == "renegade", "本人看自己的发放必须可见"
+
+    reveal = IdentityRevealRecord(
+        seq=210, frame_id=0, depth=0, seat=3, identity=Identity.REBEL
+    )
+    assert visible_record(reveal, viewer=VIEWER)["identity"] == "rebel", (
+        "阵亡亮明身份必须公开（A3 的 revealed / dead）"
+    )
+
+
+def test_the_no_leak_assertions_bite_on_the_unredacted_payloads() -> None:
+    """合成反例：把**未脱敏**的原始记录喂给判据，两条都必须抛 AssertionError。"""
+    cases = _delta_records()
+    raw_shuffle = json.loads(record_json(cases["deck_shuffle"]))
+    with pytest.raises(AssertionError):
+        _assert_card_faces_absent(raw_shuffle, tuple(raw_shuffle["cards"]))
+
+    raw_deal = json.loads(record_json(cases["identity_deal"]))
+    with pytest.raises(AssertionError):
+        _assert_identity_hidden(raw_deal, "rebel")
 

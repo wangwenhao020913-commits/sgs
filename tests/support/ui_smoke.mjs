@@ -13378,9 +13378,10 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     timing(114, "PHASE_DRAW_START", { actor: 1 }),
     timing(115, "PHASE_DRAW", { actor: 1 }),
     timing(116, "PHASE_PLAY_START", { actor: 1 }),
-    // 重洗：弃牌堆并回牌堆（牌面是公开的；牌堆只给数量）。
+    // 重洗：弃牌堆并回牌堆。A3 下服务端只给**数量**（cards 抹空 + card_count），
+    // 故这条夹具必须是脱敏形状——派生牌堆数只能读 card_count，读牌序会停在 36。
     { kind: "delta", delta_type: "deck_shuffle", seq: 117, frame_id: 0, depth: 0,
-      cards: [synthCard(13, "桃"), synthCard(16, "桃")],
+      cards: [], card_count: 2,
       from_zone: { seat: null, zone: "discard" }, to_zone: { seat: null, zone: "deck" } },
   ];
   const authoritative = baseView(session);

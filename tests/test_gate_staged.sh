@@ -2,6 +2,11 @@
 # 门禁分级器：docs 提交走快速文档检查，src/tests 走全量 run_all.sh。
 # 用临时 git 仓库与 stub 命令验证三种分类，不跑真实门禁。
 set -euo pipefail
+# 门禁 hook 会导出 GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE（linked worktree）。本文件用
+# `git -C "$tmp"` 操作临时仓库；GIT_INDEX_FILE 是**相对当前 cwd** 解析的，不隔离就会把
+# `add` / `reset` 打到本仓库的暂存区（真踩过：hook 跑门禁时暂存区被 reset）。先清掉。
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_OBJECT_DIRECTORY
+unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
