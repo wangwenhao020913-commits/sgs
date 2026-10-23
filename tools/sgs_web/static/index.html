@@ -112,7 +112,8 @@
       </div>
     </div>
 
-    <!-- 中央舞台：上层 = 当前动作，下层 = 处理区。结算完淡出（CSS 过渡）。 -->
+    <!-- 中央舞台（U3-01）：上层 = 当前动作，下层 = 三组牌（处理中 / 展示 / 弃牌）同一条换行流。
+         离场 1s 淡出；三组跨 commit 保留。 -->
     <div id="table-stage" class="table-stage">
       <section id="t-seats" class="seats ring" aria-label="对手座位"></section>
       <div id="stage-center" class="stage-center">
@@ -121,7 +122,7 @@
           <div id="t-action-text" class="action-text">等待行动</div>
         </div>
         <div class="stage-divider"></div>
-        <div class="stage-title">处理区</div>
+        <div class="stage-title">舞台</div>
         <div id="t-processing" class="cards processing"></div>
         <p id="t-context" class="context"></p>
       </div>

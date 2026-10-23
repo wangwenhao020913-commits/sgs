@@ -128,3 +128,90 @@ def test_identity_ratio_display_copy_matches_the_engine_rosters() -> None:
         "table.js:IDENTITY_RATIOS 与 identities.py:IDENTITY_ROSTERS 漂移："
         f"界面 {display} / 引擎 {expected}"
     )
+
+
+# ---------------------------------------------------------------------------
+# U3-01：舞台三组的**设计单位**（spec D3 / D4；票 01 的验收把 CSS 算式钉在这里）
+# ---------------------------------------------------------------------------
+
+_CSS_TEXT = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+
+
+def _css_rule(selector: str) -> str:
+    """取一条 CSS 规则的正文（选择器按字面量匹配；找不到即失败）。"""
+    match = re.search(rf"{re.escape(selector)}\s*\{{(?P<body>[^}}]*)\}}", _CSS_TEXT)
+    assert match is not None, f"style.css 里找不到规则 {selector}"
+    return match.group("body")
+
+
+def test_stage_panel_uses_the_u3_design_units() -> None:
+    """舞台 40% / 上限 360 / 中心 64.47% / 两行 253，几何上不压顶座。
+
+    设计舞台 1600×608、环桌圆心 y=370、ry=235、对手卡高 150（`table.js:RING_STAGE`）：
+    顶座（90°）下沿 = 370 − 235 + 150/2 = 210。舞台中心 64.47% × 608 = 392，上限 360
+    ⇒ 顶边 392 − 180 = 212 > 210（D3）。40% 宽 = 640 设计单位，横跨 480–1120，
+    左右座位中心 212 / 1388、卡宽 210，故不压侧座。舞台行限两行卡面（124×2 + 5 = 253），
+    超出纵向滚动。
+    """
+    stage = _css_rule(".stage-center")
+    assert re.search(r"width:\s*40%", stage), "舞台宽必须是 40%（640 设计单位）"
+    width = re.search(r"max-height:\s*calc\((\d+(?:\.\d+)?) \* var\(--dsu\)\)", stage)
+    assert width is not None and float(width.group(1)) == 360.0, (
+        f"舞台 max-height 必须是 360 设计单位，实际：{stage}"
+    )
+    top = re.search(r"top:\s*(\d+(?:\.\d+)?)%", stage)
+    assert top is not None and abs(float(top.group(1)) - 64.47) < 1e-6, (
+        f"舞台中心必须下移到 64.47%，实际：{stage}"
+    )
+    assert re.search(r"overflow:\s*hidden", stage), "舞台面板必须裁掉超出的行"
+
+    center_y = float(top.group(1)) / 100 * 608
+    top_seat_bottom = 370 - 235 + 150 / 2
+    panel_top = center_y - float(width.group(1)) / 2
+    assert panel_top > top_seat_bottom, (
+        f"舞台顶边 {panel_top} 压住了顶座下沿 {top_seat_bottom}（D3 的几何判据）"
+    )
+    assert abs(center_y - 392) < 0.5, f"64.47% × 608 应 ≈ 392，实际 {center_y}"
+
+    row = _css_rule(".stage-center .processing")
+    assert re.search(r"max-height:\s*calc\(253 \* var\(--dsu\)\)", row), (
+        f"舞台行必须限两行卡面（253 = 124×2 + 5），实际：{row}"
+    )
+    assert re.search(r"overflow-y:\s*auto", row), "超过两行必须纵向滚动，不折叠"
+    assert re.search(r"align-content:\s*flex-start", row), "行从顶部排（滚动而不是把行压扁）"
+
+    assert re.search(r"-webkit-line-clamp:\s*2", _css_rule(".stage-center .context")), (
+        "底部说明最多 2 行"
+    )
+
+
+def test_stage_lanes_have_the_four_unit_bars_and_discard_is_desaturated() -> None:
+    """左侧 4 设计单位色条区分三组、弃牌降饱和；旧的金色描边已删除（D4）。"""
+    bar = _css_rule(".stage-card")
+    assert re.search(r"border-left:\s*calc\(4 \* var\(--dsu\)\)", bar), (
+        f"舞台卡左侧必须是 4 设计单位色条，实际：{bar}"
+    )
+    lanes = {
+        "processing": "#d9b45c",
+        "showcase": "#3f8f8a",
+        "discard": "#9a9188",
+    }
+    for lane, color in lanes.items():
+        rule = _css_rule(f'.stage-card[data-stage-lane="{lane}"]')
+        assert color in rule.lower(), f"{lane} 组色条必须是 {color}，实际：{rule}"
+    assert re.search(
+        r'\.stage-card\[data-stage-lane="discard"\][^{]*\{[^}]*saturate\(\.55\)',
+        _CSS_TEXT,
+    ), "弃牌组卡面必须降饱和 saturate(.55)"
+    assert ".revealed-card" not in _CSS_TEXT, (
+        "旧的亮牌金色描边（.revealed-card）必须删除——色条取代它，不新增角标"
+    )
+    assert ".fading" in _CSS_TEXT, "淡出必须有一个可断言的类（.stage-card.fading）"
+
+
+def test_stage_title_is_renamed_from_processing_area() -> None:
+    """小标题「处理区」改为「舞台」（D3）；三组同流，故不再只写处理区。"""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert re.search(r'class="stage-title">\s*舞台\s*<', html), (
+        "index.html 的舞台小标题必须改成「舞台」"
+    )

@@ -567,13 +567,13 @@ button.mini-slot { cursor: pointer; }
 .seat.req { outline: 2px dashed #b8860b; outline-offset: 2px; }
 
 .stage-center {
-  position: absolute; left: 50%; top: 60.85%;
+  position: absolute; left: 50%; top: 64.47%;
   transform: translate(-50%, -50%);
-  width: 24%; min-height: 22%;
-  /* U2-02 / D6：处理区卡面放大到 88×124 后，面板高度必须封顶，否则「顶边 = 370 − h/2」会向上
-   * 长进环桌、盖住顶部对手座位。上限 300 ⇒ 顶边 220 > 顶座（90°）下沿 210
-   * （370 − 235 + 150/2）。处理区内部再限一行卡面（124）、其余纵向滚动，卡片边缘不被面板裁切。 */
-  max-height: calc(300 * var(--dsu));
+  /* U3-01 / D3：宽 40%（= 640 设计单位，一行约 6 张）；中心从 370 下移到 392（64.47%
+   * × 608），面板上限 360 ⇒ 顶边 392 − 180 = 212 > 顶座（90°）下沿 210，不压顶座；
+   * 40% 宽横跨 480–1120，左右座位中心 212 / 1388、卡宽 210 ⇒ 也不压侧座。 */
+  width: 40%; min-height: 22%;
+  max-height: calc(360 * var(--dsu));
   overflow: hidden;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 2px; padding: 8px 10px;
@@ -591,26 +591,32 @@ button.mini-slot { cursor: pointer; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .stage-divider { width: 100%; border-top: 1px dashed rgba(150, 122, 82, .36); margin: 4px 0; }
-/* U2-02 / D6：处理区 / 舞台卡面与手牌**共用同一套** `.card.face`（88×124、字号 14/11/21/9）。
- * 「0.63 版」的小牌面覆盖已删除——这里不再有第二套卡面规则。
- * 一行放不下时纵向滚动（`max-height` = 一张卡面高，行从顶部排），面板高度因此被钉住。 */
-/* M5-08a：公开亮牌与处理区同排渲染，用一圈金色描边区分「亮出的事实」（不可点、悬停可读）。 */
-.stage-center .processing .revealed-card {
-  outline: 2px solid #b8860b;
-  outline-offset: 2px;
-}
+/* U2-02 / D6：舞台卡面与手牌**共用同一套** `.card.face`（88×124、字号 14/11/21/9）。
+ * U3-01 / D3：三组按入台顺序排在**一个**换行流里；行限两行卡面（124×2 + 5 = 253），
+ * 超出纵向滚动（不折叠、不缩小卡面），新牌落位粘底（JS 滚，D3）。 */
 .stage-center .processing {
   justify-content: center; align-content: flex-start;
   gap: 5px; min-height: 18px;
   flex: 0 0 auto;
-  /* 一张卡面 124 + 1 设计单位余量：避免子像素把第一行的下边框裁掉；第 2 行从 129 开始，仍整行在框外。 */
-  max-height: calc(125 * var(--dsu));
+  max-height: calc(253 * var(--dsu));
   overflow-y: auto;
 }
+/* U3-01 / D4：左侧 4 设计单位色条区分三组（处理中金 / 展示青 / 弃牌灰），
+ * 弃牌组降饱和；不新增角标。旧的亮牌金色描边已删除——色条取代它。 */
+.stage-card {
+  border-left: calc(4 * var(--dsu)) solid transparent;
+}
+.stage-card[data-stage-lane="processing"] { border-left-color: #d9b45c; }
+.stage-card[data-stage-lane="showcase"] { border-left-color: #3f8f8a; }
+.stage-card[data-stage-lane="discard"] {
+  border-left-color: #9a9188;
+  filter: saturate(.55);
+}
+/* 淡出 1 秒（D5）：节点在淡出期间保留，到点由 JS 移除；`animScale = 0` 时不会画到这一帧。 */
+.stage-card.fading { opacity: 0; transition: opacity 1s ease-out; }
 .stage-center .context {
   margin: 2px 0 0; width: 100%; font-size: 11px; text-align: center;
-  /* 处理中的牌一多说明就长：最多 2 行（省略号）。1280 下舞台里的内边距 / 字号是固定 px，
-   * 4 行会把面板推到 300 上限外并被裁成半行；2 行让整块始终落在上限内。 */
+  /* 处理中 / 展示 / 弃牌三段拼接后最多 2 行（省略号）；40% 宽下也不越过 360 上限。 */
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   overflow: hidden;
 }

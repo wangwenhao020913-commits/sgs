@@ -47,6 +47,8 @@ class El {
     this.style = {};
     // 真 DOM 的 `<input type=checkbox>` 缺省未勾选；前端读的是 `.checked`（不是 `.value`）。
     this.checked = false;
+    // 滚动容器的三个度量：舞台「粘底」断言直接写这几个数（不读布局）。
+    this.scrollTop = 0; this.scrollHeight = 0; this.clientHeight = 0;
   }
   get textContent() { return this._text + this.children.map((c) => c.textContent || c.text()).join(""); }
   set textContent(v) { this._text = String(v); this._html = ""; this._detachChildren(); }
@@ -67,6 +69,14 @@ class El {
     }
     c.parentNode = this;
     this.children.push(c);
+    return c;
+  }
+  // 舞台卡面按 `data-stage-key` 复用节点（淡出靠同一个节点上的 CSS 过渡），
+  // 故垫片必须有真正的 removeChild —— 被撤下的旧项要真的从父节点消失。
+  removeChild(c) {
+    const at = this.children.indexOf(c);
+    if (at >= 0) this.children.splice(at, 1);
+    if (c) c.parentNode = null;
     return c;
   }
   addEventListener(k, fn) { (this.listeners[k] ||= []).push(fn); }
@@ -1245,10 +1255,19 @@ if (allZonesIndex >= 0) {
     opponent >= 0 && rowCards(zoneRow(opponent, "hand")).length > 0,
     `座位=${opponent} 手牌=${opponent >= 0 ? rowCards(zoneRow(opponent, "hand")).map((card) => card.name).join("|") : "—"}`);
   const expectedProcessing = [...expected.processing.values()].map(cardText);
-  const processingCards = () => cardsIn($("r-processing")).map(cardParts);
+  // U3-01：回放页的舞台也是三组同流——处理区只比**处理中**那一组（淡出中的已不在处理区）。
+  const processingCards = () => cardsIn($("r-processing")).filter(
+    (node) => node.getAttribute("data-stage-lane") === "processing"
+      && !node.classList.contains("fading"),
+  ).map(cardParts);
   check("回放页处理区 / 效果区 = 从 card_move 重建的结果（名称 / 花色 / 点数 / id）",
     JSON.stringify(processingCards()) === JSON.stringify(expectedProcessing),
     `面板=${JSON.stringify(processingCards())} / 记录=${JSON.stringify(expectedProcessing)}`);
+  const stageLanes = cardsIn($("r-processing")).map((node) => node.getAttribute("data-stage-lane"));
+  check("回放页的舞台卡面都带 data-stage-lane（复用舞台渲染）",
+    stageLanes.every((lane) => ["processing", "showcase", "discard"].includes(lane))
+      && stageLanes.length >= expectedProcessing.length,
+    `lanes=${stageLanes.join(",")}`);
 }
 
 const queryIndex = replayRecords.findIndex((record) => record.kind === "query"
@@ -2704,8 +2723,13 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && $("t-context").textContent.includes("0号位"),
     `描述="${$("t-context").textContent}"`);
   ui.stepPlayback(true);
-  check("㉿E5 播到「离开处理区」⇒ 效果区清空（牌「停留」过一步）",
-    !$("t-processing").text().includes("杀"), `处理区="${$("t-processing").text().trim()}"`);
+  // U3-01：离区不再瞬删——牌留在舞台上淡出（`.fading`），描述文本立即清空。
+  check("㉿E5 播到「离开处理区」⇒ 牌从「处理中」转入淡出（不再瞬间消失）",
+    $("t-processing").text().includes("杀")
+      && (($("t-processing").children.find(
+        (node) => node.getAttribute("data-card-id") === "6",
+      ) || {}).classList || { contains: () => false }).contains("fading"),
+    `处理区="${$("t-processing").text().trim()}"`);
   check("㉿E5b 效果区空了 ⇒ 描述文本立即清空",
     $("t-context").textContent === "", `描述="${$("t-context").textContent}"`);
   ui.flushPlayback();
@@ -4642,6 +4666,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const show = (view) => {
     ui.state.view = view;
     ui.state.logRecords = [];
+    // 合成 view = 一个新场景：舞台项不跨场景沿用（U3-01 起 commit 不清空展示 / 弃牌，
+    // 故这里显式清一次，只影响测试之间的干净度，不改产品行为）。
+    ui.state.effectCards = [];
+    ui.state.revealedCards = [];
     ui.resetSelection();
     ui.renderTable();
   };
@@ -4902,6 +4930,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const show = (view) => {
     ui.state.view = view;
     ui.state.logRecords = [];
+    // 合成 view = 一个新场景：舞台项不跨场景沿用（U3-01 起 commit 不清空展示 / 弃牌）。
+    ui.state.effectCards = [];
+    ui.state.revealedCards = [];
     ui.resetSelection();
     ui.renderTable();
     ui.renderPending(view);
@@ -4945,23 +4976,24 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && /\.hand \.card\s*\{[^}]*flex:\s*0 0 auto/s.test(css)
       && /\.table-bottom\s*\{[^}]*flex:\s*0 0 27\.5%/s.test(css),
     `card=${/calc\(88 \* var\(--dsu\)\)/.test(css)} stageOverride=${/\.stage-center \.processing \.card/.test(css)} small=${/calc\(56 \* var\(--dsu\)\)/.test(css) || /calc\(79 \* var\(--dsu\)\)/.test(css)} hand=${/\.hand \.card\s*\{[^}]*flex:\s*0 0 auto/s.test(css)} bottom=${/\.table-bottom\s*\{[^}]*27\.5%/s.test(css)}`);
-  // U2-02：卡面统一放大后，60.85% 居中的舞台面板会向上长进环桌、盖住顶部座位；故给面板封顶。
-  // 几何算式（`table.js:RING_STAGE`）：圆心 y=370、ry=235；顶部座位（90°）下沿 = 370 − 235 + 150/2 = 210。
-  // 面板 max-height 300 ⇒ 顶边 370 − 300/2 = 220 > 210；处理区再限一行卡面（125 含 1 设计单位余量）+ 纵向滚动，
-  // 保证第一行卡面的上 / 下边框都在滚动框内（不裁切），第 2 行起整体在框外、不出半张牌；
-  // 处理中说明最多 2 行（省略号），1280 下也不越过 300 上限。
+  // U3-01：舞台面板下移 + 加宽 + 封顶 360（spec D3）：
+  // 圆心 64.47% × 608 = 392；360 上限 ⇒ 顶边 392 − 180 = 212 > 顶座下沿 210；
+  // 40% 宽 = 640 设计单位，横跨 480–1120，不压左右座位（中心 212 / 1388、卡宽 210）；
+  // 舞台行限两行卡面（253 = 124×2 + 5）纵向滚动、说明最多 2 行。
   const stageRule = css.match(/\.stage-center\s*\{[^}]*\}/s);
   const stageMax = stageRule && /max-height:\s*calc\((\d+) \* var\(--dsu\)\)/.exec(stageRule[0]);
-  const ringCenterY = 370;
-  const topSeatBottom = ringCenterY - 235 + 150 / 2;
+  const stageTop = stageRule && /top:\s*(\d+(?:\.\d+)?)%/.exec(stageRule[0]);
+  const ringCenterY = (Number(stageTop ? stageTop[1] : 0) / 100) * 608;
+  const topSeatBottom = 370 - 235 + 150 / 2;
   const panelTop = ringCenterY - Number(stageMax ? stageMax[1] : 0) / 2;
-  check("U1-02c4 CSS：舞台面板封顶 300（顶边 220 > 顶座下沿 210），处理区一行卡面（125 含余量）纵向滚动、说明最多 2 行",
-    !!stageMax && panelTop > topSeatBottom
+  check("U1-02c4 CSS：舞台宽 40%、面板封顶 360、中心下移到 64.47%（顶边 212 > 顶座下沿 210），舞台行两行卡面（253）纵向滚动、说明最多 2 行",
+    !!stageMax && Math.abs(ringCenterY - 392) < 0.5 && panelTop > topSeatBottom
+      && /\.stage-center\s*\{[^}]*width:\s*40%/s.test(css)
       && /\.stage-center\s*\{[^}]*overflow:\s*hidden/s.test(css)
-      && /\.stage-center \.processing\s*\{[^}]*flex:\s*0 0 auto[^}]*max-height:\s*calc\(125 \* var\(--dsu\)\)[^}]*overflow-y:\s*auto/s.test(css)
+      && /\.stage-center \.processing\s*\{[^}]*flex:\s*0 0 auto[^}]*max-height:\s*calc\(253 \* var\(--dsu\)\)[^}]*overflow-y:\s*auto/s.test(css)
       && /\.stage-center \.processing\s*\{[^}]*align-content:\s*flex-start/s.test(css)
       && /\.stage-center \.context\s*\{[^}]*-webkit-line-clamp:\s*2/s.test(css),
-    `panelTop=${panelTop} topSeatBottom=${topSeatBottom} max=${stageMax ? stageMax[1] : "无"} clip=${/\.stage-center\s*\{[^}]*overflow:\s*hidden/s.test(css)} row=${/max-height:\s*calc\(125 \* var\(--dsu\)\)/.test(css)} scroll=${/\.stage-center \.processing\s*\{[^}]*overflow-y:\s*auto/s.test(css)}`);
+    `centerY=${ringCenterY} panelTop=${panelTop} topSeatBottom=${topSeatBottom} max=${stageMax ? stageMax[1] : "无"} width=${/\.stage-center\s*\{[^}]*width:\s*40%/s.test(css)} row=${/max-height:\s*calc\(253 \* var\(--dsu\)\)/.test(css)} scroll=${/\.stage-center \.processing\s*\{[^}]*overflow-y:\s*auto/s.test(css)}`);
   check("U1-02d CSS：可指定 = 5px 绿外圈、已选 = 4px 绿内圈、悬停浅绿、行动中 = 金框，当前 + 合法有绿角点",
     /\.seat\.targetable:not\(\.tsel\)\s*\{[^}]*0 0 0 5px var\(--ok\)/s.test(css)
       && /\.seat\.tsel::before\s*\{[^}]*inset 0 0 0 4px var\(--ok\)/s.test(css)
@@ -5085,7 +5117,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && byClass(handCard, "suit")[0].textContent === "♠"
       && byClass(handCard, "rank")[0].textContent === "7"
       && byClass(handCard, "cname")[0].textContent === "杀"
-      && byClass(handCard, "ctype")[0].textContent === "普通",
+      && byClass(handCard, "ctype")[0].textContent === "",
     `html="${handCard.text()}"`);
   // 底行的三类事实：装备槽 / 属性 / 攻击范围（都来自服务端展示契约，不在 JS 里猜）。
   const fireSlash = card(-7, "火杀", {
@@ -5096,11 +5128,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   show(bottomView);
   const weaponFace = $("t-hand").children[0];
   const fireFace = $("t-hand").children[1];
-  check("U1-02o3 卡面底行：武器 = 武器 · 范围 2；火杀 = 普通 · 火焰（红）",
+  check("U1-02o3 卡面底行：武器 = 武器 · 范围 2；火杀 = 火焰（红）；不再写「普通 / 虚拟 / 转化」",
     byClass(weaponFace, "ctype")[0].textContent === "武器 · 范围 2"
-      && byClass(fireFace, "ctype")[0].textContent === "普通 · 火焰"
+      && byClass(fireFace, "ctype")[0].textContent === "火焰"
       && hasClass(fireFace, "attr-fire")
-      && byClass(fireFace, "cname")[0].textContent === "杀",
+      && byClass(fireFace, "cname")[0].textContent === "杀"
+      && !/普通|虚拟|转化/.test(byClass(fireFace, "ctype")[0].textContent),
     `weapon="${byClass(weaponFace, "ctype")[0].textContent}" fire="${byClass(fireFace, "ctype")[0].textContent}"`);
   show(table());
 
@@ -7383,6 +7416,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   });
   faceView.snapshot.self_hand = [sourceDodge, sourceSlash];
   faceView.snapshot.processing = [virtual, single, multi, fire, thunder];
+  // 合成 view = 新场景：舞台项不跨场景沿用（U3-01 起 commit 不清空展示 / 弃牌）。
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
   ui.state.view = faceView;
   ui.resetSelection();
   ui.renderTable();
@@ -7484,6 +7520,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
 
   // 回放：来源牌进处理区的那条 card_move 也画产物（快照的 processing 是产物映射的来源）。
   faceView.snapshot.processing = [];
+  // 新场景：上一小节的五张产物不该以淡出态混进这一段的计数。
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
   ui.state.view = faceView;
   ui.resetSelection();
   ui.renderTable();
@@ -10849,6 +10888,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   };
   const renderFire = (view) => {
     ui.state.view = view;
+    // 合成 view = 新场景：舞台项不跨场景沿用（U3-01 起 commit 不清空展示 / 弃牌）。
+    ui.state.effectCards = [];
+    ui.state.revealedCards = [];
     ui.resetSelection();
     ui.renderTable();
     ui.renderPending(view);
@@ -11041,10 +11083,11 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && $("btn-submit").disabled === true
       && $("btn-cancel").disabled === true,
     `kind=${ui.stepDialogKind(discardPending)} dis=${$("t-hand").children.map((n) => n.classList.contains("dis")).join(",")} passHidden=${$("btn-pass").hidden} hint="${$("t-target-hint").textContent}"`);
-  check("M5-08a-c2 中央舞台看得见亮出的那一张（公开事实；与处理区同一行、不可点）",
+  check("M5-08a-c2 中央舞台的「展示」组看得见亮出的那一张（公开事实；同一行、不可点）",
     $("t-processing").children.some((node) => node.classList.contains("revealed-card")
-      && node.getAttribute("data-card-id") === "5")
-      && $("t-context").textContent.includes("亮牌")
+      && node.getAttribute("data-card-id") === "5"
+      && node.getAttribute("data-stage-lane") === "showcase")
+      && $("t-context").textContent.includes("展示")
       && $("t-context").textContent.includes("闪电"),
     `processing=${$("t-processing").text() } context="${$("t-context").textContent}"`);
 
@@ -11124,9 +11167,10 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && logText().includes("放弃（无可弃的同花色牌）")
       && !$("t-prompt").textContent.includes("选择一张手牌"),
     `log="${logText()}" prompt="${$("t-prompt").textContent}"`);
-  check("M5-08a-d2 亮牌仍在中央舞台（公开事实），手牌区没有「已知」标记 / 属性",
+  check("M5-08a-d2 亮牌仍在中央舞台的「展示」组（公开事实），手牌区没有「已知」标记 / 属性",
     $("t-processing").children.some((node) => node.classList.contains("revealed-card")
-      && node.getAttribute("data-card-id") === "5")
+      && node.getAttribute("data-card-id") === "5"
+      && node.getAttribute("data-stage-lane") === "showcase")
       && !$("t-hand").text().includes("已知")
       && $("t-hand").children.every((node) => !node.classList.contains("known")
         && !node.classList.contains("revealed")
@@ -11142,9 +11186,12 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   clearedBody.snapshot = { ...noSuitBody.snapshot, processing: [] };
   ui.applyViewRaw(clearedBody);
   ui.flushPlayback();
-  check("M5-08a-d3 结算帧出栈 ⇒ 舞台撤下亮牌（只在中央舞台留那一瞬）",
-    !$("t-processing").children.some((node) => node.classList.contains("revealed-card"))
-      && !$("t-context").textContent.includes("亮牌"),
+  // U3-01：pop 不再瞬删——展示项开始 1s 淡出（`.fading`），描述还留着「展示」。
+  check("M5-08a-d3 结算帧出栈 ⇒ 展示项进入 1s 淡出（不瞬删、不提前撤下）",
+    $("t-processing").children.some((node) => node.classList.contains("revealed-card")
+      && node.getAttribute("data-card-id") === "5"
+      && node.classList.contains("fading"))
+      && $("t-context").textContent.includes("展示"),
     `processing=${$("t-processing").text()} context="${$("t-context").textContent}"`);
 
   ui.state.sessionId = null;
@@ -12008,18 +12055,18 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   check("M5-08d-a1 火杀 / 雷杀卡面 = 服务端「杀」+ 火焰 / 雷电（红 / 蓝），不在前端另起牌名",
     faces.length === hand.length
       && byClass(faces[0], "cname")[0].textContent === "杀"
-      && byClass(faces[0], "ctype")[0].textContent === "普通 · 火焰"
+      && byClass(faces[0], "ctype")[0].textContent === "火焰"
       && hasClass(faces[0], "attr-fire")
       && byClass(faces[1], "cname")[0].textContent === "杀"
-      && byClass(faces[1], "ctype")[0].textContent === "普通 · 雷电"
+      && byClass(faces[1], "ctype")[0].textContent === "雷电"
       && hasClass(faces[1], "attr-thunder")
       && /\.card\.face\.attr-fire \.cname\s*\{[^}]*#b3261e/s.test(css)
       && /\.card\.face\.attr-thunder \.cname\s*\{[^}]*#1d4e9c/s.test(css),
     `fire="${byClass(faces[0], "cname")[0].textContent}/${byClass(faces[0], "ctype")[0].textContent}" thunder="${byClass(faces[1], "cname")[0].textContent}/${byClass(faces[1], "ctype")[0].textContent}"`);
 
   const expectedFaces = [
-    { name: "酒", type: "普通" },
-    { name: "铁索连环", type: "普通" },
+    { name: "酒", type: "" },
+    { name: "铁索连环", type: "" },
     { name: "藤甲", type: "防具" },
     { name: "白银狮子", type: "防具" },
     { name: "古锭刀", type: "武器 · 范围 2" },
@@ -12183,6 +12230,344 @@ const bottomSkillIds = () => $("t-skills").children.filter(
 
   ui.state.sessionId = null;
   ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ U3-01（票 01）：舞台三组 / 来源底行 / 淡出寿命 / 粘底 / 回放 ============
+ *
+ * 判据来自票面与 spec D2 / D3 / D5 / D10 / D14 / D15。载荷是**与响应体同形**的合成
+ * `view` + 记录；断言只落在 DOM 的 `data-stage-lane` / `data-zone-label` / `.fading`
+ * 与底行文本上。时间不靠真实等待：`renderProcessing(now)` 直接喂 `now`，动画倍率
+ * `state.animScale`（`0` = 淡出立即完成）。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const byClass = (node, name) => walk(node).filter(
+    (child) => child.classList.contains(name)
+      || String(child.className || "").split(/\s+/).includes(name));
+  const stageNodes = () => $("t-processing").children.filter(
+    (node) => node.classList.contains("stage-card"));
+  const stageNode = (id) => stageNodes().find(
+    (node) => attr(node, "data-card-id") === String(id));
+  const laneOf = (id) => attr(stageNode(id), "data-stage-lane");
+  const lineOf = (id) => {
+    const node = stageNode(id);
+    const line = node ? byClass(node, "ctype")[0] : null;
+    return line ? line.textContent : "";
+  };
+  /** 底行节点上的 `data-zone-label`（D10 的机械读法；无来源时不存在）。 */
+  const labelOf = (id) => {
+    const node = stageNode(id);
+    const line = node ? byClass(node, "ctype")[0] : null;
+    return line ? attr(line, "data-zone-label") : undefined;
+  };
+  const fading = (id) => Boolean(stageNode(id) && stageNode(id).classList.contains("fading"));
+  const card = (id, name, extra = {}) => ({
+    ...synthCard(id, name), kind: "normal", attribute: "普通",
+    description: `【${name}】的全文描述`, ...extra,
+  });
+  const seatPlayer = (seat, heroName) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName,
+  });
+  const view = (session = "u3-stage-1") => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.snapshot.processing = [];
+    out.snapshot.players = [
+      seatPlayer(0, "郭嘉"), seatPlayer(1, "周瑜"), seatPlayer(2, "貂蝉"),
+    ];
+    return out;
+  };
+  const TO_PROCESSING = { zone: "processing", seat: null };
+  const TO_DISCARD = { zone: "discard", seat: null };
+  const move = (seq, frame, moveCard, from, to, reason) => ({
+    kind: "delta", delta_type: "card_move", seq, frame_id: frame, depth: 1,
+    reason, owner: from.seat, from_zone: from, to_zone: to, cards: [moveCard],
+  });
+  const at = (zone, seat = null) => ({ zone, seat });
+  const pop = (seq, frame) => ({
+    kind: "frame", op: "pop", frame_id: frame, frame_kind: "RESOLVE", depth: 1, seq,
+  });
+
+  const A = card(101, "杀");
+  const B = card(102, "闪");
+  const C = card(103, "八卦阵", { slot: "armor" });
+  const J = card(104, "闪电");
+  const D = card(105, "桃");
+  const records = [
+    move(101, 10, A, at("hand", 0), TO_PROCESSING, "USE"),
+    move(102, 11, B, at("hand", 1), TO_DISCARD, "DISCARD"),
+    move(103, 11, C, at("equip", 2), TO_DISCARD, "LOSE"),
+    move(104, 12, J, at("deck"), TO_PROCESSING, "JUDGE"),
+    move(105, 12, J, at("processing"), TO_DISCARD, "JUDGE"),
+    { kind: "delta", delta_type: "card_reveal", seq: 106, frame_id: 11, depth: 1, seat: 1, card: D },
+    { kind: "timing", seq: 107, timing: "USE_DESIGNATE_TARGET", frame_id: 10, depth: 1, actor: 0, targets: [1], cards: [] },
+  ];
+
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.animScale = 1;
+  const before = { ...view(), cursor: 100, log_seq: 0, records: [], finished: false };
+  ui.applyViewRaw(before);
+  const after = {
+    ...view(), cursor: 107, log_seq: 0, records, finished: false,
+  };
+  // 这一批播完时 A 还在处理区：快照是权威终态，commit 不能把它判成"已离场"。
+  after.snapshot.processing = [A];
+  ui.applyViewRaw(after);
+  const step = () => ui.stepPlayback(true);
+
+  step();
+  check("U3-01a 处理中的牌：data-stage-lane=processing、底行 座位·武将·区域",
+    laneOf(101) === "processing"
+      && labelOf(101) === "0·郭嘉·手牌"
+      && lineOf(101) === "0·郭嘉·手牌"
+      && $("t-context").textContent.includes("处理中"),
+    `lane=${laneOf(101)} label=${labelOf(101)} context="${$("t-context").textContent}"`);
+
+  step();
+  check("U3-01b 手牌弃置进弃牌组：data-stage-lane=discard、底行 1·周瑜·手牌",
+    laneOf(102) === "discard"
+      && labelOf(102) === "1·周瑜·手牌"
+      && $("t-context").textContent.includes("弃牌"),
+    `lane=${laneOf(102)} label=${labelOf(102)} context="${$("t-context").textContent}"`);
+
+  step();
+  check("U3-01c 装备替换弃置：底行 2·貂蝉·装备（LOSE 也算弃牌）",
+    laneOf(103) === "discard"
+      && labelOf(103) === "2·貂蝉·装备"
+      && lineOf(103) === "2·貂蝉·装备",
+    `lane=${laneOf(103)} label=${labelOf(103)}`);
+
+  step();
+  step();
+  check("U3-01d 牌堆来源的判定牌：仍在处理中组、底行不写座位（无 undefined / null）",
+    laneOf(104) === "processing"
+      && !labelOf(104)
+      && lineOf(104) === ""
+      && !/undefined|null/.test(stageNode(104).text())
+      && fading(104),
+    `lane=${laneOf(104)} label=${labelOf(104)} text="${stageNode(104) ? stageNode(104).text() : "(缺)"}"`);
+
+  step();
+  check("U3-01e card_reveal 进展示组：data-stage-lane=showcase、保留 revealed-card 与亮出者",
+    laneOf(105) === "showcase"
+      && stageNode(105).classList.contains("revealed-card")
+      && attr(stageNode(105), "data-reveal-seat") === "1"
+      && labelOf(105) === "1·周瑜·手牌"
+      && $("t-context").textContent.includes("展示"),
+    `lane=${laneOf(105)} seat=${attr(stageNode(105), "data-reveal-seat")} context="${$("t-context").textContent}"`);
+
+  step();
+  check("U3-01f 三组在同一说明里拼接（处理中：… / 展示：… / 弃牌：…）",
+    ["处理中：", "展示：", "弃牌：", " / "].every((part) => $("t-context").textContent.includes(part)),
+    `context="${$("t-context").textContent}"`);
+  ui.flushPlayback();
+
+  // ---- 寿命规则（D5）：有帧的展示 / 弃牌挂到 pop；无帧的固定 1s + 1s；兜底 30s ----
+  const item = (id) => (ui.state.effectCards || [])
+    .concat(ui.state.revealedCards || [])
+    .find((entry) => String(entry.card_id) === String(id));
+  const fiveSecondsOn = item(102).stage.enteredAt + 5000;
+  ui.renderProcessing(fiveSecondsOn);
+  check("U3-01g 有承载帧的展示 / 弃牌：pop 之前一直可见（5 秒后仍不淡出）",
+    !!stageNode(102) && !!stageNode(103) && !!stageNode(105)
+      && !fading(102) && !fading(103) && !fading(105),
+    `B=${fading(102)} C=${fading(103)} D=${fading(105)}`);
+
+  ui.state.effectCards = ui.applyEffectDelta(pop(108, 11), ui.state.effectCards);
+  ui.state.revealedCards = ui.applyRevealDelta(pop(108, 11), ui.state.revealedCards);
+  ui.renderProcessing();
+  check("U3-01h 产生它们的结算帧 pop ⇒ 展示 / 弃牌开始 1s 淡出（不再是瞬删）",
+    fading(102) && fading(103) && fading(105) && !fading(101),
+    `A=${fading(101)} B=${fading(102)} C=${fading(103)} D=${fading(105)}`);
+
+  ui.state.effectCards = ui.applyEffectDelta(pop(109, 10), ui.state.effectCards);
+  ui.renderProcessing();
+  check("U3-01i 处理中的牌由它自己的离区 / 帧 pop 触发淡出（A 的帧 pop 才淡出）",
+    fading(101), `A=${fading(101)}`);
+  const goneAt = Math.max(...[101, 102, 103, 105].map((id) => item(id).stage.fadeAt + 1000));
+  ui.renderProcessing(goneAt);
+  check("U3-01j 1s 淡出结束 ⇒ 舞台项移除（不留幽灵）",
+    stageNodes().length === 0, `剩余=${stageNodes().map((n) => attr(n, "data-card-id")).join(",")}`);
+
+  // 判定区来源的牌（拆 / 顺）：底行写「N·武将·判定」（D10 的第三种区域）。
+  ui.state.effectCards = [];
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(251, 42, card(251, "闪电"), at("judge", 1), TO_DISCARD, "LOSE"), []);
+  ui.renderProcessing(Date.now());
+  check("U3-01c2 判定区来源的弃牌：底行 1·周瑜·判定（非牌堆来源）",
+    laneOf(251) === "discard" && labelOf(251) === "1·周瑜·判定",
+    `lane=${laneOf(251)} label=${labelOf(251)}`);
+
+  // 无帧（frame_id = 0）：停留 1s + 淡出 1s = 2s（弃牌阶段等）。
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(201, 0, card(201, "杀"), at("hand", 0), TO_DISCARD, "DISCARD"), []);
+  const noFrame = ui.state.effectCards[0];
+  check("U3-01k 无帧弃牌：fadeAt = 入台 + 1s 停留",
+    !!noFrame && noFrame.stage.fadeAt === noFrame.stage.enteredAt + 1000,
+    `fadeAt=${noFrame && noFrame.stage.fadeAt} enteredAt=${noFrame && noFrame.stage.enteredAt}`);
+  ui.renderProcessing(noFrame.stage.enteredAt + 999);
+  const beforeHold = !!stageNode(201) && !fading(201);
+  ui.renderProcessing(noFrame.stage.enteredAt + 1000);
+  const duringFade = fading(201);
+  ui.renderProcessing(noFrame.stage.enteredAt + 2000);
+  check("U3-01l 无帧弃牌：1s 内 visible、1s–2s fading、2s 后 gone",
+    beforeHold && duringFade && !stageNode(201),
+    `before=${beforeHold} fading=${duringFade} gone=${!stageNode(201)}`);
+
+  // 兜底 30s：pop 丢失（断线 / 刷新）也不留幽灵。
+  ui.state.effectCards = [];
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(301, 77, card(301, "闪"), at("hand", 1), TO_DISCARD, "DISCARD"), []);
+  const dangling = ui.state.effectCards[0];
+  ui.renderProcessing(dangling.stage.enteredAt + 29999);
+  const stillThere = !!stageNode(301) && !fading(301);
+  ui.renderProcessing(dangling.stage.enteredAt + 30000);
+  const fallbackFading = fading(301);
+  ui.renderProcessing(dangling.stage.enteredAt + 31000);
+  check("U3-01m 兜底 30s：没有 pop 也到点无条件淡出",
+    stillThere && fallbackFading && !stageNode(301),
+    `visible=${stillThere} fading=${fallbackFading} gone=${!stageNode(301)}`);
+
+  // 动画倍率 0：淡出立即完成（D15 测试口径）。
+  ui.state.effectCards = [];
+  ui.state.animScale = 0;
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(401, 0, card(401, "桃"), at("hand", 2), TO_DISCARD, "DISCARD"), []);
+  const fast = ui.state.effectCards[0];
+  ui.renderProcessing(fast.stage.enteredAt + 999);
+  const fastVisible = !!stageNode(401);
+  ui.renderProcessing(fast.stage.enteredAt + 1000);
+  check("U3-01n animScale = 0 ⇒ 淡出立即完成（不等真实时间）",
+    fastVisible && !stageNode(401), `visible=${fastVisible} gone=${!stageNode(401)}`);
+  ui.state.animScale = 1;
+
+  // 淡出期间同一张牌再次入台：撤旧项、新项重新落位（D5.6），台上始终只有一条。
+  ui.state.effectCards = [];
+  const again = card(260, "杀");
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(260, 0, again, at("hand", 0), TO_DISCARD, "DISCARD"), []);
+  const againItem = ui.state.effectCards[0];
+  ui.renderProcessing(againItem.stage.enteredAt + 1500);
+  const wasFading = fading(260);
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(261, 9, again, at("hand", 1), TO_PROCESSING, "USE"), ui.state.effectCards);
+  ui.renderProcessing(Date.now());
+  check("U3-01n2 淡出期间同一张牌再入台 ⇒ 撤旧项、只剩一条处理中项",
+    wasFading && ui.state.effectCards.length === 1
+      && laneOf(260) === "processing" && !fading(260) && stageNodes().length === 1,
+    `wasFading=${wasFading} items=${ui.state.effectCards.length} lane=${laneOf(260)} nodes=${stageNodes().length}`);
+
+  // 一次 8 张的阵亡弃置：全部落位、不折叠。
+  ui.state.effectCards = [];
+  const eight = Array.from({ length: 8 }, (_, index) => card(500 + index, "杀"));
+  ui.state.effectCards = ui.applyEffectDelta({
+    kind: "delta", delta_type: "card_move", seq: 500, frame_id: 0, depth: 1,
+    reason: "DISCARD", owner: 0, from_zone: at("hand", 0), to_zone: TO_DISCARD, cards: eight,
+  }, []);
+  ui.renderProcessing(Date.now());
+  check("U3-01o 一次 8 张弃置全部落位（8 个舞台项，不折叠成「+N」）",
+    stageNodes().length === 8
+      && stageNodes().every((node) => attr(node, "data-stage-lane") === "discard")
+      && !/\+8|\+ ?[1-9]/.test($("t-processing").text()),
+    `节点=${stageNodes().length} text="${$("t-processing").text()}"`);
+
+  // ---- commit / 换会话 / 手动刷新（D5.5）----
+  const committed = { ...view(), cursor: 501, log_seq: 0, records: [], finished: false };
+  ui.applyViewRaw(committed);
+  check("U3-01p 一批事件播完（commit）不清空弃牌组",
+    stageNodes().length === 8, `节点=${stageNodes().length}`);
+  const refreshed = { ...view(), cursor: 502, log_seq: 0, records: [], finished: false };
+  ui.applyViewRaw(refreshed);
+  check("U3-01q 同一会话的手动刷新不清空弃牌组",
+    stageNodes().length === 8, `节点=${stageNodes().length}`);
+  const otherSession = { ...view("u3-stage-2"), cursor: 0, log_seq: 0, records: [], finished: false };
+  ui.applyViewRaw(otherSession);
+  check("U3-01r 换会话清空舞台",
+    stageNodes().length === 0, `节点=${stageNodes().length}`);
+
+  // ---- 粘底滚动（D3）：新牌落位滚到底；用户手动上滚后不再打扰 ----
+  const box = $("t-processing");
+  const fireScroll = () => (box.listeners.scroll || []).forEach((fn) => fn({ target: box }));
+  box.scrollHeight = 600;
+  box.clientHeight = 253;
+  box.scrollTop = 300;
+  fireScroll();
+  const pinnedUp = attr(box, "data-stage-pinned");
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(601, 0, card(601, "杀"), at("hand", 0), TO_DISCARD, "DISCARD"), ui.state.effectCards);
+  ui.renderProcessing();
+  const keptUp = box.scrollTop === 300;
+  box.scrollTop = 600 - 253;
+  fireScroll();
+  const pinnedBottom = attr(box, "data-stage-pinned");
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(602, 0, card(602, "闪"), at("hand", 0), TO_DISCARD, "DISCARD"), ui.state.effectCards);
+  ui.renderProcessing();
+  check("U3-01s 新牌落位粘底；手动上滚后不再打扰（滚回底部后恢复）",
+    pinnedUp === "false" && keptUp && pinnedBottom === "true" && box.scrollTop === 600,
+    `up=${pinnedUp} keptUp=${keptUp} bottom=${pinnedBottom} scrollTop=${box.scrollTop}`);
+
+  // ---- 回放页复用同一套派生与卡面渲染：三组 + 淡出，但不接线 / 名字 / 白光 ----
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  const replayRecords = [
+    move(701, 10, A, at("hand", 0), TO_PROCESSING, "USE"),
+    move(702, 11, B, at("hand", 1), TO_DISCARD, "DISCARD"),
+    { kind: "delta", delta_type: "card_reveal", seq: 703, frame_id: 11, depth: 1, seat: 2, card: D },
+    pop(704, 11),
+  ];
+  ui.state.replay = {
+    name: "u3-stage-replay",
+    meta: { seed: 1, player_count: 3, human_seat: 0, heroes: ["guojia", "zhouyu", "diaochan"] },
+    records: replayRecords,
+    narrative: [],
+    index: replayRecords.length - 1,
+    seats: null,
+    query: null,
+    effectCards: [],
+    revealedCards: [],
+    appliedIndex: -1,
+    playing: false,
+    timer: null,
+  };
+  ui.renderReplay();
+  const replayNodes = $("r-processing").children.filter(
+    (node) => node.classList.contains("stage-card"));
+  const replayLane = (id) => {
+    const node = replayNodes.find((child) => attr(child, "data-card-id") === String(id));
+    return attr(node, "data-stage-lane");
+  };
+  check("U3-01t 回放页显示同样三组：处理中 / 弃牌 / 展示（pop 后展示进入淡出）",
+    replayLane(101) === "processing"
+      && replayLane(102) === "discard"
+      && replayLane(105) === "showcase"
+      && replayNodes.some((node) => node.classList.contains("fading"))
+      && $("r-effect").textContent.includes("弃牌：")
+      && $("r-effect").textContent.includes("展示："),
+    `lanes=${replayNodes.map((node) => `${attr(node, "data-card-id")}:${attr(node, "data-stage-lane")}`).join(",")} effect="${$("r-effect").textContent}"`);
+  check("U3-01u 回放页不出现目标线 / 技能名 / 白光（04 的范围裁定）",
+    byClass($("table-stage"), "target-line").length === 0
+      && byClass($("table-stage"), "skill-float").length === 0
+      && byClass($("table-stage"), "hero-flash").length === 0,
+    `lines=${byClass($("table-stage"), "target-line").length} floats=${byClass($("table-stage"), "skill-float").length}`);
+  ui.state.replay = null;
+  ui.renderReplay();
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.animScale = 1;
   ui.resetSelection();
 }
 

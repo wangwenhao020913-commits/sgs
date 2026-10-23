@@ -8,6 +8,172 @@
 
 let playbackTimer = null;
 
+/* ------------------------------------------------ 中央舞台：三组与寿命（U3-01） */
+
+/** 弃牌组的来源原因（D2 / D7）：弃置 / 重铸 / 装备替换 + 拆顺（LOSE）。
+ *  使用（USE）与判定（JUDGE）**不算弃牌**：它们只从「处理中」淡出。 */
+const DISCARD_REASONS = new Set(["DISCARD", "REFORGE", "LOSE"]);
+
+/** 区域名 → 舞台底行的中文（D10）。只用来源区域；牌堆 / 弃牌堆没有座位，不写底行。 */
+const STAGE_ZONE_LABELS = {
+  hand: "手牌",
+  equip: "装备",
+  judge: "判定",
+};
+
+/** 寿命口径（D5）：无帧停留 1s、淡出 1s；任何舞台项兜底 30s。 */
+const STAGE_HOLD_MS = 1000;
+const STAGE_FADE_MS = 1000;
+const STAGE_MAX_MS = 30000;
+
+/** 动画倍率（D15）：测试里设 `state.animScale = 0`，淡出立即完成；缺省 1。
+ *
+ * 它只缩**淡出**时长，不缩停留：停留是"看得见多久"，不是动画。
+ */
+function animScale() {
+  return typeof state.animScale === "number" ? state.animScale : 1;
+}
+
+/** 当前时刻的唯一读取口（测试用 `renderProcessing(now)` 直接喂时间，不等真实时钟）。 */
+function stageNow() {
+  return Date.now();
+}
+
+/** 舞台项 = 卡面 + 一条道 + 来源 + 决定它活多久的结算帧。
+ *
+ * 字段住在 `item.stage` 里（不是散在卡面上）：判定是**纯函数**
+ * :func:`stageLane`，只读这三个数——`enteredAt` / `fadeAt` / 承载帧。
+ * ``fadeAt === null`` = 还在等承载帧的 `pop`；兜底由 `enteredAt + 30s` 接住。
+ */
+function stageItem(card, options = {}) {
+  const now = options.enteredAt === undefined ? stageNow() : options.enteredAt;
+  const frameId = Number(options.frameId) || 0;
+  const lane = options.lane || "processing";
+  let fadeAt = options.fadeAt;
+  if (fadeAt === undefined) {
+    // 处理中：离开处理区 / 承载帧 pop 才起算；展示与弃牌：无帧固定 1s 停留，有帧等 pop。
+    fadeAt = lane === "processing" || frameId > 0 ? null : now + STAGE_HOLD_MS;
+  }
+  return {
+    ...card,
+    source: options.source !== undefined ? options.source : null,
+    targets: options.targets !== undefined ? options.targets : null,
+    currentTarget: options.currentTarget !== undefined ? options.currentTarget : null,
+    stage: {
+      lane,
+      frameId,
+      enteredAt: now,
+      fadeAt,
+      fromZone: options.fromZone || null,
+    },
+  };
+}
+
+/** 记录里的承载帧号；缺省 / 非正数 = 无帧（frame_id = 0）。
+ *
+ * 合成载荷 / 旧录像可能没有这个键：按"无帧"处理，落到 1s + 1s 的固定口径。
+ */
+function stageFrameOf(record) {
+  const frameId = Number(record && record.frame_id);
+  return Number.isFinite(frameId) && frameId > 0 ? frameId : 0;
+}
+
+/** 寿命推进（**纯函数**，D5 / D15）：`item + now → visible | fading | gone`。
+ *
+ * 判定不看计时器，也不改任何状态；`setTimeout` 只在 hold / fade 结束时触发重绘
+ * （测试直接喂 `now`，或把 `animScale` 置 0）。
+ */
+function stageLane(item, now) {
+  const stage = item && item.stage;
+  if (!stage) return "gone";
+  const enteredAt = Number(stage.enteredAt) || 0;
+  const fadeAt = stage.fadeAt === null || stage.fadeAt === undefined
+    ? enteredAt + STAGE_MAX_MS
+    : Number(stage.fadeAt);
+  const fadeMs = STAGE_FADE_MS * animScale();
+  if (now >= fadeAt + fadeMs) return "gone";
+  if (now >= fadeAt) return "fading";
+  return "visible";
+}
+
+/** 承载帧 `pop` 到了：把挂在这帧上的舞台项推进 1s 淡出（已开始的保持原锚点）。 */
+function stageStartFade(items, frameId, now) {
+  for (const item of items || []) {
+    const stage = item && item.stage;
+    if (!stage) continue;
+    if (String(stage.frameId) !== String(frameId)) continue;
+    if (stage.fadeAt === null || stage.fadeAt === undefined) stage.fadeAt = now;
+  }
+}
+
+/** 舞台项的入台顺序（D3：三组按入台顺序排在**一个**换行流里，不按组分行）。 */
+function stageCardItems(effectCards, revealCards, now) {
+  const out = [];
+  const seen = new Set();
+  for (const item of (effectCards || []).concat(revealCards || [])) {
+    if (!item || !item.stage) continue;
+    const key = String(item.card_id);
+    if (seen.has(key)) continue;  // 同一 card_id 同时只出现在一组里（D2）
+    if (stageLane(item, now) === "gone") continue;
+    seen.add(key);
+    out.push(item);
+  }
+  out.sort((left, right) => Number(left.stage.enteredAt) - Number(right.stage.enteredAt));
+  return out;
+}
+
+/** 下一次需要重绘的时刻（hold 结束 / 淡出结束 / 兜底 30s）；没有就 `null`。 */
+function nextStageDeadline(items, now) {
+  let next = null;
+  const fadeMs = STAGE_FADE_MS * animScale();
+  for (const item of items || []) {
+    const stage = item && item.stage;
+    if (!stage) continue;
+    const enteredAt = Number(stage.enteredAt) || 0;
+    const fadeAt = stage.fadeAt === null || stage.fadeAt === undefined
+      ? enteredAt + STAGE_MAX_MS
+      : Number(stage.fadeAt);
+    for (const at of [fadeAt, fadeAt + fadeMs]) {
+      if (at > now && (next === null || at < next)) next = at;
+    }
+  }
+  return next;
+}
+
+/** 舞台牌底行 = `座位号·武将名·区域`（D10）；无座位（牌堆 / 弃牌堆）或无名时省掉缺项。 */
+function stageZoneLabel(item, heroNameOf) {
+  const from = item && item.stage && item.stage.fromZone;
+  if (!from || from.seat === null || from.seat === undefined) return "";
+  const zone = STAGE_ZONE_LABELS[from.zone];
+  if (!zone) return "";
+  const hero = typeof heroNameOf === "function" ? heroNameOf(from.seat) : "";
+  return hero ? `${from.seat}·${hero}·${zone}` : `${from.seat}·${zone}`;
+}
+
+/** 舞台三组的说明文本（`#t-context` 与回放页 `#r-effect` 共用，最多 2 行由 CSS 裁）。 */
+function describeStageGroups(effectCards, revealCards, now) {
+  const items = stageCardItems(effectCards, revealCards, now);
+  const processing = items.filter(
+    (item) => item.stage.lane === "processing" && stageLane(item, now) === "visible",
+  );
+  const showcase = items.filter((item) => item.stage.lane === "showcase");
+  const discard = items.filter((item) => item.stage.lane === "discard");
+  return [describeEffect(processing), describeReveals(showcase), describeDiscards(discard)]
+    .filter(Boolean)
+    .join(" / ");
+}
+
+/** 这份视图是不是**换会话**（开新局 / 从录像回到牌桌 / 首屏）。
+ *
+ * 询问序号 / 自动提交去重键 / 舞台项都只在**同一会话**里有效；缺 `session_id` 的合成
+ * 载荷按同一会话处理（测试夹具 / 旧录像），不在每次刷新都清屏。
+ */
+function viewStartsNewSession(body) {
+  if (!state.view) return true;
+  if (!body || !body.session_id || !state.view.session_id) return false;
+  return body.session_id !== state.view.session_id;
+}
+
 /** 收到一份新视图：**有事件就先回放**，播完再提交快照与询问（报障 3 的严格顺序）。
  *
  * 回放期间 ``state.view`` 仍是**上一条**视图、提交按钮是灰的——用户看到的是事件一条条
@@ -20,6 +186,11 @@ function applyView(body) {
   for (const entry of body.narrative || []) state.narrative.push(entry);
   const incoming = body.records || [];
   const first = state.view === null;
+  // U3-01 / D5.5：换会话时舞台整块作废——上一局的牌不能在**回放新局记录之前**还留在台上。
+  if (viewStartsNewSession(body)) {
+    state.effectCards = [];
+    state.revealedCards = [];
+  }
   // U1-07：快照的处理区已经是**产物**（服务端把转化来源组换成了虚拟牌），回放期间也要
   // 按同一份映射把"来源牌进处理区"渲染成产物，否则用户会先看到两张源牌再被快照纠正。
   state.processingProducts = processingProductMap(
@@ -29,7 +200,9 @@ function applyView(body) {
     commitView(body);
     return;
   }
-  const previous = state.view && state.view.snapshot ? state.view.snapshot.processing || [] : [];
+  const previous = viewStartsNewSession(body)
+    ? []
+    : (state.view && state.view.snapshot ? state.view.snapshot.processing || [] : []);
   state.effectCards = mergeEffectCards(previous);
   state.playback = { body, records: incoming, index: 0, querySeat: state.lastQuerySeat };
   $("btn-submit").disabled = true;
@@ -148,77 +321,150 @@ function processingProductFor(cards, products = state.processingProducts) {
   return products[sourceGroupKey((cards || []).map((card) => card.card_id))] || null;
 }
 
-/** 公开亮牌的逐事件派生（M5-08a）：``card_reveal`` 上舞台，结算帧出栈时撤下。
+/** 公开亮牌的逐事件派生（M5-08a / U3-01）：``card_reveal`` 进**展示组**。
  *
- * 亮牌不移动、也不写任何「已知」状态；它只在**中央舞台 + 事件流**留痕。舞台这一份按
- * 帧记账（``revealFrame``），``frame`` 的 ``pop`` 到达即撤下——所以它不会在效果结束后
- * 粘在手牌区，也不会活过下一次使用。服务端已按展示契约补好牌面字段（``visible_record``）。
+ * 亮牌不移动、也不写任何「已知」状态；它只在**中央舞台 + 事件流**留痕。展示项挂到
+ * 承载帧（``frame_id``）：``pop`` 到达后开始 1s 淡出（D5），不再瞬删。来源取
+ * ``{seat: 亮出者, zone: "hand"}``——底行因此写得出「1·周瑜·手牌」（D10）。
+ * 服务端已按展示契约补好牌面字段（``visible_record``）。
+ *
+ * 牌组作为参数传入、返回值就是新牌组：牌桌与回放页各持一份。
  */
 function applyRevealDelta(record, cards = state.revealedCards) {
-  const held = cards || [];
+  const now = stageNow();
+  const held = (cards || []).filter((item) => stageLane(item, now) !== "gone");
   if (!record) return held;
-  if (record.kind === "frame" && record.op !== "push") {
-    return held.filter((card) => String(card.revealFrame) !== String(record.frame_id));
+  if (record.kind === "frame") {
+    if (record.op === "pop") stageStartFade(held, record.frame_id, now);
+    return held;
   }
   if (record.kind !== "delta" || record.delta_type !== "card_reveal" || !record.card) return held;
   const card = record.card;
-  const already = held.some(
-    (existing) => String(existing.card_id) === String(card.card_id)
-      && String(existing.revealFrame) === String(record.frame_id),
-  );
-  if (already) return held;
-  return [...held, { ...card, revealFrame: record.frame_id, revealedBy: record.seat }];
+  const frameId = stageFrameOf(record);
+  const existing = held.find((item) => String(item.card_id) === String(card.card_id));
+  if (existing) {
+    if (String(existing.stage && existing.stage.frameId) === String(frameId)) return held;
+    // 同一张牌在另一帧再次亮出：撤旧项，新项重新落位（D5.6）。
+    held.splice(held.indexOf(existing), 1);
+  }
+  held.push({
+    ...stageItem(card, {
+      lane: "showcase",
+      frameId,
+      enteredAt: now,
+      fromZone: { seat: record.seat, zone: "hand" },
+    }),
+    revealedBy: record.seat,
+  });
+  return held;
 }
 
-/** 效果区的逐事件派生：``card_move`` 进 / 出处理区时增删牌面。
+/** 舞台的逐事件派生（U3-01 / D2）：``card_move`` / ``card_reveal`` / 帧 ``pop``。
  *
- * 处理区是**公开区**（`snapshot.processing`），但一次响应只给**终态**；回放期间要看见
- * 【杀】【闪】【桃】停在里面，只能顺着增量把牌挪进挪出。
+ * - **处理中**：`snapshot.processing` + ``card_move`` 且 `to_zone.zone === "processing"`；
+ * - **展示**：``card_reveal`` 进展示组（火攻；反间的转组是票 02 的范围）；
+ * - **弃牌**：``card_move`` 且 `to_zone.zone === "discard"` 且原因 = 弃置 / 重铸 / 装备
+ *   替换 / 拆顺；使用（USE）与判定（JUDGE）**不进弃牌组**，只从处理中淡出。
  *
- * **为什么进区时只记使用者、不记目标**：卡牌在 ``USE_CHOOSE_TARGET`` 之后、
- * ``USE_DESIGNATE_TARGET`` 之前就进了处理区，那一刻这次使用的目标**还没定**；拿"上一次
- * 指定目标"去套会串味（【决斗】套到上一次【南蛮入侵】的 7 个目标，报障图 1）。
- * 目标在 :func:`applyUseTiming` 里等 ``USE_DESIGNATE_TARGET`` 到了再认领。
+ * **寿命**（D5）：有承载帧的展示 / 弃牌停在帧 ``pop`` 后 1s 淡出；处理中的牌离开处理区
+ * 即 1s 淡出；无帧的弃牌入台 1s 停留 + 1s 淡出；任何项兜底 30s。换组沿用同一条舞台项
+ * （不重新落位）；淡出期间同一张牌再入台 = 撤旧项、重新落位（D5.6）。
  *
  * **转化来源（U1-07）**：一组来源牌进处理区时画的是产物（`state.processingProducts`），
- * 不是来源牌本身；离场时也按同一组来源把产物移走。事件流仍是引擎原文，不受影响。
+ * 不是来源牌本身；离场时也按同一组来源把产物移走。事件流仍是引擎原文。
  * 回放页传 `products = null`：录像里没有"当前快照产物"这份展示派生，按原始 `card_move` 画。
  *
  * **牌组作为参数传入、返回值就是新牌组**：牌桌与回放页各持一份，派生函数不读 / 不写
- * ``state.effectCards``。旧签名在内部把 `state.effectCards` 整个换掉（`filter` 产生新数组），
- * 回放页借来的那份会从第二条 "离开处理区" 起就和写方分家——页面于是停在一张早已离场的牌上。
+ * ``state.effectCards``。
  */
 function applyEffectDelta(record, effectCards = state.effectCards, products = state.processingProducts) {
-  let held = effectCards || [];
+  const now = stageNow();
+  let held = (effectCards || []).filter((item) => stageLane(item, now) !== "gone");
   if (!record) return held;
   if (record.kind === "timing") {
     applyUseTiming(record, held);
+    return held;
+  }
+  if (record.kind === "frame") {
+    if (record.op === "pop") stageStartFade(held, record.frame_id, now);
     return held;
   }
   if (record.kind !== "delta" || record.delta_type !== "card_move") return held;
   const cards = record.cards || [];
   const from = record.from_zone || {};
   const to = record.to_zone || {};
+  const frameId = stageFrameOf(record);
+  const byId = (cardId) => held.find((item) => String(item.card_id) === String(cardId));
+  // 转化牌：离场的是它的来源实体牌，台上那一条是**产物**。来源牌不再单独落位。
+  const consumed = new Set();
+
   if (from.zone === "processing") {
-    const ids = new Set(cards.map((card) => card.card_id));
-    held = held.filter((card) => {
-      if (ids.has(card.card_id)) return false;
-      // 产物自己不在区域里：它的来源组全部离场时才把产物移走。
-      const sources = card.virtual_sources || [];
-      return !(sources.length && sources.every((source) => ids.has(source)));
-    });
+    const ids = new Set(cards.map((card) => String(card.card_id)));
+    for (const item of held) {
+      const sources = item.virtual_sources || [];
+      const matches = ids.has(String(item.card_id))
+        || (sources.length > 0 && sources.every((source) => ids.has(String(source))));
+      if (!matches) continue;
+      for (const source of sources) consumed.add(String(source));
+      if (to.zone === "discard" && DISCARD_REASONS.has(record.reason)) {
+        // 换组沿用同一条舞台项：来源取**首次入台**的 from_zone，寿命改挂这次结算帧。
+        item.stage.lane = "discard";
+        item.stage.frameId = frameId;
+        item.stage.fadeAt = frameId > 0 ? null : item.stage.enteredAt + STAGE_HOLD_MS;
+        continue;
+      }
+      // 离场（使用 / 判定 / 交给别人 / 五谷不命中…）→ 1s 淡出，不再瞬删。
+      if (item.stage.fadeAt === null || item.stage.fadeAt === undefined) {
+        item.stage.fadeAt = now;
+      }
+    }
   }
+
   if (to.zone === "processing") {
     const product = processingProductFor(cards, products);
     const added = product ? [product] : cards;
     for (const card of added) {
-      if (held.some((existing) => existing.card_id === card.card_id)) continue;
-      held.push({
-        ...card,
-        source: record.reason === "USE" ? record.owner : null, // 使用者随这次使用已知
-        targets: null,        // 目标等 USE_DESIGNATE_TARGET 认领
-        currentTarget: null,  // 逐目标结算时由 RESOLVE_* 覆盖
-      });
+      const existing = byId(card.card_id);
+      if (existing) {
+        // 淡出期间同一张牌再次入台：撤旧项、新项重新落位（D5.6）。
+        existing.stage.lane = "processing";
+        existing.stage.frameId = frameId;
+        existing.stage.enteredAt = now;
+        existing.stage.fadeAt = null;
+        existing.stage.fromZone = from;
+        existing.source = record.reason === "USE" ? record.owner : null;
+        existing.targets = null;
+        existing.currentTarget = null;
+        continue;
+      }
+      held.push(stageItem(card, {
+        lane: "processing",
+        frameId,
+        enteredAt: now,
+        fromZone: from,
+        source: record.reason === "USE" ? record.owner : null,
+      }));
+    }
+  }
+
+  if (to.zone === "discard" && DISCARD_REASONS.has(record.reason)) {
+    for (const card of cards) {
+      if (consumed.has(String(card.card_id))) continue;
+      const existing = byId(card.card_id);
+      if (existing) {
+        // 已从处理中组转来（上面的分支）：这里只补锚点，不重新落位。
+        existing.stage.lane = "discard";
+        existing.stage.frameId = frameId;
+        existing.stage.fadeAt = frameId > 0 ? null : existing.stage.enteredAt + STAGE_HOLD_MS;
+        continue;
+      }
+      held.push(stageItem(card, {
+        lane: "discard",
+        frameId,
+        enteredAt: now,
+        fromZone: from,
+        source: record.owner,
+      }));
     }
   }
   return held;
@@ -226,11 +472,15 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
 
 /** 时机记录对描述文本的两个贡献：认领这次使用的目标、更新"当前结算到谁"。
  *
- * 认领只看**栈顶那张处理区牌**（刚进来的那张）且要求使用者与时机 ``actor`` 相同、
- * 目标还没认领过；认领过一次就不再改，故一次使用的目标只认领自己那一份。
+ * 认领只看**还在处理中组里的最后一张牌**（刚进来的那张）且要求使用者与时机 ``actor``
+ * 相同、目标还没认领过；认领过一次就不再改，故一次使用的目标只认领自己那一份。
+ * 淡出中的牌不属于处理中组（``stageLane`` 已不是 visible），不参与认领。
  */
 function applyUseTiming(record, effectCards = state.effectCards) {
-  const held = effectCards || [];
+  const now = stageNow();
+  const held = (effectCards || []).filter(
+    (item) => item.stage && item.stage.lane === "processing" && stageLane(item, now) === "visible",
+  );
   const card = held[held.length - 1];
   if (!card) return;
   if (record.timing === "USE_DESIGNATE_TARGET") {
@@ -244,21 +494,43 @@ function applyUseTiming(record, effectCards = state.effectCards) {
   }
 }
 
-/** 把新快照的处理区并进 `state.effectCards`：同一张牌保留回放期间标注的使用者/目标。 */
+/** 把新快照的处理区并进舞台：同一张牌保留回放期间标注的使用者 / 目标。
+ *
+ * **只动处理中组**（U3-01 / D5.5）：展示 / 弃牌两组跨 ``commit`` 保留；处理中组里
+ * 快照已没有的牌 = 它已经离开处理区——开始 1s 淡出（不再瞬删）；快照里新出现的牌补进来。
+ * 同一 id 若还挂在展示 / 弃牌组又出现在处理区快照里（洗牌后再次使用），以快照为准落回
+ * 处理中组。换会话的清空在 :func:`commitView` 里做，不在这里猜。
+ */
 function mergeEffectCards(cards) {
-  const previous = new Map((state.effectCards || []).map((card) => [card.card_id, card]));
-  return (cards || []).map((card) => {
-    const held = previous.get(card.card_id);
-    return {
-      ...card,
-      source: held ? held.source : null,
-      targets: held ? held.targets : null,
-      currentTarget: held ? held.currentTarget : null,
-    };
-  });
+  const now = stageNow();
+  const wanted = new Set((cards || []).map((card) => String(card.card_id)));
+  const held = new Map();
+  for (const item of state.effectCards || []) {
+    if (!item || !item.stage) continue;
+    if (stageLane(item, now) === "gone") continue;
+    held.set(String(item.card_id), item);
+  }
+  const out = [];
+  for (const item of held.values()) {
+    if (item.stage.lane !== "processing") {
+      if (!wanted.has(String(item.card_id))) out.push(item);
+      continue;
+    }
+    if (wanted.has(String(item.card_id))) {
+      out.push(item);
+      continue;
+    }
+    if (item.stage.fadeAt === null || item.stage.fadeAt === undefined) item.stage.fadeAt = now;
+    out.push(item);
+  }
+  for (const card of cards || []) {
+    if (out.some((item) => String(item.card_id) === String(card.card_id))) continue;
+    out.push(stageItem(card, { lane: "processing", enteredAt: now, fromZone: null }));
+  }
+  return out;
 }
 
-/** 效果区（处理区）的说明文本：有牌才有一行，牌全走了就**立即清空**（用户裁定）。 */
+/** 效果区（处理中组）的说明文本：有牌才有一行，牌全走了就**立即清空**（用户裁定）。 */
 function describeEffect(cards) {
   if (!cards || !cards.length) return "";
   const parts = cards.map((card) => {
@@ -268,6 +540,18 @@ function describeEffect(cards) {
     return `【${cardName(card)}】${who}`;
   });
   return `处理中：${parts.join("、")}`;
+}
+
+/** 展示组的说明（D3 的三段之一）：只写牌名——来源在卡面底行，不重复。 */
+function describeReveals(cards) {
+  if (!cards || !cards.length) return "";
+  return `展示：${cards.map((card) => `【${cardName(card)}】`).join("、")}`;
+}
+
+/** 弃牌组的说明（D3 的三段之一）：只写牌名——来源在卡面底行，不重复。 */
+function describeDiscards(cards) {
+  if (!cards || !cards.length) return "";
+  return `弃牌：${cards.map((card) => `【${cardName(card)}】`).join("、")}`;
 }
 
 /** 处理区里某张牌的"谁对谁"：逐目标结算时写**当前**目标；否则写全部（去重使用者本人）。 */
@@ -288,9 +572,7 @@ function commitView(body) {
   // 换会话（开新局 / 从录像回到牌桌）时倒计时锚点必须作废：不同会话的询问序号会重复，
   // 沿用旧锚点会把上一局已经过去的秒数算到新局的第一个询问上。
   // `state.view === null` 也算换会话（首屏 / 测试重开一局）：自动提交的去重键不能跨局沿用。
-  const sessionChanged = !state.view
-    || (body && state.view.session_id && body.session_id
-      && state.view.session_id !== body.session_id);
+  const sessionChanged = viewStartsNewSession(body);
   if (sessionChanged) {
     state.pendingClock.seq = null;
     state.pendingClock.receivedAt = 0;
@@ -298,10 +580,11 @@ function commitView(body) {
     state.arrangeAutoSeq = null;
     // U1-06：换会话时详情窗口的座位号属于上一局，必须作废（同一局的刷新则保留）。
     state.modal.heroSeat = null;
+    // U3-01 / D5.5：舞台三组跨 commit 保留，但换会话必须清空（上一局的牌不能留在台上）。
+    state.effectCards = [];
+    state.revealedCards = [];
   }
   state.view = body;
-  // 亮牌只在【火攻】结算期间挂舞台上：处理区空了 = 那一帧已经走完（快照是权威终态）。
-  if (!(body.snapshot && (body.snapshot.processing || []).length)) state.revealedCards = [];
   state.cursor = body.cursor;
   state.logSeq = body.log_seq;
   $("t-seed").textContent = String(body.seed);
