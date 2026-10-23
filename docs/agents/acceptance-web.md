@@ -19,18 +19,27 @@ bash tools/check_env.sh
 
 ## 2 · 起服务
 
-在 SGS 仓根起（放后台任务，别占前台）：
+在 SGS 仓根起。优先用生命周期脚本（M5 retro；pid / log 在 gitignored 的 `runs/`）：
+
+```bash
+bash tools/serve-dev.sh start 8080        # 起并等到端口可连；打印 URL
+bash tools/serve-dev.sh status 8080       # 在跑？pid / URL
+bash tools/serve-dev.sh stop 8080         # 收尾
+```
+
+它底层就是 `.venv/bin/python tools/sgs_web/serve.py --host 0.0.0.0 --port 8080 --quiet`，
+log 在 `runs/serve-8080.log`。需要 effort 专属录像目录时再用原始命令：
 
 ```bash
 .venv/bin/python tools/sgs_web/serve.py --port 8080 --quiet \
   --runs-dir .scratch/<effort>/runs > .scratch/<effort>/serve.log 2>&1 &
 ```
 
-- 启动行打到 stdout，形如 `http://127.0.0.1:8080/`；以实际打印的地址为准。缺省端口是
-  **8100**，8080 只是习惯用法。端口被占就用 `--port 0`（内核分配）或换一个，不要杀未知进程。
+- 启动行形如 `http://127.0.0.1:8080/`；以实际打印的地址为准。缺省端口是 **8100**，
+  8080 只是习惯用法。端口被占就用 `--port 0`（内核分配）或换一个，不要杀未知进程。
 - `--quiet`（别名 `--no-access-log`）只关逐请求访问日志，启动行与行为不变。
 - 静态脚本是**每请求从磁盘读**的：改 `static/*.js` 后浏览器强刷即可，不必重启；只有改了
-  `serve.py` / 接入层 Python 才重启服务。
+  `serve.py` / `projection.py` / `visibility.py` 等接入层 Python 才重启服务。
 
 ## 3 · 浏览器操作（browser-skill）
 

@@ -55,7 +55,6 @@
    验收配方见 `docs/agents/acceptance-web.md`。
    浏览器 / `bsk` 探针读配置只走 **`git config --get`**（或**本地 config 副本**），写共享
    `.git/config`（`core.bare` / probe 身份）会被 `check_env` 判红并挡住全仓 git 命令。
-   多步验收准备好服务器 + 复现配方后**结束 turn**，不要用 `ask_user_question` 阻塞等结果。
 5. **派发**：同一 checkout 同时只能有一个实现者。确需并行时，每个实现者只
    `git add <显式路径>`，禁止 `git add -A` 与带 `-am` 的提交；任何人不得对别人未提交的改动做
    `git checkout --` / `git stash` / `git reset`。并行安全的前提是"改的文件不重叠"，而它只能
