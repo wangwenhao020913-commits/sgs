@@ -8,15 +8,19 @@
    **`.venv/bin/python tools/check_acceptance.py .scratch/<effort>`**：它扫该 effort 的
    `.scratch/*/issues/*.md` 里 `## Answer` 引用的 `test_*`，逐个核成"存在且绿"（模块名 /
    省略号占位 / 明说不存在的名字不算引用）。它是只读工具，**不进** `tests/run_all.sh` ——
-   `.scratch/` 是 gitignore 的，门禁不能依赖它。
-2. 唯一门禁是仓根的 **`bash tests/run_all.sh`**（全部 shell 校验 + pytest，**约 3 分钟**）。
+   `.scratch/` 是 gitignore 的，门禁不能依赖它。`/implement-spec` 收口另写
+   **`.scratch/<effort>/acceptance-map.md`**（spec 验收条目 → 断言），交给 `/code-review` 的
+   Spec 轴。
+2. 唯一门禁是仓根的 **`bash tests/run_all.sh`**（全部 shell 校验 + pytest，**约 4–5 分钟**；
+   实测 231–275 s）。
    **没有 CI、也没有默认 hook 会替你跑它。** 先跑一次 `bash tools/install-hooks.sh`
    把它接到 pre-commit 上：`src/` / `tests/` 改动跑全量，`开发文档/` / `GLOSSARY.md` /
    `AGENTS.md` / `CODING_STANDARDS.md` / `docs/` 改动跑**快速文档检查**（分级在 `tools/gate-staged.sh`）；**合并提交**
    由同源的 `.githooks/pre-merge-commit` 覆盖（`git merge` 不触发 pre-commit）。
    **放后台跑**：它超过多数前台工具调用的超时（前台跑会被打断、输出丢掉）；用后台任务
    起它，再取输出。**装好 hook 后**，提交时 hook 会替你跑对应级别，别在提交前手动重跑一遍
-   （每票白等 3 分钟）；迭代期要快就用**单文件子集**：**`.venv/bin/pytest <file>`** ——
+   （每票白等 4–5 分钟；**`wip:` 提交同样跑全量 hook**，别把它当免费检查点）；迭代期要快就用
+   **单文件子集**：**`.venv/bin/pytest <file>`** ——
    `python` 不在 PATH，门禁也只认 `$ROOT/.venv/bin/pytest`、不回退系统 pytest —— 或
    `bash tests/smoke-web.sh`。**全量失败先 `grep -nE 'FAIL|失败' <log>`** 看完全部失败，
    不要只 `tail`。
@@ -28,10 +32,13 @@
    绝不动你手上的工作树。
 4. 前端改动想快速看一眼，用 **`bash tests/smoke-web.sh`**（约 4 秒：起临时服务 +
    跑 `ui_smoke.mjs` + 收尾）。它在门禁之外，跑完整门禁才用 `tests/run_all.sh`。
-   人工**实机验收**：`.venv/bin/python tools/sgs_web/serve.py --port 8080`（**缺省端口 8100**，
-   8080 只是习惯用法；服务把实际地址打到 stdout）。验收前先 `bash tools/check_env.sh`：
-   缺 `bsk` 时 browser-skill 不可用，实机验收由用户手动做；多步验收准备好服务器 + 复现配方后
-   **结束 turn**，不要用 `ask_user_question` 阻塞等结果。
+   人工**实机验收**：**`bash tools/serve-dev.sh start|stop|status|restart [port]`**
+   （缺省端口 8100；pid / log 在 gitignored 的 `runs/serve-<port>.*`，起来后打印实际 URL）。
+   验收前先 `bash tools/check_env.sh`（只读预检）：缺 `bsk` 时 browser-skill 不可用，实机
+   验收由用户手动做；浏览器 / `bsk` 探针读配置只走 **`git config --get`**（或**本地 config
+   副本**），写共享 `.git/config`（`core.bare` / probe 身份）会被 U3 的 `check_env` 判红并
+   挡住全仓 git 命令。多步验收准备好服务器 + 复现配方后**结束 turn**，不要用
+   `ask_user_question` 阻塞等结果。
 5. **派发**：同一 checkout 同时只能有一个实现者。确需并行时，每个实现者只
    `git add <显式路径>`，禁止 `git add -A` 与带 `-am` 的提交；任何人不得对别人未提交的改动做
    `git checkout --` / `git stash` / `git reset`。并行安全的前提是"改的文件不重叠"，而它只能
@@ -45,6 +52,15 @@
    再跑全量；找该节裁定行用 **`.venv/bin/python tools/ledger_index.py --grep <票号/关键词>`**；
    实机验收找种子用 **`.venv/bin/python tools/acceptance_seed.py --players 4 --card <type>`**
    （只读起始手牌；配方写进验收票的 `## 复现配方`）。
+8. **新增检查（M5 retro）**：
+   - **`tests/test_card_family_sites.py`**：新增牌族（含【杀】的转化 / 属性变体）时，把每个
+     判族站点登记成"该拦 / 不该拦"；未登记的新站点直接判红——别只修实机撞到的那一处。
+   - **`tests/test_m5_no_leak.py`**：不泄露判据是 **delta-generic** 的（八种 delta 逐类 +
+     新增 delta 类型强制登记），别只给已知卡面补特例。
+   - **`tests/test_action_contract.py`**：界面动作 → 服务端 `parse_action` 的回环契约
+     （`tests/support/action_probe.mjs` 加载真实前端脚本，不另抄一份 JS）。
+   - **`bash tools/check_goldens.sh`**：金录像变红先用它定位（47 条标准录像的冻结字节 +
+     相对基准 ref 的既有录像未改），再决定修行为还是重录。
 
 ## Agent skills
 
