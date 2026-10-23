@@ -1,4 +1,4 @@
-"""M4 接入层的纯函数与机制单测（票 01 起；不起服务、不连网、**不 import threading**）。
+"""M4 接入层的纯函数与机制单测（票 01 起；不 serve_forever、不连网、**不 import threading**）。
 
 本文件刻意不住在 ``src/sgs/`` 的测试域里——它测的是 ``tools/sgs_web/``。
 ``sys.path`` 引导只做一次（见 :func:`_bootstrap`），让 ``sgs`` 与 ``sgs_web`` 都可导入。
@@ -334,25 +334,20 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _post_with_the_real_handler(registry, path: str, body: dict) -> tuple[int, dict]:
-    """把一条 POST 交给**真的** ``serve._Handler``（进程内；不开端口、不起线程）。
+def _handler_socket(raw: bytes):
+    """假 socket：只补 stdlib handler 需要的两个动作（``makefile`` / ``sendall``）。
 
-    未知档位的 400 是 **HTTP 层**的判据，只能从 handler 的响应里读。假 socket 只补
-    stdlib handler 需要的两个动作（``makefile`` / ``sendall``）：请求 / 响应仍按 HTTP
-    报文走，解析、路由、状态码与 JSON 都是产品代码给出的。
+    请求 / 响应仍按 HTTP 报文走：解析、路由、状态码与 JSON 都是产品代码给出的。
     """
-
     import io as _io
-
-    from sgs_web.serve import _Handler
 
     class _Buffer(_io.BytesIO):
         def close(self):  # handler.finish() 会关流；响应还要读，故忽略关闭
             pass
 
     class _Socket:
-        def __init__(self, raw: bytes) -> None:
-            self._reader = _Buffer(raw)
+        def __init__(self, payload: bytes) -> None:
+            self._reader = _Buffer(payload)
             self._writer = _Buffer()
 
         def makefile(self, mode, *args, **kwargs):  # noqa: ANN002, ANN003 - 基类签名
@@ -361,15 +356,33 @@ def _post_with_the_real_handler(registry, path: str, body: dict) -> tuple[int, d
         def sendall(self, data: bytes) -> None:
             self._writer.write(data)
 
+    return _Socket(raw)
+
+
+def _raw_response_from_the_real_handler(handler_cls, raw: bytes) -> bytes:
+    """把一段原始报文交给**真的**处理器类，返回它写出的全部字节（进程内）。"""
+    socket = _handler_socket(raw)
+    handler_cls(socket, ("127.0.0.1", 0), None)
+    return socket._writer.getvalue()
+
+
+def _post_with_the_real_handler(registry, path: str, body: dict) -> tuple[int, dict]:
+    """把一条 POST 交给**真的** ``serve._Handler``（进程内；不开端口、不起线程）。
+
+    未知档位的 400 是 **HTTP 层**的判据，只能从 handler 的响应里读。假 socket 只补
+    stdlib handler 需要的两个动作（``makefile`` / ``sendall``）：请求 / 响应仍按 HTTP
+    报文走，解析、路由、状态码与 JSON 都是产品代码给出的。
+    """
+
+    from sgs_web.serve import _Handler
+
     payload = json.dumps(body).encode("utf-8")
     raw = (
         f"POST {path} HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\n"
         f"Content-Length: {len(payload)}\r\n\r\n"
     ).encode("ascii") + payload
     handler_cls = type("_BoundHandler", (_Handler,), {"registry": registry})
-    socket = _Socket(raw)
-    handler_cls(socket, ("127.0.0.1", 0), None)
-    response = socket._writer.getvalue()
+    response = _raw_response_from_the_real_handler(handler_cls, raw)
     head, _, response_body = response.partition(b"\r\n\r\n")
     status = int(head.split(b" ", 2)[1])
     return status, json.loads(response_body.decode("utf-8"))
@@ -7359,3 +7372,101 @@ def test_skill_events_do_not_special_case_which_skill_specifies_targets() -> Non
         assert [(event["name"], event["targets"]) for event in events] == [(name, targets)], (
             f"{skill_id} 的派生：{events}"
         )
+
+
+# ---------------------------------------------------------------------------
+# retro（候选 3）：serve.py --quiet 关访问日志，启动 / 监听契约不变
+# ---------------------------------------------------------------------------
+
+
+def test_the_quiet_flag_reaches_make_server_and_keeps_the_listening_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``main`` 收下 ``--quiet``（及别名）并传给 ``make_server``；启动行一字不变。
+
+    假 server 只补 ``main`` 用到的三样东西（``server_address`` / ``serve_forever`` /
+    ``server_close``）：不绑端口、不 serve_forever，故这条用例是毫秒级的。
+    """
+    from sgs_web import serve
+
+    calls: dict[str, object] = {}
+
+    class _FakeServer:
+        server_address = ("127.0.0.1", 54321)
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt  # main 自己会吞掉，仍走 finally 收尾
+
+        def server_close(self) -> None:
+            calls["closed"] = True
+
+    def fake_make_server(port, runs_dir, host, quiet=False):  # noqa: ANN001, ANN202
+        calls.update(port=port, runs_dir=runs_dir, host=host, quiet=quiet)
+        return _FakeServer()
+
+    monkeypatch.setattr(serve, "make_server", fake_make_server)
+    expected_line = (
+        "sgs-web listening on http://127.0.0.1:54321/  " f"(runs: {serve.DEFAULT_RUNS_DIR})"
+    )
+
+    assert serve.main(["--port", "0", "--quiet"]) == 0
+    assert calls["quiet"] is True and calls["closed"] is True
+    assert expected_line in capsys.readouterr().out
+
+    # 缺省行为：不带开关 ⇒ quiet=False（访问日志照旧）。
+    calls.clear()
+    assert serve.main(["--port", "0"]) == 0
+    assert calls["quiet"] is False
+    assert expected_line in capsys.readouterr().out
+
+    # 别名同一件事。
+    calls.clear()
+    assert serve.main(["--port", "0", "--no-access-log"]) == 0
+    assert calls["quiet"] is True
+
+
+def test_quiet_suppresses_the_access_log_but_not_the_response(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``make_server(quiet=True)`` 的请求一条日志都不打，HTTP 响应照常。
+
+    真绑定一个 ``127.0.0.1:0``（内核分配）但不 ``serve_forever``：报文仍经真的
+    ``_Handler``，与 :func:`_post_with_the_real_handler` 是同一条缝。
+    """
+    from sgs_web.serve import make_server
+
+    server = make_server(port=0, runs_dir="/tmp/unused", host="127.0.0.1", quiet=True)
+    try:
+        handler_cls = server.RequestHandlerClass
+        assert handler_cls.quiet is True, "quiet 要挂在绑定后的处理器类上"
+        response = _raw_response_from_the_real_handler(
+            handler_cls, b"GET /api/heroes HTTP/1.1\r\nHost: test\r\n\r\n"
+        )
+    finally:
+        server.server_close()
+
+    status_line = response.split(b"\r\n", 1)[0]
+    assert status_line.endswith(b" 200 OK"), status_line
+    assert capsys.readouterr().out == "", "quiet 服务不该为这次请求打任何访问日志"
+
+
+def test_without_quiet_the_access_log_stays_one_line_per_request(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """不传 ``quiet`` ⇒ 默认行为原样：每个请求一行 ``[sgs-web] …``。"""
+    from sgs_web.serve import make_server
+
+    server = make_server(port=0, runs_dir="/tmp/unused", host="127.0.0.1")
+    try:
+        handler_cls = server.RequestHandlerClass
+        assert handler_cls.quiet is False
+        response = _raw_response_from_the_real_handler(
+            handler_cls, b"GET /api/heroes HTTP/1.1\r\nHost: test\r\n\r\n"
+        )
+    finally:
+        server.server_close()
+
+    status_line = response.split(b"\r\n", 1)[0]
+    assert status_line.endswith(b" 200 OK"), status_line
+    out = capsys.readouterr().out
+    assert out.count("[sgs-web]") == 1, f"缺省 = 每请求一行；实际：{out!r}"

@@ -10,7 +10,7 @@ mkdir -p "$tmp/tools" "$tmp/tests" "$tmp/src" "$tmp/开发文档" "$tmp/.venv/bi
 cp "$ROOT/tools/gate-staged.sh" "$tmp/tools/gate-staged.sh"
 
 cat > "$tmp/tests/run_all.sh" <<'STUB'
-echo full >> "$MARKER"
+echo "full $*" >> "$MARKER"
 STUB
 cat > "$tmp/tests/test_dev_docs.sh" <<'STUB'
 echo devdocs >> "$MARKER"
@@ -61,7 +61,7 @@ touch "$tmp/src/example.py"
 git -C "$tmp" add src/example.py
 [ "$(run_in_tmp --classify)" = "full" ] || { echo "FAIL: src 未分到 full"; fail=1; }
 dry="$(run_in_tmp --dry-run)"
-grep -q 'run_all.sh' <<<"$dry" || { echo "FAIL: full dry-run 缺 run_all"; fail=1; }
+grep -q 'run_all.sh --quiet' <<<"$dry" || { echo "FAIL: full dry-run 缺 run_all --quiet"; fail=1; }
 
 git -C "$tmp" reset -q
 touch "$tmp/tests/example.py"
@@ -74,7 +74,7 @@ git -C "$tmp" add README.md
 [ "$(run_in_tmp --classify)" = "skip" ] || { echo "FAIL: 无关改动未分到 skip"; fail=1; }
 [ "$(run_in_tmp --dry-run)" = "skip" ] || { echo "FAIL: skip dry-run 不是 skip"; fail=1; }
 
-# 2) 执行：docs 只跑四个快速检查，src 只跑全量
+# 2) 执行：docs 只跑四个快速检查，src 只跑全量（全量走 --quiet 摘要）
 : > "$marker"
 git -C "$tmp" reset -q
 git -C "$tmp" add "开发文档/04-AI与交互设计.md"
@@ -82,13 +82,13 @@ run_in_tmp --run "门禁 hook" >/dev/null
 for expected in devdocs skills agents "$py_cmd"; do
   grep -qx "$expected" "$marker" || { echo "FAIL: docs 执行缺 $expected"; fail=1; }
 done
-grep -qx full "$marker" && { echo "FAIL: docs 执行跑了全量"; fail=1; }
+grep -q '^full' "$marker" && { echo "FAIL: docs 执行跑了全量"; fail=1; }
 
 : > "$marker"
 git -C "$tmp" reset -q
 git -C "$tmp" add src/example.py
 run_in_tmp --run "门禁 hook" >/dev/null
-grep -qx full "$marker" || { echo "FAIL: src 执行没跑全量"; fail=1; }
+grep -qx 'full --quiet' "$marker" || { echo "FAIL: src 执行没跑 run_all --quiet"; fail=1; }
 for unexpected in devdocs skills agents "$py_cmd"; do
   grep -qx "$unexpected" "$marker" && { echo "FAIL: src 执行跑了 $unexpected"; fail=1; }
 done
@@ -99,6 +99,24 @@ git -C "$tmp" add README.md
 out="$(run_in_tmp --run "门禁 hook")"
 grep -q '跳过' <<<"$out" || { echo "FAIL: skip 执行没有跳过文案"; fail=1; }
 [ ! -s "$marker" ] || { echo "FAIL: skip 执行碰了命令"; fail=1; }
+
+# 3) 全量失败：run_all --quiet 的失败输出照旧透出，门禁必须失败
+cat > "$tmp/tests/run_all.sh" <<'STUB'
+echo "full $*" >> "$MARKER"
+echo "FAIL  test_demo.sh"
+echo "FAIL: 演示失败"
+exit 1
+STUB
+: > "$marker"
+git -C "$tmp" reset -q
+git -C "$tmp" add src/example.py
+if out="$(run_in_tmp --run "门禁 hook" 2>&1)"; then
+  echo "FAIL: 全量失败时门禁没有失败"; fail=1
+fi
+grep -qx 'full --quiet' "$marker" || { echo "FAIL: 失败路径没把 --quiet 传给 run_all"; fail=1; }
+grep -q 'FAIL  test_demo.sh' <<<"$out" || { echo "FAIL: run_all 失败摘要没有透出"; fail=1; }
+grep -q 'FAIL: 演示失败' <<<"$out" || { echo "FAIL: run_all 失败详情没有透出"; fail=1; }
+grep -q '门禁失败' <<<"$out" || { echo "FAIL: 失败路径没有门禁失败文案"; fail=1; }
 
 if [ "$fail" -eq 0 ]; then
   echo "PASS: gate-staged 分级与执行命令符合预期"

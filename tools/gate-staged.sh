@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 按**暂存区**路径分级跑门禁（W5-03 retro）：
 #
-# - src/ 或 tests/          → `bash tests/run_all.sh`（全量，约 3 分钟）
+# - src/ 或 tests/          → `bash tests/run_all.sh --quiet`（全量，约 3 分钟；只打摘要）
 # - 开发文档/、GLOSSARY.md、AGENTS.md、CODING_STANDARDS.md、docs/
 #                           → 快速文档检查（约 1 秒，不跑全量）
 # - 其它                    → 跳过
@@ -64,8 +64,10 @@ run_docs() {
 
 run_full() {
   local label="$1"
-  echo "$label：跑 bash tests/run_all.sh（约 3 分钟）……"
-  if bash tests/run_all.sh; then
+  echo "$label：跑 bash tests/run_all.sh --quiet（约 3 分钟）……"
+  # --quiet 只收「全量输出」这一层：成功 = 每条检查一行 PASS + 最终结果，失败 = 失败项的
+  # 完整输出照旧透出（run_all.sh 先打 `FAIL <测试>` 再 cat 捕获的日志）。门禁判据不变。
+  if bash tests/run_all.sh --quiet; then
     echo "$label：通过。"
   else
     echo "$label：门禁失败，本次提交被拒。"
@@ -81,7 +83,7 @@ case "$mode" in
     ;;
   --dry-run)
     case "$(classify)" in
-      full) echo "bash tests/run_all.sh" ;;
+      full) echo "bash tests/run_all.sh --quiet" ;;
       docs) docs_commands ;;
       skip) echo "skip" ;;
     esac

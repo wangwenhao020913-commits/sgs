@@ -255,6 +255,7 @@ class _Handler(BaseHTTPRequestHandler):
     """每个请求一个实例（``http.server`` 的约定）；状态都在 :class:`GameRegistry` 里。"""
 
     registry: GameRegistry
+    quiet: bool = False
     server_version = "sgs-web/0.1"
 
     # -- 工具 ---------------------------------------------------------------
@@ -288,7 +289,13 @@ class _Handler(BaseHTTPRequestHandler):
         return int(query.get("logs", ["0"])[0])
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - 基类签名
-        """把访问日志压到一行（结构化侧车日志在会话里，不在这里）。"""
+        """把访问日志压到一行（结构化侧车日志在会话里，不在这里）。
+
+        ``quiet=True``（``serve.py --quiet``）时**整条丢弃**：后台验收任务把服务输出
+        收进日志时，逐请求的 GET 行没有任何信息量，只会把真正的启动 / 报错行淹掉。
+        """
+        if self.quiet:
+            return
         print(f"[sgs-web] {self.address_string()} {format % args}", flush=True)
 
     # -- 路由 ---------------------------------------------------------------
@@ -412,18 +419,29 @@ WSL2 里浏览器跑在 Windows 那侧时，回环**可能**被 localhost 转发
 
 
 def make_server(
-    port: int = DEFAULT_PORT, runs_dir: Path | None = None, host: str = DEFAULT_HOST
+    port: int = DEFAULT_PORT,
+    runs_dir: Path | None = None,
+    host: str = DEFAULT_HOST,
+    quiet: bool = False,
 ) -> ThreadingHTTPServer:
-    """造一个已装好路由的 HTTP 服务；``port=0`` 让内核分配（``server_address[1]`` 读回）。"""
+    """造一个已装好路由的 HTTP 服务；``port=0`` 让内核分配（``server_address[1]`` 读回）。
+
+    ``quiet=True`` 把"关访问日志"这件事挂在**绑定后的处理器类**上：``_Handler.log_message``
+    只认 ``self.quiet``，故每个请求实例都看得见，不用改 ``ThreadingHTTPServer``。
+    """
     registry = GameRegistry(runs_dir=runs_dir)
-    handler = type("_BoundHandler", (_Handler,), {"registry": registry})
+    handler = type("_BoundHandler", (_Handler,), {"registry": registry, "quiet": quiet})
     server = ThreadingHTTPServer((host, port), handler)
     server.registry = registry  # type: ignore[attr-defined]
     return server
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``python tools/sgs_web/serve.py [--host H] [--port N] [--runs-dir DIR]``；把实际地址打到 stdout。"""
+    """``python tools/sgs_web/serve.py [--host H] [--port N] [--runs-dir DIR] [--quiet]``。
+
+    启动行（``sgs-web listening on …``）与 ``--quiet`` 无关：它由 ``main`` 打到 stdout，
+    后台任务仍照旧从这一行读端口。``--quiet`` 只关**逐请求**的访问日志。
+    """
     import argparse
 
     parser = argparse.ArgumentParser(prog="sgs-web", description="SGS 极简 Web 界面（M4）。")
@@ -436,9 +454,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--runs-dir", type=Path, default=DEFAULT_RUNS_DIR, help="录像目录（缺省仓根 runs/）。"
     )
+    parser.add_argument(
+        "--quiet",
+        "--no-access-log",
+        dest="quiet",
+        action="store_true",
+        help="不打印逐请求的访问日志（启动行照旧）；后台 / 验收任务用。",
+    )
     args = parser.parse_args(argv)
 
-    server = make_server(args.port, args.runs_dir, host=args.host)
+    server = make_server(args.port, args.runs_dir, host=args.host, quiet=args.quiet)
     host, port = server.server_address[:2]
     print(f"sgs-web listening on http://{host}:{port}/  (runs: {args.runs_dir})", flush=True)
     if host == "0.0.0.0":  # noqa: S104 - 显式选项，不是缺省
