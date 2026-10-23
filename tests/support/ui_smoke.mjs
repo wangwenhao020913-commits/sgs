@@ -136,9 +136,16 @@ const realFetch = globalThis.fetch;
  * 现状"这条只在真实竞态里出现的路径，也能在烟测里被跑到。注入用完即清。 */
 let staleAnswerStatus = null;   // 下一次 `/answer` 直接回这个状态码（409）
 let nextGetPending = null;      // 下一次 `GET /api/sessions` 把 `pending` 换成这一份
+/* U3-05 / D12：静默轮询的失败注入——接下来的 N 次 `GET /api/sessions/…` 直接失败。
+ * 用来钉「失败静默，连续 3 次才提示」；注入用完即清。 */
+let failNextGets = 0;
 globalThis.fetch = async (path, options) => {
   if (typeof path === "string" && path.startsWith("/api/")) {
     calls.push({ path, body: options && options.body ? JSON.parse(options.body) : null });
+    if (failNextGets > 0 && !(options && options.method) && path.startsWith("/api/sessions/")) {
+      failNextGets -= 1;
+      throw new Error("注入的取增量失败");
+    }
     if (staleAnswerStatus && path.includes("/answer")) {
       const status = staleAnswerStatus;
       staleAnswerStatus = null;
@@ -160,7 +167,9 @@ globalThis.fetch = async (path, options) => {
 };
 
 /* 计时器垫片：**只排队、不自动跑**。既有用例仍由 `flushPlayback()` 一次性冲刷；
- * 回放 play/pause 的用例显式跑一条，才能断言"暂停后计时器被清掉、播放推进只留一个"。 */
+ * 回放 play/pause 的用例显式跑一条，才能断言"暂停后计时器被清掉、播放推进只留一个"。
+ * `setInterval` 只登记（U3-05 起 2 秒轮询靠它接线）：用例按登记表取回调显式跑一拍。 */
+const intervals = [];
 const pendingTimers = new Map();
 let nextTimerId = 1;
 const runNextTimer = () => {
@@ -178,7 +187,10 @@ const windowShim = {
     return id;
   },
   clearTimeout: (id) => { pendingTimers.delete(id); },
-  setInterval: () => 0,
+  setInterval: (fn, ms) => {
+    intervals.push({ fn, ms });
+    return intervals.length;
+  },
 };
 
 const context = vm.createContext({
@@ -2687,25 +2699,26 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.state.logRecords = [];
   ui.state.view = null;
   ui.applyViewRaw(before);
-  // 步长按钮：默认 0.1s，点一下在 0.05→0.5 六档之间循环（不记住，刷新回默认）。
-  check("㉿E1 默认步长 0.1 秒", ui.state.eventDelayMs === 100, `eventDelayMs=${ui.state.eventDelayMs}`);
+  // 步长按钮：默认 0.2s（U3-05 / D13），点一下在 0.05→0.5 六档之间循环（不记住，刷新回默认）。
+  check("㉿E1 默认步长 0.2 秒", ui.state.eventDelayMs === 200, `eventDelayMs=${ui.state.eventDelayMs}`);
   check("㉿E1b 档位就是 0.05–0.5 秒六档（最小挡 0.05s 在首位）",
     JSON.stringify(ui.DELAY_STEPS_MS) === JSON.stringify([50, 100, 200, 300, 400, 500]),
     `steps=${JSON.stringify(ui.DELAY_STEPS_MS)}`);
   const delayBtn = $("btn-delay");
-  check("㉿E1c 牌桌上有步长按钮，按钮上显示当前档", !!delayBtn && delayBtn.textContent === "步长 0.1s",
+  check("㉿E1c 牌桌上有步长按钮，按钮上显示当前档", !!delayBtn && delayBtn.textContent === "步长 0.2s",
     `按钮="${delayBtn ? delayBtn.textContent : "(缺)"}"`);
   const clickDelay = () => (delayBtn.listeners.click || []).forEach((fn) => fn({ target: delayBtn }));
   clickDelay();
-  check("㉿E1d 点一下 → 0.2 秒", ui.state.eventDelayMs === 200,
+  check("㉿E1d 点一下 → 0.3 秒", ui.state.eventDelayMs === 300,
     `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
-  // 走完 0.2 / 0.3 / 0.4 / 0.5 四档，下一档就是新增的最小挡 0.05s。
-  for (let i = 0; i < 4; i += 1) clickDelay();
+  // 走完 0.4 / 0.5 / 0.05 三档：满档后落到最小挡 0.05s。
+  for (let i = 0; i < 3; i += 1) clickDelay();
   check("㉿E1f 满档后落到新的最小挡 0.05 秒，按钮文字跟着换",
     ui.state.eventDelayMs === 50 && delayBtn.textContent === "步长 0.05s",
     `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
   clickDelay();
-  check("㉿E1e 再点一下循环回默认 0.1 秒", ui.state.eventDelayMs === 100 && delayBtn.textContent.includes("0.1"),
+  clickDelay();
+  check("㉿E1e 六档循环一圈回到默认 0.2 秒", ui.state.eventDelayMs === 200 && delayBtn.textContent.includes("0.2"),
     `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
   ui.applyViewRaw(after);
   check("㉿E2 收到事件先进入回放：快照还没提交、提交按钮灰着",
@@ -13082,11 +13095,14 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && attr(lineNodes()[0], "data-line-to") === "0"
       && attr(lineNodes()[0], "data-line-from") === "1",
     `lines=${lineNodes().map((item) => `${attr(item, "data-line-from")}->${attr(item, "data-line-to")}`).join(",")}`);
+  // U3-05 起每步都全表重绘（座位节点会换），而 `animScale = 0` 的白光"到点即结束"——
+  // 故"发动时挂上"要在**发动那一步**读；"活过重绘"由 U3-05r 在 animScale = 1 下另钉。
+  const sweepAtActivation = hasClass(heroBlockOf(1), "skill-sweep")
+    && !hasClass(heroBlockOf(0), "skill-sweep");
   step();  // hp_change(3)
   check("U3-04c 白光：发动者武将块在发动时挂 .skill-sweep（裁在块内由 CSS 的 overflow:hidden 保证）",
-    hasClass(heroBlockOf(1), "skill-sweep")
-      && !hasClass(heroBlockOf(0), "skill-sweep"),
-    `seat1=${hasClass(heroBlockOf(1), "skill-sweep")} self=${hasClass($("t-self-hero"), "skill-sweep")}`);
+    sweepAtActivation,
+    `seat1=${sweepAtActivation} self=${hasClass($("t-self-hero"), "skill-sweep")}`);
 
   // ---- 同一武将块 2s 内两条：不合并 / 不去重；后一条起点抬高 14 设计单位 ----
   loadSkillBatch(
@@ -13176,6 +13192,475 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.state.view = null;
   ui.state.sessionId = null;
   ui.resetSelection();
+}
+
+/* ============ U3-05（票 05）：逐事件全表更新 / 静默轮询 / 步长 200ms ============
+ *
+ * 判据来自票面与 spec D11 / D12 / D13（步长）。载荷是**与响应体同形**的合成 view + 记录；
+ * 回放用 `stepPlayback(true)` 逐条推进（不跑真实计时器），轮询直接取 `wire()` 注册的 2s
+ * 间隔回调（垫片只登记、不自动跑）。断言只落在 DOM 与 `state.liveView` / `state.view`
+ * 的可观察值上；派生集合之外的东西（技能可用性 / 体力上限 / 上一问）另行显式钉住。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+    || String(node.className || "").split(/\s+/).includes(name)));
+  const seatNodesNow = () => [...$("t-seats").children, $("t-self-seat")];
+  const seatNodeOf = (seat) => seatNodesNow().find(
+    (node) => attr(node, "data-seat") === String(seat)) || null;
+  const seatText = (seat) => (seatNodeOf(seat) ? seatNodeOf(seat).text() : "")
+    .replace(/\s+/g, " ").trim();
+  const seatPlayer = (seat, extra = {}) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: `武将${seat}`, ...extra,
+  });
+  const basePlayers = () => [seatPlayer(0), seatPlayer(1), seatPlayer(2), seatPlayer(3)];
+  const ownPending = (seq) => ({
+    kind: "PLAY_PHASE", actor: 0, seq, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: seq }],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  const foreignPending = (seq, actor) => ({
+    kind: "PLAY_PHASE", actor, seq, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [], candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  const testSkill = (available = true) => ({
+    skill_id: "hero.test.skill", name: "测试技", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", description: "测试用技能", available, ui: {},
+  });
+  /** 一份干净的基准提交视图；`session` 相同 = 同一会话（不清 live view）。 */
+  const baseView = (session, players = basePlayers()) => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.heroes = { 0: "guojia", 1: "zhouyu", 2: "diaochan", 3: "zhangfei" };
+    out.records = [];
+    out.narrative = [];
+    out.cursor = 100;
+    out.log_seq = 0;
+    out.finished = false;
+    out.snapshot.players = players;
+    out.snapshot.self_hand = [synthCard(11, "杀"), synthCard(12, "闪")];
+    out.snapshot.deck_count = 40;
+    out.snapshot.discard = [synthCard(13, "桃")];
+    out.snapshot.processing = [];
+    out.snapshot.turn_seat = 0;
+    out.snapshot.phase = "play";
+    out.skills = [testSkill(true)];
+    out.pending = ownPending(50);
+    return out;
+  };
+  const moveRecord = (seq, options) => ({
+    kind: "delta", delta_type: "card_move", seq, frame_id: 0, depth: 0,
+    reason: options.reason || "MOVE",
+    owner: options.owner === undefined ? null : options.owner,
+    from_zone: options.from, to_zone: options.to,
+    cards: options.cards || [],
+    ...(options.cardCount === undefined ? {} : { card_count: options.cardCount }),
+  });
+  const timing = (seq, name, extra = {}) => ({
+    kind: "timing", timing: name, seq, frame_id: 0, depth: 0, targets: [], cards: [], ...extra,
+  });
+  /** 派生集合（D11 的"可派生"清单）：逐事件由记录写进 live view 的那几项。 */
+  const derived = (snapshot) => ({
+    seat: snapshot.seat,
+    deck_count: snapshot.deck_count,
+    self_hand: snapshot.self_hand.map((card) => card.card_id),
+    discard: snapshot.discard.map((card) => card.card_id),
+    turn_seat: snapshot.turn_seat,
+    phase: snapshot.phase,
+    players: snapshot.players.map((player) => ({
+      seat: player.seat,
+      hp: player.hp,
+      hand_count: player.hand_count,
+      alive: player.alive,
+      chained: Boolean(player.chained),
+      wine_active: Boolean(player.wine_active),
+      identity: player.identity,
+      identity_label: player.identity_label || null,
+      // 装备区只比**成员**：权威顺序是槽位枚举序（`SlotKind`），前端不复制第二份槽序；
+      // 判定区按置入序（`extend`），故比次序。
+      equip: player.equip.map((card) => card.card_id).sort((left, right) => left - right),
+      judge: player.judge.map((card) => card.card_id),
+    })),
+  });
+  const step = (count = 1) => {
+    for (let index = 0; index < count; index += 1) ui.stepPlayback(true);
+  };
+
+  ui.state.animScale = 1;
+
+  // ---- ① 逐事件更新 + 派生视图 vs 提交快照（不变量） ----
+  const session = "u3-live-1";
+  const equipCard = { ...synthCard(15, "青龙偃月刀"), slot: "weapon", type: "equip", attack_range: 3 };
+  const base = baseView(session);
+  ui.state.view = null;
+  ui.state.logRecords = [];
+  $("t-log").innerHTML = "";
+  ui.applyViewRaw(base);
+  check("U3-05a0 提交后 live view 从最近一次提交视图起算",
+    Boolean(ui.state.liveView) && ui.state.liveView !== ui.state.view
+      && ui.state.liveView.snapshot !== ui.state.view.snapshot
+      && JSON.stringify(derived(ui.state.liveView.snapshot))
+        === JSON.stringify(derived(base.snapshot)),
+    `live=${Boolean(ui.state.liveView)} viewSame=${ui.state.liveView === ui.state.view}`);
+
+  const tape = [
+    { kind: "delta", delta_type: "hp_change", seq: 101, frame_id: 3, depth: 1,
+      seat: 1, before: 4, after: 3, amount: -1 },
+    // 对手摸牌：隐藏区只给张数（服务端 `visible_record` 的裁剪形状）。
+    moveRecord(102, { reason: "DRAW", owner: 1, from: { seat: null, zone: "deck" },
+      to: { seat: 1, zone: "hand" }, cardCount: 2 }),
+    // 自己摸牌：牌面可见（自己的手牌不是隐藏信息）。
+    moveRecord(103, { reason: "DRAW", owner: 0, from: { seat: null, zone: "deck" },
+      to: { seat: 0, zone: "hand" }, cards: [synthCard(14, "闪")] }),
+    // 装备置入：公开区牌面。
+    moveRecord(104, { reason: "PUT", owner: 1, from: { seat: 1, zone: "hand" },
+      to: { seat: 1, zone: "equip" }, cards: [equipCard] }),
+    moveRecord(105, { reason: "DISCARD", owner: 2, from: { seat: 2, zone: "hand" },
+      to: { seat: null, zone: "discard" }, cards: [synthCard(16, "桃")] }),
+    moveRecord(106, { reason: "PUT", owner: 2, from: { seat: null, zone: "deck" },
+      to: { seat: 2, zone: "judge" }, cards: [synthCard(17, "乐不思蜀")] }),
+    { kind: "delta", delta_type: "chained_change", seq: 107, frame_id: 0, depth: 0,
+      seat: 2, chained: true },
+    { kind: "delta", delta_type: "wine_change", seq: 108, frame_id: 0, depth: 0,
+      seat: 0, active: true },
+    { kind: "delta", delta_type: "identity_reveal", seq: 109, frame_id: 0, depth: 0,
+      seat: 3, identity: "rebel" },
+    timing(110, "DEATH_BEFORE_START", { frame_id: 9, depth: 2, actor: 3, targets: [3] }),
+    timing(111, "TURN_END", { actor: 0 }),
+    timing(112, "TURN_BEFORE_START", { actor: 1 }),
+    timing(113, "TURN_START", { actor: 1 }),
+    timing(114, "PHASE_DRAW_START", { actor: 1 }),
+    timing(115, "PHASE_DRAW", { actor: 1 }),
+    timing(116, "PHASE_PLAY_START", { actor: 1 }),
+    // 重洗：弃牌堆并回牌堆（牌面是公开的；牌堆只给数量）。
+    { kind: "delta", delta_type: "deck_shuffle", seq: 117, frame_id: 0, depth: 0,
+      cards: [synthCard(13, "桃"), synthCard(16, "桃")],
+      from_zone: { seat: null, zone: "discard" }, to_zone: { seat: null, zone: "deck" } },
+  ];
+  const authoritative = baseView(session);
+  authoritative.cursor = 117;
+  authoritative.pending = ownPending(51);
+  authoritative.skills = [testSkill(false)];
+  authoritative.snapshot.players = [
+    seatPlayer(0, { hand_count: 3, wine_active: true }),
+    seatPlayer(1, { hp: 3, hp_max: 5, hand_count: 3, equip: [equipCard] }),
+    seatPlayer(2, { hand_count: 1, judge: [synthCard(17, "乐不思蜀")], chained: true }),
+    seatPlayer(3, { alive: false, identity: "rebel", identity_label: "反贼" }),
+  ];
+  authoritative.snapshot.self_hand = [synthCard(11, "杀"), synthCard(12, "闪"), synthCard(14, "闪")];
+  authoritative.snapshot.deck_count = 38;
+  authoritative.snapshot.discard = [];
+  authoritative.snapshot.turn_seat = 1;
+  authoritative.snapshot.phase = "play";
+  ui.applyViewRaw({ ...authoritative, records: tape });
+  check("U3-05a1 收到记录先回放（还没提交、表体仍是上一份视图）",
+    Boolean(ui.state.playback) && ui.state.view.cursor === 100,
+    `playback=${Boolean(ui.state.playback)} cursor=${ui.state.view.cursor}`);
+
+  step();  // 101 hp_change
+  check("U3-05a 体力随 hp_change 逐事件变化（不等到整批播完）",
+    seatText(1).includes("3/4"), `座1="${seatText(1)}"`);
+  step();  // 102 对手摸两张
+  check("U3-05b 对手手牌数随摸牌事件变化（隐藏区只给张数）",
+    seatText(1).includes("手牌 4"), `座1="${seatText(1)}"`);
+  step();  // 103 自己摸一张
+  check("U3-05c 自己的手牌数 / 手牌面随事件更新",
+    $("t-hand-count").textContent === "3 张" && $("t-hand").children.length === 3
+      && $("t-hand").children.some((node) => attr(node, "data-card-id") === "14"),
+    `count="${$("t-hand-count").textContent}" hand=${$("t-hand").children.length}`);
+  step();  // 104 装备置入
+  check("U3-05d 装备区牌面随 card_move 更新",
+    walk(seatNodeOf(1)).some((node) => attr(node, "data-card-id") === "15"),
+    `座1="${seatText(1)}"`);
+  step();  // 105 弃置进弃牌堆
+  check("U3-05e 弃牌堆数量随事件更新",
+    $("t-discard").textContent === "2", `弃牌="${$("t-discard").textContent}"`);
+  step();  // 106 判定区
+  const deckAfterSix = $("t-deck").textContent;
+  check("U3-05f 判定区牌面 / 牌堆数量随事件更新",
+    walk(seatNodeOf(2)).some((node) => attr(node, "data-card-id") === "17")
+      && deckAfterSix === "36",
+    `座2="${seatText(2)}" deck=${deckAfterSix}`);
+  step();  // 107 横置
+  check("U3-05g 横置随 chained_change 更新",
+    hasClass(seatNodeOf(2), "chained"), `座2="${seatText(2)}"`);
+  step();  // 108 酒
+  check("U3-05h 酒随 wine_change 更新（自己座位泛红）",
+    hasClass($("t-self-seat"), "wine"), `self="${$("t-self-seat").className}"`);
+  step();  // 109 身份亮明
+  const badge = walk(seatNodeOf(3)).find((node) => hasClass(node, "identity-badge"));
+  check("U3-05i 身份亮明随 identity_reveal 更新",
+    Boolean(badge) && badge.textContent === "反贼", `badge=${badge ? badge.textContent : "(缺)"}`);
+  step();  // 110 阵亡
+  check("U3-05j 阵亡随 DEATH_BEFORE_START 更新",
+    hasClass(seatNodeOf(3), "dead"), `座3="${seatText(3)}"`);
+  step(2);  // 111 TURN_END / 112 TURN_BEFORE_START
+  check("U3-05k 回合随 TURN_* 更新",
+    $("t-turn").textContent === "座位 1", `回合="${$("t-turn").textContent}"`);
+  step(2);  // 113 TURN_START / 114 PHASE_DRAW_START
+  const midPhase = $("t-phase").textContent;
+  step(2);  // 115 PHASE_DRAW / 116 PHASE_PLAY_START
+  check("U3-05l 阶段随 PHASE_* 更新",
+    midPhase === "摸牌阶段" && $("t-phase").textContent === "出牌阶段",
+    `mid="${midPhase}" now="${$("t-phase").textContent}"`);
+  step();  // 117 重洗
+  check("U3-05m 重洗把弃牌堆并回牌堆（弃牌清零 / 牌堆补回）",
+    $("t-discard").textContent === "0" && $("t-deck").textContent === "38",
+    `弃牌="${$("t-discard").textContent}" 牌堆="${$("t-deck").textContent}"`);
+
+  const liveBeforeCommit = ui.state.liveView;
+  check("U3-05n 派生视图与随后提交的权威快照一致（派生集合内）",
+    JSON.stringify(derived(liveBeforeCommit.snapshot))
+      === JSON.stringify(derived(authoritative.snapshot)),
+    `live=${JSON.stringify(derived(liveBeforeCommit.snapshot))}`
+      + ` authoritative=${JSON.stringify(derived(authoritative.snapshot))}`);
+  check("U3-05n2 逐事件（不是最后一次性跳变）：中途的牌堆数曾到 36",
+    deckAfterSix === "36" && $("t-deck").textContent === "38",
+    `mid=${deckAfterSix} final=${$("t-deck").textContent}`);
+  check("U3-05n3 不可派生字段留在最近一次提交：体力上限 / 技能可用性 / 上一问",
+    liveBeforeCommit.snapshot.players.find((player) => player.seat === 1).hp_max === 4
+      && liveBeforeCommit.skills[0].available === true
+      && liveBeforeCommit.pending.seq === 50
+      && authoritative.snapshot.players.find((player) => player.seat === 1).hp_max === 5
+      && authoritative.skills[0].available === false
+      && authoritative.pending.seq === 51,
+    `live hp_max=${liveBeforeCommit.snapshot.players[1].hp_max}`
+      + ` available=${liveBeforeCommit.skills[0].available} pending=${liveBeforeCommit.pending.seq}`);
+  ui.flushPlayback();
+  check("U3-05o 提交用权威快照覆盖 live view（不可派生字段随之更新）",
+    ui.state.playback === null
+      && ui.state.liveView !== ui.state.view
+      && ui.state.liveView.snapshot !== ui.state.view.snapshot
+      && JSON.stringify(derived(ui.state.liveView.snapshot))
+        === JSON.stringify(derived(ui.state.view.snapshot))
+      && ui.state.liveView.snapshot.players[1].hp_max === 5
+      && ui.state.liveView.skills[0].available === false
+      && ui.state.liveView.pending.seq === 51,
+    `playback=${Boolean(ui.state.playback)} hp_max=${ui.state.liveView.snapshot.players[1].hp_max}`);
+
+  // ---- ② 播放期间不画上一问的 pending 派生 UI ----
+  // 上一问是**别人**的：提交视图里那个座位挂「正在响应…」，播放期间必须收起。
+  const foreignBase = baseView("u3-live-foreign");
+  foreignBase.pending = foreignPending(50, 1);
+  ui.state.view = null;
+  ui.applyViewRaw(foreignBase);
+  const promptsBefore = walk($("t-seats")).filter((node) => hasClass(node, "seat-prompt"));
+  ui.applyViewRaw({
+    ...foreignBase, cursor: 201, pending: ownPending(51),
+    records: [{ kind: "delta", delta_type: "hp_change", seq: 201, frame_id: 3, depth: 1,
+      seat: 2, before: 4, after: 3, amount: -1 }],
+  });
+  step();
+  const promptsDuring = walk($("t-seats")).concat(walk($("t-self-seat")))
+    .filter((node) => hasClass(node, "seat-prompt"));
+  check("U3-05p 播放期间不画上一问的「正在响应…」（提交后恢复）",
+    promptsBefore.length === 1 && promptsBefore[0].textContent === "正在响应…"
+      && promptsDuring.length === 0,
+    `before=${promptsBefore.length} during=${promptsDuring.length}`);
+  ui.flushPlayback();
+  check("U3-05p2 播完提交后 pending 派生的座位提示按新询问重算",
+    walk($("t-seats")).filter((node) => hasClass(node, "seat-prompt")).length === 0
+      && ui.state.view.pending.seq === 51,
+    `prompts=${walk($("t-seats")).filter((node) => hasClass(node, "seat-prompt")).length}`);
+
+  // 上一问是**自己**的：技能按钮在提交视图里可点，播放期间不得画可点态。
+  const ownBase = baseView("u3-live-own");
+  ui.state.view = null;
+  ui.applyViewRaw(ownBase);
+  const skillButton = () => walk($("t-skills")).find(
+    (node) => attr(node, "data-skill-id") === "hero.test.skill") || null;
+  const readyBefore = skillButton();
+  ui.applyViewRaw({
+    ...ownBase, cursor: 301, pending: ownPending(51),
+    records: [{ kind: "delta", delta_type: "hp_change", seq: 301, frame_id: 3, depth: 1,
+      seat: 2, before: 4, after: 3, amount: -1 }],
+  });
+  step();
+  const readyDuring = skillButton();
+  check("U3-05q 播放期间技能按钮不画可点态（上一问的可点态收起）",
+    hasClass(readyBefore, "ready") && attr(readyBefore, "data-usable") === "true"
+      && readyBefore.disabled === false
+      && !hasClass(readyDuring, "ready") && attr(readyDuring, "data-usable") === "false"
+      && readyDuring.disabled === true
+      && $("t-prompt-skills").children.length === 0,
+    `before=${readyBefore ? readyBefore.className : "(缺)"}`
+      + ` during=${readyDuring ? readyDuring.className : "(缺)"}`
+      + ` usable=${readyDuring ? attr(readyDuring, "data-usable") : "-"}`
+      + ` promptSkills=${$("t-prompt-skills").children.length}`);
+  ui.flushPlayback();
+  check("U3-05q2 提交后可点态随新询问恢复",
+    hasClass(skillButton(), "ready") && attr(skillButton(), "data-usable") === "true",
+    `after=${skillButton() ? skillButton().className : "(缺)"}`);
+
+  // ---- ③ 每步全表重绘后，票 03/04 的线 / 描边 / 技能名仍在 ----
+  const effectsBase = baseView("u3-live-effects");
+  ui.state.view = null;
+  ui.applyViewRaw(effectsBase);
+  const designate = { kind: "timing", timing: "USE_DESIGNATE_TARGET", seq: 402,
+    frame_id: 5, depth: 1, actor: 1, source: 1, targets: [2], cards: [] };
+  const skillAction = { kind: "action", seq: 403, accepted: true, reason: null,
+    action: { kind: "ActivateSkill", answers_seq: 402,
+      skill_id: "hero.test.skill", choices: [], picks: [] } };
+  ui.applyViewRaw({
+    ...effectsBase, cursor: 404, pending: ownPending(51),
+    records: [
+      { kind: "query", seq: 401, query: { actor: 1 } },
+      designate,
+      skillAction,
+      { kind: "delta", delta_type: "hp_change", seq: 404, frame_id: 5, depth: 1,
+        seat: 2, before: 4, after: 3, amount: -1 },
+    ],
+    skill_events: [{ seq: 403, seat: 1, skill_id: "hero.test.skill", name: "测试技", targets: [] }],
+  });
+  const lineCount = () => walk($("t-target-lines")).filter(
+    (node) => hasClass(node, "target-line") && attr(node, "data-line-to") !== undefined).length;
+  const floatCount = () => walk($("t-skill-floats")).filter(
+    (node) => hasClass(node, "skill-float")).length;
+  const actingCount = () => seatNodesNow().filter((node) => hasClass(node, "acting")).length;
+  const sweptCount = () => seatNodesNow().filter((node) => {
+    const block = walk(node).find((child) => hasClass(child, "hero-block"));
+    return hasClass(block, "skill-sweep");
+  }).length + (hasClass($("t-self-hero"), "skill-sweep") ? 1 : 0);
+  step(2);  // query / designate
+  const lineAfterDesignate = lineCount();
+  const actingAfterDesignate = actingCount();
+  step();  // action → 技能名飘字 + 白光
+  const floatAfterAction = floatCount();
+  const sweepAfterAction = sweptCount();
+  step();  // hp_change → 又一次全表重绘
+  check("U3-05r 每步全表重绘后票 03/04 的线 / 描边 / 技能名 / 白光仍在（独立图层 + syncTransientEffects）",
+    lineAfterDesignate === 1 && actingAfterDesignate === 1 && floatAfterAction === 1
+      && sweepAfterAction === 1
+      && lineCount() === 1 && floatCount() === 1 && actingCount() === 1 && sweptCount() === 1,
+    `line=${lineAfterDesignate}->${lineCount()} acting=${actingAfterDesignate}->${actingCount()}`
+      + ` float=${floatAfterAction}->${floatCount()} sweep=${sweepAfterAction}->${sweptCount()}`);
+  ui.flushPlayback();
+
+  // ---- ④ 静默 2s 轮询（真会话）：没新事实时不清选择 ----
+  ui.show("table");
+  const pollSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: 60, seed: 20261013,
+  });
+  await openSession(pollSession);
+  const pollTimer = intervals.find((entry) => entry.ms === 2000);
+  check("U3-05s 2 秒轮询已接上（唯一一条 2000ms 间隔）",
+    Boolean(pollTimer) && intervals.filter((entry) => entry.ms === 2000).length === 1,
+    `intervals=${intervals.map((entry) => entry.ms).join(",")}`);
+  const pollPending = ui.state.view.pending;
+  const handCardId = (ui.state.view.snapshot.self_hand[0] || {}).card_id;
+  check("U3-05s2 静默轮询的前置：真会话停在人类询问上",
+    Boolean(pollPending) && handCardId !== undefined,
+    `pending=${pollPending ? pollPending.kind : "(无)"} card=${handCardId}`);
+  // 选到一半：焦点 / 已选目标 / 预发动本地态都摆上。
+  ui.state.focusCardId = handCardId;
+  ui.state.selectedTargets = [1];
+  ui.state.preactivation = {
+    skillId: "hero.test.skill", name: "测试技", steps: [], answers: [], cursor: 0,
+  };
+  const viewBefore = ui.state.view;
+  const ringFirst = $("t-seats").children[0];
+  const clockBefore = ui.state.pendingClock.receivedAt;
+  const idleCallsBefore = calls.length;
+  await pollTimer.fn();
+  const idleGets = calls.slice(idleCallsBefore).filter(
+    (call) => call.path.startsWith("/api/sessions/") && call.body === null);
+  check("U3-05t 静默轮询：游标与询问序号都没变 ⇒ 不提交、不重绘、不清选择",
+    idleGets.length === 1
+      && ui.state.view === viewBefore
+      && ui.state.liveView && ui.state.liveView.pending === viewBefore.pending
+      && $("t-seats").children[0] === ringFirst
+      && ui.state.focusCardId === handCardId
+      && ui.state.selectedTargets.join(",") === "1"
+      && ui.state.preactivation && ui.state.preactivation.name === "测试技"
+      && ui.state.pendingClock.receivedAt === clockBefore,
+    `gets=${idleGets.length} viewSame=${ui.state.view === viewBefore}`
+      + ` ringSame=${$("t-seats").children[0] === ringFirst}`
+      + ` focus=${ui.state.focusCardId} targets=${ui.state.selectedTargets.join(",")}`
+      + ` pre=${ui.state.preactivation ? ui.state.preactivation.name : "(清空)"}`
+      + ` clockSame=${ui.state.pendingClock.receivedAt === clockBefore}`);
+
+  // 弹窗打开期间继续轮询（超时代答靠它生效）：不因为 `state.dialog.open` 跳过。
+  ui.state.dialog.open = true;
+  const dialogCallsBefore = calls.length;
+  await pollTimer.fn();
+  const dialogGets = calls.slice(dialogCallsBefore).filter(
+    (call) => call.path.startsWith("/api/sessions/") && call.body === null);
+  ui.state.dialog.open = false;
+  check("U3-05u 弹窗打开期间仍轮询（超时代答依赖它）",
+    dialogGets.length === 1, `gets=${dialogGets.length}`);
+
+  // 失败静默：前两次页面一字不动，连续第 3 次才提示。
+  const noticeBefore = $("t-choice").textContent;
+  const failureCallsBefore = calls.length;
+  failNextGets = 1;
+  await pollTimer.fn();
+  const noticeAfterFirst = $("t-choice").textContent;
+  failNextGets = 1;
+  await pollTimer.fn();
+  const noticeAfterSecond = $("t-choice").textContent;
+  failNextGets = 1;
+  await pollTimer.fn();
+  const noticeAfterThird = $("t-choice").textContent;
+  failNextGets = 0;
+  const failureGets = calls.slice(failureCallsBefore).filter(
+    (call) => call.path.startsWith("/api/sessions/") && call.body === null).length;
+  check("U3-05v 轮询失败静默：前两次不提示，连续第 3 次才提示",
+    failureGets === 3
+      && noticeAfterFirst === noticeBefore
+      && noticeAfterSecond === noticeBefore
+      && noticeAfterThird.includes("取增量失败"),
+    `gets=${failureGets} firstSame=${noticeAfterFirst === noticeBefore}`
+      + ` secondSame=${noticeAfterSecond === noticeBefore} third="${noticeAfterThird}"`);
+
+  // ---- ⑤ 播放中 / 提交在飞时暂停轮询，commit 后恢复 ----
+  const resumeSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: 60, seed: 20261014,
+  });
+  await openSession(resumeSession);
+  ui.applyViewRaw({
+    ...resumeSession, cursor: resumeSession.cursor + 1, pending: null,
+    records: [{ kind: "delta", delta_type: "hp_change", seq: resumeSession.cursor + 1,
+      frame_id: 3, depth: 1, seat: 1, before: 4, after: 3, amount: -1 }],
+  });
+  const playCallsBefore = calls.length;
+  await pollTimer.fn();
+  const playGets = calls.slice(playCallsBefore).filter(
+    (call) => call.path.startsWith("/api/sessions/") && call.body === null).length;
+  check("U3-05w 播放中暂停轮询（整批事件播完之前不发 GET）",
+    Boolean(ui.state.playback) && playGets === 0,
+    `playback=${Boolean(ui.state.playback)} gets=${playGets}`);
+  ui.flushPlayback();
+  const resumeCallsBefore = calls.length;
+  await pollTimer.fn();
+  const resumeGets = calls.slice(resumeCallsBefore).filter(
+    (call) => call.path.startsWith("/api/sessions/") && call.body === null).length;
+  check("U3-05w2 commit 后轮询恢复", ui.state.playback === null && resumeGets === 1,
+    `playback=${Boolean(ui.state.playback)} gets=${resumeGets}`);
+  ui.state.submitBusy = true;
+  const busyCallsBefore = calls.length;
+  await pollTimer.fn();
+  const busyGets = calls.slice(busyCallsBefore).filter(
+    (call) => call.path.startsWith("/api/sessions/") && call.body === null).length;
+  ui.state.submitBusy = false;
+  check("U3-05w3 提交在飞时暂停轮询（不换掉点击前那一面）",
+    busyGets === 0, `gets=${busyGets}`);
+
+  // 收尾：状态不留给后面的用例（本段在文件末尾，只是 hygiene）。
+  ui.state.liveView = null;
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.playback = null;
+  ui.state.animScale = 1;
+  ui.resetSelection();
+  ui.state.cursor = -1;
+  ui.state.pendingClock.seq = null;
+  ui.state.pendingClock.receivedAt = 0;
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

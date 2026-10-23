@@ -915,6 +915,45 @@ def test_a_new_question_gets_a_fresh_deadline() -> None:
     assert session.timeouts == 0
 
 
+def test_an_idle_poll_is_silent_until_the_deadline_answers_for_you() -> None:
+    """D12「静默轮询」的**服务端那一半**：没新事实时游标与询问序号都不变。
+
+    前端的 2 秒轮询据此分流：两者都没变 ⇒ 只回倒计时锚点（不重绘、不清掉选到一半的牌），
+    变了才走整条提交路径。这里打 ``GameRegistry`` 这条缝（HTTP GET 的真实路径：
+    ``advance_clock`` → ``view``），钉两件事：
+
+    - 无人操作时再取一次增量：``cursor`` 与 ``pending.seq`` 原样返回、没有新记录；
+    - 轮询本身推进超时判定：到点后同一次 GET 就代答 ⇒ 游标前进、询问序号变化
+      （于是"不操作也会超时"真的发生，而不是要人点刷新）。
+    """
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {"player_count": 4, "ai": "random", "seed": 20261013, "timeout_seconds": 10.0}
+    )
+    first = registry.view(session, after=-1, logs_after=0)
+    assert first["pending"] is not None, "人类座位应当停在第一个询问上"
+
+    # 无事发生的一次轮询（与 HTTP GET 同一条路径：先 advance_clock，再 view）。
+    registry.advance_clock(session)
+    idle = registry.view(session, after=first["cursor"], logs_after=first["log_seq"])
+    assert idle["records"] == [], "没有新记录"
+    assert idle["cursor"] == first["cursor"], "游标没变 ⇒ 前端走静默分支"
+    assert idle["pending"]["seq"] == first["pending"]["seq"], "同一询问序号 ⇒ 前端不清选择"
+    assert idle["pending_since"] is not None, "倒计时锚点仍挂着"
+
+    # 把倒计时拨到过去（等价于「发呆超过时限」）：轮询这一下就会代答。
+    assert session.pending_since is not None
+    session.pending_since -= 11.0
+    registry.advance_clock(session)
+    assert session.timeouts == 1, "到时限的那一次轮询必须代答（不操作也会超时）"
+
+    after = registry.view(session, after=first["cursor"], logs_after=first["log_seq"])
+    assert after["cursor"] > first["cursor"], "代答产生了新记录 ⇒ 前端走整条提交路径"
+    assert after["pending"] is None or after["pending"]["seq"] != first["pending"]["seq"]
+
+
 # ---------------------------------------------------------------------------
 # 5. 可见面：不泄露（票 03；判据 2）
 # ---------------------------------------------------------------------------

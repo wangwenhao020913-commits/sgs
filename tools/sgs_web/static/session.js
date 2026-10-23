@@ -203,6 +203,182 @@ function viewStartsNewSession(body) {
   return body.session_id !== state.view.session_id;
 }
 
+/* ------------------------------------------------ 回放期逐事件全表更新（U3-05 / D11） */
+
+/** 一份新的 **live view**：从最近一次提交的视图复制出牌桌会用到的可变容器。
+ *
+ * 它只属于回放期：每条记录把**可见**变化写进它（见 :func:`applyLiveDelta`），`renderTable`
+ * 从它重绘；`commitView` 到时用权威快照整份覆盖。深拷贝的是牌桌会改写的容器
+ * （`players` 及其装备 / 判定区、`self_hand`、`discard`、`processing`），故逐事件派生
+ * **绝不改** `state.view` 的权威快照。
+ */
+function cloneLiveView(body) {
+  const view = { ...body };
+  const snapshot = body && body.snapshot;
+  if (!snapshot) return view;
+  view.snapshot = {
+    ...snapshot,
+    players: (snapshot.players || []).map((player) => ({
+      ...player,
+      equip: (player.equip || []).slice(),
+      judge: (player.judge || []).slice(),
+    })),
+    self_hand: (snapshot.self_hand || []).slice(),
+    discard: (snapshot.discard || []).slice(),
+    processing: (snapshot.processing || []).slice(),
+  };
+  return view;
+}
+
+/** `PHASE_<名字>_…` 时机 → 投影里的 `Phase` 枚举值。
+ *
+ * 阶段值由**阶段体**写进引擎（`_phase_prepare` / `_phase_discard_start` 都先写 `state.phase`
+ * 再发时机），故时机名里的那段就是新阶段；`_START` / `_END` / `_IDLE` 后缀不改变阶段。
+ */
+const PHASE_TIMING_VALUES = {
+  PREPARE: "prepare",
+  JUDGE: "judge",
+  DRAW: "draw",
+  PLAY: "play",
+  DISCARD: "discard",
+  FINISH: "finish",
+};
+
+/** 一条移动的张数：牌面可见时 = `cards.length`；被服务端裁掉（隐藏区）时读 `card_count`。
+ *
+ * 两个字段**互斥**（`visible_record` 只在抹掉 `cards` 时补 `card_count`），不会重复计数。
+ */
+function liveMoveCount(record) {
+  const visible = (record.cards || []).length;
+  if (visible) return visible;
+  const hidden = Number(record.card_count);
+  return Number.isFinite(hidden) && hidden > 0 ? hidden : 0;
+}
+
+/** 按牌 id 从一份公开牌表里撤掉这些牌；`cards` 为空（隐藏区移动）时原样复制。 */
+function liveRemoveCards(list, cards) {
+  if (!cards || !cards.length) return (list || []).slice();
+  const gone = new Set(cards.map((card) => String(card.card_id)));
+  return (list || []).filter((item) => !gone.has(String(item.card_id)));
+}
+
+/** 一条记录对 live view 的**可见**贡献（D11）：只写记录里真有的派生事实。
+ *
+ * 可派生：体力（`hp_change.after`）、手牌数（`card_move` 的牌面 / `card_count`）、自己的
+ * 手牌面、装备与判定区（公开区牌面）、牌堆与弃牌数（含 `deck_shuffle` 的重洗）、横置、
+ * 酒、亮明身份、阵亡（`DEATH_BEFORE_START` 的 `actor`）、回合 / 阶段（`TURN_*` / `PHASE_*`）。
+ *
+ * **不可派生的字段一律不猜**：技能可用性、体力上限、当前询问、武将名与势力留在最近一次
+ * 提交的视图里，由下一次 `commitView` 覆盖（D11）。`snapshot.processing` 也不在这里推：
+ * 舞台的处理中组由 `applyEffectDelta` 单独派生（转化牌要显示产物，快照里的实体来源牌
+ * 不是那个形状），表体渲染不读它。
+ *
+ * 就地改传入的 view（= `state.liveView`）；回放页与权威快照都不经过这里。
+ */
+function applyLiveDelta(record, view = state.liveView) {
+  if (!record || !view || !view.snapshot) return view;
+  const snapshot = view.snapshot;
+  const players = snapshot.players || [];
+  const playerAt = (seat) => players.find((player) => Number(player.seat) === Number(seat));
+  if (record.kind === "delta") {
+    if (record.delta_type === "hp_change") {
+      const player = playerAt(record.seat);
+      if (player) player.hp = Number(record.after);
+      return view;
+    }
+    if (record.delta_type === "chained_change") {
+      const player = playerAt(record.seat);
+      if (player) player.chained = Boolean(record.chained);
+      return view;
+    }
+    if (record.delta_type === "wine_change") {
+      const player = playerAt(record.seat);
+      if (player) player.wine_active = Boolean(record.active);
+      return view;
+    }
+    if (record.delta_type === "identity_reveal") {
+      const player = playerAt(record.seat);
+      if (player) {
+        player.identity = record.identity;
+        // 座位卡优先读服务端 `identity_label`；记录里只有枚举值，故按**同一份**前端映射
+        // 补出来（身份徽标的翻译点仍只有 `interaction.js:identityLabel` 一处）。
+        player.identity_label = identityLabel(record.identity);
+      }
+      return view;
+    }
+    if (record.delta_type === "deck_shuffle") {
+      // 重洗 = 弃牌堆并回牌堆（记录里 `cards` 是洗后的弃牌堆牌面，公开事实）。
+      const from = record.from_zone || {};
+      const to = record.to_zone || {};
+      if (from.zone === "discard") {
+        snapshot.discard = [];
+        if (to.zone === "deck") {
+          snapshot.deck_count = Number(snapshot.deck_count) + (record.cards || []).length;
+        }
+      }
+      return view;
+    }
+    if (record.delta_type !== "card_move") return view;
+    const cards = record.cards || [];
+    const from = record.from_zone || {};
+    const to = record.to_zone || {};
+    const count = liveMoveCount(record);
+    // 牌堆只给数量。
+    if (from.zone === "deck") snapshot.deck_count = Number(snapshot.deck_count) - count;
+    if (to.zone === "deck") snapshot.deck_count = Number(snapshot.deck_count) + count;
+    // 弃牌堆是公开区：按牌面增减。
+    if (from.zone === "discard") snapshot.discard = liveRemoveCards(snapshot.discard, cards);
+    if (to.zone === "discard") snapshot.discard = (snapshot.discard || []).concat(cards);
+    // 手牌数：来源座位先扣、目标座位再加（隐藏区移动只有张数）。
+    if (from.zone === "hand") {
+      const player = playerAt(from.seat);
+      if (player) player.hand_count = Math.max(0, Number(player.hand_count) - count);
+    }
+    if (to.zone === "hand") {
+      const player = playerAt(to.seat);
+      if (player) player.hand_count = Number(player.hand_count) + count;
+    }
+    // 自己的手牌面：服务端按同一可见性口径保证「查看者自己经手的移动牌面可见」。
+    if (from.zone === "hand" && Number(from.seat) === Number(snapshot.seat) && cards.length) {
+      snapshot.self_hand = liveRemoveCards(snapshot.self_hand, cards);
+    }
+    if (to.zone === "hand" && Number(to.seat) === Number(snapshot.seat) && cards.length) {
+      snapshot.self_hand = (snapshot.self_hand || []).concat(cards);
+    }
+    // 装备 / 判定区：公开区牌面。装备区按槽位落位，列表序不派生（渲染读 `slot`）；
+    // 判定区是 `extend` 置入序，追加即权威顺序。
+    if (from.zone === "equip" || from.zone === "judge") {
+      const player = playerAt(from.seat);
+      if (player) player[from.zone] = liveRemoveCards(player[from.zone], cards);
+    }
+    if (to.zone === "equip" || to.zone === "judge") {
+      const player = playerAt(to.seat);
+      if (player) player[to.zone] = (player[to.zone] || []).concat(cards);
+    }
+    return view;
+  }
+  if (record.kind !== "timing") return view;
+  const timing = String(record.timing || "");
+  if (timing === "DEATH_BEFORE_START") {
+    const player = playerAt(record.actor);
+    if (player) player.alive = false;
+    return view;
+  }
+  if (timing === "TURN_BEFORE_START" || timing === "TURN_START") {
+    // 回合轮转本身**没有记录**（`_step_turn` 末尾直接改 `state.turn_seat`）：这两条时机的
+    // `actor` 就是权威回合座位（前者紧跟在轮转之后、后者属于当前回合）。
+    if (record.actor !== null && record.actor !== undefined) {
+      snapshot.turn_seat = Number(record.actor);
+    }
+    return view;
+  }
+  if (timing.startsWith("PHASE_")) {
+    const phase = PHASE_TIMING_VALUES[timing.split("_")[1]];
+    if (phase) snapshot.phase = phase;
+  }
+  return view;
+}
+
 /** 收到一份新视图：**有事件就先回放**，播完再提交快照与询问（报障 3 的严格顺序）。
  *
  * 回放期间 ``state.view`` 仍是**上一条**视图、提交按钮是灰的——用户看到的是事件一条条
@@ -221,6 +397,8 @@ function applyView(body) {
     state.revealedCards = [];
     // U3-04：上一局还没触发的技能发动事件不属于新局（DOM 侧由 commit 的清屏兜底）。
     state.skillEvents = [];
+    // U3-05：live view 是"上一份提交视图的派生副本"，换会话后没有上一份可派生。
+    state.liveView = null;
   }
   // U3-04 / D8.2：技能发动是随视图下发的派生通道；先收进队列，回放走到对应的记录 seq
   // 才演出（飘名 / 白光 / 线），而不是响应一到就全部同时出现。
@@ -240,7 +418,14 @@ function applyView(body) {
     ? []
     : (state.view && state.view.snapshot ? state.view.snapshot.processing || [] : []);
   state.effectCards = mergeEffectCards(previous);
-  state.playback = { body, records: incoming, index: 0, querySeat: state.lastQuerySeat };
+  // U3-05（D11）：逐事件派生的 live view 从**最近一次提交**的视图起算（深拷贝，绝不改权威
+  // 快照）。开局那一批没有上一份提交视图（牌桌本来是空的、且整批即时冲刷），
+  // `playback.live = false`：只逐事件派生舞台，表体等 `commitView`。
+  const live = state.view !== null;
+  if (live) state.liveView = cloneLiveView(state.view);
+  state.playback = {
+    body, records: incoming, index: 0, querySeat: state.lastQuerySeat, live,
+  };
   $("btn-submit").disabled = true;
   $("btn-cancel").disabled = true;
   $("t-choice").textContent = "";
@@ -279,8 +464,20 @@ function stepPlayback(immediate) {
   else appendLog(record, playback.querySeat);
   state.effectCards = applyEffectDelta(record, state.effectCards);
   state.revealedCards = applyRevealDelta(record, state.revealedCards);
-  renderProcessing();
+  // U3-05（D11）：每条记录先把**可见**变化写进 live view，再**从它**重绘全表——手牌数 /
+  // 自己的手牌面 / 体力 / 装备与判定区 / 牌堆与弃牌数 / 横置 / 酒 / 身份 / 阵亡 /
+  // 回合与阶段都随事件走，不再等整批播完提交。
+  if (playback.live && state.liveView) {
+    applyLiveDelta(record, state.liveView);
+    // renderTable 末尾就是舞台重绘（`renderProcessing`），播放期也走同一条口。
+    renderTable();
+  } else {
+    // 开局批次没有上一份提交视图可派生：表体等 commit，舞台照旧逐事件派生。
+    renderProcessing();
+  }
   // U3-03（D8.1 / D13）：决策点高亮、使用牌目标线、体力闪。回放页不走这条路径（D14）。
+  // 放在表体重绘**之后**：描边 / 体力闪要落在新座位节点上（`syncTransientEffects` 兜住
+  // 未到寿命的那几个，这里补的是这一条记录新产生的那一个）。
   applyRecordEffects(record, playback.querySeat);
   // U3-04（D9）：技能发动的演出挂在**产生它的那条记录**的 seq 上。
   fireSkillEventsThrough(record.seq);
@@ -653,6 +850,9 @@ function commitView(body) {
     clearTransientEffects();
   }
   state.view = body;
+  // U3-05（D11）：提交即权威——live view 用这份快照整份覆盖（下一批事件从它起算）。
+  // 注意它是**副本**（`cloneLiveView`）：回放期逐事件改写的是副本，`state.view` 不动。
+  state.liveView = cloneLiveView(body);
   state.cursor = body.cursor;
   state.logSeq = body.log_seq;
   $("t-seed").textContent = String(body.seed);
@@ -729,15 +929,73 @@ async function refresh(force = false) {
   // 409 的刷新走 `refresh(true)`——那是请求**结束后**才发生的，必须放行。
   if (state.submitBusy && !force) return;
   try {
-    const body = await api(`/api/sessions/${state.sessionId}?after=${state.cursor}&logs=${state.logSeq}`);
-    applyView(body);
+    applyView(await fetchView());
   } catch (error) {
     showPageNotice(`取增量失败：${error.message}`);
   }
 }
 
+/* ------------------------------------------------ 静默轮询（U3-05 / D12） */
+
+/** 轮询节奏与失败提示阈值（D12）：每 2 秒一拍；失败静默，连续 3 次才提示。 */
+const POLL_INTERVAL_MS = 2000;
+const POLL_NOTICE_AFTER = 3;
+
+/** 连续失败次数：成功一次即归零，到第 3 次才在页面上说一句。 */
+let pollFailures = 0;
+
+/** 取一次增量（GET 的 URL / 游标口径只在这里一处；`refresh` 与 `poll` 共用）。 */
+async function fetchView() {
+  return api(`/api/sessions/${state.sessionId}?after=${state.cursor}&logs=${state.logSeq}`);
+}
+
+/** 这份响应有没有**新事实**：游标与当前询问序号都没变 ⇒ 只回倒计时锚点（D12）。
+ *
+ * 两个判据缺一不可：只看游标会漏掉"同游标但换了询问"；只看询问序号会漏掉新记录
+ * （AI 行动推着同一个询问走）。没有当前视图（首屏）时一律按"变了"处理。
+ */
+function pollIsIdle(body) {
+  if (!body || state.view === null) return false;
+  if (Number(body.cursor) !== Number(state.cursor)) return false;
+  const incoming = body.pending ? body.pending.seq : null;
+  const current = state.view.pending ? state.view.pending.seq : null;
+  return incoming === current;
+}
+
+/** 静默分支：不换视图、不重绘、不清选择——只把服务端时刻与倒计时锚点并进来。
+ *
+ * `commitView` 无条件 `resetSelection()`，直接调它会每 2 秒清掉选到一半的牌；这里因此
+ * **只**同步时间：同一询问序号`syncPendingClock` 不会重置本地锚点（`pending.js` 的唯一职责）。
+ */
+function applyIdlePoll(body) {
+  if (!state.view) return;
+  state.view.pending_since = body.pending_since;
+  syncPendingClock(state.view);
+}
+
+/** 一拍轮询：播放中 / 提交在飞时**暂停**（下一次 tick 自然恢复），弹窗打开时照常进行。
+ *
+ * - 播放中取增量会把半批事件换成"播放中快照"（提交按钮 / 倒计时都会跳），故让路；
+ * - 提交在飞时同 `refresh`：不换掉点击前那一面（U2-03 的失败回滚依赖它）；
+ * - 弹窗打开期间**继续**轮询：服务端的超时代答只在取增量时判定（`serve.py` 的
+ *   `advance_clock`），停掉它就等于"开着弹窗永远不会超时"。
+ *
+ * 失败静默（D12）：前两次一个字都不写，连续第 3 次才提示一次；任何一次成功都清零。
+ */
 async function poll() {
-  if (!state.sessionId) return;
-  await refresh();
-  window.setTimeout(poll, 1200);
+  if (!state.sessionId || state.playback || state.submitBusy) return;
+  try {
+    const body = await fetchView();
+    pollFailures = 0;
+    if (pollIsIdle(body)) {
+      applyIdlePoll(body);
+      return;
+    }
+    applyView(body);
+  } catch (error) {
+    pollFailures += 1;
+    if (pollFailures === POLL_NOTICE_AFTER) {
+      showPageNotice(`取增量失败：${error.message}`);
+    }
+  }
 }

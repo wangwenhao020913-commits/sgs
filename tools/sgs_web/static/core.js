@@ -172,8 +172,9 @@ const FREE_SPLIT = "free";
  * 【桃】在效果区一闪而过。改成逐条回放后，牌会在效果区停满一个步长。
  * **严格顺序**（用户裁定）：这一批播完才提交新的快照与询问，故播放期间禁掉提交。
  *
- * 步长改成牌桌上的按钮（0.05–0.5 秒，点一下换一档）；缺省 0.1 秒，**不记住**——
- * 刷新/换局回默认，故它只住内存（`state.eventDelayMs`），不落 localStorage。
+ * 步长改成牌桌上的按钮（0.05–0.5 秒，点一下换一档）；缺省 **0.2 秒**（U3-05 / D13：
+ * 逐事件更新全表之后，0.1 秒看不完一条），**不记住**——刷新/换局回默认，故它只住内存
+ * （`state.eventDelayMs`），不落 localStorage。
  */
 const DELAY_STEPS_MS = [50, 100, 200, 300, 400, 500];
 
@@ -181,7 +182,8 @@ const state = {
   sessionId: null,
   cursor: -1,
   logSeq: 0,
-  view: null,          // 服务端最近一次下发的会话视图
+  view: null,          // 服务端最近一次下发的会话视图（**权威**提交视图）
+  liveView: null,      // U3-05：回放期间逐事件派生的视图副本（D11；提交时被权威快照覆盖）
   focusCardId: null,   // **焦点**：正在挑目标的那张候选牌（再点一次取消）
   selectedTargets: [], // 已选目标座位
   selectedOption: null,// 内部选中态：选中的 legal_action 下标（技能 / 小选项 / 右端动作）
@@ -189,8 +191,8 @@ const state = {
   arrange: null,       // 排列（W6-03）：{key,cards,count,free,fixed,top,bottom,selected,dragging}
   preactivation: null, // 预发动（W4-1）：{skillId,name,steps,answers,cursor}；本地态，取消零提交
   convertSkill: null,  // 转化技"挑来源牌"模式（【龙胆】）：正在等玩家点一张可转化的手牌
-  playback: null,      // 事件回放：{body, records, index, querySeat}
-  eventDelayMs: 100,   // 回放步长（牌桌按钮切档）；缺省 0.1s **不随档位表首位走**
+  playback: null,      // 事件回放：{body, records, index, querySeat, live}
+  eventDelayMs: 200,   // 回放步长（牌桌按钮切档）；缺省 0.2s **不随档位表首位走**
   effectCards: [],     // 效果区里当前可见的牌；回放期间由 card_move delta 逐事件派生
   revealedCards: [],   // M5-08a：公开亮牌（card_reveal delta / pending.reveal）；按帧在舞台显示
   targetLines: [],     // U3-03：正在播的目标线（{node, from, to, enteredAt}）；由 effects.js 维护

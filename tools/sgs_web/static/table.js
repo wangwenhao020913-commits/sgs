@@ -193,8 +193,22 @@ function renderIdentityPanel(playerCount) {
 
 /* ------------------------------------------------------------------ 牌桌 */
 
+/** 牌桌渲染读的视图（U3-05 / D11）：回放期间 = 逐事件派生的 `state.liveView`，其余时候 =
+ *  权威提交视图（`commitView` 会把 live view 覆盖成它）。
+ *
+ *  回放期间 `pending` **收起**：上一问的「正在响应…」、技能可点态、手牌可点态都属于旧询问，
+ *  新询问要等这批事件播完提交（spec D11）。技能可用性等不可派生字段仍留在 live view 里，
+ *  只是不画 pending 派生的那一层。
+ */
+function tableViewForRender() {
+  if (state.playback && state.liveView) {
+    return { ...state.liveView, pending: null };
+  }
+  return state.view;
+}
+
 function renderTable() {
-  const view = state.view;
+  const view = tableViewForRender();
   if (!view) return;
   const snapshot = view.snapshot;
   $("t-phase").textContent = phaseLabel(snapshot.phase);
@@ -272,7 +286,10 @@ function renderTable() {
   for (const card of snapshot.self_hand) {
     // 置灰 / 选中**只**由 :func:`cardFace` 从"当前询问 + 这张牌"算出（票 14 §D）：
     // 弃牌、技能手选、提供 B、普通手选四条路都在那一个函数里分流，这里不再各写一份。
-    const face = cardFace(pendingNow, card);
+    // 回放期间不画上一问的选择态（焦点 / 待弃 / 预发动）——它们属于旧询问（D11）。
+    const face = state.playback
+      ? { selectable: false, selected: false, picked: false, slotIndex: -1 }
+      : cardFace(pendingNow, card);
     hand.appendChild(
       cardChip(
         card, face.selected, false, face.selectable,
@@ -344,7 +361,8 @@ function describeStage(now = stageNow()) {
  */
 function stageRevealCards(now = stageNow()) {
   const cards = (state.revealedCards || []).slice();
-  const pending = state.view && state.view.pending;
+  // 回放期间不画上一问的 `pending.reveal`：它属于旧询问，舞台此时该显示记录流派生的那几组。
+  const pending = state.playback ? null : (state.view && state.view.pending);
   const reveal = pending && pending.reveal;
   const card = reveal && reveal.card;
   if (card && !cards.some((existing) => String(existing.card_id) === String(card.card_id))) {
