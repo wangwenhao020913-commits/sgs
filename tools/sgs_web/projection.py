@@ -11,8 +11,9 @@
    - ``card_move`` 的牌面按**区域可见性**裁剪（M5-09c / spec §6 A3）：公开区照常可见，
      隐藏区（牌堆 / 手牌）只给数量（``cards`` 抹空 + ``card_count``）。判据与叙事同源，
      见 :mod:`sgs_web.visibility`；
-   - ``action`` / ``timing`` / ``delta``（除 ``card_move`` 的牌面）/ ``frame`` / ``game_end``
-     是公开事实，原样下发。
+   - ``deck_shuffle`` 的整副洗后牌序只给数量（``card_count``）；``identity_deal`` 的开局
+     暗发只放行本人 / 主公（其余 ``identity: null``，亮明 / 阵亡走 ``identity_reveal``）；
+   - ``action`` / ``timing`` / 其余 ``delta`` / ``frame`` / ``game_end`` 是公开事实，原样下发。
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ from .display import (
     suit_labels,
 )
 from .session import Session
-from .visibility import cards_visible
+from .visibility import cards_visible, deck_cards_visible, identity_visible
 
 __all__ = [
     "HARVEST_REQUIREMENT",
@@ -1618,6 +1619,13 @@ def visible_record(record: object, *, viewer: int | None = None) -> dict[str, An
     让界面仍能说"移动了几张"。判据与事件流（``sgs_web.narrative``）共用
     :func:`sgs_web.visibility.cards_visible`——一处规则，两个下发口。
 
+    M5 retro 补齐另两条 A3 面（同住 :mod:`sgs_web.visibility`）：
+
+    - ``deck_shuffle`` 的 ``cards`` 是**整副洗后牌序**：人类查看者只收 ``card_count``，
+      牌序与牌面一个都不下发（全知通道照旧）；
+    - ``identity_deal`` 是**开局暗发**：只有本人与主公的身份可见，其余置 ``null``；
+      "已亮明 / 阵亡"由公开的 ``identity_reveal`` 承载，故不需要回读引擎状态。
+
     **只过滤这一份下发**：引擎记录流保持全信息（回放 / 裁判需要），本函数不写任何状态、
     不改 schema、不碰金录像。``card_reveal``（M5-06 火攻亮牌）是公开事实，额外补展示字段。
     """
@@ -1638,6 +1646,15 @@ def visible_record(record: object, *, viewer: int | None = None) -> dict[str, An
                 # M5-09c：隐藏区的牌面不下发，只给张数——界面 / 事件流仍能说"移动了几张"。
                 raw["card_count"] = len(raw["cards"])
                 raw["cards"] = []
+        elif delta_type == "deck_shuffle" and raw.get("cards"):
+            # A3：牌堆只给数量。整副洗后牌序是引擎 / 回放的全知事实，不是人类载荷。
+            if not deck_cards_visible(viewer):
+                raw["card_count"] = len(raw["cards"])
+                raw["cards"] = []
+        elif delta_type == "identity_deal":
+            # A3：开局暗发。本人 / 主公可见，其余置空；亮明 / 阵亡走 identity_reveal。
+            if not identity_visible(raw, viewer):
+                raw["identity"] = None
     if kind == "action":
         # 公开事实：谁应答了、被接受与否；**具体选了什么**只对人类座位自己的应答展开。
         action = raw.get("action")

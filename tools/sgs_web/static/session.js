@@ -356,13 +356,14 @@ function applyLiveDelta(record, view = state.liveView) {
       return view;
     }
     if (record.delta_type === "deck_shuffle") {
-      // 重洗 = 弃牌堆并回牌堆（记录里 `cards` 是洗后的弃牌堆牌面，公开事实）。
+      // 重洗 = 弃牌堆并回牌堆。A3 下人类载荷只给数量（`cards` 抹空 + `card_count`），
+      // 故张数与 card_move 走**同一个读取口** liveMoveCount，不读牌序。
       const from = record.from_zone || {};
       const to = record.to_zone || {};
       if (from.zone === "discard") {
         snapshot.discard = [];
         if (to.zone === "deck") {
-          snapshot.deck_count = Number(snapshot.deck_count) + (record.cards || []).length;
+          snapshot.deck_count = Number(snapshot.deck_count) + liveMoveCount(record);
         }
       }
       return view;
