@@ -7,7 +7,7 @@
 池是入参、不走数据文件的 ``enabled`` 名单，这样"发放"这套机器在本票可测，而
 "数据文件里启用谁"仍留给定票。
 
-票 12 起数据文件里的启用池非空（票 12 的 16 名；M6 P0 票 01 后 19 名），故
+票 12 起数据文件里的启用池非空（票 12 的 16 名；M6 P0 票 02 后 22 名），故
 ``hero_pool=()`` 的那条断言改判为"从启用池里真发得出牌"；显式换池的路径一字未动。
 """
 
@@ -182,10 +182,10 @@ def test_an_unknown_hero_id_is_rejected():
 
 
 def test_enabled_hero_ids_reads_the_table_enablement():
-    """启用门控的只读面：M6 P0 票 01 起数据文件里有 19 名启用 ⇒ 启用池恰是那 19 名。"""
+    """启用门控的只读面：M6 P0 票 02 起数据文件里有 22 名启用 ⇒ 启用池恰是那 22 名。"""
     ids = enabled_hero_ids(HEROES)
 
-    assert len(ids) == 19
+    assert len(ids) == 22
     assert set(ids) == {
         "caocao",
         "simayi",
@@ -193,11 +193,14 @@ def test_enabled_hero_ids_reads_the_table_enablement():
         "zhangliao",
         "xuchu",
         "guojia",
+        "zhenji",
         "liubei",
         "guanyu",
+        "zhangfei",
         "zhaoyun",
         "machao",
         "zhugeliang",
+        "huangyueying",
         "sunquan",
         "zhouyu",
         "luxun",

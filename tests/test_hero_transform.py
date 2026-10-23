@@ -899,6 +899,123 @@ def test_the_guose_virtual_indulgence_still_opens_a_nullify_window_offering_null
 
 
 # ---------------------------------------------------------------------------
+# 倾国（甄姬）：一张**黑色手牌**当【闪】使用或打出（M6 票 02；§九 L962）
+#
+# 与武圣 / 国色的差别只有**区域**：牌面写的是"一张黑色**手牌**"，故源区是手牌
+# **只有手牌**（装备区的黑牌不是源——区域默认的例外，写在声明表的 ``source_zone``）。
+# ---------------------------------------------------------------------------
+
+QINGGUO = "hero.zhenji.qingguo"
+
+
+def test_qingguo_offers_a_black_hand_card_as_a_dodge():
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(BLACK_SLASH,), hero="zhenji"), SeatSpec()],
+        deck=_deck_excluding(BLACK_SLASH),
+        turn_seat=0,
+    )
+
+    virtual = _virtual(legal_actions_for(state, 0, QueryKind.DODGE, answers_seq=1), "dodge")
+
+    assert [action.card.virtual_sources for action in virtual] == [(BLACK_SLASH,)]
+    assert virtual[0].card.color is Color.BLACK, "单源转化继承原牌颜色"
+
+
+def test_qingguo_rejects_a_red_hand_card():
+    """反例：红色手牌不是源（判据是黑色，不是"任意一张手牌"）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_DODGE,), hero="zhenji"), SeatSpec()],
+        deck=_deck_excluding(RED_DODGE),
+        turn_seat=0,
+    )
+
+    assert not _virtual(legal_actions_for(state, 0, QueryKind.DODGE, answers_seq=1), "dodge")
+    assert not _virtual(
+        legal_actions_for(
+            state, 0, QueryKind.RESPOND, answers_seq=1, payload=_respond("dodge")
+        ),
+        "dodge",
+    )
+
+
+def test_qingguo_source_is_hand_only_not_the_equipment_zone():
+    """区域：牌面写"黑色**手牌**" ⇒ 装备区的黑牌不是源（与武圣 / 国色的区域默认相反）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=(BLACK_SLASH,), hero="zhenji"), SeatSpec()],
+        deck=_deck_excluding(BLACK_SLASH),
+        turn_seat=0,
+    )
+
+    assert not _virtual(legal_actions_for(state, 0, QueryKind.DODGE, answers_seq=1), "dodge")
+
+
+def test_qingguo_is_offered_in_the_play_out_response_window():
+    """「使用**或打出**」：万箭 / 南蛮的 ``RESPOND`` 窗口同样给黑手牌当【闪】。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(BLACK_SLASH,), hero="zhenji"), SeatSpec()],
+        deck=_deck_excluding(BLACK_SLASH),
+        turn_seat=0,
+    )
+
+    actions = legal_actions_for(
+        state, 0, QueryKind.RESPOND, answers_seq=1, payload=_respond("dodge")
+    )
+
+    assert [action.card.virtual_sources for action in _virtual(actions, "dodge")] == [
+        (BLACK_SLASH,)
+    ]
+
+
+def test_a_real_slash_opens_the_dodge_window_where_zhenji_offers_a_black_hand_card():
+    """**真【杀】** 打来时的整局链：甄姬的黑手牌在 ``DODGE`` 窗口里作为转化【闪】出现。
+
+    W4-fix-2 起转化牌已从暴露面收回：这一问的合法形态是清单（``transform_preactivations``）
+    里的一条来源步，提交 ``ActivateSkill(来源)`` 由引擎解析成那条 ``UseCard``。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(RED_SLASH,)),
+            SeatSpec(hand=(BLACK_SLASH,), hero="zhenji"),
+        ],
+        deck=_deck_excluding(RED_SLASH, BLACK_SLASH),
+        turn_seat=0,
+    )
+    windows: list = []
+
+    def attacker(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            return _slash_use(query, RED_SLASH, 1)
+        return None
+
+    def zhenji(query):
+        if query.kind == QueryKind.DODGE:
+            windows.append(query)
+            steps = query.transform_preactivations.get(QINGGUO)
+            assert steps, "倾国必须在【闪】窗口的清单里"
+            assert steps[0].pool[0].options == (str(BLACK_SLASH),)
+            return ActivateSkill(
+                skill_id=QINGGUO,
+                picks=(BLACK_SLASH,),
+                choices=(),
+                answers_seq=query.seq,
+            )
+        return None
+
+    engine = _run(state, [Scripted(attacker), Scripted(zhenji)], _use_frame_popped)
+
+    assert len(windows) == 1, "真【杀】照常开【闪】窗口"
+    assert BLACK_SLASH not in engine.state.player(1).hand, (
+        "转化【闪】的来源黑手牌走正常的使用路径离手"
+    )
+    assert engine.state.player(1).hp == 4, "黑手牌当【闪】成功抵消了这张【杀】"
+
+
+# ---------------------------------------------------------------------------
 # 急救（华佗）：红色牌 →【桃】，限回合外（验收 6；时机判据用 ``turn_seat``）
 # ---------------------------------------------------------------------------
 

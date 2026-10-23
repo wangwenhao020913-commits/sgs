@@ -128,11 +128,20 @@ def _outside_turn(state: GameState, seat: int) -> bool:
 def _hand_equip(state: GameState, seat: int) -> tuple[int, ...]:
     """**区域默认**：手牌 ∪ 装备（牌面没写区域时按这一档读，`GLOSSARY.md`「区域默认」）。
 
-    判定区**不默认包含**（W4-3）：五条转化技的牌面都只写"一张牌 / 一张红色牌 / 一张
-    方块牌 / 一张【杀】/【闪】"，没有一条写"区域内的牌"或"场上的牌"，故一律落到
-    手牌 + 装备。区序固定（先手牌后装备），逐种子可复现。
+    判定区**不默认包含**（W4-3）：转化技的牌面都只写"一张牌 / 一张红色牌 / 一张方块牌 /
+    一张【杀】/【闪】"，没有一条写"区域内的牌"或"场上的牌"，故一律落到手牌 + 装备。
+    区序固定（先手牌后装备），逐种子可复现。
+
+    **例外由牌面自己声明**：M6 票 02 的【倾国】写的是"一张黑色**手牌**"，故它声明
+    :func:`_hand`（只有手牌），不套用本默认——区域默认是"牌面没写区域"时的那一档，
+    不是统一强制。
     """
     return card_ids(state, seat, Zone.HAND) + card_ids(state, seat, Zone.EQUIP)
+
+
+def _hand(state: GameState, seat: int) -> tuple[int, ...]:
+    """**手牌**（牌面明写"手牌"时的区域谓词；【倾国】是第一个消费者，§九 L962）。"""
+    return card_ids(state, seat, Zone.HAND)
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +197,11 @@ def _red(state: GameState, card_id: int) -> bool:
 def _diamond(state: GameState, card_id: int) -> bool:
     """花色谓词：方块牌（【国色】）。"""
     return _convertible(state, card_id, suit="diamond")
+
+
+def _black(state: GameState, card_id: int) -> bool:
+    """颜色谓词：黑色牌（【倾国】；§九 L962）。"""
+    return _convertible(state, card_id, color=Color.BLACK)
 
 
 def _slash(state: GameState, card_id: int) -> bool:
@@ -255,8 +269,19 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         outside_turn_only=True,
         requirement="选择1张红色牌当【桃】使用",
     ),
+    # 甄姬【倾国】（M6 票 02）：一张**黑色手牌**当【闪】使用或打出（§九 L962）。
+    # 区域 = 只有手牌：牌面明写"手牌"，故不套 `_hand_equip` 的区域默认。
+    ConversionSkill(
+        hero_id="zhenji",
+        short_id="qingguo",
+        target_type_id="dodge",
+        source_zone=_hand,
+        predicate=_black,
+        scopes=(CandidateScope.DODGE, CandidateScope.RESPOND),
+        requirement="选择1张黑色手牌当【闪】使用或打出",
+    ),
 )
-"""H 族四条技能（五条声明：龙胆两个方向各一条）的逐字声明（票 03 §表）。"""
+"""H 族五条技能（六条声明：龙胆两个方向各一条）的逐字声明（票 03 §表 + M6 票 02【倾国】）。"""
 
 
 def _modifier(skill: ConversionSkill) -> Modifier:

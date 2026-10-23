@@ -19,12 +19,17 @@
 技能行为仍住 ``skills/``（ADR-009）。
 票 02（M3）再增**发放**与**启用池**两个只读面：:func:`deal_heroes`（开局按座位序决定
 谁坐哪，走 ``hero`` 子流）与 :func:`enabled_hero_ids`（启用门控的只读查询）。
+
+M6 票 02 把**牌名大类** :class:`Category` 与按 ``pack_id`` 的只读查询
+:func:`card_category` 纳入公开面：【集智】的非延时锦囊与【奇才】的锦囊都按它判族
+（"这张牌是锦囊吗"），而不是各自抄一份牌名白名单。
 """
 
 from .errors import DataLoadError, LoadError
 from .heroes import HeroDealError, deal_heroes
 from .identities import IDENTITY_LABELS, IDENTITY_ROSTERS, Identity, Mode, roster_for
 from .loader import (
+    card_category,
     enabled_hero_ids,
     hero_skill_id,
     hero_skill_ids,
@@ -34,6 +39,7 @@ from .loader import (
     validate_heroes,
 )
 from .models import (
+    Category,
     Color,
     ContentPack,
     Gender,
@@ -48,6 +54,7 @@ from .models import (
 from .rule_config import RuleConfig, validate_rule_config
 
 __all__ = (
+    "Category",
     "Color",
     "ContentPack",
     "DataLoadError",
@@ -65,6 +72,7 @@ __all__ = (
     "RuleConfig",
     "SkillType",
     "Suit",
+    "card_category",
     "color_of_suit",
     "deal_heroes",
     "enabled_hero_ids",

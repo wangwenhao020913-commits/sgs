@@ -237,3 +237,54 @@ def test_the_m6_p0_heroes_finish_a_full_ai_game_cleanly_and_replay():
     replay.run([TapePlayer(tape)] * PLAYERS)
 
     assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"
+
+
+# ---------------------------------------------------------------------------
+# M6 P0 票 02：甄姬 / 张飞 / 黄月英的**显式逐座位**全 AI 局（判据同上面四条）
+# ---------------------------------------------------------------------------
+
+M6_P0_B_HEROES: tuple[str, ...] = (
+    "zhenji",
+    "zhangfei",
+    "huangyueying",
+    "caocao",
+    "guojia",
+)
+"""票 02 的三名将 + 两名陪跑（5 人身份局；显式发放，不吃 ``hero`` 子流、不依赖启用池）。"""
+
+M6_P0_B_SEED = ACCEPTANCE_SEEDS[1]
+"""与 32 种子基准组同批的第二个种子（``ACCEPTANCE_SEEDS`` 的真源）。"""
+
+
+def test_the_m6_p0_b_heroes_finish_a_full_ai_game_cleanly_and_replay():
+    """验收：含【洛神】/【倾国】/【咆哮】/【集智】/【奇才】的全 AI 局四条判据全过。"""
+    engine = Engine.new_game(
+        seed=M6_P0_B_SEED,
+        rule_config=RuleConfig(player_count=PLAYERS),
+        pack=PACK,
+        heroes=M6_P0_B_HEROES,
+    )
+    scans = _participants(M6_P0_B_SEED)
+
+    engine.run(scans)
+
+    assert [player.hero for player in engine.state.players] == list(M6_P0_B_HEROES)
+    assert engine.finished, "必达终局"
+    tail = engine.records[-1]
+    assert tail.kind == "game_end"
+    assert tail.result in ("winner", "draw"), f"终局结果非法：{tail.result!r}"
+    _assert_endgame_identity_consistency(engine, M6_P0_B_SEED)
+    assert all(scan.illegal == 0 for scan in scans), "出现了候选集合之外的应答"
+    assert sum(scan.answers for scan in scans) > 0
+
+    replayed_seed, tape = tape_from_journal(engine.records)
+    assert replayed_seed == M6_P0_B_SEED and tape
+    replay = Engine.new_game(
+        seed=replayed_seed,
+        rule_config=RuleConfig(player_count=PLAYERS),
+        pack=PACK,
+        heroes=M6_P0_B_HEROES,
+    )
+    replay.run([TapePlayer(tape)] * PLAYERS)
+
+    assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"

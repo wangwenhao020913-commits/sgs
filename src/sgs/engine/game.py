@@ -1801,6 +1801,12 @@ class Engine:
         【刚烈】要读"不为红桃"——方块是红色但不终止，布尔读不出来。既有读
         ``skill_result`` 的两条（【八卦阵】/【铁骑】）不受影响；判定牌在写入前已进弃牌堆，
         回写的是不可变的 ``CardRef`` 事实，不是位置。
+
+        M6 票 02 起**发起帧不一定是栈上的结算帧**：【洛神】是**阶段体**（准备阶段）里的
+        多轮判定，而阶段体的那个帧住 ``Engine._turn_data``、从不压栈（票 10 的"帧外阶段体"）。
+        ``frame_id`` 因此对阶段体帧恒为 0，唯一可用的身份是"它正在跑哪个技能"
+        （:data:`~sgs.skills.RUNNING_SKILL_KEY`，派发环在调回调前写入），与判定帧自己带的
+        ``skill_id`` 对照。找不到任何发起帧才抛错——那是结算栈真被破坏了。
         """
         parent_id = frame.data.get("activation_parent")
         judge_card = frame.data.get("judge_card")
@@ -1809,6 +1815,16 @@ class Engine:
             if candidate.frame_id == parent_id:
                 candidate.data["skill_result"] = red
                 candidate.data[SKILL_JUDGMENT_CARD_KEY] = judge_card
+                return
+        skill_id = frame.data.get("skill_id")
+        for value in self._turn_data.values():
+            if (
+                isinstance(value, Frame)
+                and value.frame_id == parent_id
+                and value.data.get(RUNNING_SKILL_KEY) == skill_id
+            ):
+                value.data["skill_result"] = red
+                value.data[SKILL_JUDGMENT_CARD_KEY] = judge_card
                 return
         raise RuntimeError(f"判定发起帧 {parent_id} 不在栈上；结算栈被破坏")
 

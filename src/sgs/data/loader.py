@@ -23,6 +23,7 @@ from collections import Counter
 from collections.abc import Mapping
 from functools import lru_cache
 from importlib.resources import files
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import ValidationError
@@ -35,6 +36,7 @@ __all__ = [
     "HERO_SKILL_PREFIX",
     "KNOWN_HEROES_SCHEMA_VERSIONS",
     "KNOWN_SCHEMA_VERSIONS",
+    "card_category",
     "enabled_hero_ids",
     "hero_skill_id",
     "hero_skill_ids",
@@ -587,6 +589,29 @@ def load_content_pack(
             ]
         )
     return pack.model_copy(update={"deck_profile": deck_profile})
+
+
+@lru_cache(maxsize=None)
+def _card_category_table(pack_id: str) -> Mapping[str, Category]:
+    """``pack_id`` 的 ``card_type_id → 大类`` 只读表（按包缓存；``load_content_pack`` 本身也是缓存的）。"""
+    pack = load_content_pack(pack_id)
+    return MappingProxyType(
+        {card_type.id: card_type.category for card_type in pack.card_types}
+    )
+
+
+def card_category(pack_id: str, type_id: str) -> Category | None:
+    """``pack_id`` 内容包里 ``type_id`` 这张牌的**大类**；未知牌名返回 ``None``（M6 票 02）。
+
+    牌名大类（``basic`` / ``trick`` / ``equipment``）是**数据文件**的事实（`03` §2「卡牌数据模型」），
+    而运行期只有"这张牌是锦囊吗"这一个读取方（【集智】的非延时锦囊 / 【奇才】的锦囊）：
+    两者都拿 ``CardRef.type`` 来问，故这里按 ``pack_id`` 建一张只读表。
+
+    缓存只按 ``pack_id`` 分桶：``card_types`` 与 ``deck_profile`` 无关（档位只改牌堆组成）。
+    查不到牌名**不抛错**——fail-closed 返回 ``None``，调用方按"不是锦囊"处理（虚拟牌 /
+    未来新增牌名漏配时是"不发动"，不是崩）。
+    """
+    return _card_category_table(pack_id).get(type_id)
 
 
 # ---------------------------------------------------------------------------

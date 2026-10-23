@@ -2378,7 +2378,11 @@ def test_every_seat_carries_the_public_skill_list_for_the_detail_window() -> Non
     所有座位下发；它是**只读展示**清单，不带 `available` / `preactivated` /
     `ui.convert_sources`——那三样读的是**当前询问与本人手牌**，对别人就是暗置信息。
     """
-    session = Session(seed=20261012, ai="heuristic", timeout_seconds=None, player_count=4)
+    # 种子的判据（判据未放宽）：快照必须发生在**任何 AI 回合之前**——人类座位是主公、
+    # 由他开局，故此刻没有任何座位装备过牌，详情清单里只有武将技能（下面断的就是它）。
+    # M6 P0 票 02 换池（启用池 22 名）后原 seed 20261012 的人类不再是主公、AI 回合先跑，
+    # 座位 3 已装上两张装备；按同一判据重扫到 20261016（人类主公、四座清单全 HERO）。
+    session = Session(seed=20261016, ai="heuristic", timeout_seconds=None, player_count=4)
     snapshot = visible_snapshot(session)
 
     assert len(snapshot["players"]) == 4
@@ -4622,7 +4626,7 @@ def test_a_bare_query_rebuilds_transformed_source_cards_from_the_query_itself() 
 
 
 # ---------------------------------------------------------------------------
-# U1-04b 描述全文：43 个牌名 + 54 条技能（独立内容文件，不进引擎 / 录像）
+# U1-04b 描述全文：43 个牌名 + 59 条技能（独立内容文件，不进引擎 / 录像）
 # ---------------------------------------------------------------------------
 
 MILITARY_CARD_TYPE_IDS = frozenset(
@@ -4644,7 +4648,7 @@ MILITARY_CARD_TYPE_IDS = frozenset(
 
 
 def test_every_card_name_and_skill_id_has_a_description() -> None:
-    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 54 条技能一条不缺。
+    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 59 条技能一条不缺。
 
     缺一条时断言消息**直接列出缺的 key**（不是只报一个总数）——这是票面的验收判据。
     多余 / 拼错的 key 也一并拦：否则「43 条」可以是 42 条真条目 + 1 条错拼。
@@ -4663,7 +4667,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 54, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 59, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

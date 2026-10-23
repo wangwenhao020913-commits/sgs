@@ -78,7 +78,7 @@
       "gender": "female",
       "hp_max": 3,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "qingguo", "name": "倾国", "skill_type": "NORMAL" },
         { "id": "luoshen", "name": "洛神", "skill_type": "NORMAL" }
@@ -114,7 +114,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "paoxiao", "name": "咆哮", "skill_type": "NORMAL" }]
     },
     {
@@ -160,7 +160,7 @@
       "gender": "female",
       "hp_max": 3,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [
         { "id": "jizhi", "name": "集智", "skill_type": "NORMAL" },
         { "id": "qicai", "name": "奇才", "skill_type": "NORMAL" }

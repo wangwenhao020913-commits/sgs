@@ -806,6 +806,10 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         # 两点伤害按"1 点 ≈ 3.5、两张最便宜的牌 ≈ 2"估计 ⇒ 能弃牌就弃牌。
         "discard_two": -2.0,
         "take_damage": -3.5,
+        # 【洛神】（M6 票 02）每个黑色判定结果后的「是否继续」：再来一轮=白拿一张黑牌；
+        # 停=保住现状。判据是"红色才停"，故每轮继续恒为正（不做概率模型）。
+        "repeat": 2.0,
+        "stop": 0.0,
     }
 )
 
@@ -1558,6 +1562,11 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(2.0),
         "少摸一张换本回合【杀】/【决斗】+1：进攻回合值得",
     ),
+    "hero.zhenji.luoshen": (
+        _constant(3.0),
+        "准备阶段判定：黑色则白拿一张并可继续，红色才停——恒为正",
+    ),
+    "hero.zhenji.qingguo": (_constant(2.0), "黑色手牌当【闪】：多一条防御路径"),
     "hero.guojia.tiandu": (_constant(2.0), "获得此判定牌：额外一张手牌"),
     "hero.guojia.yiji": (_constant(4.5), "受伤后摸两张并可分配：净赚两张"),
     # 蜀
@@ -1567,6 +1576,7 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.zhaoyun.longdan": (_constant(2.0), "【杀】⇄【闪】互转：攻防两便"),
     "hero.machao.tieqi": (_constant(2.5), "使用【杀】后判定，通过则目标不可响应：助此【杀】命中"),
     "hero.zhugeliang.guanxing": (_constant(3.0), "准备阶段观看牌堆顶并按任意顺序放回：改善摸牌"),
+    "hero.huangyueying.jizhi": (_constant(3.0), "使用非延时锦囊时摸一张：净赚"),
     # 吴
     "hero.sunquan.zhiheng": (_score_zhiheng, "弃任意张摸等量：换牌质量（弃【桃】/【闪】扣分）"),
     "hero.zhouyu.yingzi": (_constant(2.5), "摸牌阶段多摸一张：净赚一张"),

@@ -144,13 +144,13 @@ def test_hero_skill_ids_are_fully_qualified_and_keep_the_data_order():
 def test_the_enabled_flag_is_required_and_read_back_from_the_data(monkeypatch):
     """``enabled`` 是声明式字段：数据里没写就是结构错误，写了就原样读出（不静默取默认）。
 
-    M6 票 01 起数据文件里 **19 名**启用（P0 三票收口后到 25）、6 名未启用；这里钉的是
+    M6 票 02 起数据文件里 **22 名**启用（P0 三票收口后到 25）、3 名未启用；这里钉的是
     **两种取值都能原样读出**，而不是"全表都关"。
     """
     table = load_heroes()
 
     assert len(table.heroes) == STANDARD_HERO_COUNT
-    assert sum(hero.enabled for hero in table.heroes) == 19
+    assert sum(hero.enabled for hero in table.heroes) == 22
 
     _patch_catalog(monkeypatch)
     raw = _heroes_raw()
@@ -168,16 +168,16 @@ def test_the_enabled_flag_is_required_and_read_back_from_the_data(monkeypatch):
 def test_disabled_heroes_load_even_when_their_skills_are_not_implemented():
     """未启用的武将只查结构与唯一性：技能还没实现也照样加载整张表。
 
-    判据取**尚未实现**的技能（甄姬【洛神】：M6 票 02 才落地，故她此刻仍未启用、
-    ``hero.zhenji.luoshen`` 不在 ``CATALOG``），故这条断言验的是"条件化引用校验"，
+    判据取**尚未实现**的技能（甘宁【奇袭】：M6 P0 收口也还没轮到，故他仍未启用、
+    ``hero.ganning.qixi`` 不在 ``CATALOG``），故这条断言验的是"条件化引用校验"，
     不随 P0 的票依次推进而失效（M3 的落点记录曾拿 ``hero.xiahoudun.ganglie`` 当"明确不做"
-    的反例；M6 票 01 起它已登记、夏侯惇已启用，故改用甄姬）。
+    的反例；M6 票 01 起它已登记；票 02 又把甄姬 / 张飞 / 黄月英启用，故改用甘宁）。
     """
     table = load_heroes()
 
-    assert sum(hero.enabled for hero in table.heroes) == 19, "启用 19 名（M6 P0 票 01 后）"
-    assert not table.by_id("zhenji").enabled, "落选武将不启用（故引用不查）"
-    assert "hero.zhenji.luoshen" not in catalog_module.CATALOG
+    assert sum(hero.enabled for hero in table.heroes) == 22, "启用 22 名（M6 P0 票 02 后）"
+    assert not table.by_id("ganning").enabled, "落选武将不启用（故引用不查）"
+    assert "hero.ganning.qixi" not in catalog_module.CATALOG
 
 
 def test_an_enabled_hero_whose_skills_all_exist_loads(monkeypatch):

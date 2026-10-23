@@ -7749,11 +7749,12 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   // ③ 八卦阵：起始手牌有它，装上后真会话走到需要【闪】的窗口，候选里有八卦。
   // 这条场景**依赖对手真的对座位 0 出【杀】**，因此对"启用池 → 随机发将 → AI 行动序列"敏感；
-  // M6 P0 换池后原 seed 7 不再命中，探针重扫到 seed 21（后续换池若失效，按同一判据重扫）。
+  // M6 P0 票 02 换池（启用池 22 名）后 seed 21 不再命中，按同一判据重扫到 seed 29
+  // （后续换池若失效，按同一判据重扫；判据本身未放宽）。
   let baguaSeed = null;
   let equippedBagua = false;
   let sawBaguaDodge = false;
-  for (const seed of [21, 7, 15, 20, 2, 24, 28, 38]) {
+  for (const seed of [29, 21, 7, 15, 20, 2, 24, 28, 38]) {
     await newSession(seed);
     equippedBagua = false;
     sawBaguaDodge = false;
@@ -7784,12 +7785,15 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   }
   const baguaPending = ui.state.view.pending;
   const baguaEquip = (ui.state.view.snapshot.players[0].equip || []).map((card) => card.type);
+  // 扫不到命中时 `pending` 可能已经是 null（最后一个种子的局打完了）：判据照旧判红，
+  // 但不许在 detail 字符串里崩（那会把 FAIL 变成 TypeError、看不出是哪条场景）。
+  const baguaLegal = (baguaPending && baguaPending.legal_actions) || [];
   check("U1-07l 真会话【八卦】：装上后走到 DODGE 窗口，候选里出现八卦阵的 ActivateSkill",
     equippedBagua && baguaEquip.includes("eight_diagrams") && sawBaguaDodge
-      && (baguaPending.legal_actions || []).some(
+      && baguaLegal.some(
         (action) => action.kind === "ActivateSkill" && action.skill_id === "equip.eight_diagrams"),
-    `seed=${baguaSeed} equip=${baguaEquip.join(",")} dodge=${sawBaguaDodge} legal=${(baguaPending.legal_actions || []).map((a) => a.kind + ":" + (a.skill_id || "")).join(",")}`);
-  const baguaIndex = (baguaPending.legal_actions || []).findIndex(
+    `seed=${baguaSeed} equip=${baguaEquip.join(",")} dodge=${sawBaguaDodge} legal=${baguaLegal.map((a) => a.kind + ":" + (a.skill_id || "")).join(",")}`);
+  const baguaIndex = baguaLegal.findIndex(
     (action) => action.kind === "ActivateSkill" && action.skill_id === "equip.eight_diagrams");
   if (baguaIndex >= 0) {
     ui.resetSelection();

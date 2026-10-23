@@ -28,6 +28,9 @@
 | 阶段体 | :mod:`sgs.skills.phase_body` | 英姿 / 闭月 |
 | 排列 | :mod:`sgs.skills.arrange` | 观星 |
 | 目标池 / 响应窗口 | :mod:`sgs.skills.target_pool` / :mod:`sgs.skills.response_window` | 空城 / 谦逊；无双 / 铁骑 |
+| P 限制豁免（锁定技，只挂修饰器） | :mod:`sgs.skills.limits` | 咆哮（次数）/ 奇才（距离） |
+| U 使用牌时 | :mod:`sgs.skills.use_after` | 集智 |
+| J 可重复判定（手写多轮循环） | :mod:`sgs.skills.judgment_loop` | 洛神 |
 | **流水线执行器**（**不**依赖 catalog） | :mod:`sgs.skills.flow` | ``SkillFlow`` / ``PickCards`` / ``PickSeats`` / ``PickOption`` / ``PickProvide`` / ``run_flow`` |
 | **注册表 + 装备定义** | :mod:`sgs.skills.catalog` | ``SkillDef`` / ``CATALOG`` / ``resolve_instances`` / ``dispatch_timing`` / ``dispatch_seam`` |
 
@@ -187,6 +190,22 @@ from .target_change import (
     MASHU,
     target_change_skill_definitions,
 )
+from .limits import (
+    PAOXIAO,
+    QICAI,
+    limits_skill_definitions,
+)
+from .use_after import (
+    JIZHI,
+    JIZHI_FLOW,
+    use_after_skill_definitions,
+)
+from .judgment_loop import (
+    LUOSHEN,
+    LUOSHEN_OPTIONS,
+    judgment_loop_activation_plans,
+    judgment_loop_skill_definitions,
+)
 
 EQUIPMENT_CARD_TYPE_IDS: tuple[str, ...] = tuple(
     skill_id.removeprefix("equip.")
@@ -237,20 +256,26 @@ __all__ = (
     "GUICAI",
     "HUJIA",
     "JIJIANG",
+    "JIZHI",
+    "JIZHI_FLOW",
     "JIUYUAN",
     "LIULI",
     "LORD_REQUEST_KEY",
     "LORD_REQUEST_SKILLS",
     "LORD_SKILL_IDS",
+    "LUOSHEN",
+    "LUOSHEN_OPTIONS",
     "MASHU",
     "MAX_VIRTUAL_SOURCES",
     "MOVE_AFTER_SKILLS",
     "MOVE_EVENT_KEY",
+    "PAOXIAO",
     "PHASE_BODY_SKILLS",
     "PROVIDERS",
     "PROVIDER_ACTOR_KEY",
     "PROVIDER_SATISFIED_KEY",
     "PROVIDER_SKILL_KEY",
+    "QICAI",
     "REJUDGE_SKILL_IDS",
     "RUNNING_SKILL_KEY",
     "SKILL_JUDGMENT_CARD_KEY",
@@ -305,6 +330,9 @@ __all__ = (
     "instance_key",
     "is_equipped",
     "is_transformed_action",
+    "judgment_loop_activation_plans",
+    "judgment_loop_skill_definitions",
+    "limits_skill_definitions",
     "lord_skill_allowed",
     "lord_skill_definitions",
     "lord_skill_ids",
@@ -332,6 +360,7 @@ __all__ = (
     "transform_candidates",
     "transformed_card",
     "transformed_slash",
+    "use_after_skill_definitions",
     "virtual_card_id",
     "virtual_dodge",
 )

@@ -100,7 +100,12 @@ def priority_class_of(carrier: CarrierKind) -> PriorityClass:
 class ModifierPoint(str, Enum):
     """修饰器的**挂点**（票 07 §3）；M3 只许增。
 
-    - ``COUNT_LIMIT``：本回合使用次数上限（诸葛连弩）；
+    - ``COUNT_LIMIT``：本回合使用次数上限（诸葛连弩 / 【咆哮】）；
+    - ``DISTANCE_LIMIT``：本牌**额定距离上限**（M6 票 02 的加法；【奇才】把锦囊的
+      ``TargetRule.max_distance`` 豁免成"无上限"）。``current`` 从 ``max_distance`` 起，
+      返回 ``None`` ⇒ 这次使用的距离条件整体豁免。只在 ``max_distance is not None`` 的牌上
+      派发——【杀】的"距离 ≤ 攻击范围"是另一条判据（``needs_distance``），不在本挂点，
+      故【奇才】不会顺带放宽【杀】；
     - ``TARGET_POOL``：目标池（方天画戟的"额外目标合法性同标准"挂点）；
     - ``TARGET_COUNT``：本牌**最大目标数**（方天画戟 +2；只对 ``TargetCount.RATED``
       的牌查链，见下）；
@@ -131,6 +136,7 @@ class ModifierPoint(str, Enum):
     """
 
     COUNT_LIMIT = "COUNT_LIMIT"
+    DISTANCE_LIMIT = "DISTANCE_LIMIT"
     TARGET_POOL = "TARGET_POOL"
     TARGET_COUNT = "TARGET_COUNT"
     DISTANCE = "DISTANCE"

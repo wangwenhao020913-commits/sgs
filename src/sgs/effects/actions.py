@@ -228,7 +228,9 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
 
     票 27 把**目标池限制**拆成两半，都不给 ``TargetRule`` 加面向具体牌名的布尔：
 
-    - **额定距离上限** ``rule.max_distance``（【顺手牵羊】= 1，与武器无关）；
+    - **额定距离上限** ``rule.max_distance``（【顺手牵羊】= 1，与武器无关），过
+      :data:`~sgs.skills.ModifierPoint.DISTANCE_LIMIT` 链（M6 票 02 的加法；
+      【奇才】把锦囊的这条上限豁免成"不限"，返回 ``None`` 即完全不查距离）；
     - **附加谓词** ``behavior.target_filters``（【过河拆桥】/【顺手牵羊】"区域里有牌"、
       【借刀杀人】"有武器且有合法【杀】目标"），经 :data:`TARGET_FILTERS` 注册表解析。
 
@@ -245,6 +247,17 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
             return ()
         pool: list[int] = [seat]
     else:
+        # 额定距离上限先过 DISTANCE_LIMIT 链（M6 票 02）：``None`` = 这次使用**豁免距离**
+        # （【奇才】），否则从 ``rule.max_distance`` 起逐条修正。链在候选生成期求值，
+        # 与 TARGET_POOL 同一姿态；无修饰器时原值返回，故既有牌型的池逐字节不变。
+        max_distance = rule.max_distance
+        if max_distance is not None:
+            max_distance = apply_modifiers(
+                ModifierPoint.DISTANCE_LIMIT,
+                state,
+                ModifierContext(subject=seat, card=card),
+                max_distance,
+            )
         pool = []
         for player in state.players:
             if not player.alive:
@@ -255,9 +268,9 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
                 state, seat
             ):
                 continue
-            if rule.max_distance is not None and distance(
+            if max_distance is not None and distance(
                 state, seat, player.seat
-            ) > rule.max_distance:
+            ) > max_distance:
                 continue
             pool.append(player.seat)
     if behavior.is_delayed:
