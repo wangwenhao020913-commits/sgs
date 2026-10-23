@@ -35,7 +35,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "ganglie", "name": "刚烈", "skill_type": "NORMAL" }]
     },
     {
@@ -45,7 +45,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "tuxi", "name": "突袭", "skill_type": "NORMAL" }]
     },
     {
@@ -55,7 +55,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "luoyi", "name": "裸衣", "skill_type": "NORMAL" }]
     },
     {

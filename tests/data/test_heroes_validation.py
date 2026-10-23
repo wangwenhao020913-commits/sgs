@@ -144,13 +144,13 @@ def test_hero_skill_ids_are_fully_qualified_and_keep_the_data_order():
 def test_the_enabled_flag_is_required_and_read_back_from_the_data(monkeypatch):
     """``enabled`` 是声明式字段：数据里没写就是结构错误，写了就原样读出（不静默取默认）。
 
-    票 12 起数据文件里 16 名启用、9 名未启用，故这里钉的是**两种取值都能原样读出**，
-    而不是"全表都关"。
+    M6 票 01 起数据文件里 **19 名**启用（P0 三票收口后到 25）、6 名未启用；这里钉的是
+    **两种取值都能原样读出**，而不是"全表都关"。
     """
     table = load_heroes()
 
     assert len(table.heroes) == STANDARD_HERO_COUNT
-    assert sum(hero.enabled for hero in table.heroes) == 16
+    assert sum(hero.enabled for hero in table.heroes) == 19
 
     _patch_catalog(monkeypatch)
     raw = _heroes_raw()
@@ -168,15 +168,16 @@ def test_the_enabled_flag_is_required_and_read_back_from_the_data(monkeypatch):
 def test_disabled_heroes_load_even_when_their_skills_are_not_implemented():
     """未启用的武将只查结构与唯一性：技能还没实现也照样加载整张表。
 
-    判据取**明确不做**的技能（夏侯惇【刚烈】：R6-Q3 判为"只丢一个样例"，夏侯惇不在
-    16 名名单、M3 不会实现），故它不会随族级票推进而变成已登记——这条断言验的是
-    "条件化引用校验"，不是某条技能当时的实现状态。
+    判据取**尚未实现**的技能（甄姬【洛神】：M6 票 02 才落地，故她此刻仍未启用、
+    ``hero.zhenji.luoshen`` 不在 ``CATALOG``），故这条断言验的是"条件化引用校验"，
+    不随 P0 的票依次推进而失效（M3 的落点记录曾拿 ``hero.xiahoudun.ganglie`` 当"明确不做"
+    的反例；M6 票 01 起它已登记、夏侯惇已启用，故改用甄姬）。
     """
     table = load_heroes()
 
-    assert sum(hero.enabled for hero in table.heroes) == 16, "启用 16 名"
-    assert not table.by_id("xiahoudun").enabled, "落选武将不启用（故引用不查）"
-    assert "hero.xiahoudun.ganglie" not in catalog_module.CATALOG
+    assert sum(hero.enabled for hero in table.heroes) == 19, "启用 19 名（M6 P0 票 01 后）"
+    assert not table.by_id("zhenji").enabled, "落选武将不启用（故引用不查）"
+    assert "hero.zhenji.luoshen" not in catalog_module.CATALOG
 
 
 def test_an_enabled_hero_whose_skills_all_exist_loads(monkeypatch):
@@ -221,10 +222,14 @@ def test_a_disabled_hero_may_reference_a_missing_skill(monkeypatch):
 
 
 def test_duplicate_hero_id_is_rejected():
-    """判据用**未启用**的武将做基底：启用会连带报出技能引用错误，淹没唯一性这一条。"""
+    """判据用**未启用**的武将做基底：启用会连带报出技能引用错误，淹没唯一性这一条。
+
+    M6 票 01 起夏侯惇已启用，故基底换成两名**相邻且此刻仍未启用**的武将（甘宁 → 吕蒙；
+    相邻是因为下面的 loc 断言用 ``index + 1`` 定位第二条重名记录）。
+    """
     raw = _heroes_raw()
-    index = _index_of(raw, "xiahoudun")
-    raw["heroes"][index]["id"] = "zhangliao"
+    index = _index_of(raw, "ganning")
+    raw["heroes"][index]["id"] = "lvmeng"
 
     errors = _errors(raw)
 

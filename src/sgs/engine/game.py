@@ -54,6 +54,7 @@ from sgs.resolution import Control, Frame, ResolutionStack, StepTable, Tag, has_
 from sgs.skills import (
     MOVE_EVENT_KEY,
     RUNNING_SKILL_KEY,
+    SKILL_JUDGMENT_CARD_KEY,
     ActivationPlan,
     MoveEvent,
     SeamKind,
@@ -1794,13 +1795,20 @@ class Engine:
         )
 
     def note_skill_judgment(self, frame: Frame) -> None:
-        """判定后果：把"红 = 成功"写回发起判定的帧（票 10 §5.3）。"""
+        """判定后果：把"红 = 成功"写回发起判定的帧（票 10 §5.3）。
+
+        M6 票 01 起同时回写**判定牌本身**（:data:`~sgs.skills.SKILL_JUDGMENT_CARD_KEY`）：
+        【刚烈】要读"不为红桃"——方块是红色但不终止，布尔读不出来。既有读
+        ``skill_result`` 的两条（【八卦阵】/【铁骑】）不受影响；判定牌在写入前已进弃牌堆，
+        回写的是不可变的 ``CardRef`` 事实，不是位置。
+        """
         parent_id = frame.data.get("activation_parent")
         judge_card = frame.data.get("judge_card")
         red = judge_card is not None and color_of_suit(judge_card.suit) is Color.RED
         for candidate in reversed(self.stack.frames):
             if candidate.frame_id == parent_id:
                 candidate.data["skill_result"] = red
+                candidate.data[SKILL_JUDGMENT_CARD_KEY] = judge_card
                 return
         raise RuntimeError(f"判定发起帧 {parent_id} 不在栈上；结算栈被破坏")
 
@@ -1971,6 +1979,30 @@ class Engine:
         """
         if self.state.turn_seat == seat:
             self._turn_data["skip_draw"] = True
+
+    def set_draw_phase_count(self, seat: int, count: int) -> None:
+        """把 ``seat`` 本回合摸牌阶段的**基础摸牌数**改成 ``count``（M6 票 01 的加法）。
+
+        与 :meth:`skip_draw_phase` 同姿态：只对**当前回合角色**生效（阶段体钩子跑在
+        他自己的回合里），由 :meth:`_phase_draw` 消费——**0 = 放弃摸牌**（【突袭】）、
+        正整数是从额定张数改写（【裸衣】经 :meth:`reduce_draw_phase_by`）。它是"阶段体
+        对基础摸牌的数值改写"，不是跳过阶段（跳过阶段另有 ``skip_draw_phase``：连阶段体
+        与边界一起越过）。负数在发问前就 ``ValueError``（比静默夹取更容易发现调用错误）。
+        """
+        if count < 0:
+            raise ValueError(f"摸牌张数不能为负，得到 {count!r}")
+        if self.state.turn_seat == seat:
+            self._turn_data["draw_count"] = count
+
+    def draw_phase_count(self) -> int:
+        """当前回合摸牌阶段**当前**计划摸几张（缺省 :data:`DRAW_COUNT`）。"""
+        return int(self._turn_data.get("draw_count", DRAW_COUNT))
+
+    def reduce_draw_phase_by(self, seat: int, count: int) -> None:
+        """把 ``seat`` 本回合摸牌阶段的基础摸牌数**减少** ``count`` 张（不低于 0）。"""
+        if count < 0:
+            raise ValueError(f"少摸的张数不能为负，得到 {count!r}")
+        self.set_draw_phase_count(seat, max(0, self.draw_phase_count() - count))
 
     def consume_delayed_card(self, frame: Frame) -> None:
         """把**延时锦囊本体**标记为"已消耗"：判定阶段循环的收尾据此送它进弃牌堆。
@@ -2324,6 +2356,25 @@ class Engine:
         """把一个座位的【酒】加伤清掉（回合的收尾点与下一回合起点各调一次，幂等）。"""
         if self.state.player(seat).wine_active:
             self.set_wine_active(None, seat, False)
+
+    def set_luoyi_active(self, seat: int, active: bool) -> bool:
+        """写一个座位的【裸衣】加伤状态（M6 票 01 的唯一写入口；**不发 delta**）。
+
+        与 :meth:`set_wine_active` 同形但少一条 ``wine_change`` 式的事件：本状态没有 JSON
+        读者（网页座位卡不读它、记录流不写它），回放按同一条 ``SKILL_ACTIVATION`` 动作
+        重跑即可重建。返回值 = 状态真的变了吗；回合末与下一回合起点的清理都走这里，
+        因此"置过而没用掉"与"从来没置过"在状态面同形。
+        """
+        player = self.state.player(seat)
+        if player.luoyi_active == active:
+            return False
+        player.luoyi_active = active
+        return True
+
+    def _clear_luoyi_active(self, seat: int) -> None:
+        """把一个座位的【裸衣】加伤清掉（回合的收尾点与下一回合起点各调一次，幂等）。"""
+        if self.state.player(seat).luoyi_active:
+            self.set_luoyi_active(seat, False)
 
     def reveal_card(self, frame: Frame | None, seat: int, card: CardRef) -> None:
         """把 ``seat`` 的一张**手牌**标成公开事实并落一条 ``card_reveal``（M5-06）。
@@ -3048,6 +3099,8 @@ class Engine:
             # 【酒】加伤只在本回合有效（M5-04）：回合收尾已清，这里再幂等兜一次——
             # 两处都走唯一写入口，故"清掉"与"从来没置过"的记录形态相同（无 delta）。
             self._clear_wine_active(seat)
+            # 【裸衣】同口径（M6 票 01）：作用域 = 本回合结束，回合收尾已清，这里幂等兜底。
+            self._clear_luoyi_active(seat)
         self.emit_timing(Timing.TURN_START, actor=seat)
 
     def _phase_prepare(self) -> str | None:
@@ -3222,10 +3275,13 @@ class Engine:
         if control == "stay":
             return "stay"
         if self._turn_data.get("phase_draw_drawn"):
-            # 钩子在同一阶段体里提过问：重入时只补完基础摸牌，不重发时机记录、不重摸。
+            # 钩子在同一阶段体里提过问：重入时只补完基础摸牌、不重摸。
             return None
         self._turn_data["phase_draw_drawn"] = True
-        drawn = draw_from_deck(self.state, DRAW_COUNT, self._shuffle)
+        # M6 票 01：阶段体钩子可以把**基础摸牌数**改写（【突袭】0 = 放弃摸牌、【裸衣】少一张）。
+        # 缺省仍是额定 DRAW_COUNT，故无技能时与旧路径逐字节相同。
+        count = int(self._turn_data.pop("draw_count", DRAW_COUNT))
+        drawn = draw_from_deck(self.state, count, self._shuffle)
         if drawn.shuffle is not None:
             # 重洗只发**一条** deck_shuffle（记洗后顺序），不另发牌移动事件（票 08 §5 / 票 23）。
             self.emit_delta(drawn.shuffle)
@@ -3239,7 +3295,7 @@ class Engine:
                 owner=seat,
             )
             self.emit_delta(delta)
-        if len(drawn.cards) < DRAW_COUNT:
+        if len(drawn.cards) < count:
             # 短摸 ⟺ 两堆皆空：弃牌堆非空时 draw_from_deck 已经重洗补足（票 23）。
             self.check_game_end(draw_reason="both_decks_empty")
             self.finish()
@@ -3344,6 +3400,8 @@ class Engine:
         seat = self.state.turn_seat
         if seat is not None:
             self._clear_wine_active(seat)
+            # 【裸衣】的作用域是"直到回合结束"（§九 L952–954 / M6 票 01）：同一收尾点清掉。
+            self._clear_luoyi_active(seat)
         # 【酒】的"每回合一次"按**游戏回合**记（spec §5.1 酒）：濒死自救可能发生在别人的
         # 回合、记在濒死者身上，故回合末必须清**所有座位**的 wine 计数键，不能只清回合角色。
         # 只动这一个键：其它键（【杀】等）仍按座位自己的 ``TURN_START`` 重置，回合外

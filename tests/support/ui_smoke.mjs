@@ -2873,42 +2873,57 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 /* ============ 报障 2 / 4（真局）：从真实服务端扫出刘备 / 赵云的局面再验一次 ============ */
 {
   const scanHeroCases = async () => {
-    let longdan = null;
-    let rende = null;
-    for (const seed of [1, 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47]) {
-      await newSession(seed);
-      const hero = ui.state.view.heroes[0] || "";
-      if (hero !== "zhaoyun" && hero !== "liubei") continue;
-      for (let step = 0; step < 260 && ui.state.view.pending; step += 1) {
-        const view = ui.state.view;
-        const p = view.pending;
-        if (p && p.kind === "PLAY_PHASE" && p.actor === 0 && hero === "zhaoyun" && !longdan) {
-          const dodge = (view.snapshot.self_hand || []).find((card) => card.type === "dodge");
-          // W4-fix-2：转化候选已从候选面收回，入口改由**清单**表达。
-          const manifest = (p.preactivations || {})["hero.zhaoyun.longdan"];
-          if (dodge && manifest) {
-            longdan = { seed, steps: step, cardId: dodge.card_id };
+    // M6 P0（启用池 16 → 19）后同一个 seed 的发将会变，故这两条场景**钉住座位 0 的武将**
+    // （``my_hero``）再扫种子，而不是赌随机发到赵云 / 刘备。种子只决定"第 1 回合手牌够用"：
+    // 探针在 seed 5 上分别命中赵云的【闪】+ 龙胆清单（第 3 步）与刘备的仁德（第 1 步）；
+    // 后续换池若命中不了，重扫一次种子即可（判据不变）。
+    const found = { longdan: null, rende: null };
+    for (const seed of [5, 1, 2, 3, 7]) {
+      if (found.longdan && found.rende) break;
+      if (!found.longdan) {
+        await newSession(seed, { my_hero: "zhaoyun" });
+        for (let step = 0; step < 260 && ui.state.view.pending; step += 1) {
+          const view = ui.state.view;
+          const p = view.pending;
+          if (p && p.kind === "PLAY_PHASE" && p.actor === 0) {
+            const dodge = (view.snapshot.self_hand || []).find((card) => card.type === "dodge");
+            // W4-fix-2：转化候选已从候选面收回，入口改由**清单**表达。
+            const manifest = (p.preactivations || {})["hero.zhaoyun.longdan"];
+            if (dodge && manifest) {
+              found.longdan = { seed, steps: step, cardId: dodge.card_id, hero: "zhaoyun" };
+              break;
+            }
           }
+          await advanceOnce();
         }
-        if (p && p.kind === "PLAY_PHASE" && p.actor === 0 && hero === "liubei" && !rende) {
-          const skill = (view.skills || []).find((item) => item.skill_id === "hero.liubei.rende");
-          if (skill && skill.available) rende = { seed, steps: step };
+      }
+      if (!found.rende) {
+        await newSession(seed, { my_hero: "liubei" });
+        for (let step = 0; step < 260 && ui.state.view.pending; step += 1) {
+          const view = ui.state.view;
+          const p = view.pending;
+          if (p && p.kind === "PLAY_PHASE" && p.actor === 0) {
+            const skill = (view.skills || []).find((item) => item.skill_id === "hero.liubei.rende");
+            if (skill && skill.available) {
+              found.rende = { seed, steps: step, hero: "liubei" };
+              break;
+            }
+          }
+          await advanceOnce();
         }
-        if (longdan && rende) return { longdan, rende };
-        await advanceOnce();
       }
     }
-    return { longdan, rende };
+    return found;
   };
   const replayScanTo = async (found) => {
-    await newSession(found.seed);
+    await newSession(found.seed, { my_hero: found.hero });
     for (let step = 0; step < found.steps; step += 1) await advanceOnce();
     return found;
   };
   const found = await scanHeroCases();
 
   check("㉿L8 真局扫到「赵云出牌阶段手里有可转化的【闪】」", !!found.longdan,
-    found.longdan ? `seed=${found.longdan.seed} steps=${found.longdan.steps}` : "16 个种子内没找到");
+    found.longdan ? `seed=${found.longdan.seed} steps=${found.longdan.steps}` : "钉住赵云后 5 个种子内没找到");
   if (found.longdan) {
     await replayScanTo(found.longdan);
     const p = ui.state.view.pending;
@@ -2925,7 +2940,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   }
 
   check("㉿R8 真局扫到「刘备出牌阶段仁德可发动」", !!found.rende,
-    found.rende ? `seed=${found.rende.seed} steps=${found.rende.steps}` : "16 个种子内没找到");
+    found.rende ? `seed=${found.rende.seed} steps=${found.rende.steps}` : "钉住刘备后 5 个种子内没找到");
   if (found.rende) {
     await replayScanTo(found.rende);
     const button = Array.from($("t-skills").children).find((b) => b.getAttribute("data-skill-id") === "hero.liubei.rende");
@@ -7616,9 +7631,37 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     await ui.submitAction();
     return true;
   };
+  const endPlayPhase = async () => {
+    const pending = ui.state.view.pending;
+    if (!pending || pending.kind !== "PLAY_PHASE") return false;
+    const index = (pending.legal_actions || []).findIndex((action) => action.kind === "EndPhase");
+    if (index < 0) return false;
+    ui.resetSelection();
+    ui.state.selectedOption = index;
+    await ui.submitAction();
+    return true;
+  };
+  /** 弃牌阶段：界面没有手选路径（spec D10），按"前 N 张手牌"补 picks 再提交。 */
+  const discardPhase = async () => {
+    const pending = ui.state.view.pending;
+    if (!pending || pending.kind !== "DISCARD") return false;
+    const first = (pending.legal_actions || []).find((action) => action.kind === "DiscardCards");
+    if (!first) return false;
+    const need = (first.cards || []).length;
+    const hand = (ui.state.view.snapshot.self_hand || []).map((card) => card.card_id);
+    if (hand.length < need) return false;
+    ui.resetSelection();
+    ui.state.picks = hand.slice(0, need);
+    ui.renderTable();
+    ui.renderPending(ui.state.view);
+    if (ui.buildAction() === null) return false;
+    await ui.submitAction();
+    return true;
+  };
 
   // ① 龙胆：seed 5 的赵云起始手牌里有【闪】；出牌阶段真会话给出龙胆清单。
-  await newSession(5);
+  // 钉住座位 0 = 赵云（M6 P0 换池后随机发将不再保证 seed 5 的座位 0 是他）。
+  await newSession(5, { my_hero: "zhaoyun" });
   let longdanPending = null;
   for (let step = 0; step < 40; step += 1) {
     const pending = ui.state.view.pending;
@@ -7704,33 +7747,48 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && $("t-target-hint").textContent.includes("将以【杀】使用"),
     `sources=${serpentPair.join(",")} chosen=${chosenSources.join(",")} hint="${$("t-target-hint").textContent}"`);
 
-  // ③ 八卦阵：seed 7 的起始手牌有它；装上后真会话走到需要【闪】的窗口，候选里有八卦。
-  await newSession(7);
+  // ③ 八卦阵：起始手牌有它，装上后真会话走到需要【闪】的窗口，候选里有八卦。
+  // 这条场景**依赖对手真的对座位 0 出【杀】**，因此对"启用池 → 随机发将 → AI 行动序列"敏感；
+  // M6 P0 换池后原 seed 7 不再命中，探针重扫到 seed 21（后续换池若失效，按同一判据重扫）。
+  let baguaSeed = null;
   let equippedBagua = false;
   let sawBaguaDodge = false;
-  for (let step = 0; step < 160; step += 1) {
-    const pending = ui.state.view.pending;
-    if (!pending) break;
-    if (pending.actor === 0 && pending.kind === "PLAY_PHASE" && !equippedBagua
-      && await submitEquip("eight_diagrams")) {
-      equippedBagua = true;
-      continue;
+  for (const seed of [21, 7, 15, 20, 2, 24, 28, 38]) {
+    await newSession(seed);
+    equippedBagua = false;
+    sawBaguaDodge = false;
+    for (let step = 0; step < 160; step += 1) {
+      const pending = ui.state.view.pending;
+      if (!pending) break;
+      if (pending.actor === 0 && pending.kind === "PLAY_PHASE") {
+        // 这个场景要的是"对手真的对座位 0 出【杀】"：座位 0 只装八卦、然后结束出牌阶段
+        // （不是随手甩牌把局面打散）——否则扫描结果取决于 UI 的"第一个候选"策略。
+        if (!equippedBagua && await submitEquip("eight_diagrams")) {
+          equippedBagua = true;
+          continue;
+        }
+        if (await endPlayPhase()) continue;
+      }
+      if (pending.actor === 0 && pending.kind === "DODGE"
+        && (pending.legal_actions || []).some(
+          (action) => action.kind === "ActivateSkill" && action.skill_id === "equip.eight_diagrams")) {
+        sawBaguaDodge = true;
+        break;
+      }
+      if (pending.kind === "DISCARD" && await discardPhase()) continue;
+      const before = pending;
+      if (!(await passResponse())) await advanceOnce();
+      if (ui.state.view.pending === before) break; // 这一轮没提交成功 ⇒ 换下一个种子
     }
-    if (pending.actor === 0 && pending.kind === "DODGE"
-      && (pending.legal_actions || []).some(
-        (action) => action.kind === "ActivateSkill" && action.skill_id === "equip.eight_diagrams")) {
-      sawBaguaDodge = true;
-      break;
-    }
-    if (!(await passResponse())) await advanceOnce();
+    if (sawBaguaDodge) { baguaSeed = seed; break; }
   }
   const baguaPending = ui.state.view.pending;
   const baguaEquip = (ui.state.view.snapshot.players[0].equip || []).map((card) => card.type);
-  check("U1-07l 真会话【八卦】：seed 7 装上后走到 DODGE 窗口，候选里出现八卦阵的 ActivateSkill",
+  check("U1-07l 真会话【八卦】：装上后走到 DODGE 窗口，候选里出现八卦阵的 ActivateSkill",
     equippedBagua && baguaEquip.includes("eight_diagrams") && sawBaguaDodge
       && (baguaPending.legal_actions || []).some(
         (action) => action.kind === "ActivateSkill" && action.skill_id === "equip.eight_diagrams"),
-    `equip=${baguaEquip.join(",")} dodge=${sawBaguaDodge} legal=${(baguaPending.legal_actions || []).map((a) => a.kind + ":" + (a.skill_id || "")).join(",")}`);
+    `seed=${baguaSeed} equip=${baguaEquip.join(",")} dodge=${sawBaguaDodge} legal=${(baguaPending.legal_actions || []).map((a) => a.kind + ":" + (a.skill_id || "")).join(",")}`);
   const baguaIndex = (baguaPending.legal_actions || []).findIndex(
     (action) => action.kind === "ActivateSkill" && action.skill_id === "equip.eight_diagrams");
   if (baguaIndex >= 0) {

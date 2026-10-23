@@ -1,14 +1,18 @@
-"""武将总表：16 名 × 29 条技能的数据断言与登记（票 12）。
+"""武将总表：19 名 × 32 条技能的数据断言与登记（票 12；M6 票 01 把启用池 16 → 19）。
 
 本文件只装**跨技能**的登记事实（逐技能的构造局面单测按族住各自文件）：
 
-- ``CATALOG`` 的规模与分区：装备 22 + 武将 29 = **51 条**，且武将那半恰是数据文件里
-  16 名启用武将的技能清单（``heroes.standard.json`` 是名单的唯一真源）；
+- ``CATALOG`` 的规模与分区：装备 22 + 武将 32 = **54 条**，且武将那半恰是数据文件里
+  19 名启用武将的技能清单（``heroes.standard.json`` 是名单的唯一真源）；
 - **同一 owner 同一时机只有一条技能**（票 12 §要做什么 3）：这是 R5-Q1「同一时点多技能
   自选顺序不建」的落地依据——将来加武将时这条断言先变红，逼出一次重新裁定；
-- 16 名的 ``gender`` / ``kingdom`` / ``hp_max`` 与规则文档第九章逐项一致（表驱动，
+- 19 名的 ``gender`` / ``kingdom`` / ``hp_max`` 与规则文档第九章逐项一致（表驱动，
   期望值是**手抄的独立真源**，不是从数据文件回读）；
-- 启用门控：未启用的 9 名不产出实例、不参与发放；启用池恰是那 16 名。
+- 启用门控：未启用的 6 名不产出实例、不参与发放；启用池恰是那 19 名。
+
+**测试函数名的历史口径**：带 ``sixteen`` / ``twenty_nine`` 的名字是 M3 收口时的节点名，
+被 ``tests/test_dod_m3.py`` 的 DoD 绑定（node id 必须继续存在）；M6 P0 只改函数体里的
+数字，不重命名（M3 DoD 记的是 M3 当时的事实）。
 """
 
 from __future__ import annotations
@@ -30,7 +34,17 @@ from sgs.engine import DRAW_COUNT, Engine
 from sgs.skills import CATALOG, PROVIDERS, flow_for
 from sgs.skills.catalog import MATCH_OWNER_KEY
 from sgs.skills.move_after import MOVE_EVENT_KEY, MoveEvent
-from sgs.state import CardRef, EndPhase, GameState, MoveReason, Pass, Zone, ZoneRef
+from sgs.state import (
+    CardRef,
+    EndPhase,
+    GameState,
+    MoveReason,
+    Pass,
+    SelectOption,
+    UseCard,
+    Zone,
+    ZoneRef,
+)
 from sgs.timing import DISPATCH_WHITELIST, Timing
 
 from support import (
@@ -45,10 +59,13 @@ from support import (
 PACK = load_content_pack(deck_profile="standard_108")
 HEROES = load_heroes()
 
-# 16 名启用武将（票 12 §落地表的 16 行；名单与 `spec.md` §名单一致）。
+# 19 名启用武将（票 12 §落地表的 16 行 + M6 票 01 的魏三名）。
 ENABLED = (
     "caocao",
     "simayi",
+    "xiahoudun",
+    "zhangliao",
+    "xuchu",
     "guojia",
     "liubei",
     "guanyu",
@@ -65,11 +82,8 @@ ENABLED = (
     "diaochan",
 )
 
-# 落选 9 名（数据文件里结构存在、引用不查、不参与发放）。
+# 落选 6 名（数据文件里结构存在、引用不查、不参与发放）。
 DISABLED = (
-    "xiahoudun",
-    "zhangliao",
-    "xuchu",
     "zhangfei",
     "huangyueying",
     "ganning",
@@ -112,26 +126,27 @@ PLAYABLE = ("slash", "peach", "dodge")
 
 
 # ---------------------------------------------------------------------------
-# ① CATALOG 的一分为二（装备 22 + 武将 29 = 51）
+# ① CATALOG 的一分为二（装备 22 + 武将 32 = 54）
 # ---------------------------------------------------------------------------
 
 
 def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
-    """验收 1：``CATALOG`` = 51 条（22 装备 + 29 武将），且两半由 ``carrier`` 分区。
+    """验收 1：``CATALOG`` = **54** 条（22 装备 + 32 武将），且两半由 ``carrier`` 分区。
 
-    M5-01a 补 5 条军争装备技能占位（白银狮子 / 藤甲 / 古锭刀 / 朱雀羽扇 / 骅骝）：
-    效果留给 M5-05，本票只让 ``equip.<id>`` 在技能表里闭合。
+    M5-01a 补 5 条军争装备技能占位（白银狮子 / 藤甲 / 古锭刀 / 朱雀羽扇 / 骅骝）；
+    M6 票 01 把武将那半 29 → 32（【刚烈】/【突袭】/【裸衣】）。函数名沿用 M3 的节点名
+    （``test_dod_m3`` 的 DoD 绑定），数字以函数体为准。
     """
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 51
+    assert len(CATALOG) == 54
     assert len(equipment) == 22
-    assert len(heroes) == 29
+    assert len(heroes) == 32
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
-    """武将那半 = 16 名启用武将的技能清单（数据文件是名单的唯一真源，代码不另抄）。"""
+    """武将那半 = 19 名启用武将的技能清单（数据文件是名单的唯一真源，代码不另抄）。"""
     expected = {
         f"hero.{hero.id}.{skill.id}"
         for hero in HEROES.heroes
@@ -141,7 +156,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 29
+    assert len(expected) == 32
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -159,8 +174,8 @@ def test_every_hero_skill_id_is_fully_qualified():
 # ---------------------------------------------------------------------------
 
 
-def test_the_sixteen_enabled_heroes_have_no_two_skills_on_the_same_timing():
-    """验收 2：16 名里不存在同一 owner 同一时机的两条技能。
+def test_the_enabled_heroes_have_no_two_skills_on_the_same_timing():
+    """验收 2：19 名里不存在同一 owner 同一时机的两条技能。
 
     判据 = 该武将的每条技能定义的 ``hooks`` 的时机集合两两不交；主公技与普通技同样
     受此约束（它们同住一张武将牌）。将来加武将时这条断言先变红。
@@ -182,7 +197,7 @@ def test_the_sixteen_enabled_heroes_have_no_two_skills_on_the_same_timing():
 
 
 # ---------------------------------------------------------------------------
-# ③ 16 名的 gender / kingdom / hp_max 与第九章一致
+# ③ 19 名的 gender / kingdom / hp_max 与第九章一致
 # ---------------------------------------------------------------------------
 
 
@@ -195,25 +210,32 @@ def test_every_hero_matches_the_rule_book_stats():
 
 
 # ---------------------------------------------------------------------------
-# ④ 启用门控：9 名不产出实例、不参与发放
+# ④ 启用门控：6 名不产出实例、不参与发放
 # ---------------------------------------------------------------------------
 
 
 def test_the_enabled_pool_is_exactly_the_sixteen_and_the_rest_stay_dark():
-    """验收 5：启用池 = 16 名；另外 9 名结构存在但不启用。"""
+    """验收 5：启用池 = **19** 名（M6 P0 票 01）；另外 6 名结构存在但不启用。
+
+    函数名沿用 M3 的节点名（``test_dod_m3`` 的 DoD 绑定），数字以函数体为准。
+    """
     ids = enabled_hero_ids(HEROES)
 
     assert set(ids) == set(ENABLED)
-    assert len(ids) == 16
+    assert len(ids) == 19
     assert all(HEROES.by_id(hero_id).enabled for hero_id in ENABLED)
     assert all(not HEROES.by_id(hero_id).enabled for hero_id in DISABLED)
 
 
 def test_a_disabled_hero_never_produces_an_instance():
-    """未启用的武将连牌都不发；构造局面里显式写死也不产出技能实例。"""
+    """未启用的武将连牌都不发；构造局面里显式写死也不产出技能实例。
+
+    取两名**此刻仍未启用**的（甄姬 / 张飞：M6 票 02 才落地），故本判据不随 P0 的票
+    推进而失效（票 01 已把夏侯惇启用）。
+    """
     state = build_state(
         pack=PACK,
-        seats=[SeatSpec(hero="zhenji"), SeatSpec(hero="xiahoudun")],
+        seats=[SeatSpec(hero="zhenji"), SeatSpec(hero="zhangfei")],
     )
 
     from sgs.skills import resolve_instances
@@ -226,7 +248,7 @@ def test_a_disabled_hero_never_produces_an_instance():
 
 
 def test_the_enabled_pool_feeds_a_real_deal_without_the_hero_substream():
-    """``hero_pool=()`` = 数据文件的启用池 ⇒ 真发牌取到 16 名里的两名。"""
+    """``hero_pool=()`` = 数据文件的启用池 ⇒ 真发牌取到 19 名里的两名。"""
     from sgs.data import deal_heroes
     from sgs.engine import RandomSource
 
@@ -426,12 +448,305 @@ def test_declining_biyue_leaves_the_hand_alone():
     assert sorted(engine.state.player(0).hand) == list(range(50, 54)), "不发动 ⇒ 一张都不摸"
 
 
+# ---------------------------------------------------------------------------
+# ⑨ 张辽【突袭】：摸牌阶段放弃摸牌，改为获得至多两名其他角色各一张手牌（M6 票 01）
+#
+# 官方 §九 L948–950。形态 = 阶段体（``PHASE_DRAW``）+ 一步座位询问（``PickSeats``，
+# 1–2 名、可少选）+ 不摸牌（引擎的摸牌张数被技能改写成 0）。
+# ---------------------------------------------------------------------------
+
+TUXI = "hero.zhangliao.tuxi"
+LUOYI = "hero.xuchu.luoyi"
+
+
+class _TuxiPlayer:
+    """【突袭】的脚本玩家：按 ``seats`` 依次选人，选完用 ``Pass`` 收「至多两名」。"""
+
+    def __init__(self, *, seats: tuple[int, ...] = (), activate: bool = True) -> None:
+        self._seats = list(seats)
+        self.activate = activate
+        self.queries: list = []
+        self.options: list = []
+
+    def respond(self, query):
+        if query.kind == "SKILL_ACTIVATION" and query.skill_id == TUXI:
+            self.queries.append(query)
+            if self.activate:
+                for action in query.legal_actions:
+                    if getattr(action, "kind", None) == "ActivateSkill":
+                        return action
+            return next(action for action in query.legal_actions if isinstance(action, Pass))
+        if query.kind == "SELECT_OPTION" and str(query.skill_id).startswith("tuxi:"):
+            self.options.append(query)
+            if self._seats:
+                seat = self._seats.pop(0)
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, SelectOption)
+                    and action.choice == f"seat:{seat}"
+                )
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+            return query.legal_actions[0]
+        if query.kind == "PLAY_PHASE":
+            return next(action for action in query.legal_actions if isinstance(action, EndPhase))
+        return query.legal_actions[0]
+
+
+def _tuxi_deck(*hands: tuple[int, ...]) -> tuple[int, ...]:
+    used = {card_id for hand in hands for card_id in hand}
+    return tuple(index for index in range(len(PACK.deck.cards)) if index not in used)
+
+
+def test_tuxi_takes_one_hidden_hand_card_from_up_to_two_others_instead_of_drawing():
+    """发动 ⇒ 牌堆一张不动，两名角色各少一张手牌、张辽多两张。"""
+    dodges = cards_of_type(PACK, "dodge")
+    hand_a, hand_b = dodges[0], dodges[1]
+    deck = _tuxi_deck((hand_a,), (hand_b,))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="zhangliao"),
+            SeatSpec(hand=(hand_a,)),
+            SeatSpec(hand=(hand_b,)),
+        ],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _TuxiPlayer(seats=(1, 2))
+
+    _run(engine, [player, _PASS, _PASS], lambda e: _after(e, Timing.PHASE_DRAW))
+
+    assert len(player.queries) == 1, "摸牌阶段问一次「是否发动」"
+    assert len(player.options) == 2, "至多两名 ⇒ 选完一人再问一人"
+    assert "seat:1" in player.options[0].options and "seat:2" in player.options[0].options
+    assert "seat:1" not in player.options[1].options, "同一角色只取一张"
+    assert sorted(engine.state.player(0).hand) == sorted([hand_a, hand_b])
+    assert engine.state.player(1).hand == []
+    assert engine.state.player(2).hand == []
+    assert list(engine.state.deck) == list(deck), "放弃摸牌 ⇒ 牌堆一张都没少"
+
+
+def test_tuxi_can_take_from_only_one_character():
+    """「至多两名」⇒ 选一名后放弃，仍算发动（牌堆照样不摸）。"""
+    dodges = cards_of_type(PACK, "dodge")
+    hand_a, hand_b = dodges[0], dodges[1]
+    deck = _tuxi_deck((hand_a,), (hand_b,))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="zhangliao"),
+            SeatSpec(hand=(hand_a,)),
+            SeatSpec(hand=(hand_b,)),
+        ],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _TuxiPlayer(seats=(1,))
+
+    _run(engine, [player, _PASS, _PASS], lambda e: _after(e, Timing.PHASE_DRAW))
+
+    assert len(player.options) == 2, "第一问选人、第二问放弃"
+    assert sorted(engine.state.player(0).hand) == [hand_a]
+    assert engine.state.player(1).hand == []
+    assert engine.state.player(2).hand == [hand_b], "没被选中的人手牌不动"
+    assert list(engine.state.deck) == list(deck)
+
+
+def test_declining_tuxi_draws_two_cards():
+    dodges = cards_of_type(PACK, "dodge")
+    hand_a, hand_b = dodges[0], dodges[1]
+    deck = _tuxi_deck((hand_a,), (hand_b,))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="zhangliao"),
+            SeatSpec(hand=(hand_a,)),
+            SeatSpec(hand=(hand_b,)),
+        ],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _TuxiPlayer(activate=False)
+
+    _run(engine, [player, _PASS, _PASS], lambda e: _after(e, Timing.PHASE_DRAW))
+
+    assert len(player.queries) == 1
+    assert player.options == []
+    assert list(engine.state.player(0).hand) == list(deck[:DRAW_COUNT])
+    assert engine.state.player(1).hand == [hand_a]
+    assert engine.state.player(2).hand == [hand_b]
+
+
+def test_tuxi_is_not_offered_when_no_other_character_has_hand_cards():
+    """没有可拿的手牌 ⇒ 该实例连"是否发动"都不问（正常摸两张）。"""
+    deck = tuple(range(10, 30))
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="zhangliao"), SeatSpec(), SeatSpec()],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _TuxiPlayer(seats=())
+
+    _run(engine, [player, _PASS, _PASS], lambda e: _after(e, Timing.PHASE_DRAW))
+
+    assert player.queries == []
+    assert list(engine.state.player(0).hand) == list(deck[:DRAW_COUNT])
+
+
+# ---------------------------------------------------------------------------
+# ⑩ 许褚【裸衣】：摸牌阶段少摸一张；若如此做，本回合【杀】/【决斗】伤害 +1
+#
+# 官方 §九 L952–954。形态 = 阶段体（``PHASE_DRAW``，把摸牌张数改写成 1 并落本回合
+# 状态）+ ``DAMAGE_DEAL_AMOUNT`` 修饰器（来源侧）+ 回合末清理。
+# ---------------------------------------------------------------------------
+
+
+class _LuoyiPlayer:
+    """【裸衣】的脚本玩家：第一次「是否发动」同意；出牌阶段用第一张指向座位 1 的收益牌。"""
+
+    def __init__(self, *, activate: bool = True, card_type: str = "slash") -> None:
+        self.activations_left = 1 if activate else 0
+        self.card_type = card_type
+        self.queries: list = []
+        self.cards_used = 0
+
+    def respond(self, query):
+        if query.kind == "SKILL_ACTIVATION" and query.skill_id == LUOYI:
+            self.queries.append(query)
+            if self.activations_left:
+                self.activations_left -= 1
+                for action in query.legal_actions:
+                    if getattr(action, "kind", None) == "ActivateSkill":
+                        return action
+            return next(action for action in query.legal_actions if isinstance(action, Pass))
+        if query.kind == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if (
+                    isinstance(action, UseCard)
+                    and action.card.type == self.card_type
+                    and action.targets == (1,)
+                ):
+                    self.cards_used += 1
+                    return action
+            return next(action for action in query.legal_actions if isinstance(action, EndPhase))
+        if query.kind == "DODGE":
+            return next(action for action in query.legal_actions if isinstance(action, Pass))
+        return query.legal_actions[0]
+
+
+def _turn_ends(engine) -> int:
+    return sum(
+        1
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.TURN_AFTER_END
+    )
+
+
+def test_luoyi_draws_one_fewer_and_this_turns_slash_deals_one_more():
+    slash = cards_of_type(PACK, "slash")[0]
+    deck = tuple(index for index in range(len(PACK.deck.cards)) if index != slash)
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="xuchu", hand=(slash,)), SeatSpec()],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _LuoyiPlayer()
+
+    _run(engine, [player, _PASS], lambda e: ran_timing(e, Timing.TURN_AFTER_END))
+
+    assert len(player.queries) == 1
+    assert engine.state.player(0).hand == [deck[0]], "少摸一张 ⇒ 只摸到牌堆顶第 1 张"
+    assert engine.state.player(1).hp == 2, "本回合的【杀】基础 1 点 + 【裸衣】1 点"
+    assert player.cards_used == 1
+
+
+def test_luoyi_also_adds_one_to_this_turns_duel_damage():
+    """规则写的是「【杀】或【决斗】」：决斗造成的伤害同样 +1（付 1 张换 2 点）。"""
+    duel = cards_of_type(PACK, "duel")[0]
+    deck = tuple(index for index in range(len(PACK.deck.cards)) if index != duel)
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="xuchu", hand=(duel,)), SeatSpec()],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _LuoyiPlayer(card_type="duel")
+
+    _run(engine, [player, _PASS], lambda e: ran_timing(e, Timing.TURN_AFTER_END))
+
+    assert player.cards_used == 1
+    assert engine.state.player(1).hp == 2, "【决斗】基础 1 点 + 【裸衣】1 点"
+    assert engine.state.player(0).hp == 4, "许褚自己不受伤"
+
+
+def test_declining_luoyi_draws_two_and_the_slash_deals_one():
+    slash = cards_of_type(PACK, "slash")[0]
+    deck = tuple(index for index in range(len(PACK.deck.cards)) if index != slash)
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="xuchu", hand=(slash,)), SeatSpec()],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _LuoyiPlayer(activate=False)
+
+    _run(engine, [player, _PASS], lambda e: ran_timing(e, Timing.TURN_AFTER_END))
+
+    assert len(player.queries) == 1
+    assert list(engine.state.player(0).hand) == list(deck[:DRAW_COUNT])
+    assert engine.state.player(1).hp == 3, "不发动 ⇒ 【杀】只有基础 1 点"
+
+
+def test_the_luoyi_bonus_is_gone_after_the_turn_ends():
+    """+1 的作用域 = **本回合结束**：下个自己的回合再用【杀】，伤害回到 1 点。"""
+    slash_ids = cards_of_type(PACK, "slash")
+    first, second = slash_ids[0], slash_ids[1]
+    non_slash = [
+        index
+        for index, card in enumerate(PACK.deck.cards)
+        if card.type != "slash" and index not in (first, second)
+    ]
+    deck = (non_slash[0], non_slash[1], non_slash[2], second, *non_slash[3:], slash_ids[2])
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="xuchu", hand=(first,)), SeatSpec()],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _LuoyiPlayer()
+
+    _run(engine, [player, _PASS], lambda e: _turn_ends(e) >= 3)
+
+    # 回合 1：裸衣 + 【杀】= 2 点；回合 2 是对手的空过；回合 3 的【杀】= 1 点。
+    assert player.cards_used == 2
+    assert engine.state.player(1).hp == 1, "回合结束 +1 消失，第三回合的【杀】只造成 1 点"
+    assert engine.state.player(0).hand == [non_slash[0], non_slash[3]], (
+        "回合 3 正常摸两张（无【裸衣】），用掉一张【杀】"
+    )
+
+
 SKILL_FILES: dict[str, str] = {
     # 魏
     "hero.caocao.jianxiong": "test_hero_damage_after.py",
     "hero.caocao.hujia": "test_hero_lord.py",
     "hero.simayi.fankui": "test_hero_damage_after.py",
     "hero.simayi.guicai": "test_hero_rejudge.py",
+    "hero.xiahoudun.ganglie": "test_hero_damage_after.py",
+    "hero.zhangliao.tuxi": "test_hero_catalog.py",
+    "hero.xuchu.luoyi": "test_hero_catalog.py",
     "hero.guojia.tiandu": "test_hero_rejudge.py",
     "hero.guojia.yiji": "test_hero_damage_after.py",
     # 蜀
@@ -461,10 +776,7 @@ SKILL_FILES: dict[str, str] = {
     "hero.diaochan.lijian": "test_hero_active.py",
     "hero.diaochan.biyue": "test_hero_catalog.py",
 }
-"""29 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表）。
-
-一个显式登记，而不是从测试源码里猜：新增一条技能时这张表先缺键变红，逼出"给它写一条
-断言"。短 id 在该文件里确实出现是第二道闸（防"登记了但文件里其实没提"）。"""
+"""32 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条）。"""
 
 
 def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
@@ -476,7 +788,7 @@ def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
         for skill in hero.skills
     }
 
-    assert set(SKILL_FILES) == skills, "覆盖表必须恰等于 16 名的 29 条技能"
+    assert set(SKILL_FILES) == skills, "覆盖表必须恰等于 19 名的 32 条技能"
 
     tests_dir = Path(__file__).resolve().parent
     unnamed = sorted(
@@ -540,7 +852,7 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
 
     帧里的 ``target`` / ``targets`` / ``source`` / 移动载荷都指向**别人**（座位 0 / 座位 1），
     只有 ``MATCH_OWNER_KEY`` 由检查本身按 ME / OTHER 改写。逐条的"我"分别是：
-    受伤者（【奸雄】【遗计】）、受伤者 + 拿来源牌的持有者（【反馈】）、
+    受伤者（【奸雄】【遗计】【刚烈】）、受伤者 + 拿来源牌的持有者（【反馈】）、
     本次【杀】的目标（【流离】）、刚失去最后一张手牌 / 装备的失主（【连营】【枭姬】）。
     """
     move_lianying = MoveEvent(
@@ -580,6 +892,8 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         ),
         "hero.simayi.fankui": _HookFrame(target=ME, source=0),
         "hero.guojia.yiji": _HookFrame(target=ME),
+        # M6 票 01【刚烈】：受伤的是我、伤害来源是座位 0（活着、不是自己）。
+        "hero.xiahoudun.ganglie": _HookFrame(target=ME, source=0),
         "hero.daqiao.liuli": _HookFrame(
             source=0, actor=ME, targets=(ME,), card=state.card(_PROBE_CHANNEL_SLASH)
         ),
@@ -648,7 +962,7 @@ def test_every_conditional_hook_goes_false_when_the_owner_is_someone_else() -> N
 
 
 # ---------------------------------------------------------------------------
-# W6-01：7 条零步技能登记成**模块级** ``SkillFlow``，且仍走旧候选路径
+# W6-01：零步技能登记成**模块级** ``SkillFlow``，且仍走旧候选路径
 # ---------------------------------------------------------------------------
 
 # ``ZERO_STEP_SKILL_IDS`` 由 ``SKILL_SHAPE`` 派生（定义在下面那张表之后，W6-07 / 评审 J7）：
@@ -656,7 +970,8 @@ def test_every_conditional_hook_goes_false_when_the_owner_is_someone_else() -> N
 
 
 def test_the_seven_zero_step_skills_are_registered_flows_with_no_steps():
-    """7 条零步技能：``flow_for`` 非空、``steps == ()``、``preactivated`` 仍 ``False``。
+    """8 条零步技能（M6 票 01 加【裸衣】）：``flow_for`` 非空、``steps == ()``、
+    ``preactivated`` 仍 ``False``。
 
     这条钉的是 W6-01 的**执行路径统一**判据（spec §7）：迁移只把 ``Hook(handler=…)``
     换成 ``Hook(flow=…)``，不翻预发动开关（Q5=A）——界面 / 候选 / 记录流因此一行不改。
@@ -673,12 +988,12 @@ def test_the_seven_zero_step_skills_are_registered_flows_with_no_steps():
 
 
 # ---------------------------------------------------------------------------
-# W6-04：51 条技能的**形态**分类（静态表 + 全量覆盖）
+# W6-04：54 条技能的**形态**分类（静态表 + 全量覆盖）
 #
 # 形态是**读法**：`SkillDef` 上没有 shape 字段，也不该有。形态由既有声明读出来
 # （`locked` / `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` /
 # `rejudge_capable`），这张表把那次阅读机械化钉住：新增 / 删除技能时先缺键 / 多键变红，
-# 逼出一次重新分类。**不要**把这张表与 `SKILL_FILES` 混用——后者是 29 条启用技能 →
+# 逼出一次重新分类。**不要**把这张表与 `SKILL_FILES` 混用——后者是 32 条启用技能 →
 # 点名它的族级单测文件（票 14），语义不同。
 # ---------------------------------------------------------------------------
 
@@ -690,13 +1005,14 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.huatuo.qingnang": "主动技能",
     "hero.diaochan.lijian": "主动技能",
     "hero.sunshangxiang.jieyin": "主动技能",
-    # 触发技能 5（钩子 / 接缝驱动的非零步流水线）
+    # 触发技能 6（钩子 / 接缝驱动的非零步流水线；M6 票 01 的【突袭】是阶段体 + 座位步）
     "hero.simayi.fankui": "触发技能",
     "hero.daqiao.liuli": "触发技能",
+    "hero.zhangliao.tuxi": "触发技能",
     "equip.green_dragon_blade": "触发技能",
     "equip.axe": "触发技能",
     "equip.qilin_bow": "触发技能",
-    # 零步技能 7（SkillFlow(steps=())；执行路径统一，preactivated 不翻）
+    # 零步技能 8（SkillFlow(steps=())；执行路径统一，preactivated 不翻）
     "hero.luxun.lianying": "零步技能",
     "hero.sunshangxiang.xiaoji": "零步技能",
     "hero.caocao.jianxiong": "零步技能",
@@ -704,10 +1020,12 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.zhouyu.yingzi": "零步技能",
     "hero.diaochan.biyue": "零步技能",
     "hero.machao.tieqi": "零步技能",
+    "hero.xuchu.luoyi": "零步技能",
     # 排列技能 1（deck_arrange + Arrange 步）
     "hero.zhugeliang.guanxing": "排列技能",
-    # 多轮技能 3（手写帧内游标循环；flow_for is None）
+    # 多轮技能 4（手写帧内游标循环；flow_for is None；M6 票 01 的【刚烈】= 判定 → 选项 → 选牌）
     "hero.guojia.yiji": "多轮技能",
+    "hero.xiahoudun.ganglie": "多轮技能",
     "equip.ice_sword": "多轮技能",
     "equip.double_sword": "多轮技能",
     # 锁定技 18（locked=True，含带目标池 / 修饰器的锁定技；M5-01a 的 4 件军争装备占位）
@@ -745,42 +1063,42 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.liubei.jijiang": "候选提供者",
     "equip.eight_diagrams": "候选提供者",
 }
-"""51 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
+"""54 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
 `SkillDef` 上没有 shape 字段，也不该有：形态是从既有声明读出来的归类（`locked` /
 `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` / `rejudge_capable`），不是
 第二份真源。这张表把那次阅读**机械化钉住**：新增 / 删除技能时先缺键 / 多键变红，逼出一次
 重新分类；改表 = 重新裁定形态。
 
-**不要**把这张表与 `SKILL_FILES` 混用：后者是 29 条启用技能 → 点名它的族级单测文件
+**不要**把这张表与 `SKILL_FILES` 混用：后者是 32 条启用技能 → 点名它的族级单测文件
 （票 14 的机械覆盖表），语义完全不同。
 """
 
 SHAPE_COUNTS: dict[str, int] = {
     "主动技能": 6,
-    "触发技能": 5,
-    "零步技能": 7,
+    "触发技能": 6,
+    "零步技能": 8,
     "排列技能": 1,
-    "多轮技能": 3,
+    "多轮技能": 4,
     "锁定技": 18,
     "转化技": 6,
     "能力位": 1,
     "候选生成器": 1,
     "候选提供者": 3,
 }
-"""每格的条数（spec §4.4）：6 + 5 + 7 + 1 + 3 + 18 + 6 + 1 + 1 + 3 = 51。"""
+"""每格的条数（spec §4.4；M6 票 01 后 6 + 6 + 8 + 1 + 4 + 18 + 6 + 1 + 1 + 3 = 54）。"""
 
 STEP_LANGUAGE_SHAPES: frozenset[str] = frozenset(
     {"主动技能", "触发技能", "零步技能", "排列技能"}
 )
-"""在步骤语言内的四个形态（19 条 = 6 + 5 + 7 + 1）。"""
+"""在步骤语言内的四个形态（21 条 = 6 + 6 + 8 + 1）。"""
 
 IN_STEP_LANGUAGE: frozenset[str] = frozenset(
     skill_id
     for skill_id, shape in SKILL_SHAPE.items()
     if shape in STEP_LANGUAGE_SHAPES
 )
-"""在步骤语言内（19）：**派生**自 :data:`SKILL_SHAPE` 的四个步骤语言形态。
+"""在步骤语言内（21）：**派生**自 :data:`SKILL_SHAPE` 的四个步骤语言形态。
 
 W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同一份事实的两份拷贝——
 形态表一改，第二份名单就悄悄过期。现在它只是那张表的一个投影；真正的判据留在
@@ -789,16 +1107,17 @@ W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同�
 """
 
 OUTSIDE_STEP_LANGUAGE: frozenset[str] = frozenset(SKILL_SHAPE) - IN_STEP_LANGUAGE
-"""不在步骤语言内（32）：多轮 3 + 锁定 18 + 转化 6 + 能力位 1 + 候选生成器 1 + 候选提供者 3。
+"""不在步骤语言内（33）：多轮 4 + 锁定 18 + 转化 6 + 能力位 1 + 候选生成器 1 + 候选提供者 3。
 
-同样**派生**（:data:`SKILL_SHAPE` 减 :data:`IN_STEP_LANGUAGE`）；32 这个数由
+同样**派生**（:data:`SKILL_SHAPE` 减 :data:`IN_STEP_LANGUAGE`）；33 这个数由
 `SHAPE_COUNTS` 的其余六格加出来，测试里另有一条规模断言。
 """
 
 ZERO_STEP_SKILL_IDS: tuple[str, ...] = tuple(
     skill_id for skill_id, shape in SKILL_SHAPE.items() if shape == "零步技能"
 )
-"""W6-01 的 7 条零步技能（spec §4.1）：连营 / 枭姬 / 奸雄 / 天妒 / 英姿 / 闭月 / 铁骑。
+"""W6-01 的零步技能（spec §4.1）：连营 / 枭姬 / 奸雄 / 天妒 / 英姿 / 闭月 / 铁骑，
+M6 票 01 加【裸衣】（共 8 条）。
 
 W6-07 / 评审 J7：**派生**自 :data:`SKILL_SHAPE` 的「零步技能」那一格（原先手抄 7 个 id）。"""
 
@@ -817,9 +1136,9 @@ def _flow_steps(skill_id: str):
 
 
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
-    """51 条恰好一形态：键 = ``CATALOG`` 的键、值 = 10 个形态闭集之一。"""
+    """54 条恰好一形态：键 = ``CATALOG`` 的键、值 = 10 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 51
+    assert len(SKILL_SHAPE) == len(CATALOG) == 54
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 10
     assert all(SKILL_SHAPE.values()), "表里没有空形态"
@@ -881,12 +1200,12 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
     assert set(PROVIDERS) == {"hero.caocao.hujia", "hero.liubei.jijiang"}
 
     multi_round = _shape_members("多轮技能")
-    assert len(multi_round) == 3
+    assert len(multi_round) == 4
     assert all(_flow_steps(skill_id) is None for skill_id in multi_round)
     assert all(
         any(hook.handler is not None for hook in CATALOG[skill_id].hooks)
         for skill_id in multi_round
-    ), "三条多轮技能都保持手写钩子（flow_for is None）"
+    ), "四条多轮技能都保持手写钩子（flow_for is None）"
 
 
 def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
@@ -912,7 +1231,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """19 在内 / 32 在外：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """21 在内 / 33 在外：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -924,8 +1243,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 19
-    assert len(outside) == 32
+    assert len(inside) == 21
+    assert len(outside) == 33
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     assert {skill_id for skill_id in CATALOG if flow_for(skill_id) is not None} == inside

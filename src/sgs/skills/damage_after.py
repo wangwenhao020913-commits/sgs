@@ -16,22 +16,25 @@ B 族的形态差别只有一处：它挂在 ``DAMAGE_AFTER_TAKE`` 上，而**�
 曹操【奸雄】               非锁定  ``False``  获得**造成此伤害的牌**（在处理区里找）
 司马懿【反馈】             非锁定  ``False``  获得**伤害来源**的一张牌（手牌隐藏槽 + 装备可见槽）
 郭嘉【遗计】               非锁定  ``True``   观看牌堆顶 2 张 → 交给任意角色（可一次两张）
+夏侯惇【刚烈】             非锁定  ``False``  判定 → 非红桃时**伤害来源**二选一：弃两张手牌 / 受 1 点伤害
 =========================  ======  =========  ==========================================
 
-三条都是**非锁定技**（技能面写了"你可以"）⇒ 发动是询问出来的。它们在回调里可以
-**提问**（【反馈】选牌、【遗计】看牌与交给），返回 ``"stay"`` 让出控制权；引擎按
-"同一轮重入不重问、轮次推进"的帧内游标范式继续（票 19 §8）。【遗计】的面是**观看**
-（票 15）：牌面只在**持有者本人**的那次询问里（询问的 ``revealed`` 授予），不进任何
-``PlayerView``、不落带牌面的 delta；同一个伤害点内**一次可以选两张一起交给同一名角色**，
-也可以一张一交、每次换人。
+四条都是**非锁定技**（技能面写了"你可以"）⇒ 发动是询问出来的。它们在回调里可以
+**提问**（【反馈】选牌、【遗计】看牌与交给、【刚烈】判定后问来源），返回 ``"stay"``
+让出控制权；引擎按"同一轮重入不重问、轮次推进"的帧内游标范式继续（票 19 §8）。
+【遗计】的面是**观看**（票 15）：牌面只在**持有者本人**的那次询问里（询问的
+``revealed`` 授予），不进任何 ``PlayerView``、不落带牌面的 delta；同一个伤害点内
+**一次可以选两张一起交给同一名角色**，也可以一张一交、每次换人。
 
 **"获得造成伤害的牌"**读 ``frame.data["card"]``（= 官方六要素的**渠道牌**，与
 ``channel`` 同源）经 :func:`~sgs.effects.locate` 定位：牌在处理区里才拿得到；已被
 【寒冰剑】类效果移走（或已进弃牌堆）⇒ **找不到就跳过**，不抛错。
 
-**B 族的第四形态（【刚烈】：判定 + 由伤害来源二选一 + 条件伤害）确认缺席**（R6-Q3）：
-夏侯惇不在 16 名名单，该形态是既有形状（判定帧 + ``ask_option`` + 条件伤害）的组合，
-只丢一个样例；登记一句是为了让后来者读到"奸雄 / 反馈 / 遗计"时不会以为漏做。
+**B 族第四形态由 M6 票 01 落地**（R6-Q3 当时登记为"缺席"）：【刚烈】是"判定帧 +
+``ask_option`` + 条件伤害"的组合，判定结果要读**花色**而不是布尔（红桃终止，方块是红色
+但继续），故引擎的 :meth:`~sgs.engine.Engine.note_skill_judgment` 从本票起额外回写
+:data:`~sgs.skills.SKILL_JUDGMENT_CARD_KEY`。选项与"弃哪两张"都问**伤害来源**
+（``actor`` = 来源），不是技能持有者——这与同族三条"问自己"相反，是本形态的关键差别。
 """
 
 from __future__ import annotations
@@ -39,10 +42,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import SkillType
-from sgs.effects import CarrierKind, locate
+from sgs.data import SkillType, Suit
+from sgs.effects import CarrierKind, DamageNature, locate
 from sgs.state import (
     CardRef,
+    FrameKind,
     GameState,
     MoveReason,
     SelectionSpec,
@@ -53,7 +57,13 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .catalog import MATCH_OWNER_KEY, HeroSkillDecl, Hook, SkillDef
+from .catalog import (
+    MATCH_OWNER_KEY,
+    SKILL_JUDGMENT_CARD_KEY,
+    HeroSkillDecl,
+    Hook,
+    SkillDef,
+)
 from .flow import FlowAnswers, PickCards, SkillFlow, zero_step_effect
 
 __all__ = [
@@ -62,6 +72,7 @@ __all__ = [
     "DAMAGE_RECORDED_KEY",
     "DamageAfterSkill",
     "FANKUI_FLOW",
+    "GANGLIE_OPTIONS",
     "JIANXIONG_FLOW",
     "damage_after_skill_definitions",
     "damage_point_index",
@@ -443,6 +454,185 @@ YIJI_SEEN_KEY = "yiji_seen"
 YIJI_GIVEN_KEY = "yiji_given"
 """帧私有槽名前缀：本点伤害里【遗计】已经交出去的那批牌 id（槽名再带点号）。"""
 
+
+# ---------------------------------------------------------------------------
+# 夏侯惇【刚烈】（M6 P0 票 01）：判定 → 由**伤害来源**二选一
+# ---------------------------------------------------------------------------
+
+GANGLIE_DISCARD_TWO = "discard_two"
+"""【刚烈】选项一：伤害来源弃置两张手牌。"""
+
+GANGLIE_TAKE_DAMAGE = "take_damage"
+"""【刚烈】选项二：伤害来源受到夏侯惇造成的 1 点伤害。"""
+
+GANGLIE_OPTIONS: tuple[str, ...] = (GANGLIE_DISCARD_TWO, GANGLIE_TAKE_DAMAGE)
+"""【刚烈】的选项全集（顺序即询问里的顺序；AI 的 ``_OPTION_VALUES`` 与它同名）。"""
+
+_GANGLIE_DISCARD_COUNT = 2
+"""「弃置两张手牌」的张数（规则 §九 L945）。"""
+
+_GANGLIE_JUDGED_KEY = "ganglie_judged"
+"""帧私有：本帧的判定已经开过（重入时不再压第二个 JUDGE 帧）。"""
+
+_GANGLIE_SUIT_KEY = "ganglie_suit"
+"""帧私有：判定牌的花色（"heart" 终止；其余一律结算——方块虽红也要结算）。"""
+
+_GANGLIE_CHOICE_KEY = "ganglie_choice"
+"""帧私有：伤害来源选的那一项（重入时不再重问）。"""
+
+_GANGLIE_DONE_KEY = "ganglie_done"
+"""帧私有：本帧的效果已经执行 / 已经压出伤害子帧（重入直接收尾）。"""
+
+_ASK_GANGLIE_DISCARD = "hero.xiahoudun.ganglie.discard"
+"""手写询问位置：【刚烈】「弃置两张手牌」的**选牌步**（:meth:`Engine.ask_selection` 的
+``owner``；询问名 ``key`` 取 ``"ganglie:discard"``）。"""
+
+GANGLIE_SKILL_ID = "hero.xiahoudun.ganglie"
+"""【刚烈】的全限定技能 id（判定帧回写坐标用；与数据侧同源派生）。"""
+
+
+def _ganglie_source(state: GameState, frame: Any, owner: int | None) -> int | None:
+    """【刚烈】的结算对象：**造成这次伤害的角色**；无来源 / 是自己 / 已阵亡 ⇒ ``None``。
+
+    无来源伤害（【闪电】一类）没有"伤害来源"可问；自己是来源时"对伤害来源造成伤害 /
+    弃置伤害来源的手牌"退化成自伤，与【反馈】的口径一致地排除（技能面写的是"伤害来源"，
+    不是"一名角色"）。来源已阵亡时不向死者发询问。
+    """
+    source = frame.data.get("source")
+    if source is None or owner is None or int(source) == int(owner):
+        return None
+    source = int(source)
+    if not state.player(source).alive:
+        return None
+    return source
+
+
+def _ganglie_condition(host: Any, frame: Any) -> bool:
+    """【刚烈】的触发条件：**受伤的是持有者自己**，且有一个可结算的伤害来源。
+
+    持有者判据与同族三条同源（读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`）：派发环
+    遍历每个存活玩家的实例，漏掉它就会"任何人挨打、夏侯惇都判一次"。
+    """
+    return _hurt_owner(frame) and _ganglie_source(
+        host.state, frame, frame.data.get(MATCH_OWNER_KEY)
+    ) is not None
+
+
+def _ganglie_options(state: GameState, source: int) -> tuple[str, ...]:
+    """"弃两张手牌"付不起（手牌 < 2）时只留伤害一项（票面「手牌不足两张时只有一个选项」）。"""
+    if len(state.player(source).hand) >= _GANGLIE_DISCARD_COUNT:
+        return GANGLIE_OPTIONS
+    return (GANGLIE_TAKE_DAMAGE,)
+
+
+def _push_ganglie_damage(host: Any, frame: Any, *, source: int, target: int, amount: int = 1) -> None:
+    """压一个无渠道牌的 ``DAMAGE`` 子帧（【刚烈】的"受到你造成的 1 点伤害"）。
+
+    ``source`` = 夏侯惇（技能持有者）、``target`` = 伤害来源；``channel`` 恒 ``None``
+    （这次伤害不是任何一张牌造成的，绝不能继承外层伤害的渠道牌）。
+    """
+    host.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": source,
+            "targets": (target,),
+            "card": None,
+            "use_timing": frame.data.get("use_timing"),
+            "target": target,
+            "channel": None,
+            "nature": DamageNature.NORMAL,
+            "chain": False,
+            "amount": amount,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+
+def _ganglie(host: Any, frame: Any) -> Any:
+    """夏侯惇【刚烈】：受伤后判定；非红桃则伤害来源二选一（规则 §九 L944–945）。
+
+    三段，每段都可挂起，靠帧私有游标续跑（与【铁骑】同一范式）：
+
+    1. **判定**：:meth:`Engine.open_skill_judgment` 压 JUDGE 帧；结算后引擎把判定牌回写进
+       本帧（:data:`~sgs.skills.SKILL_JUDGMENT_CARD_KEY`），取它的**花色**：
+       红桃 ⇒ 终止；方块 / 黑牌 ⇒ 继续。
+    2. **二选一**：``ask_option`` 问 **伤害来源**（``actor = source``，不是持有者），
+       选项 = 弃两张手牌 / 受 1 点伤害；手牌不足两张时只有后者。
+    3. **执行**：选伤害 ⇒ 压 DAMAGE 子帧（来源 = 持有者）；选弃牌 ⇒ 问来源选两张手牌、
+       经 :meth:`Engine.move_in_frame` 进弃牌堆（``reason = DISCARD``，走同一条"失去牌"
+       派发口，【连营】一类钩子照常触发）。
+
+    每一步的完成事实都记在帧私有键里，故重入既不复述也不重问；压伤害子帧前先落
+    ``done``——子帧出栈后重入直接收尾，不会打第二遍。
+    """
+    state = host.state
+    owner = frame.data["skill_owner"]
+    source = _ganglie_source(state, frame, owner)
+    if source is None or frame.data.get(_GANGLIE_DONE_KEY):
+        return None
+    if not frame.data.get(_GANGLIE_JUDGED_KEY):
+        frame.data[_GANGLIE_JUDGED_KEY] = True
+        host.open_skill_judgment(frame, owner, GANGLIE_SKILL_ID)
+        return "stay"
+    if _GANGLIE_SUIT_KEY not in frame.data:
+        judge_card = frame.data.pop(SKILL_JUDGMENT_CARD_KEY, None)
+        # 同帧的布尔结果只有本技能读（判定是刚开的、没有别人写），取完即弹。
+        frame.data.pop("skill_result", None)
+        frame.data[_GANGLIE_SUIT_KEY] = None if judge_card is None else judge_card.suit
+    if frame.data[_GANGLIE_SUIT_KEY] == Suit.HEART.value:
+        frame.data[_GANGLIE_DONE_KEY] = True
+        return None
+    choice = frame.data.get(_GANGLIE_CHOICE_KEY)
+    if choice is None:
+        answer = host.ask_option(
+            frame,
+            source,
+            Timing.DAMAGE_AFTER_TAKE,
+            skill_id="ganglie:choice",
+            options=_ganglie_options(state, source),
+            optional=False,
+        )
+        if host.suspended(answer):
+            return "stay"
+        choice = answer.choice
+        frame.data[_GANGLIE_CHOICE_KEY] = choice
+    if choice == GANGLIE_TAKE_DAMAGE:
+        frame.data[_GANGLIE_DONE_KEY] = True
+        _push_ganglie_damage(host, frame, source=owner, target=source)
+        return "stay"
+    picked = host.ask_selection(
+        frame,
+        owner=_ASK_GANGLIE_DISCARD,
+        key="ganglie:discard",
+        actor=source,
+        timing=Timing.DAMAGE_AFTER_TAKE,
+        spec=SelectionSpec(
+            zones=(Zone.HAND,),
+            total=(_GANGLIE_DISCARD_COUNT, _GANGLIE_DISCARD_COUNT),
+            optional=False,
+        ),
+        # 应答的是**手牌持有者本人** ⇒ 可见槽（与【贯石斧】/【雌雄】的自选口径一致）。
+        build_face=lambda: host.selection_face(source, (Zone.HAND,), reveal_hand=True),
+    )
+    if host.suspended(picked):
+        return "stay"
+    frame.data[_GANGLIE_DONE_KEY] = True
+    if not picked:
+        # 防御分支：``optional=False`` 时引擎不会给空答案；直接调用方硬塞空元组时收尾。
+        return None
+    control = host.move_in_frame(
+        frame,
+        state.refs(picked),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=source,
+        actor=source,
+    )
+    if control == "stay":
+        return "stay"
+    return None
+
+
 DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
     # 曹操【奸雄】：你可以获得造成此伤害的牌（规则 972）——每次伤害事件一次。
     # W6-01：零步技能迁 ``run_flow``（模块级 ``JIANXIONG_FLOW``），行为与旧回调逐字等价。
@@ -452,15 +642,19 @@ DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
     DamageAfterSkill("simayi", "fankui", False, _fankui_condition, None, FANKUI_FLOW),
     # 郭嘉【遗计】：观看牌堆顶两张牌，然后交给任意角色（规则 993）——每受到 1 点伤害一次。
     DamageAfterSkill("guojia", "yiji", True, _yiji_condition, _yiji),
+    # 夏侯惇【刚烈】：受伤后判定，非红桃则由伤害来源二选一（规则 §九 L944–945）。
+    # 每次伤害事件一次（"受到伤害后"，不是"受到 1 点伤害后"）。
+    DamageAfterSkill("xiahoudun", "ganglie", False, _ganglie_condition, _ganglie),
 )
-"""B 族三条技能的逐字声明（票 05 §要做什么 2 的表）。"""
+"""B 族四条技能的逐字声明（票 05 §要做什么 2 的表 + M6 票 01 的【刚烈】）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "jianxiong": "获得造成伤害的牌",
     "fankui": "获得伤害来源的一张牌",
     "yiji": "观看牌堆顶两张牌，然后交给任意角色",
+    "ganglie": "受伤后判定：非红桃则伤害来源弃两张手牌或受到 1 点伤害",
 }
-"""B 族三条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+"""B 族四条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
 _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
     # 票 07：走步骤流水线的被动技逐步文案。键的取法同 A 族 —— ``SELECT_CARDS`` 恒读
@@ -472,15 +666,23 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
     # 票 15：选牌步**一次可选两张**（用户口径），故文案写"一至两张"；"给谁"步承认复数的
     # "这些牌"——一次两张与一张一交共用它（只选一张时读起来也通顺）。
     "yiji": {"card": "从亮出的牌里选择一至两张", "give": "选择将这些牌交给哪名角色"},
+    # M6 票 01【刚烈】同样是手写（判定 → 选项 → 选牌三步），逐步文案按询问自带的标识取键：
+    # ``SELECT_OPTION`` 的 ``skill_id`` = ``ganglie:choice`` ⇒ ``"choice"``；
+    # ``SELECT_CARDS`` ⇒ ``"card"``。
+    "ganglie": {
+        "choice": "选择弃置两张手牌或受到 1 点伤害",
+        "card": "选择弃置的两张手牌",
+    },
 }
 """**多步被动技**逐步的"需要做什么"（票 07）；键 = 短 id → 步骤名 → 文案。"""
 
 
 def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
-    """B 族三条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
+    """B 族四条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
 
-    三条都是**非锁定技**（技能面写了"你可以"）；``carrier = HERO`` ⇒ 优先级档由载体派生；
+    四条都是**非锁定技**（技能面写了"你可以"）；``carrier = HERO`` ⇒ 优先级档由载体派生；
     ``skill_type = NORMAL``（都不是主公技）；``per_point`` 由声明给出（【遗计】为真）。
+    ``handler`` 与 ``flow`` 恰有其一（【刚烈】是手写多轮回调，其余三条走流水线）。
     """
     return tuple(
         SkillDef(

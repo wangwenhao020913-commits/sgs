@@ -14,35 +14,47 @@ L 族的形态差别只有一处：它挂在**阶段体**（``PHASE_DRAW`` / ``P
 ===========  ======  ================  ==========================
 周瑜【英姿】    非锁定  ``PHASE_DRAW``    摸牌阶段多摸一张（规则 1018）
 貂蝉【闭月】    非锁定  ``PHASE_FINISH``  结束阶段摸一张（规则 1054）
+张辽【突袭】    非锁定  ``PHASE_DRAW``    放弃摸牌，改为获得至多两名其他角色各一张手牌（§九 L948）
+许褚【裸衣】    非锁定  ``PHASE_DRAW``    少摸一张；本回合【杀】/【决斗】伤害 +1（§九 L952）
 ===========  ======  ================  ==========================
 
-两条都是**非锁定技**（技能面写了"你可以"）⇒ 先发"是否发动"询问，答 ``ActivateSkill``
-才摸牌；"技能持有者就是当前回合角色"这一前提由 :func:`phase_body_activation_plans` 的
+四条都是**非锁定技**（技能面写了"你可以"）⇒ 先发"是否发动"询问，答 ``ActivateSkill``
+才执行；"技能持有者就是当前回合角色"这一前提由 :func:`phase_body_activation_plans` 的
 ``available`` 表达（阶段体帧的 ``source`` 就是当前回合角色），与【观星】同一姿态：
-``available=False`` ⇒ 别人的阶段里该实例连"是否发动"都不问。
+``available=False`` ⇒ 别人的阶段里该实例连"是否发动"都不问。【突袭】另有一条前提
+"至少一名其他角色有手牌"（没有可拿的牌就不该问），由 :attr:`PhaseBodySkill.available`
+声明。
 
 摸牌走 :meth:`~sgs.engine.Engine.draw_for_hand`（沿用 ``shuffle`` 子流、短摸判平局），
-与摸牌阶段 / 奖惩摸牌同一口径；本族的钩子**不提问**，故不会让出控制权。
+与摸牌阶段 / 奖惩摸牌同一口径；【突袭】/【裸衣】改的是**阶段的基础摸牌数**，经
+:meth:`~sgs.engine.Engine.set_draw_phase_count` / ``reduce_draw_phase_by`` 交给
+``_phase_draw`` 统一摸（而不是各画一份摸牌循环）。【英姿】/【闭月】/【裸衣】**不提问**，
+走零步流水线、不让出控制权；【突袭】的座位步（``PickSeats``）会提问，走 ``SkillFlow``
+的常规挂起 / 续跑。
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from sgs.data import SkillType
-from sgs.effects import CarrierKind
+from sgs.effects import CarrierKind, Modifier, ModifierContext, ModifierPoint, behavior_for, is_slash
 from sgs.resolution import Control, Frame
-from sgs.state import GameState
+from sgs.state import GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
 from .catalog import ActivationPlan, HeroSkillDecl, Hook, SkillDef
-from .flow import SkillFlow, zero_step_effect
+from .flow import PickSeats, SkillFlow, zero_step_effect
 
 __all__ = [
     "BIYUE_FLOW",
+    "LUOYI_DAMAGE_BONUS",
+    "LUOYI_FLOW",
     "PHASE_BODY_SKILLS",
     "PhaseBodySkill",
+    "TUXI_FLOW",
     "YINGZI_FLOW",
     "phase_body_skill_definitions",
 ]
@@ -54,11 +66,15 @@ class PhaseBodySkill(HeroSkillDecl):
 
     ``flow``（W6-01）：零步技能的 ``SkillFlow``（``steps=()``）；旧回调
     :meth:`handler` 保留，由 flow 的 ``effect`` 原样转调。
+    ``modifiers``（M6 票 01）：这条技能随身带的修饰器（【裸衣】的伤害 +1）；
+    ``available``（M6 票 01）：除"自己的阶段"外的额外前提（【突袭】：有牌可拿）。
     """
 
     timing: Timing
-    draws: int
+    draws: int = 0
     flow: Any = None
+    modifiers: tuple[Modifier, ...] = ()
+    available: Callable[[GameState, int], bool] | None = None
 
     def handler(self, host: Any, frame: Frame) -> Control:
         """阶段体钩子：是否发动已由派发器问过；这里把 ``draws`` 张摸进持有者手里。"""
@@ -107,37 +123,195 @@ _BIYUE = PhaseBodySkill(
     flow=BIYUE_FLOW,
 )
 
-PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (_YINGZI, _BIYUE)
-"""L 族两条技能的逐字声明（票 12 §落地表第 17/27 行）。"""
+
+# ---------------------------------------------------------------------------
+# 张辽【突袭】（M6 P0 票 01）：放弃摸牌，改为获得至多两名其他角色各一张手牌
+# ---------------------------------------------------------------------------
+
+TUXI_TARGETS = 2
+"""「至多两名其他角色」的上限（§九 L948–949）。"""
+
+_TUXI_TAKEN = "tuxi_taken"
+"""帧私有：本次发动里**已经交过牌**的座位（重入时跳过，不会重复拿）。"""
+
+
+def _tuxi_targets(state: GameState, owner: int) -> tuple[int, ...]:
+    """可以选的角色：**其他存活角色里手牌非空**的（没牌可拿的不进候选）。"""
+    return tuple(
+        player.seat
+        for player in state.players
+        if player.alive and player.seat != owner and player.hand
+    )
+
+
+def _tuxi_pool(
+    state: GameState, frame: Frame, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """``PickSeats`` 的池：上次已选的人不再出现（同一角色只取一张手牌）。"""
+    del frame
+    return tuple(seat for seat in _tuxi_targets(state, owner) if seat not in chosen)
+
+
+def _tuxi_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """提交点：逐个被选角色取**一张暗手牌**进张辽手牌，然后放弃本次摸牌。
+
+    "暗牌"= 走 :meth:`Engine.selection_face` 的隐藏槽（``select`` 子流打乱位置），
+    牌面在移动前对任何人都不出现；移动照常落 ``card_move``（``reason = PUT``、
+    归属 = 获得者），不泄露给第三方（记录流按区域可见性裁剪）。
+    进度记在帧私有 ``tuxi_taken``：搬牌可能内联派发"失去牌后"而挂起，重入不会二次搬。
+    全部取完才把本阶段的摸牌数改成 0——中途挂起时基础摸牌还没开始，不会先摸再放弃。
+    """
+    owner = frame.data["skill_owner"]
+    taken: list[int] = frame.data.setdefault(_TUXI_TAKEN, [])
+    for seat in tuple(int(seat) for seat in answers["seat"]):
+        if seat in taken:
+            continue
+        _slots, card_ids = host.selection_face(seat, (Zone.HAND,), reveal_hand=False)
+        # 隐藏槽只提供"位置"；本次取第一张（位置序已由 ``select`` 子流打乱）。
+        taken.append(seat)
+        if not card_ids:
+            continue
+        control = host.move_in_frame(
+            frame,
+            host.state.refs((card_ids[0],)),
+            to_zone=ZoneRef(Zone.HAND, owner),
+            reason=MoveReason.PUT,
+            owner=owner,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+    host.set_draw_phase_count(owner, 0)
+    return None
+
+
+TUXI_FLOW = SkillFlow(
+    name="tuxi",
+    steps=(
+        # 「至多两名」：1–2 名、可少选（``optional=True`` ⇒ 第二问起有 ``Pass``；
+        # 第一问就放弃 ⇒ 整条流水线取消，按"没发动"回到正常摸两张）。
+        PickSeats(lo=1, hi=TUXI_TARGETS, pool=_tuxi_pool, optional=True),
+    ),
+    effect=_tuxi_effect,
+)
+"""【突袭】的一步流水线：选 1–2 名其他角色 → 各取一张暗手牌 → 放弃摸牌。"""
+
+
+def _tuxi_available(state: GameState, owner: int) -> bool:
+    """额外前提：至少有一名其他角色手里有牌（没有可拿的就不问"是否发动"）。"""
+    return bool(_tuxi_targets(state, owner))
+
+
+_TUXI = PhaseBodySkill(
+    # 张辽【突袭】：摸牌阶段，你可以放弃摸牌，改为获得至多两名其他角色的各一张手牌。
+    hero_id="zhangliao",
+    short_id="tuxi",
+    timing=Timing.PHASE_DRAW,
+    flow=TUXI_FLOW,
+    available=_tuxi_available,
+)
+
+
+# ---------------------------------------------------------------------------
+# 许褚【裸衣】（M6 P0 票 01）：少摸一张；本回合【杀】/【决斗】伤害 +1
+# ---------------------------------------------------------------------------
+
+LUOYI_DAMAGE_BONUS = 1
+"""【裸衣】的伤害增量（§九 L952–954：使用【杀】或【决斗】造成的伤害 +1）。"""
+
+LUOYI_DUEL_TYPE = "duel"
+"""【决斗】的牌名 id（与【杀】家族并列的第二个受益牌型）。"""
+
+
+def _luoyi_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """提交点：本阶段少摸一张，并落"本回合伤害 +1"的座位状态（回合末清）。"""
+    del answers
+    owner = frame.data["skill_owner"]
+    host.reduce_draw_phase_by(owner, 1)
+    host.set_luoyi_active(owner, True)
+    return None
+
+
+LUOYI_FLOW = SkillFlow(name="luoyi", steps=(), effect=_luoyi_effect)
+"""【裸衣】的零步流水线：[是否发动] → 少摸一张 + 本回合伤害 +1（无步骤）。"""
+
+
+def _luoyi_damage_bonus(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``DAMAGE_DEAL_AMOUNT`` 回调：本回合内许褚的【杀】/【决斗】伤害 +1。
+
+    只认**来源侧**（``ctx.owner == ctx.subject``：许褚是造成伤害的人）与**渠道牌**
+    （【杀】家族按行为表判 — 普通 / 火 / 雷 / 转化 / 虚拟同族；【决斗】按牌名 id）；
+    传导帧不派发本挂点（``damage_amount`` 只对 ``chain=False`` 的源头帧派发），
+    故不会把 +1 重复算进连环传导。"是否发动过"记在**座位级状态** ``Player.luoyi_active``
+    （一次性效果，不挂到技能实例上；回合末由引擎清理），而"伤害 +1"本身是本技能随身
+    携带的**连续型修饰器**——随实例存亡（`06`（§5「程序化约定与偏离一手」）/ spec D9）。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not state.player(ctx.owner).luoyi_active:
+        return current
+    if is_slash(behavior_for(ctx.card)) or ctx.card.type == LUOYI_DUEL_TYPE:
+        return current + LUOYI_DAMAGE_BONUS
+    return current
+
+
+_LUOYI = PhaseBodySkill(
+    # 许褚【裸衣】：摸牌阶段，你可以少摸一张牌；若如此做，你使用【杀】或【决斗】造成的
+    # 伤害 +1（直到回合结束）。
+    hero_id="xuchu",
+    short_id="luoyi",
+    timing=Timing.PHASE_DRAW,
+    flow=LUOYI_FLOW,
+    modifiers=(Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _luoyi_damage_bonus),),
+)
+
+PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (_YINGZI, _BIYUE, _TUXI, _LUOYI)
+"""L 族四条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "yingzi": "多摸一张牌",
     "biyue": "摸一张牌",
+    "tuxi": "放弃摸牌，改为获得至多两名其他角色的各一张手牌",
+    "luoyi": "少摸一张牌；本回合你的【杀】或【决斗】造成的伤害 +1",
 }
-"""L 族两条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+"""L 族四条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+
+_STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
+    # M6 票 01【突袭】：座位步的询问 ``skill_id`` 是 ``tuxi:seat:<序号>`` ⇒ 键 = ``seat``。
+    "tuxi": {"seat": "选择至多两名其他角色（各获得其中一张手牌）"},
+}
+"""多步阶段体技能的逐步文案（M6 票 01）；键 = 短 id → 步骤名 → 文案。"""
 
 
 def phase_body_activation_plans() -> dict[str, Any]:
     """L 族的发动形态注册表（由 :data:`sgs.skills.catalog.ACTIVATION_PLANS` 末尾并入）。
 
-    两条技能的形态同形：**技能持有者就是当前回合角色**才 ``available``——阶段体帧的
+    四条技能的形态同形：**技能持有者就是当前回合角色**才 ``available``——阶段体帧的
     ``source`` 由 :meth:`Engine._dispatch_phase_body` 设成当前回合角色。别的人摸牌 /
     结束阶段里，这条实例连"是否发动"都不问（与【观星】的 ``_guanxing_plan`` 同一条理由）。
+    声明了 :attr:`PhaseBodySkill.available` 的（【突袭】"有牌可拿"）再叠一层前提。
     """
 
-    def plan(state: GameState, frame: Frame, instance: Any) -> ActivationPlan:
-        del state
-        return ActivationPlan(available=frame.data.get("source") == instance.owner)
+    def plan_for(skill: PhaseBodySkill) -> Any:
+        def plan(state: GameState, frame: Frame, instance: Any) -> ActivationPlan:
+            if frame.data.get("source") != instance.owner:
+                return ActivationPlan(available=False)
+            if skill.available is not None and not skill.available(state, instance.owner):
+                return ActivationPlan(available=False)
+            return ActivationPlan()
 
-    return {skill.skill_id: plan for skill in PHASE_BODY_SKILLS}
+        return plan
+
+    return {skill.skill_id: plan_for(skill) for skill in PHASE_BODY_SKILLS}
 
 
 def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
-    """L 族两条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
+    """L 族四条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
 
-    两条都**非锁定**（技能面写"你可以"）⇒ 先问"是否发动"再摸牌；``carrier = HERO``
+    四条都**非锁定**（技能面写"你可以"）⇒ 先问"是否发动"再执行；``carrier = HERO``
     ⇒ 优先级档由载体派生；``skill_type = NORMAL``（都不是主公技）。
-    挂点是**阶段体**（``Hook(timing)``），消费方是票 10 的 ``_dispatch_phase_body``。
+    挂点是**阶段体**（``Hook(timing)``），消费方是票 10 的 ``_dispatch_phase_body``；
+    【裸衣】另带一条 ``DAMAGE_DEAL_AMOUNT`` 修饰器（随身修饰器，随实例存亡）。
     """
     return tuple(
         SkillDef(
@@ -146,7 +320,9 @@ def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             hooks=(Hook(skill.timing, flow=skill.flow),),
+            modifiers=skill.modifiers,
             requirement=_REQUIREMENTS[skill.short_id],
+            step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
         )
         for skill in PHASE_BODY_SKILLS
     )

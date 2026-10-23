@@ -168,12 +168,14 @@ def play(
 #     事件流写「放弃（无可弃的同花色牌）」。
 # 种子由 ``tools/acceptance_seed.py --players 8 --deck-profile standard_ex_160 --card
 # fire_attack`` 起步、再用固定脚本在这两个种子上确认（同 seed 可复现）。
+# M6 P0（启用池 16 → 19）后 seed 37 的人类在对局里活不到自己的出牌阶段、火攻用不出来；
+# 用同一份固定脚本重扫到 seed 68（判据未放宽：仍是"对 AI 用火攻 + 目标没有同花色"）。
 # ---------------------------------------------------------------------------
 
 _FIRE_TAPES = (
     # (seed, 目标是不是自己, 是否期望出现同花色弃牌询问)
     (4, True, True),
-    (37, False, False),
+    (68, False, False),
 )
 
 
@@ -365,19 +367,26 @@ def fire_attack_tape(base: str) -> int:
 #      打到人类 0 血，求桃窗口里的【酒】目标恒为自己；提交后回复 1、wine_active 仍为
 #      false、零 wine_change。
 # 种子 16 由 ``tools/acceptance_seed.py --players 8 --deck-profile standard_ex_160
-# --card wine`` 起步，再按上面两段脚本确认（同 seed 可复现）。
+# --card wine`` 起步，再按上面两段脚本确认（同 seed 可复现）。M6 P0（启用池 16 → 19）
+# 换池后 seed 16 的对局在人类走到 0 血之前就结束了，故**两段各自选种**：
+# 出牌阶段那段仍要"座位 0 首发 + 起始手牌恰有一张【酒】"（seed 16），濒死自救那段按
+# 同一固定策略重扫到 seed 8（判据未放宽：人 0 血 + 窗口里的【酒】目标为自己）。
 # ---------------------------------------------------------------------------
 
 _WINE_TAPE_SEED = 16
+"""出牌阶段那段：首问就是人类出牌阶段、起始手牌里恰一张【酒】。"""
+
+_WINE_TAPE_NEAR_DEATH_SEED = 8
+"""濒死自救那段：同一固定策略能把人类打到 0 血、此时手里还有【酒】。"""
 
 
-def _wine_tape_create(base: str) -> tuple[str, int, int, dict[str, Any]] | None:
+def _wine_tape_create(base: str, *, seed: int = _WINE_TAPE_SEED) -> tuple[str, int, int, dict[str, Any]] | None:
     status, body = call(
         f"{base}/api/sessions",
         {
             "player_count": 8,
             "ai": "heuristic",
-            "seed": _WINE_TAPE_SEED,
+            "seed": seed,
             "human_seat": 0,
             "timeout_seconds": None,
             "deck_profile": "standard_ex_160",
@@ -478,7 +487,7 @@ def _wine_tape_play(base: str) -> int:
 
 def _wine_tape_near_death(base: str) -> int:
     """濒死自救：固定策略打到 0 血，窗口里点一次【酒】= 回复 1、无 wine_change。"""
-    created = _wine_tape_create(base)
+    created = _wine_tape_create(base, seed=_WINE_TAPE_NEAR_DEATH_SEED)
     if created is None:
         return 1
     session_id, cursor, log_seq, body = created
@@ -516,8 +525,11 @@ def _wine_tape_near_death(base: str) -> int:
                 record for record in records
                 if record.get("kind") == "action" and record.get("accepted")
             ]
-            if len(accepted) != 1 or (accepted[0].get("action") or {}).get("kind") != "UseCard":
-                print(f"FAIL 酒 tape（濒死）：自救不是恰一条 UseCard：{accepted}")
+            # 回应里可能夹着**同一次 drive 里 AI 座位**的动作（无 actor 字段可分辨），故判据
+            # 取"第一条 accepted 就是本次提交的 UseCard"（提交的动作恒排在最前）；
+            # 早先版本要求恰一条，那在"救援后 drive 继续走到 AI 座位"的种子上会误判。
+            if not accepted or (accepted[0].get("action") or {}).get("kind") != "UseCard":
+                print(f"FAIL 酒 tape（濒死）：自救不是一条 UseCard：{accepted}")
                 return 1
             narrative = "\n".join(entry["text"] for entry in body.get("narrative") or [])
             if "使用【酒】" not in narrative or "回复 1 点体力" not in narrative:

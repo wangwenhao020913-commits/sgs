@@ -85,6 +85,7 @@ __all__ = [
     "HeroSkillDecl",
     "MATCH_OWNER_KEY",
     "RUNNING_SKILL_KEY",
+    "SKILL_JUDGMENT_CARD_KEY",
     "Seam",
     "SeamKind",
     "SkillDef",
@@ -574,6 +575,16 @@ RUNNING_SKILL_KEY = "running_skill"
 交给郭嘉、【反馈】又拿郭嘉那张——同一张牌、同一个目标区、同一帧内序号），此时唯一能
 区分"同一次移动的重入"与"另一次移动"的就是**是哪个技能在跑**。派发环在调每个 handler
 前写它，重入时同一个 handler 会写回同一个值，故它是稳定的重入坐标。
+"""
+
+
+SKILL_JUDGMENT_CARD_KEY = "skill_judgment_card"
+"""帧私有槽名：技能触发的一次判定**结算后**，那张判定牌本身回写进发起帧（M6 票 01）。
+
+引擎一直把判定结果回写成 ``skill_result``（红 = 成功，供【八卦阵】/【铁骑】读）；
+【刚烈】的"不为红桃"需要**花色**（方块是红色但不终止），布尔读不出来，故同一次回写
+再带上判定牌。帧私有数据不进记录流，既有基准逐字节不受影响；读它的技能用后即弹掉，
+避免随 ``dict(frame.data)`` 流进子帧被别的窗口误读。
 """
 
 
@@ -1950,7 +1961,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
 )
 """定义目录：``skill_id`` → :class:`SkillDef`，**模块级不可变**（票 07 §1 / §6）。
 
-装备技能（22 条：标准 17 + 军争 5）与武将技能（票 03 起逐族落地，票 12 起 29 条齐）**共用同一张表**：
+装备技能（22 条：标准 17 + 军争 5）与武将技能（票 03 起逐族落地，票 12 起 29 条齐、M6 P0 票 01 起 32 条）**共用同一张表**：
 载体解析、优先级档、修饰器链、时机派发都只认这张表，不区分两类载体。合并点在**文件末尾**
 （而不是模块头部的 import）是为了让 :mod:`sgs.skills.heroes` 能反向 import 本模块的
 :class:`SkillDef`——`heroes` 在 import 期读到的 :data:`CATALOG` 是装备那半张，而它的定义由

@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 from sgs.agents import HeuristicPlayer
-from sgs.data import load_content_pack
+from sgs.data import Identity, load_content_pack
 from sgs.engine import Engine, RandomSource
 from sgs.effects import legal_actions_for
 from sgs.state import (
@@ -484,3 +484,27 @@ def test_the_ai_uses_wine_to_rescue_itself_at_near_death():
 
     assert isinstance(action, UseCard) and action.card.card_id == wine, "【酒】自救"
     assert action.targets == (0,)
+
+
+def test_the_ai_scores_a_chained_revealed_enemy_without_using_the_chain():
+    """回归（M6 P0 暴露）：横置的**已明敌人**走进【铁索】打分器的敌人分支。
+
+    该分支原来引用一个不存在的常量（``_IRON_CHAIN_RESET_ENEMY_VALUE``，真名是
+    ``_IRON_CHAIN_RESET_ENEMY_PENALTY``）；启用池 16 名时随机对局没走到它，M6 P0
+    扩到 19 名后第一次命中就 ``NameError``（160 档 8 种子里的 seed 142）。
+    判据 = AI 照常应答，且**不**替敌人拆引线（重置敌人是 -1.5，比重铸的 0.6 差）。
+    """
+    chain = IRON_CHAIN[0]
+    enemy_chained = _engine(
+        [
+            SeatSpec(hand=(chain,), identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LORD, chained=True),
+        ],
+        deck=_deck_with_top(*_inert_draw(chain), exclude=(chain,)),
+    )
+    _advance(enemy_chained, [_Minimal(), _Minimal()], _at_play_phase(0))
+
+    action = _ai().respond(enemy_chained.pending)
+
+    assert isinstance(action, Reforge), "横置的已明敌人是负收益（替他拆引线）⇒ 重铸"
+    assert action.card.card_id == chain

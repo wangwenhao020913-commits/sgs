@@ -20,7 +20,7 @@
 
 from __future__ import annotations
 
-from sgs.data import load_content_pack
+from sgs.data import Suit, load_content_pack
 from sgs.engine import Engine
 from sgs.resolution import Tag, add_tag
 from sgs.state import (
@@ -30,6 +30,7 @@ from sgs.state import (
     Phase,
     SelectCards,
     SelectCardsQuery,
+    SelectOption,
     UseCard,
     Zone,
     ZoneRef,
@@ -1367,3 +1368,209 @@ def test_foreign_damage_does_not_offer_jianxiong_to_the_unhurt_owner():
     assert _activation_count(engine, JIANXIONG) == 0, (
         "受伤的是座位 1、装【奸雄】的是座位 0（曹操）⇒ 不该问"
     )
+
+
+# ---------------------------------------------------------------------------
+# ⑨ 夏侯惇【刚烈】（M6 P0 票 01）：受伤后判定，非红桃 ⇒ **伤害来源**二选一
+#
+# 官方 §九 L944–945：「当你受到伤害后，你可以进行判定，若结果不为红桃，则伤害来源
+# 选择一项：弃置两张手牌，或受到你造成的 1 点伤害。」
+#
+# 与同族三条的差别只有两处，都在**询问面**上：判定结果要看**花色**（红桃终止；方块是
+# 红色但**不**终止），且选项 / 选牌问的是**伤害来源**（``actor`` = 来源，不是技能持有者）。
+# ---------------------------------------------------------------------------
+
+GANGLIE = "hero.xiahoudun.ganglie"
+
+HEARTS = Suit.HEART
+DIAMOND = Suit.DIAMOND
+SPADE = Suit.SPADE
+
+GANGGLIE_OPTIONS = ("discard_two", "take_damage")
+"""【刚烈】的两个选项文本：弃置两张手牌 / 受到你造成的 1 点伤害。"""
+
+
+def _suit_card(suit: Suit, *, used: set[int] | None = None) -> int:
+    """标准 108 张里第一张 ``suit`` 花色的牌 id（判定牌可控用）。"""
+    used = used or set()
+    for index, card in enumerate(PACK.deck.cards):
+        if card.suit is suit and index not in used:
+            return index
+    raise AssertionError(f"标准 108 张里没有 {suit} 花色的牌")
+
+
+class _GanglieSource:
+    """伤害来源的脚本：应答【刚烈】的选项步与"弃两张手牌"的选牌步。"""
+
+    def __init__(self, *, choice: str | None = None) -> None:
+        self.choice = choice
+        self.options: list = []
+        self.selections: list = []
+
+    def respond(self, query):
+        if query.kind == "SELECT_OPTION" and str(query.skill_id).startswith("ganglie"):
+            self.options.append(query)
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and action.choice == self.choice:
+                    return action
+            return query.legal_actions[0]
+        if query.kind == "SELECT_CARDS":
+            self.selections.append(query)
+            for action in query.legal_actions:
+                if isinstance(action, SelectCards) and len(action.picks) == 2:
+                    return action
+            raise AssertionError("【刚烈】的「弃两张手牌」没有两选的候选")
+        return _pass_or_first(query)
+
+
+def _ganglie_engine(
+    *,
+    judge_suit: Suit = SPADE,
+    source_hand: tuple[int, ...] = (),
+    target: int = 1,
+    holder: int = 1,
+    source: int | None = 0,
+    seats: int = 2,
+    amount: int = 1,
+    choice: str | None = None,
+):
+    """压一个 DAMAGE 子帧（打向 ``target``），推进到**该帧出栈**。
+
+    ``holder`` 座位是夏侯惇；``target`` 是挨打的人（正例两者相同，反例用它造"别人挨打"）。
+    牌堆顶 = ``judge_suit`` 的一张 ⇒【刚烈】的判定结果可控。
+    返回 ``(engine, 来源脚本, 判定牌 id)``。
+    """
+    judge = _suit_card(judge_suit)
+    channel = _cards("slash")[0]
+    specs = [SeatSpec() for _ in range(seats)]
+    if source is not None:
+        specs[source] = SeatSpec(hand=tuple(source_hand))
+    specs[holder] = SeatSpec(hero="xiahoudun")
+    used = {judge, channel, *source_hand}
+    deck = tuple(index for index in range(len(PACK.deck.cards)) if index not in used)
+    state = build_state(
+        pack=PACK,
+        seats=specs,
+        deck=(judge, *deck),
+        processing=(channel,),
+    )
+    engine = Engine.from_state(state, seed=7)
+    source_player = _GanglieSource(choice=choice)
+    players = [Scripted() for _ in range(seats)]
+    if source is not None:
+        players[source] = source_player
+    frame = engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": source,
+            "targets": (target,),
+            "card": state.card(channel),
+            "use_timing": Timing.PHASE_PLAY_IDLE,
+            "target": target,
+            "channel": state.card(channel),
+            "nature": "NORMAL",
+            "chain": False,
+            "amount": amount,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "frame"
+            and record.op == "pop"
+            and record.frame_id == frame.frame_id
+            for record in e.records
+        ),
+    )
+    return engine, source_player, judge
+
+
+def _damage_deal_records(engine) -> list[tuple[int | None, tuple[int, ...]]]:
+    """``DAMAGE_DEAL`` 时机记录的 ``(actor, targets)`` 序列。"""
+    return [
+        (record.actor, tuple(record.targets))
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.DAMAGE_DEAL
+    ]
+
+
+def test_ganglie_does_nothing_when_the_judgment_is_a_heart():
+    """红桃 ⇒ 判定终止，**连"二选一"都不问**（规则"若结果不为红桃"）。"""
+    hand = tuple(_cards("dodge")[:2])
+    engine, source, judge = _ganglie_engine(
+        judge_suit=HEARTS, source_hand=hand, choice="take_damage"
+    )
+
+    assert _activation_count(engine, GANGLIE) == 1, "受伤后问一次「是否发动」"
+    assert source.options == [], "红桃 ⇒ 不结算，不向伤害来源发选项询问"
+    assert engine.state.player(0).hp == 4, "伤害来源不掉血"
+    assert engine.state.player(0).hand == list(hand), "伤害来源不弃牌"
+    assert judge in engine.state.discard, "判定牌照常入弃牌堆"
+
+
+def test_ganglie_a_diamond_is_not_a_heart_so_the_source_takes_one_damage():
+    """方块是**红色但不是红桃** ⇒ 仍要结算（"不为红桃"不是"为黑色"）。"""
+    hand = tuple(_cards("dodge")[:2])
+    engine, source, _judge = _ganglie_engine(
+        judge_suit=DIAMOND, source_hand=hand, choice="take_damage"
+    )
+
+    assert len(source.options) == 1, "非红桃 ⇒ 向伤害来源发一次二选一"
+    assert source.options[0].options == GANGGLIE_OPTIONS
+    assert source.options[0].actor == 0, "问的是**伤害来源**，不是技能持有者"
+    assert engine.state.player(0).hp == 3, "选「受到你造成的 1 点伤害」⇒ 来源掉 1 点"
+    assert engine.state.player(0).hand == list(hand), "没选弃牌 ⇒ 手牌一张不少"
+    assert _damage_deal_records(engine) == [(0, (1,)), (1, (0,))], (
+        "第二次伤害的来源（actor）必须是夏侯惇，目标必须是伤害来源"
+    )
+
+
+def test_ganglie_a_spade_makes_the_source_discard_two_hand_cards():
+    """黑桃 ⇒ 非红桃；选「弃置两张手牌」⇒ 来源自己选牌、进弃牌堆，他不掉血。"""
+    hand = tuple(_cards("dodge")[:2])
+    engine, source, judge = _ganglie_engine(
+        judge_suit=SPADE, source_hand=hand, choice="discard_two"
+    )
+
+    assert len(source.options) == 1
+    assert source.options[0].options == GANGGLIE_OPTIONS
+    assert len(source.selections) == 1, "弃两张手牌要问来源选哪两张"
+    assert source.selections[0].actor == 0
+    assert len(engine.state.player(0).hand) == 0
+    assert set(hand) <= set(engine.state.discard)
+    assert engine.state.player(0).hp == 4
+    assert judge in engine.state.discard
+
+
+def test_ganglie_offers_only_the_damage_option_when_the_source_has_one_hand_card():
+    """手牌不足两张 ⇒ 只剩「受到 1 点伤害」一个选项（规则允不出的选项不给）。"""
+    hand = (_cards("dodge")[0],)
+    engine, source, _judge = _ganglie_engine(
+        judge_suit=SPADE, source_hand=hand, choice="take_damage"
+    )
+
+    assert len(source.options) == 1
+    assert source.options[0].options == ("take_damage",)
+    assert engine.state.player(0).hand == list(hand), "不够两张 ⇒ 不弃牌"
+    assert engine.state.player(0).hp == 3
+
+
+def test_ganglie_is_not_offered_when_the_damage_has_no_source():
+    """无来源伤害（【闪电】一类）⇒ 没有"伤害来源"可问 ⇒ 不发动（连询问都不发）。"""
+    engine, _source, _judge = _ganglie_engine(source=None, seats=2)
+
+    assert _activation_count(engine, GANGLIE) == 0
+    assert not any(
+        record.kind == "query" and record.query.kind == "SELECT_OPTION"
+        for record in engine.records
+    )
+
+
+def test_ganglie_is_not_offered_when_someone_else_takes_the_damage():
+    """**别人受伤 ⇒ 夏侯惇不被问**（条件必须自校"受伤的是不是持有者"）。"""
+    engine, _source, _judge = _ganglie_engine(target=2, holder=1, seats=3)
+
+    assert _activation_count(engine, GANGLIE) == 0
+    assert engine.state.player(2).hp == 3, "别人照常掉血（伤害本身不受影响）"

@@ -203,6 +203,15 @@ class Player(BaseModel):
     wine_active: bool = False
     """【酒】的"下一张【杀】+1"是否生效（M5-04 接线：出牌阶段的【酒】写入，回合末清空；
     每次变化发一条 ``wine_change`` delta）。"""
+    luoyi_active: bool = False
+    """【裸衣】的"本回合【杀】/【决斗】伤害 +1"是否生效（M6 票 01）。
+
+    写入唯一入口 ``Engine.set_luoyi_active``（许褚的摸牌阶段写入、回合末清空）；读点是
+    :func:`sgs.skills.phase_body._luoyi_damage_bonus` 的 ``DAMAGE_DEAL_AMOUNT`` 回调。
+    **不发 delta**：与 ``wine_active`` 不同，目前没有任何 JSON 读者（网页座位卡不读它、
+    记录流不写它），回放按同一条 ``SKILL_ACTIVATION`` 动作重跑即可重建；等出现 UI 读取方
+    时再补 ``luoyi_change`` delta（同时要登记 no-leak 判据）。
+    """
     card_use_counts: dict[str, int] = Field(default_factory=dict)
     """本回合各**计数键**的已用次数；该座位自己的 ``TURN_START`` 重置（票 07 §6）。
 

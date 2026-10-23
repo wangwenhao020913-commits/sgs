@@ -532,7 +532,10 @@ def _score_iron_chain(action: Action, view: PlayerView) -> float:
             if _is_friendly(view, seat):
                 score += _IRON_CHAIN_RESET_FRIENDLY_VALUE
             elif _is_revealed_enemy(view, seat):
-                score -= _IRON_CHAIN_RESET_ENEMY_VALUE
+                # 常量名是 ``..._PENALTY``（M6 P0 之前这一行写成了不存在的
+                # ``..._VALUE``：该分支在启用池 16 名时没被随机对局走到，扩到 19 名后
+                # 第一次命中就 NameError；回归测试见 `tests/test_m5_ai_military.py`）。
+                score -= _IRON_CHAIN_RESET_ENEMY_PENALTY
         elif _is_friendly(view, seat):
             score -= _IRON_CHAIN_EXPOSE_FRIENDLY_PENALTY
         elif _is_revealed_enemy(view, seat) and elemental:
@@ -799,6 +802,10 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         # 【雌雄双股剑】目标侧的两种损失：弃一张手牌 vs 令使用者摸一张。
         "discard_one": -1.0,
         "draw_one": -1.5,
+        # 【刚烈】（M6 票 01）伤害来源的二选一：弃两张手牌 vs 受 1 点伤害。
+        # 两点伤害按"1 点 ≈ 3.5、两张最便宜的牌 ≈ 2"估计 ⇒ 能弃牌就弃牌。
+        "discard_two": -2.0,
+        "take_damage": -3.5,
     }
 )
 
@@ -849,6 +856,17 @@ _HOSTILE_SEAT_STEPS = (
 "帮盟友"（旧实现用四条字面 id：``wusheng`` / ``longdan`` / ``guose`` / ``serpent_spear``）。
 """
 
+_STOLEN_CARD_SEAT_STEPS = ("tuxi:",)
+"""座位步的第三类：**从对方手里拿走一张牌**（M6 票 01 的【突袭】）。
+
+与"被指向的对手"不同：拿走一张牌对**任何人**都是可得收益（敌人的代价更高、盟友只是
+队内转移），故每个非自己座位都给正分、敌人更高。不把 ``Pass`` 当更优——发动了却一张
+不拿是纯亏（还放弃了摸牌），所以 ``"tuxi:"`` 不能落进"帮助类"的默认 0 分里。
+"""
+
+_STOLEN_CARD_SEAT_VALUE = 1.0
+"""【突袭】座位步：非敌人也值一张牌（估算，不做收益模型调参）。"""
+
 
 def _score_seat_option(
     query: Query,
@@ -885,6 +903,8 @@ def _score_seat_option(
     )
     if conversion or skill.startswith(_HOSTILE_SEAT_STEPS):
         return _SEAT_TARGET_VALUE if enemy else 0.0
+    if skill.startswith(_STOLEN_CARD_SEAT_STEPS):
+        return _SEAT_TARGET_VALUE if enemy else _STOLEN_CARD_SEAT_VALUE
     if seat == view.seat or _is_revealed_ally(view, seat):
         return _SEAT_TARGET_VALUE
     return -_SEAT_TARGET_VALUE if enemy else 0.0
@@ -1525,6 +1545,19 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     ),
     "hero.simayi.fankui": (_constant(3.5), "受伤后获得来源一张牌：净赚一张，恒发动"),
     "hero.simayi.guicai": (_constant(1.0), "改判窗口：有改判能力即参与（保守给正但不高）"),
+    # M6 票 01：
+    "hero.xiahoudun.ganglie": (
+        _constant(4.0),
+        "受伤后判定：非红桃则伤害来源弃两张手牌或掉 1 点，收益恒为正",
+    ),
+    "hero.zhangliao.tuxi": (
+        _constant(3.5),
+        "放弃摸牌改为至多拿两张：净赚（拿到 ≤2 张、代价是少摸 2 张）",
+    ),
+    "hero.xuchu.luoyi": (
+        _constant(2.0),
+        "少摸一张换本回合【杀】/【决斗】+1：进攻回合值得",
+    ),
     "hero.guojia.tiandu": (_constant(2.0), "获得此判定牌：额外一张手牌"),
     "hero.guojia.yiji": (_constant(4.5), "受伤后摸两张并可分配：净赚两张"),
     # 蜀
