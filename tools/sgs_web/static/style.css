@@ -628,6 +628,61 @@ button.mini-slot { cursor: pointer; }
   border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px;
 }
 
+/* ---------- 牌桌动效（U3-03 / D8.1 / D13）：目标线 / 行动者高亮 / 体力闪 ---------- */
+
+/* 目标线层：覆盖整个 16:9 壳（`inset: 0`、无 viewBox），不吃指针。
+ * z-index 15 = 在环上座位（3）与自己的底部面板（10）之上、弹窗 / 询问窗（60）之下：
+ * 连到自己的线不会被底部面板背景盖住，模态打开时线仍在窗口之下。
+ * 端点只在 JS 画线时读一次 `getBoundingClientRect()`，之后是 SVG 属性——窗口尺寸变化
+ * 不会重算已经在播的线。 */
+.target-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+  z-index: 15;
+}
+.target-line { transition: opacity .8s ease-out; }
+.target-line.fading { opacity: 0; }
+/* 线宽 2.5 设计单位（不是 CSS px）；统一金色，不按效果分类。箭头尺寸在 JS 里
+ * 按同一设计单位换算（effects.js:TARGET_ARROW_SIZE = 10）。 */
+.target-line line {
+  stroke: #d9b45c;
+  stroke-width: calc(2.5 * var(--dsu));
+  stroke-linecap: round;
+}
+.target-line polygon { fill: #d9b45c; }
+
+/* 决策点行动者（D13）：0.5 秒金色描边；结算类时机不加 `.acting`。 */
+.seat.acting { animation: seat-acting .5s ease-out 1; }
+@keyframes seat-acting {
+  0% {
+    outline: calc(3 * var(--dsu)) solid rgba(217, 180, 92, .95);
+    outline-offset: calc(2 * var(--dsu));
+  }
+  100% {
+    outline: calc(3 * var(--dsu)) solid rgba(217, 180, 92, 0);
+    outline-offset: calc(6 * var(--dsu));
+  }
+}
+
+/* 体力闪（D13）：武将块闪 0.4 秒；掉血红 / 回复绿（两个修饰类只给颜色变量）。 */
+.hero-block.hp-flash { animation: hp-flash .4s ease-out 1; }
+.hero-block.hp-flash-down { --flash-bg: rgba(179, 38, 30, .22); --flash-edge: #b3261e; }
+.hero-block.hp-flash-up { --flash-bg: rgba(46, 125, 50, .22); --flash-edge: #2e7d32; }
+@keyframes hp-flash {
+  0% {
+    background: var(--flash-bg);
+    box-shadow: inset 0 0 0 calc(2 * var(--dsu)) var(--flash-edge);
+  }
+  100% {
+    background: transparent;
+    box-shadow: inset 0 0 0 calc(2 * var(--dsu)) transparent;
+  }
+}
+
 /* ---------- 底部面板：事件流按钮 | 手牌区 | 技能 | 自己的武将块 | 自己的判定 / 装备 ---------- */
 
 .table-bottom {

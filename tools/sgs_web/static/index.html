@@ -245,6 +245,10 @@
         <div id="t-modal-body" class="modal-body"></div>
       </div>
     </div>
+
+    <!-- 目标线层（U3-03 / D8.1）：覆盖整个牌桌壳的 SVG（`inset: 0`、无 viewBox、不吃指针），
+         在座位与底部面板之上、弹窗之下。端点只在画线时读一次布局（窗口变化不影响已在播的线）。 -->
+    <svg id="t-target-lines" class="target-lines" aria-hidden="true"></svg>
   </div>
 </main>
 
@@ -329,6 +333,8 @@
 <script src="card-face.js"></script>
 <script src="seat-view.js"></script>
 <script src="table.js"></script>
+<!-- 牌桌动效（U3-03 / D8 / D13）：目标线 / 行动者高亮 / 体力闪。函数只在 wire() 后被调用。 -->
+<script src="effects.js"></script>
 <script src="preactivation.js"></script>
 <script src="interaction.js"></script>
 <script src="pending.js"></script>

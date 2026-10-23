@@ -12762,4 +12762,199 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.resetSelection();
 }
 
+/* ============ U3-03（票 03）：使用牌目标线 / 行动者高亮 / 体力闪 ============
+ *
+ * 判据来自票面与 spec D8.1 / D13 / D15。载荷是**与响应体同形**的合成 view + 记录；
+ * 断言只落在 DOM：SVG 线的 `data-line-to` / `.target-line`、座位的 `.acting`、武将块的
+ * `.hp-flash-*`。时间不靠真实等待：`state.animScale = 0`（淡出立即完成）；要验证寿命时
+ * 把线上的 `enteredAt` 改到 1.2s 前再重绘一次（不读像素、不等真实时钟）。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+      || String(node.className || "").split(/\s+/).includes(name)));
+  const seatNodesNow = () => [...$("t-seats").children, $("t-self-seat")];
+  const seatNodeOf = (seat) => seatNodesNow().find(
+    (node) => attr(node, "data-seat") === String(seat)) || null;
+  const heroBlockOf = (seat) => {
+    // 垫片不建静态 HTML 的父子树：自己的武将块按稳定 id 取（真页面里它在 #t-self-seat 里）。
+    const selfSeat = ui.state.view && ui.state.view.snapshot
+      ? ui.state.view.snapshot.seat : null;
+    if (selfSeat !== null && selfSeat !== undefined && String(seat) === String(selfSeat)) {
+      return $("t-self-hero");
+    }
+    const seatNode = seatNodeOf(seat);
+    return seatNode ? walk(seatNode).find((node) => hasClass(node, "hero-block")) || null : null;
+  };
+  const lineNodes = () => walk($("t-target-lines")).filter((node) => hasClass(node, "target-line"));
+  const lineTos = () => lineNodes().map((node) => attr(node, "data-line-to"))
+    .filter((value) => value !== undefined);
+  const linePart = (node, name) => Boolean(node && node.children.find(
+    (child) => hasClass(child, name)));
+  const seatPlayer = (seat, heroName, extra = {}) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName, ...extra,
+  });
+  const PLAYERS = [
+    seatPlayer(0, "郭嘉"), seatPlayer(1, "周瑜"),
+    seatPlayer(2, "貂蝉"), seatPlayer(3, "张飞"),
+  ];
+  const baseView = (session, players) => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.heroes = { 0: "guojia", 1: "zhouyu", 2: "diaochan", 3: "zhangfei" };
+    out.snapshot.processing = [];
+    out.snapshot.players = players;
+    return out;
+  };
+  let serial = 0;
+  /** 落一份基准视图（座位渲染出来）再起一份带记录的回放；返回后由用例逐条 step。 */
+  const loadEffects = (records, players = PLAYERS) => {
+    ui.flushPlayback();
+    serial += 1;
+    const session = `u3-effects-${serial}`;
+    ui.applyViewRaw({
+      ...baseView(session, players), cursor: 0, log_seq: 0, records: [], finished: false,
+    });
+    ui.applyViewRaw({
+      ...baseView(session, players), cursor: records.length, log_seq: 0,
+      records, finished: false,
+    });
+  };
+  const step = (count = 1) => { for (let index = 0; index < count; index += 1) ui.stepPlayback(true); };
+  const designate = (seq, actor, targets, frame = 5) => ({
+    kind: "timing", timing: "USE_DESIGNATE_TARGET", seq, frame_id: frame, depth: 1,
+    actor, source: actor, targets, cards: [],
+  });
+  const query = (seq, actor) => ({ kind: "query", seq, query: { actor } });
+  const action = (seq) => ({
+    kind: "action", seq, accepted: true, reason: null, action: { kind: "Pass" },
+  });
+  const hpChange = (seq, seat, before, after, frame = 3) => ({
+    kind: "delta", delta_type: "hp_change", seq, frame_id: frame, depth: 1,
+    seat, before, after, amount: after - before,
+  });
+
+  ui.state.animScale = 0;
+
+  // 垫片只按 id 建静态节点（不解析 HTML 的 class），自己的武将块在真页面里带
+  // class="hero-block"；这里补上，端点才能真的落在自己的武将块上。
+  const selfHeroBlock = $("t-self-hero");
+  selfHeroBlock.className = "hero-block";
+  selfHeroBlock.classList.add("hero-block");
+
+  // AI 对你使用【杀】：从发动者武将块到你一条线，data-line-to 指目标座位。
+  loadEffects([designate(1, 1, [0])]);
+  step();
+  check("U3-03a 使用牌指定目标：发动者到目标一条 SVG 线（data-line-to=0）",
+    lineNodes().length === 1
+      && attr(lineNodes()[0], "data-line-to") === "0"
+      && attr(lineNodes()[0], "data-line-from") === "1"
+      && linePart(lineNodes()[0], "target-shaft")
+      && linePart(lineNodes()[0], "target-arrow"),
+    `lines=${JSON.stringify(lineTos())}`);
+
+  // 多目标牌（南蛮入侵 / 万箭齐发）：每个目标一条，互不覆盖。
+  loadEffects([designate(1, 1, [2, 3])]);
+  step();
+  check("U3-03b 多目标牌：每个目标各一条线（2 / 3 两条独立节点）",
+    lineNodes().length === 2 && lineTos().sort().join(",") === "2,3"
+      && lineNodes().every((node) => attr(node, "data-line-from") === "1"),
+    `lines=${JSON.stringify(lineTos())}`);
+
+  // 桃 / 无中生有 / 装备牌：没有目标 ⇒ 一条线都不画。
+  loadEffects([designate(1, 1, [])]);
+  step();
+  check("U3-03c 无目标的牌（桃 / 无中生有 / 装备）不画线",
+    lineNodes().length === 0, `lines=${JSON.stringify(lineTos())}`);
+
+  // 目标表里包含自己 / 已阵亡座位：都跳过，只画活着的别人。
+  const deadPlayers = PLAYERS.map(
+    (player) => (player.seat === 2 ? { ...player, alive: false } : player));
+  loadEffects([designate(1, 1, [1, 2, 3])], deadPlayers);
+  step();
+  check("U3-03d 目标含自己（发动者）与已阵亡座位：跳过，只画剩下的活目标",
+    lineTos().join(",") === "3", `lines=${JSON.stringify(lineTos())}`);
+
+  // 同一时刻多条线：各自带自己的 data-line-to，前一条不会被后一条挤掉。
+  loadEffects([designate(1, 1, [2]), designate(2, 1, [3], 6)]);
+  step(2);
+  check("U3-03e 多条线同时存在、互不干扰（每条一个 data-line-to + 自己的箭头）",
+    lineNodes().length === 2 && lineTos().sort().join(",") === "2,3"
+      && lineNodes().every((node) => linePart(node, "target-arrow")),
+    `lines=${JSON.stringify(lineTos())}`);
+
+  // 寿命：1.2s 保持；animScale = 0 ⇒ 淡出立即完成。把线的 enteredAt 拨回 1.2s 前再重绘一次，
+  // 走的是**真实渲染口**（renderTable → syncTransientEffects → targetLineLane），不等真实时间。
+  loadEffects([designate(1, 1, [0])]);
+  step();
+  const lineItem = (ui.state.targetLines || [])[0];
+  const hold = 1200;
+  let visibleBeforeHold = false;
+  let goneAfterHold = false;
+  if (lineItem) {
+    ui.renderTable();
+    visibleBeforeHold = lineNodes().length === 1;
+    lineItem.enteredAt = Date.now() - hold;
+    ui.renderTable();
+    goneAfterHold = lineNodes().length === 0;
+  }
+  check("U3-03f 线在 1.2s 保持期内可见、保持结束即消失（animScale=0，不读真实时间）",
+    visibleBeforeHold && goneAfterHold,
+    `before=${visibleBeforeHold} after=${goneAfterHold} hold=${hold}`);
+
+  // 决策点高亮（D13）：action 记录给应答者加 .acting（0.5s 描边）。
+  loadEffects([query(1, 2), action(2)]);
+  step(2);
+  check("U3-03g action 记录是决策点：给应答座位加 .acting",
+    hasClass(seatNodeOf(2), "acting")
+      && seatNodesNow().filter((node) => hasClass(node, "acting")).length === 1,
+    `acting=${seatNodesNow().map((node) => `${attr(node, "data-seat")}:${hasClass(node, "acting")}`).join(",")}`);
+
+  // 决策点高亮：USE_DESIGNATE_TARGET 也高亮发动者（同时画线）。
+  loadEffects([designate(1, 2, [0])]);
+  step();
+  check("U3-03h USE_DESIGNATE_TARGET 也是决策点：高亮发动者并画线",
+    hasClass(seatNodeOf(2), "acting") && lineTos().join(",") === "0",
+    `acting=${hasClass(seatNodeOf(2), "acting")} lines=${JSON.stringify(lineTos())}`);
+
+  // 结算类时机不高亮：actor 在结算期常是目标，加描边会误导。
+  loadEffects([
+    { kind: "timing", timing: "RESOLVE_START", seq: 1, frame_id: 3, depth: 2, actor: 1, source: 0, targets: [0] },
+    { kind: "timing", timing: "USE_BECOME_TARGET", seq: 2, frame_id: 2, depth: 1, actor: 0, source: 1, targets: [0] },
+    { kind: "timing", timing: "RESOLVE_EFFECT", seq: 3, frame_id: 3, depth: 2, actor: 1, source: 0, targets: [0] },
+  ]);
+  step(3);
+  check("U3-03i 结算类时机（RESOLVE_* / USE_BECOME_TARGET）不高亮、不画线",
+    seatNodesNow().every((node) => !hasClass(node, "acting")) && lineNodes().length === 0,
+    `acting=${seatNodesNow().map((node) => `${attr(node, "data-seat")}:${hasClass(node, "acting")}`).join(",")}`);
+
+  // 体力闪（D13）：掉血武将块闪红，回复闪绿。
+  loadEffects([hpChange(1, 1, 4, 3)]);
+  step();
+  check("U3-03j hp_change 掉血：对应武将块闪红（hp-flash + hp-flash-down）",
+    hasClass(heroBlockOf(1), "hp-flash") && hasClass(heroBlockOf(1), "hp-flash-down")
+      && !hasClass(heroBlockOf(1), "hp-flash-up"),
+    `class="${heroBlockOf(1) ? heroBlockOf(1).className : ""}"`);
+
+  loadEffects([hpChange(1, 2, 2, 3)]);
+  step();
+  check("U3-03k hp_change 回复：对应武将块闪绿（hp-flash + hp-flash-up）",
+    hasClass(heroBlockOf(2), "hp-flash") && hasClass(heroBlockOf(2), "hp-flash-up")
+      && !hasClass(heroBlockOf(2), "hp-flash-down"),
+    `class="${heroBlockOf(2) ? heroBlockOf(2).className : ""}"`);
+
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.animScale = 1;
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

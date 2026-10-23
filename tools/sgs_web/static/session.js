@@ -273,6 +273,8 @@ function stepPlayback(immediate) {
   state.effectCards = applyEffectDelta(record, state.effectCards);
   state.revealedCards = applyRevealDelta(record, state.revealedCards);
   renderProcessing();
+  // U3-03（D8.1 / D13）：决策点高亮、使用牌目标线、体力闪。回放页不走这条路径（D14）。
+  applyRecordEffects(record, playback.querySeat);
   scrollLogToBottom();
   playback.index += 1;
   if (!immediate) playbackTimer = window.setTimeout(() => stepPlayback(false), state.eventDelayMs);
@@ -636,6 +638,8 @@ function commitView(body) {
     // U3-01 / D5.5：舞台三组跨 commit 保留，但换会话必须清空（上一局的牌不能留在台上）。
     state.effectCards = [];
     state.revealedCards = [];
+    // U3-03 / D8.1：目标线与行动者描边 / 体力闪是**一次演出**，换会话后不属于新局。
+    clearTransientEffects();
   }
   state.view = body;
   state.cursor = body.cursor;

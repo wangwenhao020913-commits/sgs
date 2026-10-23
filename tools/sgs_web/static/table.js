@@ -258,6 +258,8 @@ function renderTable() {
 
   renderRingSeats(view, ctx);
   renderSelfSeat(view, ctx);
+  // U3-03：座位节点在这一屏被重建；仍在播的行动者描边 / 体力闪按状态补回类（D13）。
+  syncTransientEffects();
 
   // 快照到达时把处理区并进 `state.effectCards`（同一张牌保留回放期间的使用者标注）；
   // 回放期间不并——那份是逐事件派生的，快照要等播完才提交。

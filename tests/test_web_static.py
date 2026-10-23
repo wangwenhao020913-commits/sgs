@@ -215,3 +215,106 @@ def test_stage_title_is_renamed_from_processing_area() -> None:
     assert re.search(r'class="stage-title">\s*舞台\s*<', html), (
         "index.html 的舞台小标题必须改成「舞台」"
     )
+
+
+# ---------------------------------------------------------------------------
+# U3-03：使用牌目标线 / 行动者高亮 / 体力闪（spec D8.1 / D13；票 03 的验收把
+# CSS 设计单位与层级钉在这里）
+# ---------------------------------------------------------------------------
+
+_EFFECTS_JS = STATIC_DIR / "effects.js"
+
+
+def test_target_line_layer_is_full_shell_above_seats_below_modals() -> None:
+    """目标线层 = 覆盖整个牌桌壳的 SVG：`inset: 0`、无 viewBox、不吃指针、层级正确。
+
+    D8.1 的层级要求「在座位之上、弹窗之下」；自己的武将块住底部面板（z-index 10），
+    故线层还要在它之上，否则连到自己的线会被面板背景盖住。端点只在画线时读一次布局
+    （JS 注释 / `ui_smoke` 的“窗口尺寸变化不影响已在播的线”），这里只钉静态几何。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    tag = re.search(r"<svg\b[^>]*\bid=\"t-target-lines\"[^>]*>", html)
+    assert tag is not None, "index.html 里缺少目标线层的 SVG（id=t-target-lines）"
+    assert "viewBox" not in tag.group(0), (
+        f"目标线层不能有 viewBox（坐标就是壳内 CSS 像素），实际：{tag.group(0)}"
+    )
+    assert re.search(r'class="target-lines"', tag.group(0)), "目标线层必须带 class=target-lines"
+    assert html.index('id="table-shell"') < html.index('id="t-target-lines"'), (
+        "目标线层的 SVG 必须住在 .table-shell 里面"
+    )
+
+    layer = _css_rule(".target-lines")
+    assert re.search(r"position:\s*absolute", layer), f"线层必须绝对定位，实际：{layer}"
+    assert re.search(r"inset:\s*0\b", layer), f"线层必须铺满壳（inset: 0），实际：{layer}"
+    assert re.search(r"pointer-events:\s*none", layer), f"线层不能吃指针，实际：{layer}"
+
+    def z_index(selector: str) -> int:
+        body = _css_rule(selector)
+        found = re.search(r"z-index:\s*(\d+)", body)
+        assert found is not None, f"{selector} 里找不到 z-index，实际：{body}"
+        return int(found.group(1))
+
+    seat_z = z_index(".ring .seat")
+    bottom_z = z_index(".table-bottom")
+    line_z = z_index(".target-lines")
+    modal_z = z_index(".modal")
+    assert seat_z < line_z < modal_z, (
+        f"线层必须在环上座位（{seat_z}）之上、弹窗（{modal_z}）之下，实际 {line_z}"
+    )
+    assert bottom_z < line_z, (
+        f"线层必须在自己的底部面板（{bottom_z}）之上，否则连到自己的线被面板盖住，实际 {line_z}"
+    )
+
+
+def test_target_line_is_gold_two_and_half_units_with_ten_unit_arrow() -> None:
+    """D8.1 的样式：线宽 2.5 设计单位、箭头 10 设计单位、统一金色 `#d9b45c`。"""
+    assert _EFFECTS_JS.is_file(), "缺少 effects.js（目标线 / 高亮 / 体力闪的渲染口）"
+    line = _css_rule(".target-line line")
+    assert re.search(r"stroke:\s*#d9b45c", line), f"目标线必须统一金色，实际：{line}"
+    assert re.search(r"stroke-width:\s*calc\(2\.5 \* var\(--dsu\)\)", line), (
+        f"线宽必须是 2.5 设计单位（不是 CSS px），实际：{line}"
+    )
+    arrow = _css_rule(".target-line polygon")
+    assert "#d9b45c" in arrow.lower(), f"箭头必须同色，实际：{arrow}"
+
+    js = _EFFECTS_JS.read_text(encoding="utf-8")
+    assert re.search(r"const\s+TARGET_ARROW_SIZE\s*=\s*10\b", js), (
+        "箭头尺寸常量必须是 10 设计单位"
+    )
+    assert re.search(r"TARGET_ARROW_SIZE\s*\*\s*designUnit", js), (
+        "箭头尺寸必须按设计单位换算（10 × 1 设计单位），不能写死 CSS px"
+    )
+
+
+def test_target_line_lifetime_is_1200_hold_plus_800_fade() -> None:
+    """D8.1 / D15：2s = 保持 1.2s + 淡出 0.8s；淡出靠 `.fading` + 0.8s 过渡。"""
+    assert _EFFECTS_JS.is_file(), "缺少 effects.js（目标线 / 高亮 / 体力闪的渲染口）"
+    js = _EFFECTS_JS.read_text(encoding="utf-8")
+    hold = re.search(r"const\s+TARGET_LINE_HOLD_MS\s*=\s*(\d+)\b", js)
+    fade = re.search(r"const\s+TARGET_LINE_FADE_MS\s*=\s*(\d+)\b", js)
+    assert hold is not None and int(hold.group(1)) == 1200, "线保持必须是 1.2 秒"
+    assert fade is not None and int(fade.group(1)) == 800, "线淡出必须是 0.8 秒"
+    style = _css_rule(".target-line")
+    assert re.search(r"transition:\s*opacity\s*\.8s", style), (
+        f"线淡出过渡必须是 0.8s，实际：{style}"
+    )
+    assert re.search(r"opacity:\s*0", _css_rule(".target-line.fading")), "淡出类必须把线画成透明"
+
+
+def test_acting_highlight_and_hp_flash_use_the_d13_durations() -> None:
+    """D13：行动者描边 0.5s；体力闪 0.4s，掉血红 / 回复绿。"""
+    acting = _css_rule(".seat.acting")
+    assert re.search(r"\.5s", acting), f"行动者描边必须是 0.5s，实际：{acting}"
+    flash = _css_rule(".hero-block.hp-flash")
+    assert re.search(r"\.4s", flash), f"体力闪必须是 0.4s，实际：{flash}"
+    down = _css_rule(".hero-block.hp-flash-down")
+    up = _css_rule(".hero-block.hp-flash-up")
+    assert "#b3261e" in down.lower(), f"掉血必须红，实际：{down}"
+    assert "#2e7d32" in up.lower(), f"回复必须绿，实际：{up}"
+
+    js = _EFFECTS_JS.read_text(encoding="utf-8")
+    for name, value in (("ACTING_HIGHLIGHT_MS", 500), ("HP_FLASH_MS", 400)):
+        found = re.search(rf"const\s+{name}\s*=\s*(\d+)\b", js)
+        assert found is not None and int(found.group(1)) == value, (
+            f"{name} 必须是 {value}ms（CSS 时长与类移除共用一份）"
+        )
