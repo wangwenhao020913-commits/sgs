@@ -14,6 +14,10 @@ let playbackTimer = null;
  *  使用（USE）与判定（JUDGE）**不算弃牌**：它们只从「处理中」淡出。 */
 const DISCARD_REASONS = new Set(["DISCARD", "REFORGE", "LOSE"]);
 
+/** 隐藏区（D2）：牌面不公开的落点。反间的展示是「处理区 → 隐藏区 + 承载帧 SKILL」
+ *  那一条（D6）；当前能从处理区走进去的只有手牌（牌堆方向留作同一判据）。 */
+const HIDDEN_ZONES = new Set(["hand", "deck"]);
+
 /** 区域名 → 舞台底行的中文（D10）。只用来源区域；牌堆 / 弃牌堆没有座位，不写底行。 */
 const STAGE_ZONE_LABELS = {
   hand: "手牌",
@@ -76,6 +80,31 @@ function stageItem(card, options = {}) {
 function stageFrameOf(record) {
   const frameId = Number(record && record.frame_id);
   return Number.isFinite(frameId) && frameId > 0 ? frameId : 0;
+}
+
+/** 结算帧的 kind（D6）：`frame_kind` 只随 `FrameRecord(push)` 下发，是服务端已下发的
+ *  事实（不是前端写的技能规则）。按 `frame_id` 记住它，供"处理区 → 隐藏区"那次移动
+ *  判断承载帧是不是 `SKILL`。
+ *
+ * 记在**舞台项列表自己身上**（WeakMap 的键 = 列表）：牌桌与回放页各持一份列表、各读
+ * 自己那本记录流；回放页拖进度条会重放同一本流，不能用模块级全局表把两本流的同号帧
+ * 混成一张（帧号每局都从 1 起）。
+ */
+const stageFrameKinds = new WeakMap();
+
+/** 取（没有就建）这份舞台项列表的 `frame_id → frame_kind` 表。 */
+function stageFrameKindMap(cards) {
+  let kinds = stageFrameKinds.get(cards);
+  if (!kinds) {
+    kinds = new Map();
+    stageFrameKinds.set(cards, kinds);
+  }
+  return kinds;
+}
+
+/** 这份舞台项列表见过的 `frame_id` 的 kind；没见过（旧录像 / 合成载荷缺 push）返回空串。 */
+function stageFrameKindOf(cards, frameId) {
+  return stageFrameKindMap(cards).get(String(frameId)) || "";
 }
 
 /** 寿命推进（**纯函数**，D5 / D15）：`item + now → visible | fading | gone`。
@@ -359,16 +388,21 @@ function applyRevealDelta(record, cards = state.revealedCards) {
   return held;
 }
 
-/** 舞台的逐事件派生（U3-01 / D2）：``card_move`` / ``card_reveal`` / 帧 ``pop``。
+/** 舞台的逐事件派生（U3-01 / D2 / D6）：``card_move`` / ``card_reveal`` / 帧 ``push``、``pop``。
  *
  * - **处理中**：`snapshot.processing` + ``card_move`` 且 `to_zone.zone === "processing"`；
- * - **展示**：``card_reveal`` 进展示组（火攻；反间的转组是票 02 的范围）；
+ * - **展示**：``card_reveal`` 进展示组（火攻）；或「处理区 → 隐藏区」且承载帧的
+ *   ``frame_kind === "SKILL"``（反间，D6）；
  * - **弃牌**：``card_move`` 且 `to_zone.zone === "discard"` 且原因 = 弃置 / 重铸 / 装备
  *   替换 / 拆顺；使用（USE）与判定（JUDGE）**不进弃牌组**，只从处理中淡出。
  *
  * **寿命**（D5）：有承载帧的展示 / 弃牌停在帧 ``pop`` 后 1s 淡出；处理中的牌离开处理区
  * 即 1s 淡出；无帧的弃牌入台 1s 停留 + 1s 淡出；任何项兜底 30s。换组沿用同一条舞台项
  * （不重新落位）；淡出期间同一张牌再入台 = 撤旧项、重新落位（D5.6）。
+ *
+ * **承载帧的 kind 来自记录流**（D6）：`frame_kind` 只随 ``FrameRecord(push)`` 下发，
+ * 这里把它记在**这份牌组自己**的帧表上（见 :func:`stageFrameKindOf`）——前端不写
+ * "哪个技能该展示"的规则。
  *
  * **转化来源（U1-07）**：一组来源牌进处理区时画的是产物（`state.processingProducts`），
  * 不是来源牌本身；离场时也按同一组来源把产物移走。事件流仍是引擎原文。
@@ -379,13 +413,20 @@ function applyRevealDelta(record, cards = state.revealedCards) {
  */
 function applyEffectDelta(record, effectCards = state.effectCards, products = state.processingProducts) {
   const now = stageNow();
-  let held = (effectCards || []).filter((item) => stageLane(item, now) !== "gone");
+  const previous = effectCards || [];
+  const frameKinds = stageFrameKindMap(previous);
+  let held = previous.filter((item) => stageLane(item, now) !== "gone");
+  stageFrameKinds.set(held, frameKinds);
   if (!record) return held;
   if (record.kind === "timing") {
     applyUseTiming(record, held);
     return held;
   }
   if (record.kind === "frame") {
+    // D6：`frame_kind` 只在 push 上；记下来供离区那一步查（跨 commit / 跨批次有效）。
+    if (record.op === "push" && record.frame_kind) {
+      frameKinds.set(String(record.frame_id), String(record.frame_kind));
+    }
     if (record.op === "pop") stageStartFade(held, record.frame_id, now);
     return held;
   }
@@ -394,6 +435,7 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
   const from = record.from_zone || {};
   const to = record.to_zone || {};
   const frameId = stageFrameOf(record);
+  const carryingFrameKind = stageFrameKindOf(held, frameId);
   const byId = (cardId) => held.find((item) => String(item.card_id) === String(cardId));
   // 转化牌：离场的是它的来源实体牌，台上那一条是**产物**。来源牌不再单独落位。
   const consumed = new Set();
@@ -411,6 +453,14 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
         item.stage.lane = "discard";
         item.stage.frameId = frameId;
         item.stage.fadeAt = frameId > 0 ? null : item.stage.enteredAt + STAGE_HOLD_MS;
+        continue;
+      }
+      if (HIDDEN_ZONES.has(to.zone) && carryingFrameKind === "SKILL") {
+        // 反间（D6）：处理区 → 隐藏区且承载帧是 SKILL 帧 ⇒ 转进展示组。沿用同一条
+        // 舞台项（入台时刻 / 首次来源都不动，不重新落位），活到该 SKILL 帧 pop 后淡出。
+        item.stage.lane = "showcase";
+        item.stage.frameId = frameId;
+        item.stage.fadeAt = null;
         continue;
       }
       // 离场（使用 / 判定 / 交给别人 / 五谷不命中…）→ 1s 淡出，不再瞬删。
@@ -503,6 +553,7 @@ function applyUseTiming(record, effectCards = state.effectCards) {
  */
 function mergeEffectCards(cards) {
   const now = stageNow();
+  const frameKinds = stageFrameKindMap(state.effectCards || []);
   const wanted = new Set((cards || []).map((card) => String(card.card_id)));
   const held = new Map();
   for (const item of state.effectCards || []) {
@@ -511,6 +562,8 @@ function mergeEffectCards(cards) {
     held.set(String(item.card_id), item);
   }
   const out = [];
+  // 承载帧的 kind 跟着牌组走（D6）：帧 push 与离区移动可能隔着一次 commit。
+  stageFrameKinds.set(out, frameKinds);
   for (const item of held.values()) {
     if (item.stage.lane !== "processing") {
       if (!wanted.has(String(item.card_id))) out.push(item);

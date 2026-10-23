@@ -12571,4 +12571,195 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.resetSelection();
 }
 
+/* ============ U3-02（票 02）：反间 —— 处理区 → 手牌 + SKILL 帧 ⇒ 转展示组 ============
+ *
+ * 判据来自票面与 spec D2 / D5 / D6：只有**服务端已下发的事实**参与判定
+ * （`FrameRecord(push)` 的 `frame_kind === "SKILL"`），前端不写技能规则。转组沿用同一条
+ * 舞台项（不重新落位、不出现两份）；五谷（USE / RESOLVE 帧）与判定牌（JUDGE 帧）的同类
+ * 移动都不转组。时间仍不靠真实等待：`renderProcessing(now)` 直接喂 `now`（D15）。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const stageNodes = () => $("t-processing").children.filter(
+    (node) => node.classList.contains("stage-card"));
+  const nodesOf = (id) => stageNodes().filter(
+    (node) => attr(node, "data-card-id") === String(id));
+  const stageNode = (id) => nodesOf(id)[0];
+  const laneOf = (id) => attr(stageNode(id), "data-stage-lane");
+  const fading = (id) => Boolean(stageNode(id) && stageNode(id).classList.contains("fading"));
+  const lineNode = (id) => {
+    const node = stageNode(id);
+    return node ? walk(node).find(
+      (child) => child.classList.contains("ctype")
+        || String(child.className || "").split(/\s+/).includes("ctype")) : null;
+  };
+  const lineOf = (id) => (lineNode(id) ? lineNode(id).textContent : "");
+  const labelOf = (id) => attr(lineNode(id), "data-zone-label");
+  const card = (id, name) => ({
+    ...synthCard(id, name), kind: "normal", attribute: "普通",
+    description: `【${name}】的全文描述`,
+  });
+  const seatPlayer = (seat, heroName) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName,
+  });
+  const view = () => {
+    const out = synthView(null);
+    out.session_id = "u3-reveal-1";
+    out.snapshot.processing = [];
+    out.snapshot.players = [
+      seatPlayer(0, "周瑜"), seatPlayer(1, "郭嘉"), seatPlayer(2, "貂蝉"),
+    ];
+    return out;
+  };
+  const at = (zone, seat = null) => ({ zone, seat });
+  const move = (seq, frame, moved, from, to, reason = "PUT") => ({
+    kind: "delta", delta_type: "card_move", seq, frame_id: frame, depth: 1,
+    reason, owner: to.seat === null || to.seat === undefined ? from.seat : to.seat,
+    from_zone: from, to_zone: to, cards: [moved],
+  });
+  const push = (seq, frame, kind) => ({
+    kind: "frame", op: "push", frame_id: frame, frame_kind: kind, depth: 1, seq,
+  });
+  const pop = (seq, frame) => ({
+    kind: "frame", op: "pop", frame_id: frame, frame_kind: "SKILL", depth: 1, seq,
+  });
+  const itemOf = (id) => (ui.state.effectCards || [])
+    .concat(ui.state.revealedCards || [])
+    .find((entry) => String(entry.card_id) === String(id));
+
+  const FANJIAN = card(211, "桃");
+  const WUGU_USE = card(212, "杀");
+  const WUGU_RESOLVE = card(213, "闪");
+  const JUDGE_CARD = card(214, "闪电");
+
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.animScale = 1;
+
+  // 真实批次形状（真会话记录流）：SKILL 帧 push 随"确认发动"那次应答先到、先提交；
+  // 处理区里的进出移动在后面几次应答里 —— 承载帧的 kind 必须跨 commit 记得住。
+  // 先落一条空视图（= 首屏提交，会话已建立），否则「首屏 commit 清舞台」会吃掉假批次。
+  const before = {
+    ...view(), cursor: 0, log_seq: 0, records: [], finished: false,
+  };
+  ui.applyViewRaw(before);
+  const first = {
+    ...view(), cursor: 1, log_seq: 0,
+    records: [push(1, 81, "SKILL")], finished: false,
+  };
+  ui.applyViewRaw(first);
+  ui.flushPlayback();
+  const second = {
+    ...view(), cursor: 3, log_seq: 0, finished: false,
+    records: [
+      move(2, 81, FANJIAN, at("hand", 0), at("processing")),
+      move(3, 81, FANJIAN, at("processing"), at("hand", 1)),
+    ],
+  };
+  ui.applyViewRaw(second);
+  ui.stepPlayback(true);
+  const entering = itemOf(211);
+  const enteredAt = entering && entering.stage.enteredAt;
+  const wasProcessing = laneOf(211) === "processing"
+    && lineOf(211) === "0·周瑜·手牌" && Boolean(entering);
+  ui.stepPlayback(true);
+  const transferred = itemOf(211);
+  check("U3-02a 处理区 → 手牌 + SKILL 帧 ⇒ 同一条舞台项转进展示组（不重新落位 / 不两份）",
+    wasProcessing && laneOf(211) === "showcase"
+      && Boolean(stageNode(211)) && stageNode(211).classList.contains("revealed-card")
+      && transferred === entering
+      && transferred.stage.enteredAt === enteredAt
+      && nodesOf(211).length === 1
+      && (ui.state.revealedCards || []).length === 0,
+    `wasProcessing=${wasProcessing} lane=${laneOf(211)} same=${transferred === entering}`
+      + ` entered=${enteredAt} nodes=${nodesOf(211).length}`);
+  check("U3-02b 转组沿用首次入台的来源：底行仍是 0·周瑜·手牌，说明文本只剩「展示」",
+    lineOf(211) === "0·周瑜·手牌"
+      && labelOf(211) === "0·周瑜·手牌"
+      && $("t-context").textContent.includes("展示：")
+      && !$("t-context").textContent.includes("处理中："),
+    `line="${lineOf(211)}" label="${labelOf(211)}" context="${$("t-context").textContent}"`);
+
+  ui.renderProcessing(enteredAt + 5000);
+  check("U3-02c 转组后活到 SKILL 帧 pop：5 秒后仍可见、尚未淡出",
+    Boolean(stageNode(211)) && !fading(211) && laneOf(211) === "showcase",
+    `node=${Boolean(stageNode(211))} fading=${fading(211)} lane=${laneOf(211)}`);
+
+  ui.state.effectCards = ui.applyEffectDelta(pop(4, 81), ui.state.effectCards);
+  const fadeAt = itemOf(211) && itemOf(211).stage.fadeAt;
+  ui.renderProcessing();
+  check("U3-02d SKILL 帧 pop ⇒ 转组项才开始 1s 淡出（不是一闪而过）",
+    itemOf(211).stage.lane === "showcase" && Number.isFinite(fadeAt) && fading(211),
+    `fadeAt=${fadeAt} fading=${fading(211)}`);
+  ui.renderProcessing(fadeAt + 1000);
+  check("U3-02e 1s 淡出结束 ⇒ 转组项从舞台移除（不留幽灵）",
+    !stageNode(211), `node=${Boolean(stageNode(211))}`);
+  ui.flushPlayback();
+  ui.state.effectCards = [];
+  ui.renderProcessing();
+
+  // 五谷丰登（D6 的排除）：USE 帧里进 / 出处理区 ⇒ 不转组，离区即 1s 淡出。
+  ui.state.effectCards = ui.applyEffectDelta(push(10, 82, "USE"), ui.state.effectCards);
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(11, 82, WUGU_USE, at("deck"), at("processing")), ui.state.effectCards);
+  const wuguUse = itemOf(212);
+  const wuguEntered = wuguUse.stage.enteredAt;
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(12, 82, WUGU_USE, at("processing"), at("hand", 1)), ui.state.effectCards);
+  ui.renderProcessing();
+  check("U3-02f 处理区 → 手牌 + USE 帧 ⇒ 不转组（五谷不命中），仍按离区淡出",
+    laneOf(212) === "processing"
+      && !stageNode(212).classList.contains("revealed-card")
+      && Number.isFinite(wuguUse.stage.fadeAt) && fading(212)
+      && ui.state.effectCards.filter((entry) => String(entry.card_id) === "212").length === 1,
+    `lane=${laneOf(212)} fadeAt=${wuguUse.stage.fadeAt} fading=${fading(212)}`);
+  ui.renderProcessing(wuguEntered + 5000);
+  check("U3-02g USE 帧的离场牌不滞留整轮（5 秒后已从舞台消失）",
+    !stageNode(212), `node=${Boolean(stageNode(212))}`);
+
+  // 五谷的真实形状：进处理区在 USE 帧、取走进手牌在 RESOLVE 帧 ⇒ 也不转组、不额外镜像。
+  ui.state.effectCards = ui.applyEffectDelta(push(20, 83, "USE"), ui.state.effectCards);
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(21, 83, WUGU_RESOLVE, at("deck"), at("processing")), ui.state.effectCards);
+  ui.state.effectCards = ui.applyEffectDelta(push(22, 84, "RESOLVE"), ui.state.effectCards);
+  const wuguResolve = itemOf(213);
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(23, 84, WUGU_RESOLVE, at("processing"), at("hand", 0)), ui.state.effectCards);
+  ui.renderProcessing();
+  check("U3-02h 五谷真实形状（USE 帧进 / RESOLVE 帧出）也不转组、不镜像",
+    laneOf(213) === "processing"
+      && !stageNode(213).classList.contains("revealed-card")
+      && Number.isFinite(wuguResolve.stage.fadeAt)
+      && ui.state.effectCards.filter((entry) => String(entry.card_id) === "213").length === 1,
+    `lane=${laneOf(213)} fadeAt=${wuguResolve.stage.fadeAt}`);
+
+  // 判定牌（JUDGE 帧，如【天妒】获得判定牌）：不进展示组，仍在处理中组里淡出。
+  ui.state.effectCards = ui.applyEffectDelta(push(30, 85, "JUDGE"), ui.state.effectCards);
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(31, 85, JUDGE_CARD, at("deck"), at("processing"), "JUDGE"), ui.state.effectCards);
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(32, 85, JUDGE_CARD, at("processing"), at("hand", 0)), ui.state.effectCards);
+  ui.renderProcessing();
+  check("U3-02i 判定牌（JUDGE 帧）从处理区进手牌也不进展示组，仍在处理中组淡出",
+    laneOf(214) === "processing"
+      && !stageNode(214).classList.contains("revealed-card")
+      && itemOf(214).stage.lane === "processing" && fading(214),
+    `lane=${laneOf(214)} fading=${fading(214)}`);
+
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.renderProcessing();
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.animScale = 1;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
