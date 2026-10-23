@@ -219,13 +219,20 @@ function applyView(body) {
   if (viewStartsNewSession(body)) {
     state.effectCards = [];
     state.revealedCards = [];
+    // U3-04：上一局还没触发的技能发动事件不属于新局（DOM 侧由 commit 的清屏兜底）。
+    state.skillEvents = [];
   }
+  // U3-04 / D8.2：技能发动是随视图下发的派生通道；先收进队列，回放走到对应的记录 seq
+  // 才演出（飘名 / 白光 / 线），而不是响应一到就全部同时出现。
+  for (const event of body.skill_events || []) state.skillEvents.push(event);
   // U1-07：快照的处理区已经是**产物**（服务端把转化来源组换成了虚拟牌），回放期间也要
   // 按同一份映射把"来源牌进处理区"渲染成产物，否则用户会先看到两张源牌再被快照纠正。
   state.processingProducts = processingProductMap(
     body.snapshot ? body.snapshot.processing : [],
   );
   if (!incoming.length) {
+    // 纯刷新没有回放：技能发动的演出按响应立即触发（不等一个不存在的记录步）。
+    fireSkillEventsThrough(Infinity);
     commitView(body);
     return;
   }
@@ -275,6 +282,8 @@ function stepPlayback(immediate) {
   renderProcessing();
   // U3-03（D8.1 / D13）：决策点高亮、使用牌目标线、体力闪。回放页不走这条路径（D14）。
   applyRecordEffects(record, playback.querySeat);
+  // U3-04（D9）：技能发动的演出挂在**产生它的那条记录**的 seq 上。
+  fireSkillEventsThrough(record.seq);
   scrollLogToBottom();
   playback.index += 1;
   if (!immediate) playbackTimer = window.setTimeout(() => stepPlayback(false), state.eventDelayMs);
@@ -305,6 +314,8 @@ function finishPlayback() {
     if (window.clearTimeout) window.clearTimeout(playbackTimer);
     playbackTimer = null;
   }
+  // 兜底：旧录像 / 合成载荷若没有同 seq 的记录，播完立即触发，不让事件跨到下一批。
+  fireSkillEventsThrough(Infinity);
   commitView(playback.body);
 }
 

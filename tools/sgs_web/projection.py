@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from sgs.data import hero_skill_id, load_content_pack, load_heroes
@@ -58,6 +59,7 @@ __all__ = [
     "query_context",
     "seat_skill_display",
     "serialize_record",
+    "skill_events_after",
     "virtual_index",
     "visible_record",
     "visible_snapshot",
@@ -1649,3 +1651,64 @@ def serialize_record(
 ) -> dict[str, Any] | None:
     """``visible_record`` 的别名，名字更贴近"序列化"的调用点。"""
     return visible_record(record, viewer=viewer)
+
+
+def skill_events_after(
+    records: Iterable[object], *, after: int, state: Any
+) -> list[dict[str, Any]]:
+    """从**未裁剪**的记录流派生技能发动事件（spec D8.2）：``seq > after`` 的那几条。
+
+    这条通道只补「记录流里已有、但 ``records`` 的 action 裁剪把细节藏掉了」的那部分：
+    已接受（``accepted === true``）且 ``action.kind === "ActivateSkill"`` 的动作。
+    其余动作（含使用牌 / 打出牌，以及被拒的应答）一条都不产。
+
+    - ``seat`` = **应答那次询问的 actor**。``ActionRecord`` 自己不带座位，但它的
+      ``answers_seq`` 指向产生它的那次 ``query`` 记录（记录流已下发的公开事实）；
+      不从手牌 / 目标等隐藏信息反推。
+    - ``targets`` = ``action.choices`` 里以 ``seat:`` 开头的选项（``flow.py`` 的规范编码），
+      按出现顺序；没有指定目标的发动（制衡 / 装备技等）是空列表。
+    - ``name`` = 接入层展示表的中文名（与 ``build_skills`` / 叙事同源）；查不到时退回
+      ``skill_id``，不让前端自建映射。
+
+    ``records`` 可以是引擎记录模型，也可以是已序列化的 JSON（录像 / 合成夹具），两种
+    形状走同一份派生。**不使用** ``picks``（那是成本牌），技能与目标都是公开事实，
+    不需要按查看者过滤。
+    """
+    query_actors: dict[int, int] = {}
+    events: list[dict[str, Any]] = []
+    for raw in records:
+        record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
+        kind = record.get("kind")
+        seq = record.get("seq")
+        if kind == "query":
+            query = record.get("query") or {}
+            actor = query.get("actor")
+            if isinstance(seq, int) and isinstance(actor, int):
+                query_actors[seq] = actor
+            continue
+        if kind != "action" or not record.get("accepted"):
+            continue
+        action = record.get("action")
+        if not isinstance(action, Mapping) or action.get("kind") != "ActivateSkill":
+            continue
+        if not isinstance(seq, int) or seq <= after:
+            continue
+        skill_id = str(action.get("skill_id") or "")
+        targets: list[int] = []
+        for choice in action.get("choices") or ():
+            if not isinstance(choice, str) or not choice.startswith(SEAT_PREFIX):
+                continue
+            try:
+                targets.append(int(choice[len(SEAT_PREFIX) :]))
+            except ValueError:
+                continue
+        events.append(
+            {
+                "seq": seq,
+                "seat": query_actors.get(action.get("answers_seq")),
+                "skill_id": skill_id,
+                "name": _skill_display_name(state, skill_id) or skill_id,
+                "targets": targets,
+            }
+        )
+    return events

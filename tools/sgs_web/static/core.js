@@ -194,6 +194,7 @@ const state = {
   effectCards: [],     // 效果区里当前可见的牌；回放期间由 card_move delta 逐事件派生
   revealedCards: [],   // M5-08a：公开亮牌（card_reveal delta / pending.reveal）；按帧在舞台显示
   targetLines: [],     // U3-03：正在播的目标线（{node, from, to, enteredAt}）；由 effects.js 维护
+  skillEvents: [],     // U3-04：随视图下发、尚未到 seq 的技能发动（{seq, seat, skill_id, name, targets}）
   processingProducts: {}, // U1-07：来源实体牌组 → 正在结算的虚拟 / 转化产物（快照派生）
   timer: null,
   // U1-03：倒计时的本地锚点。服务端的 `pending_since` 是单调时钟，浏览器不能直接比；

@@ -26,6 +26,13 @@ const TARGET_ARROW_HALF_WIDTH = 5;
 const ACTING_HIGHLIGHT_MS = 500;
 const HP_FLASH_MS = 400;
 
+/** 技能名 / 白光的时长与设计单位（U3-04 / D9；CSS 里是同一份裁定）。 */
+const SKILL_FLOAT_MS = 2000;
+const SKILL_FLOAT_GAP_UNITS = 8;
+const SKILL_FLOAT_STACK_UNITS = 14;
+const SKILL_SWEEP_MS = 600;
+const SKILL_SWEEP_STAGGER_MS = 120;
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 /** `setTimeout` 归零也不影响测试：到点重绘的计时器只触发 :func:`renderTargetLines`。 */
@@ -37,6 +44,13 @@ let actingTimer = null;
 
 /** 正在闪的武将块：`seat → {direction, timer}`（同一座位连续掉血 / 回复不叠计时器）。 */
 const hpFlashes = new Map();
+
+/** 技能名飘字（D9）：`seat → [{node, enteredAt, timer}]`；同一武将块 2s 内的后一条
+ *  起点依次抬高 14（**不合并不去重**——两次发动就是两次演出）。 */
+const skillFloats = new Map();
+
+/** 白光（D9）：`seat → {until, timer}`；武将块在 commit 时会被重建，重绘后按它补类。 */
+const skillSweeps = new Map();
 
 /** 造一个 SVG 节点；烟测垫片没有 `createElementNS`，退回普通 `createElement`（断言只看属性）。 */
 function svgNode(tag) {
@@ -318,6 +332,116 @@ function flashHeroHp(seat, before, after) {
   hpFlashes.set(key, { direction, timer });
 }
 
+/* ------------------------------------------------------------ 技能名 / 白光（U3-04 / D9） */
+
+/** 技能名飘字：在发动者武将块正上方 8 设计单位起飘，2s 内上浮 20 并淡出（D9）。
+ *
+ * 同一武将块 2s 内的多条**不合并、不去重**：后一条的起点再抬高 14 设计单位，节点各自
+ * 保留（`data-skill-stack` 是这条口径的可断言读法）。位置只在创建时读一次布局：
+ * 与目标线一致，已经在播的飘字不随窗口尺寸变化重算。
+ */
+function showSkillFloat(seat, name, now = stageNow()) {
+  const layer = $("t-skill-floats");
+  const shell = $("table-shell");
+  const block = heroBlockFor(seat);
+  if (!layer || !shell || !block) return null;
+  const key = String(seat);
+  const active = (skillFloats.get(key) || []).filter(
+    (entry) => now - Number(entry.enteredAt) < SKILL_FLOAT_MS,
+  );
+  const stack = active.length;
+  const node = document.createElement("div");
+  node.className = "skill-float";
+  node.classList.add("skill-float");
+  node.setAttribute("data-skill-seat", key);
+  node.setAttribute("data-skill-stack", String(stack));
+  node.textContent = name;
+  const layerRect = rectOf(layer);
+  const blockRect = rectOf(block);
+  const designUnit = designUnitOf(shell);
+  const left = blockRect.left - layerRect.left + (Number(blockRect.width) || 0) / 2;
+  const top = blockRect.top - layerRect.top
+    - (SKILL_FLOAT_GAP_UNITS + stack * SKILL_FLOAT_STACK_UNITS) * designUnit;
+  node.style.left = `${left}px`;
+  node.style.top = `${top}px`;
+  layer.appendChild(node);
+  const entry = { node, enteredAt: now, timer: null };
+  entry.timer = window.setTimeout(() => {
+    if (node.parentNode) node.parentNode.removeChild(node);
+    const kept = (skillFloats.get(key) || []).filter((item) => item !== entry);
+    if (kept.length) skillFloats.set(key, kept);
+    else skillFloats.delete(key);
+  }, Math.max(0, SKILL_FLOAT_MS * animScale()));
+  active.push(entry);
+  skillFloats.set(key, active);
+  return node;
+}
+
+/** 白光：武将块扫过一道白光 0.6s；粗 8 / 细 3，细带晚 0.12s（CSS 的伪元素）。
+ *
+ * 这里只负责挂 / 摘 `.skill-sweep` 类（可断言的读法）；几何与时长住在 CSS。同一武将块
+ * 连续发动时先摘类、强制一次重排，再挂回去——CSS 动画才会重新起跑。
+ */
+function flashSkillSweep(seat, now = stageNow()) {
+  const block = heroBlockFor(seat);
+  if (!block) return;
+  const key = String(seat);
+  const previous = skillSweeps.get(key);
+  if (previous && previous.timer !== null && window.clearTimeout) {
+    window.clearTimeout(previous.timer);
+  }
+  block.classList.remove("skill-sweep");
+  if (typeof block.offsetWidth === "number") void block.offsetWidth;
+  block.classList.add("skill-sweep");
+  // 细带晚 0.12s 起跑，故类的寿命要把这段错开算进去（否则会在细带播完前摘掉）。
+  const duration = (SKILL_SWEEP_MS + SKILL_SWEEP_STAGGER_MS) * animScale();
+  const timer = window.setTimeout(() => {
+    skillSweeps.delete(key);
+    const current = heroBlockFor(seat);
+    if (current) current.classList.remove("skill-sweep");
+  }, Math.max(0, duration));
+  skillSweeps.set(key, { until: now + duration, timer });
+}
+
+/** 一条 `skill_events` 的演出：飘技能名 + 白光；只有 `targets` 非空才画线（D9 / D8.2）。
+ *
+ * 制衡 / 贯石斧 / 青龙偃月刀 / 寒冰剑这类没有指定目标的发动只飘名 + 白光；使用牌不产
+ * `skill_events`（转化技最终走 UseCard，记录流里没有"技能发动"这条事实）。
+ */
+function playSkillEvent(event, now = stageNow()) {
+  if (!event) return;
+  if (event.seat === null || event.seat === undefined) return;
+  const seat = Number(event.seat);
+  if (!Number.isFinite(seat)) return;
+  const name = String(event.name || "").trim();
+  if (name) showSkillFloat(seat, name, now);
+  flashSkillSweep(seat, now);
+  const targets = Array.isArray(event.targets) ? event.targets : [];
+  if (targets.length) drawTargetLines(seat, targets, now);
+}
+
+/** 把 `seq` 及之前的技能发动事件放出来（按记录流顺序）。
+ *
+ * `state.skillEvents` 是随视图下发的**待触发**队列：回放走到某条记录的 `seq` 才演出，
+ * 于是技能名 / 白光 / 线在发动那一步出现，而不是响应一到就全部同时出现（D15）。
+ * `seq = Infinity` = 没有回放（纯刷新）或回放收尾：立即触发。
+ */
+function fireSkillEventsThrough(seq = Infinity) {
+  const events = state.skillEvents || [];
+  if (!events.length) return;
+  const threshold = seq === null || seq === undefined ? Infinity : Number(seq);
+  const due = [];
+  const kept = [];
+  for (const event of events) {
+    const eventSeq = Number(event && event.seq);
+    if (!Number.isFinite(eventSeq) || eventSeq <= threshold) due.push(event);
+    else kept.push(event);
+  }
+  if (!due.length) return;
+  state.skillEvents = kept;
+  for (const event of due) playSkillEvent(event);
+}
+
 /** 座位 / 武将块在 commit 时会被重建：按仍在播的状态补类（0.5s / 0.4s 不被一次重绘截断）。
  *
  * 目标线不重建，但换会话 / 重绘时也顺手收一次寿命（判定仍只走 :func:`targetLineLane`）：
@@ -334,9 +458,14 @@ function syncTransientEffects() {
     if (!block) continue;
     block.classList.add("hp-flash", entry.direction === "down" ? "hp-flash-down" : "hp-flash-up");
   }
+  for (const [seat, entry] of skillSweeps) {
+    if (stageNow() >= entry.until) continue;
+    const block = heroBlockFor(seat);
+    if (block && !block.classList.contains("skill-sweep")) block.classList.add("skill-sweep");
+  }
 }
 
-/** 换会话 / 测试收尾：撤掉目标线、行动者描边与体力闪，不给下一局留残影。 */
+/** 换会话 / 测试收尾：撤掉目标线、行动者描边、体力闪、技能名与白光，不给下一局留残影。 */
 function clearTransientEffects() {
   clearTargetLines();
   if (actingTimer !== null) {
@@ -350,14 +479,38 @@ function clearTransientEffects() {
     if (block) clearHpFlashClasses(block);
   }
   hpFlashes.clear();
+  for (const [seat, entry] of skillSweeps) {
+    if (entry.timer !== null && window.clearTimeout) window.clearTimeout(entry.timer);
+    const block = heroBlockFor(seat);
+    if (block) block.classList.remove("skill-sweep");
+  }
+  skillSweeps.clear();
+  for (const entries of skillFloats.values()) {
+    for (const entry of entries) {
+      if (entry.timer !== null && window.clearTimeout) window.clearTimeout(entry.timer);
+      const node = entry.node;
+      if (node && node.parentNode) node.parentNode.removeChild(node);
+    }
+  }
+  skillFloats.clear();
+  const floatLayer = $("t-skill-floats");
+  if (floatLayer) floatLayer.innerHTML = "";
+  // 换会话后上一批的待触发事件不属于新局（换会话的清空同时写在 applyView 里，这里兜底）。
+  state.skillEvents = [];
   for (const seatNode of seatNodes()) {
     seatNode.classList.remove("acting");
     const block = descendantWithClass(seatNode, "hero-block");
-    if (block) clearHpFlashClasses(block);
+    if (block) {
+      clearHpFlashClasses(block);
+      block.classList.remove("skill-sweep");
+    }
   }
   // 自己的武将块走稳定 id（烟测垫片不建静态 HTML 的父子树；真页面里两条路同一节点）。
   const selfBlock = $("t-self-hero");
-  if (selfBlock) clearHpFlashClasses(selfBlock);
+  if (selfBlock) {
+    clearHpFlashClasses(selfBlock);
+    selfBlock.classList.remove("skill-sweep");
+  }
 }
 
 /** 事件回放的一步对「演出」的贡献（牌桌专属；回放页不走这里，D14）。

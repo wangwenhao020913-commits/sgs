@@ -12957,4 +12957,225 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.resetSelection();
 }
 
+
+/* ============ U3-04（票 04）：技能名 / 白光 / 技能目标线 ============
+ *
+ * 判据来自票面与 spec D8.2 / D9 / D15。载荷是**与响应体同形**的合成 `view` + 记录 +
+ * `skill_events`（派生通道由服务端下发）：断言只落在 DOM——`.skill-float` 的文本 /
+ * 座位 / 叠放属性与坐标、武将块的 `.skill-sweep`、线层的 `data-line-to`。
+ * 时间不靠真实等待：`state.animScale = 0`（淡出立即完成），回放用 `stepPlayback(true)`
+ * 逐条推进；纯刷新走"没有 records 的 applyView"。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+      || String(node.className || "").split(/\s+/).includes(name)));
+  const seatNodesNow = () => [...$("t-seats").children, $("t-self-seat")];
+  const seatNodeOf = (seat) => seatNodesNow().find(
+    (node) => attr(node, "data-seat") === String(seat)) || null;
+  const heroBlockOf = (seat) => {
+    // 垫片不建静态 HTML 的父子树：自己的武将块按稳定 id 取（真页面里它在 #t-self-seat 里）。
+    const selfSeat = ui.state.view && ui.state.view.snapshot
+      ? ui.state.view.snapshot.seat : null;
+    if (selfSeat !== null && selfSeat !== undefined && String(seat) === String(selfSeat)) {
+      return $("t-self-hero");
+    }
+    const seatNode = seatNodeOf(seat);
+    return seatNode ? walk(seatNode).find((node) => hasClass(node, "hero-block")) || null : null;
+  };
+  const allHeroBlocks = () => [
+    ...seatNodesNow().flatMap(
+      (node) => walk(node).filter((child) => hasClass(child, "hero-block"))),
+    $("t-self-hero"),
+  ];
+  const floats = () => walk($("t-skill-floats")).filter(
+    (node) => hasClass(node, "skill-float"));
+  const lineNodes = () => walk($("t-target-lines")).filter(
+    (node) => hasClass(node, "target-line"))
+    .filter((node) => attr(node, "data-line-to") !== undefined);
+
+  const seatPlayer = (seat, heroName) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName,
+  });
+  const baseView = (session) => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.heroes = { 0: "guojia", 1: "zhouyu", 2: "diaochan", 3: "zhangfei" };
+    out.snapshot.processing = [];
+    out.snapshot.players = [
+      seatPlayer(0, "郭嘉"), seatPlayer(1, "周瑜"),
+      seatPlayer(2, "貂蝉"), seatPlayer(3, "张飞"),
+    ];
+    return out;
+  };
+  const query = (seq, actor) => ({ kind: "query", seq, query: { actor } });
+  const skillAction = (seq) => ({
+    kind: "action", seq, accepted: true, reason: null,
+    action: { kind: "ActivateSkill", answers_seq: seq - 1, skill_id: "hero.zhouyu.fanjian", choices: [] },
+  });
+  const useAction = (seq) => ({
+    kind: "action", seq, accepted: true, reason: null,
+    action: { kind: "UseCard", answers_seq: seq - 1 },
+  });
+  const skillEvent = (seq, seat, name, targets = []) => ({
+    seq, seat, skill_id: "hero.zhouyu.fanjian", name, targets,
+  });
+  const designate = (seq, actor, targets) => ({
+    kind: "timing", timing: "USE_DESIGNATE_TARGET", seq, frame_id: 5, depth: 1,
+    actor, source: actor, targets, cards: [],
+  });
+
+  let serial = 0;
+  /** 落一份干净会话（换会话 = 走真实的清屏路径），再起一份带记录 + skill_events 的回放。 */
+  const loadSkillBatch = (records, events) => {
+    ui.flushPlayback();
+    serial += 1;
+    const session = `u3-skill-${serial}`;
+    ui.applyViewRaw({
+      ...baseView(session), cursor: 0, log_seq: 0, records: [], skill_events: [], finished: false,
+    });
+    ui.applyViewRaw({
+      ...baseView(session), cursor: records.length, log_seq: 0,
+      records, skill_events: events, finished: false,
+    });
+    return session;
+  };
+  const step = (count = 1) => { for (let index = 0; index < count; index += 1) ui.stepPlayback(true); };
+
+  ui.state.animScale = 0;
+  // 垫片只按 id 建静态节点（不解析 class）：自己的武将块在真页面里带 class="hero-block"。
+  const selfHeroBlock = $("t-self-hero");
+  selfHeroBlock.className = "hero-block";
+  selfHeroBlock.classList.add("hero-block");
+
+  // ---- 时序：事件在**产生它的记录 seq** 那一步演出，不在响应到达时全部出现 ----
+  loadSkillBatch(
+    [
+      query(1, 1),
+      skillAction(2),
+      { kind: "delta", delta_type: "hp_change", seq: 3, frame_id: 9, depth: 1,
+        seat: 1, before: 4, after: 3, amount: -1 },
+    ],
+    [skillEvent(2, 1, "反间", [0])],
+  );
+  const atArrival = floats().length;
+  const pendingAtArrival = (ui.state.skillEvents || []).length;
+  step();  // query(1)
+  const afterQuery = floats().length;
+  step();  // action(2) = 发动
+  const node = floats()[0];
+  check("U3-04a 技能名在**发动那条记录**的步上飘出（query 步不飘、响应到达时不出现）",
+    atArrival === 0 && pendingAtArrival === 1 && afterQuery === 0
+      && floats().length === 1 && Boolean(node)
+      && node.textContent === "反间"
+      && attr(node, "data-skill-seat") === "1",
+    `arrival=${atArrival} pending=${pendingAtArrival} afterQuery=${afterQuery}`
+      + ` floats=${floats().map((item) => item.textContent).join(",")}`);
+  check("U3-04b 反间的目标线复用 U3-03 的线层：发动者 1 → 目标 0（data-line-to=0）",
+    lineNodes().length === 1
+      && attr(lineNodes()[0], "data-line-to") === "0"
+      && attr(lineNodes()[0], "data-line-from") === "1",
+    `lines=${lineNodes().map((item) => `${attr(item, "data-line-from")}->${attr(item, "data-line-to")}`).join(",")}`);
+  step();  // hp_change(3)
+  check("U3-04c 白光：发动者武将块在发动时挂 .skill-sweep（裁在块内由 CSS 的 overflow:hidden 保证）",
+    hasClass(heroBlockOf(1), "skill-sweep")
+      && !hasClass(heroBlockOf(0), "skill-sweep"),
+    `seat1=${hasClass(heroBlockOf(1), "skill-sweep")} self=${hasClass($("t-self-hero"), "skill-sweep")}`);
+
+  // ---- 同一武将块 2s 内两条：不合并 / 不去重；后一条起点抬高 14 设计单位 ----
+  loadSkillBatch(
+    [query(1, 1), skillAction(2), query(3, 1), skillAction(4)],
+    [skillEvent(2, 1, "反间", []), skillEvent(4, 1, "制衡", [])],
+  );
+  step(4);
+  const stacked = floats();
+  const tops = stacked.map((item) => parseFloat(item.style.top));
+  check("U3-04d 同一武将块 2s 内两条：两个独立飘字，后一条起点抬高 14 设计单位",
+    stacked.length === 2
+      && stacked[0].textContent === "反间" && stacked[1].textContent === "制衡"
+      && attr(stacked[0], "data-skill-stack") === "0"
+      && attr(stacked[1], "data-skill-stack") === "1"
+      && Math.abs((tops[0] - tops[1]) - 14) < 1e-6,
+    `n=${stacked.length} stacks=${stacked.map((item) => attr(item, "data-skill-stack")).join(",")}`
+      + ` tops=${tops.join(",")}`);
+  check("U3-04e 没有指定目标的发动（制衡 / 装备技）：只飘名 + 白光，一条线都不画",
+    lineNodes().length === 0 && hasClass(heroBlockOf(1), "skill-sweep"),
+    `lines=${lineNodes().length} sweep=${hasClass(heroBlockOf(1), "skill-sweep")}`);
+
+  // ---- 自己（底部武将块）也会飘：同一条路径，不是只给环上对手 ----
+  loadSkillBatch(
+    [query(1, 0), skillAction(2)],
+    [skillEvent(2, 0, "遗计", [2])],
+  );
+  step(2);
+  check("U3-04f 自己的发动：飘字挂在自己武将块上、白光落在 #t-self-hero、并向目标画线",
+    floats().length === 1 && attr(floats()[0], "data-skill-seat") === "0"
+      && hasClass($("t-self-hero"), "skill-sweep")
+      && lineNodes().length === 1 && attr(lineNodes()[0], "data-line-to") === "2",
+    `floats=${floats().length} selfSweep=${hasClass($("t-self-hero"), "skill-sweep")}`
+      + ` lines=${lineNodes().map((item) => attr(item, "data-line-to")).join(",")}`);
+
+  // ---- 使用牌不飘技能名（转化技武圣 / 龙胆 / 奇袭最终走 UseCard，没有 ActivateSkill 记录）----
+  loadSkillBatch(
+    [query(1, 2), useAction(2), designate(3, 2, [0])],
+    [],
+  );
+  step(3);
+  check("U3-04g 使用牌不飘技能名 / 不扫白光：只有 U3-03 的使用牌目标线",
+    floats().length === 0
+      && allHeroBlocks().every((block) => !hasClass(block, "skill-sweep"))
+      && lineNodes().length === 1 && attr(lineNodes()[0], "data-line-to") === "0",
+    `floats=${floats().length} sweeps=${allHeroBlocks().filter((b) => hasClass(b, "skill-sweep")).length}`
+      + ` lines=${lineNodes().length}`);
+
+  // ---- 纯刷新（没有 records）：事件立即演出，不等回放 ----
+  const refreshSession = loadSkillBatch([query(1, 1), skillAction(2)], [skillEvent(2, 1, "反间", [])]);
+  step(2);
+  const beforeRefresh = floats().length;
+  ui.applyViewRaw({
+    ...baseView(refreshSession), cursor: 2, log_seq: 0, records: [],
+    skill_events: [skillEvent(6, 1, "反间", [])], finished: false,
+  });
+  check("U3-04h 纯刷新（无回放）：技能名立即演出，不丢事件、不等不存在的记录步",
+    beforeRefresh === 1 && floats().length === 2
+      && (ui.state.skillEvents || []).length === 0,
+    `before=${beforeRefresh} after=${floats().length} pending=${(ui.state.skillEvents || []).length}`);
+
+  // ---- 名字只用服务端下发的 name：前端没有 skill_id → 中文常量表 ----
+  loadSkillBatch(
+    [query(1, 1), skillAction(2)],
+    [{ seq: 2, seat: 1, skill_id: "hero.zhouyu.fanjian", name: "服务端命名", targets: [] }],
+  );
+  step(2);
+  check("U3-04j 飘字的文本就是下发载荷的 name（前端没有 skill_id → 中文常量表）",
+    floats().length === 1 && floats()[0].textContent === "服务端命名",
+    `floats=${floats().map((item) => item.textContent).join(",")}`);
+
+  // ---- 换会话：飘字 / 白光 / 待触发事件一起清掉，不给下一局留残影 ----
+  ui.applyViewRaw({
+    ...baseView("u3-skill-next"), cursor: 0, log_seq: 0, records: [],
+    skill_events: [], finished: false,
+  });
+  check("U3-04i 换会话清空技能名 / 白光 / 待触发事件",
+    floats().length === 0
+      && (ui.state.skillEvents || []).length === 0
+      && allHeroBlocks().every((block) => !hasClass(block, "skill-sweep"))
+      && lineNodes().length === 0,
+    `floats=${floats().length} pending=${(ui.state.skillEvents || []).length}`
+      + ` sweeps=${allHeroBlocks().filter((b) => hasClass(b, "skill-sweep")).length}`);
+
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.animScale = 1;
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

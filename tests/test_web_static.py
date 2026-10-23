@@ -318,3 +318,88 @@ def test_acting_highlight_and_hp_flash_use_the_d13_durations() -> None:
         assert found is not None and int(found.group(1)) == value, (
             f"{name} 必须是 {value}ms（CSS 时长与类移除共用一份）"
         )
+
+
+# ---------------------------------------------------------------------------
+# U3-04：技能名飘字 / 白光（spec D9；票 04 的 CSS 设计单位钉在这里）
+#
+# 目标线复用 U3-03 的线层与 `drawTargetLines`，这里只钉新增的两件演出：
+# 飘字（16 设计单位字、2s 上浮 20、同块 2s 内叠加 14）与白光（0.6s、粗 8 / 细 3、
+# 间隔 0.12s、左上 → 右下、裁在武将块内）。
+# ---------------------------------------------------------------------------
+
+_KEYFRAMES_RE = re.compile(r"@keyframes\s+(?P<name>[\w-]+)\s*\{(?P<body>.*?)\n\}", re.S)
+
+
+def _keyframes(name: str) -> str:
+    """取一段 `@keyframes` 的完整正文（`_css_rule` 的 `[^}]*` 进不了嵌套块）。"""
+    for match in _KEYFRAMES_RE.finditer(_CSS_TEXT):
+        if match.group("name") == name:
+            return match.group("body")
+    raise AssertionError(f"style.css 里找不到 @keyframes {name}")
+
+
+def test_skill_sweep_is_a_thick_and_thin_white_band_clipped_inside_the_hero_block() -> None:
+    """D9 的白光：武将块内 `overflow: hidden`、粗 8 / 细 3 设计单位、0.6s、间隔 0.12s。"""
+    block = _css_rule(".seat .hero-block")
+    assert re.search(r"overflow:\s*hidden", block), (
+        f"白光必须裁在武将块内（.seat .hero-block 需要 overflow: hidden）：{block}"
+    )
+
+    thick = _css_rule(".hero-block.skill-sweep::before")
+    thin = _css_rule(".hero-block.skill-sweep::after")
+    assert re.search(r"content:\s*\"\"", thick), f"粗白光是伪元素，必须有 content：{thick}"
+    assert re.search(r"position:\s*absolute", thick), f"白光必须绝对定位在武将块内：{thick}"
+    assert re.search(r"width:\s*calc\(8 \* var\(--dsu\)\)", thick), (
+        f"粗白光必须是 8 设计单位（不是 CSS px），实际：{thick}"
+    )
+    assert re.search(r"width:\s*calc\(3 \* var\(--dsu\)\)", thin), (
+        f"细白光必须是 3 设计单位，实际：{thin}"
+    )
+    for name, body in (("粗", thick), ("细", thin)):
+        assert re.search(r"animation:\s*skill-sweep\s+\S*\.6s\b[^;]*\b1\b", body), (
+            f"{name}白光必须是 0.6s、只播一次，实际：{body}"
+        )
+    assert re.search(r"animation-delay:\s*(?:0?\.12s|120ms)", thin), (
+        f"两条白光间隔 0.12s（细带延迟），实际：{thin}"
+    )
+    assert "#fff" in thick.lower() or "255, 255, 255" in thick, (
+        f"白光的底色必须是白色，实际：{thick}"
+    )
+
+    frames = _keyframes("skill-sweep")
+    lefts = [float(value) for value in re.findall(r"left:\s*(-?\d+(?:\.\d+)?)%", frames)]
+    assert len(lefts) >= 2 and lefts[0] < 0 < lefts[-1], (
+        f"扫光必须左上 → 右下（left 从负百分比走到正百分比），实际：{frames}"
+    )
+    assert "rotate(" in frames or "rotate(" in thick, (
+        "扫光必须是斜带（左上 → 右下），直上直下不满足 D9"
+    )
+
+
+def test_skill_float_uses_the_d9_design_units_and_stack_offset() -> None:
+    """D9 的飘字：16 设计单位金色加粗、2s 上浮 20、同一武将块 2s 内叠加抬高 14。"""
+    style = _css_rule(".skill-float")
+    assert re.search(r"font-size:\s*calc\(16 \* var\(--dsu\)\)", style), (
+        f"技能名字号必须是 16 设计单位，实际：{style}"
+    )
+    assert re.search(r"font-weight:\s*700", style), f"技能名必须加粗，实际：{style}"
+    assert "#d9b45c" in style.lower(), f"技能名必须是金色，实际：{style}"
+    assert re.search(r"animation:\s*skill-float-rise\s+2s\b", style), (
+        f"技能名必须在 2s 内上浮并淡出，实际：{style}"
+    )
+    rise = _keyframes("skill-float-rise")
+    assert re.search(r"calc\(-20 \* var\(--dsu\)\)", rise), (
+        f"上浮必须走 20 设计单位（不是 CSS px），实际：{rise}"
+    )
+    assert re.search(r"opacity:\s*0", rise), f"上浮结束必须淡出，实际：{rise}"
+
+    js = _EFFECTS_JS.read_text(encoding="utf-8")
+    for name, value in (
+        ("SKILL_FLOAT_GAP_UNITS", 8),
+        ("SKILL_FLOAT_STACK_UNITS", 14),
+    ):
+        found = re.search(rf"const\s+{name}\s*=\s*(\d+)\b", js)
+        assert found is not None and int(found.group(1)) == value, (
+            f"{name} 必须是 {value} 设计单位（JS 定位与 CSS 是同一份裁定）"
+        )

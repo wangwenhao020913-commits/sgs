@@ -7171,3 +7171,152 @@ def test_a_real_http_borrowed_sword_preactivation_needs_a_bare_card_ref() -> Non
     assert use.kind == "UseCard"
     assert use.card.model_dump(mode="json") == bare, "记录里的牌面就是提交的纯 CardRef"
     assert use.targets == (1,) and use.designations == (0,), "持刀者 A / 附带指定 Bn 原样落账"
+
+
+# ---------------------------------------------------------------------------
+# U3-04：技能发动派生通道 `skill_events`（spec D8.2 / D9；票 04 的接入层半边）
+#
+# 引擎 / 记录流不动：接入层从**未裁剪**的记录流里派生「已接受、kind=ActivateSkill」
+# 的那几条，给出 `{seq, seat, skill_id, name, targets}`。名字来自接入层展示表
+# （`projection._skill_display_name`），前端不自建 skill_id → 中文映射。
+# 同一份响应的 `records` 仍把 action 裁成 `{kind, answers_seq}`（不泄露 choices / picks）。
+# ---------------------------------------------------------------------------
+
+
+def _fanjian_activation_record(session: Session):
+    """本局里第一条已接受的 `ActivateSkill` 记录（真会话：AI 周瑜反间人类座位）。"""
+    for record in session.records():
+        if getattr(record, "kind", None) != "action" or not getattr(record, "accepted", False):
+            continue
+        if getattr(getattr(record, "action", None), "kind", None) == "ActivateSkill":
+            return record
+    return None
+
+
+def test_the_session_view_derives_skill_events_for_an_accepted_activation() -> None:
+    """真会话（AI 周瑜反间人类座位）：`skill_events` 给出座位 / 技能 id / 中文名 / 目标，
+    且同一响应的 `records` 仍把 action 裁成 `{kind, answers_seq}`（不泄露 choices）。"""
+    from sgs_web.serve import GameRegistry
+
+    session = _session_at_the_fanjian_suit_step(timeout_seconds=None)
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    body = registry.view(session, after=-1, logs_after=0)
+
+    activation = _fanjian_activation_record(session)
+    assert activation is not None, "反间真会话里必须有已接受的 ActivateSkill 记录"
+    action = activation.action
+    assert action.kind == "ActivateSkill"
+    assert action.skill_id == "hero.zhouyu.fanjian"
+    assert action.choices == ("seat:1",), f"真记录里的指定编码：{action.choices}"
+
+    events = [event for event in body["skill_events"] if event["seq"] == activation.seq]
+    assert len(events) == 1, f"这条发动必须恰好派生一条 skill_events：{body['skill_events']}"
+    event = events[0]
+    assert set(event) == {"seq", "seat", "skill_id", "name", "targets"}, (
+        f"skill_events 的字段形状必须稳定：{event}"
+    )
+    assert event == {
+        "seq": activation.seq,
+        "seat": 0,  # 应答这条 ActivateSkill 的那次询问的 actor（记录流已下发的公开事实）
+        "skill_id": "hero.zhouyu.fanjian",
+        "name": "反间",  # 中文名来自接入层展示表（projection._skill_display_name）
+        "targets": [1],  # choices 里 `seat:` 前缀的选项，按出现顺序
+    }, event
+
+    # 同一响应的 records：那条 action 仍被裁成 {kind, answers_seq}，choices / picks 不泄露。
+    visible = [record for record in body["records"] if record.get("seq") == activation.seq]
+    assert len(visible) == 1, f"同一条记录必须原样下发一次：{visible}"
+    clipped = visible[0]
+    assert clipped["kind"] == "action"
+    assert clipped["action"] == {
+        "kind": "ActivateSkill",
+        "answers_seq": action.answers_seq,
+    }, f"records 里的 action 必须仍被裁成 {{kind, answers_seq}}：{clipped['action']}"
+    assert "choices" not in clipped["action"] and "picks" not in clipped["action"], (
+        f"下发体不得泄露具体选择：{clipped['action']}"
+    )
+    # 更宽的判据：这一批里每一条 action 都只有这两个键（不是只裁了反间那一条）。
+    for record in body["records"]:
+        if record.get("kind") == "action" and isinstance(record.get("action"), dict):
+            assert set(record["action"]) == {"kind", "answers_seq"}, (
+                f"action 下发面被放宽了：{record['action']}"
+            )
+
+
+def test_skill_events_follow_the_record_cursor_and_only_cover_accepted_activations() -> None:
+    """派生是**纯函数**且按与 `records` 同一游标增量：`seq > after`、
+    只取已接受的 `ActivateSkill`、`seat:` 前缀按出现顺序解析成座位号。"""
+    from sgs_web.projection import skill_events_after
+
+    state = Session(seed=1, ai="random", timeout_seconds=None, player_count=2).engine.state
+    records = [
+        {"kind": "query", "seq": 1, "query": {"actor": 2}},
+        # 已接受但不是技能发动：不产事件（使用牌 / 打出牌不飘技能名）。
+        {"kind": "action", "seq": 2, "accepted": True,
+         "action": {"kind": "UseCard", "answers_seq": 1, "targets": [0]}},
+        # 未接受的技能发动：不产事件。
+        {"kind": "action", "seq": 3, "accepted": False,
+         "action": {"kind": "ActivateSkill", "answers_seq": 1,
+                    "skill_id": "hero.zhouyu.fanjian", "choices": ["seat:0"]}},
+        {"kind": "query", "seq": 4, "query": {"actor": 1}},
+        # 已接受的技能发动：座位取应答那次询问的 actor；seat: 选项按顺序成 targets。
+        {"kind": "action", "seq": 5, "accepted": True,
+         "action": {"kind": "ActivateSkill", "answers_seq": 4,
+                    "skill_id": "hero.zhouyu.fanjian",
+                    "choices": ["seat:0", "heart", "seat:3"]}},
+        {"kind": "query", "seq": 6, "query": {"actor": 0}},
+        # 装备技（equip.<牌名 id>）走同一张展示表：中文名取装备牌名。
+        {"kind": "action", "seq": 7, "accepted": True,
+         "action": {"kind": "ActivateSkill", "answers_seq": 6,
+                    "skill_id": "equip.qinggang_sword", "choices": []}},
+    ]
+
+    events = skill_events_after(records, after=-1, state=state)
+    assert [event["seq"] for event in events] == [5, 7], (
+        f"只产已接受的 ActivateSkill，且按记录顺序：{events}"
+    )
+    assert events[0] == {
+        "seq": 5, "seat": 1, "skill_id": "hero.zhouyu.fanjian",
+        "name": "反间", "targets": [0, 3],
+    }, events[0]
+    assert events[1]["name"] == "青釭剑", f"装备技的中文名取装备牌名：{events[1]}"
+    assert events[1]["targets"] == [], "没有 seat: 选项 ⇒ targets 为空（制衡这类只飘名）"
+
+    assert [event["seq"] for event in skill_events_after(records, after=5, state=state)] == [7], (
+        "与 records 同一游标：只给 seq > after 的那几条"
+    )
+    assert skill_events_after(records, after=7, state=state) == []
+
+
+def test_skill_events_do_not_special_case_which_skill_specifies_targets() -> None:
+    """票面点名的几类发动走**同一条** `seat:` 解析：仁德 / 青囊 / 结姻 / 离间 有线；
+    制衡没有指定目标 ⇒ `targets` 空（前端只飘名 + 白光，不画线）。"""
+    from sgs_web.projection import skill_events_after
+
+    state = Session(seed=1, ai="random", timeout_seconds=None, player_count=2).engine.state
+    cases = (
+        ("hero.liubei.rende", "仁德", ["seat:1"], [1]),
+        ("hero.huatuo.qingnang", "青囊", ["seat:2"], [2]),
+        ("hero.sunshangxiang.jieyin", "结姻", ["seat:3"], [3]),
+        ("hero.diaochan.lijian", "离间", ["seat:2", "seat:3"], [2, 3]),
+        ("hero.sunquan.zhiheng", "制衡", [], []),
+    )
+    for skill_id, name, choices, targets in cases:
+        records = [
+            {"kind": "query", "seq": 1, "query": {"actor": 0}},
+            {
+                "kind": "action",
+                "seq": 2,
+                "accepted": True,
+                "action": {
+                    "kind": "ActivateSkill",
+                    "answers_seq": 1,
+                    "skill_id": skill_id,
+                    "choices": choices,
+                },
+            },
+        ]
+        events = skill_events_after(records, after=-1, state=state)
+        assert [(event["name"], event["targets"]) for event in events] == [(name, targets)], (
+            f"{skill_id} 的派生：{events}"
+        )
