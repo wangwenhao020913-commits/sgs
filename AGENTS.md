@@ -14,6 +14,10 @@
    把它接到 pre-commit 上：`src/` / `tests/` 改动跑全量，`开发文档/` / `GLOSSARY.md` /
    `AGENTS.md` / `CODING_STANDARDS.md` / `docs/` 改动跑**快速文档检查**（分级在 `tools/gate-staged.sh`）；**合并提交**
    由同源的 `.githooks/pre-merge-commit` 覆盖（`git merge` 不触发 pre-commit）。
+   hook 的全量档走 **`tests/run_all.sh --quiet`**：只打每条检查一行 PASS 与最终结果
+   （成功摘要约 **227B**），失败时**照旧补打失败项的完整输出**；**人工跑全量用不带参数的
+   `bash tests/run_all.sh`**（全部 PASS 行与 pytest 输出）。`--quiet` 是 hook / agent 的省流
+   档，门禁判据不变。
    **放后台跑**：它超过多数前台工具调用的超时（前台跑会被打断、输出丢掉）；用后台任务
    起它，再取输出。**装好 hook 后**，提交时 hook 会替你跑对应级别，别在提交前手动重跑一遍
    （每票白等 3 分钟）；迭代期要快就用**单文件子集**：**`.venv/bin/pytest <file>`** ——
@@ -26,12 +30,24 @@
    用 `git stash` 做"改前对照"，把自己的活从工作树里清掉（靠 `git fsck` 找回游离对象）。
    **要对照基线就走安全通道**：`bash tools/baseline-worktree.sh` —— 它在仓外另开一棵 worktree，
    绝不动你手上的工作树。
+   **linked worktree 共用 `.git/config`**：`SGS-retro`（M5 retro，分支 `retro/m5-env`）是
+   SGS 仓的 linked worktree，**与主工作树共用 `SGS/.git/config`**。在那边跑环境探针只许读
+   （`git config --get ...`），**不许写** `core.bare` / `user.name` / `user.email`；写坏后主
+   工作树的 git 会一起报 `fatal: this operation must be run in a work tree`。
+   `bash tools/check_env.sh` 现在对 `core.bare=true` 或 `probe` 身份**硬失败**。真碰到那句
+   fatal，先 `git config --get core.bare` 确认，再按 `check_env` 的修复清单恢复
+   `core.bare=false` 与身份 `dsh-agent <dsh-agent@localhost>`。
 4. 前端改动想快速看一眼，用 **`bash tests/smoke-web.sh`**（约 4 秒：起临时服务 +
    跑 `ui_smoke.mjs` + 收尾）。它在门禁之外，跑完整门禁才用 `tests/run_all.sh`。
-   人工**实机验收**：`.venv/bin/python tools/sgs_web/serve.py --port 8080`（**缺省端口 8100**，
-   8080 只是习惯用法；服务把实际地址打到 stdout）。验收前先 `bash tools/check_env.sh`：
-   缺 `bsk` 时 browser-skill 不可用，实机验收由用户手动做；多步验收准备好服务器 + 复现配方后
-   **结束 turn**，不要用 `ask_user_question` 阻塞等结果。
+   **实机验收**：改动 DOM API 的 UI 票（`children` 形状、节点结构、模板、选择面等）在置
+   `resolved` 前必须走一遍**真实浏览器**（`bsk`）；最小覆盖 = **进入处理区 / 舞台卡更新 /
+   弃牌**。`bsk` 可用时由 **agent 自己驱动**（`browser_session` / `browser_page` /
+   `browser_inspect` / `browser_interact`）；**只有 `bsk` 缺失时**才准备服务器 + 复现配方，
+   然后**结束 turn**（不要用 `ask_user_question` 阻塞等结果），由用户手动验收。
+   验收前先跑 **`bash tools/check_env.sh`**（现在含共享 `.git/config` 护栏）；后台验收用
+   **`.venv/bin/python tools/sgs_web/serve.py --port 8080 --quiet`**（缺省端口 8100，8080
+   只是习惯用法；服务把实际地址打到 stdout；`--quiet` 只关逐请求访问日志）。配方见
+   `docs/agents/acceptance-web.md`。
 5. **派发**：同一 checkout 同时只能有一个实现者。确需并行时，每个实现者只
    `git add <显式路径>`，禁止 `git add -A` 与带 `-am` 的提交；任何人不得对别人未提交的改动做
    `git checkout --` / `git stash` / `git reset`。并行安全的前提是"改的文件不重叠"，而它只能
@@ -59,3 +75,12 @@
 ### Coding standards
 
 评审期（`code-review` 的 Standards 轴）的判断题标准见 `CODING_STANDARDS.md`。
+
+### Frontend / Web
+
+改 `tools/sgs_web/static/` 或验收前端行为前，先按这三份读：
+
+- `docs/agents/frontend-map.md`：脚本职责、舞台 / live view / 轮询 / 动效入口、测试垫片与
+  烟测清单——先定位文件，不要从头通读 `session.js`。
+- `docs/agents/acceptance-web.md`：实机验收配方（环境预检、起服务、browser-skill、种子 12）。
+- 评审口径：`CODING_STANDARDS.md` §4（次序断言）与 §6（读取方断言走真实产出路径）。

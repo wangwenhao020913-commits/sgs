@@ -67,6 +67,10 @@
 "发动→取消→再发动"空转、门禁**无声挂死**。
 配套的机械检查 = fuzz 不变量「`Pass` 恒为最后一条候选」（`tests/test_fuzz.py`）。
 
+**前端的同一半**（U3 / D15）：断集合相等用 `tests/support/ui_smoke.mjs` 的 `setEquals`，
+它只表达"集合相等"，不替断次序；要断顺序就直接比序列本身。纯函数（舞台项寿命等）的断言
+经 `ui_bridge` 把 `now` 喂给 `ui.stageLane`，不读真实时钟、也不等 `setTimeout`。
+
 ## 5. 统计判据的**样本量**要大到阈值不在噪声里
 
 一条"胜率 ≥ 0.6"之类的统计断言，只有在**样本量足以让阈值远离噪声**时才是判据；否则它是
@@ -112,3 +116,9 @@
   `SelectCardsQuery.skill_id` 都是这条纪律的产物）。
 - 分步文案这类"投影读得到"的断言，配一条**真会话**回归（样板：
   `tests/test_web.py::test_a_real_session_reaches_the_yiji_card_step_wording`）。
+- **前端的同一半**（U3 实机复盘）：烟测垫片里 `El.children` 已是 **HTMLCollection 形状的
+  活视图**（只有 `length` / 下标 / `item` / 迭代，没有数组方法）；产品 JS 一律
+  `Array.from(...)` / 展开后再遍历。机械守卫是
+  `tests/test_web_static.py::test_product_scripts_never_call_array_methods_on_children`。
+  垫片终究不是真 DOM，所以**改动 DOM API 的 UI 票在 `resolved` 前还要走一遍 `bsk`
+  真浏览器**（配方见 `docs/agents/acceptance-web.md`）。
