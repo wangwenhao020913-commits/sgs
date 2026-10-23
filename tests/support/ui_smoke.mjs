@@ -12840,6 +12840,13 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   const lineNodes = () => walk($("t-target-lines")).filter((node) => hasClass(node, "target-line"));
   const lineTos = () => lineNodes().map((node) => attr(node, "data-line-to"))
     .filter((value) => value !== undefined);
+  /** 集合相等（Standards §4）：只在**确实是集合**的断言上用，并且显式命名——
+   *  它比的是成员、不比次序；反过来，次序是契约的地方（如 U3-03d）仍直接比序列。 */
+  const setEquals = (actual, expected) => {
+    const left = new Set((actual || []).map(String));
+    const right = new Set((expected || []).map(String));
+    return left.size === right.size && [...right].every((value) => left.has(value));
+  };
   const linePart = (node, name) => Boolean(node && node.children.find(
     (child) => hasClass(child, name)));
   const seatPlayer = (seat, heroName, extra = {}) => ({
@@ -12909,7 +12916,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   loadEffects([designate(1, 1, [2, 3])]);
   step();
   check("U3-03b 多目标牌：每个目标各一条线（2 / 3 两条独立节点）",
-    lineNodes().length === 2 && lineTos().sort().join(",") === "2,3"
+    lineNodes().length === 2 && setEquals(lineTos(), ["2", "3"])
       && lineNodes().every((node) => attr(node, "data-line-from") === "1"),
     `lines=${JSON.stringify(lineTos())}`);
 
@@ -12931,7 +12938,7 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   loadEffects([designate(1, 1, [2]), designate(2, 1, [3], 6)]);
   step(2);
   check("U3-03e 多条线同时存在、互不干扰（每条一个 data-line-to + 自己的箭头）",
-    lineNodes().length === 2 && lineTos().sort().join(",") === "2,3"
+    lineNodes().length === 2 && setEquals(lineTos(), ["2", "3"])
       && lineNodes().every((node) => linePart(node, "target-arrow")),
     `lines=${JSON.stringify(lineTos())}`);
 
@@ -13694,6 +13701,186 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   ui.state.cursor = -1;
   ui.state.pendingClock.seq = null;
   ui.state.pendingClock.receivedAt = 0;
+}
+
+/* ============ U3 评审修复：读取方（live view / 跨快照来源）+ 纯函数直喂 ============
+ *
+ * 三条都来自 U3 的评审（`CODING_STANDARDS.md` §1 / §4 / §6）：
+ *  - D8.1：目标线的「目标已阵亡」必须读**牌桌正在渲染的视图**（回放期 = 逐事件派生的
+ *    `state.liveView`）。同一批里刚阵亡的座位只在 live view 里 `alive === false`，读上一份
+ *    提交的 `state.view` 会把线画到已死的座位上；舞台底行的武将名同理（:func:`tableViewForRender`）。
+ *  - D2 / D10：`mergeEffectCards` 从快照补出来的处理中项没有产生它的 `card_move`，
+ *    来源从这份舞台项列表记着的 `card_id → fromZone` 里补回来（真机验收的【火攻】底行空）。
+ *  - D15：`stageLane` 是纯函数，直接喂 `now` 断 visible / fading / gone，不经过
+ *    `renderProcessing`。
+ * 载荷与响应体同形；时间不靠真实等待。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+      || String(node.className || "").split(/\s+/).includes(name)));
+  const seatNodesNow = () => [...$("t-seats").children, $("t-self-seat")];
+  const seatNodeOf = (seat) => seatNodesNow().find(
+    (node) => attr(node, "data-seat") === String(seat)) || null;
+  const lineNodes = () => walk($("t-target-lines")).filter(
+    (node) => hasClass(node, "target-line") && attr(node, "data-line-to") !== undefined);
+  const stageNodes = () => $("t-processing").children.filter(
+    (node) => node.classList.contains("stage-card"));
+  const stageNode = (id) => stageNodes().find(
+    (node) => attr(node, "data-card-id") === String(id));
+  const stageLineNode = (id) => {
+    const node = stageNode(id);
+    return node ? walk(node).find((child) => hasClass(child, "ctype")) || null : null;
+  };
+  const stageLine = (id) => (stageLineNode(id) ? stageLineNode(id).textContent : "");
+  const labelOf = (id) => attr(stageLineNode(id), "data-zone-label");
+  const seatPlayer = (seat, heroName) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName,
+  });
+  const card = (id, name) => ({
+    ...synthCard(id, name), kind: "normal", attribute: "普通",
+    description: `【${name}】的全文描述`,
+  });
+  const baseView = (session) => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.heroes = { 0: "guojia", 1: "zhouyu", 2: "diaochan", 3: "zhangfei" };
+    out.records = [];
+    out.narrative = [];
+    out.snapshot.processing = [];
+    out.snapshot.players = [
+      seatPlayer(0, "郭嘉"), seatPlayer(1, "周瑜"),
+      seatPlayer(2, "貂蝉"), seatPlayer(3, "张飞"),
+    ];
+    return out;
+  };
+  const designate = (seq, actor, targets) => ({
+    kind: "timing", timing: "USE_DESIGNATE_TARGET", seq, frame_id: 5, depth: 1,
+    actor, source: actor, targets, cards: [],
+  });
+  const death = (seq, seat) => ({
+    kind: "timing", timing: "DEATH_BEFORE_START", seq, frame_id: 9, depth: 2,
+    actor: seat, targets: [seat], cards: [],
+  });
+  const move = (seq, moved, from, to) => ({
+    kind: "delta", delta_type: "card_move", seq, frame_id: 0, depth: 1, reason: "USE",
+    owner: from.seat === null || from.seat === undefined ? null : from.seat,
+    from_zone: from, to_zone: to, cards: [moved],
+  });
+  const playerOf = (view, seat) => view.snapshot.players.find(
+    (player) => Number(player.seat) === Number(seat));
+
+  ui.state.animScale = 1;
+
+  // ---- ① 目标线的存活读 live view：提交视图说活、live view 说死 ⇒ 不画线 ----
+  // 先钉夹具：两个视图都活时，同一份目标表真的会画线（否则"没有线"可能只是夹具写错）。
+  ui.state.view = null;
+  ui.applyViewRaw({ ...baseView("u3-review-live"), cursor: 0, records: [], finished: false });
+  ui.applyViewRaw({
+    ...baseView("u3-review-live"), cursor: 1, records: [designate(1, 1, [2])], finished: false,
+  });
+  ui.stepPlayback(true);
+  const fixtureLine = lineNodes().length;
+  ui.flushPlayback();
+  check("U3-R1 夹具：提交视图里目标活着时，USE_DESIGNATE_TARGET 画一条线",
+    fixtureLine === 1 && lineNodes().length === 1, `lines=${lineNodes().length}`);
+
+  // 同一批里目标先阵亡、再收到指定它的目标时机：提交视图仍是"活"，live view 已是"死"。
+  ui.applyViewRaw({ ...baseView("u3-review-live-2"), cursor: 0, records: [], finished: false });
+  const stageCard = card(511, "火攻");
+  ui.applyViewRaw({
+    ...baseView("u3-review-live-2"), cursor: 3, finished: false,
+    records: [
+      death(1, 2),
+      designate(2, 1, [2]),
+      move(3, stageCard, { zone: "hand", seat: 1 }, { zone: "processing", seat: null }),
+    ],
+  });
+  ui.stepPlayback(true);  // 阵亡：只写 live view
+  ui.stepPlayback(true);  // 指定目标：目标在 live view 里已死
+  const committedAlive = playerOf(ui.state.view, 2).alive;
+  const liveAlive = playerOf(ui.state.liveView, 2).alive;
+  const linesToDead = lineNodes().length;
+  check("U3-R2 目标已阵亡读 live view：提交视图说活、live view 说死 ⇒ 不画线",
+    committedAlive === true && liveAlive === false && linesToDead === 0
+      && Boolean(ui.state.playback),
+    `committed=${committedAlive} live=${liveAlive} lines=${linesToDead}`);
+
+  ui.stepPlayback(true);  // 处理中的牌：底行的武将名走**渲染视图**
+  check("U3-R3 播放期间舞台底行仍按渲染视图取武将名（live 路径照常渲染）",
+    Boolean(ui.state.playback) && stageLine(511) === "1·周瑜·手牌"
+      && labelOf(511) === "1·周瑜·手牌",
+    `playback=${Boolean(ui.state.playback)} line="${stageLine(511)}" label=${labelOf(511)}`);
+  ui.flushPlayback();
+
+  // ---- ② 跨快照来源：快照补出来的处理中项仍写得出「座位·武将·区域」（D2 / D10） ----
+  ui.applyViewRaw({ ...baseView("u3-review-zone"), cursor: 0, records: [], finished: false });
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(10, stageCard, { zone: "hand", seat: 1 }, { zone: "processing", seat: null }),
+    ui.state.effectCards);
+  ui.renderProcessing();
+  const recordedLabel = labelOf(511);
+  const recordedItem = (ui.state.effectCards || []).find(
+    (entry) => String(entry.card_id) === "511");
+  // 让这一项离开列表（兜底 30s 到点，只拨 fadeAt、不等真实时间），下一次 commit 只从快照补出来。
+  if (recordedItem) recordedItem.stage.fadeAt = 1;
+  const unseenCard = card(512, "无中生有");
+  const zoneRefresh = baseView("u3-review-zone");
+  zoneRefresh.cursor = 11;
+  zoneRefresh.snapshot.processing = [stageCard, unseenCard];
+  ui.applyViewRaw(zoneRefresh);
+  check("U3-R4 快照补出来的处理中项从列表记的 fromZone 补底行（1·周瑜·手牌）；没见过的牌不编来源",
+    recordedLabel === "1·周瑜·手牌"
+      && stageNode(511) !== undefined
+      && attr(stageNode(511), "data-stage-lane") === "processing"
+      && labelOf(511) === "1·周瑜·手牌"
+      && stageLine(511) === "1·周瑜·手牌"
+      && !labelOf(512) && stageLine(512) === "",
+    `recorded="${recordedLabel}" after="${stageLine(511)}" label=${labelOf(511)}`
+      + ` unseen=${labelOf(512)}`);
+
+  // ---- ③ stageLane 纯函数：直接喂 now 断三段（不经过 renderProcessing，D15） ----
+  ui.state.animScale = 1;
+  const laneItem = {
+    card_id: 77,
+    stage: { lane: "processing", frameId: 0, enteredAt: 1000, fadeAt: 2000, fromZone: null },
+  };
+  const fallbackItem = {
+    card_id: 78,
+    stage: { lane: "discard", frameId: 7, enteredAt: 0, fadeAt: null, fromZone: null },
+  };
+  const stageBefore = $("t-processing").children.length;
+  const lanes = [ui.stageLane(laneItem, 1999), ui.stageLane(laneItem, 2000),
+    ui.stageLane(laneItem, 3000)].join(",");
+  const fallbackLanes = [ui.stageLane(fallbackItem, 29999), ui.stageLane(fallbackItem, 30000),
+    ui.stageLane(fallbackItem, 31000)].join(",");
+  ui.state.animScale = 0;
+  const collapsed = ui.stageLane(laneItem, 2000);
+  ui.state.animScale = 1;
+  check("U3-R5 stageLane 纯函数直喂 now：visible / fading / gone（含兜底 30s；animScale=0 淡出即时）",
+    lanes === "visible,fading,gone"
+      && fallbackLanes === "visible,fading,gone"
+      && collapsed === "gone"
+      && laneItem.stage.fadeAt === 2000
+      && $("t-processing").children.length === stageBefore,
+    `lanes=${lanes} fallback=${fallbackLanes} collapsed=${collapsed}`
+      + ` fadeAt=${laneItem.stage.fadeAt} nodes=${stageBefore}->${$("t-processing").children.length}`);
+
+  // 收尾：不留状态给后面的用例。
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.liveView = null;
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.playback = null;
+  ui.state.animScale = 1;
+  ui.resetSelection();
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

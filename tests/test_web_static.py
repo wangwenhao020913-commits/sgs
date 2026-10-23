@@ -403,3 +403,124 @@ def test_skill_float_uses_the_d9_design_units_and_stack_offset() -> None:
         assert found is not None and int(found.group(1)) == value, (
             f"{name} 必须是 {value} 设计单位（JS 定位与 CSS 是同一份裁定）"
         )
+
+
+# ---------------------------------------------------------------------------
+# U3-07 实机验收缺陷（CODING_STANDARDS.md §6 的机械那一半）：真 DOM 的
+# `element.children` 是 **HTMLCollection**——只有 `length` / `item()` / 索引，
+# **没有** `find` / `filter` / `map` / `forEach` / `some` / `every` / `reduce`。
+#
+# 舞台卡更新曾写成 `(node.children || []).find(...)`：真浏览器里每次更新都抛
+# `TypeError`、舞台与表体重绘中断；烟测垫片的 `children` 是数组，故常规门禁没抓到。
+# 这里扫产品脚本里的**直接调用点**（注释不算行为；`Array.from(...)` / 展开 / 下标 /
+# `.length` 都是允许的写法）。**真实浏览器验收仍是这类缺陷的最终裁判**，本检查只是
+# 把"同一个错型再写回来"变成机械红。
+# ---------------------------------------------------------------------------
+
+_CHILDREN_ARRAY_METHOD_RE = re.compile(
+    r"\.children\s*(?:\|\|\s*\[\s*\]\s*\))?\s*\.\s*"
+    r"(?P<method>find|filter|map|forEach|some|every|reduce)\b"
+)
+
+# 允许的写法：方法调用的接收者是 `Array.from(...)` 的结果，不是 `children` 本身。
+# 只挖这一种精确形状——`Array.from(node.children.find(...))` 这种嵌套违规仍会被抓到。
+_ALLOWED_ARRAY_FROM_CHILDREN_RE = re.compile(
+    r"Array\.from\(\s*[\w.$]+\.children\s*(?:\|\|\s*\[\s*\]\s*)?\)\s*\.\s*\w+"
+)
+
+
+def _strip_js_comments(source: str) -> str:
+    """去掉 `//` 与 `/* … */` 注释，字符串 / 模板串原样保留。
+
+    注释里的旧写法是历史说明，不是调用点；字符串里的 `http://` 也不是注释起点。
+    产品脚本里没有含 `//` 或 `/*` 的正则字面量，故扫描器不区分正则字面量。
+    注释按原换行数换行，报错行号仍指向原文。
+    """
+    out: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(source):
+        char = source[index]
+        if quote is not None:
+            out.append(char)
+            if char == "\\" and index + 1 < len(source):
+                out.append(source[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "\"'`":
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        if source.startswith("//", index):
+            newline = source.find("\n", index)
+            if newline < 0:
+                break
+            out.append("\n")
+            index = newline + 1
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            if end < 0:
+                break
+            out.extend("\n" * source.count("\n", index, end + 2))
+            index = end + 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _children_array_method_hits(source: str) -> list[str]:
+    """`element.children` 上直接调数组方法的每一处（`行 N: 片段`）。"""
+    allowed = _ALLOWED_ARRAY_FROM_CHILDREN_RE.sub("", _strip_js_comments(source))
+    return [
+        f"行 {allowed.count(chr(10), 0, match.start()) + 1}: {match.group(0).strip()}"
+        for match in _CHILDREN_ARRAY_METHOD_RE.finditer(allowed)
+    ]
+
+
+def test_product_scripts_never_call_array_methods_on_children() -> None:
+    """产品 `static/*.js` 不得在 `element.children` 上直接调数组方法。
+
+    真 DOM 的 `children` 是 HTMLCollection（活集合），数组方法只存在于真数组上；
+    需要遍历 / 查找时先 `Array.from(...)` 或展开。旧写法在真浏览器里抛
+    `TypeError: … .find is not a function`，烟测垫片（children 是数组）看不见。
+    """
+    offenders: list[str] = []
+    for path in sorted(STATIC_DIR.glob("*.js")):
+        for hit in _children_array_method_hits(path.read_text(encoding="utf-8")):
+            offenders.append(f"{path.name}:{hit}")
+    assert not offenders, (
+        "`element.children` 是 HTMLCollection（只有 length / item / 索引），没有数组方法；"
+        "请先 `Array.from(...)` / 展开成数组再调用：\n" + "\n".join(offenders)
+    )
+
+
+def test_the_children_guard_catches_the_old_bug_and_allows_array_forms() -> None:
+    """守卫自身正反两面：旧写法判红；`Array.from` / 展开 / 下标 / `.length` / 注释放行。"""
+    bug = (
+        "const line = (node.children || []).find(f);"
+        " node.children.filter(g); box.children.map(h);"
+    )
+    assert len(_children_array_method_hits(bug)) == 3, _children_array_method_hits(bug)
+
+    allowed = (
+        "Array.from(node.children || []).find(f);"
+        " [...node.children].filter(g);"
+        " node.children[0]; box.children.length;"
+        " for (const child of (root && root.children) || []) {}"
+    )
+    assert _children_array_method_hits(allowed) == []
+
+    commented = "// node.children.find(f)\n/* (node.children || []).map(g) */\n"
+    assert _children_array_method_hits(commented) == []
+
+    nested = "Array.from(node.children.find(f))"
+    assert len(_children_array_method_hits(nested)) == 1, (
+        "`Array.from(...)` 里嵌套的直接调用仍是违规，守卫不得整段放行"
+    )

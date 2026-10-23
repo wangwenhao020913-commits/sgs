@@ -107,6 +107,49 @@ function stageFrameKindOf(cards, frameId) {
   return stageFrameKindMap(cards).get(String(frameId)) || "";
 }
 
+/** 舞台项的**入台来源**（D2 / D10）：`card_id → from_zone`，同样记在**舞台项列表自己身上**
+ *  （WeakMap 的键 = 列表，形状与 :data:`stageFrameKinds` 一致；牌桌与回放页各持一份）。
+ *
+ *  为什么需要它：:func:`mergeEffectCards` 会把新快照的处理区牌并进舞台，那种"从快照补
+ *  出来"的项**没有产生它的那条 `card_move`**，`stage.fromZone` 会丢 ⇒ 底行（`座位·武将·区域`）
+ *  空着（真机验收里的【火攻】就是这样）。记录流里见过的来源留在这份列表上，跨 `commit`
+ *  带着走；快照项创建时再用它补回来。
+ */
+const stageFromZones = new WeakMap();
+
+/** 取（没有就建）这份舞台项列表的 `card_id → from_zone` 表。 */
+function stageFromZoneMap(cards) {
+  let zones = stageFromZones.get(cards);
+  if (!zones) {
+    zones = new Map();
+    stageFromZones.set(cards, zones);
+  }
+  return zones;
+}
+
+/** 记下一次入台的来源（D2 的"首次入台"= 这条项这次亮相的来源；重落位时覆盖旧值）。 */
+function stageRememberFromZone(cards, cardId, fromZone) {
+  if (!fromZone) return;
+  stageFromZoneMap(cards).set(String(cardId), fromZone);
+}
+
+/** 这张牌在这份列表里见过的入台来源；没见过（刷新后第一次从快照补出来的牌）返回 `null`。 */
+function stageFromZoneOf(cards, cardId) {
+  return stageFromZoneMap(cards).get(String(cardId)) || null;
+}
+
+/** 舞台项开始淡出的时刻（D5）：有 `fadeAt` 用它，否则兜底 = 入台 + 30s。
+ *
+ *  判定（:func:`stageLane`）与计时器（:func:`nextStageDeadline`）共用这一处算式：
+ *  两边各写一份，兜底口径一旦漂移，就会出现"判定说还在、计时器说该走了"。
+ */
+function stageFadeAt(stage) {
+  const enteredAt = Number(stage.enteredAt) || 0;
+  return stage.fadeAt === null || stage.fadeAt === undefined
+    ? enteredAt + STAGE_MAX_MS
+    : Number(stage.fadeAt);
+}
+
 /** 寿命推进（**纯函数**，D5 / D15）：`item + now → visible | fading | gone`。
  *
  * 判定不看计时器，也不改任何状态；`setTimeout` 只在 hold / fade 结束时触发重绘
@@ -115,10 +158,7 @@ function stageFrameKindOf(cards, frameId) {
 function stageLane(item, now) {
   const stage = item && item.stage;
   if (!stage) return "gone";
-  const enteredAt = Number(stage.enteredAt) || 0;
-  const fadeAt = stage.fadeAt === null || stage.fadeAt === undefined
-    ? enteredAt + STAGE_MAX_MS
-    : Number(stage.fadeAt);
+  const fadeAt = stageFadeAt(stage);
   const fadeMs = STAGE_FADE_MS * animScale();
   if (now >= fadeAt + fadeMs) return "gone";
   if (now >= fadeAt) return "fading";
@@ -133,6 +173,18 @@ function stageStartFade(items, frameId, now) {
     if (String(stage.frameId) !== String(frameId)) continue;
     if (stage.fadeAt === null || stage.fadeAt === undefined) stage.fadeAt = now;
   }
+}
+
+/** 把一条舞台项改挂到**弃牌组**（D2 / D5）：换组不重新落位，寿命改挂这次结算帧；
+ *  无帧（弃牌阶段的弃置）从**入台时刻**起算 1s 停留。
+ *
+ *  两个入口共用：处理区 → 弃牌堆的换组，以及同一张牌已在台上又收到弃牌移动。
+ *  两处写的是同一份状态，各写一份迟早会漂移（比如一处忘了无帧分支）。
+ */
+function stageAttachDiscard(item, frameId) {
+  item.stage.lane = "discard";
+  item.stage.frameId = frameId;
+  item.stage.fadeAt = frameId > 0 ? null : item.stage.enteredAt + STAGE_HOLD_MS;
 }
 
 /** 舞台项的入台顺序（D3：三组按入台顺序排在**一个**换行流里，不按组分行）。 */
@@ -158,10 +210,7 @@ function nextStageDeadline(items, now) {
   for (const item of items || []) {
     const stage = item && item.stage;
     if (!stage) continue;
-    const enteredAt = Number(stage.enteredAt) || 0;
-    const fadeAt = stage.fadeAt === null || stage.fadeAt === undefined
-      ? enteredAt + STAGE_MAX_MS
-      : Number(stage.fadeAt);
+    const fadeAt = stageFadeAt(stage);
     for (const at of [fadeAt, fadeAt + fadeMs]) {
       if (at > now && (next === null || at < next)) next = at;
     }
@@ -571,7 +620,10 @@ function processingProductFor(cards, products = state.processingProducts) {
  */
 function applyRevealDelta(record, cards = state.revealedCards) {
   const now = stageNow();
+  const fromZones = stageFromZoneMap(cards || []);
   const held = (cards || []).filter((item) => stageLane(item, now) !== "gone");
+  // 来源表跟着牌组走（D2 / D10）：展示项也要能在"从快照补项"时找回首次来源。
+  stageFromZones.set(held, fromZones);
   if (!record) return held;
   if (record.kind === "frame") {
     if (record.op === "pop") stageStartFade(held, record.frame_id, now);
@@ -586,12 +638,14 @@ function applyRevealDelta(record, cards = state.revealedCards) {
     // 同一张牌在另一帧再次亮出：撤旧项，新项重新落位（D5.6）。
     held.splice(held.indexOf(existing), 1);
   }
+  const fromZone = { seat: record.seat, zone: "hand" };
+  stageRememberFromZone(held, card.card_id, fromZone);
   held.push({
     ...stageItem(card, {
       lane: "showcase",
       frameId,
       enteredAt: now,
-      fromZone: { seat: record.seat, zone: "hand" },
+      fromZone,
     }),
     revealedBy: record.seat,
   });
@@ -625,8 +679,11 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
   const now = stageNow();
   const previous = effectCards || [];
   const frameKinds = stageFrameKindMap(previous);
+  const fromZones = stageFromZoneMap(previous);
   let held = previous.filter((item) => stageLane(item, now) !== "gone");
   stageFrameKinds.set(held, frameKinds);
+  // 来源表跟着牌组走（D2 / D10）：入台移动与"从快照补项"可能隔着一次 commit。
+  stageFromZones.set(held, fromZones);
   if (!record) return held;
   if (record.kind === "timing") {
     applyUseTiming(record, held);
@@ -660,9 +717,7 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
       for (const source of sources) consumed.add(String(source));
       if (to.zone === "discard" && DISCARD_REASONS.has(record.reason)) {
         // 换组沿用同一条舞台项：来源取**首次入台**的 from_zone，寿命改挂这次结算帧。
-        item.stage.lane = "discard";
-        item.stage.frameId = frameId;
-        item.stage.fadeAt = frameId > 0 ? null : item.stage.enteredAt + STAGE_HOLD_MS;
+        stageAttachDiscard(item, frameId);
         continue;
       }
       if (HIDDEN_ZONES.has(to.zone) && carryingFrameKind === "SKILL") {
@@ -692,11 +747,13 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
         existing.stage.enteredAt = now;
         existing.stage.fadeAt = null;
         existing.stage.fromZone = from;
+        stageRememberFromZone(held, card.card_id, from);
         existing.source = record.reason === "USE" ? record.owner : null;
         existing.targets = null;
         existing.currentTarget = null;
         continue;
       }
+      stageRememberFromZone(held, card.card_id, from);
       held.push(stageItem(card, {
         lane: "processing",
         frameId,
@@ -713,11 +770,10 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
       const existing = byId(card.card_id);
       if (existing) {
         // 已从处理中组转来（上面的分支）：这里只补锚点，不重新落位。
-        existing.stage.lane = "discard";
-        existing.stage.frameId = frameId;
-        existing.stage.fadeAt = frameId > 0 ? null : existing.stage.enteredAt + STAGE_HOLD_MS;
+        stageAttachDiscard(existing, frameId);
         continue;
       }
+      stageRememberFromZone(held, card.card_id, from);
       held.push(stageItem(card, {
         lane: "discard",
         frameId,
@@ -757,13 +813,16 @@ function applyUseTiming(record, effectCards = state.effectCards) {
 /** 把新快照的处理区并进舞台：同一张牌保留回放期间标注的使用者 / 目标。
  *
  * **只动处理中组**（U3-01 / D5.5）：展示 / 弃牌两组跨 ``commit`` 保留；处理中组里
- * 快照已没有的牌 = 它已经离开处理区——开始 1s 淡出（不再瞬删）；快照里新出现的牌补进来。
+ * 快照已没有的牌 = 它已经离开处理区——开始 1s 淡出（不再瞬删）；快照里新出现的牌补进来，
+ * 其来源从这份列表记着的 `card_id → fromZone` 里补（D2 / D10）——快照本身没有"从哪来"，
+ * 不补的话底行会空着（真机验收的【火攻】）。
  * 同一 id 若还挂在展示 / 弃牌组又出现在处理区快照里（洗牌后再次使用），以快照为准落回
  * 处理中组。换会话的清空在 :func:`commitView` 里做，不在这里猜。
  */
 function mergeEffectCards(cards) {
   const now = stageNow();
   const frameKinds = stageFrameKindMap(state.effectCards || []);
+  const fromZones = stageFromZoneMap(state.effectCards || []);
   const wanted = new Set((cards || []).map((card) => String(card.card_id)));
   const held = new Map();
   for (const item of state.effectCards || []) {
@@ -772,8 +831,9 @@ function mergeEffectCards(cards) {
     held.set(String(item.card_id), item);
   }
   const out = [];
-  // 承载帧的 kind 跟着牌组走（D6）：帧 push 与离区移动可能隔着一次 commit。
+  // 承载帧的 kind / 入台来源跟着牌组走（D2 / D6）：记录与"从快照补项"可能隔着一次 commit。
   stageFrameKinds.set(out, frameKinds);
+  stageFromZones.set(out, fromZones);
   for (const item of held.values()) {
     if (item.stage.lane !== "processing") {
       if (!wanted.has(String(item.card_id))) out.push(item);
@@ -788,7 +848,11 @@ function mergeEffectCards(cards) {
   }
   for (const card of cards || []) {
     if (out.some((item) => String(item.card_id) === String(card.card_id))) continue;
-    out.push(stageItem(card, { lane: "processing", enteredAt: now, fromZone: null }));
+    out.push(stageItem(card, {
+      lane: "processing",
+      enteredAt: now,
+      fromZone: stageFromZoneOf(out, card.card_id),
+    }));
   }
   return out;
 }

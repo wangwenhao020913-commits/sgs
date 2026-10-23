@@ -129,9 +129,14 @@ function heroBlockFor(seat) {
   return seatNode ? descendantWithClass(seatNode, "hero-block") : null;
 }
 
-/** 目标还活着吗？读的是**当前视图快照**（服务端已下发的公开事实），不自己推死亡。 */
+/** 目标还活着吗？读的是**牌桌正在渲染的那份视图**（`tableViewForRender()`，D11）。
+ *
+ * 回放期间那是逐事件派生的 `state.liveView`，不是上一次提交的 `state.view`：同一批里
+ * 刚阵亡的座位只在 live view 里 `alive === false`，读旧快照会把线画到已死的座位上。
+ * 存活是服务端已下发的公开事实，前端不自己推死亡。
+ */
 function seatAlive(seat) {
-  const view = state.view;
+  const view = tableViewForRender();
   const players = (view && view.snapshot && view.snapshot.players) || [];
   const player = players.find((item) => Number(item.seat) === Number(seat));
   return !player || player.alive !== false;

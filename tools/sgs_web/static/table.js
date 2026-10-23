@@ -305,9 +305,13 @@ function renderTable() {
 /* --------------------------------------------------- 中央舞台（U3-01 / D2–D5） */
 
 /** 牌桌当前的武将名表：底行「座位号·武将名·区域」读 `snapshot.players[].hero_name`
- *  （U1-02 的展示契约，D10）。缺名时底行只写座位号 + 区域，不编一个名字。 */
+ *  （U1-02 的展示契约，D10）。缺名时底行只写座位号 + 区域，不编一个名字。
+ *
+ *  读的是**牌桌正在渲染的那份视图**（:func:`tableViewForRender`）：回放期间 = 逐事件派生的
+ *  live view，不是上一次提交的 `state.view`——底行与表体因此不会各读一份视图。 */
 function stageHeroNameOf(seat) {
-  const snapshot = state.view && state.view.snapshot;
+  const view = tableViewForRender();
+  const snapshot = view && view.snapshot;
   const player = ((snapshot && snapshot.players) || []).find(
     (item) => Number(item.seat) === Number(seat));
   return (player && player.hero_name) || "";
