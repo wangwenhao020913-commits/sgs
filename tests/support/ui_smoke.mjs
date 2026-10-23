@@ -47,6 +47,8 @@ class El {
     this.style = {};
     // 真 DOM 的 `<input type=checkbox>` 缺省未勾选；前端读的是 `.checked`（不是 `.value`）。
     this.checked = false;
+    // 滚动容器的三个度量：舞台「粘底」断言直接写这几个数（不读布局）。
+    this.scrollTop = 0; this.scrollHeight = 0; this.clientHeight = 0;
   }
   get textContent() { return this._text + this.children.map((c) => c.textContent || c.text()).join(""); }
   set textContent(v) { this._text = String(v); this._html = ""; this._detachChildren(); }
@@ -67,6 +69,14 @@ class El {
     }
     c.parentNode = this;
     this.children.push(c);
+    return c;
+  }
+  // 舞台卡面按 `data-stage-key` 复用节点（淡出靠同一个节点上的 CSS 过渡），
+  // 故垫片必须有真正的 removeChild —— 被撤下的旧项要真的从父节点消失。
+  removeChild(c) {
+    const at = this.children.indexOf(c);
+    if (at >= 0) this.children.splice(at, 1);
+    if (c) c.parentNode = null;
     return c;
   }
   addEventListener(k, fn) { (this.listeners[k] ||= []).push(fn); }
@@ -126,9 +136,16 @@ const realFetch = globalThis.fetch;
  * 现状"这条只在真实竞态里出现的路径，也能在烟测里被跑到。注入用完即清。 */
 let staleAnswerStatus = null;   // 下一次 `/answer` 直接回这个状态码（409）
 let nextGetPending = null;      // 下一次 `GET /api/sessions` 把 `pending` 换成这一份
+/* U3-05 / D12：静默轮询的失败注入——接下来的 N 次 `GET /api/sessions/…` 直接失败。
+ * 用来钉「失败静默，连续 3 次才提示」；注入用完即清。 */
+let failNextGets = 0;
 globalThis.fetch = async (path, options) => {
   if (typeof path === "string" && path.startsWith("/api/")) {
     calls.push({ path, body: options && options.body ? JSON.parse(options.body) : null });
+    if (failNextGets > 0 && !(options && options.method) && path.startsWith("/api/sessions/")) {
+      failNextGets -= 1;
+      throw new Error("注入的取增量失败");
+    }
     if (staleAnswerStatus && path.includes("/answer")) {
       const status = staleAnswerStatus;
       staleAnswerStatus = null;
@@ -150,7 +167,9 @@ globalThis.fetch = async (path, options) => {
 };
 
 /* 计时器垫片：**只排队、不自动跑**。既有用例仍由 `flushPlayback()` 一次性冲刷；
- * 回放 play/pause 的用例显式跑一条，才能断言"暂停后计时器被清掉、播放推进只留一个"。 */
+ * 回放 play/pause 的用例显式跑一条，才能断言"暂停后计时器被清掉、播放推进只留一个"。
+ * `setInterval` 只登记（U3-05 起 2 秒轮询靠它接线）：用例按登记表取回调显式跑一拍。 */
+const intervals = [];
 const pendingTimers = new Map();
 let nextTimerId = 1;
 const runNextTimer = () => {
@@ -168,7 +187,10 @@ const windowShim = {
     return id;
   },
   clearTimeout: (id) => { pendingTimers.delete(id); },
-  setInterval: () => 0,
+  setInterval: (fn, ms) => {
+    intervals.push({ fn, ms });
+    return intervals.length;
+  },
 };
 
 const context = vm.createContext({
@@ -319,6 +341,48 @@ check("⓪11 关了开关 ⇒ 六个 seed 里出现过不是我已点的那名�
   seatZero.some((hero) => hero !== picked.id), `点将 ${picked.id} / 实得 ${seatZero.join(",")}`);
 check("⓪12 关了开关 ⇒ 我的武将随 seed 变（真的是随机发将）",
   new Set(seatZero).size > 1, seatZero.join(","));
+
+/* ------------------------------------------- ⓪b 牌堆档位（M5-01b）
+ *
+ * 同样走**真的开局表单**（submit → startGame → POST /api/sessions）。选项来自服务端
+ * `GET /api/decks`（前端不抄第二份档位文案表），请求体从烟测自己的 `calls` 拦截器里读，
+ * 响应体里的 `deck_profile` 是会话真档位（`GameRegistry.view` 下发）。
+ */
+
+await ui.loadDeckCatalog();
+const deckOptions = $("in-deck-profile").children;
+check("⓪13 牌堆档位选项来自服务端（标准 108 / 军争 160）",
+  calls.some((call) => call.path === "/api/decks")
+    && deckOptions.length === 2
+    && deckOptions.some((option) => option.value === "standard_108")
+    && deckOptions.some((option) => option.value === "standard_ex_160"),
+  deckOptions.map((option) => `${option.value}:${option.textContent}`).join(","));
+check("⓪14 档位缺省选中 standard_108（默认对局不变）",
+  $("in-deck-profile").value === "standard_108", $("in-deck-profile").value);
+
+mark = calls.length;
+await submitLobby();
+ui.flushPlayback();  // startGame 里的 applyView 走真计时器（垫片只排队）；冲完才提交新视图
+const standardDeck = ui.state.view;
+check("⓪15 未选档也把 standard_108 带进建局请求体",
+  sessionBodiesSince(mark).pop().deck_profile === "standard_108",
+  JSON.stringify(sessionBodiesSince(mark)));
+check("⓪16 未选档建出的仍是 108 档",
+  standardDeck.deck_profile === "standard_108", String(standardDeck.deck_profile));
+
+setSelect("in-deck-profile", "standard_ex_160");
+check("⓪17 切到军争 160 后选择器的值是 160 档",
+  $("in-deck-profile").value === "standard_ex_160");
+mark = calls.length;
+await submitLobby();
+ui.flushPlayback();
+const expandedDeck = ui.state.view;
+check("⓪18 160 档的建局请求体带 deck_profile",
+  sessionBodiesSince(mark).pop().deck_profile === "standard_ex_160",
+  JSON.stringify(sessionBodiesSince(mark)));
+check("⓪19 开局页能建出 standard_ex_160 的局",
+  expandedDeck.deck_profile === "standard_ex_160", String(expandedDeck.deck_profile));
+setSelect("in-deck-profile", "standard_108");
 
 /** 推进一条对局到一个干净局面。
  *
@@ -1203,10 +1267,19 @@ if (allZonesIndex >= 0) {
     opponent >= 0 && rowCards(zoneRow(opponent, "hand")).length > 0,
     `座位=${opponent} 手牌=${opponent >= 0 ? rowCards(zoneRow(opponent, "hand")).map((card) => card.name).join("|") : "—"}`);
   const expectedProcessing = [...expected.processing.values()].map(cardText);
-  const processingCards = () => cardsIn($("r-processing")).map(cardParts);
+  // U3-01：回放页的舞台也是三组同流——处理区只比**处理中**那一组（淡出中的已不在处理区）。
+  const processingCards = () => cardsIn($("r-processing")).filter(
+    (node) => node.getAttribute("data-stage-lane") === "processing"
+      && !node.classList.contains("fading"),
+  ).map(cardParts);
   check("回放页处理区 / 效果区 = 从 card_move 重建的结果（名称 / 花色 / 点数 / id）",
     JSON.stringify(processingCards()) === JSON.stringify(expectedProcessing),
     `面板=${JSON.stringify(processingCards())} / 记录=${JSON.stringify(expectedProcessing)}`);
+  const stageLanes = cardsIn($("r-processing")).map((node) => node.getAttribute("data-stage-lane"));
+  check("回放页的舞台卡面都带 data-stage-lane（复用舞台渲染）",
+    stageLanes.every((lane) => ["processing", "showcase", "discard"].includes(lane))
+      && stageLanes.length >= expectedProcessing.length,
+    `lanes=${stageLanes.join(",")}`);
 }
 
 const queryIndex = replayRecords.findIndex((record) => record.kind === "query"
@@ -2626,25 +2699,26 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.state.logRecords = [];
   ui.state.view = null;
   ui.applyViewRaw(before);
-  // 步长按钮：默认 0.1s，点一下在 0.05→0.5 六档之间循环（不记住，刷新回默认）。
-  check("㉿E1 默认步长 0.1 秒", ui.state.eventDelayMs === 100, `eventDelayMs=${ui.state.eventDelayMs}`);
+  // 步长按钮：默认 0.2s（U3-05 / D13），点一下在 0.05→0.5 六档之间循环（不记住，刷新回默认）。
+  check("㉿E1 默认步长 0.2 秒", ui.state.eventDelayMs === 200, `eventDelayMs=${ui.state.eventDelayMs}`);
   check("㉿E1b 档位就是 0.05–0.5 秒六档（最小挡 0.05s 在首位）",
     JSON.stringify(ui.DELAY_STEPS_MS) === JSON.stringify([50, 100, 200, 300, 400, 500]),
     `steps=${JSON.stringify(ui.DELAY_STEPS_MS)}`);
   const delayBtn = $("btn-delay");
-  check("㉿E1c 牌桌上有步长按钮，按钮上显示当前档", !!delayBtn && delayBtn.textContent === "步长 0.1s",
+  check("㉿E1c 牌桌上有步长按钮，按钮上显示当前档", !!delayBtn && delayBtn.textContent === "步长 0.2s",
     `按钮="${delayBtn ? delayBtn.textContent : "(缺)"}"`);
   const clickDelay = () => (delayBtn.listeners.click || []).forEach((fn) => fn({ target: delayBtn }));
   clickDelay();
-  check("㉿E1d 点一下 → 0.2 秒", ui.state.eventDelayMs === 200,
+  check("㉿E1d 点一下 → 0.3 秒", ui.state.eventDelayMs === 300,
     `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
-  // 走完 0.2 / 0.3 / 0.4 / 0.5 四档，下一档就是新增的最小挡 0.05s。
-  for (let i = 0; i < 4; i += 1) clickDelay();
+  // 走完 0.4 / 0.5 / 0.05 三档：满档后落到最小挡 0.05s。
+  for (let i = 0; i < 3; i += 1) clickDelay();
   check("㉿E1f 满档后落到新的最小挡 0.05 秒，按钮文字跟着换",
     ui.state.eventDelayMs === 50 && delayBtn.textContent === "步长 0.05s",
     `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
   clickDelay();
-  check("㉿E1e 再点一下循环回默认 0.1 秒", ui.state.eventDelayMs === 100 && delayBtn.textContent.includes("0.1"),
+  clickDelay();
+  check("㉿E1e 六档循环一圈回到默认 0.2 秒", ui.state.eventDelayMs === 200 && delayBtn.textContent.includes("0.2"),
     `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
   ui.applyViewRaw(after);
   check("㉿E2 收到事件先进入回放：快照还没提交、提交按钮灰着",
@@ -2662,8 +2736,13 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && $("t-context").textContent.includes("0号位"),
     `描述="${$("t-context").textContent}"`);
   ui.stepPlayback(true);
-  check("㉿E5 播到「离开处理区」⇒ 效果区清空（牌「停留」过一步）",
-    !$("t-processing").text().includes("杀"), `处理区="${$("t-processing").text().trim()}"`);
+  // U3-01：离区不再瞬删——牌留在舞台上淡出（`.fading`），描述文本立即清空。
+  check("㉿E5 播到「离开处理区」⇒ 牌从「处理中」转入淡出（不再瞬间消失）",
+    $("t-processing").text().includes("杀")
+      && (($("t-processing").children.find(
+        (node) => node.getAttribute("data-card-id") === "6",
+      ) || {}).classList || { contains: () => false }).contains("fading"),
+    `处理区="${$("t-processing").text().trim()}"`);
   check("㉿E5b 效果区空了 ⇒ 描述文本立即清空",
     $("t-context").textContent === "", `描述="${$("t-context").textContent}"`);
   ui.flushPlayback();
@@ -3606,6 +3685,80 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `pre=${ui.state.preactivation} calls=${calls.length - beforeCancel}`);
 }
 
+/* ---- M5-bugfix（D）：借刀预发动提交的 `card` 必须是**纯 CardRef** ----
+ *
+ * 报障（用户实机）：预发动确认时报
+ * `UseCard.card.attribute Extra inputs are not permitted`。根因是界面把**展示副本**
+ * （`display_name` / `attribute` / `description` / `kind` / `source_cards` …）原样塞进
+ * `UseCard.card`，而服务端的 `CardRef` 是 `extra="forbid"` 的严格模型。
+ *
+ * 判据：任何从**展示卡**拼出来的 `UseCard` / `PlayCard` 都先过 `bareCardRef`
+ * （`core.js`，字段闭集 = 服务端 `CardRef` 的九个键）；其余字段（来源牌 / 展示文案）
+ * 一个都不许随提交上行。**不放宽服务端模型**。
+ */
+{
+  const borrowedDisplay = {
+    ...synthCard(31, "借刀杀人"),
+    type: "borrowed_sword",
+    display_name: "借刀杀人",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "借刀杀人的描述：令持刀者对其攻击范围内的一名角色使用【杀】。",
+  };
+  const borrowedRaw = {
+    card_id: 31, type: "borrowed_sword", name: "借刀杀人", suit: "spade",
+    rank: 7, slot: null, attack_range: null, color: "black", virtual_sources: [],
+  };
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 93,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 93 }],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [], card_preactivations: {},
+  };
+  const pa = {
+    skillId: null, cardId: 31, card: borrowedDisplay, name: "借刀杀人",
+    composite: false, cardEntry: true,
+    steps: [
+      {
+        name: "seat", zones: [], min: 1, max: 1, order: 0,
+        pool: [{ when: [], options: ["seat:1"] }],
+      },
+      {
+        name: "seat", zones: [], min: 1, max: 1, order: 1,
+        pool: [{ when: [], options: ["seat:2"] }],
+      },
+    ],
+    answers: [
+      { values: [1], texts: ["seat:1"] },
+      { values: [2], texts: ["seat:2"] },
+    ],
+    cursor: 2,
+  };
+
+  const action = ui.buildPreativationAction(pending, pa);
+  const cardKeys = action && action.card ? Object.keys(action.card).sort() : [];
+  const forbidden = ["display_name", "attribute", "description", "kind", "source_cards"];
+  check("M5-bugfix-d1 借刀预发动提交的 card 只剩 CardRef 字段（展示副本字段全部剔除）",
+    !!action && action.kind === "UseCard"
+      && JSON.stringify(action.card) === JSON.stringify(borrowedRaw)
+      && JSON.stringify(cardKeys) === JSON.stringify(Object.keys(borrowedRaw).sort())
+      && forbidden.every((key) => !(key in action.card))
+      && JSON.stringify(action.targets) === "[1]"
+      && JSON.stringify(action.designations) === "[2]"
+      && action.answers_seq === 93,
+    `card=${JSON.stringify(action && action.card)} keys=${JSON.stringify(cardKeys)}`);
+
+  const projected = ui.bareCardRef ? ui.bareCardRef(borrowedDisplay) : undefined;
+  check("M5-bugfix-d2 bareCardRef = CardRef 字段闭集的唯一投影口（九键，缺省不补）",
+    !!projected
+      && JSON.stringify(projected) === JSON.stringify(borrowedRaw)
+      && !("description" in projected)
+      && !("source_cards" in projected),
+    `projected=${JSON.stringify(projected)}`);
+}
+
 {
   const dodge = { ...synthCard(51, "闪"), type: "dodge" };
   const realSlash = { ...synthCard(52, "杀"), type: "slash" };
@@ -4526,6 +4679,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const show = (view) => {
     ui.state.view = view;
     ui.state.logRecords = [];
+    // 合成 view = 一个新场景：舞台项不跨场景沿用（U3-01 起 commit 不清空展示 / 弃牌，
+    // 故这里显式清一次，只影响测试之间的干净度，不改产品行为）。
+    ui.state.effectCards = [];
+    ui.state.revealedCards = [];
     ui.resetSelection();
     ui.renderTable();
   };
@@ -4786,6 +4943,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const show = (view) => {
     ui.state.view = view;
     ui.state.logRecords = [];
+    // 合成 view = 一个新场景：舞台项不跨场景沿用（U3-01 起 commit 不清空展示 / 弃牌）。
+    ui.state.effectCards = [];
+    ui.state.revealedCards = [];
     ui.resetSelection();
     ui.renderTable();
     ui.renderPending(view);
@@ -4829,23 +4989,24 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && /\.hand \.card\s*\{[^}]*flex:\s*0 0 auto/s.test(css)
       && /\.table-bottom\s*\{[^}]*flex:\s*0 0 27\.5%/s.test(css),
     `card=${/calc\(88 \* var\(--dsu\)\)/.test(css)} stageOverride=${/\.stage-center \.processing \.card/.test(css)} small=${/calc\(56 \* var\(--dsu\)\)/.test(css) || /calc\(79 \* var\(--dsu\)\)/.test(css)} hand=${/\.hand \.card\s*\{[^}]*flex:\s*0 0 auto/s.test(css)} bottom=${/\.table-bottom\s*\{[^}]*27\.5%/s.test(css)}`);
-  // U2-02：卡面统一放大后，60.85% 居中的舞台面板会向上长进环桌、盖住顶部座位；故给面板封顶。
-  // 几何算式（`table.js:RING_STAGE`）：圆心 y=370、ry=235；顶部座位（90°）下沿 = 370 − 235 + 150/2 = 210。
-  // 面板 max-height 300 ⇒ 顶边 370 − 300/2 = 220 > 210；处理区再限一行卡面（125 含 1 设计单位余量）+ 纵向滚动，
-  // 保证第一行卡面的上 / 下边框都在滚动框内（不裁切），第 2 行起整体在框外、不出半张牌；
-  // 处理中说明最多 2 行（省略号），1280 下也不越过 300 上限。
+  // U3-01：舞台面板下移 + 加宽 + 封顶 360（spec D3）：
+  // 圆心 64.47% × 608 = 392；360 上限 ⇒ 顶边 392 − 180 = 212 > 顶座下沿 210；
+  // 40% 宽 = 640 设计单位，横跨 480–1120，不压左右座位（中心 212 / 1388、卡宽 210）；
+  // 舞台行限两行卡面（253 = 124×2 + 5）纵向滚动、说明最多 2 行。
   const stageRule = css.match(/\.stage-center\s*\{[^}]*\}/s);
   const stageMax = stageRule && /max-height:\s*calc\((\d+) \* var\(--dsu\)\)/.exec(stageRule[0]);
-  const ringCenterY = 370;
-  const topSeatBottom = ringCenterY - 235 + 150 / 2;
+  const stageTop = stageRule && /top:\s*(\d+(?:\.\d+)?)%/.exec(stageRule[0]);
+  const ringCenterY = (Number(stageTop ? stageTop[1] : 0) / 100) * 608;
+  const topSeatBottom = 370 - 235 + 150 / 2;
   const panelTop = ringCenterY - Number(stageMax ? stageMax[1] : 0) / 2;
-  check("U1-02c4 CSS：舞台面板封顶 300（顶边 220 > 顶座下沿 210），处理区一行卡面（125 含余量）纵向滚动、说明最多 2 行",
-    !!stageMax && panelTop > topSeatBottom
+  check("U1-02c4 CSS：舞台宽 40%、面板封顶 360、中心下移到 64.47%（顶边 212 > 顶座下沿 210），舞台行两行卡面（253）纵向滚动、说明最多 2 行",
+    !!stageMax && Math.abs(ringCenterY - 392) < 0.5 && panelTop > topSeatBottom
+      && /\.stage-center\s*\{[^}]*width:\s*40%/s.test(css)
       && /\.stage-center\s*\{[^}]*overflow:\s*hidden/s.test(css)
-      && /\.stage-center \.processing\s*\{[^}]*flex:\s*0 0 auto[^}]*max-height:\s*calc\(125 \* var\(--dsu\)\)[^}]*overflow-y:\s*auto/s.test(css)
+      && /\.stage-center \.processing\s*\{[^}]*flex:\s*0 0 auto[^}]*max-height:\s*calc\(253 \* var\(--dsu\)\)[^}]*overflow-y:\s*auto/s.test(css)
       && /\.stage-center \.processing\s*\{[^}]*align-content:\s*flex-start/s.test(css)
       && /\.stage-center \.context\s*\{[^}]*-webkit-line-clamp:\s*2/s.test(css),
-    `panelTop=${panelTop} topSeatBottom=${topSeatBottom} max=${stageMax ? stageMax[1] : "无"} clip=${/\.stage-center\s*\{[^}]*overflow:\s*hidden/s.test(css)} row=${/max-height:\s*calc\(125 \* var\(--dsu\)\)/.test(css)} scroll=${/\.stage-center \.processing\s*\{[^}]*overflow-y:\s*auto/s.test(css)}`);
+    `centerY=${ringCenterY} panelTop=${panelTop} topSeatBottom=${topSeatBottom} max=${stageMax ? stageMax[1] : "无"} width=${/\.stage-center\s*\{[^}]*width:\s*40%/s.test(css)} row=${/max-height:\s*calc\(253 \* var\(--dsu\)\)/.test(css)} scroll=${/\.stage-center \.processing\s*\{[^}]*overflow-y:\s*auto/s.test(css)}`);
   check("U1-02d CSS：可指定 = 5px 绿外圈、已选 = 4px 绿内圈、悬停浅绿、行动中 = 金框，当前 + 合法有绿角点",
     /\.seat\.targetable:not\(\.tsel\)\s*\{[^}]*0 0 0 5px var\(--ok\)/s.test(css)
       && /\.seat\.tsel::before\s*\{[^}]*inset 0 0 0 4px var\(--ok\)/s.test(css)
@@ -4969,7 +5130,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && byClass(handCard, "suit")[0].textContent === "♠"
       && byClass(handCard, "rank")[0].textContent === "7"
       && byClass(handCard, "cname")[0].textContent === "杀"
-      && byClass(handCard, "ctype")[0].textContent === "普通",
+      && byClass(handCard, "ctype")[0].textContent === "",
     `html="${handCard.text()}"`);
   // 底行的三类事实：装备槽 / 属性 / 攻击范围（都来自服务端展示契约，不在 JS 里猜）。
   const fireSlash = card(-7, "火杀", {
@@ -4980,11 +5141,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   show(bottomView);
   const weaponFace = $("t-hand").children[0];
   const fireFace = $("t-hand").children[1];
-  check("U1-02o3 卡面底行：武器 = 武器 · 范围 2；火杀 = 普通 · 火焰（红）",
+  check("U1-02o3 卡面底行：武器 = 武器 · 范围 2；火杀 = 火焰（红）；不再写「普通 / 虚拟 / 转化」",
     byClass(weaponFace, "ctype")[0].textContent === "武器 · 范围 2"
-      && byClass(fireFace, "ctype")[0].textContent === "普通 · 火焰"
+      && byClass(fireFace, "ctype")[0].textContent === "火焰"
       && hasClass(fireFace, "attr-fire")
-      && byClass(fireFace, "cname")[0].textContent === "杀",
+      && byClass(fireFace, "cname")[0].textContent === "杀"
+      && !/普通|虚拟|转化/.test(byClass(fireFace, "ctype")[0].textContent),
     `weapon="${byClass(weaponFace, "ctype")[0].textContent}" fire="${byClass(fireFace, "ctype")[0].textContent}"`);
   show(table());
 
@@ -5981,17 +6143,20 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     })(),
     `option=${ui.state.selectedOption} action=${JSON.stringify(ui.buildAction())}`);
 
-  // 引擎在目标**没有手牌**时不发 `discard_one`（`skills/catalog.py::_double_sword`）；
-  // 界面不补——载荷里只有 `draw_one` 就只画一个按钮（判据是载荷，不是前端规则）。
+  // 引擎在目标**没有手牌**时不发 `discard_one`（`skills/catalog.py::_double_sword`）。
+  // M5-bugfix 起界面按**完整的一对**画控件：付不起的那条是**禁用**控件（不是候选），
+  // 可点的只有引擎真发了的 `draw_one`（判据是 `legal_actions`，不是前端规则）。
   const drawOnly = optionView(["draw_one"], 9431);
   ui.state.view = drawOnly;
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(drawOnly);
-  check("U2-04j 无手牌时只显示「令其摸一张牌」（不出现「弃置 1 张手牌」，界面不补规则）",
-    optionLabels().join(",") === "令其摸一张牌"
-      && !$("t-options").text().includes("弃置 1 张手牌"),
-    `选项=${JSON.stringify(optionLabels())}`);
+  const drawOnlyButtons = $("t-options").children.filter((node) => node.tagName === "BUTTON");
+  check("U2-04j 无手牌时「弃置 1 张手牌」是禁用控件、「令其摸一张牌」仍可点（引擎不发不可支付的选项）",
+    optionLabels().join(",") === "弃置 1 张手牌,令其摸一张牌"
+      && drawOnlyButtons.find((node) => node.textContent === "弃置 1 张手牌").disabled === true
+      && drawOnlyButtons.find((node) => node.textContent === "令其摸一张牌").disabled === false,
+    `选项=${JSON.stringify(optionLabels())} disabled=${JSON.stringify(drawOnlyButtons.map((node) => [node.textContent, node.disabled]))}`);
 
   // 可复用的枚举标签（花色）自票 08 起由服务端下发 `option_labels`：前端只读它摆版面，
   // 不抄第二份中文表；有标签就是选择型弹窗，没有标签才退回原值（fail-visible）。
@@ -6008,6 +6173,142 @@ const bottomSkillIds = () => $("t-skills").children.filter(
     optionLabels().join(",") === "♥红桃,♠黑桃"
       && !/heart|spade/.test($("t-options").text()),
     `选项=${JSON.stringify(optionLabels())}`);
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ M5-bugfix（B）：雌雄双股剑 · 目标无手牌 ============
+ *
+ * 用户验收（逐字）：
+ *   - 目标**没有手牌**时引擎只发 `draw_one`（付不起的组合不进候选），但左侧控制区仍要
+ *     列出两条一次性选项：「弃置 1 张手牌」**禁用**（点了零提交），
+ *     「令座位号 N <name>摸一张牌」可点并提交那条 `SelectOption(draw_one)`；
+ *   - 来源座位 / 名称读服务端派生的 `option_source`（`{"seat", "name"}`）——前端不按
+ *     "谁的回合 / 谁用了【杀】"推（那会是第二份规则）；
+ *   - **不是**新的弹窗种类：`modal.js:stepDialogKind` 仍是只读判据的唯一来源，
+ *     这一步仍是牌桌表面（对话框不打开）；
+ *   - 目标有手牌时两条都可点（既有两选项行为不变）。
+ */
+{
+  const doubleSword = {
+    ...synthCard(129, "雌雄双股剑"),
+    type: "double_sword", display_name: "雌雄双股剑", kind: "normal",
+    attribute: "普通", source_cards: [],
+    description: "雌雄双股剑：使用【杀】指定异性目标后，令其选择弃一张手牌或你摸一张牌。",
+  };
+  const doubleSwordView = (options, seq, { optionSource = { seat: 3, name: "张飞" } } = {}) => {
+    const view = synthView({
+      kind: "SELECT_OPTION", actor: 0, seq, skill_id: "equip.double_sword",
+      prompt: "请选择一项。",
+      options,
+      legal_actions: options.map((choice) => ({
+        kind: "SelectOption", choice, answers_seq: seq,
+      })),
+      candidate_index: {}, virtual_index: {}, option_seats: {},
+      context: {
+        actor: 3, name: "雌雄双股剑", targets: [0],
+        label: "3号位张飞对0号位使用雌雄双股剑", requirement: "选择：弃一张手牌 / 令使用者摸一张",
+        skill_hints: [],
+      },
+      option_source: optionSource,
+      preactivations: {}, preactivation: [],
+    });
+    view.human_seat = 0;
+    view.snapshot.seat = 0;
+    view.snapshot.self_hand = [];
+    view.snapshot.players = [0, 1, 2, 3].map((seat) => ({
+      seat, hp: 4, hp_max: 4,
+      hand_count: seat === 0 ? 0 : 2,
+      hero_name: seat === 3 ? "张飞" : null,
+      alive: true, equip: seat === 3 ? [doubleSword] : [], judge: [], identity: null,
+      chained: false,
+    }));
+    return view;
+  };
+  const optionButtons = () => $("t-options").children.filter(
+    (node) => node.tagName === "BUTTON",
+  );
+  const optionButton = (text) => optionButtons().find((node) => node.textContent === text) || null;
+  const settle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261019,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  ui.state.modal.heroSeat = null;
+
+  const renderOptionView = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+
+  // ---- ① 目标无手牌：两条选项（弃牌禁用 + 令座位 3 张飞摸一张） ----
+  const empty = doubleSwordView(["draw_one"], 9450);
+  renderOptionView(empty);
+  const discard = optionButton("弃置 1 张手牌");
+  const draw = optionButton("令座位号 3 张飞摸一张牌");
+  check("M5-bugfix-b1 无手牌目标：左侧两条选项（「弃置 1 张手牌」禁用、「令座位号 3 张飞摸一张牌」可点）",
+    !!discard && !!draw
+      && discard.disabled === true
+      && !draw.disabled
+      && ui.stepDialogKind(empty.pending) === null
+      && $("t-dialog").hidden === true
+      && $("t-options").text().includes("弃置 1 张手牌"),
+    `选项=${JSON.stringify(optionButtons().map((node) => node.textContent))} discardDisabled=${discard && discard.disabled} drawDisabled=${draw && draw.disabled} dialog=${ui.stepDialogKind(empty.pending)} hidden=${$("t-dialog").hidden}`);
+
+  // ---- ② 点禁用项 = 零提交、不改变选择 ----
+  const beforeDisabled = calls.length;
+  const beforeSelected = ui.state.selectedOption;
+  (discard.listeners.click || []).forEach((fn) => fn({ target: discard }));
+  check("M5-bugfix-b2 点禁用「弃置 1 张手牌」= 零提交且不改变选择",
+    calls.length === beforeDisabled
+      && ui.state.selectedOption === beforeSelected
+      && (ui.buildAction() || {}).choice !== "discard_one",
+    `calls=${calls.length - beforeDisabled} option=${ui.state.selectedOption} built=${JSON.stringify(ui.buildAction())}`);
+
+  // ---- ③ 点「令座位号 3 张飞摸一张牌」= 选中那条 SelectOption(draw_one)；提交恰一条 ----
+  (draw.listeners.click || []).forEach((fn) => fn({ target: draw }));
+  const builtDraw = ui.buildAction();
+  check("M5-bugfix-b3 点「令座位号 3 张飞摸一张牌」= 选中 legal_actions 里的 SelectOption(draw_one)",
+    !!builtDraw && builtDraw.kind === "SelectOption" && builtDraw.choice === "draw_one"
+      && empty.pending.legal_actions.includes(builtDraw)
+      && $("btn-submit").disabled === false,
+    `built=${JSON.stringify(builtDraw)} submit=${$("btn-submit").disabled}`);
+  const beforeDraw = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  await settle();
+  staleAnswerStatus = null;
+  const drawAnswers = calls.slice(beforeDraw).filter((call) => call.path.includes("/answer"));
+  check("M5-bugfix-b4 提交恰一条 SelectOption(draw_one)，原样取自 legal_actions",
+    drawAnswers.length === 1
+      && JSON.stringify(drawAnswers[0].body.action)
+        === JSON.stringify({ kind: "SelectOption", choice: "draw_one", answers_seq: 9450 }),
+    `answers=${drawAnswers.length} action=${JSON.stringify(drawAnswers[0] && drawAnswers[0].body.action)}`);
+
+  // ---- ④ 正常情况下两条都可点（既有行为不变） ----
+  const both = doubleSwordView(["discard_one", "draw_one"], 9451);
+  renderOptionView(both);
+  const discardBoth = optionButton("弃置 1 张手牌");
+  const drawBoth = optionButton("令座位号 3 张飞摸一张牌");
+  (drawBoth.listeners.click || []).forEach((fn) => fn({ target: drawBoth }));
+  const builtDrawBoth = ui.buildAction();
+  (discardBoth.listeners.click || []).forEach((fn) => fn({ target: discardBoth }));
+  const builtDiscardBoth = ui.buildAction();
+  check("M5-bugfix-b5 目标有手牌时两条都可点（皆可提交对应 SelectOption）",
+    !!discardBoth && !!drawBoth
+      && !discardBoth.disabled && !drawBoth.disabled
+      && !!builtDiscardBoth && builtDiscardBoth.choice === "discard_one"
+      && builtDrawBoth.choice === "draw_one",
+    `discard=${JSON.stringify(builtDiscardBoth)} draw=${JSON.stringify(builtDrawBoth)}`);
+
+  ui.state.sessionId = null;
   ui.state.view = null;
   ui.resetSelection();
 }
@@ -7128,6 +7429,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
   });
   faceView.snapshot.self_hand = [sourceDodge, sourceSlash];
   faceView.snapshot.processing = [virtual, single, multi, fire, thunder];
+  // 合成 view = 新场景：舞台项不跨场景沿用（U3-01 起 commit 不清空展示 / 弃牌）。
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
   ui.state.view = faceView;
   ui.resetSelection();
   ui.renderTable();
@@ -7229,6 +7533,9 @@ const bottomSkillIds = () => $("t-skills").children.filter(
 
   // 回放：来源牌进处理区的那条 card_move 也画产物（快照的 processing 是产物映射的来源）。
   faceView.snapshot.processing = [];
+  // 新场景：上一小节的五张产物不该以淡出态混进这一段的计数。
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
   ui.state.view = faceView;
   ui.resetSelection();
   ui.renderTable();
@@ -10499,6 +10806,3080 @@ const bottomSkillIds = () => $("t-skills").children.filter(
 
   ui.state.sessionId = null;
   ui.state.view = null;
+  ui.resetSelection();
+}
+
+
+/* ============ M5-08a（D10 / §5.1.4）：火攻界面 ============
+ *
+ * 载荷与真会话同形（字段由 `tests/test_web.py` 的真会话断言钉）：
+ *   - 目标过滤 = 候选索引的池：只有有手牌的角色（含自己）；空手牌座位不在池里 ⇒ 不可点；
+ *   - 人类被指定：`dialog: "reveal"` + `revealed`（本人的手牌）+ `total: [1, 1]` ⇒ 亮牌模板，
+ *     点一张即提交；牌桌只读，但悬停描述照常；
+ *   - 使用者弃同花色：`SELECT_CARDS` + `pending.reveal`（已公开的亮牌）+ `optional: true`
+ *     ⇒ 点自己手里那张同花色牌即提交；右端「放弃」是另一个出口；
+ *   - 无同花色：引擎不发询问（自动放弃），事件流由服务端叙事写「放弃（无可弃的同花色牌）」；
+ *   - 公开亮牌进中央舞台的**同一处理区行**，结算帧出栈即撤下；手牌区不留「已知」。
+ */
+{
+  const fire = {
+    ...synthCard(109, "火攻"),
+    type: "fire_attack",
+    display_name: "火攻",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "火攻的描述：亮一张手牌，弃同花色造成 1 点火焰伤害。",
+  };
+  const revealed = {
+    ...synthCard(5, "闪电"),
+    type: "lightning",
+    display_name: "闪电",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "闪电的描述",
+  };
+  const sameSuitA = {
+    ...synthCard(5, "闪电"),
+    type: "lightning",
+    display_name: "闪电",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "闪电的描述",
+  };
+  const sameSuitB = {
+    ...synthCard(7, "杀"),
+    type: "slash",
+    display_name: "杀",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "杀的描述",
+  };
+  const heartCard = {
+    ...synthCard(8, "桃"),
+    type: "peach",
+    display_name: "桃",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "桃的描述",
+    suit: "heart",
+    color: "red",
+  };
+  const clubCard = {
+    ...synthCard(9, "闪"),
+    type: "dodge",
+    display_name: "闪",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "闪的描述",
+    suit: "club",
+    color: "black",
+  };
+  const fireContext = (requirement) => ({
+    actor: 0, name: "火攻", targets: [0],
+    label: "0号位对0号位使用火攻", requirement, skill_hints: [],
+  });
+  const fireView = (pending, { hand = [], processing = [fire], seats = 4 } = {}) => {
+    const view = synthView(pending);
+    view.human_seat = 0;
+    view.snapshot.seat = 0;
+    view.snapshot.phase = "play";
+    view.snapshot.turn_seat = 0;
+    view.snapshot.self_hand = hand;
+    view.snapshot.processing = processing;
+    view.snapshot.players = Array.from({ length: seats }, (_, seat) => ({
+      seat, hp: 4, hp_max: 4,
+      hand_count: seat === 2 ? 0 : 2,
+      alive: true, equip: [], judge: [], identity: null,
+    }));
+    return view;
+  };
+  const renderFire = (view) => {
+    ui.state.view = view;
+    // 合成 view = 新场景：舞台项不跨场景沿用（U3-01 起 commit 不清空展示 / 弃牌）。
+    ui.state.effectCards = [];
+    ui.state.revealedCards = [];
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const handNode = (cardId) => $("t-hand").children.find(
+    (node) => node.getAttribute("data-card-id") === String(cardId),
+  ) || null;
+  const clickHand = async (cardId) => {
+    const node = handNode(cardId);
+    if (!node) return false;
+    for (const fn of node.listeners.click || []) await fn({ target: node, stopPropagation() {} });
+    return true;
+  };
+  const settle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const answersSince = (mark) => calls.slice(mark).filter((call) => call.path.includes("/answer"));
+
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261016,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  ui.state.modal.heroSeat = null;
+
+  // ---- ① 目标过滤：只有有手牌的角色可点（含自己；座位 2 空手牌不可点） ----
+  const play = {
+    kind: "PLAY_PHASE", actor: 0, seq: 2101,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 2101, card: fire, targets: [0] },
+      { kind: "UseCard", answers_seq: 2101, card: fire, targets: [1] },
+      { kind: "UseCard", answers_seq: 2101, card: fire, targets: [3] },
+      { kind: "EndPhase", answers_seq: 2101 },
+    ],
+    candidate_index: {
+      109: {
+        card: fire, pool: [0, 1, 3], combos: [[0], [1], [3]], min_targets: 1, max_targets: 1,
+      },
+    },
+    virtual_index: {}, option_seats: {}, context: fireContext("使用一张牌（或发动技能），或结束出牌阶段"),
+    prompt_display: {
+      text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      default_action: { kind: "EndPhase", answers_seq: 2101 },
+      default_label: "超时将自动结束出牌阶段",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  renderFire(fireView(play, { hand: [fire] }));
+  await clickHand(109);
+  check("M5-08a-a1 选中火攻后：有手牌的座位（含自己）可点，空手牌座位 2 不可点",
+    ui.state.focusCardId === 109
+      && seatBox(0).classList.contains("targetable")
+      && seatBox(1).classList.contains("targetable")
+      && seatBox(3).classList.contains("targetable")
+      && !seatBox(2).classList.contains("targetable")
+      && ui.pickerSeats(play).map((item) => item.seat).join(",") === "0,1,3",
+    `focus=${ui.state.focusCardId} seats=${ui.pickerSeats(play).map((item) => item.seat).join(",")} s2=${seatBox(2).className}`);
+  (seatBox(2).listeners.click || []).forEach((fn) => fn({ target: seatBox(2) }));
+  check("M5-08a-a2 点空手牌座位 = 没有目标（不会提交空目标）",
+    ui.state.selectedTargets.length === 0 && ui.buildAction() === null,
+    `targets=${JSON.stringify(ui.state.selectedTargets)}`);
+  (seatBox(0).listeners.click || []).forEach((fn) => fn({ target: seatBox(0) }));
+  check("M5-08a-a3 可指定自己：点座位 0 = 选中自己，提交候选原样来自 legal_actions",
+    JSON.stringify(ui.state.selectedTargets) === "[0]"
+      && ui.buildAction() !== null
+      && ui.buildAction().targets.join(",") === "0",
+    `targets=${JSON.stringify(ui.state.selectedTargets)} action=${JSON.stringify(ui.buildAction())}`);
+
+  // ---- ② 人类被指定：亮牌模板（点一张即提交；只读；悬停可读；其余手牌不外泄） ----
+  const revealPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 2102,
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 2102, picks: [0] },
+      { kind: "SelectCards", answers_seq: 2102, picks: [1] },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "hand" }, card: sameSuitA },
+      { ref: { seat: 0, zone: "hand" }, card: sameSuitB },
+    ],
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: false },
+    revealed: [sameSuitA, sameSuitB],
+    dialog: "reveal", harvest: null, reveal: null,
+    context: fireContext("从自己的手牌里亮出一张（公开）"),
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 2102, picks: [0] },
+      default_label: "超时将自动选择第一张亮牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const revealView = fireView(revealPending, { hand: [sameSuitA, sameSuitB] });
+  renderFire(revealView);
+  const revealCards = () => $("t-options").children[0].children[0].children;
+  check("M5-08a-b1 被指定者（人类）看到亮牌模板：标题「火攻」、两张自己的手牌、没有放弃",
+    ui.stepDialogKind(revealPending) === "reveal"
+      && $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "火攻"
+      && ui.isPickRevealStep(revealPending) === false
+      && revealCards().length === 2
+      && revealCards().map((node) => node.getAttribute("data-card-id")).join(",") === "5,7"
+      && $("btn-pass").hidden === true
+      && $("btn-submit").disabled === true,
+    `kind=${ui.stepDialogKind(revealPending)} title="${$("t-dialog-title").textContent}" cards=${revealCards().length} submit=${$("btn-submit").disabled}`);
+  check("M5-08a-b2 亮牌弹窗打开时牌桌只读，但牌面悬停描述照常可读",
+    ui.selectionEnabled() === false
+      && revealCards()[0].getAttribute("title").includes("闪电的描述")
+      && revealCards()[1].getAttribute("title").includes("杀的描述")
+      && $("t-modal-backdrop").hidden === false,
+    `enabled=${ui.selectionEnabled()} backdrop=${$("t-modal-backdrop").hidden} titles=${revealCards().map((n) => n.getAttribute("title")).join("|")}`);
+  const focusBefore = ui.state.focusCardId;
+  await clickHand(5);
+  check("M5-08a-b3 只读态：点自己的手牌不产生选择（选择只在亮牌窗里）",
+    ui.state.focusCardId === focusBefore && ui.state.picks.length === 0,
+    `focus=${ui.state.focusCardId} picks=${JSON.stringify(ui.state.picks)}`);
+  const beforeReveal = calls.length;
+  staleAnswerStatus = 400;
+  (revealCards()[0].listeners.click || []).forEach((fn) => fn({ target: revealCards()[0] }));
+  await settle();
+  staleAnswerStatus = null;
+  const revealAnswers = answersSince(beforeReveal);
+  check("M5-08a-b4 点一张亮牌 = 恰一条 SelectCards（picks 填面内位置），不手拼 Action",
+    revealAnswers.length === 1
+      && JSON.stringify(revealAnswers[0].body.action) === JSON.stringify(revealPending.legal_actions[0]),
+    `answers=${revealAnswers.length} action=${JSON.stringify(revealAnswers[0] && revealAnswers[0].body.action)}`);
+
+  // 别人的载荷：不是询问者 ⇒ 不开窗、不放牌面（未亮出的牌一张都不出现）。
+  const foreignPending = {
+    ...revealPending,
+    seq: 2103,
+    actor: 1,
+    dialog: null,
+    revealed: [],
+    slots: revealPending.slots.map(() => ({ ref: { seat: 1, zone: "hand" }, card: null })),
+  };
+  const foreignView = fireView(foreignPending, { hand: [sameSuitA, sameSuitB] });
+  foreignView.human_seat = 0;
+  renderFire(foreignView);
+  check("M5-08a-b5 别人的亮牌步（revealed / 槽位已抹）不开窗、不画牌面",
+    $("t-dialog").hidden === true
+      && ui.stepDialogKind(foreignPending) === null
+      && $("t-prompt").textContent.includes("等待其他座位响应")
+      && $("t-options").children.length === 0,
+    `hidden=${$("t-dialog").hidden} kind=${ui.stepDialogKind(foreignPending)} prompt="${$("t-prompt").textContent}"`);
+
+  // ---- ③ 同花色弃牌：点自己的同花色手牌 = 一次提交；也可右端放弃 ----
+  const discardPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 2104,
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", answers_seq: 2104, picks: [0] },
+      { kind: "SelectCards", answers_seq: 2104, picks: [1] },
+      { kind: "Pass", answers_seq: 2104 },
+    ],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [
+      { ref: { seat: 0, zone: "hand" }, card: sameSuitA },
+      { ref: { seat: 0, zone: "hand" }, card: sameSuitB },
+    ],
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: true },
+    revealed: [], dialog: null, harvest: null,
+    reveal: { seat: 0, card: sameSuitA },
+    context: fireContext("弃一张与亮出的牌同花色的手牌，造成 1 点火焰伤害，或放弃"),
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "Pass", answers_seq: 2104 },
+      default_label: "超时将自动放弃",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const discardView = fireView(discardPending, {
+    hand: [sameSuitA, sameSuitB, heartCard, clubCard],
+  });
+  renderFire(discardView);
+  check("M5-08a-c1 弃牌步回到牌桌：只有同花色手牌可点，其余置灰；这一步不是弹窗",
+    ui.stepDialogKind(discardPending) === null
+      && ui.isOwnHandSinglePick(discardPending) === true
+      && ui.selectionEnabled() === true
+      && $("t-hand").children[0].classList.contains("static") === false
+      && !$("t-hand").children[0].classList.contains("dis")
+      && !$("t-hand").children[1].classList.contains("dis")
+      && $("t-hand").children[2].classList.contains("dis")
+      && $("t-hand").children[3].classList.contains("dis")
+      && $("t-target-hint").textContent.includes("同花色")
+      && $("btn-pass").hidden === false
+      && $("btn-submit").disabled === true
+      && $("btn-cancel").disabled === true,
+    `kind=${ui.stepDialogKind(discardPending)} dis=${$("t-hand").children.map((n) => n.classList.contains("dis")).join(",")} passHidden=${$("btn-pass").hidden} hint="${$("t-target-hint").textContent}"`);
+  check("M5-08a-c2 中央舞台的「展示」组看得见亮出的那一张（公开事实；同一行、不可点）",
+    $("t-processing").children.some((node) => node.classList.contains("revealed-card")
+      && node.getAttribute("data-card-id") === "5"
+      && node.getAttribute("data-stage-lane") === "showcase")
+      && $("t-context").textContent.includes("展示")
+      && $("t-context").textContent.includes("闪电"),
+    `processing=${$("t-processing").text() } context="${$("t-context").textContent}"`);
+
+  const beforeDiscardClick = calls.length;
+  await clickHand(8);  // 桃（不同花色）：不可点
+  check("M5-08a-c3 点不同花色的手牌 = 无提交（没有非法动作可发）",
+    answersSince(beforeDiscardClick).length === 0,
+    `answers=${answersSince(beforeDiscardClick).length}`);
+  const beforeSuit = calls.length;
+  staleAnswerStatus = 400;
+  await clickHand(7);  // 同花色的杀
+  await settle();
+  staleAnswerStatus = null;
+  const suitAnswers = answersSince(beforeSuit);
+  check("M5-08a-c4 点同花色手牌 = 恰一条 SelectCards（同花色那张的面内位置）",
+    suitAnswers.length === 1
+      && JSON.stringify(suitAnswers[0].body.action) === JSON.stringify(discardPending.legal_actions[1]),
+    `answers=${suitAnswers.length} action=${JSON.stringify(suitAnswers[0] && suitAnswers[0].body.action)}`);
+
+  // 再渲染一次（提交被 400 拒后回到点击前那一面）：右端「放弃」= 一条 Pass，且不留选择态。
+  renderFire(discardView);
+  const beforePass = calls.length;
+  await clickAndWait($("btn-pass"));
+  await settle();
+  const passAnswers = answersSince(beforePass);
+  check("M5-08a-c5 右端「放弃」= 恰一条 Pass，不重绘、不残留选择态",
+    passAnswers.length === 1
+      && JSON.stringify(passAnswers[0].body.action) === JSON.stringify(
+        discardPending.legal_actions.find((action) => action.kind === "Pass"),
+      )
+      && ui.state.focusCardId === null
+      && ui.state.picks.length === 0,
+    `answers=${passAnswers.length} action=${JSON.stringify(passAnswers[0] && passAnswers[0].body.action)} picks=${JSON.stringify(ui.state.picks)}`);
+
+  // ---- ④ 无同花色：没有弃牌询问；事件流有「放弃（无可弃的同花色牌）」；舞台亮牌随帧撤下 ----
+  const noSuitPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 2105,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 2105 }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    context: fireContext("使用一张牌（或发动技能），或结束出牌阶段"),
+    prompt_display: {
+      text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      default_action: { kind: "EndPhase", answers_seq: 2105 },
+      default_label: "超时将自动结束出牌阶段",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const revealRecord = {
+    kind: "delta", delta_type: "card_reveal", seat: 1, card: revealed, frame_id: 2, seq: 2106,
+  };
+  const autoPassRecord = {
+    kind: "timing", timing: "RESOLVE_END", frame_id: 2, source: 0, seq: 2107,
+  };
+  const logWithReveal = (line, seq) => ({
+    kind: "line", seq, text: line,
+    segments: [{ text: line, cls: "act" }],
+  });
+  const noSuitBody = {
+    session_id: session.session_id, seed: 20261016, player_count: 4, human_seat: 0,
+    heroes: [], deck_profile: "standard_ex_160", timeout_seconds: null,
+    pending_since: 0, finished: false, cursor: 2107, log_seq: 0,
+    snapshot: fireView(noSuitPending).snapshot,
+    skills: [], pending: noSuitPending,
+    records: [revealRecord, autoPassRecord],
+    narrative: [
+      logWithReveal("座位1 亮出【闪电】", 2106),
+      logWithReveal("座位0 放弃（无可弃的同花色牌）", 2107),
+    ],
+    session_log: [],
+  };
+  noSuitBody.snapshot.processing = [fire];
+  ui.applyViewRaw(noSuitBody);
+  ui.flushPlayback();
+  check("M5-08a-d1 无同花色：没有弃牌询问；事件流写出「放弃（无可弃的同花色牌）」",
+    ui.state.view.pending.kind === "PLAY_PHASE"
+      && logText().includes("放弃（无可弃的同花色牌）")
+      && !$("t-prompt").textContent.includes("选择一张手牌"),
+    `log="${logText()}" prompt="${$("t-prompt").textContent}"`);
+  check("M5-08a-d2 亮牌仍在中央舞台的「展示」组（公开事实），手牌区没有「已知」标记 / 属性",
+    $("t-processing").children.some((node) => node.classList.contains("revealed-card")
+      && node.getAttribute("data-card-id") === "5"
+      && node.getAttribute("data-stage-lane") === "showcase")
+      && !$("t-hand").text().includes("已知")
+      && $("t-hand").children.every((node) => !node.classList.contains("known")
+        && !node.classList.contains("revealed")
+        && node.getAttribute("data-known") === undefined),
+    `processing=${$("t-processing").text()} hand="${$("t-hand").text()}"`);
+
+  const clearedBody = {
+    ...noSuitBody,
+    cursor: 2108,
+    records: [{ kind: "frame", op: "pop", frame_id: 2, depth: 1, seq: 2108 }],
+    narrative: [],
+  };
+  clearedBody.snapshot = { ...noSuitBody.snapshot, processing: [] };
+  ui.applyViewRaw(clearedBody);
+  ui.flushPlayback();
+  // U3-01：pop 不再瞬删——展示项开始 1s 淡出（`.fading`），描述还留着「展示」。
+  check("M5-08a-d3 结算帧出栈 ⇒ 展示项进入 1s 淡出（不瞬删、不提前撤下）",
+    $("t-processing").children.some((node) => node.classList.contains("revealed-card")
+      && node.getAttribute("data-card-id") === "5"
+      && node.classList.contains("fading"))
+      && $("t-context").textContent.includes("展示"),
+    `processing=${$("t-processing").text()} context="${$("t-context").textContent}"`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+
+/* ============ M5-08b（D6 / D7 / §5.1.2–5.1.3）：铁索 1–2 目标 + 重铸入口 ============
+ *
+ * 载荷与真会话同形（字段由 `tests/test_web.py` 的真会话断言钉）：
+ *   - 铁索 = 手选路 + 候选索引 `min_targets: 1` / `max_targets: 2`：点座位切换选中，
+ *     同一个座位再点一次 = 取消；0 目标时提交键不可用；可点自己；不会提交重复目标；
+ *   - 重铸 = `legal_actions` 里独立的 `Reforge`（不是 `UseCard` 变体、没有 targets）：
+ *     选中该牌时控件区出现「重铸」，点一下 = 恰一条 Reforge 提交；
+ *   - 非出牌阶段 / 不可重铸的牌没有 Reforge 候选 ⇒ 没有入口；
+ *   - 无懈窗口走既有的 RESPOND 面（右端「放弃」），不新增计数器 / 提示条 / 只读判据。
+ */
+{
+  const iron = {
+    ...synthCard(130, "铁索连环"),
+    type: "iron_chain",
+    display_name: "铁索连环",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "铁索连环的描述：横置或重置至多两名角色。",
+    suit: "club",
+    color: "black",
+  };
+  const slash = {
+    ...synthCard(5, "杀"),
+    type: "slash",
+    display_name: "杀",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "杀的描述",
+  };
+  const nullify = {
+    ...synthCard(140, "无懈可击"),
+    type: "nullify",
+    display_name: "无懈可击",
+    kind: "normal",
+    attribute: "普通",
+    source_cards: [],
+    description: "无懈可击的描述",
+  };
+  const raw = (card) => ({
+    card_id: card.card_id, type: card.type, name: card.name, suit: card.suit,
+    rank: card.rank, slot: card.slot, attack_range: card.attack_range,
+    color: card.color, virtual_sources: [],
+  });
+  const ironRaw = raw(iron);
+  const slashRaw = raw(slash);
+  const nullifyRaw = raw(nullify);
+  const ironContext = {
+    actor: 0, name: null, targets: [], label: null,
+    requirement: "使用一张牌（或发动技能），或结束出牌阶段", skill_hints: [],
+  };
+  const ironView = (pending, { hand = [iron, slash] } = {}) => {
+    const view = synthView(pending);
+    view.human_seat = 0;
+    view.snapshot.seat = 0;
+    view.snapshot.phase = "play";
+    view.snapshot.turn_seat = 0;
+    view.snapshot.self_hand = hand;
+    view.snapshot.processing = [];
+    view.snapshot.players = [0, 1, 2, 3].map((seat) => ({
+      seat, hp: 4, hp_max: 4, hand_count: seat === 2 ? 0 : 2,
+      alive: true, equip: [], judge: [], identity: null,
+      chained: seat === 1,
+    }));
+    return view;
+  };
+  const renderIron = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const handNode = (cardId) => $("t-hand").children.find(
+    (node) => node.getAttribute("data-card-id") === String(cardId),
+  ) || null;
+  const clickHand = async (cardId) => {
+    const node = handNode(cardId);
+    if (!node) return false;
+    for (const fn of node.listeners.click || []) await fn({ target: node, stopPropagation() {} });
+    return true;
+  };
+  const clickSeat = (seat) => {
+    const node = seatBox(seat);
+    (node.listeners.click || []).forEach((fn) => fn({ target: node, stopPropagation() {} }));
+  };
+  const reforgeNode = () => $("t-options").children.find(
+    (node) => node.getAttribute("data-reforge") === "true") || null;
+  const settle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const answersSince = (mark) => calls.slice(mark).filter((call) => call.path.includes("/answer"));
+  const selected = () => ui.state.selectedTargets.join(",");
+  const builtTargets = () => {
+    const action = ui.buildAction();
+    return action && action.targets ? action.targets.join(",") : null;
+  };
+
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261017,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  ui.state.modal.heroSeat = null;
+
+  const combos = [[0], [0, 1], [0, 2], [0, 3], [1], [1, 2], [1, 3], [2], [2, 3], [3]];
+  const play = {
+    kind: "PLAY_PHASE", actor: 0, seq: 3101,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      ...combos.map((targets) => ({
+        kind: "UseCard", answers_seq: 3101, card: ironRaw, targets,
+      })),
+      { kind: "UseCard", answers_seq: 3101, card: slashRaw, targets: [1] },
+      { kind: "Reforge", answers_seq: 3101, card: ironRaw },
+      { kind: "EndPhase", answers_seq: 3101 },
+    ],
+    candidate_index: {
+      130: {
+        card: iron, pool: [0, 1, 2, 3], combos, min_targets: 1, max_targets: 2,
+      },
+      5: { card: slash, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
+    },
+    virtual_index: {}, option_seats: {}, context: ironContext,
+    prompt_display: {
+      text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      default_action: { kind: "EndPhase", answers_seq: 3101 },
+      default_label: "超时将自动结束出牌阶段",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const useOn = (targets) => play.legal_actions.find(
+    (action) => action.kind === "UseCard" && action.card.card_id === 130
+      && action.targets.join(",") === targets.join(","),
+  );
+
+  // ---- ① 选中铁索：可点自己与所有座位；0 目标提交键不可用；重铸入口并列出现 ----
+  renderIron(ironView(play));
+  await clickHand(130);
+  check("M5-08b-a1 选中铁索：1–2 目标（含自己）、0 目标提交键不可用、重铸入口并列出现",
+    ui.state.focusCardId === 130
+      && [0, 1, 2, 3].every((seat) => seatBox(seat).classList.contains("targetable"))
+      && $("btn-submit").disabled === true
+      && $("t-target-hint").textContent.includes("还要选 1–2 个目标")
+      && ui.reforgeAction(play, 130) !== null
+      && reforgeNode() !== null
+      && reforgeNode().textContent.includes("重铸")
+      && reforgeNode().textContent.includes("铁索连环"),
+    `focus=${ui.state.focusCardId} hint="${$("t-target-hint").textContent}" submit=${$("btn-submit").disabled} reforge="${reforgeNode() && reforgeNode().textContent}"`);
+
+  // ---- ② 点座位切换 / 再点取消；不会产生重复目标 ----
+  clickSeat(1);
+  check("M5-08b-a2 点座位 1 = 选中 1 个目标，提交候选原样来自 legal_actions",
+    selected() === "1" && builtTargets() === "1"
+      && $("btn-submit").disabled === false
+      && seatBox(1).classList.contains("tsel"),
+    `targets=${selected()} built=${builtTargets()} submit=${$("btn-submit").disabled}`);
+  clickSeat(1);
+  check("M5-08b-a3 同一座位再点一次 = 取消该目标，0 目标提交键回到不可用",
+    selected() === "" && ui.buildAction() === null && $("btn-submit").disabled === true,
+    `targets=${selected()} submit=${$("btn-submit").disabled}`);
+  clickSeat(1);
+  clickSeat(2);
+  check("M5-08b-a4 2 个目标独立选中；两个座位都画成已选",
+    selected() === "1,2" && builtTargets() === "1,2"
+      && seatBox(1).classList.contains("tsel") && seatBox(2).classList.contains("tsel"),
+    `targets=${selected()} built=${builtTargets()}`);
+  clickSeat(1);
+  check("M5-08b-a5 取消其中一个 = 只剩另一个（不会残留重复目标）",
+    selected() === "2" && builtTargets() === "2"
+      && !seatBox(1).classList.contains("tsel") && seatBox(2).classList.contains("tsel"),
+    `targets=${selected()} built=${builtTargets()}`);
+  clickSeat(2);
+  check("M5-08b-a6 再点最后一个也取消 ⇒ 回到 0 目标、提交键不可用",
+    selected() === "" && ui.buildAction() === null && $("btn-submit").disabled === true,
+    `targets=${selected()} submit=${$("btn-submit").disabled}`);
+
+  // ---- ③ 可指定自己：点座位 0（底部自己的面板） = 选中自己 ----
+  clickSeat(0);
+  check("M5-08b-a7 可指定自己：点座位 0 = 选中自己，提交候选的 targets 就是 0",
+    selected() === "0" && builtTargets() === "0"
+      && seatBox(0).classList.contains("tsel")
+      && ($("btn-submit").disabled === false),
+    `targets=${selected()} built=${builtTargets()} submit=${$("btn-submit").disabled}`);
+
+  // ---- ④ 1 目标 / 2 目标各提交一次：恰一条 UseCard，原样取自 legal_actions ----
+  renderIron(ironView(play));
+  await clickHand(130);
+  clickSeat(1);
+  const beforeOne = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  await settle();
+  staleAnswerStatus = null;
+  const oneAnswers = answersSince(beforeOne);
+  check("M5-08b-a8 1 目标提交 = 恰一条 UseCard（targets=[1]）",
+    oneAnswers.length === 1
+      && JSON.stringify(oneAnswers[0].body.action) === JSON.stringify(useOn([1])),
+    `answers=${oneAnswers.length} action=${JSON.stringify(oneAnswers[0] && oneAnswers[0].body.action)}`);
+
+  renderIron(ironView(play));
+  await clickHand(130);
+  clickSeat(1);
+  clickSeat(2);
+  const beforeTwo = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  await settle();
+  staleAnswerStatus = null;
+  const twoAnswers = answersSince(beforeTwo);
+  check("M5-08b-a9 2 目标提交 = 恰一条 UseCard（targets=[1,2]），不是两条",
+    twoAnswers.length === 1
+      && JSON.stringify(twoAnswers[0].body.action) === JSON.stringify(useOn([1, 2])),
+    `answers=${twoAnswers.length} action=${JSON.stringify(twoAnswers[0] && twoAnswers[0].body.action)}`);
+
+  // ---- ⑤ 无懈窗口：既有 RESPOND 面；右端「放弃」是唯一出口，不出现重铸入口 ----
+  const nullifyPending = {
+    kind: "RESPOND", actor: 0, seq: 3102, cause: "NULLIFY",
+    prompt: "是否使用【无懈可击】？",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 3102, card: nullifyRaw, targets: [1] },
+      { kind: "Pass", answers_seq: 3102 },
+    ],
+    candidate_index: {
+      140: {
+        card: nullify, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1,
+      },
+    },
+    virtual_index: {}, option_seats: {},
+    context: { ...ironContext, requirement: "使用【无懈可击】抵消这张锦囊，或放弃" },
+    prompt_display: {
+      text: "是否使用【无懈可击】？",
+      default_action: { kind: "Pass", answers_seq: 3102 },
+      default_label: "超时将自动放弃",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  renderIron(ironView(nullifyPending, { hand: [iron, nullify] }));
+  check("M5-08b-b1 无懈窗口沿用既有 RESPOND 面：右端「放弃」可用、不铺目标、无重铸入口",
+    $("btn-pass").hidden === false
+      && $("btn-pass").textContent.includes("放弃")
+      && $("btn-submit").disabled === true
+      && ui.state.selectedTargets.length === 0
+      && ui.reforgeAction(nullifyPending, 130) === null
+      && reforgeNode() === null,
+    `passHidden=${$("btn-pass").hidden} pass="${$("btn-pass").textContent}" submit=${$("btn-submit").disabled} reforge=${reforgeNode() && reforgeNode().textContent}`);
+
+  // ---- ⑥ 重铸：点一次 = 恰一条 Reforge；不进入目标选择；不产生无懈 / 使用次数 ----
+  renderIron(ironView(play));
+  check("M5-08b-c1 未选牌时控件区没有重铸入口（零提交）",
+    reforgeNode() === null && ui.reforgeAction(play, 130) !== null,
+    `entry=${reforgeNode() && reforgeNode().textContent}`);
+  await clickHand(130);
+  check("M5-08b-c2 不可重铸的牌（杀）没有重铸入口",
+    (await (async () => { await clickHand(5); return true; })())
+      && ui.state.focusCardId === 5
+      && ui.reforgeAction(play, 5) === null
+      && reforgeNode() === null,
+    `focus=${ui.state.focusCardId} reforge=${reforgeNode() && reforgeNode().textContent}`);
+
+  renderIron(ironView(play));
+  const beforeCancel = calls.length;
+  await clickAndWait($("btn-cancel"));
+  check("M5-08b-c3 未选牌时点「取消」= 零提交（不发明 Action）",
+    answersSince(beforeCancel).length === 0 && ui.state.focusCardId === null,
+    `answers=${answersSince(beforeCancel).length} focus=${ui.state.focusCardId}`);
+
+  await clickHand(130);
+  clickSeat(1);
+  clickSeat(2);
+  const entryWithTargets = reforgeNode();
+  const beforeReforge = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait(reforgeNode());
+  await settle();
+  staleAnswerStatus = null;
+  const reforgeAnswers = answersSince(beforeReforge);
+  const reforgeAction = play.legal_actions.find((action) => action.kind === "Reforge");
+  check("M5-08b-c4 点一次「重铸」= 恰一条 Reforge POST（保留选中的目标也不进目标步）",
+    reforgeAnswers.length === 1
+      && JSON.stringify(reforgeAnswers[0].body.action) === JSON.stringify(reforgeAction)
+      && !("targets" in reforgeAnswers[0].body.action)
+      && !("designations" in reforgeAnswers[0].body.action),
+    `answers=${reforgeAnswers.length} action=${JSON.stringify(reforgeAnswers[0] && reforgeAnswers[0].body.action)}`);
+  check("M5-08b-c5 目标选择不改变重铸入口（独立动作）：已选 2 个目标时点重铸只发 Reforge，不发 UseCard",
+    entryWithTargets !== null
+      && reforgeAnswers.every((answer) => answer.body.action.kind === "Reforge"),
+    `entry="${entryWithTargets && entryWithTargets.textContent}" kinds=${reforgeAnswers.map((answer) => answer.body.action.kind).join(",")}`);
+
+  // ---- ⑦ 事件流的人话：完整档也不能把 Reforge / REFORGE 英文漏给玩家 ----
+  const reforgeLabel = ui.actionLabel({ kind: "Reforge", card: ironRaw });
+  // 投影对非本方应答只下发 `kind` / `answers_seq`（`visible_record`）：没有卡面时写动作本身。
+  const maskedReforgeLabel = ui.actionLabel({ kind: "Reforge", answers_seq: 3101 });
+  const moveLine = ui.describeRecord({
+    kind: "delta", delta_type: "card_move", seq: 3104, reason: "REFORGE",
+    from_zone: { seat: 0, zone: "hand" }, to_zone: { zone: "discard" }, cards: [iron],
+  });
+  check("M5-08b-d1 重铸在事件流 / 候选文案里都写「重铸」，不落 Reforge / REFORGE 英文",
+    reforgeLabel.includes("重铸") && reforgeLabel.includes("铁索连环")
+      && !reforgeLabel.includes("Reforge")
+      && maskedReforgeLabel === "重铸"
+      && moveLine.includes("重铸") && !moveLine.includes("REFORGE"),
+    `label="${reforgeLabel}" masked="${maskedReforgeLabel}" line="${moveLine}"`);
+
+  // ---- ⑧ 弹窗步骤沿 U2：只读判据仍是 selectionEnabled()，重铸入口不出现 ----
+  const dialogPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 3103, dialog: "reveal",
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [{ kind: "SelectCards", answers_seq: 3103, picks: [0] }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [{ ref: { seat: 0, zone: "hand" }, card: slash }],
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: false },
+    revealed: [slash], harvest: null, reveal: null,
+    context: { ...ironContext, requirement: "从自己的手牌里亮出一张（公开）" },
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 3103, picks: [0] },
+      default_label: "超时将自动选择第一张亮牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  renderIron(ironView(dialogPending, { hand: [iron, slash] }));
+  await clickHand(130);
+  check("M5-08b-e1 弹窗步骤沿 U2 只读：牌桌不可选、重铸入口不出现（不新写第二套判据）",
+    ui.stepDialogKind(dialogPending) === "reveal"
+      && ui.selectionEnabled() === false
+      && $("t-dialog").hidden === false
+      && ui.state.focusCardId === null
+      && reforgeNode() === null,
+    `kind=${ui.stepDialogKind(dialogPending)} enabled=${ui.selectionEnabled()} dialogHidden=${$("t-dialog").hidden} focus=${ui.state.focusCardId} reforge=${reforgeNode() && reforgeNode().textContent}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ M5-bugfix（C）：铁索按**点击顺序**提交 ============
+ *
+ * 引擎侧（`effects/actions.py:target_combos(..., ordered=True)`）对声明了
+ * `preserve_target_order` 的牌同时给出两种顺序的候选；界面这一侧还必须**保留点击顺序**：
+ * `buildAction` 先按点击顺序找候选，找不到才退回排序后的匹配（普通牌不受影响）。
+ *
+ * 判据（用户逐字要求）：
+ *   - 先点座位 4、再点座位 3 ⇒ 提交的是 `UseCard.targets = [4, 3]`（不是升序的 [3, 4]）；
+ *   - 提交的仍是 `legal_actions` 里**原样**的那一条（不手拼 Action）；
+ *   - 候选里 (3, 4) 与 (4, 3) 都存在（引擎 preserve_target_order 的下发形状）。
+ */
+{
+  const iron = {
+    ...synthCard(130, "铁索连环"),
+    type: "iron_chain", display_name: "铁索连环", kind: "normal", attribute: "普通",
+    source_cards: [], description: "铁索连环的描述：横置或重置至多两名角色。",
+  };
+  const ironRaw = {
+    card_id: iron.card_id, type: iron.type, name: iron.name, suit: iron.suit,
+    rank: iron.rank, slot: iron.slot, attack_range: iron.attack_range,
+    color: iron.color, virtual_sources: [],
+  };
+  // 5 座：全部 1 元组 + 全部 2 元组的**两种点击顺序**（服务端 preserve_target_order 的形状）。
+  const combos = [];
+  for (let a = 0; a <= 4; a += 1) {
+    combos.push([a]);
+    for (let b = a + 1; b <= 4; b += 1) combos.push([a, b], [b, a]);
+  }
+  const play = {
+    kind: "PLAY_PHASE", actor: 0, seq: 3201,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      ...combos.map((targets) => ({
+        kind: "UseCard", answers_seq: 3201, card: ironRaw, targets,
+      })),
+      { kind: "EndPhase", answers_seq: 3201 },
+    ],
+    candidate_index: {
+      130: {
+        card: iron, pool: [0, 1, 2, 3, 4], combos, min_targets: 1, max_targets: 2,
+      },
+    },
+    virtual_index: {}, option_seats: {},
+    context: {
+      actor: 0, name: null, targets: [], label: null,
+      requirement: "使用一张牌（或发动技能），或结束出牌阶段", skill_hints: [],
+    },
+    prompt_display: {
+      text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      default_action: { kind: "EndPhase", answers_seq: 3201 },
+      default_label: "超时将自动结束出牌阶段",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const view = synthView(play);
+  view.human_seat = 0;
+  view.snapshot.seat = 0;
+  view.snapshot.phase = "play";
+  view.snapshot.turn_seat = 0;
+  view.snapshot.self_hand = [iron];
+  view.snapshot.players = [0, 1, 2, 3, 4].map((seat) => ({
+    seat, hp: 4, hp_max: 4, hand_count: seat === 0 ? 1 : 2,
+    alive: true, equip: [], judge: [], identity: null, chained: false,
+  }));
+  const session = await post("/api/sessions", {
+    player_count: 5, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261018,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  ui.state.modal.heroSeat = null;
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const handNode = $("t-hand").children.find(
+    (node) => node.getAttribute("data-card-id") === "130",
+  );
+  for (const fn of handNode.listeners.click || []) fn({ target: handNode });
+  const clickSeat = (seat) => {
+    const node = seatBox(seat);
+    (node.listeners.click || []).forEach((fn) => fn({ target: node, stopPropagation() {} }));
+  };
+  const settle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const useOn = (targets) => play.legal_actions.find(
+    (action) => action.kind === "UseCard"
+      && action.card.card_id === 130
+      && action.targets.join(",") === targets.join(","),
+  );
+
+  check("M5-bugfix-c1 载荷里 (3,4) 与 (4,3) 都是合法候选（引擎 preserve_target_order 的形状）",
+    !!useOn([3, 4]) && !!useOn([4, 3]),
+    `4,3=${JSON.stringify(useOn([4, 3]))} 3,4=${JSON.stringify(useOn([3, 4]))}`);
+
+  clickSeat(4);
+  clickSeat(3);
+  const clicked = ui.state.selectedTargets.join(",");
+  const built = ui.buildAction();
+  check("M5-bugfix-c2 先点 4 再点 3 ⇒ 提交的 UseCard.targets 是点击顺序 [4,3]（不是升序）",
+    clicked === "4,3"
+      && !!built && built.kind === "UseCard"
+      && JSON.stringify(built.targets) === "[4,3]"
+      && JSON.stringify(built) === JSON.stringify(useOn([4, 3])),
+    `clicked=${clicked} built=${JSON.stringify(built)}`);
+
+  const before = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  await settle();
+  staleAnswerStatus = null;
+  const answers = calls.slice(before).filter((call) => call.path.includes("/answer"));
+  check("M5-bugfix-c3 提交恰一条 UseCard，targets 原样是点击顺序 [4,3] 且取自 legal_actions",
+    answers.length === 1
+      && JSON.stringify(answers[0].body.action) === JSON.stringify(useOn([4, 3]))
+      && play.legal_actions.includes(useOn([4, 3])),
+    `answers=${answers.length} action=${JSON.stringify(answers[0] && answers[0].body.action)}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+
+/* ============ M5-08c（D5 / §5.1 酒）：酒界面（出牌阶段 / 濒死自救 / 每回合一次） ============
+ *
+ * 载荷与真会话同形（字段由 `tests/test_web.py` 的真会话断言钉）：
+ *   - 出牌阶段【酒】= 手选路 + 候选索引 `pool: [0]` / `combos: [[0]]`（**自己为目标**）：
+ *     点牌自动选中自己，**没有目标步 / 座位目标高亮**；再点控件区「提交」= 恰一条 UseCard。
+ *     这是 U2 的自我目标路径（与【桃】/装备同形）——本票**不**改成"点牌即提交"。
+ *   - 使用后本回合第二张【酒】没有候选条目 ⇒ 牌置灰、点它零提交。
+ *   - 自己濒死：【酒】进求桃窗口（目标恒为自己，无目标步）；他人濒死：没有【酒】入口。
+ *   - 只读判据仍只住 `modal.js:stepDialogKind`；弹窗步骤里点牌不选、零提交。
+ *   - 事件流文案读 `actionLabel`（「使用【酒】」），不出现英文枚举。
+ */
+{
+  const wine = {
+    ...synthCard(123, "酒"),
+    type: "wine", display_name: "酒", kind: "normal", attribute: "普通",
+    source_cards: [], description: "酒：出牌阶段对自己使用，令下一张【杀】伤害 +1。",
+    suit: "club", rank: 3, color: "black",
+  };
+  const wine2 = {
+    ...wine, card_id: 124, suit: "heart", rank: 9, color: "red",
+  };
+  const peach = {
+    ...synthCard(4, "桃"),
+    type: "peach", display_name: "桃", kind: "normal", attribute: "普通",
+    source_cards: [], description: "桃：回复 1 点体力。",
+    suit: "heart", rank: 3, color: "red",
+  };
+  const slash = {
+    ...synthCard(5, "杀"),
+    type: "slash", display_name: "杀", kind: "normal", attribute: "普通",
+    source_cards: [], description: "杀的描述。",
+  };
+  const raw = (card) => ({
+    card_id: card.card_id, type: card.type, name: card.name, suit: card.suit,
+    rank: card.rank, slot: card.slot, attack_range: card.attack_range,
+    color: card.color, virtual_sources: [],
+  });
+  const wineRaw = raw(wine);
+  const wine2Raw = raw(wine2);
+  const peachRaw = raw(peach);
+  const slashRaw = raw(slash);
+  const context = {
+    actor: 0, name: null, targets: [], label: null,
+    requirement: "使用一张牌（或发动技能），或结束出牌阶段", skill_hints: [],
+  };
+  const promptDisplay = (seq, label) => ({
+    text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    default_action: { kind: "EndPhase", answers_seq: seq },
+    default_label: label,
+  });
+  const wineView = (pending, { hand = [wine, wine2, slash], dyingSeat = null } = {}) => {
+    const view = synthView(pending);
+    view.human_seat = 0;
+    view.snapshot.seat = 0;
+    view.snapshot.phase = "play";
+    view.snapshot.turn_seat = 0;
+    view.snapshot.self_hand = hand;
+    view.snapshot.processing = [];
+    view.snapshot.players = [0, 1, 2, 3].map((seat) => ({
+      seat, hp: dyingSeat === seat ? 0 : 4, hp_max: 4, hand_count: 2,
+      alive: true, equip: [], judge: [], identity: null,
+      chained: false, wine_active: false,
+    }));
+    view.timeout_seconds = null;
+    return view;
+  };
+  const renderWine = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const handNode = (cardId) => $("t-hand").children.find(
+    (node) => node.getAttribute("data-card-id") === String(cardId),
+  ) || null;
+  const clickHand = async (cardId) => {
+    const node = handNode(cardId);
+    if (!node) return false;
+    for (const fn of node.listeners.click || []) {
+      await fn({ target: node, stopPropagation() {} });
+    }
+    return true;
+  };
+  const seatFlags = (seat) => {
+    const node = seatBox(seat);
+    return node ? ["targetable", "tsel"].filter((name) => node.classList.contains(name)) : [];
+  };
+  const settle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  const answersSince = (mark) => calls.slice(mark).filter((call) => call.path.includes("/answer"));
+
+  const session = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261018,
+  });
+  ui.state.sessionId = session.session_id;
+  ui.state.playback = null;
+  ui.state.modal.heroSeat = null;
+
+  const playWine = (seq = 3301) => ({
+    kind: "PLAY_PHASE", actor: 0, seq,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: seq, card: wineRaw, targets: [0] },
+      { kind: "UseCard", answers_seq: seq, card: wine2Raw, targets: [0] },
+      { kind: "UseCard", answers_seq: seq, card: slashRaw, targets: [1] },
+      { kind: "EndPhase", answers_seq: seq },
+    ],
+    candidate_index: {
+      123: { card: wine, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+      124: { card: wine2, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+      5: { card: slash, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
+    },
+    virtual_index: {}, option_seats: {}, context,
+    prompt_display: promptDisplay(seq, "超时将自动结束出牌阶段"),
+    preactivations: {}, preactivation: [],
+  });
+
+  // ---- ① 出牌阶段：点【酒】只选中自己，没有目标步 / 座位高亮；再点「提交」= 1 条 POST ----
+  const playPending = playWine();
+  renderWine(wineView(playPending));
+  const beforeClick = calls.length;
+  await clickHand(123);
+  check("M5-08c-a1 出牌阶段点【酒】：自动选中自己、没有目标步、没有座位目标高亮、提交可点",
+    ui.state.focusCardId === 123
+      && JSON.stringify(ui.state.selectedTargets) === "[0]"
+      && ui.cardEntry(playPending, 123).max_targets === 1
+      && [0, 1, 2, 3].every((seat) => seatFlags(seat).length === 0)
+      && $("btn-submit").disabled === false
+      && /自动选中|唯一确定/.test($("t-target-hint").textContent)
+      && answersSince(beforeClick).length === 0,
+    `focus=${ui.state.focusCardId} targets=${JSON.stringify(ui.state.selectedTargets)} flags=${[0, 1, 2, 3].map((seat) => seatFlags(seat).join("/")).join(",")} submit=${$("btn-submit").disabled} hint="${$("t-target-hint").textContent}" answers=${answersSince(beforeClick).length}`);
+  ui.selectTarget(1);
+  check("M5-08c-a2 没有目标步：点其他座位不改变目标（只对自己）",
+    JSON.stringify(ui.state.selectedTargets) === "[0]" && ui.buildAction() !== null
+      && ui.buildAction().kind === "UseCard"
+      && String(ui.buildAction().card.card_id) === "123"
+      && JSON.stringify(ui.buildAction().targets) === "[0]",
+    `targets=${JSON.stringify(ui.state.selectedTargets)} built=${JSON.stringify(ui.buildAction())}`);
+  const beforeSubmit = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  await settle();
+  staleAnswerStatus = null;
+  const playAnswers = answersSince(beforeSubmit);
+  check("M5-08c-a3 点一次控件区「提交」= 恰一条 UseCard【酒】POST（原样取自候选、目标为自己）",
+    playAnswers.length === 1
+      && JSON.stringify(playAnswers[0].body.action) === JSON.stringify(playPending.legal_actions[0]),
+    `answers=${playAnswers.length} action=${JSON.stringify(playAnswers[0] && playAnswers[0].body.action)}`);
+
+  // ---- ② 使用后本回合第二张【酒】不可用：候选消失 ⇒ 置灰、点它零提交 ----
+  const secondPending = {
+    ...playWine(3302),
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 3302, card: slashRaw, targets: [1] },
+      { kind: "EndPhase", answers_seq: 3302 },
+    ],
+    candidate_index: {
+      5: { card: slash, pool: [1], combos: [[1]], min_targets: 1, max_targets: 1 },
+    },
+  };
+  renderWine(wineView(secondPending, { hand: [wine2, slash] }));
+  const beforeSecond = calls.length;
+  const secondNode = handNode(124);
+  check("M5-08c-a4 本回合第二张【酒】没有候选、牌置灰（明确不可用）",
+    ui.cardSelectable(secondPending, 124) === false
+      && Boolean(secondNode) && secondNode.classList.contains("dis")
+      && $("btn-submit").disabled === true,
+    `selectable=${ui.cardSelectable(secondPending, 124)} dis=${secondNode && secondNode.classList.contains("dis")} submit=${$("btn-submit").disabled}`);
+  await clickHand(124);
+  check("M5-08c-a5 点不可用的第二张【酒】= 零提交、焦点不落下，提示说清原因",
+    answersSince(beforeSecond).length === 0
+      && ui.state.focusCardId === null
+      && /酒/.test(ui.state.lastRejectReason),
+    `answers=${answersSince(beforeSecond).length} focus=${ui.state.focusCardId} reason="${ui.state.lastRejectReason}"`);
+
+  // ---- ③ 自己濒死：求桃窗口里的【酒】目标恒为自己，无目标步；一次提交 = 1 条 POST ----
+  const selfPeach = {
+    kind: "PEACH", actor: 0, seq: 3303,
+    prompt: "你处于濒死状态：是否使用【桃】或【酒】自救？",
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 3303, card: wineRaw, targets: [0] },
+      { kind: "UseCard", answers_seq: 3303, card: peachRaw, targets: [0] },
+      { kind: "Pass", answers_seq: 3303 },
+    ],
+    candidate_index: {
+      123: { card: wine, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+      4: { card: peach, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+    },
+    virtual_index: {}, option_seats: {},
+    context: { ...context, requirement: "你处于濒死状态：使用【桃】或【酒】自救，或放弃" },
+    prompt_display: {
+      text: "你处于濒死状态：是否使用【桃】或【酒】自救？",
+      default_action: { kind: "Pass", answers_seq: 3303 },
+      default_label: "超时将自动放弃",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  renderWine(wineView(selfPeach, { hand: [wine, peach], dyingSeat: 0 }));
+  await clickHand(123);
+  check("M5-08c-b1 自己濒死：点【酒】= 选中自己、无目标步 / 无目标高亮，提交可点",
+    ui.state.focusCardId === 123
+      && JSON.stringify(ui.state.selectedTargets) === "[0]"
+      && [0, 1, 2, 3].every((seat) => seatFlags(seat).length === 0)
+      && $("btn-submit").disabled === false,
+    `focus=${ui.state.focusCardId} targets=${JSON.stringify(ui.state.selectedTargets)} flags=${[0, 1, 2, 3].map((seat) => seatFlags(seat).join("/")).join(",")} submit=${$("btn-submit").disabled}`);
+  const beforeSelf = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  await settle();
+  staleAnswerStatus = null;
+  const selfAnswers = answersSince(beforeSelf);
+  check("M5-08c-b2 濒死自救点一次「提交」= 恰一条 UseCard【酒】POST（目标为自己；不产生加伤由 pytest 钉）",
+    selfAnswers.length === 1
+      && JSON.stringify(selfAnswers[0].body.action) === JSON.stringify(selfPeach.legal_actions[0]),
+    `answers=${selfAnswers.length} action=${JSON.stringify(selfAnswers[0] && selfAnswers[0].body.action)}`);
+
+  // ---- ④ 他人濒死：手里有【酒】也没有入口；【桃】仍可救（对照） ----
+  const otherPeach = {
+    ...selfPeach,
+    seq: 3304,
+    legal_actions: [
+      { kind: "UseCard", answers_seq: 3304, card: peachRaw, targets: [2] },
+      { kind: "Pass", answers_seq: 3304 },
+    ],
+    candidate_index: {
+      4: { card: peach, pool: [2], combos: [[2]], min_targets: 1, max_targets: 1 },
+    },
+    context: { ...context, requirement: "座位 2 处于濒死状态：是否对其使用【桃】？" },
+    prompt_display: {
+      text: "座位 2 处于濒死状态：是否对其使用【桃】？",
+      default_action: { kind: "Pass", answers_seq: 3304 },
+      default_label: "超时将自动放弃",
+    },
+  };
+  renderWine(wineView(otherPeach, { hand: [wine, peach], dyingSeat: 2 }));
+  const beforeOther = calls.length;
+  check("M5-08c-b3 他人濒死：手里【酒】置灰、没有候选，【桃】仍可点（对照）",
+    ui.cardSelectable(otherPeach, 123) === false
+      && Boolean(handNode(123)) && handNode(123).classList.contains("dis")
+      && ui.cardSelectable(otherPeach, 4) === true,
+    `wineSelectable=${ui.cardSelectable(otherPeach, 123)} peachSelectable=${ui.cardSelectable(otherPeach, 4)}`);
+  await clickHand(123);
+  check("M5-08c-b4 点他人濒死窗口里的【酒】= 零提交、不设焦点",
+    answersSince(beforeOther).length === 0 && ui.state.focusCardId === null,
+    `answers=${answersSince(beforeOther).length} focus=${ui.state.focusCardId}`);
+
+  // ---- ⑤ 取消 / 未选牌 = 零提交 ----
+  renderWine(wineView(playWine(3305)));
+  const beforeCancel = calls.length;
+  await clickAndWait($("btn-cancel"));
+  check("M5-08c-c1 未选牌点「取消」= 零提交（不发明 Action，也不自动使用【酒】）",
+    answersSince(beforeCancel).length === 0
+      && ui.state.focusCardId === null
+      && $("btn-submit").disabled === true,
+    `answers=${answersSince(beforeCancel).length} focus=${ui.state.focusCardId} submit=${$("btn-submit").disabled}`);
+
+  // ---- ⑥ 只读态：弹窗步骤里点【酒】不选、零提交（判据仍是 stepDialogKind） ----
+  const dialogPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 3306, dialog: "reveal",
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [{ kind: "SelectCards", answers_seq: 3306, picks: [0] }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [{ ref: { seat: 0, zone: "hand" }, card: wine }],
+    spec: { zones: ["hand"], total: [1, 1], sequential: false, optional: false },
+    revealed: [wine], harvest: null, reveal: null,
+    context: { ...context, requirement: "从自己的手牌里亮出一张（公开）" },
+    prompt_display: {
+      text: "请从选择面里选择一张牌。",
+      default_action: { kind: "SelectCards", answers_seq: 3306, picks: [0] },
+      default_label: "超时将自动选择第一张亮牌",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  renderWine(wineView(dialogPending, { hand: [wine, slash] }));
+  const beforeDialog = calls.length;
+  await clickHand(123);
+  check("M5-08c-d1 只读态：弹窗步骤里点【酒】不设焦点、零提交（没有第二套只读判据）",
+    ui.stepDialogKind(dialogPending) === "reveal"
+      && ui.selectionEnabled() === false
+      && $("t-dialog").hidden === false
+      && ui.state.focusCardId === null
+      && answersSince(beforeDialog).length === 0,
+    `kind=${ui.stepDialogKind(dialogPending)} enabled=${ui.selectionEnabled()} hidden=${$("t-dialog").hidden} focus=${ui.state.focusCardId} answers=${answersSince(beforeDialog).length}`);
+
+  // ---- ⑦ 事件流 / 候选文案：写「使用【酒】」，不落英文枚举 ----
+  const wineLabel = ui.actionLabel({ kind: "UseCard", card: wineRaw });
+  const wineLine = ui.describeRecord({
+    kind: "action", seq: 3307, accepted: true,
+    action: { kind: "UseCard", card: wineRaw, targets: [0], answers_seq: 3301 },
+  });
+  check("M5-08c-e1 事件流 / 候选文案写「使用【酒】」，不出现 UseCard / wine 英文枚举",
+    wineLabel.includes("使用【酒】") && wineLine.includes("使用【酒】")
+      && !wineLabel.includes("UseCard") && !wineLabel.includes("wine")
+      && !wineLine.includes("UseCard") && !wineLine.includes("wine"),
+    `label="${wineLabel}" line="${wineLine}"`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ M5-08d（D2 / D5 / D12 / §6 A2 A3）：新卡面 / 横置 / 酒 / 伤害飘字 ============
+ *
+ * 本组只钉**界面读法**（服务端那一半由 `tests/test_web.py` 的 M5-08d 组钉）：
+ *   - 火杀 / 雷杀 = 服务端 `display_name`「杀」+ `attribute` 火焰 / 雷电（红 / 蓝）；
+ *   - 酒 / 铁索 / 藤甲 / 白银狮子 / 古锭刀 / 朱雀羽扇 / 骅骝：牌名、描述、槽位、攻击范围
+ *     全部来自载荷（前端没有第二份牌名 / 描述表）；
+ *   - 横置 = 投影的 `chained` ⇒ 座位中央虚线（自己的静态块 `#t-self-chain` 也画），
+ *     重置后消失；
+ *   - 酒 = 投影的 `wine_active` ⇒ 席位泛红（无「酒」字徽章），与当前回合 / 横置 / 阵亡
+ *     叠加不互挡，回合末清除后恢复；
+ *   - 伤害数字只按服务端给的 `segments[].cls`（dmg-fire / dmg-thunder / dmg）上色；
+ *   - 事件流：重铸 / 横置 / 重置 / 亮牌 / 酒 都是中文，完整档不漏英文枚举。
+ */
+{
+  const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const hasClass = (node, name) => Boolean(node)
+    && (node.classList.contains(name) || String(node.className || "").split(/\s+/).includes(name));
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) {
+      out.push(child);
+      walk(child, out);
+    }
+    return out;
+  };
+  const byClass = (node, name) => walk(node).filter((child) => hasClass(child, name));
+  const card = (id, type, name, extra = {}) => ({
+    ...synthCard(id, name), type, display_name: name, kind: "normal",
+    attribute: "普通", source_cards: [], slot: null, attack_range: null,
+    description: `服务端描述：${name}`, ...extra,
+  });
+  // 载荷形状 = 服务端 `card_payload`（`display_name` / `attribute` / `description` /
+  // `slot` / `attack_range` 都来自服务端；界面不兜任何一张牌名的表）。
+  const fireSlash = card(201, "fire_slash", "火杀", { display_name: "杀", attribute: "火焰" });
+  const thunderSlash = card(202, "thunder_slash", "雷杀", { display_name: "杀", attribute: "雷电" });
+  const wine = card(203, "wine", "酒");
+  const iron = card(204, "iron_chain", "铁索连环");
+  const vine = card(205, "vine_armor", "藤甲", { slot: "armor" });
+  const silver = card(206, "silver_lion", "白银狮子", { slot: "armor" });
+  const scimitar = card(207, "ancient_scimitar", "古锭刀", { slot: "weapon", attack_range: 2 });
+  const fan = card(208, "vermilion_feather_fan", "朱雀羽扇", { slot: "weapon", attack_range: 4 });
+  const hualiu = card(209, "hualiu", "骅骝", { slot: "horse_defense" });
+  const hand = [fireSlash, thunderSlash, wine, iron, vine, silver, scimitar, fan, hualiu];
+
+  const playPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 3401,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 3401 }],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+    prompt_display: {
+      text: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      default_action: { kind: "EndPhase", answers_seq: 3401 },
+      default_label: "超时将自动结束出牌阶段",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const seatState = (seat, extra = {}) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, chained: false, wine_active: false, ...extra,
+  });
+  const displayView = () => {
+    const view = synthView(playPending);
+    view.human_seat = 0;
+    view.snapshot.seat = 0;
+    view.snapshot.phase = "play";
+    view.snapshot.turn_seat = 1;
+    view.snapshot.self_hand = [...hand];
+    view.snapshot.players = [
+      seatState(0, { chained: true, wine_active: true }),
+      seatState(1, { chained: true, wine_active: true }),  // turn + chained + wine
+      seatState(2),                                       // 干净对照
+      seatState(3, { alive: false, chained: true, wine_active: true }),  // dead + chained + wine
+    ];
+    return view;
+  };
+  const renderDisplay = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+  };
+
+  const view = displayView();
+  renderDisplay(view);
+  const faces = $("t-hand").children;
+  check("M5-08d-a1 火杀 / 雷杀卡面 = 服务端「杀」+ 火焰 / 雷电（红 / 蓝），不在前端另起牌名",
+    faces.length === hand.length
+      && byClass(faces[0], "cname")[0].textContent === "杀"
+      && byClass(faces[0], "ctype")[0].textContent === "火焰"
+      && hasClass(faces[0], "attr-fire")
+      && byClass(faces[1], "cname")[0].textContent === "杀"
+      && byClass(faces[1], "ctype")[0].textContent === "雷电"
+      && hasClass(faces[1], "attr-thunder")
+      && /\.card\.face\.attr-fire \.cname\s*\{[^}]*#b3261e/s.test(css)
+      && /\.card\.face\.attr-thunder \.cname\s*\{[^}]*#1d4e9c/s.test(css),
+    `fire="${byClass(faces[0], "cname")[0].textContent}/${byClass(faces[0], "ctype")[0].textContent}" thunder="${byClass(faces[1], "cname")[0].textContent}/${byClass(faces[1], "ctype")[0].textContent}"`);
+
+  const expectedFaces = [
+    { name: "酒", type: "" },
+    { name: "铁索连环", type: "" },
+    { name: "藤甲", type: "防具" },
+    { name: "白银狮子", type: "防具" },
+    { name: "古锭刀", type: "武器 · 范围 2" },
+    { name: "朱雀羽扇", type: "武器 · 范围 4" },
+    { name: "骅骝", type: "防马" },
+  ];
+  const faceFacts = faces.slice(2).map((node) => ({
+    name: byClass(node, "cname")[0].textContent,
+    type: byClass(node, "ctype")[0].textContent,
+    title: node.getAttribute("title"),
+  }));
+  check("M5-08d-a2 酒 / 铁索 / 五件装备的牌名、描述、槽位 / 攻击范围全部读载荷（前端没有第二份表）",
+    faceFacts.every((fact, index) => fact.name === expectedFaces[index].name
+      && fact.type === expectedFaces[index].type
+      && fact.title === hand[index + 2].description),
+    `faces=${JSON.stringify(faceFacts)}`);
+
+  /* ---- 横置：投影字段 ⇒ 虚线；自己的静态块也有；重置后消失 ---- */
+  check("M5-08d-b1 投影 chained=true ⇒ 座位中央虚线；自己的静态块 #t-self-chain 也画",
+    byClass(seatBox(1), "chain-line").length === 1
+      && byClass(seatBox(2), "chain-line").length === 0
+      && seatBox(1).classList.contains("chained")
+      && $("t-self-seat").classList.contains("chained")
+      && $("t-self-chain").hidden === false
+      && /id="t-self-chain" class="chain-line"/.test(readFileSync("tools/sgs_web/static/index.html", "utf8"))
+      && /\.chain-line\s*\{[^}]*dashed/s.test(css),
+    `seat1=${[...seatBox(1).classList.set].join(",")} self=${[...$("t-self-seat").classList.set].join(",")} selfChainHidden=${$("t-self-chain").hidden} lines=${byClass(seatBox(1), "chain-line").length}/${byClass(seatBox(2), "chain-line").length} css=${/\.chain-line\s*\{[^}]*dashed/s.test(css)}`);
+  const resetView = displayView();
+  resetView.snapshot.players[0].chained = false;
+  resetView.snapshot.players[1].chained = false;
+  resetView.snapshot.players[3].chained = false;
+  renderDisplay(resetView);
+  check("M5-08d-b2 重置后（同一份投影 chained=false）虚线与静态块一起消失——状态只读投影",
+    byClass(seatBox(1), "chain-line").length === 0
+      && !seatBox(1).classList.contains("chained")
+      && !$("t-self-seat").classList.contains("chained")
+      && $("t-self-chain").hidden === true,
+    `seat1=${[...seatBox(1).classList.set].join(",")} self=${[...$("t-self-seat").classList.set].join(",")} selfChainHidden=${$("t-self-chain").hidden}`);
+
+  /* ---- 酒：席位泛红 + 三态叠加不互挡；回合末清除后恢复 ---- */
+  renderDisplay(displayView());
+  const seat1 = seatBox(1);
+  const seat3 = seatBox(3);
+  check("M5-08d-c1 投影 wine_active=true ⇒ 席位泛红（无「酒」字徽章），与当前回合 / 横置 / 阵亡叠加不互挡",
+    seat1.classList.contains("wine") && seat1.classList.contains("turn")
+      && seat1.classList.contains("chained")
+      && byClass(seat1, "chain-line").length === 1
+      && !seat1.text().includes("酒")
+      && seat3.classList.contains("wine") && seat3.classList.contains("chained")
+      && seat3.classList.contains("dead")
+      && byClass(seat3, "chain-line").length === 1
+      && byClass(seat3, "dead-tag").length === 1
+      && byClass(seat3, "dead-text").length === 1
+      && $("t-self-seat").classList.contains("wine")
+      && !$("t-self-seat").text().includes("酒")
+      && /\.seat\.wine \.hero-block\s*\{[^}]*#fbe4de/s.test(css)
+      && !/\.seat\.dead\s*\{[^}]*filter:\s*grayscale/s.test(css),
+    `seat1=${[...seat1.classList.set].join(",")} seat3=${[...seat3.classList.set].join(",")} self=${[...$("t-self-seat").classList.set].join(",")}`);
+  const soberView = displayView();
+  soberView.snapshot.players[0].wine_active = false;
+  soberView.snapshot.players[1].wine_active = false;
+  soberView.snapshot.players[3].wine_active = false;
+  renderDisplay(soberView);
+  check("M5-08d-c2 回合末清除 wine_active 后席位恢复：泛红类撤下，横置 / 阵亡不受影响",
+    !seatBox(1).classList.contains("wine")
+      && !seatBox(3).classList.contains("wine")
+      && !$("t-self-seat").classList.contains("wine")
+      && seatBox(3).classList.contains("dead")
+      && byClass(seatBox(1), "chain-line").length === 1,
+    `seat1=${[...seatBox(1).classList.set].join(",")} seat3=${[...seatBox(3).classList.set].join(",")}`);
+
+  /* ---- 伤害飘字：服务端 cls ⇒ 火红 / 雷蓝 / 普通白（前端只搬类名 + CSS 上色） ---- */
+  const damageLine = (seq, seat, amount, cls) => ({
+    kind: "line", seq, text: `座位${seat} 受到 ${amount} 点伤害`,
+    segments: [
+      { text: `座位${seat}`, cls: "seat" },
+      { text: " 受到 ", cls: "act" },
+      { text: String(amount), cls },
+      { text: " 点伤害", cls: "act" },
+    ],
+  });
+  ui.state.narrative = [
+    damageLine(3410, 1, 1, "dmg-fire"),       // 火杀
+    damageLine(3411, 1, 1, "dmg-fire"),       // 火攻
+    damageLine(3412, 2, 1, "dmg-fire"),       // 连环传导（沿用源伤害属性）
+    damageLine(3413, 1, 1, "dmg-thunder"),    // 雷杀
+    damageLine(3414, 1, 3, "dmg-thunder"),    // 闪电（既有雷电伤害）
+    damageLine(3415, 1, 1, "dmg"),            // 普通伤害
+  ];
+  ui.state.narrativeShown = 0;
+  ui.renderLog();
+  const damageSpans = byClass($("t-log"), "nar-dmg-fire")
+    .concat(byClass($("t-log"), "nar-dmg-thunder"))
+    .concat(byClass($("t-log"), "nar-dmg"));
+  const fireSpans = byClass($("t-log"), "nar-dmg-fire");
+  const thunderSpans = byClass($("t-log"), "nar-dmg-thunder");
+  const plainSpans = byClass($("t-log"), "nar-dmg");
+  check("M5-08d-d1 伤害数字按服务端 cls 上色：火杀 / 火攻 / 传导红、雷杀 / 闪电蓝、普通白",
+    damageSpans.length === 6
+      && fireSpans.length === 3 && fireSpans.every((span) => span.textContent === "1")
+      && thunderSpans.length === 2
+      && thunderSpans.some((span) => span.textContent === "3")
+      && plainSpans.length === 1
+      && /\.nar-card-fire, \.nar-dmg-fire\s*\{[^}]*#b3261e/s.test(css)
+      && /\.nar-card-thunder, \.nar-dmg-thunder\s*\{[^}]*#1d4e9c/s.test(css)
+      && /\.nar-dmg\s*\{[^}]*font-weight:\s*600/s.test(css),
+    `fire=${fireSpans.map((span) => span.textContent)} thunder=${thunderSpans.map((span) => span.textContent)} plain=${plainSpans.map((span) => span.textContent)}`);
+
+  /* ---- 事件流：重铸 / 横置 / 重置 / 亮牌 / 酒 都是中文，没有英文枚举 ---- */
+  const describe = ui.describeRecord;
+  const reforgeLine = describe({
+    kind: "delta", delta_type: "card_move", seq: 3420, reason: "REFORGE",
+    from_zone: { seat: 0, zone: "hand" }, to_zone: { zone: "discard" }, cards: [iron],
+  });
+  const chainLine = describe({
+    kind: "delta", delta_type: "chained_change", seq: 3421, frame_id: 7, depth: 0,
+    seat: 1, chained: true,
+  });
+  const resetLine = describe({
+    kind: "delta", delta_type: "chained_change", seq: 3422, frame_id: 7, depth: 0,
+    seat: 1, chained: false,
+  });
+  const wineLine = describe({
+    kind: "delta", delta_type: "wine_change", seq: 3423, frame_id: 7, depth: 0,
+    seat: 0, active: true,
+  });
+  const revealLine = describe({
+    kind: "delta", delta_type: "card_reveal", seq: 3424, frame_id: 7, depth: 0,
+    seat: 1, card: iron,
+  });
+  const allLines = [reforgeLine, chainLine, resetLine, wineLine, revealLine].join(" | ");
+  check("M5-08d-e1 完整事件流：重铸 / 横置 / 重置 / 酒 / 亮牌都是中文，不落 REFORGE / *_change 英文枚举",
+    reforgeLine.includes("重铸") && reforgeLine.includes("铁索连环")
+      && chainLine.includes("横置") && resetLine.includes("重置")
+      && wineLine.includes("酒") && revealLine.includes("亮牌")
+      && revealLine.includes("铁索连环")
+      && !/REFORGE|Reforge|chained_change|wine_change|card_reveal|洗牌/.test(allLines),
+    allLines);
+  const hiddenMoveLine = describe({
+    kind: "delta", delta_type: "card_move", seq: 3426, reason: "DRAW",
+    from_zone: { zone: "deck" }, to_zone: { seat: 1, zone: "hand" },
+    cards: [], card_count: 2,
+  });
+  check("M5-09c-e3 隐藏区牌移动只写张数、不写牌名（脱敏在服务端，前端只按下发值渲染）",
+    hiddenMoveLine.includes("2 张牌") && !hiddenMoveLine.includes("【"),
+    hiddenMoveLine);
+  ui.state.narrative = [{
+    kind: "line", seq: 3425, text: "座位0 重铸【铁索连环】",
+    segments: [
+      { text: "座位0", cls: "seat" },
+      { text: " 重铸", cls: "act" },
+      { text: "【铁索连环】", cls: "card" },
+    ],
+  }];
+  ui.state.narrativeShown = 0;
+  ui.renderLog();
+  check("M5-08d-e2 简易事件流也写「重铸」（不是「弃置」），服务端叙事原样渲染",
+    logText().includes("重铸") && logText().includes("铁索连环")
+      && !logText().includes("弃置"),
+    `log="${logText()}"`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
+/* ============ U3-01（票 01）：舞台三组 / 来源底行 / 淡出寿命 / 粘底 / 回放 ============
+ *
+ * 判据来自票面与 spec D2 / D3 / D5 / D10 / D14 / D15。载荷是**与响应体同形**的合成
+ * `view` + 记录；断言只落在 DOM 的 `data-stage-lane` / `data-zone-label` / `.fading`
+ * 与底行文本上。时间不靠真实等待：`renderProcessing(now)` 直接喂 `now`，动画倍率
+ * `state.animScale`（`0` = 淡出立即完成）。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const byClass = (node, name) => walk(node).filter(
+    (child) => child.classList.contains(name)
+      || String(child.className || "").split(/\s+/).includes(name));
+  const stageNodes = () => $("t-processing").children.filter(
+    (node) => node.classList.contains("stage-card"));
+  const stageNode = (id) => stageNodes().find(
+    (node) => attr(node, "data-card-id") === String(id));
+  const laneOf = (id) => attr(stageNode(id), "data-stage-lane");
+  const lineOf = (id) => {
+    const node = stageNode(id);
+    const line = node ? byClass(node, "ctype")[0] : null;
+    return line ? line.textContent : "";
+  };
+  /** 底行节点上的 `data-zone-label`（D10 的机械读法；无来源时不存在）。 */
+  const labelOf = (id) => {
+    const node = stageNode(id);
+    const line = node ? byClass(node, "ctype")[0] : null;
+    return line ? attr(line, "data-zone-label") : undefined;
+  };
+  const fading = (id) => Boolean(stageNode(id) && stageNode(id).classList.contains("fading"));
+  const card = (id, name, extra = {}) => ({
+    ...synthCard(id, name), kind: "normal", attribute: "普通",
+    description: `【${name}】的全文描述`, ...extra,
+  });
+  const seatPlayer = (seat, heroName) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName,
+  });
+  const view = (session = "u3-stage-1") => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.snapshot.processing = [];
+    out.snapshot.players = [
+      seatPlayer(0, "郭嘉"), seatPlayer(1, "周瑜"), seatPlayer(2, "貂蝉"),
+    ];
+    return out;
+  };
+  const TO_PROCESSING = { zone: "processing", seat: null };
+  const TO_DISCARD = { zone: "discard", seat: null };
+  const move = (seq, frame, moveCard, from, to, reason) => ({
+    kind: "delta", delta_type: "card_move", seq, frame_id: frame, depth: 1,
+    reason, owner: from.seat, from_zone: from, to_zone: to, cards: [moveCard],
+  });
+  const at = (zone, seat = null) => ({ zone, seat });
+  const pop = (seq, frame) => ({
+    kind: "frame", op: "pop", frame_id: frame, frame_kind: "RESOLVE", depth: 1, seq,
+  });
+
+  const A = card(101, "杀");
+  const B = card(102, "闪");
+  const C = card(103, "八卦阵", { slot: "armor" });
+  const J = card(104, "闪电");
+  const D = card(105, "桃");
+  const records = [
+    move(101, 10, A, at("hand", 0), TO_PROCESSING, "USE"),
+    move(102, 11, B, at("hand", 1), TO_DISCARD, "DISCARD"),
+    move(103, 11, C, at("equip", 2), TO_DISCARD, "LOSE"),
+    move(104, 12, J, at("deck"), TO_PROCESSING, "JUDGE"),
+    move(105, 12, J, at("processing"), TO_DISCARD, "JUDGE"),
+    { kind: "delta", delta_type: "card_reveal", seq: 106, frame_id: 11, depth: 1, seat: 1, card: D },
+    { kind: "timing", seq: 107, timing: "USE_DESIGNATE_TARGET", frame_id: 10, depth: 1, actor: 0, targets: [1], cards: [] },
+  ];
+
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.animScale = 1;
+  const before = { ...view(), cursor: 100, log_seq: 0, records: [], finished: false };
+  ui.applyViewRaw(before);
+  const after = {
+    ...view(), cursor: 107, log_seq: 0, records, finished: false,
+  };
+  // 这一批播完时 A 还在处理区：快照是权威终态，commit 不能把它判成"已离场"。
+  after.snapshot.processing = [A];
+  ui.applyViewRaw(after);
+  const step = () => ui.stepPlayback(true);
+
+  step();
+  check("U3-01a 处理中的牌：data-stage-lane=processing、底行 座位·武将·区域",
+    laneOf(101) === "processing"
+      && labelOf(101) === "0·郭嘉·手牌"
+      && lineOf(101) === "0·郭嘉·手牌"
+      && $("t-context").textContent.includes("处理中"),
+    `lane=${laneOf(101)} label=${labelOf(101)} context="${$("t-context").textContent}"`);
+
+  step();
+  check("U3-01b 手牌弃置进弃牌组：data-stage-lane=discard、底行 1·周瑜·手牌",
+    laneOf(102) === "discard"
+      && labelOf(102) === "1·周瑜·手牌"
+      && $("t-context").textContent.includes("弃牌"),
+    `lane=${laneOf(102)} label=${labelOf(102)} context="${$("t-context").textContent}"`);
+
+  step();
+  check("U3-01c 装备替换弃置：底行 2·貂蝉·装备（LOSE 也算弃牌）",
+    laneOf(103) === "discard"
+      && labelOf(103) === "2·貂蝉·装备"
+      && lineOf(103) === "2·貂蝉·装备",
+    `lane=${laneOf(103)} label=${labelOf(103)}`);
+
+  step();
+  step();
+  check("U3-01d 牌堆来源的判定牌：仍在处理中组、底行不写座位（无 undefined / null）",
+    laneOf(104) === "processing"
+      && !labelOf(104)
+      && lineOf(104) === ""
+      && !/undefined|null/.test(stageNode(104).text())
+      && fading(104),
+    `lane=${laneOf(104)} label=${labelOf(104)} text="${stageNode(104) ? stageNode(104).text() : "(缺)"}"`);
+
+  step();
+  check("U3-01e card_reveal 进展示组：data-stage-lane=showcase、保留 revealed-card 与亮出者",
+    laneOf(105) === "showcase"
+      && stageNode(105).classList.contains("revealed-card")
+      && attr(stageNode(105), "data-reveal-seat") === "1"
+      && labelOf(105) === "1·周瑜·手牌"
+      && $("t-context").textContent.includes("展示"),
+    `lane=${laneOf(105)} seat=${attr(stageNode(105), "data-reveal-seat")} context="${$("t-context").textContent}"`);
+
+  step();
+  check("U3-01f 三组在同一说明里拼接（处理中：… / 展示：… / 弃牌：…）",
+    ["处理中：", "展示：", "弃牌：", " / "].every((part) => $("t-context").textContent.includes(part)),
+    `context="${$("t-context").textContent}"`);
+  ui.flushPlayback();
+
+  // ---- 寿命规则（D5）：有帧的展示 / 弃牌挂到 pop；无帧的固定 1s + 1s；兜底 30s ----
+  const item = (id) => (ui.state.effectCards || [])
+    .concat(ui.state.revealedCards || [])
+    .find((entry) => String(entry.card_id) === String(id));
+  const fiveSecondsOn = item(102).stage.enteredAt + 5000;
+  ui.renderProcessing(fiveSecondsOn);
+  check("U3-01g 有承载帧的展示 / 弃牌：pop 之前一直可见（5 秒后仍不淡出）",
+    !!stageNode(102) && !!stageNode(103) && !!stageNode(105)
+      && !fading(102) && !fading(103) && !fading(105),
+    `B=${fading(102)} C=${fading(103)} D=${fading(105)}`);
+
+  ui.state.effectCards = ui.applyEffectDelta(pop(108, 11), ui.state.effectCards);
+  ui.state.revealedCards = ui.applyRevealDelta(pop(108, 11), ui.state.revealedCards);
+  ui.renderProcessing();
+  check("U3-01h 产生它们的结算帧 pop ⇒ 展示 / 弃牌开始 1s 淡出（不再是瞬删）",
+    fading(102) && fading(103) && fading(105) && !fading(101),
+    `A=${fading(101)} B=${fading(102)} C=${fading(103)} D=${fading(105)}`);
+
+  ui.state.effectCards = ui.applyEffectDelta(pop(109, 10), ui.state.effectCards);
+  ui.renderProcessing();
+  check("U3-01i 处理中的牌由它自己的离区 / 帧 pop 触发淡出（A 的帧 pop 才淡出）",
+    fading(101), `A=${fading(101)}`);
+  const goneAt = Math.max(...[101, 102, 103, 105].map((id) => item(id).stage.fadeAt + 1000));
+  ui.renderProcessing(goneAt);
+  check("U3-01j 1s 淡出结束 ⇒ 舞台项移除（不留幽灵）",
+    stageNodes().length === 0, `剩余=${stageNodes().map((n) => attr(n, "data-card-id")).join(",")}`);
+
+  // 判定区来源的牌（拆 / 顺）：底行写「N·武将·判定」（D10 的第三种区域）。
+  ui.state.effectCards = [];
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(251, 42, card(251, "闪电"), at("judge", 1), TO_DISCARD, "LOSE"), []);
+  ui.renderProcessing(Date.now());
+  check("U3-01c2 判定区来源的弃牌：底行 1·周瑜·判定（非牌堆来源）",
+    laneOf(251) === "discard" && labelOf(251) === "1·周瑜·判定",
+    `lane=${laneOf(251)} label=${labelOf(251)}`);
+
+  // 无帧（frame_id = 0）：停留 1s + 淡出 1s = 2s（弃牌阶段等）。
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(201, 0, card(201, "杀"), at("hand", 0), TO_DISCARD, "DISCARD"), []);
+  const noFrame = ui.state.effectCards[0];
+  check("U3-01k 无帧弃牌：fadeAt = 入台 + 1s 停留",
+    !!noFrame && noFrame.stage.fadeAt === noFrame.stage.enteredAt + 1000,
+    `fadeAt=${noFrame && noFrame.stage.fadeAt} enteredAt=${noFrame && noFrame.stage.enteredAt}`);
+  ui.renderProcessing(noFrame.stage.enteredAt + 999);
+  const beforeHold = !!stageNode(201) && !fading(201);
+  ui.renderProcessing(noFrame.stage.enteredAt + 1000);
+  const duringFade = fading(201);
+  ui.renderProcessing(noFrame.stage.enteredAt + 2000);
+  check("U3-01l 无帧弃牌：1s 内 visible、1s–2s fading、2s 后 gone",
+    beforeHold && duringFade && !stageNode(201),
+    `before=${beforeHold} fading=${duringFade} gone=${!stageNode(201)}`);
+
+  // 兜底 30s：pop 丢失（断线 / 刷新）也不留幽灵。
+  ui.state.effectCards = [];
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(301, 77, card(301, "闪"), at("hand", 1), TO_DISCARD, "DISCARD"), []);
+  const dangling = ui.state.effectCards[0];
+  ui.renderProcessing(dangling.stage.enteredAt + 29999);
+  const stillThere = !!stageNode(301) && !fading(301);
+  ui.renderProcessing(dangling.stage.enteredAt + 30000);
+  const fallbackFading = fading(301);
+  ui.renderProcessing(dangling.stage.enteredAt + 31000);
+  check("U3-01m 兜底 30s：没有 pop 也到点无条件淡出",
+    stillThere && fallbackFading && !stageNode(301),
+    `visible=${stillThere} fading=${fallbackFading} gone=${!stageNode(301)}`);
+
+  // 动画倍率 0：淡出立即完成（D15 测试口径）。
+  ui.state.effectCards = [];
+  ui.state.animScale = 0;
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(401, 0, card(401, "桃"), at("hand", 2), TO_DISCARD, "DISCARD"), []);
+  const fast = ui.state.effectCards[0];
+  ui.renderProcessing(fast.stage.enteredAt + 999);
+  const fastVisible = !!stageNode(401);
+  ui.renderProcessing(fast.stage.enteredAt + 1000);
+  check("U3-01n animScale = 0 ⇒ 淡出立即完成（不等真实时间）",
+    fastVisible && !stageNode(401), `visible=${fastVisible} gone=${!stageNode(401)}`);
+  ui.state.animScale = 1;
+
+  // 淡出期间同一张牌再次入台：撤旧项、新项重新落位（D5.6），台上始终只有一条。
+  ui.state.effectCards = [];
+  const again = card(260, "杀");
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(260, 0, again, at("hand", 0), TO_DISCARD, "DISCARD"), []);
+  const againItem = ui.state.effectCards[0];
+  ui.renderProcessing(againItem.stage.enteredAt + 1500);
+  const wasFading = fading(260);
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(261, 9, again, at("hand", 1), TO_PROCESSING, "USE"), ui.state.effectCards);
+  ui.renderProcessing(Date.now());
+  check("U3-01n2 淡出期间同一张牌再入台 ⇒ 撤旧项、只剩一条处理中项",
+    wasFading && ui.state.effectCards.length === 1
+      && laneOf(260) === "processing" && !fading(260) && stageNodes().length === 1,
+    `wasFading=${wasFading} items=${ui.state.effectCards.length} lane=${laneOf(260)} nodes=${stageNodes().length}`);
+
+  // 一次 8 张的阵亡弃置：全部落位、不折叠。
+  ui.state.effectCards = [];
+  const eight = Array.from({ length: 8 }, (_, index) => card(500 + index, "杀"));
+  ui.state.effectCards = ui.applyEffectDelta({
+    kind: "delta", delta_type: "card_move", seq: 500, frame_id: 0, depth: 1,
+    reason: "DISCARD", owner: 0, from_zone: at("hand", 0), to_zone: TO_DISCARD, cards: eight,
+  }, []);
+  ui.renderProcessing(Date.now());
+  check("U3-01o 一次 8 张弃置全部落位（8 个舞台项，不折叠成「+N」）",
+    stageNodes().length === 8
+      && stageNodes().every((node) => attr(node, "data-stage-lane") === "discard")
+      && !/\+8|\+ ?[1-9]/.test($("t-processing").text()),
+    `节点=${stageNodes().length} text="${$("t-processing").text()}"`);
+
+  // ---- commit / 换会话 / 手动刷新（D5.5）----
+  const committed = { ...view(), cursor: 501, log_seq: 0, records: [], finished: false };
+  ui.applyViewRaw(committed);
+  check("U3-01p 一批事件播完（commit）不清空弃牌组",
+    stageNodes().length === 8, `节点=${stageNodes().length}`);
+  const refreshed = { ...view(), cursor: 502, log_seq: 0, records: [], finished: false };
+  ui.applyViewRaw(refreshed);
+  check("U3-01q 同一会话的手动刷新不清空弃牌组",
+    stageNodes().length === 8, `节点=${stageNodes().length}`);
+  const otherSession = { ...view("u3-stage-2"), cursor: 0, log_seq: 0, records: [], finished: false };
+  ui.applyViewRaw(otherSession);
+  check("U3-01r 换会话清空舞台",
+    stageNodes().length === 0, `节点=${stageNodes().length}`);
+
+  // ---- 粘底滚动（D3）：新牌落位滚到底；用户手动上滚后不再打扰 ----
+  const box = $("t-processing");
+  const fireScroll = () => (box.listeners.scroll || []).forEach((fn) => fn({ target: box }));
+  box.scrollHeight = 600;
+  box.clientHeight = 253;
+  box.scrollTop = 300;
+  fireScroll();
+  const pinnedUp = attr(box, "data-stage-pinned");
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(601, 0, card(601, "杀"), at("hand", 0), TO_DISCARD, "DISCARD"), ui.state.effectCards);
+  ui.renderProcessing();
+  const keptUp = box.scrollTop === 300;
+  box.scrollTop = 600 - 253;
+  fireScroll();
+  const pinnedBottom = attr(box, "data-stage-pinned");
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(602, 0, card(602, "闪"), at("hand", 0), TO_DISCARD, "DISCARD"), ui.state.effectCards);
+  ui.renderProcessing();
+  check("U3-01s 新牌落位粘底；手动上滚后不再打扰（滚回底部后恢复）",
+    pinnedUp === "false" && keptUp && pinnedBottom === "true" && box.scrollTop === 600,
+    `up=${pinnedUp} keptUp=${keptUp} bottom=${pinnedBottom} scrollTop=${box.scrollTop}`);
+
+  // ---- 回放页复用同一套派生与卡面渲染：三组 + 淡出，但不接线 / 名字 / 白光 ----
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  const replayRecords = [
+    move(701, 10, A, at("hand", 0), TO_PROCESSING, "USE"),
+    move(702, 11, B, at("hand", 1), TO_DISCARD, "DISCARD"),
+    { kind: "delta", delta_type: "card_reveal", seq: 703, frame_id: 11, depth: 1, seat: 2, card: D },
+    pop(704, 11),
+  ];
+  ui.state.replay = {
+    name: "u3-stage-replay",
+    meta: { seed: 1, player_count: 3, human_seat: 0, heroes: ["guojia", "zhouyu", "diaochan"] },
+    records: replayRecords,
+    narrative: [],
+    index: replayRecords.length - 1,
+    seats: null,
+    query: null,
+    effectCards: [],
+    revealedCards: [],
+    appliedIndex: -1,
+    playing: false,
+    timer: null,
+  };
+  ui.renderReplay();
+  const replayNodes = $("r-processing").children.filter(
+    (node) => node.classList.contains("stage-card"));
+  const replayLane = (id) => {
+    const node = replayNodes.find((child) => attr(child, "data-card-id") === String(id));
+    return attr(node, "data-stage-lane");
+  };
+  check("U3-01t 回放页显示同样三组：处理中 / 弃牌 / 展示（pop 后展示进入淡出）",
+    replayLane(101) === "processing"
+      && replayLane(102) === "discard"
+      && replayLane(105) === "showcase"
+      && replayNodes.some((node) => node.classList.contains("fading"))
+      && $("r-effect").textContent.includes("弃牌：")
+      && $("r-effect").textContent.includes("展示："),
+    `lanes=${replayNodes.map((node) => `${attr(node, "data-card-id")}:${attr(node, "data-stage-lane")}`).join(",")} effect="${$("r-effect").textContent}"`);
+  check("U3-01u 回放页不出现目标线 / 技能名 / 白光（04 的范围裁定）",
+    byClass($("table-stage"), "target-line").length === 0
+      && byClass($("table-stage"), "skill-float").length === 0
+      && byClass($("table-stage"), "hero-flash").length === 0,
+    `lines=${byClass($("table-stage"), "target-line").length} floats=${byClass($("table-stage"), "skill-float").length}`);
+
+  // 真 DOM 回归（U3 验收缺陷）：`node.children` 是 HTMLCollection——只有 length / item，
+  // **没有 `.find`**。舞台卡复用更新（renderEffectCards → updateStageCardNode）曾写成
+  // `(node.children || []).find(...)`，真浏览器里每次更新都抛 TypeError、整场舞台不渲染；
+  // 垫片的 children 是数组，所以这里显式换成没有 `.find` 的类数组，喂同一条更新路径。
+  const reused = documentShim.createElement("button");
+  reused.className = "card face kind-normal static stage-card";
+  reused.setAttribute("data-stage-key", "903");
+  const reusedLine = documentShim.createElement("span");
+  reusedLine.className = "ctype";
+  reusedLine.textContent = "旧底行";
+  reused.appendChild(reusedLine);
+  reused.children = { 0: reusedLine, length: 1 };  // 类数组：没有 find
+  const reusedBox = documentShim.createElement("div");
+  reusedBox.appendChild(reused);
+  const guardItem = {
+    ...card(903, "闪"),
+    stage: {
+      lane: "processing", frameId: 0, enteredAt: Date.now(), fadeAt: null,
+      fromZone: { seat: 1, zone: "hand" },
+    },
+  };
+  let arrayLikeError = null;
+  try {
+    ui.renderEffectCards(reusedBox, [guardItem], Date.now(), () => "周瑜");
+  } catch (error) {
+    arrayLikeError = error;
+  }
+  check("U3-01v 类数组 children（HTMLCollection 无 .find）也更新底行：不抛错、data-zone-label / 文本更新",
+    !arrayLikeError
+      && reusedLine.getAttribute("data-zone-label") === "1·周瑜·手牌"
+      && reusedLine.textContent === "1·周瑜·手牌",
+    `threw=${arrayLikeError ? arrayLikeError.message : "(none)"} label=${reusedLine.getAttribute("data-zone-label")} text="${reusedLine.textContent}"`);
+  ui.state.replay = null;
+  ui.renderReplay();
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.animScale = 1;
+  ui.resetSelection();
+}
+
+/* ============ U3-02（票 02）：反间 —— 处理区 → 手牌 + SKILL 帧 ⇒ 转展示组 ============
+ *
+ * 判据来自票面与 spec D2 / D5 / D6：只有**服务端已下发的事实**参与判定
+ * （`FrameRecord(push)` 的 `frame_kind === "SKILL"`），前端不写技能规则。转组沿用同一条
+ * 舞台项（不重新落位、不出现两份）；五谷（USE / RESOLVE 帧）与判定牌（JUDGE 帧）的同类
+ * 移动都不转组。时间仍不靠真实等待：`renderProcessing(now)` 直接喂 `now`（D15）。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const stageNodes = () => $("t-processing").children.filter(
+    (node) => node.classList.contains("stage-card"));
+  const nodesOf = (id) => stageNodes().filter(
+    (node) => attr(node, "data-card-id") === String(id));
+  const stageNode = (id) => nodesOf(id)[0];
+  const laneOf = (id) => attr(stageNode(id), "data-stage-lane");
+  const fading = (id) => Boolean(stageNode(id) && stageNode(id).classList.contains("fading"));
+  const lineNode = (id) => {
+    const node = stageNode(id);
+    return node ? walk(node).find(
+      (child) => child.classList.contains("ctype")
+        || String(child.className || "").split(/\s+/).includes("ctype")) : null;
+  };
+  const lineOf = (id) => (lineNode(id) ? lineNode(id).textContent : "");
+  const labelOf = (id) => attr(lineNode(id), "data-zone-label");
+  const card = (id, name) => ({
+    ...synthCard(id, name), kind: "normal", attribute: "普通",
+    description: `【${name}】的全文描述`,
+  });
+  const seatPlayer = (seat, heroName) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName,
+  });
+  const view = () => {
+    const out = synthView(null);
+    out.session_id = "u3-reveal-1";
+    out.snapshot.processing = [];
+    out.snapshot.players = [
+      seatPlayer(0, "周瑜"), seatPlayer(1, "郭嘉"), seatPlayer(2, "貂蝉"),
+    ];
+    return out;
+  };
+  const at = (zone, seat = null) => ({ zone, seat });
+  const move = (seq, frame, moved, from, to, reason = "PUT") => ({
+    kind: "delta", delta_type: "card_move", seq, frame_id: frame, depth: 1,
+    reason, owner: to.seat === null || to.seat === undefined ? from.seat : to.seat,
+    from_zone: from, to_zone: to, cards: [moved],
+  });
+  const push = (seq, frame, kind) => ({
+    kind: "frame", op: "push", frame_id: frame, frame_kind: kind, depth: 1, seq,
+  });
+  const pop = (seq, frame) => ({
+    kind: "frame", op: "pop", frame_id: frame, frame_kind: "SKILL", depth: 1, seq,
+  });
+  const itemOf = (id) => (ui.state.effectCards || [])
+    .concat(ui.state.revealedCards || [])
+    .find((entry) => String(entry.card_id) === String(id));
+
+  const FANJIAN = card(211, "桃");
+  const WUGU_USE = card(212, "杀");
+  const WUGU_RESOLVE = card(213, "闪");
+  const JUDGE_CARD = card(214, "闪电");
+
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.animScale = 1;
+
+  // 真实批次形状（真会话记录流）：SKILL 帧 push 随"确认发动"那次应答先到、先提交；
+  // 处理区里的进出移动在后面几次应答里 —— 承载帧的 kind 必须跨 commit 记得住。
+  // 先落一条空视图（= 首屏提交，会话已建立），否则「首屏 commit 清舞台」会吃掉假批次。
+  const before = {
+    ...view(), cursor: 0, log_seq: 0, records: [], finished: false,
+  };
+  ui.applyViewRaw(before);
+  const first = {
+    ...view(), cursor: 1, log_seq: 0,
+    records: [push(1, 81, "SKILL")], finished: false,
+  };
+  ui.applyViewRaw(first);
+  ui.flushPlayback();
+  const second = {
+    ...view(), cursor: 3, log_seq: 0, finished: false,
+    records: [
+      move(2, 81, FANJIAN, at("hand", 0), at("processing")),
+      move(3, 81, FANJIAN, at("processing"), at("hand", 1)),
+    ],
+  };
+  ui.applyViewRaw(second);
+  ui.stepPlayback(true);
+  const entering = itemOf(211);
+  const enteredAt = entering && entering.stage.enteredAt;
+  const wasProcessing = laneOf(211) === "processing"
+    && lineOf(211) === "0·周瑜·手牌" && Boolean(entering);
+  ui.stepPlayback(true);
+  const transferred = itemOf(211);
+  check("U3-02a 处理区 → 手牌 + SKILL 帧 ⇒ 同一条舞台项转进展示组（不重新落位 / 不两份）",
+    wasProcessing && laneOf(211) === "showcase"
+      && Boolean(stageNode(211)) && stageNode(211).classList.contains("revealed-card")
+      && transferred === entering
+      && transferred.stage.enteredAt === enteredAt
+      && nodesOf(211).length === 1
+      && (ui.state.revealedCards || []).length === 0,
+    `wasProcessing=${wasProcessing} lane=${laneOf(211)} same=${transferred === entering}`
+      + ` entered=${enteredAt} nodes=${nodesOf(211).length}`);
+  check("U3-02b 转组沿用首次入台的来源：底行仍是 0·周瑜·手牌，说明文本只剩「展示」",
+    lineOf(211) === "0·周瑜·手牌"
+      && labelOf(211) === "0·周瑜·手牌"
+      && $("t-context").textContent.includes("展示：")
+      && !$("t-context").textContent.includes("处理中："),
+    `line="${lineOf(211)}" label="${labelOf(211)}" context="${$("t-context").textContent}"`);
+
+  ui.renderProcessing(enteredAt + 5000);
+  check("U3-02c 转组后活到 SKILL 帧 pop：5 秒后仍可见、尚未淡出",
+    Boolean(stageNode(211)) && !fading(211) && laneOf(211) === "showcase",
+    `node=${Boolean(stageNode(211))} fading=${fading(211)} lane=${laneOf(211)}`);
+
+  ui.state.effectCards = ui.applyEffectDelta(pop(4, 81), ui.state.effectCards);
+  const fadeAt = itemOf(211) && itemOf(211).stage.fadeAt;
+  ui.renderProcessing();
+  check("U3-02d SKILL 帧 pop ⇒ 转组项才开始 1s 淡出（不是一闪而过）",
+    itemOf(211).stage.lane === "showcase" && Number.isFinite(fadeAt) && fading(211),
+    `fadeAt=${fadeAt} fading=${fading(211)}`);
+  ui.renderProcessing(fadeAt + 1000);
+  check("U3-02e 1s 淡出结束 ⇒ 转组项从舞台移除（不留幽灵）",
+    !stageNode(211), `node=${Boolean(stageNode(211))}`);
+  ui.flushPlayback();
+  ui.state.effectCards = [];
+  ui.renderProcessing();
+
+  // 五谷丰登（D6 的排除）：USE 帧里进 / 出处理区 ⇒ 不转组，离区即 1s 淡出。
+  ui.state.effectCards = ui.applyEffectDelta(push(10, 82, "USE"), ui.state.effectCards);
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(11, 82, WUGU_USE, at("deck"), at("processing")), ui.state.effectCards);
+  const wuguUse = itemOf(212);
+  const wuguEntered = wuguUse.stage.enteredAt;
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(12, 82, WUGU_USE, at("processing"), at("hand", 1)), ui.state.effectCards);
+  ui.renderProcessing();
+  check("U3-02f 处理区 → 手牌 + USE 帧 ⇒ 不转组（五谷不命中），仍按离区淡出",
+    laneOf(212) === "processing"
+      && !stageNode(212).classList.contains("revealed-card")
+      && Number.isFinite(wuguUse.stage.fadeAt) && fading(212)
+      && ui.state.effectCards.filter((entry) => String(entry.card_id) === "212").length === 1,
+    `lane=${laneOf(212)} fadeAt=${wuguUse.stage.fadeAt} fading=${fading(212)}`);
+  ui.renderProcessing(wuguEntered + 5000);
+  check("U3-02g USE 帧的离场牌不滞留整轮（5 秒后已从舞台消失）",
+    !stageNode(212), `node=${Boolean(stageNode(212))}`);
+
+  // 五谷的真实形状：进处理区在 USE 帧、取走进手牌在 RESOLVE 帧 ⇒ 也不转组、不额外镜像。
+  ui.state.effectCards = ui.applyEffectDelta(push(20, 83, "USE"), ui.state.effectCards);
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(21, 83, WUGU_RESOLVE, at("deck"), at("processing")), ui.state.effectCards);
+  ui.state.effectCards = ui.applyEffectDelta(push(22, 84, "RESOLVE"), ui.state.effectCards);
+  const wuguResolve = itemOf(213);
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(23, 84, WUGU_RESOLVE, at("processing"), at("hand", 0)), ui.state.effectCards);
+  ui.renderProcessing();
+  check("U3-02h 五谷真实形状（USE 帧进 / RESOLVE 帧出）也不转组、不镜像",
+    laneOf(213) === "processing"
+      && !stageNode(213).classList.contains("revealed-card")
+      && Number.isFinite(wuguResolve.stage.fadeAt)
+      && ui.state.effectCards.filter((entry) => String(entry.card_id) === "213").length === 1,
+    `lane=${laneOf(213)} fadeAt=${wuguResolve.stage.fadeAt}`);
+
+  // 判定牌（JUDGE 帧，如【天妒】获得判定牌）：不进展示组，仍在处理中组里淡出。
+  ui.state.effectCards = ui.applyEffectDelta(push(30, 85, "JUDGE"), ui.state.effectCards);
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(31, 85, JUDGE_CARD, at("deck"), at("processing"), "JUDGE"), ui.state.effectCards);
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(32, 85, JUDGE_CARD, at("processing"), at("hand", 0)), ui.state.effectCards);
+  ui.renderProcessing();
+  check("U3-02i 判定牌（JUDGE 帧）从处理区进手牌也不进展示组，仍在处理中组淡出",
+    laneOf(214) === "processing"
+      && !stageNode(214).classList.contains("revealed-card")
+      && itemOf(214).stage.lane === "processing" && fading(214),
+    `lane=${laneOf(214)} fading=${fading(214)}`);
+
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.renderProcessing();
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.animScale = 1;
+  ui.resetSelection();
+}
+
+/* ============ U3-03（票 03）：使用牌目标线 / 行动者高亮 / 体力闪 ============
+ *
+ * 判据来自票面与 spec D8.1 / D13 / D15。载荷是**与响应体同形**的合成 view + 记录；
+ * 断言只落在 DOM：SVG 线的 `data-line-to` / `.target-line`、座位的 `.acting`、武将块的
+ * `.hp-flash-*`。时间不靠真实等待：`state.animScale = 0`（淡出立即完成）；要验证寿命时
+ * 把线上的 `enteredAt` 改到 1.2s 前再重绘一次（不读像素、不等真实时钟）。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+      || String(node.className || "").split(/\s+/).includes(name)));
+  const seatNodesNow = () => [...$("t-seats").children, $("t-self-seat")];
+  const seatNodeOf = (seat) => seatNodesNow().find(
+    (node) => attr(node, "data-seat") === String(seat)) || null;
+  const heroBlockOf = (seat) => {
+    // 垫片不建静态 HTML 的父子树：自己的武将块按稳定 id 取（真页面里它在 #t-self-seat 里）。
+    const selfSeat = ui.state.view && ui.state.view.snapshot
+      ? ui.state.view.snapshot.seat : null;
+    if (selfSeat !== null && selfSeat !== undefined && String(seat) === String(selfSeat)) {
+      return $("t-self-hero");
+    }
+    const seatNode = seatNodeOf(seat);
+    return seatNode ? walk(seatNode).find((node) => hasClass(node, "hero-block")) || null : null;
+  };
+  const lineNodes = () => walk($("t-target-lines")).filter((node) => hasClass(node, "target-line"));
+  const lineTos = () => lineNodes().map((node) => attr(node, "data-line-to"))
+    .filter((value) => value !== undefined);
+  /** 集合相等（Standards §4）：只在**确实是集合**的断言上用，并且显式命名——
+   *  它比的是成员、不比次序；反过来，次序是契约的地方（如 U3-03d）仍直接比序列。 */
+  const setEquals = (actual, expected) => {
+    const left = new Set((actual || []).map(String));
+    const right = new Set((expected || []).map(String));
+    return left.size === right.size && [...right].every((value) => left.has(value));
+  };
+  const linePart = (node, name) => Boolean(node && node.children.find(
+    (child) => hasClass(child, name)));
+  const seatPlayer = (seat, heroName, extra = {}) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName, ...extra,
+  });
+  const PLAYERS = [
+    seatPlayer(0, "郭嘉"), seatPlayer(1, "周瑜"),
+    seatPlayer(2, "貂蝉"), seatPlayer(3, "张飞"),
+  ];
+  const baseView = (session, players) => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.heroes = { 0: "guojia", 1: "zhouyu", 2: "diaochan", 3: "zhangfei" };
+    out.snapshot.processing = [];
+    out.snapshot.players = players;
+    return out;
+  };
+  let serial = 0;
+  /** 落一份基准视图（座位渲染出来）再起一份带记录的回放；返回后由用例逐条 step。 */
+  const loadEffects = (records, players = PLAYERS) => {
+    ui.flushPlayback();
+    serial += 1;
+    const session = `u3-effects-${serial}`;
+    ui.applyViewRaw({
+      ...baseView(session, players), cursor: 0, log_seq: 0, records: [], finished: false,
+    });
+    ui.applyViewRaw({
+      ...baseView(session, players), cursor: records.length, log_seq: 0,
+      records, finished: false,
+    });
+  };
+  const step = (count = 1) => { for (let index = 0; index < count; index += 1) ui.stepPlayback(true); };
+  const designate = (seq, actor, targets, frame = 5) => ({
+    kind: "timing", timing: "USE_DESIGNATE_TARGET", seq, frame_id: frame, depth: 1,
+    actor, source: actor, targets, cards: [],
+  });
+  const query = (seq, actor) => ({ kind: "query", seq, query: { actor } });
+  const action = (seq) => ({
+    kind: "action", seq, accepted: true, reason: null, action: { kind: "Pass" },
+  });
+  const hpChange = (seq, seat, before, after, frame = 3) => ({
+    kind: "delta", delta_type: "hp_change", seq, frame_id: frame, depth: 1,
+    seat, before, after, amount: after - before,
+  });
+
+  ui.state.animScale = 0;
+
+  // 垫片只按 id 建静态节点（不解析 HTML 的 class），自己的武将块在真页面里带
+  // class="hero-block"；这里补上，端点才能真的落在自己的武将块上。
+  const selfHeroBlock = $("t-self-hero");
+  selfHeroBlock.className = "hero-block";
+  selfHeroBlock.classList.add("hero-block");
+
+  // AI 对你使用【杀】：从发动者武将块到你一条线，data-line-to 指目标座位。
+  loadEffects([designate(1, 1, [0])]);
+  step();
+  check("U3-03a 使用牌指定目标：发动者到目标一条 SVG 线（data-line-to=0）",
+    lineNodes().length === 1
+      && attr(lineNodes()[0], "data-line-to") === "0"
+      && attr(lineNodes()[0], "data-line-from") === "1"
+      && linePart(lineNodes()[0], "target-shaft")
+      && linePart(lineNodes()[0], "target-arrow"),
+    `lines=${JSON.stringify(lineTos())}`);
+
+  // 多目标牌（南蛮入侵 / 万箭齐发）：每个目标一条，互不覆盖。
+  loadEffects([designate(1, 1, [2, 3])]);
+  step();
+  check("U3-03b 多目标牌：每个目标各一条线（2 / 3 两条独立节点）",
+    lineNodes().length === 2 && setEquals(lineTos(), ["2", "3"])
+      && lineNodes().every((node) => attr(node, "data-line-from") === "1"),
+    `lines=${JSON.stringify(lineTos())}`);
+
+  // 桃 / 无中生有 / 装备牌：没有目标 ⇒ 一条线都不画。
+  loadEffects([designate(1, 1, [])]);
+  step();
+  check("U3-03c 无目标的牌（桃 / 无中生有 / 装备）不画线",
+    lineNodes().length === 0, `lines=${JSON.stringify(lineTos())}`);
+
+  // 目标表里包含自己 / 已阵亡座位：都跳过，只画活着的别人。
+  const deadPlayers = PLAYERS.map(
+    (player) => (player.seat === 2 ? { ...player, alive: false } : player));
+  loadEffects([designate(1, 1, [1, 2, 3])], deadPlayers);
+  step();
+  check("U3-03d 目标含自己（发动者）与已阵亡座位：跳过，只画剩下的活目标",
+    lineTos().join(",") === "3", `lines=${JSON.stringify(lineTos())}`);
+
+  // 同一时刻多条线：各自带自己的 data-line-to，前一条不会被后一条挤掉。
+  loadEffects([designate(1, 1, [2]), designate(2, 1, [3], 6)]);
+  step(2);
+  check("U3-03e 多条线同时存在、互不干扰（每条一个 data-line-to + 自己的箭头）",
+    lineNodes().length === 2 && setEquals(lineTos(), ["2", "3"])
+      && lineNodes().every((node) => linePart(node, "target-arrow")),
+    `lines=${JSON.stringify(lineTos())}`);
+
+  // 寿命：1.2s 保持；animScale = 0 ⇒ 淡出立即完成。把线的 enteredAt 拨回 1.2s 前再重绘一次，
+  // 走的是**真实渲染口**（renderTable → syncTransientEffects → targetLineLane），不等真实时间。
+  loadEffects([designate(1, 1, [0])]);
+  step();
+  const lineItem = (ui.state.targetLines || [])[0];
+  const hold = 1200;
+  let visibleBeforeHold = false;
+  let goneAfterHold = false;
+  if (lineItem) {
+    ui.renderTable();
+    visibleBeforeHold = lineNodes().length === 1;
+    lineItem.enteredAt = Date.now() - hold;
+    ui.renderTable();
+    goneAfterHold = lineNodes().length === 0;
+  }
+  check("U3-03f 线在 1.2s 保持期内可见、保持结束即消失（animScale=0，不读真实时间）",
+    visibleBeforeHold && goneAfterHold,
+    `before=${visibleBeforeHold} after=${goneAfterHold} hold=${hold}`);
+
+  // 决策点高亮（D13）：action 记录给应答者加 .acting（0.5s 描边）。
+  loadEffects([query(1, 2), action(2)]);
+  step(2);
+  check("U3-03g action 记录是决策点：给应答座位加 .acting",
+    hasClass(seatNodeOf(2), "acting")
+      && seatNodesNow().filter((node) => hasClass(node, "acting")).length === 1,
+    `acting=${seatNodesNow().map((node) => `${attr(node, "data-seat")}:${hasClass(node, "acting")}`).join(",")}`);
+
+  // 决策点高亮：USE_DESIGNATE_TARGET 也高亮发动者（同时画线）。
+  loadEffects([designate(1, 2, [0])]);
+  step();
+  check("U3-03h USE_DESIGNATE_TARGET 也是决策点：高亮发动者并画线",
+    hasClass(seatNodeOf(2), "acting") && lineTos().join(",") === "0",
+    `acting=${hasClass(seatNodeOf(2), "acting")} lines=${JSON.stringify(lineTos())}`);
+
+  // 结算类时机不高亮：actor 在结算期常是目标，加描边会误导。
+  loadEffects([
+    { kind: "timing", timing: "RESOLVE_START", seq: 1, frame_id: 3, depth: 2, actor: 1, source: 0, targets: [0] },
+    { kind: "timing", timing: "USE_BECOME_TARGET", seq: 2, frame_id: 2, depth: 1, actor: 0, source: 1, targets: [0] },
+    { kind: "timing", timing: "RESOLVE_EFFECT", seq: 3, frame_id: 3, depth: 2, actor: 1, source: 0, targets: [0] },
+  ]);
+  step(3);
+  check("U3-03i 结算类时机（RESOLVE_* / USE_BECOME_TARGET）不高亮、不画线",
+    seatNodesNow().every((node) => !hasClass(node, "acting")) && lineNodes().length === 0,
+    `acting=${seatNodesNow().map((node) => `${attr(node, "data-seat")}:${hasClass(node, "acting")}`).join(",")}`);
+
+  // 体力闪（D13）：掉血武将块闪红，回复闪绿。
+  loadEffects([hpChange(1, 1, 4, 3)]);
+  step();
+  check("U3-03j hp_change 掉血：对应武将块闪红（hp-flash + hp-flash-down）",
+    hasClass(heroBlockOf(1), "hp-flash") && hasClass(heroBlockOf(1), "hp-flash-down")
+      && !hasClass(heroBlockOf(1), "hp-flash-up"),
+    `class="${heroBlockOf(1) ? heroBlockOf(1).className : ""}"`);
+
+  loadEffects([hpChange(1, 2, 2, 3)]);
+  step();
+  check("U3-03k hp_change 回复：对应武将块闪绿（hp-flash + hp-flash-up）",
+    hasClass(heroBlockOf(2), "hp-flash") && hasClass(heroBlockOf(2), "hp-flash-up")
+      && !hasClass(heroBlockOf(2), "hp-flash-down"),
+    `class="${heroBlockOf(2) ? heroBlockOf(2).className : ""}"`);
+
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.animScale = 1;
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+}
+
+
+/* ============ U3-04（票 04）：技能名 / 白光 / 技能目标线 ============
+ *
+ * 判据来自票面与 spec D8.2 / D9 / D15。载荷是**与响应体同形**的合成 `view` + 记录 +
+ * `skill_events`（派生通道由服务端下发）：断言只落在 DOM——`.skill-float` 的文本 /
+ * 座位 / 叠放属性与坐标、武将块的 `.skill-sweep`、线层的 `data-line-to`。
+ * 时间不靠真实等待：`state.animScale = 0`（淡出立即完成），回放用 `stepPlayback(true)`
+ * 逐条推进；纯刷新走"没有 records 的 applyView"。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+      || String(node.className || "").split(/\s+/).includes(name)));
+  const seatNodesNow = () => [...$("t-seats").children, $("t-self-seat")];
+  const seatNodeOf = (seat) => seatNodesNow().find(
+    (node) => attr(node, "data-seat") === String(seat)) || null;
+  const heroBlockOf = (seat) => {
+    // 垫片不建静态 HTML 的父子树：自己的武将块按稳定 id 取（真页面里它在 #t-self-seat 里）。
+    const selfSeat = ui.state.view && ui.state.view.snapshot
+      ? ui.state.view.snapshot.seat : null;
+    if (selfSeat !== null && selfSeat !== undefined && String(seat) === String(selfSeat)) {
+      return $("t-self-hero");
+    }
+    const seatNode = seatNodeOf(seat);
+    return seatNode ? walk(seatNode).find((node) => hasClass(node, "hero-block")) || null : null;
+  };
+  const allHeroBlocks = () => [
+    ...seatNodesNow().flatMap(
+      (node) => walk(node).filter((child) => hasClass(child, "hero-block"))),
+    $("t-self-hero"),
+  ];
+  const floats = () => walk($("t-skill-floats")).filter(
+    (node) => hasClass(node, "skill-float"));
+  const lineNodes = () => walk($("t-target-lines")).filter(
+    (node) => hasClass(node, "target-line"))
+    .filter((node) => attr(node, "data-line-to") !== undefined);
+
+  const seatPlayer = (seat, heroName) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName,
+  });
+  const baseView = (session) => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.heroes = { 0: "guojia", 1: "zhouyu", 2: "diaochan", 3: "zhangfei" };
+    out.snapshot.processing = [];
+    out.snapshot.players = [
+      seatPlayer(0, "郭嘉"), seatPlayer(1, "周瑜"),
+      seatPlayer(2, "貂蝉"), seatPlayer(3, "张飞"),
+    ];
+    return out;
+  };
+  const query = (seq, actor) => ({ kind: "query", seq, query: { actor } });
+  const skillAction = (seq) => ({
+    kind: "action", seq, accepted: true, reason: null,
+    action: { kind: "ActivateSkill", answers_seq: seq - 1, skill_id: "hero.zhouyu.fanjian", choices: [] },
+  });
+  const useAction = (seq) => ({
+    kind: "action", seq, accepted: true, reason: null,
+    action: { kind: "UseCard", answers_seq: seq - 1 },
+  });
+  const skillEvent = (seq, seat, name, targets = []) => ({
+    seq, seat, skill_id: "hero.zhouyu.fanjian", name, targets,
+  });
+  const designate = (seq, actor, targets) => ({
+    kind: "timing", timing: "USE_DESIGNATE_TARGET", seq, frame_id: 5, depth: 1,
+    actor, source: actor, targets, cards: [],
+  });
+
+  let serial = 0;
+  /** 落一份干净会话（换会话 = 走真实的清屏路径），再起一份带记录 + skill_events 的回放。 */
+  const loadSkillBatch = (records, events) => {
+    ui.flushPlayback();
+    serial += 1;
+    const session = `u3-skill-${serial}`;
+    ui.applyViewRaw({
+      ...baseView(session), cursor: 0, log_seq: 0, records: [], skill_events: [], finished: false,
+    });
+    ui.applyViewRaw({
+      ...baseView(session), cursor: records.length, log_seq: 0,
+      records, skill_events: events, finished: false,
+    });
+    return session;
+  };
+  const step = (count = 1) => { for (let index = 0; index < count; index += 1) ui.stepPlayback(true); };
+
+  ui.state.animScale = 0;
+  // 垫片只按 id 建静态节点（不解析 class）：自己的武将块在真页面里带 class="hero-block"。
+  const selfHeroBlock = $("t-self-hero");
+  selfHeroBlock.className = "hero-block";
+  selfHeroBlock.classList.add("hero-block");
+
+  // ---- 时序：事件在**产生它的记录 seq** 那一步演出，不在响应到达时全部出现 ----
+  loadSkillBatch(
+    [
+      query(1, 1),
+      skillAction(2),
+      { kind: "delta", delta_type: "hp_change", seq: 3, frame_id: 9, depth: 1,
+        seat: 1, before: 4, after: 3, amount: -1 },
+    ],
+    [skillEvent(2, 1, "反间", [0])],
+  );
+  const atArrival = floats().length;
+  const pendingAtArrival = (ui.state.skillEvents || []).length;
+  step();  // query(1)
+  const afterQuery = floats().length;
+  step();  // action(2) = 发动
+  const node = floats()[0];
+  check("U3-04a 技能名在**发动那条记录**的步上飘出（query 步不飘、响应到达时不出现）",
+    atArrival === 0 && pendingAtArrival === 1 && afterQuery === 0
+      && floats().length === 1 && Boolean(node)
+      && node.textContent === "反间"
+      && attr(node, "data-skill-seat") === "1",
+    `arrival=${atArrival} pending=${pendingAtArrival} afterQuery=${afterQuery}`
+      + ` floats=${floats().map((item) => item.textContent).join(",")}`);
+  check("U3-04b 反间的目标线复用 U3-03 的线层：发动者 1 → 目标 0（data-line-to=0）",
+    lineNodes().length === 1
+      && attr(lineNodes()[0], "data-line-to") === "0"
+      && attr(lineNodes()[0], "data-line-from") === "1",
+    `lines=${lineNodes().map((item) => `${attr(item, "data-line-from")}->${attr(item, "data-line-to")}`).join(",")}`);
+  // U3-05 起每步都全表重绘（座位节点会换），而 `animScale = 0` 的白光"到点即结束"——
+  // 故"发动时挂上"要在**发动那一步**读；"活过重绘"由 U3-05r 在 animScale = 1 下另钉。
+  const sweepAtActivation = hasClass(heroBlockOf(1), "skill-sweep")
+    && !hasClass(heroBlockOf(0), "skill-sweep");
+  step();  // hp_change(3)
+  check("U3-04c 白光：发动者武将块在发动时挂 .skill-sweep（裁在块内由 CSS 的 overflow:hidden 保证）",
+    sweepAtActivation,
+    `seat1=${sweepAtActivation} self=${hasClass($("t-self-hero"), "skill-sweep")}`);
+
+  // ---- 同一武将块 2s 内两条：不合并 / 不去重；后一条起点抬高 14 设计单位 ----
+  loadSkillBatch(
+    [query(1, 1), skillAction(2), query(3, 1), skillAction(4)],
+    [skillEvent(2, 1, "反间", []), skillEvent(4, 1, "制衡", [])],
+  );
+  step(4);
+  const stacked = floats();
+  const tops = stacked.map((item) => parseFloat(item.style.top));
+  check("U3-04d 同一武将块 2s 内两条：两个独立飘字，后一条起点抬高 14 设计单位",
+    stacked.length === 2
+      && stacked[0].textContent === "反间" && stacked[1].textContent === "制衡"
+      && attr(stacked[0], "data-skill-stack") === "0"
+      && attr(stacked[1], "data-skill-stack") === "1"
+      && Math.abs((tops[0] - tops[1]) - 14) < 1e-6,
+    `n=${stacked.length} stacks=${stacked.map((item) => attr(item, "data-skill-stack")).join(",")}`
+      + ` tops=${tops.join(",")}`);
+  check("U3-04e 没有指定目标的发动（制衡 / 装备技）：只飘名 + 白光，一条线都不画",
+    lineNodes().length === 0 && hasClass(heroBlockOf(1), "skill-sweep"),
+    `lines=${lineNodes().length} sweep=${hasClass(heroBlockOf(1), "skill-sweep")}`);
+
+  // ---- 自己（底部武将块）也会飘：同一条路径，不是只给环上对手 ----
+  loadSkillBatch(
+    [query(1, 0), skillAction(2)],
+    [skillEvent(2, 0, "遗计", [2])],
+  );
+  step(2);
+  check("U3-04f 自己的发动：飘字挂在自己武将块上、白光落在 #t-self-hero、并向目标画线",
+    floats().length === 1 && attr(floats()[0], "data-skill-seat") === "0"
+      && hasClass($("t-self-hero"), "skill-sweep")
+      && lineNodes().length === 1 && attr(lineNodes()[0], "data-line-to") === "2",
+    `floats=${floats().length} selfSweep=${hasClass($("t-self-hero"), "skill-sweep")}`
+      + ` lines=${lineNodes().map((item) => attr(item, "data-line-to")).join(",")}`);
+
+  // ---- 使用牌不飘技能名（转化技武圣 / 龙胆 / 奇袭最终走 UseCard，没有 ActivateSkill 记录）----
+  loadSkillBatch(
+    [query(1, 2), useAction(2), designate(3, 2, [0])],
+    [],
+  );
+  step(3);
+  check("U3-04g 使用牌不飘技能名 / 不扫白光：只有 U3-03 的使用牌目标线",
+    floats().length === 0
+      && allHeroBlocks().every((block) => !hasClass(block, "skill-sweep"))
+      && lineNodes().length === 1 && attr(lineNodes()[0], "data-line-to") === "0",
+    `floats=${floats().length} sweeps=${allHeroBlocks().filter((b) => hasClass(b, "skill-sweep")).length}`
+      + ` lines=${lineNodes().length}`);
+
+  // ---- 纯刷新（没有 records）：事件立即演出，不等回放 ----
+  const refreshSession = loadSkillBatch([query(1, 1), skillAction(2)], [skillEvent(2, 1, "反间", [])]);
+  step(2);
+  const beforeRefresh = floats().length;
+  ui.applyViewRaw({
+    ...baseView(refreshSession), cursor: 2, log_seq: 0, records: [],
+    skill_events: [skillEvent(6, 1, "反间", [])], finished: false,
+  });
+  check("U3-04h 纯刷新（无回放）：技能名立即演出，不丢事件、不等不存在的记录步",
+    beforeRefresh === 1 && floats().length === 2
+      && (ui.state.skillEvents || []).length === 0,
+    `before=${beforeRefresh} after=${floats().length} pending=${(ui.state.skillEvents || []).length}`);
+
+  // ---- 名字只用服务端下发的 name：前端没有 skill_id → 中文常量表 ----
+  loadSkillBatch(
+    [query(1, 1), skillAction(2)],
+    [{ seq: 2, seat: 1, skill_id: "hero.zhouyu.fanjian", name: "服务端命名", targets: [] }],
+  );
+  step(2);
+  check("U3-04j 飘字的文本就是下发载荷的 name（前端没有 skill_id → 中文常量表）",
+    floats().length === 1 && floats()[0].textContent === "服务端命名",
+    `floats=${floats().map((item) => item.textContent).join(",")}`);
+
+  // ---- 换会话：飘字 / 白光 / 待触发事件一起清掉，不给下一局留残影 ----
+  ui.applyViewRaw({
+    ...baseView("u3-skill-next"), cursor: 0, log_seq: 0, records: [],
+    skill_events: [], finished: false,
+  });
+  check("U3-04i 换会话清空技能名 / 白光 / 待触发事件",
+    floats().length === 0
+      && (ui.state.skillEvents || []).length === 0
+      && allHeroBlocks().every((block) => !hasClass(block, "skill-sweep"))
+      && lineNodes().length === 0,
+    `floats=${floats().length} pending=${(ui.state.skillEvents || []).length}`
+      + ` sweeps=${allHeroBlocks().filter((b) => hasClass(b, "skill-sweep")).length}`);
+
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.animScale = 1;
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+}
+
+/* ============ U3-05（票 05）：逐事件全表更新 / 静默轮询 / 步长 200ms ============
+ *
+ * 判据来自票面与 spec D11 / D12 / D13（步长）。载荷是**与响应体同形**的合成 view + 记录；
+ * 回放用 `stepPlayback(true)` 逐条推进（不跑真实计时器），轮询直接取 `wire()` 注册的 2s
+ * 间隔回调（垫片只登记、不自动跑）。断言只落在 DOM 与 `state.liveView` / `state.view`
+ * 的可观察值上；派生集合之外的东西（技能可用性 / 体力上限 / 上一问）另行显式钉住。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+    || String(node.className || "").split(/\s+/).includes(name)));
+  const seatNodesNow = () => [...$("t-seats").children, $("t-self-seat")];
+  const seatNodeOf = (seat) => seatNodesNow().find(
+    (node) => attr(node, "data-seat") === String(seat)) || null;
+  const seatText = (seat) => (seatNodeOf(seat) ? seatNodeOf(seat).text() : "")
+    .replace(/\s+/g, " ").trim();
+  const seatPlayer = (seat, extra = {}) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: `武将${seat}`, ...extra,
+  });
+  const basePlayers = () => [seatPlayer(0), seatPlayer(1), seatPlayer(2), seatPlayer(3)];
+  const ownPending = (seq) => ({
+    kind: "PLAY_PHASE", actor: 0, seq, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: seq }],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  const foreignPending = (seq, actor) => ({
+    kind: "PLAY_PHASE", actor, seq, prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [], candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  const testSkill = (available = true) => ({
+    skill_id: "hero.test.skill", name: "测试技", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", description: "测试用技能", available, ui: {},
+  });
+  /** 一份干净的基准提交视图；`session` 相同 = 同一会话（不清 live view）。 */
+  const baseView = (session, players = basePlayers()) => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.heroes = { 0: "guojia", 1: "zhouyu", 2: "diaochan", 3: "zhangfei" };
+    out.records = [];
+    out.narrative = [];
+    out.cursor = 100;
+    out.log_seq = 0;
+    out.finished = false;
+    out.snapshot.players = players;
+    out.snapshot.self_hand = [synthCard(11, "杀"), synthCard(12, "闪")];
+    out.snapshot.deck_count = 40;
+    out.snapshot.discard = [synthCard(13, "桃")];
+    out.snapshot.processing = [];
+    out.snapshot.turn_seat = 0;
+    out.snapshot.phase = "play";
+    out.skills = [testSkill(true)];
+    out.pending = ownPending(50);
+    return out;
+  };
+  const moveRecord = (seq, options) => ({
+    kind: "delta", delta_type: "card_move", seq, frame_id: 0, depth: 0,
+    reason: options.reason || "MOVE",
+    owner: options.owner === undefined ? null : options.owner,
+    from_zone: options.from, to_zone: options.to,
+    cards: options.cards || [],
+    ...(options.cardCount === undefined ? {} : { card_count: options.cardCount }),
+  });
+  const timing = (seq, name, extra = {}) => ({
+    kind: "timing", timing: name, seq, frame_id: 0, depth: 0, targets: [], cards: [], ...extra,
+  });
+  /** 派生集合（D11 的"可派生"清单）：逐事件由记录写进 live view 的那几项。 */
+  const derived = (snapshot) => ({
+    seat: snapshot.seat,
+    deck_count: snapshot.deck_count,
+    self_hand: snapshot.self_hand.map((card) => card.card_id),
+    discard: snapshot.discard.map((card) => card.card_id),
+    turn_seat: snapshot.turn_seat,
+    phase: snapshot.phase,
+    players: snapshot.players.map((player) => ({
+      seat: player.seat,
+      hp: player.hp,
+      hand_count: player.hand_count,
+      alive: player.alive,
+      chained: Boolean(player.chained),
+      wine_active: Boolean(player.wine_active),
+      identity: player.identity,
+      identity_label: player.identity_label || null,
+      // 装备区只比**成员**：权威顺序是槽位枚举序（`SlotKind`），前端不复制第二份槽序；
+      // 判定区按置入序（`extend`），故比次序。
+      equip: player.equip.map((card) => card.card_id).sort((left, right) => left - right),
+      judge: player.judge.map((card) => card.card_id),
+    })),
+  });
+  const step = (count = 1) => {
+    for (let index = 0; index < count; index += 1) ui.stepPlayback(true);
+  };
+
+  ui.state.animScale = 1;
+
+  // ---- ① 逐事件更新 + 派生视图 vs 提交快照（不变量） ----
+  const session = "u3-live-1";
+  const equipCard = { ...synthCard(15, "青龙偃月刀"), slot: "weapon", type: "equip", attack_range: 3 };
+  const base = baseView(session);
+  ui.state.view = null;
+  ui.state.logRecords = [];
+  $("t-log").innerHTML = "";
+  ui.applyViewRaw(base);
+  check("U3-05a0 提交后 live view 从最近一次提交视图起算",
+    Boolean(ui.state.liveView) && ui.state.liveView !== ui.state.view
+      && ui.state.liveView.snapshot !== ui.state.view.snapshot
+      && JSON.stringify(derived(ui.state.liveView.snapshot))
+        === JSON.stringify(derived(base.snapshot)),
+    `live=${Boolean(ui.state.liveView)} viewSame=${ui.state.liveView === ui.state.view}`);
+
+  const tape = [
+    { kind: "delta", delta_type: "hp_change", seq: 101, frame_id: 3, depth: 1,
+      seat: 1, before: 4, after: 3, amount: -1 },
+    // 对手摸牌：隐藏区只给张数（服务端 `visible_record` 的裁剪形状）。
+    moveRecord(102, { reason: "DRAW", owner: 1, from: { seat: null, zone: "deck" },
+      to: { seat: 1, zone: "hand" }, cardCount: 2 }),
+    // 自己摸牌：牌面可见（自己的手牌不是隐藏信息）。
+    moveRecord(103, { reason: "DRAW", owner: 0, from: { seat: null, zone: "deck" },
+      to: { seat: 0, zone: "hand" }, cards: [synthCard(14, "闪")] }),
+    // 装备置入：公开区牌面。
+    moveRecord(104, { reason: "PUT", owner: 1, from: { seat: 1, zone: "hand" },
+      to: { seat: 1, zone: "equip" }, cards: [equipCard] }),
+    moveRecord(105, { reason: "DISCARD", owner: 2, from: { seat: 2, zone: "hand" },
+      to: { seat: null, zone: "discard" }, cards: [synthCard(16, "桃")] }),
+    moveRecord(106, { reason: "PUT", owner: 2, from: { seat: null, zone: "deck" },
+      to: { seat: 2, zone: "judge" }, cards: [synthCard(17, "乐不思蜀")] }),
+    { kind: "delta", delta_type: "chained_change", seq: 107, frame_id: 0, depth: 0,
+      seat: 2, chained: true },
+    { kind: "delta", delta_type: "wine_change", seq: 108, frame_id: 0, depth: 0,
+      seat: 0, active: true },
+    { kind: "delta", delta_type: "identity_reveal", seq: 109, frame_id: 0, depth: 0,
+      seat: 3, identity: "rebel" },
+    timing(110, "DEATH_BEFORE_START", { frame_id: 9, depth: 2, actor: 3, targets: [3] }),
+    timing(111, "TURN_END", { actor: 0 }),
+    timing(112, "TURN_BEFORE_START", { actor: 1 }),
+    timing(113, "TURN_START", { actor: 1 }),
+    timing(114, "PHASE_DRAW_START", { actor: 1 }),
+    timing(115, "PHASE_DRAW", { actor: 1 }),
+    timing(116, "PHASE_PLAY_START", { actor: 1 }),
+    // 重洗：弃牌堆并回牌堆（牌面是公开的；牌堆只给数量）。
+    { kind: "delta", delta_type: "deck_shuffle", seq: 117, frame_id: 0, depth: 0,
+      cards: [synthCard(13, "桃"), synthCard(16, "桃")],
+      from_zone: { seat: null, zone: "discard" }, to_zone: { seat: null, zone: "deck" } },
+  ];
+  const authoritative = baseView(session);
+  authoritative.cursor = 117;
+  authoritative.pending = ownPending(51);
+  authoritative.skills = [testSkill(false)];
+  authoritative.snapshot.players = [
+    seatPlayer(0, { hand_count: 3, wine_active: true }),
+    seatPlayer(1, { hp: 3, hp_max: 5, hand_count: 3, equip: [equipCard] }),
+    seatPlayer(2, { hand_count: 1, judge: [synthCard(17, "乐不思蜀")], chained: true }),
+    seatPlayer(3, { alive: false, identity: "rebel", identity_label: "反贼" }),
+  ];
+  authoritative.snapshot.self_hand = [synthCard(11, "杀"), synthCard(12, "闪"), synthCard(14, "闪")];
+  authoritative.snapshot.deck_count = 38;
+  authoritative.snapshot.discard = [];
+  authoritative.snapshot.turn_seat = 1;
+  authoritative.snapshot.phase = "play";
+  ui.applyViewRaw({ ...authoritative, records: tape });
+  check("U3-05a1 收到记录先回放（还没提交、表体仍是上一份视图）",
+    Boolean(ui.state.playback) && ui.state.view.cursor === 100,
+    `playback=${Boolean(ui.state.playback)} cursor=${ui.state.view.cursor}`);
+
+  step();  // 101 hp_change
+  check("U3-05a 体力随 hp_change 逐事件变化（不等到整批播完）",
+    seatText(1).includes("3/4"), `座1="${seatText(1)}"`);
+  step();  // 102 对手摸两张
+  check("U3-05b 对手手牌数随摸牌事件变化（隐藏区只给张数）",
+    seatText(1).includes("手牌 4"), `座1="${seatText(1)}"`);
+  step();  // 103 自己摸一张
+  check("U3-05c 自己的手牌数 / 手牌面随事件更新",
+    $("t-hand-count").textContent === "3 张" && $("t-hand").children.length === 3
+      && $("t-hand").children.some((node) => attr(node, "data-card-id") === "14"),
+    `count="${$("t-hand-count").textContent}" hand=${$("t-hand").children.length}`);
+  step();  // 104 装备置入
+  check("U3-05d 装备区牌面随 card_move 更新",
+    walk(seatNodeOf(1)).some((node) => attr(node, "data-card-id") === "15"),
+    `座1="${seatText(1)}"`);
+  step();  // 105 弃置进弃牌堆
+  check("U3-05e 弃牌堆数量随事件更新",
+    $("t-discard").textContent === "2", `弃牌="${$("t-discard").textContent}"`);
+  step();  // 106 判定区
+  const deckAfterSix = $("t-deck").textContent;
+  check("U3-05f 判定区牌面 / 牌堆数量随事件更新",
+    walk(seatNodeOf(2)).some((node) => attr(node, "data-card-id") === "17")
+      && deckAfterSix === "36",
+    `座2="${seatText(2)}" deck=${deckAfterSix}`);
+  step();  // 107 横置
+  check("U3-05g 横置随 chained_change 更新",
+    hasClass(seatNodeOf(2), "chained"), `座2="${seatText(2)}"`);
+  step();  // 108 酒
+  check("U3-05h 酒随 wine_change 更新（自己座位泛红）",
+    hasClass($("t-self-seat"), "wine"), `self="${$("t-self-seat").className}"`);
+  step();  // 109 身份亮明
+  const badge = walk(seatNodeOf(3)).find((node) => hasClass(node, "identity-badge"));
+  check("U3-05i 身份亮明随 identity_reveal 更新",
+    Boolean(badge) && badge.textContent === "反贼", `badge=${badge ? badge.textContent : "(缺)"}`);
+  step();  // 110 阵亡
+  check("U3-05j 阵亡随 DEATH_BEFORE_START 更新",
+    hasClass(seatNodeOf(3), "dead"), `座3="${seatText(3)}"`);
+  step(2);  // 111 TURN_END / 112 TURN_BEFORE_START
+  check("U3-05k 回合随 TURN_* 更新",
+    $("t-turn").textContent === "座位 1", `回合="${$("t-turn").textContent}"`);
+  step(2);  // 113 TURN_START / 114 PHASE_DRAW_START
+  const midPhase = $("t-phase").textContent;
+  step(2);  // 115 PHASE_DRAW / 116 PHASE_PLAY_START
+  check("U3-05l 阶段随 PHASE_* 更新",
+    midPhase === "摸牌阶段" && $("t-phase").textContent === "出牌阶段",
+    `mid="${midPhase}" now="${$("t-phase").textContent}"`);
+  step();  // 117 重洗
+  check("U3-05m 重洗把弃牌堆并回牌堆（弃牌清零 / 牌堆补回）",
+    $("t-discard").textContent === "0" && $("t-deck").textContent === "38",
+    `弃牌="${$("t-discard").textContent}" 牌堆="${$("t-deck").textContent}"`);
+
+  const liveBeforeCommit = ui.state.liveView;
+  check("U3-05n 派生视图与随后提交的权威快照一致（派生集合内）",
+    JSON.stringify(derived(liveBeforeCommit.snapshot))
+      === JSON.stringify(derived(authoritative.snapshot)),
+    `live=${JSON.stringify(derived(liveBeforeCommit.snapshot))}`
+      + ` authoritative=${JSON.stringify(derived(authoritative.snapshot))}`);
+  check("U3-05n2 逐事件（不是最后一次性跳变）：中途的牌堆数曾到 36",
+    deckAfterSix === "36" && $("t-deck").textContent === "38",
+    `mid=${deckAfterSix} final=${$("t-deck").textContent}`);
+  check("U3-05n3 不可派生字段留在最近一次提交：体力上限 / 技能可用性 / 上一问",
+    liveBeforeCommit.snapshot.players.find((player) => player.seat === 1).hp_max === 4
+      && liveBeforeCommit.skills[0].available === true
+      && liveBeforeCommit.pending.seq === 50
+      && authoritative.snapshot.players.find((player) => player.seat === 1).hp_max === 5
+      && authoritative.skills[0].available === false
+      && authoritative.pending.seq === 51,
+    `live hp_max=${liveBeforeCommit.snapshot.players[1].hp_max}`
+      + ` available=${liveBeforeCommit.skills[0].available} pending=${liveBeforeCommit.pending.seq}`);
+  ui.flushPlayback();
+  check("U3-05o 提交用权威快照覆盖 live view（不可派生字段随之更新）",
+    ui.state.playback === null
+      && ui.state.liveView !== ui.state.view
+      && ui.state.liveView.snapshot !== ui.state.view.snapshot
+      && JSON.stringify(derived(ui.state.liveView.snapshot))
+        === JSON.stringify(derived(ui.state.view.snapshot))
+      && ui.state.liveView.snapshot.players[1].hp_max === 5
+      && ui.state.liveView.skills[0].available === false
+      && ui.state.liveView.pending.seq === 51,
+    `playback=${Boolean(ui.state.playback)} hp_max=${ui.state.liveView.snapshot.players[1].hp_max}`);
+
+  // ---- ② 播放期间不画上一问的 pending 派生 UI ----
+  // 上一问是**别人**的：提交视图里那个座位挂「正在响应…」，播放期间必须收起。
+  const foreignBase = baseView("u3-live-foreign");
+  foreignBase.pending = foreignPending(50, 1);
+  ui.state.view = null;
+  ui.applyViewRaw(foreignBase);
+  const promptsBefore = walk($("t-seats")).filter((node) => hasClass(node, "seat-prompt"));
+  ui.applyViewRaw({
+    ...foreignBase, cursor: 201, pending: ownPending(51),
+    records: [{ kind: "delta", delta_type: "hp_change", seq: 201, frame_id: 3, depth: 1,
+      seat: 2, before: 4, after: 3, amount: -1 }],
+  });
+  step();
+  const promptsDuring = walk($("t-seats")).concat(walk($("t-self-seat")))
+    .filter((node) => hasClass(node, "seat-prompt"));
+  check("U3-05p 播放期间不画上一问的「正在响应…」（提交后恢复）",
+    promptsBefore.length === 1 && promptsBefore[0].textContent === "正在响应…"
+      && promptsDuring.length === 0,
+    `before=${promptsBefore.length} during=${promptsDuring.length}`);
+  ui.flushPlayback();
+  check("U3-05p2 播完提交后 pending 派生的座位提示按新询问重算",
+    walk($("t-seats")).filter((node) => hasClass(node, "seat-prompt")).length === 0
+      && ui.state.view.pending.seq === 51,
+    `prompts=${walk($("t-seats")).filter((node) => hasClass(node, "seat-prompt")).length}`);
+
+  // 上一问是**自己**的：技能按钮在提交视图里可点，播放期间不得画可点态。
+  const ownBase = baseView("u3-live-own");
+  ui.state.view = null;
+  ui.applyViewRaw(ownBase);
+  const skillButton = () => walk($("t-skills")).find(
+    (node) => attr(node, "data-skill-id") === "hero.test.skill") || null;
+  const readyBefore = skillButton();
+  ui.applyViewRaw({
+    ...ownBase, cursor: 301, pending: ownPending(51),
+    records: [{ kind: "delta", delta_type: "hp_change", seq: 301, frame_id: 3, depth: 1,
+      seat: 2, before: 4, after: 3, amount: -1 }],
+  });
+  step();
+  const readyDuring = skillButton();
+  check("U3-05q 播放期间技能按钮不画可点态（上一问的可点态收起）",
+    hasClass(readyBefore, "ready") && attr(readyBefore, "data-usable") === "true"
+      && readyBefore.disabled === false
+      && !hasClass(readyDuring, "ready") && attr(readyDuring, "data-usable") === "false"
+      && readyDuring.disabled === true
+      && $("t-prompt-skills").children.length === 0,
+    `before=${readyBefore ? readyBefore.className : "(缺)"}`
+      + ` during=${readyDuring ? readyDuring.className : "(缺)"}`
+      + ` usable=${readyDuring ? attr(readyDuring, "data-usable") : "-"}`
+      + ` promptSkills=${$("t-prompt-skills").children.length}`);
+  ui.flushPlayback();
+  check("U3-05q2 提交后可点态随新询问恢复",
+    hasClass(skillButton(), "ready") && attr(skillButton(), "data-usable") === "true",
+    `after=${skillButton() ? skillButton().className : "(缺)"}`);
+
+  // ---- ③ 每步全表重绘后，票 03/04 的线 / 描边 / 技能名仍在 ----
+  const effectsBase = baseView("u3-live-effects");
+  ui.state.view = null;
+  ui.applyViewRaw(effectsBase);
+  const designate = { kind: "timing", timing: "USE_DESIGNATE_TARGET", seq: 402,
+    frame_id: 5, depth: 1, actor: 1, source: 1, targets: [2], cards: [] };
+  const skillAction = { kind: "action", seq: 403, accepted: true, reason: null,
+    action: { kind: "ActivateSkill", answers_seq: 402,
+      skill_id: "hero.test.skill", choices: [], picks: [] } };
+  ui.applyViewRaw({
+    ...effectsBase, cursor: 404, pending: ownPending(51),
+    records: [
+      { kind: "query", seq: 401, query: { actor: 1 } },
+      designate,
+      skillAction,
+      { kind: "delta", delta_type: "hp_change", seq: 404, frame_id: 5, depth: 1,
+        seat: 2, before: 4, after: 3, amount: -1 },
+    ],
+    skill_events: [{ seq: 403, seat: 1, skill_id: "hero.test.skill", name: "测试技", targets: [] }],
+  });
+  const lineCount = () => walk($("t-target-lines")).filter(
+    (node) => hasClass(node, "target-line") && attr(node, "data-line-to") !== undefined).length;
+  const floatCount = () => walk($("t-skill-floats")).filter(
+    (node) => hasClass(node, "skill-float")).length;
+  const actingCount = () => seatNodesNow().filter((node) => hasClass(node, "acting")).length;
+  const sweptCount = () => seatNodesNow().filter((node) => {
+    const block = walk(node).find((child) => hasClass(child, "hero-block"));
+    return hasClass(block, "skill-sweep");
+  }).length + (hasClass($("t-self-hero"), "skill-sweep") ? 1 : 0);
+  step(2);  // query / designate
+  const lineAfterDesignate = lineCount();
+  const actingAfterDesignate = actingCount();
+  step();  // action → 技能名飘字 + 白光
+  const floatAfterAction = floatCount();
+  const sweepAfterAction = sweptCount();
+  step();  // hp_change → 又一次全表重绘
+  check("U3-05r 每步全表重绘后票 03/04 的线 / 描边 / 技能名 / 白光仍在（独立图层 + syncTransientEffects）",
+    lineAfterDesignate === 1 && actingAfterDesignate === 1 && floatAfterAction === 1
+      && sweepAfterAction === 1
+      && lineCount() === 1 && floatCount() === 1 && actingCount() === 1 && sweptCount() === 1,
+    `line=${lineAfterDesignate}->${lineCount()} acting=${actingAfterDesignate}->${actingCount()}`
+      + ` float=${floatAfterAction}->${floatCount()} sweep=${sweepAfterAction}->${sweptCount()}`);
+  ui.flushPlayback();
+
+  // ---- ④ 静默 2s 轮询（真会话）：没新事实时不清选择 ----
+  ui.show("table");
+  const pollSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: 60, seed: 20261013,
+  });
+  await openSession(pollSession);
+  const pollTimer = intervals.find((entry) => entry.ms === 2000);
+  check("U3-05s 2 秒轮询已接上（唯一一条 2000ms 间隔）",
+    Boolean(pollTimer) && intervals.filter((entry) => entry.ms === 2000).length === 1,
+    `intervals=${intervals.map((entry) => entry.ms).join(",")}`);
+  const pollPending = ui.state.view.pending;
+  const handCardId = (ui.state.view.snapshot.self_hand[0] || {}).card_id;
+  check("U3-05s2 静默轮询的前置：真会话停在人类询问上",
+    Boolean(pollPending) && handCardId !== undefined,
+    `pending=${pollPending ? pollPending.kind : "(无)"} card=${handCardId}`);
+  // 选到一半：焦点 / 已选目标 / 预发动本地态都摆上。
+  ui.state.focusCardId = handCardId;
+  ui.state.selectedTargets = [1];
+  ui.state.preactivation = {
+    skillId: "hero.test.skill", name: "测试技", steps: [], answers: [], cursor: 0,
+  };
+  const viewBefore = ui.state.view;
+  const ringFirst = $("t-seats").children[0];
+  const clockBefore = ui.state.pendingClock.receivedAt;
+  const idleCallsBefore = calls.length;
+  await pollTimer.fn();
+  const idleGets = calls.slice(idleCallsBefore).filter(
+    (call) => call.path.startsWith("/api/sessions/") && call.body === null);
+  check("U3-05t 静默轮询：游标与询问序号都没变 ⇒ 不提交、不重绘、不清选择",
+    idleGets.length === 1
+      && ui.state.view === viewBefore
+      && ui.state.liveView && ui.state.liveView.pending === viewBefore.pending
+      && $("t-seats").children[0] === ringFirst
+      && ui.state.focusCardId === handCardId
+      && ui.state.selectedTargets.join(",") === "1"
+      && ui.state.preactivation && ui.state.preactivation.name === "测试技"
+      && ui.state.pendingClock.receivedAt === clockBefore,
+    `gets=${idleGets.length} viewSame=${ui.state.view === viewBefore}`
+      + ` ringSame=${$("t-seats").children[0] === ringFirst}`
+      + ` focus=${ui.state.focusCardId} targets=${ui.state.selectedTargets.join(",")}`
+      + ` pre=${ui.state.preactivation ? ui.state.preactivation.name : "(清空)"}`
+      + ` clockSame=${ui.state.pendingClock.receivedAt === clockBefore}`);
+
+  // 弹窗打开期间继续轮询（超时代答靠它生效）：不因为 `state.dialog.open` 跳过。
+  ui.state.dialog.open = true;
+  const dialogCallsBefore = calls.length;
+  await pollTimer.fn();
+  const dialogGets = calls.slice(dialogCallsBefore).filter(
+    (call) => call.path.startsWith("/api/sessions/") && call.body === null);
+  ui.state.dialog.open = false;
+  check("U3-05u 弹窗打开期间仍轮询（超时代答依赖它）",
+    dialogGets.length === 1, `gets=${dialogGets.length}`);
+
+  // 失败静默：前两次页面一字不动，连续第 3 次才提示。
+  const noticeBefore = $("t-choice").textContent;
+  const failureCallsBefore = calls.length;
+  failNextGets = 1;
+  await pollTimer.fn();
+  const noticeAfterFirst = $("t-choice").textContent;
+  failNextGets = 1;
+  await pollTimer.fn();
+  const noticeAfterSecond = $("t-choice").textContent;
+  failNextGets = 1;
+  await pollTimer.fn();
+  const noticeAfterThird = $("t-choice").textContent;
+  failNextGets = 0;
+  const failureGets = calls.slice(failureCallsBefore).filter(
+    (call) => call.path.startsWith("/api/sessions/") && call.body === null).length;
+  check("U3-05v 轮询失败静默：前两次不提示，连续第 3 次才提示",
+    failureGets === 3
+      && noticeAfterFirst === noticeBefore
+      && noticeAfterSecond === noticeBefore
+      && noticeAfterThird.includes("取增量失败"),
+    `gets=${failureGets} firstSame=${noticeAfterFirst === noticeBefore}`
+      + ` secondSame=${noticeAfterSecond === noticeBefore} third="${noticeAfterThird}"`);
+
+  // ---- ⑤ 播放中 / 提交在飞时暂停轮询，commit 后恢复 ----
+  const resumeSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: 60, seed: 20261014,
+  });
+  await openSession(resumeSession);
+  ui.applyViewRaw({
+    ...resumeSession, cursor: resumeSession.cursor + 1, pending: null,
+    records: [{ kind: "delta", delta_type: "hp_change", seq: resumeSession.cursor + 1,
+      frame_id: 3, depth: 1, seat: 1, before: 4, after: 3, amount: -1 }],
+  });
+  const playCallsBefore = calls.length;
+  await pollTimer.fn();
+  const playGets = calls.slice(playCallsBefore).filter(
+    (call) => call.path.startsWith("/api/sessions/") && call.body === null).length;
+  check("U3-05w 播放中暂停轮询（整批事件播完之前不发 GET）",
+    Boolean(ui.state.playback) && playGets === 0,
+    `playback=${Boolean(ui.state.playback)} gets=${playGets}`);
+  ui.flushPlayback();
+  const resumeCallsBefore = calls.length;
+  await pollTimer.fn();
+  const resumeGets = calls.slice(resumeCallsBefore).filter(
+    (call) => call.path.startsWith("/api/sessions/") && call.body === null).length;
+  check("U3-05w2 commit 后轮询恢复", ui.state.playback === null && resumeGets === 1,
+    `playback=${Boolean(ui.state.playback)} gets=${resumeGets}`);
+  ui.state.submitBusy = true;
+  const busyCallsBefore = calls.length;
+  await pollTimer.fn();
+  const busyGets = calls.slice(busyCallsBefore).filter(
+    (call) => call.path.startsWith("/api/sessions/") && call.body === null).length;
+  ui.state.submitBusy = false;
+  check("U3-05w3 提交在飞时暂停轮询（不换掉点击前那一面）",
+    busyGets === 0, `gets=${busyGets}`);
+
+  // 收尾：状态不留给后面的用例（本段在文件末尾，只是 hygiene）。
+  ui.state.liveView = null;
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.playback = null;
+  ui.state.animScale = 1;
+  ui.resetSelection();
+  ui.state.cursor = -1;
+  ui.state.pendingClock.seq = null;
+  ui.state.pendingClock.receivedAt = 0;
+}
+
+/* ============ U3 评审修复：读取方（live view / 跨快照来源）+ 纯函数直喂 ============
+ *
+ * 三条都来自 U3 的评审（`CODING_STANDARDS.md` §1 / §4 / §6）：
+ *  - D8.1：目标线的「目标已阵亡」必须读**牌桌正在渲染的视图**（回放期 = 逐事件派生的
+ *    `state.liveView`）。同一批里刚阵亡的座位只在 live view 里 `alive === false`，读上一份
+ *    提交的 `state.view` 会把线画到已死的座位上；舞台底行的武将名同理（:func:`tableViewForRender`）。
+ *  - D2 / D10：`mergeEffectCards` 从快照补出来的处理中项没有产生它的 `card_move`，
+ *    来源从这份舞台项列表记着的 `card_id → fromZone` 里补回来（真机验收的【火攻】底行空）。
+ *  - D15：`stageLane` 是纯函数，直接喂 `now` 断 visible / fading / gone，不经过
+ *    `renderProcessing`。
+ * 载荷与响应体同形；时间不靠真实等待。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+      || String(node.className || "").split(/\s+/).includes(name)));
+  const seatNodesNow = () => [...$("t-seats").children, $("t-self-seat")];
+  const seatNodeOf = (seat) => seatNodesNow().find(
+    (node) => attr(node, "data-seat") === String(seat)) || null;
+  const lineNodes = () => walk($("t-target-lines")).filter(
+    (node) => hasClass(node, "target-line") && attr(node, "data-line-to") !== undefined);
+  const stageNodes = () => $("t-processing").children.filter(
+    (node) => node.classList.contains("stage-card"));
+  const stageNode = (id) => stageNodes().find(
+    (node) => attr(node, "data-card-id") === String(id));
+  const stageLineNode = (id) => {
+    const node = stageNode(id);
+    return node ? walk(node).find((child) => hasClass(child, "ctype")) || null : null;
+  };
+  const stageLine = (id) => (stageLineNode(id) ? stageLineNode(id).textContent : "");
+  const labelOf = (id) => attr(stageLineNode(id), "data-zone-label");
+  const seatPlayer = (seat, heroName) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName,
+  });
+  const card = (id, name) => ({
+    ...synthCard(id, name), kind: "normal", attribute: "普通",
+    description: `【${name}】的全文描述`,
+  });
+  const baseView = (session) => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.heroes = { 0: "guojia", 1: "zhouyu", 2: "diaochan", 3: "zhangfei" };
+    out.records = [];
+    out.narrative = [];
+    out.snapshot.processing = [];
+    out.snapshot.players = [
+      seatPlayer(0, "郭嘉"), seatPlayer(1, "周瑜"),
+      seatPlayer(2, "貂蝉"), seatPlayer(3, "张飞"),
+    ];
+    return out;
+  };
+  const designate = (seq, actor, targets) => ({
+    kind: "timing", timing: "USE_DESIGNATE_TARGET", seq, frame_id: 5, depth: 1,
+    actor, source: actor, targets, cards: [],
+  });
+  const death = (seq, seat) => ({
+    kind: "timing", timing: "DEATH_BEFORE_START", seq, frame_id: 9, depth: 2,
+    actor: seat, targets: [seat], cards: [],
+  });
+  const move = (seq, moved, from, to) => ({
+    kind: "delta", delta_type: "card_move", seq, frame_id: 0, depth: 1, reason: "USE",
+    owner: from.seat === null || from.seat === undefined ? null : from.seat,
+    from_zone: from, to_zone: to, cards: [moved],
+  });
+  const playerOf = (view, seat) => view.snapshot.players.find(
+    (player) => Number(player.seat) === Number(seat));
+
+  ui.state.animScale = 1;
+
+  // ---- ① 目标线的存活读 live view：提交视图说活、live view 说死 ⇒ 不画线 ----
+  // 先钉夹具：两个视图都活时，同一份目标表真的会画线（否则"没有线"可能只是夹具写错）。
+  ui.state.view = null;
+  ui.applyViewRaw({ ...baseView("u3-review-live"), cursor: 0, records: [], finished: false });
+  ui.applyViewRaw({
+    ...baseView("u3-review-live"), cursor: 1, records: [designate(1, 1, [2])], finished: false,
+  });
+  ui.stepPlayback(true);
+  const fixtureLine = lineNodes().length;
+  ui.flushPlayback();
+  check("U3-R1 夹具：提交视图里目标活着时，USE_DESIGNATE_TARGET 画一条线",
+    fixtureLine === 1 && lineNodes().length === 1, `lines=${lineNodes().length}`);
+
+  // 同一批里目标先阵亡、再收到指定它的目标时机：提交视图仍是"活"，live view 已是"死"。
+  ui.applyViewRaw({ ...baseView("u3-review-live-2"), cursor: 0, records: [], finished: false });
+  const stageCard = card(511, "火攻");
+  ui.applyViewRaw({
+    ...baseView("u3-review-live-2"), cursor: 3, finished: false,
+    records: [
+      death(1, 2),
+      designate(2, 1, [2]),
+      move(3, stageCard, { zone: "hand", seat: 1 }, { zone: "processing", seat: null }),
+    ],
+  });
+  ui.stepPlayback(true);  // 阵亡：只写 live view
+  ui.stepPlayback(true);  // 指定目标：目标在 live view 里已死
+  const committedAlive = playerOf(ui.state.view, 2).alive;
+  const liveAlive = playerOf(ui.state.liveView, 2).alive;
+  const linesToDead = lineNodes().length;
+  check("U3-R2 目标已阵亡读 live view：提交视图说活、live view 说死 ⇒ 不画线",
+    committedAlive === true && liveAlive === false && linesToDead === 0
+      && Boolean(ui.state.playback),
+    `committed=${committedAlive} live=${liveAlive} lines=${linesToDead}`);
+
+  ui.stepPlayback(true);  // 处理中的牌：底行的武将名走**渲染视图**
+  check("U3-R3 播放期间舞台底行仍按渲染视图取武将名（live 路径照常渲染）",
+    Boolean(ui.state.playback) && stageLine(511) === "1·周瑜·手牌"
+      && labelOf(511) === "1·周瑜·手牌",
+    `playback=${Boolean(ui.state.playback)} line="${stageLine(511)}" label=${labelOf(511)}`);
+  ui.flushPlayback();
+
+  // ---- ② 跨快照来源：快照补出来的处理中项仍写得出「座位·武将·区域」（D2 / D10） ----
+  ui.applyViewRaw({ ...baseView("u3-review-zone"), cursor: 0, records: [], finished: false });
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(10, stageCard, { zone: "hand", seat: 1 }, { zone: "processing", seat: null }),
+    ui.state.effectCards);
+  ui.renderProcessing();
+  const recordedLabel = labelOf(511);
+  const recordedItem = (ui.state.effectCards || []).find(
+    (entry) => String(entry.card_id) === "511");
+  // 让这一项离开列表（兜底 30s 到点，只拨 fadeAt、不等真实时间），下一次 commit 只从快照补出来。
+  if (recordedItem) recordedItem.stage.fadeAt = 1;
+  const unseenCard = card(512, "无中生有");
+  const zoneRefresh = baseView("u3-review-zone");
+  zoneRefresh.cursor = 11;
+  zoneRefresh.snapshot.processing = [stageCard, unseenCard];
+  ui.applyViewRaw(zoneRefresh);
+  check("U3-R4 快照补出来的处理中项从列表记的 fromZone 补底行（1·周瑜·手牌）；没见过的牌不编来源",
+    recordedLabel === "1·周瑜·手牌"
+      && stageNode(511) !== undefined
+      && attr(stageNode(511), "data-stage-lane") === "processing"
+      && labelOf(511) === "1·周瑜·手牌"
+      && stageLine(511) === "1·周瑜·手牌"
+      && !labelOf(512) && stageLine(512) === "",
+    `recorded="${recordedLabel}" after="${stageLine(511)}" label=${labelOf(511)}`
+      + ` unseen=${labelOf(512)}`);
+
+  // ---- ③ stageLane 纯函数：直接喂 now 断三段（不经过 renderProcessing，D15） ----
+  ui.state.animScale = 1;
+  const laneItem = {
+    card_id: 77,
+    stage: { lane: "processing", frameId: 0, enteredAt: 1000, fadeAt: 2000, fromZone: null },
+  };
+  const fallbackItem = {
+    card_id: 78,
+    stage: { lane: "discard", frameId: 7, enteredAt: 0, fadeAt: null, fromZone: null },
+  };
+  const stageBefore = $("t-processing").children.length;
+  const lanes = [ui.stageLane(laneItem, 1999), ui.stageLane(laneItem, 2000),
+    ui.stageLane(laneItem, 3000)].join(",");
+  const fallbackLanes = [ui.stageLane(fallbackItem, 29999), ui.stageLane(fallbackItem, 30000),
+    ui.stageLane(fallbackItem, 31000)].join(",");
+  ui.state.animScale = 0;
+  const collapsed = ui.stageLane(laneItem, 2000);
+  ui.state.animScale = 1;
+  check("U3-R5 stageLane 纯函数直喂 now：visible / fading / gone（含兜底 30s；animScale=0 淡出即时）",
+    lanes === "visible,fading,gone"
+      && fallbackLanes === "visible,fading,gone"
+      && collapsed === "gone"
+      && laneItem.stage.fadeAt === 2000
+      && $("t-processing").children.length === stageBefore,
+    `lanes=${lanes} fallback=${fallbackLanes} collapsed=${collapsed}`
+      + ` fadeAt=${laneItem.stage.fadeAt} nodes=${stageBefore}->${$("t-processing").children.length}`);
+
+  // 收尾：不留状态给后面的用例。
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.liveView = null;
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.playback = null;
+  ui.state.animScale = 1;
   ui.resetSelection();
 }
 

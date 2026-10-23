@@ -18,6 +18,8 @@ from sgs.effects import (
     CARD_BEHAVIORS,
     CallOp,
     CardBehavior,
+    FinalZone,
+    ResponseWindow,
     TargetRule,
     UseContext,
     UseLimit,
@@ -27,6 +29,7 @@ from sgs.skills import EQUIPMENT_SKILL_IDS
 
 BASIC_53 = "basic_53"
 STANDARD_108 = "standard_108"
+STANDARD_EX_160 = "standard_ex_160"
 
 
 def _standard_raw() -> dict[str, Any]:
@@ -43,9 +46,10 @@ def _standard_108_raw() -> dict[str, Any]:
 
 
 def _basic_only_raw() -> dict[str, Any]:
-    """只留 ``basic_53`` 档的基底（并把默认档指回它）：改坏牌名时不必连带修 108 档的引用。"""
+    """只留 ``basic_53`` 档的基底（并把默认档指回它）：改坏牌名时不必连带修别的档的引用。"""
     raw = _standard_raw()
     del raw["decks"][STANDARD_108]
+    del raw["decks"][STANDARD_EX_160]
     raw["deck_profile"] = BASIC_53
     return raw
 
@@ -59,7 +63,7 @@ def test_loads_standard_content_pack():
     assert pack.pack_id == "standard"
     assert pack.deck_profile == STANDARD_108
     assert [card_type.id for card_type in pack.card_types][:3] == ["slash", "dodge", "peach"]
-    assert len(pack.card_types) == 32, "标准版全表 32 个牌名"
+    assert len(pack.card_types) == 43, "全包 43 个牌名（标准 32 + 军争 11；默认档仍是 108）"
     assert len(pack.deck.cards) == 108
 
     basic = load_content_pack(deck_profile=BASIC_53)
@@ -87,10 +91,13 @@ def test_the_default_profile_is_selected_by_the_pack_and_can_be_overridden():
     default = load_content_pack()
     basic = load_content_pack(deck_profile=BASIC_53)
     standard = load_content_pack(deck_profile=STANDARD_108)
+    military = load_content_pack(deck_profile=STANDARD_EX_160)
 
     assert default.deck_profile == STANDARD_108, "M2 收口翻默认档（票 32 §1）"
     assert basic.deck_profile == BASIC_53
     assert standard.deck_profile == STANDARD_108
+    assert military.deck_profile == STANDARD_EX_160
+    assert len(military.deck.cards) == 160, "军争是显式选档，总表 108 + 52"
     assert default.deck.cards == standard.deck.cards, "同档同数据"
     assert len(basic.deck.cards) == 53
 
@@ -118,17 +125,22 @@ def _errors(raw: dict[str, Any]) -> tuple[LoadError, ...]:
 
 
 def _rename_type(raw: dict[str, Any], profile: str, old: str, new: str) -> None:
-    """把一个牌名改成新 id（连带牌堆引用与 ``expect.by_type``），用于制造"缺行为"等坏数据。"""
+    """把一个牌名改成新 id（连带**全部档位**的牌堆引用与 ``expect.by_type``）。
+
+    牌名表是全包的：只改默认档会留下别的档位引用旧 id，坏数据基底就不再是"单点根因"。
+    ``profile`` 保留在签名里标明调用方关心的档位，但改名对全包生效。
+    """
+    del profile  # 全档位一起改；保留参数是为了调用点读起来仍标明"针对哪一档"
     for card_type in raw["card_types"]:
         if card_type["id"] == old:
             card_type["id"] = new
-    deck = raw["decks"][profile]
-    for card in deck["cards"]:
-        if card["type"] == old:
-            card["type"] = new
-    by_type = deck["expect"]["by_type"]
-    if old in by_type:
-        by_type[new] = by_type.pop(old)
+    for deck in raw["decks"].values():
+        for card in deck["cards"]:
+            if card["type"] == old:
+                card["type"] = new
+        by_type = deck["expect"]["by_type"]
+        if old in by_type:
+            by_type[new] = by_type.pop(old)
 
 
 def test_unknown_schema_version_is_rejected_as_version_mismatch():
@@ -246,13 +258,14 @@ def test_rank_below_range_is_rejected():
 
 def test_card_type_reference_must_exist():
     raw = _standard_raw()
-    raw["decks"][BASIC_53]["cards"][0]["type"] = "wine"
+    # 不要再用军争牌名当"未知牌"：M5-01a 起 11 个军争 id 已是本包合法牌名。
+    raw["decks"][BASIC_53]["cards"][0]["type"] = "ghost_type"
 
     errors = _errors(raw)
 
     assert errors[0].rule_id == "deck.unknown_type"
     assert errors[0].loc == f"/decks/{BASIC_53}/cards/0/type"
-    assert "wine" in errors[0].got
+    assert "ghost_type" in errors[0].got
 
 
 def test_duplicate_card_type_id_is_rejected():
@@ -430,6 +443,63 @@ def test_a_call_op_must_reference_the_ops_registry(monkeypatch):
     assert [error.rule_id for error in errors] == ["card_type.unknown_op"]
     assert errors[0].loc == "/card_types/0/id"
     assert errors[0].got == "'no_such_op'"
+
+
+def test_the_military_behaviors_declare_the_static_skeleton():
+    """M5-01a 只落静态面：火 / 雷杀同【杀】、酒双语境、锦囊 / 装备的时机与最终去向。
+
+    属性 / 连环 / 重铸 / 装备效果分属 M5-02–06，本测试只钉"装得进、跑得动"的声明面；
+    5 件装备的 ``equip.<id>`` 技能占位同批核。
+    """
+    play = UseTiming(UseContext.PLAY_PHASE)
+
+    for type_id in ("fire_slash", "thunder_slash"):
+        behavior = CARD_BEHAVIORS[type_id]
+        assert behavior.use_timings == (play,)
+        assert behavior.target_rule.rated_targets == 1
+        assert behavior.target_rule.needs_distance is True
+        assert behavior.use_limit.rated == 1
+        assert behavior.response_window is ResponseWindow.DODGE
+        assert behavior.final_zone is FinalZone.DISCARD
+
+    wine = CARD_BEHAVIORS["wine"]
+    assert wine.use_timings == (play, UseTiming(UseContext.NEAR_DEATH))
+    assert wine.target_rule.self_only is True
+    assert wine.final_zone is FinalZone.DISCARD
+
+    iron_chain = CARD_BEHAVIORS["iron_chain"]
+    assert (iron_chain.target_rule.min_targets, iron_chain.target_rule.max_targets) == (1, 2), (
+        "1–2 目标 = M5-03 的 min/max 区间规则（0 目标非法、可指定自己）"
+    )
+    assert iron_chain.target_rule.includes_self_in_pool() is True, "可指定自己（D7）"
+    assert iron_chain.reforgeable is True, "重铸是牌面声明（M5-03 / D6）"
+    assert iron_chain.final_zone is FinalZone.DISCARD
+    assert iron_chain.response_window is ResponseWindow.NULLIFY
+
+    fire_attack = CARD_BEHAVIORS["fire_attack"]
+    assert fire_attack.target_rule.rated_targets == 1
+    assert fire_attack.target_rule.includes_self_in_pool() is True, "可指定自己（M5-06 / D10）"
+    assert fire_attack.target_filters == ("has_hand_cards",), "目标须有手牌（M5-06）"
+    assert fire_attack.response_window is ResponseWindow.NULLIFY
+
+    shortage = CARD_BEHAVIORS["supply_shortage"]
+    assert shortage.is_delayed is True
+    assert shortage.target_rule.max_distance == 1, "兵粮寸断：距离 1"
+    assert shortage.target_rule.includes_self_in_pool() is False, "只能对其他角色（M5-06）"
+    assert shortage.response_window is ResponseWindow.NULLIFY
+
+    for type_id in (
+        "silver_lion",
+        "vine_armor",
+        "ancient_scimitar",
+        "vermilion_feather_fan",
+        "hualiu",
+    ):
+        behavior = CARD_BEHAVIORS[type_id]
+        assert behavior.use_timings == (play,)
+        assert behavior.target_rule.self_only is True
+        assert behavior.final_zone is FinalZone.EQUIP
+        assert f"equip.{type_id}" in EQUIPMENT_SKILL_IDS, "每张装备都有技能占位"
 
 
 def _index_of(raw: dict[str, Any], card_type_id: str) -> int:

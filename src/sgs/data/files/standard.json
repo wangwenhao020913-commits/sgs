@@ -205,6 +205,75 @@
       "name": "紫骍",
       "category": "equipment",
       "subcategory": "horse_offense"
+    },
+    {
+      "id": "fire_slash",
+      "name": "火杀",
+      "category": "basic",
+      "subcategory": null
+    },
+    {
+      "id": "thunder_slash",
+      "name": "雷杀",
+      "category": "basic",
+      "subcategory": null
+    },
+    {
+      "id": "wine",
+      "name": "酒",
+      "category": "basic",
+      "subcategory": null
+    },
+    {
+      "id": "supply_shortage",
+      "name": "兵粮寸断",
+      "category": "trick",
+      "subcategory": "delayed",
+      "delayed": true
+    },
+    {
+      "id": "fire_attack",
+      "name": "火攻",
+      "category": "trick",
+      "subcategory": "instant"
+    },
+    {
+      "id": "iron_chain",
+      "name": "铁索连环",
+      "category": "trick",
+      "subcategory": "instant"
+    },
+    {
+      "id": "silver_lion",
+      "name": "白银狮子",
+      "category": "equipment",
+      "subcategory": "armor"
+    },
+    {
+      "id": "vine_armor",
+      "name": "藤甲",
+      "category": "equipment",
+      "subcategory": "armor"
+    },
+    {
+      "id": "ancient_scimitar",
+      "name": "古锭刀",
+      "category": "equipment",
+      "subcategory": "weapon",
+      "attack_range": 2
+    },
+    {
+      "id": "vermilion_feather_fan",
+      "name": "朱雀羽扇",
+      "category": "equipment",
+      "subcategory": "weapon",
+      "attack_range": 4
+    },
+    {
+      "id": "hualiu",
+      "name": "骅骝",
+      "category": "equipment",
+      "subcategory": "horse_defense"
     }
   ],
   "decks": {
@@ -1074,6 +1143,870 @@
         {
           "type": "nullify",
           "suit": "club",
+          "rank": 13
+        }
+      ]
+    },
+    "standard_ex_160": {
+      "slot_limit": 4,
+      "expect": {
+        "total": 160,
+        "by_type": {
+          "slash": 30,
+          "dodge": 24,
+          "peach": 12,
+          "dismantlement": 6,
+          "snatch": 5,
+          "ex_nihilo": 4,
+          "nullify": 7,
+          "duel": 3,
+          "barbarian_invasion": 3,
+          "arrow_barrage": 1,
+          "peach_garden": 1,
+          "borrowed_sword": 2,
+          "harvest": 2,
+          "indulgence": 3,
+          "lightning": 2,
+          "crossbow": 2,
+          "qinggang_sword": 1,
+          "double_sword": 1,
+          "green_dragon_blade": 1,
+          "serpent_spear": 1,
+          "axe": 1,
+          "halberd": 1,
+          "qilin_bow": 1,
+          "ice_sword": 1,
+          "eight_diagrams": 2,
+          "renwang_shield": 1,
+          "jueying": 1,
+          "dilu": 1,
+          "zhuahuang_feidian": 1,
+          "chitu": 1,
+          "dawan": 1,
+          "zixing": 1,
+          "fire_slash": 5,
+          "thunder_slash": 9,
+          "wine": 5,
+          "supply_shortage": 2,
+          "fire_attack": 3,
+          "iron_chain": 6,
+          "silver_lion": 1,
+          "vine_armor": 2,
+          "ancient_scimitar": 1,
+          "vermilion_feather_fan": 1,
+          "hualiu": 1
+        },
+        "by_suit": {
+          "heart": 40,
+          "diamond": 40,
+          "spade": 40,
+          "club": 40
+        },
+        "by_category": {
+          "basic": 85,
+          "trick": 50,
+          "equipment": 25
+        }
+      },
+      "cards": [
+        {
+          "type": "peach_garden",
+          "suit": "heart",
+          "rank": 1
+        },
+        {
+          "type": "arrow_barrage",
+          "suit": "heart",
+          "rank": 1
+        },
+        {
+          "type": "dodge",
+          "suit": "heart",
+          "rank": 2
+        },
+        {
+          "type": "dodge",
+          "suit": "heart",
+          "rank": 2
+        },
+        {
+          "type": "peach",
+          "suit": "heart",
+          "rank": 3
+        },
+        {
+          "type": "harvest",
+          "suit": "heart",
+          "rank": 3
+        },
+        {
+          "type": "peach",
+          "suit": "heart",
+          "rank": 4
+        },
+        {
+          "type": "harvest",
+          "suit": "heart",
+          "rank": 4
+        },
+        {
+          "type": "qilin_bow",
+          "suit": "heart",
+          "rank": 5
+        },
+        {
+          "type": "chitu",
+          "suit": "heart",
+          "rank": 5
+        },
+        {
+          "type": "peach",
+          "suit": "heart",
+          "rank": 6
+        },
+        {
+          "type": "indulgence",
+          "suit": "heart",
+          "rank": 6
+        },
+        {
+          "type": "peach",
+          "suit": "heart",
+          "rank": 7
+        },
+        {
+          "type": "ex_nihilo",
+          "suit": "heart",
+          "rank": 7
+        },
+        {
+          "type": "peach",
+          "suit": "heart",
+          "rank": 8
+        },
+        {
+          "type": "ex_nihilo",
+          "suit": "heart",
+          "rank": 8
+        },
+        {
+          "type": "peach",
+          "suit": "heart",
+          "rank": 9
+        },
+        {
+          "type": "ex_nihilo",
+          "suit": "heart",
+          "rank": 9
+        },
+        {
+          "type": "slash",
+          "suit": "heart",
+          "rank": 10
+        },
+        {
+          "type": "slash",
+          "suit": "heart",
+          "rank": 10
+        },
+        {
+          "type": "slash",
+          "suit": "heart",
+          "rank": 11
+        },
+        {
+          "type": "ex_nihilo",
+          "suit": "heart",
+          "rank": 11
+        },
+        {
+          "type": "peach",
+          "suit": "heart",
+          "rank": 12
+        },
+        {
+          "type": "dismantlement",
+          "suit": "heart",
+          "rank": 12
+        },
+        {
+          "type": "lightning",
+          "suit": "heart",
+          "rank": 12
+        },
+        {
+          "type": "dodge",
+          "suit": "heart",
+          "rank": 13
+        },
+        {
+          "type": "zhuahuang_feidian",
+          "suit": "heart",
+          "rank": 13
+        },
+        {
+          "type": "duel",
+          "suit": "spade",
+          "rank": 1
+        },
+        {
+          "type": "lightning",
+          "suit": "spade",
+          "rank": 1
+        },
+        {
+          "type": "double_sword",
+          "suit": "spade",
+          "rank": 2
+        },
+        {
+          "type": "eight_diagrams",
+          "suit": "spade",
+          "rank": 2
+        },
+        {
+          "type": "ice_sword",
+          "suit": "spade",
+          "rank": 2
+        },
+        {
+          "type": "dismantlement",
+          "suit": "spade",
+          "rank": 3
+        },
+        {
+          "type": "snatch",
+          "suit": "spade",
+          "rank": 3
+        },
+        {
+          "type": "dismantlement",
+          "suit": "spade",
+          "rank": 4
+        },
+        {
+          "type": "snatch",
+          "suit": "spade",
+          "rank": 4
+        },
+        {
+          "type": "green_dragon_blade",
+          "suit": "spade",
+          "rank": 5
+        },
+        {
+          "type": "jueying",
+          "suit": "spade",
+          "rank": 5
+        },
+        {
+          "type": "indulgence",
+          "suit": "spade",
+          "rank": 6
+        },
+        {
+          "type": "qinggang_sword",
+          "suit": "spade",
+          "rank": 6
+        },
+        {
+          "type": "slash",
+          "suit": "spade",
+          "rank": 7
+        },
+        {
+          "type": "barbarian_invasion",
+          "suit": "spade",
+          "rank": 7
+        },
+        {
+          "type": "slash",
+          "suit": "spade",
+          "rank": 8
+        },
+        {
+          "type": "slash",
+          "suit": "spade",
+          "rank": 8
+        },
+        {
+          "type": "slash",
+          "suit": "spade",
+          "rank": 9
+        },
+        {
+          "type": "slash",
+          "suit": "spade",
+          "rank": 9
+        },
+        {
+          "type": "slash",
+          "suit": "spade",
+          "rank": 10
+        },
+        {
+          "type": "slash",
+          "suit": "spade",
+          "rank": 10
+        },
+        {
+          "type": "snatch",
+          "suit": "spade",
+          "rank": 11
+        },
+        {
+          "type": "nullify",
+          "suit": "spade",
+          "rank": 11
+        },
+        {
+          "type": "dismantlement",
+          "suit": "spade",
+          "rank": 12
+        },
+        {
+          "type": "serpent_spear",
+          "suit": "spade",
+          "rank": 12
+        },
+        {
+          "type": "barbarian_invasion",
+          "suit": "spade",
+          "rank": 13
+        },
+        {
+          "type": "dawan",
+          "suit": "spade",
+          "rank": 13
+        },
+        {
+          "type": "crossbow",
+          "suit": "diamond",
+          "rank": 1
+        },
+        {
+          "type": "duel",
+          "suit": "diamond",
+          "rank": 1
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 2
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 2
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 3
+        },
+        {
+          "type": "snatch",
+          "suit": "diamond",
+          "rank": 3
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 4
+        },
+        {
+          "type": "snatch",
+          "suit": "diamond",
+          "rank": 4
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 5
+        },
+        {
+          "type": "axe",
+          "suit": "diamond",
+          "rank": 5
+        },
+        {
+          "type": "slash",
+          "suit": "diamond",
+          "rank": 6
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 6
+        },
+        {
+          "type": "slash",
+          "suit": "diamond",
+          "rank": 7
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 7
+        },
+        {
+          "type": "slash",
+          "suit": "diamond",
+          "rank": 8
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 8
+        },
+        {
+          "type": "slash",
+          "suit": "diamond",
+          "rank": 9
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 9
+        },
+        {
+          "type": "slash",
+          "suit": "diamond",
+          "rank": 10
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 10
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 11
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 11
+        },
+        {
+          "type": "peach",
+          "suit": "diamond",
+          "rank": 12
+        },
+        {
+          "type": "halberd",
+          "suit": "diamond",
+          "rank": 12
+        },
+        {
+          "type": "nullify",
+          "suit": "diamond",
+          "rank": 12
+        },
+        {
+          "type": "slash",
+          "suit": "diamond",
+          "rank": 13
+        },
+        {
+          "type": "zixing",
+          "suit": "diamond",
+          "rank": 13
+        },
+        {
+          "type": "duel",
+          "suit": "club",
+          "rank": 1
+        },
+        {
+          "type": "crossbow",
+          "suit": "club",
+          "rank": 1
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 2
+        },
+        {
+          "type": "eight_diagrams",
+          "suit": "club",
+          "rank": 2
+        },
+        {
+          "type": "renwang_shield",
+          "suit": "club",
+          "rank": 2
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 3
+        },
+        {
+          "type": "dismantlement",
+          "suit": "club",
+          "rank": 3
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 4
+        },
+        {
+          "type": "dismantlement",
+          "suit": "club",
+          "rank": 4
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 5
+        },
+        {
+          "type": "dilu",
+          "suit": "club",
+          "rank": 5
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 6
+        },
+        {
+          "type": "indulgence",
+          "suit": "club",
+          "rank": 6
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 7
+        },
+        {
+          "type": "barbarian_invasion",
+          "suit": "club",
+          "rank": 7
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 8
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 8
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 9
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 9
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 10
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 10
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 11
+        },
+        {
+          "type": "slash",
+          "suit": "club",
+          "rank": 11
+        },
+        {
+          "type": "borrowed_sword",
+          "suit": "club",
+          "rank": 12
+        },
+        {
+          "type": "nullify",
+          "suit": "club",
+          "rank": 12
+        },
+        {
+          "type": "borrowed_sword",
+          "suit": "club",
+          "rank": 13
+        },
+        {
+          "type": "nullify",
+          "suit": "club",
+          "rank": 13
+        },
+        {
+          "type": "nullify",
+          "suit": "heart",
+          "rank": 1
+        },
+        {
+          "type": "fire_attack",
+          "suit": "heart",
+          "rank": 2
+        },
+        {
+          "type": "fire_attack",
+          "suit": "heart",
+          "rank": 3
+        },
+        {
+          "type": "fire_slash",
+          "suit": "heart",
+          "rank": 4
+        },
+        {
+          "type": "peach",
+          "suit": "heart",
+          "rank": 5
+        },
+        {
+          "type": "peach",
+          "suit": "heart",
+          "rank": 6
+        },
+        {
+          "type": "fire_slash",
+          "suit": "heart",
+          "rank": 7
+        },
+        {
+          "type": "dodge",
+          "suit": "heart",
+          "rank": 8
+        },
+        {
+          "type": "dodge",
+          "suit": "heart",
+          "rank": 9
+        },
+        {
+          "type": "fire_slash",
+          "suit": "heart",
+          "rank": 10
+        },
+        {
+          "type": "dodge",
+          "suit": "heart",
+          "rank": 11
+        },
+        {
+          "type": "dodge",
+          "suit": "heart",
+          "rank": 12
+        },
+        {
+          "type": "nullify",
+          "suit": "heart",
+          "rank": 13
+        },
+        {
+          "type": "silver_lion",
+          "suit": "club",
+          "rank": 1
+        },
+        {
+          "type": "vine_armor",
+          "suit": "club",
+          "rank": 2
+        },
+        {
+          "type": "wine",
+          "suit": "club",
+          "rank": 3
+        },
+        {
+          "type": "supply_shortage",
+          "suit": "club",
+          "rank": 4
+        },
+        {
+          "type": "thunder_slash",
+          "suit": "club",
+          "rank": 5
+        },
+        {
+          "type": "thunder_slash",
+          "suit": "club",
+          "rank": 6
+        },
+        {
+          "type": "thunder_slash",
+          "suit": "club",
+          "rank": 7
+        },
+        {
+          "type": "thunder_slash",
+          "suit": "club",
+          "rank": 8
+        },
+        {
+          "type": "wine",
+          "suit": "club",
+          "rank": 9
+        },
+        {
+          "type": "iron_chain",
+          "suit": "club",
+          "rank": 10
+        },
+        {
+          "type": "iron_chain",
+          "suit": "club",
+          "rank": 11
+        },
+        {
+          "type": "iron_chain",
+          "suit": "club",
+          "rank": 12
+        },
+        {
+          "type": "iron_chain",
+          "suit": "club",
+          "rank": 13
+        },
+        {
+          "type": "ancient_scimitar",
+          "suit": "spade",
+          "rank": 1
+        },
+        {
+          "type": "vine_armor",
+          "suit": "spade",
+          "rank": 2
+        },
+        {
+          "type": "wine",
+          "suit": "spade",
+          "rank": 3
+        },
+        {
+          "type": "thunder_slash",
+          "suit": "spade",
+          "rank": 4
+        },
+        {
+          "type": "thunder_slash",
+          "suit": "spade",
+          "rank": 5
+        },
+        {
+          "type": "thunder_slash",
+          "suit": "spade",
+          "rank": 6
+        },
+        {
+          "type": "thunder_slash",
+          "suit": "spade",
+          "rank": 7
+        },
+        {
+          "type": "thunder_slash",
+          "suit": "spade",
+          "rank": 8
+        },
+        {
+          "type": "wine",
+          "suit": "spade",
+          "rank": 9
+        },
+        {
+          "type": "supply_shortage",
+          "suit": "spade",
+          "rank": 10
+        },
+        {
+          "type": "iron_chain",
+          "suit": "spade",
+          "rank": 11
+        },
+        {
+          "type": "iron_chain",
+          "suit": "spade",
+          "rank": 12
+        },
+        {
+          "type": "nullify",
+          "suit": "spade",
+          "rank": 13
+        },
+        {
+          "type": "vermilion_feather_fan",
+          "suit": "diamond",
+          "rank": 1
+        },
+        {
+          "type": "peach",
+          "suit": "diamond",
+          "rank": 2
+        },
+        {
+          "type": "peach",
+          "suit": "diamond",
+          "rank": 3
+        },
+        {
+          "type": "fire_slash",
+          "suit": "diamond",
+          "rank": 4
+        },
+        {
+          "type": "fire_slash",
+          "suit": "diamond",
+          "rank": 5
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 6
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 7
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 8
+        },
+        {
+          "type": "wine",
+          "suit": "diamond",
+          "rank": 9
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 10
+        },
+        {
+          "type": "dodge",
+          "suit": "diamond",
+          "rank": 11
+        },
+        {
+          "type": "fire_attack",
+          "suit": "diamond",
+          "rank": 12
+        },
+        {
+          "type": "hualiu",
+          "suit": "diamond",
           "rank": 13
         }
       ]

@@ -6,7 +6,7 @@
 
 /* ------------------------------------------------------------------ 装配 */
 
-/** 牌桌按钮：在 0.05–0.5 秒之间切一档回放步长（缺省 0.1，不记住）。 */
+/** 牌桌按钮：在 0.05–0.5 秒之间切一档回放步长（缺省 0.2，不记住；U3-05 / D13）。 */
 function cycleDelay() {
   const at = DELAY_STEPS_MS.indexOf(state.eventDelayMs);
   state.eventDelayMs = DELAY_STEPS_MS[(at + 1) % DELAY_STEPS_MS.length];
@@ -43,6 +43,7 @@ function wire() {
   $("in-pointjiang").addEventListener("change", syncPointjiang);
   syncPointjiang();
   loadHeroCatalog();
+  loadDeckCatalog();
   $("lobby-form").addEventListener("submit", startGame);
   // U2-01（D7）：三页顶栏共用同一组导航（顺序 / 高亮 / 禁用都归 core.js:show()）；
   // 这里只按 NAV_BUTTONS 逐个挂同一份处理器。回放入口就是导航三键之一，旧图标按钮已删。
@@ -105,6 +106,9 @@ function wire() {
   window.setInterval(() => {
     if (!$("view-table").hidden && !state.playback) renderCountdown(state.view);
   }, 1000);
+  // U3-05 / D12：静默轮询——每 2 秒取一次增量。播放中 / 提交在飞时 `poll` 自己让路
+  // （下一次 tick 自然恢复）；弹窗打开时照常轮询（服务端的超时代答只在这一步判定）。
+  window.setInterval(poll, POLL_INTERVAL_MS);
 }
 
 wire();

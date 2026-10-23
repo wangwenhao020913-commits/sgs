@@ -245,14 +245,26 @@ function buildAction() {
     // 焦点是玩家点的**实体牌**；转化技下要提交的是它对应的**虚拟牌**（`entry.card`）。
     const entry = cardEntry(pending, state.focusCardId);
     if (!entry) return null;
-    const targets = state.selectedTargets.slice().sort((a, b) => a - b);
-    return actions.find(
-      (action) =>
-        action.card
-        && String(action.card.card_id) === String(entry.card.card_id)
-        && (action.kind === "UseCard" || action.kind === "PlayCard")
-        && (action.targets || []).slice().sort((a, b) => a - b).join(",") === targets.join(","),
-    ) || null;
+    // **点击顺序优先**（M5-bugfix / 铁索连环）：声明了 `preserve_target_order` 的牌把
+    // 两种顺序都发成候选，玩家点的那个顺序才是要结算的顺序。普通牌（多目标【杀】）只有
+    // 升序候选，第一条查找落空后由下面的排序匹配兜住——不是前端规则，只是"先在候选里
+    // 找原样那一条，找不到再按集合找"。
+    const clicked = state.selectedTargets.slice();
+    const sorted = clicked.slice().sort((a, b) => a - b);
+    const isTargetStep = (action) =>
+      action.card
+      && String(action.card.card_id) === String(entry.card.card_id)
+      && (action.kind === "UseCard" || action.kind === "PlayCard");
+    const inClickOrder = (action) => {
+      const targets = (action.targets || []);
+      return targets.length === clicked.length
+        && targets.every((seat, index) => seat === clicked[index]);
+    };
+    const inAnyOrder = (action) =>
+      (action.targets || []).slice().sort((a, b) => a - b).join(",") === sorted.join(",");
+    return actions.find((action) => isTargetStep(action) && inClickOrder(action))
+      || actions.find((action) => isTargetStep(action) && inAnyOrder(action))
+      || null;
   }
   return null;
 }

@@ -22,12 +22,15 @@ LOG="$TMP/serve.log"
 RUNS="$TMP/runs"
 mkdir -p "$RUNS"
 PID=""
+FIXPID=""
 
 cleanup() {
-  if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-    kill "$PID" 2>/dev/null || true
-    wait "$PID" 2>/dev/null || true
-  fi
+  for child in "$PID" "$FIXPID"; do
+    if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+      kill "$child" 2>/dev/null || true
+      wait "$child" 2>/dev/null || true
+    fi
+  done
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -113,6 +116,17 @@ else
   exit 1
 fi
 
+# ③b M5-09a：军争 **160 张档**的 8 人身份局（spec §6 A2 的端到端判据）。
+# 与 ② 的 108 正局同一条路径，只换档位；零非法应答 + 人类每次询问都真的过 HTTP。
+echo "=== 军争正局：8 人，standard_ex_160，逐问经 HTTP 应答 ==="
+if ! "$PYTHON" tests/support/web_client.py --base "http://127.0.0.1:$PORT" \
+      --seed 20261012 --players 8 --deck-profile standard_ex_160 --max-answers 4000; then
+  echo "FAIL: 军争 160 张的端到端对局未通过"
+  echo "--- 服务输出 ---"
+  cat "$LOG"
+  exit 1
+fi
+
 # ④ 超时护栏真的会触发，且该局仍跑得完
 echo "=== 超时护栏：时限 0.05 秒 ==="
 if ! "$PYTHON" tests/support/web_client.py --base "http://127.0.0.1:$PORT" \
@@ -171,6 +185,55 @@ if ! node tests/support/ui_smoke.mjs "http://127.0.0.1:$PORT"; then
   echo "FAIL: 前端渲染冒烟未通过"
   exit 1
 fi
+
+# ⑥b M5-08a：固定【火攻】tape（spec D12 / §6 A2）——亮牌 / 同花色弃牌 / 放弃 / 无同花色
+# 自动放弃，两条固定种子全走真 HTTP；每次提交的动作必须原样取自 legal_actions。
+echo "=== 火攻 tape：亮牌 / 同花色 / 放弃（真 HTTP） ==="
+if ! "$PYTHON" tests/support/web_client.py --base "http://127.0.0.1:$PORT" --tape fire_attack; then
+  echo "FAIL: 火攻 tape 未通过"
+  echo "--- 服务输出 ---"
+  cat "$LOG"
+  exit 1
+fi
+
+# ⑥c M5-08c：固定【酒】tape（spec D12 / §6 A2）——出牌阶段一次真实 UseCard（目标自己）+
+# 濒死自救一次真实 UseCard（回复 1、无 wine_change）；固定种子，动作原样取自 legal_actions。
+echo "=== 酒 tape：出牌阶段 / 濒死自救（真 HTTP） ==="
+if ! "$PYTHON" tests/support/web_client.py --base "http://127.0.0.1:$PORT" --tape wine; then
+  echo "FAIL: 酒 tape 未通过"
+  echo "--- 服务输出 ---"
+  cat "$LOG"
+  exit 1
+fi
+
+# ⑥d M5-09a：三条**固定 tape**（火攻人类亮牌 / 铁索重铸 / 酒）——spec D12 / §6 A2。
+# tape 由构造局面生成（`tests/support/m5_fixture_server.py`），不依赖随机种子；
+# 火攻的亮牌 + 同花色弃牌两步都由**人类**经 HTTP 应答（不是 AI 亮牌），其余每次询问
+# 也都是对同一份产品 HTTP 门面的真实往返。
+echo "=== 固定 tape：火攻 / 重铸 / 酒（构造局面，真 HTTP） ==="
+FIXLOG="$TMP/fixtures.log"
+"$PYTHON" tests/support/m5_fixture_server.py --port 0 --runs-dir "$RUNS" > "$FIXLOG" 2>&1 &
+FIXPID=$!
+FIXURL=""
+for _ in $(seq 1 60); do
+  FIXURL="$(sed -n 's/.*\(http:\/\/127\.0\.0\.1:[0-9][0-9]*\/\).*/\1/p' "$FIXLOG" 2>/dev/null | head -1)"
+  [ -n "$FIXURL" ] && break
+  if ! kill -0 "$FIXPID" 2>/dev/null; then break; fi
+  sleep 0.2
+done
+if [ -z "$FIXURL" ]; then
+  echo "FAIL: 固定 tape 服务没有在预期时间内打印监听地址"
+  cat "$FIXLOG" 2>/dev/null || true
+  exit 1
+fi
+if ! "$PYTHON" tests/support/web_client.py --base "$FIXURL" --tape m5_fixed; then
+  echo "FAIL: 固定 tape（火攻 / 重铸 / 酒）未通过"
+  cat "$FIXLOG" 2>/dev/null || true
+  exit 1
+fi
+kill "$FIXPID" 2>/dev/null || true
+wait "$FIXPID" 2>/dev/null || true
+FIXPID=""
 
 # ⑦ `--host 0.0.0.0` 必须真的绑全部网卡（WSL 里从 Windows 打开界面就靠它）。
 # 只多起一个进程、只发两个请求，然后立刻杀掉——它防的是"host 参数被写死回环"这种回归。

@@ -19,16 +19,17 @@ M2 的三处结构变化：
 - :class:`CardBehavior` 增 ``response_window``（票 11 §7 / 票 28）：这张牌在自己的
   "生效前"给谁开窗口——【杀】= ``DODGE``（M1 的【闪】窗口一字不动）、锦囊 = ``NULLIFY``
   （收集式无懈窗口）、其余 ``None``。它取代原先"效果里有没有伤害帧"的布尔判据。
-- 牌名扩到标准版全表 32 个；本票先把**静态面**（使用时机 / 目标规则 / 次数限制 /
-  最终去向区 / 响应窗口）补齐，需询问或多步的**效果**由后续票落进 ``effects``
-  （票 26 / 27 / 29 / 30）。
+- 牌名扩到标准版全表 32 个；M5-01a 再补军争篇 11 个（行为表 43 条）。本票先把**静态面**
+  （使用时机 / 目标规则 / 次数限制 / 最终去向区 / 响应窗口）补齐，需询问或多步的**效果**
+  由后续票落进 ``effects``（票 26 / 27 / 29 / 30）；军争的属性 / 连环 / 酒 / 装备效果
+  分别由 M5-02–06 落地，本文件只放可加载的骨架。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from sgs.state import CardRef, FrameKind
 from sgs.timing import Timing
@@ -50,6 +51,7 @@ __all__ = [
     "UseLimit",
     "UseTiming",
     "behavior_for",
+    "satisfies_required",
 ]
 
 
@@ -154,7 +156,31 @@ class TargetRule:
     needs_distance: bool = False
     self_only: bool = False
     requires_wounded_self: bool = False
+    near_death_self_only: bool = False
+    """**濒死语境**下是否只能对**濒死者自己**使用（M5-04 的【酒】）。
+
+    与 ``self_only`` 分开：``self_only`` 管**出牌阶段**的目标池（【桃】/【酒】都只能对自己），
+    而濒死求桃窗口对【桃】允许**他人**对濒死者使用——目标由求桃询问直接给出，不走本规则
+    （票 21）。【酒】的濒死用法只允许自救，故需要这条独立的、只影响求桃候选的声明。
+    标准 108 的【桃】保持 ``False``，候选面因此一字不变。
+    """
     max_distance: int | None = None
+    min_targets: int | None = None
+    """**目标数区间**的下界（M5-03；``None`` = 不启用区间规则）。
+
+    区间规则与 ``rated_targets`` 的"额定 N 个"是**两种形状**：区间给的是"一次使用可指定
+    ``min..max`` 个"（铁索连环 = 1–2），组合由 :func:`sgs.effects.target_combos` 摊开。
+    ``min_targets`` 同时就是"**0 目标非法**"的落点（铁索 = 1）。两个都为 ``None`` 时行为
+    与 M2 逐字相同（额定 / 全体存活两档），故既有牌型一行不改。
+    """
+
+    max_targets: int | None = None
+    """**目标数区间**的上界（``None`` = 不设上限，取候选池大小）。"""
+
+    @property
+    def is_range(self) -> bool:
+        """这条规则是否用**目标数区间**（``min_targets`` / ``max_targets``）表达。"""
+        return self.min_targets is not None or self.max_targets is not None
 
     def includes_self_in_pool(self) -> bool:
         """候选池是否含使用者自己（由目标数来源 + ``includes_self`` 派生）。"""
@@ -165,28 +191,55 @@ class TargetRule:
         return self.includes_self
 
     def target_count(self, pool_size: int) -> int:
-        """本牌这一问要指定几个目标；``ALL_ALIVE*`` 档取整个候选池。"""
+        """本牌这一问**至少**要指定几个目标；``ALL_ALIVE*`` 档取整个候选池。
+
+        区间规则返回下界（铁索 = 1）：它同时是"0 目标非法"的读点
+        （``steps.use_push_resolve`` 用 ``> 0`` 判"要不要压 RESOLVE"）。
+        """
+        if self.is_range:
+            return self.min_targets or 0
         if self.count is TargetCount.RATED:
             return self.rated_targets
         return pool_size
 
+    def target_range(self, pool_size: int) -> tuple[int, int]:
+        """``(下界, 上界)``：区间规则的候选组合由此摊开；其余档退化为"恰好 N 个"。"""
+        if self.is_range:
+            low = self.min_targets or 0
+            high = self.max_targets if self.max_targets is not None else pool_size
+            return low, high
+        count = self.target_count(pool_size)
+        return count, count
+
 
 @dataclass(frozen=True, slots=True)
 class UseLimit:
-    """额定 / 额外两个上限；``rated=None`` 表示不限次数（票 07 §6）。"""
+    """额定 / 额外两个上限；``rated=None`` 表示不限次数（票 07 §6）。
+
+    ``count_key`` 是**本回合次数计数的键**：``None`` = 按牌型计（``card.type``）；
+    非空 = 若干牌型共用一个键（M5-02：普通【杀】/ 火【杀】/ 雷【杀】共用 ``"slash"``，
+    规则 5.1 + 5.4「作为【杀】使用或打出时作用完全相同」）。键是牌面事实，故住行为表；
+    ``engine/`` 只读这个键，不认识具体牌名。
+    """
 
     rated: int | None
     extra: int = 0
     counts: bool = True
     ignore_distance: bool = False
+    count_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class PushFrame:
-    """压出一个带时机的子帧；``scalars`` 是标量字面量（如 ``amount=1``）。"""
+    """压出一个带时机的子帧；``scalars`` 是标量字面量（如 ``amount=1``）。
+
+    伤害步可以再带一个 ``nature`` 标量声明这次伤害的属性（火杀 = ``DamageNature.FIRE``、
+    雷杀 = ``THUNDER``）；不声明即普通伤害。属性是**伤害步的事实**而不是 ``CardRef``
+    的字段（ADR-003），故转化 / 虚拟牌按产物牌型读到的是产物行为表里的这一步。
+    """
 
     kind: FrameKind
-    scalars: tuple[tuple[str, int], ...] = ()
+    scalars: tuple[tuple[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +294,27 @@ class CardBehavior:
     response_window: ResponseWindow | None = None
     """"生效前"给响应者开的窗口（票 11 §7 / 票 28）：【杀】= 闪、锦囊 = 无懈、其余无。"""
 
+    reforgeable: bool = False
+    """这张牌能否**重铸**（M5-03 / 决策 D6）。
+
+    重铸是牌面声明的一条**独立动作**（不是使用）：出牌阶段里可重铸的牌各给一条
+    ``Reforge`` 候选，结算 = 弃置 + 摸一张。目前只有【铁索连环】声明为真。
+    """
+
+    preserve_target_order: bool = False
+    """这张牌是否**按使用者的选择顺序**结算目标（M5-bugfix）。
+
+    缺省 ``False`` = 引擎的通用排法（从当前回合角色起、逆时针，见
+    :func:`~sgs.state.seating.order_targets`）；【铁索连环】声明为真——它的特殊规则是
+    “按使用者选择的顺序结算”（spec §5.1.2），而多目标【杀】（【方天画戟】）仍走通用排法。
+    这是**牌面事实**，故落在行为表，``engine/`` 不出现牌名分支。
+    """
+
+    @property
+    def count_key(self) -> str:
+        """本回合次数计数的键：行为表声明的共用键，缺省 = 牌型 id（M5-02）。"""
+        return self.use_limit.count_key or self.card_type_id
+
     @property
     def is_delayed(self) -> bool:
         """延时锦囊：使用当时只走 L4，实体牌置入目标判定区，L5 推迟到判定阶段（票 26）。
@@ -254,6 +328,50 @@ _PLAY_PHASE = UseTiming(UseContext.PLAY_PHASE)
 _NEAR_DEATH = UseTiming(UseContext.NEAR_DEATH)
 _RESPONSE_BEFORE_EFFECT = UseTiming(UseContext.RESPONSE, Timing.RESOLVE_BEFORE_EFFECT)
 _UNLIMITED = UseLimit(rated=None)
+
+SLASH_FAMILY_KEY = "slash"
+"""【杀】家族**共享的计数键**（M5-02）：普通 / 火 / 雷与转化、虚拟产物都归它。
+
+它同时是"这次使用算不算一张【杀】"的唯一判据（:func:`is_slash`）：`engine/` 只调本
+函数决定"酒加伤兑现给哪次使用"，不认识任何具体牌名 / 牌型 id。
+"""
+
+WINE_COUNT_KEY = "wine"
+"""【酒】的**每回合一次**计数键（M5-04 / spec §5.1 酒）。
+
+它按**游戏回合**结算，而不是按座位自己的回合：出牌阶段的加伤用法记在回合角色身上，
+而濒死自救可能发生在**别人的回合**、记在濒死者身上。故回合末要清掉**所有座位**的这个键
+（``Engine._turn_after_end``），不能只依赖座位自己的 ``TURN_START`` 重置。键只在这里
+定义一次：酒的 ``UseLimit.count_key`` 与引擎的回合末清理都读它，``engine/`` 不写死牌名。
+"""
+
+
+def is_slash(behavior: CardBehavior) -> bool:
+    """这次使用是不是一张【杀】——含普通 / 火 / 雷与**转化、虚拟产物**。
+
+    判据 = 行为表的共享计数键（M5-02 把三种【杀】的 ``count_key`` 都声明成 ``"slash"``；
+    转化 / 虚拟牌按**产物牌型**查行为表，故同一个键覆盖整个家族）。【酒】的加伤因此
+    只认"是不是【杀】"，不认打出去的是哪张实体牌。
+    """
+    return behavior.count_key == SLASH_FAMILY_KEY
+
+
+def satisfies_required(card: CardRef, required: str) -> bool:
+    """:class:`CardRef` 能不能充当 ``required`` 牌名的响应（**牌名闸门的唯一判据**）。
+
+    ``required`` 的语义是"这次需要一张什么牌"（B1 的 ``_required_hand``、转化候选的
+    ``respond_required`` 都读它）。判据默认是**逐字相等的牌名**；唯一放宽的是【杀】族：
+    ``required == "slash"`` 时火【杀】/ 雷【杀】/ 转化与虚拟【杀】都算——它们与普通【杀】
+    共享 :data:`SLASH_FAMILY_KEY`，故 M5-05b 起直接读 :func:`is_slash`，不写具体牌名。
+
+    **不放宽其它牌名**：``required == "dodge"`` 仍只接受产物牌型 ``dodge``（藤甲的
+    "普通【杀】无效"同理是 normal-only 判据，见 ``skills/catalog.py`` 的
+    ``_VINE_ARMOR_IMMUNE_CARD_TYPES``）。两个调用点（真牌响应窗口 / 转化候选）因此
+    不可能各写一份"什么牌能当什么牌"。
+    """
+    return card.type == required or (
+        required == SLASH_FAMILY_KEY and is_slash(behavior_for(card))
+    )
 
 
 def _one_other(
@@ -339,13 +457,36 @@ def _response(
     )
 
 
+def _slash_variant(card_type_id: str, *, nature: DamageNature) -> CardBehavior:
+    """火【杀】/ 雷【杀】的静态面与【杀】一字不差，伤害步声明自己的属性（M5-02）。
+
+    D2 把它们建成独立牌型（而不是在 ``CardRef`` 上加属性字段）：属性落在**产物牌型的
+    行为表**里，转化 / 虚拟牌因此按产物牌型自动带出属性（朱雀羽扇的普通杀 → 火杀由
+    M5-05 产出 ``fire_slash`` 产物即可，不需要另开声明通道）。
+    """
+    return CardBehavior(
+        card_type_id=card_type_id,
+        use_timings=(_PLAY_PHASE,),
+        target_rule=TargetRule(rated_targets=1, includes_self=False, needs_distance=True),
+        use_limit=UseLimit(
+            rated=1, extra=0, counts=True, ignore_distance=False, count_key="slash"
+        ),
+        effects=(
+            PushFrame(FrameKind.DAMAGE, (("amount", 1), ("nature", nature))),
+        ),
+        response_window=ResponseWindow.DODGE,
+    )
+
+
 CARD_BEHAVIORS: dict[str, CardBehavior] = {
     # ---- 基本牌（M1 三条，字段一字不改）----
     "slash": CardBehavior(
         card_type_id="slash",
         use_timings=(_PLAY_PHASE,),
         target_rule=TargetRule(rated_targets=1, includes_self=False, needs_distance=True),
-        use_limit=UseLimit(rated=1, extra=0, counts=True, ignore_distance=False),
+        use_limit=UseLimit(
+            rated=1, extra=0, counts=True, ignore_distance=False, count_key="slash"
+        ),
         effects=(PushFrame(FrameKind.DAMAGE, (("amount", 1),)),),
         response_window=ResponseWindow.DODGE,
     ),
@@ -439,8 +580,63 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
     "zhuahuang_feidian": _self_only("zhuahuang_feidian", final_zone=FinalZone.EQUIP),
     "dawan": _self_only("dawan", final_zone=FinalZone.EQUIP),
     "zixing": _self_only("zixing", final_zone=FinalZone.EQUIP),
+    # ---- 军争篇（M5-01a 的静态骨架；规则效果由 M5-02–06 落地）----
+    # 火杀 / 雷杀：独立牌型，静态面同【杀】；伤害步各自声明 FIRE / THUNDER（M5-02）。
+    "fire_slash": _slash_variant("fire_slash", nature=DamageNature.FIRE),
+    "thunder_slash": _slash_variant("thunder_slash", nature=DamageNature.THUNDER),
+    # 酒：自己 + 出牌阶段 / 濒死；出牌阶段置加伤（M5-04 的 resolve_wine），濒死自救走
+    # 求桃窗口的统一回复（与【桃】同一骨架），两种用法共用一个每回合一次的计数键。
+    "wine": CardBehavior(
+        card_type_id="wine",
+        use_timings=(_PLAY_PHASE, _NEAR_DEATH),
+        target_rule=TargetRule(
+            rated_targets=1,
+            includes_self=True,
+            self_only=True,
+            near_death_self_only=True,
+        ),
+        use_limit=UseLimit(rated=1, count_key=WINE_COUNT_KEY),
+        effects=(CallOp("resolve_wine"),),
+    ),
+    # 军争三张需询问 / 判定的牌：火攻 / 铁索 / 兵粮。
+    # 火攻（M5-06 / D10 / §5.1.4）：目标须**有手牌**（第 0 层 target filter），**可指定自己**；
+    # 效果 = 目标亮 1 张手牌 + 使用者可选弃一张同花色手牌 → 1 点火焰伤害（op 名见 OPS）。
+    "fire_attack": CardBehavior(
+        card_type_id="fire_attack",
+        use_timings=(_PLAY_PHASE,),
+        target_rule=TargetRule(rated_targets=1, includes_self=True),
+        use_limit=_UNLIMITED,
+        effects=(CallOp("resolve_fire_attack"),),
+        target_filters=("has_hand_cards",),
+        response_window=ResponseWindow.NULLIFY,
+    ),
+    "iron_chain": CardBehavior(
+        card_type_id="iron_chain",
+        use_timings=(_PLAY_PHASE,),
+        target_rule=TargetRule(min_targets=1, max_targets=2, includes_self=True),
+        use_limit=_UNLIMITED,
+        effects=(CallOp("resolve_iron_chain"),),
+        response_window=ResponseWindow.NULLIFY,
+        reforgeable=True,
+        preserve_target_order=True,
+    ),
+    "supply_shortage": _one_other(
+        "supply_shortage",
+        final_zone=FinalZone.JUDGE,
+        max_distance=1,
+        effects=(CallOp("resolve_supply_shortage"),),
+    ),
+    # 5 件装备：使用面 = 置入装备区；技能占位住 ``sgs.skills``（键 = ``equip.<id>``），
+    # 效果由 M5-05 落地。
+    "silver_lion": _self_only("silver_lion", final_zone=FinalZone.EQUIP),
+    "vine_armor": _self_only("vine_armor", final_zone=FinalZone.EQUIP),
+    "ancient_scimitar": _self_only("ancient_scimitar", final_zone=FinalZone.EQUIP),
+    "vermilion_feather_fan": _self_only(
+        "vermilion_feather_fan", final_zone=FinalZone.EQUIP
+    ),
+    "hualiu": _self_only("hualiu", final_zone=FinalZone.EQUIP),
 }
-"""标准版全表 32 个牌名的行为；装备牌的**技能**在 ``sgs.skills`` 注册（键 = ``equip.<id>``）。"""
+"""43 个牌名的行为（标准 32 + 军争 11）；装备牌的**技能**在 ``sgs.skills`` 注册（键 = ``equip.<id>``）。"""
 
 
 def behavior_for(card: CardRef) -> CardBehavior:

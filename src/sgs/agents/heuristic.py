@@ -17,6 +17,15 @@
 （静态扫描住 ``tests/test_source_discipline.py``）。
 **不做身份推断、不建决策时限**（ADR-011）：拿不准时缺省保守，而不是猜身份。
 
+**M5-07 的属性 / 连环 / 酒**：军争的取舍只接进**既有打分器**，不另造策略框架。用到的
+公开事实 = 目标的装备区（藤甲 / 白银狮子 / 古锭刀）、自己的装备（青釭剑 / 朱雀羽扇）、
+横置与 ``wine_active``、手牌**张数**、体力与已明身份；【杀】族判据走行为表
+（:func:`_is_slash_card`），火【杀】/ 雷【杀】与转化、虚拟产物因此自动同权。四条取舍：
+`_damage_to`（藤甲 / 酒 / 古锭刀 / 白银狮子的实际伤害）、`_score_wine`（只为一击必杀
+才喝）、`_score_iron_chain` / `_score_reforge`（有收益才用、没收益重铸）、
+`_score_fire_attack` 与 `_score_select_cards` 的火攻分支（无同花色来源就不开、
+同花色弃牌换 1 点伤害，贵的牌宁可放弃）。
+
 **预发动填表**（W4-4）：预发动后复合动作**不在** ``legal_actions`` 里，AI 读询问随附的
 清单（主动 ``preactivations`` / 被动 ``preactivation``），按**现有打分器**填一个
 ``ActivateSkill(picks, choices)``：代价取 :func:`_card_value` 最低、目标取
@@ -39,7 +48,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 
-from sgs.effects import Randomness, target_sets_match
+from sgs.effects import Randomness, behavior_for, is_slash, target_sets_match
 from sgs.state import (
     Action,
     ActivateSkill,
@@ -58,6 +67,7 @@ from sgs.state import (
     PlayerView,
     Query,
     QueryKind,
+    Reforge,
     RespondQuery,
     SelectCards,
     SelectCardsQuery,
@@ -73,11 +83,40 @@ __all__ = ["SKILL_VALUES", "HeuristicPlayer"]
 # 打分要素：只取可从 ``query.view`` 与 action **局部算出**的量（票 13 §打分要素）
 # ---------------------------------------------------------------------------
 
-_DAMAGE_CARD_TYPES = frozenset({"slash", "duel", "barbarian_invasion", "arrow_barrage"})
-"""能造成伤害的牌名：出牌阶段优先于装备与过牌。"
+_DAMAGE_CARD_TYPES = frozenset({"duel", "barbarian_invasion", "arrow_barrage"})
+"""**非【杀】族**的伤害牌名：出牌阶段优先于装备与过牌。
+
+【杀】族（普通 / 火 / 雷与转化、虚拟产物）**不在**这张表里：它的判据是行为表的共享
+计数键（:func:`~sgs.effects.is_slash`），见 :func:`_is_slash_card`。只往集合里补
+``fire_slash`` / ``thunder_slash`` 两个牌名会绕过家族判据（M5-04 / M5-05b），
+日后第五条【杀】又得再补一次。
 
 .. note:: ``frozenset`` 只作**成员判定**（``card.type in ...``），从不迭代——
    源码纪律禁止的是集合**迭代**（逐进程序变化），不是集合本身。
+"""
+
+_VINE_ARMOR = "vine_armor"
+_SILVER_LION = "silver_lion"
+_ANCIENT_SCIMITAR = "ancient_scimitar"
+_QINGGANG_SWORD = "qinggang_sword"
+_VERMILION_FAN = "vermilion_feather_fan"
+"""军争装备 / 既有武器的牌名**字面量**（判据只读公开装备区的牌面）。
+
+同 :data:`_PLAY_PHASE_IDLE` 的理由：牌名是数据层的值，``sgs.data`` 不在本模块的可见面
+白名单里；这里只拿它们做**相等比较**，不复制任何规则。
+"""
+
+_ELEMENTAL_SLASH_TYPES = frozenset({"fire_slash", "thunder_slash"})
+"""**属性**伤害的【杀】（火焰 / 雷电）：连环传导只认属性伤害，普通【杀】不传导。
+
+``frozenset`` 只作成员判定、不迭代；【朱雀羽扇】把普通【杀】转成火【杀】的能力由
+:func:`_elemental_ready` 单独读（装备是公开信息）。
+"""
+
+_RESCUE_CARD_TYPES = frozenset({"peach", "wine"})
+"""求桃窗口里能**回复 1 点**的牌：真【桃】与【酒】的濒死自救（M5-04）。
+
+两者规则上同价，故共用 :func:`_peach_save_value`；``frozenset`` 只作成员判定、不迭代。
 """
 
 _SLOT_VALUES: Mapping[str, float] = MappingProxyType(
@@ -120,13 +159,21 @@ _CARD_VALUES: Mapping[str, float] = MappingProxyType(
         "duel": 2.5,
         "barbarian_invasion": 2.5,
         "arrow_barrage": 2.5,
+        "wine": 2.4,
+        "fire_attack": 2.4,
+        "supply_shortage": 2.6,
         "harvest": 2.2,
         "peach_garden": 2.0,
         "borrowed_sword": 2.0,
+        "iron_chain": 1.6,
         "lightning": 1.0,
     }
 )
-"""牌名价值表：**弃牌**与**排列**共用的"这张牌多有用"（票 13 §DISCARD / §ARRANGE）。"""
+"""牌名价值表：**弃牌**与**排列**共用的"这张牌多有用"（票 13 §DISCARD / §ARRANGE）。
+
+火【杀】/ 雷【杀】与转化、虚拟【杀】**不逐名入表**：:func:`_card_value` 按家族判据
+回落到普通【杀】的同价（见 :func:`_is_slash_card`）。
+"""
 
 _UNKNOWN_CARD_VALUE = 1.0
 _EQUIP_VALUE = 1.5
@@ -200,6 +247,94 @@ _SEAT_TARGET_VALUE = 2.0
 _ENEMY_FOCUS = 2.0
 """伤害目标里"已明身份的敌人"的加权：小到不盖过手牌防御贴现，只作同价时的偏向。"""
 
+_DAMAGE_POINT_VALUE = 1.4
+"""每**多一点**实际伤害的加权（藤甲的火焰 +1、【酒】的 +1、古锭刀的 +1）。
+
+只作同一张牌内部的比较：它让"火【杀】打藤甲"严格高于"普通【杀】打藤甲"，
+而不把伤害牌的整体序（伤害 ＞ 装备 ＞ 过牌）翻过来。
+"""
+
+_WASTED_ATTACK_PENALTY = 5.0
+"""目标**实际不会受伤**时扣的分（普通【杀】/【南蛮】/【万箭】打藤甲）。
+
+扣到伤害牌低于「结束阶段」（0）⇒ AI 宁可不出这一张，也不把【杀】浪费在无效目标上；
+另一个合法目标仍按正分参评，故"另有目标时避开藤甲"不是靠拒绝出牌做到的。
+"""
+
+_WINE_LETHAL_VALUE = 6.5
+"""【酒】+【杀】正好斩杀时，那口【酒】的价值（高于任何单张伤害牌的裸分）。
+
+故意高：这一手是**击杀**，比"再打一刀不死的【杀】"值钱；且必须高过同一询问里
+那张【杀】自己的分数（否则贪心会先出【杀】、把【酒】留成废牌）。
+"""
+
+_WINE_WASTE_PENALTY = -1.0
+"""杀不掉 / 手里没有【杀】时喝【酒】：低于「结束阶段」（0）⇒ 一口都不浪费。"""
+
+_REFORGE_VALUE = 0.6
+"""【铁索连环】重铸的固定收益：**换一张牌**（弃置 + 摸一张）而不是使用。
+
+高于「结束阶段」（0）⇒ 没有收益时 AI 会把铁索换掉、不空放；低于任何有产出的使用
+（伤害 / 装备 / 过牌）⇒ 有收益时永远先选"用"。重铸是独立行动，不算使用、不触发
+使用锦囊类技能（M5-03），故它不会被当成"用了一张锦囊"来估值。
+"""
+
+_IRON_CHAIN_RESET_FRIENDLY_VALUE = 2.0
+"""铁索对**已在连环上的自己 / 已明盟友**的收益：重置 = 脱离连环，躲开下一次火伤传导。"""
+
+_IRON_CHAIN_RESET_ENEMY_PENALTY = 1.5
+"""把**已在连环上的敌人**重置掉是亏的：等于替他拆掉传导的引线（扣分的大小）。"""
+
+_IRON_CHAIN_EXPOSE_FRIENDLY_PENALTY = 2.0
+"""把**未横置的自己 / 盟友**横置是纯亏：替对手把传导接上（扣分的大小）。"""
+
+_IRON_CHAIN_CHAIN_ENEMY_VALUE = 2.0
+"""横置敌人：只有在**手里有属性伤害**（火 / 雷【杀】或朱雀羽扇）时才值得——先串起来，
+下一刀火【杀】就能顺着连环烧过去。"""
+
+_FIRE_ATTACK_BASE = 1.0
+_FIRE_ATTACK_SPARE_WEIGHT = 0.4
+_FIRE_ATTACK_SPARE_CAP = 2
+"""【火攻】的基线价值与"手上还有几张别的牌"的加权（每张 +0.4，最多算 2 张）。
+
+同花色弃牌是**可选**的：手里一张别的牌都没有时，连"可能同花色"都没有 ⇒ 火攻不产生
+伤害（见 :data:`_FIRE_ATTACK_NO_SPARE_PENALTY`）。加权封顶是为了让火攻始终低于
+"出一张【杀】"（伤害牌优先），不把出牌序翻过来。
+"""
+
+_FIRE_ATTACK_NO_SPARE_PENALTY = -1.0
+"""手里只剩这张【火攻】（没有同花色牌可弃）/ 只指向自己 ⇒ 低于「结束阶段」，不出。"""
+
+_FIRE_ATTACK_VINE_BONUS = 1.0
+"""火攻是**火焰**伤害：目标穿藤甲时 +1（公开装备）。"""
+
+_FIRE_ATTACK_DISCARD_VALUE = 3.0
+"""火攻同花色弃牌换来的 1 点火焰伤害值多少：只弃**不高于它**的牌，贵的牌宁可放弃。
+
+"1 点伤害 ≈ 3.0 牌价"与 :data:`_CARD_VALUES` 的【杀】（3.0）同量级：比它贵的
+（【桃】6 / 【闪】4 / 【无懈】3.5）留着更值；比它便宜的（【杀】、装备、普通锦囊）弃掉。
+"""
+
+
+def _is_slash_card(card: CardRef | None) -> bool:
+    """这张牌的**产物牌型**是不是【杀】族（普通 / 火 / 雷与转化、虚拟产物）。
+
+    判据 = 行为表的共享计数键（:func:`~sgs.effects.is_slash`，M5-02 / M5-05b）：火【杀】/
+    雷【杀】不是"往牌名集合里补的两个名字"，而是家族的一员；转化 / 虚拟【杀】按**产物
+    牌型**查行为表，故同一个判据也覆盖它们。表外牌名（不该出现）fail-open 成"不是【杀】"。
+    """
+    if card is None:
+        return False
+    try:
+        return is_slash(behavior_for(card))
+    except KeyError:  # pragma: no cover - 数据表外的牌名（不该出现）
+        return False
+
+
+def _damage_card(card: CardRef) -> bool:
+    """这张牌能不能造成伤害：:func:`_is_slash_card` 或 :data:`_DAMAGE_CARD_TYPES`。"""
+    return _is_slash_card(card) or card.type in _DAMAGE_CARD_TYPES
+
 
 def _card_value(card: CardRef | None) -> float:
     """一张牌的局部估值：牌名表 → 装备槽位 → 未知兜底（不读任何隐藏信息）。"""
@@ -208,6 +343,9 @@ def _card_value(card: CardRef | None) -> float:
     known = _CARD_VALUES.get(card.type)
     if known is not None:
         return known
+    if _is_slash_card(card):
+        # 火【杀】/ 雷【杀】/ 转化与虚拟【杀】与普通【杀】同价：家族判据，不逐名抄表。
+        return _CARD_VALUES["slash"]
     if card.slot is not None:
         return _SLOT_VALUES.get(card.slot.value, _EQUIP_VALUE)
     return _UNKNOWN_CARD_VALUE
@@ -215,6 +353,55 @@ def _card_value(card: CardRef | None) -> float:
 
 def _me(view: PlayerView) -> PlayerPublic:
     return view.players[view.seat]
+
+
+def _wears(player: PlayerPublic, type_id: str) -> bool:
+    """``player`` 的装备区里有没有这张装备（公开信息；只比牌名）。"""
+    return any(card.type == type_id for card in player.equip)
+
+
+def _ignores_armour(me: PlayerPublic) -> bool:
+    """我装备区的武器是否**无视防具**（【青釭剑】）：藤甲对它不设防（M5-05a）。"""
+    return _wears(me, _QINGGANG_SWORD)
+
+
+def _damage_to(
+    card: CardRef | None, view: PlayerView, seat: int, *, wine: bool | None = None
+) -> int:
+    """这张伤害牌落到 ``seat`` 身上大约造成几点伤害（只读公开的装备与状态）。
+
+    只建模**公开可读**的修正，不做概率：
+
+    - **藤甲**：普通【杀】无效（0）；火【杀】+1（火伤 +1）；雷【杀】照常。我装备
+      【青釭剑】时整条让开（"无视防具"）；
+    - **【酒】**：``me.wine_active`` 的下一张【杀】+1（公开状态）；``wine=True`` 表示
+      "假设这一口已经喝下"（``_wine_enables_kill`` 推演斩杀线时用），缺省读当前状态；
+    - **古锭刀**：目标**没有手牌**时 +1（手牌张数是公开信息）；
+    - **白银狮子**：每次伤害至多 1 点（封顶在最后一步），**青釭剑**越过它——与
+      ``catalog._silver_lion_damage_cap`` 同一条口径；【酒】的 +1 也吃这道封顶。
+
+    非【杀】的伤害牌（【决斗】/【南蛮】/【万箭】）不参与装备交互，按 1 点计。
+    """
+    if card is None:
+        return 1
+    target = view.players[seat]
+    me = _me(view)
+    damage = 1
+    if _is_slash_card(card):
+        vine = _wears(target, _VINE_ARMOR) and not _ignores_armour(me)
+        if vine:
+            if card.type == "slash":
+                return 0
+            if card.type == "fire_slash":
+                damage += 1
+        add_wine = me.wine_active if wine is None else wine
+        if add_wine:
+            damage += 1
+        if _wears(me, _ANCIENT_SCIMITAR) and target.hand_count == 0:
+            damage += 1
+    if _wears(target, _SILVER_LION) and not _ignores_armour(me):
+        damage = min(damage, 1)
+    return damage
 
 
 def _wounded(view: PlayerView) -> bool:
@@ -232,6 +419,11 @@ def _score_attack(action: Action, view: PlayerView) -> float:
 
     ``targets`` 只出现在 :class:`~sgs.state.UseCard` 上；``PlayCard``（打出）无目标，
     故按"无目标"读——打出伤害牌在出牌阶段本就不产生伤害。
+
+    目标穿戴（公开信息）会修正实际伤害（:func:`_damage_to`）：普通【杀】打藤甲 = 0 ⇒
+    扣 :data:`_WASTED_ATTACK_PENALTY`；火【杀】打藤甲 = 2 ⇒ 每多一点加
+    :data:`_DAMAGE_POINT_VALUE`。于是"火杀 vs 藤甲选火杀"与"普通杀避开藤甲"都不需要
+    专门的牌名分支，只读同一张公开装备表。
     """
     targets = tuple(action.targets) if isinstance(action, UseCard) else ()
     if not targets:
@@ -244,8 +436,14 @@ def _score_attack(action: Action, view: PlayerView) -> float:
     ]
     if not others:
         return -_SAVE_VALUE
+    card = getattr(action, "card", None)
     score = _DAMAGE_BASE + _TARGET_BONUS * len(others)
     for seat in others:
+        damage = _damage_to(card, view, seat)
+        if damage <= 0:
+            score -= _WASTED_ATTACK_PENALTY
+        else:
+            score += _DAMAGE_POINT_VALUE * (damage - 1)
         score -= _HAND_DEFENSE_WEIGHT * min(view.players[seat].hand_count, _HAND_DEFENSE_CAP)
         # 主公是公开信息：反贼据此**略**偏向锁定他，但不能盖过"手牌越多越难命中"的贴现。
         if _is_revealed_enemy(view, seat):
@@ -253,14 +451,145 @@ def _score_attack(action: Action, view: PlayerView) -> float:
     return score
 
 
-def _score_card_use(action: Action, view: PlayerView) -> float:
+def _wine_enables_kill(query: Query) -> bool:
+    """【酒】用下去**真的能造成击杀**吗：某个合法【杀】目标正好差这 1 点。
+
+    只读公开面：目标体力、目标装备（藤甲 / 白银狮子 / 古锭刀）、自己的 ``wine_active``
+    与**手里的【杀】候选**（候选由引擎从真局面生成）。判据是"这一刀打不死、加【酒】
+    正好打死"：目标体力 > 当前伤害、且 ≤ **喝下酒之后**的伤害
+    （``_damage_to(..., wine=True)``）。白银狮子的封顶把【酒】的 +1 也封在 1 点里
+    （除非我装备青釭剑越过防具），故那种局面下酒不是斩杀。已经能一刀打死（体力 ≤ 伤害）
+    时【酒】是多余的——那条不算"能击杀"，故 AI 不会为补刀白白扔掉【酒】。
+    """
+    view = query.view
+    me = view.seat
+    for action in query.legal_actions:
+        if not isinstance(action, UseCard) or not _is_slash_card(action.card):
+            continue
+        for seat in action.targets:
+            if seat == me or not 0 <= seat < len(view.players):
+                continue
+            target = view.players[seat]
+            if not target.alive:
+                continue
+            damage = _damage_to(action.card, view, seat)
+            after_wine = _damage_to(action.card, view, seat, wine=True)
+            # ``damage == 0``（普通【杀】打藤甲）时【酒】也救不了这一刀：它无效，不是差 1 点。
+            # ``after_wine == damage``（白银狮子把 +1 封掉）同样不算"加酒正好打死"。
+            if damage < target.hp <= after_wine:
+                return True
+    return False
+
+
+def _score_wine(query: Query, view: PlayerView) -> float:
+    """【酒】的出牌阶段用法：只在"下一张【杀】+1 正好斩杀"时值得，否则白扔。
+
+    两种用法共用一个每回合一次的计数键，故出牌阶段把【酒】喝掉就再也救不了自己；
+    "杀不掉也先来一口"在 AI 的估值里是**负分**（低于结束阶段），一条也不浪费。
+    """
+    del view
+    return _WINE_LETHAL_VALUE if _wine_enables_kill(query) else _WINE_WASTE_PENALTY
+
+
+def _elemental_ready(view: PlayerView) -> bool:
+    """我手里 / 装备上有没有**属性伤害**的引线（横置敌人才有传导的下一棒）。
+
+    只读公开面：自己的手牌牌面（对自己是已知的）与装备区的【朱雀羽扇】（把普通【杀】
+    变火【杀】）。【火攻】不算：它的伤害要再来一张同花色手牌才成立，链式"先串再烧"的
+    估值不把两步赌在一张牌上。
+    """
+    me = _me(view)
+    if _wears(me, _VERMILION_FAN):
+        return True
+    return any(card.type in _ELEMENTAL_SLASH_TYPES for card in view.self_hand)
+
+
+def _is_friendly(view: PlayerView, seat: int) -> bool:
+    """自己或**已明身份**的盟友（未知身份的座位不算朋友，也不算敌人）。"""
+    return seat == view.seat or _is_revealed_ally(view, seat)
+
+
+def _score_iron_chain(action: Action, view: PlayerView) -> float:
+    """【铁索连环】：每个目标**独立 toggle**，收益 = 各目标横置 / 重置的收益之和。
+
+    - 已在连环上的**自己 / 已明盟友** ⇒ 重置是好的（脱离传导名单）；
+    - 已在连环上的**敌人** ⇒ 重置是亏的（替他拆引线）；
+    - 未横置的**自己 / 盟友** ⇒ 纯亏（替对手接上引线）；
+    - 未横置的**敌人** ⇒ 只有手里有属性引线时才值得（先串起来，下一刀火【杀】烧过去）。
+
+    没有收益时分数为 0：低于「重铸」（:data:`_REFORGE_VALUE`）⇒ 走重铸而不是空放。
+    """
+    targets = tuple(action.targets) if isinstance(action, UseCard) else ()
+    if not targets:
+        return 0.0
+    elemental = _elemental_ready(view)
+    score = 0.0
+    for seat in targets:
+        if not 0 <= seat < len(view.players):
+            continue
+        player = view.players[seat]
+        if player.chained:
+            if _is_friendly(view, seat):
+                score += _IRON_CHAIN_RESET_FRIENDLY_VALUE
+            elif _is_revealed_enemy(view, seat):
+                score -= _IRON_CHAIN_RESET_ENEMY_VALUE
+        elif _is_friendly(view, seat):
+            score -= _IRON_CHAIN_EXPOSE_FRIENDLY_PENALTY
+        elif _is_revealed_enemy(view, seat) and elemental:
+            score += _IRON_CHAIN_CHAIN_ENEMY_VALUE
+    return score
+
+
+def _score_fire_attack(action: Action, view: PlayerView) -> float:
+    """【火攻】：目标有手牌 + 自己**还有别的牌**可弃才可能造成伤害，否则不出。
+
+    同花色弃牌是可选步（目标先亮一张，AI 再决定弃不弃），故"值不值"在弃牌那一步
+    （:data:`_FIRE_ATTACK_DISCARD_VALUE`）再算一次；这里只回答"这一步值不值得开"：
+    手里只剩这张火攻（没有同花色牌可弃）或只点自己 ⇒ 负分，宁可结束阶段。
+    """
+    targets = tuple(action.targets) if isinstance(action, UseCard) else ()
+    me = view.seat
+    others = [
+        seat
+        for seat in targets
+        if seat != me and 0 <= seat < len(view.players) and view.players[seat].alive
+    ]
+    spare = len(view.self_hand) - 1
+    if not others or spare <= 0:
+        return _FIRE_ATTACK_NO_SPARE_PENALTY
+    score = _FIRE_ATTACK_BASE + _FIRE_ATTACK_SPARE_WEIGHT * min(
+        spare, _FIRE_ATTACK_SPARE_CAP
+    )
+    for seat in others:
+        if _wears(view.players[seat], _VINE_ARMOR):
+            score += _FIRE_ATTACK_VINE_BONUS
+        if _is_revealed_enemy(view, seat):
+            score += _ENEMY_FOCUS
+    return score
+
+
+def _score_reforge(action: Action) -> float:
+    """【铁索连环】重铸：换一张牌（不是使用、不占次数、不触发使用锦囊类技能）。"""
+    assert isinstance(action, Reforge)
+    del action
+    return _REFORGE_VALUE
+
+
+def _score_card_use(query: Query, action: Action) -> float:
     """出牌阶段使用一张牌的局部收益（伤害 ＞ 装备 ＞ 过牌；【桃】只在受伤时用）。"""
     assert isinstance(action, (UseCard, PlayCard))
+    view = query.view
     card = action.card
-    if card.type in _DAMAGE_CARD_TYPES:
+    if _damage_card(card):
         return _score_attack(action, view)
+    if card.type == "wine":
+        return _score_wine(query, view)
     if card.type == "peach":
         return _HEAL_VALUE if _wounded(view) else 0.0
+    if card.type == "iron_chain":
+        return _score_iron_chain(action, view)
+    if card.type == "fire_attack":
+        return _score_fire_attack(action, view)
     if card.slot is not None:
         return _EQUIP_PLAY_VALUE
     return _TRICK_VALUES.get(card.type, _UNKNOWN_CARD_VALUE)
@@ -273,8 +602,10 @@ def _score_play_phase(query: Query, action: Action) -> float:
         return 0.0
     if isinstance(action, ActivateSkill):
         return _skill_value(query, action)
+    if isinstance(action, Reforge):
+        return _score_reforge(action)
     if isinstance(action, (UseCard, PlayCard)):
-        return _score_card_use(action, view)
+        return _score_card_use(query, action)
     return 0.0
 
 
@@ -318,13 +649,17 @@ def _score_peach(query: Query, action: Action) -> float:
 
     W4-fix-2：急救的转化【桃】不再是候选，AI 从清单填出的 ``ActivateSkill`` 与真【桃】
     按同一个救命价值打分——否则它会是 0 分、与「放弃」打平。
+
+    M5-04：【酒】的濒死自救与【桃】同价（规则上都是"回复 1 点"）——它只在本座位濒死时
+    出现在候选里，且**不产生**加伤，故与真【桃】共用 :func:`_peach_save_value`，
+    不能因为牌名不是 ``peach`` 就 0 分、与「放弃」打平。
     """
     assert isinstance(query, PeachQuery)
     if isinstance(action, Pass):
         return 0.0
     if isinstance(action, ActivateSkill):
         return _peach_save_value(query)
-    if not isinstance(action, (UseCard, PlayCard)) or action.card.type != "peach":
+    if not isinstance(action, (UseCard, PlayCard)) or action.card.type not in _RESCUE_CARD_TYPES:
         return 0.0
     return _peach_save_value(query)
 
@@ -410,6 +745,18 @@ def _step_card_score(card: CardRef | None, owner: int, me: int, short: str) -> f
     return -value
 
 
+def _is_fire_attack_discard(query: SelectCardsQuery) -> bool:
+    """这一步是不是【火攻】的**同花色弃牌**（可选弃一张，换 1 点火焰伤害）。
+
+    判据只读公开面：询问可选（目标亮牌那一步**必选**一张）且处理区里躺着那张【火攻】
+    （处理区是公开信息，火攻此刻正在结算）。不猜目标是谁——那 1 点伤害值多少按
+    :data:`_FIRE_ATTACK_DISCARD_VALUE` 一刀切。
+    """
+    return query.spec.optional and any(
+        card.type == "fire_attack" for card in query.view.processing
+    )
+
+
 def _score_select_cards(query: Query, action: Action) -> float:
     """``SELECT_CARDS``：选**别人的**牌取高价值、选**自己的**牌（成本）取低价值。
 
@@ -421,17 +768,26 @@ def _score_select_cards(query: Query, action: Action) -> float:
 
     单张口径的唯一实现是 :func:`_step_card_score`——W4 评审处置 D.7 起，预发动填表的
     "选哪几张"也读它（不再另写一套）。
+
+    M5-06 的例外是【火攻】的**可选同花色弃牌**（:func:`_is_fire_attack_discard`）：
+    "弃一张换 1 点伤害"是一笔正收益，故按 :data:`_FIRE_ATTACK_DISCARD_VALUE - 牌价`
+    估值——便宜的同花色牌该弃、贵的（【桃】/【闪】/【无懈】）宁可放弃（``Pass`` = 0）。
+    目标**亮哪一张**仍是普通的"选自己的牌取低价值"（同一段代码的缺省分支）。
     """
     assert isinstance(query, SelectCardsQuery)
     if not isinstance(action, SelectCards):
         return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
     committed = _is_committed_skill_step(query)
     short = _step_skill_short(query) if committed else ""
+    fire_attack_discard = not committed and _is_fire_attack_discard(query)
     total = 0.0
     for index in action.picks:
         if not 0 <= index < len(query.slots):
             return _ILLEGAL_PENALTY
         slot = query.slots[index]
+        if fire_attack_discard:
+            total += _FIRE_ATTACK_DISCARD_VALUE - _card_value(slot.card)
+            continue
         total += _step_card_score(slot.card, slot.ref.seat, query.view.seat, short)
     if short in _GIVE_STEPS and len(action.picks) >= 2 and _wounded(query.view):
         total += _RENDE_RECOVER_VALUE

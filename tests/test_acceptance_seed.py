@@ -100,3 +100,79 @@ def test_cli_smoke_prints_a_match_for_the_first_seed() -> None:
     lines = completed.stdout.splitlines()
     assert lines[0].startswith("seed")
     assert lines[1].startswith("0\t"), lines[1]
+
+
+# ---------------------------------------------------------------------------
+# 牌堆档位：``--deck-profile``（M5-01b）
+# ---------------------------------------------------------------------------
+
+
+def test_find_seeds_can_scan_the_160_deck_profile() -> None:
+    """160 档能扫到军争牌（``fire_slash`` 只在 160 档里）作实机验收种子。"""
+    tool = _load_tool()
+    matches = tool.find_seeds(
+        players=2,
+        human_seat=0,
+        card="fire_slash",
+        deck_profile="standard_ex_160",
+        limit=200,
+        show=1,
+    )
+
+    assert matches, "160 档、200 个 2 人种子里应至少有一局人类起始手牌含【火杀】"
+    assert "fire_slash" in matches[0].hand
+
+
+def test_find_seeds_defaults_to_standard_108() -> None:
+    """不传档位 = 旧行为（standard_108）：108 张里根本没有军争牌，故扫不到【火杀】。"""
+    tool = _load_tool()
+
+    assert tool.find_seeds(players=2, human_seat=0, card="fire_slash", limit=200, show=1) == []
+
+
+def test_cli_accepts_the_deck_profile_flag() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tools" / "acceptance_seed.py"),
+            "--players",
+            "2",
+            "--card",
+            "fire_slash",
+            "--deck-profile",
+            "standard_ex_160",
+            "--limit",
+            "200",
+            "--show",
+            "1",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert not completed.stdout.startswith("no match"), completed.stdout
+
+
+def test_cli_rejects_an_unknown_deck_profile() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "tools" / "acceptance_seed.py"),
+            "--players",
+            "2",
+            "--card",
+            "slash",
+            "--deck-profile",
+            "standard_999",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "decks.unknown_profile" in completed.stderr

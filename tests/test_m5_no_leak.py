@@ -1,0 +1,500 @@
+"""M5-09a / 09c：人类座位载荷的**不泄露**判据（spec §6 A3）。
+
+落点 = 接入层唯一过滤点（``sgs_web.projection``）：人类座位收到的**快照 / 挂起询问**
+里，对手只有手牌**数量**、身份按「本人 / 主公 / 已亮明 / 阵亡」可见、牌堆只有数量；
+【火攻】亮出的那张是公开信息，但目标**未亮出的手牌**不外泄，且亮牌不写任何「已知」
+持久状态。
+
+三条面（09a 补前两条，09c 补第三条）：
+
+1. 真跑一局 **160 张 / 8 人**，逐次询问检查快照与挂起载荷（不是只看终局那一次）；
+2. 构造局面里放一张【火攻】+ 目标两张手牌（只亮一张），逐条检查亮牌 / 弃牌两步；
+3. **日志 / 记录流**（09c）：``card_move`` 的牌面按区域可见性裁剪——他人摸牌 / 隐藏
+   手牌移动只给数量（``card_count``），公开区与自己的移动照发牌面；``card_reveal``
+   仍公开。同一局也是「他人摸到的牌面」既有的泄露面（09a 当时没查）。
+
+口径与 M4 的 ``test_the_snapshot_never_exposes_other_hands_or_hidden_identity`` 同源，
+只是 M5 把「逐次询问」「火攻亮牌」「日志记录」三维补满。
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _bootstrap() -> None:
+    for entry in (REPO_ROOT / "tools", REPO_ROOT / "src", REPO_ROOT / "tests"):
+        if str(entry) not in sys.path:
+            sys.path.insert(0, str(entry))
+
+
+_bootstrap()
+
+from sgs.data import RuleConfig, load_content_pack  # noqa: E402
+from sgs.engine import Engine, record_json  # noqa: E402
+from sgs.state import (  # noqa: E402
+    EndPhase,
+    Pass,
+    QueryKind,
+    SelectCards,
+    UseCard,
+)
+from sgs_web.projection import (  # noqa: E402
+    pending_payload,
+    visible_record,
+    visible_snapshot,
+)
+from sgs_web.serve import GameRegistry  # noqa: E402
+from sgs_web.session import Session  # noqa: E402
+
+from support import SeatSpec, build_state, cards_of_type  # noqa: E402
+
+PACK = load_content_pack(deck_profile="standard_ex_160")
+"""160 张档：不泄露判据要在含 11 张新牌的档位上成立。"""
+
+EIGHT_SEED = 20261012
+"""与 ``tests/test_web.sh`` 的军争正局同一个种子（同一批行为也能在门禁里复现）。"""
+
+
+def _assert_player_payload(player: dict, *, human_seat: int) -> None:
+    """一个座位在快照 / 挂起视角里的公开面（唯一读点 = 投影输出）。"""
+    seat = player["seat"]
+    if seat == human_seat:
+        assert player["identity"] not in (None, ""), "本人身份必须可见"
+        return
+    assert "self_hand" not in player, f"对手手牌牌面泄露：{player}"
+    assert "hand" not in player and "hand_cards" not in player
+    assert isinstance(player.get("hand_count"), int), "对手手牌只给数量"
+    assert "known" not in player and "revealed_cards" not in player, (
+        f"手牌区出现「已知」持久状态：{player}"
+    )
+    if not player["alive"]:
+        assert player["identity"] is not None, "阵亡者的身份应亮明"
+    elif player["identity"] == "lord":
+        pass  # 主公身份公开
+    else:
+        assert player["identity"] is None, f"存活非主公的身份泄露：{player}"
+
+
+def _assert_snapshot(snapshot: dict, *, human_seat: int) -> None:
+    assert snapshot["seat"] == human_seat
+    assert isinstance(snapshot.get("self_hand"), list), "本人手牌必须可见"
+    me = next(
+        player for player in snapshot["players"] if player["seat"] == human_seat
+    )
+    assert me["hand_count"] == len(snapshot["self_hand"])
+    assert isinstance(snapshot.get("deck_count"), int), "牌堆只给数量"
+    assert "deck" not in snapshot and "deck_cards" not in snapshot, "牌堆顺序 / 牌面泄露"
+    for player in snapshot["players"]:
+        _assert_player_payload(player, human_seat=human_seat)
+
+
+def _human_action(query) -> object:
+    """最小合法应答（与 web_client 的"原始取第一条候选"同姿态）。"""
+    if query.kind == QueryKind.PLAY_PHASE:
+        for action in query.legal_actions:
+            if isinstance(action, EndPhase):
+                return action
+    for action in query.legal_actions:
+        if isinstance(action, Pass):
+            return action
+    return query.legal_actions[0]
+
+
+def test_the_human_payload_of_a_full_160_game_never_leaks_hands_identities_or_deck() -> None:
+    """逐次询问检查：160 张 8 人局的每一次快照 / 挂起载荷都不泄露。"""
+    session = Session(
+        seed=EIGHT_SEED,
+        player_count=8,
+        ai="heuristic",
+        human_seat=0,
+        timeout_seconds=None,
+        pack=PACK,
+    )
+    checks = 0
+    lord_seen = False
+    while not session.finished:
+        query = session.pending
+        assert query is not None, "未终局却没有挂起询问"
+        snapshot = visible_snapshot(session)
+        _assert_snapshot(snapshot, human_seat=session.human_seat)
+        payload = pending_payload(session)
+        assert payload is not None
+        inner = payload.get("view") or {}
+        if inner.get("players"):
+            for player in inner["players"]:
+                _assert_player_payload(player, human_seat=session.human_seat)
+        lord_seen = lord_seen or any(
+            player["identity"] == "lord" for player in snapshot["players"]
+        )
+        checks += 1
+        session.submit_answer(_human_action(query))
+
+    assert checks > 10, f"这一局只检查了 {checks} 次询问——样本太少，判据不可信"
+    assert lord_seen, "8 人身份局必须能看到主公身份（否则身份可见性判据是空转）"
+    final = visible_snapshot(session)
+    _assert_snapshot(final, human_seat=session.human_seat)
+    assert session.engine.records[-1].kind == "game_end"
+
+
+# ---------------------------------------------------------------------------
+# 日志 / 记录流：隐藏区 card_move 只给数量（M5-09c / spec §6 A3）
+# ---------------------------------------------------------------------------
+
+LOG_PUBLIC_ZONES = frozenset({"discard", "processing", "equip", "judge"})
+"""A3 的公开区闭集。测试侧独立写一份判据，不复用实现里的 helper——否则断言在自证。"""
+
+
+def _card_move_visible_to(card_move: dict, viewer: int) -> bool:
+    """一张牌移动的牌面**是否该**对 ``viewer`` 可见（spec §6 A3 的判据，独立写一遍）。"""
+    source = card_move["from_zone"]
+    target = card_move["to_zone"]
+    if source["zone"] in LOG_PUBLIC_ZONES or target["zone"] in LOG_PUBLIC_ZONES:
+        return True
+    if target["zone"] == "hand" and target.get("seat") == viewer:
+        return True
+    if source["zone"] == "hand" and source.get("seat") == viewer:
+        return True
+    return False
+
+
+def _assert_card_faces_absent(payload: dict, cards: tuple[dict, ...]) -> None:
+    """脱敏形态：``cards`` 为空 + ``card_count``，且下发字节里没有牌面字段。"""
+    assert payload["cards"] == [], f"隐藏区牌面泄露：{payload}"
+    assert payload.get("card_count") == len(cards), (
+        f"脱敏后必须给出张数（应有 {len(cards)} 张）：{payload}"
+    )
+    text = json.dumps(payload, ensure_ascii=False)
+    for key in ("card_id", "name", "suit", "rank"):
+        assert f'"{key}"' not in text, f"脱敏记录仍带牌面字段 {key}：{payload}"
+
+
+def test_the_human_log_records_never_name_hidden_card_moves_in_a_full_160_game() -> None:
+    """逐次询问检查 160 张 8 人局的**人类日志记录**：隐藏区移动只有数量，没有牌面。
+
+    这是 M5-09a 没查到的那个面：快照 / 挂起载荷当时都裁好了，但 ``visible_record`` 把
+    ``CardMoveDelta.cards`` 原样下发——其他座位从牌堆摸到的牌名就在日志里。
+    判据按区域：公开区（弃牌堆 / 处理区 / 装备区 / 判定区）照常可见；牌堆 / 手牌这类
+    隐藏区只有查看者自己经手的那一侧可见；其余只给数量。
+    """
+    session = Session(
+        seed=EIGHT_SEED,
+        player_count=8,
+        ai="heuristic",
+        human_seat=0,
+        timeout_seconds=None,
+        pack=PACK,
+    )
+    human = session.human_seat
+    stats = {
+        "other_draw": 0,
+        "own_draw": 0,
+        "public": 0,
+        "hidden_hand_to_hand": 0,
+        "redacted": 0,
+    }
+    public_zones_seen: set[str] = set()
+    after = -1
+    while True:
+        for record in session.records_after(after):
+            if getattr(record, "kind", None) != "delta":
+                continue
+            if getattr(record, "delta_type", None) != "card_move":
+                continue
+            raw = json.loads(record_json(record))
+            payload = visible_record(record, viewer=human)
+            assert payload is not None
+            cards = tuple(raw.get("cards") or ())
+            assert cards, "引擎记录流保持全信息：真实 card_move 必带牌面"
+            visible = _card_move_visible_to(raw, human)
+            source = raw["from_zone"]
+            target = raw["to_zone"]
+            if visible:
+                assert [card["card_id"] for card in payload["cards"]] == [
+                    card["card_id"] for card in cards
+                ], f"公开 / 自己经手的移动被误脱敏：{payload}"
+                assert payload["cards"][0]["name"] == cards[0]["name"]
+                stats["public"] += 1
+                public_zones_seen.update(
+                    {zone for zone in (source["zone"], target["zone"]) if zone in LOG_PUBLIC_ZONES}
+                )
+            else:
+                _assert_card_faces_absent(payload, cards)
+                stats["redacted"] += 1
+            if (
+                source["zone"] == "deck"
+                and target["zone"] == "hand"
+                and target.get("seat") != human
+            ):
+                stats["other_draw"] += 1
+                assert not visible, "其他座位从牌堆摸到的牌面泄露"
+            if (
+                source["zone"] == "deck"
+                and target["zone"] == "hand"
+                and target.get("seat") == human
+            ):
+                stats["own_draw"] += 1
+                assert visible, "自己的摸牌应当可见"
+            if (
+                source["zone"] == "hand"
+                and target["zone"] == "hand"
+                and source.get("seat") != human
+                and target.get("seat") != human
+            ):
+                stats["hidden_hand_to_hand"] += 1
+                assert not visible, "他人之间的手牌移动泄露"
+        if session.finished:
+            break
+        query = session.pending
+        assert query is not None, "未终局却没有挂起询问"
+        after = session.next_cursor(after)
+        session.submit_answer(_human_action(query))
+
+    assert stats["other_draw"] >= 1, f"这一局没有他人摸牌样本：{stats}"
+    assert stats["own_draw"] >= 1, f"这一局没有自己摸牌样本：{stats}"
+    assert stats["hidden_hand_to_hand"] >= 1, f"这一局没有隐藏手牌移动样本：{stats}"
+    assert stats["redacted"] >= stats["other_draw"] + stats["hidden_hand_to_hand"]
+    assert public_zones_seen == LOG_PUBLIC_ZONES, (
+        f"公开区移动没覆盖全（弃牌 / 处理 / 装备 / 判定）：{sorted(public_zones_seen)}"
+    )
+    assert session.engine.records[-1].kind == "game_end"
+
+
+def test_the_served_view_payload_filters_hidden_card_moves_for_the_human_seat() -> None:
+    """真下发口（``GameRegistry.view``）必须把 ``viewer`` 传给 ``visible_record``。
+
+    只测投影函数不够：``serve.py`` 的调用点漏传 ``session.human_seat`` 时，函数测试照样
+    绿、HTTP 日志照样泄露。这里直接读服务端响应体里的 ``records``（与浏览器收到的同形）。
+    """
+    session = Session(
+        seed=EIGHT_SEED,
+        player_count=8,
+        ai="heuristic",
+        human_seat=0,
+        timeout_seconds=None,
+        pack=PACK,
+    )
+    while not session.finished:
+        session.submit_answer(_human_action(session.pending))
+    view = GameRegistry().view(session, after=-1, logs_after=0)
+    assert view["human_seat"] == session.human_seat
+    raw_moves = {
+        record.seq: json.loads(record_json(record))
+        for record in session.records()
+        if getattr(record, "delta_type", None) == "card_move"
+    }
+    human = session.human_seat
+    stats = {"other_draw": 0, "own_draw": 0, "public": 0, "hidden_hand_to_hand": 0}
+    for payload in view["records"]:
+        if payload.get("kind") != "delta" or payload.get("delta_type") != "card_move":
+            continue
+        raw = raw_moves[payload["seq"]]
+        cards = tuple(raw.get("cards") or ())
+        source = raw["from_zone"]
+        target = raw["to_zone"]
+        visible = _card_move_visible_to(raw, human)
+        if not visible:
+            _assert_card_faces_absent(payload, cards)
+        else:
+            assert [card["card_id"] for card in payload["cards"]] == [
+                card["card_id"] for card in cards
+            ]
+        if source["zone"] == "deck" and target["zone"] == "hand" and target.get("seat") != human:
+            stats["other_draw"] += 1
+            assert not visible
+        if source["zone"] == "deck" and target["zone"] == "hand" and target.get("seat") == human:
+            stats["own_draw"] += 1
+            assert visible
+        if (
+            source["zone"] == "hand"
+            and target["zone"] == "hand"
+            and source.get("seat") != human
+            and target.get("seat") != human
+        ):
+            stats["hidden_hand_to_hand"] += 1
+            assert not visible
+        if source["zone"] in LOG_PUBLIC_ZONES or target["zone"] in LOG_PUBLIC_ZONES:
+            stats["public"] += 1
+            assert visible
+    assert stats["other_draw"] >= 1, f"下发口没有他人摸牌样本：{stats}"
+    assert stats["own_draw"] >= 1, f"下发口没有自己摸牌样本：{stats}"
+    assert stats["hidden_hand_to_hand"] >= 1, f"下发口没有隐藏手牌移动样本：{stats}"
+    assert stats["public"] >= 1, f"下发口没有公开区移动样本：{stats}"
+
+
+# ---------------------------------------------------------------------------
+# 火攻亮牌：公开的那一张 vs 未亮出的手牌
+# ---------------------------------------------------------------------------
+
+
+class _MinimalSeat:
+    """AI 座位的最小应答：出牌阶段结束、能放弃就放弃、其余取首条候选。"""
+
+    def respond(self, query):  # noqa: ANN001 - Participant 协议
+        return _human_action(query)
+
+
+class _HaltSeat:
+    """人类座位：把询问交给 ``Session.pending``，由用例显式应答。"""
+
+    def respond(self, query):  # noqa: ANN001
+        from sgs_web.session import Halt
+
+        raise Halt(query)
+
+
+def _fire_attack_session():
+    """2 人构造局面：座位 0（人类）【火攻】座位 1；座位 1 两张手牌只亮一张。"""
+    fire = cards_of_type(PACK, "fire_attack")[0]
+    spares = [
+        index
+        for index, card in enumerate(PACK.deck.cards)
+        if card.type != "fire_attack"
+    ]
+    discard = spares[0]
+    reveal = spares[1]
+    hidden = spares[2]
+    used = {fire, discard, reveal, hidden}
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=4, hand=(fire, discard)),
+            SeatSpec(hp=4, hand=(reveal, hidden)),
+        ],
+        deck=tuple(index for index in range(len(PACK.deck.cards)) if index not in used),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    session = Session(
+        seed=1,
+        player_count=2,
+        ai="random",
+        human_seat=0,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=PACK,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = (_HaltSeat(), _MinimalSeat())
+    session.drive()
+    return session, fire, discard, reveal, hidden
+
+
+def _fire_use(query, fire: int):
+    """对**座位 1** 使用火攻（不能取到自指的那条候选）。"""
+    for action in query.legal_actions:
+        if (
+            isinstance(action, UseCard)
+            and action.card.card_id == fire
+            and action.targets == (1,)
+        ):
+            return action
+    raise AssertionError("出牌阶段没有【火攻】→ 座位 1 的候选")
+
+
+def _reveal_deltas(session: Session) -> list[dict]:
+    return [
+        json.loads(record.model_dump_json())
+        for record in session.records()
+        if getattr(record, "delta_type", None) == "card_reveal"
+    ]
+
+
+def test_the_fire_attack_reveal_is_public_but_the_unrevealed_hand_never_leaks() -> None:
+    """亮出的那一张是公开事实；目标另一张手牌不出现在任何下发字节里。"""
+    session, fire, discard, reveal, hidden = _fire_attack_session()
+    query = session.pending
+    assert query is not None and query.kind == QueryKind.PLAY_PHASE
+    session.submit_answer(_fire_use(query, fire))
+
+    # 走完无懈窗口（人类只是应答者，放弃），AI 目标亮牌后人类拿到弃同花色询问。
+    for _ in range(20):
+        query = session.pending
+        if query is None or query.kind == QueryKind.SELECT_CARDS:
+            break
+        session.submit_answer(_human_action(query))
+    assert query is not None and query.kind == QueryKind.SELECT_CARDS
+    reveals = _reveal_deltas(session)
+    assert len(reveals) == 1, "亮牌只落一条 card_reveal"
+    shown = reveals[0]["card"]["card_id"]
+    assert shown == reveal, "目标亮出的就是那张牌"
+    assert shown != hidden
+
+    payload = pending_payload(session)
+    assert payload["reveal"] is not None, "使用者看得到亮出的那一张（公开信息）"
+    assert payload["reveal"]["card"]["card_id"] == shown
+    assert payload["reveal"]["card"].get("display_name")
+    text = json.dumps(payload, ensure_ascii=False)
+    assert f'"card_id": {hidden}' not in text, (
+        "未亮出的手牌（实体牌 id）泄露到了使用者的载荷里"
+    )
+    target = next(
+        player
+        for player in visible_snapshot(session)["players"]
+        if player["seat"] == 1
+    )
+    assert target["hand_count"] == 2, "亮牌不移动牌：目标仍有 2 张手牌"
+    assert "self_hand" not in target and "known" not in target
+
+    # 同花色弃牌 ⇒ 1 点火焰伤害；之后不残留任何「已知」状态。
+    same_suit = [
+        action
+        for action in query.legal_actions
+        if isinstance(action, SelectCards)
+        and len(action.picks) == 1
+        and query.slots[action.picks[0]].card is not None
+        and query.slots[action.picks[0]].card.suit
+        == session.engine.state.card(shown).suit
+    ]
+    assert same_suit, "构造局面：人类手里必须有同花色牌"
+    session.submit_answer(same_suit[0])
+    session.drive()
+    for player in visible_snapshot(session)["players"]:
+        assert "known" not in player and "revealed_cards" not in player, (
+            f"火攻结算后手牌区残留「已知」状态：{player}"
+        )
+    assert len(_reveal_deltas(session)) == 1, "亮牌只在结算期落一条，不是持久字段"
+
+
+def test_the_fire_attack_reveal_is_public_in_the_log_records_but_the_other_hand_card_hidden() -> None:
+    """M5-09c：``visible_record`` 的裁剪不得把 ``card_reveal`` 也藏掉。
+
+    亮出的那一张是**公开事实**（08a 的中央舞台读它），目标的**另一张**手牌仍未亮出，
+    既不出现在 ``card_reveal`` 里，也不得被任何下发记录带出来。
+    """
+    session, fire, discard, reveal, hidden = _fire_attack_session()
+    viewer = session.human_seat
+    query = session.pending
+    assert query is not None and query.kind == QueryKind.PLAY_PHASE
+    session.submit_answer(_fire_use(query, fire))
+    for _ in range(20):
+        query = session.pending
+        if query is None or query.kind == QueryKind.SELECT_CARDS:
+            break
+        session.submit_answer(_human_action(query))
+    assert query is not None and query.kind == QueryKind.SELECT_CARDS
+
+    payloads = [visible_record(record, viewer=viewer) for record in session.records()]
+    reveals = [
+        payload
+        for payload in payloads
+        if payload is not None and payload.get("delta_type") == "card_reveal"
+    ]
+    assert len(reveals) == 1, "亮牌只落一条 card_reveal，且必须下发"
+    shown = reveals[0]["card"]
+    assert shown["card_id"] == reveal, "下发的是目标亮出的那一张"
+    assert shown.get("display_name"), "亮牌仍按展示契约补好牌名（08a 中央舞台读它）"
+
+    text = json.dumps(payloads, ensure_ascii=False)
+    assert f'"card_id": {reveal}' in text, "公开亮出的牌必须仍在人类日志里"
+    assert f'"card_id": {hidden}' not in text, "未亮出的手牌泄露到了人类日志记录里"
+    for card_move in payloads:
+        if card_move is not None and card_move.get("delta_type") == "card_move":
+            assert card_move["cards"], (
+                f"火攻这一刻只有公开移动；隐藏区移动被误下发：{card_move}"
+            )
+

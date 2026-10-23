@@ -567,13 +567,13 @@ button.mini-slot { cursor: pointer; }
 .seat.req { outline: 2px dashed #b8860b; outline-offset: 2px; }
 
 .stage-center {
-  position: absolute; left: 50%; top: 60.85%;
+  position: absolute; left: 50%; top: 64.47%;
   transform: translate(-50%, -50%);
-  width: 24%; min-height: 22%;
-  /* U2-02 / D6：处理区卡面放大到 88×124 后，面板高度必须封顶，否则「顶边 = 370 − h/2」会向上
-   * 长进环桌、盖住顶部对手座位。上限 300 ⇒ 顶边 220 > 顶座（90°）下沿 210
-   * （370 − 235 + 150/2）。处理区内部再限一行卡面（124）、其余纵向滚动，卡片边缘不被面板裁切。 */
-  max-height: calc(300 * var(--dsu));
+  /* U3-01 / D3：宽 40%（= 640 设计单位，一行约 6 张）；中心从 370 下移到 392（64.47%
+   * × 608），面板上限 360 ⇒ 顶边 392 − 180 = 212 > 顶座（90°）下沿 210，不压顶座；
+   * 40% 宽横跨 480–1120，左右座位中心 212 / 1388、卡宽 210 ⇒ 也不压侧座。 */
+  width: 40%; min-height: 22%;
+  max-height: calc(360 * var(--dsu));
   overflow: hidden;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 2px; padding: 8px 10px;
@@ -591,21 +591,32 @@ button.mini-slot { cursor: pointer; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .stage-divider { width: 100%; border-top: 1px dashed rgba(150, 122, 82, .36); margin: 4px 0; }
-/* U2-02 / D6：处理区 / 舞台卡面与手牌**共用同一套** `.card.face`（88×124、字号 14/11/21/9）。
- * 「0.63 版」的小牌面覆盖已删除——这里不再有第二套卡面规则。
- * 一行放不下时纵向滚动（`max-height` = 一张卡面高，行从顶部排），面板高度因此被钉住。 */
+/* U2-02 / D6：舞台卡面与手牌**共用同一套** `.card.face`（88×124、字号 14/11/21/9）。
+ * U3-01 / D3：三组按入台顺序排在**一个**换行流里；行限两行卡面（124×2 + 5 = 253），
+ * 超出纵向滚动（不折叠、不缩小卡面），新牌落位粘底（JS 滚，D3）。 */
 .stage-center .processing {
   justify-content: center; align-content: flex-start;
   gap: 5px; min-height: 18px;
   flex: 0 0 auto;
-  /* 一张卡面 124 + 1 设计单位余量：避免子像素把第一行的下边框裁掉；第 2 行从 129 开始，仍整行在框外。 */
-  max-height: calc(125 * var(--dsu));
+  max-height: calc(253 * var(--dsu));
   overflow-y: auto;
 }
+/* U3-01 / D4：左侧 4 设计单位色条区分三组（处理中金 / 展示青 / 弃牌灰），
+ * 弃牌组降饱和；不新增角标。旧的亮牌金色描边已删除——色条取代它。 */
+.stage-card {
+  border-left: calc(4 * var(--dsu)) solid transparent;
+}
+.stage-card[data-stage-lane="processing"] { border-left-color: #d9b45c; }
+.stage-card[data-stage-lane="showcase"] { border-left-color: #3f8f8a; }
+.stage-card[data-stage-lane="discard"] {
+  border-left-color: #9a9188;
+  filter: saturate(.55);
+}
+/* 淡出 1 秒（D5）：节点在淡出期间保留，到点由 JS 移除；`animScale = 0` 时不会画到这一帧。 */
+.stage-card.fading { opacity: 0; transition: opacity 1s ease-out; }
 .stage-center .context {
   margin: 2px 0 0; width: 100%; font-size: 11px; text-align: center;
-  /* 处理中的牌一多说明就长：最多 2 行（省略号）。1280 下舞台里的内边距 / 字号是固定 px，
-   * 4 行会把面板推到 300 上限外并被裁成半行；2 行让整块始终落在上限内。 */
+  /* 处理中 / 展示 / 弃牌三段拼接后最多 2 行（省略号）；40% 宽下也不越过 360 上限。 */
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   overflow: hidden;
 }
@@ -615,6 +626,138 @@ button.mini-slot { cursor: pointer; }
   position: absolute; left: 50%; bottom: 4px; transform: translateX(-50%);
   font-size: 10px; color: var(--dim); background: rgba(255, 253, 247, .9);
   border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px;
+}
+
+/* ---------- 牌桌动效（U3-03 / D8.1 / D13）：目标线 / 行动者高亮 / 体力闪 ---------- */
+
+/* 目标线层：覆盖整个 16:9 壳（`inset: 0`、无 viewBox），不吃指针。
+ * z-index 15 = 在环上座位（3）与自己的底部面板（10）之上、弹窗 / 询问窗（60）之下：
+ * 连到自己的线不会被底部面板背景盖住，模态打开时线仍在窗口之下。
+ * 端点只在 JS 画线时读一次 `getBoundingClientRect()`，之后是 SVG 属性——窗口尺寸变化
+ * 不会重算已经在播的线。 */
+.target-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+  z-index: 15;
+}
+.target-line { transition: opacity .8s ease-out; }
+.target-line.fading { opacity: 0; }
+/* 线宽 2.5 设计单位（不是 CSS px）；统一金色，不按效果分类。箭头尺寸在 JS 里
+ * 按同一设计单位换算（effects.js:TARGET_ARROW_SIZE = 10）。 */
+.target-line line {
+  stroke: #d9b45c;
+  stroke-width: calc(2.5 * var(--dsu));
+  stroke-linecap: round;
+}
+.target-line polygon { fill: #d9b45c; }
+
+/* 决策点行动者（D13）：0.5 秒金色描边；结算类时机不加 `.acting`。 */
+.seat.acting { animation: seat-acting .5s ease-out 1; }
+@keyframes seat-acting {
+  0% {
+    outline: calc(3 * var(--dsu)) solid rgba(217, 180, 92, .95);
+    outline-offset: calc(2 * var(--dsu));
+  }
+  100% {
+    outline: calc(3 * var(--dsu)) solid rgba(217, 180, 92, 0);
+    outline-offset: calc(6 * var(--dsu));
+  }
+}
+
+/* 体力闪（D13）：武将块闪 0.4 秒；掉血红 / 回复绿（两个修饰类只给颜色变量）。 */
+.hero-block.hp-flash { animation: hp-flash .4s ease-out 1; }
+.hero-block.hp-flash-down { --flash-bg: rgba(179, 38, 30, .22); --flash-edge: #b3261e; }
+.hero-block.hp-flash-up { --flash-bg: rgba(46, 125, 50, .22); --flash-edge: #2e7d32; }
+@keyframes hp-flash {
+  0% {
+    background: var(--flash-bg);
+    box-shadow: inset 0 0 0 calc(2 * var(--dsu)) var(--flash-edge);
+  }
+  100% {
+    background: transparent;
+    box-shadow: inset 0 0 0 calc(2 * var(--dsu)) transparent;
+  }
+}
+
+/* ---------- 牌桌动效（U3-04 / D9）：技能名飘字 / 白光 ---------- */
+
+/* 技能名层：与目标线层一样覆盖整个牌桌壳、不吃指针；层级在线层（15）之上、弹窗（60）
+ * 之下。飘字**不住武将块里**——武将块要 `overflow: hidden` 裁白光（D9），住进去会把
+ * 上浮的技能名一起裁掉；两条要求因此各用一层。 */
+.skill-floats {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 16;
+}
+/* 发动者武将块正上方 8 设计单位起飘（JS 定位），2s 内上浮 20 设计单位并淡出；
+ * 金色加粗 16 设计单位。同一武将块 2s 内的后一条由 JS 把起点再抬高 14（`data-skill-stack`）。 */
+.skill-float {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  white-space: nowrap;
+  font-size: calc(16 * var(--dsu));
+  font-weight: 700;
+  color: #d9b45c;
+  text-shadow: 0 1px calc(2 * var(--dsu)) rgba(43, 36, 28, .35);
+  animation: skill-float-rise 2s ease-out 1 forwards;
+}
+@keyframes skill-float-rise {
+  0% {
+    transform: translate(-50%, -100%) translateY(0);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-50%, -100%) translateY(calc(-20 * var(--dsu)));
+    opacity: 0;
+  }
+}
+
+/* 白光（D9）：武将块内 0.6s 扫过；粗 8 / 细 3 设计单位、细带晚 0.12s，左上 → 右下，
+ * 只播一次，靠武将块的 `overflow: hidden` 裁在块内（`.seat .hero-block` 的既有规则）。 */
+.hero-block.skill-sweep::before {
+  content: "";
+  position: absolute;
+  top: -60%;
+  left: -35%;
+  width: calc(8 * var(--dsu));
+  height: 220%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, .95) 50%, rgba(255, 255, 255, 0) 100%);
+  transform: rotate(28deg);
+  pointer-events: none;
+  z-index: 6;
+  animation: skill-sweep .6s ease-out 1;
+}
+.hero-block.skill-sweep::after {
+  content: "";
+  position: absolute;
+  top: -60%;
+  left: -35%;
+  width: calc(3 * var(--dsu));
+  height: 220%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, .95) 50%, rgba(255, 255, 255, 0) 100%);
+  transform: rotate(28deg);
+  pointer-events: none;
+  z-index: 6;
+  animation: skill-sweep .6s ease-out 1;
+  animation-delay: .12s;
+}
+@keyframes skill-sweep {
+  0% {
+    left: -35%;
+    top: -60%;
+    opacity: 1;
+  }
+  100% {
+    left: 115%;
+    top: 0%;
+    opacity: .85;
+  }
 }
 
 /* ---------- 底部面板：事件流按钮 | 手牌区 | 技能 | 自己的武将块 | 自己的判定 / 装备 ---------- */

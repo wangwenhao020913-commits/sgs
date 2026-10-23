@@ -49,8 +49,15 @@ from __future__ import annotations
 from typing import Any
 
 from sgs.data import SkillType, hero_skill_id
-from sgs.effects import CarrierKind, Modifier, ModifierContext, ModifierPoint
-from sgs.effects import targets_within_attack_range
+from sgs.effects import (
+    CarrierKind,
+    Modifier,
+    ModifierContext,
+    ModifierPoint,
+    behavior_for,
+    is_slash,
+    targets_within_attack_range,
+)
 from sgs.resolution import Control, Frame
 from sgs.state import GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
@@ -105,7 +112,8 @@ def _liuli_condition(host: Any, frame: Frame) -> bool:
     if frame.data.get("source") == frame.data.get("actor"):
         return False
     card = frame.data.get("card")
-    if card is None or card.type != "slash":
+    # "渠道牌仍是【杀】"按 M5-04 的家族判据（M5-05b-fix：火【杀】/ 雷【杀】同样可转移）。
+    if card is None or not is_slash(behavior_for(card)):
         return False
     return True
 
@@ -152,7 +160,7 @@ def _liuli_applies(state: GameState, frame: Frame, owner: int) -> bool:
     if frame.data.get("source") == owner:
         return False
     card = frame.data.get("card")
-    if card is None or card.type != "slash":
+    if card is None or not is_slash(behavior_for(card)):
         return False
     return bool(_liuli_target_pool(state, frame, owner, ()))
 
@@ -187,7 +195,7 @@ def _liuli_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Control:
     if owner not in targets or frame.data.get("source") == owner:
         return None
     card = frame.data.get("card")
-    if card is None or card.type != "slash":
+    if card is None or not is_slash(behavior_for(card)):
         return None
     new_target = int(tuple(answers["seat"])[0])
 

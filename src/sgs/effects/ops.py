@@ -17,6 +17,10 @@
   （逐目标打出【杀】/【闪】，否则受伤）；
 - 五谷丰登三件套：``reveal_harvest``（B5 亮牌，走 ``timing_ops``）、``pick_harvest``
   （C4 逐目标取牌）、``finish_harvest``（使用结算结束后弃余牌）。
+
+M5-06 补了两张军争锦囊：``resolve_fire_attack``（亮 1 张公开 + 可选同花色弃牌 → 火焰
+伤害，两步都可中断）与 ``resolve_supply_shortage`` / ``after_supply_shortage``（判定，
+非梅花 ⇒ 跳过摸牌阶段）。两者都只经 ``OPS`` 注册表被派发，``engine/`` 不认识牌名。
 """
 
 from __future__ import annotations
@@ -57,6 +61,9 @@ LIGHTNING_RANK_MAX = 9
 EX_NIHILO_DRAW = 2
 """【无中生有】摸牌数。"""
 
+FIRE_ATTACK_DAMAGE = 1
+"""【火攻】同花色弃牌造成的火焰伤害值（spec §5.1.4）。"""
+
 DUEL_DAMAGE = 1
 BARBARIAN_DAMAGE = 1
 ARROW_DAMAGE = 1
@@ -69,6 +76,20 @@ _ZONE_SELECTION_SPEC = SelectionSpec(zones=_HAND_EQUIP_JUDGE, total=(1, 1))
 
 _HARVEST_SELECTION_SPEC = SelectionSpec(zones=(Zone.PROCESSING,), total=(1, 1))
 """五谷丰登：从亮出的牌里取一张（处理区、可见槽）。"""
+
+_BORROWED_SWORD_USE = "use"
+"""借刀持刀者已答 a（使用【杀】）——重入时不再发问、也不再交出武器。"""
+
+_BORROWED_SWORD_HAND_OVER = "hand_over"
+"""借刀持刀者已答 b（交出武器 / auto-b）——重入时只补做那次移动。"""
+
+_BORROWED_SWORD_RESOLVED = "borrowed_sword_resolved"
+"""借刀持刀者的决定（帧私有，M5-bugfix）。
+
+「出杀 / 交出武器」的应答由一次 ``ask`` 的**一次性**缓存交出，而 b 支的移动会内联派发
+「失去牌后」（孙尚香【枭姬】）并挂起——挂起的续跑重新进入本 op 时缓存已空，没有这个
+标记就会把同一个窗口再问一遍。标记在**拿到应答之后**才写，故首次询问挂起时不受影响。
+"""
 
 
 def _judge_payload(frame: Frame, *, subject: int, after: str) -> dict[str, Any]:
@@ -106,6 +127,26 @@ def resolve_indulgence(host: Any, frame: Frame) -> None:
 def resolve_lightning(host: Any, frame: Frame) -> None:
     """【闪电】生效后：压 JUDGE 帧，后果 op 为 :func:`after_lightning`。"""
     _open_judgment(host, frame, after=after_lightning.__name__)
+
+
+def resolve_supply_shortage(host: Any, frame: Frame) -> None:
+    """【兵粮寸断】生效后：压 JUDGE 帧，后果 op 为 :func:`after_supply_shortage`。
+
+    与【乐不思蜀】同一骨架：判定放在**目标的判定阶段**那张结算帧的 C4，压 JUDGE 帧；
+    同名守卫 / 无懈窗口 / 结算后进弃牌堆都走既有延时锦囊路径，本 op 只负责"开判定"。
+    """
+    _open_judgment(host, frame, after=after_supply_shortage.__name__)
+
+
+def after_supply_shortage(host: Any, frame: Frame) -> None:
+    """【兵粮寸断】判定后果：**不是梅花** ⇒ 被判定者跳过**摸牌阶段**（梅花照常摸牌）。
+
+    跳过是阶段推进的状态（``Engine.skip_draw_phase`` → ``_phase_draw_start`` 消费），
+    **不是**技能钩子，因此不新增 ``Timing``（票面纪律 / spec §5.1.4）。
+    """
+    judge_card = frame.data["judge_card"]
+    if judge_card.suit is None or Suit(judge_card.suit) is not Suit.CLUB:
+        host.skip_draw_phase(frame.data["subject"])
 
 
 def after_skill_judgment(host: Any, frame: Frame) -> None:
@@ -197,6 +238,17 @@ def resolve_ex_nihilo(host: Any, frame: Frame) -> None:
     host.draw_for_hand(frame, host.current_target(frame), EX_NIHILO_DRAW)
 
 
+def resolve_iron_chain(host: Any, frame: Frame) -> None:
+    """【铁索连环】：**当前目标**独立 toggle 横置状态（M5-03 / 规格 §5.1.2）。
+
+    每个目标各自结算（RESOLVE 帧逐目标走 C1–C5），故这里只翻**当前目标**：
+    "可指定 1–2 个、每个独立 toggle"因此不需要第二份多目标循环，也不产生额外帧。
+    状态写入走引擎的 ``set_chained``（唯一写入口），delta 落在本 RESOLVE 帧上。
+    """
+    target = host.current_target(frame)
+    host.set_chained(frame, target, not host.state.player(target).chained)
+
+
 def resolve_peach_garden(host: Any, frame: Frame) -> None:
     """【桃园结义】：当前目标回复 1 点体力。
 
@@ -217,6 +269,23 @@ def resolve_peach_garden(host: Any, frame: Frame) -> None:
     )
 
 
+def resolve_wine(host: Any, frame: Frame) -> None:
+    """【酒】（M5-04）：出牌阶段置"下一张【杀】+1"；濒死语境**不产生**加伤。
+
+    两种用法共用 ``start_use`` 与同一个计数键，效果按 ``frame.data["use_timing"]`` 分叉：
+
+    - 出牌阶段（``use_timing = None``）：把来源座位的 ``wine_active`` 写成 ``True``
+      （唯一写入口 ``Engine.set_wine_active``，落一条 ``wine_change``）；
+    - 濒死（``use_timing = NEAR_DEATH_AT``）：回复 1 已由求桃窗口的既有骨架
+      （``Engine.recover_from_peach`` 先压好的 RECOVER 帧）落地——濒死语境的 RESOLVE
+      在"生效前"就跳过效果步骤，本分支因此只保证**不写** ``wine_active``：不产生任何
+      留给下一张【杀】的加伤，也不产生跨回合残留。
+    """
+    if frame.data.get("use_timing") is Timing.NEAR_DEATH_AT:
+        return None
+    host.set_wine_active(frame, frame.data["source"], True)
+
+
 _ASK_DISMANTLEMENT = "ops.dismantlement"
 """手写询问位置（票 22）：【过河拆桥】目标区选一张牌。"""
 
@@ -225,6 +294,12 @@ _ASK_SNATCH = "ops.snatch"
 
 _ASK_HARVEST = "ops.harvest"
 """手写询问位置（票 22）：【五谷丰登】目标从剩余亮牌里取一张。"""
+
+_ASK_FIRE_ATTACK_REVEAL = "ops.fire_attack.reveal"
+"""手写询问位置（票 22）：【火攻】目标从**自己**手牌里亮一张（M5-06）。"""
+
+_ASK_FIRE_ATTACK_DISCARD = "ops.fire_attack.discard"
+"""手写询问位置（票 22）：【火攻】使用者可选弃一张**同花色**手牌（M5-06）。"""
 
 
 def _take_one_zone_card(
@@ -301,6 +376,104 @@ def resolve_snatch(host: Any, frame: Frame) -> Any:
     if host.suspended(picked):
         return "stay"
     return _move_lost_cards(host, frame, picked, to_zone=ZoneRef(Zone.HAND, frame.data["source"]))
+
+
+def _same_suit_hand_face(
+    host: Any, seat: int, suit: str | None
+) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
+    """``seat`` 手里**与 ``suit`` 同花色**的那些牌的选择面（可见槽：弃牌者看自己的手牌）。"""
+    hand = tuple(
+        card_id
+        for card_id in host.state.player(seat).hand
+        if host.state.card(card_id).suit == suit
+    )
+    slots = tuple(
+        Slot(ref=ZoneRef(Zone.HAND, seat), card=host.state.card(card_id))
+        for card_id in hand
+    )
+    return slots, hand
+
+
+def resolve_fire_attack(host: Any, frame: Frame) -> Any:
+    """【火攻】生效后：目标亮 1 张手牌 → 使用者可弃一张同花色手牌 → 1 点火焰伤害。
+
+    D10 / spec §5.1.4 的四条：
+
+    - **结算时目标没有手牌** ⇒ 无事发生（连亮牌步都不压；火攻随后按行为表的
+      ``final_zone``（缺省 ``DISCARD``）从处理区进弃牌堆）；
+    - 亮牌由**目标自己**选 1 张（``reveal_hand=True``：挑的是自己的手牌），并以
+      ``card_reveal`` 落成**公开事实**——牌不移动、也不写任何"已知"状态；
+    - 使用者**可以弃**一张同花色手牌造成 1 点火焰伤害（:func:`_push_damage` 统一入口：
+      来源 = 使用者、属性 = 火焰、渠道 = 火攻本体），**也可以放弃**——``optional``
+      候选里恒有一条 ``Pass``；没有同花色 ⇒ 选择面为空、直接放弃（"只能放弃"）；
+    - 两次询问各自让出控制权（``ask_selection`` 的帧内缓存 + ``effect_pc``），弃牌搬移
+      还可能因"失去牌后"再挂起；故进度记在帧私有游标上，重入既不重发问、也不重复记
+      delta / 重复造成伤害。
+    """
+    target = host.current_target(frame)
+    source = frame.data["source"]
+    if "revealed" not in frame.data:
+        if not host.state.player(target).hand:
+            # 结算时无手牌（例：仅剩一张【火攻】时对自己使用）⇒ 无事发生。
+            return None
+        picked = host.ask_selection(
+            frame,
+            owner=_ASK_FIRE_ATTACK_REVEAL,
+            key=f"fire_attack:reveal:{target}",
+            actor=target,
+            timing=Timing.RESOLVE_AFTER_EFFECT,
+            spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1)),
+            build_face=lambda: host.selection_face(
+                target, (Zone.HAND,), reveal_hand=True
+            ),
+        )
+        if host.suspended(picked):
+            return "stay"
+        if not picked:
+            return None
+        frame.data["revealed"] = picked[0]
+        host.reveal_card(frame, target, host.state.card(picked[0]))
+    revealed = host.state.card(frame.data["revealed"])
+    if "discarded" not in frame.data:
+        picked = host.ask_selection(
+            frame,
+            owner=_ASK_FIRE_ATTACK_DISCARD,
+            key=f"fire_attack:discard:{source}",
+            actor=source,
+            timing=Timing.RESOLVE_AFTER_EFFECT,
+            spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=True),
+            build_face=lambda: _same_suit_hand_face(host, source, revealed.suit),
+        )
+        if host.suspended(picked):
+            return "stay"
+        # 空元组 = 放弃 / 没有同花色（"只能放弃"）：记下"这一步已经问过"。
+        frame.data["discarded"] = picked[0] if picked else None
+    chosen = frame.data["discarded"]
+    if chosen is None:
+        return None
+    if "discard_moved" not in frame.data:
+        frame.data["discard_moved"] = True
+        control = host.move_in_frame(
+            frame,
+            host.state.refs((chosen,)),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.DISCARD,
+            owner=source,
+            actor=source,
+        )
+        if control == "stay":
+            return "stay"
+    if "damage_done" not in frame.data:
+        frame.data["damage_done"] = True
+        _push_damage(
+            host,
+            frame,
+            source=source,
+            target=target,
+            amount=FIRE_ATTACK_DAMAGE,
+            nature=DamageNature.FIRE,
+        )
+    return None
 
 
 def _duel_accepted(op: dict[str, Any], *, other: int, required: int) -> str:
@@ -393,9 +566,21 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
     **a 不可行 ⇒ 自动 b**（`spec.md` §1.8）：先按**同一份候选生成器**预览这扇窗口，非
     ``Pass`` 候选为空（手上没有可用【杀】/ 转化源，或 Bn 在结算时已不合法）⇒ **不问**，
     直接走 b；武器已离装备区则 no-op。预览只读状态：不记询问、不耗序号、不搬牌。
+
+    **持刀者的决定只做一次**（M5-bugfix）：b 支的移动会内联派发「失去牌后」（孙尚香
+    【枭姬】摸两张会提问），挂起的续跑重新进入本 op；``ask`` 的应答缓存是一次性的，
+    没有 :data:`_BORROWED_SWORD_RESOLVED` 就会把同一个窗口再问一遍——实机缺陷的根因。
+    标记在拿到应答 / 判定 auto-b **之后**才写，故首次询问挂起时不受影响。
     """
     holder = host.current_target(frame)
     source = frame.data["source"]
+    resolved = frame.data.get(_BORROWED_SWORD_RESOLVED)
+    if resolved == _BORROWED_SWORD_USE:
+        return None
+    if resolved == _BORROWED_SWORD_HAND_OVER:
+        # 重入：决定已经做过。b 支的移动可能挂在【枭姬】上，挂起续跑回到本 op 时
+        # ``weapon_of`` 已为空 ⇒ 补做的那次移动是 no-op；**绝不再问一次**持刀者。
+        return _hand_over_weapon(host, frame, holder=holder, source=source)
     designations = tuple(frame.data.get("designations", ()))
     if len(designations) != 1:
         # 显式异常而不是 assert（``python -O`` 会删掉 assert）：入口只经清单，
@@ -417,6 +602,7 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
         if not isinstance(action, Pass)
     ]
     if not offers:
+        frame.data[_BORROWED_SWORD_RESOLVED] = _BORROWED_SWORD_HAND_OVER
         return _hand_over_weapon(host, frame, holder=holder, source=source)
     action = host.ask_respond(
         frame,
@@ -432,6 +618,7 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
     if host.suspended(action):
         return "stay"
     if isinstance(action, UseCard):
+        frame.data[_BORROWED_SWORD_RESOLVED] = _BORROWED_SWORD_USE
         host.start_use(
             action.card,
             source=holder,
@@ -439,6 +626,7 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
             use_timing=Timing.RESOLVE_AFTER_EFFECT,
         )
         return None
+    frame.data[_BORROWED_SWORD_RESOLVED] = _BORROWED_SWORD_HAND_OVER
     return _hand_over_weapon(host, frame, holder=holder, source=source)
 
 
@@ -628,11 +816,16 @@ def finish_harvest(host: Any, frame: Frame) -> None:
 OPS: dict[str, Callable[[Any, Frame], Any]] = {
     resolve_indulgence.__name__: resolve_indulgence,
     resolve_lightning.__name__: resolve_lightning,
+    resolve_supply_shortage.__name__: resolve_supply_shortage,
     after_indulgence.__name__: after_indulgence,
     after_lightning.__name__: after_lightning,
+    after_supply_shortage.__name__: after_supply_shortage,
     after_skill_judgment.__name__: after_skill_judgment,
     resolve_ex_nihilo.__name__: resolve_ex_nihilo,
+    resolve_iron_chain.__name__: resolve_iron_chain,
+    resolve_fire_attack.__name__: resolve_fire_attack,
     resolve_peach_garden.__name__: resolve_peach_garden,
+    resolve_wine.__name__: resolve_wine,
     resolve_dismantlement.__name__: resolve_dismantlement,
     resolve_snatch.__name__: resolve_snatch,
     resolve_duel.__name__: resolve_duel,

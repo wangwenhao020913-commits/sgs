@@ -1,9 +1,12 @@
 """变化事件（delta）的载荷类型：一次状态变化的纯事实（票 06 §2 / §3）。
 
-五种 ``delta_type``（``card_move`` / ``hp_change`` / ``deck_shuffle`` / ``identity_deal`` /
-``identity_reveal``）：它们是记录流 schema 的一部分，后补会动事件版本，所以即使 M1 的
-骨架期只用得到 ``card_move`` 也先建位。记录层（``engine``）在这些模型上**继承**出带
-``seq`` / ``frame_id`` / ``depth`` 的记录子类，从而 JSON 是平铺的。
+八种 ``delta_type``（``card_move`` / ``hp_change`` / ``chained_change`` / ``wine_change`` /
+``card_reveal`` / ``deck_shuffle`` / ``identity_deal`` / ``identity_reveal``）：它们是记录流
+schema 的一部分，后补会动事件版本，所以即使 M1 的骨架期只用得到 ``card_move`` 也先建位；
+``chained_change``（M5-03 横置）、``wine_change``（M5-04 酒）与 ``card_reveal``（M5-06
+火攻亮牌）都是就地追加，记录流仍为事件版本 2。记录层
+（``engine``）在这些模型上**继承**出带 ``seq`` / ``frame_id`` / ``depth`` 的记录子类，
+从而 JSON 是平铺的。
 """
 
 from __future__ import annotations
@@ -18,11 +21,14 @@ from .models import CardRef, MoveReason, ZoneRef, _FrozenModel
 
 __all__ = [
     "CardMoveDelta",
+    "CardRevealDelta",
+    "ChainedChangeDelta",
     "DeckShuffleDelta",
     "Delta",
     "HpChangeDelta",
     "IdentityDealDelta",
     "IdentityRevealDelta",
+    "WineChangeDelta",
 ]
 
 
@@ -53,6 +59,52 @@ class HpChangeDelta(_FrozenModel):
     before: int
     after: int
     amount: int
+
+
+class ChainedChangeDelta(_FrozenModel):
+    """一个座位的**横置**状态被写成某个值（M5-03 / 决策 D5）。
+
+    写入口唯一：``Engine.set_chained``。铁索连环的 toggle 与属性伤害的"结算后立即重置"
+    都经它发这条 delta——重置因此发生在**同一伤害事件内**（记录流里与那条
+    ``hp_change`` 同帧），不另开事件帧，也不产生第二个时机。
+    """
+
+    delta_type: Literal["chained_change"] = "chained_change"
+    seat: int
+    chained: bool
+
+
+class WineChangeDelta(_FrozenModel):
+    """一个座位的【酒】加伤状态被写成某个值（M5-04 / 决策 D5）。
+
+    写入口唯一：``Engine.set_wine_active``。出牌阶段使用【酒】把它写成 ``True``；兑现给
+    下一张【杀】的使用、以及回合末清理都经它写成 ``False``。与 ``chained_change`` 同形
+    （只记**新值**：``active``），因为它同样是"回合内的临时状态 + 网页座位卡读投影"。
+
+    加伤只在本回合有效，故它不会跨回合出现在记录流里；标准 108 无【酒】，故标准基准
+    一条都不会出现这条 delta。
+    """
+
+    delta_type: Literal["wine_change"] = "wine_change"
+    seat: int
+    active: bool
+
+
+class CardRevealDelta(_FrozenModel):
+    """一张**手牌**成为公开事实（M5-06 的【火攻】亮牌 / 决策 D10）。
+
+    只揭示、不移动：亮出的牌仍留在原区（火攻亮出的手牌留在手里，不离开手牌区）。
+    因此它**不是** ``card_move``——不进牌守恒的搬运记账，只回答"哪张牌此刻被公开了"。
+    ``seat`` = 亮出者（手牌持有者），``card`` = 被公开的那一张。
+
+    **不持久**：不写任何"已知"状态（手牌区不留标记），记录流里的这一条就是全部公开
+    事实；未亮出的手牌一张都不在这里出现。标准 108 无【火攻】，故 47 条金录像一条都
+    不会出现这条 delta。
+    """
+
+    delta_type: Literal["card_reveal"] = "card_reveal"
+    seat: int
+    card: CardRef
 
 
 class DeckShuffleDelta(_FrozenModel):
@@ -94,6 +146,13 @@ class IdentityRevealDelta(_FrozenModel):
 
 
 Delta = Annotated[
-    CardMoveDelta | HpChangeDelta | DeckShuffleDelta | IdentityDealDelta | IdentityRevealDelta,
+    CardMoveDelta
+    | HpChangeDelta
+    | ChainedChangeDelta
+    | WineChangeDelta
+    | CardRevealDelta
+    | DeckShuffleDelta
+    | IdentityDealDelta
+    | IdentityRevealDelta,
     Field(discriminator="delta_type"),
 ]

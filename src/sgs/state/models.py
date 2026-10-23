@@ -134,6 +134,13 @@ class MoveReason(str, Enum):
     """判定：牌堆 → 处理区 → 弃牌堆（亮判定牌与判定牌生效后入弃牌堆，`11.6`）。"""
     LOSE = "LOSE"
     """失去：判定区 / 装备区 → 弃牌堆或他处（替换失去旧装备、拆 / 顺，`4.10` / `11.5`）。"""
+    REFORGE = "REFORGE"
+    """重铸（M5-03）：手牌 → 弃牌堆，**不算弃置、算失去**（§5.1.3）。
+
+    "失去"一侧的判据与 :class:`MoveReason` 无关（``move_after`` 只看区域与移动后的持有），
+    故 REFORGE 照常触发【连营】/【枭姬】；"弃置"类触发若出现，必须显式比较原因、把
+    REFORGE 排除在外。事件流据此写「重铸」，不写「弃置」。
+    """
 
 
 class Phase(str, Enum):
@@ -151,8 +158,8 @@ class FrameKind(str, Enum):
     """结算事件的帧类型（票 04 §6）。
 
     前八个是 M2 真的会走到 `push` 的结算单元（``JUDGE`` 自票 26 从占位转真帧）；
-    其余是留位（触发它们的机制在本里程碑被排除），只作 ``frame`` 记录
-    ``frame_kind`` 的合法取值。
+    ``MOVE`` 自 M5-03 起承载**重铸**的"弃置 + 摸一张"；其余是留位（触发它们的机制在
+    本里程碑被排除），只作 ``frame`` 记录 ``frame_kind`` 的合法取值。
     """
 
     # M2 会走到
@@ -164,9 +171,9 @@ class FrameKind(str, Enum):
     DEATH = "DEATH"
     RECOVER = "RECOVER"
     JUDGE = "JUDGE"
+    MOVE = "MOVE"
     # 留枚举位
     PLAY = "PLAY"
-    MOVE = "MOVE"
     LIFE_LOSE = "LIFE_LOSE"
     MAXLIFE = "MAXLIFE"
     RANK_COMPARE = "RANK_COMPARE"
@@ -188,13 +195,20 @@ class Player(BaseModel):
     judge: list[int] = Field(default_factory=list)
     """判定区（**先入在前**）；"最后置入"的读取端用 ``reversed()`` 表达（票 08 §8）。"""
     chained: bool = False
-    """是否横置（铁索连环，U1-04 先落座位字段；**状态接线归 M5**）。"""
+    """是否横置（铁索连环）。
+
+    U1-04 先落座位字段；**M5-03 接线**：写入唯一入口是 ``Engine.set_chained``（铁索连环的
+    toggle 与属性伤害的"结算后立即重置"），每次变化发一条 ``chained_change`` delta。
+    """
     wine_active: bool = False
-    """【酒】的"下一张【杀】+1"是否生效（U1-04 先落座位字段；**状态接线归 M5**）。"""
+    """【酒】的"下一张【杀】+1"是否生效（M5-04 接线：出牌阶段的【酒】写入，回合末清空；
+    每次变化发一条 ``wine_change`` delta）。"""
     card_use_counts: dict[str, int] = Field(default_factory=dict)
-    """本回合各牌名（card type id）的已用次数；该座位自己的 ``TURN_START`` 重置（票 07 §6）。
+    """本回合各**计数键**的已用次数；该座位自己的 ``TURN_START`` 重置（票 07 §6）。
 
     只存总已用次数：额定 / 额外两个上限记在行为表里，M1 的判定只用总数（票 07 §6）。
+    键通常是牌型 id，也可以是行为表声明的**共用键**（M5-02：普通【杀】/ 火【杀】/
+    雷【杀】共用 ``"slash"``）；读写的唯一真源是 ``CardBehavior.count_key``。
     """
     identity: Identity | None = None
     """座位级身份（票 13 §3）：无身份局恒 ``None``，身份局由 ``build_initial`` 一次发放。

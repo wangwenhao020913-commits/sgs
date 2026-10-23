@@ -43,6 +43,8 @@
     "cardPreactivationManifest", "enterCardPreativation", "alternativeLabel",
     // 报障 3：事件回放（步长按钮 0.1–0.5s，默认 0.1）+ 效果区逐事件派生 + 描述文本
     "flushPlayback", "stepPlayback", "renderProcessing", "applyEffectDelta", "DELAY_STEPS_MS", "describeEffect",
+    // U3-01 / D5：舞台项寿命的纯函数——烟测直接喂 `now` 断 visible / fading / gone（D15）
+    "stageLane",
     // W4-6：回放页（全区域增量重建 / 询问面板 / play-pause / 步长 / 空壳引导）
     "renderEffectCards", "replayStep", "replaySeek", "toggleReplayPlay", "stopReplayPlay",
     "renderRunList", "runRow",
@@ -58,6 +60,8 @@
     "arrangeRowOf", "arrangeMoveTo", "arrangePick", "arrangeDrop",
     // 票 19：开局点将——列表拉取 + 开关（关了 = 置灰 + 建局不带 my_hero）
     "loadHeroCatalog", "fillHeroOptions", "syncPointjiang",
+    // M5-01b：开局页牌堆档位——列表拉取（选项/文案全来自服务端 GET /api/decks）
+    "loadDeckCatalog", "fillDeckOptions",
     // U1-03：提示条右端动作的候选下标 + 倒计时的三色纯函数 / 渲染（烟测只读这三口）
     "rightActionIndex", "countdownPhase", "renderCountdown",
     // U2-07（票 07）：排列超时自动提交（唯一例外）+ 提交 / 放弃按当前排列执行。
@@ -72,6 +76,13 @@
     // U2-11（D4 / D10）：亮牌模板（五谷 + 票 12 遗计复用）——判据 / 数据 / 渲染 / 一击提交。
     // `isRevealStep` 住在 modal.js（只读判据源），渲染口在 reveal.js；烟测直接喂合成载荷。
     "isRevealStep", "revealData", "revealHintText", "renderReveal", "submitRevealPick",
+    // M5-08a：火攻 —— 亮牌步（亮牌模板 / 一击提交）+ 同花色弃牌（点自己的手牌）+ 舞台亮牌
+    "isPickRevealStep", "isOwnHandSinglePick", "renderOwnHandPick", "submitOwnHandSinglePick",
+    "applyRevealDelta", "stageRevealCards", "renderRevealedCards", "describeReveals",
+    // M5-08b：铁索 1–2 目标（沿用点座位多选）+ 重铸入口（独立 Reforge，一击即提交）
+    "reforgeAction", "renderReforgeEntry", "submitReforge", "describeRecord",
+    // M5-bugfix（借刀预发动）：展示卡 → 纯 CardRef 的唯一投影口
+    "bareCardRef",
   ];
   const out = {};
   for (const name of names) {

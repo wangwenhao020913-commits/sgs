@@ -23,6 +23,7 @@ import pytest
 
 from sgs.data import Color, Identity, RuleConfig, color_of_suit
 from sgs.effects import (
+    DamageNature,
     ModifierContext,
     ModifierPoint,
     apply_modifiers,
@@ -414,6 +415,79 @@ def test_a_converted_slash_carries_no_attribute_because_the_card_face_has_no_suc
 
     assert not {name for name in fields if "attribute" in name or "element" in name}
     assert "type" in fields and "suit" in fields and "color" in fields
+
+
+class _DamageFrameSpy(Engine):
+    """记下每一次压栈的 DAMAGE 帧载荷：``nature`` 是帧私有事实，记录流里不落。"""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.damage_frames: list[dict[str, Any]] = []
+
+    def push_frame(self, kind, data, *, timing):  # type: ignore[no-untyped-def]
+        frame = super().push_frame(kind, data, timing=timing)
+        if kind is FrameKind.DAMAGE:
+            self.damage_frames.append(dict(data))
+        return frame
+
+
+def test_a_transformed_slash_product_reads_as_an_ordinary_slash_before_any_damage_frame():
+    """D9 / §8 第 1 条：藤甲的"普通【杀】无效"在**生效前**判定，只读产物牌型。
+
+    武圣（以及龙胆 / 丈八）的产物牌型是 ``slash`` ⇒ 它是普通【杀】；火杀 / 雷杀是
+    另外两个独立牌型。故 M5-05 不需要等伤害帧、也不需要 ``CardRef`` 属性字段：
+    ``product.type == "slash"`` 就是判据（``CardRef`` 模型里根本没有 ``nature`` 字段）。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_PEACH, BLACK_SLASH), hero="guanyu"), SeatSpec()],
+        deck=_deck_excluding(RED_PEACH, BLACK_SLASH),
+        turn_seat=0,
+    )
+
+    products = [action.card for action in _virtual_uses(_play_candidates(state), "slash")]
+    assert products, "武圣的转化【杀】仍在候选里（非空转）"
+
+    for product in products:
+        assert product.is_virtual and product.virtual_sources == (RED_PEACH,)
+        assert product.type == "slash", "产物牌型是普通【杀】，不是火 / 雷牌型"
+        assert product.name == "杀"
+        assert "nature" not in type(product).model_fields, "判据不读牌面属性字段"
+
+    # 来源牌的花色 / 点数 / 颜色都不参与：红桃与黑桃来源的产物牌型同为普通【杀】。
+    from_faces = [
+        transformed_card(state, (RED_PEACH,), "slash"),
+        transformed_card(state, (BLACK_SLASH,), "slash"),
+    ]
+    assert [product.type for product in from_faces] == ["slash", "slash"]
+    assert [product.color for product in from_faces] == [Color.RED, Color.BLACK], (
+        "颜色照旧继承（与属性不继承是两条互不干扰的裁定）"
+    )
+
+
+def test_a_wusheng_converted_slash_product_deals_normal_damage():
+    """产物牌型 ``slash`` ⇒ 普通伤害；来源牌的花色 / 点数 / 颜色不改变属性（规则 16.3）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(RED_PEACH,), hero="guanyu"), SeatSpec()],
+        deck=_deck_excluding(RED_PEACH),
+        turn_seat=0,
+    )
+
+    engine = _DamageFrameSpy.from_state(state, seed=1)
+    run_until(
+        engine,
+        [_play_transformed(GUANYU), Scripted(lambda query: None)],
+        _use_frame_popped,
+    )
+
+    assert engine.damage_frames, "转化【杀】必须真的造成伤害"
+    payload = engine.damage_frames[0]
+    assert payload["nature"] is DamageNature.NORMAL
+    assert payload["chain"] is False
+    assert payload["channel"].type == "slash", "渠道 = 产物牌"
+    assert payload["channel"].is_virtual
+    assert payload["channel"].virtual_sources == (RED_PEACH,)
 
 
 def test_wusheng_offers_the_red_card_when_a_slash_is_required_in_response():

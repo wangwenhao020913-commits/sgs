@@ -57,7 +57,8 @@ async function openReplay(name) {
       index: 0,
       seats: null,       // 逐座位：手牌 / 装备 / 判定 + 体力 / 上限 / 身份 / 存活
       query: null,       // 当前位置之前最近的一条询问（询问面板显示它）
-      effectCards: [],   // 处理区 / 效果区（复用 applyEffectDelta 逐事件派生）
+      effectCards: [],   // 舞台里的处理中 / 弃牌两组（复用 applyEffectDelta 逐事件派生）
+      revealedCards: [], // 舞台里的展示组（复用 applyRevealDelta；U3-01 起三组同一份渲染）
       appliedIndex: -1,  // 已经应用到第几条记录（向前播放只追加，回跳才整体重来）
       playing: false,
       timer: null,
@@ -80,6 +81,7 @@ function resetReplayDerived(replay) {
     hp: null, hpMax: null, alive: null, identity: null,
   }));
   replay.effectCards = [];
+  replay.revealedCards = [];
   replay.query = null;
   replay.appliedIndex = -1;
 }
@@ -163,6 +165,7 @@ function applyReplayThrough(replay, index) {
     applyReplaySeatDelta(replay, record);
     if (record.kind === "query") noteReplayQuery(replay, record.query);
     replay.effectCards = applyEffectDelta(record, replay.effectCards, null);
+    replay.revealedCards = applyRevealDelta(record, replay.revealedCards);
   }
   replay.appliedIndex = index;
 }
@@ -396,14 +399,55 @@ function renderReplay() {
 
   renderReplaySeats(replay);
   renderReplayQuery(replay.query);
-  renderEffectCards($("r-processing"), replay.effectCards);
+  // U3-01 / D14：回放页复用牌桌的舞台派生与卡面渲染（三组 + 1s 淡出）；
+  // 目标线 / 技能名 / 白光 / 高亮 / 体力闪不接（它们的触发时机与进度条拖拽语义冲突）。
+  const now = stageNow();
+  renderEffectCards(
+    $("r-processing"),
+    stageCardItems(replay.effectCards, replay.revealedCards, now),
+    now,
+    replayHeroNameOf(replay),
+  );
   const effectText = $("r-effect");
-  if (effectText) effectText.textContent = describeEffect(replay.effectCards);
+  if (effectText) {
+    effectText.textContent = describeStageGroups(replay.effectCards, replay.revealedCards, now);
+  }
+  scheduleReplayStageRender(now);
 
   const record = replay.records[replay.index] || {};
   $("r-pos").textContent = `${replay.index + 1} / ${replay.records.length}（seq ${record.seq || "-"}）`;
   renderReplayLog(replay);
   updateReplayPlayButton();
+}
+
+/** 回放页的武将名解析：侧车 meta 给的是武将 id，中文名单只来自服务端 `/api/heroes`
+ *  （开局页已拉过、存在 `state.heroCatalog`）；缺表时退回 id，不编名字（D10）。 */
+function replayHeroNameOf(replay) {
+  const names = new Map((state.heroCatalog || []).map((hero) => [hero.id, hero.name]));
+  const heroes = (replay.meta && replay.meta.heroes) || [];
+  return (seat) => {
+    const heroId = heroes[seat];
+    return (heroId && names.get(heroId)) || heroId || "";
+  };
+}
+
+/** 回放页舞台的到点重绘（与牌桌同一条 `nextStageDeadline`；只重绘，不判定）。 */
+let replayStageTimer = null;
+
+function scheduleReplayStageRender(now = stageNow()) {
+  if (replayStageTimer !== null) {
+    if (window.clearTimeout) window.clearTimeout(replayStageTimer);
+    replayStageTimer = null;
+  }
+  const replay = state.replay;
+  if (!replay) return;
+  const next = nextStageDeadline(
+    (replay.effectCards || []).concat(replay.revealedCards || []), now);
+  if (next === null) return;
+  replayStageTimer = window.setTimeout(() => {
+    replayStageTimer = null;
+    if (state.replay) renderReplay();
+  }, Math.max(0, next - now));
 }
 
 function replayStep(delta) {

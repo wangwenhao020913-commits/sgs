@@ -128,3 +128,399 @@ def test_identity_ratio_display_copy_matches_the_engine_rosters() -> None:
         "table.js:IDENTITY_RATIOS 与 identities.py:IDENTITY_ROSTERS 漂移："
         f"界面 {display} / 引擎 {expected}"
     )
+
+
+# ---------------------------------------------------------------------------
+# U3-01：舞台三组的**设计单位**（spec D3 / D4；票 01 的验收把 CSS 算式钉在这里）
+# ---------------------------------------------------------------------------
+
+_CSS_TEXT = (STATIC_DIR / "style.css").read_text(encoding="utf-8")
+
+
+def _css_rule(selector: str) -> str:
+    """取一条 CSS 规则的正文（选择器按字面量匹配；找不到即失败）。"""
+    match = re.search(rf"{re.escape(selector)}\s*\{{(?P<body>[^}}]*)\}}", _CSS_TEXT)
+    assert match is not None, f"style.css 里找不到规则 {selector}"
+    return match.group("body")
+
+
+def test_stage_panel_uses_the_u3_design_units() -> None:
+    """舞台 40% / 上限 360 / 中心 64.47% / 两行 253，几何上不压顶座。
+
+    设计舞台 1600×608、环桌圆心 y=370、ry=235、对手卡高 150（`table.js:RING_STAGE`）：
+    顶座（90°）下沿 = 370 − 235 + 150/2 = 210。舞台中心 64.47% × 608 = 392，上限 360
+    ⇒ 顶边 392 − 180 = 212 > 210（D3）。40% 宽 = 640 设计单位，横跨 480–1120，
+    左右座位中心 212 / 1388、卡宽 210，故不压侧座。舞台行限两行卡面（124×2 + 5 = 253），
+    超出纵向滚动。
+    """
+    stage = _css_rule(".stage-center")
+    assert re.search(r"width:\s*40%", stage), "舞台宽必须是 40%（640 设计单位）"
+    width = re.search(r"max-height:\s*calc\((\d+(?:\.\d+)?) \* var\(--dsu\)\)", stage)
+    assert width is not None and float(width.group(1)) == 360.0, (
+        f"舞台 max-height 必须是 360 设计单位，实际：{stage}"
+    )
+    top = re.search(r"top:\s*(\d+(?:\.\d+)?)%", stage)
+    assert top is not None and abs(float(top.group(1)) - 64.47) < 1e-6, (
+        f"舞台中心必须下移到 64.47%，实际：{stage}"
+    )
+    assert re.search(r"overflow:\s*hidden", stage), "舞台面板必须裁掉超出的行"
+
+    center_y = float(top.group(1)) / 100 * 608
+    top_seat_bottom = 370 - 235 + 150 / 2
+    panel_top = center_y - float(width.group(1)) / 2
+    assert panel_top > top_seat_bottom, (
+        f"舞台顶边 {panel_top} 压住了顶座下沿 {top_seat_bottom}（D3 的几何判据）"
+    )
+    assert abs(center_y - 392) < 0.5, f"64.47% × 608 应 ≈ 392，实际 {center_y}"
+
+    row = _css_rule(".stage-center .processing")
+    assert re.search(r"max-height:\s*calc\(253 \* var\(--dsu\)\)", row), (
+        f"舞台行必须限两行卡面（253 = 124×2 + 5），实际：{row}"
+    )
+    assert re.search(r"overflow-y:\s*auto", row), "超过两行必须纵向滚动，不折叠"
+    assert re.search(r"align-content:\s*flex-start", row), "行从顶部排（滚动而不是把行压扁）"
+
+    assert re.search(r"-webkit-line-clamp:\s*2", _css_rule(".stage-center .context")), (
+        "底部说明最多 2 行"
+    )
+
+
+def test_stage_lanes_have_the_four_unit_bars_and_discard_is_desaturated() -> None:
+    """左侧 4 设计单位色条区分三组、弃牌降饱和；旧的金色描边已删除（D4）。"""
+    bar = _css_rule(".stage-card")
+    assert re.search(r"border-left:\s*calc\(4 \* var\(--dsu\)\)", bar), (
+        f"舞台卡左侧必须是 4 设计单位色条，实际：{bar}"
+    )
+    lanes = {
+        "processing": "#d9b45c",
+        "showcase": "#3f8f8a",
+        "discard": "#9a9188",
+    }
+    for lane, color in lanes.items():
+        rule = _css_rule(f'.stage-card[data-stage-lane="{lane}"]')
+        assert color in rule.lower(), f"{lane} 组色条必须是 {color}，实际：{rule}"
+    assert re.search(
+        r'\.stage-card\[data-stage-lane="discard"\][^{]*\{[^}]*saturate\(\.55\)',
+        _CSS_TEXT,
+    ), "弃牌组卡面必须降饱和 saturate(.55)"
+    assert ".revealed-card" not in _CSS_TEXT, (
+        "旧的亮牌金色描边（.revealed-card）必须删除——色条取代它，不新增角标"
+    )
+    assert ".fading" in _CSS_TEXT, "淡出必须有一个可断言的类（.stage-card.fading）"
+
+
+def test_stage_title_is_renamed_from_processing_area() -> None:
+    """小标题「处理区」改为「舞台」（D3）；三组同流，故不再只写处理区。"""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert re.search(r'class="stage-title">\s*舞台\s*<', html), (
+        "index.html 的舞台小标题必须改成「舞台」"
+    )
+
+
+# ---------------------------------------------------------------------------
+# U3-03：使用牌目标线 / 行动者高亮 / 体力闪（spec D8.1 / D13；票 03 的验收把
+# CSS 设计单位与层级钉在这里）
+# ---------------------------------------------------------------------------
+
+_EFFECTS_JS = STATIC_DIR / "effects.js"
+
+
+def test_target_line_layer_is_full_shell_above_seats_below_modals() -> None:
+    """目标线层 = 覆盖整个牌桌壳的 SVG：`inset: 0`、无 viewBox、不吃指针、层级正确。
+
+    D8.1 的层级要求「在座位之上、弹窗之下」；自己的武将块住底部面板（z-index 10），
+    故线层还要在它之上，否则连到自己的线会被面板背景盖住。端点只在画线时读一次布局
+    （JS 注释 / `ui_smoke` 的“窗口尺寸变化不影响已在播的线”），这里只钉静态几何。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    tag = re.search(r"<svg\b[^>]*\bid=\"t-target-lines\"[^>]*>", html)
+    assert tag is not None, "index.html 里缺少目标线层的 SVG（id=t-target-lines）"
+    assert "viewBox" not in tag.group(0), (
+        f"目标线层不能有 viewBox（坐标就是壳内 CSS 像素），实际：{tag.group(0)}"
+    )
+    assert re.search(r'class="target-lines"', tag.group(0)), "目标线层必须带 class=target-lines"
+    assert html.index('id="table-shell"') < html.index('id="t-target-lines"'), (
+        "目标线层的 SVG 必须住在 .table-shell 里面"
+    )
+
+    layer = _css_rule(".target-lines")
+    assert re.search(r"position:\s*absolute", layer), f"线层必须绝对定位，实际：{layer}"
+    assert re.search(r"inset:\s*0\b", layer), f"线层必须铺满壳（inset: 0），实际：{layer}"
+    assert re.search(r"pointer-events:\s*none", layer), f"线层不能吃指针，实际：{layer}"
+
+    def z_index(selector: str) -> int:
+        body = _css_rule(selector)
+        found = re.search(r"z-index:\s*(\d+)", body)
+        assert found is not None, f"{selector} 里找不到 z-index，实际：{body}"
+        return int(found.group(1))
+
+    seat_z = z_index(".ring .seat")
+    bottom_z = z_index(".table-bottom")
+    line_z = z_index(".target-lines")
+    modal_z = z_index(".modal")
+    assert seat_z < line_z < modal_z, (
+        f"线层必须在环上座位（{seat_z}）之上、弹窗（{modal_z}）之下，实际 {line_z}"
+    )
+    assert bottom_z < line_z, (
+        f"线层必须在自己的底部面板（{bottom_z}）之上，否则连到自己的线被面板盖住，实际 {line_z}"
+    )
+
+
+def test_target_line_is_gold_two_and_half_units_with_ten_unit_arrow() -> None:
+    """D8.1 的样式：线宽 2.5 设计单位、箭头 10 设计单位、统一金色 `#d9b45c`。"""
+    assert _EFFECTS_JS.is_file(), "缺少 effects.js（目标线 / 高亮 / 体力闪的渲染口）"
+    line = _css_rule(".target-line line")
+    assert re.search(r"stroke:\s*#d9b45c", line), f"目标线必须统一金色，实际：{line}"
+    assert re.search(r"stroke-width:\s*calc\(2\.5 \* var\(--dsu\)\)", line), (
+        f"线宽必须是 2.5 设计单位（不是 CSS px），实际：{line}"
+    )
+    arrow = _css_rule(".target-line polygon")
+    assert "#d9b45c" in arrow.lower(), f"箭头必须同色，实际：{arrow}"
+
+    js = _EFFECTS_JS.read_text(encoding="utf-8")
+    assert re.search(r"const\s+TARGET_ARROW_SIZE\s*=\s*10\b", js), (
+        "箭头尺寸常量必须是 10 设计单位"
+    )
+    assert re.search(r"TARGET_ARROW_SIZE\s*\*\s*designUnit", js), (
+        "箭头尺寸必须按设计单位换算（10 × 1 设计单位），不能写死 CSS px"
+    )
+
+
+def test_target_line_lifetime_is_1200_hold_plus_800_fade() -> None:
+    """D8.1 / D15：2s = 保持 1.2s + 淡出 0.8s；淡出靠 `.fading` + 0.8s 过渡。"""
+    assert _EFFECTS_JS.is_file(), "缺少 effects.js（目标线 / 高亮 / 体力闪的渲染口）"
+    js = _EFFECTS_JS.read_text(encoding="utf-8")
+    hold = re.search(r"const\s+TARGET_LINE_HOLD_MS\s*=\s*(\d+)\b", js)
+    fade = re.search(r"const\s+TARGET_LINE_FADE_MS\s*=\s*(\d+)\b", js)
+    assert hold is not None and int(hold.group(1)) == 1200, "线保持必须是 1.2 秒"
+    assert fade is not None and int(fade.group(1)) == 800, "线淡出必须是 0.8 秒"
+    style = _css_rule(".target-line")
+    assert re.search(r"transition:\s*opacity\s*\.8s", style), (
+        f"线淡出过渡必须是 0.8s，实际：{style}"
+    )
+    assert re.search(r"opacity:\s*0", _css_rule(".target-line.fading")), "淡出类必须把线画成透明"
+
+
+def test_acting_highlight_and_hp_flash_use_the_d13_durations() -> None:
+    """D13：行动者描边 0.5s；体力闪 0.4s，掉血红 / 回复绿。"""
+    acting = _css_rule(".seat.acting")
+    assert re.search(r"\.5s", acting), f"行动者描边必须是 0.5s，实际：{acting}"
+    flash = _css_rule(".hero-block.hp-flash")
+    assert re.search(r"\.4s", flash), f"体力闪必须是 0.4s，实际：{flash}"
+    down = _css_rule(".hero-block.hp-flash-down")
+    up = _css_rule(".hero-block.hp-flash-up")
+    assert "#b3261e" in down.lower(), f"掉血必须红，实际：{down}"
+    assert "#2e7d32" in up.lower(), f"回复必须绿，实际：{up}"
+
+    js = _EFFECTS_JS.read_text(encoding="utf-8")
+    for name, value in (("ACTING_HIGHLIGHT_MS", 500), ("HP_FLASH_MS", 400)):
+        found = re.search(rf"const\s+{name}\s*=\s*(\d+)\b", js)
+        assert found is not None and int(found.group(1)) == value, (
+            f"{name} 必须是 {value}ms（CSS 时长与类移除共用一份）"
+        )
+
+
+# ---------------------------------------------------------------------------
+# U3-04：技能名飘字 / 白光（spec D9；票 04 的 CSS 设计单位钉在这里）
+#
+# 目标线复用 U3-03 的线层与 `drawTargetLines`，这里只钉新增的两件演出：
+# 飘字（16 设计单位字、2s 上浮 20、同块 2s 内叠加 14）与白光（0.6s、粗 8 / 细 3、
+# 间隔 0.12s、左上 → 右下、裁在武将块内）。
+# ---------------------------------------------------------------------------
+
+_KEYFRAMES_RE = re.compile(r"@keyframes\s+(?P<name>[\w-]+)\s*\{(?P<body>.*?)\n\}", re.S)
+
+
+def _keyframes(name: str) -> str:
+    """取一段 `@keyframes` 的完整正文（`_css_rule` 的 `[^}]*` 进不了嵌套块）。"""
+    for match in _KEYFRAMES_RE.finditer(_CSS_TEXT):
+        if match.group("name") == name:
+            return match.group("body")
+    raise AssertionError(f"style.css 里找不到 @keyframes {name}")
+
+
+def test_skill_sweep_is_a_thick_and_thin_white_band_clipped_inside_the_hero_block() -> None:
+    """D9 的白光：武将块内 `overflow: hidden`、粗 8 / 细 3 设计单位、0.6s、间隔 0.12s。"""
+    block = _css_rule(".seat .hero-block")
+    assert re.search(r"overflow:\s*hidden", block), (
+        f"白光必须裁在武将块内（.seat .hero-block 需要 overflow: hidden）：{block}"
+    )
+
+    thick = _css_rule(".hero-block.skill-sweep::before")
+    thin = _css_rule(".hero-block.skill-sweep::after")
+    assert re.search(r"content:\s*\"\"", thick), f"粗白光是伪元素，必须有 content：{thick}"
+    assert re.search(r"position:\s*absolute", thick), f"白光必须绝对定位在武将块内：{thick}"
+    assert re.search(r"width:\s*calc\(8 \* var\(--dsu\)\)", thick), (
+        f"粗白光必须是 8 设计单位（不是 CSS px），实际：{thick}"
+    )
+    assert re.search(r"width:\s*calc\(3 \* var\(--dsu\)\)", thin), (
+        f"细白光必须是 3 设计单位，实际：{thin}"
+    )
+    for name, body in (("粗", thick), ("细", thin)):
+        assert re.search(r"animation:\s*skill-sweep\s+\S*\.6s\b[^;]*\b1\b", body), (
+            f"{name}白光必须是 0.6s、只播一次，实际：{body}"
+        )
+    assert re.search(r"animation-delay:\s*(?:0?\.12s|120ms)", thin), (
+        f"两条白光间隔 0.12s（细带延迟），实际：{thin}"
+    )
+    assert "#fff" in thick.lower() or "255, 255, 255" in thick, (
+        f"白光的底色必须是白色，实际：{thick}"
+    )
+
+    frames = _keyframes("skill-sweep")
+    lefts = [float(value) for value in re.findall(r"left:\s*(-?\d+(?:\.\d+)?)%", frames)]
+    assert len(lefts) >= 2 and lefts[0] < 0 < lefts[-1], (
+        f"扫光必须左上 → 右下（left 从负百分比走到正百分比），实际：{frames}"
+    )
+    assert "rotate(" in frames or "rotate(" in thick, (
+        "扫光必须是斜带（左上 → 右下），直上直下不满足 D9"
+    )
+
+
+def test_skill_float_uses_the_d9_design_units_and_stack_offset() -> None:
+    """D9 的飘字：16 设计单位金色加粗、2s 上浮 20、同一武将块 2s 内叠加抬高 14。"""
+    style = _css_rule(".skill-float")
+    assert re.search(r"font-size:\s*calc\(16 \* var\(--dsu\)\)", style), (
+        f"技能名字号必须是 16 设计单位，实际：{style}"
+    )
+    assert re.search(r"font-weight:\s*700", style), f"技能名必须加粗，实际：{style}"
+    assert "#d9b45c" in style.lower(), f"技能名必须是金色，实际：{style}"
+    assert re.search(r"animation:\s*skill-float-rise\s+2s\b", style), (
+        f"技能名必须在 2s 内上浮并淡出，实际：{style}"
+    )
+    rise = _keyframes("skill-float-rise")
+    assert re.search(r"calc\(-20 \* var\(--dsu\)\)", rise), (
+        f"上浮必须走 20 设计单位（不是 CSS px），实际：{rise}"
+    )
+    assert re.search(r"opacity:\s*0", rise), f"上浮结束必须淡出，实际：{rise}"
+
+    js = _EFFECTS_JS.read_text(encoding="utf-8")
+    for name, value in (
+        ("SKILL_FLOAT_GAP_UNITS", 8),
+        ("SKILL_FLOAT_STACK_UNITS", 14),
+    ):
+        found = re.search(rf"const\s+{name}\s*=\s*(\d+)\b", js)
+        assert found is not None and int(found.group(1)) == value, (
+            f"{name} 必须是 {value} 设计单位（JS 定位与 CSS 是同一份裁定）"
+        )
+
+
+# ---------------------------------------------------------------------------
+# U3-07 实机验收缺陷（CODING_STANDARDS.md §6 的机械那一半）：真 DOM 的
+# `element.children` 是 **HTMLCollection**——只有 `length` / `item()` / 索引，
+# **没有** `find` / `filter` / `map` / `forEach` / `some` / `every` / `reduce`。
+#
+# 舞台卡更新曾写成 `(node.children || []).find(...)`：真浏览器里每次更新都抛
+# `TypeError`、舞台与表体重绘中断；烟测垫片的 `children` 是数组，故常规门禁没抓到。
+# 这里扫产品脚本里的**直接调用点**（注释不算行为；`Array.from(...)` / 展开 / 下标 /
+# `.length` 都是允许的写法）。**真实浏览器验收仍是这类缺陷的最终裁判**，本检查只是
+# 把"同一个错型再写回来"变成机械红。
+# ---------------------------------------------------------------------------
+
+_CHILDREN_ARRAY_METHOD_RE = re.compile(
+    r"\.children\s*(?:\|\|\s*\[\s*\]\s*\))?\s*\.\s*"
+    r"(?P<method>find|filter|map|forEach|some|every|reduce)\b"
+)
+
+# 允许的写法：方法调用的接收者是 `Array.from(...)` 的结果，不是 `children` 本身。
+# 只挖这一种精确形状——`Array.from(node.children.find(...))` 这种嵌套违规仍会被抓到。
+_ALLOWED_ARRAY_FROM_CHILDREN_RE = re.compile(
+    r"Array\.from\(\s*[\w.$]+\.children\s*(?:\|\|\s*\[\s*\]\s*)?\)\s*\.\s*\w+"
+)
+
+
+def _strip_js_comments(source: str) -> str:
+    """去掉 `//` 与 `/* … */` 注释，字符串 / 模板串原样保留。
+
+    注释里的旧写法是历史说明，不是调用点；字符串里的 `http://` 也不是注释起点。
+    产品脚本里没有含 `//` 或 `/*` 的正则字面量，故扫描器不区分正则字面量。
+    注释按原换行数换行，报错行号仍指向原文。
+    """
+    out: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(source):
+        char = source[index]
+        if quote is not None:
+            out.append(char)
+            if char == "\\" and index + 1 < len(source):
+                out.append(source[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in "\"'`":
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        if source.startswith("//", index):
+            newline = source.find("\n", index)
+            if newline < 0:
+                break
+            out.append("\n")
+            index = newline + 1
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            if end < 0:
+                break
+            out.extend("\n" * source.count("\n", index, end + 2))
+            index = end + 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _children_array_method_hits(source: str) -> list[str]:
+    """`element.children` 上直接调数组方法的每一处（`行 N: 片段`）。"""
+    allowed = _ALLOWED_ARRAY_FROM_CHILDREN_RE.sub("", _strip_js_comments(source))
+    return [
+        f"行 {allowed.count(chr(10), 0, match.start()) + 1}: {match.group(0).strip()}"
+        for match in _CHILDREN_ARRAY_METHOD_RE.finditer(allowed)
+    ]
+
+
+def test_product_scripts_never_call_array_methods_on_children() -> None:
+    """产品 `static/*.js` 不得在 `element.children` 上直接调数组方法。
+
+    真 DOM 的 `children` 是 HTMLCollection（活集合），数组方法只存在于真数组上；
+    需要遍历 / 查找时先 `Array.from(...)` 或展开。旧写法在真浏览器里抛
+    `TypeError: … .find is not a function`，烟测垫片（children 是数组）看不见。
+    """
+    offenders: list[str] = []
+    for path in sorted(STATIC_DIR.glob("*.js")):
+        for hit in _children_array_method_hits(path.read_text(encoding="utf-8")):
+            offenders.append(f"{path.name}:{hit}")
+    assert not offenders, (
+        "`element.children` 是 HTMLCollection（只有 length / item / 索引），没有数组方法；"
+        "请先 `Array.from(...)` / 展开成数组再调用：\n" + "\n".join(offenders)
+    )
+
+
+def test_the_children_guard_catches_the_old_bug_and_allows_array_forms() -> None:
+    """守卫自身正反两面：旧写法判红；`Array.from` / 展开 / 下标 / `.length` / 注释放行。"""
+    bug = (
+        "const line = (node.children || []).find(f);"
+        " node.children.filter(g); box.children.map(h);"
+    )
+    assert len(_children_array_method_hits(bug)) == 3, _children_array_method_hits(bug)
+
+    allowed = (
+        "Array.from(node.children || []).find(f);"
+        " [...node.children].filter(g);"
+        " node.children[0]; box.children.length;"
+        " for (const child of (root && root.children) || []) {}"
+    )
+    assert _children_array_method_hits(allowed) == []
+
+    commented = "// node.children.find(f)\n/* (node.children || []).map(g) */\n"
+    assert _children_array_method_hits(commented) == []
+
+    nested = "Array.from(node.children.find(f))"
+    assert len(_children_array_method_hits(nested)) == 1, (
+        "`Array.from(...)` 里嵌套的直接调用仍是违规，守卫不得整段放行"
+    )

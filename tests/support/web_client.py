@@ -1,7 +1,8 @@
 """`tests/test_web.sh` 的 JSON 客户端助手（bash 里解析 JSON 不现实，故这一小段住 Python）。
 
 它**不是**测试：被 shell 门禁调用，走真 HTTP 打完一整局并把关键事实打成一行结论。
-用法见 ``tests/test_web.sh``（``--port <N> --seed <N> --players <N> [--timeout <S>]``）。
+用法见 ``tests/test_web.sh``（``--port <N> --seed <N> --players <N> [--timeout <S>]``；
+``--tape fire_attack`` = M5-08a 的固定火攻 tape，见 :func:`fire_attack_tape`）。
 
 判据（`spec.md` §Acceptance 第 1 条）：
   * 出现 ``game_end``；
@@ -35,19 +36,30 @@ def call(url: str, payload: dict[str, Any] | None = None) -> tuple[int, Any]:
             return error.code, {"error": body}
 
 
-def play(base: str, *, seed: int, players: int, timeout: float | None, max_answers: int) -> int:
-    status, body = call(
-        f"{base}/api/sessions",
-        {
-            "player_count": players,
-            "ai": "heuristic",
-            "seed": seed,
-            "human_seat": 0,
-            "timeout_seconds": timeout,
-        },
-    )
+def play(
+    base: str,
+    *,
+    seed: int,
+    players: int,
+    timeout: float | None,
+    max_answers: int,
+    deck_profile: str | None = None,
+) -> int:
+    create: dict[str, Any] = {
+        "player_count": players,
+        "ai": "heuristic",
+        "seed": seed,
+        "human_seat": 0,
+        "timeout_seconds": timeout,
+    }
+    if deck_profile is not None:
+        create["deck_profile"] = deck_profile
+    status, body = call(f"{base}/api/sessions", create)
     if status != 200:
         print(f"FAIL 建局失败：HTTP {status} {body}")
+        return 1
+    if deck_profile is not None and body.get("deck_profile") != deck_profile:
+        print(f"FAIL 建局档位不是 {deck_profile}：{body.get('deck_profile')}")
         return 1
 
     session_id = body["session_id"]
@@ -113,18 +125,891 @@ def play(base: str, *, seed: int, players: int, timeout: float | None, max_answe
     # 主公身份公开），且任何对手都不出现手牌牌面；牌堆只有数量。
     # 「已阵亡」是**允许**公开的三种情形之一（`06` §M4 判据 2 的原文），故这里不拦它。
     snapshot = body["snapshot"]
+    seat = snapshot["seat"]
     for player in snapshot["players"]:
-        if player["seat"] == snapshot["seat"]:
+        if player["seat"] == seat:
+            if player.get("identity") in (None, ""):
+                print(f"FAIL 人类座位看不到自己的身份：{player}")
+                return 1
             continue
+        # 身份可见性：本人 / 主公 / 已亮明 / 阵亡 —— 存活且非主公的对手必须是 ``None``。
         if player["alive"] and player.get("identity") not in (None, "lord"):
             print(f"FAIL 存活对手的身份泄露：{player}")
             return 1
-        if "self_hand" in player or "hand" in player:
+        if "self_hand" in player or "hand" in player or "hand_cards" in player:
             print(f"FAIL 对手手牌牌面泄露：{player}")
             return 1
+        if not isinstance(player.get("hand_count"), int):
+            print(f"FAIL 对手手牌没有数量（只有牌面 / 缺字段）：{player}")
+            return 1
+        if "known" in player or "revealed_cards" in player:
+            print(f"FAIL 手牌区出现「已知」持久状态：{player}")
+            return 1
+    if "deck" in snapshot or "deck_cards" in snapshot:
+        print(f"FAIL 牌堆下发了牌面 / 顺序：{sorted(snapshot)}")
+        return 1
+    if not isinstance(snapshot.get("deck_count"), int):
+        print("FAIL 快照没有牌堆数量")
+        return 1
     print(
-        "PASS 快照无对手手牌牌面（deck_count=%d，存活对手身份均为空）" % snapshot["deck_count"]
+        "PASS 快照无对手手牌牌面（deck_count=%d，存活对手身份均为空，牌堆只有数量）"
+        % snapshot["deck_count"]
     )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# M5-08a：固定【火攻】tape（spec D12 / §6 A2）
+#
+# 两条固定种子，都走**真 HTTP**：每次询问一条 POST、提交的动作原样取自该询问的
+# ``legal_actions``；断言亮牌 / 同花色弃牌 / 放弃 / 无同花色自动放弃的可观测事实。
+#   - seed 4：人类**对自己**用火攻 ⇒ 自己亮牌 + 弃同花色 ⇒ 恰 1 点火焰伤害；
+#   - seed 37：人类**对 AI** 用火攻 ⇒ AI 亮牌；人类没有同花色 ⇒ 引擎不发弃牌询问，
+#     事件流写「放弃（无可弃的同花色牌）」。
+# 种子由 ``tools/acceptance_seed.py --players 8 --deck-profile standard_ex_160 --card
+# fire_attack`` 起步、再用固定脚本在这两个种子上确认（同 seed 可复现）。
+# ---------------------------------------------------------------------------
+
+_FIRE_TAPES = (
+    # (seed, 目标是不是自己, 是否期望出现同花色弃牌询问)
+    (4, True, True),
+    (37, False, False),
+)
+
+
+def _fire_choice(pending: dict[str, Any], *, target_self: bool, fa_used: bool) -> tuple[dict[str, Any], str]:
+    """火攻 tape 的固定策略：返回（原样取自 ``legal_actions`` 的动作, 这一步的名字）。"""
+    actions = pending.get("legal_actions") or []
+    kind = pending.get("kind")
+    if kind == "PLAY_PHASE" and not fa_used:
+        for action in actions:
+            card = action.get("card") or {}
+            targets = action.get("targets") or []
+            if action.get("kind") != "UseCard" or card.get("type") != "fire_attack":
+                continue
+            if target_self and targets == [0]:
+                return action, "fire_attack"
+            if not target_self and targets and targets != [0]:
+                return action, "fire_attack"
+    if kind == "SELECT_CARDS":
+        if pending.get("dialog") == "reveal":
+            for action in actions:
+                if action.get("kind") == "SelectCards" and len(action.get("picks") or []) == 1:
+                    return action, "reveal"
+        if pending.get("reveal"):
+            for action in actions:
+                if action.get("kind") == "SelectCards":
+                    return action, "discard"
+            for action in actions:
+                if action.get("kind") == "Pass":
+                    return action, "discard_pass"
+    for action in actions:
+        if action.get("kind") == "Pass":
+            return action, "pass"
+    for action in actions:
+        if action.get("kind") == "EndPhase":
+            return action, "end"
+    return actions[0], "first"
+
+
+def fire_attack_tape(base: str) -> int:
+    """两条固定种子的火攻 tape；全部经真 HTTP，任何违规立即 FAIL。"""
+    failures = 0
+    for seed, target_self, expect_discard in _FIRE_TAPES:
+        label = f"seed={seed} 目标={'自己' if target_self else 'AI'}"
+        status, body = call(
+            f"{base}/api/sessions",
+            {
+                "player_count": 8,
+                "ai": "heuristic",
+                "seed": seed,
+                "human_seat": 0,
+                "timeout_seconds": None,
+                "deck_profile": "standard_ex_160",
+            },
+        )
+        if status != 200:
+            print(f"FAIL 火攻 tape {label}：建局失败 HTTP {status} {body}")
+            failures += 1
+            continue
+        if body.get("deck_profile") != "standard_ex_160":
+            print(f"FAIL 火攻 tape {label}：档位不是 standard_ex_160：{body.get('deck_profile')}")
+            failures += 1
+            continue
+        session_id = body["session_id"]
+        cursor = body["cursor"]
+        log_seq = body["log_seq"]
+        fa_used = False
+        resolving = False
+        target_seat: int | None = None
+        damage = 0
+        reveal_seen = False
+        discard_seen = False
+        discard_pass_seen = False
+        reveal_records: list[dict[str, Any]] = []
+        narrative: list[str] = []
+        answers = 0
+        rejected = 0
+        while not body["finished"]:
+            pending = body["pending"]
+            if pending is None:
+                print(f"FAIL 火攻 tape {label}：未终局但也没有待应答的询问")
+                failures += 1
+                break
+            action, step = _fire_choice(pending, target_self=target_self, fa_used=fa_used)
+            if not any(action == candidate for candidate in pending["legal_actions"]):
+                print(f"FAIL 火攻 tape {label}：提交动作不在 legal_actions 里：{action}")
+                failures += 1
+                break
+            if step == "fire_attack":
+                fa_used = True
+                resolving = True
+                target_seat = int((action.get("targets") or [0])[0])
+                damage = 0
+            if step == "reveal":
+                reveal_seen = True
+            if step == "discard":
+                discard_seen = True
+            if step == "discard_pass":
+                discard_seen = True
+                discard_pass_seen = True
+            status, body = call(
+                f"{base}/api/sessions/{session_id}/answer?after={cursor}&logs={log_seq}",
+                {"action": action},
+            )
+            if status != 200:
+                print(f"FAIL 火攻 tape {label}：应答被拒 HTTP {status} {body}")
+                failures += 1
+                break
+            answers += 1
+            if answers > 4000:
+                print(f"FAIL 火攻 tape {label}：超过 4000 次应答仍未终局")
+                failures += 1
+                break
+            cursor = body["cursor"]
+            log_seq = body["log_seq"]
+            for record in body["records"]:
+                if record["kind"] == "action" and not record.get("accepted"):
+                    rejected += 1
+                if record.get("delta_type") == "card_reveal":
+                    reveal_records.append(record)
+                if (
+                    resolving
+                    and record.get("delta_type") == "hp_change"
+                    and record.get("seat") == target_seat
+                ):
+                    damage += int(record.get("amount", 0))
+            narrative.extend(entry["text"] for entry in body.get("narrative") or [])
+            # 火攻结算结束 = 同一回合又回到人类的出牌阶段询问（期间的体力变化才归这一次火攻）。
+            next_pending = body.get("pending") or {}
+            if resolving and next_pending.get("kind") == "PLAY_PHASE" and answers:
+                resolving = False
+        if rejected:
+            print(f"FAIL 火攻 tape {label}：记录流里有 {rejected} 条 accepted=false")
+            failures += 1
+            continue
+        if not fa_used:
+            print(f"FAIL 火攻 tape {label}：整局没有用出【火攻】（tape 失效）")
+            failures += 1
+            continue
+        if not reveal_records:
+            print(f"FAIL 火攻 tape {label}：没有 card_reveal 公开记录")
+            failures += 1
+            continue
+        revealed_ids = [record["card"]["card_id"] for record in reveal_records]
+        if any("display_name" not in record["card"] for record in reveal_records):
+            print(f"FAIL 火攻 tape {label}：亮牌记录没有展示字段（中央舞台画不出牌面）")
+            failures += 1
+            continue
+        if expect_discard:
+            if not discard_seen:
+                print(f"FAIL 火攻 tape {label}：有同花色却没有弃牌询问 / 弃牌")
+                failures += 1
+                continue
+            if damage != -1:
+                print(f"FAIL 火攻 tape {label}：同花色弃牌后的火焰伤害不对（{damage}）")
+                failures += 1
+                continue
+            print(
+                f"PASS 火攻 tape {label}：亮牌 {revealed_ids} + 同花色弃牌 ⇒ 1 点火焰伤害"
+                f"（{answers} 次真实 POST，零非法应答）"
+            )
+        else:
+            if discard_seen:
+                print(f"FAIL 火攻 tape {label}：没有同花色却出现了弃牌询问（死步骤）")
+                failures += 1
+                continue
+            if damage != 0:
+                print(f"FAIL 火攻 tape {label}：放弃却造成了伤害（{damage}）")
+                failures += 1
+                continue
+            text = "\n".join(narrative)
+            if "放弃（无可弃的同花色牌）" not in text:
+                print(f"FAIL 火攻 tape {label}：事件流没有「放弃（无可弃的同花色牌）」")
+                failures += 1
+                continue
+            print(
+                f"PASS 火攻 tape {label}：亮牌 {revealed_ids} + 无同花色 ⇒ 零伤害、"
+                f"事件流写「放弃（无可弃的同花色牌）」（{answers} 次真实 POST，零非法应答）"
+            )
+    return 1 if failures else 0
+
+
+# ---------------------------------------------------------------------------
+# M5-08c：固定【酒】tape（spec D12 / §6 A2）
+#
+# 一个固定种子（160 档 / 8 人 / 人类座位 0）跑两段**真 HTTP**：
+#   ① 出牌阶段：人类起始手牌就有【酒】；提交一次 = 恰一条 UseCard（目标为自己）+
+#      wine_change，下一问里【酒】不再进候选；
+#   ② 濒死自救：同一种子按固定策略（出牌阶段结束 / 能放弃就放弃 / 否则首个候选）
+#      打到人类 0 血，求桃窗口里的【酒】目标恒为自己；提交后回复 1、wine_active 仍为
+#      false、零 wine_change。
+# 种子 16 由 ``tools/acceptance_seed.py --players 8 --deck-profile standard_ex_160
+# --card wine`` 起步，再按上面两段脚本确认（同 seed 可复现）。
+# ---------------------------------------------------------------------------
+
+_WINE_TAPE_SEED = 16
+
+
+def _wine_tape_create(base: str) -> tuple[str, int, int, dict[str, Any]] | None:
+    status, body = call(
+        f"{base}/api/sessions",
+        {
+            "player_count": 8,
+            "ai": "heuristic",
+            "seed": _WINE_TAPE_SEED,
+            "human_seat": 0,
+            "timeout_seconds": None,
+            "deck_profile": "standard_ex_160",
+        },
+    )
+    if status != 200:
+        print(f"FAIL 酒 tape：建局失败 HTTP {status} {body}")
+        return None
+    if body.get("deck_profile") != "standard_ex_160":
+        print(f"FAIL 酒 tape：档位不是 standard_ex_160：{body.get('deck_profile')}")
+        return None
+    return body["session_id"], body["cursor"], body["log_seq"], body
+
+
+def _wine_tape_answer(
+    base: str, session: tuple[str, int, int], action: dict[str, Any]
+) -> tuple[int, Any]:
+    session_id, cursor, log_seq = session
+    return call(
+        f"{base}/api/sessions/{session_id}/answer?after={cursor}&logs={log_seq}",
+        {"action": action},
+    )
+
+
+def _wine_offers(pending: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        action
+        for action in pending.get("legal_actions") or []
+        if action.get("kind") == "UseCard"
+        and (action.get("card") or {}).get("type") == "wine"
+    ]
+
+
+def _wine_tape_play(base: str) -> int:
+    """出牌阶段：一次真实 UseCard【酒】往返 + 候选 / wine_change / 下一问读数。"""
+    created = _wine_tape_create(base)
+    if created is None:
+        return 1
+    session_id, cursor, log_seq, body = created
+    session = (session_id, cursor, log_seq)
+    pending = body.get("pending") or {}
+    offers = _wine_offers(pending)
+    if pending.get("kind") != "PLAY_PHASE" or pending.get("actor") != 0 or len(offers) != 1:
+        print(
+            "FAIL 酒 tape（出牌阶段）：首问不是人类出牌阶段 / 没有唯一一张【酒】："
+            f"{pending.get('kind')}"
+        )
+        return 1
+    wine_action = offers[0]
+    if wine_action.get("targets") != [0]:
+        print(f"FAIL 酒 tape（出牌阶段）：【酒】的目标不是自己：{wine_action.get('targets')}")
+        return 1
+    entry = (pending.get("candidate_index") or {}).get(str(wine_action["card"]["card_id"]))
+    if entry is None or entry.get("pool") != [0] or entry.get("combos") != [[0]]:
+        print(f"FAIL 酒 tape（出牌阶段）：候选索引不是「只对自己」：{entry}")
+        return 1
+
+    status, body = _wine_tape_answer(base, session, wine_action)
+    if status != 200:
+        print(f"FAIL 酒 tape（出牌阶段）：应答被拒 HTTP {status} {body}")
+        return 1
+    records = body.get("records") or []
+    accepted = [
+        record for record in records
+        if record.get("kind") == "action" and record.get("accepted")
+    ]
+    if len(accepted) != 1:
+        print(f"FAIL 酒 tape（出牌阶段）：本次应答的 action 记录不是恰一条：{len(accepted)}")
+        return 1
+    action = accepted[0].get("action") or {}
+    # 投影对**所有** action 记录只下发 kind / answers_seq（`visible_record`）：具体牌与
+    # 目标不回放；这里能钉的是"恰一条被接受的 UseCard"，具体牌 / 目标由提交体与
+    # wine_change / 手牌读数共同证明。
+    if action.get("kind") != "UseCard":
+        print(f"FAIL 酒 tape（出牌阶段）：记录流里的动作不是 UseCard：{action}")
+        return 1
+    changes = [record for record in records if record.get("delta_type") == "wine_change"]
+    if len(changes) != 1 or changes[0].get("seat") != 0 or changes[0].get("active") is not True:
+        print(f"FAIL 酒 tape（出牌阶段）：wine_change 不是「座位 0 置位」恰一条：{changes}")
+        return 1
+    next_pending = body.get("pending") or {}
+    if _wine_offers(next_pending):
+        print("FAIL 酒 tape（出牌阶段）：使用后同一回合里【酒】仍在候选里")
+        return 1
+    if (body.get("snapshot") or {}).get("players", [{}])[0].get("wine_active") is not True:
+        print("FAIL 酒 tape（出牌阶段）：投影没有下发 wine_active=true")
+        return 1
+    narrative = "\n".join(entry["text"] for entry in body.get("narrative") or [])
+    if "使用【酒】" not in narrative:
+        print(f"FAIL 酒 tape（出牌阶段）：事件流读不出「使用【酒】」：{narrative}")
+        return 1
+    print(
+        "PASS 酒 tape（出牌阶段）：1 次真实 POST 的 UseCard【酒】目标为自己、"
+        "wine_change=true、下一问不再有【酒】、事件流「使用【酒】」"
+    )
+    return 0
+
+
+def _wine_tape_near_death(base: str) -> int:
+    """濒死自救：固定策略打到 0 血，窗口里点一次【酒】= 回复 1、无 wine_change。"""
+    created = _wine_tape_create(base)
+    if created is None:
+        return 1
+    session_id, cursor, log_seq, body = created
+    session = (session_id, cursor, log_seq)
+    answers = 0
+    while not body.get("finished"):
+        pending = body.get("pending") or {}
+        if not pending:
+            print("FAIL 酒 tape（濒死）：未终局但也没有待应答的询问")
+            return 1
+        offers = _wine_offers(pending)
+        if pending.get("kind") == "PEACH" and pending.get("actor") == 0 and offers:
+            if (body.get("snapshot") or {}).get("players", [{}])[0].get("hp") != 0:
+                print("FAIL 酒 tape（濒死）：自救窗口里人类不是 0 血")
+                return 1
+            if offers[0].get("targets") != [0]:
+                print(f"FAIL 酒 tape（濒死）：自救的【酒】目标不是自己：{offers[0].get('targets')}")
+                return 1
+            status, body = _wine_tape_answer(base, session, offers[0])
+            if status != 200:
+                print(f"FAIL 酒 tape（濒死）：自救应答被拒 HTTP {status} {body}")
+                return 1
+            player = (body.get("snapshot") or {}).get("players", [{}])[0]
+            if player.get("hp") != 1:
+                print("FAIL 酒 tape（濒死）：【酒】自救没有回复到 1")
+                return 1
+            if player.get("wine_active") is not False:
+                print("FAIL 酒 tape（濒死）：自救产生了加伤状态")
+                return 1
+            records = body.get("records") or []
+            if any(record.get("delta_type") == "wine_change" for record in records):
+                print("FAIL 酒 tape（濒死）：自救产生了 wine_change")
+                return 1
+            accepted = [
+                record for record in records
+                if record.get("kind") == "action" and record.get("accepted")
+            ]
+            if len(accepted) != 1 or (accepted[0].get("action") or {}).get("kind") != "UseCard":
+                print(f"FAIL 酒 tape（濒死）：自救不是恰一条 UseCard：{accepted}")
+                return 1
+            narrative = "\n".join(entry["text"] for entry in body.get("narrative") or [])
+            if "使用【酒】" not in narrative or "回复 1 点体力" not in narrative:
+                print(f"FAIL 酒 tape（濒死）：事件流读不出使用【酒】/ 回复 1：{narrative}")
+                return 1
+            print(
+                f"PASS 酒 tape（濒死自救）：{answers} 次真实 POST 推进到 0 血，窗口里一次"
+                " UseCard【酒】回复 1、无 wine_change、事件流可读"
+            )
+            return 0
+        action = None
+        if pending.get("kind") == "PLAY_PHASE":
+            action = next(
+                (item for item in pending.get("legal_actions") or [] if item.get("kind") == "EndPhase"),
+                None,
+            )
+        if action is None:
+            action = next(
+                (item for item in pending.get("legal_actions") or [] if item.get("kind") == "Pass"),
+                None,
+            )
+        if action is None:
+            action = (pending.get("legal_actions") or [None])[0]
+        if action is None:
+            print("FAIL 酒 tape（濒死）：这一步没有可提交的候选")
+            return 1
+        status, body = _wine_tape_answer(base, session, action)
+        if status != 200:
+            print(f"FAIL 酒 tape（濒死）：应答被拒 HTTP {status} {body}")
+            return 1
+        cursor, log_seq = body["cursor"], body["log_seq"]
+        session = (session_id, cursor, log_seq)
+        answers += 1
+        if answers > 200:
+            print("FAIL 酒 tape（濒死）：200 次应答内没有走到人类的自救窗口")
+            return 1
+    print("FAIL 酒 tape（濒死）：对局在出现自救窗口前结束")
+    return 1
+
+
+def wine_tape(base: str) -> int:
+    """两段固定【酒】tape（出牌阶段 / 濒死自救），全部经真 HTTP。"""
+    return _wine_tape_play(base) or _wine_tape_near_death(base)
+
+
+# ---------------------------------------------------------------------------
+# M5-09a：固定 tape（构造局面 / 不依赖随机种子；spec D12 / §6 A2）
+#
+# 三条 tape 都连**同一份产品 HTTP 门面**（``tests/support/m5_fixture_server.py`` 只把
+# 「按种子开局」换成「按名字取构造局面」），每次询问一条真实 POST：
+#   - ``fire_attack``：人类**对自己**用火攻 ⇒ 亮牌 / 同花色弃牌两步都是**人类**的真 POST，
+#     随后【杀】收局；对手的暗手在整个过程中不外泄；
+#   - ``reforge``：一次 ``Reforge`` 真实往返（独立 Action、弃一张摸一张、无无懈窗口）；
+#   - ``wine``：出牌阶段一次【酒】真实往返（``wine_change`` / ``wine_active``）+【杀】收局。
+# 与 08a / 08c 的 seed 4/37/16 tape 的区别：这三条**不经过种子扫描**，手牌 / 体力 /
+# 牌堆全部在 fixture 里写死，视频证据之外的 A2 判据由本函数承担。
+# ---------------------------------------------------------------------------
+
+_M5_FIXTURES = ("fire_attack", "reforge", "wine")
+_M5_DECK_PROFILE = "standard_ex_160"
+
+
+def _m5_create(base: str, fixture: str) -> tuple[str, int, int, dict[str, Any]] | None:
+    status, body = call(
+        f"{base}/api/sessions",
+        {
+            "fixture": fixture,
+            "player_count": 2,
+            "human_seat": 0,
+            "timeout_seconds": None,
+        },
+    )
+    if status != 200:
+        print(f"FAIL 固定 tape（{fixture}）：建局失败 HTTP {status} {body}")
+        return None
+    if body.get("deck_profile") != _M5_DECK_PROFILE:
+        print(f"FAIL 固定 tape（{fixture}）：档位不是 {_M5_DECK_PROFILE}")
+        return None
+    if body.get("human_seat") != 0 or body.get("player_count") != 2:
+        print(f"FAIL 固定 tape（{fixture}）：建局面不是「2 人 / 人类座 0」")
+        return None
+    return body["session_id"], body["cursor"], body["log_seq"], body
+
+
+def _pick_action(
+    pending: dict[str, Any],
+    *,
+    kind: str | None = None,
+    card_type: str | None = None,
+    targets: list[int] | None = None,
+) -> dict[str, Any] | None:
+    for action in pending.get("legal_actions") or []:
+        if kind is not None and action.get("kind") != kind:
+            continue
+        if card_type is not None and (action.get("card") or {}).get("type") != card_type:
+            continue
+        if targets is not None and action.get("targets") != targets:
+            continue
+        return action
+    return None
+
+
+def _m5_play(
+    base: str,
+    fixture: str,
+    choose,
+    observe,
+) -> int:
+    """跑完一条固定 tape：每次人类询问一条真 POST，逐条收集记录与叙事。"""
+    created = _m5_create(base, fixture)
+    if created is None:
+        return 1
+    session_id, cursor, log_seq, body = created
+    answers = 0
+    rejected = 0
+    human_answers = 0
+    records: list[dict[str, Any]] = []
+    narrative: list[str] = []
+    game_end: dict[str, Any] | None = None
+    state: dict[str, Any] = {}
+
+    def collect(payload: dict[str, Any]) -> None:
+        for record in payload.get("records") or []:
+            records.append(record)
+            if record.get("kind") == "action" and not record.get("accepted"):
+                rejected_nonlocal[0] += 1
+            if record.get("kind") == "game_end":
+                nonlocal_game_end[0] = record
+        narrative.extend(entry["text"] for entry in payload.get("narrative") or [])
+
+    rejected_nonlocal = [0]
+    nonlocal_game_end: list[dict[str, Any] | None] = [None]
+    while not body.get("finished"):
+        pending = body.get("pending")
+        if not pending:
+            print(f"FAIL 固定 tape（{fixture}）：未终局但也没有待应答的询问")
+            return 1
+        if observe is not None and not observe("pending", body, pending, state):
+            return 1
+        action = choose(pending, state)
+        if action is None:
+            print(f"FAIL 固定 tape（{fixture}）：这一步没有固定策略可选的候选：{pending.get('kind')}")
+            return 1
+        if not any(action == candidate for candidate in pending.get("legal_actions") or []):
+            print(f"FAIL 固定 tape（{fixture}）：提交动作不在 legal_actions 里：{action}")
+            return 1
+        status, body = call(
+            f"{base}/api/sessions/{session_id}/answer?after={cursor}&logs={log_seq}",
+            {"action": action},
+        )
+        if status != 200:
+            print(f"FAIL 固定 tape（{fixture}）：应答被拒 HTTP {status} {body}")
+            return 1
+        answers += 1
+        if answers > 200:
+            print(f"FAIL 固定 tape（{fixture}）：200 次应答仍未终局")
+            return 1
+        cursor, log_seq = body["cursor"], body["log_seq"]
+        for record in body.get("records") or []:
+            if (
+                record.get("kind") == "action"
+                and record.get("accepted")
+                and (record.get("action") or {}).get("answers_seq") == pending.get("seq")
+            ):
+                human_answers += 1
+        collect(body)
+        if observe is not None and not observe("answer", body, pending, state):
+            return 1
+
+    rejected = rejected_nonlocal[0]
+    game_end = nonlocal_game_end[0]
+    if game_end is None:
+        print(f"FAIL 固定 tape（{fixture}）：终局没有 game_end 记录")
+        return 1
+    if rejected:
+        print(f"FAIL 固定 tape（{fixture}）：记录流里有 {rejected} 条 accepted=false")
+        return 1
+    if human_answers != answers:
+        print(
+            f"FAIL 固定 tape（{fixture}）：HTTP 应答数 {answers} != "
+            f"人类座位的 action 记录数 {human_answers}"
+        )
+        return 1
+    if observe is not None and not observe("end", body, None, state):
+        return 1
+    print(
+        f"PASS 固定 tape（{fixture}）：{answers} 次真实 POST、零非法应答，"
+        f"终局 {game_end['result']}（{game_end['reason']}）"
+    )
+    return 0
+
+
+def _fire_attack_fixed(base: str) -> int:
+    """火攻：人类**自己**亮牌（真 HTTP 的 SelectCards POST）；对手的暗手不外泄。"""
+    # 只用于断言亮牌归属 / 负断言「对手的暗手没有泄露」；夹具是构造局面，不参与 HTTP。
+    from m5_fixture_server import build_fixture
+
+    fixture_state = build_fixture("fire_attack").state
+    opponent_hand = [
+        {
+            "card_id": fixture_state.card(card_id).card_id,
+            "name": fixture_state.card(card_id).name,
+        }
+        for card_id in fixture_state.players[1].hand
+    ]
+    assert len(opponent_hand) == 2, "火攻夹具的对手必须恰有两张暗手（负断言用）"
+
+    def mentions_card(value, card_id: int) -> bool:
+        """载荷里有没有 ``card_id`` 这张牌面（按 ``card_id`` 键判，不扫裸整数）。"""
+        stack = [value]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                if item.get("card_id") == card_id:
+                    return True
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
+        return False
+
+    def opponent_hand_not_leaked(body) -> bool:  # noqa: ANN001
+        leaked = [
+            entry for entry in opponent_hand if mentions_card(body, entry["card_id"])
+        ]
+        if leaked:
+            print(f"FAIL 火攻固定 tape：对手未亮出的手牌泄露了：{leaked}")
+            return False
+        return True
+
+    def accepted_actions(records, seq):  # noqa: ANN001
+        return [
+            record.get("action") or {}
+            for record in records
+            if record.get("kind") == "action"
+            and record.get("accepted")
+            and (record.get("action") or {}).get("answers_seq") == seq
+        ]
+
+    def choose(pending, state):  # noqa: ANN001
+        if pending.get("kind") == "PLAY_PHASE":
+            if not state.get("fire_used"):
+                fire = _pick_action(pending, card_type="fire_attack", targets=[0])
+                if fire is not None:
+                    state["fire_used"] = True
+                    return fire
+            slash = _pick_action(pending, kind="UseCard", card_type="slash", targets=[1])
+            if slash is not None:
+                return slash
+            return _pick_action(pending, kind="EndPhase")
+        if pending.get("kind") == "SELECT_CARDS":
+            # 亮牌步（人类选自己 1 张，必选）与弃牌步（人类弃同花色）：都取 SelectCards，
+            # 弃牌步不取 Pass——这一步也要有一条真人 POST。
+            return _pick_action(pending, kind="SelectCards")
+        return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
+
+    def observe(kind, body, pending, state) -> bool:  # noqa: ANN001
+        records = body.get("records") or []
+        if kind == "answer":
+            for record in records:
+                if record.get("delta_type") == "card_reveal":
+                    state["reveal"] = record.get("card") or {}
+                    state["reveal_count"] = state.get("reveal_count", 0) + 1
+                    state["reveal_seat"] = record.get("seat")
+            if pending is not None and pending.get("dialog") == "reveal":
+                # A2：亮牌必须是一条**人类**的 SelectCards POST（不是 AI 亮牌）：人类座位
+                # 自己的应答记录 + 紧接着的 card_reveal 公开 delta 都落在这一次 POST 的响应里。
+                accepted = accepted_actions(records, pending.get("seq"))
+                if len(accepted) != 1 or accepted[0].get("kind") != "SelectCards":
+                    print(f"FAIL 火攻固定 tape：亮牌应答不是一条人类 SelectCards：{accepted}")
+                    return False
+                faces = {
+                    card.get("card_id") for card in pending.get("revealed") or []
+                }
+                revealed = [
+                    (record.get("card") or {}).get("card_id")
+                    for record in records
+                    if record.get("delta_type") == "card_reveal"
+                ]
+                if len(revealed) != 1 or revealed[0] not in faces:
+                    print(
+                        "FAIL 火攻固定 tape：亮牌 delta 不是人类手牌里被选中/公开的那一张："
+                        f"{revealed} vs {sorted(faces)}"
+                    )
+                    return False
+                state["human_reveal"] = revealed[0]
+                state["human_reveal_answered"] = True
+            if pending is not None and pending.get("reveal") is not None:
+                accepted = accepted_actions(records, pending.get("seq"))
+                if len(accepted) != 1 or accepted[0].get("kind") != "SelectCards":
+                    print(f"FAIL 火攻固定 tape：同花色弃牌不是一条人类 SelectCards：{accepted}")
+                    return False
+                revealed = (pending.get("reveal") or {}).get("card") or {}
+                moves = [
+                    move
+                    for move in records
+                    if move.get("delta_type") == "card_move"
+                    and move.get("reason") == "DISCARD"
+                    and move.get("owner") == 0
+                    and (move.get("from_zone") or {}).get("zone") == "hand"
+                ]
+                discarded = (moves[0].get("cards") or []) if len(moves) == 1 else []
+                if len(discarded) != 1 or discarded[0].get("suit") != revealed.get("suit"):
+                    print(
+                        "FAIL 火攻固定 tape：弃掉的牌与亮牌不同花色 / 没有弃牌："
+                        f"{discarded} vs {revealed}"
+                    )
+                    return False
+                state["discard_answered"] = True
+        if kind == "pending" and pending is not None:
+            if not opponent_hand_not_leaked(body):
+                return False
+            if pending.get("dialog") == "reveal":
+                if pending.get("actor") != 0:
+                    print(f"FAIL 火攻固定 tape：亮牌询问不是人类座位：{pending.get('actor')}")
+                    return False
+                slots = pending.get("slots") or []
+                faces = [card.get("card_id") for card in pending.get("revealed") or []]
+                if not faces or any(
+                    (slot.get("ref") or {}).get("seat") != 0
+                    or (slot.get("ref") or {}).get("zone") != "hand"
+                    for slot in slots
+                ):
+                    print(f"FAIL 火攻固定 tape：亮牌步的选择面不是人类自己的手牌：{faces}")
+                    return False
+                state["human_faces"] = set(faces)
+                state["hand_count_before_discard"] = len(slots)
+                state["reveal_pending"] = True
+            if pending.get("reveal") is not None:
+                reveal = pending["reveal"]
+                card = reveal.get("card") or {}
+                if not card.get("display_name") or not card.get("description"):
+                    print(f"FAIL 火攻固定 tape：亮牌没有展示契约：{card}")
+                    return False
+                shown = card.get("card_id")
+                if shown not in state.get("human_faces", set()):
+                    print(f"FAIL 火攻固定 tape：亮出的牌不在人类手牌里：{card}")
+                    return False
+                if state.get("human_reveal") != shown:
+                    print(
+                        "FAIL 火攻固定 tape：弃牌步展示的亮牌不是人类刚亮出的那张："
+                        f"{shown} != {state.get('human_reveal')}"
+                    )
+                    return False
+                target = next(
+                    player for player in body["snapshot"]["players"] if player["seat"] == 0
+                )
+                if target.get("hand_count") != state.get("hand_count_before_discard"):
+                    print(f"FAIL 火攻固定 tape：亮牌后人类手牌数不对：{target}")
+                    return False
+                if any(
+                    key in target
+                    for key in ("known", "revealed_cards", "self_hand", "hand")
+                ):
+                    print(f"FAIL 火攻固定 tape：手牌区出现牌面 / 已知状态：{target}")
+                    return False
+                state["discard_pending"] = True
+        if kind == "end":
+            if not state.get("reveal"):
+                print("FAIL 火攻固定 tape：整局没有 card_reveal 公开记录")
+                return False
+            if state.get("reveal_count") != 1:
+                print(f"FAIL 火攻固定 tape：card_reveal 不是恰一条：{state.get('reveal_count')}")
+                return False
+            if state.get("reveal_seat") != 0:
+                print(f"FAIL 火攻固定 tape：亮牌者不是人类座位：{state.get('reveal_seat')}")
+                return False
+            if not state.get("reveal_pending") or not state.get("human_reveal_answered"):
+                print("FAIL 火攻固定 tape：亮牌不是一次真实的人类 HTTP 往返")
+                return False
+            if not state.get("discard_pending") or not state.get("discard_answered"):
+                print("FAIL 火攻固定 tape：没有走到同花色弃牌的人类应答")
+                return False
+            if not state.get("fire_used"):
+                print("FAIL 火攻固定 tape：整局没有用出【火攻】")
+                return False
+            players = body["snapshot"]["players"]
+            if players[0].get("hp") != 3:
+                print(f"FAIL 火攻固定 tape：同花色弃牌后的火焰伤害不对：{players[0]}")
+                return False
+            if players[1].get("alive") is not False:
+                print(f"FAIL 火攻固定 tape：收局前对手还活着：{players[1]}")
+                return False
+            for player in players:
+                if "known" in player or "revealed_cards" in player:
+                    print(f"FAIL 火攻固定 tape：结算后手牌区残留「已知」：{player}")
+                    return False
+        return True
+
+    return _m5_play(base, "fire_attack", choose, observe)
+
+
+def _reforge_fixed(base: str) -> int:
+    """重铸：一次真实 ``Reforge`` 往返；不算使用、不开无懈窗口、弃一张摸一张。"""
+
+    def choose(pending, state):  # noqa: ANN001
+        if pending.get("kind") == "PLAY_PHASE":
+            if not state.get("reforged"):
+                reforge = _pick_action(pending, kind="Reforge")
+                if reforge is not None:
+                    return reforge
+            slash = _pick_action(pending, kind="UseCard", card_type="slash", targets=[1])
+            if slash is not None:
+                return slash
+            return _pick_action(pending, kind="EndPhase")
+        return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
+
+    def observe(kind, body, pending, state) -> bool:
+        if kind == "answer" and not state.get("reforged"):
+            records = body.get("records") or []
+            accepted = [r for r in records if r.get("kind") == "action" and r.get("accepted")]
+            if len(accepted) != 1 or (accepted[0].get("action") or {}).get("kind") != "Reforge":
+                print(f"FAIL 重铸固定 tape：重铸应答不是恰一条 Reforge：{accepted}")
+                return False
+            moves = [r for r in records if r.get("delta_type") == "card_move"]
+            if not any((m.get("reason") == "REFORGE") for m in moves):
+                print(f"FAIL 重铸固定 tape：没有 reason=REFORGE 的移动：{moves}")
+                return False
+            if not any(m.get("reason") == "DRAW" and m.get("owner") == 0 for m in moves):
+                print(f"FAIL 重铸固定 tape：重铸后没有摸牌：{moves}")
+                return False
+            if any(
+                r.get("kind") == "query"
+                and (r.get("query") or {}).get("kind") == "RESPOND"
+                and (r.get("query") or {}).get("cause") == "NULLIFY"
+                for r in records
+            ):
+                print("FAIL 重铸固定 tape：重铸开了无懈窗口")
+                return False
+            state["reforged"] = True
+        return True
+
+    code = _m5_play(base, "reforge", choose, observe)
+    if code != 0:
+        return code
+    return 0
+
+
+def _wine_fixed(base: str) -> int:
+    """酒：出牌阶段一次真实 UseCard（目标为自己）+ ``wine_change`` / ``wine_active``。"""
+
+    def choose(pending, state):  # noqa: ANN001
+        if pending.get("kind") == "PLAY_PHASE":
+            if not state.get("wine_used"):
+                wine = _pick_action(pending, card_type="wine", targets=[0])
+                if wine is not None:
+                    return wine
+            slash = _pick_action(pending, kind="UseCard", card_type="slash", targets=[1])
+            if slash is not None:
+                return slash
+            return _pick_action(pending, kind="EndPhase")
+        return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
+
+    def observe(kind, body, pending, state) -> bool:
+        if kind == "answer" and not state.get("wine_used"):
+            records = body.get("records") or []
+            changes = [r for r in records if r.get("delta_type") == "wine_change"]
+            if not any(c.get("seat") == 0 and c.get("active") is True for c in changes):
+                print(f"FAIL 酒固定 tape：没有「座位 0 置位」的 wine_change：{changes}")
+                return False
+            player = body["snapshot"]["players"][0]
+            if player.get("wine_active") is not True:
+                print(f"FAIL 酒固定 tape：投影没有 wine_active=true：{player}")
+                return False
+            if any(
+                (a.get("card") or {}).get("type") == "wine"
+                for a in (body.get("pending") or {}).get("legal_actions") or []
+            ):
+                print("FAIL 酒固定 tape：使用后同一回合里【酒】仍在候选里")
+                return False
+            state["wine_used"] = True
+        return True
+
+    code = _m5_play(base, "wine", choose, observe)
+    if code != 0:
+        return code
+    return 0
+
+
+def m5_fixed_tapes(base: str) -> int:
+    """三条固定 tape（火攻 / 重铸 / 酒），逐条真 HTTP；任一失败即 FAIL。"""
+    failures = 0
+    for name, run in (
+        ("fire_attack", _fire_attack_fixed),
+        ("reforge", _reforge_fixed),
+        ("wine", _wine_fixed),
+    ):
+        if run(base) != 0:
+            failures += 1
+            print(f"FAIL 固定 tape（{name}）：未通过")
+    if failures:
+        return 1
+    print(f"PASS 固定 tape：{len(_M5_FIXTURES)} 条构造局面全部经真 HTTP 跑完（零非法应答）")
     return 0
 
 
@@ -159,11 +1044,21 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--players", type=int, default=8)
     parser.add_argument("--timeout", type=float, default=None)
+    parser.add_argument("--deck-profile", default=None, help="牌堆档位（缺省 = 内容包默认档）")
     parser.add_argument("--max-answers", type=int, default=4000)
     parser.add_argument("--probe-skills", action="store_true")
+    parser.add_argument(
+        "--tape", choices=("fire_attack", "wine", "m5_fixed"), default=None
+    )
     args = parser.parse_args(argv)
     if args.probe_skills:
         return probe_skills(args.base)
+    if args.tape == "fire_attack":
+        return fire_attack_tape(args.base)
+    if args.tape == "wine":
+        return wine_tape(args.base)
+    if args.tape == "m5_fixed":
+        return m5_fixed_tapes(args.base)
     if args.seed is None:
         parser.error("--seed 必填（除非用 --probe-skills）")
     return play(
@@ -172,6 +1067,7 @@ def main(argv: list[str]) -> int:
         players=args.players,
         timeout=args.timeout,
         max_answers=args.max_answers,
+        deck_profile=args.deck_profile,
     )
 
 

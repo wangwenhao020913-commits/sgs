@@ -5,11 +5,14 @@
 
 from .deltas import (
     CardMoveDelta,
+    CardRevealDelta,
+    ChainedChangeDelta,
     DeckShuffleDelta,
     Delta,
     HpChangeDelta,
     IdentityDealDelta,
     IdentityRevealDelta,
+    WineChangeDelta,
 )
 from .models import (
     CardRef,
@@ -42,6 +45,7 @@ from .protocol import (
     PlayerView,
     Query,
     QueryKind,
+    Reforge,
     RespondContext,
     RespondMode,
     RespondQuery,
@@ -78,6 +82,8 @@ __all__ = (
     "ArrangeQuery",
     "CardMoveDelta",
     "CardRef",
+    "CardRevealDelta",
+    "ChainedChangeDelta",
     "DeckShuffleDelta",
     "Delta",
     "DiscardCards",
@@ -101,6 +107,7 @@ __all__ = (
     "PlayerView",
     "Query",
     "QueryKind",
+    "Reforge",
     "RespondContext",
     "RespondMode",
     "RespondQuery",
@@ -118,6 +125,7 @@ __all__ = (
     "StepPool",
     "SlotKind",
     "UseCard",
+    "WineChangeDelta",
     "WindowCause",
     "Zone",
     "ZoneRef",

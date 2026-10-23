@@ -34,6 +34,7 @@ from sgs.state import (
     PlayCard,
     Player,
     QueryKind,
+    Reforge,
     RespondContext,
     RespondMode,
     SelectCards,
@@ -54,6 +55,7 @@ from .behaviors import (
     TargetCount,
     UseContext,
     behavior_for,
+    satisfies_required,
 )
 from .modifiers import (
     CandidateScope,
@@ -199,7 +201,11 @@ def check_count(state: GameState, seat: int, card: CardRef) -> bool:
 
     额定上限先过 :data:`~sgs.skills.ModifierPoint.COUNT_LIMIT` 链：【诸葛连弩】把
     【杀】的上限改成"无限"（``None``）；``extra`` 是牌面给的额外额度，链后相加。
+
+    已用次数读**行为表声明的计数键**（``CardBehavior.count_key``）：普通【杀】/ 火【杀】/
+    雷【杀】共用 ``"slash"``，转化 / 虚拟【杀】按产物牌型（也是 ``"slash"``）读同一键。
     """
+
     behavior = behavior_for(card)
     limit = behavior.use_limit
     rated = apply_modifiers(
@@ -210,7 +216,7 @@ def check_count(state: GameState, seat: int, card: CardRef) -> bool:
     )
     if rated is None:
         return False
-    used = state.player(seat).card_use_counts.get(card.type, 0)
+    used = state.player(seat).card_use_counts.get(behavior.count_key, 0)
     return used >= rated + limit.extra
 
 
@@ -231,7 +237,7 @@ def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]
     """
     behavior = behavior_for(card)
     rule = behavior.target_rule
-    if rule.count is TargetCount.RATED and rule.rated_targets == 0:
+    if rule.count is TargetCount.RATED and not rule.is_range and rule.rated_targets == 0:
         return ()
     if rule.self_only:
         me = state.player(seat)
@@ -355,6 +361,7 @@ def target_combos(
     high: int,
     *,
     required: tuple[int, ...] = (),
+    ordered: bool = False,
 ) -> tuple[tuple[int, ...], ...]:
     """**目标组合**的唯一构建子（W7-01）：大小 ``low..high``、每组恒含 ``required``。
 
@@ -372,16 +379,30 @@ def target_combos(
     ``pool`` 里的座位 ⇒ **没有任何组合**（fail-closed：那条组合不合法，不能造出来）。
     ``high`` 超过池大小时多余的部分自然为空（``itertools.combinations`` 的语义），
     调用方不必先夹一遍。
+
+    ``ordered=True``（M5-bugfix）只给声明了
+    :attr:`~sgs.effects.CardBehavior.preserve_target_order` 的牌用（当前 =【铁索连环】）：
+    每个组合再摊成**全部排列**——"按使用者选择的顺序结算"的牌，(3, 4) 与 (4, 3) 是
+    两条不同的合法动作。``required`` 前缀（借刀的 Bn）**不参与**排列，仍恒在首位；
+    目标数至多 2（铁索），故排列代价可忽略。缺省 ``False`` = 既有行为逐条不变
+    （多目标【杀】仍只有升序）。
     """
     required = tuple(dict.fromkeys(required))  # 去重、保序（Bn 恒在首位）
     if any(seat not in pool for seat in required):
         return ()
     optional = tuple(seat for seat in pool if seat not in required)
     start = max(low, len(required))  # 不能比 required 的张数还小（combinations 不接受负 r）
-    return tuple(
+    combos = tuple(
         (*required, *combo)
         for total in range(start, high + 1)
         for combo in combinations(optional, total - len(required))
+    )
+    if not ordered:
+        return combos
+    return tuple(
+        (*required, *tail)
+        for combo in combos
+        for tail in permutations(combo[len(required) :])
     )
 
 
@@ -465,6 +486,15 @@ def _has_zone_cards(state: GameState, source: int, target: int) -> bool:
     return bool(player.hand or player.equip or player.judge)
 
 
+def _has_hand_cards(state: GameState, source: int, target: int) -> bool:
+    """目标**手里有牌**（M5-06 的【火攻】"目标须有手牌才能被指定"）。
+
+    只读手牌：装备区 / 判定区有牌不算——火攻要亮的是手牌（spec §5.1.4 / D10）。
+    """
+    del source
+    return bool(state.player(target).hand)
+
+
 def _borrowed_sword_target(state: GameState, source: int, target: int) -> bool:
     """【借刀杀人】的第 0 层合法性：目标有**武器**且攻击范围内有合法【杀】目标。
 
@@ -486,6 +516,7 @@ def _wounded(state: GameState, source: int, target: int) -> bool:
 
 TARGET_FILTERS: dict[str, "Callable[[GameState, int, int], bool]"] = {
     "has_zone_cards": _has_zone_cards,
+    "has_hand_cards": _has_hand_cards,
     "borrowed_sword_target": _borrowed_sword_target,
 }
 """第 0 层附加谓词名 → 回调（``(state, source, target) -> bool``）。"""
@@ -592,6 +623,11 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
     候选期的追加**）；回调只追加、不排序，全表仍由 :func:`legal_actions_for` 按票 05 的
     稳定键统一排序，故"候选与校验同源"不被打破。
 
+    **点击顺序**（M5-bugfix）：声明了
+    :attr:`~sgs.effects.CardBehavior.preserve_target_order` 的牌（【铁索连环】）把每组
+    目标再摊成全部排列（``target_combos(..., ordered=True)``），两种点击顺序都是合法动作；
+    其余牌保持引擎排好的逆时针升序。
+
     **附带指定的牌**（借刀杀人，W5-02b）不在这里出裸候选：它的合法动作是"牌 + 持刀者 A
     + Bn"三元组，只有 :func:`designation_actions_for` 那份内部池能表达。可用性因此只剩
     询问上的 ``card_preactivations`` 清单——**清单渲不出来 = 此刻不可用**（不 fail-open，
@@ -603,24 +639,31 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
             continue
         if check_count(state, seat, card):
             continue
-        rule = behavior_for(card).target_rule
+        behavior = behavior_for(card)
+        rule = behavior.target_rule
         pool = check_targets(state, seat, card)
-        count = rule.target_count(len(pool))
-        if count <= 0:
+        low, high = rule.target_range(len(pool))
+        if high <= 0:
             # 空池的"全体存活"牌（唯一存活者）没有合法候选；M1 的额定牌由
             # ``target_combos`` 自然为空，这里只补上零目标那档。
             continue
-        high = count
-        if rule.count is TargetCount.RATED:
+        if rule.count is TargetCount.RATED and not rule.is_range:
             high = apply_modifiers(
                 ModifierPoint.TARGET_COUNT,
                 state,
                 ModifierContext(subject=seat, card=card),
-                count,
+                high,
             )
         generated: tuple[Action, ...] = tuple(
             UseCard(card=card, targets=combo, answers_seq=answers_seq)
-            for combo in target_combos(pool, count, high)
+            for combo in target_combos(
+                pool,
+                low,
+                high,
+                # M5-bugfix：声明了 ``preserve_target_order`` 的牌（【铁索连环】）按
+                # **点击顺序**结算，故两种顺序都是合法动作；其余牌仍只给引擎排好的升序。
+                ordered=behavior.preserve_target_order,
+            )
         )
         ctx = ModifierContext(subject=seat, card=card)
         actions.extend(
@@ -636,6 +679,13 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
             ModifierContext(subject=seat, card=None, answers_seq=answers_seq, scope=CandidateScope.PLAY),
             (),
         )
+    )
+    # 重铸（M5-03）：可重铸的牌各给一条**独立构造子**——它不是使用，故不过可用性 /
+    # 次数 / 目标 / 无懈任何一道使用闸门（规格 §5.1.3：无次数限制、不算使用锦囊）。
+    actions.extend(
+        Reforge(card=card, answers_seq=answers_seq)
+        for card in state.refs(state.player(seat).hand)
+        if behavior_for(card).reforgeable
     )
     actions.append(EndPhase(answers_seq=answers_seq))
     return actions
@@ -698,6 +748,14 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
     濒死语境的目标由求桃询问直接给出（官方 4.17"对濒死角色使用"）。放弃恒在最后，
     且**永远可选**——"放弃"是 PEACH 询问的一个候选而不是独立询问（票 05 §1）。
 
+    两处**语境专属**的过滤（M5-04）：
+
+    - ``TargetRule.near_death_self_only`` 的牌（【酒】）只在**濒死者自己**被问时进候选；
+      【桃】不声明它，故"他人对濒死者出【桃】"不受影响。——单靠 ``self_only`` 会误伤
+      【桃】（它的 ``self_only`` 只描述出牌阶段的目标池）。
+    - 次数上限照走 ``check_count``：本回合已用过【酒】（无论出牌阶段加伤还是上一次濒死
+      自救）⇒ 这次求桃不再给【酒】候选，出牌阶段与濒死自救因此共用**同一个**计数键。
+
     **转化源路径**（W4-3）：除了真牌，**能把牌当【桃】的转化技**（当前只有华佗【急救】）
     也在这里产出候选——红牌（手牌 ∪ 装备）当【桃】，目标仍是濒死者。候选集合与
     ``GLOSSARY.md``「预发动清单」里的那一步**同源**：来源由
@@ -708,6 +766,8 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
     actions: list[Action] = [
         UseCard(card=card, targets=(dying,), answers_seq=answers_seq)
         for card in _usable_hand(state, seat, UseContext.NEAR_DEATH)
+        if (seat == dying or not behavior_for(card).target_rule.near_death_self_only)
+        and not check_count(state, seat, card)
     ]
     actions.extend(_transformed_peaches(state, seat, dying, answers_seq))
     actions.append(Pass(answers_seq=answers_seq))
@@ -927,12 +987,16 @@ def _required_hand(
     真牌与转化牌也不必区分——:func:`~sgs.skills.transformed_card` 把虚拟牌的类型写成
     目标牌名，故【龙胆】的转化【闪】与真【闪】在这里同形。
 
+    **牌名判据只有一处**：:func:`~sgs.effects.satisfies_required`（M5-05b 起【杀】族按
+    共享计数键放宽——火【杀】/ 雷【杀】因此出现在南蛮 / 决斗 / 借刀的响应窗口里；其余
+    ``required`` 仍逐字相等）。
+
     ``required = None`` 是改判窗口（``WindowCause.REJUDGE``）：打出一张**任意**手牌。
     """
     cards: list[CardRef] = []
     for card_id in state.player(seat).hand:
         card = state.card(card_id)
-        if required is not None and card.type != required:
+        if required is not None and not satisfies_required(card, required):
             continue
         if check_forbidden(state, seat, card):
             continue
@@ -972,6 +1036,10 @@ def _sort_key(action: Action) -> tuple[Any, ...]:
     if isinstance(action, UseCard):
         return (0, (action.card.card_id, *action.targets), action.kind)
     if isinstance(action, PlayCard):
+        return (0, (action.card.card_id,), action.kind)
+    if isinstance(action, Reforge):
+        # 重铸带牌实例但没有目标：与其它带牌的构造子同档（先按牌 id），仍排在
+        # ``EndPhase``（兜底键）之前——"结束阶段排最后"的既有口径不破（M5-03）。
         return (0, (action.card.card_id,), action.kind)
     if isinstance(action, SelectCards):
         return (0, action.picks, action.kind)

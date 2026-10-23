@@ -40,6 +40,9 @@
           <option value="random">随机（基线）</option>
         </select>
       </label>
+      <label>牌堆档位
+        <select id="in-deck-profile"></select>
+      </label>
       <label>我的座位
         <select id="in-seat"></select>
       </label>
@@ -109,7 +112,8 @@
       </div>
     </div>
 
-    <!-- 中央舞台：上层 = 当前动作，下层 = 处理区。结算完淡出（CSS 过渡）。 -->
+    <!-- 中央舞台（U3-01）：上层 = 当前动作，下层 = 三组牌（处理中 / 展示 / 弃牌）同一条换行流。
+         离场 1s 淡出；三组跨 commit 保留。 -->
     <div id="table-stage" class="table-stage">
       <section id="t-seats" class="seats ring" aria-label="对手座位"></section>
       <div id="stage-center" class="stage-center">
@@ -118,7 +122,7 @@
           <div id="t-action-text" class="action-text">等待行动</div>
         </div>
         <div class="stage-divider"></div>
-        <div class="stage-title">处理区</div>
+        <div class="stage-title">舞台</div>
         <div id="t-processing" class="cards processing"></div>
         <p id="t-context" class="context"></p>
       </div>
@@ -241,6 +245,14 @@
         <div id="t-modal-body" class="modal-body"></div>
       </div>
     </div>
+
+    <!-- 目标线层（U3-03 / D8.1）：覆盖整个牌桌壳的 SVG（`inset: 0`、无 viewBox、不吃指针），
+         在座位与底部面板之上、弹窗之下。端点只在画线时读一次布局（窗口变化不影响已在播的线）。 -->
+    <svg id="t-target-lines" class="target-lines" aria-hidden="true"></svg>
+
+    <!-- 技能名层（U3-04 / D9）：发动者武将块上方的飘字（金色加粗，2s 上浮 20 设计单位）。
+         独立一层是必须的：武将块用 `overflow: hidden` 裁白光，飘字住进去会被一起裁掉。 -->
+    <div id="t-skill-floats" class="skill-floats" aria-hidden="true"></div>
   </div>
 </main>
 
@@ -325,6 +337,8 @@
 <script src="card-face.js"></script>
 <script src="seat-view.js"></script>
 <script src="table.js"></script>
+<!-- 牌桌动效（U3-03 / D8 / D13）：目标线 / 行动者高亮 / 体力闪。函数只在 wire() 后被调用。 -->
+<script src="effects.js"></script>
 <script src="preactivation.js"></script>
 <script src="interaction.js"></script>
 <script src="pending.js"></script>

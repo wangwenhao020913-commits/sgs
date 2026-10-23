@@ -41,6 +41,7 @@ from sgs.effects import (
     ModifierPoint,
     apply_modifiers,
     locate,
+    satisfies_required,
 )
 from sgs.resolution import Frame
 from sgs.state import (
@@ -594,6 +595,8 @@ def _kept_by_filters(
 ) -> bool:
     """这张牌是否同时过**牌名 / 槽位种类**两条白名单与**实体牌 id 黑名单**（空 = 不筛）。
 
+    牌名白名单逐项按 :func:`~sgs.effects.satisfies_required` 匹配（【杀】族按共享计数键）。
+
     这是选择面过滤的**唯一判据**（W4-fix-6，D.3）：铺面（:func:`_filter_face`）与
     ``hi=None`` 的上限（:func:`_filtered_zone_pool_size`）都读它。原先三条同形函数
     （``_filter_card_types`` / ``_filter_slot_kinds`` / ``_filter_excluded_cards``）各抄
@@ -601,7 +604,7 @@ def _kept_by_filters(
     """
     if int(card_id) in exclude_cards:
         return False
-    if card_types and card.type not in card_types:
+    if card_types and not any(satisfies_required(card, type_id) for type_id in card_types):
         return False
     return not (slot_kinds and card.slot not in slot_kinds)
 
@@ -722,8 +725,10 @@ def provide_face(
     两半合成，各读各的真源：
 
     - **实体 B**：``zones`` 此刻对 ``seat`` 铺出的面，按牌名 ``type_id`` 筛
-      （与 :class:`PickCards` 的 ``card_types`` 同一条牌名过滤；这一步**永远**是
-      "本人自己的区域" ⇒ 手牌是**可见槽**，与 ``reveal_hand=True`` 同形）；
+      （判据 = :func:`~sgs.effects.satisfies_required`：牌名逐字相等，【杀】族按共享
+      计数键放宽——M5-05b-fix 起青龙也能"提供"火【杀】/ 雷【杀】；与 :class:`PickCards`
+      的 ``card_types`` 走同一条过滤。这一步**永远**是"本人自己的区域" ⇒ 手牌是
+      **可见槽**，与 ``reveal_hand=True`` 同形）；
     - **虚拟 B**：跑一趟 ``CANDIDATES`` 通道（``scope=RESPOND`` +
       ``respond_required=type_id``、``card=None``）——**与使用 / 打出窗口同一批回调**，
       故"哪些牌能当 B"由各技能自己的声明决定，本函数不写第二份谓词。
@@ -739,7 +744,7 @@ def provide_face(
     for zone in zones:
         for card_id in state.zone(ZoneRef(zone, seat)):
             card = state.card(card_id)
-            if card.type != type_id:
+            if not satisfies_required(card, type_id):
                 continue
             slots.append(Slot(ref=ZoneRef(zone, seat), card=card))
             card_ids.append(card_id)
@@ -756,7 +761,7 @@ def provide_face(
         (),
     ):
         card = getattr(action, "card", None)
-        if card is None or not card.is_virtual or card.type != type_id:
+        if card is None or not card.is_virtual or not satisfies_required(card, type_id):
             continue
         sources = tuple(card.virtual_sources)
         if len(sources) != 1 or int(card.card_id) in seen:

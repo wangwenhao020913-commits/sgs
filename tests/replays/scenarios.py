@@ -43,13 +43,16 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .goals import PREACTIVATION_CANCEL_SKILL, goal_for
+from . import m5
 
 __all__ = [
     "M1_DECK_PROFILE",
     "M2_DECK_PROFILE",
+    "M5_SCENARIOS",
     "PREACTIVATION_CANCEL_SCENARIO",
     "SCENARIOS",
     "Scenario",
+    "engine_for",
     "play_random",
     "preactivation_cancel_pair",
     "record",
@@ -421,11 +424,86 @@ M3_SCENARIOS: dict[str, Scenario] = {
 W4-fix-2：``42-hero-transform`` 改脚本驱动（转化技的唯一入口 = 预发动清单），其余七条
 仍是随机驱动。"""
 
+M5_SCENARIOS: dict[str, Scenario] = {
+    # M5-09a：8 条**构造局面**基准（spec D14 / §6 A3）。种子只是 header 里的记录，
+    # 局面的手牌 / 装备 / 牌堆顶全部写死在 ``replays/m5.py``，不依赖种子搜索。
+    "48-fire-slash-vine-armor": Scenario(
+        slug="48-fire-slash-vine-armor",
+        seed=901,
+        max_turns=80,
+        player_count=2,
+        deck_profile=m5.M5_DECK_PROFILE,
+        driver="m5",
+    ),
+    "49-iron-chain-thunder-conduction": Scenario(
+        slug="49-iron-chain-thunder-conduction",
+        seed=902,
+        max_turns=80,
+        player_count=2,
+        deck_profile=m5.M5_DECK_PROFILE,
+        driver="m5",
+    ),
+    "50-wine-silver-lion-cap": Scenario(
+        slug="50-wine-silver-lion-cap",
+        seed=903,
+        max_turns=80,
+        player_count=2,
+        deck_profile=m5.M5_DECK_PROFILE,
+        driver="m5",
+    ),
+    "51-fire-attack-reveal-discard": Scenario(
+        slug="51-fire-attack-reveal-discard",
+        seed=904,
+        max_turns=80,
+        player_count=2,
+        deck_profile=m5.M5_DECK_PROFILE,
+        driver="m5",
+    ),
+    "52-scimitar-empty-hand-hualiu": Scenario(
+        slug="52-scimitar-empty-hand-hualiu",
+        seed=905,
+        max_turns=80,
+        player_count=2,
+        deck_profile=m5.M5_DECK_PROFILE,
+        driver="m5",
+    ),
+    "53-supply-shortage-skips-draw": Scenario(
+        slug="53-supply-shortage-skips-draw",
+        seed=906,
+        max_turns=80,
+        player_count=2,
+        deck_profile=m5.M5_DECK_PROFILE,
+        driver="m5",
+    ),
+    "54-reforge-iron-chain": Scenario(
+        slug="54-reforge-iron-chain",
+        seed=907,
+        max_turns=80,
+        player_count=2,
+        deck_profile=m5.M5_DECK_PROFILE,
+        driver="m5",
+    ),
+    "55-fan-converts-normal-slash": Scenario(
+        slug="55-fan-converts-normal-slash",
+        seed=908,
+        max_turns=80,
+        player_count=2,
+        deck_profile=m5.M5_DECK_PROFILE,
+        driver="m5",
+    ),
+}
+"""8 条 M5 军争基准（M5-09a）：覆盖 11 个新牌名与 spec §6 A3 的 10 个覆盖项。
+
+驱动是 ``"m5"``：**从构造局面起跑**（``Engine.from_state`` + :mod:`replays.m5` 的脚本
+计划），不是随机种子；回放侧用同一份构造（:func:`engine_for`）重开。
+"""
+
 SCENARIOS: dict[str, Scenario] = {
     **M1_SCENARIOS,
     **M2_SCENARIOS,
     **M3_SCENARIOS,
     **SCRIPTED_SCENARIOS,
+    **M5_SCENARIOS,
 }
 
 
@@ -1088,16 +1166,35 @@ def _find(query: Query, action_type: type) -> Action:
     raise AssertionError(f"{query.kind} 询问里没有 {action_type.__name__} 候选")  # pragma: no cover
 
 
-def _new_scripted_engine(scenario: Scenario) -> Engine:
-    """按场景声明开一局脚本基准（档位 / 人数 / 逐座位武将与真人局同一条入口）。"""
-    pack = load_content_pack(deck_profile=scenario.deck_profile)
+def engine_for(
+    scenario: Scenario,
+    *,
+    seed: int,
+    pack=None,
+    rule_config: RuleConfig | None = None,
+) -> Engine:
+    """按场景声明开一局基准：**录制与回放共用**的同一条入口。
+
+    M5 的 8 条基准从**构造局面**起跑（``Engine.from_state``，见 :mod:`replays.m5`）：
+    手牌 / 装备 / 牌堆顶都写死，回放只凭「场景 slug + seed」就能重建同一份局面，故
+    录像不依赖随机种子；其余基准仍是 ``Engine.new_game``（随机发牌 + 冻结磁带）。
+    """
+    if pack is None:
+        pack = load_content_pack(deck_profile=scenario.deck_profile)
+    if scenario.slug in m5.M5_SETUPS:
+        return m5.build_engine(scenario.slug, seed=seed, pack=pack)
     return Engine.new_game(
-        seed=scenario.seed,
-        rule_config=RuleConfig(player_count=scenario.player_count),
+        seed=seed,
+        rule_config=rule_config or RuleConfig(player_count=scenario.player_count),
         pack=pack,
         heroes=scenario.heroes or (),
         hero_pool=scenario.hero_pool,
     )
+
+
+def _new_scripted_engine(scenario: Scenario) -> Engine:
+    """按场景声明开一局脚本基准（档位 / 人数 / 逐座位武将与真人局同一条入口）。"""
+    return engine_for(scenario, seed=scenario.seed)
 
 
 def _run_scripted(
@@ -1110,7 +1207,16 @@ def _run_scripted(
     """
     engine = _new_scripted_engine(scenario)
     recording = _Recording()
-    if slug == PREACTIVATION_CANCEL_SCENARIO:
+    if scenario.driver == "m5":
+        assert enter is None, "M5 构造基准没有取消 / 不发动两条路径"
+        pack = load_content_pack(deck_profile=scenario.deck_profile)
+        players = m5.build_players(
+            slug,
+            pack=pack,
+            player_count=scenario.player_count,
+            recording=recording,
+        )
+    elif slug == PREACTIVATION_CANCEL_SCENARIO:
         assert enter is not None, f"{slug}：调用方必须显式选取消 / 不发动路径"
         players: list = [
             _PreativationCancelPlayer(seat, slug, recording, engine, enter=enter)
@@ -1167,6 +1273,11 @@ def _record_scripted(slug: str, scenario: Scenario) -> Engine:
     else:
         engine, recording = _run_scripted(scenario, slug)
     assert recording.goal_done, f"{slug}：目标段没有命中（seed={scenario.seed}）"
+    if scenario.driver == "m5":
+        # 脚本宣布命中 ≠ 记录流里有那回事：M5 的 8 条**再独立复读一遍**事后判据。
+        assert goal_for(slug)(engine), (
+            f"{slug}：构造局面的计划走完了，但记录流没有命中 goals.M5_GOALS 的判据"
+        )
     return engine
 
 

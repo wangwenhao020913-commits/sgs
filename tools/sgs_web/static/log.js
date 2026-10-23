@@ -13,6 +13,10 @@
 /** 事件流的详略；`simple` = 默认的服务端叙事，`focus` = 隐藏对手之间的响应往来。 */
 const LOG_MODES = ["simple", "focus", "all"];
 
+/** 移动原因的中文（M5-08b）：完整档也不把 `REFORGE` 英文漏给玩家；其余原因保留报文值
+ *  （完整档本来就是记录流原文，不在这里另翻一套规则话术）。 */
+const MOVE_REASON_LABELS = Object.freeze({ REFORGE: "重铸" });
+
 function logMode() {
   const node = $("t-log-mode");
   const mode = node && node.value ? node.value : "simple";
@@ -141,9 +145,25 @@ function describeRecord(record) {
   if (record.kind === "game_end") return `<span class="k">#${record.seq}</span> 终局 ${record.result} · 获胜座位 [${(record.winners || []).join("、")}] · ${record.reason}`;
   if (record.kind === "delta") {
     if (record.delta_type === "card_move") {
-      return `<span class="k">#${record.seq}</span> 牌移动 ${zoneLabel(record.from_zone)} → ${zoneLabel(record.to_zone)}（${record.reason}）${cardsLabel(record.cards)}`;
+      const reason = MOVE_REASON_LABELS[record.reason] || record.reason;
+      // M5-09c：隐藏区（牌堆 / 手牌）之间的移动在服务端已脱敏——`cards` 为空、`card_count`
+      // 给张数（公开区 / 自己经手的移动仍带牌面）。完整档只按下发值渲染，不做可见性判断。
+      const moved = (record.cards || []).length
+        ? cardsLabel(record.cards)
+        : (record.card_count ? ` · ${record.card_count} 张牌` : "");
+      return `<span class="k">#${record.seq}</span> 牌移动 ${zoneLabel(record.from_zone)} → ${zoneLabel(record.to_zone)}（${reason}）${moved}`;
     }
     if (record.delta_type === "hp_change") return `<span class="k">#${record.seq}</span> 体力 座位 ${record.seat} ${record.before} → ${record.after}`;
+    if (record.delta_type === "chained_change") {
+      // M5-08d：横置 / 重置的状态变化在完整档也写人话（U1-05 的简易档由服务端叙事写）。
+      return `<span class="k">#${record.seq}</span> 座位 ${record.seat} ${record.chained ? "横置" : "重置"}`;
+    }
+    if (record.delta_type === "wine_change") {
+      return `<span class="k">#${record.seq}</span> 座位 ${record.seat} ${record.active ? "进入【酒】状态" : "【酒】加伤消失"}`;
+    }
+    if (record.delta_type === "card_reveal") {
+      return `<span class="k">#${record.seq}</span> 亮牌 座位 ${record.seat}${record.card ? cardsLabel([record.card]) : ""}`;
+    }
     if (record.delta_type === "identity_deal") return `<span class="k">#${record.seq}</span> 身份 座位 ${record.seat}（只有自己 / 主公 / 阵亡者公开）`;
     if (record.delta_type === "identity_reveal") return `<span class="k">#${record.seq}</span> 亮明身份 座位 ${record.seat}`;
     return `<span class="k">#${record.seq}</span> 洗牌`;

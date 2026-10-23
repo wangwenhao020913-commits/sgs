@@ -52,7 +52,7 @@ DOD_M3_ITEMS: dict[int, DoDItem] = {
         "16 名武将全部登记且每条技能有断言：CATALOG 武将半恰等于数据文件启用名单、"
         "落选 9 名继续暗置、29 条技能逐条被族级文件点名",
         (
-            "tests/test_hero_catalog.py::test_the_catalog_holds_seventeen_equipment_and_twenty_nine_hero_skills",
+            "tests/test_hero_catalog.py::test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills",
             "tests/test_hero_catalog.py::test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet",
             "tests/test_hero_catalog.py::test_the_enabled_pool_is_exactly_the_sixteen_and_the_rest_stay_dark",
             "tests/test_hero_catalog.py::test_every_enabled_hero_skill_is_named_by_a_family_test_file",

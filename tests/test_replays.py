@@ -98,7 +98,23 @@ REPLAY_SINGLE_LIMIT_BYTES = 4 * 1024 * 1024
 **3,334,043 字节 ≈ 3.18 MiB**（``10-identity-7p-lord-win.jsonl``）——仍在两句上限之内，
 故**不动预算**。删掉【遗计】选牌步的 ``Pass`` 后只有 35 / 41 两份基准变化：35 的 seed 109
 不再命中判据（≥2 次逐点），按本模块纪律**重新选种**为 198（1112 → 804 条）；41 同种子 626
-重录（1210 → 1283 条）。其余 45 条逐字节不变。"""
+重录（1210 → 1283 条）。其余 45 条逐字节不变。
+
+**M5-09a（军争金录像）后的实测**：55 条合计 **52,083,601 字节 ≈ 49.67 MiB**，最大单文件
+**3,334,043 字节 ≈ 3.18 MiB**（``10-identity-7p-lord-win.jsonl``）——仍在两句上限之内，
+故**不动预算**。本轮只**新增** 8 条 160 档**构造局面**基准（48–55，合计 420,345 字节
+≈ 0.40 MiB），标准 108 的 47 条逐字节不变：``git diff --diff-filter=M --name-only
+dd029e5..HEAD -- 'tests/replays/*.jsonl'`` 为空即证（README / 生成器按票面同批更新，
+不在"旧基准"之列）。新基准从人为局面起跑（``replays/m5.py``），不含随机发牌，
+故体积只随回合数增长。
+
+**M5-bugfix（铁索点击顺序）后的实测**：55 条合计 **52,084,021 字节 ≈ 49.67 MiB**，最大单文件
+**3,334,043 字节 ≈ 3.18 MiB**（``10-identity-7p-lord-win.jsonl``）——仍在两句上限之内，
+故**不动预算**。出牌阶段的铁索候选按 ``preserve_target_order`` 多出**逆序**的那一条
+（``[0, 1]`` 之外再有 ``[1, 0]``），于是**含铁索出牌阶段的 49 / 54** 两份 160 档构造基准由
+``pytest --update-golden`` 重录：逐行比对只见那一条候选多出来（磁带上记录的动作一字未变，
+``goals.py`` 的判据照旧命中）。标准 108 的 47 条与其余 6 条 M5 基准逐字节不变——出牌阶段
+含铁索的只有这两条。"""
 
 
 def _write(path: Path, text: str) -> Path:
@@ -351,14 +367,11 @@ def test_golden_replay_matches_byte_for_byte(slug: str, tmp_path: Path, update_g
     )
     seed, tape = tape_from_journal(records)
     scenario = scenarios.SCENARIOS[slug]
-    # 武将**不是** header 的一部分（武将不是牌、没有 delta）：专项基准的逐座位武将以
-    # ``scenarios.SCENARIOS`` 为唯一真源（与"档位 / 人数"同一姿态，票 14 §8）。
-    engine = Engine.new_game(
-        seed=seed,
-        rule_config=header.rule_config,
-        pack=pack,
-        heroes=scenario.heroes,
-        hero_pool=scenario.hero_pool,
+    # 武将 / **构造局面**都不是 header 的一部分：逐座位武将与 M5 的初始手牌 / 装备 /
+    # 牌堆顶以 ``scenarios.SCENARIOS``（及其 ``replays/m5.py`` 构造器）为唯一真源
+    # （与"档位 / 人数"同一姿态，票 14 §8 / M5-09a）。回放与录制走**同一条**开局入口。
+    engine = scenarios.engine_for(
+        scenario, seed=seed, pack=pack, rule_config=header.rule_config
     )
     player = TapePlayer(tape)
     engine.run([player] * header.rule_config.player_count)
@@ -369,7 +382,12 @@ def test_golden_replay_matches_byte_for_byte(slug: str, tmp_path: Path, update_g
         artifact.write_text(actual, encoding="utf-8")
         raise AssertionError(f"{_first_divergence(expected, actual)}\n本次实际记录流：{artifact}")
 
-    if slug in goals.M1_GOALS or slug in goals.M2_GOALS or slug in goals.M3_GOALS:
+    if (
+        slug in goals.M1_GOALS
+        or slug in goals.M2_GOALS
+        or slug in goals.M3_GOALS
+        or slug in goals.M5_GOALS
+    ):
         # 门禁期**真的**验证这条基准在证它声称的机制（票 32 §1；M2 用"随机驱动 + 事后判据"
         # 替代 M1 的录制期脚本，故判据必须在这里也生效，而不是只在 --update-golden 时；
         # M3 的专项基准同一口径，票 14 §8；脚本专项基准由票 17 起登记在 M1_GOALS）。
@@ -492,14 +510,19 @@ M3_BASELINES = tuple(scenarios.M3_SCENARIOS)
 SCRIPTED_BASELINES = tuple(scenarios.SCRIPTED_SCENARIOS)
 """票 17 起的脚本驱动专项基准（与 M1 六条同一驱动，但不属于票 12 定格的回归网）。"""
 
+M5_BASELINES = tuple(scenarios.M5_SCENARIOS)
+"""M5 的 8 条**构造局面**基准（M5-09a / spec §6 A3）：覆盖 11 个新牌名与 10 个覆盖项。"""
+
 M2_BASELINES = tuple(
     name
     for name in distribution.SLUG_CLASSES
     if name not in set(FROZEN_BASELINES)
     and name not in set(M3_BASELINES)
     and name not in set(SCRIPTED_BASELINES)
+    and name not in set(M5_BASELINES)
 )
-"""M2 的 27 条基准：分布表里除 M1 六条、M3 八条与脚本专项以外的全部 slug（票 32 §1）。
+"""M2 的 27 条基准：分布表里除 M1 六条、M3 八条、脚本专项与 M5 八条以外的全部 slug
+（票 32 §1）。
 
 W5-02b：``33-borrowed-sword-use-slash`` 随借刀入口的翻转移入脚本专项（随机驱动产不出借刀
 动作），故 M2 由 28 条变为 27 条。W7-01 的 ``47-halberd-borrowed-sword`` 同属脚本专项
@@ -523,6 +546,7 @@ def test_the_baseline_distribution_meets_every_category_minimum() -> None:
     }
     assert not shortfalls, f"分布判据未达标（实得 / 最少）：{shortfalls}"
     assert counts[distribution.M1_CLASS] == len(FROZEN_BASELINES)
+    assert counts[distribution.M5_CLASS] == len(M5_BASELINES), "M5 军争机制类必须恰 8 条"
 
 
 def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
@@ -535,7 +559,10 @@ def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
     assert files == set(scenarios.SCENARIOS), "场景表与基准文件集合互相等于"
     assert set(M2_BASELINES) == files - set(FROZEN_BASELINES) - set(M3_BASELINES) - set(
         SCRIPTED_BASELINES
-    ), "M2 恰为 47 − 6 − 8 − 6 = 27 条"
+    ) - set(M5_BASELINES), "M2 恰为 47 − 6 − 8 − 6 = 27 条"
+    assert set(M5_BASELINES) == set(scenarios.M5_SCENARIOS) == set(goals.M5_GOALS), (
+        "M5 的 8 条构造基准必须与场景表、判据表三方相等"
+    )
     assert set(M3_BASELINES) == set(scenarios.M3_SCENARIOS) == set(goals.M3_GOALS), (
         "M3 的 8 条专项基准必须与场景表、判据表三方相等"
     )
@@ -556,6 +583,16 @@ def test_every_scripted_baseline_has_an_after_the_fact_goal() -> None:
     assert set(SCRIPTED_BASELINES) == set(goals.M1_GOALS), (
         "脚本专项基准集合与 goals.M1_GOALS 的键集必须相等"
     )
+
+
+def test_every_m5_baseline_has_an_after_the_fact_goal() -> None:
+    """M5 的 8 条构造基准各有一条事后判据，且判据覆盖 A3 的分派表。"""
+    assert set(M5_BASELINES) == set(goals.M5_GOALS), (
+        "M5 构造基准集合与 goals.M5_GOALS 的键集必须相等"
+    )
+    assert {scenarios.SCENARIOS[slug].deck_profile for slug in M5_BASELINES} == {
+        "standard_ex_160"
+    }, "M5 的每条基准都必须是 standard_ex_160 档"
 
 
 def test_the_preactivation_cancel_equals_the_not_activating_path() -> None:
@@ -914,3 +951,84 @@ def test_the_golden_replays_fit_within_their_size_budget() -> None:
     violations = _size_budget_violations(REPLAYS_DIR)
 
     assert not violations, "\n".join(violations)
+
+
+STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
+    "01-slash-dodge-cancel": (579602, "39f0f169d443bb2e31581c06965c96dfead7fa5be5ffa9b5761d1102679148ff"),
+    "02-slash-hit-damage": (593788, "7758958b6424e0f59a07d375d0076224710bb82f2a444200d2fe9f65440780ce"),
+    "03-near-death-self-peach": (746027, "e6dc77639e9c0d349fff0cf53672784a11f2cc884a0d50cd1a89a2ddf1b2f63b"),
+    "04-near-death-other-peach": (559211, "ce1d8b87ea55997a4bfe1886b7957ec4793c489891af83ea0f92dae342ed3c00"),
+    "05-near-death-death": (237154, "d3ad42843fd77fe43f20ce0300b5d58b5a5e92fc9ba95ceefdf2648074ab516c"),
+    "06-deck-reshuffle": (615957, "37841aa948d281495fb7687aa9af8d415d490169b41ca3a641712be9bcf50224"),
+    "07-identity-4p-rebel-win": (416007, "80cfce029194cdb36ca95054548133238fa3abea3639ba4a817f0bc1193268e6"),
+    "08-identity-5p-lord-win": (1089436, "f0f52483480e7a9592161081500151d76e58703c365d1507858872ff7469983d"),
+    "09-identity-6p-renegade-win": (2931297, "073813439df46b8de856e1e475baad49121a91b8d44259ae0abb88dfbc4328e1"),
+    "10-identity-7p-lord-win": (3334043, "9e52615a41de7aa32e544a55376a46cb9ca66ac94e8cf8c42c46c4cac81928e8"),
+    "11-identity-8p-rebel-win": (1883336, "492dcb7e2e568e2e99f9eb97a2273833125e539d206b04eaaaf3834c7aeaded4"),
+    "12-indulgence-skips-play": (1217689, "b895a9998687587186777798a3c7ad8d43604eb5fc7ded61ad1fda31b89f0203"),
+    "13-indulgence-heart-misses": (2230634, "bd4fedb3c11486a4413097ce606c6c2e49510c899390ae996344850f36afd60c"),
+    "14-lightning-thunder-damage": (530891, "d2a5311557165cca33ae4bf2ed595d51bcb71ca8b737c3bfefa18fc2d60bebbe"),
+    "15-lightning-defers-next-seat": (576031, "e679a58c4aea112d8f978cada05cfcc8207004ade4b35927eb88a46c204bc6ba"),
+    "16-nullify-cancels-a-trick": (1701176, "efd0352c0899aad5717f5c1c77e8f1dabf6132a395b54acba35ab90c2b275a86"),
+    "17-nullify-nested-two": (917417, "77e9970e928adf0419ddf124ae731a197ed02daef32a52a46dbf64848885ee5f"),
+    "18-nullify-nested-three": (2087671, "c6c978a964987af8ff6a91dcf95bde7bcc03355fee9557d0fc83544edee19584"),
+    "19-nullify-on-multi-target": (708234, "b331118a440a55a35071b878e8bb58ad23017eecbe4487e4092afd9afbcd9740"),
+    "20-nullify-lightning-defers": (706210, "53c20f1fc75097ebd9060ad5369ace6ad0b674e56d3289a7631ecb14fcfd4e8d"),
+    "21-rebel-killed-reward": (1178637, "eba5d7c0ddfcaae552632bc43a14e45d53453bbe7062397acea481d5f5da3444"),
+    "22-lord-kills-loyalist": (1588956, "7cb0e7c80fa5dc89a3a814f0b23ee666cde906318aee1253a297add1dbafca6a"),
+    "23-two-deaths-revealed": (1483342, "8dd11aac660caf79f4621bfdd92a4c63bf94789f33b59596873367a436c58c20"),
+    "24-multi-player-peach-window": (1042313, "2d4feddbb319aa54ae5958141a810e184fd3efb3bea13f0c89169daa3b7c5629"),
+    "25-rollback-same-start": (305813, "ebd14b21e5a1b643351814587a7ddf1a944f406d40ee653688ac8b6b6db32319"),
+    "26-rollback-start-advances": (750488, "fd2f091b08a66215d5f08372c2b926c1c03c42a95bab106c51ffa915fd131db1"),
+    "27-slash-beyond-adjacent": (805123, "b43bfd3e41f45b3316064fa84cea1f163de373eb3ed6646bf9c19291e99589b3"),
+    "28-equipment-replacement": (686849, "311e06a607ca3b41e0534ae5a2d53560b769b35999674e7e7d2fd876bb552540"),
+    "29-serpent-spear-virtual-slash": (361109, "5f872af688f162346e2171a17ecd3f69451a5be1337a5adca0b1e6c5f1cc0e53"),
+    "30-halberd-three-targets": (2858367, "c6baeff1cc184b26a8039a81f62807403125d90ab71f64e380df5197daaa13b1"),
+    "31-play-card-response": (2700271, "8a6cfc3643345355e5a42887e4c361297411c47be07a29946c06900c083e3898"),
+    "32-five-grains-selection": (605191, "ab41daf266306c95da82a44698f714a58d26fdb8e5cac446cd5b1c5c31630462"),
+    "33-borrowed-sword-use-slash": (1149248, "e69ee120a8e4f3df3beebd29f8ee80b78f652482e29422faf21b9cd3b702aecb"),
+    "34-dismantle-or-snatch-equip-judge": (802508, "672687163dfa779b39f0794e3e4c64de6d72bfc88af91f09fe91f9648ddede2c"),
+    "35-hero-damage-points": (465008, "053c6a7fd33d4e018c643c2d0de0772ca4ce20f56ff3f9f4660f51f89d760d35"),
+    "36-hero-rejudge-cycle": (1236540, "121ec584347982627ffa4f60e6ffcd803529bf4892f9949b58621ae31c808ae3"),
+    "37-hero-lord-request": (1464704, "f618bb97447c1ddf15e278d9a9b6d947e66848f68a472ed72b15c75871b8d619"),
+    "38-hero-lost-cards": (857328, "3ed01389ce128ccc2591a4adfdaafca4d74087dac372e9e8407bb5cdae5ec251"),
+    "39-hero-target-pool": (2586144, "3409eb95b9a2460fc9b844e5eb521fe537f6c2f600630c11bd4b18fc400ed928"),
+    "40-hero-wushuang": (359502, "ebfbda32bae631d9533396ac3e5eab51e8c75e7f0c778c86709c668a70b90ca7"),
+    "41-hero-guanxing": (815491, "3cd14e5c0364b9cff3ff0f3ca3b396e871ba158363434e96af54944dde62db7f"),
+    "42-hero-transform": (835090, "ae39e725a5c94a2a8fa08b95e914c6618a14c0223b44b3372dd22c95c9263f75"),
+    "43-double-sword-opposite-gender": (387810, "426a5647e9332c78458ed737863eae5a297406f9c28ce9b0cbeb9f2914cd2aec"),
+    "44-preactivation-cancel-no-side-effect": (193552, "c1dd71f3e039631927404af475017579c58792bde78dc5f7208bb297c75973e9"),
+    "45-borrowed-sword-auto-handover": (484984, "fa0fa716de76231743f3fffc717e9d6a9fadbaffaaebc927bf6df274eb8be6b4"),
+    "46-borrowed-sword-transform-slash": (1146397, "7a5aa42497ab98f549272393803374fd710840825c5d8e339624422883ac16a4"),
+    "47-halberd-borrowed-sword": (850680, "ddfc21af23189b45396c504c3c865c2c140548d533c35b205c2c81f1995e02df"),
+}
+"""标准 108 的 **47 条金录像**逐文件 ``(字节数, sha256)``（spec D14 / M5-09a）。
+
+**故意写死**：M5 只许**新增**军争基准，标准 108 的 47 条必须逐字节不变。这张表把
+"不变"钉成门禁判据——任何重录、格式化或手改都会让对应条目变红；改它 = 一次显式决定
+（本 effort 的 D14 明确禁止）。``M1_FROZEN_TRAJECTORIES`` 钉的是六条的**决策轨迹**，
+这张表钉的是 47 条的**文件字节**，两者互补。
+"""
+
+
+def test_the_47_standard_108_replays_keep_their_frozen_bytes() -> None:
+    """D14：标准 108 的 47 条金录像逐字节不变（增删 / 重录旧基准即红）。"""
+    files = {path.stem: path for path in _golden_files()}
+    assert len(STANDARD_108_REPLAY_BYTES) == 47, "标准基准恰 47 条"
+    assert set(STANDARD_108_REPLAY_BYTES).isdisjoint(M5_BASELINES), (
+        "M5 的 8 条是新基准，不得混进标准 108 的冻结表"
+    )
+
+    missing = set(STANDARD_108_REPLAY_BYTES) - set(files)
+    assert not missing, f"标准 108 基准文件缺失：{sorted(missing)}"
+
+    mismatches: list[str] = []
+    for slug, (size, digest) in STANDARD_108_REPLAY_BYTES.items():
+        data = files[slug].read_bytes()
+        actual = (len(data), hashlib.sha256(data).hexdigest())
+        if actual != (size, digest):
+            mismatches.append(f"{slug}: 期望 {(size, digest)}，实得 {actual}")
+    assert not mismatches, (
+        "标准 108 金录像的字节变了（D14：本 effort 不许重录旧基准；先比对 git 基线 "
+        "dd029e5）：\n" + "\n".join(mismatches)
+    )

@@ -4,12 +4,14 @@
 单处录入错字过不了这里。字面量来自票 03 §3 与票 06 §1 的逐格核对结果，
 不从数据文件反推。
 
-两个档位各有一份逐张快照：
+三个档位各有一份逐张快照：
 
 - ``basic_53`` 是 M1 的 53 张切片（杀 30 / 闪 15 / 桃 8），**显式选档**读取，
   使 M2 把默认档翻到 108 的改动不会泄漏进 M1 回归网（票 16 §9）；
 - ``standard_108`` 是标准版全表（基本 53 + 锦囊 36 + 装备 19），含 4 张 EX 牌，
-  故 ♠2 / ♣2 / ♥Q / ♦Q 四个槽位各有三张（票 06 §1 的 108 行逐张转录）。
+  故 ♠2 / ♣2 / ♥Q / ♦Q 四个槽位各有三张（票 06 §1 的 108 行逐张转录）；
+- ``standard_ex_160`` 是 108 + 军争 52 张（M5-01a）：52 张按规则文本 §10.2
+  （``三国杀详细规则.txt`` 1125–1180 行）逐格转录，不改默认档。
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from sgs.data import load_content_pack
 
 BASIC_53 = "basic_53"
 STANDARD_108 = "standard_108"
+STANDARD_EX_160 = "standard_ex_160"
 
 _EQUIPMENT_IDS = (
     "crossbow",
@@ -211,6 +214,82 @@ EXPECTED_STANDARD_108: tuple[tuple[str, str, int], ...] = (
 
 RED_SUITS = frozenset({"heart", "diamond"})
 
+EXPECTED_MILITARY_52: tuple[tuple[str, str, int], ...] = (
+    # ♥ A–K（规则 10.2 逐格转录）
+    ("nullify", "heart", 1),
+    ("fire_attack", "heart", 2),
+    ("fire_attack", "heart", 3),
+    ("fire_slash", "heart", 4),
+    ("peach", "heart", 5),
+    ("peach", "heart", 6),
+    ("fire_slash", "heart", 7),
+    ("dodge", "heart", 8),
+    ("dodge", "heart", 9),
+    ("fire_slash", "heart", 10),
+    ("dodge", "heart", 11),
+    ("dodge", "heart", 12),
+    ("nullify", "heart", 13),
+    # ♣ A–K
+    ("silver_lion", "club", 1),
+    ("vine_armor", "club", 2),
+    ("wine", "club", 3),
+    ("supply_shortage", "club", 4),
+    ("thunder_slash", "club", 5),
+    ("thunder_slash", "club", 6),
+    ("thunder_slash", "club", 7),
+    ("thunder_slash", "club", 8),
+    ("wine", "club", 9),
+    ("iron_chain", "club", 10),
+    ("iron_chain", "club", 11),
+    ("iron_chain", "club", 12),
+    ("iron_chain", "club", 13),
+    # ♠ A–K
+    ("ancient_scimitar", "spade", 1),
+    ("vine_armor", "spade", 2),
+    ("wine", "spade", 3),
+    ("thunder_slash", "spade", 4),
+    ("thunder_slash", "spade", 5),
+    ("thunder_slash", "spade", 6),
+    ("thunder_slash", "spade", 7),
+    ("thunder_slash", "spade", 8),
+    ("wine", "spade", 9),
+    ("supply_shortage", "spade", 10),
+    ("iron_chain", "spade", 11),
+    ("iron_chain", "spade", 12),
+    ("nullify", "spade", 13),
+    # ♦ A–K
+    ("vermilion_feather_fan", "diamond", 1),
+    ("peach", "diamond", 2),
+    ("peach", "diamond", 3),
+    ("fire_slash", "diamond", 4),
+    ("fire_slash", "diamond", 5),
+    ("dodge", "diamond", 6),
+    ("dodge", "diamond", 7),
+    ("dodge", "diamond", 8),
+    ("wine", "diamond", 9),
+    ("dodge", "diamond", 10),
+    ("dodge", "diamond", 11),
+    ("fire_attack", "diamond", 12),
+    ("hualiu", "diamond", 13),
+)
+"""军争 52 张（规则 10.2）：花色 / 点数 / 牌名逐格转录，**不从数据文件反推**。"""
+
+MILITARY_CARD_TYPES: dict[str, tuple[str, str, str | None, bool, int | None]] = {
+    # id → (名称, 类别, 子类, 延时标记, 攻击范围)；spec §4.1 的 11 行。
+    "fire_slash": ("火杀", "basic", None, False, None),
+    "thunder_slash": ("雷杀", "basic", None, False, None),
+    "wine": ("酒", "basic", None, False, None),
+    "supply_shortage": ("兵粮寸断", "trick", "delayed", True, None),
+    "fire_attack": ("火攻", "trick", "instant", False, None),
+    "iron_chain": ("铁索连环", "trick", "instant", False, None),
+    "silver_lion": ("白银狮子", "equipment", "armor", False, None),
+    "vine_armor": ("藤甲", "equipment", "armor", False, None),
+    "ancient_scimitar": ("古锭刀", "equipment", "weapon", False, 2),
+    "vermilion_feather_fan": ("朱雀羽扇", "equipment", "weapon", False, 4),
+    "hualiu": ("骅骝", "equipment", "horse_defense", False, None),
+}
+"""军争 11 个牌名的牌面事实（spec §4.1）：名称 / 类别 / 子类 / 延时 / 攻击范围。"""
+
 
 def _actual(profile: str = BASIC_53) -> tuple[tuple[str, str, int], ...]:
     pack = load_content_pack(deck_profile=profile)
@@ -326,6 +405,107 @@ def test_the_53_slice_is_exactly_the_basic_cards_of_the_108_deck():
 
 
 # ---------------------------------------------------------------------------
+# 军争 160 张（M5-01a：108 + 52；默认档不变）
+# ---------------------------------------------------------------------------
+
+
+def test_the_160_deck_matches_the_snapshot():
+    names = {card_type for card_type, _, _ in EXPECTED_MILITARY_52}
+    assert len(names) == 14, "军争 52 张共 14 个牌名（11 新 + 闪 / 桃 / 无懈副本）"
+    assert names - set(MILITARY_CARD_TYPES) == {"dodge", "peach", "nullify"}
+    assert EXPECTED_STANDARD_108 + EXPECTED_MILITARY_52 == _actual(STANDARD_EX_160)
+
+
+def test_the_160_profile_stacks_the_military_deck_on_the_standard_108():
+    """160 = 108 档原样 + 52 张军争；108 的实体牌顺序一张不改（默认档的字节基线由此保住）。"""
+    military = load_content_pack(deck_profile=STANDARD_EX_160)
+    standard = load_content_pack(deck_profile=STANDARD_108)
+    actual = tuple((card.type, card.suit.value, card.rank) for card in military.deck.cards)
+
+    assert military.deck_profile == STANDARD_EX_160
+    assert military.deck.slot_limit == 4, "军争与标准叠在四个槽位上各有 4 张"
+    assert actual[:108] == tuple(
+        (card.type, card.suit.value, card.rank) for card in standard.deck.cards
+    )
+    assert actual[108:] == EXPECTED_MILITARY_52
+
+
+def test_the_160_deck_counts_by_type_suit_and_category():
+    pack = load_content_pack(deck_profile=STANDARD_EX_160)
+    cards = tuple((card.type, card.suit.value, card.rank) for card in pack.deck.cards)
+    by_type = Counter(card_type for card_type, _, _ in cards)
+    by_suit = Counter(suit for _, suit, _ in cards)
+    categories = {card_type.id: card_type.category.value for card_type in pack.card_types}
+    by_category = Counter(categories[card_type] for card_type, _, _ in cards)
+
+    assert len(cards) == 160
+    assert by_suit == {"heart": 40, "diamond": 40, "spade": 40, "club": 40}
+    assert by_category == {"basic": 85, "trick": 50, "equipment": 25}
+
+    # 标准 32 个牌名的张数不变，军争副本按 §4.1 统计叠加。
+    assert by_type["slash"] == 30 and by_type["dismantlement"] == 6 and by_type["lightning"] == 2
+    assert by_type["dodge"] == 15 + 9
+    assert by_type["peach"] == 8 + 4
+    assert by_type["nullify"] == 4 + 3
+    assert {type_id: by_type[type_id] for type_id in MILITARY_CARD_TYPES} == {
+        "fire_slash": 5,
+        "thunder_slash": 9,
+        "wine": 5,
+        "supply_shortage": 2,
+        "fire_attack": 3,
+        "iron_chain": 6,
+        "silver_lion": 1,
+        "vine_armor": 2,
+        "ancient_scimitar": 1,
+        "vermilion_feather_fan": 1,
+        "hualiu": 1,
+    }
+    assert len(by_type) == 43, "32 个标准牌名 + 11 个军争牌名"
+
+
+def test_the_160_deck_holds_40_cards_per_suit_and_four_four_card_slots():
+    cards = _actual(STANDARD_EX_160)
+    suits = Counter(suit for _, suit, _ in cards)
+    slots = Counter((suit, rank) for _, suit, rank in cards)
+
+    assert suits == {"heart": 40, "diamond": 40, "spade": 40, "club": 40}
+    assert {slot for slot, count in slots.items() if count == 4} == {
+        ("spade", 2),
+        ("club", 2),
+        ("heart", 12),
+        ("diamond", 12),
+    }
+    assert max(slots.values()) == 4
+
+
+def test_the_160_deck_keeps_the_rank_distribution_of_the_two_slices():
+    """108 档 2 / Q 各 10 张、其余各 8；52 张每花色每点数一张 ⇒ 160 档为 14 / 12。"""
+    ranks = Counter(rank for _, _, rank in _actual(STANDARD_EX_160))
+
+    assert ranks[2] == 14 and ranks[12] == 14
+    assert all(ranks[rank] == 12 for rank in range(1, 14) if rank not in (2, 12))
+
+
+def test_the_military_card_types_carry_the_rule_book_faces():
+    pack = load_content_pack(deck_profile=STANDARD_EX_160)
+    by_id = {card_type.id: card_type for card_type in pack.card_types}
+    actual = {
+        type_id: (
+            by_id[type_id].name,
+            by_id[type_id].category.value,
+            by_id[type_id].subcategory,
+            by_id[type_id].delayed,
+            by_id[type_id].attack_range,
+        )
+        for type_id in MILITARY_CARD_TYPES
+    }
+
+    assert actual == MILITARY_CARD_TYPES
+    assert len(pack.card_types) == 43
+    assert len({card_type.name for card_type in pack.card_types}) == 43, "牌名全局唯一"
+
+
+# ---------------------------------------------------------------------------
 # 牌面事实：攻击范围、延时标记（票 09 §6）
 # ---------------------------------------------------------------------------
 
@@ -352,6 +532,8 @@ def test_weapons_declare_their_attack_range_from_the_first_hand_table():
         "halberd": 4,
         "qilin_bow": 5,
         "ice_sword": 2,
+        "ancient_scimitar": 2,
+        "vermilion_feather_fan": 4,
     }
 
 
@@ -365,15 +547,21 @@ def test_only_weapons_carry_an_attack_range():
     assert offenders == {}
 
 
-def test_only_the_two_delayed_tricks_carry_the_delayed_marker():
+def test_only_the_three_delayed_tricks_carry_the_delayed_marker():
     delayed = {card_type.id for card_type in _card_types_by_id().values() if card_type.delayed}
 
-    assert delayed == {"indulgence", "lightning"}
+    assert delayed == {"indulgence", "lightning", "supply_shortage"}
 
 
 def test_the_basic_53_card_types_are_untouched_by_the_new_face_facts():
+    """53 张档里的基本牌三种仍是老样子；军争基本牌是同一内容包的**另外**三种。"""
     pack = load_content_pack(deck_profile=BASIC_53)
-    basics = {card_type.id: card_type for card_type in pack.card_types if card_type.category.value == "basic"}
+    deck_ids = {card.type for card in pack.deck.cards}
+    basics = {
+        card_type.id: card_type
+        for card_type in pack.card_types
+        if card_type.id in deck_ids and card_type.category.value == "basic"
+    }
 
     assert set(basics) == {"slash", "dodge", "peach"}
     for card_type in basics.values():

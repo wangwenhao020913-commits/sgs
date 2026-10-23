@@ -8,12 +8,17 @@
    所以逐条过 :func:`visible_record`：
    - ``query`` 记录**不带** ``view`` 与 ``legal_actions``：非人类座位的询问带的是**别人的视角**，
      而人类座位的候选在"当前挂起"那一条里单独给（前端只需要能点的那一份）；
-   - ``action`` / ``timing`` / ``delta`` / ``frame`` / ``game_end`` 是公开事实，原样下发。
+   - ``card_move`` 的牌面按**区域可见性**裁剪（M5-09c / spec §6 A3）：公开区照常可见，
+     隐藏区（牌堆 / 手牌）只给数量（``cards`` 抹空 + ``card_count``）。判据与叙事同源，
+     见 :mod:`sgs_web.visibility`；
+   - ``action`` / ``timing`` / ``delta``（除 ``card_move`` 的牌面）/ ``frame`` / ``game_end``
+     是公开事实，原样下发。
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from sgs.data import hero_skill_id, load_content_pack, load_heroes
@@ -29,7 +34,7 @@ from sgs.skills import (
     lord_skill_allowed,
     resolve_instances,
 )
-from sgs.state import FrameKind, Query, WindowCause, Zone, project
+from sgs.state import CardRef, FrameKind, Query, Reforge, WindowCause, Zone, project
 from sgs.timing import Timing
 
 from .descriptions import skill_description
@@ -41,6 +46,7 @@ from .display import (
     suit_labels,
 )
 from .session import Session
+from .visibility import cards_visible
 
 __all__ = [
     "HARVEST_REQUIREMENT",
@@ -48,10 +54,12 @@ __all__ = [
     "candidate_index",
     "harvest_state",
     "option_seats",
+    "option_source",
     "pending_payload",
     "query_context",
     "seat_skill_display",
     "serialize_record",
+    "skill_events_after",
     "virtual_index",
     "visible_record",
     "visible_snapshot",
@@ -372,14 +380,20 @@ def _query_summary(query: Query) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _seat_label(state: Any, seat: int) -> str:
-    """座位的中文人话："0号位郭嘉"（没发武将时退化成"0号位"）。"""
+def _seat_name(state: Any, seat: int) -> str | None:
+    """座位上的武将中文名（没发武将 / 未知武将 ⇒ ``None``，不编名字）。"""
     hero_id = state.player(seat).hero
     if hero_id:
         hero = load_heroes(state.pack_id).by_id(hero_id)
         if hero is not None and hero.name:
-            return f"{seat}号位{hero.name}"
-    return f"{seat}号位"
+            return hero.name
+    return None
+
+
+def _seat_label(state: Any, seat: int) -> str:
+    """座位的中文人话："0号位郭嘉"（没发武将时退化成"0号位"）。"""
+    name = _seat_name(state, seat)
+    return f"{seat}号位{name}" if name else f"{seat}号位"
 
 
 def _card_type_name(state: Any, type_id: str) -> str | None:
@@ -486,6 +500,34 @@ def option_seats(query: Query) -> dict[str, int]:
             except ValueError:
                 continue
     return out
+
+
+def option_source(engine: Any, query: Query | None) -> dict[str, Any] | None:
+    """``SELECT_OPTION`` 的"这项令谁做"的**展示事实**（M5-bugfix：雌雄双股剑）。
+
+    一次性选项步（当前唯一生产者 = ``equip.double_sword``）的应答者是**目标**，而
+    「令……摸一张牌」里的"……"是**这次使用的来源**（雌雄的持有者）。前端不能按"谁的回合 /
+    谁用了【杀】"去推（那是第二份规则），故由投影从结算栈顶帧的 ``source`` 派生：
+    ``{"seat": N, "name": <武将名或 None>}``。
+
+    只给**装备技能的** ``SELECT_OPTION``（``skill_id`` 以 ``equip.`` 开头）——其余
+    ``SELECT_OPTION``（花色 / 遗计的交给谁）的"来源"没有这项展示语义。取不到引擎
+    （409 里的裸 ``Query``）或栈顶帧没有 ``source`` ⇒ ``None``（界面退回不带来源的旧文案）。
+
+    纯派生、只读公开事实：不进记录流，不参与合法性判定。
+    """
+    if query is None or str(getattr(query, "kind", "")) != "SELECT_OPTION":
+        return None
+    skill_id = getattr(query, "skill_id", None)
+    if not isinstance(skill_id, str) or not skill_id.startswith("equip."):
+        return None
+    frames = getattr(getattr(engine, "stack", None), "frames", ()) or ()
+    data: dict[str, Any] = frames[-1].data if frames else {}
+    source = data.get("source")
+    if source is None:
+        return None
+    seat = int(source)
+    return {"seat": seat, "name": _seat_name(engine.state, seat)}
 
 
 def _event_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
@@ -689,6 +731,11 @@ def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) ->
             return "选择目标区域里的一张牌"
         if card_type == "harvest":
             return HARVEST_REQUIREMENT
+        if card_type == "fire_attack":
+            # M5-08a：火攻的两步各有自己的问法（亮牌是公开动作；弃牌可选）。
+            if data.get("revealed") is not None:
+                return "弃一张与亮出的牌同花色的手牌，造成 1 点火焰伤害，或放弃"
+            return "从自己的手牌里亮出一张（公开）"
         return "从选择面里选择要交出的牌"
     if kind == "RESPOND":
         cause = getattr(query, "cause", None)
@@ -837,6 +884,49 @@ def _step_requirement(definition: Any, query: Query) -> str | None:
     return None
 
 
+def _fire_attack_step(engine: Any, query: Query) -> dict[str, Any] | None:
+    """【火攻】的两步选牌（M5-08a 的界面读取方，纯展示派生）。
+
+    引擎侧（M5-06）把亮牌与同花色弃牌都表达成普通的 ``SELECT_CARDS``；界面要把它们
+    分别走**亮牌模板**与**牌桌点手牌**，故这里只读结算栈顶帧 + 询问本身，派生出：
+
+    - ``{"step": "reveal"}``：目标选**自己**的 1 张手牌亮出（``reveal_hand=True``）；
+    - ``{"step": "discard", "revealed": CardRef, "target": seat}``：使用者看到亮出的那一张，
+      可弃一张同花色手牌（或放弃）。
+
+    不是火攻的选牌步 / 帧已不在 / 应答者不是这一步该问的人 ⇒ ``None``（fail-closed）。
+    只读公开事实（帧载荷 + 询问），不裁决规则、不改记录流。
+    """
+    if str(getattr(query, "kind", "")) != "SELECT_CARDS":
+        return None
+    frames = getattr(getattr(engine, "stack", None), "frames", ()) or ()
+    if not frames:
+        return None
+    data = frames[-1].data
+    if getattr(data.get("card"), "type", None) != "fire_attack":
+        return None
+    spec = getattr(query, "spec", None)
+    zones = tuple(getattr(spec, "zones", ()) or ())
+    if zones != (Zone.HAND,):
+        return None
+    targets = tuple(data.get("targets", ()) or ())
+    cursor = int(data.get("cursor", 0) or 0)
+    if not 0 <= cursor < len(targets):
+        return None
+    target = int(targets[cursor])
+    if data.get("revealed") is None:
+        if int(query.actor) != target:
+            return None
+        return {"step": "reveal", "target": target}
+    if int(query.actor) != int(data.get("source", -1)):
+        return None
+    return {
+        "step": "discard",
+        "target": target,
+        "revealed": engine.state.card(int(data["revealed"])),
+    }
+
+
 def query_context(engine: Any, query: Query | None) -> dict[str, Any] | None:
     """这次询问的两行人话：**正在发生什么**（``label``）+ **需要做什么**（``requirement``）。
 
@@ -969,6 +1059,11 @@ def candidate_index(query: Query) -> dict[str, dict[str, Any]]:
     ``min_targets`` / ``max_targets`` 是**这张牌这次使用**要选几个目标，**由候选组合派生**
     （【杀】额定 1；【方天画戟】等 ``TARGET_COUNT`` 修饰器成立时可放宽到 ``1..max``；
     【南蛮入侵】类等于池大小），界面据此说"还要选 N 个"。
+
+    **重铸不参与目标聚合**（M5-08b / D6）：``Reforge`` 是独立 Action、不是 ``UseCard`` 的
+    变体，它没有目标。索引仍为它保留**这张牌的条目**（手牌因此可点、重铸入口读
+    ``legal_actions`` 是否出现该 Action），但**不贡献** ``combos`` / ``pool``——否则 0 目标
+    会被当成一条合法的「使用」组合（min_targets 变 0、界面显示"目标已选好"）。
     """
     grouped: dict[str, dict[str, Any]] = {}
     for action in query.legal_actions:
@@ -984,6 +1079,9 @@ def candidate_index(query: Query) -> dict[str, dict[str, Any]]:
                 "_sizes": set(),
             }
             grouped[str(card.card_id)] = entry
+        # 重铸：只保留"这张牌可点"的条目，不把它的空目标并进使用组合。
+        if isinstance(action, Reforge):
+            continue
         combo = tuple(getattr(action, "targets", ()))
         if combo not in entry["combos"]:
             entry["combos"].append(combo)
@@ -1412,6 +1510,26 @@ def pending_payload(
         else None
     )
     payload["option_seats"] = option_seats(query)
+    # M5-bugfix（雌雄双股剑）：一次性选项步的**来源**展示事实（`{"seat", "name"}`）。键恒在
+    # （读取方契约）；只对装备技能的一次性选项有值，其余为 None（界面不画来源文案）。
+    # 与 `context` 同姿态：派生数据不进记录流 / 金录像。
+    payload["option_source"] = (
+        option_source(session.engine, query) if isinstance(session, Session) else None
+    )
+    # M5-08a（D10 / §5.1.4）：【火攻】的两步选牌。读取方 = 亮牌模板 / 牌桌点手牌：
+    #   - 亮牌步：``dialog = "reveal"`` + ``revealed``（**只发给目标本人**；他点一张即亮出）；
+    #   - 弃牌步：``reveal`` = 已经公开的那一张（使用者据此在中央舞台看到亮牌）。
+    # 两步的牌面都只在本座位载荷里；别人的载荷由既有的 ``_mask_watched_faces`` 抹掉。
+    fire_attack = _fire_attack_step(session.engine, query) if isinstance(session, Session) else None
+    payload["reveal"] = None
+    if fire_attack is not None and not foreign:
+        if fire_attack["step"] == "reveal":
+            payload["revealed"] = [
+                slot.card.model_dump(mode="json")
+                for slot in query.slots
+                if getattr(slot, "card", None) is not None
+            ]
+
     # U2-08（D10）：花色是**会被复用的枚举模板**，中文名 / 符号 / 红黑由服务端派生一次；
     # 选项闭集里只要不全是花色就是 ``None``（界面据此决定画选择型弹窗还是小选项组）。
     # 与 ``option_seats`` 分开两个键：一个回答"这是谁"，一个回答"这项怎么显示"。
@@ -1458,6 +1576,17 @@ def pending_payload(
         lookup = _card_lookup(session.engine.state)
     else:
         lookup = card_lookup_from_query(query)
+    # 弃牌步的公开亮牌：只发给使用者本人（他是这一步的应答者）；牌来自帧载荷，不进记录流。
+    if (
+        fire_attack is not None
+        and fire_attack["step"] == "discard"
+        and not foreign
+        and lookup is not None
+    ):
+        payload["reveal"] = {
+            "seat": int(fire_attack["target"]),
+            "card": card_payload(fire_attack["revealed"], lookup=lookup),
+        }
     # U1-02：内嵌视角里的座位也要武将名称 / 势力；裸 Query（409）拿不到包，传 None。
     heroes = load_heroes(session.pack.pack_id) if isinstance(session, Session) else None
     # U1-07：转化清单的产物索引（全部产物牌面）。清单本身只说"选哪些来源牌"，
@@ -1477,12 +1606,38 @@ def pending_payload(
     return payload
 
 
-def visible_record(record: object) -> dict[str, Any] | None:
-    """把一条记录转成可下发的 JSON；``None`` = 这一条不下发。"""
+def visible_record(record: object, *, viewer: int | None = None) -> dict[str, Any] | None:
+    """把一条记录转成**查看者可下发**的 JSON；``None`` = 这一条不下发。
+
+    ``viewer`` = 人类座位（``serve.GameRegistry.view`` 传 ``session.human_seat``）；
+    ``None`` = 没有查看者 / 全知——**不裁剪**（内部调用与测试需要原始记录）。
+
+    ``card_move`` 的牌面按 spec §6 A3 的**区域可见性**脱敏（M5-09c）：公开区
+    （弃牌堆 / 处理区 / 装备区 / 判定区）照常下发牌面；隐藏区（牌堆 / 手牌）之间的移动，
+    除查看者自己的手牌 / 自己经手的移动外，``cards`` 抹成空列表并补 ``card_count``，
+    让界面仍能说"移动了几张"。判据与事件流（``sgs_web.narrative``）共用
+    :func:`sgs_web.visibility.cards_visible`——一处规则，两个下发口。
+
+    **只过滤这一份下发**：引擎记录流保持全信息（回放 / 裁判需要），本函数不写任何状态、
+    不改 schema、不碰金录像。``card_reveal``（M5-06 火攻亮牌）是公开事实，额外补展示字段。
+    """
     kind = getattr(record, "kind", None)
     if kind == "query":
         return {"kind": "query", "seq": record.seq, "query": _query_summary(record.query)}
     raw = json.loads(record_json(record))
+    if kind == "delta":
+        delta_type = raw.get("delta_type")
+        if delta_type == "card_reveal":
+            # M5-08a：亮牌是公开事实，中央舞台按**同一份卡面契约**画它（牌名 / 属性 / 描述）。
+            # 只补展示字段，不移动、不写任何「已知」状态。
+            card = raw.get("card")
+            if isinstance(card, dict):
+                raw["card"] = card_payload(CardRef.model_validate(card))
+        elif delta_type == "card_move" and raw.get("cards"):
+            if not cards_visible(raw, viewer):
+                # M5-09c：隐藏区的牌面不下发，只给张数——界面 / 事件流仍能说"移动了几张"。
+                raw["card_count"] = len(raw["cards"])
+                raw["cards"] = []
     if kind == "action":
         # 公开事实：谁应答了、被接受与否；**具体选了什么**只对人类座位自己的应答展开。
         action = raw.get("action")
@@ -1491,6 +1646,69 @@ def visible_record(record: object) -> dict[str, Any] | None:
     return raw
 
 
-def serialize_record(record: object) -> dict[str, Any] | None:
+def serialize_record(
+    record: object, *, viewer: int | None = None
+) -> dict[str, Any] | None:
     """``visible_record`` 的别名，名字更贴近"序列化"的调用点。"""
-    return visible_record(record)
+    return visible_record(record, viewer=viewer)
+
+
+def skill_events_after(
+    records: Iterable[object], *, after: int, state: Any
+) -> list[dict[str, Any]]:
+    """从**未裁剪**的记录流派生技能发动事件（spec D8.2）：``seq > after`` 的那几条。
+
+    这条通道只补「记录流里已有、但 ``records`` 的 action 裁剪把细节藏掉了」的那部分：
+    已接受（``accepted === true``）且 ``action.kind === "ActivateSkill"`` 的动作。
+    其余动作（含使用牌 / 打出牌，以及被拒的应答）一条都不产。
+
+    - ``seat`` = **应答那次询问的 actor**。``ActionRecord`` 自己不带座位，但它的
+      ``answers_seq`` 指向产生它的那次 ``query`` 记录（记录流已下发的公开事实）；
+      不从手牌 / 目标等隐藏信息反推。
+    - ``targets`` = ``action.choices`` 里以 ``seat:`` 开头的选项（``flow.py`` 的规范编码），
+      按出现顺序；没有指定目标的发动（制衡 / 装备技等）是空列表。
+    - ``name`` = 接入层展示表的中文名（与 ``build_skills`` / 叙事同源）；查不到时退回
+      ``skill_id``，不让前端自建映射。
+
+    ``records`` 可以是引擎记录模型，也可以是已序列化的 JSON（录像 / 合成夹具），两种
+    形状走同一份派生。**不使用** ``picks``（那是成本牌），技能与目标都是公开事实，
+    不需要按查看者过滤。
+    """
+    query_actors: dict[int, int] = {}
+    events: list[dict[str, Any]] = []
+    for raw in records:
+        record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
+        kind = record.get("kind")
+        seq = record.get("seq")
+        if kind == "query":
+            query = record.get("query") or {}
+            actor = query.get("actor")
+            if isinstance(seq, int) and isinstance(actor, int):
+                query_actors[seq] = actor
+            continue
+        if kind != "action" or not record.get("accepted"):
+            continue
+        action = record.get("action")
+        if not isinstance(action, Mapping) or action.get("kind") != "ActivateSkill":
+            continue
+        if not isinstance(seq, int) or seq <= after:
+            continue
+        skill_id = str(action.get("skill_id") or "")
+        targets: list[int] = []
+        for choice in action.get("choices") or ():
+            if not isinstance(choice, str) or not choice.startswith(SEAT_PREFIX):
+                continue
+            try:
+                targets.append(int(choice[len(SEAT_PREFIX) :]))
+            except ValueError:
+                continue
+        events.append(
+            {
+                "seq": seq,
+                "seat": query_actors.get(action.get("answers_seq")),
+                "skill_id": skill_id,
+                "name": _skill_display_name(state, skill_id) or skill_id,
+                "targets": targets,
+            }
+        )
+    return events

@@ -32,6 +32,8 @@ from sgs.engine import Engine, RandomSource
 from support import ACCEPTANCE_SEEDS
 
 PACK = load_content_pack(deck_profile="standard_108")
+PACK_EX_160 = load_content_pack(deck_profile="standard_ex_160")
+"""M5-01a：军争 160 张档只在**显式选档**时使用；下面的 108 基准组仍读默认口径。"""
 
 SEEDS: tuple[int, ...] = ACCEPTANCE_SEEDS
 """验收写死的 32 个种子（``python -m sgs --seed S --players 5 --hero-pool "" --ai heuristic``）。
@@ -76,12 +78,12 @@ class _IllegalAnswerScan:
         return action
 
 
-def _new_engine(seed: int) -> Engine:
+def _new_engine(seed: int, *, pack=PACK) -> Engine:
     """与命令行同源的建局：5 人、标准版全表、**武将开启**（``hero_pool=()`` = 启用池）。"""
     return Engine.new_game(
         seed=seed,
         rule_config=RuleConfig(player_count=PLAYERS),
-        pack=PACK,
+        pack=pack,
         hero_pool=(),
     )
 
@@ -147,5 +149,46 @@ def test_the_all_ai_heuristic_group_finishes_consistently_and_replays(seed: int)
     replay = _new_engine(replayed_seed)
     player = TapePlayer(tape)
     replay.run([player] * PLAYERS)
+
+    assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"
+
+
+MILITARY_SEEDS: tuple[int, ...] = ACCEPTANCE_SEEDS[:8]
+"""M5-07 的 160 档全 AI 基准组：**8 个固定种子**（票面「至少 8 个」的最低线）。
+
+取验收批 :data:`~support.ACCEPTANCE_SEEDS` 的前 8 个（136–143）：与 108 基准组**同批**，
+故军争牌加进来后 108 / 160 两档读的是同一组局面；32 种子是选做（票面允许时间够再加，
+本票按门禁预算只跑 8 个）。每局判定与 108 基准组**同四条**（跑完 / 身份胜负一致 /
+零非法应答 / 可回放），见下面的测试。
+"""
+
+
+@pytest.mark.parametrize("seed", MILITARY_SEEDS)
+def test_the_standard_ex_160_group_finishes_cleanly_and_replays(seed: int) -> None:
+    """M5-07 / spec §6 A2：160 张档（108 + 军争 52）的全 AI 局，四条第据逐种子复核。
+
+    判据与上面的 108 基准组同四条（跑完 / 终局与身份胜负一致 / 零非法应答 / 可回放）。
+    M5-02–06 的军争规则已全部落地，故这也是"AI 会答新询问形状"的整局实测：重铸、
+    铁索 1–2 目标、【酒】（出牌 / 濒死）、火攻的亮牌与同花色弃牌、兵粮的判定与跳过摸牌
+    都在牌堆里，任何一条答不出候选都会被第 3 条判红。
+    """
+    engine = _new_engine(seed, pack=PACK_EX_160)
+    scans = _participants(seed)
+
+    engine.run(scans)
+
+    assert engine.records[0].deck_profile == "standard_ex_160", "这局必须真的用了 160 档"
+    assert engine.finished, "必达终局"
+    tail = engine.records[-1]
+    assert tail.kind == "game_end", "最后一条记录必须是 game_end"
+    assert tail.result in ("winner", "draw"), f"终局结果非法：{tail.result!r}"
+    _assert_endgame_identity_consistency(engine, seed)
+    assert all(scan.illegal == 0 for scan in scans), "出现了候选集合之外的应答"
+    assert sum(scan.answers for scan in scans) > 0, "整局没有任何应答（断言不空转）"
+
+    replayed_seed, tape = tape_from_journal(engine.records)
+    assert replayed_seed == seed and tape, "磁带必须带上种子与行动序列"
+    replay = _new_engine(replayed_seed, pack=PACK_EX_160)
+    replay.run([TapePlayer(tape)] * PLAYERS)
 
     assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"

@@ -14,9 +14,10 @@ C 族的形态差别只有一处：它**不产候选**，而是给 :data:`~sgs.e
 陆逊【谦逊】   锁定    牌名 ∈ {【顺手牵羊】,【乐不思蜀】}（与手牌无关）
 ===========  ======  ==========================================
 
-**谓词内联在回调里**（与 H 族同一姿态）：牌名读 ``ctx.card.type``，手牌读
-``state.player(ctx.owner).hand``。回调只在"自己确实在池里"时才动手，故它对别人的目标池
-天然是惰性的。
+**谓词内联在回调里**（与 H 族同一姿态）：牌名闭集按
+:func:`~sgs.effects.satisfies_required` 逐项匹配（【杀】族按共享计数键，M5-05b-fix），
+手牌读 ``state.player(ctx.owner).hand``。回调只在"自己确实在池里"时才动手，故它对别人的
+目标池天然是惰性的。
 """
 
 from __future__ import annotations
@@ -25,7 +26,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from sgs.data import SkillType
-from sgs.effects import CarrierKind, Modifier, ModifierContext, ModifierPoint
+from sgs.effects import (
+    CarrierKind,
+    Modifier,
+    ModifierContext,
+    ModifierPoint,
+    satisfies_required,
+)
 from sgs.state import GameState
 
 from .catalog import HeroSkillDecl, SkillDef
@@ -41,8 +48,16 @@ class TargetPoolSkill(HeroSkillDecl):
     requires_empty_hand: bool = False
 
     def remove_self(self, state: GameState, ctx: ModifierContext, current: Any) -> Any:
-        """``TARGET_POOL`` 回调：条件满足时把**自己**从池里去掉，否则原样返回。"""
-        if ctx.card is None or ctx.card.type not in self.card_types:
+        """``TARGET_POOL`` 回调：条件满足时把**自己**从池里去掉，否则原样返回。
+
+        ``card_types`` 是**声明的牌名闭集**，按 :func:`~sgs.effects.satisfies_required`
+        逐项匹配（【杀】族按共享计数键；【决斗】等其它牌名仍逐字相等）。
+        """
+        if ctx.card is None:
+            return current
+        if not any(
+            satisfies_required(ctx.card, type_id) for type_id in self.card_types
+        ):
             return current
         if ctx.owner not in current:
             return current

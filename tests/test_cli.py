@@ -112,7 +112,7 @@ BAD_PACK_PROBE = f"""
 import sgs.cli as cli
 from sgs.data import validate_content_pack
 
-def load_bad_pack(pack_id="standard"):
+def load_bad_pack(pack_id="standard", *, deck_profile=None):
     validate_content_pack({BAD_RAW_PACK!r}, file="files/standard.json")
 
 cli.load_content_pack = load_bad_pack
@@ -125,7 +125,7 @@ def test_bad_content_pack_reports_to_stderr_and_exits_1(monkeypatch, capsys):
     import sgs.cli as cli
     from sgs.data import validate_content_pack
 
-    def load_bad_pack(pack_id="standard"):
+    def load_bad_pack(pack_id="standard", *, deck_profile=None):
         validate_content_pack(BAD_RAW_PACK, file="files/standard.json")
 
     monkeypatch.setattr(cli, "load_content_pack", load_bad_pack)
@@ -427,3 +427,36 @@ def test_the_heuristic_tier_runs_with_heroes(capsys):
 def test_an_unknown_ai_tier_is_rejected():
     with pytest.raises(SystemExit):
         main(["--ai", "oracle"])
+
+
+# ---------------------------------------------------------------------------
+# 牌堆档位：``--deck-profile``（M5-01b）
+# ---------------------------------------------------------------------------
+
+
+def test_the_deck_profile_flag_builds_a_160_card_game(capsys):
+    """票 01b：命令行显式选 160 档，header 记新档位且整局跑到终局。"""
+    assert main(["--seed", "7", "--players", "2", "--deck-profile", "standard_ex_160"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "牌堆档位=standard_ex_160" in lines[1]
+    assert "终局" in lines[-1], "160 张档也要真的跑到终局"
+
+
+def test_omitting_the_deck_profile_keeps_the_standard_108_game(capsys):
+    """不传档位 = 内容包默认档（standard_108）：默认对局一个字节都不变。"""
+    assert main(["--seed", "7", "--players", "2"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "牌堆档位=standard_108" in lines[1]
+    assert "终局" in lines[-1]
+
+
+def test_an_unknown_deck_profile_reports_the_loader_error_and_exits_1(capsys):
+    """非法档位照加载器的 ``decks.unknown_profile`` 报错，退出码非零。"""
+    assert main(["--seed", "7", "--deck-profile", "standard_999"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "decks.unknown_profile" in captured.err
+    assert "standard_999" in captured.err

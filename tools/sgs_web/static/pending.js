@@ -88,7 +88,7 @@ function renderPending(view) {
   // 描述文本 = 效果区（处理区）当前内容的说明，**不**再写服务端的"本窗口：谁对谁使用…"。
   // 那条只在询问到达时更新，回放期间会残留；效果区那行才与牌桌同步（用户裁定）。
   const contextNode = $("t-context");
-  if (contextNode) contextNode.textContent = describeEffect(state.effectCards);
+  if (contextNode) contextNode.textContent = describeStage();
   // 这条窗口里**被提供**的技能（主动技 / 提供者 / 转化技）的"需要做什么"文案。
   const hintsNode = $("t-skill-hints");
   if (hintsNode) {
@@ -137,6 +137,7 @@ function renderPending(view) {
   else if (kind === "preactivation") renderPreativation(pending);
   else if (kind === "preactivation-entry") renderPreativationEntry(pending);
   else if (kind === "seat") renderSeatPick(pending);
+  else if (kind === "own-hand-pick") renderOwnHandPick(pending);
   else if (kind === "slots") {
     // 选择面也要**指到那条候选**：引擎只发一条 `SelectCards` 骨架，具体 `picks` 由
     // `buildAction()` 补上；不指过去它就没有可补的对象 ⇒ `buildAction()` 返回 null ⇒
@@ -226,6 +227,7 @@ function renderKind(pending, actions) {
   // 选择面**永远**要渲染：它的交互在 `slots` 上（点槽位），不在候选条数上。
   // 引擎为 `SELECT_CARDS` 只生成**一条**候选（`SelectCards` + 全部 picks 的组合是前端拼的），
   // 所以"只有一条候选"绝不能理解成"没什么可选的、直接提交"。
+  if (isOwnHandSinglePick(pending)) return "own-hand-pick";
   if (pending.kind === "SELECT_CARDS") return "slots";
   // 弃牌阶段：不铺候选按钮，点手牌收进待弃置集合（`buildAction` 按 picks 找候选）。
   if (pending.kind === "DISCARD") return "discard";
@@ -397,6 +399,8 @@ function renderPicker(pending) {
   if (hint) hint.textContent = pickerTargetHint(pending);
   $("btn-cancel").disabled = state.focusCardId === null;
   renderPickerAlternatives(pending);
+  // 焦点牌若有独立的重铸候选，控件区并列给一个「重铸」入口（M5-08b / D6）。
+  renderReforgeEntry(pending);
 }
 
 /** 弃牌阶段：不铺候选按钮（引擎按 C(n,k) 枚举组合，会铺出几十个「弃牌（N张）」），
@@ -542,6 +546,13 @@ function refreshSubmit(pending) {
     } else {
       $("t-choice").textContent = "可以提交。";
     }
+    return;
+  }
+  // 只从自己手里选一张（M5-08a）：点手牌即提交；唯一出口是内容点击或右端「放弃」。
+  if (isOwnHandSinglePick(pending)) {
+    $("btn-submit").disabled = true;
+    $("t-choice").textContent = state.lastRejectReason
+      || "点一张亮起的手牌即提交；也可以点右端「放弃」。";
     return;
   }
   if (dialogDisablesPass(dialogKind)) {

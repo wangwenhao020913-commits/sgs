@@ -59,6 +59,36 @@ function syncPointjiang() {
   return on;
 }
 
+/** 牌堆档位列表：把服务端下发的档位铺成选项（`id` 是值，标签 / 说明也来自服务端）。 */
+function fillDeckOptions() {
+  const select = $("in-deck-profile");
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = "";
+  for (const deck of state.deckCatalog) {
+    const option = document.createElement("option");
+    option.value = deck.id;
+    option.textContent = deck.name;
+    if (deck.description) option.title = deck.description;
+    select.appendChild(option);
+  }
+  const known = state.deckCatalog.some((deck) => deck.id === previous);
+  const fallback = state.deckCatalog.find((deck) => deck.default) || state.deckCatalog[0];
+  select.value = known ? previous : (fallback && fallback.id) || "";
+}
+
+/** 拉一次牌堆档位列表；失败只提示、不挡住开局（选项空 ⇒ 建局不带档位 = 默认档）。 */
+async function loadDeckCatalog() {
+  try {
+    const body = await api("/api/decks");
+    state.deckCatalog = (body && body.decks) || [];
+  } catch (error) {
+    state.deckCatalog = [];
+    $("lobby-hint").textContent = `牌堆档位拉取失败：${error.message}`;
+  }
+  fillDeckOptions();
+}
+
 async function startGame(event) {
   event.preventDefault();
   const seedRaw = $("in-seed").value.trim();
@@ -74,6 +104,9 @@ async function startGame(event) {
       timeout_seconds: timeout > 0 ? timeout : null,
       seed: seedRaw === "" ? null : Number(seedRaw),
       my_hero: myHero,
+      // 牌堆档位（M5-01b）：选项由 `GET /api/decks` 铺出来；没铺到（拉取失败）就不带，
+      // 服务端按内容包默认档（standard_108）建局——与改动前那条路一字不差。
+      deck_profile: $("in-deck-profile").value || null,
     });
     state.sessionId = body.session_id;
     state.cursor = -1;

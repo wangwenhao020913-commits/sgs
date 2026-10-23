@@ -329,6 +329,148 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
     assert all(entry["name"] for entry in catalog), "列表要能给人看（名称非空）"
 
 
+# ---------------------------------------------------------------------------
+# 3b. 牌堆档位：建局读 body / 未知档 400 / 开局页文案（M5-01b）
+# ---------------------------------------------------------------------------
+
+
+def _post_with_the_real_handler(registry, path: str, body: dict) -> tuple[int, dict]:
+    """把一条 POST 交给**真的** ``serve._Handler``（进程内；不开端口、不起线程）。
+
+    未知档位的 400 是 **HTTP 层**的判据，只能从 handler 的响应里读。假 socket 只补
+    stdlib handler 需要的两个动作（``makefile`` / ``sendall``）：请求 / 响应仍按 HTTP
+    报文走，解析、路由、状态码与 JSON 都是产品代码给出的。
+    """
+
+    import io as _io
+
+    from sgs_web.serve import _Handler
+
+    class _Buffer(_io.BytesIO):
+        def close(self):  # handler.finish() 会关流；响应还要读，故忽略关闭
+            pass
+
+    class _Socket:
+        def __init__(self, raw: bytes) -> None:
+            self._reader = _Buffer(raw)
+            self._writer = _Buffer()
+
+        def makefile(self, mode, *args, **kwargs):  # noqa: ANN002, ANN003 - 基类签名
+            return self._reader if "r" in mode else self._writer
+
+        def sendall(self, data: bytes) -> None:
+            self._writer.write(data)
+
+    payload = json.dumps(body).encode("utf-8")
+    raw = (
+        f"POST {path} HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {len(payload)}\r\n\r\n"
+    ).encode("ascii") + payload
+    handler_cls = type("_BoundHandler", (_Handler,), {"registry": registry})
+    socket = _Socket(raw)
+    handler_cls(socket, ("127.0.0.1", 0), None)
+    response = socket._writer.getvalue()
+    head, _, response_body = response.partition(b"\r\n\r\n")
+    status = int(head.split(b" ", 2)[1])
+    return status, json.loads(response_body.decode("utf-8"))
+
+
+def test_the_registry_builds_the_deck_profile_from_the_request_body() -> None:
+    """打 ``GameRegistry.create`` 这一缝：建局请求里的档位真的进了会话与下发体。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {
+            "player_count": 2,
+            "ai": "random",
+            "seed": 20261012,
+            "timeout_seconds": None,
+            "deck_profile": "standard_ex_160",
+        }
+    )
+    payload = registry.view(session, after=-1, logs_after=0)
+
+    assert session.pack.deck_profile == "standard_ex_160"
+    assert len(session.pack.deck.cards) == 160
+    assert payload["deck_profile"] == "standard_ex_160"
+
+
+def test_the_registry_defaults_to_standard_108_without_a_deck_profile() -> None:
+    """不传档位 = 内容包默认档；M5 之前每一局走的就是这条路。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {"player_count": 2, "ai": "random", "seed": 20261012, "timeout_seconds": None}
+    )
+
+    assert session.pack.deck_profile == "standard_108"
+    assert len(session.pack.deck.cards) == 108
+
+
+def test_an_unknown_deck_profile_is_a_400_and_creates_no_session() -> None:
+    """未知档位：HTTP 400，且 registry 里**不留半局会话**。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    status, body = _post_with_the_real_handler(
+        registry,
+        "/api/sessions",
+        {
+            "player_count": 2,
+            "ai": "random",
+            "seed": 20261012,
+            "timeout_seconds": None,
+            "deck_profile": "standard_999",
+        },
+    )
+
+    assert status == 400
+    assert "decks.unknown_profile" in body["error"]
+    assert registry.sessions == {}, "未知档位不得留下半局会话"
+
+
+def test_the_deck_catalog_lists_the_packs_profiles_with_server_labels() -> None:
+    """开局页的档位选项由服务端给：标准 108 / 军争 160，缺省档带标记。
+
+    ``basic_53`` 是 M1 回归网的 53 张测试切片，不给人选——但会话层仍接受它
+    （值域 = 内容包 ``decks`` 的全部键），这里只钉开局页铺哪几项。
+    """
+    from sgs_web.serve import deck_catalog
+
+    pack = load_content_pack()
+    catalog = deck_catalog()
+
+    assert [entry["id"] for entry in catalog] == ["standard_108", "standard_ex_160"]
+    assert "basic_53" not in {entry["id"] for entry in catalog}
+    assert all(entry["id"] in pack.decks for entry in catalog), "文案表里的档位必须真在数据里"
+    assert [entry["id"] for entry in catalog if entry["default"]] == ["standard_108"]
+    assert all(entry["name"] for entry in catalog), "每个档位都要有人看的标签"
+    assert all(entry["description"] for entry in catalog), "每个档位都要有说明文案"
+
+
+def test_the_lobby_form_offers_the_deck_profile_from_server_content() -> None:
+    """开局页「牌堆档位」的静态契约：选择器在位、建局带字段、**前端不抄档位文案表**。
+
+    行为由 ``tests/support/ui_smoke.mjs`` 的 ⓪13–⓪19 驱动**真表单**覆盖（真 HTTP）；
+    这里钉的是接线本身，以及"选项 / 标签只从 `GET /api/decks` 来"这条票面纪律。
+    """
+    static = REPO_ROOT / "tools" / "sgs_web" / "static"
+    html = (static / "index.html").read_text(encoding="utf-8")
+    lobby = (static / "lobby.js").read_text(encoding="utf-8")
+    main = (static / "main.js").read_text(encoding="utf-8")
+
+    assert 'id="in-deck-profile"' in html, "开局页缺「牌堆档位」选择器"
+    assert "deck_profile:" in lobby, "建局请求体没带 deck_profile"
+    assert "loadDeckCatalog" in lobby and "loadDeckCatalog();" in main, "开局时没拉档位列表"
+    scripts = "\n".join(path.read_text(encoding="utf-8") for path in static.glob("*.js"))
+    assert not re.search(r"""["']standard_(?:108|ex_160)["']""", scripts), (
+        "前端抄了第二份档位 id / 文案表；选项与标签只能由服务端 GET /api/decks 下发"
+    )
+    assert "军争 160" not in scripts and "标准 108" not in scripts
+
+
 def test_the_session_log_stays_out_of_the_journal() -> None:
     """侧车日志是接入层事实：写它**不得**动记录流一个字节（地图 D10）。"""
     session = Session(seed=31, ai="random", timeout_seconds=None, **TWO_PLAYERS)
@@ -773,6 +915,45 @@ def test_a_new_question_gets_a_fresh_deadline() -> None:
     assert session.timeouts == 0
 
 
+def test_an_idle_poll_is_silent_until_the_deadline_answers_for_you() -> None:
+    """D12「静默轮询」的**服务端那一半**：没新事实时游标与询问序号都不变。
+
+    前端的 2 秒轮询据此分流：两者都没变 ⇒ 只回倒计时锚点（不重绘、不清掉选到一半的牌），
+    变了才走整条提交路径。这里打 ``GameRegistry`` 这条缝（HTTP GET 的真实路径：
+    ``advance_clock`` → ``view``），钉两件事：
+
+    - 无人操作时再取一次增量：``cursor`` 与 ``pending.seq`` 原样返回、没有新记录；
+    - 轮询本身推进超时判定：到点后同一次 GET 就代答 ⇒ 游标前进、询问序号变化
+      （于是"不操作也会超时"真的发生，而不是要人点刷新）。
+    """
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {"player_count": 4, "ai": "random", "seed": 20261013, "timeout_seconds": 10.0}
+    )
+    first = registry.view(session, after=-1, logs_after=0)
+    assert first["pending"] is not None, "人类座位应当停在第一个询问上"
+
+    # 无事发生的一次轮询（与 HTTP GET 同一条路径：先 advance_clock，再 view）。
+    registry.advance_clock(session)
+    idle = registry.view(session, after=first["cursor"], logs_after=first["log_seq"])
+    assert idle["records"] == [], "没有新记录"
+    assert idle["cursor"] == first["cursor"], "游标没变 ⇒ 前端走静默分支"
+    assert idle["pending"]["seq"] == first["pending"]["seq"], "同一询问序号 ⇒ 前端不清选择"
+    assert idle["pending_since"] is not None, "倒计时锚点仍挂着"
+
+    # 把倒计时拨到过去（等价于「发呆超过时限」）：轮询这一下就会代答。
+    assert session.pending_since is not None
+    session.pending_since -= 11.0
+    registry.advance_clock(session)
+    assert session.timeouts == 1, "到时限的那一次轮询必须代答（不操作也会超时）"
+
+    after = registry.view(session, after=first["cursor"], logs_after=first["log_seq"])
+    assert after["cursor"] > first["cursor"], "代答产生了新记录 ⇒ 前端走整条提交路径"
+    assert after["pending"] is None or after["pending"]["seq"] != first["pending"]["seq"]
+
+
 # ---------------------------------------------------------------------------
 # 5. 可见面：不泄露（票 03；判据 2）
 # ---------------------------------------------------------------------------
@@ -883,7 +1064,8 @@ def test_the_candidate_index_is_derived_from_the_legal_actions() -> None:
                 # 是未装饰的纯索引 ⇒ 两边都是牌面事实，可以直接比。展示字段的补充由
                 # `pending_payload` 单独做（`test_the_pending_payload_carries_display_fields...`）。
 
-                # ② 候选 ⊆ 索引：每条带牌的候选都在索引里，且挂在**自己那张牌**下
+                # ② 候选 ⊆ 索引：每条带牌的候选都在索引里，且挂在**自己那张牌**下。
+                #    重铸是独立 Action（M5-08b / D6），没有 targets，不贡献 combos。
                 for action in payload["legal_actions"]:
                     card = action.get("card")
                     if card is None:
@@ -891,6 +1073,8 @@ def test_the_candidate_index_is_derived_from_the_legal_actions() -> None:
                     entry = index.get(str(card["card_id"]))
                     assert entry is not None, f"{action['kind']} 的牌不在候选索引里"
                     assert entry["card"] == card, "索引里的牌面必须与候选里的是同一张"
+                    if action["kind"] == "Reforge":
+                        continue
                     assert action.get("targets", []) in entry["combos"], (
                         f"{card['name']} 的候选 targets={action.get('targets')} 不在 combos 里"
                     )
@@ -1976,6 +2160,23 @@ def test_the_replay_closes_the_loop_from_the_sidecar_meta(tmp_path: Path) -> Non
     assert dump_journal(replayed) == dump_journal(session.records())
 
 
+def test_a_160_profile_session_replays_as_standard_ex_160(tmp_path: Path) -> None:
+    """M5-01b：160 局存档后从侧车重建仍是 160 档，不回落内容包默认档。"""
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    session = _finished_session(seed=83, pack=pack)
+    save_run(tmp_path, session)
+    name = next(tmp_path.glob("*.jsonl")).name[: -len(".jsonl")]
+
+    meta = load_run(tmp_path, name)["meta"]
+    assert meta["pack_id"] == "standard"
+    assert meta["deck_profile"] == "standard_ex_160"
+
+    replayed = replay_journal(meta)
+    assert replayed[0].deck_profile == "standard_ex_160", "重放不得静默回落到 standard_108"
+    assert len(load_content_pack(meta["pack_id"], deck_profile=meta["deck_profile"]).deck.cards) == 160
+    assert dump_journal(replayed) == dump_journal(session.records())
+
+
 def test_saving_twice_never_overwrites(tmp_path: Path) -> None:
     session = _finished_session(seed=89)
     first = save_run(tmp_path, session)
@@ -2645,6 +2846,106 @@ def test_query_context_reads_the_double_sword_step_wording() -> None:
     cards_query = _skill_step_cards_query(state, zones=(Zone.HAND,))
 
     assert query_context(engine, cards_query)["requirement"] == "由目标选择弃置一张手牌"
+
+
+def test_the_double_sword_option_payload_names_the_source_seat() -> None:
+    """【雌雄双股剑】的选项步：载荷要下发"令谁摸牌"的展示事实（来源座位 + 武将名）。
+
+    M5-bugfix（用户验收）：目标**没有手牌**时引擎只发一条 ``draw_one``（付不起的组合
+    不进候选），界面却要把左侧的两条一次性选项都画出来——「弃置 1 张手牌」是**禁用**
+    控件，「令座位号 N <name>摸一张牌」可点并提交那条 ``SelectOption(draw_one)``。
+
+    "N 是谁"不能由前端按"谁的回合 / 谁用了【杀】"推（那是第二份规则）：它是投影从结算栈
+    顶帧（这次使用的 ``source``）派生的展示事实，故由 ``option_source`` 随载荷下发。
+    它**不进记录流**、不参与合法性；目标有手牌时两条选项都在，来源仍是同一个座位。
+    """
+    empty = _double_sword_option_session()
+    pending = empty.pending
+    assert pending is not None and pending.kind == QueryKind.SELECT_OPTION
+    assert pending.actor == 1, "选择权在目标"
+    assert pending.options == ("draw_one",), "无手牌 ⇒ 引擎不发 discard_one"
+
+    payload = pending_payload(empty)
+
+    assert [action["choice"] for action in payload["legal_actions"]] == ["draw_one"]
+    assert payload["option_source"] == {"seat": 0, "name": "张飞"}, (
+        "选项步的来源座位 / 名称 = 雌雄双股剑的持有者（展示事实，不是前端规则）"
+    )
+    assert payload["option_seats"] == {}, "一次性二选一不是选座位形态"
+
+    with_hand = _double_sword_option_session(
+        target_hand=(cards_of_type(_iron_pack(), "peach")[0],)
+    )
+    both = pending_payload(with_hand)
+    assert [action["choice"] for action in both["legal_actions"]] == [
+        "discard_one",
+        "draw_one",
+    ]
+    assert both["option_source"] == {"seat": 0, "name": "张飞"}, (
+        "有手牌时两条都可提交，来源不变"
+    )
+
+
+class _DoubleSwordDriver:
+    """把座位 0 推到"用【杀】指定异性目标 + 发动雌雄双股剑"，不测规则本身。"""
+
+    def __init__(self, slash: int) -> None:
+        self.slash = slash
+
+    def respond(self, query):  # noqa: ANN001 - Participant 协议
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == self.slash:
+                    return action
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill):
+                    return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _double_sword_option_session(*, target_hand: tuple[int, ...] = ()):
+    """2 座构造局面：座位 0（张飞）用【杀】指定座位 1（异性目标、人类）⇒ 挂起 SELECT_OPTION。
+
+    与 :func:`_iron_session` 同一姿态：引擎行为真跑，只有人类座位（= 目标）的询问被挂起。
+    """
+    from sgs.data import Gender, RuleConfig as _RuleConfig
+
+    pack = _iron_pack()
+    slash = cards_of_type(pack, "slash")[0]
+    sword = cards_of_type(pack, "double_sword")[0]
+    used = {slash, sword, *target_hand}
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(slash,), equip=(sword,), gender=Gender.MALE, hero="zhangfei"),
+            SeatSpec(hand=tuple(target_hand), gender=Gender.FEMALE),
+        ],
+        deck=tuple(i for i in range(len(pack.deck.cards)) if i not in used),
+        turn_seat=0,
+        rule_config=_RuleConfig(player_count=2, first_seat=0),
+    )
+    from sgs_web.session import Session as _Session
+
+    session = _Session(
+        seed=1,
+        player_count=2,
+        ai="random",
+        human_seat=1,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=pack,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = (_DoubleSwordDriver(slash), _HaltSeat())
+    session.drive()
+    return session
 
 
 def test_query_context_walks_the_yiji_steps_with_their_own_wording() -> None:
@@ -4308,7 +4609,7 @@ def test_a_bare_query_rebuilds_transformed_source_cards_from_the_query_itself() 
 
 
 # ---------------------------------------------------------------------------
-# U1-04b 描述全文：43 个牌名 + 46 条技能（独立内容文件，不进引擎 / 录像）
+# U1-04b 描述全文：43 个牌名 + 51 条技能（独立内容文件，不进引擎 / 录像）
 # ---------------------------------------------------------------------------
 
 MILITARY_CARD_TYPE_IDS = frozenset(
@@ -4326,11 +4627,11 @@ MILITARY_CARD_TYPE_IDS = frozenset(
         "hualiu",
     }
 )
-"""U1-04b 预写的 11 个军争牌名 id（M5 落地前只写描述，不建牌堆条目）。"""
+"""U1-04b 预写的 11 个军争牌名 id；M5-01a 起已并入内容包，本清单保留作独立核对。"""
 
 
 def test_every_card_name_and_skill_id_has_a_description() -> None:
-    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 46 条技能一条不缺。
+    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 51 条技能一条不缺。
 
     缺一条时断言消息**直接列出缺的 key**（不是只报一个总数）——这是票面的验收判据。
     多余 / 拼错的 key 也一并拦：否则「43 条」可以是 42 条真条目 + 1 条错拼。
@@ -4349,7 +4650,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 46, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 51, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)
@@ -5349,3 +5650,1712 @@ def test_harvest_state_is_none_when_no_harvest_frame_is_on_the_stack() -> None:
         assert harvest_state(engine) is None
     finally:
         frames.extend(saved)
+
+
+# ---------------------------------------------------------------------------
+# M5-08a：火攻界面（真会话 / 记录流 / 投影 / 叙事）
+#
+# 引擎侧（M5-06）已经保证：目标过滤 `has_hand_cards`、目标亮 1 张（`card_reveal` 公开
+# delta）、同花色弃牌可选（`Pass`）、无同花色时**不发询问**（自动放弃）。本段钉的是
+# **界面读取方**：目标过滤只出现在有手牌的角色上（含自己）、亮牌走 U2 的亮牌模板、
+# 亮出的那一张才公开、弃一张同花色 = 1 点火焰伤害、放弃 / 无同花色 = 0 伤害且事件流
+# 可读、手牌区不残留「已知」。
+# ---------------------------------------------------------------------------
+
+_FIRE_PACK = None
+
+
+def _fire_pack():
+    """军争 160 档（惰性加载；火攻不在此档之外）。"""
+    global _FIRE_PACK
+    if _FIRE_PACK is None:
+        from sgs.data import load_content_pack
+
+        _FIRE_PACK = load_content_pack(deck_profile="standard_ex_160")
+    return _FIRE_PACK
+
+
+def _fire_card_id() -> int:
+    return cards_of_type(_fire_pack(), "fire_attack")[0]
+
+
+def _fire_suit_cards(suit) -> list[int]:
+    return [
+        index
+        for index, card in enumerate(_fire_pack().deck.cards)
+        if card.suit is suit and card.type != "fire_attack"
+    ]
+
+
+class _FireDriver:
+    """火攻脚本：座位 1 = 目标（亮牌），其余 AI 座位按最小合法应答。
+
+    只用于把**真会话**推到界面要读的那一步，不测规则本身；人类座位的询问由用例自己答。
+    """
+
+    def __init__(self, *, reveal=None, discard=None) -> None:
+        self.reveal = reveal
+        self.discard = discard
+
+    def _pick(self, query, wanted):
+        for action in query.legal_actions:
+            if not isinstance(action, SelectCards) or len(action.picks) != 1:
+                continue
+            slot = query.slots[action.picks[0]]
+            card = slot.card
+            if card is None:
+                continue
+            if wanted(card):
+                return action
+        return None
+
+    def respond(self, query):  # noqa: ANN001 - Participant 协议
+        return self.answer(query)
+
+    def answer(self, query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+            return query.legal_actions[0]
+        if query.kind == QueryKind.SELECT_CARDS:
+            if self.reveal is not None:
+                action = self._pick(query, lambda card: card.card_id == self.reveal)
+                if action is not None:
+                    return action
+            if self.discard is not None:
+                action = self._pick(query, lambda card: card.card_id == self.discard)
+                if action is not None:
+                    return action
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+            return query.legal_actions[0]
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+class _FireSpyEngine(Engine):
+    """记下每一次压栈的 ``DAMAGE`` 帧：属性（FIRE）与渠道牌只能这样从真会话观测。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.damage_frames: list[dict] = []
+
+    def push_frame(self, kind, data, *, timing):  # type: ignore[no-untyped-def]
+        frame = super().push_frame(kind, data, timing=timing)
+        if kind is FrameKind.DAMAGE:
+            self.damage_frames.append(dict(data))
+        return frame
+
+
+class _HaltSeat:
+    """人类座位：把询问交给 ``Session.pending``，由用例显式应答（与产品同一条挂起驱动）。"""
+
+    def respond(self, query):  # noqa: ANN001
+        from sgs_web.session import Halt
+
+        raise Halt(query)
+
+
+def _fire_session(
+    *,
+    user_hand: tuple[int, ...],
+    target_hand: tuple[int, ...] = (),
+    other_hands: tuple[tuple[int, ...], ...] = ((), ()),
+    top: tuple[int, ...] = (),
+    human_seat: int = 0,
+    spy: bool = False,
+):
+    """4 座构造局面：座位 0 = 火攻使用者、1 = 首个目标、2 / 3 = 其它（默认空手牌）。
+
+    ``other_hands`` 给座位 2 / 3 的手牌；空手牌座位用来钉"不可指定"。
+    """
+    from sgs.data import RuleConfig as _RuleConfig
+
+    pack = _fire_pack()
+    fire = _fire_card_id()
+    used = {fire, *user_hand, *target_hand, *top}
+    for hand in other_hands:
+        used.update(hand)
+    seats = [
+        SeatSpec(hp=4, hand=(fire, *user_hand)),
+        SeatSpec(hp=4, hand=target_hand),
+        SeatSpec(hp=4, hand=other_hands[0] if other_hands else ()),
+        SeatSpec(hp=4, hand=other_hands[1] if len(other_hands) > 1 else ()),
+    ]
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=(*top, *tuple(i for i in range(len(pack.deck.cards)) if i not in used)),
+        turn_seat=0,
+        rule_config=_RuleConfig(first_seat=0),
+    )
+    from sgs_web.session import Session as _Session
+
+    session = _Session(
+        seed=1,
+        player_count=4,
+        ai="random",
+        human_seat=human_seat,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=pack,
+    )
+    engine_cls = _FireSpyEngine if spy else Engine
+    session.engine = engine_cls.from_state(state, seed=1)
+    session.participants = tuple(
+        _HaltSeat() if seat == human_seat else _FireDriver(reveal=None)
+        for seat in range(4)
+    )
+    session.drive()
+    return session
+
+
+def _step_until(session: Session, predicate, answer=None):
+    """推进到 ``predicate(pending)`` 成立的询问；其余询问按 ``answer`` 应答。"""
+    for _ in range(500):
+        pending = session.pending
+        if pending is None:
+            break
+        if predicate(pending):
+            return pending
+        session.submit_answer(answer(pending) if answer is not None else _FireDriver().answer(pending))
+    raise AssertionError("500 步内没有走到目标询问")
+
+
+def _fire_use_action(pending, *, target: int):
+    fire = _fire_card_id()
+    for action in pending.legal_actions:
+        if isinstance(action, UseCard) and action.card.card_id == fire and action.targets == (target,):
+            return action
+    raise AssertionError(f"出牌阶段没有对座位 {target} 使用火攻的候选")
+
+
+def _reveal_deltas(session: Session) -> list[dict]:
+    out = []
+    for record in session.records():
+        payload = _record_payload(record)
+        if payload.get("kind") == "delta" and payload.get("delta_type") == "card_reveal":
+            out.append(payload)
+    return out
+
+
+def test_fire_attack_target_index_lists_only_seats_with_hand_cards_including_self() -> None:
+    """第 0 层目标过滤的读取方：候选索引的池只有有手牌的角色（含自己），空手牌不可点。"""
+    spade = _fire_suit_cards(Suit.SPADE)[0]
+    session = _fire_session(
+        user_hand=(spade,),
+        target_hand=(_fire_suit_cards(Suit.HEART)[0],),
+        other_hands=(()),  # 座位 2 空手牌
+    )
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    payload = pending_payload(session)
+    entry = payload["candidate_index"][str(_fire_card_id())]
+    assert entry["pool"] == [0, 1], "只有有手牌的角色在池里（座位 2 空手牌）"
+    assert entry["combos"] == [[0], [1]], "可指定自己；空手牌座位 2 没有候选"
+    assert entry["min_targets"] == 1 and entry["max_targets"] == 1
+
+    snapshot = visible_snapshot(session)
+    assert snapshot["players"][2]["hand_count"] == 0
+
+
+def test_the_human_targets_fire_attack_reveal_step_uses_the_reveal_dialog_without_leaking() -> None:
+    """人类被指定：亮牌步 = U2 亮牌模板（dialog=reveal），只有本人的手牌；外人拿不到牌面。"""
+    spade = _fire_suit_cards(Suit.SPADE)[0]
+    heart = _fire_suit_cards(Suit.HEART)[0]
+    session = _fire_session(user_hand=(spade, heart), target_hand=())
+    # 对自己使用：在候选区里把目标改成 0（用法仍原样取自 legal_actions）。
+    use = _fire_use_action(session.pending, target=0)
+    session.submit_answer(use)
+    reveal = _step_until(
+        session,
+        lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0,
+    )
+    assert reveal is not None
+    payload = pending_payload(session)
+    assert payload["dialog"] == "reveal", "人类被指定 ⇒ 亮牌模板（四类弹窗之一）"
+    assert payload["harvest"] is None, "火攻没有五谷的 harvest 状态"
+    assert payload["context"]["name"] == "火攻"
+    assert "亮出" in payload["context"]["requirement"]
+    own_hand = [card["card_id"] for card in payload["view"]["self_hand"]]
+    revealed = [card["card_id"] for card in payload["revealed"]]
+    assert revealed == [slot["card"]["card_id"] for slot in payload["slots"]]
+    assert set(revealed) == set(own_hand), "亮牌窗里是本人手牌；牌面只发给询问者本人"
+    assert all(card["description"] for card in payload["revealed"]), "卡面契约随亮牌下发"
+
+    # 外人的载荷：不是询问者 ⇒ 没有 dialog / revealed，槽位只剩位置。
+    foreign = pending_payload(session.pending, human_seat=1)
+    assert foreign["dialog"] is None
+    assert foreign["revealed"] == []
+    assert foreign["slots"] and all(slot["card"] is None for slot in foreign["slots"])
+
+
+def test_the_human_targets_reveal_is_public_and_leaves_no_known_marker() -> None:
+    """亮牌只有那一张成为公开事实；未亮出的手牌不泄露；结算后没有「已知」残留。"""
+    spade = _fire_suit_cards(Suit.SPADE)[0]
+    heart = _fire_suit_cards(Suit.HEART)[0]
+    session = _fire_session(user_hand=(spade, heart), target_hand=(), other_hands=((spade,),))
+    session.submit_answer(_fire_use_action(session.pending, target=0))
+    reveal = _step_until(session, lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0)
+    chosen = next(
+        action
+        for action in reveal.legal_actions
+        if isinstance(action, SelectCards)
+        and reveal.slots[action.picks[0]].card is not None
+        and reveal.slots[action.picks[0]].card.card_id == spade
+    )
+    session.submit_answer(chosen)
+    _step_until(session, lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0)
+
+    reveals = _reveal_deltas(session)
+    assert len(reveals) == 1, "亮牌只落一条 card_reveal"
+    assert reveals[0]["seat"] == 0 and reveals[0]["card"]["card_id"] == spade
+    assert reveals[0]["card"]["name"] == session.engine.state.card(spade).name
+
+    snapshot = visible_snapshot(session)
+    for player in snapshot["players"]:
+        assert "known" not in player and "revealed_cards" not in player, (
+            "手牌区不写「已知」状态"
+        )
+        if player["seat"] != session.human_seat:
+            assert "self_hand" not in player
+    shown = visible_record(next(
+        record
+        for record in session.records()
+        if getattr(record, "delta_type", None) == "card_reveal"
+    ))
+    assert shown["card"]["display_name"] == session.engine.state.card(spade).name
+    assert shown["card"]["description"], "中央舞台的牌面沿展示契约（悬停可读）"
+
+
+def test_fire_attack_same_suit_discard_deals_one_fire_damage() -> None:
+    """点一张同花色手牌 = 一次真实提交 → 恰 1 点火焰伤害；亮牌进事件流 / 叙事。"""
+    spades = _fire_suit_cards(Suit.SPADE)
+    hearts = _fire_suit_cards(Suit.HEART)
+    session = _fire_session(
+        user_hand=(spades[0], spades[1], hearts[0]),
+        target_hand=(),
+        spy=True,
+    )
+    session.submit_answer(_fire_use_action(session.pending, target=0))
+    reveal = _step_until(session, lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0)
+    reveal_action = next(
+        action
+        for action in reveal.legal_actions
+        if isinstance(action, SelectCards)
+        and reveal.slots[action.picks[0]].card is not None
+        and reveal.slots[action.picks[0]].card.card_id == spades[0]
+    )
+    session.submit_answer(reveal_action)
+
+    discard = _step_until(session, lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0)
+    payload = pending_payload(session)
+    assert payload["spec"]["optional"] is True
+    assert payload["context"]["name"] == "火攻"
+    assert "同花色" in payload["context"]["requirement"]
+    assert payload["reveal"]["seat"] == 0
+    assert payload["reveal"]["card"]["card_id"] == spades[0], "使用者看得见亮出的那一张"
+    assert [slot["card"]["card_id"] for slot in payload["slots"]] == [spades[0], spades[1]], (
+        "选择面只铺同花色手牌"
+    )
+    assert any(action["kind"] == "Pass" for action in payload["legal_actions"])
+
+    discard_action = next(
+        action
+        for action in discard.legal_actions
+        if isinstance(action, SelectCards)
+        and discard.slots[action.picks[0]].card is not None
+        and discard.slots[action.picks[0]].card.card_id == spades[1]
+    )
+    session.submit_answer(discard_action)
+    _step_until(session, lambda p: p.kind == QueryKind.PLAY_PHASE and p.actor == 0)
+
+    from sgs.effects import DamageNature
+
+    assert session.engine.state.player(0).hp == 3, "对自己使用 ⇒ 自己受到 1 点火焰伤害"
+    assert session.engine.state.player(0).hp_max == 4
+    frames = session.engine.damage_frames
+    assert len(frames) == 1, "一次火攻伤害只压一个伤害帧"
+    assert frames[0]["nature"] is DamageNature.FIRE, "属性 = 火焰（WEB 会话的真实帧）"
+    assert frames[0]["channel"].card_id == _fire_card_id(), "渠道牌 = 火攻本体"
+    assert spades[1] in session.engine.state.discard, "弃掉的那张进弃牌堆"
+    assert _fire_card_id() in session.engine.state.discard, "火攻本体随后也进弃牌堆"
+    assert any(
+        record.get("kind") == "delta"
+        and record.get("delta_type") == "hp_change"
+        and record.get("seat") == 0
+        and record.get("amount") == -1
+        for record in (_record_payload(r) for r in session.records())
+    ), "目标受到 1 点伤害"
+
+    entries = _narrative(
+        session.records(),
+        viewer=0,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    text = _line_text(entries)
+    assert "亮出" in text and "弃置" in text and "受到 1 点伤害" in text
+
+
+def test_fire_attack_pass_with_a_same_suit_card_deals_no_damage() -> None:
+    """有同花色也可以放弃：一条 Pass = 零伤害，手牌 / 弃牌堆都不动。"""
+    spades = _fire_suit_cards(Suit.SPADE)
+    session = _fire_session(user_hand=(spades[0], spades[1]))
+    session.submit_answer(_fire_use_action(session.pending, target=0))
+    reveal = _step_until(session, lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0)
+    session.submit_answer(reveal.legal_actions[0])
+    discard = _step_until(session, lambda p: p.kind == QueryKind.SELECT_CARDS and p.actor == 0)
+
+    before_discard = tuple(session.engine.state.discard)
+    pass_action = next(action for action in discard.legal_actions if isinstance(action, Pass))
+    session.submit_answer(pass_action)
+    _step_until(session, lambda p: p.kind == QueryKind.PLAY_PHASE and p.actor == 0)
+
+    assert session.engine.state.player(0).hp == 4, "放弃 ⇒ 零伤害"
+    hand = tuple(session.engine.state.player(0).hand)
+    assert spades[0] in hand and spades[1] in hand, "同花色手牌留在手里"
+    assert spades[0] not in session.engine.state.discard
+    assert spades[1] not in session.engine.state.discard
+    assert set(session.engine.state.discard) - set(before_discard) == {_fire_card_id()}, (
+        "只有火攻本体进弃牌堆"
+    )
+    assert not any(
+        record.get("delta_type") == "hp_change"
+        for record in (_record_payload(r) for r in session.records())
+    ), "放弃不产生任何体力变化"
+    entries = _narrative(
+        session.records(),
+        viewer=0,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    assert "放弃" in _line_text(entries)
+
+
+def test_fire_attack_without_a_same_suit_card_has_no_discard_query_and_narrates_auto_pass() -> None:
+    """无同花色 ⇒ 引擎不发弃牌询问（自动放弃）；事件流写「放弃（无可弃的同花色牌）」。"""
+    club = _fire_suit_cards(Suit.CLUB)[0]
+    spade = _fire_suit_cards(Suit.SPADE)[0]
+    heart = _fire_suit_cards(Suit.HEART)[0]
+    club2 = _fire_suit_cards(Suit.CLUB)[1]
+    spade2 = _fire_suit_cards(Suit.SPADE)[1]
+    # 人类：梅花 + 黑桃（无红桃）；摸牌也只摸梅花 / 黑桃；目标亮一张红桃 ⇒ 没有同花色。
+    session = _fire_session(
+        user_hand=(club, spade), target_hand=(heart,), top=(club2, spade2)
+    )
+    driver = _FireDriver(reveal=heart)
+    session.participants = (_HaltSeat(), driver, _FireDriver(), _FireDriver())
+    session.submit_answer(_fire_use_action(session.pending, target=1))
+    selection_queries = []
+    for _ in range(200):
+        pending = session.pending
+        if pending is None:
+            break
+        if pending.kind == QueryKind.SELECT_CARDS and pending.actor == 0:
+            selection_queries.append(pending)
+        if pending.kind == QueryKind.PLAY_PHASE and pending.actor == 0:
+            break
+        session.submit_answer(_FireDriver().answer(pending))
+    assert selection_queries == [], "没有同花色 ⇒ 使用者收不到弃牌询问（不是死步骤）"
+    assert session.engine.state.player(1).hp == 4, "零伤害"
+
+    entries = _narrative(
+        session.records(),
+        viewer=0,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    text = _line_text(entries)
+    assert "亮出" in text
+    assert "放弃（无可弃的同花色牌）" in text, text
+    assert "受到 1 点伤害" not in text
+
+
+# ---------------------------------------------------------------------------
+# M5-08b：铁索 1–2 目标 + 重铸入口（真会话 / 投影 / 叙事）
+#
+# 引擎侧（M5-03）已经保证：铁索是 1–2 目标的普通锦囊（可指定自己、无距离、0 目标非法、
+# 同座不可重复、开无懈窗口、无次数限制），重铸是独立的 `Reforge` Action（仅出牌阶段、
+# 不算使用、不开无懈、不消耗次数、牌进弃牌堆并摸一张、移动原因 `REFORGE`）。
+# 本段钉的是**界面读取方**：候选索引里「使用」的组合与「重铸」分离、提交后两个目标
+# 按各自状态独立翻转、重铸恰一次且不经过目标 / 无懈、事件流写「重铸」。
+# ---------------------------------------------------------------------------
+
+_IRON_PACK = None
+
+
+def _iron_pack():
+    """军争 160 档（惰性加载；铁索不在此档之外）。"""
+    global _IRON_PACK
+    if _IRON_PACK is None:
+        from sgs.data import load_content_pack
+
+        _IRON_PACK = load_content_pack(deck_profile="standard_ex_160")
+    return _IRON_PACK
+
+
+def _iron_card_id() -> int:
+    return cards_of_type(_iron_pack(), "iron_chain")[0]
+
+
+def _iron_card_ids() -> set[int]:
+    return set(cards_of_type(_iron_pack(), "iron_chain"))
+
+
+def _iron_session(*, hand=None, chained=(False, False, False, False)):
+    """4 座构造局面：座位 0 = 人类、首回合出牌阶段；``chained`` 给各座初始横置态。
+
+    与 :func:`_fire_session` 同一姿态：引擎行为真跑，只有人类座位的询问被挂起、由用例
+    显式应答；其余座位走最小合法应答。``hand`` 缺省只有一张【铁索连环】。
+    """
+    from sgs.data import RuleConfig as _RuleConfig
+
+    pack = _iron_pack()
+    iron = _iron_card_id()
+    user_hand = (iron,) if hand is None else tuple(hand)
+    used = set(user_hand)
+    seats = [
+        SeatSpec(hp=4, hand=user_hand, chained=chained[0]),
+        SeatSpec(hp=4, chained=chained[1]),
+        SeatSpec(hp=4, chained=chained[2]),
+        SeatSpec(hp=4, chained=chained[3]),
+    ]
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=tuple(i for i in range(len(pack.deck.cards)) if i not in used),
+        turn_seat=0,
+        rule_config=_RuleConfig(first_seat=0),
+    )
+    from sgs_web.session import Session as _Session
+
+    session = _Session(
+        seed=1,
+        player_count=4,
+        ai="random",
+        human_seat=0,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=pack,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = tuple(
+        _HaltSeat() if seat == 0 else _FireDriver() for seat in range(4)
+    )
+    session.drive()
+    return session
+
+
+def _iron_use_action(pending, targets):
+    iron = _iron_card_id()
+    for action in pending.legal_actions:
+        if (
+            isinstance(action, UseCard)
+            and action.card.card_id == iron
+            and action.targets == tuple(targets)
+        ):
+            return action
+    raise AssertionError(f"出牌阶段没有对 {targets} 使用铁索的候选")
+
+
+def _drive_until_human_play(session) -> list:
+    """把人类座位推回出牌阶段；返回途中经过的无懈询问（真窗口，不是替身）。"""
+    nullifies = []
+    for _ in range(300):
+        pending = session.pending
+        if pending is None:
+            break
+        if pending.kind == QueryKind.PLAY_PHASE and pending.actor == 0:
+            return nullifies
+        if getattr(pending, "cause", None) == WindowCause.NULLIFY:
+            nullifies.append(pending)
+        session.submit_answer(_FireDriver().answer(pending))
+    raise AssertionError("300 步内没有回到人类座位的出牌阶段")
+
+
+def test_iron_chain_candidate_index_offers_self_and_one_or_two_targets() -> None:
+    """候选索引：铁索可指定自己，组合只有 1 个或 2 个目标；重铸不冒充「使用」组合。"""
+    session = _iron_session()
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    payload = pending_payload(session)
+    iron = _iron_card_id()
+
+    entry = payload["candidate_index"][str(iron)]
+    assert entry["pool"] == [0, 1, 2, 3], "4 座存活 ⇒ 池是全部座位（含自己）"
+    assert [0] in entry["combos"], "可以只指定自己"
+    assert [0, 1] in entry["combos"] and [1, 2] in entry["combos"], "两个目标的组合都在"
+    assert entry["min_targets"] == 1 and entry["max_targets"] == 2, "min=1 / max=2"
+    assert [] not in entry["combos"], "重铸是独立 Action，不得把 0 目标混进使用组合"
+
+    reforge = [
+        action for action in payload["legal_actions"] if action["kind"] == "Reforge"
+    ]
+    assert len(reforge) == 1, "可重铸的牌各给一条独立 Reforge 候选"
+    assert reforge[0]["card"]["card_id"] == iron
+    assert "targets" not in reforge[0], "重铸没有目标字段（不是 UseCard 的变体）"
+
+
+def test_iron_chain_single_self_target_toggles_and_opens_the_nullify_window() -> None:
+    """1 个目标（自己）：横置状态翻转、开无懈窗口、不消耗使用次数。"""
+    session = _iron_session(chained=(False, True, False, False))
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    session.submit_answer(_iron_use_action(pending, (0,)))
+
+    nullifies = _drive_until_human_play(session)
+
+    assert nullifies, "普通锦囊 ⇒ 使用后必须经过无懈窗口（真询问）"
+    assert all(pending.kind == QueryKind.RESPOND for pending in nullifies)
+    assert all(pending.cause == WindowCause.NULLIFY for pending in nullifies)
+    assert all(
+        any(action.kind == "Pass" for action in pending.legal_actions)
+        for pending in nullifies
+    ), "无懈窗口里至少有「放弃」"
+    assert session.engine.state.player(0).chained is True, "自己：未横置 → 横置"
+    assert session.engine.state.player(1).chained is True, "未指定的目标保持原状"
+    assert _iron_card_id() in session.engine.state.discard, "结算后进弃牌堆"
+
+
+def test_iron_chain_two_targets_toggle_each_seat_independently() -> None:
+    """2 个目标：每个目标独立 toggle（已横置 → 重置、未横置 → 横置）。"""
+    session = _iron_session(chained=(False, True, False, False))
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    session.submit_answer(_iron_use_action(pending, (1, 2)))
+
+    nullifies = _drive_until_human_play(session)
+
+    assert nullifies, "2 目标同样开无懈窗口"
+    assert session.engine.state.player(1).chained is False, "已横置 → 重置"
+    assert session.engine.state.player(2).chained is True, "未横置 → 横置"
+    assert session.engine.state.player(0).chained is False, "未指定的自己不动"
+    assert session.engine.state.player(3).chained is False, "未指定的座位不动"
+
+
+def test_reforge_moves_the_card_to_discard_and_draws_one_without_nullify() -> None:
+    """重铸 = 恰一次真实提交：弃置 + 摸一张、不经过目标步 / 无懈窗口、不消耗使用次数。"""
+    from sgs.state import Reforge
+
+    session = _iron_session(hand=(_iron_card_id(),))
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    payload = pending_payload(session)
+    reforge = [action for action in pending.legal_actions if isinstance(action, Reforge)]
+    assert len(reforge) == 1, "手里有可重铸的牌 ⇒ 恰一条 Reforge 候选"
+    assert reforge[0].card.card_id == _iron_card_id()
+    assert payload["legal_actions"].count(
+        next(
+            action for action in payload["legal_actions"]
+            if action["kind"] == "Reforge"
+        )
+    ) == 1
+
+    before_hand = tuple(session.engine.state.player(0).hand)
+    before_deck = len(session.engine.state.deck)
+    before_discard = tuple(session.engine.state.discard)
+    before_counts = dict(session.engine.state.player(0).card_use_counts)
+
+    session.submit_answer(reforge[0])
+
+    after = session.pending
+    assert after is not None and after.kind == QueryKind.PLAY_PHASE and after.actor == 0, (
+        "重铸后直接回到出牌阶段：不进入目标选择、不开无懈窗口"
+    )
+    hand = tuple(session.engine.state.player(0).hand)
+    assert _iron_card_id() not in hand, "重铸后牌离开手牌"
+    assert len(hand) == len(before_hand), "弃一张 + 摸一张 ⇒ 手牌数不变"
+    assert len(session.engine.state.deck) == before_deck - 1, "摸的那一张来自牌堆"
+    assert _iron_card_id() in session.engine.state.discard, "牌进弃牌堆"
+    assert set(session.engine.state.discard) - set(before_discard) == {_iron_card_id()}
+    assert dict(session.engine.state.player(0).card_use_counts) == before_counts, (
+        "重铸不算使用 ⇒ 不消耗任何使用次数"
+    )
+
+    moves = [
+        record
+        for record in (_record_payload(item) for item in session.records())
+        if record.get("kind") == "delta"
+        and record.get("delta_type") == "card_move"
+        and record.get("reason") == "REFORGE"
+    ]
+    assert len(moves) == 1, "重铸只落一条 REFORGE 的移动记录"
+    assert moves[0]["to_zone"]["zone"] == "discard"
+
+
+def test_reforge_is_narrated_as_reforge_not_discard() -> None:
+    """事件流（简易档）写「重铸」：既不写「弃置」，也不泄露 REFORGE / Reforge 英文。"""
+    from sgs.state import Reforge
+
+    session = _iron_session(hand=(_iron_card_id(),))
+    session.submit_answer(next(
+        action for action in session.pending.legal_actions if isinstance(action, Reforge)
+    ))
+    _drive_until_human_play(session)
+
+    entries = _narrative(
+        session.records(),
+        viewer=0,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    text = _line_text(entries)
+    reforge_move = next(
+        record
+        for record in (_record_payload(item) for item in session.records())
+        if record.get("kind") == "delta"
+        and record.get("delta_type") == "card_move"
+        and record.get("reason") == "REFORGE"
+    )
+    line = _line_at(entries, reforge_move["seq"])
+    assert line is not None, "重铸必须有一行事件流"
+    assert "重铸" in line["text"] and "铁索连环" in line["text"], line["text"]
+    assert "弃置" not in line["text"], line["text"]
+    assert "REFORGE" not in text and "Reforge" not in text, text
+
+
+def test_reforge_is_not_offered_for_non_reforgeable_cards() -> None:
+    """重铸入口以 `legal_actions` 里的 Reforge 为唯一判据：不可重铸的牌没有。"""
+    pack = _iron_pack()
+    slash = cards_of_type(pack, "slash")[0]
+    session = _iron_session(hand=(_iron_card_id(), slash))
+    payload = pending_payload(session)
+    reforge_cards = {
+        action["card"]["card_id"]
+        for action in payload["legal_actions"]
+        if action["kind"] == "Reforge"
+    }
+    assert reforge_cards == {_iron_card_id()}, "只有可重铸的【铁索连环】有 Reforge 候选"
+    assert slash not in reforge_cards
+
+
+def test_reforge_is_not_offered_outside_the_play_phase() -> None:
+    """非出牌阶段（真会话的【闪】窗口）里，手里有铁索也没有 Reforge 候选。"""
+    session = Session(
+        seed=17,
+        player_count=8,
+        ai="heuristic",
+        timeout_seconds=None,
+        pack=_iron_pack(),
+    )
+    pending = session.pending
+    assert pending is not None and pending.kind != QueryKind.PLAY_PHASE, (
+        "这个种子的人类首个询问不是出牌阶段（前置断言）"
+    )
+    hand = tuple(session.engine.state.player(session.human_seat).hand)
+    assert _iron_card_ids() & set(hand), "手里确实有铁索，否则这条断言是空转"
+    payload = pending_payload(session)
+    assert all(action["kind"] != "Reforge" for action in payload["legal_actions"]), (
+        "非出牌阶段不出现重铸候选"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M5-08c：酒界面（出牌阶段 / 濒死自救 / 每回合一次）
+#
+# 引擎侧（M5-04）已经保证：出牌阶段【酒】是**自己为目标**的 UseCard（目标恒为
+# ``(source,)``）、每游戏回合一次（两种用法共用计数键）、回合末清 ``wine_active`` 与
+# 计数、濒死自救只在**濒死者自己**的求桃窗口里出现且不产生加伤。本段钉的是**界面
+# 读取方**：候选索引里「自己为目标 / 无目标步」、使用后本回合第二张【酒】从
+# ``legal_actions`` 消失、求桃窗口里的【酒】可被自救、他人濒死没有【酒】入口、
+# 回合末清理后下回合重新可用，以及仅「呈现」不等于自动提交。
+# ---------------------------------------------------------------------------
+
+_WINE_PACK = None
+
+
+def _wine_pack():
+    """军争 160 档（惰性加载；酒在标准 108 与 160 两档都有）。"""
+    global _WINE_PACK
+    if _WINE_PACK is None:
+        _WINE_PACK = load_content_pack(deck_profile="standard_ex_160")
+    return _WINE_PACK
+
+
+def _wine_card_ids() -> list[int]:
+    return cards_of_type(_wine_pack(), "wine")
+
+
+def _wine_slash_id() -> int:
+    return cards_of_type(_wine_pack(), "slash")[0]
+
+
+class _WineDriver:
+    """把 AI 座位推过「攻击 / 弃牌 / 响应」的脚本；人类座位的询问由用例自己答。
+
+    ``slash_target`` 非空时，首个出牌阶段对那个座位用一张【杀】——用来把**真会话**
+    推到求桃窗口，不测规则本身。其它时机一律「有 Pass 就 Pass，否则首个候选」。
+    """
+
+    def __init__(self, *, slash_target: int | None = None) -> None:
+        self.slash_target = slash_target
+        self.used_slash = False
+
+    def respond(self, query):  # noqa: ANN001 - Participant 协议
+        return self.answer(query)
+
+    def answer(self, query):  # noqa: ANN001
+        if query.kind == QueryKind.PLAY_PHASE and self.slash_target is not None and not self.used_slash:
+            for action in query.legal_actions:
+                if (
+                    isinstance(action, UseCard)
+                    and action.card.type == "slash"
+                    and action.targets == (self.slash_target,)
+                ):
+                    self.used_slash = True
+                    return action
+        if query.kind == QueryKind.PLAY_PHASE:
+            for action in query.legal_actions:
+                if isinstance(action, EndPhase):
+                    return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _wine_session(*, player_count: int = 4, hand: tuple[int, ...] | None = None):
+    """构造局面：座位 0 = 人类、首回合出牌阶段；``hand`` 缺省两张【酒】+ 一张【杀】。
+
+    与 :func:`_iron_session` 同一姿态：引擎行为真跑，只有人类座位的询问挂起、由用例
+    显式应答；其余座位走 :class:`_WineDriver` 的最小合法应答。
+    """
+    from sgs.data import RuleConfig as _RuleConfig
+
+    pack = _wine_pack()
+    wines = _wine_card_ids()
+    user_hand = (
+        (wines[0], wines[1], _wine_slash_id()) if hand is None else tuple(hand)
+    )
+    used = set(user_hand)
+    seats = [SeatSpec(hp=4, hand=user_hand)]
+    seats.extend(SeatSpec(hp=4) for _ in range(player_count - 1))
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=tuple(i for i in range(len(pack.deck.cards)) if i not in used),
+        turn_seat=0,
+        rule_config=_RuleConfig(first_seat=0),
+    )
+    from sgs_web.session import Session as _Session
+
+    session = _Session(
+        seed=1,
+        player_count=player_count,
+        ai="random",
+        human_seat=0,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=pack,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = tuple(
+        _HaltSeat() if seat == 0 else _WineDriver() for seat in range(player_count)
+    )
+    session.drive()
+    return session
+
+
+def _wine_near_death_session(*, human_seat: int, human_hand: tuple[int, ...]):
+    """构造 4 座：座位 0 对座位 1 用【杀】把 1 号打到濒死。
+
+    ``human_seat`` = 1 时人类是濒死者（自救窗口）；= 2 时人类是旁观者（他人濒死窗口）。
+    座位 1 的濒死者手里另有一张【酒】（仅人类为 2 时用来钉「不出现」）。
+    """
+    from sgs.data import RuleConfig as _RuleConfig
+
+    pack = _wine_pack()
+    wines = _wine_card_ids()
+    slash = _wine_slash_id()
+    hand0 = tuple(human_hand) if human_seat == 0 else (slash,)
+    hand1 = tuple(human_hand) if human_seat == 1 else (wines[4],)
+    hand2 = tuple(human_hand) if human_seat == 2 else ()
+    seats = [
+        SeatSpec(hp=4, hand=hand0),
+        SeatSpec(hp=1, hand=hand1),
+        SeatSpec(hp=4, hand=hand2),
+        SeatSpec(hp=4),
+    ]
+    used = set()
+    for spec in seats:
+        used.update(spec.hand)
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=tuple(i for i in range(len(pack.deck.cards)) if i not in used),
+        turn_seat=0,
+        rule_config=_RuleConfig(first_seat=0),
+    )
+    from sgs_web.session import Session as _Session
+
+    session = _Session(
+        seed=1,
+        player_count=4,
+        ai="random",
+        human_seat=human_seat,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=pack,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = tuple(
+        _HaltSeat() if seat == human_seat
+        else (_WineDriver(slash_target=1) if seat == 0 else _WineDriver())
+        for seat in range(4)
+    )
+    session.drive()
+    return session
+
+
+def _wine_actions(pending, card_id: int | None = None) -> list:
+    return [
+        action
+        for action in pending.legal_actions
+        if isinstance(action, UseCard)
+        and action.card.type == "wine"
+        and (card_id is None or action.card.card_id == card_id)
+    ]
+
+
+def _wine_use_records(session) -> list[dict]:
+    """记录流里所有**被接受**的【酒】使用（按 seq 升序）。"""
+    out = []
+    for record in session.records():
+        payload = _record_payload(record)
+        if payload.get("kind") != "action" or not payload.get("accepted"):
+            continue
+        action = payload.get("action") or {}
+        card = action.get("card") or {}
+        if action.get("kind") == "UseCard" and card.get("type") == "wine":
+            out.append(payload)
+    return out
+
+
+def _wine_change_records(session) -> list[dict]:
+    return [
+        _record_payload(record)
+        for record in session.records()
+        if _record_payload(record).get("delta_type") == "wine_change"
+    ]
+
+
+def test_wine_play_phase_needs_no_target_step_and_one_use_card_submits() -> None:
+    """出牌阶段【酒】= 自己为目标、无目标步；提交一次 = 恰一条 UseCard，事件流可读。"""
+    wines = _wine_card_ids()
+    session = _wine_session()
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE and pending.actor == 0
+    payload = pending_payload(session)
+
+    # 候选索引：两张【酒】都只有「自己」这一组；没有第二个座位可点（= 无目标步）。
+    for wine in wines[:2]:
+        entry = payload["candidate_index"][str(wine)]
+        assert entry["pool"] == [0], "【酒】的池只有自己（不给座位加目标高亮）"
+        assert entry["combos"] == [[0]], "唯一的合法组合 = 对自己使用"
+        assert entry["min_targets"] == 1 and entry["max_targets"] == 1
+    wine_offers = _wine_actions(pending)
+    assert len(wine_offers) == 2 and all(action.targets == (0,) for action in wine_offers), (
+        "出牌阶段两张【酒】各一条候选，目标恒为自己"
+    )
+
+    first = next(action for action in wine_offers if action.card.card_id == wines[0])
+    session.submit_answer(first)
+
+    assert session.engine.state.player(0).wine_active is True, "出牌阶段使用 ⇒ 置加伤状态"
+    uses = _wine_use_records(session)
+    assert len(uses) == 1, "一次提交只产生一条被接受的 UseCard【酒】"
+    assert uses[0]["action"]["targets"] == [0], "提交出去的就是对自己使用（原样取自候选）"
+    changes = _wine_change_records(session)
+    assert len(changes) == 1 and changes[0]["active"] is True and changes[0]["seat"] == 0
+
+    entries = _narrative(
+        session.records(),
+        viewer=0,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    text = _line_text(entries)
+    assert "使用【酒】" in text, f"事件流要能读出「使用【酒】」：{text}"
+    assert "UseCard" not in text and "wine" not in text.lower(), text
+
+
+def test_the_second_wine_is_not_offered_in_the_same_game_turn() -> None:
+    """使用后本回合第二张【酒】从 legal_actions / 候选索引消失（牌仍留手里、置灰）。"""
+    wines = _wine_card_ids()
+    session = _wine_session()
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    first = next(action for action in _wine_actions(pending) if action.card.card_id == wines[0])
+    session.submit_answer(first)
+
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE and pending.actor == 0
+    payload = pending_payload(session)
+    assert not _wine_actions(pending), "同一游戏回合的第二张【酒】不得再进合法候选"
+    assert str(wines[1]) not in payload["candidate_index"], (
+        "第二张【酒】没有候选条目 ⇒ 界面按「候选消失」置灰，不产生非法应答"
+    )
+    snapshot = visible_snapshot(session)
+    hand_ids = [card["card_id"] for card in snapshot["self_hand"]]
+    assert wines[1] in hand_ids, "牌还在手里（只是本回合不能用）"
+    assert dict(session.engine.state.player(0).card_use_counts).get("wine") == 1
+
+
+def test_near_death_wine_self_rescue_recovers_one_without_the_bonus() -> None:
+    """自己濒死：求桃窗口里有【酒】；提交一次 = 回复 1、不产生任何加伤 / wine_change。"""
+    wines = _wine_card_ids()
+    session = _wine_near_death_session(human_seat=1, human_hand=(wines[0],))
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.DODGE and pending.actor == 1
+    session.submit_answer(next(action for action in pending.legal_actions if isinstance(action, Pass)))
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PEACH and pending.actor == 1, (
+        "人类（濒死者）的求桃窗口"
+    )
+    payload = pending_payload(session)
+    entry = payload["candidate_index"][str(wines[0])]
+    assert entry["pool"] == [1] and entry["combos"] == [[1]], "目标恒为濒死者自己"
+    offers = _wine_actions(pending)
+    assert len(offers) == 1 and offers[0].targets == (1,)
+
+    session.submit_answer(offers[0])
+
+    assert session.engine.state.player(1).hp == 1, "【酒】自救回复 1 点"
+    assert session.engine.state.player(1).wine_active is False, "濒死用法不产生加伤"
+    assert not _wine_change_records(session), "濒死自救不得留下任何 wine_change"
+    uses = _wine_use_records(session)
+    assert len(uses) == 1 and uses[0]["action"]["targets"] == [1]
+
+    entries = _narrative(
+        session.records(),
+        viewer=1,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    text = _line_text(entries)
+    assert "使用【酒】" in text, text
+    assert "回复 1 点体力" in text, f"自救要读得出回复 1 点：{text}"
+
+
+def test_wine_is_not_offered_for_another_seats_near_death() -> None:
+    """他人濒死：人类手里有【酒】也不进候选；界面因此没有【酒】入口、零 wine_change。"""
+    wines = _wine_card_ids()
+    peach_id = cards_of_type(_wine_pack(), "peach")[0]
+    session = _wine_near_death_session(human_seat=2, human_hand=(wines[0], peach_id))
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PEACH and pending.actor == 2
+    payload = pending_payload(session)
+    assert not _wine_actions(pending), "对他人的濒死不能用【酒】"
+    assert str(wines[0]) not in payload["candidate_index"], "没有【酒】的候选条目"
+    snapshot = visible_snapshot(session)
+    assert wines[0] in [card["card_id"] for card in snapshot["self_hand"]], (
+        "牌仍在手里，只是这个窗口不能用"
+    )
+    peach = next(
+        action
+        for action in pending.legal_actions
+        if isinstance(action, UseCard) and action.card.type == "peach"
+    )
+    assert peach.targets == (1,), "仍然可以用【桃】救别人（对照）"
+
+    session.submit_answer(peach)
+
+    assert session.engine.state.player(1).hp == 1
+    assert not _wine_change_records(session)
+    assert wines[0] in list(session.engine.state.player(2).hand), "【酒】未被误用 / 误弃"
+
+
+def test_wine_is_available_again_after_turn_end_cleanup() -> None:
+    """回合末清掉 wine_active 与「本回合已用」；下个自己的回合【酒】重新可用。"""
+    wines = _wine_card_ids()
+    session = _wine_session(player_count=2)
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE and pending.actor == 0
+    first = next(action for action in _wine_actions(pending) if action.card.card_id == wines[0])
+    session.submit_answer(first)
+    assert session.engine.state.player(0).wine_active is True
+
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    session.submit_answer(next(action for action in pending.legal_actions if isinstance(action, EndPhase)))
+    # 2 人局：AI 的整个回合也跑完，挂起停在人类的下一个出牌阶段。
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE and pending.actor == 0
+    assert session.engine.state.turn_seat == 0
+    assert session.engine.state.player(0).wine_active is False, "回合末清理加伤状态"
+    assert "wine" not in dict(session.engine.state.player(0).card_use_counts), (
+        "回合末清理「本回合已用【酒】」"
+    )
+    payload = pending_payload(session)
+    entry = payload["candidate_index"][str(wines[1])]
+    assert entry["pool"] == [0] and entry["combos"] == [[0]]
+    offers = _wine_actions(pending)
+    assert [action.card.card_id for action in offers] == [wines[1]], (
+        "下个自己的回合，手里剩下那张【酒】重新可用"
+    )
+    assert any(payload_record.get("timing") == "TURN_END" for payload_record in map(
+        _record_payload, session.records()
+    )), "确实经过了回合末（不是同一个回合的错觉）"
+
+
+def test_offering_wine_submits_nothing_until_the_player_answers() -> None:
+    """只把【酒】放进候选不等于提交：没有玩家应答时零 action、零 wine_change、牌不动。"""
+    wines = _wine_card_ids()
+    session = _wine_session()
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    records = [_record_payload(record) for record in session.records()]
+    assert not [record for record in records if record.get("kind") == "action"], (
+        "候选里出现【酒】不会替玩家自动使用"
+    )
+    assert not _wine_change_records(session)
+    assert wines[0] in list(session.engine.state.player(0).hand)
+    assert session.engine.state.player(0).wine_active is False
+    assert session.pending is pending, "询问原样挂着，等玩家自己决定"
+
+
+# ---------------------------------------------------------------------------
+# M5-08d：新状态显示（新卡面 / 横置 / 酒 / 伤害飘字 / 事件流中文）
+#
+# 本票**只做展示**：`src/sgs/` 一行不改，`display.py` / `narrative.py` / `static/` 只读
+# 服务端已下发的事实。本段钉的是服务端的**展示契约**：新牌名 / 属性的翻法、横置与酒的
+# 状态字段、伤害数字的颜色（火红 / 雷蓝 / 普通白），以及新 delta 在事件流里的中文。
+# DOM（虚线与泛红）由 `tests/support/ui_smoke.mjs` 的 M5-08d 组钉。
+# ---------------------------------------------------------------------------
+
+
+def _damage_classes(entries: list[dict], seat: int) -> list[str]:
+    """某座位「受到 N 点伤害」那一条里的伤害数字颜色类（``dmg`` / ``dmg-fire`` / ...）。"""
+    for entry in entries:
+        segments = entry.get("segments") or []
+        if entry.get("kind") != "line" or not segments:
+            continue
+        if segments[0].get("text") != f"座位{seat}" or "受到" not in entry["text"]:
+            continue
+        return [seg["cls"] for seg in segments if seg["cls"].startswith("dmg")]
+    raise AssertionError(f"事件流里没有座位 {seat} 的受伤行：{[e['text'] for e in entries]}")
+
+
+def _fire_attack_damage_session(*, target: int = 1):
+    """真会话：人类（0）对 ``target`` 用火攻，弃一张同花色牌 ⇒ 目标吃 1 点火焰伤害。"""
+    spades = _fire_suit_cards(Suit.SPADE)
+    session = _fire_session(
+        user_hand=(spades[0], spades[1]),
+        target_hand=(spades[2],),
+    )
+    session.submit_answer(_fire_use_action(session.pending, target=target))
+    discard = _step_until(
+        session,
+        lambda pending: pending.kind == QueryKind.SELECT_CARDS
+        and pending.actor == session.human_seat,
+    )
+    discard_action = next(
+        action
+        for action in discard.legal_actions
+        if isinstance(action, SelectCards)
+        and discard.slots[action.picks[0]].card is not None
+        and discard.slots[action.picks[0]].card.card_id == spades[1]
+    )
+    session.submit_answer(discard_action)
+    _step_until(
+        session,
+        lambda pending: pending.kind == QueryKind.PLAY_PHASE
+        and pending.actor == session.human_seat,
+    )
+    return session, target
+
+
+def _attribute_slash_conduction_session(card_type: str):
+    """真会话：0 号位对横置的 1 号位打出 ``card_type``，1 号位吃属性伤害后传导给 2 号位。"""
+    card = cards_of_type(_iron_pack(), card_type)[0]
+    session = _iron_session(hand=(card,), chained=(False, True, True, False))
+    pending = session.pending
+    action = next(
+        item
+        for item in pending.legal_actions
+        if isinstance(item, UseCard) and item.card.card_id == card and item.targets == (1,)
+    )
+    session.submit_answer(action)
+    _drive_until_human_play(session)
+    return session
+
+
+def test_m5_fire_slash_fire_attack_and_conduction_damage_floats_are_red() -> None:
+    """火焰伤害飘红：火杀、火攻、以及“渠道牌沿用源伤害”的连环传导都取火焰色。"""
+    fire_slash = _attribute_slash_conduction_session("fire_slash")
+    entries = _narrative(
+        fire_slash.records(),
+        viewer=0,
+        heroes=fire_slash.hero_assignments,
+        pack_id=fire_slash.pack.pack_id,
+    )
+    assert _damage_classes(entries, 1) == ["dmg-fire"], "火杀命中 ⇒ 红"
+    assert _damage_classes(entries, 2) == ["dmg-fire"], "传导沿用源渠道牌 ⇒ 仍红"
+    conduction = _line_at(
+        entries,
+        next(
+            record["seq"]
+            for record in _delta_records(fire_slash, "hp_change")
+            if record["seat"] == 2
+        ),
+    )
+    assert conduction is not None and "受到 1 点伤害" in conduction["text"], conduction
+
+    fire_attack, target = _fire_attack_damage_session()
+    entries = _narrative(
+        fire_attack.records(),
+        viewer=0,
+        heroes=fire_attack.hero_assignments,
+        pack_id=fire_attack.pack.pack_id,
+    )
+    assert _damage_classes(entries, target) == ["dmg-fire"], "火攻的火焰伤害 ⇒ 红"
+
+
+def test_m5_thunder_slash_and_lightning_damage_floats_are_blue() -> None:
+    """雷电伤害飘蓝：雷杀（含传导）与既有的【闪电】都不回归成普通白。"""
+    thunder_slash = _attribute_slash_conduction_session("thunder_slash")
+    entries = _narrative(
+        thunder_slash.records(),
+        viewer=0,
+        heroes=thunder_slash.hero_assignments,
+        pack_id=thunder_slash.pack.pack_id,
+    )
+    assert _damage_classes(entries, 1) == ["dmg-thunder"], "雷杀命中 ⇒ 蓝"
+    assert _damage_classes(entries, 2) == ["dmg-thunder"], "传导沿用源渠道牌 ⇒ 仍蓝"
+
+    lightning = _lethal_lightning_session()
+    entries = _narrative(
+        lightning.records(),
+        viewer=0,
+        heroes=lightning.hero_assignments,
+        pack_id=lightning.pack.pack_id,
+    )
+    assert _damage_classes(entries, 1) == ["dmg-thunder"], "【闪电】命中 ⇒ 蓝（既有雷电伤害）"
+
+
+def test_m5_plain_damage_floats_stay_white() -> None:
+    """普通伤害不变色：普通【杀】的伤害数字仍是默认色。"""
+    session = _attribute_slash_conduction_session("slash")
+    entries = _narrative(
+        session.records(),
+        viewer=0,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    assert _damage_classes(entries, 1) == ["dmg"], "普通伤害 ⇒ 白"
+    assert not [entry for entry in entries if _damage_classes(entries, 1) != ["dmg"]]
+
+
+def _delta_records(session, delta_type: str) -> list[dict]:
+    return [
+        payload
+        for payload in (_record_payload(record) for record in session.records())
+        if payload.get("kind") == "delta" and payload.get("delta_type") == delta_type
+    ]
+
+
+def test_m5_narrative_reads_chain_reset_reveal_wine_and_reforge_in_chinese() -> None:
+    """事件流（简易档）：横置 / 重置 / 亮牌 / 酒 / 重铸各有一行可读中文，没有英文枚举。"""
+    # 横置 / 重置：同一张铁索让两个目标独立翻转 ⇒ 两个 chained_change 各一行。
+    iron = _iron_session(hand=(_iron_card_id(),), chained=(False, True, False, False))
+    iron.submit_answer(_iron_use_action(iron.pending, (1, 2)))
+    _drive_until_human_play(iron)
+    entries = _narrative(
+        iron.records(),
+        viewer=0,
+        heroes=iron.hero_assignments,
+        pack_id=iron.pack.pack_id,
+    )
+    changes = {record["seat"]: record for record in _delta_records(iron, "chained_change")}
+    assert changes[1]["chained"] is False and changes[2]["chained"] is True, changes
+    reset_line = _line_at(entries, changes[1]["seq"])
+    chain_line = _line_at(entries, changes[2]["seq"])
+    assert reset_line is not None and "重置" in reset_line["text"], reset_line
+    assert chain_line is not None and "横置" in chain_line["text"], chain_line
+    assert "chained_change" not in _line_text(entries)
+
+    # 亮牌：火攻亮出的那一张，事件流写「亮出【牌名】」。
+    fire_attack, _target = _fire_attack_damage_session()
+    reveals = _delta_records(fire_attack, "card_reveal")
+    assert len(reveals) == 1, "前置：火攻恰好公开一张"
+    entries = _narrative(
+        fire_attack.records(),
+        viewer=0,
+        heroes=fire_attack.hero_assignments,
+        pack_id=fire_attack.pack.pack_id,
+    )
+    reveal_line = _line_at(entries, reveals[0]["seq"])
+    assert reveal_line is not None and "亮出" in reveal_line["text"], reveal_line
+    assert "【" in reveal_line["text"] and "】" in reveal_line["text"], reveal_line
+    assert "card_reveal" not in _line_text(entries)
+
+    # 酒：状态变化有中文行（置位 / 加伤消失），且不落 wine / wine_change 英文。
+    wine = _wine_session()
+    first = next(
+        action for action in _wine_actions(wine.pending) if action.card.card_id == _wine_card_ids()[0]
+    )
+    wine.submit_answer(first)
+    entries = _narrative(
+        wine.records(),
+        viewer=0,
+        heroes=wine.hero_assignments,
+        pack_id=wine.pack.pack_id,
+    )
+    changes = _delta_records(wine, "wine_change")
+    assert len(changes) == 1 and changes[0]["active"] is True, changes
+    wine_line = _line_at(entries, changes[0]["seq"])
+    assert wine_line is not None and "酒" in wine_line["text"], wine_line
+    text = _line_text(entries)
+    assert "wine_change" not in text and "wine" not in text.lower()
+
+    # 重铸：写「重铸」不写「弃置」，也不落 REFORGE / Reforge / iron_chain 英文。
+    reforge = _iron_session(hand=(_iron_card_id(),))
+    from sgs.state import Reforge
+
+    reforge.submit_answer(next(
+        action for action in reforge.pending.legal_actions if isinstance(action, Reforge)
+    ))
+    _drive_until_human_play(reforge)
+    entries = _narrative(
+        reforge.records(),
+        viewer=0,
+        heroes=reforge.hero_assignments,
+        pack_id=reforge.pack.pack_id,
+    )
+    moves = [
+        record
+        for record in _delta_records(reforge, "card_move")
+        if record.get("reason") == "REFORGE"
+    ]
+    assert len(moves) == 1, moves
+    reforge_line = _line_at(entries, moves[0]["seq"])
+    assert reforge_line is not None and "重铸" in reforge_line["text"], reforge_line
+    assert "弃置" not in reforge_line["text"], reforge_line
+    text = _line_text(entries)
+    for forbidden in ("REFORGE", "Reforge", "iron_chain", "FIRE"):
+        assert forbidden not in text, f"事件流漏出英文枚举 {forbidden!r}：{text}"
+
+
+_M5_NEW_CARD_TYPES = (
+    "fire_slash",
+    "thunder_slash",
+    "wine",
+    "iron_chain",
+    "vine_armor",
+    "silver_lion",
+    "ancient_scimitar",
+    "vermilion_feather_fan",
+    "hualiu",
+)
+"""M5 新牌名（展示契约要逐张核对的闭集；【火攻】/【闪电】的**伤害属性**另由飘字测试钉）。"""
+
+
+def test_m5_new_card_faces_come_from_the_server_display_contract() -> None:
+    """新卡面：火杀 / 雷杀 = 「杀」+ 红 / 蓝；酒 / 铁索 / 五件装备 = 服务端牌名 + 描述 + 槽位 / 范围。"""
+    from sgs_web.display import card_payload
+
+    pack = _iron_pack()
+    names = {card_type.id: card_type.name for card_type in pack.card_types}
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=tuple(range(len(pack.deck.cards))),
+    )
+    faces = {
+        card_type: card_payload(state.card(cards_of_type(pack, card_type)[0]))
+        for card_type in _M5_NEW_CARD_TYPES
+    }
+
+    assert faces["fire_slash"]["display_name"] == "杀", "火杀卡面显示「杀」，不是「火杀」"
+    assert faces["fire_slash"]["attribute"] == "火焰"
+    assert faces["thunder_slash"]["display_name"] == "杀", "雷杀卡面显示「杀」"
+    assert faces["thunder_slash"]["attribute"] == "雷电"
+    for card_type in ("fire_slash", "thunder_slash"):
+        assert faces[card_type]["description"], f"{card_type} 要带服务端描述（悬停读它）"
+
+    for card_type in _M5_NEW_CARD_TYPES[2:]:
+        face = faces[card_type]
+        assert face["display_name"] == names[card_type], (
+            f"{card_type} 的卡面名必须逐字取内容包的牌名：{face['display_name']!r}"
+        )
+        assert face["description"], f"{card_type} 的服务端描述为空"
+
+    equipment = {
+        "ancient_scimitar": ("weapon", 2),
+        "vermilion_feather_fan": ("weapon", 4),
+        "vine_armor": ("armor", None),
+        "silver_lion": ("armor", None),
+        "hualiu": ("horse_defense", None),
+    }
+    for card_type, (slot, attack_range) in equipment.items():
+        face = faces[card_type]
+        assert face["slot"] == slot, f"{card_type} 槽位 = {slot}（服务端 CardRef 派生）"
+        assert face["attack_range"] == attack_range, (
+            f"{card_type} 攻击范围 = {attack_range}（服务端 CardRef 派生）"
+        )
+
+    # 描述只有服务端一份：前端脚本不抄任何新牌名的描述全文（与既有 U1-04d 同一判据）。
+    from sgs_web.descriptions import CARD_DESCRIPTIONS
+
+    static = REPO_ROOT / "tools" / "sgs_web" / "static"
+    scripts = {path.name: path.read_text(encoding="utf-8") for path in static.glob("*.js")}
+    for card_type in _M5_NEW_CARD_TYPES:
+        text = CARD_DESCRIPTIONS[card_type]
+        for name, source in scripts.items():
+            assert text not in source, f"{name} 硬编码了 {card_type} 的描述全文"
+
+
+def test_m5_real_chained_and_wine_states_reach_the_seat_display_contract() -> None:
+    """横置 / 酒是**投影事实**：真实铁索 toggle 与【酒】使用后，座位字段与展示契约同步。"""
+    from sgs_web.display import seat_display
+
+    iron = _iron_session(hand=(_iron_card_id(),), chained=(False, True, False, False))
+    iron.submit_answer(_iron_use_action(iron.pending, (1, 2)))
+    _drive_until_human_play(iron)
+    view = project(iron.engine.state, 0)
+    assert [player.chained for player in view.players[:3]] == [False, False, True], (
+        "座位 1 已横置 ⇒ 重置；座位 2 未横置 ⇒ 横置"
+    )
+    assert seat_display(view.players[0])["chained"] is False
+    assert seat_display(view.players[2])["chained"] is True
+    snapshot = visible_snapshot(iron)
+    assert [player["chained"] for player in snapshot["players"][:3]] == [False, False, True]
+
+    wine = _wine_session()
+    wine.submit_answer(next(
+        action for action in _wine_actions(wine.pending)
+        if action.card.card_id == _wine_card_ids()[0]
+    ))
+    view = project(wine.engine.state, 0)
+    assert view.players[0].wine_active is True, "使用【酒】后投影为真"
+    assert seat_display(view.players[0])["wine_active"] is True
+    assert visible_snapshot(wine)["players"][0]["wine_active"] is True
+
+    pending = wine.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE
+    wine.submit_answer(next(
+        action for action in pending.legal_actions if isinstance(action, EndPhase)
+    ))
+    # 其余 AI 座位的回合也跑完，挂起停在人类的下一个出牌阶段。
+    assert wine.engine.state.player(0).wine_active is False, "回合末清理"
+    view = project(wine.engine.state, 0)
+    assert view.players[0].wine_active is False
+    assert seat_display(view.players[0])["wine_active"] is False
+
+
+# ---------------------------------------------------------------------------
+# M5-bugfix（C / D）：真 HTTP 的点击顺序与预发动纯 CardRef
+#
+# 两条固定构造局面（`tests/support/m5_fixture_server.py`）经**真的** `serve._Handler`
+# 建局 + 应答：不起端口、不起线程，但 HTTP 报文、路由、解析、状态码与 JSON 都是产品代码
+# （与 :func:`_post_with_the_real_handler` 同一条缝）。
+# ---------------------------------------------------------------------------
+
+_FIXTURE_CARD_REF_KEYS = (
+    "card_id",
+    "type",
+    "name",
+    "suit",
+    "rank",
+    "slot",
+    "attack_range",
+    "color",
+    "virtual_sources",
+)
+
+
+def _fixture_session_over_http(name: str):
+    """经真 handler 建一局构造局面；返回 ``(registry, session_id, 建局响应体)``。"""
+    from support.m5_fixture_server import FixtureRegistry
+
+    registry = FixtureRegistry(runs_dir="/tmp/unused")
+    status, body = _post_with_the_real_handler(registry, "/api/sessions", {"fixture": name})
+    assert status == 200, body
+    return registry, body["session_id"], body
+
+
+def _fixture_answer(registry, session_id: str, after: int, action: dict):
+    return _post_with_the_real_handler(
+        registry,
+        f"/api/sessions/{session_id}/answer?after={after}&logs=0",
+        {"action": action},
+    )
+
+
+def test_a_real_http_iron_chain_answer_keeps_the_click_order() -> None:
+    """M5-bugfix（C）：经真 HTTP 提交 ``targets=[3, 2]`` ⇒ 记录里的结算顺序也是 3 → 2。
+
+    界面侧按点击顺序取候选（`answer.js`），服务端这一侧必须**照单接受**并原样结算：
+    记录流里这次 ``UseCard`` 的 ``targets`` 是 ``(3, 2)``，随后两条 ``chained_change``
+    的座位顺序 = 3、2（不是引擎默认的逆时针升序）。无懈窗口由人类放弃（同一局真窗口）。
+    """
+    registry, session_id, body = _fixture_session_over_http("iron_chain")
+    pending = body["pending"]
+    assert pending["kind"] == "PLAY_PHASE"
+    seq = pending["seq"]
+    iron_actions = [
+        action
+        for action in pending["legal_actions"]
+        if action["kind"] == "UseCard" and action["card"]["type"] == "iron_chain"
+    ]
+    orders = {tuple(action["targets"]) for action in iron_actions}
+    assert (3, 2) in orders and (2, 3) in orders, (
+        "铁索声明了 preserve_target_order ⇒ 两种点击顺序都必须是合法候选"
+    )
+    clicked = next(action for action in iron_actions if tuple(action["targets"]) == (3, 2))
+
+    status, answer = _fixture_answer(registry, session_id, body["cursor"], clicked)
+    assert status == 200, answer
+    records = list(answer["records"])
+    cursor, pending = answer["cursor"], answer["pending"]
+    # 无懈窗口是真询问：人类逐个「放弃」，直到铁索的两个目标都结算完。
+    for _ in range(6):
+        if pending is None:
+            break
+        passes = [
+            action for action in pending["legal_actions"] if action["kind"] == "Pass"
+        ]
+        if not passes:
+            break
+        status, answer = _fixture_answer(registry, session_id, cursor, passes[0])
+        assert status == 200, answer
+        records.extend(answer["records"])
+        cursor, pending = answer["cursor"], answer["pending"]
+
+    changed = [
+        record for record in records if record.get("delta_type") == "chained_change"
+    ]
+    assert [record["seat"] for record in changed] == [3, 2], (
+        "铁索按使用者的点击顺序结算：先 3 后 2（记录流里的 chained_change 顺序）"
+    )
+
+    session = registry.get(session_id)
+    accepted = [
+        record
+        for record in session.engine.records
+        if record.kind == "action"
+        and record.accepted
+        and record.action.answers_seq == seq
+    ]
+    assert accepted, "这次使用必须作为 accepted=true 的 action 记录写进记录流"
+    assert accepted[0].action.kind == "UseCard"
+    assert accepted[0].action.targets == (3, 2), "记录里的目标顺序 = 提交的点击顺序"
+
+
+def test_a_real_http_borrowed_sword_preactivation_needs_a_bare_card_ref() -> None:
+    """M5-bugfix（D）：借刀预发动的应答必须用**纯 CardRef**（展示副本被服务端 400 拒绝）。
+
+    报障原文 = ``UseCard.card.attribute Extra inputs are not permitted``：界面曾把展示卡
+    原样塞进 ``UseCard.card``。修复在界面（``core.js:bareCardRef``），**不放宽**服务端
+    ``CardRef``；这条真 HTTP 用例钉住两端：装饰过的应答 400、纯 CardRef 200，且这次使用
+    出现在记录流里（accepted=true），卡面与提交的纯 CardRef 逐字段相同。
+    """
+    registry, session_id, body = _fixture_session_over_http("borrowed_sword")
+    pending = body["pending"]
+    assert pending["kind"] == "PLAY_PHASE"
+    assert "borrowed_sword" in pending["card_preactivations"], (
+        "借刀的可用性只在预发动清单上（裸候选已被收回）"
+    )
+    card = next(
+        face
+        for face in body["snapshot"]["self_hand"]
+        if face["type"] == "borrowed_sword"
+    )
+    assert "display_name" in card and "attribute" in card, "快照里的手牌是带展示字段的副本"
+    seq = pending["seq"]
+
+    decorated = {
+        "kind": "UseCard",
+        "card": card,
+        "targets": [1],
+        "designations": [0],
+        "answers_seq": seq,
+    }
+    status, rejected = _fixture_answer(registry, session_id, body["cursor"], decorated)
+    assert status == 400, rejected
+    assert "Extra inputs are not permitted" in rejected["error"], (
+        "服务端的 CardRef 是严格模型：这正是界面必须投影成纯 CardRef 的原因"
+    )
+
+    bare = {key: card[key] for key in _FIXTURE_CARD_REF_KEYS if key in card}
+    status, answer = _fixture_answer(
+        registry,
+        session_id,
+        body["cursor"],
+        {"kind": "UseCard", "card": bare, "targets": [1], "designations": [0], "answers_seq": seq},
+    )
+    assert status == 200, answer
+    accepted = [
+        record
+        for record in answer["records"]
+        if record["kind"] == "action"
+        and record.get("accepted")
+        and (record.get("action") or {}).get("answers_seq") == seq
+    ]
+    assert accepted, "这次使用必须出现在下发的记录流里（accepted=true）"
+
+    session = registry.get(session_id)
+    action_records = [
+        record
+        for record in session.engine.records
+        if record.kind == "action" and record.accepted and record.action.answers_seq == seq
+    ]
+    assert action_records, "这次使用必须写进记录流"
+    use = action_records[0].action
+    assert use.kind == "UseCard"
+    assert use.card.model_dump(mode="json") == bare, "记录里的牌面就是提交的纯 CardRef"
+    assert use.targets == (1,) and use.designations == (0,), "持刀者 A / 附带指定 Bn 原样落账"
+
+
+# ---------------------------------------------------------------------------
+# U3-04：技能发动派生通道 `skill_events`（spec D8.2 / D9；票 04 的接入层半边）
+#
+# 引擎 / 记录流不动：接入层从**未裁剪**的记录流里派生「已接受、kind=ActivateSkill」
+# 的那几条，给出 `{seq, seat, skill_id, name, targets}`。名字来自接入层展示表
+# （`projection._skill_display_name`），前端不自建 skill_id → 中文映射。
+# 同一份响应的 `records` 仍把 action 裁成 `{kind, answers_seq}`（不泄露 choices / picks）。
+# ---------------------------------------------------------------------------
+
+
+def _fanjian_activation_record(session: Session):
+    """本局里第一条已接受的 `ActivateSkill` 记录（真会话：AI 周瑜反间人类座位）。"""
+    for record in session.records():
+        if getattr(record, "kind", None) != "action" or not getattr(record, "accepted", False):
+            continue
+        if getattr(getattr(record, "action", None), "kind", None) == "ActivateSkill":
+            return record
+    return None
+
+
+def test_the_session_view_derives_skill_events_for_an_accepted_activation() -> None:
+    """真会话（AI 周瑜反间人类座位）：`skill_events` 给出座位 / 技能 id / 中文名 / 目标，
+    且同一响应的 `records` 仍把 action 裁成 `{kind, answers_seq}`（不泄露 choices）。"""
+    from sgs_web.serve import GameRegistry
+
+    session = _session_at_the_fanjian_suit_step(timeout_seconds=None)
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    body = registry.view(session, after=-1, logs_after=0)
+
+    activation = _fanjian_activation_record(session)
+    assert activation is not None, "反间真会话里必须有已接受的 ActivateSkill 记录"
+    action = activation.action
+    assert action.kind == "ActivateSkill"
+    assert action.skill_id == "hero.zhouyu.fanjian"
+    assert action.choices == ("seat:1",), f"真记录里的指定编码：{action.choices}"
+
+    events = [event for event in body["skill_events"] if event["seq"] == activation.seq]
+    assert len(events) == 1, f"这条发动必须恰好派生一条 skill_events：{body['skill_events']}"
+    event = events[0]
+    assert set(event) == {"seq", "seat", "skill_id", "name", "targets"}, (
+        f"skill_events 的字段形状必须稳定：{event}"
+    )
+    assert event == {
+        "seq": activation.seq,
+        "seat": 0,  # 应答这条 ActivateSkill 的那次询问的 actor（记录流已下发的公开事实）
+        "skill_id": "hero.zhouyu.fanjian",
+        "name": "反间",  # 中文名来自接入层展示表（projection._skill_display_name）
+        "targets": [1],  # choices 里 `seat:` 前缀的选项，按出现顺序
+    }, event
+
+    # 同一响应的 records：那条 action 仍被裁成 {kind, answers_seq}，choices / picks 不泄露。
+    visible = [record for record in body["records"] if record.get("seq") == activation.seq]
+    assert len(visible) == 1, f"同一条记录必须原样下发一次：{visible}"
+    clipped = visible[0]
+    assert clipped["kind"] == "action"
+    assert clipped["action"] == {
+        "kind": "ActivateSkill",
+        "answers_seq": action.answers_seq,
+    }, f"records 里的 action 必须仍被裁成 {{kind, answers_seq}}：{clipped['action']}"
+    assert "choices" not in clipped["action"] and "picks" not in clipped["action"], (
+        f"下发体不得泄露具体选择：{clipped['action']}"
+    )
+    # 更宽的判据：这一批里每一条 action 都只有这两个键（不是只裁了反间那一条）。
+    for record in body["records"]:
+        if record.get("kind") == "action" and isinstance(record.get("action"), dict):
+            assert set(record["action"]) == {"kind", "answers_seq"}, (
+                f"action 下发面被放宽了：{record['action']}"
+            )
+
+
+def test_skill_events_follow_the_record_cursor_and_only_cover_accepted_activations() -> None:
+    """派生是**纯函数**且按与 `records` 同一游标增量：`seq > after`、
+    只取已接受的 `ActivateSkill`、`seat:` 前缀按出现顺序解析成座位号。"""
+    from sgs_web.projection import skill_events_after
+
+    state = Session(seed=1, ai="random", timeout_seconds=None, player_count=2).engine.state
+    records = [
+        {"kind": "query", "seq": 1, "query": {"actor": 2}},
+        # 已接受但不是技能发动：不产事件（使用牌 / 打出牌不飘技能名）。
+        {"kind": "action", "seq": 2, "accepted": True,
+         "action": {"kind": "UseCard", "answers_seq": 1, "targets": [0]}},
+        # 未接受的技能发动：不产事件。
+        {"kind": "action", "seq": 3, "accepted": False,
+         "action": {"kind": "ActivateSkill", "answers_seq": 1,
+                    "skill_id": "hero.zhouyu.fanjian", "choices": ["seat:0"]}},
+        {"kind": "query", "seq": 4, "query": {"actor": 1}},
+        # 已接受的技能发动：座位取应答那次询问的 actor；seat: 选项按顺序成 targets。
+        {"kind": "action", "seq": 5, "accepted": True,
+         "action": {"kind": "ActivateSkill", "answers_seq": 4,
+                    "skill_id": "hero.zhouyu.fanjian",
+                    "choices": ["seat:0", "heart", "seat:3"]}},
+        {"kind": "query", "seq": 6, "query": {"actor": 0}},
+        # 装备技（equip.<牌名 id>）走同一张展示表：中文名取装备牌名。
+        {"kind": "action", "seq": 7, "accepted": True,
+         "action": {"kind": "ActivateSkill", "answers_seq": 6,
+                    "skill_id": "equip.qinggang_sword", "choices": []}},
+    ]
+
+    events = skill_events_after(records, after=-1, state=state)
+    assert [event["seq"] for event in events] == [5, 7], (
+        f"只产已接受的 ActivateSkill，且按记录顺序：{events}"
+    )
+    assert events[0] == {
+        "seq": 5, "seat": 1, "skill_id": "hero.zhouyu.fanjian",
+        "name": "反间", "targets": [0, 3],
+    }, events[0]
+    assert events[1]["name"] == "青釭剑", f"装备技的中文名取装备牌名：{events[1]}"
+    assert events[1]["targets"] == [], "没有 seat: 选项 ⇒ targets 为空（制衡这类只飘名）"
+
+    assert [event["seq"] for event in skill_events_after(records, after=5, state=state)] == [7], (
+        "与 records 同一游标：只给 seq > after 的那几条"
+    )
+    assert skill_events_after(records, after=7, state=state) == []
+
+
+def test_skill_events_do_not_special_case_which_skill_specifies_targets() -> None:
+    """票面点名的几类发动走**同一条** `seat:` 解析：仁德 / 青囊 / 结姻 / 离间 有线；
+    制衡没有指定目标 ⇒ `targets` 空（前端只飘名 + 白光，不画线）。"""
+    from sgs_web.projection import skill_events_after
+
+    state = Session(seed=1, ai="random", timeout_seconds=None, player_count=2).engine.state
+    cases = (
+        ("hero.liubei.rende", "仁德", ["seat:1"], [1]),
+        ("hero.huatuo.qingnang", "青囊", ["seat:2"], [2]),
+        ("hero.sunshangxiang.jieyin", "结姻", ["seat:3"], [3]),
+        ("hero.diaochan.lijian", "离间", ["seat:2", "seat:3"], [2, 3]),
+        ("hero.sunquan.zhiheng", "制衡", [], []),
+    )
+    for skill_id, name, choices, targets in cases:
+        records = [
+            {"kind": "query", "seq": 1, "query": {"actor": 0}},
+            {
+                "kind": "action",
+                "seq": 2,
+                "accepted": True,
+                "action": {
+                    "kind": "ActivateSkill",
+                    "answers_seq": 1,
+                    "skill_id": skill_id,
+                    "choices": choices,
+                },
+            },
+        ]
+        events = skill_events_after(records, after=-1, state=state)
+        assert [(event["name"], event["targets"]) for event in events] == [(name, targets)], (
+            f"{skill_id} 的派生：{events}"
+        )

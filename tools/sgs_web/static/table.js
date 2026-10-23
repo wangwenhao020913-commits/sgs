@@ -193,8 +193,22 @@ function renderIdentityPanel(playerCount) {
 
 /* ------------------------------------------------------------------ 牌桌 */
 
+/** 牌桌渲染读的视图（U3-05 / D11）：回放期间 = 逐事件派生的 `state.liveView`，其余时候 =
+ *  权威提交视图（`commitView` 会把 live view 覆盖成它）。
+ *
+ *  回放期间 `pending` **收起**：上一问的「正在响应…」、技能可点态、手牌可点态都属于旧询问，
+ *  新询问要等这批事件播完提交（spec D11）。技能可用性等不可派生字段仍留在 live view 里，
+ *  只是不画 pending 派生的那一层。
+ */
+function tableViewForRender() {
+  if (state.playback && state.liveView) {
+    return { ...state.liveView, pending: null };
+  }
+  return state.view;
+}
+
 function renderTable() {
-  const view = state.view;
+  const view = tableViewForRender();
   if (!view) return;
   const snapshot = view.snapshot;
   $("t-phase").textContent = phaseLabel(snapshot.phase);
@@ -258,6 +272,8 @@ function renderTable() {
 
   renderRingSeats(view, ctx);
   renderSelfSeat(view, ctx);
+  // U3-03：座位节点在这一屏被重建；仍在播的行动者描边 / 体力闪按状态补回类（D13）。
+  syncTransientEffects();
 
   // 快照到达时把处理区并进 `state.effectCards`（同一张牌保留回放期间的使用者标注）；
   // 回放期间不并——那份是逐事件派生的，快照要等播完才提交。
@@ -270,7 +286,10 @@ function renderTable() {
   for (const card of snapshot.self_hand) {
     // 置灰 / 选中**只**由 :func:`cardFace` 从"当前询问 + 这张牌"算出（票 14 §D）：
     // 弃牌、技能手选、提供 B、普通手选四条路都在那一个函数里分流，这里不再各写一份。
-    const face = cardFace(pendingNow, card);
+    // 回放期间不画上一问的选择态（焦点 / 待弃 / 预发动）——它们属于旧询问（D11）。
+    const face = state.playback
+      ? { selectable: false, selected: false, picked: false, slotIndex: -1 }
+      : cardFace(pendingNow, card);
     hand.appendChild(
       cardChip(
         card, face.selected, false, face.selectable,
@@ -283,24 +302,93 @@ function renderTable() {
   renderPromptSkills(view);
 }
 
-/** 效果区 / 处理区：画 `state.effectCards`（回放期间逐事件派生、快照到达时并进来），
- * 并把**描述文本**（`#t-context`）同步成它的说明——两者同源，故不会一个变一个不变。
+/* --------------------------------------------------- 中央舞台（U3-01 / D2–D5） */
+
+/** 牌桌当前的武将名表：底行「座位号·武将名·区域」读 `snapshot.players[].hero_name`
+ *  （U1-02 的展示契约，D10）。缺名时底行只写座位号 + 区域，不编一个名字。
  *
- * 描述文本曾经是服务端下发的"本窗口：谁对谁使用…"，只在询问到达时更新，回放期间会残留；
- * 现在它跟着效果区走：有牌写「处理中：【牌】（谁在使用）」，牌全走了**立即清空**。 */
-function renderProcessing() {
-  renderEffectCards($("t-processing"), state.effectCards || []);
+ *  读的是**牌桌正在渲染的那份视图**（:func:`tableViewForRender`）：回放期间 = 逐事件派生的
+ *  live view，不是上一次提交的 `state.view`——底行与表体因此不会各读一份视图。 */
+function stageHeroNameOf(seat) {
+  const view = tableViewForRender();
+  const snapshot = view && view.snapshot;
+  const player = ((snapshot && snapshot.players) || []).find(
+    (item) => Number(item.seat) === Number(seat));
+  return (player && player.hero_name) || "";
+}
+
+/** 舞台重绘的计时器：**只负责到点重绘**，判定在 :func:`stageLane`（D5）。 */
+let stageTimer = null;
+
+function scheduleStageRender(now = stageNow()) {
+  if (stageTimer !== null) {
+    if (window.clearTimeout) window.clearTimeout(stageTimer);
+    stageTimer = null;
+  }
+  const items = (state.effectCards || []).concat(state.revealedCards || []);
+  const next = nextStageDeadline(items, now);
+  if (next === null) return;
+  stageTimer = window.setTimeout(() => {
+    stageTimer = null;
+    renderProcessing();
+  }, Math.max(0, next - now));
+}
+
+/** 中央舞台：把三组按入台顺序画进**同一个**换行流，并同步描述文本。
+ *
+ * `now` 参数是寿命判定的唯一时间输入（测试直接喂 `now`，不等真实时钟；D15）。
+ */
+function renderProcessing(now = stageNow()) {
+  const box = $("t-processing");
+  const reveals = stageRevealCards(now);
+  const items = stageCardItems(state.effectCards || [], reveals, now);
+  renderEffectCards(box, items, now);
+  bindStageScroll(box);
+  keepStagePinned(box);
   const contextNode = $("t-context");
-  if (contextNode) contextNode.textContent = describeEffect(state.effectCards || []);
-  renderStageAction();
+  if (contextNode) contextNode.textContent = describeStage(now);
+  renderStageAction(now);
+  scheduleStageRender(now);
+}
+
+/** 中央舞台描述文本的**唯一派生点**：处理中 / 展示 / 弃牌三段（`renderPending` 也读它）。 */
+function describeStage(now = stageNow()) {
+  return describeStageGroups(state.effectCards || [], stageRevealCards(now), now);
+}
+
+/** 中央舞台要画的**公开亮牌**（M5-08a / U3-01）：记录流派生的那一份 + 当前询问自带的公开事实。
+ *
+ * 后者（``pending.reveal``）是服务端为「火攻弃牌步」下发的已亮牌：用户刷新 / 断线重连时
+ * 记录可能已不在增量里，但这一步仍要看得见亮出的那一张。两者按牌 id 去重。
+ * 它没有承载帧记录，故按**当前询问还挂着**这个事实展示（不入 `state.revealedCards`，
+ * 换问即消失）；寿命仍由 `stageLane` 判定，不在渲染里特判。
+ */
+function stageRevealCards(now = stageNow()) {
+  const cards = (state.revealedCards || []).slice();
+  // 回放期间不画上一问的 `pending.reveal`：它属于旧询问，舞台此时该显示记录流派生的那几组。
+  const pending = state.playback ? null : (state.view && state.view.pending);
+  const reveal = pending && pending.reveal;
+  const card = reveal && reveal.card;
+  if (card && !cards.some((existing) => String(existing.card_id) === String(card.card_id))) {
+    cards.push({
+      ...stageItem(card, {
+        lane: "showcase",
+        frameId: 0,
+        enteredAt: now,
+        fromZone: { seat: reveal.seat, zone: "hand" },
+      }),
+      revealedBy: reveal.seat,
+    });
+  }
+  return cards;
 }
 
 /** 中央舞台上层 = 当前动作（最近一条应答的人话；没有就写"等待行动"）。
  *
- * **结算完淡出**用「处理区是否为空」当判据（无计时器）：牌还在处理区 = 正在结算（不透明），
- * 牌全走了 = 这条动作已经落定（`.faded` 半透明 + CSS 过渡）。历史仍进事件流。
+ * **结算完淡出**用「处理中组是否还有牌」当判据（无计时器）：牌还在处理区 = 正在结算
+ * （不透明），牌全走了 = 这条动作已经落定（`.faded` 半透明 + CSS 过渡）。历史仍进事件流。
  */
-function renderStageAction() {
+function renderStageAction(now = stageNow()) {
   const textNode = $("t-action-text");
   if (!textNode) return;
   const records = state.logRecords || [];
@@ -312,26 +400,110 @@ function renderStageAction() {
     }
   }
   textNode.textContent = lastAction ? describeAction(lastAction.action) : "等待行动";
+  const processing = (state.effectCards || []).filter(
+    (item) => item.stage && item.stage.lane === "processing" && stageLane(item, now) === "visible",
+  );
   const layer = $("t-action-layer");
-  if (layer) layer.classList.toggle("faded", !(state.effectCards || []).length);
+  if (layer) layer.classList.toggle("faded", processing.length === 0);
 }
 
-/** 把一组"处理区牌"画进任意容器（牌桌 / 回放页共用同一份渲染）。
+/** 舞台行「粘底」（D3）：新牌落位时自动滚到可见；用户手动上滚过之后不再打扰。 */
+function bindStageScroll(box) {
+  if (!box || box.getAttribute("data-stage-scroll") === "bound") return;
+  box.setAttribute("data-stage-scroll", "bound");
+  box.addEventListener("scroll", () => {
+    const top = Number(box.scrollTop) || 0;
+    const height = Number(box.clientHeight) || 0;
+    const bottom = Number(box.scrollHeight) || 0;
+    box.setAttribute("data-stage-pinned", top + height >= bottom - 4 ? "true" : "false");
+  });
+}
+
+function keepStagePinned(box) {
+  if (!box || box.getAttribute("data-stage-pinned") === "false") return;
+  box.scrollTop = Number(box.scrollHeight) || 0;
+}
+
+/** 节点是否带某个类（垫片 / 旧代码用 `className`，`classList` 未必同步；真 DOM 两者一致）。 */
+function nodeHasClass(node, name) {
+  if (!node) return false;
+  if (node.classList && node.classList.contains(name)) return true;
+  return String(node.className || "").split(/\s+/).includes(name);
+}
+
+/** 一张舞台卡面：复用 88×124 卡面（`cardFaceNode`），底行改写成来源，左侧色条由 CSS 给。 */
+function stageCardNode(item, heroNameOf) {
+  const label = stageZoneLabel(item, heroNameOf);
+  const node = cardFaceNode(item, {
+    static: true,
+    bottomLine: label,
+    zoneLabel: label || undefined,
+  });
+  node.classList.add("stage-card");
+  node.setAttribute("data-stage-key", String(item.card_id));
+  return node;
+}
+
+/** 更新一张已经在台上的卡面：道 / 淡出类 / 底行 / 展示者角标（只改变的部分）。 */
+function updateStageCardNode(node, item, now, heroNameOf) {
+  const stage = item.stage;
+  node.setAttribute("data-stage-lane", stage.lane);
+  node.classList.toggle("fading", stageLane(item, now) === "fading");
+  node.classList.toggle("revealed-card", stage.lane === "showcase");
+  const label = stageZoneLabel(item, heroNameOf);
+  // 真 DOM 的 `node.children` 是 HTMLCollection（无 `.find`）；`Array.from` 对数组同样成立。
+  const line = Array.from(node.children || []).find((child) => nodeHasClass(child, "ctype"));
+  if (line) {
+    if (line.textContent !== label) line.textContent = label;
+    if (label) line.setAttribute("data-zone-label", label);
+    else line.removeAttribute("data-zone-label");
+  }
+  const seat = item.revealedBy !== undefined ? item.revealedBy : item.revealSeat;
+  if (stage.lane === "showcase" && seat !== undefined && seat !== null) {
+    node.setAttribute("data-reveal-seat", String(seat));
+  } else {
+    node.removeAttribute("data-reveal-seat");
+  }
+}
+
+/** 把舞台项画进任意容器（牌桌 / 回放页共用这一份渲染）。
  *
- * 回放页的效果区**复用** :func:`applyEffectDelta` 的逐事件派生，渲染也复用这一处——
- * "怎么画处理区"只有一份实现，两个页面不会漂开。
+ * 按 `data-stage-key`（= card_id）**复用节点**：淡出因此是靠同一个节点上的 CSS 过渡，
+ * 而不是每个事件步重建一屏（重建会让过渡从头开始）；被淡出结束的项真的从父节点移除。
+ * 空舞台仍画「（空）」占位（U1-02 的既有读法）。
  */
-function renderEffectCards(box, cards) {
+function renderEffectCards(box, items, now = stageNow(), heroNameOf = stageHeroNameOf) {
   if (!box) return;
-  box.innerHTML = "";
-  if (!cards || !cards.length) {
-    const empty = document.createElement("span");
-    empty.className = "dim";
-    empty.textContent = "（空）";
-    box.appendChild(empty);
+  const wanted = items || [];
+  if (!wanted.length) {
+    const onlyEmpty = box.children.length === 1 && nodeHasClass(box.children[0], "dim")
+      && !nodeHasClass(box.children[0], "stage-card");
+    if (!onlyEmpty) {
+      box.innerHTML = "";
+      const empty = document.createElement("span");
+      empty.className = "dim";
+      empty.textContent = "（空）";
+      box.appendChild(empty);
+    }
     return;
   }
-  for (const card of cards) box.appendChild(cardChip(card, false, true));
+  const existing = new Map();
+  for (const node of [...(box.children || [])]) {
+    const key = node.getAttribute ? node.getAttribute("data-stage-key") : null;
+    if (key) existing.set(key, node);
+    else box.removeChild(node);
+  }
+  const ordered = [];
+  for (const item of wanted) {
+    const key = String(item.card_id);
+    let node = existing.get(key);
+    if (node) existing.delete(key);
+    else node = stageCardNode(item, heroNameOf);
+    updateStageCardNode(node, item, now, heroNameOf);
+    ordered.push(node);
+  }
+  for (const node of existing.values()) box.removeChild(node);
+  for (const node of ordered) box.appendChild(node);
 }
 
 /** 技能按钮右下角的状态补充（预发动 / 点它转化 / 可发动）；详情模态不读它。 */

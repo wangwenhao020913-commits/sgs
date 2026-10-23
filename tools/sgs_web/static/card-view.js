@@ -25,14 +25,16 @@ const EQUIP_SLOT_LABELS = {
   horse_defense: "防马",
 };
 
-/** 展示种类（服务端 `kind` 的稳定报文值）→ 卡面底行 / 右上角标（U1-07）。
+/** 展示种类（服务端 `kind` 的稳定报文值）→ 右上角标（U1-07；U3-01 起**不再有底行文字**）。
  *
  * 普通牌没有角标；虚拟 / 转化牌的角标只在中央舞台 / 处理区出现（手牌拿到的是源实体牌）。
+ * 底行只写**有用的事实**（槽名 / 属性 / 范围；舞台牌另写来源），「普通 / 虚拟 / 转化」
+ * 已由右上角标表达，不再重复（U3-01 / D10）。
  */
 const CARD_KIND_PRESENTATION = {
-  normal: { label: "普通", corner: "" },
-  virtual: { label: "虚拟", corner: "虚" },
-  transformed: { label: "转化", corner: "转" },
+  normal: { corner: "" },
+  virtual: { corner: "虚" },
+  transformed: { corner: "转" },
 };
 
 /** 一张牌的展示种类：读服务端 `kind`；旧载荷 / 合成载荷退回 `virtual_sources`
@@ -93,19 +95,17 @@ function cardHoverText(card) {
   return description;
 }
 
-/** 卡面底部那行：类型 / 属性 / 攻击范围（只拼服务端已给的事实）。
+/** 卡面底部那行：装备槽 / 属性 / 攻击范围（只拼服务端已给的事实）。
  *
- * 类型：装备牌用槽名（武器 / 防具 / 攻马 / 防马），其余用展示种类（普通 / 虚拟 / 转化）。
- * 属性只在**不是普通**时出现（火杀 / 雷杀才标红蓝）；攻击范围只属武器。
+ * 类型（普通 / 虚拟 / 转化）**不再写**：右上角「虚 / 转」已经表达（U3-01 / D10）。
+ * 于是普通牌底行为空行；装备牌写槽名；属性只在**不是普通**时出现（火杀 / 雷杀才标红蓝）；
+ * 攻击范围只属武器。舞台牌由调用方传 `opts.bottomLine` 换成「座位·武将·区域」。
  */
 function cardTypeLine(card) {
   if (!card) return "";
   const parts = [];
   if (card.slot && EQUIP_SLOT_LABELS[card.slot]) {
     parts.push(EQUIP_SLOT_LABELS[card.slot]);
-  } else {
-    const kind = CARD_KIND_PRESENTATION[cardKind(card)];
-    if (kind) parts.push(kind.label);
   }
   if (card.attribute && card.attribute !== "普通") parts.push(card.attribute);
   if (card.attack_range !== null && card.attack_range !== undefined) {
@@ -119,6 +119,8 @@ function cardTypeLine(card) {
  * ``opts.selected`` 选中态（`.sel`，焦点牌）、``opts.picked`` 已选态（`.picked`，弃牌 /
  * 提供 B / 预发动选中的牌）、``opts.usable === false`` 置灰（`.dis`）、``opts.static``
  * 不可点（公开信息）。点击回调由调用方给；静态牌也有悬停全文。
+ * ``opts.bottomLine`` 换掉卡面底行（舞台牌写来源）、``opts.zoneLabel`` 同时给底行挂
+ * `data-zone-label`（U3-01 / D10；手牌 / 候选 / 弹窗不传，仍是槽名 / 属性 / 范围）。
  *
  * **虚拟 / 转化牌（U1-07）**：只在中央舞台 / 处理区出现，右上角标「虚 / 转」；
  * 转化牌左上角另有颜色标记（红 / 黑 / 无），单源同时继承花色 / 点数（引擎给的
@@ -170,9 +172,12 @@ function cardFaceNode(card, opts = {}) {
   const name = document.createElement("span");
   name.className = "cname";
   name.textContent = cardName(card);
+  // 底行：默认 = 槽名 / 属性 / 范围；舞台牌由调用方换成「座位·武将·区域」并带上
+  // `data-zone-label`（U3-01 / D10 的读取口）。
   const type = document.createElement("span");
   type.className = "ctype";
-  type.textContent = cardTypeLine(card);
+  type.textContent = opts.bottomLine !== undefined ? opts.bottomLine : cardTypeLine(card);
+  if (opts.zoneLabel) type.setAttribute("data-zone-label", opts.zoneLabel);
   node.appendChild(name);
   node.appendChild(type);
   // 悬停全文（U1-04b / U1-07）：只读服务端下发的 description 与来源牌；前端不存文案。

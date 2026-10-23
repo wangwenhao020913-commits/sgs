@@ -15,22 +15,37 @@ from itertools import combinations
 
 import pytest
 
+from sgs.data import load_content_pack
+from sgs.effects import CandidateScope
 from sgs.skills import (
     MAX_VIRTUAL_SOURCES,
+    ModifierContext,
     VirtualKind,
     VirtualSourceError,
     transformed_card,
     virtual_card_id,
 )
-from sgs.skills.virtual import WIRE_INT_LIMIT
+from sgs.skills.virtual import LEGACY_KIND_COUNT, WIRE_INT_LIMIT, virtual_candidates
 
 from support import SeatSpec, build_state
 from test_skills import PACK
+
+PACK_EX_160 = load_content_pack(deck_profile="standard_ex_160")
+"""160 张军争档：本副牌堆的来源上界被收紧到 6（M5-01a）。"""
 
 BASE = len(PACK.deck.cards) + 1
 """编码进制 = 牌堆张数 + 1（标准包 108 张 ⇒ 109）。"""
 
 KINDS = tuple(range(len(VirtualKind)))
+
+FIRE_KIND = int(VirtualKind.FIRE_SLASH)
+"""M5-05b 新增的火【杀】命名空间（本票唯一允许追加的 kind）。"""
+
+STANDARD_108_BLOCK = 8 * 109**7
+"""108 张 / 7 张来源的泛化段容量（W4 冻结值；追加 kind 后一字不改）。"""
+
+MILITARY_160_BLOCK = 7 * 161**6
+"""160 张 / 6 张来源的泛化段容量（M5-01a 的收紧；追加 kind 后一字不改）。"""
 
 
 def _capacity(source_count: int, base: int = BASE) -> int:
@@ -204,23 +219,218 @@ def test_the_source_ceiling_is_enforced_at_construction_time():
 
 
 # ---------------------------------------------------------------------------
-# 上界要按**当前进制**校验（W4-fix-5）：票 01 的 ``base = 109`` 不再是"碰巧成立"
+# 上界要按**当前进制**校验（W4-fix-5 / M5-01a）：票 01 的 ``base = 109`` 不再是
+# "碰巧成立"，更大的牌堆按同一条界**收紧**来源上界
 # ---------------------------------------------------------------------------
 
 
 def test_the_current_pack_passes_the_base_check():
-    """正常牌堆 ``base = 109``：构造期检查通过（每个 ``kind`` 都产得出 id）。"""
+    """正常牌堆 ``base = 109``：7 张来源的编码仍撑得住（每个 ``kind`` 都产得出 id）。"""
     count = len(PACK.deck.cards)
     assert BASE == 109, "标准包 108 张 ⇒ 进制 109"
     for kind in KINDS:
         virtual_card_id(kind=kind, sources=(0,), card_count=count)
 
 
-def test_a_base_too_large_for_the_source_ceiling_is_rejected_at_construction_time():
-    """200 张的包 ⇒ ``base = 201``：撑不住 7 张来源，构造期抛错（不静默产 id）。"""
-    with pytest.raises(VirtualSourceError, match="当前进制撑不住这个来源上限"):
+def test_the_standard_108_ids_stay_on_the_frozen_seven_source_block():
+    """108 张档的段容量**一字不改**：仍是 ``8 * 109**7`` 的 7 张来源紧界。
+
+    牌堆自适应只能**收紧**（160 张掉到 6），不能因 53 张档数学上容得下 8 张就改大。
+    这里用冻结算式值直接对账（除了 47 条金录像之外的第二道锁）。
+    """
+    block = 8 * 109**7
+    assert block == 1_462_431_296_653_352, "7 张来源的段容量是 W4 时代冻结的算式值"
+    assert (
+        virtual_card_id(kind=2, sources=(18,), card_count=108)
+        == -2_924_862_593_306_832
+    ), "kind=2 / 单源 18 的 id = -(1 + 2*block + (1*109+18))"
+    assert virtual_card_id(kind=4, sources=(), card_count=108) == -(1 + 4 * block)
+
+
+def test_a_smaller_deck_does_not_raise_the_source_ceiling_above_seven():
+    """53 张档（base=54）数学上容得下 8 张来源，但上限冻结在 7——旧 id 不漂移。"""
+    count = 53
+    virtual_card_id(
+        kind=int(VirtualKind.PEACH), sources=tuple(range(7)), card_count=count
+    )
+    with pytest.raises(VirtualSourceError):
+        virtual_card_id(
+            kind=int(VirtualKind.PEACH), sources=tuple(range(8)), card_count=count
+        )
+
+
+def test_the_military_160_deck_narrows_the_source_ceiling_but_keeps_ids_safe():
+    """160 张军争 ⇒ ``base = 161``：7 张来源越过线上上限，故按 6 张编码。
+
+    这是 M5-01a 的 160 档能跑全 AI 的结构前提：不收紧的话任何转化牌
+    （关羽 / 赵云 / 大乔 / 华佗 / 丈八蛇矛 / 八卦阵）都会在构造期抛错。
+    6 张仍远大于本里程碑的最多两张来源（【丈八蛇矛】）。
+    """
+    count = 160
+    ceiling = 6
+    assert len(KINDS) * (ceiling + 1) * 161**ceiling < WIRE_INT_LIMIT
+    assert len(KINDS) * (ceiling + 2) * 161 ** (ceiling + 1) >= WIRE_INT_LIMIT, (
+        "160 进制下 7 张必须撑不住，否则这条测试没有钉住收紧的边界"
+    )
+
+    for kind in KINDS:
+        for sources in ((), (0,), (0, 1), tuple(range(ceiling))):
+            card_id = virtual_card_id(kind=kind, sources=sources, card_count=count)
+            assert abs(card_id) < WIRE_INT_LIMIT, (kind, sources, card_id)
+
+    with pytest.raises(VirtualSourceError):
         virtual_card_id(
             kind=int(VirtualKind.PEACH),
-            sources=(0, 1),
-            card_count=200,
+            sources=tuple(range(ceiling + 1)),
+            card_count=count,
         )
+
+
+def test_the_candidate_guard_uses_the_deck_specific_source_ceiling():
+    """160 张档：7 张来源的组在**候选阶段**就抛；108 张档仍按 7 张编码。
+
+    候选守卫必须与 :func:`transformed_card` 读**同一个** ``_source_ceiling_for_base``：
+    否则 160 档的 7 张组会先过守卫、再到构造器才抛，"第几道闸拦住"随调用路径漂移。
+    """
+    ctx = ModifierContext(subject=0, owner=0, scope=CandidateScope.DODGE)
+
+    standard = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()])
+    actions = virtual_candidates(
+        standard,
+        ctx,
+        target_type_id="peach",
+        sources=(tuple(range(MAX_VIRTUAL_SOURCES)),),
+        scopes=(CandidateScope.DODGE,),
+    )
+    assert actions, "108 张档的 7 张来源仍是合法候选组（编码上界 7）"
+
+    military = build_state(pack=PACK_EX_160, seats=[SeatSpec(), SeatSpec()])
+    with pytest.raises(VirtualSourceError, match="virtual_candidates"):
+        virtual_candidates(
+            military,
+            ctx,
+            target_type_id="peach",
+            sources=(tuple(range(MAX_VIRTUAL_SOURCES)),),
+            scopes=(CandidateScope.DODGE,),
+        )
+
+
+def test_an_absurd_base_is_rejected_at_construction_time():
+    """牌堆大到连一张来源的编码都撑不住 ⇒ 构造期 fail-closed（不静默产 id）。"""
+    with pytest.raises(VirtualSourceError, match="撑不住"):
+        virtual_card_id(
+            kind=int(VirtualKind.PEACH),
+            sources=(0,),
+            card_count=2**53,
+        )
+
+
+# ---------------------------------------------------------------------------
+# M5-05b：火【杀】命名空间（只追加一个 kind；旧 kind 的 block / offset 一字不改）
+# ---------------------------------------------------------------------------
+
+
+def test_appending_the_fire_slash_kind_does_not_move_the_old_kind_ids():
+    """旧 kind 0–4 的 block / offset 逐字节不变：108 仍按 7 张来源的紧界分块。
+
+    这是本票的硬约束（票面「108 的既有 id 逐字节不变」）：新 kind **只能追加在
+    ``5 * old_block`` 之后**；把 ``KIND_COUNT`` 从 5 加 1 再让 108 的来源上限掉到 6
+    会挪动旧泛化段的 block，这里用冻结算式值逐段对账。
+    """
+    count = 108
+    block = STANDARD_108_BLOCK
+    assert block == 1_462_431_296_653_352, "7 张来源的段容量是 W4 时代冻结的算式值"
+    assert (
+        abs(virtual_card_id(kind=int(VirtualKind.PEACH), sources=(), card_count=count))
+        == 1 + 2 * block
+    )
+    assert (
+        abs(
+            virtual_card_id(
+                kind=int(VirtualKind.PEACH), sources=(18,), card_count=count
+            )
+        )
+        == 1 + 2 * block + (1 * 109 + 18)
+    )
+    assert (
+        abs(
+            virtual_card_id(
+                kind=int(VirtualKind.INDULGENCE), sources=(), card_count=count
+            )
+        )
+        == 1 + 3 * block
+    )
+    assert (
+        abs(virtual_card_id(kind=int(VirtualKind.DUEL), sources=(), card_count=count))
+        == 1 + 4 * block
+    )
+
+
+def test_the_fire_slash_kind_opens_the_next_generalized_block_without_overlap():
+    """新 kind 整段排在旧泛化段之后：``[1+5*block, 6*block]``，且上界仍在线内。
+
+    ``min(|id|) = 1 + 5 * block`` 恰是【决斗】段上界 + 1；段容量仍按 **7 张来源**
+    （108）/ **6 张来源**（160）取紧界——追加 kind 只加段数，不改来源上限。
+    """
+    for count, block in ((108, STANDARD_108_BLOCK), (160, MILITARY_160_BLOCK)):
+        new_min = abs(
+            virtual_card_id(kind=FIRE_KIND, sources=(), card_count=count)
+        )
+        assert new_min == 1 + 5 * block, (count, new_min)
+        assert 6 * block < WIRE_INT_LIMIT, (
+            f"{count} 张档的全体 kind 上界 6*block 必须仍 < WIRE_INT_LIMIT"
+        )
+
+
+def test_the_fire_slash_kind_is_wire_safe_and_does_not_collide_with_the_old_kinds():
+    """108 / 160 两档：新 kind × 0..来源上限的端点 id 全部在线内且不撞旧 kind。"""
+    for count, ceiling in ((108, 7), (160, 6)):
+        seen: dict[int, tuple[int, tuple[int, ...]]] = {}
+        for kind in range(LEGACY_KIND_COUNT, FIRE_KIND + 1):
+            for size in range(ceiling + 1):
+                sources = tuple(range(count - size, count))  # 编码最大的端点
+                card_id = virtual_card_id(
+                    kind=kind, sources=sources, card_count=count
+                )
+                assert abs(card_id) < WIRE_INT_LIMIT, (count, kind, sources, card_id)
+                assert card_id not in seen, (
+                    f"{count} 张档撞 id：{card_id} 同时来自 {seen[card_id]} 与 "
+                    f"{(kind, sources)}"
+                )
+                seen[card_id] = (kind, sources)
+
+
+def test_the_source_ceilings_stay_seven_for_108_and_six_for_160_after_the_new_kind():
+    """追加 kind 后来源上限的读数不变：108 = 7、160 = 6（每个 kind 都产得出 id）。"""
+    for count, ceiling in ((108, 7), (160, 6)):
+        for kind in KINDS:
+            virtual_card_id(
+                kind=kind, sources=tuple(range(ceiling)), card_count=count
+            )
+            with pytest.raises(VirtualSourceError):
+                virtual_card_id(
+                    kind=kind, sources=tuple(range(ceiling + 1)), card_count=count
+                )
+
+
+def test_a_fire_slash_virtual_product_is_constructible_in_the_160_deck():
+    """160 档能构造火【杀】产物：单源继承花色 / 点数 / 颜色，id 在线内且不与普通【杀】撞。"""
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    state = build_state(pack=pack, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    source = next(card.card_id for card in state.cards if card.type == "fire_slash")
+    origin = state.card(source)
+
+    product = transformed_card(state, (source,), "fire_slash")
+
+    assert product.type == "fire_slash" and product.is_virtual
+    assert product.name == "火杀"
+    assert product.virtual_sources == (source,)
+    assert (product.suit, product.rank, product.color) == (
+        origin.suit,
+        origin.rank,
+        origin.color,
+    )
+    assert abs(product.card_id) < WIRE_INT_LIMIT
+    assert product.card_id != transformed_card(state, (source,), "slash").card_id, (
+        "同一来源的普通【杀】产物与火【杀】产物必须分处两个 kind 段"
+    )

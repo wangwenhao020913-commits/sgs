@@ -25,6 +25,8 @@ from typing import Any, TypeAlias
 
 from sgs.state import CardRef, GameState, RespondMode
 
+from .behaviors import DamageNature
+
 __all__ = [
     "CandidateScope",
     "CarrierKind",
@@ -33,7 +35,9 @@ __all__ = [
     "ModifierPoint",
     "ModifierRole",
     "PriorityClass",
+    "WINE_DAMAGE_BONUS",
     "apply_modifiers",
+    "damage_amount",
     "priority_class_of",
     "recover_amount",
     "response_count",
@@ -78,6 +82,10 @@ class PriorityClass(IntEnum):
     CARD_USE = 2
 
 
+WINE_DAMAGE_BONUS = 1
+"""【酒】的加伤值（spec §5.1 酒）：出牌阶段使用后，本回合**下一张【杀】**的来源侧 +1。"""
+
+
 _CARRIER_PRIORITY: dict[CarrierKind, PriorityClass] = {
     CarrierKind.EQUIPMENT: PriorityClass.EQUIPMENT,
     CarrierKind.HERO: PriorityClass.HERO,
@@ -100,7 +108,12 @@ class ModifierPoint(str, Enum):
     - ``EFFECTIVENESS``：第 2 层"无效"（仁王盾）；
     - ``CANDIDATES``：候选行动的追加（丈八蛇矛 / 八卦阵的候选注入）；
     - ``RESPONSE_COUNT``：本次响应窗口**需要几张**（缺省 1；票 08 的 M3 加法）；
-    - ``RECOVER_AMOUNT``：本次回复**回复几点**（缺省 1；票 09 的 M3 加法，【救援】）。
+    - ``RECOVER_AMOUNT``：本次回复**回复几点**（缺省 1；票 09 的 M3 加法，【救援】）；
+    - ``DAMAGE_DEAL_AMOUNT`` / ``DAMAGE_TAKE_AMOUNT``：本次伤害的**来源侧 / 目标侧**数值
+      （M5-03 的加法；【酒】/【古锭刀】与【藤甲】/【白银狮子】的落点）；
+    - ``DAMAGE_CAP``：本次伤害的**目标侧上限**（M5-05a 的加法；【白银狮子】"最多 1 点"）。
+      它**排在** ``DAMAGE_TAKE_AMOUNT`` 之后（见 :func:`damage_amount`）：先让所有加法落地，
+      再封顶——把 cap 写进来源侧链会让"加一点"永远先于"最多一点"，次序就反了。
 
     ``TARGET_COUNT`` 的语义（W7-01）：查询期修正"本牌**最大**目标数"，``current`` 从
     **额定目标数**起（``TargetRule.rated_targets``；【借刀杀人】的被迫使用窗口 base = 1，
@@ -109,6 +122,12 @@ class ModifierPoint(str, Enum):
     ``TargetCount.RATED`` 的牌生效**：``ALL_ALIVE`` / ``ALL_ALIVE_WITH_SELF``（南蛮 /
     万箭 / 桃园 / 五谷）的目标数由候选池决定，查链会造出**非法子集**，故读者
     （``_play_phase`` / ``_respond`` 的 USE 趟 / ``virtual_card_use``）只在 RATED 档派发。
+
+    **伤害数值为什么分成两个挂点**（M5-03）：连环传导的合同要求"来源侧加伤只算一次、
+    传导目标只再吃自己的受到伤害修正"（spec §5.1.1 第 6 条）。两个挂点把这条读法变成
+    **结构事实**：:func:`damage_amount` 只在 ``chain=False`` 的源头伤害帧上派发
+    ``DAMAGE_DEAL_AMOUNT``，而 ``DAMAGE_TAKE_AMOUNT`` 每一帧都派发——传导帧因此不可能
+    重算来源侧加成，不需要任何回调自己判"这次是不是传导"。
     """
 
     COUNT_LIMIT = "COUNT_LIMIT"
@@ -119,6 +138,9 @@ class ModifierPoint(str, Enum):
     CANDIDATES = "CANDIDATES"
     RESPONSE_COUNT = "RESPONSE_COUNT"
     RECOVER_AMOUNT = "RECOVER_AMOUNT"
+    DAMAGE_DEAL_AMOUNT = "DAMAGE_DEAL_AMOUNT"
+    DAMAGE_TAKE_AMOUNT = "DAMAGE_TAKE_AMOUNT"
+    DAMAGE_CAP = "DAMAGE_CAP"
 
 
 class ModifierRole(str, Enum):
@@ -179,6 +201,13 @@ class ModifierContext:
     respond_mode: RespondMode | None = None
     respond_targets: tuple[int, ...] = ()
     flags: dict[str, Any] = field(default_factory=dict)
+    nature: DamageNature | None = None
+    """本次伤害的**属性**（M5-05a 的加法；``DAMAGE_TAKE_AMOUNT`` / ``DAMAGE_CAP`` 用）。
+
+    【藤甲】的"火焰伤害 +1"按它判火 / 雷 / 普通；属性的真源仍是 DAMAGE 帧的
+    ``frame.data["nature"]``（由行为表的 ``PushFrame`` 声明，D2），
+    :func:`damage_amount` 只负责把它透传进本次链，**不给 ``CardRef`` 加属性字段**。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,3 +274,59 @@ def recover_amount(
     """
     ctx = ModifierContext(subject=source, target=target, card=card)
     return apply_modifiers(ModifierPoint.RECOVER_AMOUNT, state, ctx, base)
+
+
+def damage_amount(
+    state: GameState,
+    *,
+    source: int | None,
+    target: int,
+    card: CardRef | None,
+    base: int,
+    chain: bool,
+    deal_bonus: int = 0,
+    nature: DamageNature | None = None,
+) -> int:
+    """本次伤害的**最终数值**（M5-03；M5-05a 补封顶段与属性透传）。
+
+    三段链、一个读者，`DAMAGE` 帧的"受到伤害时"之后（``steps.damage_finalize_amount``）
+    是唯一调用点：
+
+    1. ``DAMAGE_DEAL_AMOUNT``（**来源侧**：酒 / 古锭刀）——只有 ``chain=False`` 的源头伤害
+       才派发。传导帧的基数是初始目标**实际受到**的伤害值，来源侧加成已经烘进那个数里，
+       重算就会翻倍（spec §5.1.1 第 6 条）。派发时 ``ctx.role = SUBJECT``（主体 = 来源）。
+    2. ``DAMAGE_TAKE_AMOUNT``（**目标侧**：藤甲 / 白银）——**每一帧**都派发，包括传导帧；
+       回调按 ``ctx.target == ctx.owner`` 认自己。``ctx.role = TARGET``。
+    3. ``DAMAGE_CAP``（**目标侧上限**：白银狮子"最多 1 点"）——在**所有加法之后**、对
+       **每一帧**派发（M5-05a）。放这里而不是来源侧链，是"先加后封"的顺序事实：
+       ``DAMAGE_TAKE_AMOUNT`` 的 +1 与封顶同属目标侧，封顶读到的必须是加完的数。
+
+    ``deal_bonus``（M5-04）是**使用级**的来源侧加伤（【酒】兑现给本回合下一张【杀】的 +1，
+    由 ``Engine.start_use`` 消费 ``wine_active`` 时写进使用帧、随帧传到伤害帧）。它和
+    ``DAMAGE_DEAL_AMOUNT`` 链上的技能修正一样只在源头帧生效：先烘进 ``base`` 再交给链，
+    加法可交换，故与古锭刀等来源侧 +1 的先后次序不影响总和；``chain=True`` 的门槛把它与
+    链一起挡在外面（传导不重算来源侧）。
+
+    ``nature``（M5-05a）是 DAMAGE 帧的属性（由 ``steps.damage_finalize_amount`` 原样传入），
+    只进 ``ctx.nature`` 供目标侧回调读（藤甲火焰 +1）；属性本身不落到牌上。
+
+    链序仍是 ``(priority_class, skill_id, owner)``；没有命中任何修饰器时返回 ``base``
+    （标准 108 无任何伤害数值修饰器 ⇒ 逐字节不变）。
+    """
+    ctx = ModifierContext(
+        subject=source if source is not None else -1,
+        target=target,
+        role=ModifierRole.TARGET,
+        card=card,
+        nature=nature,
+    )
+    value = base
+    if not chain:
+        value = apply_modifiers(
+            ModifierPoint.DAMAGE_DEAL_AMOUNT,
+            state,
+            replace(ctx, role=ModifierRole.SUBJECT),
+            value + deal_bonus,
+        )
+    value = apply_modifiers(ModifierPoint.DAMAGE_TAKE_AMOUNT, state, ctx, value)
+    return apply_modifiers(ModifierPoint.DAMAGE_CAP, state, ctx, value)

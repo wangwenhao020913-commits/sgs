@@ -36,12 +36,15 @@ from sgs.effects import (
     EffectStep,
     PushFrame,
     Randomness,
+    WINE_COUNT_KEY,
+    WINE_DAMAGE_BONUS,
     apply_hp,
     behavior_for,
     delayed_settle_target,
     designation_actions_for,
     discard_count,
     draw_from_deck,
+    is_slash,
     legal_actions_for,
     locate,
     move_card,
@@ -82,6 +85,8 @@ from sgs.state import (
     ArrangeContext,
     ArrangeQuery,
     CardRef,
+    CardRevealDelta,
+    ChainedChangeDelta,
     DiscardQuery,
     DodgeContext,
     DodgeQuery,
@@ -97,6 +102,7 @@ from sgs.state import (
     Player,
     Query,
     QueryKind,
+    Reforge,
     RespondContext,
     RespondMode,
     RespondQuery,
@@ -114,6 +120,7 @@ from sgs.state import (
     Step,
     UseCard,
     WindowCause,
+    WineChangeDelta,
     Zone,
     ZoneRef,
     next_alive_seat,
@@ -139,7 +146,7 @@ from .journal import (
     wrap_delta,
 )
 from .rng import RandomSource
-from .steps import build_steps
+from .steps import CHAIN_TRIGGER_KEY, build_steps
 from .victory import DeathFact, Side, solve_identity_outcome
 
 __all__ = ["DRAW_COUNT", "INITIAL_HP", "Engine", "Outcome", "instantiate_cards", "new_game"]
@@ -256,7 +263,8 @@ def _child_payload(
     ``use_timing`` 一路带着走，好让"这次使用是从哪个窗口开的"在后面每一层都读得到
     （濒死求桃开的【桃】用它把自己的回复结算与行为表的效果帧区分开，票 21）。
     伤害帧再规范化成官方**六要素**（票 07 §6）：``target`` = 唯一目标、
-    ``channel`` = 使用的实体牌、``nature`` 恒 ``NORMAL``、``chain`` 恒 ``False``。
+    ``channel`` = 使用的实体牌、``chain`` 恒 ``False``；``nature`` 读伤害步的声明
+    （火杀 FIRE / 雷杀 THUNDER），未声明即 ``NORMAL``——属性住行为表，``CardRef`` 无此字段。
 
     ``targets`` 由效果执行器显式给**当前目标**（票 27）：多目标结算里每一层效果都只
     作用于 ``targets[cursor]``，子帧因此不会把整张牌的目标列表继承下去。
@@ -267,6 +275,10 @@ def _child_payload(
         "card": parent_data.get("card"),
         "use_timing": parent_data.get("use_timing"),
     }
+    if "deal_bonus" in parent_data:
+        # 使用级的来源侧伤害加伤（M5-04 的【酒】+1）：随使用帧 → RESOLVE → DAMAGE 一路带走。
+        # 只在**有**这个键时继承，故其它牌的子帧载荷与旧路径逐键相同（帧私有，不进记录流）。
+        data["deal_bonus"] = parent_data["deal_bonus"]
     for key, value in scalars:
         if key in data:
             raise ValueError(f"行为表的标量 {key!r} 会覆盖子帧继承的字段")
@@ -275,7 +287,7 @@ def _child_payload(
         targets_value = data["targets"]
         data["target"] = targets_value[0] if targets_value else None
         data["channel"] = data["card"]
-        data["nature"] = DamageNature.NORMAL
+        data.setdefault("nature", DamageNature.NORMAL)
         data["chain"] = False
     return data
 
@@ -404,6 +416,13 @@ class Engine:
         L4/L5），故挂起状态存在引擎上，由 :meth:`_flush_pending_move` 在"引擎空闲"处
         接着派发完——这是"移动入口不建帧"（R1-Q2）的代价，也是它的唯一落点。
         """
+        self._conduction: dict[str, Any] | None = None
+        """进行中的**连环传导**（M5-03 / spec §5.1.1）：名单 + 游标 + 源伤害事实。
+
+        名单在传导开始时**一次锁定**（``seats`` 元组），此后中途新横置的角色不会进来；
+        轮到时已重置 / 已阵亡的座位在派发前跳过。它是引擎规则处理，不是 ``Timing`` /
+        技能钩子，故不进记录流：回放重跑引擎时会按同一份状态重建。
+        """
         self._turn_data: dict[str, Any] = {}
         self._turn_steps: tuple[Callable[[], Any], ...] = (
             self._turn_before_start,
@@ -523,7 +542,7 @@ class Engine:
         )
         if not dispatch_frame:
             return None
-        if not move_after_providers(self.state):
+        if not move_after_providers(self.state, event=event):
             return None
         frame = Frame(
             kind=FrameKind.RESOLVE,
@@ -725,10 +744,100 @@ class Engine:
         """唯一的出栈收尾：记一条 ``pop``，再跑响应型使用的**成败传播**（票 11 §2）。
 
         ``pop_frame`` 与 :meth:`_step` 都经这里，故"帧的生命周期"在记录流里没有缺口、
-        传播也只可能跑一次。
+        传播也只可能跑一次。DAMAGE 帧出栈后另跑**连环传导**的引擎规则（M5-03）：它是
+        "初始目标的伤害事件处理完之后"由系统决定派发的属性伤害，不是新时机。
         """
         self._emit_frame("pop", popped)
         self._propagate_cancel(popped)
+        if popped.kind is FrameKind.DAMAGE:
+            self._settle_chain_conduction(popped)
+
+    def _conduction_order(self) -> tuple[int, ...]:
+        """**锁定名单**：从当前回合角色起、座位号递增（逆时针、绕环）扫描仍横置的座位。
+
+        扫描**只看横置**（存活与否留给轮到时跳过）：这样"名单里的角色在轮到他之前死亡"
+        与"一开始就阵亡"走同一条跳过路径。当前回合角色若仍横置则排第一，否则第一个
+        横置角色自然成为起点。初始目标此刻已重置，故不会出现在名单里。
+        """
+        total = len(self.state.players)
+        if total <= 0:
+            return ()
+        start = self.state.turn_seat if self.state.turn_seat is not None else 0
+        return tuple(
+            (start + offset) % total
+            for offset in range(total)
+            if self.state.player((start + offset) % total).chained
+        )
+
+    def _settle_chain_conduction(self, popped: Frame) -> None:
+        """DAMAGE 帧出栈后的连环传导（M5-03 / spec §5.1.1 的逐条裁定）。
+
+        - **触发**：只有源头属性伤害（``chain=False``、火 / 雷）命中横置角色——判据由
+          :func:`~sgs.engine.steps.damage_finalize_amount` 写进帧私有 ``chain_trigger``；
+        - **锁定**：初始目标的伤害事件处理完之后才建名单（``_conduction_order``），此后
+          中途新横置的不进名单；轮到时已重置 / 已阵亡的跳过；
+        - **派发**：名单逐个压 **DAMAGE 帧**（``chain=True``）：来源 / 属性 / 渠道沿用源伤害，
+          数量 = 初始目标**实际受到**的伤害值（帧私有 ``amount`` 已过修饰器链）；
+        - **不再传导**：传导帧的 ``chain_trigger`` 恒假（``chain=True``），故本方法只会在
+          下一帧出栈时推进游标，不会开第二轮。
+        """
+        conduction = self._conduction
+        if conduction is not None and conduction["frame_id"] == popped.frame_id:
+            conduction["cursor"] += 1
+            self._push_next_conduction()
+            return
+        if self.finished or self.pending_outcome is not None:
+            return
+        if not popped.data.get(CHAIN_TRIGGER_KEY):
+            return
+        seats = self._conduction_order()
+        if not seats:
+            return
+        self._conduction = {
+            "seats": seats,
+            "cursor": 0,
+            "frame_id": 0,
+            "source": popped.data.get("source"),
+            "nature": popped.data.get("nature"),
+            "amount": popped.data["amount"],
+            "channel": popped.data.get("channel"),
+            "card": popped.data.get("card"),
+            "use_timing": popped.data.get("use_timing"),
+        }
+        self._push_next_conduction()
+
+    def _push_next_conduction(self) -> None:
+        """按锁定名单派发下一个传导伤害；名单走完即清空传导状态。"""
+        conduction = self._conduction
+        assert conduction is not None
+        if self.finished or self.pending_outcome is not None:
+            self._conduction = None
+            return
+        while conduction["cursor"] < len(conduction["seats"]):
+            seat = conduction["seats"][conduction["cursor"]]
+            player = self.state.player(seat)
+            if not player.alive or not player.chained:
+                # 轮到时已阵亡 / 已解除横置 ⇒ 跳过（名单本身不重算）。
+                conduction["cursor"] += 1
+                continue
+            frame = self.push_frame(
+                FrameKind.DAMAGE,
+                {
+                    "source": conduction["source"],
+                    "targets": (seat,),
+                    "card": conduction["card"],
+                    "channel": conduction["channel"],
+                    "use_timing": conduction["use_timing"],
+                    "target": seat,
+                    "nature": conduction["nature"],
+                    "chain": True,
+                    "amount": conduction["amount"],
+                },
+                timing=Timing.DAMAGE_DEAL,
+            )
+            conduction["frame_id"] = frame.frame_id
+            return
+        self._conduction = None
 
     def _propagate_cancel(self, popped: Frame) -> None:
         """出栈钩子：响应型使用的 RESOLVE 帧出栈即向**它指向的那一层**传播成败（票 11 §2）。
@@ -947,9 +1056,11 @@ class Engine:
         ``USE_CHOOSE_TARGET``，濒死求桃里出【桃】时是 ``NEAR_DEATH_AT``
         （票 04 §4 的"从哪回来"要读得出是哪个窗口开的使用）。
 
-        **目标顺序在这里定格为"从当前回合角色起、逆时针"**（票 15 §4）：B / C 两段都读
-        同一个排好序的列表；使用者与当前回合角色不同（【借刀杀人】迫使的【杀】）时仍按
-        当前回合角色起算（U-15-1，程序化约定）。
+        **目标顺序在这里定格**（票 15 §4）：B / C 两段都读同一个列表；缺省是“从当前回合
+        角色起、逆时针”（使用者与当前回合角色不同（【借刀杀人】迫使的【杀】）时仍按当前
+        回合角色起算，U-15-1）。行为表声明了 ``preserve_target_order`` 的牌（【铁索连环】）
+        例外——它的特殊规则是“按使用者选择的顺序结算”（spec §5.1.2），故原样使用
+        ``targets``；多目标【杀】没有这条声明，仍走通用排法。
 
         ``cancel_target`` 只给**响应型使用**（无懈一类的牌）用（票 11 §2）：记下这次使用指向
         "哪一层的哪个目标"（``(被挂起帧 id, 目标座位)``），由子帧随 ``use_push_resolve``
@@ -957,29 +1068,54 @@ class Engine:
 
         ``counts=False`` 用于**不计次数**的使用（【青龙偃月刀】的续杀，票 12）。
 
+        计数写在**行为表声明的计数键**上（``CardBehavior.count_key``），而不是写死牌型：
+        普通【杀】/ 火【杀】/ 雷【杀】因此共用一个「本回合已用【杀】」计数（M5-02）。
+
         ``designations``（W5-02a）是**附带指定**（借刀的 Bn）：原样带进 USE 帧，再随
         :func:`~sgs.engine.steps.use_push_resolve` 的 ``dict(frame.data)`` 继承进 RESOLVE
         帧，由 :func:`~sgs.effects.resolve_borrowed_sword` 读出。空元组不落帧键——没有
         附带指定的每一条使用与旧路径的帧载荷逐键相同。
+
+        **【酒】的加伤在"使用"时兑现**（M5-04，spec §5.1 酒）：若来源座位正处于
+        ``wine_active`` 且这次使用属于【杀】家族（:func:`~sgs.effects.is_slash`，含转化 /
+        虚拟产物），就把 +1 作为本次使用的**来源侧**加伤写进帧（``deal_bonus``，随子帧
+        一路传到伤害帧的 :func:`~sgs.effects.damage_amount`），并**立刻消费**状态
+        （落一条 ``wine_change``）。兑现点必须是使用而不是造成伤害：被【闪】抵消 / 未造成
+        伤害的那张【杀】同样消耗掉加伤，不能留给下一张。其它牌（锦囊 / 其它基本牌）与
+        打出都不消费、也不加伤。引擎只问"是不是【杀】家族"，不认识"酒"这个牌名。
         """
+        behavior = behavior_for(card)
         if counts:
             counts_by_type = self.state.player(source).card_use_counts
-            counts_by_type[card.type] = counts_by_type.get(card.type, 0) + 1
+            key = behavior.count_key
+            counts_by_type[key] = counts_by_type.get(key, 0) + 1
+        deal_bonus = 0
+        if is_slash(behavior) and self.state.player(source).wine_active:
+            deal_bonus = WINE_DAMAGE_BONUS
         data: dict[str, Any] = {
             "card": card,
             "source": source,
-            "targets": order_targets(self.state, tuple(targets)),
+            "targets": (
+                tuple(targets)
+                if behavior.preserve_target_order
+                else order_targets(self.state, tuple(targets))
+            ),
             "use_timing": use_timing,
         }
+        if deal_bonus:
+            data["deal_bonus"] = deal_bonus
         if designations:
             data["designations"] = tuple(designations)
         if cancel_target is not None:
             data["cancel_target"] = cancel_target
-        return self.push_frame(
+        frame = self.push_frame(
             FrameKind.USE,
             data,
             timing=use_timing if use_timing is not None else Timing.USE_CHOOSE_TARGET,
         )
+        if deal_bonus:
+            self.set_wine_active(frame, source, False)
+        return frame
 
     def current_target(self, frame: Frame) -> int:
         """C 段的**当前目标**：``targets[cursor]``；空目标（响应牌）退回使用者。"""
@@ -1007,6 +1143,24 @@ class Engine:
         return self.push_frame(
             FrameKind.SKILL,
             self._skill_payload(action, source),
+            timing=Timing.PHASE_PLAY_IDLE,
+        )
+
+    def start_reforge(self, action: Reforge, *, source: int) -> Frame:
+        """发动重铸：压一个 **MOVE 帧**跑"弃置 → 摸一张"（M5-03 / 决策 D6）。
+
+        重铸不是使用，故不建 USE / RESOLVE 帧（不算使用锦囊、不进 use count、不开无懈窗口）。
+        MOVE 帧只做两件帧内的事：``reason = REFORGE`` 的移动（会派发「失去牌后」，钩子可
+        提问并暂停）与随后的摸一张——两步走保证重铸自己的摸牌排在「失去牌后」之后。
+        """
+        return self.push_frame(
+            FrameKind.MOVE,
+            {
+                "source": source,
+                "targets": (),
+                "card": action.card,
+                "use_timing": Timing.PHASE_PLAY_IDLE,
+            },
             timing=Timing.PHASE_PLAY_IDLE,
         )
 
@@ -1807,6 +1961,17 @@ class Engine:
         if self.state.turn_seat == seat:
             self._turn_data["skip_play"] = True
 
+    def skip_draw_phase(self, seat: int) -> None:
+        """让 ``seat`` 的**摸牌阶段**整体跳过（M5-06【兵粮寸断】的判定后果）。
+
+        与 :meth:`skip_play_phase` 同姿态：只对**当前回合角色**生效（判定阶段跑在该角色
+        自己的回合里），跳过由 :meth:`_phase_draw_start` 消费——连阶段体（多摸牌类技能）
+        与两条边界一并越过，直奔出牌阶段。**不是**技能钩子，故不新增 ``Timing``：
+        它是阶段推进的状态（spec §5.1.4 / 票面纪律）。
+        """
+        if self.state.turn_seat == seat:
+            self._turn_data["skip_draw"] = True
+
     def consume_delayed_card(self, frame: Frame) -> None:
         """把**延时锦囊本体**标记为"已消耗"：判定阶段循环的收尾据此送它进弃牌堆。
 
@@ -1968,7 +2133,7 @@ class Engine:
         上层帧出栈），故不使用帧自己的私有标记；载荷写进 ``frame.data`` 供钩子读。
         """
         if frame is not None:
-            if not move_after_providers(self.state):
+            if not move_after_providers(self.state, event=event):
                 # **惰性守卫**（票 07 §要做什么 2）：没有提供者 ⇒ 一个时机事件都不发、
                 # 一个钩子都不跑。无武将模式的记录流因此**逐字节不变**（M2 的 34 条基准
                 # 不重录）——这是本票的硬约束，比"每条移动都落一条记录"更重要。
@@ -2003,7 +2168,7 @@ class Engine:
                 frame.data.pop("_pending_move_timing", None)
             return result
         # 无承载帧（弃牌阶段等）：先判惰性守卫，再落记录并派发。
-        if not move_after_providers(self.state):
+        if not move_after_providers(self.state, event=event):
             return None
         if self._move_recorded != key:
             self.emit_timing(
@@ -2116,6 +2281,63 @@ class Engine:
         delta = apply_hp(self.state, ctx, seat, value)
         self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
         return delta
+
+    def set_chained(self, frame: Frame | None, seat: int, chained: bool) -> bool:
+        """写一个座位的**横置**状态并落一条 ``chained_change``（M5-03 的唯一写入口）。
+
+        返回值 = 状态真的变了吗。铁索连环的 toggle 与属性伤害的"结算后立即重置"都经这里，
+        故"重置在伤害事件内、先于 `DAMAGE_AFTER_TAKE`"由**调用点**决定，这里只管写状态 +
+        记 delta：``frame`` 是承载帧（重置 = LIFE_DECREASE 帧，记录流里因此与那条
+        ``hp_change`` 同帧），帧外写状态时为 ``None``（记录坐标 ``frame_id = 0``）。
+        """
+        player = self.state.player(seat)
+        if player.chained == chained:
+            return False
+        player.chained = chained
+        self.emit_delta(
+            ChainedChangeDelta(seat=seat, chained=chained),
+            frame_id=(frame.frame_id if frame is not None else 0),
+            depth=self.stack.depth,
+        )
+        return True
+
+    def set_wine_active(self, frame: Frame | None, seat: int, active: bool) -> bool:
+        """写一个座位的【酒】加伤状态并落一条 ``wine_change``（M5-04 的唯一写入口）。
+
+        返回值 = 状态真的变了吗。三处调用点：出牌阶段的【酒】效果置位（RESOLVE 帧）、
+        下一张【杀】被使用时消费（USE 帧）、回合末（含回合内阵亡跳段）与下一回合开始时的
+        清理（帧外，``frame=None`` → 记录坐标 ``frame_id = 0``）。集中到这一个口子，
+        "状态变化必有 delta"与"回放可重建"因此不靠调用点自觉。
+        """
+        player = self.state.player(seat)
+        if player.wine_active == active:
+            return False
+        player.wine_active = active
+        self.emit_delta(
+            WineChangeDelta(seat=seat, active=active),
+            frame_id=(frame.frame_id if frame is not None else 0),
+            depth=self.stack.depth,
+        )
+        return True
+
+    def _clear_wine_active(self, seat: int) -> None:
+        """把一个座位的【酒】加伤清掉（回合的收尾点与下一回合起点各调一次，幂等）。"""
+        if self.state.player(seat).wine_active:
+            self.set_wine_active(None, seat, False)
+
+    def reveal_card(self, frame: Frame | None, seat: int, card: CardRef) -> None:
+        """把 ``seat`` 的一张**手牌**标成公开事实并落一条 ``card_reveal``（M5-06）。
+
+        唯一写入口：目前只有【火攻】的"目标亮 1 张"调它。**只揭示、不移动**——牌仍留在
+        原区（所以不是 ``card_move``、不进牌守恒），也**不写任何"已知"状态**：亮牌不是
+        持久知识，记录流里的这一条就是全部公开事实（spec §5.1.4 / D10）。``frame`` 是承载
+        帧（【火攻】的 RESOLVE 帧），记录坐标因此与那次结算的其它 delta 同帧。
+        """
+        self.emit_delta(
+            CardRevealDelta(seat=seat, card=card),
+            frame_id=(frame.frame_id if frame is not None else 0),
+            depth=self.stack.depth,
+        )
 
     # -- 询问 ---------------------------------------------------------------
 
@@ -2823,6 +3045,9 @@ class Engine:
         seat = self.state.turn_seat
         if seat is not None:
             self.state.player(seat).card_use_counts.clear()
+            # 【酒】加伤只在本回合有效（M5-04）：回合收尾已清，这里再幂等兜一次——
+            # 两处都走唯一写入口，故"清掉"与"从来没置过"的记录形态相同（无 delta）。
+            self._clear_wine_active(seat)
         self.emit_timing(Timing.TURN_START, actor=seat)
 
     def _phase_prepare(self) -> str | None:
@@ -2984,6 +3209,11 @@ class Engine:
 
     def _phase_draw_start(self) -> None:
         self.state.phase = Phase.DRAW
+        if self._turn_data.pop("skip_draw", False):
+            # 【兵粮寸断】判定非梅花 ⇒ **跳过摸牌阶段**（官方"跳过其摸牌阶段"）：
+            # 阶段体与边界一并越过，直奔出牌阶段（M5-06；与【乐不思蜀】跳过出牌阶段同形）。
+            self._skip_to(self._phase_play_start)
+            return
         self.emit_timing(Timing.PHASE_DRAW_START, actor=self.state.turn_seat)
 
     def _phase_draw(self) -> str | None:
@@ -3050,6 +3280,10 @@ class Engine:
             # 主动技（票 04）：压 SKILL 帧跑发动主体，出栈后回到本步重新询问。
             self.start_skill(action, source=seat)
             return "stay"
+        if isinstance(action, Reforge):
+            # 重铸（M5-03）：压 MOVE 帧跑"弃置 + 摸一张"，出栈后回到本步重新询问。
+            self.start_reforge(action, source=seat)
+            return "stay"
         # 使用一张牌：压入 USE 帧；子帧结算完再回到本步重新询问（票 07 §3）。
         # W5-02a：借刀的附带指定（Bn）随动作进帧，其余每一条使用都是空元组。
         self.start_use(
@@ -3104,6 +3338,18 @@ class Engine:
         self.emit_timing(Timing.TURN_END, actor=self.state.turn_seat)
 
     def _turn_after_end(self) -> None:
+        # 回合彻底走完（含"回合内阵亡 ⇒ 跳过整段、直接落到本步"的路径）才清【酒】加伤：
+        # 它只在**本回合**有效，不能留到别人的回合里（M5-04）。清理走唯一写入口，
+        # 故置过而没用掉的那一份会留下一条 ``wine_change = false``（回放据此重建）。
+        seat = self.state.turn_seat
+        if seat is not None:
+            self._clear_wine_active(seat)
+        # 【酒】的"每回合一次"按**游戏回合**记（spec §5.1 酒）：濒死自救可能发生在别人的
+        # 回合、记在濒死者身上，故回合末必须清**所有座位**的 wine 计数键，不能只清回合角色。
+        # 只动这一个键：其它键（【杀】等）仍按座位自己的 ``TURN_START`` 重置，回合外
+        # ``check_count``（【借刀杀人】迫使的【杀】）的可见面因此一字不变。
+        for player in self.state.players:
+            player.card_use_counts.pop(WINE_COUNT_KEY, None)
         self.emit_timing(Timing.TURN_AFTER_END, actor=self.state.turn_seat)
 
     def _turn_seat(self) -> int:

@@ -43,6 +43,7 @@ from sgs.engine import record_json
 from sgs.state import CardRef
 
 from .display import card_display
+from .visibility import cards_visible
 
 __all__ = ["NARRATIVE_SEGMENT_CLASSES", "NO_VIEWER", "build_narrative", "narrative_after"]
 
@@ -71,11 +72,6 @@ NARRATIVE_SEGMENT_CLASSES: Final[tuple[str, ...]] = (
 ``tests/support/ui_smoke.mjs`` 的 ``colorClasses``、``static/style.css`` 的 ``.nar-*``。
 新增一种颜色要四处同批改；任何一处单独漂移都不会被编译期拦住。
 """
-
-PUBLIC_ZONES: Final[frozenset[str]] = frozenset(
-    {"discard", "processing", "equip", "judge"}
-)
-"""牌面一旦进入这些区域就是公开事实；手牌 / 牌堆仍是隐藏区。"""
 
 _SIDE_LABELS: Final[dict[str, str]] = {
     "lord": "主公方",
@@ -185,6 +181,11 @@ class _Narrator:
         self.pending_damage: tuple[int, str] | None = None
         self.damage_class = "dmg"
         self.last_query_actor: int | None = None
+        # M5-08a：【火攻】亮牌（`card_reveal`）按**帧**记「亮出后有没有弃牌 / 放弃」。
+        # 引擎在"无同花色"时根本不发弃牌询问（自动放弃），故这条只能从记录流派生：
+        # 同一帧里出现 Pass 动作 = 显式放弃；出现手牌 → 弃牌堆的移动 = 弃置；
+        # 两者都没有 ⇒ 自动放弃（无可弃的同花色牌）。纯展示派生，不写状态。
+        self.reveal_frames: dict[int, dict[str, bool]] = {}
 
     # -- 单条记录 -----------------------------------------------------------
 
@@ -251,6 +252,9 @@ class _Narrator:
         if timing == "DEATH_ON":
             self._line(seq, [*self._seat(record.get("actor")), _act(" 阵亡")])
             return
+        if timing == "RESOLVE_END":
+            self._fire_attack_end(record, seq)
+            return
         if timing in ("DAMAGE_END", "TURN_END"):
             self.pending_damage = None
 
@@ -283,6 +287,12 @@ class _Narrator:
             self._hp_change(record, seq)
         elif delta_type == "card_move":
             self._card_move(record, seq)
+        elif delta_type == "card_reveal":
+            self._card_reveal(record, seq)
+        elif delta_type == "chained_change":
+            self._chained_change(record, seq)
+        elif delta_type == "wine_change":
+            self._wine_change(record, seq)
         elif delta_type == "identity_reveal":
             label = _IDENTITY_BY_VALUE.get(str(record.get("identity")))
             if label is None:
@@ -294,6 +304,76 @@ class _Narrator:
                     _act(" 亮明身份："),
                     _act(label),
                 ],
+            )
+
+    def _card_reveal(self, record: dict[str, Any], seq: int) -> None:
+        """一张手牌成为公开事实（M5-06 的【火攻】亮牌）：写一行，并记住它所在帧。"""
+        if not self.started:
+            return
+        seat = record.get("seat")
+        card = record.get("card")
+        if seat is None or not isinstance(card, dict):
+            return
+        self._line(seq, [*self._seat(seat), _act(" 亮出"), *_cards((card,))])
+        frame_id = record.get("frame_id")
+        if isinstance(frame_id, int):
+            self.reveal_frames[frame_id] = {"passed": False, "discarded": False}
+
+    def _chained_change(self, record: dict[str, Any], seq: int) -> None:
+        """横置 / 重置（M5-03 的 ``chained_change``）：一行中文，不读牌名、不判原因。
+
+        delta 只给"哪个座位、新值是什么"；铁索的 toggle 与属性伤害命中的结算后重置
+        都是同一个状态变化，事件流因此只写「横置」/「重置」，不替引擎解释是谁造成的。
+        """
+        if not self.started:
+            return
+        seat = record.get("seat")
+        if seat is None:
+            return
+        self._line(
+            seq,
+            [*self._seat(seat), _act(" 横置" if record.get("chained") else " 重置")],
+        )
+
+    def _wine_change(self, record: dict[str, Any], seq: int) -> None:
+        """【酒】加伤状态（M5-04 的 ``wine_change``）：置位 / 消失各一行中文。
+
+        ``active=True`` = 出牌阶段使用【酒】置上加伤（濒死自救不产生这条）；
+        ``active=False`` = 下一张【杀】兑现或回合末清理——玩家因此看得见"加伤还在不在"。
+        """
+        if not self.started:
+            return
+        seat = record.get("seat")
+        if seat is None:
+            return
+        text = " 进入【酒】状态" if record.get("active") else " 的【酒】加伤消失"
+        self._line(seq, [*self._seat(seat), _act(text)])
+
+    def _mark_reveal_action(self, kind: str) -> None:
+        """亮牌之后、结算结束之前的 ``Pass`` ⇒ 显式放弃（有同花色也可以放弃）。"""
+        if kind != "Pass":
+            return
+        for state in self.reveal_frames.values():
+            state["passed"] = True
+
+    def _fire_attack_end(self, record: dict[str, Any], seq: int) -> None:
+        """【火攻】结算结束：把「亮出之后发生了什么」补成一行。
+
+        - 弃了一张同花色牌 ⇒ 弃置行已经由 ``card_move`` 写过，这里不再补；
+        - 显式放弃 ⇒ 写「放弃」；
+        - 两者都没有 ⇒ 引擎没发弃牌询问（没有同花色）⇒「放弃（无可弃的同花色牌）」。
+        """
+        frame_id = record.get("frame_id")
+        state = self.reveal_frames.pop(frame_id, None) if isinstance(frame_id, int) else None
+        if state is None or state["discarded"]:
+            return
+        source = record.get("source")
+        if state["passed"]:
+            self._line(seq, [*self._subject(source), _act(" 放弃")])
+        else:
+            self._line(
+                seq,
+                [*self._subject(source), _act(" 放弃（无可弃的同花色牌）")],
             )
 
     def _hp_change(self, record: dict[str, Any], seq: int) -> None:
@@ -348,13 +428,25 @@ class _Narrator:
             return
         to_zone = record.get("to_zone") or {}
         to = to_zone.get("zone")
+        frame_id = record.get("frame_id")
+        if (
+            to == "discard"
+            and isinstance(frame_id, int)
+            and frame_id in self.reveal_frames
+        ):
+            self.reveal_frames[frame_id]["discarded"] = True
         if to == "hand":
             self._gain(record, seq, cards)
             return
         if to == "discard":
             # 使用 / 判定牌离开处理区已有各自的行；其余弃置（弃牌阶段、拆牌、死亡清场）
             # 是公开事实，牌名可以写。
-            if record.get("reason") in ("USE", "JUDGE"):
+            reason = record.get("reason")
+            if reason == "REFORGE":
+                # 重铸是**失去**不是弃置（M5-08b / §5.1.3）：事件流写「重铸」。
+                self._reforge(record, seq, cards)
+                return
+            if reason in ("USE", "JUDGE"):
                 return
             self._discard(record, seq, cards)
             return
@@ -368,7 +460,7 @@ class _Narrator:
         if seat is None:
             return
         segments = [*self._subject(seat), _act(" 获得")]
-        if _cards_visible(record, self.viewer):
+        if cards_visible(record, self.viewer):
             segments.extend(_cards(cards))
         else:
             segments.append(_act(f" {len(cards)} 张牌"))
@@ -397,6 +489,20 @@ class _Narrator:
             segments = [*self._subject(owner), _act(" 弃置"), *_cards(cards)]
         self._line(seq, segments)
 
+    def _reforge(
+        self, record: dict[str, Any], seq: int, cards: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """重铸（M5-08b / §5.1.3）：**失去**一张牌并摸一张，事件流写「重铸」不写「弃置」。"""
+        from_zone = record.get("from_zone") or {}
+        owner = record.get("owner")
+        origin = from_zone.get("seat")
+        if owner is None:
+            owner = origin
+        if owner is None:
+            self._line(seq, [_act("重铸"), *_cards(cards)])
+            return
+        self._line(seq, [*self._subject(owner), _act(" 重铸"), *_cards(cards)])
+
     # -- 应答 ---------------------------------------------------------------
 
     def _action(self, record: dict[str, Any], seq: int) -> None:
@@ -407,6 +513,7 @@ class _Narrator:
         actor = self.last_query_actor
         if actor is None:
             return
+        self._mark_reveal_action(str(kind))
         if kind == "ActivateSkill":
             name = self._skill_name(str(action.get("skill_id") or ""))
             self._line(
@@ -554,27 +661,6 @@ def _damage_class(cards: Sequence[Mapping[str, Any]]) -> str:
         if display.get("attribute") == "雷电":
             return "dmg-thunder"
     return "dmg"
-
-
-def _cards_visible(record: Mapping[str, Any], viewer: int | None) -> bool:
-    """这条牌移动的**牌面身份**对查看者是否公开。
-
-    公开区（弃牌堆 / 处理区 / 装备区 / 判定区）里出现过的牌是公开事实；只进出隐藏区
-    （牌堆 / 手牌）的牌只给张数。查看者本人的手牌与他经手转交的牌仍可见——那不是泄露。
-    """
-    if viewer is None:
-        return True
-    to_zone = record.get("to_zone") or {}
-    from_zone = record.get("from_zone") or {}
-    to = to_zone.get("zone")
-    source = from_zone.get("zone")
-    if to in PUBLIC_ZONES or source in PUBLIC_ZONES:
-        return True
-    if to == "hand" and to_zone.get("seat") == viewer:
-        return True
-    if source == "hand" and from_zone.get("seat") == viewer:
-        return True
-    return False
 
 
 def _divider(seq: int, text: str) -> dict[str, Any]:
