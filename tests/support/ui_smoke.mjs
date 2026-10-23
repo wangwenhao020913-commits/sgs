@@ -12574,6 +12574,39 @@ const bottomSkillIds = () => $("t-skills").children.filter(
       && byClass($("table-stage"), "skill-float").length === 0
       && byClass($("table-stage"), "hero-flash").length === 0,
     `lines=${byClass($("table-stage"), "target-line").length} floats=${byClass($("table-stage"), "skill-float").length}`);
+
+  // 真 DOM 回归（U3 验收缺陷）：`node.children` 是 HTMLCollection——只有 length / item，
+  // **没有 `.find`**。舞台卡复用更新（renderEffectCards → updateStageCardNode）曾写成
+  // `(node.children || []).find(...)`，真浏览器里每次更新都抛 TypeError、整场舞台不渲染；
+  // 垫片的 children 是数组，所以这里显式换成没有 `.find` 的类数组，喂同一条更新路径。
+  const reused = documentShim.createElement("button");
+  reused.className = "card face kind-normal static stage-card";
+  reused.setAttribute("data-stage-key", "903");
+  const reusedLine = documentShim.createElement("span");
+  reusedLine.className = "ctype";
+  reusedLine.textContent = "旧底行";
+  reused.appendChild(reusedLine);
+  reused.children = { 0: reusedLine, length: 1 };  // 类数组：没有 find
+  const reusedBox = documentShim.createElement("div");
+  reusedBox.appendChild(reused);
+  const guardItem = {
+    ...card(903, "闪"),
+    stage: {
+      lane: "processing", frameId: 0, enteredAt: Date.now(), fadeAt: null,
+      fromZone: { seat: 1, zone: "hand" },
+    },
+  };
+  let arrayLikeError = null;
+  try {
+    ui.renderEffectCards(reusedBox, [guardItem], Date.now(), () => "周瑜");
+  } catch (error) {
+    arrayLikeError = error;
+  }
+  check("U3-01v 类数组 children（HTMLCollection 无 .find）也更新底行：不抛错、data-zone-label / 文本更新",
+    !arrayLikeError
+      && reusedLine.getAttribute("data-zone-label") === "1·周瑜·手牌"
+      && reusedLine.textContent === "1·周瑜·手牌",
+    `threw=${arrayLikeError ? arrayLikeError.message : "(none)"} label=${reusedLine.getAttribute("data-zone-label")} text="${reusedLine.textContent}"`);
   ui.state.replay = null;
   ui.renderReplay();
   ui.state.effectCards = [];

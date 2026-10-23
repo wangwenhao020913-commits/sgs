@@ -447,7 +447,8 @@ function updateStageCardNode(node, item, now, heroNameOf) {
   node.classList.toggle("fading", stageLane(item, now) === "fading");
   node.classList.toggle("revealed-card", stage.lane === "showcase");
   const label = stageZoneLabel(item, heroNameOf);
-  const line = (node.children || []).find((child) => nodeHasClass(child, "ctype"));
+  // 真 DOM 的 `node.children` 是 HTMLCollection（无 `.find`）；`Array.from` 对数组同样成立。
+  const line = Array.from(node.children || []).find((child) => nodeHasClass(child, "ctype"));
   if (line) {
     if (line.textContent !== label) line.textContent = label;
     if (label) line.setAttribute("data-zone-label", label);
