@@ -116,6 +116,11 @@ from sgs.state import (
     SelectOptionQuery,
     SkillActivationContext,
     SkillActivationQuery,
+    SkillGainDelta,
+    SkillLoseDelta,
+    SkillSuppressDelta,
+    SkillSuppression,
+    SkillSuppressionScope,
     Slot,
     SlotKind,
     Step,
@@ -2423,6 +2428,128 @@ class Engine:
         if self.state.player(seat).luoyi_active:
             self.set_luoyi_active(seat, False)
 
+    # -- 技能三态（M6 票 04）：获得 / 失去 / 失效 -------------------------------
+
+    def grant_skill(self, seat: int, skill_id: str, *, frame: Frame | None = None) -> bool:
+        """写一个座位的**获得**技能记录并落一条 ``skill_gain``（M6 票 04 的唯一写入口）。
+
+        返回值 = 状态真的变了吗。获得是**第四种技能来源**（`GLOSSARY.md`「技能来源」）：
+        载体解析读 :attr:`~sgs.state.Player.granted_skills` 产出 ``GRANTED`` 实例，与
+        装备 / 虚拟授予 / 武将牌同一条链、同一条去重口径。``frame`` 是承载帧（觉醒技在
+        技能帧里授予 ☆ 技能），帧外写状态时为 ``None``（记录坐标 ``frame_id = 0``）。
+        M6 没有"获得技能"的武将（票 06 的 ☆ 技能是第一个消费者），故本票只以构造测试钉形状。
+        """
+        player = self.state.player(seat)
+        if skill_id in player.granted_skills:
+            return False
+        player.granted_skills.append(skill_id)
+        self.emit_delta(
+            SkillGainDelta(seat=seat, skill_id=skill_id),
+            frame_id=(frame.frame_id if frame is not None else 0),
+            depth=self.stack.depth,
+        )
+        return True
+
+    def lose_skill(self, seat: int, skill_id: str, *, frame: Frame | None = None) -> bool:
+        """写一个座位的**失去**技能记录并落一条 ``skill_lose``（M6 票 04 的唯一写入口）。
+
+        失去 = 实例不再存在且**不可恢复**（`GLOSSARY.md`「技能失去」）：载体解析在去重后
+        减去 ``Player.lost_skills``，故武将牌上的技能清单不动、连续型效果（距离 / 目标池）
+        也随之消失。"不可恢复"由**解析顺序**兑现：之后再 ``grant_skill`` 同一个 id，实例
+        仍在"减失去"那一步被减掉（记录照写，但那是一次可见的无效授予）。
+        失去让 per-instance 状态随来源一起清掉（``prune_skill_state``）。
+        """
+        player = self.state.player(seat)
+        if skill_id in player.lost_skills:
+            return False
+        player.lost_skills.append(skill_id)
+        self.emit_delta(
+            SkillLoseDelta(seat=seat, skill_id=skill_id),
+            frame_id=(frame.frame_id if frame is not None else 0),
+            depth=self.stack.depth,
+        )
+        prune_skill_state(self.state)
+        return True
+
+    def suppress_skills(
+        self,
+        seat: int,
+        skill_id: str,
+        *,
+        frame: Frame | None = None,
+    ) -> bool:
+        """给一个座位加一条**失效**记录并落一条 ``skill_suppress``（M6 票 04 的唯一写入口）。
+
+        失效 = 实例**还在**、但被座位级谓词挡在解析之外（`GLOSSARY.md`「技能失效」）：
+        失效率不逐技能展开，故一条记录覆盖该座位此刻与**此后获得**的全部非锁定技；
+        锁定技不受影响。``skill_id`` 是**施加者**（【义绝】/【铁骑】），不是被挡的技能。
+        作用域 ``TURN`` = 本回合，回合末由 :meth:`_clear_turn_effects` 清掉并落一条
+        ``suppressed=False``。返回值 = 状态真的变了吗。
+        """
+        player = self.state.player(seat)
+        if any(record.skill_id == skill_id for record in player.suppressed_skills):
+            return False
+        player.suppressed_skills.append(SkillSuppression(skill_id=skill_id))
+        self.emit_delta(
+            SkillSuppressDelta(
+                seat=seat, skill_id=skill_id, suppressed=True
+            ),
+            frame_id=(frame.frame_id if frame is not None else 0),
+            depth=self.stack.depth,
+        )
+        return True
+
+    def set_hand_card_prohibition(self, seat: int, prohibited: bool) -> bool:
+        """写一个座位的"**不能使用或打出手牌**"状态（M6 票 04 的【义绝】黑色分支）。
+
+        座位级、作用域 = 本回合（回合末清掉）；**不发 delta**（与 ``luoyi_active`` 同一
+        姿态：回放按同一条技能动作重跑即可重建，目前也没有 JSON 读者）。候选生成侧的唯一
+        读取方是 :func:`sgs.effects.legal_actions_for`，故"哪些动作算使用 / 打出手牌"
+        只有一处判据。返回值 = 状态真的变了吗。
+        """
+        player = self.state.player(seat)
+        if player.hand_card_prohibited == prohibited:
+            return False
+        player.hand_card_prohibited = prohibited
+        return True
+
+    def add_heart_slash_bonus(self, seat: int, target: int) -> None:
+        """记下"本回合 ``seat`` 使用红桃【杀】对 ``target`` 的伤害 +1"（【义绝】黑色分支）。
+
+        唯一写入方是【义绝】的效果；读取方是同一条技能定义上的 ``DAMAGE_DEAL_AMOUNT``
+        修饰器（查询期从**活着的实例**算，失去 / 失效即消失）。作用域 = 本回合，回合末
+        由 :meth:`_clear_turn_effects` 清空；**不发 delta**（同 ``set_hand_card_prohibition``）。
+        """
+        bonus = self.state.player(seat).heart_slash_bonus_against
+        if target not in bonus:
+            bonus.append(target)
+
+    def _clear_turn_effects(self) -> None:
+        """回合末清理作用域 = ``TURN`` 的座位级效果（M6 票 04）。
+
+        三样一起清：失效记录（逐条落 ``skill_suppress = false``，使"可恢复"在记录流里
+        可被看见）、手牌禁令、红桃【杀】加伤目标。与【酒】/【裸衣】同一收尾点
+        （:meth:`_turn_after_end`），故"本回合"的作用域不跨回合。
+        """
+        for player in self.state.players:
+            for record in tuple(player.suppressed_skills):
+                if record.scope is not SkillSuppressionScope.TURN:
+                    continue
+                player.suppressed_skills.remove(record)
+                self.emit_delta(
+                    SkillSuppressDelta(
+                        seat=player.seat,
+                        skill_id=record.skill_id,
+                        suppressed=False,
+                        scope=record.scope,
+                        predicate=record.predicate,
+                    ),
+                    frame_id=0,
+                    depth=self.stack.depth,
+                )
+            player.hand_card_prohibited = False
+            player.heart_slash_bonus_against.clear()
+
     def reveal_card(self, frame: Frame | None, seat: int, card: CardRef) -> None:
         """把 ``seat`` 的一张**手牌**标成公开事实并落一条 ``card_reveal``（M5-06）。
 
@@ -3466,6 +3593,8 @@ class Engine:
             self._clear_wine_active(seat)
             # 【裸衣】的作用域是"直到回合结束"（§九 L952–954 / M6 票 01）：同一收尾点清掉。
             self._clear_luoyi_active(seat)
+        # 技能失效 / 手牌禁令 / 红桃【杀】加伤的作用域 = 本回合（M6 票 04）：同一收尾点清掉。
+        self._clear_turn_effects()
         # 【酒】的"每回合一次"按**游戏回合**记（spec §5.1 酒）：濒死自救可能发生在别人的
         # 回合、记在濒死者身上，故回合末必须清**所有座位**的 wine 计数键，不能只清回合角色。
         # 只动这一个键：其它键（【杀】等）仍按座位自己的 ``TURN_START`` 重置，回合外

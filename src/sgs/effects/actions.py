@@ -622,7 +622,35 @@ def legal_actions_for(
         candidates = _arrange(answers_seq, payload)
     else:
         raise ValueError(f"还没有 {kind.value} 询问的候选生成器")
+    if state.player(seat).hand_card_prohibited:
+        # 【义绝】黑色分支（M6 票 04）：该座位本回合**不能使用或打出手牌**。判据放在这里
+        # 而不是各窗口里：``legal_actions_for`` 是全部询问候选的**唯一生成口**，故
+        # 出牌 / 【闪】 / 求桃 / 响应四类窗口一次收口，不会漏掉任何一个。只删"使用 / 打出
+        # 手牌"的动作：弃置、重铸、技能发动都不是"使用或打出"，照常保留。
+        candidates = [
+            action
+            for action in candidates
+            if not _uses_hand_card(state, seat, action)
+        ]
     return tuple(sorted(candidates, key=_sort_key))
+
+
+def _uses_hand_card(state: GameState, seat: int, action: Action) -> bool:
+    """这个动作是不是"**使用或打出手牌**"（`Player.hand_card_prohibited` 的唯一判据）。
+
+    - 实体牌：牌本身此刻在手牌区；
+    - 转化 / 虚拟牌：只要**任一来源牌**在该座位手牌区，就算"打出手牌"（单源转化是自然
+      形态；【丈八蛇矛】两张手牌同理）。纯虚拟牌（无实体来源，如【八卦阵】的视为【闪】）
+      不是手牌 ⇒ 不受禁令影响。
+    """
+    if not isinstance(action, (UseCard, PlayCard)):
+        # 重铸 / 弃置 / 技能发动都**不是**"使用或打出"：``Reforge`` 也带 ``card`` 字段，
+        # 故这里必须按构造子收口，不能按"有没有 card"判。
+        return False
+    card = action.card
+    source_ids = card.virtual_sources if card.is_virtual else (card.card_id,)
+    hand = state.player(seat).hand
+    return any(source_id in hand for source_id in source_ids)
 
 
 def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:

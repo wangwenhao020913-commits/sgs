@@ -55,7 +55,9 @@ from sgs.state import (
     FrameKind,
     GameState,
     MoveReason,
+    Player,
     SelectionSpec,
+    SkillSuppressionPredicate,
     SlotKind,
     Zone,
     ZoneRef,
@@ -131,15 +133,18 @@ class SeamKind(str, Enum):
 
 
 class SkillSourceKind(str, Enum):
-    """技能实例的**来源**种类（票 07 §6 的带标签联合）。
+    """技能实例的**来源**种类（票 07 §6 的带标签联合；M6 票 04 补第四种）。
 
     ``HERO_CARD``（票 01）是**武将牌**：它不是实体牌，故只为它记 ``skill_id``，
-    **绝不为它造 ``CardRef``**（与虚拟装备同一姿态）。
+    **绝不为它造 ``CardRef``**（与虚拟装备同一姿态）。``GRANTED``（M6 票 04）是
+    运行时**获得**的技能（`GLOSSARY.md`「技能来源」的第四种）：同样不是牌，
+    只记 ``skill_id``，实例由 :func:`resolve_instances` 读 ``Player.granted_skills`` 产出。
     """
 
     EQUIPMENT_CARD = "EQUIPMENT_CARD"
     VIRTUAL_GRANT = "VIRTUAL_GRANT"
     HERO_CARD = "HERO_CARD"
+    GRANTED = "GRANTED"
 
 
 HookCondition: TypeAlias = Callable[[Any, Frame], bool]
@@ -413,14 +418,41 @@ def _add_instance(
     )
 
 
-def resolve_instances(state: GameState) -> tuple[SkillInstance, ...]:
+def _skill_is_suppressed(player: Player, definition: SkillDef) -> bool:
+    """``player`` 的路失效记录挡不挡 ``definition``（座位级谓词，唯一读取方）。
+
+    ``ALL_NON_LOCKED`` 只覆盖**非锁定技**：锁定技是"满足条件即强制发动"的一类效果标记
+    （官方 `A/rule_forced.txt:5`，见 :class:`SkillDef.locked` 的注释），与"能不能被失效"
+    是两件事——牌面写"其所有**非锁定**技失效"，故锁定技照常产出。
+    """
+    return any(
+        record.predicate is SkillSuppressionPredicate.ALL_NON_LOCKED
+        and not definition.locked
+        for record in player.suppressed_skills
+    )
+
+
+def resolve_instances(
+    state: GameState, *, include_suppressed: bool = False
+) -> tuple[SkillInstance, ...]:
     """解析全部**存活实例**，按链序 ``(priority_class, skill_id, owner)`` 全序。
 
     载体 = 装备区里的实体牌（``source = EQUIPMENT_CARD``）∪ 座位的虚拟授予
     （``source = VIRTUAL_GRANT``，不占牌守恒）∪ **武将牌**（``source = HERO_CARD``，
-    票 01：读 ``player.hero`` 经 ``sgs.data.hero_skill_ids`` 取该武将的技能清单）。
+    票 01：读 ``player.hero`` 经 ``sgs.data.hero_skill_ids`` 取该武将的技能清单）∪
+    **获得**（``source = GRANTED``，M6 票 04：读 ``player.granted_skills``）。
     同一 ``(owner, skill_id)`` 只留**最早出现的来源**（票 07 §6 的去重口径）；
     两名角色各有同一技能时是**两个实例**。
+
+    **解析顺序钉死**（M6 票 04 / spec §Implementation Decisions「技能运行时」）：
+    载体并集 → 去重 → **减失去** → **过失效谓词**。后两步是座位级的（`Player.lost_skills`
+    / `Player.suppressed_skills`）：失去的实例不再产出且不可恢复；失效的实例仍在，
+    但被谓词挡在解析之外（不产出候选、不进修饰器链、不触发钩子），作用域到期即恢复。
+
+    ``include_suppressed`` 只服务 :func:`prune_skill_state`：清 per-instance 状态时
+    "暂时失效"不等于"来源消失"，把失效实例算成死实例会顺手抹掉它的"已用"计数——
+    失效恢复后那条限定技就能再发动一次。默认 ``False`` = 只回答"此刻真正**在解析中**的
+    实例"。
 
     **身份门控在派发侧的唯一兑现处**是这里（票 01 §身份门控 / `03` §6「技能分类与过滤」）：
     主公技而持有者不是主公 ⇒ **该实例不产出**——不进实例集合、不进候选、不进修饰器链、不落
@@ -450,16 +482,26 @@ def resolve_instances(state: GameState) -> tuple[SkillInstance, ...]:
                     definition,
                     SkillSource(SkillSourceKind.VIRTUAL_GRANT, skill_id=grant),
                 )
-        if player.hero is None:
-            continue
-        for skill_id in hero_skill_ids(player.hero, pack_id=state.pack_id):
+        if player.hero is not None:
+            for skill_id in hero_skill_ids(player.hero, pack_id=state.pack_id):
+                definition = CATALOG.get(skill_id)
+                if definition is not None:
+                    _add_instance(
+                        found,
+                        player.seat,
+                        definition,
+                        SkillSource(SkillSourceKind.HERO_CARD, skill_id=skill_id),
+                    )
+        # 获得排在最后：同 `(owner, skill_id)` 的去重留**最早**来源，故"武将牌上本来就有"
+        # 的那一份优先于后来又授予的同名技能（获得一份已有的技能不改变实例身份）。
+        for skill_id in player.granted_skills:
             definition = CATALOG.get(skill_id)
             if definition is not None:
                 _add_instance(
                     found,
                     player.seat,
                     definition,
-                    SkillSource(SkillSourceKind.HERO_CARD, skill_id=skill_id),
+                    SkillSource(SkillSourceKind.GRANTED, skill_id=skill_id),
                 )
     deduped: list[SkillInstance] = []
     seen: list[tuple[int, str]] = []
@@ -471,8 +513,16 @@ def resolve_instances(state: GameState) -> tuple[SkillInstance, ...]:
             continue
         seen.append(key)
         deduped.append(instance)
-    deduped.sort(key=lambda item: (int(item.definition.priority_class), item.skill_id, item.owner))
-    return tuple(deduped)
+    alive: list[SkillInstance] = []
+    for instance in deduped:
+        player = state.player(instance.owner)
+        if instance.skill_id in player.lost_skills:
+            continue
+        if not include_suppressed and _skill_is_suppressed(player, instance.definition):
+            continue
+        alive.append(instance)
+    alive.sort(key=lambda item: (int(item.definition.priority_class), item.skill_id, item.owner))
+    return tuple(alive)
 
 
 def timing_hooks_present(state: GameState, timing: Timing) -> bool:
@@ -515,8 +565,16 @@ def same_kingdom(state: GameState, a: int, b: int) -> bool:
 
 
 def prune_skill_state(state: GameState) -> None:
-    """清理**来源已消失**的 per-instance 状态（票 07 §6 的"随 source 清理"）。"""
-    live = {instance_key(instance) for instance in resolve_instances(state)}
+    """清理**来源已消失**的 per-instance 状态（票 07 §6 的"随 source 清理"）。
+
+    ``include_suppressed=True``：暂时失效的实例**仍算活着**（M6 票 04）——把它的
+    ``skill_state`` 一起清掉，会让"失效恢复后限定技又能再发动一次"。这里只清
+    "实例真的没了"（载体消失 / 已失去）的那些键。
+    """
+    live = {
+        instance_key(instance)
+        for instance in resolve_instances(state, include_suppressed=True)
+    }
     for key in list(state.skill_state):
         if key not in live:
             del state.skill_state[key]
@@ -884,6 +942,8 @@ ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], Activ
             "equip.ice_sword": _ice_sword_plan,
             "equip.qilin_bow": _qilin_bow_plan,
             hero_skill_id("machao", "tieqi"): _tieji_plan,
+            # 界马超【铁骑】（M6 票 04）：发动前提与标准版逐字相同（自己的【杀】指定了目标）。
+            hero_skill_id("jie_machao", "tieqi"): _tieji_plan,
         }
     )
 )

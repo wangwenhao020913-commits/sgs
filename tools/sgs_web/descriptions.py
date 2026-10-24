@@ -87,7 +87,7 @@ CARD_DESCRIPTIONS: Mapping[str, str] = _load_table(_DOCUMENT, "cards")
 """``CardType.id`` → 描述全文（43 条：标准 32 + 军争 11）。"""
 
 SKILL_DESCRIPTIONS: Mapping[str, str] = _load_table(_DOCUMENT, "skills")
-"""``SkillDef.skill_id`` → 描述全文（62 条：装备 22 + 武将 40）。"""
+"""``SkillDef.skill_id`` → 描述全文（66 条：装备 22 + 武将 44）。"""
 
 
 def card_description(card_type: str | None) -> str:

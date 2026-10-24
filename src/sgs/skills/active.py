@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from sgs.data import Gender, SkillType, Suit
+from sgs.data import Color, Gender, SkillType, Suit, color_of_suit, hero_skill_id
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
@@ -49,7 +49,9 @@ from sgs.effects import (
     Modifier,
     ModifierContext,
     ModifierPoint,
+    behavior_for,
     check_targets,
+    is_slash,
 )
 from sgs.state import (
     ActivateSkill,
@@ -851,6 +853,191 @@ KUROU_FLOW = SkillFlow(
 
 
 # ---------------------------------------------------------------------------
+# 界关羽【义绝】（M6 票 04）：弃一张牌 → 一名其他角色展示一张手牌 → 红 / 黑分叉
+#
+# 规则原文（§十九 L2071–L2074）：
+#
+#     出牌阶段限一次，你可以弃置一张牌，令一名其他角色展示一张手牌。若此牌为红色，
+#     你获得此牌且你可以令其回复 1 点体力；若此牌为黑色，本回合：其所有非锁定技
+#     失效且不能使用或打出手牌、你使用红桃【杀】对其造成的伤害 +1。
+#
+# 三段共用一个 ``SkillFlow``（弃牌 → 选人 → 由目标展示），红 / 黑分叉与"可以回复"的
+# 二次决定在 ``effect`` 里（帧内游标续跑）。黑色分支的三条效果各有落点：
+#
+# - "所有非锁定技失效" ⇒ :meth:`Engine.suppress_skills`（票 04 的座位级失效记录）；
+# - "不能使用或打出手牌" ⇒ :meth:`Engine.set_hand_card_prohibition`，唯一读取方是
+#   :func:`sgs.effects.legal_actions_for`（被禁者**所有**使用 / 打出手牌的候选消失）；
+# - "红桃【杀】伤害 +1" ⇒ ``DAMAGE_DEAL_AMOUNT`` 修饰器 + 座位级目标记录。
+# ---------------------------------------------------------------------------
+
+YIJUE = hero_skill_id("jie_guanyu", "yijue")
+"""界关羽【义绝】的全限定技能 id。"""
+
+YIJUE_HEAL = "heal"
+"""【义绝】红色分支的二次决定：令其回复 1 点体力。"""
+
+YIJUE_SKIP_HEAL = "skip"
+"""【义绝】红色分支的二次决定：放弃回复。"""
+
+YIJUE_HEAL_OPTIONS: tuple[str, str] = (YIJUE_HEAL, YIJUE_SKIP_HEAL)
+"""【义绝】"你可以令其回复 1 点体力"的选项闭集（顺序即询问里的顺序）。"""
+
+
+def _yijue_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """座位步的**候选池**：其他存活角色（"有手牌"那一层由**展示步**自己兜住）。
+
+    池子故意**不随目标手牌数收缩**（M6 票 04 的评审发现）：``effect`` 里的"获得展示的牌"
+    会把目标的手牌搬走，而效果挂起后续跑会**从头重跑步骤**——池若还在按"有手牌"过滤，
+    重入时它已为空 ⇒ ``PickSeats`` 判取消、``effect`` 不再执行（``_push_recover`` 之后
+    的收尾整段丢掉）。故这里的池只按"存活 / 不是自己"定，选到没有手牌的角色时由展示步
+    （空面 ⇒ 取消）兜住，而**取消发生在提交点之前**，代价一张都不付。
+
+    "候选里有没有这条技能"另由 :func:`_yijue_offers` 判（至少一名其他角色有手牌）。
+    """
+    del frame, chosen
+    return tuple(
+        player.seat
+        for player in state.players
+        if player.alive and player.seat != owner
+    )
+
+
+def _yijue_target(state: GameState, frame: Any, owner: int, answers: FlowAnswers) -> int:
+    """步 2 / 步 3 的**应答者**：步 2 选中的那名角色（展示手牌的是被指定者，不是发动者）。"""
+    del state, frame, owner
+    return int(answers["seat"][0])
+
+
+def _yijue_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选**恒为一条骨架**：付不起（自己无牌）或没有可指定的目标 ⇒ 一个候选都不造。"""
+    if not _can_offer(state, ctx):
+        return current
+    player = state.player(ctx.subject)
+    if not player.hand and not player.equip:
+        return current
+    if not any(
+        other.hand
+        for other in state.players
+        if other.alive and other.seat != ctx.subject
+    ):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _yijue_heart_slash_bonus(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """【义绝】黑色分支的"你使用**红桃**【杀】对其造成的伤害 +1"（``DAMAGE_DEAL_AMOUNT``）。
+
+    连续型效果从**活着的实例**算（D9）：本回调挂在【义绝】的 ``SkillDef`` 上，失去 / 失效
+    【义绝】后它自然不再被派发。作用域目标记在 ``Player.heart_slash_bonus_against``（回合末
+    清空），故"本回合"只由那一条座位记录表达，而不是给每张【杀】写标签。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None or ctx.target is None:
+        return current
+    if ctx.target not in state.player(ctx.owner).heart_slash_bonus_against:
+        return current
+    if ctx.card.suit != Suit.HEART.value:
+        return current
+    if not is_slash(behavior_for(ctx.card)):
+        return current
+    return current + 1
+
+
+def _yijue_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：展示（公开事实）→ 红：获得 + 可令其回复 1 点 / 黑：三条失效类效果。
+
+    每一步的完成事实都记在帧私有键里，故重入既不复述也不重问；搬牌 / 回复各自可能挂起
+    （"失去牌后"钩子、濒死插入），续跑只补没做的那一段。
+
+    **在飞语义**（票面验收 3）：本效果**不撤回**任何已开始的结算——它只写座位级记录，
+    真帧标签 / 修饰器在**此后新产生**的解析里才读这些记录。
+    """
+    state = host.state
+    owner = frame.data["source"]
+    target = int(answers["seat"][0])
+    card = state.card(int(answers["card"][0]))
+    if "yijue_cost_paid" not in frame.data:
+        # 成本（弃置一张牌）在**提交点**才搬：步骤只收集（与【反间】/【离间】同一条 N6）。
+        # 搬牌可能内联派发"失去牌后"并挂起，故游标在搬完之后才落。
+        control = host.move_in_frame(
+            frame,
+            state.refs(tuple(answers["cost"])),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.DISCARD,
+            owner=owner,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+        frame.data["yijue_cost_paid"] = True
+    if "yijue_revealed" not in frame.data:
+        # 展示是**公开事实**：落一条 card_reveal（牌仍留在目标手里，除非随后被获得）。
+        frame.data["yijue_revealed"] = True
+        host.reveal_card(frame, target, card)
+    if color_of_suit(card.suit) is Color.RED:
+        if "yijue_gained" not in frame.data:
+            frame.data["yijue_gained"] = True
+            control = host.move_in_frame(
+                frame,
+                (card,),
+                to_zone=ZoneRef(Zone.HAND, owner),
+                reason=MoveReason.PUT,
+                owner=owner,
+                actor=owner,
+            )
+            if control == "stay":
+                return "stay"
+        if "yijue_heal" not in frame.data:
+            answer = host.ask_option(
+                frame,
+                owner,
+                Timing.PHASE_PLAY_IDLE,
+                skill_id="yijue:heal",
+                options=YIJUE_HEAL_OPTIONS,
+                optional=False,
+            )
+            if host.suspended(answer):
+                return "stay"
+            frame.data["yijue_heal"] = answer.choice
+        if frame.data["yijue_heal"] == YIJUE_HEAL and "yijue_recovered" not in frame.data:
+            frame.data["yijue_recovered"] = True
+            _push_recover(host, frame, source=owner, target=target, amount=1)
+            return "stay"
+        return None
+    if "yijue_black" not in frame.data:
+        frame.data["yijue_black"] = True
+        host.suppress_skills(target, YIJUE, frame=frame)
+        host.set_hand_card_prohibition(target, True)
+        host.add_heart_slash_bonus(owner, target)
+    return None
+
+
+YIJUE_FLOW = SkillFlow(
+    name="yijue",
+    steps=(
+        # 成本：一张牌（手牌 / 装备区）。第一步可取消 = 牌面"**可以**弃置一张牌"的放弃出口；
+        # 弃出之后（后续步骤）不可再退——与【反间】的"确认之后不可退回"同一口径。
+        PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=1, hi=1, key="cost"),
+        PickSeats(lo=1, hi=1, pool=_yijue_targets, key="seat", optional=False),
+        PickCards(
+            zones=(Zone.HAND,),
+            lo=1,
+            hi=1,
+            key="card",
+            actor=_yijue_target,
+            face=_yijue_target,
+            optional=False,
+        ),
+    ),
+    effect=_yijue_effect,
+)
+"""【义绝】的三步流水线：弃一张牌 → 选一名有手牌的其他角色 →（由其）展示一张手牌。"""
+
+
+# ---------------------------------------------------------------------------
 # 登记：一条声明 = 候选回调 + 发动回调（两者共用同一个 skill_id）
 # ---------------------------------------------------------------------------
 
@@ -873,6 +1060,13 @@ class ActiveSkill(HeroSkillDecl):
     offers: Callable[[GameState, ModifierContext, Any], Any]
     activate: ActivationHandler | None = None
     flow: SkillFlow | None = None
+    extra_modifiers: tuple[Modifier, ...] = ()
+    """候选之外**额外**的修饰器（M6 票 04 的加法；缺省空 = 既有七条一字不改）。
+
+    【义绝】的"你使用红桃【杀】对其造成的伤害 +1"是同一张武将牌上的一条**连续型**效果：
+    它必须与候选入口共用同一个 ``SkillDef``（一个技能一条定义），故在声明面留一个修饰器
+    口子，由 :func:`active_skill_definitions` 合并进定义。
+    """
     preactivated: bool = False
     """本技能是否已迁到**预发动**（W4-1 的迁移开关，缺省 ``False``）。
 
@@ -904,6 +1098,17 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 黄盖【苦肉】：失去 1 点体力，然后摸两张牌（§九 L1015；无"出牌阶段限一次"）。
     # 裸发动（零步流水线）⇒ **不翻预发动**：没有步骤可渲染，候选直接进 ``legal_actions``。
     ActiveSkill("huanggai", "kurou", _kurou_offers, flow=KUROU_FLOW),
+    # 界关羽【义绝】（M6 票 04）：弃一张牌 → 一名其他角色展示一张手牌 → 红 / 黑分叉。
+    # 与【苦肉】同姿态不翻预发动：三步由发动后的询问逐步收集，骨架候选直接进 ``legal_actions``。
+    ActiveSkill(
+        "jie_guanyu",
+        "yijue",
+        _yijue_offers,
+        flow=YIJUE_FLOW,
+        extra_modifiers=(
+            Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _yijue_heart_slash_bonus),
+        ),
+    ),
 )
 """A 族七条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】，见模块 docstring）。
 
@@ -925,6 +1130,7 @@ _REQUIREMENTS: dict[str, str] = {
     "lijian": "弃一张牌，选择两名男性角色",
     "jieyin": "弃两张手牌，选择一名已受伤男性角色",
     "kurou": "失去1点体力，然后摸两张牌",
+    "yijue": "弃置一张牌：令一名其他角色展示一张手牌（红则获得并可令其回复；黑则本回合其非锁定技失效、不能使用或打出手牌）",
 }
 """A 族七条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
@@ -957,6 +1163,12 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
         "card": "选择任意张要交给其他角色的手牌",
         "seat": "选择交给哪名其他角色",
     },
+    "yijue": {
+        # SELECT_CARDS 的逐步文案键恒读 ``"card"``（见 ``SkillDef.step_requirements``），
+        # 而本技能有**两次**选牌（代价 + 目标的展示），故这一句要同时说清两件事。
+        "card": "弃置一张牌；随后由被指定者展示一张手牌",
+        "seat": "选择一名有手牌的其他角色",
+    },
     "fanjian": {
         # 票 06：步 2/3 的**应答者是目标**（不是发动者）——文案必须写出归属，
         # 否则发动者看不懂"为什么屏幕跑到别人那儿去了"（票面明写的要求）。
@@ -984,7 +1196,10 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
             locked=False,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
-            modifiers=(Modifier(ModifierPoint.CANDIDATES, skill.offers),),
+            modifiers=(
+                Modifier(ModifierPoint.CANDIDATES, skill.offers),
+                *skill.extra_modifiers,
+            ),
             requirement=_REQUIREMENTS[skill.short_id],
             step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
             preactivated=skill.preactivated,

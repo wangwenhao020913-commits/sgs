@@ -281,7 +281,11 @@ ALLOWLIST: dict[Site, Rule] = {
         "src/sgs/skills/heroes.py",
         "CONVERSION_SKILLS",
         'target_type_id="slash",',
-    ): Rule(NORMAL, 2, "武圣 / 龙胆的转化**产物**是普通杀牌型；源谓词 _slash 才用 is_slash（方向相反）"),
+    ): Rule(
+        NORMAL,
+        3,
+        "武圣（标准 / 界）/ 龙胆的转化**产物**是普通杀牌型；源谓词 _slash 才用 is_slash（方向相反）",
+    ),
     # ---- skills/lord_request.py ----
     (
         "src/sgs/skills/lord_request.py",

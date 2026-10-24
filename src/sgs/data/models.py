@@ -157,11 +157,24 @@ class Hero(_FrozenModel):
 
     id: str
     name: str
+    true_name: str | None = None
+    """**真名**（M6 票 04；`GLOSSARY.md`「真名」）：同名武将不同版本共用的那个名字。
+
+    它是**数据字段**，不从显示名派生：4 名只有界版的武将没有可剥的"界"前缀（spec
+    §Further Notes 第 6 条），从 `name` 反推必然漏。标准 25 名的真名由票 12 补齐，
+    故本字段在 M6 票 04 仍是**可选**（界版数据先带；票 12 补标准表后再收紧为必写）。
+    真名配将（先抽真名、再抽版本）与"同一真名一局只出现一版"都读这一份。
+    """
     kingdom: Kingdom
     gender: Gender
     hp_max: int
     skills: tuple[HeroSkill, ...]
     version: str
+    """版本标记：标准版 ``"standard"`` / 界限突破·OL 口径 ``"jie-ol"``（ADR-006 的 OL 口径）。
+
+    版本是**数据字段**（不是从 id 前缀派生）：同一真名的标准 / 界两版是两个独立武将 id
+    （spec §Further Notes 第 6 条），版本字段让"抽到哪一版"可在数据面回答。
+    """
     enabled: bool
 
 

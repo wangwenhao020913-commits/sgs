@@ -34,6 +34,7 @@ from .models import Category, CardType, ContentPack, Deck, HeroTable
 __all__ = [
     "DEFAULT_PACK_ID",
     "HERO_SKILL_PREFIX",
+    "HERO_SUPPLEMENT_PACK_IDS",
     "KNOWN_HEROES_SCHEMA_VERSIONS",
     "KNOWN_SCHEMA_VERSIONS",
     "card_category",
@@ -41,6 +42,7 @@ __all__ = [
     "hero_skill_id",
     "hero_skill_ids",
     "load_content_pack",
+    "load_hero_tables",
     "load_heroes",
     "validate_content_pack",
     "validate_heroes",
@@ -62,6 +64,15 @@ KNOWN_HEROES_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 """
 
 DEFAULT_PACK_ID = "standard"
+
+HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = ("jie",)
+"""与内容包表并行装载的**扩展武将包**（M6 票 04：界标准独立成一份数据）。
+
+界标准 29 名与标准 25 名**分开存**（ADR-006 的"分开存"这次真落），故
+``files/heroes.jie.json`` 是独立的一份 :class:`~sgs.data.models.HeroTable`，**不是**
+内容包（内容包管牌堆与牌名，武将包管武将面）。它由 :func:`load_hero_tables` 与内容包
+自己的表一起交给读取面：载体解析按同一个武将 id 查全部表，故界将能被构造局面直接发放。
+后续界将票只往这个文件追加条目（真名配将与默认将池属于票 12）。"""
 
 HERO_SKILL_PREFIX = "hero."
 """武将技能 id 的前缀（票 01 §Data / 票 12）：``hero.<武将 id>.<短 id>``。
@@ -769,16 +780,32 @@ def load_heroes(pack_id: str = DEFAULT_PACK_ID) -> HeroTable:
     return validate_heroes(text, file=file)
 
 
+def load_hero_tables(pack_id: str = DEFAULT_PACK_ID) -> tuple[HeroTable, ...]:
+    """``pack_id`` 的武将表**连同扩展武将包**（M6 票 04）：``(标准表, 界版表, …)``。
+
+    顺序 = :data:`HERO_SUPPLEMENT_PACK_IDS` 的声明序；每一份都各自走三段校验并各自缓存
+    （与 :func:`load_heroes` 同姿态）。这是"分开存、同一读取面"的唯一定义处：
+    :func:`hero_skill_ids` 读它，不在调用方各拼一份表名。
+    """
+    return tuple(
+        load_heroes(table_pack_id)
+        for table_pack_id in dict.fromkeys((pack_id, *HERO_SUPPLEMENT_PACK_IDS))
+    )
+
+
 def hero_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tuple[str, ...]:
     """某武将的**全限定技能 id**（``hero.<武将 id>.<短 id>``，按数据文件里的顺序）。
 
+    查表面 = :func:`load_hero_tables`（内容包的表 + 扩展武将包的表）：界版武将与标准版
+    走同一道载体解析，故"两名界将可用"不需要第二份查找路径。
     未知 ``hero_id`` 返回空元组：调用方（载体解析）与"装备牌查不到技能定义即跳过"
     同姿态，不因一处未知引用把整局打断；数据侧的"漏配"由加载期校验负责拦。
     """
-    hero = load_heroes(pack_id).by_id(hero_id)
-    if hero is None:
-        return ()
-    return tuple(hero_skill_id(hero.id, skill.id) for skill in hero.skills)
+    for table in load_hero_tables(pack_id):
+        hero = table.by_id(hero_id)
+        if hero is not None:
+            return tuple(hero_skill_id(hero.id, skill.id) for skill in hero.skills)
+    return ()
 
 
 def enabled_hero_ids(

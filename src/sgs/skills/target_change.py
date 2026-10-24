@@ -65,10 +65,23 @@ from sgs.timing import Timing
 from .catalog import MATCH_OWNER_KEY, Hook, SkillDef
 from .flow import FlowAnswers, PickCards, PickSeats, SkillFlow
 
-__all__ = ["LIULI_FLOW", "LIULI", "MASHU", "target_change_skill_definitions"]
+__all__ = [
+    "LIULI_FLOW",
+    "JIE_MASHU",
+    "LIULI",
+    "MASHU",
+    "target_change_skill_definitions",
+]
 
 MASHU = hero_skill_id("machao", "mashu")
 """马超【马术】的全限定技能 id（前缀派生走 :func:`sgs.data.hero_skill_id`）。"""
+
+JIE_MASHU = hero_skill_id("jie_machao", "mashu")
+"""界马超【马术】的全限定技能 id（M6 票 04）：§十九 L2091 与标准版逐字相同。
+
+界版的第二条技能是【铁骑】（票 04 的第二个载体，住 :mod:`sgs.skills.response_window`）；
+【马术】本身没有版本差异，故两个 id 共用**同一个** ``DISTANCE`` 回调——"一个技能一条定义"
+不因武将版本分叉而成两份行为。"""
 
 LIULI = hero_skill_id("daqiao", "liuli")
 """大乔【流离】的全限定技能 id。"""
@@ -265,7 +278,7 @@ LIULI_FLOW = SkillFlow(
 
 
 def target_change_skill_definitions() -> tuple[SkillDef, ...]:
-    """K 族【马术】与 M 族【流离】的 :class:`~sgs.skills.catalog.SkillDef`。
+    """K 族【马术】（标准 / 界两条）与 M 族【流离】的 :class:`~sgs.skills.catalog.SkillDef`。
 
     【马术】锁定（技能面写"锁定技"）⇒ ``locked=True``、落 ``DISTANCE`` 修饰器；
     【流离】非锁定（"你可以"）⇒ ``locked=False``、落 ``USE_BECOME_TARGET`` 钩子（票 08 起
@@ -275,6 +288,15 @@ def target_change_skill_definitions() -> tuple[SkillDef, ...]:
     return (
         SkillDef(
             skill_id=MASHU,
+            locked=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            modifiers=(Modifier(ModifierPoint.DISTANCE, _mashu_distance),),
+            requirement="计算与其他角色的距离时 -1",
+        ),
+        # 界马超【马术】（M6 票 04）：牌面与标准版逐字相同 ⇒ 同一个回调、同一条链。
+        SkillDef(
+            skill_id=JIE_MASHU,
             locked=True,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,

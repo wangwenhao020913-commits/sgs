@@ -29,11 +29,13 @@ from .errors import DataLoadError, LoadError
 from .heroes import HeroDealError, deal_heroes
 from .identities import IDENTITY_LABELS, IDENTITY_ROSTERS, Identity, Mode, roster_for
 from .loader import (
+    HERO_SUPPLEMENT_PACK_IDS,
     card_category,
     enabled_hero_ids,
     hero_skill_id,
     hero_skill_ids,
     load_content_pack,
+    load_hero_tables,
     load_heroes,
     validate_content_pack,
     validate_heroes,
@@ -63,6 +65,7 @@ __all__ = (
     "HeroDealError",
     "HeroSkill",
     "HeroTable",
+    "HERO_SUPPLEMENT_PACK_IDS",
     "IDENTITY_LABELS",
     "IDENTITY_ROSTERS",
     "Identity",
@@ -79,6 +82,7 @@ __all__ = (
     "hero_skill_id",
     "hero_skill_ids",
     "load_content_pack",
+    "load_hero_tables",
     "load_heroes",
     "roster_for",
     "validate_content_pack",

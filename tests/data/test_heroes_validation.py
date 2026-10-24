@@ -394,3 +394,104 @@ def test_semantic_errors_are_aggregated_not_fail_fast():
         "hero.hp_max_range",
         "hero.skills_empty",
     ]
+
+
+# ---------------------------------------------------------------------------
+# 界武将表（M6 票 04）：独立成一份数据、与内容包表分开装载
+# ---------------------------------------------------------------------------
+#
+# 票面「数据与加载」：界标准 29 名**独立成一份武将数据**（与标准 25 名分开存，ADR-006 的
+# "分开存"这次真落），每名带**真名**、版本标记、势力、体力上限、技能清单。票 04 先落两名
+# （界关羽 / 界马超），后续票只追加自己的条目。故这里钉的是"**分开存但同一读取面**"：
+# ``load_heroes()`` 仍是标准表（25 名）不动，而**载体解析**（``hero_skill_ids``）能按同一个
+# 武将 id 找到扩展表里的条目——界将因此能被构造局面直接发放。
+
+
+def test_the_standard_table_stays_the_25_and_the_jie_table_is_loaded_separately():
+    standard = load_heroes()
+    jie = load_heroes("jie")
+
+    assert standard.pack_id == "standard"
+    assert len(standard.heroes) == STANDARD_HERO_COUNT
+    assert jie.pack_id == "jie"
+    assert [hero.id for hero in jie.heroes] == ["jie_guanyu", "jie_machao"]
+    assert {hero.id for hero in standard.heroes}.isdisjoint(
+        {hero.id for hero in jie.heroes}
+    ), "界版武将 id 与标准版各自独立（不改既有 id）"
+
+
+def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
+    """真名 / 版本 / 势力 / 体力上限 / 技能清单逐项落定（第十九章 L2067–L2074 / L2090–L2096）。
+
+    真名是**字段**而不是从显示名派生（票面「数据与加载」；4 名只有界版的武将没有可剥的
+    前缀）。票 12 才把标准 25 名的真名补齐，故本票只要求界版这半已带上。
+    """
+    jie = load_heroes("jie")
+    guanyu = jie.by_id("jie_guanyu")
+    machao = jie.by_id("jie_machao")
+    assert guanyu is not None and machao is not None
+
+    assert (guanyu.name, guanyu.true_name, guanyu.version) == ("界关羽", "关羽", "jie-ol")
+    assert (guanyu.kingdom, guanyu.gender, guanyu.hp_max) == (
+        Kingdom.SHU,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in guanyu.skills] == ["wusheng", "yijue"]
+
+    assert (machao.name, machao.true_name, machao.version) == ("界马超", "马超", "jie-ol")
+    assert (machao.kingdom, machao.gender, machao.hp_max) == (
+        Kingdom.SHU,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in machao.skills] == ["mashu", "tieqi"]
+
+    assert all(hero.true_name for hero in jie.heroes), "界版每名都带真名"
+    assert all(hero.enabled for hero in jie.heroes), "边界突破 P1 起两名界将可用"
+
+
+def test_hero_skill_ids_lookup_covers_the_jie_supplement():
+    """载体解析的唯一读取面：同一个 ``hero_skill_ids`` 认得扩展表里的武将。
+
+    这正是"两名界将可用"的接缝——``resolve_instances`` 读它取武将牌上的技能清单；
+    少了这一道，界将的构造局面会静默得到零个实例。
+    """
+    assert hero_skill_ids("jie_guanyu") == (
+        "hero.jie_guanyu.wusheng",
+        "hero.jie_guanyu.yijue",
+    )
+    assert hero_skill_ids("jie_machao") == (
+        "hero.jie_machao.mashu",
+        "hero.jie_machao.tieqi",
+    )
+    assert hero_skill_ids("guanyu") == ("hero.guanyu.wusheng",), "标准版查法一字不变"
+
+
+def test_the_jie_skill_references_close_against_the_catalog():
+    """启用 ⇒ 技能引用必须闭合（与标准表同一条加载期纪律）。"""
+    from sgs.skills import CATALOG
+
+    missing = [
+        hero_skill_id(hero.id, skill.id)
+        for hero in load_heroes("jie").heroes
+        if hero.enabled
+        for skill in hero.skills
+        if hero_skill_id(hero.id, skill.id) not in CATALOG
+    ]
+    assert missing == [], f"界版武将引用了未登记的技能：{missing}"
+
+
+def test_the_jie_pack_keeps_the_same_three_segment_validation():
+    """扩展表走**同一套**校验：坏版本 / 缺字段 / 技能引用不闭合都照旧报错。"""
+    raw = load_heroes("jie").model_dump(mode="json")
+    raw["schema_version"] = 2
+    with pytest.raises(DataLoadError) as excinfo:
+        validate_heroes(raw, file="heroes.jie.json")
+    assert [error.rule_id for error in excinfo.value.errors] == ["version.unknown"]
+
+    raw = load_heroes("jie").model_dump(mode="json")
+    del raw["heroes"][0]["true_name"]
+    raw["heroes"][0]["true_name"] = None
+    table = validate_heroes(raw, file="heroes.jie.json")
+    assert table.by_id("jie_guanyu").true_name is None, "真名仍是可选字段（票 12 收紧）"

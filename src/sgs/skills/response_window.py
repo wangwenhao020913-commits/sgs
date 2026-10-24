@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import SkillType
+from sgs.data import SkillType, hero_skill_id
 from sgs.effects import (
     CarrierKind,
     Modifier,
@@ -38,13 +38,31 @@ from sgs.effects import (
     satisfies_required,
 )
 from sgs.resolution import Control, Frame, Tag, add_tag
-from sgs.state import GameState
+from sgs.state import (
+    GameState,
+    MoveReason,
+    SelectionSpec,
+    Slot,
+    Zone,
+    ZoneRef,
+)
 from sgs.timing import Timing
 
-from .catalog import HeroSkillDecl, Hook, HookHandler, SkillDef
+from .catalog import (
+    SKILL_JUDGMENT_CARD_KEY,
+    HeroSkillDecl,
+    Hook,
+    HookHandler,
+    SkillDef,
+)
 from .flow import SkillFlow, zero_step_effect
 
-__all__ = ["RESPONSE_WINDOW_SKILLS", "TIEQI_FLOW", "response_window_skill_definitions"]
+__all__ = [
+    "JIE_TIEQI",
+    "RESPONSE_WINDOW_SKILLS",
+    "TIEQI_FLOW",
+    "response_window_skill_definitions",
+]
 
 
 RESPONSE_COUNT_NEEDED = 2
@@ -124,6 +142,148 @@ def _tieqi(host: Any, frame: Frame) -> Control:
     return "stay"
 
 
+# ---------------------------------------------------------------------------
+# 界马超【铁骑】（M6 票 04）：封印目标技能 + 判定 + 由目标决定弃牌
+# ---------------------------------------------------------------------------
+
+JIE_TIEQI = hero_skill_id("jie_machao", "tieqi")
+"""界马超【铁骑】的全限定技能 id（§十九 L2093–L2096）。"""
+
+_JIE_TIEQI_CURSOR = "jie_tieqi_cursor"
+"""帧私有键：逐目标推进的游标（多目标【杀】里一个目标一次判定 + 一次弃牌询问）。"""
+
+_JIE_TIEQI_STAGE = "jie_tieqi_stage"
+"""帧私有键：当前目标停在哪个阶段——``"judge"``（判定帧已压出）/ ``"discard"``（该搬弃牌）。"""
+
+_JIE_TIEQI_PICK = "jie_tieqi_pick"
+"""帧私有键：目标选中的那张同花色牌（搬到弃牌堆之前先落这里，挂起后据此只搬一次）。"""
+
+_JIE_TIEQI_SUIT = "jie_tieqi_suit"
+"""帧私有键：本次判定的**花色**（判定牌读出来后即定格）。
+
+判定牌回写的帧私有键在"算出花色"那一步就被弹掉；重入（目标弃牌询问挂起后续跑）若再读
+一次，就已经是 ``None`` —— 面会变空、直接判成"不能响应"而**漏掉那条应答**（票 04 的
+评审发现：``_answer`` 泄漏到下一个询问）。故花色必须在中途定格。"""
+
+_ASK_JIE_TIEQI_DISCARD = "hero.jie_machao.tieqi.discard"
+"""手写询问位置：【铁骑】"弃置一张与判定结果花色相同的牌"的选牌步（`:meth:`Engine.ask_selection`
+的 ``owner``；询问名 ``key`` 逐目标带序号）。"""
+
+
+def _tieqi_suit_face(
+    state: GameState, seat: int, suit: str | None
+) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
+    """目标的**同花色选择面**：手牌 ∪ 装备区里花色等于判定结果的那些牌。
+
+    "弃置一张牌"不限定手牌（与【贯石斧】/【雌雄双股剑】同一档：手牌 + 装备区）。面由技能
+    自铺而不走 :meth:`Engine.selection_face`：那条路按区铺、不按花色筛，而这里的花色判据
+    就是判定结果的直接后果。应答者 = 牌的持有者本人 ⇒ 全部是**可见槽**（不需要隐藏位置）。
+    """
+    slots: list[Slot] = []
+    card_ids: list[int] = []
+    player = state.player(seat)
+    for zone, cards in ((Zone.HAND, player.hand), (Zone.EQUIP, player.equip)):
+        for card_id in cards:
+            card = state.card(card_id)
+            if suit is not None and card.suit == suit:
+                slots.append(Slot(ref=ZoneRef(zone, seat), card=card))
+                card_ids.append(card_id)
+    return tuple(slots), tuple(card_ids)
+
+
+def _jie_tieqi_next(frame: Frame, cursor: int) -> None:
+    """推进到下一个目标：清掉当前目标的阶段 / 选牌 / 花色游标（逐目标分槽，不跨目标串味）。"""
+    frame.data[_JIE_TIEQI_CURSOR] = cursor + 1
+    frame.data.pop(_JIE_TIEQI_STAGE, None)
+    frame.data.pop(_JIE_TIEQI_PICK, None)
+    frame.data.pop(_JIE_TIEQI_SUIT, None)
+
+
+def _jie_tieqi(host: Any, frame: Frame) -> Control:
+    """界马超【铁骑】：使用【杀】指定目标后，封印其非锁定技 → 判定 → 由其决定弃牌（§十九 L2093–2096）。
+
+    牌面三段，逐目标各跑一遍（帧内游标 ``jie_tieqi_cursor``，重入从头）：
+
+    1. **令其本回合所有非锁定技失效**：写一条座位级失效记录（``Engine.suppress_skills``）
+       ——失效率不逐技能展开，故该座位**此刻与之后获得**的非锁定技都被挡（§票面验收 1）；
+    2. **你进行一次判定**：``open_skill_judgment`` 压 JUDGE 帧，判定牌由引擎回写进本帧
+       （取**花色**，不是"红 = 成功"的布尔）；
+    3. **除非该角色弃置一张与判定结果花色相同的牌，否则其不能使用【闪】响应此【杀】**：
+       "弃不弃"由**目标**决定（本票裁定，见 `06` §5「程序化约定与偏离一手」）——把同花色牌铺成一张可选面
+       （``optional=True``，``Pass`` = 不弃）；弃了 ⇒ 窗口照常，没弃 ⇒ 给该目标打
+       :data:`~sgs.resolution.Tag.UNRESPONSIVE`（逐目标档，【闪】窗口因此不会出现，
+       【八卦阵】一类的"视为使用"也一并被封）。
+
+    判定 / 弃牌都可能挂起（改判窗口、失去牌后钩子），故每段的完成事实都记在帧私有游标里。
+    多目标时逐目标标签与既有标准版【铁骑】同形（``use_tags`` 随游标推进清除，见
+    ``engine.steps._PER_TARGET_FRAME_KEYS``）。
+    """
+    state = host.state
+    owner = frame.data["skill_owner"]
+    targets = tuple(frame.data.get("targets", ()))
+    cursor = int(frame.data.get(_JIE_TIEQI_CURSOR, 0))
+    if cursor >= len(targets):
+        return None
+    target = int(targets[cursor])
+    stage = frame.data.get(_JIE_TIEQI_STAGE)
+    if stage is None:
+        host.suppress_skills(target, JIE_TIEQI, frame=frame)
+        frame.data[_JIE_TIEQI_STAGE] = "judge"
+        stage = "judge"
+    if stage == "judge":
+        frame.data[_JIE_TIEQI_STAGE] = "decide"
+        host.open_skill_judgment(frame, target, JIE_TIEQI)
+        return "stay"
+    if stage == "decide":
+        if _JIE_TIEQI_SUIT not in frame.data:
+            judge_card = frame.data.pop(SKILL_JUDGMENT_CARD_KEY, None)
+            # 同帧的布尔结果只有本技能读（判定是刚开的），取完即弹。
+            frame.data.pop("skill_result", None)
+            frame.data[_JIE_TIEQI_SUIT] = None if judge_card is None else judge_card.suit
+        suit = frame.data[_JIE_TIEQI_SUIT]
+        face = _tieqi_suit_face(state, target, suit)
+        if not face[1]:
+            # 付不起（没有同花色的牌）⇒ 一个询问都不发，直接"不能响应"。
+            add_tag(frame, Tag.UNRESPONSIVE, target=target)
+            _jie_tieqi_next(frame, cursor)
+            return "stay"
+        picked = host.ask_selection(
+            frame,
+            owner=_ASK_JIE_TIEQI_DISCARD,
+            key=f"jie_tieqi:discard:{cursor}",
+            actor=target,
+            timing=Timing.USE_AFTER_DESIGNATE_TARGET,
+            spec=SelectionSpec(
+                zones=(Zone.HAND, Zone.EQUIP), total=(1, 1), optional=True
+            ),
+            face=face,
+        )
+        if host.suspended(picked):
+            return "stay"
+        if not picked:
+            # 目标选择**不弃**（"除非"的另一侧）：不能使用【闪】响应此【杀】。
+            add_tag(frame, Tag.UNRESPONSIVE, target=target)
+            _jie_tieqi_next(frame, cursor)
+            return "stay"
+        frame.data[_JIE_TIEQI_PICK] = tuple(picked)
+        frame.data[_JIE_TIEQI_STAGE] = "discard"
+    picked = tuple(frame.data[_JIE_TIEQI_PICK])
+    control = host.move_in_frame(
+        frame,
+        state.refs(picked),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=target,
+        actor=target,
+    )
+    if control == "stay":
+        # 搬牌内联派发"失去牌后"并挂起：游标**不前进**，重入只补搬这一次（``move_in_frame``
+        # 自带同帧幂等守卫，故重复调用不会搬第二遍）。
+        return "stay"
+    _jie_tieqi_next(frame, cursor)
+    return "stay"
+
+
 @dataclass(frozen=True, slots=True)
 class FrameTagSkill(HeroSkillDecl):
     """E 族"加一条禁令"一条技能的声明：触发时机 + 标签取值。"""
@@ -157,6 +317,7 @@ RESPONSE_WINDOW_SKILLS: tuple[ResponseCountSkill | FrameTagSkill, ...] = (WUSHUA
 _REQUIREMENTS: dict[str, str] = {
     "wushuang": "使用【杀】/【决斗】时，响应者需要连续打出两张",
     "tieqi": "判定；红色则该目标不能使用【闪】响应此【杀】",
+    "jie_tieqi": "令目标本回合非锁定技失效并判定：除非其弃置一张同花色牌，否则不能使用【闪】响应此【杀】",
 }
 """E 族两条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
@@ -184,5 +345,15 @@ def response_window_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             hooks=(Hook(TIEQI.timing, flow=TIEQI_FLOW),),
             requirement=_REQUIREMENTS["tieqi"],
+        ),
+        # 界马超【铁骑】（M6 票 04）：非锁定、逐目标的多段手写钩子（判定 + 条件弃牌）。
+        SkillDef(
+            skill_id=JIE_TIEQI,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=(Hook(Timing.USE_AFTER_DESIGNATE_TARGET, handler=_jie_tieqi),),
+            requirement=_REQUIREMENTS["jie_tieqi"],
+            step_requirements={"card": "弃置一张与判定结果花色相同的牌（由被指定者选择）"},
         ),
     )

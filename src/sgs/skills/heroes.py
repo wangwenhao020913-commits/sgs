@@ -18,6 +18,9 @@ r"""武将技能的**定义**（票 03 起；全表登记归票 12）。
 华佗【急救】  红色牌、手牌∪装备     【桃】               单源、**限回合外**
 甄姬【倾国】  黑色**手牌**          【闪】               单源、``DODGE`` + ``RESPOND``
 甘宁【奇袭】  黑色牌、手牌∪装备     【过河拆桥】          单源、``PLAY``
+界关羽【武圣】 红色牌、手牌∪装备     【杀】（普通）        单源、``PLAY`` + ``RESPOND``
+                                                      ＋②方块【杀】无距离限制
+                                                      （同一技能上的 ``TARGET_POOL``）
 ===========  ==================  ==================  ==============================
 
 **区域默认**（W4-3 / `GLOSSARY.md`）：五条牌面都只写"一张牌"，没有一条写"区域内的牌"
@@ -39,7 +42,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import Color, SkillType, color_of_suit
+from sgs.data import Color, SkillType, Suit, color_of_suit
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
@@ -160,6 +163,14 @@ class ConversionSkill(HeroSkillDecl):
     predicate: Predicate
     scopes: tuple[CandidateScope, ...]
     outside_turn_only: bool = False
+    modifiers: tuple[Modifier, ...] = ()
+    """这条转化技能**额外**的修饰器（M6 票 04 的加法；缺省空 = 既有六条一字不改）。
+
+    转化候选本身只落 ``CANDIDATES``；但界关羽【武圣】②"你使用**方块**【杀】无距离限制"是
+    同一张武将牌上的一条**连续型**效果，必须与转化入口共用同一个 ``SkillDef``（一个技能
+    一条定义），故在这里给声明面一个修饰器口子，由
+    :func:`conversion_skill_definitions` 合并进定义（合并 = 一份真源，不是两份拷贝）。
+    """
     requirement: str = ""
     """这条转化"需要玩家做什么"的人话（item 4）；`conversion_skill_definitions` 透进
     :attr:`~sgs.skills.catalog.SkillDef.requirement`（龙胆两个方向各一条 ⇒ 用"；"并起来）。"""
@@ -220,6 +231,32 @@ def _dodge(state: GameState, card_id: int) -> bool:
     return _convertible(state, card_id, card_type="dodge")
 
 
+def _diamond_slash_target_pool(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """界关羽【武圣】②：你使用**方块【杀】无距离限制**（§十九 L2068–L2070）。
+
+    落点是 ``TARGET_POOL``（"无距离限制" = 目标池豁免"距离 ≤ 攻击范围"这一条判据）：
+    把**全部其他存活座位**并进池子。用"并集"而不是直接返回全集，是为了不与链上**其它**
+    目标池修饰器打架——链序 ``(priority_class, skill_id, owner)`` 里后跑的回调（如
+    【空城】的剔除）仍能删掉不合法的目标；本回调只**补上**被攻击范围挡掉的那些。
+
+    牌面判据读 ``ctx.card`` 的**花色 + 族**：方块是 `CardRef.suit` 的牌面事实（转化牌
+    单源继承花色，故"方块牌当【杀】"同样命中）；族判据走 :func:`~sgs.effects.is_slash`
+    而不是牌型相等（火 / 雷【杀】同族）。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not is_slash(behavior_for(ctx.card)):
+        return current
+    if ctx.card.suit != Suit.DIAMOND.value:
+        return current
+    everyone = tuple(
+        player.seat for player in state.players if player.alive and player.seat != ctx.subject
+    )
+    return tuple(dict.fromkeys((*current, *everyone)))
+
+
 CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
     # 关羽【武圣】：一张红色牌当【杀】使用或打出（规则 976）。
     ConversionSkill(
@@ -230,6 +267,18 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         predicate=_red,
         scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
         requirement="选择1张红色牌当【杀】使用或打出",
+    ),
+    # 界关羽【武圣】（M6 票 04，§十九 L2068–L2070）：①与标准版逐字相同（红牌当【杀】）；
+    # ②"你使用**方块**【杀】无距离限制"是同一技能的连续型效果，挂在 TARGET_POOL 上。
+    ConversionSkill(
+        hero_id="jie_guanyu",
+        short_id="wusheng",
+        target_type_id="slash",
+        source_zone=_hand_equip,
+        predicate=_red,
+        scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
+        modifiers=(Modifier(ModifierPoint.TARGET_POOL, _diamond_slash_target_pool),),
+        requirement="选择1张红色牌当【杀】使用或打出；方块【杀】无距离限制",
     ),
     # 赵云【龙胆】两条方向共用一个技能 id（规则 982）。
     ConversionSkill(
@@ -294,7 +343,8 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         requirement="选择1张黑色牌当【过河拆桥】使用",
     ),
 )
-"""H 族五条技能（六条声明：龙胆两个方向各一条）的逐字声明（票 03 §表 + M6 票 02【倾国】）。"""
+"""H 族五条技能（六条声明：龙胆两个方向各一条）的逐字声明（票 03 §表 + M6 票 02【倾国】/
+票 03【奇袭】/ 票 04 界关羽【武圣】）。"""
 
 
 def _modifier(skill: ConversionSkill) -> Modifier:
@@ -686,7 +736,13 @@ def conversion_skill_definitions() -> tuple[SkillDef, ...]:
             locked=False,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
-            modifiers=tuple(_modifier(skill) for skill in skills),
+            modifiers=tuple(
+                dict.fromkeys(
+                    modifier
+                    for skill in skills
+                    for modifier in (_modifier(skill), *skill.modifiers)
+                )
+            ),
             # 龙胆两个方向各一条声明 ⇒ 文案用"；"并起来；虚拟牌名去重后收成元组。
             requirement="；".join(skill.requirement for skill in skills),
             virtual_type_ids=tuple(dict.fromkeys(skill.target_type_id for skill in skills)),

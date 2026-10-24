@@ -31,6 +31,9 @@ from sgs.state import (
     IdentityDealDelta,
     IdentityRevealDelta,
     Query,
+    SkillGainDelta,
+    SkillLoseDelta,
+    SkillSuppressDelta,
     WineChangeDelta,
 )
 from sgs.timing import Timing
@@ -56,6 +59,9 @@ __all__ = [
     "JournalRecord",
     "MalformedAction",
     "QueryRecord",
+    "SkillGainRecord",
+    "SkillLoseRecord",
+    "SkillSuppressRecord",
     "TimingRecord",
     "WineChangeRecord",
     "dump_journal",
@@ -136,6 +142,33 @@ class WineChangeRecord(WineChangeDelta):
     depth: int
 
 
+class SkillGainRecord(SkillGainDelta):
+    """一次**技能获得**（M6 票 04）：运行时授予的第四种来源。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class SkillLoseRecord(SkillLoseDelta):
+    """一次**技能失去**（M6 票 04）：实例不再存在、不可恢复。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class SkillSuppressRecord(SkillSuppressDelta):
+    """一次**技能失效 / 恢复**（M6 票 04）：座位级记录被加上或撤掉。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
 class DeckShuffleRecord(DeckShuffleDelta):
     kind: Literal["delta"] = "delta"
     seq: int
@@ -178,7 +211,10 @@ DeltaRecord = Annotated[
     | CardRevealRecord
     | DeckShuffleRecord
     | IdentityDealRecord
-    | IdentityRevealRecord,
+    | IdentityRevealRecord
+    | SkillGainRecord
+    | SkillLoseRecord
+    | SkillSuppressRecord,
     Field(discriminator="delta_type"),
 ]
 
@@ -302,6 +338,12 @@ def wrap_delta(delta: Delta, *, seq: int, frame_id: int, depth: int) -> DeltaRec
         return IdentityDealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, IdentityRevealDelta):
         return IdentityRevealRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, SkillGainDelta):
+        return SkillGainRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, SkillLoseDelta):
+        return SkillLoseRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, SkillSuppressDelta):
+        return SkillSuppressRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     return DeckShuffleRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
 
 

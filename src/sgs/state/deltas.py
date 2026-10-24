@@ -1,10 +1,12 @@
 """变化事件（delta）的载荷类型：一次状态变化的纯事实（票 06 §2 / §3）。
 
-八种 ``delta_type``（``card_move`` / ``hp_change`` / ``chained_change`` / ``wine_change`` /
-``card_reveal`` / ``deck_shuffle`` / ``identity_deal`` / ``identity_reveal``）：它们是记录流
-schema 的一部分，后补会动事件版本，所以即使 M1 的骨架期只用得到 ``card_move`` 也先建位；
-``chained_change``（M5-03 横置）、``wine_change``（M5-04 酒）与 ``card_reveal``（M5-06
-火攻亮牌）都是就地追加，记录流仍为事件版本 2。记录层
+``delta_type`` 是记录流 schema 的一部分，后补会动事件版本，所以即使 M1 的骨架期只用得到
+``card_move`` 也先建位。现有 11 种：M1 的八种（``card_move`` / ``hp_change`` /
+``chained_change`` / ``wine_change`` / ``card_reveal`` / ``deck_shuffle`` /
+``identity_deal`` / ``identity_reveal``）之后，``chained_change``（M5-03 横置）、
+``wine_change``（M5-04 酒）与 ``card_reveal``（M5-06 火攻亮牌）都是就地追加；M6 票 04 再
+追加技能三态的 ``skill_gain`` / ``skill_lose`` / ``skill_suppress``（技能获得 / 失去 /
+失效），记录流仍为事件版本 2。记录层
 （``engine``）在这些模型上**继承**出带 ``seq`` / ``frame_id`` / ``depth`` 的记录子类，
 从而 JSON 是平铺的。
 """
@@ -17,7 +19,14 @@ from pydantic import Field
 
 from sgs.data import Identity
 
-from .models import CardRef, MoveReason, ZoneRef, _FrozenModel
+from .models import (
+    CardRef,
+    MoveReason,
+    SkillSuppressionPredicate,
+    SkillSuppressionScope,
+    ZoneRef,
+    _FrozenModel,
+)
 
 __all__ = [
     "CardMoveDelta",
@@ -28,6 +37,9 @@ __all__ = [
     "HpChangeDelta",
     "IdentityDealDelta",
     "IdentityRevealDelta",
+    "SkillGainDelta",
+    "SkillLoseDelta",
+    "SkillSuppressDelta",
     "WineChangeDelta",
 ]
 
@@ -145,6 +157,47 @@ class IdentityRevealDelta(_FrozenModel):
     identity: Identity
 
 
+class SkillGainDelta(_FrozenModel):
+    """一个座位**获得**了一条技能实例（M6 票 04 的第四种来源）。
+
+    技能不是牌：不进 ``cards``、不占牌守恒、与 :class:`MoveReason` 无关。``skill_id`` 是
+    被授予的**技能定义 id**；来源种类恒为 ``GRANTED``（实例本身由载体解析按座位状态重建，
+    故 delta 只记"谁获得了哪条"，不重复来源形状）。
+    """
+
+    delta_type: Literal["skill_gain"] = "skill_gain"
+    seat: int
+    skill_id: str
+
+
+class SkillLoseDelta(_FrozenModel):
+    """一个座位**失去**了一条技能（M6 票 04）：实例不再存在，且不可恢复。
+
+    与 :class:`SkillGainDelta` 同形；"失去 ≠ 失效"由两个 delta 类型分开表达
+    （`GLOSSARY.md`：失效可恢复、失去不可恢复）。
+    """
+
+    delta_type: Literal["skill_lose"] = "skill_lose"
+    seat: int
+    skill_id: str
+
+
+class SkillSuppressDelta(_FrozenModel):
+    """一个座位的**失效**记录被加上 / 撤掉（M6 票 04）。
+
+    ``skill_id`` = **施加失效的那条技能**（不是被挡住的技能）：失效率是座位级的，
+    一条记录覆盖整个座位，逐技能展开会写出与规则无关的噪声。``suppressed=False`` 是
+    作用域到期（回合末）那一条，使"可恢复"在记录流里可被看见。
+    """
+
+    delta_type: Literal["skill_suppress"] = "skill_suppress"
+    seat: int
+    skill_id: str
+    suppressed: bool
+    scope: SkillSuppressionScope = SkillSuppressionScope.TURN
+    predicate: SkillSuppressionPredicate = SkillSuppressionPredicate.ALL_NON_LOCKED
+
+
 Delta = Annotated[
     CardMoveDelta
     | HpChangeDelta
@@ -153,6 +206,9 @@ Delta = Annotated[
     | CardRevealDelta
     | DeckShuffleDelta
     | IdentityDealDelta
-    | IdentityRevealDelta,
+    | IdentityRevealDelta
+    | SkillGainDelta
+    | SkillLoseDelta
+    | SkillSuppressDelta,
     Field(discriminator="delta_type"),
 ]

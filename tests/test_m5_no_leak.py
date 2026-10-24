@@ -46,6 +46,9 @@ from sgs.engine import (  # noqa: E402
     HpChangeRecord,
     IdentityDealRecord,
     IdentityRevealRecord,
+    SkillGainRecord,
+    SkillLoseRecord,
+    SkillSuppressRecord,
     WineChangeRecord,
     record_json,
 )
@@ -554,7 +557,7 @@ def test_the_fire_attack_reveal_is_public_in_the_log_records_but_the_other_hand_
 
 
 # ---------------------------------------------------------------------------
-# 八种 delta 的**逐类**不泄露判据（M5 retro：09c 只查了 card_move）
+# 全部 delta 的**逐类**不泄露判据（M5 retro：09c 只查了 card_move）
 # ---------------------------------------------------------------------------
 #
 # 09c 的教训不是"card_move 漏了"，而是"只查了一种 delta"。这里把 ``sgs.state.deltas``
@@ -624,6 +627,30 @@ def _delta_records() -> dict[str, object]:
         "identity_reveal": IdentityRevealRecord(
             seq=108, frame_id=0, depth=0, seat=1, identity=Identity.REBEL
         ),
+        # M6 票 04 的技能三态：载荷只有座位 + 技能 id（武将牌明置，技能是公开事实），
+        # 没有任何隐藏牌面 / 身份 ⇒ 下发面 = 原样。
+        "skill_gain": SkillGainRecord(
+            seq=109,
+            frame_id=0,
+            depth=0,
+            seat=1,
+            skill_id="hero.machao.mashu",
+        ),
+        "skill_lose": SkillLoseRecord(
+            seq=110,
+            frame_id=0,
+            depth=0,
+            seat=1,
+            skill_id="hero.machao.mashu",
+        ),
+        "skill_suppress": SkillSuppressRecord(
+            seq=111,
+            frame_id=0,
+            depth=0,
+            seat=1,
+            skill_id="hero.jie_guanyu.yijue",
+            suppressed=True,
+        ),
     }
 
 
@@ -652,8 +679,8 @@ def test_every_delta_type_has_a_no_leak_case() -> None:
     """delta 类型表与判据表**双向**对齐：新增类型必须登记一条不泄露判据。"""
     schema_types = _delta_schema_types()
     cases = _delta_records()
-    assert len(schema_types) == 8, (
-        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 8 种写）："
+    assert len(schema_types) == 11, (
+        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 11 种写）："
         f"{sorted(schema_types)}"
     )
     missing = sorted(set(schema_types) - set(cases))
@@ -668,7 +695,7 @@ def test_every_delta_type_has_a_no_leak_case() -> None:
 
 
 def test_the_delta_coverage_check_bites() -> None:
-    """探针：从判据表里拿掉一种 delta，覆盖检查必须报出它（防"8 种"断言空转）。"""
+    """探针：从判据表里拿掉一种 delta，覆盖检查必须报出它（防"11 种"断言空转）。"""
     cases = _delta_records()
     cases.pop("deck_shuffle")
     missing = sorted(set(_delta_schema_types()) - set(cases))
@@ -699,6 +726,10 @@ def test_every_delta_record_is_redacted_for_a_human_viewer() -> None:
             assert payload["identity"] == "rebel"
         elif delta_type == "card_move":
             _assert_card_faces_absent(payload, tuple(raw["cards"]))
+        elif delta_type in ("skill_gain", "skill_lose", "skill_suppress"):
+            # 技能三态（M6 票 04）：座位 + 技能 id 是公开事实，没有可裁的隐藏面。
+            assert payload == raw, f"{delta_type} 是公开事实，不该被裁剪：{payload}"
+            assert payload["seat"] == 1
         else:
             assert payload == raw, f"{delta_type} 是公开事实，不该被裁剪：{payload}"
         if delta_type in ("deck_shuffle", "identity_deal"):

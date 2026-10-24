@@ -25,6 +25,9 @@ __all__ = [
     "MoveReason",
     "Phase",
     "Player",
+    "SkillSuppression",
+    "SkillSuppressionPredicate",
+    "SkillSuppressionScope",
     "SlotKind",
     "Zone",
     "ZoneRef",
@@ -33,6 +36,41 @@ __all__ = [
 
 class _FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class SkillSuppressionScope(str, Enum):
+    """技能失效记录的**作用域**（M6 票 04；`GLOSSARY.md`「技能失效」）。
+
+    M6 只有一档：``TURN`` = 本回合（回合末由 ``Engine._clear_turn_effects`` 清掉）。
+    记录带作用域而不是裸布尔，是因为"失效可恢复"的那一半取决于**何时**恢复——条件撤销
+    可能是回合末、也可能是某张牌离场；把作用域放进记录，清理点就不必逐技能特判。
+    """
+
+    TURN = "turn"
+
+
+class SkillSuppressionPredicate(str, Enum):
+    """技能失效记录的**谓词**：它挡住该座位的哪些技能实例（M6 票 04）。
+
+    ``ALL_NON_LOCKED`` = "其所有非锁定技失效"（【义绝】/【铁骑】的牌面用语）。
+    谓词是**座位级**的：一条记录覆盖该座位名下此刻与**此后获得**的全部非锁定技
+    （票面 D10 的"失效率不逐技能展开"）；锁定技不受它影响。
+    """
+
+    ALL_NON_LOCKED = "all_non_locked"
+
+
+class SkillSuppression(_FrozenModel):
+    """一个座位的**失效记录**（M6 票 04）：``GLOSSARY.md``「技能失效」的实例形状。
+
+    ``skill_id`` = **施加失效的那条技能**的实例 id（【义绝】/【铁骑】）——不是被挡住的
+    技能；一条记录覆盖整个座位，故这里不会逐技能展开。"谁让它失效的"由这条技能实例的
+    持有者推出，不另存一个座位号。
+    """
+
+    skill_id: str
+    scope: SkillSuppressionScope = SkillSuppressionScope.TURN
+    predicate: SkillSuppressionPredicate = SkillSuppressionPredicate.ALL_NON_LOCKED
 
 
 class SlotKind(str, Enum):
@@ -270,6 +308,42 @@ class Player(BaseModel):
     虚拟装备**不是牌**，绝不进装备区、不占牌守恒（票 07 §6 的"绝不为它造 CardRef"）；
     `装备区` 只放实体牌，`已装备` = 实体装备 ∪ 虚拟授予（由 ``skills.is_equipped`` 求并集）。
     M2 没有生产者（【八阵】类技能属 M3），字段是接口位。
+    """
+    granted_skills: list[str] = Field(default_factory=list)
+    """**获得**的技能 id（第四种技能来源，M6 票 04；`GLOSSARY.md`「技能来源」）。
+
+    与装备区 / 虚拟授予 / 武将牌三种载体并列，由 :meth:`Engine.grant_skill` 写入；
+    载体解析读它产出 ``SkillSourceKind.GRANTED`` 实例。M6 没有"获得技能"的武将
+    （觉醒技的 ☆ 技能由票 06 用同一个入口授予），故本票只以构造测试钉住形状。
+    """
+    lost_skills: list[str] = Field(default_factory=list)
+    """**已失去**的技能 id（M6 票 04；`GLOSSARY.md`「技能失去」）。
+
+    失去 = 实例**不再存在**且不可恢复：载体解析在去重之后减去这一份，故武将牌上的技能
+    清单一字未动、实例照样不产出，连续型效果（距离 / 目标池）随之消失。写入唯一入口
+    :meth:`Engine.lose_skill`；M6 无载体（断肠 / 左慈留给后续里程碑）。
+    """
+    suppressed_skills: list[SkillSuppression] = Field(default_factory=list)
+    """**失效**记录（M6 票 04；`GLOSSARY.md`「技能失效」）：座位级的条件记录。
+
+    载体解析的最后一道：实例仍在，但被谓词挡在解析之外（不产出候选、不进修饰器链、
+    不触发钩子）；作用域到期后恢复。失效率是**座位级**的，一条记录覆盖该座位此后获得的
+    非锁定技；锁定技不受 ``ALL_NON_LOCKED`` 影响。写入唯一入口
+    :meth:`Engine.suppress_skills`，回合末由 ``Engine._clear_turn_effects`` 清掉。
+    """
+    hand_card_prohibited: bool = False
+    """本回合**不能使用或打出手牌**（M6 票 04 的【义绝】黑色分支）。
+
+    座位级、回合末清理；候选生成在 :func:`sgs.effects.legal_actions_for` 的**唯一**闸门里
+    读它（使用 / 打出的候选按来源区过滤，弃置 / 重铸等不是"使用或打出"的动作照常）。
+    **不发 delta**：与 ``luoyi_active`` 同姿态——回放按同一条技能动作重跑即可重建。
+    """
+    heart_slash_bonus_against: list[int] = Field(default_factory=list)
+    """本回合"**你使用红桃【杀】对其造成的伤害 +1**"的目标座位（【义绝】黑色分支）。
+
+    由 :meth:`Engine.add_heart_slash_bonus` 追加、回合末清空；读取方是【义绝】技能定义上的
+    ``DAMAGE_DEAL_AMOUNT`` 修饰器（查询期从活着的实例算，失去 / 失效即消失）。**不发
+    delta**：与 ``hand_card_prohibited`` 同一条理由。
     """
 
 
