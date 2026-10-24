@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Any
@@ -502,6 +503,83 @@ class GameState(BaseModel):
     """
     turn_seat: int | None = None
     phase: Phase | None = None
+    round: int = 1
+    """当前**轮次**（M6 票 11；spec D13 / §回合与轮次）：自然回合转完一圈 +1，从 1 起。
+
+    "轮"是 M6 新立的概念：`三国杀详细规则.txt` §三 3.8 把它定成"从当前回合角色开始，
+    经过其余角色各一个回合、再次回到当前回合角色之前"。自然指针
+    （:attr:`next_seat`）只在**非额外回合**结束时前进，回到本轮起始座位
+    （:attr:`round_start_seat`）时轮次 +1——额外回合因此不会刷新「每轮限 X 次」。
+
+    只有「每轮限 X 次」的技能读它（M6 = 界吕蒙【博图】），但**记录流只在有读者时**才落
+    ``turn_change``（见该 delta 的注释）：没有读者时轮次不改变任何规则结果，
+    标准 47 条金录像因此逐字节不变。
+    """
+
+    round_start_seat: int | None = None
+    """本轮**起始座位**（轮次判据的锚点；``None`` = 还没定，人为局面从当前回合起算）。
+
+    判据不是"回到它"而是"自然指针在座位环上**转过**它"：本轮起点座位可能在本轮中途
+    阵亡，那时"回到它"永远不会发生、轮次会卡死；越过它同样意味着这一圈走完了
+    （:meth:`Engine._advance_turn`）。
+    """
+
+    next_seat: int | None = None
+    """**自然指针**：下一个**自然**回合的座位（M6 票 11 / spec D13）。
+
+    只在**非额外回合**结束时前进（:meth:`Engine._advance_turn`）：额外回合出栈接管时它
+    一动不动，故"额外回合插在自然下家之前"而不是把它挤掉。``None`` = 第一个回合还没结束。
+    """
+
+    turn_extra: bool = False
+    """当前回合是不是**额外回合**（M6 票 11）。
+
+    回合结束时据此决定自然指针要不要前进：额外回合结束**不**推进它，否则额外回合会被
+    当成"又走了一圈"，把「每轮限 X 次」无限刷新。
+    """
+
+    extra_turns: list[int] = Field(default_factory=list)
+    """**额外回合待执行栈**（M6 票 11 / spec D13）：回合结束时压入，下个回合开始时弹出。
+
+    显式栈而不是"插队改 turn_seat"：压栈点与接管点因此各只有一处，且额外回合可以连续
+    叠加（X > 1 时同一轮里能连拿几个）。弹出顺序 = **LIFO**（最后压入的那个紧接当前
+    回合，官方"插在当前回合之后"的直读）；轮到已阵亡的座位时直接丢弃（没有它的回合）。
+    """
+
+    round_use_counts: dict[str, int] = Field(default_factory=dict)
+    """**本轮**的「每轮限 X 次」已用次数（M6 票 11）：实例键 → 次数。
+
+    与 :attr:`skill_state` 的位图分列而不是再挤一位：位图存"有没有用过"，而每轮限次是
+    **计数**（X 可以大于 1，【博图】的 X = 存活角色数且至多 3），一位表达不了。键 = 实例键
+    （``skills.instance_key``，与 ``skill_state`` 同一套身份）；写入口
+    ``skills.mark_round_skill_used``，读入口 ``skills.round_skill_uses``，
+    **唯一复位点** = 轮次 +1（``skills.reset_round_skill_state``）——额外回合不经过它，
+    故额外回合不会刷新每轮次数（票面核心反例）。**不发 delta**：每轮次数可由记录流里的
+    ``turn_change``（轮次）+ 发动动作重放重建，且它没有任何 JSON 读者。
+    """
+
+    discard_suits_this_turn: list[str] = Field(default_factory=list)
+    """**本回合**置入弃牌堆的牌出现过的花色（M6 票 11 的【博图】判据；按首次出现序、去重）。
+
+    判据的读取方只有一处：界吕蒙【博图】"若本回合置入弃牌堆的牌中包含四种花色"。裁定
+    （`06`（§5「程序化约定与偏离一手」））是**计入本回合所有来源置入的牌**——阵亡者清区、
+    主公杀忠臣的弃置、【铁索】重铸、判定牌入弃牌堆……都算，故写入点在**搬牌原语**
+    （:func:`sgs.effects.move_card`）里，而不是各调用点自己记：少了那一道，任何一条没接上
+    的来源都会让技能静默不发动。复位点 = 下一个回合的 ``TURN_START``（额外回合也各有一份：
+    作用域 = **一个回合**，不是一轮）。
+    """
+
+    def note_discard_suits(self, cards: Iterable[CardRef]) -> None:
+        """记下这一批**进入弃牌堆**的牌的花色（M6 票 11 的唯一写入口）。
+
+        按首次出现序去重（本项目禁无序容器参与顺序，源码纪律 §3）；花色为空（纯虚拟牌）
+        的牌不占位——它们从不进弃牌堆。
+        """
+        for card in cards:
+            suit = card.suit
+            if suit is not None and suit not in self.discard_suits_this_turn:
+                self.discard_suits_this_turn.append(suit)
+
     skill_state: dict[str, int] = Field(default_factory=dict)
     """**per-instance 技能状态**（票 07 §6 / 票 30）：实例键 → 位图（"已用次数"等）。
 

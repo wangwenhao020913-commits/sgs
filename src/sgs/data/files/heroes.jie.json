@@ -121,6 +121,11 @@
           "name": "攻心",
           "skill_type": "NORMAL",
           "granted_by": "qinxue"
+        },
+        {
+          "id": "botu",
+          "name": "博图",
+          "skill_type": "NORMAL"
         }
       ]
     },

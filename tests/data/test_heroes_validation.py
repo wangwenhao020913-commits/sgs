@@ -509,13 +509,21 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
         Gender.MALE,
         4,
     )
-    assert [skill.id for skill in lvmeng.skills] == ["keji", "qinxue", "gongxin"]
+    # M6 票 11：再追加【博图】（「每轮限 X 次」+ 额外回合；§十九 L2140–L2142）。
+    assert [skill.id for skill in lvmeng.skills] == [
+        "keji",
+        "qinxue",
+        "gongxin",
+        "botu",
+    ]
     assert [skill.skill_type for skill in lvmeng.skills] == [
         SkillType.NORMAL,
         SkillType.AWAKENING,
         SkillType.NORMAL,
+        SkillType.NORMAL,
     ]
     assert lvmeng.skills[2].granted_by == "qinxue", "☆攻心由【勤学】觉醒后获得"
+    assert lvmeng.skills[3].granted_by is None, "【博图】不是 ☆ 技能"
 
     # M6 票 07：界甘宁 / 界貂蝉。甘宁的【奇袭】与标准版逐字相同；【奋威】是**限定技**；
     # 貂蝉两条都是普通技（【离间】的"不能被响应"是行为差异，不是技能类型差异）。
@@ -663,6 +671,7 @@ def test_a_star_skill_declares_its_awakening_and_is_not_on_the_hero_card():
     assert hero_card_skill_ids("jie_lvmeng") == (
         "hero.jie_lvmeng.keji",
         "hero.jie_lvmeng.qinxue",
+        "hero.jie_lvmeng.botu",
     )
 
 
@@ -716,6 +725,7 @@ def test_hero_skill_ids_lookup_covers_the_jie_supplement():
         "hero.jie_lvmeng.keji",
         "hero.jie_lvmeng.qinxue",
         "hero.jie_lvmeng.gongxin",
+        "hero.jie_lvmeng.botu",
     )
     assert hero_skill_ids("jie_zhouyu") == (
         "hero.jie_zhouyu.yingzi",

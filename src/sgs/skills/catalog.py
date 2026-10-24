@@ -312,6 +312,17 @@ class SkillDef:
     ``group_size``），这里只是把它暴露出来，不是第二份判据。
     """
 
+    per_round_limit: bool = False
+    """这条技能有没有**每轮限 X 次**（M6 票 11 的加法，默认 ``False`` ⇒ 既有 88 条一字不改）。
+
+    "轮次"是引擎状态（``GameState.round``），但**只有带每轮限次的技能会读它**：本字段是
+    :func:`round_limit_present` 的唯一判据——记录流只在这种对局里落 ``turn_change``
+    （没有读者时轮次不改变任何规则结果，标准 47 条金录像因此逐字节不变）。
+    M6 的唯一载体是界吕蒙【博图】（X = 存活角色数且至多 3，**每次发动时重算**，见
+    `06`（§5「程序化约定与偏离一手」））；每轮已用次数住
+    :attr:`~sgs.state.GameState.round_use_counts`，轮次 +1 时清空。
+    """
+
     @property
     def priority_class(self) -> PriorityClass:
         """本技能在修饰器链里的优先级档（由载体派生，不另存字段以防漂移）。"""
@@ -601,6 +612,23 @@ def instance_key(instance: SkillInstance) -> str:
     return f"{instance.owner}:{instance.skill_id}:{source.kind.value}:{ref}"
 
 
+def round_limit_present(state: GameState, catalog: Mapping[str, SkillDef] | None = None) -> bool:
+    """本局此刻有没有「每轮限 X 次」的**载体**（M6 票 11）。
+
+    轮次变化只在有读者时进记录流（见 :class:`~sgs.state.TurnChangeDelta`）：没有载体的对局
+    里轮次不改变任何规则结果，记录流保持与 M5 逐字相同 ⇒ 标准 47 条金录像逐字节不变。
+    判据读**存活实例**的定义字段（:attr:`SkillDef.per_round_limit`），不读一张会漂移的
+    名单；**暂时失效也算**（``include_suppressed=True``）——失效恢复后它照样要读轮次。
+    ``catalog`` 入参只为让机械检查注入合成定义；缺省读**当前**的 :data:`CATALOG`。
+    """
+    source = CATALOG if catalog is None else catalog
+    return any(
+        source[instance.skill_id].per_round_limit
+        for instance in resolve_instances(state, include_suppressed=True)
+        if instance.skill_id in source
+    )
+
+
 def hero_card_zone_key(owner: int, skill_id: str) -> str:
     """**武将牌上的牌区的键**（M6 票 10）：（座位, 技能实例）的规范文本。
 
@@ -698,6 +726,43 @@ def reset_turn_skill_state(state: GameState) -> None:
             state.skill_state[key] = remaining
         else:
             del state.skill_state[key]
+
+
+# ---------------------------------------------------------------------------
+# 「每轮限 X 次」的计数（M6 票 11 的界吕蒙【博图】）
+# ---------------------------------------------------------------------------
+
+
+def round_skill_uses(state: GameState, seat: int, skill_id: str) -> int:
+    """``seat`` 的 ``skill_id`` **本轮**已发动几次（M6 票 11 的只读面）。
+
+    与 :func:`skill_used_this_turn` 同姿态：按存活实例（``include_suppressed=True``
+    ——失效 ≠ 没用过）取实例键、读 :attr:`~sgs.state.GameState.round_use_counts`。
+    没有这条实例时恒 ``0``。**上限 X 不在本函数里**——"每轮限几次"是牌面事实
+    （【博图】是"存活角色数且至多 3"，每次发动时重算），由技能自己的 ``available`` 判。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            return state.round_use_counts.get(instance_key(instance), 0)
+    return 0
+
+
+def mark_round_skill_used(state: GameState, seat: int, skill_id: str) -> None:
+    """给 ``seat`` 的 ``skill_id`` 记一次**本轮已发动**（技能层调用；实例不在则零动作）。"""
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            key = instance_key(instance)
+            state.round_use_counts[key] = state.round_use_counts.get(key, 0) + 1
+            return
+
+
+def reset_round_skill_state(state: GameState) -> None:
+    """清空**本轮**的每轮次数（M6 票 11；引擎在轮次 +1 时调用，唯一复位点）。
+
+    计数本身就是"本轮"的，故整段清空；**额外回合不经过这里**——这正是"额外回合不会
+    刷新每轮限 X 次"的机械保证（见 :meth:`~sgs.engine.Engine._advance_turn`）。
+    """
+    state.round_use_counts.clear()
 
 
 def _instance_awakened(state: GameState, instance: SkillInstance) -> bool:

@@ -156,6 +156,12 @@ def move_card(
         _place_into_equipment(state, to_zone, cards)
     else:
         state.zone(to_zone).extend(card_ids)
+    if to_zone.zone is Zone.DISCARD:
+        # 本回合"置入弃牌堆的牌含哪几种花色"（M6 票 11 的【博图】判据）：记在**唯一的搬牌
+        # 原语**里，而不是各调用点自己记——裁定是"计入本回合**所有来源**置入的牌"
+        # （`06`（§5「程序化约定与偏离一手」）），任何一条没接上的来源都会让技能静默不
+        # 发动。花色与来源 / 原因无关。
+        state.note_discard_suits(cards)
 
     return CardMoveDelta(
         cards=cards,

@@ -50,6 +50,7 @@ from sgs.engine import (  # noqa: E402
     SkillGainRecord,
     SkillLoseRecord,
     SkillSuppressRecord,
+    TurnChangeRecord,
     WineChangeRecord,
     record_json,
 )
@@ -656,6 +657,11 @@ def _delta_records() -> dict[str, object]:
             skill_id="hero.jie_guanyu.yijue",
             suppressed=True,
         ),
+        # M6 票 11 的回合边界（额外回合 / 轮次变化）：回合座位与轮次都是公开事实
+        # （顶栏本来就画轮次），没有隐藏面 ⇒ 下发面 = 原样。
+        "turn_change": TurnChangeRecord(
+            seq=113, frame_id=0, depth=0, seat=1, round=2, extra=True
+        ),
     }
 
 
@@ -684,8 +690,8 @@ def test_every_delta_type_has_a_no_leak_case() -> None:
     """delta 类型表与判据表**双向**对齐：新增类型必须登记一条不泄露判据。"""
     schema_types = _delta_schema_types()
     cases = _delta_records()
-    assert len(schema_types) == 12, (
-        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 12 种写）："
+    assert len(schema_types) == 13, (
+        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 13 种写）："
         f"{sorted(schema_types)}"
     )
     missing = sorted(set(schema_types) - set(cases))
@@ -731,9 +737,16 @@ def test_every_delta_record_is_redacted_for_a_human_viewer() -> None:
             assert payload["identity"] == "rebel"
         elif delta_type == "card_move":
             _assert_card_faces_absent(payload, tuple(raw["cards"]))
-        elif delta_type in ("skill_gain", "skill_lose", "skill_suppress", "hp_max_change"):
-            # 技能三态（M6 票 04）/ 体力上限变化（M6 票 06）：座位 + 技能 id / 数值都是
-            # 公开事实（体力上限本来就在投影里），没有可裁的隐藏面。
+        elif delta_type in (
+            "skill_gain",
+            "skill_lose",
+            "skill_suppress",
+            "hp_max_change",
+            "turn_change",
+        ):
+            # 技能三态（M6 票 04）/ 体力上限变化（M6 票 06）/ 回合边界（M6 票 11）：
+            # 座位 + 技能 id / 数值 / 轮次都是公开事实（体力上限与轮次本来就在投影 / 顶栏里），
+            # 没有可裁的隐藏面。
             assert payload == raw, f"{delta_type} 是公开事实，不该被裁剪：{payload}"
             assert payload["seat"] == 1
         else:

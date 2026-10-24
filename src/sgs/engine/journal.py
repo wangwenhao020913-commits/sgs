@@ -35,6 +35,7 @@ from sgs.state import (
     SkillGainDelta,
     SkillLoseDelta,
     SkillSuppressDelta,
+    TurnChangeDelta,
     WineChangeDelta,
 )
 from sgs.timing import Timing
@@ -65,6 +66,7 @@ __all__ = [
     "SkillLoseRecord",
     "SkillSuppressRecord",
     "TimingRecord",
+    "TurnChangeRecord",
     "WineChangeRecord",
     "dump_journal",
     "read_journal",
@@ -180,6 +182,18 @@ class SkillSuppressRecord(SkillSuppressDelta):
     depth: int
 
 
+class TurnChangeRecord(TurnChangeDelta):
+    """一个**回合边界**的事实（M6 票 11）：额外回合开始 / 轮次变化。
+
+    直接落在回合环（帧外、``frame_id = 0``），故坐标与既有的回合级记录一致。
+    """
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
 class DeckShuffleRecord(DeckShuffleDelta):
     kind: Literal["delta"] = "delta"
     seq: int
@@ -226,7 +240,8 @@ DeltaRecord = Annotated[
     | IdentityRevealRecord
     | SkillGainRecord
     | SkillLoseRecord
-    | SkillSuppressRecord,
+    | SkillSuppressRecord
+    | TurnChangeRecord,
     Field(discriminator="delta_type"),
 ]
 
@@ -358,6 +373,8 @@ def wrap_delta(delta: Delta, *, seq: int, frame_id: int, depth: int) -> DeltaRec
         return SkillLoseRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, SkillSuppressDelta):
         return SkillSuppressRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, TurnChangeDelta):
+        return TurnChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     return DeckShuffleRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
 
 

@@ -16,6 +16,7 @@ from .deltas import (
     SkillGainDelta,
     SkillLoseDelta,
     SkillSuppressDelta,
+    TurnChangeDelta,
     WineChangeDelta,
 )
 from .models import (
@@ -143,6 +144,7 @@ __all__ = (
     "Step",
     "StepPool",
     "SlotKind",
+    "TurnChangeDelta",
     "UseCard",
     "WineChangeDelta",
     "WindowCause",

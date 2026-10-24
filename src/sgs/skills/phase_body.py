@@ -45,17 +45,27 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import SkillType, hero_skill_id
+from sgs.data import SkillType, Suit, hero_skill_id
 from sgs.effects import CarrierKind, Modifier, ModifierContext, ModifierPoint, behavior_for, is_slash
 from sgs.resolution import Control, Frame
 from sgs.state import FrameKind, GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
-from .catalog import ActivationPlan, HeroSkillDecl, Hook, SkillDef
+from .catalog import (
+    ActivationPlan,
+    HeroSkillDecl,
+    Hook,
+    SkillDef,
+    mark_round_skill_used,
+    round_skill_uses,
+)
 from .flow import PickSeats, SkillFlow, zero_step_effect
 
 __all__ = [
     "BIYUE_FLOW",
+    "BOTU_FLOW",
+    "BOTU_ROUND_LIMIT",
+    "JIE_BOTU",
     "KEJI",
     "KEJI_FLOW",
     "LUOYI_DAMAGE_BONUS",
@@ -80,6 +90,8 @@ class PhaseBodySkill(HeroSkillDecl):
     ``available``（M6 票 01）：除"自己的阶段"外的额外前提（【突袭】：有牌可拿）；
     ``skill_type``（M6 票 05）：技能类型（缺省 ``NORMAL``；【替身】是 ``LIMITED``，
     派发环据此落"整局已用"位）。
+    ``per_round_limit``（M6 票 11）：这条技能有没有「每轮限 X 次」（【博图】是唯一载体）；
+    直接透进 :class:`~sgs.skills.catalog.SkillDef` 的同名字段，见那里的注释。
     """
 
     timing: Timing
@@ -94,6 +106,13 @@ class PhaseBodySkill(HeroSkillDecl):
     界周瑜【英姿】是锁定技（§十九 L2152–L2154 牌面写"锁定技"），故它**不问**"是否发动"、
     满足条件即执行（派发环 ``forced = locked or AWAKENING``）。与 ``skill_type`` 正交：
     锁定 / 非锁定管"要不要问"，``skill_type`` 管技能规则类型（普通 / 限定 / 觉醒）。
+    """
+    per_round_limit: bool = False
+    """这条技能有没有**每轮限 X 次**（M6 票 11；缺省 ``False`` ⇒ 既有九条声明一字不改）。
+
+    ``True`` 时：本技能的发动次数记在 ``GameState.round_use_counts``（每轮复位），并让轮次
+    变化进记录流（``skills.round_limit_present`` 的判据）。上限 X 由技能自己的
+    :attr:`available` 每次重算（【博图】：X = 存活角色数且至多 3）。
     """
     requirement: str | None = None
     """这条技能"需要玩家做什么"的**覆盖文案**（M6 票 07；缺省 ``None`` = 读
@@ -390,6 +409,76 @@ _KEJI_JIE = PhaseBodySkill(
 
 
 # ---------------------------------------------------------------------------
+# 界吕蒙【博图】（M6 票 11）：每轮限 X 次，回合结束时，若本回合置入弃牌堆的牌中包含
+# 四种花色，你可以执行一个额外的回合（§十九 L2140–L2142）。
+#
+# 规则原文：
+#
+#     博图：每轮限 X 次（X 为存活角色数且至多为 3），回合结束时，若本回合置入弃牌堆的
+#          牌中包含四种花色，你可以执行一个额外的回合。
+#
+# 三个落点各自只有一处真源：
+#
+# - **条件**（本回合置入弃牌堆的牌含四种花色）读 ``GameState.discard_suits_this_turn``：
+#   写入点在搬牌原语里（"计入本回合**所有来源**置入的牌"，`06`（§5「程序化约定与偏离
+#   一手」）的裁定），作用域 = 一个回合（``TURN_START`` 复位）；
+# - **上限 X** 在 :func:`_botu_available` 里**每次发动时重算**（存活角色数且至多 3，
+#   `06`（§5「程序化约定与偏离一手」）的第二条裁定）——已用次数住
+#   ``GameState.round_use_counts``，轮次 +1 才清空，故额外回合不会刷新它；
+# - **效果** = 压一个额外回合进待执行栈（``Engine.schedule_extra_turn``），由回合环在下一个
+#   回合边界弹出接管，**自然指针不前进**（D13）。
+# ---------------------------------------------------------------------------
+
+JIE_BOTU = hero_skill_id("jie_lvmeng", "botu")
+"""界吕蒙【博图】的全限定技能 id。"""
+
+BOTU_ROUND_LIMIT = 3
+"""【博图】「至多 3」的硬上限（§十九 L2141）：X = ``min(存活角色数, 3)``。"""
+
+_SUITS: tuple[Suit, ...] = tuple(Suit)
+"""四种花色（"包含四种花色"的判据长度；取值与 ``CardRef.suit`` 的字符串同源）。"""
+
+
+def _botu_available(state: GameState, owner: int) -> bool:
+    """【博图】的两个前提：本回合弃牌堆含四花色 ∧ 本轮次数还没用完。
+
+    四条花色是**去重后的花色种类数**（``discard_suits_this_turn`` 按首次出现序去重）：
+    "包含四种花色"读作"里面出现过全部四种色"，而不是"恰好四张"。
+    X **每次发动时重算**（`06`（§5「程序化约定与偏离一手」））：存活角色数会中途
+    变小，写成开场快照会让已经死人的对局多发动几次。
+    """
+    if len(state.discard_suits_this_turn) < len(_SUITS):
+        return False
+    alive = sum(1 for player in state.players if player.alive)
+    return round_skill_uses(state, owner, JIE_BOTU) < min(alive, BOTU_ROUND_LIMIT)
+
+
+def _botu_effect(host: Any, frame: Frame, answers: Any) -> Control:
+    """提交点：记一次「本轮已发动」并把一个额外回合压进待执行栈（两件事同一处）。"""
+    del answers
+    owner = frame.data["skill_owner"]
+    mark_round_skill_used(host.state, owner, JIE_BOTU)
+    host.schedule_extra_turn(owner)
+    return None
+
+
+BOTU_FLOW = SkillFlow(name="botu", steps=(), effect=_botu_effect)
+"""【博图】的零步流水线：[是否发动] → 压一个额外回合（无步骤）。"""
+
+
+_BOTU = PhaseBodySkill(
+    # 界吕蒙【博图】：回合结束时，若本回合置入弃牌堆的牌包含四种花色，可以执行一个
+    # 额外的回合；每轮限 X 次（X = 存活角色数且至多 3，每次发动时重算）。
+    hero_id="jie_lvmeng",
+    short_id="botu",
+    timing=Timing.TURN_END,
+    flow=BOTU_FLOW,
+    available=_botu_available,
+    per_round_limit=True,
+)
+
+
+# ---------------------------------------------------------------------------
 # 界张飞【替身】（M6 票 05）：限定技——准备阶段，体力回复至上限，摸回复量张牌
 #
 # 规则原文（§十九 L2079–L2081）：
@@ -466,10 +555,12 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _KEJI_JIE,
     _TISHEN,
     _JIE_BIYUE,
+    _BOTU,
 )
-"""L 族九条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
+"""L 族十条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
 票 03 的【克己】、票 05 的【替身】、票 06 的界【克己】、票 07 的界【闭月】、
-票 08 的界【英姿】）。"""
+票 08 的界【英姿】、票 11 的【博图】——最后一条挂在**回合结束时**而不是阶段体上，
+派发机制相同，见 :meth:`Engine._dispatch_phase_body`）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "yingzi": "多摸一张牌",
@@ -478,8 +569,9 @@ _REQUIREMENTS: dict[str, str] = {
     "luoyi": "少摸一张牌；本回合你的【杀】或【决斗】造成的伤害 +1",
     "keji": "跳过弃牌阶段",
     "tishen": "将体力回复至体力上限，然后摸以此法回复的体力值数张牌",
+    "botu": "执行一个额外的回合",
 }
-"""L 族六条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+"""L 族七条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
 _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
     # M6 票 01【突袭】：座位步的询问 ``skill_id`` 是 ``tuxi:seat:<序号>`` ⇒ 键 = ``seat``。
@@ -513,7 +605,7 @@ def phase_body_activation_plans() -> dict[str, Any]:
 
 
 def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
-    """L 族九条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
+    """L 族十条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
 
     除界【英姿】外都**非锁定**（技能面写"你可以"）⇒ 先问"是否发动"再执行；界【英姿】
     牌面写"锁定技" ⇒ ``locked=True``、不问即执行（M6 票 08）。``carrier = HERO``
@@ -532,6 +624,7 @@ def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
             modifiers=skill.modifiers,
             requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
             step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
+            per_round_limit=skill.per_round_limit,
         )
         for skill in PHASE_BODY_SKILLS
     )

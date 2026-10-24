@@ -6,7 +6,7 @@
 ``identity_deal`` / ``identity_reveal``）之后，``chained_change``（M5-03 横置）、
 ``wine_change``（M5-04 酒）与 ``card_reveal``（M5-06 火攻亮牌）都是就地追加；M6 票 04 再
 追加技能三态的 ``skill_gain`` / ``skill_lose`` / ``skill_suppress``（技能获得 / 失去 /
-失效），记录流仍为事件版本 2。记录层
+失效），M6 票 11 追加 ``turn_change``（额外回合 / 轮次变化），记录流仍为事件版本 2。记录层
 （``engine``）在这些模型上**继承**出带 ``seq`` / ``frame_id`` / ``depth`` 的记录子类，
 从而 JSON 是平铺的。
 """
@@ -41,6 +41,7 @@ __all__ = [
     "SkillGainDelta",
     "SkillLoseDelta",
     "SkillSuppressDelta",
+    "TurnChangeDelta",
     "WineChangeDelta",
 ]
 
@@ -219,6 +220,29 @@ class SkillSuppressDelta(_FrozenModel):
     predicate: SkillSuppressionPredicate = SkillSuppressionPredicate.ALL_NON_LOCKED
 
 
+class TurnChangeDelta(_FrozenModel):
+    """一个**回合边界**的事实（M6 票 11；spec D13 / §回合与轮次）。
+
+    "哪一回合"由既有的 ``TURN_START`` 时机回答；本 delta 只记**它读不出来的那两件事**：
+
+    - ``extra=True``：``seat`` 的**额外回合**开始了（从待执行栈弹出并接管）。额外回合的
+      ``TURN_START`` 与自然回合逐字相同，故没有这一条时"同一个座位连着两个回合"会被读成
+      "进入了下一轮"（``table.js:roundNumber`` 的旧派生就是这一条）。
+    - ``extra=False``：**轮次变化**——新一轮从 ``seat`` 的自然回合开始，``round`` 是新轮次。
+      本轮起点座位中途阵亡时，自然指针越过它也算一圈（见 ``Engine._advance_turn``）。
+
+    **只在有载体的对局里出现**：轮次只有「每轮限 X 次」的技能会读（M6 = 界吕蒙【博图】），
+    没有读者时轮次不改变任何规则结果，故不落记录——标准 47 条金录像因此逐字节不变。
+
+    公开事实（回合座位与轮次都在明面上），无需按可见性裁剪：载荷原样下发。
+    """
+
+    delta_type: Literal["turn_change"] = "turn_change"
+    seat: int
+    round: int
+    extra: bool = False
+
+
 Delta = Annotated[
     CardMoveDelta
     | HpChangeDelta
@@ -231,6 +255,7 @@ Delta = Annotated[
     | IdentityRevealDelta
     | SkillGainDelta
     | SkillLoseDelta
-    | SkillSuppressDelta,
+    | SkillSuppressDelta
+    | TurnChangeDelta,
     Field(discriminator="delta_type"),
 ]

@@ -89,7 +89,9 @@ from sgs.skills import (
     prune_card_tags,
     prune_skill_state,
     reset_phase_skill_state,
+    reset_round_skill_state,
     reset_turn_skill_state,
+    round_limit_present,
     resolve_conversion_confirmation,
     start_provider,
     timing_hooks_present,
@@ -143,6 +145,7 @@ from sgs.state import (
     Slot,
     SlotKind,
     Step,
+    TurnChangeDelta,
     UseCard,
     WindowCause,
     WineChangeDelta,
@@ -2169,6 +2172,16 @@ class Engine:
             raise ValueError(f"少摸的张数不能为负，得到 {count!r}")
         self.set_draw_phase_count(seat, max(0, self.draw_phase_count() - count))
 
+    def schedule_extra_turn(self, seat: int) -> None:
+        """把一个**额外回合**压进待执行栈（M6 票 11 的唯一写入口；【博图】的落点）。
+
+        压在这里 = "插在当前回合结算完毕之后"：回合环在下一个回合边界上弹出并接管
+        （:meth:`_advance_turn`），**自然指针不前进**，故"回到本轮起始座位"不会发生、
+        「每轮限 X 次」不会被额外回合刷新。**不发 delta**：记录流只在额外回合**真的
+        开始**的那一刻落 ``turn_change``（记事实，不记打算）。
+        """
+        self.state.extra_turns.append(seat)
+
     def consume_delayed_card(self, frame: Frame) -> None:
         """把**延时锦囊本体**标记为"已消耗"：判定阶段循环的收尾据此送它进弃牌堆。
 
@@ -3579,6 +3592,10 @@ class Engine:
 
     def _start(self) -> None:
         self.state.turn_seat = self._first_seat()
+        # 轮次从 1 起、本轮起点 = 先手座位（M6 票 11）：自然指针再次轮到它时轮次 +1。
+        self.state.round = 1
+        self.state.round_start_seat = self.state.turn_seat
+        self.state.turn_extra = False
         self.emit_timing(Timing.GAME_START)
         self._started = True
 
@@ -3615,12 +3632,66 @@ class Engine:
         if self._turn_pc >= len(self._turn_steps):
             self._turn_pc = 0
             self._turn_data.clear()
-            if self.state.turn_seat is not None and self.state.players:
-                # 回合只在**存活座位**之间轮转（票 15 §6）；座位环是唯一真源。
-                # 存活 ≤ 1 时终局已抢先，故正常对局必然读到一个存活下家。
-                next_seat = next_alive_seat(self.state, self.state.turn_seat)
-                if next_seat is not None:
-                    self.state.turn_seat = next_seat
+            self._advance_turn()
+
+    def _advance_turn(self) -> None:
+        """回合之间：先结算**自然指针与轮次**，再让**额外回合栈**插队接管（M6 票 11 / D13）。
+
+        两件事的次序就是 spec 「回合与轮次」的两句话：
+
+        1. **自然指针只在非额外回合结束时前进**：刚结束的是自然回合 ⇒ 指针走到下一个存活
+           座位（``next_seat``）；座位环转过本轮起始座位时轮次 +1 并清空每轮次数。
+           刚结束的是**额外回合** ⇒ 指针与轮次**一动不动**，故额外回合不会触发"回到起始
+           座位"，「每轮限 X 次」不会被刷新（票面核心反例）。
+        2. **待执行栈非空 ⇒ 弹出并接管**（``turn_extra = True``）：额外回合因此**插在**
+           自然下家之前，而不是把它挤掉；栈空时下一个回合就是指针指向的那个自然回合。
+
+        轮次 +1 落一条 ``turn_change``——**只在有「每轮限 X 次」载体的对局里**（见
+        :class:`~sgs.state.TurnChangeDelta`；没有读者时不落记录，标准金录像逐字节不变）。
+        额外回合开始也落一条（``extra=True``），使"同一个座位连着两个回合"在记录流里
+        读得出是额外回合而不是新一轮。
+        """
+        state = self.state
+        finished = state.turn_seat
+        if not state.turn_extra and finished is not None and state.players:
+            # 回合只在**存活座位**之间轮转（票 15 §6）；座位环是唯一真源。
+            # 存活 ≤ 1 时终局已抢先，故正常对局必然读到一个存活下家。
+            nxt = next_alive_seat(state, finished)
+            if nxt is not None:
+                state.next_seat = nxt
+                state.turn_seat = nxt
+                if _round_ended(state, finished, nxt):
+                    state.round += 1
+                    state.round_start_seat = nxt
+                    # 每轮次数随轮次清空（M6 票 11）：清在**新轮开始之前**，故新一轮的第一次
+                    # 发动读到的就是 0；额外回合不经过这里，故它不会刷新它们。
+                    reset_round_skill_state(state)
+                    if round_limit_present(state):
+                        self.emit_delta(TurnChangeDelta(seat=nxt, round=state.round))
+        extra = self._pop_extra_turn()
+        if extra is not None:
+            state.turn_seat = extra
+            state.turn_extra = True
+            self.emit_delta(TurnChangeDelta(seat=extra, round=state.round, extra=True))
+            return
+        state.turn_extra = False
+        if state.next_seat is not None:
+            # 额外回合结束后回到"本来该轮到的那个自然回合"；自然回合结束时它刚被算出来，
+            # 这一句因此是幂等的（同一个座位）。
+            state.turn_seat = state.next_seat
+
+    def _pop_extra_turn(self) -> int | None:
+        """弹出待执行的额外回合（**LIFO**；轮到已阵亡的座位时直接丢弃）。
+
+        栈序 = "最后压入的那个紧接当前回合"（官方"插在当前回合结算完毕之后"的直读）。
+        阵亡座位的额外回合不执行（没有它的回合），也不落 ``turn_change``——记录流只记
+        **真的开始了**的回合。
+        """
+        while self.state.extra_turns:
+            seat = self.state.extra_turns.pop()
+            if self.state.player(seat).alive:
+                return seat
+        return None
 
     def _turn_is_over(self) -> bool:
         """当前回合角色已阵亡且终局未判 ⇒ 该回合立即结束（票 14 §4 的回合结束分支）。"""
@@ -3639,6 +3710,9 @@ class Engine:
     def _turn_start(self) -> None:
         # 该座位自己的 TURN_START 是使用次数计数器的重置点（票 07 §6）。
         seat = self.state.turn_seat
+        # "本回合置入弃牌堆的牌"（M6 票 11 的【博图】判据）作用域 = **一个回合**：
+        # 每个回合（含额外回合）起点清空，故额外回合各自重算、不继承上一个回合的花色。
+        self.state.discard_suits_this_turn.clear()
         if seat is not None:
             self.state.player(seat).card_use_counts.clear()
             # 【酒】加伤只在本回合有效（M5-04）：回合收尾已清，这里再幂等兜一次——
@@ -3663,6 +3737,9 @@ class Engine:
         只作钩子的上下文与帧内答案缓存（与 ``emit_timing`` 给 ``MOVE_AFTER`` 造的
         临时帧同形，区别只是要跨暂停存活）。没有注册在该时机上的实例时**一个帧都不建**，
         记录流与 M2 逐字节相同（票 10 的硬纪律：34 条基准一行不改）。
+
+        同一机制也服务**回合结束时**（``TURN_END``，M6 票 11）：它同样是帧外时机、
+        同样要能提问，故不另造一套——区别只在调用点与 ``key``。
 
         时机记录只发一次（``_turn_data`` 的键作幂等闸）；派发返回 ``"stay"`` 时整个阶段体
         原地重入，重用同一个帧与同一份应答缓存。
@@ -3954,8 +4031,15 @@ class Engine:
         self.state.phase = Phase.FINISH
         return self._dispatch_phase_body(Timing.PHASE_FINISH, "phase_finish")
 
-    def _turn_end(self) -> None:
-        self.emit_timing(Timing.TURN_END, actor=self.state.turn_seat)
+    def _turn_end(self) -> str | None:
+        """回合结束时（L2.24）：**帧外时机**，与阶段体同一套惰性派发（M6 票 11）。
+
+        没有注册在该时机上的实例时一个帧都不建、只落时机记录——记录流与 M5 逐字节相同
+        （标准 47 条金录像的前提）。界吕蒙【博图】是第一个消费者：它问"是否发动"、
+        答发动就把一个额外回合压进待执行栈，故本步可以返回 ``"stay"``（钩子提过问），
+        回合环于是原地重入本步、复用同一个帧与同一份应答缓存。
+        """
+        return self._dispatch_phase_body(Timing.TURN_END, "turn_end_body")
 
     def _turn_after_end(self) -> str | None:
         # 回合彻底走完（含"回合内阵亡 ⇒ 跳过整段、直接落到本步"的路径）：
@@ -3990,6 +4074,25 @@ class Engine:
         if seat is None:
             raise RuntimeError("回合环启动前没有当前回合角色")
         return seat
+
+
+def _round_ended(state: GameState, finished: int, nxt: int) -> bool:
+    """自然指针从 ``finished`` 走到 ``nxt`` 是否**走完了一圈**（M6 票 11 的轮次判据）。
+
+    自然回合只按座位升序环转，故"回到本轮起始座位"在座位环上等价于
+    ``pos(nxt) <= pos(finished)``（``pos`` 相对本轮起始座位）。用**环位置**而不是
+    "``nxt`` 就是起始座位"，是因为起始座位可能在本轮中途阵亡——那样"回到它"永远不会
+    发生、轮次会卡死；越过它同样意味着这一圈走完了。
+
+    ``round_start_seat is None``（人为局面直接从轮中途起跑）⇒ 把**当前回合**当作本轮
+    起点：轮次从它起算，下一次回到它才 +1。
+    """
+    start = state.round_start_seat
+    if start is None:
+        state.round_start_seat = finished
+        return False
+    size = len(state.players)
+    return (nxt - start) % size <= (finished - start) % size
 
 
 _SLOT_BY_SUBCATEGORY: dict[str, SlotKind] = {
