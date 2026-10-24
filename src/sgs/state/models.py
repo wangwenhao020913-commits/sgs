@@ -16,10 +16,11 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from sgs.data import Color, Gender, Identity, Kingdom, RuleConfig
+from sgs.data import CardTagType, Color, Gender, Identity, Kingdom, RuleConfig
 
 __all__ = [
     "CardRef",
+    "CardTag",
     "FrameKind",
     "GameState",
     "MoveReason",
@@ -137,6 +138,30 @@ class Zone(str, Enum):
     PROCESSING = "processing"
     EQUIP = "equip"
     JUDGE = "judge"
+
+
+class CardTag(_FrozenModel):
+    """挂在一张牌上的**持久事实**（M6 票 09；spec D12 / §标签）。
+
+    形状 = **（标签类型、来源实例）**：标签类型是 ``sgs.data`` 的登记闭集
+    （:class:`~sgs.data.CardTagType`，四项声明住 :data:`~sgs.data.CARD_TAG_TYPES`）；
+    来源实例用 ``(owner, skill_id)`` 标识——载体解析（``resolve_instances``）按同一对字段
+    去重，故它是"哪一个技能实例"的规范身份，不随来源种类（武将牌 / 装备 / 获得）漂移。
+
+    **与所在区域无关**：标签存在 :attr:`GameState.card_tags` 里，不随牌移动被搬走或清掉；
+    牌在牌堆顶 / 手牌 / 弃牌堆都照样带着它。清除只由**登记表声明的触发**（:class:`CardTagClear`）
+    或"来源实例消失"（``disappears_with_source``）决定。
+
+    只挂在**实体牌**上（``card_id >= 0``）：虚拟牌从不进任何区域、也不持久存在。
+    """
+
+    tag_type: CardTagType
+    owner: int
+    """来源实例的持有者座位。"""
+
+    skill_id: str
+    """来源实例的技能 id（全限定，如 ``hero.jie_zhenji.luoshen``）。"""
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,6 +441,26 @@ class GameState(BaseModel):
     来源消失（装备离场 / 技能失去）时由 ``skills.prune_skill_state`` 清理——暂时失效不算
     来源消失；M2 的 17 条装备没有持久状态，故本字段实际恒空。
     """
+    card_tags: dict[int, tuple[CardTag, ...]] = Field(default_factory=dict)
+    """**牌标签**：``card_id → 该牌上的标签（按加入序）``（M6 票 09；spec D12）。
+
+    标签是**牌**的持久事实、**与区域无关**（:class:`CardTag` 的注释）：牌从手牌进弃牌堆，
+    标签不会被搬走或清掉。主键是实体牌 id（虚拟牌恒不带标签），值一律用 ``tuple`` 保序、
+    不用 ``set``（同种子逐字节复现，源码纪律 §3）。
+
+    **不进记录流**（门票 09 未分配 delta）：回放按同一条技能决策重跑即可重建；写入唯一入口
+    :meth:`~sgs.engine.Engine.add_card_tag`，清除走声明触发的唯一入口
+    :meth:`~sgs.engine.Engine.clear_card_tags` 与 ``skills.prune_card_tags``。
+    """
+
+    def tags_of(self, card_id: int) -> tuple[CardTag, ...]:
+        """一张牌上的全部标签（没有 = 空元组，按加入序）。"""
+        return self.card_tags.get(card_id, ())
+
+    def has_card_tag(self, card_id: int, tag_type: CardTagType) -> bool:
+        """这张牌有没有某个**类型**的标签（读取方的唯一谓词）。"""
+        return any(tag.tag_type is tag_type for tag in self.tags_of(card_id))
+
 
     def player(self, seat: int) -> Player:
         return self.players[seat]

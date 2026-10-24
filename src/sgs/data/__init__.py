@@ -23,6 +23,11 @@
 M6 票 02 把**牌名大类** :class:`Category` 与按 ``pack_id`` 的只读查询
 :func:`card_category` 纳入公开面：【集智】的非延时锦囊与【奇才】的锦囊都按它判族
 （"这张牌是锦囊吗"），而不是各自抄一份牌名白名单。
+
+M6 票 09 增**牌标签的类型登记**（:class:`CardTagType` / :class:`CardTagSpec` /
+:data:`CARD_TAG_TYPES` / :func:`card_tag_spec`）：标签是牌上的持久事实（D12），其读取方 /
+生存期 / 可见性 / 是否随来源实例消失四项由类型在数据层声明；未登记的类型读取时显式失败，
+故"由标签类型声明并强制登记"落在这一层，读取方（手牌计数、投影）不各写一份名单。
 """
 
 from .errors import DataLoadError, LoadError
@@ -42,6 +47,12 @@ from .loader import (
     validate_heroes,
 )
 from .models import (
+    CARD_TAG_TYPES,
+    CardTagClear,
+    CardTagReader,
+    CardTagSpec,
+    CardTagType,
+    CardTagVisibility,
     Category,
     Color,
     ContentPack,
@@ -52,11 +63,18 @@ from .models import (
     Kingdom,
     SkillType,
     Suit,
+    card_tag_spec,
     color_of_suit,
 )
 from .rule_config import RuleConfig, validate_rule_config
 
 __all__ = (
+    "CARD_TAG_TYPES",
+    "CardTagClear",
+    "CardTagReader",
+    "CardTagSpec",
+    "CardTagType",
+    "CardTagVisibility",
     "Category",
     "Color",
     "ContentPack",
@@ -77,6 +95,7 @@ __all__ = (
     "SkillType",
     "Suit",
     "card_category",
+    "card_tag_spec",
     "color_of_suit",
     "deal_heroes",
     "enabled_hero_ids",

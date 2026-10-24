@@ -425,6 +425,7 @@ def test_the_standard_table_stays_the_25_and_the_jie_table_is_loaded_separately(
         "jie_zhouyu",
         "jie_xiahoudun",
         "jie_huangyueying",
+        "jie_zhenji",
     ]
     assert {hero.id for hero in standard.heroes}.isdisjoint(
         {hero.id for hero in jie.heroes}
@@ -593,6 +594,26 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     )
     assert [skill.id for skill in huangyueying.skills] == ["jizhi", "qicai"]
 
+    # M6 票 09：界甄姬。两条技能都是普通技；标签（以此法获得的牌不计入本回合的手牌上限）
+    # 是【洛神】的行为差异，不是技能类型差异。
+    zhenji = jie.by_id("jie_zhenji")
+    assert zhenji is not None
+    assert (zhenji.name, zhenji.true_name, zhenji.version) == (
+        "界甄姬",
+        "甄姬",
+        "jie-ol",
+    )
+    assert (zhenji.kingdom, zhenji.gender, zhenji.hp_max) == (
+        Kingdom.WEI,
+        Gender.FEMALE,
+        3,
+    )
+    assert [skill.id for skill in zhenji.skills] == ["luoshen", "qingguo"]
+    assert [skill.skill_type for skill in zhenji.skills] == [
+        SkillType.NORMAL,
+        SkillType.NORMAL,
+    ]
+
     assert all(hero.true_name for hero in jie.heroes), "界版每名都带真名"
     assert all(hero.enabled for hero in jie.heroes), "边界突破 P1 起界将逐批启用"
 
@@ -697,6 +718,10 @@ def test_hero_skill_ids_lookup_covers_the_jie_supplement():
     assert hero_skill_ids("jie_huangyueying") == (
         "hero.jie_huangyueying.jizhi",
         "hero.jie_huangyueying.qicai",
+    )
+    assert hero_skill_ids("jie_zhenji") == (
+        "hero.jie_zhenji.luoshen",
+        "hero.jie_zhenji.qingguo",
     )
     assert hero_skill_ids("guanyu") == ("hero.guanyu.wusheng",), "标准版查法一字不变"
 

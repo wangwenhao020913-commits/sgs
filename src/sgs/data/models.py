@@ -14,12 +14,20 @@ M3 票 01 追加**武将面**（``Kingdom`` / ``SkillType`` / ``HeroSkill`` / ``
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
+from types import MappingProxyType
 
 from pydantic import BaseModel, ConfigDict
 
 __all__ = [
+    "CARD_TAG_TYPES",
     "DEFAULT_SLOT_LIMIT",
+    "CardTagClear",
+    "CardTagReader",
+    "CardTagSpec",
+    "CardTagType",
+    "CardTagVisibility",
     "Category",
     "CardType",
     "Color",
@@ -34,6 +42,7 @@ __all__ = [
     "Kingdom",
     "SkillType",
     "Suit",
+    "card_tag_spec",
     "color_of_suit",
 ]
 
@@ -284,3 +293,133 @@ class ContentPack(_FrozenModel):
     def deck(self) -> Deck:
         """本内容包默认选中的牌堆档位（校验保证 ``deck_profile`` 必存在）。"""
         return self.decks[self.deck_profile]
+
+
+# ---------------------------------------------------------------------------
+# 牌标签的类型登记（M6 票 09；spec D12 / §标签）
+# ---------------------------------------------------------------------------
+#
+# **标签 = 挂在*一张牌*上的持久事实**（不是座位状态、也不是帧私有标志）：
+# 牌在牌堆顶也能带，故它的生存期与"牌在哪个区域"无关。每个标签实例记
+# （**标签类型**、**来源实例**），类型本身在下面这张登记表里声明四项——
+# 读取方 / 生存期（清除触发）/ 可见性 / 是否随来源实例消失。
+#
+# 登记表是**数据层**的声明面：`sgs.state.CardTag` 只装值，读取方（手牌计数、投影）
+# 与清除点（引擎回合末、技能三态）都按这里的声明做事，不各写一份"哪些标签算数"的名单。
+# 未登记的标签类型在 ``tests/test_tags.py`` 里判红（与 ``test_card_family_sites`` 同规格）。
+
+
+class CardTagReader(str, Enum):
+    """标签的**读取方**（D12 四项之一；闭集，新增读取方要先在这里登记）。
+
+    M6 只有一处读取方：``HAND_COUNT`` = 弃牌阶段的**手牌计数**
+    （``sgs.effects.hand_count``：手牌中不带"排除计数"标签的张数）。手牌**上限**
+    （``sgs.effects.hand_limit``）是另一个查询，两者互不替换（spec D11）。
+    """
+
+    HAND_COUNT = "hand_count"
+
+
+class CardTagClear(str, Enum):
+    """标签的**生存期 / 清除触发**（D12 四项之一）。
+
+    三个取值对应 spec §标签 点名的三类形状；清除点只有一个执行入口
+    （``Engine.clear_card_tags``），各载体的触发点调它：
+
+    - ``TURN_END``：回合末（``Engine._clear_turn_effects``）——洛神式"本回合不计入"；
+    - ``LEAVE_ZONE``：该牌离开标签声明所在的那个区域时——黠慧式"在手牌期间"；
+    - ``USED_OR_PLAYED``：该牌被使用或打出时——遗珠式"到被使用 / 打出为止"。
+
+    与"是否随来源实例消失"是**两个轴**：前者按时间 / 事件到期，后者按来源技能存亡撤销。
+    """
+
+    TURN_END = "turn_end"
+    LEAVE_ZONE = "leave_zone"
+    USED_OR_PLAYED = "used_or_played"
+
+
+class CardTagVisibility(str, Enum):
+    """标签的**可见性**（D12 四项之一）：按它裁剪玩家载荷。
+
+    - ``HIDDEN``：引擎内事实，**任何**玩家载荷（含本人）都不带——M6 三类全是这一档
+      （公开的"手牌数"恒 = ``len(hand)``，标签不改变它，故观察者也无从回读）；
+    - ``PUBLIC``：公开事实（如明置的牌上的标记），可随载荷下发（M6 无载体）。
+    """
+
+    HIDDEN = "hidden"
+    PUBLIC = "public"
+
+
+class CardTagType(str, Enum):
+    """标签类型的**闭集**（M6 票 09；spec §标签 点名的三类形状）。
+
+    - ``LUOSHEN_HAND``：**本回合不计入**（洛神式；M6 唯一活载体 = 界甄姬【洛神】）；
+    - ``ZONE_HAND``：**在某区域（手牌）期间不计入**（黠慧式；M6 无载体，只登记形状）；
+    - ``UNTIL_PLAYED``：**到被使用 / 打出为止**（遗珠式；M6 无载体，只登记形状）。
+    """
+
+    LUOSHEN_HAND = "luoshen_hand"
+    ZONE_HAND = "zone_hand"
+    UNTIL_PLAYED = "until_played"
+
+
+class CardTagSpec(_FrozenModel):
+    """一个标签类型的**四项声明**（D12）+ 载体锚点。
+
+    ``carrier`` 是 M6 的活载体技能 id（无载体 = ``None``）：登记表据此回答"这一类形状
+    此刻由谁生产"，``tests/test_tags.py`` 会把它与 ``CATALOG`` 对账。
+    """
+
+    reader: CardTagReader
+    clear_trigger: CardTagClear
+    visibility: CardTagVisibility
+    disappears_with_source: bool
+    carrier: str | None = None
+
+
+CARD_TAG_TYPES: Mapping[CardTagType, CardTagSpec] = MappingProxyType(
+    {
+        # 洛神式：界甄姬【洛神】以此法获得的牌"不计入本回合的手牌上限"。回合末到期；
+        # 失去 / 失效【洛神】时随来源实例一并清除（计数立刻恢复）。
+        CardTagType.LUOSHEN_HAND: CardTagSpec(
+            reader=CardTagReader.HAND_COUNT,
+            clear_trigger=CardTagClear.TURN_END,
+            visibility=CardTagVisibility.HIDDEN,
+            disappears_with_source=True,
+            carrier="hero.jie_zhenji.luoshen",
+        ),
+        # 黠慧式（M6 无载体，为后续铺路）："在手牌期间不计入"。清除触发 = 离开声明区域
+        # （手牌）——它不随回合末清，也不因技能存亡撤销以外的方式消失。
+        CardTagType.ZONE_HAND: CardTagSpec(
+            reader=CardTagReader.HAND_COUNT,
+            clear_trigger=CardTagClear.LEAVE_ZONE,
+            visibility=CardTagVisibility.HIDDEN,
+            disappears_with_source=True,
+        ),
+        # 遗珠式（M6 无载体，为后续铺路）："到被使用 / 打出为止"。清除触发 = 这张牌
+        # 自己被打出 / 使用；故回合末清理**不**碰它，来源技能存亡也不撤回它
+        # （第四项声明因此与上面两类相反——形状测试逐项钉住）。
+        CardTagType.UNTIL_PLAYED: CardTagSpec(
+            reader=CardTagReader.HAND_COUNT,
+            clear_trigger=CardTagClear.USED_OR_PLAYED,
+            visibility=CardTagVisibility.HIDDEN,
+            disappears_with_source=False,
+        ),
+    }
+)
+"""标签类型登记表（唯一真源）：未登记的类型读不到声明，读取 / 写入都 fail-closed。"""
+
+
+def card_tag_spec(tag_type: CardTagType) -> CardTagSpec:
+    """取一个标签类型的四项声明；**未登记**时显式失败（不静默按"不排除"处理）。
+
+    这是读取方 / 清除点 / 写入口共用的唯一访问器：登记表少一行，行为面立刻是异常而不是
+    静默降级——测试的合成反例（``tests/test_tags.py``）只是把这条再钉一次。
+    """
+    spec = CARD_TAG_TYPES.get(tag_type)
+    if spec is None:
+        raise KeyError(
+            f"标签类型 {tag_type!r} 未在 CARD_TAG_TYPES 登记："
+            "D12 要求每个类型声明读取方 / 清除触发 / 可见性 / 是否随来源实例消失"
+        )
+    return spec

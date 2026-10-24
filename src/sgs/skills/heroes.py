@@ -339,6 +339,8 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
     ),
     # 甄姬【倾国】（M6 票 02）：一张**黑色手牌**当【闪】使用或打出（§九 L962）。
     # 区域 = 只有手牌：牌面明写"手牌"，故不套 `_hand_equip` 的区域默认。
+    # M6 票 09：界甄姬【倾国】与标准版**逐字相同**（§十九 L2048–L2049）⇒ 同一条声明经
+    # ``shared_with`` 派生 ``hero.jie_zhenji.qingguo``，不复制第二行。
     ConversionSkill(
         hero_id="zhenji",
         short_id="qingguo",
@@ -347,6 +349,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         predicate=_black,
         scopes=(CandidateScope.DODGE, CandidateScope.RESPOND),
         requirement="选择1张黑色手牌当【闪】使用或打出",
+        shared_with=("jie_zhenji",),
     ),
     # 甘宁【奇袭】（M6 票 03）：一张黑色牌当【过河拆桥】使用（§九 L1009）。
     # 区域默认 = 手牌 ∪ 装备：牌面没写区域，按 `_hand_equip` 那一档读。

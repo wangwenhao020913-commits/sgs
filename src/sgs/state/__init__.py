@@ -20,6 +20,7 @@ from .deltas import (
 )
 from .models import (
     CardRef,
+    CardTag,
     FrameKind,
     GameState,
     MoveReason,
@@ -90,6 +91,7 @@ __all__ = (
     "CardMoveDelta",
     "CardRef",
     "CardRevealDelta",
+    "CardTag",
     "ChainedChangeDelta",
     "DeckShuffleDelta",
     "Delta",

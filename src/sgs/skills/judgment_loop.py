@@ -1,9 +1,19 @@
-r"""J 族：可重复的判定循环（M6 票 02）——甄姬【洛神】。
+r"""J 族：可重复的判定循环（M6 票 02）——甄姬【洛神】；界版见票 09。
 
-规则原文：§九 L963–965：
+规则原文：§九 L963–965（标准版）：
 
     准备阶段（回合开始阶段）开始时，你可以进行判定，若结果为黑色，你获得此牌，
     然后可以重复此流程，直到出现红色结果为止。
+
+§十九 L2045–L2049（界甄姬，OL 增补）：
+
+    洛神：准备阶段，你可以进行一次判定，若结果为黑色，你获得此牌并可以重复此流程
+         （**以此法获得的牌不计入本回合的手牌上限**）。
+
+两版**共用这一条循环**（同一段"以此法重复"的执行形态），差别只有界版在"获得"那一刻
+给牌挂上 :data:`~sgs.data.CardTagType.LUOSHEN_HAND` 标签：标签与区域无关，故**先挂再搬**
+（搬牌可能内联派发"失去牌后"而挂起，挂起后再补挂就会漏掉一张）。标签的生存期（回合末）、
+随来源消失（失去 / 失效【洛神】）都由 ``sgs.data.CARD_TAG_TYPES`` 登记，本模块不另写清理。
 
 **循环的读法由本票定死**（票面"已知的一处小扩容"）：
 
@@ -32,23 +42,38 @@ from __future__ import annotations
 
 from typing import Any
 
-from sgs.data import Color, SkillType, color_of_suit, hero_skill_id
+from sgs.data import CardTagType, Color, SkillType, color_of_suit, hero_skill_id
 from sgs.effects import CarrierKind, locate
 from sgs.resolution import Control, Frame
-from sgs.state import GameState, MoveReason, Zone, ZoneRef
+from sgs.state import CardTag, GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
-from .catalog import SKILL_JUDGMENT_CARD_KEY, ActivationPlan, Hook, SkillDef
+from .catalog import (
+    RUNNING_SKILL_KEY,
+    SKILL_JUDGMENT_CARD_KEY,
+    ActivationPlan,
+    Hook,
+    SkillDef,
+)
 
 __all__ = [
+    "JIE_LUOSHEN",
     "LUOSHEN",
     "LUOSHEN_OPTIONS",
+    "LUOSHEN_TAG_TYPE",
     "judgment_loop_activation_plans",
     "judgment_loop_skill_definitions",
 ]
 
 LUOSHEN = hero_skill_id("zhenji", "luoshen")
 """甄姬【洛神】的全限定技能 id。"""
+
+JIE_LUOSHEN = hero_skill_id("jie_zhenji", "luoshen")
+"""界甄姬【洛神】的全限定技能 id（M6 票 09）：与标准版同一条循环 + 获得牌带标签。"""
+
+LUOSHEN_TAG_TYPE = CardTagType.LUOSHEN_HAND
+"""界【洛神】给"以此法获得的牌"挂的标签类型（登记表：``reader = HAND_COUNT`` /
+``clear = TURN_END`` / ``disappears_with_source = True``）。"""
 
 _CONTINUE = "repeat"
 _STOP = "stop"
@@ -82,8 +107,11 @@ def _luoshen_plan(state: GameState, frame: Frame, instance: Any) -> ActivationPl
 
 
 def judgment_loop_activation_plans() -> dict[str, Any]:
-    """J 族的发动形态注册表（由 :data:`sgs.skills.catalog.ACTIVATION_PLANS` 末尾并入）。"""
-    return {LUOSHEN: _luoshen_plan}
+    """J 族的发动形态注册表（由 :data:`sgs.skills.catalog.ACTIVATION_PLANS` 末尾并入）。
+
+    标准 / 界两版共用同一条"**你的**准备阶段"前提（牌面逐字相同的那半句）。
+    """
+    return {LUOSHEN: _luoshen_plan, JIE_LUOSHEN: _luoshen_plan}
 
 
 def _judge_next_round(host: Any, frame: Frame, owner: int) -> Control:
@@ -93,7 +121,11 @@ def _judge_next_round(host: Any, frame: Frame, owner: int) -> Control:
     判定牌回写进本帧（阶段体帧的找法见 :meth:`Engine.note_skill_judgment`）。
     """
     frame.data[_STAGE_KEY] = "judge"
-    host.open_skill_judgment(frame, owner, LUOSHEN)
+    # 判定帧记**正在跑的那个实例**（标准 / 界两个 skill id）：`note_skill_judgment` 拿它
+    # 回找发起帧的 ``RUNNING_SKILL_KEY``，写死标准版 id 会让界版的判定后果找不到发起帧。
+    host.open_skill_judgment(
+        frame, owner, frame.data.get(RUNNING_SKILL_KEY, LUOSHEN)
+    )
     return "stay"
 
 
@@ -135,6 +167,18 @@ def _luoshen(host: Any, frame: Frame) -> Control:
         # 判定牌此刻在弃牌堆（judge_finish 已收尾）；被【天妒】一类效果先拿走的则跳过，
         # 免得对同一张牌搬出 ``hand → hand`` 的幻影移动。
         if locate(host.state, card.card_id) != ZoneRef(Zone.HAND, owner):
+            # 界版（票 09）：先挂标签、再搬牌——标签**与区域无关**，牌还在弃牌堆就能带；
+            # 反过来"搬完再挂"会在搬牌内联派发"失去牌后"并挂起时丢掉这一张
+            # （重入从 ``confirm`` 阶段续跑，不会再回到这里）。
+            if frame.data.get(RUNNING_SKILL_KEY) == JIE_LUOSHEN:
+                host.add_card_tag(
+                    card.card_id,
+                    CardTag(
+                        tag_type=LUOSHEN_TAG_TYPE,
+                        owner=owner,
+                        skill_id=JIE_LUOSHEN,
+                    ),
+                )
             control = host.move_in_frame(
                 frame,
                 (card,),
@@ -165,7 +209,11 @@ def _luoshen(host: Any, frame: Frame) -> Control:
 
 
 def judgment_loop_skill_definitions() -> tuple[SkillDef, ...]:
-    """J 族一条技能的 :class:`~sgs.skills.catalog.SkillDef`（非锁定、手写多轮钩子）。"""
+    """J 族两条技能的 :class:`~sgs.skills.catalog.SkillDef`（非锁定、手写多轮钩子）。
+
+    标准 / 界两版是**两个技能 id、同一条循环**：界版多出的半句（获得牌不计入本回合的
+    手牌上限）落在标签上，不是第二份循环实现。
+    """
     return (
         SkillDef(
             skill_id=LUOSHEN,
@@ -174,6 +222,15 @@ def judgment_loop_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             hooks=(Hook(Timing.PHASE_PREPARE, _luoshen),),
             requirement="进行判定：黑色则获得此牌并可重复，直到出现红色",
+            step_requirements={"repeat": "选择是否再进行一次【洛神】判定"},
+        ),
+        SkillDef(
+            skill_id=JIE_LUOSHEN,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=(Hook(Timing.PHASE_PREPARE, _luoshen),),
+            requirement="进行判定：黑色则获得此牌并可重复，直到出现红色；以此法获得的牌不计入本回合的手牌上限",
             step_requirements={"repeat": "选择是否再进行一次【洛神】判定"},
         ),
     )

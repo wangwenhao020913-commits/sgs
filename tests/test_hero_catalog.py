@@ -2,7 +2,7 @@
 
 本文件只装**跨技能**的登记事实（逐技能的构造局面单测按族住各自文件）：
 
-- ``CATALOG`` 的规模与分区：装备 22 + 武将 52 = **74 条**，且武将那半恰是数据文件里
+- ``CATALOG`` 的规模与分区：装备 22 + 武将 64 = **86 条**，且武将那半恰是数据文件里
   全部启用武将的技能清单（``heroes.standard.json`` + ``heroes.jie.json`` 是名单的唯一真源）；
 - **同一 owner 同一时机只有一条技能**（票 12 §要做什么 3）：这是 R5-Q1「同一时点多技能
   自选顺序不建」的落地依据——将来加武将时这条断言先变红，逼出一次重新裁定；
@@ -133,12 +133,12 @@ PLAYABLE = ("slash", "peach", "dodge")
 
 
 # ---------------------------------------------------------------------------
-# ① CATALOG 的一分为二（装备 22 + 武将 52 = 74）
+# ① CATALOG 的一分为二（装备 22 + 武将 64 = 86）
 # ---------------------------------------------------------------------------
 
 
 def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
-    """验收 1：``CATALOG`` = **84** 条（22 装备 + 62 武将），且两半由 ``carrier`` 分区。
+    """验收 1：``CATALOG`` = **86** 条（22 装备 + 64 武将），且两半由 ``carrier`` 分区。
 
     M5-01a 补 5 条军争装备技能占位（白银狮子 / 藤甲 / 古锭刀 / 朱雀羽扇 / 骅骝）；
     M6 票 01 把武将那半 29 → 32（【刚烈】/【突袭】/【裸衣】），票 02 → 37
@@ -149,15 +149,16 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     界吕蒙【克己】/【勤学】/☆【攻心】 = 首个**觉醒技**与首个 ☆ 派生技能载体），
     票 07 起 56（界甘宁【奇袭】/【奋威】、界貂蝉【离间】/【闭月】 = 首个**限定技**否定载体
     与首个"不可响应"载体），票 08 起 62（界周瑜【英姿】/【反间】、界夏侯惇【刚烈】/【清俭】、
-    界黄月英【集智】/【奇才】 = **手牌上限双轴**与**事件帧无效**的首批载体）。
+    界黄月英【集智】/【奇才】 = **手牌上限双轴**与**事件帧无效**的首批载体），
+    票 09 起 64（界甄姬【洛神】/【倾国】 = 首个**牌标签**载体）。
     函数名沿用 M3 的节点名（``test_dod_m3`` 的 DoD 绑定），数字以函数体为准。
     """
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 84
+    assert len(CATALOG) == 86
     assert len(equipment) == 22
-    assert len(heroes) == 62
+    assert len(heroes) == 64
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -172,7 +173,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 62
+    assert len(expected) == 64
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -959,6 +960,9 @@ SKILL_FILES: dict[str, str] = {
     "hero.jie_lvmeng.keji": "test_hero_catalog.py",
     "hero.jie_lvmeng.qinxue": "test_hero_jie.py",
     "hero.jie_lvmeng.gongxin": "test_hero_jie.py",
+    # M6 票 09：标签骨架 + 界甄姬【洛神】/【倾国】
+    "hero.jie_zhenji.luoshen": "test_tags.py",
+    "hero.jie_zhenji.qingguo": "test_tags.py",
     # M6 票 08：手牌上限双轴 + 界周瑜 / 界夏侯惇 / 界黄月英
     "hero.jie_zhouyu.yingzi": "test_hero_jie_hand_limit.py",
     "hero.jie_zhouyu.fanjian": "test_hero_jie_hand_limit.py",
@@ -967,9 +971,10 @@ SKILL_FILES: dict[str, str] = {
     "hero.jie_huangyueying.jizhi": "test_hero_jie_hand_limit.py",
     "hero.jie_huangyueying.qicai": "test_hero_jie_hand_limit.py",
 }
-"""62 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
+"""64 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
 票 02 加 5 条、票 03 加 3 条、票 04 加 4 条界将技能、票 05 加界张飞 2 条、票 06 加界徐庶 /
-界吕蒙 6 条、票 07 加界甘宁 / 界貂蝉 4 条、票 08 加界周瑜 / 界夏侯惇 / 界黄月英 6 条）。"""
+界吕蒙 6 条、票 07 加界甘宁 / 界貂蝉 4 条、票 08 加界周瑜 / 界夏侯惇 / 界黄月英 6 条、
+票 09 加界甄姬 2 条）。"""
 
 
 def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
@@ -1326,6 +1331,8 @@ SKILL_SHAPE: dict[str, str] = {
     # M6 票 08：界【刚烈】是判定 → 红 / 黑分叉的手写多轮（与标准版整句重写）
     "hero.jie_xiahoudun.ganglie": "多轮技能",
     "hero.zhenji.luoshen": "多轮技能",
+    # M6 票 09：界【洛神】与标准版共用同一条手写多轮循环（差别只在获得牌的标签）
+    "hero.jie_zhenji.luoshen": "多轮技能",
     "hero.jie_machao.tieqi": "多轮技能",
     # M6 票 06：觉醒族的【诛害】是"其他角色的结束阶段"的触发技（目标在帧里给定）
     "hero.jie_xushu.zhuhai": "触发技能",
@@ -1372,6 +1379,8 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.huatuo.jijiu": "转化技",
     "hero.zhenji.qingguo": "转化技",
     "hero.ganning.qixi": "转化技",
+    # M6 票 09：界【倾国】与标准版逐字相同（同一条 ConversionSkill 声明）
+    "hero.jie_zhenji.qingguo": "转化技",
     "hero.jie_guanyu.wusheng": "转化技",
     "equip.serpent_spear": "转化技",
     "equip.vermilion_feather_fan": "转化技",
@@ -1400,16 +1409,16 @@ SHAPE_COUNTS: dict[str, int] = {
     "触发技能": 8,
     "零步技能": 15,
     "排列技能": 1,
-    "多轮技能": 8,
+    "多轮技能": 9,
     "锁定技": 24,
-    "转化技": 10,
+    "转化技": 11,
     "能力位": 1,
     "候选生成器": 1,
     "候选提供者": 3,
     "觉醒技": 2,
 }
-"""每格的条数（spec §4.4；M6 票 08 后
-11 + 8 + 15 + 1 + 8 + 24 + 10 + 1 + 1 + 3 + 2 = 84）。
+"""每格的条数（spec §4.4；M6 票 09 后
+11 + 8 + 15 + 1 + 9 + 24 + 11 + 1 + 1 + 3 + 2 = 86）。
 
 票 03 的三条：**苦肉**是零步主动技（裸发动，无步骤 ⇒ 机械形态落在「零步技能」格）；
 **克己**是阶段体零步技（同格）；**奇袭**是单源转化（转化技格）。票 04 的四条：**义绝**
@@ -1423,7 +1432,9 @@ SHAPE_COUNTS: dict[str, int] = {
 （多轮技能格）；**离间**（界）是三步主动技（主动技能格）；**闭月**（界）是零步阶段体
 （零步技能格）。票 08 的六条：**反间**（界）是两步主动技（主动技能格）；**集智**（界）
 是零步（零步技能格）；**清俭**是 MOVE_AFTER 钩子 + 两步流水线（触发技能格）；**刚烈**
-（界）是手写多轮（多轮技能格）；**英姿**（界）/ **奇才**（界）是锁定技——锁定技牌面写
+（界）是手写多轮（多轮技能格）；**英姿**（界）/ **奇才**（界）是锁定技。票 09 的两条：
+**洛神**（界）与标准版共用同一条手写多轮循环（多轮技能格）；**倾国**（界）与标准版共用
+同一条转化声明（转化技格）。锁定技牌面写
 "锁定技"，故即使英姿带一条零步阶段体流水线也按**类型**归「锁定技」格（零步格因此
 **排除**锁定技，见 :func:`test_every_shape_has_the_documented_count_and_members`）。"""
 
@@ -1447,7 +1458,7 @@ W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同�
 """
 
 OUTSIDE_STEP_LANGUAGE: frozenset[str] = frozenset(SKILL_SHAPE) - IN_STEP_LANGUAGE
-"""不在步骤语言内（47）：多轮 8 + 锁定 24 + 转化 10 + 能力位 1 + 候选生成器 1 + 候选提供者 3。
+"""不在步骤语言内（49）：多轮 9 + 锁定 24 + 转化 11 + 能力位 1 + 候选生成器 1 + 候选提供者 3。
 
 同样**派生**（:data:`SKILL_SHAPE` 减 :data:`IN_STEP_LANGUAGE`）；44 这个数由
 `SHAPE_COUNTS` 的其余六格加出来，测试里另有一条规模断言。
@@ -1478,9 +1489,9 @@ def _flow_steps(skill_id: str):
 
 
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
-    """84 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
+    """86 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 84
+    assert len(SKILL_SHAPE) == len(CATALOG) == 86
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11
     assert all(SKILL_SHAPE.values()), "表里没有空形态"
@@ -1555,7 +1566,7 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
     assert set(PROVIDERS) == {"hero.caocao.hujia", "hero.liubei.jijiang"}
 
     multi_round = _shape_members("多轮技能")
-    assert len(multi_round) == 8
+    assert len(multi_round) == 9
     assert all(_flow_steps(skill_id) is None for skill_id in multi_round)
     assert all(
         any(hook.handler is not None for hook in CATALOG[skill_id].hooks)
@@ -1586,7 +1597,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """37 在内 / 47 在外：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """37 在内 / 49 在外：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -1599,7 +1610,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
     assert len(inside) == 37
-    assert len(outside) == 47
+    assert len(outside) == 49
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

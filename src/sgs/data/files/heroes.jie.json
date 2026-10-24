@@ -233,6 +233,28 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "jie_zhenji",
+      "name": "界甄姬",
+      "true_name": "甄姬",
+      "kingdom": "wei",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "luoshen",
+          "name": "洛神",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "qingguo",
+          "name": "倾国",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

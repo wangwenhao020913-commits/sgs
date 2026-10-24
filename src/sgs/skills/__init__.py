@@ -82,6 +82,7 @@ from .catalog import (
     limited_skill_used,
     lord_skill_allowed,
     lord_skill_ids,
+    prune_card_tags,
     prune_skill_state,
     rejudge_skill_ids,
     reset_phase_skill_state,
@@ -227,8 +228,10 @@ from .use_after import (
     use_after_skill_definitions,
 )
 from .judgment_loop import (
+    JIE_LUOSHEN,
     LUOSHEN,
     LUOSHEN_OPTIONS,
+    LUOSHEN_TAG_TYPE,
     judgment_loop_activation_plans,
     judgment_loop_skill_definitions,
 )
@@ -315,8 +318,10 @@ __all__ = (
     "LORD_REQUEST_KEY",
     "LORD_REQUEST_SKILLS",
     "LORD_SKILL_IDS",
+    "JIE_LUOSHEN",
     "LUOSHEN",
     "LUOSHEN_OPTIONS",
+    "LUOSHEN_TAG_TYPE",
     "MASHU",
     "MAX_VIRTUAL_SOURCES",
     "MOVE_AFTER_SKILLS",
@@ -422,6 +427,7 @@ __all__ = (
     "negation_skill_definitions",
     "owned_conversion_skill_ids",
     "phase_body_skill_definitions",
+    "prune_card_tags",
     "prune_skill_state",
     "provider_registered",
     "pure_virtual_card",

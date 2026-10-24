@@ -37,6 +37,7 @@ from sgs.data import (
     Color,
     Identity,
     SkillType,
+    card_tag_spec,
     color_of_suit,
     hero_card_skill_ids,
     hero_skill_id,
@@ -59,6 +60,7 @@ from sgs.resolution import Control, Frame, Tag, add_tag
 from sgs.state import (
     ActivateSkill,
     CardRef,
+    CardTag,
     FrameKind,
     GameState,
     MoveReason,
@@ -112,6 +114,7 @@ __all__ = [
     "lord_skill_allowed",
     "lord_skill_ids",
     "mark_skill_used_this_turn",
+    "prune_card_tags",
     "prune_skill_state",
     "rejudge_skill_ids",
     "reset_turn_skill_state",
@@ -725,6 +728,48 @@ def same_kingdom(state: GameState, a: int, b: int) -> bool:
     left = state.player(a).kingdom
     right = state.player(b).kingdom
     return left is not None and left is right
+
+
+def prune_card_tags(state: GameState) -> None:
+    """清理**来源实例已消失**的牌标签（M6 票 09；D12 的第四项声明）。
+
+    判据 = 标签类型声明 ``disappears_with_source`` ∧ 它的来源实例
+    ``(owner, skill_id)`` 不在 :func:`resolve_instances` 的结果里。
+
+    **"失效"也算来源消失**：:func:`resolve_instances` 默认扣掉被失效谓词挡住的实例，
+    故失效【洛神】时标签一并清除、计数立刻恢复（票 09 的验收）。这与
+    :func:`prune_skill_state` 的"暂时失效不算来源消失"**方向相反**，因为两者问的不是
+    同一件事：per-instance 状态（"限定技已用"）在失效恢复后必须还在；而标签是连续型
+    效果的产物，来源查不到就不再成立。
+
+    没有声明 ``disappears_with_source`` 的类型（遗珠式"到被使用 / 打出为止"）不在这里被
+    清：它的到期由自己的清除触发（:meth:`~sgs.engine.Engine.clear_card_tags`）回答。
+
+    没有标签时**零动作**（先短路再看实例）：这个方法随每次牌移动都会跑，常规局里
+    ``card_tags`` 恒空，前缀守卫让"没标签"的路径不付第二次 ``resolve_instances``。
+    """
+    if not state.card_tags:
+        return
+    live = {
+        (instance.owner, instance.skill_id)
+        for instance in resolve_instances(state)
+    }
+    for card_id in list(state.card_tags):
+        tags = state.card_tags[card_id]
+        kept = tuple(
+            tag
+            for tag in tags
+            if not (
+                card_tag_spec(tag.tag_type).disappears_with_source
+                and (tag.owner, tag.skill_id) not in live
+            )
+        )
+        if len(kept) == len(tags):
+            continue
+        if kept:
+            state.card_tags[card_id] = kept
+        else:
+            del state.card_tags[card_id]
 
 
 def prune_skill_state(state: GameState) -> None:

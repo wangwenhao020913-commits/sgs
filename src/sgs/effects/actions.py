@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterable, Sequence
 from itertools import combinations, permutations
 from typing import Any
 
+from sgs.data import CardTagReader, card_tag_spec
 from sgs.state import (
     Action,
     ActivateSkill,
@@ -77,6 +78,7 @@ __all__ = [
     "discard_count",
     "distance",
     "forced_use_targets",
+    "hand_count",
     "hand_limit",
     "legal_actions_for",
     "needs_designation",
@@ -101,7 +103,8 @@ def hand_limit(state: GameState, player: Player) -> int:
     最后再夹一次下限 0：官方把"体力"（可小于 0）与作为参数读取的"体力值"分开——体力降到
     0 或更低时体力值读作 0，且手牌上限经过修正后最小值为 0。
 
-    **不是**"手牌计数"：计数排除（得牌不计入手牌数）是票 09 的标签轴，与上限是两个查询。
+    **不是**"手牌计数"：计数是另一个查询（:func:`hand_count`——排除计数标签，票 09 的
+    标签轴），spec D11 明写"上限与计数是两个查询，互不替换"。
     """
     base = max(player.hp, 0)
     ctx = ModifierContext(subject=player.seat, target=player.seat)
@@ -109,9 +112,35 @@ def hand_limit(state: GameState, player: Player) -> int:
     return max(int(replaced) + player.hand_limit_bonus, 0)
 
 
+def hand_count(state: GameState, player: Player) -> int:
+    """**手牌计数** = 手牌中**不带"排除计数"标签**的张数（M6 票 09；spec D12 / §标签）。
+
+    标签类型在 ``sgs.data.CARD_TAG_TYPES`` 里声明**读取方**：只有 ``reader == HAND_COUNT``
+    的类型参与这里的排除，其余类型（将来出现的别的读取方）不影响计数。判据逐张读
+    :meth:`~sgs.state.GameState.tags_of`——标签与区域无关，故这里不做"牌在哪"的判断；
+    形状分类（本回合 / 在某区域期间 / 到被使用为止）由各标签类型的**清除触发**负责，
+    不在读取方特判（"在某区域期间"的那一类本来也只会在该区域的牌上被计数读到）。
+
+    这个数**只用于**弃牌阶段（:func:`discard_count`）；投影里的公开"手牌数"仍是
+    ``len(hand)``（spec §投影与记录流：标签的增删不改变那个公开数字）。
+    """
+    return sum(
+        1
+        for card_id in player.hand
+        if not any(
+            card_tag_spec(tag.tag_type).reader is CardTagReader.HAND_COUNT
+            for tag in state.tags_of(card_id)
+        )
+    )
+
+
 def discard_count(state: GameState, player: Player) -> int:
-    """弃牌阶段须弃置的张数；``<= 0`` 表示无需弃牌（也不发询问）。"""
-    return len(player.hand) - hand_limit(state, player)
+    """弃牌阶段须弃置的张数；``<= 0`` 表示无需弃牌（也不发询问）。
+
+    计数 = :func:`hand_count`（排除带"不计入"标签的牌，票 09），上限 =
+    :func:`hand_limit`（票 08 的双轴）：两个查询各走各的，不互相替换（spec D11）。
+    """
+    return hand_count(state, player) - hand_limit(state, player)
 
 
 def distance(state: GameState, a: int, b: int) -> int:
@@ -746,7 +775,7 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
 
 
 def _discard(state: GameState, seat: int, answers_seq: int) -> list[Action]:
-    """弃牌阶段：任意"手牌数 − 手牌上限"张子集，全枚举（票 07 §4）。"""
+    """弃牌阶段：任意"手牌计数 − 手牌上限"张子集，全枚举（票 07 §4 / 票 09）。"""
     player = state.player(seat)
     count = discard_count(state, player)
     if count <= 0:

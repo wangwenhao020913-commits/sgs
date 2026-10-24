@@ -1645,6 +1645,12 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(3.0),
         "使用非延时锦囊摸一张；摸到基本牌还能弃它换本回合 +1 手牌上限",
     ),
+    # M6 票 09：牌标签的首个载体——界甄姬【洛神】（与标准版同一条循环 + 标签）
+    "hero.jie_zhenji.luoshen": (
+        _constant(3.0),
+        "准备阶段判定：黑色则白拿一张并可继续，且获得的牌本回合不占手牌数",
+    ),
+    "hero.jie_zhenji.qingguo": (_constant(2.0), "黑色手牌当【闪】：与标准【倾国】同一条转化"),
     # 装备技（W4-4）：会问"是否发动"的 5 条非锁定装备**各给一个正分常量**。
     # 缺省 ``_UNKNOWN_SKILL_VALUE = -1.0 < Pass(0)`` ⇒ 不入表就永不发动（雌雄无法复现
     # 的根因）；正分 ⇒ 永远发动（Pass = 0，成本 / 收益不建模，见票面"不做收益模型调参"）。

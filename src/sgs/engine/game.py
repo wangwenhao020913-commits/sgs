@@ -17,12 +17,14 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from sgs.agents import Participant
 from sgs.data import (
+    CardTagClear,
     Color,
     ContentPack,
     Hero,
     Identity,
     Mode,
     RuleConfig,
+    card_tag_spec,
     color_of_suit,
     deal_heroes,
     load_heroes,
@@ -80,6 +82,7 @@ from sgs.skills import (
     preactivated_skill_ids,
     preactivations_for,
     provider_registered,
+    prune_card_tags,
     prune_skill_state,
     reset_phase_skill_state,
     reset_turn_skill_state,
@@ -96,6 +99,7 @@ from sgs.state import (
     ArrangeQuery,
     CardRef,
     CardRevealDelta,
+    CardTag,
     ChainedChangeDelta,
     DiscardQuery,
     DodgeContext,
@@ -2197,6 +2201,9 @@ class Engine:
             depth=self.stack.depth,
         )
         prune_skill_state(self.state)
+        # 牌移动后同样核一次来源：装备 / 获得来源离场时，随来源消失的标签立刻清掉
+        # （M6 票 09；武将技能失去 / 失效另走各自写入口的同一次清理）。
+        prune_card_tags(self.state)
         count = frame.data.get(_MOVE_EVENTS, 0) + 1 if frame is not None else 0
         if frame is not None:
             # 这次移动的**持久事实**落在承载帧私有；重入时同一份身份 + "牌已在目标区"即认出。
@@ -2624,6 +2631,8 @@ class Engine:
             depth=self.stack.depth,
         )
         prune_skill_state(self.state)
+        # 牌标签的第四项声明（M6 票 09）：来源实例真的消失 ⇒ 随来源消失的标签一并清掉。
+        prune_card_tags(self.state)
         return True
 
     def suppress_skills(
@@ -2652,6 +2661,8 @@ class Engine:
             frame_id=(frame.frame_id if frame is not None else 0),
             depth=self.stack.depth,
         )
+        # 失效也算"来源实例不再解析"：随来源消失的牌标签立刻清掉（票 09 验收）。
+        prune_card_tags(self.state)
         return True
 
     def set_hand_card_prohibition(self, seat: int, prohibited: bool) -> bool:
@@ -2693,6 +2704,52 @@ class Engine:
         player = self.state.player(seat)
         player.hand_limit_bonus += int(amount)
 
+    def add_card_tag(self, card_id: int, tag: CardTag) -> bool:
+        """给一张**实体牌**挂一个标签（M6 票 09 的唯一写入口；spec D12）。
+
+        标签是**牌上的持久事实、与区域无关**：牌在牌堆 / 手牌 / 弃牌堆 / 处理区都照样带它，
+        故这里不做任何区域判断。写入口先读登记表（:func:`~sgs.data.card_tag_spec`）——
+        **未登记的类型读不到"清除触发"**，在这里就 fail-closed，不让它落进状态。
+        同一标签重复挂是幂等的（返回 ``False``）。返回值 = 状态真的变了吗。
+        """
+        if card_id < 0:
+            raise ValueError(
+                f"牌 {card_id} 是虚拟牌：虚拟牌不落任何区域、也不持久存在，不能挂标签"
+            )
+        self.state.card(card_id)  # 未知 card_id ⇒ 越界失败（fail-closed）
+        card_tag_spec(tag.tag_type)  # 未登记的类型在写入口拒绝
+        tags = self.state.tags_of(card_id)
+        if tag in tags:
+            return False
+        self.state.card_tags[card_id] = (*tags, tag)
+        return True
+
+    def clear_card_tags(self, trigger: CardTagClear) -> int:
+        """按**清除触发**清标签（M6 票 09；D12 的"生存期"唯一执行入口）。
+
+        逐张牌留下"触发不等于 ``trigger``"的标签，清空即删掉该牌的表项；返回清掉的条数。
+        M6 只把 ``TURN_END`` 接到真实触发点（:meth:`_clear_turn_effects`）；``LEAVE_ZONE`` /
+        ``USED_OR_PLAYED`` 这两类形状**无载体**，触发点随后续里程碑的载体一起接
+        （形状由 ``tests/test_tags.py`` 的构造测试钉住）。**不发 delta**：与
+        ``set_hand_card_prohibition`` 同姿态——没有 JSON 读者，回放按同一条技能决策重建。
+        """
+        if not self.state.card_tags:
+            return 0
+        removed = 0
+        for card_id in list(self.state.card_tags):
+            tags = self.state.card_tags[card_id]
+            kept = tuple(
+                tag
+                for tag in tags
+                if card_tag_spec(tag.tag_type).clear_trigger is not trigger
+            )
+            removed += len(tags) - len(kept)
+            if kept:
+                self.state.card_tags[card_id] = kept
+            else:
+                del self.state.card_tags[card_id]
+        return removed
+
     def _clear_turn_effects(self) -> None:
         """回合末清理作用域 = ``TURN`` 的座位级效果（M6 票 04；票 05 补【咆哮】②、
         票 08 补手牌上限加式）。
@@ -2724,6 +2781,9 @@ class Engine:
             player.damage_dealt_this_turn = False
             player.hand_limit_bonus = 0
             self._clear_paoxiao_bonus(player.seat)
+        # 牌标签的"本回合不计入"（M6 票 09）：与其它 ``TURN`` 作用域状态同一收尾点，
+        # 走声明触发的唯一入口（逐类型读登记表，不在这里特判标签类型）。
+        self.clear_card_tags(CardTagClear.TURN_END)
         reset_turn_skill_state(self.state)
 
     def reveal_card(self, frame: Frame | None, seat: int, card: CardRef) -> None:
