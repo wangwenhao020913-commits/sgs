@@ -75,6 +75,7 @@ from support import (
     build_state,
     cards_of_type,
     declare_death,
+    deck_excluding,
     ran_timing,
     run_turns,
     run_until,
@@ -108,23 +109,16 @@ def _zone_state(**kwargs: Any):
             SeatSpec(hero=JIE_LUXUN, hand=tuple(hands[0])),
             SeatSpec(hero=None, hand=tuple(hands[1])),
         ],
-        deck=kwargs.pop("deck", _deck_excluding(*hands[0], *hands[1])),
+        deck=kwargs.pop("deck", deck_excluding(PACK, *hands[0], *hands[1])),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
         **kwargs,
     )
 
 
-def _deck_excluding(*used: int) -> tuple[int, ...]:
-    excluded = set(used)
-    return tuple(
-        card_id for card_id in range(len(PACK.deck.cards)) if card_id not in excluded
-    )
-
-
 def _spare_cards(*exclude: int, count: int = 2) -> tuple[int, ...]:
     """牌堆里没被占用的前 ``count`` 张（避免测试里的"手牌 id"与技能牌 id 撞车）。"""
-    return _deck_excluding(*exclude)[:count]
+    return deck_excluding(PACK, *exclude)[:count]
 
 
 def _add_zone(state, seat: int, owner: int, skill_id: str, cards: tuple[int, ...] = ()) -> str:
@@ -229,7 +223,7 @@ def test_hero_card_zone_cards_are_not_hand_cards():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hp=1, hp_max=4, hero=JIE_LUXUN, hand=(0, 1, 2)), SeatSpec()],
-        deck=_deck_excluding(0, 1, 2),
+        deck=deck_excluding(PACK, 0, 1, 2),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -443,7 +437,7 @@ def _trick_state(*, victim_hand: tuple[int, ...], trick: int, victim_equip=()):
             SeatSpec(hand=(trick,)),
             SeatSpec(hero=JIE_LUXUN, hp=3, hp_max=3, hand=victim_hand, equip=victim_equip),
         ],
-        deck=_deck_excluding(*victim_hand, trick, *victim_equip),
+        deck=deck_excluding(PACK, *victim_hand, trick, *victim_equip),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -549,7 +543,7 @@ def test_qianxun_does_not_place_for_your_own_trick() -> None:
             SeatSpec(hero=JIE_LUXUN, hp=3, hp_max=3, hand=(*_spare_cards(trick, count=1), trick)),
             SeatSpec(hand=(_spare_cards(trick, count=2)[1],)),
         ],
-        deck=_deck_excluding(0, 1, trick),
+        deck=deck_excluding(PACK, 0, 1, trick),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -589,7 +583,7 @@ def test_qianxun_does_not_place_for_another_players_slash() -> None:
             SeatSpec(hand=(slash,)),
             SeatSpec(hero=JIE_LUXUN, hp=3, hp_max=3, hand=_spare_cards(slash)),
         ],
-        deck=_deck_excluding(slash, *_spare_cards(slash)),
+        deck=deck_excluding(PACK, slash, *_spare_cards(slash)),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -629,7 +623,7 @@ def test_qianxun_triggers_on_a_delayed_trick_in_the_judge_phase() -> None:
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hero=JIE_LUXUN, hp=3, hp_max=3, hand=hand), SeatSpec()],
-        deck=_deck_excluding(*hand, delayed),
+        deck=deck_excluding(PACK, *hand, delayed),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -885,7 +879,7 @@ def test_dead_players_hero_card_cards_go_to_the_discard_pile() -> None:
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hero=JIE_LUXUN, hp=1, hp_max=3, hand=hand), SeatSpec()],
-        deck=_deck_excluding(*hand),
+        deck=deck_excluding(PACK, *hand),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -920,7 +914,7 @@ def test_the_placement_primitive_is_cross_seat_and_returns_to_the_skill_owner() 
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=(0, 1)), SeatSpec(hero=JIE_LUXUN, hp=3, hp_max=3)],
-        deck=_deck_excluding(0, 1),
+        deck=deck_excluding(PACK, 0, 1),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -952,7 +946,7 @@ def test_placing_no_cards_is_a_no_op_and_does_not_create_a_zone() -> None:
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hero=JIE_LUXUN, hp=3, hp_max=3), SeatSpec()],
-        deck=_deck_excluding(),
+        deck=deck_excluding(PACK),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -973,7 +967,7 @@ def test_the_placement_primitive_refuses_a_skill_that_is_not_registered_as_place
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hero=JIE_LUXUN, hp=3, hp_max=3, hand=(0,)), SeatSpec()],
-        deck=_deck_excluding(0),
+        deck=deck_excluding(PACK, 0),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )

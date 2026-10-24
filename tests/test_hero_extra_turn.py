@@ -32,7 +32,14 @@ from sgs.engine import Engine
 from sgs.state import MoveReason, UseCard, Zone, ZoneRef
 from sgs.timing import Timing
 
-from support import PassPlayer, SeatSpec, build_state, cards_of_type, run_until
+from support import (
+    PassPlayer,
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+    run_until,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -155,13 +162,6 @@ def _suited_hand() -> tuple[int, ...]:
     return _suited_hand_for(PACK)
 
 
-def _deck_excluding(*used: int) -> tuple[int, ...]:
-    excluded = set(used)
-    return tuple(
-        card_id for card_id in range(len(PACK.deck.cards)) if card_id not in excluded
-    )
-
-
 class _BotuDriver:
     """座位 0 的脚本：弃牌阶段**尽量丢出四种花色**，见到【博图】就发动，其余最小应答。
 
@@ -259,11 +259,11 @@ class _BotuDriver:
 
 def _botu_state():
     """座位 0 = 界吕蒙、体力 1、手里四花色（弃牌阶段会把四花色丢进弃牌堆）。"""
-    hand = _suited_hand() + (_deck_excluding(*_suited_hand())[0],)
+    hand = _suited_hand() + (deck_excluding(PACK, *_suited_hand())[0],)
     return build_state(
         pack=PACK,
         seats=[SeatSpec(hp=1, hp_max=4, hand=hand, hero=JIE_LVMENG), SeatSpec()],
-        deck=_deck_excluding(*hand),
+        deck=deck_excluding(PACK, *hand),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -333,7 +333,7 @@ def test_the_round_limit_refreshes_when_the_round_actually_advances():
 
 def _four_seat_engine():
     """4 人局：座位 0 = 界吕蒙、体力 1、手里四花色；其余座位无武将。"""
-    hand = _suited_hand() + (_deck_excluding(*_suited_hand())[0],)
+    hand = _suited_hand() + (deck_excluding(PACK, *_suited_hand())[0],)
     state = build_state(
         pack=PACK,
         seats=[
@@ -342,7 +342,7 @@ def _four_seat_engine():
             SeatSpec(),
             SeatSpec(),
         ],
-        deck=_deck_excluding(*hand),
+        deck=deck_excluding(PACK, *hand),
         turn_seat=0,
         rule_config=RuleConfig(player_count=4),
     )
@@ -386,7 +386,7 @@ def _wine_engine():
     hand = (
         _suited_hand_for(PACK_160)
         + (wine[0], wine[1])
-        + tuple(_deck_excluding(*_suited_hand_for(PACK_160), *wine[:2])[:1])
+        + tuple(deck_excluding(PACK, *_suited_hand_for(PACK_160), *wine[:2])[:1])
     )
     state = build_state(
         pack=PACK_160,
@@ -396,7 +396,7 @@ def _wine_engine():
             SeatSpec(),
             SeatSpec(),
         ],
-        deck=_deck_excluding(*hand),
+        deck=deck_excluding(PACK, *hand),
         turn_seat=0,
         rule_config=RuleConfig(player_count=4),
     )
@@ -457,7 +457,7 @@ def test_every_source_zone_that_feeds_the_discard_pile_counts_for_the_four_suits
             SeatSpec(hand=hand, equip=(other[0],), judge=(other[1],)),
             SeatSpec(),
         ],
-        deck=_deck_excluding(*hand, *other),
+        deck=deck_excluding(PACK, *hand, *other),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )

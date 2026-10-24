@@ -39,7 +39,14 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state, cards_of_type, ran_timing, run_queries
+from support import (
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+    ran_timing,
+    run_queries,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -53,11 +60,6 @@ INDULGENCE = cards_of_type(PACK, "indulgence")[0]
 
 def _cards(type_id: str) -> list[int]:
     return cards_of_type(PACK, type_id)
-
-
-def _deck_excluding(*used: int) -> tuple[int, ...]:
-    excluded = set(used)
-    return tuple(card_id for card_id in range(len(PACK.deck.cards)) if card_id not in excluded)
 
 
 def _pass_or_first(query):
@@ -165,7 +167,7 @@ def _damage_engine(
     state = build_state(
         pack=PACK,
         seats=seats,
-        deck=deck if deck is not None else _deck_excluding(card),
+        deck=deck if deck is not None else deck_excluding(PACK, card),
         processing=(card,),
     )
     engine = Engine.from_state(state, seed=7)
@@ -194,7 +196,7 @@ def test_jie_tiandu_takes_the_judge_card_and_keeps_it_out_of_the_discard():
             SeatSpec(hp=3, hp_max=3, hero="jie_guojia", judge=(INDULGENCE,)),
             SeatSpec(hp=4),
         ],
-        deck=(judge_card, *_deck_excluding(judge_card, INDULGENCE)),
+        deck=(judge_card, *deck_excluding(PACK, judge_card, INDULGENCE)),
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=1)
@@ -215,7 +217,7 @@ def test_jie_tiandu_is_not_offered_when_the_judgment_is_someone_elses():
             SeatSpec(hp=4, judge=(INDULGENCE,)),
             SeatSpec(hp=3, hp_max=3, hero="jie_guojia"),
         ],
-        deck=(judge_card, *_deck_excluding(judge_card, INDULGENCE)),
+        deck=(judge_card, *deck_excluding(PACK, judge_card, INDULGENCE)),
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=1)
@@ -280,7 +282,7 @@ def test_jie_yiji_draws_two_then_distributes_hand_cards_to_other_characters():
         seats=state_seats,
         source=0,
         target=1,
-        deck=(*top, *_deck_excluding(*top)),
+        deck=(*top, *deck_excluding(PACK, *top)),
         players=[
             Scripted(),
             Scripted(_select_first_then(seats=(0, 2))),
@@ -310,7 +312,7 @@ def test_jie_yiji_can_stop_after_one_card_or_give_nothing():
         ],
         source=0,
         target=1,
-        deck=(*top, *_deck_excluding(*top)),
+        deck=(*top, *deck_excluding(PACK, *top)),
         players=[
             Scripted(),
             Scripted(lambda q: (
@@ -374,7 +376,7 @@ def test_jie_yiji_triggers_once_per_damage_point():
 def test_xunxun_puts_two_chosen_cards_on_top_and_the_rest_on_the_bottom():
     """正例：固定切分 2 / 2，置顶两行内顺序可选；随后照常摸牌（摸到刚置顶的两张）。"""
     top = (_cards("slash")[0], _cards("peach")[0], _cards("dodge")[0], _cards("duel")[0])
-    rest = _deck_excluding(*top)
+    rest = deck_excluding(PACK, *top)
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hp=4, hero="jie_lidian"), SeatSpec(hp=4)],
@@ -408,7 +410,7 @@ def test_declining_xunxun_draws_the_original_top_two():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hp=4, hero="jie_lidian"), SeatSpec(hp=4)],
-        deck=(*top, *_deck_excluding(*top)),
+        deck=(*top, *deck_excluding(PACK, *top)),
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=1)
@@ -430,7 +432,7 @@ def test_xunxun_is_not_offered_outside_the_owners_draw_phase():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hp=4), SeatSpec(hp=4, hero="jie_lidian")],
-        deck=(*top, *_deck_excluding(*top)),
+        deck=(*top, *deck_excluding(PACK, *top)),
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=1)
@@ -464,7 +466,7 @@ def test_wangxi_after_taking_damage_draws_two_and_gives_one_to_the_source():
         seats=[SeatSpec(hp=4), SeatSpec(hp=3, hp_max=3, hero="jie_lidian")],
         source=0,
         target=1,
-        deck=(*top, *_deck_excluding(*top)),
+        deck=(*top, *deck_excluding(PACK, *top)),
         players=[Scripted(), Scripted(_wangxi_handler())],
     )
 
@@ -480,7 +482,7 @@ def test_wangxi_after_dealing_damage_draws_two_and_gives_one_to_the_target():
         seats=[SeatSpec(hp=4, hero="jie_lidian"), SeatSpec(hp=4)],
         source=0,
         target=1,
-        deck=(*top, *_deck_excluding(*top)),
+        deck=(*top, *deck_excluding(PACK, *top)),
         players=[Scripted(_wangxi_handler()), Scripted()],
     )
 

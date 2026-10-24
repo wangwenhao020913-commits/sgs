@@ -53,6 +53,7 @@ from support import (
     build_state,
     cards_of_type,
     declare_death,
+    deck_excluding,
     ran_timing,
     run_until,
 )
@@ -64,11 +65,6 @@ PACK_EX_160 = load_content_pack(deck_profile="standard_ex_160")
 
 def _ids(pack, type_id: str) -> list[int]:
     return cards_of_type(pack, type_id)
-
-
-def _deck_excluding(pack, *used: int) -> tuple[int, ...]:
-    excluded = set(used)
-    return tuple(card_id for card_id in range(len(pack.deck.cards)) if card_id not in excluded)
 
 
 def _virtual(actions, type_id: str) -> list[UseCard]:
@@ -104,13 +100,13 @@ def test_jie_longdan_keeps_both_standard_slash_dodge_directions():
     play = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=(dodge,), hero="jie_zhaoyun"), SeatSpec()],
-        deck=_deck_excluding(PACK, dodge),
+        deck=deck_excluding(PACK, dodge),
         turn_seat=0,
     )
     dodge_window = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=(slash,), hero="jie_zhaoyun"), SeatSpec()],
-        deck=_deck_excluding(PACK, slash),
+        deck=deck_excluding(PACK, slash),
         turn_seat=0,
     )
 
@@ -130,7 +126,7 @@ def test_jie_longdan_uses_a_peach_as_a_wine_in_the_play_phase():
     state = build_state(
         pack=PACK_EX_160,
         seats=[SeatSpec(hand=(peach,), hero="jie_zhaoyun"), SeatSpec()],
-        deck=_deck_excluding(PACK_EX_160, peach),
+        deck=deck_excluding(PACK_EX_160, peach),
         turn_seat=0,
     )
 
@@ -149,7 +145,7 @@ def test_jie_longdan_uses_a_wine_as_a_peach_when_someone_is_dying():
     state = build_state(
         pack=PACK_EX_160,
         seats=[SeatSpec(hand=(wine,), hero="jie_zhaoyun"), SeatSpec(hp=0)],
-        deck=_deck_excluding(PACK_EX_160, wine),
+        deck=deck_excluding(PACK_EX_160, wine),
         turn_seat=1,
     )
 
@@ -167,13 +163,13 @@ def test_the_standard_zhaoyun_does_not_gain_the_wine_peach_directions():
     peach_state = build_state(
         pack=PACK_EX_160,
         seats=[SeatSpec(hand=(peach,), hero="zhaoyun"), SeatSpec()],
-        deck=_deck_excluding(PACK_EX_160, peach),
+        deck=deck_excluding(PACK_EX_160, peach),
         turn_seat=0,
     )
     wine_state = build_state(
         pack=PACK_EX_160,
         seats=[SeatSpec(hand=(wine,), hero="zhaoyun"), SeatSpec(hp=0)],
-        deck=_deck_excluding(PACK_EX_160, wine),
+        deck=deck_excluding(PACK_EX_160, wine),
         turn_seat=1,
     )
 
@@ -195,7 +191,7 @@ def test_peach_to_wine_is_not_offered_when_the_pack_has_no_wine():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=(peach,), hero="jie_zhaoyun"), SeatSpec()],
-        deck=_deck_excluding(PACK, peach),
+        deck=deck_excluding(PACK, peach),
         turn_seat=0,
     )
 
@@ -211,7 +207,7 @@ def test_jie_longdan_source_predicates_are_card_names_not_colors():
     state = build_state(
         pack=PACK_EX_160,
         seats=[SeatSpec(hand=(peach, slash), hero="jie_zhaoyun"), SeatSpec()],
-        deck=_deck_excluding(PACK_EX_160, peach, slash),
+        deck=deck_excluding(PACK_EX_160, peach, slash),
         turn_seat=0,
     )
 
@@ -240,7 +236,7 @@ def test_jie_kongcheng_removes_the_owner_from_the_slash_and_duel_pools():
             SeatSpec(equip=(armor,), hero="jie_zhugeliang"),
             SeatSpec(hand=(_ids(PACK, "peach")[0],)),
         ],
-        deck=_deck_excluding(PACK, slash, duel, snatch, armor, _ids(PACK, "peach")[0]),
+        deck=deck_excluding(PACK, slash, duel, snatch, armor, _ids(PACK, "peach")[0]),
         turn_seat=0,
     )
 
@@ -260,7 +256,7 @@ def test_jie_kongcheng_returns_to_the_pool_when_the_owner_has_a_hand_card():
             SeatSpec(hand=(slash,)),
             SeatSpec(hand=(filler,), hero="jie_zhugeliang"),
         ],
-        deck=_deck_excluding(PACK, slash, filler),
+        deck=deck_excluding(PACK, slash, filler),
         turn_seat=0,
     )
 
@@ -504,7 +500,7 @@ def _rende_state(hand, *, owner_hp: int = 4, targets: int = 1):
             SeatSpec(hp=owner_hp, hp_max=4, hand=tuple(hand), hero="jie_liubei"),
             *[SeatSpec() for _ in range(targets)],
         ],
-        deck=_deck_excluding(PACK, *hand),
+        deck=deck_excluding(PACK, *hand),
         turn_seat=0,
     )
 
@@ -546,7 +542,7 @@ def test_jie_rende_limits_each_target_to_once_per_play_phase():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=hand, hero="jie_liubei"), SeatSpec(), SeatSpec(), SeatSpec()],
-        deck=_deck_excluding(PACK, *hand),
+        deck=deck_excluding(PACK, *hand),
         turn_seat=0,
     )
 
@@ -562,19 +558,23 @@ def test_jie_rende_limits_each_target_to_once_per_play_phase():
 
     query = _next_play_phase(engine, players)
     first_seat_step = query.preactivations[JIE_RENDE][1]
-    assert sorted(option for row in first_seat_step.pool for option in row.options) == [
+    assert {
+        option for row in first_seat_step.pool for option in row.options
+    } == {
         "seat:1",
         "seat:2",
         "seat:3",
-    ], "第一次：三名其他角色都可选"
+    }, "第一次：三名其他角色都可选"
 
     engine.submit(_composite(query, JIE_RENDE, picks=hand, choices=("seat:1",)))
     query = _next_play_phase(engine, players)
     seat_step = query.preactivations[JIE_RENDE][1]
-    assert sorted(option for row in seat_step.pool for option in row.options) == [
+    assert {
+        option for row in seat_step.pool for option in row.options
+    } == {
         "seat:2",
         "seat:3",
-    ], "已收过牌的座位 1 不再出现（本阶段）"
+    }, "已收过牌的座位 1 不再出现（本阶段）"
 
     engine.submit(
         _composite(
@@ -586,7 +586,9 @@ def test_jie_rende_limits_each_target_to_once_per_play_phase():
     )
     query = _next_play_phase(engine, players)
     last_step = query.preactivations[JIE_RENDE][1]
-    assert sorted(option for row in last_step.pool for option in row.options) == ["seat:3"]
+    assert {
+        option for row in last_step.pool for option in row.options
+    } == {"seat:3"}
 
     engine.submit(
         _composite(
@@ -696,7 +698,7 @@ def test_jie_rende_offers_no_basic_card_when_no_type_is_usable():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=hand, hero="jie_liubei"), SeatSpec(hero="jie_zhugeliang")],
-        deck=_deck_excluding(PACK, *hand),
+        deck=deck_excluding(PACK, *hand),
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=7)
@@ -785,7 +787,7 @@ def test_jie_jijiang_first_half_still_runs_the_lord_request_window():
             SeatSpec(hand=(slash,), kingdom=Kingdom.SHU),
             SeatSpec(kingdom=Kingdom.WEI),
         ],
-        deck=_deck_excluding(PACK, barbarian, slash),
+        deck=deck_excluding(PACK, barbarian, slash),
         turn_seat=0,
     )
 
@@ -833,7 +835,7 @@ def _jie_jijiang_second_state(*, ally_kingdom=Kingdom.SHU, ally_slashes: int = 2
             SeatSpec(hand=slashes, kingdom=ally_kingdom),
             SeatSpec(kingdom=Kingdom.WEI),
         ],
-        deck=_deck_excluding(PACK, *barbarians, *slashes),
+        deck=deck_excluding(PACK, *barbarians, *slashes),
         turn_seat=0,
     )
     return barbarians, slashes, state
@@ -943,7 +945,7 @@ def test_jie_jijiang_second_does_not_ask_when_the_lord_plays_himself():
                 hand=(slash,),
             ),
         ],
-        deck=_deck_excluding(PACK, barbarian, slash),
+        deck=deck_excluding(PACK, barbarian, slash),
         turn_seat=0,
     )
 
@@ -1147,7 +1149,7 @@ def test_yajiao_does_not_trigger_in_the_owners_own_turn():
             SeatSpec(hand=(slash,), hero="jie_zhaoyun"),
             SeatSpec(),
         ],
-        deck=_deck_excluding(PACK, slash),
+        deck=deck_excluding(PACK, slash),
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=7)
@@ -1176,7 +1178,7 @@ def test_yajiao_does_not_trigger_for_a_card_played_from_the_equipment_zone():
             SeatSpec(equip=(slash,), hero="jie_zhaoyun"),
             SeatSpec(hand=(attack,)),
         ],
-        deck=_deck_excluding(PACK, slash, attack),
+        deck=deck_excluding(PACK, slash, attack),
         turn_seat=1,
         rule_config=RuleConfig(player_count=2, first_seat=1),
     )

@@ -23,6 +23,7 @@ __all__ = [
     "SequenceHalt",
     "build_state",
     "cards_of_type",
+    "deck_excluding",
     "declare_death",
     "move_after_engine",
     "play_phase_peach_engine",
@@ -58,6 +59,18 @@ class SeatSpec:
 def cards_of_type(pack: ContentPack, type_id: str) -> list[int]:
     """按数据表顺序给出某牌名的全部 ``card_id``。"""
     return [index for index, card in enumerate(pack.deck.cards) if card.type == type_id]
+
+
+def deck_excluding(pack: ContentPack, *used: int) -> tuple[int, ...]:
+    """牌堆序去掉已经发到座位上的牌（``build_state(deck=...)`` 的常用写法）。
+
+    界将各单测原先各带一份逐字节相同的实现（M6）；这里收成唯一实现，调用方传自己的
+    ``PACK``——不给 ``pack`` 参数就分不清 108 / 160 档。
+    """
+    excluded = set(used)
+    return tuple(
+        card_id for card_id in range(len(pack.deck.cards)) if card_id not in excluded
+    )
 
 
 def build_state(

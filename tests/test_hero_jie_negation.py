@@ -62,7 +62,15 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import PassPlayer, SeatSpec, build_state, cards_of_type, run_turns, run_until
+from support import (
+    PassPlayer,
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+    run_turns,
+    run_until,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -141,13 +149,6 @@ def _first_card(*, type_id: str | None = None, color: Color | None = None):
     raise AssertionError("夹具里找不到满足条件的牌")
 
 
-def _deck_excluding(*used: int) -> tuple[int, ...]:
-    excluded = set(used)
-    return tuple(
-        card_id for card_id in range(len(PACK.deck.cards)) if card_id not in excluded
-    )
-
-
 def _deltas(engine: Engine, delta_type: str) -> list:
     return [
         record
@@ -192,7 +193,7 @@ def _ganning_state(hand: tuple[int, ...]):
     return build_state(
         pack=PACK,
         seats=[SeatSpec(hand=hand, hero="jie_ganning"), SeatSpec()],
-        deck=_deck_excluding(*hand),
+        deck=deck_excluding(PACK, *hand),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -220,7 +221,7 @@ def test_jie_qixi_is_the_standard_implementation_not_a_fork():
     standard = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=(black,), hero="ganning"), SeatSpec()],
-        deck=_deck_excluding(black),
+        deck=deck_excluding(PACK, black),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -284,7 +285,7 @@ def test_jie_biyue_draws_one_when_the_hand_is_not_empty():
     state = build_state(
         pack=PACK,
         seats=[_biyue_seat((held,)), SeatSpec()],
-        deck=_deck_excluding(held),
+        deck=deck_excluding(PACK, held),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -304,7 +305,11 @@ def test_jie_biyue_draws_two_when_the_hand_is_empty():
     hand = tuple(_cards(type_id)[0] for type_id in _EQUIP_SLOTS[:6])
     drawn_phase = tuple(_cards(type_id)[0] for type_id in _EQUIP_SLOTS[6:])
     finish_draw = (_cards("peach")[0], _cards("dodge")[0])
-    deck = (*drawn_phase, *finish_draw, *_deck_excluding(*hand, *drawn_phase, *finish_draw))
+    deck = (
+        *drawn_phase,
+        *finish_draw,
+        *deck_excluding(PACK, *hand, *drawn_phase, *finish_draw),
+    )
     state = build_state(
         pack=PACK,
         seats=[_biyue_seat(hand), SeatSpec()],
@@ -354,7 +359,7 @@ def _lijian_state(hero_id: str):
             ),
             SeatSpec(gender=Gender.FEMALE, identity=Identity.RENEGADE),
         ],
-        deck=_deck_excluding(cost, victim_slash, user_slash),
+        deck=deck_excluding(PACK, cost, victim_slash, user_slash),
         turn_seat=0,
         rule_config=RuleConfig(player_count=4),
     )
@@ -570,7 +575,7 @@ def test_fenwei_invalidates_only_the_chosen_subset():
             SeatSpec(identity=Identity.REBEL),
             SeatSpec(identity=Identity.RENEGADE),
         ],
-        deck=_deck_excluding(barbarian),
+        deck=deck_excluding(PACK, barbarian),
         turn_seat=0,
         rule_config=RuleConfig(player_count=4),
     )
@@ -601,7 +606,7 @@ def test_fenwei_declining_lets_every_target_take_damage():
             SeatSpec(identity=Identity.REBEL),
             SeatSpec(identity=Identity.RENEGADE),
         ],
-        deck=_deck_excluding(barbarian),
+        deck=deck_excluding(PACK, barbarian),
         turn_seat=0,
         rule_config=RuleConfig(player_count=4),
     )
@@ -633,7 +638,7 @@ def test_fenwei_may_invalidate_the_user_when_the_card_targets_him():
             SeatSpec(hp=2, hp_max=4, identity=Identity.REBEL),
             SeatSpec(hp=2, hp_max=4, identity=Identity.RENEGADE),
         ],
-        deck=_deck_excluding(garden),
+        deck=deck_excluding(PACK, garden),
         turn_seat=0,
         rule_config=RuleConfig(player_count=4),
     )
@@ -675,7 +680,7 @@ def test_fenwei_needs_a_trick_with_at_least_two_targets():
             SeatSpec(hand=(_UNTARGETED,), identity=Identity.REBEL),
             SeatSpec(identity=Identity.RENEGADE),
         ],
-        deck=_deck_excluding(dismantlement, _UNTARGETED),
+        deck=deck_excluding(PACK, dismantlement, _UNTARGETED),
         turn_seat=0,
         rule_config=RuleConfig(player_count=4),
     )
@@ -706,7 +711,7 @@ def test_fenwei_is_a_limited_skill_that_fires_once():
             SeatSpec(hp=4, identity=Identity.REBEL),
             SeatSpec(hp=4, identity=Identity.RENEGADE),
         ],
-        deck=_deck_excluding(first, second),
+        deck=deck_excluding(PACK, first, second),
         turn_seat=0,
         rule_config=RuleConfig(player_count=4),
     )

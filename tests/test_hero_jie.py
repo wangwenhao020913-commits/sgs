@@ -92,6 +92,7 @@ from support import (
     SeatSpec,
     build_state,
     cards_of_type,
+    deck_excluding,
     ran_timing,
     run_queries,
     run_turns,
@@ -200,13 +201,6 @@ def _first(*, type_id: str | None = None, color: Color | None = None, suit: str 
     raise AssertionError("夹具里找不到满足条件的牌")
 
 
-def _deck_excluding(*used: int) -> tuple[int, ...]:
-    excluded = set(used)
-    return tuple(
-        card_id for card_id in range(len(PACK.deck.cards)) if card_id not in excluded
-    )
-
-
 def _deltas(engine: Engine, delta_type: str) -> list:
     return [
         record
@@ -254,7 +248,7 @@ def _wusheng_state(hand: tuple[int, ...]):
             SeatSpec(),
             SeatSpec(),
         ],
-        deck=_deck_excluding(*hand),
+        deck=deck_excluding(PACK, *hand),
         turn_seat=0,
         rule_config=RuleConfig(player_count=4),
     )
@@ -406,7 +400,7 @@ def _yijue_state(
             SeatSpec(hand=owner_hand, hero="jie_guanyu"),
             SeatSpec(hand=target_hand, hero="guanyu", hp=target_hp),
         ],
-        deck=_deck_excluding(*owner_hand, *target_hand),
+        deck=deck_excluding(PACK, *owner_hand, *target_hand),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -821,7 +815,7 @@ def _zhangfei_state(
             SeatSpec(hp=hp, hand=hand, hero="jie_zhangfei"),
             SeatSpec(hp=target_hp, hand=target_hand),
         ],
-        deck=_deck_excluding(*hand, *target_hand),
+        deck=deck_excluding(PACK, *hand, *target_hand),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -1119,7 +1113,7 @@ def _xushu_state(*, hp: int = 3, hand: tuple[int, ...] = (), target_hand: tuple[
             SeatSpec(hp=hp, hand=hand, hero="jie_xushu"),
             SeatSpec(hand=target_hand, gender=Gender.MALE),
         ],
-        deck=_deck_excluding(*hand, *target_hand),
+        deck=deck_excluding(PACK, *hand, *target_hand),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -1187,7 +1181,7 @@ def test_qianxue_does_not_trigger_when_someone_else_deals_the_damage():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hp=3, hero="jie_xushu"), SeatSpec(hand=(slash,))],
-        deck=_deck_excluding(slash),
+        deck=deck_excluding(PACK, slash),
         turn_seat=1,
         rule_config=RuleConfig(player_count=2),
     )
@@ -1233,7 +1227,7 @@ def _xushu_awakened_state(
             SeatSpec(hp=3, hand=hand, hero="jie_xushu"),
             SeatSpec(hand=target_hand, gender=gender),
         ],
-        deck=_deck_excluding(*hand, *target_hand),
+        deck=deck_excluding(PACK, *hand, *target_hand),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -1313,7 +1307,7 @@ def test_jianyan_reveals_until_a_match_and_discards_the_rest():
 
     # 亮牌发生在摸牌阶段之后（摸牌阶段摸走的 2 张已在手里），故牌堆序 = 初始序减去那 2 张。
     drawn = set(engine.state.player(0).hand)
-    deck_order = [card_id for card_id in _deck_excluding() if card_id not in drawn]
+    deck_order = [card_id for card_id in deck_excluding(PACK) if card_id not in drawn]
     first_trick = next(
         card_id
         for card_id in deck_order
@@ -1372,7 +1366,7 @@ def _lvmeng_state(*, hp: int = 1, hand: tuple[int, ...] = (), target_hand: tuple
     return build_state(
         pack=PACK,
         seats=[SeatSpec(hp=hp, hand=hand, hero="jie_lvmeng"), SeatSpec(hand=target_hand, gender=Gender.MALE)],
-        deck=_deck_excluding(*hand, *target_hand),
+        deck=deck_excluding(PACK, *hand, *target_hand),
         turn_seat=turn_seat,
         rule_config=RuleConfig(player_count=2),
     )
@@ -1483,7 +1477,7 @@ def _gongxin_state(*, target_hand: tuple[int, ...]):
             SeatSpec(hero="jie_lvmeng"),
             SeatSpec(hand=target_hand, gender=Gender.MALE),
         ],
-        deck=_deck_excluding(*target_hand),
+        deck=deck_excluding(PACK, *target_hand),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -1622,7 +1616,7 @@ def _zhuhai_state(*, turn_seat: int = 2, weapon: int | None = None, slash_count:
             SeatSpec(hp=4, identity=identities[2]),
             SeatSpec(hp=4, identity=identities[3]),
         ],
-        deck=_deck_excluding(*(() if weapon is None else (weapon,))),
+        deck=deck_excluding(PACK, *(() if weapon is None else (weapon,))),
         turn_seat=turn_seat,
         rule_config=RuleConfig(player_count=4),
     )

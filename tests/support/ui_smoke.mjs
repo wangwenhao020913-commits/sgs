@@ -14288,7 +14288,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && displayName("jie_daqiao") === "界大乔",
     `${displayName("jie_not_a_hero")} / ${displayName("jie_daqiao")}`);
 
-  /* ---- ② 武将牌上的牌区（可跨座位、可多人并存） + 不算手牌 ---- */
+  /* ---- ② 武将牌上的牌区（可跨座位、可多人并存） + 不算手牌 ----
+   * 形状绑定：`players[].hero_zones` 的键集（skill_id / skill_name / owner / cards）
+   * 由 tests/test_web.py::test_the_ui_smoke_hero_zone_and_skill_fixtures_match_the_real_snapshot_shape
+   * 从真快照钉住；改这里的夹具形状先看那条用例。 */
   const zoneView = synthView({
     kind: "PLAY_PHASE", actor: 0, seq: 9402,
     prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
@@ -14358,6 +14361,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     candidate_index: {}, option_seats: {}, context: null,
     preactivations: {}, preactivation: [],
   });
+  /* 形状绑定：`players[].skills[]` 的键集与 `star` / `state` 三态（active / suppressed /
+   * lost）同样由 tests/test_web.py 的上面那条形状用例从真投影钉住。 */
   const skillRow = (id, name, extra = {}) => ({
     skill_id: id, name, skill_type: "NORMAL", locked: false, carrier: "HERO",
     star: false, state: "active", description: `${name}的描述。`,

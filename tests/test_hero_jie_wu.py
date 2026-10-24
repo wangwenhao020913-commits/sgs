@@ -47,7 +47,14 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state, cards_of_type, run_queries, run_until
+from support import (
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+    run_queries,
+    run_until,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -62,11 +69,6 @@ XIAOJI = "hero.jie_sunshangxiang.xiaoji"
 
 def _cards(type_id: str) -> list[int]:
     return cards_of_type(PACK, type_id)
-
-
-def _deck_excluding(*used: int) -> tuple[int, ...]:
-    excluded = set(used)
-    return tuple(card_id for card_id in range(len(PACK.deck.cards)) if card_id not in excluded)
 
 
 def _red_slash() -> int:
@@ -190,7 +192,7 @@ def _zhiheng_state(*, hero: str, hand: tuple[int, ...]):
     return build_state(
         pack=PACK,
         seats=[SeatSpec(hand=hand, hero=hero), SeatSpec()],
-        deck=_deck_excluding(*hand),
+        deck=deck_excluding(PACK, *hand),
         turn_seat=0,
     )
 
@@ -199,7 +201,7 @@ def _zhiheng_engine(*, hero: str, hand: tuple[int, ...], picks: tuple[int, ...])
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=hand, hero=hero), SeatSpec()],
-        deck=_deck_excluding(*hand),
+        deck=deck_excluding(PACK, *hand),
         turn_seat=0,
     )
 
@@ -259,7 +261,7 @@ def _jie_kurou_engine(*, hand: tuple[int, ...], equip: tuple[int, ...] = ()):
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=hand, equip=equip, hero="jie_huanggai"), SeatSpec()],
-        deck=_deck_excluding(*hand, *equip),
+        deck=deck_excluding(PACK, *hand, *equip),
         turn_seat=0,
     )
     used = {"count": 0}
@@ -298,7 +300,7 @@ def test_jie_kurou_is_limited_to_once_per_play_phase():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=(first, second), hero="jie_huanggai"), SeatSpec()],
-        deck=_deck_excluding(first, second),
+        deck=deck_excluding(PACK, first, second),
         turn_seat=0,
     )
     assert _skill_offers(state, KUROU), "第一次可发动"
@@ -327,7 +329,7 @@ def test_the_standard_huanggai_kurou_is_still_repeatable_without_a_cost():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=(card,), hero="huanggai"), SeatSpec()],
-        deck=_deck_excluding(card),
+        deck=deck_excluding(PACK, card),
         turn_seat=0,
     )
     assert _skill_offers(state, "hero.huanggai.kurou")
@@ -344,7 +346,7 @@ def test_zhaxiang_draws_three_after_every_hp_loss():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hero="jie_huanggai"), SeatSpec()],
-        deck=_deck_excluding(slash),
+        deck=deck_excluding(PACK, slash),
         processing=(slash,),
     )
     engine = Engine.from_state(state, seed=5)
@@ -417,7 +419,7 @@ def test_zhaxiang_opens_the_slash_bonuses_in_its_own_play_phase():
     red = _red_slash()
     junk = _cards("lightning")[0]
     dodge = _cards("dodge")[0]
-    state = _zhaxiang_phase_state(hand=(junk, red), deck=_deck_excluding(junk, red, dodge))
+    state = _zhaxiang_phase_state(hand=(junk, red), deck=deck_excluding(PACK, junk, red, dodge))
     engine = Engine.from_state(state, seed=5)
 
     _use_kurou_once(engine)
@@ -454,7 +456,7 @@ def test_zhaxiang_phase_scope_is_cleared_at_the_end_of_the_play_phase():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=(card,), hero="jie_huanggai"), SeatSpec()],
-        deck=_deck_excluding(card),
+        deck=deck_excluding(PACK, card),
         turn_seat=0,
     )
     used = {"count": 0}
@@ -507,7 +509,7 @@ def _guose_setup(*, judge=(), target_hand=()):
             SeatSpec(hand=(diamond,), hero="jie_daqiao"),
             SeatSpec(hand=target_hand, judge=judge),
         ],
-        deck=_deck_excluding(diamond, *judge, *target_hand),
+        deck=deck_excluding(PACK, diamond, *judge, *target_hand),
         turn_seat=0,
     )
     return diamond, state
@@ -561,7 +563,7 @@ def test_jie_guose_draws_only_after_the_chosen_option_resolves():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=(diamond,), hero="jie_daqiao"), SeatSpec(hand=(nullify,))],
-        deck=_deck_excluding(diamond, nullify),
+        deck=deck_excluding(PACK, diamond, nullify),
         turn_seat=0,
     )
     drive, _ = _guose_driver("guose_use_indulgence")
@@ -639,7 +641,7 @@ def test_jie_guose_is_not_offered_without_a_diamond_card():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=(black,), hero="jie_daqiao"), SeatSpec(judge=(indulgence,))],
-        deck=_deck_excluding(black, indulgence),
+        deck=deck_excluding(PACK, black, indulgence),
         turn_seat=0,
     )
     assert not _skill_offers(state, GUOSE)
@@ -670,7 +672,7 @@ def test_jie_liuli_transfers_the_slash_like_the_standard_version():
             SeatSpec(hand=(paid,), hero="jie_daqiao"),
             SeatSpec(),
         ],
-        deck=_deck_excluding(paid, slash),
+        deck=deck_excluding(PACK, paid, slash),
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=7)
@@ -747,7 +749,7 @@ def _jie_jieyin_engine(
                 equip=target_equip,
             ),
         ],
-        deck=_deck_excluding(*hand, *equip, *target_hand, *target_equip),
+        deck=deck_excluding(PACK, *hand, *equip, *target_hand, *target_equip),
         turn_seat=0,
     )
     used = {"count": 0}
@@ -832,7 +834,7 @@ def test_jie_jieyin_target_may_be_healthy_and_the_equipment_must_come_from_hand(
             SeatSpec(hand=(card,), equip=(horse,), hero="jie_sunshangxiang"),
             SeatSpec(hp=4, hp_max=4, gender=Gender.MALE),
         ],
-        deck=_deck_excluding(card, horse),
+        deck=deck_excluding(PACK, card, horse),
         turn_seat=0,
     )
 
@@ -853,7 +855,7 @@ def test_jie_xiaoji_draws_two_after_losing_equipment():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(equip=(weapon,), hero="jie_sunshangxiang"), SeatSpec()],
-        deck=_deck_excluding(weapon),
+        deck=deck_excluding(PACK, weapon),
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=7)
@@ -887,7 +889,7 @@ def test_jie_xiaoji_does_not_fire_when_another_seat_loses_equipment():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hero="jie_sunshangxiang"), SeatSpec(equip=(weapon,))],
-        deck=_deck_excluding(weapon),
+        deck=deck_excluding(PACK, weapon),
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=7)
@@ -932,7 +934,7 @@ def _jiuyuan_state(
                 kingdom=Kingdom.WU,
             ),
         ],
-        deck=_deck_excluding(peach),
+        deck=deck_excluding(PACK, peach),
         turn_seat=0,
     )
 

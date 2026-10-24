@@ -45,7 +45,7 @@ from sgs.state import (
     UseCard,
 )
 
-from support import SeatSpec, build_state, cards_of_type, run_queries
+from support import SeatSpec, build_state, cards_of_type, deck_excluding, run_queries
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -57,11 +57,6 @@ QUN, WEI, SHU, WU = Kingdom.QUN, Kingdom.WEI, Kingdom.SHU, Kingdom.WU
 
 def _cards(type_id: str) -> list[int]:
     return cards_of_type(PACK, type_id)
-
-
-def _deck_excluding(*used: int) -> tuple[int, ...]:
-    excluded = set(used)
-    return tuple(card_id for card_id in range(len(PACK.deck.cards)) if card_id not in excluded)
 
 
 def _with_suit(type_id: str, suit: str, *, skip: int = 0) -> int:
@@ -150,7 +145,7 @@ def test_jie_jijiu_offers_red_cards_as_peach_outside_the_owners_turn():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=(red,), hero="jie_huatuo", kingdom=QUN), SeatSpec()],
-        deck=_deck_excluding(red),
+        deck=deck_excluding(PACK, red),
         turn_seat=1,
     )
 
@@ -169,7 +164,7 @@ def test_jie_jijiu_stays_outside_turn_only_and_does_not_belong_to_standard_huatu
             SeatSpec(hand=(red,), hero="huatuo", kingdom=QUN),
             SeatSpec(kingdom=WEI),
         ],
-        deck=_deck_excluding(red),
+        deck=deck_excluding(PACK, red),
         turn_seat=0,
     )
 
@@ -199,7 +194,7 @@ def _chuli_state(*, own_card: int, wei_a: int, wei_b: int, shu: int):
             SeatSpec(hand=(wei_b,), kingdom=WEI),
             SeatSpec(hand=(shu,), kingdom=SHU),
         ],
-        deck=_deck_excluding(own_card, wei_a, wei_b, shu),
+        deck=deck_excluding(PACK, own_card, wei_a, wei_b, shu),
         turn_seat=0,
     )
 
@@ -361,7 +356,7 @@ def test_jie_wushuang_still_needs_two_dodges_to_cancel_a_slash():
             SeatSpec(hand=(slash,), hero="jie_lvbu", kingdom=QUN),
             SeatSpec(hand=(dodge1, dodge2)),
         ],
-        deck=_deck_excluding(slash, dodge1, dodge2),
+        deck=deck_excluding(PACK, slash, dodge1, dodge2),
         turn_seat=0,
     )
 
@@ -422,7 +417,7 @@ def _liyu_engine(*, target: SeatSpec, seats_after: int = 0, card_type: str = "sl
             target,
             *[SeatSpec() for _ in range(seats_after)],
         ],
-        deck=_deck_excluding(card, *target.hand, *target.equip, *target.judge),
+        deck=deck_excluding(PACK, card, *target.hand, *target.equip, *target.judge),
         processing=(card,),
     )
     engine = Engine.from_state(state, seed=7)
@@ -611,7 +606,7 @@ def _yaowu_engine(*, card_suit: str | None, source: int | None = 0, card_type: s
             SeatSpec(kingdom=WEI),
             SeatSpec(hero="jie_huaxiong", kingdom=QUN),
         ],
-        deck=_deck_excluding(card) if card is not None else _deck_excluding(),
+        deck=deck_excluding(PACK, card) if card is not None else deck_excluding(PACK),
         processing=(card,) if card is not None else (),
     )
     engine = Engine.from_state(state, seed=7)
@@ -718,7 +713,7 @@ def _shizhan_state(*, owner_hand, target_hand=()):
             SeatSpec(hand=owner_hand, hero="jie_huaxiong", kingdom=QUN),
             SeatSpec(hand=target_hand, kingdom=WEI),
         ],
-        deck=_deck_excluding(*owner_hand, *target_hand),
+        deck=deck_excluding(PACK, *owner_hand, *target_hand),
         turn_seat=0,
     )
 
@@ -803,7 +798,7 @@ def _qiaomeng_engine(*, target: SeatSpec, card_type: str = "slash"):
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hero="jie_gongsunzan", kingdom=QUN), target],
-        deck=_deck_excluding(card, *target.hand, *target.equip, *target.judge),
+        deck=deck_excluding(PACK, card, *target.hand, *target.equip, *target.judge),
         processing=(card,),
     )
     engine = Engine.from_state(state, seed=7)
@@ -919,7 +914,7 @@ def test_yicong_shortens_own_distance_and_lengthens_targets_when_hp_is_low():
             SeatSpec(kingdom=SHU),
             SeatSpec(kingdom=WU),
         ],
-        deck=_deck_excluding(),
+        deck=deck_excluding(PACK),
     )
 
     # 4 人环：0↔2 座位距离 = 2，0↔1 = 1。

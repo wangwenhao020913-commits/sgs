@@ -57,7 +57,14 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state, cards_of_type, ran_timing, run_queries
+from support import (
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+    ran_timing,
+    run_queries,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -71,11 +78,6 @@ JIE_LUOYI = "hero.jie_xuchu.luoyi"
 
 def _cards(type_id: str) -> list[int]:
     return cards_of_type(PACK, type_id)
-
-
-def _deck_excluding(*used: int) -> tuple[int, ...]:
-    excluded = set(used)
-    return tuple(card_id for card_id in range(len(PACK.deck.cards)) if card_id not in excluded)
 
 
 def _run(engine, players, stop):
@@ -171,7 +173,7 @@ def _damage_engine(
     state = build_state(
         pack=PACK,
         seats=specs,
-        deck=deck if deck is not None else _deck_excluding(card, *processing),
+        deck=deck if deck is not None else deck_excluding(PACK, card, *processing),
         processing=processing,
     )
     engine = Engine.from_state(state, seed=7)
@@ -200,7 +202,7 @@ def _damage_engine(
 def test_jie_jianxiong_takes_the_channel_card_and_draws_one():
     """正例：拿牌 + 多摸一张（标准版只拿牌，摸的那张是牌堆顶）。"""
     slash = _cards("slash")[0]
-    deck = _deck_excluding(slash)
+    deck = deck_excluding(PACK, slash)
     engine, _players = _damage_engine(
         target=SeatSpec(hero="jie_caocao"), card=slash, deck=deck
     )
@@ -236,7 +238,7 @@ def test_jie_jianxiong_can_be_declined_and_then_draws_nothing():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(), SeatSpec(hero="jie_caocao")],
-        deck=_deck_excluding(slash),
+        deck=deck_excluding(PACK, slash),
         processing=(slash,),
     )
     engine = Engine.from_state(state, seed=7)
@@ -277,7 +279,7 @@ def test_jie_fankui_triggers_once_per_damage_point():
         source_seat=SeatSpec(hand=source_cards),
         amount=2,
         card=slash,
-        deck=_deck_excluding(slash, *source_cards),
+        deck=deck_excluding(PACK, slash, *source_cards),
         select=_pick_first,
     )
 
@@ -295,7 +297,7 @@ def test_standard_fankui_asks_once_for_two_points():
         source_seat=SeatSpec(hand=source_cards),
         amount=2,
         card=slash,
-        deck=_deck_excluding(slash, *source_cards),
+        deck=deck_excluding(PACK, slash, *source_cards),
         select=_pick_first,
     )
 
@@ -390,7 +392,7 @@ def test_a_standard_simayi_seat_is_not_in_the_jie_capable_seats():
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(), SeatSpec(hero="simayi", hand=(_red_slash(),))],
-        deck=_deck_excluding(_red_slash(), INDULGENCE),
+        deck=deck_excluding(PACK, _red_slash(), INDULGENCE),
         turn_seat=0,
     )
 
@@ -529,7 +531,7 @@ class _TuxiPlayer:
 
 def _tuxi_state(*, hero: str):
     hand_a, hand_b = _cards("dodge")[0], _cards("dodge")[1]
-    deck = _deck_excluding(hand_a, hand_b)
+    deck = deck_excluding(PACK, hand_a, hand_b)
     state = build_state(
         pack=PACK,
         seats=[
@@ -714,7 +716,7 @@ def test_jie_luoyi_adds_one_to_this_turns_slash_damage():
 def test_declining_jie_luoyi_draws_two_and_deals_one():
     """反例：不发动 ⇒ 正常摸两张、【杀】只有基础 1 点。"""
     slash = _one_of("slash")
-    deck = _deck_excluding(slash)
+    deck = deck_excluding(PACK, slash)
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hero="jie_xuchu", hand=(slash,)), SeatSpec()],
@@ -1125,7 +1127,7 @@ def test_jie_hujia_second_condition_has_four_guards():
             SeatSpec(kingdom=Kingdom.WEI),
             SeatSpec(hero="jie_caocao", identity=Identity.LORD, kingdom=Kingdom.WEI),
         ],
-        deck=_deck_excluding(dodge),
+        deck=deck_excluding(PACK, dodge),
         turn_seat=2,
     )
     frame = _Frame(card=state.card(dodge), source=0)

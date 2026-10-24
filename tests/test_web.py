@@ -30,7 +30,7 @@ from sgs.agents import RandomPlayer, TapePlayer  # noqa: E402
 from sgs.data import Identity, Kingdom, Suit, load_content_pack, validate_rule_config  # noqa: E402
 from sgs.engine import Engine, RandomSource, dump_journal  # noqa: E402
 from sgs.resolution import Frame, ResolutionStack  # noqa: E402
-from sgs.skills import FREE_SPLIT  # noqa: E402
+from sgs.skills import FREE_SPLIT, hero_card_zone_key  # noqa: E402
 from sgs.state import (  # noqa: E402
     Action,
     ActivateSkill,
@@ -87,9 +87,6 @@ from support.scripts import PassPlayer, run_queries  # noqa: E402
 
 TWO_PLAYERS = {"player_count": 2}
 """2 人局：无身份 1v1，跑得快，且足以覆盖"挂起 → 应答 → 续跑"的全部分支。"""
-
-_QIANXUN_ZONE = "0:hero.jie_luxun.qianxun"
-"""座位 0 的界陆逊【谦逊】区键（（座位, 技能实例）的规范文本；M6 票 10 的唯一派生）。"""
 
 
 class _FirstChoice:
@@ -4981,37 +4978,68 @@ def test_the_web_snapshot_shows_public_hero_card_zones_without_inflating_the_han
     """
     from types import SimpleNamespace
 
-    from sgs.state import HeroCardZone
+    from sgs.state import MoveReason
 
     from sgs_web.projection import visible_snapshot as snapshot_of
 
     pack = load_content_pack(deck_profile="standard_108")
-    zone_cards = tuple(cards_of_type(pack, "slash")[:2])
+    peaches = cards_of_type(pack, "peach")
+    slashes = cards_of_type(pack, "slash")
+    zone_cards = tuple(slashes[:2])
+    main_key = hero_card_zone_key(1, "hero.jie_luxun.qianxun")
+    empty_key = hero_card_zone_key(2, "hero.jie_luxun.qianxun")
     state = build_state(
         pack=pack,
         seats=[
-            SeatSpec(hp=4, hero="jie_luxun", hand=(cards_of_type(pack, "peach")[0],)),
-            SeatSpec(hp=4, hero="guanyu"),
-            SeatSpec(hp=4, hero="zhaoyun"),
+            SeatSpec(hp=4, hero="jie_luxun", hand=(peaches[0],)),
+            # 被放置的牌先从**持有者**（座位 1）的手牌起步；多留一张垫底，免得"失去最后
+            # 的手牌"把【连营】问出来（本用例不测它）。
+            SeatSpec(hp=4, hero="jie_luxun", hand=(*zone_cards, peaches[1])),
+            SeatSpec(hp=4, hero="jie_luxun", hand=(peaches[2], slashes[2])),
         ],
         deck=tuple(range(40, 50)),
     )
-    state.player(0).hero_cards[_QIANXUN_ZONE] = HeroCardZone(
-        skill_id="hero.jie_luxun.qianxun", owner=1, cards=list(zone_cards)
-    )
-    state.player(0).hero_cards["0:hero.jie_xusheng.pojun"] = HeroCardZone(
-        skill_id="hero.jie_xusheng.pojun", owner=0, cards=[]
-    )
     engine = Engine.from_state(state, seed=1)
+    # 主区走**产品写入路径**：键由 hero_card_zone_key 派生、搬牌由 place_on_hero_card 做。
+    engine.place_on_hero_card(
+        None,
+        owner=1,
+        skill_id="hero.jie_luxun.qianxun",
+        holder=0,
+        cards=engine.state.refs(zone_cards),
+    )
+    # 空区只能来自"放上去又归还"（place_on_hero_card 对空批不建区）：先放一张再移回
+    # 持有者手牌，得到规则 15.2 保留区条目的真实形状。owner 2 与主区分开，才能判"空区不画"。
+    engine.place_on_hero_card(
+        None,
+        owner=2,
+        skill_id="hero.jie_luxun.qianxun",
+        holder=0,
+        cards=engine.state.refs((peaches[2],)),
+    )
+    engine.move_in_frame(
+        None,
+        engine.state.refs((peaches[2],)),
+        to_zone=ZoneRef(Zone.HAND, 2),
+        reason=MoveReason.PUT,
+        owner=2,
+        actor=2,
+    )
+    assert set(engine.state.player(0).hero_cards) == {main_key, empty_key}, (
+        "两个区都经产品写入路径建出（键 = hero_card_zone_key 的派生）"
+    )
+    assert engine.state.player(0).hero_cards[empty_key].cards == [], (
+        "归还后引擎保留区条目、区为空（规则 15.2）"
+    )
 
     for human_seat in (0, 1, 2):
         session = SimpleNamespace(engine=engine, human_seat=human_seat, pack=pack)
         snapshot = snapshot_of(session)
         seat_zero = snapshot["players"][0]
         zones = seat_zero["hero_zones"]
-        assert [zone["skill_id"] for zone in zones] == ["hero.jie_luxun.qianxun"], (
-            f"座位 0 只有一个**非空**的公开区（空区不画）；查看者 {human_seat}：{zones}"
-        )
+        assert [(zone["skill_id"], zone["owner"]) for zone in zones] == [
+            ("hero.jie_luxun.qianxun", 1)
+        ], f"座位 0 只有一个**非空**的公开区（空区不画）；查看者 {human_seat}：{zones}"
         zone = zones[0]
         assert zone["skill_name"] == "谦逊", "区名取技能中文名（服务端从武将表翻）"
         assert zone["owner"] == 1, "跨座位：区记的是放置技能的持有者"
@@ -5037,7 +5065,6 @@ def test_a_hidden_hero_card_zone_is_not_shown_to_a_foreign_viewer(monkeypatch) -
     from types import SimpleNamespace
 
     from sgs.data.models import PlacementDecl, PlacementReturn, PlacementVisibility
-    from sgs.state import HeroCardZone
 
     from sgs_web import projection as projection_module
 
@@ -5054,20 +5081,27 @@ def test_a_hidden_hero_card_zone_is_not_shown_to_a_foreign_viewer(monkeypatch) -
     )
 
     pack = load_content_pack(deck_profile="standard_108")
+    peaches = cards_of_type(pack, "peach")
     zone_cards = tuple(cards_of_type(pack, "slash")[:2])
     state = build_state(
         pack=pack,
         seats=[
             SeatSpec(hp=4, hero="jie_luxun"),
-            SeatSpec(hp=4, hero="guanyu"),
+            SeatSpec(hp=4, hero="jie_luxun", hand=(*zone_cards, peaches[1])),
             SeatSpec(hp=4, hero="zhaoyun"),
         ],
         deck=tuple(range(40, 50)),
     )
-    state.player(0).hero_cards[_QIANXUN_ZONE] = HeroCardZone(
-        skill_id="hero.jie_luxun.qianxun", owner=1, cards=list(zone_cards)
-    )
     engine = Engine.from_state(state, seed=1)
+    engine.place_on_hero_card(
+        None,
+        owner=1,
+        skill_id="hero.jie_luxun.qianxun",
+        holder=0,
+        cards=engine.state.refs(zone_cards),
+    )
+    key = hero_card_zone_key(1, "hero.jie_luxun.qianxun")
+    assert key in engine.state.player(0).hero_cards, "区由产品写入路径建出（键的唯一派生）"
 
     def zones_for(viewer: int) -> list[dict]:
         session = SimpleNamespace(engine=engine, human_seat=viewer, pack=pack)
@@ -5188,6 +5222,92 @@ def test_the_actionable_skill_list_marks_a_star_skill_and_keeps_the_key_set() ->
     assert entries["hero.jie_xushu.zhuhai"]["star"] is False
     assert all(entry["state"] == "active" for entry in entries.values()), (
         "可操作清单只列解析中的实例，故状态恒 active（失效 / 失去不在这里）"
+    )
+
+
+def test_the_ui_smoke_hero_zone_and_skill_fixtures_match_the_real_snapshot_shape() -> None:
+    """M6 烟测手编的 ``players[].hero_zones`` 与技能 ``star`` / ``state`` 必须与真投影同形。
+
+    ``tests/support/ui_smoke.mjs`` 的 ㉉M6-6..14 直接摆这些键的姿势：夹具可以省事，但形状
+    没有消费方。这里从**真快照**（``visible_snapshot``）取同一批键，钉死键名与三态取值；
+    投影改了形状先红在这里，烟测夹具的作者据此更新（两条夹具不再各自漂）。
+    """
+    from types import SimpleNamespace
+
+    from sgs.state import SkillSuppression
+
+    pack = load_content_pack(deck_profile="standard_108")
+    zone_card = cards_of_type(pack, "slash")[0]
+    guard = cards_of_type(pack, "peach")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hero="jie_luxun", hand=(zone_card, guard)),
+            SeatSpec(hp=4, hero="jie_xushu"),
+            SeatSpec(hp=4, hero="jie_machao"),
+            SeatSpec(hp=4, hero="jie_machao"),
+        ],
+        deck=tuple(range(40, 50)),
+    )
+    state.player(1).granted_skills.append("hero.jie_xushu.jianyan")
+    state.player(2).suppressed_skills.append(
+        SkillSuppression(skill_id="hero.jie_ganning.yijue")
+    )
+    state.player(3).lost_skills.append("hero.jie_machao.tieqi")
+    engine = Engine.from_state(state, seed=1)
+    engine.place_on_hero_card(
+        None,
+        owner=0,
+        skill_id="hero.jie_luxun.qianxun",
+        holder=0,
+        cards=engine.state.refs((zone_card,)),
+    )
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    snapshot = visible_snapshot(session)
+
+    # ① `players[].hero_zones`：键恒在（没有区 = 空列表），每个区 = 四个键 + 卡面契约。
+    assert snapshot["players"][1]["hero_zones"] == [], "没有区的座位仍是空列表（键恒在）"
+    zones = snapshot["players"][0]["hero_zones"]
+    assert [set(zone) for zone in zones] == [
+        {"skill_id", "skill_name", "owner", "cards"}
+    ], f"hero_zones 的键集 = ui_smoke 夹具照抄的形状：{zones}"
+    assert (zones[0]["skill_id"], zones[0]["skill_name"], zones[0]["owner"]) == (
+        "hero.jie_luxun.qianxun",
+        "谦逊",
+        0,
+    )
+    card = zones[0]["cards"][0]
+    assert card["card_id"] == zone_card
+    assert {"display_name", "description"} <= set(card), (
+        "区里的牌走同一份卡面契约：界面读 display_name / description"
+    )
+
+    # ② `players[].skills`：star / state 的键与三态取值（ui_smoke 的 M6-10..14 手编这三态）。
+    entries = {
+        (player["seat"], entry["skill_id"]): entry
+        for player in snapshot["players"]
+        for entry in player["skills"]
+    }
+    active = entries[(1, "hero.jie_xushu.qianxue")]
+    assert set(active) == {
+        "skill_id",
+        "name",
+        "skill_type",
+        "locked",
+        "carrier",
+        "star",
+        "state",
+        "description",
+        "ui",
+    }, "技能条目的键集 = ui_smoke 夹具照抄的形状"
+    assert active["star"] is False and active["state"] == "active"
+    assert entries[(1, "hero.jie_xushu.jianyan")]["star"] is True
+    suppressed = entries[(2, "hero.jie_machao.tieqi")]["state"]
+    lost = entries[(3, "hero.jie_machao.tieqi")]["state"]
+    assert (suppressed, lost) == ("suppressed", "lost")
+    assert {active["state"], suppressed, lost} == {"active", "suppressed", "lost"}, (
+        "三态都从真快照下发（烟测夹具照这三个值摆姿势）"
     )
 
 
