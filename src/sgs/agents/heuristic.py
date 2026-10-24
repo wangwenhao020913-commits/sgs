@@ -1617,6 +1617,17 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.huatuo.qingnang": (_score_qingnang, "弃一张手牌令已受伤角色回复 1 点"),
     "hero.diaochan.lijian": (_score_lijian, "弃一张牌令两名男性决斗：伤害转嫁"),
     "hero.diaochan.biyue": (_constant(2.5), "结束阶段摸一张：净赚一张"),
+    # M6 票 07：界甘宁 / 界貂蝉（否定分类四层的第一批真实载体）
+    "hero.jie_ganning.qixi": (_constant(2.0), "黑色牌当【过河拆桥】：与标准【奇袭】同一条转化"),
+    "hero.jie_ganning.fenwei": (
+        _constant(2.5),
+        "限定技：让多目标锦囊对若干目标无效——保护己方 / 削弱敌方的群体锦囊",
+    ),
+    "hero.jie_diaochan.lijian": (
+        _score_lijian,
+        "与标准【离间】同一条三步清单；虚拟【决斗】不可响应，收益更高",
+    ),
+    "hero.jie_diaochan.biyue": (_constant(2.5), "结束阶段摸一 / 两张：净赚"),
     # 装备技（W4-4）：会问"是否发动"的 5 条非锁定装备**各给一个正分常量**。
     # 缺省 ``_UNKNOWN_SKILL_VALUE = -1.0 < Pass(0)`` ⇒ 不入表就永不发动（雌雄无法复现
     # 的根因）；正分 ⇒ 永远发动（Pass = 0，成本 / 收益不建模，见票面"不做收益模型调参"）。

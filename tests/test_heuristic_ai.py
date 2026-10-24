@@ -38,6 +38,7 @@ from sgs.data import (
     enabled_hero_ids,
     hero_skill_id,
     load_content_pack,
+    load_hero_tables,
     load_heroes,
 )
 from sgs.effects import designation_actions_for, legal_actions_for, locate
@@ -167,10 +168,19 @@ def _equipment_skill_ids(pack=PACK) -> frozenset[str]:
 def _stray_entries(table, values) -> list[str]:
     """表里每个 id 都必须在数据文件里存在（不能凭空多出一条）。
 
-    已知集合 = 武将技（内容包的武将自己声明）∪ **装备技**（内容包里的装备牌名派生）。
-    装备技不在 ``load_heroes()`` 的表里，不补进来时每一条装备条目都会被误判为"凭空多出"。
+    已知集合 = 武将技（内容包的武将自己声明）∪ **装备技**（内容包里的装备牌名派生）
+    ∪ **界版扩展表**的武将技（M6 票 07 起：``SKILL_VALUES`` 可以为界将登记条目，
+    【奋威】/【离间】这类机制需要 AI 真的会发动）。
+    装备技与界将都不在 ``load_heroes()`` 的表里，不补进来时每一条这类条目都会被误判为
+    "凭空多出"。
     """
     known = {hero_skill_id(hero.id, skill.id) for hero in table.heroes for skill in hero.skills}
+    for extended in load_hero_tables():
+        known |= {
+            hero_skill_id(hero.id, skill.id)
+            for hero in extended.heroes
+            for skill in hero.skills
+        }
     known |= set(_equipment_skill_ids())
     return sorted(set(values) - known)
 
@@ -1837,6 +1847,22 @@ def _coverage_lijian():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_jie_lijian():
+    """M6 票 07：界貂蝉【离间】与标准版同一条三步清单（AI 填表复用同一条路径）。"""
+    lightning = _ids("lightning")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_diaochan", hand=(lightning,)),
+            SeatSpec(gender=Gender.MALE),
+            SeatSpec(gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(lightning),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_jieyin():
     low = tuple(_ids("lightning")[:2])
     state = build_state(
@@ -1955,6 +1981,7 @@ _COVERAGE_CASES = {
     "hero.zhouyu.fanjian": _coverage_fanjian,
     "hero.huatuo.qingnang": _coverage_qingnang,
     "hero.diaochan.lijian": _coverage_lijian,
+    "hero.jie_diaochan.lijian": _coverage_jie_lijian,
     "hero.sunshangxiang.jieyin": _coverage_jieyin,
     "hero.daqiao.liuli": _coverage_liuli,
     "equip.green_dragon_blade": _coverage_green_dragon,

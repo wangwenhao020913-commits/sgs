@@ -88,6 +88,13 @@ class PhaseBodySkill(HeroSkillDecl):
     modifiers: tuple[Modifier, ...] = ()
     available: Callable[[GameState, int], bool] | None = None
     skill_type: SkillType = SkillType.NORMAL
+    requirement: str | None = None
+    """这条技能"需要玩家做什么"的**覆盖文案**（M6 票 07；缺省 ``None`` = 读
+    :data:`_REQUIREMENTS` 的短 id 那一行）。
+
+    同一短 id 的两版（标准【闭月】摸一张 / 界【闭月】有手牌摸一、没有手牌摸二）
+    牌面不同、文案也就不同；键仍是短 id，故给界版一条显式覆盖，而不是再抄一份表。
+    """
 
     def handler(self, host: Any, frame: Frame) -> Control:
         """阶段体钩子：是否发动已由派发器问过；这里把 ``draws`` 张摸进持有者手里。"""
@@ -134,6 +141,34 @@ _BIYUE = PhaseBodySkill(
     timing=Timing.PHASE_FINISH,
     draws=1,
     flow=BIYUE_FLOW,
+)
+
+
+def _jie_biyue_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """界貂蝉【闭月】的提交点：**当时**有手牌摸 1、没有手牌摸 2（§十九 L2199）。
+
+    张数在提交点读**发动那一刻**的手牌数（结束阶段的当前事实），不是摸牌阶段的快照；
+    与标准版共用同一条"是否发动"询问与阶段体挂点，差别只在摸几张。
+    """
+    del answers
+    owner = frame.data["skill_owner"]
+    count = 1 if host.state.player(owner).hand else 2
+    host.draw_for_hand(frame, owner, count)
+    return None
+
+
+JIE_BIYUE_FLOW = SkillFlow(name="jie_biyue", steps=(), effect=_jie_biyue_effect)
+"""界貂蝉【闭月】的零步流水线（M6 票 07）：[是否发动] → 有手牌摸 1 / 没有手牌摸 2。"""
+
+
+_JIE_BIYUE = PhaseBodySkill(
+    # 界貂蝉【闭月】（§十九 L2199）：结束阶段，若你有 / 没有手牌，你可以摸一 / 两张牌。
+    # 与标准版【闭月】同一条阶段体挂点、同一条"是否发动"询问；牌面分叉只在摸几张。
+    hero_id="jie_diaochan",
+    short_id="biyue",
+    timing=Timing.PHASE_FINISH,
+    flow=JIE_BIYUE_FLOW,
+    requirement="有手牌摸一张牌 / 没有手牌摸两张牌",
 )
 
 
@@ -396,9 +431,10 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _KEJI,
     _KEJI_JIE,
     _TISHEN,
+    _JIE_BIYUE,
 )
-"""L 族七条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
-票 03 的【克己】、票 05 的【替身】、票 06 的界【克己】）。"""
+"""L 族八条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
+票 03 的【克己】、票 05 的【替身】、票 06 的界【克己】、票 07 的界【闭月】）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "yingzi": "多摸一张牌",
@@ -458,7 +494,7 @@ def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=skill.skill_type,
             hooks=(Hook(skill.timing, flow=skill.flow),),
             modifiers=skill.modifiers,
-            requirement=_REQUIREMENTS[skill.short_id],
+            requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
             step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
         )
         for skill in PHASE_BODY_SKILLS

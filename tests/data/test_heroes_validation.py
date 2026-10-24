@@ -420,6 +420,8 @@ def test_the_standard_table_stays_the_25_and_the_jie_table_is_loaded_separately(
         "jie_zhangfei",
         "jie_xushu",
         "jie_lvmeng",
+        "jie_ganning",
+        "jie_diaochan",
     ]
     assert {hero.id for hero in standard.heroes}.isdisjoint(
         {hero.id for hero in jie.heroes}
@@ -509,6 +511,43 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
         SkillType.NORMAL,
     ]
     assert lvmeng.skills[2].granted_by == "qinxue", "☆攻心由【勤学】觉醒后获得"
+
+    # M6 票 07：界甘宁 / 界貂蝉。甘宁的【奇袭】与标准版逐字相同；【奋威】是**限定技**；
+    # 貂蝉两条都是普通技（【离间】的"不能被响应"是行为差异，不是技能类型差异）。
+    ganning = jie.by_id("jie_ganning")
+    diaochan = jie.by_id("jie_diaochan")
+    assert ganning is not None and diaochan is not None
+    assert (ganning.name, ganning.true_name, ganning.version) == (
+        "界甘宁",
+        "甘宁",
+        "jie-ol",
+    )
+    assert (ganning.kingdom, ganning.gender, ganning.hp_max) == (
+        Kingdom.WU,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in ganning.skills] == ["qixi", "fenwei"]
+    assert [skill.skill_type for skill in ganning.skills] == [
+        SkillType.NORMAL,
+        SkillType.LIMITED,
+    ], "【奋威】是限定技（§十九 L2130–L2131：整局只能发动一次）"
+
+    assert (diaochan.name, diaochan.true_name, diaochan.version) == (
+        "界貂蝉",
+        "貂蝉",
+        "jie-ol",
+    )
+    assert (diaochan.kingdom, diaochan.gender, diaochan.hp_max) == (
+        Kingdom.QUN,
+        Gender.FEMALE,
+        3,
+    )
+    assert [skill.id for skill in diaochan.skills] == ["lijian", "biyue"]
+    assert [skill.skill_type for skill in diaochan.skills] == [
+        SkillType.NORMAL,
+        SkillType.NORMAL,
+    ]
 
     assert all(hero.true_name for hero in jie.heroes), "界版每名都带真名"
     assert all(hero.enabled for hero in jie.heroes), "边界突破 P1 起界将逐批启用"

@@ -29,7 +29,7 @@ from collections.abc import Callable
 from typing import Any
 
 from sgs.data import Suit
-from sgs.resolution import Frame
+from sgs.resolution import Frame, Tag, has_tag
 from sgs.state import (
     ActivateSkill,
     FrameKind,
@@ -498,6 +498,11 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
     **提供者（【激将】）**：候选里的 ``ActivateSkill`` 走技能层通用派发（票 09）；它可能跨
     多次重入（逐个问同势力角色），故窗口顶部先 :meth:`advance_provider` 重入它，收尾后再决定
     这次响应成不成立。同势力角色代打的【杀】是**真打出**、不占其使用次数。
+
+    **不可响应**（M6 票 07）：帧标签袋的**全场档**带 ``Tag.UNRESPONSIVE``（界貂蝉【离间】）
+    ⇒ 这一问**不发生**，当前响应方直接判负。落点读的是同一个标签、同一份语义
+    （"这一次使用不响应"），不另立"离间专用"分支；逐目标档（【铁骑】）不在此读，
+    因为它说的是"这个目标不能出【闪】"。
     """
     source = frame.data["source"]
     op = frame.data.setdefault("op", {})
@@ -509,6 +514,17 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
     required = response_count(
         host.state, source=source, card=frame.data.get("card"), target=turn
     )
+    if has_tag(frame, Tag.UNRESPONSIVE):
+        # **响应窗口不产生**（M6 票 07 的否定分类第 4 层）：这张【决斗】整次使用被标成
+        # "不可响应"（界貂蝉【离间】挂的是**全场档**），故轮到谁打【杀】都不问——当前
+        # 响应方直接判负、受到对方 1 点伤害。这与"被抵消"不同：决斗**照常结算**，只是
+        # 它的响应窗口整个不产生。
+        #
+        # 只读**全场档**（不带 ``target=``）：逐目标档是"这个目标不能出【闪】"的【铁骑】
+        # 语义（挂在【杀】的目标上），不能被读成"整场决斗不许出【杀】"——否则【铁骑】
+        # 在【决斗】使用上被误触发时（它的触发条件只看时机、不看牌名）会静默改写决斗。
+        _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
+        return None
     control, satisfied = host.advance_provider(frame, Timing.RESOLVE_AFTER_EFFECT)
     if control is not None:
         return control

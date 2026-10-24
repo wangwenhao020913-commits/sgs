@@ -42,7 +42,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import Color, SkillType, Suit, color_of_suit
+from sgs.data import Color, SkillType, Suit, color_of_suit, hero_skill_id
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
@@ -174,6 +174,23 @@ class ConversionSkill(HeroSkillDecl):
     requirement: str = ""
     """这条转化"需要玩家做什么"的人话（item 4）；`conversion_skill_definitions` 透进
     :attr:`~sgs.skills.catalog.SkillDef.requirement`（龙胆两个方向各一条 ⇒ 用"；"并起来）。"""
+
+    shared_with: tuple[str, ...] = ()
+    """**同一份牌面文本**也由这些武将 id 持有的那条转化技（M6 票 07 的加法；缺省空）。
+
+    界甘宁【奇袭】（§十九 L2129）与标准甘宁【奇袭】（§九 L1009）**逐字相同**，
+    故这里写 ``shared_with=("jie_ganning",)``——一条声明派生两个全限定技能 id，
+    而不是把同一行声明复制两份：源筛选 / 产物 / 时机只有一份真源，界版只是另一个
+    武将 id（与【克己】【马术】的"另一个武将 id"同一姿态）。
+    """
+
+    @property
+    def skill_ids(self) -> tuple[str, ...]:
+        """本声明的全部全限定技能 id：自己 + :attr:`shared_with`（按声明序）。"""
+        return tuple(
+            hero_skill_id(hero_id, self.short_id)
+            for hero_id in (self.hero_id, *self.shared_with)
+        )
 
     def select(self, state: GameState, seat: int) -> tuple[int, ...]:
         """本技能在当前局面下**筛好的**来源牌（区域谓词 + 牌面谓词 + 时机谓词）。"""
@@ -333,6 +350,8 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
     ),
     # 甘宁【奇袭】（M6 票 03）：一张黑色牌当【过河拆桥】使用（§九 L1009）。
     # 区域默认 = 手牌 ∪ 装备：牌面没写区域，按 `_hand_equip` 那一档读。
+    # M6 票 07：界甘宁【奇袭】牌面逐字相同（§十九 L2129）⇒ 同一条声明经 ``shared_with``
+    # 派生 ``hero.jie_ganning.qixi``，不复制第二行。
     ConversionSkill(
         hero_id="ganning",
         short_id="qixi",
@@ -341,10 +360,12 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         predicate=_black,
         scopes=(CandidateScope.PLAY,),
         requirement="选择1张黑色牌当【过河拆桥】使用",
+        shared_with=("jie_ganning",),
     ),
 )
-"""H 族五条技能（六条声明：龙胆两个方向各一条）的逐字声明（票 03 §表 + M6 票 02【倾国】/
-票 03【奇袭】/ 票 04 界关羽【武圣】）。"""
+"""H 族五条技能（六条声明：龙胆两个方向各一条；界甘宁【奇袭】经 ``shared_with`` 共用
+甘宁那一行）的逐字声明（票 03 §表 + M6 票 02【倾国】/ 票 03【奇袭】/ 票 04 界关羽【武圣】/
+票 07 界甘宁【奇袭】）。"""
 
 
 def _modifier(skill: ConversionSkill) -> Modifier:
@@ -376,9 +397,11 @@ def conversion_offers(
         if instance.owner == seat
     }
     return tuple(
-        (card_id, skill.skill_id)
+        (card_id, owned_id)
         for skill in CONVERSION_SKILLS
-        if skill.target_type_id == target_type_id and skill.skill_id in owned
+        if skill.target_type_id == target_type_id
+        for owned_id in skill.skill_ids
+        if owned_id in owned
         for card_id in skill.select(state, seat)
     )
 
@@ -729,7 +752,8 @@ def conversion_skill_definitions() -> tuple[SkillDef, ...]:
     """
     grouped: dict[str, list[ConversionSkill]] = {}
     for skill in CONVERSION_SKILLS:
-        grouped.setdefault(skill.skill_id, []).append(skill)
+        for skill_id in skill.skill_ids:
+            grouped.setdefault(skill_id, []).append(skill)
     return tuple(
         SkillDef(
             skill_id=skill_id,

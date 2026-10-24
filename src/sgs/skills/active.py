@@ -63,6 +63,7 @@ from sgs.effects import (
     is_slash,
     place_on_deck,
 )
+from sgs.resolution import Tag, add_tag
 from sgs.state import (
     ActivateSkill,
     FrameKind,
@@ -88,6 +89,7 @@ __all__ = [
     "ACTIVATIONS",
     "ACTIVE_SKILLS",
     "CANDIDATE_CAP",
+    "JIE_LIJIAN",
     "ActiveSkill",
     "Arrange",
     "PickCards",
@@ -700,20 +702,28 @@ def _lijian_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     三步都只收集：牌直到这里才搬进弃牌堆（取消 / 校验失败 ⇒ 手牌原样）。``_USED`` 由
     执行器的 ``on_commit`` 在 ``effect`` 之前落位（``once_per_phase=True``），故本函数
     不重复记账。
+
+    **标准 / 界两版共用本函数**：界貂蝉（``frame.data["skill_id"] == JIE_LIJIAN``）把这条
+    虚拟【决斗】标成**不可响应**（全场档 ``Tag.UNRESPONSIVE``）；标准版一字不改。
     """
     owner = frame.data["source"]
     user_seat = int(answers["user"][0])
     victim_seat = int(answers["victim"][0])
     if _move_to_discard(host, frame, answers["card"], owner=owner, key="lijian:cost") == "stay":
         return "stay"
+    if frame.data.get(_LIJIAN_STARTED):
+        return None
+    frame.data[_LIJIAN_STARTED] = True
     # 使用者与目标已按同一条 ``check_targets`` 链定下，故这里不再重查"能否使用"的常规
     # 合法性，只走【决斗】自己的结算链——伤害来源随使用者（不是貂蝉）。
-    host.start_use(
+    duel = host.start_use(
         pure_virtual_card(host.state, "duel"),
         source=user_seat,
         targets=(victim_seat,),
         use_timing=Timing.PHASE_PLAY_IDLE,
     )
+    if frame.data.get("skill_id") == JIE_LIJIAN:
+        add_tag(duel, Tag.UNRESPONSIVE)
     return None
 
 
@@ -732,6 +742,32 @@ LIJIAN_FLOW = SkillFlow(
 承担，不靠按钮文案）。受害者池读前序答案（使用者），故清单按前序选项逐行下发
 （:func:`~sgs.skills.flow.manifest` 的逐选项子池）。
 """
+
+
+# ---------------------------------------------------------------------------
+# 界貂蝉【离间】（M6 票 07）：**不能被响应**的虚拟【决斗】
+#
+# §十九 L2196–L2198：离间：出牌阶段限一次，你可以弃置一张牌，依次选择两名男性其他
+# 角色，令后者视为对前者使用一张**不能被响应**的【决斗】。
+#
+# "不能被响应" = **响应窗口不产生**（否定分类第 4 层）：无懈询问不出现，决斗双方也都
+# 不能打出【杀】。落点 = 帧标签袋的 ``Tag.UNRESPONSIVE``（全场档，与【铁骑】逐目标档
+# 同一个标签、同一条读取面）：引擎的"生效前"窗口见到它就不再发无懈询问，决斗效果
+# 见到它就不再发【杀】响应询问——两处都是**既有消费者**按标签跳过窗口，不是本技能
+# 自己把结算短路。故【决斗】照常结算（受害者直接判负、受到 1 点伤害），"不可响应"
+# 不是"抵消"。`06`（§5「程序化约定与偏离一手」）另记一条裁定：它**不**挡"生效时"类技能
+# （如【谦逊】）的介入。
+#
+# 界版与标准版**同一条流水线**（同一个 ``SkillFlow`` 对象、同一个提交点）：两者牌面只差
+# "不能被响应"这一句，故差异落成提交点里的一个条件分支，而不是把三步再抄一份
+# （与【克己】【马术】的"界版只是另一个武将 id"同一姿态）。
+# ---------------------------------------------------------------------------
+
+JIE_LIJIAN = hero_skill_id("jie_diaochan", "lijian")
+"""界貂蝉【离间】的全限定技能 id（§十九 L2196–L2198）。"""
+
+_LIJIAN_STARTED = "lijian_started"
+"""帧私有：这次发动已经开出虚拟【决斗】（重入不重复开第二次）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -1358,6 +1394,9 @@ class ActiveSkill(HeroSkillDecl):
     它必须与候选入口共用同一个 ``SkillDef``（一个技能一条定义），故在声明面留一个修饰器
     口子，由 :func:`active_skill_definitions` 合并进定义。
     """
+    requirement: str | None = None
+    """这条技能"需要玩家做什么"的**覆盖文案**（M6 票 07；缺省 ``None`` = 读
+    :data:`_REQUIREMENTS` 的短 id 那一行）。标准 / 界两版同短 id 但牌面不同时用它。"""
     preactivated: bool = False
     """本技能是否已迁到**预发动**（W4-1 的迁移开关，缺省 ``False``）。
 
@@ -1384,6 +1423,15 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 貂蝉【离间】：弃一张牌 + 两名男性角色 → 视为其中一名对另一名使用【决斗】（规则 1049）。
     # W4-2：手写步骤流水线改成声明式（三步各有自己的池：受害者池按使用者）。
     ActiveSkill("diaochan", "lijian", _lijian_offers, flow=LIJIAN_FLOW, preactivated=True),
+    # 界貂蝉【离间】（M6 票 07）：判据 / 步骤与标准版相同，只有虚拟【决斗】不可响应。
+    ActiveSkill(
+        "jie_diaochan",
+        "lijian",
+        _lijian_offers,
+        flow=LIJIAN_FLOW,
+        preactivated=True,
+        requirement="弃一张牌，依次选择两名男性角色：后者视为对前者使用一张不能被响应的【决斗】",
+    ),
     # 孙尚香【结姻】：弃两张手牌 + 一名已受伤男性 → 你与其各回复 1 点（规则 1033）。
     ActiveSkill("sunshangxiang", "jieyin", _jieyin_offers, flow=JIEYIN_FLOW, preactivated=True),
     # 黄盖【苦肉】：失去 1 点体力，然后摸两张牌（§九 L1015；无"出牌阶段限一次"）。
@@ -1509,7 +1557,7 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
                 Modifier(ModifierPoint.CANDIDATES, skill.offers),
                 *skill.extra_modifiers,
             ),
-            requirement=_REQUIREMENTS[skill.short_id],
+            requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
             step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
             preactivated=skill.preactivated,
         )

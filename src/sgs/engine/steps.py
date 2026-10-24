@@ -59,6 +59,7 @@ from sgs.skills import (
     SeamKind,
     activate_skill,
     rejudge_capable_seats,
+    target_is_ineffective,
     virtual_dodge,
 )
 from sgs.state import (
@@ -417,6 +418,12 @@ def resolve_start(host: FrameHost, frame: Frame) -> Control:
     无效 ⇒ **终止对该目标的结算**、直接推进游标（**不进 C2，故没有无懈窗口**）；
     有效 ⇒ 照常走 C2–C5。时机本身照记——它就是这个检测点。
 
+    判据有两个来源、同一个终止点：既有的牌面 / 修饰器链
+    （:func:`~sgs.effects.target_is_effective`），以及 M6 票 07 的**目标级否定**
+    （:func:`~sgs.skills.target_is_ineffective`，【奋威】在 B5 写进帧私有键）。前者
+    回答"这张牌本来对谁无效"，后者回答"这张牌这一次对谁被技能判无效"——两层语义在
+    :mod:`GLOSSARY` 里同属「无效」，故共用同一个出口。
+
     C1 的 ``actor`` 保持 M1 的**使用者**（C3–C5 才是当前目标），故 1v1 基准逐字节不变。
     """
     targets = tuple(frame.data["targets"])
@@ -430,8 +437,14 @@ def resolve_start(host: FrameHost, frame: Frame) -> Control:
     )
     if control is not None:
         return control
-    if targets and not target_is_effective(
-        host.state, frame.data["card"], frame.data["source"], current
+    if targets and (
+        # **目标级无效**（M6 票 07 的否定分类第 2 层）：【奋威】在 B5 把"本次使用对其中
+        # 任意名目标无效"写进帧私有键；这里与既有的"牌面 / 修饰器判无效"共用同一个
+        # 终止点——终止对该目标的结算，故**不开** C2 的无懈窗口。
+        target_is_ineffective(frame, current)
+        or not target_is_effective(
+            host.state, frame.data["card"], frame.data["source"], current
+        )
     ):
         return Goto(CURSOR_PC)
     return None

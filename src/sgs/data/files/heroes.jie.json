@@ -123,6 +123,50 @@
           "granted_by": "qinxue"
         }
       ]
+    },
+    {
+      "id": "jie_ganning",
+      "name": "界甘宁",
+      "true_name": "甘宁",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "qixi",
+          "name": "奇袭",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "fenwei",
+          "name": "奋威",
+          "skill_type": "LIMITED"
+        }
+      ]
+    },
+    {
+      "id": "jie_diaochan",
+      "name": "界貂蝉",
+      "true_name": "貂蝉",
+      "kingdom": "qun",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "lijian",
+          "name": "离间",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "biyue",
+          "name": "闭月",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

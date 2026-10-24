@@ -32,6 +32,7 @@
 | U 使用牌时 | :mod:`sgs.skills.use_after` | 集智 |
 | J 可重复判定（手写多轮循环） | :mod:`sgs.skills.judgment_loop` | 洛神 |
 | 觉醒 / ☆ 派生（M6 票 06） | :mod:`sgs.skills.awakening` | 潜心 / 勤学 / 诛害 |
+| 否定（目标级无效，M6 票 07） | :mod:`sgs.skills.negation` | 奋威（目标产生前的取消住 :mod:`sgs.skills.target_pool`，事件帧 / 响应窗口各自住票 08 / 界【离间】） |
 | **流水线执行器**（**不**依赖 catalog） | :mod:`sgs.skills.flow` | ``SkillFlow`` / ``PickCards`` / ``PickSeats`` / ``PickOption`` / ``PickProvide`` / ``run_flow`` |
 | **注册表 + 装备定义** | :mod:`sgs.skills.catalog` | ``SkillDef`` / ``CATALOG`` / ``resolve_instances`` / ``dispatch_timing`` / ``dispatch_seam`` |
 
@@ -123,6 +124,7 @@ from .active import (
     JIANYAN,
     JIANYAN_FLOW,
     JIANYAN_OPTIONS,
+    JIE_LIJIAN,
     YIJUE,
     YIJUE_FLOW,
     YIJUE_HEAL,
@@ -227,6 +229,13 @@ from .judgment_loop import (
     judgment_loop_activation_plans,
     judgment_loop_skill_definitions,
 )
+from .negation import (
+    FENWEI,
+    TARGET_INEFFECTIVE_KEY,
+    mark_targets_ineffective,
+    negation_skill_definitions,
+    target_is_ineffective,
+)
 from .awakening import (
     LVMENG_GONGXIN,
     LVMENG_QINXUE,
@@ -286,11 +295,13 @@ __all__ = (
     "DAMAGE_RECORDED_KEY",
     "EQUIPMENT_CARD_TYPE_IDS",
     "EQUIPMENT_SKILL_IDS",
+    "FENWEI",
     "FREE_SPLIT",
     "GUANXING",
     "GUANXING_MAX",
     "GUICAI",
     "HUJIA",
+    "JIE_LIJIAN",
     "JIJIANG",
     "JIE_MASHU",
     "JIE_TIEQI",
@@ -345,6 +356,7 @@ __all__ = (
     "SkillSource",
     "SkillSourceKind",
     "SkillType",
+    "TARGET_INEFFECTIVE_KEY",
     "TIANDU",
     "VirtualKind",
     "VirtualSourceError",
@@ -401,7 +413,9 @@ __all__ = (
     "lord_skill_ids",
     "move_after_providers",
     "move_after_skill_definitions",
+    "mark_targets_ineffective",
     "move_event",
+    "negation_skill_definitions",
     "owned_conversion_skill_ids",
     "phase_body_skill_definitions",
     "prune_skill_state",
@@ -418,6 +432,7 @@ __all__ = (
     "same_kingdom",
     "start_provider",
     "target_change_skill_definitions",
+    "target_is_ineffective",
     "tiandu_handler",
     "timing_hooks_present",
     "transform_candidates",
