@@ -1651,6 +1651,15 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "准备阶段判定：黑色则白拿一张并可继续，且获得的牌本回合不占手牌数",
     ),
     "hero.jie_zhenji.qingguo": (_constant(2.0), "黑色手牌当【闪】：与标准【倾国】同一条转化"),
+    # M6 票 10：武将牌上的牌区的首个载体——界陆逊【谦逊】/【连营】
+    "hero.jie_luxun.qianxun": (
+        _constant(2.0),
+        "别的角色的普通锦囊 / 延时锦囊对自己生效时把全部手牌扣上武将牌：躲开拆顺，回合末拿回",
+    ),
+    "hero.jie_luxun.lianying": (
+        _constant(2.5),
+        "失去最后的手牌后令至多 X 名角色各摸一张：【谦逊】扣光手牌时白赚 X 张",
+    ),
     # 装备技（W4-4）：会问"是否发动"的 5 条非锁定装备**各给一个正分常量**。
     # 缺省 ``_UNKNOWN_SKILL_VALUE = -1.0 < Pass(0)`` ⇒ 不入表就永不发动（雌雄无法复现
     # 的根因）；正分 ⇒ 永远发动（Pass = 0，成本 / 收益不建模，见票面"不做收益模型调参"）。

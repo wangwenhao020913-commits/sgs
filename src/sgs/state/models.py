@@ -13,8 +13,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer
 
 from sgs.data import CardTagType, Color, Gender, Identity, Kingdom, RuleConfig
 
@@ -23,6 +24,7 @@ __all__ = [
     "CardTag",
     "FrameKind",
     "GameState",
+    "HeroCardZone",
     "MoveReason",
     "Phase",
     "Player",
@@ -32,6 +34,7 @@ __all__ = [
     "SlotKind",
     "Zone",
     "ZoneRef",
+    "ZoneRefField",
 ]
 
 
@@ -126,10 +129,12 @@ class CardRef(_FrozenModel):
 
 
 class Zone(str, Enum):
-    """实体牌所在的区域种类（票 08 §1）。
+    """实体牌所在的区域种类（票 08 §1；M6 票 10 增 ``HERO``）。
 
     ``HAND`` / ``EQUIP`` / ``JUDGE`` 是**逐座位**的区，座位在 :class:`ZoneRef` 坐标里；
-    ``DECK`` / ``DISCARD`` / ``PROCESSING`` 是共享区。
+    ``DECK`` / ``DISCARD`` / ``PROCESSING`` 是共享区。``HERO``（武将牌上的牌）是**按
+    （座位, 技能实例）再分片**的逐座位区：座位答"扣在谁的武将牌上"，技能实例答"哪个技能
+    放的"（spec D14；同一座位可同时存在多个相互独立的放置区）。
     """
 
     DECK = "deck"
@@ -138,6 +143,33 @@ class Zone(str, Enum):
     PROCESSING = "processing"
     EQUIP = "equip"
     JUDGE = "judge"
+    HERO = "hero"
+
+
+class HeroCardZone(BaseModel):
+    """**武将牌上的一个放置区**（M6 票 10；`GLOSSARY.md`「武将牌上的牌」）。
+
+    区键 = （座位, 技能实例）：座位是 :class:`Player.hero_cards` 的宿主（扣在谁的武将牌
+    上，可跨座位），技能实例由字典的键回答（``owner:skill_id``，见
+    ``skills.hero_card_zone_key``）。**不同技能实例的区彼此独立**：牌的归还 / 可见性 /
+    附加效果都由各自的声明决定，不会串到别的区。
+
+    规则性质（`三国杀详细规则.txt` §十五）：这些牌是"移出游戏的牌"，不为任何角色所拥有、
+    不在手牌 / 装备 / 判定 / 牌堆 / 弃牌堆 / 处理区，故**不算手牌**、不计入手牌上限，
+    也不能被拆 / 顺指定。区在**失去技能时不受影响**（规则 15.2 明文），故这里的字段是
+    技能的**身份**（持有者 + 技能 id），不引用运行期 ``SkillInstance``（那个会随失去消失）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_id: str
+    """放置它的技能 id（全限定）——归还时机 / 附加效果按它查数据声明。"""
+
+    owner: int
+    """放置它的技能实例的**持有者**座位（归还的收件人；与宿主座位可不同）。"""
+
+    cards: list[int] = Field(default_factory=list)
+    """区里的实体牌 id（按置入序；与其它区域一样，列表就是区域的真源）。"""
 
 
 class CardTag(_FrozenModel):
@@ -166,19 +198,44 @@ class CardTag(_FrozenModel):
 
 @dataclass(frozen=True, slots=True)
 class ZoneRef:
-    """**区域坐标**（票 08 §1）：区种类 + 座位。
+    """**区域坐标**（票 08 §1；M6 票 10 增第三个维度 ``skill_instance``）。
 
-    ``seat`` 只对 ``HAND`` / ``EQUIP`` / ``JUDGE`` 有意义，共享区为 ``None``。
+    ``seat`` 只对 ``HAND`` / ``EQUIP`` / ``JUDGE`` / ``HERO`` 有意义，共享区为 ``None``。
+    ``skill_instance`` 只对 ``HERO`` 有意义（放置技能的实例键；其余区为 ``None``）。
     坐标说的是"**区域**在谁那里"，不是"牌归谁"——判定区的牌坐标带座位，但牌本身
     仍"不为任何角色所拥有"（规则 11.6）；"归谁"由 :class:`CardMoveDelta.owner` 回答。
 
     冻结值类型（用 ``dataclass`` 而非 pydantic）：pydantic 把 stdlib dataclass 字段
     序列化成 ``{"zone": ..., "seat": ...}``（``seat`` 显式写出，含 ``null``），
     与 ``CardRef`` 的平铺形状一致，且允许位置构造 ``ZoneRef(Zone.HAND, 0)``。
+    第三个字段**只在武将牌上的牌区出现**：:data:`ZoneRefField` 的写出去掉 ``None`` 的
+    那一档，故非 ``HERO`` 区的记录字节与 M2 逐字相同。
     """
 
     zone: Zone
     seat: int | None = None
+    skill_instance: str | None = None
+
+
+def _zone_ref_wire(value: ZoneRef) -> dict[str, Any]:
+    """``ZoneRef`` 的记录形态：``zone`` / ``seat`` 恒写，``skill_instance`` 仅在 HERO 区写。
+
+    ``seat`` 显式写出（含 ``null``）是 M2 冻结口径（票 08 §7）；新增的第三维**不能**
+    让 47 条标准金录像多出一个 ``"skill_instance": null``——那会改既有记录字节，故这一档
+    只透出非 ``None`` 的实例键。
+    """
+    data: dict[str, Any] = {"zone": value.zone.value, "seat": value.seat}
+    if value.skill_instance is not None:
+        data["skill_instance"] = value.skill_instance
+    return data
+
+
+ZoneRefField = Annotated[ZoneRef, PlainSerializer(_zone_ref_wire, return_type=dict)]
+"""在**记录模型**（delta / 选择面槽位）里引用 :class:`ZoneRef` 的字段类型。
+
+序列化器只在这里挂（而不是把 ``ZoneRef`` 换成 pydantic 模型）：``ZoneRef`` 保持
+dataclass 的位置构造与冻结语义，字段形状仍在 ``models`` 一处声明。
+"""
 
 
 class MoveReason(str, Enum):
@@ -257,6 +314,19 @@ class Player(BaseModel):
     """装备区（一个整体区）；列表序 = 槽位枚举序（票 12 §Q2），每槽至多一张。"""
     judge: list[int] = Field(default_factory=list)
     """判定区（**先入在前**）；"最后置入"的读取端用 ``reversed()`` 表达（票 08 §8）。"""
+    hero_cards: dict[str, HeroCardZone] = Field(default_factory=dict)
+    """**武将牌上的牌**的全部放置区（M6 票 10；spec D14）：区键 → 区。
+
+    区键 = 放置技能的**实例键** ``owner:skill_id``（``skills.hero_card_zone_key`` 是唯一
+    派生处）：座位 = 这张武将牌的主人（扣牌的目标，可跨座位），键里的 ``owner`` = 放置技能
+    的持有者。字典按插入序（同种子逐字节复现），空区**保留**（规则 15.2：失去技能不影响
+    武将牌上的牌，区本身不随一次归还消失；再次放置进同一个键）。
+
+    这些牌**不在手牌区**，故手牌数 / 手牌上限 / 拆顺的候选都自动不含它们（票面验收）。
+    写入唯一入口 :meth:`Engine.place_on_hero_card`；回合末归还由
+    :meth:`Engine.return_hero_card_zones` 按数据声明做，阵亡清区在
+    :meth:`Engine.discard_dead_cards`。
+    """
     chained: bool = False
     """是否横置（铁索连环）。
 
@@ -481,7 +551,10 @@ class GameState(BaseModel):
     def zone(self, ref: ZoneRef) -> list[int]:
         """区域坐标 → 该区域的 ``card_id`` 列表（唯一入口，原语只经它改区域）。
 
-        共享区（牌堆 / 弃牌堆 / 处理区）忽略座位；逐座位的三个区必须给出座位。
+        共享区（牌堆 / 弃牌堆 / 处理区）忽略座位；逐座位的区必须给出座位；武将牌上的牌区
+        还必须给出**技能实例**（区键的第二维，缺了会落进"同一张表"、把两个技能的区串了）。
+        区**必须先存在**（放置入口 :meth:`Engine.place_on_hero_card` 建区）——目的地不存在
+        时在这里 fail-closed，而不是悄悄造一个没有技能身份的区。
         """
         if ref.zone is Zone.DECK:
             return self.deck
@@ -498,4 +571,25 @@ class GameState(BaseModel):
             return player.equip
         if ref.zone is Zone.JUDGE:
             return player.judge
+        if ref.zone is Zone.HERO:
+            if ref.skill_instance is None:
+                raise ValueError(
+                    "武将牌上的牌区按技能实例独立，区域坐标必须带 skill_instance"
+                )
+            zone = player.hero_cards.get(ref.skill_instance)
+            if zone is None:
+                raise ValueError(
+                    f"座位 {ref.seat} 的武将牌上没有 {ref.skill_instance!r} 这个放置区"
+                    "（先由 Engine.place_on_hero_card 建立）"
+                )
+            return zone.cards
         raise ValueError(f"未知区域：{ref.zone!r}")
+
+    def hero_zone(self, seat: int, skill_instance: str) -> tuple[int, ...]:
+        """座位 ``seat`` 的武将牌上、``skill_instance`` 那个区里的牌（没有该区 = 空元组）。
+
+        读访问器（不建区、不变状态）：投影（票 19）与构造局面测试都经它读，不必知道
+        ``hero_cards`` 的内部形状。
+        """
+        zone = self.player(seat).hero_cards.get(skill_instance)
+        return () if zone is None else tuple(zone.cards)

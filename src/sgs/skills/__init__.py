@@ -77,11 +77,13 @@ from .catalog import (
     damage_point_index,
     dispatch_seam,
     dispatch_timing,
+    hero_card_zone_key,
     instance_key,
     is_equipped,
     limited_skill_used,
     lord_skill_allowed,
     lord_skill_ids,
+    placement_skill_ids,
     prune_card_tags,
     prune_skill_state,
     rejudge_skill_ids,
@@ -242,6 +244,13 @@ from .negation import (
     negation_skill_definitions,
     target_is_ineffective,
 )
+from .hero_zone import (
+    JIE_LIANYING,
+    JIE_QIANXUN,
+    QIANXUN_FLOW,
+    QIANXUN_PLACED_KEY,
+    hero_zone_skill_definitions,
+)
 from .awakening import (
     LVMENG_GONGXIN,
     LVMENG_QINXUE,
@@ -281,6 +290,14 @@ LORD_SKILL_IDS: frozenset[str] = lord_skill_ids()
 不读这个快照。
 """
 
+PLACEMENT_SKILL_IDS: frozenset[str] = placement_skill_ids()
+"""**放置类技能**（往武将牌上放牌）的技能 id：:func:`placement_skill_ids` 对 ``CATALOG``
+的 **import 期快照**（M6 票 10）。
+
+"这是不是放置类技能"的唯一真源是 ``SkillDef.places_on_hero_card``；数据侧的三项声明由
+加载期与它双向核对（``heroes.placement_missing`` / ``heroes.placement_not_registered``），
+引擎在放置入口按定义字段 fail-closed。"""
+
 REJUDGE_SKILL_IDS: frozenset[str] = rejudge_skill_ids()
 """有**改判**能力的技能 id（【鬼才】/【鬼道】一类）：:func:`rejudge_skill_ids` 对
 ``CATALOG`` 的 **import 期快照**（票 11 §①：M2 手抄空集 → M3 由定义字段派生）。
@@ -307,7 +324,9 @@ __all__ = (
     "GUANXING_MAX",
     "GUICAI",
     "HUJIA",
+    "JIE_LIANYING",
     "JIE_LIJIAN",
+    "JIE_QIANXUN",
     "JIJIANG",
     "JIE_MASHU",
     "JIE_TIEQI",
@@ -327,11 +346,14 @@ __all__ = (
     "MOVE_AFTER_SKILLS",
     "MOVE_EVENT_KEY",
     "PAOXIAO",
+    "PLACEMENT_SKILL_IDS",
     "PHASE_BODY_SKILLS",
     "PROVIDERS",
     "PROVIDER_ACTOR_KEY",
     "PROVIDER_SATISFIED_KEY",
     "PROVIDER_SKILL_KEY",
+    "QIANXUN_FLOW",
+    "QIANXUN_PLACED_KEY",
     "QICAI",
     "REJUDGE_SKILL_IDS",
     "RUNNING_SKILL_KEY",
@@ -408,6 +430,8 @@ __all__ = (
     "dispatch_timing",
     "equipment_skill_ids",
     "flow_for",
+    "hero_card_zone_key",
+    "hero_zone_skill_definitions",
     "instance_key",
     "is_equipped",
     "is_transformed_action",
@@ -427,6 +451,7 @@ __all__ = (
     "negation_skill_definitions",
     "owned_conversion_skill_ids",
     "phase_body_skill_definitions",
+    "placement_skill_ids",
     "prune_card_tags",
     "prune_skill_state",
     "provider_registered",

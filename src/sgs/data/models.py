@@ -40,6 +40,9 @@ __all__ = [
     "HeroSkill",
     "HeroTable",
     "Kingdom",
+    "PlacementDecl",
+    "PlacementReturn",
+    "PlacementVisibility",
     "SkillType",
     "Suit",
     "card_tag_spec",
@@ -143,6 +146,57 @@ class SkillType(str, Enum):
     AWAKENING = "AWAKENING"
 
 
+class PlacementVisibility(str, Enum):
+    """一个放置区的**可见性**（M6 票 10；spec D14 的三项声明之一）。
+
+    - ``PUBLIC``：放置区公开——牌面是公开事实（界陆逊【谦逊】的武将牌上的牌是明置的，
+      spec §Further Notes 第 3 条）；
+    - ``HIDDEN``：只有放置技能的持有者（以及被扣牌的目标本人）可见；M6 无载体。
+
+    取值与 :class:`CardTagVisibility` 同形是**有意的两套词汇**：标签的可见性裁的是
+    "牌上的持久事实"，放置区的可见性裁的是"整个区"；两者由不同的读取方（投影的标签
+    裁剪 vs 区域的牌面裁剪）消费，合并会让"某区公开、某牌上的标签隐藏"无法表达。
+    """
+
+    PUBLIC = "public"
+    HIDDEN = "hidden"
+
+
+class PlacementReturn(str, Enum):
+    """一个放置区的**归还时机**（M6 票 10；spec D14 的三项声明之一）。
+
+    - ``TURN_END``：当前回合结束时整批回到放置技能的持有者手里（【谦逊】"于当前回合
+      结束时获得之"）；
+    - ``NEVER``：不自动归还（如「田」/「权」这类留在武将牌上、由技能自己消费的牌；
+      M6 无载体，只登记形状）。
+
+    归还**给谁**不是这条声明的一部分：两项都用"放置技能的持有者"——【谦逊】的"你"就是
+    持有者本人；将来有"扣在目标身上、回合末由目标获得"的载体（【破军】）时，再把收件人
+    加进声明（那一票才需要它，M6 的落点不预造字段）。
+    """
+
+    TURN_END = "turn_end"
+    NEVER = "never"
+
+
+class PlacementDecl(_FrozenModel):
+    """一个**放置类技能**在数据里的三项声明（M6 票 10；spec D14 / S8 登记表检查）。
+
+    三项都**必写、无默认值**：缺一项是数据错误（``structure.missing``），不是"按默认
+    语义补"——这正是"放置类技能必须显式想清楚三件事"的机械保证。
+    """
+
+    visibility: PlacementVisibility
+    return_timing: PlacementReturn
+    extra_effect: bool
+    """放置之外还有没有效果（如【权计】同时 +手牌上限）。
+
+    ``True`` 表示"搬牌只是这条技能的一部分、归还 / 后续由技能自己挂接"——引擎因此
+    **不**替它做自动归还（即使 ``return_timing`` 是 ``TURN_END``），避免替一条有附加
+    流程的技能抢跑。M6 唯一载体【谦逊】为 ``False``。
+    """
+
+
 class HeroSkill(_FrozenModel):
     """武将牌上的一条技能**条目**：引用技能定义，不装行为。
 
@@ -165,6 +219,13 @@ class HeroSkill(_FrozenModel):
     name: str
     skill_type: SkillType
     granted_by: str | None = None
+    placement: PlacementDecl | None = None
+    """把牌置于武将牌上的**三项声明**（M6 票 10；``None`` = 不是放置类技能）。
+
+    与 :attr:`skill_type` 同姿态：数据侧声明、加载期与 ``skills.CATALOG`` 交叉核对
+    （代码上的 ``SkillDef.places_on_hero_card`` 是另一半）。三项缺一项是**结构错误**；
+    代码与数据不一致是**语义错误**——登记表检查因此不空转。
+    """
 
 
 class Hero(_FrozenModel):

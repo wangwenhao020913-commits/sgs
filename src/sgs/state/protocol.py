@@ -29,7 +29,7 @@ from pydantic import Field, TypeAdapter, model_serializer
 from sgs.data import Identity, Kingdom
 from sgs.timing import Timing
 
-from .models import CardRef, Phase, Zone, ZoneRef, _FrozenModel
+from .models import CardRef, Phase, Zone, ZoneRefField, _FrozenModel
 
 __all__ = [
     "Action",
@@ -130,7 +130,7 @@ class Slot(_FrozenModel):
     如他人手牌）。Action 用**面内位置**引用槽位，故不泄露隐藏牌面。
     """
 
-    ref: ZoneRef
+    ref: ZoneRefField
     card: CardRef | None = None
 
 

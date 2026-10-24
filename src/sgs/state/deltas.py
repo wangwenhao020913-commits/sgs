@@ -24,7 +24,7 @@ from .models import (
     MoveReason,
     SkillSuppressionPredicate,
     SkillSuppressionScope,
-    ZoneRef,
+    ZoneRefField,
     _FrozenModel,
 )
 
@@ -57,8 +57,8 @@ class CardMoveDelta(_FrozenModel):
 
     delta_type: Literal["card_move"] = "card_move"
     cards: tuple[CardRef, ...]
-    from_zone: ZoneRef
-    to_zone: ZoneRef
+    from_zone: ZoneRefField
+    to_zone: ZoneRefField
     reason: MoveReason
     owner: int | None = None
     """本次移动的归属角色；"无角色主体"时为 ``None``。"""
@@ -148,10 +148,10 @@ class DeckShuffleDelta(_FrozenModel):
 
     delta_type: Literal["deck_shuffle"] = "deck_shuffle"
     cards: tuple[CardRef, ...]
-    from_zone: ZoneRef | None
+    from_zone: ZoneRefField | None
     """初次洗牌为 ``None``；重洗为 ``{"zone": "discard", "seat": null}``。"""
 
-    to_zone: ZoneRef
+    to_zone: ZoneRefField
 
 
 class IdentityDealDelta(_FrozenModel):

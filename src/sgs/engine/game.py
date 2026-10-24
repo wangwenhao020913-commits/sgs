@@ -23,10 +23,12 @@ from sgs.data import (
     Hero,
     Identity,
     Mode,
+    PlacementReturn,
     RuleConfig,
     card_tag_spec,
     color_of_suit,
     deal_heroes,
+    hero_placement_decl,
     load_heroes,
     roster_for,
 )
@@ -62,6 +64,7 @@ from sgs.resolution import (
     take_event_frame_invalid,
 )
 from sgs.skills import (
+    CATALOG,
     MOVE_EVENT_KEY,
     RUNNING_SKILL_KEY,
     SKILL_JUDGMENT_CARD_KEY,
@@ -75,6 +78,7 @@ from sgs.skills import (
     dispatch_seam,
     dispatch_timing,
     conversion_preactivations,
+    hero_card_zone_key,
     is_transformed_action,
     move_after_providers,
     owned_conversion_skill_ids,
@@ -106,6 +110,7 @@ from sgs.state import (
     DodgeQuery,
     FrameKind,
     GameState,
+    HeroCardZone,
     HpChangeDelta,
     HpMaxChangeDelta,
     IdentityRevealDelta,
@@ -657,6 +662,10 @@ class Engine:
             ZoneRef(Zone.HAND, seat),
             ZoneRef(Zone.EQUIP, seat),
             ZoneRef(Zone.JUDGE, seat),
+            *(
+                ZoneRef(Zone.HERO, seat, key)
+                for key in tuple(self.state.player(seat).hero_cards)
+            ),
         ):
             card_ids = tuple(self.state.zone(source_ref))
             if not card_ids:
@@ -1461,9 +1470,107 @@ class Engine:
         return drawn.cards
 
     def has_zone_cards(self, seat: int) -> bool:
-        """``seat`` 的三区里是否至少有一张牌（拆 / 顺的第 0 层前提）。"""
+        """``seat`` 的三区里是否至少有一张牌（拆 / 顺的第 0 层前提）。
+
+        **不含**武将牌上的牌（M6 票 10）：那些是"移出游戏的牌"，不是拆 / 顺的处理对象
+        （`三国杀详细规则.txt` §十五 15.2 明文）。
+        """
         player = self.state.player(seat)
         return bool(player.hand or player.equip or player.judge)
+
+    # -- 武将牌上的牌（M6 票 10；spec D14）----------------------------------
+
+    def place_on_hero_card(
+        self,
+        frame: Frame | None,
+        *,
+        owner: int,
+        skill_id: str,
+        holder: int,
+        cards: Sequence[CardRef],
+    ) -> Control:
+        """把一批牌置于**武将牌上**（唯一写入口；M6 票 10 / spec D14）。
+
+        ``owner`` = 放置技能实例的持有者（这批牌的归属、也是回合末归还的收件人）；
+        ``skill_id`` = 放置技能的 id（区键的第二维）；``holder`` = **武将牌的主人**
+        （扣在谁身上，可跨座位）。区 = （holder 座位, ``owner:skill_id``），第一次放置时
+        建区（同键复用；空区保留，规则 15.2：失去技能不影响武将牌上的牌）。
+
+        **放置类技能必须在代码里登记**（``SkillDef.places_on_hero_card``）：未登记的技能
+        走到这里即编程错误（不是静默造区）。搬牌走 :meth:`move_in_frame`，故照常记
+        ``card_move``、派发"失去牌后"（【谦逊】把牌放上武将牌**就是**失去手牌，会点亮
+        【连营】）。
+
+        空的一批牌 = 无动作、**不建区**（没有牌就没有可归还的东西，也不该留下一个空区
+        让"这条技能发动过"被误读）。返回 ``"stay"`` 表示这次移动内联的钩子提问挂起了。
+        """
+        definition = CATALOG.get(skill_id)
+        if definition is None or not definition.places_on_hero_card:
+            raise ValueError(
+                f"{skill_id!r} 不是登记在案的放置类技能：往武将牌上放牌必须先声明 "
+                "SkillDef.places_on_hero_card 并在数据里写三项声明"
+            )
+        if any(card.is_virtual for card in cards):
+            raise ValueError("虚拟牌不落任何区域，不能置于武将牌上")
+        if not cards:
+            return None
+        key = hero_card_zone_key(owner, skill_id)
+        player = self.state.player(holder)
+        if key not in player.hero_cards:
+            player.hero_cards[key] = HeroCardZone(skill_id=skill_id, owner=owner)
+        return self.move_in_frame(
+            frame,
+            tuple(cards),
+            to_zone=ZoneRef(Zone.HERO, holder, key),
+            reason=MoveReason.PUT,
+            owner=owner,
+            actor=owner,
+        )
+
+    def return_hero_card_zones(self) -> Control:
+        """把**归还时机 = 当前回合结束时**的放置区整批还给放置技能的持有者（M6 票 10）。
+
+        逐区一条 ``card_move``（一次移动只能有一个来源区），与死亡清区 / 弃牌阶段同姿态：
+        帧外移动走 :meth:`move_in_frame`，故照常派发"失去牌后"（归还是**获得**牌，可能
+        点亮【清俭】一类"获得牌后"的钩子）；钩子提问挂起时返回 ``"stay"``，由回合步
+        重新进入本方法——已经还完的区是空区，天然跳过，故不会重搬。
+
+        判据读**数据声明**（:func:`~sgs.data.hero_placement_decl`），不读技能定义：
+        ``return_timing = TURN_END`` 且 ``extra_effect = False`` 才由引擎代还；声明为
+        ``NEVER`` / 有附加效果的区留给技能自己（M6 无此类载体）。数据里没有声明的区
+        （只可能来自测试构造）**跳过、不动**——加载期保证真实放置类技能都有声明。
+
+        持有者已阵亡（跨座位区、宿主还活着）时改为置入弃牌堆：不给死者手里塞牌，也不
+        破坏"阵亡者区域为空"的不变量。
+        """
+        for player in self.state.players:
+            for key in tuple(player.hero_cards):
+                zone = player.hero_cards[key]
+                if not zone.cards:
+                    continue
+                decl = hero_placement_decl(zone.skill_id, pack_id=self.state.pack_id)
+                if (
+                    decl is None
+                    or decl.return_timing is not PlacementReturn.TURN_END
+                    or decl.extra_effect
+                ):
+                    continue
+                alive = self.state.player(zone.owner).alive
+                control = self.move_in_frame(
+                    None,
+                    self.state.refs(tuple(zone.cards)),
+                    to_zone=(
+                        ZoneRef(Zone.HAND, zone.owner)
+                        if alive
+                        else ZoneRef(Zone.DISCARD)
+                    ),
+                    reason=MoveReason.PUT if alive else MoveReason.LOSE,
+                    owner=zone.owner,
+                    actor=zone.owner,
+                )
+                if control == "stay":
+                    return "stay"
+        return None
 
     def selection_face(
         self, seat: int, zones: tuple[Zone, ...], *, reveal_hand: bool = False
@@ -3850,10 +3957,15 @@ class Engine:
     def _turn_end(self) -> None:
         self.emit_timing(Timing.TURN_END, actor=self.state.turn_seat)
 
-    def _turn_after_end(self) -> None:
-        # 回合彻底走完（含"回合内阵亡 ⇒ 跳过整段、直接落到本步"的路径）才清【酒】加伤：
-        # 它只在**本回合**有效，不能留到别人的回合里（M5-04）。清理走唯一写入口，
-        # 故置过而没用掉的那一份会留下一条 ``wine_change = false``（回放据此重建）。
+    def _turn_after_end(self) -> str | None:
+        # 回合彻底走完（含"回合内阵亡 ⇒ 跳过整段、直接落到本步"的路径）：
+        # M6 票 10 先把"当前回合结束时归还"的武将牌放置区整批还回去。它走帧外移动，
+        # 钩子提问会挂起 ⇒ 返回 "stay" 让回合环原地重入本步（已还完的区是空区，天然
+        # 跳过）；故这一步必须在清回合状态**之前**做——归还发生在"本回合"里。
+        if self.return_hero_card_zones() == "stay":
+            return "stay"
+        # 才清【酒】加伤：它只在**本回合**有效，不能留到别人的回合里（M5-04）。清理走
+        # 唯一写入口，故置过而没用掉的那一份会留下一条 ``wine_change = false``。
         seat = self.state.turn_seat
         if seat is not None:
             self._clear_wine_active(seat)
@@ -3867,7 +3979,11 @@ class Engine:
         # ``check_count``（【借刀杀人】迫使的【杀】）的可见面因此一字不变。
         for player in self.state.players:
             player.card_use_counts.pop(WINE_COUNT_KEY, None)
-        self.emit_timing(Timing.TURN_AFTER_END, actor=self.state.turn_seat)
+        # 重入只可能来自上面那次挂起续跑：``TURN_AFTER_END`` 已经落过就不要再落一条。
+        if not self._turn_data.get("turn_after_end_emitted"):
+            self._turn_data["turn_after_end_emitted"] = True
+            self.emit_timing(Timing.TURN_AFTER_END, actor=self.state.turn_seat)
+        return None
 
     def _turn_seat(self) -> int:
         seat = self.state.turn_seat

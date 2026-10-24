@@ -56,6 +56,7 @@ from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable, Tag,
 from sgs.skills import (
     DAMAGE_POINT_KEY,
     DAMAGE_RECORDED_KEY,
+    QIANXUN_PLACED_KEY,
     SeamKind,
     activate_skill,
     rejudge_capable_seats,
@@ -739,6 +740,7 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
     "_pending_timing",
     DAMAGE_POINT_KEY,
     DAMAGE_RECORDED_KEY,
+    QIANXUN_PLACED_KEY,
 )
 """**逐目标分槽**的帧私有键：游标推进时必须整体清掉（票 11 §3.2）。
 

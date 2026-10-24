@@ -108,12 +108,14 @@ __all__ = [
     "damage_point_index",
     "dispatch_seam",
     "dispatch_timing",
+    "hero_card_zone_key",
     "instance_key",
     "is_equipped",
     "limited_skill_used",
     "lord_skill_allowed",
     "lord_skill_ids",
     "mark_skill_used_this_turn",
+    "placement_skill_ids",
     "prune_card_tags",
     "prune_skill_state",
     "rejudge_skill_ids",
@@ -291,6 +293,17 @@ class SkillDef:
     ``ConversionSkill.target_type_id`` / 蛇矛的目标牌名，不是第二份真源。
     """
 
+    places_on_hero_card: bool = False
+    """这条技能是否**把牌置于武将牌上**（M6 票 10；spec D14 的代码侧声明）。
+
+    数据侧的 ``HeroSkill.placement``（可见性 / 归还时机 / 有无附加效果）与它是**同一条
+    事实的两半**，加载期双向核对：代码标了而数据没写 ⇒ ``heroes.placement_missing``；
+    数据写了而代码没标 ⇒ ``heroes.placement_not_registered``。由它派生的
+    :data:`~sgs.skills.PLACEMENT_SKILL_IDS` 是"哪些技能会开区"的唯一名单。
+
+    缺省 ``False``：既有 88 条定义一字不改；M6 唯一载体是界陆逊【谦逊】。
+    """
+
     virtual_source_count: int = 1
     """这条技能的虚拟牌候选**每次消耗几张来源牌**（W4-3 的清单归属判据）。
 
@@ -404,6 +417,23 @@ def rejudge_skill_ids(catalog: Mapping[str, SkillDef] | None = None) -> frozense
     source = CATALOG if catalog is None else catalog
     return frozenset(
         definition.skill_id for definition in source.values() if definition.rejudge_capable
+    )
+
+
+def placement_skill_ids(catalog: Mapping[str, SkillDef] | None = None) -> frozenset[str]:
+    """``catalog`` 里全部**放置类技能**的 id（M6 票 10；D14 的代码侧登记）。
+
+    与 :func:`rejudge_skill_ids` 同构：``sgs.skills.PLACEMENT_SKILL_IDS`` 只是 import 期
+    快照，"会不会往武将牌上放牌"的唯一真源是 :attr:`SkillDef.places_on_hero_card`；
+    加载期按它核"每条放置类技能都有一份数据声明"，引擎在
+    :meth:`Engine.place_on_hero_card` 入口按它 fail-closed。传 ``catalog`` 让派生可对
+    一份注入的表单独验证。
+    """
+    source = CATALOG if catalog is None else catalog
+    return frozenset(
+        definition.skill_id
+        for definition in source.values()
+        if definition.places_on_hero_card
     )
 
 
@@ -569,6 +599,18 @@ def instance_key(instance: SkillInstance) -> str:
     source = instance.source
     ref = source.card_id if source.card_id is not None else source.skill_id
     return f"{instance.owner}:{instance.skill_id}:{source.kind.value}:{ref}"
+
+
+def hero_card_zone_key(owner: int, skill_id: str) -> str:
+    """**武将牌上的牌区的键**（M6 票 10）：（座位, 技能实例）的规范文本。
+
+    ``owner`` = **放置技能实例的持有者**（不是扣牌的宿主座位——宿主由 ``Player`` 回答）。
+    实例身份取 ``(owner, skill_id)``：载体解析对同一 owner 同一技能只留**一个**实例
+    （``resolve_instances`` 的去重口径），故这就是"技能实例"的规范身份；**不含来源**
+    （``instance_key`` 的第三段）——规则 15.2 明说失去技能不影响武将牌上的牌，区不随
+    来源种类 / 存亡改键。
+    """
+    return f"{owner}:{skill_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -2242,6 +2284,9 @@ from .awakening import (  # noqa: E402  （末尾 import 是刻意的）
     awakening_skill_definitions,
 )
 from .negation import negation_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
+from .hero_zone import (  # noqa: E402  （末尾 import 是刻意的）
+    hero_zone_skill_definitions,
+)
 
 ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], ActivationPlan]] = (
     MappingProxyType(
@@ -2279,6 +2324,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *judgment_loop_skill_definitions(),
             *awakening_skill_definitions(),
             *negation_skill_definitions(),
+            *hero_zone_skill_definitions(),
         )
     }
 )

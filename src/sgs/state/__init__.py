@@ -23,6 +23,7 @@ from .models import (
     CardTag,
     FrameKind,
     GameState,
+    HeroCardZone,
     MoveReason,
     Phase,
     Player,
@@ -32,6 +33,7 @@ from .models import (
     SlotKind,
     Zone,
     ZoneRef,
+    ZoneRefField,
 )
 from .projection import project
 from .protocol import (
@@ -102,6 +104,7 @@ __all__ = (
     "EndPhase",
     "FrameKind",
     "GameState",
+    "HeroCardZone",
     "HpChangeDelta",
     "HpMaxChangeDelta",
     "IdentityDealDelta",
@@ -145,6 +148,7 @@ __all__ = (
     "WindowCause",
     "Zone",
     "ZoneRef",
+    "ZoneRefField",
     "alive_seat_at",
     "alive_seats",
     "next_alive_seat",

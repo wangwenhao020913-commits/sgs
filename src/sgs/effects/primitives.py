@@ -82,6 +82,11 @@ def locate(state: GameState, card_id: int) -> ZoneRef:
             return ZoneRef(Zone.EQUIP, player.seat)
         if card_id in player.judge:
             return ZoneRef(Zone.JUDGE, player.seat)
+        # 武将牌上的牌是**真区域**（M6 票 10）：坐标带 （座位, 技能实例），故逐区找，
+        # 同一座位的两个放置区不会互相遮挡。
+        for instance, zone in player.hero_cards.items():
+            if card_id in zone.cards:
+                return ZoneRef(Zone.HERO, player.seat, instance)
     if card_id in state.discard:
         return ZoneRef(Zone.DISCARD)
     if card_id in state.processing:

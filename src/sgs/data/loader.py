@@ -29,7 +29,15 @@ from typing import Any
 from pydantic import ValidationError
 
 from .errors import DataLoadError, LoadError
-from .models import Category, CardType, ContentPack, Deck, HeroTable, SkillType
+from .models import (
+    Category,
+    CardType,
+    ContentPack,
+    Deck,
+    HeroTable,
+    PlacementDecl,
+    SkillType,
+)
 
 __all__ = [
     "DEFAULT_PACK_ID",
@@ -40,6 +48,8 @@ __all__ = [
     "card_category",
     "enabled_hero_ids",
     "hero_card_skill_ids",
+    "hero_placement_decl",
+    "hero_placement_decls",
     "hero_skill_id",
     "hero_skill_ids",
     "load_content_pack",
@@ -718,7 +728,8 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
             if not hero.enabled:
                 continue
             full_id = hero_skill_id(hero.id, skill.id)
-            if CATALOG.get(full_id) is None:
+            definition = CATALOG.get(full_id)
+            if definition is None:
                 errors.append(
                     LoadError(
                         file=file,
@@ -726,6 +737,31 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
                         expected=f"技能表里存在 {full_id}（已启用武将的技能引用必须闭合）",
                         got=repr(skill.id),
                         rule_id="hero.skill_missing",
+                    )
+                )
+                continue
+            # M6 票 10：放置类技能的三项声明（可见性 / 归还时机 / 附加效果）在**数据**里，
+            # "这条技能会往武将牌上放牌"在**代码**里（SkillDef.places_on_hero_card）。
+            # 两半必须同时成立：代码标了而数据没写 ⇒ 放置区没人负责归还；数据写了而代码
+            # 没标 ⇒ 声明了一条不存在的机制。两项都 fail-closed（D14 / S8 登记表检查）。
+            if definition.places_on_hero_card and skill.placement is None:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/skills/{skill_index}",
+                        expected="placement：可见性 / 归还时机 / 有无附加效果三项声明",
+                        got="缺失",
+                        rule_id="heroes.placement_missing",
+                    )
+                )
+            elif skill.placement is not None and not definition.places_on_hero_card:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/skills/{skill_index}/placement",
+                        expected=f"{full_id} 是登记在案的放置类技能（SkillDef.places_on_hero_card）",
+                        got="声明了放置、技能定义没有登记",
+                        rule_id="heroes.placement_not_registered",
                     )
                 )
 
@@ -836,6 +872,30 @@ def hero_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tuple[str
         if hero is not None:
             return tuple(hero_skill_id(hero.id, skill.id) for skill in hero.skills)
     return ()
+
+
+@lru_cache(maxsize=None)
+def hero_placement_decls(pack_id: str = DEFAULT_PACK_ID) -> Mapping[str, PlacementDecl]:
+    """**放置三项声明**的唯一读取面（M6 票 10；spec D14 / S8）。
+
+    返回 ``全限定技能 id → PlacementDecl``（只含**声明了** ``placement`` 的条目）。
+    引擎的"当前回合结束时整批归还"按它取 ``return_timing`` / ``extra_effect``；测试的
+    登记表检查按它核"每个 ``SkillDef.places_on_hero_card`` 都有一份声明"。
+    """
+    found: dict[str, PlacementDecl] = {}
+    for table in load_hero_tables(pack_id):
+        for hero in table.heroes:
+            for skill in hero.skills:
+                if skill.placement is not None:
+                    found[hero_skill_id(hero.id, skill.id)] = skill.placement
+    return MappingProxyType(found)
+
+
+def hero_placement_decl(
+    skill_id: str, *, pack_id: str = DEFAULT_PACK_ID
+) -> PlacementDecl | None:
+    """一条技能的三项声明；不是放置类技能（或数据里没有它）返回 ``None``。"""
+    return hero_placement_decls(pack_id).get(skill_id)
 
 
 def hero_card_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tuple[str, ...]:

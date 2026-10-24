@@ -38,6 +38,10 @@ PACK = load_content_pack(deck_profile="basic_53")
 
 
 def test_the_zone_enum_is_exactly_the_six_m2_zones():
+    """M2 的六个区 + M6 票 10 的「武将牌上的牌」（``hero``，真区域、按实例再分片）。
+
+    函数名沿用 M2 的节点名；M6 票 10 只加一个取值，既有的六个一字不改。
+    """
     assert {zone.value for zone in Zone} == {
         "deck",
         "hand",
@@ -45,6 +49,7 @@ def test_the_zone_enum_is_exactly_the_six_m2_zones():
         "processing",
         "equip",
         "judge",
+        "hero",
     }
 
 

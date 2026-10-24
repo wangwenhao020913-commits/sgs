@@ -255,6 +255,33 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "jie_luxun",
+      "name": "界陆逊",
+      "true_name": "陆逊",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "qianxun",
+          "name": "谦逊",
+          "skill_type": "NORMAL",
+          "placement": {
+            "visibility": "public",
+            "return_timing": "turn_end",
+            "extra_effect": false
+          }
+        },
+        {
+          "id": "lianying",
+          "name": "连营",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

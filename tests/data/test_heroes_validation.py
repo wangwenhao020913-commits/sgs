@@ -426,6 +426,7 @@ def test_the_standard_table_stays_the_25_and_the_jie_table_is_loaded_separately(
         "jie_xiahoudun",
         "jie_huangyueying",
         "jie_zhenji",
+        "jie_luxun",
     ]
     assert {hero.id for hero in standard.heroes}.isdisjoint(
         {hero.id for hero in jie.heroes}
@@ -614,6 +615,15 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
         SkillType.NORMAL,
     ]
 
+    # M6 票 10：界陆逊。谦逊是**放置类技能**（placement 三项声明在数据里），连营不是。
+    luxun = jie.by_id("jie_luxun")
+    assert luxun is not None
+    assert (luxun.name, luxun.true_name, luxun.version) == ("界陆逊", "陆逊", "jie-ol")
+    assert (luxun.kingdom, luxun.gender, luxun.hp_max) == (Kingdom.WU, Gender.MALE, 3)
+    assert [skill.id for skill in luxun.skills] == ["qianxun", "lianying"]
+    assert luxun.skills[0].placement is not None, "【谦逊】必须带三项放置声明"
+    assert luxun.skills[1].placement is None, "【连营】不是放置类技能"
+
     assert all(hero.true_name for hero in jie.heroes), "界版每名都带真名"
     assert all(hero.enabled for hero in jie.heroes), "边界突破 P1 起界将逐批启用"
 
@@ -722,6 +732,10 @@ def test_hero_skill_ids_lookup_covers_the_jie_supplement():
     assert hero_skill_ids("jie_zhenji") == (
         "hero.jie_zhenji.luoshen",
         "hero.jie_zhenji.qingguo",
+    )
+    assert hero_skill_ids("jie_luxun") == (
+        "hero.jie_luxun.qianxun",
+        "hero.jie_luxun.lianying",
     )
     assert hero_skill_ids("guanyu") == ("hero.guanyu.wusheng",), "标准版查法一字不变"
 

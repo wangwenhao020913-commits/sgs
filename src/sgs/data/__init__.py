@@ -24,6 +24,11 @@ M6 票 02 把**牌名大类** :class:`Category` 与按 ``pack_id`` 的只读查�
 :func:`card_category` 纳入公开面：【集智】的非延时锦囊与【奇才】的锦囊都按它判族
 （"这张牌是锦囊吗"），而不是各自抄一份牌名白名单。
 
+M6 票 10 增**放置区的三项声明**（:class:`PlacementDecl` / :class:`PlacementVisibility` /
+:class:`PlacementReturn`）与只读查询（:func:`hero_placement_decl` /
+:func:`hero_placement_decls`）：放置类技能必须在数据里显式声明可见性 / 归还时机 / 有无
+附加效果（D14），加载期与代码上的 ``SkillDef.places_on_hero_card`` 双向核对。
+
 M6 票 09 增**牌标签的类型登记**（:class:`CardTagType` / :class:`CardTagSpec` /
 :data:`CARD_TAG_TYPES` / :func:`card_tag_spec`）：标签是牌上的持久事实（D12），其读取方 /
 生存期 / 可见性 / 是否随来源实例消失四项由类型在数据层声明；未登记的类型读取时显式失败，
@@ -38,6 +43,8 @@ from .loader import (
     card_category,
     enabled_hero_ids,
     hero_card_skill_ids,
+    hero_placement_decl,
+    hero_placement_decls,
     hero_skill_id,
     hero_skill_ids,
     load_content_pack,
@@ -61,6 +68,9 @@ from .models import (
     HeroSkill,
     HeroTable,
     Kingdom,
+    PlacementDecl,
+    PlacementReturn,
+    PlacementVisibility,
     SkillType,
     Suit,
     card_tag_spec,
@@ -91,6 +101,9 @@ __all__ = (
     "Kingdom",
     "LoadError",
     "Mode",
+    "PlacementDecl",
+    "PlacementReturn",
+    "PlacementVisibility",
     "RuleConfig",
     "SkillType",
     "Suit",
@@ -100,6 +113,8 @@ __all__ = (
     "deal_heroes",
     "enabled_hero_ids",
     "hero_card_skill_ids",
+    "hero_placement_decl",
+    "hero_placement_decls",
     "hero_skill_id",
     "hero_skill_ids",
     "load_content_pack",
