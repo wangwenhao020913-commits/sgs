@@ -462,6 +462,14 @@ def test_yijue_red_gives_the_revealed_card_and_may_heal_the_target():
     players = [_yijue_player(cost, 1, heal=True), _reveal_player(red)]
     engine = _run(state, players, lambda e: e.state.player(1).hp == 4)
 
+    heals = [
+        query
+        for query in _queries(engine, QueryKind.SELECT_OPTION.value)
+        if query.skill_id == "yijue:heal"
+    ]
+    assert len(heals) == 1, "红色分支只问一次「是否回复」"
+    assert tuple(heals[0].options) == YIJUE_HEAL_OPTIONS, "选项闭集由技能定义声明"
+
     assert red in state.player(0).hand, "获得的牌进了你的手牌"
     assert red not in state.player(1).hand
     assert state.player(1).hp == 4, "回复 1 点（3 → 4）"
