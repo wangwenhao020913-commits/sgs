@@ -422,6 +422,9 @@ def test_the_standard_table_stays_the_25_and_the_jie_table_is_loaded_separately(
         "jie_lvmeng",
         "jie_ganning",
         "jie_diaochan",
+        "jie_zhouyu",
+        "jie_xiahoudun",
+        "jie_huangyueying",
     ]
     assert {hero.id for hero in standard.heroes}.isdisjoint(
         {hero.id for hero in jie.heroes}
@@ -549,6 +552,47 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
         SkillType.NORMAL,
     ]
 
+    # M6 票 08：界周瑜 / 界夏侯惇 / 界黄月英（手牌上限双轴 + 事件帧无效的载体）。
+    zhouyu = jie.by_id("jie_zhouyu")
+    xiahoudun = jie.by_id("jie_xiahoudun")
+    huangyueying = jie.by_id("jie_huangyueying")
+    assert zhouyu is not None and xiahoudun is not None and huangyueying is not None
+    assert (zhouyu.name, zhouyu.true_name, zhouyu.version) == (
+        "界周瑜",
+        "周瑜",
+        "jie-ol",
+    )
+    assert (zhouyu.kingdom, zhouyu.gender, zhouyu.hp_max) == (
+        Kingdom.WU,
+        Gender.MALE,
+        3,
+    )
+    assert [skill.id for skill in zhouyu.skills] == ["yingzi", "fanjian"]
+
+    assert (xiahoudun.name, xiahoudun.true_name, xiahoudun.version) == (
+        "界夏侯惇",
+        "夏侯惇",
+        "jie-ol",
+    )
+    assert (xiahoudun.kingdom, xiahoudun.gender, xiahoudun.hp_max) == (
+        Kingdom.WEI,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in xiahoudun.skills] == ["ganglie", "qingjian"]
+
+    assert (huangyueying.name, huangyueying.true_name, huangyueying.version) == (
+        "界黄月英",
+        "黄月英",
+        "jie-ol",
+    )
+    assert (huangyueying.kingdom, huangyueying.gender, huangyueying.hp_max) == (
+        Kingdom.SHU,
+        Gender.FEMALE,
+        3,
+    )
+    assert [skill.id for skill in huangyueying.skills] == ["jizhi", "qicai"]
+
     assert all(hero.true_name for hero in jie.heroes), "界版每名都带真名"
     assert all(hero.enabled for hero in jie.heroes), "边界突破 P1 起界将逐批启用"
 
@@ -641,6 +685,18 @@ def test_hero_skill_ids_lookup_covers_the_jie_supplement():
         "hero.jie_lvmeng.keji",
         "hero.jie_lvmeng.qinxue",
         "hero.jie_lvmeng.gongxin",
+    )
+    assert hero_skill_ids("jie_zhouyu") == (
+        "hero.jie_zhouyu.yingzi",
+        "hero.jie_zhouyu.fanjian",
+    )
+    assert hero_skill_ids("jie_xiahoudun") == (
+        "hero.jie_xiahoudun.ganglie",
+        "hero.jie_xiahoudun.qingjian",
+    )
+    assert hero_skill_ids("jie_huangyueying") == (
+        "hero.jie_huangyueying.jizhi",
+        "hero.jie_huangyueying.qicai",
     )
     assert hero_skill_ids("guanyu") == ("hero.guanyu.wusheng",), "标准版查法一字不变"
 

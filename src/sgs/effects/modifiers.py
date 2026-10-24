@@ -106,6 +106,12 @@ class ModifierPoint(str, Enum):
       返回 ``None`` ⇒ 这次使用的距离条件整体豁免。只在 ``max_distance is not None`` 的牌上
       派发——【杀】的"距离 ≤ 攻击范围"是另一条判据（``needs_distance``），不在本挂点，
       故【奇才】不会顺带放宽【杀】；
+    - ``HAND_LIMIT_REPLACE``：**手牌上限的替换式**（M6 票 08 的加法，spec D11 的
+      "上限修正链"第二段）。``current`` 从**当前体力值**（下限 0）起，回调返回替换后的
+      上限——界周瑜【英姿】② 的"手牌上限 = 体力上限"是唯一消费者。加式**不**走本挂点：
+      它是 D9 的一次性效果，住 ``Player.hand_limit_bonus``、查询期由
+      :func:`~sgs.effects.hand_limit` 在替换式之后再加，故"来源技能失去 / 失效后
+      替换式立刻消失、已落的一次性增量不撤回"是结构事实，不靠回调自己判；
     - ``TARGET_POOL``：目标池（方天画戟的"额外目标合法性同标准"挂点）；
     - ``TARGET_COUNT``：本牌**最大目标数**（方天画戟 +2；只对 ``TargetCount.RATED``
       的牌查链，见下）；
@@ -137,6 +143,7 @@ class ModifierPoint(str, Enum):
 
     COUNT_LIMIT = "COUNT_LIMIT"
     DISTANCE_LIMIT = "DISTANCE_LIMIT"
+    HAND_LIMIT_REPLACE = "HAND_LIMIT_REPLACE"
     TARGET_POOL = "TARGET_POOL"
     TARGET_COUNT = "TARGET_COUNT"
     DISTANCE = "DISTANCE"

@@ -365,6 +365,19 @@ class Player(BaseModel):
     过期 = 回合末，**不随技能实例存亡撤回**（故住座位而不是 ``skill_state``）。
     **不发 delta**：与 ``luoyi_active`` 同姿态——回放按同一条【闪】的应答重建。
     """
+    hand_limit_bonus: int = 0
+    """本回合**手牌上限的加式增量**（M6 票 08；spec D11 / D9 的第二轴）。
+
+    写入唯一入口 :meth:`Engine.add_hand_limit_bonus`（【清俭】作用于**当前回合角色**，
+    【集智】作用于自己）；读取方是 :func:`sgs.effects.hand_limit` 的加式段。形状 =
+    D9 的**一次性效果**（作用座位、增量、过期 = 回合末）：增量住**座位**、不随来源技能
+    的失去 / 失效撤回，回合末由 :meth:`Engine._clear_turn_effects` 清空。
+
+    作用座位就是**落增量时**的 ``state.turn_seat``（【清俭】）/ 技能持有者本人（【集智】），
+    此后**不再重定向**：当前回合角色中途阵亡时，增量仍记在那个座位名下（死者不再弃牌，
+    读不到它），回合末与其它 ``TURN`` 作用域的状态一起清掉。**不发 delta**：与
+    ``paoxiao_bonus`` 同姿态——没有 JSON 读者，回放按同一条技能动作重建。
+    """
 
 
 class GameState(BaseModel):

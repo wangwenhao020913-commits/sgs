@@ -50,14 +50,16 @@ from sgs.effects import (
     behavior_for,
     is_slash,
 )
-from sgs.resolution import Frame
-from sgs.state import GameState
+from sgs.resolution import Frame, invalidate_event_frame
+from sgs.state import GameState, SlotKind, Zone
 from sgs.timing import Timing
 
 from .catalog import Hook, Seam, SeamKind, SkillDef
+from .move_after import move_event
 
 __all__ = [
     "JIE_PAOXIAO",
+    "JIE_QICAI",
     "PAOXIAO",
     "PAOXIAO_BONUS",
     "QICAI",
@@ -72,6 +74,9 @@ JIE_PAOXIAO = hero_skill_id("jie_zhangfei", "paoxiao")
 
 QICAI = hero_skill_id("huangyueying", "qicai")
 """黄月英【奇才】的全限定技能 id。"""
+
+JIE_QICAI = hero_skill_id("jie_huangyueying", "qicai")
+"""界黄月英【奇才】的全限定技能 id（§十九 L2106–L2107：①无距离限制 + ②取消装备区弃置）。"""
 
 PAOXIAO_BONUS = 1
 """【咆哮】②的伤害增量（"此伤害 +1"）。"""
@@ -158,6 +163,37 @@ def _qicai_distance_limit(state: GameState, ctx: ModifierContext, current: Any) 
     return None
 
 
+def _jie_qicai_cancel(host: Any, frame: Frame) -> Any:
+    """``EQUIPMENT_DISCARD`` 接缝：**其他角色弃置你装备区里的防具牌** ⇒ 事件帧无效。
+
+    四段判据都不认牌名：
+
+    1. **是我的装备区**（``move.from_zone.seat == 持有者``）——「你装备区里」；
+    2. **是弃置**（去向 = 弃牌堆；接缝本身只为这个形状开，见 ``Engine.move_in_frame``）；
+    3. **是其他角色**（``move.causer != 持有者``）——「其他角色弃置」；自己顶替 / 自弃不挡；
+    4. **是防具牌**（``CardRef.slot is SlotKind.ARMOR``）。宝物半句**无载体**（D7：宝物槽位
+       随木牛流马一起出局），故 `06`（§5「程序化约定与偏离一手」） 登记为偏离，实现只处理防具。
+
+    成立则把**这个事件帧**标成无效（:func:`~sgs.resolution.invalidate_event_frame`）：
+    引擎读一次、整个移动被取消。**宝物牌未匹配**不是实现缺口，是裁定（见 `06`）。
+    """
+    del host
+    owner = frame.data.get("skill_owner")
+    move = move_event(frame)
+    if owner is None or move is None:
+        return None
+    if move.from_zone.zone is not Zone.EQUIP or move.from_zone.seat != owner:
+        return None
+    if move.to_zone.zone is not Zone.DISCARD:
+        return None
+    if move.causer is None or move.causer == owner:
+        return None
+    if not any(card.slot is SlotKind.ARMOR for card in move.cards):
+        return None
+    invalidate_event_frame(frame)
+    return None
+
+
 def limits_skill_definitions() -> tuple[SkillDef, ...]:
     """P 族三条锁定技的 :class:`~sgs.skills.catalog.SkillDef`。
 
@@ -197,5 +233,16 @@ def limits_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             modifiers=(Modifier(ModifierPoint.DISTANCE_LIMIT, _qicai_distance_limit),),
             requirement="你使用锦囊牌无距离限制",
+        ),
+        SkillDef(
+            skill_id=JIE_QICAI,
+            locked=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            modifiers=(Modifier(ModifierPoint.DISTANCE_LIMIT, _qicai_distance_limit),),
+            seams=(Seam(SeamKind.EQUIPMENT_DISCARD, handler=_jie_qicai_cancel),),
+            requirement=(
+                "你使用锦囊牌无距离限制；当其他角色弃置你装备区里的防具牌时，取消之"
+            ),
         ),
     )

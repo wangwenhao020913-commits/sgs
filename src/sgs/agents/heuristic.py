@@ -1628,6 +1628,23 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "与标准【离间】同一条三步清单；虚拟【决斗】不可响应，收益更高",
     ),
     "hero.jie_diaochan.biyue": (_constant(2.5), "结束阶段摸一 / 两张：净赚"),
+    # M6 票 08：手牌上限双轴 + 界周瑜 / 界夏侯惇 / 界黄月英
+    "hero.jie_zhouyu.fanjian": (
+        _constant(2.5),
+        "交出一张手牌换取目标二选一：弃同花色牌或失去 1 点体力——多数时候是净赚",
+    ),
+    "hero.jie_xiahoudun.ganglie": (
+        _constant(3.5),
+        "受伤后判定：红打来源 1 点 / 黑拆来源一张——两条分支都为正",
+    ),
+    "hero.jie_xiahoudun.qingjian": (
+        _constant(2.0),
+        "别人回合获得牌后给牌换当前回合角色 +X 手牌上限：给低价值牌即可",
+    ),
+    "hero.jie_huangyueying.jizhi": (
+        _constant(3.0),
+        "使用非延时锦囊摸一张；摸到基本牌还能弃它换本回合 +1 手牌上限",
+    ),
     # 装备技（W4-4）：会问"是否发动"的 5 条非锁定装备**各给一个正分常量**。
     # 缺省 ``_UNKNOWN_SKILL_VALUE = -1.0 < Pass(0)`` ⇒ 不入表就永不发动（雌雄无法复现
     # 的根因）；正分 ⇒ 永远发动（Pass = 0，成本 / 收益不建模，见票面"不做收益模型调参"）。

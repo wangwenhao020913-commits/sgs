@@ -36,10 +36,9 @@
   符号都判红；
 - 四层的键 = :data:`LAYERS` 的键，**闭集**（D15 只给这四层）；新增第五层必须改这里。
 
-**事件帧无效的形状**（票 08 的【奇才】②落地时用）：机制符号登记为
-``EVENT_FRAME_INVALID``——一个**事件帧自己**的帧私有失效标志。本票只登记形状，故它的
-站点数 = **0**；票 08 的第一处出现会立刻被本审计报为"未登记"，直到把载体与站点补进
-:data:`LAYERS` / :data:`SITES`（票 08 的票面明写"用票 07 的登记表登记"）。
+**事件帧无效的形状**：机制符号登记为 ``EVENT_FRAME_INVALID``——一个**事件帧自己**的
+帧私有失效标志。票 07 只登记形状（站点数 = 0），**票 08 把它变成第一个活站点**
+（界黄月英【奇才】②：机制定义 / 写入 / 读取三处站点，见 :data:`SITES`）。
 """
 
 from __future__ import annotations
@@ -130,12 +129,15 @@ LAYERS: dict[str, Layer] = {
     ),
     "event-frame-invalid": Layer(
         semantics="某个事件帧无效：事件已经发生、在它自己的帧里被取消",
-        # 票 08 的载体（本批未落地；票面明写由票 08 用本登记表登记）
+        # M6 票 08 的载体（本票落地：票 07 只登记形状，票 08 补站点与行为测试）
         carrier=hero_skill_id("jie_huangyueying", "qicai"),
-        status=ORDERED_ELSEWHERE,
+        status=LIVE,
         existing_carriers=(),
         tokens=(EVENT_FRAME_TOKEN,),
-        tests=(),
+        tests=(
+            "test_jie_qicai_cancels_another_characters_discard_of_your_armor",
+            "test_jie_qicai_does_not_cancel_a_weapon_discard",
+        ),
     ),
     "response-window-not-produced": Layer(
         semantics="响应窗口不产生：不可无懈 + 不可打出对应牌（窗口该不该存在仍由牌的规则决定）",
@@ -345,8 +347,39 @@ SITES: dict[Site, Rule] = {
         1,
         "结算 C1 的读取口：与『牌面 / 修饰器判无效』共用同一个终止点",
     ),
-    # ---- 第 3 层：事件帧无效（票 08 的【奇才】②；本票只登记形状，站点数 = 0）----
-    # 形状入口在本表上方，见 LAYERS[...]["tokens"]；出现第一处就会以"未登记"判红。
+    # ---- 第 3 层：事件帧无效（M6 票 08 的【奇才】② = 本层第一个活站点）----
+    # 三个站点 = 机制符号的**定义 / 写入 / 读取**各一处；它们同住 resolution/events.py，
+    # 由技能层（limits.py 的接缝回调）与引擎（move_in_frame）分别消费。
+    (
+        "src/sgs/resolution/events.py",
+        "EVENT_FRAME_INVALID",
+        EVENT_FRAME_TOKEN,
+        'EVENT_FRAME_INVALID = "event_frame_invalid"',
+    ): Rule(
+        "event-frame-invalid",
+        1,
+        "事件帧无效的**机制符号本身**（帧私有槽名）：本层唯一的类型定义处",
+    ),
+    (
+        "src/sgs/resolution/events.py",
+        "invalidate_event_frame",
+        EVENT_FRAME_TOKEN,
+        "frame.data[EVENT_FRAME_INVALID] = True",
+    ): Rule(
+        "event-frame-invalid",
+        1,
+        "唯一**写入口**：界黄月英【奇才】② 判定成立后把事件帧标成无效",
+    ),
+    (
+        "src/sgs/resolution/events.py",
+        "take_event_frame_invalid",
+        EVENT_FRAME_TOKEN,
+        "return bool(frame.data.pop(EVENT_FRAME_INVALID, False))",
+    ): Rule(
+        "event-frame-invalid",
+        1,
+        "唯一**读取口**：引擎在装备区弃置的接缝派发之后消费一次（取消整次移动）",
+    ),
     # ---- 第 4 层：响应窗口不产生（【离间】本票 + 既有【铁骑】/ 界【铁骑】）----
     (
         "src/sgs/skills/active.py",
@@ -440,27 +473,24 @@ def test_the_four_layers_are_exactly_the_d15_closed_set() -> None:
     assert [layer.status for layer in LAYERS.values()].count(NO_CARRIER) == 1, (
         "『一个无载体』：目标产生前取消（【帷幕】不在本批）"
     )
-    assert [layer.status for layer in LAYERS.values()].count(ORDERED_ELSEWHERE) == 1, (
-        "『一个他票』：事件帧无效（票 08 的【奇才】②）"
+    assert [layer.status for layer in LAYERS.values()].count(ORDERED_ELSEWHERE) == 0, (
+        "票 08 落地【奇才】② 之后，四层里已没有『等别的票』的层"
     )
-    assert [layer.status for layer in LAYERS.values()].count(LIVE) == 2, (
-        "『一个有载体、一个本票』：目标级无效【奋威】+ 响应窗口不产生【离间】"
+    assert [layer.status for layer in LAYERS.values()].count(LIVE) == 3, (
+        "『一个有载体、一个他票、两个本票』：目标级无效【奋威】+ 响应窗口不产生【离间】"
+        "+ 事件帧无效【奇才】②（票 08 起为活站点）"
     )
 
 
 def test_the_registered_carriers_match_the_catalog_and_the_effort_tickets() -> None:
-    """登记的载体与现状一致：本票的与既有的在 ``CATALOG`` 里；票 08 的还不在。"""
+    """登记的载体与现状一致：四层的载体（含票 08 的【奇才】②）都在 ``CATALOG`` 里。"""
     for key, layer in LAYERS.items():
         for carrier in (() if layer.carrier is None else (layer.carrier,)) + layer.existing_carriers:
-            if key == "event-frame-invalid":
-                assert carrier not in CATALOG, (
-                    "事件帧无效的载体属票 08；它落地时应把本行改成本票的登记（见票 08 票面）"
-                )
-                continue
             assert carrier in CATALOG, f"{key} 的载体 {carrier} 不在 CATALOG 里"
 
     assert CATALOG[LAYERS["target-level-invalid"].carrier].skill_type.value == "LIMITED"
     assert CATALOG[LAYERS["response-window-not-produced"].carrier].skill_type.value == "NORMAL"
+    assert CATALOG[LAYERS["event-frame-invalid"].carrier].skill_type.value == "NORMAL"
 
 
 def test_the_registered_behavior_tests_really_exist() -> None:
@@ -487,19 +517,21 @@ def test_every_negation_site_in_the_source_tree_is_registered() -> None:
     )
 
 
-def test_the_event_frame_shape_is_registered_but_has_no_live_site() -> None:
-    """『事件帧无效』本票只登记形状：机制符号没有出现，载体也还没落地（票 08）。"""
-    hits = scan_tree()
-    event_sites = [
+def test_the_event_frame_layer_has_its_first_live_site() -> None:
+    """『事件帧无效』自票 08 起是**活站点**：定义 / 写入 / 读取三处都在登记表里。
+
+    票 07 的"形状已登记、站点数 = 0"在这里被票 08 的【奇才】② 替换：三处站点逐条可核，
+    且全树没有第四处（计数不符会由全树审计报出）。
+    """
+    event_sites = sorted(
         site for site, _rule in SITES.items() if site[2] == EVENT_FRAME_TOKEN
-    ]
-    assert event_sites == [], (
-        "事件帧无效还没有实现物；票 08 落地时应把站点登记进 SITES"
     )
-    assert not [site for site in hits if site[2] == EVENT_FRAME_TOKEN], (
-        "出现了未登记的事件帧无效符号：请按票 08 的载体把它登记进 LAYERS / SITES"
-    )
-    assert LAYERS["event-frame-invalid"].status == ORDERED_ELSEWHERE
+    assert [site[1] for site in event_sites] == [
+        "EVENT_FRAME_INVALID",
+        "invalidate_event_frame",
+        "take_event_frame_invalid",
+    ], "定义 / 写入口 / 读取口各一处"
+    assert LAYERS["event-frame-invalid"].status == LIVE
 
 
 def test_the_four_layers_do_not_share_a_mechanism_symbol() -> None:

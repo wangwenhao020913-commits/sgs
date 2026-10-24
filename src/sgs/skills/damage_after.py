@@ -42,7 +42,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import SkillType, Suit
+from sgs.data import Color, SkillType, Suit, color_of_suit
 from sgs.effects import CarrierKind, DamageNature, locate
 from sgs.state import (
     CardRef,
@@ -68,6 +68,7 @@ from .flow import FlowAnswers, PickCards, SkillFlow, zero_step_effect
 
 __all__ = [
     "DAMAGE_AFTER_SKILLS",
+    "JIE_GANGLIE",
     "DAMAGE_POINT_KEY",
     "DAMAGE_RECORDED_KEY",
     "DamageAfterSkill",
@@ -160,12 +161,17 @@ def fankui_step_key(frame: Any) -> str:
 
 @dataclass(frozen=True, slots=True)
 class DamageAfterSkill(HeroSkillDecl):
-    """B 族一条技能的**声明**：触发条件 + 回调（票 05 §要做什么 2 一行）。"""
+    """B 族一条技能的**声明**：触发条件 + 回调（票 05 §要做什么 2 一行）。
+
+    ``requirement``（M6 票 08 的加法，缺省 ``None``）：覆盖 :data:`_REQUIREMENTS` 的
+    短 id 文案——标准 / 界两版【刚烈】的牌面是整句重写，短 id 相同而"需要做什么"不同。
+    """
 
     per_point: bool
     condition: Any
     handler: Any = None
     flow: Any = None
+    requirement: str | None = None
 
 
 def _jianxiong_condition(host: Any, frame: Any) -> bool:
@@ -633,6 +639,125 @@ def _ganglie(host: Any, frame: Any) -> Any:
     return None
 
 
+# ---------------------------------------------------------------------------
+# 界夏侯惇【刚烈】（M6 票 08；较界版整句重写）
+#
+# §十九 L2023–L2025：
+#
+#     刚烈：当你受到 1 点伤害后，你可以进行一次判定，若结果为：红色，你对伤害来源
+#           造成 1 点伤害；黑色，你弃置伤害来源的一张牌。
+#
+# 与标准【刚烈】（票 01："判定 → 来源二选一"）**不是**同一句：判据从"不为红桃"变成
+# 红 / 黑二分，结算从"来源选择弃两张手牌或受 1 点伤害"变成"红色你打他 / 黑色你拆他"。
+# 因此不复用 :func:`_ganglie`，只共用同形的触发条件（受伤者是自己 ∧ 有可结算来源）与
+# 判定原语（``open_skill_judgment`` / ``SKILL_JUDGMENT_CARD_KEY``）。
+# ---------------------------------------------------------------------------
+
+JIE_GANGLIE = "hero.jie_xiahoudun.ganglie"
+"""界夏侯惇【刚烈】的全限定技能 id（§十九 L2023–L2025）。"""
+
+_JIE_GANGLIE_JUDGED_KEY = "jie_ganglie_judged"
+"""帧私有：本帧的判定已经开过（重入不再压第二个 JUDGE 帧）。"""
+
+_JIE_GANGLIE_SUIT_KEY = "jie_ganglie_suit"
+"""帧私有：判定牌的花色（红 / 黑二分，取完即弹）。"""
+
+_JIE_GANGLIE_DONE_KEY = "jie_ganglie_done"
+"""帧私有：效果已经执行 / 已经压出伤害子帧（重入直接收尾）。"""
+
+_ASK_JIE_GANGLIE_DISCARD = "hero.jie_xiahoudun.ganglie.discard"
+"""手写询问位置：界【刚烈】黑色分支「你弃置来源的一张牌」的选牌步。"""
+
+
+def _jie_ganglie_condition(host: Any, frame: Any) -> bool:
+    """触发条件：**受伤的是持有者自己**，且有一个可结算的伤害来源。
+
+    与标准【刚烈】同源（:func:`_hurt_owner` + :func:`_ganglie_source`）：牌面写"伤害来源"，
+    无来源 / 来源是自己 / 来源已阵亡时连"是否发动"都不问。
+    """
+    return _hurt_owner(frame) and _ganglie_source(
+        host.state, frame, frame.data.get(MATCH_OWNER_KEY)
+    ) is not None
+
+
+def _jie_ganglie_keys(frame: Any) -> tuple[str, str, str]:
+    """逐点触发时的帧私有键：**按伤害点号加后缀**。
+
+    ``Hook.per_point=True`` 的技能在同一条 DAMAGE 帧里被派发多轮（一点一轮），故"判定开过 /
+    花色 / 收尾"三个游标必须逐点分开——共用一套键会让第 2 点直接看到第 1 点的"已收尾"而
+    静默跳掉整条效果（本票的实现一开始就踩了这一条）。
+    """
+    suffix = f":{damage_point_index(frame)}"
+    return (
+        f"{_JIE_GANGLIE_JUDGED_KEY}{suffix}",
+        f"{_JIE_GANGLIE_SUIT_KEY}{suffix}",
+        f"{_JIE_GANGLIE_DONE_KEY}{suffix}",
+    )
+
+
+def _jie_ganglie(host: Any, frame: Any) -> Any:
+    """界【刚烈】：受伤后判定；红 ⇒ 对来源 1 点伤害，黑 ⇒ 弃置来源的一张牌。
+
+    三段、每段一个帧私有游标（与标准【刚烈】/【铁骑】同一范式）：
+
+    1. **判定**：``open_skill_judgment`` 压 JUDGE 帧，结算后判定牌回写进本帧；取花色后用
+       :func:`~sgs.data.color_of_suit` 判红 / 黑（黄月英式"颜色"判据的唯一真源）；
+    2. **红色**：压一个无渠道牌的 DAMAGE 子帧（来源 = 持有者、目标 = 伤害来源）；
+    3. **黑色**：问**持有者**从来源的三区里选一张（"你弃置"），搬进弃牌堆。来源没有牌时
+       跳过选牌（没有可弃的牌），不产生空询问。
+    """
+    state = host.state
+    owner = frame.data["skill_owner"]
+    judged_key, suit_key, done_key = _jie_ganglie_keys(frame)
+    source = _ganglie_source(state, frame, owner)
+    if source is None or frame.data.get(done_key):
+        return None
+    if not frame.data.get(judged_key):
+        frame.data[judged_key] = True
+        host.open_skill_judgment(frame, owner, JIE_GANGLIE)
+        return "stay"
+    if suit_key not in frame.data:
+        judge_card = frame.data.pop(SKILL_JUDGMENT_CARD_KEY, None)
+        # 同帧的布尔结果只有本技能读（判定是刚开的、没有别人写），取完即弹。
+        frame.data.pop("skill_result", None)
+        frame.data[suit_key] = None if judge_card is None else judge_card.suit
+    if color_of_suit(frame.data[suit_key]) is Color.RED:
+        frame.data[done_key] = True
+        _push_ganglie_damage(host, frame, source=owner, target=source)
+        return "stay"
+    frame.data[done_key] = True
+    if not host.has_zone_cards(source):
+        return None
+    picked = host.ask_selection(
+        frame,
+        owner=_ASK_JIE_GANGLIE_DISCARD,
+        key=f"jie_ganglie:discard:{damage_point_index(frame)}",
+        actor=owner,
+        timing=Timing.DAMAGE_AFTER_TAKE,
+        spec=SelectionSpec(
+            zones=(Zone.HAND, Zone.EQUIP, Zone.JUDGE),
+            total=(1, 1),
+            optional=False,
+        ),
+        # 选牌者是**夏侯惇**（不是来源）⇒ 面铺来源的三区，手牌是隐藏槽。
+        build_face=lambda: host.selection_face(source, (Zone.HAND, Zone.EQUIP, Zone.JUDGE)),
+    )
+    if host.suspended(picked):
+        frame.data[done_key] = False
+        return "stay"
+    if not picked:
+        return None
+    control = host.move_in_frame(
+        frame,
+        state.refs(picked),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=source,
+        actor=owner,
+    )
+    return "stay" if control == "stay" else None
+
+
 DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
     # 曹操【奸雄】：你可以获得造成此伤害的牌（规则 972）——每次伤害事件一次。
     # W6-01：零步技能迁 ``run_flow``（模块级 ``JIANXIONG_FLOW``），行为与旧回调逐字等价。
@@ -645,6 +770,16 @@ DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
     # 夏侯惇【刚烈】：受伤后判定，非红桃则由伤害来源二选一（规则 §九 L944–945）。
     # 每次伤害事件一次（"受到伤害后"，不是"受到 1 点伤害后"）。
     DamageAfterSkill("xiahoudun", "ganglie", False, _ganglie_condition, _ganglie),
+    # 界夏侯惇【刚烈】（M6 票 08）：整句重写——逐点触发（"受到 1 点伤害后"），
+    # 红色对来源造成 1 点伤害、黑色弃置来源的一张牌。
+    DamageAfterSkill(
+        "jie_xiahoudun",
+        "ganglie",
+        True,
+        _jie_ganglie_condition,
+        _jie_ganglie,
+        requirement="受伤后判定：红色对伤害来源造成 1 点伤害，黑色弃置伤害来源的一张牌",
+    ),
 )
 """B 族四条技能的逐字声明（票 05 §要做什么 2 的表 + M6 票 01 的【刚烈】）。"""
 
@@ -699,7 +834,7 @@ def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
                     flow=skill.flow,
                 ),
             ),
-            requirement=_REQUIREMENTS[skill.short_id],
+            requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
             step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
         )
         for skill in DAMAGE_AFTER_SKILLS

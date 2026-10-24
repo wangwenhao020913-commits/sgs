@@ -87,18 +87,31 @@ __all__ = [
 ]
 
 
-def hand_limit(player: Player) -> int:
-    """手牌上限 = **体力值**（票 07 §4 的规则**公式**；M1 无修正项）。
+def hand_limit(state: GameState, player: Player) -> int:
+    """手牌上限的**双轴**查询（M6 票 08；spec D11）。
 
-    官方把"体力"（可小于 0）与作为参数读取的"体力值"分开：体力降到 0 或更低时，
-    体力值读作 0，且手牌上限经过修正后最小值为 0 —— 故这里取 ``max(hp, 0)``。
+    两段、各自一个真源（`三国杀详细规则.txt` §四 L334–L336）：
+
+    1. **上限修正链**：``max(当前体力值, 0)`` → ``HAND_LIMIT_REPLACE`` 修饰器链（界周瑜
+       【英姿】② 的"手牌上限 = 体力上限"是唯一消费者；查询期从**活着的实例**算，故
+       体力上限变化、技能失去 / 失效都立刻反映）；
+    2. **加式**：``Player.hand_limit_bonus``（【清俭】跨座位、【集智】自身；D9 的一次性
+       效果，带回合作用域、不随来源消失撤回）。
+
+    最后再夹一次下限 0：官方把"体力"（可小于 0）与作为参数读取的"体力值"分开——体力降到
+    0 或更低时体力值读作 0，且手牌上限经过修正后最小值为 0。
+
+    **不是**"手牌计数"：计数排除（得牌不计入手牌数）是票 09 的标签轴，与上限是两个查询。
     """
-    return max(player.hp, 0)
+    base = max(player.hp, 0)
+    ctx = ModifierContext(subject=player.seat, target=player.seat)
+    replaced = apply_modifiers(ModifierPoint.HAND_LIMIT_REPLACE, state, ctx, base)
+    return max(int(replaced) + player.hand_limit_bonus, 0)
 
 
-def discard_count(player: Player) -> int:
+def discard_count(state: GameState, player: Player) -> int:
     """弃牌阶段须弃置的张数；``<= 0`` 表示无需弃牌（也不发询问）。"""
-    return len(player.hand) - hand_limit(player)
+    return len(player.hand) - hand_limit(state, player)
 
 
 def distance(state: GameState, a: int, b: int) -> int:
@@ -733,9 +746,9 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
 
 
 def _discard(state: GameState, seat: int, answers_seq: int) -> list[Action]:
-    """弃牌阶段：任意"手牌数 − 体力值"张子集，全枚举（票 07 §4）。"""
+    """弃牌阶段：任意"手牌数 − 手牌上限"张子集，全枚举（票 07 §4）。"""
     player = state.player(seat)
-    count = discard_count(player)
+    count = discard_count(state, player)
     if count <= 0:
         return []
     return [

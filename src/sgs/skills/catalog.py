@@ -111,11 +111,14 @@ __all__ = [
     "limited_skill_used",
     "lord_skill_allowed",
     "lord_skill_ids",
+    "mark_skill_used_this_turn",
     "prune_skill_state",
     "rejudge_skill_ids",
+    "reset_turn_skill_state",
     "reset_phase_skill_state",
     "resolve_instances",
     "same_kingdom",
+    "skill_used_this_turn",
     "timing_hooks_present",
 ]
 
@@ -139,6 +142,12 @@ class SeamKind(str, Enum):
     """
 
     SLASH_CANCELED = "SLASH_CANCELED"
+    EQUIPMENT_DISCARD = "EQUIPMENT_DISCARD"
+    """**装备区 → 弃牌堆**的移动事件（M6 票 08）：界的【奇才】②在它自己的帧里取消它。
+
+    接缝只为**会进入弃牌堆的装备区移动**派发（结构过滤，见 ``Engine.move_in_frame``）；
+    "谁在弃置"由载荷 :attr:`~sgs.skills.move_after.MoveEvent.causer` 给出，技能回调据此
+    判"其他角色"。事件帧无效的机制符号住 :mod:`sgs.resolution.events`。"""
 
 
 class SkillSourceKind(str, Enum):
@@ -587,6 +596,63 @@ _AWAKENED = 0b1_0000
 一个整数字段、**互不重叠**：出牌阶段复位只清阶段位，觉醒位跨整局保留，只有实例真的
 消失（``prune_skill_state``）才随键清掉。
 """
+
+
+_TURN_USED = 0b10_0000
+"""**每回合限一次**的"本回合已用"位（M6 票 08；界夏侯惇【清俭】的第一个消费者）。
+
+作用域 = **一个游戏回合**（不是"自己的出牌阶段"）：清俭可以在**别人的回合**里由"获得牌"
+触发，故它不能复用 A 族的阶段位（``_PHASE_STATE_MASK``）——那些位在 ``PHASE_PLAY_START``
+就清了。位与其它三段互不重叠；复位走 :func:`reset_turn_skill_state`（引擎的
+``_clear_turn_effects`` 统一调用），整局位 / 觉醒位不受影响。
+"""
+
+
+def _instance_used_this_turn(state: GameState, instance: SkillInstance) -> bool:
+    """``instance`` 的**本回合已用**位（只看位，不解析实例）。"""
+    return bool(state.skill_state.get(instance_key(instance), 0) & _TURN_USED)
+
+
+def _mark_used_this_turn(state: GameState, instance: SkillInstance) -> None:
+    """给实例落"本回合已用"位（非"每回合限一次"的技能由调用方自己保证不落）。"""
+    key = instance_key(instance)
+    state.skill_state[key] = state.skill_state.get(key, 0) | _TURN_USED
+
+
+def skill_used_this_turn(state: GameState, seat: int, skill_id: str) -> bool:
+    """``seat`` 的 ``skill_id`` 本回合是否已经发动过（M6 票 08 的只读面）。
+
+    与 :func:`limited_skill_used` / :func:`awakening_skill_awakened` 同姿态：按存活实例
+    （``include_suppressed=True``——失效 ≠ 没用过）读 :data:`_TURN_USED` 位。没有这条
+    实例时恒 ``False``。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            return _instance_used_this_turn(state, instance)
+    return False
+
+
+def mark_skill_used_this_turn(state: GameState, seat: int, skill_id: str) -> None:
+    """给 ``seat`` 的 ``skill_id`` 落"本回合已用"位（技能层调用；实例不在则零动作）。"""
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            _mark_used_this_turn(state, instance)
+            return
+
+
+def reset_turn_skill_state(state: GameState) -> None:
+    """清理**本回合**的 per-instance 技能状态（M6 票 08；引擎回合末统一调用）。
+
+    只清 :data:`_TURN_USED` 位：整局位（限定技"已用"）与觉醒位保留，"每回合限一次"的
+    技能因此每个游戏回合都能重新发动一次。与 :func:`reset_phase_skill_state` 同形
+    （按掩码清、键清空即删）。
+    """
+    for key in list(state.skill_state):
+        remaining = state.skill_state[key] & ~_TURN_USED
+        if remaining:
+            state.skill_state[key] = remaining
+        else:
+            del state.skill_state[key]
 
 
 def _instance_awakened(state: GameState, instance: SkillInstance) -> bool:

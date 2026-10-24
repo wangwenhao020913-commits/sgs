@@ -565,6 +565,153 @@ U2 验收修正（用户裁定）：第一段（预发动选目标）仍可本�
 
 
 # ---------------------------------------------------------------------------
+# 界周瑜【反间】（M6 票 08）：展示一张手牌交给一名其他角色，然后令其二选一
+#
+# §十九 L2155–L2158：
+#
+#     反间：出牌阶段限一次，你可以展示一张手牌并交给一名其他角色，然后令其选择一项：
+#           1. 展示所有手牌，弃置与此牌花色相同的所有牌；2. 失去 1 点体力。
+#
+# 与标准【反间】**整句重写**（标准版是"目标选花色 → 获得你一张手牌 → 花色不同则受伤"），
+# 故不复用 :data:`FANJIAN_FLOW`。次序是牌面写死的"先交给、后二选一"：交出之后那张牌已经
+# 在目标手里，**它也属于"与此牌花色相同的所有牌"**（选①时一并弃置）——这是"展示所有手牌"
+# 的字面读法，也是"先给后选"这个次序的事实后果。
+#
+# 二选一的应答者是**目标**（不是发动者），且不可放弃（``optional=False``）：发动者已经
+# 交出了牌，这一幕必须落地。失去体力走 ``LIFE_DECREASE`` 帧（**不是**伤害：没有来源、
+# 不经过伤害修正链，与【苦肉】同口径）。
+# ---------------------------------------------------------------------------
+
+JIE_FANJIAN = hero_skill_id("jie_zhouyu", "fanjian")
+"""界周瑜【反间】的全限定技能 id（§十九 L2155–L2158）。"""
+
+JIE_FANJIAN_DISCARD_SUIT = "discard_suit"
+"""界【反间】选项①：展示所有手牌，弃置与此牌花色相同的所有牌。"""
+
+JIE_FANJIAN_LOSE_HP = "lose_hp"
+"""界【反间】选项②：失去 1 点体力。"""
+
+JIE_FANJIAN_OPTIONS: tuple[str, ...] = (JIE_FANJIAN_DISCARD_SUIT, JIE_FANJIAN_LOSE_HP)
+"""界【反间】的选项闭集（顺序即询问里的顺序）。"""
+
+_JIE_FANJIAN_ASK = "fanjian:choice"
+"""界【反间】"二选一"的询问标识（``ask_option`` 的 ``skill_id``）。
+
+与流水线步骤的 ``<短 id>:<步骤名>`` 同一拼法（短 id = ``fanjian``），故投影的
+``step_requirements`` 查表与界面提示走同一条键；也是 ``ask_answers`` 缓存键的一半。
+"""
+
+_JIE_FANJIAN_GIVEN = "jie_fanjian_given"
+"""帧私有：那张手牌已经交出（搬牌挂起后的续跑不重搬）。"""
+
+_JIE_FANJIAN_CHOICE = "jie_fanjian_choice"
+"""帧私有：目标选的那一项（重入不重问）。"""
+
+_JIE_FANJIAN_HP_LOST = "jie_fanjian_hp_lost"
+"""帧私有：失去体力的子帧已经压过（出栈后的续跑只收尾）。"""
+
+_JIE_FANJIAN_DISCARDED = "jie_fanjian_discarded"
+"""帧私有：展示并弃置那一段已经做过。"""
+
+
+def _jie_fanjian_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """界【反间】"一名其他角色"：除发动者外的存活座位（座位序）。"""
+    del frame, chosen
+    return _other_alive_seats(state, owner)
+
+
+def _jie_fanjian_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选恒一条骨架：**没有手牌不能发动**（没有可展示 / 交出的牌）。"""
+    if not _can_offer(state, ctx):
+        return current
+    if not state.player(ctx.subject).hand:
+        return current
+    if not _jie_fanjian_targets(state, None, ctx.subject, ()):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _jie_fanjian_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：展示并交出那张牌 → 目标二选一 → 执行。
+
+    交出那一步可能内联派发"失去牌后"（接收者的【清俭】等）并挂起，故"已交出 / 已选定 /
+    已失去 / 已弃置"各一个帧私有游标；续跑既不重搬也不重问。
+    """
+    state = host.state
+    owner = frame.data["source"]
+    target = int(answers["seat"][0])
+    card = state.card(int(answers["card"][0]))
+    if not frame.data.get(_JIE_FANJIAN_GIVEN):
+        frame.data[_JIE_FANJIAN_GIVEN] = card.card_id
+        host.reveal_card(frame, owner, card)
+        control = host.move_in_frame(
+            frame,
+            (card,),
+            to_zone=ZoneRef(Zone.HAND, target),
+            reason=MoveReason.PUT,
+            owner=target,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+    if _JIE_FANJIAN_CHOICE not in frame.data:
+        answer = host.ask_option(
+            frame,
+            target,
+            Timing.PHASE_PLAY_IDLE,
+            skill_id=_JIE_FANJIAN_ASK,
+            options=JIE_FANJIAN_OPTIONS,
+            optional=False,
+        )
+        if host.suspended(answer):
+            return "stay"
+        frame.data[_JIE_FANJIAN_CHOICE] = str(answer.choice)
+    if frame.data[_JIE_FANJIAN_CHOICE] == JIE_FANJIAN_LOSE_HP:
+        if not frame.data.get(_JIE_FANJIAN_HP_LOST):
+            frame.data[_JIE_FANJIAN_HP_LOST] = True
+            host.push_frame(
+                FrameKind.LIFE_DECREASE,
+                {"target": target, "source": None, "amount": 1},
+                timing=Timing.LIFE_DECREASE_BEFORE,
+            )
+            return "stay"
+        return None
+    if not frame.data.get(_JIE_FANJIAN_DISCARDED):
+        frame.data[_JIE_FANJIAN_DISCARDED] = True
+        hand = tuple(state.player(target).hand)
+        for card_id in hand:
+            host.reveal_card(frame, target, state.card(card_id))
+        same_suit = tuple(
+            card_id for card_id in hand if state.card(card_id).suit == card.suit
+        )
+        if same_suit:
+            control = host.move_in_frame(
+                frame,
+                state.refs(same_suit),
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.DISCARD,
+                owner=target,
+                actor=target,
+            )
+            if control == "stay":
+                return "stay"
+    return None
+
+
+JIE_FANJIAN_FLOW = SkillFlow(
+    name="jie_fanjian",
+    steps=(
+        PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="card"),
+        PickSeats(lo=1, hi=1, pool=_jie_fanjian_targets, key="seat"),
+    ),
+    effect=_jie_fanjian_effect,
+)
+"""界【反间】的两步流水线：选一张手牌 → 选一名其他角色 →（提交点）交出 + 目标二选一。"""
+
+
+# ---------------------------------------------------------------------------
 # 华佗【青囊】：弃 1 张手牌 → 一名已受伤角色回复 1 点（目标池含自己）
 #
 # 票 02：本技能是 :class:`SkillFlow` 的**第二个实例**（第一个是票 01 手写的【离间】），
@@ -1452,6 +1599,15 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     ActiveSkill("jie_xushu", "jianyan", _jianyan_offers, flow=JIANYAN_FLOW),
     # 界吕蒙 ☆【攻心】（M6 票 06）：同上。
     ActiveSkill("jie_lvmeng", "gongxin", _gongxin_offers, flow=GONGXIN_FLOW),
+    # 界周瑜【反间】（M6 票 08）：两步由发动者选（手牌 → 目标），二选一由**目标**应答。
+    # 与【义绝】同姿态不翻预发动（多步由发动后的询问逐步收集；第二段换应答者）。
+    ActiveSkill(
+        "jie_zhouyu",
+        "fanjian",
+        _jie_fanjian_offers,
+        flow=JIE_FANJIAN_FLOW,
+        requirement="展示一张手牌交给一名其他角色，然后令其选择：展示所有手牌弃置同花色牌 / 失去 1 点体力",
+    ),
 )
 """A 族十条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】+
 票 06 的两条 ☆ 技能【荐言】/【攻心】）。

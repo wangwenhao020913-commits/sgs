@@ -556,8 +556,8 @@ def test_apply_hp_refuses_a_value_above_the_hp_max():
 def test_hand_limit_is_zero_when_hp_is_at_or_below_zero():
     state = _state(hp_a=-1, hand_a=(SLASH[0], PEACH[0]))
 
-    assert hand_limit(state.player(0)) == 0, "官方：体力值 ≤ 0 时读作 0，手牌上限最小 0"
-    assert discard_count(state.player(0)) == len(state.player(0).hand), (
+    assert hand_limit(state, state.player(0)) == 0, "官方：体力值 ≤ 0 时读作 0，手牌上限最小 0"
+    assert discard_count(state, state.player(0)) == len(state.player(0).hand), (
         "体力为负时也必须给得出弃牌候选（不能要求弃超过手里的张数）"
     )
 

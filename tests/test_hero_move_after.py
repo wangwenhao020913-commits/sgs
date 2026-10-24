@@ -790,12 +790,12 @@ def test_a_move_that_suspends_on_move_after_is_not_replayed_when_it_resumes():
     def suspended_on_a_carried_frame(candidate) -> bool:
         if candidate._move_pending is None:
             return False
-        _, _, pending_frame = candidate._move_pending
+        _, _, _, pending_frame = candidate._move_pending
         return pending_frame is not None and pending_frame.frame_id != 0
 
     _advance(engine, players, suspended_on_a_carried_frame)
 
-    _, key, _ = engine._move_pending
+    _, key, _, _ = engine._move_pending
     card_id = key[1][0]
     moved = _moves_of(engine, card_id)
     assert len(moved) == 1, f"挂起前这次移动恰一条 card_move：{moved}"

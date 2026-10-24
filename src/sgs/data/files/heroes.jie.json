@@ -167,6 +167,72 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "jie_zhouyu",
+      "name": "界周瑜",
+      "true_name": "周瑜",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "yingzi",
+          "name": "英姿",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "fanjian",
+          "name": "反间",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_xiahoudun",
+      "name": "界夏侯惇",
+      "true_name": "夏侯惇",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "ganglie",
+          "name": "刚烈",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "qingjian",
+          "name": "清俭",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_huangyueying",
+      "name": "界黄月英",
+      "true_name": "黄月英",
+      "kingdom": "shu",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "jizhi",
+          "name": "集智",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "qicai",
+          "name": "奇才",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

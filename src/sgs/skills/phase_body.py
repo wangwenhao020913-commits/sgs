@@ -88,6 +88,13 @@ class PhaseBodySkill(HeroSkillDecl):
     modifiers: tuple[Modifier, ...] = ()
     available: Callable[[GameState, int], bool] | None = None
     skill_type: SkillType = SkillType.NORMAL
+    locked: bool = False
+    """这条技能是不是**锁定技**（M6 票 08；缺省 ``False`` = 非锁定，先问"是否发动"）。
+
+    界周瑜【英姿】是锁定技（§十九 L2152–L2154 牌面写"锁定技"），故它**不问**"是否发动"、
+    满足条件即执行（派发环 ``forced = locked or AWAKENING``）。与 ``skill_type`` 正交：
+    锁定 / 非锁定管"要不要问"，``skill_type`` 管技能规则类型（普通 / 限定 / 觉醒）。
+    """
     requirement: str | None = None
     """这条技能"需要玩家做什么"的**覆盖文案**（M6 票 07；缺省 ``None`` = 读
     :data:`_REQUIREMENTS` 的短 id 那一行）。
@@ -133,6 +140,32 @@ _YINGZI = PhaseBodySkill(
     timing=Timing.PHASE_DRAW,
     draws=1,
     flow=YINGZI_FLOW,
+)
+
+
+def _jie_yingzi_hand_limit(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``HAND_LIMIT_REPLACE`` 回调：界【英姿】②"你的手牌上限等于体力上限"。
+
+    ``current`` 是**当前体力值**（下限 0），返回**体力上限**——替换式，不是加式（加式住
+    ``Player.hand_limit_bonus``）。``ctx.owner == ctx.subject`` 是"这条技能属于被查询的
+    座位"的自校（修饰器链遍历全体存活实例，缺这一条会替所有人改上限）。
+    """
+    if ctx.owner != ctx.subject:
+        return current
+    return max(state.player(ctx.subject).hp_max, 0)
+
+
+_JIE_YINGZI = PhaseBodySkill(
+    # 界周瑜【英姿】（§十九 L2152–L2154）：锁定技，①摸牌阶段你多摸一张牌；
+    # ②你的手牌上限等于体力上限（X = 体力上限）。
+    hero_id="jie_zhouyu",
+    short_id="yingzi",
+    timing=Timing.PHASE_DRAW,
+    draws=1,
+    flow=YINGZI_FLOW,
+    modifiers=(Modifier(ModifierPoint.HAND_LIMIT_REPLACE, _jie_yingzi_hand_limit),),
+    locked=True,
+    requirement="摸牌阶段你多摸一张牌；你的手牌上限等于体力上限",
 )
 _BIYUE = PhaseBodySkill(
     # 貂蝉【闭月】：结束阶段（回合结束阶段）开始时，你可以摸一张牌（规则 1054）。
@@ -425,6 +458,7 @@ _TISHEN = PhaseBodySkill(
 
 PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _YINGZI,
+    _JIE_YINGZI,
     _BIYUE,
     _TUXI,
     _LUOYI,
@@ -433,8 +467,9 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _TISHEN,
     _JIE_BIYUE,
 )
-"""L 族八条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
-票 03 的【克己】、票 05 的【替身】、票 06 的界【克己】、票 07 的界【闭月】）。"""
+"""L 族九条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
+票 03 的【克己】、票 05 的【替身】、票 06 的界【克己】、票 07 的界【闭月】、
+票 08 的界【英姿】）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "yingzi": "多摸一张牌",
@@ -478,18 +513,19 @@ def phase_body_activation_plans() -> dict[str, Any]:
 
 
 def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
-    """L 族七条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
+    """L 族九条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
 
-    六条都**非锁定**（技能面写"你可以"）⇒ 先问"是否发动"再执行；``carrier = HERO``
+    除界【英姿】外都**非锁定**（技能面写"你可以"）⇒ 先问"是否发动"再执行；界【英姿】
+    牌面写"锁定技" ⇒ ``locked=True``、不问即执行（M6 票 08）。``carrier = HERO``
     ⇒ 优先级档由载体派生；``skill_type`` 取自声明（缺省 ``NORMAL``，【替身】是
     ``LIMITED``——锁定 / 非锁定与它正交）。
     挂点是**阶段体**（``Hook(timing)``），消费方是票 10 的 ``_dispatch_phase_body``；
-    【裸衣】另带一条 ``DAMAGE_DEAL_AMOUNT`` 修饰器（随身修饰器，随实例存亡）。
+    【裸衣】/ 界【英姿】各带一条随身修饰器（随实例存亡）。
     """
     return tuple(
         SkillDef(
             skill_id=skill.skill_id,
-            locked=False,
+            locked=skill.locked,
             carrier=CarrierKind.HERO,
             skill_type=skill.skill_type,
             hooks=(Hook(skill.timing, flow=skill.flow),),

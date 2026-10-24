@@ -50,7 +50,15 @@ from sgs.effects import (
     move_card,
     targets_within_attack_range,
 )
-from sgs.resolution import Control, Frame, ResolutionStack, StepTable, Tag, has_tag
+from sgs.resolution import (
+    Control,
+    Frame,
+    ResolutionStack,
+    StepTable,
+    Tag,
+    has_tag,
+    take_event_frame_invalid,
+)
 from sgs.skills import (
     MOVE_EVENT_KEY,
     RUNNING_SKILL_KEY,
@@ -74,6 +82,7 @@ from sgs.skills import (
     provider_registered,
     prune_skill_state,
     reset_phase_skill_state,
+    reset_turn_skill_state,
     resolve_conversion_confirmation,
     start_provider,
     timing_hooks_present,
@@ -415,8 +424,14 @@ class Engine:
         帧外移动没有 ``frame.data`` 可挂"记录过了"的标记，故这个判据住引擎上；
         重入同一批牌时不再重复落 ``MOVE_AFTER`` 记录。
         """
-        self._move_pending: tuple[MoveEvent, tuple, Frame | None] | None = None
-        """被钩子挂起的 ``MOVE_AFTER``（票 07）：``(载荷, 幂等键, 承载帧或 None)``。
+        self._move_pending: (
+            tuple[MoveEvent, tuple, Frame, Frame | None] | None
+        ) = None
+        """被钩子挂起的 ``MOVE_AFTER``（票 07）：``(载荷, 幂等键, 续跑帧, 承载帧或 None)``。
+
+        第 3 项是**续跑用的临时帧**（帧私有里带着钩子的询问缓存与效果游标，M6 票 08）；
+        第 4 项是**原始承载帧**（只用于"时机记录去重"的旧语义，见
+        :meth:`_flush_pending_move`）。
 
         "失去牌后"是**内联时机**，它的钩子可以提问。提问把控制权交回驱动循环之后，
         重入**不一定落在同一个步骤上**（拆顺会继续跑效果帧的后续步骤、使用链会继续跑
@@ -2145,6 +2160,30 @@ class Engine:
             # 若回 ``"stay"``，把返回值透传出去的 op（``use_choose_target`` 一类）会认为
             # 自己还没跑完、把游标留在原处，驱动循环于是原地空转。
             return None
+        # **事件帧无效**（M6 票 08 的【奇才】②）：只有"装备区 → 弃牌堆"的移动才开这个
+        # 接缝（"其他角色弃置你装备区里的防具牌"的唯一形状），且只在有承载帧时——帧外
+        # 移动（弃牌阶段的自弃、阵亡清区）没有"其他角色"可判。技能标记后整个事件被取消：
+        # 不搬牌、不记 delta、不派发 `MOVE_AFTER`，移动入口原样返回。
+        if frame is not None and to_zone.zone is Zone.DISCARD:
+            from_zone = locate(self.state, card_ids[0])
+            if from_zone.zone is Zone.EQUIP:
+                frame.data[MOVE_EVENT_KEY] = MoveEvent(
+                    cards=tuple(cards),
+                    from_zone=from_zone,
+                    to_zone=to_zone,
+                    reason=reason,
+                    owner=owner,
+                    after_holder=to_zone.seat,
+                    actor=actor,
+                    causer=self._move_causer(frame),
+                )
+                control = self.dispatch_seam(frame, SeamKind.EQUIPMENT_DISCARD)
+                if control == "stay":
+                    return "stay"
+                cancelled = take_event_frame_invalid(frame)
+                frame.data.pop(MOVE_EVENT_KEY, None)
+                if cancelled:
+                    return None
         ctx = self._effect_context(
             frame,
             actor=(frame.data["source"] if frame is not None else None) if actor is None else actor,
@@ -2172,9 +2211,21 @@ class Engine:
             key=key,
             frame_id=frame.frame_id if frame is not None else 0,
         )
-        if control == "stay":
-            self._move_pending = (event, key, frame)
         return "stay" if control == "stay" else None
+
+    @staticmethod
+    def _move_causer(frame: Frame) -> int | None:
+        """**这次移动的发起人**：当时正在跑的技能的持有者；没有技能时退回帧的 ``source``。
+
+        弃置类效果常把 ``actor`` 写成牌的归属者（【寒冰剑】/界【刚烈】都这样），故"是不是
+        **其他角色**弃置的"只能由"谁在跑"回答。两个键都由派发环在回调前写；帧外的收尾移动
+        没有帧，调用点也不会问它（只在有承载帧的装备区弃置前调用）。
+        """
+        running = frame.data.get(RUNNING_SKILL_KEY)
+        if running and frame.data.get("skill_owner") is not None:
+            return int(frame.data["skill_owner"])
+        source = frame.data.get("source")
+        return None if source is None else int(source)
 
     def _move_event(self, delta: Any, *, actor: int | None) -> MoveEvent:
         """把一条 ``card_move`` 的形状装成 :class:`~sgs.skills.MoveEvent`（派发载荷）。"""
@@ -2188,6 +2239,26 @@ class Engine:
             actor=actor,
         )
 
+    @staticmethod
+    def _resume_frame(dispatch_frame: Frame, event: MoveEvent) -> Frame:
+        """挂起后续跑用的**不压栈临时帧**（M6 票 08）。
+
+        形状与票 07 的临时帧逐字相同（``source = event.actor`` / 无目标 / 无渠道牌、
+        ``frame_id = 0``），故续跑里所有 delta 与时机记录的坐标与"帧外移动"一致——这是
+        冻结基准（38 / 39 号录像）已经录下的坐标，不能改。
+
+        **但帧私有数据从派发帧继承**：钩子的询问缓存（``ask_answers``）与效果游标都住在
+        帧私有里，续跑换一条空帧会把它们丢光——零步钩子只是把同一问再问一遍（旧行为），
+        多步钩子（【清俭】是第一条）会整条静默丢失并把下一条应答串给下一个询问。
+        继承时只覆盖三个"帧语义"键（``source`` / ``targets`` / ``card``），其余原样共享
+        （``ask_answers`` 是同一个 dict，故后续每一步的答案继续累在它上面）。
+        """
+        data = dict(dispatch_frame.data)
+        data["source"] = event.actor
+        data["targets"] = ()
+        data["card"] = None
+        return Frame(kind=FrameKind.RESOLVE, data=data, frame_id=0)
+
     def _dispatch_move_after(
         self,
         frame: Frame | None,
@@ -2197,11 +2268,17 @@ class Engine:
         key: tuple,
         frame_id: int = 0,
     ) -> Control:
-        """把这次移动当"失去牌后"派发 ``MOVE_AFTER``（票 07）。
+        """把这次移动当"失去牌后"派发 ``MOVE_AFTER``（票 07；M6 票 08 补挂起续跑）。
 
         ``key`` 是这次时机实例的幂等键（见 :meth:`_move_key`）：重入续跑时沿用它，
         故"同一次移动"只落一条记录、只派发一遍。承载帧可能已经不在栈上（挂起期间
-        上层帧出栈），故不使用帧自己的私有标记；载荷写进 ``frame.data`` 供钩子读。
+        上层帧出栈），故此时改用一条**不压栈的临时帧**。
+
+        钩子提问而挂起时，把**续跑帧**（:meth:`_resume_frame`：临时帧形状 + 派发帧的帧私有
+        数据）连同**原始承载帧**一起记进 :meth:`_flush_pending_move` 的挂起槽：前者保住
+        询问缓存 / 效果游标，后者保住"时机记录去重"的旧语义（承载帧上
+        ``_pending_move_timing`` 若被同帧后续移动覆盖，续跑要补记一条 ``MOVE_AFTER``——
+        冻结基准里真有这一条）。
         """
         if frame is not None:
             if not move_after_providers(self.state, event=event):
@@ -2221,20 +2298,25 @@ class Engine:
                     targets=(),
                     cards=event.cards,
                 )
+            dispatch_frame = frame
             if not carried:
                 # 承载帧已经不在栈上（挂起期间上层帧出栈）：用临时帧续跑，
                 # 不往一个已出栈的帧里写载荷。
-                transient = Frame(
+                dispatch_frame = Frame(
                     kind=FrameKind.RESOLVE,
                     data={"source": event.actor, "targets": (), "card": None},
                     frame_id=frame_id,
                 )
-                transient.data[MOVE_EVENT_KEY] = event
-                return dispatch_move_after(self, transient)
-            frame.data[MOVE_EVENT_KEY] = event
-            result = dispatch_move_after(self, frame)
+            dispatch_frame.data[MOVE_EVENT_KEY] = event
+            result = dispatch_move_after(self, dispatch_frame)
             if result == "stay":
                 frame.data["_pending_move_timing"] = key
+                self._move_pending = (
+                    event,
+                    key,
+                    self._resume_frame(dispatch_frame, event),
+                    frame,
+                )
             else:
                 frame.data.pop("_pending_move_timing", None)
             return result
@@ -2260,7 +2342,10 @@ class Engine:
             frame_id=frame_id,
         )
         transient.data[MOVE_EVENT_KEY] = event
-        return dispatch_move_after(self, transient)
+        result = dispatch_move_after(self, transient)
+        if result == "stay":
+            self._move_pending = (event, key, transient, None)
+        return result
 
     @staticmethod
     def _move_key(event: MoveEvent, count: int) -> tuple:
@@ -2594,13 +2679,29 @@ class Engine:
         if target not in bonus:
             bonus.append(target)
 
-    def _clear_turn_effects(self) -> None:
-        """回合末清理作用域 = ``TURN`` 的座位级效果（M6 票 04；票 05 补【咆哮】②）。
+    def add_hand_limit_bonus(self, seat: int, amount: int) -> None:
+        """给 ``seat`` 记一笔**本回合的手牌上限加式增量**（M6 票 08 的唯一写入口）。
 
-        五样一起清：失效记录（逐条落 ``skill_suppress = false``，使"可恢复"在记录流里
+        `三国杀详细规则.txt` §四 L334–L336 的"手牌上限"是派生量，spec D11 把它拆成
+        **替换式**（界【英姿】②，查询期从活着的实例算）与**加式**（【清俭】/【集智】，
+        落座位状态）。本方法只写加式那一轴：``amount`` 累加到 ``Player.hand_limit_bonus``
+        （多笔来源可叠加），过期 = 回合末（:meth:`_clear_turn_effects`）。作用座位由**调用方**
+        决定（【清俭】传当时的 ``state.turn_seat``、【集智】传持有者本人），写进来之后
+        **不再重定向**——D9 的一次性效果不随来源技能失去 / 失效撤回，死者名下的那笔也
+        只是再没人读它（回合末统一清掉）。**不发 delta**：与 ``set_paoxiao_bonus`` 同姿态。
+        """
+        player = self.state.player(seat)
+        player.hand_limit_bonus += int(amount)
+
+    def _clear_turn_effects(self) -> None:
+        """回合末清理作用域 = ``TURN`` 的座位级效果（M6 票 04；票 05 补【咆哮】②、
+        票 08 补手牌上限加式）。
+
+        六样一起清：失效记录（逐条落 ``skill_suppress = false``，使"可恢复"在记录流里
         可被看见）、手牌禁令、红桃【杀】加伤目标、【咆哮】②的"下一次【杀】伤害 +1"
-        待消费标记、以及 M6 票 06 的"本回合造成过伤害"（【诛害】的判据）。与【酒】/
-        【裸衣】同一收尾点（:meth:`_turn_after_end`），故"本回合"的作用域不跨回合。
+        待消费标记、M6 票 06 的"本回合造成过伤害"（【诛害】的判据）、以及 M6 票 08 的
+        手牌上限加式（【清俭】/【集智】的 +X）。与【酒】/【裸衣】同一收尾点
+        （:meth:`_turn_after_end`），故"本回合"的作用域不跨回合。
         """
         for player in self.state.players:
             for record in tuple(player.suppressed_skills):
@@ -2621,7 +2722,9 @@ class Engine:
             player.hand_card_prohibited = False
             player.heart_slash_bonus_against.clear()
             player.damage_dealt_this_turn = False
+            player.hand_limit_bonus = 0
             self._clear_paoxiao_bonus(player.seat)
+        reset_turn_skill_state(self.state)
 
     def reveal_card(self, frame: Frame | None, seat: int, card: CardRef) -> None:
         """把 ``seat`` 的一张**手牌**标成公开事实并落一条 ``card_reveal``（M5-06）。
@@ -2976,7 +3079,7 @@ class Engine:
             )
         if kind is QueryKind.DISCARD:
             player = self.state.player(actor)
-            count = discard_count(player)
+            count = discard_count(self.state, player)
             return DiscardQuery(
                 seq=seq,
                 actor=actor,
@@ -3245,18 +3348,46 @@ class Engine:
         return self.records
 
     def _flush_pending_move(self) -> None:
-        """把被钩子挂起的 ``MOVE_AFTER`` 派发完（票 07）。
+        """把被钩子挂起的 ``MOVE_AFTER`` 派发完（票 07；M6 票 08 补"帧私有续跑"）。
 
         询问刚被应答、下一帧还没跑时调用：此时钩子重入需要的那条应答已经在
         ``_answer`` 里，故续跑会把它消费掉。没有挂起的移动时是**零动作**。
+
+        **续跑帧** = 挂起时记下的那条临时帧（:meth:`_resume_frame`）：询问缓存与效果游标
+        都在它上面，多步流水线（【清俭】）因此不会从头重问、也不会把下一条应答错配给
+        上一个询问。**时机记录去重**按旧语义复刻：承载帧的 ``_pending_move_timing`` 若在
+        挂起期间被同帧后续移动覆盖，这里要补记一条 ``MOVE_AFTER``（38 号冻结基准录了它）；
+        帧外移动（无承载帧）走 ``_move_recorded`` 同一条判据。
         """
         while self._move_pending is not None:
-            event, key, pending_frame = self._move_pending
-            control = self._dispatch_move_after(
-                pending_frame, event, count=key[2], key=key
-            )
-            if control == "stay":  # pragma: no cover - 本族的钩子不提问（见 move_after 模块）
+            event, key, resume_frame, carrying = self._move_pending
+            if carrying is not None:
+                if carrying.data.get("_pending_move_timing") != key:
+                    self.emit_timing(
+                        Timing.MOVE_AFTER,
+                        frame_id=0,
+                        depth=self.stack.depth,
+                        actor=event.actor,
+                        source=carrying.data.get("source"),
+                        targets=(),
+                        cards=event.cards,
+                    )
+            elif self._move_recorded != key:
+                self.emit_timing(
+                    Timing.MOVE_AFTER,
+                    frame_id=0,
+                    depth=self.stack.depth,
+                    actor=event.actor,
+                    source=event.actor,
+                    targets=(),
+                    cards=event.cards,
+                )
+                self._move_recorded = key
+            control = dispatch_move_after(self, resume_frame)
+            if control == "stay":
                 return
+            if carrying is not None:
+                carrying.data.pop("_pending_move_timing", None)
             self._move_pending = None
 
     def _step(self) -> None:
@@ -3629,7 +3760,7 @@ class Engine:
             self.emit_timing(Timing.PHASE_DISCARD, actor=seat)
             self._turn_data["discard_emitted"] = True
         player = self.state.player(seat)
-        if discard_count(player) <= 0:
+        if discard_count(self.state, player) <= 0:
             return None
         action = self.ask(
             lambda seq: self._build_query(QueryKind.DISCARD, seat, Timing.PHASE_DISCARD, seq)
