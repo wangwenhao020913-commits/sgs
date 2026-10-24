@@ -13,6 +13,10 @@
    手牌移动只给数量（``card_count``），公开区与自己的移动照发牌面；``card_reveal``
    仍公开。同一局也是「他人摸到的牌面」既有的泄露面（09a 当时没查）。
 
+M6 票 20 把**新增的 delta 类型**（标签增删）补进逐类判据表，并给**武将牌上的牌区**
+（HERO 区域）补一条区域行：区可见性读 ``PlacementDecl.visibility``，不是"HERO 一律
+隐藏"——数据里【谦逊】是公开区，原先按隐藏区裁是**过度隐藏**。
+
 口径与 M4 的 ``test_the_snapshot_never_exposes_other_hands_or_hidden_identity`` 同源，
 只是 M5 把「逐次询问」「火攻亮牌」「日志记录」三维补满。
 """
@@ -50,6 +54,8 @@ from sgs.engine import (  # noqa: E402
     SkillGainRecord,
     SkillLoseRecord,
     SkillSuppressRecord,
+    TagAddRecord,
+    TagRemoveRecord,
     TurnChangeRecord,
     WineChangeRecord,
     record_json,
@@ -563,12 +569,14 @@ def test_the_fire_attack_reveal_is_public_in_the_log_records_but_the_other_hand_
 # ---------------------------------------------------------------------------
 #
 # 09c 的教训不是"card_move 漏了"，而是"只查了一种 delta"。这里把 ``sgs.state.deltas``
-# 的**全部** delta_type 枚举出来，逐类构造一条带隐藏信息的合成记录，断言人类查看者
-# 收到的下发只留公开事实：
+# 的**全部** delta_type（M6 票 20 后 15 种）枚举出来，逐类构造一条带隐藏信息的合成
+# 记录，断言人类查看者收到的下发只留公开事实：
 #
 # - ``deck_shuffle``：整副牌序 → 只给 ``card_count``；
 # - ``identity_deal``：A3 可见性（本人 / 主公 / 已由 ``identity_reveal`` 亮明 / 阵亡）；
 # - ``card_reveal``：**公开事实**，不得被顺手藏掉；
+# - ``tag_add`` / ``tag_remove``：**标签类型**的可见性声明说了算（M6 三类全是
+#   ``HIDDEN`` ⇒ 整条裁掉，牌面与标签类型都不下发）；
 # - 其余（体力 / 横置 / 酒 / 牌移动 / 身份亮明）各按既有口径。
 #
 # 新增一种 delta 时，``test_every_delta_type_has_a_no_leak_case`` 会要求在这里登记判据。
@@ -662,6 +670,26 @@ def _delta_records() -> dict[str, object]:
         "turn_change": TurnChangeRecord(
             seq=113, frame_id=0, depth=0, seat=1, round=2, extra=True
         ),
+        # M6 票 20 的标签增删（spec §投影与记录流）：标签挂在**手牌**上，故牌的实体身份
+        # 与标签类型都属于隐藏面——隐藏标签的下发面 = 整条裁掉（M6 登记的三类全是 HIDDEN）。
+        "tag_add": TagAddRecord(
+            seq=114,
+            frame_id=0,
+            depth=0,
+            card=HIDDEN_CARD,
+            tag_type="luoshen_hand",
+            owner=1,
+            skill_id="hero.jie_zhenji.luoshen",
+        ),
+        "tag_remove": TagRemoveRecord(
+            seq=115,
+            frame_id=0,
+            depth=0,
+            card=HIDDEN_CARD,
+            tag_type="luoshen_hand",
+            owner=1,
+            skill_id="hero.jie_zhenji.luoshen",
+        ),
     }
 
 
@@ -690,8 +718,8 @@ def test_every_delta_type_has_a_no_leak_case() -> None:
     """delta 类型表与判据表**双向**对齐：新增类型必须登记一条不泄露判据。"""
     schema_types = _delta_schema_types()
     cases = _delta_records()
-    assert len(schema_types) == 13, (
-        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 13 种写）："
+    assert len(schema_types) == 15, (
+        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 15 种写）："
         f"{sorted(schema_types)}"
     )
     missing = sorted(set(schema_types) - set(cases))
@@ -718,6 +746,11 @@ def test_every_delta_record_is_redacted_for_a_human_viewer() -> None:
     for delta_type, record in _delta_records().items():
         raw = json.loads(record_json(record))
         payload = visible_record(record, viewer=VIEWER)
+        if delta_type in ("tag_add", "tag_remove"):
+            # 隐藏标签（M6 登记表三类全是 HIDDEN）：整条裁掉，牌面 / 标签类型都不下发。
+            assert payload is None, f"隐藏标签的增删泄露到了人类载荷：{payload}"
+            assert raw["card"]["card_id"] == HIDDEN_CARD.card_id, "夹具必须带隐藏牌面"
+            continue
         assert payload is not None, f"{delta_type} 被整条丢弃（不是裁剪）"
         assert payload["seq"] == raw["seq"]
         if delta_type == "deck_shuffle":
@@ -796,3 +829,197 @@ def test_the_no_leak_assertions_bite_on_the_unredacted_payloads() -> None:
     with pytest.raises(AssertionError):
         _assert_identity_hidden(raw_deal, "rebel")
 
+
+
+# ---------------------------------------------------------------------------
+# M6 票 20：**标签增删**与**武将牌上的牌区**两条新面
+#
+# 标签：M6 登记的三类全声明为 ``HIDDEN`` ⇒ 增删 delta **整条**裁掉（牌面与标签类型都不
+# 下发），且不放宽公开的「手牌数」。区域：整个区给不给看由放置技能的**数据声明**回答
+# （``PlacementDecl.visibility``），不是"HERO 一律隐藏"——数据里【谦逊】是公开区。
+# ---------------------------------------------------------------------------
+
+JIE_LUOSHEN = "hero.jie_zhenji.luoshen"
+LUOSHEN_REPEAT_PREFIX = "luoshen:repeat:"
+
+
+class _LuoshenSeat:
+    """座位 0 的脚本：发动一次【洛神】、不重复、出牌阶段直接结束、其余放弃。"""
+
+    def respond(self, query):  # noqa: ANN001 - Participant 协议
+        if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == JIE_LUOSHEN:
+            for action in query.legal_actions:
+                if getattr(action, "kind", None) == "ActivateSkill":
+                    return action
+            return next(action for action in query.legal_actions if isinstance(action, Pass))
+        if query.kind == QueryKind.SELECT_OPTION and str(query.skill_id).startswith(
+            LUOSHEN_REPEAT_PREFIX
+        ):
+            for action in query.legal_actions:
+                if getattr(action, "choice", None) == "stop":
+                    return action
+            raise AssertionError(f"「是否继续」里没有 stop：{query.legal_actions}")
+        if query.kind == QueryKind.PLAY_PHASE:
+            return next(action for action in query.legal_actions if isinstance(action, EndPhase))
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def test_hidden_card_tags_never_reach_the_human_record_stream() -> None:
+    """真一局界甄姬【洛神】：标签增删进引擎记录流，人类下发面**整条都没有**。
+
+    判据同时钉住：① 夹具真的挂过标签（否则"下发面没有"是空转）；② 引擎记录流保留全信息
+    （牌面 + 标签类型）；③ 人类查看者（含**本人**）收到的记录里一条标签 delta 都没有；
+    ④ 公开的「手牌数」不受标签影响（仍是 ``len(hand)``）。
+    """
+    from types import SimpleNamespace
+
+    from sgs.data import Suit
+    from sgs.engine import Engine
+
+    from support import PassPlayer, run_until
+
+    pack = load_content_pack(deck_profile="standard_108")
+    black = next(
+        index for index, card in enumerate(pack.deck.cards) if card.suit is Suit.SPADE
+    )
+    hand = (next(index for index, card in enumerate(pack.deck.cards) if card.type == "peach"),)
+    fillers = [index for index in range(len(pack.deck.cards)) if index not in {black, *hand}]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="jie_zhenji", hp=3, hp_max=3, hand=hand),
+            SeatSpec(),
+        ],
+        deck=(black, *fillers),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = [_LuoshenSeat(), PassPlayer()]
+    run_until(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.PLAY_PHASE
+        and running.pending.actor == 0,
+    )
+    query = engine.pending
+    engine.submit(next(a for a in query.legal_actions if isinstance(a, EndPhase)))
+    run_until(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.PLAY_PHASE
+        and running.pending.actor == 1,
+    )
+
+    records = [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) in ("tag_add", "tag_remove")
+    ]
+    assert {record.delta_type for record in records} == {"tag_add", "tag_remove"}, (
+        f"这一局必须真的挂过又清过标签（否则判据空转）：{records}"
+    )
+    raw = json.loads(record_json(records[0]))
+    assert "card" in raw and "tag_type" in raw, "引擎记录流保持全信息"
+
+    for record in engine.records:
+        if record.kind == "delta" and record.delta_type in ("tag_add", "tag_remove"):
+            for viewer in (0, 1, None):
+                payload = visible_record(record, viewer=viewer)
+                if viewer is None:
+                    assert payload is not None and payload["tag_type"] == "luoshen_hand", (
+                        "全知通道不裁剪"
+                    )
+                else:
+                    assert payload is None, (
+                        f"隐藏标签的下发面必须整条裁掉（viewer={viewer}）：{payload}"
+                    )
+    text = json.dumps(
+        [visible_record(record, viewer=0) for record in engine.records],
+        ensure_ascii=False,
+    )
+    for key in ('"tag_add"', '"tag_remove"', '"tag_type"', '"luoshen_hand"'):
+        assert key not in text, f"人类记录流里仍有标签字段 {key}"
+
+    snapshot = visible_snapshot(
+        SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+    )
+    seat_zero = snapshot["players"][0]
+    assert seat_zero["hand_count"] == len(state.player(0).hand), (
+        "标签不改变公开的「手牌数」：它是 len(hand)，不是手牌计数"
+    )
+
+
+_QIANXUN_ZONE_KEY = "1:hero.jie_luxun.qianxun"
+"""【谦逊】的放置区键 = ``{owner}:{skill_id}``（owner = 放置技能实例的持有者）。"""
+
+
+def _hero_zone_move(from_zone: ZoneRef, to_zone: ZoneRef) -> CardMoveRecord:
+    return CardMoveRecord(
+        seq=301,
+        frame_id=0,
+        depth=0,
+        cards=(HIDDEN_CARD,),
+        from_zone=from_zone,
+        to_zone=to_zone,
+        reason=MoveReason.PUT,
+        owner=1,
+    )
+
+
+def test_a_hero_card_zone_move_follows_the_placement_declaration(monkeypatch) -> None:  # noqa: ANN001
+    """HERO 区的牌面可见性 = ``PlacementDecl.visibility``（不是"HERO 一律隐藏"）。
+
+    【谦逊】在数据里声明为 ``public`` ⇒ 离开该区的移动对外人可见（票 19 的 no-leak 判据
+    原先把它当隐藏区：**过度隐藏**，不是泄露）。换成 ``hidden``（同一份声明的 monkeypatch，
+    走产品读取路径）⇒ 只给放置者 / 宿主；未登记的区键 fail-closed。
+    """
+    from sgs.data.models import PlacementDecl, PlacementReturn, PlacementVisibility
+
+    from sgs_web import visibility as visibility_module
+
+    return_move = _hero_zone_move(
+        ZoneRef(Zone.HERO, 1, _QIANXUN_ZONE_KEY), ZoneRef(Zone.HAND, 1)
+    )
+    put_move = _hero_zone_move(
+        ZoneRef(Zone.HAND, 1), ZoneRef(Zone.HERO, 1, _QIANXUN_ZONE_KEY)
+    )
+
+    # ① 数据声明 public：外人可见（原实现把 HERO 当隐藏区 ⇒ 这里会红）。
+    for move in (return_move, put_move):
+        payload = visible_record(move, viewer=0)
+        assert payload["cards"] and payload["cards"][0]["card_id"] == HIDDEN_CARD.card_id, (
+            f"公开放置区的移动被误脱敏：{payload}"
+        )
+
+    # ② 同一份声明换成 hidden：只给放置者 / 宿主本人（这里 owner = host = 1）。
+    hidden = PlacementDecl(
+        visibility=PlacementVisibility.HIDDEN,
+        return_timing=PlacementReturn.TURN_END,
+        extra_effect=False,
+    )
+    real_lookup = visibility_module.hero_placement_decls
+    monkeypatch.setattr(
+        visibility_module,
+        "hero_placement_decls",
+        lambda: dict(real_lookup()) | {"hero.jie_luxun.qianxun": hidden},
+    )
+    for move in (return_move, put_move):
+        foreign = visible_record(move, viewer=0)
+        _assert_card_faces_absent(foreign, (HIDDEN_CARD,))
+        allowed = visible_record(move, viewer=1)
+        assert allowed["cards"] and allowed["cards"][0]["card_id"] == HIDDEN_CARD.card_id, (
+            "隐藏区对放置者 / 宿主本人可见"
+        )
+        assert visible_record(move, viewer=None)["cards"], "全知通道不裁剪"
+
+    # ③ 未登记的区键（不是放置类技能）fail-closed：外人拿不到牌面。
+    unregistered = _hero_zone_move(
+        ZoneRef(Zone.HERO, 1, "1:hero.jie_luxun.lianying"), ZoneRef(Zone.HAND, 1)
+    )
+    _assert_card_faces_absent(visible_record(unregistered, viewer=0), (HIDDEN_CARD,))

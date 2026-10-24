@@ -11,7 +11,12 @@ A3 的口径按**记录类型**各有一条，全部只读记录字典：
   （同一份记录流里的下一条），本判据不需要回读引擎状态。
 - **武将牌上的牌区**（M6 票 19 / spec §区域）：整个区给不给看由放置技能的数据声明回答
   （``PlacementDecl.visibility``）——``public`` 谁都能看；``hidden`` 只给**放置技能的
-  持有者**与**被扣牌的宿主本人**；未登记的取值一律不可见（fail-closed）。
+  持有者**与**被扣牌的宿主本人**；未登记的取值一律不可见（fail-closed）。M6 票 20 把这
+  条判据接进 ``card_move`` 的牌面可见性（``hero_zone_ref_visible``）：区域引用里的
+  ``skill_instance`` 就是放置技能的全限定 id，故由数据声明回答、不在此处另抄名单。
+- **牌标签**（M6 票 20 / D12 第三项声明）：增删 delta 的可见性读标签类型的登记表——
+  ``PUBLIC`` 照发；``HIDDEN`` 对**任何**玩家载荷（含本人）都不下发；未登记的类型
+  fail-closed（``tag_visible``）。
 - ``viewer is None`` = 没有查看者（全知）：不裁剪（内部调用 / 测试需要原始记录）。
 
 两个下发口**必须同源**，否则同一件事在事件流与日志里口径不一：
@@ -20,8 +25,9 @@ A3 的口径按**记录类型**各有一条，全部只读记录字典：
   按这条判据把隐藏区的 ``cards`` 抹成空列表并下发 ``card_count``）；
 - ``sgs_web.narrative._Narrator._gain``——简易事件流写"获得 N 张牌"还是写牌名。
 
-判据住在这里而不是两边各写一份：投影与叙事都从这里 import（本模块只读记录字典，
-不 import 任何 ``sgs_web`` 模块，故不制造 ``projection`` ↔ ``narrative`` 的循环依赖）。
+判据住在这里而不是两边各写一份：投影与叙事都从这里 import（本模块只读记录字典 +
+``sgs.data`` 的登记表，不 import 任何 ``sgs_web`` 模块，故不制造 ``projection`` ↔
+``narrative`` 的循环依赖）。
 """
 
 from __future__ import annotations
@@ -29,12 +35,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Final
 
+from sgs.data import hero_placement_decls
+
 __all__ = [
     "PUBLIC_ZONES",
     "cards_visible",
     "deck_cards_visible",
+    "hero_zone_ref_visible",
     "hero_zone_visible",
     "identity_visible",
+    "placement_visibility",
+    "tag_visible",
 ]
 
 PUBLIC_ZONES: Final[frozenset[str]] = frozenset({"discard", "processing", "equip", "judge"})
@@ -46,6 +57,11 @@ def cards_visible(record: Mapping[str, Any], viewer: int | None) -> bool:
 
     ``record`` 是 ``card_move`` 的 JSON 形态（``from_zone`` / ``to_zone`` 各带 ``zone``
     与 ``seat``）；``viewer`` = 查看者座位，``None`` = 没有查看者 / 全知。
+
+    区域分三档：**公开区**（弃牌堆 / 处理区 / 装备区 / 判定区）照发；**隐藏区**
+    （牌堆 / 手牌）只放行查看者自己经手的那一侧；**武将牌上的牌区**（``hero``，M6 票 20
+    补）按放置技能的 ``PlacementDecl.visibility`` 回答——公开区谁都能看，隐藏区只给放置者
+    与宿主本人，未登记的区键 fail-closed（见 :func:`hero_zone_ref_visible`）。
     """
     if viewer is None:
         return True
@@ -59,7 +75,55 @@ def cards_visible(record: Mapping[str, Any], viewer: int | None) -> bool:
         return True
     if source == "hand" and from_zone.get("seat") == viewer:
         return True
+    if to == "hero" and hero_zone_ref_visible(to_zone, viewer):
+        return True
+    if source == "hero" and hero_zone_ref_visible(from_zone, viewer):
+        return True
     return False
+
+
+def placement_visibility(skill_instance: str | None) -> str | None:
+    """一个**武将牌上牌区**的可见性声明（``{owner}:{skill_id}`` → ``PlacementDecl.visibility``）。
+
+    区键的第二段是放置技能的**全限定 id**（:func:`sgs.skills.catalog.hero_card_zone_key`
+    的规范文本），故这里只读数据层的三项声明；键不合形、技能不在数据里、或技能没有
+    placement 声明，一律返回 ``None``（调用方 fail-closed：不可见）。
+    """
+    if not isinstance(skill_instance, str) or ":" not in skill_instance:
+        return None
+    _owner, _, skill_id = skill_instance.partition(":")
+    decl = hero_placement_decls().get(skill_id)
+    if decl is None:
+        return None
+    return getattr(decl.visibility, "value", decl.visibility)
+
+
+def hero_zone_ref_visible(zone_ref: Mapping[str, Any], viewer: int | None) -> bool:
+    """一个 HERO 区域引用对 ``viewer`` 是否可见（牌面级别；``viewer=None`` = 全知）。
+
+    ``zone_ref`` 是记录里的 ``from_zone`` / ``to_zone``：``seat`` = 武将牌的**宿主**，
+    ``skill_instance`` = （放置技能持有者, 技能 id）的规范文本。可见性声明缺失时
+    **fail-closed**（不把新写的声明当成公开区）。
+    """
+    if viewer is None:
+        return True
+    skill_instance = zone_ref.get("skill_instance")
+    if not isinstance(skill_instance, str) or ":" not in skill_instance:
+        return False
+    owner_text, _, _skill_id = skill_instance.partition(":")
+    try:
+        owner = int(owner_text)
+    except ValueError:
+        return False
+    visibility = placement_visibility(skill_instance)
+    if visibility is None:
+        return False
+    return hero_zone_visible(
+        visibility,
+        owner=owner,
+        host=zone_ref.get("seat"),
+        viewer=viewer,
+    )
 
 
 def deck_cards_visible(viewer: int | None) -> bool:
@@ -77,6 +141,28 @@ def identity_visible(record: Mapping[str, Any], viewer: int | None) -> bool:
     if viewer is None:
         return True
     return record.get("seat") == viewer or record.get("identity") == "lord"
+
+
+def tag_visible(tag_type: str | None, viewer: int | None) -> bool:
+    """一个**牌标签**的增删是否可下发（spec §投影与记录流 / D12 的第三项声明）。
+
+    可见性由标签类型的登记表回答（``sgs.data.CARD_TAG_TYPES[...].visibility``）：
+    ``PUBLIC`` 照发；``HIDDEN`` 对**任何**玩家载荷（含本人）都不下发；未登记的类型
+    fail-closed。``viewer is None`` = 全知通道，不裁剪（与其它判据同一条口径）。
+    """
+    if viewer is None:
+        return True
+    from sgs.data import CARD_TAG_TYPES, CardTagType
+
+    try:
+        tag = CardTagType(tag_type)
+    except ValueError:
+        return False
+    spec = CARD_TAG_TYPES.get(tag)
+    if spec is None:
+        return False
+    return getattr(spec.visibility, "value", spec.visibility) == "public"
+
 
 def hero_zone_visible(
     visibility: str, *, owner: int | None, host: int | None, viewer: int | None

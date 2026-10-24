@@ -36,6 +36,47 @@ def call(url: str, payload: dict[str, Any] | None = None) -> tuple[int, Any]:
             return error.code, {"error": body}
 
 
+def _identity_win_failure(
+    game_end: dict[str, Any], known: dict[int, str | None]
+) -> str | None:
+    """终局 ``side`` / ``winners`` 与**公开可知**身份的一致性（``None`` = 一致）。
+
+    ``known`` 只装三类公开事实：本人身份、主公身份、``identity_reveal`` 亮明过的身份；
+    暗置的对手身份不猜。规则口径与 `06`（§5「程序化约定与偏离一手」）一致：主忠胜 = 主公在胜方且胜方没有反贼 / 内奸；
+    反贼胜 = 胜方没有主公 / 忠臣 / 内奸；内奸胜 = 胜方恰一人且（若已知）是内奸。
+    """
+    side = game_end.get("side")
+    winners = tuple(game_end.get("winners") or ())
+    if game_end.get("result") == "draw":
+        return None if side is None and not winners else "平局却带 side / winners"
+    if side is None:
+        return None  # 无身份局：winner 是唯一存活座位，另有判据
+    if not winners:
+        return "身份局胜局必须带 winners"
+    if side == "lord":
+        lord_seats = [seat for seat, identity in known.items() if identity == "lord"]
+        if lord_seats and lord_seats[0] not in winners:
+            return "主公不在主忠胜方"
+        wrong = [seat for seat in winners if known.get(seat) in ("rebel", "renegade")]
+        if wrong:
+            return f"主忠胜方里出现了反贼 / 内奸：{wrong}"
+    elif side == "rebel":
+        wrong = [
+            seat for seat in winners if known.get(seat) in ("lord", "loyalist", "renegade")
+        ]
+        if wrong:
+            return f"反贼胜方里出现了主公 / 忠臣 / 内奸：{wrong}"
+    elif side == "renegade":
+        if len(winners) != 1:
+            return "内奸胜的胜方必须恰一人"
+        identity = known.get(winners[0])
+        if identity is not None and identity != "renegade":
+            return f"内奸胜方的已知身份不是内奸：{identity}"
+    else:
+        return f"未知的 side：{side!r}"
+    return None
+
+
 def play(
     base: str,
     *,
@@ -44,6 +85,7 @@ def play(
     timeout: float | None,
     max_answers: int,
     deck_profile: str | None = None,
+    expect_mixed: bool = False,
 ) -> int:
     create: dict[str, Any] = {
         "player_count": players,
@@ -70,6 +112,7 @@ def play(
     human_answers = 0
     queries = 0
     game_end: dict[str, Any] | None = None
+    reveals: list[dict[str, Any]] = []
 
     while not body["finished"]:
         pending = body["pending"]
@@ -101,6 +144,8 @@ def play(
                     rejected += 1
             if record["kind"] == "game_end":
                 game_end = record
+            if record.get("delta_type") == "identity_reveal":
+                reveals.append(record)
 
     if game_end is None:
         print("FAIL 终局没有 game_end 记录")
@@ -120,6 +165,45 @@ def play(
         f"session={session_id} seed={seed} 人数={players} 询问={queries} "
         f"结果={game_end['result']} 获胜座位={game_end['winners']} 原因={game_end['reason']}"
     )
+
+    # ① 混合池（M6 票 20 / spec P1-2）：默认将池是标准版 + 界版的并集，8 人身份局必须真的
+    # 同时抽到两版；只跑标准池的旧判据看不出"混合局可玩"。
+    snapshot = body["snapshot"]
+    # 逐座位武将 id 的真源是会话顶层的 ``heroes``（`PlayerPublic.hero` 带 ``exclude``，
+    # 不进投影载荷——那是为了 47 条金录像的字节不变）。
+    hero_ids = [hero_id for hero_id in body.get("heroes") or () if hero_id]
+    if expect_mixed:
+        if not hero_ids:
+            print("FAIL 混合池：快照里没有任何武将（无武将模式不是混合池）")
+            return 1
+        jie = [hero for hero in hero_ids if str(hero).startswith("jie_")]
+        standard = [hero for hero in hero_ids if not str(hero).startswith("jie_")]
+        if not jie or not standard:
+            print(f"FAIL 混合池：这一局没有同时抽到标准 / 界版两版武将：{sorted(hero_ids)}")
+            return 1
+        print(
+            f"PASS 混合池：标准 {len(standard)} 名 + 界版 {len(jie)} 名 "
+            f"（{', '.join(sorted(hero_ids))}）"
+        )
+
+    # ② 终局与身份胜负一致（spec P1-2）：用**公开可知**的身份（本人 / 主公 / 已亮明）
+    # 复核 game_end 的 side + winners；不可知的暗置身份不猜。
+    known: dict[int, str | None] = {}
+    for player in snapshot.get("players") or []:
+        if player.get("seat") == snapshot.get("seat"):
+            known[player["seat"]] = player.get("identity")
+        elif player.get("identity") == "lord":
+            known[player["seat"]] = "lord"
+    for reveal in reveals:
+        known[reveal["seat"]] = reveal.get("identity")
+    failure = _identity_win_failure(game_end, known)
+    if failure is not None:
+        print(f"FAIL 终局与身份胜负不一致：{failure}（已知身份 {known}）")
+        return 1
+    if game_end.get("side") is not None:
+        print(
+            f"PASS 终局与身份胜负一致：side={game_end['side']} winners={game_end['winners']}"
+        )
 
     # 不泄露（判据 2）：人类座位收到的响应体里，**存活**的对手身份必须是 None（主公除外——
     # 主公身份公开），且任何对手都不出现手牌牌面；牌堆只有数量。
@@ -607,7 +691,9 @@ _M5_FIXTURES = ("fire_attack", "reforge", "wine")
 _M5_DECK_PROFILE = "standard_ex_160"
 
 
-def _m5_create(base: str, fixture: str) -> tuple[str, int, int, dict[str, Any]] | None:
+def _m5_create(
+    base: str, fixture: str, *, profile: str = _M5_DECK_PROFILE
+) -> tuple[str, int, int, dict[str, Any]] | None:
     status, body = call(
         f"{base}/api/sessions",
         {
@@ -620,8 +706,8 @@ def _m5_create(base: str, fixture: str) -> tuple[str, int, int, dict[str, Any]] 
     if status != 200:
         print(f"FAIL 固定 tape（{fixture}）：建局失败 HTTP {status} {body}")
         return None
-    if body.get("deck_profile") != _M5_DECK_PROFILE:
-        print(f"FAIL 固定 tape（{fixture}）：档位不是 {_M5_DECK_PROFILE}")
+    if body.get("deck_profile") != profile:
+        print(f"FAIL 固定 tape（{fixture}）：档位不是 {profile}")
         return None
     if body.get("human_seat") != 0 or body.get("player_count") != 2:
         print(f"FAIL 固定 tape（{fixture}）：建局面不是「2 人 / 人类座 0」")
@@ -652,9 +738,15 @@ def _m5_play(
     fixture: str,
     choose,
     observe,
+    *,
+    profile: str = _M5_DECK_PROFILE,
+    state: dict[str, Any] | None = None,
 ) -> int:
-    """跑完一条固定 tape：每次人类询问一条真 POST，逐条收集记录与叙事。"""
-    created = _m5_create(base, fixture)
+    """跑完一条固定 tape：每次人类询问一条真 POST，逐条收集记录与叙事。
+
+    ``state`` 可由调用方传入（M6 的 tape 用它收集"这个原语真的发生了"的旗标，跑完再断言）。
+    """
+    created = _m5_create(base, fixture, profile=profile)
     if created is None:
         return 1
     session_id, cursor, log_seq, body = created
@@ -664,7 +756,7 @@ def _m5_play(
     records: list[dict[str, Any]] = []
     narrative: list[str] = []
     game_end: dict[str, Any] | None = None
-    state: dict[str, Any] = {}
+    state = {} if state is None else state
 
     def collect(payload: dict[str, Any]) -> None:
         for record in payload.get("records") or []:
@@ -1040,6 +1132,232 @@ def m5_fixed_tapes(base: str) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# M6 票 20：三条**构造 tape**（觉醒 / 额外回合 / 区域放置），各至少一次真实往返。
+# 局面在 `tests/support/m6_fixture_server.py`，档位 standard_108。每次人类询问都是一条
+# 真 POST；``observe`` 在拿到的响应体上核对"这个原语真的发生了"。``m6_tape_handlers``
+# 把同一份 ``(choose, observe)`` 交给 pytest 的 real-handler 用例复用，不另抄一份计划。
+# ---------------------------------------------------------------------------
+
+_M6_PROFILE = "standard_108"
+
+
+def _m6_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    return [record for record in payload.get("records") or [] if record.get("kind")]
+
+
+def _play_phase_use(pending: dict[str, Any], *, card_type: str, targets: list[int]):
+    return _pick_action(pending, kind="UseCard", card_type=card_type, targets=targets)
+
+
+def _awakening_handlers():
+    """界徐庶【潜心】觉醒（强制）后，人类发动 ☆【荐言】——两次选项询问都是真往返。"""
+
+    def choose(pending, state):  # noqa: ANN001
+        kind = pending.get("kind")
+        if kind == "PLAY_PHASE":
+            if not state.get("slashed"):
+                slash = _play_phase_use(pending, card_type="slash", targets=[1])
+                if slash is not None:
+                    state["slashed"] = True
+                    return slash
+            if state.get("awakened") and not state.get("jianyan"):
+                for action in pending.get("legal_actions") or []:
+                    if action.get("skill_id") == "hero.jie_xushu.jianyan":
+                        state["jianyan"] = True
+                        return action
+            if state.get("jianyan"):
+                slash = _play_phase_use(pending, card_type="slash", targets=[1])
+                if slash is not None:
+                    return slash
+            return _pick_action(pending, kind="EndPhase")
+        if kind == "SELECT_OPTION":
+            skill_id = str(pending.get("skill_id") or "")
+            if skill_id.startswith("jianyan:type"):
+                for action in pending.get("legal_actions") or []:
+                    if action.get("choice") == "basic":
+                        return action
+            if skill_id.startswith("jianyan:seat"):
+                for action in pending.get("legal_actions") or []:
+                    if action.get("choice") == "seat:0":
+                        return action
+        return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
+
+    def observe(kind, body, pending, state) -> bool:  # noqa: ANN001
+        for record in _m6_records(body):
+            if record.get("delta_type") == "hp_max_change" and record.get("seat") == 0:
+                state["awakened"] = True
+            if (
+                record.get("delta_type") == "skill_gain"
+                and record.get("skill_id") == "hero.jie_xushu.jianyan"
+            ):
+                state["awakened"] = True
+        if kind == "pending" and state.get("awakened"):
+            # ☆【荐言】是**出牌阶段裸候选**（不是 SKILL_ACTIVATION 询问）：觉醒后它应当
+            # 出现在候选清单里，人类就是在这条骨架上经 HTTP 发动的。
+            if any(
+                action.get("skill_id") == "hero.jie_xushu.jianyan"
+                for action in pending.get("legal_actions") or []
+            ):
+                state["jianyan_query"] = True
+        return True
+
+    return choose, observe
+
+
+def _extra_turn_handlers():
+    """界吕蒙【博图】：弃四花色 ⇒ 人类应答"是否发动" ⇒ 额外回合（同座位连着两个回合）。"""
+
+    def choose(pending, state):  # noqa: ANN001
+        kind = pending.get("kind")
+        if kind == "DISCARD":
+            for action in pending.get("legal_actions") or []:
+                cards = action.get("cards") or []
+                if len({card.get("suit") for card in cards}) == 4:
+                    return action
+            return (pending.get("legal_actions") or [None])[0]
+        if kind == "SKILL_ACTIVATION":
+            skill_id = str(pending.get("skill_id") or "")
+            if skill_id == "hero.jie_lvmeng.botu":
+                for action in pending.get("legal_actions") or []:
+                    if action.get("kind") == "ActivateSkill":
+                        state["botu"] = True
+                        return action
+            return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
+        if kind == "PLAY_PHASE":
+            if state.get("extra"):
+                slash = _play_phase_use(pending, card_type="slash", targets=[1])
+                if slash is not None:
+                    return slash
+            return _pick_action(pending, kind="EndPhase")
+        return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
+
+    def observe(kind, body, pending, state) -> bool:  # noqa: ANN001
+        for record in _m6_records(body):
+            if record.get("delta_type") == "turn_change" and record.get("extra"):
+                state["extra"] = True
+        if (body.get("snapshot") or {}).get("turn_extra"):
+            state["extra"] = True
+        return True
+
+    return choose, observe
+
+
+def _hero_zone_handlers():
+    """界陆逊【谦逊】：人类应答后全部手牌置于武将牌上；同帧【连营】也由人类应答。"""
+
+    def choose(pending, state):  # noqa: ANN001
+        kind = pending.get("kind")
+        if kind == "PLAY_PHASE":
+            if state.get("qianxun"):
+                slash = _play_phase_use(pending, card_type="slash", targets=[1])
+                if slash is not None:
+                    return slash
+            return _pick_action(pending, kind="EndPhase")
+        if kind == "SKILL_ACTIVATION":
+            skill_id = str(pending.get("skill_id") or "")
+            if skill_id in ("hero.jie_luxun.qianxun", "hero.jie_luxun.lianying"):
+                for action in pending.get("legal_actions") or []:
+                    if action.get("kind") == "ActivateSkill":
+                        state[skill_id] = True
+                        return action
+            return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
+        if kind == "SELECT_OPTION":
+            skill_id = str(pending.get("skill_id") or "")
+            if skill_id.startswith("lianying:") and not state.get("lianying_seat"):
+                for action in pending.get("legal_actions") or []:
+                    if action.get("choice") == "seat:0":
+                        state["lianying_seat"] = True
+                        return action
+            return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
+        return _pick_action(pending, kind="Pass") or (pending.get("legal_actions") or [None])[0]
+
+    def observe(kind, body, pending, state) -> bool:  # noqa: ANN001
+        for record in _m6_records(body):
+            if (
+                record.get("delta_type") == "card_move"
+                and (record.get("to_zone") or {}).get("zone") == "hero"
+            ):
+                state["placed"] = True
+                state["qianxun"] = True
+        if kind == "pending" and state.get("placed"):
+            players = (body.get("snapshot") or {}).get("players") or []
+            seat_zero = next(
+                (player for player in players if player.get("seat") == 0), None
+            )
+            if seat_zero is not None:
+                state["hero_zones"] = state.get("hero_zones") or bool(
+                    seat_zero.get("hero_zones")
+                )
+        return True
+
+    return choose, observe
+
+
+M6_TAPES = ("awakening", "extra_turn", "hero_zone")
+"""三条 tape 的名字（与 ``tests/support/m6_fixture_server.FIXTURES`` 的键一致）。"""
+
+M6_TAPE_EXPECTATIONS: dict[str, tuple[str, ...]] = {
+    "awakening": ("awakened", "jianyan_query", "jianyan"),
+    "extra_turn": ("botu", "extra"),
+    "hero_zone": ("placed", "qianxun", "hero_zones"),
+}
+"""每条 tape 必须命中的观察旗标（人类载荷上核对；缺一即 FAIL）。"""
+
+M6_TAPE_FAILURES: dict[str, dict[str, str]] = {
+    "awakening": {
+        "awakened": "记录流里没有【潜心】觉醒（hp_max_change / skill_gain）",
+        "jianyan_query": "觉醒后人类没有被问【荐言】的发动",
+        "jianyan": "人类没有发动 ☆【荐言】",
+    },
+    "extra_turn": {
+        "botu": "人类没有应答【博图】的发动",
+        "extra": "没有落 turn_change(extra=True) / turn_extra",
+    },
+    "hero_zone": {
+        "placed": "没有牌被置于武将牌上（HERO 区域）",
+        "qianxun": "【谦逊】的发动没有被人类应答",
+        "hero_zones": "查看者的快照里看不到武将牌上的牌区",
+    },
+}
+
+
+def m6_tape_handlers(name: str):
+    """一条 M6 tape 的 ``(choose, observe)``；HTTP 客户端与 pytest 共用同一份计划。"""
+    return {
+        "awakening": _awakening_handlers,
+        "extra_turn": _extra_turn_handlers,
+        "hero_zone": _hero_zone_handlers,
+    }[name]()
+
+
+def _run_m6_tape(base: str, name: str) -> int:
+    choose, observe = m6_tape_handlers(name)
+    state: dict[str, Any] = {}
+    code = _m5_play(base, name, choose, observe, profile=_M6_PROFILE, state=state)
+    if code != 0:
+        return code
+    missing = [flag for flag in M6_TAPE_EXPECTATIONS[name] if not state.get(flag)]
+    if missing:
+        for flag in missing:
+            print(f"FAIL M6 固定 tape（{name}）：{M6_TAPE_FAILURES[name][flag]}")
+        return 1
+    return 0
+
+
+def m6_fixed_tapes(base: str) -> int:
+    """三条 M6 构造 tape（觉醒 / 额外回合 / 区域放置），逐条真 HTTP；任一失败即 FAIL。"""
+    failures = 0
+    for name in M6_TAPES:
+        if _run_m6_tape(base, name) != 0:
+            failures += 1
+            print(f"FAIL M6 固定 tape（{name}）：未通过")
+    if failures:
+        return 1
+    print("PASS M6 固定 tape：3 条构造局面全部经真 HTTP 跑完（觉醒 / 额外回合 / 区域放置）")
+    return 0
+
+
 def probe_skills(base: str) -> int:
     """建局响应必须带**本人**技能清单（刀 4）；引擎的可见面里没有技能。"""
     status, body = call(
@@ -1075,7 +1393,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--max-answers", type=int, default=4000)
     parser.add_argument("--probe-skills", action="store_true")
     parser.add_argument(
-        "--tape", choices=("fire_attack", "wine", "m5_fixed"), default=None
+        "--expect-mixed",
+        action="store_true",
+        help="断言这一局是标准版 + 界版的混合池（8 人身份局的两版武将都在场）",
+    )
+    parser.add_argument(
+        "--tape", choices=("fire_attack", "wine", "m5_fixed", "m6_fixed"), default=None
     )
     args = parser.parse_args(argv)
     if args.probe_skills:
@@ -1086,6 +1409,8 @@ def main(argv: list[str]) -> int:
         return wine_tape(args.base)
     if args.tape == "m5_fixed":
         return m5_fixed_tapes(args.base)
+    if args.tape == "m6_fixed":
+        return m6_fixed_tapes(args.base)
     if args.seed is None:
         parser.error("--seed 必填（除非用 --probe-skills）")
     return play(
@@ -1095,6 +1420,7 @@ def main(argv: list[str]) -> int:
         timeout=args.timeout,
         max_answers=args.max_answers,
         deck_profile=args.deck_profile,
+        expect_mixed=args.expect_mixed,
     )
 
 

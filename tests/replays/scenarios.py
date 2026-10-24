@@ -43,12 +43,13 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .goals import PREACTIVATION_CANCEL_SKILL, goal_for
-from . import m5
+from . import m5, m6
 
 __all__ = [
     "M1_DECK_PROFILE",
     "M2_DECK_PROFILE",
     "M5_SCENARIOS",
+    "M6_SCENARIOS",
     "PREACTIVATION_CANCEL_SCENARIO",
     "SCENARIOS",
     "Scenario",
@@ -498,12 +499,64 @@ M5_SCENARIOS: dict[str, Scenario] = {
 计划），不是随机种子；回放侧用同一份构造（:func:`engine_for`）重开。
 """
 
+M6_SCENARIOS: dict[str, Scenario] = {
+    # M6 票 20：5 条**构造局面**基准，覆盖 spec §投影与记录流 的新原语（技能失效 / 获得、
+    # 武将牌上的牌区、额外回合与轮次、标签增删）。局面写死在 ``replays/m6.py``，种子只是
+    # header 里的记录（与 M5 同姿态）。
+    "56-jie-guanyu-yijue-suppress": Scenario(
+        slug="56-jie-guanyu-yijue-suppress",
+        seed=1001,
+        max_turns=40,
+        player_count=2,
+        deck_profile=m6.M6_DECK_PROFILE,
+        driver="m6",
+    ),
+    "57-jie-xushu-awakening": Scenario(
+        slug="57-jie-xushu-awakening",
+        seed=1002,
+        max_turns=40,
+        player_count=2,
+        deck_profile=m6.M6_DECK_PROFILE,
+        driver="m6",
+    ),
+    "58-jie-luxun-hero-zone": Scenario(
+        slug="58-jie-luxun-hero-zone",
+        seed=1003,
+        max_turns=40,
+        player_count=2,
+        deck_profile=m6.M6_DECK_PROFILE,
+        driver="m6",
+    ),
+    "59-jie-lvmeng-extra-turn": Scenario(
+        slug="59-jie-lvmeng-extra-turn",
+        seed=1004,
+        max_turns=40,
+        player_count=2,
+        deck_profile=m6.M6_DECK_PROFILE,
+        driver="m6",
+    ),
+    "60-jie-zhenji-luoshen-tags": Scenario(
+        slug="60-jie-zhenji-luoshen-tags",
+        seed=1005,
+        max_turns=40,
+        player_count=2,
+        deck_profile=m6.M6_DECK_PROFILE,
+        driver="m6",
+    ),
+}
+"""5 条 M6 界局构造基准（票 20）：覆盖 M6 新原语（spec §投影与记录流）。
+
+驱动是 ``"m6"``：从构造局面起跑（``Engine.from_state`` + :mod:`replays.m6` 的脚本计划），
+回放侧用同一份构造（:func:`engine_for`）重开。"""
+
+
 SCENARIOS: dict[str, Scenario] = {
     **M1_SCENARIOS,
     **M2_SCENARIOS,
     **M3_SCENARIOS,
     **SCRIPTED_SCENARIOS,
     **M5_SCENARIOS,
+    **M6_SCENARIOS,
 }
 
 
@@ -1183,6 +1236,8 @@ def engine_for(
         pack = load_content_pack(deck_profile=scenario.deck_profile)
     if scenario.slug in m5.M5_SETUPS:
         return m5.build_engine(scenario.slug, seed=seed, pack=pack)
+    if scenario.slug in m6.M6_SETUPS:
+        return m6.build_engine(scenario.slug, seed=seed, pack=pack)
     return Engine.new_game(
         seed=seed,
         rule_config=rule_config or RuleConfig(player_count=scenario.player_count),
@@ -1211,6 +1266,15 @@ def _run_scripted(
         assert enter is None, "M5 构造基准没有取消 / 不发动两条路径"
         pack = load_content_pack(deck_profile=scenario.deck_profile)
         players = m5.build_players(
+            slug,
+            pack=pack,
+            player_count=scenario.player_count,
+            recording=recording,
+        )
+    elif scenario.driver == "m6":
+        assert enter is None, "M6 构造基准没有取消 / 不发动两条路径"
+        pack = load_content_pack(deck_profile=scenario.deck_profile)
+        players = m6.build_players(
             slug,
             pack=pack,
             player_count=scenario.player_count,
@@ -1273,10 +1337,10 @@ def _record_scripted(slug: str, scenario: Scenario) -> Engine:
     else:
         engine, recording = _run_scripted(scenario, slug)
     assert recording.goal_done, f"{slug}：目标段没有命中（seed={scenario.seed}）"
-    if scenario.driver == "m5":
-        # 脚本宣布命中 ≠ 记录流里有那回事：M5 的 8 条**再独立复读一遍**事后判据。
+    if scenario.driver in ("m5", "m6"):
+        # 脚本宣布命中 ≠ 记录流里有那回事：构造基准**再独立复读一遍**事后判据。
         assert goal_for(slug)(engine), (
-            f"{slug}：构造局面的计划走完了，但记录流没有命中 goals.M5_GOALS 的判据"
+            f"{slug}：构造局面的计划走完了，但记录流没有命中 goals 里的判据"
         )
     return engine
 

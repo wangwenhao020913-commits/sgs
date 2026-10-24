@@ -1233,6 +1233,16 @@ def _fill_activation(
         if not options:
             return None
         if all(text.startswith(_SEAT_PREFIX) for text in options):
+            if (str(skill_id), str(step.name)) in _HAND_REQUIRED_SEAT_STEPS:
+                # 只用**公开**的手牌数筛：空手目标会在展示 / 选牌步整步取消，AI 反复选它
+                # 就是空操作死循环（见 :data:`_HAND_REQUIRED_SEAT_STEPS`）。
+                options = tuple(
+                    text
+                    for text in options
+                    if query.view.players[int(text.removeprefix(_SEAT_PREFIX))].hand_count > 0
+                )
+                if not options:
+                    return None
             chosen = _pick_options(
                 step, options, query, short, conversion=conversion
             )
@@ -1693,6 +1703,21 @@ def _score_shizhan(query: Query, action: Action, view: PlayerView) -> float:
     return 1.0 if slashes else -_UNKNOWN_CARD_VALUE
 
 
+_HAND_REQUIRED_SEAT_STEPS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # 【义绝】的目标必须"有手牌"（规则 §十九 L2106：选择一名有手牌的其他角色）。
+        ("hero.jie_guanyu.yijue", "seat"),
+    }
+)
+"""座位步要求"目标有手牌"的技能（**公开的** ``hand_count`` 可判，不读暗牌）。
+
+引擎的候选池**故意不按手牌收缩**（【义绝】的池只按"存活 / 不是自己"定：展示步为空时
+整步取消、提交点之前就停，重入不会因目标已被拿走手牌而误取消）。代价是 AI 可能选中
+一个空手目标：展示步空面 ⇒ 取消 ⇒ 不落「阶段已用」位 ⇒ 同一个出牌阶段里反复发动同一
+个空操作（32 种子混合池扫里真出现过）。故 AI 用**公开**的手牌数避开空手目标。
+"""
+
+
 SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]] = {
     # 魏
     "hero.caocao.jianxiong": (_constant(4.0), "受伤后获得造成伤害的牌：净赚一张，恒发动"),
@@ -1795,6 +1820,50 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(5.0),
         "执行一个额外的回合（完整六阶段）：一次免费的整回合，收益远高于一次用牌；"
         "「每轮限 X 次」由技能前提自己收住",
+    ),
+    # M6 票 20：票 04–11 的界将补齐语义条目（此前只有表 05–18 的批次，正向检查只看标准表
+    # 时看不出来）。觉醒技（潜心 / 勤学）**强制发动**、引擎从不出示"是否发动"询问，条目取
+    # 0.0 并在说明里点名；它们由构造测试与 M6 金录像覆盖，不是"AI 主动发动"。
+    "hero.jie_guanyu.wusheng": (
+        _constant(2.0),
+        "红色牌当【杀】：与标准【武圣】同一条转化，多一条进攻路径",
+    ),
+    "hero.jie_guanyu.yijue": (
+        _constant(2.5),
+        "弃一张牌令目标展示一张手牌：红则拿走并可回复、黑则封住其技能与手牌——两条都为正",
+    ),
+    "hero.jie_machao.tieqi": (
+        _constant(2.5),
+        "使用【杀】后判定，通过则目标不可响应：与标准【铁骑】同一条助命中",
+    ),
+    "hero.jie_zhangfei.tishen": (
+        _constant(3.5),
+        "限定技：准备阶段回复至体力上限并摸『实际回复值』张——一次大回复 + 补牌",
+    ),
+    "hero.jie_xushu.zhuhai": (
+        _constant(2.0),
+        "其他角色的结束阶段对其使用一张【杀】：回合外的一刀，条件由距离 / 次数收住",
+    ),
+    "hero.jie_xushu.qianxue": (
+        _constant(0.0),
+        "觉醒技**强制发动**（引擎不出示『是否发动』询问）：条目只为满足正向检查，"
+        "由构造测试与 M6 金录像覆盖",
+    ),
+    "hero.jie_xushu.jianyan": (
+        _constant(2.5),
+        "☆ 出牌阶段：看牌堆顶一张按类别 / 颜色亮出并令一名男性角色获得——净赚一张",
+    ),
+    "hero.jie_lvmeng.keji": (
+        _score_keji,
+        "未出过【杀】就跳过弃牌阶段：与标准【克己】同口径，保住超出上限的手牌",
+    ),
+    "hero.jie_lvmeng.qinxue": (
+        _constant(0.0),
+        "觉醒技**强制发动**（引擎不出示『是否发动』询问）：减上限后由选项步问摸两张 / 回复",
+    ),
+    "hero.jie_lvmeng.gongxin": (
+        _constant(2.5),
+        "☆ 出牌阶段：观看一名其他角色的手牌并处理其中一张红桃牌——信息 + 一张牌",
     ),
     # M6 票 14：界·魏 A（曹操 / 司马懿 / 张辽 / 许褚）
     "hero.jie_caocao.jianxiong": (

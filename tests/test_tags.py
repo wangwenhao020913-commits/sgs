@@ -61,6 +61,7 @@ from sgs.state import (
     QueryKind,
     SelectOption,
     UseCard,
+    Zone,
     project,
 )
 from sgs.timing import Timing
@@ -499,6 +500,65 @@ def test_jie_zhenji_tags_the_black_card_gained_by_luoshen_for_the_turn() -> None
     assert zhenji.discard_queries == [], "计数排除生效 ⇒ 弃牌阶段不发询问"
     assert state.card_tags == {}, "回合末清除标签"
     assert discard_count(state, player) == 1, "计数随回合末恢复"
+
+
+def _tag_events(engine, delta_type: str) -> list:
+    return [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == delta_type
+    ]
+
+
+def test_tag_additions_and_removals_reach_the_record_stream() -> None:
+    """spec §投影与记录流：标签增删**进记录流**（M6 票 20 补的 delta）。
+
+    判据只读记录流：① 【洛神】发动后落一条 ``tag_add``，载荷 = 那张牌 + 标签类型 +
+    来源实例；② 它落在**这次技能发动**之后（不是开局的计划）；③ 回合末清理落一条同形的
+    ``tag_remove``。标签不是牌：两条都不进 ``card_move``，也不改牌的位置——牌在判定后从
+    处理区进弃牌堆、再被【洛神】拿进手牌，标签在这之间挂上（标签与区域无关）。
+    """
+    engine, state, zhenji = _jie_zhenji_engine()
+    _to_play_phase(engine, zhenji)
+
+    added = _tag_events(engine, "tag_add")
+    assert len(added) == 1, f"【洛神】获得黑牌应落一条 tag_add：{added}"
+    event = added[0]
+    assert event.card.card_id == BLACK_SLASH, "载荷 = 被挂标签的那张实体牌"
+    assert event.tag_type is CardTagType.LUOSHEN_HAND
+    assert event.owner == 0 and event.skill_id == JIE_LUOSHEN, "来源实例 = 哪个技能挂的"
+
+    activation = next(
+        record
+        for record in engine.records
+        if record.kind == "action" and getattr(record.action, "skill_id", None) == JIE_LUOSHEN
+    )
+    assert activation.seq < event.seq, "标签由这次【洛神】发动挂上（顺序可读）"
+
+    _to_next_play_phase(engine, zhenji)
+    removed = _tag_events(engine, "tag_remove")
+    assert len(removed) == 1, f"回合末清除应落一条 tag_remove：{removed}"
+    assert removed[0].card.card_id == BLACK_SLASH
+    assert removed[0].tag_type is CardTagType.LUOSHEN_HAND
+    assert removed[0].owner == 0 and removed[0].skill_id == JIE_LUOSHEN
+
+
+def test_losing_or_suppressing_the_source_reports_the_tag_removal() -> None:
+    """随来源实例消失的清除（失去 / 失效）同样进记录流：一条 ``tag_remove``。"""
+    engine, state, zhenji = _jie_zhenji_engine()
+    _to_play_phase(engine, zhenji)
+    assert len(_tag_events(engine, "tag_add")) == 1
+
+    assert engine.lose_skill(0, JIE_LUOSHEN) is True
+    removed = _tag_events(engine, "tag_remove")
+    assert len(removed) == 1, "失去【洛神】⇒ 一条 tag_remove（不是静默清状态）"
+    assert removed[0].card.card_id == BLACK_SLASH
+
+    engine2, state2, zhenji2 = _jie_zhenji_engine()
+    _to_play_phase(engine2, zhenji2)
+    assert engine2.suppress_skills(0, "hero.jie_guanyu.yijue") is True
+    removed2 = _tag_events(engine2, "tag_remove")
+    assert len(removed2) == 1, "失效【洛神】⇒ 同样落一条 tag_remove"
 
 
 def test_using_the_tagged_card_does_not_disturb_the_count() -> None:

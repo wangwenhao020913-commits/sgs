@@ -147,6 +147,8 @@ from sgs.state import (
     Slot,
     SlotKind,
     Step,
+    TagAddDelta,
+    TagRemoveDelta,
     TurnChangeDelta,
     UseCard,
     WindowCause,
@@ -216,6 +218,16 @@ _MOVE_EVENTS = "move_events"
 让"第 n 次移动"与"第 n 次重入"区分开：这次移动的幂等键带上它的序号
 （见 :meth:`Engine._move_key`），故"同一次移动"只落一条记录、只派发一遍。
 帧外移动没有帧可挂标记，那份幂等键住 :attr:`Engine._move_recorded`。
+"""
+
+_DISPATCH_SCOPE = "dispatch_scope"
+"""帧私有槽名：**当前这一次派发的范围键**（M6 票 20 的询问缓存修正）。
+
+钩子的"是否发动 / 选哪个"询问按帧内缓存（挂起重入时不重发），旧键只有
+``(skill, actor)``：同一帧里同一技能的**第二次触发**会复用上一次的答案——人类 / AI
+根本没被问过。本槽在 :meth:`Engine._dispatch_move_after` 里写成这次移动的幂等键
+（``(时机, 牌, 本帧第几次移动)``），续跑帧从派发帧继承，故"同一次触发"的重入仍命中
+同一槽，而"同帧的下一次触发"是另一个槽。
 """
 
 _JUDGE_SUBSTITUTION = "judge_substitution"
@@ -458,6 +470,15 @@ class Engine:
         ``start_skill`` / ``ask_skill_activation`` 据这个身份把载荷原样挂进帧，交给
         ``run_flow`` 跳过本人应答的步骤——而不是当成面内位置去索引。
         """
+
+        self._activation_frame: Frame | None = None
+        """最近一次 ``SKILL_ACTIVATION`` 询问的**承载帧**（票 20）。
+
+        帧外时机的钩子（阶段体 / 回合末）用**不压栈**的持久帧发问，故应答提交时栈是空的、
+        校验器读不到上下文（【诛害】的选牌池按当前回合角色算）。这里留一份引用：栈非空时
+        仍以栈顶为准（既有行为逐字不变），栈空时用它——与发问时渲染清单的那份上下文同源。
+        """
+
         self._conversion_answer: Action | None = None
         """最近一次**转化技确认**解析出的普通使用 / 打出动作（W4-fix-2）。"""
         self._started = False
@@ -1927,6 +1948,8 @@ class Engine:
         应答者取（清单是"这一问交给谁"的一部分，不是持有者的属性）。
         """
         actor = instance.owner if plan.actor is None else plan.actor
+        # 帧外时机的询问：记下承载帧，供 ``submit`` 的复合动作校验器读同一份上下文（票 20）。
+        self._activation_frame = frame
         answers = frame.data.setdefault("ask_answers", {})
         answer_key = ("activate", instance.skill_id, key or str(timing))
         if answer_key in answers:
@@ -1985,7 +2008,10 @@ class Engine:
         答案按 ``(skill_id, actor)`` 帧内缓存，重入不重发。
         """
         answers = frame.data.setdefault("ask_answers", {})
-        answer_key = ("option", skill_id, actor)
+        # M6 票 20：键带上**这次派发的范围**（``_DISPATCH_SCOPE``）。同一帧里同一技能的第二次
+        # 触发是另一次派发、另一个范围键，故不会复用上一次的选择；同一次触发的挂起重入
+        # 范围键不变，仍然命中缓存（重入不重发）。
+        answer_key = ("option", skill_id, actor, frame.data.get(_DISPATCH_SCOPE))
         if answer_key in answers:
             return answers[answer_key]
         action = self.ask(
@@ -2415,7 +2441,7 @@ class Engine:
         prune_skill_state(self.state)
         # 牌移动后同样核一次来源：装备 / 获得来源离场时，随来源消失的标签立刻清掉
         # （M6 票 09；武将技能失去 / 失效另走各自写入口的同一次清理）。
-        prune_card_tags(self.state)
+        self._prune_card_tags()
         count = frame.data.get(_MOVE_EVENTS, 0) + 1 if frame is not None else 0
         if frame is not None:
             # 这次移动的**持久事实**落在承载帧私有；重入时同一份身份 + "牌已在目标区"即认出。
@@ -2527,6 +2553,14 @@ class Engine:
                     frame_id=frame_id,
                 )
             dispatch_frame.data[MOVE_EVENT_KEY] = event
+            # 这次派发的范围键（M6 票 20）：本次移动的幂等键。同一帧里的下一次移动是下一个
+            # 范围，故同一技能第二次触发会重新发问；挂起续跑用的临时帧从派发帧继承它。
+            # **嵌套派发要还原**：效果里的搬牌（内联 MOVE_AFTER）会把范围改掉，而外层钩子
+            # 在续跑后还要用**自己**那份范围命中缓存——不还原就会重发一个已答的询问，把
+            # 下一条应答（例如【反间】的选项）错配给座位步。
+            prior_scope = dispatch_frame.data.get(_DISPATCH_SCOPE)
+            prior_had_scope = _DISPATCH_SCOPE in dispatch_frame.data
+            dispatch_frame.data[_DISPATCH_SCOPE] = key
             # **把"正在跑的技能"还给承载帧**：``_dispatch`` 在跑每条钩子前把
             # ``RUNNING_SKILL_KEY`` 改成钩子的 id，而 ``move_in_frame`` 的**重入判据**
             # （:data:`_MOVE_DONE`）拿它当"这次移动是谁发起的"的一部分。挂起续跑完成后，
@@ -2542,6 +2576,8 @@ class Engine:
                 frame.data.pop(RUNNING_SKILL_KEY, None)
             if result == "stay":
                 frame.data["_pending_move_timing"] = key
+                # 续跑帧在**还原范围之前**建：它要带着这次派发的范围，续跑里的询问才命中
+                # 同一份缓存（票 20 的答案缓存策略）。
                 self._move_pending = (
                     event,
                     key,
@@ -2550,6 +2586,10 @@ class Engine:
                 )
             else:
                 frame.data.pop("_pending_move_timing", None)
+            if prior_had_scope:
+                dispatch_frame.data[_DISPATCH_SCOPE] = prior_scope
+            else:
+                dispatch_frame.data.pop(_DISPATCH_SCOPE, None)
             return result
         # 无承载帧（弃牌阶段等）：先判惰性守卫，再落记录并派发。
         if not move_after_providers(self.state, event=event):
@@ -2895,7 +2935,7 @@ class Engine:
         )
         prune_skill_state(self.state)
         # 牌标签的第四项声明（M6 票 09）：来源实例真的消失 ⇒ 随来源消失的标签一并清掉。
-        prune_card_tags(self.state)
+        self._prune_card_tags()
         return True
 
     def suppress_skills(
@@ -2925,7 +2965,7 @@ class Engine:
             depth=self.stack.depth,
         )
         # 失效也算"来源实例不再解析"：随来源消失的牌标签立刻清掉（票 09 验收）。
-        prune_card_tags(self.state)
+        self._prune_card_tags()
         return True
 
     def set_hand_card_prohibition(self, seat: int, prohibited: bool) -> bool:
@@ -2985,7 +3025,19 @@ class Engine:
         if tag in tags:
             return False
         self.state.card_tags[card_id] = (*tags, tag)
+        self._emit_tag(TagAddDelta, card_id, tag)
         return True
+
+    def _emit_tag(self, model: type, card_id: int, tag: CardTag) -> None:
+        """落一条标签增删 delta（M6 票 20）：牌面 + 标签类型 + 来源实例（帧外坐标 = 0）。"""
+        self.emit_delta(
+            model(
+                card=self.state.card(card_id),
+                tag_type=tag.tag_type,
+                owner=tag.owner,
+                skill_id=tag.skill_id,
+            )
+        )
 
     def clear_card_tags(self, trigger: CardTagClear) -> int:
         """按**清除触发**清标签（M6 票 09；D12 的"生存期"唯一执行入口）。
@@ -3001,17 +3053,25 @@ class Engine:
         removed = 0
         for card_id in list(self.state.card_tags):
             tags = self.state.card_tags[card_id]
-            kept = tuple(
+            gone = tuple(
                 tag
                 for tag in tags
-                if card_tag_spec(tag.tag_type).clear_trigger is not trigger
+                if card_tag_spec(tag.tag_type).clear_trigger is trigger
             )
-            removed += len(tags) - len(kept)
+            kept = tuple(tag for tag in tags if tag not in gone)
+            removed += len(gone)
             if kept:
                 self.state.card_tags[card_id] = kept
             else:
                 del self.state.card_tags[card_id]
+            for tag in gone:
+                self._emit_tag(TagRemoveDelta, card_id, tag)
         return removed
+
+    def _prune_card_tags(self) -> None:
+        """清掉来源实例已消失的标签，并逐条落 ``tag_remove``（M6 票 20 / 票 09 的清理入口）。"""
+        for card_id, tag in prune_card_tags(self.state):
+            self._emit_tag(TagRemoveDelta, card_id, tag)
 
     def _clear_turn_effects(self) -> None:
         """回合末清理作用域 = ``TURN`` 的座位级效果（M6 票 04；票 05 补【咆哮】②、
@@ -3291,8 +3351,9 @@ class Engine:
             if action.skill_id != pending.skill_id or not pending.preactivation:
                 return _NOT_STRUCTURED
             # 被动入口的池常要读**真帧**（【流离】的使用者 / 【麒麟弓】的目标）：
-            # 挂起期间栈顶就是发问的那一帧，校验器必须读同一份上下文。
-            frame = self.stack.top if self.stack else None
+            # 挂起期间栈顶就是发问的那一帧，校验器必须读同一份上下文。阶段体 / 回合末这类
+            # **帧外**时机没有栈顶（帧住 ``_turn_data``），退回发问时记下的承载帧（票 20）。
+            frame = self.stack.top if self.stack else self._activation_frame
         else:
             return _NOT_STRUCTURED
         return validate_activation(

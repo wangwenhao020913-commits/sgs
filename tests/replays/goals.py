@@ -31,6 +31,7 @@ __all__ = [
     "M2_GOALS",
     "M3_GOALS",
     "M5_GOALS",
+    "M6_GOALS",
     "PREACTIVATION_CANCEL_SKILL",
     "goal_for",
 ]
@@ -1020,6 +1021,150 @@ M5_GOALS = {
 """8 条 M5 构造基准的 slug → 事后判据（spec §6 A3 的 10 个覆盖项）。"""
 
 
+# ---------------------------------------------------------------------------
+# M6 界局构造基准（票 20）：各覆盖 spec §投影与记录流 的一类新原语
+# ---------------------------------------------------------------------------
+
+
+def _m6_suppress(engine: Engine) -> bool:
+    """56：界关羽【义绝】弃黑牌 ⇒ 座位 1 的**技能失效**，回合末**到期**（一真一假两条）。"""
+    records = [
+        record
+        for record in _deltas(engine, "skill_suppress")
+        if record.seat == 1
+    ]
+    applied = [record for record in records if record.suppressed]
+    cleared = [record for record in records if not record.suppressed]
+    return (
+        any(record.skill_id == "hero.jie_guanyu.yijue" for record in applied)
+        and bool(cleared)
+        and applied[0].seq < cleared[0].seq
+        and any(
+            isinstance(action, ActivateSkill)
+            and action.skill_id == "hero.jie_guanyu.yijue"
+            for action in (record.action for record in _accepted(engine))
+        )
+    )
+
+
+def _m6_awakening(engine: Engine) -> bool:
+    """57：造成伤害后【潜心】觉醒（上限 -1 + 获得 ☆【荐言】），随后 ☆ 技能真的被发动。"""
+    maxima = [record for record in _deltas(engine, "hp_max_change") if record.seat == 0]
+    gained = [
+        record
+        for record in _deltas(engine, "skill_gain")
+        if record.seat == 0 and record.skill_id == "hero.jie_xushu.jianyan"
+    ]
+    activated = [
+        record.action
+        for record in _accepted(engine)
+        if isinstance(record.action, ActivateSkill)
+        and record.action.skill_id == "hero.jie_xushu.jianyan"
+    ]
+    return (
+        bool(maxima)
+        and maxima[0].before == 4
+        and maxima[0].after == 3
+        and bool(gained)
+        and maxima[0].seq < gained[0].seq
+        and bool(activated)
+        and gained[0].seq < activated[0].answers_seq
+    )
+
+
+QIANXUN_ZONE = "0:hero.jie_luxun.qianxun"
+"""56/58 用例里【谦逊】区的规范键（与 ``skills.hero_card_zone_key`` 同形）。"""
+
+
+def _hero_zone_moves(engine: Engine) -> tuple[list, list]:
+    """一次 HERO 区域进 / 出（区域引用带 ``skill_instance`` 的那些 card_move）。"""
+    entered = []
+    left = []
+    for record in _card_moves(engine):
+        if record.to_zone.zone is Zone.HERO:
+            entered.append(record)
+        if record.from_zone.zone is Zone.HERO:
+            left.append(record)
+    return entered, left
+
+
+def _m6_hero_zone(engine: Engine) -> bool:
+    """58：【谦逊】把全部手牌置于武将牌上（进入 HERO 区），回合末**整批归还**。"""
+    entered, left = _hero_zone_moves(engine)
+    zone = next(
+        (
+            record
+            for record in entered
+            if record.to_zone.skill_instance == QIANXUN_ZONE
+        ),
+        None,
+    )
+    returned = next(
+        (
+            record
+            for record in left
+            if record.from_zone.skill_instance == QIANXUN_ZONE
+            and record.to_zone.zone is Zone.HAND
+            and record.to_zone.seat == 0
+        ),
+        None,
+    )
+    return (
+        zone is not None
+        and returned is not None
+        and zone.seq < returned.seq
+        and engine.state.hero_zone(0, QIANXUN_ZONE) == ()
+        and any(
+            isinstance(action, ActivateSkill)
+            and action.skill_id == "hero.jie_luxun.qianxun"
+            for action in (record.action for record in _accepted(engine))
+        )
+    )
+
+
+def _m6_extra_turn(engine: Engine) -> bool:
+    """59：【博图】的额外回合（``extra=True``）与之后的轮次变化（``extra=False, round=2``）。"""
+    changes = [
+        (record.seat, record.round, record.extra)
+        for record in _deltas(engine, "turn_change")
+    ]
+    return (0, 1, True) in changes and (0, 2, False) in changes
+
+
+def _m6_tags(engine: Engine) -> bool:
+    """60：【洛神】获得黑牌挂标签（``tag_add``），回合末清除（``tag_remove``）。"""
+    added = _deltas(engine, "tag_add")
+    removed = _deltas(engine, "tag_remove")
+    if not added or not removed:
+        return False
+    first = added[0]
+    match = next(
+        (
+            record
+            for record in removed
+            if record.card.card_id == first.card.card_id
+            and record.tag_type is first.tag_type
+        ),
+        None,
+    )
+    return (
+        first.tag_type.value == "luoshen_hand"
+        and first.skill_id == "hero.jie_zhenji.luoshen"
+        and match is not None
+        and first.seq < match.seq
+    )
+
+
+M6_GOALS = {
+    "56-jie-guanyu-yijue-suppress": _m6_suppress,
+    "57-jie-xushu-awakening": _m6_awakening,
+    "58-jie-luxun-hero-zone": _m6_hero_zone,
+    "59-jie-lvmeng-extra-turn": _m6_extra_turn,
+    "60-jie-zhenji-luoshen-tags": _m6_tags,
+}
+"""5 条 M6 界局构造基准的 slug → 事后判据（spec §投影与记录流 的新原语）。"""
+
+
 M1_GOALS = {
     "33-borrowed-sword-use-slash": _borrowed_sword,
     "43-double-sword-opposite-gender": _double_sword_chain,
@@ -1038,7 +1183,7 @@ M1_GOALS = {
 
 def goal_for(slug: str):
     """取一条基准的判据；未登记即抛（录制期护栏）。"""
-    table = {**M1_GOALS, **M2_GOALS, **M3_GOALS, **M5_GOALS}
+    table = {**M1_GOALS, **M2_GOALS, **M3_GOALS, **M5_GOALS, **M6_GOALS}
     try:
         return table[slug]
     except KeyError:  # pragma: no cover - 开发期护栏

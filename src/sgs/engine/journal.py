@@ -35,6 +35,8 @@ from sgs.state import (
     SkillGainDelta,
     SkillLoseDelta,
     SkillSuppressDelta,
+    TagAddDelta,
+    TagRemoveDelta,
     TurnChangeDelta,
     WineChangeDelta,
 )
@@ -65,6 +67,8 @@ __all__ = [
     "SkillGainRecord",
     "SkillLoseRecord",
     "SkillSuppressRecord",
+    "TagAddRecord",
+    "TagRemoveRecord",
     "TimingRecord",
     "TurnChangeRecord",
     "WineChangeRecord",
@@ -182,6 +186,24 @@ class SkillSuppressRecord(SkillSuppressDelta):
     depth: int
 
 
+class TagAddRecord(TagAddDelta):
+    """一张实体牌被挂上一个标签（M6 票 20）：spec §投影与记录流「标签增删」。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class TagRemoveRecord(TagRemoveDelta):
+    """一张实体牌的标签被清除（M6 票 20）：回合末 / 随来源消失 / 使用或打出。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
 class TurnChangeRecord(TurnChangeDelta):
     """一个**回合边界**的事实（M6 票 11）：额外回合开始 / 轮次变化。
 
@@ -241,6 +263,8 @@ DeltaRecord = Annotated[
     | SkillGainRecord
     | SkillLoseRecord
     | SkillSuppressRecord
+    | TagAddRecord
+    | TagRemoveRecord
     | TurnChangeRecord,
     Field(discriminator="delta_type"),
 ]
@@ -373,6 +397,10 @@ def wrap_delta(delta: Delta, *, seq: int, frame_id: int, depth: int) -> DeltaRec
         return SkillLoseRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, SkillSuppressDelta):
         return SkillSuppressRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, TagAddDelta):
+        return TagAddRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, TagRemoveDelta):
+        return TagRemoveRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, TurnChangeDelta):
         return TurnChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     return DeckShuffleRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)

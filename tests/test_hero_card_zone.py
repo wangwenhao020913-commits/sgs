@@ -1012,3 +1012,112 @@ def test_a_move_after_question_stops_the_engine_before_the_next_frame_asks() -> 
     engine.run([HeuristicPlayer(stream) for _ in range(5)])
 
     assert engine.finished, "这一局必须跑到终局（挂起后不得再发第二条询问）"
+
+
+# ---------------------------------------------------------------------------
+# ⑤ 同一帧里的第二次【连营】（M6 票 20：``ask_option`` 的帧内答案缓存回归）
+# ---------------------------------------------------------------------------
+
+
+class _DoubleTriggerPlayer:
+    """座位脚本：座位 1 用过河拆桥；座位 0 接受【谦逊】/【连营】，选人一律选自己。"""
+
+    def __init__(self, seat: int) -> None:
+        self.seat = seat
+
+    def respond(self, query):  # noqa: ANN001 - Participant 协议
+        if query.kind == QueryKind.PLAY_PHASE and self.seat == 1:
+            for action in query.legal_actions:
+                if (
+                    getattr(action, "kind", None) == "UseCard"
+                    and getattr(getattr(action, "card", None), "type", None)
+                    == "dismantlement"
+                ):
+                    return action
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            for action in query.legal_actions:
+                if getattr(action, "kind", None) == "ActivateSkill":
+                    return action
+            return next(action for action in query.legal_actions if isinstance(action, Pass))
+        if query.kind == QueryKind.SELECT_OPTION and str(query.skill_id).startswith(
+            "lianying:"
+        ):
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and action.choice == "seat:0":
+                    return action
+            return next(action for action in query.legal_actions if isinstance(action, Pass))
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def test_a_second_lianying_trigger_in_the_same_frame_asks_a_fresh_question() -> None:
+    """票 12 留下的隐患：``ask_option`` 的帧内缓存按 ``(skill_id, actor)`` 分桶。
+
+    复现（混合池 seed=148 暴露过的组合，本测试用构造局面焊死）：界陆逊【谦逊】把全部
+    手牌放上武将牌 ⇒ 这次移动的 ``MOVE_AFTER`` 里【连营】问"令谁摸牌"（答案选了座位 0，
+    于是座位 0 摸回一张）。随后【过河拆桥】结算，弃掉刚摸的那张——陆逊**再次**失去最后
+    的手牌 ⇒ 同一帧里【连营】第二次触发。
+
+    旧实现：这一问的缓存键与上一次相同（``lianying:seat:0``），于是**不问**、直接复用上次
+    的选择（记录流里凭空多摸一张，人类 / AI 都没被问过）。判据 = 同一帧里出现**两次**
+    ``lianying:seat:0`` 询问；修好后第二次也真的发问。
+    """
+    dismantle = cards_of_type(PACK, "dismantlement")[0]
+    hand0 = tuple(cards_of_type(PACK, "slash")[:2])
+    used = {dismantle, *hand0}
+    deck = tuple(index for index in range(len(PACK.deck.cards)) if index not in used)
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=JIE_LUXUN, hp=3, hp_max=3, hand=hand0),
+            SeatSpec(hero="guanyu", hp=4, hand=(dismantle,)),
+        ],
+        deck=deck,
+        turn_seat=1,
+        rule_config=RuleConfig(player_count=2, first_seat=1),
+    )
+    engine = Engine.from_state(state, seed=3)
+    players = [_DoubleTriggerPlayer(0), _DoubleTriggerPlayer(1)]
+
+    def discarded_the_drawn_card(running) -> bool:
+        return any(
+            getattr(record, "delta_type", None) == "card_move"
+            and record.reason is MoveReason.LOSE
+            for record in running.records
+        )
+
+    run_until(engine, players, lambda running: running.finished or discarded_the_drawn_card(running))
+    engine.run(players)
+
+    lose = next(
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == "card_move"
+        and record.reason is MoveReason.LOSE
+    )
+    resolve_end = next(
+        record
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing is Timing.RESOLVE_END
+        and record.seq > lose.seq
+    )
+    asked_again = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SELECT_OPTION
+        and str(record.query.skill_id).startswith("lianying:")
+        and lose.seq < record.seq < resolve_end.seq
+    ]
+    assert asked_again, (
+        "同一帧里【连营】第二次触发没有发问（ask_option 的答案缓存跨触发复用）："
+        f"弃牌（seq={lose.seq}）之后到 RESOLVE_END（seq={resolve_end.seq}）之间"
+        "没有任何 lianying: 询问"
+    )
+    assert engine.finished, "修好缓存键后这一局仍必须跑完"

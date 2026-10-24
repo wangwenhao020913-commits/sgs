@@ -16,6 +16,8 @@ from .deltas import (
     SkillGainDelta,
     SkillLoseDelta,
     SkillSuppressDelta,
+    TagAddDelta,
+    TagRemoveDelta,
     TurnChangeDelta,
     WineChangeDelta,
 )
@@ -144,6 +146,8 @@ __all__ = (
     "Step",
     "StepPool",
     "SlotKind",
+    "TagAddDelta",
+    "TagRemoveDelta",
     "TurnChangeDelta",
     "UseCard",
     "WineChangeDelta",

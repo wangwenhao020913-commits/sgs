@@ -96,6 +96,12 @@ NAMES: dict[str, tuple[str, str]] = {
     "54-reforge-iron-chain": ("【铁索连环】重铸", "重铸是独立 `Reforge` Action（不是 `UseCard`）：牌按 `reason=REFORGE` 进弃牌堆、随后摸一张，且**不开**无懈窗口、不占使用次数"),
     "55-fan-converts-normal-slash": ("【朱雀羽扇】转化火【杀】", "按预发动清单（`equip.vermilion_feather_fan`）确认：普通【杀】当成虚拟火【杀】（`virtual_sources` 非空、产物牌型 `fire_slash`）并造成火焰伤害"),
     "47-halberd-borrowed-sword": ("【借刀杀人】+【方天画戟】· 多目标", "【方天画戟】的 `TARGET_COUNT` 修饰器：持刀者的【杀】是**最后一张手牌**时最大目标数 +2 ⇒ 借刀窗口的候选恒含 Bn、另加 0..2 个其它合法目标（`targets` 里）；外层借刀的 `designations=(Bn,)` 不变，持刀者【杀】的 `designations` 为空"),
+    # ---- 10. 界局机制（M6 票 20：spec §投影与记录流 的每类新原语） ----
+    "56-jie-guanyu-yijue-suppress": ("【义绝】施加技能失效 → 回合末到期", "界关羽【义绝】弃一张牌 ⇒ 目标展示黑牌 ⇒ 座位级失效落一条 `skill_suppress`（`suppressed=true`，`scope=turn`），同一回合末落一条 `suppressed=false`；目标手里那张牌只以 `card_reveal` 公开、不移动"),
+    "57-jie-xushu-awakening": ("【潜心】觉醒 → ☆【荐言】", "觉醒技强制发动：造成伤害后（来源是自己、且自己已受伤）落 `hp_max_change`（4 → 3）与 `skill_gain`（☆【荐言】），两者之间没有「是否发动」询问；随后 ☆ 技能作为 `PLAY_PHASE` 的裸 `ActivateSkill` 候选真的被发动"),
+    "58-jie-luxun-hero-zone": ("【谦逊】武将牌上的牌区 · 放置与归还", "一张延时 / 普通锦囊唯一指向界陆逊 ⇒ 【谦逊】把**全部手牌**置于 `Zone.HERO`（区键 `0:hero.jie_luxun.qianxun`，`card_move` 的 `to_zone.skill_instance` 非空）并触发【连营】；当前回合结束时整批归还（`HERO → HAND`）。同一帧里【连营】第二次触发**重新发问**（答案缓存按派发范围分桶）"),
+    "59-jie-lvmeng-extra-turn": ("【博图】额外回合 + 轮次变化", "弃牌阶段弃出四花色 ⇒ 回合结束时【博图】给一个额外回合：`TURN_START` 序列出现同座位连着的两个回合，`turn_change` 先落 `extra=true`（轮次不变）；额外回合不推进自然指针、也不刷新「每轮限 X 次」，回到座位 0 的自然回合时落 `extra=false` 且 `round=2`"),
+    "60-jie-zhenji-luoshen-tags": ("【洛神】牌标签 · 增与删", "界甄姬【洛神】判定为黑色 ⇒ 获得此牌并挂「本回合不计入」标签：`tag_add` 带牌面 + 标签类型 + 来源实例；回合末清除落同形的 `tag_remove`。标签与所在区域无关、也不改变公开的「手牌数」（手牌计数是另一个查询）"),
 }
 """slug → ``(中文场景名, 验证的规则条目)``：索引表里两列人工维护的**单一真源**。"""
 

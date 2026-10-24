@@ -7967,6 +7967,52 @@ def test_a_real_http_borrowed_sword_preactivation_needs_a_bare_card_ref() -> Non
 
 
 # ---------------------------------------------------------------------------
+# M6 票 20：三条**构造 tape**（觉醒 / 额外回合 / 区域放置）经**真 handler**的往返
+#
+# 与 `tests/test_web.sh` 的 socket 版共用同一份计划（`support.web_client.m6_tape_handlers`）：
+# 这里不起端口、不起线程，但 HTTP 报文、路由、解析、状态码与 JSON 都是产品代码
+# （与 :func:`_post_with_the_real_handler` 同一条缝）。判据 = 每条 tape 都跑完且它的
+# "原语真的发生了"旗标全部命中（觉醒 / turn_change(extra=true) / 快照里的 hero_zones）。
+# ---------------------------------------------------------------------------
+
+
+def test_the_m6_fixture_tapes_run_over_the_real_http_handler() -> None:
+    from support import web_client
+    from support.m6_fixture_server import FixtureRegistry
+
+    for name in web_client.M6_TAPES:
+        registry = FixtureRegistry(runs_dir="/tmp/unused")
+        status, body = _post_with_the_real_handler(
+            registry, "/api/sessions", {"fixture": name}
+        )
+        assert status == 200, body
+        session_id = body["session_id"]
+        assert body["deck_profile"] == "standard_108"
+        choose, observe = web_client.m6_tape_handlers(name)
+        state: dict = {}
+        answers = 0
+        while not body["finished"]:
+            pending = body["pending"]
+            assert pending is not None, f"{name}：未终局却没有待应答询问"
+            observe("pending", body, pending, state)
+            action = choose(pending, state)
+            assert action is not None, f"{name}：固定策略没有可选候选"
+            status, body = _fixture_answer(registry, session_id, body["cursor"], action)
+            assert status == 200, body
+            observe("answer", body, pending, state)
+            answers += 1
+            assert answers < 200, f"{name}：200 次应答仍未终局"
+        assert answers >= 1, f"{name}：一次真实往返都没有"
+        missing = [flag for flag in web_client.M6_TAPE_EXPECTATIONS[name] if not state.get(flag)]
+        assert not missing, f"{name}：这些判据没命中：" + "；".join(
+            web_client.M6_TAPE_FAILURES[name][flag] for flag in missing
+        )
+        session = registry.get(session_id)
+        assert session.engine.finished
+        assert session.engine.records[-1].kind == "game_end"
+
+
+# ---------------------------------------------------------------------------
 # U3-04：技能发动派生通道 `skill_events`（spec D8.2 / D9；票 04 的接入层半边）
 #
 # 引擎 / 记录流不动：接入层从**未裁剪**的记录流里派生「已接受、kind=ActivateSkill」

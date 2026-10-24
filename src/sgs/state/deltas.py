@@ -6,7 +6,8 @@
 ``identity_deal`` / ``identity_reveal``）之后，``chained_change``（M5-03 横置）、
 ``wine_change``（M5-04 酒）与 ``card_reveal``（M5-06 火攻亮牌）都是就地追加；M6 票 04 再
 追加技能三态的 ``skill_gain`` / ``skill_lose`` / ``skill_suppress``（技能获得 / 失去 /
-失效），M6 票 11 追加 ``turn_change``（额外回合 / 轮次变化），记录流仍为事件版本 2。记录层
+失效），M6 票 11 追加 ``turn_change``（额外回合 / 轮次变化），M6 票 20 追加标签增删的
+``tag_add`` / ``tag_remove``（spec §投影与记录流），记录流仍为事件版本 2。记录层
 （``engine``）在这些模型上**继承**出带 ``seq`` / ``frame_id`` / ``depth`` 的记录子类，
 从而 JSON 是平铺的。
 """
@@ -17,7 +18,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from sgs.data import Identity
+from sgs.data import CardTagType, Identity
 
 from .models import (
     CardRef,
@@ -41,6 +42,8 @@ __all__ = [
     "SkillGainDelta",
     "SkillLoseDelta",
     "SkillSuppressDelta",
+    "TagAddDelta",
+    "TagRemoveDelta",
     "TurnChangeDelta",
     "WineChangeDelta",
 ]
@@ -220,6 +223,41 @@ class SkillSuppressDelta(_FrozenModel):
     predicate: SkillSuppressionPredicate = SkillSuppressionPredicate.ALL_NON_LOCKED
 
 
+class TagAddDelta(_FrozenModel):
+    """一张**实体牌**被挂上一个标签（M6 票 20 补；spec §投影与记录流「标签增删」）。
+
+    标签是牌上的**持久事实、与所在区域无关**（``CardTag``）：本 delta 只记"哪张牌被挂上
+    哪个标签、来源实例是谁"，不移动牌、不占牌守恒（与 ``card_reveal`` 一样不是
+    ``card_move``）。``tag_type`` 的**可见性**由登记表（``sgs.data.CARD_TAG_TYPES``）声明：
+    隐藏标签的下发面整条裁掉（见 ``sgs_web.visibility.tag_visible``），公开标签原样下发。
+
+    ``owner`` / ``skill_id`` = 来源实例的规范身份（与 ``CardTag`` 同形）；标签的生存期与
+    清除触发也由登记表回答，故本 delta 不重复声明。
+    """
+
+    delta_type: Literal["tag_add"] = "tag_add"
+    card: CardRef
+    tag_type: CardTagType
+    owner: int
+    skill_id: str
+
+
+class TagRemoveDelta(_FrozenModel):
+    """一张**实体牌**的标签被清除（M6 票 20 补；spec §投影与记录流「标签增删」）。
+
+    与 :class:`TagAddDelta` 同形：``card`` + ``tag_type`` + 来源实例。清除的三条触发都在
+    记录流里落这一条——回合末（``TURN_END``）、随来源实例消失（失去 / 失效）、以及
+    ``LEAVE_ZONE`` / ``USED_OR_PLAYED`` 这两个 M6 无载体的形状。**牌不动**：标签的增删
+    不改变牌所在的区域，也不改变投影里公开的「手牌数」。
+    """
+
+    delta_type: Literal["tag_remove"] = "tag_remove"
+    card: CardRef
+    tag_type: CardTagType
+    owner: int
+    skill_id: str
+
+
 class TurnChangeDelta(_FrozenModel):
     """一个**回合边界**的事实（M6 票 11；spec D13 / §回合与轮次）。
 
@@ -256,6 +294,8 @@ Delta = Annotated[
     | SkillGainDelta
     | SkillLoseDelta
     | SkillSuppressDelta
+    | TagAddDelta
+    | TagRemoveDelta
     | TurnChangeDelta,
     Field(discriminator="delta_type"),
 ]

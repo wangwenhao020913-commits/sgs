@@ -152,17 +152,24 @@ def _play(seed: int, *, players: int = 2, ai: str = "heuristic", hero_pool=None)
 
 
 def _missing_entries(table, values) -> list[str]:
-    """启用的每名武将的每个**非锁定**技能都应有序语义条目（锁定技没有发动询问）。"""
+    """启用的每名武将的每个**非锁定**技能都应有序语义条目（锁定技没有发动询问）。
+
+    ``table`` 可以是一张表，也可以是 ``load_hero_tables()`` 的**并集**（M6 票 20 把正向
+    检查从"标准表"扩到"标准 + 界版"）：界将的每条非锁定技一样会在引擎里被问"是否发动"
+    / 出现在出牌阶段候选里，缺条目 = 缺省 ``Pass``/不发动（``_UNKNOWN_SKILL_VALUE < 0``）。
+    """
+    tables = table if isinstance(table, tuple) else (table,)
     missing: list[str] = []
-    for hero_id in enabled_hero_ids(table):
-        hero = table.by_id(hero_id)
-        for skill in hero.skills:
-            full_id = hero_skill_id(hero.id, skill.id)
-            definition = CATALOG.get(full_id)
-            if definition is not None and definition.locked:
-                continue
-            if full_id not in values:
-                missing.append(full_id)
+    for source in tables:
+        for hero_id in enabled_hero_ids(source):
+            hero = source.by_id(hero_id)
+            for skill in hero.skills:
+                full_id = hero_skill_id(hero.id, skill.id)
+                definition = CATALOG.get(full_id)
+                if definition is not None and definition.locked:
+                    continue
+                if full_id not in values:
+                    missing.append(full_id)
     return missing
 
 
@@ -219,9 +226,10 @@ def _missing_equipment_entries(values, catalog=CATALOG) -> list[str]:
 
 
 def test_every_enabled_non_locked_hero_skill_has_a_semantic_entry():
-    table = load_heroes()
+    """**标准 + 界版**两张表的每个启用非锁定技能都有语义条目（M6 票 20 扩表）。"""
+    tables = load_hero_tables()
 
-    missing = _missing_entries(table, SKILL_VALUES)
+    missing = _missing_entries(tables, SKILL_VALUES)
 
     assert not missing, "这些启用武将的非锁定技能还没教 AI：" + "；".join(missing)
 
@@ -235,15 +243,19 @@ def test_every_semantic_entry_names_a_skill_in_the_data_file():
 
 
 def test_the_forward_check_goes_red_when_an_entry_is_removed():
-    """合成反例：临时删掉一条 ⇒ 正向断言必须变红（票 13 §验收 4）。"""
-    table = load_heroes()
-    assert not _missing_entries(table, SKILL_VALUES)
+    """合成反例：临时删掉一条（标准 / 界版各一）⇒ 正向断言必须变红（票 13 §验收 4）。"""
+    tables = load_hero_tables()
+    assert not _missing_entries(tables, SKILL_VALUES)
 
     trimmed = dict(SKILL_VALUES)
-    victim = "hero.caocao.jianxiong"
-    del trimmed[victim]
+    standard_victim = "hero.caocao.jianxiong"
+    jie_victim = "hero.jie_guanyu.yijue"
+    del trimmed[standard_victim]
+    del trimmed[jie_victim]
 
-    assert victim in _missing_entries(table, trimmed)
+    missing = _missing_entries(tables, trimmed)
+    assert standard_victim in missing
+    assert jie_victim in missing, "正向检查只看了标准表：界将缺条目不会被报出来"
 
 
 def test_the_reverse_check_goes_red_on_an_unknown_id():
@@ -3689,3 +3701,676 @@ def test_every_jie_qun_skill_has_a_deterministic_ai_scene_or_is_named():
         assert CATALOG[skill_id].locked is True
         assert skill_id not in SKILL_VALUES, "锁定技没有「是否发动」询问，不该有条目"
     assert JIE_QUN_JIJIU in SKILL_VALUES, "转化技与标准版共用声明，但仍按 id 进语义表"
+
+
+# ---------------------------------------------------------------------------
+# ⑩ M6 界将的 **AI 真的发动过**（票 20）：票 04–11 的界将此前只有语义条目，没有"AI 在
+#    真实询问上答了 ActivateSkill 且引擎接受"的确定性场景。
+#
+# 两类询问各有一份模板（与 ⑨ 的 botu 测试同姿态）：
+#
+# - **hook / 计划技**（铁骑 / 替身 / 克己 / 诛害 / 奋威 / 洛神 / 谦逊 / 连营）：真引擎跑
+#   到挂起的 ``SKILL_ACTIVATION``，把 ``engine.pending`` 交给启发式，再 ``submit``；
+#   判据 = 引擎在记录流里落了一条 ``accepted=true``；
+# - **出牌阶段裸 ``ActivateSkill`` 候选**（义绝 / 荐言 / 攻心）：候选来自产品路径
+#   （``_play_phase_with_preactivations``），AI 填的是**复合动作**（不在候选里），故用
+#   引擎同一个校验器 ``validate_activation`` 放行——与 ⑦ 的覆盖判据同一条缝。
+#
+# 结构上**不会被问**的界将技能不在这里（也没有可"发动"的询问）：觉醒技【潜心】/【勤学】
+# 是强制发动（`tests/test_hero_jie.py` 的 ``_activation_queries(...) == []`` 断言 +
+# `test_hero_jie.py` 的觉醒用例）、【武圣】是转化候选、【英姿】是摸牌 / 上限修饰器、
+# 【奇才】② 是事件帧无效的锁存。它们由各自的构造测试与 M6 金录像覆盖，不是 AI 主动发动。
+# ---------------------------------------------------------------------------
+
+
+def _card(*, type_id: str | None = None, suit: str | None = None, exclude=frozenset()) -> int:
+    """按牌名 / 花色取一张未占用的牌（数据表顺序，确定性）。"""
+    for index, card in enumerate(PACK.deck.cards):
+        if index in exclude:
+            continue
+        if type_id is not None and card.type != type_id:
+            continue
+        if suit is not None and card.suit.value != suit:
+            continue
+        return index
+    raise AssertionError(f"standard_108 里没有可用牌：type={type_id!r} suit={suit!r}")
+
+
+class _FixedSeat:
+    """最小脚本座位：按给定函数应答，其余交给最小合法应答（放弃 / 结束阶段）。"""
+
+    def __init__(self, handler=None) -> None:
+        self._handler = handler
+
+    def respond(self, query):  # noqa: ANN001 - Participant 协议
+        if self._handler is not None:
+            action = self._handler(query)
+            if action is not None:
+                return action
+        if query.kind == "PLAY_PHASE":
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _activation_of(skill_id: str) -> tuple:
+    """一套"跑到该技能的 ``SKILL_ACTIVATION`` 挂起询问"的构造局面 + 座位脚本。"""
+    raise NotImplementedError  # pragma: no cover - 占位，实际用下面的具名构造器
+
+
+def _run_to_activation(state, *, players=None, count: int = 2) -> Engine:
+    """从构造局面跑真引擎，停在第一条挂起的 ``SKILL_ACTIVATION`` 上。"""
+    engine = Engine.from_state(state, seed=7)
+    seats = players or [HeuristicPlayer(_stream(7)) for _ in range(count)]
+    run_until(
+        engine,
+        seats,
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.SKILL_ACTIVATION,
+    )
+    return engine
+
+
+def _ai_accepts(engine: Engine) -> ActivateSkill:
+    """把当前挂起询问交给启发式，并断言引擎接受这次发动（记录流 accepted=true）。"""
+    query = engine.pending
+    assert query is not None, "没有挂起的询问"
+    action = HeuristicPlayer(_stream(7)).respond(query)
+    assert isinstance(action, ActivateSkill), f"AI 没有发动而是答了 {action!r}"
+    engine.submit(action)
+    record = engine.records[-1]
+    assert record.kind == "action" and record.accepted is True, (
+        f"AI 的发动被引擎拒绝：{getattr(record, 'reason', None)}"
+    )
+    return action
+
+
+def test_the_ai_activates_jie_tieqi_on_a_slash() -> None:
+    """界马超【铁骑】：使用【杀】后的 ``SKILL_ACTIVATION`` 上 AI 答发动（引擎接受）。"""
+    slash = _card(type_id="slash", suit="spade")
+    judge = _card(type_id="peach", suit="heart")
+    dodge = _card(type_id="dodge", suit="diamond")
+    fillers = [i for i in range(len(PACK.deck.cards)) if i not in {slash, judge, dodge}]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(slash,), hero="jie_machao", gender=Gender.MALE),
+            SeatSpec(hand=(dodge,), hero="guanyu", gender=Gender.MALE),
+        ],
+        deck=(fillers[0], fillers[1], judge, *fillers[2:]),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = _run_to_activation(state)
+    assert engine.pending is not None and engine.pending.skill_id == "hero.jie_machao.tieqi"
+    action = _ai_accepts(engine)
+    assert action.skill_id == "hero.jie_machao.tieqi"
+
+
+def test_the_ai_activates_jie_tishen_at_the_prepare_phase() -> None:
+    """界张飞【替身】（限定技）：准备阶段的询问上 AI 答发动（体力未满才有意义）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=1, hp_max=4, hero="jie_zhangfei", gender=Gender.MALE),
+            SeatSpec(hp=4, hero="guanyu", gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = _run_to_activation(state)
+    assert engine.pending is not None and engine.pending.skill_id == "hero.jie_zhangfei.tishen"
+    _ai_accepts(engine)
+
+
+def test_the_ai_activates_jie_keji_before_the_discard_phase() -> None:
+    """界吕蒙【克己】：弃牌阶段开始的询问上 AI 答发动（手牌多于体力时值得）。"""
+    hand = (*_ids("dodge")[:3], _ids("peach")[0])
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=4, hp_max=4, hand=hand, hero="jie_lvmeng", gender=Gender.MALE),
+            SeatSpec(hp=4, hero="guanyu", gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(*hand),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = _run_to_activation(state)
+    assert engine.pending is not None and engine.pending.skill_id == "hero.jie_lvmeng.keji"
+    _ai_accepts(engine)
+
+
+def test_the_ai_activates_jie_fenwei_against_a_multi_target_trick() -> None:
+    """界甘宁【奋威】（限定技）：多目标锦囊的指定目标后，AI 在**非使用者**的询问上发动。"""
+    barbarian = _ids("barbarian_invasion")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(barbarian,), identity=Identity.LORD, gender=Gender.MALE),
+            SeatSpec(hero="jie_ganning", identity=Identity.LOYALIST, gender=Gender.MALE),
+            SeatSpec(identity=Identity.REBEL, gender=Gender.MALE),
+            SeatSpec(identity=Identity.RENEGADE, gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(barbarian),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    engine = _run_to_activation(state, count=4)
+    assert engine.pending is not None
+    assert engine.pending.skill_id == "hero.jie_ganning.fenwei"
+    assert engine.pending.actor == 1, "询问发给界甘宁（不是使用锦囊的座位 0）"
+    _ai_accepts(engine)
+
+
+def _zhuhai_engine() -> Engine:
+    """界徐庶【诛害】：座位 2 的回合造成伤害后，其结束阶段把询问发给**回合外**的座位 0。
+
+    距离 2 需要武器：座位 0 装【青龙偃月刀】；两张【杀】分别给座位 0（诛害用）与座位 2
+    （造成伤害用）。脚本座位只负责"打那一刀"与"最小应答"，其余交给引擎。
+    """
+    turn_slash = _ids("slash")[0]
+    zhuhai_slash = _ids("slash")[1]
+    weapon = _ids("green_dragon_blade")[0]
+    identities = [Identity.REBEL, Identity.REBEL, Identity.LORD, Identity.REBEL]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=4, hero="jie_xushu", gender=Gender.MALE, identity=identities[0]),
+            SeatSpec(identity=identities[1], gender=Gender.MALE),
+            SeatSpec(hp=4, identity=identities[2], gender=Gender.MALE),
+            SeatSpec(hp=4, identity=identities[3], gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(weapon),
+        turn_seat=2,
+        rule_config=RuleConfig(player_count=4),
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.state.player(0).hand.append(zhuhai_slash)
+    engine.state.deck.remove(zhuhai_slash)
+    engine.state.player(2).hand.append(turn_slash)
+    engine.state.deck.remove(turn_slash)
+    engine.state.player(0).equip.append(weapon)
+    return engine
+
+
+def test_the_ai_activates_jie_zhuhai_in_another_seats_finish_phase() -> None:
+    """界徐庶【诛害】：回合外（别的角色的结束阶段）的询问上 AI 答发动且引擎接受。
+
+    【诛害】的承载帧是**帧外**的阶段体帧（不在结算栈上），故这条也钉住复合动作的校验器
+    "栈空时用发问那一刻的帧"（票 20 一并修的）：AI 填的是复合动作（选一张【杀】），
+    旧的校验器在栈空时读不到目标池、会把合法发动误拒。
+    """
+    engine = _zhuhai_engine()
+    turn_slash = _ids("slash")[0]
+
+    def play_the_slash(query):  # noqa: ANN001
+        if query.kind != QueryKind.PLAY_PHASE:
+            return None
+        for action in query.legal_actions:
+            if (
+                isinstance(action, UseCard)
+                and action.card.card_id == turn_slash
+                and action.targets == (3,)
+            ):
+                return action
+        return None
+
+    players = [
+        _FixedSeat(),
+        _FixedSeat(),
+        _FixedSeat(play_the_slash),
+        _FixedSeat(),
+    ]
+    run_until(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.SKILL_ACTIVATION,
+    )
+    query = engine.pending
+    assert query is not None and query.skill_id == "hero.jie_xushu.zhuhai"
+    assert query.actor == 0, "询问发给界徐庶（回合外的持有者）"
+    action = HeuristicPlayer(_stream(7)).respond(query)
+    assert isinstance(action, ActivateSkill) and action.skill_id == "hero.jie_xushu.zhuhai"
+    engine.submit(action)
+    record = engine.records[-1]
+    assert record.kind == "action" and record.accepted is True, (
+        f"帧外时机的复合动作被误拒：{getattr(record, 'reason', None)}"
+    )
+
+
+def test_the_ai_activates_jie_luoshen_at_the_prepare_phase() -> None:
+    """界甄姬【洛神】：准备阶段的询问上 AI 答发动（判定为黑则白拿一张）。"""
+    black = _card(suit="spade")
+    cost = _card(suit="club", exclude={black})
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=3, hp_max=3, hero="jie_zhenji", gender=Gender.FEMALE, hand=(cost,)),
+            SeatSpec(hp=4, hero="guanyu", gender=Gender.MALE),
+        ],
+        deck=(black, *(_deck_excluding(black, cost))),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = _run_to_activation(state)
+    query = engine.pending
+    assert query is not None and query.skill_id == "hero.jie_zhenji.luoshen"
+    _ai_accepts(engine)
+    # 发动被接受 ≠ 效果已结算：submit 只交出答案，续跑才走判定 / 获得（【洛神】的循环）。
+    run_until(
+        engine,
+        [HeuristicPlayer(_stream(7)), HeuristicPlayer(_stream(7))],
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.PLAY_PHASE,
+    )
+    assert any(
+        record.kind == "delta" and record.delta_type == "tag_add"
+        for record in engine.records
+    ), "【洛神】获得黑牌后要挂标签（AI 发动的落点）"
+
+
+def _qianxun_engine() -> Engine:
+    """界陆逊【谦逊】：座位 1 用过河拆桥唯一指向座位 0 ⇒ 座位 0 的 【谦逊】/【连营】。"""
+    hand = (_ids("peach")[0], _ids("dodge")[0])
+    dismantle = _ids("dismantlement")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=3, hp_max=3, hero="jie_luxun", gender=Gender.MALE, hand=hand),
+            SeatSpec(hp=4, hero="guanyu", gender=Gender.MALE, hand=(dismantle,)),
+        ],
+        deck=_deck_excluding(*hand, dismantle),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    return Engine.from_state(state, seed=7)
+
+
+def _play_the_dismantlement_at_zero(query):  # noqa: ANN001
+    if query.kind != QueryKind.PLAY_PHASE:
+        return None
+    for action in query.legal_actions:
+        if (
+            isinstance(action, UseCard)
+            and action.card.type == "dismantlement"
+            and action.targets == (0,)
+        ):
+            return action
+    return None
+
+
+def test_the_ai_activates_jie_qianxun_and_lianying() -> None:
+    """界陆逊【谦逊】放置手牌后，同一帧的【连营】也由 AI 发动（两次都被引擎接受）。"""
+    engine = _qianxun_engine()
+    players = [HeuristicPlayer(_stream(7)), _FixedSeat(_play_the_dismantlement_at_zero)]
+    run_until(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.SKILL_ACTIVATION,
+    )
+    query = engine.pending
+    assert query is not None and query.skill_id == "hero.jie_luxun.qianxun"
+    _ai_accepts(engine)
+    # 续跑：接受【谦逊】后效果里才搬牌（HERO 区域），随后同一帧里问【连营】。
+    run_until(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.SKILL_ACTIVATION,
+    )
+    assert any(
+        record.kind == "delta" and record.delta_type == "card_move"
+        and record.to_zone.zone is Zone.HERO
+        for record in engine.records
+    ), "【谦逊】把全部手牌置于武将牌上（HERO 区域）"
+    query = engine.pending
+    assert query is not None and query.skill_id == "hero.jie_luxun.lianying", (
+        "【谦逊】放置手牌（失去最后的手牌）后应接着问【连营】"
+    )
+    _ai_accepts(engine)
+
+
+def test_the_ai_fills_the_bare_play_phase_activation_of_yijue_jianyan_and_gongxin() -> None:
+    """义绝 / 荐言 / 攻心（出牌阶段裸 ``ActivateSkill`` 候选）：AI 填复合动作并通过校验器。
+
+    三条技能的候选在 ``PLAY_PHASE`` 的 ``legal_actions`` 里（骨架），AI 答的是**复合动作**
+    （不在候选里，走引擎的复合动作那条路），故判据 = 与引擎同一个 ``validate_activation``
+    放行。
+    """
+    cases = {}
+
+    cost = _card(type_id="peach")
+    black = _card(type_id="dismantlement", suit="club")
+    cases["hero.jie_guanyu.yijue"] = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(cost,), hero="jie_guanyu", gender=Gender.MALE),
+            SeatSpec(hand=(black,), hero="guanyu", gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(cost, black),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+
+    jianyan = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(), hero="jie_xushu", gender=Gender.MALE),
+            SeatSpec(hand=(), hero="guanyu", gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    jianyan.player(0).granted_skills.append("hero.jie_xushu.jianyan")
+    cases["hero.jie_xushu.jianyan"] = jianyan
+
+    peach = _card(type_id="peach")
+    gongxin = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(), hero="jie_lvmeng", gender=Gender.MALE),
+            SeatSpec(hand=(peach,), hero="guanyu", gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(peach),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    gongxin.player(0).granted_skills.append("hero.jie_lvmeng.gongxin")
+    cases["hero.jie_lvmeng.gongxin"] = gongxin
+
+    for skill_id, state in cases.items():
+        query = _play_phase_with_preactivations(state)
+        assert any(
+            isinstance(action, ActivateSkill) and action.skill_id == skill_id
+            for action in query.legal_actions
+        ), f"{skill_id}：出牌阶段候选里没有它的骨架（AI 无从发动）"
+        action = HeuristicPlayer(_stream(0)).respond(query)
+        assert isinstance(action, ActivateSkill), f"{skill_id}：AI 答了 {action!r}"
+        assert action.skill_id == skill_id
+        assert action not in query.legal_actions, "有清单的技能应当填复合动作"
+        assert (
+            validate_activation(
+                state,
+                0,
+                skill_id,
+                action.picks,
+                action.choices,
+                timing=query.timing,
+                frame=None,
+            )
+            is None
+        ), f"{skill_id}：AI 填的复合动作没过引擎同一个校验器"
+
+
+# ---------------------------------------------------------------------------
+# ⑪ M6 界将的 AI 发动（票 20，续）：票 07–08 的界将（闭月 / 集智 / 刚烈 / 清俭 / 反间 /
+#    武圣）。判据同 ⑧/⑨：记录流里有一条 ``accepted`` 的 ``ActivateSkill``（或转化技解析出的
+#    ``UseCard``），且发动后有外部可观测的收益；**结构上不会被问**的三条（英姿 / 奇才 /
+#    潜心 / 勤学）另有一条"零询问"断言，点名它们由哪个构造测试覆盖。
+# ---------------------------------------------------------------------------
+
+JIE_BIYUE = "hero.jie_diaochan.biyue"
+JIE_JIZHI = "hero.jie_huangyueying.jizhi"
+JIE_GANGLIE = "hero.jie_xiahoudun.ganglie"
+JIE_QINGJIAN = "hero.jie_xiahoudun.qingjian"
+JIE_FANJIAN = "hero.jie_zhouyu.fanjian"
+JIE_WUSHENG = "hero.jie_guanyu.wusheng"
+JIE_YINGZI = "hero.jie_zhouyu.yingzi"
+JIE_QICAI = "hero.jie_huangyueying.qicai"
+JIE_QIANXUE = "hero.jie_xushu.qianxue"
+JIE_QINXUE = "hero.jie_lvmeng.qinxue"
+
+
+def test_the_ai_activates_jie_biyue_at_the_finish_phase() -> None:
+    """界貂蝉【闭月】：结束阶段摸牌。整回合交给 AI，记录流里必须有它被接受的发动。"""
+    held = _ids("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(held,), hero="jie_diaochan", gender=Gender.FEMALE),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(held),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+
+    run_until(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and getattr(running.pending, "skill_id", None) == JIE_BIYUE,
+    )
+    _ai_accepts(engine)
+
+    assert _activated(engine, JIE_BIYUE), "AI 必须真的发动界【闭月】"
+
+
+def test_the_ai_activates_jie_jizhi_on_a_trick() -> None:
+    """界黄月英【集智】：使用非延时锦囊时摸一张。整回合交给 AI，记录流里必须有发动。"""
+    trick = _ids("ex_nihilo")[0]
+    deck_top = tuple(_ids("dodge")[:2])
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(trick,)), SeatSpec()],
+        deck=(*deck_top, *_deck_excluding(trick, *deck_top)),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    state.player(0).granted_skills.append(JIE_JIZHI)
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+
+    run_queries(engine, players, lambda running: ran_timing(running, Timing.PHASE_PLAY_END))
+
+    assert _activated(engine, JIE_JIZHI), "AI 必须真的发动界【集智】"
+
+
+def test_the_ai_activates_jie_ganglie_after_damage() -> None:
+    """界夏侯惇【刚烈】：受到 1 点伤害后判定。AI 答发动（判定牌红 / 黑两条都为正）。"""
+    judge_card = next(
+        card_id
+        for card_id in _ids("dodge")
+        if PACK.deck.cards[card_id].suit.value == "diamond"
+    )
+    channel = _ids("slash")[0]
+    source_hand = tuple(_ids("dodge")[:2])
+    used = {judge_card, channel, *source_hand}
+    deck = tuple(index for index in range(len(PACK.deck.cards)) if index not in used)
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=source_hand), SeatSpec()],
+        deck=(judge_card, *deck),
+        processing=(channel,),
+        rule_config=RuleConfig(player_count=2),
+    )
+    state.player(1).granted_skills.append(JIE_GANGLIE)
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, channel, source=0, target=1),
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    run_queries(engine, players, lambda running: ran_timing(running, Timing.DAMAGE_END))
+
+    assert _activated(engine, JIE_GANGLIE), "AI 必须真的发动界【刚烈】"
+
+
+def test_the_ai_activates_jie_qingjian_after_gaining_cards() -> None:
+    """界夏侯惇【清俭】：回合外获得牌后，AI 填复合动作（交牌 + 选当前回合角色）并被接受。"""
+    harvest = _ids("harvest")[0]
+    basic = _ids("slash")[0]
+    trick = _ids("dismantlement")[0]
+    slash = _ids("slash")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(harvest, slash), identity=Identity.LORD),
+            SeatSpec(hand=(basic, trick)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(harvest, basic, trick, slash),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    state.player(1).granted_skills.append(JIE_QINGJIAN)
+    engine = Engine.from_state(state, seed=11)
+
+    def use_the_harvest(query):  # noqa: ANN001
+        if query.kind != QueryKind.PLAY_PHASE:
+            return None
+        for action in query.legal_actions:
+            if isinstance(action, UseCard) and action.card.type == "harvest":
+                return action
+        return None
+
+    players = [
+        _FixedSeat(use_the_harvest),
+        HeuristicPlayer(_stream(11)),
+        HeuristicPlayer(_stream(11)),
+        HeuristicPlayer(_stream(11)),
+    ]
+    run_until(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and getattr(running.pending, "skill_id", None) == JIE_QINGJIAN,
+    )
+    query = engine.pending
+    assert query is not None and query.kind == QueryKind.SKILL_ACTIVATION
+    action = HeuristicPlayer(_stream(11)).respond(query)
+    assert isinstance(action, ActivateSkill) and action.skill_id == JIE_QINGJIAN
+    assert action.picks, "【清俭】的两步清单（交牌 + 选人）必须被 AI 填完"
+    engine.submit(action)
+    record = engine.records[-1]
+    assert record.kind == "action" and record.accepted is True, (
+        f"AI 的【清俭】被引擎拒绝：{getattr(record, 'reason', None)}"
+    )
+
+
+def test_the_ai_activates_jie_fanjian_in_the_play_phase() -> None:
+    """界周瑜【反间】：出牌阶段主动技，AI 填两步复合动作并被接受（记录为 ActivateSkill）。
+
+    手牌只给【闪】与【无懈可击】（满体力时都不可用）+ 牌堆顶两张【闪】，
+    故 AI 不会先出牌抢在它前面。
+    """
+    hand0 = (_ids("dodge")[0], _ids("nullify")[0])
+    hand1 = (_ids("dodge")[1],)
+    deck_top = tuple(_ids("dodge")[2:4])
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=hand0), SeatSpec(hand=hand1)],
+        deck=(*deck_top, *_deck_excluding(*hand0, *hand1, *deck_top)),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    state.player(0).granted_skills.append(JIE_FANJIAN)
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+
+    run_queries(engine, players, lambda running: ran_timing(running, Timing.PHASE_PLAY_END))
+
+    assert _activated(engine, JIE_FANJIAN), "AI 必须真的发动界【反间】"
+
+
+def test_the_ai_wusheng_conversion_resolves_to_a_virtual_slash() -> None:
+    """界关羽【武圣】：转化技没有「是否发动」询问，AI 从转化清单填复合动作、引擎解析成
+    ``UseCard(虚拟【杀】)``——判据是那条使用记录，不是 ``ActivateSkill``。"""
+    red = next(
+        card_id
+        for card_id in _ids("peach")
+        if color_of_suit(PACK.deck.cards[card_id].suit) is Color.RED
+    )
+    deck_top = tuple(_ids("dodge")[:2])
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(red,), hero="jie_guanyu", gender=Gender.MALE),
+            SeatSpec(hand=(), gender=Gender.MALE),
+        ],
+        deck=(*deck_top, *_deck_excluding(red, *deck_top)),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+    run_until(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.PLAY_PHASE,
+    )
+
+    query = engine.pending
+    assert query is not None
+    action = HeuristicPlayer(_stream(11)).respond(query)
+    assert isinstance(action, ActivateSkill) and action.skill_id == JIE_WUSHENG
+    engine.submit(action)
+
+    record = engine.records[-1]
+    assert record.kind == "action" and record.accepted is True
+    resolved = record.action
+    assert isinstance(resolved, UseCard), "转化确认解析成普通使用，而不是 ActivateSkill"
+    assert resolved.card.type == "slash"
+    sources = resolved.card.virtual_sources
+    assert len(sources) == 1, f"武圣把一张红色牌转化成【杀】：{sources}"
+    assert color_of_suit(PACK.deck.cards[sources[0]].suit) is Color.RED, (
+        "转化来源必须是红色牌（武圣的判据）"
+    )
+    assert resolved.targets == (1,)
+
+
+def test_the_forced_and_locked_jie_skills_never_ask_for_an_activation() -> None:
+    """结构上**不可由 AI 主动发动**的界将技能：引擎从不出示「是否发动」询问。
+
+    - 【英姿】【奇才】是锁定技（`locked=True`）；
+    - 【潜心】【勤学】是觉醒技（**强制发动**，引擎按 ``SkillType.AWAKENING`` 直接生效）。
+
+    这四条不是"AI 不发动"，而是"没有可回答的询问"——它们的正向覆盖由构造测试接手：
+    ``tests/test_hero_jie.py::test_qianxue_awakens_without_asking_and_reduces_the_max_hp``、
+    ``::test_qinxue_awakens_in_the_prepare_phase_and_draws_two``（两条都在断言里写明
+    ``_activation_queries(...) == []``）、``tests/test_hero_jie_hand_limit.py`` 的英姿摸牌 /
+    上限用例与奇才撤销装备弃置用例（``test_jie_yingzi_*`` / ``test_jie_qicai_*``）。
+    """
+    for skill_id in (JIE_YINGZI, JIE_QICAI, JIE_QIANXUE, JIE_QINXUE):
+        definition = CATALOG[skill_id]
+        assert (
+            definition.skill_type.name == "AWAKENING" or definition.locked
+        ), f"{skill_id} 既不是锁定技也不是觉醒技——请给它补 AI 发动覆盖"
+
+    # 真跑一局界张飞的准备阶段：觉醒 / 锁定技一条激活询问都不该出现。
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=1, hp_max=4, hero="jie_xushu", gender=Gender.MALE),
+            SeatSpec(hp=4, hero="guanyu", gender=Gender.MALE),
+        ],
+        deck=_deck_excluding(),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)), HeuristicPlayer(_stream(11))]
+    run_queries(engine, players, lambda running: running.pending is not None
+                and running.pending.kind == QueryKind.PLAY_PHASE)
+    asked = {
+        record.query.skill_id
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION
+    }
+    assert asked == set(), f"未受伤的界徐庶不该有技能激活询问：{asked}"

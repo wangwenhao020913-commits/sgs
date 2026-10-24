@@ -24,7 +24,7 @@ from sgs.engine import (
     dump_journal,
     read_journal,
 )
-from sgs.state import ActivateSkill, QueryKind, UseCard, WindowCause
+from sgs.state import ActivateSkill, QueryKind, UseCard, WindowCause, Zone
 
 from support import play_standard
 
@@ -513,6 +513,9 @@ SCRIPTED_BASELINES = tuple(scenarios.SCRIPTED_SCENARIOS)
 M5_BASELINES = tuple(scenarios.M5_SCENARIOS)
 """M5 的 8 条**构造局面**基准（M5-09a / spec §6 A3）：覆盖 11 个新牌名与 10 个覆盖项。"""
 
+M6_BASELINES = tuple(scenarios.M6_SCENARIOS)
+"""M6 的 5 条**界局构造**基准（票 20）：覆盖 spec §投影与记录流 的新原语。"""
+
 M2_BASELINES = tuple(
     name
     for name in distribution.SLUG_CLASSES
@@ -520,6 +523,7 @@ M2_BASELINES = tuple(
     and name not in set(M3_BASELINES)
     and name not in set(SCRIPTED_BASELINES)
     and name not in set(M5_BASELINES)
+    and name not in set(M6_BASELINES)
 )
 """M2 的 27 条基准：分布表里除 M1 六条、M3 八条、脚本专项与 M5 八条以外的全部 slug
 （票 32 §1）。
@@ -547,6 +551,7 @@ def test_the_baseline_distribution_meets_every_category_minimum() -> None:
     assert not shortfalls, f"分布判据未达标（实得 / 最少）：{shortfalls}"
     assert counts[distribution.M1_CLASS] == len(FROZEN_BASELINES)
     assert counts[distribution.M5_CLASS] == len(M5_BASELINES), "M5 军争机制类必须恰 8 条"
+    assert counts[distribution.M6_CLASS] == len(M6_BASELINES), "M6 界局机制类必须恰 5 条"
 
 
 def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
@@ -559,7 +564,7 @@ def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
     assert files == set(scenarios.SCENARIOS), "场景表与基准文件集合互相等于"
     assert set(M2_BASELINES) == files - set(FROZEN_BASELINES) - set(M3_BASELINES) - set(
         SCRIPTED_BASELINES
-    ) - set(M5_BASELINES), "M2 恰为 47 − 6 − 8 − 6 = 27 条"
+    ) - set(M5_BASELINES) - set(M6_BASELINES), "M2 恰为 47 − 6 − 8 − 6 = 27 条"
     assert set(M5_BASELINES) == set(scenarios.M5_SCENARIOS) == set(goals.M5_GOALS), (
         "M5 的 8 条构造基准必须与场景表、判据表三方相等"
     )
@@ -568,6 +573,9 @@ def test_every_baseline_is_classified_and_the_registry_has_no_orphan() -> None:
     )
     assert set(SCRIPTED_BASELINES) == set(scenarios.SCRIPTED_SCENARIOS), (
         "票 17 起的脚本专项基准必须与场景表相等"
+    )
+    assert set(M6_BASELINES) == set(scenarios.M6_SCENARIOS) == set(goals.M6_GOALS), (
+        "M6 的 5 条界局构造基准必须与场景表、判据表三方相等"
     )
 
 
@@ -593,6 +601,32 @@ def test_every_m5_baseline_has_an_after_the_fact_goal() -> None:
     assert {scenarios.SCENARIOS[slug].deck_profile for slug in M5_BASELINES} == {
         "standard_ex_160"
     }, "M5 的每条基准都必须是 standard_ex_160 档"
+
+
+def test_every_m6_baseline_has_an_after_the_fact_goal() -> None:
+    """M6 的 5 条界局构造基准各有事后判据，且判据覆盖 spec §投影与记录流 的新原语。"""
+    assert set(M6_BASELINES) == set(goals.M6_GOALS), (
+        "M6 构造基准集合与 goals.M6_GOALS 的键集必须相等"
+    )
+    required = {
+        "skill_suppress",
+        "hp_max_change",
+        "skill_gain",
+        "tag_add",
+        "tag_remove",
+        "turn_change",
+    }
+    covered: set[str] = set()
+    zones: set[Zone] = set()
+    for slug in M6_BASELINES:
+        for record in read_journal(REPLAYS_DIR / f"{slug}.jsonl"):
+            if record.kind != "delta":
+                continue
+            covered.add(record.delta_type)
+            if record.delta_type == "card_move":
+                zones.update((record.from_zone.zone, record.to_zone.zone))
+    assert required <= covered, f"M6 金录像没有覆盖全部新原语：缺 {sorted(required - covered)}"
+    assert Zone.HERO in zones, "M6 金录像必须有一条 HERO 区域的移动（武将牌上的牌）"
 
 
 def test_the_preactivation_cancel_equals_the_not_activating_path() -> None:

@@ -58,6 +58,7 @@ from .visibility import (
     deck_cards_visible,
     hero_zone_visible,
     identity_visible,
+    tag_visible,
 )
 
 __all__ = [
@@ -1804,6 +1805,12 @@ def visible_record(record: object, *, viewer: int | None = None) -> dict[str, An
             # A3：开局暗发。本人 / 主公可见，其余置空；亮明 / 阵亡走 identity_reveal。
             if not identity_visible(raw, viewer):
                 raw["identity"] = None
+        elif delta_type in ("tag_add", "tag_remove"):
+            # spec §投影与记录流：标签的可见性由**标签类型**的登记表回答。隐藏标签
+            # （M6 登记的三类）对任何玩家载荷都不下发 ⇒ 整条裁掉，牌面与标签类型都不出现。
+            # 这也解释了"标签的增删不改变公开的手牌数"：人类侧根本看不到这两条。
+            if not tag_visible(raw.get("tag_type"), viewer):
+                return None
     if kind == "action":
         # 公开事实：谁应答了、被接受与否；**具体选了什么**只对人类座位自己的应答展开。
         action = raw.get("action")

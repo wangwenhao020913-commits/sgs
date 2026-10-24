@@ -870,7 +870,7 @@ def same_kingdom(state: GameState, a: int, b: int) -> bool:
     return left is not None and left is right
 
 
-def prune_card_tags(state: GameState) -> None:
+def prune_card_tags(state: GameState) -> list[tuple[int, object]]:
     """清理**来源实例已消失**的牌标签（M6 票 09；D12 的第四项声明）。
 
     判据 = 标签类型声明 ``disappears_with_source`` ∧ 它的来源实例
@@ -887,29 +887,34 @@ def prune_card_tags(state: GameState) -> None:
 
     没有标签时**零动作**（先短路再看实例）：这个方法随每次牌移动都会跑，常规局里
     ``card_tags`` 恒空，前缀守卫让"没标签"的路径不付第二次 ``resolve_instances``。
+
+    返回值 = 被清掉的 ``(card_id, CardTag)`` 列表（按清除顺序）：调用方（引擎）据此在
+    记录流里落 ``tag_remove``（M6 票 20）。纯状态函数仍不碰记录流。
     """
     if not state.card_tags:
-        return
+        return []
     live = {
         (instance.owner, instance.skill_id)
         for instance in resolve_instances(state)
     }
+    removed: list[tuple[int, object]] = []
     for card_id in list(state.card_tags):
         tags = state.card_tags[card_id]
-        kept = tuple(
+        gone = tuple(
             tag
             for tag in tags
-            if not (
-                card_tag_spec(tag.tag_type).disappears_with_source
-                and (tag.owner, tag.skill_id) not in live
-            )
+            if card_tag_spec(tag.tag_type).disappears_with_source
+            and (tag.owner, tag.skill_id) not in live
         )
-        if len(kept) == len(tags):
+        if not gone:
             continue
+        kept = tuple(tag for tag in tags if tag not in gone)
         if kept:
             state.card_tags[card_id] = kept
         else:
             del state.card_tags[card_id]
+        removed.extend((card_id, tag) for tag in gone)
+    return removed
 
 
 def prune_skill_state(state: GameState) -> None:
