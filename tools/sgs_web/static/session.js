@@ -345,6 +345,14 @@ function applyLiveDelta(record, view = state.liveView) {
       if (player) player.wine_active = Boolean(record.active);
       return view;
     }
+    if (record.delta_type === "turn_change") {
+      // M6 票 11 的回合边界事实（票 19 起界面消费）：额外回合**不推进自然指针**，
+      // 故轮次只在这里更新、不按 TURN_START 数（那样同一个座位连开两个回合会误进一轮）。
+      // 公开事实（回合座位 + 轮次都在明面上），无需按可见性裁剪。
+      snapshot.round = Number(record.round);
+      snapshot.turn_extra = Boolean(record.extra);
+      return view;
+    }
     if (record.delta_type === "identity_reveal") {
       const player = playerAt(record.seat);
       if (player) {

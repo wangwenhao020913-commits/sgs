@@ -65,11 +65,16 @@ function heroIdAt(view, seat) {
   return heroes[seat] || "";
 }
 
-/** 武将块的名称：优先服务端 `hero_name`（U1-02），旧载荷 / 合成视图退回武将 id。 */
+/** 武将块的名称：优先服务端 `hero_name`（U1-02）。
+ *
+ * 旧载荷 / 合成视图没有 `hero_name`（M6 票 19 前只对标准版武将翻得出名字）⇒ 按
+ * **目录**把 id 翻成中文名（`core.js:heroDisplayName`）。混合池下"刘备 / 界刘备"
+ * 因此在环上与自己的面板上都分得清，不会退回 `jie_liubei` 这种引擎 id。
+ */
 function heroNameOf(player, view) {
   if (player && player.hero_name) return player.hero_name;
   const assigned = heroIdAt(view, player ? player.seat : null);
-  return assigned || "（无武将）";
+  return assigned ? heroDisplayName(assigned) : "（无武将）";
 }
 
 /** 视角快照里的座位（详情标题 / 详情头 / 右键入口共用这一处查找）。 */
@@ -211,7 +216,56 @@ function miniSlotNode(options) {
   return node;
 }
 
-/** 右侧判定 / 装备区（两个容器，`data-zone` 落在行上——与旧读取口一致）。 */
+/** **武将牌上的牌区**（M6 票 10 / 票 19；spec §区域）：一个区一行，画在**武将块**里。
+ *
+ * 形状判据（服务端已裁好可见性，前端不判）：
+ * - 可跨座位：区记 `owner`（放置技能的持有者），行落在**宿主座位**的武将牌上；
+ * - 可多人并存：同一座位可以为每个技能实例各有一行（服务端 `hero_zones` 是数组）；
+ * - 这些牌**不在手牌区**，故手牌数（`player.hand_count`）不含它们——界面不另算。
+ *
+ * 布局：座位卡是固定尺寸（对手 210×150 / 自己 292×210），故一行**单行横向滚动**而不换行
+ * ——【谦逊】一次可以扣下整手牌，换行会把盒子撑破（实机验收的发现）。
+ * 空区不下发（服务端只给有牌的区），故这里不需要空占位。
+ */
+function heroZoneRows(player) {
+  const rows = [];
+  for (const zone of (player && player.hero_zones) || []) {
+    const row = document.createElement("div");
+    row.className = "hero-zone-row";
+    row.setAttribute("data-zone", "hero");
+    row.setAttribute("data-seat", String(player.seat));
+    row.setAttribute("data-skill-id", zone.skill_id || "");
+    const label = document.createElement("span");
+    label.className = "zone-k";
+    label.textContent = zone.skill_name || "武将牌上";
+    label.setAttribute("title", `武将牌上（${zone.skill_name || zone.skill_id || "技能"}）`);
+    row.appendChild(label);
+    for (const card of zone.cards || []) {
+      const chip = document.createElement("span");
+      chip.className = "hero-zone-card";
+      chip.setAttribute("data-card-id", String(card.card_id));
+      // 悬停全文与手牌 / 装备 / 处理区**同一份**服务端描述（U1-04b）。
+      chip.setAttribute("title", `${cardName(card)}\n${cardDescription(card)}`);
+      chip.textContent = cardName(card);
+      row.appendChild(chip);
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+/** 把武将牌上的牌区铺进一个容器；没有区就整块隐藏（不占布局）。 */
+function fillHeroZones(box, player) {
+  if (!box) return;
+  box.innerHTML = "";
+  const rows = heroZoneRows(player);
+  box.hidden = rows.length === 0;
+  for (const row of rows) box.appendChild(row);
+}
+
+/** 右侧判定 / 装备区（两个容器，`data-zone` 落在行上——与旧读取口一致）。
+ *  **武将牌上的牌区**不在这里：它画在**武将块**里（见 :func:`heroZoneRows`），
+ *  因为座位卡的右侧块装不下【谦逊】整手牌那样的行。 */
 function sideBlockRows(player, ctx) {
   const seat = ctx.snapshot.seat;
   const interactive = Number(player.seat) === Number(seat)
@@ -275,6 +329,11 @@ function heroBlockNode(player, view, ctx, flags) {
   tags.className = "seat-tags";
   fillSeatTags(tags, flags);
   block.appendChild(tags);
+  // M6 票 19：武将牌上的牌区（一个放置区一行；没有区时整块隐藏）。
+  const zones = document.createElement("div");
+  zones.className = "hero-zones";
+  fillHeroZones(zones, player);
+  block.appendChild(zones);
   const foot = document.createElement("div");
   foot.className = "seat-foot";
   const hand = document.createElement("span");

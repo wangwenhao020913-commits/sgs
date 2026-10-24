@@ -9,6 +9,9 @@ A3 的口径按**记录类型**各有一条，全部只读记录字典：
 - **身份发放**（``identity_deal``）：A3 的「本人 / 主公 / 已亮明 / 阵亡」——发放是**开局
   暗发**，故只有本人与主公可见；"已亮明 / 阵亡"由**公开的** ``identity_reveal`` 记录承载
   （同一份记录流里的下一条），本判据不需要回读引擎状态。
+- **武将牌上的牌区**（M6 票 19 / spec §区域）：整个区给不给看由放置技能的数据声明回答
+  （``PlacementDecl.visibility``）——``public`` 谁都能看；``hidden`` 只给**放置技能的
+  持有者**与**被扣牌的宿主本人**；未登记的取值一律不可见（fail-closed）。
 - ``viewer is None`` = 没有查看者（全知）：不裁剪（内部调用 / 测试需要原始记录）。
 
 两个下发口**必须同源**，否则同一件事在事件流与日志里口径不一：
@@ -30,6 +33,7 @@ __all__ = [
     "PUBLIC_ZONES",
     "cards_visible",
     "deck_cards_visible",
+    "hero_zone_visible",
     "identity_visible",
 ]
 
@@ -73,3 +77,23 @@ def identity_visible(record: Mapping[str, Any], viewer: int | None) -> bool:
     if viewer is None:
         return True
     return record.get("seat") == viewer or record.get("identity") == "lord"
+
+def hero_zone_visible(
+    visibility: str, *, owner: int | None, host: int | None, viewer: int | None
+) -> bool:
+    """一个**武将牌上牌区**对 ``viewer`` 是否可见（M6 票 19；spec §区域 / D14）。
+
+    ``visibility`` 是放置技能数据声明上的取值（``public`` / ``hidden``）；``owner`` =
+    放置技能的持有者座位（可跨座位扣牌），``host`` = 武将牌的主人（被扣牌的座位）。
+    ``hidden`` 的放行名单是这两者本人（spec：「只有放置技能的持有者（以及被扣牌的目标
+    本人）可见」）；未登记的取值 **fail-closed**（不把新写的声明当成公开区）。
+
+    ``viewer is None`` = 全知通道：不裁剪（与 :func:`cards_visible` 同一条口径）。
+    """
+    if viewer is None:
+        return True
+    if visibility == "public":
+        return True
+    if visibility != "hidden":
+        return False
+    return viewer == owner or viewer == host

@@ -362,6 +362,12 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 }
 .topbar-center .round { font-weight: 700; }
 .topbar-center .round #t-round { font-weight: 700; font-variant-numeric: tabular-nums; }
+/* M6 票 19：额外回合提示（票 11 的 turn_extra；自然回合不挂）。 */
+.topbar-center .extra-turn {
+  font-size: 11px; font-weight: 700; color: #8a5a00;
+  border: 1px solid #d9b45c; border-radius: 999px; padding: 1px 7px;
+  background: #fdf3d8;
+}
 .topbar-center .sep { color: var(--line); }
 .topbar-right { flex: 1 1 auto; justify-content: flex-end; position: relative; }
 .ratio { font-size: 12px; color: var(--ink); letter-spacing: .02em; }
@@ -553,6 +559,30 @@ button.mini-slot { cursor: pointer; }
 .mini-slot.sel { border-color: var(--accent); background: var(--accent-soft); }
 .mini-slot.picked { border-color: var(--ok); background: #e7f5ec; box-shadow: inset 0 0 0 2px var(--ok); }
 .mini-slot.dis { opacity: .4; cursor: not-allowed; }
+
+/* M6 票 19：武将牌上的牌区（一个放置区一行，画在**武将块**里）。
+   「可跨座位」由座位卡的宿主决定，「可多人并存」= 同一座位多行。
+   座位卡是固定尺寸、且【谦逊】能一次扣下整手牌，故每行**单行横向滚动**（不换行、不撑破盒子）。 */
+.hero-zones { display: flex; flex-direction: column; gap: 2px; margin: 2px 0; min-height: 0; }
+.hero-zones[hidden] { display: none; }
+.hero-zone-row {
+  display: flex; align-items: center; gap: 2px;
+  overflow-x: auto; overflow-y: hidden;
+  padding-bottom: 1px; border-top: 1px dashed #d8cbb4;
+}
+.hero-zone-row .zone-k {
+  flex: 0 0 auto;
+  font-size: calc(9 * var(--dsu)); color: #7d6b52; font-weight: 600;
+  white-space: nowrap; max-width: 4.2em; overflow: hidden; text-overflow: ellipsis;
+}
+.hero-zone-card {
+  flex: 0 0 auto;
+  max-width: 4.2em; padding: 0 4px;
+  border: 1px solid #b89f74; border-radius: 4px; background: #fffaf0;
+  font-size: calc(9 * var(--dsu)); font-weight: 600; color: var(--ink);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.self .hero-zone-row .zone-k, .self .hero-zone-card { font-size: calc(11 * var(--dsu)); }
 
 /* 行高亮：金框行动中 / 加粗绿外圈可指定 / 绿内圈 + 填充已选 / 悬停浅绿。 */
 .seat.turn {
@@ -1191,6 +1221,22 @@ button.mini-slot { cursor: pointer; }
 }
 .hero-detail .detail-skill p {
   margin: 4px 0 0; font-size: calc(12 * var(--dsu)); line-height: 1.55; color: #4e4438;
+}
+/* M6 票 19：☆ 技能标记 + 失效 / 失去的视觉区分（"有但被挡住" vs "没了"）。 */
+.hero-detail .detail-skill .skill-star {
+  color: #b8860b; font-weight: 700; font-size: calc(12 * var(--dsu));
+}
+.hero-detail .detail-skill .skill-state {
+  font-size: calc(10 * var(--dsu)); border-radius: 999px; padding: 0 6px;
+  border: 1px solid var(--line);
+}
+.hero-detail .detail-skill.state-suppressed .skill-name { color: #8a8579; }
+.hero-detail .detail-skill.state-suppressed .skill-state {
+  color: #6b6255; border-color: #c9c1b3; background: #efece6;
+}
+.hero-detail .detail-skill.state-lost .skill-name { color: #9a938a; text-decoration: line-through; }
+.hero-detail .detail-skill.state-lost .skill-state {
+  color: #8a4a3a; border-color: #d6b3a8; background: #f7e9e4;
 }
 .hero-detail .detail-divider { height: 1px; background: var(--line); margin: 8px 0 2px; }
 .hero-detail .detail-empty { padding: 3px 0 5px; font-size: calc(12 * var(--dsu)); color: var(--dim); }

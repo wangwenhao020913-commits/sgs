@@ -22,7 +22,13 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from sgs.data import hero_skill_id, load_content_pack, load_heroes
+from sgs.data import (
+    hero_by_id,
+    hero_placement_decls,
+    hero_skill_id,
+    load_content_pack,
+    load_hero_tables,
+)
 from sgs.effects import response_count
 from sgs.engine import record_json
 from sgs.skills import (
@@ -47,7 +53,12 @@ from .display import (
     suit_labels,
 )
 from .session import Session
-from .visibility import cards_visible, deck_cards_visible, identity_visible
+from .visibility import (
+    cards_visible,
+    deck_cards_visible,
+    hero_zone_visible,
+    identity_visible,
+)
 
 __all__ = [
     "HARVEST_REQUIREMENT",
@@ -58,6 +69,7 @@ __all__ = [
     "option_source",
     "pending_payload",
     "query_context",
+    "seat_hero_zones",
     "seat_skill_display",
     "serialize_record",
     "skill_events_after",
@@ -124,10 +136,33 @@ def _transform_products(
     return list(out.values())
 
 
+SKILL_STATES: tuple[str, ...] = ("active", "suppressed", "lost")
+"""技能在详情里的**三态**（M6 票 19；稳定报文值）。
+
+- ``active``：技能在武将牌上、且参与解析；
+- ``suppressed``：**失效**——实例还在（武将牌上看得见），但被座位级谓词挡在解析之外，
+  作用域到期即恢复（`GLOSSARY.md`「技能失效」）：界面要画"有但被挡住"；
+- ``lost``：**失去**——实例不再存在且不可恢复，但武将面的技能清单一字未动（规则 15.2 /
+  「技能失去」）：界面要画"没了"。
+"""
+
+
 def _skill_entry(
-    definition: Any, name: str, *, skill_type: str | None = None
+    definition: Any,
+    name: str,
+    *,
+    skill_type: str | None = None,
+    star: bool = False,
+    state: str = "active",
 ) -> dict[str, Any]:
-    """技能条目的**公共只读键**（可操作清单 / 详情清单共用，避免两边各抄一份）。"""
+    """技能条目的**公共只读键**（可操作清单 / 详情清单共用，避免两边各抄一份）。
+
+    ``star``（M6 票 06 / 票 19）：这条技能是 **☆ 技能**（觉醒后由某条觉醒技获得）；
+    ``state``：见 :data:`SKILL_STATES`。两个键都是**公开事实**（武将牌上的技能是明置的），
+    不含当前询问 / 手牌，故可对任意座位下发。
+    """
+    if state not in SKILL_STATES:  # pragma: no cover - 闭集，防御性守卫
+        raise ValueError(f"未知的技能状态 {state!r}（可选 {SKILL_STATES}）")
     return {
         "skill_id": definition.skill_id,
         "name": name,
@@ -135,6 +170,8 @@ def _skill_entry(
         or getattr(definition.skill_type, "value", str(definition.skill_type)),
         "locked": bool(definition.locked),
         "carrier": getattr(definition.carrier, "value", str(definition.carrier)),
+        "star": bool(star),
+        "state": state,
         "description": skill_description(definition.skill_id),
     }
 
@@ -156,7 +193,7 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         payload,
         view.players,
         lookup=_card_lookup(state),
-        heroes=load_heroes(session.pack.pack_id),
+        heroes=load_hero_tables(session.pack.pack_id),
         virtual_cards=_active_virtual_cards(session.engine),
     )
     # U1-06：武将详情对**任意**座位可开，故每个座位都带一份只读技能清单
@@ -164,7 +201,69 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
     # 顶层带 `available` / `ui.convert_sources`，读的是**查看者当前询问与手牌**。
     for player_payload, player in zip(payload["players"], view.players, strict=True):
         player_payload["skills"] = seat_skill_display(session, player.seat)
+        # M6 票 19：**武将牌上的牌区**（可跨座位、可多人并存）。可见性由放置技能的数据
+        # 声明裁剪（`PlacementDecl.visibility`），不是"数据里恰好没有隐藏区"。
+        player_payload["hero_zones"] = seat_hero_zones(
+            session, player.seat, viewer=session.human_seat
+        )
+    # M6 票 19：顶栏的轮次 / 额外回合提示。轮次自票 11 起是引擎事实（额外回合不推进
+    # 自然指针），但 ``PlayerView`` 里**没有**它——加进去会改 47 条金录像的记录字节
+    # （票 11 已核）。故与技能清单同姿态：只在本函数里补进**网页载荷**，记录流不动。
+    payload["round"] = int(state.round)
+    payload["turn_extra"] = bool(state.turn_extra)
     return payload
+
+
+def seat_hero_zones(
+    session: Session, seat: int, *, viewer: int | None
+) -> list[dict[str, Any]]:
+    """一个座位**武将牌上的牌区**（M6 票 19 / spec §区域 / D14）。
+
+    口径：
+
+    - 区键 = （座位, 技能实例）。座位 = 武将牌的主人（**可跨座位**：牌可以扣在别人身上），
+      技能实例 = 放置技能的持有者 + 技能 id；`Player.hero_cards` 的键已经是规范文本。
+    - **可见性按数据声明裁**：``PlacementDecl.visibility`` 是唯一判据
+      （:func:`sgs_web.visibility.hero_zone_visible`）；未声明的技能 / 未登记的取值一律
+      不下发（fail-closed）。
+    - **只画有牌的区**：空区在引擎里是合法且被保留的（规则 15.2：失去技能不影响区），
+      但界面不需要一行空框。
+    - 牌面走**同一份卡面契约**（``display.card_payload``）：牌名 / 属性 / 描述与别处一致。
+    - 这些牌不在手牌区，故公开的 ``hand_count`` 不因它们变化（票面验收）。
+    """
+    state = session.engine.state
+    player = state.player(seat)
+    declared = hero_placement_decls(state.pack_id)
+    lookup = _card_lookup(state)
+    out: list[dict[str, Any]] = []
+    for zone in player.hero_cards.values():
+        if not zone.cards:
+            continue
+        declaration = declared.get(zone.skill_id)
+        if declaration is None:
+            continue
+        if not hero_zone_visible(
+            declaration.visibility.value, owner=zone.owner, host=seat, viewer=viewer
+        ):
+            continue
+        cards: list[dict[str, Any]] = []
+        for card_id in zone.cards:
+            try:
+                card = state.card(card_id)
+            except (KeyError, IndexError):  # pragma: no cover - 牌守恒由引擎保证
+                continue
+            cards.append(card_payload(card, lookup=lookup))
+        if not cards:  # pragma: no cover - 与上面 `not zone.cards` 同一条守卫
+            continue
+        out.append(
+            {
+                "skill_id": zone.skill_id,
+                "skill_name": _skill_display_name(state, zone.skill_id),
+                "owner": int(zone.owner),
+                "cards": cards,
+            }
+        )
+    return out
 
 
 def seat_skill_display(session: Session, seat: int) -> list[dict[str, Any]]:
@@ -175,27 +274,51 @@ def seat_skill_display(session: Session, seat: int) -> list[dict[str, Any]]:
     - **武将技能**读公开武将面（``Hero.skills``），**不**经 ``resolve_instances``——
       后者只解析**存活实例**（死者不能发动技能），而阵亡武将的详情仍要开得出来；
       主公技照旧按 ``player.identity`` 门控（非主公的武将牌上没有它）。
+    - **☆ 技能**（``HeroSkill.granted_by`` 非空）**觉醒后才出现**：它的实例只来自
+      "获得"（``Player.granted_skills``），未获得时武将牌上根本没有它——这不是"有但
+      不生效"，故这里按 ``granted_skills`` 决定列不列，而不是把武将面的三条全铺出来。
+    - **三态**（M6 票 19）：``lost`` = 在 ``Player.lost_skills`` 里（武将面不删，故仍列）；
+      ``suppressed`` = 实例还在、但被座位级失效记录挡在解析之外（锁定技不受影响）——
+      判据与引擎同源：``resolve_instances`` 解析两次（含 / 不含失效）再作差。
     - **装备技能** = 装备区里的实体牌（``equip.<牌名 id>``）+ ``virtual_equipment``
-      的虚拟授予（不占牌守恒，如【八阵】）。顺序 = 武将技能 → 实体装备 → 虚拟装备。
+      的虚拟授予（不占牌守恒，如【八阵】）。顺序 = 武将技能 → 获得（☆）→ 实体装备 →
+      虚拟装备。
     - **只读展示**：不带 ``available`` / ``preactivated`` / ``ui.convert_sources``；
       那三样会读出当前询问与本人手牌，给到别的座位就是暗置信息。``ui.passive``
       是技能定义上的公开类别，详情用它标「被动技」。
     """
     state = session.engine.state
     player = state.player(seat)
-    heroes = load_heroes(state.pack_id)
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
+    resolved = {instance.skill_id for instance in resolve_instances(state) if instance.owner == seat}
+    with_suppressed = {
+        instance.skill_id
+        for instance in resolve_instances(state, include_suppressed=True)
+        if instance.owner == seat
+    }
+    suppressed = with_suppressed - resolved
+    lost = set(player.lost_skills)
+    granted = set(player.granted_skills)
 
-    def add(definition: Any, name: str | None) -> None:
+    def state_of(skill_id: str) -> str:
+        if skill_id in lost:
+            return "lost"
+        if skill_id in suppressed:
+            return "suppressed"
+        return "active"
+
+    def add(definition: Any, name: str | None, *, star: bool = False) -> None:
         if definition is None or name is None or definition.skill_id in seen:
             return
         seen.add(definition.skill_id)
-        entry = _skill_entry(definition, name)
+        entry = _skill_entry(
+            definition, name, star=star, state=state_of(definition.skill_id)
+        )
         entry["ui"] = {"passive": _is_passive_skill(definition)}
         out.append(entry)
 
-    hero = heroes.by_id(player.hero) if player.hero else None
+    hero = hero_by_id(player.hero, pack_id=state.pack_id) if player.hero else None
     if hero is not None:
         for skill in hero.skills:
             skill_id = hero_skill_id(hero.id, skill.id)
@@ -206,7 +329,25 @@ def seat_skill_display(session: Session, seat: int) -> list[dict[str, Any]]:
                 player.identity, skill_id
             ):
                 continue
-            add(definition, skill.name)
+            # ☆ 技能只来自"获得"：未获得时武将牌上没有它（载体解析的结构事实）。
+            if skill.granted_by is not None and skill_id not in granted:
+                continue
+            add(definition, skill.name, star=skill.granted_by is not None)
+    # 武将面之外的**获得**技能（如将来"获得别人的技能"）：名字只能从数据表反查。
+    for skill_id in player.granted_skills:
+        if skill_id in seen:
+            continue
+        definition = CATALOG.get(skill_id)
+        if definition is None:
+            continue
+        short = skill_id.rsplit(".", 1)[-1]
+        star = bool(
+            hero is not None
+            and any(
+                skill.id == short and skill.granted_by is not None for skill in hero.skills
+            )
+        )
+        add(definition, _skill_display_name(state, skill_id) or short, star=star)
     for card_id in player.equip:
         card = state.card(card_id)
         add(CATALOG.get(f"equip.{card.type}"), _card_type_name(state, card.type))
@@ -262,14 +403,19 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     hand = tuple(state.player(seat).hand)
     virtual = _virtual_index(pending, state, owner=seat) if pending is not None else {}
     hero_id = state.players[seat].hero
-    names: dict[str, tuple[str, str]] = {}
+    names: dict[str, tuple[str, str, bool]] = {}
     if hero_id is not None:
-        hero = load_heroes(state.pack_id).by_id(hero_id)
+        hero = hero_by_id(hero_id, pack_id=state.pack_id)
         if hero is not None:
             # 武将面里的技能 id 是**短名**（`guose`），而实例上的 `skill_id` 带命名空间
-            # （`hero.daqiao.guose`）；两边靠**末段**对上，别去猜前缀。
+            # （`hero.daqiao.guose`）；两边靠**末段**对上，别去猜前缀。第三项 = ☆ 标记
+            # （M6 票 19：觉醒后出现的技能在按钮上也标出来）。
             names = {
-                skill.id.rsplit(".", 1)[-1]: (skill.name, getattr(skill.skill_type, "value", str(skill.skill_type)))
+                skill.id.rsplit(".", 1)[-1]: (
+                    skill.name,
+                    getattr(skill.skill_type, "value", str(skill.skill_type)),
+                    skill.granted_by is not None,
+                )
                 for skill in hero.skills
             }
 
@@ -279,8 +425,9 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
             continue
         definition = instance.definition
         short_id = instance.skill_id.rsplit(".", 1)[-1]
-        name, skill_type = names.get(
-            short_id, (None, getattr(definition.skill_type, "value", str(definition.skill_type)))
+        name, skill_type, star = names.get(
+            short_id,
+            (None, getattr(definition.skill_type, "value", str(definition.skill_type)), False),
         )
         if name is None and definition.skill_id.startswith("equip."):
             # 装备技能没有**武将面**的名字：中文名取它所依附的**装备牌名**
@@ -289,7 +436,9 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
             name = _card_type_name(state, definition.skill_id[len("equip.") :])
         if name is None:
             continue
-        entry = _skill_entry(definition, name, skill_type=skill_type)
+        # `state` 恒 `active`：本清单只列**解析中的**实例（失效 / 失去不产出实例），
+        # 三态的区分在 `seat_skill_display` 的详情清单里（那里武将面一字未动）。
+        entry = _skill_entry(definition, name, skill_type=skill_type, star=star)
         entry.update(
             {
                 "available": definition.skill_id in offered,
@@ -385,7 +534,7 @@ def _seat_name(state: Any, seat: int) -> str | None:
     """座位上的武将中文名（没发武将 / 未知武将 ⇒ ``None``，不编名字）。"""
     hero_id = state.player(seat).hero
     if hero_id:
-        hero = load_heroes(state.pack_id).by_id(hero_id)
+        hero = hero_by_id(hero_id, pack_id=state.pack_id)
         if hero is not None and hero.name:
             return hero.name
     return None
@@ -417,12 +566,12 @@ def _skill_display_name(state: Any, skill_id: str) -> str | None:
         return _card_type_name(state, head[len("equip.") :])
     parts = head.split(".")
     short = parts[-1]
-    heroes = load_heroes(state.pack_id)
+    heroes = load_hero_tables(state.pack_id)
     if len(parts) >= 3 and parts[0] == "hero":
-        hero = heroes.by_id(parts[1])
+        hero = hero_by_id(parts[1], pack_id=state.pack_id)
         pool = (hero,) if hero is not None else ()
     else:
-        pool = heroes.heroes
+        pool = tuple(hero for table in heroes for hero in table.heroes)
     for hero in pool:
         if hero is None:
             continue
@@ -1589,7 +1738,7 @@ def pending_payload(
             "card": card_payload(fire_attack["revealed"], lookup=lookup),
         }
     # U1-02：内嵌视角里的座位也要武将名称 / 势力；裸 Query（409）拿不到包，传 None。
-    heroes = load_heroes(session.pack.pack_id) if isinstance(session, Session) else None
+    heroes = load_hero_tables(session.pack.pack_id) if isinstance(session, Session) else None
     # U1-07：转化清单的产物索引（全部产物牌面）。清单本身只说"选哪些来源牌"，
     # 界面要写「将以【X】使用」只能读这份派生；不是查看者的询问 ⇒ 空列表（fail-closed）。
     payload["transform_products"] = (

@@ -119,6 +119,39 @@ function skillKindLabel(skill) {
   return passive ? "被动技" : "主动技";
 }
 
+/** 技能**三态**的徽标文案（M6 票 19；`player.skills[].state` 是稳定报文值）。
+ *
+ * - `suppressed` = **失效**：有但被挡住（实例还在，作用域到期恢复）；
+ * - `lost` = **失去**：没了（实例不再存在且不可恢复）；
+ * - `active`（或缺字段）= 不出徽标，不制造噪声；未登记的值同样不出字（fail-closed）。
+ *
+ * 文案只住这一处：武将详情与技能按钮区读同一份，两处不会各写一套。
+ */
+const SKILL_STATE_LABELS = { suppressed: "失效", lost: "失去" };
+
+function skillStateLabel(skill) {
+  return SKILL_STATE_LABELS[(skill && skill.state) || ""] || "";
+}
+
+/** ☆ 技能标记（M6 票 19）：觉醒后由某条觉醒技**获得**的技能（服务端 `star`）。
+ *  未觉醒时它根本不在清单里（载体解析的事实），故这里只负责"出现之后怎么标"。 */
+function skillStarLabel(skill) {
+  return skill && skill.star ? "☆" : "";
+}
+
+/** 武将 id → 中文名：目录（`GET /api/heroes`，标准 + 界版的启用并集）是服务端唯一的
+ *  名单来源（M6 票 19）。服务端已把 `hero_name` 翻好；这里只服务**旧载荷 / 合成视图**
+ *  （没有 `hero_name`）与回放页的座位名——缺目录 / 未知 id 时退回 id，**不编名字**。 */
+function heroDisplayName(heroId) {
+  if (!heroId) return "";
+  for (const group of state.heroCatalog || []) {
+    for (const version of group.versions || []) {
+      if (version.id === heroId) return version.name;
+    }
+  }
+  return String(heroId);
+}
+
 /** `Phase` 枚举的字面值 → 中文阶段名。
  *
  * 枚举值（`prepare` / `judge` / `draw` / `play` / `discard` / `finish`）是**稳定报文值**，

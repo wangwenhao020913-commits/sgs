@@ -31,10 +31,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-from sgs.data import IDENTITY_LABELS, HeroTable, Suit, color_of_suit
+from sgs.data import IDENTITY_LABELS, Hero, HeroTable, Suit, color_of_suit
 from sgs.state import CardRef, EndPhase, Pass, PlayerPublic, Query, SelectCards
 
 from .descriptions import card_description
@@ -50,6 +50,7 @@ __all__ = [
     "card_payload",
     "decorate_pending",
     "decorate_snapshot",
+    "hero_in_tables",
     "prompt_display",
     "seat_display",
     "suit_labels",
@@ -234,7 +235,7 @@ def _processing_display(
 
 
 def seat_display(
-    player: PlayerPublic, *, heroes: HeroTable | None = None
+    player: PlayerPublic, *, heroes: HeroTable | Sequence[HeroTable] | None = None
 ) -> dict[str, Any]:
     """座位卡的展示字段：横置 / 酒状态 + 身份标签 + 武将名称 / 势力。
 
@@ -243,12 +244,11 @@ def seat_display(
     回放 / 合成载荷兜底。
 
     ``hero_name`` / ``kingdom`` / ``kingdom_label``（U1-02）：引擎只给武将 id
-    （``PlayerPublic.hero``）与势力枚举；``heroes`` 是 :func:`sgs.data.load_heroes` 的
-    武将表，给了才翻得出中文名，缺表 / 未发放武将时给 ``None``（界面退回「（无武将）」）。
+    （``PlayerPublic.hero``）与势力枚举；``heroes`` 是武将表——**可以是多张**（M6 票 19：
+    标准表 + 界版包），引擎配将的默认池是两者的并集，只查一张表会让界将退回引擎 id。
+    缺表 / 未发放武将时给 ``None``（界面退回「（无武将）」）。
     """
-    hero = None
-    if heroes is not None and player.hero:
-        hero = heroes.by_id(player.hero)
+    hero = hero_in_tables(heroes, player.hero)
     kingdom = player.kingdom.value if player.kingdom is not None else None
     return {
         "chained": bool(player.chained),
@@ -260,6 +260,24 @@ def seat_display(
         "kingdom": kingdom,
         "kingdom_label": KINGDOM_LABELS.get(kingdom) if kingdom is not None else None,
     }
+
+
+def hero_in_tables(
+    heroes: HeroTable | Sequence[HeroTable] | None, hero_id: str | None
+) -> Hero | None:
+    """按武将 id 在**一张或多张**武将表里取武将；取不到返回 ``None``（不编名字）。
+
+    单一读取面（M6 票 19）：默认池是标准 + 界版的并集，故"id → 武将"的解析必须能跨表。
+    接受单张表（既有调用方 / 测试）或表的序列；``None`` / 未发放武将一律 ``None``。
+    """
+    if heroes is None or not hero_id:
+        return None
+    tables = (heroes,) if isinstance(heroes, HeroTable) else tuple(heroes)
+    for table in tables:
+        hero = table.by_id(hero_id)
+        if hero is not None:
+            return hero
+    return None
 
 
 def prompt_display(query: Query) -> dict[str, Any]:
@@ -357,14 +375,15 @@ def decorate_snapshot(
     players: tuple[PlayerPublic, ...] | list[PlayerPublic],
     *,
     lookup: Mapping[int, CardRef] | None = None,
-    heroes: HeroTable | None = None,
+    heroes: Sequence[HeroTable] | None = None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
 ) -> dict[str, Any]:
     """给一份 ``PlayerView`` 的 JSON 形态补展示字段（原地改，返回同一个 dict）。
 
     ``players`` 与载荷里的 ``players`` 同序（投影按座位序输出）；座位字段由
     :func:`seat_display` 给出，卡面字段由 :func:`card_display` 给出。``heroes``
-    是武将表（U1-02 的 ``hero_name`` 要用），缺省时名称留空、界面退回 id。
+    是武将表（U1-02 的 ``hero_name`` 要用；M6 票 19 起是**多张表**——标准 + 界版包，
+    与配将池同源），缺省时名称留空、界面退回 id。
     ``virtual_cards`` 是**当前正在结算**的虚拟 / 转化牌（U1-07）：``processing``
     按它换成产物（见 :func:`_processing_display`），其余区域只补展示字段。
     """
@@ -389,7 +408,7 @@ def decorate_pending(
     query: Query,
     *,
     lookup: Mapping[int, CardRef] | None = None,
-    heroes: HeroTable | None = None,
+    heroes: Sequence[HeroTable] | None = None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
 ) -> dict[str, Any]:
     """给一份 ``pending_payload`` 补展示字段（询问里的所有牌面 + 内嵌视角 + 提示条）。"""

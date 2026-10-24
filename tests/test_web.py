@@ -88,6 +88,9 @@ from support.scripts import PassPlayer, run_queries  # noqa: E402
 TWO_PLAYERS = {"player_count": 2}
 """2 人局：无身份 1v1，跑得快，且足以覆盖"挂起 → 应答 → 续跑"的全部分支。"""
 
+_QIANXUN_ZONE = "0:hero.jie_luxun.qianxun"
+"""座位 0 的界陆逊【谦逊】区键（（座位, 技能实例）的规范文本；M6 票 10 的唯一派生）。"""
+
 
 class _FirstChoice:
     """每次都取第一个候选——确定性的脚本参与者（**真正的参与者协议**，不是替身）。"""
@@ -2648,6 +2651,9 @@ def test_every_skill_entry_carries_type_lock_and_availability() -> None:
             "skill_type",
             "locked",
             "carrier",
+            # M6 票 19：☆ 标记 + 三态（可操作清单里恒 active，失效 / 失去在详情清单里）
+            "star",
+            "state",
             "available",
             "preactivated",
             "description",
@@ -2736,9 +2742,15 @@ def test_every_seat_carries_the_public_skill_list_for_the_detail_window() -> Non
                 "skill_type",
                 "locked",
                 "carrier",
+                # M6 票 19：☆ 标记 + 三态（active / suppressed / lost）
+                "star",
+                "state",
                 "description",
                 "ui",
             }, f"详情技能的键集合变了：{sorted(skill)}"
+            assert skill["star"] is False and skill["state"] == "active", (
+                "这一局的四座都在开局，没有 ☆ / 失效 / 失去"
+            )
             assert set(skill["ui"]) == {"passive"}
             assert skill["description"] != "暂无描述", f"{skill['skill_id']} 没有描述"
 
@@ -4873,25 +4885,353 @@ def test_the_seat_contract_names_the_hero_and_kingdom() -> None:
 
 
 def test_the_web_snapshot_carries_each_seats_hero_name_and_kingdom() -> None:
-    """真值走完整 ``visible_snapshot``：前端不需要自己把 id 翻成名称 / 势力。"""
-    from sgs.data import load_heroes
+    """真值走完整 ``visible_snapshot``：前端不需要自己把 id 翻成名称 / 势力。
 
-    # M6 票 12 起默认池是标 / 界混合池，而快照的名称解析仍读内容包表（界将的显示归
-    # 票 19）；按**同一判据**（五座都发到标准版、名称与势力逐项对得上）从 1 重扫。
-    # M6 票 14 换池（版本 37 → 41）后 seed 10 里出现了界将，再重扫到 seed 11。
-    # M6 票 18 换池（版本 50 → 54）后 seed 11 里出现了界将，按同一判据
-    # （五座都发到标准版武将）重扫到 seed 43。
-    session = Session(seed=43, ai="random", timeout_seconds=None, player_count=5)
-    heroes = load_heroes()
+    M6 票 19：名称解析读**两张武将表**（标准表 + 界版包）的并集。默认池自票 12 起就是
+    标 / 界混合池，只看内容包那张表会让界将的 ``hero_name`` 变成 ``None``（界面退回引擎
+    id）——本用例钉住混合局里**逐座位**都能翻出名字，且这一局真的含界将（否则判据空转）。
+    """
+    from sgs.data import hero_by_id
+
+    # seed 20261002：8 席混合局（含 6 名界将）；判据是"逐座位名称与数据表一致"，
+    # 与 47 条金录像无关（快照是网页载荷）。
+    session = Session(seed=20261002, ai="heuristic", timeout_seconds=None, player_count=8)
+    assignments = session.hero_assignments
+    assert any(hero_id and hero_id.startswith("jie_") for hero_id in assignments), (
+        f"默认池是标 / 界混合池，本局必须发到界将：{assignments}"
+    )
 
     snapshot = visible_snapshot(session)
     for payload in snapshot["players"]:
-        hero_id = session.hero_assignments[payload["seat"]]
-        hero = heroes.by_id(hero_id)
+        hero_id = assignments[payload["seat"]]
+        hero = hero_by_id(hero_id, pack_id=session.pack.pack_id)
         assert hero is not None
         assert payload["hero_name"] == hero.name, f"座位 {payload['seat']} 的武将名"
         assert payload["kingdom"] == hero.kingdom.value
         assert payload["kingdom_label"] in ("魏", "蜀", "吴", "群")
+
+
+def test_the_two_versions_of_one_true_name_stay_distinguishable_in_the_payload() -> None:
+    """spec 用户故事：**“刘备”与“界刘备”在局内必须分得清**（不是同一个名字 / 也不是 id）。
+
+    两局显式发将（其余座位固定）：同真名的两版各占一局，座位 0 的 ``hero_name`` 必须是
+    数据里的显示名（``刘备`` / ``界刘备``），而不是引擎 id（``liubei`` / ``jie_liubei``）。
+    """
+    standard = Session(
+        seed=1,
+        ai="random",
+        timeout_seconds=None,
+        player_count=2,
+        heroes=("liubei", "sunquan"),
+    )
+    jie = Session(
+        seed=1,
+        ai="random",
+        timeout_seconds=None,
+        player_count=2,
+        heroes=("jie_liubei", "sunquan"),
+    )
+
+    plain_name = visible_snapshot(standard)["players"][0]["hero_name"]
+    jie_name = visible_snapshot(jie)["players"][0]["hero_name"]
+
+    assert plain_name == "刘备", f"标准版刘备的显示名：{plain_name!r}"
+    assert jie_name == "界刘备", f"界刘备的显示名：{jie_name!r}（不能退回引擎 id）"
+    assert plain_name != jie_name, "同一真名的两版必须分得清"
+
+
+def test_the_web_snapshot_carries_the_round_and_the_extra_turn_flag() -> None:
+    """M6 票 19：顶栏的**轮次与额外回合提示**读服务端的事实，不在前端数回合。
+
+    M6 票 11 立了轮次（``state.round``，额外回合不推进自然指针）与 ``turn_extra``；
+    投影把它们作为**网页载荷**下发（``PlayerView`` 一个字段都不加——那会改 47 条金
+    录像的记录字节）。这里同时钉住两件事：真快照带这两个键、``PlayerView`` 里没有它们。
+    """
+    from sgs.state.protocol import PlayerView
+
+    session = Session(seed=20261002, ai="heuristic", timeout_seconds=None, player_count=8)
+    state = session.engine.state
+
+    snapshot = visible_snapshot(session)
+    assert snapshot["round"] == state.round, "轮次直接读引擎状态"
+    assert snapshot["turn_extra"] is False, "自然回合不是额外回合"
+
+    state.round = 4
+    state.turn_extra = True
+    snapshot = visible_snapshot(session)
+    assert snapshot["round"] == 4
+    assert snapshot["turn_extra"] is True
+
+    assert "round" not in PlayerView.model_fields, (
+        "轮次是网页展示字段，不能塞进 PlayerView（金录像字节会变）"
+    )
+    assert "turn_extra" not in PlayerView.model_fields
+
+
+def test_the_web_snapshot_shows_public_hero_card_zones_without_inflating_the_hand_count() -> None:
+    """M6 票 19 / spec §区域：武将牌上的牌区要**画得出来**，且不算手牌。
+
+    构造局面：座位 0 = 界陆逊（【谦逊】的区是**公开**声明），区里两张牌，区**跨座位**
+    （owner = 座位 1 的技能实例，扣在座位 0 的武将牌上）。判据：
+
+    - 每个座位都带 ``hero_zones`` 键（键恒在，空列表 = 没有区）；
+    - 公开区对**任何**查看者都可见（换 human_seat 再看一次）；
+    - 区里的牌不进 ``self_hand`` / ``discard``，公开的 ``hand_count`` 仍是 ``len(hand)``；
+    - 空区不画（归还后引擎保留区条目，界面不该留一行空框）。
+    """
+    from types import SimpleNamespace
+
+    from sgs.state import HeroCardZone
+
+    from sgs_web.projection import visible_snapshot as snapshot_of
+
+    pack = load_content_pack(deck_profile="standard_108")
+    zone_cards = tuple(cards_of_type(pack, "slash")[:2])
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hero="jie_luxun", hand=(cards_of_type(pack, "peach")[0],)),
+            SeatSpec(hp=4, hero="guanyu"),
+            SeatSpec(hp=4, hero="zhaoyun"),
+        ],
+        deck=tuple(range(40, 50)),
+    )
+    state.player(0).hero_cards[_QIANXUN_ZONE] = HeroCardZone(
+        skill_id="hero.jie_luxun.qianxun", owner=1, cards=list(zone_cards)
+    )
+    state.player(0).hero_cards["0:hero.jie_xusheng.pojun"] = HeroCardZone(
+        skill_id="hero.jie_xusheng.pojun", owner=0, cards=[]
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    for human_seat in (0, 1, 2):
+        session = SimpleNamespace(engine=engine, human_seat=human_seat, pack=pack)
+        snapshot = snapshot_of(session)
+        seat_zero = snapshot["players"][0]
+        zones = seat_zero["hero_zones"]
+        assert [zone["skill_id"] for zone in zones] == ["hero.jie_luxun.qianxun"], (
+            f"座位 0 只有一个**非空**的公开区（空区不画）；查看者 {human_seat}：{zones}"
+        )
+        zone = zones[0]
+        assert zone["skill_name"] == "谦逊", "区名取技能中文名（服务端从武将表翻）"
+        assert zone["owner"] == 1, "跨座位：区记的是放置技能的持有者"
+        assert [card["card_id"] for card in zone["cards"]] == list(zone_cards)
+        assert all(card.get("display_name") for card in zone["cards"]), "区里的牌也走卡面契约"
+        assert seat_zero["hand_count"] == len(state.player(0).hand), (
+            "武将牌上的牌不在手牌区 ⇒ 公开手牌数不变"
+        )
+        assert seat_zero["hero_zones"] and not (
+            set(zone_cards)
+            & {card["card_id"] for card in snapshot["self_hand"]}
+        ), "区里的牌不能混进查看者的手牌"
+        assert snapshot["players"][1]["hero_zones"] == [], "没有区的座位给空列表"
+
+
+def test_a_hidden_hero_card_zone_is_not_shown_to_a_foreign_viewer(monkeypatch) -> None:  # noqa: ANN001 - pytest 注入
+    """隐藏区（``PlacementVisibility.HIDDEN``）只给**放置者**与**宿主本人**，别人拿不到。
+
+    M6 没有隐藏区载体（【谦逊】是公开的），故这里把**同一份声明**临时换成 ``hidden``，
+    走的仍然是产品读取路径（``visible_snapshot`` → 声明 → 载荷）：判据不是"数据里恰好
+    没有隐藏区"，而是"声明说隐藏就真的裁掉"。
+    """
+    from types import SimpleNamespace
+
+    from sgs.data.models import PlacementDecl, PlacementReturn, PlacementVisibility
+    from sgs.state import HeroCardZone
+
+    from sgs_web import projection as projection_module
+
+    hidden = PlacementDecl(
+        visibility=PlacementVisibility.HIDDEN,
+        return_timing=PlacementReturn.TURN_END,
+        extra_effect=False,
+    )
+    real_lookup = projection_module.hero_placement_decls
+    monkeypatch.setattr(
+        projection_module,
+        "hero_placement_decls",
+        lambda pack_id: dict(real_lookup(pack_id)) | {"hero.jie_luxun.qianxun": hidden},
+    )
+
+    pack = load_content_pack(deck_profile="standard_108")
+    zone_cards = tuple(cards_of_type(pack, "slash")[:2])
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hero="jie_luxun"),
+            SeatSpec(hp=4, hero="guanyu"),
+            SeatSpec(hp=4, hero="zhaoyun"),
+        ],
+        deck=tuple(range(40, 50)),
+    )
+    state.player(0).hero_cards[_QIANXUN_ZONE] = HeroCardZone(
+        skill_id="hero.jie_luxun.qianxun", owner=1, cards=list(zone_cards)
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    def zones_for(viewer: int) -> list[dict]:
+        session = SimpleNamespace(engine=engine, human_seat=viewer, pack=pack)
+        return projection_module.visible_snapshot(session)["players"][0]["hero_zones"]
+
+    assert zones_for(1), "放置者（owner = 座位 1）看得见自己放的区"
+    assert zones_for(0), "宿主本人（座位 0）看得见自己武将牌上的区"
+    assert zones_for(2) == [], "第三方既不是放置者也不是宿主 ⇒ 整块不下发（fail-closed）"
+
+
+def test_the_hero_zone_visibility_predicate_follows_the_declaration() -> None:
+    """可见性判据的真值表（唯一读取方 = :func:`sgs_web.visibility.hero_zone_visible`）。"""
+    from sgs_web.visibility import hero_zone_visible
+
+    assert hero_zone_visible("public", owner=1, host=0, viewer=2) is True
+    assert hero_zone_visible("hidden", owner=1, host=0, viewer=1) is True
+    assert hero_zone_visible("hidden", owner=1, host=0, viewer=0) is True
+    assert hero_zone_visible("hidden", owner=1, host=0, viewer=2) is False
+    assert hero_zone_visible("hidden", owner=1, host=0, viewer=None) is True, (
+        "全知通道不裁剪（内部调用 / 录像）"
+    )
+    assert hero_zone_visible("unregistered", owner=1, host=0, viewer=2) is False, (
+        "未登记的可见性值必须 fail-closed（不能当成公开区）"
+    )
+
+
+def test_the_detail_skill_list_distinguishes_star_suppressed_and_lost_skills() -> None:
+    """M6 票 19：☆ / **失效** / **失去**三态在详情清单里分得清（"有但被挡住" vs "没了"）。
+
+    三件事各有一条判据：
+
+    - ☆ 技能**觉醒后才出现**（载体解析不给未获得的 ☆ 条目；旧详情清单把武将面的三条
+      全列出来，等于"没觉醒也能看见"，是错的）；
+    - **失效**的实例仍在武将牌上 ⇒ 仍列出，``state = "suppressed"``；锁定技不受
+      "所有非锁定技失效"影响，状态仍是 ``active``；
+    - **失去**的技能 ⇒ 仍列出（武将面一字未动），``state = "lost"``（与失效可区分）。
+    """
+    from types import SimpleNamespace
+
+    from sgs.state import SkillSuppression
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hero="jie_xushu"), SeatSpec(hp=4, hero="jie_machao")],
+        deck=tuple(range(40, 50)),
+    )
+    seat_one = state.player(1)
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine)
+
+    # ① 未觉醒：☆【荐言】不在清单里（武将面有，实例没有）。
+    by_id = {entry["skill_id"]: entry for entry in seat_skill_display(session, 0)}
+    assert set(by_id) == {
+        "hero.jie_xushu.zhuhai",
+        "hero.jie_xushu.qianxue",
+    }, f"未觉醒时不该列出 ☆ 技能：{sorted(by_id)}"
+    assert all(entry["star"] is False and entry["state"] == "active" for entry in by_id.values())
+
+    # ② 觉醒后（获得 ☆ 技能）：出现，且带 ☆ 标记。
+    seat_zero = state.player(0)
+    seat_zero.granted_skills.append("hero.jie_xushu.jianyan")
+    by_id = {entry["skill_id"]: entry for entry in seat_skill_display(session, 0)}
+    assert "hero.jie_xushu.jianyan" in by_id, f"觉醒后 ☆ 技能必须出现在详情里：{sorted(by_id)}"
+    assert by_id["hero.jie_xushu.jianyan"]["star"] is True
+    assert by_id["hero.jie_xushu.zhuhai"]["star"] is False
+
+    # ③ 失效：非锁定技 state = suppressed（仍列出），锁定技不受影响。
+    locked_ids = {
+        entry["skill_id"] for entry in seat_skill_display(session, 1) if entry["locked"]
+    }
+    assert locked_ids, "界马超的【马术】是锁定技——本判据需要一个锁定技作对照"
+    seat_one.suppressed_skills.append(SkillSuppression(skill_id="hero.jie_ganning.yijue"))
+    by_id = {entry["skill_id"]: entry for entry in seat_skill_display(session, 1)}
+    assert set(by_id) == {"hero.jie_machao.mashu", "hero.jie_machao.tieqi"}, (
+        f"失效不删条目（它还在武将牌上）：{sorted(by_id)}"
+    )
+    for skill_id in locked_ids:
+        assert by_id[skill_id]["state"] == "active", "锁定技不被「所有非锁定技失效」覆盖"
+    for skill_id in set(by_id) - locked_ids:
+        assert by_id[skill_id]["state"] == "suppressed", f"{skill_id} 应标成失效"
+
+    # ④ 失去：state = lost，仍列出（武将面没删）——与失效可区分。
+    seat_one.lost_skills.append("hero.jie_machao.tieqi")
+    by_id = {entry["skill_id"]: entry for entry in seat_skill_display(session, 1)}
+    assert by_id["hero.jie_machao.tieqi"]["state"] == "lost"
+    assert by_id["hero.jie_machao.mashu"]["state"] == "active"
+
+    # 读取方走真实产出路径：`visible_snapshot` 才是 `players[].skills` 的写入者。
+    session.pack = pack
+    session.human_seat = 0
+    snapshot = visible_snapshot(session)
+    seat_one_payload = next(
+        entry for entry in snapshot["players"] if entry["seat"] == 1
+    )
+    assert {
+        entry["skill_id"]: entry["state"] for entry in seat_one_payload["skills"]
+    }["hero.jie_machao.tieqi"] == "lost", "三态没有从 visible_snapshot 下发到前端"
+
+
+def test_the_actionable_skill_list_marks_a_star_skill_and_keeps_the_key_set() -> None:
+    """技能按钮区（可操作清单）也带 ☆ 标记：觉醒后出现的技能在按钮上同样标出来。"""
+    from types import SimpleNamespace
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hero="jie_xushu"), SeatSpec(hp=4, hero="guanyu")],
+        deck=tuple(range(40, 50)),
+    )
+    state.player(0).granted_skills.append("hero.jie_xushu.jianyan")
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, pending=None)
+
+    entries = {entry["skill_id"]: entry for entry in build_skills(session, 0)}
+
+    assert entries["hero.jie_xushu.jianyan"]["star"] is True
+    assert entries["hero.jie_xushu.zhuhai"]["star"] is False
+    assert all(entry["state"] == "active" for entry in entries.values()), (
+        "可操作清单只列解析中的实例，故状态恒 active（失效 / 失去不在这里）"
+    )
+
+
+def test_hidden_card_tags_never_reach_the_web_payload_and_do_not_change_the_hand_count() -> None:
+    """spec §投影与记录流：标签按**类型声明的可见性**裁剪，且不改变公开的「手牌数」。
+
+    M6 登记的三类标签全是 ``HIDDEN``（引擎内事实），故网页载荷里连键都不该有——这里
+    同时钉住"载荷逐字节不变"与"手牌数不动"。最后一条断言是**登记表检查**：一旦有人登记
+    ``PUBLIC`` 标签，本用例会红，逼他先给载荷加一个按声明裁剪的读取方（再放开这一条）。
+    """
+    from types import SimpleNamespace
+
+    from sgs.data import CARD_TAG_TYPES, CardTagVisibility, CardTagType
+    from sgs.state import CardTag
+
+    pack = load_content_pack(deck_profile="standard_108")
+    hand = tuple(cards_of_type(pack, "slash")[:3])
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hand=hand), SeatSpec(hp=4, hero="guanyu")],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    before = json.dumps(visible_snapshot(session), ensure_ascii=False, sort_keys=True)
+    state.card_tags[hand[0]] = (
+        CardTag(tag_type=CardTagType.LUOSHEN_HAND, owner=0, skill_id="hero.zhenji.luoshen"),
+    )
+    after_payload = visible_snapshot(session)
+    after = json.dumps(after_payload, ensure_ascii=False, sort_keys=True)
+
+    assert after == before, "隐藏标签不该进任何玩家载荷（本人也不行）"
+    assert "luoshen_hand" not in after, "标签类型值泄露到了网页载荷"
+    seat_zero = after_payload["players"][0]
+    assert seat_zero["hand_count"] == len(state.player(0).hand), (
+        "标签不改变公开的「手牌数」这个数字"
+    )
+    assert all(
+        spec.visibility is CardTagVisibility.HIDDEN for spec in CARD_TAG_TYPES.values()
+    ), (
+        "M6 登记表里出现了非 HIDDEN 的标签类型：网页载荷必须先补一个按声明裁剪的读取方"
+        f"（现有读取方只做手牌计数）：{ {k.value: v.visibility.value for k, v in CARD_TAG_TYPES.items()} }"
+    )
 
 
 def test_the_web_snapshot_reveals_a_seat_marked_identity_visible() -> None:
@@ -5524,6 +5864,42 @@ def test_the_card_seat_and_skill_names_come_from_the_data_tables() -> None:
     ]
     assert skill_actions, "本局必须有技能发动"
     assert "观星" in text, f"技能中文名没进叙事：\n{text[:800]}"
+
+
+def test_the_narrative_names_jie_heroes_from_the_supplement_tables() -> None:
+    """M6 票 19：简易事件流的座位名同样读**两张表**——界将不能退回引擎 id。
+
+    叙事与投影共用"武将 id → 中文名"这一份读取面（`load_hero_tables` 的并集）。四席
+    全是界将：``0号位界刘备`` 这样的写法必须出现，而 ``0号位jie_liubei`` 不能出现。
+    """
+    from sgs.data import hero_by_id
+
+    session = Session(
+        seed=11,
+        ai="heuristic",
+        timeout_seconds=None,
+        player_count=4,
+        heroes=("jie_liubei", "jie_guanyu", "jie_diaochan", "jie_lvbu"),
+    )
+    _play_to_end(session)
+    entries = _narrative(
+        session.records(),
+        viewer=session.human_seat,
+        heroes=session.hero_assignments,
+        pack_id=session.pack.pack_id,
+    )
+    text = _line_text(entries)
+
+    names = [
+        hero_by_id(hero_id, pack_id=session.pack.pack_id).name
+        for hero_id in session.hero_assignments
+        if hero_id is not None
+    ]
+    assert len(names) == 4
+    for name in names:
+        assert name in text, f"界将名 {name} 没进叙事：\n{text[:800]}"
+    for hero_id in session.hero_assignments:
+        assert hero_id not in text, f"叙事里出现了引擎 id（应翻成中文名）：{hero_id}"
 
 
 def test_the_session_view_carries_incremental_narrative_by_the_record_cursor() -> None:

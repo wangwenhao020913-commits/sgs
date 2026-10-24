@@ -87,6 +87,8 @@
     "reforgeAction", "renderReforgeEntry", "submitReforge", "describeRecord",
     // M5-bugfix（借刀预发动）：展示卡 → 纯 CardRef 的唯一投影口
     "bareCardRef",
+    // M6 票 19：混合池武将名（目录兜底）/ 技能三态徽标 / 逐事件派生的轮次与额外回合
+    "heroDisplayName", "skillStateLabel", "applyLiveDelta",
   ];
   const out = {};
   for (const name of names) {

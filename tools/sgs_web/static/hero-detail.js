@@ -46,20 +46,51 @@ function bindHeroDetailContext(node, seatOf) {
   });
 }
 
+/** 一条技能行：名称 / ☆ / 类别 / **三态徽标** / 描述全文。
+ *
+ * M6 票 19（spec「UI：☆ 技能标识、失效 / 失去标识」）：
+ * - ☆ = 觉醒后**获得**的技能（服务端 `star`）；
+ * - `state = suppressed` ⇒ 徽标「失效」+ `.state-suppressed`："有但被挡住"；
+ * - `state = lost` ⇒ 徽标「失去」+ `.state-lost`（CSS 划掉名字）："没了"；
+ * - `active` ⇒ 不挂徽标（不制造噪声）。
+ *
+ * 判据全读服务端字段，本函数不裁决技能是否生效。
+ */
 function detailSkillRow(skill) {
   const row = document.createElement("div");
-  row.className = "detail-skill";
+  const state = (skill && skill.state) || "active";
+  const stateLabel = skillStateLabel(skill);
+  row.className = `detail-skill state-${state}`;
   row.setAttribute("data-skill-id", skill.skill_id);
+  row.setAttribute("data-state", state);
   const head = document.createElement("div");
   head.className = "skill-head";
   const name = document.createElement("span");
   name.className = "skill-name";
   name.textContent = skill.name || skill.skill_id;
+  head.appendChild(name);
+  const star = skillStarLabel(skill);
+  if (star) {
+    const mark = document.createElement("span");
+    mark.className = "skill-star";
+    mark.textContent = star;
+    mark.setAttribute("title", "☆ 技能：觉醒后获得");
+    head.appendChild(mark);
+  }
   const type = document.createElement("span");
   type.className = "skill-type";
   type.textContent = skillKindLabel(skill);
-  head.appendChild(name);
   head.appendChild(type);
+  if (stateLabel) {
+    const badge = document.createElement("span");
+    badge.className = `skill-state ${state}`;
+    badge.textContent = stateLabel;
+    badge.setAttribute(
+      "title",
+      state === "lost" ? "失去：技能已不在，且不可恢复" : "失效：技能还在，作用域到期即恢复",
+    );
+    head.appendChild(badge);
+  }
   const text = document.createElement("p");
   text.textContent = skillDescription(skill);
   row.appendChild(head);

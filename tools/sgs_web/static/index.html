@@ -96,6 +96,9 @@
       </div>
       <div class="topbar-center">
         <span class="round">第 <span id="t-round">—</span> 轮</span>
+        <!-- M6 票 11 / 票 19：额外回合提示（额外回合不推进自然指针，顶栏轮次不变）。
+             显隐只由服务端快照的 `turn_extra` 决定（`table.js:renderTable`）。 -->
+        <span id="t-extra-turn" class="extra-turn" hidden>额外回合</span>
         <span class="sep">·</span>
         <span class="tag">回合计</span><code id="t-phase"></code>
         <span class="tag">轮到</span><code id="t-turn"></code>
@@ -192,6 +195,8 @@
           </div>
           <div id="t-self-hp" class="hp-bar"></div>
           <div id="t-self-tags" class="seat-tags"></div>
+          <!-- M6 票 19：武将牌上的牌区（每个放置区一行；没有区时整块隐藏）。 -->
+          <div id="t-self-hero-zones" class="hero-zones" hidden></div>
           <div class="seat-foot">
             <span>手牌 <b id="t-self-hand">0</b></span>
             <span>座位 <b id="t-self-seatno">0</b></span>

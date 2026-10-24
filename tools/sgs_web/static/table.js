@@ -59,9 +59,10 @@ function identityRatioText(playerCount) {
 
 /** 当前是第几轮：**显示用**的计数——同一座位第二次 `TURN_START` 即进入下一轮。
  *
- * 引擎侧没有轮次计数器（`PlayerView` 只给 `turn_seat` / `phase`），阵亡座位会跳过回合；
- * 因此不能用"次数 ÷ 人数"（那会在最后一人的回合就提前进轮）。按「本轮已经行动过的座位」
- * 记：座位重复出现 = 转了一圈。顶栏不拿它做任何判据，等 U2 有服务端轮次字段再换。
+ * M6 票 11 起引擎有真正的轮次（`state.round`，额外回合不推进自然指针），票 19 起由
+ * 投影下发 `snapshot.round`；本函数只在**旧录像 / 合成视图**（没有那个键）时兜底：
+ * 按「本轮已经行动过的座位」记，座位重复出现 = 转了一圈。两种数法都只是显示，
+ * 顶栏不拿它做任何判据。
  */
 function roundNumber(records) {
   let round = 1;
@@ -77,6 +78,15 @@ function roundNumber(records) {
     seen.add(seat);
   }
   return round;
+}
+
+/** 顶栏轮次文本：服务端 `snapshot.round`（引擎事实）优先，缺键时退回本地数法。 */
+function roundLabelOf(snapshot, records) {
+  const server = snapshot ? snapshot.round : null;
+  if (server !== null && server !== undefined && Number.isFinite(Number(server))) {
+    return String(Number(server));
+  }
+  return String(roundNumber(records));
 }
 
 /** 座位交互态的类全集 / `applySeatState` 住 `seat-view.js`（U1-02）；环上与底部面板共用一份。 */
@@ -180,6 +190,8 @@ function renderSelfSeat(view, ctx) {
     zones.innerHTML = "";
     for (const row of sideBlockRows(player, ctx)) zones.appendChild(row);
   }
+  // M6 票 19：武将牌上的牌区画在**武将块**里（与对手块同一个渲染口）。
+  fillHeroZones($("t-self-hero-zones"), player);
 }
 
 /** 顶栏那块公开身份配比：2 人局（无身份局）整块隐藏。 */
@@ -222,10 +234,14 @@ function renderTable() {
   $("t-discard").textContent = String((snapshot.discard || []).length);
   const rounds = $("t-round");
   if (rounds) {
-    rounds.textContent = String(roundNumber(
+    rounds.textContent = roundLabelOf(
+      snapshot,
       state.logRecords.length ? state.logRecords : (view.records || []),
-    ));
+    );
   }
+  // M6 票 19：额外回合提示（票 11 的 `turn_extra`）。自然回合不挂这个标记。
+  const extraTurn = $("t-extra-turn");
+  if (extraTurn) extraTurn.hidden = !snapshot.turn_extra;
   renderIdentityPanel(snapshot.players.length);
 
   const pendingNow = view.pending || null;
@@ -616,7 +632,11 @@ function renderSkills(view) {
     const badge = preactivated
       ? (manifest ? " · 预发动" : "")
       : skillBadgeText(skill, manifest, convertCards);
-    button.innerHTML = `${skill.name}<span class="kind">${kind}${badge}</span>`;
+    // M6 票 19：☆ 技能（觉醒后获得）在按钮名字前标出来；未觉醒时它不在清单里。
+    const star = skillStarLabel(skill);
+    if (star) button.setAttribute("data-star", "true");
+    const shownName = star ? `${star} ${skill.name}` : skill.name;
+    button.innerHTML = `${shownName}<span class="kind">${kind}${badge}</span>`;
     if (offer.handler) button.addEventListener("click", offer.handler);
     box.appendChild(button);
   }

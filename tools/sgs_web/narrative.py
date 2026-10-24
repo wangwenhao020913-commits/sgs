@@ -38,7 +38,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from functools import lru_cache
 from typing import Any, Final
 
-from sgs.data import IDENTITY_LABELS, hero_skill_id, load_content_pack, load_heroes
+from sgs.data import IDENTITY_LABELS, hero_skill_id, load_content_pack, load_hero_tables
 from sgs.engine import record_json
 from sgs.state import CardRef
 
@@ -683,12 +683,13 @@ def _name_tables(pack_id: str) -> tuple[dict[str, str], dict[str, str]]:
     数据文件是只读进料；同一进程里反复生成叙事时不必每次重读 / 重校验。装备技能的
     中文名取它所依附的**装备牌名**（与 ``build_skills`` 同一条派生）。
     """
-    heroes = load_heroes(pack_id)
-    hero_names = {hero.id: hero.name for hero in heroes.heroes}
+    tables = load_hero_tables(pack_id)
+    hero_names = {hero.id: hero.name for table in tables for hero in table.heroes}
     skill_names: dict[str, str] = {}
-    for hero in heroes.heroes:
-        for skill in hero.skills:
-            skill_names[hero_skill_id(hero.id, skill.id)] = skill.name
+    for table in tables:
+        for hero in table.heroes:
+            for skill in hero.skills:
+                skill_names[hero_skill_id(hero.id, skill.id)] = skill.name
     for card_type in load_content_pack(pack_id).card_types:
         skill_names[f"equip.{card_type.id}"] = card_type.name
     return hero_names, skill_names

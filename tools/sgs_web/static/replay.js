@@ -204,9 +204,10 @@ function renderReplaySeats(replay) {
       : `${seatState.hp} / ${seatState.hpMax === null || seatState.hpMax === undefined ? "?" : seatState.hpMax}`;
     const identity = seatState.identity ? identityLabel(seatState.identity) : "—";
     const alive = seatState.alive === false ? " · 已阵亡" : "";
+    const heroName = heroDisplayName(heroes[seat]) || "（无武将）";
     node.innerHTML = `<div class="top"><span class="who">座位 ${seat}${isHuman ? "（本局人类）" : ""}</span>
       <span class="small">体力 ${hp}${alive}</span></div>
-      <div class="small">${heroes[seat] || "（无武将）"} · 身份 ${identity}</div>`;
+      <div class="small">${heroName} · 身份 ${identity}</div>`;
     for (const [zone, label] of REPLAY_SEAT_ZONES) {
       const cards = seatState[zone] || [];
       const line = document.createElement("div");
@@ -421,14 +422,12 @@ function renderReplay() {
 }
 
 /** 回放页的武将名解析：侧车 meta 给的是武将 id，中文名单只来自服务端 `/api/heroes`
- *  （开局页已拉过、存在 `state.heroCatalog`）；缺表时退回 id，不编名字（D10）。 */
+ *  （开局页已拉过、存在 `state.heroCatalog`）；缺表时退回 id，不编名字（D10）。
+ *  M6 票 19：与牌桌共用 `core.js:heroDisplayName` 这一份"id → 中文名"的读法，
+ *  混合池下回放页同样显示"界刘备"而不是 `jie_liubei`。 */
 function replayHeroNameOf(replay) {
-  const names = new Map((state.heroCatalog || []).map((hero) => [hero.id, hero.name]));
   const heroes = (replay.meta && replay.meta.heroes) || [];
-  return (seat) => {
-    const heroId = heroes[seat];
-    return (heroId && names.get(heroId)) || heroId || "";
-  };
+  return (seat) => heroDisplayName(heroes[seat]);
 }
 
 /** 回放页舞台的到点重绘（与牌桌同一条 `nextStageDeadline`；只重绘，不判定）。 */

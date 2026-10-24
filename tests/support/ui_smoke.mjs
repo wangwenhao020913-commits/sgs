@@ -14229,4 +14229,260 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.resetSelection();
 }
 
+
+/* ============ 票 19（M6）：武将牌上的牌区 / ☆·失效·失去 / 混合池名称 / 轮次与额外回合 ====
+ *
+ * 四处都是**界面读法**的断言：服务端载荷形状由 `tests/test_web.py` 钉，这里喂与响应体
+ * 同形的合成 `view` 看界面按不按那些键读。混合池名称另有一条**真会话**判据（点将 =
+ * 界刘备），证明服务端与界面两侧都翻得出"界刘备"（spec 用户故事：刘备 / 界刘备 分得清）。
+ */
+{
+  const boxSkills = (node) => {                   // 递归找 detail / zone 行（合成 DOM 只有 children）
+    const found = [];
+    const walk = (n) => {
+      for (const child of Array.from((n && n.children) || [])) {
+        found.push(child);
+        walk(child);
+      }
+    };
+    walk(node);
+    return found;
+  };
+  const rowOf = (root, attr, value) => boxSkills(root).find(
+    (node) => node.getAttribute && node.getAttribute(attr) === String(value)) || null;
+
+  /* ---- ④ 混合池：真会话 + 旧载荷兜底（spec 用户故事「刘备 / 界刘备 分得清」） ---- */
+  const jieSession = await newSession(4321, { my_hero: "jie_liubei" });
+  ui.flushPlayback();
+  check("㉿M6-1 混合池：本人点将界刘备 ⇒ 载荷座位名是「界刘备」（不是引擎 id）",
+    jieSession.snapshot.players[0].hero_name === "界刘备",
+    `载荷 hero_name=${JSON.stringify(jieSession.snapshot.players[0].hero_name)}`);
+  check("㉿M6-2 混合池：座位卡写「界刘备」，不显示 jie_liubei",
+    $("t-hero").textContent === "界刘备", `界面="${$("t-hero").textContent}"`);
+
+  const fallbackView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9401,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9401 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  fallbackView.heroes = { 0: "jie_liubei", 1: "liubei", 2: "jie_daqiao" };
+  // 旧载荷 / 合成视图没有 `hero_name`：界面必须按目录把 id 翻成中文名，而不是显示 id。
+  for (const player of fallbackView.snapshot.players) delete player.hero_name;
+  ui.state.sessionId = null;
+  ui.state.view = fallbackView;
+  ui.resetSelection();
+  ui.renderTable();
+  check("㉉M6-3 没有 hero_name 的旧载荷：目录把 jie_liubei 翻成「界刘备」",
+    $("t-hero").textContent === "界刘备", `界面="${$("t-hero").textContent}"`);
+  const foeBoxOne = seatBox(1);
+  check("㉉M6-4 同真名的标准版仍写「刘备」（两版在环上分得清）",
+    !!foeBoxOne && foeBoxOne.text().includes("刘备") && !foeBoxOne.text().includes("jie_liubei"),
+    foeBoxOne ? foeBoxOne.text().replace(/\s+/g, " ").trim().slice(0, 60) : "缺座位 1");
+  const displayName = (heroId) => (typeof ui.heroDisplayName === "function"
+    ? ui.heroDisplayName(heroId) : null);
+  check("㉉M6-5 目录里没有的 id 才退回 id 本身（不编名字）",
+    displayName("jie_not_a_hero") === "jie_not_a_hero"
+      && displayName("jie_daqiao") === "界大乔",
+    `${displayName("jie_not_a_hero")} / ${displayName("jie_daqiao")}`);
+
+  /* ---- ② 武将牌上的牌区（可跨座位、可多人并存） + 不算手牌 ---- */
+  const zoneView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9402,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9402 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  zoneView.snapshot.players[0].hand_count = 2;   // 区里的两张**不算**手牌
+  zoneView.snapshot.players[0].hero_zones = [{
+    skill_id: "hero.jie_luxun.qianxun", skill_name: "谦逊", owner: 1,
+    cards: [synthCard(21, "杀"), synthCard(22, "闪")],
+  }];
+  zoneView.snapshot.players[2].hero_zones = [{
+    skill_id: "hero.jie_xusheng.pojun", skill_name: "破军", owner: 0,
+    cards: [synthCard(23, "桃")],
+  }];
+  ui.state.view = zoneView;
+  ui.resetSelection();
+  ui.renderTable();
+  const selfZoneRow = rowOf($("t-self-hero-zones"), "data-zone", "hero");
+  const selfZoneCards = selfZoneRow
+    ? Array.from(selfZoneRow.children).filter((node) => node.getAttribute("data-card-id"))
+    : [];
+  const selfZonesBox = $("t-self-hero-zones");
+  check("㉉M6-6 自己的武将牌上区域画在武将块里（区名 + 两张牌，横向一行）",
+    !!selfZoneRow && selfZonesBox.hidden === false
+      && selfZoneRow.getAttribute("data-skill-id") === "hero.jie_luxun.qianxun"
+      && selfZoneRow.text().includes("谦逊")
+      && selfZoneCards.map((node) => node.getAttribute("data-card-id")).join(",") === "21,22",
+    selfZoneRow ? selfZoneRow.text().replace(/\s+/g, " ").trim() : "没有 hero 行");
+  check("㉉M6-7 区里的牌**不算**手牌数（公开数字仍是 hand_count）",
+    $("t-self-hand").textContent === "2" && $("t-hand-count").textContent === "1 张",
+    `hand_count=${$("t-self-hand").textContent} 手牌区=${$("t-hand-count").textContent}`);
+  const foeZoneBox = seatBox(2);
+  const foeZoneRow = foeZoneBox ? rowOf(foeZoneBox, "data-zone", "hero") : null;
+  check("㉉M6-8 对手的武将牌上区域也画得出来（可多人并存 / 跨座位）",
+    !!foeZoneRow
+      && foeZoneRow.getAttribute("data-skill-id") === "hero.jie_xusheng.pojun"
+      && foeZoneRow.getAttribute("data-seat") === "2"
+      && foeZoneRow.text().includes("破军")
+      && foeZoneRow.text().includes("桃"),
+    foeZoneRow ? foeZoneRow.text().replace(/\s+/g, " ").trim() : "对手没有 hero 行");
+  const noZoneView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9403,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9403 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  ui.state.view = noZoneView;
+  ui.resetSelection();
+  ui.renderTable();
+  check("㉉M6-9 没有武将牌上区域 ⇒ 不画空行（整块隐藏；空区不是界面概念）",
+    $("t-self-hero-zones").hidden === true
+      && !rowOf($("t-self-hero-zones"), "data-zone", "hero")
+      && !rowOf($("t-seats"), "data-zone", "hero"),
+    `self=${!$("t-self-hero-zones").hidden}`);
+
+  /* ---- ③ ☆ / 失效 / 失去：同一条技能清单里的三种状态 ---- */
+  const skillView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9404,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9404 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  const skillRow = (id, name, extra = {}) => ({
+    skill_id: id, name, skill_type: "NORMAL", locked: false, carrier: "HERO",
+    star: false, state: "active", description: `${name}的描述。`,
+    ui: { passive: false, requirement: "", convert_sources: [] }, ...extra,
+  });
+  skillView.snapshot.players[0].skills = [
+    skillRow("hero.jie_xushu.qianxue", "勤学", { skill_type: "AWAKENING" }),
+    skillRow("hero.jie_xushu.jianyan", "荐言", { star: true }),
+    skillRow("hero.jie_xushu.zhuhai", "诛害", { state: "suppressed" }),
+    skillRow("hero.jie_xushu.fenwei", "奋威", { state: "lost" }),
+  ];
+  skillView.skills = [
+    { ...skillRow("hero.jie_xushu.jianyan", "荐言", { star: true }), available: true, preactivated: false },
+  ];
+  ui.state.view = skillView;
+  ui.resetSelection();
+  ui.renderTable();
+  const barButton = Array.from($("t-skills").children)
+    .find((node) => node.getAttribute("data-skill-id") === "hero.jie_xushu.jianyan");
+  check("㉉M6-10 技能按钮上标出 ☆（觉醒后出现的技能）",
+    !!barButton && barButton.text().includes("☆")
+      && barButton.getAttribute("data-star") === "true",
+    barButton ? barButton.text() : "没有荐言按钮");
+
+  const fireContext = (node) => {
+    const event = { target: node, preventDefault() {}, stopPropagation() {} };
+    (node.listeners.contextmenu || []).forEach((fn) => fn(event));
+  };
+  fireContext($("t-self-hero"));
+  const detailRow = (id) => rowOf($("t-modal-body"), "data-skill-id", id);
+  const starRow = detailRow("hero.jie_xushu.jianyan");
+  const suppressedRow = detailRow("hero.jie_xushu.zhuhai");
+  const lostRow = detailRow("hero.jie_xushu.fenwei");
+  const activeRow = detailRow("hero.jie_xushu.qianxue");
+  check("㉉M6-11 ☆ 技能在详情里带 ☆ 标记（未觉醒时根本不出现是服务端判据）",
+    !!starRow && starRow.text().includes("☆"),
+    starRow ? starRow.text().replace(/\s+/g, " ").trim() : "没有 ☆ 行");
+  // 垫片的 `className` 与 `classList` 不联动（真 DOM 联动）：类名断言读 className。
+  const classNamesOf = (node) => String((node && node.className) || "").split(/\s+/).filter(Boolean);
+  check("㉉M6-12 失效 = 「有但被挡住」：仍列出 + 「失效」徽标 + state-suppressed",
+    !!suppressedRow
+      && suppressedRow.getAttribute("data-state") === "suppressed"
+      && classNamesOf(suppressedRow).includes("state-suppressed")
+      && suppressedRow.text().includes("失效"),
+    suppressedRow ? suppressedRow.text().replace(/\s+/g, " ").trim() : "没有失效行");
+  check("㉉M6-13 失去 = 「没了」：仍列出但划掉 + 「失去」徽标，与失效视觉可区分",
+    !!lostRow
+      && lostRow.getAttribute("data-state") === "lost"
+      && classNamesOf(lostRow).includes("state-lost")
+      && lostRow.text().includes("失去")
+      && !classNamesOf(lostRow).includes("state-suppressed"),
+    lostRow ? lostRow.text().replace(/\s+/g, " ").trim() : "没有失去行");
+  check("㉉M6-14 正常的技能不带状态徽标（active 不噪声）",
+    !!activeRow && activeRow.getAttribute("data-state") === "active"
+      && !activeRow.text().includes("失效") && !activeRow.text().includes("失去"),
+    activeRow ? activeRow.text().replace(/\s+/g, " ").trim() : "没有勤学行");
+  const stateLabel = (skill) => (typeof ui.skillStateLabel === "function"
+    ? ui.skillStateLabel(skill) : null);
+  check("㉉M6-15 徽标文案的纯函数（active / 未登记值都不出字）",
+    stateLabel({ state: "suppressed" }) === "失效"
+      && stateLabel({ state: "lost" }) === "失去"
+      && stateLabel({ state: "active" }) === ""
+      && stateLabel({}) === "",
+    `${stateLabel({ state: "suppressed" })}/${stateLabel({ state: "lost" })}`);
+  fireDocument("keydown", { key: "Escape" });
+
+  /* ---- ① 轮次与额外回合提示 ---- */
+  const roundView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9405,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9405 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  roundView.snapshot.round = 5;
+  roundView.snapshot.turn_extra = true;
+  ui.state.view = roundView;
+  ui.state.logRecords = [];
+  ui.resetSelection();
+  ui.renderTable();
+  check("㉉M6-16 顶栏轮次读服务端 `snapshot.round`（不在前端数回合）",
+    $("t-round").textContent === "5", `实得 "${$("t-round").textContent}"`);
+  // 提示条的**标签文本**是静态 HTML（垫片不解析静态文本），显隐由 `turn_extra` 决定。
+  check("㉉M6-17 额外回合有提示（标签在顶栏；显示 / 隐藏由服务端的 turn_extra 决定）",
+    $("t-extra-turn").hidden === false
+      && /id="t-extra-turn"[^>]*>\s*额外回合/.test(html),
+    `hidden=${$("t-extra-turn").hidden} 标签在 HTML=${/id="t-extra-turn"[^>]*>\s*额外回合/.test(html)}`);
+
+  const oldRoundView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9406,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    prompt_display: { text: "出牌阶段：使用一张牌，或结束出牌阶段。", default_label: "超时将自动结束出牌阶段" },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9406 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  ui.state.view = oldRoundView;
+  ui.state.logRecords = [
+    { kind: "timing", timing: "TURN_START", actor: 0, seq: 1 },
+    { kind: "timing", timing: "TURN_START", actor: 1, seq: 2 },
+    { kind: "timing", timing: "TURN_START", actor: 0, seq: 3 },
+  ];
+  ui.renderTable();
+  check("㉉M6-18 旧录像 / 合成视图没有 round ⇒ 退回按 TURN_START 的本地数法（顶栏不空）",
+    $("t-round").textContent === "2" && $("t-extra-turn").hidden === true,
+    `round="${$("t-round").textContent}" hidden=${$("t-extra-turn").hidden}`);
+
+  const live = {
+    snapshot: { ...roundView.snapshot, round: 1, turn_extra: false, players: [] },
+  };
+  if (typeof ui.applyLiveDelta === "function") {
+    ui.applyLiveDelta(
+      { kind: "delta", delta_type: "turn_change", seat: 3, round: 7, extra: true }, live);
+  }
+  check("㉉M6-19 逐事件派生：`turn_change` 记录把轮次与额外回合写进 live view",
+    live.snapshot.round === 7 && live.snapshot.turn_extra === true,
+    `round=${live.snapshot.round} extra=${live.snapshot.turn_extra}`);
+
+  // 收尾：别把这一段的状态带进后面的用例。
+  ui.state.logRecords = [];
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.liveView = null;
+  ui.resetSelection();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
