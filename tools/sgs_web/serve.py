@@ -266,12 +266,11 @@ class GameRegistry:
         return load_hero_presets(self.presets_path)
 
     def save_hero_presets(self, body: dict[str, Any]) -> dict[str, Any]:
-        """保存一个槽位并置为 active；越界 / 未知武将由 :func:`save_hero_presets` 拒。"""
-        banned = body.get("banned_heroes", [])
-        if not isinstance(banned, list):
-            raise ValueError(f"banned_heroes 必须是武将 id 的数组：{banned!r}")
+        """保存一个槽位并置为 active；**校验只在模块函数**（唯一写入口）里做。"""
         return save_hero_presets(
-            slot=body.get("slot"), banned_heroes=banned, path=self.presets_path
+            slot=body.get("slot"),
+            banned_heroes=body.get("banned_heroes", []),
+            path=self.presets_path,
         )
 
     # -- 建局 ---------------------------------------------------------------

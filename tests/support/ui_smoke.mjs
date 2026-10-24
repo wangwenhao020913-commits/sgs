@@ -6574,12 +6574,12 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const hintNode = Array.from($("t-prompt-skills").children).find(
     (node) => String(node.className || "").split(/\s+/).includes("prompt-skill-hint"));
   const before = calls.length;
-  check("U2-04l 鬼才改判窗口：提示区只有一个只说明的「鬼才」入口（+ 点手牌提示；无第二套选择）",
+  check("U2-04l 鬼才改判窗口：提示区只有一个只说明的「鬼才」入口（+ 选牌提示；无第二套选择）",
     ui.renderKind(pending, pending.legal_actions) === "picker"
       && promptSkillIds().join(",") === "hero.simayi.guicai"
       && !!entry && entry.getAttribute("data-window-entry") === "true"
       && entry.disabled === false
-      && !!hintNode && /点一张手牌/.test(hintNode.textContent) && /提交/.test(hintNode.textContent),
+      && !!hintNode && /选一张牌/.test(hintNode.textContent) && /提交/.test(hintNode.textContent),
     `kind=${ui.renderKind(pending, pending.legal_actions)} 组=${JSON.stringify(promptSkillIds())} entry=${entry && entry.getAttribute("data-window-entry")} hint="${hintNode && hintNode.textContent}"`);
   check("U2-04m 点「鬼才」只写提示：不选中候选、不设焦点、不发请求（不是第二套选择方式）",
     (() => {
@@ -6587,7 +6587,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       return ui.state.selectedOption === null
         && ui.state.focusCardId === null
         && calls.length === before
-        && /点一张手牌/.test($("t-target-hint").textContent);
+        && /选一张牌/.test($("t-target-hint").textContent);
     })(),
     `option=${ui.state.selectedOption} focus=${ui.state.focusCardId} calls=${calls.length - before} hint="${$("t-target-hint").textContent}"`);
 
@@ -6613,6 +6613,23 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
         && pending.legal_actions.some((action) => action.kind === "Pass");
     })(),
     `focus=${ui.state.focusCardId} calls=${calls.length} passHidden=${$("btn-pass").hidden}`);
+
+  // 界版【鬼才】的改判窗口含装备区（M6 票 14）：同一句提示必须对"一张牌"成立，
+  // 且入口仍按服务端 requirement 认领（不是只认标准版那句）。
+  const jieRequirement = "打出一张牌，代替此判定牌";
+  pending.context = { ...pending.context, requirement: jieRequirement };
+  view.skills[1].ui = { ...view.skills[1].ui, requirement: jieRequirement };
+  ui.renderTable();
+  ui.renderPending(view);
+  const jieEntry = promptSkill("hero.simayi.guicai");
+  const jieHint = Array.from($("t-prompt-skills").children).find(
+    (node) => String(node.className || "").split(/\s+/).includes("prompt-skill-hint"));
+  check("U2-04l2 界版【鬼才】（候选含装备区）同样认领只说明入口，提示对「一张牌」成立",
+    !!jieEntry && jieEntry.getAttribute("data-window-entry") === "true"
+      && !!jieHint && /选一张牌/.test(jieHint.textContent)
+      && !/一张手牌/.test(jieHint.textContent)
+      && /提交/.test(jieHint.textContent),
+    `entry=${jieEntry && jieEntry.getAttribute("data-window-entry")} hint="${jieHint && jieHint.textContent}"`);
 
   // 提交路径：一次 POST、载荷就是那条 PlayCard（400 由拦截器注入，不依赖真引擎）。
   // 走 `submitAction` 入口而不是 DOM 事件：按钮的监听器会把 MouseEvent 当"选择快照"

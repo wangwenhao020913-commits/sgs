@@ -250,6 +250,10 @@ function heroPick() {
  * 与引擎的判据同义：真名池 = 至少一版未被禁的真名；手选先占真名（即使它两版都被禁，
  * 玩家点名要的版本照发，那个真名也算一个座位）。目录没拉到时返回 null——客户端不瞎猜，
  * 服务端仍会 fail-closed。
+ *
+ * 这是前端唯一重复引擎规则的地方，故阈值由 `tests/test_lobby_pool_contract.py` 逐边界
+ * 比对真实的 `poolBlockReason` 与引擎 `deal_heroes` 的 fail-closed：改动本函数要让那条
+ * 契约测试继续红绿一致，别只改这一边。
  */
 function poolBlockReason() {
   if (!state.heroCatalog.length) return null;

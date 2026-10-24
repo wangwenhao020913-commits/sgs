@@ -274,6 +274,11 @@ _NOT_DESIGNATION: object = object()
 原因（要写进拒绝记录）；本哨兵 = 不是附带指定动作，交给既有路径。
 """
 
+_BooleanPlayerFlag = Literal[
+    "luoyi_active", "luoyi_until_next_turn", "paoxiao_bonus", "zhaxiang_active"
+]
+"""座位级布尔技能状态的字段闭集（:meth:`Engine._set_player_flag` 的 ``field``）。"""
+
 
 class Outcome(BaseModel):
     """终局判定结果；由唯一的 :meth:`Engine.check_game_end` 产出。
@@ -2819,6 +2824,23 @@ class Engine:
         if self.state.player(seat).wine_active:
             self.set_wine_active(None, seat, False)
 
+    # 四个座位级布尔技能状态（标准 / 界【裸衣】、【咆哮】②、【诈降】）形状相同：
+    # 幂等写入、**不发 delta**、清理点由调用方决定。唯一写入口收在这对 helper 上；
+    # 各公开 setter 只保留名字与文档（skills / state.models 的交叉引用仍指向它们）。
+
+    def _set_player_flag(self, seat: int, field: _BooleanPlayerFlag, active: bool) -> bool:
+        """写一个座位的布尔技能状态；返回值 = 状态真的变了吗（幂等）。"""
+        player = self.state.player(seat)
+        if getattr(player, field) == active:
+            return False
+        setattr(player, field, active)
+        return True
+
+    def _clear_player_flag(self, seat: int, field: _BooleanPlayerFlag) -> None:
+        """把一个座位的布尔技能状态清掉（清理点由调用方决定，幂等）。"""
+        if getattr(self.state.player(seat), field):
+            self._set_player_flag(seat, field, False)
+
     def set_luoyi_active(self, seat: int, active: bool) -> bool:
         """写一个座位的【裸衣】加伤状态（M6 票 01 的唯一写入口；**不发 delta**）。
 
@@ -2827,16 +2849,11 @@ class Engine:
         重跑即可重建。返回值 = 状态真的变了吗；回合末与下一回合起点的清理都走这里，
         因此"置过而没用掉"与"从来没置过"在状态面同形。
         """
-        player = self.state.player(seat)
-        if player.luoyi_active == active:
-            return False
-        player.luoyi_active = active
-        return True
+        return self._set_player_flag(seat, "luoyi_active", active)
 
     def _clear_luoyi_active(self, seat: int) -> None:
         """把一个座位的【裸衣】加伤清掉（回合的收尾点与下一回合起点各调一次，幂等）。"""
-        if self.state.player(seat).luoyi_active:
-            self.set_luoyi_active(seat, False)
+        self._clear_player_flag(seat, "luoyi_active")
 
     def set_luoyi_until_next_turn(self, seat: int, active: bool) -> bool:
         """写一个座位的**界**【裸衣】"直到你的下个回合开始"加伤状态（M6 票 14 的唯一写入口）。
@@ -2846,16 +2863,11 @@ class Engine:
         （§十九 L2035–L2039），清理点因此落在该座位自己的 ``TURN_START``——两者共用一个
         字段会让其中一版的作用域被另一版的收尾点提前抹掉。
         """
-        player = self.state.player(seat)
-        if player.luoyi_until_next_turn == active:
-            return False
-        player.luoyi_until_next_turn = active
-        return True
+        return self._set_player_flag(seat, "luoyi_until_next_turn", active)
 
     def _clear_luoyi_until_next_turn(self, seat: int) -> None:
         """把界【裸衣】加伤清掉（**只**在该座位自己的 ``TURN_START`` 调，幂等）。"""
-        if self.state.player(seat).luoyi_until_next_turn:
-            self.set_luoyi_until_next_turn(seat, False)
+        self._clear_player_flag(seat, "luoyi_until_next_turn")
 
     def set_paoxiao_bonus(self, seat: int, active: bool) -> bool:
         """写一个座位的【咆哮】②"下一次【杀】伤害 +1"待消费标记（M6 票 05 的唯一写入口）。
@@ -2866,16 +2878,11 @@ class Engine:
         "一次性效果不随来源消失撤回"（D9）由**座位级**存储兑现：技能实例失去 / 失效不会
         抹掉这个已经挂上的 +1。
         """
-        player = self.state.player(seat)
-        if player.paoxiao_bonus == active:
-            return False
-        player.paoxiao_bonus = active
-        return True
+        return self._set_player_flag(seat, "paoxiao_bonus", active)
 
     def _clear_paoxiao_bonus(self, seat: int) -> None:
         """把一个座位的【咆哮】待消费标记清掉（回合收尾点与下一回合起点各调一次，幂等）。"""
-        if self.state.player(seat).paoxiao_bonus:
-            self.set_paoxiao_bonus(seat, False)
+        self._clear_player_flag(seat, "paoxiao_bonus")
 
     def set_zhaxiang_active(self, seat: int, active: bool) -> bool:
         """写一个座位的界【诈降】"本阶段"效果状态（M6 票 17 的唯一写入口）。
@@ -2886,16 +2893,11 @@ class Engine:
         否则别的回合里被"借刀杀人"被迫使用的【杀】会错误地吃到它们。**不发 delta**：
         与 ``luoyi_active`` 同姿态（没有 JSON 读者，回放按同一次失去体力重建）。
         """
-        player = self.state.player(seat)
-        if player.zhaxiang_active == active:
-            return False
-        player.zhaxiang_active = active
-        return True
+        return self._set_player_flag(seat, "zhaxiang_active", active)
 
     def _clear_zhaxiang_active(self, seat: int) -> None:
         """把界【诈降】的"本阶段"效果清掉（出牌阶段起止各调一次，幂等）。"""
-        if self.state.player(seat).zhaxiang_active:
-            self.set_zhaxiang_active(seat, False)
+        self._clear_player_flag(seat, "zhaxiang_active")
 
     # -- 技能三态（M6 票 04）：获得 / 失去 / 失效 -------------------------------
 
@@ -3874,14 +3876,7 @@ class Engine:
             if nxt is not None:
                 state.next_seat = nxt
                 state.turn_seat = nxt
-                if _round_ended(state, finished, nxt):
-                    state.round += 1
-                    state.round_start_seat = nxt
-                    # 每轮次数随轮次清空（M6 票 11）：清在**新轮开始之前**，故新一轮的第一次
-                    # 发动读到的就是 0；额外回合不经过这里，故它不会刷新它们。
-                    reset_round_skill_state(state)
-                    if round_limit_present(state):
-                        self.emit_delta(TurnChangeDelta(seat=nxt, round=state.round))
+                self._finish_round_and_advance(finished, nxt)
         extra = self._pop_extra_turn()
         if extra is not None:
             state.turn_seat = extra
@@ -3893,6 +3888,33 @@ class Engine:
             # 额外回合结束后回到"本来该轮到的那个自然回合"；自然回合结束时它刚被算出来，
             # 这一句因此是幂等的（同一个座位）。
             state.turn_seat = state.next_seat
+
+    def _finish_round_and_advance(self, finished: int, nxt: int) -> None:
+        """自然指针从 ``finished`` 走到 ``nxt``：走完一圈 ⇒ 轮次 +1、本轮起点推进到 ``nxt``。
+
+        自然回合只按座位升序环转，故"回到本轮起始座位"在座位环上等价于
+        ``pos(nxt) <= pos(finished)``（``pos`` 相对本轮起始座位）。用**环位置**而不是
+        "``nxt`` 就是起始座位"，是因为起始座位可能在本轮中途阵亡——那样"回到它"永远不会
+        发生、轮次会卡死；越过它同样意味着这一圈走完了。
+
+        ``round_start_seat is None``（人为局面直接从轮中途起跑）⇒ 把**当前回合**
+        （``finished``）当作本轮起点，轮次不动；下一次回到它才 +1。
+        """
+        state = self.state
+        start = state.round_start_seat
+        if start is None:
+            state.round_start_seat = finished
+            return
+        size = len(state.players)
+        if (nxt - start) % size > (finished - start) % size:
+            return
+        state.round += 1
+        state.round_start_seat = nxt
+        # 每轮次数随轮次清空（M6 票 11）：清在**新轮开始之前**，故新一轮的第一次
+        # 发动读到的就是 0；额外回合不经过这里，故它不会刷新它们。
+        reset_round_skill_state(state)
+        if round_limit_present(state):
+            self.emit_delta(TurnChangeDelta(seat=nxt, round=state.round))
 
     def _pop_extra_turn(self) -> int | None:
         """弹出待执行的额外回合（**LIFO**；轮到已阵亡的座位时直接丢弃）。
@@ -4301,25 +4323,6 @@ class Engine:
         if seat is None:
             raise RuntimeError("回合环启动前没有当前回合角色")
         return seat
-
-
-def _round_ended(state: GameState, finished: int, nxt: int) -> bool:
-    """自然指针从 ``finished`` 走到 ``nxt`` 是否**走完了一圈**（M6 票 11 的轮次判据）。
-
-    自然回合只按座位升序环转，故"回到本轮起始座位"在座位环上等价于
-    ``pos(nxt) <= pos(finished)``（``pos`` 相对本轮起始座位）。用**环位置**而不是
-    "``nxt`` 就是起始座位"，是因为起始座位可能在本轮中途阵亡——那样"回到它"永远不会
-    发生、轮次会卡死；越过它同样意味着这一圈走完了。
-
-    ``round_start_seat is None``（人为局面直接从轮中途起跑）⇒ 把**当前回合**当作本轮
-    起点：轮次从它起算，下一次回到它才 +1。
-    """
-    start = state.round_start_seat
-    if start is None:
-        state.round_start_seat = finished
-        return False
-    size = len(state.players)
-    return (nxt - start) % size <= (finished - start) % size
 
 
 _SLOT_BY_SUBCATEGORY: dict[str, SlotKind] = {
