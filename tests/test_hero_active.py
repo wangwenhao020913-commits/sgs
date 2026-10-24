@@ -8,8 +8,8 @@
 - 组合上限闸的**候选形态**与**顺序降级**（``SelectionSpec(sequential=True)``）。
 
 不测 ``ACTIVATIONS`` / 候选回调的内部结构；行为只经候选、询问、delta 流观测。
-【苦肉】不在 16 名名单（票 12 的 46 条计数不含它），故"裸发动 + 失去体力"用**注入的
-假定义**验形状（``tests/test_hero_skills.py`` 的先例）。
+【苦肉】自 M6 票 03 起是**真登记**的技能（黄盖启用）：本章测它的裸发动 / 失去体力 /
+可重复 / 濒死顺序，不再用注入的假定义验形状。
 """
 
 from __future__ import annotations
@@ -44,12 +44,15 @@ from sgs.skills import catalog as catalog_module
 from sgs.skills.preactivation import preactivation_for, preactivations_for
 from sgs.state import (
     ActivateSkill,
+    EndPhase,
     FrameKind,
+    MoveReason,
     Pass,
     Phase,
     QueryKind,
     SelectCards,
     SelectOption,
+    UseCard,
     Zone,
 )
 from sgs.timing import Timing
@@ -420,73 +423,254 @@ def test_reset_phase_skill_state_is_a_public_reset_point():
 
 
 # ---------------------------------------------------------------------------
-# 【苦肉】的形状：裸发动（max_picks == 0）+ 失去体力（LIFE_LOSE_* 不解封）
+# 黄盖【苦肉】（M6 票 03）：出牌阶段，你可以失去 1 点体力，然后摸两张牌
+#
+# §九 L1015 的**标准版**原文没有"限一次"、也不弃牌——界黄盖的"限一次 + 弃一张"随票 17。
+# 形态 = 裸发动（``picks == ()`` / ``choices == ()``、``once_per_phase=False``）+ 失去体力
+# （LIFE_DECREASE 帧，**不是** DAMAGE 帧）+ 摸两张。失去体力与受到伤害是两条事件：
+# 前者只走体力写入钩子（LIFE_DECREASE_*），后者先走 DAMAGE_* 再进 LIFE_DECREASE。
 # ---------------------------------------------------------------------------
 
 
-def test_a_bare_activation_candidate_and_handler_run_the_shape(monkeypatch):
-    """裸发动：候选载荷全空，发动后回调直接跑（本例 = 失去 1 点体力）。"""
+class _KurouDriver:
+    """【苦肉】的脚本玩家：先发动 ``times`` 次，然后结束出牌阶段；濒死时按 ``heal`` 用【桃】。"""
 
-    def offers(state, ctx, current):
-        if ctx.scope is not CandidateScope.PLAY or ctx.owner != ctx.subject:
-            return current
-        return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+    def __init__(self, *, times: int = 1, heal: bool = False) -> None:
+        self.times = times
+        self.heal = heal
+        self.activations = 0
+        self.play_queries = 0
+        self.peach_queries = 0
+        self.bare = True
 
-    def activate(host, frame):
-        seat = frame.data["source"]
-        host.apply_hp_change(frame, seat, host.state.player(seat).hp - 1)
-        return None
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            self.play_queries += 1
+            if self.times:
+                for action in query.legal_actions:
+                    if isinstance(action, ActivateSkill) and action.skill_id == KUROU:
+                        self.times -= 1
+                        self.activations += 1
+                        self.bare = action.picks == () and action.choices == ()
+                        return action
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        if query.kind == QueryKind.PEACH:
+            self.peach_queries += 1
+            if self.heal:
+                for action in query.legal_actions:
+                    if (
+                        isinstance(action, UseCard)
+                        and action.card.type == "peach"
+                        and action.targets == (query.dying,)
+                    ):
+                        self.heal = False
+                        return action
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+        return _decline(query)
 
-    definition = SkillDef(
-        skill_id=KUROU,
-        locked=False,
-        carrier=CarrierKind.HERO,
-        skill_type=SkillType.NORMAL,
-        modifiers=(Modifier(ModifierPoint.CANDIDATES, offers),),
-    )
-    monkeypatch.setattr(
-        catalog_module,
-        "CATALOG",
-        MappingProxyType({**catalog_module.CATALOG, KUROU: definition}),
-    )
-    monkeypatch.setattr(
-        active_module,
-        "ACTIVATIONS",
-        MappingProxyType({**active_module.ACTIVATIONS, KUROU: activate}),
-    )
+
+def _kurou_state(hand: tuple[int, ...] = (), *, hp: int = 4, hero: str = "huanggai"):
+    """构造局面 + 完整牌堆（期望值要读牌堆顶，故把同一份 ``deck`` 一并交回）。"""
+    deck = _deck_excluding(*hand)
     state = build_state(
         pack=PACK,
-        seats=[SeatSpec(hp=4, hp_max=4, hero="huanggai"), SeatSpec()],
-        deck=_deck_excluding(),
+        seats=[SeatSpec(hp=hp, hp_max=4, hand=hand, hero=hero), SeatSpec()],
+        deck=deck,
         turn_seat=0,
     )
+    return state, deck
 
-    bare = [
-        action
-        for action in _offers(_play_candidates(state), KUROU)
-        if action.picks == () and action.choices == ()
-    ]
-    assert bare, "max_picks == 0 ⇒ 裸发动候选（无载荷）"
 
-    def kurou(query):
+def test_a_bare_activation_candidate_and_handler_run_the_shape():
+    """**裸发动**的形状（M6 票 03 起由真【苦肉】承载）：一个无载荷候选 ⇒ 失去 1 点体力、摸两张。
+
+    函数名沿用 M3 的落点名（``开发文档/06`` §5 的写回账本钉着它；本票只是把"注入的假
+    定义演示形状"换成"真的黄盖【苦肉】"）。「本阶段还能再发动」由下一条测试单独钉。
+    """
+    state, deck = _kurou_state()
+    driver = _KurouDriver(times=1)
+
+    engine = _run(state, [driver, Scripted(_decline)], _skill_frame_popped)
+
+    assert driver.activations == 1
+    assert driver.bare, "裸发动：候选载荷全空（picks / choices 都是空元组）"
+    assert engine.state.player(0).hp == 3, "失去 1 点体力走体力写入原语"
+    # 摸牌阶段先摸 2 张，苦肉再摸 2 张 ⇒ 手牌 = 牌堆顶 4 张。
+    assert sorted(engine.state.player(0).hand) == sorted(deck[:4]), "然后摸两张牌"
+
+
+def test_kurou_can_be_activated_again_in_the_same_play_phase():
+    """§九 L1015 没有"限一次"：同一出牌阶段连续发动两次，每次失去 1 点、摸两张。"""
+    state, deck = _kurou_state()
+    driver = _KurouDriver(times=2)
+
+    def done(engine) -> bool:
+        return driver.activations == 2 and len(engine.state.player(0).hand) >= 4
+
+    engine = _run(state, [driver, Scripted(_decline)], done)
+
+    assert driver.activations == 2, "同一阶段内可重复发动"
+    assert not any(
+        record.kind == "timing" and record.timing is Timing.PHASE_PLAY_END
+        for record in engine.records
+    ), "两次发动都发生在同一个出牌阶段之内（阶段还没结束）"
+    assert engine.state.player(0).hp == 2, "每次失去 1 点体力"
+    # 摸牌阶段 2 张 + 两次苦肉各 2 张 ⇒ 牌堆顶 6 张。
+    assert sorted(engine.state.player(0).hand) == sorted(deck[:6]), "每次摸两张牌"
+
+
+def test_kurou_loses_hp_through_the_life_decrease_hooks_not_the_damage_hooks():
+    """失去体力 ≠ 受到伤害：只走 LIFE_DECREASE_*，一条 DAMAGE_* / DAMAGE 帧都不出现。
+
+    判据是**两条既有钩子的差异**：苦肉跑完 ⇒ ``LIFE_DECREASE_ON`` 已派发、``DAMAGE_*``
+    一条不发；同一座位的真【杀】伤害 ⇒ ``DAMAGE_DEAL`` / ``DAMAGE_TAKE`` 都出现。
+    """
+    state, _deck = _kurou_state()
+    engine = _run(state, [_KurouDriver(times=1), Scripted(_decline)], _skill_frame_popped)
+
+    timings = [record.timing for record in engine.records if record.kind == "timing"]
+    assert Timing.LIFE_DECREASE_ON in timings, "失去体力走体力写入钩子"
+    assert not [timing for timing in timings if timing.value.startswith("DAMAGE_")], (
+        "苦肉不是受到伤害：DAMAGE_* 一条都不该发"
+    )
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "frame" and record.frame_kind is FrameKind.DAMAGE
+    ], "苦肉不压 DAMAGE 帧"
+
+    # --- 对照（伤害侧）：同一座位挨一张真【杀】⇒ DAMAGE_* 出现 -------------------
+    slash = cards_of_type(PACK, "slash")[0]
+    damaged = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=4, hp_max=4, hero="huanggai"), SeatSpec(hand=(slash,))],
+        deck=_deck_excluding(slash),
+        turn_seat=1,
+    )
+
+    def attacker(query):
         if query.kind == QueryKind.PLAY_PHASE:
-            return _find(
-                query,
-                lambda action: isinstance(action, ActivateSkill) and action.skill_id == KUROU,
+            for action in query.legal_actions:
+                if (
+                    isinstance(action, UseCard)
+                    and action.card.card_id == slash
+                    and action.targets == (0,)
+                ):
+                    return action
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
             )
         return _decline(query)
 
-    engine = _run(state, [Scripted(kurou), Scripted(_decline)], _skill_frame_popped)
-
-    assert engine.state.player(0).hp == 3, "失去体力走 apply_hp 原语"
-    assert not any(
-        record.kind == "frame" and record.frame_kind is FrameKind.LIFE_LOSE
-        for record in engine.records
-    ), "LIFE_LOSE_* 不解封"
-    assert not any(
-        record.kind == "timing" and record.timing.value.startswith("LIFE_LOSE")
-        for record in engine.records
+    control = _run(
+        damaged,
+        [Scripted(_decline), Scripted(attacker)],
+        lambda engine: any(
+            record.kind == "timing" and record.timing is Timing.DAMAGE_END
+            for record in engine.records
+        ),
+        seed=3,
     )
+    control_timings = {
+        record.timing for record in control.records if record.kind == "timing"
+    }
+    assert Timing.DAMAGE_DEAL in control_timings
+    assert Timing.DAMAGE_TAKE in control_timings
+
+
+def test_kurou_triggers_near_death_and_draws_two_only_after_the_rescue():
+    """1 点体力发动：先失去到 0 → 濒死求桃 → 救回后才摸两张（顺序由记录流钉住）。"""
+    peach = _cards("peach")[0]
+    deck = _deck_excluding(peach)
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=1, hp_max=4, hand=(peach,), hero="huanggai"), SeatSpec()],
+        deck=deck,
+        turn_seat=0,
+    )
+    driver = _KurouDriver(times=1, heal=True)
+
+    engine = _run(
+        state,
+        [driver, Scripted(_decline)],
+        lambda engine: any(
+            record.kind == "timing" and record.timing is Timing.PHASE_PLAY_END
+            for record in engine.records
+        ),
+    )
+
+    assert driver.peach_queries == 1, "失去体力到 0 ⇒ 真进濒死求桃（不是静默停在 0 血）"
+    assert engine.state.player(0).alive
+    assert engine.state.player(0).hp == 1, "【桃】救回 1 点"
+    # 摸牌阶段 2 张 + 苦肉的 2 张 = 牌堆顶 4 张；【桃】已在求桃时用掉。
+    assert sorted(engine.state.player(0).hand) == sorted(deck[:4]), (
+        "救回后才摸两张：手牌是牌堆顶四张，不是『桃 + 两张』"
+    )
+
+    def first_seq(predicate) -> int | None:
+        for record in engine.records:
+            if predicate(record):
+                return record.seq
+        return None
+
+    rescue_seq = first_seq(
+        lambda record: record.kind == "delta"
+        and record.delta_type == "hp_change"
+        and record.seat == 0
+        and record.after == 1
+    )
+    # 苦肉的两张从牌堆顶第 3 张开始（前两张是摸牌阶段摸走的）：这次移动必须排在救回之后。
+    draw_seq = first_seq(
+        lambda record: record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is MoveReason.DRAW
+        and record.to_zone.zone == Zone.HAND
+        and record.to_zone.seat == 0
+        and record.cards
+        and record.cards[0].card_id == deck[2]
+    )
+    assert rescue_seq is not None and draw_seq is not None
+    assert rescue_seq < draw_seq, "摸两张发生在濒死结算之后（『然后』）"
+
+
+def test_kurou_death_stops_the_skill_before_the_draw():
+    """1 点体力、无人救 ⇒ 阵亡即结束：**不给阵亡者摸牌**（fuzz 不变量"阵亡者区域为空"）。
+
+    失去体力把自己送进濒死是苦肉的正常结果；若摸牌段不检查存活，就会给已阵亡的座位
+    发两张牌，破坏 fuzz 的"阵亡者无手牌"不变量。
+    """
+    state, _deck = _kurou_state(hp=1)
+    driver = _KurouDriver(times=1, heal=False)
+
+    engine = _run(
+        state,
+        [driver, Scripted(_decline)],
+        lambda engine: engine.finished or engine.state.player(0).alive is False,
+    )
+
+    assert not engine.state.player(0).alive, "无人救 ⇒ 阵亡"
+    death_seq = next(
+        record.seq
+        for record in engine.records
+        if record.kind == "frame"
+        and record.frame_kind is FrameKind.DEATH
+        and record.op == "push"
+    )
+    posthumous_draws = [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is MoveReason.DRAW
+        and record.to_zone.seat == 0
+        and record.seq > death_seq
+    ]
+    assert engine.state.player(0).hand == [], "阵亡者的手牌已按死亡段清空"
+    assert not posthumous_draws, "阵亡之后不该再有 DRAW 移动（技能在摸牌前结束）"
 
 
 def test_activate_skill_fails_closed_for_an_unregistered_id():

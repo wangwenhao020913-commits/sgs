@@ -606,8 +606,15 @@ if (partial) {
     for (let step = 0; step < 400 && ui.state.view.pending; step += 1) {
       const pending = ui.state.view.pending;
       const offered = (ui.state.view.skills || []).filter((s) => s.available);
-      if (pending.kind === "PLAY_PHASE" && pending.actor === 0 && offered.length > 0) {
-        skillCase = { seed, steps: step, offered };
+      // 只收"点按钮 → 能选中一条候选"的形态：预发动技能走清单入口，非预发动的主动技要有
+      // `ActivateSkill` 骨架候选。**转化技**（【国色】等）的候选已收回 `legal_actions`、
+      // 由 `transform_preactivations` 表达，按钮点击不在本段的三态判据里——M6 P0 收口换池后
+      // 这里最先撞到【国色】（判据不变，扫描谓词按被测形态收窄，见下面 ㉿4d/4e）。
+      const clickable = offered.filter(
+        (s) => s.preactivated || (pending.legal_actions || []).some(
+          (a) => a.kind === "ActivateSkill" && a.skill_id === s.skill_id));
+      if (pending.kind === "PLAY_PHASE" && pending.actor === 0 && clickable.length > 0) {
+        skillCase = { seed, steps: step, offered: clickable };
         break;
       }
       // **必须**与 `replayTo` 走同一条推进路径（`advanceOnce`），否则重放回不到这一步：

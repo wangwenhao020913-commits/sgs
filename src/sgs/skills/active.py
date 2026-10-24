@@ -27,10 +27,11 @@ A 族与其他族的形态差别只有一处：它的候选**不是某张牌的*
 旧的两维枚举 / 顺序多轮付成本路径（按 design.md §7 Q4 曾"先留、之后再清"）已在
 W6-06a 删除，本族不再有降级分支。
 
-**苦肉的形状**（裸发动 + 失去体力）：本模块不登记【苦肉】（黄盖不在 16 名名单，
-票 12 的 46 条计数也不含它），但机制支持——``ActivateSkill`` 的载荷可全空
-（``picks == ()``、``choices == ()``），回调照常经 SKILL 帧执行；
-"失去体力"用 ``host.apply_hp_change`` 直接写体力，**不解封** ``LIFE_LOSE_*``。
+**苦肉**（M6 票 03 起真登记）：§九 L1015 的标准版没有"出牌阶段限一次"、也不弃牌，
+故它是**裸发动**（``ActivateSkill`` 载荷可全空：``picks == ()``、``choices == ()``）
++ ``once_per_phase=False``（同一阶段可反复发动）。"失去体力"压 ``LIFE_DECREASE`` 帧走
+唯一的体力写入点（**不**压 DAMAGE 帧——失去体力不是受到伤害），该帧自带濒死插入；
+摸两张在子帧出栈后执行，故濒死救回之后才摸（"然后"）。
 """
 
 from __future__ import annotations
@@ -786,6 +787,70 @@ JIEYIN_FLOW = SkillFlow(
 
 
 # ---------------------------------------------------------------------------
+# 黄盖【苦肉】（M6 票 03）：出牌阶段，你可以失去 1 点体力，然后摸两张牌
+#
+# §九 L1015 的**标准版**原文没有"限一次"、也不弃置牌：``once_per_phase=False`` ⇒
+# 同一出牌阶段可反复发动（界黄盖的"限一次 + 弃一张"随票 17，不在这里）。
+# 形态 = **裸发动**（``picks == ()`` / ``choices == ()``，候选直接进 ``legal_actions``，
+# 不走预发动清单）+ 失去体力 + 摸两张。
+#
+# **失去体力 ≠ 受到伤害**：苦肉不压 DAMAGE 帧、不过 DAMAGE_* 与伤害修正链，只压
+# ``LIFE_DECREASE`` 帧走唯一的体力写入点（该帧自带濒死插入——1 点体力发动时真的进
+# 求桃，而不是静默停在 0 血）。体力扣完后才摸两张，故被救回之后才摸（"然后"）。
+# ---------------------------------------------------------------------------
+
+KUROU_DRAW = 2
+"""【苦肉】摸牌数（§九 L1015：摸两张牌）。"""
+
+_KUROU_LOST = "kurou_lost"
+"""帧私有游标：本次发动的那次"失去体力"已经压过帧（重入时只补摸牌）。"""
+
+
+def _kurou_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选**恒为一条骨架**、载荷全空；没有"出牌阶段限一次"（``once_per_phase=False``）。"""
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _kurou_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：先压 LIFE_DECREASE 帧失去 1 点体力，出栈后再摸两张。
+
+    压帧后返回 ``"stay"``，重入（子帧已出栈）走到摸牌段——濒死 / 求桃 / 死亡都在子帧里
+    结算完，摸牌因此严格排在"然后"之后。帧私有 ``_KUROU_LOST`` 是重入守卫。
+    """
+    del answers
+    owner = frame.data["source"]
+    if not frame.data.get(_KUROU_LOST):
+        frame.data[_KUROU_LOST] = True
+        host.push_frame(
+            FrameKind.LIFE_DECREASE,
+            {
+                "target": owner,
+                "source": None,  # 失去体力：没有伤害来源
+                "amount": 1,
+            },
+            timing=Timing.LIFE_DECREASE_BEFORE,
+        )
+        return "stay"
+    if not host.state.player(owner).alive:
+        # 失去体力把自己送进濒死且没救回：角色已阵亡，技能就此结束——**不能**再给
+        # 阵亡者摸牌（fuzz 的"已阵亡仍有手牌"不变量先抓到过这一条）。
+        return None
+    host.draw_for_hand(frame, owner, KUROU_DRAW)
+    return None
+
+
+KUROU_FLOW = SkillFlow(
+    name="kurou",
+    steps=(),
+    effect=_kurou_effect,
+    once_per_phase=False,
+)
+"""【苦肉】的零步流水线：裸发动 → 失去 1 点体力 → 摸两张（**无**出牌阶段限一次）。"""
+
+
+# ---------------------------------------------------------------------------
 # 登记：一条声明 = 候选回调 + 发动回调（两者共用同一个 skill_id）
 # ---------------------------------------------------------------------------
 
@@ -836,8 +901,15 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     ActiveSkill("diaochan", "lijian", _lijian_offers, flow=LIJIAN_FLOW, preactivated=True),
     # 孙尚香【结姻】：弃两张手牌 + 一名已受伤男性 → 你与其各回复 1 点（规则 1033）。
     ActiveSkill("sunshangxiang", "jieyin", _jieyin_offers, flow=JIEYIN_FLOW, preactivated=True),
+    # 黄盖【苦肉】：失去 1 点体力，然后摸两张牌（§九 L1015；无"出牌阶段限一次"）。
+    # 裸发动（零步流水线）⇒ **不翻预发动**：没有步骤可渲染，候选直接进 ``legal_actions``。
+    ActiveSkill("huanggai", "kurou", _kurou_offers, flow=KUROU_FLOW),
 )
-"""A 族六条技能（票 04 §逐技能落位表；【苦肉】不在 16 名名单、只留形状，见模块 docstring）。"""
+"""A 族七条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】，见模块 docstring）。
+
+【苦肉】是唯一一条**零步**的 A 族技能：没有步骤可渲染 ⇒ 不翻预发动，骨架候选直接进
+``legal_actions``；其余六条都走预发动清单。
+"""
 
 
 ACTIVATIONS: MappingProxyType[str, ActivationHandler] = MappingProxyType(
@@ -852,8 +924,9 @@ _REQUIREMENTS: dict[str, str] = {
     "qingnang": "弃一张手牌，令一名已受伤角色回复 1 点体力",
     "lijian": "弃一张牌，选择两名男性角色",
     "jieyin": "弃两张手牌，选择一名已受伤男性角色",
+    "kurou": "失去1点体力，然后摸两张牌",
 }
-"""A 族六条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+"""A 族七条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
 _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
     "lijian": {

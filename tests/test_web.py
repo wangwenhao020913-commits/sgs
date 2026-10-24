@@ -4626,7 +4626,7 @@ def test_a_bare_query_rebuilds_transformed_source_cards_from_the_query_itself() 
 
 
 # ---------------------------------------------------------------------------
-# U1-04b 描述全文：43 个牌名 + 59 条技能（独立内容文件，不进引擎 / 录像）
+# U1-04b 描述全文：43 个牌名 + 62 条技能（独立内容文件，不进引擎 / 录像）
 # ---------------------------------------------------------------------------
 
 MILITARY_CARD_TYPE_IDS = frozenset(
@@ -4648,7 +4648,7 @@ MILITARY_CARD_TYPE_IDS = frozenset(
 
 
 def test_every_card_name_and_skill_id_has_a_description() -> None:
-    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 59 条技能一条不缺。
+    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 62 条技能一条不缺。
 
     缺一条时断言消息**直接列出缺的 key**（不是只报一个总数）——这是票面的验收判据。
     多余 / 拼错的 key 也一并拦：否则「43 条」可以是 42 条真条目 + 1 条错拼。
@@ -4667,7 +4667,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 59, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 62, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)
@@ -5005,8 +5005,13 @@ def test_the_narrative_uses_the_display_contract_for_cards_and_damage_colors() -
 
 
 def test_the_narrative_hides_opponent_hand_and_deck_while_revealing_public_card_moves() -> None:
-    """观察者过滤：牌堆 / 对手手牌只给张数，公开区的牌才给牌名；同一份记录换观察者会变。"""
-    session = Session(seed=11, ai="random", timeout_seconds=None, player_count=4)
+    """观察者过滤：牌堆 / 对手手牌只给张数，公开区的牌才给牌名；同一份记录换观察者会变。
+
+    种子的判据（M6 P0 票 03 换池后重扫）：随机 4 人局的记录流里必须出现**手牌 → 手牌**的
+    转手（这条测的正是"转手的牌对第三方仍只显示张数"）。换成 25 名启用池后 seed 11 不再
+    出现这种移动，按同一判据从 1 起重扫到 seed 29（判据本身未放宽）。
+    """
+    session = Session(seed=29, ai="random", timeout_seconds=None, player_count=4)
     _play_to_end(session)
     records = session.records()
     payloads = [_record_payload(record) for record in records]
@@ -5033,6 +5038,11 @@ def test_the_narrative_hides_opponent_hand_and_deck_while_revealing_public_card_
         if to_zone["zone"] != "hand" or int(to_zone["seat"]) == session.human_seat:
             continue
         if from_zone["zone"] not in ("deck", "hand"):
+            continue
+        if from_zone.get("seat") == session.human_seat:
+            # 人类**自己交出去**的牌本来就对他可见（【仁德】等）：这一条测的是"别人的
+            # 手牌不漏"，不是"自己给出去的牌也不许看"。M6 票 03 换池后 seed 29 的第一个
+            # 转手正是人类给牌，故按可见性判据收窄断言范围（判据未放宽）。
             continue
         line = _line_at(entries, payload["seq"])
         assert line is not None, f"对手摸 / 拿牌的 {payload['seq']} 没有叙事行"

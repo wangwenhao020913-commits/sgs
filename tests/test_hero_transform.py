@@ -36,6 +36,7 @@ from sgs.skills import (
     MAX_VIRTUAL_SOURCES,
     VirtualKind,
     VirtualSourceError,
+    kind_source_ceiling,
     preactivation_for,
     transformed_card,
     transformed_slash,
@@ -166,20 +167,23 @@ def test_different_source_sets_get_different_ids_for_the_same_target_name():
 def test_the_id_derivation_is_injective_over_every_kind_and_source_count():
     """步长不再假设"最多两张来源"的**穷举判据**（票 03 §要做什么 1 / §验收 4）。
 
-    对 ``kind`` 的全部取值 × ``0..MAX_VIRTUAL_SOURCES`` 张来源 × 若干 ``card_count``
+    对 ``kind`` 的全部取值 × 各段 ``0..上界`` 张来源 × 若干 ``card_count``
     逐个算 id，断言**两两不同**——旧的 ``(card_count+1)**2`` 步长在第 3 张来源上就会撞。
     来源 id 取 ``1..size``（合法牌 id 的**非零**前缀）；``card_count`` 因此都取
     ``>= MAX_VIRTUAL_SOURCES + 1``，否则 ``1..size`` 会越过 ``base`` 这一位、不再是
     合法来源。兼容段（``kind < 2``）逐字保留旧算式，故它的 id **只由来源集合决定、
     与牌堆张数无关**（``card_count`` 只是那里的进制）：
     跨牌堆的撞因此只查**泛化段**（``kind >= 2``）——本票新引入的那一半。
+    来源上界读 :func:`kind_source_ceiling`：M6 票 03 的追加段（``DISMANTLEMENT``）在
+    108 张档只到 6 张，不再套用共享段的 7。
     """
     count = len(PACK.deck.cards)
     global_seen: set[int] = set()
     for card_count in (MAX_VIRTUAL_SOURCES + 1, 53, count):
         seen: set[int] = set()
         for kind in range(len(VirtualKind)):
-            for size in range(MAX_VIRTUAL_SOURCES + 1):
+            ceiling = kind_source_ceiling(kind, card_count)
+            for size in range(ceiling + 1):
                 sources = tuple(range(1, size + 1))
                 card_id = virtual_card_id(kind=kind, sources=sources, card_count=card_count)
                 assert card_id < 0
@@ -213,7 +217,7 @@ def test_the_generalized_namespace_does_not_overlap_the_legacy_one():
     generalized_min = min(
         virtual_card_id(kind=kind, sources=tuple(range(size)), card_count=count)
         for kind in range(LEGACY_KIND_COUNT, len(VirtualKind))
-        for size in range(MAX_VIRTUAL_SOURCES + 1)
+        for size in range(kind_source_ceiling(kind, count) + 1)
     )
 
     assert generalized_min < legacy_max, "两段都在负数区，泛化段必须更负（区间不相交）"
@@ -1013,6 +1017,81 @@ def test_a_real_slash_opens_the_dodge_window_where_zhenji_offers_a_black_hand_ca
         "转化【闪】的来源黑手牌走正常的使用路径离手"
     )
     assert engine.state.player(1).hp == 4, "黑手牌当【闪】成功抵消了这张【杀】"
+
+
+# ---------------------------------------------------------------------------
+# 奇袭（甘宁）：一张黑色牌当【过河拆桥】使用（M6 票 03；§九 L1009）
+#
+# 形态与国色同族：单源转化、只在 ``PLAY`` 语境；差别是**来源谓词是颜色（黑）**、
+# 产物是带目标的即时锦囊（目标池走真【过河拆桥】的 ``check_targets``）。
+# ---------------------------------------------------------------------------
+
+QIXI = "hero.ganning.qixi"
+
+
+def _qixi_state(*, owner_hand=(), owner_equip=(), target_hand=(RED_DODGE,)):
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=owner_hand, equip=owner_equip, hero="ganning"),
+            SeatSpec(hand=target_hand),
+        ],
+        deck=_deck_excluding(*owner_hand, *owner_equip, *target_hand),
+        turn_seat=0,
+    )
+
+
+def test_qixi_offers_a_black_card_as_dismantlement():
+    """正面：黑色手牌进候选、产物是【过河拆桥】，目标是区域里有牌的那名角色。"""
+    state = _qixi_state(owner_hand=(BLACK_SLASH,))
+
+    virtual = _virtual_uses(_play_candidates(state), "dismantlement")
+
+    assert [action.card.virtual_sources for action in virtual] == [(BLACK_SLASH,)]
+    assert virtual[0].card.color is Color.BLACK, "单源转化继承原牌颜色"
+    assert virtual[0].card.name == "过河拆桥"
+    assert virtual[0].targets == (1,), "目标池走与真【过河拆桥】同一套 check_targets"
+
+
+def test_qixi_source_zone_default_is_hand_plus_equip():
+    """区域默认：牌面只写"一张黑色牌" ⇒ 手牌 ∪ 装备（判定区的黑牌不是源）。"""
+    equip_state = _qixi_state(owner_equip=(BLACK_SLASH,))
+
+    assert _sources(_play_candidates(equip_state), "dismantlement") == {(BLACK_SLASH,)}
+
+    judge_state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(judge=(BLACK_SLASH,), hero="ganning"),
+            SeatSpec(hand=(RED_DODGE,)),
+        ],
+        deck=_deck_excluding(BLACK_SLASH, RED_DODGE),
+        turn_seat=0,
+    )
+    assert not _virtual(_play_candidates(judge_state), "dismantlement"), (
+        "判定区的黑牌不是【奇袭】的源（区域默认不包含判定区）"
+    )
+
+
+def test_qixi_rejects_a_red_card():
+    """反例：红色牌不是源（判据是黑色，不是"任意一张牌"）。"""
+    state = _qixi_state(owner_hand=(RED_PEACH,))
+
+    assert not _virtual(_play_candidates(state), "dismantlement"), (
+        "红色牌不能当【过河拆桥】"
+    )
+
+
+def test_qixi_manifest_takes_the_black_source_then_the_dismantlement_target():
+    """清单：1. 一张黑色牌（手牌）；2. 这张【过河拆桥】的目标（区域里有牌的角色）。"""
+    state = _qixi_state(owner_hand=(BLACK_SLASH,))
+
+    steps = _manifest(state, _virtual_actions(state), QIXI)
+
+    assert [step.name for step in steps] == ["card", "seat"]
+    assert tuple(steps[0].pool[0].options) == (str(BLACK_SLASH),)
+    assert tuple(steps[0].zones) == (Zone.HAND,)
+    assert [option for row in steps[1].pool for option in row.options] == ["seat:1"]
 
 
 # ---------------------------------------------------------------------------

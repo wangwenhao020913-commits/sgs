@@ -8,6 +8,11 @@
 技能"这类坏数据必须**同时**触碰被校验的那一端（与 ``test_load_validation.py`` 的
 ``monkeypatch`` 姿态相同）。本票（票 01）尚未登记任何武将技能，故正向的"启用即可加载"
 也用注入的假定义表达；票 12 登记 29 条真定义后，本文件的坏数据基底仍然成立。
+
+**字面串沿革**（供 M3 写回账本核对，`.scratch/m3-standard-heroes/writeback.md` 的
+「B 族第四形态缺席」一行把落点记在本文件）：M3 P0 时 ``hero.xiahoudun.ganglie`` 是
+"明确不做"的反例；M6 票 01 起【刚烈】已登记，票 03 收口后 25 名全部启用。账本核的是
+"这个文件里还留着这个可核对的字面串"，不是"该技能仍未实现"。
 """
 
 from __future__ import annotations
@@ -144,13 +149,13 @@ def test_hero_skill_ids_are_fully_qualified_and_keep_the_data_order():
 def test_the_enabled_flag_is_required_and_read_back_from_the_data(monkeypatch):
     """``enabled`` 是声明式字段：数据里没写就是结构错误，写了就原样读出（不静默取默认）。
 
-    M6 票 02 起数据文件里 **22 名**启用（P0 三票收口后到 25）、3 名未启用；这里钉的是
-    **两种取值都能原样读出**，而不是"全表都关"。
+    M6 票 03 的 P0 收口起数据文件里 **25 名全部启用**；这里钉的是**两种取值都能原样
+    读出**（字段不是"存在即启用"），而不是"全表都开"。
     """
     table = load_heroes()
 
     assert len(table.heroes) == STANDARD_HERO_COUNT
-    assert sum(hero.enabled for hero in table.heroes) == 22
+    assert sum(hero.enabled for hero in table.heroes) == 25
 
     _patch_catalog(monkeypatch)
     raw = _heroes_raw()
@@ -165,19 +170,32 @@ def test_the_enabled_flag_is_required_and_read_back_from_the_data(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_disabled_heroes_load_even_when_their_skills_are_not_implemented():
-    """未启用的武将只查结构与唯一性：技能还没实现也照样加载整张表。
+def test_disabled_heroes_load_even_when_their_skills_are_not_implemented(monkeypatch):
+    """``enabled: false`` 的武将只查结构与唯一性：技能还没实现也照样加载整张表。
 
-    判据取**尚未实现**的技能（甘宁【奇袭】：M6 P0 收口也还没轮到，故他仍未启用、
-    ``hero.ganning.qixi`` 不在 ``CATALOG``），故这条断言验的是"条件化引用校验"，
-    不随 P0 的票依次推进而失效（M3 的落点记录曾拿 ``hero.xiahoudun.ganglie`` 当"明确不做"
-    的反例；M6 票 01 起它已登记；票 02 又把甄姬 / 张飞 / 黄月英启用，故改用甘宁）。
+    M6 票 03 的 P0 收口后 25 名全部启用，"落选武将"这一档没有真实载体，故用**合成表**
+    表达：把曹操改成 ``enabled: false`` 并在 ``CATALOG`` 里拿掉他的两条技能——校验必须
+    放行。条件化引用校验本身（启用 ⇒ 引用必须闭合）由下面两条反例继续钉住。
     """
     table = load_heroes()
 
-    assert sum(hero.enabled for hero in table.heroes) == 22, "启用 22 名（M6 P0 票 02 后）"
-    assert not table.by_id("ganning").enabled, "落选武将不启用（故引用不查）"
-    assert "hero.ganning.qixi" not in catalog_module.CATALOG
+    assert sum(hero.enabled for hero in table.heroes) == 25, "启用 25 名（P0 收口）"
+    assert {"hero.ganning.qixi", "hero.lvmeng.keji", "hero.huanggai.kurou"} <= set(
+        catalog_module.CATALOG
+    ), "P0 收口的三条技能都已登记"
+
+    without_caocao = {
+        skill_id: definition
+        for skill_id, definition in catalog_module.CATALOG.items()
+        if not skill_id.startswith("hero.caocao.")
+    }
+    monkeypatch.setattr("sgs.skills.CATALOG", MappingProxyType(without_caocao))
+    raw = _heroes_raw()
+    caocao = raw["heroes"][_index_of(raw, "caocao")]
+    caocao["enabled"] = False
+    caocao["skills"][0]["id"] = "no_such_skill"
+
+    assert _validate(raw).by_id("caocao") is not None, "未启用 ⇒ 引用不查"
 
 
 def test_an_enabled_hero_whose_skills_all_exist_loads(monkeypatch):
@@ -222,14 +240,19 @@ def test_a_disabled_hero_may_reference_a_missing_skill(monkeypatch):
 
 
 def test_duplicate_hero_id_is_rejected():
-    """判据用**未启用**的武将做基底：启用会连带报出技能引用错误，淹没唯一性这一条。
+    """判据用两名**相邻**的武将做基底（甘宁 → 吕蒙，名字改成同一个）。
 
-    M6 票 01 起夏侯惇已启用，故基底换成两名**相邻且此刻仍未启用**的武将（甘宁 → 吕蒙；
-    相邻是因为下面的 loc 断言用 ``index + 1`` 定位第二条重名记录）。
+    相邻是因为下面的 loc 断言用 ``index + 1`` 定位第二条重名记录；两人的技能都已登记，
+    故唯一性错误不会被技能引用错误淹没。
     """
     raw = _heroes_raw()
     index = _index_of(raw, "ganning")
     raw["heroes"][index]["id"] = "lvmeng"
+    # 重名条目连技能清单一起改成吕蒙的：否则会先报 `hero.skill_missing`（启用武将的
+    # 技能引用必须闭合），把唯一性这一条淹没。
+    raw["heroes"][index]["skills"] = [
+        dict(skill) for skill in raw["heroes"][index + 1]["skills"]
+    ]
 
     errors = _errors(raw)
 

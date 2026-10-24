@@ -39,7 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import SkillType
+from sgs.data import SkillType, hero_skill_id
 from sgs.effects import CarrierKind, Modifier, ModifierContext, ModifierPoint, behavior_for, is_slash
 from sgs.resolution import Control, Frame
 from sgs.state import GameState, MoveReason, Zone, ZoneRef
@@ -50,6 +50,8 @@ from .flow import PickSeats, SkillFlow, zero_step_effect
 
 __all__ = [
     "BIYUE_FLOW",
+    "KEJI",
+    "KEJI_FLOW",
     "LUOYI_DAMAGE_BONUS",
     "LUOYI_FLOW",
     "PHASE_BODY_SKILLS",
@@ -265,16 +267,52 @@ _LUOYI = PhaseBodySkill(
     modifiers=(Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _luoyi_damage_bonus),),
 )
 
-PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (_YINGZI, _BIYUE, _TUXI, _LUOYI)
-"""L 族四条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】）。"""
+# ---------------------------------------------------------------------------
+# 吕蒙【克己】（M6 票 03）：本回合出牌阶段内未使用 / 打出过【杀】⇒ 可以跳过弃牌阶段
+# ---------------------------------------------------------------------------
+
+KEJI = hero_skill_id("lvmeng", "keji")
+"""吕蒙【克己】的全限定技能 id。"""
+
+
+def _keji_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """提交点：置"跳过弃牌阶段"——由 :meth:`Engine._phase_discard_start` 消费。"""
+    del answers
+    host.skip_discard_phase(frame.data["skill_owner"])
+    return None
+
+
+KEJI_FLOW = SkillFlow(name="keji", steps=(), effect=_keji_effect)
+"""【克己】的零步流水线：[是否发动] → 跳过弃牌阶段（无步骤）。"""
+
+
+def _keji_available(state: GameState, owner: int) -> bool:
+    """额外前提：本回合出牌阶段内**没有**使用 / 打出过【杀】（引擎记的座位级事实）。"""
+    return not state.player(owner).slash_in_play_phase
+
+
+_KEJI = PhaseBodySkill(
+    # 吕蒙【克己】：若你于出牌阶段内没有使用或打出过【杀】，你可以跳过弃牌阶段（§九 L1011）。
+    hero_id="lvmeng",
+    short_id="keji",
+    timing=Timing.PHASE_DISCARD_START,
+    flow=KEJI_FLOW,
+    available=_keji_available,
+)
+
+
+PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (_YINGZI, _BIYUE, _TUXI, _LUOYI, _KEJI)
+"""L 族五条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
+票 03 的【克己】）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "yingzi": "多摸一张牌",
     "biyue": "摸一张牌",
     "tuxi": "放弃摸牌，改为获得至多两名其他角色的各一张手牌",
     "luoyi": "少摸一张牌；本回合你的【杀】或【决斗】造成的伤害 +1",
+    "keji": "跳过弃牌阶段",
 }
-"""L 族四条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+"""L 族五条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
 _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
     # M6 票 01【突袭】：座位步的询问 ``skill_id`` 是 ``tuxi:seat:<序号>`` ⇒ 键 = ``seat``。
@@ -286,7 +324,7 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
 def phase_body_activation_plans() -> dict[str, Any]:
     """L 族的发动形态注册表（由 :data:`sgs.skills.catalog.ACTIVATION_PLANS` 末尾并入）。
 
-    四条技能的形态同形：**技能持有者就是当前回合角色**才 ``available``——阶段体帧的
+    五条技能的形态同形：**技能持有者就是当前回合角色**才 ``available``——阶段体帧的
     ``source`` 由 :meth:`Engine._dispatch_phase_body` 设成当前回合角色。别的人摸牌 /
     结束阶段里，这条实例连"是否发动"都不问（与【观星】的 ``_guanxing_plan`` 同一条理由）。
     声明了 :attr:`PhaseBodySkill.available` 的（【突袭】"有牌可拿"）再叠一层前提。

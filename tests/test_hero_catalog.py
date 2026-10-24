@@ -1,14 +1,14 @@
-"""武将总表：22 名 × 37 条技能的数据断言与登记（票 12；M6 票 01 把启用池 16 → 19，票 02 → 22）。
+"""武将总表：25 名 × 40 条技能的数据断言与登记（票 12；M6 P0 三票收口 16 → 25）。
 
 本文件只装**跨技能**的登记事实（逐技能的构造局面单测按族住各自文件）：
 
-- ``CATALOG`` 的规模与分区：装备 22 + 武将 37 = **59 条**，且武将那半恰是数据文件里
-  22 名启用武将的技能清单（``heroes.standard.json`` 是名单的唯一真源）；
+- ``CATALOG`` 的规模与分区：装备 22 + 武将 40 = **62 条**，且武将那半恰是数据文件里
+  25 名启用武将的技能清单（``heroes.standard.json`` 是名单的唯一真源）；
 - **同一 owner 同一时机只有一条技能**（票 12 §要做什么 3）：这是 R5-Q1「同一时点多技能
   自选顺序不建」的落地依据——将来加武将时这条断言先变红，逼出一次重新裁定；
-- 22 名的 ``gender`` / ``kingdom`` / ``hp_max`` 与规则文档第九章逐项一致（表驱动，
+- 25 名的 ``gender`` / ``kingdom`` / ``hp_max`` 与规则文档第九章逐项一致（表驱动，
   期望值是**手抄的独立真源**，不是从数据文件回读）；
-- 启用门控：未启用的 3 名不产出实例、不参与发放；启用池恰是那 22 名。
+- **P0 收口**（M6 票 03）：标准 25 名全部启用，启用池恰是这 25 名（没有"落选"了）。
 
 **测试函数名的历史口径**：带 ``sixteen`` / ``twenty_nine`` 的名字是 M3 收口时的节点名，
 被 ``tests/test_dod_m3.py`` 的 DoD 绑定（node id 必须继续存在）；M6 P0 只改函数体里的
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from sgs.data import (
@@ -59,7 +60,8 @@ from support import (
 PACK = load_content_pack(deck_profile="standard_108")
 HEROES = load_heroes()
 
-# 22 名启用武将（票 12 §落地表的 16 行 + M6 票 01 的魏三名 + 票 02 的魏/蜀三名）。
+# 25 名启用武将（票 12 §落地表的 16 行 + M6 票 01 的魏三名 + 票 02 的魏/蜀三名 +
+# 票 03 的吴三名 —— P0 收口：整张标准表全开）。
 ENABLED = (
     "caocao",
     "simayi",
@@ -76,6 +78,9 @@ ENABLED = (
     "zhugeliang",
     "huangyueying",
     "sunquan",
+    "ganning",
+    "lvmeng",
+    "huanggai",
     "zhouyu",
     "luxun",
     "daqiao",
@@ -85,12 +90,8 @@ ENABLED = (
     "diaochan",
 )
 
-# 落选 3 名（数据文件里结构存在、引用不查、不参与发放）。
-DISABLED = (
-    "ganning",
-    "lvmeng",
-    "huanggai",
-)
+# 落选 0 名（M6 票 03 的 P0 收口：标准 25 名全部启用）。
+DISABLED: tuple[str, ...] = ()
 
 # 规则文档第九章 933–1054 行的逐项事实（手抄的真源）：id → (势力, 性别, 体力上限)。
 _HERO_STATS = {
@@ -110,7 +111,7 @@ _HERO_STATS = {
     "huatuo": (Kingdom.QUN, Gender.MALE, 3),
     "lvbu": (Kingdom.QUN, Gender.MALE, 4),
     "diaochan": (Kingdom.QUN, Gender.FEMALE, 3),
-    # 落选 9 名同样逐项核对（结构存在即为它们负责）。
+    # P0 补齐的另外 9 名同样逐项核对（结构存在即为它们负责）。
     "xiahoudun": (Kingdom.WEI, Gender.MALE, 4),
     "zhangliao": (Kingdom.WEI, Gender.MALE, 4),
     "xuchu": (Kingdom.WEI, Gender.MALE, 4),
@@ -126,28 +127,29 @@ PLAYABLE = ("slash", "peach", "dodge")
 
 
 # ---------------------------------------------------------------------------
-# ① CATALOG 的一分为二（装备 22 + 武将 37 = 59）
+# ① CATALOG 的一分为二（装备 22 + 武将 40 = 62）
 # ---------------------------------------------------------------------------
 
 
 def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
-    """验收 1：``CATALOG`` = **59** 条（22 装备 + 37 武将），且两半由 ``carrier`` 分区。
+    """验收 1：``CATALOG`` = **62** 条（22 装备 + 40 武将），且两半由 ``carrier`` 分区。
 
     M5-01a 补 5 条军争装备技能占位（白银狮子 / 藤甲 / 古锭刀 / 朱雀羽扇 / 骅骝）；
     M6 票 01 把武将那半 29 → 32（【刚烈】/【突袭】/【裸衣】），票 02 → 37
-    （【洛神】/【倾国】/【咆哮】/【集智】/【奇才】）。函数名沿用 M3 的节点名
+    （【洛神】/【倾国】/【咆哮】/【集智】/【奇才】），票 03 → 40
+    （【奇袭】/【克己】/【苦肉】 = P0 收口）。函数名沿用 M3 的节点名
     （``test_dod_m3`` 的 DoD 绑定），数字以函数体为准。
     """
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 59
+    assert len(CATALOG) == 62
     assert len(equipment) == 22
-    assert len(heroes) == 37
+    assert len(heroes) == 40
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
-    """武将那半 = 22 名启用武将的技能清单（数据文件是名单的唯一真源，代码不另抄）。"""
+    """武将那半 = 25 名启用武将的技能清单（数据文件是名单的唯一真源，代码不另抄）。"""
     expected = {
         f"hero.{hero.id}.{skill.id}"
         for hero in HEROES.heroes
@@ -157,7 +159,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 37
+    assert len(expected) == 40
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -176,7 +178,7 @@ def test_every_hero_skill_id_is_fully_qualified():
 
 
 def test_the_enabled_heroes_have_no_two_skills_on_the_same_timing():
-    """验收 2：22 名里不存在同一 owner 同一时机的两条技能。
+    """验收 2：25 名里不存在同一 owner 同一时机的两条技能。
 
     判据 = 该武将的每条技能定义的 ``hooks`` 的时机集合两两不交；主公技与普通技同样
     受此约束（它们同住一张武将牌）。将来加武将时这条断言先变红。
@@ -198,7 +200,7 @@ def test_the_enabled_heroes_have_no_two_skills_on_the_same_timing():
 
 
 # ---------------------------------------------------------------------------
-# ③ 22 名的 gender / kingdom / hp_max 与第九章一致
+# ③ 25 名的 gender / kingdom / hp_max 与第九章一致
 # ---------------------------------------------------------------------------
 
 
@@ -211,45 +213,55 @@ def test_every_hero_matches_the_rule_book_stats():
 
 
 # ---------------------------------------------------------------------------
-# ④ 启用门控：3 名不产出实例、不参与发放
+# ④ 启用门控：25 名全开（P0 收口）
 # ---------------------------------------------------------------------------
 
 
 def test_the_enabled_pool_is_exactly_the_sixteen_and_the_rest_stay_dark():
-    """验收 5：启用池 = **22** 名（M6 P0 票 02）；另外 3 名结构存在但不启用。
+    """验收 5：启用池 = **25** 名（M6 票 03 的 P0 收口："另外几名的启停"这一档消失了）。
 
-    函数名沿用 M3 的节点名（``test_dod_m3`` 的 DoD 绑定），数字以函数体为准。
+    函数名沿用 M3 的节点名（``test_dod_m3`` 的 DoD 绑定），数字以函数体为准。启用字段
+    仍是唯一判据（不是"数据里存在即启用"）：读回的门控行为由
+    :func:`test_enabled_hero_ids_reads_the_table_enablement`（``tests/test_hero_dealing.py``）
+    用一张只开一名的合成表继续钉住。
     """
     ids = enabled_hero_ids(HEROES)
 
-    assert set(ids) == set(ENABLED)
-    assert len(ids) == 22
+    assert set(ids) == set(ENABLED) == {hero.id for hero in HEROES.heroes}
+    assert len(ids) == 25
+    assert DISABLED == (), "P0 收口后没有落选武将"
     assert all(HEROES.by_id(hero_id).enabled for hero_id in ENABLED)
-    assert all(not HEROES.by_id(hero_id).enabled for hero_id in DISABLED)
 
 
-def test_a_disabled_hero_never_produces_an_instance():
-    """未启用的武将连牌都不发；构造局面里显式写死也不产出技能实例。
+def test_a_hero_skill_missing_from_the_catalog_never_produces_an_instance(monkeypatch):
+    """技能不在 ``CATALOG`` 里 ⇒ 连构造局面都产不出实例（原"未启用武将"的判据）。
 
-    取两名**此刻仍未启用且技能未实现**的（甘宁 / 吕蒙：M6 P0 收口也还没轮到），故本判据
-    不随 P0 的票推进而失效（票 01 已把夏侯惇启用、票 02 把甄姬 / 张飞 / 黄月英启用）。
+    P0 收口后 25 名全部启用，"未启用 ⇒ 无实例"这一档不再有真实载体；它当时真正依赖的
+    机制是**技能定义缺席**（``resolve_instances`` 只查 ``CATALOG``，不看 ``enabled``——
+    启用门控在**发放**侧，见 ``test_the_enabled_pool_feeds_a_real_deal_without_the_hero_substream``）。
+    故这里用 monkeypatch 拿掉甘宁的【奇袭】定义，断言同一判据仍然成立。
     """
+    from sgs.skills import catalog as catalog_module
+    from sgs.skills import resolve_instances
+
+    without_qixi = {
+        skill_id: definition
+        for skill_id, definition in catalog_module.CATALOG.items()
+        if skill_id != "hero.ganning.qixi"
+    }
+    monkeypatch.setattr(catalog_module, "CATALOG", MappingProxyType(without_qixi))
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hero="ganning"), SeatSpec(hero="lvmeng")],
     )
 
-    from sgs.skills import resolve_instances
-
-    assert not [
-        instance
-        for instance in resolve_instances(state)
-        if instance.owner in (0, 1)
-    ], "落选武将的技能没有登记 ⇒ 一条实例都不产出"
+    owned = {instance.skill_id for instance in resolve_instances(state)}
+    assert "hero.ganning.qixi" not in owned, "缺定义 ⇒ 不产出实例"
+    assert "hero.lvmeng.keji" in owned, "同一局面里别人的已登记技能照常产出"
 
 
 def test_the_enabled_pool_feeds_a_real_deal_without_the_hero_substream():
-    """``hero_pool=()`` = 数据文件的启用池 ⇒ 真发牌取到 22 名里的两名。"""
+    """``hero_pool=()`` = 数据文件的启用池 ⇒ 真发牌取到 25 名里的两名。"""
     from sgs.data import deal_heroes
     from sgs.engine import RandomSource
 
@@ -263,6 +275,26 @@ def test_the_enabled_pool_feeds_a_real_deal_without_the_hero_substream():
     assert dealt is not None
     assert len(set(dealt)) == 2
     assert set(dealt) <= set(ENABLED)
+
+    # 启用门控的**发放侧**判据：合成一张只开第一名的表，启用池随之收缩到一名。
+    only_first = HEROES.model_copy(
+        update={
+            "heroes": (
+                HEROES.heroes[0].model_copy(update={"enabled": True}),
+                *(
+                    hero.model_copy(update={"enabled": False})
+                    for hero in HEROES.heroes[1:]
+                ),
+            )
+        }
+    )
+    shrunk = deal_heroes(
+        seat_count=1,
+        stream=RandomSource(1).substream("hero"),
+        hero_pool=(),
+        table=only_first,
+    )
+    assert shrunk == (HEROES.heroes[0].id,), "禁用其它武将后启用池只剩第一名"
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +771,116 @@ def test_the_luoyi_bonus_is_gone_after_the_turn_ends():
     )
 
 
+# ---------------------------------------------------------------------------
+# ⑪ 吕蒙【克己】（M6 票 03）：出牌阶段内未使用 / 打出过【杀】⇒ 可以跳过弃牌阶段
+#
+# §九 L1011–1012。形态 = 阶段体（``PHASE_DISCARD_START``，非锁定 ⇒ 问"是否发动"）+
+# 座位级事实"本回合出牌阶段内是否用过 / 打出过【杀】"（引擎在 ``start_use`` /
+# ``play_card`` 写、``_phase_play_start`` 复位）+ ``Engine.skip_discard_phase``。
+# 判据只从外部观测：弃牌阶段的 ``SKILL_ACTIVATION`` 询问、DISCARD 询问、手牌最终张数。
+# ---------------------------------------------------------------------------
+
+KEJI = "hero.lvmeng.keji"
+
+
+class _KejiPlayer:
+    """【克己】脚本：可选先用一张【杀】，再决定是否发动克己，其余最小应答。"""
+
+    def __init__(self, *, use_slash: bool = False, activate: bool = True) -> None:
+        self.use_slash = use_slash
+        self.activate = activate
+        self.slash_used = False
+        self.keji_queries: list = []
+        self.discard_queries: list = []
+
+    def respond(self, query):
+        if query.kind == "SKILL_ACTIVATION" and query.skill_id == KEJI:
+            self.keji_queries.append(query)
+            if self.activate:
+                for action in query.legal_actions:
+                    if getattr(action, "kind", None) == "ActivateSkill":
+                        return action
+            return next(action for action in query.legal_actions if isinstance(action, Pass))
+        if query.kind == "PLAY_PHASE":
+            if self.use_slash and not self.slash_used:
+                for action in query.legal_actions:
+                    if (
+                        isinstance(action, UseCard)
+                        and action.card.type == "slash"
+                        and action.targets == (1,)
+                    ):
+                        self.slash_used = True
+                        return action
+            return next(action for action in query.legal_actions if isinstance(action, EndPhase))
+        if query.kind == "DISCARD":
+            self.discard_queries.append(query)
+        if query.kind == "DODGE":
+            return next(action for action in query.legal_actions if isinstance(action, Pass))
+        return query.legal_actions[0]
+
+
+def _keji_state():
+    """4 血吕蒙、起手 4 张（摸牌阶段后 6 张 > 上限 4）——不跳过就要弃 2 张。"""
+    dodges = cards_of_type(PACK, "dodge")
+    slash = cards_of_type(PACK, "slash")[0]
+    hand = (slash, *dodges[:3])
+    deck = _keji_deck(hand)
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=4, hp_max=4, hand=hand, hero="lvmeng"), SeatSpec()],
+        deck=deck,
+        turn_seat=0,
+    )
+    return state, hand, deck
+
+
+def _keji_deck(hand: tuple[int, ...]) -> tuple[int, ...]:
+    used = set(hand)
+    return tuple(index for index in range(len(PACK.deck.cards)) if index not in used)
+
+
+def test_keji_skips_the_discard_phase_when_no_slash_was_used():
+    """正面：本回合没用过【杀】⇒ 弃牌阶段开始问一次，发动后一张都不弃、直接到结束阶段。"""
+    state, hand, deck = _keji_state()
+    engine = Engine.from_state(state, seed=7)
+    player = _KejiPlayer(activate=True)
+
+    _run(engine, [player, _PASS], lambda e: ran_timing(e, Timing.TURN_AFTER_END))
+
+    assert len(player.keji_queries) == 1, "弃牌阶段开始时问一次「是否发动」"
+    assert player.discard_queries == [], "跳过弃牌阶段 ⇒ 不发 DISCARD 询问"
+    assert sorted(engine.state.player(0).hand) == sorted((*hand, *deck[:2])), (
+        "6 张手牌全部保留（正常弃牌阶段会弃到体力上限 4）"
+    )
+
+
+def test_declining_keji_still_runs_the_discard_phase():
+    """反例（可选性）：同样没用过【杀】，放弃发动 ⇒ 照常弃到体力上限。"""
+    state, hand, deck = _keji_state()
+    engine = Engine.from_state(state, seed=7)
+    player = _KejiPlayer(activate=False)
+
+    _run(engine, [player, _PASS], lambda e: ran_timing(e, Timing.TURN_AFTER_END))
+
+    assert len(player.keji_queries) == 1
+    assert len(player.discard_queries) == 1, "不发动 ⇒ 正常弃牌询问"
+    assert len(engine.state.player(0).hand) == 4, "弃到体力上限"
+
+
+def test_keji_is_not_offered_after_using_a_slash_in_the_play_phase():
+    """反例（条件）：本回合出牌阶段用过【杀】⇒ 连「是否发动」都不问，照常弃牌。"""
+    state, hand, deck = _keji_state()
+    engine = Engine.from_state(state, seed=7)
+    player = _KejiPlayer(use_slash=True, activate=True)
+
+    _run(engine, [player, _PASS], lambda e: ran_timing(e, Timing.TURN_AFTER_END))
+
+    assert player.slash_used, "本局确实用过一张【杀】"
+    assert player.keji_queries == [], "用过【杀】⇒ 克己不可发动（连询问都不发）"
+    assert len(player.discard_queries) == 1
+    assert len(engine.state.player(0).hand) == 4
+
+
 SKILL_FILES: dict[str, str] = {
     # 魏
     "hero.caocao.jianxiong": "test_hero_damage_after.py",
@@ -767,6 +909,9 @@ SKILL_FILES: dict[str, str] = {
     # 吴
     "hero.sunquan.zhiheng": "test_hero_active.py",
     "hero.sunquan.jiuyuan": "test_hero_lord.py",
+    "hero.ganning.qixi": "test_hero_transform.py",
+    "hero.lvmeng.keji": "test_hero_catalog.py",
+    "hero.huanggai.kurou": "test_hero_active.py",
     "hero.zhouyu.yingzi": "test_hero_catalog.py",
     "hero.zhouyu.fanjian": "test_hero_active.py",
     "hero.luxun.qianxun": "test_hero_target_pool.py",
@@ -782,7 +927,8 @@ SKILL_FILES: dict[str, str] = {
     "hero.diaochan.lijian": "test_hero_active.py",
     "hero.diaochan.biyue": "test_hero_catalog.py",
 }
-"""37 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、票 02 加 5 条）。"""
+"""40 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
+票 02 加 5 条、票 03 加 3 条）。"""
 
 
 def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
@@ -794,7 +940,7 @@ def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
         for skill in hero.skills
     }
 
-    assert set(SKILL_FILES) == skills, "覆盖表必须恰等于 22 名的 37 条技能"
+    assert set(SKILL_FILES) == skills, "覆盖表必须恰等于 25 名的 40 条技能"
 
     tests_dir = Path(__file__).resolve().parent
     unnamed = sorted(
@@ -983,8 +1129,8 @@ def test_every_conditional_hook_goes_false_when_the_owner_is_someone_else() -> N
 
 
 def test_the_seven_zero_step_skills_are_registered_flows_with_no_steps():
-    """9 条零步技能（M6 票 01 加【裸衣】、票 02 加【集智】）：``flow_for`` 非空、``steps == ()``、
-    ``preactivated`` 仍 ``False``。
+    """11 条零步技能（M6 票 01 加【裸衣】、票 02 加【集智】、票 03 加【克己】/【苦肉】）：
+    ``flow_for`` 非空、``steps == ()``、``preactivated`` 仍 ``False``。
 
     这条钉的是 W6-01 的**执行路径统一**判据（spec §7）：迁移只把 ``Hook(handler=…)``
     换成 ``Hook(flow=…)``，不翻预发动开关（Q5=A）——界面 / 候选 / 记录流因此一行不改。
@@ -1001,7 +1147,7 @@ def test_the_seven_zero_step_skills_are_registered_flows_with_no_steps():
 
 
 # ---------------------------------------------------------------------------
-# W6-04：59 条技能的**形态**分类（静态表 + 全量覆盖）
+# W6-04：62 条技能的**形态**分类（静态表 + 全量覆盖）
 #
 # 形态是**读法**：`SkillDef` 上没有 shape 字段，也不该有。形态由既有声明读出来
 # （`locked` / `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` /
@@ -1013,6 +1159,7 @@ def test_the_seven_zero_step_skills_are_registered_flows_with_no_steps():
 SKILL_SHAPE: dict[str, str] = {
     # 主动技能 6（出牌阶段主动发动：有 SkillFlow、无钩子 / 接缝）
     "hero.sunquan.zhiheng": "主动技能",
+    "hero.huanggai.kurou": "零步技能",
     "hero.liubei.rende": "主动技能",
     "hero.zhouyu.fanjian": "主动技能",
     "hero.huatuo.qingnang": "主动技能",
@@ -1031,6 +1178,7 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.sunshangxiang.xiaoji": "零步技能",
     "hero.caocao.jianxiong": "零步技能",
     "hero.guojia.tiandu": "零步技能",
+    "hero.lvmeng.keji": "零步技能",
     "hero.zhouyu.yingzi": "零步技能",
     "hero.diaochan.biyue": "零步技能",
     "hero.machao.tieqi": "零步技能",
@@ -1071,6 +1219,7 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.daqiao.guose": "转化技",
     "hero.huatuo.jijiu": "转化技",
     "hero.zhenji.qingguo": "转化技",
+    "hero.ganning.qixi": "转化技",
     "equip.serpent_spear": "转化技",
     "equip.vermilion_feather_fan": "转化技",
     # 能力位 1（rejudge_capable，没有对持有者的询问）
@@ -1082,7 +1231,7 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.liubei.jijiang": "候选提供者",
     "equip.eight_diagrams": "候选提供者",
 }
-"""59 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
+"""62 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
 `SkillDef` 上没有 shape 字段，也不该有：形态是从既有声明读出来的归类（`locked` /
 `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` / `rejudge_capable`），不是
@@ -1096,28 +1245,31 @@ SKILL_SHAPE: dict[str, str] = {
 SHAPE_COUNTS: dict[str, int] = {
     "主动技能": 6,
     "触发技能": 6,
-    "零步技能": 9,
+    "零步技能": 11,
     "排列技能": 1,
     "多轮技能": 5,
     "锁定技": 20,
-    "转化技": 7,
+    "转化技": 8,
     "能力位": 1,
     "候选生成器": 1,
     "候选提供者": 3,
 }
-"""每格的条数（spec §4.4；M6 票 02 后 6 + 6 + 9 + 1 + 5 + 20 + 7 + 1 + 1 + 3 = 59）。"""
+"""每格的条数（spec §4.4；M6 票 03 后 6 + 6 + 11 + 1 + 5 + 20 + 8 + 1 + 1 + 3 = 62）。
+
+票 03 的三条：**苦肉**是零步主动技（裸发动，无步骤 ⇒ 机械形态落在「零步技能」格）；
+**克己**是阶段体零步技（同格）；**奇袭**是单源转化（转化技格）。"""
 
 STEP_LANGUAGE_SHAPES: frozenset[str] = frozenset(
     {"主动技能", "触发技能", "零步技能", "排列技能"}
 )
-"""在步骤语言内的四个形态（22 条 = 6 + 6 + 9 + 1）。"""
+"""在步骤语言内的四个形态（24 条 = 6 + 6 + 11 + 1）。"""
 
 IN_STEP_LANGUAGE: frozenset[str] = frozenset(
     skill_id
     for skill_id, shape in SKILL_SHAPE.items()
     if shape in STEP_LANGUAGE_SHAPES
 )
-"""在步骤语言内（22）：**派生**自 :data:`SKILL_SHAPE` 的四个步骤语言形态。
+"""在步骤语言内（24）：**派生**自 :data:`SKILL_SHAPE` 的四个步骤语言形态。
 
 W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同一份事实的两份拷贝——
 形态表一改，第二份名单就悄悄过期。现在它只是那张表的一个投影；真正的判据留在
@@ -1126,9 +1278,9 @@ W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同�
 """
 
 OUTSIDE_STEP_LANGUAGE: frozenset[str] = frozenset(SKILL_SHAPE) - IN_STEP_LANGUAGE
-"""不在步骤语言内（37）：多轮 5 + 锁定 20 + 转化 7 + 能力位 1 + 候选生成器 1 + 候选提供者 3。
+"""不在步骤语言内（38）：多轮 5 + 锁定 20 + 转化 8 + 能力位 1 + 候选生成器 1 + 候选提供者 3。
 
-同样**派生**（:data:`SKILL_SHAPE` 减 :data:`IN_STEP_LANGUAGE`）；37 这个数由
+同样**派生**（:data:`SKILL_SHAPE` 减 :data:`IN_STEP_LANGUAGE`）；38 这个数由
 `SHAPE_COUNTS` 的其余六格加出来，测试里另有一条规模断言。
 """
 
@@ -1136,7 +1288,7 @@ ZERO_STEP_SKILL_IDS: tuple[str, ...] = tuple(
     skill_id for skill_id, shape in SKILL_SHAPE.items() if shape == "零步技能"
 )
 """W6-01 的零步技能（spec §4.1）：连营 / 枭姬 / 奸雄 / 天妒 / 英姿 / 闭月 / 铁骑，
-M6 票 01 加【裸衣】、票 02 加【集智】（共 9 条）。
+M6 票 01 加【裸衣】、票 02 加【集智】、票 03 加【克己】/【苦肉】（共 11 条）。
 
 W6-07 / 评审 J7：**派生**自 :data:`SKILL_SHAPE` 的「零步技能」那一格（原先手抄 7 个 id）。"""
 
@@ -1155,9 +1307,9 @@ def _flow_steps(skill_id: str):
 
 
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
-    """59 条恰好一形态：键 = ``CATALOG`` 的键、值 = 10 个形态闭集之一。"""
+    """62 条恰好一形态：键 = ``CATALOG`` 的键、值 = 10 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 59
+    assert len(SKILL_SHAPE) == len(CATALOG) == 62
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 10
     assert all(SKILL_SHAPE.values()), "表里没有空形态"
@@ -1250,7 +1402,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """22 在内 / 37 在外：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """24 在内 / 38 在外：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -1262,8 +1414,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 22
-    assert len(outside) == 37
+    assert len(inside) == 24
+    assert len(outside) == 38
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     assert {skill_id for skill_id in CATALOG if flow_for(skill_id) is not None} == inside

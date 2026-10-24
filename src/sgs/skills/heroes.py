@@ -16,13 +16,15 @@ r"""武将技能的**定义**（票 03 起；全表登记归票 12）。
 赵云【龙胆】  【闪】、手牌∪装备     【杀】（普通）        单源、``PLAY`` + ``RESPOND``
 大乔【国色】  方块牌、手牌∪装备     【乐不思蜀】          单源、``PLAY``
 华佗【急救】  红色牌、手牌∪装备     【桃】               单源、**限回合外**
+甄姬【倾国】  黑色**手牌**          【闪】               单源、``DODGE`` + ``RESPOND``
+甘宁【奇袭】  黑色牌、手牌∪装备     【过河拆桥】          单源、``PLAY``
 ===========  ==================  ==================  ==============================
 
 **区域默认**（W4-3 / `GLOSSARY.md`）：五条牌面都只写"一张牌"，没有一条写"区域内的牌"
 或"场上的牌" ⇒ 源区一律是 :func:`_hand_equip`（手牌 ∪ 装备）。**不设统一的转化源区**，
 更不默认包含判定区；将来某条转化技的牌面真写了别的区域，改它自己那一行的 ``source_zone``。
 
-**五个谓词全部内联在回调里**（票 03 §要做什么 3）：颜色 / 花色 / 牌名（三者在
+**谓词全部内联在回调里**（票 03 §要做什么 3）：颜色 / 花色 / 牌名（三者在
 :func:`_convertible` 的谓词分支里）、区域（``card_ids`` 给出取牌区）、时机（回合外，
 :func:`_outside_turn` 读 ``state.turn_seat``）。**不建声明式 DSL**——回调自己声明
 "源筛选 + 目标牌名"，组合与合法性走 :mod:`sgs.skills.virtual` 的共享构造器。
@@ -200,7 +202,7 @@ def _diamond(state: GameState, card_id: int) -> bool:
 
 
 def _black(state: GameState, card_id: int) -> bool:
-    """颜色谓词：黑色牌（【倾国】；§九 L962）。"""
+    """颜色谓词：黑色牌（【倾国】§九 L962 / 【奇袭】§九 L1009）。"""
     return _convertible(state, card_id, color=Color.BLACK)
 
 
@@ -279,6 +281,17 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         predicate=_black,
         scopes=(CandidateScope.DODGE, CandidateScope.RESPOND),
         requirement="选择1张黑色手牌当【闪】使用或打出",
+    ),
+    # 甘宁【奇袭】（M6 票 03）：一张黑色牌当【过河拆桥】使用（§九 L1009）。
+    # 区域默认 = 手牌 ∪ 装备：牌面没写区域，按 `_hand_equip` 那一档读。
+    ConversionSkill(
+        hero_id="ganning",
+        short_id="qixi",
+        target_type_id="dismantlement",
+        source_zone=_hand_equip,
+        predicate=_black,
+        scopes=(CandidateScope.PLAY,),
+        requirement="选择1张黑色牌当【过河拆桥】使用",
     ),
 )
 """H 族五条技能（六条声明：龙胆两个方向各一条）的逐字声明（票 03 §表 + M6 票 02【倾国】）。"""

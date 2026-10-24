@@ -1090,6 +1090,7 @@ class Engine:
             counts_by_type = self.state.player(source).card_use_counts
             key = behavior.count_key
             counts_by_type[key] = counts_by_type.get(key, 0) + 1
+        self._note_play_phase_slash(card, source)
         deal_bonus = 0
         if is_slash(behavior) and self.state.player(source).wine_active:
             deal_bonus = WINE_DAMAGE_BONUS
@@ -1126,7 +1127,12 @@ class Engine:
         return targets[frame.data.get("cursor", 0)]
 
     def play_card(self, card: CardRef, *, source: int, timing: Timing) -> Frame:
-        """开始一次**打出**：压入 PLAY 帧（L6 两个时机），**不占使用次数**（票 19 §2）。"""
+        """开始一次**打出**：压入 PLAY 帧（L6 两个时机），**不占使用次数**（票 19 §2）。
+
+        M6 票 03：打出也是【克己】的判据之一（"使用**或打出**过【杀】"），故这里同样记
+        座位级事实；判据与 ``start_use`` 共用 :meth:`_note_play_phase_slash`。
+        """
+        self._note_play_phase_slash(card, source)
         return self.push_frame(
             FrameKind.PLAY,
             {"card": card, "source": source, "targets": ()},
@@ -1996,6 +2002,17 @@ class Engine:
         if self.state.turn_seat == seat:
             self._turn_data["skip_draw"] = True
 
+    def skip_discard_phase(self, seat: int) -> None:
+        """让 ``seat`` 的**弃牌阶段**整体跳过（M6 票 03【克己】）。
+
+        与 :meth:`skip_play_phase` / :meth:`skip_draw_phase` 同姿态：只对**当前回合角色**
+        生效，跳过由 :meth:`_phase_discard_start` 消费（连 DISCARD 询问与
+        ``PHASE_DISCARD_END`` 一并越过，直奔结束阶段）。技能只在弃牌阶段**开始**时
+        决定跳不跳，故 ``PHASE_DISCARD_START`` 本身照发（那是技能窗口）。
+        """
+        if self.state.turn_seat == seat:
+            self._turn_data["skip_discard"] = True
+
     def set_draw_phase_count(self, seat: int, count: int) -> None:
         """把 ``seat`` 本回合摸牌阶段的**基础摸牌数**改成 ``count``（M6 票 01 的加法）。
 
@@ -2319,6 +2336,20 @@ class Engine:
                 return "stay"
             index = frame.data["effect_pc"]
         return None
+
+    def _note_play_phase_slash(self, card: CardRef, source: int) -> None:
+        """把"出牌阶段内使用 / 打出过【杀】"记进座位级事实（M6 票 03【克己】）。
+
+        判据三条同时成立：这是**当前回合角色自己的出牌阶段**（``state.phase`` 是
+        ``PLAY`` 且 ``source`` 是 ``turn_seat``——回合外的响应、别人的出牌阶段都不算）、
+        牌面属于【杀】**家族**（:func:`~sgs.effects.is_slash`，火 / 雷 / 转化 / 虚拟同族）。
+        写入唯一入口；复位见 :meth:`_phase_play_start`。不发 delta（见 ``Player`` 字段文档）。
+        """
+        if self.state.phase is not Phase.PLAY or self.state.turn_seat != source:
+            return
+        if not is_slash(behavior_for(card)):
+            return
+        self.state.player(source).slash_in_play_phase = True
 
     def apply_hp_change(self, frame: Frame, seat: int, value: int) -> HpChangeDelta:
         """调 ``apply_hp`` 这个叶子原语并把返回的变化事件写进记录流（票 07 §1）。
@@ -3325,6 +3356,10 @@ class Engine:
         # 出牌阶段限一次的技能计数在本步复位：与"座位自己的 TURN_START 清空
         # card_use_counts"同一重置口径（票 04 §要做什么 2 / 票 07 §6）。
         reset_phase_skill_state(self.state)
+        # M6 票 03【克己】："本回合**出牌阶段内**是否使用 / 打出过【杀】"。复位点就是
+        # 出牌阶段起点（被【乐不思蜀】跳过时也复位——本阶段一张都没用，事实为假）。
+        if self.state.turn_seat is not None:
+            self.state.player(self.state.turn_seat).slash_in_play_phase = False
         if self._turn_data.pop("skip_play", False):
             # 【乐不思蜀】判定非红桃 ⇒ **跳过出牌阶段**（官方"跳过其出牌阶段"，非跳过回合）：
             # 阶段体与边界一并越过，直奔弃牌阶段（票 26）。
@@ -3369,9 +3404,22 @@ class Engine:
     def _phase_play_end(self) -> None:
         self.emit_timing(Timing.PHASE_PLAY_END, actor=self.state.turn_seat)
 
-    def _phase_discard_start(self) -> None:
+    def _phase_discard_start(self) -> str | None:
+        """弃牌阶段开始：发 ``PHASE_DISCARD_START``，有阶段体钩子（【克己】）时惰性建帧。
+
+        跳过 = 阶段体钩子经 :meth:`skip_discard_phase` 置的状态，在这里消费：DISCARD
+        询问与 ``PHASE_DISCARD_END`` 一并越过（与【乐不思蜀】/【兵粮寸断】的跳过同形），
+        直奔结束阶段。
+        """
         self.state.phase = Phase.DISCARD
-        self.emit_timing(Timing.PHASE_DISCARD_START, actor=self.state.turn_seat)
+        control = self._dispatch_phase_body(
+            Timing.PHASE_DISCARD_START, "phase_discard_start"
+        )
+        if control == "stay":
+            return "stay"
+        if self._turn_data.pop("skip_discard", False):
+            self._skip_to(self._phase_finish)
+        return None
 
     def _phase_discard(self) -> str | None:
         seat = self._turn_seat()

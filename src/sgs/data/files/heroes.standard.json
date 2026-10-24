@@ -186,7 +186,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "qixi", "name": "奇袭", "skill_type": "NORMAL" }]
     },
     {
@@ -196,7 +196,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "keji", "name": "克己", "skill_type": "NORMAL" }]
     },
     {
@@ -206,7 +206,7 @@
       "gender": "male",
       "hp_max": 4,
       "version": "standard",
-      "enabled": false,
+      "enabled": true,
       "skills": [{ "id": "kurou", "name": "苦肉", "skill_type": "NORMAL" }]
     },
     {

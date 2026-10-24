@@ -7,8 +7,8 @@
 池是入参、不走数据文件的 ``enabled`` 名单，这样"发放"这套机器在本票可测，而
 "数据文件里启用谁"仍留给定票。
 
-票 12 起数据文件里的启用池非空（票 12 的 16 名；M6 P0 票 02 后 22 名），故
-``hero_pool=()`` 的那条断言改判为"从启用池里真发得出牌"；显式换池的路径一字未动。
+票 12 起数据文件里的启用池非空（票 12 的 16 名；M6 票 03 的 P0 收口后 25 名全开），
+故 ``hero_pool=()`` 的那条断言改判为"从启用池里真发得出牌"；显式换池的路径一字未动。
 """
 
 from __future__ import annotations
@@ -182,34 +182,11 @@ def test_an_unknown_hero_id_is_rejected():
 
 
 def test_enabled_hero_ids_reads_the_table_enablement():
-    """启用门控的只读面：M6 P0 票 02 起数据文件里有 22 名启用 ⇒ 启用池恰是那 22 名。"""
+    """启用门控的只读面：M6 票 03 的 P0 收口后标准 25 名全部启用 ⇒ 启用池恰是 25 名。"""
     ids = enabled_hero_ids(HEROES)
 
-    assert len(ids) == 22
-    assert set(ids) == {
-        "caocao",
-        "simayi",
-        "xiahoudun",
-        "zhangliao",
-        "xuchu",
-        "guojia",
-        "zhenji",
-        "liubei",
-        "guanyu",
-        "zhangfei",
-        "zhaoyun",
-        "machao",
-        "zhugeliang",
-        "huangyueying",
-        "sunquan",
-        "zhouyu",
-        "luxun",
-        "daqiao",
-        "sunshangxiang",
-        "huatuo",
-        "lvbu",
-        "diaochan",
-    }
+    assert len(ids) == 25
+    assert set(ids) == {hero.id for hero in HEROES.heroes}, "启用池 = 整张标准武将表"
     assert all(HEROES.by_id(hero_id).enabled for hero_id in ids)
 
     # 派生判据本身（"读的是 enabled 字段"）：造一张只启用第一名的表，池随之收缩。
@@ -228,6 +205,24 @@ def test_enabled_hero_ids_reads_the_table_enablement():
     assert enabled_hero_ids(only_first) == (HEROES.heroes[0].id,)
     assert isinstance(HEROES.heroes[0], Hero)
     assert isinstance(HEROES.heroes[0].skills[0], HeroSkill)
+
+
+def test_every_enabled_hero_is_dealable_from_the_default_pool():
+    """M6 P0 收口（票 03）：默认标准局的启用池真的**发得出每一名**（25 名逐名点将）。
+
+    判据比"池里有 25 个 id"强一层：逐个把目标武将当点将、其余座位仍从**默认启用池**
+    （``hero_pool=()``）随机——25 次都要成功落到座位 0，且其余座位不得重复抽到同一名。
+    """
+    ids = enabled_hero_ids(HEROES)
+    assert len(ids) == 25
+
+    for hero_id in ids:
+        heroes = _heroes_of(
+            _build(seed=5, player_count=2, hero_pool=(), pinned_hero=hero_id)
+        )
+        assert heroes[0] == hero_id, f"默认启用池发不出 {hero_id}"
+        assert heroes[1] != hero_id, "其余座位不得重复抽到已点武将"
+        assert HEROES.by_id(heroes[1]).enabled
 
 
 def test_an_empty_explicit_pool_means_the_data_file_enabled_pool():

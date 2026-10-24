@@ -1499,6 +1499,29 @@ def _score_zhiheng(query: Query, action: Action, view: PlayerView) -> float:
     return _CYCLE_VALUE * count - sum(values[:count])
 
 
+def _score_keji(query: Query, action: Action, view: PlayerView) -> float:
+    """【克己】（M6 票 03）：跳过弃牌阶段 ⇒ 保住"超出体力值"的那几张手牌。
+
+    收益按保住的张数估（每张约一张未知牌的价值）：手牌数 − 当前体力值。
+    不超出上限时不发动（0 分 ⇒ 与 Pass 打平，由下一层的"放弃"胜出）。
+    """
+    del query, action
+    me = view.players[view.seat]
+    return float(max(0, me.hand_count - me.hp)) * _UNKNOWN_CARD_VALUE
+
+
+def _score_kurou(query: Query, action: Action, view: PlayerView) -> float:
+    """【苦肉】（M6 票 03）：失去 1 点体力换两张牌；**1 点体力时不换**（再失去即濒死）。
+
+    标准版没有"每阶段一次"⇒ 这个打分会被反复问：体力 > 1 时每次都是正分，
+    掉到 1 点后转为负分，AI 因此不会把自己苦肉死。
+    """
+    del query, action
+    if view.players[view.seat].hp <= 1:
+        return -_UNKNOWN_CARD_VALUE
+    return 2.0 * _UNKNOWN_CARD_VALUE
+
+
 def _score_qingnang(query: Query, action: Action, view: PlayerView) -> float:
     """【青囊】：弃一张手牌令**已受伤**角色回复 1 点（= 3 点收益 − 牌价）。"""
     assert isinstance(action, ActivateSkill)
@@ -1579,6 +1602,9 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.huangyueying.jizhi": (_constant(3.0), "使用非延时锦囊时摸一张：净赚"),
     # 吴
     "hero.sunquan.zhiheng": (_score_zhiheng, "弃任意张摸等量：换牌质量（弃【桃】/【闪】扣分）"),
+    "hero.ganning.qixi": (_constant(2.0), "黑色牌当【过河拆桥】：多一条拆牌路径"),
+    "hero.lvmeng.keji": (_score_keji, "未出过【杀】就跳过弃牌阶段：保住超出上限的手牌"),
+    "hero.huanggai.kurou": (_score_kurou, "失去 1 点体力换两张牌；1 点体力时不换（会濒死）"),
     "hero.zhouyu.yingzi": (_constant(2.5), "摸牌阶段多摸一张：净赚一张"),
     "hero.zhouyu.fanjian": (_score_fanjian, "交付一张牌令目标猜花色：猜错即受伤"),
     "hero.daqiao.guose": (_constant(2.0), "方块牌当【乐不思蜀】：多一条控制路径"),

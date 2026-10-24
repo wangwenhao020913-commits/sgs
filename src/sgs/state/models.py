@@ -219,6 +219,18 @@ class Player(BaseModel):
     键通常是牌型 id，也可以是行为表声明的**共用键**（M5-02：普通【杀】/ 火【杀】/
     雷【杀】共用 ``"slash"``）；读写的唯一真源是 ``CardBehavior.count_key``。
     """
+    slash_in_play_phase: bool = False
+    """本回合**出牌阶段内**是否使用或打出过【杀】（M6 票 03 的【克己】）。
+
+    写在**当前回合角色自己的出牌阶段**里（``Engine.start_use`` 的"使用"与
+    ``Engine.play_card`` 的"打出"两个入口）：判据是牌面事实（``is_slash``，火 / 雷 /
+    转化 / 虚拟【杀】同族）∧ ``state.phase is Phase.PLAY`` ∧ ``source == state.turn_seat``。
+    复位点是 :meth:`Engine._phase_play_start`（每个出牌阶段开始时清掉，被【乐不思蜀】
+    跳过时也清），故"本阶段"的作用域不跨回合。
+
+    **不发 delta**：与 ``luoyi_active`` 同姿态——没有 JSON 读者，记录流里的使用 / 打出
+    动作已足以在回放时重建它。
+    """
     identity: Identity | None = None
     """座位级身份（票 13 §3）：无身份局恒 ``None``，身份局由 ``build_initial`` 一次发放。
 
