@@ -365,6 +365,50 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "jie_guojia",
+      "name": "界郭嘉",
+      "true_name": "郭嘉",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "tiandu",
+          "name": "天妒",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yiji",
+          "name": "遗计",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_lidian",
+      "name": "界李典",
+      "true_name": "李典",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "xunxun",
+          "name": "恂恂",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "wangxi",
+          "name": "忘隙",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

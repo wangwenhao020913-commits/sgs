@@ -476,7 +476,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 41 and len(catalog) == 26, "M6 P1 收口前：41 个版本 / 26 个真名"
+    assert len(flat) == 43 and len(catalog) == 27, "M6 票 15 后：43 个版本 / 27 个真名"
     for group in catalog:
         true_name = group["true_name"]
         assert true_name, "每个真名都要能给人看（名称非空）"
@@ -4955,7 +4955,7 @@ def test_a_bare_query_rebuilds_transformed_source_cards_from_the_query_itself() 
 
 
 # ---------------------------------------------------------------------------
-# U1-04b 描述全文：43 个牌名 + 95 条技能（独立内容文件，不进引擎 / 录像）
+# U1-04b 描述全文：43 个牌名 + 99 条技能（独立内容文件，不进引擎 / 录像）
 # ---------------------------------------------------------------------------
 
 MILITARY_CARD_TYPE_IDS = frozenset(
@@ -4977,7 +4977,7 @@ MILITARY_CARD_TYPE_IDS = frozenset(
 
 
 def test_every_card_name_and_skill_id_has_a_description() -> None:
-    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 95 条技能一条不缺。
+    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 99 条技能一条不缺。
 
     缺一条时断言消息**直接列出缺的 key**（不是只报一个总数）——这是票面的验收判据。
     多余 / 拼错的 key 也一并拦：否则「43 条」可以是 42 条真条目 + 1 条错拼。
@@ -4996,7 +4996,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 95, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 99, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)
@@ -5072,7 +5072,10 @@ def test_the_card_and_skill_contracts_carry_the_server_side_description() -> Non
     from sgs_web.descriptions import card_description, skill_description
     from sgs_web.display import card_display
 
-    session = Session(seed=5, ai="random", timeout_seconds=None, player_count=4)
+    # M6 票 15 换池（版本 41 → 43）后 seed 5 的人类是界马超：详情清单的名称解析仍读
+    # 内容包表（界将的显示归票 19），`build_skills` 因此拿不到条目、本测试的
+    # "人类座位至少有一条武将技能"失去消费者。按同一判据（人类是标准版武将）从 1 重扫到 2。
+    session = Session(seed=2, ai="random", timeout_seconds=None, player_count=4)
     snapshot = visible_snapshot(session)
 
     # 真产品路径：HTTP 门面拼的响应体（serve.GameRegistry.view）里就得有全文。

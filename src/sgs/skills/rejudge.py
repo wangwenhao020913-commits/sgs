@@ -39,6 +39,7 @@ from .flow import SkillFlow, zero_step_effect
 __all__ = [
     "GUICAI",
     "JIE_GUICAI",
+    "JIE_TIANDU",
     "TIANDU",
     "TIANDU_FLOW",
     "rejudge_activation_plans",
@@ -59,6 +60,13 @@ JIE_GUICAI = hero_skill_id("jie_simayi", "guicai")
 TIANDU = hero_skill_id("guojia", "tiandu")
 """郭嘉【天妒】的全限定技能 id。"""
 
+JIE_TIANDU = hero_skill_id("jie_guojia", "tiandu")
+"""界郭嘉【天妒】的全限定技能 id（§十九 L2041：牌面与标准版逐字相同）。
+
+票 15 的"复用"落点与界【鬼才】同姿态：**同一个** :data:`TIANDU_FLOW` 对象与**同一条**
+发动形态（:func:`_tiandu_plan` 读判定帧的 ``subject``），只有技能 id 不同。
+"""
+
 
 def _tiandu_plan(state: GameState, frame: Frame, instance: Any) -> ActivationPlan:
     """【天妒】的发动前提：**被判定者就是技能持有者**（"当**你的**判定牌生效后"）。
@@ -72,8 +80,11 @@ def _tiandu_plan(state: GameState, frame: Frame, instance: Any) -> ActivationPla
 
 
 def rejudge_activation_plans() -> dict[str, Any]:
-    """I 族的发动形态注册表（由 :data:`sgs.skills.catalog.ACTIVATION_PLANS` 末尾并入）。"""
-    return {TIANDU: _tiandu_plan}
+    """I 族的发动形态注册表（由 :data:`sgs.skills.catalog.ACTIVATION_PLANS` 末尾并入）。
+
+    标准 / 界两版【天妒】共用同一个 ``_tiandu_plan`` 函数对象（"逐字相同"的落点）。
+    """
+    return {TIANDU: _tiandu_plan, JIE_TIANDU: _tiandu_plan}
 
 
 def tiandu_handler(host: Any, frame: Frame) -> Control:
@@ -131,6 +142,14 @@ def rejudge_skill_definitions() -> tuple[SkillDef, ...]:
         ),
         SkillDef(
             skill_id=TIANDU,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=(Hook(Timing.JUDGE_CARD_AFTER_EFFECT, flow=TIANDU_FLOW),),
+            requirement="获得此判定牌",
+        ),
+        SkillDef(
+            skill_id=JIE_TIANDU,
             locked=False,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,

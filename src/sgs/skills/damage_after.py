@@ -5,10 +5,11 @@ r"""伤害后触发（B 族，票 05）：逐点触发的判读、三条技能�
 ``hero.<武将 id>.<短 id>`` 技能，定义与回调住本模块，:data:`sgs.skills.CATALOG` 仍是
 **唯一入口**。
 
-B 族的形态差别只有一处：它挂在 ``DAMAGE_AFTER_TAKE`` 上，而**这个时机在同一次伤害里
-可能派发多轮**——引擎按伤害值逐轮派发，轮次写进帧私有 :data:`DAMAGE_POINT_KEY`
-（票 05 §要做什么 1）。故"每次伤害事件一次"与"每受到 1 点伤害一次"是**技能定义上的
-一个可选字段**（:attr:`~sgs.skills.catalog.Hook.per_point`），不是引擎里的特判：
+B 族的形态差别只有一处：它挂在 ``DAMAGE_AFTER_TAKE`` / ``DAMAGE_AFTER_DEAL`` 上，而
+**这两个时机在同一次伤害里可能派发多轮**——引擎按伤害值逐轮派发，轮次写进帧私有
+:data:`DAMAGE_POINT_KEY`（票 05 §要做什么 1；票 15 把逐点扩到造成侧）。故"每次伤害事件
+一次"与"受到 / 造成 1 点伤害一次"是**技能定义上的一个可选字段**
+（:attr:`~sgs.skills.catalog.Hook.per_point`），不是引擎里的特判：
 
 =========================  ======  =========  ==========================================
 技能                       锁定    per_point  效果
@@ -18,16 +19,20 @@ B 族的形态差别只有一处：它挂在 ``DAMAGE_AFTER_TAKE`` 上，而**�
 司马懿【反馈】             非锁定  ``False``  获得**伤害来源**的一张牌（手牌隐藏槽 + 装备可见槽）
 界司马懿【反馈】           非锁定  ``True``   同上，逐点触发（"受到 **1 点**伤害后"，§十九 L2020）
 郭嘉【遗计】               非锁定  ``True``   观看牌堆顶 2 张 → 交给任意角色（可一次两张）
+界郭嘉【遗计】             非锁定  ``True``   摸两张 → 从**手牌**里分配给至多两名其他角色
 夏侯惇【刚烈】             非锁定  ``False``  判定 → 非红桃时**伤害来源**二选一：弃两张手牌 / 受 1 点伤害
 界夏侯惇【刚烈】           非锁定  ``True``   判定 → 红：对来源 1 点伤害 / 黑：弃来源一张牌
+界李典【忘隙】             非锁定  ``True``   造成 / 受到 1 点伤害后摸两张，交给该角色其中一张
 =========================  ======  =========  ==========================================
 
-四条都是**非锁定技**（技能面写了"你可以"）⇒ 发动是询问出来的。它们在回调里可以
+全部是**非锁定技**（技能面写了"你可以"）⇒ 发动是询问出来的。它们在回调里可以
 **提问**（【反馈】选牌、【遗计】看牌与交给、【刚烈】判定后问来源），返回 ``"stay"``
 让出控制权；引擎按"同一轮重入不重问、轮次推进"的帧内游标范式继续（票 19 §8）。
 【遗计】的面是**观看**（票 15）：牌面只在**持有者本人**的那次询问里（询问的
 ``revealed`` 授予），不进任何 ``PlayerView``、不落带牌面的 delta；同一个伤害点内
-**一次可以选两张一起交给同一名角色**，也可以一张一交、每次换人。
+**一次可以选两张一起交给同一名角色**，也可以一张一交、每次换人。界【遗计】的"分配"
+与【忘隙】的"交给该角色"走同一条既有给牌路径（``SELECT_CARDS`` / ``SELECT_OPTION``
+询问 + ``PUT`` 进对方手牌），不新造私有 Action。
 
 **"获得造成伤害的牌"**读 ``frame.data["card"]``（= 官方六要素的**渠道牌**，与
 ``channel`` 同源）经 :func:`~sgs.effects.locate` 定位：牌在处理区里才拿得到；已被
@@ -74,8 +79,14 @@ __all__ = [
     "JIE_GANGLIE",
     "JIE_JIANXIONG",
     "JIE_JIANXIONG_FLOW",
+    "JIE_YIJI",
+    "JIE_YIJI_DRAW",
+    "JIE_YIJI_GIVE_LIMIT",
+    "WANGXI",
     "DAMAGE_POINT_KEY",
     "DAMAGE_RECORDED_KEY",
+    "DAMAGE_DEAL_POINT_KEY",
+    "DAMAGE_DEAL_RECORDED_KEY",
     "DamageAfterSkill",
     "FANKUI_FLOW",
     "GANGLIE_OPTIONS",
@@ -101,8 +112,26 @@ DAMAGE_RECORDED_KEY = "damage_recorded"
 把"这一轮只派发、不再记"传给派发口（``emit_record=False``）。
 """
 
+DAMAGE_DEAL_POINT_KEY = "damage_deal_point_index"
+"""帧私有槽名：**造成伤害后**那一侧逐点派发到第几点（M6 票 15）。
+
+``DAMAGE_AFTER_TAKE`` 的逐点游标（:data:`DAMAGE_POINT_KEY`）在 ``damage_after_take``
+里从 0 起跑；``DAMAGE_AFTER_DEAL`` 在它**之前**执行（``DAMAGE_STEPS`` 的顺序），故
+造成侧的游标另存一个键，跑完再把 :data:`DAMAGE_POINT_KEY` 交还 0。技能回调不读它，
+只有 :func:`~sgs.engine.steps.damage_after_deal` 的循环用它续跑。
+"""
+
+DAMAGE_DEAL_RECORDED_KEY = "damage_deal_recorded"
+"""帧私有槽名：**造成伤害后**的时机记录是否已经落过（M6 票 15）。
+
+与 :data:`DAMAGE_RECORDED_KEY` 同一条纪律（同一次伤害事件恰好一条时机记录），只是分属
+两个时机——共用一个键会让 ``DAMAGE_AFTER_TAKE`` 在 ``DAMAGE_AFTER_DEAL`` 之后误以为
+自己已经记过。
+"""
+
+
 def damage_point_index(frame: Any) -> int:
-    """当前伤害点序号；不在 ``DAMAGE_AFTER_TAKE`` 派发中时是 ``0``（"第一轮"）。"""
+    """当前伤害点序号；不在 ``DAMAGE_AFTER_TAKE`` / ``DAMAGE_AFTER_DEAL`` 派发中时是 ``0``。"""
     return frame.data.get(DAMAGE_POINT_KEY, 0)
 
 
@@ -170,6 +199,13 @@ class DamageAfterSkill(HeroSkillDecl):
 
     ``requirement``（M6 票 08 的加法，缺省 ``None``）：覆盖 :data:`_REQUIREMENTS` 的
     短 id 文案——标准 / 界两版【刚烈】的牌面是整句重写，短 id 相同而"需要做什么"不同。
+    ``step_requirements``（M6 票 15 的加法，缺省 ``None``）：逐步文案的覆盖；与
+    ``requirement`` 同一条理由——标准 / 界【遗计】共用一个短 id ``yiji`` 而分配步的
+    问法不同（标准看牌堆顶、界版从手牌里挑），故声明侧给界版一份自己的表。
+    ``timings``（M6 票 15 的加法，缺省空 = 只挂 ``DAMAGE_AFTER_TAKE`` + ``condition``）：
+    这条技能挂在哪些伤害后时机上、各用什么触发条件。【忘隙】是首个**双向**载体（造成 /
+    受到各一条钩子）：两侧的"我是谁"判据相反，故条件**逐时机**声明，而不是一条条件
+    兼顾两侧（后者会让同一次伤害的两个时机都命中同一个持有者）。
     """
 
     per_point: bool
@@ -177,6 +213,8 @@ class DamageAfterSkill(HeroSkillDecl):
     handler: Any = None
     flow: Any = None
     requirement: str | None = None
+    step_requirements: dict[str, str] | None = None
+    timings: tuple[tuple[Timing, Any], ...] = ()
 
 
 def _jianxiong_condition(host: Any, frame: Any) -> bool:
@@ -516,6 +554,242 @@ YIJI_GIVEN_KEY = "yiji_given"
 
 
 # ---------------------------------------------------------------------------
+# 界郭嘉【遗计】（M6 票 15）：摸两张，然后把至多两张**手牌**交给至多两名其他角色
+# ---------------------------------------------------------------------------
+
+JIE_YIJI = "hero.jie_guojia.yiji"
+"""界郭嘉【遗计】的全限定技能 id（§十九 L2042–L2044）。"""
+
+JIE_YIJI_DRAW = 2
+"""界【遗计】"摸两张牌"的张数（与标准版观看的张数无关，是**两种**效果）。"""
+
+JIE_YIJI_GIVE_LIMIT = 2
+"""「至多两名其他角色共计至多两张手牌」的两个上限（角色数 = 牌数 = 2）。
+
+逐张给、每张各选一名其他角色 ⇒ 两个上限同时成立：最多两轮，每轮至多一名角色。
+"""
+
+JIE_YIJI_DRAWN_KEY = "jie_yiji_drawn"
+"""帧私有槽名前缀：本点伤害里界【遗计】的"摸两张"已经做过（槽名再带点号）。"""
+
+JIE_YIJI_GIVEN_KEY = "jie_yiji_given"
+"""帧私有槽名前缀：本点伤害里界【遗计】已经交出的 ``(牌 id, 收牌座位)``（槽名再带点号）。"""
+
+_ASK_JIE_YIJI_PICK = "hero.jie_guojia.yiji.pick"
+"""手写询问位置（票 22）：界【遗计】从**自己手牌**里挑要交出去的牌。"""
+
+
+def _jie_yiji_other_seats(state: GameState, owner: int) -> tuple[int, ...]:
+    """界【遗计】的收牌人池："**其他**角色" ⇒ 存活、且不是持有者本人（座位序）。"""
+    return tuple(player.seat for player in state.players if player.alive and player.seat != owner)
+
+
+def _jie_yiji(host: Any, frame: Any) -> Any:
+    """界郭嘉【遗计】：受到 1 点伤害后摸两张，然后可不分配（§十九 L2042–L2044）。
+
+    与标准【遗计】是**两种**效果：标准版看牌堆顶两张、交给任意角色（含自己）；界版先
+    **摸两张**，再从**自己的手牌**里选至多两张交给至多两名**其他**角色。逐点触发
+    （"受到 1 点伤害后"）与标准版同一条 :func:`_yiji_condition`。
+
+    分配走**既有的给牌路径**（票面验收）：``SELECT_CARDS`` 挑牌 → ``SELECT_OPTION``
+    选人 → :meth:`~sgs.engine.Engine.move_in_frame`（``PUT`` 进收牌人手牌），与标准
+    【遗计】的"交给谁"同一条；不新造私有 Action。
+
+    逐轮推进：每轮一张，最多 :data:`JIE_YIJI_GIVE_LIMIT` 轮；选牌步 ``optional=True``
+    是"至多"的出口（答 ``Pass`` = 不再交）。进度落帧私有键（带点号），故挂起 → 应答 →
+    续跑既不重摸、也不重问已答过的轮次。
+    """
+    owner = frame.data["skill_owner"]
+    point = damage_point_index(frame)
+    drawn_key = f"{JIE_YIJI_DRAWN_KEY}:{point}"
+    given_key = f"{JIE_YIJI_GIVEN_KEY}:{point}"
+    if not frame.data.get(drawn_key):
+        frame.data[drawn_key] = True
+        host.draw_for_hand(frame, owner, JIE_YIJI_DRAW)
+    given: tuple[tuple[int, int], ...] = tuple(frame.data.get(given_key, ()))
+    if len(given) >= JIE_YIJI_GIVE_LIMIT:
+        return None
+    others = _jie_yiji_other_seats(host.state, owner)
+    if not others:
+        return None
+    round_index = len(given)
+    picked = host.ask_selection(
+        frame,
+        owner=_ASK_JIE_YIJI_PICK,
+        key=f"jie_yiji:pick:{point}:{round_index}",
+        actor=owner,
+        timing=Timing.DAMAGE_AFTER_TAKE,
+        # "至多两张"：每轮一张、最多两轮；这一轮不交就答 ``Pass``。
+        spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=True),
+        # 选的是**自己的**手牌 ⇒ 可见槽（票 19 §3 的口径）。
+        build_face=lambda: host.selection_face(owner, (Zone.HAND,), reveal_hand=True),
+    )
+    if host.suspended(picked):
+        return "stay"
+    if not picked:
+        return None
+    choice = host.ask_option(
+        frame,
+        owner,
+        Timing.DAMAGE_AFTER_TAKE,
+        # 点号 + 轮号进询问名：``ask_option`` 的答案缓存键是 ``(skill_id, actor)``，同名会
+        # 把第 2 轮读成第 1 轮的答案（标准【遗计】的既有口径）。短 id 仍是 ``yiji``，
+        # 界面按"给谁"这一步取文案。
+        skill_id=f"yiji:give:{point}:{round_index}",
+        options=tuple(f"seat:{seat}" for seat in others),
+    )
+    if host.suspended(choice):
+        return "stay"
+    receiver = int(choice.choice.split(":", 1)[1])
+    control = host.move_in_frame(
+        frame,
+        host.state.refs(picked),
+        to_zone=ZoneRef(Zone.HAND, receiver),
+        reason=MoveReason.PUT,
+        owner=receiver,
+        actor=owner,
+    )
+    if control == "stay":
+        return "stay"
+    frame.data[given_key] = given + ((picked[0], receiver),)
+    return _jie_yiji(host, frame)
+
+
+# ---------------------------------------------------------------------------
+# 界李典【忘隙】（M6 票 15）：造成 / 受到 1 点伤害后摸两张并交给该角色其中一张
+# ---------------------------------------------------------------------------
+
+WANGXI = "hero.jie_lidian.wangxi"
+"""界李典【忘隙】的全限定技能 id（§十九 L2055–L2057）。"""
+
+WANGXI_DRAW = 2
+"""【忘隙】"摸两张牌"的张数。"""
+
+WANGXI_DRAWN_KEY = "wangxi_drawn"
+"""帧私有槽名前缀：本次触发摸到的两张牌（槽名再带方向与点号）。"""
+
+_ASK_WANGXI_GIVE = "hero.jie_lidian.wangxi.give"
+"""手写询问位置（票 22）：【忘隙】从**刚摸到的两张**里挑一张交出去。"""
+
+
+def _wangxi_other(
+    state: GameState, frame: Any, owner: int | None, *, side: str
+) -> int | None:
+    """【忘隙】的"该角色"：**另一个**当事角色；这一侧不成立 ⇒ ``None``。
+
+    ``side`` 决定"我是谁"：
+
+    - ``"deal"``（``DAMAGE_AFTER_DEAL``）：持有者必须是**来源**，"该角色" = 受伤者；
+    - ``"take"``（``DAMAGE_AFTER_TAKE``）：持有者必须是受伤者，"该角色" = 来源。
+
+    "其他角色"排除自己；无来源（【闪电】）与来源已阵亡都不触发（给不出牌）。与
+    :func:`_fankui_source` 的存活 / 非自己判据同姿态。**两侧的判据必须分开**：一条
+    "我是双向之一"的判据会让同一次伤害的两个时机都命中同一个人（票 15 构造测试逮到过）。
+    """
+    if owner is None:
+        return None
+    if side == "deal":
+        if frame.data.get("source") is None or int(frame.data["source"]) != int(owner):
+            return None
+        other = frame.data.get("target")
+    else:
+        if frame.data.get("target") is None or int(frame.data["target"]) != int(owner):
+            return None
+        other = frame.data.get("source")
+    if other is None or int(other) == int(owner):
+        return None
+    other = int(other)
+    return other if state.player(other).alive else None
+
+
+def _wangxi_deal_condition(host: Any, frame: Any) -> bool:
+    """【忘隙】造成侧：持有者是伤害来源，且受伤者是另一个存活角色。"""
+    return (
+        _wangxi_other(host.state, frame, frame.data.get(MATCH_OWNER_KEY), side="deal")
+        is not None
+    )
+
+
+def _wangxi_take_condition(host: Any, frame: Any) -> bool:
+    """【忘隙】受到侧：持有者是受伤者，且来源是另一个存活角色。"""
+    return (
+        _wangxi_other(host.state, frame, frame.data.get(MATCH_OWNER_KEY), side="take")
+        is not None
+    )
+
+
+def _wangxi_side(frame: Any, owner: int) -> tuple[str, Timing]:
+    """这次触发来自哪一侧：``("deal", DAMAGE_AFTER_DEAL)`` / ``("take", ..._TAKE)``。"""
+    if frame.data.get("source") is not None and int(frame.data["source"]) == int(owner):
+        return "deal", Timing.DAMAGE_AFTER_DEAL
+    return "take", Timing.DAMAGE_AFTER_TAKE
+
+
+def _wangxi_face(host: Any, owner: int, shown: tuple[int, ...]):
+    """【忘隙】选牌步的面：**只有刚摸到的两张**（官方"交给该角色**其中一张**牌"）。
+
+    自铺面（不调 ``selection_face``）：那张面会铺开整个手牌区，而这里只允许从"这两张"里
+    挑一张。槽的坐标仍是 ``(HAND, owner)``，故移动 / 投影与其它选牌步同形。
+    """
+    cards = tuple(host.state.card(card_id) for card_id in shown)
+    return (
+        tuple(Slot(ref=ZoneRef(Zone.HAND, owner), card=card) for card in cards),
+        tuple(card.card_id for card in cards),
+    )
+
+
+def _wangxi(host: Any, frame: Any) -> Any:
+    """界李典【忘隙】：摸两张，把**其中一张**交给该角色（§十九 L2055–L2057）。
+
+    "造成 1 点伤害后"与"受到 1 点伤害后"共用这一份回调：方向由 :func:`_wangxi_side`
+    从帧里读（持有者 = 来源 ⇒ deal，否则 take），"该角色"由 :func:`_wangxi_other` 给出。
+    摸到的两张**当场定格**在帧私有键里（``before`` 手牌集合的差集），故重入不重摸、
+    选牌面也只铺这两张（不是整手牌）。
+
+    交给谁**不问**：牌面写死是"该角色"（造成伤害的对手 / 伤害来源）。选中的那张走既有
+    给牌路径（``PUT`` 进该角色手牌），与【遗计】的分配同一条。
+    """
+    owner = frame.data["skill_owner"]
+    side, timing = _wangxi_side(frame, owner)
+    other = _wangxi_other(host.state, frame, owner, side=side)
+    if other is None:
+        return None
+    point = damage_point_index(frame)
+    drawn_key = f"{WANGXI_DRAWN_KEY}:{side}:{point}"
+    shown: tuple[int, ...] | None = frame.data.get(drawn_key)
+    if shown is None:
+        before = tuple(host.state.player(owner).hand)
+        host.draw_for_hand(frame, owner, WANGXI_DRAW)
+        after = tuple(host.state.player(owner).hand)
+        shown = tuple(card_id for card_id in after if card_id not in before)
+        frame.data[drawn_key] = shown
+    if not shown:
+        return None
+    picked = host.ask_selection(
+        frame,
+        owner=_ASK_WANGXI_GIVE,
+        key=f"wangxi:give:{side}:{point}",
+        actor=owner,
+        timing=timing,
+        spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=False),
+        build_face=lambda: _wangxi_face(host, owner, shown),
+    )
+    if host.suspended(picked):
+        return "stay"
+    if not picked:
+        return None
+    control = host.move_in_frame(
+        frame,
+        host.state.refs(picked),
+        to_zone=ZoneRef(Zone.HAND, other),
+        reason=MoveReason.PUT,
+        owner=other,
+        actor=owner,
+    )
+    return "stay" if control == "stay" else None
+
+
+# ---------------------------------------------------------------------------
 # 夏侯惇【刚烈】（M6 P0 票 01）：判定 → 由**伤害来源**二选一
 # ---------------------------------------------------------------------------
 
@@ -849,8 +1123,39 @@ DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
         _jie_ganglie,
         requirement="受伤后判定：红色对伤害来源造成 1 点伤害，黑色弃置伤害来源的一张牌",
     ),
+    # 界郭嘉【遗计】（M6 票 15）：整句重写——逐点触发，摸两张后从**手牌**里分配。
+    # 触发条件与标准版同源（受伤的是持有者），故共用 :func:`_yiji_condition`。
+    DamageAfterSkill(
+        "jie_guojia",
+        "yiji",
+        True,
+        _yiji_condition,
+        _jie_yiji,
+        requirement="受到 1 点伤害后摸两张牌，然后可以将至多两张手牌分配给其他角色",
+        step_requirements={
+            "card": "选择要交给其他角色的手牌（至多两张）",
+            "give": "选择将这张牌交给哪名其他角色",
+        },
+    ),
+    # 界李典【忘隙】（M6 票 15）：**双向**触发——造成 / 受到 1 点伤害后各一次（两处
+    # "1 点"都是逐点，故 ``per_point=True`` 在两侧都成立）。两侧的"我是谁"判据相反，
+    # 故 ``timings`` 逐时机给条件；回调共用同一份（方向由帧里的 source / target 读出）。
+    # ``condition`` 是声明形状的必填位；``timings`` 在场时派发只读它里面的两条。
+    DamageAfterSkill(
+        "jie_lidian",
+        "wangxi",
+        True,
+        _wangxi_take_condition,
+        _wangxi,
+        requirement="造成或受到 1 点伤害后，摸两张牌并交给该角色其中一张牌",
+        step_requirements={"card": "选择交给该角色的一张牌"},
+        timings=(
+            (Timing.DAMAGE_AFTER_DEAL, _wangxi_deal_condition),
+            (Timing.DAMAGE_AFTER_TAKE, _wangxi_take_condition),
+        ),
+    ),
 )
-"""B 族四条技能的逐字声明（票 05 §要做什么 2 的表 + M6 票 01 的【刚烈】）。"""
+"""B 族技能的逐字声明（票 05 §要做什么 2 的表 + M6 票 01 / 08 / 14 / 15 的界版）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "jianxiong": "获得造成伤害的牌",
@@ -882,11 +1187,12 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
 
 
 def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
-    """B 族四条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
+    """B 族技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
 
-    四条都是**非锁定技**（技能面写了"你可以"）；``carrier = HERO`` ⇒ 优先级档由载体派生；
-    ``skill_type = NORMAL``（都不是主公技）；``per_point`` 由声明给出（【遗计】为真）。
-    ``handler`` 与 ``flow`` 恰有其一（【刚烈】是手写多轮回调，其余三条走流水线）。
+    全部是**非锁定技**（技能面写了"你可以"）；``carrier = HERO`` ⇒ 优先级档由载体派生；
+    ``skill_type = NORMAL``（都不是主公技）；``per_point`` / ``timings`` 由声明给出
+    （【遗计】逐点；【忘隙】在造成 / 受到两侧都逐点）。``handler`` 与 ``flow`` 恰有其一
+    （【刚烈】【遗计】（标准 / 界）是手写多轮回调，其余走流水线）。
     """
     return tuple(
         SkillDef(
@@ -894,17 +1200,22 @@ def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
             locked=False,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
-            hooks=(
+            hooks=tuple(
                 Hook(
-                    Timing.DAMAGE_AFTER_TAKE,
+                    timing,
                     skill.handler,
-                    skill.condition,
+                    condition,
                     per_point=skill.per_point,
                     flow=skill.flow,
-                ),
+                )
+                for timing, condition in (
+                    skill.timings or ((Timing.DAMAGE_AFTER_TAKE, skill.condition),)
+                )
             ),
             requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
-            step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
+            step_requirements=(
+                skill.step_requirements or _STEP_REQUIREMENTS.get(skill.short_id)
+            ),
         )
         for skill in DAMAGE_AFTER_SKILLS
     )

@@ -1691,6 +1691,20 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(2.5),
         "亮三张拿基本牌 / 武器牌 /【决斗】并放弃摸牌，换**跨回合**的【杀】/【决斗】+1",
     ),
+    # M6 票 15：界·魏 B（郭嘉 / 李典）
+    "hero.jie_guojia.tiandu": (_constant(2.0), "获得此判定牌：与标准【天妒】同一条收益"),
+    "hero.jie_guojia.yiji": (
+        _constant(4.5),
+        "受伤后摸两张（分配是「至多」，AI 不在受伤时机白送手牌，见 Answer）",
+    ),
+    "hero.jie_lidian.xunxun": (
+        _constant(2.5),
+        "摸牌阶段看四张并把有用的两张置顶：改善自己接下来摸到的两张",
+    ),
+    "hero.jie_lidian.wangxi": (
+        _constant(2.5),
+        "造成 / 受到 1 点伤害后摸两张、交出其中一张：净赚一张且能补队友",
+    ),
     # 装备技（W4-4）：会问"是否发动"的 5 条非锁定装备**各给一个正分常量**。
     # 缺省 ``_UNKNOWN_SKILL_VALUE = -1.0 < Pass(0)`` ⇒ 不入表就永不发动（雌雄无法复现
     # 的根因）；正分 ⇒ 永远发动（Pass = 0，成本 / 收益不建模，见票面"不做收益模型调参"）。

@@ -60,6 +60,8 @@ from sgs.state import GameState
 from .catalog import (
     ACTIVATION_PLANS,
     CATALOG,
+    DAMAGE_DEAL_POINT_KEY,
+    DAMAGE_DEAL_RECORDED_KEY,
     DAMAGE_POINT_KEY,
     DAMAGE_RECORDED_KEY,
     ActivationPlan,
@@ -211,6 +213,9 @@ from .rejudge import (
 )
 from .phase_body import (
     PHASE_BODY_SKILLS,
+    XUNXUN,
+    XUNXUN_ARRANGE,
+    XUNXUN_FLOW,
     PhaseBodySkill,
     phase_body_skill_definitions,
 )
@@ -320,6 +325,8 @@ __all__ = (
     "DAMAGE_AFTER_SKILLS",
     "DAMAGE_POINT_KEY",
     "DAMAGE_RECORDED_KEY",
+    "DAMAGE_DEAL_POINT_KEY",
+    "DAMAGE_DEAL_RECORDED_KEY",
     "EQUIPMENT_CARD_TYPE_IDS",
     "EQUIPMENT_SKILL_IDS",
     "FENWEI",
@@ -352,6 +359,9 @@ __all__ = (
     "PAOXIAO",
     "PLACEMENT_SKILL_IDS",
     "PHASE_BODY_SKILLS",
+    "XUNXUN",
+    "XUNXUN_ARRANGE",
+    "XUNXUN_FLOW",
     "PROVIDERS",
     "PROVIDER_ACTOR_KEY",
     "PROVIDER_SATISFIED_KEY",

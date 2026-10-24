@@ -90,6 +90,8 @@ __all__ = [
     "CATALOG",
     "DAMAGE_POINT_KEY",
     "DAMAGE_RECORDED_KEY",
+    "DAMAGE_DEAL_POINT_KEY",
+    "DAMAGE_DEAL_RECORDED_KEY",
     "ActivationPlan",
     "Hook",
     "HookCondition",
@@ -2326,6 +2328,8 @@ from .arrange import (  # noqa: E402  （末尾 import 是刻意的）
     arrange_skill_definitions,
 )
 from .damage_after import (  # noqa: E402  （末尾 import 是刻意的）
+    DAMAGE_DEAL_POINT_KEY,
+    DAMAGE_DEAL_RECORDED_KEY,
     DAMAGE_POINT_KEY,
     DAMAGE_RECORDED_KEY,
     damage_after_skill_definitions,

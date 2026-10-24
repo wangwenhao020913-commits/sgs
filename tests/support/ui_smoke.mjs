@@ -325,7 +325,7 @@ const sessionBodiesSince = (from) =>
 await ui.loadHeroCatalog();
 const catalogVersions = ui.heroVersions();
 check("⓪1 点将列表拉到了启用并集（标准 + 界版，按真名分组）",
-  ui.state.heroCatalog.length === 26 && catalogVersions.length === 41,
+  ui.state.heroCatalog.length === 27 && catalogVersions.length === 43,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -654,6 +654,8 @@ const scanCases = async () => {
 // hero_name / 详情名称解析归票 19，故这一局必须是标准局（否则座位卡退回引擎 id）。
 // M6 票 14 换池（版本 37 → 41）后 20261012 的座位 1 是界司马懿，按同一判据重扫到
 // 20261053（8 席全是标准版，且这一局里仍有复合 `ActivateSkill` 的应答——W4-6 断言的前置）。
+// M6 票 15 再换池（版本 41 → 43）：按同一判据重扫，20261053 仍命中（8 席全是标准版、
+// 复合 `ActivateSkill` 的 W4-6 断言照旧通过），故种子不变。
 const created = await post("/api/sessions", {
   player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261053,
 });

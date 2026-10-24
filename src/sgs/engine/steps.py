@@ -54,6 +54,8 @@ from sgs.effects import (
 )
 from sgs.resolution import Control, Frame, Goto, Step, StepHost, StepTable, Tag, has_tag
 from sgs.skills import (
+    DAMAGE_DEAL_POINT_KEY,
+    DAMAGE_DEAL_RECORDED_KEY,
     DAMAGE_POINT_KEY,
     DAMAGE_RECORDED_KEY,
     QIANXUN_PLACED_KEY,
@@ -740,6 +742,8 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
     "_pending_timing",
     DAMAGE_POINT_KEY,
     DAMAGE_RECORDED_KEY,
+    DAMAGE_DEAL_POINT_KEY,
+    DAMAGE_DEAL_RECORDED_KEY,
     QIANXUN_PLACED_KEY,
 )
 """**逐目标分槽**的帧私有键：游标推进时必须整体清掉（票 11 §3.2）。
@@ -824,14 +828,17 @@ def _emit_damage(
 
 
 def damage_deal(host: FrameHost, frame: Frame) -> Control:
-    """**造成伤害时**：本帧逐点触发的两个帧私有键在这里重置（票 05）。
+    """**造成伤害时**：本帧逐点触发的四个帧私有键在这里重置（票 05 / M6 票 15）。
 
     "本帧第几点 / 记过没有"是**帧级**事实，故在帧的第一步显式清零：同一份载荷字典被复用、
-    或某个调用点先写过这两个键时，后一次伤害不会接着前一次的轮次跑（帧私有数据不进记录流，
-    这一步对 M2 逐字节无影响）。
+    或某个调用点先写过这些键时，后一次伤害不会接着前一次的轮次跑（帧私有数据不进记录流，
+    这一步对 M2 逐字节无影响）。票 15 追加**造成伤害后**一侧的两个键（与受到侧分列），
+    否则两次伤害之间的 ``DAMAGE_AFTER_DEAL`` 会误读上一帧的游标。
     """
     frame.data[DAMAGE_POINT_KEY] = 0
     frame.data.pop(DAMAGE_RECORDED_KEY, None)
+    frame.data.pop(DAMAGE_DEAL_POINT_KEY, None)
+    frame.data.pop(DAMAGE_DEAL_RECORDED_KEY, None)
     return _emit_damage(host, frame, Timing.DAMAGE_DEAL, frame.data["source"])
 
 
@@ -921,7 +928,49 @@ def damage_push_life_decrease(host: FrameHost, frame: Frame) -> None:
 
 
 def damage_after_deal(host: FrameHost, frame: Frame) -> Control:
-    return _emit_damage(host, frame, Timing.DAMAGE_AFTER_DEAL, frame.data["source"])
+    """**造成伤害后**：按伤害值**逐点**派发（M6 票 15，与 ``DAMAGE_AFTER_TAKE`` 同范式）。
+
+    票 15 之前这里每次伤害事件只派发一轮——当时挂在此时机上的只有觉醒技【潜心】，牌面是
+    "当你造成伤害后"（每次事件一次）。【忘隙】的牌面是"造成 **1 点**伤害后"，逐点因此是
+    **技能定义上的事实**（``03`` §4），把 ``Hook.per_point`` 的既有判据扩展到此时机：为真
+    的钩子每一轮都有机会，为假的只在第一轮（读取 :func:`~sgs.skills.damage_after.
+    damage_point_index` 的同一处过滤）。
+
+    循环沿用 ``DAMAGE_AFTER_TAKE`` 的形状：
+
+    - **时机记录恰好一条**（与既有基准逐字节一致）：第 1 轮落记录，第 2 轮起
+      ``emit_record=False``；
+    - 轮次写进 ``DAMAGE_POINT_KEY``（技能回调与派发答案键都读它），**跑完交还 0**——
+      ``DAMAGE_AFTER_TAKE`` 在同一帧里紧接着从第 0 点起跑，不接造成侧的尾数；
+    - 造成侧自己的续跑游标另存 :data:`~sgs.skills.DAMAGE_DEAL_POINT_KEY`：某轮提问让出
+      控制权（返回 ``"stay"``）后重入从这一轮接着跑，不重记也不跳点；
+    - 伤害值 ≤ 0 或被防止时与旧行为逐字相同：只落一条记录、一轮都不派发（【潜心】的
+      既有语义不变）。
+    """
+    amount = frame.data["amount"]
+    if amount <= 0 or has_tag(frame, Tag.PREVENTED):
+        return _emit_damage(host, frame, Timing.DAMAGE_AFTER_DEAL, frame.data["source"])
+    point = frame.data.get(DAMAGE_DEAL_POINT_KEY, 0)
+    while point < amount:
+        frame.data[DAMAGE_DEAL_POINT_KEY] = point
+        # ``damage_point_index`` / 答案缓存键 / ``Hook.per_point`` 都读这一个点号。
+        frame.data[DAMAGE_POINT_KEY] = point
+        control = _emit_damage(
+            host,
+            frame,
+            Timing.DAMAGE_AFTER_DEAL,
+            frame.data["source"],
+            emit_record=not frame.data.get(DAMAGE_DEAL_RECORDED_KEY),
+        )
+        if control is not None:
+            # 让出控制权（钩子提问）：本轮尚未标成已派发，重入时同一轮继续。
+            return control
+        frame.data[DAMAGE_DEAL_RECORDED_KEY] = True
+        point += 1
+        frame.data[DAMAGE_DEAL_POINT_KEY] = point
+    # 交还给 ``damage_after_take``：它按同一个点号从 0 起逐点派发。
+    frame.data[DAMAGE_POINT_KEY] = 0
+    return None
 
 
 def damage_after_take(host: FrameHost, frame: Frame) -> Control:

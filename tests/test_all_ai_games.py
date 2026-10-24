@@ -394,3 +394,82 @@ def test_the_m6_jie_wei_heroes_finish_a_full_ai_game_cleanly_and_replay():
     replay.run([TapePlayer(tape)] * PLAYERS)
 
     assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"
+
+
+# ---------------------------------------------------------------------------
+# M6 票 15：界·魏 B（界郭嘉 / 界李典 + 三名陪跑）的**显式逐座位**全 AI 局
+# ---------------------------------------------------------------------------
+
+M6_JIE_WEI_B_HEROES: tuple[str, ...] = (
+    "jie_guojia",
+    "jie_lidian",
+    "jie_caocao",
+    "jie_simayi",
+    "jie_zhangliao",
+)
+"""票 15 的两名将 + 三名陪跑（5 人身份局；显式发放，不吃 ``hero`` 子流）。
+
+五名**真名互异**（郭嘉 / 李典 / 曹操 / 司马懿 / 张辽）：同一真名不共存是引擎不变量，
+显式发放也不得违反它。
+"""
+
+M6_JIE_WEI_B_SEED = ACCEPTANCE_SEEDS[4]
+"""与 32 种子基准组同批的第五个种子（``ACCEPTANCE_SEEDS`` 的真源）。"""
+
+
+def test_the_m6_jie_wei_b_heroes_finish_a_full_ai_game_cleanly_and_replay():
+    """验收：含界【天妒】/【遗计】/【恂恂】/【忘隙】的全 AI 局四条判据全过。
+
+    回放判据同时覆盖票 15 的"【恂恂】的置顶 / 置底在回放中一致"：界李典的排列是
+    ``ArrangeCards`` 行动（只带面内位置），重放后记录流逐字节相等即置顶 / 置底一致。
+    本局里四条新技能都**真的发动过**（下面断言），故"含其中一名的全 AI 局"这一条验收
+    不是"将发了但没触发"的空转。
+    """
+    engine = Engine.new_game(
+        seed=M6_JIE_WEI_B_SEED,
+        rule_config=RuleConfig(player_count=PLAYERS),
+        pack=PACK,
+        heroes=M6_JIE_WEI_B_HEROES,
+    )
+    scans = _participants(M6_JIE_WEI_B_SEED)
+
+    engine.run(scans)
+
+    assert [player.hero for player in engine.state.players] == list(M6_JIE_WEI_B_HEROES)
+    assert engine.finished, "必达终局"
+    tail = engine.records[-1]
+    assert tail.kind == "game_end"
+    assert tail.result in ("winner", "draw"), f"终局结果非法：{tail.result!r}"
+    _assert_endgame_identity_consistency(engine, M6_JIE_WEI_B_SEED)
+    assert all(scan.illegal == 0 for scan in scans), "出现了候选集合之外的应答"
+    assert sum(scan.answers for scan in scans) > 0
+
+    activated = {
+        record.action.skill_id
+        for record in engine.records
+        if record.kind == "action"
+        and record.accepted
+        and getattr(record.action, "skill_id", None)
+    }
+    for skill_id in (
+        "hero.jie_guojia.tiandu",
+        "hero.jie_guojia.yiji",
+        "hero.jie_lidian.xunxun",
+        "hero.jie_lidian.wangxi",
+    ):
+        assert skill_id in activated, f"本局没有发动 {skill_id}（AI 覆盖落空）"
+
+    replayed_seed, tape = tape_from_journal(engine.records)
+    assert replayed_seed == M6_JIE_WEI_B_SEED and tape
+    assert any(getattr(action, "kind", None) == "ArrangeCards" for action in tape), (
+        "【恂恂】的排列必须在回放磁带里（置顶 / 置底一致性的载体）"
+    )
+    replay = Engine.new_game(
+        seed=replayed_seed,
+        rule_config=RuleConfig(player_count=PLAYERS),
+        pack=PACK,
+        heroes=M6_JIE_WEI_B_HEROES,
+    )
+    replay.run([TapePlayer(tape)] * PLAYERS)
+
+    assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"

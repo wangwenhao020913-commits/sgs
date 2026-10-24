@@ -18,6 +18,7 @@ L 族的形态差别只有一处：它挂在**阶段体**（``PHASE_PREPARE`` / 
 许褚【裸衣】     非锁定    ``PHASE_DRAW``             少摸一张；本回合【杀】/【决斗】伤害 +1（§九 L952）
 吕蒙【克己】     非锁定    ``PHASE_DISCARD_START``    本回合未出【杀】⇒ 跳过弃牌阶段（§九 L1011）
 界张飞【替身】   **限定**  ``PHASE_PREPARE``         体力回复至上限，摸以此法回复的体力值数张牌（§十九 L2079–L2081）
+界李典【恂恂】   非锁定    ``PHASE_DRAW``             观看牌堆顶四张，两张置顶、其余置底（§十九 L2051–L2054）
 =============  ========  =========================  ==========================
 
 除【替身】外都是**非锁定技**（技能面写了"你可以"）⇒ 先发"是否发动"询问，答
@@ -46,7 +47,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from sgs.data import Category, SkillType, Suit, card_category, hero_skill_id
-from sgs.effects import CarrierKind, Modifier, ModifierContext, ModifierPoint, behavior_for, is_slash
+from sgs.effects import (
+    CarrierKind,
+    Modifier,
+    ModifierContext,
+    ModifierPoint,
+    behavior_for,
+    is_slash,
+    place_on_deck,
+)
 from sgs.resolution import Control, Frame
 from sgs.state import FrameKind, GameState, MoveReason, SlotKind, Zone, ZoneRef
 from sgs.timing import Timing
@@ -59,7 +68,16 @@ from .catalog import (
     mark_round_skill_used,
     round_skill_uses,
 )
-from .flow import PickSeats, SkillFlow, zero_step_effect
+from .flow import (
+    Arrange,
+    DeckTopArrange,
+    FixedSplit,
+    FlowAnswers,
+    PickSeats,
+    SkillFlow,
+    watched_cards,
+    zero_step_effect,
+)
 
 __all__ = [
     "BIYUE_FLOW",
@@ -80,6 +98,9 @@ __all__ = [
     "TISHEN",
     "TISHEN_FLOW",
     "TUXI_FLOW",
+    "XUNXUN",
+    "XUNXUN_ARRANGE",
+    "XUNXUN_FLOW",
     "YINGZI_FLOW",
     "phase_body_skill_definitions",
 ]
@@ -125,6 +146,13 @@ class PhaseBodySkill(HeroSkillDecl):
 
     同一短 id 的两版（标准【闭月】摸一张 / 界【闭月】有手牌摸一、没有手牌摸二）
     牌面不同、文案也就不同；键仍是短 id，故给界版一条显式覆盖，而不是再抄一份表。
+    """
+    deck_arrange: DeckTopArrange | None = None
+    """这条阶段体技能带的**牌堆顶排列规格**（M6 票 15；缺省 ``None`` = 不排列）。
+
+    与 :meth:`flow` 的 ``Arrange`` 步引用**同一个对象**（一份声明，不是两份）：执行器读它
+    求张数 / 切分，接入层（``sgs_web.projection._arrange_spec``）读 ``SkillDef.deck_arrange``
+    做投影。本票的唯一消费者是界李典【恂恂】（固定切分 2 / 2）。
     """
 
     def handler(self, host: Any, frame: Frame) -> Control:
@@ -226,6 +254,78 @@ _JIE_BIYUE = PhaseBodySkill(
     timing=Timing.PHASE_FINISH,
     flow=JIE_BIYUE_FLOW,
     requirement="有手牌摸一张牌 / 没有手牌摸两张牌",
+)
+
+
+# ---------------------------------------------------------------------------
+# 界李典【恂恂】（M6 票 15）：摸牌阶段开始时看四张，两张置顶、其余置底
+# ---------------------------------------------------------------------------
+
+XUNXUN = hero_skill_id("jie_lidian", "xunxun")
+"""界李典【恂恂】的全限定技能 id（§十九 L2051–L2054）。"""
+
+_XUNXUN_STEP = "cards"
+"""``Arrange`` 步的步骤键（效果读 ``answers`` 的键，也是 :func:`watched_cards` 的定位）。"""
+
+_XUNXUN_DONE_KEY = "xunxun_done"
+"""放回完成的帧私有幂等位：``run_flow`` 重入时不得重复放回（与【观星】同姿态）。"""
+
+XUNXUN_ARRANGE = DeckTopArrange(count=4, split=FixedSplit(2, 2))
+"""【恂恂】的牌堆顶排列规格：**定数四张、固定切分 2 / 2**（"两张置于牌堆顶，其余置于牌堆底"）。
+
+``FixedSplit`` 让候选生成只铺"置顶 2 张"这一种切分（两张的顺序仍任意）；同一个对象同时
+被 :data:`XUNXUN_FLOW` 的 ``Arrange`` 步与 ``SkillDef.deck_arrange`` 引用——执行器与接入层
+读的是**同一份声明**。
+"""
+
+
+def _xunxun_effect(host: Any, frame: Frame, answers: FlowAnswers) -> None:
+    """提交点：按 ``ArrangeCards`` 把四张牌放回牌堆——上两行置顶、下两行置底。
+
+    位置 → 实体牌读 ``Arrange`` 步首跑时存下的牌面（:func:`watched_cards`），不二次看牌
+    （spec B3）。"置底"接在**原有牌堆底之下**（:func:`~sgs.effects.place_on_deck` 的
+    ``to_top=False``），与【观星】逐字同口径；``_XUNXUN_DONE_KEY`` 短路保证续跑只放回一次。
+    """
+    if frame.data.get(_XUNXUN_DONE_KEY):
+        return None
+    action = answers[_XUNXUN_STEP]
+    assert hasattr(action, "order") and hasattr(action, "split")  # 候选只有 ArrangeCards
+    cards = watched_cards(frame, XUNXUN_FLOW, _XUNXUN_STEP)
+    place_on_deck(
+        host.state,
+        tuple(cards[index] for index in action.order[: action.split]),
+        to_top=True,
+    )
+    place_on_deck(
+        host.state,
+        tuple(cards[index] for index in action.order[action.split :]),
+        to_top=False,
+    )
+    frame.data[_XUNXUN_DONE_KEY] = True
+    return None
+
+
+XUNXUN_FLOW = SkillFlow(
+    name="xunxun",
+    steps=(Arrange(key=_XUNXUN_STEP, spec=XUNXUN_ARRANGE),),
+    effect=_xunxun_effect,
+)
+"""【恂恂】的一步流水线：排列（固定切分 2 / 2）→ 按答案放回牌堆顶 / 牌堆底。
+
+**模块级具名常量**：``tests/test_ask_points.py`` 只发现模块级 ``SkillFlow``，并要求它被
+某个 ``Hook.flow`` 登记、``name`` 两两不同；``manifest`` 对含 ``Arrange`` 的流水线返回
+空元组（排列无法用 ``Step.pool`` 表达），故恂恂不翻预发动。
+"""
+
+
+_XUNXUN = PhaseBodySkill(
+    # 界李典【恂恂】（§十九 L2051–L2054）：摸牌阶段开始时，你可以观看牌堆顶的四张牌，
+    # 然后将其中的两张牌置于牌堆顶，其余置于牌堆底。
+    hero_id="jie_lidian",
+    short_id="xunxun",
+    timing=Timing.PHASE_DRAW,
+    flow=XUNXUN_FLOW,
+    deck_arrange=XUNXUN_ARRANGE,
 )
 
 
@@ -771,11 +871,13 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _TISHEN,
     _JIE_BIYUE,
     _BOTU,
+    _XUNXUN,
 )
-"""L 族十二条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
+"""L 族十三条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
 票 03 的【克己】、票 05 的【替身】、票 06 的界【克己】、票 07 的界【闭月】、
-票 08 的界【英姿】、票 11 的【博图】、票 14 的界【突袭】/界【裸衣】——最后一条挂在
-**回合结束时**而不是阶段体上，派发机制相同，见 :meth:`Engine._dispatch_phase_body`）。"""
+票 08 的界【英姿】、票 11 的【博图】、票 14 的界【突袭】/界【裸衣】、票 15 的界【恂恂】
+——【博图】挂在**回合结束时**而不是阶段体上，派发机制相同，见
+:meth:`Engine._dispatch_phase_body`）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "yingzi": "多摸一张牌",
@@ -785,8 +887,9 @@ _REQUIREMENTS: dict[str, str] = {
     "keji": "跳过弃牌阶段",
     "tishen": "将体力回复至体力上限，然后摸以此法回复的体力值数张牌",
     "botu": "执行一个额外的回合",
+    "xunxun": "观看牌堆顶四张牌，两张置于牌堆顶、其余置于牌堆底",
 }
-"""L 族七条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+"""L 族八条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
 _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
     # M6 票 01【突袭】：座位步的询问 ``skill_id`` 是 ``tuxi:seat:<序号>`` ⇒ 键 = ``seat``。
@@ -837,6 +940,7 @@ def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=skill.skill_type,
             hooks=(Hook(skill.timing, flow=skill.flow),),
             modifiers=skill.modifiers,
+            deck_arrange=skill.deck_arrange,
             requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
             step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
             per_round_limit=skill.per_round_limit,

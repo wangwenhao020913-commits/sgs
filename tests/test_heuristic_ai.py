@@ -96,7 +96,14 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import ACCEPTANCE_SEEDS, SeatSpec, build_state, ran_timing, run_until
+from support import (
+    ACCEPTANCE_SEEDS,
+    SeatSpec,
+    build_state,
+    ran_timing,
+    run_queries,
+    run_until,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 TESTS_DIR = Path(__file__).resolve().parent
@@ -2712,3 +2719,145 @@ def test_every_jie_wei_skill_except_guicai_has_a_deterministic_ai_scene():
     )
     # 【鬼才】仍按"能力位"有语义条目（与标准版同口径），只是不产生 SKILL_ACTIVATION 询问。
     assert guicai in SKILL_VALUES
+
+
+# ---------------------------------------------------------------------------
+# ⑨ M6 票 15：界·魏 B —— 四条新技能各有**确定性 AI 发动**场景（spec §AI / D16 / S7）
+#
+# 判据同上一节：记录流里有一条 ``accepted`` 的 ``ActivateSkill``（技能 id 对上本票四条），
+# 且发动后有**外部可观测**的收益（拿判定牌 / 摸牌 / 排列）。界【遗计】的**分配**是
+# "至多两张"的可选步，AI 的保守策略是放弃白送手牌（见该技能 ``SKILL_VALUES`` 的说明）；
+# 分配行为本身由 ``tests/test_hero_jie_wei_b.py`` 的构造局面覆盖。
+# ---------------------------------------------------------------------------
+
+JIE_TIANDU = "hero.jie_guojia.tiandu"
+JIE_YIJI = "hero.jie_guojia.yiji"
+XUNXUN = "hero.jie_lidian.xunxun"
+WANGXI = "hero.jie_lidian.wangxi"
+
+
+def test_the_ai_activates_jie_tiandu_and_takes_the_judge_card():
+    """界郭嘉【天妒】：自己的判定牌生效后，AI 答发动 ⇒ 判定牌进手牌、不进弃牌堆。
+
+    判定牌取**黑色**【杀】：乐不思蜀判定非红桃 ⇒ 跳过出牌阶段，判定的那张牌因此
+    留在手里（红桃会把判定牌变成"判定成功"并进入出牌阶段、被 AI 打出去）。
+    """
+    judge_card = next(
+        card_id
+        for card_id in _ids("slash")
+        if color_of_suit(PACK.deck.cards[card_id].suit) is Color.BLACK
+    )
+    indulgence = _ids("indulgence")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=3, hp_max=3, hero="jie_guojia", judge=(indulgence,)),
+            SeatSpec(hp=4),
+        ],
+        deck=(judge_card, *_deck_excluding(judge_card, indulgence)),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+
+    run_queries(engine, players, lambda e: ran_timing(e, Timing.PHASE_DRAW_END))
+
+    assert _activated(engine, JIE_TIANDU), "AI 必须真的发动界【天妒】"
+    assert judge_card in engine.state.player(0).hand, "判定牌进手牌"
+    assert judge_card not in engine.state.discard, "已被获得 ⇒ 不再入弃牌堆"
+
+
+def test_the_ai_activates_jie_yiji_and_draws_two():
+    """界郭嘉【遗计】：受到 1 点伤害后，AI 答发动 ⇒ 摸两张（分配是可选步，AI 放弃）。"""
+    slash = _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(_ids("peach")[0],)), SeatSpec(hero="jie_guojia")],
+        deck=_deck_excluding(slash),
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, source=0, target=1),
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    run_queries(engine, players, lambda e: ran_timing(e, Timing.DAMAGE_END))
+
+    assert _activated(engine, JIE_YIJI), "AI 必须真的发动界【遗计】"
+    assert len(engine.state.player(1).hand) == 2, "摸两张（分配步放弃）"
+
+
+def test_the_ai_activates_xunxun_and_arranges_the_top_four():
+    """界李典【恂恂】：摸牌阶段开始时，AI 答发动 + 排列 ⇒ 照常摸两张。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_lidian"), SeatSpec()],
+        deck=tuple(range(10, len(PACK.deck.cards))),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+
+    run_queries(engine, players, lambda e: ran_timing(e, Timing.PHASE_DRAW_END))
+
+    assert _activated(engine, XUNXUN), "AI 必须真的发动【恂恂】"
+    arranges = [
+        record.query
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == "ARRANGE"
+    ]
+    assert len(arranges) == 1 and len(arranges[0].revealed) == 4, "一次四张的排列询问"
+    assert len(engine.state.player(0).hand) == 2, "排列后照常摸两张"
+
+
+def test_the_ai_activates_wangxi_on_both_sides_and_gives_one_card():
+    """界李典【忘隙】：造成 / 受到 1 点伤害后 AI 都答发动 ⇒ 摸两张、交出一张给该角色。"""
+    slash = _ids("slash")[0]
+    taking = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=4), SeatSpec(hp=3, hp_max=3, hero="jie_lidian")],
+        deck=_deck_excluding(slash),
+        processing=(slash,),
+    )
+    taking_engine = Engine.from_state(taking, seed=11)
+    taking_players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+    taking_engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(taking, slash, source=0, target=1),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    run_queries(taking_engine, taking_players, lambda e: ran_timing(e, Timing.DAMAGE_END))
+
+    dealing = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=4, hero="jie_lidian"), SeatSpec(hp=4)],
+        deck=_deck_excluding(slash),
+        processing=(slash,),
+    )
+    dealing_engine = Engine.from_state(dealing, seed=11)
+    dealing_players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+    dealing_engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(dealing, slash, source=0, target=1),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    run_queries(dealing_engine, dealing_players, lambda e: ran_timing(e, Timing.DAMAGE_END))
+
+    assert _activated(taking_engine, WANGXI), "受到侧必须发动"
+    assert _activated(dealing_engine, WANGXI), "造成侧必须发动"
+    assert len(taking_engine.state.player(1).hand) == 1, "摸两张、交给来源一张"
+    assert len(taking_engine.state.player(0).hand) == 1
+    assert len(dealing_engine.state.player(0).hand) == 1, "摸两张、交给受伤者一张"
+    assert len(dealing_engine.state.player(1).hand) == 1
+
+
+def test_every_jie_wei_b_skill_has_a_deterministic_ai_scene():
+    """本票四条技能全部进 ``SKILL_VALUES`` 且各有一条确定性 AI 发动场景（spec S7）。"""
+    covered = {JIE_TIANDU, JIE_YIJI, XUNXUN, WANGXI}
+
+    assert all(skill_id in SKILL_VALUES for skill_id in covered), (
+        "这些技能还没进 SKILL_VALUES：" + "；".join(sorted(covered - set(SKILL_VALUES)))
+    )

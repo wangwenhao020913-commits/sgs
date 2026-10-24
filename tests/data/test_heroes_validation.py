@@ -431,6 +431,8 @@ def test_the_standard_table_stays_the_25_and_the_jie_table_is_loaded_separately(
         "jie_simayi",
         "jie_zhangliao",
         "jie_xuchu",
+        "jie_guojia",
+        "jie_lidian",
     ]
     assert {hero.id for hero in standard.heroes}.isdisjoint(
         {hero.id for hero in jie.heroes}
@@ -639,6 +641,8 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
 
     # M6 票 14：界·魏 A（曹操 / 司马懿 / 张辽 / 许褚）。四名都在第十九章 L2012–L2039，
     # 真名与标准版同名 ⇒ 追加它们只让**版本池** 37 → 41，真名池仍是 26。
+    # M6 票 15：界·魏 B（郭嘉 / 李典）。界郭嘉真名同标准版（版本 41 → 42，真名仍 26）；
+    # 界李典是**只有界版**的新真名（版本 → 43、真名 → 27，§十九 L2050–L2057）。
     caocao = jie.by_id("jie_caocao")
     simayi = jie.by_id("jie_simayi")
     zhangliao = jie.by_id("jie_zhangliao")
@@ -688,6 +692,39 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
         4,
     )
     assert [skill.id for skill in xuchu.skills] == ["luoyi"]
+
+    # M6 票 15：界郭嘉（§十九 L2040–L2044）、界李典（§十九 L2050–L2057）。两名都是 3 体力；
+    # 【天妒】与标准版逐字相同，【遗计】是界版重写；【恂恂】/【忘隙】是李典的两条新技能。
+    guojia = jie.by_id("jie_guojia")
+    lidian = jie.by_id("jie_lidian")
+    assert guojia is not None and lidian is not None
+    assert (guojia.name, guojia.true_name, guojia.version) == ("界郭嘉", "郭嘉", "jie-ol")
+    assert (guojia.kingdom, guojia.gender, guojia.hp_max) == (
+        Kingdom.WEI,
+        Gender.MALE,
+        3,
+    )
+    assert [skill.id for skill in guojia.skills] == ["tiandu", "yiji"]
+    assert [skill.skill_type for skill in guojia.skills] == [
+        SkillType.NORMAL,
+        SkillType.NORMAL,
+    ]
+
+    assert (lidian.name, lidian.true_name, lidian.version) == (
+        "界李典",
+        "李典",
+        "jie-ol",
+    )
+    assert (lidian.kingdom, lidian.gender, lidian.hp_max) == (
+        Kingdom.WEI,
+        Gender.MALE,
+        3,
+    )
+    assert [skill.id for skill in lidian.skills] == ["xunxun", "wangxi"]
+    assert [skill.skill_type for skill in lidian.skills] == [
+        SkillType.NORMAL,
+        SkillType.NORMAL,
+    ]
 
     assert all(hero.true_name for hero in jie.heroes), "界版每名都带真名"
     assert all(hero.enabled for hero in jie.heroes), "边界突破 P1 起界将逐批启用"
