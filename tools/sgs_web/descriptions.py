@@ -9,8 +9,8 @@
 - 缺条目时**显式**返回 :data:`DESCRIPTION_FALLBACK`（“暂无描述”），不返回空串——
   空串会让界面静默留白，看起来像渲染坏了。
 
-**覆盖**：43 个牌名（标准 32 + 军争 11，M5-01a 起同一内容包）；62 条技能 =
-``CATALOG`` 的全部装备技能（22）与武将技能（40，M6 P0 票 03 收口后）。覆盖由
+**覆盖**：43 个牌名（标准 32 + 军争 11，M5-01a 起同一内容包）；66 条技能 =
+``CATALOG`` 的全部装备技能（22）与武将技能（44，M6 票 04 首份界版数据后）。覆盖由
 ``tests/test_web.py::test_every_card_name_and_skill_id_has_a_description`` 逐 key 核。
 
 **消费方**：服务端展示层把它并入载荷——:func:`sgs_web.display.card_display` 给每张牌加

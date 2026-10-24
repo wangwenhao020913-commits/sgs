@@ -1,9 +1,9 @@
-"""武将总表：25 名 × 40 条技能的数据断言与登记（票 12；M6 P0 三票收口 16 → 25）。
+"""武将总表：25 名标准 + 界版已到达条目的数据断言与登记（票 12；M6 P0 三票收口 16 → 25）。
 
 本文件只装**跨技能**的登记事实（逐技能的构造局面单测按族住各自文件）：
 
-- ``CATALOG`` 的规模与分区：装备 22 + 武将 40 = **62 条**，且武将那半恰是数据文件里
-  25 名启用武将的技能清单（``heroes.standard.json`` 是名单的唯一真源）；
+- ``CATALOG`` 的规模与分区：装备 22 + 武将 44 = **66 条**，且武将那半恰是数据文件里
+  全部启用武将的技能清单（``heroes.standard.json`` + ``heroes.jie.json`` 是名单的唯一真源）；
 - **同一 owner 同一时机只有一条技能**（票 12 §要做什么 3）：这是 R5-Q1「同一时点多技能
   自选顺序不建」的落地依据——将来加武将时这条断言先变红，逼出一次重新裁定；
 - 25 名的 ``gender`` / ``kingdom`` / ``hp_max`` 与规则文档第九章逐项一致（表驱动，
@@ -940,8 +940,8 @@ SKILL_FILES: dict[str, str] = {
     "hero.jie_machao.mashu": "test_hero_jie.py",
     "hero.jie_machao.tieqi": "test_hero_jie.py",
 }
-"""40 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
-票 02 加 5 条、票 03 加 3 条）。"""
+"""44 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
+票 02 加 5 条、票 03 加 3 条、票 04 加 4 条界将技能）。"""
 
 
 def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
@@ -1161,7 +1161,7 @@ def test_the_seven_zero_step_skills_are_registered_flows_with_no_steps():
 
 
 # ---------------------------------------------------------------------------
-# W6-04：62 条技能的**形态**分类（静态表 + 全量覆盖）
+# W6-04：66 条技能的**形态**分类（静态表 + 全量覆盖）
 #
 # 形态是**读法**：`SkillDef` 上没有 shape 字段，也不该有。形态由既有声明读出来
 # （`locked` / `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` /
@@ -1249,7 +1249,7 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.liubei.jijiang": "候选提供者",
     "equip.eight_diagrams": "候选提供者",
 }
-"""62 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
+"""66 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
 `SkillDef` 上没有 shape 字段，也不该有：形态是从既有声明读出来的归类（`locked` /
 `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` / `rejudge_capable`），不是

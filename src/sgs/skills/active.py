@@ -1,7 +1,7 @@
 r"""出牌阶段**主动技**（A 族）的候选与发动（票 04；W6 收口）。
 
 A 族与其他族的形态差别只有一处：它的候选**不是某张牌的**使用 / 打出，而是**技能本身**
-作为出牌阶段空闲时间点的一个行动（票 04 §要做什么 1）。W4-1 起六条技能都已是
+作为出牌阶段空闲时间点的一个行动（票 04 §要做什么 1）。W4-1 起主动技都已是
 **骨架候选 + 步骤流水线**，候选与载荷只有一份声明：
 
 - **候选**：每条技能一个 ``Modifier(ModifierPoint.CANDIDATES, …)``，只在
@@ -1110,10 +1110,11 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         ),
     ),
 )
-"""A 族七条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】，见模块 docstring）。
+"""A 族八条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】）。
 
 【苦肉】是唯一一条**零步**的 A 族技能：没有步骤可渲染 ⇒ 不翻预发动，骨架候选直接进
-``legal_actions``；其余六条都走预发动清单。
+``legal_actions``；【义绝】的三步由发动后的询问逐步收集，同样不翻预发动；其余六条都走
+预发动清单。
 """
 
 
@@ -1132,7 +1133,7 @@ _REQUIREMENTS: dict[str, str] = {
     "kurou": "失去1点体力，然后摸两张牌",
     "yijue": "弃置一张牌：令一名其他角色展示一张手牌（红则获得并可令其回复；黑则本回合其非锁定技失效、不能使用或打出手牌）",
 }
-"""A 族七条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+"""A 族八条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
 _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
     "lijian": {
@@ -1185,7 +1186,7 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
 
 
 def active_skill_definitions() -> tuple[SkillDef, ...]:
-    """A 族六条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
+    """A 族八条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
 
     非锁定（技能面都写了"你可以"）：候选由 ``CANDIDATES`` 挂点产出；``carrier = HERO``
     ⇒ 优先级档由载体派生；``skill_type = NORMAL``（无主公技）。
