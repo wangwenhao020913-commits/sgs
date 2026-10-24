@@ -387,10 +387,17 @@ class ActivationPlan:
     ``max_picks`` 四个无生产者字段已在 W6-06a 删除。`SkillActivationQuery` 的
     ``min_picks`` / ``max_picks`` / ``slots`` 仍是冻结报文（A-4 另立票；当前生产者恒传
     ``0 / 0 / ()``，15 份录像逐字节）。
+
+    ``actor``（M6 票 14 的加法，缺省 ``None`` = 技能持有者）：这一问**由谁应答**。
+    【护驾】②的牌面是"当**其他**魏势力角色于其回合外使用或打出【闪】时，**其**可以令你
+    摸一张牌"——决定者是事件的当事角色，受益者（``skill_owner``）仍是技能持有者。它是
+    座位号而不是布尔：同一个技能在不同帧上可以由不同的人决定，故取值由计划的构造方
+    按帧算（:func:`~sgs.skills.lord_request.jie_hujia_activation_plan`）。
     """
 
     optional: bool = True
     available: bool = True
+    actor: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -2311,6 +2318,7 @@ from .response_window import (  # noqa: E402  （末尾 import 是刻意的）
     response_window_skill_definitions,
 )
 from .lord_request import (  # noqa: E402  （末尾 import 是刻意的）
+    lord_request_activation_plans,
     lord_skill_definitions,
 )
 from .arrange import (  # noqa: E402  （末尾 import 是刻意的）
@@ -2362,10 +2370,12 @@ ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], Activ
             **phase_body_activation_plans(),
             **judgment_loop_activation_plans(),
             **awakening_activation_plans(),
+            **lord_request_activation_plans(),
         }
     )
 )
-"""G 族（票 10）、I 族（票 11）、L 族（票 12）与 J 族（M6 票 02）的发动形态并入后的**完整**注册表：
+"""G 族（票 10）、I 族（票 11）、L 族（票 12）、J 族（M6 票 02）与 F 族（M6 票 14 的
+界【护驾】②：应答者 = 使用 / 打出【闪】的那个角色）的发动形态并入后的**完整**注册表：
 与 :data:`CATALOG` 同一合并姿态。"""
 
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
@@ -2395,7 +2405,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
 )
 """定义目录：``skill_id`` → :class:`SkillDef`，**模块级不可变**（票 07 §1 / §6）。
 
-装备技能（22 条：标准 17 + 军争 5）与武将技能（票 03 起逐族落地，票 12 起 29 条齐、M6 P0 票 01 起 32 条、票 02 起 37 条、票 03 收口 40 条、票 04 起 44 条、票 05 起 46 条、票 06 起 52 条、票 07 起 56 条）**共用同一张表**：
+装备技能（22 条：标准 17 + 军争 5）与武将技能（票 03 起逐族落地，票 12 起 29 条齐、M6 P0 票 01 起 32 条、票 02 起 37 条、票 03 收口 40 条、票 04 起 44 条、票 05 起 46 条、票 06 起 52 条、票 07 起 56 条、票 08 起 62 条、票 09 起 64 条、票 10 起 66 条、票 11 起 67 条、票 14 起 **73 条** = 合计 95 条）**共用同一张表**：
 载体解析、优先级档、修饰器链、时机派发都只认这张表，不区分两类载体。合并点在**文件末尾**
 （而不是模块头部的 import）是为了让 :mod:`sgs.skills.heroes` 能反向 import 本模块的
 :class:`SkillDef`——`heroes` 在 import 期读到的 :data:`CATALOG` 是装备那半张，而它的定义由

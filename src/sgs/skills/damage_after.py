@@ -14,9 +14,12 @@ B 族的形态差别只有一处：它挂在 ``DAMAGE_AFTER_TAKE`` 上，而**�
 技能                       锁定    per_point  效果
 =========================  ======  =========  ==========================================
 曹操【奸雄】               非锁定  ``False``  获得**造成此伤害的牌**（在处理区里找）
+界曹操【奸雄】             非锁定  ``False``  同上，**并摸一张牌**（§十九 L2013）
 司马懿【反馈】             非锁定  ``False``  获得**伤害来源**的一张牌（手牌隐藏槽 + 装备可见槽）
+界司马懿【反馈】           非锁定  ``True``   同上，逐点触发（"受到 **1 点**伤害后"，§十九 L2020）
 郭嘉【遗计】               非锁定  ``True``   观看牌堆顶 2 张 → 交给任意角色（可一次两张）
 夏侯惇【刚烈】             非锁定  ``False``  判定 → 非红桃时**伤害来源**二选一：弃两张手牌 / 受 1 点伤害
+界夏侯惇【刚烈】           非锁定  ``True``   判定 → 红：对来源 1 点伤害 / 黑：弃来源一张牌
 =========================  ======  =========  ==========================================
 
 四条都是**非锁定技**（技能面写了"你可以"）⇒ 发动是询问出来的。它们在回调里可以
@@ -69,6 +72,8 @@ from .flow import FlowAnswers, PickCards, SkillFlow, zero_step_effect
 __all__ = [
     "DAMAGE_AFTER_SKILLS",
     "JIE_GANGLIE",
+    "JIE_JIANXIONG",
+    "JIE_JIANXIONG_FLOW",
     "DAMAGE_POINT_KEY",
     "DAMAGE_RECORDED_KEY",
     "DamageAfterSkill",
@@ -182,14 +187,20 @@ def _jianxiong_condition(host: Any, frame: Any) -> bool:
     return _hurt_owner(frame) and _in_processing(host.state, _damage_channel_card(frame))
 
 
-def _jianxiong(host: Any, frame: Any) -> None:
-    """曹操【奸雄】：你可以获得造成此伤害的牌（规则 972）。"""
-    owner = frame.data["skill_owner"]
+def _gain_channel_card(host: Any, frame: Any, owner: int) -> Any:
+    """把**造成这次伤害的牌**从处理区搬进 ``owner`` 手牌；返回移动的 ``Control``。
+
+    【奸雄】标准版与界版的**共用体**：两版的差别只在界版多摸一张（见
+    :func:`_jie_jianxiong`），"拿哪张牌、从哪搬、什么理由"逐字相同。返回
+    :meth:`~sgs.engine.Engine.move_in_frame` 的控制值（``"stay"`` = 搬牌挂起了），
+    由调用方决定要不要等它——标准版早先忽略了这个返回（搬牌内联派发"失去牌后"时
+    会静默少续跑一次），抽这一层时一并交给调用方处理。
+    """
     card = _damage_channel_card(frame)
     if not _in_processing(host.state, card):
-        return
+        return None
     assert card is not None  # _in_processing 已保证
-    host.move_in_frame(
+    return host.move_in_frame(
         frame,
         (card,),
         to_zone=ZoneRef(Zone.HAND, owner),
@@ -199,12 +210,55 @@ def _jianxiong(host: Any, frame: Any) -> None:
     )
 
 
+def _jianxiong(host: Any, frame: Any) -> Any:
+    """曹操【奸雄】：你可以获得造成此伤害的牌（规则 972）。"""
+    return _gain_channel_card(host, frame, frame.data["skill_owner"])
+
+
 JIANXIONG_FLOW = SkillFlow(name="jianxiong", steps=(), effect=zero_step_effect(_jianxiong))
 """【奸雄】的零步流水线（W6-01）：[是否发动] → 获得造成伤害的牌（无步骤）。
 
 与 :data:`FANKUI_FLOW` 同一形态：**模块级具名常量**，与 Hook 同住本模块
 （``tests/test_ask_points.py`` 只发现模块级 ``SkillFlow`` 实例）。
 """
+
+
+JIE_JIANXIONG = "hero.jie_caocao.jianxiong"
+"""界曹操【奸雄】的全限定技能 id（§十九 L2012–L2013）。"""
+
+_JIE_JIANXIONG_MOVED_KEY = "jie_jianxiong_moved"
+"""帧私有：造成伤害的牌已经搬进手牌（搬牌挂起后的续跑不重搬）。"""
+
+_JIE_JIANXIONG_DRAWN_KEY = "jie_jianxiong_drawn"
+"""帧私有：界【奸雄】"并摸一张牌"的那一张已经摸过（续跑不重摸）。"""
+
+
+def _jie_jianxiong(host: Any, frame: Any) -> Any:
+    """界曹操【奸雄】：获得造成此伤害的牌**并摸一张牌**（§十九 L2013）。
+
+    与标准版共用 :func:`_gain_channel_card` 与同一条触发条件
+    （:func:`_jianxiong_condition`：受伤的是自己 ∧ 渠道牌还在处理区），差别只在拿到牌之后
+    多摸一张。两段各一个帧私有游标：搬牌 / 摸牌都可能内联派发而挂起，续跑必须既不重做
+    也不漏做（与界【集智】/界【刚烈】同一范式）。
+    """
+    owner = frame.data["skill_owner"]
+    if not _in_processing(host.state, _damage_channel_card(frame)):
+        return None
+    if not frame.data.get(_JIE_JIANXIONG_MOVED_KEY):
+        control = _gain_channel_card(host, frame, owner)
+        if control == "stay":
+            return "stay"
+        frame.data[_JIE_JIANXIONG_MOVED_KEY] = True
+    if not frame.data.get(_JIE_JIANXIONG_DRAWN_KEY):
+        frame.data[_JIE_JIANXIONG_DRAWN_KEY] = True
+        host.draw_for_hand(frame, owner, 1)
+    return None
+
+
+JIE_JIANXIONG_FLOW = SkillFlow(
+    name="jie_jianxiong", steps=(), effect=zero_step_effect(_jie_jianxiong)
+)
+"""界【奸雄】的零步流水线：[是否发动] → 获得造成伤害的牌 → 摸一张牌。"""
 
 
 def _fankui_condition(host: Any, frame: Any) -> bool:
@@ -770,6 +824,21 @@ DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
     # 夏侯惇【刚烈】：受伤后判定，非红桃则由伤害来源二选一（规则 §九 L944–945）。
     # 每次伤害事件一次（"受到伤害后"，不是"受到 1 点伤害后"）。
     DamageAfterSkill("xiahoudun", "ganglie", False, _ganglie_condition, _ganglie),
+    # 界曹操【奸雄】（M6 票 14）：牌面比标准版多一句"并摸一张牌"（§十九 L2013），
+    # 触发条件与"拿哪张牌"逐字相同 ⇒ 共用条件 / 搬牌体，只多一个摸一张的提交点。
+    DamageAfterSkill(
+        "jie_caocao",
+        "jianxiong",
+        False,
+        _jianxiong_condition,
+        None,
+        JIE_JIANXIONG_FLOW,
+        requirement="获得造成伤害的牌并摸一张牌",
+    ),
+    # 界司马懿【反馈】（M6 票 14）：牌面是"当你受到 **1 点** 伤害后"（§十九 L2020），
+    # 故与界【刚烈】同档：`per_point=True`（标准版是"当你受到伤害后"，每次伤害事件一次）。
+    # 条件 / 流水线 / 缓存的逐点键（``fankui_step_key``）全与标准版共用。
+    DamageAfterSkill("jie_simayi", "fankui", True, _fankui_condition, None, FANKUI_FLOW),
     # 界夏侯惇【刚烈】（M6 票 08）：整句重写——逐点触发（"受到 1 点伤害后"），
     # 红色对来源造成 1 点伤害、黑色弃置来源的一张牌。
     DamageAfterSkill(

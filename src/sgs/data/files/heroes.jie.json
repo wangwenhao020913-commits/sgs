@@ -287,6 +287,84 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "jie_caocao",
+      "name": "界曹操",
+      "true_name": "曹操",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "jianxiong",
+          "name": "奸雄",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "hujia",
+          "name": "护驾",
+          "skill_type": "LORD"
+        }
+      ]
+    },
+    {
+      "id": "jie_simayi",
+      "name": "界司马懿",
+      "true_name": "司马懿",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "fankui",
+          "name": "反馈",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "guicai",
+          "name": "鬼才",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_zhangliao",
+      "name": "界张辽",
+      "true_name": "张辽",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "tuxi",
+          "name": "突袭",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_xuchu",
+      "name": "界许褚",
+      "true_name": "许褚",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "luoyi",
+          "name": "裸衣",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

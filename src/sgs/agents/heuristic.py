@@ -1666,6 +1666,31 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "执行一个额外的回合（完整六阶段）：一次免费的整回合，收益远高于一次用牌；"
         "「每轮限 X 次」由技能前提自己收住",
     ),
+    # M6 票 14：界·魏 A（曹操 / 司马懿 / 张辽 / 许褚）
+    "hero.jie_caocao.jianxiong": (
+        _constant(4.0),
+        "受伤后获得造成伤害的牌**并摸一张牌**：净赚两张，恒发动",
+    ),
+    "hero.jie_caocao.hujia": (
+        _constant(_DODGE_SKILL_VALUE),
+        "主公技：①求助窗口视为打出【闪】；②决定者（盟友）让主公白摸一张——两条都为正",
+    ),
+    "hero.jie_simayi.fankui": (
+        _constant(3.5),
+        "受到 1 点伤害后获得伤害来源的一张牌：逐点触发 ⇒ 每次伤害赚得更多",
+    ),
+    "hero.jie_simayi.guicai": (
+        _constant(1.0),
+        "改判窗口：与标准【鬼才】同口径（有改判能力即参与，保守给正但不高）",
+    ),
+    "hero.jie_zhangliao.tuxi": (
+        _constant(3.5),
+        "少摸任意张换等量张他人手牌：至多 2 张，牌数不变但换牌质量更高",
+    ),
+    "hero.jie_xuchu.luoyi": (
+        _constant(2.5),
+        "亮三张拿基本牌 / 武器牌 /【决斗】并放弃摸牌，换**跨回合**的【杀】/【决斗】+1",
+    ),
     # 装备技（W4-4）：会问"是否发动"的 5 条非锁定装备**各给一个正分常量**。
     # 缺省 ``_UNKNOWN_SKILL_VALUE = -1.0 < Pass(0)`` ⇒ 不入表就永不发动（雌雄无法复现
     # 的根因）；正分 ⇒ 永远发动（Pass = 0，成本 / 收益不建模，见票面"不做收益模型调参"）。

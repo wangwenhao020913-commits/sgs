@@ -45,10 +45,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import SkillType, Suit, hero_skill_id
+from sgs.data import Category, SkillType, Suit, card_category, hero_skill_id
 from sgs.effects import CarrierKind, Modifier, ModifierContext, ModifierPoint, behavior_for, is_slash
 from sgs.resolution import Control, Frame
-from sgs.state import FrameKind, GameState, MoveReason, Zone, ZoneRef
+from sgs.state import FrameKind, GameState, MoveReason, SlotKind, Zone, ZoneRef
 from sgs.timing import Timing
 
 from .catalog import (
@@ -66,6 +66,11 @@ __all__ = [
     "BOTU_FLOW",
     "BOTU_ROUND_LIMIT",
     "JIE_BOTU",
+    "JIE_LUOYI",
+    "JIE_LUOYI_FLOW",
+    "JIE_LUOYI_REVEAL",
+    "JIE_TUXI",
+    "JIE_TUXI_FLOW",
     "KEJI",
     "KEJI_FLOW",
     "LUOYI_DAMAGE_BONUS",
@@ -313,6 +318,82 @@ _TUXI = PhaseBodySkill(
 
 
 # ---------------------------------------------------------------------------
+# 界张辽【突袭】（M6 票 14）：摸牌阶段，你可以**少摸任意张**牌，然后获得**等量**名其他
+# 角色的各一张手牌（§十九 L2030–L2031）。
+#
+# 与标准版（"放弃摸牌，改为获得至多两名…"）**共用**触发时机、可拿的座位池 / 排除已选
+# 的池、以及同一条一步座位流水线的**形状**（1–2 名、可少选 ⇒ X 就是选了几名）；差别只在
+# 提交点：标准版把本阶段摸牌数改成 0，界版**按实际拿到的张数**减（少摸 X 张）。
+# ---------------------------------------------------------------------------
+
+JIE_TUXI = hero_skill_id("jie_zhangliao", "tuxi")
+"""界张辽【突袭】的全限定技能 id（§十九 L2030–L2031）。"""
+
+_TUXI_GAINED_KEY = "tuxi_gained"
+"""帧私有：本次发动**已经真的拿到几张**（减摸牌张数的依据；搬牌挂起后续跑不丢计数）。"""
+
+_TUXI_REDUCED_KEY = "tuxi_reduced"
+"""帧私有：本阶段的摸牌数已经减过（重入不重复减）。"""
+
+
+def _jie_tuxi_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """提交点：逐个被选角色取一张暗手牌，然后**少摸等量张**（与标准版只差最后一步）。
+
+    进度计数住帧私有 ``tuxi_gained``：搬牌可能内联派发"失去牌后"而挂起，重入时先把
+    已拿到的张数写回、再继续；摸牌数的减法只做一次（``tuxi_reduced``）。空手牌的座位
+    （理论上不进候选池）不算"获得"，故也不减摸牌数——牌面写的是"获得**等量名**"。
+    """
+    owner = frame.data["skill_owner"]
+    taken: list[int] = frame.data.setdefault(_TUXI_TAKEN, [])
+    gained = int(frame.data.get(_TUXI_GAINED_KEY, 0))
+    for seat in tuple(int(seat) for seat in answers["seat"]):
+        if seat in taken:
+            continue
+        _slots, card_ids = host.selection_face(seat, (Zone.HAND,), reveal_hand=False)
+        taken.append(seat)
+        if not card_ids:
+            continue
+        gained += 1
+        frame.data[_TUXI_GAINED_KEY] = gained
+        control = host.move_in_frame(
+            frame,
+            host.state.refs((card_ids[0],)),
+            to_zone=ZoneRef(Zone.HAND, owner),
+            reason=MoveReason.PUT,
+            owner=owner,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+    if not frame.data.get(_TUXI_REDUCED_KEY):
+        frame.data[_TUXI_REDUCED_KEY] = True
+        host.reduce_draw_phase_by(owner, gained)
+    return None
+
+
+JIE_TUXI_FLOW = SkillFlow(
+    name="jie_tuxi",
+    steps=(
+        # 「获得**等量名**其他角色的各一张手牌」：选几名 = 少摸几张；1–2 名、可少选。
+        PickSeats(lo=1, hi=TUXI_TARGETS, pool=_tuxi_pool, optional=True),
+    ),
+    effect=_jie_tuxi_effect,
+)
+"""界【突袭】的一步流水线：选 1–2 名其他角色 → 各取一张暗手牌 → 少摸等量张。"""
+
+
+_JIE_TUXI = PhaseBodySkill(
+    # 界张辽【突袭】：摸牌阶段，你可以少摸任意张牌，然后获得等量名其他角色的各一张手牌。
+    hero_id="jie_zhangliao",
+    short_id="tuxi",
+    timing=Timing.PHASE_DRAW,
+    flow=JIE_TUXI_FLOW,
+    available=_tuxi_available,
+    requirement="少摸任意张牌，然后获得等量名其他角色的各一张手牌",
+)
+
+
+# ---------------------------------------------------------------------------
 # 许褚【裸衣】（M6 P0 票 01）：少摸一张；本回合【杀】/【决斗】伤害 +1
 # ---------------------------------------------------------------------------
 
@@ -348,7 +429,21 @@ def _luoyi_damage_bonus(state: GameState, ctx: ModifierContext, current: Any) ->
     """
     if ctx.owner != ctx.subject or ctx.card is None:
         return current
-    if not state.player(ctx.owner).luoyi_active:
+    return _luoyi_bonus(state, ctx, current, active=state.player(ctx.owner).luoyi_active)
+
+
+def _luoyi_bonus(
+    state: GameState, ctx: ModifierContext, current: Any, *, active: bool
+) -> Any:
+    """``DAMAGE_DEAL_AMOUNT`` 的**共用判据**：来源侧 + 【杀】/【决斗】+ 座位状态已置位。
+
+    标准 / 界两版【裸衣】的差别只有"哪个座位状态字段"（作用域不同），故判据只此一份；
+    ``active`` 由各自的回调从自己的字段读出来（调用方已保证 ``ctx.owner`` 是合法座位）。
+    """
+    del state
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not active:
         return current
     if is_slash(behavior_for(ctx.card)) or ctx.card.type == LUOYI_DUEL_TYPE:
         return current + LUOYI_DAMAGE_BONUS
@@ -363,6 +458,124 @@ _LUOYI = PhaseBodySkill(
     timing=Timing.PHASE_DRAW,
     flow=LUOYI_FLOW,
     modifiers=(Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _luoyi_damage_bonus),),
+)
+
+
+# ---------------------------------------------------------------------------
+# 界许褚【裸衣】（M6 票 14）：摸牌阶段开始时，你亮出牌堆顶的三张牌，然后你可以获得其中
+# 的基本牌、武器牌和【决斗】。若如此做，你放弃摸牌，且直到你的下个回合开始，你为伤害
+# 来源的【杀】或【决斗】造成的**基础伤害值** +1（§十九 L2035–L2039）。
+#
+# 与标准版不是同一句（"少摸一张换本回合 +1"），故不复用标准版的流水线；共用的是
+# **伤害加成判据**（:func:`_luoyi_bonus`：来源侧 + 【杀】/【决斗】）与修饰器挂点。
+# 三个作用域事实各有唯一落点：
+#
+# - **亮出 3 张**：``peek_deck`` 只看不移（牌仍在牌堆顶，没拿走的自然留在原处），每张落
+#   一条公开的 ``card_reveal``——"亮出"是公开事实，不是私有观看；
+# - **放弃摸牌**：``set_draw_phase_count(owner, 0)``（与【突袭】同一个写入口）；
+# - **直到你的下个回合开始**：座位状态 ``Player.luoyi_until_next_turn``，清理点 = 该座位
+#   自己的 ``TURN_START``（与标准版"回合末清"分开，见 :class:`~sgs.state.Player`）。
+#
+# "若如此做"的落点 = **真的拿到了至少一张**：三张里一张可拿的都没有时，亮出照发生、但
+# 既不放弃摸牌也不加伤（正常摸两张）。这一档不另发询问：牌面对"获得"只有一个"可以"，
+# 且"亮完什么都不拿"与"不发动"在收益上等价，故整条技能按一类询问（是否发动）收口。
+# ---------------------------------------------------------------------------
+
+JIE_LUOYI = hero_skill_id("jie_xuchu", "luoyi")
+"""界许褚【裸衣】的全限定技能 id（§十九 L2035–L2039）。"""
+
+JIE_LUOYI_REVEAL = 3
+"""「亮出牌堆顶的三张牌」的张数（§十九 L2035）。"""
+
+_LUOYI_REVEALED_KEY = "jie_luoyi_revealed"
+"""帧私有：本次亮出的牌 id（自顶向下；续跑沿用它，不重看牌堆）。"""
+
+_LUOYI_GAINED_KEY = "jie_luoyi_gained"
+"""帧私有：其中的"基本牌 / 武器牌 / 【决斗】"已经搬进手牌。"""
+
+_LUOYI_SETTLED_KEY = "jie_luoyi_settled"
+"""帧私有：放弃摸牌 + 加伤已经落过（搬牌挂起后的续跑不重复落）。"""
+
+
+def _jie_luoyi_keeps(state: GameState, card: Any) -> bool:
+    """这三张里的这一张能不能拿：**基本牌** ∨ **武器牌** ∨ 【决斗】（§十九 L2035–L2036）。
+
+    三种判据都读数据层的事实，不抄牌名清单：大类读 :func:`sgs.data.card_category`，
+    武器读 :class:`~sgs.state.SlotKind`（``CardType.subcategory`` 在实例化时派生的牌面事实），
+    【决斗】按牌名 id（与标准版同一个 :data:`LUOYI_DUEL_TYPE`）。
+    """
+    if card_category(state.pack_id, card.type) is Category.BASIC:
+        return True
+    if card.slot is SlotKind.WEAPON:
+        return True
+    return card.type == LUOYI_DUEL_TYPE
+
+
+def _jie_luoyi_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """提交点：亮出牌堆顶三张 → 获得其中合格者 → 若拿到牌则放弃摸牌 + 加伤。
+
+    顺序即牌面的顺序（"然后"）。三段各一个帧私有游标：亮出只做一次（续跑不重看），
+    搬牌可能内联派发"失去牌后"而挂起（续跑不重搬），"若如此做"的两件副作用只落一次。
+    没拿到任何一张时**不**放弃摸牌、**不**加伤：牌面写的是"若如此做"（= 获得过）。
+    """
+    owner = frame.data["skill_owner"]
+    state = host.state
+    if _LUOYI_REVEALED_KEY not in frame.data:
+        revealed = host.peek_deck(frame, JIE_LUOYI_REVEAL)
+        frame.data[_LUOYI_REVEALED_KEY] = tuple(card.card_id for card in revealed)
+        for card in revealed:
+            # "亮出"= 公开事实（与【火攻】的亮牌同一个记录面），牌本身仍留在牌堆顶。
+            host.reveal_card(frame, owner, card)
+    revealed = state.refs(tuple(frame.data[_LUOYI_REVEALED_KEY]))
+    kept = tuple(card for card in revealed if _jie_luoyi_keeps(state, card))
+    if kept and not frame.data.get(_LUOYI_GAINED_KEY):
+        control = host.move_in_frame(
+            frame,
+            kept,
+            to_zone=ZoneRef(Zone.HAND, owner),
+            reason=MoveReason.PUT,
+            owner=owner,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+        frame.data[_LUOYI_GAINED_KEY] = True
+    if frame.data.get(_LUOYI_GAINED_KEY) and not frame.data.get(_LUOYI_SETTLED_KEY):
+        frame.data[_LUOYI_SETTLED_KEY] = True
+        host.set_draw_phase_count(owner, 0)
+        host.set_luoyi_until_next_turn(owner, True)
+    return None
+
+
+JIE_LUOYI_FLOW = SkillFlow(name="jie_luoyi", steps=(), effect=_jie_luoyi_effect)
+"""界【裸衣】的零步流水线：[是否发动] → 亮三张 → 拿合格牌 →（拿到则）弃摸牌 + 跨回合 +1。"""
+
+
+def _jie_luoyi_damage_bonus(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """界【裸衣】的 ``DAMAGE_DEAL_AMOUNT`` 回调：读**跨回合**的座位状态。
+
+    判据与标准版共用 :func:`_luoyi_bonus`；只有"作用域字段"不同——界版的作用域是
+    "直到你的下个回合开始"，住 ``Player.luoyi_until_next_turn``（见那里的注释）。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    return _luoyi_bonus(
+        state, ctx, current, active=state.player(ctx.owner).luoyi_until_next_turn
+    )
+
+
+_JIE_LUOYI = PhaseBodySkill(
+    # 界许褚【裸衣】：摸牌阶段开始时亮出牌堆顶三张，可获得其中的基本牌 / 武器牌 /【决斗】；
+    # 若如此做，放弃摸牌，且直到你的下个回合开始【杀】/【决斗】基础伤害 +1。
+    hero_id="jie_xuchu",
+    short_id="luoyi",
+    timing=Timing.PHASE_DRAW,
+    flow=JIE_LUOYI_FLOW,
+    modifiers=(Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _jie_luoyi_damage_bonus),),
+    requirement=(
+        "亮出牌堆顶三张牌，可获得其中的基本牌 / 武器牌 /【决斗】；若如此做，放弃摸牌，"
+        "且直到你的下个回合开始【杀】或【决斗】造成的基础伤害 +1"
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -550,17 +763,19 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _JIE_YINGZI,
     _BIYUE,
     _TUXI,
+    _JIE_TUXI,
     _LUOYI,
+    _JIE_LUOYI,
     _KEJI,
     _KEJI_JIE,
     _TISHEN,
     _JIE_BIYUE,
     _BOTU,
 )
-"""L 族十条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
+"""L 族十二条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
 票 03 的【克己】、票 05 的【替身】、票 06 的界【克己】、票 07 的界【闭月】、
-票 08 的界【英姿】、票 11 的【博图】——最后一条挂在**回合结束时**而不是阶段体上，
-派发机制相同，见 :meth:`Engine._dispatch_phase_body`）。"""
+票 08 的界【英姿】、票 11 的【博图】、票 14 的界【突袭】/界【裸衣】——最后一条挂在
+**回合结束时**而不是阶段体上，派发机制相同，见 :meth:`Engine._dispatch_phase_body`）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "yingzi": "多摸一张牌",

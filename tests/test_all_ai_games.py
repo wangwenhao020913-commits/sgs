@@ -339,3 +339,58 @@ def test_the_m6_p0_c_heroes_finish_a_full_ai_game_cleanly_and_replay():
     replay.run([TapePlayer(tape)] * PLAYERS)
 
     assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"
+
+
+# ---------------------------------------------------------------------------
+# M6 票 14：界·魏 A 四名（+ 界关羽陪跑）的**显式逐座位**全 AI 局（判据同上面四条）
+# ---------------------------------------------------------------------------
+
+M6_JIE_WEI_HEROES: tuple[str, ...] = (
+    "jie_caocao",
+    "jie_simayi",
+    "jie_zhangliao",
+    "jie_xuchu",
+    "jie_guanyu",
+)
+"""票 14 的四名将 + 一名陪跑（5 人身份局；显式发放，不吃 ``hero`` 子流）。
+
+五名**真名互异**（曹操 / 司马懿 / 张辽 / 许褚 / 关羽）：同一真名不共存是引擎不变量，
+显式发放也不得违反它。
+"""
+
+M6_JIE_WEI_SEED = ACCEPTANCE_SEEDS[3]
+"""与 32 种子基准组同批的第四个种子（``ACCEPTANCE_SEEDS`` 的真源）。"""
+
+
+def test_the_m6_jie_wei_heroes_finish_a_full_ai_game_cleanly_and_replay():
+    """验收：含界【奸雄】/【护驾】/【反馈】/【鬼才】/【突袭】/【裸衣】的全 AI 局四条判据全过。"""
+    engine = Engine.new_game(
+        seed=M6_JIE_WEI_SEED,
+        rule_config=RuleConfig(player_count=PLAYERS),
+        pack=PACK,
+        heroes=M6_JIE_WEI_HEROES,
+    )
+    scans = _participants(M6_JIE_WEI_SEED)
+
+    engine.run(scans)
+
+    assert [player.hero for player in engine.state.players] == list(M6_JIE_WEI_HEROES)
+    assert engine.finished, "必达终局"
+    tail = engine.records[-1]
+    assert tail.kind == "game_end"
+    assert tail.result in ("winner", "draw"), f"终局结果非法：{tail.result!r}"
+    _assert_endgame_identity_consistency(engine, M6_JIE_WEI_SEED)
+    assert all(scan.illegal == 0 for scan in scans), "出现了候选集合之外的应答"
+    assert sum(scan.answers for scan in scans) > 0
+
+    replayed_seed, tape = tape_from_journal(engine.records)
+    assert replayed_seed == M6_JIE_WEI_SEED and tape
+    replay = Engine.new_game(
+        seed=replayed_seed,
+        rule_config=RuleConfig(player_count=PLAYERS),
+        pack=PACK,
+        heroes=M6_JIE_WEI_HEROES,
+    )
+    replay.run([TapePlayer(tape)] * PLAYERS)
+
+    assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"

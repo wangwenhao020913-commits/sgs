@@ -1840,7 +1840,13 @@ class Engine:
         ``(skill_id, key)`` 帧内缓存，重入不重发（``key`` 让同一时机上的真钩子与帧内
         接缝不共用缓存槽）。询问模型仍带 ``min_picks=0 / max_picks=0 / slots=()`` 的
         冻结报文（A-4 另立票；15 份录像逐字节）。
+
+        **应答者默认是技能持有者，但可以由计划指定**（M6 票 14 的 ``plan.actor``）：
+        【护驾】②的"其可以令你摸一张牌"里决定者是**使用 / 打出【闪】的那个角色**，收益者
+        是技能持有者（主公）。询问因此发给 ``plan.actor``；``preactivation`` 清单也按
+        应答者取（清单是"这一问交给谁"的一部分，不是持有者的属性）。
         """
+        actor = instance.owner if plan.actor is None else plan.actor
         answers = frame.data.setdefault("ask_answers", {})
         answer_key = ("activate", instance.skill_id, key or str(timing))
         if answer_key in answers:
@@ -1848,7 +1854,7 @@ class Engine:
         action = self.ask(
             lambda seq: self._build_query(
                 QueryKind.SKILL_ACTIVATION,
-                instance.owner,
+                actor,
                 timing,
                 seq,
                 payload=SkillActivationContext(
@@ -1859,7 +1865,7 @@ class Engine:
                     slots=(),
                     preactivation=preactivation_for(
                         self.state,
-                        instance.owner,
+                        actor,
                         instance.skill_id,
                         timing=timing,
                         frame=frame,
@@ -2705,6 +2711,25 @@ class Engine:
         """把一个座位的【裸衣】加伤清掉（回合的收尾点与下一回合起点各调一次，幂等）。"""
         if self.state.player(seat).luoyi_active:
             self.set_luoyi_active(seat, False)
+
+    def set_luoyi_until_next_turn(self, seat: int, active: bool) -> bool:
+        """写一个座位的**界**【裸衣】"直到你的下个回合开始"加伤状态（M6 票 14 的唯一写入口）。
+
+        与 :meth:`set_luoyi_active` 同形、同样**不发 delta**，但是**另一个字段**：标准版
+        裸衣到**本回合结束**（收尾点 :meth:`_turn_after_end`），界版到**你的下个回合开始**
+        （§十九 L2035–L2039），清理点因此落在该座位自己的 ``TURN_START``——两者共用一个
+        字段会让其中一版的作用域被另一版的收尾点提前抹掉。
+        """
+        player = self.state.player(seat)
+        if player.luoyi_until_next_turn == active:
+            return False
+        player.luoyi_until_next_turn = active
+        return True
+
+    def _clear_luoyi_until_next_turn(self, seat: int) -> None:
+        """把界【裸衣】加伤清掉（**只**在该座位自己的 ``TURN_START`` 调，幂等）。"""
+        if self.state.player(seat).luoyi_until_next_turn:
+            self.set_luoyi_until_next_turn(seat, False)
 
     def set_paoxiao_bonus(self, seat: int, active: bool) -> bool:
         """写一个座位的【咆哮】②"下一次【杀】伤害 +1"待消费标记（M6 票 05 的唯一写入口）。
@@ -3742,6 +3767,9 @@ class Engine:
             self._clear_wine_active(seat)
             # 【裸衣】同口径（M6 票 01）：作用域 = 本回合结束，回合收尾已清，这里幂等兜底。
             self._clear_luoyi_active(seat)
+            # 界【裸衣】的清理点**只在**这里（M6 票 14）：它的作用域是"直到**你的**下个回合
+            # 开始"，故别人的回合末不清、只有该座位自己的回合起点清（上一句是标准版）。
+            self._clear_luoyi_until_next_turn(seat)
             # 【咆哮】②的"下一次 +1"同口径（M6 票 05）。
             self._clear_paoxiao_bonus(seat)
         self.emit_timing(Timing.TURN_START, actor=seat)

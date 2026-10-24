@@ -294,8 +294,8 @@ ALLOWLIST: dict[Site, Rule] = {
     ): Rule(FAMILY, 1, "激将的请求牌名是杀族；候选 / 响应成员判定走 satisfies_required"),
     (
         "src/sgs/skills/lord_request.py",
-        "lord_request_skill_definitions",
-        'requirement={"dodge": "打出【闪】", "slash": "打出【杀】"}[skill.required],',
+        "_lord_request_definition",
+        'requirement = {"dodge": "打出【闪】", "slash": "打出【杀】"}[skill.required]',
     ): Rule(FAMILY, 1, "按 required 取文案（请求牌名，不筛牌面；护驾 / 激将各一档）"),
     # ---- skills/response_window.py / target_pool.py：声明闭集 ----
     (

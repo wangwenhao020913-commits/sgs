@@ -38,6 +38,7 @@ from .flow import SkillFlow, zero_step_effect
 
 __all__ = [
     "GUICAI",
+    "JIE_GUICAI",
     "TIANDU",
     "TIANDU_FLOW",
     "rejudge_activation_plans",
@@ -47,6 +48,13 @@ __all__ = [
 
 GUICAI = hero_skill_id("simayi", "guicai")
 """司马懿【鬼才】的全限定技能 id（前缀派生走 :func:`sgs.data.hero_skill_id`）。"""
+
+JIE_GUICAI = hero_skill_id("jie_simayi", "guicai")
+"""界司马懿【鬼才】的全限定技能 id（§十九 L2021：牌面与标准版逐字相同）。
+
+界版只是另一个武将 id：改判能力仍是 ``SkillDef.rejudge_capable`` 这一个定义字段，
+能力来源由 :func:`rejudge_skill_ids` 机械派生，故引擎侧一行不改。
+"""
 
 TIANDU = hero_skill_id("guojia", "tiandu")
 """郭嘉【天妒】的全限定技能 id。"""
@@ -97,15 +105,24 @@ TIANDU_FLOW = SkillFlow(name="tiandu", steps=(), effect=zero_step_effect(tiandu_
 
 
 def rejudge_skill_definitions() -> tuple[SkillDef, ...]:
-    """I 族两条技能的 :class:`~sgs.skills.catalog.SkillDef`。
+    """I 族三条技能的 :class:`~sgs.skills.catalog.SkillDef`（M6 票 14 加界【鬼才】）。
 
-    【鬼才】非锁定（技能面写了"你可以"）但**不落钩子**——它把能力写在定义字段上，
-    由引擎的通用改判窗口消费；【天妒】非锁定，落 ``JUDGE_CARD_AFTER_EFFECT`` 钩子。
-    两条 ``carrier = HERO``（优先级档由载体派生）、``skill_type = NORMAL``。
+    【鬼才】（标准 / 界）非锁定（技能面写了"你可以"）但**不落钩子**——它把能力写在
+    定义字段上，由引擎的通用改判窗口消费；【天妒】非锁定，落
+    ``JUDGE_CARD_AFTER_EFFECT`` 钩子。三条 ``carrier = HERO``（优先级档由载体派生）、
+    ``skill_type = NORMAL``。界【鬼才】与标准版牌面逐字相同，故除 id 外逐字段相同。
     """
     return (
         SkillDef(
             skill_id=GUICAI,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            rejudge_capable=True,
+            requirement="打出一张手牌，代替此判定牌",
+        ),
+        SkillDef(
+            skill_id=JIE_GUICAI,
             locked=False,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,

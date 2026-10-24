@@ -427,6 +427,10 @@ def test_the_standard_table_stays_the_25_and_the_jie_table_is_loaded_separately(
         "jie_huangyueying",
         "jie_zhenji",
         "jie_luxun",
+        "jie_caocao",
+        "jie_simayi",
+        "jie_zhangliao",
+        "jie_xuchu",
     ]
     assert {hero.id for hero in standard.heroes}.isdisjoint(
         {hero.id for hero in jie.heroes}
@@ -632,6 +636,58 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     assert [skill.id for skill in luxun.skills] == ["qianxun", "lianying"]
     assert luxun.skills[0].placement is not None, "【谦逊】必须带三项放置声明"
     assert luxun.skills[1].placement is None, "【连营】不是放置类技能"
+
+    # M6 票 14：界·魏 A（曹操 / 司马懿 / 张辽 / 许褚）。四名都在第十九章 L2012–L2039，
+    # 真名与标准版同名 ⇒ 追加它们只让**版本池** 37 → 41，真名池仍是 26。
+    caocao = jie.by_id("jie_caocao")
+    simayi = jie.by_id("jie_simayi")
+    zhangliao = jie.by_id("jie_zhangliao")
+    xuchu = jie.by_id("jie_xuchu")
+    assert caocao is not None and simayi is not None
+    assert zhangliao is not None and xuchu is not None
+    assert (caocao.name, caocao.true_name, caocao.version) == ("界曹操", "曹操", "jie-ol")
+    assert (caocao.kingdom, caocao.gender, caocao.hp_max) == (
+        Kingdom.WEI,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in caocao.skills] == ["jianxiong", "hujia"]
+    assert [skill.skill_type for skill in caocao.skills] == [
+        SkillType.NORMAL,
+        SkillType.LORD,
+    ], "【护驾】是主公技（§十九 L2014–L2018）"
+
+    assert (simayi.name, simayi.true_name, simayi.version) == (
+        "界司马懿",
+        "司马懿",
+        "jie-ol",
+    )
+    assert (simayi.kingdom, simayi.gender, simayi.hp_max) == (
+        Kingdom.WEI,
+        Gender.MALE,
+        3,
+    )
+    assert [skill.id for skill in simayi.skills] == ["fankui", "guicai"]
+
+    assert (zhangliao.name, zhangliao.true_name, zhangliao.version) == (
+        "界张辽",
+        "张辽",
+        "jie-ol",
+    )
+    assert (zhangliao.kingdom, zhangliao.gender, zhangliao.hp_max) == (
+        Kingdom.WEI,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in zhangliao.skills] == ["tuxi"]
+
+    assert (xuchu.name, xuchu.true_name, xuchu.version) == ("界许褚", "许褚", "jie-ol")
+    assert (xuchu.kingdom, xuchu.gender, xuchu.hp_max) == (
+        Kingdom.WEI,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in xuchu.skills] == ["luoyi"]
 
     assert all(hero.true_name for hero in jie.heroes), "界版每名都带真名"
     assert all(hero.enabled for hero in jie.heroes), "边界突破 P1 起界将逐批启用"

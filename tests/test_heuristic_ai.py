@@ -33,6 +33,7 @@ from sgs.data import (
     Color,
     Gender,
     Identity,
+    Kingdom,
     RuleConfig,
     color_of_suit,
     enabled_hero_ids,
@@ -66,6 +67,7 @@ from sgs.state import (
     DiscardQuery,
     DodgeQuery,
     EndPhase,
+    FrameKind,
     Pass,
     PeachQuery,
     PlayCard,
@@ -94,7 +96,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import ACCEPTANCE_SEEDS, SeatSpec, build_state, run_until
+from support import ACCEPTANCE_SEEDS, SeatSpec, build_state, ran_timing, run_until
 
 PACK = load_content_pack(deck_profile="standard_108")
 TESTS_DIR = Path(__file__).resolve().parent
@@ -2479,3 +2481,234 @@ def test_a_composite_action_only_counts_when_that_skill_was_offered():
         query,
         ActivateSkill(skill_id="hero.huatuo.qingnang", answers_seq=query.seq),
     ), "空载荷是 W4-2 之前的旧骨架，不是填好的复合动作"
+
+
+# ---------------------------------------------------------------------------
+# ⑧ M6 票 14：界·魏 A —— 四条新技能各有**确定性 AI 发动**场景（spec §AI / D16 / S7）
+#
+# 判据读**记录流**：``action`` 记录里有一条 ``accepted = True`` 的 ``ActivateSkill``
+# （技能 id 对上本票的六条之一），以及发动后**外部可观测**的收益（拿牌 / 摸牌 / 少摸 /
+# 加伤）。【鬼才】不是"是否发动"询问（改判窗口直接问"打不打一张牌"），不在此节，
+# 由 ``tests/test_hero_jie_wei.py`` 的构造局面覆盖——本节的最后一条把它点名。
+# ---------------------------------------------------------------------------
+
+JIE_JIANXIONG = "hero.jie_caocao.jianxiong"
+JIE_HUJIA = "hero.jie_caocao.hujia"
+JIE_FANKUI = "hero.jie_simayi.fankui"
+JIE_TUXI = "hero.jie_zhangliao.tuxi"
+JIE_LUOYI = "hero.jie_xuchu.luoyi"
+
+
+def _accepted(engine) -> list:
+    return [
+        record.action
+        for record in engine.records
+        if record.kind == "action" and record.accepted
+    ]
+
+
+def _activated(engine, skill_id: str) -> bool:
+    return any(
+        isinstance(action, ActivateSkill) and action.skill_id == skill_id
+        for action in _accepted(engine)
+    )
+
+
+def _damage_frame(state, card: int, *, source: int, target: int, amount: int = 1):
+    channel = state.card(card)
+    return {
+        "source": source,
+        "targets": (target,),
+        "card": channel,
+        "use_timing": Timing.PHASE_PLAY_IDLE,
+        "target": target,
+        "channel": channel,
+        "nature": "NORMAL",
+        "chain": False,
+        "amount": amount,
+    }
+
+
+def test_the_ai_activates_jie_jianxiong_and_takes_two_cards():
+    """界曹操【奸雄】：AI 答"发动"⇒ 拿渠道牌 + 摸一张（两张都到手）。"""
+    slash = _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(_ids("peach")[0],)), SeatSpec(hero="jie_caocao")],
+        deck=_deck_excluding(slash),
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, source=0, target=1),
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    run_until(engine, players, lambda e: ran_timing(e, Timing.DAMAGE_END))
+
+    assert _activated(engine, JIE_JIANXIONG), "AI 必须真的发动界【奸雄】"
+    assert slash in engine.state.player(1).hand
+    assert len(engine.state.player(1).hand) == 2, "拿一张 + 摸一张"
+
+
+def test_the_ai_activates_jie_fankui_on_each_damage_point():
+    """界司马懿【反馈】：受到 2 点伤害 ⇒ AI 两次都答发动、拿两张牌。"""
+    slash = _ids("slash")[0]
+    source_cards = (_ids("peach")[0], _ids("peach")[1])
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=source_cards), SeatSpec(hero="jie_simayi")],
+        deck=_deck_excluding(slash, *source_cards),
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, source=0, target=1, amount=2),
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    run_until(engine, players, lambda e: ran_timing(e, Timing.DAMAGE_END))
+
+    assert _activated(engine, JIE_FANKUI)
+    assert sorted(engine.state.player(1).hand) == sorted(source_cards), "逐点两次各拿一张"
+
+
+def test_the_ai_activates_jie_tuxi_and_takes_someone_else_hand_card():
+    """界张辽【突袭】：AI 答发动 + 选人 ⇒ 拿到别人的手牌、本阶段总手牌数仍是 2。
+
+    少摸几张由 AI 自己选的座位数决定，故判据只钉"总手牌数 = 2"（拿到的 X 张 + 摸到的
+    2 − X 张）与"有人少了一张手牌"——**不**猜 AI 选了几个座位。
+    """
+    hand_a, hand_b = _ids("dodge")[0], _ids("dodge")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_zhangliao"), SeatSpec(hand=(hand_a,)), SeatSpec(hand=(hand_b,))],
+        deck=_deck_excluding(hand_a, hand_b),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(3)]
+
+    run_until(engine, players, lambda e: ran_timing(e, Timing.PHASE_DRAW_END))
+
+    assert _activated(engine, JIE_TUXI), "AI 必须真的发动界【突袭】"
+    assert len(engine.state.player(0).hand) == 2, "拿到 X 张 + 摸到 2 − X 张"
+    assert len(engine.state.player(1).hand) + len(engine.state.player(2).hand) < 2, (
+        "至少从一名其他角色手里拿到了一张"
+    )
+
+
+def test_the_ai_activates_jie_luoyi_and_takes_the_revealed_cards():
+    """界许褚【裸衣】：AI 答发动 ⇒ 亮出的三张全合格 ⇒ 全拿走、本阶段不摸牌。"""
+    top = (_ids("slash")[0], _ids("crossbow")[0], _ids("duel")[0])
+    extra = _ids("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_xuchu"), SeatSpec()],
+        deck=(*top, *_deck_excluding(*top, extra)),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+
+    run_until(engine, players, lambda e: ran_timing(e, Timing.PHASE_DRAW_END))
+
+    assert _activated(engine, JIE_LUOYI), "AI 必须真的发动界【裸衣】"
+    assert set(top).issubset(set(engine.state.player(0).hand)), "三张合格牌全进手牌"
+    assert len(engine.state.player(0).hand) == 3, "放弃摸牌 ⇒ 只有亮出的三张"
+
+
+class _ScriptedSeat:
+    """只给一个座位用的小脚本：``handler(query) -> Action | None``，其余放弃 / 取首个。"""
+
+    def __init__(self, handler) -> None:
+        self._handler = handler
+
+    def respond(self, query):
+        action = self._handler(query)
+        if action is not None:
+            return action
+        if query.kind in ("RESPOND", "DODGE", "PEACH"):
+            for candidate in query.legal_actions:
+                if isinstance(candidate, Pass):
+                    return candidate
+        return query.legal_actions[0]
+
+
+def test_the_ai_as_the_decider_lets_the_lord_draw_with_jie_hujia_second():
+    """【护驾】②：决定者不是受益者——AI 坐在**盟友**座位上也必须答发动（问对了人）。
+
+    座位 0 用脚本（确定性地对座位 2 出【杀】），座位 1 是主公、座位 2 是盟友；后两者都
+    交给启发式。判据：``SKILL_ACTIVATION`` 的 actor 是 2（盟友），AI 答发动，主公摸一张。
+    """
+    slash = _ids("slash")[0]
+    dodge = _ids("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(slash,)),
+            SeatSpec(hero="jie_caocao", identity=Identity.LORD, kingdom=Kingdom.WEI),
+            SeatSpec(hand=(dodge,), kingdom=Kingdom.WEI),
+        ],
+        deck=_deck_excluding(slash, dodge),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if (
+                    isinstance(action, UseCard)
+                    and action.card.card_id == slash
+                    and action.targets == (2,)
+                ):
+                    return action
+        return None
+
+    players = [
+        _ScriptedSeat(attacker),
+        HeuristicPlayer(_stream(11)),
+        HeuristicPlayer(_stream(11)),
+    ]
+    run_until(engine, players, lambda e: e.state.player(1).hand)
+
+    queries = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == "SKILL_ACTIVATION"
+        and record.query.skill_id == JIE_HUJIA
+    ]
+    assert [query.actor for query in queries] == [2], "询问出现在决定者（盟友）的座位上"
+    assert _activated(engine, JIE_HUJIA), "AI 坐在决定者座位上时真的发动"
+    assert len(engine.state.player(1).hand) == 1, "收益归主公"
+
+
+def test_every_jie_wei_skill_except_guicai_has_a_deterministic_ai_scene():
+    """本票六条技能的 AI 覆盖点名（spec S7 的"每条新机制 AI 至少一次合法发动"）。
+
+    【鬼才】结构上**没有**"是否发动"询问（改判窗口问的是"打哪张牌代替"，走 ``RESPOND``
+    的打牌应答），故它不进 ``SKILL_VALUES``-驱动的那一档；覆盖由
+    ``tests/test_hero_jie_wei.py::test_jie_guicai_is_a_rejudge_capable_skill_and_the_window_asks_its_owner``
+    接手。
+    """
+    covered = {
+        JIE_JIANXIONG,
+        JIE_HUJIA,
+        JIE_FANKUI,
+        JIE_TUXI,
+        JIE_LUOYI,
+    }
+    guicai = "hero.jie_simayi.guicai"
+
+    assert guicai not in covered
+    assert all(skill_id in SKILL_VALUES for skill_id in covered), (
+        "这些技能还没进 SKILL_VALUES：" + "；".join(sorted(covered - set(SKILL_VALUES)))
+    )
+    # 【鬼才】仍按"能力位"有语义条目（与标准版同口径），只是不产生 SKILL_ACTIVATION 询问。
+    assert guicai in SKILL_VALUES

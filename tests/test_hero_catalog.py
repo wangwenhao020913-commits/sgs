@@ -2,7 +2,7 @@
 
 本文件只装**跨技能**的登记事实（逐技能的构造局面单测按族住各自文件）：
 
-- ``CATALOG`` 的规模与分区：装备 22 + 武将 67 = **89 条**，且武将那半恰是数据文件里
+- ``CATALOG`` 的规模与分区：装备 22 + 武将 73 = **95 条**，且武将那半恰是数据文件里
   全部启用武将的技能清单（``heroes.standard.json`` + ``heroes.jie.json`` 是名单的唯一真源）；
 - **同一 owner 同一时机只有一条技能**（票 12 §要做什么 3）：这是 R5-Q1「同一时点多技能
   自选顺序不建」的落地依据——将来加武将时这条断言先变红，逼出一次重新裁定；
@@ -152,15 +152,17 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     界黄月英【集智】/【奇才】 = **手牌上限双轴**与**事件帧无效**的首批载体），
     票 09 起 64（界甄姬【洛神】/【倾国】 = 首个**牌标签**载体），票 10 起 66
     （界陆逊【谦逊】/【连营】 = 首个**武将牌上的牌区**载体），票 11 起 67
-    （界吕蒙【博图】 = 首个**额外回合 / 轮次**载体）。
+    （界吕蒙【博图】 = 首个**额外回合 / 轮次**载体），票 14 起 73
+    （界曹操【奸雄】/【护驾】、界司马懿【反馈】/【鬼才】、界张辽【突袭】、
+    界许褚【裸衣】 = 首个**决定者 ≠ 受益者**的钩子与跨回合伤害加成）。
     函数名沿用 M3 的节点名（``test_dod_m3`` 的 DoD 绑定），数字以函数体为准。
     """
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 89
+    assert len(CATALOG) == 95
     assert len(equipment) == 22
-    assert len(heroes) == 67
+    assert len(heroes) == 73
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -175,7 +177,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 67
+    assert len(expected) == 73
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -970,6 +972,13 @@ SKILL_FILES: dict[str, str] = {
     # M6 票 10：武将牌上的牌区 + 界陆逊【谦逊】/【连营】
     "hero.jie_luxun.qianxun": "test_hero_card_zone.py",
     "hero.jie_luxun.lianying": "test_hero_card_zone.py",
+    # M6 票 14：界·魏 A（曹操 / 司马懿 / 张辽 / 许褚）
+    "hero.jie_caocao.jianxiong": "test_hero_jie_wei.py",
+    "hero.jie_caocao.hujia": "test_hero_jie_wei.py",
+    "hero.jie_simayi.fankui": "test_hero_jie_wei.py",
+    "hero.jie_simayi.guicai": "test_hero_jie_wei.py",
+    "hero.jie_zhangliao.tuxi": "test_hero_jie_wei.py",
+    "hero.jie_xuchu.luoyi": "test_hero_jie_wei.py",
     # M6 票 08：手牌上限双轴 + 界周瑜 / 界夏侯惇 / 界黄月英
     "hero.jie_zhouyu.yingzi": "test_hero_jie_hand_limit.py",
     "hero.jie_zhouyu.fanjian": "test_hero_jie_hand_limit.py",
@@ -978,10 +987,11 @@ SKILL_FILES: dict[str, str] = {
     "hero.jie_huangyueying.jizhi": "test_hero_jie_hand_limit.py",
     "hero.jie_huangyueying.qicai": "test_hero_jie_hand_limit.py",
 }
-"""67 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
+"""73 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
 票 02 加 5 条、票 03 加 3 条、票 04 加 4 条界将技能、票 05 加界张飞 2 条、票 06 加界徐庶 /
 界吕蒙 6 条、票 07 加界甘宁 / 界貂蝉 4 条、票 08 加界周瑜 / 界夏侯惇 / 界黄月英 6 条、
-票 09 加界甄姬 2 条、票 10 加界陆逊 2 条、票 11 加界吕蒙【博图】1 条）。"""
+票 09 加界甄姬 2 条、票 10 加界陆逊 2 条、票 11 加界吕蒙【博图】1 条、
+票 14 加界·魏 A 6 条）。"""
 
 
 def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
@@ -1026,6 +1036,8 @@ OTHER = 2
 _PROBE_PROCESSING_SLASH = cards_of_type(PACK, "slash")[0]
 _PROBE_CHANNEL_SLASH = cards_of_type(PACK, "slash")[1]
 _PROBE_SOURCE_CARD = cards_of_type(PACK, "peach")[0]
+_PROBE_DODGE_CARD = cards_of_type(PACK, "dodge")[0]
+"""界【护驾】②的正面探针要一张【闪】牌面（"其他魏势力角色使用 / 打出【闪】"那一侧）。"""
 _PROBE_TRICK_CARD = cards_of_type(PACK, "dismantlement")[0]
 """【集智】的正面探针要一张**非延时类锦囊**牌面（命中"使用者是我 + 牌面合格"那一侧）。
 
@@ -1088,12 +1100,30 @@ def _qianxun_probe_state() -> GameState:
     )
 
 
+def _hujia_probe_state() -> GameState:
+    """界【护驾】②的正面对照：ME（座位 1）与【闪】的使用者（座位 0）都是**魏**势力。
+
+    座位 2 没有势力 ⇒ ``three`` 的负面对照里"持有者换成别人"必然不同势力，条件恒假
+    （这正是"关于我"的判据：把持有者挪走，②就不该成立）。
+    """
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(kingdom=Kingdom.WEI),
+            SeatSpec(hp=3, kingdom=Kingdom.WEI),
+            SeatSpec(),
+        ],
+    )
+
+
 def _probe_state_for(skill_id: str) -> GameState:
     """逐技能的正面对照局面（默认同一份；条件里有额外状态前提的单独给）。"""
     if skill_id == "hero.jie_lvmeng.qinxue":
         return _qinxue_probe_state()
     if skill_id == "hero.jie_luxun.qianxun":
         return _qianxun_probe_state()
+    if skill_id == "hero.jie_caocao.hujia":
+        return _hujia_probe_state()
     return _probe_state()
 
 
@@ -1212,6 +1242,19 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
             _HookFrame(source=ME),
         ),
         "hero.jie_xushu.zhuhai": (_HookFrame(source=OTHER),),
+        # M6 票 14：界·魏 A 的三条条件钩子。
+        # - 界【奸雄】：与标准版同一条条件（受伤的是我 + 渠道牌还在处理区）；
+        # - 界【反馈】：与标准版同一条条件（受伤的是我 + 来源有牌）；
+        # - 界【护驾】②：两条挂接（使用 / 打出【闪】）共用同一条条件——我 = 主公，
+        #   【闪】的使用者是座位 0（同为魏势力、不是当前回合角色）。
+        "hero.jie_caocao.jianxiong": (
+            _HookFrame(target=ME, source=0, card=state.card(_PROBE_PROCESSING_SLASH)),
+        ),
+        "hero.jie_simayi.fankui": (_HookFrame(target=ME, source=0),),
+        "hero.jie_caocao.hujia": (
+            _HookFrame(card=state.card(_PROBE_DODGE_CARD), source=0),
+            _HookFrame(card=state.card(_PROBE_DODGE_CARD), source=0),
+        ),
     }
 
 
@@ -1300,8 +1343,9 @@ def test_every_conditional_hook_goes_false_when_the_owner_is_someone_else() -> N
 
 
 def test_the_seven_zero_step_skills_are_registered_flows_with_no_steps():
-    """16 条零步技能（M6 票 01 加【裸衣】、票 02 加【集智】、票 03 加【克己】/【苦肉】、
-    票 06 加界【克己】、票 07 加界【闭月】）：
+    """19 条零步技能（M6 票 01 加【裸衣】、票 02 加【集智】、票 03 加【克己】/【苦肉】、
+    票 06 加界【克己】、票 07 加界【闭月】、票 10 加界【谦逊】、票 11 加界【博图】、
+    票 14 加界【奸雄】/界【裸衣】）：
     ``flow_for`` 非空、``steps == ()``、``preactivated`` 仍 ``False``。
 
     这条钉的是 W6-01 的**执行路径统一**判据（spec §7）：迁移只把 ``Hook(handler=…)``
@@ -1354,6 +1398,9 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.jie_huangyueying.jizhi": "零步技能",
     # M6 票 08：界【清俭】= 触发技能（MOVE_AFTER 钩子 + 两步流水线）
     "hero.jie_xiahoudun.qingjian": "触发技能",
+    # M6 票 14：界【反馈】共用【反馈】的一步流水线；界【突袭】是阶段体 + 座位步
+    "hero.jie_simayi.fankui": "触发技能",
+    "hero.jie_zhangliao.tuxi": "触发技能",
     "equip.green_dragon_blade": "触发技能",
     "equip.axe": "触发技能",
     "equip.qilin_bow": "触发技能",
@@ -1371,6 +1418,9 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.jie_lvmeng.keji": "零步技能",
     # M6 票 11：界【博图】是**回合结束时**的零步技（压一个额外回合进待执行栈）
     "hero.jie_lvmeng.botu": "零步技能",
+    # M6 票 14：界【奸雄】（拿牌 + 摸一张）与界【裸衣】（亮三张 → 拿 → 跨回合 +1）零步
+    "hero.jie_caocao.jianxiong": "零步技能",
+    "hero.jie_xuchu.luoyi": "零步技能",
     # 排列技能 1（deck_arrange + Arrange 步）
     "hero.zhugeliang.guanxing": "排列技能",
     # 多轮技能 5（手写帧内游标循环；flow_for is None；M6 票 01 的【刚烈】= 判定 → 选项 → 选牌，
@@ -1435,12 +1485,15 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.jie_guanyu.wusheng": "转化技",
     "equip.serpent_spear": "转化技",
     "equip.vermilion_feather_fan": "转化技",
-    # 能力位 1（rejudge_capable，没有对持有者的询问）
+    # 能力位 2（rejudge_capable，没有对持有者的询问）；M6 票 14 加界【鬼才】
     "hero.simayi.guicai": "能力位",
+    "hero.jie_simayi.guicai": "能力位",
     # 候选生成器 1（TARGET_POOL + TARGET_COUNT，从不发「是否发动」）
     "equip.halberd": "候选生成器",
-    # 候选提供者 3（CANDIDATES + 势力求助窗口 / 引擎回退）
+    # 候选提供者 4（CANDIDATES + 势力求助窗口 / 引擎回退）；M6 票 14 加界【护驾】
+    # （它另带②的两条零步钩子，但"候选提供者"是它在本表里的归类——见 zero_step 的排除）
     "hero.caocao.hujia": "候选提供者",
+    "hero.jie_caocao.hujia": "候选提供者",
     "hero.liubei.jijiang": "候选提供者",
     "equip.eight_diagrams": "候选提供者",
 }
@@ -1457,19 +1510,19 @@ SKILL_SHAPE: dict[str, str] = {
 
 SHAPE_COUNTS: dict[str, int] = {
     "主动技能": 11,
-    "触发技能": 8,
-    "零步技能": 17,
+    "触发技能": 10,
+    "零步技能": 19,
     "排列技能": 1,
     "多轮技能": 10,
     "锁定技": 24,
     "转化技": 11,
-    "能力位": 1,
+    "能力位": 2,
     "候选生成器": 1,
-    "候选提供者": 3,
+    "候选提供者": 4,
     "觉醒技": 2,
 }
-"""每格的条数（spec §4.4；M6 票 11 后
-11 + 8 + 17 + 1 + 10 + 24 + 11 + 1 + 1 + 3 + 2 = 89）。
+"""每格的条数（spec §4.4；M6 票 14 后
+11 + 10 + 19 + 1 + 10 + 24 + 11 + 2 + 1 + 4 + 2 = 95）。
 
 票 03 的三条：**苦肉**是零步主动技（裸发动，无步骤 ⇒ 机械形态落在「零步技能」格）；
 **克己**是阶段体零步技（同格）；**奇袭**是单源转化（转化技格）。票 04 的四条：**义绝**
@@ -1487,14 +1540,19 @@ SHAPE_COUNTS: dict[str, int] = {
 **洛神**（界）与标准版共用同一条手写多轮循环（多轮技能格）；**倾国**（界）与标准版共用
 同一条转化声明（转化技格）。票 11 的一条：**博图**是回合结束时触发的零步技（零步技能格）。
 票 10 的两条：**谦逊**是生效时触发的零步技（零步技能格，
-放置区的三项声明在数据里）；**连营**（界）是逐座选人的手写多轮（多轮技能格）。锁定技牌面写
+放置区的三项声明在数据里）；**连营**（界）是逐座选人的手写多轮（多轮技能格）。票 14 的
+六条：**奸雄**（界，拿牌 + 摸一张）/ **裸衣**（界，亮三张 → 拿 → 跨回合 +1）是零步；
+**反馈**（界，共用标准版的一步选牌流水线）/ **突袭**（界，阶段体 + 座位步）是触发技能；
+**鬼才**（界）是能力位；**护驾**（界）是候选提供者（①）且另带②的两条零步钩子——
+它按"候选提供者单列"归格，零步判据因此**排除**提供者（与"锁定技 / 觉醒技单列"同一条
+互斥纪律）。锁定技牌面写
 "锁定技"，故即使英姿带一条零步阶段体流水线也按**类型**归「锁定技」格（零步格因此
 **排除**锁定技，见 :func:`test_every_shape_has_the_documented_count_and_members`）。"""
 
 STEP_LANGUAGE_SHAPES: frozenset[str] = frozenset(
     {"主动技能", "触发技能", "零步技能", "排列技能", "觉醒技"}
 )
-"""在步骤语言内的五个形态（39 条 = 11 + 8 + 17 + 1 + 2）。觉醒技也走 ``SkillFlow``
+"""在步骤语言内的五个形态（43 条 = 11 + 10 + 19 + 1 + 2）。觉醒技也走 ``SkillFlow``
 （【潜心】零步、【勤学】一步选项），故"内 == 有 ``flow_for``"仍成立。"""
 
 IN_STEP_LANGUAGE: frozenset[str] = frozenset(
@@ -1511,7 +1569,7 @@ W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同�
 """
 
 OUTSIDE_STEP_LANGUAGE: frozenset[str] = frozenset(SKILL_SHAPE) - IN_STEP_LANGUAGE
-"""不在步骤语言内（50）：多轮 10 + 锁定 24 + 转化 11 + 能力位 1 + 候选生成器 1 + 候选提供者 3。
+"""不在步骤语言内（52）：多轮 10 + 锁定 24 + 转化 11 + 能力位 2 + 候选生成器 1 + 候选提供者 4。
 
 同样**派生**（:data:`SKILL_SHAPE` 减 :data:`IN_STEP_LANGUAGE`）；44 这个数由
 `SHAPE_COUNTS` 的其余六格加出来，测试里另有一条规模断言。
@@ -1543,9 +1601,9 @@ def _flow_steps(skill_id: str):
 
 
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
-    """89 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
+    """95 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 89
+    assert len(SKILL_SHAPE) == len(CATALOG) == 95
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11
     assert all(SKILL_SHAPE.values()), "表里没有空形态"
@@ -1583,13 +1641,16 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
         and CATALOG[skill_id].deck_arrange is None
         and skill_id not in awakening
     )
+    providers = frozenset(PROVIDERS) | {"equip.eight_diagrams"}
     zero_step = frozenset(
         skill_id
         for skill_id in CATALOG
         # 锁定技按**类型**单列一格（界【英姿】带一条零步阶段体流水线也是锁定技），
         # 故零步格排除锁定技——与"觉醒技单列"同一条互斥纪律。
+        # 同理：候选提供者（界【护驾】）带 ② 的零步钩子，仍按"提供者"单列一格。
         if _flow_steps(skill_id) == ()
         and skill_id not in awakening
+        and skill_id not in providers
         and not CATALOG[skill_id].locked
     )
     arranged = skills(lambda definition: definition.deck_arrange is not None)
@@ -1605,8 +1666,6 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
         lambda definition: {modifier.point for modifier in definition.modifiers}
         == {ModifierPoint.TARGET_POOL, ModifierPoint.TARGET_COUNT}
     )
-    providers = frozenset(PROVIDERS) | {"equip.eight_diagrams"}
-
     assert _shape_members("主动技能") == active
     assert _shape_members("触发技能") == triggered
     assert _shape_members("零步技能") == zero_step
@@ -1617,7 +1676,11 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
     assert _shape_members("能力位") == ability
     assert _shape_members("候选生成器") == generator
     assert _shape_members("候选提供者") == providers
-    assert set(PROVIDERS) == {"hero.caocao.hujia", "hero.liubei.jijiang"}
+    assert set(PROVIDERS) == {
+        "hero.caocao.hujia",
+        "hero.jie_caocao.hujia",
+        "hero.liubei.jijiang",
+    }
 
     multi_round = _shape_members("多轮技能")
     assert len(multi_round) == 10
@@ -1651,7 +1714,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """39 在内 / 50 在外：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """43 在内 / 52 在外：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -1663,17 +1726,23 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 39
-    assert len(outside) == 50
+    assert len(inside) == 43
+    assert len(outside) == 52
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉
     # **锁定技**：M6 票 08 的界【英姿】带一条零步阶段体流水线，但按技能类型归「锁定技」格
     # （与觉醒技单列同一姿态）——"有没有 flow"不再是划分步骤语言内外的充分条件。
     locked = {skill_id for skill_id in CATALOG if CATALOG[skill_id].locked}
+    providers = frozenset(PROVIDERS) | {"equip.eight_diagrams"}
     flow_backed = {
         skill_id for skill_id in CATALOG if flow_for(skill_id) is not None
     }
-    assert flow_backed - locked == inside
-    assert ({skill_id for skill_id in CATALOG if flow_for(skill_id) is None} | (flow_backed & locked)) == outside
+    # 候选提供者（界【护驾】带 ② 的零步钩子）也排除——与锁定技同一条"按格单列"。
+    assert flow_backed - locked - providers == inside
+    assert (
+        {skill_id for skill_id in CATALOG if flow_for(skill_id) is None}
+        | (flow_backed & locked)
+        | (flow_backed & providers)
+    ) == outside
     assert ZERO_STEP_SKILL_IDS and set(ZERO_STEP_SKILL_IDS) <= inside

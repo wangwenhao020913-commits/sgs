@@ -346,6 +346,17 @@ class Player(BaseModel):
     记录流不写它），回放按同一条 ``SKILL_ACTIVATION`` 动作重跑即可重建；等出现 UI 读取方
     时再补 ``luoyi_change`` delta（同时要登记 no-leak 判据）。
     """
+    luoyi_until_next_turn: bool = False
+    """界【裸衣】的"直到你的下个回合开始【杀】/【决斗】基础伤害 +1"是否生效（M6 票 14）。
+
+    与标准版【裸衣】（``luoyi_active``）**分字段**：两者作用域不同——标准版到**本回合结束**，
+    界版到**你的下个回合开始**（§十九 L2035–L2039），故不能共用"回合末清空"的清理点。
+    写入唯一入口 ``Engine.set_luoyi_until_next_turn``（界许褚的摸牌阶段写入）；清理点 =
+    该座位自己的 ``TURN_START``（:meth:`Engine._turn_start`）——那正是"你的下个回合开始"。
+    读点是 :func:`sgs.skills.phase_body._jie_luoyi_damage_bonus` 的 ``DAMAGE_DEAL_AMOUNT``
+    回调。**不发 delta**：与 ``luoyi_active`` 同姿态（没有 JSON 读者，回放按同一条
+    ``SKILL_ACTIVATION`` 动作重跑即可重建）。
+    """
     card_use_counts: dict[str, int] = Field(default_factory=dict)
     """本回合各**计数键**的已用次数；该座位自己的 ``TURN_START`` 重置（票 07 §6）。
 
