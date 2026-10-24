@@ -308,6 +308,22 @@ ALLOWLIST: dict[Site, Rule] = {
         "TARGET_POOL_SKILLS",
         'card_types=("slash", "duel"),',
     ): Rule(FAMILY, 1, "空城的牌名闭集同样走 satisfies_required（火 / 雷杀也进不了目标池）"),
+    # ---- skills/awakening.py：界徐庶【诛害】（M6 票 06） ----
+    (
+        "src/sgs/skills/awakening.py",
+        "ZHUHAI_FLOW",
+        'card_types=("slash",),',
+    ): Rule(FAMILY, 1, "【诛害】可用的【杀】按**家族**判（PickCards 的 card_types 走 satisfies_required：火 / 雷 / 转化杀同族）"),
+    (
+        "src/sgs/skills/awakening.py",
+        "_zhuhai_illegal_cards",
+        'if not satisfies_required(card, "slash"):',
+    ): Rule(FAMILY, 1, "距离 / 次数闸门逐张判「是不是【杀】」同样按家族（火 / 雷 / 转化杀与普通杀同一条使用规则）"),
+    (
+        "src/sgs/skills/awakening.py",
+        "_zhuhai_plan",
+        'and satisfies_required(state.card(card_id), "slash")',
+    ): Rule(FAMILY, 1, "available 判据与选择面同源（family-aware，避免「计划问、步骤却付不起」）"),
     # ---- skills/virtual.py：虚拟牌命名空间与产物 ----
     (
         "src/sgs/skills/virtual.py",

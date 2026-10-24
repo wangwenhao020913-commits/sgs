@@ -35,6 +35,7 @@ __all__ = [
     "DeckShuffleDelta",
     "Delta",
     "HpChangeDelta",
+    "HpMaxChangeDelta",
     "IdentityDealDelta",
     "IdentityRevealDelta",
     "SkillGainDelta",
@@ -67,6 +68,26 @@ class HpChangeDelta(_FrozenModel):
     """体力被写成某个值（``apply_hp`` 是唯一改体力的口）。"""
 
     delta_type: Literal["hp_change"] = "hp_change"
+    seat: int
+    before: int
+    after: int
+    amount: int
+
+
+class HpMaxChangeDelta(_FrozenModel):
+    """一个座位的**体力上限**被写成某个值（M6 票 06 的觉醒技"减 1 点体力上限"）。
+
+    与 :class:`HpChangeDelta` 并列而不是复用它：体力上限与当前体力是**两个独立事实**
+    （§四 4.15 的四种数值变化事件各自建模），合并会让"减上限但体力不变"（【潜心】）
+    与"上限与体力同时下调"（【勤学】在满体力时）无法区分。减上限同时须调整体力值的那
+    一档由调用方另发一条 ``hp_change``（规则：减上限前体力值等于上限 ⇒ 同步调整），
+    故记录流里两条 delta 并存就是完整事实。
+
+    **公开事实**：体力上限在投影（``PlayerPublic.hp_max``）里本来就可见，故载荷原样下发，
+    不进不泄露的裁剪面（与 ``hp_change`` 同档）。
+    """
+
+    delta_type: Literal["hp_max_change"] = "hp_max_change"
     seat: int
     before: int
     after: int
@@ -201,6 +222,7 @@ class SkillSuppressDelta(_FrozenModel):
 Delta = Annotated[
     CardMoveDelta
     | HpChangeDelta
+    | HpMaxChangeDelta
     | ChainedChangeDelta
     | WineChangeDelta
     | CardRevealDelta

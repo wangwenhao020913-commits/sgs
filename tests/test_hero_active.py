@@ -434,6 +434,10 @@ def test_the_phase_reset_mask_covers_every_phase_bit_and_nothing_else():
 
     assert catalog_module._PHASE_STATE_MASK == phase_bits
     assert not (catalog_module._LIMITED_USED & phase_bits), "整局位不得与阶段位重叠"
+    assert not (catalog_module._AWAKENED & phase_bits), "觉醒位（票 06）也不得与阶段位重叠"
+    assert not (catalog_module._AWAKENED & catalog_module._LIMITED_USED), (
+        "觉醒位与限定技已用位各占一位、互不重叠"
+    )
 
     state = build_state(
         pack=PACK,
@@ -448,6 +452,23 @@ def test_the_phase_reset_mask_covers_every_phase_bit_and_nothing_else():
 
     assert state.skill_state == {key: catalog_module._LIMITED_USED}, (
         "阶段位清掉、整局已用位保留同一个键"
+    )
+
+    # M6 票 06：觉醒位同样跨阶段保留（【勤学】在准备 / 结束阶段都可能触发，觉醒后另一
+    # 条挂接不得再触发；出牌阶段复位更不能让它复活）。
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_xushu"), SeatSpec()],
+        deck=_deck_excluding(),
+        turn_seat=0,
+    )
+    awakened_key = "0:hero.jie_xushu.qianxue:HERO_CARD:hero.jie_xushu.qianxue"
+    state.skill_state[awakened_key] = catalog_module._AWAKENED | active_module._USED
+
+    reset_phase_skill_state(state)
+
+    assert state.skill_state == {awakened_key: catalog_module._AWAKENED}, (
+        "阶段位清掉、觉醒位保留同一个键"
     )
 
 

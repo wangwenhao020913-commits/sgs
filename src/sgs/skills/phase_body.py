@@ -310,6 +310,15 @@ _KEJI = PhaseBodySkill(
     flow=KEJI_FLOW,
     available=_keji_available,
 )
+_KEJI_JIE = PhaseBodySkill(
+    # 界吕蒙【克己】（M6 票 06）：牌面与标准版**逐字相同**（§十九 L2135），故共用同一条
+    # 流水线与同一条"本阶段没用过【杀】"前提；界版只是另一个武将 id（同一真名的两版不并存）。
+    hero_id="jie_lvmeng",
+    short_id="keji",
+    timing=Timing.PHASE_DISCARD_START,
+    flow=KEJI_FLOW,
+    available=_keji_available,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -385,10 +394,11 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _TUXI,
     _LUOYI,
     _KEJI,
+    _KEJI_JIE,
     _TISHEN,
 )
-"""L 族六条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
-票 03 的【克己】、票 05 的【替身】）。"""
+"""L 族七条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
+票 03 的【克己】、票 05 的【替身】、票 06 的界【克己】）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "yingzi": "多摸一张牌",
@@ -432,7 +442,7 @@ def phase_body_activation_plans() -> dict[str, Any]:
 
 
 def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
-    """L 族六条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
+    """L 族七条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
 
     六条都**非锁定**（技能面写"你可以"）⇒ 先问"是否发动"再执行；``carrier = HERO``
     ⇒ 优先级档由载体派生；``skill_type`` 取自声明（缺省 ``NORMAL``，【替身】是

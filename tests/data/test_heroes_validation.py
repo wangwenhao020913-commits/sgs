@@ -414,7 +414,13 @@ def test_the_standard_table_stays_the_25_and_the_jie_table_is_loaded_separately(
     assert standard.pack_id == "standard"
     assert len(standard.heroes) == STANDARD_HERO_COUNT
     assert jie.pack_id == "jie"
-    assert [hero.id for hero in jie.heroes] == ["jie_guanyu", "jie_machao", "jie_zhangfei"]
+    assert [hero.id for hero in jie.heroes] == [
+        "jie_guanyu",
+        "jie_machao",
+        "jie_zhangfei",
+        "jie_xushu",
+        "jie_lvmeng",
+    ]
     assert {hero.id for hero in standard.heroes}.isdisjoint(
         {hero.id for hero in jie.heroes}
     ), "界版武将 id 与标准版各自独立（不改既有 id）"
@@ -431,7 +437,15 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     guanyu = jie.by_id("jie_guanyu")
     machao = jie.by_id("jie_machao")
     zhangfei = jie.by_id("jie_zhangfei")
-    assert guanyu is not None and machao is not None and zhangfei is not None
+    xushu = jie.by_id("jie_xushu")
+    lvmeng = jie.by_id("jie_lvmeng")
+    assert (
+        guanyu is not None
+        and machao is not None
+        and zhangfei is not None
+        and xushu is not None
+        and lvmeng is not None
+    )
 
     assert (guanyu.name, guanyu.true_name, guanyu.version) == ("界关羽", "关羽", "jie-ol")
     assert (guanyu.kingdom, guanyu.gender, guanyu.hp_max) == (
@@ -465,8 +479,100 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
         SkillType.LIMITED,
     ], "【替身】是限定技（§四 L350–L355：整局只能发动一次）"
 
+    # M6 票 06：界徐庶 / 界吕蒙。觉醒技与 ☆ 派生技能都在技能清单里，☆ 用
+    # ``granted_by`` 记"由哪条觉醒技获得"（数据字段，不从名字里的 ☆ 派生）。
+    assert (xushu.name, xushu.true_name, xushu.version) == ("界徐庶", "徐庶", "jie-ol")
+    assert (xushu.kingdom, xushu.gender, xushu.hp_max) == (
+        Kingdom.SHU,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in xushu.skills] == ["zhuhai", "qianxue", "jianyan"]
+    assert [skill.skill_type for skill in xushu.skills] == [
+        SkillType.NORMAL,
+        SkillType.AWAKENING,
+        SkillType.NORMAL,
+    ], "【潜心】是觉醒技（§十九 L2114：觉醒技 = 满足条件时强制发动）"
+    assert xushu.skills[2].granted_by == "qianxue", "☆荐言由【潜心】觉醒后获得"
+    assert [skill.granted_by for skill in xushu.skills[:2]] == [None, None]
+
+    assert (lvmeng.name, lvmeng.true_name, lvmeng.version) == ("界吕蒙", "吕蒙", "jie-ol")
+    assert (lvmeng.kingdom, lvmeng.gender, lvmeng.hp_max) == (
+        Kingdom.WU,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in lvmeng.skills] == ["keji", "qinxue", "gongxin"]
+    assert [skill.skill_type for skill in lvmeng.skills] == [
+        SkillType.NORMAL,
+        SkillType.AWAKENING,
+        SkillType.NORMAL,
+    ]
+    assert lvmeng.skills[2].granted_by == "qinxue", "☆攻心由【勤学】觉醒后获得"
+
     assert all(hero.true_name for hero in jie.heroes), "界版每名都带真名"
     assert all(hero.enabled for hero in jie.heroes), "边界突破 P1 起界将逐批启用"
+
+
+def test_a_star_skill_declares_its_awakening_and_is_not_on_the_hero_card():
+    """☆ 技能的**唯一**来源是觉醒技的"获得"：武将牌不产出它的实例。
+
+    判据 = 数据侧 ``granted_by`` 指向**同一武将**的觉醒技；载体解析读
+    ``hero_card_skill_ids``（只含非 ☆ 条目），故未觉醒时不存在实例（本票验收的
+    "禁：用觉醒前的状态断言没有这个技能"在技能侧）。
+    """
+    from sgs.data import hero_card_skill_ids
+
+    jie = load_heroes("jie")
+    for hero in jie.heroes:
+        awakening_ids = {
+            skill.id for skill in hero.skills if skill.skill_type is SkillType.AWAKENING
+        }
+        star_ids = {
+            skill.id for skill in hero.skills if skill.granted_by is not None
+        }
+        for skill in hero.skills:
+            if skill.granted_by is not None:
+                assert skill.granted_by in awakening_ids, (
+                    f"{hero.id}.{skill.id} 的 granted_by 不是本武将的觉醒技：{skill.granted_by}"
+                )
+        assert set(hero_card_skill_ids(hero.id)) == {
+            hero_skill_id(hero.id, skill.id)
+            for skill in hero.skills
+            if skill.id not in star_ids
+        }, f"{hero.id} 的武将牌载体不该含 ☆ 技能"
+
+    assert hero_card_skill_ids("jie_xushu") == (
+        "hero.jie_xushu.zhuhai",
+        "hero.jie_xushu.qianxue",
+    )
+    assert hero_card_skill_ids("jie_lvmeng") == (
+        "hero.jie_lvmeng.keji",
+        "hero.jie_lvmeng.qinxue",
+    )
+
+
+def test_granted_by_must_name_an_awakening_skill_of_the_same_hero():
+    """加载期校验：``granted_by`` 指向不存在的技能 / 非觉醒技，都必须报错。"""
+    raw = load_heroes("jie").model_dump(mode="json")
+    for hero in raw["heroes"]:
+        if hero["id"] == "jie_xushu":
+            hero["skills"][2]["granted_by"] = "no_such_skill"
+    with pytest.raises(DataLoadError) as excinfo:
+        validate_heroes(raw, file="heroes.jie.json")
+    assert "heroes.granted_by_unknown" in {
+        error.rule_id for error in excinfo.value.errors
+    }
+
+    raw = load_heroes("jie").model_dump(mode="json")
+    for hero in raw["heroes"]:
+        if hero["id"] == "jie_xushu":
+            hero["skills"][2]["granted_by"] = "zhuhai"
+    with pytest.raises(DataLoadError) as excinfo:
+        validate_heroes(raw, file="heroes.jie.json")
+    assert "heroes.granted_by_not_awakening" in {
+        error.rule_id for error in excinfo.value.errors
+    }
 
 
 def test_hero_skill_ids_lookup_covers_the_jie_supplement():
@@ -486,6 +592,16 @@ def test_hero_skill_ids_lookup_covers_the_jie_supplement():
     assert hero_skill_ids("jie_zhangfei") == (
         "hero.jie_zhangfei.paoxiao",
         "hero.jie_zhangfei.tishen",
+    )
+    assert hero_skill_ids("jie_xushu") == (
+        "hero.jie_xushu.zhuhai",
+        "hero.jie_xushu.qianxue",
+        "hero.jie_xushu.jianyan",
+    )
+    assert hero_skill_ids("jie_lvmeng") == (
+        "hero.jie_lvmeng.keji",
+        "hero.jie_lvmeng.qinxue",
+        "hero.jie_lvmeng.gongxin",
     )
     assert hero_skill_ids("guanyu") == ("hero.guanyu.wusheng",), "标准版查法一字不变"
 

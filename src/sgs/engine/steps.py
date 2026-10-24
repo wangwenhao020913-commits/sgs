@@ -100,6 +100,8 @@ class FrameHost(StepHost, Protocol):
 
     def apply_timing_ops(self, frame: Frame, timing: Timing) -> Any: ...
 
+    def note_damage_dealt(self, seat: int) -> bool: ...
+
     def move_used_card_to_processing(self, frame: Frame) -> Control: ...
 
     def move_used_card_to_judge_zone(self, frame: Frame) -> None: ...
@@ -875,6 +877,11 @@ def damage_finalize_amount(host: FrameHost, frame: Frame) -> None:
     frame.data["amount"] = amount
     frame.data[CHAIN_RESET_KEY] = reset
     frame.data[CHAIN_TRIGGER_KEY] = reset and not bool(frame.data.get("chain"))
+    source = frame.data.get("source")
+    if amount > 0 and not has_tag(frame, Tag.PREVENTED) and source is not None:
+        # M6 票 06【诛害】的判据：**造成过伤害**（数值定稿且 > 0、未被防止）。
+        # 在"受到伤害时"整步之后记，故被【寒冰剑】一类效果防止的伤害不算。
+        host.note_damage_dealt(int(source))
     return None
 
 

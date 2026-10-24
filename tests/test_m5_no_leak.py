@@ -44,6 +44,7 @@ from sgs.engine import (  # noqa: E402
     DeckShuffleRecord,
     Engine,
     HpChangeRecord,
+    HpMaxChangeRecord,
     IdentityDealRecord,
     IdentityRevealRecord,
     SkillGainRecord,
@@ -604,6 +605,10 @@ def _delta_records() -> dict[str, object]:
         "hp_change": HpChangeRecord(
             seq=102, frame_id=0, depth=0, seat=1, before=4, after=3, amount=1
         ),
+        # M6 票 06 的体力上限变化（觉醒技）：与 hp_change 同档的公开事实。
+        "hp_max_change": HpMaxChangeRecord(
+            seq=112, frame_id=0, depth=0, seat=1, before=4, after=3, amount=1
+        ),
         "chained_change": ChainedChangeRecord(
             seq=103, frame_id=0, depth=0, seat=1, chained=True
         ),
@@ -679,8 +684,8 @@ def test_every_delta_type_has_a_no_leak_case() -> None:
     """delta 类型表与判据表**双向**对齐：新增类型必须登记一条不泄露判据。"""
     schema_types = _delta_schema_types()
     cases = _delta_records()
-    assert len(schema_types) == 11, (
-        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 11 种写）："
+    assert len(schema_types) == 12, (
+        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 12 种写）："
         f"{sorted(schema_types)}"
     )
     missing = sorted(set(schema_types) - set(cases))
@@ -726,8 +731,9 @@ def test_every_delta_record_is_redacted_for_a_human_viewer() -> None:
             assert payload["identity"] == "rebel"
         elif delta_type == "card_move":
             _assert_card_faces_absent(payload, tuple(raw["cards"]))
-        elif delta_type in ("skill_gain", "skill_lose", "skill_suppress"):
-            # 技能三态（M6 票 04）：座位 + 技能 id 是公开事实，没有可裁的隐藏面。
+        elif delta_type in ("skill_gain", "skill_lose", "skill_suppress", "hp_max_change"):
+            # 技能三态（M6 票 04）/ 体力上限变化（M6 票 06）：座位 + 技能 id / 数值都是
+            # 公开事实（体力上限本来就在投影里），没有可裁的隐藏面。
             assert payload == raw, f"{delta_type} 是公开事实，不该被裁剪：{payload}"
             assert payload["seat"] == 1
         else:

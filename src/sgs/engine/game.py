@@ -94,6 +94,7 @@ from sgs.state import (
     FrameKind,
     GameState,
     HpChangeDelta,
+    HpMaxChangeDelta,
     IdentityRevealDelta,
     MoveReason,
     Pass,
@@ -2366,6 +2367,55 @@ class Engine:
         self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
         return delta
 
+    def reduce_hp_max(self, frame: Frame, seat: int, amount: int = 1) -> HpMaxChangeDelta:
+        """**减体力上限**（M6 票 06 的唯一写入口；觉醒技"减 1 点体力上限"）。
+
+        规则（§四 4.15「体力上限变化」）：
+        - 减上限**不会**自动回血（体力值不因上限变小而上升）；
+        - 若减上限前体力值**等于**上限，则减上限的同时**须把体力值调整至**新上限
+          （`L436–437`）。因此"满体力觉醒"会同时落两条 delta：``hp_max_change`` 与
+          ``hp_change``，而"已受伤觉醒"只有前一条；
+        - 上限减为 0 ⇒ 直接死亡、不进濒死（`L431–433`）。M6 的两个载体只会 4 → 3，
+          该档**没有载体**，故本原语只接受减后仍 ≥ 1 的调用（越界即编程错误，不静默
+          实现半套死亡流程）。
+
+        返回值 = 这条 ``hp_max_change`` 事件；``frame`` 是承载帧（技能帧），记录坐标与
+        同帧的 ``skill_gain`` 一致。
+        """
+        player = self.state.player(seat)
+        before_max = player.hp_max
+        before_hp = player.hp
+        after_max = before_max - amount
+        if after_max < 1:
+            raise ValueError(
+                f"体力上限 {before_max} 减 {amount} 后为 {after_max}：M6 没有该档载体"
+                "（上限减为 0 的直接死亡流程未落地）"
+            )
+        player.hp_max = after_max
+        delta = HpMaxChangeDelta(
+            seat=seat, before=before_max, after=after_max, amount=amount
+        )
+        self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+        if before_hp == before_max and before_hp > after_max:
+            # 规则 L436–437：减上限前满体力 ⇒ 体力值同步调整到新上限（**不回血**，只下调）。
+            self.apply_hp_change(frame, seat, after_max)
+        return delta
+
+    def note_damage_dealt(self, seat: int) -> bool:
+        """记"``seat`` 本回合**造成过伤害**"的座位级事实（M6 票 06 的【诛害】判据）。
+
+        写入唯一入口：伤害数值定稿且 > 0、未被防止、有来源时由
+        :func:`~sgs.engine.steps.damage_finalize_amount` 调一次。作用域 = **本回合**：
+        :meth:`_clear_turn_effects` 在回合末把所有座位的这一位清掉（无论伤害是谁造成的），
+        故"本回合造成过伤害"只覆盖当前回合。**不发 delta**（与 ``luoyi_active`` 同姿态：
+        没有 JSON 读者，回放按同一条伤害结算重建）。返回值 = 状态真的变了吗。
+        """
+        player = self.state.player(seat)
+        if player.damage_dealt_this_turn:
+            return False
+        player.damage_dealt_this_turn = True
+        return True
+
     def set_chained(self, frame: Frame | None, seat: int, chained: bool) -> bool:
         """写一个座位的**横置**状态并落一条 ``chained_change``（M5-03 的唯一写入口）。
 
@@ -2547,10 +2597,10 @@ class Engine:
     def _clear_turn_effects(self) -> None:
         """回合末清理作用域 = ``TURN`` 的座位级效果（M6 票 04；票 05 补【咆哮】②）。
 
-        四样一起清：失效记录（逐条落 ``skill_suppress = false``，使"可恢复"在记录流里
-        可被看见）、手牌禁令、红桃【杀】加伤目标、以及【咆哮】②的"下一次【杀】伤害 +1"
-        待消费标记。与【酒】/【裸衣】同一收尾点（:meth:`_turn_after_end`），故"本回合"的
-        作用域不跨回合。
+        五样一起清：失效记录（逐条落 ``skill_suppress = false``，使"可恢复"在记录流里
+        可被看见）、手牌禁令、红桃【杀】加伤目标、【咆哮】②的"下一次【杀】伤害 +1"
+        待消费标记、以及 M6 票 06 的"本回合造成过伤害"（【诛害】的判据）。与【酒】/
+        【裸衣】同一收尾点（:meth:`_turn_after_end`），故"本回合"的作用域不跨回合。
         """
         for player in self.state.players:
             for record in tuple(player.suppressed_skills):
@@ -2570,6 +2620,7 @@ class Engine:
                 )
             player.hand_card_prohibited = False
             player.heart_slash_bonus_against.clear()
+            player.damage_dealt_this_turn = False
             self._clear_paoxiao_bonus(player.seat)
 
     def reveal_card(self, frame: Frame | None, seat: int, card: CardRef) -> None:

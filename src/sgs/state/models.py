@@ -269,6 +269,17 @@ class Player(BaseModel):
     **不发 delta**：与 ``luoyi_active`` 同姿态——没有 JSON 读者，记录流里的使用 / 打出
     动作已足以在回放时重建它。
     """
+    damage_dealt_this_turn: bool = False
+    """本回合是否**造成过伤害**（M6 票 06 的【诛害】判据：§十九 L2111–L2113）。
+
+    写入唯一入口 :meth:`Engine.note_damage_dealt`（伤害数值定稿且 > 0、未被防止、
+    有来源时由伤害帧调一次）；作用域 = **本回合**，回合末由
+    :meth:`Engine._clear_turn_effects` 把所有座位的这一位清掉。判据是"本回合**造成过**
+    伤害"而不是"最近一次伤害的来源"，故一次成立即保持到回合末。
+
+    **不发 delta**：与 ``luoyi_active`` 同姿态——没有 JSON 读者，回放按同一条伤害结算
+    重建（本字段不进记录流）。
+    """
     identity: Identity | None = None
     """座位级身份（票 13 §3）：无身份局恒 ``None``，身份局由 ``build_initial`` 一次发放。
 

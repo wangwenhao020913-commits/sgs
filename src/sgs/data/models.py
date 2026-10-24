@@ -121,9 +121,11 @@ class SkillType(str, Enum):
 
     闭集 = ``NORMAL``（普通技）/ ``LORD``（主公技）/ ``LIMITED``（限定技）/
     ``AWAKENING``（觉醒技）。标准版 25 名只落前两类；``LIMITED`` 从 M6 票 05（界张飞
-    【替身】）起有真实载体，判定跑在 :class:`~sgs.skills.catalog.SkillDef` 上（数据侧的取值
-    是**声明**，供界面与加载期对账，不参与派发）。类型与 ``locked``（锁定 / 非锁定）**正交**：
-    限定技仍各自可以是锁定或非锁定。
+    【替身】）、``AWAKENING`` 从 M6 票 06（界徐庶【潜心】/ 界吕蒙【勤学】）起有真实载体。
+    数据侧的取值是**声明**（供界面与加载期对账）：限定技的派发判据读
+    :class:`~sgs.skills.catalog.SkillDef` 上的同一个字段；觉醒技的"强制发动"也读定义上的
+    ``skill_type``。类型与 ``locked``（锁定 / 非锁定）**正交**：限定 / 觉醒技仍各自可以是
+    锁定或非锁定（本批两条觉醒技都是非锁定，仍受"所有非锁定技失效"覆盖）。
     """
 
     NORMAL = "NORMAL"
@@ -141,11 +143,19 @@ class HeroSkill(_FrozenModel):
     条目自带的 ``skill_type`` 是数据侧的声明，加载期会与 ``skills.CATALOG`` 里那份
     定义的 ``SkillType`` 对账（**仅对启用的武将**，见 :mod:`sgs.data.loader`）；
     身份门控的规范落点仍读定义上的字段，不读这里。
+
+    ``granted_by``（M6 票 06）是 **☆ 标记**：非 ``None`` = 这条技能由同武将的某条
+    **觉醒技**（短 id）获得。☆ 技能的实例**只**来自"获得"来源
+    （``Player.granted_skills``），武将牌载体不产出它
+    （:func:`sgs.data.hero_card_skill_ids` 已把它排除），故未觉醒时"没有这个技能"
+    是载体解析的结构事实。它是数据字段而不是从名字里的 "☆" 派生："由哪条觉醒技获得"
+    本身是行为事实，加载期会校验它指向同一武将的觉醒技。
     """
 
     id: str
     name: str
     skill_type: SkillType
+    granted_by: str | None = None
 
 
 class Hero(_FrozenModel):

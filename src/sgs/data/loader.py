@@ -29,7 +29,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from .errors import DataLoadError, LoadError
-from .models import Category, CardType, ContentPack, Deck, HeroTable
+from .models import Category, CardType, ContentPack, Deck, HeroTable, SkillType
 
 __all__ = [
     "DEFAULT_PACK_ID",
@@ -39,6 +39,7 @@ __all__ = [
     "KNOWN_SCHEMA_VERSIONS",
     "card_category",
     "enabled_hero_ids",
+    "hero_card_skill_ids",
     "hero_skill_id",
     "hero_skill_ids",
     "load_content_pack",
@@ -728,6 +729,35 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
                     )
                 )
 
+        # M6 票 06：☆ 的 ``granted_by`` 必须指向**同一武将**的一条**觉醒技**。
+        # 与技能引用闭合分开核对：觉醒技本身就在这份清单里，故不依赖"该技能已在
+        # ``CATALOG`` 里闭合"（那条只对启用的武将查）。
+        declared = {skill.id: skill for skill in hero.skills}
+        for skill_index, skill in enumerate(hero.skills):
+            if skill.granted_by is None:
+                continue
+            target = declared.get(skill.granted_by)
+            if target is None:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/skills/{skill_index}/granted_by",
+                        expected="同一武将技能清单里的一条觉醒技短 id",
+                        got=repr(skill.granted_by),
+                        rule_id="heroes.granted_by_unknown",
+                    )
+                )
+            elif target.skill_type is not SkillType.AWAKENING:
+                errors.append(
+                    LoadError(
+                        file=file,
+                        loc=f"{base}/skills/{skill_index}/granted_by",
+                        expected=f"「{skill.granted_by}」是觉醒技（☆ 只能由觉醒技获得）",
+                        got=target.skill_type.value,
+                        rule_id="heroes.granted_by_not_awakening",
+                    )
+                )
+
     return errors
 
 
@@ -805,6 +835,26 @@ def hero_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tuple[str
         hero = table.by_id(hero_id)
         if hero is not None:
             return tuple(hero_skill_id(hero.id, skill.id) for skill in hero.skills)
+    return ()
+
+
+def hero_card_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tuple[str, ...]:
+    """某武将**武将牌上**（非 ☆）的全限定技能 id，按数据文件里的顺序（M6 票 06）。
+
+    与 :func:`hero_skill_ids` 的差别只有一处：**排除 ``granted_by`` 非空的 ☆ 条目**。
+    载体解析的武将牌那一路读本函数——☆ 技能的实例只来自"获得"来源
+    （``Player.granted_skills``），武将牌不产出它，故未觉醒时"没有这个技能"是结构事实，
+    不靠条件在派发期挡。``hero_skill_ids`` 仍回答"这名武将总共带哪些技能"（加载期闭合
+    校验与界面清单读它），两者共用同一份数据、不各抄一份名单。
+    """
+    for table in load_hero_tables(pack_id):
+        hero = table.by_id(hero_id)
+        if hero is not None:
+            return tuple(
+                hero_skill_id(hero.id, skill.id)
+                for skill in hero.skills
+                if skill.granted_by is None
+            )
     return ()
 
 

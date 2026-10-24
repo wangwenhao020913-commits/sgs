@@ -41,7 +41,16 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from sgs.data import Color, Gender, SkillType, Suit, color_of_suit, hero_skill_id
+from sgs.data import (
+    Category,
+    Color,
+    Gender,
+    SkillType,
+    Suit,
+    card_category,
+    color_of_suit,
+    hero_skill_id,
+)
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
@@ -52,12 +61,15 @@ from sgs.effects import (
     behavior_for,
     check_targets,
     is_slash,
+    place_on_deck,
 )
 from sgs.state import (
     ActivateSkill,
     FrameKind,
     GameState,
     MoveReason,
+    SelectionSpec,
+    Slot,
     Zone,
     ZoneRef,
 )
@@ -1037,6 +1049,285 @@ YIJUE_FLOW = SkillFlow(
 """【义绝】的三步流水线：弃一张牌 → 选一名有手牌的其他角色 →（由其）展示一张手牌。"""
 
 
+
+# ---------------------------------------------------------------------------
+# 界徐庶 ☆【荐言】（M6 票 06）：选择类别 / 颜色 → 亮出牌堆直到符合 → 一名男性角色获得
+#
+# 规则原文（§十九 L2116–L2117）：
+#
+#     ☆荐言：出牌阶段限一次，你可以选择一种牌的类别或颜色，然后亮出牌堆中一张符合
+#            要求的牌并令一名男性角色获得此牌。
+#
+# "亮出牌堆中一张符合要求的牌"的结算口径（OL 牌面与通行实现）：**逐张亮出牌堆顶的牌，
+# 直到出现一张符合所选类别 / 颜色的牌**；最后那张交给选定的男性角色，**其余亮出的牌
+# 置入弃牌堆**。亮出的牌进**处理区**（公开区域）：牌面因此对所有参与者可见，且"其余
+# 置入弃牌堆"在同一次结算内完成（与【五谷丰登】的亮牌 / 收尾同一形状）。
+# ---------------------------------------------------------------------------
+
+JIANYAN = hero_skill_id("jie_xushu", "jianyan")
+"""界徐庶 ☆【荐言】的全限定技能 id（觉醒后由【潜心】授予）。"""
+
+JIANYAN_OPTIONS: tuple[str, ...] = (
+    Category.BASIC.value,
+    Category.TRICK.value,
+    Category.EQUIPMENT.value,
+    Color.RED.value,
+    Color.BLACK.value,
+)
+"""【荐言】的五个选项：三种**类别** + 两种**颜色**（`06` §5「程序化约定与偏离一手」裁定：类别与颜色同属一份
+闭集，不是两条技能；两条判据各自读数据层的唯一真源）。"""
+
+_JIANYAN_REVEALED = "jianyan_revealed"
+"""帧私有：本次发动已经亮出的牌 id（自顶向下；重入不重新亮牌、不重复消耗随机数）。"""
+
+_JIANYAN_MATCH = "jianyan_match"
+"""帧私有：最后那张符合要求的牌 id；``None`` = 牌堆 + 弃牌堆亮完也没有符合的。"""
+
+
+def _male_seats(state: GameState) -> tuple[int, ...]:
+    """**存活男性**座位（座位序）。【荐言】的受赠者池 = 全部男性角色（含发动者本人）。"""
+    return tuple(
+        player.seat
+        for player in state.players
+        if player.alive and player.gender is Gender.MALE
+    )
+
+
+def _jianyan_matches(state: GameState, card: Any, choice: str) -> bool:
+    """这张牌符不符合所选的**类别 / 颜色**（判据与选项同一闭集）。"""
+    if choice in {category.value for category in Category}:
+        return card_category(state.pack_id, card.type) is Category(choice)
+    return color_of_suit(card.suit) is Color(choice)
+
+
+def _jianyan_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：本阶段没用过 ∧ 至少有一名存活男性（没有合法受赠者 ⇒ 一个候选都不造）。"""
+    if not _can_offer(state, ctx):
+        return current
+    if not _male_seats(state):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _jianyan_reveal(
+    host: Any, frame: Any, choice: str, owner: int
+) -> tuple[tuple[int, ...], int | None]:
+    """逐张亮出牌堆顶的牌（进处理区）直到符合 ``choice``；返回（亮出的 id, 命中的 id）。
+
+    牌堆与弃牌堆都亮完仍没有符合的牌 ⇒ 返回 ``None``（其余照常置入弃牌堆）。``draw_open``
+    沿用摸牌的洗牌 / 短摸口径，但**不判平局**（亮牌不是摸牌）。
+    """
+    revealed: list[int] = []
+    while True:
+        drawn = host.draw_open(frame, 1, owner=owner)
+        if not drawn:
+            return tuple(revealed), None
+        card = drawn[0]
+        revealed.append(card.card_id)
+        if _jianyan_matches(host.state, card, choice):
+            return tuple(revealed), card.card_id
+
+
+def _jianyan_discard(host: Any, frame: Any, card_ids: tuple[int, ...], *, owner: int) -> Any:
+    """把亮出的其余牌置入弃牌堆（无归属主体，与【五谷丰登】的收尾同口径）。"""
+    if not card_ids:
+        return None
+    return host.move_in_frame(
+        frame,
+        host.state.refs(card_ids),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=None,
+        actor=owner,
+    )
+
+
+def _jianyan_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：亮牌 → 选一名男性角色 → 把命中的牌交给其，其余置入弃牌堆。
+
+    重入：亮牌结果缓存在帧私有（``_JIANYAN_REVEALED`` / ``_JIANYAN_MATCH``），故选人
+    询问挂起后续跑不会重新亮牌；两次搬牌各自有 ``move_in_frame`` 的"同一次移动"守卫。
+    """
+    owner = frame.data["source"]
+    if _JIANYAN_REVEALED not in frame.data:
+        revealed, matched = _jianyan_reveal(host, frame, str(answers["type"]), owner)
+        frame.data[_JIANYAN_REVEALED] = revealed
+        frame.data[_JIANYAN_MATCH] = matched
+    revealed = tuple(frame.data[_JIANYAN_REVEALED])
+    matched = frame.data[_JIANYAN_MATCH]
+    if matched is None:
+        return _jianyan_discard(host, frame, revealed, owner=owner)
+
+    pool = _male_seats(host.state)
+    answer = host.ask_option(
+        frame,
+        owner,
+        Timing.PHASE_PLAY_IDLE,
+        skill_id="jianyan:seat",
+        options=tuple(_seat_choice(seat) for seat in pool),
+    )
+    if host.suspended(answer):
+        return "stay"
+    recipient = _option_seat(answer)
+    leftovers = tuple(card_id for card_id in revealed if card_id != matched)
+    control = _jianyan_discard(host, frame, leftovers, owner=owner)
+    if control == "stay":
+        return "stay"
+    return host.move_in_frame(
+        frame,
+        host.state.refs((matched,)),
+        to_zone=ZoneRef(Zone.HAND, recipient),
+        reason=MoveReason.PUT,
+        owner=recipient,
+        actor=owner,
+    )
+
+
+JIANYAN_FLOW = SkillFlow(
+    name="jianyan",
+    steps=(
+        # 「选择一种牌的类别或颜色」：一次闭集选项（类别三项 + 颜色两项）。
+        PickOption(options=JIANYAN_OPTIONS, optional=False, key="type"),
+    ),
+    effect=_jianyan_effect,
+)
+"""【荐言】的一步流水线：选类别 / 颜色 → 亮牌直到符合 → 选一名男性角色获得。"""
+
+
+# ---------------------------------------------------------------------------
+# 界吕蒙 ☆【攻心】（M6 票 06）：观看一名其他角色的手牌 → 可展示一张红桃牌 →
+#                           弃置此牌 / 置于牌堆顶
+#
+# 规则原文（§十九 L2142–L2144）：
+#
+#     ☆攻心：出牌阶段限一次，你可以观看一名其他角色的手牌，然后你可以展示其中一张
+#            红桃牌并选择一项：1. 弃置此牌；2. 将此牌置于牌堆顶。
+#
+# "观看"是**这一次询问**的牌面授予（不写持久知识）：选牌询问把目标的**整副手牌**放进
+# ``revealed``，而可选槽**只**铺红桃（"你可以展示其中一张红桃牌"）——两者同一份询问，
+# 故观看与"能不能展示"不会各读一份状态。展示本身落 ``card_reveal``（公开事实）。
+# ---------------------------------------------------------------------------
+
+GONGXIN = hero_skill_id("jie_lvmeng", "gongxin")
+"""界吕蒙 ☆【攻心】的全限定技能 id（觉醒后由【勤学】授予）。"""
+
+GONGXIN_DISCARD = "discard"
+GONGXIN_DECK_TOP = "deck_top"
+"""【攻心】的两项：1. 弃置此牌；2. 将此牌置于牌堆顶。"""
+
+GONGXIN_OPTIONS: tuple[str, ...] = (GONGXIN_DISCARD, GONGXIN_DECK_TOP)
+
+_ASK_GONGXIN_HEART = "hero.jie_lvmeng.gongxin.heart"
+"""手写询问位置：【攻心】"展示其中一张红桃牌"的那次 ``ask_selection``。"""
+
+_GONGXIN_REVEALED = "gongxin_revealed"
+"""帧私有：这张红桃牌已经落过 ``card_reveal``（重入不重复展示）。"""
+
+
+def _gongxin_targets(state: GameState, owner: int) -> tuple[int, ...]:
+    """可以观看的对象：**其他存活且手牌非空**的角色（座位序）。"""
+    return tuple(
+        player.seat
+        for player in state.players
+        if player.alive and player.seat != owner and player.hand
+    )
+
+
+def _gongxin_pool(state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]) -> tuple[int, ...]:
+    del frame, chosen
+    return _gongxin_targets(state, owner)
+
+
+def _gongxin_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：本阶段没用过 ∧ 有可观看的其他角色。"""
+    if not _can_offer(state, ctx):
+        return current
+    if not _gongxin_targets(state, ctx.subject):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _gongxin_heart_face(host: Any, target: int) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
+    """可选槽 = 目标手牌里的**红桃**（可见槽：观看者已经看到了整副手牌）。"""
+    hearts = tuple(
+        card_id
+        for card_id in host.state.player(target).hand
+        if host.state.card(card_id).suit == Suit.HEART.value
+    )
+    slots = tuple(
+        Slot(ref=ZoneRef(Zone.HAND, target), card=host.state.card(card_id))
+        for card_id in hearts
+    )
+    return slots, hearts
+
+
+def _gongxin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：观看（整副手牌授予）→（可选）展示一张红桃 → 弃置 / 置于牌堆顶。"""
+    owner = frame.data["source"]
+    target = int(answers["seat"][0])
+    hand = tuple(host.state.player(target).hand)
+    picked = host.ask_selection(
+        frame,
+        owner=_ASK_GONGXIN_HEART,
+        key=f"gongxin:{target}",
+        actor=owner,
+        timing=Timing.PHASE_PLAY_IDLE,
+        spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=True),
+        build_face=lambda: _gongxin_heart_face(host, target),
+        # "观看"：目标的**整副手牌**只授予这一次询问的应答者（不进投影、不落 delta）。
+        revealed=tuple(host.state.refs(hand)),
+    )
+    if host.suspended(picked):
+        return "stay"
+    if not picked:
+        return None
+    card_id = int(picked[0])
+    if not frame.data.get(_GONGXIN_REVEALED):
+        frame.data[_GONGXIN_REVEALED] = True
+        # 展示是**公开事实**：落一条 card_reveal（牌随后才离开目标手牌）。
+        host.reveal_card(frame, target, host.state.card(card_id))
+    answer = host.ask_option(
+        frame,
+        owner,
+        Timing.PHASE_PLAY_IDLE,
+        skill_id="gongxin:option",
+        options=GONGXIN_OPTIONS,
+    )
+    if host.suspended(answer):
+        return "stay"
+    if answer.choice == GONGXIN_DISCARD:
+        return host.move_in_frame(
+            frame,
+            host.state.refs((card_id,)),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.DISCARD,
+            owner=owner,
+            actor=owner,
+        )
+    control = host.move_in_frame(
+        frame,
+        host.state.refs((card_id,)),
+        to_zone=ZoneRef(Zone.DECK),
+        reason=MoveReason.PUT,
+        owner=target,
+        actor=owner,
+    )
+    if control == "stay":
+        return "stay"
+    place_on_deck(host.state, (host.state.card(card_id),), to_top=True)
+    return None
+
+
+GONGXIN_FLOW = SkillFlow(
+    name="gongxin",
+    steps=(
+        PickSeats(lo=1, hi=1, pool=_gongxin_pool, optional=False, key="seat"),
+    ),
+    effect=_gongxin_effect,
+)
+"""【攻心】的流水线：选一名其他角色 → 观看其手牌 →（可）展示红桃 → 弃置 / 置顶。"""
+
+
 # ---------------------------------------------------------------------------
 # 登记：一条声明 = 候选回调 + 发动回调（两者共用同一个 skill_id）
 # ---------------------------------------------------------------------------
@@ -1109,8 +1400,13 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
             Modifier(ModifierPoint.DAMAGE_DEAL_AMOUNT, _yijue_heart_slash_bonus),
         ),
     ),
+    # 界徐庶 ☆【荐言】（M6 票 06）：觉醒后才有实例，故候选只在觉醒后的出牌阶段出现。
+    ActiveSkill("jie_xushu", "jianyan", _jianyan_offers, flow=JIANYAN_FLOW),
+    # 界吕蒙 ☆【攻心】（M6 票 06）：同上。
+    ActiveSkill("jie_lvmeng", "gongxin", _gongxin_offers, flow=GONGXIN_FLOW),
 )
-"""A 族八条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】）。
+"""A 族十条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】+
+票 06 的两条 ☆ 技能【荐言】/【攻心】）。
 
 【苦肉】是唯一一条**零步**的 A 族技能：没有步骤可渲染 ⇒ 不翻预发动，骨架候选直接进
 ``legal_actions``；【义绝】的三步由发动后的询问逐步收集，同样不翻预发动；其余六条都走
@@ -1132,6 +1428,8 @@ _REQUIREMENTS: dict[str, str] = {
     "jieyin": "弃两张手牌，选择一名已受伤男性角色",
     "kurou": "失去1点体力，然后摸两张牌",
     "yijue": "弃置一张牌：令一名其他角色展示一张手牌（红则获得并可令其回复；黑则本回合其非锁定技失效、不能使用或打出手牌）",
+    "jianyan": "选择一种牌的类别或颜色，亮出牌堆中一张符合要求的牌并令一名男性角色获得",
+    "gongxin": "观看一名其他角色的手牌，然后可以展示其中一张红桃牌并选择：弃置此牌 / 将此牌置于牌堆顶",
 }
 """A 族八条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
@@ -1176,6 +1474,16 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
         "seat": "选择一名其他角色",
         "suit": "由目标选择一种花色",
         "card": "由目标从你的手牌中选择一张",
+    },
+    "jianyan": {
+        "type": "选择一种牌的类别或颜色（基本牌 / 锦囊牌 / 装备牌 / 红色 / 黑色）",
+        "seat": "选择一名男性角色获得这张牌",
+    },
+    "gongxin": {
+        "seat": "选择一名手牌非空的其他角色",
+        # SELECT_CARDS 的逐步文案键恒读 "card"（与【青囊】同一套键）。
+        "card": "观看其手牌：选择一张红桃牌展示（可放弃）",
+        "option": "选择：弃置此牌 / 将此牌置于牌堆顶",
     },
 }
 """**多步技能**逐步的问法（票 01 起）；键 = 步骤名（判据见 :attr:`SkillDef.step_requirements`）。

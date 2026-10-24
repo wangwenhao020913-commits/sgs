@@ -12,8 +12,16 @@
       "version": "jie-ol",
       "enabled": true,
       "skills": [
-        { "id": "wusheng", "name": "武圣", "skill_type": "NORMAL" },
-        { "id": "yijue", "name": "义绝", "skill_type": "NORMAL" }
+        {
+          "id": "wusheng",
+          "name": "武圣",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yijue",
+          "name": "义绝",
+          "skill_type": "NORMAL"
+        }
       ]
     },
     {
@@ -26,8 +34,16 @@
       "version": "jie-ol",
       "enabled": true,
       "skills": [
-        { "id": "mashu", "name": "马术", "skill_type": "NORMAL" },
-        { "id": "tieqi", "name": "铁骑", "skill_type": "NORMAL" }
+        {
+          "id": "mashu",
+          "name": "马术",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "tieqi",
+          "name": "铁骑",
+          "skill_type": "NORMAL"
+        }
       ]
     },
     {
@@ -40,8 +56,72 @@
       "version": "jie-ol",
       "enabled": true,
       "skills": [
-        { "id": "paoxiao", "name": "咆哮", "skill_type": "NORMAL" },
-        { "id": "tishen", "name": "替身", "skill_type": "LIMITED" }
+        {
+          "id": "paoxiao",
+          "name": "咆哮",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "tishen",
+          "name": "替身",
+          "skill_type": "LIMITED"
+        }
+      ]
+    },
+    {
+      "id": "jie_xushu",
+      "name": "界徐庶",
+      "true_name": "徐庶",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "zhuhai",
+          "name": "诛害",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "qianxue",
+          "name": "潜心",
+          "skill_type": "AWAKENING"
+        },
+        {
+          "id": "jianyan",
+          "name": "荐言",
+          "skill_type": "NORMAL",
+          "granted_by": "qianxue"
+        }
+      ]
+    },
+    {
+      "id": "jie_lvmeng",
+      "name": "界吕蒙",
+      "true_name": "吕蒙",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "keji",
+          "name": "克己",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "qinxue",
+          "name": "勤学",
+          "skill_type": "AWAKENING"
+        },
+        {
+          "id": "gongxin",
+          "name": "攻心",
+          "skill_type": "NORMAL",
+          "granted_by": "qinxue"
+        }
       ]
     }
   ]

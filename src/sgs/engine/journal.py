@@ -28,6 +28,7 @@ from sgs.state import (
     Delta,
     FrameKind,
     HpChangeDelta,
+    HpMaxChangeDelta,
     IdentityDealDelta,
     IdentityRevealDelta,
     Query,
@@ -54,6 +55,7 @@ __all__ = [
     "GameEndRecord",
     "Header",
     "HpChangeRecord",
+    "HpMaxChangeRecord",
     "IdentityDealRecord",
     "IdentityRevealRecord",
     "JournalRecord",
@@ -118,6 +120,15 @@ class CardMoveRecord(CardMoveDelta):
 
 
 class HpChangeRecord(HpChangeDelta):
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class HpMaxChangeRecord(HpMaxChangeDelta):
+    """一次**体力上限**变化（M6 票 06）：觉醒技"减 1 点体力上限"。"""
+
     kind: Literal["delta"] = "delta"
     seq: int
     frame_id: int
@@ -206,6 +217,7 @@ class IdentityRevealRecord(IdentityRevealDelta):
 DeltaRecord = Annotated[
     CardMoveRecord
     | HpChangeRecord
+    | HpMaxChangeRecord
     | ChainedChangeRecord
     | WineChangeRecord
     | CardRevealRecord
@@ -328,6 +340,8 @@ def wrap_delta(delta: Delta, *, seq: int, frame_id: int, depth: int) -> DeltaRec
         return CardMoveRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, HpChangeDelta):
         return HpChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, HpMaxChangeDelta):
+        return HpMaxChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, ChainedChangeDelta):
         return ChainedChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, WineChangeDelta):

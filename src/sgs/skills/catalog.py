@@ -33,7 +33,14 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, TypeAlias
 
-from sgs.data import Color, Identity, SkillType, color_of_suit, hero_skill_id, hero_skill_ids
+from sgs.data import (
+    Color,
+    Identity,
+    SkillType,
+    color_of_suit,
+    hero_card_skill_ids,
+    hero_skill_id,
+)
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
@@ -95,6 +102,7 @@ __all__ = [
     "SkillSource",
     "SkillSourceKind",
     "activation_plan",
+    "awakening_skill_awakened",
     "damage_point_index",
     "dispatch_seam",
     "dispatch_timing",
@@ -484,7 +492,10 @@ def resolve_instances(
                     SkillSource(SkillSourceKind.VIRTUAL_GRANT, skill_id=grant),
                 )
         if player.hero is not None:
-            for skill_id in hero_skill_ids(player.hero, pack_id=state.pack_id):
+            # M6 票 06：☆ 技能**不**是武将牌载体 —— 它们只来自"获得"来源
+            # （``hero_card_skill_ids`` 已排除 ``granted_by`` 非空的条目），故未觉醒时
+            # "没有这个技能"是结构事实，不靠条件在派发期挡。
+            for skill_id in hero_card_skill_ids(player.hero, pack_id=state.pack_id):
                 definition = CATALOG.get(skill_id)
                 if definition is not None:
                     _add_instance(
@@ -569,6 +580,28 @@ _LIMITED_USED = 0b1000
 """
 
 
+_AWAKENED = 0b1_0000
+"""**觉醒技已觉醒**位（M6 票 06；§四 4.12「觉醒技：满足条件时强制发动，通常为一次性转变」）。
+
+与 A 族的阶段位（``_PHASE_STATE_MASK``）和限定技的"已用"位（``_LIMITED_USED``）同处
+一个整数字段、**互不重叠**：出牌阶段复位只清阶段位，觉醒位跨整局保留，只有实例真的
+消失（``prune_skill_state``）才随键清掉。
+"""
+
+
+def _instance_awakened(state: GameState, instance: SkillInstance) -> bool:
+    """``instance`` 的**已觉醒**位是否已落（只看位，不解析实例）。"""
+    return bool(state.skill_state.get(instance_key(instance), 0) & _AWAKENED)
+
+
+def _mark_awakened(state: GameState, instance: SkillInstance) -> None:
+    """给**觉醒技**实例落"已觉醒"位（非觉醒技零动作 ⇒ 既有技能不写 ``skill_state``）。"""
+    if instance.definition.skill_type is not SkillType.AWAKENING:
+        return
+    key = instance_key(instance)
+    state.skill_state[key] = state.skill_state.get(key, 0) | _AWAKENED
+
+
 def _instance_used_once(state: GameState, instance: SkillInstance) -> bool:
     """``instance`` 的**已用**位是否已落（只看位，不解析实例；限定技的读取方专用）。"""
     return bool(state.skill_state.get(instance_key(instance), 0) & _LIMITED_USED)
@@ -592,6 +625,22 @@ def limited_skill_used(state: GameState, seat: int, skill_id: str) -> bool:
     for instance in resolve_instances(state, include_suppressed=True):
         if instance.owner == seat and instance.skill_id == skill_id:
             return _instance_used_once(state, instance)
+    return False
+
+
+def awakening_skill_awakened(state: GameState, seat: int, skill_id: str) -> bool:
+    """``seat`` 的 ``skill_id`` 这条**觉醒技**是否已经觉醒过（M6 票 06 的只读面）。
+
+    判据 = 该 ``(owner, skill_id)`` 的存活实例在 ``skill_state`` 里的
+    :data:`_AWAKENED` 位。与 :func:`limited_skill_used` 同姿态：用
+    ``include_suppressed=True`` 解析（**失效 ≠ 未觉醒**——暂时被挡住不复活觉醒）；
+    没有这条实例 / 不是觉醒技时恒 ``False``。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            if instance.definition.skill_type is not SkillType.AWAKENING:
+                return False
+            return _instance_awakened(state, instance)
     return False
 
 
@@ -760,11 +809,21 @@ def _dispatch(
     key: str,
     extra_instances: tuple[SkillInstance, ...] = (),
 ) -> Control:
-    """钩子与接缝共用的派发环（唯一一份）：锁定直接跑，非锁定先问"是否发动"。
+    """钩子与接缝共用的派发环（唯一一份）：强制类直接跑，其余先问"是否发动"。
 
     **只有答 ``ActivateSkill`` 才执行**——``Pass``（不发动）与 ``plan.available=False``
     （付不起）都跳过；这是"非锁定技的发动是询问出来的"这条规则（`GLOSSARY.md` 的**发动**）
     的唯一落点。暂停 = ``"stay"`，重入时整条链从头跑，但 `ask` 的应答按帧内键缓存。
+
+    **强制类 = 锁定技 ∪ 觉醒技**（§四 4.12：两者都是"满足条件即强制发动，不可选择不
+    发动"）。觉醒技**不并进 ``locked``**：``locked`` 是"锁定技"这一规则类型，同时被
+    "其所有非锁定技失效"的谓词读取；觉醒技是独立的类型（``SkillType.AWAKENING``），
+    故仍可被座位级失效挡住。两者的共同点只在"派发时不问"——本函数按类型读它，不另立
+    ``mandatory`` 字段（同一事实只留一处声明）。
+
+    **觉醒技整局一次转变**：已觉醒 ⇒ 不再派发（同限定技的"已用"门）。位在
+    :func:`_mark_awakened`，落点在**执行完**之后——effect 挂起（如【勤学】的选项询问）
+    时重入必须还能续跑同一个实例。
 
     ``extra_instances``（M5-05a）只由"失去牌后"的派发传入：刚离开装备区的装备技能仍是
     这一次移动的提供者（见 :func:`_instances_for`）。
@@ -774,12 +833,17 @@ def _dispatch(
         if not items:
             continue
         limited = instance.definition.skill_type is SkillType.LIMITED
+        awakening = instance.definition.skill_type is SkillType.AWAKENING
         if limited and _instance_used_once(host.state, instance):
             # 限定技**整局一次**（§四 L350–L355）：已用 ⇒ 不再产出候选、不再发"是否发动"
             # 询问、不进记录流的询问视角。判定放在"有东西可派发"之后，故普通技能的
             # 每一条派发路径一字不改；"整局已用"与 locked / 非锁定正交（这条门在提问之前）。
             continue
-        if not instance.definition.locked:
+        if awakening and _instance_awakened(host.state, instance):
+            # 觉醒技是**一次性转变**：已觉醒 ⇒ 不再派发（与限定技的"已用"同一位置）。
+            continue
+        forced = instance.definition.locked or awakening
+        if not forced:
             plan = activation_plan(host.state, frame, instance)
             if not plan.available:
                 continue
@@ -800,6 +864,9 @@ def _dispatch(
             # "已用"位落**执行完之后**：effect 挂起时（如【替身】压回复帧）重入必须还能
             # 走到这里续跑同一个实例，故不能先落位再判（先落位会让重入把实例自己挡掉）。
             _mark_used_once(host.state, instance)
+        if awakening:
+            # 同姿态：觉醒位也落执行完之后（【勤学】的选项询问会让第一轮挂起）。
+            _mark_awakened(host.state, instance)
     return None
 
 
@@ -2059,6 +2126,10 @@ from .judgment_loop import (  # noqa: E402  （末尾 import 是刻意的）
     judgment_loop_activation_plans,
     judgment_loop_skill_definitions,
 )
+from .awakening import (  # noqa: E402  （末尾 import 是刻意的）
+    awakening_activation_plans,
+    awakening_skill_definitions,
+)
 
 ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], ActivationPlan]] = (
     MappingProxyType(
@@ -2068,6 +2139,7 @@ ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], Activ
             **rejudge_activation_plans(),
             **phase_body_activation_plans(),
             **judgment_loop_activation_plans(),
+            **awakening_activation_plans(),
         }
     )
 )
@@ -2093,6 +2165,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *limits_skill_definitions(),
             *use_after_skill_definitions(),
             *judgment_loop_skill_definitions(),
+            *awakening_skill_definitions(),
         )
     }
 )

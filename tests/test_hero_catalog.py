@@ -2,7 +2,7 @@
 
 本文件只装**跨技能**的登记事实（逐技能的构造局面单测按族住各自文件）：
 
-- ``CATALOG`` 的规模与分区：装备 22 + 武将 46 = **68 条**，且武将那半恰是数据文件里
+- ``CATALOG`` 的规模与分区：装备 22 + 武将 52 = **74 条**，且武将那半恰是数据文件里
   全部启用武将的技能清单（``heroes.standard.json`` + ``heroes.jie.json`` 是名单的唯一真源）；
 - **同一 owner 同一时机只有一条技能**（票 12 §要做什么 3）：这是 R5-Q1「同一时点多技能
   自选顺序不建」的落地依据——将来加武将时这条断言先变红，逼出一次重新裁定；
@@ -25,6 +25,7 @@ from typing import Any
 from sgs.data import (
     Gender,
     Kingdom,
+    SkillType,
     enabled_hero_ids,
     hero_skill_id,
     load_content_pack,
@@ -132,27 +133,28 @@ PLAYABLE = ("slash", "peach", "dodge")
 
 
 # ---------------------------------------------------------------------------
-# ① CATALOG 的一分为二（装备 22 + 武将 46 = 68）
+# ① CATALOG 的一分为二（装备 22 + 武将 52 = 74）
 # ---------------------------------------------------------------------------
 
 
 def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
-    """验收 1：``CATALOG`` = **68** 条（22 装备 + 46 武将），且两半由 ``carrier`` 分区。
+    """验收 1：``CATALOG`` = **74** 条（22 装备 + 52 武将），且两半由 ``carrier`` 分区。
 
     M5-01a 补 5 条军争装备技能占位（白银狮子 / 藤甲 / 古锭刀 / 朱雀羽扇 / 骅骝）；
     M6 票 01 把武将那半 29 → 32（【刚烈】/【突袭】/【裸衣】），票 02 → 37
     （【洛神】/【倾国】/【咆哮】/【集智】/【奇才】），票 03 → 40
     （【奇袭】/【克己】/【苦肉】 = P0 收口），票 04 → 44（界关羽【武圣】/【义绝】、
     界马超【马术】/【铁骑】 = 首份界版数据），票 05 → 46（界张飞【咆哮】/【替身】 =
-    首个**限定技**载体）。函数名沿用 M3 的节点名（``test_dod_m3`` 的 DoD 绑定），
-    数字以函数体为准。
+    首个**限定技**载体），票 06 → 52（界徐庶【诛害】/【潜心】/☆【荐言】、
+    界吕蒙【克己】/【勤学】/☆【攻心】 = 首个**觉醒技**与首个 ☆ 派生技能载体）。
+    函数名沿用 M3 的节点名（``test_dod_m3`` 的 DoD 绑定），数字以函数体为准。
     """
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 68
+    assert len(CATALOG) == 74
     assert len(equipment) == 22
-    assert len(heroes) == 46
+    assert len(heroes) == 52
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -167,7 +169,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 46
+    assert len(expected) == 52
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -942,9 +944,17 @@ SKILL_FILES: dict[str, str] = {
     "hero.jie_machao.tieqi": "test_hero_jie.py",
     "hero.jie_zhangfei.paoxiao": "test_hero_jie.py",
     "hero.jie_zhangfei.tishen": "test_hero_jie.py",
+    # M6 票 06：觉醒技 + ☆ 派生技能 + 界徐庶【诛害】/ 界吕蒙【克己】
+    "hero.jie_xushu.zhuhai": "test_hero_jie.py",
+    "hero.jie_xushu.qianxue": "test_hero_jie.py",
+    "hero.jie_xushu.jianyan": "test_hero_jie.py",
+    "hero.jie_lvmeng.keji": "test_hero_catalog.py",
+    "hero.jie_lvmeng.qinxue": "test_hero_jie.py",
+    "hero.jie_lvmeng.gongxin": "test_hero_jie.py",
 }
-"""46 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
-票 02 加 5 条、票 03 加 3 条、票 04 加 4 条界将技能、票 05 加界张飞 2 条）。"""
+"""52 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
+票 02 加 5 条、票 03 加 3 条、票 04 加 4 条界将技能、票 05 加界张飞 2 条、票 06 加界徐庶 /
+界吕蒙 6 条）。"""
 
 
 def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
@@ -1010,13 +1020,39 @@ class _HookHost:
 
 
 def _probe_state() -> GameState:
-    """合成局面：座位 0 手里有牌（【反馈】的**伤害来源**）、座位 1 / 2 空手（【连营】的"已失去"）、
-    处理区有一张【杀】（【奸雄】的渠道牌）。"""
-    return build_state(
+    """合成局面：座位 0 手里有牌（【反馈】的**伤害来源**）、座位 1 **已受伤**（【潜心】的
+    "若你已受伤"）、座位 2 本回合造成过伤害（【诛害】）、处理区有一张【杀】（【奸雄】的渠道牌）。
+
+    座位 1（ME）的手牌保持为空 —— 【连营】的正面对照要"移动后手牌为空"。
+    """
+    state = build_state(
         pack=PACK,
-        seats=[SeatSpec(hand=(_PROBE_SOURCE_CARD,)), SeatSpec(), SeatSpec()],
+        seats=[SeatSpec(hand=(_PROBE_SOURCE_CARD,)), SeatSpec(hp=3), SeatSpec()],
         processing=(_PROBE_PROCESSING_SLASH,),
     )
+    # 【诛害】的判据是座位级"本回合造成过伤害"事实（合成局面直接置位）。
+    state.player(OTHER).damage_dealt_this_turn = True
+    return state
+
+
+def _qinxue_probe_state() -> GameState:
+    """【勤学】的正面对照需要"手牌数减体力值 ≥ 2"：ME 体力 1、三张手牌 ⇒ 2。"""
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_PROBE_SOURCE_CARD,)),
+            SeatSpec(hp=1, hand=tuple(cards_of_type(PACK, "dodge")[:3])),
+            SeatSpec(),
+        ],
+        processing=(_PROBE_PROCESSING_SLASH,),
+    )
+
+
+def _probe_state_for(skill_id: str) -> GameState:
+    """逐技能的正面对照局面（默认同一份；条件里有额外状态前提的单独给）。"""
+    if skill_id == "hero.jie_lvmeng.qinxue":
+        return _qinxue_probe_state()
+    return _probe_state()
 
 
 def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
@@ -1059,23 +1095,36 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         actor=ME,
     )
     return {
-        "hero.caocao.jianxiong": _HookFrame(
-            target=ME, source=0, card=state.card(_PROBE_PROCESSING_SLASH)
+        # 每条技能一个**元组**：本技能的每条带条件钩子各一帧（【勤学】两个时机两条）。
+        "hero.caocao.jianxiong": (
+            _HookFrame(target=ME, source=0, card=state.card(_PROBE_PROCESSING_SLASH)),
         ),
-        "hero.simayi.fankui": _HookFrame(target=ME, source=0),
-        "hero.guojia.yiji": _HookFrame(target=ME),
+        "hero.simayi.fankui": (_HookFrame(target=ME, source=0),),
+        "hero.guojia.yiji": (_HookFrame(target=ME),),
         # M6 票 02【集智】：使用牌帧的 source 是我、牌面是非延时类锦囊。
-        "hero.huangyueying.jizhi": _HookFrame(
-            source=ME, card=state.card(_PROBE_TRICK_CARD)
+        "hero.huangyueying.jizhi": (
+            _HookFrame(source=ME, card=state.card(_PROBE_TRICK_CARD)),
         ),
         # M6 票 01【刚烈】：受伤的是我、伤害来源是座位 0（活着、不是自己）。
-        "hero.xiahoudun.ganglie": _HookFrame(target=ME, source=0),
-        "hero.daqiao.liuli": _HookFrame(
-            source=0, actor=ME, targets=(ME,), card=state.card(_PROBE_CHANNEL_SLASH)
+        "hero.xiahoudun.ganglie": (_HookFrame(target=ME, source=0),),
+        "hero.daqiao.liuli": (
+            _HookFrame(
+                source=0, actor=ME, targets=(ME,), card=state.card(_PROBE_CHANNEL_SLASH)
+            ),
         ),
-        "hero.luxun.lianying": _HookFrame(**{MOVE_EVENT_KEY: move_lianying}),
-        "hero.sunshangxiang.xiaoji": _HookFrame(**{MOVE_EVENT_KEY: move_xiaoji}),
-        "equip.silver_lion": _HookFrame(**{MOVE_EVENT_KEY: move_silver_lion}),
+        "hero.luxun.lianying": (_HookFrame(**{MOVE_EVENT_KEY: move_lianying}),),
+        "hero.sunshangxiang.xiaoji": (_HookFrame(**{MOVE_EVENT_KEY: move_xiaoji}),),
+        "equip.silver_lion": (_HookFrame(**{MOVE_EVENT_KEY: move_silver_lion}),),
+        # M6 票 06：觉醒技与【诛害】的持有者自校。
+        # - 【潜心】：伤害来源 = 我（归属）∧ 我已受伤（基础局面 ME 3/4）；
+        # - 【勤学】：阶段体帧的 source = 我（两条挂接共用同一条条件）；
+        # - 【诛害】：当前回合角色是**别人**（source=2）且其本回合造成过伤害。
+        "hero.jie_xushu.qianxue": (_HookFrame(source=ME),),
+        "hero.jie_lvmeng.qinxue": (
+            _HookFrame(source=ME),
+            _HookFrame(source=ME),
+        ),
+        "hero.jie_xushu.zhuhai": (_HookFrame(source=OTHER),),
     }
 
 
@@ -1120,21 +1169,24 @@ def test_every_conditional_hook_goes_false_when_the_owner_is_someone_else() -> N
         f"{sorted(discovered - set(probes) - set(EXEMPT_OWNER_SELF_CHECK))}"
     )
 
-    state = _probe_state()
-    host = _HookHost(state)
-    for skill_id, frame in probes.items():
+    for skill_id, frames in probes.items():
         hooks = [hook for hook in CATALOG[skill_id].hooks if hook.condition is not None]
-        assert len(hooks) == 1, f"{skill_id} 的带条件钩子不止一条，探针只覆盖第一条"
-        condition = hooks[0].condition
+        assert len(hooks) == len(frames), (
+            f"{skill_id} 的带条件钩子 {len(hooks)} 条，探针给了 {len(frames)} 帧"
+            "（每条带条件钩子都要有一段正 / 反断言）"
+        )
+        host = _HookHost(_probe_state_for(skill_id))
+        for hook, frame in zip(hooks, frames):
+            condition = hook.condition
 
-        frame.data[MATCH_OWNER_KEY] = ME
-        assert condition(host, frame) is True, (
-            f"{skill_id}：持有者是自己时条件必须成立（正面对照，否则负断言是假绿）"
-        )
-        frame.data[MATCH_OWNER_KEY] = OTHER
-        assert condition(host, frame) is False, (
-            f"{skill_id}：持有者换成别人后条件仍成立 ⇒ 触发条件没自校持有者"
-        )
+            frame.data[MATCH_OWNER_KEY] = ME
+            assert condition(host, frame) is True, (
+                f"{skill_id}：持有者是自己时条件必须成立（正面对照，否则负断言是假绿）"
+            )
+            frame.data[MATCH_OWNER_KEY] = OTHER
+            assert condition(host, frame) is False, (
+                f"{skill_id}：持有者换成别人后条件仍成立 ⇒ 触发条件没自校持有者"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1146,7 +1198,8 @@ def test_every_conditional_hook_goes_false_when_the_owner_is_someone_else() -> N
 
 
 def test_the_seven_zero_step_skills_are_registered_flows_with_no_steps():
-    """11 条零步技能（M6 票 01 加【裸衣】、票 02 加【集智】、票 03 加【克己】/【苦肉】）：
+    """13 条零步技能（M6 票 01 加【裸衣】、票 02 加【集智】、票 03 加【克己】/【苦肉】、
+    票 06 加界【克己】）：
     ``flow_for`` 非空、``steps == ()``、``preactivated`` 仍 ``False``。
 
     这条钉的是 W6-01 的**执行路径统一**判据（spec §7）：迁移只把 ``Hook(handler=…)``
@@ -1183,6 +1236,9 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.diaochan.lijian": "主动技能",
     "hero.sunshangxiang.jieyin": "主动技能",
     "hero.jie_guanyu.yijue": "主动技能",
+    # M6 票 06 的两条 ☆ 派生技能（觉醒后才存在的出牌阶段主动技）
+    "hero.jie_xushu.jianyan": "主动技能",
+    "hero.jie_lvmeng.gongxin": "主动技能",
     # 触发技能 6（钩子 / 接缝驱动的非零步流水线；M6 票 01 的【突袭】是阶段体 + 座位步）
     "hero.simayi.fankui": "触发技能",
     "hero.daqiao.liuli": "触发技能",
@@ -1202,6 +1258,7 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.machao.tieqi": "零步技能",
     "hero.xuchu.luoyi": "零步技能",
     "hero.jie_zhangfei.tishen": "零步技能",
+    "hero.jie_lvmeng.keji": "零步技能",
     # 排列技能 1（deck_arrange + Arrange 步）
     "hero.zhugeliang.guanxing": "排列技能",
     # 多轮技能 5（手写帧内游标循环；flow_for is None；M6 票 01 的【刚烈】= 判定 → 选项 → 选牌，
@@ -1210,6 +1267,11 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.xiahoudun.ganglie": "多轮技能",
     "hero.zhenji.luoshen": "多轮技能",
     "hero.jie_machao.tieqi": "多轮技能",
+    # M6 票 06：觉醒族的【诛害】是"其他角色的结束阶段"的触发技（目标在帧里给定）
+    "hero.jie_xushu.zhuhai": "触发技能",
+    # M6 票 06 的两条觉醒技（强制发动 + 一次性转变）
+    "hero.jie_xushu.qianxue": "觉醒技",
+    "hero.jie_lvmeng.qinxue": "觉醒技",
     "equip.ice_sword": "多轮技能",
     "equip.double_sword": "多轮技能",
     # 锁定技 22（locked=True，含带目标池 / 修饰器的锁定技；M5-01a 的 4 件军争装备占位）
@@ -1254,11 +1316,11 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.liubei.jijiang": "候选提供者",
     "equip.eight_diagrams": "候选提供者",
 }
-"""68 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
+"""74 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
 `SkillDef` 上没有 shape 字段，也不该有：形态是从既有声明读出来的归类（`locked` /
-`hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` / `rejudge_capable`），不是
-第二份真源。这张表把那次阅读**机械化钉住**：新增 / 删除技能时先缺键 / 多键变红，逼出一次
+`skill_type` / `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` /
+`rejudge_capable`），不是第二份真源。这张表把那次阅读**机械化钉住**：新增 / 删除技能时先缺键 / 多键变红，逼出一次
 重新分类；改表 = 重新裁定形态。
 
 **不要**把这张表与 `SKILL_FILES` 混用：后者是 32 条启用技能 → 点名它的族级单测文件
@@ -1266,9 +1328,9 @@ SKILL_SHAPE: dict[str, str] = {
 """
 
 SHAPE_COUNTS: dict[str, int] = {
-    "主动技能": 7,
-    "触发技能": 6,
-    "零步技能": 12,
+    "主动技能": 9,
+    "触发技能": 7,
+    "零步技能": 13,
     "排列技能": 1,
     "多轮技能": 6,
     "锁定技": 22,
@@ -1276,26 +1338,32 @@ SHAPE_COUNTS: dict[str, int] = {
     "能力位": 1,
     "候选生成器": 1,
     "候选提供者": 3,
+    "觉醒技": 2,
 }
-"""每格的条数（spec §4.4；M6 票 05 后 7 + 6 + 12 + 1 + 6 + 22 + 9 + 1 + 1 + 3 = 68）。
+"""每格的条数（spec §4.4；M6 票 06 后
+9 + 7 + 13 + 1 + 6 + 22 + 9 + 1 + 1 + 3 + 2 = 74）。
 
 票 03 的三条：**苦肉**是零步主动技（裸发动，无步骤 ⇒ 机械形态落在「零步技能」格）；
 **克己**是阶段体零步技（同格）；**奇袭**是单源转化（转化技格）。票 04 的四条：**义绝**
 是三步主动技（主动技能格）；**武圣**（界）是转化技；**马术**（界）是锁定技；**铁骑**（界）
 是逐目标手写的多段钩子（多轮技能格）。票 05 的两条：**替身**是阶段体零步技（零步技能格），
-**咆哮**（界）是锁定技（锁定技格）。"""
+**咆哮**（界）是锁定技（锁定技格）。票 06 的六条：**荐言** / **攻心**是两个 ☆ 主动技
+（主动技能格）；**诛害**是结束阶段触发技（触发技能格）；**克己**（界）是阶段体零步技
+（零步技能格）；**潜心** / **勤学**按 `skill_type = AWAKENING` 单列「觉醒技」格——
+它们不是锁定技（不并进 ``locked``），"强制发动"由派发环按类型判。"""
 
 STEP_LANGUAGE_SHAPES: frozenset[str] = frozenset(
-    {"主动技能", "触发技能", "零步技能", "排列技能"}
+    {"主动技能", "触发技能", "零步技能", "排列技能", "觉醒技"}
 )
-"""在步骤语言内的四个形态（26 条 = 7 + 6 + 12 + 1）。"""
+"""在步骤语言内的五个形态（32 条 = 9 + 7 + 13 + 1 + 2）。觉醒技也走 ``SkillFlow``
+（【潜心】零步、【勤学】一步选项），故"内 == 有 ``flow_for``"仍成立。"""
 
 IN_STEP_LANGUAGE: frozenset[str] = frozenset(
     skill_id
     for skill_id, shape in SKILL_SHAPE.items()
     if shape in STEP_LANGUAGE_SHAPES
 )
-"""在步骤语言内（26）：**派生**自 :data:`SKILL_SHAPE` 的四个步骤语言形态。
+"""在步骤语言内（32）：**派生**自 :data:`SKILL_SHAPE` 的五个步骤语言形态。
 
 W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同一份事实的两份拷贝——
 形态表一改，第二份名单就悄悄过期。现在它只是那张表的一个投影；真正的判据留在
@@ -1314,7 +1382,8 @@ ZERO_STEP_SKILL_IDS: tuple[str, ...] = tuple(
     skill_id for skill_id, shape in SKILL_SHAPE.items() if shape == "零步技能"
 )
 """W6-01 的零步技能（spec §4.1）：连营 / 枭姬 / 奸雄 / 天妒 / 英姿 / 闭月 / 铁骑，
-M6 票 01 加【裸衣】、票 02 加【集智】、票 03 加【克己】/【苦肉】（共 11 条）。
+M6 票 01 加【裸衣】、票 02 加【集智】、票 03 加【克己】/【苦肉】、票 06 加界【克己】
+（共 13 条；觉醒技【潜心】虽有零步流水线，按类型单列「觉醒技」格，不在此列）。
 
 W6-07 / 评审 J7：**派生**自 :data:`SKILL_SHAPE` 的「零步技能」那一格（原先手抄 7 个 id）。"""
 
@@ -1333,11 +1402,11 @@ def _flow_steps(skill_id: str):
 
 
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
-    """68 条恰好一形态：键 = ``CATALOG`` 的键、值 = 10 个形态闭集之一。"""
+    """74 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 68
+    assert len(SKILL_SHAPE) == len(CATALOG) == 74
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
-    assert len(SHAPE_COUNTS) == 10
+    assert len(SHAPE_COUNTS) == 11
     assert all(SKILL_SHAPE.values()), "表里没有空形态"
 
 
@@ -1353,6 +1422,9 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
             if predicate(definition)
         )
 
+    awakening = skills(lambda definition: definition.skill_type is SkillType.AWAKENING)
+    # 觉醒技按**类型**单列一格；两条觉醒技都有流水线（零步 / 一步），故从"零步 / 触发"
+    # 两个机械谓词里排除，避免一条技能落进两格。
     active = frozenset(
         skill_id
         for skill_id in CATALOG
@@ -1368,8 +1440,13 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
         and _steps != ()
         and (CATALOG[skill_id].hooks or CATALOG[skill_id].seams)
         and CATALOG[skill_id].deck_arrange is None
+        and skill_id not in awakening
     )
-    zero_step = frozenset(skill_id for skill_id in CATALOG if _flow_steps(skill_id) == ())
+    zero_step = frozenset(
+        skill_id
+        for skill_id in CATALOG
+        if _flow_steps(skill_id) == () and skill_id not in awakening
+    )
     arranged = skills(lambda definition: definition.deck_arrange is not None)
     locked = skills(lambda definition: definition.locked)
     conversion = skills(lambda definition: bool(definition.virtual_type_ids))
@@ -1390,6 +1467,7 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
     assert _shape_members("零步技能") == zero_step
     assert _shape_members("排列技能") == arranged
     assert _shape_members("锁定技") == locked
+    assert _shape_members("觉醒技") == awakening
     assert _shape_members("转化技") == conversion
     assert _shape_members("能力位") == ability
     assert _shape_members("候选生成器") == generator
@@ -1428,7 +1506,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """26 在内 / 42 在外：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """32 在内 / 42 在外：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -1440,7 +1518,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 26
+    assert len(inside) == 32
     assert len(outside) == 42
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

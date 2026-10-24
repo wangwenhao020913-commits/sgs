@@ -18,7 +18,7 @@
 
 | 族 | 模块 | 代表技能 |
 |---|---|---|
-| A 主动技 | :mod:`sgs.skills.active` | 制衡 / 仁德 / 反间 / 青囊 / 离间 / 结姻 |
+| A 主动技 | :mod:`sgs.skills.active` | 制衡 / 仁德 / 反间 / 青囊 / 离间 / 结姻 / ☆荐言 / ☆攻心 |
 | B 伤害后 | :mod:`sgs.skills.damage_after` | 奸雄 / 反馈 / 遗计 |
 | H 转化（源谓词 → 虚拟牌） | :mod:`sgs.skills.heroes` | 武圣 / 龙胆 / 国色 / 急救 |
 | K·M 距离与目标转移 | :mod:`sgs.skills.target_change` | 马术 / 流离 |
@@ -31,6 +31,7 @@
 | P 限制豁免 / 【咆哮】②（锁定技） | :mod:`sgs.skills.limits` | 咆哮（次数 + 被抵消后的 +1）/ 奇才（距离） |
 | U 使用牌时 | :mod:`sgs.skills.use_after` | 集智 |
 | J 可重复判定（手写多轮循环） | :mod:`sgs.skills.judgment_loop` | 洛神 |
+| 觉醒 / ☆ 派生（M6 票 06） | :mod:`sgs.skills.awakening` | 潜心 / 勤学 / 诛害 |
 | **流水线执行器**（**不**依赖 catalog） | :mod:`sgs.skills.flow` | ``SkillFlow`` / ``PickCards`` / ``PickSeats`` / ``PickOption`` / ``PickProvide`` / ``run_flow`` |
 | **注册表 + 装备定义** | :mod:`sgs.skills.catalog` | ``SkillDef`` / ``CATALOG`` / ``resolve_instances`` / ``dispatch_timing`` / ``dispatch_seam`` |
 
@@ -71,6 +72,7 @@ from .catalog import (
     SkillSource,
     SkillSourceKind,
     activation_plan,
+    awakening_skill_awakened,
     damage_point_index,
     dispatch_seam,
     dispatch_timing,
@@ -113,6 +115,14 @@ from .active import (
     ACTIVATIONS,
     ACTIVE_SKILLS,
     CANDIDATE_CAP,
+    GONGXIN,
+    GONGXIN_DECK_TOP,
+    GONGXIN_DISCARD,
+    GONGXIN_FLOW,
+    GONGXIN_OPTIONS,
+    JIANYAN,
+    JIANYAN_FLOW,
+    JIANYAN_OPTIONS,
     YIJUE,
     YIJUE_FLOW,
     YIJUE_HEAL,
@@ -216,6 +226,21 @@ from .judgment_loop import (
     LUOSHEN_OPTIONS,
     judgment_loop_activation_plans,
     judgment_loop_skill_definitions,
+)
+from .awakening import (
+    LVMENG_GONGXIN,
+    LVMENG_QINXUE,
+    QIANXUE_FLOW,
+    QINXUE_DRAW,
+    QINXUE_FLOW,
+    QINXUE_OPTIONS,
+    QINXUE_RECOVER,
+    XUSHU_JIANYAN,
+    XUSHU_QIANXUE,
+    XUSHU_ZHUHAI,
+    ZHUHAI_FLOW,
+    awakening_activation_plans,
+    awakening_skill_definitions,
 )
 
 EQUIPMENT_CARD_TYPE_IDS: tuple[str, ...] = tuple(
@@ -323,6 +348,24 @@ __all__ = (
     "TIANDU",
     "VirtualKind",
     "VirtualSourceError",
+    "GONGXIN",
+    "GONGXIN_DECK_TOP",
+    "GONGXIN_DISCARD",
+    "GONGXIN_FLOW",
+    "GONGXIN_OPTIONS",
+    "JIANYAN",
+    "JIANYAN_FLOW",
+    "JIANYAN_OPTIONS",
+    "LVMENG_GONGXIN",
+    "LVMENG_QINXUE",
+    "QIANXUE_FLOW",
+    "QINXUE_DRAW",
+    "QINXUE_FLOW",
+    "QINXUE_OPTIONS",
+    "QINXUE_RECOVER",
+    "XUSHU_JIANYAN",
+    "XUSHU_QIANXUE",
+    "XUSHU_ZHUHAI",
     "YIJUE",
     "YIJUE_FLOW",
     "YIJUE_HEAL",
