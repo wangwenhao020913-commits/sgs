@@ -225,7 +225,8 @@ const state = {
   modal: { heroSeat: null },
   runs: [],
   replay: null,
-  heroCatalog: [],     // 点将列表（`GET /api/heroes` 的启用池）；开局页的选项来源
+  heroCatalog: [],     // 将池目录：按真名分组的启用版本（`GET /api/heroes`；票 13 起分组）
+  heroPools: null,     // 将池预设的本地编辑态 `{slots, active, selected}`（票 13；服务端存档在 runs/）
   deckCatalog: [],     // 牌堆档位列表（`GET /api/decks`）；标签 / 说明也由服务端下发
   logRecords: [],
   lastQuerySeat: null, // 事件流里"上一条询问的 actor"（action 记录靠它归属）

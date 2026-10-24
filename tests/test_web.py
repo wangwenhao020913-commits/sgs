@@ -318,15 +318,179 @@ def test_the_registry_passes_the_pick_through_from_the_request_body() -> None:
     assert "diaochan" not in payload["heroes"][1:]
 
 
+# ---------------------------------------------------------------------------
+# 6b-2. 禁将（M6 票 13 落到会话配置）：版本粒度、只作用于随机配将、冻结在开局
+# ---------------------------------------------------------------------------
+
+
+def test_the_registry_passes_the_ban_set_through_from_the_request_body() -> None:
+    """打 ``GameRegistry.create`` 这一缝：建局请求里的禁将真的进了配将。
+
+    禁将 18 个真名的全部版本、只留 8 个真名 ⇒ 8 个座位**只能**落在那 8 个真名上。
+    这比"某个被禁版本没出现"强一层：它证明整个真名池都按禁将集合缩过。
+    """
+    from sgs.data import hero_by_id
+    from sgs_web.serve import GameRegistry, hero_catalog
+
+    catalog = hero_catalog()
+    keep = catalog[:8]
+    ban = [version["id"] for group in catalog[8:] for version in group["versions"]]
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {
+            "player_count": 8,
+            "ai": "random",
+            "seed": 20261012,
+            "timeout_seconds": None,
+            "banned_heroes": ban,
+        }
+    )
+    payload = registry.view(session, after=-1, logs_after=0)
+
+    dealt = {hero_by_id(hero_id).true_name for hero_id in payload["heroes"]}
+    assert dealt == {group["true_name"] for group in keep}
+
+
+def test_a_manual_pick_ignores_the_ban_set() -> None:
+    """手选无视禁将（spec D5）：点名的版本即使两版都被禁也照发，但真名先占。"""
+    from sgs.data import hero_by_id
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {
+            "player_count": 5,
+            "ai": "random",
+            "seed": 20261012,
+            "timeout_seconds": None,
+            "my_hero": "jie_guanyu",
+            "banned_heroes": ["guanyu", "jie_guanyu"],
+        }
+    )
+    payload = registry.view(session, after=-1, logs_after=0)
+
+    assert payload["heroes"][0] == "jie_guanyu", "手选不受禁将影响"
+    others = [hero_by_id(hero_id).true_name for hero_id in payload["heroes"][1:]]
+    assert "关羽" not in others, "手选先占真名：其余座位不会再拿到关羽的任何版本"
+
+
+def test_a_ban_set_that_leaves_fewer_true_names_than_seats_is_refused() -> None:
+    """真名池 < 座位数 ⇒ 引擎侧 fail-closed（400 + 可读原因），且**不创建会话**。"""
+    from sgs_web.serve import GameRegistry, hero_catalog
+
+    catalog = hero_catalog()
+    # 8 个座位只留 7 个可用真名：第 8 个真名起全部版本都禁掉。
+    ban = [version["id"] for group in catalog[7:] for version in group["versions"]]
+    body = {
+        "player_count": 8,
+        "ai": "random",
+        "seed": 20261012,
+        "timeout_seconds": None,
+        "banned_heroes": ban,
+    }
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    with pytest.raises(ValueError) as caught:
+        registry.create(body)
+    assert "真名池不足" in str(caught.value), str(caught.value)
+    assert registry.sessions == {}, "拒绝路径不得留下半局会话"
+
+    status, payload = _post_with_the_real_handler(registry, "/api/sessions", body)
+    assert status == 400
+    assert "真名池不足" in payload["error"], payload
+    assert registry.sessions == {}
+
+
+def test_an_unknown_banned_hero_is_a_400_and_creates_no_session() -> None:
+    """未知禁将 id 不静默忽略：400 + 带 id 的原因，注册表干净。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    status, body = _post_with_the_real_handler(
+        registry,
+        "/api/sessions",
+        {
+            "player_count": 2,
+            "ai": "random",
+            "seed": 5,
+            "timeout_seconds": None,
+            "banned_heroes": ["nobody"],
+        },
+    )
+
+    assert status == 400
+    assert "nobody" in body["error"]
+    assert registry.sessions == {}
+
+
+def test_the_ban_set_never_enters_the_record_stream() -> None:
+    """禁将是会话配置（与 ``hero_assignments`` 同纪律）：不进记录流、不动一个字节。
+
+    取一个**不影响发将**的禁将（禁的是没抽到的真名的一个界版，同真名的标准版仍可用），
+    于是"加不加这条禁将"只改配置、不改局面：记录流必须逐字节相同。
+    """
+    from sgs.data import hero_by_id
+    from sgs_web.serve import hero_catalog
+
+    plain = Session(seed=23, ai="random", timeout_seconds=None, **TWO_PLAYERS)
+    dealt_names = {hero_by_id(hero_id).true_name for hero_id in plain.hero_assignments}
+    ban = next(
+        version["id"]
+        for group in hero_catalog()
+        if group["true_name"] not in dealt_names
+        for version in group["versions"][1:]
+    )
+    configured = Session(
+        seed=23, ai="random", timeout_seconds=None, banned_heroes=(ban,), **TWO_PLAYERS
+    )
+
+    assert configured.hero_assignments == plain.hero_assignments
+    assert dump_journal(configured.records()) == dump_journal(plain.records())
+
+
 def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
-    """点将列表的只读面：只有**启用**武将，且与发放用的启用池同源同序。"""
-    from sgs.data import enabled_hero_ids, load_heroes
+    """开局页将池（M6 票 13）：标准 + 界版的**启用版本并集**，按**真名**分组。
+
+    函数名保留票 19 的旧名字（`06` §5「程序化约定与偏离一手」的账本引用了它，文档归
+    票 21 写回）；判据已按票 13 的分组语义加严：目录的**版本集合**仍恰是启用池（与发放段
+    同源，不各抄名单），而渲染面改为一层真名分组 + 组内 1–2 个版本。
+
+    分组的唯一键是数据里的 ``true_name``（不是从显示名剥前缀）：同一真名的标准 / 界两版
+    落在同一行，正是界面要自解释的"同一真名一局只出一个"。组的顺序 = 真名在启用池里首次
+    出现的顺序；组内版本 = 数据文件顺序（标准在前、界版在后）。
+    """
+    from sgs.data import enabled_hero_ids, hero_by_id
     from sgs_web.serve import hero_catalog
 
     catalog = hero_catalog()
 
-    assert [entry["id"] for entry in catalog] == list(enabled_hero_ids(load_heroes()))
-    assert all(entry["name"] for entry in catalog), "列表要能给人看（名称非空）"
+    flat = [version for group in catalog for version in group["versions"]]
+    assert {version["id"] for version in flat} == set(enabled_hero_ids()), (
+        "将池的版本集合必须与发放用的启用池同源（标准 + 界版并集）"
+    )
+    # 组的顺序 = 真名在启用池里**首次出现**的顺序（标准表在前、界版包在后）；
+    # 分组本身会重排平铺清单（界版跟在它同真名的标准版后面），故只钉集合与行序。
+    first_seen: list[str] = []
+    for hero_id in enabled_hero_ids():
+        hero = hero_by_id(hero_id)
+        assert hero is not None
+        if hero.true_name not in first_seen:
+            first_seen.append(hero.true_name)
+    assert [group["true_name"] for group in catalog] == first_seen
+    assert len(flat) == 37 and len(catalog) == 26, "M6 P1 收口前：37 个版本 / 26 个真名"
+    for group in catalog:
+        true_name = group["true_name"]
+        assert true_name, "每个真名都要能给人看（名称非空）"
+        assert 1 <= len(group["versions"]) <= 2, "一行一个真名、行内 1–2 个版本格"
+        for version in group["versions"]:
+            hero = hero_by_id(version["id"])
+            assert hero is not None and hero.true_name == true_name
+            assert version["name"] == hero.name and version["version"] == hero.version
+
+    by_name = {group["true_name"]: group["versions"] for group in catalog}
+    assert [version["id"] for version in by_name["关羽"]] == ["guanyu", "jie_guanyu"], (
+        "标准版在前、界版在后（数据文件顺序）"
+    )
+    assert len(by_name["徐庶"]) == 1, "只有界版的真名也自成一行"
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +545,18 @@ def _post_with_the_real_handler(registry, path: str, body: dict) -> tuple[int, d
         f"POST {path} HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\n"
         f"Content-Length: {len(payload)}\r\n\r\n"
     ).encode("ascii") + payload
+    handler_cls = type("_BoundHandler", (_Handler,), {"registry": registry})
+    response = _raw_response_from_the_real_handler(handler_cls, raw)
+    head, _, response_body = response.partition(b"\r\n\r\n")
+    status = int(head.split(b" ", 2)[1])
+    return status, json.loads(response_body.decode("utf-8"))
+
+
+def _get_with_the_real_handler(registry, path: str) -> tuple[int, dict]:
+    """GET 版：同 :func:`_post_with_the_real_handler`，报文与解析都走真的处理器。"""
+    from sgs_web.serve import _Handler
+
+    raw = f"GET {path} HTTP/1.1\r\nHost: test\r\n\r\n".encode("ascii")
     handler_cls = type("_BoundHandler", (_Handler,), {"registry": registry})
     response = _raw_response_from_the_real_handler(handler_cls, raw)
     head, _, response_body = response.partition(b"\r\n\r\n")
@@ -482,6 +658,154 @@ def test_the_lobby_form_offers_the_deck_profile_from_server_content() -> None:
         "前端抄了第二份档位 id / 文案表；选项与标签只能由服务端 GET /api/decks 下发"
     )
     assert "军争 160" not in scripts and "标准 108" not in scripts
+
+
+# ---------------------------------------------------------------------------
+# 6c. 将池存档（M6 票 13）：5 个常驻槽位 + 活动槽位 + 本地文件
+# ---------------------------------------------------------------------------
+
+
+def test_the_hero_presets_start_as_five_empty_slots_with_no_file(tmp_path: Path) -> None:
+    """将池存档（M6 票 13）：5 个常驻槽位；缺文件 = 全空、活动槽位 0。
+
+    存档与 serve 的录像 / pid / log 同处（``runs/``，gitignored）：所以缺省落点由
+    ``GameRegistry.runs_dir`` 派生，测试可以整目录注入。**读不写文件**——开局页拉一次
+    存档不该在磁盘上留下空档。
+    """
+    from sgs_web.serve import HERO_POOL_SLOTS, GameRegistry, load_hero_presets
+
+    path = tmp_path / "hero-presets.json"
+    presets = load_hero_presets(path)
+
+    assert HERO_POOL_SLOTS == 5
+    assert presets["slot_count"] == 5
+    assert presets["active"] == 0
+    assert [slot["banned_heroes"] for slot in presets["slots"]] == [[] for _ in range(5)]
+    assert not path.exists(), "读存档不得落盘"
+    registry = GameRegistry(runs_dir=tmp_path)
+    assert registry.presets_path == path, "存档与 serve 的录像 / pid 同处（runs 目录）"
+
+
+def test_saving_a_slot_overwrites_it_and_makes_it_active(tmp_path: Path) -> None:
+    """保存 = **覆盖**该槽位并置为活动（不是追加、不动别的槽位）。"""
+    from sgs_web.serve import load_hero_presets, save_hero_presets
+
+    path = tmp_path / "hero-presets.json"
+    save_hero_presets(slot=2, banned_heroes=["guanyu", "jie_guanyu"], path=path)
+    presets = load_hero_presets(path)
+
+    assert presets["active"] == 2
+    assert presets["slots"][2]["banned_heroes"] == ["guanyu", "jie_guanyu"]
+    assert [at for at, slot in enumerate(presets["slots"]) if slot["banned_heroes"]] == [2]
+
+    # 同一槽位再存一次：只留新的集合（覆盖，不是并集）。
+    save_hero_presets(slot=2, banned_heroes=["diaochan"], path=path)
+    assert load_hero_presets(path)["slots"][2]["banned_heroes"] == ["diaochan"]
+
+    # 换一个槽位保存：两槽互不影响，活动槽位跟着保存走。
+    save_hero_presets(slot=0, banned_heroes=["liubei"], path=path)
+    after = load_hero_presets(path)
+    assert after["active"] == 0
+    assert after["slots"][0]["banned_heroes"] == ["liubei"]
+    assert after["slots"][2]["banned_heroes"] == ["diaochan"]
+
+
+def test_the_active_slot_round_trips_through_a_restart(tmp_path: Path) -> None:
+    """重启后自动加载上次 active：状态只在文件里，新进程重读即得（没有内存态可依赖）。"""
+    from sgs_web.serve import load_hero_presets, save_hero_presets
+
+    path = tmp_path / "hero-presets.json"
+    save_hero_presets(slot=4, banned_heroes=["zhouyu", "jie_zhouyu"], path=path)
+
+    again = load_hero_presets(path)
+
+    assert again["active"] == 4
+    assert again["slots"][4]["banned_heroes"] == ["zhouyu", "jie_zhouyu"]
+
+
+def test_a_broken_preset_file_falls_back_to_empty_slots(tmp_path: Path) -> None:
+    """坏文件 / 结构不符 ⇒ 5 个空槽（不把开局页炸掉）；未知武将的旧条目在读取时丢掉。"""
+    from sgs_web.serve import load_hero_presets
+
+    path = tmp_path / "hero-presets.json"
+    path.write_text("{ not json", encoding="utf-8")
+    assert load_hero_presets(path)["slots"] == [{"banned_heroes": []} for _ in range(5)]
+
+    path.write_text(json.dumps({"slots": [{"banned_heroes": ["guanyu"]}]}), encoding="utf-8")
+    assert load_hero_presets(path)["slots"] == [{"banned_heroes": []} for _ in range(5)]
+
+    path.write_text(
+        json.dumps(
+            {
+                "active": 1,
+                "slots": [
+                    {"banned_heroes": ["guanyu", "nobody", 7]},
+                    *[{"banned_heroes": []} for _ in range(4)],
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_hero_presets(path)["active"] == 1
+    assert load_hero_presets(path)["slots"][0]["banned_heroes"] == ["guanyu"], (
+        "将池里已不存在的武将 / 非字符串条目在读取时丢掉（只剩合法版本禁将）"
+    )
+
+
+def test_saving_refuses_an_unknown_ban_or_a_bad_slot(tmp_path: Path) -> None:
+    """写入口的 fail-closed：未知武将 id / 槽位越界 ⇒ 报错且**不写文件**。"""
+    from sgs_web.serve import save_hero_presets
+
+    path = tmp_path / "hero-presets.json"
+    with pytest.raises(ValueError) as caught:
+        save_hero_presets(slot=0, banned_heroes=["nobody"], path=path)
+    assert "nobody" in str(caught.value)
+
+    for slot in (-1, 5):
+        with pytest.raises(ValueError):
+            save_hero_presets(slot=slot, banned_heroes=[], path=path)
+
+    assert not path.exists(), "被拒的保存不得留下文件"
+
+
+def test_the_preset_endpoints_read_and_write_the_local_file(tmp_path: Path) -> None:
+    """HTTP 门面：GET 读存档、POST 保存并置 active；服务端文件是唯一真源。"""
+    from sgs_web.serve import GameRegistry, load_hero_presets
+
+    registry = GameRegistry(runs_dir=tmp_path)
+    status, body = _get_with_the_real_handler(registry, "/api/hero-presets")
+    assert status == 200
+    assert body["presets"]["active"] == 0
+    assert len(body["presets"]["slots"]) == 5
+
+    status, body = _post_with_the_real_handler(
+        registry, "/api/hero-presets", {"slot": 3, "banned_heroes": ["guanyu"]}
+    )
+    assert status == 200
+    assert body["presets"]["active"] == 3
+    assert body["presets"]["slots"][3]["banned_heroes"] == ["guanyu"]
+    assert load_hero_presets(registry.presets_path)["active"] == 3
+
+    status, body = _get_with_the_real_handler(registry, "/api/hero-presets")
+    assert status == 200 and body["presets"]["active"] == 3
+
+
+def test_the_preset_endpoint_refuses_a_malformed_body(tmp_path: Path) -> None:
+    """槽位越界 / banned_heroes 不是数组 / 未知武将 id ⇒ 400，且不写存档。"""
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir=tmp_path)
+    for bad in (
+        {"slot": 9, "banned_heroes": []},
+        {"slot": 0, "banned_heroes": "guanyu"},
+        {"slot": 0, "banned_heroes": ["nobody"]},
+        {"banned_heroes": []},
+    ):
+        status, body = _post_with_the_real_handler(registry, "/api/hero-presets", bad)
+        assert status == 400, (bad, status)
+        assert body["error"], (bad, body)
+
+    assert not (tmp_path / "hero-presets.json").exists()
 
 
 def test_the_session_log_stays_out_of_the_journal() -> None:

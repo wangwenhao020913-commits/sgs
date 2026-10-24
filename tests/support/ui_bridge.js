@@ -60,6 +60,10 @@
     "arrangeRowOf", "arrangeMoveTo", "arrangePick", "arrangeDrop",
     // 票 19：开局点将——列表拉取 + 开关（关了 = 置灰 + 建局不带 my_hero）
     "loadHeroCatalog", "fillHeroOptions", "syncPointjiang",
+    // 票 13：将池预设——5 槽切换 / 编辑 / 保存，真名分组渲染，真名池不足的拒绝判据
+    "heroVersions", "heroPools", "loadHeroPools", "saveHeroPool", "currentBans",
+    "renderPoolSlots", "renderHeroPool", "selectPoolSlot", "togglePoolBan",
+    "poolBlockReason", "syncPoolHint",
     // M5-01b：开局页牌堆档位——列表拉取（选项/文案全来自服务端 GET /api/decks）
     "loadDeckCatalog", "fillDeckOptions",
     // U1-03：提示条右端动作的候选下标 + 倒计时的三色纯函数 / 渲染（烟测只读这三口）

@@ -39,12 +39,18 @@ function wireOverlayToggle(button, panel, onOpen) {
 
 function wire() {
   seedOptions();
-  $("in-players").addEventListener("change", seedOptions);
+  $("in-players").addEventListener("change", () => {
+    seedOptions();
+    syncPoolHint();  // 座位数变了，真名池够不够要重算
+  });
   $("in-pointjiang").addEventListener("change", syncPointjiang);
+  $("in-my-hero").addEventListener("change", syncPoolHint);
   syncPointjiang();
   loadHeroCatalog();
+  loadHeroPools();
   loadDeckCatalog();
   $("lobby-form").addEventListener("submit", startGame);
+  $("btn-pool-save").addEventListener("click", saveHeroPool);
   // U2-01（D7）：三页顶栏共用同一组导航（顺序 / 高亮 / 禁用都归 core.js:show()）；
   // 这里只按 NAV_BUTTONS 逐个挂同一份处理器。回放入口就是导航三键之一，旧图标按钮已删。
   const openReplayPage = () => {

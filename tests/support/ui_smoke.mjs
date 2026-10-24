@@ -323,14 +323,21 @@ const sessionBodiesSince = (from) =>
   calls.slice(from).filter((call) => call.path === "/api/sessions").map((call) => call.body);
 
 await ui.loadHeroCatalog();
-check("⓪1 点将列表拉到了启用池", ui.state.heroCatalog.length > 0, `${ui.state.heroCatalog.length} 名`);
+const catalogVersions = ui.heroVersions();
+check("⓪1 点将列表拉到了启用并集（标准 + 界版，按真名分组）",
+  ui.state.heroCatalog.length === 26 && catalogVersions.length === 37,
+  `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
-  $("in-my-hero").children.length === ui.state.heroCatalog.length,
-  `选项 ${$("in-my-hero").children.length} / 池 ${ui.state.heroCatalog.length}`);
+  $("in-my-hero").children.length === catalogVersions.length,
+  `选项 ${$("in-my-hero").children.length} / 池 ${catalogVersions.length}`);
+check("⓪2b 同一真名的两版在下拉里分得清（关羽 / 界关羽）",
+  Array.from($("in-my-hero").children).some((option) => option.textContent === "关羽")
+  && Array.from($("in-my-hero").children).some((option) => option.textContent === "界关羽"),
+  Array.from($("in-my-hero").children).slice(7, 10).map((option) => option.textContent).join(","));
 check("⓪3 开关缺省是关的（不点将 = 老路径）", $("in-pointjiang").checked === false);
 
 $("in-players").value = "5";
-const picked = ui.state.heroCatalog[2];
+const picked = catalogVersions[2];
 tickPointjiang(true);
 check("⓪4 开关开着时「我的武将」可选", $("in-my-hero").disabled === false);
 $("in-my-hero").value = picked.id;
@@ -412,6 +419,156 @@ check("⓪18 160 档的建局请求体带 deck_profile",
 check("⓪19 开局页能建出 standard_ex_160 的局",
   expandedDeck.deck_profile === "standard_ex_160", String(expandedDeck.deck_profile));
 setSelect("in-deck-profile", "standard_108");
+
+/* --------------------------------------------- ⓪c 将池预设（M6 票 13）
+ *
+ * 走真的开局表单 + 真的服务端存档端点（`GET/POST /api/hero-presets`）：5 槽切换 / 编辑 /
+ * 保存 / 覆盖 / 重启后加载 active，以及"真名池不足 ⇒ 开局页拒绝且不发建局请求"。
+ * 面板与存档都由真脚本渲染 / 读写；断言只看 DOM 形状与线上请求体，不读内部实现。
+ */
+
+/** 某真名那一行的版本格（重渲染后必须重查：DOM 节点是替换的，不是原地改）。 */
+const poolRow = (trueName) => Array.from($("hero-pool").children)
+  .find((row) => row.getAttribute("data-true-name") === trueName) || null;
+const poolCells = (trueName) => {
+  const row = poolRow(trueName);
+  return row ? Array.from(row.children).filter((cell) => cell.tagName === "BUTTON") : [];
+};
+const slotButtons = () => Array.from($("pool-slots").children);
+const bannedIds = (trueName) => poolCells(trueName)
+  .filter((cell) => cell.classList.contains("banned"))
+  .map((cell) => cell.getAttribute("data-hero-id"));
+
+await ui.loadHeroPools();
+
+check("⓪20 服务端存档铺出 5 个常驻槽位",
+  slotButtons().length === 5, `${slotButtons().length} 个`);
+check("⓪21 启动时选中上次保存的 active（新档 = 槽位 0）",
+  ui.heroPools().selected === ui.heroPools().active
+  && slotButtons()[ui.heroPools().active].classList.contains("on")
+  && slotButtons()[ui.heroPools().active].classList.contains("active"),
+  `selected=${ui.heroPools().selected} active=${ui.heroPools().active}`);
+check("⓪22 将池按真名分组渲染（一行一个真名、行内 1–2 个版本格）",
+  $("hero-pool").children.length === ui.state.heroCatalog.length
+  && ui.state.heroCatalog.every((group, at) =>
+    $("hero-pool").children[at].getAttribute("data-true-name") === group.true_name
+    && $("hero-pool").children[at].children.length === group.versions.length + 1),
+  `行 ${$("hero-pool").children.length} / 真名 ${ui.state.heroCatalog.length}`);
+check("⓪23 同一真名的两个版本在同一行（关羽 / 界关羽）",
+  poolCells("关羽").length === 2
+  && poolCells("关羽")[0].getAttribute("data-hero-id") === "guanyu"
+  && poolCells("关羽")[1].getAttribute("data-hero-id") === "jie_guanyu",
+  poolCells("关羽").map((cell) => cell.getAttribute("data-hero-id")).join(","));
+
+// 点一格 = 禁掉这一版（灰 + aria-pressed=false）；同真名的另一版仍是可用（粒度是版本）。
+mark = calls.length;
+await clickAndWait(poolCells("关羽")[0]);
+check("⓪24 点版本格即禁掉该版本（禁用即灰）",
+  poolCells("关羽")[0].classList.contains("banned")
+  && poolCells("关羽")[0].getAttribute("aria-pressed") === "false",
+  poolCells("关羽")[0].getAttribute("class"));
+check("⓪25 禁将粒度是版本：同真名的另一版仍可用",
+  !poolCells("关羽")[1].classList.contains("banned")
+  && poolCells("关羽")[1].getAttribute("aria-pressed") === "true");
+check("⓪26 编辑不落盘（点格子不发保存请求）", calls.length === mark, `${calls.length - mark} 个新请求`);
+
+// 切到槽位 2：编辑的是**另一个槽位**（空集合），禁界关羽后保存 ⇒ 覆盖槽位 2 并置 active。
+mark = calls.length;
+await clickAndWait(slotButtons()[2]);
+check("⓪27 切槽位只改编辑对象（槽位按钮高亮）",
+  ui.heroPools().selected === 2 && slotButtons()[2].classList.contains("on")
+  && !slotButtons()[0].classList.contains("on"));
+check("⓪27b 新槽位是空集合（不串槽位 0 的编辑）",
+  JSON.stringify(ui.heroPools().slots[2]) === JSON.stringify([]),
+  JSON.stringify(ui.heroPools().slots[2]));
+await clickAndWait(poolCells("关羽")[1]);
+await clickAndWait($("btn-pool-save"));
+const savedBody = calls.slice(mark).filter((call) => call.path === "/api/hero-presets").pop();
+check("⓪28 保存请求带槽位 2 + 当前禁将集合",
+  savedBody.body.slot === 2 && JSON.stringify(savedBody.body.banned_heroes) === JSON.stringify(["jie_guanyu"]),
+  JSON.stringify(savedBody.body));
+check("⓪29 保存后槽位 2 置为 active（★）并保持选中",
+  ui.heroPools().active === 2 && ui.heroPools().selected === 2
+  && slotButtons()[2].classList.contains("active"),
+  `active=${ui.heroPools().active}`);
+
+// 槽位彼此独立：切回槽位 0，它禁的是 guanyu、界版仍可用；槽位 2 的集合不受影响。
+await clickAndWait(slotButtons()[0]);
+check("⓪30 槽位彼此独立（槽位 0 = guanyu、槽位 2 = jie_guanyu）",
+  JSON.stringify(bannedIds("关羽")) === JSON.stringify(["guanyu"])
+  && JSON.stringify(ui.heroPools().slots[2]) === JSON.stringify(["jie_guanyu"]),
+  `槽位0禁=${bannedIds("关羽").join(",")} 槽位2=${ui.heroPools().slots[2].join(",")}`);
+
+// 重启（重新拉存档 = 新进程读同一个本地文件）⇒ 自动加载 active 2 的禁将。
+await ui.loadHeroPools();
+check("⓪31 重启后自动加载上次 active（槽位 2、界关羽仍禁用、标准版可用）",
+  ui.heroPools().selected === 2
+  && slotButtons()[2].classList.contains("on")
+  && JSON.stringify(bannedIds("关羽")) === JSON.stringify(["jie_guanyu"]),
+  `selected=${ui.heroPools().selected} 禁=${bannedIds("关羽").join(",")}`);
+
+// 覆盖：在槽位 2 上恢复界关羽再存 ⇒ 存档里旧条目消失（整槽覆盖，不是追加）。
+await clickAndWait(poolCells("关羽")[1]);
+await clickAndWait($("btn-pool-save"));
+await ui.loadHeroPools();
+check("⓪32 保存覆盖整槽（恢复的那版从存档里消失）",
+  JSON.stringify(ui.heroPools().slots[2]) === JSON.stringify([])
+  && bannedIds("关羽").length === 0,
+  JSON.stringify(ui.heroPools().slots[2]));
+
+// 开局：请求体带**当前编辑**的禁将集合（不必先保存），本局随机配将不得发出被禁版本。
+await clickAndWait(slotButtons()[0]);
+await clickAndWait(poolCells("关羽")[0]);
+$("in-players").value = "2";
+$("in-seed").value = "2468";
+mark = calls.length;
+const bannedStart = await submitLobby();
+const bannedBody = sessionBodiesSince(mark).pop();
+check("⓪33 建局请求带当前槽位的禁将集合",
+  JSON.stringify(bannedBody.banned_heroes) === JSON.stringify(["guanyu"]),
+  JSON.stringify(bannedBody.banned_heroes));
+check("⓪34 禁将只作用于随机配将：本局没有 guanyu",
+  !bannedStart.heroes.includes("guanyu"), bannedStart.heroes.join(","));
+
+// 真名池不足 ⇒ 开局页先拦：切到槽位 1，禁到只剩 1 个可用真名（2 个座位）。
+await clickAndWait(slotButtons()[1]);
+const banAllButOne = [];
+for (const group of ui.state.heroCatalog.slice(1)) {
+  for (const version of group.versions) banAllButOne.push(version.id);
+}
+for (const heroId of banAllButOne) ui.togglePoolBan(heroId);
+ui.syncPoolHint();
+check("⓪35 可用真名 < 座位数 ⇒ 开局页给出可读原因",
+  $("pool-hint").textContent.includes("可用真名不足")
+  && $("pool-hint").classList.contains("warn"),
+  $("pool-hint").textContent);
+mark = calls.length;
+const refused = await submitLobby();
+check("⓪36 拒绝时不发建局请求、不创建会话",
+  sessionBodiesSince(mark).length === 0
+  && $("lobby-hint").textContent.includes("可用真名不足")
+  && refused === ui.state.view,
+  `新请求 ${sessionBodiesSince(mark).length} / 提示 ${$("lobby-hint").textContent}`);
+
+// 服务端同守：同一条禁将集合直接打 HTTP ⇒ 400 + 可读原因（引擎侧 fail-closed）。
+const denied = await fetch(`${BASE}/api/sessions`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    player_count: 2, ai: "random", human_seat: 0, timeout_seconds: null, seed: 5,
+    banned_heroes: banAllButOne,
+  }),
+});
+const deniedBody = await denied.json();
+check("⓪37 服务端同守：真名池不足 ⇒ 400 + 可读原因",
+  denied.status === 400 && String(deniedBody.error).includes("真名池不足"),
+  `HTTP ${denied.status} ${deniedBody.error}`);
+
+// 收尾：清空存档，别把这一段的禁将带进后面的用例（active 槽位归零）。
+await ui.loadHeroPools();
+ui.heroPools().slots[ui.heroPools().selected].splice(0);
+await clickAndWait($("btn-pool-save"));
+$("in-players").value = "8";
 
 /** 推进一条对局到一个干净局面。
  *

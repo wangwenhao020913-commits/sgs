@@ -64,6 +64,17 @@
       <span id="lobby-hint" class="dim"></span>
     </div>
   </form>
+  <!-- 将池（M6 票 13 / spec D6）：5 个常驻预设槽位 + 按真名分组的版本格。
+       槽位按钮与版本格都由 lobby.js 按服务端下发的目录 / 存档渲染；这里只留挂载点。 -->
+  <section id="hero-pool-panel" class="panel">
+    <h2>将池预设</h2>
+    <div id="pool-slots" class="pool-slots" aria-label="将池槽位"></div>
+    <div class="row">
+      <button id="btn-pool-save" type="button">保存到槽位 1</button>
+      <span id="pool-hint" class="dim"></span>
+    </div>
+    <div id="hero-pool" class="hero-pool" aria-label="将池"></div>
+  </section>
   <section class="panel">
     <h2>已有录像</h2>
     <div id="run-list" class="runs"></div>

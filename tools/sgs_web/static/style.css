@@ -73,6 +73,29 @@ button.primary:hover:not(:disabled) { color: #fff; opacity: .92; }
 button.ghost { background: transparent; }
 button:disabled { opacity: .4; cursor: not-allowed; }
 
+/* 将池预设（M6 票 13 / spec D6）：5 个常驻槽位 + 按真名分组的版本格。
+ * 版本格点一下 = 禁掉该版本（灰 + 删除线）；★ = 上次保存的 active（下次打开自动加载）。 */
+.pool-slots { display: flex; flex-wrap: wrap; gap: 8px; }
+.pool-slot.active { box-shadow: 0 0 0 3px var(--accent-soft); }
+.pool-slot.active::after { content: " ★"; color: var(--accent); }
+.pool-slots .pool-slot.on.active::after { color: #fff; }
+.hero-pool {
+  display: flex; flex-direction: column; gap: 2px; margin-top: 10px;
+  max-height: 46vh; overflow-y: auto; border-top: 1px solid var(--line); padding-top: 6px;
+}
+.pool-row {
+  display: flex; align-items: center; gap: 8px; padding: 2px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.pool-name { flex: 0 0 64px; font-size: 13px; color: var(--dim); }
+.pool-version { padding: 2px 10px; border-radius: 999px; background: #fff; font-size: 13px; }
+.pool-version.banned {
+  opacity: .38; text-decoration: line-through; background: var(--bg);
+}
+.pool-version.banned:hover:not(:disabled) { color: var(--dim); border-color: var(--line); }
+.pool-row.all-banned .pool-name { opacity: .45; }
+#pool-hint.warn { color: #a15c00; font-weight: 600; }
+
 .seats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
 .seat {
   border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: #fff;
