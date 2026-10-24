@@ -1,10 +1,11 @@
 """U 族：使用牌时触发（M6 票 02）——黄月英【集智】。
 
-规则原文：§九 L997（"当你使用一张非延时类锦囊牌时，你可以摸一张牌"）与界版 §十九 L2105
-（"当你使用一张**非转化的**锦囊牌时……"）。两版牌面**不同**（M6 评审订正）：
+规则原文：§九 L997（"当你使用一张非延时类锦囊牌时，你可以摸一张牌"）与界版 §十九
+L2104–L2105（"当你使用一张**非转化的**锦囊牌时……"）。两版牌面**不同**（M6 评审订正）：
 
 - **标准版**只排除延时类：**转化锦囊照常触发**（票 02 曾把"非转化"写进标准版口径）；
-- **界版**另排除转化牌（"非转化的"只在界版文本里）。
+- **界版**只排除转化牌（"非转化的"只在界版文本里）：**延时类非转化锦囊照常触发**
+  （界版牌面**没有**"非延时类"；正例在 ``tests/test_hero_jie_hand_limit.py``）。
 
 落点全部是外部缝：
 
@@ -14,7 +15,7 @@
 - 真引擎的整段出牌阶段（含**转化牌**这一正反两例：来源由 ``start_use`` 直接压帧，与
   ``tests/test_m5_attribute_damage.py`` 同一手法）。
 
-"延时类"与"转化"在标准版只有一个排除（前者），界版两个都排除，故各有各的反例。
+标准版排除延时类、界版排除转化牌，两版各有一个反例（界版对延时类的正例另居 Jie 文件）。
 """
 
 from __future__ import annotations
@@ -157,12 +158,16 @@ def test_jizhi_does_not_fire_on_a_basic_card():
 
 
 def test_jizhi_does_not_fire_on_a_delayed_trick():
-    """反例：真【乐不思蜀】（延时类）不触发。"""
+    """反例：标准版（§九 L997 的"非延时类"）对真【乐不思蜀】不触发。
+
+    界版牌面**没有**"非延时类"（§十九 L2104–L2105），同一张牌照常触发——正例见
+    ``tests/test_hero_jie_hand_limit.py::test_jie_jizhi_fires_on_a_delayed_non_transformed_trick``。
+    """
     delayed = _cards("indulgence")[0]
 
     engine, hand_before, _deck_before = _use_in_play_phase(delayed, targets=(1,))
 
-    assert _jizhi_queries(engine) == [], "延时类锦囊不触发集智"
+    assert _jizhi_queries(engine) == [], "标准版：延时类锦囊不触发集智"
     assert list(engine.state.player(0).hand) == [
         card for card in hand_before if card != delayed
     ]

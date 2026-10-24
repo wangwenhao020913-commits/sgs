@@ -1,19 +1,19 @@
 r"""U 族：使用牌时触发（M6 票 02）——黄月英【集智】。
 
 规则原文：§九 L997「当你使用一张非延时类锦囊牌时，你可以摸一张牌」——**没有**"非转化"；
-界版（§十九 L2105）「当你使用一张非转化的锦囊牌时，你可以摸一张牌」另追加「若此牌为基本
-牌，你可以弃置此牌，令你本回合的手牌上限 +1」——本模块经 :data:`JIE_JIZHI` 落地（M6 票
-08）。故两版的牌面判据**不同**：
+界版（§十九 L2104–L2105）「当你使用一张非转化的锦囊牌时，你可以摸一张牌」——**没有**
+"非延时类"，另追加「若此牌为基本牌，你可以弃置此牌，令你本回合的手牌上限 +1」——本模块
+经 :data:`JIE_JIZHI` 落地（M6 票 08）。故两版的牌面判据**不同**：
 
 - **标准版**只排除**延时类**（``behavior.is_delayed``：乐不思蜀 / 闪电 / 兵粮寸断）；
   **转化锦囊照常触发**（票 02 曾把"非转化"写进标准版口径，M6 评审按 §九 L997 订正）；
-- **界版**另排除**转化牌**（``CardRef.is_virtual`` 且 ``virtual_sources`` 非空）——§十九
-  L2105 才写"非转化的"。纯虚拟牌（没有来源实体牌）**不**在此列：§十六 16.2 明写"视为
-  使用"触发"当你使用牌时"类技能，排除词也只是"转化"。
+- **界版**只排除**转化牌**（``CardRef.is_virtual`` 且 ``virtual_sources`` 非空）——§十九
+  L2104 的"非转化的"是它**唯一**的排除；**延时类非转化锦囊照常触发**（乐不思蜀 / 兵粮寸断
+  / 闪电；M6 评审按界版牌面无"非延时类"订正）。纯虚拟牌（没有来源实体牌）**不**在排除之列：
+  §十六 16.2 明写"视为使用"触发"当你使用牌时"类技能，排除词也只是"转化"。
 
-**"此牌" = 集智摸的那一张**（spec D20）：规则书 L2199 的注记把"此牌"读成被使用的锦囊、
-与前半句"非延时类锦囊"冲突，是误读（`06`（§5「程序化约定与偏离一手」） 登记）。
-两版共用**延时类**这一个排除（§九 L997 的"非延时类"）：标准版只有它，界版另有"非转化"。
+**"此牌" = 集智摸的那一张**（spec D20）：规则书 L2108–L2109 的注记把"此牌"读成被使用的
+锦囊、与前半句"使用锦囊牌"冲突（锦囊牌不是基本牌），是误读（`06`（§5「程序化约定与偏离一手」） 登记）。
 
 牌名大类读数据文件的 :func:`sgs.data.card_category`（唯一真源），不抄牌名白名单：将来
 新增锦囊时这里不需要改。
@@ -89,19 +89,28 @@ _JIE_LIMIT_OPTION = "discard"
 
 
 def _jizhi_eligible(
-    state: GameState, card: CardRef | None, *, exclude_transformed: bool
+    state: GameState,
+    card: CardRef | None,
+    *,
+    exclude_delayed: bool,
+    exclude_transformed: bool,
 ) -> bool:
-    """这张牌算不算"使用了一张**非延时类锦囊**牌"（条件求值的唯一牌面判据）。
+    """这张牌算不算"使用了一张锦囊牌"（条件求值的唯一牌面判据）。
 
-    ``exclude_transformed`` 是**标准 / 界唯一的牌面差别**：§九 L997 只写"非延时类锦囊"，
-    转化锦囊照常触发；§十九 L2105 的界版才写"非转化的"，故界版传 ``True``。
-    三段都不读牌名白名单：大类读内容包、延时性读行为表、转化性读虚拟牌来源集合。
+    两个开关是**两版牌面的全部差别**，各由一版传入、另一版不传：
+
+    - ``exclude_delayed`` = §九 L997 的"**非延时类**锦囊牌"——只标准版有；
+    - ``exclude_transformed`` = §十九 L2104 的"**非转化的**锦囊牌"——只界版有。
+
+    故标准版对转化锦囊照常触发（不排除转化）、界版对延时类非转化锦囊照常触发
+    （不排除延时）。三段都不读牌名白名单：大类读内容包、延时性读行为表、转化性读虚拟牌
+    来源集合。
     """
     if card is None:
         return False
     if exclude_transformed and card.is_virtual and card.virtual_sources:
         return False
-    if behavior_for(card).is_delayed:
+    if exclude_delayed and behavior_for(card).is_delayed:
         return False
     return card_category(state.pack_id, card.type) is Category.TRICK
 
@@ -120,14 +129,24 @@ def _jizhi_condition(host: Any, frame: Frame) -> bool:
     """标准【集智】（§九 L997）：本人使用非延时类锦囊 —— **转化锦囊照样触发**。"""
     if not _jizhi_owner_used_it(frame):
         return False
-    return _jizhi_eligible(host.state, frame.data.get("card"), exclude_transformed=False)
+    return _jizhi_eligible(
+        host.state,
+        frame.data.get("card"),
+        exclude_delayed=True,
+        exclude_transformed=False,
+    )
 
 
 def _jie_jizhi_condition(host: Any, frame: Frame) -> bool:
-    """界【集智】（§十九 L2105）：本人使用**非转化的**锦囊 —— 转化锦囊不触发。"""
+    """界【集智】（§十九 L2104–L2105）：本人使用**非转化的**锦囊 —— 延时类照样触发。"""
     if not _jizhi_owner_used_it(frame):
         return False
-    return _jizhi_eligible(host.state, frame.data.get("card"), exclude_transformed=True)
+    return _jizhi_eligible(
+        host.state,
+        frame.data.get("card"),
+        exclude_delayed=False,
+        exclude_transformed=True,
+    )
 
 
 def _jizhi(host: Any, frame: Frame) -> Control:
@@ -463,8 +482,9 @@ def use_after_skill_definitions() -> tuple[SkillDef, ...]:
     """U 族三条技能的 :class:`~sgs.skills.catalog.SkillDef`（非锁定；【涯角】挂使用 / 打出两条钩子）。
 
     标准 / 界**各自一条触发条件**，因为两版牌面不同：§九 L997 的标准版只排除延时类
-    （转化锦囊照常触发），§十九 L2105 的界版另排除转化牌（:func:`_jizhi_eligible` 的
-    ``exclude_transformed``）。提交点仍各一条零步流水线：界版只多"基本牌弃置换 +1"一段。
+    （转化锦囊照常触发），§十九 L2104–L2105 的界版只排除转化牌（延时类照常触发）：
+    :func:`_jizhi_eligible` 的两个开关各传一个。提交点仍各一条零步流水线：界版只多
+    "基本牌弃置换 +1"一段。
     """
     return (
         SkillDef(
@@ -473,7 +493,7 @@ def use_after_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             hooks=(Hook(Timing.USE_ON_USE, condition=_jizhi_condition, flow=JIZHI_FLOW),),
-            requirement="使用非延时类锦囊牌时，摸一张牌",
+            requirement="使用非延时类锦囊牌时，摸一张牌（转化锦囊也算）",
         ),
         SkillDef(
             skill_id=JIE_JIZHI,
@@ -488,8 +508,8 @@ def use_after_skill_definitions() -> tuple[SkillDef, ...]:
                 ),
             ),
             requirement=(
-                "使用非转化的非延时锦囊牌时摸一张牌；若此牌为基本牌，你可以弃置此牌，"
-                "令你本回合的手牌上限 +1"
+                "使用非转化的锦囊牌时摸一张牌（延时类也算）；若此牌为基本牌，你可以弃置"
+                "此牌，令你本回合的手牌上限 +1"
             ),
         ),
         SkillDef(

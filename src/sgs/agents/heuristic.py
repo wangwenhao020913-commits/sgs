@@ -1798,7 +1798,7 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     ),
     "hero.jie_huangyueying.jizhi": (
         _constant(3.0),
-        "使用非延时锦囊摸一张；摸到基本牌还能弃它换本回合 +1 手牌上限",
+        "使用非转化锦囊摸一张（延时类也触发）；摸到基本牌还能弃它换本回合 +1 手牌上限",
     ),
     # M6 票 09：牌标签的首个载体——界甄姬【洛神】（与标准版同一条循环 + 标签）
     "hero.jie_zhenji.luoshen": (

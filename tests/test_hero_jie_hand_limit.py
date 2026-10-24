@@ -145,6 +145,17 @@ def _use_trick(
     return engine, deck_before
 
 
+def _activation_queries(engine, skill_id: str) -> list:
+    """记录流里 ``skill_id`` 的「是否发动」询问（非锁定技的可选性判据）。"""
+    return [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION
+        and record.query.skill_id == skill_id
+    ]
+
+
 def _state(
     *,
     seats: int = 2,
@@ -308,6 +319,37 @@ def test_jie_jizhi_draws_a_card_on_a_non_transformed_trick():
     assert list(engine.state.player(0).hand) == [0, 1, drawn, *deck_before[1:3]], (
         "集智先摸牌堆顶一张，随后【无中生有】再摸两张"
     )
+
+
+def test_jie_jizhi_fires_on_a_delayed_non_transformed_trick():
+    """界版牌面**没有**"非延时类"（§十九 L2104–L2105）：真【乐不思蜀】照常触发、摸一张。
+
+    与标准版（§九 L997 的"非延时类锦囊牌"）相反；标准版对同一张牌的反例见
+    ``tests/test_hero_use_after.py::test_jizhi_does_not_fire_on_a_delayed_trick``。
+    "此牌"是**摸到的**那张（D20）：摸到锦囊 ⇒ 不产生"弃置换 +1"的询问，上限不加。
+    """
+    delayed = cards_of_type(PACK, "indulgence")[0]
+    drawn = cards_of_type(PACK, "dismantlement")[0]
+    fillers = _deck_excluding(drawn, delayed)
+
+    engine, deck_before = _use_trick(
+        delayed, third=drawn, seat0_skill=JIE_JIZHI, discard=True
+    )
+
+    assert deck_before[0] == drawn
+    assert len(_activation_queries(engine, JIE_JIZHI)) == 1, (
+        "界版对延时类非转化锦囊照样问一次「是否发动」"
+    )
+    assert list(engine.state.player(0).hand) == [*fillers[:2], drawn], (
+        "集智摸到牌堆顶那一张；延时锦囊自身去判定区、不再摸牌"
+    )
+    assert engine.state.player(0).hand_limit_bonus == 0
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "query"
+        and getattr(record.query, "skill_id", "") == JIE_JIZHI_LIMIT
+    ], "摸到的是锦囊 ⇒ 不产生「是否弃置」询问"
 
 
 def test_jie_jizhi_discards_the_drawn_basic_card_for_plus_one():
