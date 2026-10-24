@@ -414,22 +414,24 @@ def test_the_standard_table_stays_the_25_and_the_jie_table_is_loaded_separately(
     assert standard.pack_id == "standard"
     assert len(standard.heroes) == STANDARD_HERO_COUNT
     assert jie.pack_id == "jie"
-    assert [hero.id for hero in jie.heroes] == ["jie_guanyu", "jie_machao"]
+    assert [hero.id for hero in jie.heroes] == ["jie_guanyu", "jie_machao", "jie_zhangfei"]
     assert {hero.id for hero in standard.heroes}.isdisjoint(
         {hero.id for hero in jie.heroes}
     ), "界版武将 id 与标准版各自独立（不改既有 id）"
 
 
 def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
-    """真名 / 版本 / 势力 / 体力上限 / 技能清单逐项落定（第十九章 L2067–L2074 / L2090–L2096）。
+    """真名 / 版本 / 势力 / 体力上限 / 技能清单逐项落定（第十九章 L2067–L2081 等）。
 
     真名是**字段**而不是从显示名派生（票面「数据与加载」；4 名只有界版的武将没有可剥的
     前缀）。票 12 才把标准 25 名的真名补齐，故本票只要求界版这半已带上。
+    票 05 追加界张飞：技能类型里第一次出现**限定技**（``LIMITED``，§四 L350–L355）。
     """
     jie = load_heroes("jie")
     guanyu = jie.by_id("jie_guanyu")
     machao = jie.by_id("jie_machao")
-    assert guanyu is not None and machao is not None
+    zhangfei = jie.by_id("jie_zhangfei")
+    assert guanyu is not None and machao is not None and zhangfei is not None
 
     assert (guanyu.name, guanyu.true_name, guanyu.version) == ("界关羽", "关羽", "jie-ol")
     assert (guanyu.kingdom, guanyu.gender, guanyu.hp_max) == (
@@ -447,14 +449,30 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     )
     assert [skill.id for skill in machao.skills] == ["mashu", "tieqi"]
 
+    assert (zhangfei.name, zhangfei.true_name, zhangfei.version) == (
+        "界张飞",
+        "张飞",
+        "jie-ol",
+    )
+    assert (zhangfei.kingdom, zhangfei.gender, zhangfei.hp_max) == (
+        Kingdom.SHU,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in zhangfei.skills] == ["paoxiao", "tishen"]
+    assert [skill.skill_type for skill in zhangfei.skills] == [
+        SkillType.NORMAL,
+        SkillType.LIMITED,
+    ], "【替身】是限定技（§四 L350–L355：整局只能发动一次）"
+
     assert all(hero.true_name for hero in jie.heroes), "界版每名都带真名"
-    assert all(hero.enabled for hero in jie.heroes), "边界突破 P1 起两名界将可用"
+    assert all(hero.enabled for hero in jie.heroes), "边界突破 P1 起界将逐批启用"
 
 
 def test_hero_skill_ids_lookup_covers_the_jie_supplement():
     """载体解析的唯一读取面：同一个 ``hero_skill_ids`` 认得扩展表里的武将。
 
-    这正是"两名界将可用"的接缝——``resolve_instances`` 读它取武将牌上的技能清单；
+    这正是"界将可用"的接缝——``resolve_instances`` 读它取武将牌上的技能清单；
     少了这一道，界将的构造局面会静默得到零个实例。
     """
     assert hero_skill_ids("jie_guanyu") == (
@@ -464,6 +482,10 @@ def test_hero_skill_ids_lookup_covers_the_jie_supplement():
     assert hero_skill_ids("jie_machao") == (
         "hero.jie_machao.mashu",
         "hero.jie_machao.tieqi",
+    )
+    assert hero_skill_ids("jie_zhangfei") == (
+        "hero.jie_zhangfei.paoxiao",
+        "hero.jie_zhangfei.tishen",
     )
     assert hero_skill_ids("guanyu") == ("hero.guanyu.wusheng",), "标准版查法一字不变"
 

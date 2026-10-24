@@ -4,33 +4,39 @@ r"""L 族：阶段体触发与数值（票 12 登记；机制由票 10 的通用
 :class:`~sgs.skills.catalog.SkillDef` = 一个 ``hero.<武将 id>.<短 id>`` 技能，
 定义与回调住本模块，:data:`sgs.skills.CATALOG` 仍是**唯一入口**。
 
-L 族的形态差别只有一处：它挂在**阶段体**（``PHASE_DRAW`` / ``PHASE_FINISH``）上，
-而阶段体没有结算帧——票 10 的 ``Engine._dispatch_phase_body`` 已经在"当前局面存在注册在
-该时机上的实例"时惰性建一个不压栈的持久帧，故本票**只需登记**（票 10 §读法 4 明写
-【英姿】【闭月】因此是"照表登记"、不新增机制）：
+L 族的形态差别只有一处：它挂在**阶段体**（``PHASE_PREPARE`` / ``PHASE_DRAW`` /
+``PHASE_FINISH`` …）上，而阶段体没有结算帧——票 10 的 ``Engine._dispatch_phase_body``
+已经在"当前局面存在注册在该时机上的实例"时惰性建一个不压栈的持久帧，故本票**只需登记**
+（票 10 §读法 4 明写【英姿】【闭月】因此是"照表登记"、不新增机制）：
 
-===========  ======  ================  ==========================
-技能           锁定    阶段               效果
-===========  ======  ================  ==========================
-周瑜【英姿】    非锁定  ``PHASE_DRAW``    摸牌阶段多摸一张（规则 1018）
-貂蝉【闭月】    非锁定  ``PHASE_FINISH``  结束阶段摸一张（规则 1054）
-张辽【突袭】    非锁定  ``PHASE_DRAW``    放弃摸牌，改为获得至多两名其他角色各一张手牌（§九 L948）
-许褚【裸衣】    非锁定  ``PHASE_DRAW``    少摸一张；本回合【杀】/【决斗】伤害 +1（§九 L952）
-===========  ======  ================  ==========================
+=============  ========  =========================  ==========================
+技能            类型       阶段                        效果
+=============  ========  =========================  ==========================
+周瑜【英姿】     非锁定    ``PHASE_DRAW``             摸牌阶段多摸一张（规则 1018）
+貂蝉【闭月】     非锁定    ``PHASE_FINISH``           结束阶段摸一张（规则 1054）
+张辽【突袭】     非锁定    ``PHASE_DRAW``             放弃摸牌，改为获得至多两名其他角色各一张手牌（§九 L948）
+许褚【裸衣】     非锁定    ``PHASE_DRAW``             少摸一张；本回合【杀】/【决斗】伤害 +1（§九 L952）
+吕蒙【克己】     非锁定    ``PHASE_DISCARD_START``    本回合未出【杀】⇒ 跳过弃牌阶段（§九 L1011）
+界张飞【替身】   **限定**  ``PHASE_PREPARE``         体力回复至上限，摸以此法回复的体力值数张牌（§十九 L2079–L2081）
+=============  ========  =========================  ==========================
 
-四条都是**非锁定技**（技能面写了"你可以"）⇒ 先发"是否发动"询问，答 ``ActivateSkill``
-才执行；"技能持有者就是当前回合角色"这一前提由 :func:`phase_body_activation_plans` 的
-``available`` 表达（阶段体帧的 ``source`` 就是当前回合角色），与【观星】同一姿态：
-``available=False`` ⇒ 别人的阶段里该实例连"是否发动"都不问。【突袭】另有一条前提
-"至少一名其他角色有手牌"（没有可拿的牌就不该问），由 :attr:`PhaseBodySkill.available`
-声明。
+除【替身】外都是**非锁定技**（技能面写了"你可以"）⇒ 先发"是否发动"询问，答
+``ActivateSkill`` 才执行；"技能持有者就是当前回合角色"这一前提由
+:func:`phase_body_activation_plans` 的 ``available`` 表达（阶段体帧的 ``source`` 就是当前
+回合角色），与【观星】同一姿态：``available=False`` ⇒ 别人的阶段里该实例连"是否发动"
+都不问。【突袭】另有一条前提"至少一名其他角色有手牌"（没有可拿的牌就不该问），由
+:attr:`PhaseBodySkill.available` 声明。
+
+【替身】是 M6 的第一个**限定技**载体：整局只能发动一次，发动后由 :mod:`sgs.skills.catalog`
+的派发环落"整局已用"位（与锁定 / 非锁定正交——它仍是非锁定，先问再执行）。
 
 摸牌走 :meth:`~sgs.engine.Engine.draw_for_hand`（沿用 ``shuffle`` 子流、短摸判平局），
 与摸牌阶段 / 奖惩摸牌同一口径；【突袭】/【裸衣】改的是**阶段的基础摸牌数**，经
 :meth:`~sgs.engine.Engine.set_draw_phase_count` / ``reduce_draw_phase_by`` 交给
 ``_phase_draw`` 统一摸（而不是各画一份摸牌循环）。【英姿】/【闭月】/【裸衣】**不提问**，
 走零步流水线、不让出控制权；【突袭】的座位步（``PickSeats``）会提问，走 ``SkillFlow``
-的常规挂起 / 续跑。
+的常规挂起 / 续跑；【替身】的回血先压 ``RECOVER`` 帧、出栈后才按"以此法回复的体力值"
+摸牌（"然后"的严格次序，与【苦肉】的先失去体力再摸牌同形）。
 """
 
 from __future__ import annotations
@@ -42,7 +48,7 @@ from typing import Any
 from sgs.data import SkillType, hero_skill_id
 from sgs.effects import CarrierKind, Modifier, ModifierContext, ModifierPoint, behavior_for, is_slash
 from sgs.resolution import Control, Frame
-from sgs.state import GameState, MoveReason, Zone, ZoneRef
+from sgs.state import FrameKind, GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
 from .catalog import ActivationPlan, HeroSkillDecl, Hook, SkillDef
@@ -56,6 +62,8 @@ __all__ = [
     "LUOYI_FLOW",
     "PHASE_BODY_SKILLS",
     "PhaseBodySkill",
+    "TISHEN",
+    "TISHEN_FLOW",
     "TUXI_FLOW",
     "YINGZI_FLOW",
     "phase_body_skill_definitions",
@@ -69,7 +77,9 @@ class PhaseBodySkill(HeroSkillDecl):
     ``flow``（W6-01）：零步技能的 ``SkillFlow``（``steps=()``）；旧回调
     :meth:`handler` 保留，由 flow 的 ``effect`` 原样转调。
     ``modifiers``（M6 票 01）：这条技能随身带的修饰器（【裸衣】的伤害 +1）；
-    ``available``（M6 票 01）：除"自己的阶段"外的额外前提（【突袭】：有牌可拿）。
+    ``available``（M6 票 01）：除"自己的阶段"外的额外前提（【突袭】：有牌可拿）；
+    ``skill_type``（M6 票 05）：技能类型（缺省 ``NORMAL``；【替身】是 ``LIMITED``，
+    派发环据此落"整局已用"位）。
     """
 
     timing: Timing
@@ -77,6 +87,7 @@ class PhaseBodySkill(HeroSkillDecl):
     flow: Any = None
     modifiers: tuple[Modifier, ...] = ()
     available: Callable[[GameState, int], bool] | None = None
+    skill_type: SkillType = SkillType.NORMAL
 
     def handler(self, host: Any, frame: Frame) -> Control:
         """阶段体钩子：是否发动已由派发器问过；这里把 ``draws`` 张摸进持有者手里。"""
@@ -301,9 +312,83 @@ _KEJI = PhaseBodySkill(
 )
 
 
-PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (_YINGZI, _BIYUE, _TUXI, _LUOYI, _KEJI)
-"""L 族五条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
-票 03 的【克己】）。"""
+# ---------------------------------------------------------------------------
+# 界张飞【替身】（M6 票 05）：限定技——准备阶段，体力回复至上限，摸回复量张牌
+#
+# 规则原文（§十九 L2079–L2081）：
+#
+#     替身：限定技，准备阶段，你可以将体力回复至体力上限，摸以此法回复的体力值数张牌。
+#
+# "限定技"= **整局只能发动一次**（§四 L350–L355），落点是 `sgs.skills.catalog` 的派发环
+# （非限定技零动作）：它与本技能的 `skill_type = LIMITED` 一起构成唯一判据，"已用"位住
+# per-instance 的 `GameState.skill_state`。与 locked 正交——技能面写"你可以"，故仍是非锁定。
+# ---------------------------------------------------------------------------
+
+TISHEN = hero_skill_id("jie_zhangfei", "tishen")
+"""界张飞【替身】的全限定技能 id。"""
+
+_TISHEN_HP_BEFORE = "tishen_hp_before"
+"""帧私有：发动前的体力（重入时用来算"**以此法**回复的体力值"）。"""
+
+
+def _tishen_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """提交点：先压 ``RECOVER`` 帧回满，出栈后摸"实际回复值"张牌（"然后"的次序）。
+
+    回复量声明为 ``hp_max - hp``（"回复至体力上限"），但**摸几张按实际回复的体力值**算：
+    重入时比较发动前后的体力，而不是把声明的量再算一遍（【救援】一类回复量修饰器把量
+    抬高后仍被上限夹住，读声明值会摸多）。回复 0（本来就满）⇒ 不压帧、不摸牌。
+    """
+    del answers
+    owner = frame.data["skill_owner"]
+    if _TISHEN_HP_BEFORE not in frame.data:
+        player = host.state.player(owner)
+        frame.data[_TISHEN_HP_BEFORE] = player.hp
+        healed = player.hp_max - player.hp
+        if healed <= 0:
+            return None
+        host.push_frame(
+            FrameKind.RECOVER,
+            {
+                "source": owner,
+                "targets": (owner,),
+                "card": None,
+                "use_timing": frame.data.get("use_timing"),
+                "amount": healed,
+            },
+            timing=Timing.RECOVER_VALUE,
+        )
+        return "stay"
+    healed = host.state.player(owner).hp - int(frame.data[_TISHEN_HP_BEFORE])
+    if healed > 0:
+        host.draw_for_hand(frame, owner, healed)
+    return None
+
+
+TISHEN_FLOW = SkillFlow(name="tishen", steps=(), effect=_tishen_effect)
+"""【替身】的零步流水线：[是否发动] → 回复至上限 → 摸回复量张牌（无步骤）。"""
+
+
+_TISHEN = PhaseBodySkill(
+    # 界张飞【替身】：限定技，准备阶段，你可以将体力回复至体力上限，摸以此法回复的
+    # 体力值数张牌（§十九 L2079–L2081）。
+    hero_id="jie_zhangfei",
+    short_id="tishen",
+    timing=Timing.PHASE_PREPARE,
+    flow=TISHEN_FLOW,
+    skill_type=SkillType.LIMITED,
+)
+
+
+PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
+    _YINGZI,
+    _BIYUE,
+    _TUXI,
+    _LUOYI,
+    _KEJI,
+    _TISHEN,
+)
+"""L 族六条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
+票 03 的【克己】、票 05 的【替身】）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "yingzi": "多摸一张牌",
@@ -311,8 +396,9 @@ _REQUIREMENTS: dict[str, str] = {
     "tuxi": "放弃摸牌，改为获得至多两名其他角色的各一张手牌",
     "luoyi": "少摸一张牌；本回合你的【杀】或【决斗】造成的伤害 +1",
     "keji": "跳过弃牌阶段",
+    "tishen": "将体力回复至体力上限，然后摸以此法回复的体力值数张牌",
 }
-"""L 族五条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+"""L 族六条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
 _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
     # M6 票 01【突袭】：座位步的询问 ``skill_id`` 是 ``tuxi:seat:<序号>`` ⇒ 键 = ``seat``。
@@ -324,10 +410,12 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
 def phase_body_activation_plans() -> dict[str, Any]:
     """L 族的发动形态注册表（由 :data:`sgs.skills.catalog.ACTIVATION_PLANS` 末尾并入）。
 
-    五条技能的形态同形：**技能持有者就是当前回合角色**才 ``available``——阶段体帧的
+    六条技能的形态同形：**技能持有者就是当前回合角色**才 ``available``——阶段体帧的
     ``source`` 由 :meth:`Engine._dispatch_phase_body` 设成当前回合角色。别的人摸牌 /
     结束阶段里，这条实例连"是否发动"都不问（与【观星】的 ``_guanxing_plan`` 同一条理由）。
     声明了 :attr:`PhaseBodySkill.available` 的（【突袭】"有牌可拿"）再叠一层前提。
+    限定技的"已用"门在派发环（:func:`sgs.skills.catalog.dispatch_timing`）里，不在这里
+    重复——本函数只回答"这一问在不在这个人的阶段里"。
     """
 
     def plan_for(skill: PhaseBodySkill) -> Any:
@@ -344,10 +432,11 @@ def phase_body_activation_plans() -> dict[str, Any]:
 
 
 def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
-    """L 族四条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
+    """L 族六条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
 
-    四条都**非锁定**（技能面写"你可以"）⇒ 先问"是否发动"再执行；``carrier = HERO``
-    ⇒ 优先级档由载体派生；``skill_type = NORMAL``（都不是主公技）。
+    六条都**非锁定**（技能面写"你可以"）⇒ 先问"是否发动"再执行；``carrier = HERO``
+    ⇒ 优先级档由载体派生；``skill_type`` 取自声明（缺省 ``NORMAL``，【替身】是
+    ``LIMITED``——锁定 / 非锁定与它正交）。
     挂点是**阶段体**（``Hook(timing)``），消费方是票 10 的 ``_dispatch_phase_body``；
     【裸衣】另带一条 ``DAMAGE_DEAL_AMOUNT`` 修饰器（随身修饰器，随实例存亡）。
     """
@@ -356,7 +445,7 @@ def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
             skill_id=skill.skill_id,
             locked=False,
             carrier=CarrierKind.HERO,
-            skill_type=SkillType.NORMAL,
+            skill_type=skill.skill_type,
             hooks=(Hook(skill.timing, flow=skill.flow),),
             modifiers=skill.modifiers,
             requirement=_REQUIREMENTS[skill.short_id],

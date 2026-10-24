@@ -1,6 +1,6 @@
-"""M6 票 04：界关羽 / 界马超（§十九 L2067–L2074 / L2090–L2096）。
+"""M6 界将：界关羽 / 界马超（票 04）+ 界张飞（票 05）。
 
-两名界将是本票的**真实载体**——技能三态（获得 / 失去 / 失效）的引擎原语由它们第一次真用上：
+票 04 的两名界将是**技能三态**（获得 / 失去 / 失效）的引擎原语第一次真用上：
 
 - 【武圣】②（界关羽）：方块【杀】无距离限制 ⇒ ``TARGET_POOL`` 的连续型效果；
 - 【义绝】（界关羽）：弃一张牌 → 目标展示一张手牌 → 红：获得并可令其回复 / 黑：**本回合**
@@ -9,19 +9,30 @@
 - 【铁骑】（界马超）：使用【杀】指定目标后 → 令其非锁定技失效 → 判定 → **由目标决定**
   是否弃一张同花色牌；不弃（或没有）⇒ 该目标不能使用【闪】响应此【杀】。
 
+票 05 的界张飞是**限定技**（整局一次）的第一个载体：
+
+- 【替身】（限定技）：准备阶段 → 体力回复至上限 → 摸以此法回复的体力值数张牌；
+  第二次询问不再出现，"已用"在回放后一致；
+- 【咆哮】①：与标准版逐字相同（无次数限制）；②：被【闪】抵消后，本回合**第一个**
+  【杀】伤害事件 +1（"造成伤害时"消费，不是"使用【杀】时"）。
+
 本文件只走外部缝：候选 / 询问序列、记录流（delta）、终局状态（手牌 / 体力 / 距离 / 目标池）。
 引擎级的三态形状（获得 / 失去的零载体构造）住 ``tests/test_hero_skill_state.py``。
 
-两条**本票裁定**（`06` §5「程序化约定与偏离一手」逐条登记）：
+三条**裁定**（`06` §5「程序化约定与偏离一手」逐条登记；票 05 的账本行由票 21 写回）：
 
 1. 【义绝】"不能使用或打出手牌"**也挡住响应**（【闪】/【桃】）——牌面写的是"使用或打出"，
    响应就是打出；故被义绝者的【闪】候选整个消失（反例：没有义绝时【闪】照常出现）。
 2. 【铁骑】"除非该角色弃置一张与判定结果花色相同的牌"——**弃不弃由目标决定**：这一问的
    应答者是目标（``SELECT_CARDS`` 的 ``actor``），``Pass`` = 不弃 = 不能响应。
+3. 【咆哮】②"下一次"= 触发后**第一个**由自己使用的【杀】造成的**伤害事件**：被抵消 /
+   未造成伤害的那张不消费（与【酒】的使用即消费相反），多目标【杀】只有第一个目标的本次
+   伤害 +1；作用域 = 本回合，回合末清掉。
 """
 
 from __future__ import annotations
 
+from sgs.agents import tape_from_journal
 from sgs.data import Color, RuleConfig, Suit, color_of_suit, load_content_pack
 from sgs.effects import behavior_for, check_targets, distance, legal_actions_for
 from sgs.engine import Engine
@@ -32,6 +43,9 @@ from sgs.skills import (
     YIJUE_HEAL,
     YIJUE_HEAL_OPTIONS,
     conversion_offers,
+    limited_skill_used,
+    prune_skill_state,
+    reset_phase_skill_state,
 )
 from sgs.state import (
     ActivateSkill,
@@ -45,7 +59,17 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import RecordingPlayer, SeatSpec, build_state, cards_of_type, ran_timing, run_until
+from support import (
+    PassPlayer,
+    RecordingPlayer,
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    ran_timing,
+    run_queries,
+    run_turns,
+    run_until,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -737,3 +761,290 @@ def test_jie_tieqi_suppression_happens_inside_the_use_frame_and_the_frame_still_
     assert engine.state.player(1).hp == 3, "在飞的【杀】结算没有被失效打断"
     assert conversion_offers(engine.state, 1, "slash") == (), "此后新产生的解析才被挡"
 
+
+# ---------------------------------------------------------------------------
+# 界张飞【替身】：限定技（整局一次）——§十九 L2075–L2081、§四 L350–L355
+#
+# 【替身】= 准备阶段，你可以将体力回复至体力上限，摸以此法回复的体力值数张牌。
+# 类型是**限定技**（`SkillType.LIMITED`，规则 §4.12）：整局只能发动一次。它与锁定 / 非锁定
+# 正交——本技能的技能面写"你可以"，故仍是**非锁定**（发动要先问"Do you want to"）。
+#
+# "已用"落 per-instance 的 ``GameState.skill_state``（票 04 建好的"已用"键位），与 A 族
+# 的阶段位共用一个位图；出牌阶段复位只清阶段位，整局位保留（票 05 把复位收窄）。
+# ---------------------------------------------------------------------------
+
+TISHEN = "hero.jie_zhangfei.tishen"
+"""界张飞【替身】的全限定技能 id。"""
+
+JIE_PAOXIAO = "hero.jie_zhangfei.paoxiao"
+"""界张飞【咆哮】的全限定技能 id（§十九 L2075–L2078）。"""
+
+
+def _zhangfei_state(
+    *,
+    hp: int = 4,
+    hand: tuple[int, ...] = (),
+    target_hand: tuple[int, ...] = (),
+    target_hp: int = 4,
+):
+    """两人局：座位 0 = 界张飞（体力 ``hp``），座位 1 = 无武将（体力 ``target_hp``）。"""
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=hp, hand=hand, hero="jie_zhangfei"),
+            SeatSpec(hp=target_hp, hand=target_hand),
+        ],
+        deck=_deck_excluding(*hand, *target_hand),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+
+
+def _tishen_player(*, activate: bool = True):
+    """座位 0 的脚本：见到【替身】的"是否发动"就按 ``activate`` 应答，其余走最小应答。"""
+
+    def handler(query):
+        if query.kind == QueryKind.SKILL_ACTIVATION.value and query.skill_id == TISHEN:
+            if activate:
+                return _activate(query, TISHEN)
+            return _find(query, lambda action: isinstance(action, Pass))
+        return None
+
+    return Scripted(handler)
+
+
+def _tishen_queries(engine) -> list:
+    """记录流里【替身】的"是否发动"询问（按出现序）。"""
+    return [
+        query
+        for query in _queries(engine, QueryKind.SKILL_ACTIVATION.value)
+        if query.skill_id == TISHEN
+    ]
+
+
+def test_tishen_heals_to_the_max_and_draws_the_healed_cards():
+    """正例：体力 1 ⇒ 回复至上限 4（以此法回复 3），**先摸 3 张**，摸牌阶段再摸 2 张。"""
+    engine = Engine.from_state(_zhangfei_state(hp=1), seed=7)
+    run_queries(
+        engine,
+        [_tishen_player(), PassPlayer()],
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE.value,
+    )
+
+    player = engine.state.player(0)
+    assert player.hp == 4, "将体力回复至体力上限"
+    assert len(player.hand) == 5, "以此法回复 3 点 ⇒ 摸 3 张；摸牌阶段再摸 2 张"
+    assert limited_skill_used(engine.state, 0, TISHEN) is True, "发动后落整局已用位"
+
+
+def test_tishen_asks_only_once_in_the_whole_game():
+    """验收 1：首次可发动；**第二次准备阶段不再出现询问**（整局一次）。
+
+    跑完三个回合（界张飞的第二次准备阶段在第三个回合）断言"询问序列里没有第二次"。
+    """
+    engine = Engine.from_state(_zhangfei_state(hp=2), seed=7)
+    run_turns(engine, [_tishen_player(), PassPlayer()], turns=3)
+
+    assert len(_tishen_queries(engine)) == 1, "整局只发一次「是否发动」询问"
+    assert engine.state.player(0).hp == 4, "第一次已回复至上限，第二次若又发动会露馅"
+
+
+def test_declining_tishen_keeps_it_available():
+    """反例（可选性）：答"不发动"⇒ 不落已用位，下一次准备阶段仍会问。"""
+    engine = Engine.from_state(_zhangfei_state(hp=2), seed=7)
+    run_turns(engine, [_tishen_player(activate=False), PassPlayer()], turns=3)
+
+    assert len(_tishen_queries(engine)) == 2, "放弃不消耗限定技"
+    assert engine.state.player(0).hp == 2, "没发动就一点体力都没回"
+    assert limited_skill_used(engine.state, 0, TISHEN) is False
+
+
+def test_a_used_limited_skill_survives_phase_resets_and_suppression():
+    """"已用"是**整局**位：出牌阶段复位与技能失效都不能让它复活（票 04 的解析顺序）。"""
+    engine = Engine.from_state(_zhangfei_state(hp=2), seed=7)
+    run_turns(engine, [_tishen_player(), PassPlayer()], turns=3)
+    assert limited_skill_used(engine.state, 0, TISHEN) is True
+
+    reset_phase_skill_state(engine.state)
+    assert limited_skill_used(engine.state, 0, TISHEN) is True, (
+        "PHASE_PLAY_START 的复位只清阶段位，不碰整局位（票 05 的复位收窄）"
+    )
+
+    engine.suppress_skills(0, YIJUE)
+    prune_skill_state(engine.state)
+    assert limited_skill_used(engine.state, 0, TISHEN) is True, (
+        "失效 ≠ 来源消失；暂时失效的实例仍算活着（include_suppressed）"
+    )
+
+
+def test_the_used_state_round_trips_through_a_replay():
+    """验收 2：录像重放后实例状态一致——"已用"不是记录流字段，而是同一条动作重建出来的。"""
+    initial = _zhangfei_state(hp=2)
+    engine = Engine.from_state(initial.model_copy(deep=True), seed=7)
+    run_turns(engine, [_tishen_player(), PassPlayer()], turns=3)
+
+    seed, tape = tape_from_journal(engine.records)
+    replay = Engine.from_state(initial.model_copy(deep=True), seed=seed)
+    for action in tape:
+        while replay.pending is None and not replay.finished:
+            replay._step()
+        assert not replay.finished, "磁带在下一次询问前就用尽了"
+        assert action.answers_seq == replay.pending.seq
+        replay.submit(action)
+    while replay.pending is None and not replay.finished:
+        replay._step()
+
+    assert replay.state.skill_state == engine.state.skill_state, "per-instance 状态逐键相等"
+    assert limited_skill_used(replay.state, 0, TISHEN) is True
+    assert len(_tishen_queries(replay)) == 1
+    assert replay.journal() == engine.journal(), "重放的记录流逐字节相等"
+
+
+# ---------------------------------------------------------------------------
+# 界张飞【咆哮】②：被【闪】抵消后，本回合下一次【杀】造成伤害时，此伤害 +1
+#
+# 【咆哮】是**锁定技**（整条技能没有"你可以"）：①无次数限制沿用标准版同一条
+# ``COUNT_LIMIT`` 回调；②是本票的"下一次"状态机：
+#
+# - **触发**：自己使用的【杀】被【闪】抵消（``SeamKind.SLASH_CANCELED``；
+#   【闪】的"使用"由引擎判定，不认牌名）；
+# - **消费**：本回合**第一个**由自己使用的【杀】造成的伤害事件；`伤害被抵消 / 未造成伤害
+#   的那张【杀】不消费`（与【酒】"使用即消费"相反），非【杀】伤害不消费，
+#   多目标【杀】只有第一个目标的本次伤害 +1；
+# - **作用域**：本回合末清掉（与【义绝】的红桃【杀】加伤同一收尾点）。
+# ---------------------------------------------------------------------------
+
+
+def _paoxiao_owner(slashes: list[int]):
+    """座位 0 的脚本：出牌阶段逐张使用 ``slashes`` 里的【杀】（目标座位 1），用光即结束。"""
+
+    def handler(query):
+        if query.kind == QueryKind.PLAY_PHASE.value and slashes:
+            action = _use_at(query, slashes[0], (1,))
+            if action is not None:
+                slashes.pop(0)
+                return action
+        return None
+
+    return Scripted(handler)
+
+
+def _one_slash_per_turn(slashes: list[int]):
+    """座位 0 的脚本：每个出牌阶段只用一张【杀】（模拟"本回合"的边界）。"""
+
+    state = {"spent": False}
+
+    def handler(query):
+        if query.kind == QueryKind.PLAY_PHASE.value:
+            if not state["spent"] and slashes:
+                action = _use_at(query, slashes[0], (1,))
+                if action is not None:
+                    state["spent"] = True
+                    slashes.pop(0)
+                    return action
+            state["spent"] = False
+            return _find(query, lambda action: isinstance(action, EndPhase))
+        if query.kind in (
+            QueryKind.RESPOND.value,
+            QueryKind.DODGE.value,
+            QueryKind.PEACH.value,
+        ):
+            return _decline(query)
+        return None
+
+    return Scripted(handler)
+
+
+def _dodge_player(*dodges: int):
+    """座位 1 的脚本：按序打出给定的【闪】；没有可打 / 其它询问一律放弃。"""
+
+    pending = list(dodges)
+
+    def handler(query):
+        if query.kind == QueryKind.DODGE.value and pending:
+            card_id = pending[0]
+            action = _find(
+                query,
+                lambda action: isinstance(action, UseCard)
+                and action.card.card_id == card_id,
+            )
+            if action is not None:
+                pending.pop(0)
+                return action
+        return _decline(query)
+
+    return Scripted(handler)
+
+
+def test_paoxiao_boosts_the_next_slash_damage_after_a_dodge():
+    """正面：第一张【杀】被【闪】抵消 ⇒ 第二张【杀】的伤害 1 + 1 = 2。"""
+    slash1, slash2 = _cards("slash")[:2]
+    dodge = _cards("dodge")[0]
+    engine = Engine.from_state(
+        _zhangfei_state(hand=(slash1, slash2), target_hand=(dodge,)), seed=7
+    )
+
+    run_until(
+        engine,
+        [_paoxiao_owner([slash1, slash2]), _dodge_player(dodge)],
+        lambda e: e.state.player(1).hp == 2,
+    )
+
+    assert engine.state.player(1).hp == 2, "第二张【杀】造成 1 + 1 点伤害"
+    assert slash1 in engine.state.discard and slash2 in engine.state.discard, "两张都用了"
+
+
+def test_without_a_dodge_the_slash_is_plain_damage():
+    """反例（触发条件）：没有【闪】抵消 ⇒ 伤害不加（+1 不是无条件常驻）。"""
+    slash = _cards("slash")[0]
+    engine = Engine.from_state(_zhangfei_state(hand=(slash,)), seed=7)
+
+    run_until(
+        engine,
+        [_paoxiao_owner([slash]), _dodge_player()],
+        lambda e: e.state.player(1).hp == 3,
+    )
+
+    assert engine.state.player(1).hp == 3, "普通【杀】1 点伤害"
+
+
+def test_a_dodged_slash_does_not_consume_the_paoxiao_bonus():
+    """消费语义：+1 只在**造成伤害**时消费——被抵消的第二张【杀】不消费它。
+
+    第一张被抵消（挂上 +1）→ 第二张也被抵消（没造成伤害，不消费）→ 第三张命中 ⇒ 2 点。
+    若按【酒】的"使用即消费"，第三张只会造成 1 点（本条会红）。
+    """
+    slash1, slash2, slash3 = _cards("slash")[:3]
+    dodge1, dodge2 = _cards("dodge")[:2]
+    engine = Engine.from_state(
+        _zhangfei_state(
+            hand=(slash1, slash2, slash3), target_hand=(dodge1, dodge2)
+        ),
+        seed=7,
+    )
+
+    run_until(
+        engine,
+        [_paoxiao_owner([slash1, slash2, slash3]), _dodge_player(dodge1, dodge2)],
+        lambda e: e.state.player(1).hp == 2,
+    )
+
+    assert engine.state.player(1).hp == 2, "第三张【杀】仍带 +1（1 + 1）"
+
+
+def test_the_paoxiao_bonus_expires_at_the_end_of_the_turn():
+    """作用域：+1 是"**本回合**下一次"，回合结束即清（下一回合的【杀】不再加伤）。"""
+    slash1, slash2 = _cards("slash")[:2]
+    dodge = _cards("dodge")[0]
+    engine = Engine.from_state(
+        _zhangfei_state(hand=(slash1, slash2), target_hand=(dodge,)), seed=7
+    )
+
+    run_turns(
+        engine,
+        [_one_slash_per_turn([slash1, slash2]), _dodge_player(dodge)],
+        turns=3,
+    )
+
+    assert engine.state.player(1).hp == 3, "回合 1 被抵消、+1 没用掉；回合 3 的【杀】只造成 1 点"

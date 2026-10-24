@@ -25,10 +25,10 @@
 | 主公求助 | :mod:`sgs.skills.lord_request` | 护驾 / 激将 / 救援 |
 | 改判 | :mod:`sgs.skills.rejudge` | 鬼才 / 天妒 |
 | 失去牌后 | :mod:`sgs.skills.move_after` | 连营 / 枭姬 |
-| 阶段体 | :mod:`sgs.skills.phase_body` | 英姿 / 闭月 |
+| 阶段体 | :mod:`sgs.skills.phase_body` | 英姿 / 闭月 / 替身（**限定技**） |
 | 排列 | :mod:`sgs.skills.arrange` | 观星 |
 | 目标池 / 响应窗口 | :mod:`sgs.skills.target_pool` / :mod:`sgs.skills.response_window` | 空城 / 谦逊；无双 / 铁骑 |
-| P 限制豁免（锁定技，只挂修饰器） | :mod:`sgs.skills.limits` | 咆哮（次数）/ 奇才（距离） |
+| P 限制豁免 / 【咆哮】②（锁定技） | :mod:`sgs.skills.limits` | 咆哮（次数 + 被抵消后的 +1）/ 奇才（距离） |
 | U 使用牌时 | :mod:`sgs.skills.use_after` | 集智 |
 | J 可重复判定（手写多轮循环） | :mod:`sgs.skills.judgment_loop` | 洛神 |
 | **流水线执行器**（**不**依赖 catalog） | :mod:`sgs.skills.flow` | ``SkillFlow`` / ``PickCards`` / ``PickSeats`` / ``PickOption`` / ``PickProvide`` / ``run_flow`` |
@@ -76,6 +76,7 @@ from .catalog import (
     dispatch_timing,
     instance_key,
     is_equipped,
+    limited_skill_used,
     lord_skill_allowed,
     lord_skill_ids,
     prune_skill_state,
@@ -351,6 +352,7 @@ __all__ = (
     "judgment_loop_skill_definitions",
     "kind_source_ceiling",
     "limits_skill_definitions",
+    "limited_skill_used",
     "lord_skill_allowed",
     "lord_skill_definitions",
     "lord_skill_ids",

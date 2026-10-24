@@ -2428,6 +2428,26 @@ class Engine:
         if self.state.player(seat).luoyi_active:
             self.set_luoyi_active(seat, False)
 
+    def set_paoxiao_bonus(self, seat: int, active: bool) -> bool:
+        """写一个座位的【咆哮】②"下一次【杀】伤害 +1"待消费标记（M6 票 05 的唯一写入口）。
+
+        与 :meth:`set_luoyi_active` 同形、同样**不发 delta**：状态没有 JSON 读者（网页座位卡
+        不读它、记录流不写它），回放按同一条【闪】的应答重跑即可重建。返回值 = 状态真的变了
+        吗；回合末与下一回合起点的清理都走这里，故"置过而没用掉"与"从来没置过"在状态面同形。
+        "一次性效果不随来源消失撤回"（D9）由**座位级**存储兑现：技能实例失去 / 失效不会
+        抹掉这个已经挂上的 +1。
+        """
+        player = self.state.player(seat)
+        if player.paoxiao_bonus == active:
+            return False
+        player.paoxiao_bonus = active
+        return True
+
+    def _clear_paoxiao_bonus(self, seat: int) -> None:
+        """把一个座位的【咆哮】待消费标记清掉（回合收尾点与下一回合起点各调一次，幂等）。"""
+        if self.state.player(seat).paoxiao_bonus:
+            self.set_paoxiao_bonus(seat, False)
+
     # -- 技能三态（M6 票 04）：获得 / 失去 / 失效 -------------------------------
 
     def grant_skill(self, seat: int, skill_id: str, *, frame: Frame | None = None) -> bool:
@@ -2525,11 +2545,12 @@ class Engine:
             bonus.append(target)
 
     def _clear_turn_effects(self) -> None:
-        """回合末清理作用域 = ``TURN`` 的座位级效果（M6 票 04）。
+        """回合末清理作用域 = ``TURN`` 的座位级效果（M6 票 04；票 05 补【咆哮】②）。
 
-        三样一起清：失效记录（逐条落 ``skill_suppress = false``，使"可恢复"在记录流里
-        可被看见）、手牌禁令、红桃【杀】加伤目标。与【酒】/【裸衣】同一收尾点
-        （:meth:`_turn_after_end`），故"本回合"的作用域不跨回合。
+        四样一起清：失效记录（逐条落 ``skill_suppress = false``，使"可恢复"在记录流里
+        可被看见）、手牌禁令、红桃【杀】加伤目标、以及【咆哮】②的"下一次【杀】伤害 +1"
+        待消费标记。与【酒】/【裸衣】同一收尾点（:meth:`_turn_after_end`），故"本回合"的
+        作用域不跨回合。
         """
         for player in self.state.players:
             for record in tuple(player.suppressed_skills):
@@ -2549,6 +2570,7 @@ class Engine:
                 )
             player.hand_card_prohibited = False
             player.heart_slash_bonus_against.clear()
+            self._clear_paoxiao_bonus(player.seat)
 
     def reveal_card(self, frame: Frame | None, seat: int, card: CardRef) -> None:
         """把 ``seat`` 的一张**手牌**标成公开事实并落一条 ``card_reveal``（M5-06）。
@@ -3275,6 +3297,8 @@ class Engine:
             self._clear_wine_active(seat)
             # 【裸衣】同口径（M6 票 01）：作用域 = 本回合结束，回合收尾已清，这里幂等兜底。
             self._clear_luoyi_active(seat)
+            # 【咆哮】②的"下一次 +1"同口径（M6 票 05）。
+            self._clear_paoxiao_bonus(seat)
         self.emit_timing(Timing.TURN_START, actor=seat)
 
     def _phase_prepare(self) -> str | None:

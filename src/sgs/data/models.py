@@ -119,9 +119,11 @@ class Kingdom(str, Enum):
 class SkillType(str, Enum):
     """技能的**类型**（`GLOSSARY.md`「技能类型」；`03` §4「技能描述模型」的闭集；M3 票 01 新增）。
 
-    闭集 = ``NORMAL``（普通技）/ ``LORD``（主公技）——标准版 25 名只落这两类。
-    ``LIMITED``（限定技）/ ``AWAKENING``（觉醒技）是**预留取值**：字段照建、取值合法，
-    但标准版 25 名**零载体**，M3 不落（ADR-008：改判 M5）。
+    闭集 = ``NORMAL``（普通技）/ ``LORD``（主公技）/ ``LIMITED``（限定技）/
+    ``AWAKENING``（觉醒技）。标准版 25 名只落前两类；``LIMITED`` 从 M6 票 05（界张飞
+    【替身】）起有真实载体，判定跑在 :class:`~sgs.skills.catalog.SkillDef` 上（数据侧的取值
+    是**声明**，供界面与加载期对账，不参与派发）。类型与 ``locked``（锁定 / 非锁定）**正交**：
+    限定技仍各自可以是锁定或非锁定。
     """
 
     NORMAL = "NORMAL"

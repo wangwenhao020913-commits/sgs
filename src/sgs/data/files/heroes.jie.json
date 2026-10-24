@@ -29,6 +29,20 @@
         { "id": "mashu", "name": "马术", "skill_type": "NORMAL" },
         { "id": "tieqi", "name": "铁骑", "skill_type": "NORMAL" }
       ]
+    },
+    {
+      "id": "jie_zhangfei",
+      "name": "界张飞",
+      "true_name": "张飞",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        { "id": "paoxiao", "name": "咆哮", "skill_type": "NORMAL" },
+        { "id": "tishen", "name": "替身", "skill_type": "LIMITED" }
+      ]
     }
   ]
 }

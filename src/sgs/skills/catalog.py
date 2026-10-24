@@ -100,6 +100,7 @@ __all__ = [
     "dispatch_timing",
     "instance_key",
     "is_equipped",
+    "limited_skill_used",
     "lord_skill_allowed",
     "lord_skill_ids",
     "prune_skill_state",
@@ -547,6 +548,53 @@ def instance_key(instance: SkillInstance) -> str:
     return f"{instance.owner}:{instance.skill_id}:{source.kind.value}:{ref}"
 
 
+# ---------------------------------------------------------------------------
+# per-instance 状态的**位布局**（票 07 §6 的键 + M6 票 05 的"整局已用"位）
+# ---------------------------------------------------------------------------
+
+_PHASE_STATE_MASK = 0b111
+"""``skill_state`` 里属于**本出牌阶段**的位（A 族的 ``_USED`` / ``_RECOVERED`` /
+``_GAVE_ANY``，见 :mod:`sgs.skills.active`）。
+
+:func:`reset_phase_skill_state` 只清这一掩码里的位：M6 票 05 起 ``skill_state`` 还有
+**跨阶段**的位（限定技的"整局已用"），整段 ``clear()`` 会让限定技复活。
+``tests/test_hero_active.py` 有一条机械检查钉住"掩码 == A 族三个阶段位的并集"。
+"""
+
+_LIMITED_USED = 0b1000
+"""**限定技整局已用**位（M6 票 05；§四 L350–L355「限定技：整局游戏中只能发动一次」）。
+
+与 A 族的阶段位同处一个整数字段（票 04 预留的"已用"键位），但**永不**被出牌阶段复位；
+随实例键一起：来源消失（``prune_skill_state``）才清，暂时失效不清（``include_suppressed``）。
+"""
+
+
+def _instance_used_once(state: GameState, instance: SkillInstance) -> bool:
+    """``instance`` 的**已用**位是否已落（只看位，不解析实例；限定技的读取方专用）。"""
+    return bool(state.skill_state.get(instance_key(instance), 0) & _LIMITED_USED)
+
+
+def _mark_used_once(state: GameState, instance: SkillInstance) -> None:
+    """给**限定技**实例落"整局已用"位（非限定技**零动作** ⇒ 既有技能不写 ``skill_state``）。"""
+    if instance.definition.skill_type is not SkillType.LIMITED:
+        return
+    key = instance_key(instance)
+    state.skill_state[key] = state.skill_state.get(key, 0) | _LIMITED_USED
+
+
+def limited_skill_used(state: GameState, seat: int, skill_id: str) -> bool:
+    """``seat`` 的 ``skill_id`` 这条**限定技**整局是否已经发动过（M6 票 05 的只读面）。
+
+    判据 = 该 ``(owner, skill_id)`` 的存活实例在 ``skill_state`` 里的 :data:`_LIMITED_USED`
+    位。用 ``include_suppressed=True`` 解析：**失效 ≠ 来源消失**，暂时被挡住的限定技照样
+    "已经用过"（否则失效恢复后能再发动一次）。没有这条实例 / 不是限定技时恒 ``False``。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            return _instance_used_once(state, instance)
+    return False
+
+
 def same_kingdom(state: GameState, a: int, b: int) -> bool:
     """``a`` 与 ``b`` 是不是**同一势力**（票 09 §要做什么 1 的只读小工具）。
 
@@ -581,16 +629,21 @@ def prune_skill_state(state: GameState) -> None:
 
 
 def reset_phase_skill_state(state: GameState) -> None:
-    """清理**本出牌阶段**的 per-instance 技能状态（票 04 §要做什么 2）。
+    """清理**本出牌阶段**的 per-instance 技能状态（票 04 §要做什么 2；M6 票 05 收窄）。
 
     与"座位自己的 ``TURN_START`` 清空 ``card_use_counts``"同一重置口径（票 07 §6），
-    只是节拍落在 ``PHASE_PLAY_START``：M3 里 ``skill_state`` 的**唯一写入者**是 A 族
-    "出牌阶段限一次"（含【仁德】"首次达两张"）的计数，故按阶段整体清空即等于
-    "每阶段限一次"的复位。装备技能不写 ``skill_state``；限定技 / 觉醒技的"已用"键
-    按 ADR-008 改判 M5、M3 无载体——真出现**跨阶段**的 per-instance 状态时，这里必须
-    升级成带作用域的清理（本函数是那个唯一的升级点）。
+    只是节拍落在 ``PHASE_PLAY_START``。票 04 时 ``skill_state`` 的**唯一写入者**是 A 族
+    "出牌阶段限一次"（含【仁德】"首次达两张"）的计数，故整段 ``clear()`` 就是复位；
+    M6 票 05 起同一个字段里还有**跨阶段**的位（限定技的"整局已用"，:data:`_LIMITED_USED`），
+    整段清空会让【替身】下一回合又能发动一次。故这里改成**按作用域掩码**清：
+    只清 :data:`_PHASE_STATE_MASK` 里的阶段位，其余位（以及只剩这些位的键）保留。
     """
-    state.skill_state.clear()
+    for key in list(state.skill_state):
+        remaining = state.skill_state[key] & ~_PHASE_STATE_MASK
+        if remaining:
+            state.skill_state[key] = remaining
+        else:
+            del state.skill_state[key]
 
 
 def is_equipped(state: GameState, seat: int, slot: SlotKind) -> bool:
@@ -720,6 +773,12 @@ def _dispatch(
         items = match(instance)
         if not items:
             continue
+        limited = instance.definition.skill_type is SkillType.LIMITED
+        if limited and _instance_used_once(host.state, instance):
+            # 限定技**整局一次**（§四 L350–L355）：已用 ⇒ 不再产出候选、不再发"是否发动"
+            # 询问、不进记录流的询问视角。判定放在"有东西可派发"之后，故普通技能的
+            # 每一条派发路径一字不改；"整局已用"与 locked / 非锁定正交（这条门在提问之前）。
+            continue
         if not instance.definition.locked:
             plan = activation_plan(host.state, frame, instance)
             if not plan.available:
@@ -737,6 +796,10 @@ def _dispatch(
             control = _run_item(host, frame, item, instance, timing)
             if control is not None:
                 return control
+        if limited:
+            # "已用"位落**执行完之后**：effect 挂起时（如【替身】压回复帧）重入必须还能
+            # 走到这里续跑同一个实例，故不能先落位再判（先落位会让重入把实例自己挡掉）。
+            _mark_used_once(host.state, instance)
     return None
 
 
@@ -2035,7 +2098,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
 )
 """定义目录：``skill_id`` → :class:`SkillDef`，**模块级不可变**（票 07 §1 / §6）。
 
-装备技能（22 条：标准 17 + 军争 5）与武将技能（票 03 起逐族落地，票 12 起 29 条齐、M6 P0 票 01 起 32 条、票 02 起 37 条、票 03 收口 40 条、票 04 起 44 条）**共用同一张表**：
+装备技能（22 条：标准 17 + 军争 5）与武将技能（票 03 起逐族落地，票 12 起 29 条齐、M6 P0 票 01 起 32 条、票 02 起 37 条、票 03 收口 40 条、票 04 起 44 条、票 05 起 46 条）**共用同一张表**：
 载体解析、优先级档、修饰器链、时机派发都只认这张表，不区分两类载体。合并点在**文件末尾**
 （而不是模块头部的 import）是为了让 :mod:`sgs.skills.heroes` 能反向 import 本模块的
 :class:`SkillDef`——`heroes` 在 import 期读到的 :data:`CATALOG` 是装备那半张，而它的定义由

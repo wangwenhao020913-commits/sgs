@@ -422,6 +422,35 @@ def test_reset_phase_skill_state_is_a_public_reset_point():
     assert state.skill_state == {}
 
 
+def test_the_phase_reset_mask_covers_every_phase_bit_and_nothing_else():
+    """M6 票 05：``reset_phase_skill_state`` 只清**本阶段**位，整局位（限定技"已用"）保留。
+
+    位布局的单一真源在 ``catalog``（``skill_state`` 的键与复位都住那里），A 族的三个阶段位
+    必须恰好落在那个掩码里；多一位会误清整局位，少一位会让"每阶段限一次"失效。
+    """
+    phase_bits = (
+        active_module._USED | active_module._RECOVERED | active_module._GAVE_ANY
+    )
+
+    assert catalog_module._PHASE_STATE_MASK == phase_bits
+    assert not (catalog_module._LIMITED_USED & phase_bits), "整局位不得与阶段位重叠"
+
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_zhangfei"), SeatSpec()],
+        deck=_deck_excluding(),
+        turn_seat=0,
+    )
+    key = "0:hero.jie_zhangfei.tishen:HERO_CARD:hero.jie_zhangfei.tishen"
+    state.skill_state[key] = catalog_module._LIMITED_USED | active_module._USED
+
+    reset_phase_skill_state(state)
+
+    assert state.skill_state == {key: catalog_module._LIMITED_USED}, (
+        "阶段位清掉、整局已用位保留同一个键"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 黄盖【苦肉】（M6 票 03）：出牌阶段，你可以失去 1 点体力，然后摸两张牌
 #

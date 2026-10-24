@@ -345,6 +345,15 @@ class Player(BaseModel):
     ``DAMAGE_DEAL_AMOUNT`` 修饰器（查询期从活着的实例算，失去 / 失效即消失）。**不发
     delta**：与 ``hand_card_prohibited`` 同一条理由。
     """
+    paoxiao_bonus: bool = False
+    """本回合"下一次【杀】造成伤害 +1"的待消费标记（界张飞【咆哮】②，M6 票 05）。
+
+    写入唯一入口 :meth:`Engine.set_paoxiao_bonus`：自己使用的【杀】被【闪】抵消时置真、
+    那次伤害结算完（``DAMAGE_AFTER_TAKE``，伤害 > 0）置假；回合末与下一回合起点各清一次
+    （与【酒】/【裸衣】同一收尾点）。这是 D9 的**一次性效果**：作用座位 = 自己、增量固定、
+    过期 = 回合末，**不随技能实例存亡撤回**（故住座位而不是 ``skill_state``）。
+    **不发 delta**：与 ``luoyi_active`` 同姿态——回放按同一条【闪】的应答重建。
+    """
 
 
 class GameState(BaseModel):
@@ -375,11 +384,13 @@ class GameState(BaseModel):
     turn_seat: int | None = None
     phase: Phase | None = None
     skill_state: dict[str, int] = Field(default_factory=dict)
-    """**per-instance 技能状态**（票 07 §6 / 票 30）：实例键 → 计数（如"已用次数"）。
+    """**per-instance 技能状态**（票 07 §6 / 票 30）：实例键 → 位图（"已用次数"等）。
 
     实例键 = ``(owner, skill_id, source)`` 的规范文本（``skills.instance_key``）；
-    来源消失（装备离场）时由 ``skills.prune_skill_state`` 清理。M2 的 17 条装备没有
-    持久状态，故本字段实际恒空——它是"M3 只许增"的接口位，形状在此钉死。
+    位布局住 :mod:`sgs.skills.catalog`（唯一声明处）：低位是 A 族**本出牌阶段**的阶段位
+    （``PHASE_PLAY_START`` 只清它们），高位是限定技的**整局已用**位（永不随阶段复位）。
+    来源消失（装备离场 / 技能失去）时由 ``skills.prune_skill_state`` 清理——暂时失效不算
+    来源消失；M2 的 17 条装备没有持久状态，故本字段实际恒空。
     """
 
     def player(self, seat: int) -> Player:
