@@ -864,6 +864,11 @@ _HOSTILE_SEAT_STEPS = (
     "lijian:",
     "fanjian:",
     "liuli:",
+    # M6 票 18：界华佗【除疠】（弃敌方的牌）与界华雄【势斩】（让敌方来决斗）的座位步；
+    # 界吕布【利驭】的"受伤者指定决斗目标"也用全限定前缀（决定者是受伤者，他自己选）。
+    "chuli:",
+    "shizhan:",
+    "hero.jie_lvbu.liyu:",
     # 界大乔【国色】（M6 票 17）的【乐不思蜀】目标：手写询问用**全限定** skill_id
     # （``hero.jie_daqiao.guose:seat``），故这里登记整段前缀，不另造第二套短 id 约定。
     "hero.jie_daqiao.guose:",
@@ -1659,6 +1664,35 @@ def _score_jie_jiuyuan(query: Query, action: Action, view: PlayerView) -> float:
     return 2.0
 
 
+def _score_chuli(query: Query, action: Action, view: PlayerView) -> float:
+    """界华佗【除疠】（M6 票 18）：自己弃一张、每名目标各弃一张；黑桃还有摸牌。
+
+    净收益 = 拆掉对手若干张 − 自己的成本一张；黑桃摸牌不打折（不明牌面，按保守常数）。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query
+    return 2.0 - 0.5 * _skeleton_cost(view, 1)
+
+
+def _score_shizhan(query: Query, action: Action, view: PlayerView) -> float:
+    """界华雄【势斩】（M6 票 18）：令其他角色视为对我使用【决斗】。
+
+    手里有【杀】才有得打：一张也能赢"对方打不出【杀】"的局面，两张以上才扛得住一次
+    来回。1 点体力时不做这笔冒险（决斗输掉即濒死）。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query
+    me = view.players[view.seat]
+    if me.hp <= 1:
+        return -_UNKNOWN_CARD_VALUE
+    slashes = sum(
+        1
+        for card in view.self_hand
+        if _is_slash_card(card)
+    )
+    return 1.0 if slashes else -_UNKNOWN_CARD_VALUE
+
+
 SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]] = {
     # 魏
     "hero.caocao.jianxiong": (_constant(4.0), "受伤后获得造成伤害的牌：净赚一张，恒发动"),
@@ -1863,6 +1897,26 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     # W4-fix-2：丈八蛇矛的转化【杀】候选已收回，AI 改从清单填 —— 没有条目就落在
     # `_UNKNOWN_SKILL_VALUE = -1.0` 上、永不发动（五条转化技的覆盖判据会红）。
     "equip.serpent_spear": (_constant(2.0), "丈八蛇矛：两张手牌当【杀】使用或打出"),
+    # M6 票 18：界·群（华佗 / 吕布 / 华雄 / 公孙瓒）。【无双】【耀武】【义从】是锁定技，
+    # 没有「是否发动」询问，故不进本表；【急救】与标准版共用同一条转化声明，但仍需要
+    # 自己的语义条目（三向同步检查按技能 id 逐条核）。
+    "hero.jie_huatuo.jijiu": (_constant(2.0), "红色牌当【桃】（限回合外）：与标准【急救】同一条转化"),
+    "hero.jie_huatuo.chuli": (
+        _score_chuli,
+        "弃自己与若干名势力互异角色各一张牌；黑桃牌的角色各摸一张（拆牌为主）",
+    ),
+    "hero.jie_lvbu.liyu": (
+        _constant(3.0),
+        "使用【杀】造成伤害后获得其区域内一张牌：非装备则其摸一张，装备则开一次决斗",
+    ),
+    "hero.jie_huaxiong.shizhan": (
+        _score_shizhan,
+        "令一名其他角色视为对我使用【决斗】：手里有【杀】才赌，1 点体力不赌",
+    ),
+    "hero.jie_gongsunzan.qiaomeng": (
+        _constant(3.0),
+        "使用【杀】造成伤害后选其区域里一张牌：坐骑获得、其余弃置（净赚）",
+    ),
 }
 """技能 id → ``(打分函数, 默认策略说明)``（`map.md` R4-Q6 的统一签名）。
 

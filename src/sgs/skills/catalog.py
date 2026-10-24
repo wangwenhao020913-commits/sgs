@@ -664,17 +664,27 @@ _GIVEN_TO_SHIFT = 6
 _GIVEN_TO_MASK = 0xFF << _GIVEN_TO_SHIFT
 """界刘备【仁德】的"本阶段已给过这些座位"位段（座位号 = 位序号 - ``_GIVEN_TO_SHIFT``）。"""
 
-_PHASE_STATE_MASK = 0b111 | _GIVEN_TO_MASK
+_USED_SECOND = 1 << 14
+"""**本出牌阶段"第二次"已用**位（M6 票 18；界华雄【势斩】"出牌阶段限两次"）。
+
+位 14 是 :data:`_GIVEN_TO_MASK`（6..13）之后的下一个空闲位。它与 A 族的 ``_USED``
+**成对**读出"本阶段用了几次"：两者都落 = 2 次，只落 ``_USED`` = 1 次。作用域仍是
+**本出牌阶段**，故并入 :data:`_PHASE_STATE_MASK`；没有"限两次"的技能从不写这一位。
+"""
+
+_PHASE_STATE_MASK = 0b111 | _GIVEN_TO_MASK | _USED_SECOND
 """``skill_state`` 里属于**本出牌阶段**的位（A 族的 ``_USED`` / ``_RECOVERED`` /
-``_GAVE_ANY`` + 界刘备【仁德】的目标座位位段，见 :mod:`sgs.skills.active`）。
+``_GAVE_ANY`` + 界刘备【仁德】的目标座位位段 + 界华雄【势斩】的"第二次已用"位，
+见 :mod:`sgs.skills.active`）。
 
 :func:`reset_phase_skill_state` 只清这一掩码里的位：M6 票 05 起 ``skill_state`` 还有
 **跨阶段**的位（限定技的"整局已用"），整段 ``clear()`` 会让限定技复活。
-``tests/test_hero_active.py` 有一条机械检查钉住"掩码 == 上述两段位的并集"。
+``tests/test_hero_active.py` 有一条机械检查钉住"掩码 == 上述几段位的并集"。
 
 M6 票 16 起同一个掩码还含**界刘备【仁德】的"本阶段已给过的目标座位"**位
 （:data:`_GIVEN_TO_MASK`）：它同样是"本出牌阶段"的作用域——每位角色在本阶段只能被
-仁德指定一次，下个出牌阶段重新可给。
+仁德指定一次，下个出牌阶段重新可给。M6 票 18 起还含**界华雄【势斩】的第二次已用位**
+（:data:`_USED_SECOND`）。
 """
 
 _LIMITED_USED = 0b1000

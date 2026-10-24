@@ -50,8 +50,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from sgs.data import Color, SkillType, Suit, color_of_suit
-from sgs.effects import CarrierKind, DamageNature, locate
+from sgs.data import Color, SkillType, Suit, color_of_suit, hero_skill_id
+from sgs.effects import (
+    CarrierKind,
+    DamageNature,
+    behavior_for,
+    check_targets,
+    is_slash,
+    locate,
+)
 from sgs.state import (
     CardRef,
     FrameKind,
@@ -59,6 +66,7 @@ from sgs.state import (
     MoveReason,
     SelectionSpec,
     Slot,
+    SlotKind,
     Zone,
     ZoneRef,
     alive_seats,
@@ -72,13 +80,24 @@ from .catalog import (
     Hook,
     SkillDef,
 )
-from .flow import FlowAnswers, PickCards, SkillFlow, zero_step_effect
+from .flow import (
+    FlowAnswers,
+    PickCards,
+    SkillFlow,
+    option_seat,
+    seat_choice,
+    zero_step_effect,
+)
+from .virtual import pure_virtual_card
 
 __all__ = [
     "DAMAGE_AFTER_SKILLS",
     "JIE_GANGLIE",
     "JIE_JIANXIONG",
     "JIE_JIANXIONG_FLOW",
+    "JIE_LIYU",
+    "JIE_QIAOMENG",
+    "JIE_YAOWU",
     "JIE_YIJI",
     "JIE_YIJI_DRAW",
     "JIE_YIJI_GIVE_LIMIT",
@@ -215,6 +234,12 @@ class DamageAfterSkill(HeroSkillDecl):
     requirement: str | None = None
     step_requirements: dict[str, str] | None = None
     timings: tuple[tuple[Timing, Any], ...] = ()
+    locked: bool = False
+    """是否锁定技（M6 票 18 的加法；缺省 ``False`` = 既有七条一字不改）。
+
+    【耀武】是 B 族第一条**锁定技**（§十九 L2202–L2203）：没有"是否发动"询问，派发环
+    按 ``locked`` 直接跑回调。此前 B 族全是"你可以"（非锁定），故这个字段由本票引入，
+    不改变任何既有技能的声明形状。"""
 
 
 def _jianxiong_condition(host: Any, frame: Any) -> bool:
@@ -790,6 +815,316 @@ def _wangxi(host: Any, frame: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# 界吕布【利驭】（M6 票 18）：【杀】造成伤害后获得其区域内一张牌；非装备则其摸一张，
+# 装备则视为你对该角色指定的另一名其他角色使用【决斗】
+#
+# §十九 L2192–L2193：
+#
+#     利驭：当你使用【杀】对其他角色造成伤害后，你可以获得其区域内的一张牌，若你获得的
+#           牌不为装备牌，则其摸一张牌，否则视为你对该角色指定的另一名其他角色使用一张
+#           【决斗】。
+#
+# 两条裁定（票面 `## 已知歧义`，写进 `06`（§5「程序化约定与偏离一手」））：
+#
+# - **【决斗】目标由受伤者指定**（"该角色指定的"）——决定者 ≠ 技能持有者，与
+#   【护驾】②的"决定者 = 事件当事角色"同一姿态；座位询问发给受伤者；
+# - **"区域内的一张牌"** 按 `GLOSSARY.md`「区域默认」= 手牌 + 装备 + 判定区；手牌对
+#   选择者（吕布）是**隐藏槽**（与【反馈】同一条选取面）。
+# ---------------------------------------------------------------------------
+
+JIE_LIYU = hero_skill_id("jie_lvbu", "liyu")
+"""界吕布【利驭】的全限定技能 id（§十九 L2192–L2193）。"""
+
+
+def _slash_damage_target(state: GameState, frame: Any, owner: int) -> int | None:
+    """**我**用【杀】对**另一个**角色造成伤害时的受伤者；不是这个形状 ⇒ ``None``。
+
+    【利驭】与【趫猛】共用的前半句（"当你使用【杀】对一名角色造成伤害后"）：判据只有
+    "伤害的来源是我"、"渠道牌是【杀】家族"、"受伤者是别人"三条，区域 / 后续分支各自再判。
+    """
+    del state
+    if frame.data.get("source") is None or int(frame.data["source"]) != int(owner):
+        return None
+    target = frame.data.get("target")
+    if target is None or int(target) == int(owner):
+        return None
+    card = _damage_channel_card(frame)
+    if card is None or not is_slash(behavior_for(card)):
+        return None
+    return int(target)
+
+
+LIYU_DUEL_TARGET_ASK = "hero.jie_lvbu.liyu.duel_target"
+"""手写询问位置：受伤者指定另一名其他角色（虚拟【决斗】的目标）。"""
+
+_LIYU_STARTED = "liyu_started"
+"""帧私有：虚拟【决斗】已经开出（重入不重复开）。"""
+
+_LIYU_MATCHED = "liyu_matched"
+"""帧私有：本帧上【利驭】已经命中过（条件求值的重入标记）。
+
+**为什么需要**：条件在每次重入都重新求值，而【利驭】的前半段会把受伤者的牌拿走——
+"其区域里有牌可拿"在搬牌之后不再成立。没有这个标记，选牌 / 指定决斗目标的中途挂起
+（重新进入同一个钩子）会被条件挡回去，整条流水线静默丢失（本票构造测试逮到过）。
+标记只记"这条钩子在本帧已经过闸"，重入时不再重判"还有没有牌"。
+"""
+
+
+def _liyu_target(state: GameState, frame: Any, owner: int, answers: Any) -> Any:
+    """选牌步的 ``face``：受伤者的区域；不是"造成伤害的是我"或没有牌 ⇒ 空元组 = 无此步。"""
+    del answers
+    target = _slash_damage_target(state, frame, owner)
+    if target is None:
+        return ()
+    # 命中之后（``_LIYU_MATCHED`` 已落）不再重判"还有没有牌"：选牌步的**面**在每次重入
+    # 都重新求值，而前半段会把那张牌拿走——不认这个标记，重入会看到空面、把整条流水线
+    # 判成取消（构造测试逮到过：决斗目标还没问就静默结束）。
+    if frame.data.get(_LIYU_MATCHED) == owner:
+        return target
+    player = state.player(target)
+    if not (player.hand or player.equip or player.judge):
+        return ()
+    return target
+
+
+def _liyu_condition(host: Any, frame: Any) -> bool:
+    """【利驭】的触发条件：**我用【杀】对另一个角色造成伤害**，且其区域里有牌可拿。
+
+    命中后落 :data:`_LIYU_MATCHED`：条件在每次重入都重新求值，而前半段会把受伤者的牌
+    拿走 ⇒ 没有这个标记，中途挂起后重入会被"还有没有牌"挡回去。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    if frame.data.get(_LIYU_MATCHED) == owner:
+        return True
+    if _liyu_target(host.state, frame, owner, None) == ():
+        return False
+    frame.data[_LIYU_MATCHED] = owner
+    return True
+
+
+def _liyu_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：获得那张牌 → 非装备则其摸一张；装备则受伤者指人，吕布对其使用【决斗】。"""
+    owner = frame.data["skill_owner"]
+    target = frame.data.get("target")
+    card_id = int(answers["card"][0])
+    card = host.state.card(card_id)
+    control = host.move_in_frame(
+        frame,
+        (card,),
+        to_zone=ZoneRef(Zone.HAND, owner),
+        reason=MoveReason.PUT,
+        owner=owner,
+        actor=owner,
+    )
+    if control == "stay":
+        return "stay"
+    if card.slot is None:
+        # 不为装备牌 ⇒ 受伤者摸一张（"其" = 受伤者）。
+        if target is not None:
+            host.draw_for_hand(frame, int(target), 1)
+        return None
+    if frame.data.get(_LIYU_STARTED):
+        return None
+    if target is None:
+        return None
+    target = int(target)
+    duel = pure_virtual_card(host.state, "duel")
+    options = tuple(
+        seat_choice(seat)
+        for seat in check_targets(host.state, owner, duel)
+        if seat not in (owner, target)
+    )
+    if not options:
+        # 没有"另一名其他角色"可指定 ⇒ 没有【决斗】；获得装备这件事已经发生。
+        return None
+    answer = host.ask_option(
+        frame,
+        target,
+        Timing.DAMAGE_AFTER_DEAL,
+        skill_id=LIYU_DUEL_TARGET_ASK,
+        options=options,
+        optional=False,
+    )
+    if host.suspended(answer):
+        return "stay"
+    frame.data[_LIYU_STARTED] = True
+    host.start_use(
+        duel,
+        source=owner,
+        targets=(option_seat(answer),),
+        use_timing=Timing.DAMAGE_AFTER_DEAL,
+    )
+    return None
+
+
+LIYU_FLOW = SkillFlow(
+    name="liyu",
+    steps=(
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP, Zone.JUDGE),
+            lo=1,
+            hi=1,
+            optional=False,
+            face=_liyu_target,
+            # 受伤者的手牌对吕布是隐藏槽（与【反馈】同姿态）。
+            reveal_hand=False,
+        ),
+    ),
+    effect=_liyu_effect,
+)
+"""【利驭】的一步流水线：从受伤者区域内获得一张牌 → 提交点里分叉（摸牌 / 虚拟【决斗】）。
+
+选牌步复用「反馈」的选取面形状（``face`` 指向别人、``actor`` 是技能持有者）；【决斗】
+目标的座位询问住在提交点里，因为"要不要问"取决于刚获得的牌是不是装备——步骤语言表达
+不了"按前序答案决定这一步在不在"。
+"""
+
+
+# ---------------------------------------------------------------------------
+# 界华雄【耀武】（M6 票 18）：锁定技，受到**牌造成的**伤害时按颜色决定谁摸一张
+#
+# §十九 L2202–L2203：
+#
+#     耀武：锁定技，当你受到牌造成的伤害时，若此牌为红色，则伤害来源摸一张牌，否则你
+#           摸一张牌。
+#
+# 三条判据合起来才是"牌造成的伤害"：**渠道牌存在**（无来源伤害 / 失去体力都不算）、
+# **受伤的是持有者**（``_hurt_owner``）、**每次伤害事件一次**（牌面没有"1 点"⇒
+# ``per_point=False``）。锁定技没有"是否发动"询问，故直接挂 ``handler``。
+# ---------------------------------------------------------------------------
+
+JIE_YAOWU = hero_skill_id("jie_huaxiong", "yaowu")
+"""界华雄【耀武】的全限定技能 id（§十九 L2202–L2203）。"""
+
+
+def _yaowu_condition(host: Any, frame: Any) -> bool:
+    """触发条件：**我**受到**牌造成的**伤害（渠道牌在场）。"""
+    del host
+    return _hurt_owner(frame) and _damage_channel_card(frame) is not None
+
+
+def _yaowu(host: Any, frame: Any) -> None:
+    """红色渠道牌 ⇒ 伤害来源摸一张；否则华雄摸一张（无来源 ⇒ 无人可摸）。"""
+    owner = frame.data["skill_owner"]
+    card = _damage_channel_card(frame)
+    if card is None:  # pragma: no cover - 条件已挡
+        return None
+    color = card.color if card.color is not None else color_of_suit(card.suit)
+    if color is Color.RED:
+        source = frame.data.get("source")
+        if source is None:
+            return None
+        source = int(source)
+        if not host.state.player(source).alive:
+            return None
+        host.draw_for_hand(frame, source, 1)
+        return None
+    host.draw_for_hand(frame, owner, 1)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 界公孙瓒【趫猛】（M6 票 18）：【杀】造成伤害后选其区域里的一张牌——坐骑获得、其余弃置
+#
+# §十九 L2210–L2212：
+#
+#     趫猛：当你使用【杀】对一名角色造成伤害后，你可以选择其区域里的一张牌，若此牌：
+#           为坐骑牌，你获得之；不为坐骑牌，你弃置之。
+#
+# **"区域里的一张牌"** 按 `GLOSSARY.md`「区域默认」= 手牌 + 装备 + 判定区；受伤者的手牌
+# 对选择者（公孙瓒）是**隐藏槽**——可能选到手牌而看不到牌面（票面 `## 已知歧义` 的第三条，
+# 写进 `06`（§5「程序化约定与偏离一手」））。
+# ---------------------------------------------------------------------------
+
+JIE_QIAOMENG = hero_skill_id("jie_gongsunzan", "qiaomeng")
+"""界公孙瓒【趫猛】的全限定技能 id（§十九 L2210–L2212）。"""
+
+_QIAOMENG_MATCHED = "qiaomeng_matched"
+"""帧私有：本帧上【趫猛】已经命中过（与【利驭】同一条重入标记的理由）。
+
+选牌步的**面**在每次重入都重新求值，而前半段会把那张牌搬走——不认这个标记，重入会
+看到空面、把整条流水线判成取消。
+"""
+
+_HORSE_SLOTS: tuple[SlotKind, ...] = (SlotKind.HORSE_OFFENSE, SlotKind.HORSE_DEFENSE)
+"""坐骑牌的槽位种类（"为坐骑牌 ⇒ 获得之"的判据，不写死六个牌名 id）。"""
+
+
+def _qiaomeng_target(state: GameState, frame: Any, owner: int, answers: Any) -> Any:
+    """选牌步的 ``face``：受伤者的区域；不是"造成伤害的是我"或没有牌 ⇒ 空元组 = 无此步。"""
+    del answers
+    target = _slash_damage_target(state, frame, owner)
+    if target is None:
+        return ()
+    if frame.data.get(_QIAOMENG_MATCHED) == owner:
+        return target
+    player = state.player(target)
+    if not (player.hand or player.equip or player.judge):
+        return ()
+    return target
+
+
+def _qiaomeng_condition(host: Any, frame: Any) -> bool:
+    """触发条件：**我用【杀】**对另一个角色造成伤害，且其区域里有牌可选。"""
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    if frame.data.get(_QIAOMENG_MATCHED) == owner:
+        return True
+    if _qiaomeng_target(host.state, frame, owner, None) == ():
+        return False
+    frame.data[_QIAOMENG_MATCHED] = owner
+    return True
+
+
+def _qiaomeng_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：坐骑牌 ⇒ 获得；否则 ⇒ 弃置（"你弃置之"，弃置者是技能持有者）。"""
+    owner = frame.data["skill_owner"]
+    card = host.state.card(int(answers["card"][0]))
+    target = _slash_damage_target(host.state, frame, owner)
+    if target is None:  # pragma: no cover - 条件已挡
+        return None
+    if card.slot in _HORSE_SLOTS:
+        control = host.move_in_frame(
+            frame,
+            (card,),
+            to_zone=ZoneRef(Zone.HAND, owner),
+            reason=MoveReason.PUT,
+            owner=owner,
+            actor=owner,
+        )
+    else:
+        control = host.move_in_frame(
+            frame,
+            (card,),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.DISCARD,
+            owner=target,
+            actor=owner,
+        )
+    return "stay" if control == "stay" else None
+
+
+QIAOMENG_FLOW = SkillFlow(
+    name="qiaomeng",
+    steps=(
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP, Zone.JUDGE),
+            lo=1,
+            hi=1,
+            optional=False,
+            face=_qiaomeng_target,
+            reveal_hand=False,
+        ),
+    ),
+    effect=_qiaomeng_effect,
+)
+"""【趫猛】的一步流水线：选受伤者区域内一张牌 → 坐骑获得 / 其余弃置。"""
+
+
+# ---------------------------------------------------------------------------
 # 夏侯惇【刚烈】（M6 P0 票 01）：判定 → 由**伤害来源**二选一
 # ---------------------------------------------------------------------------
 
@@ -1154,6 +1489,45 @@ DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
             (Timing.DAMAGE_AFTER_TAKE, _wangxi_take_condition),
         ),
     ),
+    # 界华雄【耀武】（M6 票 18）：锁定技，B 族第一条不询问的声明（``locked=True``）。
+    DamageAfterSkill(
+        "jie_huaxiong",
+        "yaowu",
+        False,
+        _yaowu_condition,
+        _yaowu,
+        requirement="锁定技：受到牌造成的伤害时，红色则伤害来源摸一张，否则你摸一张",
+        locked=True,
+    ),
+    # 界公孙瓒【趫猛】（M6 票 18）：【杀】造成伤害后选其区域里的一张牌（§十九 L2210–L2212）。
+    DamageAfterSkill(
+        "jie_gongsunzan",
+        "qiaomeng",
+        False,
+        _qiaomeng_condition,
+        None,
+        QIAOMENG_FLOW,
+        requirement=(
+            "使用【杀】对一名角色造成伤害后，选择其区域里的一张牌："
+            "为坐骑牌则获得之，否则弃置之"
+        ),
+        step_requirements={"card": "选择受伤角色区域里的一张牌"},
+    ),
+    # 界吕布【利驭】（M6 票 18）：**我用【杀】**对另一个角色造成伤害后获得其区域内一张牌
+    # （§十九 L2192–L2193）。"每次伤害事件一次"（牌面没有"1 点"）⇒ ``per_point=False``。
+    DamageAfterSkill(
+        "jie_lvbu",
+        "liyu",
+        False,
+        _liyu_condition,
+        None,
+        LIYU_FLOW,
+        requirement=(
+            "使用【杀】对一名角色造成伤害后，获得其区域内的一张牌："
+            "不为装备牌则其摸一张牌，否则视为你对该角色指定的另一名其他角色使用一张【决斗】"
+        ),
+        step_requirements={"card": "获得受伤角色区域内的一张牌"},
+    ),
 )
 """B 族技能的逐字声明（票 05 §要做什么 2 的表 + M6 票 01 / 08 / 14 / 15 的界版）。"""
 
@@ -1197,7 +1571,7 @@ def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
     return tuple(
         SkillDef(
             skill_id=skill.skill_id,
-            locked=False,
+            locked=skill.locked,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             hooks=tuple(

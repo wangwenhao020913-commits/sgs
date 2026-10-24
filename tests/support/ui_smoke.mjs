@@ -325,7 +325,7 @@ const sessionBodiesSince = (from) =>
 await ui.loadHeroCatalog();
 const catalogVersions = ui.heroVersions();
 check("⓪1 点将列表拉到了启用并集（标准 + 界版，按真名分组）",
-  ui.state.heroCatalog.length === 27 && catalogVersions.length === 50,
+  ui.state.heroCatalog.length === 29 && catalogVersions.length === 54,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -624,8 +624,15 @@ const scanCases = async () => {
       const pending = ui.state.view.pending;
       if (ui.isHandPick(pending)) {
         const hand = ui.state.view.snapshot.self_hand || [];
+        // 两种前置各走一条判据：
+        // - "用得出" = 候选索引里有它（点它 **设焦点**，2e 的判据）；
+        // - "用不出" = 候选索引里没有**且** ``cardFace`` 也说点不动——W5-02b 的借刀杀人
+        //   点得动（走两步清单入口、不设焦点），所以它既不算"用得出"、也不算"置灰"。
+        // 判据仍是"手里既有可点、又有不可点的牌"，不是放宽。
         const usable = hand.filter((card) => ui.cardSelectable(pending, card.card_id));
-        const unusable = hand.filter((card) => !ui.cardSelectable(pending, card.card_id));
+        const unusable = hand.filter(
+          (card) => !ui.cardSelectable(pending, card.card_id)
+            && !ui.cardFace(pending, card).selectable);
         if (!partial && usable.length > 0 && unusable.length > 0) {
           partial = { seed, steps: step, unusable: unusable[0], usable: usable[0] };
         }
@@ -656,8 +663,10 @@ const scanCases = async () => {
 // 20261053（8 席全是标准版，且这一局里仍有复合 `ActivateSkill` 的应答——W4-6 断言的前置）。
 // M6 票 15 再换池（版本 41 → 43）：按同一判据重扫，20261053 仍命中（8 席全是标准版、
 // 复合 `ActivateSkill` 的 W4-6 断言照旧通过），故种子不变。
+// M6 票 18 换池（版本 50 → 54）：20261053 的座位 0 变成界华雄，按同一判据
+// （8 席全是标准版 + 该局仍有复合 `ActivateSkill` 应答）重扫到 20273291。
 const created = await post("/api/sessions", {
-  player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261053,
+  player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20273291,
 });
 ui.state.sessionId = created.session_id;
 ui.applyView(created);
@@ -7556,8 +7565,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   }
 
   // 真会话（不是合成夹具）：服务端给**每个座位**下发详情清单，读取方（详情）读到它。
+  // 判据未放宽：详情里的武将名称 / 技能清单走标准武将表（界将的显示归票 19），故这一局
+  // 的对手（座位 1）必须是标准版武将。M6 票 18 换池（版本 50 → 54）后 20261012 的座位 1
+  // 变成界将，按同一判据重扫到 20261017（座位 0 司马懿 / 座位 1 吕蒙，均为标准版）。
   const realDetail = await post("/api/sessions", {
-    player_count: 4, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261012,
+    player_count: 4, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261017,
   });
   await openSession(realDetail);
   ui.renderTable();

@@ -375,6 +375,8 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         requirement="选择1张方块牌当【乐不思蜀】使用",
     ),
     # 华佗【急救】：回合外一张红色牌当【桃】使用（规则 1041）。
+    # M6 票 18：界华佗【急救】与标准版**逐字相同**（§十九 L2183）⇒ 同一条声明经
+    # ``shared_with`` 派生 ``hero.jie_huatuo.jijiu``，不复制第二行。
     ConversionSkill(
         hero_id="huatuo",
         short_id="jijiu",
@@ -384,6 +386,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         scopes=(CandidateScope.PLAY,),
         outside_turn_only=True,
         requirement="选择1张红色牌当【桃】使用",
+        shared_with=("jie_huatuo",),
     ),
     # 甄姬【倾国】（M6 票 02）：一张**黑色手牌**当【闪】使用或打出（§九 L962）。
     # 区域 = 只有手牌：牌面明写"手牌"，故不套 `_hand_equip` 的区域默认。

@@ -429,13 +429,32 @@ def test_the_phase_reset_mask_covers_every_phase_bit_and_nothing_else():
     必须恰好落在那个掩码里；多一位会误清整局位，少一位会让"每阶段限一次"失效。
     """
     phase_bits = (
-        active_module._USED | active_module._RECOVERED | active_module._GAVE_ANY
+        active_module._USED
+        | active_module._RECOVERED
+        | active_module._GAVE_ANY
+        # M6 票 18：界华雄【势斩】"出牌阶段限两次"的第二档位也是阶段作用域。
+        | active_module._USED_SECOND
     )
     # M6 票 16：界刘备【仁德】的"本阶段已给过的目标座位"位段也是阶段作用域。
     given_bits = catalog_module._GIVEN_TO_MASK
     assert given_bits == 0xFF << catalog_module._GIVEN_TO_SHIFT
 
     assert catalog_module._PHASE_STATE_MASK == phase_bits | given_bits
+    assert catalog_module._USED_SECOND == active_module._USED_SECOND, (
+        "位布局的唯一真源在 catalog；active 只是转发同一个常量"
+    )
+    assert not (
+        catalog_module._USED_SECOND
+        & (
+            active_module._USED
+            | active_module._RECOVERED
+            | active_module._GAVE_ANY
+            | given_bits
+            | catalog_module._LIMITED_USED
+            | catalog_module._AWAKENED
+            | catalog_module._TURN_USED
+        )
+    ), "第二档位不得与任何既有位重叠"
     assert not (catalog_module._LIMITED_USED & phase_bits), "整局位不得与阶段位重叠"
     assert not (catalog_module._AWAKENED & phase_bits), "觉醒位（票 06）也不得与阶段位重叠"
     assert not (catalog_module._AWAKENED & catalog_module._LIMITED_USED), (

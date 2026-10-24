@@ -165,9 +165,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 113
+    assert len(CATALOG) == 121
     assert len(equipment) == 22
-    assert len(heroes) == 91
+    assert len(heroes) == 99
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -182,7 +182,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 91
+    assert len(expected) == 99
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1012,8 +1012,17 @@ SKILL_FILES: dict[str, str] = {
     "hero.jie_xiahoudun.qingjian": "test_hero_jie_hand_limit.py",
     "hero.jie_huangyueying.jizhi": "test_hero_jie_hand_limit.py",
     "hero.jie_huangyueying.qicai": "test_hero_jie_hand_limit.py",
+    # M6 票 18：界·群（华佗 / 吕布 / 华雄 / 公孙瓒）
+    "hero.jie_huatuo.jijiu": "test_hero_jie_qun.py",
+    "hero.jie_huatuo.chuli": "test_hero_jie_qun.py",
+    "hero.jie_lvbu.wushuang": "test_hero_jie_qun.py",
+    "hero.jie_lvbu.liyu": "test_hero_jie_qun.py",
+    "hero.jie_huaxiong.yaowu": "test_hero_jie_qun.py",
+    "hero.jie_huaxiong.shizhan": "test_hero_jie_qun.py",
+    "hero.jie_gongsunzan.qiaomeng": "test_hero_jie_qun.py",
+    "hero.jie_gongsunzan.yicong": "test_hero_jie_qun.py",
 }
-"""83 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
+"""91 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
 票 02 加 5 条、票 03 加 3 条、票 04 加 4 条界将技能、票 05 加界张飞 2 条、票 06 加界徐庶 /
 界吕蒙 6 条、票 07 加界甘宁 / 界貂蝉 4 条、票 08 加界周瑜 / 界夏侯惇 / 界黄月英 6 条、
 票 09 加界甄姬 2 条、票 10 加界陆逊 2 条、票 11 加界吕蒙【博图】1 条、
@@ -1365,6 +1374,22 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
             _HookFrame(target=ME, amount=1),
             _HookFrame(source=ME, card=state.card(_PROBE_CHANNEL_SLASH)),
         ),
+        # M6 票 18：界·群的三条条件钩子。
+        # - 界【利驭】/ 界【趫猛】：我用【杀】对座位 0（有牌可拿）造成伤害；
+        # - 界【耀武】：受伤的是我，渠道牌是一张【杀】。
+        "hero.jie_lvbu.liyu": (
+            _HookFrame(
+                source=ME, target=0, card=state.card(_PROBE_CHANNEL_SLASH)
+            ),
+        ),
+        "hero.jie_gongsunzan.qiaomeng": (
+            _HookFrame(
+                source=ME, target=0, card=state.card(_PROBE_CHANNEL_SLASH)
+            ),
+        ),
+        "hero.jie_huaxiong.yaowu": (
+            _HookFrame(target=ME, card=state.card(_PROBE_CHANNEL_SLASH)),
+        ),
     }
 
 
@@ -1556,6 +1581,18 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.jie_daqiao.liuli": "触发技能",
     "hero.jie_sunshangxiang.jieyin": "主动技能",
     "hero.jie_sunshangxiang.xiaoji": "零步技能",
+    # M6 票 18：界华佗【除疠】（座位步 + 提交点里逐名选牌）/ 界华雄【势斩】（一步座位 +
+    # 次数由提交点自己数）都是主动技能；界吕布【利驭】/ 界公孙瓒【趫猛】是"钩子 + 一步
+    # 选牌流水线"的触发技能；界吕布【无双】/ 界华雄【耀武】/ 界公孙瓒【义从】是锁定技；
+    # 界华佗【急救】与标准版逐字相同（同一条转化声明）。
+    "hero.jie_huatuo.chuli": "主动技能",
+    "hero.jie_huaxiong.shizhan": "主动技能",
+    "hero.jie_lvbu.liyu": "触发技能",
+    "hero.jie_gongsunzan.qiaomeng": "触发技能",
+    "hero.jie_lvbu.wushuang": "锁定技",
+    "hero.jie_huaxiong.yaowu": "锁定技",
+    "hero.jie_gongsunzan.yicong": "锁定技",
+    "hero.jie_huatuo.jijiu": "转化技",
     # 多轮技能 12（手写帧内游标循环；flow_for is None；M6 票 01 的【刚烈】= 判定 → 选项 → 选牌，
     # 票 02 的【洛神】= 可重复判定循环；票 15 的界【遗计】= 摸两张 → 逐张选择收牌人）
     "hero.guojia.yiji": "多轮技能",
@@ -1649,20 +1686,20 @@ SKILL_SHAPE: dict[str, str] = {
 """
 
 SHAPE_COUNTS: dict[str, int] = {
-    "主动技能": 15,
-    "触发技能": 11,
+    "主动技能": 17,
+    "触发技能": 13,
     "零步技能": 23,
     "排列技能": 3,
     "多轮技能": 13,
-    "锁定技": 26,
-    "转化技": 12,
+    "锁定技": 29,
+    "转化技": 13,
     "能力位": 2,
     "候选生成器": 1,
     "候选提供者": 5,
     "觉醒技": 2,
 }
-"""每格的条数（spec §4.4；M6 票 17 后
-15 + 11 + 23 + 3 + 13 + 26 + 12 + 2 + 1 + 5 + 2 = 113）。
+"""每格的条数（spec §4.4；M6 票 18 后
+17 + 13 + 23 + 3 + 13 + 29 + 13 + 2 + 1 + 5 + 2 = 121）。
 
 票 03 的三条：**苦肉**是零步主动技（裸发动，无步骤 ⇒ 机械形态落在「零步技能」格）；
 **克己**是阶段体零步技（同格）；**奇袭**是单源转化（转化技格）。票 04 的四条：**义绝**
@@ -1746,9 +1783,9 @@ def _flow_steps(skill_id: str):
 
 
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
-    """113 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
+    """121 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 113
+    assert len(SKILL_SHAPE) == len(CATALOG) == 121
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11
     assert all(SKILL_SHAPE.values()), "表里没有空形态"
@@ -1872,8 +1909,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 54
-    assert len(outside) == 59
+    assert len(inside) == 58
+    assert len(outside) == 63
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

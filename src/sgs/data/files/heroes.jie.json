@@ -563,6 +563,94 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "jie_huatuo",
+      "name": "界华佗",
+      "true_name": "华佗",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "jijiu",
+          "name": "急救",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "chuli",
+          "name": "除疠",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_lvbu",
+      "name": "界吕布",
+      "true_name": "吕布",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 5,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "wushuang",
+          "name": "无双",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "liyu",
+          "name": "利驭",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_huaxiong",
+      "name": "界华雄",
+      "true_name": "华雄",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 6,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "yaowu",
+          "name": "耀武",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "shizhan",
+          "name": "势斩",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_gongsunzan",
+      "name": "界公孙瓒",
+      "true_name": "公孙瓒",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "qiaomeng",
+          "name": "趫猛",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yicong",
+          "name": "义从",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

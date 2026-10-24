@@ -59,6 +59,7 @@ from .flow import SkillFlow, zero_step_effect
 
 __all__ = [
     "JIE_TIEQI",
+    "JIE_WUSHUANG",
     "RESPONSE_WINDOW_SKILLS",
     "TIEQI_FLOW",
     "response_window_skill_definitions",
@@ -112,6 +113,14 @@ WUSHUANG = ResponseCountSkill(
     card_types=("slash", "duel"),
 )
 """吕布【无双】：锁定技，使用【杀】/【决斗】时该角色需连续两张响应（规则 1046）。"""
+
+JIE_WUSHUANG = hero_skill_id("jie_lvbu", "wushuang")
+"""界吕布【无双】的全限定技能 id（§十九 L2188–L2191）。
+
+界版牌面与标准版**逐字同义**（①【杀】要两张【闪】、②【决斗】要两张【杀】，只是改写成
+①/② 的编号形态）⇒ 同一条 ``RESPONSE_COUNT`` 回调、同一条修饰器，界版只是另一个武将 id
+（与【马术】【克己】【流离】的"另一个武将 id"同一姿态，不复制第二份行为）。
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -355,5 +364,14 @@ def response_window_skill_definitions() -> tuple[SkillDef, ...]:
             hooks=(Hook(Timing.USE_AFTER_DESIGNATE_TARGET, handler=_jie_tieqi),),
             requirement=_REQUIREMENTS["jie_tieqi"],
             step_requirements={"card": "弃置一张与判定结果花色相同的牌（由被指定者选择）"},
+        ),
+        # 界吕布【无双】（M6 票 18）：与标准版逐字同义 ⇒ 同一个回调 / 同一条修饰器。
+        SkillDef(
+            skill_id=JIE_WUSHUANG,
+            locked=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            modifiers=(Modifier(ModifierPoint.RESPONSE_COUNT, WUSHUANG.response_count),),
+            requirement=_REQUIREMENTS["wushuang"],
         ),
     )

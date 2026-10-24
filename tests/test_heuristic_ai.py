@@ -3484,3 +3484,208 @@ def test_every_jie_wu_skill_has_a_deterministic_ai_scene_or_is_named():
     )
     assert JIE_WU_ZHAXIANG not in SKILL_VALUES, "锁定技没有「是否发动」询问，不该有条目"
     assert CATALOG[JIE_WU_ZHAXIANG].locked is True
+
+
+# ---------------------------------------------------------------------------
+# ⑩ M6 票 18：界·群（华佗 / 吕布 / 华雄 / 公孙瓒）——五条非锁定技能各有确定性 AI
+#    发动场景（spec §AI / D16 / S7）；三条锁定技没有「是否发动」询问，由构造局面接手
+# ---------------------------------------------------------------------------
+
+JIE_QUN_CHULI = "hero.jie_huatuo.chuli"
+JIE_QUN_LIYU = "hero.jie_lvbu.liyu"
+JIE_QUN_SHIZHAN = "hero.jie_huaxiong.shizhan"
+JIE_QUN_QIAOMENG = "hero.jie_gongsunzan.qiaomeng"
+JIE_QUN_JIJIU = "hero.jie_huatuo.jijiu"
+JIE_QUN_LOCKED = (
+    "hero.jie_lvbu.wushuang",
+    "hero.jie_huaxiong.yaowu",
+    "hero.jie_gongsunzan.yicong",
+)
+
+
+def _jie_qun_players(count: int, seed: int = 11):
+    return [HeuristicPlayer(_stream(seed)) for _ in range(count)]
+
+
+def test_the_ai_activates_jie_chuli_and_discards_one_card_from_each_chosen_kingdom():
+    """界华佗【除疠】：AI 发动后逐名选目标、逐名选牌；至少自己与一名目标各弃一张。"""
+    own, other1, other2, other3 = (
+        _ids("peach")[0],
+        _ids("peach")[1],
+        _ids("slash")[1],
+        _ids("dodge")[0],
+    )
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(own,), hero="jie_huatuo", kingdom=Kingdom.QUN),
+            SeatSpec(hand=(other1,), kingdom=Kingdom.WEI),
+            SeatSpec(hand=(other2,), kingdom=Kingdom.WU),
+            SeatSpec(hand=(other3,), kingdom=Kingdom.SHU),
+        ],
+        deck=_deck_excluding(own, other1, other2, other3),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
+
+    run_queries(
+        engine,
+        _jie_qun_players(4),
+        lambda e: _activated(e, JIE_QUN_CHULI)
+        and any(
+            record.kind == "delta"
+            and record.delta_type == "card_move"
+            and record.reason is MoveReason.DISCARD
+            for record in e.records
+        )
+        and not e.stack,
+    )
+
+    assert _activated(engine, JIE_QUN_CHULI), "AI 必须真的发动界【除疠】"
+    records = list(engine.records)
+    activated_at = next(
+        index
+        for index, record in enumerate(records)
+        if record.kind == "action"
+        and record.accepted
+        and isinstance(record.action, ActivateSkill)
+        and record.action.skill_id == JIE_QUN_CHULI
+    )
+    discarded_from = {
+        record.from_zone.seat
+        for record in records[activated_at:]
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.reason is MoveReason.DISCARD
+        and record.to_zone.zone is Zone.DISCARD
+    }
+    assert {0, 1, 2, 3} <= discarded_from, (
+        "自己与三名势力互异的目标各弃一张（实得 " f"{sorted(discarded_from)}）"
+    )
+
+
+def test_the_ai_activates_jie_liyu_and_gains_a_card_from_the_damaged_character():
+    """界吕布【利驭】：AI 在【杀】伤害后答发动 ⇒ 获得受伤者一张牌。"""
+    slash = _ids("slash")[0]
+    peach = _ids("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_lvbu", kingdom=Kingdom.QUN),
+            SeatSpec(hand=(peach,), kingdom=Kingdom.WEI),
+        ],
+        deck=_deck_excluding(slash, peach),
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=11)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, source=0, target=1),
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    run_queries(
+        engine,
+        _jie_qun_players(2),
+        lambda e: _activated(e, JIE_QUN_LIYU) and not e.stack,
+    )
+
+    assert _activated(engine, JIE_QUN_LIYU), "AI 必须真的发动界【利驭】"
+    assert peach in engine.state.player(0).hand, "获得的牌进吕布手牌"
+
+
+def test_the_ai_activates_jie_shizhan_and_duels_itself_with_another_character():
+    """界华雄【势斩】：AI 有【杀】时发动 ⇒ 被指定者视为对华雄使用【决斗】，其不响应而受伤。"""
+    first, second = _ids("slash")[0], _ids("slash")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(first, second), hero="jie_huaxiong", kingdom=Kingdom.QUN),
+            SeatSpec(kingdom=Kingdom.WEI),
+        ],
+        deck=_deck_excluding(first, second),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
+
+    run_queries(
+        engine,
+        _jie_qun_players(2),
+        lambda e: _activated(e, JIE_QUN_SHIZHAN)
+        and any(
+            record.kind == "query"
+            and record.query.kind == QueryKind.RESPOND.value
+            and record.query.cause is WindowCause.DUEL
+            for record in e.records
+        ),
+    )
+
+    assert _activated(engine, JIE_QUN_SHIZHAN), "AI 必须真的发动界【势斩】"
+    duel_queries = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.RESPOND.value
+        and record.query.cause is WindowCause.DUEL
+    ]
+    assert duel_queries and duel_queries[0].actor == 0, "虚拟【决斗】由华雄先响应"
+    assert engine.state.player(1).hp < 4, "对方打不出【杀】⇒ 受伤"
+
+
+def test_the_ai_activates_jie_qiaomeng_and_gains_a_mount():
+    """界公孙瓒【趫猛】：AI 在【杀】伤害后答发动，选中坐骑牌 ⇒ 获得之。"""
+    slash = _ids("slash")[0]
+    horse = _ids("chitu")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_gongsunzan", kingdom=Kingdom.QUN),
+            SeatSpec(equip=(horse,), kingdom=Kingdom.WEI),
+        ],
+        deck=_deck_excluding(slash, horse),
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=11)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, source=0, target=1),
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+    run_queries(
+        engine,
+        _jie_qun_players(2),
+        lambda e: _activated(e, JIE_QUN_QIAOMENG) and not e.stack,
+    )
+
+    assert _activated(engine, JIE_QUN_QIAOMENG), "AI 必须真的发动界【趫猛】"
+    assert horse in engine.state.player(0).hand, "坐骑牌被公孙瓒获得"
+
+
+def test_every_jie_qun_skill_has_a_deterministic_ai_scene_or_is_named():
+    """本票八条技能的 AI 覆盖点名（spec S7 的"每条新机制 AI 至少一次合法发动"）。
+
+    三条**锁定技**（【无双】【耀武】【义从】）没有"是否发动"询问，结构上不可由 AI 主动
+    发动；覆盖由构造局面接手：`tests/test_hero_jie_qun.py` 的
+    ``test_jie_wushuang_still_needs_two_dodges_to_cancel_a_slash`` /
+    ``test_yaowu_red_card_damage_lets_the_damage_source_draw_one`` /
+    ``test_yicong_shortens_own_distance_and_lengthens_targets_when_hp_is_low``。
+    【急救】与标准版**共用同一条转化声明**（行为一字不改），AI 的发动路径与标准【急救】
+    相同（`hero.huatuo.jijiu` 的既有场景）；界版的归属由
+    ``tests/test_hero_jie_qun.py::test_jie_jijiu_offers_red_cards_as_peach_outside_the_owners_turn``
+    接手，故本节点名而不另造重复场景。
+    """
+    covered = {
+        JIE_QUN_CHULI,
+        JIE_QUN_LIYU,
+        JIE_QUN_SHIZHAN,
+        JIE_QUN_QIAOMENG,
+    }
+
+    assert all(skill_id in SKILL_VALUES for skill_id in covered), (
+        "这些技能还没进 SKILL_VALUES：" + "；".join(sorted(covered - set(SKILL_VALUES)))
+    )
+    for skill_id in JIE_QUN_LOCKED:
+        assert CATALOG[skill_id].locked is True
+        assert skill_id not in SKILL_VALUES, "锁定技没有「是否发动」询问，不该有条目"
+    assert JIE_QUN_JIJIU in SKILL_VALUES, "转化技与标准版共用声明，但仍按 id 进语义表"

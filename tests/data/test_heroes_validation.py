@@ -440,6 +440,10 @@ def test_the_standard_table_stays_the_25_and_the_jie_table_is_loaded_separately(
         "jie_huanggai",
         "jie_daqiao",
         "jie_sunshangxiang",
+        "jie_huatuo",
+        "jie_lvbu",
+        "jie_huaxiong",
+        "jie_gongsunzan",
     ]
     assert {hero.id for hero in standard.heroes}.isdisjoint(
         {hero.id for hero in jie.heroes}
@@ -847,6 +851,59 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     )
     assert [skill.id for skill in sunshangxiang.skills] == ["jieyin", "xiaoji"]
 
+    # M6 票 18：界华佗 / 界吕布 / 界华雄 / 界公孙瓒（§十九 L2181–L2215）。
+    # 华佗、吕布的真名与标准版同名（版本池 +2）；华雄、公孙瓒是**只有界版**的新真名
+    # （版本池 +2、真名池 +2 ⇒ spec 收口的 54 个版本 / 29 个真名）。
+    huatuo = jie.by_id("jie_huatuo")
+    lvbu = jie.by_id("jie_lvbu")
+    huaxiong = jie.by_id("jie_huaxiong")
+    gongsunzan = jie.by_id("jie_gongsunzan")
+    assert huatuo is not None and lvbu is not None
+    assert huaxiong is not None and gongsunzan is not None
+    assert (huatuo.name, huatuo.true_name, huatuo.version) == (
+        "界华佗",
+        "华佗",
+        "jie-ol",
+    )
+    assert (huatuo.kingdom, huatuo.gender, huatuo.hp_max) == (
+        Kingdom.QUN,
+        Gender.MALE,
+        3,
+    )
+    assert [skill.id for skill in huatuo.skills] == ["jijiu", "chuli"]
+
+    assert (lvbu.name, lvbu.true_name, lvbu.version) == ("界吕布", "吕布", "jie-ol")
+    assert (lvbu.kingdom, lvbu.gender, lvbu.hp_max) == (
+        Kingdom.QUN,
+        Gender.MALE,
+        5,
+    ), "界吕布体力上限 5（§十九 L2187）"
+    assert [skill.id for skill in lvbu.skills] == ["wushuang", "liyu"]
+
+    assert (huaxiong.name, huaxiong.true_name, huaxiong.version) == (
+        "界华雄",
+        "华雄",
+        "jie-ol",
+    )
+    assert (huaxiong.kingdom, huaxiong.gender, huaxiong.hp_max) == (
+        Kingdom.QUN,
+        Gender.MALE,
+        6,
+    ), "界华雄体力上限 6（§十九 L2201）"
+    assert [skill.id for skill in huaxiong.skills] == ["yaowu", "shizhan"]
+
+    assert (gongsunzan.name, gongsunzan.true_name, gongsunzan.version) == (
+        "界公孙瓒",
+        "公孙瓒",
+        "jie-ol",
+    )
+    assert (gongsunzan.kingdom, gongsunzan.gender, gongsunzan.hp_max) == (
+        Kingdom.QUN,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in gongsunzan.skills] == ["qiaomeng", "yicong"]
+
     assert all(hero.true_name for hero in jie.heroes), "界版每名都带真名"
     assert all(hero.enabled for hero in jie.heroes), "边界突破 P1 起界将逐批启用"
 
@@ -989,6 +1046,22 @@ def test_hero_skill_ids_lookup_covers_the_jie_supplement():
     assert hero_skill_ids("jie_sunshangxiang") == (
         "hero.jie_sunshangxiang.jieyin",
         "hero.jie_sunshangxiang.xiaoji",
+    )
+    assert hero_skill_ids("jie_huatuo") == (
+        "hero.jie_huatuo.jijiu",
+        "hero.jie_huatuo.chuli",
+    )
+    assert hero_skill_ids("jie_lvbu") == (
+        "hero.jie_lvbu.wushuang",
+        "hero.jie_lvbu.liyu",
+    )
+    assert hero_skill_ids("jie_huaxiong") == (
+        "hero.jie_huaxiong.yaowu",
+        "hero.jie_huaxiong.shizhan",
+    )
+    assert hero_skill_ids("jie_gongsunzan") == (
+        "hero.jie_gongsunzan.qiaomeng",
+        "hero.jie_gongsunzan.yicong",
     )
     assert hero_skill_ids("guanyu") == ("hero.guanyu.wusheng",), "标准版查法一字不变"
 

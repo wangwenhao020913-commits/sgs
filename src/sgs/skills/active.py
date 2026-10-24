@@ -45,6 +45,7 @@ from sgs.data import (
     Category,
     Color,
     Gender,
+    Kingdom,
     SkillType,
     Suit,
     card_category,
@@ -82,6 +83,7 @@ from .catalog import (
     HeroSkillDecl,
     SkillDef,
     _GIVEN_TO_SHIFT,
+    _USED_SECOND,
     _move_by_source,
     instance_key,
     resolve_instances,
@@ -1049,6 +1051,237 @@ QINGNANG_FLOW = SkillFlow(
     effect=_qingnang_effect,
 )
 """【青囊】的两步流水线：弃 1 张手牌 → 一名已受伤角色回复 1 点（票 02）。"""
+
+
+# ---------------------------------------------------------------------------
+# 界华佗【除疠】（M6 票 18）：任意名势力互异的其他角色 → 各弃一张；黑桃者各摸一张
+#
+# §十九 L2184–L2185：
+#
+#     除疠：出牌阶段限一次，你可以选择任意名势力各不相同的其他角色，然后弃置你和这些
+#           角色的各一张牌。因此被弃置黑桃牌的角色各摸一张牌。
+#
+# 三条裁定（票面 `## 已知歧义`，写进 `06`（§5「程序化约定与偏离一手」））：
+#
+# - **目标组合** = 任意名、**势力互异**、**不含自己**、**至少 1 名**（0 目标非法）；
+#   势力重复 / 不含自己 / 0 目标各有正反例（``tests/test_hero_jie_qun.py``）；
+# - 牌面**没写**"区域内"（写的是"各一张牌"）⇒ 按 `GLOSSARY.md`「区域默认」= 手牌 + 装备，
+#   不含判定区（与【利驭】/【趫猛】这两条明写"区域内 / 区域里"的技能分列）；
+# - 弃哪一张由**发动者**（华佗）选：手牌是给发动者看的隐藏槽（与拆 / 顺同姿态）。
+#
+# **为什么不是一条纯声明式流水线**：目标是"任意名"（``PickSeats`` 可以），但每种目标
+# 各问一次"弃哪张"的循环不是步骤语言里的一步（步骤只表达一次选择），故选牌循环住在
+# 提交点里（与【苦肉】/【国色】的"零步提交 + 手写询问"同姿态）。
+# ---------------------------------------------------------------------------
+
+CHULI = hero_skill_id("jie_huatuo", "chuli")
+"""界华佗【除疠】的全限定技能 id（§十九 L2184–L2185）。"""
+
+_ASK_CHULI_CARD = "hero.jie_huatuo.chuli.card"
+"""手写询问位置：第 ``i`` 名角色（0 = 自己）的那张成本牌。"""
+
+_CHULI_MOVED = "chuli_moved"
+"""帧私有：已经搬进弃牌堆的成本数（重入时从下一个角色接着搬）。"""
+
+_CHULI_DRAWN = "chuli_drawn"
+"""帧私有：黑桃摸牌已经结算（重入不重复摸）。"""
+
+_CHULI_MAX_TARGETS = len(Kingdom)
+"""**任意名**的上界 = 势力闭集的成员数（自己之外的每个势力至多一名）。"""
+
+
+def _chuli_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """可选目标：存活、不含自己、**势力与已选目标互异**、且**有牌可弃**（手牌 ∪ 装备）。
+
+    ``chosen`` 由步骤执行器逐次传入 ⇒ "势力互异"不需要在提交点再判一次。
+    """
+    del frame
+    used = {state.player(seat).kingdom for seat in chosen}
+    return tuple(
+        player.seat
+        for player in state.players
+        if player.alive
+        and player.seat != owner
+        and player.kingdom not in used
+        and (player.hand or player.equip)
+    )
+
+
+def _chuli_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：本阶段没用过 ∧ 自己付得起一张 ∧ 至少有一名可选目标。"""
+    if not _can_offer(state, ctx):
+        return current
+    me = state.player(ctx.subject)
+    if not (me.hand or me.equip):
+        return current
+    if not _chuli_targets(state, None, ctx.subject, ()):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _chuli_face(host: Any, seat: int, owner: int):
+    """第 ``seat`` 名角色的选牌面：自己的手牌可见、别人的手牌是隐藏槽。"""
+    return host.selection_face(
+        seat, (Zone.HAND, Zone.EQUIP), reveal_hand=(seat == owner)
+    )
+
+
+def _chuli_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：逐名角色问一张牌 → 依次弃置 → 黑桃者各摸一张。
+
+    选牌全部问完才开始搬牌：取消 / 校验失败发生在**步骤阶段**（此时一张牌都没动），
+    故"取消零副作用"不靠提交点的额外守卫。搬牌逐个进行（一次 ``move_card`` 只能有一个
+    来源区），进度落在帧私有游标里；某个角色的"失去牌后"钩子提问挂起时，重入从那一张
+    接着搬（``move_in_frame`` 的同帧幂等守卫保证不重复搬）。
+    """
+    owner = frame.data["source"]
+    seats = (owner, *answers["seat"])
+    picked: list[tuple[int, int]] = []
+    for index, seat in enumerate(seats):
+        cards = host.ask_selection(
+            frame,
+            owner=_ASK_CHULI_CARD,
+            key=f"chuli:card:{index}",
+            actor=owner,
+            timing=Timing.PHASE_PLAY_IDLE,
+            spec=SelectionSpec(
+                zones=(Zone.HAND, Zone.EQUIP), total=(1, 1), optional=False
+            ),
+            build_face=lambda seat=seat: _chuli_face(host, seat, owner),
+        )
+        if host.suspended(cards):
+            return "stay"
+        if not cards:
+            # 面上没有牌（重入时区域可能已变）：不搬、也不猜。
+            return None
+        picked.append((seat, int(cards[0])))
+    moved = int(frame.data.get(_CHULI_MOVED, 0))
+    while moved < len(picked):
+        seat, card_id = picked[moved]
+        control = host.move_in_frame(
+            frame,
+            host.state.refs((card_id,)),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.DISCARD,
+            owner=seat,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+        frame.data[_CHULI_MOVED] = moved + 1
+        moved += 1
+    if not frame.data.get(_CHULI_DRAWN):
+        frame.data[_CHULI_DRAWN] = True
+        for seat, card_id in picked:
+            if host.state.card(card_id).suit == Suit.SPADE.value:
+                host.draw_for_hand(frame, seat, 1)
+    return None
+
+
+CHULI_FLOW = SkillFlow(
+    name="chuli",
+    steps=(
+        PickSeats(
+            lo=1,
+            hi=_CHULI_MAX_TARGETS,
+            pool=_chuli_targets,
+            # **有序多选**：第二问起依赖"本步已选"的势力（``chosen`` 传入池），清单语言
+            # 只能表达第一问。翻 ``ordered`` 让清单**不下发候选索引**（``manifest`` 的
+            # "有序多选"分支），复合动作因此不成立——人 / AI 都走执行期的逐步询问。
+            # 这一步不放宽任何规则：校验器与执行器读的是同一个 ``pool(chosen)``。
+            ordered=True,
+            optional=True,
+            key="seat",
+        ),
+    ),
+    effect=_chuli_effect,
+)
+"""【除疠】的流水线：选任意名势力互异的其他角色（≥1）→ 提交点里逐名问成本牌。
+
+``hi`` = 势力闭集的大小：目标数受"势力互异"收住，故这是结构上界而不是拍脑袋的数。
+"""
+
+
+# ---------------------------------------------------------------------------
+# 界华雄【势斩】（M6 票 18）：出牌阶段限两次，令一名其他角色视为对你使用一张【决斗】
+#
+# §十九 L2204–L2205：
+#
+#     势斩：出牌阶段限两次，你可以令一名其他角色视为对你使用一张【决斗】。
+#
+# **"限两次"不是 `_USED` 一位能表达的**：`_USED` 是"限一次"的位（A 族七条），限两次
+# 需要第二档。位 14 由 catalog 的 :data:`~sgs.skills.catalog._USED_SECOND` 持有，
+# 与 `_USED` 成对读出"本阶段用了几次"；两者都在阶段掩码里，出牌阶段开始统一复位。
+# 本技能因此走 ``once_per_phase=False``（执行器不自动落位），由提交点自己数。
+#
+# "视为对你使用【决斗】"：使用者 = 被指定的其他角色、目标 = 华雄（决斗由**目标**先响应）。
+# 虚拟【决斗】与【离间】共用 :func:`~sgs.skills.virtual.pure_virtual_card` 的构造，
+# 走同一条真使用 / 真响应窗口，不另造"决斗"分支。
+# ---------------------------------------------------------------------------
+
+SHIZHAN = hero_skill_id("jie_huaxiong", "shizhan")
+"""界华雄【势斩】的全限定技能 id（§十九 L2204–L2205）。"""
+
+_SHIZHAN_STARTED = "shizhan_started"
+"""帧私有：虚拟【决斗】已经开出（重入不重复开）。"""
+
+
+def _phase_use_count(state: GameState, owner: int, skill_id: str) -> int:
+    """本阶段该实例已经发动几次（``_USED`` 与 :data:`_USED_SECOND` 两位之和）。"""
+    flags = _phase_flags(state, owner, skill_id)
+    return (1 if flags & _USED else 0) + (1 if flags & _USED_SECOND else 0)
+
+
+def _shizhan_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """可选目标：任意**其他**存活角色（单选；座位序 = 玩家序）。"""
+    del frame, chosen
+    return _other_alive_seats(state, owner)
+
+
+def _shizhan_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：本阶段不足两次 ∧ 场上还有别的存活角色。"""
+    if ctx.card is not None or ctx.owner != ctx.subject:
+        return current
+    if ctx.scope is not CandidateScope.PLAY:
+        return current
+    if _phase_use_count(state, ctx.owner, ctx.skill_id) >= 2:
+        return current
+    if not _other_alive_seats(state, ctx.subject):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _shizhan_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：记一次本阶段已用，再让被指定者视为对华雄使用【决斗】。"""
+    owner = frame.data["source"]
+    target = int(answers["seat"][0])
+    if not frame.data.get(_SHIZHAN_STARTED):
+        if _phase_flags(host.state, owner, SHIZHAN) & _USED:
+            _mark_phase(host.state, owner, SHIZHAN, _USED_SECOND)
+        else:
+            _mark_phase(host.state, owner, SHIZHAN, _USED)
+        frame.data[_SHIZHAN_STARTED] = True
+        host.start_use(
+            pure_virtual_card(host.state, "duel"),
+            source=target,
+            targets=(owner,),
+            use_timing=Timing.PHASE_PLAY_IDLE,
+        )
+    return None
+
+
+SHIZHAN_FLOW = SkillFlow(
+    name="shizhan",
+    steps=(PickSeats(lo=1, hi=1, pool=_shizhan_targets, key="seat"),),
+    effect=_shizhan_effect,
+    # 次数由提交点自己数（见上）：执行器的 `_USED` 只表达"限一次"。
+    once_per_phase=False,
+)
+"""【势斩】的流水线：选一名其他角色 → 其视为对华雄使用【决斗】（每阶段至多两次）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -2465,13 +2698,35 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         flow=JIE_FANJIAN_FLOW,
         requirement="展示一张手牌交给一名其他角色，然后令其选择：展示所有手牌弃置同花色牌 / 失去 1 点体力",
     ),
+    # 界华佗【除疠】（M6 票 18）：任意名势力互异的其他角色 → 各弃一张；黑桃者各摸一张
+    # （§十九 L2184–L2185）。座位步是"任意名"（势力互异收住上界），逐名选牌住在提交点。
+    ActiveSkill(
+        "jie_huatuo",
+        "chuli",
+        _chuli_offers,
+        flow=CHULI_FLOW,
+        requirement=(
+            "出牌阶段限一次：选择任意名势力各不相同的其他角色，"
+            "弃置你和这些角色的各一张牌；因此被弃置黑桃牌的角色各摸一张牌"
+        ),
+    ),
+    # 界华雄【势斩】（M6 票 18）：出牌阶段**限两次**，令一名其他角色视为对你使用
+    # 一张【决斗】（§十九 L2204–L2205）。次数由提交点自己数（``_USED_SECOND``）。
+    ActiveSkill(
+        "jie_huaxiong",
+        "shizhan",
+        _shizhan_offers,
+        flow=SHIZHAN_FLOW,
+        requirement="出牌阶段限两次：令一名其他角色视为对你使用一张【决斗】",
+    ),
 )
-"""A 族十五条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】+
-票 06 的两条 ☆ 技能【荐言】/【攻心】+ M6 票 17 的界·吴四条）。
+"""A 族十七条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】+
+票 06 的两条 ☆ 技能【荐言】/【攻心】+ M6 票 17 的界·吴四条 + M6 票 18 的界华佗【除疠】/
+界华雄【势斩】）。
 
 【苦肉】是唯一一条**零步**的 A 族技能：没有步骤可渲染 ⇒ 不翻预发动，骨架候选直接进
-``legal_actions``；【义绝】的三步由发动后的询问逐步收集，同样不翻预发动；其余六条都走
-预发动清单。
+``legal_actions``；【义绝】【除疠】的多步由发动后的询问逐步收集（【除疠】的逐名选牌
+更是在提交点里），同样不翻预发动；其余七条都走预发动清单。
 """
 
 

@@ -69,6 +69,7 @@ __all__ = [
     "JIE_LIULI",
     "LIULI_FLOW",
     "JIE_MASHU",
+    "JIE_YICONG",
     "LIULI",
     "MASHU",
     "target_change_skill_definitions",
@@ -76,6 +77,9 @@ __all__ = [
 
 MASHU = hero_skill_id("machao", "mashu")
 """马超【马术】的全限定技能 id（前缀派生走 :func:`sgs.data.hero_skill_id`）。"""
+
+JIE_YICONG = hero_skill_id("jie_gongsunzan", "yicong")
+"""界公孙瓒【义从】的全限定技能 id（M6 票 18；§十九 L2213–L2214）。"""
 
 JIE_MASHU = hero_skill_id("jie_machao", "mashu")
 """界马超【马术】的全限定技能 id（M6 票 04）：§十九 L2091 与标准版逐字相同。
@@ -108,6 +112,20 @@ def _mashu_distance(state: GameState, ctx: ModifierContext, current: Any) -> Any
     if ctx.owner != ctx.subject:
         return current
     return current - 1
+
+
+def _yicong_distance(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """界公孙瓒【义从】的两条距离修正（§十九 L2213–L2214）。
+
+    ①"你计算与其他角色的距离 -1" ⇒ 持有者是**主体**时 −1（与【马术】同一条）；
+    ②"若你的体力值不大于 2，其他角色计算与你的距离 +1" ⇒ 持有者是**客体**且**当前
+    体力值**（不是体力上限）≤ 2 时 +1。两条互斥（主体与客体不可能同时是同一人）。
+    """
+    if ctx.owner == ctx.subject:
+        return current - 1
+    if ctx.owner == ctx.target and state.player(ctx.owner).hp <= 2:
+        return current + 1
+    return current
 
 
 # ---------------------------------------------------------------------------
@@ -336,4 +354,13 @@ def target_change_skill_definitions() -> tuple[SkillDef, ...]:
         _liuli_definition(LIULI),
         # 界大乔【流离】（M6 票 17）：牌面与标准版逐字相同 ⇒ 同一条钩子 / 流水线。
         _liuli_definition(JIE_LIULI),
+        # 界公孙瓒【义从】（M6 票 18）：①主体侧 -1；②客体侧在体力 ≤ 2 时 +1。
+        SkillDef(
+            skill_id=JIE_YICONG,
+            locked=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            modifiers=(Modifier(ModifierPoint.DISTANCE, _yicong_distance),),
+            requirement="①你计算与其他角色的距离 -1；②若你的体力值不大于 2，其他角色计算与你的距离 +1",
+        ),
     )
