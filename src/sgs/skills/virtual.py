@@ -86,6 +86,14 @@ class VirtualKind(IntEnum):
     DUEL = 4
     FIRE_SLASH = 5
     DISMANTLEMENT = 6
+    WINE = 7
+    """【酒】（M6 票 16 的龙胆「桃当酒」）：**尾部紧凑段**的第一个 kind。
+
+    追加段挂在 ``kind * block`` 之后，而 108 张档的 ``kind = 7`` 段起点已经
+    ``> WIRE_INT_LIMIT``（7 * 1.46e15 ≈ 1.02e16 > 2**53）。故从这里起的 kind 改用
+    :func:`_tail_segment_start` 的紧凑段：段容量只需（来源张数 + 1）× 进制的平方，
+    且整段落在**兼容段与泛化段之间的未用空隙**里——旧 id 一字不动。
+    """
 
 
 BLOCK_KIND_COUNT = 6
@@ -117,9 +125,11 @@ _KIND_BY_TYPE: dict[str, VirtualKind] = {
     "duel": VirtualKind.DUEL,
     "fire_slash": VirtualKind.FIRE_SLASH,
     "dismantlement": VirtualKind.DISMANTLEMENT,
+    "wine": VirtualKind.WINE,
 }
 """目标**牌名 id** → 命名空间；只登记本里程碑有生产者的牌（票 03 §表 / 票 04 加【决斗】；
-M5-05b 加朱雀羽扇的火【杀】产物；M6 票 03 加【奇袭】的【过河拆桥】）。雷杀当前没有
+M5-05b 加朱雀羽扇的火【杀】产物；M6 票 03 加【奇袭】的【过河拆桥】；M6 票 16 加界【龙胆】
+的【桃】当【酒】——它走尾部紧凑段，因为追加段的段起点已经越过线上上限）。雷杀当前没有
 生产者，故**不登记**——空段会白占 ``KIND_COUNT``，把 108 的来源上限从 7 压到 6 并移动
 旧泛化段。"""
 
@@ -218,7 +228,16 @@ def kind_source_ceiling(kind: int, card_count: int) -> int:
     108 张档（``base = 109``、``block ≈ 1.46e15``）下 ``DISMANTLEMENT``（kind = 6）的
     段起点 ``≈ 8.77e15``，只剩约 ``2.3e14`` 的线内空间：``L = 7`` 的 7 张来源会越过
     ``2**53``，``L = 6`` 仍在界内 ⇒ 上界 6。160 张档同样 6（与共享段相同）。
+
+    **尾部紧凑段**（M6 票 16 起，``kind >= TAIL_KIND_START``）：追加段的段起点
+    ``kind * block`` 已经超出线上上限（108 张档的 ``kind = 7`` ⇒ ``≈ 1.02e16 > 2**53``），
+    故这类 kind 改用落在兼容段与泛化段之间空隙里的紧凑段（:func:`_tail_source_ceiling`），
+    上界按同一不等式在该空隙里反推（108 / 160 档都是 2）。
     """
+    if kind >= TAIL_KIND_START:
+        base = _base(card_count)
+        _tail_segment_start(base, kind)  # 段不相交的构造期校验（越界即抛）
+        return _tail_source_ceiling(base)
     base = _base(card_count)
     shared = _source_ceiling_for_base(base)
     if kind < BLOCK_KIND_COUNT:
@@ -252,6 +271,9 @@ def virtual_card_id(
       :func:`_generalized_block`。全体 id 因此严格小于
       ``KIND_COUNT * (MAX_VIRTUAL_SOURCES + 1) * base ** MAX_VIRTUAL_SOURCES``，
       而来源上限 :data:`MAX_VIRTUAL_SOURCES` 正是按它 ``< WIRE_INT_LIMIT`` 反推的。
+    - ``kind >= TAIL_KIND_START``（M6 票 16 起）走**尾部紧凑段**：追加段的段起点已经
+      越过线上上限，故这些 kind 落在兼容段与泛化段之间的空隙里
+      （:func:`_tail_segment_start`），整段不与任何旧 id 相交。
 
     两段区间互不重叠：泛化段的起点 ``1 + 2 * block`` 大于兼容段的上界
     ``1 + base ** 2``（``block = (ceiling+1) * base**ceiling > base**2``，``ceiling >= 2``）。
@@ -273,6 +295,8 @@ def virtual_card_id(
         mixed = _fold_legacy(base=base, sources=sources)
         return -(1 + kind * base * base + mixed)
     mixed = _fold(base=base, sources=sources)
+    if kind >= TAIL_KIND_START:
+        return -(1 + _tail_segment_start(base, kind) + mixed)
     block = _generalized_block(
         base=base, source_ceiling=_source_ceiling_for_base(base)
     )
@@ -292,6 +316,64 @@ def _generalized_block(*, base: int, source_ceiling: int | None = None) -> int:
     """
     ceiling = _source_ceiling_for_base(base) if source_ceiling is None else source_ceiling
     return (ceiling + 1) * base**ceiling
+
+
+TAIL_KIND_START = int(VirtualKind.WINE)
+"""**尾部紧凑段**的起点 kind（M6 票 16 的龙胆「桃当酒」是第一个消费者）。"""
+
+TAIL_SOURCE_CEILING = 2
+"""尾部紧凑段每段的来源张数上界（实际松紧由 :func:`_tail_source_ceiling` 按进制重算）。
+
+酒 / 桃 都是**单源**转化，2 已留出余量；容量按 ``(m + 1) * base**m`` 取紧界，故整段只占
+``3 * base**2`` 个数——放进兼容段与泛化段之间的空隙里，几十亿个追加 kind 也不会撞到
+``2 * block`` 的泛化段起点。
+"""
+
+
+def _tail_offset(base: int) -> int:
+    """尾部紧凑段的第一个字节偏移：紧接**兼容段**（``kind 0..1``）之后。
+
+    兼容段的 id 落在 ``[1, 1 + LEGACY_KIND_COUNT * base**2)``；泛化段从
+    ``1 + LEGACY_KIND_COUNT * block`` 起算。两者之间是一条从未被使用的空隙（兼容段的段
+    步长只有 ``base**2``），尾部段就住这里——旧 id 因此一字不动。
+    """
+    return LEGACY_KIND_COUNT * base * base
+
+
+def _tail_source_ceiling(base: int) -> int:
+    """尾部紧凑段在当前进制下的来源张数上界（按线上整数上限反推，与共享段同一不等式）。"""
+    offset = _tail_offset(base)
+    for sources in range(TAIL_SOURCE_CEILING, 0, -1):
+        if offset + (sources + 1) * base**sources < WIRE_INT_LIMIT:
+            return sources
+    raise VirtualSourceError(
+        f"virtual_card_id: 尾部紧凑段在 base={base} 下连一张来源都撑不住"
+        f"（越过线上整数上限 {WIRE_INT_LIMIT}）"
+    )
+
+
+def _tail_block(base: int) -> int:
+    """尾部紧凑段一段的容量：``(m + 1) * base**m``（``m`` = 该进制的尾部来源上界）。"""
+    ceiling = _tail_source_ceiling(base)
+    return (ceiling + 1) * base**ceiling
+
+
+def _tail_segment_start(base: int, kind: int) -> int:
+    """尾部 kind 的段起点（``_fold`` 混合值之前的绝对偏移）。
+
+    整段必须仍落在兼容段与泛化段之间的空隙里：``start + block <= 2 * block``（泛化段从
+    ``1 + 2 * block`` 起算）。越界说明用户代码登记了一个荒唐的 ``VirtualKind`` 值，在
+    构造期抛——不静默产出撞 id 的牌。
+    """
+    block = _tail_block(base)
+    start = _tail_offset(base) + (kind - TAIL_KIND_START) * block
+    generalized = LEGACY_KIND_COUNT * _generalized_block(base=base)
+    if start + block > generalized:
+        raise VirtualSourceError(
+            f"virtual_card_id: kind={kind} 的尾部段 [{start}, {start + block}) 越出"
+            f"兼容段与泛化段之间的空隙（上限 {generalized}）"
+        )
+    return start
 
 
 def _fold(*, base: int, sources: tuple[int, ...]) -> int:

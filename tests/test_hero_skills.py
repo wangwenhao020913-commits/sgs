@@ -257,7 +257,7 @@ def test_lord_skill_ids_are_derived_from_the_skill_definitions(monkeypatch):
     """注入一条主公技定义 ⇒ 派生集合**非空且含它**（手抄空集过不了这条）。
 
     票 09 起真实 ``CATALOG`` 已有三条主公技（护驾 / 激将 / 救援），M6 票 14 又加界【护驾】；
-    注入点仍是同一条派生路径（``SkillDef.skill_type``）。
+    M6 票 16 再加界【激将】；注入点仍是同一条派生路径（``SkillDef.skill_type``）。
     """
     _install(monkeypatch, _hero_def())
 
@@ -266,6 +266,7 @@ def test_lord_skill_ids_are_derived_from_the_skill_definitions(monkeypatch):
             HUJIA,
             "hero.jie_caocao.hujia",
             "hero.liubei.jijiang",
+            "hero.jie_liubei.jijiang",
             "hero.sunquan.jiuyuan",
         }
     )

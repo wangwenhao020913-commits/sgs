@@ -654,13 +654,27 @@ def hero_card_zone_key(owner: int, skill_id: str) -> str:
 # per-instance 状态的**位布局**（票 07 §6 的键 + M6 票 05 的"整局已用"位）
 # ---------------------------------------------------------------------------
 
-_PHASE_STATE_MASK = 0b111
+_GIVEN_TO_SHIFT = 6
+"""「本阶段已给过的目标座位」位的起始位（M6 票 16；位 6..13 = 座位 0..7）。
+
+低 6 位已被 A 族三个阶段位 + 限定技整局位 + 觉醒位 + 每回合已用位占满，故从第 6 位起。
+内建上限 8 座（``RuleConfig.player_count`` 的闭集为 2/4/5/6/7/8），与这里一致。
+"""
+
+_GIVEN_TO_MASK = 0xFF << _GIVEN_TO_SHIFT
+"""界刘备【仁德】的"本阶段已给过这些座位"位段（座位号 = 位序号 - ``_GIVEN_TO_SHIFT``）。"""
+
+_PHASE_STATE_MASK = 0b111 | _GIVEN_TO_MASK
 """``skill_state`` 里属于**本出牌阶段**的位（A 族的 ``_USED`` / ``_RECOVERED`` /
-``_GAVE_ANY``，见 :mod:`sgs.skills.active`）。
+``_GAVE_ANY`` + 界刘备【仁德】的目标座位位段，见 :mod:`sgs.skills.active`）。
 
 :func:`reset_phase_skill_state` 只清这一掩码里的位：M6 票 05 起 ``skill_state`` 还有
 **跨阶段**的位（限定技的"整局已用"），整段 ``clear()`` 会让限定技复活。
-``tests/test_hero_active.py` 有一条机械检查钉住"掩码 == A 族三个阶段位的并集"。
+``tests/test_hero_active.py` 有一条机械检查钉住"掩码 == 上述两段位的并集"。
+
+M6 票 16 起同一个掩码还含**界刘备【仁德】的"本阶段已给过的目标座位"**位
+（:data:`_GIVEN_TO_MASK`）：它同样是"本出牌阶段"的作用域——每位角色在本阶段只能被
+仁德指定一次，下个出牌阶段重新可给。
 """
 
 _LIMITED_USED = 0b1000

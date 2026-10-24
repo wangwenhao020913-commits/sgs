@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -79,6 +79,7 @@ from sgs.skills import (
     dispatch_seam,
     dispatch_timing,
     conversion_preactivations,
+    flow_for,
     hero_card_zone_key,
     is_transformed_action,
     move_after_providers,
@@ -279,6 +280,24 @@ class Outcome(BaseModel):
     reason: str
 
 
+def _card_from_hand(state: GameState, source: int, card: CardRef) -> bool:
+    """这张使用 / 打出的牌此刻是不是**手牌**（M6 票 16 的界【涯角】判据）。
+
+    必须在牌离开手牌**之前**调用（``start_use`` / ``play_card`` 建帧时）：
+    - 实体牌：它在来源座位的手牌区里；
+    - 转化牌：【涯角】牌面写的是"使用或打出**手牌**"，单源 / 多源转化的来源牌只要有一张
+      在手牌区就算（【丈八蛇矛】是两张手牌）；
+    - 纯虚拟牌：没有来源实体牌（【八卦阵】的视为【闪】）⇒ 不是手牌。
+
+    结果写进 USE / PLAY 帧的 ``from_hand``（帧私有载荷、不进记录流），故钩子仍按统一的
+    ``(host, frame)`` 面读它，引擎不把"哪条技能读它"写死在这里。
+    """
+    if card.is_virtual:
+        hand = state.player(source).hand
+        return any(card_id in hand for card_id in card.virtual_sources)
+    return card.card_id in state.player(source).hand
+
+
 def _child_payload(
     kind: FrameKind,
     parent_data: dict[str, Any],
@@ -355,6 +374,25 @@ def _raw_text(response: object) -> str:
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except (TypeError, ValueError):
         return repr(response)
+
+
+def _activation_payload(
+    activation: Mapping[str, tuple[Any, ...]], skill_id: str, timing: Timing | None
+) -> dict[str, Any]:
+    """复合动作的帧私有载荷：``(picks, choices)`` + 归属。
+
+    归属同时带 **技能 id**（给记录 / 调试）与**流水线名**（给
+    :func:`~sgs.skills.flow._activation_belongs`）。后者是必需的：界版技能的流水线名带
+    ``jie_`` 前缀（``jie_rende`` / ``jie_tuxi``），与技能 id 的短名（``rende`` / ``tuxi``）
+    不再相等；只按短名判归属会让界版的**复合动作不被摊回**、改去逐步重问（M6 票 16
+    的界【仁德】第一次撞到）。流水线名在**提交那一刻**按同一份登记表解析，与执行器随后
+    读到的是同一个对象。
+    """
+    payload: dict[str, Any] = {**activation, "skill_id": skill_id}
+    flow = flow_for(skill_id, timing)
+    if flow is not None:
+        payload["flow"] = flow.name
+    return payload
 
 
 class Engine:
@@ -1144,6 +1182,7 @@ class Engine:
                 else order_targets(self.state, tuple(targets))
             ),
             "use_timing": use_timing,
+            "from_hand": _card_from_hand(self.state, source, card),
         }
         if deal_bonus:
             data["deal_bonus"] = deal_bonus
@@ -1176,7 +1215,12 @@ class Engine:
         self._note_play_phase_slash(card, source)
         return self.push_frame(
             FrameKind.PLAY,
-            {"card": card, "source": source, "targets": ()},
+            {
+                "card": card,
+                "source": source,
+                "targets": (),
+                "from_hand": _card_from_hand(self.state, source, card),
+            },
             timing=timing,
         )
 
@@ -1230,7 +1274,9 @@ class Engine:
         activation = self._take_structured_activation(action)
         if activation is not None:
             # 归属随载荷一起走（W4-fix-2 的跨技能泄漏修复：见 `flow._activation_belongs`）。
-            data["activation"] = {**activation, "skill_id": action.skill_id}
+            data["activation"] = _activation_payload(
+                activation, action.skill_id, None
+            )
         return data
 
     def _take_structured_activation(
@@ -1881,7 +1927,9 @@ class Engine:
                 # W4-1：复合动作的 picks 是**实体牌 id**，不是面内位置；原样交给
                 # ``run_flow`` 摊回逐步答案。W4-fix-2：归属随载荷一起走——同一帧上后续
                 # 别的技能的流水线不得读它（`flow._activation_belongs`）。
-                frame.data["activation"] = {**activation, "skill_id": instance.skill_id}
+                frame.data["activation"] = _activation_payload(
+                    activation, instance.skill_id, timing
+                )
         answers[answer_key] = action
         return action
 

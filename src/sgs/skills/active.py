@@ -59,6 +59,7 @@ from sgs.effects import (
     ModifierContext,
     ModifierPoint,
     behavior_for,
+    check_count,
     check_targets,
     is_slash,
     place_on_deck,
@@ -69,6 +70,7 @@ from sgs.state import (
     FrameKind,
     GameState,
     MoveReason,
+    Pass,
     SelectionSpec,
     Slot,
     Zone,
@@ -79,6 +81,7 @@ from sgs.timing import Timing
 from .catalog import (
     HeroSkillDecl,
     SkillDef,
+    _GIVEN_TO_SHIFT,
     _move_by_source,
     instance_key,
     resolve_instances,
@@ -444,6 +447,238 @@ RENDE_FLOW = SkillFlow(
     once_per_phase=False,
 )
 """【仁德】的两步流水线：给任意张手牌 → 一名其他角色（**无出牌阶段限一次**，票 05）。"""
+
+
+# ---------------------------------------------------------------------------
+# 界刘备【仁德】（M6 票 16）：出牌阶段**每名角色限一次**；本阶段第二张换一次"视为使用
+# 一张基本牌"
+#
+# §十九 L2059–L2061：
+#
+#     仁德：出牌阶段每名角色限一次，你可以交给一名其他角色任意张手牌，若你此次给出了
+#           本阶段的第二张"仁德"牌，你可以视为使用一张基本牌。
+#
+# 与标准【仁德】（票 05）是**两处**差异，故不复用标准版的流水线（收益不同、目标限次
+# 也不同）；共用的是给牌原语 :func:`_give` 与"本阶段累计给到 2"的判据形状：
+#
+# - **每名角色限一次**：每位其他角色本阶段只能被你仁德一次。座位位段住 ``skill_state``
+#   的 :data:`~sgs.skills.catalog._GIVEN_TO_MASK`（作用域 = 本出牌阶段，与 A 族阶段位
+#   同一个复位点），故不需要新的状态字段；
+# - **本阶段第二张 ⇒ 视为使用一张基本牌**：不再回复体力（标准版才是回复）。累计口径与
+#   标准版一致（"首次达到 2"：给 1 张再给 1 张、或一次给 ≥2 张），每阶段至多一次；
+# - **"一张基本牌"的牌型 / 目标限制**（本票裁定，`06`（§5「程序化约定与偏离一手」））：只有**此刻走得通完整使用
+#   规则**的基本牌才进候选——【杀】（次数未满且有合法目标）、【桃】（仅自己且已受伤）、
+#   【酒】（仅自己且本回合未用过）；【闪】不是可在出牌阶段"使用"的牌，故不在列。牌型
+#   清单用既有的 :func:`~sgs.effects.check_count` / :func:`~sgs.effects.check_targets`
+#   现算，与真牌候选同一条判据，不在技能里另抄一份规则；产物牌名在本档牌堆里没有实体牌
+#   时（108 档的【酒】）不进候选——不凭空造一张牌堆外的牌。
+# ---------------------------------------------------------------------------
+
+JIE_RENDE = hero_skill_id("jie_liubei", "rende")
+"""界刘备【仁德】的全限定技能 id（§十九 L2059–L2061）。"""
+
+JIE_RENDE_BASIC_SLASH = "basic_slash"
+JIE_RENDE_BASIC_PEACH = "basic_peach"
+JIE_RENDE_BASIC_WINE = "basic_wine"
+"""界【仁德】"视为使用一张基本牌"的选项 id（闭集；不用裸牌名，避免与别的选项表撞键）。"""
+
+JIE_RENDE_BASIC_OPTIONS: tuple[str, ...] = (
+    JIE_RENDE_BASIC_SLASH,
+    JIE_RENDE_BASIC_PEACH,
+    JIE_RENDE_BASIC_WINE,
+)
+"""询问顺序：杀 → 桃 → 酒（与牌面"基本牌"的常见用法序一致；届时只保留下得去的）。"""
+
+_JIE_RENDE_BASIC_TYPES: dict[str, str] = {
+    JIE_RENDE_BASIC_SLASH: "slash",
+    JIE_RENDE_BASIC_PEACH: "peach",
+    JIE_RENDE_BASIC_WINE: "wine",
+}
+"""选项 id → 产物牌名 id。"""
+
+_JIE_RENDE_ASK_BASIC = "hero.jie_liubei.rende.basic"
+"""手写询问位置：界【仁德】"视为使用哪一张基本牌"的 ``ask_option`` 标识。"""
+
+_JIE_RENDE_ASK_TARGET = "hero.jie_liubei.rende.target"
+"""手写询问位置：视为使用【杀】时的目标座位（``seat:N`` 选项）。"""
+
+_JIE_RENDE_GIVEN_KEY = "jie_rende_given"
+"""帧私有：这一次发动的手牌已经交给目标（续跑不重交）。"""
+
+_JIE_RENDE_BONUS_KEY = "jie_rende_bonus"
+"""帧私有：这次发动是否触发了"本阶段第二张"（续跑不重算）。"""
+
+_JIE_RENDE_OPTION_KEY = "jie_rende_option"
+"""帧私有：选中的基本牌选项（空串 = 放弃；续跑不重问）。"""
+
+_JIE_RENDE_TARGET_KEY = "jie_rende_target"
+"""帧私有：视为使用【杀】时选中的目标座位。"""
+
+_JIE_RENDE_USED_KEY = "jie_rende_used"
+"""帧私有：视为使用已经发起（续跑不重复 ``start_use``）。"""
+
+
+def _has_entity_of_type(state: GameState, type_id: str) -> bool:
+    """本档牌堆里有没有这种牌名的**实体牌**（界【仁德】的基本牌清单用；108 档没有【酒】）。"""
+    return any(card.type == type_id for card in state.cards)
+
+
+def _gave_to(state: GameState, owner: int, skill_id: str, seat: int) -> bool:
+    """``seat`` 本出牌阶段是否已经收过这条【仁德】的牌（座位位段，见
+    :data:`~sgs.skills.catalog._GIVEN_TO_MASK`）。"""
+    key = _skill_key(state, owner, skill_id)
+    if key is None:
+        return True  # 实例不在 ⇒ 记不了"已给过" ⇒ fail-closed，不产出这个目标
+    return bool(state.skill_state.get(key, 0) & (1 << (_GIVEN_TO_SHIFT + seat)))
+
+
+def _mark_gave_to(state: GameState, owner: int, skill_id: str, seat: int) -> None:
+    """记下"本阶段已经给过 ``seat``"（位段随出牌阶段复位，见
+    :data:`~sgs.skills.catalog._GIVEN_TO_MASK`）。"""
+    key = _skill_key(state, owner, skill_id)
+    if key is not None and 0 <= seat < 8:
+        state.skill_state[key] = state.skill_state.get(key, 0) | (
+            1 << (_GIVEN_TO_SHIFT + seat)
+        )
+
+
+def _jie_rende_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """界【仁德】的可选目标：**本阶段还没收过**的其他存活角色（座位序）。"""
+    del frame, chosen
+    return tuple(
+        seat
+        for seat in _other_alive_seats(state, owner)
+        if not _gave_to(state, owner, JIE_RENDE, seat)
+    )
+
+
+def _jie_rende_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    if not state.player(ctx.subject).hand:
+        return current
+    if not _jie_rende_targets(state, None, ctx.subject, ()):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _jie_rende_basic_options(state: GameState, owner: int) -> tuple[str, ...]:
+    """此刻"视为使用"能用的基本牌选项（本票裁定；判据与真牌候选同源）。
+
+    逐项用 :func:`~sgs.effects.check_count`（使用次数）与
+    :func:`~sgs.effects.check_targets`（目标池与目标规则：桃仅自己且已受伤、酒仅自己、
+    杀走距离与"不能成为目标"链）现算；产物牌名在本档牌堆里没有实体牌时跳过。
+    """
+    options: list[str] = []
+    for option in JIE_RENDE_BASIC_OPTIONS:
+        type_id = _JIE_RENDE_BASIC_TYPES[option]
+        if not _has_entity_of_type(state, type_id):
+            continue
+        card = pure_virtual_card(state, type_id)
+        if check_count(state, owner, card):
+            continue
+        if not check_targets(state, owner, card):
+            continue
+        options.append(option)
+    return tuple(options)
+
+
+def _jie_rende_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：交牌 + 记目标 +（本阶段第二张时）可视为使用一张基本牌。
+
+    "然后"的严格次序：先给牌（可能内联派发"失去牌后"而挂起），再按累计张数决定是否
+    触发基本牌，最后才问牌型 / 目标并 ``start_use``。每段一个帧私有游标：重入既不重交、
+    也不重问、更不重复使用。
+    """
+    owner = frame.data["source"]
+    skill_id = frame.data["skill_id"]
+    if not frame.data.get(_JIE_RENDE_GIVEN_KEY):
+        cards = answers["card"]
+        seats = answers["seat"]
+        assert isinstance(cards, tuple) and isinstance(seats, tuple)
+        target = int(seats[0])
+        if _give(host, frame, owner, target, cards, key="jie_rende:cost") == "stay":
+            return "stay"
+        frame.data[_JIE_RENDE_GIVEN_KEY] = True
+        _mark_gave_to(host.state, owner, skill_id, target)
+        flags = _phase_flags(host.state, owner, skill_id)
+        _mark_phase(host.state, owner, skill_id, _GAVE_ANY)
+        bonus = not (flags & _RECOVERED) and (
+            len(cards) >= 2 or bool(flags & _GAVE_ANY)
+        )
+        if bonus:
+            _mark_phase(host.state, owner, skill_id, _RECOVERED)
+        frame.data[_JIE_RENDE_BONUS_KEY] = bonus
+    if not frame.data.get(_JIE_RENDE_BONUS_KEY) or frame.data.get(_JIE_RENDE_USED_KEY):
+        return None
+    option = frame.data.get(_JIE_RENDE_OPTION_KEY)
+    if option is None:
+        options = _jie_rende_basic_options(host.state, owner)
+        if not options:
+            frame.data[_JIE_RENDE_USED_KEY] = True
+            return None
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.PHASE_PLAY_IDLE,
+            skill_id=_JIE_RENDE_ASK_BASIC,
+            options=options,
+            optional=True,
+        )
+        if host.suspended(answer):
+            return "stay"
+        option = "" if isinstance(answer, Pass) else str(answer.choice)
+        frame.data[_JIE_RENDE_OPTION_KEY] = option
+    if not option:
+        frame.data[_JIE_RENDE_USED_KEY] = True
+        return None
+    type_id = _JIE_RENDE_BASIC_TYPES[option]
+    card = pure_virtual_card(host.state, type_id)
+    targets: tuple[int, ...]
+    if type_id == "slash":
+        target_seat = frame.data.get(_JIE_RENDE_TARGET_KEY)
+        if target_seat is None:
+            pool = check_targets(host.state, owner, card)
+            if not pool:
+                frame.data[_JIE_RENDE_USED_KEY] = True
+                return None
+            answer = host.ask_option(
+                frame,
+                owner,
+                Timing.PHASE_PLAY_IDLE,
+                skill_id=_JIE_RENDE_ASK_TARGET,
+                options=tuple(f"seat:{seat}" for seat in pool),
+                optional=False,
+            )
+            if host.suspended(answer):
+                return "stay"
+            target_seat = int(str(answer.choice).split(":", 1)[1])
+            frame.data[_JIE_RENDE_TARGET_KEY] = target_seat
+        targets = (int(target_seat),)
+    else:
+        targets = (owner,)
+    frame.data[_JIE_RENDE_USED_KEY] = True
+    host.start_use(
+        card,
+        source=owner,
+        targets=targets,
+        use_timing=Timing.PHASE_PLAY_IDLE,
+    )
+    return None
+
+
+JIE_RENDE_FLOW = SkillFlow(
+    name="jie_rende",
+    steps=(
+        PickCards(zones=(Zone.HAND,), lo=1, hi=None, key="card"),
+        PickSeats(lo=1, hi=1, pool=_jie_rende_targets, key="seat"),
+    ),
+    effect=_jie_rende_effect,
+    once_per_phase=False,
+)
+"""界【仁德】的两步流水线：给任意张手牌 → **本阶段还没收过**的一名其他角色（可再发动）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -1562,6 +1797,19 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     ActiveSkill("sunquan", "zhiheng", _zhiheng_offers, flow=ZHIHENG_FLOW, preactivated=True),
     # 刘备【仁德】：给一名其他角色任意张手牌；本阶段首次给到第 2 张回复 1 点（规则 976）。
     ActiveSkill("liubei", "rende", _rende_offers, flow=RENDE_FLOW, preactivated=True),
+    # 界刘备【仁德】（M6 票 16）：每名角色限一次；本阶段第二张换一次"视为使用一张基本牌"
+    # （§十九 L2059–L2061）。骨架候选恒一条，给哪几张 / 给谁由下面两步清单问。
+    ActiveSkill(
+        "jie_liubei",
+        "rende",
+        _jie_rende_offers,
+        flow=JIE_RENDE_FLOW,
+        preactivated=True,
+        requirement=(
+            "出牌阶段每名角色限一次：交给一名其他角色任意张手牌；若你此次给出了本阶段的"
+            "第二张「仁德」牌，可以视为使用一张基本牌"
+        ),
+    ),
     # 周瑜【反间】：令一名其他角色选花色 → 获得并展示你的一张手牌 → 花色不同则受伤（规则 1017）。
     # W4-2：只把**第一段**（选谁）放进预发动；猜花色 / 挑牌仍由目标逐步应答。
     ActiveSkill("zhouyu", "fanjian", _fanjian_offers, flow=FANJIAN_FLOW, preactivated=True),

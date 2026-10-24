@@ -810,6 +810,16 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         # 停=保住现状。判据是"红色才停"，故每轮继续恒为正（不做概率模型）。
         "repeat": 2.0,
         "stop": 0.0,
+        # 界刘备【仁德】（M6 票 16）：本阶段第二张换来的"视为使用一张基本牌"。
+        # 【桃】最稳（回血），【杀】次之（要目标），【酒】只有在能补刀时才值（保守给低）。
+        "basic_slash": 2.0,
+        "basic_peach": 3.5,
+        "basic_wine": 1.0,
+        # 界赵云【涯角】（M6 票 16）：类别相同 → 把亮出的牌交给一名角色（白赚一张）；
+        # 类别不同 → 弃对手一张（拆牌的收益）或放弃弃牌。
+        "yajiao_give": 1.5,
+        "yajiao_top": 0.0,
+        "yajiao_discard": 1.5,
     }
 )
 
@@ -1476,6 +1486,34 @@ def _score_rende(query: Query, action: Action, view: PlayerView) -> float:
     return -_skeleton_cost(view, 1)
 
 
+_JIE_RENDE_BASIC_VALUE = 6.0
+"""界【仁德】"视为使用一张基本牌"对 AI 的估值。
+
+一张免费的基本牌 ≈ 一次额外的进攻 / 回复（【桃】/【杀】都在 3.5–6 的价值区间），且它不占
+手牌、不另付代价；取略高于"一张普通牌"的值，好让"给两张换一次使用"在 AI 的同一问里
+排到"先出一张同价牌"之前——否则界【仁德】这个**双收益**机会会被逐张出牌挤掉。
+"""
+
+
+def _score_jie_rende(query: Query, action: Action, view: PlayerView) -> float:
+    """界【仁德】：给牌是成本；本阶段第二张换一次"视为使用一张基本牌"。
+
+    与标准【仁德】的差别是**收益不同**（不回复、改为额外使用一张基本牌）；AI 也无法从
+    公开面读到"本阶段已经给过几张"，故按下游选牌步的同一模型估：给 ≥2 张就按换到一张
+    基本牌计。给 1 张只在"下一张就凑满 2"时才有收益，AI 不建模这一层（保守）。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query
+    if action.picks:
+        bonus = _JIE_RENDE_BASIC_VALUE if len(action.picks) >= 2 else 0.0
+        return bonus - _picked_value(view, action)
+    if not view.self_hand:
+        return 0.0
+    if len(view.self_hand) >= 2:
+        return _JIE_RENDE_BASIC_VALUE - _skeleton_cost(view, 2)
+    return -_skeleton_cost(view, 1)
+
+
 def _score_zhiheng(query: Query, action: Action, view: PlayerView) -> float:
     """【制衡】：弃任意张摸等量——净牌数不变、换质量；弃【桃】/【闪】按价值扣分。
 
@@ -1704,6 +1742,27 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.jie_lidian.wangxi": (
         _constant(2.5),
         "造成 / 受到 1 点伤害后摸两张、交出其中一张：净赚一张且能补队友",
+    ),
+    # M6 票 16：界·蜀（刘备 / 赵云 / 诸葛亮）
+    "hero.jie_liubei.rende": (
+        _score_jie_rende,
+        "给牌是成本；本阶段第二张换一次「视为使用一张基本牌」（AI 按给两张估）",
+    ),
+    "hero.jie_liubei.jijiang": (
+        _constant(_RESPOND_VALUE),
+        "主公技：①求助窗口视为使用 / 打出【杀】；②盟友回合外打出【杀】时令主公摸一张",
+    ),
+    "hero.jie_zhaoyun.longdan": (
+        _constant(2.0),
+        "【杀】⇄【闪】与 酒⇄桃 四向互转：攻防与自救都多一条路径",
+    ),
+    "hero.jie_zhaoyun.yajiao": (
+        _constant(2.5),
+        "回合外使用 / 打出手牌时亮一张：类别相同则白拿一张，否则可拆对手一张",
+    ),
+    "hero.jie_zhugeliang.guanxing": (
+        _constant(3.0),
+        "准备阶段看牌堆顶五张（存活 < 4 时三张）；全置底还能在结束阶段再看一次",
     ),
     # 装备技（W4-4）：会问"是否发动"的 5 条非锁定装备**各给一个正分常量**。
     # 缺省 ``_UNKNOWN_SKILL_VALUE = -1.0 < Pass(0)`` ⇒ 不入表就永不发动（雌雄无法复现

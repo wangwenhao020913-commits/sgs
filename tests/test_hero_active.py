@@ -431,13 +431,20 @@ def test_the_phase_reset_mask_covers_every_phase_bit_and_nothing_else():
     phase_bits = (
         active_module._USED | active_module._RECOVERED | active_module._GAVE_ANY
     )
+    # M6 票 16：界刘备【仁德】的"本阶段已给过的目标座位"位段也是阶段作用域。
+    given_bits = catalog_module._GIVEN_TO_MASK
+    assert given_bits == 0xFF << catalog_module._GIVEN_TO_SHIFT
 
-    assert catalog_module._PHASE_STATE_MASK == phase_bits
+    assert catalog_module._PHASE_STATE_MASK == phase_bits | given_bits
     assert not (catalog_module._LIMITED_USED & phase_bits), "整局位不得与阶段位重叠"
     assert not (catalog_module._AWAKENED & phase_bits), "觉醒位（票 06）也不得与阶段位重叠"
     assert not (catalog_module._AWAKENED & catalog_module._LIMITED_USED), (
         "觉醒位与限定技已用位各占一位、互不重叠"
     )
+    assert not (given_bits & phase_bits), "座位位段与 A 族阶段位不重叠"
+    assert not (given_bits & catalog_module._LIMITED_USED), "座位位段与限定技整局位不重叠"
+    assert not (given_bits & catalog_module._AWAKENED), "座位位段与觉醒位不重叠"
+    assert not (given_bits & catalog_module._TURN_USED), "座位位段与每回合已用位不重叠"
 
     state = build_state(
         pack=PACK,

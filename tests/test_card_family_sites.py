@@ -277,6 +277,18 @@ ALLOWLIST: dict[Site, Rule] = {
         'type_id="slash",',
     ): Rule(FAMILY, 1, "PickProvide 的面同样经 satisfies_required 过滤（与 _green_dragon_plan 同源）"),
     # ---- skills/heroes.py：转化产物 ----
+    # ---- skills/active.py：界刘备【仁德】的"视为使用一张基本牌"（M6 票 16）----
+    (
+        "src/sgs/skills/active.py",
+        "_JIE_RENDE_BASIC_TYPES",
+        'JIE_RENDE_BASIC_SLASH: "slash",',
+    ): Rule(NORMAL, 1, "界【仁德】视为使用的【杀】**产物**是普通杀牌型——有意 normal-only"),
+    (
+        "src/sgs/skills/active.py",
+        "_jie_rende_effect",
+        'if type_id == "slash":',
+    ): Rule(NORMAL, 1, "按产物牌型决定要不要选目标（普通杀需要目标；桃/酒只对自己）"),
+    # ---- skills/heroes.py：转化产物 ----
     (
         "src/sgs/skills/heroes.py",
         "CONVERSION_SKILLS",
@@ -297,6 +309,22 @@ ALLOWLIST: dict[Site, Rule] = {
         "_lord_request_definition",
         'requirement = {"dodge": "打出【闪】", "slash": "打出【杀】"}[skill.required]',
     ): Rule(FAMILY, 1, "按 required 取文案（请求牌名，不筛牌面；护驾 / 激将各一档）"),
+    # ---- skills/lord_request.py：界【激将】①②（M6 票 16）----
+    (
+        "src/sgs/skills/lord_request.py",
+        "JIE_JIJIANG_LORD",
+        'required="slash",',
+    ): Rule(FAMILY, 1, "界【激将】①的请求牌名是杀族；候选 / 响应成员判定走 satisfies_required"),
+    (
+        "src/sgs/skills/lord_request.py",
+        "JIE_JIJIANG_ECHO",
+        'card_type="slash",',
+    ): Rule(FAMILY, 1, "界【激将】②的牌面判据走 satisfies_required（火 / 雷 / 转化杀同族）"),
+    (
+        "src/sgs/skills/lord_request.py",
+        "_lord_echo_requirement",
+        '"slash": "当你需要使用或打出【杀】时，你可以令其他蜀势力角色依次选择是否打出一张【杀】",',
+    ): Rule(FAMILY, 1, "按 required 取 ① 的文案（请求牌名，不筛牌面）"),
     # ---- skills/response_window.py / target_pool.py：声明闭集 ----
     (
         "src/sgs/skills/response_window.py",
@@ -307,7 +335,11 @@ ALLOWLIST: dict[Site, Rule] = {
         "src/sgs/skills/target_pool.py",
         "TARGET_POOL_SKILLS",
         'card_types=("slash", "duel"),',
-    ): Rule(FAMILY, 1, "空城的牌名闭集同样走 satisfies_required（火 / 雷杀也进不了目标池）"),
+    ): Rule(
+        FAMILY,
+        2,
+        "空城（标准 / 界）的牌名闭集同样走 satisfies_required（火 / 雷杀也进不了目标池）",
+    ),
     # ---- skills/awakening.py：界徐庶【诛害】（M6 票 06） ----
     (
         "src/sgs/skills/awakening.py",

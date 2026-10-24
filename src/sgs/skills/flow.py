@@ -1685,10 +1685,16 @@ def _activation_belongs(activation: Mapping[str, object], frame: Any, flow: Skil
     「被抵消时」接缝（青龙 / 贯石斧）。没有归属判据时，后一条流水线会拿到前一条技能的
     载荷去索引自己的选取面（牌 id 不在面里 ⇒ ``KeyError``）。
     """
+    recorded_flow = activation.get("flow")
+    if recorded_flow is not None:
+        # 提交时由引擎按登记表解析出的**流水线名**：界版的流水线名带 ``jie_`` 前缀，
+        # 与技能 id 的短名不相等（M6 票 16 的界【仁德】/界【突袭】），故优先读它。
+        return str(recorded_flow) == flow.name
     recorded = activation.get("skill_id", frame.data.get("skill_id"))
     if recorded is None:
         return True  # 旧形态没有归属字段：保持"谁读谁用"的原行为，不 fail-closed
-    return str(recorded).rsplit(".", 1)[-1] == flow.name
+    short = str(recorded).rsplit(".", 1)[-1]
+    return short == flow.name or flow.name.endswith(f"_{short}")
 
 
 def run_flow(

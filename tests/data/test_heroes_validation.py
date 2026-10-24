@@ -433,6 +433,9 @@ def test_the_standard_table_stays_the_25_and_the_jie_table_is_loaded_separately(
         "jie_xuchu",
         "jie_guojia",
         "jie_lidian",
+        "jie_liubei",
+        "jie_zhaoyun",
+        "jie_zhugeliang",
     ]
     assert {hero.id for hero in standard.heroes}.isdisjoint(
         {hero.id for hero in jie.heroes}
@@ -643,6 +646,8 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     # 真名与标准版同名 ⇒ 追加它们只让**版本池** 37 → 41，真名池仍是 26。
     # M6 票 15：界·魏 B（郭嘉 / 李典）。界郭嘉真名同标准版（版本 41 → 42，真名仍 26）；
     # 界李典是**只有界版**的新真名（版本 → 43、真名 → 27，§十九 L2050–L2057）。
+    # M6 票 16：界刘备 / 界赵云 / 界诸葛亮三名的真名都与标准版同名（版本 43 → 46、
+    # 真名仍 27，§十九 L2058–L2102）。
     caocao = jie.by_id("jie_caocao")
     simayi = jie.by_id("jie_simayi")
     zhangliao = jie.by_id("jie_zhangliao")
@@ -722,6 +727,56 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     )
     assert [skill.id for skill in lidian.skills] == ["xunxun", "wangxi"]
     assert [skill.skill_type for skill in lidian.skills] == [
+        SkillType.NORMAL,
+        SkillType.NORMAL,
+    ]
+
+    # M6 票 16：界刘备（§十九 L2058–L2066）、界赵云（L2082–L2089）、界诸葛亮（L2097–L2102）。
+    # 三名真名都与标准版同名；【激将】是主公技，其余五条都是普通技。
+    liubei = jie.by_id("jie_liubei")
+    zhaoyun = jie.by_id("jie_zhaoyun")
+    zhugeliang = jie.by_id("jie_zhugeliang")
+    assert liubei is not None and zhaoyun is not None and zhugeliang is not None
+    assert (liubei.name, liubei.true_name, liubei.version) == ("界刘备", "刘备", "jie-ol")
+    assert (liubei.kingdom, liubei.gender, liubei.hp_max) == (
+        Kingdom.SHU,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in liubei.skills] == ["rende", "jijiang"]
+    assert [skill.skill_type for skill in liubei.skills] == [
+        SkillType.NORMAL,
+        SkillType.LORD,
+    ], "【激将】是主公技（§十九 L2062–L2065）"
+
+    assert (zhaoyun.name, zhaoyun.true_name, zhaoyun.version) == (
+        "界赵云",
+        "赵云",
+        "jie-ol",
+    )
+    assert (zhaoyun.kingdom, zhaoyun.gender, zhaoyun.hp_max) == (
+        Kingdom.SHU,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in zhaoyun.skills] == ["longdan", "yajiao"]
+    assert [skill.skill_type for skill in zhaoyun.skills] == [
+        SkillType.NORMAL,
+        SkillType.NORMAL,
+    ]
+
+    assert (zhugeliang.name, zhugeliang.true_name, zhugeliang.version) == (
+        "界诸葛亮",
+        "诸葛亮",
+        "jie-ol",
+    )
+    assert (zhugeliang.kingdom, zhugeliang.gender, zhugeliang.hp_max) == (
+        Kingdom.SHU,
+        Gender.MALE,
+        3,
+    )
+    assert [skill.id for skill in zhugeliang.skills] == ["guanxing", "kongcheng"]
+    assert [skill.skill_type for skill in zhugeliang.skills] == [
         SkillType.NORMAL,
         SkillType.NORMAL,
     ]
@@ -840,6 +895,18 @@ def test_hero_skill_ids_lookup_covers_the_jie_supplement():
     assert hero_skill_ids("jie_luxun") == (
         "hero.jie_luxun.qianxun",
         "hero.jie_luxun.lianying",
+    )
+    assert hero_skill_ids("jie_liubei") == (
+        "hero.jie_liubei.rende",
+        "hero.jie_liubei.jijiang",
+    )
+    assert hero_skill_ids("jie_zhaoyun") == (
+        "hero.jie_zhaoyun.longdan",
+        "hero.jie_zhaoyun.yajiao",
+    )
+    assert hero_skill_ids("jie_zhugeliang") == (
+        "hero.jie_zhugeliang.guanxing",
+        "hero.jie_zhugeliang.kongcheng",
     )
     assert hero_skill_ids("guanyu") == ("hero.guanyu.wusheng",), "标准版查法一字不变"
 

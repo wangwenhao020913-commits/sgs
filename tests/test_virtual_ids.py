@@ -29,6 +29,7 @@ from sgs.skills import (
 from sgs.skills.virtual import (
     BLOCK_KIND_COUNT,
     LEGACY_KIND_COUNT,
+    TAIL_KIND_START,
     WIRE_INT_LIMIT,
     virtual_candidates,
 )
@@ -49,6 +50,9 @@ FIRE_KIND = int(VirtualKind.FIRE_SLASH)
 
 DISMANTLEMENT_KIND = int(VirtualKind.DISMANTLEMENT)
 """M6 票 03【奇袭】新增的【过河拆桥】命名空间：M5 之后的第一个追加段。"""
+
+WINE_KIND = int(VirtualKind.WINE)
+"""M6 票 16【龙胆】新增的【酒】命名空间：追加段的段起点已越过线上上限，故走尾部紧凑段。"""
 
 STANDARD_108_BLOCK = 8 * 109**7
 """108 张 / 7 张来源的泛化段容量（W4 冻结值；追加 kind 后一字不改）。
@@ -120,14 +124,28 @@ def test_the_source_ceiling_is_the_largest_the_wire_limit_allows():
 
 
 def test_every_kind_has_its_own_wire_safe_source_ceiling():
-    """每个 kind 的来源上界 = 该段起点 + 编码上界仍线内的最大张数（紧到下一张就越界）。
+    """每个 kind 的来源上界都线内；前两类按剩余空间收紧，尾部段按声明容量取。
 
-    M6 票 03 起 kind 被分成两类：共享冻结段（0–5）读牌堆上限 7；追加段（6…）挂在旧段之后，
-    段起点 ``1 + kind * block`` 已逼近 ``2**53``，故按剩余空间逐段收窄（108 张档的
-    ``DISMANTLEMENT`` 段 = 6）。判据与实现的 :func:`kind_source_ceiling` 同一条不等式，
-    但这里从 :data:`STANDARD_108_BLOCK` **独立复算**，不读实现。
+    M6 票 03 / 票 16 起 kind 被分成三类：
+
+    - 共享冻结段（0–5）读牌堆上限 7；
+    - 追加段（6）挂在旧段之后，段起点 ``1 + kind * block`` 已逼近 ``2**53``，故按剩余
+      空间逐段收窄（108 张档的 ``DISMANTLEMENT`` 段 = 6）；
+    - 尾部紧凑段（7…）的段起点改用兼容段之后的空隙，段容量按**声明的来源上界** 2 取
+      （见 :data:`sgs.skills.virtual.TAIL_SOURCE_CEILING`）——它不是"紧到下一张就越界"，
+      而是"只承载单源 / 双源转化"的声明式收窄。
+
+    判据与实现的 :func:`kind_source_ceiling` 同一条不等式，但这里从
+    :data:`STANDARD_108_BLOCK` **独立复算**，不读实现。
     """
+    tail_offset = LEGACY_KIND_COUNT * BASE**2
+    tail_block = (2 + 1) * BASE**2
     for kind in KINDS:
+        if kind >= TAIL_KIND_START:
+            assert kind_source_ceiling(kind, 108) == 2, (kind, "尾部段恒 2 张")
+            start = tail_offset + (kind - TAIL_KIND_START) * tail_block
+            assert start + _capacity(2) < WIRE_INT_LIMIT, f"kind={kind} 的尾部段越线"
+            continue
         expected = min(MAX_VIRTUAL_SOURCES, _best_source_count(kind, STANDARD_108_BLOCK))
         assert kind_source_ceiling(kind, 108) == expected, (kind, expected)
         assert (
@@ -189,7 +207,7 @@ def _generalized_samples(count: int, ceiling: int) -> set[tuple[int, ...]]:
     """泛化段的抽样：含 ``0`` 的组合 + 该段上界内的最小 / 最大 / 进位端点。"""
     sample = (0, 1, 2, 53, 106, 107)
     source_sets: set[tuple[int, ...]] = set()
-    for size in range(0, len(sample) + 1):
+    for size in range(0, min(len(sample), ceiling) + 1):
         source_sets.update(combinations(sample, size))
     for size in range(1, ceiling + 1):
         source_sets.add(tuple(range(size)))  # 最小端点（编码最小）
@@ -334,7 +352,10 @@ def test_the_military_160_deck_narrows_the_source_ceiling_but_keeps_ids_safe():
     )
 
     for kind in KINDS:
-        for sources in ((), (0,), (0, 1), tuple(range(ceiling))):
+        kind_ceiling = kind_source_ceiling(kind, count)
+        sizes = dict.fromkeys((0, 1, 2, min(2, kind_ceiling), kind_ceiling))
+        for size in sizes:
+            sources = tuple(range(size))
             card_id = virtual_card_id(kind=kind, sources=sources, card_count=count)
             assert abs(card_id) < WIRE_INT_LIMIT, (kind, sources, card_id)
 
@@ -537,3 +558,51 @@ def test_a_fire_slash_virtual_product_is_constructible_in_the_160_deck():
     assert product.card_id != transformed_card(state, (source,), "slash").card_id, (
         "同一来源的普通【杀】产物与火【杀】产物必须分处两个 kind 段"
     )
+
+
+# ---------------------------------------------------------------------------
+# M6 票 16：尾部紧凑段（【酒】段）——追加段已无空间，新 kind 住兼容段之后的空隙
+# ---------------------------------------------------------------------------
+
+
+def test_the_tail_kind_uses_the_gap_after_the_legacy_namespace():
+    """尾部段的 id 落在兼容段之后、泛化段之前：旧 id 一字不动、新旧两段不相交。"""
+    count = 108
+    legacy_end = 1 + LEGACY_KIND_COUNT * BASE**2
+    generalized_start = 1 + LEGACY_KIND_COUNT * STANDARD_108_BLOCK
+
+    assert kind_source_ceiling(WINE_KIND, count) == 2, "尾部段按声明的来源上界收窄"
+    empty = abs(virtual_card_id(kind=WINE_KIND, sources=(), card_count=count))
+    single = abs(
+        virtual_card_id(kind=WINE_KIND, sources=(count - 1,), card_count=count)
+    )
+    two = abs(
+        virtual_card_id(kind=WINE_KIND, sources=(count - 1, count - 2), card_count=count)
+    )
+
+    assert empty == legacy_end, "尾部段紧接兼容段之后"
+    assert empty < single < two < generalized_start, "整段落在两段之间的空隙里"
+    # 旧 kind 的冻结值一字不动（与 test_the_standard_108_ids_stay_on_the_frozen_seven_source_block 同源）。
+    assert (
+        virtual_card_id(kind=2, sources=(18,), card_count=108)
+        == -2_924_862_593_306_832
+    )
+
+
+def test_the_tail_kind_is_wire_safe_and_single_source_is_constructible_in_the_160_deck():
+    """160 档：单源【桃】当【酒】的产物 id 在线内，且与所有旧 kind 不撞。"""
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    state = build_state(pack=pack, seats=[SeatSpec(), SeatSpec()], turn_seat=0)
+    source = next(card.card_id for card in state.cards if card.type == "peach")
+
+    product = transformed_card(state, (source,), "wine")
+
+    assert product.type == "wine" and product.is_virtual
+    assert product.name == "酒", "产物牌名读实体牌（不是 type id）"
+    assert abs(product.card_id) < WIRE_INT_LIMIT
+    other_kinds = {
+        virtual_card_id(kind=kind, sources=(source,), card_count=160)
+        for kind in KINDS
+        if kind != WINE_KIND and kind_source_ceiling(kind, 160) >= 1
+    }
+    assert product.card_id not in other_kinds, "与所有旧 kind 的单源 id 两两不等"

@@ -25,9 +25,17 @@ from __future__ import annotations
 from typing import Any
 
 from sgs.data import Category, SkillType, card_category, hero_skill_id
-from sgs.effects import CarrierKind, behavior_for
+from sgs.effects import CarrierKind, behavior_for, targets_within_attack_range
 from sgs.resolution import Control, Frame
-from sgs.state import CardRef, GameState, MoveReason, Pass, Zone, ZoneRef
+from sgs.state import (
+    CardRef,
+    GameState,
+    MoveReason,
+    Pass,
+    SelectionSpec,
+    Zone,
+    ZoneRef,
+)
 from sgs.timing import Timing
 
 from .catalog import MATCH_OWNER_KEY, Hook, SkillDef
@@ -38,6 +46,7 @@ __all__ = [
     "JIE_JIZHI_FLOW",
     "JIZHI",
     "JIZHI_FLOW",
+    "YAJIAO",
     "use_after_skill_definitions",
 ]
 
@@ -188,8 +197,250 @@ JIE_JIZHI_FLOW = SkillFlow(name="jie_jizhi", steps=(), effect=zero_step_effect(_
 """界【集智】的零步流水线：[是否发动] → 摸一张 →（基本牌时）可选弃置换 +1。"""
 
 
+# ---------------------------------------------------------------------------
+# 界赵云【涯角】（M6 票 16）：回合外使用 / 打出手牌时亮出牌堆顶一张，按类别分叉
+#
+# §十九 L2085–L2088：
+#
+#     涯角：当你于回合外使用或打出手牌时，你可以亮出牌堆顶的一张牌，然后若这两张牌类别
+#           相同，则你将之交给一名角色或放回牌堆顶；否则你可以弃置一名攻击范围内包含你的
+#           其他角色区域里的一张牌，并将亮出的牌放回牌堆顶。
+#
+# 三段口径（`06`（§5「程序化约定与偏离一手」） 的裁定）：
+#
+# - **"这两张牌类别相同"** = 被使用 / 打出的那张（转化牌按**产物牌型**）与亮出的那张的
+#   **大类**（基本 / 锦囊 / 装备）相同——不是牌名相同，也不是花色 / 颜色；
+# - **"使用或打出手牌"** = 来源牌里有手牌。判据取引擎在使用 / 打出帧上记下的
+#   ``from_hand``（``start_use`` / ``play_card`` 在牌离开手牌前写入）：装备区转化出来的
+#   牌、纯虚拟牌（八卦阵的视为【闪】）都不触发；
+# - **"放回牌堆顶"** = ``peek_deck`` 只看不移，故"放回"是无动作；只有"交给一名角色"与
+#   "弃置一张牌"会真实搬牌。
+#
+# 手写多轮（同【忘隙】的姿态）：类别分叉后的步骤数不同（同类别是"给谁 / 放回"二选一，
+# 不同类别是"弃不弃 → 弃谁的"），``SkillFlow`` 的静态步骤表达不了条件分支。
+# ---------------------------------------------------------------------------
+
+YAJIAO = hero_skill_id("jie_zhaoyun", "yajiao")
+"""界赵云【涯角】的全限定技能 id（§十九 L2085–L2088）。"""
+
+_YAJIAO_OPTIONS_SAME: tuple[str, ...] = ("yajiao_give", "yajiao_top")
+"""类别相同：交给一名角色 / 放回牌堆顶（**必选**，牌面的"或"是两个动作，不是"可以不做"）。"""
+
+_YAJIAO_OPTION_GIVE = "yajiao_give"
+
+_YAJIAO_OPTION_DISCARD = "yajiao_discard"
+"""类别不同：弃置一张牌（**可选**；``Pass`` = 不弃、直接放回）。"""
+
+_YAJIAO_ASK_BRANCH = "yajiao:branch"
+_YAJIAO_ASK_GIVE_SEAT = "yajiao:give_seat"
+_YAJIAO_ASK_DISCARD_SEAT = "yajiao:discard_seat"
+_ASK_YAJIAO_DISCARD = "hero.jie_zhaoyun.yajiao.discard"
+"""手写询问位置：从目标区域里挑一张弃置（票 22 的 ``ask_selection`` owner 约定）。"""
+
+_YAJIAO_REVEALED_KEY = "yajiao_revealed"
+"""帧私有：亮出的那张牌 id（续跑不重看牌堆）。"""
+
+_YAJIAO_BRANCH_KEY = "yajiao_branch"
+"""帧私有：类别相同分支的选择（交给一名角色 / 放回牌堆顶）。"""
+
+_YAJIAO_DISCARD_KEY = "yajiao_discard_choice"
+"""帧私有：类别不同分支"弃不弃"的应答（``Pass`` → 空串）。"""
+
+_YAJIAO_SEAT_KEY = "yajiao_seat"
+"""帧私有：选中的"交给谁" / "弃谁的牌"座位。"""
+
+_YAJIAO_GIVEN_KEY = "yajiao_given"
+"""帧私有：亮出的牌已经交给目标（续跑不重搬）。"""
+
+_YAJIAO_DISCARDED_KEY = "yajiao_discarded"
+"""帧私有：目标的那张牌已经弃置（续跑不重搬）。"""
+
+
+def _yajiao_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**持有者自己**于**回合外**使用 / 打出的是**手牌**。
+
+    持有者读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（条件求值期由派发环写）；
+    "手牌"读引擎在帧上记下的 ``from_hand``（见 :meth:`~sgs.engine.Engine.start_use`）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    if not frame.data.get("from_hand"):
+        return False
+    return host.state.turn_seat != owner
+
+
+def _yajiao_same_category(state: GameState, used: CardRef | None, revealed: CardRef) -> bool:
+    """两张牌的**大类**是否相同（基本 / 锦囊 / 装备）。"""
+    if used is None:
+        return False
+    return card_category(state.pack_id, used.type) is card_category(
+        state.pack_id, revealed.type
+    )
+
+
+def _yajiao_discard_seats(state: GameState, owner: int) -> tuple[int, ...]:
+    """能弃牌的对象：**其他存活角色**中"攻击范围内包含你"且区域里**有牌**的那些。
+
+    "攻击范围内包含你"不能只看自己的攻击范围：攻击范围是**看的人**的属性（武器不同），
+    故这里从候选座位出发，问它能否触及 ``owner``（与【借刀杀人】同一个
+    :func:`~sgs.effects.targets_within_attack_range` 判据）。
+    """
+    return tuple(
+        player.seat
+        for player in state.players
+        if player.alive
+        and player.seat != owner
+        and owner in targets_within_attack_range(state, player.seat)
+        and (player.hand or player.equip or player.judge)
+    )
+
+
+def _yajiao_seat_options(state: GameState, seats: tuple[int, ...]) -> tuple[str, ...]:
+    return tuple(f"seat:{seat}" for seat in seats)
+
+
+def _yajiao_seat(answer: Any) -> int:
+    return int(str(answer.choice).split(":", 1)[1])
+
+
+def _yajiao(host: Any, frame: Frame) -> Control:
+    """【涯角】的提交点：亮一张 → 按类别分叉 → （同类别）交给一人 / 放回顶，（不同类别）
+    可选弃一张 → 放回顶。
+
+    每段一个帧私有游标：亮牌 / 交给 / 弃置都可能内联派发"失去牌后"等钩子而挂起，
+    重入必须既不重做也不漏做。
+    """
+    state = host.state
+    owner = frame.data["skill_owner"]
+    if _YAJIAO_REVEALED_KEY not in frame.data:
+        revealed = host.peek_deck(frame, 1)
+        if not revealed:
+            return None
+        frame.data[_YAJIAO_REVEALED_KEY] = revealed[0].card_id
+        # "亮出"= 公开事实（与【火攻】/界【裸衣】同一个记录面），牌本身仍留在牌堆顶。
+        host.reveal_card(frame, owner, revealed[0])
+    revealed = state.card(int(frame.data[_YAJIAO_REVEALED_KEY]))
+    used = frame.data.get("card")
+    if _yajiao_same_category(state, used, revealed):
+        branch = frame.data.get(_YAJIAO_BRANCH_KEY)
+        if branch is None:
+            answer = host.ask_option(
+                frame,
+                owner,
+                Timing.USE_ON_USE,
+                skill_id=_YAJIAO_ASK_BRANCH,
+                options=_YAJIAO_OPTIONS_SAME,
+                optional=False,
+            )
+            if host.suspended(answer):
+                return "stay"
+            branch = str(answer.choice)
+            frame.data[_YAJIAO_BRANCH_KEY] = branch
+        if branch != _YAJIAO_OPTION_GIVE:
+            return None  # 放回牌堆顶：牌本来就在顶上，无动作
+        target = frame.data.get(_YAJIAO_SEAT_KEY)
+        if target is None:
+            seats = tuple(player.seat for player in state.players if player.alive)
+            answer = host.ask_option(
+                frame,
+                owner,
+                Timing.USE_ON_USE,
+                skill_id=_YAJIAO_ASK_GIVE_SEAT,
+                options=_yajiao_seat_options(state, seats),
+                optional=False,
+            )
+            if host.suspended(answer):
+                return "stay"
+            target = _yajiao_seat(answer)
+            frame.data[_YAJIAO_SEAT_KEY] = target
+        if frame.data.get(_YAJIAO_GIVEN_KEY):
+            return None
+        frame.data[_YAJIAO_GIVEN_KEY] = True
+        control = host.move_in_frame(
+            frame,
+            (revealed,),
+            to_zone=ZoneRef(Zone.HAND, int(target)),
+            reason=MoveReason.PUT,
+            owner=int(target),
+            actor=owner,
+        )
+        return "stay" if control == "stay" else None
+    choice = frame.data.get(_YAJIAO_DISCARD_KEY)
+    if choice is None:
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.USE_ON_USE,
+            skill_id=f"{_YAJIAO_ASK_BRANCH}:discard",
+            options=(_YAJIAO_OPTION_DISCARD,),
+            optional=True,
+        )
+        if host.suspended(answer):
+            return "stay"
+        choice = "" if isinstance(answer, Pass) else str(answer.choice)
+        frame.data[_YAJIAO_DISCARD_KEY] = choice
+    if not choice:
+        return None  # 不弃：亮出的牌放回牌堆顶（仍在顶上，无动作）
+    target = frame.data.get(_YAJIAO_SEAT_KEY)
+    if target is None:
+        seats = _yajiao_discard_seats(state, owner)
+        if not seats:
+            return None
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.USE_ON_USE,
+            skill_id=_YAJIAO_ASK_DISCARD_SEAT,
+            options=_yajiao_seat_options(state, seats),
+            optional=False,
+        )
+        if host.suspended(answer):
+            return "stay"
+        target = _yajiao_seat(answer)
+        frame.data[_YAJIAO_SEAT_KEY] = target
+    if frame.data.get(_YAJIAO_DISCARDED_KEY):
+        return None
+    picked = host.ask_selection(
+        frame,
+        owner=_ASK_YAJIAO_DISCARD,
+        key="yajiao:discard",
+        actor=owner,
+        timing=Timing.USE_ON_USE,
+        spec=SelectionSpec(
+            zones=(Zone.HAND, Zone.EQUIP, Zone.JUDGE), total=(1, 1), optional=False
+        ),
+        # 别人的手牌是隐藏槽（只有位置、没有牌面），装备 / 判定区照旧可见。
+        build_face=lambda: host.selection_face(
+            int(target), (Zone.HAND, Zone.EQUIP, Zone.JUDGE), reveal_hand=False
+        ),
+    )
+    if host.suspended(picked):
+        return "stay"
+    if not picked:
+        return None
+    frame.data[_YAJIAO_DISCARDED_KEY] = True
+    control = host.move_in_frame(
+        frame,
+        state.refs(picked),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=int(target),
+        actor=owner,
+    )
+    return "stay" if control == "stay" else None
+
+
+def _yajiao_hooks() -> tuple[Hook, Hook]:
+    """【涯角】的两条挂接（使用 / 打出），共用同一条条件与同一份手写回调。"""
+    return (
+        Hook(Timing.USE_ON_USE, condition=_yajiao_condition, handler=_yajiao),
+        Hook(Timing.PLAY_ON_PLAY, condition=_yajiao_condition, handler=_yajiao),
+    )
+
+
 def use_after_skill_definitions() -> tuple[SkillDef, ...]:
-    """U 族两条技能的 :class:`~sgs.skills.catalog.SkillDef`（非锁定、挂 ``USE_ON_USE``）。
+    """U 族三条技能的 :class:`~sgs.skills.catalog.SkillDef`（非锁定；【涯角】挂使用 / 打出两条钩子）。
 
     标准 / 界共用**同一条触发条件**（:func:`_jizhi_condition`）：两版前半句逐字相同，界版
     只多一个提交点里的分支，故条件不 fork（与【克己】/【英姿】的"界版只是另一个武将 id +
@@ -215,6 +466,18 @@ def use_after_skill_definitions() -> tuple[SkillDef, ...]:
             requirement=(
                 "使用非转化的非延时锦囊牌时摸一张牌；若此牌为基本牌，你可以弃置此牌，"
                 "令你本回合的手牌上限 +1"
+            ),
+        ),
+        SkillDef(
+            skill_id=YAJIAO,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=_yajiao_hooks(),
+            requirement=(
+                "当你于回合外使用或打出手牌时，可以亮出牌堆顶一张牌：类别相同则交给一名"
+                "角色或放回牌堆顶；否则可以弃置一名攻击范围内包含你的其他角色区域里的一张"
+                "牌，并将亮出的牌放回牌堆顶"
             ),
         ),
     )

@@ -62,6 +62,7 @@ from sgs.skills.preactivation import (
 )
 from sgs.state import (
     ActivateSkill,
+    ArrangeCards,
     ArrangeContext,
     ArrangeQuery,
     DiscardQuery,
@@ -106,6 +107,7 @@ from support import (
 )
 
 PACK = load_content_pack(deck_profile="standard_108")
+PACK_EX_160 = load_content_pack(deck_profile="standard_ex_160")
 TESTS_DIR = Path(__file__).resolve().parent
 ROOT = TESTS_DIR.parent
 PROBE = TESTS_DIR / "journal_probe.py"
@@ -1819,6 +1821,17 @@ def _coverage_rende():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_jie_rende():
+    low = tuple(_ids("lightning")[:2])
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_liubei", hp=2, hp_max=4, hand=low), SeatSpec()],
+        deck=_deck_excluding(*low),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_fanjian():
     lightning = _ids("lightning")[0]
     state = build_state(
@@ -1987,6 +2000,7 @@ def _coverage_ice_sword():
 _COVERAGE_CASES = {
     "hero.sunquan.zhiheng": _coverage_zhiheng,
     "hero.liubei.rende": _coverage_rende,
+    "hero.jie_liubei.rende": _coverage_jie_rende,
     "hero.zhouyu.fanjian": _coverage_fanjian,
     "hero.huatuo.qingnang": _coverage_qingnang,
     "hero.diaochan.lijian": _coverage_lijian,
@@ -2860,4 +2874,285 @@ def test_every_jie_wei_b_skill_has_a_deterministic_ai_scene():
 
     assert all(skill_id in SKILL_VALUES for skill_id in covered), (
         "这些技能还没进 SKILL_VALUES：" + "；".join(sorted(covered - set(SKILL_VALUES)))
+    )
+
+
+# ---------------------------------------------------------------------------
+# ⑨ M6 票 16：界·蜀（刘备 / 赵云 / 诸葛亮）——六条技能各有**确定性 AI 发动**场景
+#    （spec §AI / D16 / S7；【空城】是锁定技，没有「是否发动」询问，由构造局面覆盖）
+# ---------------------------------------------------------------------------
+
+JIE_RENDE = "hero.jie_liubei.rende"
+JIE_JIJIANG = "hero.jie_liubei.jijiang"
+JIE_LONGDAN = "hero.jie_zhaoyun.longdan"
+JIE_YAJIAO = "hero.jie_zhaoyun.yajiao"
+JIE_GUANXING = "hero.jie_zhugeliang.guanxing"
+
+
+def test_the_ai_activates_jie_rende_and_uses_the_free_basic_card():
+    """界刘备【仁德】：AI 给两张换来一次「视为使用一张基本牌」，受伤时选【桃】回血。"""
+    low = (_ids("lightning")[0], _ids("harvest")[0])
+    # 摸牌阶段摸到两张**出牌阶段用不出去**的牌（【闪】/【无懈可击】）：本问只剩
+    # "界仁德"与"结束阶段"两个正分选项，AI 的发动决策因此可确定地观测。
+    blanks = (_ids("dodge")[0], _ids("nullify")[0])
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=2, hp_max=4, hand=low, hero="jie_liubei"),
+            SeatSpec(),
+        ],
+        deck=(*blanks, *_deck_excluding(*low, *blanks)),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)) for _ in range(2)]
+
+    run_until(engine, players, lambda e: ran_timing(e, Timing.TURN_AFTER_END))
+
+    assert _activated(engine, JIE_RENDE), "AI 必须真的发动界【仁德】"
+    assert engine.state.player(0).hp == 3, "给牌不回复；选的【桃】回复 1 点"
+    basic_uses = [
+        record
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing is Timing.RESOLVE_AFTER_END
+        and any(card.is_virtual and card.type == "peach" for card in record.cards)
+    ]
+    assert basic_uses and basic_uses[0].targets == (0,), "视为使用的【桃】目标为自己"
+
+
+def test_the_ai_activates_jie_jijiang_first_half_in_a_barbarian_window():
+    """界刘备【激将】①：AI 作为主公在【南蛮入侵】窗口求助，盟友 AI 代打【杀】。"""
+    barbarian = _ids("barbarian_invasion")[0]
+    slash = _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(barbarian,)),
+            SeatSpec(hero="jie_liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(hand=(slash,), kingdom=Kingdom.SHU),
+        ],
+        deck=_deck_excluding(barbarian, slash),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == barbarian:
+                    return action
+        return None
+
+    engine = Engine.from_state(state, seed=11)
+    players = [
+        _ScriptedSeat(attacker),
+        HeuristicPlayer(_stream(11)),
+        HeuristicPlayer(_stream(11)),
+    ]
+    run_until(engine, players, lambda e: slash in e.state.discard)
+
+    assert _activated(engine, JIE_JIJIANG), "AI 主公必须真的发动界【激将】①"
+    requests = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == "RESPOND"
+        and getattr(record.query, "cause", None) is WindowCause.LORD_REQUEST
+    ]
+    assert [query.actor for query in requests] == [2], "求助窗口只问其他蜀势力角色"
+    assert engine.state.player(1).hp == 4, "需要被满足 ⇒ 主公不受伤害"
+
+
+def test_the_ai_as_the_shu_ally_lets_the_lord_draw_with_jie_jijiang_second():
+    """界刘备【激将】②：盟友 AI 在回合外打出【杀】后，**其**答发动、主公摸一张。"""
+    barbarian = _ids("barbarian_invasion")[0]
+    slash = _ids("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(barbarian,)),
+            SeatSpec(hero="jie_liubei", identity=Identity.LORD, kingdom=Kingdom.SHU),
+            SeatSpec(hand=(slash,), kingdom=Kingdom.SHU),
+        ],
+        deck=_deck_excluding(barbarian, slash),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == barbarian:
+                    return action
+        return None
+
+    engine = Engine.from_state(state, seed=11)
+    players = [
+        _ScriptedSeat(attacker),
+        HeuristicPlayer(_stream(11)),
+        HeuristicPlayer(_stream(11)),
+    ]
+    run_until(engine, players, lambda e: e.state.player(1).hand)
+
+    seconds = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == "SKILL_ACTIVATION"
+        and record.query.skill_id == JIE_JIJIANG
+    ]
+    assert [query.actor for query in seconds] == [2], "询问发给打出【杀】的盟友"
+    assert _activated(engine, JIE_JIJIANG), "盟友 AI 必须答发动"
+    assert len(engine.state.player(1).hand) == 1, "收益归主公"
+
+
+def test_the_ai_activates_jie_yajiao_and_takes_the_revealed_card():
+    """界赵云【涯角】：AI 在别人的回合打出【杀】后亮牌，类别相同则把亮出的牌交给自己。"""
+    barbarian = _ids("barbarian_invasion")[0]
+    slash = _ids("slash")[0]
+    reveal = _ids("dodge")[0]
+    fillers = (_ids("peach")[0], _ids("peach")[1])
+    deck = (fillers[0], fillers[1], reveal) + tuple(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in {barbarian, slash, reveal, *fillers}
+    )
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(slash,), hero="jie_zhaoyun"),
+            SeatSpec(hand=(barbarian,)),
+        ],
+        deck=deck,
+        turn_seat=1,
+        rule_config=RuleConfig(player_count=2, first_seat=1),
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.card_id == barbarian:
+                    return action
+        return None
+
+    engine = Engine.from_state(state, seed=11)
+    players = [HeuristicPlayer(_stream(11)), _ScriptedSeat(attacker)]
+    run_until(engine, players, lambda e: reveal in e.state.player(0).hand)
+
+    assert _activated(engine, JIE_YAJIAO), "AI 必须真的发动界【涯角】"
+    assert reveal in engine.state.player(0).hand, "类别相同 ⇒ 亮出的牌交给一名角色（自己）"
+
+
+def _arrange_all_bottom(inner):
+    """把 AI 的 ``ARRANGE`` 应答改成"全部置底"，其余仍由启发式应答（验第二次观星）。"""
+
+    class _Wrap:
+        def respond(self, query):
+            if query.kind == "ARRANGE":
+                return ArrangeCards(
+                    answers_seq=query.seq,
+                    order=tuple(range(len(query.revealed))),
+                    split=0,
+                )
+            return inner.respond(query)
+
+    return _Wrap()
+
+
+def test_the_ai_activates_jie_guanxing_and_relooks_after_placing_everything_at_the_bottom():
+    """界诸葛亮【观星】：AI 在准备阶段发动；全部置底后**结束阶段再发动一次**。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_zhugeliang"), *[SeatSpec() for _ in range(3)]],
+        deck=tuple(range(len(PACK.deck.cards))),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
+    inner = HeuristicPlayer(_stream(11))
+    players = [_arrange_all_bottom(inner)] + [HeuristicPlayer(_stream(11)) for _ in range(3)]
+
+    run_until(engine, players, lambda e: ran_timing(e, Timing.PHASE_DRAW_END))
+    assert _activated(engine, JIE_GUANXING), "AI 必须真的发动界【观星】"
+
+    run_until(engine, players, lambda e: ran_timing(e, Timing.TURN_AFTER_END))
+
+    queries = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == "SKILL_ACTIVATION"
+        and record.query.skill_id == JIE_GUANXING
+    ]
+    assert [query.timing for query in queries[:2]] == [
+        Timing.PHASE_PREPARE,
+        Timing.PHASE_FINISH,
+    ], "全部置底后结束阶段再次观星"
+    activations = [
+        record.action
+        for record in engine.records
+        if record.kind == "action"
+        and record.accepted
+        and isinstance(record.action, ActivateSkill)
+        and record.action.skill_id == JIE_GUANXING
+    ]
+    assert len(activations) == 2, "两次都由 AI 答发动"
+
+
+def test_the_ai_uses_jie_longdan_wine_as_a_peach_when_saving_a_dying_character():
+    """界赵云【龙胆】：160 档的【酒】当【桃】——AI 在求桃窗口里选它（与真【桃】同价）。"""
+    wine = next(
+        card_id
+        for card_id in range(len(PACK_EX_160.deck.cards))
+        if PACK_EX_160.deck.cards[card_id].type == "wine"
+    )
+    state = build_state(
+        pack=PACK_EX_160,
+        seats=[SeatSpec(hand=(wine,), hero="jie_zhaoyun"), SeatSpec(hp=0)],
+        deck=tuple(
+            card_id
+            for card_id in range(len(PACK_EX_160.deck.cards))
+            if card_id != wine
+        ),
+        turn_seat=1,
+    )
+    query = _transform_query(state, QueryKind.PEACH, dying=1, timing=Timing.NEAR_DEATH_AT)
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, ActivateSkill) and action.skill_id == JIE_LONGDAN, (
+        f"AI 该按转化清单用【酒】当【桃】，实得 {action!r}"
+    )
+    resolved = resolve_conversion_confirmation(
+        state,
+        query.actor,
+        JIE_LONGDAN,
+        action.picks,
+        action.choices,
+        query.transform_actions,
+        steps=query.transform_preactivations[JIE_LONGDAN],
+    )
+    assert isinstance(resolved, UseCard), f"解析失败：{resolved}"
+    assert resolved.card.type == "peach" and resolved.card.virtual_sources == (wine,)
+    assert resolved.targets == (1,), "救濒死者"
+
+
+def test_every_jie_shu_skill_has_a_deterministic_ai_scene():
+    """本票六条技能的 AI 覆盖点名（spec S7 的"每条新机制 AI 至少一次合法发动"）。
+
+    【空城】是**锁定技**：没有"是否发动"询问（目标池修饰器直接生效），故不进
+    ``SKILL_VALUES``-驱动的那一档；覆盖由
+    ``tests/test_hero_jie_shu.py::test_jie_kongcheng_removes_the_owner_from_the_slash_and_duel_pools``
+    接手。【龙胆】的 酒↔桃 两侧也由本节的 酒→桃 场景与构造局面（桃→酒）分别钉住。
+    """
+    from sgs.agents import SKILL_VALUES
+
+    for skill_id in (
+        JIE_RENDE,
+        JIE_JIJIANG,
+        JIE_LONGDAN,
+        JIE_YAJIAO,
+        JIE_GUANXING,
+    ):
+        assert skill_id in SKILL_VALUES, f"{skill_id} 缺 SKILL_VALUES 语义条目"
+    assert "hero.jie_zhugeliang.kongcheng" not in SKILL_VALUES, (
+        "锁定技没有「是否发动」询问，不该有条目"
     )

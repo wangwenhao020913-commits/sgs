@@ -49,6 +49,7 @@ from sgs.effects import (
     Modifier,
     ModifierContext,
     ModifierPoint,
+    satisfies_required,
 )
 from sgs.resolution import Control, Frame
 from sgs.state import (
@@ -65,6 +66,7 @@ from .catalog import (
     ActivationPlan,
     Hook,
     MATCH_OWNER_KEY,
+    RUNNING_SKILL_KEY,
     HeroSkillDecl,
     SkillDef,
     mark_skill_used_this_turn,
@@ -76,8 +78,11 @@ from .flow import SkillFlow
 __all__ = [
     "HUJIA",
     "JIE_HUJIA",
-    "JIE_HUJIA_DRAW_FLOW",
+    "JIE_HUJIA_ECHO",
     "JIE_HUJIA_LORD",
+    "JIE_JIJIANG",
+    "JIE_JIJIANG_ECHO",
+    "JIE_JIJIANG_LORD",
     "JIJIANG",
     "JIUYUAN",
     "LORD_REQUEST_KEY",
@@ -86,10 +91,13 @@ __all__ = [
     "PROVIDER_ACTOR_KEY",
     "PROVIDER_SATISFIED_KEY",
     "PROVIDER_SKILL_KEY",
+    "LORD_ECHO_FLOW",
+    "LordEcho",
     "LordSkill",
     "advance_provider",
     "dispatch_provider",
     "jie_hujia_activation_plan",
+    "lord_echo_activation_plan",
     "lord_request_activation_plans",
     "lord_request_skill_definitions",
     "lord_skill_definitions",
@@ -328,81 +336,158 @@ JIJIANG = LordSkill(
 )
 """刘备【激将】：需要【杀】时令其他蜀势力角色打出【杀】（规则 972）。"""
 
-LORD_REQUEST_SKILLS: tuple[LordSkill, ...] = (HUJIA, JIE_HUJIA_LORD, JIJIANG)
-"""F 族三条"求助型"技能的逐字声明（票 09 §要做什么 3 的③表 + M6 票 14 的界【护驾】①）。"""
+JIE_JIJIANG = hero_skill_id("jie_liubei", "jijiang")
+"""界刘备【激将】的全限定技能 id（§十九 L2062–L2065：①求助窗口 + ②决定者不是受益者）。"""
+
+JIE_JIJIANG_LORD = LordSkill(
+    hero_id="jie_liubei",
+    short_id="jijiang",
+    required="slash",
+    scope=CandidateScope.RESPOND,
+    respond_mode=RespondMode.PLAY,
+)
+"""界刘备【激将】①：与标准版**逐字相同**的求助窗口声明（同一条 ``LordSkill.offer``）。
+
+"令所有其他蜀势力角色依次选择是否打出一张【杀】，若有角色打出【杀】，视为你使用或打出
+一张【杀】"与标准【激将】的"令其他蜀势力角色选择是否打出一张【杀】（视为由你使用或
+打出）"是同一件事；故它是另一个武将 id 上的另一条声明，不复制行为。
+"""
+
+LORD_REQUEST_SKILLS: tuple[LordSkill, ...] = (
+    HUJIA,
+    JIE_HUJIA_LORD,
+    JIJIANG,
+    JIE_JIJIANG_LORD,
+)
+"""F 族四条"求助型"技能的逐字声明（票 09 §要做什么 3 的③表 + M6 票 14 的界【护驾】① +
+M6 票 16 的界【激将】①）。"""
 
 
 # ---------------------------------------------------------------------------
-# 界曹操【护驾】②（M6 票 14）：**决定者不是受益者**的第一条钩子
+# 主公技的 ② 半句（M6 票 14 的界【护驾】/ M6 票 16 的界【激将】）：
+# **决定者不是受益者**的钩子
 #
-# §十九 L2014–L2018：
+# §十九 L2014–L2018（界护驾②）：
 #
 #     ②每回合限一次，当其他魏势力角色于其回合外使用或打出【闪】时，其可以令你摸一张牌。
 #
-# 钩子方向：挂在**使用【闪】**（``USE_ON_USE``）与**打出【闪】**（``PLAY_ON_PLAY``）两个
-# 时机上，条件判"其他魏势力角色 ∧ 于其回合外 ∧ 本回合还没发动过"；受益者是技能持有者
-# （主公），**决定者是那个使用 / 打出【闪】的角色**——:attr:`ActivationPlan.actor` 把
-# "是否发动"的询问发到**它的座位**上（``ask_skill_activation`` 的应答者），效果仍落在
-# ``skill_owner`` 身上。这条是本批唯一的"一个人决定、另一个人受益"。
+# §十九 L2062–L2065（界激将②）：
+#
+#     ②每回合限一次，当其他蜀势力角色于其回合外使用或打出【杀】时，其可以令你摸一张牌。
+#
+# 两句同形，只差**势力**与**牌名**；故落成一条声明 :class:`LordEcho`（两个消费者）：
+# 钩子方向 = **使用**（``USE_ON_USE``）与**打出**（``PLAY_ON_PLAY``）两个时机；
+# 受益者是技能持有者（主公），**决定者是那个使用 / 打出牌的角色**——
+# :attr:`ActivationPlan.actor` 把"是否发动"的询问发到**它的座位**上，效果仍落在
+# ``skill_owner`` 身上。
 #
 # "每回合限一次"落在 ``skill_state`` 的本回合位上（与【清俭】同一条：技能在**任何人的**
 # 回合都可能触发，不能复用"本出牌阶段"的位）。与【清俭】同姿态：**真的发动了**才落位——
-# 决定者放弃不算"发动过"，同一回合里再来一张【闪】仍会被问。
+# 决定者放弃不算"发动过"，同一回合里再来一张同名牌仍会被问。
 # ---------------------------------------------------------------------------
 
-_JIE_HUJIA_DRAWN_KEY = "jie_hujia_drawn"
-"""帧私有：这张【闪】上已经因【护驾】②摸过牌（续跑不重摸）。"""
+
+@dataclass(frozen=True, slots=True)
+class LordEcho(HeroSkillDecl):
+    """主公技的 **② 半句**声明：势力由持有者与事件来源比、牌名由 ``card_type`` 声明。"""
+
+    card_type: str
+    """触发牌名（``dodge`` / ``slash``；按 :func:`~sgs.effects.satisfies_required` 判，
+    故【杀】族按共享计数键放宽为火 / 雷 / 转化【杀】）。"""
+
+    requirement: str = ""
+    """② 半句的人话（拼在 ① 后面，供询问提示用）。"""
+
+    def condition(self, host: Any, frame: Any) -> bool:
+        """触发条件：**其他同势力角色于其回合外**使用 / 打出 ``card_type``，且本回合未发动。
+
+        持有者读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（条件求值期由派发环写），事件
+        的当事角色读 ``frame.data["source"]``（使用 / 打出帧的既有载荷）。五段全成立才发问：
+        ①牌名对得上（转化 / 虚拟牌按**产物牌型**同判）；②当事角色不是主公自己（"其他"）；
+        ③当前回合不是它的回合（"于其回合外"）；④与自己同势力；⑤本回合还没发动过。
+        """
+        owner = frame.data.get(MATCH_OWNER_KEY)
+        if owner is None:
+            return False
+        card = frame.data.get("card")
+        if card is None or not satisfies_required(card, self.card_type):
+            return False
+        source = frame.data.get("source")
+        if source is None or source == owner:
+            return False
+        state = host.state
+        if state.turn_seat == source:
+            return False
+        if not same_kingdom(state, source, owner):
+            return False
+        return not skill_used_this_turn(state, owner, self.skill_id)
+
+    @property
+    def hooks(self) -> tuple[Hook, ...]:
+        """② 的两条挂接（使用 / 打出），共用同一条条件与同一条零步流水线。"""
+        return (
+            Hook(Timing.USE_ON_USE, condition=self.condition, flow=LORD_ECHO_FLOW),
+            Hook(Timing.PLAY_ON_PLAY, condition=self.condition, flow=LORD_ECHO_FLOW),
+        )
 
 
-def _jie_hujia_condition(host: Any, frame: Any) -> bool:
-    """【护驾】②的触发条件：**其他**魏势力角色**于其回合外**使用 / 打出【闪】。
+JIE_HUJIA_ECHO = LordEcho(
+    hero_id="jie_caocao",
+    short_id="hujia",
+    card_type="dodge",
+    requirement=(
+        "每回合限一次，其他魏势力角色于其回合外使用或打出【闪】时，其可以令你摸一张牌"
+    ),
+)
+"""界曹操【护驾】②：其他**魏**势力角色于其回合外使用 / 打出【闪】时，其可以令主公摸一张。"""
 
-    持有者读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（条件求值期由派发环写），事件的
-    当事角色读 ``frame.data["source"]``（使用 / 打出帧的既有载荷）。五段全成立才发问：
-    ①牌名是【闪】（转化 / 虚拟【闪】按产物牌型同判）；②当事角色不是主公自己（"其他"）；
-    ③当前回合不是它的回合（"于其回合外"）；④与自己同势力（魏）；⑤本回合还没发动过。
-    """
-    owner = frame.data.get(MATCH_OWNER_KEY)
-    if owner is None:
-        return False
-    card = frame.data.get("card")
-    if card is None or card.type != "dodge":
-        return False
-    source = frame.data.get("source")
-    if source is None or source == owner:
-        return False
-    state = host.state
-    if state.turn_seat == source:
-        return False
-    if not same_kingdom(state, source, owner):
-        return False
-    return not skill_used_this_turn(state, owner, JIE_HUJIA)
+JIE_JIJIANG_ECHO = LordEcho(
+    hero_id="jie_liubei",
+    short_id="jijiang",
+    card_type="slash",
+    requirement=(
+        "每回合限一次，其他蜀势力角色于其回合外使用或打出【杀】时，其可以令你摸一张牌"
+    ),
+)
+"""界刘备【激将】②：其他**蜀**势力角色于其回合外使用 / 打出【杀】时，其可以令主公摸一张。"""
+
+_ECHO_BY_LORD: dict[LordSkill, LordEcho] = {
+    JIE_HUJIA_LORD: JIE_HUJIA_ECHO,
+    JIE_JIJIANG_LORD: JIE_JIJIANG_ECHO,
+}
+"""①声明 → ②声明（同一条 ``SkillDef`` 上挂两半；按声明对象身份分派，不按 id 字符串猜）。"""
+
+_LORD_ECHO_DRAWN_KEY = "lord_echo_drawn"
+"""帧私有：这张牌上已经因 ② 摸过牌（续跑不重摸）。"""
 
 
-def _jie_hujia_draw(host: Any, frame: Any, answers: Any) -> Any:
+def _lord_echo_draw(host: Any, frame: Any, answers: Any) -> Any:
     """提交点：**主公**摸一张牌（决定者已在"是否发动"里答过），并落"本回合已发动"。
 
-    收益归技能持有者（``skill_owner`` = 主公），不是答话的人。帧私有游标挡住重入
-    （摸牌可能内联派发而挂起）。
+    收益归技能持有者（``skill_owner`` = 主公），不是答话的人。技能 id 读派发环写在帧上的
+    :data:`~sgs.skills.catalog.RUNNING_SKILL_KEY`：同一条流水线服务两条主公技（界护驾 /
+    界激将），落位必须落在**正在跑的那一条**上。帧私有游标挡住重入（摸牌可能内联挂起）。
     """
     del answers
-    if frame.data.get(_JIE_HUJIA_DRAWN_KEY):
+    if frame.data.get(_LORD_ECHO_DRAWN_KEY):
         return None
-    frame.data[_JIE_HUJIA_DRAWN_KEY] = True
+    frame.data[_LORD_ECHO_DRAWN_KEY] = True
     owner = frame.data["skill_owner"]
     host.draw_for_hand(frame, owner, 1)
-    mark_skill_used_this_turn(host.state, owner, JIE_HUJIA)
+    skill_id = frame.data.get(RUNNING_SKILL_KEY)
+    if skill_id:
+        mark_skill_used_this_turn(host.state, owner, str(skill_id))
     return None
 
 
-JIE_HUJIA_DRAW_FLOW = SkillFlow(name="jie_hujia", steps=(), effect=_jie_hujia_draw)
-"""【护驾】②的零步流水线：决定者在"是否发动"里作答 → 主公摸一张。"""
+LORD_ECHO_FLOW = SkillFlow(name="lord_echo", steps=(), effect=_lord_echo_draw)
+"""主公技 ② 的零步流水线：决定者在"是否发动"里作答 → 主公摸一张。"""
 
 
-def jie_hujia_activation_plan(
+def lord_echo_activation_plan(
     state: GameState, frame: Frame, instance: Any
 ) -> ActivationPlan:
-    """【护驾】②的发动形态：**应答者 = 使用 / 打出【闪】的那个角色**（决定者 ≠ 受益者）。
+    """主公技 ② 的发动形态：**应答者 = 使用 / 打出的那个角色**（决定者 ≠ 受益者）。
 
     由 :data:`~sgs.skills.catalog.ACTIVATION_PLANS` 交给引擎的 ``ask_skill_activation``，
     询问因此出现在正确的座位上；``skill_owner`` 仍是主公，流水线的效果落在它身上。
@@ -413,9 +498,19 @@ def jie_hujia_activation_plan(
     return ActivationPlan(actor=source if isinstance(source, int) else None)
 
 
+def jie_hujia_activation_plan(
+    state: GameState, frame: Frame, instance: Any
+) -> ActivationPlan:
+    """界【护驾】② 的发动形态（历史名字；与 :func:`lord_echo_activation_plan` 同一份判据）。"""
+    return lord_echo_activation_plan(state, frame, instance)
+
+
 def lord_request_activation_plans() -> dict[str, Any]:
     """F 族的发动形态注册表（由 :data:`sgs.skills.catalog.ACTIVATION_PLANS` 末尾并入）。"""
-    return {JIE_HUJIA: jie_hujia_activation_plan}
+    return {
+        JIE_HUJIA: lord_echo_activation_plan,
+        JIE_JIJIANG: lord_echo_activation_plan,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -458,45 +553,35 @@ PROVIDERS: Mapping[str, ProviderHandler] = MappingProxyType(
 
 
 def lord_request_skill_definitions() -> tuple[SkillDef, ...]:
-    """三条求助型技能（【护驾】/界【护驾】/【激将】）的 :class:`~sgs.skills.catalog.SkillDef`。
+    """四条求助型技能（【护驾】/界【护驾】/【激将】/界【激将】）的 ``SkillDef``。
 
-    三条都**非锁定**（技能面写"你可以"）：候选由 ``CANDIDATES`` 挂点产出，
+    四条都**非锁定**（技能面写"你可以"）：候选由 ``CANDIDATES`` 挂点产出，
     选中 ``ActivateSkill`` 就是发动；``skill_type = LORD`` ⇒ 身份门控由载体解析兑现。
-    界【护驾】另有两条 ② 的钩子（同一张定义上，见 :func:`_jie_hujia_hook_requirement`）。
+    界【护驾】/界【激将】另有 ② 的两条钩子（同一张定义上，见 :func:`_lord_request_definition`）。
     """
     return tuple(_lord_request_definition(skill) for skill in LORD_REQUEST_SKILLS)
 
 
-def _jie_hujia_hook_requirement() -> str:
-    """界【护驾】的 ``requirement`` 文案：①② 都在这一条技能上，故两段都要说。"""
-    return (
-        "①当你需要使用或打出【闪】时，你可以令其他魏势力角色依次选择是否打出一张【闪】；"
-        "②每回合限一次，其他魏势力角色于其回合外使用或打出【闪】时，其可以令你摸一张牌"
-    )
+def _lord_echo_requirement(skill: LordSkill, echo: LordEcho) -> str:
+    """①② 都在一条技能上时的 ``requirement`` 文案：两段都要说（按声明取，不按 id 猜）。"""
+    first = {
+        "dodge": "当你需要使用或打出【闪】时，你可以令其他魏势力角色依次选择是否打出一张【闪】",
+        "slash": "当你需要使用或打出【杀】时，你可以令其他蜀势力角色依次选择是否打出一张【杀】",
+    }[skill.required]
+    return f"①{first}；②{echo.requirement}"
 
 
 def _lord_request_definition(skill: LordSkill) -> SkillDef:
-    """一条求助型技能的 :class:`SkillDef`；**只有**界【护驾】多挂 ② 的两条钩子。
+    """一条求助型技能的 :class:`SkillDef`；带 ② 半句时多挂两条钩子。
 
-    "多出来的那一半"是这一处显式的分支：``skill is JIE_HUJIA_LORD`` 是数据侧的同一个
-    事实（这条声明就是界曹操的【护驾】），不是按 id 字符串猜的白名单。
+    "多出来的那一半"是这一处显式的分支：``_ECHO_BY_LORD`` 的键是**声明对象**（这条声明
+    就是界曹操的【护驾】/ 界刘备的【激将】），不是按 id 字符串猜的白名单。
     """
-    hooks: tuple[Hook, ...] = ()
+    echo = _ECHO_BY_LORD.get(skill)
+    hooks: tuple[Hook, ...] = () if echo is None else echo.hooks
     requirement = {"dodge": "打出【闪】", "slash": "打出【杀】"}[skill.required]
-    if skill is JIE_HUJIA_LORD:
-        hooks = (
-            Hook(
-                Timing.USE_ON_USE,
-                condition=_jie_hujia_condition,
-                flow=JIE_HUJIA_DRAW_FLOW,
-            ),
-            Hook(
-                Timing.PLAY_ON_PLAY,
-                condition=_jie_hujia_condition,
-                flow=JIE_HUJIA_DRAW_FLOW,
-            ),
-        )
-        requirement = _jie_hujia_hook_requirement()
+    if echo is not None:
+        requirement = _lord_echo_requirement(skill, echo)
     return SkillDef(
         skill_id=skill.skill_id,
         locked=False,

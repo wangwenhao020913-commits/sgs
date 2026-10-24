@@ -409,6 +409,72 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "jie_liubei",
+      "name": "界刘备",
+      "true_name": "刘备",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "rende",
+          "name": "仁德",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "jijiang",
+          "name": "激将",
+          "skill_type": "LORD"
+        }
+      ]
+    },
+    {
+      "id": "jie_zhaoyun",
+      "name": "界赵云",
+      "true_name": "赵云",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "longdan",
+          "name": "龙胆",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yajiao",
+          "name": "涯角",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_zhugeliang",
+      "name": "界诸葛亮",
+      "true_name": "诸葛亮",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "guanxing",
+          "name": "观星",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "kongcheng",
+          "name": "空城",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

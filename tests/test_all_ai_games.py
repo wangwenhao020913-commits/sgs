@@ -473,3 +473,78 @@ def test_the_m6_jie_wei_b_heroes_finish_a_full_ai_game_cleanly_and_replay():
     replay.run([TapePlayer(tape)] * PLAYERS)
 
     assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"
+
+
+# ---------------------------------------------------------------------------
+# M6 票 16：界·蜀（界刘备 / 界赵云 / 界诸葛亮 + 两名陪跑）的**显式逐座位**全 AI 局
+# ---------------------------------------------------------------------------
+
+M6_JIE_SHU_HEROES: tuple[str, ...] = (
+    "jie_liubei",
+    "jie_zhaoyun",
+    "jie_zhugeliang",
+    "jie_caocao",
+    "sunquan",
+)
+"""票 16 的三名将 + 两名陪跑（5 人身份局；显式发放，不吃 ``hero`` 子流）。
+
+五名**真名互异**（刘备 / 赵云 / 诸葛亮 / 曹操 / 孙权）：同一真名不共存是引擎不变量，
+显式发放也不得违反它。
+"""
+
+M6_JIE_SHU_SEED = ACCEPTANCE_SEEDS[5]
+"""与 32 种子基准组同批的第六个种子（``ACCEPTANCE_SEEDS`` 的真源）。"""
+
+
+def test_the_m6_jie_shu_heroes_finish_a_full_ai_game_cleanly_and_replay():
+    """验收：含界【仁德】/【激将】/【龙胆】/【涯角】/【观星】/【空城】的全 AI 局四条判据全过。
+
+    【激将】是主公技，本局谁当主公由种子决定，故不要求它一定发动（D16 的逐技能覆盖由
+    ``tests/test_heuristic_ai.py`` 的确定性场景负责）；这里钉的是本票验收的那一条——
+    含界·蜀武将的整局跑完、终局与身份胜负一致、零非法、可回放。
+    """
+    engine = Engine.new_game(
+        seed=M6_JIE_SHU_SEED,
+        rule_config=RuleConfig(player_count=PLAYERS),
+        pack=PACK,
+        heroes=M6_JIE_SHU_HEROES,
+    )
+    scans = _participants(M6_JIE_SHU_SEED)
+
+    engine.run(scans)
+
+    assert [player.hero for player in engine.state.players] == list(M6_JIE_SHU_HEROES)
+    assert engine.finished, "必达终局"
+    tail = engine.records[-1]
+    assert tail.kind == "game_end"
+    assert tail.result in ("winner", "draw"), f"终局结果非法：{tail.result!r}"
+    _assert_endgame_identity_consistency(engine, M6_JIE_SHU_SEED)
+    assert all(scan.illegal == 0 for scan in scans), "出现了候选集合之外的应答"
+    assert sum(scan.answers for scan in scans) > 0
+
+    activated = {
+        record.action.skill_id
+        for record in engine.records
+        if record.kind == "action"
+        and record.accepted
+        and getattr(record.action, "skill_id", None)
+    }
+    assert activated & {
+        "hero.jie_liubei.rende",
+        "hero.jie_liubei.jijiang",
+        "hero.jie_zhaoyun.longdan",
+        "hero.jie_zhaoyun.yajiao",
+        "hero.jie_zhugeliang.guanxing",
+    }, f"本局一条界·蜀技能都没发动（AI 覆盖落空）：{sorted(activated)}"
+
+    replayed_seed, tape = tape_from_journal(engine.records)
+    assert replayed_seed == M6_JIE_SHU_SEED and tape
+    replay = Engine.new_game(
+        seed=replayed_seed,
+        rule_config=RuleConfig(player_count=PLAYERS),
+        pack=PACK,
+        heroes=M6_JIE_SHU_HEROES,
+    )
+    replay.run([TapePlayer(tape)] * PLAYERS)
+
+    assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"

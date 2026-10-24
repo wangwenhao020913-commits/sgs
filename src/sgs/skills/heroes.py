@@ -248,6 +248,27 @@ def _dodge(state: GameState, card_id: int) -> bool:
     return _convertible(state, card_id, card_type="dodge")
 
 
+def _product_in_pack(state: GameState, type_id: str) -> bool:
+    """这种牌名在**当前牌堆**里存在实体牌吗（界【龙胆】的 酒↔桃 方向用）。
+
+    牌堆档位是内容事实：标准 108 档没有【酒】（它随军争 160 档进入）。把一张【桃】转成
+    一张**牌堆里根本不存在的牌**时，虚拟牌的名字只能回落到 type id（界面上会出现
+    "wine"），且"使用一张牌堆外的牌"也不是这套数据的语义。故这两个方向只在产物牌名
+    有实体牌时产出候选；杀 / 闪 / 桃三个既有方向不受影响（标准包里都有实体牌）。
+    """
+    return any(card.type == type_id for card in state.cards)
+
+
+def _wine(state: GameState, card_id: int) -> bool:
+    """牌名谓词：【酒】（【龙胆】的【酒】→【桃】，§十九 L2083–L2084）。"""
+    return _convertible(state, card_id, card_type="wine") and _product_in_pack(state, "peach")
+
+
+def _peach_to_wine(state: GameState, card_id: int) -> bool:
+    """牌名谓词：【桃】（【龙胆】的【桃】→【酒】；产物牌名不在本档牌堆时不产出）。"""
+    return _convertible(state, card_id, card_type="peach") and _product_in_pack(state, "wine")
+
+
 def _diamond_slash_target_pool(
     state: GameState, ctx: ModifierContext, current: Any
 ) -> Any:
@@ -298,6 +319,9 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         requirement="选择1张红色牌当【杀】使用或打出；方块【杀】无距离限制",
     ),
     # 赵云【龙胆】两条方向共用一个技能 id（规则 982）。
+    # M6 票 16：界赵云【龙胆】的 杀↔闪 两向与标准版**逐字相同**（§十九 L2082–L2084），
+    # 故经 ``shared_with`` 派生 ``hero.jie_zhaoyun.longdan``，不复制这两行；另加的
+    # 酒↔桃 两向是**另一份声明**（产物牌名不同），见下面两条。
     ConversionSkill(
         hero_id="zhaoyun",
         short_id="longdan",
@@ -306,6 +330,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         predicate=_slash,
         scopes=(CandidateScope.DODGE, CandidateScope.RESPOND),
         requirement="选择1张【杀】当【闪】打出",
+        shared_with=("jie_zhaoyun",),
     ),
     ConversionSkill(
         hero_id="zhaoyun",
@@ -315,6 +340,29 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         predicate=_dodge,
         scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
         requirement="选择1张【闪】当【杀】使用或打出",
+        shared_with=("jie_zhaoyun",),
+    ),
+    # 界赵云【龙胆】的 酒↔桃 两向（§十九 L2083–L2084）。【酒】当【桃】：出牌阶段可当
+    # 【桃】对自己使用（受伤时），濒死求桃窗口由 ``_transformed_peaches`` 按产物牌名取
+    # （该窗口不读 ``scopes``）。【桃】当【酒】：出牌阶段使用（每回合限一次由【酒】的
+    # 行为表收住，目标只能是自己）。
+    ConversionSkill(
+        hero_id="jie_zhaoyun",
+        short_id="longdan",
+        target_type_id="peach",
+        source_zone=_hand_equip,
+        predicate=_wine,
+        scopes=(CandidateScope.PLAY,),
+        requirement="选择1张【酒】当【桃】使用",
+    ),
+    ConversionSkill(
+        hero_id="jie_zhaoyun",
+        short_id="longdan",
+        target_type_id="wine",
+        source_zone=_hand_equip,
+        predicate=_peach_to_wine,
+        scopes=(CandidateScope.PLAY,),
+        requirement="选择1张【桃】当【酒】使用",
     ),
     # 大乔【国色】：一张方块牌当【乐不思蜀】使用（规则 1024）。
     ConversionSkill(
