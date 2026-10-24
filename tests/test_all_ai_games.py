@@ -26,7 +26,13 @@ from sgs.agents import (
     is_structured_activation,
     tape_from_journal,
 )
-from sgs.data import Identity, RuleConfig, load_content_pack
+from sgs.data import (
+    Identity,
+    RuleConfig,
+    enabled_hero_ids,
+    hero_by_id,
+    load_content_pack,
+)
 from sgs.engine import Engine, RandomSource
 
 from support import ACCEPTANCE_SEEDS
@@ -78,20 +84,20 @@ class _IllegalAnswerScan:
         return action
 
 
-def _new_engine(seed: int, *, pack=PACK) -> Engine:
-    """与命令行同源的建局：5 人、标准版全表、**武将开启**（``hero_pool=()`` = 启用池）。"""
+def _new_engine(seed: int, *, pack=PACK, players: int = PLAYERS) -> Engine:
+    """与命令行同源的建局：默认 5 人、标准版全表、**武将开启**（``hero_pool=()`` = 启用池）。"""
     return Engine.new_game(
         seed=seed,
-        rule_config=RuleConfig(player_count=PLAYERS),
+        rule_config=RuleConfig(player_count=players),
         pack=pack,
         hero_pool=(),
     )
 
 
-def _participants(seed: int) -> list[_IllegalAnswerScan]:
-    """五个座位共用同一个 ``ai`` 子流（与 ``cli.py`` 的 ``_player`` 一处口径）。"""
+def _participants(seed: int, players: int = PLAYERS) -> list[_IllegalAnswerScan]:
+    """所有座位共用同一个 ``ai`` 子流（与 ``cli.py`` 的 ``_player`` 一处口径）。"""
     stream = RandomSource(seed).substream("ai")
-    return [_IllegalAnswerScan(HeuristicPlayer(stream)) for _ in range(PLAYERS)]
+    return [_IllegalAnswerScan(HeuristicPlayer(stream)) for _ in range(players)]
 
 
 def _fail(seed: int, message: str) -> None:
@@ -700,5 +706,79 @@ def test_the_m6_jie_qun_heroes_finish_a_full_ai_game_cleanly_and_replay():
         heroes=M6_JIE_QUN_HEROES,
     )
     replay.run([TapePlayer(tape)] * PLAYERS)
+
+    assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"
+
+
+# ---------------------------------------------------------------------------
+# M6 票 22（收口 / spec P2-2）：**8 个固定种子**的 8 人**混合池**全 AI 局
+# ---------------------------------------------------------------------------
+
+M6_CLOSEOUT_SEEDS: tuple[int, ...] = (136, 137, 138, 139, 140, 141, 142, 143)
+"""spec P2-2 的 **8 个固定种子**（票 22 收口批；取 32 种子验收批的前 8 个）。
+
+写死而不是从 :data:`~support.ACCEPTANCE_SEEDS` 切片：种子批本身是验收内容，
+换批必须同时改票面 ``## Answer`` 与 ``acceptance-map.md`` 的 P2-2 行。
+"""
+
+M6_CLOSEOUT_PLAYERS = 8
+"""8 人身份局（1 主 / 2 忠 / 4 反 / 1 内）：与票 20 A2 的人类混合池 e2e 同一个座位数。"""
+
+
+def test_the_m6_closeout_batch_is_eight_fixed_seeds() -> None:
+    """本批恰好 8 个**互异**的固定种子，且与 32 种子基准组同批（不偷偷换种）。"""
+    assert len(M6_CLOSEOUT_SEEDS) == 8
+    assert len(set(M6_CLOSEOUT_SEEDS)) == 8
+    assert set(M6_CLOSEOUT_SEEDS) <= set(ACCEPTANCE_SEEDS)
+
+
+@pytest.mark.parametrize("seed", M6_CLOSEOUT_SEEDS)
+def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -> None:
+    """spec P2-2：8 个固定种子的混合池全 AI 局，逐局四条判据（票 22）。
+
+    1. **跑完**（必达 ``game_end``）；
+    2. **终局与身份胜负一致**（与基准组同一个复核面：读引擎全知态的身份）；
+    3. **零非法应答**（每次应答都在候选 / 清单 / 附带指定池里）；
+    4. **可回放**（磁带重放后记录流逐字节相等）。
+
+    池 = **默认启用池**（spec D19：标准 25 + 界版 29 = 54 个版本 / 29 个真名），不显式
+    发将、不点将、不设禁将。逐局另外断言真的从混合池里发牌：8 名武将都在池内、8 个真名
+    互异（同一真名至多一个座位）、且标准版与界版**两版都在场**——否则"混合池"这一条
+    可以被一局全标准版的空转局糊弄过去。
+    """
+    pool = enabled_hero_ids()
+    true_names = {hero_by_id(hero_id).true_name for hero_id in pool}
+    assert (len(pool), len(true_names)) == (54, 29), "spec D18/D19 的收口池"
+
+    engine = _new_engine(seed, players=M6_CLOSEOUT_PLAYERS)
+    scans = _participants(seed, M6_CLOSEOUT_PLAYERS)
+    engine.run(scans)
+
+    heroes = [player.hero for player in engine.state.players]
+    versions = {hero_by_id(hero_id).version for hero_id in heroes}
+    assert len(heroes) == M6_CLOSEOUT_PLAYERS
+    assert set(heroes) <= set(pool), f"发出了启用池外的武将：{sorted(set(heroes) - set(pool))}"
+    assert len(set(heroes)) == M6_CLOSEOUT_PLAYERS
+    assert (
+        len({hero_by_id(hero_id).true_name for hero_id in heroes}) == M6_CLOSEOUT_PLAYERS
+    ), "同一真名占了两个座位"
+    assert versions == {"standard", "jie-ol"}, f"这一局不是混合池：{versions}"
+
+    # ① 跑完
+    assert engine.finished, "必达终局"
+    tail = engine.records[-1]
+    assert tail.kind == "game_end", "最后一条记录必须是 game_end"
+    assert tail.result in ("winner", "draw"), f"终局结果非法：{tail.result!r}"
+    # ② 终局与身份胜负一致
+    _assert_endgame_identity_consistency(engine, seed)
+    # ③ 零非法应答
+    assert all(scan.illegal == 0 for scan in scans), "出现了候选集合之外的应答"
+    assert sum(scan.answers for scan in scans) > 0, "整局没有任何应答（断言不空转）"
+
+    # ④ 可回放
+    replayed_seed, tape = tape_from_journal(engine.records)
+    assert replayed_seed == seed and tape, "磁带必须带上种子与行动序列"
+    replay = _new_engine(replayed_seed, players=M6_CLOSEOUT_PLAYERS)
+    replay.run([TapePlayer(tape)] * M6_CLOSEOUT_PLAYERS)
 
     assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"
