@@ -437,7 +437,8 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     """真名 / 版本 / 势力 / 体力上限 / 技能清单逐项落定（第十九章 L2067–L2081 等）。
 
     真名是**字段**而不是从显示名派生（票面「数据与加载」；4 名只有界版的武将没有可剥的
-    前缀）。票 12 才把标准 25 名的真名补齐，故本票只要求界版这半已带上。
+    前缀）。票 04 先落界版这半；票 12 已把标准 25 名补齐并把字段收紧为必写
+    （``test_the_standard_roster_carries_its_true_names_as_a_field``）。
     票 05 追加界张飞：技能类型里第一次出现**限定技**（``LIMITED``，§四 L350–L355）。
     """
     jie = load_heroes("jie")
@@ -774,6 +775,87 @@ def test_the_jie_pack_keeps_the_same_three_segment_validation():
 
     raw = load_heroes("jie").model_dump(mode="json")
     del raw["heroes"][0]["true_name"]
-    raw["heroes"][0]["true_name"] = None
-    table = validate_heroes(raw, file="heroes.jie.json")
-    assert table.by_id("jie_guanyu").true_name is None, "真名仍是可选字段（票 12 收紧）"
+    with pytest.raises(DataLoadError) as excinfo:
+        validate_heroes(raw, file="heroes.jie.json")
+    assert [error.rule_id for error in excinfo.value.errors] == ["structure.missing"]
+    assert excinfo.value.errors[0].loc == "/heroes/0/true_name"
+
+
+# ---------------------------------------------------------------------------
+# 真名（M6 票 12）：标准 25 名补齐；必写；同一真名的版本不重复
+# ---------------------------------------------------------------------------
+
+
+def test_the_standard_roster_carries_its_true_names_as_a_field():
+    """标准 25 名的真名逐项落定（手工抄写的独立真源，不从显示名回读）。
+
+    "真名是字段、不从显示名派生"在标准表上看不出差别（25 名没有可剥的前缀），真正的
+    判据在界版那半：4 名只有界版的武将（M6 现有的界徐庶）没有可剥的"界"前缀。本表
+    同时钉住"每名都有值"—— 真名是配将的分组键，缺一条会让真名池静默少一个。
+    """
+    table = load_heroes()
+
+    assert {hero.id: hero.true_name for hero in table.heroes} == {
+        "caocao": "曹操",
+        "simayi": "司马懿",
+        "xiahoudun": "夏侯惇",
+        "zhangliao": "张辽",
+        "xuchu": "许褚",
+        "guojia": "郭嘉",
+        "zhenji": "甄姬",
+        "liubei": "刘备",
+        "guanyu": "关羽",
+        "zhangfei": "张飞",
+        "zhaoyun": "赵云",
+        "machao": "马超",
+        "zhugeliang": "诸葛亮",
+        "huangyueying": "黄月英",
+        "sunquan": "孙权",
+        "ganning": "甘宁",
+        "lvmeng": "吕蒙",
+        "huanggai": "黄盖",
+        "zhouyu": "周瑜",
+        "daqiao": "大乔",
+        "luxun": "陆逊",
+        "sunshangxiang": "孙尚香",
+        "huatuo": "华佗",
+        "lvbu": "吕布",
+        "diaochan": "貂蝉",
+    }
+
+
+def test_true_name_is_a_required_field_now_that_both_tables_carry_it():
+    """票 04 把真名留成可选的过渡到此结束：缺字段是结构错误，不是"按显示名补"。"""
+    raw = _heroes_raw()
+    del raw["heroes"][0]["true_name"]
+
+    errors = _errors(raw)
+
+    assert [error.rule_id for error in errors] == ["structure.missing"]
+    assert errors[0].loc == "/heroes/0/true_name"
+
+
+def test_an_empty_true_name_is_rejected():
+    raw = _heroes_raw()
+    raw["heroes"][0]["true_name"] = ""
+
+    errors = _errors(raw)
+
+    assert [error.rule_id for error in errors] == ["structure.string_too_short"]
+    assert errors[0].loc == "/heroes/0/true_name"
+
+
+def test_one_true_name_cannot_have_two_records_of_the_same_version():
+    """同一真名的同一版本至多一条记录（"一个版本"与"一名武将"一一对应）。
+
+    跨表的同一真名（标准关羽 / 界关羽）是**不同版本**，不受这条限制；受限制的是"标准表
+    里出现两条标准曹操"这种会让版本抽签与座位不变量都失真的事。
+    """
+    raw = _heroes_raw()
+    raw["heroes"][_index_of(raw, "simayi")]["true_name"] = "曹操"
+
+    errors = _errors(raw)
+
+    assert [error.rule_id for error in errors] == ["heroes.duplicate_true_name_version"]
+    assert errors[0].loc == f"/heroes/{_index_of(raw, 'simayi')}/true_name"
+    assert "曹操" in errors[0].expected

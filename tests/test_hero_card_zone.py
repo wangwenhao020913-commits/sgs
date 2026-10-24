@@ -733,8 +733,14 @@ def _draw_records_until_return(engine: Engine, after_seq: int) -> list:
 
 
 def test_lianying_counts_the_hand_cards_lost_this_time_and_draws_for_each_chosen_seat() -> None:
-    """正例（X = 2）：【谦逊】一次扣下两张手牌 ⇒ 至多选 2 名角色各摸一张。"""
-    trick = _card("dismantlement")
+    """正例（X = 2）：【谦逊】一次扣下两张手牌 ⇒ 至多选 2 名角色各摸一张。
+
+    触发锦囊取【决斗】而不是【过河拆桥】：后者的"弃置其区域里的一张牌"在【谦逊】/【连营】
+    之后结算，而【连营】摸到的那张牌此时是陆逊**唯一**的手牌——被弃掉会再触发一次【连营】
+    （X = 1，M6 票 12 修好"挂起后续跑不再提前走栈"后正确的级联）。那条级联是另一条机制
+    组合，不该混进"X = 此次失去的张数"的判据；本用例只要一次 X = 2 的触发。
+    """
+    trick = _card("duel")
     hand = _spare_cards(trick)
     engine = Engine.from_state(_trick_state(victim_hand=hand, trick=trick), seed=7)
     asked: list[tuple[str, ...]] = []
@@ -753,7 +759,7 @@ def test_lianying_counts_the_hand_cards_lost_this_time_and_draws_for_each_chosen
 
     run_turns(
         engine,
-        [_use_card(trick, "dismantlement"), Scripted(victim)],
+        [_use_card(trick, "duel"), Scripted(victim)],
         turns=1,
     )
 
@@ -978,3 +984,31 @@ def test_the_placement_primitive_refuses_a_skill_that_is_not_registered_as_place
             None, owner=0, skill_id=JIE_LIANYING, holder=0, cards=state.refs((0,))
         )
     assert engine.state.player(0).hero_cards == {}
+
+
+def test_a_move_after_question_stops_the_engine_before_the_next_frame_asks() -> None:
+    """混合池回归（M6 票 12 暴露）：``MOVE_AFTER`` 挂起后，``_step`` 必须在询问处停住。
+
+    复现（默认混合池 seed=148 的真实组合）：界陆逊【谦逊】把全部手牌放上武将牌 ⇒ 这次
+    移动的 ``MOVE_AFTER`` 派发里【连营】发 ``SELECT_OPTION`` 问"令谁摸牌"。旧的
+    ``_step`` 在 ``_flush_pending_move`` 返回后**继续走结算栈**，于是同一步又发出一条
+    无关询问并覆盖 ``pending``；那条应答随后被【连营】的下一问错配，
+    ``ask_option`` 的断言当场崩（``isinstance(action, (SelectOption, Pass))``）。
+
+    判据 = **这一局跑得完**：两条会发问的 ``MOVE_AFTER`` 路径（【谦逊】的放置帧 +
+    【连营】）在同一局里真的同场，正是"混合局可玩"的前提。
+    """
+    from sgs.agents import HeuristicPlayer
+    from sgs.engine import RandomSource
+
+    engine = Engine.new_game(
+        seed=148,
+        rule_config=RuleConfig(player_count=5),
+        pack=PACK,
+        heroes=("ganning", "liubei", "jie_luxun", "zhaoyun", "huatuo"),
+    )
+    stream = RandomSource(148).substream("ai")
+
+    engine.run([HeuristicPlayer(stream) for _ in range(5)])
+
+    assert engine.finished, "这一局必须跑到终局（挂起后不得再发第二条询问）"

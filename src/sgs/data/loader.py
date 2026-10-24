@@ -34,6 +34,7 @@ from .models import (
     CardType,
     ContentPack,
     Deck,
+    Hero,
     HeroTable,
     PlacementDecl,
     SkillType,
@@ -48,6 +49,7 @@ __all__ = [
     "card_category",
     "enabled_hero_ids",
     "hero_card_skill_ids",
+    "hero_by_id",
     "hero_placement_decl",
     "hero_placement_decls",
     "hero_skill_id",
@@ -83,7 +85,8 @@ HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = ("jie",)
 ``files/heroes.jie.json`` 是独立的一份 :class:`~sgs.data.models.HeroTable`，**不是**
 内容包（内容包管牌堆与牌名，武将包管武将面）。它由 :func:`load_hero_tables` 与内容包
 自己的表一起交给读取面：载体解析按同一个武将 id 查全部表，故界将能被构造局面直接发放。
-后续界将票只往这个文件追加条目（真名配将与默认将池属于票 12）。"""
+后续界将票只往这个文件追加条目（真名配将与默认将池属于票 12：票 12 起启用池 / 默认
+将池是**两张表的并集**，配将再按真名分组）。"""
 
 HERO_SKILL_PREFIX = "hero."
 """武将技能 id 的前缀（票 01 §Data / 票 12）：``hero.<武将 id>.<短 id>``。
@@ -111,6 +114,7 @@ _EXPECTED_BY_PYDANTIC_ERROR: dict[str, str] = {
     "extra_forbidden": "无多余字段",
     "enum": "枚举取值之一",
     "string_type": "字符串",
+    "string_too_short": "非空字符串",
     "int_type": "整数",
     "int_parsing": "可解析为整数的值",
     "bool_type": "布尔值",
@@ -674,8 +678,30 @@ def _hero_semantic_errors(file: str, table: HeroTable) -> list[LoadError]:
         )
 
     seen_ids: set[str] = set()
+    seen_versions: dict[tuple[str, str], int] = {}
+    """（真名, 版本）→ 首次出现的条目下标：同一真名的同一版本只许有一条记录。"""
     for index, hero in enumerate(table.heroes):
         base = f"/heroes/{index}"
+
+        # M6 票 12：真名是配将的分组键。同一真名的**同一版本**出现两条记录时，"这一版是
+        # 哪名武将"就不再唯一；跨表的同一真名（标准关羽 / 界关羽）是不同版本，不受限。
+        version_key = (hero.true_name, hero.version)
+        first_index = seen_versions.get(version_key)
+        if first_index is not None:
+            errors.append(
+                LoadError(
+                    file=file,
+                    loc=f"{base}/true_name",
+                    expected=(
+                        f"同一真名的同一版本只出现一次（真名「{hero.true_name}」/ 版本 "
+                        f"{hero.version!r} 已在 /heroes/{first_index} 出现）"
+                    ),
+                    got=repr(hero.true_name),
+                    rule_id="heroes.duplicate_true_name_version",
+                )
+            )
+        else:
+            seen_versions[version_key] = index
 
         if hero.id in seen_ids:
             errors.append(
@@ -859,6 +885,20 @@ def load_hero_tables(pack_id: str = DEFAULT_PACK_ID) -> tuple[HeroTable, ...]:
     )
 
 
+def hero_by_id(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> Hero | None:
+    """按 id 跨**全部**武将表取武将（M6 票 12；M6 票 04 的"分开存、同一读取面"）。
+
+    配将的缺省将池是标准版 + 界版的并集，故开局初始化不能再只查内容包那张表：
+    ``build_initial`` 按抽到的 id 找武将数据（体力 / 势力 / 性别 / 真名）时走这里。
+    与 :func:`hero_skill_ids` 同姿态——未知 id 返回 ``None``，调用方 fail-closed。
+    """
+    for table in load_hero_tables(pack_id):
+        hero = table.by_id(hero_id)
+        if hero is not None:
+            return hero
+    return None
+
+
 def hero_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tuple[str, ...]:
     """某武将的**全限定技能 id**（``hero.<武将 id>.<短 id>``，按数据文件里的顺序）。
 
@@ -921,11 +961,16 @@ def hero_card_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tupl
 def enabled_hero_ids(
     table: HeroTable | None = None, *, pack_id: str = DEFAULT_PACK_ID
 ) -> tuple[str, ...]:
-    """``table`` 里**已启用**武将的 id（按数据文件顺序）；缺省读当前包的表（票 02）。
+    """**已启用**武将的 id（按数据文件顺序）；缺省读**全部**武将表（M6 票 12）。
 
     这是启用门控的**只读面**：发放段用它当"本局可发的武将池"的缺省来源，而
     :func:`validate_heroes` 用同一份 ``enabled`` 字段做条件化引用校验——两处读同一字段，
-    不各抄一份名单。``table`` 入参让"派生"这条判据能对一份注入的表单独验证。
+    不各抄一份名单。
+
+    ``table`` 入参让"派生"这条判据能对一份注入的表单独验证（仍只读那一张表）；不给时
+    读 :func:`load_hero_tables` 的**并集**（内容包表 + 扩展武将包）——票 12 起默认将池
+    是标准版与界版的全部启用版本（spec D19 的混合局），只读内容包那张表会让界将永远发
+    不出来。顺序 = 表的声明序、表内 = 数据文件顺序，故并集也是确定的。
     """
-    source = load_heroes(pack_id) if table is None else table
-    return tuple(hero.id for hero in source.heroes if hero.enabled)
+    tables = load_hero_tables(pack_id) if table is None else (table,)
+    return tuple(hero.id for source in tables for hero in source.heroes if hero.enabled)

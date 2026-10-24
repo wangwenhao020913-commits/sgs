@@ -2382,7 +2382,9 @@ def test_every_seat_carries_the_public_skill_list_for_the_detail_window() -> Non
     # 由他开局，故此刻没有任何座位装备过牌，详情清单里只有武将技能（下面断的就是它）。
     # M6 P0 票 02 换池（启用池 22 名）后原 seed 20261012 的人类不再是主公、AI 回合先跑，
     # 座位 3 已装上两张装备；按同一判据重扫到 20261016（人类主公、四座清单全 HERO）。
-    session = Session(seed=20261016, ai="heuristic", timeout_seconds=None, player_count=4)
+    # M6 票 12 起默认池是标 / 界混合池，而详情清单的名称解析仍读内容包表（界将的显示归
+    # 票 19）；按**同一判据**再扫到 20261023（人类主公、四座都发到标准版、清单全 HERO）。
+    session = Session(seed=20261023, ai="heuristic", timeout_seconds=None, player_count=4)
     snapshot = visible_snapshot(session)
 
     assert len(snapshot["players"]) == 4
@@ -4543,7 +4545,9 @@ def test_the_web_snapshot_carries_each_seats_hero_name_and_kingdom() -> None:
     """真值走完整 ``visible_snapshot``：前端不需要自己把 id 翻成名称 / 势力。"""
     from sgs.data import load_heroes
 
-    session = Session(seed=61, ai="random", timeout_seconds=None, player_count=5)
+    # M6 票 12 起默认池是标 / 界混合池，而快照的名称解析仍读内容包表（界将的显示归
+    # 票 19）；按**同一判据**（五座都发到标准版、名称与势力逐项对得上）从 1 重扫到 seed 10。
+    session = Session(seed=10, ai="random", timeout_seconds=None, player_count=5)
     heroes = load_heroes()
 
     snapshot = visible_snapshot(session)

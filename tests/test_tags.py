@@ -55,6 +55,7 @@ from sgs.engine import Engine
 from sgs.skills import CATALOG, conversion_offers
 from sgs.state import (
     CardTag,
+    DiscardCards,
     EndPhase,
     Pass,
     QueryKind,
@@ -217,6 +218,56 @@ def test_the_hand_count_excludes_tagged_cards_and_the_discard_query_follows() ->
     assert discard_count(state, player) == 0, "4 − 4 = 0 ⇒ 弃牌阶段不发询问"
 
 
+def test_discarding_the_tagged_card_does_not_end_the_discard_phase_early() -> None:
+    """弃牌阶段按**计数**收敛：把不计数的那张弃掉不会让计数下降，必须再问一次。
+
+    规则上洛神牌"不计入本回合的手牌上限"，但它仍是手牌、**可以被弃**；弃掉它只是让
+    ``len(hand)`` 降 1，``hand_count`` 不变。旧实现只问一次就进 ``PHASE_DISCARD_END``，
+    于是出现"计数仍 > 上限"的非法边界（M6 票 12 的混合局由 fuzz 抓到）。判据 = 询问
+    次数与最终边界：第一次弃掉带标签的牌之后还要再问，直到计数回落到上限。
+    """
+    state = _count_state(hand=(0, 1, 2, 3, 4, 5))
+    state.card_tags[TAGGED] = (_tag(CardTagType.LUOSHEN_HAND),)
+    engine = Engine.from_state(state, seed=7)
+    queries = []
+
+    class _Discarder:
+        """按 ``picks`` 逐次弃牌（每个询问一组牌 id）；其它询问走最小应答。"""
+
+        def __init__(self, picks) -> None:
+            self._picks = list(picks)
+
+        def respond(self, query):
+            if query.kind == QueryKind.DISCARD:
+                queries.append(query)
+                wanted = set(self._picks.pop(0))
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, DiscardCards)
+                    and {card.card_id for card in action.cards} == wanted
+                )
+            if query.kind == QueryKind.PLAY_PHASE:
+                return next(
+                    action for action in query.legal_actions if isinstance(action, EndPhase)
+                )
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+            return query.legal_actions[0]
+
+    # 初始 6 张 + 摸牌阶段 2 张 = 8；其中一张带标签 ⇒ 计数 7、上限 4 ⇒ 弃 3。
+    # 第一次弃掉"带标签的 2 号 + 两张计数牌" ⇒ 计数只降 2（7 → 5）⇒ 还要再弃 1 张。
+    run_turns(engine, [_Discarder([{2, 0, 1}, {3}]), PassPlayer()], turns=1)
+
+    player = state.player(0)
+    assert [query.count for query in queries] == [3, 1], (
+        "弃掉带标签的牌之后计数没有降到上限，弃牌阶段必须继续问"
+    )
+    assert TAGGED not in player.hand
+    assert hand_count(state, player) == hand_limit(state, player) == 4, "边界：计数回落到上限"
+
+
 def test_the_tag_never_changes_the_public_hand_count_or_enters_a_payload() -> None:
     """spec §投影与记录流：标签的增删**不改变**公开的"手牌数"这个数字。"""
     state = _count_state()
@@ -268,15 +319,24 @@ def test_the_tag_writer_is_idempotent_and_rejects_virtual_cards() -> None:
 
 
 def test_the_turn_end_clears_the_this_turn_tags_and_the_count_restores() -> None:
-    """本回合不计入：回合末清除 ⇒ 计数立刻恢复（spec §标签：生存期 = 本回合）。"""
+    """本回合不计入：回合末清除 ⇒ 计数立刻恢复（spec §标签：生存期 = 本回合）。
+
+    判据读两个查询的**关系**而不是写死张数：回合内 ``hand_count == len(hand) - 1``
+    （带标签那张不数），回合末 ``hand_count == len(hand)``（标签没了，整手都数）。
+    弃牌阶段现在会弃到**计数**回落为止（带标签的牌被弃掉时还要补弃），故"弃完之后的
+    手牌张数"不再是旧实现下的那个常量。
+    """
     engine, state = _count_engine()
     engine.add_card_tag(TAGGED, _tag(CardTagType.LUOSHEN_HAND))
-    assert discard_count(state, state.player(0)) == 0
+    player = state.player(0)
+    assert discard_count(state, player) == 0
+    assert hand_count(state, player) == len(player.hand) - 1, "回合内：带标签那张不数"
 
     run_turns(engine, [RecordingPlayer(), RecordingPlayer()], turns=1)
 
     assert state.card_tags == {}, "回合末清除全部 TURN_END 标签"
-    assert discard_count(state, state.player(0)) == 1, "计数恢复"
+    assert hand_count(state, player) == len(player.hand), "计数恢复：整手都数"
+    assert hand_count(state, player) <= hand_limit(state, player), "弃牌阶段按计数收敛"
 
 
 def test_a_zone_tag_keeps_excluding_while_in_hand_and_is_cleared_on_leaving_the_zone() -> None:

@@ -20,6 +20,11 @@
 票 02（M3）再增**发放**与**启用池**两个只读面：:func:`deal_heroes`（开局按座位序决定
 谁坐哪，走 ``hero`` 子流）与 :func:`enabled_hero_ids`（启用门控的只读查询）。
 
+M6 票 12 把配将从"版本"改到"**真名**"：:func:`deal_heroes` 先抽不同真名、再抽版本，
+并接受 :class:`HeroDealConfig`（禁将 + 手选，冻结在会话配置里、不进记录流）；
+:func:`enabled_hero_ids` 的缺省面扩到**全部武将表的并集**（默认混合局），
+:func:`hero_by_id` 是按 id 跨表取武将的同一读取面。
+
 M6 票 02 把**牌名大类** :class:`Category` 与按 ``pack_id`` 的只读查询
 :func:`card_category` 纳入公开面：【集智】的非延时锦囊与【奇才】的锦囊都按它判族
 （"这张牌是锦囊吗"），而不是各自抄一份牌名白名单。
@@ -42,6 +47,7 @@ from .loader import (
     HERO_SUPPLEMENT_PACK_IDS,
     card_category,
     enabled_hero_ids,
+    hero_by_id,
     hero_card_skill_ids,
     hero_placement_decl,
     hero_placement_decls,
@@ -65,6 +71,8 @@ from .models import (
     ContentPack,
     Gender,
     Hero,
+    HeroDealConfig,
+    HeroPick,
     HeroSkill,
     HeroTable,
     Kingdom,
@@ -91,7 +99,9 @@ __all__ = (
     "DataLoadError",
     "Gender",
     "Hero",
+    "HeroDealConfig",
     "HeroDealError",
+    "HeroPick",
     "HeroSkill",
     "HeroTable",
     "HERO_SUPPLEMENT_PACK_IDS",
@@ -112,6 +122,7 @@ __all__ = (
     "color_of_suit",
     "deal_heroes",
     "enabled_hero_ids",
+    "hero_by_id",
     "hero_card_skill_ids",
     "hero_placement_decl",
     "hero_placement_decls",

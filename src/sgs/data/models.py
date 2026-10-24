@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from enum import Enum
 from types import MappingProxyType
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "CARD_TAG_TYPES",
@@ -37,6 +37,8 @@ __all__ = [
     "DeckExpect",
     "Gender",
     "Hero",
+    "HeroDealConfig",
+    "HeroPick",
     "HeroSkill",
     "HeroTable",
     "Kingdom",
@@ -239,12 +241,13 @@ class Hero(_FrozenModel):
 
     id: str
     name: str
-    true_name: str | None = None
+    true_name: str = Field(min_length=1)
     """**真名**（M6 票 04；`GLOSSARY.md`「真名」）：同名武将不同版本共用的那个名字。
 
     它是**数据字段**，不从显示名派生：4 名只有界版的武将没有可剥的"界"前缀（spec
-    §Further Notes 第 6 条），从 `name` 反推必然漏。标准 25 名的真名由票 12 补齐，
-    故本字段在 M6 票 04 仍是**可选**（界版数据先带；票 12 补标准表后再收紧为必写）。
+    §Further Notes 第 6 条），从 `name` 反推必然漏。标准 25 名的真名由票 12 补齐；
+    票 12 起两张表都带真名，本字段因此收紧为**必写**（缺字段 / 空串都是结构错误）——
+    它是真名分组与真名池的唯一分组键，静默缺一个会让真名池少一个名字。
     真名配将（先抽真名、再抽版本）与"同一真名一局只出现一版"都读这一份。
     """
     kingdom: Kingdom
@@ -277,6 +280,35 @@ class HeroTable(_FrozenModel):
             if hero.id == hero_id:
                 return hero
         return None
+
+
+class HeroPick(_FrozenModel):
+    """一处**手选**：某个座位指定一名武将**版本**（M6 票 12；`GLOSSARY.md`「手选」）。
+
+    手选无视**禁将**（玩家点名要的版本即使被划掉也照发），但它**先占真名**：同一局里
+    别的座位不能再抽到这个真名的任何版本。故 ``hero`` 是版本级 id、真名由数据表派生，
+    存两个字段会让"手选的是不是同一个真名"多一个可漂移的真源。
+    """
+
+    seat: int = Field(ge=0)
+    hero: str = Field(min_length=1)
+
+
+class HeroDealConfig(_FrozenModel):
+    """**真名配将**的会话配置：禁将集合 + 手选（M6 票 12；spec D4 / D5）。
+
+    它是"开局前做过的选择"，与种子一起冻结进**会话配置**（票 13 落到 web 侧）：不进
+    记录流、不碰 header，故 47 条标准金录像逐字节不变（与 ``hero_assignments`` 同一条
+    纪律）。引擎只接受并遵守它——真名池不足、手选冲突这类裁定都由
+    :func:`sgs.data.deal_heroes` 在构造期 fail-closed。
+
+    ``banned_heroes`` 的粒度是**版本**：禁掉标准刘备而留着界版，"刘备"这个真名照样能
+    被抽到，只是这一局只能落到界版。``picks`` 的顺序不参与分配（座位号在条目里），
+    但它是配置的一部分，故同种子同配置必然复现同一配将结果。
+    """
+
+    banned_heroes: tuple[str, ...] = ()
+    picks: tuple[HeroPick, ...] = ()
 
 
 class Category(str, Enum):

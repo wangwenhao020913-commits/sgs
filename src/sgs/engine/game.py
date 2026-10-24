@@ -21,6 +21,7 @@ from sgs.data import (
     Color,
     ContentPack,
     Hero,
+    HeroDealConfig,
     Identity,
     Mode,
     PlacementReturn,
@@ -28,8 +29,8 @@ from sgs.data import (
     card_tag_spec,
     color_of_suit,
     deal_heroes,
+    hero_by_id,
     hero_placement_decl,
-    load_heroes,
     roster_for,
 )
 from sgs.effects import (
@@ -490,13 +491,15 @@ class Engine:
         hero_pool: Sequence[str] | None = None,
         pinned_hero: str | None = None,
         pinned_seat: int = 0,
+        hero_config: HeroDealConfig | None = None,
     ) -> "Engine":
         """造初始状态（实例化 → 洗牌 → 发身份 → 发武将 → 发牌）并带上开局那几条记录。
 
         初次洗牌与后续重洗共用同一个 ``shuffle`` 子流句柄：重洗从初次洗牌之后的位置继续取数
         （票 08 §3），因此同一 seed 的整局（含每一次重洗）逐字节可复现。
         ``heroes`` / ``hero_pool`` 与 :func:`build_initial` 同义（票 02）：缺省 = 无武将模式。
-        ``pinned_hero`` / ``pinned_seat`` 同义（票 19 的点将：钉住一个座位、其余随机）。
+        ``pinned_hero`` / ``pinned_seat`` 同义（票 19 的点将：钉住一个座位、其余随机）；
+        ``hero_config`` 是票 12 的**会话配置**（禁将 + 手选），与种子一起冻结、不进记录流。
         """
         shuffle_source = RandomSource(seed).substream("shuffle")
         state, init_records = build_initial(
@@ -508,6 +511,7 @@ class Engine:
             hero_pool=hero_pool,
             pinned_hero=pinned_hero,
             pinned_seat=pinned_seat,
+            hero_config=hero_config,
         )
         return cls(
             state, seed=seed, init_records=init_records, shuffle_source=shuffle_source
@@ -2435,7 +2439,19 @@ class Engine:
                     frame_id=frame_id,
                 )
             dispatch_frame.data[MOVE_EVENT_KEY] = event
+            # **把"正在跑的技能"还给承载帧**：``_dispatch`` 在跑每条钩子前把
+            # ``RUNNING_SKILL_KEY`` 改成钩子的 id，而 ``move_in_frame`` 的**重入判据**
+            # （:data:`_MOVE_DONE`）拿它当"这次移动是谁发起的"的一部分。挂起续跑完成后，
+            # 承载帧的 op 会原地重入 ``move_in_frame``；若不还原，身份会变成最后一条钩子的
+            # id、认不出"这次移动已经搬完"，于是把整条 ``MOVE_AFTER`` 再派发一遍
+            # （【连营】因此多摸一次牌；票 12 的混合局回归）。
+            prior_skill = frame.data.get(RUNNING_SKILL_KEY)
+            prior_had_skill = RUNNING_SKILL_KEY in frame.data
             result = dispatch_move_after(self, dispatch_frame)
+            if prior_had_skill:
+                frame.data[RUNNING_SKILL_KEY] = prior_skill
+            else:
+                frame.data.pop(RUNNING_SKILL_KEY, None)
             if result == "stay":
                 frame.data["_pending_move_timing"] = key
                 self._move_pending = (
@@ -3574,6 +3590,12 @@ class Engine:
         if self.finished:
             return
         self._flush_pending_move()
+        if self.pending is not None:
+            # 续跑的 ``MOVE_AFTER`` 派发自己又发问了（M6 票 08【清俭】/ 票 10【连营】
+            # 这类会问目标的失去牌后技能）：这一问就是本次 ``_step`` 的产物，必须停在这里。
+            # 否则结算栈会继续走、再发一条无关询问把它覆盖，那条应答随后被前一个问句
+            # 错配（M6 票 12 的混合局暴露；回归 = test_hero_card_zone 的同名用例）。
+            return
         if not self._started:
             self._start()
             return
@@ -4004,24 +4026,27 @@ class Engine:
             self.emit_timing(Timing.PHASE_DISCARD, actor=seat)
             self._turn_data["discard_emitted"] = True
         player = self.state.player(seat)
-        if discard_count(self.state, player) <= 0:
-            return None
-        action = self.ask(
-            lambda seq: self._build_query(QueryKind.DISCARD, seat, Timing.PHASE_DISCARD, seq)
-        )
-        if action is SUSPEND:
-            return "stay"
-        # 弃牌阶段没有承载帧，但"弃置"也是**失去**（票 07 §要做什么 5）：走同一个移动入口，
-        # 由它按惰性守卫派发 `MOVE_AFTER`；记录坐标（frame_id=0 / depth=stack.depth）与
-        # 既有那条 `card_move` 一致——无武将时零派发，M2 基准一行不变。
-        self.move_in_frame(
-            None,
-            action.cards,
-            to_zone=ZoneRef(Zone.DISCARD),
-            reason=MoveReason.DISCARD,
-            owner=seat,
-            actor=seat,
-        )
+        # 弃到**计数**回落为止（票 09 的排除计数标签）：玩家可以弃掉"不计数"的那张
+        # （它仍是手牌），但那不会让 ``hand_count`` 下降 ⇒ 必须再问一次，直到计数 ≤ 上限。
+        # 只问一次会让"弃掉带标签的牌"留下计数仍超上限的非法边界（M6 票 12 的混合局
+        # 由 fuzz 抓到）。
+        while discard_count(self.state, player) > 0:
+            action = self.ask(
+                lambda seq: self._build_query(QueryKind.DISCARD, seat, Timing.PHASE_DISCARD, seq)
+            )
+            if action is SUSPEND:
+                return "stay"
+            # 弃牌阶段没有承载帧，但"弃置"也是**失去**（票 07 §要做什么 5）：走同一个移动入口，
+            # 由它按惰性守卫派发 `MOVE_AFTER`；记录坐标（frame_id=0 / depth=stack.depth）与
+            # 既有那条 `card_move` 一致——无武将时零派发，M2 基准一行不变。
+            self.move_in_frame(
+                None,
+                action.cards,
+                to_zone=ZoneRef(Zone.DISCARD),
+                reason=MoveReason.DISCARD,
+                owner=seat,
+                actor=seat,
+            )
         return None
 
     def _phase_discard_end(self) -> None:
@@ -4189,6 +4214,7 @@ def build_initial(
     hero_pool: Sequence[str] | None = None,
     pinned_hero: str | None = None,
     pinned_seat: int = 0,
+    hero_config: HeroDealConfig | None = None,
 ) -> tuple[GameState, tuple[JournalRecord, ...]]:
     """实例化牌堆 → 洗牌 → 发身份（身份局）→ 发武将 → 发牌；顺带产出开局那几条记录。
 
@@ -4198,21 +4224,25 @@ def build_initial(
     无身份局完全不产生 ``identity_deal``，故 M1 六条基准的 seq 布局不变。
     ``shuffle_source`` 由 :meth:`Engine.new_game` 交进来，好让中局重洗接着同一子流取数。
 
-    **武将发放**（票 02）走唯一随机源的专用子流 ``hero``：``heroes`` 为空 = **无武将模式**
-    （M2 的 34 条基准靠它保持有效）、非空 = 显式指定；``hero_pool`` 非 ``None`` 时从该池
-    不重复随机抽 N 名。``pinned_hero`` / ``pinned_seat``（票 19 的点将）钉住一个座位、其余
-    从去掉它的池里随机——仍只取 ``hero`` 子流。发放段本身**不产出记录**（武将不是牌、
-    也没有 delta），故关掉武将时记录流逐字节不变。
+    **武将发放**（票 02 / 票 12）走唯一随机源的专用子流 ``hero``：``heroes`` 为空 =
+    **无武将模式**（M2 的 34 条基准靠它保持有效）、非空 = 显式指定；``hero_pool`` 非
+    ``None`` 时从该池按**真名**两段抽取（先抽不同真名、再抽版本）。``pinned_hero`` /
+    ``pinned_seat``（票 19 的点将）与 ``hero_config``（票 12 的会话配置：禁将 + 手选）
+    都只走 ``hero`` 子流。发放段本身**不产出记录**（武将不是牌、也没有 delta），故关掉
+    武将时记录流逐字节不变。
+
+    ``hero_config`` **不进记录流**（与 ``hero_assignments`` 同一条纪律）：禁将 / 手选是
+    开局前做过的选择，不是局面事实；它由接入层冻结在会话配置里（票 13），这里只接受并
+    遵守它。
     """
-    heroes_table = load_heroes(pack.pack_id)
-    assigned = deal_heroes(
+    dealt = deal_heroes(
         seat_count=rule_config.player_count,
         stream=RandomSource(seed).substream("hero"),
         heroes=heroes,
         hero_pool=hero_pool,
         pinned_hero=pinned_hero,
         pinned_seat=pinned_seat,
-        table=heroes_table,
+        hero_config=hero_config,
     )
     cards = instantiate_cards(pack)
     identities = _deal_identities(seed=seed, rule_config=rule_config)
@@ -4220,7 +4250,7 @@ def build_initial(
         _initial_player(
             seat,
             identities[seat] if identities is not None else None,
-            None if assigned is None else heroes_table.by_id(assigned[seat]),
+            None if dealt is None else hero_by_id(dealt[seat], pack_id=pack.pack_id),
         )
         for seat in range(rule_config.player_count)
     )
@@ -4286,10 +4316,12 @@ def new_game(
     hero_pool: Sequence[str] | None = None,
     pinned_hero: str | None = None,
     pinned_seat: int = 0,
+    hero_config: HeroDealConfig | None = None,
 ) -> GameState:
     """便利包装：造初始状态（实例化牌堆 → 洗牌 → 发身份 → 发武将 → 发牌），不返回记录流。
 
-    要"跑一局并拿到记录流"用 :meth:`Engine.new_game`。``heroes`` / ``hero_pool`` 同义。
+    要"跑一局并拿到记录流"用 :meth:`Engine.new_game`。``heroes`` / ``hero_pool`` /
+    ``pinned_hero`` / ``hero_config`` 同义。
     """
     return build_initial(
         seed=seed,
@@ -4299,4 +4331,5 @@ def new_game(
         hero_pool=hero_pool,
         pinned_hero=pinned_hero,
         pinned_seat=pinned_seat,
+        hero_config=hero_config,
     )[0]
