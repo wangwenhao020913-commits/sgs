@@ -1759,6 +1759,7 @@ class Engine:
         mode: RespondMode = RespondMode.PLAY,
         use_targets: tuple[int, ...] = (),
         providers_used: tuple[str, ...] = (),
+        zones: tuple[Zone, ...] = (Zone.HAND,),
     ) -> Any:
         """向 ``actor`` 发一次 ``RESPOND`` 询问；重入直接返回已存应答（票 19 §8）。
 
@@ -1767,6 +1768,8 @@ class Engine:
         ``window_frame`` + ``target`` 承载）；``mode = PLAY`` 是打出（无目标）。
 
         ``providers_used`` 供"需要【闪】"窗口过滤已问过的装备提供者（票 10 §5.5）。
+        ``zones`` = 候选牌取自应答者的哪几个区（缺省手牌）；改判窗口按
+        :func:`~sgs.skills.rejudge_card_zones` 传入（界【鬼才】含装备区，M6 票 14）。
         """
         payload = RespondContext(
             cause=cause,
@@ -1776,6 +1779,7 @@ class Engine:
             mode=mode,
             use_targets=tuple(use_targets),
             providers_used=tuple(providers_used),
+            zones=tuple(zones),
         )
         return self.ask(
             lambda seq: self._build_query(

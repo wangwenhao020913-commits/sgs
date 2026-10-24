@@ -1883,7 +1883,7 @@ def _coverage_lijian():
 
 
 def _coverage_jie_lijian():
-    """M6 票 07：界貂蝉【离间】与标准版同一条三步清单（AI 填表复用同一条路径）。"""
+    """M6 票 07：界貂蝉【离间】先选目标、再选使用者（与标准版次序相反，AI 填同一条预发动路径）。"""
     lightning = _ids("lightning")[0]
     state = build_state(
         pack=PACK,

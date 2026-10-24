@@ -249,6 +249,15 @@ class SkillDef:
     应答者队列由 :func:`~sgs.skills.rejudge_capable_seats` 读**存活实例**的定义字段得座位集合。
     """
 
+    rejudge_zones: tuple[Zone, ...] = (Zone.HAND,)
+    """改判窗口的候选牌取自哪几个区（M6 票 14 的加法；缺省 = 一张**手牌**）。
+
+    牌面差别：标准【鬼才】（§九 L942）「打出一张**手牌**代替之」；界【鬼才】（§十九
+    L2021）「打出**一张牌**代替之」——`参考资料/界限突破-界标准包武将资料.md` 记作
+    "鬼才由'一张手牌'放宽为'一张牌'"，故界版带装备区。判定帧的 ``RESPOND`` 窗口按
+    :func:`~sgs.skills.rejudge_card_zones` 现算，引擎不认识任何具体技能 id。
+    """
+
     preactivated: bool = False
     """本技能是否已迁到**预发动**（W4-1 的迁移开关，缺省 ``False``）。
 

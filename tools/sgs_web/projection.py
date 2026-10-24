@@ -862,6 +862,22 @@ def _count_needed(engine: Any, query: Query, data: dict[str, Any]) -> int:
     return int(response_count(engine.state, source=source, card=data.get("card"), target=target))
 
 
+def _rejudge_requirement(engine: Any, query: Query) -> str:
+    """改判窗口的"需要做什么"：读**应答座位**当前活着的改判技能定义（不写死一句）。
+
+    标准【鬼才】"打出一张**手牌**"（§九 L942）、界【鬼才】"打出**一张牌**"（§十九 L2021）
+    ——两版文案不同，而界面按"本窗口文案 == 该技能声明的 ``requirement``"认领那个只说明
+    入口（`tools/sgs_web/static/table.js:rejudgeWindowEntry`），写死会让界版对不上。
+    找不到定义（构造局面 / 事件外的预览）时退回标准版文案，与 M5 起的既有字符串逐字相同。
+    """
+    fallback = "打出一张手牌，代替此判定牌"
+    actor = int(getattr(query, "actor", -1))
+    for instance in resolve_instances(engine.state):
+        if instance.owner == actor and instance.definition.rejudge_capable:
+            return instance.definition.requirement or fallback
+    return fallback
+
+
 def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) -> str | None:
     """**不带技能归属**的窗口的"需要做什么"（表现层表；不新增真源）。"""
     kind = str(getattr(query, "kind", ""))
@@ -920,7 +936,7 @@ def _card_window_requirement(engine: Any, query: Query, data: dict[str, Any]) ->
             card = {"slash": "【杀】", "dodge": "【闪】"}.get(required, "一张牌")
             return f"需要打出{card}"
         if cause is WindowCause.REJUDGE:
-            return "打出一张手牌，代替此判定牌"
+            return _rejudge_requirement(engine, query)
     return None
 
 

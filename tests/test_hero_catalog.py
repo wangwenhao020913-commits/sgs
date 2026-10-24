@@ -1291,7 +1291,8 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         "hero.luxun.lianying": (_HookFrame(**{MOVE_EVENT_KEY: move_lianying}),),
         "hero.sunshangxiang.xiaoji": (_HookFrame(**{MOVE_EVENT_KEY: move_xiaoji}),),
         "equip.silver_lion": (_HookFrame(**{MOVE_EVENT_KEY: move_silver_lion}),),
-        # M6 票 08：界【集智】与标准版同一条条件（使用者是我 + 非延时转化锦囊）；
+        # M6 票 08：界【集智】的正面帧与标准版同形（使用者是我 + 非延时类锦囊），但两版
+        # **条件已按牌面分开**（标准版收转化锦囊、界版不收，M6 评审订正），此处只核"关于我"；
         # 【清俭】的正面帧 = 一次"处理区 → 我的手牌"的获得（ME 是获得者）；
         # 界【刚烈】与标准版同形（受伤的是我、来源是座位 0）。
         "hero.jie_huangyueying.jizhi": (

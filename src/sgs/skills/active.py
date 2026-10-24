@@ -95,6 +95,7 @@ __all__ = [
     "ACTIVE_SKILLS",
     "CANDIDATE_CAP",
     "JIE_LIJIAN",
+    "JIE_LIJIAN_FLOW",
     "ActiveSkill",
     "Arrange",
     "PickCards",
@@ -1297,9 +1298,9 @@ def _lijian_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     if not cards or not _lijian_partners(state, ctx.subject):
         return current
     # 票 01 / W4-2：候选**恒为一条骨架**（不再烘"牌 × 有序男性对"），且它立刻被引擎从
-    # 已翻预发动的技能里删掉——弃哪张、谁是使用者、谁是目标由 :data:`LIJIAN_FLOW` 的
-    # 三步清单表达；故候选数与手牌数、场上男性数无关，``CANDIDATE_CAP`` 的降级路径对
-    # 【离间】不再触发。
+    # 已翻预发动的技能里删掉——弃哪张、谁是使用者、谁是目标由该版的 ``*LIJIAN_FLOW``
+    # 三步清单表达（标准版先使用者、界版先目标，M6 评审）；故候选数与手牌数、场上男性数
+    # 无关，``CANDIDATE_CAP`` 的降级路径对【离间】不再触发。
     return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
 
@@ -1361,6 +1362,42 @@ def _lijian_victims(
     return _lijian_partners(state, owner).get(int(users[0]), ())
 
 
+def _lijian_targets(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """**界版**步 2 的池：**至少有一名合法使用者**的男性（能当【决斗】目标的人，座位序）。
+
+    与标准版步 2（使用者池）是同一张 :func:`_lijian_partners` 表的两侧：标准版取**键**
+    （使用者）、界版取**值的并集**（目标）。顺序 = 玩家序（表本身的键序也是玩家序）。
+    """
+    del frame, chosen
+    targetable = {
+        victim for victims in _lijian_partners(state, owner).values() for victim in victims
+    }
+    return tuple(seat for seat in _lijian_males(state, owner) if seat in targetable)
+
+
+def _jie_lijian_users(
+    state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """**界版**步 3 的池：**已选中那名目标**的合法使用者（座位序）。
+
+    池依赖前序答案 ⇒ 读 ``preactivation_answers`` 的 **``victim``** 那一栏（标准版读的是
+    ``user`` 栏，两版的两次座位询问正好反过来）：§十九 L2196–L2198「依次选择两名男性其他
+    角色，令**后者**视为对**前者**使用一张不能被响应的【决斗】」——第一次点的是"前者"
+    （【决斗】的目标），第二次点的才是"后者"（使用者）。没有前序答案 ⇒ 空池。
+    """
+    del chosen
+    answers = (getattr(frame, "data", {}) or {}).get("preactivation_answers") or {}
+    targets = answers.get("victim") or ()
+    if not targets:
+        return ()
+    target = int(targets[0])
+    return tuple(
+        user for user, victims in _lijian_partners(state, owner).items() if target in victims
+    )
+
+
 def _lijian_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     """提交点：弃成本 → 使用者对其受害者发起【决斗】。
 
@@ -1369,7 +1406,9 @@ def _lijian_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     不重复记账。
 
     **标准 / 界两版共用本函数**：界貂蝉（``frame.data["skill_id"] == JIE_LIJIAN``）把这条
-    虚拟【决斗】标成**不可响应**（全场档 ``Tag.UNRESPONSIVE``）；标准版一字不改。
+    虚拟【决斗】标成**不可响应**（全场档 ``Tag.UNRESPONSIVE``）；标准版一字不改。两版的
+    **选择序不同**（标准版先使用者、界版先目标），但答案键相同 ⇒ 这里读
+    ``answers["user"]`` / ``answers["victim"]`` 不必分叉。
     """
     owner = frame.data["source"]
     user_seat = int(answers["user"][0])
@@ -1423,9 +1462,13 @@ LIJIAN_FLOW = SkillFlow(
 # 不是"抵消"。`06`（§5「程序化约定与偏离一手」）另记一条裁定：它**不**挡"生效时"类技能
 # （如【谦逊】）的介入。
 #
-# 界版与标准版**同一条流水线**（同一个 ``SkillFlow`` 对象、同一个提交点）：两者牌面只差
-# "不能被响应"这一句，故差异落成提交点里的一个条件分支，而不是把三步再抄一份
-# （与【克己】【马术】的"界版只是另一个武将 id"同一姿态）。
+# 界版与标准版的**选择序相反**（M6 评审订正）：§十九 L2196–L2198「依次选择两名男性其他
+# 角色，令**后者**视为对**前者**使用一张不能被响应的【决斗】」——第一次点的是【决斗】
+# **目标**（前者）、第二次点的才是**使用者**（后者）；标准版 §九 的牌面不指定次序
+# （本仓既有口径 = 先使用者、后目标）。故两版各一条 ``SkillFlow``：步骤键不变
+# （``user`` / ``victim``），差别只在两次座位询问的次序与池的方向；**提交点仍是同一个**
+# （``_lijian_effect`` 读同一套答案键，且界版多挂 ``Tag.UNRESPONSIVE``）。分步文案随
+# 各自的 ``SkillDef.step_requirements`` 下发，界面因此画得出"先点目标、后点使用者"。
 # ---------------------------------------------------------------------------
 
 JIE_LIJIAN = hero_skill_id("jie_diaochan", "lijian")
@@ -1433,6 +1476,24 @@ JIE_LIJIAN = hero_skill_id("jie_diaochan", "lijian")
 
 _LIJIAN_STARTED = "lijian_started"
 """帧私有：这次发动已经开出虚拟【决斗】（重入不重复开第二次）。"""
+
+JIE_LIJIAN_FLOW = SkillFlow(
+    name="jie_lijian",
+    steps=(
+        PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=1, hi=1, key="card"),
+        PickSeats(lo=1, hi=1, pool=_lijian_targets, key="victim"),
+        PickSeats(lo=1, hi=1, pool=_jie_lijian_users, key="user"),
+    ),
+    effect=_lijian_effect,
+)
+"""界【离间】的三步流水线：弃 1 张牌 → **目标** → **使用者**（§十九 L2196–L2198 的次序）。
+
+与 :data:`LIJIAN_FLOW` 只差两次座位询问的次序 / 池：第一次点的是【决斗】**目标**（令后者
+对"前者"使用），第二次点的是**使用者**。受害者池（界版的步 2）取 ``_lijian_partners``
+的值的并集，使用者池（界版步 3）读前序答案 ``victim``——清单的逐选项子池因此逐目标
+下发。流水线名带 ``jie_`` 前缀，与界【仁德】/【突袭】同一口径（``_activation_belongs``
+按流水线名判归属）。
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -2579,6 +2640,11 @@ class ActiveSkill(HeroSkillDecl):
     requirement: str | None = None
     """这条技能"需要玩家做什么"的**覆盖文案**（M6 票 07；缺省 ``None`` = 读
     :data:`_REQUIREMENTS` 的短 id 那一行）。标准 / 界两版同短 id 但牌面不同时用它。"""
+    step_requirements: Mapping[str, str] | None = None
+    """**分步文案的覆盖**（M6 票 14；缺省 ``None`` = 读 :data:`_STEP_REQUIREMENTS` 的短 id
+    那一行）。标准 / 界两版同短 id 但**步骤次序 / 角色不同**时用它（界【离间】先选目标、
+    再选使用者，两次询问的文案因此与标准版相反）。键 = 步骤名，须覆盖该 flow 的每个步骤
+    （缺键的步骤 `Step.wording` 为空串）。"""
     preactivated: bool = False
     """本技能是否已迁到**预发动**（W4-1 的迁移开关，缺省 ``False``）。
 
@@ -2627,14 +2693,21 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 貂蝉【离间】：弃一张牌 + 两名男性角色 → 视为其中一名对另一名使用【决斗】（规则 1049）。
     # W4-2：手写步骤流水线改成声明式（三步各有自己的池：受害者池按使用者）。
     ActiveSkill("diaochan", "lijian", _lijian_offers, flow=LIJIAN_FLOW, preactivated=True),
-    # 界貂蝉【离间】（M6 票 07）：判据 / 步骤与标准版相同，只有虚拟【决斗】不可响应。
+    # 界貂蝉【离间】（M6 票 07）：**先选目标、再选使用者**（§十九 L2196–L2198；标准版的
+    # 牌面不指定次序，故两版各一条流水线），且这条虚拟【决斗】不可响应。
     ActiveSkill(
         "jie_diaochan",
         "lijian",
         _lijian_offers,
-        flow=LIJIAN_FLOW,
+        flow=JIE_LIJIAN_FLOW,
         preactivated=True,
         requirement="弃一张牌，依次选择两名男性角色：后者视为对前者使用一张不能被响应的【决斗】",
+        step_requirements={
+            "card": "弃置1张牌（手牌 / 装备区）",
+            # 两次座位询问与标准版**次序相反**：第一次点的目标才是【决斗】打向的人。
+            "victim": "选择决斗目标（场上的一名男性角色；先点他，【决斗】打向他）",
+            "user": "选择决斗使用者（另一名男性角色；由他对目标使用【决斗】）",
+        },
     ),
     # 孙尚香【结姻】：弃两张手牌 + 一名已受伤男性 → 你与其各回复 1 点（规则 1033）。
     ActiveSkill("sunshangxiang", "jieyin", _jieyin_offers, flow=JIEYIN_FLOW, preactivated=True),
@@ -2843,7 +2916,10 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
                 *skill.extra_modifiers,
             ),
             requirement=skill.requirement or _REQUIREMENTS[skill.short_id],
-            step_requirements=_STEP_REQUIREMENTS.get(skill.short_id),
+            # 声明级覆盖优先（标准 / 界同短 id 但步骤次序 / 角色不同，M6 票 14）。
+            step_requirements=(
+                skill.step_requirements or _STEP_REQUIREMENTS.get(skill.short_id)
+            ),
             preactivated=skill.preactivated,
         )
         for skill in ACTIVE_SKILLS

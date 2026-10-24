@@ -56,7 +56,7 @@ from sgs.effects import (
     PriorityClass,
     apply_modifiers,
 )
-from sgs.state import GameState
+from sgs.state import GameState, Zone
 
 from .catalog import (
     ACTIVATION_PLANS,
@@ -490,6 +490,7 @@ __all__ = (
     "pure_virtual_card",
     "rejudge_activation_plans",
     "rejudge_capable_seats",
+    "rejudge_card_zones",
     "rejudge_skill_definitions",
     "rejudge_skill_ids",
     "reset_phase_skill_state",
@@ -537,3 +538,24 @@ def rejudge_capable_seats(state: GameState) -> tuple[int, ...]:
         if instance.definition.rejudge_capable and instance.owner not in seats:
             seats.append(instance.owner)
     return tuple(seats)
+
+
+def rejudge_card_zones(state: GameState, seat: int) -> tuple[Zone, ...]:
+    """``seat`` 的改判窗口**可以打出哪些区的牌**（M6 票 14；缺省一张手牌）。
+
+    与 :func:`rejudge_capable_seats` 读**同一批存活实例**、同一批定义字段，只是这里取
+    :attr:`~sgs.skills.catalog.SkillDef.rejudge_zones` 的并集：标准【鬼才】（§九 L942）
+    "打出一张**手牌**" ⇒ ``(HAND,)``；界【鬼才】（§十九 L2021）"打出**一张牌**" ⇒
+    ``(HAND, EQUIP)``。多个改判实例并存时取并集（能力只增不减的一个座位不会因此变窄）。
+
+    该座位没有改判能力时不构造窗口（:func:`rejudge_capable_seats` 已先过滤），此处的
+    缺省 ``(HAND,)`` 只是"没有定义可读"的安全港，不是一条可用性判断。
+    """
+    zones: list[Zone] = []
+    for instance in resolve_instances(state):
+        if instance.owner != seat or not instance.definition.rejudge_capable:
+            continue
+        for zone in instance.definition.rejudge_zones:
+            if zone not in zones:
+                zones.append(zone)
+    return tuple(zones) or (Zone.HAND,)

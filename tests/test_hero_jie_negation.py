@@ -21,15 +21,18 @@
   "使用结算开始时"就终止（故**没有**"生效前"的无懈窗口）；
 - **界貂蝉【离间】**：令后者视为对前者使用一张**不能被响应**的【决斗】⇒
   **响应窗口不产生**：无懈询问不出现、决斗的【杀】响应也不出现（决斗照常结算，
-  败方受到伤害——"不可响应"不是"抵消"）；
+  败方受到伤害——"不可响应"不是"抵消"）。**选择序**：界版第一次点的是【决斗】**目标**
+  （前者）、第二次才是**使用者**（后者）；标准版不指定次序（既有口径 = 先使用者）；
 - **界貂蝉【闭月】**：结束阶段有手牌摸 1 / 没有手牌摸 2。
 
-两条**裁定**（`06` §5「程序化约定与偏离一手」逐条登记）：
+三条**裁定**（`06` §5「程序化约定与偏离一手」逐条登记）：
 
 1. 【奋威】可选的目标集合 = 此牌的**全部**目标（含发动者本人，当他是目标之一时）；
    牌面"其中任意名目标角色"没有把发动者排除在外；
 2. 【离间】的"不能被响应"只关闭**牌类响应窗口**（无懈 / 决斗的【杀】），**不**挡
-   "生效时"类技能（如【谦逊】）对这张虚拟【决斗】的介入——"响应"是用牌响应。
+   "生效时"类技能（如【谦逊】）对这张虚拟【决斗】的介入——"响应"是用牌响应；
+3. 【离间】的选择序：§十九 L2196–L2198 的"前者 / 后者"把**第一次点的人钉成【决斗】
+   目标**；标准版 §九 L1052–L1053 的牌面不指定次序，故界版先目标、标准版先使用者。
 """
 
 from __future__ import annotations
@@ -368,33 +371,56 @@ def _composite(query, skill_id: str, *, picks=(), choices=()) -> ActivateSkill:
     )
 
 
-def _lijian_driver(skill_id: str, *, pick: int):
+def _lijian_driver(skill_id: str, *, pick: int, seats: tuple[int, int]):
+    """``seats`` = **两次座位选择的次序**：标准版 =（使用者, 目标）；界版 =（目标, 使用者）。"""
+
     def driver(query):
         if query.kind == QueryKind.PLAY_PHASE and skill_id in query.preactivations:
             return _composite(
-                query, skill_id, picks=(pick,), choices=("seat:1", "seat:2")
+                query,
+                skill_id,
+                picks=(pick,),
+                choices=tuple(f"seat:{seat}" for seat in seats),
             )
         return None
 
     return Scripted(driver)
 
 
-def test_jie_lijian_steps_are_the_same_as_the_standard_version():
-    """同形声明：三步（弃 1 张 → 使用者 → 目标）逐名相同；界版只换提交点。"""
-    _cost, _victim, _user, state = _lijian_state("jie_diaochan")
+def test_jie_lijian_selects_the_duel_target_before_the_user():
+    """选择序（§十九 L2196–L2198）：第一次点**目标**（前者），第二次点**使用者**（后者）。
+
+    标准版 §九 的牌面不指定次序（本仓既有口径 = 先使用者、后目标），故两版选择序相反是
+    **牌面差异**而不是实现细节：本测试钉住步骤键序、逐前序子池与分步文案。
+    """
+    cost, _victim, _user, state = _lijian_state("jie_diaochan")
 
     steps = preactivation_for(state, 0, JIE_LIJIAN)
 
-    assert [step.name for step in steps] == ["card", "user", "victim"]
+    assert [step.name for step in steps] == ["card", "victim", "user"], (
+        "界版先选目标、再选使用者（标准版相反）"
+    )
+    assert {option for row in steps[1].pool for option in row.options} == {"seat:1", "seat:2"}, (
+        "步 2 = 一名男性（可作【决斗】目标）"
+    )
+    rows = {row.when: row.options for row in steps[2].pool}
+    assert rows[(str(cost), "seat:1")] == ("seat:2",), "目标选了座位 1 ⇒ 使用者只能是座位 2"
+    assert rows[(str(cost), "seat:2")] == ("seat:1",)
+    assert "目标" in steps[1].wording and "使用者" in steps[2].wording, (
+        "分步文案随界版次序下发（界面画得出先点谁）"
+    )
 
 
 def test_jie_lijian_produces_no_nullify_and_no_slash_response_window():
-    """正例：无懈询问**不出现**、决斗的【杀】询问**不出现**，伤害照常结算。"""
+    """正例：无懈询问**不出现**、决斗的【杀】询问**不出现**，伤害照常结算。
+
+    两次点人按**界版次序**传入：第一次点目标（座位 2）、第二次点使用者（座位 1）。
+    """
     cost, victim_slash, _user_slash, state = _lijian_state("jie_diaochan")
     engine = _run(
         state,
         [
-            _lijian_driver(JIE_LIJIAN, pick=cost),
+            _lijian_driver(JIE_LIJIAN, pick=cost, seats=(2, 1)),
             Scripted(_decline),
             Scripted(_decline),
             Scripted(_decline),
@@ -415,8 +441,33 @@ def test_jie_lijian_produces_no_nullify_and_no_slash_response_window():
     assert cost in engine.state.discard, "成本照常弃置"
 
 
+def test_jie_lijian_treats_the_first_pick_as_the_duel_target():
+    """反例（对照）：把第一次点人选中座位 1 ⇒ 受伤的是**座位 1**（它不是使用者）。
+
+    标准版同样的两次点人（1, 2）意味着"座位 1 是使用者"；界版次序反过来，故这条钉住
+    "第一次点的是【决斗】目标"这一面，而不只是清单的键序。
+    """
+    cost, _victim, _user_slash, state = _lijian_state("jie_diaochan")
+    engine = _run(
+        state,
+        [
+            _lijian_driver(JIE_LIJIAN, pick=cost, seats=(1, 2)),
+            Scripted(_decline),
+            Scripted(_decline),
+            Scripted(_decline),
+        ],
+        _skill_frame_popped,
+    )
+
+    assert engine.state.player(1).hp == 3, "第一次点的是目标 ⇒ 座位 1 受到【决斗】伤害"
+    assert engine.state.player(2).hp == 4, "座位 2 是使用者（伤害来源），不掉血"
+
+
 def test_the_standard_lijian_does_open_both_windows():
-    """反例（对照）：标准【貂蝉】的同一张剧本里，无懈窗口与【杀】响应窗口都在。"""
+    """反例（对照）：标准【貂蝉】的同一张剧本里，无懈窗口与【杀】响应窗口都在。
+
+    标准版次序 =（使用者, 目标）：座位 1 使用【决斗】打向座位 2。
+    """
     cost, victim_slash, _user_slash, state = _lijian_state("diaochan")
 
     def victim(query):
@@ -427,7 +478,7 @@ def test_the_standard_lijian_does_open_both_windows():
     engine = _run(
         state,
         [
-            _lijian_driver("hero.diaochan.lijian", pick=cost),
+            _lijian_driver("hero.diaochan.lijian", pick=cost, seats=(1, 2)),
             Scripted(_decline),
             Scripted(victim),
             Scripted(_decline),

@@ -10,7 +10,7 @@
 界曹操【护驾】②         **每回合限一次**，其他魏势力角色于其回合外使用 / 打出【闪】时，
                         **其**可以令主公摸一张牌 —— 决定者不是受益者
 界司马懿【反馈】         "当你受到 **1 点** 伤害后" ⇒ 逐点触发（标准版每次伤害事件一次）
-界司马懿【鬼才】         与标准【鬼才】逐字相同（改判能力位）
+界司马懿【鬼才】         "打出一张牌" ⇒ 改判窗口候选含装备区（标准版"一张手牌"只有手牌）
 界张辽【突袭】           "少摸**任意**张，然后获得**等量名**其他角色的各一张手牌"
 界许褚【裸衣】           亮出牌堆顶三张 → 可获得其中的基本牌 / 武器牌 /【决斗】；
                         若如此做，放弃摸牌，且**直到你的下个回合开始**基础伤害 +1
@@ -39,6 +39,7 @@ from sgs.skills import (
     REJUDGE_SKILL_IDS,
     mark_skill_used_this_turn,
     rejudge_capable_seats,
+    rejudge_card_zones,
     reset_turn_skill_state,
 )
 from sgs.skills.catalog import MATCH_OWNER_KEY
@@ -52,6 +53,7 @@ from sgs.state import (
     SelectOption,
     UseCard,
     WindowCause,
+    Zone,
 )
 from sgs.timing import Timing
 
@@ -313,7 +315,7 @@ def test_jie_fankui_is_not_offered_when_the_damage_has_no_source():
 
 
 # ---------------------------------------------------------------------------
-# ③ 界司马懿【鬼才】：与标准版逐字相同（改判能力位）（§十九 L2021）
+# ③ 界司马懿【鬼才】："打出一张牌" ⇒ 改判窗口候选含装备区（§十九 L2021）
 # ---------------------------------------------------------------------------
 
 INDULGENCE = _cards("indulgence")[0]
@@ -394,6 +396,94 @@ def test_a_standard_simayi_seat_is_not_in_the_jie_capable_seats():
 
     assert rejudge_capable_seats(state) == (1,), "标准【鬼才】同样有改判能力"
     assert JIE_GUICAI in REJUDGE_SKILL_IDS
+
+
+def _rejudge_query(query) -> bool:
+    return query.kind == "RESPOND" and getattr(query, "cause", None) is WindowCause.REJUDGE
+
+
+def _stop_at_rejudge(engine) -> bool:
+    return engine.pending is not None and _rejudge_query(engine.pending)
+
+
+def _guicai_equip_state(hero_id: str):
+    """判定牌 = 黑【杀】、座位 0 的判定区有【乐不思蜀】；座位 1 只有一张【麒麟弓】。
+
+    【麒麟弓】是**红桃**：改判成它 ⇒ 【乐不思蜀】判定为红桃、不生效，出牌阶段照常开始，
+    故"改判之后的账"可以用 ``PHASE_PLAY_START`` 当停止点，不依赖被跳过的阶段。
+    """
+    original = _black_slash()
+    bow = _cards("qilin_bow")[0]
+    deck = (
+        original,
+        *(
+            card_id
+            for card_id in range(len(PACK.deck.cards))
+            if card_id not in {original, bow, INDULGENCE}
+        ),
+    )
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(judge=(INDULGENCE,)),
+            SeatSpec(hero=hero_id, equip=(bow,)),
+        ],
+        deck=deck,
+        turn_seat=0,
+    )
+    return state, original, bow
+
+
+def test_jie_guicai_window_offers_the_players_equipment_cards():
+    """正例（§十九 L2021"打出一张牌"）：只有装备牌也能改判，且替代照常搬牌。
+
+    `参考资料/界限突破-界标准包武将资料.md`：「鬼才由'一张手牌'放宽为'一张牌'」。
+    """
+    state, original, bow = _guicai_equip_state("jie_simayi")
+
+    assert rejudge_card_zones(state, 1) == (Zone.HAND, Zone.EQUIP), (
+        "界【鬼才】的候选区 = 手牌 ∪ 装备区"
+    )
+
+    def rejudger(query):
+        if _rejudge_query(query):
+            assert query.actor == 1, "改判询问弹给界司马懿"
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, PlayCard) and action.card.card_id == bow
+            )
+        return None
+
+    engine = Engine.from_state(state, seed=1)
+    _run(
+        engine,
+        [Scripted(), Scripted(rejudger)],
+        lambda e: ran_timing(e, Timing.PHASE_PLAY_START),
+    )
+
+    assert bow in engine.state.discard, "装备区的牌当改判牌：结算后进弃牌堆"
+    assert bow not in engine.state.player(1).equip
+    assert original in engine.state.discard, "原判定牌按「代替」进弃牌堆"
+
+
+def test_the_standard_guicai_window_does_not_offer_equipment_cards():
+    """反例（§九 L942"一张**手牌**"）：同局面换成标准司马懿 ⇒ 装备牌不进候选。"""
+    state, _original, bow = _guicai_equip_state("simayi")
+
+    assert rejudge_card_zones(state, 1) == (Zone.HAND,), "标准【鬼才】只有手牌"
+
+    engine = Engine.from_state(state, seed=1)
+    _run(engine, [Scripted(), Scripted()], _stop_at_rejudge)
+
+    query = engine.pending
+    assert query is not None and query.actor == 1, "改判询问仍会发出（只是候选只有手牌）"
+    assert all(
+        not (isinstance(action, PlayCard) and action.card.card_id == bow)
+        for action in query.legal_actions
+    ), "标准版只有手牌；装备区的牌不进改判候选（「打出一张牌」是界版才有的放宽）"
+    engine.submit(next(action for action in query.legal_actions if isinstance(action, Pass)))
+    assert bow in engine.state.player(1).equip, "放弃改判 ⇒ 装备牌留在装备区"
 
 
 # ---------------------------------------------------------------------------

@@ -11,10 +11,11 @@ r"""I 族：改判与判定牌（票 11）。
 
 **改判窗口是引擎侧的通用循环**（票 11 §②）：``JUDGE_CARD_BEFORE_EFFECT`` 上，引擎用
 ``RESPOND`` + ``WindowCause.REJUDGE``（``required=None``、``mode=PLAY``）逐个问有改判
-能力的座位；选中 ``PlayCard`` ⇒ 引擎按"**代替**"搬牌（新牌 → 处理区、原判定牌 → 弃牌堆），
-窗口重开。故本模块的【鬼才】**没有钩子回调**——它只给判定帧留下"我有这个能力"这一个
-定义字段（:attr:`~sgs.skills.catalog.SkillDef.rejudge_capable`），引擎侧因此不出现任何
-具体技能 id（源码纪律 §5）。
+能力的座位；候选区域由该座位的技能定义派生（``rejudge_zones``：标准版"一张**手牌**"、
+界版"一**张牌**"⇒ 手牌 ∪ 装备区，M6 票 14）。选中 ``PlayCard`` ⇒ 引擎按"**代替**"搬牌
+（新牌 → 处理区、原判定牌 → 弃牌堆），窗口重开。故本模块的【鬼才】**没有钩子回调**——
+它只给判定帧留下"我有这个能力"这一个定义字段（:attr:`~sgs.skills.catalog.SkillDef.rejudge_capable`），
+引擎侧因此不出现任何具体技能 id（源码纪律 §5）。
 
 【天妒】（规则 957）：``JUDGE_CARD_AFTER_EFFECT`` 上非锁定技，先问"是否发动"，答发动
 则把**最终生效**的那张判定牌从处理区移入自己手牌（``PUT``）。已被获得 ⇒ 判定结算收尾
@@ -51,10 +52,14 @@ GUICAI = hero_skill_id("simayi", "guicai")
 """司马懿【鬼才】的全限定技能 id（前缀派生走 :func:`sgs.data.hero_skill_id`）。"""
 
 JIE_GUICAI = hero_skill_id("jie_simayi", "guicai")
-"""界司马懿【鬼才】的全限定技能 id（§十九 L2021：牌面与标准版逐字相同）。
+"""界司马懿【鬼才】的全限定技能 id（§十九 L2021：「当一名角色的判定牌生效前，你可以打出
+一张牌代替之」）。
 
-界版只是另一个武将 id：改判能力仍是 ``SkillDef.rejudge_capable`` 这一个定义字段，
-能力来源由 :func:`rejudge_skill_ids` 机械派生，故引擎侧一行不改。
+与标准版（§九 L942「打出一张**手牌**代替之」）的**唯一牌面差别**是候选牌的来源范围：
+界版是"一张牌"⇒ 手牌 ∪ 装备区（`参考资料/界限突破-界标准包武将资料.md`：
+"鬼才由'一张手牌'放宽为'一张牌'"），落成 :attr:`~sgs.skills.catalog.SkillDef.rejudge_zones`。
+改判能力仍只有 ``rejudge_capable`` 一个定义字段，座位集合由 :func:`rejudge_skill_ids`
+机械派生；候选区由 :func:`~sgs.skills.rejudge_card_zones` 从**同一批存活实例**现算。
 """
 
 TIANDU = hero_skill_id("guojia", "tiandu")
@@ -121,7 +126,8 @@ def rejudge_skill_definitions() -> tuple[SkillDef, ...]:
     【鬼才】（标准 / 界）非锁定（技能面写了"你可以"）但**不落钩子**——它把能力写在
     定义字段上，由引擎的通用改判窗口消费；【天妒】非锁定，落
     ``JUDGE_CARD_AFTER_EFFECT`` 钩子。三条 ``carrier = HERO``（优先级档由载体派生）、
-    ``skill_type = NORMAL``。界【鬼才】与标准版牌面逐字相同，故除 id 外逐字段相同。
+    ``skill_type = NORMAL``。界【鬼才】与标准版只差**候选牌区域**：标准版 §九 L942
+    "一张手牌" ⇒ 缺省 ``rejudge_zones=(HAND,)``；界版 §十九 L2021 "一张牌" ⇒ 手牌 ∪ 装备区。
     """
     return (
         SkillDef(
@@ -138,7 +144,8 @@ def rejudge_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             rejudge_capable=True,
-            requirement="打出一张手牌，代替此判定牌",
+            rejudge_zones=(Zone.HAND, Zone.EQUIP),
+            requirement="打出一张牌，代替此判定牌",
         ),
         SkillDef(
             skill_id=TIANDU,

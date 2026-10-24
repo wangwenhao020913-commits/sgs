@@ -62,6 +62,7 @@ from sgs.skills import (
     QIANXUN_PLACED_KEY,
     SeamKind,
     activate_skill,
+    rejudge_card_zones,
     rejudge_capable_seats,
     target_is_ineffective,
     virtual_dodge,
@@ -177,6 +178,7 @@ class FrameHost(StepHost, Protocol):
         window_frame: int = 0,
         mode: RespondMode = RespondMode.PLAY,
         use_targets: tuple[int, ...] = (),
+        zones: tuple[Zone, ...] = (Zone.HAND,),
     ) -> Any: ...
 
     def suspended(self, value: Any) -> bool: ...
@@ -1399,8 +1401,9 @@ def judge_before_effect(host: FrameHost, frame: Frame) -> Control:
     2. 先把上一次替代的**在途进度**收尾（``resume_judge_substitution``；code-review C2：
        替代的第一段移动可能因内联钩子提问而挂起，而 ``_rejudge_window`` 已把这个座位
        记进"已问过"、不会再次进来），再在 :func:`_rejudge_window` 里逐个问**有改判能力**
-       的座位（``WindowCause.REJUDGE``、``required=None``、``mode=PLAY`` = 打出一张**手牌**
-       代替之）；每次替代后窗口重开，直到无人再替代。
+       的座位（``WindowCause.REJUDGE``、``required=None``、``mode=PLAY`` = 打出一张牌
+       代替之；候选区 = :func:`~sgs.skills.rejudge_card_zones` 按该座位的技能定义现算——
+       标准【鬼才】只有手牌，界【鬼才】另有装备区）；每次替代后窗口重开，直到无人再替代。
     """
     if not frame.data.get(REJUDGE_EMITTED):
         control = _emit_judge(host, frame, Timing.JUDGE_CARD_BEFORE_EFFECT)
@@ -1441,6 +1444,7 @@ def _rejudge_window(host: FrameHost, frame: Frame) -> Control:
             required=None,
             window_frame=frame.frame_id,
             mode=RespondMode.PLAY,
+            zones=rejudge_card_zones(host.state, seat),
         )
         if host.suspended(action):
             return "stay"

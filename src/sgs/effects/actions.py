@@ -45,6 +45,8 @@ from sgs.state import (
     SkillActivationContext,
     SlotKind,
     UseCard,
+    Zone,
+    ZoneRef,
     alive_seats,
     seats_from,
 )
@@ -881,13 +883,16 @@ def _transformed_peaches(
 def _respond(
     state: GameState, seat: int, answers_seq: int, ctx: RespondContext
 ) -> list[Action]:
-    """响应窗口：手牌里满足 ``required`` 的牌各一个候选，放弃恒在最后。
+    """响应窗口：``ctx.zones`` 里满足 ``required`` 的牌各一个候选，放弃恒在最后。
 
-    取牌走 :func:`_required_hand`——**与【闪】窗口同一道牌名闸门**（B1）。``required``
-    是牌名（``slash`` / ``dodge`` / ``nullify``），不是询问种类：同一个函数服务南蛮 /
-    万箭 / 决斗 / 借刀 / 无懈五种语境，按 ``QueryKind`` 分支就会漏掉其中一类。
+    取牌走 :func:`_required_cards`（缺省就是 :func:`_required_hand`）——**与【闪】窗口
+    同一道牌名闸门**（B1）。``required`` 是牌名（``slash`` / ``dodge`` / ``nullify``），
+    不是询问种类：同一个函数服务南蛮 / 万箭 / 决斗 / 借刀 / 无懈五种语境，按 ``QueryKind``
+    分支就会漏掉其中一类。``ctx.zones`` 缺省 ``(HAND,)``；改判窗口按座位技能定义放宽到
+    装备区（界【鬼才】"打出一张牌"，M6 票 14）。
 
-    - ``mode = PLAY``（南蛮 / 万箭 / 决斗）：候选是 ``PlayCard``（打出，无目标、不占次数）；
+    - ``mode = PLAY``（南蛮 / 万箭 / 决斗 / 改判）：候选是 ``PlayCard``（打出，无目标、
+      不占次数）；
     - ``mode = USE``（【借刀杀人】迫使的"使用【杀】"、无懈窗口）：候选是 ``UseCard``，
       并按 L3.2 校验出牌次数。**窗口固定了目标**（借刀的 Bn）时先问
       :func:`forced_use_targets`"够不够得着 Bn"（W5-02b 的 a 可行性 / auto-b 语义），
@@ -900,7 +905,7 @@ def _respond(
     手上没有所需牌者候选只有 ``Pass``——**仍发询问**（票 19 §9.2 的"各获一次机会"）。
     """
     actions: list[Action] = []
-    for card in _required_hand(state, seat, ctx.required):
+    for card in _required_cards(state, seat, ctx.required, ctx.zones):
         if ctx.mode is RespondMode.USE:
             if check_count(state, seat, card):
                 continue
@@ -1064,6 +1069,8 @@ def _required_hand(
 
     **这是所有"需要某张牌"的响应窗口共用的候选闸门**（B1）：``_dodge``（【闪】）与
     ``_respond``（打出【杀】/ 打出【闪】/ 借刀的使用【杀】/【无懈可击】）都从这里取牌。
+    改判窗口另有 :func:`_required_cards` 的 ``zones`` 档（界【鬼才】"打出一张牌"，
+    M6 票 14 起装备区的牌也进候选）。
 
     判据是**牌名**而不是 :class:`~sgs.state.QueryKind`：【闪】窗口是独立的 ``DODGE``，
     其余五类挤在 ``RESPOND`` 里；按询问种类分支会让 DODGE 绕过闸门（B1 的根因）。
@@ -1074,16 +1081,33 @@ def _required_hand(
     共享计数键放宽——火【杀】/ 雷【杀】因此出现在南蛮 / 决斗 / 借刀的响应窗口里；其余
     ``required`` 仍逐字相等）。
 
-    ``required = None`` 是改判窗口（``WindowCause.REJUDGE``）：打出一张**任意**手牌。
+    ``required = None`` 是改判窗口（``WindowCause.REJUDGE``）：打出一张**任意**牌。
+    """
+    return _required_cards(state, seat, required, (Zone.HAND,))
+
+
+def _required_cards(
+    state: GameState,
+    seat: int,
+    required: str | None,
+    zones: tuple[Zone, ...],
+) -> list[CardRef]:
+    """``zones`` 各区里**能当** ``required`` 牌名的实体牌（区序 = ``zones``，区内保持原序）。
+
+    ``zones`` 缺省只有手牌（所有既有窗口）；放宽到装备区只有改判窗口一个消费者：界
+    【鬼才】（§十九 L2021）"打出一张牌"⇒ 手牌 ∪ 装备区，标准版（§九 L942）"一张手牌"
+    ⇒ 只有手牌。区域读 :meth:`~sgs.state.GameState.zone`（唯一入口），不直接摸
+    ``Player`` 的字段——将来多一个候选区时只改 payload，不改这里。
     """
     cards: list[CardRef] = []
-    for card_id in state.player(seat).hand:
-        card = state.card(card_id)
-        if required is not None and not satisfies_required(card, required):
-            continue
-        if check_forbidden(state, seat, card):
-            continue
-        cards.append(card)
+    for zone in zones:
+        for card_id in state.zone(ZoneRef(zone, seat)):
+            card = state.card(card_id)
+            if required is not None and not satisfies_required(card, required):
+                continue
+            if check_forbidden(state, seat, card):
+                continue
+            cards.append(card)
     return cards
 
 

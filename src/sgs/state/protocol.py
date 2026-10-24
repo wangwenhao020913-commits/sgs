@@ -217,6 +217,11 @@ class RespondContext:
 
     ``providers_used`` 只在"需要【闪】"的响应窗口里用（票 10 §5.5 / 票 30）：把它记的
     技能 id 从候选里去掉，实现"每提供者只问一次"。
+
+    ``zones`` = 候选牌取自**应答者的哪几个区**（缺省只有手牌）。改判窗口是唯一会放宽的
+    消费者：标准【鬼才】"打出一张**手牌**"、界【鬼才】"打出**一张牌**"（§十九 L2021）⇒
+    界版带装备区，由 :func:`sgs.skills.rejudge_card_zones` 从技能定义派生。**不进记录流**
+    （与 ``cause`` / ``required`` 同为候选生成载荷）。
     """
 
     cause: WindowCause
@@ -226,6 +231,7 @@ class RespondContext:
     mode: RespondMode = RespondMode.PLAY
     use_targets: tuple[int, ...] = ()
     providers_used: tuple[str, ...] = ()
+    zones: tuple[Zone, ...] = (Zone.HAND,)
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,18 +1,20 @@
 """U 族：使用牌时触发（M6 票 02）——黄月英【集智】。
 
-规则原文：§九 L997（"当你使用一张非延时类锦囊牌时，你可以摸一张牌"）；"非转化"的取法
-按票面（= 界版的文本去掉界版独有的"+1 手牌上限"分支），见 :mod:`sgs.skills.use_after`。
+规则原文：§九 L997（"当你使用一张非延时类锦囊牌时，你可以摸一张牌"）与界版 §十九 L2105
+（"当你使用一张**非转化的**锦囊牌时……"）。两版牌面**不同**（M6 评审订正）：
+
+- **标准版**只排除延时类：**转化锦囊照常触发**（票 02 曾把"非转化"写进标准版口径）；
+- **界版**另排除转化牌（"非转化的"只在界版文本里）。
 
 落点全部是外部缝：
 
 - **询问缝**：``SKILL_ACTIVATION`` 的**条数**（非锁定技：每次使用问一次；不该问的一次不问）
-  与 ``skill_id``（``hero.huangyueying.jizhi``）；
+  与 ``skill_id``（标准 / 界各一个）；
 - **终局状态**：手牌内容（摸到的**正是**牌堆顶那张，且排在锦囊自身效果摸到的牌之前）；
-- 真引擎的整段出牌阶段（含**转化牌**这个反例：来源由 ``start_use`` 直接压帧，与
+- 真引擎的整段出牌阶段（含**转化牌**这一正反两例：来源由 ``start_use`` 直接压帧，与
   ``tests/test_m5_attribute_damage.py`` 同一手法）。
 
-"延时类"与"转化"是两个**独立**的排除条件，故各有各的反例：前者用真【乐不思蜀】，
-后者把手牌转成【无中生有】的虚拟牌。
+"延时类"与"转化"在标准版只有一个排除（前者），界版两个都排除，故各有各的反例。
 """
 
 from __future__ import annotations
@@ -28,19 +30,20 @@ from test_skills import _deck_excluding, _use_frame_popped
 PACK = load_content_pack(deck_profile="standard_108")
 
 JIZHI = "hero.huangyueying.jizhi"
+JIE_JIZHI = "hero.jie_huangyueying.jizhi"
 
 
 def _cards(type_id: str) -> list[int]:
     return cards_of_type(PACK, type_id)
 
 
-def _jizhi_queries(engine) -> list:
+def _jizhi_queries(engine, skill_id: str = JIZHI) -> list:
     return [
         record.query
         for record in engine.records
         if record.kind == "query"
         and record.query.kind == QueryKind.SKILL_ACTIVATION
-        and record.query.skill_id == JIZHI
+        and record.query.skill_id == skill_id
     ]
 
 
@@ -165,28 +168,63 @@ def test_jizhi_does_not_fire_on_a_delayed_trick():
     ]
 
 
-def test_jizhi_does_not_fire_on_a_transformed_trick_card():
-    """反例（票面的"**非转化**"）：把一张手牌转成【决斗】使用 ⇒ 不摸集智那一张。
+def _use_transformed_trick(hero_id: str):
+    """把一张手牌转成【决斗】使用（不经候选面）→ 推进到"集智已应答、下一问未答"。
 
-    转化动作不经候选面（``legal_actions``），故这里与 ``test_m5_attribute_damage``
-    同一手法：``start_use`` 直接压使用帧；外部可观测的只有"集智问没问"与手牌结果。
-    产物取【决斗】是因为它已在虚拟牌命名空间里登记（没有新开空段）。
+    与 ``test_m5_attribute_damage`` 同一手法：``start_use`` 直接压使用帧；外部可观测的
+    只有"集智问没问"与手牌结果。产物取【决斗】是因为它已在虚拟牌命名空间里登记
+    （没有新开空段）。返回 ``(engine, 使用前牌堆)``：牌堆顶就是集智该摸的那张。
     """
     source = _cards("peach")[0]
     state = build_state(
         pack=PACK,
-        seats=[SeatSpec(hand=(source,), hero="huangyueying"), SeatSpec(hp=4)],
+        seats=[SeatSpec(hand=(source,), hero=hero_id), SeatSpec(hp=4)],
         deck=_deck_excluding(source),
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=7)
+    deck_before = list(state.deck)
     virtual = transformed_card(state, (source,), "duel")
 
     engine.start_use(virtual, source=0, targets=(1,))
     for _ in range(200):
-        if engine.pending is not None or engine.finished:
+        if engine.pending is not None:
+            query = engine.pending
+            if (
+                query.kind == QueryKind.SKILL_ACTIVATION
+                and query.skill_id in (JIZHI, JIE_JIZHI)
+            ):
+                engine.submit(
+                    next(
+                        action
+                        for action in query.legal_actions
+                        if getattr(action, "kind", None) == "ActivateSkill"
+                    )
+                )
+                continue
+            break  # 集智之后的第一问（【决斗】的响应窗口）——此时手牌已定型
+        if engine.finished:
             break
         engine._step()  # noqa: SLF001 - 与既有构造局面测试同一推进手法
+    return engine, deck_before
 
-    assert _jizhi_queries(engine) == [], "转化牌不算「使用了一张锦囊牌」（票面口径）"
+
+def test_jizhi_fires_on_a_transformed_trick_card():
+    """标准版（§九 L997 没有"非转化"）：转化【决斗】照样触发，摸牌堆顶一张。
+
+    M6 评审订正：票 02 曾把界版的"非转化"也套到标准版上，导致标准【集智】对转化锦囊
+    整段哑火；规则原文只排除**延时类**。
+    """
+    engine, deck_before = _use_transformed_trick("huangyueying")
+
+    assert len(_jizhi_queries(engine)) == 1, "标准版对转化锦囊照样问一次「是否发动」"
+    assert list(engine.state.player(0).hand) == [deck_before[0]], "集智摸到牌堆顶那一张"
+
+
+def test_jie_jizhi_does_not_fire_on_a_transformed_trick_card():
+    """界版（§十九 L2105 的"非转化的"）：同一次转化【决斗】⇒ 不问、不摸。"""
+    engine, _deck_before = _use_transformed_trick("jie_huangyueying")
+
+    assert _jizhi_queries(engine, JIE_JIZHI) == [], "界版把转化牌挡在触发条件之外"
     assert list(engine.state.player(0).hand) == [], "来源牌已按使用路径离手，且没有集智摸牌"
+
