@@ -54,6 +54,7 @@ from sgs.effects import (
 from sgs.resolution import Control, Frame
 from sgs.state import (
     ActivateSkill,
+    FrameKind,
     GameState,
     PlayCard,
     RespondMode,
@@ -84,6 +85,9 @@ __all__ = [
     "JIE_JIJIANG_ECHO",
     "JIE_JIJIANG_LORD",
     "JIJIANG",
+    "JIE_JIUYUAN",
+    "JIE_JIUYUAN_FLOW",
+    "JIE_JIUYUAN_REPLACED_KEY",
     "JIUYUAN",
     "LORD_REQUEST_KEY",
     "LORD_REQUEST_SKILLS",
@@ -510,6 +514,8 @@ def lord_request_activation_plans() -> dict[str, Any]:
     return {
         JIE_HUJIA: lord_echo_activation_plan,
         JIE_JIJIANG: lord_echo_activation_plan,
+        # M6 票 17：界【救援】的决定者 = 正在回复体力的那个吴势力角色。
+        JIE_JIUYUAN: _jie_jiuyuan_plan,
     }
 
 
@@ -544,6 +550,107 @@ class RecoverBoost(HeroSkillDecl):
 
 JIUYUAN = RecoverBoost(hero_id="sunquan", short_id="jiuyuan")
 """孙权【救援】：锁定技，其他吴势力角色对你使用【桃】时，回复的体力值 +1（规则 1004）。"""
+
+
+# ---------------------------------------------------------------------------
+# 界孙权【救援】（M6 票 17）：**转移回复**——其他吴势力角色于其回合内回复体力时，可以
+# 改为让主公回复 1 点、然后自己摸一张
+#
+# §十九 L2124–L2127（`## Comments` 的订正：**不是**"改判"，是转移回复）：
+#
+#     救援（主公技）：当其他吴势力角色于其回合内回复体力时，若其体力值不小于你，该角色
+#           可以改为令你回复 1 点体力，然后其摸一张牌。
+#
+# 与标准版是**两条机制**：标准版是锁定的 ``RECOVER_AMOUNT`` 修饰器（其他吴势力角色对孙权
+# 用【桃】时 +1），界版是**回复事件上的可选用应答**——落 ``RECOVER_VALUE`` 钩子，问的是
+# **回复的那个吴势力角色**（决定者 ≠ 受益者，与界【护驾】② 同一个 ``ActivationPlan.actor``
+# 机制；受益者 / 技能持有者仍是主公）。
+#
+# "改为"是**替换**：原回复不写体力（钩子在"确定回复数值"之后、写体力之前，帧私有键
+# :data:`JIE_JIUYUAN_REPLACED_KEY` 让 RECOVER 帧跳过本次回复），改压一个主公的 RECOVER
+# 子帧；子帧出栈后回到本钩子摸那一张（"然后"的严格次序：先回复、再摸牌）。`RECOVER_AFTER`
+# 不再为被替换的目标发——它没有回复过体力。
+#
+# 触发判据四条全部内联：目标是**其他**角色 ∧ 其回合（``state.turn_seat``）∧ 同属吴势力 ∧
+# 其体力值 ≥ 主公（比较发生在回复**之前**）。
+# ---------------------------------------------------------------------------
+
+JIE_JIUYUAN = hero_skill_id("jie_sunquan", "jiuyuan")
+"""界孙权【救援】的全限定技能 id（§十九 L2124–L2127）。"""
+
+JIE_JIUYUAN_REPLACED_KEY = "recover_replaced"
+"""RECOVER 帧私有键：本次回复已被【救援】替换（引擎的 RECOVER 帧据此跳过体力写入）。
+
+跨层契约：写方是本技能的钩子，读方是 :func:`sgs.engine.steps.recover_value`；与
+:data:`~sgs.skills.hero_zone.QIANXUN_PLACED_KEY` 同一条姿态（skills 定义键、engine 读取）。
+"""
+
+_JIE_JIUYUAN_REDIRECTED = "jie_jiuyuan_redirected"
+"""帧私有：转移已经成立（重入时跑"然后摸一张"、且条件据此保住，不因主公回血后比较翻转）。"""
+
+_JIE_JIUYUAN_DRAWN = "jie_jiuyuan_drawn"
+"""帧私有：那一张已经摸过（重入不重复摸）。"""
+
+
+def _jie_jiuyuan_condition(host: Any, frame: Frame) -> bool:
+    """触发条件（见本节头注）；转移成立后的重入直接放行——否则主公回血可能让
+    "其体力值不小于你"翻转为假，第二次进入时钩子被挡掉、"然后摸一张"就丢了。"""
+    if frame.data.get(_JIE_JIUYUAN_REDIRECTED):
+        return True
+    state = host.state
+    lord = frame.data.get(MATCH_OWNER_KEY)
+    targets = tuple(frame.data.get("targets", ()))
+    if lord is None or len(targets) != 1:
+        return False
+    actor = int(targets[0])
+    if actor == lord or state.turn_seat != actor:
+        return False
+    if not same_kingdom(state, actor, lord):
+        return False
+    return state.player(actor).hp >= state.player(lord).hp
+
+
+def _jie_jiuyuan_plan(
+    state: GameState, frame: Frame, instance: Any
+) -> ActivationPlan:
+    """发动形态：这一问交给**正在回复的那个吴势力角色**（决定者 ≠ 受益者）。"""
+    del state, instance
+    targets = tuple(frame.data.get("targets", ()))
+    return ActivationPlan(actor=int(targets[0]) if targets else None)
+
+
+def _jie_jiuyuan_redirect(host: Any, frame: Any, answers: Any) -> Any:
+    """提交点：第一次进入 ⇒ 替换回复（不写体力）+ 压主公的 RECOVER 子帧；出栈后摸一张。"""
+    del answers
+    state = host.state
+    lord = int(frame.data["skill_owner"])
+    actor = int(tuple(frame.data.get("targets", ()))[0])
+    if not frame.data.get(_JIE_JIUYUAN_REDIRECTED):
+        frame.data[_JIE_JIUYUAN_REDIRECTED] = True
+        frame.data[JIE_JIUYUAN_REPLACED_KEY] = True
+        # 主公已满体力 ⇒ 没有实际的"回复 1 点"可写（不压一个零变化的 RECOVER 帧），
+        # 直接进入"然后其摸一张牌"。
+        if state.player(lord).hp < state.player(lord).hp_max:
+            host.push_frame(
+                FrameKind.RECOVER,
+                {
+                    "targets": (lord,),
+                    "source": actor,
+                    "card": None,
+                    "use_timing": frame.data.get("use_timing"),
+                    "amount": 1,
+                },
+                timing=Timing.RECOVER_VALUE,
+            )
+            return "stay"
+    if not frame.data.get(_JIE_JIUYUAN_DRAWN):
+        frame.data[_JIE_JIUYUAN_DRAWN] = True
+        host.draw_for_hand(frame, actor, 1)
+    return None
+
+
+JIE_JIUYUAN_FLOW = SkillFlow(name="jie_jiuyuan", steps=(), effect=_jie_jiuyuan_redirect)
+"""界【救援】的零步流水线：[是否发动] → 转移回复 + 摸一张（无步骤）。"""
 
 
 PROVIDERS: Mapping[str, ProviderHandler] = MappingProxyType(
@@ -594,7 +701,7 @@ def _lord_request_definition(skill: LordSkill) -> SkillDef:
 
 
 def lord_skill_definitions() -> tuple[SkillDef, ...]:
-    """F 族三条主公技的 :class:`~sgs.skills.catalog.SkillDef`（票 12 §落地表的 F 行）。"""
+    """F 族五条主公技的 :class:`~sgs.skills.catalog.SkillDef`（票 12 §落地表的 F 行 + 票 17）。"""
     return (
         *lord_request_skill_definitions(),
         SkillDef(
@@ -604,5 +711,24 @@ def lord_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.LORD,
             modifiers=(Modifier(ModifierPoint.RECOVER_AMOUNT, JIUYUAN.recover_amount),),
             requirement="其他吴势力角色对你使用【桃】时，回复的体力值 +1",
+        ),
+        # 界孙权【救援】（M6 票 17）：回复事件上的可选用应答（决定者 = 正在回复的吴势力
+        # 角色，受益者 = 主公），与标准版的"锁定 +1"不是同一条机制。
+        SkillDef(
+            skill_id=JIE_JIUYUAN,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.LORD,
+            hooks=(
+                Hook(
+                    Timing.RECOVER_VALUE,
+                    condition=_jie_jiuyuan_condition,
+                    flow=JIE_JIUYUAN_FLOW,
+                ),
+            ),
+            requirement=(
+                "当其他吴势力角色于其回合内回复体力时，若其体力值不小于你，该角色可以改为"
+                "令你回复 1 点体力，然后其摸一张牌"
+            ),
         ),
     )

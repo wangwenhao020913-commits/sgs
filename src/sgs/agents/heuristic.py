@@ -820,6 +820,14 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         "yajiao_give": 1.5,
         "yajiao_top": 0.0,
         "yajiao_discard": 1.5,
+        # 界孙尚香【结姻】（M6 票 17）的二选一：两种成本都要付一张牌；置装备还让目标
+        # 多一件装备，故略优于纯弃置（下一步的选牌步仍按"自己的牌 = 成本"挑最便宜的）。
+        "jieyin_discard_hand": 0.5,
+        "jieyin_place_equipment": 1.0,
+        # 界大乔【国色】（M6 票 17）的二选一：把方块牌当【乐不思蜀】是限制对手（正收益）；
+        # 弃场上的【乐不思蜀】是解队友的控制（收益略低但同样为正）。
+        "guose_use_indulgence": 2.0,
+        "guose_discard_indulgence": 1.5,
     }
 )
 
@@ -856,6 +864,9 @@ _HOSTILE_SEAT_STEPS = (
     "lijian:",
     "fanjian:",
     "liuli:",
+    # 界大乔【国色】（M6 票 17）的【乐不思蜀】目标：手写询问用**全限定** skill_id
+    # （``hero.jie_daqiao.guose:seat``），故这里登记整段前缀，不另造第二套短 id 约定。
+    "hero.jie_daqiao.guose:",
 )
 """座位步的**语义分组**：这些步骤里的座位是"被指向的对手"，其余（治疗 / 给牌）是"被帮助的人"。
 
@@ -1601,6 +1612,53 @@ def _score_liuli(query: Query, action: Action, view: PlayerView) -> float:
     return 3.0 - 0.5 * _picked_value(view, action)
 
 
+def _score_jie_kurou(query: Query, action: Action, view: PlayerView) -> float:
+    """界【苦肉】（M6 票 17）：弃一张牌 + 失去 1 点体力，换来【诈降】**摸三张**。
+
+    净牌数 = +2（摸三张、弃一张），另有"本阶段红【杀】无距离 / 不可闪 / 次数 +1"；
+    1 点体力时不换（再失去即濒死）。成本按骨架候选预估一张最便宜的牌。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query
+    if view.players[view.seat].hp <= 1:
+        return -_UNKNOWN_CARD_VALUE
+    return 3.0 * _UNKNOWN_CARD_VALUE - _skill_cost(view, action, 1)
+
+
+def _score_jie_guose(query: Query, action: Action, view: PlayerView) -> float:
+    """界【国色】（M6 票 17）：二选一 + 稳定摸一张。
+
+    选项 1 是把方块牌变成【乐不思蜀】（控制），选项 2 是弃两张牌解掉场上的控制；
+    两者之外**恒摸一张**，故即使方块牌本身是成本，净收益仍为正。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query, view
+    return 2.0
+
+
+def _score_jie_jieyin(query: Query, action: Action, view: PlayerView) -> float:
+    """界【结姻】（M6 票 17）：成本 1 张牌，较高的摸一张、较低的回复 1 点。
+
+    自己受伤时回复归自己（主收益）；都不受伤且体力相同 ⇒ 两种效果都不执行，纯亏成本，
+    故降值。成本按骨架候选预估一张最便宜的牌。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query
+    bonus = 4.0 if _wounded(view) else 1.0
+    return bonus - _skill_cost(view, action, 1)
+
+
+def _score_jie_jiuyuan(query: Query, action: Action, view: PlayerView) -> float:
+    """界【救援】（M6 票 17）：决定者是**正在回复体力的那个吴势力角色**。
+
+    收益 = 自己**确定摸一张**，外加把这次回复转给主公（对主公阵营是好事；不做敌我模型，
+    按 D16"平衡读数只记录、不设阈值"给一个常量为正）。不发动则 0 分。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query, view
+    return 2.0
+
+
 SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]] = {
     # 魏
     "hero.caocao.jianxiong": (_constant(4.0), "受伤后获得造成伤害的牌：净赚一张，恒发动"),
@@ -1763,6 +1821,36 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.jie_zhugeliang.guanxing": (
         _constant(3.0),
         "准备阶段看牌堆顶五张（存活 < 4 时三张）；全置底还能在结束阶段再看一次",
+    ),
+    # M6 票 17：界·吴（孙权 / 黄盖 / 大乔 / 孙尚香）。【诈降】是锁定技（没有「是否发动」
+    # 询问），由构造测试与"苦肉真的触发它"的 AI 场景覆盖，不在此表。
+    "hero.jie_sunquan.zhiheng": (
+        _score_zhiheng,
+        "与标准【制衡】同一条单步清单；弃光所有手牌多摸一张",
+    ),
+    "hero.jie_sunquan.jiuyuan": (
+        _score_jie_jiuyuan,
+        "决定者 = 正在回复体力的吴势力角色：自己摸一张，把这次回复转给主公",
+    ),
+    "hero.jie_huanggai.kurou": (
+        _score_jie_kurou,
+        "弃一张牌 + 失去 1 点体力换【诈降】摸三张；1 点体力时不换",
+    ),
+    "hero.jie_daqiao.guose": (
+        _score_jie_guose,
+        "二选一（方块牌当【乐不思蜀】/ 弃方块并解掉场上一张），选择结束后摸一张",
+    ),
+    "hero.jie_daqiao.liuli": (
+        _score_liuli,
+        "与标准【流离】同一条两步清单：弃一张牌把【杀】转移给合法新目标",
+    ),
+    "hero.jie_sunshangxiang.jieyin": (
+        _score_jie_jieyin,
+        "成本 1 张牌：较高的摸一张、较低的回复 1 点；体力相同则两种效果都不执行",
+    ),
+    "hero.jie_sunshangxiang.xiaoji": (
+        _constant(3.0),
+        "与标准【枭姬】同一条零步钩子：失去装备区里的一张牌后摸两张",
     ),
     # 装备技（W4-4）：会问"是否发动"的 5 条非锁定装备**各给一个正分常量**。
     # 缺省 ``_UNKNOWN_SKILL_VALUE = -1.0 < Pass(0)`` ⇒ 不入表就永不发动（雌雄无法复现

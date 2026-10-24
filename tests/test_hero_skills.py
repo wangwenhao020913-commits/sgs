@@ -268,6 +268,7 @@ def test_lord_skill_ids_are_derived_from_the_skill_definitions(monkeypatch):
             "hero.liubei.jijiang",
             "hero.jie_liubei.jijiang",
             "hero.sunquan.jiuyuan",
+            "hero.jie_sunquan.jiuyuan",
         }
     )
 

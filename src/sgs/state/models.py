@@ -376,6 +376,19 @@ class Player(BaseModel):
     **不发 delta**：与 ``luoyi_active`` 同姿态——没有 JSON 读者，记录流里的使用 / 打出
     动作已足以在回放时重建它。
     """
+    zhaxiang_active: bool = False
+    """界黄盖【诈降】的"本阶段"效果是否生效（M6 票 17；§十九 L2148–L2151）。
+
+    牌面："然后若此时是你的出牌阶段，你本阶段：使用红色【杀】无距离限制且不能被【闪】
+    响应、使用【杀】的次数上限 +1。"写入唯一入口 ``Engine.set_zhaxiang_active``（诈降的
+    ``LIFE_DECREASE_AFTER`` 钩子在"此刻是我的出牌阶段"时置位）；**清理点 = 出牌阶段结束**
+    （:meth:`Engine._phase_play_end`，``_phase_play_start`` 再兜一次）——与
+    ``slash_in_play_phase`` 的"阶段起点复位"不同："本阶段"的效果必须在阶段**结束**就消失，
+    否则别人的回合里被"借刀杀人"被迫使用的【杀】会错误地吃到这三条加成。
+
+    读点是 :mod:`sgs.skills.life_after` 的三条回调（``TARGET_POOL`` / ``COUNT_LIMIT`` /
+    ``USE_AFTER_DESIGNATE_TARGET`` 的帧标签）。**不发 delta**：与 ``luoyi_active`` 同姿态。
+    """
     damage_dealt_this_turn: bool = False
     """本回合是否**造成过伤害**（M6 票 06 的【诛害】判据：§十九 L2111–L2113）。
 

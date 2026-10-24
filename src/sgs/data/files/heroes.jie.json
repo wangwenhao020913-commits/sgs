@@ -475,6 +475,94 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "jie_sunquan",
+      "name": "界孙权",
+      "true_name": "孙权",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "zhiheng",
+          "name": "制衡",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "jiuyuan",
+          "name": "救援",
+          "skill_type": "LORD"
+        }
+      ]
+    },
+    {
+      "id": "jie_huanggai",
+      "name": "界黄盖",
+      "true_name": "黄盖",
+      "kingdom": "wu",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "kurou",
+          "name": "苦肉",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "zhaxiang",
+          "name": "诈降",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_daqiao",
+      "name": "界大乔",
+      "true_name": "大乔",
+      "kingdom": "wu",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "guose",
+          "name": "国色",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "liuli",
+          "name": "流离",
+          "skill_type": "NORMAL"
+        }
+      ]
+    },
+    {
+      "id": "jie_sunshangxiang",
+      "name": "界孙尚香",
+      "true_name": "孙尚香",
+      "kingdom": "wu",
+      "gender": "female",
+      "hp_max": 3,
+      "version": "jie-ol",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "jieyin",
+          "name": "结姻",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "xiaoji",
+          "name": "枭姬",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

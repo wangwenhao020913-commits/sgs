@@ -1441,6 +1441,40 @@ class Engine:
             owner=seat,
         )
 
+    def put_equipment_card(
+        self, frame: Frame, *, holder: int, card: CardRef, actor: int
+    ) -> Control:
+        """把一张**手牌里的装备牌**置入 ``holder`` 的装备区（M6 票 17 的界【结姻】）。
+
+        与 :meth:`move_used_card_to_equip_zone` 同一替换口径（先旧后新：同槽旧牌 ``LOSE``
+        入弃牌堆、新牌 ``PUT`` 入槽，故旧牌的"失去装备"照常触发【枭姬】一类技能），差别
+        只有两处：来源是**手牌**（不是处理区），归属 / 接收者是 ``holder``（不是使用者
+        本人）——牌面写的是"置入**其**装备区"，跨座位的置入因此走既有的两条移动原因。
+
+        返回 ``"stay"`` = 某一段移动内联派发了「失去牌后」并挂起，调用方原样透传；重入时
+        :meth:`move_in_frame` 的帧内幂等守卫认得出这两次移动已经搬完。
+        """
+        for card_id in list(self.state.player(holder).equip):
+            if self.state.card(card_id).slot is card.slot:
+                control = self.move_in_frame(
+                    frame,
+                    (self.state.card(card_id),),
+                    to_zone=ZoneRef(Zone.DISCARD),
+                    reason=MoveReason.LOSE,
+                    owner=holder,
+                    actor=actor,
+                )
+                if control == "stay":
+                    return "stay"
+        return self.move_in_frame(
+            frame,
+            (card,),
+            to_zone=ZoneRef(Zone.EQUIP, holder),
+            reason=MoveReason.PUT,
+            owner=holder,
+            actor=actor,
+        )
+
     # -- 打出帧（票 27）：手牌 → 处理区 → 弃牌堆 --------------------------------
 
     def move_played_card_to_processing(self, frame: Frame) -> None:
@@ -2799,6 +2833,26 @@ class Engine:
         if self.state.player(seat).paoxiao_bonus:
             self.set_paoxiao_bonus(seat, False)
 
+    def set_zhaxiang_active(self, seat: int, active: bool) -> bool:
+        """写一个座位的界【诈降】"本阶段"效果状态（M6 票 17 的唯一写入口）。
+
+        写入方 = 【诈降】的 ``LIFE_DECREASE_AFTER`` 钩子（"此刻是我的出牌阶段"时置位）；
+        清理点 = **该座位的出牌阶段结束**（:meth:`_phase_play_end`，起点再兜一次）——与
+        ``slash_in_play_phase`` 的"阶段起点复位"刻意不同：这三条加成必须在阶段结束就消失，
+        否则别的回合里被"借刀杀人"被迫使用的【杀】会错误地吃到它们。**不发 delta**：
+        与 ``luoyi_active`` 同姿态（没有 JSON 读者，回放按同一次失去体力重建）。
+        """
+        player = self.state.player(seat)
+        if player.zhaxiang_active == active:
+            return False
+        player.zhaxiang_active = active
+        return True
+
+    def _clear_zhaxiang_active(self, seat: int) -> None:
+        """把界【诈降】的"本阶段"效果清掉（出牌阶段起止各调一次，幂等）。"""
+        if self.state.player(seat).zhaxiang_active:
+            self.set_zhaxiang_active(seat, False)
+
     # -- 技能三态（M6 票 04）：获得 / 失去 / 失效 -------------------------------
 
     def grant_skill(self, seat: int, skill_id: str, *, frame: Frame | None = None) -> bool:
@@ -4035,6 +4089,9 @@ class Engine:
         # 出牌阶段起点（被【乐不思蜀】跳过时也复位——本阶段一张都没用，事实为假）。
         if self.state.turn_seat is not None:
             self.state.player(self.state.turn_seat).slash_in_play_phase = False
+            # M6 票 17【诈降】：正常收尾在 ``_phase_play_end``；这里再兜一次（上一阶段异常
+            # 中断时不让"本阶段"跨进新阶段）。
+            self._clear_zhaxiang_active(self.state.turn_seat)
         if self._turn_data.pop("skip_play", False):
             # 【乐不思蜀】判定非红桃 ⇒ **跳过出牌阶段**（官方"跳过其出牌阶段"，非跳过回合）：
             # 阶段体与边界一并越过，直奔弃牌阶段（票 26）。
@@ -4078,6 +4135,10 @@ class Engine:
 
     def _phase_play_end(self) -> None:
         self.emit_timing(Timing.PHASE_PLAY_END, actor=self.state.turn_seat)
+        # M6 票 17 界【诈降】：三条加成的"本阶段"作用域在阶段**结束**就清掉（不是等下一个
+        # 出牌阶段起点）——否则别人的回合里被"借刀杀人"被迫使用的【杀】会错误地吃到加成。
+        if self.state.turn_seat is not None:
+            self._clear_zhaxiang_active(self.state.turn_seat)
 
     def _phase_discard_start(self) -> str | None:
         """弃牌阶段开始：发 ``PHASE_DISCARD_START``，有阶段体钩子（【克己】）时惰性建帧。

@@ -66,6 +66,7 @@ from .catalog import MATCH_OWNER_KEY, Hook, SkillDef
 from .flow import FlowAnswers, PickCards, PickSeats, SkillFlow
 
 __all__ = [
+    "JIE_LIULI",
     "LIULI_FLOW",
     "JIE_MASHU",
     "LIULI",
@@ -85,6 +86,12 @@ JIE_MASHU = hero_skill_id("jie_machao", "mashu")
 
 LIULI = hero_skill_id("daqiao", "liuli")
 """大乔【流离】的全限定技能 id。"""
+
+JIE_LIULI = hero_skill_id("jie_daqiao", "liuli")
+"""界大乔【流离】的全限定技能 id（M6 票 17）：§十九 L2163–L2165 与标准版**逐字相同**。
+
+与标准【流离】共用同一条钩子 / 流水线（同一个回调、同一份步骤声明）：界版只是另一个武将
+id，行为不因版本分叉。"""
 
 _LIULI_USED = "liuli_used"
 """帧私有键：本次使用里【流离】已经转移过目标（重入不再问、不再转移）。"""
@@ -277,13 +284,36 @@ LIULI_FLOW = SkillFlow(
 """
 
 
+def _liuli_definition(skill_id: str) -> SkillDef:
+    """【流离】的 :class:`SkillDef`；标准 / 界两个武将 id 各取一份（同一钩子 + 同一条流水线）。"""
+    return SkillDef(
+        skill_id=skill_id,
+        locked=False,
+        carrier=CarrierKind.HERO,
+        skill_type=SkillType.NORMAL,
+        hooks=(
+            Hook(
+                Timing.USE_BECOME_TARGET,
+                condition=_liuli_condition,
+                flow=LIULI_FLOW,
+            ),
+        ),
+        requirement="弃一张牌，把【杀】转移给另一名角色",
+        step_requirements={
+            "card": "弃置一张牌（手牌 / 装备区）",
+            "seat": "选择将此【杀】转移给哪名其他角色",
+        },
+        preactivated=True,
+    )
+
+
 def target_change_skill_definitions() -> tuple[SkillDef, ...]:
-    """K 族【马术】（标准 / 界两条）与 M 族【流离】的 :class:`~sgs.skills.catalog.SkillDef`。
+    """K 族【马术】（标准 / 界两条）与 M 族【流离】（标准 / 界两条）的 :class:`SkillDef`。
 
     【马术】锁定（技能面写"锁定技"）⇒ ``locked=True``、落 ``DISTANCE`` 修饰器；
     【流离】非锁定（"你可以"）⇒ ``locked=False``、落 ``USE_BECOME_TARGET`` 钩子（票 08 起
-    该钩子声明 ``flow=LIULI_FLOW``）。两条 ``carrier = HERO``（优先级档由载体派生）、
-    ``skill_type = NORMAL``。
+    该钩子声明 ``flow=LIULI_FLOW``）。四条 ``carrier = HERO``（优先级档由载体派生）、
+    ``skill_type = NORMAL``。界版两条都是"同一份声明、另一个武将 id"（票 04 / 票 17）。
     """
     return (
         SkillDef(
@@ -303,23 +333,7 @@ def target_change_skill_definitions() -> tuple[SkillDef, ...]:
             modifiers=(Modifier(ModifierPoint.DISTANCE, _mashu_distance),),
             requirement="计算与其他角色的距离时 -1",
         ),
-        SkillDef(
-            skill_id=LIULI,
-            locked=False,
-            carrier=CarrierKind.HERO,
-            skill_type=SkillType.NORMAL,
-            hooks=(
-                Hook(
-                    Timing.USE_BECOME_TARGET,
-                    condition=_liuli_condition,
-                    flow=LIULI_FLOW,
-                ),
-            ),
-            requirement="弃一张牌，把【杀】转移给另一名角色",
-            step_requirements={
-                "card": "弃置一张牌（手牌 / 装备区）",
-                "seat": "选择将此【杀】转移给哪名其他角色",
-            },
-            preactivated=True,
-        ),
+        _liuli_definition(LIULI),
+        # 界大乔【流离】（M6 票 17）：牌面与标准版逐字相同 ⇒ 同一条钩子 / 流水线。
+        _liuli_definition(JIE_LIULI),
     )

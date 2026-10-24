@@ -58,6 +58,7 @@ from sgs.skills import (
     DAMAGE_DEAL_RECORDED_KEY,
     DAMAGE_POINT_KEY,
     DAMAGE_RECORDED_KEY,
+    JIE_JIUYUAN_REPLACED_KEY,
     QIANXUN_PLACED_KEY,
     SeamKind,
     activate_skill,
@@ -1480,11 +1481,18 @@ def recover_value(host: FrameHost, frame: Frame) -> Control:
     目标值由本帧算，原语只负责写（票 07 §1）。回复量本身先过
     :func:`~sgs.effects.recover_amount` 链（票 09 的 ``RECOVER_AMOUNT``，缺省 1）——
     【救援】在此把"其他吴势力角色对孙权用【桃】"的回复量改成 2。
+
+    **回复被替换**（M6 票 17 的界孙权【救援】"改为令你回复 1 点体力"）：钩子在
+    ``RECOVER_VALUE`` 里写 :data:`~sgs.skills.JIE_JIUYUAN_REPLACED_KEY` 并压好主公的
+    RECOVER 子帧。子帧出栈后本步重入，这里**跳过体力写入与 ``RECOVER_AFTER``**（目标没有
+    回复过体力），整帧就此收尾；"然后摸一张"由钩子自己在第二次进入时补上。
     """
     target = frame.data["targets"][0]
     control = _emit(host, frame, Timing.RECOVER_VALUE, actor=target)
     if control is not None:
         return control
+    if frame.data.get(JIE_JIUYUAN_REPLACED_KEY):
+        return Goto(len(RECOVER_STEPS))
     amount = recover_amount(
         host.state,
         source=frame.data["source"],

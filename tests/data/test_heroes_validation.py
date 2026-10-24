@@ -436,6 +436,10 @@ def test_the_standard_table_stays_the_25_and_the_jie_table_is_loaded_separately(
         "jie_liubei",
         "jie_zhaoyun",
         "jie_zhugeliang",
+        "jie_sunquan",
+        "jie_huanggai",
+        "jie_daqiao",
+        "jie_sunshangxiang",
     ]
     assert {hero.id for hero in standard.heroes}.isdisjoint(
         {hero.id for hero in jie.heroes}
@@ -648,6 +652,8 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     # 界李典是**只有界版**的新真名（版本 → 43、真名 → 27，§十九 L2050–L2057）。
     # M6 票 16：界刘备 / 界赵云 / 界诸葛亮三名的真名都与标准版同名（版本 43 → 46、
     # 真名仍 27，§十九 L2058–L2102）。
+    # M6 票 17：界孙权 / 界黄盖 / 界大乔 / 界孙尚香四名的真名也都与标准版同名
+    # （版本 46 → 50、真名仍 27，§十九 L2121–L2180）。
     caocao = jie.by_id("jie_caocao")
     simayi = jie.by_id("jie_simayi")
     zhangliao = jie.by_id("jie_zhangliao")
@@ -781,6 +787,66 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
         SkillType.NORMAL,
     ]
 
+    # M6 票 17：界孙权（§十九 L2121–L2127）、界黄盖（L2146–L2151）、界大乔（L2159–L2165）、
+    # 界孙尚香（L2173–L2180）。四名真名都与标准版同名；【救援】是主公技。
+    sunquan = jie.by_id("jie_sunquan")
+    huanggai = jie.by_id("jie_huanggai")
+    daqiao = jie.by_id("jie_daqiao")
+    sunshangxiang = jie.by_id("jie_sunshangxiang")
+    assert sunquan is not None and huanggai is not None
+    assert daqiao is not None and sunshangxiang is not None
+    assert (sunquan.name, sunquan.true_name, sunquan.version) == (
+        "界孙权",
+        "孙权",
+        "jie-ol",
+    )
+    assert (sunquan.kingdom, sunquan.gender, sunquan.hp_max) == (
+        Kingdom.WU,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in sunquan.skills] == ["zhiheng", "jiuyuan"]
+    assert [skill.skill_type for skill in sunquan.skills] == [
+        SkillType.NORMAL,
+        SkillType.LORD,
+    ], "【救援】是主公技（§十九 L2124）"
+
+    assert (huanggai.name, huanggai.true_name, huanggai.version) == (
+        "界黄盖",
+        "黄盖",
+        "jie-ol",
+    )
+    assert (huanggai.kingdom, huanggai.gender, huanggai.hp_max) == (
+        Kingdom.WU,
+        Gender.MALE,
+        4,
+    )
+    assert [skill.id for skill in huanggai.skills] == ["kurou", "zhaxiang"]
+    assert [skill.skill_type for skill in huanggai.skills] == [
+        SkillType.NORMAL,
+        SkillType.NORMAL,
+    ], "【诈降】是锁定技，不是主公 / 限定 / 觉醒技（锁定由代码侧声明）"
+
+    assert (daqiao.name, daqiao.true_name, daqiao.version) == ("界大乔", "大乔", "jie-ol")
+    assert (daqiao.kingdom, daqiao.gender, daqiao.hp_max) == (
+        Kingdom.WU,
+        Gender.FEMALE,
+        3,
+    )
+    assert [skill.id for skill in daqiao.skills] == ["guose", "liuli"]
+
+    assert (sunshangxiang.name, sunshangxiang.true_name, sunshangxiang.version) == (
+        "界孙尚香",
+        "孙尚香",
+        "jie-ol",
+    )
+    assert (sunshangxiang.kingdom, sunshangxiang.gender, sunshangxiang.hp_max) == (
+        Kingdom.WU,
+        Gender.FEMALE,
+        3,
+    )
+    assert [skill.id for skill in sunshangxiang.skills] == ["jieyin", "xiaoji"]
+
     assert all(hero.true_name for hero in jie.heroes), "界版每名都带真名"
     assert all(hero.enabled for hero in jie.heroes), "边界突破 P1 起界将逐批启用"
 
@@ -907,6 +973,22 @@ def test_hero_skill_ids_lookup_covers_the_jie_supplement():
     assert hero_skill_ids("jie_zhugeliang") == (
         "hero.jie_zhugeliang.guanxing",
         "hero.jie_zhugeliang.kongcheng",
+    )
+    assert hero_skill_ids("jie_sunquan") == (
+        "hero.jie_sunquan.zhiheng",
+        "hero.jie_sunquan.jiuyuan",
+    )
+    assert hero_skill_ids("jie_huanggai") == (
+        "hero.jie_huanggai.kurou",
+        "hero.jie_huanggai.zhaxiang",
+    )
+    assert hero_skill_ids("jie_daqiao") == (
+        "hero.jie_daqiao.guose",
+        "hero.jie_daqiao.liuli",
+    )
+    assert hero_skill_ids("jie_sunshangxiang") == (
+        "hero.jie_sunshangxiang.jieyin",
+        "hero.jie_sunshangxiang.xiaoji",
     )
     assert hero_skill_ids("guanyu") == ("hero.guanyu.wusheng",), "标准版查法一字不变"
 

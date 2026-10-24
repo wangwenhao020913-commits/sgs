@@ -476,7 +476,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 46 and len(catalog) == 27, "M6 票 16 后：46 个版本 / 27 个真名"
+    assert len(flat) == 50 and len(catalog) == 27, "M6 票 17 后：50 个版本 / 27 个真名"
     for group in catalog:
         true_name = group["true_name"]
         assert true_name, "每个真名都要能给人看（名称非空）"
@@ -2619,8 +2619,10 @@ def test_the_session_view_carries_the_human_seats_skills() -> None:
     from sgs_web.serve import GameRegistry
 
     registry = GameRegistry(runs_dir="/tmp/unused")
+    # 判据（未放宽）：人类座位发到**标准版**武将（界将的显示归票 19，名称解析仍读内容包表）。
+    # M6 票 17 换池（版本 46 → 50）后 20261012 的人类是界孙尚香，按同一判据重扫到 20261001。
     session = registry.create(
-        {"player_count": 8, "ai": "heuristic", "seed": 20261012, "timeout_seconds": None}
+        {"player_count": 8, "ai": "heuristic", "seed": 20261001, "timeout_seconds": None}
     )
     payload = registry.view(session, after=-1, logs_after=0)
 
@@ -2877,7 +2879,9 @@ def test_skills_never_leak_another_seats_inventory() -> None:
     武将详情另有一份**公开只读**清单（`seat_skill_display`，只含武将牌 / 装备区，
     不带可用性）；两者不是同一个面，别把这条测试当成"对手技能完全不下发"。
     """
-    session = Session(seed=20261012, ai="heuristic", timeout_seconds=None, player_count=8)
+    # 判据未放宽：人类座位发到标准版武将（界将的显示归票 19）。
+    # M6 票 17 换池（版本 46 → 50）后按同一判据重扫到 20261001。
+    session = Session(seed=20261001, ai="heuristic", timeout_seconds=None, player_count=8)
     mine = {entry["skill_id"] for entry in build_skills(session, session.human_seat)}
 
     assert mine, "人类座位应当有技能"
@@ -2897,7 +2901,9 @@ def test_the_lord_skill_gate_is_inherited_not_reimplemented() -> None:
     """
     from sgs.skills import resolve_instances
 
-    session = Session(seed=20261012, ai="heuristic", timeout_seconds=None, player_count=8)
+    # 判据未放宽：人类座位发到标准版武将（界将的显示归票 19）。
+    # M6 票 17 换池（版本 46 → 50）后按同一判据重扫到 20261001。
+    session = Session(seed=20261001, ai="heuristic", timeout_seconds=None, player_count=8)
     mine = {entry["skill_id"] for entry in build_skills(session, session.human_seat)}
     owners_instances = {
         instance.skill_id
@@ -4955,7 +4961,7 @@ def test_a_bare_query_rebuilds_transformed_source_cards_from_the_query_itself() 
 
 
 # ---------------------------------------------------------------------------
-# U1-04b 描述全文：43 个牌名 + 105 条技能（独立内容文件，不进引擎 / 录像）
+# U1-04b 描述全文：43 个牌名 + 113 条技能（独立内容文件，不进引擎 / 录像）
 # ---------------------------------------------------------------------------
 
 MILITARY_CARD_TYPE_IDS = frozenset(
@@ -4977,7 +4983,7 @@ MILITARY_CARD_TYPE_IDS = frozenset(
 
 
 def test_every_card_name_and_skill_id_has_a_description() -> None:
-    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 105 条技能一条不缺。
+    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 113 条技能一条不缺。
 
     缺一条时断言消息**直接列出缺的 key**（不是只报一个总数）——这是票面的验收判据。
     多余 / 拼错的 key 也一并拦：否则「43 条」可以是 42 条真条目 + 1 条错拼。
@@ -4996,7 +5002,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 105, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 113, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

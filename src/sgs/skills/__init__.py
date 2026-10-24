@@ -26,6 +26,7 @@
 | 改判 | :mod:`sgs.skills.rejudge` | 鬼才 / 天妒 |
 | 失去牌后 | :mod:`sgs.skills.move_after` | 连营 / 枭姬 |
 | 阶段体 | :mod:`sgs.skills.phase_body` | 英姿 / 闭月 / 替身（**限定技**） |
+| 失去体力后（M6 票 17） | :mod:`sgs.skills.life_after` | 诈降（摸三张 + 本阶段红【杀】加成） |
 | 排列 | :mod:`sgs.skills.arrange` | 观星 |
 | 目标池 / 响应窗口 | :mod:`sgs.skills.target_pool` / :mod:`sgs.skills.response_window` | 空城 / 谦逊；无双 / 铁骑 |
 | P 限制豁免 / 【咆哮】②（锁定技） | :mod:`sgs.skills.limits` | 咆哮（次数 + 被抵消后的 +1）/ 奇才（距离） |
@@ -189,6 +190,9 @@ from .virtual import (
 )
 from .lord_request import (
     HUJIA,
+    JIE_JIUYUAN,
+    JIE_JIUYUAN_FLOW,
+    JIE_JIUYUAN_REPLACED_KEY,
     JIJIANG,
     JIUYUAN,
     LORD_REQUEST_KEY,
@@ -223,6 +227,7 @@ from .response_window import (
     JIE_TIEQI,
 )
 from .target_change import (
+    JIE_LIULI,
     JIE_MASHU,
     LIULI,
     MASHU,
@@ -274,6 +279,11 @@ from .awakening import (
     ZHUHAI_FLOW,
     awakening_activation_plans,
     awakening_skill_definitions,
+)
+from .life_after import (
+    JIE_ZHAXIANG,
+    ZHAXIANG_DRAW,
+    life_after_skill_definitions,
 )
 
 EQUIPMENT_CARD_TYPE_IDS: tuple[str, ...] = tuple(
@@ -335,9 +345,14 @@ __all__ = (
     "GUANXING_MAX",
     "GUICAI",
     "HUJIA",
+    "JIE_JIUYUAN",
+    "JIE_JIUYUAN_FLOW",
+    "JIE_JIUYUAN_REPLACED_KEY",
     "JIE_LIANYING",
     "JIE_LIJIAN",
+    "JIE_LIULI",
     "JIE_QIANXUN",
+    "JIE_ZHAXIANG",
     "JIJIANG",
     "JIE_MASHU",
     "JIE_TIEQI",
@@ -427,6 +442,8 @@ __all__ = (
     "YIJUE_HEAL",
     "YIJUE_HEAL_OPTIONS",
     "YIJUE_SKIP_HEAL",
+    "ZHAXIANG_DRAW",
+    "life_after_skill_definitions",
     "activate_skill",
     "activation_plan",
     "advance_provider",

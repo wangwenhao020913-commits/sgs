@@ -165,9 +165,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 105
+    assert len(CATALOG) == 113
     assert len(equipment) == 22
-    assert len(heroes) == 83
+    assert len(heroes) == 91
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -182,7 +182,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 83
+    assert len(expected) == 91
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -996,6 +996,15 @@ SKILL_FILES: dict[str, str] = {
     "hero.jie_zhaoyun.yajiao": "test_hero_jie_shu.py",
     "hero.jie_zhugeliang.guanxing": "test_hero_jie_shu.py",
     "hero.jie_zhugeliang.kongcheng": "test_hero_jie_shu.py",
+    # M6 票 17：界·吴（孙权 / 黄盖 / 大乔 / 孙尚香）
+    "hero.jie_sunquan.zhiheng": "test_hero_jie_wu.py",
+    "hero.jie_sunquan.jiuyuan": "test_hero_jie_wu.py",
+    "hero.jie_huanggai.kurou": "test_hero_jie_wu.py",
+    "hero.jie_huanggai.zhaxiang": "test_hero_jie_wu.py",
+    "hero.jie_daqiao.guose": "test_hero_jie_wu.py",
+    "hero.jie_daqiao.liuli": "test_hero_jie_wu.py",
+    "hero.jie_sunshangxiang.jieyin": "test_hero_jie_wu.py",
+    "hero.jie_sunshangxiang.xiaoji": "test_hero_jie_wu.py",
     # M6 票 08：手牌上限双轴 + 界周瑜 / 界夏侯惇 / 界黄月英
     "hero.jie_zhouyu.yingzi": "test_hero_jie_hand_limit.py",
     "hero.jie_zhouyu.fanjian": "test_hero_jie_hand_limit.py",
@@ -1133,6 +1142,34 @@ def _hujia_probe_state() -> GameState:
     )
 
 
+def _jiuyuan_probe_state() -> GameState:
+    """界【救援】的正面对照：ME（座位 1）是**主公**，正在回复的吴势力角色是座位 0。
+
+    ME 与座位 0 同属吴；座位 0 在自己的回合（``turn_seat = 0``）且体力 3 ≥ ME 的 2。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=3, kingdom=Kingdom.WU),
+            SeatSpec(hp=2, kingdom=Kingdom.WU),
+            SeatSpec(hp=4),
+        ],
+        turn_seat=0,
+    )
+    return state
+
+
+def _zhaxiang_probe_state() -> GameState:
+    """界【诈降】的正面对照：ME 的"本阶段"效果已生效、渠道牌是**红色**【杀】。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(_PROBE_SOURCE_CARD,)), SeatSpec(hp=3), SeatSpec()],
+        processing=(_PROBE_PROCESSING_SLASH,),
+    )
+    state.player(ME).zhaxiang_active = True
+    return state
+
+
 def _jijiang_probe_state() -> GameState:
     """界【激将】②的正面对照：ME（座位 1）与【杀】的打出者（座位 0）都是**蜀**势力。"""
     return build_state(
@@ -1155,6 +1192,10 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _qianxun_probe_state()
     if skill_id == "hero.jie_caocao.hujia":
         return _hujia_probe_state()
+    if skill_id == "hero.jie_sunquan.jiuyuan":
+        return _jiuyuan_probe_state()
+    if skill_id == "hero.jie_huanggai.zhaxiang":
+        return _zhaxiang_probe_state()
     return _probe_state()
 
 
@@ -1306,6 +1347,23 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         "hero.jie_zhaoyun.yajiao": (
             _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=ME, from_hand=True),
             _HookFrame(card=state.card(_PROBE_CHANNEL_SLASH), source=ME, from_hand=True),
+        ),
+        # M6 票 17：界·吴的四条条件钩子（界流离 / 界枭姬各复用标准版同一条条件）。
+        # - 界【救援】：ME = 主公（技能持有者），帧目标 = 正在回复的座位 0；
+        # - 界【流离】：与标准【流离】同一条条件（本次【杀】的目标是 ME）；
+        # - 界【枭姬】：与标准【枭姬】同一条条件（ME 失去装备区里的一张牌）；
+        # - 界【诈降】：两条挂接——失去体力的是 ME（LIFE_DECREASE_AFTER）/ 红色【杀】的
+        #   使用者是 ME 且本阶段效果已生效（USE_AFTER_DESIGNATE_TARGET）。
+        "hero.jie_sunquan.jiuyuan": (_HookFrame(targets=(0,)),),
+        "hero.jie_daqiao.liuli": (
+            _HookFrame(
+                source=0, actor=ME, targets=(ME,), card=state.card(_PROBE_CHANNEL_SLASH)
+            ),
+        ),
+        "hero.jie_sunshangxiang.xiaoji": (_HookFrame(**{MOVE_EVENT_KEY: move_xiaoji}),),
+        "hero.jie_huanggai.zhaxiang": (
+            _HookFrame(target=ME, amount=1),
+            _HookFrame(source=ME, card=state.card(_PROBE_CHANNEL_SLASH)),
         ),
     }
 
@@ -1487,6 +1545,17 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.jie_lidian.xunxun": "排列技能",
     # M6 票 16：界【观星】张数按存活数 3 / 5，且准备 / 结束两个时机各挂一条同名的排列流。
     "hero.jie_zhugeliang.guanxing": "排列技能",
+    # M6 票 17：界·吴。界制衡（单步清单）/ 界苦肉（一步成本）/ 界结姻（目标步 + 提交点手写
+    # 询问）都是主动技能；界流离（钩子 + 两步清单）是触发技能；界救援 / 界国色 / 界枭姬
+    # 是零步技能；界诈降是锁定技（两条钩子 + 两个修饰器）。
+    "hero.jie_sunquan.zhiheng": "主动技能",
+    "hero.jie_sunquan.jiuyuan": "零步技能",
+    "hero.jie_huanggai.kurou": "主动技能",
+    "hero.jie_huanggai.zhaxiang": "锁定技",
+    "hero.jie_daqiao.guose": "零步技能",
+    "hero.jie_daqiao.liuli": "触发技能",
+    "hero.jie_sunshangxiang.jieyin": "主动技能",
+    "hero.jie_sunshangxiang.xiaoji": "零步技能",
     # 多轮技能 12（手写帧内游标循环；flow_for is None；M6 票 01 的【刚烈】= 判定 → 选项 → 选牌，
     # 票 02 的【洛神】= 可重复判定循环；票 15 的界【遗计】= 摸两张 → 逐张选择收牌人）
     "hero.guojia.yiji": "多轮技能",
@@ -1568,7 +1637,7 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.jie_liubei.jijiang": "候选提供者",
     "equip.eight_diagrams": "候选提供者",
 }
-"""105 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
+"""113 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
 `SkillDef` 上没有 shape 字段，也不该有：形态是从既有声明读出来的归类（`locked` /
 `skill_type` / `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` /
@@ -1580,20 +1649,20 @@ SKILL_SHAPE: dict[str, str] = {
 """
 
 SHAPE_COUNTS: dict[str, int] = {
-    "主动技能": 12,
-    "触发技能": 10,
-    "零步技能": 20,
+    "主动技能": 15,
+    "触发技能": 11,
+    "零步技能": 23,
     "排列技能": 3,
     "多轮技能": 13,
-    "锁定技": 25,
+    "锁定技": 26,
     "转化技": 12,
     "能力位": 2,
     "候选生成器": 1,
     "候选提供者": 5,
     "觉醒技": 2,
 }
-"""每格的条数（spec §4.4；M6 票 16 后
-12 + 10 + 20 + 3 + 13 + 25 + 12 + 2 + 1 + 5 + 2 = 105）。
+"""每格的条数（spec §4.4；M6 票 17 后
+15 + 11 + 23 + 3 + 13 + 26 + 12 + 2 + 1 + 5 + 2 = 113）。
 
 票 03 的三条：**苦肉**是零步主动技（裸发动，无步骤 ⇒ 机械形态落在「零步技能」格）；
 **克己**是阶段体零步技（同格）；**奇袭**是单源转化（转化技格）。票 04 的四条：**义绝**
@@ -1628,7 +1697,7 @@ SHAPE_COUNTS: dict[str, int] = {
 STEP_LANGUAGE_SHAPES: frozenset[str] = frozenset(
     {"主动技能", "触发技能", "零步技能", "排列技能", "觉醒技"}
 )
-"""在步骤语言内的五个形态（47 条 = 12 + 10 + 20 + 3 + 2）。觉醒技也走 ``SkillFlow``
+"""在步骤语言内的五个形态（54 条 = 15 + 11 + 23 + 3 + 2）。觉醒技也走 ``SkillFlow``
 （【潜心】零步、【勤学】一步选项），故"内 == 有 ``flow_for``"仍成立。"""
 
 IN_STEP_LANGUAGE: frozenset[str] = frozenset(
@@ -1645,7 +1714,7 @@ W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同�
 """
 
 OUTSIDE_STEP_LANGUAGE: frozenset[str] = frozenset(SKILL_SHAPE) - IN_STEP_LANGUAGE
-"""不在步骤语言内（58）：多轮 13 + 锁定 25 + 转化 12 + 能力位 2 + 候选生成器 1 + 候选提供者 5。
+"""不在步骤语言内（59）：多轮 13 + 锁定 26 + 转化 12 + 能力位 2 + 候选生成器 1 + 候选提供者 5。
 
 同样**派生**（:data:`SKILL_SHAPE` 减 :data:`IN_STEP_LANGUAGE`）；54 这个数由
 `SHAPE_COUNTS` 的其余六格加出来，测试里另有一条规模断言。
@@ -1677,9 +1746,9 @@ def _flow_steps(skill_id: str):
 
 
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
-    """99 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
+    """113 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 105
+    assert len(SKILL_SHAPE) == len(CATALOG) == 113
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11
     assert all(SKILL_SHAPE.values()), "表里没有空形态"
@@ -1803,8 +1872,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 47
-    assert len(outside) == 58
+    assert len(inside) == 54
+    assert len(outside) == 59
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

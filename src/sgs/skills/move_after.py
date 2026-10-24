@@ -432,9 +432,18 @@ _XIAOJI = MoveAfterSkill(
     trigger=_lost_equipment,
     flow=XIAOJI_FLOW,
 )
+_JIE_XIAOJI = MoveAfterSkill(
+    # 界孙尚香【枭姬】（M6 票 17）：§十九 L2177 与标准版**逐字相同** ⇒ 同一个触发谓词、
+    # 同一条零步流水线（界版只是另一个武将 id；"失去装备区里的一张牌"的判据只有一份）。
+    hero_id="jie_sunshangxiang",
+    short_id="xiaoji",
+    draws=2,
+    trigger=_lost_equipment,
+    flow=XIAOJI_FLOW,
+)
 
-MOVE_AFTER_SKILLS: tuple[MoveAfterSkill, ...] = (_LIANYING, _XIAOJI)
-"""D 族两条技能的逐字声明（票 07 §要做什么 6 的表）。"""
+MOVE_AFTER_SKILLS: tuple[MoveAfterSkill, ...] = (_LIANYING, _XIAOJI, _JIE_XIAOJI)
+"""D 族三条技能的逐字声明（票 07 §要做什么 6 的表 + M6 票 17 界孙尚香【枭姬】）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "lianying": "摸一张牌",
