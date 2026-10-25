@@ -155,6 +155,10 @@ function renderPending(view) {
   else if (kind === "skill") renderDirectSkill(pending, actions);
   // `SELECT_OPTION` 的非座位形态：一选项一个按钮的专用小选项组（不是候选列表）。
   else if (kind === "options") renderOptionButtons(pending);
+  // 单选项可选确认（B1）：唯一选项自动选中，不画选项按钮；出口 = 提交 / 右端放弃。
+  else if (kind === "option-confirm") renderOptionConfirm(pending);
+  // 洛神连续判定的亮牌确认（A1）：同一弹窗换牌 + 单选项确认。
+  else if (kind === "judge-reveal") renderJudgmentReveal(pending);
   else if (kind === "arrange") {
     // 排列（W6-03）：双行拖拽面；强制、无取消——唯一出口是「确认」。
     $("btn-cancel").hidden = true;
@@ -209,6 +213,38 @@ function setActionLabels(inPreativation, passiveEntry, arrange = false) {
   }
 }
 
+/** 单选项可选确认（B1）：`SELECT_OPTION` 的候选里**恰有一个** `SelectOption`，且还有
+ *  一条 `Pass`。这是"做 / 不做"的确认形状（洛神的「是否继续」、涯角的「是否弃牌」、
+ *  界限的「是否弃置」），界面不再画那一个选项按钮：唯一选项自动选中，「提交」送它、
+ *  「放弃」送 `Pass`。
+ *
+ *  判据只读 `legal_actions` 的形状：不认技能 id、不认选项值；有两个以上选项的询问仍走
+ *  小选项按钮组，选择型（`option_labels` / ≥4）仍走自己的弹窗。选座位形态另走 `seat`。
+ */
+function isSingleOptionalOption(pending) {
+  if (!pending || pending.kind !== "SELECT_OPTION") return false;
+  if (pending.option_seats && Object.keys(pending.option_seats).length) return false;
+  const actions = pending.legal_actions || [];
+  const options = actions.filter(
+    (action) => action.kind === "SelectOption" && !isRightAction(action),
+  );
+  return options.length === 1
+    && actions.some((action) => action.kind === "Pass");
+}
+
+/** A1：洛神连续判定的**亮牌确认**（服务端派生 `judgment_reveal`）。
+ *
+ *  `judgment_reveal.final !== true` ⇒ 这一问仍是循环里的"看这张判定牌，提交继续 / 放弃停止"；
+ *  `final === true` ⇒ 循环已结束、只用于关窗（不画弹窗）。判据只看服务端字段，不认技能名。
+ */
+function isJudgmentRevealOption(pending) {
+  return !!pending
+    && pending.kind === "SELECT_OPTION"
+    && !!pending.judgment_reveal
+    && pending.judgment_reveal.final !== true
+    && !!pending.judgment_reveal.card;
+}
+
 /** 这次询问该走哪条渲染路径。
  *
  * - `picker`：出牌阶段 / 响应窗口 —— 点牌 + 点目标；
@@ -217,6 +253,8 @@ function setActionLabels(inPreativation, passiveEntry, arrange = false) {
  * - `arrange`：`ARRANGE` 的双行拖拽面（W6-03；规格由投影下发）；
  * - `preactivation` / `preactivation-entry`：清单驱动的本地态 / 被动入口；
  * - `seat` / `options`：`SELECT_OPTION` 的选座位形态 / 小选项按钮组；
+ * - `option-confirm`：单选项可选确认（B1；只画「提交 / 放弃」）；
+ * - `judge-reveal`：洛神连续判定的亮牌确认（A1；弹窗 + 单选项确认）；
  * - `skill`：技能候选的直提态（无清单，如 B 形"是否发动"）；
  * - `direct`：唯一且无需选目标的候选 —— 不铺按钮，只说"将提交：…"；
  * - `unsupported`：没有专用面 —— fail-closed（不退回候选列表，不发明合法性）。
@@ -242,6 +280,13 @@ function renderKind(pending, actions) {
   if (isPassivePreativation(pending)) return "preactivation-entry";
   // `SELECT_OPTION` 的"选座位"形态（【遗计】"交给谁"）：**取消选项按钮**，只点场上武将。
   if (pending.kind === "SELECT_OPTION" && seatChoices(pending).length > 0) return "seat";
+  // 洛神连续判定的亮牌确认（A1）：弹窗显示本张判定牌，同时仍是单选项确认。
+  if (isJudgmentRevealOption(pending)) return "judge-reveal";
+  // 单选项可选确认（B1）：唯一 `SelectOption` + 一条 `Pass` = 「提交 / 放弃」两出口，
+  // 不再画那一个选项按钮。判据只看候选形状（选项条数 + Pass），不认技能 id；
+  // 涯角 / 界限等既有单选项可选技能自动套同一形态。选择型（`option_labels` / ≥4）
+  // 仍走自己的弹窗，不抢。
+  if (isSingleOptionalOption(pending) && !isChoiceStep(pending)) return "option-confirm";
   // 其余 `SELECT_OPTION`（花色 / 二选一）：专用的小选项按钮组。
   if (pending.kind === "SELECT_OPTION" && actions.some((action) => action.kind === "SelectOption")) {
     return "options";
@@ -315,7 +360,7 @@ function cancelAction(pending) {
   // 即便引擎给了 Pass，界面也不读它——右端放弃被藏起，取消键因此只剩"清空本地选择"
   // （这里的 null 让 `cancelOrClear` 走清空分支，而不是偷偷替玩家送出一条 Pass）。
   const kind = stepDialogKind(pending);
-  if (dialogDisablesPass(kind)) return null;
+  if (dialogDisablesPass(kind, pending)) return null;
   return (pending.legal_actions || []).find((action) => action.kind === "Pass") || null;
 }
 
@@ -528,6 +573,18 @@ function refreshSubmit(pending) {
   // 故这一支按既有 `selectionError` / `buildAction` 算可点态（判据仍是"能造出候选里真有
   // 的那条 Action"），不把提交键恒置灰。
   const dialogKind = stepDialogKind(pending);
+  // A1：洛神亮牌确认——弹窗里没有可选卡，出口是「提交 / 放弃」；按唯一选项的正常提交态算。
+  if (isJudgmentRevealOption(pending)) {
+    const selected = state.selectedOption === null
+      ? null
+      : (pending.legal_actions || [])[state.selectedOption];
+    const blocked = selected === null ? null : selectionError(selected, pending);
+    const ready = blocked === null && buildAction() !== null;
+    $("btn-submit").disabled = !ready;
+    $("t-choice").textContent = state.lastRejectReason
+      || (ready ? "可以提交。" : "点右端「提交」继续，或「放弃」停止。");
+    return;
+  }
   if (dialogKind === DIALOG_KINDS.reveal && isPickRevealStep(pending)) {
     const selected = state.selectedOption === null
       ? null
@@ -555,7 +612,7 @@ function refreshSubmit(pending) {
       || "点一张亮起的手牌即提交；也可以点右端「放弃」。";
     return;
   }
-  if (dialogDisablesPass(dialogKind)) {
+  if (dialogDisablesPass(dialogKind, pending)) {
     $("btn-submit").disabled = true;
     $("t-choice").textContent = state.lastRejectReason
       || (dialogKind === DIALOG_KINDS.choice

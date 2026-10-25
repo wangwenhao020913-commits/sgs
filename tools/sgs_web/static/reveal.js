@@ -35,9 +35,15 @@ function revealData(pending) {
   const harvest = pending && pending.harvest && typeof pending.harvest === "object"
     ? pending.harvest
     : {};
-  const cards = Array.isArray(harvest.revealed)
-    ? harvest.revealed
-    : (Array.isArray(pending && pending.revealed) ? pending.revealed : []);
+  // A1：洛神连续判定的当前判定牌由服务端派生字段给出，优先于其它亮牌来源。
+  const judged = pending && pending.judgment_reveal
+    ? pending.judgment_reveal.card
+    : null;
+  const cards = judged
+    ? [judged]
+    : (Array.isArray(harvest.revealed)
+      ? harvest.revealed
+      : (Array.isArray(pending && pending.revealed) ? pending.revealed : []));
   const targets = Array.isArray(harvest.targets) ? harvest.targets : [];
   return {
     cards,
@@ -76,6 +82,10 @@ function revealHintText(pending, interactive) {
   const requirement = (pending && pending.context && pending.context.requirement)
     || data.hint
     || "从亮出的牌里选择";
+  // A1：洛神连续判定的亮牌确认——卡片只读，出口在右端「提交（继续）/ 放弃（停止）」。
+  if (isJudgmentRevealOption(pending)) {
+    return `${requirement}：点右端「提交」继续，或「放弃」停止。`;
+  }
   if (isPickRevealStep(pending)) {
     if (!interactive) return `${requirement}：等待其他座位响应…`;
     const total = (pending.spec && pending.spec.total) || [1, 1];

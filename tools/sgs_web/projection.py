@@ -34,7 +34,9 @@ from sgs.engine import record_json
 from sgs.skills import (
     CATALOG,
     FREE_SPLIT,
+    JIE_LUOSHEN,
     LORD_SKILL_IDS,
+    LUOSHEN,
     SEAT_PREFIX,
     ModifierPoint,
     conversion_offers_by_source,
@@ -1606,6 +1608,142 @@ def harvest_state(engine: Any) -> dict[str, Any] | None:
     }
 
 
+_LUOSHEN_REPEAT_PREFIX = "luoshen:repeat:"
+
+
+def _record_enum_text(value: Any) -> str:
+    """记录里的枚举 / 字符串统一成文本（``MoveReason.JUDGE`` → ``"JUDGE"``）。"""
+    return str(getattr(value, "value", value) or "")
+
+
+def _record_judge_card(record: Any) -> CardRef | None:
+    """一条 ``card_move`` 是不是"判定牌进处理区"；是则返回那张判定牌。"""
+    if getattr(record, "kind", None) != "delta":
+        return None
+    if getattr(record, "delta_type", None) != "card_move":
+        return None
+    if _record_enum_text(getattr(record, "reason", None)).upper() != "JUDGE":
+        return None
+    to_zone = getattr(record, "to_zone", None)
+    if _record_enum_text(getattr(to_zone, "zone", None)).lower() != "processing":
+        return None
+    cards = tuple(getattr(record, "cards", ()) or ())
+    return cards[0] if len(cards) == 1 else None
+
+
+def _last_judge_card(records: Iterable[Any], after_seq: int, before_seq: int) -> CardRef | None:
+    found = None
+    for record in records:
+        seq = int(getattr(record, "seq", -1) or -1)
+        if seq <= after_seq or seq >= before_seq:
+            continue
+        card = _record_judge_card(record)
+        if card is not None:
+            found = card
+    return found
+
+
+def _judgment_card_payload(engine: Any, card: CardRef, lookup: Mapping[int, CardRef] | None) -> dict[str, Any]:
+    try:
+        ref = engine.state.card(int(card.card_id))
+    except Exception:  # noqa: BLE001 - 展示派生 fail-visible：牌表缺项时用记录里的 CardRef
+        ref = card
+    return card_payload(ref, lookup=lookup)
+
+
+def judgment_reveal_state(
+    engine: Any,
+    query: Query,
+    lookup: Mapping[int, CardRef] | None,
+) -> dict[str, Any] | None:
+    """A1：洛神连续判定的**纯显示层派生**（不进记录流 / 06 / 金录像）。
+
+    读取的都只是服务端已有事实：记录流里的 ``SKILL_ACTIVATION`` 询问（本次循环的起点）、
+    ``SELECT_OPTION`` 继续询问、以及 ``card_move(reason=JUDGE, to=processing)`` 的判定牌。
+
+    - 继续询问 ⇒ ``{chain_key, card, final: False}``：本次循环的第 N 张判定牌；
+      ``chain_key = judge-loop:<activation seq>``，同一轮循环内不变；
+    - 循环结束（红牌 / 放弃）后的**第一条同座位询问** ⇒ ``{chain_key, card, final: True}``：
+      前端据此关闭弹窗；``final`` 的语义就是"循环已结束、请关窗"，不表示"还属于循环"；
+    - 没有下一份 pending（局终 / 死亡 / 换会话）⇒ 本字段不出现，前端在 ``pending == null``
+      或 ``viewStartsNewSession`` 时关窗（`syncDialog` 的既有生命周期，不新增定时器）。
+
+    取不到激活询问 / 判定牌时返回 ``None``（fail-closed，不猜链）。
+    """
+    records = tuple(getattr(engine, "records", ()) or ())
+    current_seq = int(getattr(query, "seq", -1) or -1)
+    if current_seq < 0:
+        return None
+
+    activation_seq: int | None = None
+    for record in records:
+        if getattr(record, "kind", None) != "query":
+            continue
+        seq = int(getattr(record, "seq", -1) or -1)
+        if seq > current_seq:
+            continue
+        inner = getattr(record, "query", None)
+        if inner is None or str(getattr(inner, "kind", "")) != "SKILL_ACTIVATION":
+            continue
+        if str(getattr(inner, "skill_id", "")) in (LUOSHEN, JIE_LUOSHEN):
+            activation_seq = seq
+    if activation_seq is None:
+        return None
+
+    last_continue: int | None = None
+    for record in records:
+        if getattr(record, "kind", None) != "query":
+            continue
+        seq = int(getattr(record, "seq", -1) or -1)
+        if seq <= activation_seq or seq > current_seq:
+            continue
+        inner = getattr(record, "query", None)
+        if inner is None:
+            continue
+        if str(getattr(inner, "skill_id", "")).startswith(_LUOSHEN_REPEAT_PREFIX):
+            last_continue = seq
+
+    chain_key = f"judge-loop:{activation_seq}"
+    if str(getattr(query, "skill_id", "")).startswith(_LUOSHEN_REPEAT_PREFIX):
+        card = _last_judge_card(records, activation_seq, current_seq)
+        if card is None:
+            return None
+        return {
+            "chain_key": chain_key,
+            "card": _judgment_card_payload(engine, card, lookup),
+            "final": False,
+        }
+
+    if last_continue is None:
+        return None
+    actor = int(getattr(query, "actor", -1) or -1)
+    first_after: int | None = None
+    for record in records:
+        if getattr(record, "kind", None) != "query":
+            continue
+        seq = int(getattr(record, "seq", -1) or -1)
+        if seq <= last_continue:
+            continue
+        inner = getattr(record, "query", None)
+        if inner is None or int(getattr(inner, "actor", -1) or -1) != actor:
+            continue
+        first_after = seq
+        break
+    if first_after != current_seq:
+        return None
+    card = _last_judge_card(records, last_continue, current_seq)
+    if card is None:
+        # 用户放弃：循环结束没有新的判定牌 ⇒ 用最后一轮已判定的那张做关闭帧。
+        card = _last_judge_card(records, activation_seq, last_continue)
+    if card is None:
+        return None
+    return {
+        "chain_key": chain_key,
+        "card": _judgment_card_payload(engine, card, lookup),
+        "final": True,
+    }
+
+
 def pending_payload(
     session: Session | Query | None, *, human_seat: int | None = None
 ) -> dict[str, Any] | None:
@@ -1721,6 +1859,10 @@ def pending_payload(
         if str(query.kind) == "SELECT_CARDS" and payload.get("revealed")
         else None
     )
+    # A1：洛神连续判定的显示层派生（`{chain_key, card, final}`）。只从记录流 / 引擎已有
+    # 事实派生，**不进记录流 / 06 / 金录像**；查看者不是挂起者时为 None（fail-closed）。
+    # 字段键恒在（读取方契约），无循环时为 None。
+    payload["judgment_reveal"] = None
     # 这一步是不是"提供一张 B"（票 14）：非空 = B 的牌名 id。字段在记录流里被 ``exclude``，
     # 故**不进** Golden Replay 的字节；界面靠它把这一类选择面**就地**铺到本人的可见区域上。
     payload["provide_type"] = getattr(query, "provide_type", None)
@@ -1743,6 +1885,10 @@ def pending_payload(
         lookup = _card_lookup(session.engine.state)
     else:
         lookup = card_lookup_from_query(query)
+    if isinstance(session, Session) and same_viewer:
+        payload["judgment_reveal"] = judgment_reveal_state(
+            session.engine, query, lookup
+        )
     # 弃牌步的公开亮牌：只发给使用者本人（他是这一步的应答者）；牌来自帧载荷，不进记录流。
     if (
         fire_attack is not None

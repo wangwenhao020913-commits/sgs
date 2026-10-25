@@ -44,7 +44,12 @@ const DIALOG_KINDS = Object.freeze({
  *  `renderRightActions` / `cancelAction` / `refreshSubmit` 三处原先各写一遍同一条析取；
  *  抽成这里是为了改一处即三处一致（评审 Standards：重复谓词）。
  */
-function dialogDisablesPass(kind) {
+function dialogDisablesPass(kind, pending = null) {
+  // A1：洛神连续判定的亮牌确认是**可选**询问——「放弃」= Pass = 停止；不能被
+  // "亮牌弹窗一律没有放弃"的旧规则吞掉。
+  if (kind === DIALOG_KINDS.reveal && pending && isJudgmentRevealOption(pending)) {
+    return false;
+  }
   return kind === DIALOG_KINDS.choice
     || kind === DIALOG_KINDS.unknown
     || kind === DIALOG_KINDS.reveal;
@@ -169,7 +174,14 @@ function isHarvestActive(pending) {
  * 五谷的 AI 拿牌阶段要显示在人类屏幕上，见 `syncDialog` 的 harvest 例外）。
  */
 function isRevealStep(pending) {
-  if (!pending || pending.kind !== "SELECT_CARDS") return false;
+  if (!pending) return false;
+  // A1：洛神连续判定的继续询问 = 亮牌弹窗；`final:true` 是关窗帧，不画。
+  if (pending.judgment_reveal) {
+    return pending.kind === "SELECT_OPTION"
+      && pending.judgment_reveal.final !== true
+      && !!pending.judgment_reveal.card;
+  }
+  if (pending.kind !== "SELECT_CARDS") return false;
   if (pending.dialog === DIALOG_KINDS.reveal) return true;
   if (!isHarvestActive(pending)) return false;
   const zones = (pending.spec && pending.spec.zones) || [];
@@ -242,6 +254,9 @@ function dialogKeyFor(kind, pending) {
   // 会每拿一张就关窗重开。链键取**服务端派生**的 `harvest.key`（帧 + 牌 + 使用者），
   // 整段结算不变；没有它（合成载荷 / 非五谷亮牌）才退回 `kind:seq`，fail-visible 不猜链。
   if (kind === DIALOG_KINDS.reveal) {
+    // A1：洛神连续判定用服务端给出的循环键；同一循环内的每张判定牌共用这个窗口。
+    const chain = pending && pending.judgment_reveal && pending.judgment_reveal.chain_key;
+    if (chain) return `judge-reveal:${chain}`;
     const key = pending && pending.harvest && pending.harvest.key;
     if (key) return `reveal:${key}`;
   }

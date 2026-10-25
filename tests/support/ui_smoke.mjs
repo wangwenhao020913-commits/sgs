@@ -5772,6 +5772,52 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
     `selectedOption=${ui.state.selectedOption} submit=${$("btn-submit").disabled} options=${$("t-options").children.length}`);
 }
 
+/* ---- ①b 单选项可选确认（B1）：一个 SelectOption + 一条 Pass = 提交 / 放弃，不画按钮 ---- */
+{
+  const pending = {
+    kind: "SELECT_OPTION", actor: 0, seq: 9403, skill_id: "luoshen:repeat:0",
+    options: ["repeat"],
+    prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "repeat", answers_seq: 9403 },
+      { kind: "Pass", answers_seq: 9403 },
+    ],
+    candidate_index: {}, option_seats: {},
+    context: {
+      actor: 0, name: "洛神", targets: [], label: null, skill_hints: [],
+      requirement: "选择是否再进行一次【洛神】判定",
+    },
+    preactivations: {}, preactivation: [],
+  };
+  const view = synthView(pending);
+  ui.state.view = view;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  const kind = ui.renderKind(pending, pending.legal_actions);
+  const selected = ui.state.selectedOption === null
+    ? null
+    : pending.legal_actions[ui.state.selectedOption];
+  const built = ui.buildAction();
+  const cancel = ui.cancelAction(pending);
+  check("U2-03c 单选项可选确认：唯一选项自动选中、不画选项按钮、提交 = SelectOption / 放弃 = Pass",
+    kind === "option-confirm"
+      && $("t-options").children.length === 0
+      && selected && selected.kind === "SelectOption" && selected.choice === "repeat"
+      && built && built.kind === "SelectOption" && built.choice === "repeat"
+      && cancel && cancel.kind === "Pass"
+      && $("btn-submit").disabled === false
+      && $("btn-pass").hidden === false
+      && $("btn-cancel").hidden === true
+      && $("t-target-hint").textContent.includes("提交")
+      && $("t-target-hint").textContent.includes("放弃"),
+    `kind=${kind} options=${$("t-options").children.length} selected=${selected && selected.choice}`
+      + ` built=${built && built.kind} cancel=${cancel && cancel.kind}`
+      + ` submit=${$("btn-submit").disabled} passHidden=${$("btn-pass").hidden}`
+      + ` cancelHidden=${$("btn-cancel").hidden} hint="${$("t-target-hint").textContent}"`);
+}
+
 /* ---- ② 技能候选的直提态：B 形「是否发动」与点过底部技能按钮之后 ---- */
 {
   const pending = {
@@ -14751,6 +14797,192 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       + ` nextEntered=${second && second.stage.enteredAt}`);
 
   resetStage();
+}
+
+/* ============ A1：洛神连续判定的亮牌弹窗（显示层派生 judgment_reveal） ============
+ *
+ * 服务端 `pending_payload.judgment_reveal = {chain_key, card, final}`；前端不认技能名：
+ * - `final:false` 的继续询问 → 亮牌弹窗显示本张判定牌，提交 = 唯一选项，放弃 = Pass；
+ * - 同一 `chain_key` 的下一问 → 同一个弹窗换牌（不关窗）；
+ * - `final:true` / 后续普通询问 → 关窗；
+ * - 卡片只进弹窗，不进 `state.revealedCards` / 舞台（舞台寿命口径不变）。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const card = (id, name, extra = {}) => ({
+    ...synthCard(id, name), kind: "normal", attribute: "普通",
+    display_name: name, description: `【${name}】的全文描述`, ...extra,
+  });
+  const basePending = (seq, overrides = {}) => ({
+    kind: "SELECT_OPTION", actor: 0, seq, skill_id: "luoshen:repeat:0",
+    options: ["repeat"],
+    prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "repeat", answers_seq: seq },
+      { kind: "Pass", answers_seq: seq },
+    ],
+    candidate_index: {}, option_seats: {},
+    context: {
+      actor: 0, name: "洛神", targets: [], label: null, skill_hints: [],
+      requirement: "选择是否再进行一次【洛神】判定",
+    },
+    preactivations: {}, preactivation: [],
+    ...overrides,
+  });
+  const viewFor = (pending) => {
+    const view = synthView(pending);
+    view.session_id = "a1-judgment-reveal";
+    view.records = [];
+    view.snapshot.processing = [];
+    return view;
+  };
+  const revealCardNode = () => {
+    const walk = (node, out = []) => {
+      for (const child of (node.children || [])) {
+        out.push(child);
+        walk(child, out);
+      }
+      return out;
+    };
+    return walk($("t-options")).find(
+      (node) => node.classList.contains("reveal-card")) || null;
+  };
+
+  ui.flushPlayback();
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.renderPending(null);
+
+  const firstCard = card(801, "闪电");
+  const firstPending = basePending(9501, {
+    judgment_reveal: { chain_key: "judge-loop:42", card: firstCard, final: false },
+  });
+  const firstView = viewFor(firstPending);
+  ui.state.view = firstView;
+  ui.renderTable();
+  ui.renderPending(firstView);
+  const firstName = revealCardNode();
+  const firstKey = ui.state.dialog.key;
+  const firstOwnOption = firstPending.legal_actions[ui.state.selectedOption];
+  check("A1-a 洛神继续询问 = 亮牌弹窗（同一弹窗）：标题「洛神」、显示本张判定牌、无 repeat/stop 按钮",
+    ui.stepDialogKind(firstPending) === "reveal"
+      && $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "洛神"
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
+      && Boolean(firstName) && attr(firstName, "data-card-id") === "801"
+      && $("t-options").children.length === 1
+      && Array.from($("t-options").children).every((node) => !node.classList.contains("opt"))
+      && firstOwnOption && firstOwnOption.kind === "SelectOption" && firstOwnOption.choice === "repeat"
+      && $("btn-submit").disabled === false
+      && $("btn-pass").hidden === false
+      && $("btn-cancel").hidden === true,
+    `kind=${ui.stepDialogKind(firstPending)} title="${$("t-dialog-title").textContent}"`
+      + ` card=${firstName && attr(firstName, "data-card-id")} options=${$("t-options").children.length}`
+      + ` selected=${firstOwnOption && firstOwnOption.choice} submit=${$("btn-submit").disabled}`
+      + ` passHidden=${$("btn-pass").hidden} cancelHidden=${$("btn-cancel").hidden}`);
+  check("A1-b 判定牌只进弹窗：不推 state.revealedCards、不新增舞台卡",
+    (ui.state.revealedCards || []).length === 0
+      && Array.from($("t-processing").children).every(
+        (node) => !node.classList.contains("stage-card")),
+    `revealed=${(ui.state.revealedCards || []).length}`
+      + ` stage=${Array.from($("t-processing").children).filter((n) => n.classList.contains("stage-card")).length}`);
+
+  // 同一 chain_key 的下一问：同一个弹窗换牌（不关窗、键不变）。
+  const secondCard = card(802, "杀", { type: "slash" });
+  const secondPending = basePending(9502, {
+    judgment_reveal: { chain_key: "judge-loop:42", card: secondCard, final: false },
+  });
+  const secondView = viewFor(secondPending);
+  ui.state.view = secondView;
+  ui.renderTable();
+  ui.renderPending(secondView);
+  const secondName = revealCardNode();
+  check("A1-c 同一 chain_key 的下一张判定牌 = 同一个弹窗换牌（不关窗、不重开）",
+    $("t-dialog").hidden === false
+      && ui.state.dialog.key === firstKey
+      && Boolean(secondName) && attr(secondName, "data-card-id") === "802"
+      && $("t-dialog-title").textContent === "洛神",
+    `hidden=${$("t-dialog").hidden} key=${ui.state.dialog.key} firstKey=${firstKey}`
+      + ` card=${secondName && attr(secondName, "data-card-id")}`);
+
+  // final:true（循环结束）→ 关窗；后续普通询问不保留。
+  const finalPending = basePending(9503, {
+    kind: "PLAY_PHASE",
+    judgment_reveal: { chain_key: "judge-loop:42", card: firstCard, final: true },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9503 }],
+    context: null,
+  });
+  const finalView = viewFor(finalPending);
+  ui.state.view = finalView;
+  ui.renderTable();
+  ui.renderPending(finalView);
+  check("A1-d 循环结束（final:true）⇒ 关窗；弹窗不跨到下一份普通询问",
+    $("t-dialog").hidden === true
+      && ui.state.dialog.open === false
+      && (ui.state.revealedCards || []).length === 0,
+    `hidden=${$("t-dialog").hidden} open=${ui.state.dialog.open}`);
+
+  // ---- 最后一张红牌：它没有“是否继续”询问，靠记录流的 JUDGE 判定牌续到已开的弹窗 ----
+  const redCard = card(803, "桃", { type: "peach", suit: "heart", color: "red" });
+  const redRecords = [
+    { kind: "frame", op: "push", frame_id: 60, frame_kind: "JUDGE", depth: 1, seq: 9601 },
+    {
+      kind: "delta", delta_type: "card_move", seq: 9602, frame_id: 60, depth: 1,
+      reason: "JUDGE", owner: 0,
+      from_zone: { zone: "deck", seat: null },
+      to_zone: { zone: "processing", seat: null },
+      cards: [redCard],
+    },
+  ];
+  ui.state.view = firstView;
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.renderTable();
+  ui.renderPending(firstView);
+  const nextPending = basePending(9603, {
+    kind: "PLAY_PHASE",
+    judgment_reveal: { chain_key: "judge-loop:42", card: redCard, final: true },
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9603 }],
+    context: null,
+  });
+  const nextView = viewFor(nextPending);
+  nextView.records = redRecords;
+  ui.applyViewRaw(nextView);
+  ui.stepPlayback(true);  // JUDGE push
+  ui.stepPlayback(true);  // 判定牌进处理区 ⇒ 弹窗续到红牌
+  const redNode = revealCardNode();
+  const redShownBeforeCommit = $("t-dialog").hidden === false
+    && Boolean(redNode) && attr(redNode, "data-card-id") === "803";
+  ui.flushPlayback();  // 提交下一份 pending（final:true）⇒ 关窗
+  check("A1-e 最后一张红牌（无继续询问）经 JUDGE 记录续到已开的弹窗；下一份 final:true 才关窗",
+    redShownBeforeCommit
+      && $("t-dialog").hidden === true
+      && ui.state.dialog.open === false,
+    `beforeCommit=${redShownBeforeCommit} hiddenAfter=${$("t-dialog").hidden}`
+      + ` red=${redNode && attr(redNode, "data-card-id")}`);
+
+  // 没有下一份 pending（局终 / 阵亡等）时也不能留一个永远挂着的弹窗。
+  ui.state.view = firstView;
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.renderTable();
+  ui.renderPending(firstView);
+  const noPendingView = viewFor(null);
+  ui.applyViewRaw(noPendingView);
+  check("A1-f 没有下一份 pending（pending=null）⇒ 关窗，不留幽灵",
+    $("t-dialog").hidden === true
+      && ui.state.dialog.open === false,
+    `hidden=${$("t-dialog").hidden} open=${ui.state.dialog.open}`);
+
+  ui.flushPlayback();
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.renderPending(null);
+  ui.resetSelection();
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

@@ -537,6 +537,11 @@ function stepPlayback(immediate) {
   // 放在表体重绘**之后**：描边 / 体力闪要落在新座位节点上（`syncTransientEffects` 兜住
   // 未到寿命的那几个，这里补的是这一条记录新产生的那一个）。
   applyRecordEffects(record, playback.querySeat);
+  // A1：洛神连续判定——弹窗已开着时，用刚进处理区的判定牌续上同一个窗口。
+  // 只读 JUDGE 帧 + `card_move(reason=JUDGE)` 这两条服务端事实，不认技能名；舞台已由
+  // `applyEffectDelta` 照常派生（弹窗不往舞台上加卡）。
+  const judgedCard = judgmentCardFromRecord(record);
+  if (judgedCard) refreshJudgmentReveal(judgedCard);
   // U3-04（D9）：技能发动的演出挂在**产生它的那条记录**的 seq 上。
   fireSkillEventsThrough(record.seq);
   scrollLogToBottom();

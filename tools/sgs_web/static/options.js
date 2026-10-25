@@ -20,6 +20,40 @@
  * 禁用与否只看"这条在不在 ``legal_actions`` 里"，前端不重算"为什么不可支付"
  * （那是引擎的规则）。
  */
+/** 单选项可选确认（B1）：唯一 `SelectOption` 自动选中，不再画选项按钮。
+ *
+ *  出口 = 提示条右端「提交」（送唯一选项）与「放弃」（送 `Pass`）。判据住在
+ *  `pending.js:isSingleOptionalOption`（只看候选形状），本函数只摆版面 / 设选中态。
+ *  取消键（清空选择）在这一形态没有意义，隐藏它，避免与右端「放弃」成为两个同义出口。
+ */
+function renderOptionConfirm(pending) {
+  const actions = pending.legal_actions || [];
+  const index = actions.findIndex(
+    (action) => action.kind === "SelectOption" && !isRightAction(action),
+  );
+  if (index >= 0) state.selectedOption = index;
+  const requirement = (pending.context && pending.context.requirement) || "";
+  const hint = $("t-target-hint");
+  if (hint) {
+    hint.textContent = `${requirement}${requirement ? "：" : ""}`
+      + "点右端「提交」确认，或「放弃」取消。";
+  }
+  $("btn-cancel").hidden = true;
+  $("btn-cancel").disabled = true;
+}
+
+/** A1：洛神连续判定的亮牌确认 = 单选项确认 + 亮牌模板。
+ *
+ *  `renderOptionConfirm` 负责自动选中唯一选项 / 隐藏取消键 / 写"提交 / 放弃"提示；
+ *  `renderReveal` 再把 `judgment_reveal.card` 画进同一个 `#t-options`（弹窗正文）。
+ *  卡片是**只读**的：`renderReveal` 按 `pending.slots` 决定可点性；这一问没有槽位，
+ *  所以不会把点击判成提交——提交 / 放弃始终只在提示条右端。
+ */
+function renderJudgmentReveal(pending) {
+  renderOptionConfirm(pending);
+  renderReveal(pending);
+}
+
 function renderOptionButtons(pending) {
   const box = $("t-options");
   const dialog = stepDialogKind(pending) === DIALOG_KINDS.choice;
@@ -228,7 +262,7 @@ function renderRightActions(pending, view = state.view) {
   const dialogKind = pending ? stepDialogKind(pending) : null;
   // 弹窗步骤没有「放弃」：判据与 `cancelAction` / `refreshSubmit` 共用一处
   // （`modal.js:dialogDisablesPass`，评审 Standards：重复谓词）。
-  const dialogWithoutPass = dialogDisablesPass(dialogKind);
+  const dialogWithoutPass = dialogDisablesPass(dialogKind, pending);
   const endIndex = own ? rightActionIndex(pending, RIGHT_ACTION_KINDS.endPhase) : -1;
   const passIndex = own && !dialogWithoutPass
     ? rightActionIndex(pending, RIGHT_ACTION_KINDS.pass)

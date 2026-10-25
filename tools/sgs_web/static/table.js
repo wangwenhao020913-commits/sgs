@@ -508,6 +508,45 @@ function updateStageCardNode(node, item, now, heroNameOf) {
   }
 }
 
+/** A1：一条记录是不是"判定牌进处理区"，是则返回刚入台的判定牌。
+ *
+ * 只读服务端事实：`card_move(reason=JUDGE, to=processing)` + 承载帧 `frame_kind=JUDGE`
+ * （由 `applyEffectDelta` 已记在 `state.effectCards` 的帧表上）。不认技能 id。
+ */
+function judgmentCardFromRecord(record) {
+  if (!record || record.kind !== "delta" || record.delta_type !== "card_move") return null;
+  if (String(record.reason) !== "JUDGE") return null;
+  const to = record.to_zone || {};
+  if (String(to.zone) !== "processing") return null;
+  const cards = record.cards || [];
+  if (cards.length !== 1) return null;
+  const frameId = stageFrameOf(record);
+  if (!frameId || stageFrameKindOf(state.effectCards, frameId) !== "JUDGE") return null;
+  return (state.effectCards || []).find(
+    (item) => String(item.card_id) === String(cards[0].card_id),
+  ) || cards[0];
+}
+
+/** A1：弹窗已开着时，用新判定牌续上同一个窗口（不关窗、不重开）。
+ *
+ * 只更新**弹窗正文**（`#t-options` 里的亮牌模板）；选中态 / 提交 / 放弃 / 提示条动作都不动。
+ * 关闭仍由 `syncDialog` 按下一份 pending 的生命周期决定（`final:true` / 普通询问 / 无 pending）。
+ */
+function refreshJudgmentReveal(card) {
+  if (!card || !state.dialog || !state.dialog.open) return;
+  if (state.dialog.kind !== DIALOG_KINDS.reveal) return;
+  const pending = state.view ? state.view.pending : null;
+  if (!pending || !pending.judgment_reveal || pending.judgment_reveal.final) return;
+  const box = $("t-options");
+  if (!box) return;
+  box.innerHTML = "";
+  renderReveal({
+    ...pending,
+    judgment_reveal: { ...pending.judgment_reveal, card },
+  });
+  syncDialogHint();
+}
+
 /** 把舞台项画进任意容器（牌桌 / 回放页共用这一份渲染）。
  *
  * 按 `data-stage-key`（= card_id）**复用节点**：淡出不重建一屏；但每次为了保持入台顺序
