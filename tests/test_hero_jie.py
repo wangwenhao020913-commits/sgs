@@ -71,6 +71,7 @@ from sgs.skills import (
     YIJUE_HEAL_OPTIONS,
     conversion_offers,
     limited_skill_used,
+    resolve_instances,
     prune_skill_state,
     reset_phase_skill_state,
 )
@@ -392,15 +393,18 @@ def _yijue_state(
     owner_hand: tuple[int, ...],
     target_hand: tuple[int, ...],
     target_hp: int = 4,
+    target_equip: tuple[int, ...] = (),
 ):
     """两人局：座位 0 = 界关羽、座位 1 = 关羽（有非锁定【武圣】，好观测失效）。"""
     return build_state(
         pack=PACK,
         seats=[
             SeatSpec(hand=owner_hand, hero="jie_guanyu"),
-            SeatSpec(hand=target_hand, hero="guanyu", hp=target_hp),
+            SeatSpec(
+                hand=target_hand, hero="guanyu", hp=target_hp, equip=target_equip
+            ),
         ],
-        deck=deck_excluding(PACK, *owner_hand, *target_hand),
+        deck=deck_excluding(PACK, *owner_hand, *target_hand, *target_equip),
         turn_seat=0,
         rule_config=RuleConfig(player_count=2),
     )
@@ -446,10 +450,13 @@ def test_yijue_black_reveal_suppresses_skills_prohibits_hand_cards_and_boosts_he
     black = _first(type_id="dismantlement", color=Color.BLACK)
     dodge = _first(type_id="dodge")  # 目标手里有【闪】，但本回合它不能打出
     heart_slash = _first(type_id="slash", suit=Suit.HEART.value)
-    assert len({cost, black, dodge, heart_slash}) == 4
+    equip_card = _first(type_id="serpent_spear")
+    assert len({cost, black, dodge, heart_slash, equip_card}) == 5
 
     state = _yijue_state(
-        owner_hand=(cost, heart_slash), target_hand=(black, dodge)
+        owner_hand=(cost, heart_slash),
+        target_hand=(black, dodge),
+        target_equip=(equip_card,),
     )
     assert conversion_offers(state, 1, "slash"), "构造保证：目标的红【闪】本来能当【杀】"
 
@@ -470,6 +477,9 @@ def test_yijue_black_reveal_suppresses_skills_prohibits_hand_cards_and_boosts_he
     ]
     assert conversion_offers(state, 1, "slash") == (), "武圣被挡 ⇒ 转化候选消失"
     assert not _hero_skill_instances(state, 1, "hero.guanyu.wusheng")
+    assert _hero_skill_instances(state, 1, "equip.serpent_spear"), (
+        "义绝也不作用于装备牌带来的技能"
+    )
 
     # 票面验收 1：失效之后**再获得**的技能也被挡（座位级谓词，不逐技能展开）。
     assert engine.grant_skill(1, "hero.zhaoyun.longdan") is True
@@ -567,6 +577,7 @@ def _tieqi_state(
     target_hand: tuple[int, ...],
     judge_card: int,
     target_hero: str = "guanyu",
+    target_equip: tuple[int, ...] = (),
 ):
     """座位 0 = 界马超（一手【杀】在后）、座位 1 = 关羽。
 
@@ -576,13 +587,13 @@ def _tieqi_state(
     fillers = [
         card_id
         for card_id in range(len(PACK.deck.cards))
-        if card_id not in (slash, judge_card, *target_hand)
+        if card_id not in (slash, judge_card, *target_hand, *target_equip)
     ]
     state = build_state(
         pack=PACK,
         seats=[
             SeatSpec(hero="jie_machao"),
-            SeatSpec(hand=target_hand, hero=target_hero),
+            SeatSpec(hand=target_hand, hero=target_hero, equip=target_equip),
         ],
         deck=(fillers[0], fillers[1], judge_card, *fillers[2:]),
         turn_seat=0,
@@ -685,6 +696,31 @@ def test_jie_tieqi_suppresses_and_makes_an_unmatched_target_unresponsive():
     assert not _queries(engine, QueryKind.SELECT_CARDS.value), (
         "没有同花色牌 ⇒ 不发没有候选的弃牌询问"
     )
+
+
+def test_jie_tieqi_does_not_suppress_an_equipped_skill():
+    """用户裁定：铁骑只锁武将技能；目标装备的武器技能仍参与解析。"""
+    heart_judge = _first(type_id="peach", suit=Suit.HEART.value)
+    dodge = _first(type_id="dodge", suit=Suit.DIAMOND.value)
+    equip_card = _first(type_id="serpent_spear")
+    state, slash = _tieqi_state(
+        target_hand=(dodge,), judge_card=heart_judge, target_equip=(equip_card,)
+    )
+    engine = _park_and_seed(state, slash)
+
+    _advance(
+        engine,
+        [_tieqi_owner(slash), _tieqi_target(None)],
+        lambda e: not e.stack and e.state.player(1).hp == 3,
+    )
+
+    remaining = {
+        instance.skill_id
+        for instance in resolve_instances(engine.state)
+        if instance.owner == 1
+    }
+    assert "hero.guanyu.wusheng" not in remaining, "武将技能仍被铁骑锁住"
+    assert "equip.serpent_spear" in remaining, "装备技能不被铁骑锁住"
 
 
 def test_jie_tieqi_lets_the_target_discard_a_matching_card_to_keep_the_dodge_window():

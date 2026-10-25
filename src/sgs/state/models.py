@@ -59,7 +59,8 @@ class SkillSuppressionPredicate(str, Enum):
 
     ``ALL_NON_LOCKED`` = "其所有非锁定技失效"（【义绝】/【铁骑】的牌面用语）。
     谓词是**座位级**的：一条记录覆盖该座位名下此刻与**此后获得**的全部非锁定技
-    （票面 D10 的"失效率不逐技能展开"）；锁定技不受它影响。
+    （票面 D10 的"失效率不逐技能展开"）；锁定技不受它影响。用户裁定（票 09）：
+    这里的"技能"只指**武将技能**，装备牌 / 虚拟装备带来的技能不在其列。
     """
 
     ALL_NON_LOCKED = "all_non_locked"
@@ -459,8 +460,9 @@ class Player(BaseModel):
 
     载体解析的最后一道：实例仍在，但被谓词挡在解析之外（不产出候选、不进修饰器链、
     不触发钩子）；作用域到期后恢复。失效率是**座位级**的，一条记录覆盖该座位此后获得的
-    非锁定技；锁定技不受 ``ALL_NON_LOCKED`` 影响。写入唯一入口
-    :meth:`Engine.suppress_skills`，回合末由 ``Engine._clear_turn_effects`` 清掉。
+    非锁定**武将**技能（装备牌 / 虚拟装备带来的技能不失效，用户裁定票 09）；锁定技不受
+    ``ALL_NON_LOCKED`` 影响。写入唯一入口 :meth:`Engine.suppress_skills`，回合末由
+    ``Engine._clear_turn_effects`` 清掉。
     """
     hand_card_prohibited: bool = False
     """本回合**不能使用或打出手牌**（M6 票 04 的【义绝】黑色分支）。

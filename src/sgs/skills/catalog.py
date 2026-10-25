@@ -498,16 +498,36 @@ def _add_instance(
     )
 
 
-def _skill_is_suppressed(player: Player, definition: SkillDef) -> bool:
-    """``player`` 的路失效记录挡不挡 ``definition``（座位级谓词，唯一读取方）。
+def _skill_is_suppressed(player: Player, instance: SkillInstance) -> bool:
+    """``player`` 的座位级失效记录挡不挡 ``instance``（唯一读取方）。
 
     ``ALL_NON_LOCKED`` 只覆盖**非锁定技**：锁定技是"满足条件即强制发动"的一类效果标记
     （官方 `A/rule_forced.txt:5`，见 :class:`SkillDef.locked` 的注释），与"能不能被失效"
     是两件事——牌面写"其所有**非锁定**技失效"，故锁定技照常产出。
+
+    **来源过滤**（用户裁定，票 09）：失效不作用于**装备牌带来的技能**——实体装备
+    （``EQUIPMENT_CARD``）与虚拟装备（``VIRTUAL_GRANT`` 且定义是装备技能）都免疫；
+    武将牌（``HERO_CARD``）与运行时获得（``GRANTED``，含觉醒 ☆ 技）照常失效。
+
+    ``VIRTUAL_GRANT`` **不是**只用于虚拟装备：既有测试构造也会用它授予武将技能，故这里
+    按**定义**是否为装备技能区分，不能把整个来源一刀切。来源种类无法判断时 **fail-closed
+    = 不失效**（不让未知实例被误锁）。
     """
+    source = instance.source.kind
+    if source is SkillSourceKind.EQUIPMENT_CARD:
+        return False
+    if source is SkillSourceKind.VIRTUAL_GRANT:
+        if (
+            instance.definition.carrier is CarrierKind.EQUIPMENT
+            or instance.definition.virtual_slot is not None
+        ):
+            return False
+        # 非装备的虚拟授予：不是"装备牌带来的技能"，继续按武将技能处理。
+    elif source not in (SkillSourceKind.HERO_CARD, SkillSourceKind.GRANTED):
+        return False
     return any(
         record.predicate is SkillSuppressionPredicate.ALL_NON_LOCKED
-        and not definition.locked
+        and not instance.definition.locked
         for record in player.suppressed_skills
     )
 
@@ -601,7 +621,7 @@ def resolve_instances(
         player = state.player(instance.owner)
         if instance.skill_id in player.lost_skills:
             continue
-        if not include_suppressed and _skill_is_suppressed(player, instance.definition):
+        if not include_suppressed and _skill_is_suppressed(player, instance):
             continue
         alive.append(instance)
     alive.sort(key=lambda item: (int(item.definition.priority_class), item.skill_id, item.owner))

@@ -9,7 +9,8 @@
 - **失去**（``Player.lost_skills``）：实例**不再存在**，且不可恢复 —— 武将牌上的技能清单
   一字未动，实例仍不产出。
 - **失效**（``Player.suppressed_skills``）：实例**还在**，被座位级谓词挡在解析之外；
-  "该座位所有非锁定技"这一档因此把**后获得**的技能一并挡掉。
+  "该座位所有非锁定技"这一档因此把**后获得**的技能一并挡掉。用户裁定（票 09）：
+  失效只作用于**武将技能**；装备牌 / 虚拟装备带来的技能不失效（本文件的来源过滤用例钉住）。
 
 解析顺序钉死为 **载体并集 → 去重 → 减失去 → 过失效谓词**（票面 §要做什么），本文件逐段
 钉住那四步的可观测后果：
@@ -34,7 +35,14 @@ from sgs.engine import Engine
 from sgs.skills import SkillSourceKind, resolve_instances
 from sgs.timing import Timing
 
-from support import PassPlayer, SeatSpec, build_state, run_until
+from support import (
+    PassPlayer,
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+    run_until,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -49,6 +57,15 @@ WUSHENG = "hero.guanyu.wusheng"
 
 YIJUE = "hero.jie_guanyu.yijue"
 """失效记录的**施加者技能 id**（义绝的实例 id；本文件的引擎级构造不要求它已登记）。"""
+
+JIE_TIEQI = "hero.jie_machao.tieqi"
+"""第二条座位级失效的施加者（界马超【铁骑】）：与【义绝】共用同一个谓词。"""
+
+DOUBLE_SWORD = "equip.double_sword"
+"""非锁定装备技能：用来钉"失效不作用于装备牌带来的技能"。"""
+
+EIGHT_DIAGRAMS = "equip.eight_diagrams"
+"""虚拟装备的判据样本（`VIRTUAL_GRANT`，但定义是装备技能）。"""
 
 
 def _engine(heroes: tuple[str | None, ...] = (), *, seats: int = 4) -> Engine:
@@ -216,6 +233,82 @@ def test_suppression_is_seat_level_and_only_covers_non_locked_skills():
     assert records[0].suppressed is True
     assert records[0].predicate.value == "all_non_locked"
     assert records[0].scope.value == "turn"
+
+
+@pytest.mark.parametrize("suppressor", [YIJUE, JIE_TIEQI])
+def test_suppression_covers_hero_skills_but_not_equipment_skills(suppressor):
+    """用户裁定：失效只锁武将技能；装备技能（非锁定）照常参与解析。
+
+    两条座位级失效的施加者【义绝】/【铁骑】共用同一个 ``_skill_is_suppressed``，
+    故用参数化把"两处口径一致"钉在同一个断言上。
+    """
+    sword = cards_of_type(PACK, "double_sword")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="guanyu", equip=(sword,)), SeatSpec()],
+        deck=deck_excluding(PACK, sword),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = Engine.from_state(state, seed=7)
+    assert {WUSHENG, DOUBLE_SWORD} <= _instances(state, 0)
+
+    engine.suppress_skills(0, suppressor)
+
+    remaining = _instances(state, 0)
+    assert WUSHENG not in remaining, "武将技能（【武圣】）照常失效"
+    assert DOUBLE_SWORD in remaining, "装备牌带来的技能不失效"
+
+
+def test_virtual_equipment_is_immune_but_non_equipment_virtual_grants_follow_the_hero_rule():
+    """`VIRTUAL_GRANT` 不是"只用于虚拟装备"：测试构造也用它授予非装备技能。
+
+    因此不能把整个来源一刀切；按**定义**是否为装备技能区分：虚拟装备免疫，
+    非装备的虚拟授予仍按武将技能处理（会被失效挡住）。
+    """
+    virtual_state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="guanyu", virtual_equipment=(EIGHT_DIAGRAMS,)), SeatSpec()],
+        deck=tuple(range(len(PACK.deck.cards))),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    virtual_engine = Engine.from_state(virtual_state, seed=7)
+    virtual_engine.suppress_skills(0, YIJUE)
+    assert WUSHENG not in _instances(virtual_state, 0)
+    assert EIGHT_DIAGRAMS in _instances(virtual_state, 0), "虚拟装备同样不失效"
+
+    grant_state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="guanyu", virtual_equipment=(LONGDAN,)), SeatSpec()],
+        deck=tuple(range(len(PACK.deck.cards))),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    grant_engine = Engine.from_state(grant_state, seed=7)
+    grant_engine.suppress_skills(0, YIJUE)
+    assert LONGDAN not in _instances(grant_state, 0), (
+        "非装备的虚拟授予不是装备技能，仍受失效覆盖"
+    )
+
+
+def test_an_unrecognized_source_is_not_suppressed_fail_closed():
+    """来源判断不了 ⇒ 不失效（fail-closed），不把未知实例误锁掉。"""
+    from sgs.skills import CATALOG
+    from sgs.skills.catalog import SkillInstance, SkillSource, _skill_is_suppressed
+    from sgs.state import SkillSuppression
+
+    engine = _engine(("guanyu",))
+    player = engine.state.player(0)
+    player.suppressed_skills.append(SkillSuppression(skill_id=YIJUE))
+    instance = SkillInstance(
+        owner=0,
+        skill_id=WUSHENG,
+        source=SkillSource(kind="UNRECOGNIZED"),
+        definition=CATALOG[WUSHENG],
+    )
+
+    assert _skill_is_suppressed(player, instance) is False
 
 
 def test_suppressing_the_same_seat_twice_does_not_stack_a_second_record():
