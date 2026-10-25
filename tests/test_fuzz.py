@@ -54,6 +54,7 @@ from sgs.state import (
     Pass,
     PlayPhaseQuery,
     SelectCards,
+    SelectOption,
     SlotKind,
     UseCard,
     Zone,
@@ -634,10 +635,16 @@ class _Piles:
                 )
             pile.remove(card_id)
 
-    def place(self, record: JournalRecord) -> None:
+    def place(self, record: JournalRecord, *, to_top: bool = False) -> None:
         ref = record.to_zone
         pile = self._pile(ref)
-        pile.extend(_ids(record))
+        ids = _ids(record)
+        if ref.zone is Zone.DECK and to_top:
+            # 引擎的 ``move_card`` 先进牌堆尾，调用方随后 ``place_on_deck(to_top=True)``
+            # 把它移到牌堆顶；后者只改顺序、按设计不产 delta（避免泄露被授予的牌面）。
+            pile[:0] = ids
+        else:
+            pile.extend(ids)
         if ref.zone is Zone.EQUIP:
             # 装备区存储序 = 槽位枚举序（票 12 §Q2）；重放器必须复刻，否则座位级互校会误报。
             order = list(SlotKind)
@@ -690,22 +697,26 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int, n: int) -> No
     piles = _Piles(seats=len(engine.state.players))
     arranged: tuple[CardRef, ...] = ()
     """最近一次 ``ARRANGE`` 询问授予的牌面（自顶向下）；排列行动据此落到重建牌堆上。"""
+    deck_top_next = False
+    """下一个 deck ``card_move`` 是否表示"随后被置于牌堆顶"（【攻心】的 ``deck_top``）。"""
 
     for record in engine.records:
         if record.kind == "query" and record.query.kind == "ARRANGE":
             arranged = tuple(record.query.revealed)
             continue
-        if (
-            record.kind == "action"
-            and getattr(record, "accepted", False)
-            and isinstance(record.action, ArrangeCards)
-            and arranged
-        ):
-            # 排列是**同一区域内部**的重排（无 delta，见 `place_on_deck`），故重建器要
-            # 在这个行动记录处自己把牌堆顺序改过来（票 14 §4）。
-            piles.arrange(record.action, arranged)
-            arranged = ()
-            continue
+        if record.kind == "action" and getattr(record, "accepted", False):
+            if isinstance(record.action, ArrangeCards) and arranged:
+                # 排列是**同一区域内部**的重排（无 delta，见 `place_on_deck`），故重建器要
+                # 在这个行动记录处自己把牌堆顺序改过来（票 14 §4）。
+                piles.arrange(record.action, arranged)
+                arranged = ()
+                continue
+            if isinstance(record.action, SelectOption) and record.action.choice == "deck_top":
+                # 【攻心】的"置于牌堆顶"：先 hand→deck 的 card_move 只记到"进了牌堆"，
+                # 随后 place_on_deck(to_top=True) 只改顺序、不产 delta。重建器必须把这条
+                # 移动落到牌堆顶，否则最终牌堆顺序会与活状态相差一张（seed 7322… 的回归）。
+                deck_top_next = True
+                continue
         if record.kind != "delta":
             continue
         piles.note_slots(record)
@@ -716,7 +727,12 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int, n: int) -> No
                 piles.merge_reshuffle(record, seed)
         elif record.delta_type == "card_move":
             piles.take(record, seed)
-            piles.place(record)
+            piles.place(
+                record,
+                to_top=deck_top_next and record.to_zone.zone is Zone.DECK,
+            )
+            if record.to_zone.zone is Zone.DECK:
+                deck_top_next = False
         else:
             continue  # hp_change / identity_* 不动牌，与牌守恒无关
 
@@ -831,6 +847,17 @@ def test_random_games_satisfy_the_invariants():
         played += 1
 
     assert played == game_limit
+
+
+def test_the_seeded_eight_player_gongxin_deck_top_replays():
+    """回归：seed=7322422061626536934 / 8 人的界吕蒙【攻心】把红桃置于牌堆顶。
+
+    这一局原来会在最终"牌堆与 delta 重建互校"判红：检查器只看到 hand→deck 的
+    ``card_move``，把牌追加到重建牌堆**底**；引擎随后走 ``place_on_deck(to_top=True)``
+    把它移到牌堆**顶**（顺序变化不产 delta）。这不是初始化问题——``_fail(record=None)``
+    只是最终互校的报错位置标签。
+    """
+    _play_and_check(7322422061626536934, players=8, deadline=time.monotonic() + 120)
 
 
 def test_the_player_rotation_covers_the_six_identity_branches():
