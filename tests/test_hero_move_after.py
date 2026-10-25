@@ -608,6 +608,37 @@ def test_xiaoji_fires_on_replacement_even_though_the_equipment_is_not_discarded(
     assert len(_drawn_to(_after(engine, old_horse), 0)) == 2, "枭姬摸 2 张"
 
 
+def test_xiaoji_fires_once_per_equipment_card_lost_in_the_same_move():
+    """**一次移动失去两张装备** ⇒ 触发**两次**【枭姬】，共摸 4 张（D-8，官方明确）。
+
+    牌面是"当你失去装备区里的**一张**牌后"⇒ 逐张触发，而一次弃置搬的是一**批**牌。
+    《官方规则集》「依次」条的原文举例：「装备区里有 X 张牌的主公孙尚香……一次性弃置所有
+    的牌，然后至多可以发动 X 次【枭姬】摸 2X 张牌」。故触发次数 = 这次失去的**张数**，
+    不是"这次移动"。
+    """
+    horse, horse2 = _cards("chitu")[0], _cards("dawan")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=(horse, horse2), hero="sunshangxiang"), SeatSpec()],
+        deck=_deck_excluding(horse, horse2),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.move_in_frame(
+        None,
+        engine.state.refs((horse, horse2)),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=0,
+        actor=0,
+    )
+
+    _advance(engine, [Scripted(), Scripted()], lambda e: e._move_pending is None)
+
+    assert not engine.state.player(0).equip, "两张装备都进了弃牌堆"
+    assert len(_drawn_to(engine.records, 0)) == 4, "两张装备各触发一次 ⇒ 摸 2×2 张"
+
+
 def test_xiaoji_ignores_equipment_entering_the_equip_zone():
     """装备从手牌进入装备区**不**触发【枭姬】（票 07 §验收 2 的反面对照）。
 

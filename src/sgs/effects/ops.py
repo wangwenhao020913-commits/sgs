@@ -47,7 +47,7 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .behaviors import DamageNature
-from .modifiers import response_count
+from .modifiers import ModifierRole, response_count
 
 __all__ = ("OPS",)
 
@@ -511,8 +511,19 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
         op["duel_plays"] = 0
     turn = op["duel_turn"]
     other = source if turn != source else host.current_target(frame)
+    # 这一问的响应者扮演谁（票 23）：被【决斗】的一方（先响应的那个目标）标 ``TARGET``，
+    # 使用者标 ``SUBJECT``。【无双】②只改**被决斗者**每轮的张数，故这一位是那条牌面
+    # 里"该角色"的唯一表达——引擎不出现技能名。
     required = response_count(
-        host.state, source=source, card=frame.data.get("card"), target=turn
+        host.state,
+        source=source,
+        card=frame.data.get("card"),
+        target=turn,
+        role=(
+            ModifierRole.TARGET
+            if turn == host.current_target(frame)
+            else ModifierRole.SUBJECT
+        ),
     )
     if has_tag(frame, Tag.UNRESPONSIVE):
         # **响应窗口不产生**（M6 票 07 的否定分类第 4 层）：这张【决斗】整次使用被标成

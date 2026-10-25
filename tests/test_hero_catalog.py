@@ -1225,8 +1225,12 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         after_holder=None,
         actor=ME,
     )
+    # 票 23：【枭姬】逐张触发，触发次数 = 这批牌的张数，故探针必须带一张真牌面
+    # （空批是构造不出来的局面：``move_card`` 至少要搬一张）。
     move_xiaoji = MoveEvent(
-        cards=(),
+        cards=(
+            CardRef(card_id=0, type="crossbow", name="诸葛连弩", suit="club", rank=1),
+        ),
         from_zone=ZoneRef(Zone.EQUIP, ME),
         to_zone=ZoneRef(Zone.DISCARD),
         reason=MoveReason.DISCARD,

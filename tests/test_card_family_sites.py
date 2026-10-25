@@ -332,6 +332,17 @@ ALLOWLIST: dict[Site, Rule] = {
         'card_types=("slash", "duel"),',
     ): Rule(FAMILY, 1, "声明闭集按 satisfies_required 逐项匹配（05b-fix：火 / 雷杀也求两张）"),
     (
+        "src/sgs/skills/response_window.py",
+        "ResponseCountSkill.response_count",
+        'if "slash" in self.card_types and satisfies_required(ctx.card, "slash"):',
+    ): Rule(
+        FAMILY,
+        2,
+        "票 23 把牌名闭集拆成【杀】/【决斗】两条分支（两半改的是不同的一方）；"
+        "这一行本身出现两个字面量（成员测试 + 判族实参），故计数为 2；"
+        "【杀】这一支仍走 satisfies_required ⇒ 火 / 雷 / 转化杀同族",
+    ),
+    (
         "src/sgs/skills/target_pool.py",
         "TARGET_POOL_SKILLS",
         'card_types=("slash", "duel"),',

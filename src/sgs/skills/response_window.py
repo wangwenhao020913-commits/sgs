@@ -10,13 +10,22 @@ E 族两件都改"响应窗口"，但按 R5-Q4 的分界走两条路——**改�
 =======================  ==========  ==========================================================
 技能                      锁定        落点
 =======================  ==========  ==========================================================
-吕布【无双】              锁定        ``Modifier(RESPONSE_COUNT, 2)``（自己使用【杀】/【决斗】时）
+吕布【无双】              锁定        ``Modifier(RESPONSE_COUNT, 2)``（见下方两半）
 马超【铁骑】              非锁定      ``Hook(USE_AFTER_DESIGNATE_TARGET)`` + 判定 + 帧标签 ``UNRESPONSIVE``
 =======================  ==========  ==========================================================
 
-【无双】（规则 1046）：``source == 自己`` 且牌名 ∈ {【杀】,【决斗】} ⇒ 本次响应窗口需要
-**两张**——【杀】要连续两张【闪】才抵消，【决斗】每次响应要连续两张【杀】。两处"数数"都读
-:func:`sgs.effects.response_count` 这一处真源，引擎里不出现技能名。
+【无双】（规则 1046）：牌名 ∈ {【杀】,【决斗】} ⇒ 本次响应窗口需要**两张**，但**改的是哪一方**
+两半不同（票 23）：
+
+- **【杀】**：「你**使用**【杀】指定一名角色为目标后，该角色需连续使用两张【闪】」⇒ 改的是
+  **使用者**那一侧，判据 ``owner == subject``；
+- **【决斗】**：§九 L1046「你使用【决斗】……**或成为其他角色【决斗】的目标后**，该角色每次
+  响应需连续打出两张【杀】」⇒ 改的是**被决斗的一方**那一侧，判据 = 引擎标注的
+  :data:`~sgs.effects.ModifierRole.TARGET`（这一问的响应者就是那张【决斗】指定的目标）
+  ∧ 持有者是这场【决斗】的任一方。漏掉后半句会让吕布挨【决斗】时只需一张【杀】。
+
+两处"数数"都读 :func:`sgs.effects.response_count` 这一处真源（引擎的【闪】窗口与【决斗】
+结算 + 网页层的"需要打几张"文案同一个入口），故引擎里不出现技能名。
 
 【铁骑】（规则 987，）：非锁定技，``USE_AFTER_DESIGNATE_TARGET`` 逐目标判定；红色 ⇒ 给**该目标**
 打 :data:`~sgs.resolution.Tag.UNRESPONSIVE`（**逐目标档**）。这个标签只负责"跳过本窗口"
@@ -35,6 +44,7 @@ from sgs.effects import (
     Modifier,
     ModifierContext,
     ModifierPoint,
+    ModifierRole,
     satisfies_required,
 )
 from sgs.resolution import Control, Frame, Tag, add_tag
@@ -88,23 +98,35 @@ class ResponseCountSkill(HeroSkillDecl):
     count: int = RESPONSE_COUNT_NEEDED
 
     def response_count(self, state: GameState, ctx: ModifierContext, current: Any) -> Any:
-        """``RESPONSE_COUNT`` 回调：**自己使用**那张牌时把所需张数改成 ``count``。
+        """``RESPONSE_COUNT`` 回调：把本次响应的所需张数改成 ``count``。
 
-        ``ctx.subject`` = 本次使用的来源（谁出的牌），``ctx.owner`` = 本实例的持有者，
-        故"只有牌的使用者才改这个值"由一次相等判定表达；牌名闭集按
-        :func:`~sgs.effects.satisfies_required` 逐项匹配（【杀】族按共享计数键，
+        牌面 ①（【杀】）与 ②（【决斗】）改的是**不同的一方**，故两条分支各写一处判据
+        （票 23 补 ② 的反向，`06`（§5「程序化约定与偏离一手」））：
+
+        - **【杀】**：改的是**使用者**——"当你使用【杀】指定一名角色为目标后，该角色需连续
+          使用两张【闪】"。故只有 ``ctx.owner == ctx.subject``（牌是我用的）才生效；
+        - **【决斗】**：改的是**被决斗的一方**每次响应的张数——牌面写"当你使用【决斗】指定一名
+          角色为目标后，**或成为其他角色【决斗】的目标后**，该角色每次响应需连续打出两张
+          【杀】"。故判据 = 引擎标注的"这一问的响应者就是被决斗的一方"（``ctx.role`` 为
+          ``TARGET``）∧ 持有者是这场【决斗】的**任何一方**（``subject`` 或 ``target``）。
+          只看 ``owner == subject`` 会漏掉"吕布自己被决斗"那一半：他挨【决斗】时只需一张
+          【杀】就能过关，与牌面相反。
+
+        牌名闭集按 :func:`~sgs.effects.satisfies_required` 逐项匹配（【杀】族按共享计数键，
         M5-05b-fix；【决斗】仍逐字相等）。
         """
         del state
         if ctx.card is None:
             return current
-        if not any(
-            satisfies_required(ctx.card, type_id) for type_id in self.card_types
-        ):
-            return current
-        if ctx.owner != ctx.subject:
-            return current
-        return self.count
+        if "slash" in self.card_types and satisfies_required(ctx.card, "slash"):
+            return self.count if ctx.owner == ctx.subject else current
+        if "duel" in self.card_types and satisfies_required(ctx.card, "duel"):
+            if ctx.role is not ModifierRole.TARGET:
+                return current
+            if ctx.owner not in (ctx.subject, ctx.target):
+                return current
+            return self.count
+        return current
 
 
 WUSHUANG = ResponseCountSkill(
@@ -112,7 +134,11 @@ WUSHUANG = ResponseCountSkill(
     short_id="wushuang",
     card_types=("slash", "duel"),
 )
-"""吕布【无双】：锁定技，使用【杀】/【决斗】时该角色需连续两张响应（规则 1046）。"""
+"""吕布【无双】：锁定技，牌名是【杀】/【决斗】时本次响应需要两张（规则 1046）。
+
+【杀】改的是**使用者**那一侧、【决斗】改的是**被决斗的一方**那一侧——两半的判据都在
+:meth:`ResponseCountSkill.response_count` 里（票 23）。
+"""
 
 JIE_WUSHUANG = hero_skill_id("jie_lvbu", "wushuang")
 """界吕布【无双】的全限定技能 id（§十九 L2188–L2191）。

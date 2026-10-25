@@ -23,6 +23,7 @@ from typing import Any
 from sgs.data import Color, Identity, Kingdom, RuleConfig, color_of_suit, load_content_pack
 from sgs.effects import (
     DamageNature,
+    ModifierRole,
     attack_range,
     check_count,
     check_targets,
@@ -1090,11 +1091,22 @@ def test_liuli_diverts_a_fire_slash_but_not_a_non_slash_card():
 
 
 def test_wushuang_requires_two_responses_for_a_fire_slash_but_not_for_a_trick():
-    """无双的牌名闭集按【杀】族读：火 / 雷【杀】与普通【杀】、决斗都要两张响应。"""
+    """无双的牌名闭集按【杀】族读：火 / 雷【杀】与普通【杀】、决斗都要两张响应。
+
+    【决斗】那一档要带 ``role=TARGET``（票 23）：牌面把"两张【杀】"加在**被决斗的一方**
+    每次响应上，而这一问问的就是那个人的张数（座位 1 被座位 0 决斗）。
+    """
     state = _state([SeatSpec(hero="lvbu"), SeatSpec()])
     for card_id in (SLASH[0], FIRE_SLASH[0], THUNDER_SLASH[0], DUEL[0]):
         assert (
-            response_count(state, source=0, card=state.card(card_id), target=1) == 2
+            response_count(
+                state,
+                source=0,
+                card=state.card(card_id),
+                target=1,
+                role=ModifierRole.TARGET,
+            )
+            == 2
         ), f"{state.card(card_id).name} 触发无双：需要两张响应"
     assert (
         response_count(state, source=0, card=state.card(BARBARIAN[0]), target=1) == 1

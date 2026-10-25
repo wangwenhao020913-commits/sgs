@@ -255,7 +255,12 @@ def apply_modifiers(
 
 
 def response_count(
-    state: GameState, *, source: int, card: CardRef | None, target: int | None = None
+    state: GameState,
+    *,
+    source: int,
+    card: CardRef | None,
+    target: int | None = None,
+    role: ModifierRole = ModifierRole.SUBJECT,
 ) -> int:
     """本次响应窗口**需要几张**（缺省 1，票 08 §要做什么 1–2）。
 
@@ -263,8 +268,14 @@ def response_count(
     ``resolve_duel``），故"需连续两张【闪】/【杀】"由一个修饰值表达，引擎里不出现技能名。
     ``ctx.subject`` = **本次使用的来源**（谁用的牌），修饰器回调据此比对自己是不是
     那张牌的使用者；``ctx.card`` = 本次使用的牌（牌名读它）。
+
+    ``role``（票 23 的加法，缺省 ``SUBJECT``）：这一问的**响应者扮演谁**。``subject`` =
+    响应者是牌的使用者那一方（【杀】的窗口恒是它——【闪】由目标出，与"谁该出两张"无关）；
+    ``target`` = 响应者就是这张牌**指定的目标**。目前唯一的读者是【无双】②（【决斗】）：
+    牌面把"两张【杀】"加在**被决斗的一方**身上，而那个人可能是技能持有者自己（"成为其他
+    角色【决斗】的目标后"）⇒ 只比 ``owner == subject`` 会漏掉反向那一半。
     """
-    ctx = ModifierContext(subject=source, target=target, card=card)
+    ctx = ModifierContext(subject=source, target=target, card=card, role=role)
     return apply_modifiers(ModifierPoint.RESPONSE_COUNT, state, ctx, 1)
 
 

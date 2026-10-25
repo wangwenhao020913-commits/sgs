@@ -21,7 +21,7 @@ D 族的形态差别只有一处：它**不建帧、也不产候选**，而是�
   照常触发【连营】/【枭姬】：本族**不按原因过滤**，也不新增"弃置触发"的第二条通道——
   将来若出现弃置类触发，它必须显式比较 ``MoveEvent.reason``、把 REFORGE 排除在外。
 
-两条技能的逐字语义（票 07 §要做什么 6 的表）：
+两条技能的逐字语义（票 07 §要做什么 6 的表 + 票 23 的触发粒度）：
 
 =========================  ======  ==================================================
 技能                        锁定    触发条件
@@ -30,10 +30,15 @@ D 族的形态差别只有一处：它**不建帧、也不产候选**，而是�
 孙尚香【枭姬】              非锁定   ``from_zone == EQUIP``（含顶替：先旧后新的旧装备那条）
 =========================  ======  ==================================================
 
+两条的**触发次数**不同，且差别就在牌面的量词（`06`（§5「程序化约定与偏离一手」）的默认读法
+（三））：【枭姬】写"失去装备区里的**一张**牌"⇒ 一次搬 N 张要触发 **N 次**
+（:attr:`MoveAfterSkill.trigger_count` / :func:`_lost_equipment_count`）；【连营】写"失去
+**最后的手牌**"（无限定词）⇒ 一次失去只触发**一次**（D-9，布尔判据 :func:`_emptied_hand`）。
+
 两条都是**非锁定技**（技能面写了"你可以"）⇒ 发动是询问出来的，故 :func:`_dispatch` 会
-先发一次 ``SKILL_ACTIVATION`` 询问。**这一族的钩子不得暂停**（不调 ``ask``、不压提问帧）：
-``Engine.move_in_frame`` 的返回形状是 ``None``，钩子返回 ``"stay"`` 无处安放——本票的两条
-技能都只做"摸 N 张"这一件同步事（牌堆重洗也是一次同步 delta），故约束天然成立。
+先发一次 ``SKILL_ACTIVATION`` 询问。钩子**可以**提问并挂起：``move_in_frame`` 返回
+``"stay"`` 时引擎把它记进 ``_move_pending``，由 :meth:`Engine._flush_pending_move` 用
+**续跑帧**接着跑（M6 票 08 起；界【连营】的逐座选人与界【枭姬】的逐张再发动都走这条）。
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ from typing import Any
 
 from sgs.data import SkillType, card_category
 from sgs.effects import CarrierKind, locate
-from sgs.state import CardRef, GameState, MoveReason, Phase, Zone, ZoneRef
+from sgs.state import CardRef, GameState, MoveReason, Pass, Phase, Zone, ZoneRef
 from sgs.timing import Timing
 
 from .catalog import (
@@ -76,6 +81,16 @@ __all__ = [
     "move_after_skill_definitions",
     "move_event",
 ]
+
+_AGAIN_OPTION = "skill_again"
+"""逐张触发技能（【枭姬】）第 2 张起的"是否再发动一次"里那个唯一选项的取值。
+
+`skill_again` 是**界面词的键**：`tools/sgs_web/static/options.js:OPTION_LABELS` 把它翻成
+「再发动一次」（答「取消」= 到此为止，牌面写的是"至多 X 次"）。
+
+选项字符串只是**这一个询问**内的取值（UI 按技能名渲染标题，不直接显示它），故与
+`seat:N` 一类取值同姿态：不是领域概念，也不进记录流的语义层。
+"""
 
 MOVE_EVENT_KEY = "move_event"
 """帧私有槽名：本次 ``MOVE_AFTER`` 的载荷（:class:`MoveEvent`）。
@@ -361,15 +376,29 @@ class MoveAfterSkill(HeroSkillDecl):
     ``flow``（W6-01）：零步技能的 ``SkillFlow``（``steps=()``），与
     :class:`~sgs.skills.damage_after.DamageAfterSkill` 的字段同形；旧回调
     :meth:`handle` 保留并由 flow 的 ``effect`` 原样转调。
+
+    ``trigger_count``（票 23 的加法，缺省 ``None`` = 一次移动至多触发一次）是**逐张触发**的
+    判据：牌面写"失去装备区里的**一张**牌"时，一次搬一**批**牌要按张数各触发一次
+    （【枭姬】，D-8 官方明确）；写"失去**最后的手牌**"时问的是"这次移动"这一个事实
+    （【连营】/界【连营】），故两条技能**不能共用**一个布尔判据。
     """
 
     draws: int
     trigger: Any
     flow: Any = None
+    trigger_count: Any = None
+
+    def count(self, state: GameState, move: MoveEvent, owner: int | None) -> int:
+        """这次移动对这条技能成立**几次**（缺省 = 布尔判据的 0 / 1）。"""
+        if owner is None:
+            return 0
+        if self.trigger_count is None:
+            return 1 if self.trigger(state, move, owner) else 0
+        return int(self.trigger_count(state, move, owner))
 
     def fires(self, state: GameState, move: MoveEvent, owner: int | None) -> bool:
         """本次移动对这条技能（持有者 ``owner``）算不算"失去"（只看区域与**移动后**的持有）。"""
-        return owner is not None and bool(self.trigger(state, move, owner))
+        return self.count(state, move, owner) > 0
 
     def condition(self, host: Any, frame: Any) -> bool:
         """钩子触发条件（``Hook.condition``）：不成立就连"是否发动"询问都不发。
@@ -383,9 +412,39 @@ class MoveAfterSkill(HeroSkillDecl):
             return False
         return self.fires(host.state, move, frame.data.get(MATCH_OWNER_KEY))
 
-    def handle(self, host: Any, frame: Any) -> None:
-        """钩子回调：条件成立则摸 ``draws`` 张（短摸 ⇒ 平局，与摸牌阶段同口径）。"""
-        host.draw_for_hand(frame, frame.data["skill_owner"], self.draws)
+    def handle(self, host: Any, frame: Any) -> Any:
+        """钩子回调：条件成立则摸 ``draws`` 张（短摸 ⇒ 平局，与摸牌阶段同口径）。
+
+        **逐张触发的技能**（``trigger_count`` 非空，目前只有【枭姬】）在这里补齐"至多 X 次"：
+        派发环已经问过第 1 张的"是否发动"，其余每张各再问一次（``optional`` 的
+        ``SELECT_OPTION``，答放弃即停 = "至多"）。游标 ``<skill id>:activations`` 记**已经
+        摸过几次**，且**在摸牌之前**前进——摸牌可能内联派发别的"失去牌后"并挂起，续跑据此
+        既不重问、也不重摸。
+        """
+        owner = frame.data["skill_owner"]
+        move = move_event(frame)
+        total = 1 if self.trigger_count is None else self.count(host.state, move, owner)
+        key = f"{self.skill_id}:activations"
+        done = int(frame.data.get(key, 0))
+        while done < total:
+            if done:
+                # 第 2 张起：每一张都是一次**独立**的"是否发动"（官方：至多发动 X 次）。
+                answer = host.ask_option(
+                    frame,
+                    owner,
+                    Timing.MOVE_AFTER,
+                    skill_id=f"{self.skill_id}:again:{done}",
+                    options=(_AGAIN_OPTION,),
+                    optional=True,
+                )
+                if host.suspended(answer):
+                    return "stay"
+                if isinstance(answer, Pass):
+                    break
+            frame.data[key] = done + 1
+            host.draw_for_hand(frame, owner, self.draws)
+            done += 1
+        return None
 
 
 def _emptied_hand(state: GameState, move: MoveEvent, owner: int) -> bool:
@@ -414,9 +473,29 @@ def _lost_equipment(state: GameState, move: MoveEvent, owner: int) -> bool:
 
     **只认技能持有者本人**（票 14 §2）：``from_zone.seat == owner``（同【连营】，
     不用"归属" ``move.owner``——拆 / 顺写的是操使者）。
+
+    逐张触发的**次数**见 :func:`_lost_equipment_count`；本函数是它的布尔版，两者共用
+    同一句区域判据。
     """
     del state
     return move.from_zone.zone is Zone.EQUIP and move.from_zone.seat == owner
+
+
+def _lost_equipment_count(state: GameState, move: MoveEvent, owner: int) -> int:
+    """【枭姬】这次移动触发**几次** = 从**自己的装备区**失去的**张数**（D-8，官方明确）。
+
+    牌面是"当你失去装备区里的**一张**牌后"⇒ 逐张触发；而一次弃置 / 一次【寒冰剑】都只搬
+    **一批**牌（一次 ``move_card``），故次数要数 ``len(move.cards)``，不能把"一次移动"当成
+    "一次失去"。《官方规则集》「依次」条的原文举例就是「装备区里有 X 张牌的主公孙尚香……
+    一次性弃置所有的牌，然后至多可以发动 X 次【枭姬】摸 2X 张牌」。
+
+    反面对照：陆逊【连营】问的是"失去**最后的手牌**"这**一个**事实（D-9：一次失去只触发
+    一次），故它用布尔判据 :func:`_emptied_hand`，不走本函数——同一批移动对两条技能是
+    "N 次"与"1 次"的差别，这正是 :attr:`MoveAfterSkill.trigger_count` 存在的理由。
+    """
+    if move.from_zone.zone is not Zone.EQUIP or move.from_zone.seat != owner:
+        return 0
+    return len(move.cards)
 
 
 # W6-01 / W6-07：零步流水线的 effect 由 :func:`sgs.skills.flow.zero_step_effect` 生成，
@@ -453,11 +532,14 @@ _LIANYING = MoveAfterSkill(
 )
 _XIAOJI = MoveAfterSkill(
     # 孙尚香【枭姬】：当你失去装备区里的一张牌后，你可以摸两张牌（规则 1054）。
+    # **逐张触发**：一次失去两张 ⇒ 至多发动两次（票 23 按 D-8 的官方「依次」条落
+    # ``trigger_count``；旧实现把"一次移动"当成"一次失去"，只触发一次）。
     hero_id="sunshangxiang",
     short_id="xiaoji",
     draws=2,
     trigger=_lost_equipment,
     flow=XIAOJI_FLOW,
+    trigger_count=_lost_equipment_count,
 )
 _JIE_XIAOJI = MoveAfterSkill(
     # 界孙尚香【枭姬】（M6 票 17）：§十九 L2177 与标准版**逐字相同** ⇒ 同一个触发谓词、
@@ -467,6 +549,7 @@ _JIE_XIAOJI = MoveAfterSkill(
     draws=2,
     trigger=_lost_equipment,
     flow=XIAOJI_FLOW,
+    trigger_count=_lost_equipment_count,
 )
 
 MOVE_AFTER_SKILLS: tuple[MoveAfterSkill, ...] = (_LIANYING, _XIAOJI, _JIE_XIAOJI)

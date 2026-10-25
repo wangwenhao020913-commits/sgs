@@ -28,7 +28,7 @@ from sgs.data import (
     load_content_pack,
     load_hero_tables,
 )
-from sgs.effects import response_count
+from sgs.effects import ModifierRole, response_count
 from sgs.engine import record_json
 from sgs.skills import (
     CATALOG,
@@ -1077,14 +1077,32 @@ def _need_text(verb: str, card_name: str, need: int) -> str:
 
 
 def _count_needed(engine: Any, query: Query, data: dict[str, Any]) -> int:
-    """本窗口需要几张：唯一真源 :func:`sgs.effects.response_count`（【无双】= 2）。"""
+    """本窗口需要几张：唯一真源 :func:`sgs.effects.response_count`（【无双】= 2）。
+
+    ``role``（票 23）与引擎侧同一口径：**应答者就是这张牌指定的目标**时标 ``TARGET``。
+    【无双】②（【决斗】）只给"被决斗的一方"加张数，故这一位不能省——省掉会把"吕布被
+    【决斗】"那一半的界面文档写成"需要打出【杀】"，与结算（两张）不一致。
+    """
     source = data.get("source")
     if source is None:
         return 1
     target = getattr(query, "target", None)
     if target is None:
         target = getattr(query, "actor", None)
-    return int(response_count(engine.state, source=source, card=data.get("card"), target=target))
+    targets = tuple(int(seat) for seat in (data.get("targets") or ()))
+    return int(
+        response_count(
+            engine.state,
+            source=source,
+            card=data.get("card"),
+            target=target,
+            role=(
+                ModifierRole.TARGET
+                if targets and target == targets[0]
+                else ModifierRole.SUBJECT
+            ),
+        )
+    )
 
 
 def _rejudge_requirement(engine: Any, query: Query) -> str:

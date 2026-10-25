@@ -2541,6 +2541,10 @@ class Engine:
         data["source"] = event.actor
         data["targets"] = ()
         data["card"] = None
+        # 本次移动的载荷由**续跑帧自己**带一份（票 23）：``_dispatch_move_after`` 在派发
+        # 结束后会把 ``move_event`` 还原成外层帧原来那份（嵌套搬牌不许改写外层载荷），
+        # 故不能指望 dispatch_frame 上还留着"这一轮"的那条。
+        data[MOVE_EVENT_KEY] = event
         return Frame(kind=FrameKind.RESOLVE, data=data, frame_id=0)
 
     def _dispatch_move_after(
@@ -2591,6 +2595,13 @@ class Engine:
                     data={"source": event.actor, "targets": (), "card": None},
                     frame_id=frame_id,
                 )
+            # **本次移动的载荷要在派发前先存起来**（票 23）：钩子里的摸牌 / 弃牌本身就是一次
+            # ``move_in_frame``，它的嵌套派发会就地把 ``move_event`` 改写成"牌堆 → 手牌"。
+            # 外层钩子若在摸过牌之后才重入（【枭姬】逐张触发要问第二次），条件读到的是那次
+            # 摸牌的载荷 ⇒ ``from_zone`` 不再是装备区、判据整体翻假、剩下的触发静默丢失。
+            # ``move_event`` 是"这一轮派发"的事实，与外层帧的其它字段一样只属于派发的调用方。
+            prior_event = dispatch_frame.data.get(MOVE_EVENT_KEY)
+            prior_had_event = MOVE_EVENT_KEY in dispatch_frame.data
             dispatch_frame.data[MOVE_EVENT_KEY] = event
             # 这次派发的范围键（M6 票 20）：本次移动的幂等键。同一帧里的下一次移动是下一个
             # 范围，故同一技能第二次触发会重新发问；挂起续跑用的临时帧从派发帧继承它。
@@ -2609,6 +2620,10 @@ class Engine:
             prior_skill = frame.data.get(RUNNING_SKILL_KEY)
             prior_had_skill = RUNNING_SKILL_KEY in frame.data
             result = dispatch_move_after(self, dispatch_frame)
+            if prior_had_event:
+                dispatch_frame.data[MOVE_EVENT_KEY] = prior_event
+            else:
+                dispatch_frame.data.pop(MOVE_EVENT_KEY, None)
             if prior_had_skill:
                 frame.data[RUNNING_SKILL_KEY] = prior_skill
             else:

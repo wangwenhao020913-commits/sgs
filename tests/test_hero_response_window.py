@@ -303,6 +303,60 @@ def test_wushuang_duel_a_full_pair_hands_the_response_to_the_other_side():
 
 
 # ---------------------------------------------------------------------------
+# ②b 无双（【决斗】的反向）：吕布**成为**别人的【决斗】目标时，他自己每次响应也要两张
+# ---------------------------------------------------------------------------
+
+
+def test_wushuang_duel_makes_lvbu_himself_respond_with_two_slashes():
+    """吕布是【决斗】**的目标**时，他的每次响应也要两张【杀】（牌面 ② 的后半句）。
+
+    §九 L1046 / §十九 L2188–L2191 的原文是"当你使用【决斗】指定一名角色为目标后，
+    **或成为其他角色【决斗】的目标后**，该角色每次响应此【决斗】需连续打出两张【杀】"。
+    后半句里的"该角色"= 吕布本人：被【决斗】的一方先响应，且他每次响应都要两张。
+    旧实现只认"吕布是使用者"这一侧，反向（吕布被决斗）只要求一张 —— 本用例是那条的回归。
+    """
+    duel, first, second = _cards("duel")[0], _cards("slash")[0], _cards("slash")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(duel,)),
+            SeatSpec(hand=(first, second), hero="lvbu"),
+        ],
+        deck=_deck_excluding(duel, first, second),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _use(query, duel, 1)
+        if query.kind == "RESPOND" and query.cause is WindowCause.DUEL:
+            return _find(query, lambda action: isinstance(action, Pass))
+        return None
+
+    plays = {"count": 0}
+
+    def defender(query):
+        if query.kind == "RESPOND" and query.cause is WindowCause.DUEL:
+            plays["count"] += 1
+            if plays["count"] == 1:
+                return _find(query, lambda action: isinstance(action, PlayCard))
+            return _find(query, lambda action: isinstance(action, Pass))
+        return None
+
+    engine = run_until(
+        Engine.from_state(state, seed=1),
+        [Scripted(attacker), Scripted(defender)],
+        lambda e: e.state.player(1).hp < 4 or e.state.player(0).hp < 4,
+    )
+
+    assert len(_respond_queries(engine, WindowCause.DUEL)) == 2, (
+        "吕布作为【决斗】的目标，一次响应要问两张【杀】"
+    )
+    assert engine.state.player(1).hp == 3, "只出一张【杀】不满足响应 ⇒ 吕布受伤"
+    assert engine.state.player(0).hp == 4, "响应没满足 ⇒ 对方（使用者）不掉血"
+
+
+# ---------------------------------------------------------------------------
 # ③ 无双与提供者共存：【八卦阵】红算一张，两张可"真牌 + 八卦阵"
 # ---------------------------------------------------------------------------
 
