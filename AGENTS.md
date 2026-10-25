@@ -100,3 +100,15 @@
   烟测清单——先定位文件，不要从头通读 `session.js`。
 - `docs/agents/acceptance-web.md`：实机验收配方（环境预检、起服务、browser-skill、种子 12）。
 - 评审口径：`CODING_STANDARDS.md` §4（次序断言）与 §6（读取方断言走真实产出路径）。
+
+### 新增 / 修改武将技能
+
+先读 **`docs/agents/skill-authoring.md`**（六问流水线 + **13 条硬停判据** + 一将一票的批次纪律），
+再按需读它的四份子文档：`docs/agents/skill-authoring/readings.md`（官方默认书写规范）、
+`docs/agents/skill-authoring/shapes.md`（形状表与封闭集登记表）、
+`docs/agents/skill-authoring/edge-cases.md`（极端情况清单）、
+`docs/agents/skill-authoring/batch-ticket.md`（票面骨架与 DoD）。
+
+两份只读工具：`.venv/bin/python tools/dump_catalog.py`（形状指纹 / 反查 / 封闭集枚举）、
+`.venv/bin/python tools/similar_skills.py --like <技能 id>`（相似技能反查）。
+开工前跑 `.venv/bin/pytest -q tests/test_skill_authoring_docs.py`：它红 = 框架变了而文档没跟上。
