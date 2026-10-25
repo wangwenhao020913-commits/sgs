@@ -1,7 +1,7 @@
 """A1：洛神连续判定的显示层派生 `judgment_reveal`（只读投影测试）。
 
 字段由 `pending_payload` 从**已有记录**派生（SKILL_ACTIVATION / SELECT_OPTION /
-`card_move(reason=JUDGE)`），不改记录流、不改 06 §5、不碰金录像。这里用真引擎 + 真
+`card_move(reason=JUDGE)`），不改记录流、不改 `06`（§5「程序化约定与偏离一手」）、不碰金录像。这里用真引擎 + 真
 `Session` 走完一次循环：继续询问带当前判定牌、同一 `chain_key` 稳定、结束/放弃后的
 第一份 pending 是 `final=True` 的关窗帧（红牌终止时带红牌）。
 """
