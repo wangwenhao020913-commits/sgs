@@ -796,13 +796,13 @@ def test_jie_jieyin_discard_path_recovers_for_the_lower_and_draws_for_the_higher
     assert len(engine.state.player(1).hand) == 1
 
 
-def test_jie_jieyin_equipment_path_puts_a_hand_equipment_into_the_targets_zone():
-    """正例（装备路径）：手牌里的装备牌置入**目标**装备区（PUT）；旧装备顶替走 LOSE。"""
+def test_jie_jieyin_equipment_path_puts_a_hand_equipment_into_an_empty_slot():
+    """正例（装备路径）：手牌里的装备牌置入**目标装备区的空槽**（PUT，不顶替任何牌）。"""
     new_horse = _cards("chitu")[0]
-    old_horse = _cards("dawan")[0]
+    armor = _cards("eight_diagrams")[0]
     engine, used = _jie_jieyin_engine(
         hand=(new_horse,),
-        target_equip=(old_horse,),
+        target_equip=(armor,),
         owner_hp=2,
         target_hp=3,
         option="jieyin_place_equipment",
@@ -810,11 +810,64 @@ def test_jie_jieyin_equipment_path_puts_a_hand_equipment_into_the_targets_zone()
 
     assert used["count"] == 1
     assert new_horse in engine.state.player(1).equip, "置入的是目标（男性）的装备区"
-    assert old_horse in engine.state.discard, "同槽旧装备被顶替出去"
+    assert armor in engine.state.player(1).equip, "别的槽位原样保留"
     assert ("hand", "equip", "PUT") in _moves_of(engine, new_horse)
-    assert ("equip", "discard", "LOSE") in _moves_of(engine, old_horse)
+    assert not any(
+        entry[1] == "discard" for entry in _moves_of(engine, armor)
+    ), "「置入」不替换任何已有装备"
     assert engine.state.player(0).hp == 3, "较低（自己 2 血）回复 1 点"
     assert len(engine.state.player(1).hand) == 1, "较高（目标 3 血）摸一张"
+
+
+def test_jie_jieyin_cannot_place_into_an_occupied_slot():
+    """反例（用户裁定）：目标同槽已有牌 ⇒ **这张牌不是合法成本**，该分支因此不出现。
+
+    牌面写的是"**置入**"（不是"替换"）⇒ 目标装备区没有空槽时，"置入"这条分支的候选为空；
+    手里只剩这张装备牌时，连选项都不给（:func:`_jie_jieyin_options` 按目标现算）。
+    两只马同在进攻马槽，故目标是"同槽已有牌"的局面。
+    """
+    from sgs.skills.active import _jie_jieyin_options
+
+    horse, taken = _cards("chitu")[0], _cards("dawan")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(horse,), hero="jie_sunshangxiang"),
+            SeatSpec(hp=4, equip=(taken,), gender=Gender.MALE),
+        ],
+        deck=deck_excluding(PACK, horse, taken),
+        turn_seat=0,
+    )
+
+    assert _jie_jieyin_options(state, 0, 1) == ("jieyin_discard_hand",), (
+        "目标进攻马槽已被占 ⇒「置入」不可选（不能替换已有装备）"
+    )
+
+
+def test_jie_jieyin_places_an_already_equipped_horse_into_the_targets_free_slot():
+    """装备区来源的正例（用户裁定）：自己**已装备**的牌也能置入，只要目标那个槽空着。"""
+    filler = _cards("lightning")[0]
+    horse = _cards("chitu")[0]
+    armor = _cards("renwang_shield")[0]
+    engine, used = _jie_jieyin_engine(
+        hand=(filler,),
+        equip=(horse,),
+        target_equip=(armor,),
+        owner_hp=2,
+        target_hp=3,
+        option="jieyin_place_equipment",
+        card=horse,
+    )
+
+    assert used["count"] == 1
+    assert horse in engine.state.player(1).equip, "自己装备区那张进了目标装备区"
+    assert not engine.state.player(0).equip, "自己的装备区空了出来"
+    assert armor in engine.state.player(1).equip, "目标别的槽位原样保留"
+    assert any(
+        "xiaoji" in str(getattr(record.query, "skill_id", ""))
+        for record in engine.records
+        if record.kind == "query"
+    ), "把已装备的牌送出去 = 失去装备区里的一张牌 ⇒ 她自己的【枭姬】照常问一次"
 
 
 def test_jie_jieyin_equal_hp_runs_neither_effect():
@@ -851,44 +904,10 @@ def test_jie_jieyin_target_may_be_healthy_and_the_equipment_may_come_from_the_eq
     )
 
     assert _jie_jieyin_targets(state, None, 0, ()) == (1,), "满体力的男性也是合法目标"
-    assert _jie_jieyin_options(state, 0) == (
+    assert _jie_jieyin_options(state, 0, 1) == (
         "jieyin_discard_hand",
         "jieyin_place_equipment",
-    ), "装备区里那张也是「一张装备牌」⇒ 装备路径可用"
-
-
-def test_jie_jieyin_can_place_an_already_equipped_card_into_the_targets_zone():
-    """装备区来源的正例：把自己**已装备**的马置入目标装备区，同槽旧牌被顶替。"""
-    filler = _cards("lightning")[0]
-    horse, old_horse = _cards("chitu")[0], _cards("dawan")[0]
-    state = build_state(
-        pack=PACK,
-        seats=[
-            SeatSpec(hand=(filler,), equip=(horse,), hero="jie_sunshangxiang"),
-            SeatSpec(hp=4, equip=(old_horse,), gender=Gender.MALE, hero="guanyu"),
-        ],
-        deck=deck_excluding(PACK, filler, horse, old_horse),
-        turn_seat=0,
-    )
-    engine, used = _jie_jieyin_engine(
-        hand=(filler,),
-        equip=(horse,),
-        target_equip=(old_horse,),
-        owner_hp=2,
-        target_hp=3,
-        option="jieyin_place_equipment",
-        card=horse,
-    )
-
-    assert used["count"] == 1
-    assert horse in engine.state.player(1).equip, "自己装备区那张进了目标装备区"
-    assert not engine.state.player(0).equip, "自己的装备区空了出来"
-    assert old_horse in engine.state.discard, "目标同槽旧牌被顶替出去"
-    assert any(
-        "xiaoji" in str(getattr(record.query, "skill_id", ""))
-        for record in engine.records
-        if record.kind == "query"
-    ), "把已装备的牌送出去 = 失去装备区里的一张牌 ⇒ 她自己的【枭姬】照常问一次"
+    ), "装备区里那张也是「一张装备牌」⇒ 装备路径可用（目标坐骑槽空着）"
 
 
 # ---------------------------------------------------------------------------

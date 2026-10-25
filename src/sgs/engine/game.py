@@ -1497,28 +1497,32 @@ class Engine:
     def put_equipment_card(
         self, frame: Frame, *, holder: int, card: CardRef, actor: int
     ) -> Control:
-        """把一张**手牌里的装备牌**置入 ``holder`` 的装备区（M6 票 17 的界【结姻】）。
+        """把一张**装备牌**置入 ``holder`` 的装备区（M6 票 17 的界【结姻】）。
 
-        与 :meth:`move_used_card_to_equip_zone` 同一替换口径（先旧后新：同槽旧牌 ``LOSE``
-        入弃牌堆、新牌 ``PUT`` 入槽，故旧牌的"失去装备"照常触发【枭姬】一类技能），差别
-        只有两处：来源是**手牌**（不是处理区），归属 / 接收者是 ``holder``（不是使用者
-        本人）——牌面写的是"置入**其**装备区"，跨座位的置入因此走既有的两条移动原因。
+        **不替换**：目标同槽已有牌 ⇒ 这是非法调用（牌面写的是"**置入**"，与"使用装备牌"
+        同一条口径，空槽才放得下）。合法候选由技能侧的选择面保证
+        （`_jie_jieyin_equipment_cards` 只留空槽那张），故这里用断言守住不变量，而不是
+        静默顶替——用户裁定：不能替换已有装备，同槽已有牌就是"非法选项"（票 23）。
 
-        返回 ``"stay"`` = 某一段移动内联派发了「失去牌后」并挂起，调用方原样透传；重入时
-        :meth:`move_in_frame` 的帧内幂等守卫认得出这两次移动已经搬完。
+        来源可以是**手牌，也可以是发动者自己的装备区**（"一张装备牌"含装备区，票 23）；
+        归属 / 接收者是 ``holder``——牌面写的是"置入**其**装备区"，跨座位的置入因此走既有的
+        移动原因。
+
+        返回 ``"stay"`` = 这次移动内联派发了"失去牌后"并挂起（发动者自己的【枭姬】），
+        调用方原样透传；重入时 :meth:`move_in_frame` 的帧内幂等守卫认得出这次移动已经搬完。
         """
-        for card_id in list(self.state.player(holder).equip):
-            if self.state.card(card_id).slot is card.slot:
-                control = self.move_in_frame(
-                    frame,
-                    (self.state.card(card_id),),
-                    to_zone=ZoneRef(Zone.DISCARD),
-                    reason=MoveReason.LOSE,
-                    owner=holder,
-                    actor=actor,
-                )
-                if control == "stay":
-                    return "stay"
+        if card.card_id in self.state.player(holder).equip:
+            # **幂等**：这次置入已经搬完，只因内联派发（发动者自己的【枭姬】）挂起而重入 —
+            # 目标槽位现在当然"已被占"，那是本函数刚刚放进去的那张牌。
+            return None
+        occupied = [
+            card_id
+            for card_id in self.state.player(holder).equip
+            if self.state.card(card_id).slot is card.slot
+        ]
+        assert not occupied, (
+            f"置入装备区不能替换已有装备：座位 {holder} 的 {card.slot} 槽已有 {occupied}"
+        )
         return self.move_in_frame(
             frame,
             (card,),

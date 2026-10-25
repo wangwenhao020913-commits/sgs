@@ -273,11 +273,23 @@ class PickSeats:
     actor: ActorRef = None
 
 
+OptionChoices = (
+    tuple[str, ...] | Callable[[GameState, Any, int, "FlowAnswers"], tuple[str, ...]]
+)
+"""选项步的闭集：定值元组，或 ``(state, frame, owner, answers) -> tuple[str, ...]``。
+
+可调用档（票 23 的加法）服务"可选哪几项取决于**前序答案**"的技能：界【结姻】的
+「弃置一张手牌 / 将一张装备牌置入其装备区」两选一，第二步可不可行取决于**第一步选中的
+那名男性角色**的装备区空槽（牌面定了"置入"不能替换已有装备）。与 :attr:`PickCards.face`
+同一姿态：渲染清单、铺菜单、校验复合动作三处都读同一份解析结果。
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class PickOption:
     """选项步骤：问一次 ``SELECT_OPTION``（闭集 ``options``，选中文本原样进答案）。"""
 
-    options: tuple[str, ...]
+    options: OptionChoices
     actor: ActorRef = None
     optional: bool = True
     key: str = "option"
@@ -482,6 +494,15 @@ def _resolve_face(ref: ActorRef, state: GameState, frame: Any, owner: int, answe
         value = ref(state, frame, owner, answers)
         return value if value == () else int(value)
     return int(ref)
+
+
+def _resolve_options(
+    choices: OptionChoices, state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[str, ...]:
+    """把 ``PickOption.options`` 解析成**此刻的闭集**（可调用档按前序答案现算）。"""
+    if callable(choices):
+        return tuple(choices(state, frame, owner, answers))
+    return tuple(choices)
 
 
 def _flow_actor(
@@ -884,14 +905,17 @@ def _flow_step_option(
     """跑一步选项询问：返回三态 + 选项文本。"""
     del ask_owner  # 选项步走 ``ask_option``，其询问名是 ``skill_id``（自带步骤序号）
     actor = _flow_actor(step, host.state, frame, owner, answers)
-    if not step.options:
+    options = _resolve_options(step.options, host.state, frame, owner, answers)
+    if not options:
+        # 此刻一项都执行不了（例如【结姻】的目标装备区没有空槽、手里也没有手牌）⇒
+        # 与"空池"同一条纪律：不发没有候选的询问，整条流水线取消（零副作用）。
         return "cancel", ""
     answer = host.ask_option(
         frame,
         actor,
         timing,
         skill_id=_flow_option_id(frame, step.key, 0, multi=False),
-        options=step.options,
+        options=options,
         optional=step.optional,
     )
     if host.suspended(answer):
@@ -1037,11 +1061,16 @@ def _with_answers(frame: Any, answers: FlowAnswers) -> _ActivationFrame:
 
 
 def _answer_shape(step: FlowStep, value: object) -> object:
-    """清单渲染期的代表值 → 答案形状（效果读到的形状）。"""
+    """清单渲染期的代表值 → 答案形状（效果读到的形状）。
+
+    选项步的答案是**文本**（不是座位 / 牌 id 的元组），且代表值一律以"单值元组"传入
+    （:func:`_prior_contexts` 的形状）⇒ 先按步骤类型分流，再解元组——反过来会把
+    ``"jieyin_discard_hand"`` 当牌 id 转整数。
+    """
+    if isinstance(step, PickOption):
+        return str(value[0]) if isinstance(value, tuple) else str(value)
     if isinstance(value, tuple):
         return tuple(int(item) for item in value)
-    if isinstance(step, PickOption):
-        return value
     return (int(value),)
 
 
@@ -1149,6 +1178,21 @@ def _hidden_face(step: PickCards, face: object, owner: int) -> bool:
     return face != owner and Zone.HAND in step.zones
 
 
+# 步骤的"最多几个答案"：``PickCards`` / ``PickSeats`` 有 ``hi``，**选项步没有**（恒 1 个）。
+# 清单按前序答案逐行展开时会问"这一步是不是多选"，故统一从这里读，不给每个步骤类型各写一次。
+_STEP_MAX_KEY = "hi"
+
+
+def _step_max(step: FlowStep) -> int | None:
+    """这一步最多要几个答案（``None`` = 不设上限，如【制衡】的任意张）。"""
+    return getattr(step, _STEP_MAX_KEY, 1)
+
+
+def _step_min(step: FlowStep) -> int:
+    """这一步最少要几个答案（选项步恒 1）。"""
+    return getattr(step, "lo", 1)
+
+
 def _sampled_answers(step: FlowStep, values: tuple[object, ...]) -> list[object]:
     """一个前序步骤的**代表答案**：单值 ＋ 满选 ＋ 前 ``lo`` 个（去重、保序）。
 
@@ -1159,10 +1203,12 @@ def _sampled_answers(step: FlowStep, values: tuple[object, ...]) -> list[object]
     if not values:
         return []
     out: list[object] = [(value,) for value in values]
-    take = step.hi if step.hi is not None else len(values)
+    maximum = _step_max(step)
+    take = maximum if maximum is not None else len(values)
     out.append(tuple(values[:take]))
-    if step.lo and step.lo != take:
-        out.append(tuple(values[: step.lo]))
+    lo = _step_min(step)
+    if lo and lo != take:
+        out.append(tuple(values[:lo]))
     return list(dict.fromkeys(out))
 
 
@@ -1172,9 +1218,10 @@ def _prior_contexts(
     """前序步骤的代表答案组合；超过 ``limit`` ⇒ ``None``（退化）。"""
     per_step: list[list[object]] = []
     for step, values in domains:
+        maximum = _step_max(step)
         answers = (
             _sampled_answers(step, values)
-            if step.hi is None or step.hi > 1
+            if maximum is None or maximum > 1
             else [(value,) for value in values]
         )
         if not answers:
@@ -1351,7 +1398,10 @@ def manifest(
         degraded = combos is None
         if degraded:
             combos = [{}]
-        multi_prior = any(step.hi is None or step.hi > 1 for step, _ in domains)
+        multi_prior = any(
+            _step_max(prior) is None or (_step_max(prior) or 0) > 1
+            for prior, _ in domains
+        )
         rows: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
         values: list[object] = []
 
@@ -1440,19 +1490,34 @@ def manifest(
             domains.append((step, tuple(dict.fromkeys(values))))
 
         elif isinstance(step, PickOption):
-            if not step.options:
-                return ()
+            # 可调用档按**前序答案**现算（票 23）：同一技能的选项集可能随第一步选中的人变
+            # （【结姻】的目标装备区有没有空槽）。逐组合各算一次，行键沿用 ``when``。
+            option_rows: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+            option_values: list[object] = []
+            for combo in combos:
+                answers = answer_map(combo)
+                framed = _with_answers(base, answers)
+                choices = _resolve_options(step.options, state, framed, owner, answers)
+                if not choices:
+                    return ()
+                when = _when_texts(domains, combo) if combo else ()
+                option_rows.append((when, choices))
+                option_values.extend(choices)
+            if multi_prior:
+                if not option_rows or len({row for _when, row in option_rows}) > 1:
+                    return ()
+                option_rows = [((), option_rows[0][1])]
             steps.append(
                 Step(
                     name=step.key,
                     min=1,
                     max=1,
-                    pool=(StepPool(when=(), options=tuple(step.options)),),
+                    pool=_pool_rows(option_rows),
                     order=index,
                     wording=wording(step),
                 )
             )
-            domains.append((step, tuple(step.options)))
+            domains.append((step, tuple(dict.fromkeys(option_values))))
 
         elif isinstance(step, PickProvide):
             for combo in combos:
@@ -1595,8 +1660,11 @@ def _assign_activation(
                 return answers, f"步骤 {step.key} 需要一个选项"
             text = choices[choice_index]
             choice_index += 1
-            if check and text not in step.options:
-                return answers, f"步骤 {step.key} 的选项 {text!r} 不在闭集内"
+            if check:
+                framed = _with_answers(state, answers)
+                legal = _resolve_options(step.options, state, framed, owner, answers)
+                if text not in legal:
+                    return answers, f"步骤 {step.key} 的选项 {text!r} 不在闭集内"
             answers[step.key] = text
 
         elif isinstance(step, PickProvide):

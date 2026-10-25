@@ -1591,16 +1591,9 @@ JIE_JIEYIN_EQUIP = "jieyin_place_equipment"
 """界【结姻】的二选一选项：弃一张手牌 / 将一张装备牌置入其装备区。"""
 
 JIE_JIEYIN_OPTIONS: tuple[str, str] = (JIE_JIEYIN_DISCARD, JIE_JIEYIN_EQUIP)
-"""选项闭集（顺序 = 牌面两条分支的顺序）。"""
+"""选项闭集（顺序 = 牌面两条分支的顺序；**此刻可选哪几项**由 :func:`_jie_jieyin_options`
+按目标现算——装备区空槽决定第 2 项存不存在）。"""
 
-JIE_JIEYIN_ASK_OPTION = "hero.jie_sunshangxiang.jieyin:option"
-"""手写询问位置：界【结姻】的"弃手牌 / 置装备"二选一。"""
-
-_ASK_JIE_JIEYIN_CARD = "hero.jie_sunshangxiang.jieyin.card"
-"""手写询问位置：界【结姻】的成本牌（手牌 / 手牌里的装备牌）。"""
-
-_JIE_JIEYIN_OPTION_KEY = "jie_jieyin_option"
-_JIE_JIEYIN_CARD_KEY = "jie_jieyin_card"
 _JIE_JIEYIN_PAID_KEY = "jie_jieyin_paid"
 _JIE_JIEYIN_DONE_KEY = "jie_jieyin_done"
 
@@ -1637,9 +1630,10 @@ def _jie_jieyin_options(state: GameState, owner: int) -> tuple[str, ...]:
 def _jie_jieyin_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     if not _can_offer(state, ctx):
         return current
-    if not _jie_jieyin_options(state, ctx.subject):
-        return current
-    if not _jie_jieyin_targets(state, None, ctx.subject, ()):
+    seats = _jie_jieyin_targets(state, None, ctx.subject, ())
+    # 目标与选项**互相依赖**（装备区空槽）：只要有**一名**男性角色走得通就产出候选，
+    # 具体选谁、走哪条分支由第 1 / 2 步问（不在这里替玩家裁）。
+    if not any(_jie_jieyin_options(state, ctx.subject, seat) for seat in seats):
         return current
     return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
@@ -1657,67 +1651,90 @@ def _filter_face(
     return tuple(slot for slot, _ in kept), tuple(card_id for _, card_id in kept)
 
 
-def _jie_jieyin_face(
-    host: Any, owner: int, option: str
-) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
-    """成本面：弃手牌 = 全部手牌；置装备 = **手牌 + 装备区**里带槽位的牌。"""
-    if option == JIE_JIEYIN_DISCARD:
-        return host.selection_face(owner, (Zone.HAND,), reveal_hand=True)
-    face = host.selection_face(owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True)
-    return _filter_face(host.state, face, lambda card: card.slot is not None)
+def _jie_jieyin_slot_free(state: GameState, target: int, card: Any) -> bool:
+    """``target`` 的装备区里，``card`` 这个槽位**空着**吗（"置入"不能替换已有装备）。
+
+    牌面写的是"**置入**其装备区"：与"使用装备牌"一样落在空槽上，没有"顶替"这一说。
+    目标同槽已有牌 ⇒ 这张牌不是合法成本（用户裁定，票 23）。
+    """
+    return all(
+        state.card(card_id).slot is not card.slot
+        for card_id in state.player(target).equip
+    )
+
+
+def _jie_jieyin_equipment_cards(state: GameState, owner: int, target: int) -> tuple[int, ...]:
+    """可"置入"目标的装备牌：**手牌 + 装备区**里的装备牌，且目标的同槽**空着**。
+
+    "一张**装备牌**"按默认读法（一）③ = 手牌 + 装备区里的装备牌（用户裁定，票 23）：
+    已经装备着的牌也算一张装备牌；但"置入"只能进空槽（:func:`_jie_jieyin_slot_free`），
+    故目标同槽已有牌的那几张**不进候选**（非法选项，而不是"替换"）。
+    """
+    player = state.player(owner)
+    return tuple(
+        card_id
+        for card_id in (*player.hand, *player.equip)
+        if (card := state.card(card_id)).slot is not None
+        and _jie_jieyin_slot_free(state, target, card)
+    )
+
+
+def _jie_jieyin_options(state: GameState, owner: int, target: int) -> tuple[str, ...]:
+    """对**这名目标**此刻走得通的选项：弃手牌（有手牌）/ 置装备（有空槽可放）。
+
+    选项集依赖目标（装备区空槽）⇒ 清单与询问都按前序答案现算
+    （:class:`~sgs.skills.flow.PickOption` 的可调用档）。
+    """
+    options: list[str] = []
+    if state.player(owner).hand:
+        options.append(JIE_JIEYIN_DISCARD)
+    if _jie_jieyin_equipment_cards(state, owner, target):
+        options.append(JIE_JIEYIN_EQUIP)
+    return tuple(options)
+
+
+def _jie_jieyin_option_choices(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[str, ...]:
+    """第 2 步的闭集：按**第 1 步选中的目标**现算（:func:`_jie_jieyin_options`）。"""
+    del frame
+    return _jie_jieyin_options(state, owner, int(answers["seat"][0]))
+
+
+def _jie_jieyin_excluded(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[int, ...]:
+    """第 3 步的黑名单：**按第 2 步的选项**收窄成本面（"唯一判据"仍然只有这一份）。
+
+    - 弃手牌 ⇒ 装备区的牌一律不可选（牌面写的是"弃置一张**手牌**"）；
+    - 置装备 ⇒ 非装备牌不可选，且目标同槽已有牌的那几张装备牌也不可选（不能替换）。
+    """
+    del frame
+    target = int(answers["seat"][0])
+    player = state.player(owner)
+    if str(answers["option"]) == JIE_JIEYIN_DISCARD:
+        return tuple(player.equip)
+    legal = set(_jie_jieyin_equipment_cards(state, owner, target))
+    return tuple(
+        card_id
+        for card_id in (*player.hand, *player.equip)
+        if card_id not in legal
+    )
 
 
 def _jie_jieyin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
-    """提交点：二选一 → 付一张牌 → 较高的摸一张、较低的回复 1 点。"""
+    """提交点：按第 2 步的选项付那张牌 → 较高的摸一张、较低的回复 1 点。
+
+    三步的选择都由流水线的**步骤**问过（预发动清单因此画得出完整的三步），这里只结算：
+    付成本 → 体力比较 → 两个效果之一。搬牌可能内联派发"失去牌后"（她自己的【枭姬】/
+    【连营】）并挂起，故"已付 / 已收尾"各一个帧私有游标。
+    """
     state = host.state
     owner = frame.data["source"]
     target = int(answers["seat"][0])
     if not frame.data.get(_JIE_JIEYIN_PAID_KEY):
-        option = frame.data.get(_JIE_JIEYIN_OPTION_KEY)
-        if option is None:
-            options = _jie_jieyin_options(state, owner)
-            if not options:
-                frame.data[_JIE_JIEYIN_DONE_KEY] = True
-                return None
-            answer = host.ask_option(
-                frame,
-                owner,
-                Timing.PHASE_PLAY_IDLE,
-                skill_id=JIE_JIEYIN_ASK_OPTION,
-                options=options,
-                optional=False,
-            )
-            if host.suspended(answer):
-                return "stay"
-            option = str(answer.choice)
-            frame.data[_JIE_JIEYIN_OPTION_KEY] = option
-        assert isinstance(option, str)
-        card_id = frame.data.get(_JIE_JIEYIN_CARD_KEY)
-        if card_id is None:
-            face = _jie_jieyin_face(host, owner, option)
-            picked = host.ask_selection(
-                frame,
-                owner=_ASK_JIE_JIEYIN_CARD,
-                key="card",
-                actor=owner,
-                timing=Timing.PHASE_PLAY_IDLE,
-                spec=SelectionSpec(
-                    zones=(Zone.HAND, Zone.EQUIP)
-                    if option == JIE_JIEYIN_EQUIP
-                    else (Zone.HAND,),
-                    total=(1, 1),
-                ),
-                face=face,
-            )
-            if host.suspended(picked):
-                return "stay"
-            if not picked:
-                frame.data[_JIE_JIEYIN_DONE_KEY] = True
-                return None
-            card_id = int(picked[0])
-            frame.data[_JIE_JIEYIN_CARD_KEY] = card_id
-        assert isinstance(card_id, int)
-        if option == JIE_JIEYIN_DISCARD:
+        card_id = int(answers["card"][0])
+        if str(answers["option"]) == JIE_JIEYIN_DISCARD:
             control = host.move_in_frame(
                 frame,
                 state.refs((card_id,)),
@@ -1754,12 +1771,24 @@ def _jie_jieyin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
 
 JIE_JIEYIN_FLOW = SkillFlow(
     name="jie_jieyin",
-    steps=(PickSeats(lo=1, hi=1, pool=_jie_jieyin_targets, key="seat"),),
+    steps=(
+        PickSeats(lo=1, hi=1, pool=_jie_jieyin_targets, key="seat"),
+        # 「然后你弃置一张手牌**或**将一张装备牌置入其装备区」：选项集随目标变（空槽）。
+        PickOption(
+            options=_jie_jieyin_option_choices, optional=False, key="option"
+        ),
+        # 成本面按选项收窄（弃手牌 / 置装备），黑名单是**唯一**的过滤判据。
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP),
+            lo=1,
+            hi=1,
+            key="card",
+            exclude_cards=_jie_jieyin_excluded,
+        ),
+    ),
     effect=_jie_jieyin_effect,
 )
-"""界【结姻】的单步流水线：选一名男性角色 → 二选一付牌 → 较高的摸一张、较低的回复 1 点。"""
-
-
+"""界【结姻】的三步流水线：选一名男性角色 → 二选一 → 按选项付一张牌 → 比较体力后结算。"""
 # ---------------------------------------------------------------------------
 # 界大乔【国色】（M6 票 17）：二选一（方块牌当【乐不思蜀】/ 弃方块并弃场上一张
 # 【乐不思蜀】），选择结束后摸一张
@@ -2733,6 +2762,13 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
             "选择一名男性角色：弃置一张手牌或将一张装备牌置入其装备区；"
             "然后体力值较高的角色摸一张牌，体力值较低的角色回复 1 点体力"
         ),
+        # 三步各有各的问法（票 23）：与标准【结姻】（弃 2 张手牌 + 已受伤男性）同短 id，
+        # 读短 id 表会拿到标准版那一行（"已受伤"），故必须在这里显式给。
+        step_requirements={
+            "seat": "选择一名男性角色",
+            "option": "选择弃置一张手牌，或将一张装备牌置入其装备区",
+            "card": "弃置一张手牌 / 置入一张装备牌（目标同槽必须有空位）",
+        },
     ),
     # 黄盖【苦肉】：失去 1 点体力，然后摸两张牌（§九 L1015；无"出牌阶段限一次"）。
     # 裸发动（零步流水线）⇒ **不翻预发动**：没有步骤可渲染，候选直接进 ``legal_actions``。
@@ -2892,10 +2928,6 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
     },
     "jie_kurou": {
         "card": "弃置一张牌（手牌 / 装备区）",
-    },
-    "jie_jieyin": {
-        "card": "选择一张手牌弃置 / 一张手牌里的装备牌置入其装备区",
-        "seat": "选择一名男性角色",
     },
     "jie_guose": {
         "option": "选择一项：方块牌当【乐不思蜀】使用 / 弃方块牌并弃场上一张【乐不思蜀】",
