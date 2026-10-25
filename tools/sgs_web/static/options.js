@@ -309,22 +309,46 @@ function resetRightActions() {
   }
 }
 
-/** 只从自己手里选一张的**牌桌步**（M5-08a 火攻同花色弃牌）：不铺槽位块，直接点手牌。
+/** 只从自己手牌 / 装备区选一张的**牌桌步**（火攻 / 铁骑同花色弃牌）：不铺槽位块，直接点牌。
  *
- * 提交键恒灰（点手牌就是一次提交）；「放弃」在右端，是候选里真有的那条 `Pass`。
+ * 提交键恒灰（点牌就是一次提交）；「放弃」在右端，是候选里真有的那条 `Pass`。
  */
 function renderOwnHandPick(pending) {
   const index = (pending.legal_actions || []).findIndex((action) => action.kind === "SelectCards");
   if (index >= 0) state.selectedOption = index;
   const hint = $("t-target-hint");
   if (hint) {
-    const requirement = (pending.context && pending.context.requirement) || "选择一张手牌";
-    hint.textContent = `${requirement}：点一张亮起的手牌即提交；也可以点右端「放弃」。`;
+    const requirement = (pending.context && pending.context.requirement) || "选择一张牌";
+    const where = ownPickHasEquip(pending) ? "手牌或装备区里的牌" : "手牌";
+    hint.textContent = `${requirement}：点一张亮起的${where}即提交；也可以点右端「放弃」。`;
   }
   $("btn-cancel").disabled = true;
 }
 
-/** 只从自己手里选一张：点一张手牌 = **恰一条** `SelectCards`（面内位置）。
+/** 从自己手牌 / 装备区选**多张**的牌桌步（结姻两张 / 贯石斧两张等）：同样不铺槽位块。
+ *
+ * 点牌 = 收进 / 移出 `state.picks`（面内位置）；「提交」按候选骨架补 `picks` 后送出，
+ * 右端「放弃」是候选里真有的那条 `Pass`。
+ */
+function renderOwnZonePick(pending) {
+  const index = (pending.legal_actions || []).findIndex(
+    (action) => action.kind === "SelectCards");
+  if (index >= 0) state.selectedOption = index;
+  const hint = $("t-target-hint");
+  if (hint) {
+    const requirement = (pending.context && pending.context.requirement) || "选择牌";
+    const where = ownPickHasEquip(pending) ? "手牌或装备区里的牌" : "手牌";
+    const total = (pending.spec && pending.spec.total) || [1, 1];
+    const least = Math.max(1, Number(total[0]) || 1);
+    const most = Math.max(least, Number(total[1]) || least);
+    const howMany = least === most ? `${least} 张` : `${least}~${most} 张`;
+    hint.textContent = `${requirement}：点选${where}中的 ${howMany}，再点「提交」；`
+      + "也可以点右端「放弃」。";
+  }
+  $("btn-cancel").disabled = state.picks.length === 0 && !cancelAction(pending);
+}
+
+/** 只从自己手牌 / 装备区选一张：点一张牌 = **恰一条** `SelectCards`（面内位置）。
  *
  * 送出的仍是 `legal_actions` 里的那条骨架（`buildAction` 补 `picks`），不手拼 Action；
  * 与未知区域 / 亮牌模板的「一击即提交」同一姿态。合成载荷 / 尚未建局时只留内部态。

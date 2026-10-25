@@ -251,11 +251,9 @@ def _jie_tieqi(host: Any, frame: Frame) -> Control:
             frame.data[_JIE_TIEQI_SUIT] = None if judge_card is None else judge_card.suit
         suit = frame.data[_JIE_TIEQI_SUIT]
         face = _tieqi_suit_face(state, target, suit)
-        if not face[1]:
-            # 付不起（没有同花色的牌）⇒ 一个询问都不发，直接"不能响应"。
-            add_tag(frame, Tag.UNRESPONSIVE, target=target)
-            _jie_tieqi_next(frame, cursor)
-            return "stay"
+        # 没有同花色牌也**照发**这条询问（空选择面、只有 Pass）：不发就等于告诉对手
+        # "他手里没有这个花色"（用户报障的博弈信息泄露）。选择面为空时
+        # ``ask_when_empty`` 让引擎仍构造一条只有 ``Pass`` 的询问。
         picked = host.ask_selection(
             frame,
             owner=_ASK_JIE_TIEQI_DISCARD,
@@ -266,6 +264,7 @@ def _jie_tieqi(host: Any, frame: Frame) -> Control:
                 zones=(Zone.HAND, Zone.EQUIP), total=(1, 1), optional=True
             ),
             face=face,
+            ask_when_empty=True,
         )
         if host.suspended(picked):
             return "stay"

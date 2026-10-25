@@ -3811,6 +3811,46 @@ def test_the_ai_activates_jie_tieqi_on_a_slash() -> None:
     assert action.skill_id == "hero.jie_machao.tieqi"
 
 
+def test_the_ai_answers_an_empty_tieqi_discard_query_with_pass() -> None:
+    """【铁骑】没有同花色牌时仍发询问；AI 对只有 ``Pass`` 的 SELECT_CARDS 不崩、不卡。"""
+    slash = _card(type_id="slash", suit="spade")
+    judge = _card(type_id="peach", suit="heart")
+    dodge = _card(type_id="dodge", suit="diamond")
+    fillers = [i for i in range(len(PACK.deck.cards)) if i not in {slash, judge, dodge}]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(slash,), hero="jie_machao", gender=Gender.MALE),
+            SeatSpec(hand=(dodge,), hero="guanyu", gender=Gender.MALE),
+        ],
+        deck=(fillers[0], fillers[1], judge, *fillers[2:]),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = _run_to_activation(state)
+    assert engine.pending is not None and engine.pending.skill_id == "hero.jie_machao.tieqi"
+
+    players = [HeuristicPlayer(_stream(7)), HeuristicPlayer(_stream(7))]
+    run_until(
+        engine,
+        players,
+        lambda running: running.pending is not None
+        and running.pending.kind == QueryKind.SELECT_CARDS,
+    )
+    query = engine.pending
+    assert query is not None and query.actor == 1
+    assert query.slots == (), "目标没有同花色牌 ⇒ 空选择面"
+    assert [action.kind for action in query.legal_actions] == ["Pass"]
+
+    action = HeuristicPlayer(_stream(7)).respond(query)
+    assert isinstance(action, Pass), f"AI 对空候选应答了 {action!r}"
+    engine.submit(action)
+    record = engine.records[-1]
+    assert record.kind == "action" and record.accepted is True, (
+        f"AI 的 Pass 被引擎拒绝：{getattr(record, 'reason', None)}"
+    )
+
+
 def test_the_ai_activates_jie_tishen_at_the_prepare_phase() -> None:
     """界张飞【替身】（限定技）：准备阶段的询问上 AI 答发动（体力未满才有意义）。"""
     state = build_state(

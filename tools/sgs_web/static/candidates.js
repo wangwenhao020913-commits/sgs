@@ -88,28 +88,39 @@ function isDiscardPick(pending) {
   return Boolean(pending) && pending.kind === "DISCARD";
 }
 
-/** **只从自己的手里选一张**的牌桌步（M5-08a 的【火攻】同花色弃牌）。
+/** **从自己的手牌 / 装备区里选牌**的牌桌步（火攻 / 铁骑 / 青囊 / 结姻等）。
  *
- * 形状全部读载荷：`SELECT_CARDS`、**服务端下发了一个已亮出的牌**（`pending.reveal`，
- * 火攻弃牌步的公开事实）、上限 1、面里每一槽都是**应答者本人**的手牌且牌面可见，且这一步
- * 不是「提供一张 B」/ 弹窗模板。命中时点一张手牌 = **一次提交**（与亮牌模板的「选完即提交」
- * 同一口径），右端「放弃」是另一个合法出口；没有多选态要清、也没有第二个提交点。
- * 判据只是**渲染路径**，不裁决合法性（候选仍由 `legal_actions` 给）；`pending.reveal`
- * 把"可选一张自己的手牌"里这一类（青囊 / 结姻 / 雌雄的普通选牌）挡在外面。
+ * 形状全部读载荷：`SELECT_CARDS`、面里每一槽都是**应答者本人**的手牌或装备区、牌面可见，
+ * 且这一步不是「提供一张 B」/ 弹窗模板。命中时不再铺左下角选择面，而是在牌桌的牌面上
+ * 直接点选；单张选择点一张即提交，多张选择点选后由「提交」送出。判据只是**渲染路径**，
+ * 不裁决合法性（候选仍由 `legal_actions` 给）。
  */
-function isOwnHandSinglePick(pending) {
+function isOwnZonePick(pending) {
   if (!pending || pending.kind !== "SELECT_CARDS") return false;
-  if (!pending.reveal || !pending.reveal.card) return false;
   if (isProvide(pending) || stepDialogKind(pending) !== null) return false;
   const slots = pending.slots || [];
-  if (!slots.length || selectionCap(pending) !== 1) return false;
+  if (!slots.length) return false;
+  const zones = (pending.spec && pending.spec.zones) || [];
+  if (!zones.every((zone) => zone === "hand" || zone === "equip")) return false;
   return slots.every((slot) => {
     const ref = slot && slot.ref;
     return Boolean(ref)
       && Number(ref.seat) === Number(pending.actor)
-      && ref.zone === "hand"
+      && (ref.zone === "hand" || ref.zone === "equip")
       && Boolean(slot.card);
   });
+}
+
+/** 只选一张的自己区域面：点一张即提交（与多张选择的"点选 + 提交"分开）。 */
+function isOwnHandSinglePick(pending) {
+  return isOwnZonePick(pending) && selectionCap(pending) === 1;
+}
+
+/** 这一类「自己区域内选牌」是否包含装备区（决定提示文案 / 装备槽是否接点击）。 */
+function ownPickHasEquip(pending) {
+  return ((pending && pending.slots) || []).some(
+    (slot) => slot && slot.ref && slot.ref.zone === "equip",
+  );
 }
 
 /** 出牌阶段 / 响应窗口下"哪些座位此刻可点"（**数据**给的，不是 CSS 猜的）。

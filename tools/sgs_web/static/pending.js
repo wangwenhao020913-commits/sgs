@@ -138,6 +138,7 @@ function renderPending(view) {
   else if (kind === "preactivation-entry") renderPreativationEntry(pending);
   else if (kind === "seat") renderSeatPick(pending);
   else if (kind === "own-hand-pick") renderOwnHandPick(pending);
+  else if (kind === "own-zone-pick") renderOwnZonePick(pending);
   else if (kind === "slots") {
     // 选择面也要**指到那条候选**：引擎只发一条 `SelectCards` 骨架，具体 `picks` 由
     // `buildAction()` 补上；不指过去它就没有可补的对象 ⇒ `buildAction()` 返回 null ⇒
@@ -270,6 +271,12 @@ function renderKind(pending, actions) {
   // 引擎为 `SELECT_CARDS` 只生成**一条**候选（`SelectCards` + 全部 picks 的组合是前端拼的），
   // 所以"只有一条候选"绝不能理解成"没什么可选的、直接提交"。
   if (isOwnHandSinglePick(pending)) return "own-hand-pick";
+  if (isOwnZonePick(pending)) return "own-zone-pick";
+  // 空选择面 = 引擎仍要发的那条"只能放弃"询问（如【铁骑】没有同花色牌）：不铺空面板，
+  // 只走唯一候选（Pass）的直提态；没有可选动作则 fail-closed。
+  if (pending.kind === "SELECT_CARDS" && !(pending.slots || []).length) {
+    return directAction(pending) ? "direct" : "unsupported";
+  }
   if (pending.kind === "SELECT_CARDS") return "slots";
   // 弃牌阶段：不铺候选按钮，点手牌收进待弃置集合（`buildAction` 按 picks 找候选）。
   if (pending.kind === "DISCARD") return "discard";
@@ -609,11 +616,12 @@ function refreshSubmit(pending) {
     }
     return;
   }
-  // 只从自己手里选一张（M5-08a）：点手牌即提交；唯一出口是内容点击或右端「放弃」。
+  // 只从自己手牌 / 装备区选一张（火攻 / 铁骑等）：点牌即提交；出口是内容点击或右端「放弃」。
   if (isOwnHandSinglePick(pending)) {
     $("btn-submit").disabled = true;
+    const where = ownPickHasEquip(pending) ? "手牌或装备区里的牌" : "手牌";
     $("t-choice").textContent = state.lastRejectReason
-      || "点一张亮起的手牌即提交；也可以点右端「放弃」。";
+      || `点一张亮起的${where}即提交；也可以点右端「放弃」。`;
     return;
   }
   if (dialogDisablesPass(dialogKind, pending)) {
@@ -630,6 +638,13 @@ function refreshSubmit(pending) {
   const blocked = selected === null ? null : selectionError(selected, pending);
   const ready = blocked === null && buildAction() !== null;
   $("btn-submit").disabled = !ready;
+  if (isOwnZonePick(pending)) {
+    const where = ownPickHasEquip(pending) ? "手牌或装备区里的牌" : "手牌";
+    $("t-choice").textContent = state.lastRejectReason
+      || blocked
+      || (ready ? "可以提交。" : `点选${where}（已选 ${state.picks.length} 张）。`);
+    return;
+  }
   if (state.lastRejectReason) { $("t-choice").textContent = state.lastRejectReason; return; }
   if (blocked) { $("t-choice").textContent = blocked; return; }
   if (state.preactivation) {

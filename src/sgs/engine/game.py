@@ -1869,12 +1869,15 @@ class Engine:
         revealed: tuple[CardRef, ...] = (),
         provide_type: str | None = None,
         face: tuple[tuple[Slot, ...], tuple[int, ...]] | None = None,
+        ask_when_empty: bool = False,
     ) -> Any:
         """发一次 ``SELECT_CARDS`` 询问；**选择面只构造一次**（帧内记忆，重入复用）。
 
         ``build_face() -> (slots, card_ids)`` 会消耗一次 ``select`` 子流的随机数，
         故绝不能因重入而重跑；答案回来后把该位置解析成实体 ``card_id`` 元组返回。
-        池为空时**不构造询问**、直接返回空元组（票 19 §6）。
+        池为空时缺省**不构造询问**、直接返回空元组（票 19 §6）；``ask_when_empty=True``
+        则照发一条**空选择面**的询问——调用方要的是"没有合法牌也要让对手看见我做了
+        选择"的信息面（【铁骑】的"没有同花色牌"），故这条询问只有 ``Pass``。
 
         **``owner`` 是这次询问的**询问位置**（票 22，**必填**；不给在发问前就
         ``TypeError``）**：帧内缓存（答案与自建的面）按 ``(owner, key)`` 分桶，于是"这一步
@@ -1926,7 +1929,7 @@ class Engine:
             slots, card_ids = owned_store[identity]
         else:
             slots, card_ids = face
-        if not slots:
+        if not slots and not ask_when_empty:
             answers[answer_key] = ()
             return ()
         action = self.ask(

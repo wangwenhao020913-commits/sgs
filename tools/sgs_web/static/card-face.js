@@ -64,12 +64,27 @@ function cardFace(pending, card) {
     };
   }
   if (isOwnHandSinglePick(pending)) {
-    // 火攻的同花色弃牌（M5-08a）：只有面里那几张（同花色）可点；点一张即提交。
+    // 单张自己区域面（火攻 / 铁骑等同花色弃牌）：只有面里那几张可点；点一张即提交。
     const slots = pending.slots || [];
     const slotIndex = slots.findIndex(
       (slot) => slot.card && String(slot.card.card_id) === String(card.card_id),
     );
     return { selectable: slotIndex >= 0, selected: false, picked: false, slotIndex };
+  }
+  if (isOwnZonePick(pending)) {
+    // 多张自己区域面（结姻两张 / 贯石斧两张等）：点牌收进 `picks`，点「提交」送出。
+    const slots = pending.slots || [];
+    const slotIndex = slots.findIndex(
+      (slot) => slot.card && String(slot.card.card_id) === String(card.card_id),
+    );
+    const picked = slotIndex >= 0 && state.picks.includes(slotIndex);
+    const total = (pending.spec && pending.spec.total) || [1, 1];
+    return {
+      selectable: slotIndex >= 0 && (picked || state.picks.length < Math.max(1, total[1])),
+      selected: false,
+      picked,
+      slotIndex,
+    };
   }
   if (isDiscardPick(pending)) {
     const picked = state.picks.includes(card.card_id);
@@ -113,6 +128,14 @@ function activateCard(pending, card, face) {
   }
   if (isOwnHandSinglePick(pending)) {
     if (face.slotIndex >= 0) submitOwnHandSinglePick(pending, face.slotIndex);
+    return;
+  }
+  if (isOwnZonePick(pending)) {
+    if (face.slotIndex >= 0) {
+      toggleSlotPick(pending, face.slotIndex);
+      renderTable();
+      renderPending(state.view);
+    }
     return;
   }
   if (isDiscardPick(pending)) { toggleDiscardPick(card.card_id); return; }

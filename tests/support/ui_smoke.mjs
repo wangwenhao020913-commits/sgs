@@ -2085,8 +2085,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 /* ============ ㉿ 遗计：一次选两张 / 取消（票 15 的用户口径） ============
  *
  * 用户原话（`acceptance.md` §C）："一次给出这两张牌时就需要**允许同时选择两张牌**
- * （目前不行）"。这里用**真前端**的 `renderSlots` 点击路径验四件事：
- * 面上每张牌都能点、点两张 = picks 收两个面内位置、提交的是那条候选补上 picks、
+ * （目前不行）"。这里用**真前端**的“自己区域多选直选”路径验四件事：
+ * 手牌面上每张牌都能点、点两张 = picks 收两个面内位置、提交的是那条候选补上 picks、
  * 再点第三张**不越界**（上限 = 服务端 `spec.total` 的纯函数）。
  * 面里铺三张（比上限多一张）就是为了让"越界拒绝"可观察——它是"允许两张"的另一半。
  * 私密（牌面只给持有者）由 `test_hero_damage_after.py` / `test_web.py` 的引擎侧判据钉。
@@ -2116,33 +2116,36 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     virtual_index: {}, option_seats: {}, context: null,
   };
   const view = synthView(yijiPending);
+  view.snapshot.self_hand = [first, second, third];
   ui.state.view = view;
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(view);
-  // 每次点击都会重铺选择面（`renderPending` 清空 `t-options`），故槽位要**重新取**，
-  // 否则断言读的是被换掉的旧节点（第一版就在这里红了）。
-  const slotChips = () => {
-    const row = Array.from($("t-options").children).find((c) => c.className === "cards");
-    return row ? Array.from(row.children) : [];
+  // 多张自己区域面 = 牌桌直选：每次点击重绘手牌，故按 `card_id` 重新取节点。
+  const cardNode = (cardId) => Array.from($("t-hand").children).find(
+    (node) => node.getAttribute("data-card-id") === String(cardId));
+  const click = (cardId) => {
+    const node = cardNode(cardId);
+    (node.listeners.click || []).forEach((fn) => fn({ target: node }));
   };
-  const click = (index) => (slotChips()[index].listeners.click || []).forEach((fn) => fn({ target: slotChips()[index] }));
 
-  check("㉿G1 选牌面铺出亮牌，上限读服务端 spec.total（不是写死 1）",
-    slotChips().length === 3 && ui.selectionCap(yijiPending) === 2,
-    `槽位=${slotChips().length} cap=${ui.selectionCap(yijiPending)}`);
+  check("㉿G1 多张自己区域面 = 牌桌直选：不铺左下角选择面，上限仍读 spec.total",
+    $("t-options").children.length === 0
+      && ui.selectionCap(yijiPending) === 2
+      && $("t-target-hint").textContent.includes("手牌"),
+    `块=${$("t-options").children.length} cap=${ui.selectionCap(yijiPending)}`);
   check("㉿G2 未选时不可提交", $("btn-submit").disabled === true);
 
-  click(0);
+  click(1);
   check("㉿G3 点第一张 = picks 收下位置 0", JSON.stringify(ui.state.picks) === "[0]",
     `picks=${JSON.stringify(ui.state.picks)}`);
-  click(1);
+  click(2);
   check("㉿G4 一次可以点两张（用户口径：允许同时选择两张牌）",
     JSON.stringify(ui.state.picks) === "[0,1]", `picks=${JSON.stringify(ui.state.picks)}`);
-  check("㉿G5 两张都能画成选中态（sel）",
-    slotChips()[0].classList.contains("sel") && slotChips()[1].classList.contains("sel")
-      && !slotChips()[2].classList.contains("sel"),
-    `sel=${slotChips().map((c) => c.classList.contains("sel")).join(",")}`);
+  check("㉿G5 两张都能画成选中态（picked）",
+    cardNode(1).classList.contains("picked") && cardNode(2).classList.contains("picked")
+      && !cardNode(3).classList.contains("picked"),
+    `picked=${[1, 2, 3].map((id) => cardNode(id).classList.contains("picked")).join(",")}`);
   const action = ui.buildAction();
   check("㉿G6 提交的是候选里那条 SelectCards 补上两个面内位置",
     !!action && action.kind === "SelectCards" && JSON.stringify(action.picks) === "[0,1]",
@@ -2150,13 +2153,13 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿G7 选够两张后提交按钮可点", $("btn-submit").disabled === false,
     `disabled=${$("btn-submit").disabled}`);
 
-  click(2);
+  click(3);
   check("㉿G8 上限就是两张：再点第三张不越界（上限 = spec.total 的纯函数）",
     JSON.stringify(ui.state.picks) === "[0,1]", `picks=${JSON.stringify(ui.state.picks)}`);
-  click(0);
+  click(1);
   check("㉿G9 再点已选中的那张 = 取消它（另一张仍在）",
     JSON.stringify(ui.state.picks) === "[1]", `picks=${JSON.stringify(ui.state.picks)}`);
-  click(2);
+  click(3);
   check("㉿G10 取消掉一张后名额释放：第三张现在收得下（不是粘滞的置灰）",
     JSON.stringify(ui.state.picks) === "[1,2]", `picks=${JSON.stringify(ui.state.picks)}`);
 }
@@ -2296,17 +2299,50 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   check("㉿J1 步 1 的询问区文案就是服务端那句「弃置1张牌」",
     $("t-prompt").textContent === "弃置1张牌", `"${$("t-prompt").textContent}"`);
-  check("㉿J2 选择面把手牌与装备区的槽位都铺出来",
-    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 2,
-    `块=${$("t-options").children.length}`);
-  check("㉿J3 候选里有 Pass ⇒ 取消按钮可点（不再只是清空本地选择）",
-    $("btn-cancel").disabled === false, `disabled=${$("btn-cancel").disabled}`);
+  const findCard = (root, cardId) => {
+    const out = [];
+    const walk = (node) => {
+      for (const child of node.children || []) { out.push(child); walk(child); }
+    };
+    walk(root);
+    return out.find((node) => node.getAttribute
+      && node.getAttribute("data-card-id") === String(cardId)) || null;
+  };
+  check("㉿J2 自己区域内选一张 = 牌桌直选：不铺左下角选择面，提示指向手牌 / 装备区",
+    $("t-options").children.length === 0
+      && $("t-target-hint").textContent.includes("手牌或装备区")
+      && $("t-target-hint").textContent.includes("即提交"),
+    `块=${$("t-options").children.length} hint="${$("t-target-hint").textContent}"`);
+  check("㉿J3 直选态不再用左下角取消键；“放弃”仍在右端（候选里真有 Pass）",
+    $("btn-cancel").disabled === true && $("btn-pass").hidden === false,
+    `cancel=${$("btn-cancel").disabled} passHidden=${$("btn-pass").hidden}`);
+
+  // 直选手牌 / 直选装备都 = 一次 SelectCards（面内位置）；未建局时只留本地态。
+  ui.state.sessionId = null;
+  await clickAndWait(findCard($("t-hand"), 21));
+  const handPick = ui.buildAction();
+  check("㉿J3b 点手牌 = 直接选中那条 SelectCards（picks=[0]），不再先铺槽位再提交",
+    !!handPick && handPick.kind === "SelectCards"
+      && JSON.stringify(handPick.picks) === "[0]",
+    JSON.stringify(handPick));
+  ui.state.picks = [];
+  ui.renderTable();
+  ui.renderPending(pickView);
+  await clickAndWait(findCard($("t-self-zones"), 22));
+  const equipPick = ui.buildAction();
+  check("㉿J3c 点装备区 = 同样直接选中那条 SelectCards（picks=[1]）",
+    !!equipPick && equipPick.kind === "SelectCards"
+      && JSON.stringify(equipPick.picks) === "[1]",
+    JSON.stringify(equipPick));
 
   ui.state.sessionId = "smoke-missing-session";
+  ui.state.picks = [];
+  ui.renderTable();
+  ui.renderPending(pickView);
   const beforePick = calls.length;
-  await clickAndWait($("btn-cancel"));
+  await clickAndWait($("btn-pass"));
   const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
-  check("㉿J4 步 1 点取消 = **送出一条 Pass 候选**",
+  check("㉿J4 直选态点右端「放弃」= **送出一条 Pass 候选**",
     !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
 
   // ② 步 2 / 3：先点使用者、后点目标；同一句问法，座位可点。
@@ -2350,6 +2386,41 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!sentSeat && sentSeat.kind === "Pass", JSON.stringify(sentSeat));
 }
 
+/* ============ 票 14 A：空候选的「选一张」询问仍要发，界面只能放弃 ============
+ *
+ * 形状 = 铁骑"没有同花色牌"：`SELECT_CARDS` + `slots=[]` + 只有一条 `Pass`。界面
+ * 不铺空选择面，也不闪错误；右端「放弃」与「提交」都是那条唯一候选。
+ */
+{
+  const empty = synthView({
+    kind: "SELECT_CARDS", actor: 0, seq: 930,
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [{ kind: "Pass", answers_seq: 930 }],
+    candidate_index: {}, virtual_index: {}, option_seats: {},
+    slots: [],
+    spec: { zones: ["hand", "equip"], total: [1, 1], sequential: false, optional: true },
+    context: { requirement: "弃置一张与判定结果花色相同的牌", skill_hints: [] },
+  });
+  empty.snapshot.self_hand = [synthCard(41, "闪")];
+  ui.state.view = empty;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(empty);
+  check("㉿TQ1 空候选仍渲染成“只能放弃”：不铺空选择面、无错误文案，右端放弃可见",
+    $("t-options").children.length === 0
+      && $("btn-pass").hidden === false
+      && !/错误|没有可用|不可用/.test($("t-choice").textContent),
+    `块=${$("t-options").children.length} passHidden=${$("btn-pass").hidden} choice="${$("t-choice").textContent}"`);
+
+  ui.state.sessionId = "smoke-missing-session";
+  const beforeEmpty = calls.length;
+  await clickAndWait($("btn-submit"));
+  const emptyAction = calls.length > beforeEmpty ? calls[calls.length - 1].body.action : null;
+  check("㉿TQ2 空候选中点「提交」送出的只能是那条 Pass",
+    !!emptyAction && emptyAction.kind === "Pass", JSON.stringify(emptyAction));
+}
+
 /* ============ 票 02（合成局面）：【青囊】流水线 —— 逐步文案 + 取消送出 Pass ============
  *
  * 形状与【离间】同源（两步都是服务端驱动的询问：点技能 → SELECT_CARDS → SELECT_OPTION），
@@ -2389,17 +2460,19 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   check("㉿H1 步 1 的询问区文案就是服务端那句「弃置1张手牌」",
     $("t-prompt").textContent === "弃置1张手牌", `"${$("t-prompt").textContent}"`);
-  check("㉿H2 选择面只铺手牌（弃的是自己的手牌，不是装备区）",
-    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 1,
-    `块=${$("t-options").children.length}`);
-  check("㉿H3 候选里有 Pass ⇒ 取消按钮可点", $("btn-cancel").disabled === false,
-    `disabled=${$("btn-cancel").disabled}`);
+  check("㉿H2 手牌单张直选：不铺左下角选择面，提示只指向手牌",
+    $("t-options").children.length === 0
+      && $("t-target-hint").textContent.includes("手牌")
+      && !$("t-target-hint").textContent.includes("装备区"),
+    `块=${$("t-options").children.length} hint="${$("t-target-hint").textContent}"`);
+  check("㉿H3 直选态“放弃”在右端（候选里真有 Pass）", $("btn-pass").hidden === false,
+    `passHidden=${$("btn-pass").hidden}`);
 
   ui.state.sessionId = "smoke-missing-session";
   const beforePick = calls.length;
-  await clickAndWait($("btn-cancel"));
+  await clickAndWait($("btn-pass"));
   const sentPick = calls.length > beforePick ? calls[calls.length - 1].body.action : null;
-  check("㉿H4 步 1 点取消 = **送出一条 Pass 候选**",
+  check("㉿H4 直选态点右端「放弃」= **送出一条 Pass 候选**",
     !!sentPick && sentPick.kind === "Pass", JSON.stringify(sentPick));
 
   // ② 步 2：选一名已受伤角色（目标池含自己 ⇒ 选项里有 seat:0 与 seat:2）。
@@ -2485,9 +2558,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
 
   check("㉿Y1 步 1 的询问区文案就是服务端那句「弃置2张手牌」",
     $("t-prompt").textContent === "弃置2张手牌", `"${$("t-prompt").textContent}"`);
-  check("㉿Y2 选择面把手牌两张都铺出来（恰好两张，一次问完）",
-    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 2,
-    `块=${$("t-options").children.length}`);
+  check("㉿Y2 两张手牌 = 牌桌直选：不铺左下角选择面，提示要求选中两张",
+    $("t-options").children.length === 0
+      && $("t-target-hint").textContent.includes("手牌")
+      && $("t-target-hint").textContent.includes("2 张"),
+    `块=${$("t-options").children.length} hint="${$("t-target-hint").textContent}"`);
   check("㉿Y3 候选里有 Pass ⇒ 取消按钮可点", $("btn-cancel").disabled === false,
     `disabled=${$("btn-cancel").disabled}`);
 
@@ -2583,14 +2658,36 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿Z1 单步的询问区文案就是服务端那句「弃置任意张牌（手牌 / 装备区）」",
     $("t-prompt").textContent === "弃置任意张牌（手牌 / 装备区）",
     `"${$("t-prompt").textContent}"`);
-  check("㉿Z2 选择面同时铺出手牌与自己的装备区（2 个块 / 共 2 个槽）",
-    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 2,
-    `块=${$("t-options").children.length}`);
+  check("㉿Z2 手牌 ∪ 装备区 = 牌桌直选：不铺左下角选择面，提示同时指向两区",
+    $("t-options").children.length === 0
+      && $("t-target-hint").textContent.includes("手牌或装备区"),
+    `块=${$("t-options").children.length} hint="${$("t-target-hint").textContent}"`);
   check("㉿Z3 「任意张」的上限是**真实池大小**（服务端解析 hi=None，不进哨兵值）",
     JSON.stringify(pickView.pending.spec.total) === "[1,2]",
     JSON.stringify(pickView.pending.spec.total));
   check("㉿Z4 候选里有 Pass ⇒ 取消按钮可点", $("btn-cancel").disabled === false,
     `disabled=${$("btn-cancel").disabled}`);
+
+  const findCard = (root, cardId) => {
+    const out = [];
+    const walk = (node) => {
+      for (const child of node.children || []) { out.push(child); walk(child); }
+    };
+    walk(root);
+    return out.find((node) => node.getAttribute
+      && node.getAttribute("data-card-id") === String(cardId)) || null;
+  };
+  ui.state.sessionId = null;
+  await clickAndWait(findCard($("t-hand"), 51));
+  await clickAndWait(findCard($("t-self-zones"), 52));
+  const both = ui.buildAction();
+  check("㉿Z4b 多张自己区域面：手牌 + 装备区都能直接点选，一次提交两个面内位置",
+    !!both && both.kind === "SelectCards"
+      && JSON.stringify(both.picks) === "[0,1]",
+    JSON.stringify(both));
+  ui.state.picks = [];
+  ui.renderTable();
+  ui.renderPending(pickView);
 
   ui.state.sessionId = "smoke-missing-session";
   const beforePick = calls.length;
@@ -2645,8 +2742,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿W1 步 1 的询问区文案就是服务端那句「选择任意张要交给其他角色的手牌」",
     $("t-prompt").textContent === "选择任意张要交给其他角色的手牌",
     `"${$("t-prompt").textContent}"`);
-  check("㉿W2 选择面把本人手牌铺出来（2 个槽）、上限是真实池大小",
-    $("t-options").children.length === 2 && $("t-options").children[1].children.length === 2
+  check("㉿W2 本人手牌 = 牌桌直选：不铺左下角选择面，上限仍是真实池大小",
+    $("t-options").children.length === 0
+      && $("t-target-hint").textContent.includes("手牌")
       && JSON.stringify(pickView.pending.spec.total) === "[1,2]",
     `块=${$("t-options").children.length} total=${JSON.stringify(pickView.pending.spec.total)}`);
   check("㉿W3 候选里有 Pass ⇒ 取消按钮可点", $("btn-cancel").disabled === false,

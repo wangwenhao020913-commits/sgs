@@ -670,7 +670,7 @@ def _park_and_seed(state, slash: int):
 
 
 def test_jie_tieqi_suppresses_and_makes_an_unmatched_target_unresponsive():
-    """判定花色 = 目标没有的牌 ⇒ 连弃牌询问都不发，直接不能使用【闪】。"""
+    """判定花色 = 目标没有的牌 ⇒ **仍发**弃牌询问，但只有 Pass；答完不能使用【闪】。"""
     heart_judge = _first(type_id="peach", suit=Suit.HEART.value)
     # 【闪】在标准版全是红色；取一张**不是红桃**的【闪】：判定为红桃时它不满足"同花色"，
     # 而它本身仍是一个可用的【闪】——正好用来钉"不能使用【闪】"。
@@ -693,8 +693,26 @@ def test_jie_tieqi_suppresses_and_makes_an_unmatched_target_unresponsive():
 
     assert engine.state.player(1).hp == 3, "不能使用【闪】⇒ 照常受伤"
     assert _queries(engine, QueryKind.DODGE.value) == [], "没有【闪】窗口"
-    assert not _queries(engine, QueryKind.SELECT_CARDS.value), (
-        "没有同花色牌 ⇒ 不发没有候选的弃牌询问"
+
+    # 信息面：没有同花色牌并不等于"没有选择"——仍要问，只是合法候选只有 Pass。
+    discard_queries = [
+        query for query in _queries(engine, QueryKind.SELECT_CARDS.value)
+        if query.actor == 1
+    ]
+    assert len(discard_queries) == 1, "没有同花色牌也必须发弃牌询问"
+    discard = discard_queries[0]
+    assert discard.slots == (), "没有同花色牌 ⇒ 选择面为空"
+    assert [action.kind for action in discard.legal_actions] == ["Pass"], (
+        "空候选的询问只能放弃"
+    )
+    actions = [
+        record.action
+        for record in engine.records
+        if record.kind == "action"
+        and getattr(record.action, "answers_seq", None) == discard.seq
+    ]
+    assert len(actions) == 1 and actions[0].kind == "Pass", (
+        "这条询问的应答也必须落进记录流"
     )
 
 

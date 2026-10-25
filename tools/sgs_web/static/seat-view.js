@@ -325,21 +325,31 @@ function fillHeroTags(box, player) {
  *  因为座位卡的右侧块装不下【谦逊】整手牌那样的行。 */
 function sideBlockRows(player, ctx) {
   const seat = ctx.snapshot.seat;
-  const interactive = Number(player.seat) === Number(seat)
+  const ownSeat = Number(player.seat) === Number(seat);
+  const baseInteractive = ownSeat
     && Boolean(isProvide(ctx.pendingNow) || state.preactivation);
+  // 「自己区域内选牌」也把装备区接成可点（铁骑 / 结姻 / 贯石斧等）：手牌本来就是
+  // 牌桌表面，装备槽此前只在"提供一张 B / 预发动"时才接点击。判据仍是载荷形状。
+  const equipPick = ownSeat
+    && isOwnZonePick(ctx.pendingNow)
+    && ownPickHasEquip(ctx.pendingNow);
   const judge = document.createElement("div");
   judge.className = "judge-row";
   judge.setAttribute("data-zone", "judge");
   judge.setAttribute("data-seat", String(player.seat));
   for (const layout of judgeSlotLayout(player.judge)) {
-    judge.appendChild(miniSlotNode({ ...layout, card: layout.card, interactive, ctx }));
+    judge.appendChild(miniSlotNode({
+      ...layout, card: layout.card, interactive: baseInteractive, ctx,
+    }));
   }
   const equip = document.createElement("div");
   equip.className = "equip-grid";
   equip.setAttribute("data-zone", "equip");
   equip.setAttribute("data-seat", String(player.seat));
   for (const layout of equipSlotLayout(player.equip)) {
-    equip.appendChild(miniSlotNode({ ...layout, card: layout.card, interactive, ctx }));
+    equip.appendChild(miniSlotNode({
+      ...layout, card: layout.card, interactive: baseInteractive || equipPick, ctx,
+    }));
   }
   return [judge, equip];
 }
