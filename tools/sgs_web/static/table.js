@@ -460,11 +460,37 @@ function stageCardNode(item, heroNameOf) {
   return node;
 }
 
+/** 淡出动画的**续播锚点**：把 CSS `animation` 直接推到 `now − fadeAt` 的位置。
+ *
+ * `renderEffectCards` 每次重绘都会把节点 `appendChild` 回容器（保持入台顺序）；对已有
+ * 子节点而言这是"移出再插入"——浏览器的 CSS animation 会**从头播**，表现为淡出过程中
+ * 反复闪回 opacity 1。负 `animation-delay` 让每次插入都从"该在的那一帧"开始：`now`
+ * 越大 delay 越负，进度单调前进。淡出中新出生的节点同样适用，不依赖上一帧的计算样式。
+ *
+ * 时长与 `style.css` 的 1s / `session.js:STAGE_FADE_MS` 同一份；`animScale` 只缩 JS
+ * 寿命（`stageLane`），不缩 CSS 动画。
+ */
+function syncStageCardFade(node, item, now) {
+  if (!node || !node.style) return;
+  const stage = item && item.stage;
+  if (!stage || stageLane(item, now) !== "fading") {
+    node.style.animationDelay = "";
+    return;
+  }
+  const at = Number(now);
+  const elapsed = Number.isFinite(at)
+    ? Math.max(0, Math.min(STAGE_FADE_MS, at - Number(stageFadeAt(stage))))
+    : 0;
+  node.style.animationDelay = `-${elapsed}ms`;
+}
+
 /** 更新一张已经在台上的卡面：道 / 淡出类 / 底行 / 展示者角标（只改变的部分）。 */
 function updateStageCardNode(node, item, now, heroNameOf) {
   const stage = item.stage;
   node.setAttribute("data-stage-lane", stage.lane);
-  node.classList.toggle("fading", stageLane(item, now) === "fading");
+  const lane = stageLane(item, now);
+  node.classList.toggle("fading", lane === "fading");
+  syncStageCardFade(node, item, now);
   node.classList.toggle("revealed-card", stage.lane === "showcase");
   const label = stageZoneLabel(item, heroNameOf);
   // 真 DOM 的 `node.children` 是 HTMLCollection（无 `.find`）；`Array.from` 对数组同样成立。
@@ -484,8 +510,10 @@ function updateStageCardNode(node, item, now, heroNameOf) {
 
 /** 把舞台项画进任意容器（牌桌 / 回放页共用这一份渲染）。
  *
- * 按 `data-stage-key`（= card_id）**复用节点**：淡出因此是靠同一个节点上的 CSS 过渡，
- * 而不是每个事件步重建一屏（重建会让过渡从头开始）；被淡出结束的项真的从父节点移除。
+ * 按 `data-stage-key`（= card_id）**复用节点**：淡出不重建一屏；但每次为了保持入台顺序
+ * 都会 `appendChild`（已有子节点 = 移出再插入），CSS `animation` 会从头播。故淡出进度
+ * 由 :func:`syncStageCardFade` 的负 `animation-delay` 续上，重绘只前进、不回 opacity 1。
+ * 被淡出结束的项真的从父节点移除。
  * 空舞台仍画「（空）」占位（U1-02 的既有读法）。
  */
 function renderEffectCards(box, items, now = stageNow(), heroNameOf = stageHeroNameOf) {

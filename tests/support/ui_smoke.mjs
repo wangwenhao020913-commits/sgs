@@ -14611,6 +14611,46 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `before=${fireVisibleBeforePop} pop=${fireFadesOnPop} fading=${fireNodeFading}`
       + ` keep=${fireNodeStill} gone=${fireNodeGone} fadeAt=${fireFadeAt}`);
 
+  // ---- 缺陷 1 续播：每次重绘都 appendChild（节点被移出再插入）会让 CSS 动画从头播；
+  // 负 animation-delay 把动画直接推到 now − fadeAt 的位置，重绘越多也只会前进、不回 1。
+  resetStage();
+  const RESUME = "u3-def1-resume";
+  loadView({ ...view(RESUME), cursor: 0, log_seq: 0, records: [], finished: false });
+  const RESUME_REVEAL = card(706, "闪");
+  loadView({
+    ...view(RESUME), cursor: 1, log_seq: 0, finished: false,
+    records: [reveal(40, 12, RESUME_REVEAL, 1)],
+  });
+  const resume = revealItem(706);
+  loadView({
+    ...view(RESUME), cursor: 2, log_seq: 0, finished: false,
+    records: [pop(41, 12, "RESOLVE")],
+  });
+  const resumeFadeAt = resume && resume.stage.fadeAt;
+  const animationDelayMs = (node) => {
+    const raw = node && node.style ? String(node.style.animationDelay || "") : "";
+    const found = raw.match(/^(-?\d+(?:\.\d+)?)(ms|s)$/);
+    if (!found) return null;
+    return Number(found[1]) * (found[2] === "s" ? 1000 : 1);
+  };
+  ui.renderProcessing(resumeFadeAt + 300);
+  const node300 = stageNode(706);
+  const delay300 = animationDelayMs(node300);
+  ui.renderProcessing(resumeFadeAt + 700);
+  const node700 = stageNode(706);
+  const delay700 = animationDelayMs(node700);
+  const nodes706 = stageNodes().filter((node) => attr(node, "data-card-id") === "706");
+  check("U3-01w2 淡出重绘不重置：负 animation-delay 随 now 单调前进（+300 → +700），不回到 opacity 1",
+    Boolean(resume) && Number.isFinite(resumeFadeAt)
+      && delay300 !== null && delay300 <= -300
+      && delay700 !== null && delay700 <= -700
+      && delay700 < delay300
+      && node700 === node300
+      && nodes706.length === 1
+      && hasClass(node300, "fading") && hasClass(node700, "fading"),
+    `t300=${delay300} t700=${delay700} sameNode=${node700 === node300}`
+      + ` nodes=${nodes706.length}`);
+
   // ---- 缺陷 2-b：结算同批走完（无可弃同花色）：0 停留 + 真实 1s 淡出，不是瞬删 ----
   resetStage();
   const BATCH = "u3-def2-batch";

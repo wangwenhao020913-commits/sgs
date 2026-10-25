@@ -669,6 +669,8 @@ button.mini-slot { cursor: pointer; }
  * 必须用 @keyframes，而不是 transition：舞台项可能在**首次渲染时就已进入淡出**
  * （回放缓冲 / 帧 pop 与产生它的记录同批），新节点没有"opacity 1 → 0"的已生效起点，
  * transition 不会播放，卡面直接跳没。动画从 `from` 的 opacity 1 起播，不依赖旧值。
+ * 重绘时节点会被 appendChild 移出再插入（动画会从头播），故 table.js 的
+ * `syncStageCardFade` 用负 `animation-delay` 把进度续到 `now − fadeAt`。
  * 时长与 session.js:STAGE_FADE_MS 相同（1000ms）。 */
 .stage-card.fading {
   opacity: 0;
