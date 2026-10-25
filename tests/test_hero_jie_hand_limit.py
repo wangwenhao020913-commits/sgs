@@ -519,7 +519,11 @@ class _QingjianDriver:
             )
         if query.kind == QueryKind.SELECT_CARDS:
             zones = query.spec.zones
-            if query.actor == 1 and (Zone.HAND,) == zones and query.spec.total[0] == 1:
+            if (
+                query.actor == 1
+                and zones == (Zone.HAND, Zone.EQUIP)
+                and query.spec.total[0] == 1
+            ):
                 # 清俭的"展示任意张牌"：给**前两张**（基本 + 锦囊 = 两类）。
                 for action in query.legal_actions:
                     if isinstance(action, SelectCards) and action.picks == (0, 1):
@@ -545,6 +549,15 @@ class _QingjianDriver:
             if targets is None or action.targets == targets:
                 return action
         return None
+
+
+def test_qingjian_shows_any_hand_or_equipment_card():
+    """默认读法「牌前没写区域 ⇒ 手牌 + 装备区」：清俭的展示步两者都收。"""
+    from sgs.skills import CATALOG
+
+    step = CATALOG[JIE_QINGJIAN].hooks[0].flow.steps[0]
+    assert step.zones == (Zone.HAND, Zone.EQUIP)
+    assert step.lo == 1 and step.hi is None
 
 
 def test_qingjian_gives_cards_and_boosts_the_turn_player_not_itself():
@@ -713,6 +726,7 @@ def _jie_ganglie_engine(
     judge_suits: tuple[Suit, ...] = (Suit.SPADE,),
     source_hand: tuple[int, ...] = (),
     source_equip: tuple[int, ...] = (),
+    source_judge: tuple[int, ...] = (),
     target: int = 1,
     holder: int = 1,
     source: int | None = 0,
@@ -728,8 +742,12 @@ def _jie_ganglie_engine(
     channel = cards_of_type(PACK, "slash")[0]
     specs = [SeatSpec() for _ in range(seats)]
     if source is not None:
-        specs[source] = SeatSpec(hand=tuple(source_hand), equip=tuple(source_equip))
-    used = {*judges, channel, *source_hand, *source_equip}
+        specs[source] = SeatSpec(
+            hand=tuple(source_hand),
+            equip=tuple(source_equip),
+            judge=tuple(source_judge),
+        )
+    used = {*judges, channel, *source_hand, *source_equip, *source_judge}
     deck = tuple(index for index in range(len(PACK.deck.cards)) if index not in used)
     state = build_state(
         pack=PACK,
@@ -793,6 +811,18 @@ def test_jie_ganglie_a_black_judgment_makes_you_discard_one_card_of_the_source()
     assert driver.selections[0].actor == 1, "选牌的是**夏侯惇**（『你弃置』），不是来源"
     assert len(engine.state.player(0).hand) == 1, "来源掉一张牌"
     assert engine.state.player(0).hp == 4, "黑色不造成伤害"
+
+
+def test_jie_ganglie_does_not_take_a_judgment_card():
+    """默认读法「牌前没写区域 ⇒ 手牌 + 装备区」：判定区不在「弃置一张牌」的范围内。"""
+    source_judge = (cards_of_type(PACK, "lightning")[0],)
+
+    engine, driver = _jie_ganglie_engine(
+        judge_suits=(Suit.SPADE,), source_judge=source_judge
+    )
+
+    assert driver.selections == [], "来源只有判定牌 ⇒ 没有可弃的合法候选，不发询问"
+    assert source_judge[0] in engine.state.player(0).judge, "判定牌不动"
 
 
 def test_jie_ganglie_can_take_an_equipment_card():
@@ -1212,3 +1242,28 @@ def test_jie_yingzi_draws_the_extra_card_without_asking():
         and record.query.kind == QueryKind.SKILL_ACTIVATION
         and record.query.skill_id == JIE_YINGZI
     ], "锁定技不问「是否发动」"
+
+
+def test_jie_yingzi_does_not_trigger_in_another_players_draw_phase():
+    """默认读法「没写谁的阶段 ⇒ 仅自己的」：界【英姿】只在周瑜自己的摸牌阶段生效。
+
+    锁定技不走 `SKILL_ACTIVATION` 询问，故 `available=False` 必须在派发环里也生效；
+    否则别人的摸牌阶段会替周瑜多摸一张。
+    """
+    deck = tuple(range(10, 30))
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hero="jie_zhouyu")],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+
+    run_until(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: ran_timing(e, Timing.PHASE_DRAW_END),
+    )
+
+    assert engine.state.player(1).hand == [], "周瑜不在自己的摸牌阶段 ⇒ 不能替自己摸牌"
+    assert list(engine.state.player(0).hand) == list(deck[:2]), "只有当前回合角色摸两张"

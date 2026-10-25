@@ -1398,12 +1398,13 @@ def _jie_ganglie(host: Any, frame: Any) -> Any:
         actor=owner,
         timing=Timing.DAMAGE_AFTER_TAKE,
         spec=SelectionSpec(
-            zones=(Zone.HAND, Zone.EQUIP, Zone.JUDGE),
+            zones=(Zone.HAND, Zone.EQUIP),
             total=(1, 1),
             optional=False,
         ),
-        # 选牌者是**夏侯惇**（不是来源）⇒ 面铺来源的三区，手牌是隐藏槽。
-        build_face=lambda: host.selection_face(source, (Zone.HAND, Zone.EQUIP, Zone.JUDGE)),
+        # 选牌者是**夏侯惇**（不是来源）⇒ 面铺来源的手牌 + 装备区，手牌是隐藏槽。
+        # 牌面只写「一张牌」，默认不含判定区（票 15 默认读法）。
+        build_face=lambda: host.selection_face(source, (Zone.HAND, Zone.EQUIP)),
     )
     if host.suspended(picked):
         frame.data[done_key] = False

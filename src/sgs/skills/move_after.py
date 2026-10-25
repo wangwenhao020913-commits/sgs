@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sgs.data import SkillType, card_category
-from sgs.effects import CarrierKind
+from sgs.effects import CarrierKind, locate
 from sgs.state import CardRef, GameState, MoveReason, Phase, Zone, ZoneRef
 from sgs.timing import Timing
 
@@ -234,6 +234,19 @@ _QINGJIAN_BONUS_KEY = "qingjian_bonus"
 _QINGJIAN_GIVEN_KEY = "qingjian_given"
 """帧私有：那批牌已经交出去（重入不重搬）。"""
 
+_QINGJIAN_REVEALED_KEY = "qingjian_revealed"
+"""帧私有：那批牌已经展示过（重入不重复落 ``card_reveal``）。"""
+
+_QINGJIAN_GROUPS_KEY = "qingjian_groups"
+"""帧私有：选中的牌按**来源区域**分组后的 ``[(zone, (card_id, ...)), ...]``。
+
+``move_card`` 一次只能有一个来源区（手牌 / 装备区各一批）；分组也在帧内定格，
+重入不重算。
+"""
+
+_QINGJIAN_MOVED_KEY = "qingjian_moved"
+"""帧私有：已搬完的来源组数（搬牌内联挂起后据此续搬，不重搬已完成的组）。"""
+
 
 def _other_alive_seats(
     state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
@@ -282,21 +295,35 @@ def _qingjian_effect(host: Any, frame: Any, answers: Any) -> Any:
     owner = frame.data["skill_owner"]
     cards = tuple(int(card_id) for card_id in answers["card"])
     target = int(answers["seat"][0])
-    if not frame.data.get(_QINGJIAN_GIVEN_KEY):
-        frame.data[_QINGJIAN_GIVEN_KEY] = True
-        state = host.state
+    state = host.state
+    if not frame.data.get(_QINGJIAN_REVEALED_KEY):
+        frame.data[_QINGJIAN_REVEALED_KEY] = True
         for card_id in cards:
             host.reveal_card(frame, owner, state.card(card_id))
-        control = host.move_in_frame(
-            frame,
-            state.refs(cards),
-            to_zone=ZoneRef(Zone.HAND, target),
-            reason=MoveReason.PUT,
-            owner=target,
-            actor=owner,
-        )
-        if control == "stay":
-            return "stay"
+    if not frame.data.get(_QINGJIAN_GIVEN_KEY):
+        groups = frame.data.get(_QINGJIAN_GROUPS_KEY)
+        if groups is None:
+            buckets: dict[Zone, list[int]] = {}
+            for card_id in cards:
+                buckets.setdefault(locate(state, card_id).zone, []).append(card_id)
+            groups = tuple((zone, tuple(ids)) for zone, ids in buckets.items())
+            frame.data[_QINGJIAN_GROUPS_KEY] = groups
+        moved = int(frame.data.get(_QINGJIAN_MOVED_KEY, 0))
+        while moved < len(groups):
+            _zone, card_ids = groups[moved]
+            control = host.move_in_frame(
+                frame,
+                state.refs(card_ids),
+                to_zone=ZoneRef(Zone.HAND, target),
+                reason=MoveReason.PUT,
+                owner=target,
+                actor=owner,
+            )
+            if control == "stay":
+                return "stay"
+            moved += 1
+            frame.data[_QINGJIAN_MOVED_KEY] = moved
+        frame.data[_QINGJIAN_GIVEN_KEY] = True
     if not frame.data.get(_QINGJIAN_BONUS_KEY):
         frame.data[_QINGJIAN_BONUS_KEY] = True
         state = host.state
@@ -312,14 +339,14 @@ def _qingjian_effect(host: Any, frame: Any, answers: Any) -> Any:
 QINGJIAN_FLOW = SkillFlow(
     name="qingjian",
     steps=(
-        # 「展示任意张牌」：从**持有者手牌**里选（至少 1 张；"给空"不是可支付的成本）。
-        PickCards(zones=(Zone.HAND,), lo=1, hi=None, key="card"),
+        # 「展示任意张牌」：牌前没写区域 ⇒ 默认手牌 + 装备区（至少 1 张；"给空"不是成本）。
+        PickCards(zones=(Zone.HAND, Zone.EQUIP), lo=1, hi=None, key="card"),
         # 「交给一名其他角色」：不能给自己。
         PickSeats(lo=1, hi=1, pool=_other_alive_seats, key="seat"),
     ),
     effect=_qingjian_effect,
 )
-"""【清俭】的两步流水线：展示任意张手牌 → 交给一名其他角色 → 当前回合角色 +X。"""
+"""【清俭】的两步流水线：展示任意手牌 / 装备 → 交给一名其他角色 → 当前回合角色 +X。"""
 
 
 # ---------------------------------------------------------------------------

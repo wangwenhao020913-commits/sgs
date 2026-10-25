@@ -1128,10 +1128,13 @@ def _dispatch(
             # 觉醒技是**一次性转变**：已觉醒 ⇒ 不再派发（与限定技的"已用"同一位置）。
             continue
         forced = instance.definition.locked or awakening
+        # ``available`` 是"这一刻这条技能成不成立"（阶段 / 回合归属、代价够不够），
+        # 与"要不要问"是两条正交的轴：锁定技 / 觉醒技不问，但**同样要过这一道门**。
+        # 缺了它，界【英姿】这类锁定阶段技会在别人的摸牌阶段替自己摸牌。
+        plan = activation_plan(host.state, frame, instance)
+        if not plan.available:
+            continue
         if not forced:
-            plan = activation_plan(host.state, frame, instance)
-            if not plan.available:
-                continue
             active = host.ask_skill_activation(frame, instance, timing, plan, key=key)
             if host.suspended(active):
                 return "stay"
