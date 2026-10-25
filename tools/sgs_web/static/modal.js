@@ -296,11 +296,14 @@ function showOptionsHome() {
 
 /** 武将详情窗口是否开着：真源是 `state.modal.heroSeat`（不是 DOM 的 hidden 属性）。
  *
- * 开窗判据与 `syncHeroModal` 同一条（回放 / 无视图时它不显示），故这里也读同一组条件；
- * `#t-modal.hidden` 只是这条状态的渲染结果，不能反过来当判据（评审 Standards：DOM 读法）。
+ * 开窗判据与 `syncHeroModal` 同一条（无视图时它不显示；牌桌事件回放不阻止），故这里也读
+ * 同一组条件；`#t-modal.hidden` 只是这条状态的渲染结果，不能反过来当判据（评审 Standards：
+ * DOM 读法）。
  */
 function heroDetailVisible() {
-  return state.modal.heroSeat !== null && !state.playback && !!state.view;
+  // 牌桌事件回放（`state.playback`）不阻止打开：`renderHeroDetailBody` 读同一个
+  // `tableViewForRender()`。这里只排除没有视图的首页。
+  return state.modal.heroSeat !== null && !!state.view;
 }
 
 /** 暗化层 / 页面态的唯一开关：询问弹窗**展开**或武将详情打开时显示。
@@ -578,7 +581,10 @@ function syncDialog() {
 function syncHeroModal() {
   const modal = $("t-modal");
   if (!modal) return;
-  if (state.playback || state.modal.heroSeat === null || !state.view) {
+  // 与 renderTable 走同一份视图：牌桌事件回放期间是 live view；回放页 / 首页没有
+  // 武将详情数据，仍收起。
+  const view = tableViewForRender();
+  if (state.modal.heroSeat === null || !view) {
     modal.hidden = true;
     const body = $("t-modal-body");
     if (body) {
@@ -589,8 +595,8 @@ function syncHeroModal() {
     return;
   }
   const title = $("t-modal-title");
-  const player = playerAt(state.view, state.modal.heroSeat);
-  if (title) title.textContent = player ? `武将详情 · ${heroNameOf(player, state.view)}` : "武将详情";
+  const player = playerAt(view, state.modal.heroSeat);
+  if (title) title.textContent = player ? `武将详情 · ${heroNameOf(player, view)}` : "武将详情";
   renderHeroDetailBody();
   modal.hidden = false;
   syncModalChrome();

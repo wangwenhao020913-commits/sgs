@@ -7,6 +7,8 @@
  *  - 详情里武将技能在上、分割线、装备技能在下；技能多 / 描述长时滚轮翻阅；
  *  - 关闭按钮 / ESC 只关它自己（U2-06 起它是**唯一**可叠加的检视窗：盖在询问弹窗上，
  *    关掉后底下的询问弹窗原样恢复）；倒计时不暂停、窗口内不显示；
+ *  - **任何时候**都能开：询问态、牌桌事件回放（`state.playback`）、无 pending 的快照态；
+ *    回放**页**没有牌桌武将块、也不绑定这个入口；
  *  - 阵亡武将也能点开。
  *
  * 纪律：
@@ -127,7 +129,9 @@ function renderHeroDetailBody() {
     && String(state.modal.heroSeat) === previousSeat;
   const scrollTop = sameSeat ? (Number(body.scrollTop) || 0) : 0;
   body.innerHTML = "";
-  const view = state.view;
+  // 与 renderTable 同一份视图：牌桌事件回放期间读 live view（pending 收起、快照已派生），
+  // 不读旧的 state.view，否则详情会停在上一问的画面。
+  const view = tableViewForRender();
   const seat = state.modal.heroSeat;
   if (!view || !view.snapshot || seat === null) return;
   const player = playerAt(view, seat);
@@ -181,13 +185,16 @@ function renderHeroDetailBody() {
 
 /** 打开一个座位的详情：只记本地座位号并交给 `syncHeroModal` 开窗。
  *
- * 回放期间不开（回放页没有这份详情数据，且播放是严格顺序的）。
+ * 牌桌事件回放期间也开：读 `tableViewForRender()`（live view），不是拒绝 `state.playback`。
  * **不动**询问弹窗（`#t-dialog`）的任何状态：详情是叠加的检视窗，关掉它时底下原样恢复。
  */
 function openHeroDetail(seat) {
-  if (state.playback || !state.view || !state.view.snapshot) return;
+  // 牌桌事件回放期间 `tableViewForRender` 把 pending 收起，但武将块仍是当前可见的
+  // 座位；详情应跟这张表走（`state.liveView`），不能因为 playback 就拒绝。
+  const view = tableViewForRender();
+  if (!view || !view.snapshot) return;
   if (seat === null || seat === undefined) return;
-  if (!playerAt(state.view, seat)) return;
+  if (!playerAt(view, seat)) return;
   state.modal.heroSeat = Number(seat);
   syncHeroModal();
 }

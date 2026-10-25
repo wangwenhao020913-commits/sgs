@@ -7568,6 +7568,69 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       JSON.stringify(prevented));
   }
 
+  // 用户报障（#6）：没有 pending 时右键武将块也必须能开详情。这里用纯快照视图
+  // （pending=null）覆盖"非询问态"，而不是只在询问态里测。
+  {
+    const noPending = synthView(null);
+    noPending.snapshot.players[0].skills = [
+      detailSkill("hero.demo.own", "非询问己方技"),
+    ];
+    noPending.snapshot.players[1].skills = [
+      detailSkill("hero.demo.enemy", "非询问敌方技"),
+    ];
+    noPending.snapshot.players[1].hero_name = "张飞";
+    ui.state.view = noPending;
+    ui.state.sessionId = null;
+    ui.resetSelection();
+    ui.renderTable();
+    fireContext(heroBlockOf(0));
+    check("U1-06v1 非询问态（pending=null）右键自己的武将块也能开详情",
+      $("t-modal").hidden === false
+        && $("t-modal-body").text().includes("非询问己方技"),
+      `hidden=${$("t-modal").hidden} body="${$("t-modal-body").text().replace(/\s+/g, " ").slice(0, 100)}"`);
+    fireDocument("keydown", { key: "Escape" });
+    fireContext(heroBlockOf(1));
+    check("U1-06w1 非询问态右键对手武将块也能开详情（只读公开清单）",
+      $("t-modal").hidden === false
+        && $("t-modal-body").text().includes("非询问敌方技")
+        && !$("t-modal-body").text().includes("非询问己方技"),
+      `hidden=${$("t-modal").hidden} body="${$("t-modal-body").text().replace(/\s+/g, " ").slice(0, 100)}"`);
+    fireDocument("keydown", { key: "Escape" });
+    const blank = $("t-processing");
+    const blankEvent = { target: blank, preventDefault() {} };
+    (($("table-shell").listeners.contextmenu) || []).forEach((fn) => fn(blankEvent));
+    // 事件回放期间 `tableViewForRender` 把 pending 收起（视觉上也是"非询问态"），
+    // 但 `openHeroDetail` / `syncHeroModal` 不能因此拒绝打开详情。
+    const playbackView = synthView(null);
+    playbackView.snapshot.players[0].skills = [detailSkill("hero.demo.own", "回放己方技")];
+    playbackView.snapshot.players[1].skills = [detailSkill("hero.demo.enemy", "回放敌方技")];
+    ui.state.view = playbackView;
+    ui.state.liveView = playbackView;
+    ui.state.playback = { body: playbackView, records: [], index: 0, live: false };
+    ui.state.sessionId = null;
+    ui.resetSelection();
+    ui.renderTable();
+    fireContext(heroBlockOf(0));
+    check("U1-06v3 事件回放的非询问态也能右键开自己的详情",
+      $("t-modal").hidden === false
+        && $("t-modal-body").text().includes("回放己方技"),
+      `hidden=${$("t-modal").hidden} body="${$("t-modal-body").text().replace(/\s+/g, " ").slice(0, 100)}"`);
+    fireDocument("keydown", { key: "Escape" });
+    fireContext(heroBlockOf(1));
+    check("U1-06w6 事件回放的非询问态也能右键开对手详情",
+      $("t-modal").hidden === false
+        && $("t-modal-body").text().includes("回放敌方技")
+        && !$("t-modal-body").text().includes("回放己方技"),
+      `hidden=${$("t-modal").hidden} body="${$("t-modal-body").text().replace(/\s+/g, " ").slice(0, 100)}"`);
+    fireDocument("keydown", { key: "Escape" });
+    ui.state.playback = null;
+    ui.state.liveView = null;
+
+    check("U1-06x 非询问态空白处右键不开详情（外壳仍只屏蔽浏览器菜单）",
+      $("t-modal").hidden === true,
+      `hidden=${$("t-modal").hidden}`);
+  }
+
   const css = readFileSync("tools/sgs_web/static/style.css", "utf8");
   check("U1-06u 详情沿用共享模态的滚动容器；没有单独的阻断遮罩（单层 pointer-events: none 暗化层）",
     /\.modal-body\s*\{[^}]*overflow-y:\s*auto/s.test(css)
