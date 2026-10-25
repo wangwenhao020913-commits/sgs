@@ -49,7 +49,7 @@
     "renderEffectCards", "replayStep", "replaySeek", "toggleReplayPlay", "stopReplayPlay",
     "renderRunList", "runRow",
     // 票 14：「提供一张 B」的就地渲染 + 置灰纯函数（cardFace）
-    "isProvide", "provideSlotIndex", "cardFace", "activateCard", "renderProvide", "toggleProvidePick",
+    "isProvide", "provideSlotIndex", "cardFace", "cardFaceNode", "activateCard", "renderProvide", "toggleProvidePick",
     // 票 15：选择面的张数上限（读服务端 spec.total）+ 槽位点选（【遗计】一次两张 / 取消）
     "selectionCap", "toggleSlotPick",
     // 弃牌阶段的点手牌收进待弃置集合（U2-05 只读态要逐入口钉 no-op）

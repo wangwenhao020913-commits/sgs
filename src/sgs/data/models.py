@@ -434,12 +434,14 @@ class CardTagClear(str, Enum):
 class CardTagVisibility(str, Enum):
     """标签的**可见性**（D12 四项之一）：按它裁剪玩家载荷。
 
-    - ``HIDDEN``：引擎内事实，**任何**玩家载荷（含本人）都不带——M6 三类全是这一档
-      （公开的"手牌数"恒 = ``len(hand)``，标签不改变它，故观察者也无从回读）；
+    - ``HIDDEN``：引擎内事实，**任何**玩家载荷（含本人）都不带；
+    - ``FACE_VISIBLE``：只有**看得到这张牌牌面**的查看者收到（自己的手牌、公开区、
+      观战 / 全知）；看不到牌面的人连标签都收不到。M6 三类标签用这一档；
     - ``PUBLIC``：公开事实（如明置的牌上的标记），可随载荷下发（M6 无载体）。
     """
 
     HIDDEN = "hidden"
+    FACE_VISIBLE = "face_visible"
     PUBLIC = "public"
 
 
@@ -477,7 +479,7 @@ CARD_TAG_TYPES: Mapping[CardTagType, CardTagSpec] = MappingProxyType(
         CardTagType.LUOSHEN_HAND: CardTagSpec(
             reader=CardTagReader.HAND_COUNT,
             clear_trigger=CardTagClear.TURN_END,
-            visibility=CardTagVisibility.HIDDEN,
+            visibility=CardTagVisibility.FACE_VISIBLE,
             disappears_with_source=True,
             carrier="hero.jie_zhenji.luoshen",
         ),
@@ -486,7 +488,7 @@ CARD_TAG_TYPES: Mapping[CardTagType, CardTagSpec] = MappingProxyType(
         CardTagType.ZONE_HAND: CardTagSpec(
             reader=CardTagReader.HAND_COUNT,
             clear_trigger=CardTagClear.LEAVE_ZONE,
-            visibility=CardTagVisibility.HIDDEN,
+            visibility=CardTagVisibility.FACE_VISIBLE,
             disappears_with_source=True,
         ),
         # 遗珠式（M6 无载体，为后续铺路）："到被使用 / 打出为止"。清除触发 = 这张牌
@@ -495,7 +497,7 @@ CARD_TAG_TYPES: Mapping[CardTagType, CardTagSpec] = MappingProxyType(
         CardTagType.UNTIL_PLAYED: CardTagSpec(
             reader=CardTagReader.HAND_COUNT,
             clear_trigger=CardTagClear.USED_OR_PLAYED,
-            visibility=CardTagVisibility.HIDDEN,
+            visibility=CardTagVisibility.FACE_VISIBLE,
             disappears_with_source=False,
         ),
     }

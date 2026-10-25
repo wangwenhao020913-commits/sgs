@@ -15,7 +15,9 @@ A3 的口径按**记录类型**各有一条，全部只读记录字典：
   条判据接进 ``card_move`` 的牌面可见性（``hero_zone_ref_visible``）：区域引用里的
   ``skill_instance`` 就是放置技能的全限定 id，故由数据声明回答、不在此处另抄名单。
 - **牌标签**（M6 票 20 / D12 第三项声明）：增删 delta 的可见性读标签类型的登记表——
-  ``PUBLIC`` 照发；``HIDDEN`` 对**任何**玩家载荷（含本人）都不下发；未登记的类型
+  ``PUBLIC`` 照发；``HIDDEN`` 对**任何**玩家载荷（含本人）都不下发；``FACE_VISIBLE``
+  只在调用方已确认**牌面可见**时下发（网页载荷）；**记录流仍不下发**（本判据默认
+  ``face_visible=False``，故 ``visible_record`` 的标签 delta 保持原样）。未登记的类型
   fail-closed（``tag_visible``）。
 - ``viewer is None`` = 没有查看者（全知）：不裁剪（内部调用 / 测试需要原始记录）。
 
@@ -133,12 +135,25 @@ def identity_visible(record: Mapping[str, Any], viewer: int | None) -> bool:
     return record.get("seat") == viewer or record.get("identity") == "lord"
 
 
-def tag_visible(tag_type: str | None, viewer: int | None) -> bool:
+def tag_visible(
+    tag_type: str | None,
+    viewer: int | None,
+    *,
+    face_visible: bool = False,
+) -> bool:
     """一个**牌标签**的增删是否可下发（spec §投影与记录流 / D12 的第三项声明）。
 
     可见性由标签类型的登记表回答（``sgs.data.CARD_TAG_TYPES[...].visibility``）：
-    ``PUBLIC`` 照发；``HIDDEN`` 对**任何**玩家载荷（含本人）都不下发；未登记的类型
-    fail-closed。``viewer is None`` = 全知通道，不裁剪（与其它判据同一条口径）。
+
+    - ``PUBLIC`` 照发；
+    - ``FACE_VISIBLE`` 只在 ``face_visible=True`` 时下发。调用方**已经**通过既有的
+      ``cards_visible`` / 区域载荷裁剪确认了牌面可见（payload 里存在这张牌的 ``card``
+      就是该事实），本函数不另造第二套牌面可见性；
+    - ``HIDDEN`` / 未登记 fail-closed。
+
+    ``viewer is None`` = 全知通道，不裁剪（与其它判据同一条口径）。
+    记录流的 ``tag_add`` / ``tag_remove`` 调用本函数时**不传** ``face_visible``，故
+    ``FACE_VISIBLE`` 的标签增删仍不出现在人类记录流里——本票只改网页展示载荷。
     """
     if viewer is None:
         return True
@@ -151,7 +166,10 @@ def tag_visible(tag_type: str | None, viewer: int | None) -> bool:
     spec = CARD_TAG_TYPES.get(tag)
     if spec is None:
         return False
-    return getattr(spec.visibility, "value", spec.visibility) == "public"
+    visibility = getattr(spec.visibility, "value", spec.visibility)
+    if visibility == "public":
+        return True
+    return bool(face_visible) and visibility == "face_visible"
 
 
 def hero_zone_visible(

@@ -229,7 +229,8 @@ class TagAddDelta(_FrozenModel):
     标签是牌上的**持久事实、与所在区域无关**（``CardTag``）：本 delta 只记"哪张牌被挂上
     哪个标签、来源实例是谁"，不移动牌、不占牌守恒（与 ``card_reveal`` 一样不是
     ``card_move``）。``tag_type`` 的**可见性**由登记表（``sgs.data.CARD_TAG_TYPES``）声明：
-    隐藏标签的下发面整条裁掉（见 ``sgs_web.visibility.tag_visible``），公开标签原样下发。
+    ``HIDDEN`` 的下发面整条裁掉；``FACE_VISIBLE`` 只在网页载荷按牌面可见补 tags，
+    记录流的**人类下发**仍不出现标签 delta（全知通道照旧；见 ``sgs_web.visibility.tag_visible``）。
 
     ``owner`` / ``skill_id`` = 来源实例的规范身份（与 ``CardTag`` 同形）；标签的生存期与
     清除触发也由登记表回答，故本 delta 不重复声明。

@@ -114,6 +114,40 @@ function cardTypeLine(card) {
   return parts.join(" · ");
 }
 
+/** 卡面中心最多画几个标签（2 列 × 2 行）；更多时末位收成 ``+N``。 */
+const CARD_TAG_LIMIT = 4;
+
+/** 卡面中心的**来源技能标签**（服务端 ``card.tags``：``{skill_id, label}``）。
+ *
+ * 标签只由服务端下发；这里不按技能名 / 牌名做任何分支。2 列网格由 CSS 负责，
+ * 超出两行收成末位 ``+N``，悬停仍给出完整标签名。
+ */
+function cardTagsNode(card) {
+  const tags = Array.isArray(card && card.tags) ? card.tags : [];
+  if (!tags.length) return null;
+  const box = document.createElement("div");
+  box.className = "card-tags";
+  box.setAttribute("data-tag-count", String(tags.length));
+  const shown = tags.length > CARD_TAG_LIMIT ? tags.slice(0, CARD_TAG_LIMIT - 1) : tags;
+  for (const tag of shown) {
+    const chip = document.createElement("span");
+    chip.className = "card-tag";
+    chip.textContent = tag.label || tag.skill_id || "";
+    chip.setAttribute("data-skill-id", tag.skill_id || "");
+    chip.setAttribute("title", tag.label || tag.skill_id || "");
+    box.appendChild(chip);
+  }
+  const hidden = tags.length - shown.length;
+  if (hidden > 0) {
+    const more = document.createElement("span");
+    more.className = "card-tag card-tag-more";
+    more.textContent = `+${hidden}`;
+    more.setAttribute("title", tags.slice(shown.length).map((tag) => tag.label || tag.skill_id).join("、"));
+    box.appendChild(more);
+  }
+  return box;
+}
+
 /** 一张**完整卡面**（88×124）的节点；手牌 / 处理区 / 中央舞台共用。
  *
  * ``opts.selected`` 选中态（`.sel`，焦点牌）、``opts.picked`` 已选态（`.picked`，弃牌 /
@@ -179,6 +213,8 @@ function cardFaceNode(card, opts = {}) {
   type.textContent = opts.bottomLine !== undefined ? opts.bottomLine : cardTypeLine(card);
   if (opts.zoneLabel) type.setAttribute("data-zone-label", opts.zoneLabel);
   node.appendChild(name);
+  const tags = cardTagsNode(card);
+  if (tags) node.appendChild(tags);
   node.appendChild(type);
   // 悬停全文（U1-04b / U1-07）：只读服务端下发的 description 与来源牌；前端不存文案。
   node.setAttribute("title", cardHoverText(card));

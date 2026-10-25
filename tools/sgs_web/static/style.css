@@ -158,6 +158,29 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   text-align: center; font-size: calc(9 * var(--dsu)); line-height: 1.3; color: var(--dim);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 牌面标签（票 11）：来源技能名只读服务端 `card.tags`；卡面中心 2 列网格，
+ * 每行 2 个、超出换行；两行装不下时由 JS 末位收成 +N。pointer-events: none
+ * 保证标签不让整张牌面变成可点目标。 */
+.card.face .card-tags {
+  position: absolute; left: calc(5 * var(--dsu)); right: calc(5 * var(--dsu));
+  top: calc(69 * var(--dsu));
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: calc(2 * var(--dsu)); justify-items: center; align-content: start;
+  pointer-events: none;
+}
+.card.face .card-tag {
+  max-width: 100%; padding: 0 calc(3 * var(--dsu)); border-radius: 999px;
+  border: 1px solid rgba(156, 43, 27, .35); background: var(--accent-soft);
+  color: var(--accent); font-size: calc(8 * var(--dsu)); line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.card.face .card-tag-more { border-style: dashed; background: transparent; }
+.cards.mini .card.face .card-tags {
+  left: 2px; right: 2px; top: calc(35 * var(--dsu)); gap: 1px;
+}
+.cards.mini .card.face .card-tag {
+  padding: 0 1px; font-size: calc(6 * var(--dsu)); line-height: 1.35;
+}
 .card.face.attr-fire .cname { color: #b3261e; }
 .card.face.attr-thunder .cname { color: #1d4e9c; }
 /* 虚拟 / 转化牌（U1-07）：右上角标「虚 / 转」；转化牌左上另有红 / 黑 / 无的颜色标记，

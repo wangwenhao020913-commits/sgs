@@ -177,6 +177,83 @@ def _skill_entry(
     }
 
 
+def _card_tag_payloads(state: Any, card_id: Any, viewer: int | None) -> list[dict[str, str]]:
+    """一张**牌面可见**的牌上的标签；``label`` 取来源技能的展示名（不写死中文）。"""
+    try:
+        card_id = int(card_id)
+    except (TypeError, ValueError):
+        return []
+    if card_id < 0:  # 虚拟牌从不持久存在，也就没有牌标签
+        return []
+    out: list[dict[str, str]] = []
+    for tag in state.tags_of(card_id):
+        if not tag_visible(tag.tag_type.value, viewer, face_visible=True):
+            continue
+        out.append(
+            {
+                "skill_id": tag.skill_id,
+                "label": _skill_display_name(state, tag.skill_id) or tag.skill_id,
+            }
+        )
+    return out
+
+
+def _decorate_card_tags(card: Any, state: Any, viewer: int | None) -> None:
+    """给一份**已确认牌面可见**的卡面 dict 补 ``tags``；没有标签不造空键。"""
+    if not isinstance(card, dict) or "card_id" not in card:
+        return
+    tags = _card_tag_payloads(state, card.get("card_id"), viewer)
+    if tags:
+        card["tags"] = tags
+
+
+def _decorate_snapshot_card_tags(
+    payload: dict[str, Any], state: Any, viewer: int | None
+) -> None:
+    """快照里所有**已下发的牌面**补标签（隐藏区的牌本来就不在载荷里）。"""
+    for key in ("self_hand", "discard", "processing"):
+        for card in payload.get(key) or []:
+            _decorate_card_tags(card, state, viewer)
+    for player in payload.get("players") or []:
+        for key in ("equip", "judge"):
+            for card in player.get(key) or []:
+                _decorate_card_tags(card, state, viewer)
+        for zone in player.get("hero_zones") or []:
+            for card in zone.get("cards") or []:
+                _decorate_card_tags(card, state, viewer)
+
+
+def _decorate_pending_card_tags(
+    payload: dict[str, Any], state: Any, viewer: int | None
+) -> None:
+    """询问载荷里所有**已下发的牌面**补标签；``legal_actions`` 不碰。"""
+    for entry in (payload.get("candidate_index") or {}).values():
+        if isinstance(entry, dict):
+            _decorate_card_tags(entry.get("card"), state, viewer)
+    for slot in payload.get("slots") or []:
+        if isinstance(slot, dict):
+            _decorate_card_tags(slot.get("card"), state, viewer)
+    for key in ("revealed", "transform_products"):
+        for card in payload.get(key) or []:
+            _decorate_card_tags(card, state, viewer)
+    reveal = payload.get("reveal")
+    if isinstance(reveal, dict):
+        _decorate_card_tags(reveal.get("card"), state, viewer)
+    judgment = payload.get("judgment_reveal")
+    if isinstance(judgment, dict):
+        _decorate_card_tags(judgment.get("card"), state, viewer)
+        for card in judgment.get("cards") or []:
+            _decorate_card_tags(card, state, viewer)
+    harvest = payload.get("harvest")
+    if isinstance(harvest, dict):
+        _decorate_card_tags(harvest.get("card"), state, viewer)
+        for card in harvest.get("revealed") or []:
+            _decorate_card_tags(card, state, viewer)
+    view = payload.get("view")
+    if isinstance(view, dict):
+        _decorate_snapshot_card_tags(view, state, viewer)
+
+
 def visible_snapshot(session: Session) -> dict[str, Any]:
     """人类座位的**玩家视角**快照（每次现算、不缓存）。
 
@@ -209,6 +286,8 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         )
         # B：武将块上的状态标签（手牌上限加式 / 裸衣）。纯网页显示字段，不进 PlayerView。
         player_payload["hero_tags"] = seat_hero_tags(state.player(player.seat))
+    # 牌面标签：只给**已下发的牌面**补 tags；隐藏区的牌不在载荷里，故连标签也没有。
+    _decorate_snapshot_card_tags(payload, state, session.human_seat)
     # M6 票 19：顶栏的轮次 / 额外回合提示。轮次自票 11 起是引擎事实（额外回合不推进
     # 自然指针），但 ``PlayerView`` 里**没有**它——加进去会改 47 条金录像的记录字节
     # （票 11 已核）。故与技能清单同姿态：只在本函数里补进**网页载荷**，记录流不动。
@@ -251,7 +330,9 @@ def seat_hero_zones(
                     card = state.card(card_id)
                 except (KeyError, IndexError):  # pragma: no cover - 牌守恒由引擎保证
                     continue
-                cards.append(card_payload(card, lookup=lookup))
+                card_payload_dict = card_payload(card, lookup=lookup)
+                _decorate_card_tags(card_payload_dict, state, viewer)
+                cards.append(card_payload_dict)
         out.append(
             {
                 "skill_id": zone.skill_id,
@@ -1950,6 +2031,9 @@ def pending_payload(
             _active_virtual_cards(session.engine) if isinstance(session, Session) else ()
         ),
     )
+    if isinstance(session, Session) and same_viewer:
+        # 只给**自己的**询问载荷补标签；foreign（409 里附带的别人的现状）连标签也不带。
+        _decorate_pending_card_tags(payload, session.engine.state, viewer)
     return payload
 
 
@@ -2002,9 +2086,9 @@ def visible_record(record: object, *, viewer: int | None = None) -> dict[str, An
             if not identity_visible(raw, viewer):
                 raw["identity"] = None
         elif delta_type in ("tag_add", "tag_remove"):
-            # spec §投影与记录流：标签的可见性由**标签类型**的登记表回答。隐藏标签
-            # （M6 登记的三类）对任何玩家载荷都不下发 ⇒ 整条裁掉，牌面与标签类型都不出现。
-            # 这也解释了"标签的增删不改变公开的手牌数"：人类侧根本看不到这两条。
+            # spec §投影与记录流：标签的可见性由**标签类型**的登记表回答。记录流这条通道
+            # 不传 ``face_visible``，故 FACE_VISIBLE 的标签 delta 仍整条裁掉；网页展示
+            # 载荷另由 ``_card_tag_payloads`` 按牌面可见补 tags。手牌数两条都不改。
             if not tag_visible(raw.get("tag_type"), viewer):
                 return None
     if kind == "action":

@@ -75,6 +75,7 @@ from sgs_web.projection import (  # noqa: E402
     option_seats,
     pending_payload,
     query_context,
+    seat_hero_zones,
     seat_skill_display,
     visible_record,
     visible_snapshot,
@@ -5517,16 +5518,40 @@ def test_the_ui_smoke_hero_zone_and_skill_fixtures_match_the_real_snapshot_shape
     )
 
 
-def test_hidden_card_tags_never_reach_the_web_payload_and_do_not_change_the_hand_count() -> None:
-    """spec §投影与记录流：标签按**类型声明的可见性**裁剪，且不改变公开的「手牌数」。
+def _walk_dicts(value):
+    """递归产出载荷里的全部 dict（测试断言用；不改载荷）。"""
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_dicts(child)
 
-    M6 登记的三类标签全是 ``HIDDEN``（引擎内事实），故网页载荷里连键都不该有——这里
-    同时钉住"载荷逐字节不变"与"手牌数不动"。最后一条断言是**登记表检查**：一旦有人登记
-    ``PUBLIC`` 标签，本用例会红，逼他先给载荷加一个按声明裁剪的读取方（再放开这一条）。
+
+def test_face_visible_tag_visibility_needs_a_visible_face() -> None:
+    """``tag_visible`` 的第三档：牌面可见才发；记录流默认不传 face_visible。"""
+    from sgs_web.visibility import tag_visible
+
+    assert tag_visible("luoshen_hand", 0, face_visible=True) is True
+    assert tag_visible("luoshen_hand", 1, face_visible=True) is True, (
+        "是否持有牌面由调用方的载荷裁剪回答，tag_visible 不猜座位归属"
+    )
+    assert tag_visible("luoshen_hand", 0, face_visible=False) is False
+    assert tag_visible("luoshen_hand", None, face_visible=False) is True, (
+        "全知通道不裁剪"
+    )
+
+
+def test_face_visible_card_tags_reach_the_hosts_hand_and_not_the_opponents_payload() -> None:
+    """FACE_VISIBLE：宿主自己的手牌带来源技能名；对手连牌面 / 标签都收不到。
+
+    ``label`` 由服务端从来源技能展示名派生（这里用界甄姬【洛神】），前端没有中文表。
+    公开的 ``hand_count`` 仍是 ``len(hand)``——标签只影响展示字段，不改计数。
     """
     from types import SimpleNamespace
 
-    from sgs.data import CARD_TAG_TYPES, CardTagVisibility, CardTagType
+    from sgs.data import CardTagType
     from sgs.state import CardTag
 
     pack = load_content_pack(deck_profile="standard_108")
@@ -5536,28 +5561,165 @@ def test_hidden_card_tags_never_reach_the_web_payload_and_do_not_change_the_hand
         seats=[SeatSpec(hp=4, hand=hand), SeatSpec(hp=4, hero="guanyu")],
         deck=tuple(range(40, 50)),
     )
-    engine = Engine.from_state(state, seed=1)
-    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
-
-    before = json.dumps(visible_snapshot(session), ensure_ascii=False, sort_keys=True)
     state.card_tags[hand[0]] = (
-        CardTag(tag_type=CardTagType.LUOSHEN_HAND, owner=0, skill_id="hero.zhenji.luoshen"),
+        CardTag(
+            tag_type=CardTagType.LUOSHEN_HAND,
+            owner=0,
+            skill_id="hero.jie_zhenji.luoshen",
+        ),
     )
-    after_payload = visible_snapshot(session)
-    after = json.dumps(after_payload, ensure_ascii=False, sort_keys=True)
+    engine = Engine.from_state(state, seed=1)
+    own = visible_snapshot(
+        SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+    )
+    own_card = next(card for card in own["self_hand"] if card["card_id"] == hand[0])
 
-    assert after == before, "隐藏标签不该进任何玩家载荷（本人也不行）"
-    assert "luoshen_hand" not in after, "标签类型值泄露到了网页载荷"
-    seat_zero = after_payload["players"][0]
-    assert seat_zero["hand_count"] == len(state.player(0).hand), (
+    assert own_card["tags"] == [
+        {"skill_id": "hero.jie_zhenji.luoshen", "label": "洛神"}
+    ]
+    assert own["players"][0]["hand_count"] == len(state.player(0).hand), (
         "标签不改变公开的「手牌数」这个数字"
     )
-    assert all(
-        spec.visibility is CardTagVisibility.HIDDEN for spec in CARD_TAG_TYPES.values()
-    ), (
-        "M6 登记表里出现了非 HIDDEN 的标签类型：网页载荷必须先补一个按声明裁剪的读取方"
-        f"（现有读取方只做手牌计数）：{ {k.value: v.visibility.value for k, v in CARD_TAG_TYPES.items()} }"
+
+    other = visible_snapshot(
+        SimpleNamespace(engine=engine, human_seat=1, pack=pack)
     )
+    other_json = json.dumps(other, ensure_ascii=False)
+    other_card_ids = {
+        int(node["card_id"])
+        for node in _walk_dicts(other)
+        if "card_id" in node
+    }
+    assert hand[0] not in other_card_ids, "对手载荷不该出现宿主手牌的牌面"
+    assert "洛神" not in other_json, "对手看不到牌面，连标签名都不该收到"
+
+
+def test_face_visible_card_tags_ride_public_card_faces_for_every_viewer() -> None:
+    """公开区（弃牌堆 / 处理区 / 装备区）里能看到牌面 ⇒ 双方载荷都带标签。"""
+    from types import SimpleNamespace
+
+    from sgs.data import CardTagType
+    from sgs.state import CardTag
+
+    pack = load_content_pack(deck_profile="standard_108")
+    tagged = cards_of_type(pack, "slash")[0]
+    hand = tuple(cards_of_type(pack, "slash")[1:4])
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hand=hand), SeatSpec(hp=4, hero="guanyu")],
+        deck=tuple(range(40, 50)),
+        discard=(tagged,),
+    )
+    state.card_tags[tagged] = (
+        CardTag(
+            tag_type=CardTagType.LUOSHEN_HAND,
+            owner=0,
+            skill_id="hero.jie_zhenji.luoshen",
+        ),
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    for viewer in (0, 1):
+        payload = visible_snapshot(
+            SimpleNamespace(engine=engine, human_seat=viewer, pack=pack)
+        )
+        card = next(item for item in payload["discard"] if item["card_id"] == tagged)
+        assert card["tags"] == [
+            {"skill_id": "hero.jie_zhenji.luoshen", "label": "洛神"}
+        ], f"viewer={viewer} 看不到公开区的标签"
+
+
+def test_face_visible_tag_deltas_stay_out_of_the_human_record_stream() -> None:
+    """硬边界：标签只改网页展示载荷；人类记录流里的 ``tag_add`` 仍整条裁掉。"""
+    from sgs.data import CardTagType
+    from sgs.state import CardTag
+
+    pack = load_content_pack(deck_profile="standard_108")
+    card_id = cards_of_type(pack, "slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hand=(card_id,)), SeatSpec()],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.add_card_tag(
+        card_id,
+        CardTag(
+            tag_type=CardTagType.LUOSHEN_HAND,
+            owner=0,
+            skill_id="hero.jie_zhenji.luoshen",
+        ),
+    )
+    delta = next(record for record in engine.records if getattr(record, "kind", None) == "delta"
+                 and getattr(record, "delta_type", None) == "tag_add")
+
+    assert visible_record(delta, viewer=0) is None
+    assert visible_record(delta, viewer=1) is None
+    assert visible_record(delta, viewer=None) is not None, "全知通道仍可读原始记录"
+
+
+def test_face_visible_tags_ride_the_pending_views_own_hand_card() -> None:
+    """询问载荷的内嵌视角（自己手牌）同样带标签；不是只在快照接口里补。"""
+    from sgs.data import CardTagType
+    from sgs.state import CardTag
+
+    session = Session(seed=7, ai="random", timeout_seconds=None, player_count=4)
+    card_id = session.engine.state.player(session.human_seat).hand[0]
+    session.engine.add_card_tag(
+        card_id,
+        CardTag(
+            tag_type=CardTagType.LUOSHEN_HAND,
+            owner=session.human_seat,
+            skill_id="hero.jie_zhenji.luoshen",
+        ),
+    )
+    payload = pending_payload(session)
+    view = payload["view"]
+    card = next(item for item in view["self_hand"] if item["card_id"] == card_id)
+    assert card["tags"] == [
+        {"skill_id": "hero.jie_zhenji.luoshen", "label": "洛神"}
+    ]
+
+
+def test_face_visible_card_tags_are_present_on_the_all_knowing_hero_zone_view() -> None:
+    """``viewer=None``（回放 / 全知）仍带标签；非宿主查看者拿不到牌与标签。"""
+    from types import SimpleNamespace
+
+    from sgs.data import CardTagType
+    from sgs.state import CardTag
+
+    pack = load_content_pack(deck_profile="standard_108")
+    zone_card = cards_of_type(pack, "slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hero="jie_luxun", hand=(zone_card,)), SeatSpec()],
+        deck=tuple(card_id for card_id in range(30) if card_id != zone_card),
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.place_on_hero_card(
+        None,
+        owner=0,
+        skill_id="hero.jie_luxun.qianxun",
+        holder=0,
+        cards=state.refs((zone_card,)),
+    )
+    # 放到武将牌上之后再挂标签：放置本身会 prune 一次"来源实例已消失"的标签。
+    state.card_tags[zone_card] = (
+        CardTag(
+            tag_type=CardTagType.LUOSHEN_HAND,
+            owner=0,
+            skill_id="hero.jie_zhenji.luoshen",
+        ),
+    )
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+
+    all_knowing = seat_hero_zones(session, 0, viewer=None)
+    assert all_knowing and all_knowing[0]["cards"][0]["tags"] == [
+        {"skill_id": "hero.jie_zhenji.luoshen", "label": "洛神"}
+    ], "全知通道仍要看到牌面标签"
+
+    non_host = seat_hero_zones(session, 0, viewer=1)
+    assert non_host and non_host[0]["cards"] == [], "非宿主仍拿不到牌面 / 标签"
 
 
 def test_the_web_snapshot_reveals_a_seat_marked_identity_visible() -> None:

@@ -12521,6 +12521,44 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && fact.title === hand[index + 2].description),
     `faces=${JSON.stringify(faceFacts)}`);
 
+  /* ---- 票 11：牌面标签（服务端 card.tags；多标签 2 列逐行） ---- */
+  {
+    const tags = [
+      { skill_id: "hero.jie_zhenji.luoshen", label: "洛神" },
+      { skill_id: "hero.jie_zhenji.qingguo", label: "倾国" },
+      { skill_id: "hero.jie_zhenji.luoyi", label: "裸衣" },
+    ];
+    const taggedFace = ui.cardFaceNode(
+      card(301, "slash", "杀", { tags }),
+      { static: true },
+    );
+    const tagBox = byClass(taggedFace, "card-tags")[0];
+    const chips = tagBox ? Array.from(tagBox.children) : [];
+    check("M5-08d-c1 卡面标签逐行绘制（CSS 2 列网格；3 个标签按服务端 label 原样）",
+      !!tagBox
+        && tagBox.getAttribute("data-tag-count") === "3"
+        && chips.length === 3
+        && chips.map((node) => node.textContent).join(",") === "洛神,倾国,裸衣"
+        && /\.card\.face \.card-tags\s*\{[^}]*grid-template-columns:\s*repeat\(2/s.test(css),
+      tagBox ? `count=${tagBox.getAttribute("data-tag-count")} tags=${JSON.stringify(chips.map((n) => n.textContent))}` : "没有标签块");
+
+    const many = [
+      ...tags,
+      { skill_id: "hero.jie_zhenji.extra1", label: "标签四" },
+      { skill_id: "hero.jie_zhenji.extra2", label: "标签五" },
+    ];
+    const manyFace = ui.cardFaceNode(card(302, "slash", "杀", { tags: many }), { static: true });
+    const manyBox = byClass(manyFace, "card-tags")[0];
+    const manyChips = manyBox ? Array.from(manyBox.children) : [];
+    check("M5-08d-c2 超过两行收敛为末位 +N（不把卡面撑破）",
+      manyChips.length === 4
+        && manyChips.map((node) => node.textContent).join(",") === "洛神,倾国,裸衣,+2"
+        && manyChips[3].getAttribute("title").includes("标签四"),
+      `tags=${JSON.stringify(manyChips.map((n) => n.textContent))}`);
+    check("M5-08d-c3 没有 tags 的卡面不画标签块",
+      byClass(faces[0], "card-tags").length === 0);
+  }
+
   /* ---- 横置：投影字段 ⇒ 虚线；自己的静态块也有；重置后消失 ---- */
   check("M5-08d-b1 投影 chained=true ⇒ 座位中央虚线；自己的静态块 #t-self-chain 也画",
     byClass(seatBox(1), "chain-line").length === 1

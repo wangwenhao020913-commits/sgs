@@ -11,7 +11,7 @@
 
 1. **读取方**（``reader``）：哪个查询会读它（M6 只有手牌计数）；
 2. **生存期 / 清除触发**（``clear_trigger``）：回合末 / 离开区域 / 被使用或打出；
-3. **可见性**（``visibility``）：公开 / 隐藏（隐藏 = 任何玩家载荷都不带）；
+3. **可见性**（``visibility``）：公开 / 隐藏 / **随牌面可见**（自己看得见牌面才带，M6 三类）；
 4. **是否随来源实例消失**（``disappears_with_source``）：失去 / 失效来源技能时标签是否一并清除。
 
 未登记的标签类型**判红**（与 ``tests/test_card_family_sites.py`` 同规格）：登记表与
@@ -28,7 +28,8 @@ M6 登记三类**形状**，只有第一类有载体：
 
 **公开的"手牌数"不动**：投影里的 ``hand_count`` 恒 = ``len(hand)``；标签只改
 "手牌计数"这个**弃牌阶段查询**（``effects.hand_count``），两个查询互不替换（spec D11）。
-标签也**不进任何玩家载荷**（M6 三类全声明为隐藏）。
+M6 三类标签声明为 ``FACE_VISIBLE``：网页载荷只在**看得到牌面**的牌上带标签，看不到的人
+连标签都收不到；手牌计数/记录流不受影响。
 """
 
 from __future__ import annotations
@@ -164,16 +165,16 @@ def test_the_three_m6_shapes_are_registered_with_one_live_carrier() -> None:
 
     turned = specs[CardTagType.LUOSHEN_HAND]
     assert turned.clear_trigger is CardTagClear.TURN_END
-    assert turned.visibility is CardTagVisibility.HIDDEN
+    assert turned.visibility is CardTagVisibility.FACE_VISIBLE
     assert turned.disappears_with_source is True
 
     zone = specs[CardTagType.ZONE_HAND]
     assert zone.clear_trigger is CardTagClear.LEAVE_ZONE, "黠慧式：离开手牌即清"
-    assert zone.visibility is CardTagVisibility.HIDDEN
+    assert zone.visibility is CardTagVisibility.FACE_VISIBLE
 
     until = specs[CardTagType.UNTIL_PLAYED]
     assert until.clear_trigger is CardTagClear.USED_OR_PLAYED, "遗珠式：到被使用 / 打出为止"
-    assert until.visibility is CardTagVisibility.HIDDEN
+    assert until.visibility is CardTagVisibility.FACE_VISIBLE
 
     # 载体锚点与 ``CATALOG`` 对账：登记表说"由谁生产"，技能表里就必须真有那一条。
     for tag_type, spec in specs.items():
