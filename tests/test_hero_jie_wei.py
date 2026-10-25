@@ -836,6 +836,75 @@ def test_jie_luoyi_without_a_qualified_card_skips_the_question_and_discards_the_
     assert len(revealed) == 3, "亮出三张是公开事实（三条 card_reveal）"
 
 
+def test_jie_luoyi_reveals_wait_for_the_gain_question_to_be_answered():
+    """亮出的三张必须挂在**承载这次询问的帧**上，问完才 `pop`。
+
+    阶段体没有结算栈帧（``_dispatch_phase_body`` 的帧 ``frame_id = 0``），而前端
+    ``stageLane`` 对 ``frame_id = 0`` 的展示项只给固定 1s 停留。故【裸衣】亮牌若沿用
+    那个 0 号帧，三张会在「是否获得」还没答之前淡出。这里钉住修法：亮牌前给阶段体帧
+    分配一个真实帧号并落 ``push``，询问挂起期间不落 ``pop``；答完这才落 ``pop``。
+    """
+    top = (_one_of("slash"), _one_of("crossbow"), _one_of("duel"))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_xuchu", hand=(_one_of("peach", excluded=set(top)),)),
+            SeatSpec(),
+        ],
+        deck=_luoyi_deck(top),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _LuoyiPlayer()
+    players = [player, Scripted()]
+
+    _run(
+        engine,
+        players,
+        lambda e: e.pending is not None and str(e.pending.skill_id) == "luoyi:gain",
+    )
+
+    reveals = [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == "card_reveal"
+    ]
+    assert len(reveals) == 3, "亮出三张是公开事实（三条 card_reveal）"
+    frame_ids = {record.frame_id for record in reveals}
+    assert len(frame_ids) == 1, "三张亮牌必须挂在同一个承载帧上"
+    frame_id = frame_ids.pop()
+    assert frame_id > 0, "阶段体帧必须拿到真实帧号，否则前端按无帧的 1s 停留淡出"
+
+    pushes = [
+        record
+        for record in engine.records
+        if record.kind == "frame" and record.op == "push" and record.frame_id == frame_id
+    ]
+    pops = [
+        record
+        for record in engine.records
+        if record.kind == "frame" and record.op == "pop" and record.frame_id == frame_id
+    ]
+    assert len(pushes) == 1, "承载帧必须有一次 push"
+    assert pops == [], "询问还没答，承载帧不得 pop"
+
+    action = next(
+        candidate
+        for candidate in engine.pending.legal_actions
+        if isinstance(candidate, SelectOption) and candidate.choice == "luoyi_gain"
+    )
+    engine.submit(action)
+    _run(engine, players, lambda e: ran_timing(e, Timing.PHASE_DRAW_END))
+
+    pops = [
+        record
+        for record in engine.records
+        if record.kind == "frame" and record.op == "pop" and record.frame_id == frame_id
+    ]
+    assert [record.frame_id for record in pops] == [frame_id], "答完询问才落 pop"
+    assert pops[0].seq > reveals[-1].seq, "pop 必须在三条亮牌之后"
+
+
 def test_jie_luoyi_bonus_survives_other_players_turns():
     """正例（作用域的**区别**）：效果写到"直到**你的**下个回合开始"，故别人的回合里仍 +1。
 

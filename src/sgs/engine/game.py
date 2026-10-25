@@ -689,6 +689,33 @@ class Engine:
         self._emit_frame("push", frame)
         return frame
 
+    def open_phase_body_frame(self, frame: Frame) -> Frame:
+        """给**不压栈**的阶段体帧一个记录流身份（只在需要展示承载时用）。
+
+        阶段体（准备 / 摸牌 / 结束）的帧住 ``_turn_data``、不进结算栈，缺省
+        ``frame_id = 0``（见 :meth:`_dispatch_phase_body`）。展示项的寿命挂
+        ``frame_id``：正数 = 等该帧 ``pop`` 后才淡出，0 = 固定 1s 停留。故像【裸衣】
+        这样"亮牌后还要问一次"的阶段体技能，必须让亮牌有一个真实帧号；否则牌会在
+        询问被回答之前淡出。
+
+        这不是把帧压栈：只分配单调帧号并落一条 ``push``，生命周期由
+        :meth:`close_phase_body_frame` 在同一阶段体收尾时闭合。没有展示承载需求的
+        阶段体不调用它，记录流因此与旧行为逐字节相同。
+        """
+        if frame.frame_id > 0:
+            return frame
+        self._frame_seq += 1
+        frame.frame_id = self._frame_seq
+        self._emit_frame("push", frame)
+        return frame
+
+    def close_phase_body_frame(self, frame: Frame) -> None:
+        """关闭 :meth:`open_phase_body_frame` 打开的帧；没打开过则零动作。"""
+        if frame.frame_id <= 0:
+            return
+        self._emit_frame("pop", frame)
+        frame.frame_id = 0
+
     def enter_death(self, frame: Frame, seat: int) -> Frame:
         """死亡入口：标记阵亡并压入 **DEATH** 子帧（票 22）。
 
@@ -4001,6 +4028,9 @@ class Engine:
         control = dispatch_timing(self, frame, timing)
         if control == "stay":
             return "stay"
+        # 阶段体里若有亮牌（【裸衣】）给这条不压栈的帧开了记录身份，收尾时闭合
+        # push/pop；没开过则零动作，旧记录流逐字节不变。
+        self.close_phase_body_frame(frame)
         store[key] = None
         return None
 

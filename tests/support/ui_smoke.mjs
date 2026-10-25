@@ -15055,6 +15055,64 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   resetStage();
 }
 
+/* ============ 界许褚【裸衣】：亮牌在「是否获得」答完前不得淡出 ============
+ *
+ * 现场缺陷：阶段体帧缺省 `frame_id = 0`，`stageItem` 对无帧展示项只给固定 1s
+ * 停留，三张亮牌在二选一还没答时就淡出了。修法在引擎侧：亮牌前给阶段体帧分配
+ * 真实帧号并落 `push`，询问挂起期间不 `pop`；前端只沿用既有的“有帧等 pop”。
+ * 这里用真会话（2 人 / 种子 1 / 界许褚）走完整一条：发动 → 停在 `luoyi:gain`
+ * → 断三张仍 visible（把时间直接拨到 +5s）→ 答「获得」→ 收到 `pop` 后才 fading。
+ */
+{
+  const session = await post("/api/sessions", {
+    player_count: 2, ai: "random", human_seat: 0, timeout_seconds: null,
+    seed: 1, my_hero: "jie_xuchu",
+  });
+  await openSession(session);
+  const activation = ui.state.view.pending;
+  check("U3-01aa 真会话（2 人 / 种子 1 / 界许褚）：第一问是【裸衣】的发动询问",
+    !!activation && activation.kind === "SKILL_ACTIVATION"
+      && activation.skill_id === "hero.jie_xuchu.luoyi",
+    `kind=${activation && activation.kind} skill=${activation && activation.skill_id}`);
+  await ui.submitAction();
+  ui.flushPlayback();
+  const gain = ui.state.view.pending;
+  const reveals = (ui.state.revealedCards || []).filter(
+    (item) => item && item.stage && item.stage.lane === "showcase");
+  const frameIds = [...new Set(reveals.map((item) => Number(item.stage.frameId) || 0))];
+  const lanesAtFiveSeconds = reveals.map(
+    (item) => ui.stageLane(item, item.stage.enteredAt + 5000));
+  check("U3-01ab 亮出三张挂在承载询问的正帧号上；询问未答时 +5s 仍 visible（不是 1s 后 gone）",
+    !!gain && gain.skill_id === "luoyi:gain"
+      && reveals.length === 3
+      && frameIds.length === 1 && frameIds[0] > 0
+      && lanesAtFiveSeconds.every((lane) => lane === "visible"),
+    `pending=${gain && gain.skill_id} reveals=${reveals.length}`
+      + ` frames=${frameIds.join(",")} lanes=${lanesAtFiveSeconds.join(",")}`);
+
+  const gainAction = gain && gain.legal_actions.find(
+    (action) => action.kind === "SelectOption" && action.choice === "luoyi_gain");
+  const answered = await post(
+    `/api/sessions/${ui.state.sessionId}/answer?after=${ui.state.cursor}&logs=${ui.state.logSeq}`,
+    { action: gainAction });
+  ui.applyView(answered);
+  ui.flushPlayback();
+  const fadeAt = reveals[0] && reveals[0].stage.fadeAt;
+  const fadingAfterAnswer = reveals.length === 3 && Number.isFinite(fadeAt)
+    && reveals.every((item) => ui.stageLane(item, fadeAt) === "fading");
+  check("U3-01ac 答完「获得」收到承载帧 pop 后才进入 fading（既有 1s 淡出口径不变）",
+    fadingAfterAnswer,
+    `fadeAt=${fadeAt} lanes=${reveals.map((item) => ui.stageLane(item, fadeAt)).join(",")}`);
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.state.playback = null;
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.logRecords = [];
+  ui.resetSelection();
+}
+
 /* ============ A1：洛神连续判定的亮牌弹窗（显示层派生 judgment_reveal） ============
  *
  * 服务端 `pending_payload.judgment_reveal = {chain_key, cards, final}`；前端不认技能名：

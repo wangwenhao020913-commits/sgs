@@ -652,6 +652,9 @@ def _jie_luoyi_effect(host: Any, frame: Frame, answers: Any) -> Any:
     if _LUOYI_REVEALED_KEY not in frame.data:
         revealed = host.peek_deck(frame, JIE_LUOYI_REVEAL)
         frame.data[_LUOYI_REVEALED_KEY] = tuple(card.card_id for card in revealed)
+        # 阶段体帧缺省 frame_id = 0，而 0 号展示项只停留 1s：这次亮牌后面还要问
+        # 「是否获得」，必须绑到一条真实的承载帧上，问完由阶段体收尾 pop。
+        host.open_phase_body_frame(frame)
         for card in revealed:
             # "亮出"= 公开事实（与【火攻】的亮牌同一个记录面），牌本身仍留在牌堆顶。
             host.reveal_card(frame, owner, card)
