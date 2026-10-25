@@ -45,7 +45,7 @@ from typing import Any
 from sgs.data import CardTagType, Color, SkillType, color_of_suit, hero_skill_id
 from sgs.effects import CarrierKind, locate
 from sgs.resolution import Control, Frame
-from sgs.state import CardTag, GameState, MoveReason, Zone, ZoneRef
+from sgs.state import CardTag, GameState, MoveReason, Pass, Zone, ZoneRef
 from sgs.timing import Timing
 
 from .catalog import (
@@ -76,10 +76,13 @@ LUOSHEN_TAG_TYPE = CardTagType.LUOSHEN_HAND
 ``clear = TURN_END`` / ``disappears_with_source = True``）。"""
 
 _CONTINUE = "repeat"
-_STOP = "stop"
 
-LUOSHEN_OPTIONS: tuple[str, str] = (_CONTINUE, _STOP)
-"""「是否继续」的选项闭集（``repeat`` = 再来一轮判定；``stop`` = 到此为止）。"""
+LUOSHEN_OPTIONS: tuple[str, ...] = (_CONTINUE,)
+"""「是否继续」的选项闭集：只剩「继续」一项（B1）。
+
+「停止」不再是一个 `SelectOption` 值，而是这条**可选**询问的 `Pass`——界面因此只画
+「提交 = 继续 / 放弃 = 停止」两个出口，不画 repeat / stop 两个按钮。
+"""
 
 _STAGE_KEY = "luoshen_stage"
 """帧私有：循环停在哪个阶段——``"judge"``（判定帧已压出）/ ``"gain"``（该搬判定牌）/
@@ -140,8 +143,8 @@ def _luoshen(host: Any, frame: Frame) -> Control:
        的"红 = 成功"布尔）；红 ⇒ 收尾；黑 ⇒ 记下这张牌并进入 ``gain``；
     3. ``stage == "gain"`` ⇒ 把判定牌从弃牌堆搬进手牌（``PUT``）。**先**把阶段改成
        ``confirm`` 再搬：搬牌可能内联派发"失去牌后"而挂起，续跑时不能重搬；
-    4. ``stage == "confirm"`` ⇒ 问「是否继续」（问一次、答案帧内缓存）；答继续 ⇒
-       轮号 +1 并压下一轮判定；答停止 ⇒ 收尾。
+    4. ``stage == "confirm"`` ⇒ 问「是否继续」（问一次、答案帧内缓存）；答唯一选项 ⇒
+       轮号 +1 并压下一轮判定；答 ``Pass`` ⇒ 收尾。
 
     返回 ``"stay"`` = 让出控制权（判定帧 / 搬牌钩子 / 选项询问）；``None`` = 循环结束。
     """
@@ -197,11 +200,12 @@ def _luoshen(host: Any, frame: Frame) -> Control:
         Timing.PHASE_PREPARE,
         skill_id=f"luoshen:repeat:{round_no}",
         options=LUOSHEN_OPTIONS,
-        optional=False,
+        # B1：可选询问 ⇒ 候选多一条 Pass；界面「放弃」= Pass = 停止。
+        optional=True,
     )
     if host.suspended(answer):
         return "stay"
-    if answer.choice == _STOP:
+    if isinstance(answer, Pass):
         frame.data[_DONE_KEY] = True
         return None
     frame.data[_ROUND_KEY] = round_no + 1

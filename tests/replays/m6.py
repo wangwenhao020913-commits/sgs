@@ -330,7 +330,7 @@ def _plan_60(pack: ContentPack) -> Plan:
         ),
         steps=(
             Step(0, "SKILL_ACTIVATION", _activate("hero.jie_zhenji.luoshen"), label="发动【洛神】"),
-            Step(0, "SELECT_OPTION", _option("luoshen:repeat:", "stop"), label="不重复"),
+            Step(0, "SELECT_OPTION", _pass, label="不重复（放弃）"),
             Step(0, "PLAY_PHASE", _end_phase, label="收手（本回合末清除标签）"),
             Step(1, "PLAY_PHASE", _end_phase, label="座位 1 让先"),
             Step(0, "PLAY_PHASE", _use("slash", targets=(1,)), label="【杀】收局"),

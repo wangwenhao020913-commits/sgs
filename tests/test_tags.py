@@ -411,11 +411,12 @@ class _JieZhenjiPlayer:
             REPEAT_PREFIX
         ):
             self.repeat_queries.append(query)
-            wanted = "repeat" if len(self.repeat_queries) <= self.repeats else "stop"
+            if len(self.repeat_queries) > self.repeats:
+                return next(a for a in query.legal_actions if isinstance(a, Pass))
             for action in query.legal_actions:
-                if isinstance(action, SelectOption) and action.choice == wanted:
+                if isinstance(action, SelectOption) and action.choice == "repeat":
                     return action
-            raise AssertionError(f"「是否继续」里没有 {wanted!r}：{query.legal_actions}")
+            raise AssertionError(f"「是否继续」里没有 repeat：{query.legal_actions}")
         if query.kind == QueryKind.DISCARD:
             self.discard_queries.append(query)
             return query.legal_actions[0]

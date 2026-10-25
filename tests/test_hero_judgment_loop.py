@@ -72,11 +72,13 @@ class _LuoshenPlayer:
         ):
             self.repeat_queries.append(query)
             repeat = self.repeats is None or len(self.repeat_queries) <= self.repeats
-            wanted = "repeat" if repeat else "stop"
+            if not repeat:
+                # B1：停止 = 右端「放弃」= 候选里的 Pass（不再是 stop 选项）。
+                return next(a for a in query.legal_actions if isinstance(a, Pass))
             for action in query.legal_actions:
-                if isinstance(action, SelectOption) and action.choice == wanted:
+                if isinstance(action, SelectOption) and action.choice == "repeat":
                     return action
-            raise AssertionError(f"「是否继续」里没有 {wanted!r}：{query.legal_actions}")
+            raise AssertionError(f"「是否继续」里没有 repeat：{query.legal_actions}")
         if query.kind == QueryKind.PLAY_PHASE:
             return next(a for a in query.legal_actions if isinstance(a, EndPhase))
         for action in query.legal_actions:
@@ -132,6 +134,27 @@ def _judge_frames(engine) -> int:
         and record.op == "push"
         and record.frame_kind is FrameKind.JUDGE
     )
+
+
+def test_luoshen_repeat_is_a_single_optional_continue_choice():
+    """B1：黑牌后的「是否继续」= 一个 `repeat` 选项 + 一条 `Pass`（放弃 = 停止）。
+
+    前端不再画 repeat / stop 两个按钮：提交 = 唯一选项，放弃 = `Pass`。
+    """
+    first, second, third = BLACKS[:3]
+    red = REDS[0]
+    filler = [index for index in range(len(PACK.deck.cards)) if index not in {first, second, third, red}][:2]
+    player = _LuoshenPlayer(repeats=1)
+    engine = _to_play_phase(_engine((first, second, third, red, *filler)), player)
+
+    assert len(player.repeat_queries) == 2, "两张黑牌各问一次「是否继续」"
+    for query in player.repeat_queries:
+        assert query.options == ("repeat",), "只剩继续一项；stop 不再是选项"
+        choices = [a.choice for a in query.legal_actions if isinstance(a, SelectOption)]
+        assert choices == ["repeat"], "候选里只有一个 SelectOption"
+        passes = [a for a in query.legal_actions if isinstance(a, Pass)]
+        assert len(passes) == 1, "放弃 = Pass（唯一停止出口）"
+    assert _judgment_count(engine) == 2, "第一轮继续、第二轮 Pass 停止"
 
 
 def test_luoshen_keeps_judging_while_the_results_are_black():

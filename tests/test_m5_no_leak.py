@@ -855,10 +855,7 @@ class _LuoshenSeat:
         if query.kind == QueryKind.SELECT_OPTION and str(query.skill_id).startswith(
             LUOSHEN_REPEAT_PREFIX
         ):
-            for action in query.legal_actions:
-                if getattr(action, "choice", None) == "stop":
-                    return action
-            raise AssertionError(f"「是否继续」里没有 stop：{query.legal_actions}")
+            return next(action for action in query.legal_actions if isinstance(action, Pass))
         if query.kind == QueryKind.PLAY_PHASE:
             return next(action for action in query.legal_actions if isinstance(action, EndPhase))
         for action in query.legal_actions:
