@@ -209,6 +209,46 @@ def test_stage_lanes_have_the_four_unit_bars_and_discard_is_desaturated() -> Non
     assert ".fading" in _CSS_TEXT, "淡出必须有一个可断言的类（.stage-card.fading）"
 
 
+def test_stage_card_fade_is_a_one_second_keyframe_animation_matching_the_js_constant() -> None:
+    """D5 / D15：舞台卡淡出 1s，且必须由 @keyframes 驱动（新节点也能从 1 播到 0）。
+
+    舞台项可能在**首次渲染时就已进入淡出**（回放缓冲 / 帧 pop 与产生它的记录同批）：
+    新节点没有"opacity 1 → 0"的两个已生效计算值，`transition` 不会播放，卡面直接跳没。
+    `animation` 从关键帧的 `from { opacity: 1 }` 起播，故对新建节点同样成立。
+
+    时长常量在 `session.js:STAGE_FADE_MS`；CSS 与 JS 必须相等（D15）。
+    目标线的 0.8s `transition` 是另一处，不动
+    （`test_target_line_lifetime_is_1200_hold_plus_800_fade` 钉它）。
+    """
+    session_js = (STATIC_DIR / "session.js").read_text(encoding="utf-8")
+    fade_ms = re.search(r"const\s+STAGE_FADE_MS\s*=\s*(\d+)\b", session_js)
+    assert fade_ms is not None, "session.js 里找不到 `const STAGE_FADE_MS = ...;`"
+
+    fade = _css_rule(".stage-card.fading")
+    assert "transition" not in fade, (
+        f"舞台卡淡出不能用 transition（新节点没有起点），实际：{fade}"
+    )
+    animation = re.search(r"animation:\s*([A-Za-z0-9_-]+)\s+([\d.]+)s", fade)
+    assert animation is not None, f".stage-card.fading 必须用 animation，实际：{fade}"
+    name, seconds = animation.group(1), float(animation.group(2))
+    assert round(seconds * 1000) == int(fade_ms.group(1)), (
+        f"CSS 动画 {seconds}s 必须等于 session.js:STAGE_FADE_MS={fade_ms.group(1)}"
+    )
+
+    keyframes = re.search(
+        rf"@keyframes\s+{re.escape(name)}\s*\{{(?P<body>[^{{}}]*(?:\{{[^{{}}]*\}}[^{{}}]*)*)\}}",
+        _CSS_TEXT,
+    )
+    assert keyframes is not None, f"找不到 @keyframes {name}"
+    body = keyframes.group("body")
+    assert re.search(r"(?:from|0%)\s*\{[^}]*opacity:\s*1", body), (
+        f"关键帧必须从 opacity 1 开始（新节点才有起点），实际：{body}"
+    )
+    assert re.search(r"(?:to|100%)\s*\{[^}]*opacity:\s*0", body), (
+        f"关键帧必须在 opacity 0 结束，实际：{body}"
+    )
+
+
 def test_stage_title_is_renamed_from_processing_area() -> None:
     """小标题「处理区」改为「舞台」（D3）；三组同流，故不再只写处理区。"""
     html = INDEX_HTML.read_text(encoding="utf-8")

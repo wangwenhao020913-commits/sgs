@@ -665,8 +665,19 @@ button.mini-slot { cursor: pointer; }
   border-left-color: #9a9188;
   filter: saturate(.55);
 }
-/* 淡出 1 秒（D5）：节点在淡出期间保留，到点由 JS 移除；`animScale = 0` 时不会画到这一帧。 */
-.stage-card.fading { opacity: 0; transition: opacity 1s ease-out; }
+/* 淡出 1 秒（D5）：节点在淡出期间保留，到点由 JS 移除；`animScale = 0` 时不会画到这一帧。
+ * 必须用 @keyframes，而不是 transition：舞台项可能在**首次渲染时就已进入淡出**
+ * （回放缓冲 / 帧 pop 与产生它的记录同批），新节点没有"opacity 1 → 0"的已生效起点，
+ * transition 不会播放，卡面直接跳没。动画从 `from` 的 opacity 1 起播，不依赖旧值。
+ * 时长与 session.js:STAGE_FADE_MS 相同（1000ms）。 */
+.stage-card.fading {
+  opacity: 0;
+  animation: stage-card-fade 1s ease-out 1 forwards;
+}
+@keyframes stage-card-fade {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
 .stage-center .context {
   margin: 2px 0 0; width: 100%; font-size: 11px; text-align: center;
   /* 处理中 / 展示 / 弃牌三段拼接后最多 2 行（省略号）；40% 宽下也不越过 360 上限。 */

@@ -14507,4 +14507,210 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.resetSelection();
 }
 
+/* ============ 反证 / 回归：缺陷 2（火攻亮牌寿命）与缺陷 3（连续判定展示） ============
+ *
+ * 这两条**不是**实现缺陷，而是既有设计（06 §5 的 U3-02 行 / 04「寿命与淡出」）：
+ * - 火攻亮牌走 `card_reveal`、挂 RESOLVE 帧，帧 `pop` 后 1s 淡出；
+ * - 洛神判定牌走 JUDGE 帧 + `card_move`，离处理区即 1s 淡出、不进展示组。
+ * 这里用与服务端同形的合成记录把现行为钉死（防以后被“顺手改成瞬删 / 挂外层帧”）：
+ * 同会话 commit 不清展示组，换会话必清；火攻亮牌等 RESOLVE `pop`；判定牌之间重叠 1s。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+    || String(node.className || "").split(/\s+/).includes(name)));
+  const stageNodes = () => Array.from($("t-processing").children).filter(
+    (node) => node.classList.contains("stage-card"));
+  const stageNode = (id) => stageNodes().find(
+    (node) => attr(node, "data-card-id") === String(id)) || null;
+  const laneOf = (id) => attr(stageNode(id), "data-stage-lane");
+  const fading = (id) => hasClass(stageNode(id), "fading");
+  const card = (id, name) => ({
+    ...synthCard(id, name), kind: "normal", attribute: "普通",
+    display_name: name, description: `【${name}】的全文描述`,
+  });
+  const seatPlayer = (seat, heroName) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName,
+  });
+  const view = (session) => {
+    const out = synthView(null);
+    out.session_id = session;
+    out.snapshot.processing = [];
+    out.snapshot.players = [
+      seatPlayer(0, "甄姬"), seatPlayer(1, "郭嘉"), seatPlayer(2, "貂蝉"),
+    ];
+    return out;
+  };
+  const at = (zone, seat = null) => ({ zone, seat });
+  const move = (seq, frame, moved, from, to, reason) => ({
+    kind: "delta", delta_type: "card_move", seq, frame_id: frame, depth: 1,
+    reason, owner: from.seat, from_zone: from, to_zone: to, cards: [moved],
+  });
+  const push = (seq, frame, kind) => ({
+    kind: "frame", op: "push", frame_id: frame, frame_kind: kind, depth: 1, seq,
+  });
+  const pop = (seq, frame, kind) => ({
+    kind: "frame", op: "pop", frame_id: frame, frame_kind: kind, depth: 1, seq,
+  });
+  const reveal = (seq, frame, moved, seat) => ({
+    kind: "delta", delta_type: "card_reveal", seq, frame_id: frame, depth: 1,
+    seat, card: moved,
+  });
+  const revealItem = (id) => (ui.state.revealedCards || []).find(
+    (entry) => String(entry.card_id) === String(id)) || null;
+  const effectItem = (id) => (ui.state.effectCards || []).find(
+    (entry) => String(entry.card_id) === String(id)) || null;
+  const loadView = (body) => {
+    ui.applyViewRaw(body);
+    ui.flushPlayback();
+  };
+  const resetStage = () => {
+    ui.flushPlayback();
+    ui.state.view = null;
+    ui.state.sessionId = null;
+    ui.state.effectCards = [];
+    ui.state.revealedCards = [];
+    ui.state.playback = null;
+    ui.state.animScale = 1;
+    ui.renderProcessing();
+    ui.resetSelection();
+  };
+
+  // ---- 缺陷 2-a：亮牌挂 RESOLVE 帧；pop 之前一直 visible（跨 commit） ----
+  resetStage();
+  const SESSION = "u3-def2-fire";
+  loadView({ ...view(SESSION), cursor: 0, log_seq: 0, records: [], finished: false });
+  const FIRE_REVEAL = card(701, "赤兔");
+  loadView({
+    ...view(SESSION), cursor: 1, log_seq: 0, finished: false,
+    records: [reveal(1, 2, FIRE_REVEAL, 1)],
+  });
+  const fire = revealItem(701);
+  const fireVisibleBeforePop = Boolean(fire)
+    && ui.stageLane(fire, fire.stage.enteredAt + 5000) === "visible"
+    && laneOf(701) === "showcase" && !fading(701);
+  loadView({
+    ...view(SESSION), cursor: 2, log_seq: 0, finished: false,
+    records: [pop(2, 2, "RESOLVE")],
+  });
+  const fireFadeAt = fire && fire.stage.fadeAt;
+  const fireFadesOnPop = Boolean(fire) && Number.isFinite(fireFadeAt)
+    && ui.stageLane(fire, fireFadeAt) === "fading"
+    && ui.stageLane(fire, fireFadeAt + 999) === "fading"
+    && ui.stageLane(fire, fireFadeAt + 1000) === "gone";
+  ui.renderProcessing(fireFadeAt);
+  const fireNodeFading = Boolean(stageNode(701)) && fading(701);
+  ui.renderProcessing(fireFadeAt + 999);
+  const fireNodeStill = Boolean(stageNode(701));
+  ui.renderProcessing(fireFadeAt + 1000);
+  const fireNodeGone = !stageNode(701);
+  check("U3-01w 火攻亮牌挂 RESOLVE 帧：pop 前跨 commit 一直 visible、pop 后 fading 1s 才移除",
+    fireVisibleBeforePop && fireFadesOnPop && fireNodeFading && fireNodeStill && fireNodeGone,
+    `before=${fireVisibleBeforePop} pop=${fireFadesOnPop} fading=${fireNodeFading}`
+      + ` keep=${fireNodeStill} gone=${fireNodeGone} fadeAt=${fireFadeAt}`);
+
+  // ---- 缺陷 2-b：结算同批走完（无可弃同花色）：0 停留 + 真实 1s 淡出，不是瞬删 ----
+  resetStage();
+  const BATCH = "u3-def2-batch";
+  loadView({ ...view(BATCH), cursor: 0, log_seq: 0, records: [], finished: false });
+  const BATCH_REVEAL = card(702, "闪");
+  loadView({
+    ...view(BATCH), cursor: 2, log_seq: 0, finished: false,
+    records: [
+      reveal(10, 7, BATCH_REVEAL, 1),
+      pop(11, 7, "RESOLVE"),
+    ],
+  });
+  const batch = revealItem(702);
+  const batchZeroHold = Boolean(batch)
+    && Number.isFinite(batch.stage.fadeAt)
+    && batch.stage.fadeAt - batch.stage.enteredAt < 50;
+  const batchFadeWindow = Boolean(batch)
+    && ui.stageLane(batch, batch.stage.fadeAt) === "fading"
+    && ui.stageLane(batch, batch.stage.fadeAt + 999) === "fading"
+    && ui.stageLane(batch, batch.stage.fadeAt + 1000) === "gone";
+  ui.renderProcessing(batch.stage.fadeAt);
+  const batchNodeFading = Boolean(stageNode(702)) && fading(702);
+  ui.renderProcessing(batch.stage.fadeAt + 500);
+  const batchNodeStill = Boolean(stageNode(702));
+  ui.renderProcessing(batch.stage.fadeAt + 1000);
+  const batchNodeGone = !stageNode(702);
+  check("U3-01x 火攻亮牌与 RESOLVE pop 同批（无可弃同花色）：0 停留 + 真实 1s 淡出，不是瞬删",
+    batchZeroHold && batchFadeWindow && batchNodeFading && batchNodeStill && batchNodeGone,
+    `hold=${batch ? batch.stage.fadeAt - batch.stage.enteredAt : "?"}ms`
+      + ` window=${batchFadeWindow} fading=${batchNodeFading}`
+      + ` keep=${batchNodeStill} gone=${batchNodeGone}`);
+
+  // ---- 缺陷 3-a：同会话 commit 不清展示组；换会话必须清 ----
+  resetStage();
+  const KEEP = "u3-def3-keep";
+  loadView({ ...view(KEEP), cursor: 0, log_seq: 0, records: [], finished: false });
+  const KEEP_REVEAL = card(703, "桃");
+  loadView({
+    ...view(KEEP), cursor: 1, log_seq: 0, finished: false,
+    records: [reveal(20, 9, KEEP_REVEAL, 1)],
+  });
+  const keepItem = revealItem(703);
+  // 同一会话、无记录的纯刷新 = `commitView` 的路径；展示组不能被清掉。
+  loadView({ ...view(KEEP), cursor: 1, log_seq: 0, records: [], finished: false });
+  const keptSameSession = revealItem(703) === keepItem
+    && Boolean(stageNode(703))
+    && laneOf(703) === "showcase";
+  // 换会话（`session_id` 变化）= `viewStartsNewSession` 为真；展示组必须清空。
+  loadView({ ...view("u3-def3-other"), cursor: 0, log_seq: 0, records: [], finished: false });
+  const clearedNewSession = (ui.state.revealedCards || []).length === 0
+    && !stageNode(703);
+  check("U3-01y 同会话 commit 不清展示组，换会话必清（缺陷 3 的“清空”语义）",
+    keptSameSession && clearedNewSession,
+    `same=${keptSameSession} new=${clearedNewSession}`
+      + ` left=${(ui.state.revealedCards || []).length}`);
+
+  // ---- 缺陷 3-b：连续判定重叠——下一张出现时上一张仍在真实 1s 淡出；都不进展示组 ----
+  resetStage();
+  const JUDGE_SESSION = "u3-def3-judge";
+  loadView({ ...view(JUDGE_SESSION), cursor: 0, log_seq: 0, records: [], finished: false });
+  const JUDGE_1 = card(704, "闪电");
+  const JUDGE_2 = card(705, "杀");
+  const judgeRecords = [
+    push(30, 40, "JUDGE"),
+    move(31, 40, JUDGE_1, at("deck"), at("processing"), "JUDGE"),
+    move(32, 40, JUDGE_1, at("processing"), at("discard"), "JUDGE"),
+    pop(33, 40, "JUDGE"),
+    push(34, 41, "JUDGE"),
+    move(35, 41, JUDGE_2, at("deck"), at("processing"), "JUDGE"),
+  ];
+  ui.applyViewRaw({
+    ...view(JUDGE_SESSION), cursor: 35, log_seq: 0, finished: false,
+    records: judgeRecords,
+  });
+  for (let index = 0; index < judgeRecords.length; index += 1) ui.stepPlayback(true);
+  const first = effectItem(704);
+  const second = effectItem(705);
+  const firstNode = stageNode(704);
+  const secondNode = stageNode(705);
+  const overlap = Boolean(first && second && firstNode && secondNode)
+    && first.stage.lane === "processing" && second.stage.lane === "processing"
+    && Number.isFinite(first.stage.fadeAt)
+    && second.stage.enteredAt >= first.stage.fadeAt
+    && second.stage.enteredAt < first.stage.fadeAt + 1000
+    && ui.stageLane(first, second.stage.enteredAt) === "fading"
+    && ui.stageLane(second, second.stage.enteredAt) === "visible"
+    && hasClass(firstNode, "fading") && !hasClass(secondNode, "fading")
+    && !hasClass(firstNode, "revealed-card")
+    && !hasClass(secondNode, "revealed-card");
+  const firstFadeIsOneSecond = Boolean(first)
+    && ui.stageLane(first, first.stage.fadeAt + 999) === "fading"
+    && ui.stageLane(first, first.stage.fadeAt + 1000) === "gone";
+  check("U3-01z 连续判定重叠：下一张判定牌出现时上一张仍在真实 1s 淡出（且都不进展示组）",
+    overlap && firstFadeIsOneSecond,
+    `overlap=${overlap} firstLane=${first && first.stage.lane}`
+      + ` secondLane=${second && second.stage.lane}`
+      + ` fadeAt=${first && first.stage.fadeAt}`
+      + ` nextEntered=${second && second.stage.enteredAt}`);
+
+  resetStage();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
