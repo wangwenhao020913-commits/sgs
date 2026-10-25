@@ -607,6 +607,32 @@ function skillBadgeText(skill, manifest, convertCards) {
   return skill.available ? " · 可发动" : "";
 }
 
+/** 给技能按钮补上服务端三态（`active` / `suppressed` / `lost`）。
+ *
+ * 只有 `suppressed` 需要额外画禁止图标：它是"有但被挡住"（实例还在武将牌上，只是被
+ * 【铁骑】等效果挡在解析之外），与"此刻不给入口"（`available=false`）和"失去"都不同。
+ * 图标是内联 SVG（不引外部图片），颜色取现有强调红 `var(--accent)`；`aria-hidden`
+ * 避免读屏重复，按钮的 `aria-label` 负责念出「名称（失效）」。
+ */
+function applySkillState(button, skill) {
+  const skillState = (skill && skill.state) || "active";
+  button.setAttribute("data-state", skillState);
+  if (skillState !== "suppressed") return;
+  button.classList.add("suppressed");
+  button.setAttribute("aria-label", `${skill.name}（${skillStateLabel(skill)}）`);
+  button.setAttribute("title", `${skillStateLabel(skill)}：${skillDescription(skill)}`);
+  const mark = document.createElement("span");
+  mark.className = "skill-ban";
+  // 垫片的 className / classList 不联动；两处都写，真 DOM 与烟测同一条判据。
+  mark.classList.add("skill-ban");
+  mark.setAttribute("aria-hidden", "true");
+  mark.innerHTML = '<svg viewBox="0 0 16 16" focusable="false">'
+    + '<circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.6"/>'
+    + '<line x1="3.6" y1="12.4" x2="12.4" y2="3.6" stroke="currentColor"'
+    + ' stroke-width="1.6" stroke-linecap="round"/></svg>';
+  button.appendChild(mark);
+}
+
 /** 一条技能**在这份询问里**的可点性与点击动作；底部技能区与提示区技能组共用这一处。
  *
  * U1-06 的三态判据只在这里实现一次（各写一遍就会一个绿一个灰）：
@@ -615,7 +641,8 @@ function skillBadgeText(skill, manifest, convertCards) {
  *   `ActivateSkill` 候选 / 转化来源 / 转化清单任一在（与 `view.skills.available` 同源）。
  *   清单有两类消费者（W4-2 / W4-3）：已翻到预发动的技能（`preactivated`）= **复合动作**
  *   清单；转化技 = **本地入口**清单——两者都由 `pending.preactivations[skill_id]` 下发。
- * - `inert`：被动技（`ui.passive`）/ 锁定技——按钮只说明（悬停出描述），不接 click；
+ * - `suppressed`：服务端标明技能失效——即使询问里碰巧还有同名入口也不许点；
+ * - `inert`：失效 / 被动技（`ui.passive`）/ 锁定技——按钮只说明（悬停出描述），不接 click；
  * - `clickable` = `usable && !inert`。回放期间 `handler` 为 `null`（外观不变）。
  *
  * 点击动作与旧入口完全一致：清单 → 进入预发动；转化来源 → 切来源模式；
@@ -625,14 +652,16 @@ function skillOffer(pending, skill) {
   const ui = skill.ui || {};
   const convertCards = ui.convert_sources || [];
   const preactivated = Boolean(skill.preactivated);
-  const manifest = preactivationManifest(pending, skill.skill_id);
-  const usable = isOwnPending(pending) && (
+  const suppressed = skill.state === "suppressed";
+  // 失效优先于一切入口：即使这份询问里还留着同名清单，也不显示"预发动"。
+  const manifest = suppressed ? null : preactivationManifest(pending, skill.skill_id);
+  const usable = !suppressed && isOwnPending(pending) && (
     preactivated
       ? Boolean(manifest)
       : (Boolean(skill.available) || convertCards.length > 0 || Boolean(manifest))
   );
   const passive = Boolean(ui.passive);
-  const inert = Boolean(skill.locked) || passive;
+  const inert = suppressed || Boolean(skill.locked) || passive;
   const clickable = usable && !inert;
   let handler = null;
   if (clickable && pending && !state.playback) {
@@ -647,7 +676,9 @@ function skillOffer(pending, skill) {
       if (index >= 0) handler = () => selectSkillCandidate(index);
     }
   }
-  return { convertCards, preactivated, manifest, usable, passive, inert, clickable, handler };
+  return {
+    convertCards, preactivated, manifest, suppressed, usable, passive, inert, clickable, handler,
+  };
 }
 
 /** 选中一条 `ActivateSkill` 候选 = 技能直提态（「将提交：发动【X】」）。
@@ -666,6 +697,8 @@ function selectSkillCandidate(index) {
  * 纪律：
  * - **被动 / 锁定技**（`ui.passive` / `locked`）按钮只做说明：左键 / 右键都不动作，
  *   悬停出描述（U1-06）。被动预发动的入口在提示条的浮动选项行，不靠点按钮；
+ * - **失效**（`state = suppressed`）：按钮保留并画禁止图标（见 :func:`applySkillState`），
+ *   不可点；它不是"此刻不可用"（深灰）——失效是"有但被挡住"；
  * - 可发动的主动技 / 装备技：绿（`.ready`）且可点；此刻不可用：深灰（`.unavailable`）；
  * - 清单顺序由服务端给（武将在前、装备在后），这里**只渲染**，不自己重排。
  *
@@ -702,18 +735,23 @@ function renderSkills(view) {
     // 悬停全文（U1-04b / U1-06）：技能详情 / 悬停都读服务端下发的同一份 description；
     // 缺条目时显式「暂无描述」，不留空 title，也不在 JS 里抄文案。
     button.setAttribute("title", skillDescription(skill));
-    if (preactivated) button.setAttribute("data-preactivated", "true");
-    if (convertCards.length) button.setAttribute("data-convert", String(convertCards.length));
-    if (manifest) button.setAttribute("data-preactivation", String(manifest.length));
+    if (!offer.suppressed) {
+      if (preactivated) button.setAttribute("data-preactivated", "true");
+      if (convertCards.length) button.setAttribute("data-convert", String(convertCards.length));
+      if (manifest) button.setAttribute("data-preactivation", String(manifest.length));
+    }
     const kind = skillKindLabel(skill);
-    const badge = preactivated
-      ? (manifest ? " · 预发动" : "")
-      : skillBadgeText(skill, manifest, convertCards);
+    const badge = offer.suppressed
+      ? ""
+      : (preactivated
+        ? (manifest ? " · 预发动" : "")
+        : skillBadgeText(skill, manifest, convertCards));
     // M6 票 19：☆ 技能（觉醒后获得）在按钮名字前标出来；未觉醒时它不在清单里。
     const star = skillStarLabel(skill);
     if (star) button.setAttribute("data-star", "true");
     const shownName = star ? `${star} ${skill.name}` : skill.name;
     button.innerHTML = `${shownName}<span class="kind">${kind}${badge}</span>`;
+    applySkillState(button, skill);
     if (offer.handler) button.addEventListener("click", offer.handler);
     box.appendChild(button);
   }
@@ -735,7 +773,7 @@ const REJUDGE_ENTRY_HINT = "选一张牌打出，然后点「提交」（改判�
 function rejudgeWindowEntry(pending, skill) {
   if (!pending || pending.kind !== "RESPOND" || pending.cause !== "REJUDGE") return false;
   const ui = skill.ui || {};
-  if (skill.locked || ui.passive) return false;
+  if (skill.state === "suppressed" || skill.locked || ui.passive) return false;
   const requirement = pending.context && pending.context.requirement;
   return Boolean(requirement) && ui.requirement === requirement;
 }
@@ -774,6 +812,7 @@ function renderPromptSkills(view) {
     if (windowEntry) button.setAttribute("data-window-entry", "true");
     button.setAttribute("title", windowEntry ? REJUDGE_ENTRY_HINT : skillDescription(skill));
     button.textContent = skill.name;
+    applySkillState(button, skill);
     if (offer.handler) button.addEventListener("click", offer.handler);
     else if (windowEntry && !state.playback) {
       // 只把"怎么点"写明白：不选中候选、不改焦点、不发请求（不是第二套选择方式）。

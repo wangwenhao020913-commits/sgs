@@ -397,7 +397,10 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     - **此刻能不能用**：`available` = 当前挂起的询问里有没有针对这个技能的
       ``ActivateSkill`` 候选。**不去问引擎"这个技能满不满足条件"**——那是第二条真源。
 
-    只列 ``seat`` 自己的**可操作**实例（带可用性 / 转化来源）；武将详情用的**公开只读**
+    清单还保留 ``state = suppressed`` 的非锁定技：实例仍在武将牌上，只是被座位级失效
+    记录挡在解析之外。它不可发动、也不给转化来源，但界面要在按钮上画"有但被挡住"
+    （禁止图标）——不能让它整条消失。``lost`` 是另一种语义（实例不再存在），仍不列。
+    只列 ``seat`` 自己的实例（带可用性 / 转化来源）；武将详情用的**公开只读**
     清单是 :func:`seat_skill_display`——它按武将牌 + 装备区给所有座位，不含可用性，
     故不会把当前询问或本人手牌带给别人。
     """
@@ -438,11 +441,17 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
                 for skill in hero.skills
             }
 
+    # 失效 = 含失效解析时还在、正常解析时不在（与 `seat_skill_display` 同一判据）：
+    # 不能只拿正常解析的结果遍历，否则被【铁骑】封锁的技能会从按钮区整条消失。
+    resolved_ids = {
+        instance.skill_id for instance in resolve_instances(state) if instance.owner == seat
+    }
     out: list[dict[str, Any]] = []
-    for instance in resolve_instances(state):
+    for instance in resolve_instances(state, include_suppressed=True):
         if instance.owner != seat:
             continue
         definition = instance.definition
+        suppressed = instance.skill_id not in resolved_ids
         short_id = instance.skill_id.rsplit(".", 1)[-1]
         name, skill_type, star = names.get(
             short_id,
@@ -455,18 +464,26 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
             name = _card_type_name(state, definition.skill_id[len("equip.") :])
         if name is None:
             continue
-        # `state` 恒 `active`：本清单只列**解析中的**实例（失效 / 失去不产出实例），
-        # 三态的区分在 `seat_skill_display` 的详情清单里（那里武将面一字未动）。
-        entry = _skill_entry(definition, name, skill_type=skill_type, star=star)
+        entry = _skill_entry(
+            definition,
+            name,
+            skill_type=skill_type,
+            star=star,
+            state="suppressed" if suppressed else "active",
+        )
+        ui = _skill_ui(definition, actions, hand, virtual)
+        if suppressed:
+            # 失效时没有任何入口：转化来源也不能画（否则按钮看起来还能点）。
+            ui["convert_sources"] = []
         entry.update(
             {
-                "available": definition.skill_id in offered,
+                "available": False if suppressed else definition.skill_id in offered,
                 # W4-2：这条技能是否已翻到预发动。界面据此**只**走清单入口（不再把骨架
                 # 候选画成"发动技能 XXX"选项）；它是声明上的开关，不是第二条合法性判据。
-                "preactivated": bool(definition.preactivated),
+                "preactivated": False if suppressed else bool(definition.preactivated),
                 # 界面怎么摆这个技能：转化来源牌（【龙胆】）。**纯表现层派生**，只读候选与
                 # 实例声明，不参与任何合法性判定。
-                "ui": _skill_ui(definition, actions, hand, virtual),
+                "ui": ui,
             }
         )
         out.append(entry)

@@ -2639,6 +2639,38 @@ def test_the_session_view_carries_the_human_seats_skills() -> None:
     assert {skill["name"] for skill in skills} == expected, "技能清单必须与该武将的武将面一致"
 
 
+def test_the_session_view_keeps_a_suppressed_skill_for_the_button_icon() -> None:
+    """HTTP 响应里的按钮清单不能把失效技能整条吃掉（否则前端没有地方画禁止图标）。
+
+    打的是 ``GameRegistry.view`` 这条真实缝：先建一局，再让引擎写一条座位级失效记录，
+    响应体的 ``skills`` 仍要保留该技能，并带 ``state = suppressed`` / ``available = false``。
+    """
+    from sgs_web.serve import GameRegistry
+
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    session = registry.create(
+        {
+            "player_count": 2,
+            "ai": "heuristic",
+            "human_seat": 0,
+            "seed": 20261012,
+            "timeout_seconds": None,
+            "my_hero": "guanyu",
+        }
+    )
+    assert session.hero_assignments[0] == "guanyu", "点将未生效，失效技能没有对照"
+
+    def wusheng(payload: dict) -> dict:
+        return next(entry for entry in payload["skills"] if entry["skill_id"] == "hero.guanyu.wusheng")
+
+    assert wusheng(registry.view(session, after=-1, logs_after=0))["state"] == "active"
+
+    session.engine.suppress_skills(0, "hero.jie_machao.tieqi")
+    suppressed = wusheng(registry.view(session, after=-1, logs_after=0))
+    assert suppressed["state"] == "suppressed", "响应体没有失效态，前端画不出禁止图标"
+    assert suppressed["available"] is False
+
+
 def test_every_skill_entry_carries_type_lock_and_availability() -> None:
     session = Session(seed=7, ai="heuristic", timeout_seconds=None, player_count=8)
     for entry in build_skills(session, session.human_seat):
@@ -2648,7 +2680,7 @@ def test_every_skill_entry_carries_type_lock_and_availability() -> None:
             "skill_type",
             "locked",
             "carrier",
-            # M6 票 19：☆ 标记 + 三态（可操作清单里恒 active，失效 / 失去在详情清单里）
+            # M6 票 19 / 用户报障：☆ 标记 + 三态（失效保留在按钮清单，失去不列）
             "star",
             "state",
             "available",
@@ -5351,8 +5383,52 @@ def test_the_actionable_skill_list_marks_a_star_skill_and_keeps_the_key_set() ->
     assert entries["hero.jie_xushu.jianyan"]["star"] is True
     assert entries["hero.jie_xushu.zhuhai"]["star"] is False
     assert all(entry["state"] == "active" for entry in entries.values()), (
-        "可操作清单只列解析中的实例，故状态恒 active（失效 / 失去不在这里）"
+        "没被失效的实例仍是 active；失效态由下一条用例钉住"
     )
+
+
+def test_the_actionable_skill_list_keeps_a_suppressed_skill_and_marks_its_state() -> None:
+    """技能按钮区也要能画出「有但被挡住」：失效的非锁定技仍在清单里。
+
+    ``resolve_instances`` 默认把失效实例挡在解析之外；可操作清单如果直接拿这份结果，
+    【铁骑】之后被封锁的技能会整条消失，界面也就没地方画禁止图标。判据取两次解析的差
+    （与详情 ``seat_skill_display`` 同源）：失效 = 包含失效时还在、正常解析时不在。
+    锁定技不受「所有非锁定技失效」影响，仍保持 ``active``。
+    """
+    from types import SimpleNamespace
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hero="jie_machao"), SeatSpec(hp=4, hero="guanyu")],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, pending=None)
+
+    before = {entry["skill_id"]: entry for entry in build_skills(session, 0)}
+    assert before["hero.jie_machao.tieqi"]["state"] == "active"
+    locked_ids = {skill_id for skill_id, entry in before.items() if entry["locked"]}
+    assert locked_ids, "界马超的【马术】是锁定技——本判据需要它作对照"
+
+    engine.suppress_skills(0, "hero.jie_machao.tieqi")
+    after = {entry["skill_id"]: entry for entry in build_skills(session, 0)}
+
+    assert set(after) == set(before), (
+        f"失效不删按钮（实例还在武将牌上）：{sorted(after)}"
+    )
+    suppressed = after["hero.jie_machao.tieqi"]
+    assert suppressed["state"] == "suppressed", "按钮区必须下发失效状态，前端才有判据画禁止图标"
+    assert suppressed["available"] is False, "失效的技能此刻不可发动"
+    assert suppressed["preactivated"] is False
+    assert suppressed["ui"]["convert_sources"] == [], "失效的转化技不能给出转化来源"
+    for skill_id in locked_ids:
+        assert after[skill_id]["state"] == "active", "锁定技不被「所有非锁定技失效」覆盖"
+
+    # 失去是另一种语义：实例不再存在，故按钮清单里根本不该有它。
+    engine.lose_skill(0, "hero.jie_machao.tieqi")
+    lost = {entry["skill_id"] for entry in build_skills(session, 0)}
+    assert "hero.jie_machao.tieqi" not in lost, "失去的技能不是「有但被挡住」"
 
 
 def test_the_ui_smoke_hero_zone_and_skill_fixtures_match_the_real_snapshot_shape() -> None:

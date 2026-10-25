@@ -305,6 +305,19 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 }
 .skill.locked, .skill.passive { background: #e8e8ea; color: #8c8f98; border-color: #d3d4d9; }
 .skill.unavailable { background: #3f3f3f; color: #d7d7d7; border-color: #333; }
+/* 失效（"有但被挡住"，如【铁骑】之后）：保留按钮并画禁止图标。图标绝对定位在右侧，
+ * 预留 padding 不压住技能名；颜色用现有强调红，不引外部图片。 */
+.skill.suppressed {
+  position: relative; padding-right: calc(22 * var(--dsu));
+  background: var(--accent-soft); border-color: var(--accent); color: var(--dim);
+}
+.skill.suppressed .skill-ban {
+  position: absolute; right: calc(4 * var(--dsu)); top: 50%;
+  transform: translateY(-50%);
+  width: calc(13 * var(--dsu)); height: calc(13 * var(--dsu));
+  display: inline-flex; color: var(--accent); pointer-events: none;
+}
+.skill.suppressed .skill-ban svg { width: 100%; height: 100%; display: block; }
 .skill.ready {
   background: #e7f5ec; border-color: #1d6b3a; color: #14532b; font-weight: 600; cursor: pointer;
 }

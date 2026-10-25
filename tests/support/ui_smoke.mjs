@@ -14514,7 +14514,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ];
   skillView.skills = [
     { ...skillRow("hero.jie_xushu.jianyan", "荐言", { star: true }), available: true, preactivated: false },
+    { ...skillRow("hero.jie_xushu.zhuhai", "诛害", { state: "suppressed" }), available: false, preactivated: false },
+    { ...skillRow("hero.jie_xushu.qianxue", "勤学"), available: false, preactivated: false },
   ];
+  // 失效优先于"预发动"：即使这份询问里还残留同名清单，按钮也不该画入口徽标。
+  skillView.pending.preactivations = { "hero.jie_xushu.zhuhai": [{}] };
   ui.state.view = skillView;
   ui.resetSelection();
   ui.renderTable();
@@ -14524,6 +14528,57 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     !!barButton && barButton.text().includes("☆")
       && barButton.getAttribute("data-star") === "true",
     barButton ? barButton.text() : "没有荐言按钮");
+
+  /* 用户报障：被【铁骑】封锁的技能在左侧技能按钮上没有直观变化。禁止图标只属于
+   * `state = suppressed` 这一档；`unavailable`（此刻不给入口）与 active 都不画，
+   * 也不把 `lost`（按钮清单里根本没有它）混进来。 */
+  const skillButton = (id) => Array.from($("t-skills").children)
+    .find((node) => node.getAttribute("data-skill-id") === id);
+  const suppressedButton = skillButton("hero.jie_xushu.zhuhai");
+  const unavailableButton = skillButton("hero.jie_xushu.qianxue");
+  const banMarks = (button) => Array.from((button && button.children) || [])
+    .filter((node) => node.classList && node.classList.contains("skill-ban"));
+  const ban = banMarks(suppressedButton);
+  check("㉉M6-10a 失效技能按钮画禁止图标（内联 SVG：红圈 + 斜杠）且带无障碍名称",
+    !!suppressedButton
+      && suppressedButton.disabled === true
+      && suppressedButton.classList.contains("suppressed")
+      && suppressedButton.getAttribute("data-state") === "suppressed"
+      && /失效/.test(suppressedButton.getAttribute("aria-label") || "")
+      && /失效/.test(suppressedButton.getAttribute("title") || "")
+      && !/预发动/.test(suppressedButton.text())
+      && suppressedButton.getAttribute("data-preactivation") === undefined
+      && ban.length === 1
+      && ban[0].getAttribute("aria-hidden") === "true"
+      && /<svg[\s>]/.test(ban[0].innerHTML)
+      && /<circle[\s>]/.test(ban[0].innerHTML)
+      && /<line[\s>]/.test(ban[0].innerHTML),
+    suppressedButton
+      ? `class=${suppressedButton.className} label=${suppressedButton.getAttribute("aria-label")}`
+        + ` ban=${ban.length} svg=${ban[0] ? ban[0].innerHTML : ""}`
+      : "没有诛害按钮");
+  check("㉉M6-10b 只有失效按钮画禁止图标（可发动 / 此刻不可用都不画）",
+    banMarks(barButton).length === 0
+      && !!unavailableButton
+      && banMarks(unavailableButton).length === 0
+      && !unavailableButton.classList.contains("suppressed")
+      && unavailableButton.getAttribute("data-state") === "active",
+    `active=${banMarks(barButton).length} unavailable=${banMarks(unavailableButton).length}`);
+  const iconCss = readFileSync("tools/sgs_web/static/style.css", "utf8");
+  const cssRule = (selector) => {
+    const found = new RegExp(`${selector}\\s*\\{([^}]*)\\}`).exec(iconCss);
+    return found ? found[1] : "";
+  };
+  const suppressedRule = cssRule("\\.skill\\.suppressed");
+  const banRule = cssRule("\\.skill-ban");
+  check("㉉M6-10c 禁止图标用现有强调红、绝对定位在右侧且不挡技能名",
+    /position:\s*relative/.test(suppressedRule)
+      && /padding-right:\s*calc\(/.test(suppressedRule)
+      && /position:\s*absolute/.test(banRule)
+      && /right:\s*calc\(/.test(banRule)
+      && /color:\s*var\(--accent\)/.test(banRule)
+      && /pointer-events:\s*none/.test(banRule),
+    `suppressed={${suppressedRule}} ban={${banRule}}`);
 
   const fireContext = (node) => {
     const event = { target: node, preventDefault() {}, stopPropagation() {} };
