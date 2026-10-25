@@ -527,10 +527,12 @@ function judgmentCardFromRecord(record) {
   ) || cards[0];
 }
 
-/** A1：弹窗已开着时，用新判定牌续上同一个窗口（不关窗、不重开）。
+/** A1：弹窗已开着时，把新判定牌**追加**到同一个窗口（不关窗、不重开、不覆盖前一张）。
  *
  * 只更新**弹窗正文**（`#t-options` 里的亮牌模板）；选中态 / 提交 / 放弃 / 提示条动作都不动。
- * 关闭仍由 `syncDialog` 按下一份 pending 的生命周期决定（`final:true` / 普通询问 / 无 pending）。
+ * 追加的是服务端 `card_move(reason=JUDGE)` 这条事实（最后一张红牌没有继续询问，只能走
+ * 记录流）；下一份 pending 的 `judgment_reveal.cards` 是服务端聚合的权威顺序，提交时
+ * `renderPending` 会用它整份覆盖，故这里只做"已开窗口的即时追加"，不写规则。
  */
 function refreshJudgmentReveal(card) {
   if (!card || !state.dialog || !state.dialog.open) return;
@@ -539,10 +541,17 @@ function refreshJudgmentReveal(card) {
   if (!pending || !pending.judgment_reveal || pending.judgment_reveal.final) return;
   const box = $("t-options");
   if (!box) return;
+  const cards = Array.isArray(pending.judgment_reveal.cards)
+    ? pending.judgment_reveal.cards
+    : [];
+  const known = cards.some(
+    (entry) => String(entry.card_id) === String(card.card_id),
+  );
+  const nextCards = known ? cards : [...cards, card];
   box.innerHTML = "";
   renderReveal({
     ...pending,
-    judgment_reveal: { ...pending.judgment_reveal, card },
+    judgment_reveal: { ...pending.judgment_reveal, cards: nextCards },
   });
   syncDialogHint();
 }

@@ -35,12 +35,13 @@ function revealData(pending) {
   const harvest = pending && pending.harvest && typeof pending.harvest === "object"
     ? pending.harvest
     : {};
-  // A1：洛神连续判定的当前判定牌由服务端派生字段给出，优先于其它亮牌来源。
+  // A1：洛神连续判定的**累积**判定牌由服务端派生字段给出，优先于其它亮牌来源。
   const judged = pending && pending.judgment_reveal
-    ? pending.judgment_reveal.card
+    && Array.isArray(pending.judgment_reveal.cards)
+    ? pending.judgment_reveal.cards
     : null;
-  const cards = judged
-    ? [judged]
+  const cards = judged && judged.length
+    ? judged
     : (Array.isArray(harvest.revealed)
       ? harvest.revealed
       : (Array.isArray(pending && pending.revealed) ? pending.revealed : []));

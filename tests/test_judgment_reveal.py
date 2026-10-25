@@ -2,8 +2,9 @@
 
 字段由 `pending_payload` 从**已有记录**派生（SKILL_ACTIVATION / SELECT_OPTION /
 `card_move(reason=JUDGE)`），不改记录流、不改 `06`（§5「程序化约定与偏离一手」）、不碰金录像。这里用真引擎 + 真
-`Session` 走完一次循环：继续询问带当前判定牌、同一 `chain_key` 稳定、结束/放弃后的
-第一份 pending 是 `final=True` 的关窗帧（红牌终止时带红牌）。
+`Session` 走完一次循环：继续询问带**本次循环已翻出的全部判定牌（有序累积）**、同一
+`chain_key` 稳定、结束/放弃后的第一份 pending 是 `final=True` 的关窗帧（红牌终止时
+累积里包含红牌）。
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ def _repeat(engine):
 
 
 def test_pending_payload_exposes_a_stable_judgment_reveal_chain():
-    """A1：继续询问 final=False 带本张判定牌；放弃后第一份 pending final=True。"""
+    """A1：继续询问 final=False 带**累积**判定牌；放弃后第一份 pending final=True。"""
     first, second, third = BLACKS[:3]
     red = REDS[0]
     filler = [
@@ -78,7 +79,7 @@ def test_pending_payload_exposes_a_stable_judgment_reveal_chain():
     first_reveal = first_payload["judgment_reveal"]
     assert first_reveal is not None
     assert first_reveal["final"] is False
-    assert first_reveal["card"]["card_id"] == first
+    assert [card["card_id"] for card in first_reveal["cards"]] == [first]
     chain_key = first_reveal["chain_key"]
 
     engine.submit(_repeat(engine))
@@ -86,7 +87,9 @@ def test_pending_payload_exposes_a_stable_judgment_reveal_chain():
     second_reveal = pending_payload(session)["judgment_reveal"]
     assert second_reveal is not None
     assert second_reveal["chain_key"] == chain_key, "同一循环 chain_key 稳定"
-    assert second_reveal["card"]["card_id"] == second
+    assert [card["card_id"] for card in second_reveal["cards"]] == [first, second], (
+        "第二张出现时第一张仍在累积里（顺序稳定）"
+    )
     assert second_reveal["final"] is False
 
     engine.submit(
@@ -101,11 +104,13 @@ def test_pending_payload_exposes_a_stable_judgment_reveal_chain():
     assert final_reveal is not None
     assert final_reveal["final"] is True, "循环结束后的第一份 pending = 关窗帧"
     assert final_reveal["chain_key"] == chain_key
-    assert final_reveal["card"]["card_id"] == second, "放弃时带最后一轮已判定的那张"
+    assert [card["card_id"] for card in final_reveal["cards"]] == [first, second], (
+        "放弃时保留本次循环已翻出的两张（整窗随后关闭）"
+    )
 
 
 def test_pending_payload_final_frame_carries_the_red_judgment():
-    """A1：循环被红牌终止时，关窗帧的 card = 最后那张红判定牌（不是上一张黑牌）。"""
+    """A1：循环被红牌终止时，累积里包含最后那张红牌（整窗随后关闭）。"""
     first, second = BLACKS[:2]
     red = REDS[0]
     filler = [
@@ -137,4 +142,6 @@ def test_pending_payload_final_frame_carries_the_red_judgment():
     assert final is not None
     assert final["final"] is True
     assert final["chain_key"] == chain_key
-    assert final["card"]["card_id"] == red, "红牌终止循环，关窗帧带红牌"
+    assert [card["card_id"] for card in final["cards"]] == [first, second, red], (
+        "红牌终止循环，累积里包含红牌（不是只留最后一张）"
+    )

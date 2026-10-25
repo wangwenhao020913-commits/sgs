@@ -177,9 +177,10 @@ function isRevealStep(pending) {
   if (!pending) return false;
   // A1：洛神连续判定的继续询问 = 亮牌弹窗；`final:true` 是关窗帧，不画。
   if (pending.judgment_reveal) {
+    const cards = pending.judgment_reveal.cards;
     return pending.kind === "SELECT_OPTION"
       && pending.judgment_reveal.final !== true
-      && !!pending.judgment_reveal.card;
+      && Array.isArray(cards) && cards.length > 0;
   }
   if (pending.kind !== "SELECT_CARDS") return false;
   if (pending.dialog === DIALOG_KINDS.reveal) return true;

@@ -45,7 +45,7 @@ function renderOptionConfirm(pending) {
 /** A1：洛神连续判定的亮牌确认 = 单选项确认 + 亮牌模板。
  *
  *  `renderOptionConfirm` 负责自动选中唯一选项 / 隐藏取消键 / 写"提交 / 放弃"提示；
- *  `renderReveal` 再把 `judgment_reveal.card` 画进同一个 `#t-options`（弹窗正文）。
+ *  `renderReveal` 再把 `judgment_reveal.cards`（有序累积）画进同一个 `#t-options`。
  *  卡片是**只读**的：`renderReveal` 按 `pending.slots` 决定可点性；这一问没有槽位，
  *  所以不会把点击判成提交——提交 / 放弃始终只在提示条右端。
  */

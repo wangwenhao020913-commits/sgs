@@ -232,17 +232,21 @@ function isSingleOptionalOption(pending) {
     && actions.some((action) => action.kind === "Pass");
 }
 
-/** A1：洛神连续判定的**亮牌确认**（服务端派生 `judgment_reveal`）。
+/** A1：洛神连续判定的**亮牌确认**（服务端派生 `judgment_reveal.cards`）。
  *
- *  `judgment_reveal.final !== true` ⇒ 这一问仍是循环里的"看这张判定牌，提交继续 / 放弃停止"；
+ *  `judgment_reveal.final !== true` ⇒ 这一问仍是循环里的"看本次已翻出的判定牌，提交继续 /
+ *  放弃停止"；`cards` 是**有序累积**（第一张到当前这张），前一张不消失。
  *  `final === true` ⇒ 循环已结束、只用于关窗（不画弹窗）。判据只看服务端字段，不认技能名。
  */
 function isJudgmentRevealOption(pending) {
+  const cards = pending && pending.judgment_reveal
+    ? pending.judgment_reveal.cards
+    : null;
   return !!pending
     && pending.kind === "SELECT_OPTION"
     && !!pending.judgment_reveal
     && pending.judgment_reveal.final !== true
-    && !!pending.judgment_reveal.card;
+    && Array.isArray(cards) && cards.length > 0;
 }
 
 /** 这次询问该走哪条渲染路径。

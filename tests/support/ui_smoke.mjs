@@ -14801,10 +14801,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
 /* ============ A1：洛神连续判定的亮牌弹窗（显示层派生 judgment_reveal） ============
  *
- * 服务端 `pending_payload.judgment_reveal = {chain_key, card, final}`；前端不认技能名：
- * - `final:false` 的继续询问 → 亮牌弹窗显示本张判定牌，提交 = 唯一选项，放弃 = Pass；
- * - 同一 `chain_key` 的下一问 → 同一个弹窗换牌（不关窗）；
- * - `final:true` / 后续普通询问 → 关窗；
+ * 服务端 `pending_payload.judgment_reveal = {chain_key, cards, final}`；前端不认技能名：
+ * - `final:false` 的继续询问 → 亮牌弹窗显示**本次循环已翻出的全部判定牌**（有序累积），
+ *   提交 = 唯一选项，放弃 = Pass；
+ * - 同一 `chain_key` 的下一问 → 同一个弹窗里追加，前一张不消失；
+ * - `final:true` / 后续普通询问 → 整窗关闭；
  * - 卡片只进弹窗，不进 `state.revealedCards` / 舞台（舞台寿命口径不变）。
  */
 {
@@ -14836,7 +14837,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     view.snapshot.processing = [];
     return view;
   };
-  const revealCardNode = () => {
+  const revealCardNodes = () => {
     const walk = (node, out = []) => {
       for (const child of (node.children || [])) {
         out.push(child);
@@ -14844,9 +14845,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       }
       return out;
     };
-    return walk($("t-options")).find(
-      (node) => node.classList.contains("reveal-card")) || null;
+    return walk($("t-options")).filter(
+      (node) => node.classList.contains("reveal-card"));
   };
+  const revealCardNode = () => revealCardNodes()[0] || null;
 
   ui.flushPlayback();
   ui.state.view = null;
@@ -14857,7 +14859,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   const firstCard = card(801, "闪电");
   const firstPending = basePending(9501, {
-    judgment_reveal: { chain_key: "judge-loop:42", card: firstCard, final: false },
+    judgment_reveal: { chain_key: "judge-loop:42", cards: [firstCard], final: false },
   });
   const firstView = viewFor(firstPending);
   ui.state.view = firstView;
@@ -14889,28 +14891,34 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `revealed=${(ui.state.revealedCards || []).length}`
       + ` stage=${Array.from($("t-processing").children).filter((n) => n.classList.contains("stage-card")).length}`);
 
-  // 同一 chain_key 的下一问：同一个弹窗换牌（不关窗、键不变）。
+  // 同一 chain_key 的下一问：**累积**，前一张不消失（同一弹窗、键不变）。
   const secondCard = card(802, "杀", { type: "slash" });
   const secondPending = basePending(9502, {
-    judgment_reveal: { chain_key: "judge-loop:42", card: secondCard, final: false },
+    judgment_reveal: { chain_key: "judge-loop:42", cards: [firstCard, secondCard], final: false },
   });
   const secondView = viewFor(secondPending);
   ui.state.view = secondView;
   ui.renderTable();
   ui.renderPending(secondView);
-  const secondName = revealCardNode();
-  check("A1-c 同一 chain_key 的下一张判定牌 = 同一个弹窗换牌（不关窗、不重开）",
+  const secondNodes = revealCardNodes();
+  const secondIds = secondNodes.map((node) => attr(node, "data-card-id"));
+  check("A1-c 同一 chain_key 的下一张判定牌 = 同一个弹窗内累积（前一张仍在、顺序稳定、不重开）",
     $("t-dialog").hidden === false
       && ui.state.dialog.key === firstKey
-      && Boolean(secondName) && attr(secondName, "data-card-id") === "802"
+      && secondIds.join(",") === "801,802"
       && $("t-dialog-title").textContent === "洛神",
     `hidden=${$("t-dialog").hidden} key=${ui.state.dialog.key} firstKey=${firstKey}`
-      + ` card=${secondName && attr(secondName, "data-card-id")}`);
+      + ` cards=${secondIds.join(",")}`);
 
-  // final:true（循环结束）→ 关窗；后续普通询问不保留。
+  // final:true（循环结束）→ 关窗；累积数组随关窗帧下发，但不再画。
+  const redCard = card(803, "桃", { type: "peach", suit: "heart", color: "red" });
   const finalPending = basePending(9503, {
     kind: "PLAY_PHASE",
-    judgment_reveal: { chain_key: "judge-loop:42", card: firstCard, final: true },
+    judgment_reveal: {
+      chain_key: "judge-loop:42",
+      cards: [firstCard, secondCard, redCard],
+      final: true,
+    },
     legal_actions: [{ kind: "EndPhase", answers_seq: 9503 }],
     context: null,
   });
@@ -14924,8 +14932,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && (ui.state.revealedCards || []).length === 0,
     `hidden=${$("t-dialog").hidden} open=${ui.state.dialog.open}`);
 
-  // ---- 最后一张红牌：它没有“是否继续”询问，靠记录流的 JUDGE 判定牌续到已开的弹窗 ----
-  const redCard = card(803, "桃", { type: "peach", suit: "heart", color: "red" });
+  // ---- 最后一张红牌：它没有“是否继续”询问，靠记录流的 JUDGE 判定牌追加到已开的弹窗 ----
   const redRecords = [
     { kind: "frame", op: "push", frame_id: 60, frame_kind: "JUDGE", depth: 1, seq: 9601 },
     {
@@ -14936,14 +14943,18 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       cards: [redCard],
     },
   ];
-  ui.state.view = firstView;
+  ui.state.view = secondView;
   ui.state.effectCards = [];
   ui.state.revealedCards = [];
   ui.renderTable();
-  ui.renderPending(firstView);
+  ui.renderPending(secondView);
   const nextPending = basePending(9603, {
     kind: "PLAY_PHASE",
-    judgment_reveal: { chain_key: "judge-loop:42", card: redCard, final: true },
+    judgment_reveal: {
+      chain_key: "judge-loop:42",
+      cards: [firstCard, secondCard, redCard],
+      final: true,
+    },
     legal_actions: [{ kind: "EndPhase", answers_seq: 9603 }],
     context: null,
   });
@@ -14951,24 +14962,25 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   nextView.records = redRecords;
   ui.applyViewRaw(nextView);
   ui.stepPlayback(true);  // JUDGE push
-  ui.stepPlayback(true);  // 判定牌进处理区 ⇒ 弹窗续到红牌
-  const redNode = revealCardNode();
+  ui.stepPlayback(true);  // 判定牌进处理区 ⇒ 追加到已开的弹窗
+  const redNodes = revealCardNodes();
+  const redIds = redNodes.map((node) => attr(node, "data-card-id"));
   const redShownBeforeCommit = $("t-dialog").hidden === false
-    && Boolean(redNode) && attr(redNode, "data-card-id") === "803";
+    && redIds.join(",") === "801,802,803";
   ui.flushPlayback();  // 提交下一份 pending（final:true）⇒ 关窗
-  check("A1-e 最后一张红牌（无继续询问）经 JUDGE 记录续到已开的弹窗；下一份 final:true 才关窗",
+  check("A1-e 红牌（无继续询问）经 JUDGE 记录追加到累积弹窗；下一份 final:true 才关窗",
     redShownBeforeCommit
       && $("t-dialog").hidden === true
       && ui.state.dialog.open === false,
-    `beforeCommit=${redShownBeforeCommit} hiddenAfter=${$("t-dialog").hidden}`
-      + ` red=${redNode && attr(redNode, "data-card-id")}`);
+    `beforeCommit=${redShownBeforeCommit} cards=${redIds.join(",")}`
+      + ` hiddenAfter=${$("t-dialog").hidden}`);
 
   // 没有下一份 pending（局终 / 阵亡等）时也不能留一个永远挂着的弹窗。
-  ui.state.view = firstView;
+  ui.state.view = secondView;
   ui.state.effectCards = [];
   ui.state.revealedCards = [];
   ui.renderTable();
-  ui.renderPending(firstView);
+  ui.renderPending(secondView);
   const noPendingView = viewFor(null);
   ui.applyViewRaw(noPendingView);
   check("A1-f 没有下一份 pending（pending=null）⇒ 关窗，不留幽灵",

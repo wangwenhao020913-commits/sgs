@@ -1631,16 +1631,18 @@ def _record_judge_card(record: Any) -> CardRef | None:
     return cards[0] if len(cards) == 1 else None
 
 
-def _last_judge_card(records: Iterable[Any], after_seq: int, before_seq: int) -> CardRef | None:
-    found = None
+def _judge_cards(records: Iterable[Any], after_seq: int, before_seq: int) -> list[CardRef]:
+    """一段记录流里按 seq 排序的全部判定牌（``card_move(reason=JUDGE, to=processing)``）。"""
+    found: list[tuple[int, CardRef]] = []
     for record in records:
         seq = int(getattr(record, "seq", -1) or -1)
         if seq <= after_seq or seq >= before_seq:
             continue
         card = _record_judge_card(record)
         if card is not None:
-            found = card
-    return found
+            found.append((seq, card))
+    found.sort(key=lambda pair: pair[0])
+    return [card for _seq, card in found]
 
 
 def _judgment_card_payload(engine: Any, card: CardRef, lookup: Mapping[int, CardRef] | None) -> dict[str, Any]:
@@ -1661,10 +1663,12 @@ def judgment_reveal_state(
     读取的都只是服务端已有事实：记录流里的 ``SKILL_ACTIVATION`` 询问（本次循环的起点）、
     ``SELECT_OPTION`` 继续询问、以及 ``card_move(reason=JUDGE, to=processing)`` 的判定牌。
 
-    - 继续询问 ⇒ ``{chain_key, card, final: False}``：本次循环的第 N 张判定牌；
+    - 继续询问 ⇒ ``{chain_key, cards, final: False}``：``cards`` = **本次循环从第一张到
+      当前这张**的全部判定牌（按判定顺序，前一张不丢）；
       ``chain_key = judge-loop:<activation seq>``，同一轮循环内不变；
-    - 循环结束（红牌 / 放弃）后的**第一条同座位询问** ⇒ ``{chain_key, card, final: True}``：
-      前端据此关闭弹窗；``final`` 的语义就是"循环已结束、请关窗"，不表示"还属于循环"；
+    - 循环结束（红牌 / 放弃）后的**第一条同座位询问** ⇒ ``{chain_key, cards, final: True}``：
+      ``cards`` 仍含本次循环的全部判定牌（红牌终止时含红牌）；前端据此关闭弹窗；
+      ``final`` 的语义就是"循环已结束、请关窗"，不表示"还属于循环"；
     - 没有下一份 pending（局终 / 死亡 / 换会话）⇒ 本字段不出现，前端在 ``pending == null``
       或 ``viewStartsNewSession`` 时关窗（`syncDialog` 的既有生命周期，不新增定时器）。
 
@@ -1705,12 +1709,12 @@ def judgment_reveal_state(
 
     chain_key = f"judge-loop:{activation_seq}"
     if str(getattr(query, "skill_id", "")).startswith(_LUOSHEN_REPEAT_PREFIX):
-        card = _last_judge_card(records, activation_seq, current_seq)
-        if card is None:
+        cards = _judge_cards(records, activation_seq, current_seq)
+        if not cards:
             return None
         return {
             "chain_key": chain_key,
-            "card": _judgment_card_payload(engine, card, lookup),
+            "cards": [_judgment_card_payload(engine, card, lookup) for card in cards],
             "final": False,
         }
 
@@ -1731,15 +1735,12 @@ def judgment_reveal_state(
         break
     if first_after != current_seq:
         return None
-    card = _last_judge_card(records, last_continue, current_seq)
-    if card is None:
-        # 用户放弃：循环结束没有新的判定牌 ⇒ 用最后一轮已判定的那张做关闭帧。
-        card = _last_judge_card(records, activation_seq, last_continue)
-    if card is None:
+    cards = _judge_cards(records, activation_seq, current_seq)
+    if not cards:
         return None
     return {
         "chain_key": chain_key,
-        "card": _judgment_card_payload(engine, card, lookup),
+        "cards": [_judgment_card_payload(engine, card, lookup) for card in cards],
         "final": True,
     }
 
