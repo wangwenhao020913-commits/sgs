@@ -258,8 +258,8 @@ function viewStartsNewSession(body) {
  *
  * 它只属于回放期：每条记录把**可见**变化写进它（见 :func:`applyLiveDelta`），`renderTable`
  * 从它重绘；`commitView` 到时用权威快照整份覆盖。深拷贝的是牌桌会改写的容器
- * （`players` 及其装备 / 判定区、`self_hand`、`discard`、`processing`），故逐事件派生
- * **绝不改** `state.view` 的权威快照。
+ * （`players` 及其装备 / 判定区 / 武将牌上的牌区、`self_hand`、`discard`、`processing`），
+ * 故逐事件派生（含标签增删）**绝不改** `state.view` 的权威快照。
  */
 function cloneLiveView(body) {
   const view = { ...body };
@@ -271,6 +271,10 @@ function cloneLiveView(body) {
       ...player,
       equip: (player.equip || []).slice(),
       judge: (player.judge || []).slice(),
+      hero_zones: (player.hero_zones || []).map((zone) => ({
+        ...zone,
+        cards: (zone.cards || []).slice(),
+      })),
     })),
     self_hand: (snapshot.self_hand || []).slice(),
     discard: (snapshot.discard || []).slice(),
@@ -311,6 +315,79 @@ function liveRemoveCards(list, cards) {
   return (list || []).filter((item) => !gone.has(String(item.card_id)));
 }
 
+/** 把展示通道的标签 delta 与**可见记录**按 `seq` 合并，交给同一条逐事件回放。
+ *
+ * `live_deltas` 是服务端从被记录流裁掉（但牌面已公开）的 `tag_add` / `tag_remove`
+ * 派生的网页载荷；它没有对应的 `records` 条目，故这里按 `seq` 插进回放序列，并打
+ * `live_only`。`stepPlayback` 只对它们更新 live view，不写事件流 / 舞台 / 技能演出。
+ */
+function mergeLiveDeltas(records, liveDeltas) {
+  const events = (liveDeltas || [])
+    .filter((event) => event && Number.isFinite(Number(event.seq)))
+    .slice()
+    .sort((left, right) => Number(left.seq) - Number(right.seq));
+  if (!events.length) return records || [];
+  const out = [];
+  let next = 0;
+  for (const record of records || []) {
+    const seq = Number(record && record.seq);
+    while (next < events.length && Number.isFinite(seq)
+      && Number(events[next].seq) <= seq) {
+      out.push({ ...events[next], kind: "delta", live_only: true });
+      next += 1;
+    }
+    out.push(record);
+  }
+  while (next < events.length) {
+    out.push({ ...events[next], kind: "delta", live_only: true });
+    next += 1;
+  }
+  return out;
+}
+
+/** live view 里所有可能带牌面的列表（手牌 / 弃牌堆 / 处理区 / 装备 / 判定 / 武将牌区）。 */
+function liveCardLists(view) {
+  const snapshot = view && view.snapshot;
+  if (!snapshot) return [];
+  const lists = [snapshot.self_hand, snapshot.discard, snapshot.processing];
+  for (const player of snapshot.players || []) {
+    lists.push(player.equip, player.judge);
+    for (const zone of player.hero_zones || []) lists.push(zone.cards);
+  }
+  return lists.filter((list) => Array.isArray(list));
+}
+
+/** 在一张**已经下发牌面**的牌上就地加 / 撤一个标签（live view 用，替换卡片对象）。
+ *
+ * 标签值由服务端 `live_deltas.tag` 给出（`skill_id` + 派生好的 `label`）；前端不按
+ * 技能 id 查中文名。找不到这张牌（隐藏 / 还没进表）= 零动作，不猜它属于谁。
+ */
+function liveUpdateCardTags(view, cardId, tag, adding) {
+  if (!tag || !tag.skill_id) return;
+  const wanted = String(cardId);
+  const skillId = String(tag.skill_id);
+  for (const list of liveCardLists(view)) {
+    for (let index = 0; index < list.length; index += 1) {
+      const card = list[index];
+      if (!card || String(card.card_id) !== wanted) continue;
+      let tags = Array.isArray(card.tags) ? card.tags.slice() : [];
+      if (adding) {
+        const at = tags.findIndex(
+          (item) => item && String(item.skill_id) === skillId);
+        if (at >= 0) tags[at] = tag;
+        else tags.push(tag);
+      } else {
+        tags = tags.filter(
+          (item) => !item || String(item.skill_id) !== skillId);
+      }
+      const next = { ...card };
+      if (tags.length) next.tags = tags;
+      else delete next.tags;
+      list[index] = next;
+    }
+  }
+}
+
 /** 一条记录对 live view 的**可见**贡献（D11）：只写记录里真有的派生事实。
  *
  * 可派生：体力（`hp_change.after`）、手牌数（`card_move` 的牌面 / `card_count`）、自己的
@@ -330,6 +407,20 @@ function applyLiveDelta(record, view = state.liveView) {
   const players = snapshot.players || [];
   const playerAt = (seat) => players.find((player) => Number(player.seat) === Number(seat));
   if (record.kind === "delta") {
+    if (record.delta_type === "tag_add" || record.delta_type === "tag_remove") {
+      const cardId = record.card_id !== undefined && record.card_id !== null
+        ? record.card_id
+        : (record.card && record.card.card_id);
+      const tag = record.tag || (
+        record.skill_id
+          ? { skill_id: record.skill_id, label: record.label || record.skill_id }
+          : null
+      );
+      if (cardId !== undefined && cardId !== null && tag) {
+        liveUpdateCardTags(view, cardId, tag, record.delta_type === "tag_add");
+      }
+      return view;
+    }
     if (record.delta_type === "hp_change") {
       const player = playerAt(record.seat);
       if (player) player.hp = Number(record.after);
@@ -447,7 +538,9 @@ function applyView(body) {
   // U1-05：叙事条目随视图增量下发（服务端已按查看者过滤）。先收进本地序列，
   // 再按记录回放的进度逐条铺——不在前端补事实 / 判断隐藏信息。
   for (const entry of body.narrative || []) state.narrative.push(entry);
-  const incoming = body.records || [];
+  // `live_deltas` = 被人类记录流裁掉、但牌面已公开的标签增删（网页展示通道）。
+  // 与可见记录按 seq 合并后走同一条逐事件回放；它们不写事件流 / 舞台。
+  const incoming = mergeLiveDeltas(body.records || [], body.live_deltas || []);
   const first = state.view === null;
   // U3-01 / D5.5：换会话时舞台整块作废——上一局的牌不能在**回放新局记录之前**还留在台上。
   if (viewStartsNewSession(body)) {
@@ -512,39 +605,44 @@ function stepPlayback(immediate) {
     return;
   }
   const record = playback.records[playback.index];
-  if (record.kind === "query") {
-    playback.querySeat = record.query.actor;
-    state.lastQuerySeat = record.query.actor;
+  const liveOnly = Boolean(record.live_only);
+  if (!liveOnly) {
+    if (record.kind === "query") {
+      playback.querySeat = record.query.actor;
+      state.lastQuerySeat = record.query.actor;
+    }
+    state.logRecords.push(record);
+    // 简易档铺服务端叙事（与记录同 seq 的条目在这一步出现）；完整两档铺记录。
+    if (logMode() === "simple") appendNarrativeThrough(record.seq);
+    else appendLog(record, playback.querySeat);
+    state.effectCards = applyEffectDelta(record, state.effectCards);
+    state.revealedCards = applyRevealDelta(record, state.revealedCards);
   }
-  state.logRecords.push(record);
-  // 简易档铺服务端叙事（与记录同 seq 的条目在这一步出现）；完整两档铺记录。
-  if (logMode() === "simple") appendNarrativeThrough(record.seq);
-  else appendLog(record, playback.querySeat);
-  state.effectCards = applyEffectDelta(record, state.effectCards);
-  state.revealedCards = applyRevealDelta(record, state.revealedCards);
   // U3-05（D11）：每条记录先把**可见**变化写进 live view，再**从它**重绘全表——手牌数 /
   // 自己的手牌面 / 体力 / 装备与判定区 / 牌堆与弃牌数 / 横置 / 酒 / 身份 / 阵亡 /
-  // 回合与阶段都随事件走，不再等整批播完提交。
+  // 回合与阶段都随事件走，不再等整批播完提交。标签 delta 只走这一条，不写事件流。
   if (playback.live && state.liveView) {
     applyLiveDelta(record, state.liveView);
     // renderTable 末尾就是舞台重绘（`renderProcessing`），播放期也走同一条口。
     renderTable();
-  } else {
+  } else if (!liveOnly) {
     // 开局批次没有上一份提交视图可派生：表体等 commit，舞台照旧逐事件派生。
     renderProcessing();
   }
-  // U3-03（D8.1 / D13）：决策点高亮、使用牌目标线、体力闪。回放页不走这条路径（D14）。
-  // 放在表体重绘**之后**：描边 / 体力闪要落在新座位节点上（`syncTransientEffects` 兜住
-  // 未到寿命的那几个，这里补的是这一条记录新产生的那一个）。
-  applyRecordEffects(record, playback.querySeat);
-  // A1：洛神连续判定——弹窗已开着时，用刚进处理区的判定牌续上同一个窗口。
-  // 只读 JUDGE 帧 + `card_move(reason=JUDGE)` 这两条服务端事实，不认技能名；舞台已由
-  // `applyEffectDelta` 照常派生（弹窗不往舞台上加卡）。
-  const judgedCard = judgmentCardFromRecord(record);
-  if (judgedCard) refreshJudgmentReveal(judgedCard);
-  // U3-04（D9）：技能发动的演出挂在**产生它的那条记录**的 seq 上。
-  fireSkillEventsThrough(record.seq);
-  scrollLogToBottom();
+  if (!liveOnly) {
+    // U3-03（D8.1 / D13）：决策点高亮、使用牌目标线、体力闪。回放页不走这条路径（D14）。
+    // 放在表体重绘**之后**：描边 / 体力闪要落在新座位节点上（`syncTransientEffects` 兜住
+    // 未到寿命的那几个，这里补的是这一条记录新产生的那一个）。
+    applyRecordEffects(record, playback.querySeat);
+    // A1：洛神连续判定——弹窗已开着时，用刚进处理区的判定牌续上同一个窗口。
+    // 只读 JUDGE 帧 + `card_move(reason=JUDGE)` 这两条服务端事实，不认技能名；舞台已由
+    // `applyEffectDelta` 照常派生（弹窗不往舞台上加卡）。
+    const judgedCard = judgmentCardFromRecord(record);
+    if (judgedCard) refreshJudgmentReveal(judgedCard);
+    // U3-04（D9）：技能发动的演出挂在**产生它的那条记录**的 seq 上。
+    fireSkillEventsThrough(record.seq);
+    scrollLogToBottom();
+  }
   playback.index += 1;
   if (!immediate) playbackTimer = window.setTimeout(() => stepPlayback(false), state.eventDelayMs);
 }

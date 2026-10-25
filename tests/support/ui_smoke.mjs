@@ -12708,6 +12708,104 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.resetSelection();
 }
 
+/* ============ 票 13：tag_add / tag_remove 逐事件更新 live view（不等下一次询问） ====
+ *
+ * 标签 delta 在人类记录流里仍整条裁掉（服务端另走 `live_deltas` 展示通道）；这里
+ * 只喂前端会收到的形状：`{kind, delta_type, seq, card_id, tag:{skill_id,label}}`。
+ * 判据 = 同一询问序号下，处理完 tag 事件后卡面标签已经出现 / 消失——不产生新询问。
+ */
+{
+  const hasClass = (node, name) => Boolean(node)
+    && (node.classList.contains(name) || String(node.className || "").split(/\s+/).includes(name));
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const byClass = (node, name) => walk(node).filter((child) => hasClass(child, name));
+  const tag = { skill_id: "hero.jie_zhenji.luoshen", label: "洛神" };
+  const card = (id, extra = {}) => ({
+    ...synthCard(id, "杀"), display_name: "杀", kind: "normal",
+    attribute: "普通", description: "服务端描述：杀", ...extra,
+  });
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 8801,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 8801 }],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  };
+  const viewWith = (handTags, equipTags) => {
+    const view = synthView(pending);
+    view.snapshot.self_hand = [card(301, handTags ? { tags: handTags } : {})];
+    view.snapshot.players[0].equip = [
+      card(401, { slot: "weapon", attack_range: 2, ...(equipTags ? { tags: equipTags } : {}) }),
+    ];
+    view.cursor = 0;
+    view.log_seq = 0;
+    view.records = [];
+    view.live_deltas = [];
+    return view;
+  };
+  const tagText = (cardId) => {
+    const nodes = walk($("t-hand")).concat(walk($("t-self-zones")));
+    const face = nodes.find((node) => hasClass(node, "face")
+      && node.getAttribute("data-card-id") === String(cardId));
+    const box = face ? byClass(face, "card-tags")[0] : null;
+    return box ? box.textContent : "";
+  };
+
+  ui.state.sessionId = "tag-live";
+  ui.state.view = null;
+  ui.applyViewRaw(viewWith(null, null));
+  ui.flushPlayback();
+
+  const add = viewWith(null, null);
+  add.cursor = 1;
+  add.live_deltas = [
+    { kind: "delta", delta_type: "tag_add", seq: 1, card_id: 301, tag },
+    { kind: "delta", delta_type: "tag_add", seq: 2, card_id: 401, tag },
+  ];
+  ui.applyViewRaw(add);
+  ui.stepPlayback(true);
+  ui.stepPlayback(true);
+  const equipTags = () => {
+    const equip = ((ui.state.liveView || {}).snapshot || {}).players;
+    const card = equip && equip[0] && (equip[0].equip || [])[0];
+    return (card && Array.isArray(card.tags) ? card.tags : []).map((item) => item.label).join(",");
+  };
+  check("M5-08d-t1 tag_add 逐事件更新 live view：自己的手牌与公开装备区当场出现标签，询问序号不变",
+    tagText(301) === "洛神" && equipTags() === "洛神"
+      && ui.state.view.pending.seq === 8801,
+    `hand="${tagText(301)}" equip="${equipTags()}" seq=${ui.state.view.pending.seq}`);
+
+  // 先造一份“已提交且带标签”的权威视图，再让 tag_remove 在 live view 里逐事件撤掉。
+  ui.flushPlayback();
+  ui.state.view = viewWith([tag], [tag]);
+  ui.state.liveView = null;
+  ui.renderTable();
+  const remove = viewWith([tag], [tag]);
+  remove.cursor = 2;
+  remove.live_deltas = [
+    { kind: "delta", delta_type: "tag_remove", seq: 3, card_id: 301, tag },
+    { kind: "delta", delta_type: "tag_remove", seq: 4, card_id: 401, tag },
+  ];
+  ui.applyViewRaw(remove);
+  ui.stepPlayback(true);
+  ui.stepPlayback(true);
+  check("M5-08d-t2 tag_remove 逐事件更新 live view：手牌与公开装备区的标签当场消失，询问序号不变",
+    tagText(301) === "" && equipTags() === ""
+      && ui.state.view.pending.seq === 8801,
+    `hand="${tagText(301)}" equip="${equipTags()}" seq=${ui.state.view.pending.seq}`);
+
+  ui.flushPlayback();
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.state.liveView = null;
+  ui.state.playback = null;
+  ui.state.logRecords = [];
+  ui.resetSelection();
+}
+
 /* ============ U3-01（票 01）：舞台三组 / 来源底行 / 淡出寿命 / 粘底 / 回放 ============
  *
  * 判据来自票面与 spec D2 / D3 / D5 / D10 / D14 / D15。载荷是**与响应体同形**的合成

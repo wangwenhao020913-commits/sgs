@@ -65,7 +65,9 @@ __all__ = [
     "HARVEST_REQUIREMENT",
     "build_skills",
     "candidate_index",
+    "decorate_records_card_tags",
     "harvest_state",
+    "live_tag_deltas_after",
     "option_seats",
     "option_source",
     "pending_payload",
@@ -252,6 +254,113 @@ def _decorate_pending_card_tags(
     view = payload.get("view")
     if isinstance(view, dict):
         _decorate_snapshot_card_tags(view, state, viewer)
+
+
+def _visible_card_ids(payload: Mapping[str, Any]) -> set[int]:
+    """一份快照里**已经下发牌面**的牌 id（标签可见性的现成判据）。"""
+    ids: set[int] = set()
+    for key in ("self_hand", "discard", "processing"):
+        for card in payload.get(key) or []:
+            if isinstance(card, Mapping) and card.get("card_id") is not None:
+                ids.add(int(card["card_id"]))
+    for player in payload.get("players") or []:
+        if not isinstance(player, Mapping):
+            continue
+        for key in ("equip", "judge"):
+            for card in player.get(key) or []:
+                if isinstance(card, Mapping) and card.get("card_id") is not None:
+                    ids.add(int(card["card_id"]))
+        for zone in player.get("hero_zones") or []:
+            if not isinstance(zone, Mapping):
+                continue
+            for card in zone.get("cards") or []:
+                if isinstance(card, Mapping) and card.get("card_id") is not None:
+                    ids.add(int(card["card_id"]))
+    return ids
+
+
+def decorate_records_card_tags(
+    records: list[dict[str, Any]], state: Any, viewer: int | None
+) -> None:
+    """给人类 ``records`` 里**已下发牌面**的牌补标签（只改网页载荷）。
+
+    ``tag_add`` / ``tag_remove`` 本身仍被 :func:`visible_record` 裁掉；但一次
+    ``card_move`` 可能把带标签的牌搬进手牌 / 弃牌堆，前端逐事件追加这份牌面时
+    需要标签跟着牌走。这里只补 ``tags``，不改牌的位置 / 数量，也不改记录类型。
+    """
+    for record in records:
+        if not isinstance(record, dict) or record.get("kind") != "delta":
+            continue
+        delta_type = record.get("delta_type")
+        if delta_type == "card_move":
+            for card in record.get("cards") or []:
+                _decorate_card_tags(card, state, viewer)
+        elif delta_type == "card_reveal":
+            _decorate_card_tags(record.get("card"), state, viewer)
+
+
+def _live_record_value(record: Any, name: str, default: Any = None) -> Any:
+    """模型 / 已序列化 dict 两种形状读同一个字段。"""
+    if isinstance(record, Mapping):
+        return record.get(name, default)
+    return getattr(record, name, default)
+
+
+def live_tag_deltas_after(
+    records: Iterable[Any],
+    *,
+    after: int,
+    state: Any,
+    snapshot: Mapping[str, Any],
+    viewer: int | None,
+) -> list[dict[str, Any]]:
+    """把人类记录流里被裁掉的**可见牌标签增删**转成展示用的 live delta。
+
+    只服务网页载荷的逐事件 live view（``live_deltas``），**不进入** ``records``：
+    人类记录流里的 ``tag_add`` / ``tag_remove`` 保持原样裁掉。每条载荷带服务端
+    从技能目录派生的 ``tag.label``，前端不建技能 id → 中文名表。
+
+    可见性复用**快照里已经下发的牌面**：``snapshot`` 里没有的牌（他人手牌 / 牌堆）
+    连 live delta 都不发；``FACE_VISIBLE`` 因此不会从这条旁路泄露牌面或标签名。
+    顺序按记录 ``seq``，由前端与同批记录一起逐事件消费。
+    """
+    visible = _visible_card_ids(snapshot)
+    out: list[dict[str, Any]] = []
+    for record in records:
+        if _live_record_value(record, "kind") != "delta":
+            continue
+        seq = _live_record_value(record, "seq")
+        if not isinstance(seq, int) or seq <= after:
+            continue
+        delta_type = _live_record_value(record, "delta_type")
+        if delta_type not in ("tag_add", "tag_remove"):
+            continue
+        card = _live_record_value(record, "card")
+        card_id = (
+            card.get("card_id")
+            if isinstance(card, Mapping)
+            else getattr(card, "card_id", None)
+        )
+        if card_id is None or int(card_id) not in visible:
+            continue
+        tag_type = _live_record_value(record, "tag_type")
+        tag_type_value = getattr(tag_type, "value", tag_type)
+        if not tag_visible(tag_type_value, viewer, face_visible=True):
+            continue
+        skill_id = str(_live_record_value(record, "skill_id"))
+        out.append(
+            {
+                "kind": "delta",
+                "delta_type": str(delta_type),
+                "seq": int(seq),
+                "card_id": int(card_id),
+                "tag": {
+                    "skill_id": skill_id,
+                    "label": _skill_display_name(state, skill_id) or skill_id,
+                },
+            }
+        )
+    return out
 
 
 def visible_snapshot(session: Session) -> dict[str, Any]:

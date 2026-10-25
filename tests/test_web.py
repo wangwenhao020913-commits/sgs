@@ -5658,6 +5658,85 @@ def test_face_visible_tag_deltas_stay_out_of_the_human_record_stream() -> None:
     assert visible_record(delta, viewer=None) is not None, "全知通道仍可读原始记录"
 
 
+def test_tag_deltas_reach_the_live_channel_with_labels_but_stay_out_of_records() -> None:
+    """标签走**展示用的 live 通道**：带服务端 label，但不进人类 ``records``。
+
+    这是 #13 的服务端半边：前端只收到 ``live_deltas``（网页载荷），据此就地更新
+    ``liveView``，不必等下一次询问；人类记录流里的 ``tag_add`` / ``tag_remove`` 仍然
+    整条裁掉（硬边界不变）。覆盖自己的手牌与公开的弃牌堆。
+    """
+    from sgs.data import CardTagClear, CardTagType
+    from sgs.state import CardTag
+    from sgs_web.serve import GameRegistry
+
+    session = Session(seed=7, ai="random", timeout_seconds=None, player_count=4)
+    registry = GameRegistry(runs_dir="/tmp/unused")
+    first = registry.view(session, after=-1, logs_after=0)
+    seat = session.human_seat
+    card_id = session.engine.state.player(seat).hand[0]
+    skill_id = "hero.jie_zhenji.luoshen"
+    tag = CardTag(
+        tag_type=CardTagType.LUOSHEN_HAND,
+        owner=seat,
+        skill_id=skill_id,
+    )
+
+    session.engine.add_card_tag(card_id, tag)
+    added = registry.view(session, after=first["cursor"], logs_after=first["log_seq"])
+    assert len(added["live_deltas"]) == 1, added["live_deltas"]
+    added_event = added["live_deltas"][0]
+    assert added_event["kind"] == "delta"
+    assert added_event["delta_type"] == "tag_add"
+    assert added_event["seq"] > first["cursor"]
+    assert added_event["card_id"] == card_id
+    assert added_event["tag"] == {"skill_id": skill_id, "label": "洛神"}
+    assert not [
+        record
+        for record in added["records"]
+        if record.get("delta_type") in ("tag_add", "tag_remove")
+    ], "人类记录流仍不转发标签 delta"
+    own_card = next(
+        card for card in added["snapshot"]["self_hand"] if card["card_id"] == card_id
+    )
+    assert own_card["tags"] == [{"skill_id": skill_id, "label": "洛神"}]
+
+    session.engine.clear_card_tags(CardTagClear.TURN_END)
+    removed = registry.view(
+        session, after=added["cursor"], logs_after=added["log_seq"]
+    )
+    assert len(removed["live_deltas"]) == 1, removed["live_deltas"]
+    removed_event = removed["live_deltas"][0]
+    assert removed_event["delta_type"] == "tag_remove"
+    assert removed_event["seq"] > added["cursor"]
+    assert removed_event["card_id"] == card_id
+    assert removed_event["tag"] == {"skill_id": skill_id, "label": "洛神"}
+
+    # 公开区：同一张牌进弃牌堆后再挂标签 ⇒ 快照带标签、live 通道也带（牌面公开可见）。
+    player = session.engine.state.player(seat)
+    player.hand.remove(card_id)
+    session.engine.state.discard.append(card_id)
+    session.engine.add_card_tag(card_id, tag)
+    public = registry.view(session, after=removed["cursor"], logs_after=removed["log_seq"])
+    public_card = next(
+        card for card in public["snapshot"]["discard"] if card["card_id"] == card_id
+    )
+    assert public_card["tags"] == [{"skill_id": skill_id, "label": "洛神"}]
+    assert [event["card_id"] for event in public["live_deltas"]] == [card_id]
+
+    # 反面：同一张牌进了别人的手牌 ⇒ 牌面不可见，live 通道连标签名都不发。
+    session.engine.clear_card_tags(CardTagClear.TURN_END)
+    session.engine.state.discard.remove(card_id)
+    session.engine.state.player((seat + 1) % session.rule_config.player_count).hand.append(
+        card_id
+    )
+    session.engine.add_card_tag(card_id, tag)
+    hidden = registry.view(
+        session, after=public["cursor"], logs_after=public["log_seq"]
+    )
+    assert hidden["live_deltas"] == [], "看不到牌面时，标签旁路也必须整条裁掉"
+    assert "洛神" not in json.dumps(hidden["snapshot"], ensure_ascii=False)
+
+
 def test_face_visible_tags_ride_the_pending_views_own_hand_card() -> None:
     """询问载荷的内嵌视角（自己手牌）同样带标签；不是只在快照接口里补。"""
     from sgs.data import CardTagType

@@ -49,6 +49,8 @@ from sgs.engine import IllegalActionError  # noqa: E402
 from sgs_web.narrative import narrative_after  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
+    decorate_records_card_tags,
+    live_tag_deltas_after,
     pending_payload,
     skill_events_after,
     visible_record,
@@ -319,11 +321,16 @@ class GameRegistry:
     def view(self, session: Session, *, after: int, logs_after: int) -> dict[str, Any]:
         """会话视角的响应体（建局 / 取增量 / 应答三处**共用同一个形状**）。"""
         all_records = session.records()
+        window = session.records_after(after)
         records = [
             payload
-            for record in session.records_after(after)
+            for record in window
             if (payload := visible_record(record, viewer=session.human_seat)) is not None
         ]
+        snapshot = visible_snapshot(session)
+        # 标签 delta 仍不进人类记录流（`visible_record` 裁掉）；这张牌的**可见**增删
+        # 另走展示通道，前端据此逐事件更新 live view，不必等下一次询问。
+        decorate_records_card_tags(records, session.engine.state, session.human_seat)
         return {
             "session_id": session.session_id,
             "seed": session.seed,
@@ -336,10 +343,17 @@ class GameRegistry:
             "finished": session.finished,
             "cursor": session.next_cursor(after),
             "log_seq": session.log_seq,
-            "snapshot": visible_snapshot(session),
+            "snapshot": snapshot,
             "skills": build_skills(session, session.human_seat),
             "pending": pending_payload(session),
             "records": records,
+            "live_deltas": live_tag_deltas_after(
+                window,
+                after=after,
+                state=session.engine.state,
+                snapshot=snapshot,
+                viewer=session.human_seat,
+            ),
             # U1-05 叙事契约：简易事件流的条目由服务端生成、按查看者过滤；前端只渲染。
             # 游标复用记录流的 `after`——条目自带产生它的记录 `seq`，两批拼接 = 全量。
             "narrative": narrative_after(
