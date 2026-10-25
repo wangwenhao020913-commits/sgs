@@ -24,7 +24,6 @@ from typing import Any
 
 from sgs.data import (
     hero_by_id,
-    hero_placement_decls,
     hero_skill_id,
     load_content_pack,
     load_hero_tables,
@@ -58,7 +57,6 @@ from .session import Session
 from .visibility import (
     cards_visible,
     deck_cards_visible,
-    hero_zone_visible,
     identity_visible,
     tag_visible,
 )
@@ -204,11 +202,13 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
     # 顶层带 `available` / `ui.convert_sources`，读的是**查看者当前询问与手牌**。
     for player_payload, player in zip(payload["players"], view.players, strict=True):
         player_payload["skills"] = seat_skill_display(session, player.seat)
-        # M6 票 19：**武将牌上的牌区**（可跨座位、可多人并存）。可见性由放置技能的数据
-        # 声明裁剪（`PlacementDecl.visibility`），不是"数据里恰好没有隐藏区"。
+        # M6 票 19 / 用户口径：武将牌上的牌区——**标签全体可见、牌只给宿主**；
+        # 未登记区同一默认（标签退回技能 id），可见性只在服务端裁。
         player_payload["hero_zones"] = seat_hero_zones(
             session, player.seat, viewer=session.human_seat
         )
+        # B：武将块上的状态标签（手牌上限加式 / 裸衣）。纯网页显示字段，不进 PlayerView。
+        player_payload["hero_tags"] = seat_hero_tags(state.player(player.seat))
     # M6 票 19：顶栏的轮次 / 额外回合提示。轮次自票 11 起是引擎事实（额外回合不推进
     # 自然指针），但 ``PlayerView`` 里**没有**它——加进去会改 47 条金录像的记录字节
     # （票 11 已核）。故与技能清单同姿态：只在本函数里补进**网页载荷**，记录流不动。
@@ -220,15 +220,17 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
 def seat_hero_zones(
     session: Session, seat: int, *, viewer: int | None
 ) -> list[dict[str, Any]]:
-    """一个座位**武将牌上的牌区**（M6 票 19 / spec §区域 / D14）。
+    """一个座位**武将牌上的牌区**（M6 票 19 / spec §区域；2026-10 用户口径修订）。
 
     口径：
 
     - 区键 = （座位, 技能实例）。座位 = 武将牌的主人（**可跨座位**：牌可以扣在别人身上），
       技能实例 = 放置技能的持有者 + 技能 id；`Player.hero_cards` 的键已经是规范文本。
-    - **可见性按数据声明裁**：``PlacementDecl.visibility`` 是唯一判据
-      （:func:`sgs_web.visibility.hero_zone_visible`）；未声明的技能 / 未登记的取值一律
-      不下发（fail-closed）。
+    - **标签全体可见**：每个非空区都下发 ``skill_id`` / ``skill_name`` / ``owner``；
+      未登记区没有中文名时退回 ``skill_id``（fail-visible，不猜名字）。
+    - **牌默认只有宿主可见**：``cards`` 只在 ``viewer == seat``（宿主）或 ``viewer is None``
+      （全知通道）时填；非宿主拿到空数组——不是把牌发给客户端再用 CSS 藏。旧
+      ``PlacementDecl.visibility`` 不再决定本载荷的牌面可见性（用户口径：只认宿主）。
     - **只画有牌的区**：空区在引擎里是合法且被保留的（规则 15.2：失去技能不影响区），
       但界面不需要一行空框。
     - 牌面走**同一份卡面契约**（``display.card_payload``）：牌名 / 属性 / 描述与别处一致。
@@ -236,37 +238,51 @@ def seat_hero_zones(
     """
     state = session.engine.state
     player = state.player(seat)
-    declared = hero_placement_decls(state.pack_id)
     lookup = _card_lookup(state)
+    host_view = viewer is None or int(viewer) == int(seat)
     out: list[dict[str, Any]] = []
     for zone in player.hero_cards.values():
         if not zone.cards:
             continue
-        declaration = declared.get(zone.skill_id)
-        if declaration is None:
-            continue
-        if not hero_zone_visible(
-            declaration.visibility.value, owner=zone.owner, host=seat, viewer=viewer
-        ):
-            continue
         cards: list[dict[str, Any]] = []
-        for card_id in zone.cards:
-            try:
-                card = state.card(card_id)
-            except (KeyError, IndexError):  # pragma: no cover - 牌守恒由引擎保证
-                continue
-            cards.append(card_payload(card, lookup=lookup))
-        if not cards:  # pragma: no cover - 与上面 `not zone.cards` 同一条守卫
-            continue
+        if host_view:
+            for card_id in zone.cards:
+                try:
+                    card = state.card(card_id)
+                except (KeyError, IndexError):  # pragma: no cover - 牌守恒由引擎保证
+                    continue
+                cards.append(card_payload(card, lookup=lookup))
         out.append(
             {
                 "skill_id": zone.skill_id,
-                "skill_name": _skill_display_name(state, zone.skill_id),
+                "skill_name": (
+                    _skill_display_name(state, zone.skill_id) or zone.skill_id
+                ),
                 "owner": int(zone.owner),
                 "cards": cards,
             }
         )
     return out
+
+
+def seat_hero_tags(player: Any) -> list[dict[str, Any]]:
+    """武将块上的**状态标签**（B；纯显示层，不进 ``PlayerView`` / 记录流）。
+
+    读引擎座位上的公开状态字段，只给标签名，不把效果文案抄到每张牌上：
+
+    - ``Player.hand_limit_bonus`` 非 0 ⇒ 「手牌上限+N」；
+    - ``Player.luoyi_active`` / ``Player.luoyi_until_next_turn`` ⇒ 「裸衣」（标准 / 界两个
+      作用域字段同一条标签；不给【杀】/【决斗】逐张画“伤害+1”）。
+    """
+    tags: list[dict[str, Any]] = []
+    bonus = int(getattr(player, "hand_limit_bonus", 0) or 0)
+    if bonus:
+        tags.append({"tag": "hand_limit_bonus", "label": f"手牌上限{bonus:+d}"})
+    if getattr(player, "luoyi_active", False) or getattr(
+        player, "luoyi_until_next_turn", False
+    ):
+        tags.append({"tag": "luoyi", "label": "裸衣"})
+    return tags
 
 
 def seat_skill_display(session: Session, seat: int) -> list[dict[str, Any]]:

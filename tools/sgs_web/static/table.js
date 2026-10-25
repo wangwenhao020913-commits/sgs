@@ -192,6 +192,7 @@ function renderSelfSeat(view, ctx) {
   }
   // M6 票 19：武将牌上的牌区画在**武将块**里（与对手块同一个渲染口）。
   fillHeroZones($("t-self-hero-zones"), player);
+  fillHeroTags($("t-self-hero-tags"), player);
 }
 
 /** 顶栏那块公开身份配比：2 人局（无身份局）整块隐藏。 */

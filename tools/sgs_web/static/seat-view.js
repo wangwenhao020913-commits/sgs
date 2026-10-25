@@ -216,38 +216,77 @@ function miniSlotNode(options) {
   return node;
 }
 
-/** **武将牌上的牌区**（M6 票 10 / 票 19；spec §区域）：一个区一行，画在**武将块**里。
+/** **武将牌上的牌区**（M6 票 10 / 票 19；2026-10 用户口径）：一个区一个**标签**。
  *
- * 形状判据（服务端已裁好可见性，前端不判）：
- * - 可跨座位：区记 `owner`（放置技能的持有者），行落在**宿主座位**的武将牌上；
- * - 可多人并存：同一座位可以为每个技能实例各有一行（服务端 `hero_zones` 是数组）；
- * - 这些牌**不在手牌区**，故手牌数（`player.hand_count`）不含它们——界面不另算。
+ * 服务端已裁好牌面可见性（`hero_zones[].cards` 非空 = 宿主可见；空数组 = 非宿主）：
+ * - 标签（`skill_name`，未登记区退回 skill_id）**全体可见**；
+ * - 宿主：标签可点 / 悬停展开，展开后列出区里的牌；默认收起；
+ * - 非宿主：只有标签，**没有牌容器、没有展开入口**（前端不拿 CSS 藏牌）；
+ * - 可跨座位 / 可多人并存：每个区一行，落在**宿主座位**的武将块里；
+ * - 这些牌不在手牌区，故 `hand_count` 不含它们——界面不另算。
  *
- * 布局：座位卡是固定尺寸（对手 210×150 / 自己 292×210），故一行**单行横向滚动**而不换行
- * ——【谦逊】一次可以扣下整手牌，换行会把盒子撑破（实机验收的发现）。
+ * DOM 形状：`.hero-zone-row[data-zone=hero][data-seat][data-skill-id][data-cards-visible]`
+ * + `.hero-zone-tag`（宿主 `<button aria-expanded>` / 非宿主 `<span class=static>`）
+ * + 宿主才有的 `.hero-zone-cards[hidden]` / `.hero-zone-card[data-card-id]`。
  * 空区不下发（服务端只给有牌的区），故这里不需要空占位。
  */
 function heroZoneRows(player) {
   const rows = [];
   for (const zone of (player && player.hero_zones) || []) {
+    const cards = zone.cards || [];
+    const hostVisible = cards.length > 0;
     const row = document.createElement("div");
     row.className = "hero-zone-row";
     row.setAttribute("data-zone", "hero");
     row.setAttribute("data-seat", String(player.seat));
     row.setAttribute("data-skill-id", zone.skill_id || "");
-    const label = document.createElement("span");
-    label.className = "zone-k";
-    label.textContent = zone.skill_name || "武将牌上";
-    label.setAttribute("title", `武将牌上（${zone.skill_name || zone.skill_id || "技能"}）`);
-    row.appendChild(label);
-    for (const card of zone.cards || []) {
-      const chip = document.createElement("span");
-      chip.className = "hero-zone-card";
-      chip.setAttribute("data-card-id", String(card.card_id));
-      // 悬停全文与手牌 / 装备 / 处理区**同一份**服务端描述（U1-04b）。
-      chip.setAttribute("title", `${cardName(card)}\n${cardDescription(card)}`);
-      chip.textContent = cardName(card);
-      row.appendChild(chip);
+    row.setAttribute("data-cards-visible", hostVisible ? "true" : "false");
+    const labelText = zone.skill_name || zone.skill_id || "武将牌上";
+    let tag;
+    let cardsBox = null;
+    if (hostVisible) {
+      tag = document.createElement("button");
+      tag.type = "button";
+      tag.className = "hero-zone-tag";
+      tag.setAttribute("aria-expanded", "false");
+      tag.setAttribute("title", `${labelText}：点击或悬停查看牌`);
+      cardsBox = document.createElement("div");
+      cardsBox.className = "hero-zone-cards";
+      cardsBox.hidden = true;
+      const setOpen = (open) => {
+        cardsBox.hidden = !open;
+        row.setAttribute("data-open", open ? "true" : "false");
+        tag.setAttribute("aria-expanded", String(open));
+      };
+      let pinned = false;
+      tag.addEventListener("click", (event) => {
+        if (event && event.stopPropagation) event.stopPropagation();
+        pinned = !pinned;
+        setOpen(pinned);
+      });
+      tag.addEventListener("mouseenter", () => setOpen(true));
+      tag.addEventListener("mouseleave", () => {
+        if (!pinned) setOpen(false);
+      });
+    } else {
+      tag = document.createElement("span");
+      tag.className = "hero-zone-tag static";
+      tag.setAttribute("title", `${labelText}（牌面仅宿主可见）`);
+    }
+    tag.setAttribute("data-tag", labelText);
+    tag.textContent = labelText;
+    row.appendChild(tag);
+    if (cardsBox) {
+      for (const card of cards) {
+        const chip = document.createElement("span");
+        chip.className = "hero-zone-card";
+        chip.setAttribute("data-card-id", String(card.card_id));
+        // 悬停全文与手牌 / 装备 / 处理区**同一份**服务端描述（U1-04b）。
+        chip.setAttribute("title", `${cardName(card)}\n${cardDescription(card)}`);
+        chip.textContent = cardName(card);
+        cardsBox.appendChild(chip);
+      }
+      row.appendChild(cardsBox);
     }
     rows.push(row);
   }
@@ -261,6 +300,24 @@ function fillHeroZones(box, player) {
   const rows = heroZoneRows(player);
   box.hidden = rows.length === 0;
   for (const row of rows) box.appendChild(row);
+}
+
+/** B：武将块上的**状态标签**（服务端 `hero_tags`：[{tag,label}]）。没有标签整块隐藏。
+ *
+ * 只渲染服务端下发的 `label` / `tag`，前端不按技能 / 牌面计算"该显示什么"。
+ */
+function fillHeroTags(box, player) {
+  if (!box) return;
+  box.innerHTML = "";
+  const tags = (player && player.hero_tags) || [];
+  box.hidden = tags.length === 0;
+  for (const tag of tags) {
+    const chip = document.createElement("span");
+    chip.className = "hero-tag";
+    chip.setAttribute("data-tag", tag.tag || "");
+    chip.textContent = tag.label || tag.tag || "";
+    box.appendChild(chip);
+  }
 }
 
 /** 右侧判定 / 装备区（两个容器，`data-zone` 落在行上——与旧读取口一致）。
@@ -334,6 +391,11 @@ function heroBlockNode(player, view, ctx, flags) {
   zones.className = "hero-zones";
   fillHeroZones(zones, player);
   block.appendChild(zones);
+  // B：手牌上限 / 裸衣等状态标签（服务端 hero_tags）。
+  const heroTags = document.createElement("div");
+  heroTags.className = "hero-tags";
+  fillHeroTags(heroTags, player);
+  block.appendChild(heroTags);
   const foot = document.createElement("div");
   foot.className = "seat-foot";
   const hand = document.createElement("span");

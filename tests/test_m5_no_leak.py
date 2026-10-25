@@ -969,17 +969,12 @@ def _hero_zone_move(from_zone: ZoneRef, to_zone: ZoneRef) -> CardMoveRecord:
     )
 
 
-def test_a_hero_card_zone_move_follows_the_placement_declaration(monkeypatch) -> None:  # noqa: ANN001
-    """HERO 区的牌面可见性 = ``PlacementDecl.visibility``（不是"HERO 一律隐藏"）。
+def test_a_hero_card_zone_move_is_host_only() -> None:
+    """HERO 区的牌面可见性 = **只给宿主**（2026-10 用户口径，不看旧 visibility 声明）。
 
-    【谦逊】在数据里声明为 ``public`` ⇒ 离开该区的移动对外人可见（票 19 的 no-leak 判据
-    原先把它当隐藏区：**过度隐藏**，不是泄露）。换成 ``hidden``（同一份声明的 monkeypatch，
-    走产品读取路径）⇒ 只给放置者 / 宿主；未登记的区键 fail-closed。
+    宿主 = ``ZoneRef.seat``（武将牌的主人）；非宿主（含放置技能的 owner）只拿张数；
+    ``viewer=None``（全知 / 回放）不裁剪。未登记的区键同一默认：宿主可见、外人脱敏。
     """
-    from sgs.data.models import PlacementDecl, PlacementReturn, PlacementVisibility
-
-    from sgs_web import visibility as visibility_module
-
     return_move = _hero_zone_move(
         ZoneRef(Zone.HERO, 1, _QIANXUN_ZONE_KEY), ZoneRef(Zone.HAND, 1)
     )
@@ -987,36 +982,20 @@ def test_a_hero_card_zone_move_follows_the_placement_declaration(monkeypatch) ->
         ZoneRef(Zone.HAND, 1), ZoneRef(Zone.HERO, 1, _QIANXUN_ZONE_KEY)
     )
 
-    # ① 数据声明 public：外人可见（原实现把 HERO 当隐藏区 ⇒ 这里会红）。
-    for move in (return_move, put_move):
-        payload = visible_record(move, viewer=0)
-        assert payload["cards"] and payload["cards"][0]["card_id"] == HIDDEN_CARD.card_id, (
-            f"公开放置区的移动被误脱敏：{payload}"
-        )
-
-    # ② 同一份声明换成 hidden：只给放置者 / 宿主本人（这里 owner = host = 1）。
-    hidden = PlacementDecl(
-        visibility=PlacementVisibility.HIDDEN,
-        return_timing=PlacementReturn.TURN_END,
-        extra_effect=False,
-    )
-    real_lookup = visibility_module.hero_placement_decls
-    monkeypatch.setattr(
-        visibility_module,
-        "hero_placement_decls",
-        lambda: dict(real_lookup()) | {"hero.jie_luxun.qianxun": hidden},
-    )
     for move in (return_move, put_move):
         foreign = visible_record(move, viewer=0)
         _assert_card_faces_absent(foreign, (HIDDEN_CARD,))
         allowed = visible_record(move, viewer=1)
         assert allowed["cards"] and allowed["cards"][0]["card_id"] == HIDDEN_CARD.card_id, (
-            "隐藏区对放置者 / 宿主本人可见"
+            "宿主本人（ZoneRef.seat）看得见 HERO 区的牌"
         )
         assert visible_record(move, viewer=None)["cards"], "全知通道不裁剪"
 
-    # ③ 未登记的区键（不是放置类技能）fail-closed：外人拿不到牌面。
+    # 未登记的区键（不是放置类技能）同一默认：宿主可见、外人脱敏。
     unregistered = _hero_zone_move(
         ZoneRef(Zone.HERO, 1, "1:hero.jie_luxun.lianying"), ZoneRef(Zone.HAND, 1)
     )
     _assert_card_faces_absent(visible_record(unregistered, viewer=0), (HIDDEN_CARD,))
+    assert visible_record(unregistered, viewer=1)["cards"], (
+        "未登记区的宿主仍看得见（不是整块 fail-closed）"
+    )

@@ -14313,6 +14313,9 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   };
   const rowOf = (root, attr, value) => boxSkills(root).find(
     (node) => node.getAttribute && node.getAttribute(attr) === String(value)) || null;
+  const hasClass = (node, name) => Boolean(node && (
+    node.classList.contains(name)
+    || String(node.className || "").split(/\s+/).includes(name)));
 
   /* ---- ④ 混合池：真会话 + 旧载荷兜底（spec 用户故事「刘备 / 界刘备 分得清」） ---- */
   const jieSession = await newSession(4321, { my_hero: "jie_liubei" });
@@ -14368,36 +14371,106 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     skill_id: "hero.jie_luxun.qianxun", skill_name: "谦逊", owner: 1,
     cards: [synthCard(21, "杀"), synthCard(22, "闪")],
   }];
+  zoneView.snapshot.players[0].hero_tags = [
+    { tag: "hand_limit_bonus", label: "手牌上限+1" },
+    { tag: "luoyi", label: "裸衣" },
+  ];
+  // 非宿主拿到的同一区：标签在、cards 为空（服务端已裁；界面不自己藏牌）。
   zoneView.snapshot.players[2].hero_zones = [{
-    skill_id: "hero.jie_xusheng.pojun", skill_name: "破军", owner: 0,
-    cards: [synthCard(23, "桃")],
+    skill_id: "hero.jie_xusheng.pojun", skill_name: "破军", owner: 0, cards: [],
   }];
+  zoneView.snapshot.players[2].hero_tags = [{ tag: "luoyi", label: "裸衣" }];
   ui.state.view = zoneView;
   ui.resetSelection();
   ui.renderTable();
   const selfZoneRow = rowOf($("t-self-hero-zones"), "data-zone", "hero");
-  const selfZoneCards = selfZoneRow
-    ? Array.from(selfZoneRow.children).filter((node) => node.getAttribute("data-card-id"))
+  const selfZoneTag = selfZoneRow
+    ? Array.from(selfZoneRow.children).find((node) => hasClass(node, "hero-zone-tag"))
+    : null;
+  const selfZoneCardsBox = selfZoneRow
+    ? Array.from(selfZoneRow.children).find((node) => hasClass(node, "hero-zone-cards"))
+    : null;
+  const cardsHiddenBefore = Boolean(selfZoneCardsBox && selfZoneCardsBox.hidden);
+  if (selfZoneTag) {
+    (selfZoneTag.listeners.click || []).forEach(
+      (fn) => fn({ target: selfZoneTag, stopPropagation() {} }));
+  }
+  const selfZoneCards = selfZoneCardsBox
+    ? Array.from(selfZoneCardsBox.children).filter(
+      (node) => node.getAttribute("data-card-id"))
     : [];
   const selfZonesBox = $("t-self-hero-zones");
-  check("㉉M6-6 自己的武将牌上区域画在武将块里（区名 + 两张牌，横向一行）",
+  check("㉉M6-6 自己的武将牌上区域 = 一个标签；点开才列出区里的牌",
     !!selfZoneRow && selfZonesBox.hidden === false
       && selfZoneRow.getAttribute("data-skill-id") === "hero.jie_luxun.qianxun"
-      && selfZoneRow.text().includes("谦逊")
+      && selfZoneRow.getAttribute("data-cards-visible") === "true"
+      && !!selfZoneTag && selfZoneTag.textContent === "谦逊"
+      && cardsHiddenBefore && !!selfZoneCardsBox && selfZoneCardsBox.hidden === false
       && selfZoneCards.map((node) => node.getAttribute("data-card-id")).join(",") === "21,22",
     selfZoneRow ? selfZoneRow.text().replace(/\s+/g, " ").trim() : "没有 hero 行");
+  // 再点一次收起；悬停展开、离开收起（宿主）。
+  if (selfZoneTag) {
+    (selfZoneTag.listeners.click || []).forEach(
+      (fn) => fn({ target: selfZoneTag, stopPropagation() {} }));
+  }
+  const closedAfterSecondClick = Boolean(selfZoneCardsBox && selfZoneCardsBox.hidden);
+  if (selfZoneTag) {
+    (selfZoneTag.listeners.mouseenter || []).forEach(
+      (fn) => fn({ target: selfZoneTag, stopPropagation() {} }));
+  }
+  const openOnHover = Boolean(selfZoneCardsBox && selfZoneCardsBox.hidden === false);
+  if (selfZoneTag) {
+    (selfZoneTag.listeners.mouseleave || []).forEach(
+      (fn) => fn({ target: selfZoneTag, stopPropagation() {} }));
+  }
+  check("㉉M6-6b 区标签：再点收起、悬停展开、离开收起（只宿主有这套展开）",
+    closedAfterSecondClick && openOnHover
+      && Boolean(selfZoneCardsBox && selfZoneCardsBox.hidden),
+    `closed=${closedAfterSecondClick} hover=${openOnHover}`);
   check("㉉M6-7 区里的牌**不算**手牌数（公开数字仍是 hand_count）",
     $("t-self-hand").textContent === "2" && $("t-hand-count").textContent === "1 张",
     `hand_count=${$("t-self-hand").textContent} 手牌区=${$("t-hand-count").textContent}`);
   const foeZoneBox = seatBox(2);
   const foeZoneRow = foeZoneBox ? rowOf(foeZoneBox, "data-zone", "hero") : null;
-  check("㉉M6-8 对手的武将牌上区域也画得出来（可多人并存 / 跨座位）",
+  const foeZoneTag = foeZoneRow
+    ? Array.from(foeZoneRow.children).find((node) => hasClass(node, "hero-zone-tag"))
+    : null;
+  const foeZoneCardsBox = foeZoneRow
+    ? Array.from(foeZoneRow.children).find((node) => hasClass(node, "hero-zone-cards"))
+    : null;
+  check("㉉M6-8 非宿主：只看到标签，没有牌 / 没有可展开的牌面",
     !!foeZoneRow
       && foeZoneRow.getAttribute("data-skill-id") === "hero.jie_xusheng.pojun"
       && foeZoneRow.getAttribute("data-seat") === "2"
-      && foeZoneRow.text().includes("破军")
-      && foeZoneRow.text().includes("桃"),
+      && foeZoneRow.getAttribute("data-cards-visible") === "false"
+      && !!foeZoneTag && foeZoneTag.textContent === "破军"
+      && !foeZoneCardsBox
+      && !foeZoneRow.text().includes("桃")
+      && !(foeZoneTag.listeners.click || []).length,
     foeZoneRow ? foeZoneRow.text().replace(/\s+/g, " ").trim() : "对手没有 hero 行");
+  // B：手牌上限 / 裸衣 = 武将块上的状态标签（读服务端 `hero_tags`，不按牌画 +1）。
+  const selfHeroTagsBox = $("t-self-hero-tags");
+  const selfHeroTagChips = selfHeroTagsBox
+    ? Array.from(selfHeroTagsBox.children).filter(
+      (node) => hasClass(node, "hero-tag"))
+    : [];
+  const foeHeroTagsBox = foeZoneBox
+    ? boxSkills(foeZoneBox).find((node) => hasClass(node, "hero-tags"))
+    : null;
+  const foeHeroTagChips = foeHeroTagsBox
+    ? Array.from(foeHeroTagsBox.children).filter(
+      (node) => hasClass(node, "hero-tag"))
+    : [];
+  check("㉉M6-8b 手牌上限 / 裸衣画成武将块标签（读 hero_tags，不给每张牌画 +1）",
+    selfHeroTagsBox && selfHeroTagsBox.hidden === false
+      && selfHeroTagChips.map((node) => node.getAttribute("data-tag")).join(",")
+        === "hand_limit_bonus,luoyi"
+      && selfHeroTagChips.map((node) => node.textContent).join(",")
+        === "手牌上限+1,裸衣"
+      && foeHeroTagChips.map((node) => node.getAttribute("data-tag")).join(",") === "luoyi"
+      && foeHeroTagChips.map((node) => node.textContent).join(",") === "裸衣",
+    `self=${selfHeroTagChips.map((n) => n.textContent).join(",")}`
+      + ` foe=${foeHeroTagChips.map((n) => n.textContent).join(",")}`);
   const noZoneView = synthView({
     kind: "PLAY_PHASE", actor: 0, seq: 9403,
     prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
@@ -14409,10 +14482,12 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.state.view = noZoneView;
   ui.resetSelection();
   ui.renderTable();
+  const noZoneHeroTags = $("t-self-hero-tags");
   check("㉉M6-9 没有武将牌上区域 ⇒ 不画空行（整块隐藏；空区不是界面概念）",
     $("t-self-hero-zones").hidden === true
       && !rowOf($("t-self-hero-zones"), "data-zone", "hero")
-      && !rowOf($("t-seats"), "data-zone", "hero"),
+      && !rowOf($("t-seats"), "data-zone", "hero")
+      && noZoneHeroTags && noZoneHeroTags.hidden === true,
     `self=${!$("t-self-hero-zones").hidden}`);
 
   /* ---- ③ ☆ / 失效 / 失去：同一条技能清单里的三种状态 ---- */

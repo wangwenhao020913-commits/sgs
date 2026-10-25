@@ -4965,14 +4965,16 @@ def test_the_web_snapshot_carries_the_round_and_the_extra_turn_flag() -> None:
     assert "turn_extra" not in PlayerView.model_fields
 
 
-def test_the_web_snapshot_shows_public_hero_card_zones_without_inflating_the_hand_count() -> None:
-    """M6 票 19 / spec §区域：武将牌上的牌区要**画得出来**，且不算手牌。
+def test_the_web_snapshot_shows_hero_zone_labels_to_all_and_cards_only_to_the_host() -> None:
+    """武将牌上的牌区：**标签全体可见、牌只给宿主**（用户口径，2026-10）。
 
-    构造局面：座位 0 = 界陆逊（【谦逊】的区是**公开**声明），区里两张牌，区**跨座位**
+    构造局面：座位 0 = 界陆逊（【谦逊】的区），区里两张牌，区**跨座位**
     （owner = 座位 1 的技能实例，扣在座位 0 的武将牌上）。判据：
 
     - 每个座位都带 ``hero_zones`` 键（键恒在，空列表 = 没有区）；
-    - 公开区对**任何**查看者都可见（换 human_seat 再看一次）；
+    - 区标签（``skill_name``）对**任何**查看者都下发；
+    - ``cards`` 只给**宿主本人**（``viewer == 0``）与全知通道；非宿主拿到空数组
+      （不是把牌发给客户端再用 CSS 藏）；
     - 区里的牌不进 ``self_hand`` / ``discard``，公开的 ``hand_count`` 仍是 ``len(hand)``；
     - 空区不画（归还后引擎保留区条目，界面不该留一行空框）。
     """
@@ -5039,12 +5041,19 @@ def test_the_web_snapshot_shows_public_hero_card_zones_without_inflating_the_han
         zones = seat_zero["hero_zones"]
         assert [(zone["skill_id"], zone["owner"]) for zone in zones] == [
             ("hero.jie_luxun.qianxun", 1)
-        ], f"座位 0 只有一个**非空**的公开区（空区不画）；查看者 {human_seat}：{zones}"
+        ], f"座位 0 只有一个**非空**的区（空区不画）；查看者 {human_seat}：{zones}"
         zone = zones[0]
-        assert zone["skill_name"] == "谦逊", "区名取技能中文名（服务端从武将表翻）"
+        assert zone["skill_name"] == "谦逊", "区标签取技能中文名（服务端从武将表翻）"
         assert zone["owner"] == 1, "跨座位：区记的是放置技能的持有者"
-        assert [card["card_id"] for card in zone["cards"]] == list(zone_cards)
-        assert all(card.get("display_name") for card in zone["cards"]), "区里的牌也走卡面契约"
+        if human_seat == 0:
+            assert [card["card_id"] for card in zone["cards"]] == list(zone_cards)
+            assert all(card.get("display_name") for card in zone["cards"]), (
+                "宿主看到的区里的牌也走卡面契约"
+            )
+        else:
+            assert zone["cards"] == [], (
+                f"非宿主（查看者 {human_seat}）只拿标签，拿不到区里的牌"
+            )
         assert seat_zero["hand_count"] == len(state.player(0).hand), (
             "武将牌上的牌不在手牌区 ⇒ 公开手牌数不变"
         )
@@ -5055,30 +5064,11 @@ def test_the_web_snapshot_shows_public_hero_card_zones_without_inflating_the_han
         assert snapshot["players"][1]["hero_zones"] == [], "没有区的座位给空列表"
 
 
-def test_a_hidden_hero_card_zone_is_not_shown_to_a_foreign_viewer(monkeypatch) -> None:  # noqa: ANN001 - pytest 注入
-    """隐藏区（``PlacementVisibility.HIDDEN``）只给**放置者**与**宿主本人**，别人拿不到。
-
-    M6 没有隐藏区载体（【谦逊】是公开的），故这里把**同一份声明**临时换成 ``hidden``，
-    走的仍然是产品读取路径（``visible_snapshot`` → 声明 → 载荷）：判据不是"数据里恰好
-    没有隐藏区"，而是"声明说隐藏就真的裁掉"。
-    """
+def test_hero_zone_cards_are_host_only_for_non_host_viewers() -> None:
+    """区里的牌只给**宿主本人**：放置者 / 第三方都只拿标签（不是整块不下发）。"""
     from types import SimpleNamespace
 
-    from sgs.data.models import PlacementDecl, PlacementReturn, PlacementVisibility
-
-    from sgs_web import projection as projection_module
-
-    hidden = PlacementDecl(
-        visibility=PlacementVisibility.HIDDEN,
-        return_timing=PlacementReturn.TURN_END,
-        extra_effect=False,
-    )
-    real_lookup = projection_module.hero_placement_decls
-    monkeypatch.setattr(
-        projection_module,
-        "hero_placement_decls",
-        lambda pack_id: dict(real_lookup(pack_id)) | {"hero.jie_luxun.qianxun": hidden},
-    )
+    from sgs_web.projection import visible_snapshot
 
     pack = load_content_pack(deck_profile="standard_108")
     peaches = cards_of_type(pack, "peach")
@@ -5105,26 +5095,166 @@ def test_a_hidden_hero_card_zone_is_not_shown_to_a_foreign_viewer(monkeypatch) -
 
     def zones_for(viewer: int) -> list[dict]:
         session = SimpleNamespace(engine=engine, human_seat=viewer, pack=pack)
-        return projection_module.visible_snapshot(session)["players"][0]["hero_zones"]
+        return visible_snapshot(session)["players"][0]["hero_zones"]
 
-    assert zones_for(1), "放置者（owner = 座位 1）看得见自己放的区"
-    assert zones_for(0), "宿主本人（座位 0）看得见自己武将牌上的区"
-    assert zones_for(2) == [], "第三方既不是放置者也不是宿主 ⇒ 整块不下发（fail-closed）"
+    host = zones_for(0)
+    owner = zones_for(1)
+    foreign = zones_for(2)
+    assert host and host[0]["cards"], "宿主本人（座位 0）看得见自己武将牌上的牌"
+    assert owner and owner[0]["skill_name"] == "谦逊" and owner[0]["cards"] == [], (
+        "放置者（owner = 座位 1）不是宿主 ⇒ 只拿标签，拿不到牌"
+    )
+    assert foreign and foreign[0]["skill_name"] == "谦逊" and foreign[0]["cards"] == [], (
+        "第三方不是宿主 ⇒ 只拿标签，拿不到牌"
+    )
 
 
-def test_the_hero_zone_visibility_predicate_follows_the_declaration() -> None:
-    """可见性判据的真值表（唯一读取方 = :func:`sgs_web.visibility.hero_zone_visible`）。"""
+def test_an_unregistered_hero_card_zone_defaults_to_label_visible_cards_host_only() -> None:
+    """未登记的扣置区：**同一默认**——标签下发、牌只给宿主（fail-closed）。"""
+    from types import SimpleNamespace
+
+    from sgs.state import HeroCardZone
+
+    from sgs_web.projection import seat_hero_zones, visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    zone_cards = tuple(cards_of_type(pack, "slash")[:2])
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hero="jie_luxun"), SeatSpec(hp=4, hero="zhaoyun")],
+        deck=tuple(range(40, 50)),
+    )
+    key = hero_card_zone_key(1, "hero.future.weapon")
+    state.player(0).hero_cards[key] = HeroCardZone(
+        skill_id="hero.future.weapon",
+        owner=1,
+        cards=list(zone_cards),
+    )
+    engine = Engine.from_state(state, seed=1)
+
+    def zones_for(viewer: int | None) -> list[dict]:
+        session = SimpleNamespace(engine=engine, human_seat=viewer or 0, pack=pack)
+        if viewer is None:
+            return seat_hero_zones(session, 0, viewer=None)
+        return visible_snapshot(session)["players"][0]["hero_zones"]
+
+    host = zones_for(0)
+    foreign = zones_for(1)
+    all_knowing = zones_for(None)
+    assert host and host[0]["skill_name"] == "hero.future.weapon", (
+        "未登记区没有中文名时退回技能 id，标签仍下发"
+    )
+    assert [card["card_id"] for card in host[0]["cards"]] == list(zone_cards)
+    assert foreign and foreign[0]["skill_name"] == "hero.future.weapon"
+    assert foreign[0]["cards"] == [], "未登记区默认只给宿主，非宿主拿不到牌"
+    assert [card["card_id"] for card in all_knowing[0]["cards"]] == list(zone_cards), (
+        "全知通道（回放 / 内部）不裁剪"
+    )
+
+
+def test_the_hero_zone_visibility_predicate_is_host_only() -> None:
+    """可见性判据的真值表：**只按宿主**，不看旧 ``visibility`` 声明（用户口径）。"""
     from sgs_web.visibility import hero_zone_visible
 
-    assert hero_zone_visible("public", owner=1, host=0, viewer=2) is True
-    assert hero_zone_visible("hidden", owner=1, host=0, viewer=1) is True
+    assert hero_zone_visible("public", owner=1, host=0, viewer=2) is False
+    assert hero_zone_visible("hidden", owner=1, host=0, viewer=1) is False, (
+        "放置者不是宿主 ⇒ 拿不到牌"
+    )
     assert hero_zone_visible("hidden", owner=1, host=0, viewer=0) is True
     assert hero_zone_visible("hidden", owner=1, host=0, viewer=2) is False
     assert hero_zone_visible("hidden", owner=1, host=0, viewer=None) is True, (
         "全知通道不裁剪（内部调用 / 录像）"
     )
-    assert hero_zone_visible("unregistered", owner=1, host=0, viewer=2) is False, (
-        "未登记的可见性值必须 fail-closed（不能当成公开区）"
+    assert hero_zone_visible("unregistered", owner=1, host=0, viewer=2) is False
+    assert hero_zone_visible("unregistered", owner=1, host=0, viewer=0) is True, (
+        "未登记区同一默认：宿主仍可见"
+    )
+
+
+def test_the_replay_all_knowing_view_still_sees_hero_zone_cards() -> None:
+    """回放 / 全知日志不被这次宿主裁剪影响：``viewer=None`` 仍拿完整卡面。"""
+    from types import SimpleNamespace
+
+    from sgs.state import Zone
+
+    from sgs_web.projection import seat_hero_zones, visible_record
+
+    pack = load_content_pack(deck_profile="standard_108")
+    zone_cards = tuple(cards_of_type(pack, "slash")[:2])
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hero="jie_luxun"),
+            SeatSpec(hp=4, hero="jie_luxun", hand=zone_cards),
+        ],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.place_on_hero_card(
+        None,
+        owner=1,
+        skill_id="hero.jie_luxun.qianxun",
+        holder=0,
+        cards=engine.state.refs(zone_cards),
+    )
+    session = SimpleNamespace(engine=engine, human_seat=1, pack=pack)
+    all_knowing = seat_hero_zones(session, 0, viewer=None)
+    assert [card["card_id"] for card in all_knowing[0]["cards"]] == list(zone_cards), (
+        "全知快照仍带完整 hero zone cards"
+    )
+
+    move = next(
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == "card_move"
+        and getattr(getattr(record, "to_zone", None), "zone", None) is Zone.HERO
+    )
+    shown = visible_record(move, viewer=None)
+    assert [card["card_id"] for card in shown["cards"]] == list(zone_cards), (
+        "全知记录流（回放）不裁剪"
+    )
+    hidden = visible_record(move, viewer=1)
+    assert hidden["cards"] == [] and hidden["card_count"] == len(zone_cards), (
+        "人类非宿主记录流仍只给张数（fail-closed）"
+    )
+
+
+def test_hero_tags_cover_hand_limit_bonus_and_luoyi_without_touching_player_view() -> None:
+    """B：手牌上限加式与【裸衣】画成武将块标签（显示层字段，不进 PlayerView）。"""
+    from types import SimpleNamespace
+
+    from sgs.state import PlayerView
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=4, hero="xuchu"),
+            SeatSpec(hp=4, hero="zhenji"),
+            SeatSpec(hp=4, hero="jie_xuchu"),
+        ],
+        deck=tuple(range(40, 50)),
+    )
+    state.player(0).hand_limit_bonus = 1
+    state.player(1).luoyi_active = True
+    state.player(2).luoyi_until_next_turn = True
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+    snapshot = visible_snapshot(session)
+
+    assert snapshot["players"][0]["hero_tags"] == [
+        {"tag": "hand_limit_bonus", "label": "手牌上限+1"}
+    ]
+    assert snapshot["players"][1]["hero_tags"] == [
+        {"tag": "luoyi", "label": "裸衣"}
+    ], "标准【裸衣】读 luoyi_active"
+    assert snapshot["players"][2]["hero_tags"] == [
+        {"tag": "luoyi", "label": "裸衣"}
+    ], "界【裸衣】读 luoyi_until_next_turn"
+    assert "hero_tags" not in PlayerView.model_fields, (
+        "标签是网页显示字段，不能塞进 PlayerView（记录字节 / 金录像）"
     )
 
 

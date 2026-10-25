@@ -59,9 +59,9 @@ def cards_visible(record: Mapping[str, Any], viewer: int | None) -> bool:
     与 ``seat``）；``viewer`` = 查看者座位，``None`` = 没有查看者 / 全知。
 
     区域分三档：**公开区**（弃牌堆 / 处理区 / 装备区 / 判定区）照发；**隐藏区**
-    （牌堆 / 手牌）只放行查看者自己经手的那一侧；**武将牌上的牌区**（``hero``，M6 票 20
-    补）按放置技能的 ``PlacementDecl.visibility`` 回答——公开区谁都能看，隐藏区只给放置者
-    与宿主本人，未登记的区键 fail-closed（见 :func:`hero_zone_ref_visible`）。
+    （牌堆 / 手牌）只放行查看者自己经手的那一侧；**武将牌上的牌区**（``hero``，2026-10
+    用户口径）**只给宿主本人**——只要移动任一侧是 ``hero``，就按 :func:`hero_zone_ref_visible`
+    回答，不再让"来源手牌是自己的"绕开宿主裁剪。
     """
     if viewer is None:
         return True
@@ -69,15 +69,14 @@ def cards_visible(record: Mapping[str, Any], viewer: int | None) -> bool:
     from_zone = record.get("from_zone") or {}
     to = to_zone.get("zone")
     source = from_zone.get("zone")
+    if to == "hero" or source == "hero":
+        hero_ref = to_zone if to == "hero" else from_zone
+        return hero_zone_ref_visible(hero_ref, viewer)
     if to in PUBLIC_ZONES or source in PUBLIC_ZONES:
         return True
     if to == "hand" and to_zone.get("seat") == viewer:
         return True
     if source == "hand" and from_zone.get("seat") == viewer:
-        return True
-    if to == "hero" and hero_zone_ref_visible(to_zone, viewer):
-        return True
-    if source == "hero" and hero_zone_ref_visible(from_zone, viewer):
         return True
     return False
 
@@ -101,29 +100,20 @@ def placement_visibility(skill_instance: str | None) -> str | None:
 def hero_zone_ref_visible(zone_ref: Mapping[str, Any], viewer: int | None) -> bool:
     """一个 HERO 区域引用对 ``viewer`` 是否可见（牌面级别；``viewer=None`` = 全知）。
 
-    ``zone_ref`` 是记录里的 ``from_zone`` / ``to_zone``：``seat`` = 武将牌的**宿主**，
-    ``skill_instance`` = （放置技能持有者, 技能 id）的规范文本。可见性声明缺失时
-    **fail-closed**（不把新写的声明当成公开区）。
+    ``zone_ref`` 是记录里的 ``from_zone`` / ``to_zone``：``seat`` = 武将牌的**宿主**。
+    2026-10 用户口径：**只有宿主本人**看得见区里的牌；``viewer=None``（内部 / 回放 / 全知
+    日志）不裁剪。未登记 / 缺 ``skill_instance`` 的区同一默认——宿主按 ``seat`` 认，不看
+    ``PlacementDecl.visibility``（该声明不再决定本载荷的牌面可见性）。
     """
     if viewer is None:
         return True
-    skill_instance = zone_ref.get("skill_instance")
-    if not isinstance(skill_instance, str) or ":" not in skill_instance:
+    host = zone_ref.get("seat")
+    if host is None:
         return False
-    owner_text, _, _skill_id = skill_instance.partition(":")
     try:
-        owner = int(owner_text)
-    except ValueError:
+        return int(host) == int(viewer)
+    except (TypeError, ValueError):
         return False
-    visibility = placement_visibility(skill_instance)
-    if visibility is None:
-        return False
-    return hero_zone_visible(
-        visibility,
-        owner=owner,
-        host=zone_ref.get("seat"),
-        viewer=viewer,
-    )
 
 
 def deck_cards_visible(viewer: int | None) -> bool:
@@ -167,19 +157,20 @@ def tag_visible(tag_type: str | None, viewer: int | None) -> bool:
 def hero_zone_visible(
     visibility: str, *, owner: int | None, host: int | None, viewer: int | None
 ) -> bool:
-    """一个**武将牌上牌区**对 ``viewer`` 是否可见（M6 票 19；spec §区域 / D14）。
+    """一个**武将牌上牌区**对 ``viewer`` 是否可见（2026-10 用户口径）。
 
-    ``visibility`` 是放置技能数据声明上的取值（``public`` / ``hidden``）；``owner`` =
-    放置技能的持有者座位（可跨座位扣牌），``host`` = 武将牌的主人（被扣牌的座位）。
-    ``hidden`` 的放行名单是这两者本人（spec：「只有放置技能的持有者（以及被扣牌的目标
-    本人）可见」）；未登记的取值 **fail-closed**（不把新写的声明当成公开区）。
+    新口径：**只认宿主**——``host`` = 武将牌的主人，只有 ``viewer == host`` 看得见区里的
+    牌；``viewer is None``（内部 / 回放 / 全知日志）不裁剪。``visibility`` 与 ``owner``
+    保留在签名里供旧调用方兼容，但**不再参与判定**：未登记的区同一默认（牌只给宿主），
+    放置技能的持有者不是宿主时也拿不到牌。
 
     ``viewer is None`` = 全知通道：不裁剪（与 :func:`cards_visible` 同一条口径）。
     """
     if viewer is None:
         return True
-    if visibility == "public":
-        return True
-    if visibility != "hidden":
+    if host is None:
         return False
-    return viewer == owner or viewer == host
+    try:
+        return int(host) == int(viewer)
+    except (TypeError, ValueError):
+        return False
