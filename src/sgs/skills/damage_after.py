@@ -296,22 +296,32 @@ _JIE_JIANXIONG_DRAWN_KEY = "jie_jianxiong_drawn"
 """帧私有：界【奸雄】"并摸一张牌"的那一张已经摸过（续跑不重摸）。"""
 
 
-def _jie_jianxiong(host: Any, frame: Any) -> Any:
-    """界曹操【奸雄】：获得造成此伤害的牌**并摸一张牌**（§十九 L2013）。
+def _jie_jianxiong_condition(host: Any, frame: Any) -> bool:
+    """界【奸雄】的触发条件：**受伤的是持有者自己**（不要求渠道牌还在处理区）。
 
-    与标准版共用 :func:`_gain_channel_card` 与同一条触发条件
-    （:func:`_jianxiong_condition`：受伤的是自己 ∧ 渠道牌还在处理区），差别只在拿到牌之后
-    多摸一张。两段各一个帧私有游标：搬牌 / 摸牌都可能内联派发而挂起，续跑必须既不重做
-    也不漏做（与界【集智】/界【刚烈】同一范式）。
+    牌面是"获得对你造成伤害的牌**并摸一张牌**"（§十九 L2013）：两段效果并列，"摸一张牌"不
+    以"获得了牌"为前提。伤害来自**技能**（没有渠道牌，如【刚烈】/【黩武】）时，第一段无从
+    执行、第二段照常——故条件只剩"我受伤"这一条（用户裁定，票 23；与 `参考资料/技能描述
+    歧义核查.md` B-15 的结论一致）。
+    """
+    del host
+    return _hurt_owner(frame)
+
+
+def _jie_jianxiong(host: Any, frame: Any) -> Any:
+    """界曹操【奸雄】：获得造成此伤害的牌（若有）**并摸一张牌**（§十九 L2013）。
+
+    与标准版共用 :func:`_gain_channel_card`，但**渠道牌不必存在**：没有牌时跳过第一段、
+    只摸那一张（:func:`_jie_jianxiong_condition` 已把"牌在处理区"这条前提去掉）。
+    两段各一个帧私有游标：搬牌 / 摸牌都可能内联派发而挂起，续跑必须既不重做也不漏做
+    （与界【集智】/界【刚烈】同一范式）。
     """
     owner = frame.data["skill_owner"]
-    if not _in_processing(host.state, _damage_channel_card(frame)):
-        return None
     if not frame.data.get(_JIE_JIANXIONG_MOVED_KEY):
+        frame.data[_JIE_JIANXIONG_MOVED_KEY] = True
         control = _gain_channel_card(host, frame, owner)
         if control == "stay":
             return "stay"
-        frame.data[_JIE_JIANXIONG_MOVED_KEY] = True
     if not frame.data.get(_JIE_JIANXIONG_DRAWN_KEY):
         frame.data[_JIE_JIANXIONG_DRAWN_KEY] = True
         host.draw_for_hand(frame, owner, 1)
@@ -1440,7 +1450,7 @@ DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
         "jie_caocao",
         "jianxiong",
         False,
-        _jianxiong_condition,
+        _jie_jianxiong_condition,
         None,
         JIE_JIANXIONG_FLOW,
         requirement="获得造成伤害的牌并摸一张牌",

@@ -1618,12 +1618,18 @@ def _jie_jieyin_targets(
 
 
 def _jie_jieyin_options(state: GameState, owner: int) -> tuple[str, ...]:
-    """此刻走得通的选项：弃手牌（有手牌）/ 置装备（手牌里有装备牌）。"""
-    hand = state.player(owner).hand
+    """此刻走得通的选项：弃手牌（有手牌）/ 置装备（手牌 **或装备区** 里有装备牌）。
+
+    "一张**装备牌**"按默认读法（一）③ = **手牌 + 装备区**里的装备牌（用户裁定，票 23）：
+    已经装备着的牌也算"一张装备牌"，送出去就是把已装备的牌置入其装备区（与手牌里的装备牌
+    同一条移动，只是来源区不同）。
+    """
+    player = state.player(owner)
+    hand = player.hand
     options: list[str] = []
     if hand:
         options.append(JIE_JIEYIN_DISCARD)
-    if any(state.card(card_id).slot is not None for card_id in hand):
+    if any(state.card(card_id).slot is not None for card_id in (*hand, *player.equip)):
         options.append(JIE_JIEYIN_EQUIP)
     return tuple(options)
 
@@ -1654,10 +1660,10 @@ def _filter_face(
 def _jie_jieyin_face(
     host: Any, owner: int, option: str
 ) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
-    """成本面：弃手牌 = 全部手牌；置装备 = 手牌里的**装备牌**（不从装备区取）。"""
-    face = host.selection_face(owner, (Zone.HAND,), reveal_hand=True)
+    """成本面：弃手牌 = 全部手牌；置装备 = **手牌 + 装备区**里带槽位的牌。"""
     if option == JIE_JIEYIN_DISCARD:
-        return face
+        return host.selection_face(owner, (Zone.HAND,), reveal_hand=True)
+    face = host.selection_face(owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True)
     return _filter_face(host.state, face, lambda card: card.slot is not None)
 
 
@@ -1695,7 +1701,12 @@ def _jie_jieyin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
                 key="card",
                 actor=owner,
                 timing=Timing.PHASE_PLAY_IDLE,
-                spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1)),
+                spec=SelectionSpec(
+                    zones=(Zone.HAND, Zone.EQUIP)
+                    if option == JIE_JIEYIN_EQUIP
+                    else (Zone.HAND,),
+                    total=(1, 1),
+                ),
                 face=face,
             )
             if host.suspended(picked):

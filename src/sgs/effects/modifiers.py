@@ -269,11 +269,12 @@ def response_count(
     ``ctx.subject`` = **本次使用的来源**（谁用的牌），修饰器回调据此比对自己是不是
     那张牌的使用者；``ctx.card`` = 本次使用的牌（牌名读它）。
 
-    ``role``（票 23 的加法，缺省 ``SUBJECT``）：这一问的**响应者扮演谁**。``subject`` =
-    响应者是牌的使用者那一方（【杀】的窗口恒是它——【闪】由目标出，与"谁该出两张"无关）；
-    ``target`` = 响应者就是这张牌**指定的目标**。目前唯一的读者是【无双】②（【决斗】）：
-    牌面把"两张【杀】"加在**被决斗的一方**身上，而那个人可能是技能持有者自己（"成为其他
-    角色【决斗】的目标后"）⇒ 只比 ``owner == subject`` 会漏掉反向那一半。
+    ``target`` 在 `RESPONSE_COUNT` 语境里是**这张牌指定的目标**（整场不变）；``role``
+    （票 23 的加法，缺省 ``SUBJECT``）说明**这一问的响应者扮演谁**：``TARGET`` = 响应者就是
+    那个指定的目标，``SUBJECT`` = 响应者是牌的使用者。两个事实合起来才能问出"这一问的响应者
+    是不是对手"。目前唯一的读者是【无双】②（【决斗】）：牌面把"两张【杀】"加在**吕布的对手**
+    身上，而对手可能是使用者、也可能是目标（"成为其他角色【决斗】的目标后"），只比
+    ``owner == subject`` 会漏掉反向那一半。
     """
     ctx = ModifierContext(subject=source, target=target, card=card, role=role)
     return apply_modifiers(ModifierPoint.RESPONSE_COUNT, state, ctx, 1)

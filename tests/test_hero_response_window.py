@@ -303,24 +303,26 @@ def test_wushuang_duel_a_full_pair_hands_the_response_to_the_other_side():
 
 
 # ---------------------------------------------------------------------------
-# ②b 无双（【决斗】的反向）：吕布**成为**别人的【决斗】目标时，他自己每次响应也要两张
+# ②b 无双（【决斗】的反向）：吕布**成为**别人的【决斗】目标时，加倍的是**对手**
 # ---------------------------------------------------------------------------
 
 
-def test_wushuang_duel_makes_lvbu_himself_respond_with_two_slashes():
-    """吕布是【决斗】**的目标**时，他的每次响应也要两张【杀】（牌面 ② 的后半句）。
+def test_wushuang_duel_makes_lvbus_opponent_respond_with_two_slashes():
+    """吕布**被**【决斗】⇒ 吕布本人一张、**对手**（这次是使用者）每次两张（票 23 用户裁定）。
 
-    §九 L1046 / §十九 L2188–L2191 的原文是"当你使用【决斗】指定一名角色为目标后，
-    **或成为其他角色【决斗】的目标后**，该角色每次响应此【决斗】需连续打出两张【杀】"。
-    后半句里的"该角色"= 吕布本人：被【决斗】的一方先响应，且他每次响应都要两张。
-    旧实现只认"吕布是使用者"这一侧，反向（吕布被决斗）只要求一张 —— 本用例是那条的回归。
+    牌面 ② 的"该角色"= **跟吕布决斗的那一方**——标准版牌面把这一半直接写成"与你进行
+    【决斗】的角色每次需连续打出两张【杀】"。故吕布挨【决斗】时**不**加倍：他打出一张
+    就算通过，加倍落在对手身上。
+
+    判据：吕布打出一张【杀】后响应轮转到使用者，使用者必须连出**两张**；只出一张即不满足，
+    由【决斗】判负受伤（正是本用例断言的"两张"）。
     """
     duel, first, second = _cards("duel")[0], _cards("slash")[0], _cards("slash")[1]
     state = build_state(
         pack=PACK,
         seats=[
-            SeatSpec(hand=(duel,)),
-            SeatSpec(hand=(first, second), hero="lvbu"),
+            SeatSpec(hand=(duel, second)),
+            SeatSpec(hand=(first,), hero="lvbu"),
         ],
         deck=_deck_excluding(duel, first, second),
         turn_seat=0,
@@ -330,30 +332,27 @@ def test_wushuang_duel_makes_lvbu_himself_respond_with_two_slashes():
         if query.kind == "PLAY_PHASE":
             return _use(query, duel, 1)
         if query.kind == "RESPOND" and query.cause is WindowCause.DUEL:
-            return _find(query, lambda action: isinstance(action, Pass))
+            # 座位 0 = 使用者：这次响应只打一张，看它算不算"满足两次"。
+            return _find(query, lambda action: isinstance(action, PlayCard))
         return None
-
-    plays = {"count": 0}
 
     def defender(query):
         if query.kind == "RESPOND" and query.cause is WindowCause.DUEL:
-            plays["count"] += 1
-            if plays["count"] == 1:
-                return _find(query, lambda action: isinstance(action, PlayCard))
-            return _find(query, lambda action: isinstance(action, Pass))
+            return _find(query, lambda action: isinstance(action, PlayCard))
         return None
 
     engine = run_until(
         Engine.from_state(state, seed=1),
         [Scripted(attacker), Scripted(defender)],
-        lambda e: e.state.player(1).hp < 4 or e.state.player(0).hp < 4,
+        lambda e: e.state.player(0).hp < 4 or e.state.player(1).hp < 4,
     )
 
-    assert len(_respond_queries(engine, WindowCause.DUEL)) == 2, (
-        "吕布作为【决斗】的目标，一次响应要问两张【杀】"
+    asks = _respond_queries(engine, WindowCause.DUEL)
+    assert [query.actor for query in asks] == [1, 0, 0], (
+        "吕布先响应（**一张**即可，1 问），随后对手这次响应要问**两张**（2 问）"
     )
-    assert engine.state.player(1).hp == 3, "只出一张【杀】不满足响应 ⇒ 吕布受伤"
-    assert engine.state.player(0).hp == 4, "响应没满足 ⇒ 对方（使用者）不掉血"
+    assert engine.state.player(0).hp == 3, "对手只出一张【杀】不满足响应 ⇒ 对手受伤"
+    assert engine.state.player(1).hp == 4, "吕布一张就够了（无双不惩罚自己）"
 
 
 # ---------------------------------------------------------------------------

@@ -105,12 +105,17 @@ class ResponseCountSkill(HeroSkillDecl):
 
         - **【杀】**：改的是**使用者**——"当你使用【杀】指定一名角色为目标后，该角色需连续
           使用两张【闪】"。故只有 ``ctx.owner == ctx.subject``（牌是我用的）才生效；
-        - **【决斗】**：改的是**被决斗的一方**每次响应的张数——牌面写"当你使用【决斗】指定一名
+        - **【决斗】**：改的是**吕布的对手**每次响应的张数——牌面写"当你使用【决斗】指定一名
           角色为目标后，**或成为其他角色【决斗】的目标后**，该角色每次响应需连续打出两张
-          【杀】"。故判据 = 引擎标注的"这一问的响应者就是被决斗的一方"（``ctx.role`` 为
-          ``TARGET``）∧ 持有者是这场【决斗】的**任何一方**（``subject`` 或 ``target``）。
-          只看 ``owner == subject`` 会漏掉"吕布自己被决斗"那一半：他挨【决斗】时只需一张
-          【杀】就能过关，与牌面相反。
+          【杀】"。两半里的"该角色"都是**跟吕布决斗的那一方**（标准版牌面把这一半直接写成
+          "**与你进行【决斗】的角色**每次需连续打出两张【杀】"），故：
+
+          * 吕布**使用**【决斗】⇒ 对手（被指定的那个目标）每次两张、吕布本人一张；
+          * 吕布**成为**【决斗】的目标 ⇒ 仍然是**对手**（这次是使用者）每次两张、
+            **吕布本人一张**——牌面命名的对象是"对手"，不是"先响应的那个人"。
+
+          判据因此是"响应者**不是**吕布 ∧ 吕布在这场【决斗】里"：``ctx.owner`` 与
+          ``ctx.subject`` / ``ctx.target`` 的两种组合正好覆盖两个方向，不需要特判谁是使用者。
 
         牌名闭集按 :func:`~sgs.effects.satisfies_required` 逐项匹配（【杀】族按共享计数键，
         M5-05b-fix；【决斗】仍逐字相等）。
@@ -121,11 +126,12 @@ class ResponseCountSkill(HeroSkillDecl):
         if "slash" in self.card_types and satisfies_required(ctx.card, "slash"):
             return self.count if ctx.owner == ctx.subject else current
         if "duel" in self.card_types and satisfies_required(ctx.card, "duel"):
-            if ctx.role is not ModifierRole.TARGET:
-                return current
             if ctx.owner not in (ctx.subject, ctx.target):
+                # 这场【决斗】跟吕布无关（两个别的角色在决斗）⇒ 不动张数。
                 return current
-            return self.count
+            responder = ctx.target if ctx.role is ModifierRole.TARGET else ctx.subject
+            # 吕布本人响应 ⇒ 一张；对手响应 ⇒ 两张。
+            return current if ctx.owner == responder else self.count
         return current
 
 
@@ -136,7 +142,7 @@ WUSHUANG = ResponseCountSkill(
 )
 """吕布【无双】：锁定技，牌名是【杀】/【决斗】时本次响应需要两张（规则 1046）。
 
-【杀】改的是**使用者**那一侧、【决斗】改的是**被决斗的一方**那一侧——两半的判据都在
+【杀】改的是**使用者**那一侧、【决斗】改的是**吕布的对手**那一侧——两半的判据都在
 :meth:`ResponseCountSkill.response_count` 里（票 23）。
 """
 

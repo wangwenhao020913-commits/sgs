@@ -222,14 +222,30 @@ def test_standard_jianxiong_only_takes_the_card():
     assert engine.state.player(1).hand == [slash]
 
 
-def test_jie_jianxiong_is_not_offered_when_the_card_is_no_longer_in_processing():
-    """反例：渠道牌不在处理区 ⇒ 连"是否发动"都不问、一张都不摸。"""
+def test_jie_jianxiong_still_draws_one_when_there_is_no_channel_card():
+    """渠道牌拿不到（伤害来自**技能**，或那张牌已不在处理区）⇒ 仍问一次、仍摸一张。
+
+    牌面「获得对你造成伤害的牌**并摸一张牌**」是两段并列效果，"摸一张牌"不以"拿到了牌"
+    为前提（用户裁定，票 23；与 `参考资料/技能描述歧义核查.md` B-15 一致）。标准版没有
+    "并摸一张"这一句，故它在这种局面下**不问也不摸**（见下一用例）。
+    """
     slash = _cards("slash")[0]
     engine, _players = _damage_engine(
         target=SeatSpec(hero="jie_caocao"), card=slash, processing=()
     )
 
-    assert _kind_queries(engine, JIE_JIANXIONG) == []
+    assert len(_kind_queries(engine, JIE_JIANXIONG)) == 1, "仍要问一次"
+    assert len(engine.state.player(1).hand) == 1, "拿不到牌，但那一张照摸"
+
+
+def test_standard_jianxiong_is_not_offered_when_the_card_is_no_longer_in_processing():
+    """对照：标准版只有"获得此牌"一段 ⇒ 拿不到牌就连问都不问。"""
+    slash = _cards("slash")[1]
+    engine, _players = _damage_engine(
+        target=SeatSpec(hero="caocao"), card=slash, processing=()
+    )
+
+    assert _kind_queries(engine, "hero.caocao.jianxiong") == []
     assert engine.state.player(1).hand == []
 
 

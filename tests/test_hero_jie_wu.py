@@ -736,6 +736,7 @@ def _jie_jieyin_engine(
     owner_hp=4,
     target_hp=3,
     option,
+    card=None,
 ):
     state = build_state(
         pack=PACK,
@@ -767,7 +768,14 @@ def _jie_jieyin_engine(
                 return SelectOption(choice=option, answers_seq=query.seq)
             return SelectOption(choice="seat:1", answers_seq=query.seq)
         if query.kind == QueryKind.SELECT_CARDS:
-            return SelectCards(picks=(0,), answers_seq=query.seq)
+            # ``card`` 给定时按牌 id 挑那一个槽（装备区来源的用例要挑第二张）；
+            # 不给就仍取第一个槽（既有用例的口径）。
+            pick = 0
+            if card is not None:
+                for index, slot in enumerate(query.slots):
+                    if slot.card is not None and slot.card.card_id == card:
+                        pick = index
+            return SelectCards(picks=(pick,), answers_seq=query.seq)
         return None
 
     return _run(state, [Scripted(drive), Scripted()], _phase_over), used
@@ -822,8 +830,12 @@ def test_jie_jieyin_equal_hp_runs_neither_effect():
     assert len(engine.state.player(1).hand) == 0, "目标没有摸牌"
 
 
-def test_jie_jieyin_target_may_be_healthy_and_the_equipment_must_come_from_hand():
-    """反例（目标池 + 区域）：健康的男性是合法目标；装备区里的牌不是"置入"的来源。"""
+def test_jie_jieyin_target_may_be_healthy_and_the_equipment_may_come_from_the_equip_zone():
+    """目标池 + 区域：健康的男性是合法目标；「一张装备牌」**含装备区**（用户裁定，票 23）。
+
+    牌面只写「一张**装备牌**」、没写「装备区里的牌」，按默认读法（一）③ ⇒ 手牌 + 装备区
+    里的装备牌都算。旧实现只从手牌取（票 17 的技能级裁定），票 23 按用户裁定改正。
+    """
     from sgs.skills.active import _jie_jieyin_options, _jie_jieyin_targets
 
     card = _cards("lightning")[0]
@@ -839,9 +851,44 @@ def test_jie_jieyin_target_may_be_healthy_and_the_equipment_must_come_from_hand(
     )
 
     assert _jie_jieyin_targets(state, None, 0, ()) == (1,), "满体力的男性也是合法目标"
-    assert _jie_jieyin_options(state, 0) == ("jieyin_discard_hand",), (
-        "手牌里没有装备牌 ⇒ 装备路径不出现（装备区那张不算）"
+    assert _jie_jieyin_options(state, 0) == (
+        "jieyin_discard_hand",
+        "jieyin_place_equipment",
+    ), "装备区里那张也是「一张装备牌」⇒ 装备路径可用"
+
+
+def test_jie_jieyin_can_place_an_already_equipped_card_into_the_targets_zone():
+    """装备区来源的正例：把自己**已装备**的马置入目标装备区，同槽旧牌被顶替。"""
+    filler = _cards("lightning")[0]
+    horse, old_horse = _cards("chitu")[0], _cards("dawan")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(filler,), equip=(horse,), hero="jie_sunshangxiang"),
+            SeatSpec(hp=4, equip=(old_horse,), gender=Gender.MALE, hero="guanyu"),
+        ],
+        deck=deck_excluding(PACK, filler, horse, old_horse),
+        turn_seat=0,
     )
+    engine, used = _jie_jieyin_engine(
+        hand=(filler,),
+        equip=(horse,),
+        target_equip=(old_horse,),
+        owner_hp=2,
+        target_hp=3,
+        option="jieyin_place_equipment",
+        card=horse,
+    )
+
+    assert used["count"] == 1
+    assert horse in engine.state.player(1).equip, "自己装备区那张进了目标装备区"
+    assert not engine.state.player(0).equip, "自己的装备区空了出来"
+    assert old_horse in engine.state.discard, "目标同槽旧牌被顶替出去"
+    assert any(
+        "xiaoji" in str(getattr(record.query, "skill_id", ""))
+        for record in engine.records
+        if record.kind == "query"
+    ), "把已装备的牌送出去 = 失去装备区里的一张牌 ⇒ 她自己的【枭姬】照常问一次"
 
 
 # ---------------------------------------------------------------------------

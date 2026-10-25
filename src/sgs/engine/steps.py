@@ -48,6 +48,7 @@ from sgs.effects import (
     behavior_for,
     damage_amount,
     is_slash,
+    ModifierRole,
     recover_amount,
     response_count,
     target_is_effective,
@@ -555,8 +556,15 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
     **提供者可能跨多次重入**（求助窗口逐个问人）：引擎在窗口顶部先 :meth:`advance_provider`
     重入它，收尾后再按它写回的"是否满足"记一次成功（票 09）。
     """
+    # 这一问的响应者恒是这张【杀】给定的目标（``_dodge_window`` 逐目标开窗）⇒ ``role``
+    # 标 ``TARGET``：与【决斗】用同一句"谁在响应"的事实（票 23）。【无双】①只看使用者
+    # 那一侧，读不读这一位都不变，但契约要写全。
     required = response_count(
-        host.state, source=frame.data["source"], card=frame.data["card"], target=target
+        host.state,
+        source=frame.data["source"],
+        card=frame.data["card"],
+        target=target,
+        role=ModifierRole.TARGET,
     )
     done = frame.data.get("dodges_done", 0)
     control, satisfied = host.advance_provider(frame, Timing.RESOLVE_BEFORE_EFFECT)

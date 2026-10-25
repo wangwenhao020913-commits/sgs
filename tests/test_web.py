@@ -2157,12 +2157,12 @@ def test_requirement_counts_a_wushuang_duel_demand_and_phrases_it():
     assert context["requirement"] == "需要打出2张【杀】（依次打出两张，每打完一张再询问一次）"
 
 
-def test_requirement_counts_two_slashes_when_lvbu_is_the_one_being_dueled():
-    """样例②的反向（票 23）：0号位吕布**被**3号位曹操【决斗】⇒ 吕布这一问也要两张【杀】。
+def test_requirement_asks_lvbu_for_one_slash_and_his_opponent_for_two():
+    """吕布**被**【决斗】时：吕布自己一张、**对手**（这次是使用者）两张（票 23 用户裁定）。
 
-    牌面 ② 的后半句是"或**成为其他角色【决斗】的目标**后"⇒ 两张加在**被决斗的一方**身上。
-    界面文案与引擎共用同一句 `responder_role` 判据（"这一问的响应者就是这张牌指定的目标"），
-    故这里断言的是**网页侧真的传了**那个角色标注——少了它，文案会退回"需要打出【杀】"。
+    牌面 ② 的"该角色"= **跟吕布决斗的那一方**（标准版牌面直接写"与你进行【决斗】的角色
+    每次需连续打出两张【杀】"）。故吕布挨【决斗】时并不加倍，加倍的是对方。
+    界面与结算共用同一对事实（`targets[0]` = 指定目标，`role` = 响应者是不是那个目标）。
     """
     duel = cards_of_type(_context_pack(), "duel")[0]
     engine, state = _context_fixture(
@@ -2170,23 +2170,30 @@ def test_requirement_counts_two_slashes_when_lvbu_is_the_one_being_dueled():
         frame_kind=FrameKind.RESOLVE,
         frame_data=lambda s: {"card": s.card(duel), "source": 3, "targets": (0,)},
     )
-    query = RespondQuery(
-        seq=2,
-        actor=0,
-        timing=Timing.RESOLVE_AFTER_EFFECT,
-        prompt="响应窗口：请打出一张牌，或放弃。",
-        legal_actions=(),
-        view=project(state, 0),
-        cause=WindowCause.DUEL,
-        required="slash",
-        target=None,
-        window_frame=1,
-    )
 
-    context = query_context(engine, query)
+    def _query(actor: int) -> RespondQuery:
+        return RespondQuery(
+            seq=2,
+            actor=actor,
+            timing=Timing.RESOLVE_AFTER_EFFECT,
+            prompt="响应窗口：请打出一张牌，或放弃。",
+            legal_actions=(),
+            view=project(state, actor),
+            cause=WindowCause.DUEL,
+            required="slash",
+            target=None,
+            window_frame=1,
+        )
 
-    assert context["label"] == "3号位曹操对0号位吕布使用决斗"
-    assert context["requirement"] == "需要打出2张【杀】（依次打出两张，每打完一张再询问一次）"
+    lvbu = query_context(engine, _query(0))
+    assert lvbu["label"] == "3号位曹操对0号位吕布使用决斗"
+    assert lvbu["requirement"] == "需要打出【杀】", "吕布本人的响应只要一张"
+
+    # 轮到对手（使用【决斗】的 3 号位曹操）响应 ⇒ 两张。
+    opponent = query_context(engine, _query(3))
+    assert opponent["requirement"] == (
+        "需要打出2张【杀】（依次打出两张，每打完一张再询问一次）"
+    ), "跟吕布决斗的那一方每次要两张"
 
 
 def test_requirement_drops_the_increment_note_when_one_card_suffices():

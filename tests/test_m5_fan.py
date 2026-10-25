@@ -1093,8 +1093,9 @@ def test_liuli_diverts_a_fire_slash_but_not_a_non_slash_card():
 def test_wushuang_requires_two_responses_for_a_fire_slash_but_not_for_a_trick():
     """无双的牌名闭集按【杀】族读：火 / 雷【杀】与普通【杀】、决斗都要两张响应。
 
-    【决斗】那一档要带 ``role=TARGET``（票 23）：牌面把"两张【杀】"加在**被决斗的一方**
-    每次响应上，而这一问问的就是那个人的张数（座位 1 被座位 0 决斗）。
+    【决斗】那一档要带 ``role=TARGET``（票 23）：``target`` = 这张【决斗】**指定的目标**
+    （座位 1），``role=TARGET`` 说明这一问的响应者就是他；座位 0 是吕布 ⇒ 加倍落在对手
+    身上 ⇒ 2。
     """
     state = _state([SeatSpec(hero="lvbu"), SeatSpec()])
     for card_id in (SLASH[0], FIRE_SLASH[0], THUNDER_SLASH[0], DUEL[0]):

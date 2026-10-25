@@ -1086,17 +1086,22 @@ def _count_needed(engine: Any, query: Query, data: dict[str, Any]) -> int:
     source = data.get("source")
     if source is None:
         return 1
-    target = getattr(query, "target", None)
-    if target is None:
-        target = getattr(query, "actor", None)
+    # 两个座位事实与引擎同形（票 23）：``target`` = 这张牌**指定的目标**（载荷的
+    # ``targets[0]``），``role`` = 这一问的响应者（询问的 ``target``，缺省问的人）是不是
+    # 那个目标。【无双】②改的是"吕布的对手"每轮的张数，故界面必须和结算读同一对事实，
+    # 否则"吕布被【决斗】"时文案会写成吕布要两张。
+    responder = getattr(query, "target", None)
+    if responder is None:
+        responder = getattr(query, "actor", None)
     targets = tuple(int(seat) for seat in (data.get("targets") or ()))
+    designated = targets[0] if targets else None
     return int(
         response_count(
             engine.state,
             source=source,
             card=data.get("card"),
-            target=target,
-            role=responder_role(target, targets[0] if targets else None),
+            target=designated,
+            role=responder_role(responder, designated),
         )
     )
 
