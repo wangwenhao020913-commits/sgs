@@ -47,6 +47,7 @@ from sgs.state import (
     ActivateSkill,
     EndPhase,
     FrameKind,
+    MoveReason,
     Pass,
     PlayCard,
     SelectCards,
@@ -627,12 +628,16 @@ _LUOYI_TOP_TYPES = ("slash", "crossbow", "duel")
 
 
 class _LuoyiPlayer:
-    """【裸衣】脚本玩家：第一次「是否发动」按 ``activate`` 答；出牌阶段用第一张指向 1 的牌。"""
+    """【裸衣】脚本玩家：第一次「是否发动」按 ``activate`` 答；第二次按 ``gain`` 答。"""
 
-    def __init__(self, *, activate: bool = True, card_type: str = "slash") -> None:
+    def __init__(
+        self, *, activate: bool = True, gain: bool = True, card_type: str = "slash"
+    ) -> None:
         self.activations_left = 1 if activate else 0
+        self.gain = gain
         self.card_type = card_type
         self.queries: list = []
+        self.options: list = []
         self.cards_used = 0
 
     def respond(self, query):
@@ -644,6 +649,14 @@ class _LuoyiPlayer:
                     if getattr(action, "kind", None) == "ActivateSkill":
                         return action
             return next(action for action in query.legal_actions if isinstance(action, Pass))
+        if query.kind == "SELECT_OPTION" and str(query.skill_id).startswith("luoyi:"):
+            self.options.append(query)
+            wanted = "luoyi_gain" if self.gain else "luoyi_skip"
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, SelectOption) and action.choice == wanted
+            )
         if query.kind == "PLAY_PHASE":
             for action in query.legal_actions:
                 if (
@@ -689,9 +702,59 @@ def test_jie_luoyi_takes_the_qualified_revealed_cards_and_gives_up_the_draw():
     )
 
     assert len(player.queries) == 1
+    assert len(player.options) == 1, "亮出后必须再问一次「是否获得」"
+    assert player.options[0].skill_id == "luoyi:gain"
+    assert {
+        action.choice
+        for action in player.options[0].legal_actions
+        if isinstance(action, SelectOption)
+    } == {"luoyi_gain", "luoyi_skip"}
+    assert not any(isinstance(action, Pass) for action in player.options[0].legal_actions), (
+        "「是否获得」是二选一，不是可取消步骤"
+    )
     assert engine.state.player(0).hand == [hand_card, *top], "三张全进手牌、没有额外摸牌"
     assert all(card_id not in engine.state.deck for card_id in top)
+    assert all(card_id not in engine.state.discard for card_id in top), "获得不是置入弃牌堆"
     assert [PACK.deck.cards[card_id].type for card_id in top] == list(_LUOYI_TOP_TYPES)
+
+
+def test_jie_luoyi_declining_the_gain_discards_the_revealed_cards_and_draws_two():
+    """用户裁定：不获得 ⇒ 三张亮出的牌置入弃牌堆，然后正常摸两张、不加伤。"""
+    top = (_one_of("slash"), _one_of("crossbow"), _one_of("duel"))
+    slash = _one_of("slash", excluded=set(top))
+    deck = tuple(card_id for card_id in _luoyi_deck(top) if card_id != slash)
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_xuchu", hand=(slash,)), SeatSpec()],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _LuoyiPlayer(gain=False)
+    players = [player, Scripted()]
+
+    _run(engine, players, lambda e: ran_timing(e, Timing.PHASE_DRAW_END))
+
+    assert len(player.queries) == 1
+    assert len(player.options) == 1
+    assert set(top) <= set(engine.state.discard), "不获得的三张必须进弃牌堆"
+    discard_moves = [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == "card_move"
+        and record.to_zone.zone is Zone.DISCARD
+        and {card.card_id for card in record.cards} == set(top)
+    ]
+    assert len(discard_moves) == 1 and discard_moves[0].reason is MoveReason.PUT, (
+        "置入弃牌堆是规则性搬牌（PUT），不是弃置（DISCARD）"
+    )
+    assert not set(top) & set(engine.state.player(0).hand), "不获得的牌不能留 / 摸回手里"
+    assert len(engine.state.player(0).hand) == 3, "原有的【杀】+ 正常摸两张"
+    assert engine.state.player(0).luoyi_until_next_turn is False, "不获得 ⇒ 不加伤"
+
+    _run(engine, players, lambda e: ran_timing(e, Timing.TURN_AFTER_END))
+    assert player.cards_used == 1
+    assert engine.state.player(1).hp == 3, "【杀】只有基础 1 点"
 
 
 def test_jie_luoyi_adds_one_to_this_turns_slash_damage():
@@ -729,30 +792,42 @@ def test_declining_jie_luoyi_draws_two_and_deals_one():
     _run(engine, [player, Scripted()], lambda e: ran_timing(e, Timing.TURN_AFTER_END))
 
     assert len(player.queries) == 1
+    assert player.options == [], "不发动 ⇒ 连亮牌都不发生，没有第二次询问"
     assert len(engine.state.player(0).hand) >= 1
     assert engine.state.player(1).hp == 3, "不发动 ⇒ 【杀】只有基础 1 点"
 
 
-def test_jie_luoyi_without_a_qualified_card_draws_normally():
-    """反例：三张都不是基本 / 武器 / 决斗 ⇒ 亮出照发生，但"若如此做"不成立：不弃摸牌、不加伤。"""
+def test_jie_luoyi_without_a_qualified_card_skips_the_question_and_discards_the_three():
+    """退化档：三张都不是基本 / 武器 / 决斗 ⇒ 不问「是否获得」，直接按不获得走。
+
+    没有可拿的牌时不存在第二个选择；但用户裁定的"不获得 ⇒ 置入弃牌堆"照常生效，
+    故亮出的三张进弃牌堆、随后正常摸两张，且不解锁 +1。
+    """
     top = (_one_of("dismantlement"), _one_of("snatch"), _one_of("ex_nihilo"))
     slash = _one_of("slash", excluded=set(top))
-    deck = _luoyi_deck(top)
+    deck = tuple(card_id for card_id in _luoyi_deck(top) if card_id != slash)
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hero="jie_xuchu", hand=(slash,)), SeatSpec()],
-        deck=tuple(card_id for card_id in deck if card_id != slash),
+        deck=deck,
         turn_seat=0,
     )
     engine = Engine.from_state(state, seed=7)
     player = _LuoyiPlayer()
+    players = [player, Scripted()]
 
-    _run(engine, [player, Scripted()], lambda e: ran_timing(e, Timing.TURN_AFTER_END))
+    _run(engine, players, lambda e: ran_timing(e, Timing.PHASE_DRAW_END))
 
+    assert len(player.queries) == 1
+    assert player.options == [], "没有可拿的牌 ⇒ 不发没有二选一的询问"
+    assert set(top) <= set(engine.state.discard), "不获得 ⇒ 三张置入弃牌堆"
+    assert not set(top) & set(engine.state.player(0).hand), "三张不应被摸回手里"
+    assert len(engine.state.player(0).hand) == 3, "原有的【杀】+ 正常摸两张"
+    assert engine.state.player(0).luoyi_until_next_turn is False
+
+    _run(engine, players, lambda e: ran_timing(e, Timing.TURN_AFTER_END))
     assert player.cards_used == 1
     assert engine.state.player(1).hp == 3, "没拿到牌 ⇒ 不解锁 +1"
-    # 正常摸了牌堆顶两张（含那三张里的前两张），故它们不在这三张的手里。
-    assert not set(top).issubset(set(engine.state.player(0).hand) - {slash})
     revealed = [
         record
         for record in engine.records

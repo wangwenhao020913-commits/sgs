@@ -108,17 +108,17 @@ function renderOptionButtons(pending) {
 
 /** 这一面要画哪些选项值（M5-bugfix）：一次性二选一画**完整的一对**，其余只画候选真有的。
  *
- * 配对来自**已知的一次性选项标签**（:data:`OPTION_LABELS`）——只要候选里有其中一项，
- * 就把整对都画出来；另一项是否可提交仍只看它在不在 ``legal_actions`` 里（引擎裁决），
- * 这里只决定"要不要把另一条画成禁用"。没有一次性选项的步骤（花色等复用枚举）原样。
+ * 配对来自 :data:`OPTION_PAIRS`——只要候选里有同一对的一项，就把整对都画出来；另一项
+ * 是否可提交仍只看它在不在 ``legal_actions`` 里（引擎裁决），这里只决定"要不要把另一条
+ * 画成禁用"。没有一次性选项的步骤（花色等复用枚举）原样，且不会把别的技能的配对摊进来。
  */
 function optionChoices(pending) {
   const legal = ((pending && pending.legal_actions) || [])
     .filter((action) => action.kind === "SelectOption" && !isRightAction(action))
     .map((action) => action.choice);
-  const known = Object.keys(OPTION_LABELS);
-  if (!known.some((choice) => legal.includes(choice))) return legal;
-  return [...new Set([...known, ...legal])];
+  const pair = OPTION_PAIRS.find((choices) => choices.some((choice) => legal.includes(choice)));
+  if (!pair) return legal;
+  return [...new Set([...pair, ...legal])];
 }
 
 /** 服务端下发的选项标签（`{值: {name, symbol, color}}`）；没有就是 `null`。 */
@@ -148,9 +148,9 @@ async function submitDialogChoice(pending, index) {
   await submitAction(before);
 }
 
-/** 一次性二选一的**中文标签**（U2-04）：【雌雄双股剑】的 `discard_one` / `draw_one`。
+/** 一次性二选一的**中文标签**（U2-04）：雌雄双股剑 / 界许褚【裸衣】。
  *
- * 这两个是**一次性**的小选项（spec D3「≤3 且一次性 ⇒ 提示区左侧按钮」），中文名写在
+ * 这些是**一次性**的小选项（spec D3「≤3 且一次性 ⇒ 提示区左侧按钮」），中文名写在
  * 这里；可复用的枚举（花色 / 【杀】的类型 / 锦囊牌名）中文标签属服务端展示契约：
  * 票 08 起花色由载荷的 `option_labels` 下发（见 :func:`optionLabel`），前端不另抄第二份。
  * 查不到标签的值原样显示（fail-visible，不猜中文）。
@@ -165,7 +165,21 @@ async function submitDialogChoice(pending, index) {
 const OPTION_LABELS = Object.freeze({
   discard_one: "弃置 1 张手牌",
   draw_one: "令其摸一张牌",
+  // 界许褚【裸衣】（用户裁定）：亮出三张后的「获得 / 不获得」。
+  luoyi_gain: "获得",
+  luoyi_skip: "不获得",
 });
+
+/** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。
+ *
+ * 不能把 :data:`OPTION_LABELS` 的所有键一把摊开：两张技能各有各的一对，摊开会让
+ * 【雌雄双股剑】的询问多出两个永远禁用的「获得 / 不获得」。配对是**通用**的展示
+ * 形状，不按技能 id 分支；合法性仍只看候选里有没有那一条。
+ */
+const OPTION_PAIRS = Object.freeze([
+  Object.freeze(["discard_one", "draw_one"]),
+  Object.freeze(["luoyi_gain", "luoyi_skip"]),
+]);
 
 /** 选项按钮上的文字：已知的一次性选项用中文；其余选项保留**原值**（复用标签待票 08）。 */
 function optionText(choice, pending) {

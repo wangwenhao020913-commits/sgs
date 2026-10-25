@@ -6427,6 +6427,31 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && drawOnlyButtons.find((node) => node.textContent === "令其摸一张牌").disabled === false,
     `选项=${JSON.stringify(optionLabels())} disabled=${JSON.stringify(drawOnlyButtons.map((node) => [node.textContent, node.disabled]))}`);
 
+  // 界许褚【裸衣】的第二次询问（用户裁定）也走通用 SELECT_OPTION：中文标签来自同一张
+  // 一次性标签表，合法项仍原样取自 legal_actions（前端不按技能分支）。
+  const luoyi = optionView(["luoyi_gain", "luoyi_skip"], 9433);
+  luoyi.pending.skill_id = "luoyi:gain";
+  ui.state.view = luoyi;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(luoyi);
+  check("U2-04h2 裸衣「获得 / 不获得」= 两个中文选项按钮，原值不显示",
+    optionLabels().join(",") === "获得,不获得"
+      && !/luoyi_gain|luoyi_skip/.test($("t-options").text()),
+    `选项=${JSON.stringify(optionLabels())}`);
+  const gainButton = Array.from($("t-options").children)
+    .find((node) => node.textContent === "获得");
+  check("U2-04h3 点「获得」= 选中那条 SelectOption(luoyi_gain)，可提交",
+    (() => {
+      clickNode(gainButton);
+      const action = ui.buildAction();
+      return ui.state.selectedOption === 0 && $("btn-submit").disabled === false
+        && !!action && action.kind === "SelectOption" && action.choice === "luoyi_gain"
+        && luoyi.pending.legal_actions.includes(action);
+    })(),
+    `option=${ui.state.selectedOption} action=${JSON.stringify(ui.buildAction())}`);
+
   // 可复用的枚举标签（花色）自票 08 起由服务端下发 `option_labels`：前端只读它摆版面，
   // 不抄第二份中文表；有标签就是选择型弹窗，没有标签才退回原值（fail-visible）。
   const suits = optionView(["heart", "spade"], 9432);

@@ -86,7 +86,10 @@ __all__ = [
     "JIE_BOTU",
     "JIE_LUOYI",
     "JIE_LUOYI_FLOW",
+    "JIE_LUOYI_GAIN",
+    "JIE_LUOYI_OPTIONS",
     "JIE_LUOYI_REVEAL",
+    "JIE_LUOYI_SKIP",
     "JIE_TUXI",
     "JIE_TUXI_FLOW",
     "KEJI",
@@ -562,9 +565,9 @@ _LUOYI = PhaseBodySkill(
 
 
 # ---------------------------------------------------------------------------
-# 界许褚【裸衣】（M6 票 14）：摸牌阶段开始时，你亮出牌堆顶的三张牌，然后你可以获得其中
-# 的基本牌、武器牌和【决斗】。若如此做，你放弃摸牌，且直到你的下个回合开始，你为伤害
-# 来源的【杀】或【决斗】造成的**基础伤害值** +1（§十九 L2035–L2039）。
+# 界许褚【裸衣】（M6 票 14；用户裁定修订）：摸牌阶段开始时，你亮出牌堆顶的三张牌，然后
+# **你可以获得**其中的基本牌、武器牌和【决斗】。若如此做，你放弃摸牌，且直到你的下个
+# 回合开始，你为伤害来源的【杀】或【决斗】造成的**基础伤害值** +1（§十九 L2035–L2039）。
 #
 # 与标准版不是同一句（"少摸一张换本回合 +1"），故不复用标准版的流水线；共用的是
 # **伤害加成判据**（:func:`_luoyi_bonus`：来源侧 + 【杀】/【决斗】）与修饰器挂点。
@@ -576,9 +579,14 @@ _LUOYI = PhaseBodySkill(
 # - **直到你的下个回合开始**：座位状态 ``Player.luoyi_until_next_turn``，清理点 = 该座位
 #   自己的 ``TURN_START``（与标准版"回合末清"分开，见 :class:`~sgs.state.Player`）。
 #
-# "若如此做"的落点 = **真的拿到了至少一张**：三张里一张可拿的都没有时，亮出照发生、但
-# 既不放弃摸牌也不加伤（正常摸两张）。这一档不另发询问：牌面对"获得"只有一个"可以"，
-# 且"亮完什么都不拿"与"不发动"在收益上等价，故整条技能按一类询问（是否发动）收口。
+# **第二次询问**（用户裁定，已登记 §5「程序化约定与偏离一手」）：亮出后问一次
+# 「是否获得」，二选一、不可取消。获得 ⇒ 搬走三张里的合格牌 + 放弃摸牌 + 加伤；不获得 ⇒
+# 把**亮出的三张全部置入弃牌堆**，不改摸牌数、不加伤。后者**不是官方原文**（原文只写
+# "亮出"，没写不获得时牌的去处），是本仓明知而偏离，改回去等于回归官方。
+#
+# **退化档**：三张里一张合格牌都没有时，没有"获得"这一项，故**不发**第二次询问，直接按
+# "不获得"结算（三张置入弃牌堆 + 正常摸两张）。这确实会让发动者在没有收益时白掉三张；
+# 但"不获得 ⇒ 置入弃牌堆"是用户给这条技能的统一落点，而"没有可选项"不应变成一次空询问。
 # ---------------------------------------------------------------------------
 
 JIE_LUOYI = hero_skill_id("jie_xuchu", "luoyi")
@@ -587,11 +595,26 @@ JIE_LUOYI = hero_skill_id("jie_xuchu", "luoyi")
 JIE_LUOYI_REVEAL = 3
 """「亮出牌堆顶的三张牌」的张数（§十九 L2035）。"""
 
+JIE_LUOYI_GAIN = "luoyi_gain"
+"""第二次询问的选项：获得亮出牌里的合格者（并放弃摸牌 + 加伤）。"""
+
+JIE_LUOYI_SKIP = "luoyi_skip"
+"""第二次询问的选项：不获得（亮出的三张置入弃牌堆，正常摸两张）。"""
+
+JIE_LUOYI_OPTIONS: tuple[str, ...] = (JIE_LUOYI_GAIN, JIE_LUOYI_SKIP)
+"""「是否获得」的闭集；顺序即界面按钮顺序（获得在前）。"""
+
 _LUOYI_REVEALED_KEY = "jie_luoyi_revealed"
 """帧私有：本次亮出的牌 id（自顶向下；续跑沿用它，不重看牌堆）。"""
 
+_LUOYI_CHOICE_KEY = "jie_luoyi_choice"
+"""帧私有：第二次询问的答案（``JIE_LUOYI_GAIN`` / ``JIE_LUOYI_SKIP``）；重入不重问。"""
+
 _LUOYI_GAINED_KEY = "jie_luoyi_gained"
 """帧私有：其中的"基本牌 / 武器牌 / 【决斗】"已经搬进手牌。"""
+
+_LUOYI_DISCARDED_KEY = "jie_luoyi_discarded"
+"""帧私有：亮出的牌已经置入弃牌堆（不获得路径的幂等位）。"""
 
 _LUOYI_SETTLED_KEY = "jie_luoyi_settled"
 """帧私有：放弃摸牌 + 加伤已经落过（搬牌挂起后的续跑不重复落）。"""
@@ -612,11 +635,17 @@ def _jie_luoyi_keeps(state: GameState, card: Any) -> bool:
 
 
 def _jie_luoyi_effect(host: Any, frame: Frame, answers: Any) -> Any:
-    """提交点：亮出牌堆顶三张 → 获得其中合格者 → 若拿到牌则放弃摸牌 + 加伤。
+    """提交点：亮出三张 → 问「是否获得」→ 获得或置入弃牌堆。
 
-    顺序即牌面的顺序（"然后"）。三段各一个帧私有游标：亮出只做一次（续跑不重看），
-    搬牌可能内联派发"失去牌后"而挂起（续跑不重搬），"若如此做"的两件副作用只落一次。
-    没拿到任何一张时**不**放弃摸牌、**不**加伤：牌面写的是"若如此做"（= 获得过）。
+    顺序即牌面的顺序（"然后"）。四段各一个帧私有游标：亮出只做一次（续跑不重看），
+    第二次询问只发一次（``ask_option`` 的帧内缓存 + 本帧私有键），搬牌可能内联派发
+    "失去牌后"而挂起（续跑不重搬），"若如此做"的两件副作用只落一次。
+
+    **不获得**走用户裁定：三张亮出的牌全部置入弃牌堆，**不**改摸牌数、**不**加伤。
+    置入用 :data:`~sgs.state.MoveReason.PUT` 而不是 ``DISCARD``——它不是任何人"弃置"
+    手牌 / 装备，而是规则性置入弃牌堆；这样事件流不会把它记成一次弃置动作。
+
+    **退化档**：没有合格牌 ⇒ 不提问，直接按不获得结算（三张置入弃牌堆 + 正常摸两张）。
     """
     owner = frame.data["skill_owner"]
     state = host.state
@@ -628,27 +657,59 @@ def _jie_luoyi_effect(host: Any, frame: Frame, answers: Any) -> Any:
             host.reveal_card(frame, owner, card)
     revealed = state.refs(tuple(frame.data[_LUOYI_REVEALED_KEY]))
     kept = tuple(card for card in revealed if _jie_luoyi_keeps(state, card))
-    if kept and not frame.data.get(_LUOYI_GAINED_KEY):
+
+    # 第二次询问：有可拿的牌才有二选一；没有就退化成"不获得"，不发空询问。
+    choice = frame.data.get(_LUOYI_CHOICE_KEY)
+    if kept and choice is None:
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.PHASE_DRAW,
+            skill_id="luoyi:gain",
+            options=JIE_LUOYI_OPTIONS,
+            optional=False,
+        )
+        if host.suspended(answer):
+            return "stay"
+        choice = str(answer.choice)
+        frame.data[_LUOYI_CHOICE_KEY] = choice
+    if choice == JIE_LUOYI_GAIN:
+        if not frame.data.get(_LUOYI_GAINED_KEY):
+            control = host.move_in_frame(
+                frame,
+                kept,
+                to_zone=ZoneRef(Zone.HAND, owner),
+                reason=MoveReason.PUT,
+                owner=owner,
+                actor=owner,
+            )
+            if control == "stay":
+                return "stay"
+            frame.data[_LUOYI_GAINED_KEY] = True
+        if not frame.data.get(_LUOYI_SETTLED_KEY):
+            frame.data[_LUOYI_SETTLED_KEY] = True
+            host.set_draw_phase_count(owner, 0)
+            host.set_luoyi_until_next_turn(owner, True)
+        return None
+
+    # ``choice`` 为 None = 没有合格牌的退化档；与显式「不获得」走同一落点。
+    if revealed and not frame.data.get(_LUOYI_DISCARDED_KEY):
+        frame.data[_LUOYI_DISCARDED_KEY] = True
         control = host.move_in_frame(
             frame,
-            kept,
-            to_zone=ZoneRef(Zone.HAND, owner),
+            revealed,
+            to_zone=ZoneRef(Zone.DISCARD),
             reason=MoveReason.PUT,
             owner=owner,
             actor=owner,
         )
         if control == "stay":
             return "stay"
-        frame.data[_LUOYI_GAINED_KEY] = True
-    if frame.data.get(_LUOYI_GAINED_KEY) and not frame.data.get(_LUOYI_SETTLED_KEY):
-        frame.data[_LUOYI_SETTLED_KEY] = True
-        host.set_draw_phase_count(owner, 0)
-        host.set_luoyi_until_next_turn(owner, True)
     return None
 
 
 JIE_LUOYI_FLOW = SkillFlow(name="jie_luoyi", steps=(), effect=_jie_luoyi_effect)
-"""界【裸衣】的零步流水线：[是否发动] → 亮三张 → 拿合格牌 →（拿到则）弃摸牌 + 跨回合 +1。"""
+"""界【裸衣】的零步流水线：[是否发动] → 亮三张 → 是否获得 → 拿牌 + 弃摸牌 + 跨回合 +1。"""
 
 
 def _jie_luoyi_damage_bonus(state: GameState, ctx: ModifierContext, current: Any) -> Any:
@@ -894,6 +955,11 @@ _REQUIREMENTS: dict[str, str] = {
 _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
     # M6 票 01【突袭】：座位步的询问 ``skill_id`` 是 ``tuxi:seat:<序号>`` ⇒ 键 = ``seat``。
     "tuxi": {"seat": "选择至多两名其他角色（各获得其中一张手牌）"},
+    # 用户裁定：界【裸衣】亮出三张后的第二次询问（``luoyi:gain``）⇒ 键 = ``gain``。
+    "luoyi": {
+        "gain": "选择是否获得亮出牌里的基本牌 / 武器牌 /【决斗】；"
+        "不获得则三张置入弃牌堆，正常摸两张"
+    },
 }
 """多步阶段体技能的逐步文案（M6 票 01）；键 = 短 id → 步骤名 → 文案。"""
 
