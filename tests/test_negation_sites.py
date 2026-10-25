@@ -408,8 +408,8 @@ SITES: dict[Site, Rule] = {
         "add_tag(frame, Tag.UNRESPONSIVE, target=target)",
     ): Rule(
         "response-window-not-produced",
-        2,
-        "界【铁骑】：付不起同花色牌 / 选择不弃 ⇒ 不能使用【闪】响应（两条分支同一条标签）",
+        1,
+        "界【铁骑】：付不起同花色牌 / 选择不弃 ⇒ 不能使用【闪】响应（票 14 把原两条分支并入同一处无条件调用，站点数 2 → 1）",
     ),
     (
         "src/sgs/skills/life_after.py",
