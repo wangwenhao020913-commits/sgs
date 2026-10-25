@@ -2157,6 +2157,38 @@ def test_requirement_counts_a_wushuang_duel_demand_and_phrases_it():
     assert context["requirement"] == "需要打出2张【杀】（依次打出两张，每打完一张再询问一次）"
 
 
+def test_requirement_counts_two_slashes_when_lvbu_is_the_one_being_dueled():
+    """样例②的反向（票 23）：0号位吕布**被**3号位曹操【决斗】⇒ 吕布这一问也要两张【杀】。
+
+    牌面 ② 的后半句是"或**成为其他角色【决斗】的目标**后"⇒ 两张加在**被决斗的一方**身上。
+    界面文案与引擎共用同一句 `responder_role` 判据（"这一问的响应者就是这张牌指定的目标"），
+    故这里断言的是**网页侧真的传了**那个角色标注——少了它，文案会退回"需要打出【杀】"。
+    """
+    duel = cards_of_type(_context_pack(), "duel")[0]
+    engine, state = _context_fixture(
+        [SeatSpec(hero="lvbu"), SeatSpec(), SeatSpec(), SeatSpec(hero="caocao")],
+        frame_kind=FrameKind.RESOLVE,
+        frame_data=lambda s: {"card": s.card(duel), "source": 3, "targets": (0,)},
+    )
+    query = RespondQuery(
+        seq=2,
+        actor=0,
+        timing=Timing.RESOLVE_AFTER_EFFECT,
+        prompt="响应窗口：请打出一张牌，或放弃。",
+        legal_actions=(),
+        view=project(state, 0),
+        cause=WindowCause.DUEL,
+        required="slash",
+        target=None,
+        window_frame=1,
+    )
+
+    context = query_context(engine, query)
+
+    assert context["label"] == "3号位曹操对0号位吕布使用决斗"
+    assert context["requirement"] == "需要打出2张【杀】（依次打出两张，每打完一张再询问一次）"
+
+
 def test_requirement_drops_the_increment_note_when_one_card_suffices():
     """正面对照：没有【无双】时只需一张，文案不带"依次两张"。"""
     duel = cards_of_type(_context_pack(), "duel")[0]

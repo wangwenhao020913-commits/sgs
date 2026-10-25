@@ -28,7 +28,7 @@ from sgs.data import (
     load_content_pack,
     load_hero_tables,
 )
-from sgs.effects import ModifierRole, response_count
+from sgs.effects import responder_role, response_count
 from sgs.engine import record_json
 from sgs.skills import (
     CATALOG,
@@ -1096,11 +1096,7 @@ def _count_needed(engine: Any, query: Query, data: dict[str, Any]) -> int:
             source=source,
             card=data.get("card"),
             target=target,
-            role=(
-                ModifierRole.TARGET
-                if targets and target == targets[0]
-                else ModifierRole.SUBJECT
-            ),
+            role=responder_role(target, targets[0] if targets else None),
         )
     )
 

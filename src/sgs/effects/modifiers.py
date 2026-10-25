@@ -279,6 +279,18 @@ def response_count(
     return apply_modifiers(ModifierPoint.RESPONSE_COUNT, state, ctx, 1)
 
 
+def responder_role(target: int | None, designated: int | None) -> ModifierRole:
+    """本次响应窗口里**响应者扮演谁**：就是这张牌指定的目标 ⇒ ``TARGET``，否则 ``SUBJECT``。
+
+    :func:`response_count` 的 ``role`` 实参由它派生，引擎侧（【决斗】结算按"当前该谁响应"
+    与"被决斗者"）与网页侧（询问的 ``target`` 与载荷的 ``targets[0]``）**读同一句判据**——
+    两处各写一次"相等比较"，就是同一条规则的第二份实现。
+    """
+    if target is None or designated is None:
+        return ModifierRole.SUBJECT
+    return ModifierRole.TARGET if target == designated else ModifierRole.SUBJECT
+
+
 def recover_amount(
     state: GameState,
     *,

@@ -53,6 +53,7 @@ from sgs.timing import Timing
 
 from .catalog import (
     MATCH_OWNER_KEY,
+    RUNNING_SKILL_KEY,
     HeroSkillDecl,
     Hook,
     SkillDef,
@@ -85,11 +86,11 @@ __all__ = [
 _AGAIN_OPTION = "skill_again"
 """逐张触发技能（【枭姬】）第 2 张起的"是否再发动一次"里那个唯一选项的取值。
 
-`skill_again` 是**界面词的键**：`tools/sgs_web/static/options.js:OPTION_LABELS` 把它翻成
-「再发动一次」（答「取消」= 到此为止，牌面写的是"至多 X 次"）。
-
-选项字符串只是**这一个询问**内的取值（UI 按技能名渲染标题，不直接显示它），故与
-`seat:N` 一类取值同姿态：不是领域概念，也不进记录流的语义层。
+与 ``seat:N`` 一类取值同姿态：只是**这一个询问**内的取值，不是领域概念、不进记录流的
+语义层，也不直接显示。界面按**候选形状**渲染——「一个 ``SelectOption`` + 一条 ``Pass``」=
+单选项确认（`tools/sgs_web/static/pending.js:isSingleOptionalOption`），画成「提交 / 放弃」
+两个出口、标题取技能声明的 `requirement`（【枭姬】=「摸两张牌」），故**不需要**再加中文
+标签；「放弃」= 到此为止（牌面写的是"至多 X 次"）。
 """
 
 MOVE_EVENT_KEY = "move_event"
@@ -388,7 +389,7 @@ class MoveAfterSkill(HeroSkillDecl):
     flow: Any = None
     trigger_count: Any = None
 
-    def count(self, state: GameState, move: MoveEvent, owner: int | None) -> int:
+    def activation_count(self, state: GameState, move: MoveEvent, owner: int | None) -> int:
         """这次移动对这条技能成立**几次**（缺省 = 布尔判据的 0 / 1）。"""
         if owner is None:
             return 0
@@ -398,7 +399,7 @@ class MoveAfterSkill(HeroSkillDecl):
 
     def fires(self, state: GameState, move: MoveEvent, owner: int | None) -> bool:
         """本次移动对这条技能（持有者 ``owner``）算不算"失去"（只看区域与**移动后**的持有）。"""
-        return self.count(state, move, owner) > 0
+        return self.activation_count(state, move, owner) > 0
 
     def condition(self, host: Any, frame: Any) -> bool:
         """钩子触发条件（``Hook.condition``）：不成立就连"是否发动"询问都不发。
@@ -417,14 +418,31 @@ class MoveAfterSkill(HeroSkillDecl):
 
         **逐张触发的技能**（``trigger_count`` 非空，目前只有【枭姬】）在这里补齐"至多 X 次"：
         派发环已经问过第 1 张的"是否发动"，其余每张各再问一次（``optional`` 的
-        ``SELECT_OPTION``，答放弃即停 = "至多"）。游标 ``<skill id>:activations`` 记**已经
+        ``SELECT_OPTION``，答放弃即停 = "至多"）。游标 ``<skill id>:act:<这批牌>`` 记**已经
         摸过几次**，且**在摸牌之前**前进——摸牌可能内联派发别的"失去牌后"并挂起，续跑据此
-        既不重问、也不重摸。
+        既不重问、也不重摸；按"这批牌"分桶则让同一帧的两次独立失去互不干扰。
         """
         owner = frame.data["skill_owner"]
         move = move_event(frame)
-        total = 1 if self.trigger_count is None else self.count(host.state, move, owner)
-        key = f"{self.skill_id}:activations"
+        # **正在跑的是哪一条实例**（标 / 界各一份声明、共用同一条流水线）：``self`` 是
+        # 流水线绑定的那条声明（界【枭姬】复用的是标版的 flow ⇒ ``self`` 恒为标版），
+        # 故询问标识与游标都必须读派发环写下的"这一次是谁在跑"，否则界版的"再来一次"
+        # 会记成标版的询问、两个武将还共用一个游标。
+        skill_id = str(frame.data.get(RUNNING_SKILL_KEY) or self.skill_id)
+        total = (
+            1
+            if self.trigger_count is None
+            else self.activation_count(host.state, move, owner)
+        )
+        # 游标**按这批牌**分桶，不按帧（票 23 评审）：同一帧里可以有多次移动（【顶替】的
+        # 先旧后新、【寒冰剑】逐张弃两张），每次都是一个独立的时机实例。只按技能 id 分桶
+        # 会让第二次移动读到第一次的游标（`done >= total`）而**静默不摸**。同一批牌不可能
+        # 离开装备区两次，故"这批牌的 id"就是这次时机的唯一键；挂起续跑读的是同一个
+        # ``MoveEvent``，键不变、缓存照旧命中。
+        key = (
+            f"{skill_id}:act:"
+            f"{','.join(str(card_id) for card_id in (move.card_ids if move else ()))}"
+        )
         done = int(frame.data.get(key, 0))
         while done < total:
             if done:
@@ -433,7 +451,7 @@ class MoveAfterSkill(HeroSkillDecl):
                     frame,
                     owner,
                     Timing.MOVE_AFTER,
-                    skill_id=f"{self.skill_id}:again:{done}",
+                    skill_id=f"{skill_id}:again:{done}",
                     options=(_AGAIN_OPTION,),
                     optional=True,
                 )
@@ -493,7 +511,7 @@ def _lost_equipment_count(state: GameState, move: MoveEvent, owner: int) -> int:
     一次），故它用布尔判据 :func:`_emptied_hand`，不走本函数——同一批移动对两条技能是
     "N 次"与"1 次"的差别，这正是 :attr:`MoveAfterSkill.trigger_count` 存在的理由。
     """
-    if move.from_zone.zone is not Zone.EQUIP or move.from_zone.seat != owner:
+    if not _lost_equipment(state, move, owner):
         return 0
     return len(move.cards)
 

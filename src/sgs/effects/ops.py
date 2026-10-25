@@ -47,7 +47,7 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .behaviors import DamageNature
-from .modifiers import ModifierRole, response_count
+from .modifiers import responder_role, response_count
 
 __all__ = ("OPS",)
 
@@ -519,11 +519,7 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
         source=source,
         card=frame.data.get("card"),
         target=turn,
-        role=(
-            ModifierRole.TARGET
-            if turn == host.current_target(frame)
-            else ModifierRole.SUBJECT
-        ),
+        role=responder_role(turn, host.current_target(frame)),
     )
     if has_tag(frame, Tag.UNRESPONSIVE):
         # **响应窗口不产生**（M6 票 07 的否定分类第 4 层）：这张【决斗】整次使用被标成

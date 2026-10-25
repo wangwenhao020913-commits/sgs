@@ -64,6 +64,7 @@ from .modifiers import (
     damage_amount,
     priority_class_of,
     recover_amount,
+    responder_role,
     response_count,
 )
 from .ops import OPS
@@ -134,6 +135,7 @@ __all__ = (
     "place_on_deck",
     "priority_class_of",
     "recover_amount",
+    "responder_role",
     "response_count",
     "satisfies_required",
     "seat_distance",

@@ -175,6 +175,22 @@ def _drawn_to(records, seat: int) -> list[int]:
     ]
 
 
+def _xiaoji_asks(engine) -> int:
+    """【枭姬】一共问了几次（派发环的"是否发动" + 逐张触发的"再来一次"）。
+
+    判据读记录流里那两条询问的 ``skill_id``：第 1 张是技能 id 本身，第 2 张起带
+    ``:again:<n>`` 后缀。数的是"玩家被问了几次"，不是"摸了几张"——后者会掩盖"问一次
+    却摸两次"的实现。
+    """
+    return sum(
+        1
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind in ("SKILL_ACTIVATION", "SELECT_OPTION")
+        and str(getattr(record.query, "skill_id", "")).startswith(XIAOJI)
+    )
+
+
 def _move_after_cards(engine) -> list[int]:
     """记录流里全部 ``MOVE_AFTER`` 记录带的牌 id（顺序 = 派发顺序）。"""
     return [
@@ -523,7 +539,9 @@ def test_an_equipment_hook_that_suspends_on_move_after_yields_control():
 
     engine = Engine.from_state(state, seed=7)
     players = [Scripted(attacker), Scripted(defender)]
-    _advance(engine, players, lambda e: len(_drawn_to(e.records, 1)) >= 2)
+    # 两张装备是**两次独立移动** ⇒ 各触发一次【枭姬】⇒ 共 4 张（票 23 评审把旧的 `>= 2`
+    # 收紧成"恰好两次"：`>= 2` 会让"第二次移动静默不摸"这种缺陷照样绿）。
+    _advance(engine, players, lambda e: len(_drawn_to(e.records, 1)) >= 4)
 
     assert _moves_of(engine, horse).count(("equip", "discard", "DISCARD")) == 1, "同一张牌不搬第二遍"
     assert horse in engine.state.discard, "被寒冰剑弃掉的坐骑进了弃牌堆"
@@ -539,7 +557,7 @@ def test_an_equipment_hook_that_suspends_on_move_after_yields_control():
     assert after[activations[0] + 1].kind == "action", (
         "让出控制权：询问之后紧接着就是它的应答——寒冰剑没有在应答被消费之前另发询问"
     )
-    assert len(_drawn_to(after, 1)) >= 2, "枭姬真的摸了牌"
+    assert len(_drawn_to(after, 1)) == 4, "两次失去各摸 2 张（不是只摸第一次的 2 张）"
 
 
 # ---------------------------------------------------------------------------
@@ -636,7 +654,77 @@ def test_xiaoji_fires_once_per_equipment_card_lost_in_the_same_move():
     _advance(engine, [Scripted(), Scripted()], lambda e: e._move_pending is None)
 
     assert not engine.state.player(0).equip, "两张装备都进了弃牌堆"
+    assert _xiaoji_asks(engine) == 2, "两张装备 ⇒ 恰好两问（第 1 张是『是否发动』，第 2 张是再来一次）"
     assert len(_drawn_to(engine.records, 0)) == 4, "两张装备各触发一次 ⇒ 摸 2×2 张"
+
+
+def test_xiaoji_lets_the_owner_stop_after_the_first_card():
+    """「至多 X 次」的出口：第 2 张那一问答「放弃」⇒ 不再摸（票 23 评审补的断言）。
+
+    牌面写"至多可以发动 X 次"，故放弃是**玩家能选的**，不是"一律全发动"。三张装备时：
+    第 1 问（派发环的"是否发动"）答发动 ⇒ 摸 2；第 2 问答放弃 ⇒ 停；第 3 张不再问。
+    """
+    horses = (_cards("chitu")[0], _cards("dawan")[0], _cards("dilu")[0])
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=horses, hero="sunshangxiang"), SeatSpec()],
+        deck=_deck_excluding(*horses),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.move_in_frame(
+        None,
+        engine.state.refs(horses),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=0,
+        actor=0,
+    )
+
+    def decline_the_repeat(query):
+        if query.kind == "SELECT_OPTION":
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+        return None
+
+    _advance(
+        engine,
+        [Scripted(decline_the_repeat), Scripted()],
+        lambda e: e._move_pending is None,
+    )
+
+    assert _xiaoji_asks(engine) == 2, "第 1 问答发动、第 2 问答放弃 ⇒ 停在第 2 问"
+    assert len(_drawn_to(engine.records, 0)) == 2, "放弃后再也不摸（只拿了第 1 张的 2 张）"
+
+
+def test_xiaoji_counts_each_of_two_separate_moves_in_the_same_frame():
+    """同一帧里**两次**独立的失去（【寒冰剑】逐张弃两张）各算一次（票 23 评审的回归）。
+
+    逐张触发的游标若只按技能 id 分桶，第二次移动会读到第一次的游标（`done >= total`）
+    而静默不摸；按"这批牌的 id"分桶后两次都会摸。
+    """
+    horse, horse2 = _cards("chitu")[0], _cards("dawan")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=(horse, horse2), hero="sunshangxiang"), SeatSpec()],
+        deck=_deck_excluding(horse, horse2),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    for card in (horse, horse2):
+        engine.move_in_frame(
+            None,
+            engine.state.refs((card,)),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.DISCARD,
+            owner=0,
+            actor=0,
+        )
+        _advance(engine, [Scripted(), Scripted()], lambda e: e._move_pending is None)
+
+    assert _xiaoji_asks(engine) == 2, "两次移动各一问"
+    assert len(_drawn_to(engine.records, 0)) == 4, "两次各摸 2 张"
 
 
 def test_xiaoji_ignores_equipment_entering_the_equip_zone():
