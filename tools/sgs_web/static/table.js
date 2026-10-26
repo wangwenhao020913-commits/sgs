@@ -298,7 +298,9 @@ function renderTable() {
   if (!state.playback) state.effectCards = mergeEffectCards(snapshot.processing || []);
   renderProcessing();
 
-  $("t-hand-count").textContent = `${snapshot.self_hand.length} 张`;
+  // 手牌区的标题行（旧 `#t-hand-count`）已删（票 23 报障）：它占的那一行高度让提示条
+  // 越长越压住牌面顶部的花色 / 点数。手牌张数照旧看自己的武将块（`#t-self-hand`，
+  // 由座位渲染写入 `hand_count`），这里不再重复一遍。
   const hand = $("t-hand");
   hand.innerHTML = "";
   for (const card of snapshot.self_hand) {

@@ -176,10 +176,8 @@
             <span id="t-choice" class="dim"></span>
           </div>
         </div>
-        <div class="hand-head">
-          <span class="tag">手牌</span>
-          <span id="t-hand-count" class="dim"></span>
-        </div>
+        <!-- 手牌区**不留标题行**（票 23 报障）：那行「手牌 N 张」把提示条挤到压住牌面
+             顶部的花色 / 点数上；张数在别处已经有了（自己的武将块 `#t-self-hand`）。 -->
         <div id="t-hand" class="cards hand"></div>
       </div>
       <div id="t-skills" class="skills"></div>

@@ -3533,6 +3533,146 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     !!passSent && passSent.kind === "Pass", JSON.stringify(passSent));
 }
 
+/* ⑯ M6 票 23 报障：被动入口的**两步**清单，选完牌要能走到第 2 步。
+ *
+ * 用户实机（界【清俭】：选牌 → 交给一名其他角色）：第 1 步选满牌后「确认发动」是灰的，
+ * 而界面上**没有「下一步」**——这一步进不去，清单填不完，复合动作永远拼不出来。
+ * 与 ⑥ 的区别：⑥ 只验入口按钮画出来了，没验进入之后能不能往下走。
+ */
+{
+  const handIds = [41, 42, 43];
+  const twoStepPending = {
+    kind: "SKILL_ACTIVATION", actor: 0, seq: 95,
+    prompt: "是否发动该技能？", skill_id: "demo.passive2",
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: "demo.passive2", answers_seq: 95, picks: [], choices: [] },
+      { kind: "Pass", answers_seq: 95 },
+    ],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {},
+    preactivation: [
+      { name: "card", zones: ["hand"], min: 1, max: 3, order: 0,
+        pool: [{ when: [], options: ["41", "42", "43"] }] },
+      { name: "seat", zones: [], min: 1, max: 1, order: 1,
+        pool: [{ when: [], options: ["seat:1", "seat:2"] }] },
+    ],
+  };
+  const twoStepView = synthView(twoStepPending);
+  twoStepView.snapshot.self_hand = handIds.map((id) => synthCard(id, "杀"));
+  twoStepView.skills = [{
+    skill_id: "demo.passive2", name: "两步被动", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "", convert_sources: [], passive: true },
+  }];
+  ui.state.view = twoStepView;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(twoStepView);
+
+  const optionButtons = () => Array.from($("t-options").children);
+  const optionTexts = () => optionButtons()
+    .map((node) => String(node.textContent || "").trim()).join(" | ");
+  const entry = optionButtons().find((node) => /进入预发动/.test(node.textContent || ""));
+  (entry ? entry.listeners.click || [] : []).forEach((fn) => fn({ target: entry }));
+
+  check("㉿PZ19 被动入口进入预发动后，第 1 步选牌有「下一步」",
+    optionButtons().some((node) => String(node.textContent || "").trim() === "下一步"),
+    `选项=${optionTexts()}`);
+
+  // 选满 3 张手牌（清单第 1 步的候选正好这 3 张）。
+  for (const chip of Array.from($("t-hand").children)) {
+    for (const fn of chip.listeners.click || []) fn({ target: chip });
+  }
+  const nextButton = optionButtons()
+    .find((node) => String(node.textContent || "").trim() === "下一步");
+  check("㉿PZ20 选满之后「下一步」可点（张数达标才放行）",
+    !!nextButton && nextButton.disabled === false,
+    `选项=${optionTexts()} disabled=${nextButton ? nextButton.disabled : "no-button"}`);
+  for (const fn of (nextButton || { listeners: {} }).listeners.click || []) {
+    fn({ target: nextButton });
+  }
+  check("㉿PZ21 「下一步」进第 2 步：座位候选铺出来、状态仍是预发动",
+    ui.preactivationStepKind(ui.state.preactivation) === "seat"
+      && optionButtons().some((node) => /座位 1/.test(node.textContent || "")),
+    `选项=${optionTexts()}`);
+
+  const seatButton = optionButtons().find((node) => /座位 1/.test(node.textContent || ""));
+  for (const fn of (seatButton || { listeners: {} }).listeners.click || []) {
+    fn({ target: seatButton });
+  }
+  const action = ui.buildAction();
+  check("㉿PZ22 两步填完 = 复合 ActivateSkill（picks = 三张实体牌、choices = seat:1）",
+    !!action && action.kind === "ActivateSkill"
+      && JSON.stringify(action.picks) === JSON.stringify(handIds)
+      && JSON.stringify(action.choices) === '["seat:1"]',
+    JSON.stringify(action));
+}
+
+/* ⑰ M6 票 23 报障（层二）：**五谷结算里**的预发动询问，正文槽被"持久亮牌"模式藏起来。
+ *
+ * 实机：五谷丰登取牌之后、结算帧还活着时紧跟着【清俭】的"是否发动"——这一帧的载荷里
+ * `harvest` 仍在，于是 `state.dialog.persistent` 被算成 true。玩家点「进入预发动」后弹窗
+ * 换了标题，**正文槽却仍按亮牌模式整体隐藏**：步骤条与「下一步」都在看不见的正文里，
+ * 屏幕上只剩一个空白大白框 + 灰色的「确认发动」。
+ */
+{
+  const harvestInFlight = {
+    active: true, key: "harvest:9:7:0", title: "五谷丰登",
+    hint: "从亮出的牌里选一张获得", source: 0,
+    revealed: [synthCard(2, "桃")],
+    targets: [{ seat: 0, status: "current", card: null, cancelled: false, reason: null }],
+    current: 0,
+  };
+  const qingjianPending = {
+    kind: "SKILL_ACTIVATION", actor: 0, seq: 97,
+    prompt: "是否发动该技能？", skill_id: "demo.passive3",
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: "demo.passive3", answers_seq: 97, picks: [], choices: [] },
+      { kind: "Pass", answers_seq: 97 },
+    ],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, harvest: harvestInFlight,
+    preactivation: [
+      { name: "card", zones: ["hand"], min: 1, max: 3, order: 0,
+        pool: [{ when: [], options: ["41", "42", "43"] }] },
+      { name: "seat", zones: [], min: 1, max: 1, order: 1,
+        pool: [{ when: [], options: ["seat:1"] }] },
+    ],
+  };
+  const qingjianView = synthView(qingjianPending);
+  qingjianView.snapshot.self_hand = [41, 42, 43].map((id) => synthCard(id, "杀"));
+  qingjianView.skills = [{
+    skill_id: "demo.passive3", name: "两步被动", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "", convert_sources: [], passive: true },
+  }];
+  ui.state.view = qingjianView;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(qingjianView);
+
+  const entry3 = Array.from($("t-options").children)
+    .find((node) => /进入预发动/.test(node.textContent || ""));
+  for (const fn of (entry3 ? entry3.listeners.click || [] : [])) fn({ target: entry3 });
+
+  const dialogBody = $("t-dialog-body");
+  const optionsInBody = Array.from(dialogBody.children).includes($("t-options"));
+  check("㉿PZ23 五谷结算中进入预发动：正文槽必须可见（不能按亮牌模式整体隐藏）",
+    dialogBody.hidden !== true && optionsInBody,
+    `bodyHidden=${dialogBody.hidden} optionsInBody=${optionsInBody}`);
+  // 选一张手牌（min=1）后「下一步」应当放行：这一帧的完整交互与上一块同一条路径。
+  const firstChip = Array.from($("t-hand").children)[0];
+  for (const fn of (firstChip ? firstChip.listeners.click || [] : [])) fn({ target: firstChip });
+  const next3 = Array.from($("t-options").children)
+    .find((node) => String(node.textContent || "").trim() === "下一步");
+  check("㉿PZ24 这一帧里「下一步」看得见、选够张数后可点",
+    !!next3 && next3.disabled === false && next3.parentNode === $("t-options"),
+    `选项=${Array.from($("t-options").children).map((n) => n.textContent).join(" | ")}`
+      + ` disabled=${next3 ? next3.disabled : "no-button"}`);
+}
+
 /* ⑦ W4-2：转化模式切换的**宽松保留**（切换后已选源牌仍合法则保留、不合法才清空）。
  */
 {
@@ -14156,10 +14296,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   check("U3-05b 对手手牌数随摸牌事件变化（隐藏区只给张数）",
     seatText(1).includes("手牌 4"), `座1="${seatText(1)}"`);
   step();  // 103 自己摸一张
-  check("U3-05c 自己的手牌数 / 手牌面随事件更新",
-    $("t-hand-count").textContent === "3 张" && $("t-hand").children.length === 3
+  // 张数行（旧 `#t-hand-count`）已按报障删掉（票 23）：这里只核牌面本身跟着事件更新。
+  check("U3-05c 自己的手牌面随事件更新",
+    $("t-hand").children.length === 3
       && Array.from($("t-hand").children).some((node) => attr(node, "data-card-id") === "14"),
-    `count="${$("t-hand-count").textContent}" hand=${$("t-hand").children.length}`);
+    `hand=${$("t-hand").children.length}`);
   step();  // 104 装备置入
   check("U3-05d 装备区牌面随 card_move 更新",
     walk(seatNodeOf(1)).some((node) => attr(node, "data-card-id") === "15"),
@@ -14765,8 +14906,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && Boolean(selfZoneCardsBox && selfZoneCardsBox.hidden),
     `closed=${closedAfterSecondClick} hover=${openOnHover}`);
   check("㉉M6-7 区里的牌**不算**手牌数（公开数字仍是 hand_count）",
-    $("t-self-hand").textContent === "2" && $("t-hand-count").textContent === "1 张",
-    `hand_count=${$("t-self-hand").textContent} 手牌区=${$("t-hand-count").textContent}`);
+    $("t-self-hand").textContent === "2" && $("t-hand").children.length === 1,
+    `hand_count=${$("t-self-hand").textContent} 手牌面=${$("t-hand").children.length}`);
   const foeZoneBox = seatBox(2);
   const foeZoneRow = foeZoneBox ? rowOf(foeZoneBox, "data-zone", "hero") : null;
   const foeZoneTag = foeZoneRow

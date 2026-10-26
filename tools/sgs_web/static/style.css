@@ -1001,9 +1001,9 @@ button.mini-slot { cursor: pointer; }
   max-height: 3.8em;
 }
 
-.hand-head { display: flex; align-items: baseline; gap: 8px; padding: 0 calc(2 * var(--dsu)); }
-.hand-head .tag { margin-left: 0; font-size: calc(11 * var(--dsu)); }
-.hand-head .dim { font-size: calc(11 * var(--dsu)); }
+/* 手牌区**不留标题行**（票 23 报障：那行「手牌 N 张」把提示条挤到压住牌面顶部的
+ * 花色 / 点数上）。整块再往下 6 个设计单位：把高度让给会长高的提示条，牌面顶部的
+ * 花色 / 点数因此不再被遮。 */
 .hand {
   flex: 1 1 auto; min-height: 0;
   display: flex; flex-wrap: nowrap; align-items: flex-end; gap: calc(6 * var(--dsu));
@@ -1012,6 +1012,7 @@ button.mini-slot { cursor: pointer; }
   justify-content: safe center;
   overflow-x: auto; overflow-y: hidden;
   padding: calc(2 * var(--dsu));
+  margin-bottom: calc(-6 * var(--dsu));
 }
 .hand .card { flex: 0 0 auto; line-height: 1.2; }
 

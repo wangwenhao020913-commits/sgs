@@ -342,6 +342,23 @@ function clearDialogReveal() {
   node.hidden = true;
 }
 
+/** 这一屏是不是**持久亮牌正文**：正文槽整个收起、折叠只隐藏亮牌节点。
+ *
+ * 两个条件缺一不可，判据在这里只写一次（`applyDialogCollapseChrome` 与
+ * `applyDialogContentMode` 都读它）：
+ *
+ * - `state.dialog.persistent` = **五谷的结算帧还活着**——结算期间表面会在牌桌与取牌步
+ *   之间来回换，这个标记只说明"帧还在"，不说明"这一屏在放亮牌"；
+ * - `state.dialog.kind === reveal` = **这一屏真的是亮牌**。
+ *
+ * 只看前者（票 23 报障）：五谷取牌之后紧跟【清俭】的"是否发动"，载荷里 `harvest` 仍在
+ * ⇒ `persistent` 被算成 true ⇒ 玩家点「进入预发动」后弹窗换了标题，正文槽却仍按亮牌
+ * 模式整体隐藏：步骤条与「下一步」全在看不见的正文里，屏幕上只剩空白大白框 + 灰按钮。
+ */
+function dialogRevealMode() {
+  return state.dialog.persistent && state.dialog.kind === DIALOG_KINDS.reveal;
+}
+
 /** 折叠按钮 / 重开入口的文案与可用态（只读判据不在这里）。
  *
  *  两种正文二选一：普通模式 = `#t-dialog-body`（折叠只隐藏它）；持久展示 =
@@ -350,7 +367,7 @@ function applyDialogCollapseChrome() {
   const body = $("t-dialog-body");
   const reveal = dialogRevealNode();
   const button = $("t-dialog-collapse");
-  if (state.dialog.persistent) {
+  if (dialogRevealMode()) {
     if (body) body.hidden = true;
     if (reveal) reveal.hidden = state.dialog.collapsed;
   } else {
@@ -379,7 +396,10 @@ function applyDialogContentMode(kind) {
   const body = $("t-dialog-body");
   const options = $("t-options");
   const reveal = dialogRevealNode();
-  const persistent = state.dialog.persistent && kind === DIALOG_KINDS.reveal;
+  // 与 `applyDialogCollapseChrome` **同一条判据**（票 23：两处各算一遍就会一边藏正文、
+  // 一边以为还在放亮牌）。这里的 `kind` 是本次要应用的正文种类，`state.dialog.kind`
+  // 在 `openDialogDom` / `updateDialogDom` 里已先写好，故两者一致。
+  const persistent = dialogRevealMode() && kind === DIALOG_KINDS.reveal;
   const pending = state.view ? state.view.pending : null;
   state.dialog.hintOverride = null;
   if (persistent && pending) {
