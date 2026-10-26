@@ -2016,6 +2016,30 @@ def _coverage_jie_liuli():
     return state, query, frame
 
 
+def _coverage_jie_qingjian():
+    """M6 票 23 报障：界夏侯惇【清俭】补翻预发动——两步都落在**自己**区域。
+
+    首步"展示任意张牌"选自手牌 / 装备区，`:func:`~sgs.skills.flow.manifest` 渲得出候选；
+    这正是它能翻、而首步读隐藏面（别人手牌）的【反馈】不能翻的原因。
+    """
+    basic = _ids("slash")[0]
+    trick = _ids("dismantlement")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_xiahoudun", hand=(basic, trick)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(basic, trick),
+        turn_seat=1,
+    )
+    query = _passive_preactivation_query(
+        state, 0, "hero.jie_xiahoudun.qingjian", timing=Timing.MOVE_AFTER
+    )
+    return state, query, None
+
+
 def _coverage_double_sword():
     weapon = _ids("double_sword")[0]
     slash = _ids("slash")[0]
@@ -2058,6 +2082,8 @@ _COVERAGE_CASES = {
     # M6 票 17：界·吴两条已翻预发动的技能（界制衡 / 界流离）。
     "hero.jie_sunquan.zhiheng": _coverage_jie_zhiheng,
     "hero.jie_daqiao.liuli": _coverage_jie_liuli,
+    # M6 票 23 报障：界夏侯惇【清俭】补翻预发动（首步选**自己**的手牌 / 装备 ⇒ 清单恒渲得出）。
+    "hero.jie_xiahoudun.qingjian": _coverage_jie_qingjian,
     "equip.green_dragon_blade": _coverage_green_dragon,
     "equip.axe": _coverage_axe,
     "equip.qilin_bow": _coverage_qilin_bow,

@@ -160,12 +160,27 @@
 | 选项中文标签 | `options.js:OPTION_LABELS` | 只在**多选项**形态读得到；单选项确认读不到 |
 | 逐步文案 | `SkillDef.step_requirements` | SELECT_OPTION 读 `skill_id` 冒号后那段；SELECT_CARDS 恒读 `card` |
 | 一句话文案 | `SkillDef.requirement` | 提示条与预发动清单 |
-| 预发动清单 | `preactivation.js` | 由流水线步骤渲染；`Arrange` 不下发 |
+| 预发动清单 | `preactivation.js` | 由流水线步骤渲染；`Arrange` 不下发；**触发技要翻 `preactivated`**（见下） |
 | 舞台 / 动效 | `session.js` / `effects.js` | 见 `docs/agents/frontend-map.md` |
 | 牌面标签 | `card-view.js:cardTagsNode` | 标签类型必须在 `CARD_TAG_TYPES` 登记 |
 | 武将详情 / 被封锁技能图标 | `hero-detail.js` / `table.js` | |
 
 新增 UI 形态（垫片里没有的）= **C3**：停手，另开 UI 票并走真实浏览器验收。
+
+**触发技翻 `preactivated` 的准入条件（票 23 报障）**：触发技（被动入口）的技能按钮按
+U1-06 **不接 click**，这一问的唯一入口是清单画出的浮动按钮「进入预发动」——它要求
+`pending.preactivation` 有步骤**且**技能条目带 `preactivated`（读取方
+`preactivation.js:preactivatedSkill`）。两个写方各说一半，缺一半的结果不是"退化成逐步
+问"，而是**死路**：提示条写着"点技能【…】进入预发动"，按钮却是灰的。
+
+故触发技翻开关前先回答一条：**条件成立时清单渲得出来吗**——首步候选是否恒非空
+（`sgs.skills.flow.manifest` 对"读别人手牌"这类隐藏面返回空元组）。拿不准就先
+`preactivation_for` 在真局面上探一次：
+
+- 渲得出（首步选自己的手牌 / 装备区，如【流离】【清俭】）⇒ `preactivated=True`，
+  并补一条 AI 覆盖场景（`tests/test_heuristic_ai.py` 的 `_COVERAGE_CASES` 会机械要）；
+- 渲不出（首步读隐藏面，如【反馈】【突袭】）⇒ **别翻**，界面走「将提交：发动【X】」
+  的直提态，后续步骤逐步问。
 
 ## 5. 新机制怎么进框架（三档判定）
 

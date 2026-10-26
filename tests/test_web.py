@@ -3893,6 +3893,99 @@ def test_a_foreign_viewer_does_not_get_the_actors_hand_from_the_manifest() -> No
 
 
 # ---------------------------------------------------------------------------
+# M6 票 23 报障：界【清俭】的询问带了清单，技能条目却没标 `preactivated`
+#
+# 读方 = `preactivation.js:preactivatedSkill`（`pending.kind === "SKILL_ACTIVATION"`
+# ∧ 条目 `preactivated`）。缺这个键 ⇒ 「进入预发动」的浮动按钮不画，提示条退化成
+# "点技能【hero.jie_xiahoudun.qingjian】进入预发动"——而被动技按钮按 U1-06 本来就不接
+# click（只悬停看描述），这条时机因此没有入口，玩家只能「放弃」。
+#
+# 不变量：**询问带了清单 ⇒ 这一问必须给出清单入口**。清单由引擎按 `SkillFlow.steps`
+# 渲染、`preactivated` 由声明给出——两个写方各说一半，界面靠两边同时成立才点得动。
+# ---------------------------------------------------------------------------
+
+
+JIE_QINGJIAN = "hero.jie_xiahoudun.qingjian"
+
+
+class _HarvestThenFallThrough:
+    """把整局推到"【清俭】被问"为止的最小应答：座位 0 用【五谷丰登】，其余取第一条候选。"""
+
+    def __init__(self) -> None:
+        self.played = False
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE and query.actor == 0 and not self.played:
+            for action in query.legal_actions:
+                if getattr(action, "kind", None) != "UseCard":
+                    continue
+                if getattr(action.card, "type", None) == "harvest":
+                    self.played = True
+                    return action
+        return query.legal_actions[0]
+
+
+def _qingjian_ask_session():
+    """真局面：座位 1 的界夏侯惇在别人的回合里经【五谷丰登】获得牌 ⇒ 停在【清俭】询问。
+
+    停住的时刻 = 玩家看到的那一问（引擎已 `pending`、还没收到应答），故清单与技能条目
+    都从同一次**真产出**读，不用合成载荷。
+    """
+    from types import SimpleNamespace
+
+    from support import SeatSpec, build_state, cards_of_type, deck_excluding, run_until
+
+    pack = _context_pack()
+    harvest = cards_of_type(pack, "harvest")[0]
+    basic = cards_of_type(pack, "slash")[0]
+    trick = cards_of_type(pack, "dismantlement")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(harvest,)),
+            SeatSpec(hand=(basic, trick), hero="jie_xiahoudun"),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(pack, harvest, basic, trick),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_until(
+        engine,
+        [_HarvestThenFallThrough() for _ in range(4)],
+        lambda e: e.pending is not None
+        and getattr(e.pending, "skill_id", None) == JIE_QINGJIAN,
+    )
+    assert engine.pending is not None and engine.pending.skill_id == JIE_QINGJIAN, (
+        "没走到【清俭】的时机：局面构造漂了"
+    )
+    return SimpleNamespace(engine=engine, pending=engine.pending)
+
+
+def test_the_qingjian_ask_offers_the_preactivation_entry_instead_of_dead_ending() -> None:
+    """报障（M6 票 23）：界【清俭】常态下点不进预发动。
+
+    清单本身没丢（两步：选牌 / 选人），丢的是**条目的 `preactivated`**——界面据此找技能
+    来画入口，找不到就只剩一句"点技能【…】"的死路。
+    """
+    session = _qingjian_ask_session()
+
+    payload = pending_payload(session.pending, human_seat=1)
+
+    assert [step["name"] for step in payload["preactivation"]] == ["card", "seat"], (
+        "引擎侧两步清单照常下发（这一半今天就是对的，说明缺口不在引擎）"
+    )
+    entry = next(
+        item for item in build_skills(session, 1) if item["skill_id"] == JIE_QINGJIAN
+    )
+    assert entry["available"] is True, "这一问确实是给它的（入口候选 / 清单都在）"
+    assert entry["preactivated"] is True, (
+        "界面据这个键把这一问切到清单入口；缺它 ⇒ 被动技按钮不接 click、浮动按钮也不画"
+    )
+
+
+# ---------------------------------------------------------------------------
 # W4-3：转化技的**本地入口清单**也要按 app.js 的键下发
 #
 # 写方 = 引擎的 ``_build_query``（``transform_preactivations``，`exclude` 不进记录流），

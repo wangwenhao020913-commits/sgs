@@ -606,6 +606,10 @@ def move_after_skill_definitions() -> tuple[SkillDef, ...]:
         SkillDef(
             skill_id=JIE_QINGJIAN,
             locked=False,
+            # 已翻预发动（W4-2 的被动侧，与【流离】同规格）：首步选**自己**的手牌 / 装备区，
+            # 清单渲得出来 ⇒ 界面走清单入口。不翻的后果不是"退化成分步问"，而是**死路**：
+            # 被动技按钮按 U1-06 不接 click，浮动入口又要求条目带这个键（票 23 报障）。
+            preactivated=True,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             hooks=(
