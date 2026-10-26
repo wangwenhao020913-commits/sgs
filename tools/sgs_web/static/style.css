@@ -542,21 +542,19 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   pointer-events: none; z-index: 3;
 }
 .seat.wine .hero-block { background: linear-gradient(180deg, #fbe4de 0%, #f6d9d2 100%); }
-.seat.dead { opacity: .72; }
-/* 翻面：与阵亡同一套"蒙灰"手法，但**没有文字**（用户裁定：文字会遮挡标记）。
- * 透明度比阵亡轻一点、覆盖层偏冷，两者叠加时仍看得出"既是背面又已阵亡"。 */
-.seat.flipped { opacity: .84; }
+/* 阵亡与翻面**共用同一档置灰**（用户裁定：翻面的置灰程度与阵亡完全一致）。
+ * 两者写在同一条规则里，配比因此不会漂：翻面唯一的差别是**没有文字**。
+ * 蒙灰用**灰覆盖层**而不是 `filter: grayscale`：后者会把「酒」的红一起抹掉，
+ * 三态叠加时两个状态就只剩一个可见。 */
+.seat.dead, .seat.flipped { opacity: .72; }
+.seat.dead .hero-block::after,
 .flipped-layer {
   position: absolute; inset: 0; z-index: 1;
-  background: rgba(96, 108, 120, .30); pointer-events: none;
-  border-radius: inherit;
-}
-/* 蒙灰用**灰覆盖层**而不是 `filter: grayscale`：后者会把「酒」的红一起抹掉，
- * 三态叠加时两个状态就只剩一个可见。 */
-.seat.dead .hero-block::after {
-  content: ""; position: absolute; inset: 0; z-index: 1;
   background: rgba(120, 116, 108, .35); pointer-events: none;
 }
+/* 阵亡的覆盖层是伪元素（需要 content 才会生成）；翻面用一个带 title 的真实节点，
+ * 因为它只在自己被翻面时存在，且要挂「翻面（背面朝上…）」的提示。 */
+.seat.dead .hero-block::after { content: ""; }
 .dead-tag {
   position: absolute; inset: 0; z-index: 4;
   display: flex; align-items: center; justify-content: center;

@@ -5404,12 +5404,17 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && !/\.seat\.dead\s*\{[^}]*filter:\s*grayscale/s.test(css),
     `seat3=${[...seat3.classList.set].join(",")}`);
 
-  check("U1-02j3 翻面 = 与阵亡同款蒙灰覆盖层、**没有文字**（避免遮挡标记）",
+  check("U1-02j3 翻面 = 与阵亡**完全同一档**置灰（同一条规则）+ **没有文字**（避免遮挡标记）",
     seat1.classList.contains("flipped") && !seat1.classList.contains("dead")
       && byClass(seat1, "flipped-layer").length === 1
       && byClass(seat1, "flipped-layer")[0].textContent === ""
       && seat1.text().includes("吕布")
-      && /\.seat\.flipped\s*\{/.test(css),
+      // 置灰配比只有一份：阵亡与翻面写在**同一条**选择器里（用户裁定"完全一样"），
+      // 这里核的就是"没有第二份配比"，避免日后有人把其中一档调淡。
+      && /\.seat\.dead,\s*\.seat\.flipped\s*\{[^}]*opacity:\s*\.72/s.test(css)
+      && /\.seat\.dead \.hero-block::after,\s*\n\.flipped-layer\s*\{[^}]*background:\s*rgba\(120, 116, 108, \.35\)/s.test(css)
+      // 也不许再出现"行首起一条 .seat.flipped 规则又改 opacity"（即第二份置灰配比）。
+      && !/^\.seat\.flipped\b[^{]*\{[^}]*opacity/m.test(css),
     `seat1=${[...seat1.classList.set].join(",")} layer=${byClass(seat1, "flipped-layer").length}`);
 
   /* ---- 高亮：当前回合金框行动中 / 合法目标可指定 / 已选内圈 + 勾 ---- */
