@@ -325,7 +325,7 @@ const sessionBodiesSince = (from) =>
 await ui.loadHeroCatalog();
 const catalogVersions = ui.heroVersions();
 check("⓪1 点将列表拉到了启用并集（标准 + 界版，按真名分组）",
-  ui.state.heroCatalog.length === 29 && catalogVersions.length === 54,
+  ui.state.heroCatalog.length === 30 && catalogVersions.length === 55,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -5220,6 +5220,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     {
       seat: 1, hp: 5, hp_max: 5, hand_count: 4, alive: true,
       equip: [armor], judge: [lightning], chained: false, wine_active: false,
+      // 翻面（背面朝上）：只影响"自己的回合开始前"，座位卡只画蒙灰、不写文字。
+      flipped: true,
       identity: null, identity_label: null,
       hero_name: "吕布", kingdom: "qun", kingdom_label: "群",
     },
@@ -5401,6 +5403,14 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && byClass(seat3, "dead-text").length === 1
       && !/\.seat\.dead\s*\{[^}]*filter:\s*grayscale/s.test(css),
     `seat3=${[...seat3.classList.set].join(",")}`);
+
+  check("U1-02j3 翻面 = 与阵亡同款蒙灰覆盖层、**没有文字**（避免遮挡标记）",
+    seat1.classList.contains("flipped") && !seat1.classList.contains("dead")
+      && byClass(seat1, "flipped-layer").length === 1
+      && byClass(seat1, "flipped-layer")[0].textContent === ""
+      && seat1.text().includes("吕布")
+      && /\.seat\.flipped\s*\{/.test(css),
+    `seat1=${[...seat1.classList.set].join(",")} layer=${byClass(seat1, "flipped-layer").length}`);
 
   /* ---- 高亮：当前回合金框行动中 / 合法目标可指定 / 已选内圈 + 勾 ---- */
   check("U1-02k 当前回合金框 + 「行动中」（还没点牌时没有可指定的座位）",

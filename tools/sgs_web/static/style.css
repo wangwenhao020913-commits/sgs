@@ -543,6 +543,14 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 }
 .seat.wine .hero-block { background: linear-gradient(180deg, #fbe4de 0%, #f6d9d2 100%); }
 .seat.dead { opacity: .72; }
+/* 翻面：与阵亡同一套"蒙灰"手法，但**没有文字**（用户裁定：文字会遮挡标记）。
+ * 透明度比阵亡轻一点、覆盖层偏冷，两者叠加时仍看得出"既是背面又已阵亡"。 */
+.seat.flipped { opacity: .84; }
+.flipped-layer {
+  position: absolute; inset: 0; z-index: 1;
+  background: rgba(96, 108, 120, .30); pointer-events: none;
+  border-radius: inherit;
+}
 /* 蒙灰用**灰覆盖层**而不是 `filter: grayscale`：后者会把「酒」的红一起抹掉，
  * 三态叠加时两个状态就只剩一个可见。 */
 .seat.dead .hero-block::after {

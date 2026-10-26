@@ -28,6 +28,7 @@ const SEAT_STATE_CLASSES = [
   "req",
   "chained",
   "wine",
+  "flipped",
 ];
 
 function applySeatState(box, flags) {
@@ -418,6 +419,9 @@ function heroBlockNode(player, view, ctx, flags) {
   // 横置 = 武将块中央从左到右一条虚线；酒 = 席位泛红（只上类，无「酒」字徽章）；
   // 阵亡 = 蒙灰 + 大号「阵亡」覆盖中心。三个状态可以同时存在、互不遮挡（CSS 分层）。
   if (player.chained) block.appendChild(chainLineNode());
+  // 翻面 = 与阵亡同一套"蒙灰"覆盖层，但**不**配文字（用户裁定：文字会遮挡标记）。
+  // 三态（横置 / 翻面 / 阵亡）可以同时存在，CSS 分层互不遮挡。
+  if (player.flipped) block.appendChild(flippedLayerNode());
   if (!player.alive) block.appendChild(deadTagNode());
   // U1-06：右键**武将块** = 武将详情；装备 / 判定 / 手牌不响应右键（它们只悬停出描述）。
   // 接线与自己的静态块共用 `bindHeroDetailContext`（止冒泡：外壳只负责屏蔽浏览器菜单）。
@@ -430,6 +434,13 @@ function chainLineNode() {
   line.className = "chain-line";
   line.setAttribute("title", "横置（连环状态）");
   return line;
+}
+
+function flippedLayerNode() {
+  const layer = document.createElement("div");
+  layer.className = "flipped-layer";
+  layer.setAttribute("title", "翻面（背面朝上：跳过你的下个回合）");
+  return layer;
 }
 
 function deadTagNode() {

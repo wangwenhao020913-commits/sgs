@@ -33,6 +33,7 @@ __all__ = [
     "CardMoveDelta",
     "CardRevealDelta",
     "ChainedChangeDelta",
+    "FlippedChangeDelta",
     "DeckShuffleDelta",
     "Delta",
     "HpChangeDelta",
@@ -109,6 +110,19 @@ class ChainedChangeDelta(_FrozenModel):
     delta_type: Literal["chained_change"] = "chained_change"
     seat: int
     chained: bool
+
+
+class FlippedChangeDelta(_FrozenModel):
+    """一个座位的**翻面**状态被写成某个值（本票的翻面机制）。
+
+    写入口唯一：``Engine.set_flipped``。两处调用：技能效果把它翻到背面（【据守】），
+    回合环在"回合开始前"把它翻回正面（规则集 13.2 的固定流程）。与 ``chained_change``
+    同形（只记**新值**：``flipped``），因为它同样是"座位状态 + 网页座位卡读投影"。
+    """
+
+    delta_type: Literal["flipped_change"] = "flipped_change"
+    seat: int
+    flipped: bool
 
 
 class WineChangeDelta(_FrozenModel):

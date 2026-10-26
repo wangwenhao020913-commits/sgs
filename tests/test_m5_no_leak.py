@@ -45,6 +45,7 @@ from sgs.engine import (  # noqa: E402
     CardMoveRecord,
     CardRevealRecord,
     ChainedChangeRecord,
+    FlippedChangeRecord,
     DeckShuffleRecord,
     Engine,
     HpChangeRecord,
@@ -569,7 +570,7 @@ def test_the_fire_attack_reveal_is_public_in_the_log_records_but_the_other_hand_
 # ---------------------------------------------------------------------------
 #
 # 09c 的教训不是"card_move 漏了"，而是"只查了一种 delta"。这里把 ``sgs.state.deltas``
-# 的**全部** delta_type（M6 票 20 后 15 种）枚举出来，逐类构造一条带隐藏信息的合成
+# 的**全部** delta_type（M6 票 20 后 15 种；本票的翻面后 16 种）枚举出来，逐类构造一条带隐藏信息的合成
 # 记录，断言人类查看者收到的下发只留公开事实：
 #
 # - ``deck_shuffle``：整副牌序 → 只给 ``card_count``；
@@ -620,6 +621,10 @@ def _delta_records() -> dict[str, object]:
         ),
         "chained_change": ChainedChangeRecord(
             seq=103, frame_id=0, depth=0, seat=1, chained=True
+        ),
+        # 翻面是本票的座位状态（与横置并列）：载荷只有座位 + 新值，没有隐藏面。
+        "flipped_change": FlippedChangeRecord(
+            seq=116, frame_id=0, depth=0, seat=1, flipped=True
         ),
         "wine_change": WineChangeRecord(
             seq=104, frame_id=0, depth=0, seat=1, active=True
@@ -718,8 +723,8 @@ def test_every_delta_type_has_a_no_leak_case() -> None:
     """delta 类型表与判据表**双向**对齐：新增类型必须登记一条不泄露判据。"""
     schema_types = _delta_schema_types()
     cases = _delta_records()
-    assert len(schema_types) == 15, (
-        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 15 种写）："
+    assert len(schema_types) == 16, (
+        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 16 种写）："
         f"{sorted(schema_types)}"
     )
     missing = sorted(set(schema_types) - set(cases))

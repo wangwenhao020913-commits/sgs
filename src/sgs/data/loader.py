@@ -78,7 +78,7 @@ KNOWN_HEROES_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 
 DEFAULT_PACK_ID = "standard"
 
-HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = ("jie",)
+HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = ("jie", "jie_mobile")
 """与内容包表并行装载的**扩展武将包**（M6 票 04：界标准独立成一份数据）。
 
 界标准 29 名与标准 25 名**分开存**（ADR-006 的"分开存"这次真落），故
@@ -86,7 +86,13 @@ HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = ("jie",)
 内容包（内容包管牌堆与牌名，武将包管武将面）。它由 :func:`load_hero_tables` 与内容包
 自己的表一起交给读取面：载体解析按同一个武将 id 查全部表，故界将能被构造局面直接发放。
 后续界将票只往这个文件追加条目（真名配将与默认将池属于票 12：票 12 起启用池 / 默认
-将池是**两张表的并集**，配将再按真名分组）。"""
+将池是**两张表的并集**，配将再按真名分组）。
+
+``jie_mobile`` 是**移动版**那一份（``files/heroes.jie_mobile.json``）：与 OL 系列
+**版本并存**——同一真名可以有 OL 版与移动版两条记录，版本字段分别是 ``jie-ol`` 与
+``jie-mobile``，显示名按"OL 不加后缀、移动版加「移动版」"命名（用户裁定）。所以扩展包
+不是"一个版本"，而是"每个版本一份表"；读取面（:func:`load_hero_tables`）按声明序并起来，
+缺表时才报错。"""
 
 HERO_SKILL_PREFIX = "hero."
 """武将技能 id 的前缀（票 01 §Data / 票 12）：``hero.<武将 id>.<短 id>``。

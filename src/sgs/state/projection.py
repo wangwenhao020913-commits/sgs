@@ -50,6 +50,7 @@ def project(state: GameState, seat: int) -> PlayerView:
             equip=state.refs(player.equip),
             judge=state.refs(player.judge),
             chained=player.chained,
+            flipped=player.flipped,
             wine_active=player.wine_active,
             identity=_visible_identity(player, viewer=seat),
             hero=player.hero,

@@ -279,6 +279,7 @@ function renderTable() {
     ...(player.alive ? [] : ["dead"]),
     ...(isTurnSeat(player.seat) ? ["turn"] : []),
     ...(player.chained ? ["chained"] : []),
+    ...(player.flipped ? ["flipped"] : []),
     ...(player.wine_active ? ["wine"] : []),
     ...extra,
   ];

@@ -261,6 +261,56 @@ _JIE_BIYUE = PhaseBodySkill(
 
 
 # ---------------------------------------------------------------------------
+# 界曹仁（移动版）【据守】：结束阶段摸三张，然后**翻面**
+#
+# 移动版牌面（`界曹仁移动版`，用户录入）：
+#
+#     据守：结束阶段，你可以摸三张牌，然后翻面。
+#
+# 形状 = 阶段体零步（摸 N）+ 一段状态翻转 ⇒ 复用界【闭月】的"窗口自定义 effect"。
+# "翻面"是 **toggle**（正 → 背、背 → 正；规则集 13.1），不是"置为背面"：自己在回合内
+# 被翻成背面时发动据守，应当是翻回正面。
+# ---------------------------------------------------------------------------
+
+JUSHSOU_DRAWS = 3
+"""【据守】摸牌数（移动版牌面："摸三张牌"；OL 版是四张，两版并存见账本）。"""
+
+
+def _jushou_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """【据守】的提交点：先摸三张（短摸 ⇒ 平局），再把自己的武将牌翻一个面。
+
+    "然后"的次序是牌面写死的：先摸、后翻面。摸牌走 :meth:`~sgs.engine.Engine.draw_for_hand`，
+    不触发"失去牌后"（牌堆 → 手牌不是获得），故这一段不会挂起；翻面是帧内的状态写入口。
+    平局（牌堆两空）时游戏已结束，不再翻面。
+    """
+    del answers
+    owner = frame.data["skill_owner"]
+    if frame.data.get(_JUSHSOU_DONE):
+        return None
+    frame.data[_JUSHSOU_DONE] = True
+    host.draw_for_hand(frame, owner, JUSHSOU_DRAWS)
+    if host.finished:
+        return None
+    host.set_flipped(frame, owner, not host.state.player(owner).flipped)
+    return None
+
+
+_JUSHSOU_DONE = "jushou_done"
+"""帧私有：本次【据守】的两段已经走过（重入不重复摸 / 不重复翻）。"""
+
+JUSHSOU_FLOW = SkillFlow(name="jushou", steps=(), effect=_jushou_effect)
+"""【据守】的零步流水线：[是否发动] → 摸三张 → 翻面。"""
+
+
+_JUSHSOU = PhaseBodySkill(
+    hero_id="jie_caoren_mobile",
+    short_id="jushou",
+    timing=Timing.PHASE_FINISH,
+    flow=JUSHSOU_FLOW,
+)
+
+
+# ---------------------------------------------------------------------------
 # 界李典【恂恂】（M6 票 15）：摸牌阶段开始时看四张，两张置顶、其余置底
 # ---------------------------------------------------------------------------
 
@@ -934,6 +984,7 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _KEJI_JIE,
     _TISHEN,
     _JIE_BIYUE,
+    _JUSHSOU,
     _BOTU,
     _XUNXUN,
 )
@@ -952,6 +1003,7 @@ _REQUIREMENTS: dict[str, str] = {
     "tishen": "将体力回复至体力上限，然后摸以此法回复的体力值数张牌",
     "botu": "执行一个额外的回合",
     "xunxun": "观看牌堆顶四张牌，两张置于牌堆顶、其余置于牌堆底",
+    "jushou": "摸三张牌，然后翻面",
 }
 """L 族八条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 

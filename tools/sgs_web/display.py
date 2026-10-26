@@ -252,6 +252,7 @@ def seat_display(
     kingdom = player.kingdom.value if player.kingdom is not None else None
     return {
         "chained": bool(player.chained),
+        "flipped": bool(player.flipped),
         "wine_active": bool(player.wine_active),
         "identity_label": (
             IDENTITY_LABELS.get(player.identity) if player.identity is not None else None

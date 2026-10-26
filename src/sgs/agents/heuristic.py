@@ -1871,6 +1871,12 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(2.5),
         "☆ 出牌阶段：观看一名其他角色的手牌并处理其中一张红桃牌——信息 + 一张牌",
     ),
+    # 本票：移动版界曹仁【据守】——结束阶段摸三张，然后翻面
+    "hero.jie_caoren_mobile.jushou": (
+        _constant(2.0),
+        "结束阶段摸三张、然后把武将牌翻面：三张牌是净赚，代价是下个回合被跳过；"
+        "残局（下个回合可能被直接打死）时价值下降，故给中等常数而不是最高档",
+    ),
     # M6 票 14：界·魏 A（曹操 / 司马懿 / 张辽 / 许褚）
     "hero.jie_caocao.jianxiong": (
         _constant(4.0),

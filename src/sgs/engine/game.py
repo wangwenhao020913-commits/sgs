@@ -109,6 +109,7 @@ from sgs.state import (
     CardRevealDelta,
     CardTag,
     ChainedChangeDelta,
+    FlippedChangeDelta,
     DiscardQuery,
     DodgeContext,
     DodgeQuery,
@@ -218,6 +219,13 @@ _MOVE_EVENTS = "move_events"
 让"第 n 次移动"与"第 n 次重入"区分开：这次移动的幂等键带上它的序号
 （见 :meth:`Engine._move_key`），故"同一次移动"只落一条记录、只派发一遍。
 帧外移动没有帧可挂标记，那份幂等键住 :attr:`Engine._move_recorded`。
+"""
+
+SKIPPED_TURN_KEY = "skipped_turn"
+"""``_turn_data`` 私有键：这个回合被**翻面跳过**了（规则集 13.2）。
+
+只影响一件事：收尾步不发 ``TURN_AFTER_END``（该角色没有进入过这个回合）。它随
+``_turn_data`` 在回合环回卷时清掉。
 """
 
 _DISPATCH_SCOPE = "dispatch_scope"
@@ -2849,6 +2857,26 @@ class Engine:
         )
         return True
 
+    def set_flipped(self, frame: Frame | None, seat: int, flipped: bool) -> bool:
+        """写一个座位的**翻面**状态并落一条 ``flipped_change``（翻面机制的唯一写入口）。
+
+        返回值 = 状态真的变了吗。两处调用点：①技能效果把武将牌翻过去（【据守】的
+        "然后翻面"是 **toggle**：正 → 背、背 → 正）；②回合环在"回合开始前"把背面朝上的
+        角色翻回正面（规则集 13.2 的固定流程，帧外 ⇒ ``frame=None``，记录坐标 0）。
+
+        与 :meth:`set_chained` 同形：状态 + 一条 delta，"回放可重建"不靠调用点自觉。
+        """
+        player = self.state.player(seat)
+        if player.flipped == flipped:
+            return False
+        player.flipped = flipped
+        self.emit_delta(
+            FlippedChangeDelta(seat=seat, flipped=flipped),
+            frame_id=(frame.frame_id if frame is not None else 0),
+            depth=self.stack.depth,
+        )
+        return True
+
     def set_wine_active(self, frame: Frame | None, seat: int, active: bool) -> bool:
         """写一个座位的【酒】加伤状态并落一条 ``wine_change``（M5-04 的唯一写入口）。
 
@@ -3991,7 +4019,29 @@ class Engine:
     # -- 回合环的每一步 -----------------------------------------------------
 
     def _turn_before_start(self) -> None:
-        self.emit_timing(Timing.TURN_BEFORE_START, actor=self.state.turn_seat)
+        """回合开始前（L2.1）：先记时机，再看是不是**翻面跳过**。
+
+        规则集 13.2 的固定流程：轮到该角色的"回合开始前" → **先翻面**（背面 → 正面）→
+        **然后跳过整个回合**（准备 / 判定 / 摸牌 / 出牌 / 弃牌 / 结束六阶段全部不执行），
+        直接进入下家的"回合开始前"。
+
+        跳过 = **没有进入回合**，故：
+
+        - ``TURN_START`` 不发 ⇒ 该座位的每回合清理（使用次数、【酒】/【裸衣】等加伤的清理点、
+          "本回合置入弃牌堆"的花色）都不发生。这正是【界裸衣】"直到你的下个回合开始"在
+          被跳过的回合里**不清理**的原因（`06`（§5「程序化约定与偏离一手」）登记了这条）；
+        - 六个阶段的时机一个都不发 ⇒ 该角色的所有阶段体技能（准备 / 摸牌 / 出牌 / 弃牌 /
+          结束）都不触发；
+        - ``TURN_AFTER_END`` 也不发（`_turn_after_end` 读 :data:`SKIPPED_TURN_KEY` 跳过那条
+          记录）；但**收尾清理照样跑**——那些作用域都属于上一个真实回合，跑一次是幂等的。
+        """
+        seat = self.state.turn_seat
+        self.emit_timing(Timing.TURN_BEFORE_START, actor=seat)
+        if seat is not None and self.state.player(seat).flipped:
+            self.set_flipped(None, seat, False)
+            self._turn_data[SKIPPED_TURN_KEY] = True
+            # 本步返回后 ``_step_turn`` 会 ``_turn_pc += 1``，故拨到收尾步的前一格。
+            self._skip_to(self._turn_after_end)
 
     def _turn_start(self) -> None:
         # 该座位自己的 TURN_START 是使用次数计数器的重置点（票 07 §6）。
@@ -4366,7 +4416,11 @@ class Engine:
         for player in self.state.players:
             player.card_use_counts.pop(WINE_COUNT_KEY, None)
         # 重入只可能来自上面那次挂起续跑：``TURN_AFTER_END`` 已经落过就不要再落一条。
-        if not self._turn_data.get("turn_after_end_emitted"):
+        # 被翻面跳过的回合**没有进入过**，故也不发"回合结束后"（清理照跑，见
+        # :meth:`_turn_before_start`）。
+        if not self._turn_data.get("turn_after_end_emitted") and not self._turn_data.get(
+            SKIPPED_TURN_KEY
+        ):
             self._turn_data["turn_after_end_emitted"] = True
             self.emit_timing(Timing.TURN_AFTER_END, actor=self.state.turn_seat)
         return None

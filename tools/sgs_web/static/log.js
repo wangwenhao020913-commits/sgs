@@ -158,6 +158,9 @@ function describeRecord(record) {
       // M5-08d：横置 / 重置的状态变化在完整档也写人话（U1-05 的简易档由服务端叙事写）。
       return `<span class="k">#${record.seq}</span> 座位 ${record.seat} ${record.chained ? "横置" : "重置"}`;
     }
+    if (record.delta_type === "flipped_change") {
+      return `<span class="k">#${record.seq}</span> 座位 ${record.seat} ${record.flipped ? "翻面（背面朝上）" : "翻回正面"}`;
+    }
     if (record.delta_type === "wine_change") {
       return `<span class="k">#${record.seq}</span> 座位 ${record.seat} ${record.active ? "进入【酒】状态" : "【酒】加伤消失"}`;
     }

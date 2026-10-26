@@ -431,6 +431,11 @@ function applyLiveDelta(record, view = state.liveView) {
       if (player) player.chained = Boolean(record.chained);
       return view;
     }
+    if (record.delta_type === "flipped_change") {
+      const player = playerAt(record.seat);
+      if (player) player.flipped = Boolean(record.flipped);
+      return view;
+    }
     if (record.delta_type === "wine_change") {
       const player = playerAt(record.seat);
       if (player) player.wine_active = Boolean(record.active);

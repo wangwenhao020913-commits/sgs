@@ -335,6 +335,14 @@ class Player(BaseModel):
     U1-04 先落座位字段；**M5-03 接线**：写入唯一入口是 ``Engine.set_chained``（铁索连环的
     toggle 与属性伤害的"结算后立即重置"），每次变化发一条 ``chained_change`` delta。
     """
+    flipped: bool = False
+    """武将牌是否**背面朝上**（翻面；票 1 的翻面机制）。
+
+    与 :attr:`chained` 是**两个独立状态**（规则集 13.1 / 13.3：横置管属性伤害连环、翻面管
+    跳过回合，可以同时存在）。写入唯一入口 ``Engine.set_flipped``，每次变化发一条
+    ``flipped_change`` delta。读点只有一处：回合环的"回合开始前"——背面朝上的角色在那里
+    翻回正面，然后**整个回合被跳过**（规则集 13.2）。
+    """
     wine_active: bool = False
     """【酒】的"下一张【杀】+1"是否生效（M5-04 接线：出牌阶段的【酒】写入，回合末清空；
     每次变化发一条 ``wine_change`` delta）。"""

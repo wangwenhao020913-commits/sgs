@@ -291,6 +291,8 @@ class _Narrator:
             self._card_reveal(record, seq)
         elif delta_type == "chained_change":
             self._chained_change(record, seq)
+        elif delta_type == "flipped_change":
+            self._flipped_change(record, seq)
         elif delta_type == "wine_change":
             self._wine_change(record, seq)
         elif delta_type == "identity_reveal":
@@ -318,6 +320,21 @@ class _Narrator:
         frame_id = record.get("frame_id")
         if isinstance(frame_id, int):
             self.reveal_frames[frame_id] = {"passed": False, "discarded": False}
+
+    def _flipped_change(self, record: dict[str, Any], seq: int) -> None:
+        """翻面 / 翻回正面：一行中文。跳过回合的因果**不**在这里解释（事件流只写状态）。"""
+        if not self.started:
+            return
+        seat = record.get("seat")
+        if seat is None:
+            return
+        self._line(
+            seq,
+            [
+                *self._seat(seat),
+                _act(" 翻面（背面朝上）" if record.get("flipped") else " 翻回正面"),
+            ],
+        )
 
     def _chained_change(self, record: dict[str, Any], seq: int) -> None:
         """横置 / 重置（M5-03 的 ``chained_change``）：一行中文，不读牌名、不判原因。

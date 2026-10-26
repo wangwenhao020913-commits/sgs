@@ -361,6 +361,11 @@ class PlayerPublic(_FrozenModel):
     ``exclude`` 与 ``hero`` / ``kingdom`` 同一条纪律：**不进记录流**，标准 47 条金录像
     逐字节不变。它由 ``visible_snapshot`` 经 ``display.decorate_snapshot`` 写进网页载荷。
     """
+    flipped: bool = Field(default=False, exclude=True)
+    """武将牌是否**背面朝上**（翻面；本票的翻面机制）。
+
+    同 ``chained``：``exclude`` 不进记录流，网页载荷由展示层补下。
+    """
     wine_active: bool = Field(default=False, exclude=True)
     """【酒】的下一张【杀】+1 是否生效（U1-04 下发的座位事实；M5-04 起由 ``【酒】`` 写入、
     回合末清空，每次变化落一条 ``wine_change``）。

@@ -741,14 +741,14 @@ def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -
     3. **零非法应答**（每次应答都在候选 / 清单 / 附带指定池里）；
     4. **可回放**（磁带重放后记录流逐字节相等）。
 
-    池 = **默认启用池**（spec D19：标准 25 + 界版 29 = 54 个版本 / 29 个真名），不显式
+    池 = **默认启用池**（spec D19：标准 25 + 界版 29 + 移动版 1 = 55 个版本 / 30 个真名），不显式
     发将、不点将、不设禁将。逐局另外断言真的从混合池里发牌：8 名武将都在池内、8 个真名
     互异（同一真名至多一个座位）、且标准版与界版**两版都在场**——否则"混合池"这一条
     可以被一局全标准版的空转局糊弄过去。
     """
     pool = enabled_hero_ids()
     true_names = {hero_by_id(hero_id).true_name for hero_id in pool}
-    assert (len(pool), len(true_names)) == (54, 29), "spec D18/D19 的收口池"
+    assert (len(pool), len(true_names)) == (55, 30), "spec D18/D19 的收口池（本票加移动版 1 个）"
 
     engine = _new_engine(seed, players=M6_CLOSEOUT_PLAYERS)
     scans = _participants(seed, M6_CLOSEOUT_PLAYERS)
@@ -762,7 +762,11 @@ def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -
     assert (
         len({hero_by_id(hero_id).true_name for hero_id in heroes}) == M6_CLOSEOUT_PLAYERS
     ), "同一真名占了两个座位"
-    assert versions == {"standard", "jie-ol"}, f"这一局不是混合池：{versions}"
+    # 池里有三个版本标记（standard / jie-ol / jie-mobile）：这一局只要**既有标准版又有
+    # 某个界版**就算混合局；移动版是否恰好被抽到不在判据里（它只有 1 名，靠种子碰）。
+    assert "standard" in versions and versions & {"jie-ol", "jie-mobile"}, (
+        f"这一局不是混合池：{versions}"
+    )
 
     # ① 跑完
     assert engine.finished, "必达终局"

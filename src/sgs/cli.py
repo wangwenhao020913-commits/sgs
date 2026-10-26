@@ -169,6 +169,10 @@ def render(record: JournalRecord) -> str:
             # 横置 / 解除横置（M5-03）：只作调试转写；面向玩家的措辞归 M5-08d。
             state = "横置" if record.chained else "解除横置"
             return f"#{record.seq:<4} 连环 座位={record.seat} {state}"
+        if record.delta_type == "flipped_change":
+            # 翻面：只作调试转写；面向玩家的措辞归网页叙事 / 事件流。
+            state = "翻面（背面朝上）" if record.flipped else "翻回正面"
+            return f"#{record.seq:<4} 翻面 座位={record.seat} {state}"
         if record.delta_type == "wine_change":
             # 【酒】加伤（M5-04）：只作调试转写；面向玩家的措辞归 M5-08d。
             state = "加伤生效" if record.active else "加伤解除"
