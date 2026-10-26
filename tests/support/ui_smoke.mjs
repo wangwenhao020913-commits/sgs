@@ -2254,6 +2254,81 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `pre=${ui.state.preactivation} calls=${calls.length - beforeOk}`);
 }
 
+/* ============ 票 25 报障（合成局面）：麒麟弓预发动的第一步要点**目标**装备区的坐骑 ============
+ *
+ * 清单形状来自引擎真实下发的 Step（`PickCards(zones=("equip",), slot_kinds=坐骑)`）：
+ * `zones=["equip"]`、`pool.options=[目标坐骑的 card_id]`。麒麟弓是**装备技**的被动询问
+ * （`SKILL_ACTIVATION`），入口 = 技能按钮 → 预发动清单；第一步必须在牌桌表面点**目标
+ * 座位**的装备槽。旧实现只把"**自己**的装备区"接成可点，目标座位的槽是静态 div。
+ */
+{
+  const mount = { ...synthCard(37, "的卢"), type: "dilu", slot: "horse_offense" };
+  const bow = { ...synthCard(30, "麒麟弓"), type: "qilin_bow", slot: "weapon" };
+  const manifest = [{
+    name: "card", zones: ["equip"], min: 1, max: 1, order: 0,
+    pool: [{ when: [], options: ["37"] }],
+    wording: "弃置目标装备区里的一匹坐骑（只能选坐骑）",
+  }];
+  const view = synthView({
+    kind: "SKILL_ACTIVATION", actor: 0, seq: 902,
+    prompt: "是否发动该技能？", skill_id: "equip.qilin_bow",
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: "equip.qilin_bow", answers_seq: 902 },
+      { kind: "Pass", answers_seq: 902 },
+    ],
+    preactivation: manifest, preactivations: [],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  view.heroes = { 0: "jie_luxun", 1: "jie_xiahoudun", 2: "lvbu" };
+  view.snapshot.players[0].equip = [bow];
+  view.snapshot.players[1].equip = [mount];
+  view.skills = [{
+    skill_id: "equip.qilin_bow", name: "麒麟弓", skill_type: "NORMAL", locked: false,
+    carrier: "EQUIPMENT", available: true, preactivated: true,
+    ui: { requirement: "当你使用【杀】造成伤害时，你可以弃置其装备区里的一张坐骑牌" },
+  }];
+  ui.state.view = view;
+  ui.state.sessionId = "smoke-missing-session";
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const skillButton = Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "equip.qilin_bow");
+  check("㉿Q1 麒麟弓是预发动入口（按钮可点）",
+    !!skillButton && skillButton.disabled === false,
+    `disabled=${skillButton && skillButton.disabled}`);
+  (skillButton.listeners.click || []).forEach((fn) => fn({ target: skillButton }));
+  check("㉿Q2 点它 = 进入 1 步预发动（步骤提示 = 服务端那句）",
+    !!ui.state.preactivation && ui.state.preactivation.steps.length === 1
+      && /弃置目标装备区里的一匹坐骑/.test($("t-target-hint").textContent),
+    `steps=${ui.state.preactivation && ui.state.preactivation.steps.length} hint="${$("t-target-hint").textContent}"`);
+
+  const walk = (node, out = []) => {
+    for (const child of Array.from(node.children || [])) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const targetSlot = walk(seatBox(1)).find(
+    (node) => node.getAttribute("data-card-id") === "37"
+      && node.getAttribute("data-zone") === "equip");
+  check("㉿Q3 目标座位的坐骑槽画成可点节点（不是静态 div）",
+    !!targetSlot && targetSlot.tagName === "BUTTON" && (targetSlot.listeners.click || []).length > 0,
+    `tag=${targetSlot && targetSlot.tagName} click=${targetSlot && (targetSlot.listeners.click || []).length}`);
+  if (targetSlot) (targetSlot.listeners.click || []).forEach((fn) => fn({ target: targetSlot }));
+  check("㉿Q4 点目标坐骑 = 收进第 1 步答案",
+    JSON.stringify(ui.state.preactivation.answers[0].values) === "[37]",
+    JSON.stringify(ui.state.preactivation.answers[0]));
+  const next = Array.from($("t-options").children).find((b) => b.textContent === "下一步");
+  check("㉿Q5 张数达标后「下一步」可点", !!next && next.disabled === false,
+    `next=${next && next.disabled}`);
+  (next.listeners.click || []).forEach((fn) => fn({ target: next }));
+  const action = ui.buildAction();
+  check("㉿Q6 清单填完 = 复合 ActivateSkill（picks = 目标坐骑 id）",
+    !!action && action.kind === "ActivateSkill" && action.skill_id === "equip.qilin_bow"
+      && JSON.stringify(action.picks) === "[37]",
+    JSON.stringify(action));
+}
+
 /* ============ 票 01（合成局面）：【离间】流水线 —— 逐步文案 + 取消送出 Pass ============
  *
  * 三步都是**服务端驱动的询问**（点技能 → SELECT_CARDS → SELECT_OPTION ×2），前端只按

@@ -334,13 +334,20 @@ function sideBlockRows(player, ctx) {
   const equipPick = ownSeat
     && isOwnZonePick(ctx.pendingNow)
     && ownPickHasEquip(ctx.pendingNow);
+  // 预发动选牌步**不限于自己的区域**：【麒麟弓】的第一步只铺目标装备区的坐骑槽，清单的
+  // `zones` / pool 都在 `preactivationCardPickable` 里读；目标座位的槽因此也要接点击。
+  const preactivationPick = (zone, card) =>
+    preactivationCardPickable(ctx.pendingNow, card, zone);
   const judge = document.createElement("div");
   judge.className = "judge-row";
   judge.setAttribute("data-zone", "judge");
   judge.setAttribute("data-seat", String(player.seat));
   for (const layout of judgeSlotLayout(player.judge)) {
     judge.appendChild(miniSlotNode({
-      ...layout, card: layout.card, interactive: baseInteractive, ctx,
+      ...layout,
+      card: layout.card,
+      interactive: baseInteractive || preactivationPick("judge", layout.card),
+      ctx,
     }));
   }
   const equip = document.createElement("div");
@@ -349,7 +356,10 @@ function sideBlockRows(player, ctx) {
   equip.setAttribute("data-seat", String(player.seat));
   for (const layout of equipSlotLayout(player.equip)) {
     equip.appendChild(miniSlotNode({
-      ...layout, card: layout.card, interactive: baseInteractive || equipPick, ctx,
+      ...layout,
+      card: layout.card,
+      interactive: baseInteractive || equipPick || preactivationPick("equip", layout.card),
+      ctx,
     }));
   }
   return [judge, equip];

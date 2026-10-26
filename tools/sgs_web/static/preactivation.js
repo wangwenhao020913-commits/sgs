@@ -253,6 +253,28 @@ function preactivationCardOptions(pending) {
   return preactivationOptions(pa, pa.cursor);
 }
 
+/** 预发动选牌步里，``zone`` 区的 ``card`` 是否可点。
+ *
+ * 预发动**不限于自己的区域**：【麒麟弓】的第一步只铺**目标**装备区的坐骑槽（服务端
+ * 清单的 ``zones=["equip"]`` + pool 只给那张坐骑的 card_id）。牌桌表面因此要把目标座位
+ * 的装备槽接成可点——判据只读清单的区 / 候选，不按座位写死。
+ *
+ * ``options === null``（服务端退化掉候选索引）时退化为"该区的牌全都可点"；合法性仍由
+ * 服务端校验器裁决（与 :func:`togglePreativationCard` 同一姿态）。
+ */
+function preactivationCardPickable(pending, card, zone) {
+  if (state.playback || !card) return false;
+  const pa = state.preactivation;
+  if (!pa || pa.cursor >= pa.steps.length) return false;
+  const step = pa.steps[pa.cursor];
+  if (preactivationStepKind(step) !== "card") return false;
+  const zones = step.zones || [];
+  if (!zones.includes(zone)) return false;
+  const options = preactivationCardOptions(pending);
+  if (options === undefined) return false;
+  return options === null || options.includes(String(card.card_id));
+}
+
 /** 点一张牌：多选步里点已选 = 取消该张、点新牌 = 追加（用户裁定的重选规则）。 */
 function togglePreativationCard(cardId) {
   const pending = state.view ? state.view.pending : null;
