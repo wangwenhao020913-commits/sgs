@@ -473,7 +473,7 @@ def test_lianying_does_not_fire_when_another_seat_empties_its_hand():
         actor=1,
     )
     # 挂起的"失去牌后"派发也要跑完（`_settled` 只看栈与询问，看不到 `_move_pending`）。
-    _advance(engine, [Scripted(), Scripted()], lambda e: _settled(e, other) and e._move_pending is None)
+    _advance(engine, [Scripted(), Scripted()], lambda e: _settled(e, other) and not e._move_pending)
 
     assert ("hand", "discard", "DISCARD") in _moves_of(engine, other), "座位 1 掉光手牌"
     assert other in _move_after_cards(engine), "失去牌后照记"
@@ -651,11 +651,74 @@ def test_xiaoji_fires_once_per_equipment_card_lost_in_the_same_move():
         actor=0,
     )
 
-    _advance(engine, [Scripted(), Scripted()], lambda e: e._move_pending is None)
+    _advance(engine, [Scripted(), Scripted()], lambda e: not e._move_pending)
 
     assert not engine.state.player(0).equip, "两张装备都进了弃牌堆"
     assert _xiaoji_asks(engine) == 2, "两张装备 ⇒ 恰好两问（第 1 张是『是否发动』，第 2 张是再来一次）"
     assert len(_drawn_to(engine.records, 0)) == 4, "两张装备各触发一次 ⇒ 摸 2×2 张"
+
+
+def test_xiaoji_keeps_activating_after_a_qingjian_ask_suspends_mid_draws():
+    """嵌套挂起（票 25）：【枭姬】逐张发动时，第二张的摸牌触发【清俭】⇒ 外层接着跑完。
+
+    形状：外层的"失去装备"派发已经挂在栈上，续跑里【枭姬】摸牌（内层）又触发清俭发问。
+    旧单槽实现会让内层覆盖外层（外层的"第二张还要不要发动"永久丢失）；改成栈之后，
+    栈顶是内层、栈底是外层，内层答完再续外层。判据 = 两张装备仍各触发一次、共摸 4 张。
+
+    清俭是**授予**给孙尚香的：当前内容里没有同时持这两个技能的武将，本用例是**机制级**
+    构造（同"失去装备 + 清俭"的嵌套形状），不声称对局里可达。
+    """
+    horse, horse2 = _cards("chitu")[0], _cards("dawan")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(equip=(horse, horse2), hero="sunshangxiang"), SeatSpec()],
+        deck=_deck_excluding(horse, horse2),
+        turn_seat=0,
+    )
+    state.player(0).granted_skills.append("hero.jie_xiahoudun.qingjian")
+    engine = Engine.from_state(state, seed=7)
+    qingjian: list = []
+
+    def pass_qingjian(query):
+        if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == (
+            "hero.jie_xiahoudun.qingjian"
+        ):
+            qingjian.append(query)
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+        return None
+
+    engine.move_in_frame(
+        None,
+        engine.state.refs((horse, horse2)),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=0,
+        actor=0,
+    )
+
+    # 内层（清俭的那次摸牌派发）必须排在栈顶、外层（丢弃装备）在栈底：续跑先内层、
+    # 再回到外层继续"第二张要不要发动"。
+    _advance(engine, [Scripted(pass_qingjian), Scripted()], lambda e: len(e._move_pending) == 2)
+    assert len(engine._move_pending) == 2, "外层（弃装备）+ 内层（枭姬摸牌）都挂起了"
+    inner = engine._move_pending[-1].event
+    outer = engine._move_pending[-2].event
+    assert inner.to_zone.zone is Zone.HAND, "栈顶 = 内层的摸牌派发"
+    assert outer.to_zone.zone is Zone.DISCARD, "栈底 = 外层的弃装备派发"
+
+    _advance(
+        engine,
+        [Scripted(pass_qingjian), Scripted()],
+        lambda e: not e._move_pending,
+    )
+
+    assert _xiaoji_asks(engine) == 2, "两张装备各一次『是否发动』"
+    # 同一帧 + 同一时机的发动答案按帧内缓存（与 ``ask_option`` 的范围键是另一条轴），
+    # 故第二张的摸牌复用第一次的 Pass、不再发问；本用例只关心外层有没有接着跑完。
+    assert len(qingjian) == 1, "清俭的发动询问发生一次，内层据此挂起"
+    assert len(_drawn_to(engine.records, 0)) == 4, "内层答完后外层继续 ⇒ 两张装备共摸 4 张"
+    assert not engine._move_pending, "两层都续跑完，挂起栈清空"
 
 
 def test_xiaoji_lets_the_owner_stop_after_the_first_card():
@@ -691,7 +754,7 @@ def test_xiaoji_lets_the_owner_stop_after_the_first_card():
     _advance(
         engine,
         [Scripted(decline_the_repeat), Scripted()],
-        lambda e: e._move_pending is None,
+        lambda e: not e._move_pending,
     )
 
     assert _xiaoji_asks(engine) == 2, "第 1 问答发动、第 2 问答放弃 ⇒ 停在第 2 问"
@@ -721,7 +784,7 @@ def test_xiaoji_counts_each_of_two_separate_moves_in_the_same_frame():
             owner=0,
             actor=0,
         )
-        _advance(engine, [Scripted(), Scripted()], lambda e: e._move_pending is None)
+        _advance(engine, [Scripted(), Scripted()], lambda e: not e._move_pending)
 
     assert _xiaoji_asks(engine) == 2, "两次移动各一问"
     assert len(_drawn_to(engine.records, 0)) == 4, "两次各摸 2 张"
@@ -776,7 +839,7 @@ def test_xiaoji_does_not_fire_when_another_seat_loses_equipment():
         owner=1,
         actor=1,
     )
-    _advance(engine, [Scripted(), Scripted()], lambda e: _settled(e, weapon, from_zone="equip") and e._move_pending is None)
+    _advance(engine, [Scripted(), Scripted()], lambda e: _settled(e, weapon, from_zone="equip") and not e._move_pending)
 
     assert ("equip", "discard", "DISCARD") in _moves_of(engine, weapon), "座位 1 掉了装备"
     assert _drawn_to(_after(engine, weapon), 0) == [], "不是孙尚香失去的牌 ⇒ 枭姬不摸"
@@ -896,7 +959,7 @@ def test_a_move_that_suspends_on_move_after_is_not_replayed_when_it_resumes():
     # 更早的注释（保留来历）：种子 63 是**在当前实现下**仍能走到"承载帧上挂起"的那个
     # （原用 76）。76 依赖【遗计】在**别人**受伤时也触发（那是 bug，本轮已修）来把局面推成
     # "陆逊手牌见底、连营提问"；修掉之后同一颗种子的对局走向变了，承载帧挂起不再出现——
-    # 测试会在 `_advance` 的步数上限后读到 `_move_pending is None` 而以 TypeError 假红。
+    # 测试会在 `_advance` 的步数上限后读到 `_move_pending` 为空而以 TypeError 假红。
     # 换种子保住了这条判据针对的**回归路径**（挂起后不得重放 move_card / 幻影 delta）。
     engine = Engine.new_game(
         seed=26,
@@ -907,14 +970,14 @@ def test_a_move_that_suspends_on_move_after_is_not_replayed_when_it_resumes():
     players = [_AutoActivate() for _ in range(4)]
 
     def suspended_on_a_carried_frame(candidate) -> bool:
-        if candidate._move_pending is None:
+        if not candidate._move_pending:
             return False
-        _, _, _, pending_frame = candidate._move_pending
+        pending_frame = candidate._move_pending[-1].carrying
         return pending_frame is not None and pending_frame.frame_id != 0
 
     _advance(engine, players, suspended_on_a_carried_frame)
 
-    _, key, _, _ = engine._move_pending
+    key = engine._move_pending[-1].key
     card_id = key[1][0]
     moved = _moves_of(engine, card_id)
     assert len(moved) == 1, f"挂起前这次移动恰一条 card_move：{moved}"
@@ -930,5 +993,5 @@ def test_a_move_that_suspends_on_move_after_is_not_replayed_when_it_resumes():
         f"同一次移动只搬一遍：重入不是第二次移动（{_moves_of(engine, card_id)}）"
     )
     assert _same_zone_moves(engine) == [], "重入不得留下 processing → processing 之类的幻影 delta"
-    assert engine._move_pending is None, "挂起状态已经收尾"
+    assert not engine._move_pending, "挂起状态已经收尾"
 

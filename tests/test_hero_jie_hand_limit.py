@@ -579,21 +579,51 @@ def test_qingjian_gives_cards_and_boosts_the_turn_player_not_itself():
     )
 
 
-def test_qingjian_does_not_trigger_on_a_plain_draw():
-    """反例（"获得"≠"摸牌"）：牌堆 → 手牌是摸牌，不触发清俭。"""
+class _PlayExNihiloThenPass:
+    """出牌阶段用一张【无中生有】；遇到清俭的发动询问一律 Pass（只验"问了"）。"""
+
+    def __init__(self) -> None:
+        self.qingjian: list = []
+        self.used = False
+
+    def respond(self, query):
+        if query.kind == QueryKind.PLAY_PHASE and not self.used:
+            self.used = True
+            for action in query.legal_actions:
+                if isinstance(action, UseCard) and action.card.type == "ex_nihilo":
+                    return action
+            return next(action for action in query.legal_actions if action.kind == "EndPhase")
+        if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == JIE_QINGJIAN:
+            self.qingjian.append(query)
+            return next(action for action in query.legal_actions if isinstance(action, Pass))
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def test_qingjian_triggers_on_a_draw_outside_its_owners_draw_phase():
+    """正例（Q1：**摸牌也算获得**，票 25 落地）：出牌阶段用【无中生有】摸两张 ⇒ 清俭发问。
+
+    同一持有者在自己**摸牌阶段**的摸牌不问（"于你的摸牌阶段外"的阶段门，见
+    `test_qingjian_does_not_trigger_inside_its_owners_draw_phase`）；本用例把同一动作搬到
+    出牌阶段——旧判据（"获得 ≠ 摸牌"）下这里**一次询问都没有**，Q1 之后才有。
+    """
+    ex_nihilo = cards_of_type(PACK, "ex_nihilo")[0]
     state = build_state(
         pack=PACK,
-        seats=[SeatSpec(), SeatSpec()],
-        deck=_deck_excluding(),
+        seats=[SeatSpec(hand=(ex_nihilo,)), SeatSpec()],
+        deck=_deck_excluding(ex_nihilo),
         turn_seat=0,
     )
     state.player(0).granted_skills.append(JIE_QINGJIAN)
     engine = Engine.from_state(state, seed=7)
-    players = [_QingjianDriver(seat=0, second_gain=False), _QingjianDriver(seat=1, second_gain=False)]
+    players = [_PlayExNihiloThenPass(), _PlayExNihiloThenPass()]
 
-    run_until(engine, players, lambda e: e.state.phase is not None and e.state.phase.value == "play")
+    run_turns(engine, players, turns=1)
 
-    assert players[0].qingjian_queries == [], "摸牌阶段的两张不是获得 ⇒ 连问都不问"
+    assert len(players[0].qingjian) == 1, "出牌阶段的摸牌也是『获得』 ⇒ 问一次"
+    assert engine.state.player(0).hand_limit_bonus == 0, "本例在发动询问处 Pass，不加手牌上限"
 
 
 def test_qingjian_does_not_trigger_inside_its_owners_draw_phase():

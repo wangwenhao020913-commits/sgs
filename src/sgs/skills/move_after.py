@@ -17,7 +17,8 @@ D 族的形态差别只有一处：它**不建帧、也不产候选**，而是�
   （与【八卦阵】"选中才惰性压判定帧"同款先例）；
 - **"失去"与移动原因无关**（R5-Q3）：判定只看 ``from_zone`` / ``to_zone`` / 移动后的持有，
   不看 :class:`~sgs.state.MoveReason`——使用 / 打出 / 弃置 / 交给 / 被获得 / **重铸** / 顶替
-  全算，**摸牌不算**（牌堆 → 手牌）。M5-03 的 ``MoveReason.REFORGE``（铁索重铸）因此
+  全算，**摸牌不算失去**（牌堆 → 手牌，票 24 的 Q1 只把摸牌算进"获得"）。
+  M5-03 的 ``MoveReason.REFORGE``（铁索重铸）因此
   照常触发【连营】/【枭姬】：本族**不按原因过滤**，也不新增"弃置触发"的第二条通道——
   将来若出现弃置类触发，它必须显式比较 ``MoveEvent.reason``、把 REFORGE 排除在外。
 
@@ -37,8 +38,9 @@ D 族的形态差别只有一处：它**不建帧、也不产候选**，而是�
 
 两条都是**非锁定技**（技能面写了"你可以"）⇒ 发动是询问出来的，故 :func:`_dispatch` 会
 先发一次 ``SKILL_ACTIVATION`` 询问。钩子**可以**提问并挂起：``move_in_frame`` 返回
-``"stay"`` 时引擎把它记进 ``_move_pending``，由 :meth:`Engine._flush_pending_move` 用
-**续跑帧**接着跑（M6 票 08 起；界【连营】的逐座选人与界【枭姬】的逐张再发动都走这条）。
+``"stay"`` 时引擎把它压进 ``_move_pending`` **栈**，由 :meth:`Engine._flush_pending_move`
+用**续跑帧**接着跑（M6 票 08 起；界【连营】的逐座选人与界【枭姬】的逐张再发动都走这条）。
+嵌套挂起（摸牌钩子里再触发"获得牌后"）自票 25 起按**后进先出**续跑。
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ from typing import Any
 
 from sgs.data import SkillType, card_category
 from sgs.effects import CarrierKind, locate
+from sgs.resolution import Control
 from sgs.state import CardRef, GameState, MoveReason, Pass, Phase, Zone, ZoneRef
 from sgs.timing import Timing
 
@@ -205,11 +208,11 @@ def move_after_providers(
     )
 
 
-def dispatch_move_after(host: Any, frame: Any) -> None:
+def dispatch_move_after(host: Any, frame: Any) -> Control:
     """在当前帧上派发 ``MOVE_AFTER``（引擎的 ``move_in_frame`` 在 ``move_card`` 之后调它）。
 
-    守卫在 ``Engine.move_in_frame`` 一侧已经判过，这里只做通用派发；返回值被刻意丢弃——
-    本族的钩子不得暂停（见模块 docstring）。
+    守卫在 ``Engine.move_in_frame`` 一侧已经判过，这里只做通用派发。返回值原样上抛：
+    本族的钩子**可以**提问并挂起，由 :meth:`Engine._flush_pending_move` 的续跑帧接着跑。
 
     M5-05a 起**刚离开装备区的装备**也参与本次派发（:func:`lost_equipment_instances`）：
     它们是"这一次移动"的提供者，而不是当前状态里的装备。
@@ -232,7 +235,7 @@ def dispatch_move_after(host: Any, frame: Any) -> None:
 #
 # 三段判据都不认牌名：
 #
-# - **获得** = 移到手牌、且来源区**不是牌堆**（牌堆 → 手牌是摸牌，不算获得）；
+# - **获得** = 移到自己的手牌（来源不限：牌堆的摸牌也算，票 24 裁定 Q1 / 票 25 落地）；
 # - **"于你的摸牌阶段外"** = 不是"当前回合是你 ∧ 阶段是摸牌"（在别人的回合里摸到牌
 #   也算"你的摸牌阶段外"）；
 # - **每回合限一次** = ``skill_state`` 的 :data:`~sgs.skills.catalog._TURN_USED` 位
@@ -280,20 +283,15 @@ def _other_alive_seats(
 def gains_card(event: MoveEvent | None, seat: int) -> bool:
     """这张牌这次移动对 ``seat`` 算不算**获得牌**（票 24 的唯一判据）。
 
-    仅一句：**进入了自己的手牌区、且来源不是牌堆**。别人的手牌 / 装备区 / 判定区、处理区、
-    弃牌堆、武将牌上的牌，进手牌都算；**进装备区不算获得**（Q3：置入装备区是"置入"）。
+    仅一句：**进入了自己的手牌区**（来源不限）。别人的手牌 / 装备区 / 判定区、处理区、
+    弃牌堆、牌堆、武将牌上的牌，进手牌都算；**进装备区不算获得**（Q3：置入装备区是"置入"）。
 
-    **牌堆 → 手牌（摸牌）暂时不算**：用户在票 24 已裁定"摸牌也算获得"（Q1，为了让【清俭】
-    吃【重铸】/【无中生有】的摸牌），但那条裁定**阻塞在挂起机制**上——摸牌发生在
-    `draw_for_hand` 里，可能嵌套在别人的钩子里（【连营】逐座摸牌）；这种嵌套挂起目前
-    只支持一层，外层钩子的续跑会丢（票 25 / 复现：随机局 seed=663 的答复错配）。等挂起
-    改成栈之后，这里去掉 `from_zone is not DECK` 这一句即可。
+    **来源不限**：牌堆（摸牌）也算——用户在票 24 裁定 Q1"摸牌也算获得"，票 25 把嵌套
+    挂起改成栈之后落地，故【清俭】吃【重铸】/【无中生有】/【连营】的摸牌。
     """
     if event is None:
         return False
-    if event.to_zone.zone is not Zone.HAND or event.to_zone.seat != seat:
-        return False
-    return event.from_zone.zone is not Zone.DECK
+    return event.to_zone.zone is Zone.HAND and event.to_zone.seat == seat
 
 
 def loses_card(event: MoveEvent | None, seat: int) -> bool:
@@ -490,7 +488,11 @@ class MoveAfterSkill(HeroSkillDecl):
                 if isinstance(answer, Pass):
                     break
             frame.data[key] = done + 1
-            host.draw_for_hand(frame, owner, self.draws)
+            # 摸牌也算「获得牌」（票 24 的 Q1）：摸出来的牌可能触发别人的【清俭】并挂起
+            # （票 25 的嵌套挂起）。挂起时**原样上抛**——游标已在摸牌之前前进，续跑从
+            # 下一张接着摸；吞掉 ``"stay"`` 会让下一张的摸牌在待答询问之上再发一问。
+            if host.draw_for_hand(frame, owner, self.draws) == "stay":
+                return "stay"
             done += 1
         return None
 

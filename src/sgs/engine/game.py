@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -247,6 +247,21 @@ _JUDGE_SUBSTITUTION = "judge_substitution"
 既不搬第二遍、也不会把原判定牌遗留在处理区。``resume`` 在
 :func:`~sgs.engine.steps.judge_before_effect` 顶部消费它。
 """
+
+
+class _PendingMove(NamedTuple):
+    """挂起栈的一项（票 25）：续跑一次 ``MOVE_AFTER`` 需要的四件事。
+
+    ``event`` = 这次移动的载荷；``key`` = 它的幂等键；``resume_frame`` = 带钩子询问缓存 /
+    效果游标的临时帧；``carrying`` = 原始承载帧（只用于"时机记录去重"的旧语义；帧外移动
+    为 ``None``）。字段用具名元组而不是位置下标，是因为栈里现在可能同时有多层，读错一项
+    就会续跑错层。
+    """
+
+    event: MoveEvent
+    key: tuple
+    resume_frame: Frame
+    carrying: Frame | None
 
 
 class _Suspend:
@@ -509,19 +524,25 @@ class Engine:
         帧外移动没有 ``frame.data`` 可挂"记录过了"的标记，故这个判据住引擎上；
         重入同一批牌时不再重复落 ``MOVE_AFTER`` 记录。
         """
-        self._move_pending: (
-            tuple[MoveEvent, tuple, Frame, Frame | None] | None
-        ) = None
-        """被钩子挂起的 ``MOVE_AFTER``（票 07）：``(载荷, 幂等键, 续跑帧, 承载帧或 None)``。
+        self._move_pending: list[_PendingMove] = []
+        """被钩子挂起的 ``MOVE_AFTER`` **栈**（票 07 的单槽 → M6 票 25 的栈）。
 
-        第 3 项是**续跑用的临时帧**（帧私有里带着钩子的询问缓存与效果游标，M6 票 08）；
-        第 4 项是**原始承载帧**（只用于"时机记录去重"的旧语义，见
-        :meth:`_flush_pending_move`）。
+        每项是 :class:`_PendingMove`：**续跑帧**（帧私有里带着钩子的询问缓存与效果游标，
+        M6 票 08）与**原始承载帧**（只用于"时机记录去重"的旧语义，见
+        :meth:`_flush_pending_move`）分列。字段名见该类型；读栈的代码只用属性，不按下标。
 
         "失去牌后"是**内联时机**，它的钩子可以提问。提问把控制权交回驱动循环之后，
         重入**不一定落在同一个步骤上**（拆顺会继续跑效果帧的后续步骤、使用链会继续跑
         L4/L5），故挂起状态存在引擎上，由 :meth:`_flush_pending_move` 在"引擎空闲"处
         接着派发完——这是"移动入口不建帧"（R1-Q2）的代价，也是它的唯一落点。
+
+        **必须是栈**（票 25）：钩子里的摸牌 / 弃牌本身就是另一次 ``MOVE_AFTER``，它的
+        钩子也可以提问（【连营】逐座摸牌里触发【清俭】）。内层先挂起、外层在展开返回时
+        才知道自己也要挂起——若只有一个槽，后写的一层会覆盖另一层，被覆盖那层的续跑
+        游标永久丢失、待答询问随后被下一个询问错配。内层先挂起、却在外层之后入栈，故
+        入栈下标取**派发开始前**的栈深（见 :meth:`_dispatch_move_after`），而不是简单
+        append：这样"最深一层永远在栈顶"（后进先出），:meth:`_flush_pending_move` 才能
+        先续内层、再续外层。
         """
         self._conduction: dict[str, Any] | None = None
         """进行中的**连环传导**（M5-03 / spec §5.1.1）：名单 + 游标 + 源伤害事实。
@@ -2591,11 +2612,16 @@ class Engine:
         上层帧出栈），故此时改用一条**不压栈的临时帧**。
 
         钩子提问而挂起时，把**续跑帧**（:meth:`_resume_frame`：临时帧形状 + 派发帧的帧私有
-        数据）连同**原始承载帧**一起记进 :meth:`_flush_pending_move` 的挂起槽：前者保住
+        数据）连同**原始承载帧**一起压进 :meth:`_flush_pending_move` 的挂起栈：前者保住
         询问缓存 / 效果游标，后者保住"时机记录去重"的旧语义（承载帧上
         ``_pending_move_timing`` 若被同帧后续移动覆盖，续跑要补记一条 ``MOVE_AFTER``——
         冻结基准里真有这一条）。
+
+        **入栈下标 = 派发开始前的栈深**（票 25）：内层移动先挂起、外层钩子在展开返回时
+        才知道自己也要挂起；若直接 append，外层会压在内层之上，续跑顺序就反了。按下标
+        插在"本次派发之前就存在的项"之上、本次派发里新产生的项之下，栈顶始终是最深一层。
         """
+        pending_depth = len(self._move_pending)
         if frame is not None:
             if not move_after_providers(self.state, event=event):
                 # **惰性守卫**（票 07 §要做什么 2）：没有提供者 ⇒ 一个时机事件都不发、
@@ -2660,11 +2686,14 @@ class Engine:
                 frame.data["_pending_move_timing"] = key
                 # 续跑帧在**还原范围之前**建：它要带着这次派发的范围，续跑里的询问才命中
                 # 同一份缓存（票 20 的答案缓存策略）。
-                self._move_pending = (
-                    event,
-                    key,
-                    self._resume_frame(dispatch_frame, event),
-                    frame,
+                self._move_pending.insert(
+                    pending_depth,
+                    _PendingMove(
+                        event,
+                        key,
+                        self._resume_frame(dispatch_frame, event),
+                        frame,
+                    ),
                 )
             else:
                 frame.data.pop("_pending_move_timing", None)
@@ -2695,9 +2724,13 @@ class Engine:
             frame_id=frame_id,
         )
         transient.data[MOVE_EVENT_KEY] = event
+        # 这次派发的范围键（M6 票 20）在**帧外**路径同样要写（票 25 的嵌套挂起）：临时帧
+        # 服务整次派发，钩子里的摸牌 / 弃牌会在这同一条帧上再派发 MOVE_AFTER；不写范围键，
+        # 同一技能第二次触发会命中上一次的答案缓存 → 第二次连"是否发动"都不问。
+        transient.data[_DISPATCH_SCOPE] = key
         result = dispatch_move_after(self, transient)
         if result == "stay":
-            self._move_pending = (event, key, transient, None)
+            self._move_pending.insert(pending_depth, _PendingMove(event, key, transient, None))
         return result
 
     @staticmethod
@@ -3842,9 +3875,17 @@ class Engine:
         上一个询问。**时机记录去重**按旧语义复刻：承载帧的 ``_pending_move_timing`` 若在
         挂起期间被同帧后续移动覆盖，这里要补记一条 ``MOVE_AFTER``（38 号冻结基准录了它）；
         帧外移动（无承载帧）走 ``_move_recorded`` 同一条判据。
+
+        **按栈顶逐层续跑**（票 25）：栈里更深的一层先答完，外层才接着跑；续跑期间新产生的
+        挂起项落在当前项之上。正常情况下 ``"stay"`` 会一路传上来，**当前项仍在栈顶**，这一轮
+        就直接返回；若某个调用方吞掉了 ``"stay"``（契约上不许，但既有代码里真出现过），栈顶
+        会变成新挂起的那一项——此时也返回，让更深的一层先跑，当前项留在原位等下一轮。
+        两种情形都不会出栈错项。旧实现的单槽会在这一步**丢掉外层**（【连营】的第二座永远
+        不摸）。
         """
-        while self._move_pending is not None:
-            event, key, resume_frame, carrying = self._move_pending
+        while self._move_pending:
+            entry = self._move_pending[-1]
+            event, key, resume_frame, carrying = entry
             if carrying is not None:
                 if carrying.data.get("_pending_move_timing") != key:
                     self.emit_timing(
@@ -3868,11 +3909,11 @@ class Engine:
                 )
                 self._move_recorded = key
             control = dispatch_move_after(self, resume_frame)
-            if control == "stay":
+            if control == "stay" or self._move_pending[-1] is not entry:
                 return
             if carrying is not None:
                 carrying.data.pop("_pending_move_timing", None)
-            self._move_pending = None
+            self._move_pending.pop()
 
     def _step(self) -> None:
         if self.finished:

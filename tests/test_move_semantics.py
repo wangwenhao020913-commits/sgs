@@ -53,9 +53,9 @@ def _move(from_zone: tuple[Zone, int | None], to_zone: tuple[Zone, int | None]) 
 
 #: 说明 → (来源区, 去向区, 对 ME 算获得?, 对 ME 算失去?)
 CASES: dict[str, tuple[Move, bool, bool]] = {
-    # Q1（摸牌算获得）已裁定但阻塞在挂起机制（票 25）：暂时按官方口径"牌堆不算获得"。
-    "摸牌阶段摸牌": ((Zone.DECK, None), (Zone.HAND, ME), False, False),
-    "无中生有 / 重铸的摸一张": ((Zone.DECK, None), (Zone.HAND, ME), False, False),
+    # Q1（票 25 落地）：摸牌 / 无中生有 / 重铸的摸一张都算**获得**（来源不限）。
+    "摸牌阶段摸牌": ((Zone.DECK, None), (Zone.HAND, ME), True, False),
+    "无中生有 / 重铸的摸一张": ((Zone.DECK, None), (Zone.HAND, ME), True, False),
     "五谷丰登（处理区拿牌）": ((Zone.PROCESSING, None), (Zone.HAND, ME), True, False),
     "顺手牵羊（拿走别人的手牌）": ((Zone.HAND, OTHER), (Zone.HAND, ME), True, False),
     "别人顺手牵羊拿走我的牌": ((Zone.HAND, ME), (Zone.HAND, OTHER), False, True),
@@ -89,9 +89,10 @@ def test_the_effect_registry_classifies_gain_and_loss_as_ruled(name: str) -> Non
     assert loses_card(event, ME) is expected_loss, f"{name}：失去 判错了"
 
 
-def test_gain_is_any_move_into_my_hand_except_from_the_deck() -> None:
-    """Q3 的边界：进我手牌就算获得（进装备区不算）；**牌堆来源暂时不算**（Q1 阻塞，票 25）。"""
+def test_gain_is_any_move_into_my_hand_regardless_of_the_source() -> None:
+    """Q1 + Q3 的边界：进我手牌就算获得（**来源不限，牌堆也是**）；进装备区不算。"""
     sources: tuple[tuple[Zone, int | None], ...] = (
+        (Zone.DECK, None),
         (Zone.DISCARD, None),
         (Zone.PROCESSING, None),
         (Zone.HAND, OTHER),
@@ -105,8 +106,8 @@ def test_gain_is_any_move_into_my_hand_except_from_the_deck() -> None:
         assert not gains_card(_move(source, (Zone.EQUIP, ME)), ME), (
             f"{source} → 我的装备区：Q3 明确「获得」只指进手牌"
         )
-    assert not gains_card(_move((Zone.DECK, None), (Zone.HAND, ME)), ME), (
-        "牌堆 → 手牌：Q1 已裁定算获得，但阻塞在挂起机制（票 25）；当下先按官方口径"
+    assert gains_card(_move((Zone.DECK, None), (Zone.HAND, ME)), ME), (
+        "牌堆 → 手牌也是获得：用户裁定 Q1（票 25 打开）"
     )
 
 

@@ -366,7 +366,7 @@ def test_zhaxiang_draws_three_after_every_hp_loss():
         },
         timing=Timing.DAMAGE_DEAL,
     )
-    run_queries(engine, [Scripted(), Scripted()], lambda e: e._move_pending is None and not e.stack)
+    run_queries(engine, [Scripted(), Scripted()], lambda e: not e._move_pending and not e.stack)
 
     assert len(engine.state.player(0).hand) == 3, "失去 1 点体力后摸三张"
     assert not engine.state.player(0).zhaxiang_active, (
@@ -942,7 +942,7 @@ def test_jie_xiaoji_draws_two_after_losing_equipment():
     run_queries(
         engine,
         [Scripted(drive), Scripted()],
-        lambda e: e._move_pending is None and len(e.state.player(0).hand) >= 2,
+        lambda e: not e._move_pending and len(e.state.player(0).hand) >= 2,
     )
 
     assert _activated(engine, XIAOJI)
@@ -967,7 +967,7 @@ def test_jie_xiaoji_does_not_fire_when_another_seat_loses_equipment():
         owner=1,
         actor=1,
     )
-    run_queries(engine, [Scripted(), Scripted()], lambda e: e._move_pending is None)
+    run_queries(engine, [Scripted(), Scripted()], lambda e: not e._move_pending)
 
     assert not _activated(engine, XIAOJI)
     assert engine.state.player(0).hand == []

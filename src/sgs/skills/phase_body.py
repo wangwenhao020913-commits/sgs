@@ -280,23 +280,34 @@ def _jushou_effect(host: Any, frame: Frame, answers: Any) -> Any:
     """【据守】的提交点：先摸三张（短摸 ⇒ 平局），再把自己的武将牌翻一个面。
 
     "然后"的次序是牌面写死的：先摸、后翻面。摸牌走 :meth:`~sgs.engine.Engine.draw_for_hand`，
-    不触发"失去牌后"（牌堆 → 手牌不是获得），故这一段不会挂起；翻面是帧内的状态写入口。
+    可能派发"获得牌后"（票 24 的 Q1 起摸牌也算获得）并**挂起**。挂起时原样上抛 ``"stay"``，
+    让续跑先跑完这一次移动的钩子、再回来翻面——与"先摸、后翻面"的牌面次序同源。
     平局（牌堆两空）时游戏已结束，不再翻面。
+
+    **两个段落各一个游标**（票 25）：``jushou_drawn`` 在摸牌**之前**落，重入不重摸；
+    ``jushou_flipped`` 在翻面**之后**落，重入不重翻。旧实现只有一个"整段已走"的游标且
+    在摸牌前落——摸牌挂起后续跑会把它当成"翻面也做过了"，只摸不翻。
     """
     del answers
     owner = frame.data["skill_owner"]
-    if frame.data.get(_JUSHSOU_DONE):
+    if frame.data.get(_JUSHSOU_FLIPPED):
         return None
-    frame.data[_JUSHSOU_DONE] = True
-    host.draw_for_hand(frame, owner, JUSHSOU_DRAWS)
+    if not frame.data.get(_JUSHSOU_DRAWN):
+        frame.data[_JUSHSOU_DRAWN] = True
+        if host.draw_for_hand(frame, owner, JUSHSOU_DRAWS) == "stay":
+            return "stay"
     if host.finished:
         return None
     host.set_flipped(frame, owner, not host.state.player(owner).flipped)
+    frame.data[_JUSHSOU_FLIPPED] = True
     return None
 
 
-_JUSHSOU_DONE = "jushou_done"
-"""帧私有：本次【据守】的两段已经走过（重入不重复摸 / 不重复翻）。"""
+_JUSHSOU_DRAWN = "jushou_drawn"
+"""帧私有：本次【据守】的三张已经摸过（重入不重摸；摸牌可能挂起）。"""
+
+_JUSHSOU_FLIPPED = "jushou_flipped"
+"""帧私有：本次【据守】的翻面已经落过（重入不重翻；落点在翻面**之后**）。"""
 
 JUSHSOU_FLOW = SkillFlow(name="jushou", steps=(), effect=_jushou_effect)
 """【据守】的零步流水线：[是否发动] → 摸三张 → 翻面。"""

@@ -640,7 +640,11 @@ def _jie_yiji(host: Any, frame: Any) -> Any:
     given_key = f"{JIE_YIJI_GIVEN_KEY}:{point}"
     if not frame.data.get(drawn_key):
         frame.data[drawn_key] = True
-        host.draw_for_hand(frame, owner, JIE_YIJI_DRAW)
+        # 摸牌也算「获得牌」（票 24 的 Q1）：摸出来的两张可能触发别人的【清俭】并挂起
+        # （票 25 的嵌套挂起）。挂起时**原样上抛**，否则后面的选牌 / 选人询问会覆盖那条
+        # 待答询问，答复随后错配给另一个问句。
+        if host.draw_for_hand(frame, owner, JIE_YIJI_DRAW) == "stay":
+            return "stay"
     given: tuple[tuple[int, int], ...] = tuple(frame.data.get(given_key, ()))
     if len(given) >= JIE_YIJI_GIVE_LIMIT:
         return None
@@ -794,10 +798,14 @@ def _wangxi(host: Any, frame: Any) -> Any:
     shown: tuple[int, ...] | None = frame.data.get(drawn_key)
     if shown is None:
         before = tuple(host.state.player(owner).hand)
-        host.draw_for_hand(frame, owner, WANGXI_DRAW)
+        # 摸牌也可能挂起（票 25 的嵌套挂起 + 票 24 的 Q1）：先把"摸到了哪两张"定格，
+        # 再原样上抛 ``"stay"``——重入靠 ``shown is not None`` 跳过摸牌，不能在这里漏算。
+        control = host.draw_for_hand(frame, owner, WANGXI_DRAW)
         after = tuple(host.state.player(owner).hand)
         shown = tuple(card_id for card_id in after if card_id not in before)
         frame.data[drawn_key] = shown
+        if control == "stay":
+            return "stay"
     if not shown:
         return None
     picked = host.ask_selection(

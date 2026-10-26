@@ -26,17 +26,22 @@ from support import SeatSpec, build_state, run_queries
 PACK = load_content_pack(deck_profile="standard_108")
 
 JUSHSOU = "hero.jie_caoren_mobile.jushou"
+QINGJIAN = "hero.jie_xiahoudun.qingjian"
 HERO = "jie_caoren_mobile"
 
 
 class Scripted:
-    """是否发动【据守】由标志决定；其余询问走最小合法应答。"""
+    """是否发动【据守】由标志决定；清俭一律 Pass（本文件只借它制造摸牌挂起）。"""
 
     def __init__(self, *, activate: bool) -> None:
         self.activate = activate
         self.queries = []
+        self.qingjian = []
 
     def respond(self, query):
+        if query.kind == "SKILL_ACTIVATION" and query.skill_id == QINGJIAN:
+            self.qingjian.append(query)
+            return next(a for a in query.legal_actions if isinstance(a, Pass))
         if query.kind == "SKILL_ACTIVATION" and query.skill_id == JUSHSOU:
             self.queries.append(query)
             if self.activate:
@@ -47,11 +52,18 @@ class Scripted:
         return query.legal_actions[0]
 
 
-def _run(*, activate: bool, flip_before_finish: bool = False, deck=tuple(range(10, 40))):
+def _run(
+    *,
+    activate: bool,
+    flip_before_finish: bool = False,
+    deck=tuple(range(10, 40)),
+    grant_qingjian: bool = False,
+):
     """造一个"座位 0 是界曹仁移动版"的局面，跑到一个完整回合结束。
 
     ``flip_before_finish``：先在**出牌阶段开始后**把武将牌翻到背面（此刻"回合开始前"已经
     过去，故不会触发跳过），再看结束阶段的据守怎么把自己翻回来。
+    ``grant_qingjian``：给座位 0 授予【清俭】——据守摸三张会触发它并挂起（票 25 的回归）。
     """
     state = build_state(
         pack=PACK,
@@ -60,6 +72,8 @@ def _run(*, activate: bool, flip_before_finish: bool = False, deck=tuple(range(1
         turn_seat=0,
         phase=Phase.PLAY,
     )
+    if grant_qingjian:
+        state.player(0).granted_skills.append(QINGJIAN)
     engine = Engine.from_state(state, seed=7)
     player = Scripted(activate=activate)
     players = [player, Scripted(activate=False)]
@@ -135,3 +149,19 @@ def test_jushou_toggles_a_back_facing_hero_card_back_to_the_front():
     assert len(player.queries) == 1
     assert engine.state.player(0).flipped is False, "背面 ⇒ 正面"
     assert _flips(engine) == [(0, True), (0, False)], "造局一条、据守一条"
+
+
+def test_jushou_still_flips_after_a_qingjian_ask_suspends_the_draw():
+    """票 25 回归：摸三张触发【清俭】挂起，续跑后**仍要翻面**（旧实现只摸不翻）。
+
+    Q1（摸牌算获得）之后，据守的"先摸三张"会内联派发清俭并挂起。挂起时若把"本次据守
+    已走完"的游标当成两段都完成，续跑会直接返回——手牌摸到了、武将牌却没翻。判据 =
+    清俭真的问了一次，且翻面 delta 照旧存在。
+    """
+    engine, player = _run(activate=True, grant_qingjian=True)
+
+    assert len(player.qingjian) == 1, "据守的摸牌触发清俭一次（Pass）"
+    assert len(player.queries) == 1, "据守自己的发动询问仍只有一次"
+    assert engine.state.player(0).flipped is True, "续跑之后翻面仍然发生"
+    assert _flips(engine) == [(0, True)], "翻面只落一条 delta（不重翻）"
+    assert len(_draws(engine)) == 5, "摸牌阶段 2 张 + 据守 3 张（清俭 Pass 不改变张数）"

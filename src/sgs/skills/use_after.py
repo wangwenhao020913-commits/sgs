@@ -182,9 +182,16 @@ def _jie_jizhi(host: Any, frame: Frame) -> Control:
     owner = frame.data["skill_owner"]
     if not frame.data.get(_JIE_DRAWN_KEY):
         frame.data[_JIE_DRAWN_KEY] = True
-        if not host.draw_for_hand(frame, owner, 1):
+        # 摸牌也算「获得牌」（票 24 的 Q1）：这一张可能触发别人的【清俭】并挂起（票 25
+        # 的嵌套挂起）。先把"此牌 = hand[-1]"定格，再原样上抛——重入不会再摸，若这里
+        # 先返回而没写 ``_JIE_CARD_KEY``，重入会 KeyError；若忽略挂起继续发问，待答询问
+        # 会被那个问句覆盖。
+        control = host.draw_for_hand(frame, owner, 1)
+        if not control:
             return None
         frame.data[_JIE_CARD_KEY] = state.player(owner).hand[-1]
+        if control == "stay":
+            return "stay"
     drawn = state.card(int(frame.data[_JIE_CARD_KEY]))
     if card_category(state.pack_id, drawn.type) is not Category.BASIC:
         frame.data[_JIE_BONUS_KEY] = True

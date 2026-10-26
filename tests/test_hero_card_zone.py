@@ -824,6 +824,80 @@ def test_lianying_is_not_offered_when_hand_cards_remain() -> None:
     assert len(engine.state.player(VICTIM).hand) == 1
 
 
+def test_lianying_keeps_drawing_after_a_qingjian_ask_suspends_mid_loop() -> None:
+    """嵌套挂起（票 25）：逐座摸牌里第一座触发【清俭】⇒ 内层答完后**外层接着摸第二座**。
+
+    确定性复现（票 24 的随机局 seed=663 链条的构造版）：界夏侯惇（座位 0）用【决斗】，
+    界陆逊（座位 1）以【谦逊】扣下两张手牌 ⇒ 失去最后的手牌，【连营】X = 2 ⇒ 选座位 0
+    与座位 1 各摸一张。给座位 0 摸牌是**一次内层移动**，它触发【清俭】并提问挂起。
+
+    旧实现只有**一个** ``_move_pending`` 槽：内层挂起覆盖外层，外层"还要摸座位 1"这段
+    永久丢失（连营的游标停在只摸过座位 0）。判据 = 两座**各摸一张**且顺序与选人一致。
+    """
+    trick = _card("duel")
+    hand = _spare_cards(trick)
+    qingjian_hand = _spare_cards(trick, *hand)
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="jie_xiahoudun", hp=4, hp_max=4, hand=(trick, *qingjian_hand)),
+            SeatSpec(hero=JIE_LUXUN, hp=3, hp_max=3, hand=hand),
+        ],
+        deck=deck_excluding(PACK, trick, *hand, *qingjian_hand),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    engine = Engine.from_state(state, seed=7)
+    asked: list[tuple[str, ...]] = []
+    qingjian: list[Any] = []
+    depths: list[int] = []
+
+    def user(query):
+        if query.kind == QueryKind.PLAY_PHASE:
+            action = _find(
+                query,
+                lambda action: isinstance(action, UseCard)
+                and action.card.card_id == trick
+                and action.card.type == "duel",
+            )
+            if action is not None:
+                return action
+            return _find(query, lambda action: isinstance(action, EndPhase))
+        if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == JIE_QINGJIAN:
+            qingjian.append(query)
+            # 读到这一问时内层已经挂起：栈里 = 外层（连营）+ 内层（清俭的这次摸牌）。
+            depths.append(len(engine._move_pending))
+            # 拒绝发动：内层只挂起这一次（不再有选牌 / 选人两步），判据仍是"外层接着跑"。
+            return _find(query, lambda action: isinstance(action, Pass))
+        return None
+
+    def victim(query):
+        if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == JIE_QIANXUN:
+            return _activate(query, JIE_QIANXUN)
+        if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == JIE_LIANYING:
+            return _activate(query, JIE_LIANYING)
+        if query.kind == QueryKind.SELECT_OPTION and query.skill_id.startswith("lianying:"):
+            asked.append(tuple(query.options))
+            # 先选座位 0（触发清俭的内层摸牌），再选座位 1。
+            return _seat_option(query, USER if len(asked) == 1 else VICTIM)
+        return None
+
+    run_turns(engine, [Scripted(user), Scripted(victim)], turns=1)
+
+    assert len(asked) == 2, "X = 2 的两张手牌 ⇒ 两次选人询问"
+    assert asked[0] == ("seat:0", "seat:1")
+    assert asked[1] == ("seat:1",), "同一步的第二次询问排除已选的角色"
+    assert len(qingjian) == 1, "座位 0 获得牌 ⇒ 清俭问一次（内层挂起的来源）"
+    assert depths == [2], "内层挂起时外层（连营）仍在挂起栈里（单槽会只剩 1）"
+    assert not engine._move_pending, "两座都摸完 ⇒ 挂起栈清空"
+    placement = _hero_deltas(engine, VICTIM)[0]
+    draws = _draw_records_until_return(engine, placement.seq)
+    assert [(record.to_zone.seat, len(record.cards)) for record in draws] == [
+        (USER, 1),
+        (VICTIM, 1),
+    ], "内层（座位 0）答完后，外层【连营】必须接着给座位 1 摸一张"
+
+
 def test_a_zero_card_loss_does_not_leave_lianying_available() -> None:
     """裁定（X 可为 0）：本次移动没有失去手牌 ⇒ X = 0、条件不成立（不问、不摸）。
 
