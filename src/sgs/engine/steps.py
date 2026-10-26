@@ -1605,8 +1605,13 @@ def reforge_lose_card(host: FrameHost, frame: Frame) -> Control:
 
 
 def reforge_draw(host: FrameHost, frame: Frame) -> Control:
-    """重铸第二步：摸一张牌（与其它摸牌同一 ``shuffle`` 子流、同一短摸口径）。"""
-    host.draw_for_hand(frame, frame.data["source"], 1)
+    """重铸第二步：摸一张牌（与其它摸牌同一 ``shuffle`` 子流、同一短摸口径）。
+
+    摸牌也算「获得牌」（票 24）之后，这一摸可能触发【清俭】并挂起；帧步**必须**把
+    ``"stay"`` 原样返回，否则本步被当成"完成"、MOVE 帧出栈，待答询问失去归属。
+    """
+    if host.draw_for_hand(frame, frame.data["source"], 1) == "stay":
+        return "stay"
     return None
 
 

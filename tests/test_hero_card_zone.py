@@ -86,6 +86,7 @@ PACK = load_content_pack(deck_profile="standard_108")
 JIE_LUXUN = "jie_luxun"
 JIE_QIANXUN = "hero.jie_luxun.qianxun"
 JIE_LIANYING = "hero.jie_luxun.lianying"
+JIE_QINGJIAN = "hero.jie_xiahoudun.qingjian"
 
 QIANXUN_ZONE = hero_card_zone_key(0, JIE_QIANXUN)
 """座位 0 的界陆逊【谦逊】区键（（座位, 技能实例）的规范文本）。"""

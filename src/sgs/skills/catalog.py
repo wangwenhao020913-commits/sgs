@@ -1809,7 +1809,12 @@ def _double_sword(host: Any, frame: Frame) -> Control:
                         # 由挂起的派发先消费那条应答（票 14 §1）。
                         return "stay"
         else:
-            host.draw_for_hand(frame, source, 1)
+            # 这一摸可能触发【清俭】并挂起（票 24：摸牌算获得）：游标先落，挂起原样上抛。
+            cursor += 1
+            frame.data["double_sword_cursor"] = cursor
+            if host.draw_for_hand(frame, source, 1) == "stay":
+                return "stay"
+            continue
         cursor += 1
         frame.data["double_sword_cursor"] = cursor
     return None

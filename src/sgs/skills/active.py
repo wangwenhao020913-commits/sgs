@@ -1174,10 +1174,16 @@ def _chuli_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
         frame.data[_CHULI_MOVED] = moved + 1
         moved += 1
     if not frame.data.get(_CHULI_DRAWN):
-        frame.data[_CHULI_DRAWN] = True
-        for seat, card_id in picked:
+        # 逐座摸牌里可能触发【清俭】并挂起（票 24：摸牌算获得）——挂起要把
+        # ``"stay"`` 上抛，并用帧内游标记住已摸到第几项，续跑不重复摸、不漏摸。
+        done = int(frame.data.get("chuli_drawn", 0))
+        for seat, card_id in picked[done:]:
             if host.state.card(card_id).suit == Suit.SPADE.value:
-                host.draw_for_hand(frame, seat, 1)
+                if host.draw_for_hand(frame, seat, 1) == "stay":
+                    return "stay"
+            done += 1
+            frame.data["chuli_drawn"] = done
+        frame.data[_CHULI_DRAWN] = True
     return None
 
 

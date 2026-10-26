@@ -931,9 +931,10 @@ def _liyu_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     if control == "stay":
         return "stay"
     if card.slot is None:
-        # 不为装备牌 ⇒ 受伤者摸一张（"其" = 受伤者）。
-        if target is not None:
-            host.draw_for_hand(frame, int(target), 1)
+        # 不为装备牌 ⇒ 受伤者摸一张（"其" = 受伤者）。这一摸可能触发【清俭】并挂起
+        # （票 24：摸牌算获得），挂起必须上抛。
+        if target is not None and host.draw_for_hand(frame, int(target), 1) == "stay":
+            return "stay"
         return None
     if frame.data.get(_LIYU_STARTED):
         return None

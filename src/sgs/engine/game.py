@@ -1577,17 +1577,23 @@ class Engine:
         """效果回调的公共记录口：把一条纯 delta 挂到当前帧上。"""
         self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
 
-    def draw_for_hand(self, frame: Frame, seat: int, n: int) -> bool:
+    def draw_for_hand(self, frame: Frame, seat: int, n: int) -> bool | str:
         """给 ``seat`` 摸 ``n`` 张（沿用 ``shuffle`` 子流）；短摸 ⇒ 平局并终止。
 
         与摸牌阶段 / 奖惩摸牌同口径（票 14）：重洗只发一条 ``deck_shuffle``；
         返回 ``False`` 表示两堆皆空、已判平局。
+
+        **摸牌也算「获得牌」（票 24 的 Q1）之后，摸牌会内联派发"获得牌后"的钩子并可能挂起**
+        （【清俭】在别人的回合里摸牌、或自己在出牌阶段摸牌）。挂起时本方法返回 ``"stay"``
+        —— 调用方**必须**把它原样返回（像 :func:`_lianying` 那样带游标续跑），否则引擎会
+        在带待答询问的状态下继续搬牌，那条应答随后被下一个询问错配（随机局 seed=663 复现：
+        连营逐座摸牌里触发清俭，答复被出牌阶段的询问吃掉，最终按主动技发动报错）。
         """
         drawn = draw_from_deck(self.state, n, self._shuffle)
         if drawn.shuffle is not None:
             self.emit_frame_delta(frame, drawn.shuffle)
         if drawn.cards:
-            self.move_in_frame(
+            control = self.move_in_frame(
                 frame,
                 drawn.cards,
                 to_zone=ZoneRef(Zone.HAND, seat),
@@ -1595,6 +1601,8 @@ class Engine:
                 owner=seat,
                 actor=seat,
             )
+            if control == "stay":
+                return "stay"
         if len(drawn.cards) < n:
             self.check_game_end(draw_reason="both_decks_empty")
             self.finish()

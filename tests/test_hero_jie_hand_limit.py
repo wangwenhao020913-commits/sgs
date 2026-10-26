@@ -616,6 +616,42 @@ def test_qingjian_does_not_trigger_inside_its_owners_draw_phase():
     assert engine.state.player(1).hand_limit_bonus == 0
 
 
+def test_lianying_triggers_when_the_last_hand_cards_are_given_away():
+    """Q2（票 24，用户裁定）：**交给别人的手牌也算失去**。
+
+    清俭把手里最后两张牌交给另一名角色（手牌 → 别人的手牌）：对交出方是"失去手牌"，
+    【连营】因此该问。旧判据把"去向是手牌"一律排除（不分是谁的手牌），这条会静默不触发。
+    """
+    liianying = "hero.luxun.lianying"
+    harvest = cards_of_type(PACK, "harvest")[0]
+    basic = cards_of_type(PACK, "slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(harvest,), identity=Identity.LORD),
+            SeatSpec(hand=(basic,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(harvest, basic),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+    state.player(1).granted_skills.extend((JIE_QINGJIAN, liianying))
+    engine = Engine.from_state(state, seed=7)
+    players = [_QingjianDriver(seat=seat, second_gain=False) for seat in range(4)]
+
+    run_until(
+        engine,
+        players,
+        lambda e: getattr(e.pending, "skill_id", None) == liianying or _harvest_settled(e),
+    )
+
+    assert getattr(engine.pending, "skill_id", None) == liianying, (
+        f"把最后的手牌交给别人 ⇒ 失去手牌 ⇒ 连营该问（停在 {type(engine.pending).__name__}）"
+    )
+
+
 def test_qingjian_is_once_per_turn():
     """每回合限一次：同一回合第二次获得牌不再问、不再加。"""
     engine = _harvest_engine(second_gain=True)

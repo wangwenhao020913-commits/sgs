@@ -77,7 +77,9 @@ __all__ = [
     "QINGJIAN_FLOW",
     "XIAOJI_FLOW",
     "dispatch_move_after",
+    "gains_card",
     "lost_equipment_instances",
+    "loses_card",
     "move_after_providers",
     "move_after_skill_definitions",
     "move_event",
@@ -275,13 +277,41 @@ def _other_alive_seats(
     return tuple(p.seat for p in state.players if p.alive and p.seat != owner)
 
 
-def _qingjian_is_gain(event: MoveEvent | None, owner: int) -> bool:
-    """这次移动对 ``owner`` 算不算"获得牌"：移到手牌 ∧ 来源区不是牌堆。"""
+def gains_card(event: MoveEvent | None, seat: int) -> bool:
+    """这张牌这次移动对 ``seat`` 算不算**获得牌**（票 24 的唯一判据）。
+
+    仅一句：**进入了自己的手牌区、且来源不是牌堆**。别人的手牌 / 装备区 / 判定区、处理区、
+    弃牌堆、武将牌上的牌，进手牌都算；**进装备区不算获得**（Q3：置入装备区是"置入"）。
+
+    **牌堆 → 手牌（摸牌）暂时不算**：用户在票 24 已裁定"摸牌也算获得"（Q1，为了让【清俭】
+    吃【重铸】/【无中生有】的摸牌），但那条裁定**阻塞在挂起机制**上——摸牌发生在
+    `draw_for_hand` 里，可能嵌套在别人的钩子里（【连营】逐座摸牌）；这种嵌套挂起目前
+    只支持一层，外层钩子的续跑会丢（票 25 / 复现：随机局 seed=663 的答复错配）。等挂起
+    改成栈之后，这里去掉 `from_zone is not DECK` 这一句即可。
+    """
     if event is None:
         return False
-    if event.to_zone.zone is not Zone.HAND or event.to_zone.seat != owner:
+    if event.to_zone.zone is not Zone.HAND or event.to_zone.seat != seat:
         return False
     return event.from_zone.zone is not Zone.DECK
+
+
+def loses_card(event: MoveEvent | None, seat: int) -> bool:
+    """这张牌这次移动对 ``seat`` 算不算**失去牌**（票 24 的唯一判据）。
+
+    仅一句：**从自己的手牌区或装备区离开**。去向不限、原因不限 —— 弃牌堆 / 处理区 /
+    别人手牌 / 别人的装备区 / 武将牌上全算（用户裁定 Q2：**交给别人的手牌也算失去**；
+    重铸同样算，见 :class:`~sgs.state.MoveReason.REFORGE`）。**判定区、武将牌上的牌、
+    处理区的判定牌离开都不算**（Q4 / Q5）。
+    """
+    if event is None or event.from_zone.seat != seat:
+        return False
+    if event.from_zone.zone is Zone.EQUIP:
+        return True
+    if event.from_zone.zone is not Zone.HAND:
+        return False
+    # 手牌 → 自己的手牌（重排一类）没有离开，不算失去；其余去向都算。
+    return not (event.to_zone.zone is Zone.HAND and event.to_zone.seat == seat)
 
 
 def _qingjian_condition(host: Any, frame: Any) -> bool:
@@ -293,7 +323,7 @@ def _qingjian_condition(host: Any, frame: Any) -> bool:
     owner = frame.data.get(MATCH_OWNER_KEY)
     if owner is None:
         return False
-    if not _qingjian_is_gain(move_event(frame), owner):
+    if not gains_card(move_event(frame), owner):
         return False
     state = host.state
     if state.turn_seat == owner and state.phase is Phase.DRAW:
@@ -475,9 +505,9 @@ def _emptied_hand(state: GameState, move: MoveEvent, owner: int) -> bool:
     （"归属" ``move.owner`` 在【顺手牵羊】一类里写的是**拿走牌的人**），它必须等于
     ``owner``——否则别人掉光手牌会把陆逊的【连营】点亮。
     """
-    if move.from_zone.zone is not Zone.HAND or move.to_zone.zone is Zone.HAND:
+    if not loses_card(move, owner):
         return False
-    if move.from_zone.seat != owner:
+    if move.from_zone.zone is not Zone.HAND:
         return False
     return not state.player(owner).hand
 
@@ -496,7 +526,7 @@ def _lost_equipment(state: GameState, move: MoveEvent, owner: int) -> bool:
     同一句区域判据。
     """
     del state
-    return move.from_zone.zone is Zone.EQUIP and move.from_zone.seat == owner
+    return move.from_zone.zone is Zone.EQUIP and loses_card(move, owner)
 
 
 def _lost_equipment_count(state: GameState, move: MoveEvent, owner: int) -> int:

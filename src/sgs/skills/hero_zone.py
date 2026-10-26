@@ -222,7 +222,10 @@ def _lianying(host: Any, frame: Any) -> Any:
             continue
         # 游标在**摸牌之前**前进：摸牌可能内联挂起，续跑据此跳过已摸的座位。
         drawn.append(seat)
-        host.draw_for_hand(frame, seat, 1)
+        # 摸牌也算「获得牌」（票 24）：逐座摸牌会在中途触发【清俭】这类"获得牌后"钩子
+        # 并挂起——挂起必须原样上抛，否则引擎带待答询问继续摸下一座，答复随后错配。
+        if host.draw_for_hand(frame, seat, 1) == "stay":
+            return "stay"
     return None
 
 
