@@ -743,7 +743,6 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
     "providers_used",
     "skill_result",
     "dodges_done",
-    "use_tags",
     "axe_used",
     "gdb_used",
     "provider_skill",
@@ -764,11 +763,14 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
 在 :class:`~sgs.engine.Engine` 维护、``op`` 在效果回调里维护；
 集中列在这里，使"新加一个按目标分槽的键"只需改这一处。
 
-票 08 追加两个按目标分槽的键：``dodges_done``（本次响应窗口已攒够几张）与 ``use_tags``
-（帧标签袋的**逐目标档**——登在这里使"逐目标档随游标推进自动清除"是结构性的、不靠手工
-``del``）。**全场档**住 :data:`sgs.resolution.WHOLE_FIELD_TAGS_KEY`，**刻意不登在这里**：
-它作用于整次使用的每一个目标，多目标【杀】推进游标时必须存活（R4-Q1 只要求登记逐目标档；
-code-review C3 把两档拆成两个帧私有键，见 ``tests/test_hero_response_window.py``）。
+票 08 追加 ``dodges_done``（本次响应窗口已攒够几张）。``use_tags``（帧标签袋的**逐目标
+档**）**刻意不登在这里**（票 03 修）：``UseTags.target_tags`` 是 ``(目标座位, 标签)`` 的
+键值对，``has_tag(..., target=...)`` 只命中本目标的条目，**标签本身不串目标**——所以不需要
+（也不能）在游标推进时整袋清掉。早先登在这里时，一条在"指定目标后"一次性打完标签的技能
+（【铁骑】/【烈弓】）会给第 2 个目标起的响应窗口丢失标签；`开发文档/03` §5「效果原语」与账本
+「帧标签」行写的一直是"随**本次使用**结束即结构性消失"，故这是实现缺陷修复。
+**全场档**住 :data:`sgs.resolution.WHOLE_FIELD_TAGS_KEY`，同样不登在这里（它作用于整次使用
+的每一个目标）。见 ``tests/test_hero_response_window.py``。
 票 09 再追加提供者展开的四个键（``provider_skill`` / ``provider_actor`` /
 ``provider_satisfied`` / ``lord_request``）：它们是**一次求助窗口**的进度，多目标【杀】里
 必须逐目标重来，否则后一个目标会捡到前一个目标的应答者区间。

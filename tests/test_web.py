@@ -477,8 +477,8 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 55 and len(catalog) == 30, (
-        "M6 票 18 后 54 个版本 / 29 个真名；本票加入移动版界曹仁 ⇒ 55 / 30"
+    assert len(flat) == 56 and len(catalog) == 31, (
+        "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31"
     )
     for group in catalog:
         true_name = group["true_name"]
@@ -6094,7 +6094,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 122, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 123, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

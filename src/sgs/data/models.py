@@ -255,10 +255,12 @@ class Hero(_FrozenModel):
     hp_max: int
     skills: tuple[HeroSkill, ...]
     version: str
-    """版本标记：标准版 ``"standard"`` / 界限突破·OL 口径 ``"jie-ol"``（ADR-006 的 OL 口径）。
+    """版本标记：标准版 ``"standard"`` / 界限突破·OL 口径 ``"jie-ol"``（ADR-006 的 OL 口径）/
+    移动版 ``"jie-mobile"`` / 独立系列包 ``"feng"``（神话再临·风包，票 03 起）。
 
     版本是**数据字段**（不是从 id 前缀派生）：同一真名的标准 / 界两版是两个独立武将 id
-    （spec §Further Notes 第 6 条），版本字段让"抽到哪一版"可在数据面回答。
+    （spec §Further Notes 第 6 条），版本字段让"抽到哪一版"可在数据面回答。系列包（风包）
+    没有同名版本问题，标记仍取包名——一个真名一局只占一个座位，判据只读 ``true_name``。
     """
     enabled: bool
 

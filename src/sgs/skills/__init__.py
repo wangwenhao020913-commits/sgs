@@ -28,7 +28,7 @@
 | 阶段体 | :mod:`sgs.skills.phase_body` | 英姿 / 闭月 / 替身（**限定技**） |
 | 失去体力后（M6 票 17） | :mod:`sgs.skills.life_after` | 诈降（摸三张 + 本阶段红【杀】加成） |
 | 排列 | :mod:`sgs.skills.arrange` | 观星 |
-| 目标池 / 响应窗口 | :mod:`sgs.skills.target_pool` / :mod:`sgs.skills.response_window` | 空城 / 谦逊；无双 / 铁骑 |
+| 目标池 / 响应窗口 | :mod:`sgs.skills.target_pool` / :mod:`sgs.skills.response_window` | 空城 / 谦逊；无双 / 铁骑 / 烈弓 |
 | P 限制豁免 / 【咆哮】②（锁定技） | :mod:`sgs.skills.limits` | 咆哮（次数 + 被抵消后的 +1）/ 奇才（距离） |
 | U 使用牌时 | :mod:`sgs.skills.use_after` | 集智 |
 | J 可重复判定（手写多轮循环） | :mod:`sgs.skills.judgment_loop` | 洛神 |

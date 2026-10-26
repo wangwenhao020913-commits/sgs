@@ -143,11 +143,16 @@ LAYERS: dict[str, Layer] = {
         semantics="响应窗口不产生：不可无懈 + 不可打出对应牌（窗口该不该存在仍由牌的规则决定）",
         carrier=hero_skill_id("jie_diaochan", "lijian"),
         status=LIVE,
-        existing_carriers=(hero_skill_id("jie_machao", "tieqi"),),
+        existing_carriers=(
+            hero_skill_id("jie_machao", "tieqi"),
+            hero_skill_id("huangzhong", "liegong"),
+        ),
         tokens=(UNRESPONSIVE_TOKEN,),
         tests=(
             "test_jie_lijian_produces_no_nullify_and_no_slash_response_window",
             "test_tieqi_red_hides_the_whole_dodge_window",
+            "test_tieqi_red_on_the_second_target_also_seals_its_window",
+            "test_liegong_also_seals_the_eight_diagrams_provider",
         ),
     ),
 }
@@ -410,6 +415,16 @@ SITES: dict[Site, Rule] = {
         "response-window-not-produced",
         1,
         "界【铁骑】：付不起同花色牌 / 选择不弃 ⇒ 不能使用【闪】响应（票 14 把原两条分支并入同一处无条件调用，站点数 2 → 1）",
+    ),
+    (
+        "src/sgs/skills/response_window.py",
+        "_liegong",
+        UNRESPONSIVE_TOKEN,
+        "add_tag(frame, Tag.UNRESPONSIVE, target=target)",
+    ): Rule(
+        "response-window-not-produced",
+        1,
+        "【烈弓】满足条件的目标（手牌数 ≥ 体力值 或 ≤ 攻击范围）不能使用【闪】响应（票 03；逐目标档）",
     ),
     (
         "src/sgs/skills/life_after.py",

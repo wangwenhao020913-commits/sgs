@@ -4,7 +4,7 @@ r"""响应窗口族（E，票 08）：所需张数 = 修饰器，不可响应 = 
 :mod:`sgs.skills.move_after` 同构：一条 :class:`~sgs.skills.catalog.SkillDef` = 一个
 ``hero.<武将 id>.<短 id>`` 技能，定义与回调住本模块，:data:`sgs.skills.CATALOG` 仍是**唯一入口**。
 
-E 族两件都改"响应窗口"，但按 R5-Q4 的分界走两条路——**改一个值 ⇒ 修饰器；加一条禁令 /
+E 族三条都改"响应窗口"，但按 R5-Q4 的分界走两条路——**改一个值 ⇒ 修饰器；加一条禁令 /
 标志 ⇒ 帧标签**：
 
 =======================  ==========  ==========================================================
@@ -12,6 +12,7 @@ E 族两件都改"响应窗口"，但按 R5-Q4 的分界走两条路——**改�
 =======================  ==========  ==========================================================
 吕布【无双】              锁定        ``Modifier(RESPONSE_COUNT, 2)``（见下方两半）
 马超【铁骑】              非锁定      ``Hook(USE_AFTER_DESIGNATE_TARGET)`` + 判定 + 帧标签 ``UNRESPONSIVE``
+黄忠【烈弓】              非锁定      ``Hook(USE_AFTER_DESIGNATE_TARGET)`` + **条件成立的目标**打 ``UNRESPONSIVE``
 =======================  ==========  ==========================================================
 
 【无双】（规则 1046）：牌名 ∈ {【杀】,【决斗】} ⇒ 本次响应窗口需要**两张**，但**改的是哪一方**
@@ -31,6 +32,12 @@ E 族两件都改"响应窗口"，但按 R5-Q4 的分界走两条路——**改�
 打 :data:`~sgs.resolution.Tag.UNRESPONSIVE`（**逐目标档**）。这个标签只负责"跳过本窗口"
 （【杀】跳过【闪】窗口、锦囊跳过无懈窗口是同一个标签的两个后果），窗口该不该存在仍由行为表的
 ``response_window`` 决定；"视为使用【闪】"（【八卦阵】）也因此一并被封——**视为使用仍是使用**。
+
+【烈弓】（票 03）同一条标签、同一档，但**触发条件带目标谓词**：`06`（§5「程序化约定与偏离一手」）
+的默认读法（二）④把「出牌阶段内」读成**自己的**出牌阶段（借刀杀人逼出的【杀】不算），牌面
+「该角色的手牌数不小于你的体力值或不大于你的攻击范围」逐目标现算（当前体力、`effects.attack_range`
+的唯一公式）。多目标【杀】里**逐目标**判定并打标签，而「是否发动」按帧一次——账本「同一帧里的
+第二次……沿用第一次的『是否发动』答案」（票 23 用户裁定）覆盖这一形态，与【铁骑】同构。
 """
 
 from __future__ import annotations
@@ -45,12 +52,16 @@ from sgs.effects import (
     ModifierContext,
     ModifierPoint,
     ModifierRole,
+    attack_range,
+    behavior_for,
+    is_slash,
     satisfies_required,
 )
 from sgs.resolution import Control, Frame, Tag, add_tag
 from sgs.state import (
     GameState,
     MoveReason,
+    Phase,
     SelectionSpec,
     Slot,
     Zone,
@@ -59,6 +70,7 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .catalog import (
+    MATCH_OWNER_KEY,
     SKILL_JUDGMENT_CARD_KEY,
     HeroSkillDecl,
     Hook,
@@ -70,6 +82,8 @@ from .flow import SkillFlow, zero_step_effect
 __all__ = [
     "JIE_TIEQI",
     "JIE_WUSHUANG",
+    "LIEGONG",
+    "LIEGONG_FLOW",
     "RESPONSE_WINDOW_SKILLS",
     "TIEQI_FLOW",
     "response_window_skill_definitions",
@@ -256,8 +270,8 @@ def _jie_tieqi(host: Any, frame: Frame) -> Control:
        【八卦阵】一类的"视为使用"也一并被封）。
 
     判定 / 弃牌都可能挂起（改判窗口、失去牌后钩子），故每段的完成事实都记在帧私有游标里。
-    多目标时逐目标标签与既有标准版【铁骑】同形（``use_tags`` 随游标推进清除，见
-    ``engine.steps._PER_TARGET_FRAME_KEYS``）。
+    多目标时逐目标标签与既有标准版【铁骑】同形：条目按目标座位区分、读取侧只命中本目标，
+    标签随**本次使用**（帧出栈）消失（票 03 修掉了"推进游标即整袋清除"的旧行为）。
     """
     state = host.state
     owner = frame.data["skill_owner"]
@@ -351,15 +365,97 @@ TIEQI_FLOW = SkillFlow(name="tieqi", steps=(), effect=zero_step_effect(TIEQI.han
 """
 
 
-RESPONSE_WINDOW_SKILLS: tuple[ResponseCountSkill | FrameTagSkill, ...] = (WUSHUANG, TIEQI)
-"""E 族两条技能的逐字声明（票 08 §要做什么 3 / 7）。"""
+# ---------------------------------------------------------------------------
+# 黄忠【烈弓】（票 03）：条件成立的目标**逐目标**打 ``UNRESPONSIVE``
+# ---------------------------------------------------------------------------
+
+
+def _liegong_qualifying_targets(
+    state: GameState, owner: int, targets: tuple[int, ...]
+) -> tuple[int, ...]:
+    """本次【杀】指定过的目标里**满足【烈弓】条件**的那些（牌面两分支取并）。
+
+    「该角色的手牌数**不小于你的体力值**」读**当前**体力（不是上限）；「**不大于你的攻击
+    范围**」读 :func:`~sgs.effects.attack_range` 这处唯一公式（无武器 1、否则武器牌的攻击
+    范围）。两个数都是**当下值**——与账本「动态量每次取值按当下重算」同姿态，不冻结在某个
+    时点（触发时现算是本仓对「数值」的默认读法⑥）。
+    """
+    hp = state.player(owner).hp
+    reach = attack_range(state, owner)
+    return tuple(
+        target
+        for target in targets
+        if len(state.player(target).hand) >= hp or len(state.player(target).hand) <= reach
+    )
+
+
+def _liegong_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**自己的出牌阶段**里用自己的【杀】指定了目标，且至少一个目标满足两分支。
+
+    「出牌阶段内」没写谁的 ⇒ **自己的**（默认读法（二）④ + 《规则集》"未写明即技能拥有者"
+    的通则对「…阶段」成立）；借刀杀人逼出的【杀】因此不触发——此刻是别人的出牌阶段。
+    与「付不起 / 不满足前提连『是否发动』都不该问」同一条纪律（见 :func:`_tieji_plan`），
+    故"目标全都够不上"时这条技能**一个询问都不发**。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    state = host.state
+    if state.phase is not Phase.PLAY or state.turn_seat != owner:
+        return False
+    card = frame.data.get("card")
+    if card is None or not is_slash(behavior_for(card)):
+        return False
+    targets = tuple(frame.data.get("targets", ()))
+    return bool(_liegong_qualifying_targets(state, int(owner), targets))
+
+
+def _liegong(host: Any, frame: Frame) -> Control:
+    """效果：给**每个**满足条件的目标打逐目标档 ``UNRESPONSIVE``（「是否发动」已由派发环问过）。
+
+    不搬牌、不提问 ⇒ 不挂起，**不需要**帧内游标；``add_tag`` 幂等 ⇒ 同帧重入只补标签、
+    不会重复。多目标【杀】里够不上条件的目标不受影响（逐目标档按座位读取、不作用于别人），
+    标签随**本次使用**（帧出栈）消失——票 03 起逐目标档不再随游标推进清除，否则第 2 个
+    目标起的【闪】窗口会重新出现。
+    """
+    owner = int(frame.data["skill_owner"])
+    targets = tuple(frame.data.get("targets", ()))
+    for target in _liegong_qualifying_targets(host.state, owner, targets):
+        add_tag(frame, Tag.UNRESPONSIVE, target=target)
+    return None
+
+
+LIEGONG = FrameTagSkill(
+    hero_id="huangzhong",
+    short_id="liegong",
+    timing=Timing.USE_AFTER_DESIGNATE_TARGET,
+    locked=False,
+    handler=_liegong,
+)
+"""黄忠【烈弓】：满足"手牌数 ≥ 你的体力值 或 ≤ 你的攻击范围"的目标不能闪（风包牌面）。"""
+
+LIEGONG_FLOW = SkillFlow(name="liegong", steps=(), effect=zero_step_effect(LIEGONG.handler))
+"""【烈弓】的零步流水线：[是否发动] → 逐目标打 ``UNRESPONSIVE``（无步骤）。
+
+与 :data:`TIEQI_FLOW` 同一条纪律：必须是**模块级具名常量**（``tests/test_ask_points.py``
+只发现模块级 ``SkillFlow`` 实例，并拒绝"注册了但不在模块里"的流水线）。
+"""
+
+
+RESPONSE_WINDOW_SKILLS: tuple[ResponseCountSkill | FrameTagSkill, ...] = (
+    WUSHUANG,
+    TIEQI,
+    LIEGONG,
+)
+"""E 族三条技能的逐字声明（票 08 §要做什么 3 / 7；票 03 加【烈弓】）。"""
 
 _REQUIREMENTS: dict[str, str] = {
     "wushuang": "使用【杀】/【决斗】时，响应者需要连续打出两张",
     "tieqi": "判定；红色则该目标不能使用【闪】响应此【杀】",
     "jie_tieqi": "令目标本回合非锁定技失效并判定：除非其弃置一张同花色牌，否则不能使用【闪】响应此【杀】",
+    "liegong": "出牌阶段使用【杀】指定目标后，若其手牌数不小于你的体力值或不大于你的攻击范围，其不能使用【闪】响应此【杀】",
 }
-"""E 族两条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
+"""E 族各条的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
 
 def response_window_skill_definitions() -> tuple[SkillDef, ...]:
@@ -404,5 +500,17 @@ def response_window_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             modifiers=(Modifier(ModifierPoint.RESPONSE_COUNT, WUSHUANG.response_count),),
             requirement=_REQUIREMENTS["wushuang"],
+        ),
+        # 黄忠【烈弓】（票 03）：非锁定；"目标全都够不上条件"时连问都不问 ⇒ 用 Hook.condition
+        # （与【铁骑】的 `ActivationPlan.available` 是同一道门，只是条件还要读目标的手牌数）。
+        SkillDef(
+            skill_id=LIEGONG.skill_id,
+            locked=LIEGONG.locked,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=(
+                Hook(LIEGONG.timing, condition=_liegong_condition, flow=LIEGONG_FLOW),
+            ),
+            requirement=_REQUIREMENTS["liegong"],
         ),
     )

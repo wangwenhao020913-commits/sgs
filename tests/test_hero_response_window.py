@@ -638,6 +638,50 @@ def test_tieqi_multi_target_tag_stays_on_the_judged_target_only():
     assert engine.state.player(2).hp == 3, "放弃响应 ⇒ 照常受伤"
 
 
+def test_tieqi_red_on_the_second_target_also_seals_its_window():
+    """票 03 回归：多目标【杀】里**第 2 个**目标被判红也必须封住。
+
+    旧实现把逐目标档登记进"游标推进即清除"的键里，于是标签只在第 1 个目标生效；本用例把
+    判定次序反过来（黑 → 红），断言窗口**只**出现在非红的第 1 个目标上。
+    """
+    slash = _cards("slash")[0]
+    halberd = _cards("halberd")[0]
+    black_judge = _first_by_color("slash", black=True)
+    red_judge = _first_by_color("peach", black=False)
+
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(equip=(halberd,), hero="machao"),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_two_judge_deck(black_judge, red_judge, used=(slash, halberd)),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _find(
+                query,
+                lambda action: isinstance(action, UseCard)
+                and action.card.card_id == slash
+                and action.targets == (1, 2),
+            )
+        return _activate_on_skill(query)
+
+    players = [Scripted(attacker), Scripted(), Scripted()]
+    engine = _at_play_phase(Engine.from_state(state, seed=1), players)
+    _seed_hand(engine, 0, (slash,))
+    _advance(engine, players, lambda e: _slash_done(e, slash))
+
+    assert [query.actor for query in _queries(engine, "DODGE")] == [1], (
+        "第 1 个目标判定非红 ⇒ 窗口照常；第 2 个目标判红 ⇒ 窗口不出现"
+    )
+    assert engine.state.player(1).hp == 3, "放弃响应 ⇒ 照常受伤"
+    assert engine.state.player(2).hp == 3, "不可响应 ⇒ 照常受伤"
+
+
 def test_tieqi_tag_does_not_cross_into_the_next_use():
     """标签随本次使用消失：下一次使用同一张牌时窗口照常出现（票 08 §验收 7）。"""
     first_slash, second_slash = _cards("slash")[0], _cards("slash")[1]
@@ -717,23 +761,26 @@ def test_the_frame_tag_bag_is_idempotent_and_keeps_insertion_order():
     assert frame.data[WHOLE_FIELD_TAGS_KEY].global_tags == (Tag.PREVENTED,)
 
 
-def test_the_whole_field_tag_survives_a_per_target_cursor_advance():
-    """R4-Q1：只把**逐目标档**登记进 ``_PER_TARGET_FRAME_KEYS``（code-review C3）。
+def test_both_tag_tiers_survive_a_cursor_advance_without_crossing_targets():
+    """票 03：两档都随**本次使用**消失，游标推进**不**清除任何一档（`开发文档/03` §5「效果原语」原文）。
 
-    多目标【杀】里游标推进必须清掉逐目标档（否则标签会串到下一个目标），但**全场档**
-    （【寒冰剑】的 ``PREVENTED`` / 【贯石斧】的 ``SAVED`` 一类）作用于整次使用，必须跨
-    目标存活。两档因此分住两个 ``frame.data`` 键，只有逐目标那个登记进清除表。
+    逐目标档按 ``(座位, 标签)`` 键区分，故"不串目标"由**键**保证、不靠推进时整袋清除：
+    先给目标 1 打标签、推进到目标 2，目标 1 的条目仍在，但 ``has_tag(target=2)`` 不命中它。
+    旧行为（推进即清除）会让"在指定目标后一次性打完标签"的技能在第 2 个目标起丢失标签
+    ——标准 / 界【铁骑】与【烈弓】都因此有真实的多目标缺口（票 03 实测：黑 → 红两个判定时
+    两个目标都拿到了【闪】窗口）。
     """
-    assert USE_TAGS_KEY in _PER_TARGET_FRAME_KEYS, "逐目标档随游标推进清除"
-    assert WHOLE_FIELD_TAGS_KEY not in _PER_TARGET_FRAME_KEYS, "全场档不随游标推进清除"
+    assert USE_TAGS_KEY not in _PER_TARGET_FRAME_KEYS, "逐目标档不随游标推进清除"
+    assert WHOLE_FIELD_TAGS_KEY not in _PER_TARGET_FRAME_KEYS, "全场档也不随游标推进清除"
 
     frame = Frame(kind=FrameKind.RESOLVE, data={"targets": (1, 2), "cursor": 0})
     add_tag(frame, Tag.PREVENTED)  # 全场档
-    add_tag(frame, Tag.UNRESPONSIVE, target=1)  # 逐目标档
+    add_tag(frame, Tag.UNRESPONSIVE, target=1)  # 给**第 1 个**目标打的逐目标档
 
     resolve_advance(None, frame)
 
     assert frame.data["cursor"] == 1, "游标真的推进了（断言不空转）"
     assert has_tag(frame, Tag.PREVENTED, target=2), "全场档跨目标存活"
-    assert not has_tag(frame, Tag.UNRESPONSIVE, target=1), "逐目标档随游标推进被清除"
+    assert has_tag(frame, Tag.UNRESPONSIVE, target=1), "逐目标档也跨目标存活（本次使用内有效）"
+    assert not has_tag(frame, Tag.UNRESPONSIVE, target=2), "不串目标：目标 2 读不到目标 1 的标签"
 

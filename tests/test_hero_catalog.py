@@ -42,6 +42,7 @@ from sgs.state import (
     GameState,
     MoveReason,
     Pass,
+    Phase,
     SelectOption,
     UseCard,
     Zone,
@@ -64,10 +65,13 @@ JIE_HEROES = load_heroes("jie")
 """界标准的第一份数据（M6 票 04 起陆续到达）：与 ``HEROES`` **分开存**、同一套校验。"""
 
 JIE_MOBILE_HEROES = load_heroes("jie_mobile")
-"""**移动版**那一份（本票起）：与 OL 系列**版本并存**，同一真名可以各持一版。
+"""**移动版**那一份（M6 票 04 起）：与 OL 系列**版本并存**，同一真名可以各持一版。
 
 显示名按"OL 不加后缀、移动版加「移动版」"命名（用户裁定），真名共用（`曹仁`），
 版本字段是 ``jie-mobile``。"""
+
+FENG_HEROES = load_heroes("feng")
+"""**神话再临·风包**那一份（票 03 起）：独立系列包，版本字段 ``feng``（黄忠 / 烈弓）。"""
 
 # 25 名启用武将（票 12 §落地表的 16 行 + M6 票 01 的魏三名 + 票 02 的魏/蜀三名 +
 # 票 03 的吴三名 —— P0 收口：整张标准表全开）。
@@ -108,6 +112,8 @@ JIE_ENABLED = tuple(hero.id for hero in JIE_HEROES.heroes if hero.enabled)
 JIE_MOBILE_ENABLED = tuple(
     hero.id for hero in JIE_MOBILE_HEROES.heroes if hero.enabled
 )
+
+FENG_ENABLED = tuple(hero.id for hero in FENG_HEROES.heroes if hero.enabled)
 
 # 规则文档第九章 933–1054 行的逐项事实（手抄的真源）：id → (势力, 性别, 体力上限)。
 _HERO_STATS = {
@@ -175,16 +181,16 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 122
+    assert len(CATALOG) == 123
     assert len(equipment) == 22
-    assert len(heroes) == 100
+    assert len(heroes) == 101
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     """武将那半 = 全部启用武将的技能清单（标准表 + 界版扩展表；数据文件是唯一真源）。"""
     expected = {
         f"hero.{hero.id}.{skill.id}"
-        for table in (HEROES, JIE_HEROES, JIE_MOBILE_HEROES)
+        for table in (HEROES, JIE_HEROES, JIE_MOBILE_HEROES, FENG_HEROES)
         for hero in table.heroes
         if hero.enabled
         for skill in hero.skills
@@ -192,11 +198,11 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 100
+    assert len(expected) == 101
 
 
 def test_every_hero_skill_id_is_fully_qualified():
-    enabled = set(ENABLED) | set(JIE_ENABLED) | set(JIE_MOBILE_ENABLED)
+    enabled = set(ENABLED) | set(JIE_ENABLED) | set(JIE_MOBILE_ENABLED) | set(FENG_ENABLED)
     for definition in CATALOG.values():
         if definition.carrier.value != "HERO":
             continue
@@ -218,8 +224,15 @@ def test_the_enabled_heroes_have_no_two_skills_on_the_same_timing():
     受此约束（它们同住一张武将牌）。将来加武将时这条断言先变红。
     """
     duplicated: dict[str, list[str]] = defaultdict(list)
-    for hero in (*HEROES.heroes, *JIE_HEROES.heroes, *JIE_MOBILE_HEROES.heroes):
-        if hero.id not in set(ENABLED) | set(JIE_ENABLED):
+    for hero in (
+        *HEROES.heroes,
+        *JIE_HEROES.heroes,
+        *JIE_MOBILE_HEROES.heroes,
+        *FENG_HEROES.heroes,
+    ):
+        if hero.id not in (
+            set(ENABLED) | set(JIE_ENABLED) | set(JIE_MOBILE_ENABLED) | set(FENG_ENABLED)
+        ):
             continue
         by_timing: dict[Timing, list[str]] = defaultdict(list)
         for skill in hero.skills:
@@ -962,6 +975,8 @@ SKILL_FILES: dict[str, str] = {
     "hero.diaochan.biyue": "test_hero_catalog.py",
     # 本票：移动版界曹仁【据守】
     "hero.jie_caoren_mobile.jushou": "test_hero_feng.py",
+    # 票 03：风包黄忠【烈弓】
+    "hero.huangzhong.liegong": "test_hero_feng.py",
     # 界标准（M6 票 04 起）
     "hero.jie_guanyu.wusheng": "test_hero_jie.py",
     "hero.jie_guanyu.yijue": "test_hero_jie.py",
@@ -1034,7 +1049,7 @@ SKILL_FILES: dict[str, str] = {
     "hero.jie_gongsunzan.qiaomeng": "test_hero_jie_qun.py",
     "hero.jie_gongsunzan.yicong": "test_hero_jie_qun.py",
 }
-"""91 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
+"""101 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
 票 02 加 5 条、票 03 加 3 条、票 04 加 4 条界将技能、票 05 加界张飞 2 条、票 06 加界徐庶 /
 界吕蒙 6 条、票 07 加界甘宁 / 界貂蝉 4 条、票 08 加界周瑜 / 界夏侯惇 / 界黄月英 6 条、
 票 09 加界甄姬 2 条、票 10 加界陆逊 2 条、票 11 加界吕蒙【博图】1 条、
@@ -1045,7 +1060,7 @@ def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
     """**每条启用技能都至少被一条族级单测点名**（票 14 §1 / 票 12 §要做什么 3 的机械补全）。"""
     skills = {
         hero_skill_id(hero.id, skill.id)
-        for table in (HEROES, JIE_HEROES, JIE_MOBILE_HEROES)
+        for table in (HEROES, JIE_HEROES, JIE_MOBILE_HEROES, FENG_HEROES)
         for hero in table.heroes
         if hero.enabled
         for skill in hero.skills
@@ -1191,6 +1206,24 @@ def _zhaxiang_probe_state() -> GameState:
     return state
 
 
+def _liegong_probe_state() -> GameState:
+    """【烈弓】的正面对照：ME（座位 1，体力 3）在自己的**出牌阶段**，目标座位 0 只有 1 张手牌。
+
+    1 ≥ 3 不成立、1 ≤ 攻击范围 1 成立 ⇒ 条件为真；把持有者换成别人后 ``source != owner``，
+    条件必须为假（"关于我"的判据）。
+    """
+    return build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(_PROBE_SOURCE_CARD,)),
+            SeatSpec(hp=3),
+            SeatSpec(),
+        ],
+        turn_seat=ME,
+        phase=Phase.PLAY,
+    )
+
+
 def _jijiang_probe_state() -> GameState:
     """界【激将】②的正面对照：ME（座位 1）与【杀】的打出者（座位 0）都是**蜀**势力。"""
     return build_state(
@@ -1215,6 +1248,8 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _hujia_probe_state()
     if skill_id == "hero.jie_sunquan.jiuyuan":
         return _jiuyuan_probe_state()
+    if skill_id == "hero.huangzhong.liegong":
+        return _liegong_probe_state()
     if skill_id == "hero.jie_huanggai.zhaxiang":
         return _zhaxiang_probe_state()
     return _probe_state()
@@ -1382,6 +1417,14 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         # - 界【诈降】：两条挂接——失去体力的是 ME（LIFE_DECREASE_AFTER）/ 红色【杀】的
         #   使用者是 ME 且本阶段效果已生效（USE_AFTER_DESIGNATE_TARGET）。
         "hero.jie_sunquan.jiuyuan": (_HookFrame(targets=(0,)),),
+        # 票 03：风包【烈弓】——自己的出牌阶段使用【杀】指定了座位 0（其 1 张手牌 ≤ 攻击范围 1）。
+        "hero.huangzhong.liegong": (
+            _HookFrame(
+                source=ME,
+                card=state.card(_PROBE_CHANNEL_SLASH),
+                targets=(0,),
+            ),
+        ),
         "hero.jie_daqiao.liuli": (
             _HookFrame(
                 source=0, actor=ME, targets=(ME,), card=state.card(_PROBE_CHANNEL_SLASH)
@@ -1683,6 +1726,8 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.jie_simayi.guicai": "能力位",
     # 本票：移动版界【曹仁】据守 = 阶段体零步（摸三张）+ 翻面，非锁定 ⇒ 零步技能格
     "hero.jie_caoren_mobile.jushou": "零步技能",
+    # 票 03：风包黄忠【烈弓】= 零步流水线（只问「是否发动」）+ 逐目标帧标签
+    "hero.huangzhong.liegong": "零步技能",
     # 候选生成器 1（TARGET_POOL + TARGET_COUNT，从不发「是否发动」）
     "equip.halberd": "候选生成器",
     # 候选提供者 4（CANDIDATES + 势力求助窗口 / 引擎回退）；M6 票 14 加界【护驾】
@@ -1708,7 +1753,7 @@ SKILL_SHAPE: dict[str, str] = {
 SHAPE_COUNTS: dict[str, int] = {
     "主动技能": 17,
     "触发技能": 13,
-    "零步技能": 24,
+    "零步技能": 25,
     "排列技能": 3,
     "多轮技能": 13,
     "锁定技": 29,
@@ -1719,7 +1764,7 @@ SHAPE_COUNTS: dict[str, int] = {
     "觉醒技": 2,
 }
 """每格的条数（spec §4.4；M6 票 18 后
-17 + 13 + 24 + 3 + 13 + 29 + 13 + 2 + 1 + 5 + 2 = 122）。
+17 + 13 + 25 + 3 + 13 + 29 + 13 + 2 + 1 + 5 + 2 = 123）。
 
 票 03 的三条：**苦肉**是零步主动技（裸发动，无步骤 ⇒ 机械形态落在「零步技能」格）；
 **克己**是阶段体零步技（同格）；**奇袭**是单源转化（转化技格）。票 04 的四条：**义绝**
@@ -1754,7 +1799,7 @@ SHAPE_COUNTS: dict[str, int] = {
 STEP_LANGUAGE_SHAPES: frozenset[str] = frozenset(
     {"主动技能", "触发技能", "零步技能", "排列技能", "觉醒技"}
 )
-"""在步骤语言内的五个形态（54 条 = 15 + 11 + 23 + 3 + 2）。觉醒技也走 ``SkillFlow``
+"""在步骤语言内的五个形态（60 条 = 17 + 13 + 25 + 3 + 2）。觉醒技也走 ``SkillFlow``
 （【潜心】零步、【勤学】一步选项），故"内 == 有 ``flow_for``"仍成立。"""
 
 IN_STEP_LANGUAGE: frozenset[str] = frozenset(
@@ -1762,7 +1807,7 @@ IN_STEP_LANGUAGE: frozenset[str] = frozenset(
     for skill_id, shape in SKILL_SHAPE.items()
     if shape in STEP_LANGUAGE_SHAPES
 )
-"""在步骤语言内（47）：**派生**自 :data:`SKILL_SHAPE` 的五个步骤语言形态。
+"""在步骤语言内（60）：**派生**自 :data:`SKILL_SHAPE` 的五个步骤语言形态。
 
 W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同一份事实的两份拷贝——
 形态表一改，第二份名单就悄悄过期。现在它只是那张表的一个投影；真正的判据留在
@@ -1771,9 +1816,9 @@ W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同�
 """
 
 OUTSIDE_STEP_LANGUAGE: frozenset[str] = frozenset(SKILL_SHAPE) - IN_STEP_LANGUAGE
-"""不在步骤语言内（59）：多轮 13 + 锁定 26 + 转化 12 + 能力位 2 + 候选生成器 1 + 候选提供者 5。
+"""不在步骤语言内（63）：多轮 13 + 锁定 29 + 转化 13 + 能力位 2 + 候选生成器 1 + 候选提供者 5。
 
-同样**派生**（:data:`SKILL_SHAPE` 减 :data:`IN_STEP_LANGUAGE`）；54 这个数由
+同样**派生**（:data:`SKILL_SHAPE` 减 :data:`IN_STEP_LANGUAGE`）；63 这个数由
 `SHAPE_COUNTS` 的其余六格加出来，测试里另有一条规模断言。
 """
 
@@ -1783,8 +1828,8 @@ ZERO_STEP_SKILL_IDS: tuple[str, ...] = tuple(
 """W6-01 的零步技能（spec §4.1）：连营 / 枭姬 / 奸雄 / 天妒 / 英姿 / 闭月 / 铁骑，
 M6 票 01 加【裸衣】、票 02 加【集智】、票 03 加【克己】/【苦肉】、票 06 加界【克己】、
 票 07 加界【闭月】、票 10 加界【谦逊】、票 11 加界【博图】、票 14 加界【奸雄】/界【裸衣】、
-票 15 加界【天妒】（共 20 条；觉醒技【潜心】虽有零步流水线，按类型单列「觉醒技」格，
-不在此列）。
+票 15 加界【天妒】、票 03 加风包【烈弓】（共 25 条；觉醒技【潜心】虽有零步流水线，
+按类型单列「觉醒技」格，不在此列）。
 
 W6-07 / 评审 J7：**派生**自 :data:`SKILL_SHAPE` 的「零步技能」那一格（原先手抄 7 个 id）。"""
 
@@ -1805,7 +1850,7 @@ def _flow_steps(skill_id: str):
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """122 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 122
+    assert len(SKILL_SHAPE) == len(CATALOG) == 123
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11
     assert all(SKILL_SHAPE.values()), "表里没有空形态"
@@ -1917,7 +1962,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """59 在内 / 63 在外（122 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """60 在内 / 63 在外（123 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -1929,7 +1974,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 59
+    assert len(inside) == 60
     assert len(outside) == 63
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

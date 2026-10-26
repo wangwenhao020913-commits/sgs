@@ -1998,6 +1998,11 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(3.0),
         "使用【杀】造成伤害后选其区域里一张牌：坐骑获得、其余弃置（净赚）",
     ),
+    # 票 03：风包黄忠【烈弓】——自己的出牌阶段里，条件成立的目标不能闪
+    "hero.huangzhong.liegong": (
+        _constant(3.0),
+        "使用【杀】指定目标后封【闪】：条件多由当前体力 / 攻击范围自动满足，助这一刀命中",
+    ),
 }
 """技能 id → ``(打分函数, 默认策略说明)``（`map.md` R4-Q6 的统一签名）。
 
