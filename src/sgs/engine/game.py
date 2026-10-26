@@ -2017,12 +2017,20 @@ class Engine:
                     min_picks=0,
                     max_picks=0,
                     slots=(),
-                    preactivation=preactivation_for(
-                        self.state,
-                        actor,
-                        instance.skill_id,
-                        timing=timing,
-                        frame=frame,
+                    preactivation=(
+                        # 清单只随**已翻预发动**的技能下发（与 PLAY_PHASE 删骨架同一个开关）。
+                        # 界面按这同一个开关找入口（`preactivation.js:preactivatedSkill`）：
+                        # 清单在、开关没开 ⇒ 浮动按钮画不出、被动技按钮又不接 click ⇒ 这一问
+                        # 没有任何入口（票 23 报障）。没翻的技能改走直提态，步骤照旧逐步问。
+                        preactivation_for(
+                            self.state,
+                            actor,
+                            instance.skill_id,
+                            timing=timing,
+                            frame=frame,
+                        )
+                        if instance.skill_id in preactivated_skill_ids()
+                        else ()
                     ),
                 ),
             )

@@ -3900,16 +3900,18 @@ def test_a_foreign_viewer_does_not_get_the_actors_hand_from_the_manifest() -> No
 # "点技能【hero.jie_xiahoudun.qingjian】进入预发动"——而被动技按钮按 U1-06 本来就不接
 # click（只悬停看描述），这条时机因此没有入口，玩家只能「放弃」。
 #
-# 不变量：**询问带了清单 ⇒ 这一问必须给出清单入口**。清单由引擎按 `SkillFlow.steps`
-# 渲染、`preactivated` 由声明给出——两个写方各说一半，界面靠两边同时成立才点得动。
+# 不变量（两条一起才不打架）：**清单 ⇔ 开关**——询问带了清单，这一问就必须给出清单入口；
+# 没翻开关的技能，引擎就别下发清单（界面退回「将提交：发动【X】」的直提态）。清俭与突袭
+# 各钉一条：前者翻了开关、清单两步；后者没翻，清单必须为空。
 # ---------------------------------------------------------------------------
 
 
 JIE_QINGJIAN = "hero.jie_xiahoudun.qingjian"
+TUXI = "hero.zhangliao.tuxi"
 
 
-class _HarvestThenFallThrough:
-    """把整局推到"【清俭】被问"为止的最小应答：座位 0 用【五谷丰登】，其余取第一条候选。"""
+class _FallThroughPlayer:
+    """把整局推到目标询问为止的最小应答：座位 0 手里有【五谷丰登】就先打出去，其余取第一条候选。"""
 
     def __init__(self) -> None:
         self.played = False
@@ -3925,15 +3927,32 @@ class _HarvestThenFallThrough:
         return query.legal_actions[0]
 
 
+def _ask_session(state, stop_skill_id: str, *, seats: int):
+    """跑到「``stop_skill_id`` 被问」那一刻；返回的 `pending` 就是玩家看到的那一问。"""
+    from types import SimpleNamespace
+
+    from support import run_until
+
+    engine = Engine.from_state(state, seed=7)
+    run_until(
+        engine,
+        [_FallThroughPlayer() for _ in range(seats)],
+        lambda e: e.pending is not None
+        and getattr(e.pending, "skill_id", None) == stop_skill_id,
+    )
+    assert engine.pending is not None and engine.pending.skill_id == stop_skill_id, (
+        f"没走到 {stop_skill_id} 的时机：局面构造漂了"
+    )
+    return SimpleNamespace(engine=engine, pending=engine.pending)
+
+
 def _qingjian_ask_session():
     """真局面：座位 1 的界夏侯惇在别人的回合里经【五谷丰登】获得牌 ⇒ 停在【清俭】询问。
 
     停住的时刻 = 玩家看到的那一问（引擎已 `pending`、还没收到应答），故清单与技能条目
     都从同一次**真产出**读，不用合成载荷。
     """
-    from types import SimpleNamespace
-
-    from support import SeatSpec, build_state, cards_of_type, deck_excluding, run_until
+    from support import SeatSpec, build_state, cards_of_type, deck_excluding
 
     pack = _context_pack()
     harvest = cards_of_type(pack, "harvest")[0]
@@ -3950,17 +3969,26 @@ def _qingjian_ask_session():
         deck=deck_excluding(pack, harvest, basic, trick),
         turn_seat=0,
     )
-    engine = Engine.from_state(state, seed=7)
-    run_until(
-        engine,
-        [_HarvestThenFallThrough() for _ in range(4)],
-        lambda e: e.pending is not None
-        and getattr(e.pending, "skill_id", None) == JIE_QINGJIAN,
+    return _ask_session(state, JIE_QINGJIAN, seats=4)
+
+
+def _tuxi_ask_session():
+    """真局面：座位 0 的【张辽】摸牌阶段 ⇒ 停在【突袭】的"是否发动"询问（没翻预发动）。"""
+    from support import SeatSpec, build_state, cards_of_type, deck_excluding
+
+    pack = _context_pack()
+    mine = tuple(cards_of_type(pack, "slash")[:2])
+    theirs = tuple(cards_of_type(pack, "dodge")[:2])
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=mine, hero="zhangliao"),
+            SeatSpec(hand=theirs),
+        ],
+        deck=deck_excluding(pack, *mine, *theirs),
+        turn_seat=0,
     )
-    assert engine.pending is not None and engine.pending.skill_id == JIE_QINGJIAN, (
-        "没走到【清俭】的时机：局面构造漂了"
-    )
-    return SimpleNamespace(engine=engine, pending=engine.pending)
+    return _ask_session(state, TUXI, seats=2)
 
 
 def test_the_qingjian_ask_offers_the_preactivation_entry_instead_of_dead_ending() -> None:
@@ -3983,6 +4011,26 @@ def test_the_qingjian_ask_offers_the_preactivation_entry_instead_of_dead_ending(
     assert entry["preactivated"] is True, (
         "界面据这个键把这一问切到清单入口；缺它 ⇒ 被动技按钮不接 click、浮动按钮也不画"
     )
+
+
+def test_an_unflipped_triggered_ask_carries_no_manifest_so_the_ui_keeps_the_direct_entry() -> None:
+    """同一个死路的另一半：没翻预发动的触发技**不该**收到清单。
+
+    【突袭】的首步是座位步（池由 `available` 门保证非空），所以清单渲得出来；但它的声明
+    没翻 `preactivated`，界面按开关找技能找不到 ⇒ 浮动按钮不画、被动技按钮不接 click。
+    引擎因此不下发清单，界面退回「将提交：发动【突袭】」，后续座位 / 暗手牌逐步问。
+    """
+    session = _tuxi_ask_session()
+
+    payload = pending_payload(session.pending, human_seat=0)
+
+    assert payload["preactivation"] == [], (
+        "没翻预发动 ⇒ 不下发清单；否则界面切到入口面、却找不到能点的技能（死路）"
+    )
+    entry = next(item for item in build_skills(session, 0) if item["skill_id"] == TUXI)
+    assert entry["available"] is True, "骨架候选还在：直提态点得动"
+    assert entry["preactivated"] is False, "这条技能本轮不翻开关（直提态 + 逐步问）"
+
 
 
 # ---------------------------------------------------------------------------

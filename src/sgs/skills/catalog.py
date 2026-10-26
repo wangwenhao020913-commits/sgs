@@ -2265,6 +2265,10 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
         requirement="弃置目标装备区里的一匹坐骑",
         hooks=(Hook(Timing.DAMAGE_DEAL, flow=QILIN_BOW_FLOW),),
         step_requirements={"card": "弃置目标装备区里的一匹坐骑（只能选坐骑）"},
+        # M6 票 23 报障：与【青龙偃月刀】/【贯石斧】同档——首步铺目标的**装备区**（公开区域，
+        # 坐骑是可见的），`_qilin_bow_plan` 的 `available` 又保证目标确有坐骑 ⇒ 清单恒渲得出。
+        # 不翻的后果是界面死路：清单在、开关没开 ⇒ 画不出「进入预发动」。
+        preactivated=True,
     ),
     _equip(
         "ice_sword",
