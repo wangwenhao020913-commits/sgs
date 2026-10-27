@@ -25,8 +25,19 @@ const STAGE_ZONE_LABELS = {
   judge: "判定",
 };
 
-/** 寿命口径（D5）：无帧停留 1s、淡出 1s；任何舞台项兜底 30s。 */
-const STAGE_HOLD_MS = 1000;
+/** 舞台停留（D9 / U4-03）：`0.5 × (N+1)` 秒，N = **产生该舞台项的那条记录**的牌数。
+ *
+ * N 只由产生它的记录决定（记在 `item.stage.batch`）：换组 / 跨 `commit` 都不重算，
+ * 依次发生的两条移动各按 N=1 计（第二次交牌不会并进第一批）。
+ * 缺省 / 非法 N 按 1 计（= U3 的单张停留 1s，现行回归不破）。
+ * 淡出时长不在这里：它固定 `STAGE_FADE_MS`，`animScale` 只缩淡出、不缩停留。
+ */
+function stageHoldMs(batch) {
+  const count = Number(batch);
+  return 500 * ((Number.isFinite(count) && count > 0 ? count : 1) + 1);
+}
+
+/** 淡出时长（D5 / D9）：停留结束后整体淡出 1s；任何舞台项兜底 30s（丢 pop 时不留幽灵）。 */
 const STAGE_FADE_MS = 1000;
 const STAGE_MAX_MS = 30000;
 
@@ -43,20 +54,26 @@ function stageNow() {
   return Date.now();
 }
 
-/** 舞台项 = 卡面 + 一条道 + 来源 + 决定它活多久的结算帧。
+/** 舞台项 = 卡面 + 一条道 + 来源 + 决定它活多久的结算帧 / 批量。
  *
  * 字段住在 `item.stage` 里（不是散在卡面上）：判定是**纯函数**
- * :func:`stageLane`，只读这三个数——`enteredAt` / `fadeAt` / 承载帧。
+ * :func:`stageLane`，只读 `enteredAt` / `fadeAt`；`batch` 只参与算停留
+ * （:func:`stageHoldMs`），在**创建**时按产生它的那条记录写下、之后不重算。
  * ``fadeAt === null`` = 还在等承载帧的 `pop`；兜底由 `enteredAt + 30s` 接住。
  */
 function stageItem(card, options = {}) {
   const now = options.enteredAt === undefined ? stageNow() : options.enteredAt;
   const frameId = Number(options.frameId) || 0;
   const lane = options.lane || "processing";
+  // 没有产生记录（快照补项 / 询问自带亮牌）时按 N=1：与 U3 的单张停留一致。
+  const batch = options.batch === undefined
+    ? 1
+    : Math.max(1, Math.floor(Number(options.batch) || 1));
   let fadeAt = options.fadeAt;
   if (fadeAt === undefined) {
-    // 处理中：离开处理区 / 承载帧 pop 才起算；展示与弃牌：无帧固定 1s 停留，有帧等 pop。
-    fadeAt = lane === "processing" || frameId > 0 ? null : now + STAGE_HOLD_MS;
+    // 处理中：离开处理区 / 承载帧 pop 才起算；展示与弃牌：无帧从入台起停 0.5(N+1)，
+    // 有帧等 pop（D9：pop 时刻 + 0.5(N+1)）。
+    fadeAt = lane === "processing" || frameId > 0 ? null : now + stageHoldMs(batch);
   }
   return {
     ...card,
@@ -66,6 +83,7 @@ function stageItem(card, options = {}) {
     stage: {
       lane,
       frameId,
+      batch,
       enteredAt: now,
       fadeAt,
       fromZone: options.fromZone || null,
@@ -138,10 +156,12 @@ function stageFromZoneOf(cards, cardId) {
   return stageFromZoneMap(cards).get(String(cardId)) || null;
 }
 
-/** 舞台项开始淡出的时刻（D5）：有 `fadeAt` 用它，否则兜底 = 入台 + 30s。
+/** 舞台项开始淡出的时刻（D5 / D9）：有 `fadeAt` 用它，否则兜底 = 入台 + 30s。
  *
  *  判定（:func:`stageLane`）与计时器（:func:`nextStageDeadline`）共用这一处算式：
  *  两边各写一份，兜底口径一旦漂移，就会出现"判定说还在、计时器说该走了"。
+ *  30s 兜底**只接丢 pop**（`fadeAt === null`）：已经算出的停留即使超过 30s（极大的 N）
+ *  也照 D9 的 `0.5(N+1)` 走，不被这个兜底截断——它不是停留上限。
  */
 function stageFadeAt(stage) {
   const enteredAt = Number(stage.enteredAt) || 0;
@@ -165,13 +185,21 @@ function stageLane(item, now) {
   return "visible";
 }
 
-/** 承载帧 `pop` 到了：把挂在这帧上的舞台项推进 1s 淡出（已开始的保持原锚点）。 */
+/** 承载帧 `pop` 到了（D9）：挂在这帧上的舞台项从 pop 起停 `0.5(N+1)` 秒，到点再 1s 淡出
+ *  （已排定的保持原锚点）。停留按各舞台项**自己的 batch** 算：同一帧里来自不同记录的项
+ *  可以停不一样久；同一条记录的 N 张同刻入台 ⇒ 同刻 pop ⇒ 同刻开始淡出。
+ *
+ *  两个入口共用（`applyEffectDelta` / `applyRevealDelta` 的 pop 分支）：两处各写一份
+ *  停留公式迟早会漂移。
+ */
 function stageStartFade(items, frameId, now) {
   for (const item of items || []) {
     const stage = item && item.stage;
     if (!stage) continue;
     if (String(stage.frameId) !== String(frameId)) continue;
-    if (stage.fadeAt === null || stage.fadeAt === undefined) stage.fadeAt = now;
+    if (stage.fadeAt === null || stage.fadeAt === undefined) {
+      stage.fadeAt = now + stageHoldMs(stage.batch);
+    }
   }
 }
 
@@ -184,7 +212,10 @@ function stageStartFade(items, frameId, now) {
 function stageAttachDiscard(item, frameId) {
   item.stage.lane = "discard";
   item.stage.frameId = frameId;
-  item.stage.fadeAt = frameId > 0 ? null : item.stage.enteredAt + STAGE_HOLD_MS;
+  // D9：batch 在创建时由产生该舞台项的那条记录写下；换组不重算（沿用首次入台的那一批）。
+  item.stage.fadeAt = frameId > 0
+    ? null
+    : item.stage.enteredAt + stageHoldMs(item.stage.batch);
 }
 
 /** 舞台项的入台顺序（D3：三组按入台顺序排在**一个**换行流里，不按组分行）。 */
@@ -777,10 +808,14 @@ function applyRevealDelta(record, cards = state.revealedCards) {
   }
   const fromZone = { seat: record.seat, zone: "hand" };
   stageRememberFromZone(held, card.card_id, fromZone);
+  // D9：展示项也记下产生它的这条亮牌记录的牌数（今天一条 `card_reveal` 记录一张），
+  // 换组 / 跨 commit 不重算。
+  const batch = Array.isArray(record.cards) && record.cards.length ? record.cards.length : 1;
   held.push({
     ...stageItem(card, {
       lane: "showcase",
       frameId,
+      batch,
       enteredAt: now,
       fromZone,
     }),
@@ -797,8 +832,10 @@ function applyRevealDelta(record, cards = state.revealedCards) {
  * - **弃牌**：``card_move`` 且 `to_zone.zone === "discard"` 且原因 = 弃置 / 重铸 / 装备
  *   替换 / 拆顺；使用（USE）与判定（JUDGE）**不进弃牌组**，只从处理中淡出。
  *
- * **寿命**（D5）：有承载帧的展示 / 弃牌停在帧 ``pop`` 后 1s 淡出；处理中的牌离开处理区
- * 即 1s 淡出；无帧的弃牌入台 1s 停留 + 1s 淡出；任何项兜底 30s。换组沿用同一条舞台项
+ * **寿命**（D5 / D9）：有承载帧的展示 / 弃牌停在帧 ``pop`` 后 0.5(N+1) 秒再 1s 淡出；
+ * 处理中的牌离开处理区即 1s 淡出（U3 D5 的离区分支，D9 不改它）；无帧的弃牌入台
+ * 0.5(N+1) 秒停留 + 1s 淡出；任何项兜底 30s。N 来自**产生该舞台项的那条记录**，
+ * 记在 ``item.stage.batch`` 上，换组 / 跨 commit 都不重算。换组沿用同一条舞台项
  * （不重新落位）；淡出期间同一张牌再入台 = 撤旧项、重新落位（D5.6）。
  *
  * **承载帧的 kind 来自记录流**（D6）：`frame_kind` 只随 ``FrameRecord(push)`` 下发，
@@ -839,6 +876,9 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
   const from = record.from_zone || {};
   const to = record.to_zone || {};
   const frameId = stageFrameOf(record);
+  // D9：同一条移动的 N 张一起入台 ⇒ 停留 0.5(N+1) 秒。N 与飞行层同一个口径
+  // （可见牌 = `cards.length`，隐藏区 = `card_count`）；记在创建出的舞台项上，之后不重算。
+  const batch = Math.max(1, liveMoveCount(record));
   const carryingFrameKind = stageFrameKindOf(held, frameId);
   const byId = (cardId) => held.find((item) => String(item.card_id) === String(cardId));
   // 转化牌：离场的是它的来源实体牌，台上那一条是**产物**。来源牌不再单独落位。
@@ -881,6 +921,7 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
         // 淡出期间同一张牌再次入台：撤旧项、新项重新落位（D5.6）。
         existing.stage.lane = "processing";
         existing.stage.frameId = frameId;
+        existing.stage.batch = batch;
         existing.stage.enteredAt = now;
         existing.stage.fadeAt = null;
         existing.stage.fromZone = from;
@@ -894,6 +935,7 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
       held.push(stageItem(card, {
         lane: "processing",
         frameId,
+        batch,
         enteredAt: now,
         fromZone: from,
         source: record.reason === "USE" ? record.owner : null,
@@ -914,6 +956,7 @@ function applyEffectDelta(record, effectCards = state.effectCards, products = st
       held.push(stageItem(card, {
         lane: "discard",
         frameId,
+        batch,
         enteredAt: now,
         fromZone: from,
         source: record.owner,
@@ -987,6 +1030,8 @@ function mergeEffectCards(cards) {
     if (out.some((item) => String(item.card_id) === String(card.card_id))) continue;
     out.push(stageItem(card, {
       lane: "processing",
+      // 快照补出来的牌**没有产生它的记录**（D9）⇒ 按 N=1 计；跨 commit 不重算。
+      batch: 1,
       enteredAt: now,
       fromZone: stageFromZoneOf(out, card.card_id),
     }));

@@ -45,6 +45,8 @@
     "flushPlayback", "stepPlayback", "renderProcessing", "applyEffectDelta", "DELAY_STEPS_MS", "describeEffect",
     // U3-01 / D5：舞台项寿命的纯函数——烟测直接喂 `now` 断 visible / fading / gone（D15）
     "stageLane",
+    // U4-03 / D9：批量停留的纯函数（0.5×(N+1) 秒）——烟测直接喂 N（缺省按 1）。
+    "stageHoldMs",
     // W4-6：回放页（全区域增量重建 / 询问面板 / play-pause / 步长 / 空壳引导）
     "renderEffectCards", "replayStep", "replaySeek", "toggleReplayPlay", "stopReplayPlay",
     "renderRunList", "runRow",

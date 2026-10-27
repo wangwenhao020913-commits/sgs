@@ -12101,13 +12101,21 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   clearedBody.snapshot = { ...noSuitBody.snapshot, processing: [] };
   ui.applyViewRaw(clearedBody);
   ui.flushPlayback();
-  // U3-01：pop 不再瞬删——展示项开始 1s 淡出（`.fading`），描述还留着「展示」。
-  check("M5-08a-d3 结算帧出栈 ⇒ 展示项进入 1s 淡出（不瞬删、不提前撤下）",
-    Array.from($("t-processing").children).some((node) => node.classList.contains("revealed-card")
-      && node.getAttribute("data-card-id") === "5"
-      && node.classList.contains("fading"))
+  // D9：pop 后先停留 0.5(N+1)（亮牌记录 N=1 ⇒ 1s），到点再进入 1s 淡出；不瞬删、不提前撤下。
+  const popItem = (ui.state.revealedCards || []).find(
+    (item) => String(item.card_id) === "5");
+  const popFadeAt = popItem && popItem.stage.fadeAt;
+  const popDwell = Number.isFinite(popFadeAt)
+    && ui.stageLane(popItem, popFadeAt - 1) === "visible";
+  ui.renderProcessing(popFadeAt);
+  check("M5-08a-d3 结算帧出栈 ⇒ 展示项先停留 1s 再进入 1s 淡出（不瞬删、不提前撤下）",
+    popDwell
+      && Array.from($("t-processing").children).some((node) => node.classList.contains("revealed-card")
+        && node.getAttribute("data-card-id") === "5"
+        && node.classList.contains("fading"))
       && $("t-context").textContent.includes("展示"),
-    `processing=${$("t-processing").text()} context="${$("t-context").textContent}"`);
+    `fadeAt=${popFadeAt} dwell=${popDwell}`
+      + ` processing=${$("t-processing").text()} context="${$("t-context").textContent}"`);
 
   ui.state.sessionId = null;
   ui.state.view = null;
@@ -13433,17 +13441,35 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && !fading(102) && !fading(103) && !fading(105),
     `B=${fading(102)} C=${fading(103)} D=${fading(105)}`);
 
+  const framePopBefore = Date.now();
   ui.state.effectCards = ui.applyEffectDelta(pop(108, 11), ui.state.effectCards);
   ui.state.revealedCards = ui.applyRevealDelta(pop(108, 11), ui.state.revealedCards);
-  ui.renderProcessing();
-  check("U3-01h 产生它们的结算帧 pop ⇒ 展示 / 弃牌开始 1s 淡出（不再是瞬删）",
-    fading(102) && fading(103) && fading(105) && !fading(101),
-    `A=${fading(101)} B=${fading(102)} C=${fading(103)} D=${fading(105)}`);
+  const framePopAfter = Date.now();
+  const frameFadeAt = item(102) && item(102).stage.fadeAt;
+  const frameDwell = Number.isFinite(frameFadeAt)
+    && frameFadeAt >= framePopBefore + 1000 && frameFadeAt <= framePopAfter + 1000
+    && item(103).stage.fadeAt === frameFadeAt && item(105).stage.fadeAt === frameFadeAt;
+  ui.renderProcessing(frameFadeAt - 1);
+  const frameStillDwelling = !fading(102) && !fading(103) && !fading(105) && !fading(101);
+  ui.renderProcessing(frameFadeAt);
+  check("U3-01h 产生它们的结算帧 pop ⇒ 先各自停留 0.5(N+1)（N=1 = 1s）再 1s 淡出（不再是瞬删）",
+    frameDwell && frameStillDwelling
+      && fading(102) && fading(103) && fading(105) && !fading(101),
+    `fadeAt=${frameFadeAt} popAt=${framePopBefore}..${framePopAfter} dwell=${frameStillDwelling}`
+      + ` A=${fading(101)} B=${fading(102)} C=${fading(103)} D=${fading(105)}`);
 
+  const aPopBefore = Date.now();
   ui.state.effectCards = ui.applyEffectDelta(pop(109, 10), ui.state.effectCards);
-  ui.renderProcessing();
-  check("U3-01i 处理中的牌由它自己的离区 / 帧 pop 触发淡出（A 的帧 pop 才淡出）",
-    fading(101), `A=${fading(101)}`);
+  const aPopAfter = Date.now();
+  const aFadeAt = item(101) && item(101).stage.fadeAt;
+  const aDwell = Number.isFinite(aFadeAt)
+    && aFadeAt >= aPopBefore + 1000 && aFadeAt <= aPopAfter + 1000;
+  ui.renderProcessing(aFadeAt - 1);
+  const aStillDwelling = !fading(101);
+  ui.renderProcessing(aFadeAt);
+  check("U3-01i 处理中的牌由它自己的离区 / 帧 pop 触发：A 的帧 pop 后先停留 1s 再 1s 淡出",
+    aDwell && aStillDwelling && fading(101),
+    `fadeAt=${aFadeAt} popAt=${aPopBefore}..${aPopAfter} dwell=${aStillDwelling} A=${fading(101)}`);
   const goneAt = Math.max(...[101, 102, 103, 105].map((id) => item(id).stage.fadeAt + 1000));
   ui.renderProcessing(goneAt);
   check("U3-01j 1s 淡出结束 ⇒ 舞台项移除（不留幽灵）",
@@ -13599,14 +13625,27 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     const node = replayNodes.find((child) => attr(child, "data-card-id") === String(id));
     return attr(node, "data-stage-lane");
   };
-  check("U3-01t 回放页显示同样三组：处理中 / 弃牌 / 展示（pop 后展示进入淡出）",
+  const replayState = ui.state.replay;
+  const replayReveal = (replayState.revealedCards || []).find(
+    (entry) => String(entry.card_id) === "105");
+  const replayDiscard = (replayState.effectCards || []).find(
+    (entry) => String(entry.card_id) === "102");
+  const replayFadeAt = replayReveal && replayReveal.stage.fadeAt;
+  // D9：pop 后先停留 0.5(N+1)，到点才淡出；回放页同一套寿命（渲染时仍在停留期）。
+  const replayDwell = Number.isFinite(replayFadeAt) && Boolean(replayDiscard)
+    && replayDiscard.stage.fadeAt === replayFadeAt
+    && ui.stageLane(replayReveal, replayFadeAt - 1) === "visible"
+    && ui.stageLane(replayReveal, replayFadeAt) === "fading";
+  check("U3-01t 回放页显示同样三组：处理中 / 弃牌 / 展示（pop 后先停留、到点淡出）",
     replayLane(101) === "processing"
       && replayLane(102) === "discard"
       && replayLane(105) === "showcase"
-      && replayNodes.some((node) => node.classList.contains("fading"))
+      && replayDwell
+      && !replayNodes.some((node) => node.classList.contains("fading"))
       && $("r-effect").textContent.includes("弃牌：")
       && $("r-effect").textContent.includes("展示："),
-    `lanes=${replayNodes.map((node) => `${attr(node, "data-card-id")}:${attr(node, "data-stage-lane")}`).join(",")} effect="${$("r-effect").textContent}"`);
+    `lanes=${replayNodes.map((node) => `${attr(node, "data-card-id")}:${attr(node, "data-stage-lane")}`).join(",")}`
+      + ` fadeAt=${replayFadeAt} dwell=${replayDwell} effect="${$("r-effect").textContent}"`);
   check("U3-01u 回放页不出现目标线 / 技能名 / 白光（04 的范围裁定）",
     byClass($("table-stage"), "target-line").length === 0
       && byClass($("table-stage"), "skill-float").length === 0
@@ -13848,12 +13887,20 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     Boolean(stageNode(211)) && !fading(211) && laneOf(211) === "showcase",
     `node=${Boolean(stageNode(211))} fading=${fading(211)} lane=${laneOf(211)}`);
 
+  const skillPopBefore = Date.now();
   ui.state.effectCards = ui.applyEffectDelta(pop(4, 81), ui.state.effectCards);
+  const skillPopAfter = Date.now();
   const fadeAt = itemOf(211) && itemOf(211).stage.fadeAt;
-  ui.renderProcessing();
-  check("U3-02d SKILL 帧 pop ⇒ 转组项才开始 1s 淡出（不是一闪而过）",
-    itemOf(211).stage.lane === "showcase" && Number.isFinite(fadeAt) && fading(211),
-    `fadeAt=${fadeAt} fading=${fading(211)}`);
+  const dwellLane = Number.isFinite(fadeAt)
+    && fadeAt >= skillPopBefore + 1000 && fadeAt <= skillPopAfter + 1000;
+  ui.renderProcessing(fadeAt - 1);
+  const stillDwelling = Boolean(stageNode(211)) && !fading(211);
+  ui.renderProcessing(fadeAt);
+  check("U3-02d SKILL 帧 pop ⇒ 转组项先停留 0.5(N+1)（D9，N=1 = 1s）再 1s 淡出（不是一闪而过）",
+    itemOf(211).stage.lane === "showcase" && Number.isFinite(fadeAt)
+      && dwellLane && stillDwelling && fading(211),
+    `fadeAt=${fadeAt} popAt=${skillPopBefore}..${skillPopAfter}`
+      + ` dwell=${stillDwelling} fading=${fading(211)}`);
   ui.renderProcessing(fadeAt + 1000);
   check("U3-02e 1s 淡出结束 ⇒ 转组项从舞台移除（不留幽灵）",
     !stageNode(211), `node=${Boolean(stageNode(211))}`);
@@ -15543,9 +15590,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     ],
   });
   const batch = revealItem(702);
-  const batchZeroHold = Boolean(batch)
+  // D9：pop 不再 0 停留——亮牌项 N=1 ⇒ pop 后先停 1s，再走真实 1s 淡出。
+  const batchDwell = Boolean(batch)
     && Number.isFinite(batch.stage.fadeAt)
-    && batch.stage.fadeAt - batch.stage.enteredAt < 50;
+    && batch.stage.fadeAt - batch.stage.enteredAt >= 1000
+    && ui.stageLane(batch, batch.stage.fadeAt - 1) === "visible";
   const batchFadeWindow = Boolean(batch)
     && ui.stageLane(batch, batch.stage.fadeAt) === "fading"
     && ui.stageLane(batch, batch.stage.fadeAt + 999) === "fading"
@@ -15556,8 +15605,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const batchNodeStill = Boolean(stageNode(702));
   ui.renderProcessing(batch.stage.fadeAt + 1000);
   const batchNodeGone = !stageNode(702);
-  check("U3-01x 火攻亮牌与 RESOLVE pop 同批（无可弃同花色）：0 停留 + 真实 1s 淡出，不是瞬删",
-    batchZeroHold && batchFadeWindow && batchNodeFading && batchNodeStill && batchNodeGone,
+  check("U3-01x 火攻亮牌与 RESOLVE pop 同批（无可弃同花色）：pop 后停留 1s + 真实 1s 淡出，不是瞬删",
+    batchDwell && batchFadeWindow && batchNodeFading && batchNodeStill && batchNodeGone,
     `hold=${batch ? batch.stage.fadeAt - batch.stage.enteredAt : "?"}ms`
       + ` window=${batchFadeWindow} fading=${batchNodeFading}`
       + ` keep=${batchNodeStill} gone=${batchNodeGone}`);
@@ -15672,14 +15721,20 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const answered = await post(
     `/api/sessions/${ui.state.sessionId}/answer?after=${ui.state.cursor}&logs=${ui.state.logSeq}`,
     { action: gainAction });
+  const answerFlushBefore = Date.now();
   ui.applyView(answered);
   ui.flushPlayback();
+  const answerFlushAfter = Date.now();
   const fadeAt = reveals[0] && reveals[0].stage.fadeAt;
   const fadingAfterAnswer = reveals.length === 3 && Number.isFinite(fadeAt)
     && reveals.every((item) => ui.stageLane(item, fadeAt) === "fading");
-  check("U3-01ac 答完「获得」收到承载帧 pop 后才进入 fading（既有 1s 淡出口径不变）",
-    fadingAfterAnswer,
-    `fadeAt=${fadeAt} lanes=${reveals.map((item) => ui.stageLane(item, fadeAt)).join(",")}`);
+  // D9：pop 后先停 0.5(N+1)（亮牌记录 N=1 ⇒ 1s），到点才 fading；淡出仍 1s。
+  const dwellAfterAnswer = reveals.length === 3 && Number.isFinite(fadeAt)
+    && fadeAt >= answerFlushBefore + 1000 && fadeAt <= answerFlushAfter + 1000;
+  check("U3-01ac 答完「获得」收到承载帧 pop 后先停留 1s、到点 fading（D9；淡出仍 1s）",
+    fadingAfterAnswer && dwellAfterAnswer,
+    `fadeAt=${fadeAt} flush=${answerFlushBefore}..${answerFlushAfter}`
+      + ` lanes=${reveals.map((item) => ui.stageLane(item, fadeAt)).join(",")}`);
 
   ui.state.sessionId = null;
   ui.state.view = null;
@@ -16351,6 +16406,220 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `eventDelayMs=${ui.state.eventDelayMs} playback=${Boolean(ui.state.playback)}`);
   ui.state.view = null;
   ui.state.sessionId = null;
+}
+
+/* ============ U4-03（spec D9）：舞台批量停留 0.5(N+1) ============
+ *
+ * N = **产生该舞台项的那条记录**的牌数，记在 `item.stage.batch` 上（换组 / 跨 commit 不重算）。
+ * 无帧项从入台起停 `0.5×(N+1)` 秒，有帧项从该帧 `pop` 起停；淡出仍 1s（`STAGE_FADE_MS`），
+ * `animScale` 只缩淡出、不缩停留。时间不靠真实等待：`renderProcessing(now)` 直接喂 `now`。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const card = (id, name) => ({
+    ...synthCard(id, name), kind: "normal", attribute: "普通",
+    description: `【${name}】的全文描述`,
+  });
+  const at = (zone, seat = null) => ({ zone, seat });
+  const move = (seq, frame, cards, reason, from, to) => ({
+    kind: "delta", delta_type: "card_move", seq, frame_id: frame, depth: 1,
+    reason, owner: from.seat, from_zone: from, to_zone: to, cards,
+  });
+  const reveal = (seq, frame, moved, seat) => ({
+    kind: "delta", delta_type: "card_reveal", seq, frame_id: frame, depth: 1,
+    seat, card: moved,
+  });
+  const pop = (seq, frame, kind = "RESOLVE") => ({
+    kind: "frame", op: "pop", frame_id: frame, frame_kind: kind, depth: 1, seq,
+  });
+  const stageNodes = () => Array.from($("t-processing").children).filter(
+    (node) => node.classList.contains("stage-card"));
+  const stageNode = (id) => stageNodes().find(
+    (node) => attr(node, "data-card-id") === String(id));
+  const fading = (id) => Boolean(stageNode(id) && stageNode(id).classList.contains("fading"));
+  const itemOf = (id) => (ui.state.effectCards || []).concat(ui.state.revealedCards || [])
+    .find((entry) => String(entry.card_id) === String(id));
+  const resetStage = () => {
+    ui.state.view = null;
+    ui.state.sessionId = null;
+    ui.state.playback = null;
+    ui.state.effectCards = [];
+    ui.state.revealedCards = [];
+    ui.state.animScale = 1;
+    ui.renderProcessing();
+  };
+  const TO_PROCESSING = at("processing");
+  const TO_DISCARD = at("discard");
+
+  resetStage();
+  // 缺桥时给一个可读的标记，让红落在断言上而不是调用期 TypeError（桥的容错约定）。
+  const holdOf = (n) => (typeof ui.stageHoldMs === "function" ? ui.stageHoldMs(n) : "缺");
+  check("U4-03a stageHoldMs 纯函数：停留 = 0.5×(N+1) 秒（N=1→1000、N=2→1500、N=10→5500；缺省按 1）",
+    [1, 2, 10].map(holdOf).join(",") === "1000,1500,5500"
+      && holdOf(0) === 1000 && holdOf(undefined) === 1000,
+    `holds=${[1, 2, 10, 0, undefined].map(holdOf).join(",")}`);
+
+  // 【制衡】一次弃 10 张：同一条记录 → 每张 batch=10、同刻入台、停留 5.5s，然后一起淡出。
+  resetStage();
+  const ten = Array.from({ length: 10 }, (_, index) => card(810 + index, "杀"));
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(800, 0, ten, "DISCARD", at("hand", 0), TO_DISCARD), []);
+  const tenItems = ui.state.effectCards;
+  const tenEntered = tenItems.length && tenItems[0].stage.enteredAt;
+  const tenBatch = tenItems.length === 10 && tenItems.every((item) => item.stage.batch === 10);
+  const tenFadeAt = tenItems.length === 10
+    && tenItems.every((item) => item.stage.fadeAt === tenEntered + 5500);
+  ui.renderProcessing(tenEntered + 5499);
+  const tenVisible = stageNodes().length === 10 && !fading(810) && !fading(819);
+  ui.renderProcessing(tenEntered + 5500);
+  const tenFadingTogether = stageNodes().length === 10
+    && stageNodes().every((node) => node.classList.contains("fading"));
+  ui.renderProcessing(tenEntered + 6499);
+  const tenStillFading = stageNodes().length === 10;
+  ui.renderProcessing(tenEntered + 6500);
+  check("U4-03b 一次弃 10 张（frame 0）：batch=10、停留 5500ms 后一起淡出、6500ms 一起移除",
+    tenBatch && tenFadeAt && tenVisible && tenFadingTogether && tenStillFading
+      && stageNodes().length === 0,
+    `batch=${tenItems.map((item) => item.stage.batch).join(",")}`
+      + ` fadeAt=${tenItems.map((item) => item.stage.fadeAt - tenEntered).join(",")}`
+      + ` visible=${tenVisible} fading=${tenFadingTogether}`
+      + ` still=${tenStillFading} gone=${stageNodes().length === 0}`);
+
+  // 有承载帧的 3 张：pop 前一直可见；pop 后停留 0.5×(3+1)=2000ms 再一起淡出。
+  // 其中一张先换组进弃牌组（那条记录只动 1 张）——batch 沿用首次入台的 3，不按换组记录重算。
+  resetStage();
+  const framed = [card(830, "杀"), card(831, "闪"), card(832, "桃")];
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(810, 50, framed, "USE", at("hand", 0), TO_PROCESSING), []);
+  const framedEntered = ui.state.effectCards.length && ui.state.effectCards[0].stage.enteredAt;
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(811, 50, [framed[0]], "LOSE", TO_PROCESSING, TO_DISCARD), ui.state.effectCards);
+  const framedItems = ui.state.effectCards;
+  const framedBatches = framedItems.length === 3
+    && framedItems.every((item) => item.stage.batch === 3);
+  const framedAttached = itemOf(830).stage.lane === "discard"
+    && itemOf(830).stage.fadeAt === null;
+  ui.renderProcessing(framedEntered + 5000);
+  const framedVisibleBeforePop = stageNodes().length === 3
+    && framedItems.every((item) => !stageNode(item.card_id).classList.contains("fading"));
+  const popBefore = Date.now();
+  ui.state.effectCards = ui.applyEffectDelta(pop(812, 50), ui.state.effectCards);
+  const popAfter = Date.now();
+  const framedFadeAt = itemOf(831) && itemOf(831).stage.fadeAt;
+  const framedDwell = Number.isFinite(framedFadeAt)
+    && framedFadeAt >= popBefore + 2000 && framedFadeAt <= popAfter + 2000
+    && framedItems.every((item) => item.stage.fadeAt === framedFadeAt);
+  ui.renderProcessing(framedFadeAt - 1);
+  const framedStillDwelling = stageNodes().length === 3
+    && stageNodes().every((node) => !node.classList.contains("fading"));
+  ui.renderProcessing(framedFadeAt);
+  const framedFadingTogether = stageNodes().length === 3
+    && stageNodes().every((node) => node.classList.contains("fading"));
+  ui.renderProcessing(framedFadeAt + 1000);
+  check("U4-03c 有承载帧的 3 张弃置：batch=3（换组不重算）、pop 前一直可见、pop 后停留 2000ms 再一起淡出",
+    framedBatches && framedAttached && framedVisibleBeforePop && framedDwell
+      && framedStillDwelling && framedFadingTogether && stageNodes().length === 0,
+    `batches=${framedItems.map((item) => item.stage.batch).join(",")}`
+      + ` attached=${framedAttached} beforePop=${framedVisibleBeforePop}`
+      + ` fadeAt=${framedFadeAt} popAt=${popBefore}..${popAfter}`
+      + ` dwell=${framedStillDwelling} fading=${framedFadingTogether}`
+      + ` gone=${stageNodes().length === 0}`);
+
+  // 郭嘉分两次交 2 张 = 两条 1 张的记录：各按 N=1 计、各停 1s，先后消失（不并成一批）。
+  resetStage();
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(820, 0, [card(840, "杀")], "DISCARD", at("hand", 0), TO_DISCARD), []);
+  // 记录流里两条记录本来就相隔至少一拍；这里只隔开时钟，让"先后"在 `now` 上可观测。
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(821, 0, [card(841, "闪")], "DISCARD", at("hand", 0), TO_DISCARD),
+    ui.state.effectCards);
+  const firstMoveItem = itemOf(840);
+  const secondMoveItem = itemOf(841);
+  const sequentialBatches = ui.state.effectCards.length === 2
+    && firstMoveItem.stage.batch === 1 && secondMoveItem.stage.batch === 1;
+  const sequentialHold = firstMoveItem.stage.fadeAt - firstMoveItem.stage.enteredAt === 1000
+    && secondMoveItem.stage.fadeAt - secondMoveItem.stage.enteredAt === 1000;
+  const sequentialOrder = secondMoveItem.stage.fadeAt > firstMoveItem.stage.fadeAt;
+  ui.renderProcessing(firstMoveItem.stage.fadeAt);
+  const firstFadingSecondVisible = fading(840) && !fading(841);
+  ui.renderProcessing(secondMoveItem.stage.fadeAt);
+  const bothFading = fading(840) && fading(841);
+  ui.renderProcessing(secondMoveItem.stage.fadeAt + 1000);
+  check("U4-03d 依次两条 1 张移动：各自 batch=1、各停 1000ms、先后消失（郭嘉两次交牌不并批）",
+    sequentialBatches && sequentialHold && sequentialOrder
+      && firstFadingSecondVisible && bothFading && stageNodes().length === 0,
+    `batches=${firstMoveItem.stage.batch},${secondMoveItem.stage.batch}`
+      + ` holds=${firstMoveItem.stage.fadeAt - firstMoveItem.stage.enteredAt},`
+      + `${secondMoveItem.stage.fadeAt - secondMoveItem.stage.enteredAt}`
+      + ` order=${secondMoveItem.stage.fadeAt - firstMoveItem.stage.fadeAt}`
+      + ` firstOnly=${firstFadingSecondVisible} both=${bothFading}`
+      + ` gone=${stageNodes().length === 0}`);
+
+  // `card_reveal` 记录也记 batch（今天一条记录一张），走 applyRevealDelta 的 pop 分支。
+  resetStage();
+  const revealCard = card(850, "桃");
+  ui.state.revealedCards = ui.applyRevealDelta(reveal(860, 60, revealCard, 1), []);
+  const revealItem = itemOf(850);
+  const revealBatch = Boolean(revealItem) && revealItem.stage.batch === 1
+    && revealItem.stage.fadeAt === null;
+  ui.renderProcessing(revealItem.stage.enteredAt + 5000);
+  const revealVisibleBeforePop = Boolean(stageNode(850)) && !fading(850);
+  const revealPopBefore = Date.now();
+  ui.state.revealedCards = ui.applyRevealDelta(pop(861, 60), ui.state.revealedCards);
+  const revealPopAfter = Date.now();
+  const revealFadeAt = revealItem && revealItem.stage.fadeAt;
+  const revealDwell = Number.isFinite(revealFadeAt)
+    && revealFadeAt >= revealPopBefore + 1000 && revealFadeAt <= revealPopAfter + 1000;
+  ui.renderProcessing(revealFadeAt - 1);
+  const revealStillDwelling = !fading(850);
+  ui.renderProcessing(revealFadeAt);
+  check("U4-03e card_reveal（N=1）也记 batch：pop 后停留 1000ms 再淡出（applyRevealDelta 同一公式）",
+    revealBatch && revealVisibleBeforePop && revealDwell && revealStillDwelling && fading(850),
+    `batch=${revealItem && revealItem.stage.batch} fadeAt=${revealFadeAt}`
+      + ` popAt=${revealPopBefore}..${revealPopAfter}`
+      + ` dwell=${revealStillDwelling} fading=${fading(850)}`);
+
+  // `animScale` 只缩淡出：置 0 后 3 张仍停满 2000ms（0.5×(3+1)）才整批移除（停留不缩）。
+  resetStage();
+  ui.state.animScale = 0;
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(870, 0, [card(871, "杀"), card(872, "闪"), card(873, "桃")],
+      "DISCARD", at("hand", 0), TO_DISCARD), []);
+  const fastItems = ui.state.effectCards;
+  const fastEntered = fastItems.length && fastItems[0].stage.enteredAt;
+  const fastHold = fastItems.length === 3
+    && fastItems.every((item) => item.stage.fadeAt === fastEntered + 2000);
+  ui.renderProcessing(fastEntered + 1999);
+  const fastVisibleDuringDwell = stageNodes().length === 3 && !fading(871);
+  ui.renderProcessing(fastEntered + 2000);
+  check("U4-03f animScale = 0 只缩淡出：3 张仍停满 2000ms 才移除（停留不缩）",
+    fastHold && fastVisibleDuringDwell && stageNodes().length === 0,
+    `fadeAt=${fastItems.map((item) => item.stage.fadeAt - fastEntered).join(",")}`
+      + ` visible=${fastVisibleDuringDwell} gone=${stageNodes().length === 0}`);
+
+  // 兜底 30s 只接"丢 pop"（fadeAt=null），不是停留上限：N=60 ⇒ 30500ms 照公式走完。
+  resetStage();
+  const sixty = Array.from({ length: 60 }, (_, index) => card(900 + index, "杀"));
+  ui.state.effectCards = ui.applyEffectDelta(
+    move(880, 0, sixty, "DISCARD", at("hand", 0), TO_DISCARD), []);
+  const sixtyItems = ui.state.effectCards;
+  const sixtyEntered = sixtyItems.length && sixtyItems[0].stage.enteredAt;
+  const sixtyHold = sixtyItems.length === 60
+    && sixtyItems.every((item) => item.stage.batch === 60)
+    && sixtyItems.every((item) => item.stage.fadeAt === sixtyEntered + 30500);
+  ui.renderProcessing(sixtyEntered + 30000);
+  const sixtyStillHolding = stageNodes().length === 60 && !fading(900);
+  ui.renderProcessing(sixtyEntered + 30500);
+  const sixtyFading = stageNodes().length === 60 && fading(900);
+  ui.renderProcessing(sixtyEntered + 31500);
+  check("U4-03g 30s 兜底只接丢 pop（fadeAt=null），不是停留上限：N=60 ⇒ 30500ms 后淡出",
+    sixtyHold && sixtyStillHolding && sixtyFading && stageNodes().length === 0,
+    `batch=${sixtyItems[0] && sixtyItems[0].stage.batch}`
+      + ` hold=${sixtyItems[0] && sixtyItems[0].stage.fadeAt - sixtyEntered}`
+      + ` at30s=${sixtyStillHolding} at30.5s=${sixtyFading}`
+      + ` gone=${stageNodes().length === 0}`);
+  resetStage();
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
