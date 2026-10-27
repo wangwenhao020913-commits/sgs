@@ -629,9 +629,9 @@ def test_session_playback_hook_measures_source_before_render_and_launches_after(
     match = _STEP_PLAYBACK_RE.search(text)
     assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
     body = match.group("body")
-    plan = body.find("animPlanFlight(record)")
+    plan = body.find("animPlanFlight(record")
     launch = body.find("animLaunchFlight(")
-    assert plan >= 0, "stepPlayback 里没有显式调用 animPlanFlight(record)"
+    assert plan >= 0, "stepPlayback 里没有显式调用 animPlanFlight(record, …)"
     assert launch >= 0, "stepPlayback 里没有显式调用 animLaunchFlight(...)"
     delta = body.find("applyEffectDelta(record, state.effectCards)")
     assert delta >= 0 and plan > delta, (
@@ -667,7 +667,7 @@ def test_anim_ini_lists_the_d8_durations_without_debug_scale() -> None:
 
 
 def test_anim_flight_layer_is_a_full_shell_overlay_above_the_effect_layers() -> None:
-    """D1：覆盖整个牌桌壳、不吃指针、裁在壳内、层级高于目标线与技能飘字。"""
+    """D1 / D12：覆盖整个牌桌壳、不吃指针、裁在壳内、层级高于目标线与技能飘字；只加运动不加光。"""
     html = INDEX_HTML.read_text(encoding="utf-8")
     tag = re.search(r"<div\b[^>]*\bid=\"t-anim-flights\"[^>]*>", html)
     assert tag is not None, "index.html 里缺少飞行层 #t-anim-flights"
@@ -701,6 +701,15 @@ def test_anim_flight_layer_is_a_full_shell_overlay_above_the_effect_layers() -> 
         f"飞行器位置写死成 left/top + translate，CSS 必须绝对定位：{flight}"
     )
     assert re.search(r"pointer-events:\s*none", flight), f"飞行器是牌面副本，不能吃指针：{flight}"
+    # D12：飞行器只加运动、不加光。卡面自己的 `.card.face` 阴影是同一张牌面的既有样式；
+    # 飞行器副本不得再叠 filter / box-shadow / text-shadow / outline（先剥掉 CSS 注释）。
+    flight_decl = re.sub(r"/\*.*?\*/", "", flight, flags=re.S)
+    assert not re.search(r"\b(?:box-shadow|filter|text-shadow|outline)\b", flight_decl), (
+        f"飞行器只加运动、不加光（D12），不得新增阴影 / 滤镜 / 描边：{flight_decl}"
+    )
+    assert re.search(r"will-change:\s*transform,\s*opacity", flight), (
+        f"飞行器只应声明 transform / opacity 的动画：{flight}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -839,7 +848,7 @@ def test_anim_js_builds_the_phase_layer_and_reuses_the_single_ini_load() -> None
 
 
 def test_session_playback_plans_the_phase_float_next_to_the_flight_hook() -> None:
-    """`stepPlayback` 里 `animPlanPhase(record)` 恰好一处，与 `animPlanFlight(record)` 相邻。"""
+    """`stepPlayback` 里 `animPlanPhase(record)` 恰好一处，与 `animPlanFlight(record, …)` 相邻。"""
     text = _SESSION_JS.read_text(encoding="utf-8")
     match = _STEP_PLAYBACK_RE.search(text)
     assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
@@ -848,7 +857,7 @@ def test_session_playback_plans_the_phase_float_next_to_the_flight_hook() -> Non
         f"stepPlayback 里的阶段飘字入口应只有一处：{body.count('animPlanPhase(')}"
     )
     lines = [line.strip() for line in body.splitlines()]
-    flight_at = [index for index, line in enumerate(lines) if "animPlanFlight(record)" in line]
+    flight_at = [index for index, line in enumerate(lines) if "animPlanFlight(record" in line]
     phase_at = [index for index, line in enumerate(lines) if "animPlanPhase(record)" in line]
     assert len(flight_at) == 1 and len(phase_at) == 1, (
         f"两个动效入口各应有一处：flight={flight_at} phase={phase_at}"

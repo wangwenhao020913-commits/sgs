@@ -867,7 +867,8 @@ button.mini-slot { cursor: pointer; }
   transform-origin: 50% 50%;
   pointer-events: none;
   will-change: transform, opacity;
-  filter: drop-shadow(0 calc(6 * var(--dsu)) calc(10 * var(--dsu)) rgba(43, 36, 28, .28));
+  /* D12：飞行器只加运动、不加光。卡面自己的 `.card.face` 阴影是**同一张牌面**的既有
+   * 样式，不在这里另加 filter / box-shadow / outline——D12 的证据看这一条规则。 */
 }
 /* 时间表回退提示（D8）：一行，固定左下；正常时 `hidden` 不占位。 */
 .anim-note {

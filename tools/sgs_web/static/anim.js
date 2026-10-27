@@ -475,10 +475,14 @@ function animSpawn(layer, layerRect, plan, card, index, toRect) {
   node.style.left = `${startX + normalX}px`;
   node.style.top = `${startY + normalY}px`;
 
-  const total = Math.max(0, Number(plan.duration) || 0);
-  const fanMs = Math.max(0, Number(animConfig.fan_ms) || 0);
+  // D7：base 同时是动画缩放因子（50ms 档 = 0.5×、300ms 档 = 3×）。`plan.scale` 由
+  // `session.js` 的当前档位传入；`delayOf` 的等待与这里的 WAAPI 时长用同一个 scale，
+  // 否则 50ms 档会"动画没播完就轮到下一条"、300ms 档会"牌已落位还在空等"。
+  const scale = Number(plan.scale) > 0 ? Number(plan.scale) : 1;
+  const total = Math.max(0, Number(plan.duration) || 0) * scale;
+  const fanMs = Math.max(0, Number(animConfig.fan_ms) || 0) * scale;
   const fanDelay = count > 1 ? Math.round((fanMs * index) / (count - 1)) : 0;
-  const delay = (Number(plan.replaceDelay) || 0) + fanDelay;
+  const delay = Math.round((Number(plan.replaceDelay) || 0) * scale) + fanDelay;
   node.setAttribute("data-anim-kind", plan.kind);
   node.setAttribute("data-anim-index", String(index));
   const remove = () => {
@@ -680,8 +684,13 @@ function animShowPhaseFloat(seat, text, timing) {
 
 /* ------------------------------------------------------------ 钩子（session.js 调用） */
 
-/** 起飞前调用：登记 / 不飞判定 + **量一次源矩形**。任何异常都吞掉（不阻塞播放时钟）。 */
-function animPlanFlight(record) {
+/** 起飞前调用：登记 / 不飞判定 + **量一次源矩形**。任何异常都吞掉（不阻塞播放时钟）。
+ *
+ * ``base`` = 牌桌当前步长档（`session.js` 传 `state.eventDelayMs`；缺省 100）。D7 规定
+ * base 同时是**动画缩放因子**：50ms 档 = 0.5×、300ms 档 = 3×。这里把 scale 记进 plan，
+ * `animSpawn` 用它缩 WAAPI 的 `duration` / `delay`——否则只是缩间隔，动画本身不变长。
+ */
+function animPlanFlight(record, base = 100) {
   try {
     if (!record || record.kind !== "delta" || record.delta_type !== "card_move") return null;
     // 读法只对**牌移动**重置：一条缺失 / 未登记的读法留给下一次牌移动（与烟测），
@@ -706,6 +715,8 @@ function animPlanFlight(record) {
       return null;
     }
     const cards = (record.cards || []).slice();
+    const numericBase = Number(base);
+    const scale = Number.isFinite(numericBase) && numericBase > 0 ? numericBase / 100 : 1;
     return {
       kind: rule.kind,
       record,
@@ -713,6 +724,7 @@ function animPlanFlight(record) {
       hidden: cards.length === 0,
       count,
       duration,
+      scale,
       sourceRect,
       replaceDelay: rule.kind === "replace_out"
         ? Math.round(duration * ANIM_REPLACE_OUT_DELAY)

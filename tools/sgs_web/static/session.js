@@ -671,7 +671,9 @@ function stepPlayback(immediate) {
     // 飞行器起飞前量**源**——这一步还没重绘，舞台卡 / 手牌 / 槽位都还在原处，落点等
     // 重绘之后再量并同步起飞（见本函数末尾）；阶段飘字只放画面：不排计时器、不改步长
     // （`durationOf` 对非牌移动恒为 0，见本函数末尾的 `delayOf`）。
-    flightPlan = animPlanFlight(record);
+    // D7：把当前档位作为**动画缩放因子**交给飞行层；`delayOf` 的等待在末尾用同一个 base，
+    // 两处同源，50ms 档才会"动画与间隔一起缩"。
+    flightPlan = animPlanFlight(record, state.eventDelayMs);
     animPlanPhase(record);
   }
   // U3-05（D11）：每条记录先把**可见**变化写进 live view，再**从它**重绘全表——手牌数 /

@@ -15967,6 +15967,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     layer.removeAttribute("data-anim-missing");
     layer.removeAttribute("data-anim-unregistered");
   };
+  /** 舞台卡 / 手牌卡的节点（D2 的源锚点判据：上装备的落点那一步必须从舞台卡起飞）。 */
+  const stageCardNode = (id) => Array.from($("t-processing").children).find(
+    (node) => node.getAttribute && node.getAttribute("data-stage-key") === String(id)) || null;
+  const handCardNode = (id) => Array.from($("t-hand").children).find(
+    (node) => node.getAttribute && node.getAttribute("data-card-id") === String(id)) || null;
   // 真 DOM 的 getAttribute 缺省返回 null，垫片返回 undefined：读法统一成 null。
   const missing = () => layer.getAttribute("data-anim-missing") ?? null;
   const unregistered = () => layer.getAttribute("data-anim-unregistered") ?? null;
@@ -16124,11 +16129,26 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     ], before);
     const first = stepFlights();
     const second = stepFlights();
-    check("U4-01-e 上装备：舞台卡 → 武器槽（两条记录各一只飞行器）",
+    // D2：PUT 那一步的源必须是**舞台卡**（手牌行即使还在 DOM 里也不能当源）。
+    const stageRect = stageCardNode(11) ? stageCardNode(11).getBoundingClientRect() : null;
+    const handRect = handCardNode(11) ? handCardNode(11).getBoundingClientRect() : null;
+    const flightLeft = second[0] ? parseFloat(second[0].style.left) : Number.NaN;
+    const flightTop = second[0] ? parseFloat(second[0].style.top) : Number.NaN;
+    const fromStage = Boolean(stageRect)
+      && Math.abs(flightLeft - stageRect.left) < 0.5
+      && Math.abs(flightTop - stageRect.top) < 0.5;
+    const fromHandInstead = Boolean(handRect)
+      && Math.abs(flightLeft - handRect.left) < 0.5
+      && Math.abs(flightTop - handRect.top) < 0.5;
+    check("U4-01-e 上装备：舞台卡 → 武器槽（两条记录各一只飞行器，源不是手牌）",
       first.length === 1 && kindOf(first[0]) === "use"
         && second.length === 1 && kindOf(second[0]) === "place_equip"
+        && fromStage && !fromHandInstead
         && missing() === null,
-      `${summary(first)} / ${summary(second)}`);
+      `${summary(first)} / ${summary(second)}`
+        + ` stage=${stageRect && stageRect.left},${stageRect && stageRect.top}`
+        + ` hand=${handRect && handRect.left},${handRect && handRect.top}`
+        + ` flight=${flightLeft},${flightTop} fromStage=${fromStage} fromHand=${fromHandInstead}`);
   }
   {
     const oldWeapon = flightCard(17, "青釭剑", { slot: "weapon", attack_range: 2, type: "equip" });
@@ -16314,6 +16334,27 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       flights().length === 2 && flights().every((node) => kindOf(node) === "draw")
         && ui.state.view !== null,
       `节点=${flights().length} view=${Boolean(ui.state.view)}`);
+  }
+
+  /* ---- D7 动画缩放：base 同时缩放 WAAPI 时长，不是只缩间隔 ---- */
+  {
+    const drawCard = flightCard(40, "杀");
+    const drawRecords = [
+      moveRecord(30, "DRAW", zoneRef("deck"), zoneRef("hand", 0), [drawCard]),
+    ];
+    ui.state.eventDelayMs = 50;
+    feed(drawRecords, snapshotFor(playersBase(), [drawCard]));
+    const half = stepFlights();
+    const halfDuration = half[0] ? durationOf(half[0]) : null;
+    ui.state.eventDelayMs = 300;
+    feed(drawRecords, snapshotFor(playersBase(), [drawCard]));
+    const triple = stepFlights();
+    const tripleDuration = triple[0] ? durationOf(triple[0]) : null;
+    ui.state.eventDelayMs = 100;
+    check("U4-02-k 飞行动画按 base 缩放（表 220ms：50ms 档 110、300ms 档 660），不是只缩间隔",
+      half.length === 1 && triple.length === 1
+        && halfDuration === 110 && tripleDuration === 660,
+      `nodes=${half.length}/${triple.length} dur50=${halfDuration} dur300=${tripleDuration}`);
   }
 
   ui.state.playback = null;
