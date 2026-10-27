@@ -5537,7 +5537,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
  * 票面判据（`issues/02`；U2-02 按 D6 放大）：
  * - 对手**外形** 210×150（D6 的 228×163 在 8 人环上重叠，回退为外形不变、只放大内容）、
  *   自己 292×210；左武将块收窄 30%（右块 100 / 130）；判定行 33 / 48、装备行 42 / 60；
- * - 处理区 / 舞台卡面与手牌**同一套** 88×124 + 字号 14/11/21/9（不再有第二套小牌面规则）；
+ * - 处理区 / 舞台卡面与手牌**同一套** 88×124 + 字号 14/11/20/9（不再有第二套小牌面规则）；
  *   舞台面板封顶 300（顶边 220 > 顶座下沿 210）、处理区一行 124 纵向滚动，不盖住环桌顶座；
  * - 体力分段 + current/max，上限 ≥6 只显 x/x；判定 3 槽、装备四槽；手牌数 / 座位号在 footer；
  * - 身份：主公明置、其余暗置 `?`、自己恒可见、阵亡亮明；无身份局不画 `?`；
@@ -5669,11 +5669,11 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && /\.self \.mini-slot\.judge-slot\s*\{[^}]*height:\s*calc\(52 \* var\(--dsu\)\)/s.test(css)
       && /\.self \.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(12 \* var\(--dsu\)\)/s.test(css),
     `name=${/\.self \.hero-name\s*\{[^}]*calc\(20/s.test(css)} hp=${/\.self \.hp-num\s*\{[^}]*calc\(13/s.test(css)} judge=${/\.self \.judge-row\s*\{[^}]*calc\(52/s.test(css)} equip=${/\.self \.equip-grid\s*\{[^}]*calc\(60/s.test(css)} slot=${/\.self \.mini-slot\s*\{[^}]*font-size:\s*calc\(13/s.test(css)} label=${/\.self \.mini-slot \.slot-k\s*\{[^}]*calc\(12/s.test(css)}`);
-  check("U1-02c3 CSS：处理区 / 舞台卡面与手牌同一套 88×124 + 字号 14/11/21/9（0.63 版覆盖已删，只有一套卡面规则）",
+  check("U1-02c3 CSS：处理区 / 舞台卡面与手牌同一套 88×124 + 字号 14/11/20/9（0.63 版覆盖已删，只有一套卡面规则）",
     /\.card\.face\s*\{[^}]*width:\s*calc\(88 \* var\(--dsu\)\);\s*height:\s*calc\(124 \* var\(--dsu\)\)/s.test(css)
       && /\.card\.face \.suit\s*\{[^}]*font-size:\s*calc\(14 \* var\(--dsu\)\)/s.test(css)
       && /\.card\.face \.rank\s*\{[^}]*font-size:\s*calc\(11 \* var\(--dsu\)\)/s.test(css)
-      && /\.card\.face \.cname\s*\{[^}]*font-size:\s*calc\(21 \* var\(--dsu\)\)/s.test(css)
+      && /\.card\.face \.cname\s*\{[^}]*font-size:\s*calc\(20 \* var\(--dsu\)\)/s.test(css)
       && /\.card\.face \.ctype\s*\{[^}]*font-size:\s*calc\(9 \* var\(--dsu\)\)/s.test(css)
       && !/\.stage-center \.processing \.card/.test(css)
       && !/calc\(56 \* var\(--dsu\)\)/.test(css)

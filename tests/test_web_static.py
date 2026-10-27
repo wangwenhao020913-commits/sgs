@@ -1071,3 +1071,24 @@ def test_filled_mini_slots_keep_the_zone_label_in_the_dom() -> None:
     assert 'label.textContent = judge ? "判定" : EQUIP_SLOT_LABELS[slot] || "空"' in body, (
         "槽名的文字必须来自「判定」/ 装备槽标签（不新建一份映射）"
     )
+
+
+def test_the_card_face_name_fits_four_characters_without_an_ellipsis() -> None:
+    """D13：手牌 / 舞台 / 处理区共用 88 设计单位宽的卡面，四字牌名（乐不思蜀等）放得下。
+
+    卡面内宽 = 88 − 左右各 2（`.cname` 的 left/right）= 84 设计单位；四字 + 四份字距
+    必须 ≤ 84。21 号 + .06em 时约 89（会被省略号截断），故 U4-06b 收到 20 号 + .02em。
+    """
+    rule = _css_rule(".card.face .cname")
+    size = re.search(r"font-size:\s*calc\(([\d.]+) \* var\(--dsu\)\)", rule)
+    spacing = re.search(r"letter-spacing:\s*([\d.]+)em", rule)
+    assert size is not None, f"`.cname` 的字号必须走设计单位：{rule}"
+    assert spacing is not None, f"`.cname` 的字距必须是 em 值：{rule}"
+    font = float(size.group(1))
+    em = float(spacing.group(1))
+    four_characters = 4 * font + 4 * em * font
+    assert font <= 20, f"字号必须 ≤ 20 设计单位，实际 {font}"
+    assert em <= 0.02, f"字距必须 ≤ .02em，实际 {em}"
+    assert four_characters <= 84, (
+        f"四字牌名 {four_characters:.1f} 设计单位放不进卡面内宽 84（{font} 号 / {em}em）"
+    )
