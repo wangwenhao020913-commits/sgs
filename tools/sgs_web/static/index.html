@@ -367,6 +367,9 @@
 <script src="answer.js"></script>
 <script src="log.js"></script>
 <script src="replay.js"></script>
+<!-- PROTOTYPE（一次性验证；不带 ?proto=1 时零行为）。验证完连同 anim-proto.* 一起删。
+     必须排在 main.js 之前：test_web_static 契约要求 main.js 是清单最后一份。 -->
+<script src="anim-proto.js"></script>
 <script src="main.js"></script>
 </body>
 </html>
