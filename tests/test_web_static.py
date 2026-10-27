@@ -764,3 +764,101 @@ def test_delay_button_titles_describe_the_new_five_step_range() -> None:
         assert "0.03–0.3" in tag.group(0), (
             f"#{button_id} 的 title 必须写新的 0.03–0.3 秒五档：{tag.group(0)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# U4-04：阶段 / 回合飘字（spec D10）
+#
+# 机械的三半：
+# 1. **层与飘字**：整壳覆盖、不吃指针、裁在壳内；层级夹在技能名飘字（16）与飞行器（18）
+#    之间（弹窗 60 仍在最上）。尺寸 / 内边距 / 圆角走设计单位（`--dsu`），不新造光晕（D12）。
+# 2. **建法**：层由 `anim.js` 动态建出（不动 `index.html`）；寿命读**同一份** `animConfig`
+#    （`phase_float_ms`，内置缺省 1200），启动时只调一次 `animLoadConfig()`。
+# 3. **钩子**：`stepPlayback` 在重绘之前调一次 `animPlanPhase(record)`，与
+#    `animPlanFlight(record)` 相邻两行（CODING_STANDARDS §4：直接比函数体里的位置）。
+# 行为（六个标签 / 锚点 / 夹边 / 不占步长 / 与技能飘字共存）归烟测 `U4-04-*`。
+# ---------------------------------------------------------------------------
+
+
+def test_anim_phase_layer_sits_between_the_skill_floats_and_the_flight_layer() -> None:
+    """D10 的层：与飞行层同形的整壳覆盖层，层级 16 与 18 之间。"""
+    layer = _css_rule(".anim-phase-layer")
+    assert re.search(r"position:\s*absolute", layer), f"阶段飘字层必须绝对定位：{layer}"
+    assert re.search(r"inset:\s*0\b", layer), f"阶段飘字层必须铺满壳（inset: 0）：{layer}"
+    assert re.search(r"pointer-events:\s*none", layer), f"阶段飘字层不能吃指针：{layer}"
+    assert re.search(r"overflow:\s*hidden", layer), f"阶段飘字层必须裁在壳内：{layer}"
+
+    def z_index(selector: str) -> int:
+        found = re.search(r"z-index:\s*(\d+)", _css_rule(selector))
+        assert found is not None, f"{selector} 里找不到 z-index"
+        return int(found.group(1))
+
+    assert z_index(".anim-layer") > z_index(".anim-phase-layer") > z_index(".skill-floats") > 0
+    assert z_index(".anim-phase-layer") > z_index(".target-lines") > 0
+    assert z_index(".anim-phase-layer") < z_index(".modal")
+
+
+def test_anim_phase_float_is_a_design_unit_pill_without_a_new_glow() -> None:
+    """飘字本身：位置由 JS 写死（left = 中心 / top = 底边），尺寸走 `--dsu`，不加光晕（D12）。
+
+    配色（与技能名飘字同族的金色）是判断题，留给评审 / 票 07 的实机截图；这里只钉
+    "有字色 + 有浅底 + 没有 box-shadow 这类新光"。
+    """
+    style = _css_rule(".anim-phase-float")
+    assert re.search(r"position:\s*absolute", style), f"飘字必须绝对定位：{style}"
+    assert re.search(r"transform:\s*translate\(-50%,\s*-100%\)", style), (
+        f"left 读成水平中心、top 读成底边需要 translate(-50%, -100%)：{style}"
+    )
+    assert re.search(r"pointer-events:\s*none", style), f"飘字不能吃指针：{style}"
+    assert re.search(r"font-size:\s*calc\(15 \* var\(--dsu\)\)", style), (
+        f"字号必须走设计单位（15 × --dsu）：{style}"
+    )
+    assert re.search(r"padding:\s*calc\(2 \* var\(--dsu\)\) calc\(9 \* var\(--dsu\)\)", style), (
+        f"内边距必须走设计单位（纵向 2 / 横向 9）：{style}"
+    )
+    assert re.search(r"border-radius:\s*calc\(\d+ \* var\(--dsu\)\)", style), (
+        f"圆角必须走设计单位：{style}"
+    )
+    assert re.search(r"color:\s*#", style), f"飘字必须有字色：{style}"
+    assert not re.search(r"box-shadow", style), f"D12 只加运动不加光：飘字不得加 box-shadow：{style}"
+
+
+def test_anim_js_builds_the_phase_layer_and_reuses_the_single_ini_load() -> None:
+    """层由 `anim.js` 建（不改 index.html）；寿命读同一份 `animConfig`，不第二次载入 ini。"""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert 'id="t-anim-phase"' not in html, "阶段飘字层应由 anim.js 动态建出，不进 index.html"
+    anim = _strip_js_comments(_ANIM_JS.read_text(encoding="utf-8"))
+    assert 'id = "t-anim-phase"' in anim, "anim.js 必须建出稳定的层 id #t-anim-phase"
+    assert 'className = "anim-phase-layer"' in anim, "层必须带 class=anim-phase-layer"
+    assert "PHASE_FLOAT_LABELS" in anim, "六个阶段标签应是 anim.js 里的一张表（D10）"
+    assert "phase_float_ms" in anim, "寿命必须读 animConfig.phase_float_ms"
+    assert anim.count("animLoadConfig();") == 1, (
+        "阶段飘字不得第二次载入 ini：复用启动时的那一次 animLoadConfig()"
+    )
+    assert re.search(r"phase_float_ms:\s*1200", anim), "内置缺省 phase_float_ms 必须是 1200"
+
+
+def test_session_playback_plans_the_phase_float_next_to_the_flight_hook() -> None:
+    """`stepPlayback` 里 `animPlanPhase(record)` 恰好一处，与 `animPlanFlight(record)` 相邻。"""
+    text = _SESSION_JS.read_text(encoding="utf-8")
+    match = _STEP_PLAYBACK_RE.search(text)
+    assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
+    body = match.group("body")
+    assert body.count("animPlanPhase(") == 1, (
+        f"stepPlayback 里的阶段飘字入口应只有一处：{body.count('animPlanPhase(')}"
+    )
+    lines = [line.strip() for line in body.splitlines()]
+    flight_at = [index for index, line in enumerate(lines) if "animPlanFlight(record)" in line]
+    phase_at = [index for index, line in enumerate(lines) if "animPlanPhase(record)" in line]
+    assert len(flight_at) == 1 and len(phase_at) == 1, (
+        f"两个动效入口各应有一处：flight={flight_at} phase={phase_at}"
+    )
+    assert phase_at[0] == flight_at[0] + 1, (
+        "阶段飘字必须与飞行层**相邻**规划（同一处、同一时机）："
+        f"flight@{flight_at[0]} phase@{phase_at[0]}"
+    )
+    delta = body.find("applyEffectDelta(record, state.effectCards)")
+    phase = body.find("animPlanPhase(record)")
+    assert delta >= 0 and phase > delta, "飘字规划必须在 applyEffectDelta 之后（与飞行层同一时机）"
+    assert phase < body.find("applyLiveDelta(record"), "飘字必须在重绘之前规划（读旧布局的锚点）"
+    assert phase < body.find("renderTable()"), "飘字必须在 renderTable 之前规划"

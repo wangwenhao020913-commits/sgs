@@ -75,6 +75,8 @@ const RECT_TABLE = new Map(Object.entries({
   "t-self-zones": { left: 1200, top: 560, width: 220, height: 240 },
   "t-self-hand": { left: 1100, top: 604, width: 40, height: 20 },
   "t-seats": { left: 20, top: 60, width: 1000, height: 420 },
+  // U4-04：阶段飘字层由 anim.js 动态建出（inset: 0 铺满壳），与飞行层同一块矩形。
+  "t-anim-phase": { left: 0, top: 0, width: 1440, height: 810 },
 }));
 let rectSeq = 0;
 const rectOfBox = (left, top, width, height) => ({
@@ -108,6 +110,8 @@ const shimRect = (node) => {
     return rectOfBox(left, top, 120, slot ? 34 : 52);
   }
   if (hasClassText(node, "face")) return rectOfBox(360, 300, 88, 124);
+  // U4-04：阶段飘字的盒子由文本 / 设计单位决定（垫片只给一个确定尺寸，供夹边距用）。
+  if (hasClassText(node, "anim-phase-float")) return rectOfBox(0, 0, 100, 28);
   rectSeq += 1;
   return rectOfBox(40 + (rectSeq % 12) * 100, 40 + Math.floor(rectSeq / 12) * 90, 100, 40);
 };
@@ -16620,6 +16624,358 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       + ` at30s=${sixtyStillHolding} at30.5s=${sixtyFading}`
       + ` gone=${stageNodes().length === 0}`);
   resetStage();
+}
+
+/* ============ U4-04（spec D10）：阶段 / 回合飘字 ============
+ *
+ * 走真入口：`timing` 记录交给 `stepPlayback(true)`（与页面同一条回放），飘字由
+ * `stepPlayback` 在**重绘之前**规划、由 `anim.js` 落在自己的覆盖层 `#t-anim-phase`。
+ * 断言只落在 DOM（文本 / `data-anim-phase-*` / 写死的 `left`、`top`）与纯函数（`dur = 0`）。
+ * 不读真实布局：垫片矩形是确定性的（`shimRect`）；窄壳 / 贴边座位用 `pinRect` 钉矩形夹具。
+ */
+{
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walk(child, out); }
+    return out;
+  };
+  const hasClass = (node, name) => Boolean(node
+    && String(node.className || "").split(/\s+/).includes(name));
+  /* 垫片矩形 = `getBoundingClientRect` 的 `_rect` 缓存：钉住它就是本篇的布局夹具。
+   * 只给"窄壳 / 贴右 / 贴左"这类真实布局下会顶出壳外的用例用，用完 `delete` 恢复。 */
+  const pinRect = (node, left, top, width, height) => {
+    if (node) {
+      node._rect = {
+        left, top, width, height,
+        right: left + width, bottom: top + height, x: left, y: top,
+      };
+    }
+    return node;
+  };
+  const unpinRect = (node) => { if (node) delete node._rect; };
+  // 垫片给 `.anim-phase-float` 的确定尺寸（与 CSS 无关，夹具常量）：夹边距按它算。
+  const FLOAT_WIDTH = 100;
+  const layer = () => $("t-anim-phase");
+  const floatNodes = () => Array.from((layer() && layer().children) || [])
+    .filter((node) => hasClass(node, "anim-phase-float"));
+  const clearFloats = () => { const box = layer(); if (box) box.innerHTML = ""; };
+  const px = (value) => Number.parseFloat(String(value || ""));
+
+  const player = (seat, heroName) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 2, alive: true, equip: [], judge: [],
+    identity: null, hero_name: heroName,
+  });
+  const baseView = (records, extra = {}) => ({
+    session_id: "u4-phase", seed: 1, human_seat: 0, finished: false, timeout_seconds: null,
+    heroes: { 0: "guojia", 1: "zhouyu" }, skills: [], pending: null,
+    snapshot: {
+      seat: 0, phase: "play", turn_seat: 1, deck_count: 30, discard: [], processing: [],
+      players: [player(0, "郭嘉"), player(1, "周瑜"), player(2, "")],
+      self_hand: [synthCard(1, "杀")],
+    },
+    records, live_deltas: [], narrative: [], skill_events: [],
+    cursor: records.length, log_seq: records.length, ...extra,
+  });
+  const timingRecord = (seq, name, actor) => ({
+    kind: "timing", timing: name, seq, frame_id: 0, depth: 0, actor,
+  });
+  /** 落一份干净会话：先铺一遍表体（锚点来自真实渲染口），再起带 records 的回放。 */
+  const load = (records, extra = {}) => {
+    ui.flushPlayback();
+    ui.state.playback = null;
+    ui.state.effectCards = [];
+    ui.state.revealedCards = [];
+    ui.state.sessionId = "u4-phase";
+    ui.state.view = baseView([], extra);
+    clearFloats();
+    ui.renderTable();
+    ui.applyViewRaw(baseView(records, extra));
+  };
+  const step = () => ui.stepPlayback(true);
+  const seatNode = (seat) => [...$("t-seats").children]
+    .find((node) => attr(node, "data-seat") === String(seat)) || null;
+  const judgeRow = (seat) => {
+    const root = seatNode(seat);
+    return root ? walk(root).find((node) => hasClass(node, "judge-row")) || null : null;
+  };
+  const heroBlock = (seat) => {
+    const root = seatNode(seat);
+    return root ? walk(root).find((node) => hasClass(node, "hero-block")) || null : null;
+  };
+
+  // ---- 层 + 六个阶段标签 ----
+  // 先看一眼**真对局**（本文件开头的 53 步驱动）留下的节点：引擎真发的 `TURN_START` /
+  // `PHASE_*_START` 走过同一条 `stepPlayback`，飘字早已落在这一层上（§6：读取方断言
+  // 先有真产出路径的证据；下面的用例再用同形合成载荷逐条钉文本 / 位置）。
+  const realFloats = floatNodes();
+  const realTimings = realFloats.map((node) => String(attr(node, "data-anim-phase-timing")));
+  check("U4-04-real 真对局回放里引擎真发的时机已经在本层起过飘字（不靠合成载荷）",
+    realTimings.includes("TURN_START")
+      && realTimings.some((timing) => /^PHASE_[A-Z]+_START$/.test(timing)),
+    `n=${realFloats.length} timings=${JSON.stringify([...new Set(realTimings)])}`);
+
+  const labels = [
+    ["PHASE_PREPARE_START", "准备阶段开始"],
+    ["PHASE_JUDGE_START", "判定阶段开始"],
+    ["PHASE_DRAW_START", "摸牌阶段开始"],
+    ["PHASE_PLAY_START", "出牌阶段开始"],
+    ["PHASE_DISCARD_START", "弃牌阶段开始"],
+    ["PHASE_FINISH_START", "结束阶段开始"],
+  ];
+  load(labels.map(([name], index) => timingRecord(index + 1, name, 1)));
+  for (let index = 0; index < labels.length; index += 1) step();
+  const six = floatNodes();
+  const layerNode = layer();
+  check("U4-04-layer 阶段飘字层由 anim.js 动态建在 #table-shell 里（纯视觉层）",
+    Boolean(layerNode) && layerNode.parentNode === $("table-shell")
+      && hasClass(layerNode, "anim-phase-layer")
+      && attr(layerNode, "aria-hidden") === "true",
+    `parent=${layerNode && layerNode.parentNode && layerNode.parentNode.id}`
+      + ` class=${layerNode && layerNode.className} aria=${attr(layerNode, "aria-hidden")}`);
+  check("U4-04-a 六个 PHASE_*_START → 「XX阶段开始」六种；座位 = actor、timing 原样留在 data-*",
+    six.length === labels.length
+      && six.every((node, index) => node.textContent === labels[index][1]
+        && attr(node, "data-anim-phase-seat") === "1"
+        && attr(node, "data-anim-phase-timing") === labels[index][0]),
+    `n=${six.length} texts=${JSON.stringify(six.map((node) => node.textContent))}`);
+
+  // ---- 锚：判定行（230..380）上方，不是武将块正上方（那是技能名飘字） ----
+  const first = six[0] || null;
+  const jr = judgeRow(1);
+  const jrRect = jr ? jr.getBoundingClientRect() : null;
+  const firstLeft = first ? px(first.style.left) : Number.NaN;
+  const firstTop = first ? px(first.style.top) : Number.NaN;
+  check("U4-04-b 锚在对手判定行上方：水平居中于 .judge-row（垫片 260..380 ⇒ 320），top 在其上沿之上",
+    Boolean(first) && attr(first, "data-anim-phase-anchor") === "judge-row"
+      && Boolean(jrRect)
+      && Math.abs(firstLeft - (jrRect.left + jrRect.width / 2)) < 1e-6
+      && firstTop < jrRect.top && firstTop > jrRect.top - 12,
+    `left=${first && first.style.left} top=${first && first.style.top}`
+      + ` judge=${jrRect && `${jrRect.left}..${jrRect.left + jrRect.width}@${jrRect.top}`}`
+      + ` anchor=${first && attr(first, "data-anim-phase-anchor")}`
+      + ` hero=${heroBlock(1) && heroBlock(1).getBoundingClientRect().left}`);
+
+  // ---- 自己的座位：锚在 #t-self-zones（判定 + 装备整块，最右），夹在壳内 ----
+  load([timingRecord(20, "PHASE_DRAW_START", 0)]);
+  step();
+  const own = floatNodes()[0] || null;
+  const zonesRect = $("t-self-zones").getBoundingClientRect();
+  const ownLeft = own ? px(own.style.left) : Number.NaN;
+  const ownTop = own ? px(own.style.top) : Number.NaN;
+  check("U4-04-c 自己的座位锚在 #t-self-zones（判定 + 装备整块）上方的空隙里，水平居中",
+    Boolean(own) && attr(own, "data-anim-phase-anchor") === "self-zones"
+      && Math.abs(ownLeft - (zonesRect.left + zonesRect.width / 2)) < 1e-6
+      && ownTop < zonesRect.top && ownTop > zonesRect.top - 12,
+    `left=${own && own.style.left} top=${own && own.style.top}`
+      + ` zones=${zonesRect.left}..${zonesRect.left + zonesRect.width}@${zonesRect.top}`);
+
+  // ---- 夹进壳内：自己的区贴最右（窄壳）+ 最左座位贴左缘，都不顶出 #table-shell ----
+  load([
+    timingRecord(30, "PHASE_DRAW_START", 0),
+    timingRecord(31, "PHASE_DRAW_START", 0),
+    timingRecord(32, "PHASE_DRAW_START", 2),
+  ]);
+  step();                       // 起一层（层在第一次飘字时惰性创建）
+  const shellNode = $("table-shell");
+  pinRect(shellNode, 0, 0, 900, 810);
+  pinRect(layer(), 0, 0, 900, 810);
+  step();                       // 窄壳：自己的座位（中心 1310）会顶出 900 宽的壳
+  const rightNode = floatNodes()[1] || null;
+  const rightLeft = rightNode ? px(rightNode.style.left) : Number.NaN;
+  unpinRect(shellNode);
+  unpinRect(layer());
+  const edgeJudge = pinRect(judgeRow(2), -20, 100, 120, 52);
+  step();                       // 最左：判定行钉在左缘外，夹回边距内
+  const leftNode = floatNodes()[2] || null;
+  const leftLeft = leftNode ? px(leftNode.style.left) : Number.NaN;
+  unpinRect(edgeJudge);
+  const rightLimit = 900 - 6 - FLOAT_WIDTH / 2;
+  const leftLimit = 6 + FLOAT_WIDTH / 2;
+  check("U4-04-d 夹进壳内：最右（自己的座位 / 窄壳）夹右、最左座位夹左，都不顶出边界",
+    Boolean(rightNode) && Boolean(leftNode)
+      && attr(rightNode, "data-anim-phase-clamped") === "right"
+      && Math.abs(rightLeft - rightLimit) < 1e-6
+      && rightLeft + FLOAT_WIDTH / 2 <= 900 - 6
+      && attr(leftNode, "data-anim-phase-clamped") === "left"
+      && Math.abs(leftLeft - leftLimit) < 1e-6
+      && leftLeft - FLOAT_WIDTH / 2 >= 6,
+    `right=${rightLeft}(${rightNode && attr(rightNode, "data-anim-phase-clamped")})`
+      + ` expect<=${900 - 6}`
+      + ` left=${leftLeft}(${leftNode && attr(leftNode, "data-anim-phase-clamped")})`
+      + ` expect>=6`);
+
+  // ---- 回合：轮到 <武将名>；接入层拿不到名字时退回座位号 ----
+  load([timingRecord(40, "TURN_START", 1)]);
+  step();
+  const turnNode = floatNodes()[0] || null;
+  check("U4-04-e TURN_START → 「轮到 周瑜」：武将展示名走接入层 heroNameOf（前端不新建映射）",
+    Boolean(turnNode) && turnNode.textContent === "轮到 周瑜"
+      && attr(turnNode, "data-anim-phase-seat") === "1"
+      && attr(turnNode, "data-anim-phase-timing") === "TURN_START",
+    `text=${turnNode && turnNode.textContent}`);
+
+  load([timingRecord(50, "TURN_START", 2)]);
+  step();
+  const noName = floatNodes()[0] || null;
+  check("U4-04-f 无武将名（（无武将） / 空）→ 退回「轮到 座位 2」",
+    Boolean(noName) && noName.textContent === "轮到 座位 2"
+      && attr(noName, "data-anim-phase-seat") === "2",
+    `text=${noName && noName.textContent}`);
+
+  // ---- 座位兜底：timing 没有 actor 时退回当前座位（自己的判定 / 装备区） ----
+  load([timingRecord(60, "PHASE_PLAY_START", null)]);
+  step();
+  const fallbackSeat = floatNodes()[0] || null;
+  check("U4-04-g 时机没有 actor 时退回当前座位（#t-self-zones）",
+    Boolean(fallbackSeat) && attr(fallbackSeat, "data-anim-phase-seat") === "0"
+      && attr(fallbackSeat, "data-anim-phase-anchor") === "self-zones",
+    `seat=${fallbackSeat && attr(fallbackSeat, "data-anim-phase-seat")}`
+      + ` anchor=${fallbackSeat && attr(fallbackSeat, "data-anim-phase-anchor")}`);
+
+  // ---- 与技能名飘字同时：同座位、不同层 / 不同锚（技能名住武将块正上方） ----
+  load([timingRecord(71, "PHASE_DRAW_START", 1)], {
+    skill_events: [{ seq: 71, seat: 1, skill_id: "hero.zhouyu.fanjian", name: "反间", targets: [] }],
+  });
+  step();
+  const phaseNode = floatNodes()[0] || null;
+  const skillNode = walk($("t-skill-floats"))
+    .find((node) => hasClass(node, "skill-float")) || null;
+  const skillBlock = heroBlock(1);
+  const skillBlockRect = skillBlock ? skillBlock.getBoundingClientRect() : null;
+  const skillLayerRect = $("t-skill-floats").getBoundingClientRect();
+  const judgeRect1 = judgeRow(1) ? judgeRow(1).getBoundingClientRect() : null;
+  const phaseLeftH = phaseNode ? px(phaseNode.style.left) : Number.NaN;
+  const phaseTopH = phaseNode ? px(phaseNode.style.top) : Number.NaN;
+  const skillLeftH = skillNode ? px(skillNode.style.left) : Number.NaN;
+  const skillTopH = skillNode ? px(skillNode.style.top) : Number.NaN;
+  check("U4-04-h 同座位「发动技能 + 阶段切换」同时发生：两个节点各占一层、各锚各的区，不叠",
+    Boolean(phaseNode) && Boolean(skillNode)
+      && phaseNode.parentNode === layer()
+      && skillNode.parentNode === $("t-skill-floats")
+      && attr(phaseNode, "data-anim-phase-seat") === "1"
+      && attr(skillNode, "data-skill-seat") === "1"
+      && Boolean(skillBlockRect) && Boolean(judgeRect1)
+      && Math.abs(phaseLeftH - (judgeRect1.left + judgeRect1.width / 2)) < 1e-6
+      && phaseTopH < judgeRect1.top
+      && Math.abs(skillLeftH
+        - (skillBlockRect.left - skillLayerRect.left + skillBlockRect.width / 2)) < 1e-6
+      && skillTopH < skillBlockRect.top
+      && Math.abs(phaseLeftH - skillLeftH) > 1e-6,
+    `phase=${phaseLeftH},${phaseTopH}@${phaseNode && phaseNode.parentNode && phaseNode.parentNode.id}`
+      + ` skill=${skillLeftH},${skillTopH}@${skillNode && skillNode.parentNode && skillNode.parentNode.id}`
+      + ` judge=${judgeRect1 && judgeRect1.left} hero=${skillBlockRect && skillBlockRect.left}`);
+
+  // ---- 不占步长：durationOf(timing) = 0、delayOf 只吃 base；收尾不另排计时器 ----
+  const timingDelay = timingRecord(80, "PHASE_DRAW_START", 1);
+  load([timingDelay, timingRecord(81, "TURN_START", 1)]);
+  pendingTimers.clear();
+  timerDelays.clear();
+  ui.stepPlayback(false);
+  const phaseStepDelay = latestTimerDelay();
+  const phaseStepTimers = pendingTimers.size;
+  ui.flushPlayback();
+  check("U4-04-i 不占步长：dur=0、delayOf(…,100)=100；收尾仍只排 base（飘字不加计时器）",
+    ui.durationOf(timingDelay) === 0
+      && ui.delayOf(timingDelay, 100) === 100
+      && phaseStepDelay === 100
+      && phaseStepTimers === 1,
+    `dur=${ui.durationOf(timingDelay)} delay=${ui.delayOf(timingDelay, 100)}`
+      + ` 排程=${phaseStepDelay}ms timers=${phaseStepTimers}`);
+
+  // ---- 缺锚点 / 其他座位 / 换尺寸：静默、不抛错、不卡播放 ----
+  load([timingRecord(90, "PHASE_DRAW_START", 7)]);   // 表体上没有座位 7
+  let missingThrew = null;
+  let missingFloats = -1;
+  try {
+    step();
+    missingFloats = floatNodes().length;
+  } catch (error) {
+    missingThrew = String(error && error.message);
+  }
+  const missingAdvanced = Boolean(ui.state.playback) && ui.state.playback.index > 0;
+  check("U4-04-j 没有对应座位的锚点：静默跳过（只放节点 = 0）、不抛错、播放照走",
+    missingThrew === null && missingFloats === 0 && missingAdvanced,
+    `floats=${missingFloats} threw=${missingThrew} advanced=${missingAdvanced}`);
+
+  load([timingRecord(91, "PHASE_DRAW_START", 1)]);
+  pinRect($("table-shell"), 0, 0, 720, 405);
+  pinRect(layer(), 0, 0, 720, 405);
+  let resizedThrew = null;
+  let resizedNode = null;
+  try {
+    step();
+    resizedNode = floatNodes()[0] || null;
+  } catch (error) {
+    resizedThrew = String(error && error.message);
+  }
+  unpinRect($("table-shell"));
+  unpinRect(layer());
+  const resizedLeft = resizedNode ? px(resizedNode.style.left) : Number.NaN;
+  check("U4-04-k 壳换尺寸（720 宽）：飘字照常居中并留在壳内，不抛错",
+    resizedThrew === null && Boolean(resizedNode)
+      && resizedLeft - FLOAT_WIDTH / 2 >= 6
+      && resizedLeft + FLOAT_WIDTH / 2 <= 720 - 6
+      && attr(resizedNode, "data-anim-phase-clamped") === undefined,
+    `left=${resizedLeft} threw=${resizedThrew}`);
+
+  // ---- 寿命 = anim.ini 的 phase_float_ms（同一份 animConfig）；动画结束即移除 ----
+  iniInjection = {
+    ok: true,
+    text: Object.entries(ui.animDefaults)
+      .map(([key, value]) => `${key} = ${key === "phase_float_ms" ? 600 : value}`).join("\n"),
+  };
+  await ui.animLoadConfig();
+  load([timingRecord(95, "PHASE_DRAW_START", 1)]);
+  step();
+  const lifetimeNode = floatNodes()[0] || null;
+  const lifetimeAnimation = lifetimeNode && lifetimeNode.animations && lifetimeNode.animations[0];
+  const lifetimeMs = lifetimeAnimation ? lifetimeAnimation.options.duration : null;
+  let removedOnFinish = false;
+  if (lifetimeAnimation) {
+    lifetimeAnimation.finish();   // 垫片只登记动画；显式跑完 ⇒ onfinish 移除节点
+    removedOnFinish = floatNodes().length === 0 && !lifetimeNode.parentNode;
+  }
+  check("U4-04-l 寿命 = anim.ini 的 phase_float_ms（注入 600 即生效）；动画结束即移除节点",
+    Boolean(lifetimeAnimation) && lifetimeMs === 600 && removedOnFinish,
+    `duration=${lifetimeMs} removed=${removedOnFinish}`);
+  iniInjection = null;
+  await ui.animLoadConfig();
+  check("U4-04-l2 只走票 02 的那一份 animConfig（重读磁盘 ini 后回到缺省 1200，不新建表）",
+    ui.animConfig.phase_float_ms === ui.animDefaults.phase_float_ms,
+    `phase_float_ms=${ui.animConfig.phase_float_ms}`);
+
+  // ---- 只认六个 _START 与 TURN_START：阶段体 / 阶段空闲 / 回合结束等时机零动作 ----
+  load([
+    timingRecord(100, "PHASE_PREPARE", 1),
+    timingRecord(101, "PHASE_PLAY_IDLE", 1),
+    timingRecord(102, "TURN_END", 1),
+    { kind: "delta", delta_type: "hp_change", seq: 103, frame_id: 0, depth: 0 },
+  ]);
+  for (let index = 0; index < 4; index += 1) step();
+  check("U4-04-m 只认六个 PHASE_*_START 与 TURN_START：阶段体 / 阶段空闲 / 回合结束 / 非 timing 零动作",
+    floatNodes().length === 0,
+    `floats=${floatNodes().length}`);
+
+  // ---- 判定行缺失时退回装备格（同一块区域上方的空隙） ----
+  load([timingRecord(110, "PHASE_DRAW_START", 1)]);
+  const judge1Node = judgeRow(1);
+  if (judge1Node && judge1Node.parentNode) judge1Node.parentNode.removeChild(judge1Node);
+  step();
+  const equipFallback = floatNodes()[0] || null;
+  const equipNode = seatNode(1)
+    ? walk(seatNode(1)).find((node) => hasClass(node, "equip-grid")) : null;
+  const equipRect = equipNode ? equipNode.getBoundingClientRect() : null;
+  check("U4-04-n 对手没有判定行时退回 .equip-grid[data-seat]（同一块区域上方）",
+    Boolean(equipFallback) && Boolean(equipRect)
+      && attr(equipFallback, "data-anim-phase-anchor") === "equip-grid"
+      && px(equipFallback.style.top) < equipRect.top
+      && Math.abs(px(equipFallback.style.left) - (equipRect.left + equipRect.width / 2)) < 1e-6,
+    `anchor=${equipFallback && attr(equipFallback, "data-anim-phase-anchor")}`
+      + ` left=${equipFallback && equipFallback.style.left} top=${equipFallback && equipFallback.style.top}`
+      + ` equip=${equipRect && `${equipRect.left}..${equipRect.left + equipRect.width}@${equipRect.top}`}`);
+
+  ui.state.view = null;
+  ui.state.sessionId = null;
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

@@ -505,6 +505,167 @@ function animSpawn(layer, layerRect, plan, card, index, toRect) {
   return node;
 }
 
+/* ------------------------------------------------------------ 阶段 / 回合飘字（票 04 / D10） */
+
+/** 六个阶段的中文名：`PHASE_<名字>_START` → 「<名字>开始」（D10 的六种）。
+ *
+ * 表驱动：引擎当前只发 `PHASE_DRAW_START` / `PHASE_PLAY_START` / `PHASE_DISCARD_START`
+ * 三个「开始时」（准备 / 判定 / 结束的 `_START` 在 `EMPTY_LOG`，见 `sgs/timing/enum.py`），
+ * 但 D10 登记的是六个，来什么画什么、不按"引擎会不会发"分叉。
+ */
+const PHASE_FLOAT_LABELS = {
+  PREPARE: "准备阶段",
+  JUDGE: "判定阶段",
+  DRAW: "摸牌阶段",
+  PLAY: "出牌阶段",
+  DISCARD: "弃牌阶段",
+  FINISH: "结束阶段",
+};
+
+const PHASE_FLOAT_START_RE = /^PHASE_([A-Z]+)_START$/;
+
+/** 定位的设计单位：判定 / 装备区上方的空隙、夹进壳内的边距、淡出时上浮的距离。 */
+const PHASE_FLOAT_GAP_UNITS = 6;
+const PHASE_FLOAT_MARGIN_UNITS = 6;
+const PHASE_FLOAT_RISE_UNITS = 20;
+
+/** 阶段飘字层：与飞行层同形的覆盖层，**第一次飘字时**由本文件建出来（不改 index.html）。
+ *
+ * 层随 `#table-shell` 走，层级 17（高于技能名飘字 16、低于飞行器 18 与弹窗 60）。
+ * 壳 / 座位在每次重绘都会被重建，但层不在它们里面，故不会被一次 commit 抹掉。
+ */
+function animPhaseLayer() {
+  const shell = $("table-shell");
+  const existing = $("t-anim-phase");
+  if (existing && existing.parentNode === shell) return existing;
+  if (!shell) return null;
+  const layer = existing || document.createElement("div");
+  layer.id = "t-anim-phase";
+  layer.className = "anim-phase-layer";
+  layer.setAttribute("aria-hidden", "true");
+  shell.appendChild(layer);
+  return layer;
+}
+
+/** 该座位**判定 / 装备区上方**的锚点（D10）：对手 = 右侧判定行（没有就装备格），
+ *  自己 = `#t-self-zones`（判定 + 装备整块，住在底部自己面板的最右）。
+ *
+ *  刻意**不**用武将块：武将块正上方是技能名飘字（U3-04 / D9），两层各走各的锚，
+ *  于是同座位"发动技能 + 阶段切换"同时发生时也不会叠在一起。
+ */
+function animPhaseAnchor(seat) {
+  const number = Number(seat);
+  if (number === animMySeat()) {
+    const zones = $("t-self-zones");
+    return zones ? { node: zones, source: "self-zones" } : null;
+  }
+  const judge = animZoneRow(number, "judge");
+  if (judge) return { node: judge, source: "judge-row" };
+  const equip = animZoneRow(number, "equip");
+  if (equip) return { node: equip, source: "equip-grid" };
+  return null;
+}
+
+/** 一条 `timing` 记录的座位：`record.actor`；为 null（帧外时机的兜底）时退回当前座位。 */
+function animPhaseSeat(record) {
+  const actor = record ? record.actor : null;
+  if (actor === null || actor === undefined) return animMySeat();
+  const number = Number(actor);
+  return Number.isFinite(number) ? number : animMySeat();
+}
+
+/** 一条 `timing` 记录的飘字文本；不归本层负责的时机返回 `null`（零动作）。
+ *
+ * `TURN_START` 的武将名走接入层**已有**的展示名（`heroNameOf`），前端不新建映射；
+ * 拿不到名字（`（无武将）` / 空串）时退回座位号（票面验收）。
+ */
+function animPhaseText(timing, seat) {
+  const match = PHASE_FLOAT_START_RE.exec(timing);
+  if (match) {
+    const label = PHASE_FLOAT_LABELS[match[1]];
+    return label ? `${label}开始` : null;
+  }
+  if (timing === "TURN_START") {
+    const view = tableViewForRender();
+    const name = String(heroNameOf(playerAt(view, seat), view) || "").trim();
+    const label = name && name !== "（无武将）" ? name : `座位 ${seat}`;
+    return `轮到 ${label}`;
+  }
+  return null;
+}
+
+/** 放一枚阶段飘字：位置 / 寿命 / 动画都在这里定，**不排计时器、不碰播放时钟**。
+ *
+ * 锚点中心 = `left`（CSS 的 `translate(-50%, -100%)` 把它读成水平中心），锚点上沿留
+ * 一个空隙后 = `top`（= 飘字的**底边**）。贴边的座位夹进壳内：自己的判定 / 装备区在最右，
+ * 不夹会顶出 `#table-shell`；夹到了就在节点上留 `data-anim-phase-clamped=left|right`。
+ */
+function animShowPhaseFloat(seat, text, timing) {
+  const layer = animPhaseLayer();
+  const shell = $("table-shell");
+  const anchor = animPhaseAnchor(seat);
+  if (!layer || !shell || !anchor) return null;
+  const shellRect = animRect(shell);
+  const layerRect = animRect(layer) || shellRect;
+  const anchorRect = animRect(anchor.node);
+  const lifetime = Number(animConfig.phase_float_ms);
+  if (!shellRect || !layerRect || !anchorRect || !(lifetime > 0)) return null;
+
+  const dsu = designUnitOf(shell);
+  const margin = PHASE_FLOAT_MARGIN_UNITS * dsu;
+  const node = document.createElement("div");
+  node.className = "anim-phase-float";
+  node.textContent = text;
+  node.setAttribute("data-anim-phase-seat", String(seat));
+  node.setAttribute("data-anim-phase-timing", String(timing));
+  node.setAttribute("data-anim-phase-anchor", anchor.source);
+  layer.appendChild(node);
+
+  // 先量自己的宽度再夹：宽度由文本决定（CSS 的 padding / 字号都是设计单位）。
+  const half = ((animRect(node) || {}).width || 0) / 2;
+  const minLeft = margin + half;
+  const maxLeft = (Number(shellRect.width) || 0) - margin - half;
+  let left = anchorRect.left - layerRect.left + (Number(anchorRect.width) || 0) / 2;
+  let clamped = "";
+  if (maxLeft >= minLeft) {
+    if (left > maxLeft) {
+      left = maxLeft;
+      clamped = "right";
+    } else if (left < minLeft) {
+      left = minLeft;
+      clamped = "left";
+    }
+  }
+  node.style.left = `${Math.round(left)}px`;
+  node.style.top = `${Math.round(anchorRect.top - layerRect.top - PHASE_FLOAT_GAP_UNITS * dsu)}px`;
+  if (clamped) node.setAttribute("data-anim-phase-clamped", clamped);
+
+  const remove = () => {
+    if (node.parentNode) node.parentNode.removeChild(node);
+  };
+  if (typeof node.animate !== "function") {
+    // 没有 Web Animations 就不留一枚永久节点（纯视觉层，退化成"不显示"）。
+    remove();
+    return null;
+  }
+  const fadeIn = Math.round(4 * dsu);
+  const rise = Math.round(PHASE_FLOAT_RISE_UNITS * dsu);
+  const animation = node.animate(
+    [
+      { opacity: 0, transform: `translate(-50%, -100%) translateY(${fadeIn}px)` },
+      { opacity: 1, transform: "translate(-50%, -100%)", offset: 0.18 },
+      { opacity: 1, transform: "translate(-50%, -100%)", offset: 0.7 },
+      { opacity: 0, transform: `translate(-50%, -100%) translateY(-${rise}px)` },
+    ],
+    { duration: lifetime, easing: "ease-out", fill: "forwards" },
+  );
+  if (animation) {
+    animation.onfinish = remove;
+    animation.oncancel = remove;
+  }
+  return node;
+}
+
 /* ------------------------------------------------------------ 钩子（session.js 调用） */
 
 /** 起飞前调用：登记 / 不飞判定 + **量一次源矩形**。任何异常都吞掉（不阻塞播放时钟）。 */
@@ -574,6 +735,21 @@ function animLaunchFlight(plan) {
     return spawned;
   } catch (error) {
     return 0;
+  }
+}
+
+/* 阶段 / 回合飘字（D10）：只放画面——`durationOf` 对非牌移动恒为 0，步长照旧只吃 base。
+ * 任何异常都吞掉（缺失锚点 / 座位 / 层时静默跳过），绝不阻塞播放时钟。 */
+function animPlanPhase(record) {
+  try {
+    if (!record || record.kind !== "timing") return null;
+    const timing = String(record.timing || "");
+    const seat = animPhaseSeat(record);
+    const text = animPhaseText(timing, seat);
+    if (text === null) return null;
+    return animShowPhaseFloat(seat, text, timing);
+  } catch (error) {
+    return null;
   }
 }
 

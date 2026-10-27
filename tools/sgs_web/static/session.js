@@ -667,9 +667,12 @@ function stepPlayback(immediate) {
     else appendLog(record, playback.querySeat);
     state.effectCards = applyEffectDelta(record, state.effectCards);
     state.revealedCards = applyRevealDelta(record, state.revealedCards);
-    // U4-01（D1 / D2）：飞行层只有一个显式入口。起飞前量**源**——这一步还没重绘，
-    // 舞台卡 / 手牌 / 槽位都还在原处；落点等重绘之后再量并同步起飞（见本函数末尾）。
+    // U4-01（D1 / D2）飞行层 / U4-04（D10）阶段飘字：两条动效都在**重绘之前**规划。
+    // 飞行器起飞前量**源**——这一步还没重绘，舞台卡 / 手牌 / 槽位都还在原处，落点等
+    // 重绘之后再量并同步起飞（见本函数末尾）；阶段飘字只放画面：不排计时器、不改步长
+    // （`durationOf` 对非牌移动恒为 0，见本函数末尾的 `delayOf`）。
     flightPlan = animPlanFlight(record);
+    animPlanPhase(record);
   }
   // U3-05（D11）：每条记录先把**可见**变化写进 live view，再**从它**重绘全表——手牌数 /
   // 自己的手牌面 / 体力 / 装备与判定区 / 牌堆与弃牌数 / 横置 / 酒 / 身份 / 阵亡 /

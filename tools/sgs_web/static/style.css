@@ -879,6 +879,37 @@ button.mini-slot { cursor: pointer; }
   }
 }
 
+/* ---------- 阶段 / 回合飘字层（U4-04 / D10）：判定 / 装备区上方，不占步长 ---------- */
+
+/* 覆盖整个牌桌壳、不吃指针、裁在壳内；层级高于技能名飘字（16），低于飞行器（18）与
+ * 弹窗（60）。锚在该座位的判定 / 装备区上方——**不是**武将块正上方（那里是技能名飘字），
+ * 两层各走各的锚，于是同座位"发动技能 + 阶段切换"同时发生也不叠。层由 anim.js 动态建出。 */
+.anim-phase-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 17;
+}
+/* 位置由 anim.js 写死成 left（= 水平中心）/ top（= 底边），尺寸 / 内边距 / 圆角走设计
+ * 单位；浅底药丸只为压住牌面与槽位的花纹，配色与技能名飘字同族（金色字，深一档保证
+ * 在浅底上可读），不加光晕（D12：只加运动、不加光）。 */
+.anim-phase-float {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  white-space: nowrap;
+  font-size: calc(15 * var(--dsu));
+  font-weight: 700;
+  color: #8a6b2f;
+  background: rgba(255, 252, 242, .88);
+  border: 1px solid rgba(217, 180, 92, .55);
+  padding: calc(2 * var(--dsu)) calc(9 * var(--dsu));
+  border-radius: calc(999 * var(--dsu));
+  text-shadow: 0 1px calc(2 * var(--dsu)) rgba(43, 36, 28, .28);
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+
 /* 白光（D9）：武将块内 0.6s 扫过；粗 8 / 细 3 设计单位、细带晚 0.12s，左上 → 右下，
  * 只播一次，靠武将块的 `overflow: hidden` 裁在块内（`.seat .hero-block` 的既有规则）。 */
 .hero-block.skill-sweep::before {
