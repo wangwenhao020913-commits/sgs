@@ -214,8 +214,16 @@ function animRawDuration(kind) {
   return Number.isFinite(value) ? value : 0;
 }
 
-/** N = 同一条 ``card_move`` 的牌数；隐藏移动（``cards`` 抹空）读 ``card_count``。 */
+/** N = 同一条 ``card_move`` 的牌数；隐藏移动（``cards`` 抹空）读 ``card_count``。
+ *
+ *  口径只有一份：`session.js:liveMoveCount`（可见牌 = `cards.length`，隐藏区 = `card_count`）。
+ *  这里不另抄一份可见性规则，避免飞行与舞台 / live view 的张数漂移。
+ */
 function animCountOf(record) {
+  if (typeof liveMoveCount === "function") {
+    const count = Number(liveMoveCount(record));
+    return Number.isFinite(count) && count > 0 ? count : 0;
+  }
   const cards = (record && record.cards) || [];
   if (cards.length) return cards.length;
   const hidden = Number(record && record.card_count);
@@ -587,9 +595,13 @@ function animPhaseText(timing, seat) {
   }
   if (timing === "TURN_START") {
     const view = tableViewForRender();
-    const name = String(heroNameOf(playerAt(view, seat), view) || "").trim();
-    const label = name && name !== "（无武将）" ? name : `座位 ${seat}`;
-    return `轮到 ${label}`;
+    const player = playerAt(view, seat);
+    const name = player ? String(heroNameOf(player, view) || "").trim() : "";
+    // 与 `log.js:zoneLabel` 同一条 fail-closed：`heroNameOf` 在目录查不到时会退回
+    // **引擎 id**，那不是武将名——别把 `jie_liubei` 这种串写进玩家文案，退回座位号。
+    const assigned = view ? String(heroIdAt(view, seat) || "").trim() : "";
+    const named = name && name !== "（无武将）" && name !== assigned ? name : "";
+    return `轮到 ${named || `座位 ${seat}`}`;
   }
   return null;
 }

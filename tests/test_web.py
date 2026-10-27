@@ -74,6 +74,7 @@ from sgs_web.projection import (  # noqa: E402
     harvest_state,
     option_seats,
     pending_payload,
+    query_actor_map,
     query_context,
     seat_hero_zones,
     seat_skill_display,
@@ -8919,11 +8920,7 @@ def test_the_session_view_derives_skill_events_for_an_accepted_activation() -> N
     # 更宽的判据：这一批里**别人的** action 都只有这两个键（不是只裁了反间那一条）。
     # U4-06 / D13 起，查看者**自己的**应答按 viewer 展开（本夹具里人类是座位 1、还没有应答过，
     # 故这里仍应全是座位 0 的裁剪载荷）。
-    query_actors = {
-        record.seq: record.query.actor
-        for record in session.records()
-        if getattr(record, "kind", None) == "query"
-    }
+    query_actors = query_actor_map(session.records())
     for record in body["records"]:
         if record.get("kind") != "action" or not isinstance(record.get("action"), dict):
             continue
@@ -9140,11 +9137,7 @@ def test_a_real_session_expands_the_human_seats_own_action_and_trims_the_others(
     _play_to_end(session)
     body = GameRegistry(runs_dir="/tmp/unused").view(session, after=-1, logs_after=0)
 
-    query_actors = {
-        record.seq: record.query.actor
-        for record in session.records()
-        if getattr(record, "kind", None) == "query"
-    }
+    query_actors = query_actor_map(session.records())
     actions = [
         record for record in session.records() if getattr(record, "kind", None) == "action"
     ]

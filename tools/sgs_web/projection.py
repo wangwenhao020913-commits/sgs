@@ -2175,22 +2175,24 @@ def query_actor_map(records: Iterable[object]) -> dict[int, int]:
     那次 ``query``（记录流里已下发的公开事实）。``serve.GameRegistry.view`` 拿这张表判断
     一条 action 是不是查看者自己的；``skill_events_after`` 用同一判据给派生事件找座位。
 
-    ``records`` 可以是引擎记录模型，也可以是已序列化的 JSON（录像 / 合成夹具）。只序列化
-    ``kind == "query"`` 的记录，其余模型不花 ``record_json`` 的代价。
+    ``records`` 可以是引擎记录模型，也可以是已序列化的 JSON（录像 / 合成夹具）。这里只读
+    ``seq`` / ``query.actor`` 两个字段，**不**把整条询问（含候选 / 视角）序列化一遍——
+    ``GameRegistry.view`` 每次取增量都会调它，整条序列化会把一次刷新放大成几十毫秒。
     """
     actors: dict[int, int] = {}
     for record in records:
         if isinstance(record, Mapping):
-            raw = record
-        elif getattr(record, "kind", None) == "query":
-            raw = json.loads(record_json(record))
+            if record.get("kind") != "query":
+                continue
+            query = record.get("query")
+            seq = record.get("seq")
+            actor = query.get("actor") if isinstance(query, Mapping) else None
         else:
-            continue
-        if raw.get("kind") != "query":
-            continue
-        query = raw.get("query") or {}
-        seq = raw.get("seq")
-        actor = query.get("actor")
+            if getattr(record, "kind", None) != "query":
+                continue
+            query = getattr(record, "query", None)
+            seq = getattr(record, "seq", None)
+            actor = getattr(query, "actor", None)
         if isinstance(seq, int) and isinstance(actor, int):
             actors[seq] = actor
     return actors
@@ -2322,17 +2324,15 @@ def skill_events_after(
     形状走同一份派生。**不使用** ``picks``（那是成本牌），技能与目标都是公开事实，
     不需要按查看者过滤。
     """
-    query_actors: dict[int, int] = {}
+    records = list(records)
+    # 应答者映射与 `GameRegistry.view` 共用同一份实现（记录模型 / 已序列化 JSON 都吃）。
+    query_actors = query_actor_map(records)
     events: list[dict[str, Any]] = []
     for raw in records:
         record = raw if isinstance(raw, Mapping) else json.loads(record_json(raw))
         kind = record.get("kind")
         seq = record.get("seq")
         if kind == "query":
-            query = record.get("query") or {}
-            actor = query.get("actor")
-            if isinstance(seq, int) and isinstance(actor, int):
-                query_actors[seq] = actor
             continue
         if kind != "action" or not record.get("accepted"):
             continue

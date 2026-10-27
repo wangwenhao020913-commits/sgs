@@ -788,9 +788,11 @@ function processingProductFor(cards, products = state.processingProducts) {
  * 服务端已按展示契约补好牌面字段（``visible_record``）。
  *
  * 牌组作为参数传入、返回值就是新牌组：牌桌与回放页各持一份。
+ *
+ * ``now`` 是**测试用的时钟注入**（缺省 ``stageNow()``）：两条列表的 pop / 入台要在同一
+ * 个时刻上比较时，测试传同一个 ``now``，不读真实时钟、也不等计时器（D15 / 标准 §4）。
  */
-function applyRevealDelta(record, cards = state.revealedCards) {
-  const now = stageNow();
+function applyRevealDelta(record, cards = state.revealedCards, now = stageNow()) {
   const fromZones = stageFromZoneMap(cards || []);
   const held = (cards || []).filter((item) => stageLane(item, now) !== "gone");
   // 来源表跟着牌组走（D2 / D10）：展示项也要能在"从快照补项"时找回首次来源。
@@ -851,9 +853,16 @@ function applyRevealDelta(record, cards = state.revealedCards) {
  *
  * **牌组作为参数传入、返回值就是新牌组**：牌桌与回放页各持一份，派生函数不读 / 不写
  * ``state.effectCards``。
+ *
+ * ``now`` 是**测试用的时钟注入**（缺省 ``stageNow()``）：两条列表的 pop / 入台要在同一
+ * 个时刻上比较时，测试传同一个 ``now``，不读真实时钟、也不等计时器（D15 / 标准 §4）。
  */
-function applyEffectDelta(record, effectCards = state.effectCards, products = state.processingProducts) {
-  const now = stageNow();
+function applyEffectDelta(
+  record,
+  effectCards = state.effectCards,
+  products = state.processingProducts,
+  now = stageNow(),
+) {
   const previous = effectCards || [];
   const frameKinds = stageFrameKindMap(previous);
   const fromZones = stageFromZoneMap(previous);
