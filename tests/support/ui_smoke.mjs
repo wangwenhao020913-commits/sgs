@@ -13449,17 +13449,20 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.state.effectCards = ui.applyEffectDelta(pop(108, 11), ui.state.effectCards);
   ui.state.revealedCards = ui.applyRevealDelta(pop(108, 11), ui.state.revealedCards);
   const framePopAfter = Date.now();
-  const frameFadeAt = item(102) && item(102).stage.fadeAt;
-  const frameDwell = Number.isFinite(frameFadeAt)
-    && frameFadeAt >= framePopBefore + 1000 && frameFadeAt <= framePopAfter + 1000
-    && item(103).stage.fadeAt === frameFadeAt && item(105).stage.fadeAt === frameFadeAt;
-  ui.renderProcessing(frameFadeAt - 1);
+  // `effectCards` 与 `revealedCards` 的 pop 各读一次 `Date.now()`：跨毫秒时两边的
+  // `fadeAt` 可以差 1ms，不能拿严格相等当判据（票 03 的 U3-01h 曾因此偶发红）。
+  const frameFadeAts = [102, 103, 105].map((id) => item(id) && item(id).stage.fadeAt);
+  const frameDwell = frameFadeAts.every((fadeAt) => Number.isFinite(fadeAt)
+    && fadeAt >= framePopBefore + 1000 && fadeAt <= framePopAfter + 1000);
+  const frameFadeAtMin = Math.min(...frameFadeAts);
+  const frameFadeAtMax = Math.max(...frameFadeAts);
+  ui.renderProcessing(frameFadeAtMin - 1);
   const frameStillDwelling = !fading(102) && !fading(103) && !fading(105) && !fading(101);
-  ui.renderProcessing(frameFadeAt);
+  ui.renderProcessing(frameFadeAtMax);
   check("U3-01h 产生它们的结算帧 pop ⇒ 先各自停留 0.5(N+1)（N=1 = 1s）再 1s 淡出（不再是瞬删）",
     frameDwell && frameStillDwelling
       && fading(102) && fading(103) && fading(105) && !fading(101),
-    `fadeAt=${frameFadeAt} popAt=${framePopBefore}..${framePopAfter} dwell=${frameStillDwelling}`
+    `fadeAt=${frameFadeAts.join("/")} popAt=${framePopBefore}..${framePopAfter} dwell=${frameStillDwelling}`
       + ` A=${fading(101)} B=${fading(102)} C=${fading(103)} D=${fading(105)}`);
 
   const aPopBefore = Date.now();
