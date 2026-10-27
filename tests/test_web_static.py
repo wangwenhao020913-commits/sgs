@@ -862,3 +862,133 @@ def test_session_playback_plans_the_phase_float_next_to_the_flight_hook() -> Non
     assert delta >= 0 and phase > delta, "飘字规划必须在 applyEffectDelta 之后（与飞行层同一时机）"
     assert phase < body.find("applyLiveDelta(record"), "飘字必须在重绘之前规划（读旧布局的锚点）"
     assert phase < body.find("renderTable()"), "飘字必须在 renderTable 之前规划"
+
+
+# ---------------------------------------------------------------------------
+# U4-05：弃牌堆面板（spec D11）
+#
+# 机械的两半：
+# 1. **顶栏与挂载**：「弃牌 N」是 button（计数口仍是内层 `#t-discard`，顶栏顺序 /
+#    样式不变）；面板有自己的窗口 + 遮罩 + 标题 + 关闭按钮。`#t-modal-backdrop`
+#    仍是那个**没有** click 的暗化层（U2 的固定断言），"点背景 = 关闭"只属于这里。
+# 2. **读取方**：面板正文从与表体**同一份**视图画（`tableViewForRender()`），挂在
+#    `renderTable()` 末尾自动重画；牌面只读（`cardFaceNode(..., { static: true })`），
+#    不读来源座位 / 区域。
+# 行为（行数 / 倒序 / 空态 / 关闭出口 / live 数据源 / 自动刷新）归 `ui_smoke`。
+# ---------------------------------------------------------------------------
+
+_MODAL_JS = STATIC_DIR / "modal.js"
+_TABLE_JS = STATIC_DIR / "table.js"
+
+
+def test_discard_panel_has_its_own_button_backdrop_and_modal_mount() -> None:
+    """顶栏按钮 + 独立遮罩 + 独立窗口；旧 `#t-modal-backdrop` 的点击语义不被改写。"""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    button = re.search(
+        r'<button\b[^>]*\bid="btn-discard"[^>]*>(?P<body>.*?)</button>', html, re.S)
+    assert button is not None, "index.html 里缺少顶栏按钮 #btn-discard（D11）"
+    assert re.search(r'\btype="button"', button.group(0)), (
+        f"#btn-discard 必须是 type=\"button\"（不提交表单）：{button.group(0)}"
+    )
+    assert 'id="t-discard"' in button.group("body"), (
+        "计数口必须仍是内层 #t-discard（renderTable 只写这个 span）"
+    )
+
+    topbar = html[html.index('id="table-topbar"'):html.index('id="table-stage"')]
+    order = ["t-deck", "btn-discard", "t-discard", "btn-settings",
+             "nav-lobby", "nav-table", "nav-replay"]
+    positions = [topbar.index(f'id="{name}"') for name in order]
+    assert positions == sorted(positions), (
+        "顶栏右端顺序必须保持 牌堆 / 弃牌 / 设置 / 导航三键："
+        f"{dict(zip(order, positions))}"
+    )
+
+    backdrop = re.search(r'<div\b[^>]*\bid="t-discard-backdrop"[^>]*>', html)
+    assert backdrop is not None, "index.html 里缺少弃牌堆自己的遮罩 #t-discard-backdrop"
+    modal = re.search(r'<div\b[^>]*\bid="t-discard-modal"[^>]*>', html)
+    assert modal is not None, "index.html 里缺少弃牌堆面板 #t-discard-modal"
+    assert re.search(r'class="[^"]*\bmodal\b', modal.group(0)), (
+        f"面板必须复用 modal.js 的壳（.modal / .modal-window CSS）：{modal.group(0)}"
+    )
+    for node_id in ("t-discard-title", "t-discard-close", "t-discard-body"):
+        assert re.search(rf'\bid="{node_id}"', html), f"index.html 里缺少 #{node_id}"
+    body = re.search(r'<div\b[^>]*\bid="t-discard-body"[^>]*>', html)
+    assert body is not None and re.search(r'class="[^"]*\bmodal-body\b', body.group(0)), (
+        "面板正文必须复用 .modal-body（可滚正文）"
+    )
+    assert html.index('id="t-discard-backdrop"') < html.index('id="t-discard-modal"'), (
+        "遮罩必须在窗口之前（窗口压在遮罩上）"
+    )
+
+    modal_js = _strip_js_comments(_MODAL_JS.read_text(encoding="utf-8"))
+    assert '$("btn-discard")' in modal_js and re.search(
+        r'addEventListener\("click", openDiscardPanel\)', modal_js), (
+        "modal.js 必须把 #btn-discard 接到 openDiscardPanel"
+    )
+    assert '$("t-discard-backdrop")' in modal_js and re.search(
+        r'addEventListener\("click", closeDiscardPanel\)', modal_js), (
+        "弃牌堆自己的遮罩必须接 click → closeDiscardPanel"
+    )
+    assert '$("t-discard-close")' in modal_js and re.search(
+        r'addEventListener\("click", closeDiscardPanel\)', modal_js), (
+        "关闭按钮必须接 closeDiscardPanel"
+    )
+    assert not re.search(r'\$\("t-modal-backdrop"\)\.addEventListener\(', modal_js), (
+        "#t-modal-backdrop 必须保持没有 click（U2 断言：点背景不是询问弹窗 / 详情的出口）"
+    )
+    assert "discardPanelOpen" in modal_js, "开合状态必须住 modal.js（U4-05 的裁定）"
+
+
+def test_discard_panel_reads_the_table_view_and_refreshes_from_render_table() -> None:
+    """正文读 `tableViewForRender().snapshot.discard`；`renderTable()` 末尾自动重画。"""
+    table = _strip_js_comments(_TABLE_JS.read_text(encoding="utf-8"))
+    render_panel = re.search(
+        r"function renderDiscardPanel\(\) \{(?P<body>.*?)\n\}", table, re.S)
+    assert render_panel is not None, "table.js 里找不到 renderDiscardPanel()"
+    body = render_panel.group("body")
+    assert "tableViewForRender()" in body, (
+        "面板必须与表体读同一份视图（回放期 = live view，其余 = 权威视图）"
+    )
+    assert re.search(r"snapshot\.discard", body), "面板必须读 snapshot.discard"
+    assert re.search(r"cardFaceNode\(card, \{ static: true \}\)", body), (
+        "每行必须是只读牌面（cardFaceNode(card, { static: true })），不接点击"
+    )
+    assert re.search(r"\.reverse\(\)", body), "时间倒序 = 反转 snapshot 的置入序"
+
+    render_table = re.search(r"function renderTable\(\) \{(?P<body>.*?)\n\}", table, re.S)
+    assert render_table is not None, "table.js 里找不到 renderTable()"
+    table_body = render_table.group("body")
+    assert table_body.count("renderDiscardPanel();") == 1, (
+        "renderTable 末尾必须恰好调一次 renderDiscardPanel()（关着时 no-op，不轮询）"
+    )
+    assert table_body.index("renderDiscardPanel();") > table_body.index("renderPromptSkills(view);"), (
+        "自动刷新的接缝必须在 renderTable 的末尾"
+    )
+
+
+def test_discard_panel_uses_the_shared_modal_shell_with_its_own_clickable_backdrop() -> None:
+    """CSS：面板几何沿用 .modal；自己的遮罩可点（旧遮罩仍不可点），窗口在它之上。"""
+    backdrop = _css_rule(".discard-backdrop")
+    assert re.search(r"pointer-events:\s*auto", backdrop), (
+        f"弃牌堆自己的遮罩必须吃指针（点是关闭出口），实际：{backdrop}"
+    )
+    assert re.search(r"position:\s*absolute", backdrop), f"遮罩必须绝对定位：{backdrop}"
+    legacy = _css_rule(".modal-backdrop")
+    assert re.search(r"pointer-events:\s*none", legacy), (
+        f"#t-modal-backdrop 必须保持 pointer-events: none（U2 的固定断言）：{legacy}"
+    )
+
+    def z_index(selector: str) -> int:
+        found = re.search(r"z-index:\s*(\d+)", _css_rule(selector))
+        assert found is not None, f"{selector} 里找不到 z-index"
+        return int(found.group(1))
+
+    assert z_index(".discard-modal") > z_index(".modal"), (
+        "弃牌堆面板是用户主动翻出来的顶层检视窗，必须叠在询问 / 详情窗之上"
+    )
+    assert z_index(".discard-backdrop") > z_index(".modal"), "遮罩也必须压住询问 / 详情窗"
+    assert re.search(r"overflow-y:\s*auto", _css_rule(".modal-body")), (
+        "N 多时必须纯滚动：正文沿用 .modal-body 的 overflow-y: auto"
+    )
+    body = _css_rule(".discard-body")
+    assert re.search(r"flex-wrap:\s*wrap", body), f"牌面行必须换行铺（不做分组 / 分页）：{body}"

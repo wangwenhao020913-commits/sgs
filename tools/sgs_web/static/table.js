@@ -320,6 +320,45 @@ function renderTable() {
   renderSkills(view);
   // 提示区左栏的技能按钮组：与底部技能区同一份清单 / 判据（U2-04），additive。
   renderPromptSkills(view);
+  // U4-05（D11）：弃牌堆面板开着时，每次提交 / 回放步都从同一份视图重画（关着时 no-op）。
+  renderDiscardPanel();
+}
+
+/* --------------------------------------------------- 弃牌堆面板（U4-05 / D11） */
+
+/** 只读面板正文：时间倒序（最新在上），每行一张牌面（花色 + 点数 + 名）。
+ *
+ * 开合状态住 `modal.js`（`discardPanelIsOpen()`），本函数在关着时 **no-op**，
+ * 因而可以直接挂在 `renderTable()` 的末尾做"面板开着时每次提交 / 回放步自动重画"。
+ *
+ * 数据源与表体同一份视图（`tableViewForRender()`）：回放期间是逐事件派生的 live view，
+ * 其余是权威视图；**不**读引擎 / 记录流，也不给来源座位 / 区域。服务端
+ * `snapshot.discard` 按**置入序**给牌面，反转即时间倒序。
+ */
+function renderDiscardPanel() {
+  if (!discardPanelIsOpen()) return;
+  const view = tableViewForRender();
+  const snapshot = view && view.snapshot;
+  const discard = (snapshot && snapshot.discard) || [];
+  const summary = $("t-discard-summary");
+  if (summary) summary.textContent = `共 ${discard.length} 张`;
+  const body = $("t-discard-body");
+  if (!body) return;
+  body.innerHTML = "";
+  body.scrollTop = 0;
+  if (!discard.length) {
+    const empty = document.createElement("p");
+    empty.className = "dim discard-empty";
+    empty.textContent = "弃牌堆里还没有牌。";
+    body.appendChild(empty);
+    return;
+  }
+  // N 多时纯滚动（CSS：正文 `overflow-y: auto`），不做分组、不做分页。
+  for (const card of [...discard].reverse()) {
+    const face = cardFaceNode(card, { static: true });
+    face.classList.add("discard-card");
+    body.appendChild(face);
+  }
 }
 
 /* --------------------------------------------------- 中央舞台（U3-01 / D2–D5） */

@@ -1,6 +1,7 @@
-/* SGS 前端 · 询问弹窗框架（U2-06 / spec D3）+ 武将详情检视窗（U1-06 / D8）。
+/* SGS 前端 · 询问弹窗框架（U2-06 / spec D3）+ 武将详情检视窗（U1-06 / D8）+ 弃牌堆面板
+ * （U4-05 / D11）。
  *
- * 两个窗口、两条纪律：
+ * 三个窗口、各自一条纪律：
  *
  *  - **`#t-dialog` = 询问弹窗**（唯一的询问表面容器）。标题 + 可选步骤提示 + 内容槽 +
  *    折叠按钮。**没有关闭按钮、没有 ESC 关闭、没有点背景关闭**——退出只有两条路：
@@ -9,6 +10,9 @@
  *    折叠只隐藏正文（标题 + 步骤提示 + 展开按钮留下），不改只读态。
  *  - **`#t-modal` = 武将详情**：唯一可叠加在询问弹窗之上的检视窗；它自己的关闭按钮 /
  *    ESC 只关它自己，底下的询问弹窗原样恢复；开合它不改变只读态。
+ *  - **`#t-discard-modal` = 弃牌堆面板**：只读检视窗，**自己的遮罩**（`#t-discard-backdrop`）
+ *    与关闭按钮 / ESC 三个出口。它不进只读判据、不改选择态；数据由
+ *    `table.js:renderDiscardPanel()` 从表体同一份视图画。
  *
  * 生命周期：询问弹窗只在「当前步骤的表面是弹窗」时存在（`stepDialogKind`）。另外两个
  * **牌桌表面**的用户也借这个容器、都不进只读判据：本地态的预发动清单（D2 的 C 形），
@@ -622,21 +626,72 @@ function syncHeroModal() {
   syncModalChrome();
 }
 
+/* ------------------------------------------------------------ 弃牌堆面板 */
+
+/** 弃牌堆面板的开合状态（U4-05 / D11）。
+ *
+ * 住这里的理由与武将详情同型：它是**用户**打开的只读检视窗，不跟询问 / pending 走；
+ * 开合不改变 `selectionEnabled()` / `stepDialogKind()`，也不写任何选择态。
+ * 正文由 `table.js:renderDiscardPanel()` 画（数据源与表体同一份视图），这里只开着 / 关着。
+ */
+let discardPanelOpen = false;
+
+function discardPanelIsOpen() {
+  return discardPanelOpen;
+}
+
+/** 窗口 / 自己的遮罩 / 顶栏按钮的显隐同步（唯一写 `hidden` 的地方）。 */
+function syncDiscardPanelChrome() {
+  const modal = $("t-discard-modal");
+  const backdrop = $("t-discard-backdrop");
+  const button = $("btn-discard");
+  if (modal) modal.hidden = !discardPanelOpen;
+  if (backdrop) backdrop.hidden = !discardPanelOpen;
+  if (button) button.setAttribute("aria-expanded", String(discardPanelOpen));
+}
+
+/** 打开面板：先画一帧再显示（不等下一次提交）。
+ *
+ * 不动 `state.focusCardId` / `state.picks` / `pending`，也不发请求。 */
+function openDiscardPanel() {
+  discardPanelOpen = true;
+  // 标题是静态文案，但仍在打开时写一次：真浏览器与烟测垫片（不解析 HTML 文本）
+  // 因此读到同一个值，不把文案藏进只对真 DOM 成立的地方。
+  const title = $("t-discard-title");
+  if (title) title.textContent = "弃牌堆";
+  renderDiscardPanel();
+  syncDiscardPanelChrome();
+}
+
+/** 关闭面板：只收起窗口与遮罩；不改任何选择态、不提交。 */
+function closeDiscardPanel() {
+  if (!discardPanelOpen) return;
+  discardPanelOpen = false;
+  syncDiscardPanelChrome();
+}
+
 /* ------------------------------------------------------------ 键盘 / 切页 / 装配 */
 
-/** document 的 keydown 入口：ESC **只**关武将详情（检视窗）。
+/** document 的 keydown 入口：ESC 先关弃牌堆面板，其次**只**关武将详情（检视窗）。
  *
- * 询问弹窗没有 ESC 出口（D3）：没开详情时这里什么都不做——不是"先 preventDefault 再
- * 找不到可关的东西"，ESC 在询问弹窗上就是 no-op。 */
+ * 两者互相独立：弃牌堆面板开着时 ESC 只收面板、不动武将详情；没有面板时才走详情。
+ * 询问弹窗没有 ESC 出口（D3）：两窗都没开时这里什么都不做——不是"先 preventDefault
+ * 再找不到可关的东西"，ESC 在询问弹窗上就是 no-op。 */
 function handleModalKey(event) {
   if (!event || (event.key !== "Escape" && event.key !== "Esc")) return;
+  if (discardPanelOpen) {
+    if (event.preventDefault) event.preventDefault();
+    closeDiscardPanel();
+    return;
+  }
   if (state.modal.heroSeat === null) return;
   if (event.preventDefault) event.preventDefault();
   closeHeroDetail();
 }
 
-/** 离开牌桌页 / 回放期间：收起两个窗口（不提交任何 action）。 */
+/** 离开牌桌页：收起三个窗口（不提交任何 action）。 */
 function closeModalForView() {
+  closeDiscardPanel();
   closeDialogDom();
   state.modal.heroSeat = null;
   syncHeroModal();
@@ -653,8 +708,17 @@ function wireModal() {
   // 武将详情自己的关闭按钮：只关细节，不动询问弹窗。
   const close = $("t-modal-close");
   if (close) close.addEventListener("click", closeHeroDetail);
+  // 弃牌堆面板（U4-05 / D11）：顶栏按钮开；关闭按钮 / **自己的**遮罩关（不是
+  // `#t-modal-backdrop`，那一层没有点击监听）。三者都不改选择态、不发请求。
+  const discardOpen = $("btn-discard");
+  if (discardOpen) discardOpen.addEventListener("click", openDiscardPanel);
+  const discardClose = $("t-discard-close");
+  if (discardClose) discardClose.addEventListener("click", closeDiscardPanel);
+  const discardBackdrop = $("t-discard-backdrop");
+  if (discardBackdrop) discardBackdrop.addEventListener("click", closeDiscardPanel);
   document.addEventListener("keydown", handleModalKey);
-  // 初始两个窗口都收起（真浏览器由 HTML 的 hidden 属性保证；DOM 垫片不解析属性）。
+  // 初始三个窗口都收起（真浏览器由 HTML 的 hidden 属性保证；DOM 垫片不解析属性）。
   closeDialogDom();
   syncHeroModal();
+  syncDiscardPanelChrome();
 }

@@ -105,7 +105,11 @@
       </div>
       <div class="topbar-right">
         <span class="count" title="牌堆剩余">牌堆 <span id="t-deck"></span></span>
-        <span class="count" title="弃牌堆">弃牌 <span id="t-discard"></span></span>
+        <!-- U4-05 / D11：弃牌数变成按钮，点开只读的弃牌堆面板；计数口仍是内层
+             `#t-discard`（`renderTable` 只写这个 span），顺序 / 样式与「牌堆」一致。 -->
+        <button id="btn-discard" type="button" class="count" title="弃牌堆（点开查看）"
+                aria-haspopup="dialog" aria-controls="t-discard-modal"
+                aria-expanded="false">弃牌 <span id="t-discard"></span></button>
         <button id="btn-settings" type="button" class="icon-btn" title="牌桌设置">设置</button>
         <!-- U2-01：导航三键（D7 右端顺序：牌堆 / 弃牌 / 设置 / 开局 / 牌桌 / 回放）。
              无会话时「牌桌」禁用；当前页高亮由 core.js:show() 统一维护。 -->
@@ -259,6 +263,22 @@
           <button id="t-modal-close" type="button" class="ghost" title="关闭（Esc）">关闭</button>
         </header>
         <div id="t-modal-body" class="modal-body"></div>
+      </div>
+    </div>
+
+    <!-- 弃牌堆面板（U4-05 / D11）：只读检视窗（标题 + 关闭 + 可滚正文），数据源与表体
+         同一份视图。**自己的遮罩**：`#t-modal-backdrop` 属于询问弹窗 / 武将详情，那一层
+         没有点击监听（U2 断言），"点背景 = 关闭"只适用于这里的窗口。 -->
+    <div id="t-discard-backdrop" class="discard-backdrop" hidden></div>
+    <div id="t-discard-modal" class="modal discard-modal" role="dialog" aria-modal="true"
+         aria-labelledby="t-discard-title" hidden>
+      <div class="modal-window discard-window">
+        <div class="modal-head">
+          <h2 id="t-discard-title" class="modal-title">弃牌堆</h2>
+          <button id="t-discard-close" type="button" class="ghost" title="关闭（Esc）">关闭</button>
+        </div>
+        <div id="t-discard-summary" class="discard-summary">共 0 张</div>
+        <div id="t-discard-body" class="modal-body discard-body"></div>
       </div>
     </div>
 

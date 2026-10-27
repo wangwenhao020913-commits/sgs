@@ -16981,4 +16981,190 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.state.sessionId = null;
 }
 
+/* ============ U4-05（spec D11）：弃牌堆面板 ============
+ *
+ * 顶栏「弃牌 N」开一个**只读**模态：数据源与表体同一份 `tableViewForRender()`，
+ * 时间倒序（最新在上），进入 / 关闭都不改选择态。这一节不读真实布局 / 时钟：
+ * 打开走 `#btn-discard` 的点击监听，关闭走 Esc / 自己的遮罩 / 关闭按钮。
+ */
+{
+  const discardCard = (id, name, suit = "heart", rank = 10) => ({
+    ...synthCard(id, name), suit, rank,
+    color: suit === "heart" || suit === "diamond" ? "red" : "black",
+  });
+  const discardBody = (discard) => ({
+    session_id: "u4-discard",
+    seed: 1, human_seat: 0, finished: false, timeout_seconds: null,
+    heroes: { 0: "guojia" }, skills: [], pending: null,
+    snapshot: { ...synthView(null).snapshot, discard },
+    records: [], live_deltas: [], narrative: [], skill_events: [],
+    cursor: 1, log_seq: 1,
+  });
+  const rows = () => Array.from($("t-discard-body").children);
+  const rowIds = () => rows().map((node) => node.getAttribute("data-card-id")).join(",");
+  const openDiscard = () => clickButton($("btn-discard"));
+  const discardClosed = () => $("t-discard-modal").hidden === true
+    && $("t-discard-backdrop").hidden === true;
+
+  const slash = discardCard(101, "杀", "spade", 7);
+  const dodge = discardCard(102, "闪", "diamond", 9);
+  const peach = discardCard(103, "桃", "heart", 10);
+  ui.state.playback = null;
+  ui.state.liveView = null;
+  ui.state.view = discardBody([slash, dodge, peach]);
+  ui.resetSelection();
+  ui.renderTable();
+  openDiscard();
+  check("U4-05a 点顶栏「弃牌 N」开只读面板：标题 / 「共 N 张」/ 3 行牌面",
+    $("t-discard-modal").hidden === false
+      && $("t-discard-backdrop").hidden === false
+      && $("t-discard-title").textContent === "弃牌堆"
+      && $("t-discard-summary").textContent === "共 3 张"
+      && rows().length === 3
+      && rows()[0].text().includes("桃")
+      && rows()[0].text().includes("♥")
+      && rows()[0].text().includes("10"),
+    `hidden=${$("t-discard-modal").hidden} title="${$("t-discard-title").textContent}"`
+      + ` summary="${$("t-discard-summary").textContent}" rows=${rows().length}`);
+  check("U4-05b 时间倒序：最后弃的在最上（插入序 [101,102,103] ⇒ 行序 103,102,101）",
+    rowIds() === "103,102,101" && rows().every((node) => node.listeners.click === undefined),
+    `rowIds=${rowIds()}`);
+  clickButton($("t-discard-close"));
+  check("U4-05c 关闭按钮收起面板（窗口与自己的遮罩一起隐藏）",
+    discardClosed(), `hidden=${$("t-discard-modal").hidden} backdrop=${$("t-discard-backdrop").hidden}`);
+
+  // 空态：一句空话 + 「共 0 张」，没有牌面行。
+  ui.state.view = discardBody([]);
+  ui.renderTable();
+  openDiscard();
+  check("U4-05d 空弃牌堆打开显示一句空态（不画牌行）",
+    $("t-discard-summary").textContent === "共 0 张"
+      && rows().length === 1
+      && hasClassText(rows()[0], "discard-empty")
+      && rows()[0].text() === "弃牌堆里还没有牌。",
+    `summary="${$("t-discard-summary").textContent}" rows=${rows().length}`
+      + ` text="${rows()[0] ? rows()[0].text() : ""}"`);
+  clickButton($("t-discard-close"));
+
+  // Esc：只关面板、零提交。
+  ui.state.view = discardBody([slash, dodge, peach]);
+  ui.renderTable();
+  openDiscard();
+  const escCalls = calls.length;
+  fireDocument("keydown", { key: "Escape", preventDefault() {} });
+  check("U4-05e Esc 收起面板（零 /api/ 提交）",
+    discardClosed() && calls.length === escCalls,
+    `hidden=${$("t-discard-modal").hidden} calls=${calls.length - escCalls}`);
+
+  // 自己的遮罩：点它关闭；`#t-modal-backdrop` 仍旧没有 click（U2 断言不受影响）。
+  openDiscard();
+  const backdropCalls = calls.length;
+  const backdropListeners = ($("t-discard-backdrop").listeners.click || []).length;
+  clickButton($("t-discard-backdrop"));
+  check("U4-05f 点自己的遮罩关闭；与 #t-modal-backdrop 是两层（那一层仍无 click）",
+    discardClosed() && backdropListeners === 1
+      && ($("t-modal-backdrop").listeners.click || []).length === 0
+      && calls.length === backdropCalls,
+    `hidden=${$("t-discard-modal").hidden} listeners=${backdropListeners}`
+      + ` legacy=${($("t-modal-backdrop").listeners.click || []).length}`);
+
+  // 只读：打开与点牌都不设焦点 / 不改 picks / 不提交；selectionEnabled 与步骤表面不变。
+  ui.state.focusCardId = 101;
+  ui.state.picks = [102];
+  ui.state.selectedTargets = [1];
+  const enabledBefore = ui.selectionEnabled();
+  const surfaceBefore = ui.stepDialogKind(ui.state.view.pending);
+  const readOnlyCalls = calls.length;
+  openDiscard();
+  const focusAfterOpen = ui.state.focusCardId;
+  const picksAfterOpen = JSON.stringify(ui.state.picks);
+  rows().forEach((node) => clickButton(node));
+  check("U4-05g 只读：开面板与点牌面都不改焦点 / picks / 提交，selectionEnabled 不变",
+    $("t-discard-modal").hidden === false
+      && focusAfterOpen === 101
+      && picksAfterOpen === "[102]"
+      && ui.state.focusCardId === 101
+      && JSON.stringify(ui.state.picks) === "[102]"
+      && JSON.stringify(ui.state.selectedTargets) === "[1]"
+      && ui.selectionEnabled() === enabledBefore
+      && ui.stepDialogKind(ui.state.view.pending) === surfaceBefore
+      && calls.length === readOnlyCalls,
+    `focus=${ui.state.focusCardId} picks=${JSON.stringify(ui.state.picks)}`
+      + ` enabled=${ui.selectionEnabled()} calls=${calls.length - readOnlyCalls}`);
+  clickButton($("t-discard-close"));
+
+  // Esc 的两个窗口互相独立：先收面板，武将详情（#t-modal）原样留着，再按一次才关它。
+  const ownHeroBlock = $("t-self-hero");
+  const openHeroDetailByContext = () => (ownHeroBlock.listeners.contextmenu || []).forEach(
+    (fn) => fn({ target: ownHeroBlock, preventDefault() {}, stopPropagation() {} }));
+  openDiscard();
+  openHeroDetailByContext();
+  const bothOpen = $("t-discard-modal").hidden === false && $("t-modal").hidden === false;
+  fireDocument("keydown", { key: "Escape", preventDefault() {} });
+  const discardFirst = $("t-discard-modal").hidden === true && $("t-modal").hidden === false;
+  fireDocument("keydown", { key: "Escape", preventDefault() {} });
+  check("U4-05h Esc 独立：面板先关、武将详情不被连坐；再按一次才关详情",
+    bothOpen && discardFirst && $("t-modal").hidden === true,
+    `both=${bothOpen} discardFirst=${discardFirst} detailHidden=${$("t-modal").hidden}`);
+
+  // 数据源 = `tableViewForRender()`：回放期读逐事件派生的 live view，**不**读权威视图。
+  ui.state.playback = null;
+  ui.state.liveView = null;
+  ui.state.view = discardBody([slash]);
+  ui.state.liveView = discardBody([dodge, peach]);
+  ui.state.playback = { index: 0, records: [], live: true };
+  ui.renderTable();
+  openDiscard();
+  check("U4-05i 回放期读 live view 的弃牌堆（权威 state.view 只有 1 张也不读）",
+    rowIds() === "103,102" && $("t-discard-summary").textContent === "共 2 张",
+    `rowIds=${rowIds()} summary="${$("t-discard-summary").textContent}"`);
+  ui.state.playback = null;
+  ui.state.liveView = null;
+  clickButton($("t-discard-close"));
+
+  // 自动刷新（提交）：面板开着时一次 commit 走 `renderTable()` 末尾的重画，不新起轮询。
+  ui.state.view = discardBody([slash, dodge]);
+  ui.renderTable();
+  openDiscard();
+  const intervalsBefore = intervals.length;
+  ui.applyView(discardBody([slash, dodge, peach]));
+  check("U4-05j 面板开着 + 一次提交：列表 / 「共 N 张」自动更新（不新增轮询计时器）",
+    rowIds() === "103,102,101"
+      && $("t-discard-summary").textContent === "共 3 张"
+      && intervals.length === intervalsBefore,
+    `rowIds=${rowIds()} summary="${$("t-discard-summary").textContent}"`
+      + ` intervals=${intervals.length - intervalsBefore}`);
+  clickButton($("t-discard-close"));
+
+  // 自动刷新（回放一步）：live view 由 `card_move` 派生弃牌，面板每一步都重画。
+  ui.state.view = discardBody([slash]);
+  ui.renderTable();
+  openDiscard();
+  const stepBody = discardBody([slash]);
+  stepBody.records = [{
+    kind: "delta", delta_type: "card_move", seq: 1, frame_id: 0, depth: 0,
+    reason: "DISCARD", owner: 0,
+    from_zone: { zone: "hand", seat: 0 }, to_zone: { zone: "discard", seat: null },
+    cards: [peach],
+  }];
+  ui.applyViewRaw(stepBody);
+  ui.stepPlayback(true);
+  check("U4-05k 面板开着 + 回放一步（弃置 → 弃牌堆）：行自动更新、最新在上",
+    rowIds() === "103,101" && $("t-discard-summary").textContent === "共 2 张",
+    `rowIds=${rowIds()} summary="${$("t-discard-summary").textContent}"`);
+  ui.flushPlayback();
+  clickButton($("t-discard-close"));
+
+  ui.state.playback = null;
+  ui.state.liveView = null;
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.state.focusCardId = null;
+  ui.state.picks = [];
+  ui.state.selectedTargets = [];
+  ui.state.modal.heroSeat = null;
+  ui.resetSelection();
+  ui.renderPending(null);
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
