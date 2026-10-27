@@ -591,11 +591,24 @@ function applyView(body) {
   // 回放期间**响应文本清空**：它属于"下方询问界面"的那一问，等播完、新询问提交后再显示。
   // 描述文本不在这里清——它由 renderProcessing 按效果区逐事件改写。
   $("t-prompt").textContent = "";
-  // 第一条也等满一个步长再出现：每个事件之间的间隔就是当前的步长档。
+  // 第一条也等满一个基准步长再出现；之后每条记录的间隔由**上一条**的 `delayOf` 算
+  // （U4-02 / D7：base + 该条动画时长 × base/100）。
   playbackTimer = window.setTimeout(() => stepPlayback(false), state.eventDelayMs);
   // **开局**是唯一不等节奏的：此前牌桌上一片空白，逐条播开局事件只是空屏五秒。
   // 直接把记录走完（日志照收），让牌桌立刻有局面可看。
   if (first) flushPlayback();
+}
+
+/** U4-02（spec D7 / D8）：一条记录占用的回放步长 = `base + dur(记录) × (base / 100)`。
+ *
+ * **纯函数**：`base` 由调用方给（缺省读当前档位），不读时钟、不改 `state.eventDelayMs`
+ * ——原型在播放里改档位是 bug，档位只由按钮 / `anim.ini` 的初始档决定。
+ * `dur` 来自 `anim.js:durationOf`（没有动画 / 不飞 / 未登记 = 0），故阶段 / 回合飘字这类
+ * 非阻塞记录只吃 `base`；`base` 同时是下限与动画缩放因子（50ms 档 0.5×、300ms 档 3×）。
+ * 回放页不接飞行层（D15），仍只用 `state.eventDelayMs`。
+ */
+function delayOf(record, base = state.eventDelayMs) {
+  return Math.round(base + durationOf(record) * base / 100);
 }
 
 /** 回放一步：画一条事件（事件流 + 效果区），然后排下一步。
@@ -639,7 +652,7 @@ function stepPlayback(immediate) {
     renderProcessing();
   }
   // U4-01（D1 / D2）：重绘之后才量**落点**（新槽位 / 新舞台卡这时才在 DOM 里），并同步
-  // 起飞——不排计时器、不改 `state.eventDelayMs`（节奏归票 02）。
+  // 起飞——不排计时器、不改 `state.eventDelayMs`；节奏见末尾的 `delayOf(record)`。
   if (flightPlan) animLaunchFlight(flightPlan);
   if (!liveOnly) {
     // U3-03（D8.1 / D13）：决策点高亮、使用牌目标线、体力闪。回放页不走这条路径（D14）。
@@ -656,7 +669,7 @@ function stepPlayback(immediate) {
     scrollLogToBottom();
   }
   playback.index += 1;
-  if (!immediate) playbackTimer = window.setTimeout(() => stepPlayback(false), state.eventDelayMs);
+  if (!immediate) playbackTimer = window.setTimeout(() => stepPlayback(false), delayOf(record));
 }
 
 /** 把整批回放**立刻**跑完（测试与"收到新视图前先收尾"用）。 */

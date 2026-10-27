@@ -293,22 +293,32 @@ globalThis.fetch = async (path, options) => {
  * `setInterval` 只登记（U3-05 起 2 秒轮询靠它接线）：用例按登记表取回调显式跑一拍。 */
 const intervals = [];
 const pendingTimers = new Map();
+/* U4-02：步长是**排程出来**的毫秒数，垫片顺手记下 `setTimeout` 的第二个参数，
+ * 用例才能断言"收尾按 delayOf(record) 排、不是固定步长"（不读真实时钟）。 */
+const timerDelays = new Map();
 let nextTimerId = 1;
 const runNextTimer = () => {
   const entry = pendingTimers.entries().next().value;
   if (!entry) return false;
   pendingTimers.delete(entry[0]);
+  timerDelays.delete(entry[0]);
   entry[1]();
   return true;
 };
+/** 最近一个排队的计时器毫秒数（一步回放的收尾排程总是**最后**排的那个）。 */
+const latestTimerDelay = () => {
+  const ids = Array.from(timerDelays.keys());
+  return ids.length ? timerDelays.get(ids[ids.length - 1]) : null;
+};
 const windowShim = {
-  setTimeout: (fn) => {
+  setTimeout: (fn, ms) => {
     const id = nextTimerId;
     nextTimerId += 1;
     pendingTimers.set(id, fn);
+    timerDelays.set(id, ms);
     return id;
   },
-  clearTimeout: (id) => { pendingTimers.delete(id); },
+  clearTimeout: (id) => { pendingTimers.delete(id); timerDelays.delete(id); },
   setInterval: (fn, ms) => {
     intervals.push({ fn, ms });
     return intervals.length;
@@ -1692,15 +1702,61 @@ check("录像没有人类座位时明确显示「全是 AI」",
   $("r-human").textContent);
 ui.state.replay.meta.human_seat = originalHuman;
 
+/* ---- U4-02（D7 / D8）：anim.ini 的 base_step 只决定**加载时**的初始档 ----
+ *
+ * 必须在任何按钮点击之前跑（玩家点过之后 ini 不再覆盖）。这里走真实的
+ * `animLoadConfig()`（fetch → 解析 → 生效表），不直接写 `state.eventDelayMs`。
+ */
+{
+  const delayNode = $("btn-delay");
+  iniInjection = { ok: true, text: "base_step = 150\n" };
+  await ui.animLoadConfig();
+  check("U4-02-ini 非法 base_step（150 不在五档里）被忽略：仍是缺省 0.1s",
+    ui.state.eventDelayMs === 100 && delayNode.textContent === "步长 0.1s",
+    `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayNode.textContent}"`);
+  // 删掉 anim.ini 时静态服务会回落到 index.html（200 + HTML）：整份按"取不到"处理，
+  // 回缺省档、只留一行短提示——不把整页 HTML 逐行报成"无法解析"。
+  iniInjection = {
+    ok: true,
+    text: "<!doctype html>\n<html lang=\"zh-CN\"><body>index</body></html>\n",
+  };
+  await ui.animLoadConfig();
+  const fallbackNote = String($("t-anim-note").textContent || "");
+  check("U4-02-ini 删掉 anim.ini（回落 index.html）⇒ 缺省档 + 一行提示、不逐行报错",
+    ui.state.eventDelayMs === 100 && delayNode.textContent === "步长 0.1s"
+      && $("t-anim-note").hidden === false
+      && !fallbackNote.includes("\n")
+      && !fallbackNote.includes("无法解析")
+      && fallbackNote.includes("取不到"),
+    `eventDelayMs=${ui.state.eventDelayMs} note="${fallbackNote}"`);
+  iniInjection = { ok: true, text: "base_step = 200\n" };
+  await ui.animLoadConfig();
+  check("U4-02-ini 合法 base_step（200）在首次点击前生效：按钮显示 0.2s",
+    ui.state.eventDelayMs === 200 && delayNode.textContent === "步长 0.2s",
+    `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayNode.textContent}"`);
+  clickButton(delayNode);   // 200 → 300：玩家点过按钮，初始档不再被 ini 覆盖
+  iniInjection = { ok: true, text: "base_step = 30\n" };
+  await ui.animLoadConfig();
+  check("U4-02-ini 玩家点过按钮后 ini 不再覆盖（仍是点出来的 0.3s）",
+    ui.state.eventDelayMs === 300 && delayNode.textContent === "步长 0.3s",
+    `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayNode.textContent}"`);
+  // 300 → 30 → 50 → 100：回到缺省档，后面的回放页 / 牌桌循环用例仍从 0.1s 起。
+  for (let i = 0; i < 3; i += 1) clickButton(delayNode);
+  check("U4-02-ini 恢复缺省档（后续按钮循环用例的起点）",
+    ui.state.eventDelayMs === 100 && delayNode.textContent === "步长 0.1s",
+    `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayNode.textContent}"`);
+  await ui.animLoadConfig();   // 时间表回到磁盘真文件
+}
+
 const delayBefore = ui.state.eventDelayMs;
 clickButton($("btn-r-delay"));
 const delayAfter = ui.state.eventDelayMs;
-check("回放页沿用牌桌的 0.05–0.5s 六档步长",
+check("回放页沿用牌桌的 30–300ms 五档步长",
   delayAfter !== delayBefore && ui.DELAY_STEPS_MS.includes(delayAfter),
   `${delayBefore}ms → ${delayAfter}ms`);
-// 步长是**全局一份**：把这六档再点回原档，免得把后面的牌桌断言改成另一档。
+// 步长是**全局一份**：把这五档再点回原档，免得把后面的牌桌断言改成另一档。
 for (let step = 1; step < ui.DELAY_STEPS_MS.length; step += 1) clickButton($("btn-r-delay"));
-check("六档循环一圈回到原档（回放页与牌桌共用同一份状态）",
+check("五档循环一圈回到原档（回放页与牌桌共用同一份状态）",
   ui.state.eventDelayMs === delayBefore, `${ui.state.eventDelayMs}ms`);
 
 ui.state.replay = null;
@@ -3173,26 +3229,27 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   ui.state.logRecords = [];
   ui.state.view = null;
   ui.applyViewRaw(before);
-  // 步长按钮：默认 0.2s（U3-05 / D13），点一下在 0.05→0.5 六档之间循环（不记住，刷新回默认）。
-  check("㉿E1 默认步长 0.2 秒", ui.state.eventDelayMs === 200, `eventDelayMs=${ui.state.eventDelayMs}`);
-  check("㉿E1b 档位就是 0.05–0.5 秒六档（最小挡 0.05s 在首位）",
-    JSON.stringify(ui.DELAY_STEPS_MS) === JSON.stringify([50, 100, 200, 300, 400, 500]),
+  // 步长按钮：默认 0.1s（U4-02 / D7），点一下在 0.03→0.3 五档之间循环（不记住，刷新回默认）。
+  check("㉿E1 默认步长 0.1 秒", ui.state.eventDelayMs === 100, `eventDelayMs=${ui.state.eventDelayMs}`);
+  check("㉿E1b 档位就是五档 30/50/100/200/300（最小挡 0.03s 在首位）",
+    JSON.stringify(ui.DELAY_STEPS_MS) === JSON.stringify([30, 50, 100, 200, 300]),
     `steps=${JSON.stringify(ui.DELAY_STEPS_MS)}`);
   const delayBtn = $("btn-delay");
-  check("㉿E1c 牌桌上有步长按钮，按钮上显示当前档", !!delayBtn && delayBtn.textContent === "步长 0.2s",
+  check("㉿E1c 牌桌上有步长按钮，按钮上显示当前档", !!delayBtn && delayBtn.textContent === "步长 0.1s",
     `按钮="${delayBtn ? delayBtn.textContent : "(缺)"}"`);
   const clickDelay = () => (delayBtn.listeners.click || []).forEach((fn) => fn({ target: delayBtn }));
   clickDelay();
-  check("㉿E1d 点一下 → 0.3 秒", ui.state.eventDelayMs === 300,
+  check("㉿E1d 点一下 → 0.2 秒", ui.state.eventDelayMs === 200 && delayBtn.textContent === "步长 0.2s",
     `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
-  // 走完 0.4 / 0.5 / 0.05 三档：满档后落到最小挡 0.05s。
-  for (let i = 0; i < 3; i += 1) clickDelay();
-  check("㉿E1f 满档后落到新的最小挡 0.05 秒，按钮文字跟着换",
-    ui.state.eventDelayMs === 50 && delayBtn.textContent === "步长 0.05s",
+  // 走完 0.3 / 0.03 两档：满档后落到最小挡 0.03s（两位小数，不与 0.1 撞字）。
+  clickDelay();
+  clickDelay();
+  check("㉿E1f 满档后落到新的最小挡 0.03 秒，按钮文字跟着换",
+    ui.state.eventDelayMs === 30 && delayBtn.textContent === "步长 0.03s",
     `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
   clickDelay();
   clickDelay();
-  check("㉿E1e 六档循环一圈回到默认 0.2 秒", ui.state.eventDelayMs === 200 && delayBtn.textContent.includes("0.2"),
+  check("㉿E1e 五档循环一圈回到默认 0.1 秒", ui.state.eventDelayMs === 100 && delayBtn.textContent.includes("0.1"),
     `eventDelayMs=${ui.state.eventDelayMs} 按钮="${delayBtn.textContent}"`);
   ui.applyViewRaw(after);
   check("㉿E2 收到事件先进入回放：快照还没提交、提交按钮灰着",
@@ -16203,6 +16260,97 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.state.view = null;
   ui.state.sessionId = null;
   ui.resetSelection();
+}
+
+/* ============ U4-02（spec D7 / D8）：节奏公式与五档步长 ============
+ *
+ * `delayOf(record, base) = round(base + durationOf(record) × base / 100)` 是**纯函数**：
+ * 烟测直接喂 `{base, record}`，不读 `state` / 不读时钟；随后用计时器垫片断"收尾真的按
+ * 这一条记录排程"，并断播放全程不改基准档（原型在播放里改 `state.eventDelayMs` 是 bug）。
+ * 时长期望值取自 D8 的缺省表（本块先把 `animConfig` 重置成内置默认）。
+ */
+{
+  iniInjection = {
+    ok: true,
+    text: Object.entries(ui.animDefaults).map(([key, value]) => `${key} = ${value}`).join("\n"),
+  };
+  await ui.animLoadConfig();
+  const stepCard = (id, name, extra = {}) => ({ ...synthCard(id, name), ...extra });
+  const move = (seq, reason, from, to, cards) => ({
+    kind: "delta", delta_type: "card_move", seq, frame_id: 0, depth: 0,
+    reason, owner: 0, from_zone: from, to_zone: to, cards,
+  });
+  const ref = (zone, seat = null) => ({ zone, seat });
+  const useRecord = move(40, "USE", ref("hand", 0), ref("processing"), [stepCard(41, "杀")]);
+  check("U4-02-a delayOf 是纯函数：base=100 + 使用牌（飞行 180ms）⇒ 280ms",
+    ui.durationOf(useRecord) === 180 && ui.delayOf(useRecord, 100) === 280,
+    `durationOf=${ui.durationOf(useRecord)} delay=${ui.delayOf(useRecord, 100)}`);
+  check("U4-02-b delayOf：没有动画的记录（非牌移动 / null）只吃 base",
+    ui.delayOf({ kind: "delta", delta_type: "hp_change", seq: 1, seat: 0 }, 100) === 100
+      && ui.delayOf(null, 100) === 100,
+    `hp_change=${ui.delayOf({ kind: "delta", delta_type: "hp_change" }, 100)} null=${ui.delayOf(null, 100)}`);
+  check("U4-02-c delayOf：base 同时是下限与缩放因子（50 = 0.5×、300 = 3×）",
+    ui.delayOf(useRecord, 50) === 140 && ui.delayOf(useRecord, 300) === 840,
+    `50→${ui.delayOf(useRecord, 50)}ms 300→${ui.delayOf(useRecord, 300)}ms`);
+
+  const drawRecord = move(41, "DRAW", ref("deck"), ref("hand", 0),
+    [stepCard(42, "杀"), stepCard(43, "闪")]);
+  check("U4-02-d delayOf：多张摸牌的 fan_ms 尾巴算进 dur（220+120 ⇒ 440ms @base=100）",
+    ui.durationOf(drawRecord) === 340 && ui.delayOf(drawRecord, 100) === 440,
+    `durationOf=${ui.durationOf(drawRecord)} delay=${ui.delayOf(drawRecord, 100)}`);
+
+  const replaceRecord = move(42, "LOSE", ref("equip", 0), ref("discard"),
+    [stepCard(44, "青釭剑", { slot: "weapon", type: "equip" })]);
+  check("U4-02-e delayOf：顶替出去的旧装备带半拍（280+140 ⇒ 420ms dur / 520ms @base=100）",
+    ui.durationOf(replaceRecord) === 420 && ui.delayOf(replaceRecord, 100) === 520,
+    `durationOf=${ui.durationOf(replaceRecord)} delay=${ui.delayOf(replaceRecord, 100)}`);
+
+  /* ---- 收尾排程读 delayOf(record)：第一条等 base，之后按上一条的时长缩放 ---- */
+  const hand = [stepCard(45, "杀"), stepCard(46, "闪")];
+  const snapshot = {
+    seat: 0, phase: "play", turn_seat: 0, deck_count: 30, discard: [], processing: [],
+    players: [0, 1, 2].map((seat) => ({
+      seat, hp: 4, hp_max: 4, hand_count: 3, alive: true, equip: [], judge: [], identity: null,
+    })),
+    self_hand: hand,
+  };
+  const body = (records) => ({
+    session_id: "u4-pacing", seed: 1, human_seat: 0, finished: false, timeout_seconds: null,
+    heroes: { 0: "guojia", 1: "zhangfei", 2: "diaochan" }, skills: [], pending: null,
+    snapshot, records, live_deltas: [], narrative: [], skill_events: [],
+    cursor: records.length, log_seq: records.length,
+  });
+  ui.state.playback = null;
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.sessionId = "u4-pacing";
+  pendingTimers.clear();
+  timerDelays.clear();
+  ui.state.view = body([]);
+  ui.applyViewRaw(body([drawRecord, useRecord]));
+  const delayBefore = ui.state.eventDelayMs;
+  check("U4-02-f 回放第一条先等一个基准步长（base=100）",
+    latestTimerDelay() === 100, `排程=${latestTimerDelay()}ms`);
+  // 每步先清掉上一条的计时器（垫片不自动跑），再显式走一步：收尾那条是最后排的。
+  pendingTimers.clear();
+  timerDelays.clear();
+  ui.stepPlayback(false);
+  check("U4-02-g 播完「摸 2 张」后按 delayOf(record) 排下一条：100 + 340 = 440ms",
+    latestTimerDelay() === 440, `排程=${latestTimerDelay()}ms`);
+  pendingTimers.clear();
+  timerDelays.clear();
+  ui.stepPlayback(false);
+  check("U4-02-h 播完「使用杀」后排下一条：100 + 180 = 280ms",
+    latestTimerDelay() === 280, `排程=${latestTimerDelay()}ms`);
+  check("U4-02-i 播放全程不改基准档（state.eventDelayMs 仍是 100）",
+    delayBefore === 100 && ui.state.eventDelayMs === 100,
+    `before=${delayBefore} after=${ui.state.eventDelayMs}`);
+  ui.flushPlayback();
+  check("U4-02-j 回放收尾后基准档仍不变",
+    ui.state.eventDelayMs === 100 && ui.state.playback === null,
+    `eventDelayMs=${ui.state.eventDelayMs} playback=${Boolean(ui.state.playback)}`);
+  ui.state.view = null;
+  ui.state.sessionId = null;
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

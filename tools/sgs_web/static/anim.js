@@ -43,6 +43,28 @@ const animConfig = Object.assign({}, animDefaults);
 /** 一次加载的所有问题（拼成**一行**提示；成功后清空）。 */
 const animNotes = [];
 
+/** ``anim.ini`` 生效后的订阅口：**只通知"表读完了"**，不碰播放节奏。
+ *
+ * 票 02 由 ``main.js`` 订阅它把 ``base_step`` 落成**初始**档位（玩家点过按钮之后由
+ * ``main.js`` 自己挡住）；票 04 的飘字时长直接读 ``animConfig``，不需要订阅。
+ * 订阅者的异常只影响它自己：既不阻塞 ini 载入，也不抹掉已经生效的表。
+ */
+const animConfigHandlers = [];
+
+function animOnConfig(handler) {
+  if (typeof handler === "function") animConfigHandlers.push(handler);
+}
+
+function animNotifyConfig() {
+  for (const handler of animConfigHandlers) {
+    try {
+      handler(animConfig);
+    } catch (error) {
+      /* 订阅者出错不阻塞其余订阅者，也不影响 ini 已经生效的事实。 */
+    }
+  }
+}
+
 function animPushNote(text) {
   const line = String(text || "").trim();
   if (line && !animNotes.includes(line)) animNotes.push(line);
@@ -55,6 +77,15 @@ function animShowNote(text) {
   const line = String(text || "").replace(/\s*\n+\s*/g, "；").trim();
   node.textContent = line;
   node.hidden = line === "";
+}
+
+/** 静态服务可能把**缺失**的路径回落到 `index.html`（200 + HTML；`serve.py` 的单页应用兜底）。
+ *
+ * 这时 `fetch` 是成功的、正文却是整页 HTML：若照常逐行解析，一行提示会被几十条
+ * "无法解析「…」" 撑成一堵墙。整份当"取不到"，回内置默认、只留一行。
+ */
+function animLooksLikeHtml(text) {
+  return /^\s*(?:<!doctype\s+html\b|<html\b)/i.test(String(text || ""));
 }
 
 /** ``key = value`` 的极简解析（``#`` / ``;`` 注释；非法值记一条问题、该键退回默认）。 */
@@ -85,7 +116,9 @@ function animParseIni(text) {
 function animLoadConfig() {
   const apply = (text, failed) => {
     animNotes.length = 0;
-    const parsed = animParseIni(text);
+    // 缺失的 anim.ini 可能被静态服务回落到 index.html（200 + HTML）：整份按取不到处理。
+    const unavailable = failed || animLooksLikeHtml(text);
+    const parsed = unavailable ? {} : animParseIni(text);
     for (const key of Object.keys(parsed)) {
       if (key in animDefaults) continue;
       delete parsed[key];
@@ -94,8 +127,9 @@ function animLoadConfig() {
     Object.assign(animConfig, animDefaults, parsed);
     const missing = Object.keys(animDefaults).filter((key) => !(key in parsed));
     if (missing.length) animPushNote(`缺 ${missing.length} 项，用内置默认`);
-    if (failed) animPushNote("anim.ini 取不到，用内置默认");
+    if (unavailable) animPushNote("anim.ini 取不到，用内置默认");
     animShowNote(animNotes.join("；"));
+    animNotifyConfig();
     return animConfig;
   };
   if (typeof fetch !== "function") return Promise.resolve(apply("", true));
@@ -191,7 +225,8 @@ function animCountOf(record) {
 /** 一条记录在飞行层上占用的**动画总时长**（票 02 的 ``delay = base + dur × base/100`` 用）。
  *
  * = 飞行时长 + N 张的错峰尾巴（``fan_ms``）+ 顶替旧装备的半拍。没登记 / 不飞 / 时长为 0
- * 返回 0（"没有动画的记录只吃 base"）。本票只提供这个只读口，不改播放步长。
+ * 返回 0（"没有动画的记录只吃 base"）。本文件只提供这个只读口，播放步长仍住
+ * ``session.js:delayOf`` / ``main.js``。
  */
 function durationOf(record) {
   if (!record || record.kind !== "delta" || record.delta_type !== "card_move") return 0;
@@ -542,5 +577,7 @@ function animLaunchFlight(plan) {
   }
 }
 
-/* 页面启动即读时间表；失败 / 缺键的提示由 animLoadConfig 写一行。 */
-animLoadConfig();
+/* 页面启动即读时间表；失败 / 缺键的提示由 animLoadConfig 写一行。
+ * `animReady` 是"时间表已生效"的公开口（票 02 的初始档位经 `animOnConfig` 订阅，
+ * 需要等待启动的调用方 / 测试用它）。 */
+const animReady = animLoadConfig();

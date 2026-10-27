@@ -91,7 +91,9 @@
     "heroDisplayName", "skillStateLabel", "applyLiveDelta",
     // U4-01（D1/D2/D3/D5/D6）：飞行层——分类表时长 / ini 载入 / 起飞前量源 / 重绘后起飞。
     "animDefaults", "animConfig", "animParseIni", "animLoadConfig",
-    "animPlanFlight", "animLaunchFlight", "durationOf",
+    "animReady", "animOnConfig", "animPlanFlight", "animLaunchFlight", "durationOf",
+    // U4-02（D7/D8）：节奏 = base + 该条动画 × base/100（纯函数，烟测直接喂 {base, record}）。
+    "delayOf",
   ];
   const out = {};
   for (const name of names) {

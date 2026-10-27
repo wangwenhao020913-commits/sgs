@@ -616,7 +616,8 @@ def test_anim_scripts_are_wired_and_the_prototype_is_gone() -> None:
     assert "proto=1" not in body, "不得保留 ?proto=1 门（产品文件常态生效）"
     assert "debug_scale" not in body, "debug_scale（调试倍率）必须整体移除"
     assert "eventDelayMs" not in body, (
-        "节奏（state.eventDelayMs）归票 02；票 01 的 anim.js 不得改播放步长"
+        "节奏（state.eventDelayMs）住 core.js / main.js / session.js；anim.js 只发布 ini 表，"
+        "不碰播放步长（票 02 的裁定，见 U4-02 的静态断言）"
     )
     hits = _MONKEY_PATCH_RE.findall(body)
     assert not hits, f"飞行层不得再 monkey-patch 全局入口（实际：{hits}）"
@@ -700,3 +701,66 @@ def test_anim_flight_layer_is_a_full_shell_overlay_above_the_effect_layers() -> 
         f"飞行器位置写死成 left/top + translate，CSS 必须绝对定位：{flight}"
     )
     assert re.search(r"pointer-events:\s*none", flight), f"飞行器是牌面副本，不能吃指针：{flight}"
+
+
+# ---------------------------------------------------------------------------
+# U4-02：节奏公式与五档步长（spec D7 / D8）
+#
+# 机械的三半：
+# 1. 档位表 = 30/50/100/200/300，缺省 100（旧的 50–500 作废）；
+# 2. `stepPlayback` 的收尾排程读 `delayOf(record)`，不再直接用固定步长；
+# 3. 回放页 D15 不接飞行 / 不接按记录时长的节奏公式，仍只用基准步长。
+# 行为（纯函数语义 / 按钮循环 / ini 只决定初始档）归 `ui_smoke`。
+# ---------------------------------------------------------------------------
+
+_CORE_JS = STATIC_DIR / "core.js"
+_REPLAY_JS = STATIC_DIR / "replay.js"
+
+
+def test_delay_steps_are_the_five_step_table_with_a_100ms_default() -> None:
+    core = _strip_js_comments(_CORE_JS.read_text(encoding="utf-8"))
+    steps = re.search(r"const DELAY_STEPS_MS = \[([^\]]*)\]", core)
+    assert steps is not None, "core.js 里找不到 DELAY_STEPS_MS 档位表"
+    values = [int(item.strip()) for item in steps.group(1).split(",") if item.strip()]
+    assert values == [30, 50, 100, 200, 300], f"五档步长必须按 30/50/100/200/300 排：{values}"
+    default = re.search(r"eventDelayMs:\s*(\d+)", core)
+    assert default is not None, "core.js 里找不到 state.eventDelayMs 的缺省值"
+    assert int(default.group(1)) == 100, f"事件回放缺省步长必须是 100ms：{default.group(1)}"
+    assert "50, 100, 200, 300, 400, 500" not in core, "旧的 50–500 六档口径必须作废"
+
+
+def test_playback_schedules_the_next_step_from_delay_of_the_record() -> None:
+    text = _SESSION_JS.read_text(encoding="utf-8")
+    match = _STEP_PLAYBACK_RE.search(text)
+    assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
+    schedule = [
+        line.strip() for line in match.group("body").splitlines()
+        if "setTimeout(() => stepPlayback(false)" in line
+    ]
+    assert len(schedule) == 1, f"stepPlayback 收尾应只有一处排程：{schedule}"
+    assert "delayOf(record)" in schedule[0], f"排程必须读 delayOf(record)：{schedule[0]}"
+    assert "state.eventDelayMs" not in schedule[0], f"排程不得再直接用固定步长：{schedule[0]}"
+
+    body = _strip_js_comments(text)
+    assert re.search(r"function delayOf\(record, base = state\.eventDelayMs\)", body), (
+        "session.js 必须提供纯函数 delayOf(record, base = state.eventDelayMs)"
+    )
+    assert re.search(r"Math\.round\(base \+ durationOf\(record\) \* base / 100\)", body), (
+        "delayOf 必须按 D7：base + dur × (base / 100)"
+    )
+
+
+def test_replay_page_keeps_using_the_base_step_without_flight_pacing() -> None:
+    replay = _strip_js_comments(_REPLAY_JS.read_text(encoding="utf-8"))
+    assert "state.eventDelayMs" in replay, "回放页（D15 不接飞行）仍按基准步长排程"
+    assert "delayOf(" not in replay, "回放页不接飞行，不得读按记录时长的节奏公式"
+
+
+def test_delay_button_titles_describe_the_new_five_step_range() -> None:
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    for button_id in ("btn-delay", "btn-r-delay"):
+        tag = re.search(rf'<button\b[^>]*\bid="{button_id}"[^>]*>', html)
+        assert tag is not None, f"index.html 里找不到 #{button_id}"
+        assert "0.03–0.3" in tag.group(0), (
+            f"#{button_id} 的 title 必须写新的 0.03–0.3 秒五档：{tag.group(0)}"
+        )
