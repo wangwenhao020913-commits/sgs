@@ -13,7 +13,10 @@
      见 :mod:`sgs_web.visibility`；
    - ``deck_shuffle`` 的整副洗后牌序只给数量（``card_count``）；``identity_deal`` 的开局
      暗发只放行本人 / 主公（其余 ``identity: null``，亮明 / 阵亡走 ``identity_reveal``）；
-   - ``action`` / ``timing`` / 其余 ``delta`` / ``frame`` / ``game_end`` 是公开事实，原样下发。
+   - ``action`` 记录是**公开事实**的只有 `kind` / `answers_seq` / `accepted`：**具体选了什么**
+     只对人类座位自己的那条应答展开（U4-06 / spec D13）；展开时另补接入层展示表的中文技能名
+     ``skill_name``；
+   - ``timing`` / 其余 ``delta`` / ``frame`` / ``game_end`` 原样下发。
 """
 
 from __future__ import annotations
@@ -2165,11 +2168,51 @@ def pending_payload(
     return payload
 
 
-def visible_record(record: object, *, viewer: int | None = None) -> dict[str, Any] | None:
+def query_actor_map(records: Iterable[object]) -> dict[int, int]:
+    """记录流里的 ``query.seq → query.actor``（应答者的唯一真源）。
+
+    ``ActionRecord`` 自己**不带座位**：一次应答是谁做的，看它的 ``answers_seq`` 指向的
+    那次 ``query``（记录流里已下发的公开事实）。``serve.GameRegistry.view`` 拿这张表判断
+    一条 action 是不是查看者自己的；``skill_events_after`` 用同一判据给派生事件找座位。
+
+    ``records`` 可以是引擎记录模型，也可以是已序列化的 JSON（录像 / 合成夹具）。只序列化
+    ``kind == "query"`` 的记录，其余模型不花 ``record_json`` 的代价。
+    """
+    actors: dict[int, int] = {}
+    for record in records:
+        if isinstance(record, Mapping):
+            raw = record
+        elif getattr(record, "kind", None) == "query":
+            raw = json.loads(record_json(record))
+        else:
+            continue
+        if raw.get("kind") != "query":
+            continue
+        query = raw.get("query") or {}
+        seq = raw.get("seq")
+        actor = query.get("actor")
+        if isinstance(seq, int) and isinstance(actor, int):
+            actors[seq] = actor
+    return actors
+
+
+def visible_record(
+    record: object,
+    *,
+    viewer: int | None = None,
+    query_actors: Mapping[int, int] | None = None,
+    state: Any = None,
+) -> dict[str, Any] | None:
     """把一条记录转成**查看者可下发**的 JSON；``None`` = 这一条不下发。
 
     ``viewer`` = 人类座位（``serve.GameRegistry.view`` 传 ``session.human_seat``）；
     ``None`` = 没有查看者 / 全知——**不裁剪**（内部调用与测试需要原始记录）。
+
+    ``query_actors`` = :func:`query_actor_map` 的结果（``query.seq → actor``）。有它才判得出
+    一条 ``action`` 是不是查看者自己的：**只有自己的应答展开** ``card`` / ``choices`` /
+    ``picks`` / ``targets`` / ``skill_id`` 等细节；别人的仍裁成 ``{kind, answers_seq}``。
+    没有映射（或映射里查不到）时 fail-closed：按别人的应答裁剪。``state`` 只在展开自己的
+    ``ActivateSkill`` 时用来补 :func:`_skill_display_name` 的中文名 ``skill_name``。
 
     ``card_move`` 的牌面按 spec §6 A3 的**区域可见性**脱敏（M5-09c）：公开区
     （弃牌堆 / 处理区 / 装备区 / 判定区）照常下发牌面；隐藏区（牌堆 / 手牌）之间的移动，
@@ -2220,18 +2263,42 @@ def visible_record(record: object, *, viewer: int | None = None) -> dict[str, An
             if not tag_visible(raw.get("tag_type"), viewer):
                 return None
     if kind == "action":
-        # 公开事实：谁应答了、被接受与否；**具体选了什么**只对人类座位自己的应答展开。
+        # 公开事实：谁应答了、被接受与否；**具体选了什么**只对人类座位自己的应答展开
+        # （spec D13）。``ActionRecord`` 不带座位 ⇒ 座位取 ``answers_seq`` 指向的询问 actor；
+        # 查不到 / 不是查看者 ⇒ fail-closed，保持 `{kind, answers_seq}`。
         action = raw.get("action")
         if isinstance(action, dict):
-            raw["action"] = {"kind": action.get("kind"), "answers_seq": action.get("answers_seq")}
+            actor = (query_actors or {}).get(action.get("answers_seq"))
+            own = (
+                viewer is not None
+                and actor is not None
+                and int(actor) == int(viewer)
+            )
+            if viewer is not None and not own:
+                raw["action"] = {
+                    "kind": action.get("kind"),
+                    "answers_seq": action.get("answers_seq"),
+                }
+            elif own and state is not None and action.get("kind") == "ActivateSkill":
+                # 技能名与技能飘字同源（接入层展示表）；查不到就不加键，前端退回
+                # `view.skills` 再退回 skill_id（fail-visible，不猜名字）。
+                name = _skill_display_name(state, str(action.get("skill_id") or ""))
+                if name:
+                    action["skill_name"] = name
     return raw
 
 
 def serialize_record(
-    record: object, *, viewer: int | None = None
+    record: object,
+    *,
+    viewer: int | None = None,
+    query_actors: Mapping[int, int] | None = None,
+    state: Any = None,
 ) -> dict[str, Any] | None:
     """``visible_record`` 的别名，名字更贴近"序列化"的调用点。"""
-    return visible_record(record, viewer=viewer)
+    return visible_record(
+        record, viewer=viewer, query_actors=query_actors, state=state
+    )
 
 
 def skill_events_after(

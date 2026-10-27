@@ -453,7 +453,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
  * 对手 210×150（左 110 / 右 100）；自己 292×210（左 162 / 右 130）。
  * 壳随视口缩放，故宽度用设计比例、槽高用设计像素。
  * U2-02 / D6：对手的 +8%（228×163）在 8 人环上与相邻座位重叠（40° 相邻角的 |dy| ≈ 158.3 < 163），
- * 故对手**外形保持 210×150、只放大内容**（判定 33 / 装备 42 / 槽位字 10 / 标签 9）。 */
+ * 故对手**外形保持 210×150、只放大内容**（判定 36 / 装备 42 / 槽位字 10 / 标签 9）。 */
 .ring .seat {
   position: absolute;
   width: 13.125%;                 /* 210 / 1600 设计舞台 */
@@ -578,7 +578,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   padding: 5px; background: #fbf6ea; overflow: hidden;
 }
 /* U2-02 / D6：对手内容 +8%（外形回退不变，见座位卡块注释）。 */
-.seat .judge-row { display: flex; gap: 3px; flex: 0 0 calc(33 * var(--dsu)); }
+.seat .judge-row { display: flex; gap: 3px; flex: 0 0 calc(36 * var(--dsu)); }
 .seat .equip-grid {
   display: grid; grid-template-columns: 1fr 1fr;
   grid-auto-rows: calc(42 * var(--dsu)); gap: 4px; flex: 1 1 auto;
@@ -588,18 +588,25 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   min-width: 0; height: calc(42 * var(--dsu));
   border: 1px dashed var(--line); border-radius: 5px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  text-align: center; padding: 1px 2px; overflow: hidden;
+  text-align: center; padding: calc(1 * var(--dsu)) calc(1 * var(--dsu)); overflow: hidden;
   font: inherit; font-size: calc(10 * var(--dsu)); line-height: 1.2;
   color: var(--ink); background: rgba(255, 255, 255, .55);
 }
-.mini-slot.judge-slot { height: calc(33 * var(--dsu)); }
+.mini-slot.judge-slot { height: calc(36 * var(--dsu)); }
 .mini-slot.empty { color: #9b8f7d; background: #e9e2d6; border-color: #d3c8b6; }
 .mini-slot.filled { border-style: solid; border-color: #c8b795; background: #fffdf8; cursor: help; }
 .mini-slot.judge-slot.filled { border-color: #c39a5f; background: #fff8e9; }
-.mini-slot .slot-k { font-size: calc(9 * var(--dsu)); color: #9b8f7d; }
+.mini-slot .slot-k { font-size: calc(9 * var(--dsu)); line-height: 1.1; color: #9b8f7d; }
+/* U4-06 / D13：槽内可用宽 ≈ 36 设计单位（对手装备两列）/ ≈ 21（判定三等分）。
+   牌名**允许折行**（balance 均分两行），四字 / 五字全名放得下；槽名常显在上行，
+   不靠 tooltip 兜底。字号仍是继承来的 10 / 13（判定槽折两行后高度要收一点）。 */
 .mini-slot .slot-v {
-  display: block; max-width: 100%; font-weight: 600;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  display: block; max-width: 100%; font-weight: 600; line-height: 1.1;
+  white-space: normal; overflow-wrap: anywhere; text-wrap: balance;
+}
+.mini-slot.judge-slot.filled .slot-k { font-size: calc(8 * var(--dsu)); line-height: 1.1; }
+.mini-slot.judge-slot.filled .slot-v {
+  font-size: calc(9 * var(--dsu)); line-height: 1.15;
 }
 button.mini-slot { cursor: pointer; }
 .mini-slot.sel { border-color: var(--accent); background: var(--accent-soft); }
@@ -1135,12 +1142,16 @@ button.mini-slot { cursor: pointer; }
   padding: 8px; background: #fbf6ea;
   overflow: hidden;
 }
-/* U2-02 / D6：自己武将块**外形 292×210 不变**、内容放大（判定 48 / 装备 60 / 槽位字 13 / 标签 12）。 */
-.self .judge-row { flex: 0 0 calc(48 * var(--dsu)); gap: 4px; }
+/* U2-02 / D6：自己武将块**外形 292×210 不变**、内容放大（判定 52 / 装备 60 / 槽位字 13 / 标签 12）。
+   U4-06 / D13：槽内可用宽 ≈ 47 设计单位（装备两列）/ ≈ 28（判定三等分）——牌名折两行
+   （balance），四字 / 五字全名放得下；槽名（标签 12 / 判定 12）保留。 */
+.self .judge-row { flex: 0 0 calc(52 * var(--dsu)); gap: 4px; }
 .self .equip-grid { grid-auto-rows: calc(60 * var(--dsu)); gap: 5px; }
 .self .mini-slot { height: calc(60 * var(--dsu)); font-size: calc(13 * var(--dsu)); }
-.self .mini-slot.judge-slot { height: calc(48 * var(--dsu)); }
+.self .mini-slot.judge-slot { height: calc(52 * var(--dsu)); }
 .self .mini-slot .slot-k { font-size: calc(12 * var(--dsu)); }
+.self .mini-slot.judge-slot.filled .slot-k { font-size: calc(12 * var(--dsu)); line-height: 1.1; }
+.self .mini-slot.judge-slot.filled .slot-v { font-size: calc(13 * var(--dsu)); line-height: 1.15; }
 
 /* ---------- 事件流浮层 ---------- */
 

@@ -472,11 +472,17 @@ class _Narrator:
     def _gain(
         self, record: dict[str, Any], seq: int, cards: Sequence[Mapping[str, Any]]
     ) -> None:
+        """进手牌：**牌堆来源写「摸牌」**（D14 / U4-06），其余来源（顺 / 借刀 / 获得）写「获得」。
+
+        `GLOSSARY「获得」` 的规则定义不动：摸牌在规则上也算获得；这里只换玩家语言。
+        """
         to_zone = record.get("to_zone") or {}
         seat = to_zone.get("seat")
         if seat is None:
             return
-        segments = [*self._subject(seat), _act(" 获得")]
+        from_zone = record.get("from_zone") or {}
+        verb = " 摸牌" if from_zone.get("zone") == "deck" else " 获得"
+        segments = [*self._subject(seat), _act(verb)]
         if cards_visible(record, self.viewer):
             segments.extend(_cards(cards))
         else:

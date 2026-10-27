@@ -52,6 +52,7 @@ from sgs_web.projection import (  # noqa: E402
     decorate_records_card_tags,
     live_tag_deltas_after,
     pending_payload,
+    query_actor_map,
     skill_events_after,
     visible_record,
     visible_snapshot,
@@ -322,10 +323,22 @@ class GameRegistry:
         """会话视角的响应体（建局 / 取增量 / 应答三处**共用同一个形状**）。"""
         all_records = session.records()
         window = session.records_after(after)
+        # U4-06 / D13：`action` 记录按查看者放行——只有人类座位自己的应答展开细节。
+        # 应答者 = `answers_seq` 指向的那次询问的 actor；映射取**全量**记录（询问可能
+        # 早于 `after` 游标），展开只对窗口里的记录做。
+        query_actors = query_actor_map(all_records)
         records = [
             payload
             for record in window
-            if (payload := visible_record(record, viewer=session.human_seat)) is not None
+            if (
+                payload := visible_record(
+                    record,
+                    viewer=session.human_seat,
+                    query_actors=query_actors,
+                    state=session.engine.state,
+                )
+            )
+            is not None
         ]
         snapshot = visible_snapshot(session)
         # 标签 delta 仍不进人类记录流（`visible_record` 裁掉）；这张牌的**可见**增删

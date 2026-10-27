@@ -224,13 +224,41 @@ function selectionError(action, pending) {
   return null;
 }
 
-/** 技能候选的动作短语（U2-03 直提态）：技能名读服务端下发的 `view.skills`，
- *  前端不在这里抄中文名；查不到时退回技能 id（fail-visible，不猜名字）。 */
-function skillActionLabel(action) {
+/** 动作种类 → 中文短语（U4-06 / D13）。
+ *
+ * 投影只把**人类自己的**应答展开；别人的 action 只剩 `kind` / `answers_seq`。事件流与
+ * 中央「当前动作」因此必须能读**裁过的**载荷：这里给每个已知种类一句中性中文，
+ * **不**回退到英文构造子名（`UseCard` / `ArrangeCards` / `SelectOption`），也不猜细节。
+ */
+const ACTION_KIND_LABELS = Object.freeze({
+  UseCard: "使用牌",
+  PlayCard: "打出牌",
+  ActivateSkill: "发动技能",
+  SelectCards: "选牌",
+  SelectOption: "做出选择",
+  ArrangeCards: "排列手牌",
+  DiscardCards: "弃牌",
+  Reforge: "重铸",
+  EndPhase: "结束出牌阶段",
+  Pass: "放弃",
+});
+
+/** 技能动作的中文名：`action.skill_name`（服务端接入层展示表）优先；旧载荷退回
+ *  `view.skills` 的展示名；都查不到才退回 skill_id（fail-visible，前端不新建映射）。 */
+function skillActionName(action) {
+  if (action && action.skill_name) return action.skill_name;
   const skill = (((state.view && state.view.skills) || []).find(
     (item) => item.skill_id === action.skill_id,
   ));
-  return `发动【${skill && skill.name ? skill.name : action.skill_id}】`;
+  if (skill && skill.name) return skill.name;
+  return action.skill_id || null;
+}
+
+/** 技能候选的动作短语（U2-03 直提态）：技能名读服务端下发的 `view.skills`，
+ *  前端不在这里抄中文名；查不到时退回技能 id（fail-visible，不猜名字）。 */
+function skillActionLabel(action) {
+  const name = skillActionName(action);
+  return name ? `发动【${name}】` : "发动技能";
 }
 
 function actionLabel(action) {
@@ -244,7 +272,8 @@ function actionLabel(action) {
     return action.card ? `重铸【${cardName(action.card)}】` : "重铸";
   }
   if (action.kind === "ActivateSkill") {
-    return `发动技能 ${action.skill_id}${action.picks && action.picks.length ? `（选 ${action.picks.length} 张）` : ""}`;
+    const picks = action.picks && action.picks.length ? `（选 ${action.picks.length} 张）` : "";
+    return `${skillActionLabel(action)}${picks}`;
   }
   if (action.kind === "SelectCards") return "选牌";
   if (action.kind === "SelectOption") {
@@ -255,7 +284,7 @@ function actionLabel(action) {
   if (action.kind === "DiscardCards") return `弃牌（${(action.cards || []).length} 张）`;
   if (action.kind === "EndPhase") return "结束出牌阶段";
   if (action.kind === "Pass") return "放弃";
-  return action.kind;
+  return ACTION_KIND_LABELS[action.kind] || "应答";
 }
 
 /** 右端动作在候选里的下标；`-1` = 当前询问没有这一条（按钮隐藏）。 */

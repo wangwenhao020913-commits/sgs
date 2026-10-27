@@ -5653,22 +5653,22 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     /\.seat \.side-block\s*\{[^}]*flex:\s*0 0 47\.62%/s.test(css)
       && /\.self \.side-block\s*\{[^}]*flex:\s*0 0 44\.52%/s.test(css),
     `ring=${/\.seat \.side-block\s*\{[^}]*flex:\s*0 0 47\.62%/s.test(css)} self=${/\.self \.side-block\s*\{[^}]*flex:\s*0 0 44\.52%/s.test(css)}`);
-  check("U1-02c CSS：对手内容放大（判定行 33 / 装备行 42、槽位字 10 / 标签 9）——外形仍 210×150",
-    /\.seat \.judge-row\s*\{[^}]*calc\(33 \* var\(--dsu\)\)/s.test(css)
+  check("U1-02c CSS：对手内容放大（判定行 36 / 装备行 42、槽位字 10 / 标签 9）——外形仍 210×150",
+    /\.seat \.judge-row\s*\{[^}]*calc\(36 \* var\(--dsu\)\)/s.test(css)
       && /\.seat \.equip-grid\s*\{[^}]*grid-auto-rows:\s*calc\(42 \* var\(--dsu\)\)/s.test(css)
       && /\.mini-slot\s*\{[^}]*font-size:\s*calc\(10 \* var\(--dsu\)\)/s.test(css)
-      && /\.mini-slot\.judge-slot\s*\{[^}]*height:\s*calc\(33 \* var\(--dsu\)\)/s.test(css)
+      && /\.mini-slot\.judge-slot\s*\{[^}]*height:\s*calc\(36 \* var\(--dsu\)\)/s.test(css)
       && /\.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(9 \* var\(--dsu\)\)/s.test(css),
-    `judge=${/calc\(33 \* var\(--dsu\)\)/.test(css)} equip=${/calc\(42 \* var\(--dsu\)\)/.test(css)} slot=${/\.mini-slot\s*\{[^}]*font-size:\s*calc\(10/s.test(css)} label=${/\.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(9/s.test(css)}`);
-  check("U1-02c2 CSS：自己武将块内容放大（名 20 / 体力数字 13 / 判定 48 / 装备 60 / 槽位字 13 / 标签 12）",
+    `judge=${/calc\(36 \* var\(--dsu\)\)/.test(css)} equip=${/calc\(42 \* var\(--dsu\)\)/.test(css)} slot=${/\.mini-slot\s*\{[^}]*font-size:\s*calc\(10/s.test(css)} label=${/\.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(9/s.test(css)}`);
+  check("U1-02c2 CSS：自己武将块内容放大（名 20 / 体力数字 13 / 判定 52 / 装备 60 / 槽位字 13 / 标签 12）",
     /\.self \.hero-name\s*\{[^}]*font-size:\s*calc\(20 \* var\(--dsu\)\)/s.test(css)
       && /\.self \.hp-num\s*\{[^}]*font-size:\s*calc\(13 \* var\(--dsu\)\)/s.test(css)
-      && /\.self \.judge-row\s*\{[^}]*calc\(48 \* var\(--dsu\)\)/s.test(css)
+      && /\.self \.judge-row\s*\{[^}]*calc\(52 \* var\(--dsu\)\)/s.test(css)
       && /\.self \.equip-grid\s*\{[^}]*grid-auto-rows:\s*calc\(60 \* var\(--dsu\)\)/s.test(css)
       && /\.self \.mini-slot\s*\{[^}]*font-size:\s*calc\(13 \* var\(--dsu\)\)/s.test(css)
-      && /\.self \.mini-slot\.judge-slot\s*\{[^}]*height:\s*calc\(48 \* var\(--dsu\)\)/s.test(css)
+      && /\.self \.mini-slot\.judge-slot\s*\{[^}]*height:\s*calc\(52 \* var\(--dsu\)\)/s.test(css)
       && /\.self \.mini-slot \.slot-k\s*\{[^}]*font-size:\s*calc\(12 \* var\(--dsu\)\)/s.test(css),
-    `name=${/\.self \.hero-name\s*\{[^}]*calc\(20/s.test(css)} hp=${/\.self \.hp-num\s*\{[^}]*calc\(13/s.test(css)} judge=${/\.self \.judge-row\s*\{[^}]*calc\(48/s.test(css)} equip=${/\.self \.equip-grid\s*\{[^}]*calc\(60/s.test(css)} slot=${/\.self \.mini-slot\s*\{[^}]*font-size:\s*calc\(13/s.test(css)} label=${/\.self \.mini-slot \.slot-k\s*\{[^}]*calc\(12/s.test(css)}`);
+    `name=${/\.self \.hero-name\s*\{[^}]*calc\(20/s.test(css)} hp=${/\.self \.hp-num\s*\{[^}]*calc\(13/s.test(css)} judge=${/\.self \.judge-row\s*\{[^}]*calc\(52/s.test(css)} equip=${/\.self \.equip-grid\s*\{[^}]*calc\(60/s.test(css)} slot=${/\.self \.mini-slot\s*\{[^}]*font-size:\s*calc\(13/s.test(css)} label=${/\.self \.mini-slot \.slot-k\s*\{[^}]*calc\(12/s.test(css)}`);
   check("U1-02c3 CSS：处理区 / 舞台卡面与手牌同一套 88×124 + 字号 14/11/21/9（0.63 版覆盖已删，只有一套卡面规则）",
     /\.card\.face\s*\{[^}]*width:\s*calc\(88 \* var\(--dsu\)\);\s*height:\s*calc\(124 \* var\(--dsu\)\)/s.test(css)
       && /\.card\.face \.suit\s*\{[^}]*font-size:\s*calc\(14 \* var\(--dsu\)\)/s.test(css)
@@ -9792,6 +9792,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     view.snapshot.seat = 1;
     view.human_seat = 1;
     view.snapshot.self_hand = [];
+    // U4-06 / D13：未知区域的归属写**武将名**（没有 hero_name 时才会退回「座位N」）。
+    view.snapshot.players[0].hero_name = "郭嘉";
     return view;
   };
   const render = (view) => {
@@ -9907,7 +9909,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   check("U2-08h 盲挑 = 五个「?」槽位 + 归属 / 区域提示；不画没提供的装备区",
     $("t-options").children.length === 1
       && blindZone.getAttribute("data-zone") === "hand"
-      && blindZone.children[0].textContent.includes("座位0 手牌")
+      && blindZone.children[0].textContent.includes("郭嘉 手牌")
       && blindZone.children[0].textContent.includes("牌面未知")
       && blindSlots.length === 5
       && blindSlots.every((node) => node.textContent === "?" && node.classList.contains("unknown"))
@@ -10113,13 +10115,13 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && zoneSections().length === 2
       && handSection.getAttribute("data-zone") === "hand"
       && handSection.getAttribute("data-seat") === "0"
-      && handSection.children[0].textContent.includes("座位0 手牌")
+      && handSection.children[0].textContent.includes("张飞 手牌")
       && handSection.children[0].textContent.includes("牌面未知")
       && zoneSlots(handSection).length === 3
       && zoneSlots(handSection).every((node) => node.textContent === "?"
         && node.classList.contains("unknown"))
       && equipSection.getAttribute("data-zone") === "equip"
-      && equipSection.children[0].textContent.includes("座位0 装备区")
+      && equipSection.children[0].textContent.includes("张飞 装备区")
       && zoneSlots(equipSection).length === 2
       && zoneSlots(equipSection).every((node) => /八卦阵|赤兔/.test(node.text()))
       && $("t-dialog-hint").textContent.includes("获得伤害来源的一张牌")
@@ -11471,6 +11473,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     // 人类 = 弃牌的应答者（座位 1，伤害来源），目标 = 座位 0（他的手牌是隐藏槽）。
     view.snapshot.seat = 1;
     view.human_seat = 1;
+    // U4-06 / D13：未知区域的归属写**武将名**（没有 hero_name 时才会退回「座位N」）。
+    view.snapshot.players[0].hero_name = "郭嘉";
     return view;
   };
   const render = (view) => {
@@ -11536,7 +11540,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && zoneSections().length === 2
       && handSection.getAttribute("data-zone") === "hand"
       && handSection.getAttribute("data-seat") === "0"
-      && handSection.children[0].textContent.includes("座位0 手牌")
+      && handSection.children[0].textContent.includes("郭嘉 手牌")
       && handSection.children[0].textContent.includes("牌面未知")
       && zoneSlots(handSection).length === 2
       && zoneSlots(handSection).every((node) => node.textContent === "?"
@@ -17165,6 +17169,144 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.state.modal.heroSeat = null;
   ui.resetSelection();
   ui.renderPending(null);
+}
+
+/* ============ U4-06（spec D13 / D14）：文案与槽位布局 ============
+ *
+ * 投影只把**人类自己的**应答展开（`{kind, answers_seq}` 之外不再给别人的细节）：
+ * 中央「当前动作」与事件流必须对两种形状都说人话——中文牌名 / 技能名、无英文构造子名、
+ * 无 undefined。槽位这一半（DOM 文本）：满槽同时保留槽名与牌名（判定 / 武器 + 四字牌名）；
+ * 列宽与折行的机械断言住 `tests/test_web_static.py`（DOM 垫片没有布局引擎）。
+ */
+{
+  const walk = (node, out = []) => {
+    for (const child of (node && node.children) || []) {
+      out.push(child);
+      walk(child, out);
+    }
+    return out;
+  };
+  const byClass = (node, name) => walk(node).filter(
+    (child) => child.classList.contains(name)
+      || String(child.className || "").split(/\s+/).includes(name),
+  );
+  const attr = (node, name) => (node ? node.getAttribute(name) : undefined);
+
+  const view = synthView(null);
+  ui.state.playback = null;
+  ui.state.liveView = null;
+  ui.state.view = view;
+  ui.state.logRecords = [];
+  ui.resetSelection();
+  ui.renderTable();
+
+  /** 把一条 action 记录喂给「当前动作」并读回文本（`renderTable` 会重画舞台上层）。 */
+  const actionText = (action) => {
+    ui.state.logRecords = [{ kind: "action", seq: 5, accepted: true, action }];
+    ui.renderTable();
+    return $("t-action-text").textContent;
+  };
+
+  const iceSword = {
+    ...synthCard(31, "寒冰剑"), type: "ice_sword", slot: "weapon", attack_range: 2,
+  };
+  check("U4-06a 自己的使用牌：「当前动作」=「使用【寒冰剑】」（不是 UseCard）",
+    actionText({ kind: "UseCard", answers_seq: 3, card: iceSword, targets: [] })
+      === "使用【寒冰剑】",
+    `text="${$("t-action-text").textContent}"`);
+
+  check("U4-06b 自己的技能发动：「当前动作」=「发动【英姿】」（服务端 skill_name，不是 skill_id / undefined）",
+    actionText({
+      kind: "ActivateSkill", answers_seq: 4,
+      skill_id: "hero.zhouyu.yingzi", skill_name: "英姿", choices: [], picks: [],
+    }) === "发动【英姿】",
+    `text="${$("t-action-text").textContent}"`);
+
+  // 没有 `skill_name` 的旧载荷：退回 `view.skills` 的中文名（同一份接入层展示表）。
+  ui.state.view.skills = [{ skill_id: "hero.zhouyu.yingzi", name: "英姿" }];
+  check("U4-06b2 没有 skill_name 时读 view.skills 的技能名（前端不自建映射）",
+    actionText({
+      kind: "ActivateSkill", answers_seq: 4,
+      skill_id: "hero.zhouyu.yingzi", choices: [], picks: [],
+    }) === "发动【英姿】",
+    `text="${$("t-action-text").textContent}"`);
+  ui.state.view.skills = [];
+
+  // 投影对**别人的**应答只留 kind / answers_seq：文案是中性中文，不出现英文构造子名。
+  const trimmed = {
+    UseCard: "使用牌",
+    ActivateSkill: "发动技能",
+    ArrangeCards: "排列手牌",
+    SelectOption: "做出选择",
+  };
+  const trimmedTexts = Object.keys(trimmed).map((kind) => actionText({ kind, answers_seq: 4 }));
+  check("U4-06c 别人的应答只说应答类型（无 UseCard / ArrangeCards / SelectOption / undefined，也不泄露细节）",
+    trimmedTexts.every((text) => !/UseCard|ArrangeCards|SelectOption|undefined/.test(text))
+      && trimmedTexts.join(",") === Object.values(trimmed).join(","),
+    `texts=${JSON.stringify(trimmedTexts)}`);
+
+  // 事件流的区域写武将名（拆 / 顺的选择面共用同一个 zoneLabel）。
+  const named = synthView(null);
+  named.snapshot.players[0].hero_name = "郭嘉";
+  named.snapshot.players[1].hero_name = "孙权";
+  ui.state.view = named;
+  ui.state.logRecords = [];
+  const moveLine = ui.describeRecord({
+    kind: "delta", delta_type: "card_move", seq: 9, reason: "LOSE",
+    from_zone: { zone: "equip", seat: 1 },
+    to_zone: { zone: "hand", seat: 0 },
+    cards: [],
+  });
+  check("U4-06d 牌移动的区域写武将名（不是「座位1 装备区」）",
+    moveLine.includes("孙权 装备区") && moveLine.includes("郭嘉 手牌")
+      && !moveLine.includes("座位1") && !moveLine.includes("座位0"),
+    `line="${moveLine}"`);
+
+  // 没有视图（旧载荷 / 无会话）时退回「座位N」：不把引擎 id 写进玩家文案。
+  ui.state.view = null;
+  const fallbackLine = ui.describeRecord({
+    kind: "delta", delta_type: "card_move", seq: 10, reason: "LOSE",
+    from_zone: { zone: "equip", seat: 1 },
+    to_zone: { zone: "hand", seat: 0 },
+    cards: [],
+  });
+  check("U4-06d2 没有武将名时 zoneLabel 退回「座位N」",
+    fallbackLine.includes("座位1 装备区") && fallbackLine.includes("座位0 手牌"),
+    `line="${fallbackLine}"`);
+
+  // 满槽：槽名与四字牌名同时可读（DOM 文本；列宽 / 折行由 style.css 的机械断言钉）。
+  const filled = synthView(null);
+  filled.snapshot.players[1].hero_name = "吕布";
+  filled.snapshot.players[1].judge = [
+    { ...synthCard(41, "兵粮寸断"), type: "supply_shortage" },
+  ];
+  filled.snapshot.players[1].equip = [
+    {
+      ...synthCard(42, "方天画戟"), type: "halberd", slot: "weapon", attack_range: 4,
+      attribute: "普通", kind: "normal", description: "【方天画戟】的全文描述",
+    },
+  ];
+  ui.state.view = filled;
+  ui.resetSelection();
+  ui.renderTable();
+  const seat1 = seatBox(1);
+  const judgeSlot = byClass(seat1, "judge-slot").find((node) => attr(node, "data-card-id"));
+  const equipSlot = byClass(seat1, "equip-slot").find((node) => attr(node, "data-card-id"));
+  check("U4-06e 满槽保留槽名 + 牌名：判定槽 =「判定 + 兵粮寸断」，装备槽 =「武器 + 方天画戟」",
+    !!judgeSlot && !!equipSlot
+      && judgeSlot.textContent.includes("判定")
+      && judgeSlot.textContent.includes("兵粮寸断")
+      && equipSlot.textContent.includes("武器")
+      && equipSlot.textContent.includes("方天画戟"),
+    `judge="${judgeSlot ? judgeSlot.textContent : ""}"`
+      + ` equip="${equipSlot ? equipSlot.textContent : ""}"`);
+
+  // 状态复位：后面的用例不继承这里的合成视图 / 记录。
+  ui.state.view = null;
+  ui.state.logRecords = [];
+  ui.state.playback = null;
+  ui.state.liveView = null;
+  ui.resetSelection();
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

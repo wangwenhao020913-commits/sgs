@@ -992,3 +992,82 @@ def test_discard_panel_uses_the_shared_modal_shell_with_its_own_clickable_backdr
     )
     body = _css_rule(".discard-body")
     assert re.search(r"flex-wrap:\s*wrap", body), f"牌面行必须换行铺（不做分组 / 分页）：{body}"
+
+
+# ---------------------------------------------------------------------------
+# U4-06（spec D13）：判定 / 装备槽放得下四字牌名，且满槽保留槽名
+# ---------------------------------------------------------------------------
+# 1258px 视口（--dsu = 0.786）下：对手装备槽内容宽 ≈ 36 设计单位（侧栏 100 的两列），
+# 四字牌名 @10 = 40 ⇒ 必须允许折行（两行 = 22 设计单位，42 高的槽放得下）；判定槽内容宽
+# ≈ 21（侧栏三等分），四字牌名折两行 @9 + 8 的「判定」标记 = ~34 < 36（判定行从 33 放宽到
+# 36，自己的 48 → 52：D13 明确允许「放宽槽」）。槽名与牌名都在 DOM 里
+# （`tests/support/ui_smoke.mjs` 的 U4-06e），这里钉不靠 tooltip 的机械条件。
+
+
+def test_slot_labels_leave_room_for_four_character_card_names() -> None:
+    slot = _css_rule(".mini-slot")
+    assert re.search(
+        r"padding:\s*calc\(1 \* var\(--dsu\)\) calc\(1 \* var\(--dsu\)\)", slot
+    ), f"槽内边距必须走设计单位（列宽预算是按设计单位算的）：{slot}"
+
+    value = _css_rule(".mini-slot .slot-v")
+    assert re.search(r"white-space:\s*normal", value), (
+        f"牌名必须允许折行（四字 / 五字全名不能只截断）：{value}"
+    )
+    assert re.search(r"overflow-wrap:\s*anywhere", value), (
+        f"中文没有空格，窄槽要能逐字折行：{value}"
+    )
+    assert re.search(r"text-wrap:\s*balance", value), (
+        f"两行要均分（3+1 的「方天画/戟」不算可读）：{value}"
+    )
+    assert not re.search(r"font-size:", value), (
+        f"装备槽牌名沿用槽字号（10 / 13），靠折行而不是缩字号：{value}"
+    )
+
+    assert re.search(r"calc\(36 \* var\(--dsu\)\)", _css_rule(".seat .judge-row")), (
+        "判定行放宽到 36：折两行 + 槽名 + 内边距要真的放得下"
+    )
+    assert re.search(r"height:\s*calc\(36 \* var\(--dsu\)\)", _css_rule(".mini-slot.judge-slot")), (
+        "判定槽本身也要同高，否则行高与槽高对不上"
+    )
+    assert re.search(r"calc\(52 \* var\(--dsu\)\)", _css_rule(".self .judge-row")), (
+        "自己判定行 52（原 48）：字 13 的两行 + 12 的槽名才放得下"
+    )
+    assert re.search(
+        r"height:\s*calc\(52 \* var\(--dsu\)\)", _css_rule(".self .mini-slot.judge-slot")
+    ), "自己判定槽同 52"
+    judge_label = _css_rule(".mini-slot.judge-slot.filled .slot-k")
+    assert re.search(r"font-size:\s*calc\(8 \* var\(--dsu\)\)", judge_label), (
+        f"判定槽的「判定」标记要收一档高度（折两行后仍放得下）：{judge_label}"
+    )
+    assert re.search(r"line-height:\s*1\.1\b", judge_label), judge_label
+    judge_value = _css_rule(".mini-slot.judge-slot.filled .slot-v")
+    assert re.search(r"font-size:\s*calc\(9 \* var\(--dsu\)\)", judge_value), judge_value
+    assert re.search(r"line-height:\s*1\.15", judge_value), (
+        f"折行的两行要有行距（line-height 1 会叠字）：{judge_value}"
+    )
+
+    self_label = _css_rule(".self .mini-slot.judge-slot.filled .slot-k")
+    assert re.search(r"font-size:\s*calc\(12 \* var\(--dsu\)\)", self_label), self_label
+    assert re.search(r"line-height:\s*1\.1\b", self_label), self_label
+    self_value = _css_rule(".self .mini-slot.judge-slot.filled .slot-v")
+    assert re.search(r"font-size:\s*calc\(13 \* var\(--dsu\)\)", self_value), self_value
+    assert re.search(r"line-height:\s*1\.15", self_value), self_value
+
+
+def test_filled_mini_slots_keep_the_zone_label_in_the_dom() -> None:
+    """满槽的 DOM = 槽名 + 牌名：`slot-k` 必须在 `!card` 提前返回**之前**挂上。"""
+    seat_view = _strip_js_comments((STATIC_DIR / "seat-view.js").read_text(encoding="utf-8"))
+    node = re.search(r"function miniSlotNode\(options\) \{(?P<body>.*?)\n\}", seat_view, re.S)
+    assert node is not None, "seat-view.js 里找不到 miniSlotNode()"
+    body = node.group("body")
+    append_label = body.find('label.className = "slot-k"')
+    append_to_node = body.find("node.appendChild(label)")
+    early_return = body.find("if (!card) return node;")
+    assert append_label >= 0 and append_to_node >= 0, "满槽必须也画出槽名（slot-k）"
+    assert 0 <= append_label < append_to_node < early_return, (
+        "slot-k 必须在空槽分支之前挂上——否则满槽只剩牌名，读不出这是判定区 / 哪个装备槽"
+    )
+    assert 'label.textContent = judge ? "判定" : EQUIP_SLOT_LABELS[slot] || "空"' in body, (
+        "槽名的文字必须来自「判定」/ 装备槽标签（不新建一份映射）"
+    )

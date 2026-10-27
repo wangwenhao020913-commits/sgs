@@ -176,10 +176,14 @@ function equipSlotLayout(cards) {
   return slots;
 }
 
-/** 一个判定 / 装备槽：空槽画暗色占位；有牌画牌名 + 悬停全文。
+/** 一个判定 / 装备槽：空槽画暗色占位；有牌画**槽名 + 牌名**（U4-06 / D13）。
  *
- * ``interactive`` 只在**本人**的"提供一张 B / 预发动"面里为真（票 14 / W4-1）：
- * 槽本身可点，点它 = 点那张牌；其余座位 / 其余窗口保持静态。
+ *  槽名常显（判定 / 武器 / 防具 / 攻马 / 防马）：判定槽只有侧栏三等分那么宽，有牌时若
+ *  只剩牌名，玩家读不出"这是判定区"；装备槽同理要读得出落在哪个槽。牌名在窄槽里折行
+ *  （见 `style.css`），不靠 `title` 兜底。
+ *
+ *  ``interactive`` 只在**本人**的"提供一张 B / 预发动"面里为真（票 14 / W4-1）：
+ *  槽本身可点，点它 = 点那张牌；其余座位 / 其余窗口保持静态。
  */
 function miniSlotNode(options) {
   const { zone, slot, card, interactive, ctx } = options;
@@ -189,16 +193,14 @@ function miniSlotNode(options) {
   node.className = `mini-slot ${judge ? "judge-slot" : "equip-slot"} ${card ? "filled" : "empty"}`;
   node.setAttribute("data-zone", zone);
   node.setAttribute("data-slot", slot);
-  if (!card) {
-    const key = document.createElement("span");
-    key.className = "slot-k";
-    key.textContent = judge ? "判定" : EQUIP_SLOT_LABELS[slot] || "空";
-    node.appendChild(key);
-    return node;
-  }
+  const label = document.createElement("span");
+  label.className = "slot-k";
+  label.textContent = judge ? "判定" : EQUIP_SLOT_LABELS[slot] || "空";
+  node.appendChild(label);
+  if (!card) return node;
   node.setAttribute("data-card-id", String(card.card_id));
   // 悬停全文（U1-02）：装备区 / 判定区的牌与手牌、处理区读**同一份**服务端描述。
-  // 槽很窄，牌名可能被省略号截断；标题里带全名，悬停能确认是哪张牌。
+  // 槽很窄，牌名可能折行；标题里带全名，悬停能确认是哪张牌（但不是唯一的读法）。
   node.setAttribute("title", `${cardName(card)}\n${cardDescription(card)}`);
   const value = document.createElement("span");
   value.className = "slot-v";

@@ -6347,7 +6347,8 @@ def test_the_narrative_is_a_flat_observer_readable_stream() -> None:
     text = _line_text(entries)
     assert re.search(r"受到 \d+ 点伤害", text), f"没有伤害行：\n{text[:800]}"
     assert "发动【" in text, f"没有技能发动行：\n{text[:800]}"
-    assert re.search(r"获得 \d+ 张牌|获得【", text), f"没有获得牌行：\n{text[:800]}"
+    # U4-06 / D14：牌堆→手牌写「摸牌」；非牌堆来源（顺 / 借刀 / 获得）才写「获得」。
+    assert re.search(r"摸牌 \d+ 张牌|摸牌【", text), f"没有摸牌行：\n{text[:800]}"
     for forbidden in ("RESPOND", "SKILL_ACTIVATION", "PLAY_PHASE", "结算帧", "#"):
         assert forbidden not in text, f"叙事里漏出引擎话术 {forbidden!r}：\n{text[:800]}"
 
@@ -6477,7 +6478,9 @@ def test_the_narrative_hides_opponent_hand_and_deck_while_revealing_public_card_
         line = _line_at(entries, payload["seq"])
         assert line is not None, f"对手摸 / 拿牌的 {payload['seq']} 没有叙事行"
         assert "【" not in line["text"], f"对手手牌牌名漏进叙事：{line['text']}"
-        assert re.search(r"获得 \d+ 张牌", line["text"]), line["text"]
+        # U4-06 / D14：牌堆来源写「摸牌」，手牌来源（转手）才写「获得」。
+        wording = r"摸牌 \d+ 张牌" if from_zone["zone"] == "deck" else r"获得 \d+ 张牌"
+        assert re.search(wording, line["text"]), line["text"]
         checked += 1
     assert checked >= 5, f"覆盖太少（只检查到 {checked} 次对手摸牌），断言谈不上机械"
 
@@ -6534,6 +6537,96 @@ def test_the_narrative_hides_opponent_hand_and_deck_while_revealing_public_card_
     assert receiver_line is not None and "【" in receiver_line["text"], (
         f"收牌的人看得到自己拿到的牌：{receiver_line}"
     )
+
+
+def test_the_narrative_says_draw_for_the_deck_and_gain_for_other_origins() -> None:
+    """D14：牌堆→手牌写「摸牌」，非牌堆来源（顺 / 借刀 / 获得）才写「获得」。
+
+    与 :func:`test_the_narrative_uses_the_display_contract_for_cards_and_damage_colors`
+    同一份合成记录形状：两行只差 `from_zone.zone`，措辞必须跟着换。
+    """
+    hidden = [
+        {
+            "card_id": 301,
+            "type": "slash",
+            "name": "杀",
+            "suit": "spade",
+            "rank": 7,
+            "color": "black",
+        }
+    ]
+    sword = [
+        {
+            "card_id": 302,
+            "type": "qinggang_sword",
+            "name": "青釭剑",
+            "suit": "spade",
+            "rank": 6,
+            "slot": "weapon",
+            "attack_range": 2,
+            "color": "black",
+        }
+    ]
+
+    def move(
+        seq: int,
+        cards: list[dict],
+        *,
+        from_zone: dict,
+        to_zone: dict,
+        reason: str,
+    ) -> dict:
+        return {
+            "kind": "delta",
+            "delta_type": "card_move",
+            "frame_id": 0,
+            "depth": 0,
+            "seq": seq,
+            "reason": reason,
+            "owner": to_zone["seat"],
+            "from_zone": from_zone,
+            "to_zone": to_zone,
+            "cards": cards,
+        }
+
+    records = [
+        # 叙事从 `TURN_START` 起讲（开局发牌不进叙事）；这条只用于把 `started` 置真。
+        {
+            "kind": "timing",
+            "timing": "TURN_START",
+            "seq": 0,
+            "frame_id": 0,
+            "depth": 0,
+            "actor": 0,
+        },
+        move(
+            1,
+            hidden,
+            from_zone={"zone": "deck", "seat": None},
+            to_zone={"zone": "hand", "seat": 1},
+            reason="DRAW",
+        ),
+        move(
+            2,
+            sword,
+            from_zone={"zone": "equip", "seat": 1},
+            to_zone={"zone": "hand", "seat": 0},
+            reason="LOSE",
+        ),
+    ]
+
+    entries = _narrative(records, viewer=0, heroes=("guojia", "simayi"))
+    draw_line = _line_at(entries, 1)
+    gain_line = _line_at(entries, 2)
+    assert draw_line is not None and gain_line is not None
+    assert re.search(r"摸牌 \d+ 张牌", draw_line["text"]), draw_line["text"]
+    assert "获得" not in draw_line["text"], (
+        f"牌堆→手牌是「摸牌」，不是「获得」（D14）：{draw_line['text']}"
+    )
+    assert "【青釭剑】" in gain_line["text"] and "获得" in gain_line["text"], (
+        f"非牌堆来源才写「获得」：{gain_line['text']}"
+    )
+    assert "摸牌" not in gain_line["text"], gain_line["text"]
 
 
 def test_the_narrative_has_round_and_phase_dividers_before_the_lines_they_introduce() -> None:
@@ -8823,12 +8916,23 @@ def test_the_session_view_derives_skill_events_for_an_accepted_activation() -> N
     assert "choices" not in clipped["action"] and "picks" not in clipped["action"], (
         f"下发体不得泄露具体选择：{clipped['action']}"
     )
-    # 更宽的判据：这一批里每一条 action 都只有这两个键（不是只裁了反间那一条）。
+    # 更宽的判据：这一批里**别人的** action 都只有这两个键（不是只裁了反间那一条）。
+    # U4-06 / D13 起，查看者**自己的**应答按 viewer 展开（本夹具里人类是座位 1、还没有应答过，
+    # 故这里仍应全是座位 0 的裁剪载荷）。
+    query_actors = {
+        record.seq: record.query.actor
+        for record in session.records()
+        if getattr(record, "kind", None) == "query"
+    }
     for record in body["records"]:
-        if record.get("kind") == "action" and isinstance(record.get("action"), dict):
-            assert set(record["action"]) == {"kind", "answers_seq"}, (
-                f"action 下发面被放宽了：{record['action']}"
-            )
+        if record.get("kind") != "action" or not isinstance(record.get("action"), dict):
+            continue
+        actor = query_actors.get(record["action"].get("answers_seq"))
+        if actor == body["human_seat"]:
+            continue
+        assert set(record["action"]) == {"kind", "answers_seq"}, (
+            f"别人的 action 下发面被放宽了：{record['action']}"
+        )
 
 
 def test_skill_events_follow_the_record_cursor_and_only_cover_accepted_activations() -> None:
@@ -8908,6 +9012,174 @@ def test_skill_events_do_not_special_case_which_skill_specifies_targets() -> Non
         assert [(event["name"], event["targets"]) for event in events] == [(name, targets)], (
             f"{skill_id} 的派生：{events}"
         )
+
+
+# ---------------------------------------------------------------------------
+# U4-06（spec D13）：`action` 记录按 viewer 放行**人类座位自己的**应答
+#
+# `ActionRecord` 不带座位：应答者 = 它的 `answers_seq` 指向的那次 `query` 的 actor
+# （记录流已下发的公开事实）。契约：
+# - viewer 是这条应答的 actor ⇒ 保留 card / choices / picks / targets / skill_id …，
+#   `ActivateSkill` 另补接入层展示表的中文名 `skill_name`（与技能飘字同源）；
+# - 其余 viewer ⇒ 仍裁成 `{kind, answers_seq}`（不泄露他选了什么）；
+# - `viewer=None` ⇒ 全知通道不裁剪（docstring 的既有契约）；没有映射时 fail-closed。
+# ---------------------------------------------------------------------------
+
+
+def test_visible_record_expands_only_the_actors_own_action() -> None:
+    """纯函数：同一张 `UseCard` 记录，应答者自己拿全展开，别人只拿两个键。"""
+    from sgs.engine import ActionRecord
+    from sgs.state import CardRef
+
+    state = Session(seed=1, ai="random", timeout_seconds=None, **TWO_PLAYERS).engine.state
+    hidden = CardRef(card_id=901, type="slash", name="黑桃杀", suit="spade", rank=7)
+    record = ActionRecord(
+        seq=10,
+        accepted=True,
+        action=UseCard(card=hidden, targets=(1,), designations=(0,), answers_seq=9),
+    )
+    actors = {9: 1}  # 第 9 条询问问的是座位 1 ⇒ 这条应答是座位 1 的
+
+    own = visible_record(record, viewer=1, query_actors=actors)
+    assert own["action"]["kind"] == "UseCard"
+    assert own["action"]["card"]["card_id"] == 901
+    assert own["action"]["card"]["name"] == "黑桃杀"
+    assert own["action"]["targets"] == [1]
+    assert own["action"]["designations"] == [0]
+
+    other = visible_record(record, viewer=0, query_actors=actors)
+    assert other["action"] == {"kind": "UseCard", "answers_seq": 9}, (
+        f"别人的应答必须仍被裁成 {{kind, answers_seq}}：{other['action']}"
+    )
+    assert "黑桃杀" not in json.dumps(other, ensure_ascii=False), (
+        f"别人的应答不得泄露他打出的牌：{other}"
+    )
+
+    # 没有答案映射（别的调用点 / 无法判定座位）⇒ fail-closed，保持裁剪。
+    assert visible_record(record, viewer=1)["action"] == {
+        "kind": "UseCard",
+        "answers_seq": 9,
+    }
+    # `viewer=None` = 没有查看者 / 全知：docstring 的契约是不裁剪（内部调用与测试需要原始记录）。
+    omniscient = visible_record(record)
+    assert omniscient["action"]["card"]["card_id"] == 901
+    assert omniscient["action"]["targets"] == [1]
+
+
+def test_visible_record_names_the_actors_own_activated_skill() -> None:
+    """`ActivateSkill` 的 `skill_name` 取自接入层展示表，与 `skill_events_after` 同源。"""
+    from sgs.engine import ActionRecord
+
+    state = Session(seed=1, ai="random", timeout_seconds=None, **TWO_PLAYERS).engine.state
+    record = ActionRecord(
+        seq=12,
+        accepted=True,
+        action=ActivateSkill(
+            skill_id="hero.zhouyu.fanjian",
+            choices=("seat:0",),
+            answers_seq=11,
+        ),
+    )
+    actors = {11: 3}
+
+    own = visible_record(record, viewer=3, query_actors=actors, state=state)
+    assert own["action"]["skill_id"] == "hero.zhouyu.fanjian"
+    assert own["action"]["choices"] == ["seat:0"]
+    assert own["action"]["picks"] == []
+    assert own["action"]["skill_name"] == "反间", (
+        f"自己的技能发动必须带中文名（不是 skill_id）：{own['action']}"
+    )
+
+    other = visible_record(record, viewer=0, query_actors=actors)
+    assert other["action"] == {"kind": "ActivateSkill", "answers_seq": 11}
+    assert "反间" not in json.dumps(other, ensure_ascii=False)
+
+
+def _human_fanjian_session() -> Session:
+    """人类（座位 0，周瑜）在自己的首个出牌阶段经复合动作发动【反间】。
+
+    首个询问是【英姿】的 `SKILL_ACTIVATION`（人类自己先被问），按超时默认动作让过去，
+    直到含 `hero.zhouyu.fanjian` 预发动清单的 `PLAY_PHASE`（与
+    :func:`_session_at_the_fanjian_suit_step` 同一个 seed / 将面），故这条应答是**人类自己的**。
+    """
+    session = Session(
+        seed=0,
+        player_count=2,
+        ai="random",
+        human_seat=0,
+        heroes=("zhouyu", "guanyu"),
+        timeout_seconds=None,
+    )
+    for _ in range(20):
+        pending = session.pending
+        assert pending is not None, "还没走到出牌阶段就终局了"
+        if (
+            pending.kind == QueryKind.PLAY_PHASE
+            and "hero.zhouyu.fanjian" in pending.preactivations
+        ):
+            break
+        session.submit_answer(fallback_action(pending))
+    else:
+        raise AssertionError("没有走到带【反间】预发动入口的出牌阶段")
+    session.submit_answer(
+        ActivateSkill(
+            skill_id="hero.zhouyu.fanjian",
+            choices=("seat:1",),
+            answers_seq=pending.seq,
+        )
+    )
+    return session
+
+
+def test_a_real_session_expands_the_human_seats_own_action_and_trims_the_others() -> None:
+    """真会话 + 真 `GameRegistry.view`：自己的应答展开、别人的仍只留两个键。"""
+    from sgs.engine import record_json
+    from sgs_web.serve import GameRegistry
+
+    session = _human_fanjian_session()
+    _play_to_end(session)
+    body = GameRegistry(runs_dir="/tmp/unused").view(session, after=-1, logs_after=0)
+
+    query_actors = {
+        record.seq: record.query.actor
+        for record in session.records()
+        if getattr(record, "kind", None) == "query"
+    }
+    actions = [
+        record for record in session.records() if getattr(record, "kind", None) == "action"
+    ]
+    own = [r for r in actions if query_actors[r.action.answers_seq] == session.human_seat]
+    foreign = [r for r in actions if query_actors[r.action.answers_seq] != session.human_seat]
+    assert own, "这一局人类至少应答一次（发动【反间】）"
+    assert foreign, "对手也必须应答过，否则「别人的应答被裁掉」没有样本"
+
+    payloads = {
+        record["seq"]: record for record in body["records"] if record.get("kind") == "action"
+    }
+    activation = next(r for r in own if r.action.kind == "ActivateSkill")
+    shown = payloads[activation.seq]["action"]
+    raw = json.loads(record_json(activation))["action"]
+    assert shown["skill_id"] == "hero.zhouyu.fanjian"
+    assert shown["choices"] == ["seat:1"]
+    assert shown["picks"] == []
+    assert shown["skill_name"] == "反间"
+    assert {key: shown[key] for key in raw} == raw, (
+        f"自己的应答必须整条展开（不是只补 skill_name）：{shown}"
+    )
+
+    hidden_keys = {"card", "choices", "picks", "targets", "skill_id", "skill_name"}
+    for record in foreign:
+        clipped = payloads[record.seq]["action"]
+        assert clipped == {
+            "kind": record.action.kind,
+            "answers_seq": record.action.answers_seq,
+        }, f"别人的应答必须仍被裁成 {{kind, answers_seq}}：{clipped}"
+        assert not (hidden_keys & set(clipped)), f"别人的应答泄露了具体选择：{clipped}"
+        card = getattr(record.action, "card", None)
+        if card is not None:
+            assert card.name not in json.dumps(payloads[record.seq], ensure_ascii=False), (
+                f"别人的手牌牌名漏进了下发体：{payloads[record.seq]}"
+            )
 
 
 # ---------------------------------------------------------------------------
