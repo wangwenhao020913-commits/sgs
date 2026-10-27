@@ -59,6 +59,59 @@ const htmlCollectionView = (children) => new Proxy(children, {
   set() { return false; },
 });
 
+/* U4-01：飞行层要读**起 / 落点矩形**，并在飞行节点上起 Web Animations 动画。
+ * 垫片不排版，故给每一步一个**确定性**矩形：固定 id 有显式表，其余按 data-* / 构造序
+ * 派生（同一步里同一节点重复读 = 同一个值）。动画只登记参数、不自动跑——也就不会触发
+ * `onfinish` 删节点，用例可以在一步之后数飞行器、读 `delay`。 */
+const RECT_TABLE = new Map(Object.entries({
+  "table-shell": { left: 0, top: 0, width: 1440, height: 810 },
+  "t-anim-flights": { left: 0, top: 0, width: 1440, height: 810 },
+  "t-target-lines": { left: 0, top: 0, width: 1440, height: 810 },
+  "t-deck": { left: 1120, top: 16, width: 44, height: 20 },
+  "t-discard": { left: 1210, top: 16, width: 44, height: 20 },
+  "t-processing": { left: 520, top: 190, width: 400, height: 180 },
+  "t-hand": { left: 280, top: 620, width: 720, height: 140 },
+  "t-self-seat": { left: 1040, top: 560, width: 380, height: 240 },
+  "t-self-zones": { left: 1200, top: 560, width: 220, height: 240 },
+  "t-self-hand": { left: 1100, top: 604, width: 40, height: 20 },
+  "t-seats": { left: 20, top: 60, width: 1000, height: 420 },
+}));
+let rectSeq = 0;
+const rectOfBox = (left, top, width, height) => ({
+  left, top, width, height, right: left + width, bottom: top + height, x: left, y: top,
+});
+const hasClassText = (node, name) =>
+  String((node && node.className) || "").split(/\s+/).includes(name);
+const shimRect = (node) => {
+  const explicit = node.id ? RECT_TABLE.get(node.id) : null;
+  if (explicit) return rectOfBox(explicit.left, explicit.top, explicit.width, explicit.height);
+  const attr = (name) => (node.getAttribute ? node.getAttribute(name) : undefined);
+  const cardId = attr("data-card-id");
+  const stageKey = attr("data-stage-key");
+  const seat = attr("data-seat");
+  const zone = attr("data-zone");
+  const slot = attr("data-slot");
+  if (cardId !== undefined && cardId !== null) {
+    const n = Number(cardId);
+    const safe = Number.isFinite(n) ? n : rectSeq;
+    return rectOfBox(140 + (safe * 37) % 880, 120 + (safe * 53) % 460, 88, 124);
+  }
+  if (stageKey !== undefined && stageKey !== null) {
+    const n = Number(stageKey);
+    const safe = Number.isFinite(n) ? n : rectSeq;
+    return rectOfBox(540 + (safe * 61) % 300, 210, 88, 124);
+  }
+  if (seat !== undefined && seat !== null) {
+    const n = Number(seat);
+    const left = 80 + (Number.isFinite(n) ? n : 0) * 180;
+    const top = zone === "judge" ? 100 : zone === "equip" ? 160 : 60;
+    return rectOfBox(left, top, 120, slot ? 34 : 52);
+  }
+  if (hasClassText(node, "face")) return rectOfBox(360, 300, 88, 124);
+  rectSeq += 1;
+  return rectOfBox(40 + (rectSeq % 12) * 100, 40 + Math.floor(rectSeq / 12) * 90, 100, 40);
+};
+
 class El {
   constructor(tag = "div", id = "") {
     this.tagName = tag.toUpperCase(); this.id = id;
@@ -66,6 +119,8 @@ class El {
     this._children = [];
     this._childrenView = htmlCollectionView(this._children);
     this.listeners = {};
+    // U4-01：飞行器在这上面挂动画参数（见 `animate`）。
+    this.animations = [];
     this.parentNode = null;
     this.classList = new ClassList(); this._text = ""; this._html = ""; this.value = "";
     this.hidden = false; this.disabled = false; this.type = ""; this.className = "";
@@ -125,6 +180,22 @@ class El {
   }
   dump() { return `<${this.tagName.toLowerCase()}>${this._html}${this._children.map((c) => c.dump()).join("")}</${this.tagName.toLowerCase()}>`; }
   scrollIntoView() {}
+  /* U4-01：确定性矩形（见 shimRect）；真 DOM 返回视口坐标，垫片只有"存在 / 不同"两种读法。 */
+  getBoundingClientRect() {
+    if (!this._rect) this._rect = shimRect(this);
+    return this._rect;
+  }
+  /* U4-01：Web Animations 的登记版：参数原样存下，`onfinish` / `oncancel` 由用例显式触发
+   * （飞行层本身只负责在两者之一里移除节点）。 */
+  animate(keyframes, options = {}) {
+    const animation = {
+      keyframes, options: { ...options }, onfinish: null, oncancel: null,
+      cancel() { if (this.oncancel) this.oncancel(); },
+      finish() { if (this.onfinish) this.onfinish(); },
+    };
+    this.animations.push(animation);
+    return animation;
+  }
   get lastChild() { return this._children[this._children.length - 1] || null; }
   text() { return (this._html || this._text).replace(/<[^>]*>/g, "") + this._children.map((c) => c.text()).join(""); }
 }
@@ -168,7 +239,29 @@ let nextGetPending = null;      // 下一次 `GET /api/sessions` 把 `pending` �
 /* U3-05 / D12：静默轮询的失败注入——接下来的 N 次 `GET /api/sessions/…` 直接失败。
  * 用来钉「失败静默，连续 3 次才提示」；注入用完即清。 */
 let failNextGets = 0;
+/* U4-01：飞行时间表 `anim.ini` 是相对静态文件的 fetch（不是 `/api/` 请求）。烟测默认回
+ * **磁盘上的真文件**（改 ini 即生效的口径）；用例可注入下一份 `{ok, text}` 看缺键 /
+ * 非法值 / 未知键的退回默认与"一行提示"。 */
+let iniInjection = null;
+const readIniFile = () => {
+  try { return readFileSync("tools/sgs_web/static/anim.ini", "utf8"); } catch { return ""; }
+};
+
 globalThis.fetch = async (path, options) => {
+  if (path === "anim.ini") {
+    const injected = iniInjection;
+    iniInjection = null;
+    if (injected) {
+      return {
+        ok: injected.ok !== false,
+        status: injected.ok === false ? 404 : 200,
+        text: async () => String(injected.text || ""),
+        json: async () => ({}),
+      };
+    }
+    const text = readIniFile();
+    return { ok: true, status: 200, text: async () => text, json: async () => ({}) };
+  }
   if (typeof path === "string" && path.startsWith("/api/")) {
     calls.push({ path, body: options && options.body ? JSON.parse(options.body) : null });
     if (failNextGets > 0 && !(options && options.method) && path.startsWith("/api/sessions/")) {
@@ -15735,6 +15828,380 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.state.effectCards = [];
   ui.state.revealedCards = [];
   ui.renderPending(null);
+  ui.resetSelection();
+}
+
+/* ============ U4-01：飞行层（D1 / D2 / D3 / D5 / D6） ============
+ *
+ * 合成载荷走**真入口**：`applyViewRaw` 交给 `stepPlayback(true)`（与页面同一条回放路径），
+ * 飞行器由 `stepPlayback` 在重绘之后同步起飞。断言按记录数飞行器、起 / 落点矩形存在
+ * （没有 `data-anim-missing`）、`processing -> discard` 为零、多张 N 全飞。
+ *
+ * 不读真实布局 / 时钟：垫片矩形是确定性的（`shimRect`），`animate` 只登记参数
+ * （`node.animations`），故 `delay` / 扇开幅度都能直接断言。
+ */
+{
+  const layer = $("t-anim-flights");
+  const flights = () => Array.from(layer.children || []);
+  const clearFlights = () => {
+    layer.innerHTML = "";
+    layer.removeAttribute("data-anim-missing");
+    layer.removeAttribute("data-anim-unregistered");
+  };
+  // 真 DOM 的 getAttribute 缺省返回 null，垫片返回 undefined：读法统一成 null。
+  const missing = () => layer.getAttribute("data-anim-missing") ?? null;
+  const unregistered = () => layer.getAttribute("data-anim-unregistered") ?? null;
+  const flightCard = (id, name, extra = {}) => ({ ...synthCard(id, name), ...extra });
+  const zoneRef = (zone, seat = null, extra = {}) => ({ zone, seat, ...extra });
+  const moveRecord = (seq, reason, from, to, cards, extra = {}) => ({
+    kind: "delta", delta_type: "card_move", seq, frame_id: 0, depth: 0,
+    reason, owner: 0, from_zone: from, to_zone: to, cards, ...extra,
+  });
+  const playerFor = (seat, extra = {}) => ({
+    seat, hp: 4, hp_max: 4, hand_count: 3, alive: true,
+    equip: [], judge: [], identity: null, ...extra,
+  });
+  const snapshotFor = (players, selfHand) => ({
+    seat: 0, phase: "play", turn_seat: 0, deck_count: 30, discard: [],
+    processing: [], players, self_hand: selfHand || [flightCard(1, "杀")],
+  });
+  const bodyFor = (records, snapshot) => ({
+    session_id: "u4-flight", seed: 1, human_seat: 0, finished: false,
+    timeout_seconds: null, heroes: { 0: "guojia", 1: "zhangfei", 2: "diaochan" },
+    skills: [], pending: null, snapshot, records, live_deltas: [], narrative: [],
+    skill_events: [], cursor: records.length, log_seq: records.length,
+  });
+  const feed = (records, before, { live = true } = {}) => {
+    ui.state.playback = null;
+    ui.state.effectCards = [];
+    ui.state.revealedCards = [];
+    ui.state.sessionId = "u4-flight";
+    ui.state.view = live ? bodyFor([], before) : null;
+    clearFlights();
+    ui.applyViewRaw(bodyFor(records, before));
+  };
+  /** 走一步回放，返回这一步新出生的飞行器（按节点读法，不读动画内部状态）。 */
+  const stepFlights = () => {
+    const before = flights().length;
+    ui.stepPlayback(true);
+    return flights().slice(before);
+  };
+  const kindOf = (node) => node.getAttribute("data-anim-kind");
+  const delayOf = (node) => (node && node.animations && node.animations[0]
+    ? node.animations[0].options.delay : null);
+  const durationOf = (node) => (node && node.animations && node.animations[0]
+    ? node.animations[0].options.duration : null);
+  const summary = (nodes) => `节点=${nodes.length} kinds=${JSON.stringify(nodes.map(kindOf))}`
+    + ` missing=${missing()} unregistered=${unregistered()}`;
+  const okFlight = (label, nodes, count, kind = null) => {
+    check(label,
+      nodes.length === count
+        && (kind === null || nodes.every((node) => kindOf(node) === kind))
+        && missing() === null
+        && unregistered() === null,
+      summary(nodes));
+  };
+
+  /* ---- 时间表：内置默认、缺键 / 非法值退回默认、一行提示（D8） ---- */
+  const iniKeys = [
+    "base_step", "flight_use", "flight_judge_reveal", "flight_draw", "flight_gain",
+    "flight_discard", "flight_place_equip", "flight_place_judge", "flight_replace_out",
+    "flight_stage_out", "fan_ms", "fan_px", "phase_float_ms",
+  ];
+  const defaults = ui.animDefaults;
+  check("U4-01-init 内置默认含 D8 全部键、没有 debug_scale",
+    iniKeys.every((key) => typeof defaults[key] === "number") && !("debug_scale" in defaults),
+    `keys=${JSON.stringify(Object.keys(defaults))}`);
+  iniInjection = {
+    ok: true,
+    text: "flight_draw = 400\nfan_px = 不是数字\nflight_gain =\nquantum = 1\n",
+  };
+  await ui.animLoadConfig();
+  const noteNode = $("t-anim-note");
+  const fallbackNote = String(noteNode.textContent || "");
+  check("U4-01-ini 缺键 / 非法值（含空值）退回默认，并只写一行提示（debug_scale 不再是合法键）",
+    ui.animConfig.flight_draw === 400
+      && ui.animConfig.fan_px === defaults.fan_px
+      && ui.animConfig.flight_gain === defaults.flight_gain
+      && noteNode.hidden === false
+      && fallbackNote.length > 0
+      && !fallbackNote.includes("\n")
+      && /默认/.test(fallbackNote),
+    `draw=${ui.animConfig.flight_draw} fan_px=${ui.animConfig.fan_px}`
+      + ` gain=${ui.animConfig.flight_gain} note="${fallbackNote}"`);
+  iniInjection = {
+    ok: true,
+    text: iniKeys.map((key) => `${key} = ${defaults[key]}`).join("\n"),
+  };
+  await ui.animLoadConfig();
+  check("U4-01-ini 全键 ini 覆盖后无提示（正常启动不打扰）",
+    iniKeys.every((key) => ui.animConfig[key] === defaults[key])
+      && noteNode.hidden === true && noteNode.textContent === "",
+    `noteHidden=${noteNode.hidden} note="${noteNode.textContent}"`);
+  iniInjection = { ok: false, text: "" };
+  await ui.animLoadConfig();
+  check("U4-01-ini 取不到 ini 时回内置默认、仍只一行提示",
+    iniKeys.every((key) => ui.animConfig[key] === defaults[key])
+      && noteNode.hidden === false
+      && !String(noteNode.textContent || "").includes("\n")
+      && /默认/.test(noteNode.textContent),
+    `note="${noteNode.textContent}"`);
+  noteNode.hidden = true;
+  noteNode.textContent = "";
+
+  const playersBase = () => [playerFor(0), playerFor(1), playerFor(2)];
+
+  /* ---- D3-1 摸牌：牌堆 → 自己手牌行；对手摸牌只飞牌背，数量读 card_count ---- */
+  {
+    const hand = [flightCard(1, "杀"), flightCard(2, "闪")];
+    const snapshot = snapshotFor(playersBase(), hand);
+    feed([
+      moveRecord(1, "DRAW", zoneRef("deck"), zoneRef("hand", 0), [hand[0], hand[1]]),
+    ], snapshot);
+    const nodes = stepFlights();
+    okFlight("U4-01-a 摸牌：2 张牌从「牌堆」飞进自己手牌行（2 个飞行器）", nodes, 2, "draw");
+  }
+  {
+    const snapshot = snapshotFor(playersBase(), []);
+    feed([
+      moveRecord(2, "DRAW", zoneRef("deck"), zoneRef("hand", 1), [], { card_count: 3 }),
+    ], snapshot);
+    const nodes = stepFlights();
+    check("U4-01-b 对手摸牌：只飞牌背「?」，数量读 card_count（3 个）",
+      nodes.length === 3
+        && nodes.every((node) => kindOf(node) === "draw"
+          && node.getAttribute("data-anim-hidden") === "true"
+          && node.textContent.includes("?"))
+        && missing() === null,
+      summary(nodes));
+  }
+
+  /* ---- D3-2 使用 / 判定亮牌：手牌 / 牌堆 → 处理区（舞台卡） ---- */
+  {
+    const used = flightCard(9, "杀");
+    const snapshot = snapshotFor(playersBase(), [used]);
+    feed([
+      moveRecord(3, "USE", zoneRef("hand", 0), zoneRef("processing"), [used]),
+    ], snapshot);
+    const nodes = stepFlights();
+    okFlight("U4-01-c 使用：从手牌行飞进舞台的处理区卡面", nodes, 1, "use");
+  }
+  {
+    const judged = flightCard(10, "桃");
+    feed([
+      moveRecord(4, "JUDGE", zoneRef("deck"), zoneRef("processing"), [judged]),
+    ], snapshotFor(playersBase(), [flightCard(1, "杀")]));
+    const nodes = stepFlights();
+    okFlight("U4-01-d 判定亮牌：牌堆 → 舞台处理区", nodes, 1, "judge_reveal");
+  }
+
+  /* ---- D3-3 上装备：舞台卡 → 目标槽（含顶替的旧装备错开半拍） ---- */
+  {
+    const weapon = flightCard(11, "寒冰剑", { slot: "weapon", attack_range: 2, type: "equip" });
+    const before = snapshotFor(playersBase(), [weapon]);
+    feed([
+      moveRecord(5, "USE", zoneRef("hand", 0), zoneRef("processing"), [weapon]),
+      moveRecord(6, "PUT", zoneRef("processing"), zoneRef("equip", 0), [weapon]),
+    ], before);
+    const first = stepFlights();
+    const second = stepFlights();
+    check("U4-01-e 上装备：舞台卡 → 武器槽（两条记录各一只飞行器）",
+      first.length === 1 && kindOf(first[0]) === "use"
+        && second.length === 1 && kindOf(second[0]) === "place_equip"
+        && missing() === null,
+      `${summary(first)} / ${summary(second)}`);
+  }
+  {
+    const oldWeapon = flightCard(17, "青釭剑", { slot: "weapon", attack_range: 2, type: "equip" });
+    const newWeapon = flightCard(18, "寒冰剑", { slot: "weapon", attack_range: 2, type: "equip" });
+    const before = snapshotFor([
+      playerFor(0, { equip: [oldWeapon] }), playerFor(1), playerFor(2),
+    ], [newWeapon]);
+    feed([
+      moveRecord(7, "LOSE", zoneRef("equip", 0), zoneRef("discard"), [oldWeapon]),
+      moveRecord(8, "PUT", zoneRef("hand", 0), zoneRef("equip", 0), [newWeapon]),
+    ], before);
+    const out = stepFlights();
+    const into = stepFlights();
+    const oldNode = out[0];
+    const oldDuration = oldNode ? durationOf(oldNode) : null;
+    check("U4-01-f 顶替：旧装备另飞一只去「弃牌」，且与置入错开半拍（delay = 半条飞行）",
+      out.length === 1 && kindOf(oldNode) === "replace_out"
+        && into.length === 1 && kindOf(into[0]) === "place_equip"
+        && delayOf(oldNode) === Math.round(oldDuration / 2)
+        && delayOf(into[0]) === 0
+        && missing() === null,
+      `out=${summary(out)} delay=${delayOf(oldNode)} dur=${oldDuration}`
+        + ` intoKind=${into[0] && kindOf(into[0])} intoDelay=${into[0] && delayOf(into[0])}`);
+  }
+
+  /* ---- D3-4 置入判定区 / 闪电换人（跨座位同区） ---- */
+  {
+    const lightning = flightCard(13, "闪电", { type: "trick" });
+    const before = snapshotFor(playersBase(), [lightning]);
+    feed([
+      moveRecord(9, "USE", zoneRef("hand", 0), zoneRef("processing"), [lightning]),
+      moveRecord(10, "PUT", zoneRef("processing"), zoneRef("judge", 0), [lightning]),
+      moveRecord(11, "PUT", zoneRef("judge", 0), zoneRef("judge", 2), [lightning]),
+    ], before);
+    const staged = stepFlights();
+    const placed = stepFlights();
+    const moved = stepFlights();
+    check("U4-01-g 判定区：置入第一个空判定槽；闪电换人 A 判定槽 → B 判定槽",
+      staged.length === 1 && kindOf(staged[0]) === "use"
+        && placed.length === 1 && kindOf(placed[0]) === "place_judge"
+        && moved.length === 1 && kindOf(moved[0]) === "place_judge"
+        && missing() === null,
+      `${summary(staged)} / ${summary(placed)} / ${summary(moved)}`);
+  }
+
+  /* ---- D3-5 不过处理区的置入（界【结姻】）：从源区起飞，没有舞台卡也不报错 ---- */
+  {
+    const gift = flightCard(19, "赤兔", { slot: "horse_defense", type: "equip" });
+    const before = snapshotFor(playersBase(), [gift]);
+    feed([
+      moveRecord(12, "PUT", zoneRef("hand", 0), zoneRef("equip", 0), [gift]),
+    ], before);
+    const nodes = stepFlights();
+    check("U4-01-h 界【结姻】这类不过处理区的置入：从手牌行起飞、落到装备槽",
+      nodes.length === 1 && kindOf(nodes[0]) === "place_equip"
+        && missing() === null && unregistered() === null,
+      summary(nodes));
+  }
+
+  /* ---- D3-6 顺 / 借刀 / 获得：对方槽 / 手牌数 → 自己手牌区 ---- */
+  {
+    const stolen = flightCard(14, "漆黑", { slot: "armor", type: "equip" });
+    const before = snapshotFor([
+      playerFor(0), playerFor(1, { equip: [stolen] }), playerFor(2),
+    ], [flightCard(1, "杀")]);
+    feed([
+      moveRecord(13, "LOSE", zoneRef("equip", 1), zoneRef("hand", 0), [stolen]),
+    ], before);
+    const nodes = stepFlights();
+    okFlight("U4-01-i 顺 / 借刀：对方装备槽 → 自己手牌区", nodes, 1, "gain");
+  }
+  {
+    // 借刀 / 顺手牵羊动到**他人的手牌**：来源只能是「手牌 N」计数，牌面按隐藏侧画牌背。
+    feed([
+      moveRecord(24, "LOSE", zoneRef("hand", 1), zoneRef("hand", 0), [], { card_count: 2 }),
+    ], snapshotFor(playersBase(), [flightCard(1, "杀")]));
+    const nodes = stepFlights();
+    check("U4-01-i2 对方手牌数 → 自己手牌区：2 只牌背「?」（来源是手牌计数锚点）",
+      nodes.length === 2
+        && nodes.every((node) => kindOf(node) === "gain"
+          && node.getAttribute("data-anim-hidden") === "true"
+          && node.textContent.includes("?"))
+        && missing() === null && unregistered() === null,
+      summary(nodes));
+  }
+
+  /* ---- D3-7 拆 / 弃置 / 重铸：区 → 弃牌计数 ---- */
+  {
+    const stolenJudge = flightCard(15, "乐不思蜀", { type: "trick" });
+    const before = snapshotFor([
+      playerFor(0), playerFor(1, { judge: [stolenJudge] }), playerFor(2),
+    ], [flightCard(1, "杀")]);
+    feed([
+      moveRecord(14, "LOSE", zoneRef("judge", 1), zoneRef("discard"), [stolenJudge]),
+    ], before);
+    const nodes = stepFlights();
+    okFlight("U4-01-j 拆：对方判定槽 → 顶栏「弃牌」计数", nodes, 1, "discard");
+  }
+  {
+    const junk = flightCard(16, "杀");
+    const before = snapshotFor(playersBase(), [junk]);
+    feed([moveRecord(15, "DISCARD", zoneRef("hand", 0), zoneRef("discard"), [junk])], before);
+    const nodes = stepFlights();
+    okFlight("U4-01-k 弃置：手牌行 → 顶栏「弃牌」", nodes, 1, "discard");
+  }
+  {
+    const iron = flightCard(20, "铁索连环", { type: "trick" });
+    const before = snapshotFor(playersBase(), [iron]);
+    feed([moveRecord(16, "REFORGE", zoneRef("hand", 0), zoneRef("discard"), [iron])], before);
+    const nodes = stepFlights();
+    okFlight("U4-01-k2 重铸：手牌行 → 顶栏「弃牌」", nodes, 1, "discard");
+  }
+
+  /* ---- D3-8 使用 / 判定收尾（processing → discard）：零飞行器 ---- */
+  {
+    feed([
+      moveRecord(17, "USE", zoneRef("processing"), zoneRef("discard"), [flightCard(21, "杀")]),
+      moveRecord(18, "JUDGE", zoneRef("processing"), zoneRef("discard"), [flightCard(22, "闪")]),
+    ], snapshotFor(playersBase(), []));
+    ui.flushPlayback();
+    check("U4-01-l 使用 / 判定收尾（processing → discard）：0 个飞行器",
+      flights().length === 0 && missing() === null && unregistered() === null,
+      `节点=${flights().length} missing=${missing()} unregistered=${unregistered()}`);
+  }
+
+  /* ---- D5 多张：N = 同一条记录里的牌数，全部起飞、扇开、错峰 ---- */
+  {
+    const ten = Array.from({ length: 10 }, (_, index) => flightCard(30 + index, "杀"));
+    const before = snapshotFor(playersBase(), ten);
+    feed([moveRecord(19, "DISCARD", zoneRef("hand", 0), zoneRef("discard"), ten)], before);
+    const nodes = stepFlights();
+    const offsets = nodes.map((node) => `${node.style.left}|${node.style.top}`);
+    const delays = nodes.map(delayOf);
+    const fanMs = ui.animConfig.fan_ms;
+    check("U4-01-m 一次 10 张：10 个飞行器、各自扇开（位置不重合）、fan_ms 内错峰",
+      nodes.length === 10
+        && new Set(offsets).size === 10
+        && Math.min(...delays) === 0
+        && Math.max(...delays) === fanMs
+        && new Set(nodes.map((node) => node.getAttribute("data-anim-index"))).size === 10
+        && missing() === null,
+      `节点=${nodes.length} 位置=${new Set(offsets).size} delays=${Math.min(...delays)}..${Math.max(...delays)} fan_ms=${fanMs}`);
+  }
+
+  /* ---- 未登记 / 起点缺失 / 落点缺失：可见读法、静默跳过、不阻塞播放 ---- */
+  {
+    feed([
+      moveRecord(20, "PUT", zoneRef("hand", 0), zoneRef("moon"), [flightCard(23, "杀")]),
+    ], snapshotFor(playersBase(), [flightCard(23, "杀")]));
+    ui.flushPlayback();
+    check("U4-01-n 未登记的 (reason, to_zone) 组合：0 个飞行器 + 层上标「未登记」",
+      flights().length === 0
+        && unregistered() === "PUT->moon"
+        && ui.state.playback === null,
+      `节点=${flights().length} unregistered=${unregistered()}`);
+  }
+  {
+    feed([
+      moveRecord(21, "LOSE", zoneRef("hand", 7), zoneRef("hand", 0), [flightCard(24, "杀")]),
+    ], snapshotFor(playersBase(), [flightCard(1, "杀")]));
+    ui.flushPlayback();
+    check("U4-01-o 起点缺失：静默跳过（0 个）、层上 data-anim-missing=source、播放走完不卡",
+      flights().length === 0 && missing() === "source" && ui.state.playback === null,
+      `节点=${flights().length} missing=${missing()} playback=${ui.state.playback}`);
+  }
+  {
+    feed([
+      moveRecord(22, "LOSE", zoneRef("hand", 0), zoneRef("hand", 7), [flightCard(25, "杀")]),
+    ], snapshotFor(playersBase(), [flightCard(1, "杀"), flightCard(25, "杀")]));
+    ui.flushPlayback();
+    check("U4-01-p 落点缺失：静默跳过（0 个）、层上 data-anim-missing=destination、播放走完不卡",
+      flights().length === 0 && missing() === "destination" && ui.state.playback === null,
+      `节点=${flights().length} missing=${missing()} playback=${ui.state.playback}`);
+  }
+
+  /* ---- 开局批次（!live）：没有上一份提交视图时，钩子照样起飞 ---- */
+  {
+    const hand = [flightCard(1, "杀"), flightCard(2, "闪")];
+    feed([
+      moveRecord(23, "DRAW", zoneRef("deck"), zoneRef("hand", 0), hand),
+    ], snapshotFor(playersBase(), hand), { live: false });
+    check("U4-01-q 开局批次（!live）也走同一个钩子：牌堆 → 自己手牌行照样起飞",
+      flights().length === 2 && flights().every((node) => kindOf(node) === "draw")
+        && ui.state.view !== null,
+      `节点=${flights().length} view=${Boolean(ui.state.view)}`);
+  }
+
+  ui.state.playback = null;
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.view = null;
+  ui.state.sessionId = null;
   ui.resetSelection();
 }
 

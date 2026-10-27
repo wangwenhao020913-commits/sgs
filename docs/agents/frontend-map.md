@@ -29,9 +29,10 @@
 | `answer.js` | 倒计时三色、`buildAction`、`submitAction`（`POST …/answer`）、`clearSelection`。 |
 | `log.js` | 事件流三档（简易 = 服务端叙事 / 完整重点 / 完整全部）。 |
 | `replay.js` | 回放页：录像列表、按记录重建座位全区、询问面板与播放控制。 |
+| `anim.js` | 飞行层（U4-01）：`(reason, to_zone, from_zone)` 分类表、起 / 落点锚点、`anim.ini` 时长表载入、飞行器生成；`durationOf(record)` 是节奏公式（票 02）的只读时长口。 |
 | `main.js` | `wire()` 事件绑定、回放步长按钮、启动；必须是最后一份脚本。 |
 
-`index.html` 是 DOM 骨架 + 覆盖层（`#t-target-lines` / `#t-skill-floats`）+ 脚本顺序；
+`index.html` 是 DOM 骨架 + 覆盖层（`#t-target-lines` / `#t-skill-floats` / `#t-anim-flights`）+ 脚本顺序；
 `style.css` 是样式与设计单位，动效时长 / 尺寸的机械断言在 `tests/test_web_static.py`。
 
 ## 舞台 / live view / 轮询 / 动效入口
@@ -50,6 +51,8 @@
 | `playSkillEvent(event, now)` | `effects.js` | 技能名飘字 + 白光；`targets` 非空才画线。 |
 | `fireSkillEventsThrough(seq)` | `effects.js` | 回放到某条记录时释放 `state.skillEvents` 队列。 |
 | `syncTransientEffects()` | `effects.js` | 座位重建后补回仍在播的高亮 / 体力闪 / 白光；顺手收掉过期目标线。 |
+| `animPlanFlight(record)` | `anim.js` | 飞行层**起飞前**：查分类表、不飞 / 未登记判定、量一次源矩形（`stepPlayback` 在 `applyEffectDelta` 之后、重绘之前调）。 |
+| `animLaunchFlight(plan)` | `anim.js` | 飞行层**重绘之后**：量落点并同步起飞；起 / 落点缺失静默跳过（层上留 `data-anim-missing`）。 |
 
 ## 页面层
 
@@ -64,7 +67,9 @@
 - `tests/support/ui_smoke.mjs`：`node:vm` + 最小 DOM 垫片，按 `index.html` 顺序跑**真脚本**，
   喂真服务端响应与合成载荷。垫片的 `El.children` 是 **HTMLCollection 形状的活视图**
   （`length` / 下标 / `item` / 迭代，无数组方法）——测试遍历一律 `Array.from(...)` 或展开；
-  集合断言用 `setEquals`，纯函数断言经 `ui.stageLane` 喂 `now`。
+  集合断言用 `setEquals`，纯函数断言经 `ui.stageLane` 喂 `now`。U4-01 起垫片另有
+  **确定性 `getBoundingClientRect`** 与登记式 `animate`（飞行层只读"矩形存在 / 动画参数"，
+  不读真实布局与时钟）。
 - `tests/support/ui_bridge.js`：把前端入口按名字挂到 `globalThis.__bridge`（烟测里叫 `ui`），
   缺项容错；`applyView` / `submitAction` 默认先把回放跑完，要看中间态用
   `applyViewRaw` / `submitActionRaw` 配 `stepPlayback`。

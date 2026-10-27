@@ -269,6 +269,12 @@
     <!-- 技能名层（U3-04 / D9）：发动者武将块上方的飘字（金色加粗，2s 上浮 20 设计单位）。
          独立一层是必须的：武将块用 `overflow: hidden` 裁白光，飘字住进去会被一起裁掉。 -->
     <div id="t-skill-floats" class="skill-floats" aria-hidden="true"></div>
+
+    <!-- 飞行层（U4-01 / D1）：与舞台区互不依赖的覆盖层，z 高于目标线 / 技能飘字。
+         每张移动的牌一个牌面副本；起 / 落点只在起飞那一刻量一次，之后不跟随重绘。 -->
+    <div id="t-anim-flights" class="anim-layer" aria-hidden="true"></div>
+    <!-- 飞行时间表提示（U4-01 / D8）：anim.ini 缺键 / 解析失败时**一行**，正常时隐藏。 -->
+    <div id="t-anim-note" class="anim-note" hidden></div>
   </div>
 </main>
 
@@ -367,9 +373,8 @@
 <script src="answer.js"></script>
 <script src="log.js"></script>
 <script src="replay.js"></script>
-<!-- PROTOTYPE（一次性验证；不带 ?proto=1 时零行为）。验证完连同 anim-proto.* 一起删。
-     必须排在 main.js 之前：test_web_static 契约要求 main.js 是清单最后一份。 -->
-<script src="anim-proto.js"></script>
+<!-- U4-01（D1）：飞行层。必须排在 main.js 之前：test_web_static 契约要求 main.js 是清单最后一份。 -->
+<script src="anim.js"></script>
 <script src="main.js"></script>
 </body>
 </html>

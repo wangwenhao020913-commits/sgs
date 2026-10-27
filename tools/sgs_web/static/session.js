@@ -611,6 +611,7 @@ function stepPlayback(immediate) {
   }
   const record = playback.records[playback.index];
   const liveOnly = Boolean(record.live_only);
+  let flightPlan = null;
   if (!liveOnly) {
     if (record.kind === "query") {
       playback.querySeat = record.query.actor;
@@ -622,6 +623,9 @@ function stepPlayback(immediate) {
     else appendLog(record, playback.querySeat);
     state.effectCards = applyEffectDelta(record, state.effectCards);
     state.revealedCards = applyRevealDelta(record, state.revealedCards);
+    // U4-01（D1 / D2）：飞行层只有一个显式入口。起飞前量**源**——这一步还没重绘，
+    // 舞台卡 / 手牌 / 槽位都还在原处；落点等重绘之后再量并同步起飞（见本函数末尾）。
+    flightPlan = animPlanFlight(record);
   }
   // U3-05（D11）：每条记录先把**可见**变化写进 live view，再**从它**重绘全表——手牌数 /
   // 自己的手牌面 / 体力 / 装备与判定区 / 牌堆与弃牌数 / 横置 / 酒 / 身份 / 阵亡 /
@@ -634,6 +638,9 @@ function stepPlayback(immediate) {
     // 开局批次没有上一份提交视图可派生：表体等 commit，舞台照旧逐事件派生。
     renderProcessing();
   }
+  // U4-01（D1 / D2）：重绘之后才量**落点**（新槽位 / 新舞台卡这时才在 DOM 里），并同步
+  // 起飞——不排计时器、不改 `state.eventDelayMs`（节奏归票 02）。
+  if (flightPlan) animLaunchFlight(flightPlan);
   if (!liveOnly) {
     // U3-03（D8.1 / D13）：决策点高亮、使用牌目标线、体力闪。回放页不走这条路径（D14）。
     // 放在表体重绘**之后**：描边 / 体力闪要落在新座位节点上（`syncTransientEffects` 兜住

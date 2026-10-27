@@ -833,6 +833,41 @@ button.mini-slot { cursor: pointer; }
   text-shadow: 0 1px calc(2 * var(--dsu)) rgba(43, 36, 28, .35);
   animation: skill-float-rise 2s ease-out 1 forwards;
 }
+
+/* ---------- 飞行层（U4-01 / D1 / D2）：与舞台区互不依赖的牌面副本 ---------- */
+
+/* 覆盖整个牌桌壳、不吃指针、裁在壳内；层级高于目标线（15）与技能飘字（16）、
+ * 低于弹窗（60）。起 / 落点是**起飞那一刻**量一次的视口坐标，位置写死成
+ * left/top + translate，之后不跟随任何重绘（D1）。 */
+.anim-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 18;
+}
+.anim-flight {
+  position: absolute;
+  margin: 0;
+  transform-origin: 50% 50%;
+  pointer-events: none;
+  will-change: transform, opacity;
+  filter: drop-shadow(0 calc(6 * var(--dsu)) calc(10 * var(--dsu)) rgba(43, 36, 28, .28));
+}
+/* 时间表回退提示（D8）：一行，固定左下；正常时 `hidden` 不占位。 */
+.anim-note {
+  position: fixed;
+  left: 8px;
+  bottom: 8px;
+  z-index: 9999;
+  max-width: 60%;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(32, 26, 18, .82);
+  color: #f5efe3;
+  font: 12px/1.4 system-ui;
+  pointer-events: none;
+}
 @keyframes skill-float-rise {
   0% {
     transform: translate(-50%, -100%) translateY(0);

@@ -564,3 +564,139 @@ def test_the_children_guard_catches_the_old_bug_and_allows_array_forms() -> None
     assert len(_children_array_method_hits(nested)) == 1, (
         "`Array.from(...)` 里嵌套的直接调用仍是违规，守卫不得整段放行"
     )
+
+
+# ---------------------------------------------------------------------------
+# U4-01：飞行层（spec D1 / D2 / D3 / D5 / D6；原型 anim-proto.* 提升为产品文件）
+#
+# 机械的两半：
+# 1. **原型残渣**：`anim.js` / `anim.ini` 是产品文件，不得再带 `?proto=1` 门、demo 循环、
+#    `__animProto` 探针、`debug_scale`，也不得再用全局 monkey-patch 接管 `applyEffectDelta` /
+#    `stepPlayback` / `commitView`（钩子只有一个显式入口，见 `session.js:stepPlayback`）。
+# 2. **钩子次序**：源点在 `applyEffectDelta` 之后、重绘之前量；飞行器在重绘之后同步起飞。
+#    次序断言直接比 `stepPlayback` 函数体里的**位置**，不排序、不归一化（CODING_STANDARDS §4）。
+# ---------------------------------------------------------------------------
+
+_ANIM_JS = STATIC_DIR / "anim.js"
+_SESSION_JS = STATIC_DIR / "session.js"
+_ANIM_INI = STATIC_DIR / "anim.ini"
+
+_D8_INI_KEYS = {
+    "base_step",
+    "flight_use",
+    "flight_judge_reveal",
+    "flight_draw",
+    "flight_gain",
+    "flight_discard",
+    "flight_place_equip",
+    "flight_place_judge",
+    "flight_replace_out",
+    "flight_stage_out",
+    "fan_ms",
+    "fan_px",
+    "phase_float_ms",
+}
+
+_MONKEY_PATCH_RE = re.compile(r"\b(applyEffectDelta|stepPlayback|commitView)\s*=")
+_STEP_PLAYBACK_RE = re.compile(r"function stepPlayback\(immediate\) \{(?P<body>.*?)\n\}", re.S)
+
+
+def test_anim_scripts_are_wired_and_the_prototype_is_gone() -> None:
+    """`anim.js` 进清单、排在 `main.js` 之前；原型文件与运行时接管全部移除。"""
+    srcs = _script_srcs()
+    assert "anim.js" in srcs, f"index.html 必须加载飞行层 anim.js：{srcs}"
+    assert srcs.index("anim.js") < srcs.index("main.js"), "anim.js 必须排在 main.js 之前"
+    assert "anim-proto.js" not in srcs, f"index.html 不得再加载原型：{srcs}"
+    assert not (STATIC_DIR / "anim-proto.js").exists(), "原型 anim-proto.js 应已删除"
+    assert not (STATIC_DIR / "anim-proto.ini").exists(), "原型 anim-proto.ini 应已更名"
+    assert _ANIM_INI.is_file(), "产品时间表 anim.ini 缺失"
+
+    body = _strip_js_comments(_ANIM_JS.read_text(encoding="utf-8"))
+    assert "__animProto" not in body, "原型探针 __animProto 不进产品文件"
+    assert "proto=1" not in body, "不得保留 ?proto=1 门（产品文件常态生效）"
+    assert "debug_scale" not in body, "debug_scale（调试倍率）必须整体移除"
+    assert "eventDelayMs" not in body, (
+        "节奏（state.eventDelayMs）归票 02；票 01 的 anim.js 不得改播放步长"
+    )
+    hits = _MONKEY_PATCH_RE.findall(body)
+    assert not hits, f"飞行层不得再 monkey-patch 全局入口（实际：{hits}）"
+
+
+def test_session_playback_hook_measures_source_before_render_and_launches_after() -> None:
+    """唯一的钩子：源点先量、重绘后量落点并同步起飞（D2）。"""
+    text = _SESSION_JS.read_text(encoding="utf-8")
+    match = _STEP_PLAYBACK_RE.search(text)
+    assert match is not None, "session.js 里找不到 stepPlayback(immediate) 的函数体"
+    body = match.group("body")
+    plan = body.find("animPlanFlight(record)")
+    launch = body.find("animLaunchFlight(")
+    assert plan >= 0, "stepPlayback 里没有显式调用 animPlanFlight(record)"
+    assert launch >= 0, "stepPlayback 里没有显式调用 animLaunchFlight(...)"
+    delta = body.find("applyEffectDelta(record, state.effectCards)")
+    assert delta >= 0 and plan > delta, (
+        "起点必须在 applyEffectDelta 之后量（此时舞台卡 / 手牌 / 槽位还在原处）"
+    )
+    assert plan < body.find("applyLiveDelta(record"), "起点必须在重绘（applyLiveDelta / render）之前量"
+    assert plan < body.find("renderTable()"), "起点必须在 renderTable 之前量"
+    assert launch > body.find("renderTable()"), "落点必须在 renderTable 重绘之后量"
+    assert launch > body.find("renderProcessing()"), "落点必须在 renderProcessing 重绘之后量"
+
+
+def test_anim_ini_lists_the_d8_durations_without_debug_scale() -> None:
+    """`anim.ini` = D8 的 13 个键；`flight_stage_out = 0`；`debug_scale` 不进产品。"""
+    text = _ANIM_INI.read_text(encoding="utf-8")
+    assert "debug_scale" not in text, "debug_scale 必须从 anim.ini 整体移除（含键与注释）"
+    entries: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = re.sub(r"\s*[#;].*$", "", raw).strip()
+        if not line:
+            continue
+        key, separator, value = line.partition("=")
+        assert separator, f"anim.ini 行不是 key = value：{raw}"
+        entries[key.strip()] = value.strip()
+    assert set(entries) == _D8_INI_KEYS, (
+        f"anim.ini 的键必须与 D8 表一致：缺 {sorted(_D8_INI_KEYS - set(entries))}；"
+        f"多 {sorted(set(entries) - _D8_INI_KEYS)}"
+    )
+    for key, value in entries.items():
+        float(value)  # 解析失败即红（页面此时会退回默认）
+    assert float(entries["flight_stage_out"]) == 0, (
+        "处理区 → 弃牌堆不飞：flight_stage_out 必须是 0"
+    )
+
+
+def test_anim_flight_layer_is_a_full_shell_overlay_above_the_effect_layers() -> None:
+    """D1：覆盖整个牌桌壳、不吃指针、裁在壳内、层级高于目标线与技能飘字。"""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    tag = re.search(r"<div\b[^>]*\bid=\"t-anim-flights\"[^>]*>", html)
+    assert tag is not None, "index.html 里缺少飞行层 #t-anim-flights"
+    assert re.search(r'class="[^"]*anim-layer', tag.group(0)), (
+        f"飞行层必须带 class=anim-layer：{tag.group(0)}"
+    )
+    assert "aria-hidden" in tag.group(0), "飞行层是纯视觉层，必须 aria-hidden"
+    assert html.index('id="table-shell"') < html.index('id="t-anim-flights"'), (
+        "飞行层必须住在 .table-shell 里"
+    )
+    note = re.search(r"<[^>]*\bid=\"t-anim-note\"[^>]*>", html)
+    assert note is not None, "index.html 里缺少一行提示的 #t-anim-note（D8 的 ini 回退提示）"
+
+    layer = _css_rule(".anim-layer")
+    assert re.search(r"position:\s*absolute", layer), f"飞行层必须绝对定位：{layer}"
+    assert re.search(r"inset:\s*0\b", layer), f"飞行层必须铺满壳（inset: 0）：{layer}"
+    assert re.search(r"pointer-events:\s*none", layer), f"飞行层不能吃指针：{layer}"
+    assert re.search(r"overflow:\s*hidden", layer), f"飞行层必须裁在壳内：{layer}"
+
+    def z_index(selector: str) -> int:
+        found = re.search(r"z-index:\s*(\d+)", _css_rule(selector))
+        assert found is not None, f"{selector} 里找不到 z-index"
+        return int(found.group(1))
+
+    assert z_index(".anim-layer") > z_index(".target-lines") > 0
+    assert z_index(".anim-layer") > z_index(".skill-floats") > 0
+    assert z_index(".anim-layer") < z_index(".modal")
+
+    flight = _css_rule(".anim-flight")
+    assert re.search(r"position:\s*absolute", flight), (
+        f"飞行器位置写死成 left/top + translate，CSS 必须绝对定位：{flight}"
+    )
+    assert re.search(r"pointer-events:\s*none", flight), f"飞行器是牌面副本，不能吃指针：{flight}"

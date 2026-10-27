@@ -89,6 +89,9 @@
     "bareCardRef",
     // M6 票 19：混合池武将名（目录兜底）/ 技能三态徽标 / 逐事件派生的轮次与额外回合
     "heroDisplayName", "skillStateLabel", "applyLiveDelta",
+    // U4-01（D1/D2/D3/D5/D6）：飞行层——分类表时长 / ini 载入 / 起飞前量源 / 重绘后起飞。
+    "animDefaults", "animConfig", "animParseIni", "animLoadConfig",
+    "animPlanFlight", "animLaunchFlight", "durationOf",
   ];
   const out = {};
   for (const name of names) {
