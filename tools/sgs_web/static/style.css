@@ -148,12 +148,13 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   font-variant-numeric: tabular-nums; line-height: 1;
 }
 .card.face .cname {
-  position: absolute; left: 2px; right: 2px; top: calc(43 * var(--dsu));
-  /* U4-06b（spec D13）：手牌与舞台共用 88 设计单位宽的卡面。21 号 + .06em 字距时
-   * 四字牌名（乐不思蜀 / 八卦阵…）超出内宽被省略；20 号 + .02em 在 88 宽内放得下
-   * 四字全名（1600 / 1440 / 1258 三档都算过），不再靠悬停兜底。 */
+  position: absolute; left: 1px; right: 1px; top: calc(43 * var(--dsu));
+  /* U4-06b / U4-07（spec D13）：手牌与舞台共用 88 设计单位宽的卡面。可读内宽 =
+   * 88 − 左右边框各 1 − 左右内缩各 1 = 84；20 号 + .01em 的四字牌名 = 80.8 ≤ 84，
+   * 1258 壳宽（`--dsu` ≈ .79）也放得下。U4-06b 的 2px 内缩让内宽只剩 82，实机在
+   * 1258 壳宽仍出省略号——U4-07 实机验收时改回 1px / .01em。 */
   text-align: center; font-size: calc(20 * var(--dsu)); font-weight: 700;
-  letter-spacing: .02em; line-height: 1.15;
+  letter-spacing: .01em; line-height: 1.15;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .card.face .ctype {
