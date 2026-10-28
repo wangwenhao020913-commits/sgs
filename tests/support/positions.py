@@ -148,17 +148,18 @@ def play_standard(seed: int = 7, *, pack: ContentPack | None = None, ai: str = "
     需要"跑到第 N 个回合为止"的结构性单测请用 :func:`run_turns`。
 
     ``ai``（票 13）选参与者档位：``"random"``（缺省，M2 基准与确定性探针的口径）或
-    ``"heuristic"``（规则启发式）；两档共用同一个 ``ai`` 子流。
+    ``"heuristic"``（规则启发式）；两档都按座位走 ``ai:<seat>`` 子流（票 12）。
     """
     import sgs.agents as agents
-    from sgs.engine import RandomSource
+    from sgs.engine import ai_stream
 
     resolved_pack = pack if pack is not None else load_content_pack(deck_profile=M1_DECK_PROFILE)
     rule_config = RuleConfig()
     engine = Engine.new_game(seed=seed, rule_config=rule_config, pack=resolved_pack)
-    ai_stream = RandomSource(seed).substream("ai")
     player = agents.HeuristicPlayer if ai == "heuristic" else agents.RandomPlayer
-    participants = [player(ai_stream) for _ in range(rule_config.player_count)]
+    participants = [
+        player(ai_stream(seed, seat)) for seat in range(rule_config.player_count)
+    ]
     engine.run(participants)
     return engine
 

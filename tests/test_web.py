@@ -28,7 +28,7 @@ _bootstrap()
 
 from sgs.agents import RandomPlayer, TapePlayer  # noqa: E402
 from sgs.data import Identity, Kingdom, Suit, load_content_pack, validate_rule_config  # noqa: E402
-from sgs.engine import Engine, RandomSource, dump_journal  # noqa: E402
+from sgs.engine import Engine, ai_stream, dump_journal  # noqa: E402
 from sgs.resolution import Frame, ResolutionStack  # noqa: E402
 from sgs.skills import FREE_SPLIT, hero_card_zone_key  # noqa: E402
 from sgs.state import (  # noqa: E402
@@ -158,8 +158,7 @@ def test_the_halt_driven_journal_is_byte_identical_to_a_one_shot_run(seed: int) 
         heroes=session.heroes,
         hero_pool=session.hero_pool,
     )
-    ai_stream = RandomSource(seed).substream("ai")
-    straight.run([_FirstChoice(), RandomPlayer(ai_stream)])
+    straight.run([_FirstChoice(), RandomPlayer(ai_stream(seed, 1))])
 
     assert halt_driven == dump_journal(straight.records)
 
@@ -2575,7 +2574,12 @@ def test_a_broken_run_is_refused_instead_of_half_read(tmp_path: Path) -> None:
     path = save_run(tmp_path, session)
     name = path.name[: -len(".jsonl")]
 
-    path.write_bytes(path.read_bytes()[: len(path.read_bytes()) // 2])  # 截断
+    # 截到**最后一行的中间**（"写到一半被杀"的真实形状）。按固定字节数从中间截断会
+    # 随记录流长度变化而偶发落在行边界上——那时前缀仍是合法 JSONL，本用例就不是在测
+    # "坏文件被拒"了（票 12 切换座位子流时撞到过一次）。
+    raw = path.read_bytes()
+    last_line = raw.rstrip(b"\n").rfind(b"\n") + 1
+    path.write_bytes(raw[: last_line + (len(raw) - last_line) // 2])
     with pytest.raises(ValueError):
         load_run(tmp_path, name)
 

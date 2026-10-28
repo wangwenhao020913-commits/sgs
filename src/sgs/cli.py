@@ -28,6 +28,7 @@ from sgs.engine import (
     IllegalActionError,
     JournalRecord,
     RandomSource,
+    ai_stream,
     new_seed,
 )
 from sgs.state import CardRef, Zone, ZoneRef
@@ -41,7 +42,7 @@ def _csv(raw: str) -> tuple[str, ...]:
 
 
 def _player(name: str, stream) -> Participant:
-    """按档位名造一个参与者；两档共用同一个 ``ai`` 子流（票 13 §档位）。"""
+    """按档位名造一个参与者；传进来的是该座位自己的 ``ai:<seat>`` 子流（票 12）。"""
     if name == "heuristic":
         return HeuristicPlayer(stream)
     return RandomPlayer(stream)
@@ -101,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     seed = args.seed if args.seed is not None else new_seed()
     # 种子闸门只在唯一随机源里有第二份；这里直接借它的报错，不再抄一遍值域。
     try:
-        source = RandomSource(seed)
+        RandomSource(seed)
     except ValueError as error:
         print(f"种子非法：{error}", file=sys.stderr)
         return 1
@@ -123,9 +124,9 @@ def main(argv: list[str] | None = None) -> int:
     except HeroDealError as error:
         print(f"武将发放非法：{error}", file=sys.stderr)
         return 1
-    ai_stream = source.substream("ai")
     participants: list[Participant] = [
-        _player(args.ai, ai_stream) for _ in range(rule_config.player_count)
+        _player(args.ai, ai_stream(seed, seat))
+        for seat in range(rule_config.player_count)
     ]
     try:
         engine.run(participants)

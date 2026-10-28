@@ -1370,6 +1370,11 @@ def play_random(
         heroes=heroes,
         hero_pool=hero_pool,
     )
+    # **冻结磁带的录制驱动**，故意保留旧的"全桌一条 ``ai``"队列（票 12 的例外）：
+    # 已录的 60 条基准是这套流下的字节，``seed_search --verify`` 也按它核对写死的种子。
+    # 切到 ``ai:<seat>`` 会让 15 条随机驱动基准的写死种子失效，而票 12 的 DoD 明确
+    # "不重录金录像"；运行时建座点（``cli.py`` / 网页会话 / 批量）已全走 ``ai_stream``。
+    # 重录基准是独立的显式动作，那时再把这里切过去并按本模块纪律重搜种子。
     stream = RandomSource(seed).substream("ai")
     engine.run([RandomPlayer(stream) for _ in range(player_count)])
     return engine

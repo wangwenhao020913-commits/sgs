@@ -1,7 +1,7 @@
 """全 AI 局**基准组**（票 14 §9 / `spec.md` §Testing Decisions 第 2 条②）。
 
 固定 **5 人**、**32 个种子**、**无人干预**，参与者是与产品同源的启发式档
-（``--ai heuristic``；库侧 = :class:`~sgs.agents.HeuristicPlayer` + 同一个 ``ai`` 子流）。
+（``--ai heuristic``；库侧 = :class:`~sgs.agents.HeuristicPlayer` + 每座位 ``ai:<seat>`` 子流）。
 判据四条，逐种子全查：
 
 1. **跑完**：必达 ``game_end``（不超步数、不抛错）；
@@ -33,7 +33,7 @@ from sgs.data import (
     hero_by_id,
     load_content_pack,
 )
-from sgs.engine import Engine, RandomSource
+from sgs.engine import Engine, ai_stream
 
 from support import ACCEPTANCE_SEEDS
 
@@ -95,9 +95,11 @@ def _new_engine(seed: int, *, pack=PACK, players: int = PLAYERS) -> Engine:
 
 
 def _participants(seed: int, players: int = PLAYERS) -> list[_IllegalAnswerScan]:
-    """所有座位共用同一个 ``ai`` 子流（与 ``cli.py`` 的 ``_player`` 一处口径）。"""
-    stream = RandomSource(seed).substream("ai")
-    return [_IllegalAnswerScan(HeuristicPlayer(stream)) for _ in range(players)]
+    """每座位一条 ``ai:<seat>`` 子流（与 ``cli.py`` 的 ``_player`` 一处口径，票 12）。"""
+    return [
+        _IllegalAnswerScan(HeuristicPlayer(ai_stream(seed, seat)))
+        for seat in range(players)
+    ]
 
 
 def _fail(seed: int, message: str) -> None:
@@ -419,8 +421,12 @@ M6_JIE_WEI_B_HEROES: tuple[str, ...] = (
 显式发放也不得违反它。
 """
 
-M6_JIE_WEI_B_SEED = ACCEPTANCE_SEEDS[4]
-"""与 32 种子基准组同批的第五个种子（``ACCEPTANCE_SEEDS`` 的真源）。"""
+M6_JIE_WEI_B_SEED = ACCEPTANCE_SEEDS[1]
+"""与 32 种子基准组同批的第二个种子（``ACCEPTANCE_SEEDS`` 的真源）。
+
+票 12 切每座位 ``ai:<seat>`` 子流后，原来的 ``ACCEPTANCE_SEEDS[4]``（140）这一局不再
+发动界【天妒】——"四条技能都真的发动过"是这条验收的本体，不能降成"将发了但没触发"。
+按本模块纪律在同一验收批里**重选种子**为 137（四条全命中），判据不放宽。"""
 
 
 def test_the_m6_jie_wei_b_heroes_finish_a_full_ai_game_cleanly_and_replay():

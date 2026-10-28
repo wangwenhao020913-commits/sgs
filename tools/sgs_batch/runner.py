@@ -20,7 +20,7 @@ from sgs.data import (
     deal_heroes,
     load_content_pack,
 )
-from sgs.engine import Engine, RandomSource
+from sgs.engine import Engine, RandomSource, ai_stream
 from sgs.state import Query
 
 from .errors import BatchSpecError, UnsupportedMode
@@ -225,13 +225,13 @@ def _build_participants(
             )
     else:
         assert seat_policies is not None
-        # 全桌一条 ``ai`` 子流（与 ``cli.py`` / 验收批同口径）。票 12 落地后这里换成
-        # 每座位 ``ai:<seat>`` 子流（该票面已写明"批量层随同批切换"）；本票不提前落
-        # helper，避免两票各抄一份派生格式。
-        stream = RandomSource(spec.seed).substream("ai")
+        # 每座位一条 ``ai:<seat>`` 子流（与 ``cli.py`` / 网页会话同口径，票 12）：
+        # 座位之间的取数互不消费，A/B 读数可比。
         built = [
-            HeuristicPlayer(stream) if policy == "heuristic" else RandomPlayer(stream)
-            for policy in seat_policies
+            (HeuristicPlayer if policy == "heuristic" else RandomPlayer)(
+                ai_stream(spec.seed, seat)
+            )
+            for seat, policy in enumerate(seat_policies)
         ]
     return [recorder.wrap(participant) for participant in built]
 

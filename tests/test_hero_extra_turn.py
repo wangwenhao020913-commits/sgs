@@ -543,7 +543,7 @@ def test_the_heuristic_ai_chooses_to_activate_botu():
     这条立刻变红（额外的整回合收益远高于一次用牌，正分是唯一合理的默认策略）。
     """
     from sgs.agents import HeuristicPlayer
-    from sgs.engine import RandomSource
+    from sgs.engine import ai_stream
     from sgs.state import ActivateSkill
 
     engine, driver = _botu_engine(top_up=False)
@@ -556,6 +556,6 @@ def test_the_heuristic_ai_chooses_to_activate_botu():
     )
     assert engine.pending is not None, "本回合弃牌堆已含四花色 ⇒ 必有【博图】的发动询问"
 
-    action = HeuristicPlayer(RandomSource(7).substream("ai")).respond(engine.pending)
+    action = HeuristicPlayer(ai_stream(7, 0)).respond(engine.pending)
 
     assert isinstance(action, ActivateSkill) and action.skill_id == JIE_BOTU

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from sgs.engine import RandomSource, new_seed
+from sgs.engine import RandomSource, ai_stream, new_seed
 
 SEED = 0x1234_5678_9ABC_DEF0
 
@@ -102,28 +102,27 @@ def test_new_seed_is_a_64_bit_integer():
 
 def test_substreams_are_derived_by_name_not_by_creation_order():
     left = RandomSource(SEED)
-    ai_first = left.substream("ai")
+    sample_first = left.substream("sample")
     shuffle_second = left.substream("shuffle")
 
     right = RandomSource(SEED)
     shuffle_first = right.substream("shuffle")
-    ai_second = right.substream("ai")
+    sample_second = right.substream("sample")
 
     assert [shuffle_first.randbelow(100) for _ in range(5)] == [
         shuffle_second.randbelow(100) for _ in range(5)
     ]
-    assert [ai_first.randbelow(100) for _ in range(5)] == [
-        ai_second.randbelow(100) for _ in range(5)
+    assert [sample_first.randbelow(100) for _ in range(5)] == [
+        sample_second.randbelow(100) for _ in range(5)
     ]
 
 
 def test_consuming_the_ai_stream_does_not_move_the_shuffle_stream():
-    source = RandomSource(SEED)
     for _ in range(50):
-        source.substream("ai").randbelow(10)
+        ai_stream(SEED, 0).randbelow(10)
 
     shuffled = list(range(20))
-    source.substream("shuffle").shuffle(shuffled)
+    RandomSource(SEED).substream("shuffle").shuffle(shuffled)
 
     fresh = list(range(20))
     RandomSource(SEED).substream("shuffle").shuffle(fresh)

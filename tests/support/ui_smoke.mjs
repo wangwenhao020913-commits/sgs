@@ -10779,9 +10779,12 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
  * 两段：
  *   ① 合成载荷（字段与真 payload 同形）：窗口不关、不占选项行、无懈可提交、下一次取牌
  *      复用同一个链键；
- *   ② **真生产路径**（种子 198、5 人、random AI、人类座位 0）：开局就是"人类手里有【无懈】、
+ *   ② **真生产路径**（种子 238、5 人、random AI、人类座位 0）：开局就是"人类手里有【无懈】、
  *      五谷已亮牌"的 RESPOND 窗口；逐字段断言 DOM 读的是 `harvest.revealed / taken_by /
  *      targets / current`，再驱动到真实取牌步，断言同一窗口切回正常取牌模式。
+ *      （票 12 切每座位 `ai:<seat>` 子流后原种子 198 不再落到这个窗口，按本文件纪律
+ *      在 5 人 random AI 里重扫：238 的 revealed=5 / current=3、且人类手里真有【无懈】，
+ *      与旧断言同形。）
  */
 {
   const harvestCard = (id, name, type, description) => ({
@@ -11006,14 +11009,14 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && Array.from($("t-options-home").children).includes($("t-options")),
     `dialogHidden=${$("t-dialog").hidden} revealHidden=${$("t-dialog-reveal").hidden} revealChildren=${$("t-dialog-reveal").children.length} key=${ui.state.dialog.key}`);
 
-  // ---- ④ 真生产路径：种子 198（5 人）开局 = 人类持有【无懈】的五谷无懈窗口 ----
+  // ---- ④ 真生产路径：种子 238（5 人）开局 = 人类持有【无懈】的五谷无懈窗口 ----
   ui.state.sessionId = null;
   ui.state.view = null;
-  await newSession(198, { player_count: 5 });
+  await newSession(238, { player_count: 5 });
   const realResponse = ui.state.view.pending;
   const realHarvest = realResponse && realResponse.harvest;
   const realKey = ui.state.dialog.key;
-  check("U2-R7 真会话（种子 198 / 5 人 / random AI）：开局 pending 就是带 harvest 的无懈 RESPOND",
+  check("U2-R7 真会话（种子 238 / 5 人 / random AI）：开局 pending 就是带 harvest 的无懈 RESPOND",
     !!realResponse && realResponse.kind === "RESPOND" && realResponse.cause === "NULLIFY"
       && !!realHarvest && realHarvest.active === true
       && realHarvest.revealed.length === 5 && realHarvest.current === 3,
@@ -17441,9 +17444,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   /* ---- B1：五谷亮牌弹窗在源牌结算完时当场收起 -------------------------------- */
   resetAll();
-  // 种子 198 / 5 人：开局的人类第一问就是【五谷丰登】的逐目标无懈窗口（既有用例同源）。
+  // 种子 238 / 5 人：开局的人类第一问就是【五谷丰登】的逐目标无懈窗口（既有用例同源；
+  // 票 12 切每座位子流后原种子 198 失效，按本文件纪律重扫）。
   const harvestBody = await post("/api/sessions", {
-    player_count: 5, ai: "random", human_seat: 0, timeout_seconds: null, seed: 198,
+    player_count: 5, ai: "random", human_seat: 0, timeout_seconds: null, seed: 238,
   });
   ui.state.sessionId = harvestBody.session_id;
   ui.state.view = null;

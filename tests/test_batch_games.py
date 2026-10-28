@@ -17,7 +17,7 @@ import pytest
 
 from sgs.agents import RandomPlayer
 from sgs.data import Mode, RuleConfig, load_content_pack
-from sgs.engine import Engine, RandomSource
+from sgs.engine import Engine, ai_stream
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -91,16 +91,14 @@ def _factory_that_explodes_on_142(spec):
     """模块顶层可 pickle 的 factory：种子 142 的那局在开跑时崩溃。"""
     if spec.seed == 142:
         raise RuntimeError("boom")
-    stream = RandomSource(spec.seed).substream("ai")
-    return [RandomPlayer(stream), RandomPlayer(stream)]
+    return [RandomPlayer(ai_stream(spec.seed, seat)) for seat in range(2)]
 
 
 def _factory_that_kills_the_worker_on_142(spec):
     """同上的"崩溃"版：``os._exit`` 绕过 Python 的 try/except，等同 worker 被 OOM / 信号杀死。"""
     if spec.seed == 142:
         os._exit(1)
-    stream = RandomSource(spec.seed).substream("ai")
-    return [RandomPlayer(stream), RandomPlayer(stream)]
+    return [RandomPlayer(ai_stream(spec.seed, seat)) for seat in range(2)]
 
 
 def _without_elapsed(batch: BatchResult) -> dict:
@@ -275,8 +273,7 @@ def test_keep_journal_is_opt_in_and_reuses_the_engine_journal() -> None:
         hero_pool=(),
         journal=True,
     )
-    stream = RandomSource(251).substream("ai")
-    engine.run([RandomPlayer(stream), RandomPlayer(stream)])
+    engine.run([RandomPlayer(ai_stream(251, seat)) for seat in range(2)])
 
     assert kept.journal == engine.journal(), "批量 journal 必须走引擎的唯一序列化器"
 
@@ -401,8 +398,7 @@ def test_seat_policies_and_participants_factory_are_mutually_exclusive() -> None
 
 
 def _factory_with_one_participant(spec):
-    stream = RandomSource(spec.seed).substream("ai")
-    return [RandomPlayer(stream)]
+    return [RandomPlayer(ai_stream(spec.seed, 0))]
 
 
 def test_a_participants_factory_must_return_one_participant_per_seat() -> None:

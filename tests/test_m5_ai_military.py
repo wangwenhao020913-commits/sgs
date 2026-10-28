@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from sgs.agents import HeuristicPlayer
 from sgs.data import Identity, load_content_pack
-from sgs.engine import Engine, RandomSource
+from sgs.engine import Engine, ai_stream
 from sgs.effects import legal_actions_for
 from sgs.state import (
     EndPhase,
@@ -125,7 +125,7 @@ def _engine(seats, *, deck: tuple[int, ...], turn_seat: int = 0, seed: int = 1) 
 
 
 def _ai(seed: int = AI_SEED) -> HeuristicPlayer:
-    return HeuristicPlayer(RandomSource(seed).substream("ai"))
+    return HeuristicPlayer(ai_stream(seed, 0))
 
 
 def _play_phase_query(state, seat: int = 0) -> PlayPhaseQuery:

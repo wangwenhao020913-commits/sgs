@@ -12,7 +12,7 @@ import pytest
 
 import sgs.agents as agents
 from sgs.data import RuleConfig, load_content_pack
-from sgs.engine import Engine, JournalRecord, RandomSource
+from sgs.engine import Engine, JournalRecord, ai_stream
 
 PACK = load_content_pack(deck_profile="standard_108")
 SEEDS = (136, 137, 138, 139)
@@ -34,8 +34,9 @@ def _play(
         hero_pool=(),
         **options,
     )
-    stream = RandomSource(seed).substream("ai")
-    participants = [agents.HeuristicPlayer(stream) for _ in range(players)]
+    participants = [
+        agents.HeuristicPlayer(ai_stream(seed, seat)) for seat in range(players)
+    ]
     return engine, engine.run(participants)
 
 

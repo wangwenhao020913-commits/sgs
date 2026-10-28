@@ -1068,7 +1068,7 @@ def test_a_move_after_question_stops_the_engine_before_the_next_frame_asks() -> 
     【连营】）在同一局里真的同场，正是"混合局可玩"的前提。
     """
     from sgs.agents import HeuristicPlayer
-    from sgs.engine import RandomSource
+    from sgs.engine import ai_stream
 
     engine = Engine.new_game(
         seed=148,
@@ -1076,9 +1076,7 @@ def test_a_move_after_question_stops_the_engine_before_the_next_frame_asks() -> 
         pack=PACK,
         heroes=("ganning", "liubei", "jie_luxun", "zhaoyun", "huatuo"),
     )
-    stream = RandomSource(148).substream("ai")
-
-    engine.run([HeuristicPlayer(stream) for _ in range(5)])
+    engine.run([HeuristicPlayer(ai_stream(148, seat)) for seat in range(5)])
 
     assert engine.finished, "这一局必须跑到终局（挂起后不得再发第二条询问）"
 

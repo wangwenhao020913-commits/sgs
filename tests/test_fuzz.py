@@ -41,7 +41,7 @@ import pytest
 import sgs.agents as agents
 from sgs.data import ContentPack, Identity, RuleConfig, load_content_pack
 from sgs.effects import hand_count, hand_limit
-from sgs.engine import Engine, JournalRecord, QueryRecord, RandomSource, TimingRecord
+from sgs.engine import Engine, JournalRecord, QueryRecord, TimingRecord, ai_stream
 from sgs.skills import CANDIDATE_CAP
 from sgs.state import (
     ActivateSkill,
@@ -172,11 +172,10 @@ def _play(seed: int, *, players: int = 4, deadline: float | None = None) -> _Fuz
     # 开局那几条记录（初次洗牌 + 发牌）由 ``build_initial`` 直接构造、不走 ``_emit``，
     # 故在这里补一次活状态检查；其后每条记录由 ``_emit`` 覆写逐一检查。
     _check_live_invariants(engine, None)
-    ai_stream = RandomSource(seed).substream("ai")
     remaining = [QUERY_BUDGET]
     participants = [
-        _BudgetedPlayer(agents.RandomPlayer(ai_stream), remaining, deadline)
-        for _ in range(players)
+        _BudgetedPlayer(agents.RandomPlayer(ai_stream(seed, seat)), remaining, deadline)
+        for seat in range(players)
     ]
     try:
         engine.run(participants)

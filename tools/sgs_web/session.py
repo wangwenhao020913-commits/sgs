@@ -25,7 +25,7 @@ from sgs.data import (
     load_content_pack,
     validate_rule_config,
 )
-from sgs.engine import Engine, RandomSource, new_seed
+from sgs.engine import Engine, ai_stream, new_seed
 from sgs.state import Action, Query
 
 __all__ = [
@@ -194,10 +194,9 @@ class Session:
             hero_config=self.hero_config,
         )
 
-        self._ai_stream = RandomSource(self.seed).substream("ai")
         self._halt_player = _HaltPlayer(self)
         players: list[Participant] = [
-            self._make_ai() if seat != human_seat else self._halt_player
+            self._make_ai(seat) if seat != human_seat else self._halt_player
             for seat in range(rule_config.player_count)
         ]
         self.participants: tuple[Participant, ...] = tuple(players)
@@ -328,10 +327,11 @@ class Session:
 
     # -- 内部 ---------------------------------------------------------------
 
-    def _make_ai(self) -> Participant:
+    def _make_ai(self, seat: int) -> Participant:
+        stream = ai_stream(self.seed, seat)
         if self.ai == "heuristic":
-            return HeuristicPlayer(self._ai_stream)
-        return RandomPlayer(self._ai_stream)
+            return HeuristicPlayer(stream)
+        return RandomPlayer(stream)
 
 
 def create_session(**kwargs: object) -> Session:

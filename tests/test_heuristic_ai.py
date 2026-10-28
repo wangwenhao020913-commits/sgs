@@ -43,7 +43,7 @@ from sgs.data import (
     load_heroes,
 )
 from sgs.effects import designation_actions_for, legal_actions_for, locate
-from sgs.engine import Engine, RandomSource
+from sgs.engine import Engine, ai_stream
 from sgs.skills import (
     CATALOG,
     card_preactivations,
@@ -124,8 +124,9 @@ def _ids(type_id: str) -> list[int]:
     return [index for index, card in enumerate(PACK.deck.cards) if card.type == type_id]
 
 
-def _stream(seed: int):
-    return RandomSource(seed).substream("ai")
+def _stream(seed: int, seat: int = 0):
+    """该座位的 ``ai:<seat>`` 子流（票 12）；单座位询问缺省用座位 0。"""
+    return ai_stream(seed, seat)
 
 
 def _deck_excluding(*card_ids: int) -> tuple[int, ...]:
@@ -135,13 +136,15 @@ def _deck_excluding(*card_ids: int) -> tuple[int, ...]:
 
 
 def _play(seed: int, *, players: int = 2, ai: str = "heuristic", hero_pool=None) -> Engine:
-    """库 API 跑完整局（与命令行同源：同一 ``ai`` 子流、同样的开局参数）。"""
+    """库 API 跑完整局（与命令行同源：每座位 ``ai:<seat>`` 子流、同样的开局参数）。"""
     rule_config = RuleConfig(player_count=players)
     engine = Engine.new_game(
         seed=seed, rule_config=rule_config, pack=PACK, hero_pool=hero_pool
     )
     player = HeuristicPlayer if ai == "heuristic" else RandomPlayer
-    participants = [player(_stream(seed)) for _ in range(players)]
+    participants = [
+        player(_stream(seed, seat)) for seat in range(players)
+    ]
     engine.run(participants)
     return engine
 
@@ -815,8 +818,10 @@ def test_every_answer_in_a_full_game_is_one_of_the_offered_candidates():
             pack=PACK,
             hero_pool=(),
         )
-        stream = _stream(seed)
-        scans = [_IllegalAnswerScan(HeuristicPlayer(stream)) for _ in range(5)]
+        scans = [
+            _IllegalAnswerScan(HeuristicPlayer(_stream(seed, seat)))
+            for seat in range(5)
+        ]
         engine.run(scans)
 
     assert sum(scan.answers for scan in scans) > 0
@@ -847,8 +852,10 @@ def test_the_full_ai_sweep_of_thirty_two_seeds_never_answers_illegally_or_crashe
             pack=PACK,
             hero_pool=(),
         )
-        stream = _stream(seed)
-        scans = [_IllegalAnswerScan(HeuristicPlayer(stream)) for _ in range(5)]
+        scans = [
+            _IllegalAnswerScan(HeuristicPlayer(_stream(seed, seat)))
+            for seat in range(5)
+        ]
         engine.run(scans)  # 崩溃即失败：非法应答会被引擎拒绝并抛错
         assert all(scan.illegal == 0 for scan in scans), f"种子 {seed} 出现了候选之外的应答"
         games += 1
@@ -902,7 +909,7 @@ def _candidate_wins(seed: int, *, heuristic: bool) -> bool:
 
     两臂用**同一个种子**（牌堆 / 身份 / 武将映射逐字节相同）⇒ 差别只来自座位 0 的档位，
     这正是票面说的"在同一批种子上"；``hero_pool=()`` 与验收 5 的批次同口径（开武将）。
-    五个座位共用同一个 ``ai`` 子流（与 ``cli.py`` / ``test_all_ai_games.py`` 一处口径）。
+    每座位一条 ``ai:<seat>`` 子流（与 ``cli.py`` / ``test_all_ai_games.py`` 一处口径，票 12）。
     """
     engine = Engine.new_game(
         seed=seed,
@@ -910,16 +917,17 @@ def _candidate_wins(seed: int, *, heuristic: bool) -> bool:
         pack=PACK,
         hero_pool=(),
     )
-    stream = _stream(seed)
     players = [
-        (HeuristicPlayer if heuristic and seat == 0 else RandomPlayer)(stream)
+        (HeuristicPlayer if heuristic and seat == 0 else RandomPlayer)(
+            ai_stream(seed, seat)
+        )
         for seat in range(5)
     ]
     engine.run(players)
     return 0 in set(engine.records[-1].winners)
 
 
-RATE_SEEDS: tuple[int, ...] = tuple(range(104, 232))
+RATE_SEEDS: tuple[int, ...] = tuple(range(5000, 5128))
 """胜率判据的种子批（票 13 §验收 6 的 128 局裁定，见 design.md §9 的裁定记录）。
 
 32 种子的验收批（:data:`~support.ACCEPTANCE_SEEDS`）在阈值 19.2 上是**刀尖平衡**：实测
@@ -932,6 +940,15 @@ RATE_SEEDS: tuple[int, ...] = tuple(range(104, 232))
 无害改动会随机翻红。按 `CODING_STANDARDS.md` §5（"阈值落在噪声里时……换成不含绝对阈值的
 相对判据"），本批只保留 :func:`_candidate_wins_over` 派生的**两臂之差**与 32 局批内优势
 （≥ 1/8），绝对胜率**不再断言**、只作诊断读数。
+
+**票 12（每座位 ``ai:<seat>`` 子流）后重选验收种子**：共用 ``ai`` 流换成按座位派生，全部
+旧读数作废——这是预期代价，不是回归。旧 128 局批 ``104..231`` 按 spec §2.4 一直是**趋势
+批**，切换后重读为启发式 **78/128 = 0.609**、随机 **58/128 = 0.453** ⇒ 相对优势
+**0.156**（仍 ≥ 0.10，只作诊断读数）。判据的**验收种子**按本仓纪律换一条没被调参 / 探针
+看过的带：``5000..5127``（``4000..4047`` 已被票 10 的 48 局探针用过，不选）。切换后实测
+启发式 **88/128 = 0.688**、随机 **51/128 = 0.398** ⇒ 相对优势 **0.289**，**不放宽 0.10
+阈值**。32 种子批仍 ``136..167``：切换后 **22/32 vs 16/32**（优势 6 ≥ 4）。``5000..5127``
+此后同样记为**趋势种子**（只作诊断读数，不作判决批）。
 
 **W4-4 重新标定（同一批 128 种子，改动前后各跑一遍）**：相对优势阈值按票面从 **0.15
 降到 0.10**；绝对胜率只打印、不断言。实测（装备技入表 + AI 填表之后）：启发式
@@ -958,9 +975,9 @@ RATE_SEEDS: tuple[int, ...] = tuple(range(104, 232))
 def _candidate_wins_over(seeds: tuple[int, ...], *, heuristic: bool) -> dict[int, bool]:
     """跑完一批种子，返回 ``seed -> 座位 0 是否获胜``；任一局崩溃都**点名报出**。
 
-    返回**逐种子结果**（而不是只返回总数），好让同一次运行同时供两个判据用：**对随机档的
-    优势**读整个 :data:`RATE_SEEDS`，**批内优势**读它的 :data:`~support.ACCEPTANCE_SEEDS`
-    子集 —— 两处都不必把对局再跑一遍。随机档遇崩溃时不能悄悄减种子，故收集失败清单并整条判红。
+    返回**逐种子结果**（而不是只返回总数），好用同一份结果同时打印两臂读数。票 12 换验收
+    种子带后，32 种子批（:data:`~support.ACCEPTANCE_SEEDS`）不再被 128 局批包含，故它由
+    调用方**单独再跑一批**。随机档遇崩溃时不能悄悄减种子，故收集失败清单并整条判红。
     """
     wins: dict[int, bool] = {}
     failures: list[str] = []
@@ -1004,10 +1021,13 @@ def test_the_heuristic_beats_random_on_the_same_seeds():
     )
 
     seeds = ACCEPTANCE_SEEDS
-    hero = sum(heuristic[seed] for seed in seeds)
-    baseline = sum(random[seed] for seed in seeds)
+    batch_heuristic = _candidate_wins_over(seeds, heuristic=True)
+    batch_random = _candidate_wins_over(seeds, heuristic=False)
+    hero = sum(batch_heuristic.values())
+    baseline = sum(batch_random.values())
     # 批内判据同步按实测重钉（W4-fix-2 起为 24/32 vs 15/32；上一批 104..135 因"随机档
     # 盲选面变小、质量上升"掉到 17/32 vs 14/32，按本仓纪律**重新选种**而不是放宽阈值）。
+    # 票 12 切每座位子流后为 22/32 vs 16/32（优势 6），阈值仍是 len//8 = 4。
     assert hero - baseline >= len(seeds) // 8, (
         f"启发式 {hero}/32 vs 随机 {baseline}/32："
         f"优势不足（票 13 §验收 6 的宽松判据）"
@@ -3252,7 +3272,7 @@ JIE_WU_XIAOJI = "hero.jie_sunshangxiang.xiaoji"
 
 
 def _jie_wu_players(count: int, seed: int = 11):
-    return [HeuristicPlayer(_stream(seed)) for _ in range(count)]
+    return [HeuristicPlayer(_stream(seed, seat)) for seat in range(count)]
 
 
 def test_the_ai_activates_jie_zhiheng_and_draws_the_extra_card():
@@ -3542,7 +3562,7 @@ JIE_QUN_LOCKED = (
 
 
 def _jie_qun_players(count: int, seed: int = 11):
-    return [HeuristicPlayer(_stream(seed)) for _ in range(count)]
+    return [HeuristicPlayer(_stream(seed, seat)) for seat in range(count)]
 
 
 def test_the_ai_activates_jie_chuli_and_discards_one_card_from_each_chosen_kingdom():

@@ -46,7 +46,7 @@ from .journal import (
     record_json,
     wrap_delta,
 )
-from .rng import SUBSTREAM_DOMAIN, RandomSource, new_seed
+from .rng import SUBSTREAM_DOMAIN, RandomSource, ai_stream, new_seed
 from .victory import DeathFact, Side, Victory, solve_identity_outcome
 
 __all__ = (
@@ -88,6 +88,7 @@ __all__ = (
     "TurnChangeRecord",
     "Victory",
     "WineChangeRecord",
+    "ai_stream",
     "build_initial",
     "dump_journal",
     "instantiate_cards",

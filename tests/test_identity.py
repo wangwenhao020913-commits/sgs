@@ -18,7 +18,7 @@ import pytest
 
 import sgs.agents as agents
 from sgs.data import ContentPack, Identity, RuleConfig, load_content_pack, roster_for
-from sgs.engine import INITIAL_HP, Engine, RandomSource, read_journal
+from sgs.engine import INITIAL_HP, Engine, ai_stream, read_journal
 from sgs.skills import LORD_SKILL_IDS, lord_skill_allowed
 from sgs.state import PlayerPublic, project
 
@@ -185,8 +185,7 @@ def test_a_run_reaches_game_end_in_every_identity_seat_count():
     """票 23 的多人可达性在身份发放落地后仍成立（胜负语义归票 25）。"""
     for count in (4, 5, 6, 7, 8):
         engine = _new(count)
-        ai_stream = RandomSource(SEED).substream("ai")
-        engine.run([agents.RandomPlayer(ai_stream) for _ in range(count)])
+        engine.run([agents.RandomPlayer(ai_stream(SEED, seat)) for seat in range(count)])
 
         assert engine.finished, f"{count} 人局必须收局"
         assert engine.records[-1].kind == "game_end"
