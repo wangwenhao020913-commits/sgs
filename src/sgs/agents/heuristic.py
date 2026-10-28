@@ -1454,6 +1454,133 @@ _SCORERS: Mapping[QueryKind, Callable[[Query, Action], float]] = MappingProxyTyp
 
 
 # ---------------------------------------------------------------------------
+# AI 适配契约（票 17 / spec §4.5）：读点表
+# ---------------------------------------------------------------------------
+
+_AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType(
+    {
+        "PlayerView": MappingProxyType(
+            {
+                "seat": (True, "自己的座位：判'是否自己'与座位距离"),
+                "players": (True, "逐座位的公开面（体力 / 手牌数 / 装备 / 判定 / 横置 / 酒 / 已明身份）"),
+                "self_hand": (True, "自己的手牌牌面：成本、响应与转化源都从这里挑"),
+                "deck_count": (False, "只有剩余张数、没有顺序；记牌未落地（C1 / C2 才读），估值按未知牌常数"),
+                "discard": (False, "弃牌堆顺序对现有打分无影响（记牌批 C2 才读；现状按未知池估值）"),
+                "processing": (True, "【火攻】判据：处理区里躺着那张【火攻】才给'弃一张换 1 点伤害'的价"),
+                "turn_seat": (False, "回合归属不参与打分：没有'我的回合'加权"),
+                "phase": (False, "阶段不参与打分：是不是出牌阶段由询问类型本身表达"),
+            }
+        ),
+        "PlayerPublic": MappingProxyType(
+            {
+                "seat": (True, "座位号：目标 / 敌友判定与座位步排序"),
+                "hp": (True, "濒死与斩杀线：伤害够不够、要不要救、内奸估分"),
+                "hp_max": (True, "``hp < hp_max`` 判'已受伤'（【仁德】回体力的额外价值）"),
+                "hand_count": (True, "公开手牌数：【古锭刀】加伤、防守成本、够不够弃"),
+                "alive": (True, "只对存活座位出手（不把伤害算给已阵亡者）"),
+                "equip": (True, "装备区牌面：防具 / 武器 / 白银狮子的实际伤害；也进 ``_visible_cards``"),
+                "judge": (True, "判定区是公开信息，进 ``_visible_cards``（选牌步的可见面）"),
+                "chained": (True, "【铁索连环】打分读横置状态（``exclude=True``，但询问自带）"),
+                "flipped": (False, "翻面只决定'跳过回合'，不影响任何打分分支"),
+                "wine_active": (True, "【酒】：下一张【杀】+1 的实际伤害"),
+                "identity": (True, "唯一敌我信号（本人 / 主公 / 已阵亡可见；隐藏身份不猜）"),
+                "hero": (False, "武将 id 不参与打分：技能语义走 ``SKILL_VALUES``，不按武将近路"),
+                "kingdom": (False, "势力不参与打分：敌友只按 identity，不看势力同异"),
+            }
+        ),
+        # 每个询问子类都有的公共面（``_QueryBase`` 的字段 + 各自声明的 ``kind``）：
+        # 同一份语义只登记一次，否则九类各抄一遍必然漂移。
+        "Query": MappingProxyType(
+            {
+                "seq": (True, "填 ``answers_seq``：应答与询问的配对凭据（陈旧应答由引擎判）"),
+                "actor": (False, "应答者恒是 ``view.seat``（AI 只替自己答）；再读一份会多出第二个'我是谁'真源"),
+                "timing": (True, "判'出牌阶段空闲时机'：可取消的步骤 = 撤销一次已经发动的技能"),
+                "prompt": (False, "人话文案，只给界面 / 人读"),
+                "legal_actions": (True, "候选枚举的唯一来源（骨架候选，转化 / 预发动另有清单）"),
+                "view": (True, "全部读点的入口：本座位视角"),
+                "revealed": (True, "``ARRANGE`` 按授予的牌面把最有用的那张排在顶"),
+                "transform_preactivations": (True, "转化技清单（候选已收回）：填 ``ActivateSkill(来源, 目标)``"),
+                "transform_actions": (True, "被收回的转化候选：确认路径的成员判定（清单从它派生）"),
+                "kind": (True, "选路键：``_SCORERS[QueryKind(query.kind)]`` 与候选生成的派发"),
+            }
+        ),
+        "PlayPhaseQuery": MappingProxyType(
+            {
+                "preactivations": (True, "主动技预发动清单：复合候选不在 ``legal_actions`` 里，靠它填表"),
+                "designation_actions": (
+                    False,
+                    "借刀附带指定的**原始**候选池；AI 读派生的 ``card_preactivations``（已按牌名分组）",
+                ),
+                "card_preactivations": (
+                    True,
+                    "牌名 → 清单：填 ``UseCard(card, targets=(A,), designations=(Bn,))``",
+                ),
+            }
+        ),
+        "PeachQuery": MappingProxyType(
+            {
+                "dying": (True, "救谁：濒死者是不是自己 / 是不是敌人，决定救命价值"),
+            }
+        ),
+        "DiscardQuery": MappingProxyType(
+            {
+                "count": (False, "弃牌张数由候选自带（``action.cards``），按牌价取负即可"),
+            }
+        ),
+        "RespondQuery": MappingProxyType(
+            {
+                "cause": (False, "窗口成因不影响常量打分（能抵消就抵消）；无懈窗口走 ``SELECT_CARDS``"),
+                "required": (False, "必需牌名不读：候选里只有合法的"),
+                "target": (False, "窗口针对谁不影响常量打分（响应牌不占使用次数）"),
+                "window_frame": (False, "嵌套层号只用于记录流区分，不参与打分"),
+            }
+        ),
+        "SelectCardsQuery": MappingProxyType(
+            {
+                "spec": (True, "``spec.optional`` 判'可取消步骤'（火攻的可选弃牌那一步）"),
+                "slots": (True, "每个槽的牌面与归属：自己的牌按成本、别人的牌按收益"),
+                "skill_id": (True, "步骤的成本语义（【制衡】逐张回抽 / 【仁德】给出）"),
+                "provide_type": (False, "'提供一张 B'的牌名不读：合法性由引擎的校验器判"),
+            }
+        ),
+        "SkillActivationQuery": MappingProxyType(
+            {
+                "skill_id": (True, "查 ``SKILL_VALUES``；也是被动清单的键"),
+                "optional": (False, "不读：候选里有 ``Pass`` 本身就够判'这一步可取消'"),
+                "min_picks": (False, "冻结报文：生产者恒给 0（A-4 待清理），读了也是常量"),
+                "max_picks": (False, "同上：恒 0 的冻结报文"),
+                "slots": (False, "冻结报文：生产者恒给 ``()``；真要选的牌在随后的 ``SELECT_CARDS`` 里"),
+                "preactivation": (True, "被动入口的预发动清单（单条，不按技能分组）"),
+            }
+        ),
+        "SelectOptionQuery": MappingProxyType(
+            {
+                "skill_id": (False, "座位步的语义按**选项文本**前缀（``seat:``）判，不读 skill_id"),
+                "options": (
+                    False,
+                    "选项面不枚举：打分按 ``action.choice`` 查 ``_OPTION_VALUES``——"
+                    "未登记的新选项落 0 分（新增选项必须同票登记条目）",
+                ),
+            }
+        ),
+    }
+)
+"""**AI 读点表**：``PlayerView`` / ``PlayerPublic`` / 每类询问的每个字段 → 读不读 + 一句理由。
+
+三条读法：
+
+- 桶名 = 字段**所属的那一类**；询问**公共面**（``_QueryBase`` 的字段与各自声明的
+  ``kind``）一律登记在 ``"Query"`` 桶里，一类一份必然漂移；
+- 键是 ``model_fields`` 的名字——**漏登一个新字段即红**（``tests/test_ai_adaptation.py``）；
+- ``exclude=True`` 的派生面（``chained`` / ``wine_active`` / ``transform_*`` /
+  ``skill_id`` …）同样要登记：它们不进记录流，但**进询问**，AI 读不读是必须做的一次裁定。
+
+「读 / 不读」是**人工评审面**：机械断言只保证"漏登即红"，挡不住刻意写假的条目。契约正文
+与两套 checklist 见 ``docs/agents/ai-adaptation.md``。
+"""
+
+
+# ---------------------------------------------------------------------------
 # 技能语义表：键 = 技能 id，值 = (打分函数, 默认策略说明)
 # ---------------------------------------------------------------------------
 

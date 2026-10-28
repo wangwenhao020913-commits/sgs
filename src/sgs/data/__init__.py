@@ -42,7 +42,16 @@ M6 票 09 增**牌标签的类型登记**（:class:`CardTagType` / :class:`CardT
 
 from .errors import DataLoadError, LoadError
 from .heroes import HeroDealError, deal_heroes
-from .identities import IDENTITY_LABELS, IDENTITY_ROSTERS, Identity, Mode, roster_for
+from .identities import (
+    IDENTITY_LABELS,
+    IDENTITY_ROSTERS,
+    MODE_SITES,
+    MODE_SITE_SLOTS,
+    Identity,
+    Mode,
+    ModeSite,
+    roster_for,
+)
 from .loader import (
     HERO_SUPPLEMENT_PACK_IDS,
     card_category,
@@ -110,7 +119,10 @@ __all__ = (
     "Identity",
     "Kingdom",
     "LoadError",
+    "MODE_SITES",
+    "MODE_SITE_SLOTS",
     "Mode",
+    "ModeSite",
     "PlacementDecl",
     "PlacementReturn",
     "PlacementVisibility",

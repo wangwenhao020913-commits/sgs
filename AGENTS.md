@@ -92,6 +92,12 @@
 
 评审期（`code-review` 的 Standards 轴）的判断题标准见 `CODING_STANDARDS.md`。
 
+### AI 适配契约
+
+新机制 / 新模式进仓前先读 `docs/agents/ai-adaptation.md`（两套 checklist + 三张登记表，代码侧
+断言住 `tests/test_ai_adaptation.py`）；启发式的版本台账与三档评估口径见
+`docs/agents/ai-versions.md`。
+
 ### AI 实机验收
 
 `docs/agents/acceptance-ai.md`：人机对局一局的读数配方。读数用 `ai_eval live`（两行摘要 +

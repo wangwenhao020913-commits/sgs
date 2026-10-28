@@ -6,6 +6,9 @@
 票面字段遵守 `docs/agents/issue-tracker.md`：`Status:` 一行、可选 `Touches:` / `Ruling:` /
 `规则原文:`；开工先置 `Status: claimed`，收口写 `## Answer` 再置 `Status: resolved`。
 
+票里若带来新的**机制 / 动作面 / 信息通道**，先过一遍 AI 适配契约的 §1 checklist
+（`docs/agents/ai-adaptation.md`）：AI 会不会被悄悄打废，就在那一张清单里问。
+
 ---
 
 ## 骨架
