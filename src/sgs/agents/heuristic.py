@@ -1464,8 +1464,8 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 "seat": (True, "自己的座位：判'是否自己'与座位距离"),
                 "players": (True, "逐座位的公开面（体力 / 手牌数 / 装备 / 判定 / 横置 / 酒 / 已明身份）"),
                 "self_hand": (True, "自己的手牌牌面：成本、响应与转化源都从这里挑"),
-                "deck_count": (False, "只有剩余张数、没有顺序；记牌未落地（C1 / C2 才读），估值按未知牌常数"),
-                "discard": (False, "弃牌堆顺序对现有打分无影响（记牌批 C2 才读；现状按未知池估值）"),
+                "deck_count": (False, "只有剩余张数、没有顺序；记牌未落地（记牌票落地后才读），估值按未知牌常数"),
+                "discard": (False, "弃牌堆顺序对现有打分无影响（记牌批落地后才读；现状按未知池估值）"),
                 "processing": (True, "【火攻】判据：处理区里躺着那张【火攻】才给'弃一张换 1 点伤害'的价"),
                 "turn_seat": (False, "回合归属不参与打分：没有'我的回合'加权"),
                 "phase": (False, "阶段不参与打分：是不是出牌阶段由询问类型本身表达"),
@@ -1529,7 +1529,11 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
         ),
         "RespondQuery": MappingProxyType(
             {
-                "cause": (False, "窗口成因不影响常量打分（能抵消就抵消）；无懈窗口走 ``SELECT_CARDS``"),
+                "cause": (
+                    False,
+                    "窗口成因不影响常量打分（能抵消就抵消）；无懈现在也走 RESPOND，"
+                    "目标化留给 D1 那票",
+                ),
                 "required": (False, "必需牌名不读：候选里只有合法的"),
                 "target": (False, "窗口针对谁不影响常量打分（响应牌不占使用次数）"),
                 "window_frame": (False, "嵌套层号只用于记录流区分，不参与打分"),
@@ -1555,10 +1559,15 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
         ),
         "SelectOptionQuery": MappingProxyType(
             {
-                "skill_id": (False, "座位步的语义按**选项文本**前缀（``seat:``）判，不读 skill_id"),
+                "skill_id": (
+                    True,
+                    "座位步（``seat:`` 选项）的敌我估值按它查 ``_HOSTILE_SEAT_STEPS`` / "
+                    "``_STOLEN_CARD_SEAT_STEPS`` 两张前缀表（``_score_seat_option`` 缺省读"
+                    "询问自带的 id）",
+                ),
                 "options": (
                     False,
-                    "选项面不枚举：打分按 ``action.choice`` 查 ``_OPTION_VALUES``——"
+                    "选项面不枚举：非座位选项按 ``action.choice`` 查 ``_OPTION_VALUES``——"
                     "未登记的新选项落 0 分（新增选项必须同票登记条目）",
                 ),
             }
@@ -1567,16 +1576,10 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
 )
 """**AI 读点表**：``PlayerView`` / ``PlayerPublic`` / 每类询问的每个字段 → 读不读 + 一句理由。
 
-三条读法：
-
-- 桶名 = 字段**所属的那一类**；询问**公共面**（``_QueryBase`` 的字段与各自声明的
-  ``kind``）一律登记在 ``"Query"`` 桶里，一类一份必然漂移；
-- 键是 ``model_fields`` 的名字——**漏登一个新字段即红**（``tests/test_ai_adaptation.py``）；
-- ``exclude=True`` 的派生面（``chained`` / ``wine_active`` / ``transform_*`` /
-  ``skill_id`` …）同样要登记：它们不进记录流，但**进询问**，AI 读不读是必须做的一次裁定。
-
-「读 / 不读」是**人工评审面**：机械断言只保证"漏登即红"，挡不住刻意写假的条目。契约正文
-与两套 checklist 见 ``docs/agents/ai-adaptation.md``。
+桶 = 字段**所属的那一类**；询问的**公共面**（``_QueryBase`` 的字段与各类声明的 ``kind``）
+登记在 ``"Query"`` 桶。格式、四条机械判据、``exclude=True`` 面为什么也要登记、以及"把读过
+的字段写成不读"这个高频错误，都在 ``docs/agents/ai-adaptation.md`` §3.2（正文只此一份）；
+断言住 ``tests/test_ai_adaptation.py``。
 """
 
 

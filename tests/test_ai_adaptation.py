@@ -23,7 +23,6 @@ import importlib
 from collections.abc import Mapping
 from typing import Any, get_args
 
-import pytest
 from pydantic import BaseModel
 
 from sgs.agents import heuristic
@@ -185,19 +184,23 @@ def _covered_fields() -> list[str]:
     return covered
 
 
-def _doctored(**changes: Mapping[str, Any]) -> dict[str, dict[str, ReadPoint]]:
-    """复制一份读点表并施加改动（合成反例用；不碰真表）。"""
-    table: dict[str, dict[str, ReadPoint]] = {
-        bucket: dict(entries) for bucket, entries in heuristic._AI_READ_POINTS.items()
-    }
-    for bucket, entries in changes.items():
-        target = table.setdefault(bucket, {})
-        for field, entry in entries.items():
+def _with_changes(
+    table: Mapping[Any, Mapping[str, Any]], changes: Mapping[Any, Any]
+) -> dict[Any, Any]:
+    """复制一份登记表并施加改动（``None`` 值 = 删掉那一格）；合成反例用，不碰真表。"""
+    copied: dict[Any, dict[str, Any]] = {key: dict(entries) for key, entries in table.items()}
+    for key, entries in changes.items():
+        target = copied.setdefault(key, {})
+        for name, entry in entries.items():
             if entry is None:
-                target.pop(field, None)
+                target.pop(name, None)
             else:
-                target[field] = entry
-    return table
+                target[name] = entry
+    return copied
+
+
+def _doctored(**changes: Mapping[str, Any]) -> dict[str, dict[str, ReadPoint]]:
+    return _with_changes(heuristic._AI_READ_POINTS, changes)
 
 
 def test_the_read_table_covers_every_field_of_every_query():
@@ -236,7 +239,7 @@ def test_registering_a_ghost_field_goes_red():
     assert any("PlayerView.no_such_field" in gap for gap in gaps), gaps
 
 
-def test_an_empty_reason_goes_red():
+def test_an_empty_read_point_reason_goes_red():
     """合成反例：理由留空必须变红（"读 / 不读"要能被人复核，理由就是那一句）。"""
     gaps = _read_point_gaps(_doctored(PlayerView={"seat": (True, "   ")}))
 
@@ -301,33 +304,15 @@ def _mode_site_gaps(table: Mapping[Any, Mapping[str, Any]]) -> list[str]:
     return gaps
 
 
-def _mode_gaps_with(**changes: Any) -> list[str]:
-    """复制一份 Mode 表并施加改动（合成反例用；不碰真表）。"""
-    table: dict[Any, dict[str, Any]] = {
-        mode: dict(cells) for mode, cells in MODE_SITES.items()
-    }
-    for mode, cells in changes.items():
-        target = table.setdefault(mode, {})
-        for slot, cell in cells.items():
-            if cell is None:
-                target.pop(slot, None)
-            else:
-                target[slot] = cell
-    return _mode_site_gaps(table)
+def _mode_gaps_with(changes: Mapping[Any, Mapping[str, Any]]) -> list[str]:
+    return _mode_site_gaps(_with_changes(MODE_SITES, changes))
 
 
-def test_every_mode_is_registered_with_every_slot():
+def test_the_mode_table_has_every_mode_slot_and_resolvable_sites():
+    """两种模式 × 四格齐全 + 每个实现站点 ``importlib`` 解析到可调用者（正反两面的正面）。"""
     gaps = _mode_site_gaps(MODE_SITES)
 
     assert not gaps, "Mode 表有缺口：\n" + "\n".join(gaps)
-
-
-def test_every_implemented_site_resolves_to_a_callable():
-    """正向复核：登记为实现的站点都能 ``importlib`` 解析到可调用者（不是只核"字符串出现过"）。"""
-    for mode, cells in MODE_SITES.items():
-        for slot, cell in cells.items():
-            for ref in cell.refs:
-                assert callable(_resolve(ref)), f"{mode.value}.{slot} 的 {ref!r} 不可调用"
 
 
 def test_the_mode_table_still_finds_implemented_sites():
@@ -356,7 +341,7 @@ def test_dropping_a_mode_goes_red():
 
 def test_dropping_a_slot_goes_red():
     """合成反例：四个格子缺一个，必须变红。"""
-    gaps = _mode_gaps_with(**{Mode.NO_IDENTITY: {"projection": None}})
+    gaps = _mode_gaps_with({Mode.NO_IDENTITY: {"projection": None}})
 
     assert any("projection" in gap for gap in gaps), gaps
 
@@ -366,23 +351,16 @@ def test_an_unresolvable_site_reference_goes_red():
     from sgs.data import ModeSite
 
     gaps = _mode_gaps_with(
-        **{Mode.NO_IDENTITY: {"steps": ModeSite(("sgs.no_such_module:x",), "坏引用")}}
+        {Mode.NO_IDENTITY: {"steps": ModeSite(("sgs.no_such_module:x",), "坏引用")}}
     )
 
     assert any("解析不到" in gap for gap in gaps), gaps
 
 
-def test_an_empty_reason_goes_red_too():
+def test_an_empty_mode_site_reason_goes_red():
     """合成反例：「不适用」的格子没有理由，必须变红。"""
     from sgs.data import ModeSite
 
-    gaps = _mode_gaps_with(**{Mode.NO_IDENTITY: {"relation": ModeSite((), "  ")}})
+    gaps = _mode_gaps_with({Mode.NO_IDENTITY: {"relation": ModeSite((), "  ")}})
 
     assert any(f"{Mode.NO_IDENTITY.value}.relation" in gap for gap in gaps), gaps
-
-
-@pytest.mark.parametrize("mode", sorted(Mode, key=lambda member: member.value))
-def test_no_identity_cells_explain_themselves(mode):
-    """每个格子要么指向实现、要么写清"不适用"的理由（spec §4.5 的审计口径）。"""
-    for slot, cell in MODE_SITES[mode].items():
-        assert cell.refs or cell.reason.strip(), f"{mode.value}.{slot} 既没有站点也没有理由"

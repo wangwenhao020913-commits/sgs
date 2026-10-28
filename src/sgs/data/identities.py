@@ -43,29 +43,19 @@ class Mode(str, Enum):
 
 
 MODE_SITE_SLOTS: tuple[str, ...] = ("relation", "victory", "steps", "projection")
-"""``MODE_SITES`` 每行固定四格（顺序即表的读法；AI 适配契约，票 17 / spec §4.4–§4.5）。
+"""``MODE_SITES`` 每行固定四格（顺序即表的读法）。
 
-- ``relation``：**关系**——AI 从哪个字段认敌友（新模式的票要先回答"队伍公开 ⇒ 退化成
-  0/1，还是隐藏 ⇒ 走身份概率档"）；
-- ``victory``：**胜负求解**——终局怎么判、AI 要不要读"我方已败"；
-- ``steps``：**步骤表**——``FrameKind`` 帧的步骤序列怎么装配；
-- ``projection``：**投影**——身份 / 队伍在参与者视角里怎么可见。
-
-四格必须都回答：指向实现（``refs``）或写清"不适用"的理由（``reason``）。前两格是新增
-模式的票在**写票时**就要裁掉的账，不许留给实现者临场（spec §4.4 的"三问 + 两声明"）。
+四格各自回答什么、「不适用」怎么写、以及新增模式时要裁的那笔账，见
+``docs/agents/ai-adaptation.md`` §3.3——正文只放那一份，这里不抄第二份。
 """
 
 
 class ModeSite(NamedTuple):
-    """``MODE_SITES`` 的一格：站点引用（``"模块路径:属性路径"``）+ 一句理由。
+    """``MODE_SITES`` 的一格：字符串引用（``"模块路径:属性路径"``）+ 一句理由。
 
-    用**字符串引用**而不是直接 import：``data`` 不反向依赖 ``engine`` / ``agents`` /
-    ``state``，否则会造出模块级环。解析留给审计（``tests/test_ai_adaptation.py`` 用
-    ``importlib`` 逐条核到可调用者）——所以"登记了但指不到东西"是可断言的，而不是靠读
-    代码自觉。
-
-    ``refs`` 为空 = 本模式在这格上"不适用"，此时 ``reason`` 必须是一句**理由**；有引用时
-    ``reason`` 说明"这一格由什么实现 / 为什么是这几个站点"。
+    ``refs`` 为空 = 本模式在这格上"不适用"，此时 ``reason`` 是一句**理由**。为什么用字符串
+    引用而不是直接 import（``data`` 不反向依赖 ``engine`` / ``agents``）、解析断言在哪，见
+    ``docs/agents/ai-adaptation.md`` §3.3。
     """
 
     refs: tuple[str, ...]
@@ -84,7 +74,7 @@ MODE_SITES: Mapping[Mode, Mapping[str, ModeSite]] = MappingProxyType(
                 "victory": ModeSite(
                     ("sgs.engine.game:Engine.check_game_end",),
                     "存活数 ≤ 1 直接判（票 13 §3）；该分支内联在唯一终局入口的 else 支，"
-                    "尚无独立纯函数——新模式应尽量落成 `victory.py` 里的纯求解器",
+                    "没有独立的纯求解器",
                 ),
                 "steps": ModeSite(
                     ("sgs.engine.steps:build_steps",),
@@ -103,8 +93,8 @@ MODE_SITES: Mapping[Mode, Mapping[str, ModeSite]] = MappingProxyType(
                         "sgs.agents.heuristic:_is_friendly",
                         "sgs.agents.heuristic:_is_revealed_enemy",
                     ),
-                    "只认 `PlayerPublic.identity`（本人 / 主公 / 已阵亡可见）；隐藏身份不猜"
-                    "（ADR-011 的不做身份推断）——所以敌友是两档，不是概率",
+                    "只认 `PlayerPublic.identity`（本人 / 主公 / 已阵亡可见）：隐藏身份现在当"
+                    "未知（0/1 两档，ADR-011 不做身份推断），概率档是 I1 那票的事",
                 ),
                 "victory": ModeSite(
                     ("sgs.engine.victory:solve_identity_outcome",),
@@ -125,8 +115,8 @@ MODE_SITES: Mapping[Mode, Mapping[str, ModeSite]] = MappingProxyType(
 )
 """``Mode`` → 四个格子（票 17 的第三张登记表；断言住 ``tests/test_ai_adaptation.py``）。
 
-新增一个模式 = 给这里加一行、四格都要有答案；`tests/test_ai_adaptation.py` 会核
-"每个 ``Mode`` 成员都在表里"与"登记为实现的站点能 ``importlib`` 解析到可调用者"。
+新增一个模式 = 给这里加一行、四格都要有答案（读法与责任划分见
+``docs/agents/ai-adaptation.md`` §3.3 与 §4）。
 """
 
 

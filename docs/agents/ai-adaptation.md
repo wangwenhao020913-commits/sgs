@@ -32,16 +32,20 @@
      AI 用 `getattr` 自建。query 上再长一个这类字段 ⇒ **登记 AI 读点表**，否则 AI 会静默忽略
      它（没有报错、只是永远走不到新分支）。
    - 纯 `legal_actions` ⇒ 不适用。
-   - 已知坑：`SelectOptionQuery.options` 不被读——打分按 `action.choice` 查 `_OPTION_VALUES`。
-     新选项文本不登记就落 0 分、与"放弃"打平；同身份的座位步靠 `seat:` 前缀走敌我估值。
+   - 已知坑一：`SelectOptionQuery.options` 不被读——非座位选项按 `action.choice` 查
+     `_OPTION_VALUES`。新选项文本不登记就落 0 分、与"放弃"打平。
+   - 已知坑二：座位步（`seat:` 选项）的敌我估值读的是 **`skill_id`**——`_score_seat_option`
+     拿它去查 `_HOSTILE_SEAT_STEPS` / `_STOLEN_CARD_SEAT_STEPS` 两张前缀表。新的座位步技能
+     不在那两张表里，就会静默落进"帮盟友"的缺省分支。
 3. **语义条目**：`SKILL_VALUES`（`tests/test_heuristic_ai.py` 的三向同步会自动逼）。强制 / 锁定技
    写 `0.0` + 说明；条目说明写清"有无代价 / 读哪些字段"。
 4. **覆盖场景**：AI 能合法发动一次（`_COVERAGE_CASES`，由数据派生）。不出询问的锁定 / 强制技
    用构造测试（直接造 query 与候选）。
 5. **信息通道**：新增或遮挡了可见区？记牌守恒量（53 / 108 / 160）还成不成立？未知池变大要登记。
-   ⚠️ `PlayerView` / `PlayerPublic` 的字段可以 `exclude=True`（`chained` / `hero` / `kingdom` /
-   `skill_id` 是先例）——它们**不进记录流**，所以改动**不一定**触发金录像字节告警。票面因此
-   必须写明"记牌 / 身份推断的输入变没变"，别指望金录像替你报警。
+   ⚠️ 字段可以 `exclude=True`——`PlayerView` / `PlayerPublic` 上的先例是 `chained` / `hero` /
+   `kingdom`，询问上的先例是 `skill_id` / `preactivation`。它们**不进记录流**，所以改动
+   **不一定**触发金录像字节告警。票面因此必须写明"记牌 / 身份推断的输入变没变"，别指望
+   金录像替你报警。
 6. **回归**：≥1 条"不犯已知的蠢"用例进 `tests/test_ai_cases.py`；本票进决策 diff 批，diff 非空
    逐条解释（"为什么改对了"比"改了"重要）。
 
@@ -56,12 +60,13 @@
 1. **关系**：AI 从哪个字段认敌友？队伍公开 ⇒ 退化成 0/1，隐藏 ⇒ 走身份概率档；投影里怎么可见。
    登记 `MODE_SITES[mode]["relation"]`。
 2. **胜负**：`Victory.side` 现在的值域要扩成什么、终局条件是什么、AI 要不要读"我方已败"。
-   登记 `["victory"]`——尽量落成 `sgs/engine/victory.py` 里的**纯函数**（可单测、可审计）。
+   登记 `MODE_SITES[mode]["victory"]`——尽量落成 `sgs/engine/victory.py` 里的**纯函数**
+   （可单测、可审计）。
 3. **信息通道**：新增 / 遮挡哪些可见区；记牌守恒量还成不成立；身份 / 队伍可见性怎么裁。
    身份在投影期就该抹掉（见 `_visible_identity`）：让"不泄露"是结构事实，不是约定。
 4. **读点够不够**：`PlayerView` 缺什么 ⇒ **先改协议（另票）**，不许在 AI 里按 `getattr` 猜。
 5. **步骤表 / 回合结构**：`build_steps(mode)` 该分叉哪些帧、先手怎么定、有没有共享池。
-   登记 `["steps"]`。
+   登记 `MODE_SITES[mode]["steps"]`。
 6. **回归**：≥32 局专属种子批，四判据与 `test_all_ai_games` 相同（跑完 / 终局与身份胜负一致 /
    零非法应答 / 可回放）+ ≥1 条关系用例。
 
@@ -83,18 +88,30 @@
   两处重复登记必红；理由留空必红。
 - `exclude=True` 的派生面同样要登记——它们不进记录流、但**进询问**，AI 读不读是必须做的一次裁定。
   测试另有一条覆盖元断言专门盯这一点。
-- 「读 / 不读」是**人工评审面**：机械断言只保证"漏登即红"，挡不住刻意写假的条目。写的时候
-  顺手写清**读的是哪一行**，评审才复核得动。
+- 「读 / 不读」是**人工评审面**：机械断言只保证"漏登即红"，挡不住刻意写假的条目。理由里写
+  **读它的那一处行为**（函数 / 表 / 分支，行号会漂移不必写），评审才复核得动。
+- 最容易写错的方向是"其实读了、登记成不读"：鸭子读法 `getattr(query, "xxx")` 在字段名上不留
+  痕，源码扫描也扫不全（同名字段跨类复用还会假红），所以机械面到"漏登即红"为止。写"不读"前
+  先打开读取方（`CODING_STANDARDS.md` 第 1 条）——本表就漏过一次
+  `SelectOptionQuery.skill_id`（座位步的敌我估值靠它查前缀表）。
 - 新字段进来时：在**它所属的桶**里加一行。跨九类同义的字段（如 `kind`）放共用桶，别抄九遍。
 
-现状里几处"不读"值得知道（都是有意为之，不是漏登记）：`deck_count` / `discard`（记牌还没
-落地）、`RespondQuery` 的 `cause` / `required` / `target` / `window_frame`（响应打分是常量，
+现状里几处"不读"值得知道（这几处是有意为之，不是漏登记）：`deck_count` / `discard`（记牌还
+没落地）、`RespondQuery` 的 `cause` / `required` / `target` / `window_frame`（响应打分是常量，
 无懈目标化那票会改）、`SkillActivationQuery` 的三个冻结报文（生产者恒给 `0 / 0 / ()`）。
 
 ### 3.3 `Mode` 表 `MODE_SITES`（`src/sgs/data/identities.py`）
 
 键 = `Mode`，值 = 固定四格 `relation` / `victory` / `steps` / `projection`（顺序见
-`MODE_SITE_SLOTS`），每格是 `ModeSite(refs, reason)`。
+`MODE_SITE_SLOTS`），每格是 `ModeSite(refs, reason)`。四格各回答一件事，新增模式的票在**写票
+时**就要裁（不要留给实现者临场）：
+
+| 格子 | 回答什么 |
+|---|---|
+| `relation` | AI 从哪个字段认敌友：队伍公开 ⇒ 退化成 0/1，隐藏 ⇒ 走身份概率档 |
+| `victory` | 终局怎么判、`Victory.side` 的值域要扩成什么 |
+| `steps` | `FrameKind` 帧的步骤序列怎么装配（`build_steps(mode)` 分叉哪几帧） |
+| `projection` | 身份 / 队伍在参与者视角里怎么可见（该抹掉的在投影期就抹掉） |
 
 - **引用是字符串**（`"模块路径:属性路径"`，如 `"sgs.engine.steps:build_steps"`）：`data` 不
   反向依赖 `engine` / `agents`，直接 import 会造出模块级环。解析留给审计。
