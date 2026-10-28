@@ -74,6 +74,7 @@ ALLOWED_LEGACY_SITES = {
     "src/sgs/engine/rng.py",  # helper 自己的实现
     "tests/test_ai_streams.py",  # 本模块要拿旧流作"不相等"对照
     "tests/replays/scenarios.py",  # 冻结磁带的录制驱动：重录是独立显式动作（票 12 DoD 不重录）
+    "tests/test_rng.py",  # substream 契约测试用原始用途名测"派生不消耗根"（不是建座点）
 }
 
 

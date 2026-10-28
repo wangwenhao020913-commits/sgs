@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from sgs.engine import RandomSource, ai_stream, new_seed
+from sgs.engine import RandomSource, new_seed
 
 SEED = 0x1234_5678_9ABC_DEF0
 
@@ -118,12 +118,18 @@ def test_substreams_are_derived_by_name_not_by_creation_order():
 
 
 def test_consuming_the_ai_stream_does_not_move_the_shuffle_stream():
-    ai = ai_stream(SEED, 0)
+    """派生规则契约：子流按**名字**切，消耗 ai 流不推进根的随机状态。
+
+    当前实现下这条恒真（派生是纯函数）；它守的是"哪天 substream 改成按创建顺序 /
+    消耗根状态"时的回归——那时用同一个 ``root`` 切出的 shuffle 会变。
+    """
+    root = RandomSource(SEED)
+    ai = root.substream("ai")
     for _ in range(50):
         ai.randbelow(10)
 
     shuffled = list(range(20))
-    RandomSource(SEED).substream("shuffle").shuffle(shuffled)
+    root.substream("shuffle").shuffle(shuffled)
 
     fresh = list(range(20))
     RandomSource(SEED).substream("shuffle").shuffle(fresh)
