@@ -17562,6 +17562,41 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       + ` phase=${$("t-phase").textContent}/${liveSnapshot && ui.phaseLabel(liveSnapshot.phase)}`
       + ` round=${$("t-round").textContent}/${liveSnapshot && liveSnapshot.round}`
       + ` hero=${selfHeroName()}/${secondHero}`);
+
+  // ---- 同一份底稿在另外两个 seed 上复跑：开局批里出现的 delta 类型（发牌 / 判定 / 装备 /
+  //      弃牌…）会随对局变，底稿只要漏接一类，牌堆 / 手牌数就会在这里对不上。
+  const extraProblems = [];
+  for (const seed of [303, 404]) {
+    ui.show("lobby");
+    $("in-seed").value = String(seed);
+    await submitLobbyRaw();
+    const body = ui.state.playback ? ui.state.playback.body
+      : (ui.state.view || null);
+    const snapshot = body ? body.snapshot : null;
+    const human = snapshot ? (snapshot.players || []).find(
+      (player) => Number(player.seat) === Number(body.human_seat)) : null;
+    if (!ui.state.playback || !snapshot || !human) {
+      extraProblems.push(`seed ${seed}: 没有开局回放 / 快照`);
+      ui.flushPlayback();
+      continue;
+    }
+    const total = ui.state.playback.records.length;
+    for (let index = 0; index < total; index += 1) ui.stepPlayback(true);
+    const ok = $("t-deck").textContent === String(snapshot.deck_count ?? 0)
+      && $("t-self-hand").textContent === String(human.hand_count)
+      && $("t-phase").textContent === ui.phaseLabel(snapshot.phase)
+      && $("t-round").textContent === String(snapshot.round);
+    if (!ok) {
+      extraProblems.push(
+        `seed ${seed}: deck=${$("t-deck").textContent}/${snapshot.deck_count}`
+        + ` hand=${$("t-self-hand").textContent}/${human.hand_count}`
+        + ` phase=${$("t-phase").textContent}/${ui.phaseLabel(snapshot.phase)}`
+        + ` round=${$("t-round").textContent}/${snapshot.round}`);
+    }
+    ui.flushPlayback();
+  }
+  check("M6-B2d 同一份初始化底稿在另外两个 seed 上也能长成快照（开局 delta 类型不漏接）",
+    extraProblems.length === 0, extraProblems.join(" | "));
   ui.flushPlayback();
   resetAll();
 }

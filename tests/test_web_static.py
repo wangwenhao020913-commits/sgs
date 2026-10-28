@@ -566,6 +566,22 @@ def test_the_children_guard_catches_the_old_bug_and_allows_array_forms() -> None
     )
 
 
+def test_ui_bridge_exposes_the_raw_view_and_submit_entries() -> None:
+    """烟测桥必须同时挂 `applyViewRaw` / `submitActionRaw`（文件头承诺的两个中间态入口）。
+
+    `applyView` / `submitAction` 默认先把回放冲刷完；要观察"提交之后、整批还没播完"的中间态
+    （M6 报障 1 的五谷亮窗、报障 2 的开局批）只能走 raw 入口。`submitActionRaw` 曾只活在
+    桥的注释里、实际没挂——红命令第一次跑就崩在 `ui.submitActionRaw is not a function`。
+    """
+    source = (REPO_ROOT / "tests" / "support" / "ui_bridge.js").read_text(encoding="utf-8")
+    assert "out.applyViewRaw = out.applyView;" in source, (
+        "ui_bridge.js 要把原始 applyView 挂成 applyViewRaw"
+    )
+    assert re.search(r"out\.submitActionRaw\s*=\s*rawSubmit;", source), (
+        "ui_bridge.js 要把原始 submitAction 挂成 submitActionRaw（与 applyViewRaw 同姿态）"
+    )
+
+
 # ---------------------------------------------------------------------------
 # U4-01：飞行层（spec D1 / D2 / D3 / D5 / D6；原型 anim-proto.* 提升为产品文件）
 #

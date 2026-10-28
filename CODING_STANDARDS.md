@@ -1,7 +1,7 @@
 # CODING_STANDARDS.md
 
 本文件是**评审方**的判断题标准（`code-review` 的 Standards 轴读它），不是实现期清单。
-机械项一律进 `tests/` 的检查，不写在这里；这里只留下必须由人判断的三条。
+机械项一律进 `tests/` 的检查，不写在这里；这里只留下必须由人判断的判定标准。
 
 ## 1. 引用符号 / 字段作行为落点前，先打开它的**读取方**
 
@@ -130,9 +130,28 @@ Standards 轴 enforce；没有全仓机械检查。
   `SelectCardsQuery.skill_id` 都是这条纪律的产物）。
 - 分步文案这类"投影读得到"的断言，配一条**真会话**回归（样板：
   `tests/test_web.py::test_a_real_session_reaches_the_yiji_card_step_wording`）。
+- **全量断言**（"每个 X 都要出现"）必须在**真实产出**里逐类跑出每个 X：把 N 条同形合成记录
+  逐条喂进渲染器只证明"来什么画什么"，不证明"引擎会来"。反例（M6 报障 3）：U4-04 的
+  "六个阶段各出现一次"是用六条合成记录钉的，真对局里引擎只发四个，缺的三个一直没显示；
+  真会话里跑一遍六阶段的断言才算覆盖（样板：`tests/support/ui_smoke.mjs` 的 M6-B3）。
 - **前端的同一半**（U3 实机复盘）：烟测垫片里 `El.children` 已是 **HTMLCollection 形状的
   活视图**（只有 `length` / 下标 / `item` / 迭代，没有数组方法）；产品 JS 一律
   `Array.from(...)` / 展开后再遍历。机械守卫是
   `tests/test_web_static.py::test_product_scripts_never_call_array_methods_on_children`。
   垫片终究不是真 DOM，所以**改动 DOM API 的 UI 票在 `resolved` 前还要走一遍 `bsk`
   真浏览器**（配方见 `docs/agents/acceptance-web.md`）。
+
+## 7. 断"生命周期"的断言要在多步回放里收敛；新局不得沿用旧局底稿
+
+回放不是一步：一个响应可以带几十条记录（五谷的逐目标取牌 + 无懈窗口 + 后续 AI 回合，实测
+96 条），弹窗 / 高亮 / 飘字 / 只读态的寿命必须挂在**记录或帧的事实**上，而不是等 commit。
+只断"commit 之后关掉了"等于没测时间维度——M6 报障 1 的五谷亮牌窗就是这样挂满整批、直到
+下一次询问提交才关。
+
+- **回放期生命周期**：断言"某时该消失的东西消失了"时，至少一条用例把**整批记录**喂进真回放
+  入口（`applyViewRaw` + `stepPlayback`），并在批**中途**（源结算帧 `pop` / 应答记录之后）断言
+  收敛；只测单步 pending 变化、或只测 commit 后的状态，都不算覆盖。样板：
+  `tests/support/ui_smoke.mjs` 的 M6-B1（五谷 `RESOLVE` 帧 `pop` 即收窗）。
+- **换会话 / 新局初始化**：新局的回放底稿不得是上一局的视图（`cloneLiveView(state.view)` 这类）。
+  "第一帧画的是新局"与"底稿能把开局批逐条长成新局快照"各要一条真会话断言——样板：
+  `tests/support/ui_smoke.mjs` 的 M6-B2 / M6-B2c / M6-B2d。

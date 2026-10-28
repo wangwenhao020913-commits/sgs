@@ -42,9 +42,9 @@
 | 事项 | 纪律 |
 |---|---|
 | 票的单位 | **一个武将 = 一批 = 一张票**（该武将的全部技能一起做） |
-| 迭代期 | 只跑相关单文件（`tests/test_hero_<包>.py`）+ `bash tests/smoke-web.sh`（约 4 秒）+ `bash tools/check_goldens.sh`（秒级）。**不提交** |
-| 收口 | 批次全部技能落地后跑**一次** `bash tests/run_all.sh --quiet`（2–8 分钟） |
-| 提交 | **一次** commit。不做 `wip:` 提交——hook 对 `wip:` 同样跑全量，等于白等一次 |
+| 迭代期 | 只跑相关单文件（`tests/test_hero_<包>.py`）+ `bash tests/smoke-web.sh`（实测 60–70 s）+ `bash tools/check_goldens.sh`（秒级）。**不提交** |
+| 收口 | 批次全部技能落地后**提交**：全量门禁由 pre-commit hook 跑（本机实测 ≈8 分钟），失败拒绝提交、工作树不动。手工跑全量只在"不提交、先看红/绿"时 |
+| 提交 | **一次** commit，不做 `wip:` 提交——hook 对 `wip:` 同样跑全量，等于白等一次 |
 | 实机验收 | 只有"新增询问形态 / 改了 DOM 形状"才走真实浏览器（`docs/agents/acceptance-web.md`）；其余用 `tests/support/ui_smoke.mjs` 的合成载荷覆盖 |
 | DoD | 批内每条技能二选一：**已实现**（带能红的回归）或**已摘出**（附裁定票链接）。不许"做了一半" |
 

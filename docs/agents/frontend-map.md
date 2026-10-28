@@ -77,7 +77,7 @@
 - `tests/support/ui_bridge.js`：把前端入口按名字挂到 `globalThis.__bridge`（烟测里叫 `ui`），
   缺项容错；`applyView` / `submitAction` 默认先把回放跑完，要看中间态用
   `applyViewRaw` / `submitActionRaw` 配 `stepPlayback`。
-- `tests/smoke-web.sh`：临时服务 + `ui_smoke.mjs` + 收尾（约 4 秒）。**给人用的快回路**，
+- `tests/smoke-web.sh`：临时服务 + `ui_smoke.mjs` + 收尾（实测 60–70 s）。**给人用的快回路**，
   不在 `tests/run_all.sh` 里。
 - `tests/test_web_static.py`：静态清单（脚本顺序 / strict）、身份配比副本、CSS 设计单位，
   以及 `children` 数组方法禁令。

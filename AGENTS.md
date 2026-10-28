@@ -11,23 +11,23 @@
    `.scratch/` 是 gitignore 的，门禁不能依赖它。`/implement-spec` 收口另写
    **`.scratch/<effort>/acceptance-map.md`**（spec 验收条目 → 断言），交给 `/code-review` 的
    Spec 轴。
-2. 唯一门禁是仓根的 **`bash tests/run_all.sh`**（全部 shell 校验 + pytest，**约 4–5 分钟**；
-   实测 231–275 s）。
-   **没有 CI、也没有默认 hook 会替你跑它。** 先跑一次 `bash tools/install-hooks.sh`
-   把它接到 pre-commit 上：`src/` / `tests/` 改动跑全量，`开发文档/` / `GLOSSARY.md` /
-   `AGENTS.md` / `CODING_STANDARDS.md` / `docs/` 改动跑**快速文档检查**（分级在 `tools/gate-staged.sh`）；**合并提交**
-   由同源的 `.githooks/pre-merge-commit` 覆盖（`git merge` 不触发 pre-commit）。
-   hook 的全量档走 **`tests/run_all.sh --quiet`**：只打每条检查一行 PASS 与最终结果
+2. 唯一门禁是仓根的 **`bash tests/run_all.sh`**（全部 shell 校验 + pytest，本机实测 **≈8 分钟**；
+   pytest 单跑 356 s）。
+   **验证改动 = 一次提交本身**：先 `git config core.hooksPath` 查一次——本 checkout 是
+   `.githooks`（`bash tools/install-hooks.sh` 接的）：`src/` / `tests/` 改动跑全量，
+   `开发文档/` / `GLOSSARY.md` / `AGENTS.md` / `CODING_STANDARDS.md` / `docs/` 改动跑
+   **快速文档检查**（分级在 `tools/gate-staged.sh`）；**合并提交**由同源的
+   `.githooks/pre-merge-commit` 覆盖（`git merge` 不触发 pre-commit）。hook 失败会拒绝提交、
+   工作树不动，照输出修即可。**手工跑全量只用于"不提交、先看红/绿"**——提交时 hook 一定会
+   再跑一遍，别在提交前手跑（每票白等 ≈8 分钟；**`wip:` 提交同样跑全量 hook**，别把它当免费
+   检查点）。hook 的全量档走 **`tests/run_all.sh --quiet`**：只打每条检查一行 PASS 与最终结果
    （成功摘要约 **227B**），失败时**照旧补打失败项的完整输出**；**人工跑全量用不带参数的
    `bash tests/run_all.sh`**（全部 PASS 行与 pytest 输出）。`--quiet` 是 hook / agent 的省流
-   档，门禁判据不变。
-   **放后台跑**：它超过多数前台工具调用的超时（前台跑会被打断、输出丢掉）；用后台任务
-   起它，再取输出。**装好 hook 后**，提交时 hook 会替你跑对应级别，别在提交前手动重跑一遍
-   （每票白等 4–5 分钟；**`wip:` 提交同样跑全量 hook**，别把它当免费检查点）；迭代期要快就用
-   **单文件子集**：**`.venv/bin/pytest <file>`** ——
+   档，门禁判据不变。**放后台跑**：它超过多数前台工具调用的超时（前台跑会被打断、输出丢掉）；
+   用后台任务起它，再取输出。迭代期要快就用**单文件子集**：**`.venv/bin/pytest <file>`** ——
    `python` 不在 PATH，门禁也只认 `$ROOT/.venv/bin/pytest`、不回退系统 pytest —— 或
-   `bash tests/smoke-web.sh`。**全量失败先 `grep -nE 'FAIL|失败' <log>`** 看完全部失败，
-   不要只 `tail`。
+   `bash tests/smoke-web.sh`（实测 60–70 s）。**全量失败先 `grep -nE 'FAIL|失败' <log>`**
+   看完全部失败，不要只 `tail`。
 3. **派发子代理之前先提交**（或先明确告知它"当前工作树未提交"）。子代理会在自己的会话里
    跑 git 命令收尾自己的临时改动；工作树未提交时，一条 `git checkout -- <file>`
    就把你手上的活打回 HEAD 了。本仓已发生过两次：`ui_smoke.mjs` 被抹回 HEAD；票 13 的实现者
@@ -41,7 +41,7 @@
    `bash tools/check_env.sh` 现在对 `core.bare=true` 或 `probe` 身份**硬失败**。真碰到那句
    fatal，先 `git config --get core.bare` 确认，再按 `check_env` 的修复清单恢复
    `core.bare=false` 与身份 `dsh-agent <dsh-agent@localhost>`。
-4. 前端改动想快速看一眼，用 **`bash tests/smoke-web.sh`**（约 4 秒：起临时服务 +
+4. 前端改动想快速看一眼，用 **`bash tests/smoke-web.sh`**（实测 60–70 s：起临时服务 +
    跑 `ui_smoke.mjs` + 收尾）。它在门禁之外，跑完整门禁才用 `tests/run_all.sh`。
    **实机验收**：改动 DOM API 的 UI 票（`children` 形状、节点结构、模板、选择面等）在置
    `resolved` 前必须走一遍**真实浏览器**（`bsk`）；最小覆盖 = **进入处理区 / 舞台卡更新 /
@@ -99,7 +99,8 @@
 - `docs/agents/frontend-map.md`：脚本职责、舞台 / live view / 轮询 / 动效入口、测试垫片与
   烟测清单——先定位文件，不要从头通读 `session.js`。
 - `docs/agents/acceptance-web.md`：实机验收配方（环境预检、起服务、browser-skill、种子 12）。
-- 评审口径：`CODING_STANDARDS.md` §4（次序断言）与 §6（读取方断言走真实产出路径）。
+- 评审口径：`CODING_STANDARDS.md` §4（次序断言）、§6（读取方断言走真实产出路径）、
+  §7（回放生命周期 / 新局底稿）。
 
 ### 新增 / 修改武将技能
 
