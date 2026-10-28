@@ -550,6 +550,25 @@ function closeDialogDom() {
   syncModalChrome();
 }
 
+/** 回放期：亮牌弹窗的**源结算帧出栈** ⇒ 当场收起（M6 报障 1）。
+ *
+ * 五谷整段结算跨多个询问（逐目标取牌 / 每个目标的无懈窗口），服务端每个响应只回到"下一个
+ * 询问"；而弹窗的开关只住 :func:`syncDialog`（每次 commit 才跑）。于是最后一批回放要播几十
+ * 条记录，弹窗一直挂到下一次询问提交——源牌早结算完了。
+ *
+ * 判据只读两条**记录流事实**：①弹窗键是五谷亮牌键（`reveal:harvest:<frame>:<card>:<source>`，
+ * 帧号由服务端派生）；②这条记录正是那个帧的 `pop`。其余亮牌（遗计等）没有帧号可对，照旧跟
+ * 询问生命周期走（fail-closed，不猜）。
+ */
+function syncPlaybackDialog(record) {
+  const dialog = $("t-dialog");
+  if (!dialog || dialog.hidden !== false) return;
+  if (!record || record.kind !== "frame" || record.op !== "pop") return;
+  const match = /^reveal:harvest:(\d+):/.exec(String(state.dialog.key || ""));
+  if (!match || Number(match[1]) !== Number(record.frame_id)) return;
+  closeDialogDom();
+}
+
 /** 在每次 `renderPending` 末尾调用：按"当前步骤的表面"决定开 / 关 / 换内容。
  *
  * - 表面不是弹窗、也没有五谷的持久展示（且没有预发动本地态）⇒ 关；

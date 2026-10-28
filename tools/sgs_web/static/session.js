@@ -283,6 +283,47 @@ function viewStartsNewSession(body) {
   return body.session_id !== state.view.session_id;
 }
 
+/** 新局开局的**回放底稿**：权威快照 → "发牌前"的骨架（M6 报障 2）。
+ *
+ * 建局响应带的是**整段开局**（发牌 + 若干 AI 回合，直到人类第一个询问），`snapshot` 是这段
+ * 跑完后的局面。要让这段按正常步长逐条演（既不能拿上一局的视图当底稿、也不能一次性冲完），
+ * 底稿必须是**开局前**：身份未发、手牌 0、体力满、装备 / 判定 / 武将牌区空、牌堆 0
+ * （由首条 `deck_shuffle` 的 `card_count` 写回）、阶段与回合空、没有询问。
+ *
+ * **保留**的只有开局前就公开、且整段不变的东西：座位、武将、技能。其余全部交给记录里的
+ * `identity_deal` / `deck_shuffle` / `card_move` / `hp_change` / 时机（见 `applyLiveDelta`）。
+ * 所以"有没有上一局"不再影响这一批的底稿与节奏——两条路走同一份初始化。
+ */
+function openingLiveView(body) {
+  const view = cloneLiveView(body);
+  const snapshot = view.snapshot;
+  snapshot.players = (snapshot.players || []).map((player) => ({
+    ...player,
+    identity: null,
+    identity_label: null,
+    hand_count: 0,
+    hp: Number(player.hp_max ?? player.hp) || 0,
+    equip: [],
+    judge: [],
+    hero_zones: [],
+    hero_tags: [],
+    chained: false,
+    flipped: false,
+    wine_active: false,
+    alive: true,
+  }));
+  snapshot.self_hand = [];
+  snapshot.discard = [];
+  snapshot.processing = [];
+  snapshot.deck_count = 0;
+  snapshot.phase = null;
+  snapshot.turn_seat = null;
+  snapshot.turn_extra = false;
+  snapshot.round = 1;
+  view.pending = null;
+  return view;
+}
+
 /* ------------------------------------------------ 回放期逐事件全表更新（U3-05 / D11） */
 
 /** 一份新的 **live view**：从最近一次提交的视图复制出牌桌会用到的可变容器。
@@ -480,6 +521,16 @@ function applyLiveDelta(record, view = state.liveView) {
       snapshot.turn_extra = Boolean(record.extra);
       return view;
     }
+    if (record.delta_type === "identity_deal") {
+      // 开局发身份（M6 报障 2 的开局回放）：`identity` 为 null = 这名座位对你不可见。
+      // 与下面的 `identity_reveal` 同一条写入口（翻译点仍只有 `identityLabel` 一处）。
+      const player = playerAt(record.seat);
+      if (player) {
+        player.identity = record.identity ?? null;
+        player.identity_label = identityLabel(record.identity);
+      }
+      return view;
+    }
     if (record.delta_type === "identity_reveal") {
       const player = playerAt(record.seat);
       if (player) {
@@ -500,6 +551,10 @@ function applyLiveDelta(record, view = state.liveView) {
         if (to.zone === "deck") {
           snapshot.deck_count = Number(snapshot.deck_count) + liveMoveCount(record);
         }
+      } else if (!from.zone && to.zone === "deck") {
+        // **开局洗牌**（`from_zone = null`）：牌堆张数就是这一条给的。开局底稿的
+        // `deck_count` 是 0（发牌前），这里把它写回，后面的发牌 / 摸牌才会往下减。
+        snapshot.deck_count = liveMoveCount(record);
       }
       return view;
     }
@@ -577,9 +632,13 @@ function applyView(body) {
   // `live_deltas` = 被人类记录流裁掉、但牌面已公开的标签增删（网页展示通道）。
   // 与可见记录按 seq 合并后走同一条逐事件回放；它们不写事件流 / 舞台。
   const incoming = mergeLiveDeltas(body.records || [], body.live_deltas || []);
-  const first = state.view === null;
+  const newSession = viewStartsNewSession(body);
+  // **开局批** = 换会话 + 带 `header`（无 seq 的那条只在 `after < 0` 的建局响应里下发）。
+  // 用它认出"这一批从发牌前开始"，而不是看"这一页之前有没有打过一局"——两条路必须走
+  // 同一份初始化、同一个节奏（M6 报障 2）。
+  const opening = newSession && incoming.some((record) => record.kind === "header");
   // U3-01 / D5.5：换会话时舞台整块作废——上一局的牌不能在**回放新局记录之前**还留在台上。
-  if (viewStartsNewSession(body)) {
+  if (newSession) {
     state.effectCards = [];
     state.revealedCards = [];
     // U3-04：上一局还没触发的技能发动事件不属于新局（DOM 侧由 commit 的清屏兜底）。
@@ -601,15 +660,15 @@ function applyView(body) {
     commitView(body);
     return;
   }
-  const previous = viewStartsNewSession(body)
+  const previous = newSession
     ? []
     : (state.view && state.view.snapshot ? state.view.snapshot.processing || [] : []);
   state.effectCards = mergeEffectCards(previous);
-  // U3-05（D11）：逐事件派生的 live view 从**最近一次提交**的视图起算（深拷贝，绝不改权威
-  // 快照）。开局那一批没有上一份提交视图（牌桌本来是空的、且整批即时冲刷），
-  // `playback.live = false`：只逐事件派生舞台，表体等 `commitView`。
-  const live = state.view !== null;
-  if (live) state.liveView = cloneLiveView(state.view);
+  // U3-05（D11）：逐事件派生的 live view 从中途的上一份提交视图起算（深拷贝，绝不改权威
+  // 快照）。**开局批**没有"中途底稿"：它的底稿是 :func:`openingLiveView` 倒推出来的发牌前
+  // 骨架，故新局的开局批也 `live = true`——表体随记录逐条长出来，而不是等 commit 才出现。
+  const live = opening || state.view !== null;
+  if (live) state.liveView = opening ? openingLiveView(body) : cloneLiveView(state.view);
   state.playback = {
     body, records: incoming, index: 0, querySeat: state.lastQuerySeat, live,
   };
@@ -622,12 +681,16 @@ function applyView(body) {
   // 回放期间**响应文本清空**：它属于"下方询问界面"的那一问，等播完、新询问提交后再显示。
   // 描述文本不在这里清——它由 renderProcessing 按效果区逐事件改写。
   $("t-prompt").textContent = "";
+  // 开局：先把新局的骨架画上（旧局的武将 / 手牌 / 判定装备一帧都不留在屏上），再按正常
+  // 步长逐条演。顶栏的种子 / 座位也属于新局，不等 commit 再换。
+  if (opening) {
+    $("t-seed").textContent = String(body.seed);
+    $("t-seat").textContent = String(body.human_seat);
+    renderTable();
+  }
   // 第一条也等满一个基准步长再出现；之后每条记录的间隔由**上一条**的 `delayOf` 算
   // （U4-02 / D7：base + 该条动画时长 × base/100）。
   playbackTimer = window.setTimeout(() => stepPlayback(false), state.eventDelayMs);
-  // **开局**是唯一不等节奏的：此前牌桌上一片空白，逐条播开局事件只是空屏五秒。
-  // 直接把记录走完（日志照收），让牌桌立刻有局面可看。
-  if (first) flushPlayback();
 }
 
 /** U4-02（spec D7 / D8）：一条记录占用的回放步长 = `base + dur(记录) × (base / 100)`。
@@ -667,6 +730,9 @@ function stepPlayback(immediate) {
     else appendLog(record, playback.querySeat);
     state.effectCards = applyEffectDelta(record, state.effectCards);
     state.revealedCards = applyRevealDelta(record, state.revealedCards);
+    // M6 报障 1：亮牌弹窗跟**源结算帧**走——那个帧 pop 的这条记录一到就收起，不等整批
+    // 播完（五谷的取牌步 / 无懈窗口跨多个响应，最后一批能有几十条记录）。
+    syncPlaybackDialog(record);
     // U4-01（D1 / D2）飞行层 / U4-04（D10）阶段飘字：两条动效都在**重绘之前**规划。
     // 飞行器起飞前量**源**——这一步还没重绘，舞台卡 / 手牌 / 槽位都还在原处，落点等
     // 重绘之后再量并同步起飞（见本函数末尾）；阶段飘字只放画面：不排计时器、不改步长

@@ -415,7 +415,16 @@ const logCount = () => $("t-log").children.length;
  * 这条是**线上事实**而不是读 `state`。
  */
 
+/** 走真的开局表单并等开局批**播完提交**（`startGame` 的 `applyView` 现在按正常节奏回放：
+ *  M6 报障 2 的 A 方案，计时器垫片不会自己跑，故这里显式冲刷）。
+ *  要观察"开局批还在播"的中间态用 :func:`submitLobbyRaw`。 */
 const submitLobby = async () => {
+  await submitLobbyRaw();
+  ui.flushPlayback();
+  return ui.state.view;
+};
+/** 只提交开局表单、**不**冲刷开局批（返回时 `state.view` 可能还是 null / 上一局）。 */
+const submitLobbyRaw = async () => {
   const form = $("lobby-form");
   for (const fn of form.listeners.submit || []) await fn({ preventDefault() {} });
   return ui.state.view;
@@ -16330,6 +16339,9 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     feed([
       moveRecord(23, "DRAW", zoneRef("deck"), zoneRef("hand", 0), hand),
     ], snapshotFor(playersBase(), hand), { live: false });
+    // M6 报障 2（A 方案）起，开局批也按正常节奏播（不再在 `applyView` 里即时冲刷）；
+    // 烟测的计时器垫片不跑计时器，故这里显式播完再判"钩子起过飞、视图已提交"。
+    ui.flushPlayback();
     check("U4-01-q 开局批次（!live）也走同一个钩子：牌堆 → 自己手牌行照样起飞",
       flights().length === 2 && flights().every((node) => kindOf(node) === "draw")
         && ui.state.view !== null,
@@ -16988,15 +17000,32 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     ui.animConfig.phase_float_ms === ui.animDefaults.phase_float_ms,
     `phase_float_ms=${ui.animConfig.phase_float_ms}`);
 
-  // ---- 只认六个 _START 与 TURN_START：阶段体 / 阶段空闲 / 回合结束等时机零动作 ----
+  // ---- 准备 / 判定 / 结束读**阶段体**：这三个阶段的 `_START` 在 EMPTY_LOG、不 dispatch ----
   load([
     timingRecord(100, "PHASE_PREPARE", 1),
-    timingRecord(101, "PHASE_PLAY_IDLE", 1),
-    timingRecord(102, "TURN_END", 1),
-    { kind: "delta", delta_type: "hp_change", seq: 103, frame_id: 0, depth: 0 },
+    timingRecord(101, "PHASE_JUDGE", 1),
+    timingRecord(102, "PHASE_FINISH", 1),
+  ]);
+  for (let index = 0; index < 3; index += 1) step();
+  const bodyFloats = floatNodes();
+  check("U4-04-m 准备 / 判定 / 结束三个阶段体各起一次「XX阶段开始」（M6 报障 3）",
+    bodyFloats.length === 3
+      && bodyFloats.map((node) => node.textContent).join(",") === "准备阶段开始,判定阶段开始,结束阶段开始"
+      && bodyFloats.map((node) => attr(node, "data-anim-phase-timing")).join(",")
+        === "PHASE_PREPARE,PHASE_JUDGE,PHASE_FINISH",
+    `texts=${bodyFloats.map((node) => node.textContent).join("|")}`
+      + ` timings=${bodyFloats.map((node) => attr(node, "data-anim-phase-timing")).join("|")}`);
+
+  // ---- 其余时机零动作：摸牌 / 出牌的阶段体（它们本来就有 `_START`）、阶段空闲、回合结束、
+  //      非 timing（一个阶段只许出一次飘字） ----
+  load([
+    timingRecord(103, "PHASE_DRAW", 1),
+    timingRecord(104, "PHASE_PLAY_IDLE", 1),
+    timingRecord(105, "TURN_END", 1),
+    { kind: "delta", delta_type: "hp_change", seq: 106, frame_id: 0, depth: 0 },
   ]);
   for (let index = 0; index < 4; index += 1) step();
-  check("U4-04-m 只认六个 PHASE_*_START 与 TURN_START：阶段体 / 阶段空闲 / 回合结束 / 非 timing 零动作",
+  check("U4-04-m2 摸牌 / 出牌阶段体、阶段空闲、回合结束、非 timing 仍零动作",
     floatNodes().length === 0,
     `floats=${floatNodes().length}`);
 
@@ -17340,6 +17369,201 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.state.playback = null;
   ui.state.liveView = null;
   ui.resetSelection();
+}
+
+/* ============ M6 报障（用户实机）：三条回归 ============
+ *
+ * 每条断言对应一条用户实机报障（红命令已转绿，留作回归）。三条都走**真服务 + 真前端
+ * 脚本**，不造合成响应：
+ *
+ *  - B1 五谷亮牌弹窗：源牌结算完（五谷 RESOLVE 帧 pop）时弹窗要**当场**收起，
+ *    而不是等整批回放播完、下一次询问提交时才收起；
+ *  - B2 新局开局：不能拿上一局的视图当回放底稿（残局布局），且"有没有上一局"
+ *    不该改变开局这一批的回放方式；B2c 钉"倒推出来的发牌前骨架"能把开局批逐条
+ *    长成新局快照；
+ *  - B3 阶段飘字：一回合六个阶段都该起「XX阶段开始」（准备 / 判定 / 摸牌 / 出牌 /
+ *    弃牌 / 结束）；回合开始前 / 回合结束后两个节点不显示但照旧派发钩子。
+ */
+{
+  const hasClass = (node, name) =>
+    String((node && node.className) || "").split(/\s+/).includes(name);
+  const resetAll = () => {
+    ui.flushPlayback();
+    ui.state.playback = null;
+    ui.state.sessionId = null;
+    ui.state.view = null;
+    ui.state.liveView = null;
+    ui.state.logRecords = [];
+    ui.state.narrative = [];
+    ui.state.narrativeShown = 0;
+    ui.state.cursor = -1;
+    ui.state.logSeq = 0;
+    ui.resetSelection();
+    $("t-log").innerHTML = "";
+  };
+  const bodyHeroName = (body) => {
+    const players = (body && body.snapshot && body.snapshot.players) || [];
+    const player = players.find((item) => Number(item.seat) === Number(body.human_seat || 0));
+    return player ? String(player.hero_name || "") : "";
+  };
+
+  /* ---- B3：一回合六个阶段都要起「XX阶段开始」--------------------------------- */
+  resetAll();
+  // 先清掉前面合成载荷留在层上的飘字：这一条只认**真对局**产出的节点。
+  if ($("t-anim-phase")) $("t-anim-phase").innerHTML = "";
+  const wantedPhases = [
+    "准备阶段开始", "判定阶段开始", "摸牌阶段开始",
+    "出牌阶段开始", "弃牌阶段开始", "结束阶段开始",
+  ];
+  const floatTexts = () => {
+    const layer = $("t-anim-phase");
+    return layer ? Array.from(layer.children)
+      .filter((node) => hasClass(node, "anim-phase-float"))
+      .map((node) => String(node.textContent || "")) : [];
+  };
+  const seenFloats = new Set();
+  const collectFloats = () => { for (const text of floatTexts()) seenFloats.add(text); };
+  await newSession(20273291, { ai: "random" });
+  collectFloats();
+  for (let step = 0; step < 60 && ui.state.view && ui.state.view.pending; step += 1) {
+    await advanceOnce();
+    collectFloats();
+  }
+  const missingPhases = wantedPhases.filter((text) => !seenFloats.has(text));
+  check("M6-B3 真对局：一回合六个阶段都起「XX阶段开始」",
+    missingPhases.length === 0,
+    `missing=${missingPhases.join(" / ")} seen=${Array.from(seenFloats).join(" | ")}`);
+  // 两个**节点**不显示（但后端照旧派发，见 sgs.timing 的 TURN_BEFORE_START / TURN_AFTER_END）。
+  const nodeFloats = Array.from(seenFloats).filter(
+    (text) => text.includes("回合开始前") || text.includes("回合结束后"));
+  check("M6-B3b 回合开始前 / 回合结束后两个节点不显示飘字（只做钩子）",
+    nodeFloats.length === 0, `unexpected=${nodeFloats.join(" | ")}`);
+
+  /* ---- B1：五谷亮牌弹窗在源牌结算完时当场收起 -------------------------------- */
+  resetAll();
+  // 种子 198 / 5 人：开局的人类第一问就是【五谷丰登】的逐目标无懈窗口（既有用例同源）。
+  const harvestBody = await post("/api/sessions", {
+    player_count: 5, ai: "random", human_seat: 0, timeout_seconds: null, seed: 198,
+  });
+  ui.state.sessionId = harvestBody.session_id;
+  ui.state.view = null;
+  ui.state.cursor = -1;
+  ui.state.logSeq = 0;
+  ui.applyView(harvestBody);
+  let harvestFrame = null;
+  let pendingBefore = null;
+  let closingBatch = null;
+  for (let step = 0; step < 40; step += 1) {
+    const pending = ui.state.view ? ui.state.view.pending : null;
+    if (!pending) break;
+    const harvest = pending.harvest;
+    if (!harvest) break;
+    harvestFrame = Number(String(harvest.key || "").split(":")[1]);
+    pendingBefore = pending;
+    if (pending.kind === "SELECT_CARDS") await ui.submitRevealPick(pending, 0);
+    else if (pending.kind === "RESPOND") {
+      const pass = (pending.legal_actions || []).findIndex((action) => action.kind === "Pass");
+      if (pass < 0) break;
+      ui.state.selectedOption = pass;
+      await ui.submitActionRaw();
+    } else break;
+    const nextPending = ui.state.playback
+      ? ui.state.playback.body.pending
+      : (ui.state.view ? ui.state.view.pending : null);
+    if (!(nextPending && nextPending.harvest)) {
+      closingBatch = ui.state.playback;
+      break;
+    }
+    ui.flushPlayback();
+  }
+  const dialogOpenBeforeBatch = $("t-dialog").hidden === false;
+  const batchRecords = closingBatch ? closingBatch.records : [];
+  for (let index = 0; index < batchRecords.length; index += 1) ui.stepPlayback(true);
+  const playbackStillOpen = ui.state.playback !== null;
+  const dialogClosedDuringPlayback = $("t-dialog").hidden === true;
+  check("M6-B1 五谷亮牌弹窗在源牌结算完（仍在该批回放中）就收起，不等下一次询问",
+    !!closingBatch && harvestFrame !== null && dialogOpenBeforeBatch
+      && playbackStillOpen && dialogClosedDuringPlayback,
+    `frame=${harvestFrame} before=${pendingBefore && pendingBefore.kind}`
+      + ` records=${batchRecords.length} openBefore=${dialogOpenBeforeBatch}`
+      + ` playbackOpen=${playbackStillOpen} closedMidBatch=${dialogClosedDuringPlayback}`
+      + ` dialogHidden=${$("t-dialog").hidden}`);
+  ui.flushPlayback();
+  ui.show("lobby");
+
+  /* ---- B2：新局开局不残留上一局布局、且两条开局路径一致 ---------------------- */
+  resetAll();
+  // 先扫一个"人类武将与第一局不同"的 seed（同一份建局载荷，避开"两局刚好同名"的假绿）。
+  $("in-players").value = "8";
+  tickPointjiang(false);
+  const lobbyBody = (seed) => ({
+    player_count: Number($("in-players").value),
+    ai: $("in-ai").value,
+    human_seat: Number($("in-seat").value),
+    timeout_seconds: Number($("in-timeout").value) > 0 ? Number($("in-timeout").value) : null,
+    seed: Number(seed),
+    my_hero: null,
+    banned_heroes: ui.currentBans().slice(),
+    deck_profile: $("in-deck-profile").value || null,
+  });
+  $("in-seed").value = "2468";
+  await submitLobbyRaw();                         // 没有上一局：state.view === null
+  const firstPlayback = ui.state.playback;
+  const firstBody = firstPlayback ? firstPlayback.body : ui.state.view;
+  const firstHero = bodyHeroName(firstBody);
+  const firstPaced = firstPlayback !== null;
+  ui.flushPlayback();
+  let secondSeed = null;
+  let secondHero = "";
+  for (const seed of [101, 202, 303, 404, 505, 606, 707, 808, 909, 1010]) {
+    const probe = await post("/api/sessions", lobbyBody(seed));
+    const hero = bodyHeroName(probe);
+    if (hero && hero !== firstHero) { secondSeed = seed; secondHero = hero; break; }
+  }
+  // 自己的武将名有稳定读取口 `#t-hero`（table.js:renderSelfSeat 只改内容、不重建节点）。
+  const selfHeroName = () => String(($("t-hero") && $("t-hero").textContent) || "");
+  ui.show("lobby");
+  $("in-seed").value = String(secondSeed);
+  const staleHero = selfHeroName();                 // 第一局画在屏上的武将
+  await submitLobbyRaw();                           // 有上一局：开局批照常按节奏播
+  const secondPaced = ui.state.playback !== null;
+  const secondBody = ui.state.playback ? ui.state.playback.body : ui.state.view;
+  if (ui.state.playback) ui.stepPlayback(true);     // 回放第一条：表体按 liveView 重绘
+  const paintedHero = selfHeroName();
+  check("M6-B2 新局开局的第一帧不残留上一局布局（表体画的是新局的武将）",
+    secondSeed !== null && !!secondBody && staleHero === firstHero
+      && paintedHero === secondHero && paintedHero !== staleHero,
+    `seed=${secondSeed} first=${firstHero} second=${secondHero}`
+      + ` stale=${staleHero} painted=${paintedHero}`);
+  check("M6-B2b 开局这一批的回放方式与有没有上一局无关（两条路径一致）",
+    firstPaced === secondPaced,
+    `firstPaced=${firstPaced} secondPaced=${secondPaced}`
+      + ` firstRecords=${firstBody && (firstBody.records || []).length}`);
+
+  // ---- 初始化重写（B2b 选 A 的底稿）：开局这条批逐条播完、**还没 commit** 时，表体应当已经
+  //      逐事件长成新局快照本身。底稿错（拿上一局 / 拿跑完后的快照倒着播）都会在这里露馅：
+  //      牌堆 / 手牌数 / 阶段 / 轮次对不上。
+  if (ui.state.playback) {
+    const total = ui.state.playback.records.length;
+    for (let index = ui.state.playback.index; index < total; index += 1) ui.stepPlayback(true);
+  }
+  const liveSnapshot = secondBody ? secondBody.snapshot : null;
+  const liveHuman = liveSnapshot ? (liveSnapshot.players || []).find(
+    (player) => Number(player.seat) === Number(secondBody.human_seat)) : null;
+  check("M6-B2c 开局批播完（未 commit）时表体已长成新局快照（初始化底稿正确）",
+    !!liveSnapshot && !!liveHuman
+      && $("t-deck").textContent === String(liveSnapshot.deck_count ?? 0)
+      && $("t-self-hand").textContent === String(liveHuman.hand_count)
+      && $("t-phase").textContent === ui.phaseLabel(liveSnapshot.phase)
+      && $("t-round").textContent === String(liveSnapshot.round)
+      && selfHeroName() === secondHero,
+    `deck=${$("t-deck").textContent}/${liveSnapshot && liveSnapshot.deck_count}`
+      + ` hand=${$("t-self-hand").textContent}/${liveHuman && liveHuman.hand_count}`
+      + ` phase=${$("t-phase").textContent}/${liveSnapshot && ui.phaseLabel(liveSnapshot.phase)}`
+      + ` round=${$("t-round").textContent}/${liveSnapshot && liveSnapshot.round}`
+      + ` hero=${selfHeroName()}/${secondHero}`);
+  ui.flushPlayback();
+  resetAll();
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

@@ -105,6 +105,9 @@
   // 原始入口（不自动冲刷回放）：观察中间态的用例用它。
   out.applyViewRaw = out.applyView;
   const rawSubmit = out.submitAction;
+  // 文件头注释早就写了 `applyViewRaw` / `submitActionRaw` 这一对；后者此前没挂上，
+  // 于是"提交之后、整批回放还没播完"的中间态在烟测里观察不到（M6 报障的红命令要用）。
+  out.submitActionRaw = rawSubmit;
   out.applyView = (body) => {
     out.applyViewRaw(body);
     if (out.flushPlayback) out.flushPlayback();

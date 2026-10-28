@@ -519,11 +519,15 @@ function animSpawn(layer, layerRect, plan, card, index, toRect) {
 
 /* ------------------------------------------------------------ 阶段 / 回合飘字（票 04 / D10） */
 
-/** 六个阶段的中文名：`PHASE_<名字>_START` → 「<名字>开始」（D10 的六种）。
+/** 六个阶段的中文名：`<名字>开始`（D10 的六种）。
  *
- * 表驱动：引擎当前只发 `PHASE_DRAW_START` / `PHASE_PLAY_START` / `PHASE_DISCARD_START`
- * 三个「开始时」（准备 / 判定 / 结束的 `_START` 在 `EMPTY_LOG`，见 `sgs/timing/enum.py`），
- * 但 D10 登记的是六个，来什么画什么、不按"引擎会不会发"分叉。
+ * 表驱动，两个入口都归这一张表：
+ *
+ * - `PHASE_<名字>_START`：摸牌 / 出牌 / 弃牌三个阶段发这个边界；
+ * - `PHASE_<名字>`（**阶段体**，见 :data:`PHASE_FLOAT_BODY_STARTS`）：准备 / 判定 / 结束三个
+ *   阶段的 `_START` 在 `sgs/timing/enum.py` 的 `EMPTY_LOG` 里（枚举位保留、不 dispatch、
+ *   不进记录流），引擎只在阶段起点发阶段体。故这三个阶段读阶段体，六个阶段才都画得出
+ *   「XX阶段开始」（M6 报障 3；不重开"阶段边界要不要 dispatch"的既有裁定）。
  */
 const PHASE_FLOAT_LABELS = {
   PREPARE: "准备阶段",
@@ -532,6 +536,17 @@ const PHASE_FLOAT_LABELS = {
   PLAY: "出牌阶段",
   DISCARD: "弃牌阶段",
   FINISH: "结束阶段",
+};
+
+/** 阶段体时机 → 同一张阶段表的键：只有 `_START` 在 `EMPTY_LOG` 的三个阶段。
+ *
+ * **不要**把 `PHASE_DRAW` / `PHASE_PLAY_IDLE` / `PHASE_DISCARD` 也映射进来——那三个阶段
+ * 本来就有 `_START`，映射阶段体会让一个阶段出两次飘字。
+ */
+const PHASE_FLOAT_BODY_STARTS = {
+  PHASE_PREPARE: "PREPARE",
+  PHASE_JUDGE: "JUDGE",
+  PHASE_FINISH: "FINISH",
 };
 
 const PHASE_FLOAT_START_RE = /^PHASE_([A-Z]+)_START$/;
@@ -595,6 +610,12 @@ function animPhaseText(timing, seat) {
   const match = PHASE_FLOAT_START_RE.exec(timing);
   if (match) {
     const label = PHASE_FLOAT_LABELS[match[1]];
+    return label ? `${label}开始` : null;
+  }
+  // 准备 / 判定 / 结束：`_START` 在 EMPTY_LOG 不 dispatch，读阶段体（同一张表、同一句文案）。
+  const body = PHASE_FLOAT_BODY_STARTS[timing];
+  if (body) {
+    const label = PHASE_FLOAT_LABELS[body];
     return label ? `${label}开始` : null;
   }
   if (timing === "TURN_START") {
