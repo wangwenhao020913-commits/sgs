@@ -96,7 +96,8 @@ def ai_stream(seed: int, seat: int) -> RandomSource:
     其余座位的抽签位置（票 03 实测：一次多余取数改写他座应答的中位数 **195 条/局**）。
     按座位名派生后，一个座位多问一次只影响它自己——这是后续 A/B 读数可比的技术前提。
 
-    ``seat`` 是 0 基座位号；上界由规则配置把关，这里只拒绝负数与非整数。
+    ``seat`` 是 0 基座位号；这里只拒绝负数与非整数，座位数的上界由调用方的
+    建座循环（``range(player_count)``）保证。
     """
     if isinstance(seat, bool) or not isinstance(seat, int):
         raise ValueError(f"座位必须是整数，得到 {type(seat).__name__}")

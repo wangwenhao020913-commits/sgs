@@ -27,7 +27,6 @@ from sgs.engine import (
     Engine,
     IllegalActionError,
     JournalRecord,
-    RandomSource,
     ai_stream,
     new_seed,
 )
@@ -100,9 +99,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     seed = args.seed if args.seed is not None else new_seed()
-    # 种子闸门只在唯一随机源里有第二份；这里直接借它的报错，不再抄一遍值域。
+    # 种子闸门只在唯一随机源里有第二份；这里借 ai_stream 的报错（不另抄值域），
+    # 顺便把每座位的子流一次建好。
     try:
-        RandomSource(seed)
+        streams = [
+            ai_stream(seed, seat) for seat in range(rule_config.player_count)
+        ]
     except ValueError as error:
         print(f"种子非法：{error}", file=sys.stderr)
         return 1
@@ -125,8 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"武将发放非法：{error}", file=sys.stderr)
         return 1
     participants: list[Participant] = [
-        _player(args.ai, ai_stream(seed, seat))
-        for seat in range(rule_config.player_count)
+        _player(args.ai, stream) for stream in streams
     ]
     try:
         engine.run(participants)

@@ -2579,7 +2579,9 @@ def test_a_broken_run_is_refused_instead_of_half_read(tmp_path: Path) -> None:
     # "坏文件被拒"了（票 12 切换座位子流时撞到过一次）。
     raw = path.read_bytes()
     last_line = raw.rstrip(b"\n").rfind(b"\n") + 1
-    path.write_bytes(raw[: last_line + (len(raw) - last_line) // 2])
+    cut = last_line + (len(raw) - last_line) // 2
+    assert not raw[:cut].endswith(b"\n"), "截断点必须落在行中间（否则前缀仍是合法 JSONL）"
+    path.write_bytes(raw[:cut])
     with pytest.raises(ValueError):
         load_run(tmp_path, name)
 

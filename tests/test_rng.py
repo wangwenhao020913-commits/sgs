@@ -118,8 +118,9 @@ def test_substreams_are_derived_by_name_not_by_creation_order():
 
 
 def test_consuming_the_ai_stream_does_not_move_the_shuffle_stream():
+    ai = ai_stream(SEED, 0)
     for _ in range(50):
-        ai_stream(SEED, 0).randbelow(10)
+        ai.randbelow(10)
 
     shuffled = list(range(20))
     RandomSource(SEED).substream("shuffle").shuffle(shuffled)
