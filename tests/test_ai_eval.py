@@ -30,11 +30,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 from ai_eval import (  # noqa: E402 - 测试在 import 前把 tools/ 放上 sys.path
+    AiEvalRunError,
+    AiEvalSpecError,
     AiVersionError,
     DecisionFact,
     by_identity,
     compare_pairs,
     count_misses,
+    decision_diff,
     derive_batch,
     derive_sealed_batch,
     diff_decisions,
@@ -45,11 +48,13 @@ from ai_eval import (  # noqa: E402 - 测试在 import 前把 tools/ 放上 sys.
     noise_floor,
     paired_diff_ci,
     run_cases,
+    run_seal,
     seat_zero_identity,
 )
 
-# 独立转写 spec §2.7 的 LCG + 1:1:2:1 配比后得到的**金值**；改派生规则必须重录，
-# 不是"跑一遍实现再抄回来"（那样永远绿）。
+# 按 seeds.py 的**成文口径**（§2.7 的 LCG / 间距 / 排序摘要 + 本实现裁定的"抽号时定额
+# 配比"，见 seeds.py docstring）独立转写后得到的**金值**；改派生规则必须重录，不是
+# "跑一遍实现再抄回来"（那样永远绿）。
 GOLDEN_COMMIT = "a" * 40
 GOLDEN_DEALS = 8
 GOLDEN_SEEDS = (
@@ -133,7 +138,7 @@ def test_the_derived_batch_fills_exactly_the_quota() -> None:
 
 def test_the_offline_seat_zero_identity_matches_the_engine() -> None:
     """配比按座位 0 的身份凑；离线算法必须与引擎发身份逐个相等（否则整批配比是错的）。"""
-    pack = load_content_pack()
+    pack = load_content_pack(deck_profile="standard_108")
     for seed in (136, 137, 138, 1400, 5000, 7001):
         engine = Engine.new_game(
             seed=seed,
@@ -156,7 +161,7 @@ def test_the_live_band_is_reserved_and_never_derived() -> None:
 
 def test_seed_derivation_rejects_nonsense_sizes() -> None:
     for deals in (0, -1):
-        with pytest.raises(Exception) as error:
+        with pytest.raises(AiEvalSpecError) as error:
             derive_batch("e" * 40, deals)
         assert "deals" in str(error.value)
 
@@ -327,23 +332,33 @@ def test_a_decision_fact_reads_a_real_play_phase_query() -> None:
     assert fact.composite_offered is False
 
 
-def test_a_decision_fact_sees_the_offer_lists_on_the_query() -> None:
-    """复合清单不进记录流（``exclude``），但**询问对象**上有；live 的夹具据此计数。"""
-    query, action = _a_real_play_phase_query()
-    offered = query.model_copy(update={"preactivations": {"hero.ganglie": ()}})
+def test_a_decision_fact_sees_a_real_transform_offer() -> None:
+    """复合清单不进记录流（``exclude``），但引擎交给参与者的**询问对象**上有。
 
-    assert fact_from_query(offered, action).composite_offered is True
+    这一支必须是引擎产出的真清单（关羽【武圣】的转化），不能靠 ``model_copy`` 注一个
+    引擎永远不写的空清单——否则"读到了清单"只是测试自己造出来的事实（CODING_STANDARDS §6）。
+    """
+    query, action = _a_real_play_phase_query(heroes=("guanyu", "zhangfei"))
+
+    assert query.transform_preactivations, "关羽的出牌阶段应下发转化清单"
+    assert fact_from_query(query, action).composite_offered is True
 
 
-def _a_real_play_phase_query():
-    """真实引擎产出的第一次出牌阶段询问 + 记录玩家实际给出的应答（不手抄候选）。"""
+def _a_real_play_phase_query(*, heroes: tuple[str, ...] = ()):
+    """真实引擎产出的第一次出牌阶段询问 + 记录玩家实际给出的应答（不手抄候选）。
+
+    ``heroes`` 给两名武将时用**真对局**制造转化 / 预发动清单（关羽【武圣】的
+    ``transform_preactivations``），不给则是一个没有复合清单的普通出牌阶段。
+    """
     from support.positions import RecordingPlayer, run_until
 
     from sgs.agents import RandomPlayer
     from sgs.engine import ai_stream
 
     pack = load_content_pack(deck_profile="basic_53")
-    engine = Engine.new_game(seed=7, rule_config=RuleConfig(), pack=pack)
+    engine = Engine.new_game(
+        seed=7, rule_config=RuleConfig(), pack=pack, heroes=heroes
+    )
     recorder = RecordingPlayer()
     participants = [recorder, *(RandomPlayer(ai_stream(7, seat)) for seat in range(1, 2))]
     run_until(
@@ -464,19 +479,14 @@ def test_the_ai_v0_tag_loads_and_only_touches_the_public_engine_surface() -> Non
 
     assert loaded.commit == _git(ROOT, "rev-list", "-n", "1", "ai-v0")
     assert loaded.path.parent == ROOT / "runs" / "ai-versions"
-    tree = ast.parse(loaded.path.read_text(encoding="utf-8"))
+    source = loaded.path.read_text(encoding="utf-8")
     imported_modules = {
         node.module
-        for node in ast.walk(tree)
+        for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.ImportFrom) and node.module
     }
-    assert {"sgs.effects", "sgs.state"} <= imported_modules
-    offenders = sorted(
-        module
-        for module in imported_modules
-        if module.startswith("sgs.") and module not in {"sgs.effects", "sgs.state"}
-    )
-    assert not offenders, offenders
+    assert {"sgs.effects", "sgs.state"} <= imported_modules, "扫描目标可能指错了"
+    assert _engine_surface_offenders(source) == []
 
 
 def test_the_ledger_records_the_origin_row_and_the_seed_bands() -> None:
@@ -784,14 +794,20 @@ def test_promote_publishes_both_paired_comparisons_and_the_five_verdict_fields(
 
 
 def test_seal_prints_only_aggregate_readings(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ai_eval import main
+    import ai_eval.cli as cli
+    import ai_eval.run as run
 
     out = tmp_path / "seal.json"
     batch = derive_sealed_batch("sealed-test", 2)
+    real_run_seal = run.run_seal
+    # CLI 不暴露副数（1024 写死，spec §2.4 B）；测试只缩小库参数，其余走真 CLI 路径。
+    monkeypatch.setattr(
+        cli, "run_seal", lambda **kwargs: real_run_seal(**kwargs, deals=2)
+    )
 
-    code = main(
+    code = cli.main(
         [
             "seal",
             "--batch",
@@ -799,8 +815,6 @@ def test_seal_prints_only_aggregate_readings(
             "--versions",
             "HEAD",
             "ai-v0",
-            "--deals",
-            "2",
             "--out",
             str(out),
         ]
@@ -846,6 +860,58 @@ def test_seal_prints_only_aggregate_readings(
     assert '"seeds"' not in serialized
 
 
+def test_the_seal_command_is_fixed_at_1024(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """spec §2.4 B：封印批 1024 副**写死**——CLI 不传副数（库参数只给测试缩小批）。"""
+    import ai_eval.cli as cli
+    import ai_eval.run as run
+
+    calls: dict[str, object] = {}
+
+    def _fake(**kwargs):
+        calls.update(kwargs)
+        return {
+            "tier": "seal",
+            "seed_batch": {"sha256": "0" * 64, "deals": run.SEAL_DEALS, "batch": "sealed-1"},
+            "errors": 0,
+            "versions": [],
+        }
+
+    monkeypatch.setattr(cli, "run_seal", _fake)
+
+    code = cli.main(
+        [
+            "seal",
+            "--batch",
+            "sealed-1",
+            "--versions",
+            "HEAD",
+            "ai-v0",
+            "--out",
+            str(tmp_path / "seal.json"),
+        ]
+    )
+
+    assert code == 0
+    assert "deals" not in calls
+    assert run.SEAL_DEALS == 1024
+
+
+def test_a_run_error_exits_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """用例子进程崩 / 超时是"这次没测成"（退出码 1），不是参数错（2）。"""
+    import ai_eval.cli as cli
+
+    def _raise(**kwargs):
+        raise AiEvalRunError("D 类用例起不来")
+
+    monkeypatch.setattr(cli, "run_quick", _raise)
+
+    assert cli.main(["quick", "--baseline", "HEAD", "--no-cases"]) == 1
+
+
 def test_a_batch_with_game_errors_exits_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -883,3 +949,246 @@ def test_spec_errors_exit_with_two(tmp_path: Path, capsys: pytest.CaptureFixture
     with pytest.raises(SystemExit) as error:
         main(["quick", "--deals", "2"])
     assert error.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# 评审修订补的机械面：分类型的漏动作、逐副 diff 计数、空数据的"未测"、
+# 用例运行期错误、非空 diff 的真链路、ai-v0 的 import 面（含合成反例）
+# ---------------------------------------------------------------------------
+
+
+def test_miss_counts_are_broken_down_by_query_kind() -> None:
+    from ai_eval.misses import KindMisses
+
+    counts = count_misses(
+        [
+            DecisionFact(kind="DODGE", answered_pass=True, non_pass_legal=True),
+            DecisionFact(kind="DODGE", answered_pass=False, non_pass_legal=True),
+            DecisionFact(kind="DISCARD", answered_pass=False, non_pass_legal=True),
+            DecisionFact(
+                kind="PLAY_PHASE",
+                answered_pass=False,
+                composite_offered=True,
+                composite_filled=False,
+            ),
+        ]
+    )
+
+    assert counts.pass_denominator == 3
+    assert counts.by_kind["DODGE"] == KindMisses(
+        pass_with_options=1, pass_denominator=2
+    )
+    assert counts.by_kind["DISCARD"] == KindMisses(pass_denominator=1)
+    assert counts.by_kind["PLAY_PHASE"] == KindMisses(
+        unfilled_composite=1, composite_denominator=1
+    )
+
+
+def test_merging_chunk_counts_keeps_the_per_kind_breakdown() -> None:
+    from ai_eval.misses import merge_misses
+
+    first = count_misses(
+        [DecisionFact(kind="DODGE", answered_pass=True, non_pass_legal=True)]
+    )
+    second = count_misses(
+        [
+            DecisionFact(kind="DODGE", answered_pass=False, non_pass_legal=True),
+            DecisionFact(kind="DISCARD", answered_pass=False, non_pass_legal=True),
+        ]
+    )
+
+    merged = merge_misses(first, second)
+
+    assert merged.pass_with_options == 1
+    assert merged.pass_denominator == 3
+    assert merged.by_kind["DODGE"].pass_denominator == 2
+    assert merged.by_kind["DISCARD"].pass_denominator == 1
+
+
+def test_decision_diff_counts_every_deal_and_attributes_the_first_divergence() -> None:
+    identical = (
+        _decision(0, "PLAY_PHASE", 0),
+        _decision(1, "DODGE", 1),
+    )
+    candidate = (
+        _decision(0, "PLAY_PHASE", 0),
+        _decision(
+            1,
+            "DODGE",
+            1,
+            action_kind="UseCard",
+            card={"card_id": 3, "virtual_sources": []},
+        ),
+    )
+    baseline = (
+        _decision(0, "PLAY_PHASE", 0),
+        _decision(1, "DODGE", 1),
+    )
+
+    result = decision_diff([(11, identical, identical), (12, candidate, baseline)])
+
+    assert result["deals_differing"] == 1
+    assert result["first_divergence_by_kind"] == {"DODGE": 1}
+    assert result["examples"] == [
+        {
+            "seed": 12,
+            "index": 1,
+            "kind": "DODGE",
+            "actor": 1,
+            "candidate": candidate[1]["action"],
+            "baseline": baseline[1]["action"],
+        }
+    ]
+
+
+def test_no_matched_deal_is_unmeasured_not_a_zero_diff() -> None:
+    """一副有效配对都没有 ⇒ 显示全部 null；全零会被 non_inferior 读成"没变差"。"""
+    comparison = compare_pairs([])
+
+    assert comparison.measured is False
+    assert comparison.to_dict() == {
+        "win_rate_candidate": None,
+        "win_rate_baseline": None,
+        "diff": None,
+        "ci95": None,
+        "by_identity": {},
+    }
+    assert comparison.anchor_view() == {"diff": None, "ci95": None}
+
+
+def test_promote_with_no_finished_deal_reports_unmeasured_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真走 run_promote 的装配：四臂全是空结果时五条件不许"真空通过"。"""
+    import ai_eval.run as run
+
+    empty = run.ArmRun(label="empty", games=(), miss=run.MissCounts(0, 0, 0, 0))
+    monkeypatch.setattr(run, "_run_arm", lambda *args, **kwargs: empty)
+
+    result = run.run_promote(
+        baseline="HEAD",
+        anchor="HEAD",
+        candidate_ref="HEAD",
+        deals=4,
+        measure_cases=False,
+    )
+
+    assert result["vs_baseline"]["diff"] is None
+    assert result["vs_anchor"] == {"diff": None, "ci95": None}
+    assert result["verdict"]["non_inferior"] is None
+    assert result["verdict"]["anchor_non_inferior"] is None
+    assert result["verdict"]["diff_attributed"] is None
+    assert result["decision_diff"]["deals_differing"] == 0
+    assert result["errors"] == 0
+
+
+def test_a_case_runner_timeout_is_a_run_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ai_eval.cases as cases_module
+
+    root = _make_cases_root(tmp_path, "def test_ok():\n    assert True\n")
+
+    def _timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="pytest", timeout=1)
+
+    monkeypatch.setattr(cases_module.subprocess, "run", _timeout)
+
+    with pytest.raises(AiEvalRunError) as error:
+        cases_module.run_cases(root)
+
+    assert "未结束" in str(error.value)
+
+
+def _one_shot_deviation(real_class):
+    """一个只在**第一次有得选**时故意换答案的启发式子类（其余时刻原样）。
+
+    这样两臂在第一个不同步之前逐条相同，而不同步**一定**出现（候选与基线在同一个询问上
+    给了不同答案）；之后回到正常启发式，对局仍会终局。
+    """
+
+    class OneShotDeviation(real_class):
+        def __init__(self, stream=None):
+            super().__init__(stream)
+            self._deviated = False
+
+        def respond(self, query):
+            action = super().respond(query)
+            if not self._deviated and len(query.legal_actions) > 1:
+                self._deviated = True
+                return next(
+                    candidate for candidate in query.legal_actions if candidate != action
+                )
+            return action
+
+    return OneShotDeviation
+
+
+def test_a_deal_with_different_decisions_is_counted_and_attributed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """非空 diff 的真链路：真批次 → 焦点座位决策 → `deals_differing` / 归因。"""
+    import ai_eval.run as run
+    from ai_eval.versions import LoadedVersion
+
+    def _load(ref, *, repo_root=None, versions_dir=None):
+        if ref != "deviating":
+            return run.load_version_original(
+                ref, repo_root=repo_root, versions_dir=versions_dir
+            )
+        real = run.load_version_original(
+            "HEAD", repo_root=repo_root, versions_dir=versions_dir
+        )
+        return LoadedVersion(
+            ref="deviating",
+            commit=real.commit,
+            heuristic_sha256="deviating" * 8,
+            path=real.path,
+            player_class=_one_shot_deviation(real.player_class),
+        )
+
+    monkeypatch.setattr(run, "load_version_original", run.load_version, raising=False)
+    monkeypatch.setattr(run, "load_version", _load)
+
+    result = run.run_quick(
+        baseline="deviating",
+        candidate_ref="HEAD",
+        deals=2,
+        measure_cases=False,
+        versions_dir=tmp_path,
+    )
+
+    diff = result["decision_diff"]
+    assert result["errors"] == 0
+    assert diff["deals_differing"] >= 1
+    assert diff["first_divergence_by_kind"], "非空 diff 必须有类型归因"
+    assert diff["examples"][0]["candidate"] != diff["examples"][0]["baseline"]
+
+
+def _engine_surface_offenders(source: str) -> list[str]:
+    """旧版启发式里出现 `sgs.effects` / `sgs.state` 之外的 `sgs.*` import 即列名。"""
+    tree = ast.parse(source)
+    allowed = {"sgs.effects", "sgs.state"}
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module.startswith("sgs.") and node.module not in allowed:
+                offenders.append(node.module)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("sgs.") and alias.name not in allowed:
+                    offenders.append(alias.name)
+    return offenders
+
+
+def test_the_ai_v0_import_scan_flags_omniscient_imports() -> None:
+    """合成反例：扫描本身不是空转（import 形态与 from 形态都要抓）。"""
+    red = (
+        "import sgs.engine\n"
+        "from sgs.skills import CATALOG\n"
+        "from sgs.effects import Randomness\n"
+    )
+    green = "from sgs.effects import Randomness\nfrom sgs.state import Query\n"
+
+    assert set(_engine_surface_offenders(red)) == {"sgs.engine", "sgs.skills"}
+    assert _engine_surface_offenders(green) == []

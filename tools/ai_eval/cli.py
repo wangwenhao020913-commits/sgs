@@ -3,7 +3,8 @@
 退出码（与 ``sgs_batch`` 同口径）：
 
 - **0**：跑完且 ``errors == 0``；
-- **1**：有对局报错 / worker 崩溃（重跑可能变好，但结论不可用）；
+- **1**：评估**运行期**失败——有对局报错 / worker 崩溃 / 用例子进程起不来（重跑可能变好，
+  但结论不可用）；
 - **2**：参数、规格、版本加载错误（缺 tag 是这一类——**没有**"静默打回 HEAD"）。
 
 摘要恒走 stderr（JSON 走 ``--out``，省略时走 stdout）：``seal`` 的摘要同样只有聚合
@@ -22,13 +23,14 @@ from typing import Any, Sequence
 from sgs.data import DataLoadError
 from sgs_batch import BatchSpecError, BatchWorkerError
 
-from .errors import AiEvalError
+from .errors import AiEvalError, AiEvalRunError
 from .run import run_promote, run_quick, run_seal
 from .versions import HEURISTIC_PATH, load_version, repository_root
 
 __all__ = ["main"]
 
-DEFAULT_DEALS = {"quick": 128, "promote": 768, "seal": 1024}
+DEFAULT_DEALS = {"quick": 128, "promote": 768}
+"""判决批的缺省副数（spec §2.5）；``seal`` 的 1024 写死在 ``run.SEAL_DEALS``。"""
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -38,13 +40,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    def _common(sub: argparse.ArgumentParser, *, deals: int) -> None:
-        sub.add_argument(
-            "--deals",
-            type=int,
-            default=deals,
-            help=f"判决批 / 封印批的副数（缺省 {deals}；测试用 4 副这种极小集）。",
-        )
+    def _common(
+        sub: argparse.ArgumentParser, *, deals: int | None = None
+    ) -> None:
+        if deals is not None:
+            sub.add_argument(
+                "--deals",
+                type=int,
+                default=deals,
+                help=f"判决批的副数（缺省 {deals}；测试用 4 副这种极小集）。",
+            )
         sub.add_argument("--workers", type=int, default=1, help="进程数 1..8（默认 1）。")
         sub.add_argument(
             "--out", type=Path, default=None, help="结果 JSON 路径；省略 = 写 stdout。"
@@ -86,7 +91,7 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     seal = commands.add_parser(
-        "seal", help="封印：固定批、只出聚合、不打印逐种子。"
+        "seal", help="封印：1024 副固定批、只出聚合、不打印逐种子。"
     )
     seal.add_argument("--batch", required=True, help="封印批名字（如 sealed-1，用一次退役）。")
     seal.add_argument(
@@ -95,7 +100,8 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="参与封印的版本 ref（至少一个；每个版本自身四副本对打）。",
     )
-    _common(seal, deals=DEFAULT_DEALS["seal"])
+    # 副数**不暴露**：spec §2.4 B 的 1024 副写死，缩水就不是封印批了。
+    _common(seal)
     return parser
 
 
@@ -158,8 +164,10 @@ def _summary(result: dict[str, Any]) -> list[str]:
             f"anchor_non_inferior={verdict['anchor_non_inferior']} "
             f"diff_attributed={verdict['diff_attributed']}",
         ]
-    lines = [f"seal batch={seed_batch.get('batch')} sha256={seed_batch['sha256'][:12]} "
-             f"deals={seed_batch['deals']} errors={result['errors']}"]
+    lines = [
+        f"seal batch={seed_batch.get('batch')} sha256={seed_batch['sha256'][:12]} "
+        f"deals={seed_batch['deals']} errors={result['errors']}"
+    ]
     for entry in result["versions"]:
         lines.append(
             f"version={entry['ref']} commit={entry['commit'][:12]} "
@@ -207,13 +215,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 progress=_progress,
             )
         else:
+            # 封印批副数写死（spec §2.4 B）：CLI 不传 deals。
             result = run_seal(
                 batch=args.batch,
                 versions=args.versions,
-                deals=args.deals,
                 workers=args.workers,
                 progress=_progress,
             )
+    except AiEvalRunError as error:
+        print(f"评估失败：{error}", file=sys.stderr)
+        return 1
     except (AiEvalError, BatchSpecError, DataLoadError) as error:
         print(f"参数错误：{error}", file=sys.stderr)
         return 2

@@ -20,7 +20,7 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval <quick|promote|seal> ...
 |---|---|---|---|
 | 快检 | `quick --baseline ai-vN [--deals 128]` | commit 派生批上的**决策 diff**（不看胜负） | ≈2 min |
 | 晋级 | `promote --baseline ai-vN --anchor ai-v0 --deals 768 --workers 8` | 换座配对胜率差 + 决策 diff + 分身份 + 五条件字段 | ≈26 min CPU |
-| 封印 | `seal --batch sealed-1 --versions ai-v0 ai-vN --workers 8` | 1024 副写死批，**只出聚合**、不打印逐种子 | ≈17 min |
+| 封印 | `seal --batch sealed-1 --versions ai-v0 ai-vN --workers 8` | **1024 副写死**批（CLI 不暴露副数），**只出聚合**、不打印逐种子 | ≈17 min |
 
 ```bash
 # 快检：改完立刻（改的是**提交**里的代码；工作树与提交不一致会打一行警告）
@@ -41,7 +41,9 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval seal --batch sealed-1 --versions ai
   报错 / worker 崩溃；2 = 参数、规格或版本加载错误。
 - `--workers 1..8`（默认 1，不做 auto）；`--predicted-kind <KIND>` 可重复，给出后
   `verdict.diff_attributed` 才有值（见 §4）。
-- `quick` / `promote` / `seal` **都不进** `bash tests/run_all.sh`：门禁不新增统计断言。
+- **真实批量不进** `bash tests/run_all.sh`：128 / 768 / 1024 副只是人工 / 受管后台任务。
+  门禁里跑的是 2–4 副极小批的 JSON / 退出码 / 装置对照（`tests/test_ai_eval.py`），不新增
+  统计断言；`seal` 的副数在 CLI 侧写死 1024，测试靠库参数缩小批。
 
 ## 2 · 结果 JSON（`sgs.ai_eval.v1`）
 
@@ -57,15 +59,18 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval seal --batch sealed-1 --versions ai
   （A 局候选坐 0 号、B 局基线坐 0 号、其余四席同一个对手）；`seal` 是自身四副本，故为
   `false`。
 - `vs_baseline` = `{win_rate_candidate, win_rate_baseline, diff, ci95, by_identity}`；
-  `vs_anchor` = `{diff, ci95}`。`quick` 不测胜负 ⇒ 两个字段都是 `null`。
+  `vs_anchor` = `{diff, ci95}`。`quick` 不测胜负 ⇒ 两个字段都是 `null`。**一副有效配对都
+  没有**（对局全报错 / 没终局）时也写 `null`（不是全零）——未测 ≠ 通过，`non_inferior` /
+  `anchor_non_inferior` 随之为 `null`。
 - `decision_diff` = `{deals_differing, first_divergence_by_kind, examples}`：A / B 两臂按决策
   序号逐条比，第一个不同步的**询问类型**就是这次 diff 的归因；A/A（两侧同版本）恒为空。
 - `cases` = `{total, passed, failed}`：`tests/test_ai_cases.py` 的 D 类用例。模块不存在 ⇒
   全 0 且 `verdict.cases_green = null`（未测 ≠ 通过）；strict xfail 既不算 passed 也不算
   failed，故 `total > passed + len(failed)` 时 `cases_green` 为 false。
 - `miss_rate` = `{pass_with_options, unfilled_composite}`，口径见 `tools/ai_eval/misses.py`
-  （票 15 的 `live` 复用同一份实现）。`pass_with_options` 的分母 = 含非 Pass 选项的 AI 询问，
-  分子 = 其中答了 `Pass` 的；`EndPhase` / 弃牌不是 `Pass`，只剩 `Pass` 可答的窗口不在分母。
+  （票 15 的 `live` 复用同一份实现，包括**按询问类型分**的 `by_kind` 明细）。`pass_with_options`
+  的分母 = 含非 Pass 选项的 AI 询问，分子 = 其中答了 `Pass` 的；`EndPhase` / 弃牌不是 `Pass`，
+  只剩 `Pass` 可答的窗口不在分母。
   批量档只有决策侧车投影（`kind` / `legal_count` / `action`）⇒ `unfilled_composite` 写
   `null`（"未测"）；分母为 0 的口径也写 `null`，不写 0.0。
 - `errors` = 对局报错数（聚合；封印批不点名）。`errors > 0` ⇒ CLI 退出码 1。

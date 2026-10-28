@@ -148,8 +148,21 @@ class PairedComparison:
     ci95: tuple[float, float]
     by_identity: dict[str, dict[str, Any]]
 
+    @property
+    def measured(self) -> bool:
+        """有没有一副**两臂都打完**的牌。没有 ⇒ 一律写 ``null``（未测 ≠ 通过）。"""
+        return self.deals > 0
+
     def to_dict(self) -> dict[str, Any]:
         """§2.8 的 ``vs_baseline`` 对象（只数两臂都打完的副）。"""
+        if not self.measured:
+            return {
+                "win_rate_candidate": None,
+                "win_rate_baseline": None,
+                "diff": None,
+                "ci95": None,
+                "by_identity": {},
+            }
         return {
             "win_rate_candidate": _rate(self.candidate_wins, self.deals),
             "win_rate_baseline": _rate(self.baseline_wins, self.deals),
@@ -160,6 +173,8 @@ class PairedComparison:
 
     def anchor_view(self) -> dict[str, Any]:
         """§2.8 的 ``vs_anchor`` 对象：只报配对差与 CI（spec 未给绝对胜率位）。"""
+        if not self.measured:
+            return {"diff": None, "ci95": None}
         return {"diff": self.diff, "ci95": [self.ci95[0], self.ci95[1]]}
 
 
@@ -171,7 +186,8 @@ def compare_pairs(
     """把逐副的 ``(身份, 候选赢?, 基线赢?)`` 折成配对差 + CI + 分身份。
 
     ``None`` = 该臂没有有效结果（局崩了 / 没终局）：整副**退出分母**，绝不拿半副凑数。
-    一份有效配对都没有时返回全零读数而不是抛错——批次的错误由 ``errors`` 单独计数。
+    一份有效配对都没有时返回 ``measured=False`` 的读数（JSON 写 ``null``），**不是**全零：
+    全零会被 ``non_inferior`` 读成"没变差"，把"没测成"伪装成"通过"（spec §2.3 条件②③）。
     """
     matched = [
         (identity, bool(candidate_won), bool(baseline_won))

@@ -1,18 +1,26 @@
 """判决批派生与 1:1:2:1 配比（票 13；spec §2.7 / §2.4 / §5.6）。
 
 **判决批在调参时不存在**：种子由 candidate **commit**（解析后的完整 sha 文本）经 LCG 派生，
-提交一改批次即换；同一轮所有参战版本跑同一批（spec §2.4 A）。派生规则逐字照 §2.7：
+提交一改批次即换；同一轮所有参战版本跑同一批（spec §2.4 A）。
+
+§2.7 给了两件事：**抽号规则**（LCG + 下界 + 间距 + 排序摘要）与一句"再按座位 0 的身份凑成
+1:1:2:1"。抽号部分逐字照写：
 
 1. ``digest = sha256(commit)``，``state = int.from_bytes(digest[:16], "big")``；
 2. 循环 ``state = (state * 6364136223846793005 + 1442695040888963407) mod 2**64``；
 3. 丢弃 ``state < 97``、与已选种子相差 ``< 97``、以及落进**实机带** 7001–7099 的候选
    （§5.6：概率 ~0 也要重派生）；
-4. 按座位 0 的身份（``RandomSource(seed).substream("identity")`` 离线可算，§2.7）凑
-   1:1:2:1，额度用**最大余数法**——768 副 ⇒ 154 / 154 / 307 / 153，与 spec §10 的例子一致；
-5. 排序后记 sha256（``"<seed>\\n"`` 连接，UTF-8）写进结果 JSON 的 ``seed_batch.sha256``。
+4. 排序后记 sha256（``"<seed>\\n"`` 连接，UTF-8）写进结果 JSON 的 ``seed_batch.sha256``。
 
-封印批（``seal``）不是 commit 派生：名字（如 ``sealed-1``）写死、1024 副写死，派生用
-同一个 LCG，输入换成 ``"sealed:<name>"``。"用一次退役"是人工纪律，工具只如实记下名字。
+**配比的兑现方式是本实现的显式裁定**（§2.7 只给"凑成 1:1:2:1"一句，没给凑法）：抽号时按
+座位 0 的身份**定额**——该身份额度已满的候选直接丢弃，继续抽，直到四格填满。这样"批大小"
+与"配比"同时成立；额度用**最大余数法**（平票按主-忠-反-内）——768 副 ⇒ 154 / 154 / 307 /
+153，与 spec §10 的例子逐值一致。身份本身离线算（``RandomSource(seed).substream("identity")``
+洗一次 ``roster_for(5)``，取座位 0），与引擎发身份同一份规则。
+
+封印批（``seal``）不是 commit 派生：名字（如 ``sealed-1``）写死、**1024 副写死**（CLI 不暴露
+副数），派生用同一个 LCG，输入换成 ``"sealed:<name>"``。"用一次退役"是人工纪律，工具只如实
+记下名字。
 """
 
 from __future__ import annotations
@@ -30,7 +38,7 @@ __all__ = [
     "IDENTITY_ORDER",
     "LCG_INCREMENT",
     "LCG_MULTIPLIER",
-    "LIVE_SEED_BAND",
+    "LIVE_SEED_RANGE",
     "MIN_GAP",
     "MIN_SEED",
     "SeedBatch",
@@ -54,18 +62,20 @@ LCG_MULTIPLIER = 6364136223846793005
 LCG_INCREMENT = 1442695040888963407
 MODULUS = 1 << 64
 
-LIVE_SEED_BAND = (7001, 7099, 7100)
-"""实机带：``7001..7099`` 闭区间（spec §5.2 / §5.6）。
+LIVE_SEED_RANGE = range(7001, 7100)
+"""实机带：``7001–7099``（spec §5.2 / §5.6）；右开区间的写法让边界不必再写 ``+1``。"""
 
-第三项是**右开**边界（= 7100），只在 :func:`is_reserved_seed` 里用；写成三元组是为了让
-"闭区间 7001–7099" 在同一行算出来，不必在判断里写 ''+1''。
-"""
+_QUOTA_ROSTER = roster_for(DEFAULT_PLAYERS)
+"""5 人身份配比的**唯一真源**（``sgs.data.identities.roster_for``）：本模块不重抄 1:1:2:1。"""
 
-IDENTITY_ORDER: tuple[str, ...] = ("lord", "loyalist", "rebel", "renegade")
+IDENTITY_ORDER: tuple[str, ...] = tuple(
+    dict.fromkeys(identity.value for identity in _QUOTA_ROSTER)
+)
 """配比与 JSON 里身份键的**固定次序**：主-忠-反-内（最大余数的平票也按它裁）。"""
 
-_IDENTITY_WEIGHTS: dict[str, int] = {"lord": 1, "loyalist": 1, "rebel": 2, "renegade": 1}
-"""5 人局的身份配比 1:1:2:1（与 ``sgs.data.identities`` 的 5 人配比同源）。"""
+_IDENTITY_WEIGHTS: dict[str, int] = {
+    identity.value: _QUOTA_ROSTER.count(identity) for identity in _QUOTA_ROSTER
+}
 
 
 @dataclass(frozen=True)
@@ -102,8 +112,7 @@ def _check_deals(deals: int) -> None:
 
 def is_reserved_seed(seed: int) -> bool:
     """该种子是否落进**实机带** 7001–7099（spec §5.6：派生的判决种子不得进这个带）。"""
-    low, high, _ = LIVE_SEED_BAND
-    return low <= seed < high + 1
+    return seed in LIVE_SEED_RANGE
 
 
 def identity_quota(deals: int, *, players: int = DEFAULT_PLAYERS) -> dict[str, int]:
@@ -117,7 +126,7 @@ def identity_quota(deals: int, *, players: int = DEFAULT_PLAYERS) -> dict[str, i
         raise AiEvalSpecError(
             f"判决批口径固定 {DEFAULT_PLAYERS} 人身份局，得到 players={players}（spec §2.5）"
         )
-    total = sum(_IDENTITY_WEIGHTS.values())
+    total = len(_QUOTA_ROSTER)
     base = {identity: deals * weight // total for identity, weight in _IDENTITY_WEIGHTS.items()}
     remainder = deals - sum(base.values())
     ranked = sorted(

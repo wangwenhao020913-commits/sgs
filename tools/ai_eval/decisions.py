@@ -11,11 +11,18 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-__all__ = ["Divergence", "diff_decisions"]
+__all__ = ["EXAMPLE_LIMIT", "Divergence", "decision_diff", "diff_decisions"]
+
+EXAMPLE_LIMIT = 5
+"""``examples`` 的条数（人读用；全量逐副可从种子与两侧版本复算）。"""
+
+HandPair = tuple[int, Sequence[dict[str, Any]], Sequence[dict[str, Any]]]
+"""一副的 ``(seed, 候选臂决策, 基线臂决策)``；决策是 ``sgs_batch`` 的投影字典。"""
 
 
 @dataclass(frozen=True)
@@ -37,7 +44,7 @@ def _shape(decision: dict[str, Any]) -> tuple[Any, Any, Any]:
     )
 
 
-def _at(
+def _divergence(
     index: int,
     *,
     kind: Any,
@@ -64,7 +71,7 @@ def diff_decisions(
         left = candidate[index]
         right = baseline[index]
         if _shape(left) != _shape(right):
-            return _at(
+            return _divergence(
                 index,
                 kind=left.get("kind") or right.get("kind"),
                 actor=left.get("actor", right.get("actor")),
@@ -74,7 +81,7 @@ def diff_decisions(
     if len(candidate) != len(baseline):
         longer = candidate if len(candidate) > len(baseline) else baseline
         extra = longer[shared]
-        return _at(
+        return _divergence(
             shared,
             kind=extra.get("kind"),
             actor=extra.get("actor"),
@@ -82,3 +89,41 @@ def diff_decisions(
             baseline_action=extra.get("action") if longer is baseline else None,
         )
     return None
+
+
+def decision_diff(
+    pairs: Sequence[HandPair],
+    *,
+    limit: int = EXAMPLE_LIMIT,
+) -> dict[str, Any]:
+    """逐副比两臂的决策，折成 §2.8 的 ``decision_diff``。
+
+    ``pairs`` 只含**两臂都打完**的副（调用方筛）；每副的决策序号在第一个不同步之前一一
+    对齐，所以"首个不同步"就是归因点。``deals_differing`` / 分类型计数 / 例子都从同一份
+    输入复算——不另存中间量。
+    """
+    differing = 0
+    kinds: Counter[str] = Counter()
+    examples: list[dict[str, Any]] = []
+    for seed, candidate, baseline in pairs:
+        divergence = diff_decisions(candidate, baseline)
+        if divergence is None:
+            continue
+        differing += 1
+        kinds[divergence.kind] += 1
+        if len(examples) < limit:
+            examples.append(
+                {
+                    "seed": seed,
+                    "index": divergence.index,
+                    "kind": divergence.kind,
+                    "actor": divergence.actor,
+                    "candidate": divergence.candidate_action,
+                    "baseline": divergence.baseline_action,
+                }
+            )
+    return {
+        "deals_differing": differing,
+        "first_divergence_by_kind": dict(sorted(kinds.items())),
+        "examples": examples,
+    }

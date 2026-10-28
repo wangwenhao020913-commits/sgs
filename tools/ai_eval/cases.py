@@ -20,7 +20,7 @@ import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import AiEvalError
+from .errors import AiEvalRunError
 
 __all__ = ["CASES_PATH", "CasesResult", "run_cases"]
 
@@ -120,13 +120,13 @@ def run_cases(
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as error:
-            raise AiEvalError(f"D 类用例超过 {timeout}s 未结束") from error
+            raise AiEvalRunError(f"D 类用例超过 {timeout}s 未结束") from error
         except OSError as error:
-            raise AiEvalError(f"起不了 pytest 子进程：{error}") from error
+            raise AiEvalRunError(f"起不了 pytest 子进程：{error}") from error
         if completed.returncode == 5:  # 一条用例都没收集到
             return CasesResult()
         if completed.returncode not in (0, 1) or not report.exists():
-            raise AiEvalError(
+            raise AiEvalRunError(
                 "D 类用例跑不起来（pytest 退出码 "
                 f"{completed.returncode}）：{_tail(completed.stdout + completed.stderr)}"
             )

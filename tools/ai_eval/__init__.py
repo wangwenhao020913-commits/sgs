@@ -23,8 +23,8 @@
 
 from .cases import CasesResult, run_cases
 from .cli import main
-from .decisions import Divergence, diff_decisions
-from .errors import AiEvalError, AiEvalSpecError, AiVersionError
+from .decisions import Divergence, decision_diff, diff_decisions
+from .errors import AiEvalError, AiEvalRunError, AiEvalSpecError, AiVersionError
 from .misses import DecisionFact, MissCounts, count_misses, fact_from_query
 from .seeds import (
     SeedBatch,
@@ -40,6 +40,7 @@ from .versions import LoadedVersion, load_version
 
 __all__ = (
     "AiEvalError",
+    "AiEvalRunError",
     "AiEvalSpecError",
     "AiVersionError",
     "CasesResult",
@@ -52,6 +53,7 @@ __all__ = (
     "by_identity",
     "compare_pairs",
     "count_misses",
+    "decision_diff",
     "diff_decisions",
     "derive_batch",
     "derive_sealed_batch",
