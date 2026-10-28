@@ -21,6 +21,7 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval <quick|promote|seal> ...
 | 快检 | `quick --baseline ai-vN [--deals 128]` | commit 派生批上的**决策 diff**（不看胜负） | ≈2 min |
 | 晋级 | `promote --baseline ai-vN --anchor ai-v0 --deals 768 --workers 8` | 换座配对胜率差 + 决策 diff + 分身份 + 五条件字段 | ≈26 min CPU |
 | 封印 | `seal --batch sealed-1 --versions ai-v0 ai-vN --workers 8` | **1024 副写死**批（CLI 不暴露副数），**只出聚合**、不打印逐种子 | ≈17 min |
+| 实机 | `live --run <stem> [--runs-dir runs]` | 一局 journal + meta 的两行读数（§2.11 两个廉价指标 + 人类超时）；**不判 verdict、不打胜率** | ≈1 s |
 
 ```bash
 # 快检：改完立刻（改的是**提交**里的代码；工作树与提交不一致会打一行警告）
@@ -32,7 +33,13 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval promote --baseline ai-v0 --anchor a
 
 # 封印：里程碑一次性
 PYTHONPATH=tools .venv/bin/python -m ai_eval seal --batch sealed-1 --versions ai-v0 ai-v1 --workers 8
+
+# 实机：终局后读最新一局（配方见 docs/agents/acceptance-ai.md）
+PYTHONPATH=tools .venv/bin/python -m ai_eval live --run <stem> --runs-dir runs
 ```
+
+- `live` 只读一局录像（`<stem>.jsonl` + `<stem>.meta.json`），输出是**两行摘要 + 空报账表**，
+  不写 JSON、不判 verdict、不打胜率、不打逐种子；缺文件时点名完整路径失败。
 
 - **候选 = 提交**：`--candidate-ref`（缺省 `HEAD`）解析出的完整 sha 既派生种子批、也
   `git show` 出被评估的启发式字节。工作树与提交不一致时 CLI 在 stderr 警告一行，但**照样评估
@@ -86,7 +93,7 @@ PYTHONPATH=tools .venv/bin/python -m ai_eval seal --batch sealed-1 --versions ai
 | 带 | 范围 | 用途 |
 |---|---|---|
 | 趋势带 | `104..231`（旧 128 局）、`4000..4127`、`5000..5127`（新验收）、历史 `1000..1511` / `1000..1319` / `2000..2319` / `3000..3211` | 只作诊断读数；**不得**作调参 / 判决批 |
-| 实机带 | `7001–7099`（轮换：首版 7001，下一版 7002…） | 人机对局验收专用；派生批**主动跳过** |
+| 实机带 | `7001–7099`（轮换：首版 7001，下一版 7002…） | 人机对局验收专用；派生批**主动跳过**。配方见 `docs/agents/acceptance-ai.md`，读数用 `ai_eval live`，结论写 `.scratch/ai-light/acceptance.md` |
 | 判决批 | commit 派生，任意 64 位，批内间距 ≥ 97 | `quick` / `promote`；同一轮所有参战版本跑同一批 |
 | 封印批 | 名字派生（`sealed-1`…），1024 副写死 | `seal`；只出聚合、用一次退役 |
 

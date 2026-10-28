@@ -92,6 +92,12 @@
 
 评审期（`code-review` 的 Standards 轴）的判断题标准见 `CODING_STANDARDS.md`。
 
+### AI 实机验收
+
+`docs/agents/acceptance-ai.md`：人机对局一局的读数配方（5 人 / `standard_ex_160` / 种子
+`7001–7099` 轮换 / 人类座位 0 / 时限 0）。读数用 `ai_eval live`（两行摘要 + 空报账表，
+**不判 verdict、不打胜率**）；网页不加版本选择面，现在就在打 HEAD。
+
 ### Frontend / Web
 
 改 `tools/sgs_web/static/` 或验收前端行为前，先按这三份读：

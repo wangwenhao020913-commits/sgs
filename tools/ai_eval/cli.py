@@ -9,6 +9,9 @@
 
 摘要恒走 stderr（JSON 走 ``--out``，省略时走 stdout）：``seal`` 的摘要同样只有聚合
 （批名 / 摘要 / 逐版本胜率），**不打印逐种子**（spec §2.4 B）。
+
+例外是 ``live``（实机读数，spec §5）：它不产 JSON、不判 verdict、不打胜率，两行摘要与空
+报账表直接写 **stdout**，供人 / agent 原地转写。
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from sgs.data import DataLoadError
 from sgs_batch import BatchSpecError, BatchWorkerError
 
 from .errors import AiEvalError, AiEvalRunError
+from .live import DEFAULT_RUNS_DIR, render_live, run_live
 from .run import run_promote, run_quick, run_seal
 from .versions import HEURISTIC_PATH, load_version, repository_root
 
@@ -102,6 +106,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     # 副数**不暴露**：spec §2.4 B 的 1024 副写死，缩水就不是封印批了。
     _common(seal)
+
+    live = commands.add_parser(
+        "live", help="实机读数：一局 journal + meta 的两行摘要 + 空报账表（spec §5）。"
+    )
+    live.add_argument("--run", required=True, help="录像文件名（不含 .jsonl / .meta.json 后缀）。")
+    live.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=DEFAULT_RUNS_DIR,
+        help=f"录像目录（缺省 {DEFAULT_RUNS_DIR}）。",
+    )
     return parser
 
 
@@ -214,6 +229,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 predicted_kinds=args.predicted_kind,
                 progress=_progress,
             )
+        elif args.command == "live":
+            # 实机读数不是判决批：只有两行摘要 + 空报账表，没有 JSON / verdict / 胜率。
+            sys.stdout.write(render_live(run_live(run=args.run, runs_dir=args.runs_dir)))
+            return 0
         else:
             # 封印批副数写死（spec §2.4 B）：CLI 不传 deals。
             result = run_seal(
