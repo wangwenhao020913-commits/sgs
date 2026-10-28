@@ -31,7 +31,9 @@
 | 身份 | 照发，摘要里记人类身份 | 不做身份覆盖——那是批量层的事 |
 
 种子带**同时**登记在 `docs/agents/ai-versions.md` §3（"实机带"）与这里；派生批
-（`tools/ai_eval/seeds.py` 的 `LIVE_SEED_RANGE`）主动跳过 7001–7099。
+（`tools/ai_eval/seeds.py` 的 `LIVE_SEED_RANGE`）主动跳过 7001–7099。每次验收把**本版用的
+那颗种子**记进版本台账（`docs/agents/ai-versions.md` §6 的"一句话理由"一栏，写
+`实机 seed=70xx` 即可）——否则"下一版用 7002"无从判断。
 
 ## 3 · 预检
 

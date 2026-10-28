@@ -8,13 +8,13 @@
 工具在 `tools/ai_eval/`（**不进 `src/`**，与 `tools/sgs_batch/` 同层）。统一调用方式：
 
 ```bash
-PYTHONPATH=tools .venv/bin/python -m ai_eval <quick|promote|seal> ...
+PYTHONPATH=tools .venv/bin/python -m ai_eval <quick|promote|seal|live> ...
 ```
 
 `PYTHONPATH=tools` **不可省**：`.venv` 是 editable 只指 `src/`，漏写会
 `No module named ai_eval`——响亮失败，不是静默打错版本（spec §2.9）。
 
-## 1 · 三档命令
+## 1 · 三档评估命令与实机读数
 
 | 档 | 命令 | 内容 | 成本 |
 |---|---|---|---|

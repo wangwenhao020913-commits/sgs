@@ -47,7 +47,12 @@ LEDGER_COLUMNS: tuple[str, ...] = (
 """空报账表的列（spec §5.3 的字段，按 D/S 归类、标注已知 / 新）。"""
 
 DEFAULT_RUNS_DIR = Path("runs")
-"""``--runs-dir`` 的缺省（spec §5.4）；网页服务也把终局录像写在这里。"""
+"""``--runs-dir`` 的缺省（spec §5.4 的字面 ``runs/``，按 **cwd** 解析）。
+
+网页服务的缺省是**仓根**的 ``tools/sgs_web/serve.py:DEFAULT_RUNS_DIR``（``<repo>/runs``）。
+配方在仓根起服务 / 跑读数，两者指向同一目录；但一个是命令行惯例、一个是服务端常量，
+不合并成一个（合并会把 cwd 语义偷换成 repo-root 语义）。
+"""
 
 
 @dataclass(frozen=True)
@@ -69,16 +74,14 @@ class LiveReading:
 
 def run_live(*, run: str, runs_dir: Path | str = DEFAULT_RUNS_DIR) -> LiveReading:
     """读一局录像，返回两行摘要所需的读数；坏输入一律点名路径失败。"""
-    name = _validated_name(run)
     runs_dir = Path(runs_dir)
-    journal_path = runs_dir / f"{name}.jsonl"
-    meta_path = runs_dir / f"{name}.meta.json"
+    # 先读侧车：它校验录像名 / 版本 / 必填字段，并且比记录流小得多（缺 meta 时不必先读几 MB）。
+    meta = _read_meta(runs_dir, run)
+    meta_path = runs_dir / f"{run}.meta.json"
+    journal_path = runs_dir / f"{run}.jsonl"
     if not journal_path.is_file():
         raise AiEvalSpecError(f"找不到记录流：{journal_path}")
     records = _read_journal(journal_path)
-    if not meta_path.is_file():
-        raise AiEvalSpecError(f"找不到侧车元数据：{meta_path}")
-    meta = _read_meta(runs_dir, name, meta_path)
 
     header = records[0]
     if getattr(header, "kind", None) != "header":
@@ -104,7 +107,7 @@ def run_live(*, run: str, runs_dir: Path | str = DEFAULT_RUNS_DIR) -> LiveReadin
         winners=tuple(int(seat) for seat in getattr(end, "winners", ())),
         queries=sum(1 for record in records if getattr(record, "kind", None) == "query"),
         misses=misses,
-        timeouts=int(meta.get("timeouts") or 0),
+        timeouts=_timeouts(meta, meta_path),
     )
 
 
@@ -228,13 +231,6 @@ def _is_human(query: Any, human_seat: int | None) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _validated_name(run: str) -> str:
-    """录像名只能是文件名（与 ``sgs_web.replay.read_run_meta`` 同一条边界）。"""
-    if not run or "/" in run or "\\" in run or run.startswith("."):
-        raise AiEvalSpecError(f"录像名非法：{run!r}")
-    return run
-
-
 def _read_journal(path: Path) -> tuple[Any, ...]:
     try:
         return read_journal(path)
@@ -242,9 +238,13 @@ def _read_journal(path: Path) -> tuple[Any, ...]:
         raise AiEvalSpecError(f"记录流读不动：{path}（{error}）") from error
 
 
-def _read_meta(runs_dir: Path, name: str, path: Path) -> dict[str, Any]:
+def _read_meta(runs_dir: Path, name: str) -> dict[str, Any]:
     from sgs_web.replay import read_run_meta
 
+    path = runs_dir / f"{name}.meta.json"
+    if not name:
+        # ``read_run_meta`` 的边界只拦路径分隔符 / 前导点；空名会拼成 ".meta.json"。
+        raise AiEvalSpecError(f"录像名非法：{name!r}")
     try:
         return read_run_meta(runs_dir, name)
     except (ValueError, OSError) as error:
@@ -265,9 +265,24 @@ def _human_seat(meta: dict[str, Any], meta_path: Path) -> int | None:
     human_seat = meta.get("human_seat")
     if human_seat is None:
         return None
-    if not isinstance(human_seat, int) or isinstance(human_seat, bool):
+    player_count = meta.get("player_count")
+    if (
+        not isinstance(human_seat, int)
+        or isinstance(human_seat, bool)
+        or not isinstance(player_count, int)
+        or not 0 <= human_seat < player_count
+    ):
         raise AiEvalSpecError(f"侧车元数据的人类座位非法：{human_seat!r}（{meta_path}）")
     return human_seat
+
+
+def _timeouts(meta: dict[str, Any], meta_path: Path) -> int:
+    timeouts = meta.get("timeouts")
+    if not isinstance(timeouts, int) or isinstance(timeouts, bool) or timeouts < 0:
+        raise AiEvalSpecError(
+            f"侧车元数据的超时次数非法：{timeouts!r}（未测 ≠ 0；{meta_path}）"
+        )
+    return timeouts
 
 
 def _check_same_game(header: Any, meta: dict[str, Any], journal_path: Path) -> None:
