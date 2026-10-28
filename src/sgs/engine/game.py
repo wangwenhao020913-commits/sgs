@@ -445,9 +445,18 @@ class Engine:
         seed: int,
         init_records: Sequence[JournalRecord] = (),
         shuffle_source: Randomness | None = None,
+        journal: bool = True,
     ) -> None:
         self.state = state
-        self._records: list[JournalRecord] = [
+        self._journal = journal
+        """是否**保留**记录流（票 11 的 opt-in 开关；缺省 ``True`` = 既有行为一字不变）。
+
+        ``False`` 时只关**保留 / 追加**：header 与开局记录**照常构造**（spec §1.1 的
+        ``norecords-append``，不是"整条不构造"），只是不装进 :attr:`_records`；局内每次
+        ``_emit`` 的记录对象同样照常在调用点构造，这里只跳过 append。``_seq`` /
+        ``_last_seq`` 照旧推进，故记录坐标与开记录时是同一套逻辑序号。
+        """
+        initial: list[JournalRecord] = [
             Header(
                 seed=seed,
                 pack_id=state.pack_id,
@@ -455,7 +464,8 @@ class Engine:
                 rule_config=state.rule_config,
             )
         ]
-        self._records.extend(init_records)
+        initial.extend(init_records)
+        self._records: list[JournalRecord] = initial if journal else []
         self._seq = len(init_records)
         self._last_seq = len(init_records)
 
@@ -585,6 +595,7 @@ class Engine:
         pinned_hero: str | None = None,
         pinned_seat: int = 0,
         hero_config: HeroDealConfig | None = None,
+        journal: bool = True,
     ) -> "Engine":
         """造初始状态（实例化 → 洗牌 → 发身份 → 发武将 → 发牌）并带上开局那几条记录。
 
@@ -593,6 +604,7 @@ class Engine:
         ``heroes`` / ``hero_pool`` 与 :func:`build_initial` 同义（票 02）：缺省 = 无武将模式。
         ``pinned_hero`` / ``pinned_seat`` 同义（票 19 的点将：钉住一个座位、其余随机）；
         ``hero_config`` 是票 12 的**会话配置**（禁将 + 手选），与种子一起冻结、不进记录流。
+        ``journal`` 见 :meth:`__init__`：开局那几条记录**照常构造**，``False`` 时只是不保留。
         """
         shuffle_source = RandomSource(seed).substream("shuffle")
         state, init_records = build_initial(
@@ -607,13 +619,17 @@ class Engine:
             hero_config=hero_config,
         )
         return cls(
-            state, seed=seed, init_records=init_records, shuffle_source=shuffle_source
+            state,
+            seed=seed,
+            init_records=init_records,
+            shuffle_source=shuffle_source,
+            journal=journal,
         )
 
     @classmethod
-    def from_state(cls, state: GameState, *, seed: int) -> "Engine":
+    def from_state(cls, state: GameState, *, seed: int, journal: bool = True) -> "Engine":
         """低层入口：从**人为指定的局面**起跑（只写 header，不虚构开局记录）。"""
-        return cls(state, seed=seed)
+        return cls(state, seed=seed, journal=journal)
 
     # -- 记录流 -------------------------------------------------------------
 
@@ -622,7 +638,7 @@ class Engine:
         return tuple(self._records)
 
     def journal(self) -> str:
-        """canonical JSONL（唯一序列化器的入口）。"""
+        """canonical JSONL（唯一序列化器的入口）；关记录时是空串。"""
         return dump_journal(self._records)
 
     def _next_seq(self) -> int:
@@ -630,10 +646,17 @@ class Engine:
         return self._seq
 
     def _emit(self, record: JournalRecord) -> None:
-        self._records.append(record)
+        """**局内**记录追加的唯一入口：先推进序号，再按开关决定是否保留（票 11 §1.1）。
+
+        header 与开局记录在 :meth:`__init__` 里一次性装入，不走这里。顺序很要紧：
+        ``_last_seq`` 是引擎唯一会回读的记录派生量（``check_game_end`` 的序号对账），
+        关记录时也必须与开记录时一致；而 :attr:`_records` 只是保留面。
+        """
         seq = getattr(record, "seq", None)
         if seq is not None:
             self._last_seq = seq
+        if self._journal:
+            self._records.append(record)
 
     def emit_timing(
         self,
