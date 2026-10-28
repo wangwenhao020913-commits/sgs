@@ -532,7 +532,140 @@ def _skill_is_suppressed(player: Player, instance: SkillInstance) -> bool:
     )
 
 
+_PLAYER_KEY_FIELDS = (
+    "seat",
+    "identity",
+    "alive",
+    "equip",
+    "virtual_equipment",
+    "hero",
+    "granted_skills",
+    "lost_skills",
+    "suppressed_skills",
+)
+"""内容键里**座位级**字段的顺序，与 :func:`_player_key_values` 的元组一一对应（票 16）。
+
+``seat`` 也在表里：解析用它写实例的 ``owner``。``Player.seat`` 按模型定义等于它在
+``GameState.players`` 里的下标，但键按**读点**覆盖，不为"这条不变量应该成立"开例外。
+
+**新增读点必须同步加入键**：:func:`_resolve_instances_uncached` 每多读一个 ``GameState`` /
+``Player`` 字段，就要把它加进 :func:`_player_key_values`（座位级）或 :func:`_resolve_key`
+（局面级），否则内容键会漏掉这一位、把两个不同局面当成同一个缓存项。这份字段表同时是
+键覆盖单测的输入（按它逐项"只改这一位 ⇒ 键必变"，并从副本里删一项验证检查会变红）。
+"""
+
+_RESOLVE_CACHE_LIMIT = 512
+"""缓存条数上限（spec §3.3）：进程级、按插入序淘汰，不跨局无限增长。"""
+
+_RESOLVE_CACHE: dict[tuple, tuple[SkillInstance, ...]] = {}
+"""内容键 → 解析结果（冻结 tuple，可安全共享；票 16）。"""
+
+_RESOLVE_CACHE_TABLE: object = None
+"""缓存所属的技能表对象（与 :data:`CATALOG` 做 ``is`` 比对）。
+
+:data:`CATALOG` 是模块级不可变表，但测试 / 工具会整体替换它（合成定义，见
+``test_hero_catalog.py``）：表一换，缓存里 ``SkillInstance.definition`` 指向的就是另一张表
+⇒ 必须整批作废。用 ``is`` 而不是 ``id()``——源码纪律禁止把对象地址当键
+（``tests/test_source_discipline.py``）。
+"""
+
+_RESOLVE_CACHE_HITS = 0
+_RESOLVE_CACHE_MISSES = 0
+
+
+def _resolve_cache_counters() -> tuple[int, int]:
+    """``(hits, misses)`` 的进程累计值（只读；票 16 的命中率下限从这里读）。
+
+    命中率 = ``Δhits / (Δhits + Δmisses)``，测试取两次读数的差来算。它**不是引擎开关**：
+    未命中一律走 :func:`_resolve_instances_uncached`，缓存只省重算。
+    """
+    return _RESOLVE_CACHE_HITS, _RESOLVE_CACHE_MISSES
+
+
+def _player_key_values(state: GameState, player: Player) -> tuple:
+    """``resolve_instances`` 读到的**座位级**状态位，顺序 = :data:`_PLAYER_KEY_FIELDS`。
+
+    装备区记 ``(card_id, 牌 type)`` 两份：实例来源带 ``card_id``，而定义按 ``card.type``
+    查（spec §3.3），少一份就会把"换了牌面的同一张装备"当成同一个键。
+    """
+    return (
+        player.seat,
+        player.identity,
+        player.alive,
+        tuple((card_id, state.card(card_id).type) for card_id in player.equip),
+        tuple(player.virtual_equipment),
+        player.hero,
+        tuple(player.granted_skills),
+        tuple(player.lost_skills),
+        tuple(
+            (record.skill_id, record.scope, record.predicate)
+            for record in player.suppressed_skills
+        ),
+    )
+
+
+def _resolve_key(state: GameState, include_suppressed: bool) -> tuple:
+    """内容键：``resolve_instances`` **实际读到的全部状态位**（spec §3.3）。
+
+    形状 = ``(pack_id, include_suppressed, 每座位一个元组)``；座位级字段见
+    :data:`_PLAYER_KEY_FIELDS`（含 ``seat``——解析用它写实例的 ``owner``）。键是纯值元组：
+    不用裸 ``hash()`` / ``id()``、不迭代 ``set``（源码纪律）。
+    """
+    return (
+        state.pack_id,
+        include_suppressed,
+        tuple(_player_key_values(state, player) for player in state.players),
+    )
+
+
+def _cache_resolved(key: tuple, resolved: tuple[SkillInstance, ...]) -> None:
+    """记一条解析结果；满 :data:`_RESOLVE_CACHE_LIMIT` 时按**插入序**淘汰最旧的一条。
+
+    淘汰用 ``pop(..., None)`` 而不是 ``del``：接入层（``tools/sgs_web``）是多线程 HTTP
+    服务，两条线程同时未命中时可能挑中同一条淘汰——``pop`` 带默认值不会因此抛
+    ``KeyError``。引擎本身仍是单线程语义（ADR-011 / 源码纪律），这里只是不让缓存的
+    边界条件在接入层变成异常。
+    """
+    if len(_RESOLVE_CACHE) >= _RESOLVE_CACHE_LIMIT:
+        oldest = next(iter(_RESOLVE_CACHE), None)
+        if oldest is not None:
+            _RESOLVE_CACHE.pop(oldest, None)
+    _RESOLVE_CACHE[key] = resolved
+
+
 def resolve_instances(
+    state: GameState, *, include_suppressed: bool = False
+) -> tuple[SkillInstance, ...]:
+    """全部**存活实例**（链序 ``(priority_class, skill_id, owner)``）——带内容键缓存的入口。
+
+    解析口径逐字见 :func:`_resolve_instances_uncached`（载体并集 → 去重 → 减失去 →
+    过失效谓词 → 排序，身份门控同处兑现）；本函数只加一层**语义不变**的缓存（票 16）：
+
+    - 键 = :func:`_resolve_key`，覆盖解析读到的**全部状态位**；命中返回同一个冻结 tuple
+      （``SkillInstance`` 是 frozen + slots），未命中走原实现。
+    - 缓存进程级、固定 :data:`_RESOLVE_CACHE_LIMIT` 条、按插入序淘汰；不新增
+      ``GameState`` 字段、不在写入口 bump——正确性靠"键覆盖读点"的构造。
+    - :data:`CATALOG` 被整体替换（测试注入合成定义）时整批作废。
+
+    **新增读点必须同步加入键**：这里多读一个状态位，就把它加进
+    :func:`_player_key_values` / :func:`_resolve_key`，否则两个不同局面会共用一条缓存。
+    """
+    global _RESOLVE_CACHE_TABLE, _RESOLVE_CACHE_HITS, _RESOLVE_CACHE_MISSES
+    if _RESOLVE_CACHE_TABLE is not CATALOG:
+        _RESOLVE_CACHE.clear()
+        _RESOLVE_CACHE_TABLE = CATALOG
+    key = _resolve_key(state, include_suppressed)
+    cached = _RESOLVE_CACHE.get(key)
+    if cached is not None:
+        _RESOLVE_CACHE_HITS += 1
+        return cached
+    _RESOLVE_CACHE_MISSES += 1
+    resolved = _resolve_instances_uncached(state, include_suppressed=include_suppressed)
+    _cache_resolved(key, resolved)
+    return resolved
+
+
+def _resolve_instances_uncached(
     state: GameState, *, include_suppressed: bool = False
 ) -> tuple[SkillInstance, ...]:
     """解析全部**存活实例**，按链序 ``(priority_class, skill_id, owner)`` 全序。
@@ -558,6 +691,9 @@ def resolve_instances(
     主公技而持有者不是主公 ⇒ **该实例不产出**——不进实例集合、不进候选、不进修饰器链、不落
     ``skill_state``、不进记录流。语义是"武将牌上根本没有这个技能"，不是"有但不生效"。
     ``player.hero is None``（无武将模式）时**根本不查武将数据**，故 M2 的输出逐字节不变。
+
+    本函数是**无缓存**实现（缓存未命中的唯一落点，也是键覆盖单测的对照臂）；对外入口是
+    :func:`resolve_instances`——两者结果必须逐条相同，这正是票 16 的差分判据。
     """
     found: list[SkillInstance] = []
     for player in state.players:

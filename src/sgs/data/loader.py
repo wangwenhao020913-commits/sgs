@@ -948,6 +948,7 @@ def hero_placement_decl(
     return hero_placement_decls(pack_id).get(skill_id)
 
 
+@lru_cache(maxsize=None)
 def hero_card_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tuple[str, ...]:
     """某武将**武将牌上**（非 ☆）的全限定技能 id，按数据文件里的顺序（M6 票 06）。
 
@@ -956,6 +957,10 @@ def hero_card_skill_ids(hero_id: str, *, pack_id: str = DEFAULT_PACK_ID) -> tupl
     （``Player.granted_skills``），武将牌不产出它，故未觉醒时"没有这个技能"是结构事实，
     不靠条件在派发期挡。``hero_skill_ids`` 仍回答"这名武将总共带哪些技能"（加载期闭合
     校验与界面清单读它），两者共用同一份数据、不各抄一份名单。
+
+    **纯函数 + 进程级缓存**（票 16）：返回值只依赖 ``(hero_id, pack_id)``，而武将表由
+    :func:`load_heroes` 缓存、进程内不变，故 ``lru_cache`` 零语义风险——它是载体解析的
+    最热读取面（每局上万次），命中时省掉"遍历武将表 + 重建 tuple"。
     """
     for table in load_hero_tables(pack_id):
         hero = table.by_id(hero_id)
