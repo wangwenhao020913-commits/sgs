@@ -60,12 +60,15 @@ ENEMY_SEATS = (2, 3, 4)
 但用例以地面真相断言"收牌人不是敌人"——这是 D 类用例允许的构造事实。"""
 
 TIE_SEEDS = range(8)
-"""平分抽签的种子样本。
+"""平分抽签的种子样本（D3 的"平分"与 D1 的"不许靠平分"共用）。
 
 【遗计】收牌人当前的缺陷是打分**平分**（自己与主公同为 ``_SEAT_TARGET_VALUE``），
 由 ``ai:<seat>`` 子流抽签决定。单一 seed 只能证明"某一次抽签抽到了谁"，故在固定
 若干种子上要求**同一个**性质成立：修好后无论平分如何都该给主公，修好前至少有一个
-seed 抽到自己，用例必红。它不是统计断言——输入输出全部确定。"""
+seed 抽到自己，用例必红。它不是统计断言——输入输出全部确定。
+
+D1 也复用它：无懈候选若被记成与 ``Pass`` 同分（0），"不该宣"的判据就会由同一条
+子流抽签决定；跑满这 8 个 seed 让"平分"的实现不能靠运气通过。"""
 
 
 class _YijiDriver:
@@ -446,6 +449,9 @@ def test_the_nullify_fixtures_reach_real_nullify_windows():
         assert _is_nullify_window(query), f"{name}：不是无懈窗口"
         assert query.required == NULLIFY, f"{name}：窗口要求的不是无懈"
         assert query.view.processing, f"{name}：无懈窗口里处理区是空的"
+        assert len(query.view.processing) == (2 if nested else 1), (
+            f"{name}：处理区张数不是 {2 if nested else 1}"
+        )
         top = query.view.processing[-1]
         assert top.type == expected_card, f"{name}：处理区顶牌是 {top.type}"
         assert query.target == expected_target, f"{name}：窗口目标是 {query.target}"
