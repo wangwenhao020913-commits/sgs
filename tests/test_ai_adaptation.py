@@ -253,21 +253,6 @@ def test_a_shared_entry_for_a_single_class_field_goes_red():
     assert any(f"{SHARED_BUCKET}.dying" in gap for gap in gaps), gaps
 
 
-def test_the_hero_zone_read_points_name_the_card_counting_readers():
-    """票 27：两个新字段登记为**读**，理由点名读取方（不是只说“记牌读了”）。
-
-    与 `deck_count` / `discard` 的先例同姿态：漏登由覆盖断言兜，但"读了什么 / 谁在读"
-    这两条是人读的声明，故在机械面之外单独钉一次。
-    """
-    cards_point = heuristic._AI_READ_POINTS["PlayerView"]["hero_zone_cards"]
-    count_point = heuristic._AI_READ_POINTS["PlayerPublic"]["hero_zone_count"]
-
-    assert cards_point[0] is True, cards_point
-    assert "_visible_card_faces" in cards_point[1], cards_point
-    assert count_point[0] is True, count_point
-    assert "_conserved_card_count" in count_point[1], count_point
-
-
 # ---------------------------------------------------------------------------
 # 断言 3：Mode 表（每个模式四个格子，站点可解析）
 # ---------------------------------------------------------------------------

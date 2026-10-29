@@ -25,6 +25,7 @@ from sgs.agents import heuristic as heuristic_scoring
 from sgs.data import Identity, RuleConfig, load_content_pack
 from sgs.engine import Engine, ai_stream
 from sgs.effects import behavior_for, is_slash
+from sgs.skills import hero_card_zone_key
 from sgs.state import (
     ActivateSkill,
     EndPhase,
@@ -34,6 +35,7 @@ from sgs.state import (
     SelectOption,
     UseCard,
     WindowCause,
+    project,
 )
 
 from support import (
@@ -1069,7 +1071,7 @@ QIANXUN_INDULGENCE = cards_of_type(PACK, "indulgence")[0]
 
 JIE_LUXUN = "jie_luxun"
 JIE_QIANXUN = "hero.jie_luxun.qianxun"
-QIANXUN_ZONE = f"0:{JIE_QIANXUN}"
+QIANXUN_ZONE = hero_card_zone_key(0, JIE_QIANXUN)
 
 
 def _qianxun_heart_top(used: set[int]) -> int:
@@ -1164,6 +1166,25 @@ def test_the_qianxun_fixture_reaches_a_real_play_phase_window():
         for target in action.targets
     }
     assert slash_targets == {1}, "夹具失效：两张【杀】不再指向座位 1"
+
+
+def test_the_qianxun_placement_is_public_but_faces_stay_host_only():
+    """票 27 的隐私判据走**真实产出路径**（`CODING_STANDARDS.md` §6）：真【谦逊】放置后，
+    另一个座位的视角只拿张数、不拿牌面；宿主视角牌面齐全。
+
+    与 `test_queries_views_actions.py` 的合成多区用例分工：那条钉"同一座位多区 / 未登记 /
+    畸形区"的通用形状（这些区只可能来自测试构造），这条钉**产品调用点**（引擎真的搬了牌）。
+    """
+    engine, query = _qianxun_play_query()
+
+    foreign = project(engine.state, 1)
+    assert foreign.players[0].hero_zone_count == len(QIANXUN_HAND)
+    assert foreign.hero_zone_cards == (), "非宿主不拿牌面"
+
+    host = project(engine.state, 0)
+    assert host.players[0].hero_zone_count == len(QIANXUN_HAND)
+    assert {card.card_id for card in host.hero_zone_cards} == set(QIANXUN_HAND)
+    assert query.view.players[0].hero_zone_count == len(QIANXUN_HAND), "询问视角也带上张数"
 
 
 def test_c1_qianxun_placement_keeps_card_counting_available():

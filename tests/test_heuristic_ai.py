@@ -52,6 +52,7 @@ from sgs.skills import (
     CATALOG,
     card_preactivations,
     conversion_preactivations,
+    hero_card_zone_key,
     is_transformed_action,
     resolve_conversion_confirmation,
     transform_candidates,
@@ -670,11 +671,11 @@ def test_hero_zone_cards_complete_the_conserved_count_and_only_the_host_counts_f
         deck=deck,
         turn_seat=0,
     )
-    state.player(0).hero_cards["0:hero.jie_luxun.qianxun"] = HeroCardZone(
-        skill_id="hero.jie_luxun.qianxun", owner=0, cards=list(viewer_hero)
+    state.player(0).hero_cards[hero_card_zone_key(0, "hero.jie_luxun.qianxun")] = (
+        HeroCardZone(skill_id="hero.jie_luxun.qianxun", owner=0, cards=list(viewer_hero))
     )
-    state.player(1).hero_cards["1:hero.jie_luxun.qianxun"] = HeroCardZone(
-        skill_id="hero.jie_luxun.qianxun", owner=1, cards=list(target_hero)
+    state.player(1).hero_cards[hero_card_zone_key(1, "hero.jie_luxun.qianxun")] = (
+        HeroCardZone(skill_id="hero.jie_luxun.qianxun", owner=1, cards=list(target_hero))
     )
     view = project(state, 0)
 

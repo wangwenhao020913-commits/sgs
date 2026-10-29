@@ -17,6 +17,7 @@ import pytest
 from sgs.agents import tape_from_journal
 from sgs.data import load_content_pack
 from sgs.effects import legal_actions_for
+from sgs.skills import hero_card_zone_key
 from sgs.engine import (
     ActionRecord,
     Engine,
@@ -280,31 +281,42 @@ def test_hero_zone_count_is_public_and_only_the_host_sees_the_faces():
     三条同时钉住：
 
     - 同一座位两个技能实例各一个区 ⇒ ``hero_zone_count`` 是**求和**（不按实例各报一次）；
-    - 未登记技能的区（``jie_xusheng.pojun`` 不在本内容包）同一默认：张数照样公开，
-      牌面仍只给宿主（``hero_zone_ref_visible`` 的“未登记同一默认”，不是整块 fail-closed）；
+    - 未登记技能的区（``jie_xusheng.pojun`` 不在本内容包）与**畸形区键**同一默认：
+      张数照样公开，牌面仍只给宿主（``hero_zone_ref_visible`` 的“未登记同一默认”，
+      不是整块 fail-closed）；
     - ``exclude=True``：两个新字段不进 ``model_dump``（47 条金录像逐字节不变的机械前提）。
+
+    区是**直接构造**的：未登记 / 畸形的区只可能来自测试构造（``Engine.place_on_hero_card``
+    会拒绝未登记技能）。已登记区的**产品路径**由 ``test_ai_cases.py`` 的真【谦逊】流程
+    （``test_the_qianxun_placement_is_public_but_faces_stay_host_only``）钉住。
     """
     state = build_state(
         pack=PACK,
         seats=[SeatSpec(hand=HAND_A), SeatSpec(hand=())],
         deck=DECK,
     )
-    state.player(1).hero_cards["1:hero.jie_luxun.qianxun"] = HeroCardZone(
+    qianxun = hero_card_zone_key(1, "hero.jie_luxun.qianxun")
+    pojun = hero_card_zone_key(0, "hero.jie_xusheng.pojun")
+    malformed = "not-a-zone-key"
+    state.player(1).hero_cards[qianxun] = HeroCardZone(
         skill_id="hero.jie_luxun.qianxun", owner=1, cards=[46, 47]
     )
-    state.player(1).hero_cards["0:hero.jie_xusheng.pojun"] = HeroCardZone(
+    state.player(1).hero_cards[pojun] = HeroCardZone(
         skill_id="hero.jie_xusheng.pojun", owner=0, cards=[48]
+    )
+    state.player(1).hero_cards[malformed] = HeroCardZone(
+        skill_id="not-a-skill", owner=1, cards=[49]
     )
 
     foreign = project(state, 0)
-    assert [player.hero_zone_count for player in foreign.players] == [0, 3]
+    assert [player.hero_zone_count for player in foreign.players] == [0, 4]
     assert foreign.hero_zone_cards == (), "他人视角不装任何武将牌上的牌面"
 
     host = project(state, 1)
-    assert host.players[1].hero_zone_count == 3
+    assert host.players[1].hero_zone_count == 4
     assert host.players[0].hero_zone_count == 0
-    assert [card.card_id for card in host.hero_zone_cards] == [48, 46, 47], (
-        "宿主视角牌面齐全；区之间按区键排序（跨座位 / 未登记技能同一默认）"
+    assert {card.card_id for card in host.hero_zone_cards} == {46, 47, 48, 49}, (
+        "宿主视角牌面齐全；跨座位 / 未登记 / 畸形区同一默认（区之间无规则先后，只断集合）"
     )
     assert "hero_zone_cards" not in host.model_dump(), "exclude=True：不进记录流"
     assert "hero_zone_count" not in host.players[1].model_dump(), "exclude=True：不进记录流"

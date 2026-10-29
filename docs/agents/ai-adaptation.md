@@ -104,13 +104,10 @@
 写成"不读"就把那条规则藏起来了——评审时对照读取方。另一条同类先例是 `deck_count` /
 `discard`：C1 记牌 P(闪)（票 20）起两者进 `_score_attack` 的守恒量 / 未知池计算，登记已从
 "不读"翻成"读"，理由点名读它的那几个辅助（`_conserved_card_count` / `_visible_card_faces` /
-`_verified_deck_profile` / `_dodge_probability`），不是只说"记牌读了"。
-
-**第四类先例：新字段补的是一条读法的缺口**——`PlayerPublic.hero_zone_count` 与
-`PlayerView.hero_zone_cards`（票 27）。票 20 的记牌在【谦逊】放置期间 fail-closed（守恒量
-少几张），票 27 补的是**读取面**、不改判据：张数进 `_conserved_card_count`（守恒量完整），
-本人区的牌面进 `_visible_card_faces`（已出现的牌），他人区的牌面仍留在未知池。两条都登记为
-"读"、理由分别点名这两个辅助；评审时问"守恒量 / 未知池的输入变没变"，不能只看金录像（字段
+`_verified_deck_profile` / `_dodge_probability`），不是只说"记牌读了"。票 27 补的两个读取面是
+同一类的**后续**：`PlayerPublic.hero_zone_count` 进 `_conserved_card_count`（守恒量完整）、
+`PlayerView.hero_zone_cards` 进 `_visible_card_faces`（已出现的牌），他人区的牌面仍留在未知池；
+两条登记同为"读"。评审同样问"守恒量 / 未知池的输入变没变"，不能只看金录像（字段
 `exclude=True`，不触发字节告警）。
 
 **第三类先例：读法变了、读写档没变**——`PlayerPublic.identity`。I1 身份保守档（票 21）把
