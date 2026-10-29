@@ -73,6 +73,7 @@ from sgs.state import (
     DodgeQuery,
     EndPhase,
     FrameKind,
+    HeroCardZone,
     Pass,
     PeachQuery,
     PlayCard,
@@ -644,6 +645,50 @@ def test_the_dodge_probability_lowers_the_expected_attack_score_and_a_dodge_stil
     assert two[0] == pytest.approx(1.4), "p=0 时 2 点伤害的增量 = 旧公式的 1.4 × (2 − 1)"
     assert two == sorted(two, reverse=True), two
     assert two[-1] == pytest.approx(-0.4), "被躲掉时多出的伤害也落空，只剩“消耗一张牌”的价"
+
+
+@pytest.mark.xfail(strict=True, reason="票 27：武将牌上的牌还没进 PlayerView")
+def test_hero_zone_cards_complete_the_conserved_count_and_only_the_host_counts_faces():
+    """票 27：武将牌上的牌进 view 后，守恒量完整、记牌在放置期间仍可用。
+
+    构造：观察者（座位 0）自己的武将牌上压 2 张、目标（座位 1）的武将牌上压 2 张，
+    目标另有 4 张手牌。两个区都**移出了**六个可数区域：修复前守恒量因此只剩 104
+    （108 − 4），``_verified_deck_profile`` 三档全对不上 ⇒ 记牌关闭；修复后
+    ``hero_zone_count`` 把张数补回去，守恒量恢复 108。
+
+    牌面可见性同一条：观察者看得到**自己**武将牌上的 2 张（已出现的牌），
+    看不到目标那 2 张（仍在未知池里）——两条都经 ``_visible_card_faces`` 断言。
+    """
+    viewer = _ids("slash")[0]
+    viewer_hero = tuple(_ids("slash")[20:22])
+    target_hero = tuple(_ids("peach")[6:8])
+    target_hand = tuple(_ids("peach")[:4])
+    used = {viewer, *viewer_hero, *target_hero, *target_hand}
+    deck = tuple(index for index in range(len(PACK.deck.cards)) if index not in used)
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(viewer,)), SeatSpec(hand=target_hand)],
+        deck=deck,
+        turn_seat=0,
+    )
+    state.player(0).hero_cards["0:hero.jie_luxun.qianxun"] = HeroCardZone(
+        skill_id="hero.jie_luxun.qianxun", owner=0, cards=list(viewer_hero)
+    )
+    state.player(1).hero_cards["1:hero.jie_luxun.qianxun"] = HeroCardZone(
+        skill_id="hero.jie_luxun.qianxun", owner=1, cards=list(target_hero)
+    )
+    view = project(state, 0)
+
+    assert heuristic_scoring._conserved_card_count(view) == 108
+    assert heuristic_scoring._verified_deck_profile(view) == heuristic_scoring._DECK_TABLE[
+        "standard_108"
+    ]
+    assert heuristic_scoring._dodge_probability(view, 1) is not None, "记牌必须恢复可用"
+
+    faces = {card.card_id for card in heuristic_scoring._visible_card_faces(view)}
+    assert set(viewer_hero) <= faces, "宿主自己的武将牌上的牌是已出现的牌"
+    assert not (set(target_hero) & faces), "他人武将牌上的牌面不得可见（仍在未知池里）"
+
 
 
 # ---------------------------------------------------------------------------

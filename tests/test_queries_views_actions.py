@@ -31,6 +31,7 @@ from sgs.state import (
     ActivateSkill,
     DiscardQuery,
     EndPhase,
+    HeroCardZone,
     Pass,
     Phase,
     PlayPhaseQuery,
@@ -266,6 +267,48 @@ def test_player_view_reads_public_zones_in_insertion_order_and_never_the_deck_or
     assert all(card.card_id not in HAND_B for card in view.self_hand)
     assert "deck" not in PlayerView.model_fields and "opponent_hand" not in PlayerView.model_fields
     assert "hand_limit" not in PlayerPublic.model_fields, "手牌上限由当前体力值派生，不落字段"
+
+
+# ---------------------------------------------------------------------------
+# 武将牌上的牌进视角（票 27）：张数公开、牌面只给宿主、区按实例独立
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(strict=True, reason="票 27：PlayerView 还没有 hero_zone_count / hero_zone_cards")
+def test_hero_zone_count_is_public_and_only_the_host_sees_the_faces():
+    """票 27：武将牌上的牌——张数逐座位公开，牌面**只给宿主**（M6 2026-10 口径）。
+
+    三条同时钉住：
+
+    - 同一座位两个技能实例各一个区 ⇒ ``hero_zone_count`` 是**求和**（不按实例各报一次）；
+    - 未登记技能的区（``jie_xusheng.pojun`` 不在本内容包）同一默认：张数照样公开，
+      牌面仍只给宿主（``hero_zone_ref_visible`` 的“未登记同一默认”，不是整块 fail-closed）；
+    - ``exclude=True``：两个新字段不进 ``model_dump``（47 条金录像逐字节不变的机械前提）。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=HAND_A), SeatSpec(hand=())],
+        deck=DECK,
+    )
+    state.player(1).hero_cards["1:hero.jie_luxun.qianxun"] = HeroCardZone(
+        skill_id="hero.jie_luxun.qianxun", owner=1, cards=[46, 47]
+    )
+    state.player(1).hero_cards["0:hero.jie_xusheng.pojun"] = HeroCardZone(
+        skill_id="hero.jie_xusheng.pojun", owner=0, cards=[48]
+    )
+
+    foreign = project(state, 0)
+    assert [player.hero_zone_count for player in foreign.players] == [0, 3]
+    assert foreign.hero_zone_cards == (), "他人视角不装任何武将牌上的牌面"
+
+    host = project(state, 1)
+    assert host.players[1].hero_zone_count == 3
+    assert host.players[0].hero_zone_count == 0
+    assert [card.card_id for card in host.hero_zone_cards] == [48, 46, 47], (
+        "宿主视角牌面齐全；区之间按区键排序（跨座位 / 未登记技能同一默认）"
+    )
+    assert "hero_zone_cards" not in host.model_dump(), "exclude=True：不进记录流"
+    assert "hero_zone_count" not in host.players[1].model_dump(), "exclude=True：不进记录流"
 
 
 # ---------------------------------------------------------------------------

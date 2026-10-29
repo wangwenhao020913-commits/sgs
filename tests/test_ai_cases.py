@@ -1048,6 +1048,179 @@ def test_c1_card_counting_switches_off_when_the_tier_or_the_conserved_count_is_u
 
 
 # ---------------------------------------------------------------------------
+# C1b 武将牌上的牌（票 27）：【谦逊】放置期间守恒量仍完整、记牌可用
+#
+# 真流程而不是手搓区：界陆逊的判定区里放一张【乐不思蜀】，判定阶段它"对你生效" ⇒
+# 【谦逊】把所有手牌置于自己的武将牌上（区留在那里直到当前回合结束）；随后摸牌阶段
+# 摸到两张【杀】，到达 AI 自己的出牌阶段——牌还在武将牌上，正是本票要修的窗口。
+# ---------------------------------------------------------------------------
+
+QIANXUN_HAND = tuple(cards_of_type(PACK, "peach")[:2])
+"""界陆逊（AI，座位 0）判定阶段发动【谦逊】时手里的 2 张牌（会被搬上武将牌）。"""
+
+QIANXUN_TARGET_HAND = tuple(cards_of_type(PACK, "peach")[2:6])
+"""目标（座位 1）的 4 张手牌：全是【桃】，只占手牌数、不改变未知池里的【闪】。"""
+
+QIANXUN_SLASH = tuple(cards_of_type(PACK, "slash")[:2])
+"""摸牌阶段摸到的两张【杀】（出牌阶段的可选动作）。"""
+
+QIANXUN_INDULGENCE = cards_of_type(PACK, "indulgence")[0]
+"""判定区里的【乐不思蜀】：延时锦囊在判定阶段对界陆逊生效 ⇒ 触发【谦逊】。"""
+
+JIE_LUXUN = "jie_luxun"
+JIE_QIANXUN = "hero.jie_luxun.qianxun"
+QIANXUN_ZONE = f"0:{JIE_QIANXUN}"
+
+
+def _qianxun_heart_top(used: set[int]) -> int:
+    """牌堆顶那张**红桃**判定牌：【乐不思蜀】判红桃才不跳过出牌阶段（夹具的前提）。"""
+    return next(
+        index
+        for index, card in enumerate(PACK.deck.cards)
+        if card.suit.value == "heart" and card.type != "slash" and index not in used
+    )
+
+
+class _QianxunDriver:
+    """座位 0 的脚本：接受【谦逊】，其余取最小合法应答（【连营】因此放弃）。"""
+
+    def __init__(self) -> None:
+        self._fallback = PassPlayer()
+
+    def respond(self, query):
+        if query.kind == "SKILL_ACTIVATION" and query.skill_id == JIE_QIANXUN:
+            activate = find_action(
+                query,
+                lambda action: isinstance(action, ActivateSkill)
+                and action.skill_id == JIE_QIANXUN,
+            )
+            if activate is not None:
+                return activate
+        return self._fallback.respond(query)
+
+
+def _qianxun_play_query():
+    """推进到 AI（界陆逊，座位 0）的出牌阶段；武将牌上仍压着 2 张【谦逊】放的牌。"""
+    used = {
+        *QIANXUN_HAND,
+        *QIANXUN_TARGET_HAND,
+        QIANXUN_INDULGENCE,
+        *QIANXUN_SLASH,
+    }
+    heart_top = _qianxun_heart_top(used)
+    used.add(heart_top)
+    deck = (
+        heart_top,
+        *QIANXUN_SLASH,
+        *(index for index in range(len(PACK.deck.cards)) if index not in used),
+    )
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=2),
+        seats=[
+            SeatSpec(
+                hero=JIE_LUXUN,
+                hp=3,
+                hp_max=3,
+                hand=QIANXUN_HAND,
+                judge=(QIANXUN_INDULGENCE,),
+            ),
+            SeatSpec(hand=QIANXUN_TARGET_HAND),
+        ],
+        deck=deck,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [_QianxunDriver(), PassPlayer()],
+        lambda current: current.pending is not None
+        and current.pending.kind == "PLAY_PHASE"
+        and current.pending.actor == 0,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达 AI 的出牌阶段前就停了"
+    return engine, query
+
+
+def test_the_qianxun_fixture_reaches_a_real_play_phase_window():
+    """夹具自检（不带 xfail）：询问归属、【谦逊】的牌真的在武将牌上、两个【杀】候选都在。
+
+    只核形状，不核"记牌是否可用"（那两条 D 用例整体 strict xfail，夹具被引擎改动弄坏时
+    要单独可见）。
+    """
+    engine, query = _qianxun_play_query()
+
+    assert query.kind == "PLAY_PHASE" and query.actor == 0
+    assert engine.state.hero_zone(0, QIANXUN_ZONE) == QIANXUN_HAND, (
+        "夹具失效：【谦逊】没有把手牌留在武将牌上"
+    )
+    assert [card.card_id for card in query.view.self_hand] == list(QIANXUN_SLASH)
+    assert query.view.players[1].hand_count == len(QIANXUN_TARGET_HAND)
+    slash_targets = {
+        target
+        for action in query.legal_actions
+        if isinstance(action, UseCard) and action.card.card_id in QIANXUN_SLASH
+        for target in action.targets
+    }
+    assert slash_targets == {1}, "夹具失效：两张【杀】不再指向座位 1"
+
+
+@pytest.mark.xfail(strict=True, reason="票 27：武将牌上的牌还没进 PlayerView")
+def test_c1_qianxun_placement_keeps_card_counting_available():
+    """票 27 验收①：放置期间守恒量完整、档位能认出来、``_dodge_probability`` 不再答 None。
+
+    修复前 2 张牌移出了六个可数区域又不在 ``PlayerView`` 里 ⇒ 守恒量 106 ⇒ 三档全对不上
+    ⇒ 记牌关闭（票 20 的偏差 1）。
+    """
+    _engine, query = _qianxun_play_query()
+    view = query.view
+
+    assert heuristic_scoring._conserved_card_count(view) == 108
+    profile = heuristic_scoring._verified_deck_profile(view)
+    assert profile is not None, "档位必须能按守恒量认出来"
+    assert profile[0] == 108
+    assert heuristic_scoring._dodge_probability(view, 1) is not None, "记牌必须恢复可用"
+
+
+@pytest.mark.xfail(strict=True, reason="票 27：武将牌上的牌还没进 PlayerView")
+def test_c1_qianxun_placement_keeps_the_slash_priced_by_dodge_probability():
+    """票 27 验收②（决策级）：这张【杀】的分数等于记牌路径的期望，而不是常量贴现。
+
+    谓词按票面落成"记牌可用 + 该动作分数等于 ``_expected_attack_score`` 的结果"：
+    ``_score_attack`` = 基础分 + 目标分 + 期望增量（2 人无身份局关系项为 0；目标 4 体力
+    不构成斩杀）。修复前 ``_dodge_probability`` 答 None ⇒ 分数是常量贴现的 3.0。
+    """
+    _engine, query = _qianxun_play_query()
+    action = find_action(
+        query,
+        lambda candidate: isinstance(candidate, UseCard)
+        and candidate.card.card_id in QIANXUN_SLASH
+        and candidate.targets == (1,),
+    )
+    assert action is not None, "夹具失效：没有指向座位 1 的【杀】候选"
+
+    probability = heuristic_scoring._dodge_probability(query.view, 1)
+    assert probability is not None, "记牌必须可用（否则这条退化成常量贴现）"
+    expected = (
+        heuristic_scoring._DAMAGE_BASE
+        + heuristic_scoring._TARGET_BONUS
+        + heuristic_scoring._expected_attack_score(1, probability)
+    )
+    score = heuristic_scoring._score_attack(action, query.view)
+    assert score == pytest.approx(expected), (
+        "这张【杀】必须按 P(闪) 计价；修复前是常量贴现的 3.0"
+    )
+    assert score != pytest.approx(3.0), "不能仍是“0.25 × 4 张手牌”的常量贴现"
+
+    # 决策级：真实应答仍走这张【杀】（记牌恢复不改变"该打谁"，只改变分值来源）。
+    for seed in TIE_SEEDS:
+        answer = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(answer, UseCard), f"预期出【杀】，实得 {answer!r}"
+        assert answer.targets == (1,)
+
+
+# ---------------------------------------------------------------------------
 # I1 身份保守档（票 21）：已亮明身份 + 配比后验 ⇒ P(敌) / P(友) 替换 0/1
 #
 # 两条 D 用例在实现前是**红的**（先红后绿，spec §2.2）：今天未知身份一律判"中立"，
