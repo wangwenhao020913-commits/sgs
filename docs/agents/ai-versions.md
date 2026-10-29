@@ -136,7 +136,7 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
 | `ai-v0` | `ae7da0ad72d75c2cad96663a8e78f6fae3921439` | `ae7da0ad72d75c2cad96663a8e78f6fae3921439` | `09a56098ffe98701c8499ee1db60e85cf13b6400ada1d9a894b7a12b231c5bd2` | `93ada125f14cfc3bbe41663363eee3b1f3db59f6da4be2e3d2033f42686611cb` | 128（commit 派生） | —（原点，未跑批） | 原点：规则工程开工前的 HEAD（票 11 批量 + 票 12 座位子流已落地，AI 语义未动） | —（原点不裁定） |
 | `ai-v1` | `65609d40387e9b54c83ff14aa998d6e9d16cafb0` | `65609d40387e9b54c83ff14aa998d6e9d16cafb0` | `90ad861f387be9399124bb01d2a21b3f255c5abb687a77c80cda5f2aad0dca7a` | `29fb76e9d330b4c3a55915e6fec4f44c49e3a3eba378299fa6164d64b327793e` | 768（commit 派生） | `runs/ai-eval-65609d4-capped.json` | D1 无懈目标化（票 18）：`NULLIFY` 按"被取消的牌对目标利 / 害 × 已明关系"宣 / 不宣（嵌套与未登记牌名 `Pass`）。`quick` 59/128 全落 `RESPOND`；`promote` diff 311/768 全落 `RESPOND`，对父版本 `+0.0026`、CI `[-0.0169, 0.0235]`，对 `ai-v0` 同值 | **人类裁定通过**（agent 只记读数；`cases_green=false` 与 767/768 两条见下，不替人接受） |
 | `ai-v2` | `c01cbf25327201de300034280dc95be88d779c5c` | `c01cbf25327201de300034280dc95be88d779c5c` | `6d200c6803dfbcfe71aa5b055af182f3106df05f69e90c37906e6962e243f49d` | `f294c836a49a27747736b867aefff73e031c7cda10eaf749a72394c744fc7eaa` | 768（commit 派生） | `runs/ai-eval-c01cbf2.json` | D2 斩杀优先（票 19）：`_score_attack` 加"这一下就打死"（`_damage_to >= 目标体力`）的斩杀项，与【酒】的 `_wine_enables_kill` 共用 `_lethal_to` 一条判据；藤甲把普通【杀】挡成 0 时不算，白银狮子只把伤害封在 1（够不够仍看体力）。`quick` 38/128（37 落 `PLAY_PHASE`）；`promote` diff 192/768（183 `PLAY_PHASE` + 9 条下游平分抽签漂移），对父版本 `-0.0065`、CI `[-0.0221, 0.0091]`，对 `ai-v0` `-0.0013`、CI `[-0.0247, 0.0221]`，`errors=0`；`quick` JSON `runs/quick-c01cbf2.json`。**实机 seed=7002**（HEAD `5f2d329`，行为 = 本版）：4 项必验通过（能开局 / AI 应答 / 无非法 / 到终局），**D2 局面未遇上**（按用户裁定不算失败），读数见 `.scratch/ai-light/acceptance.md` §四 | **人类裁定通过（2026-10-30）**：① `cases_green=false` 按"本项 D 用例全绿"解释、② ③ 成立、④ 10 条下游平分抽签漂移按书面说明接受、⑤ 台账理由齐全；缓存下限重取与 tag 先建一并接受（逐条见下） |
-| `ai-v3` | `e2e4753464147d1bed51730236b7969c8627eedb` | `e2e4753464147d1bed51730236b7969c8627eedb` | `7768049d4b127f0da63f89349762f15dfc60015e029dd5cafa24312ca439cef4` | `e3ff03a0bfacc715b76de6735a785c578e6f019f108fc9b90342392aa2b5b1ce` | 768（commit 派生） | `runs/ai-eval-e2e4753.json` | C1 记牌 P(闪)（票 20）：`_score_attack` 的「0.25 × 手牌数（封顶 1.0）」换成「未知池超几何 P(目标有闪) 导出的期望伤害 + 躲掉也消耗一张【闪】的收益（1.0 分/张）」；档位靠守恒量反推、对不上就关闭记牌回落到旧公式。`quick` 45/128（43 `PLAY_PHASE` + 2 条下游平分抽签漂移）；`promote` diff 283/768（277 `PLAY_PHASE` + 6 条下游漂移），对父版本 `+0.0078`、CI `[-0.0104, 0.0273]`，对 `ai-v0` `+0.013`、CI `[-0.0104, 0.0352]`，`errors=0`；`quick` JSON `runs/quick-e2e4753.json`。**预注册「中后期更明显」被实测否定**（效果跟手牌厚度走、峰值在早期；见票 20 的 Answer），两处读数偏差（武将牌上的牌 / D2 的一致漂移）也留给人类裁定 | **人类裁定待定** |
+| `ai-v3` | `e2e4753464147d1bed51730236b7969c8627eedb` | `e2e4753464147d1bed51730236b7969c8627eedb` | `7768049d4b127f0da63f89349762f15dfc60015e029dd5cafa24312ca439cef4` | `e3ff03a0bfacc715b76de6735a785c578e6f019f108fc9b90342392aa2b5b1ce` | 768（commit 派生） | `runs/ai-eval-e2e4753.json` | C1 记牌 P(闪)（票 20）：`_score_attack` 的「0.25 × 手牌数（封顶 1.0）」换成「未知池超几何 P(目标有闪) 导出的期望伤害 + 躲掉也消耗一张【闪】的收益（1.0 分/张）」；档位靠守恒量反推、对不上就关闭记牌回落到旧公式。`quick` 45/128（43 `PLAY_PHASE` + 2 条下游平分抽签漂移）；`promote` diff 283/768（277 `PLAY_PHASE` + 6 条下游漂移），对父版本 `+0.0078`、CI `[-0.0104, 0.0273]`，对 `ai-v0` `+0.013`、CI `[-0.0104, 0.0352]`，`errors=0`；`quick` JSON `runs/quick-e2e4753.json`。**实机 seed=7003**（4 项必验通过；新增 2 条 D 报账——忠臣【决斗】主公后自无懈，进 v2 候选，见 `acceptance.md` §五）。**预注册「中后期更明显」被实测否定**（效果跟手牌厚度走、峰值在早期；见票 20 的 Answer），两处读数偏差（武将牌上的牌 / D2 的一致漂移）也留给人类裁定 | **人类裁定待定** |
 
 - `ai-v0` 是**原点基线**（spec §2.6）：`promote --anchor ai-v0` 用它防梯子漂移。
 - 上表的**种子批**列 = **该版评估所用的批**：`ai-v0` 行是 `derive_batch(ai-v0 commit, 128)`
@@ -227,6 +227,13 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
 8. 票 20 还改了 `tests/support/web_client.py` 的火攻 tape 种子（68 → 63，判据未放宽）：C1 改了
    AI 出牌打分后 seed 68 的目标不再被别家拆掉【无懈】、自己把人类火攻无懈掉；按同一判据重扫的
    探针是 `.scratch/ai-light/probe20_fire_seed.py`，理由写在该文件的注释里。
+
+9. **实机（批次末一局，seed 7003，用户驱动）**：4 项必验通过、`崩溃=0 非法=0`、
+   `人类超时=0`；读数与报账住 `.scratch/ai-light/acceptance.md` §五。**新增 2 条 D 报账**
+   （同一手）：忠臣对已明主公出【决斗】，随后在自己那张【决斗】的 NULLIFY 窗口宣【无懈可击】。
+   归因：有目标的牌对已明盟友没有负分 + D1 的 `_nullify_declares` 没有"我是使用者"的判据
+   （`RespondQuery` 不带 `source`，属读点缺口）。按 spec §6.8 进 **v2 候选第 7 / 8 条**，
+   不在本图开票；实机层不否决本票。
 
 【人类裁定结果：待人工签认（ai-v3）】
 - 待签认项：① `cases_green=false` 的读法；② `diff_attributed=false` 的 8 条下游漂移书面说明；
