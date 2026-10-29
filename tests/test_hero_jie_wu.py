@@ -22,16 +22,17 @@
 界孙尚香【枭姬】            与标准版**文字相同**（同一条触发谓词 / 零步流水线）
 ========================  ============================================================
 
-**两条本票裁定**（`06`（§5「程序化约定与偏离一手」））：【国色】"选择结束后"= 所选那一项
-**完全执行完之后**才摸（选项 1 是【乐不思蜀】使用结算完）；【结姻】的装备牌从**你的手牌**
-取，不从装备区取。
+**两条裁定**（`06`（§5「程序化约定与偏离一手」））：【国色】"选择结束后"= 所选那一项
+**完全执行完之后**才摸（选项 1 是【乐不思蜀】使用结算完）；【结姻】的"一张装备牌" = 手牌 +
+装备区里的装备牌（票 23 用户裁定，推翻票 17 的"只从手牌取"）。
 """
 
 from __future__ import annotations
 
-from sgs.data import Gender, Identity, Kingdom, load_content_pack
+from sgs.agents import HeuristicPlayer
+from sgs.data import Gender, Identity, Kingdom, RuleConfig, load_content_pack
 from sgs.effects import check_count, check_targets, legal_actions_for
-from sgs.engine import Engine
+from sgs.engine import Engine, ai_stream
 from sgs.state import (
     ActivateSkill,
     FrameKind,
@@ -723,7 +724,7 @@ def test_jie_liuli_shares_the_standard_flow():
 
 
 # ---------------------------------------------------------------------------
-# ⑥ 界孙尚香【结姻】：一张手牌 或 一张手牌里的装备牌；较高摸、较低回
+# ⑥ 界孙尚香【结姻】：一张手牌 或 一张装备牌（手牌 / 装备区）；较高摸、较低回
 # ---------------------------------------------------------------------------
 
 
@@ -908,6 +909,63 @@ def test_jie_jieyin_target_may_be_healthy_and_the_equipment_may_come_from_the_eq
         "jieyin_discard_hand",
         "jieyin_place_equipment",
     ), "装备区里那张也是「一张装备牌」⇒ 装备路径可用（目标坐骑槽空着）"
+
+
+def test_jie_jieyin_target_pool_leaves_out_a_seat_with_no_way_through():
+    """票 01：座位池只发「第 2 步至少有一个选项」的人 —— 死座位不进池。
+
+    场景 = 票 18 finding 的实测局面：发动者手牌 0、装备区里只有武器（麒麟弓）与进攻马
+    （大宛）；座位 1 的武器槽（雌雄双股剑）与进攻马槽（赤兔）**都被占** ⇒ 弃手牌没手牌、
+    置装备没有空槽，两条分支都走不通。这种人不能发给参与者：AI 按关系选中它，
+    ``_flow_step_option`` 见空闭集取消整条流水线，而取消不落 ``_USED`` ⇒ 同一出牌阶段
+    无限重来。座位 2 的槽位空着 ⇒ 他在池里。
+    """
+    from sgs.skills.active import _jie_jieyin_options, _jie_jieyin_targets
+
+    bow, horse = _cards("qilin_bow")[0], _cards("dawan")[0]
+    taken_bow, taken_horse = _cards("double_sword")[0], _cards("chitu")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(), equip=(bow, horse), hero="jie_sunshangxiang"),
+            SeatSpec(gender=Gender.MALE, equip=(taken_bow, taken_horse)),
+            SeatSpec(gender=Gender.MALE),
+        ],
+        deck=deck_excluding(PACK, bow, horse, taken_bow, taken_horse),
+        turn_seat=0,
+    )
+
+    assert _jie_jieyin_options(state, 0, 1) == (), "座位 1 两条分支都走不通"
+    assert _jie_jieyin_targets(state, None, 0, ()) == (2,), (
+        "第 2 步没有选项的座位不发出去；有空槽的男性照常在池里"
+    )
+
+
+def test_the_stuck_jieyin_seed_finishes_within_a_bounded_run():
+    """票 01 回归（端到端）：卡死种子 ``5667218070898781`` 的一局能自然终局。
+
+    修复前探针跑到 2 万步仍未终局（票 18 的读数）：座位 4 的界孙尚香在同一出牌阶段反复
+    「发动【结姻】→ 选死座位 → 空闭集取消」（取消零副作用、不落 ``_USED``）。
+    ``run_queries`` 的 ``limit`` 就是这条回归的步数上限（实测 199 次决策 / 1 335 次推进
+    迭代，留足余量）：真回退了这里会**断言失败**，而不是把 CI 挂死。
+    """
+    seed = 5667218070898781
+    engine = Engine.new_game(
+        seed=seed,
+        rule_config=RuleConfig(player_count=5),
+        pack=PACK,
+        hero_pool=(),
+    )
+    players = [HeuristicPlayer(ai_stream(seed, seat)) for seat in range(5)]
+
+    run_queries(engine, players, lambda e: e.finished, limit=5_000)
+
+    assert engine.finished, "步数上限内自然终局（实测 199 次决策）"
+    assert any(
+        record.kind == "query"
+        and JIEYIN in (getattr(record.query, "preactivations", None) or {})
+        for record in engine.records
+    ), "该种子必须真的走到界【结姻】的候选，否则它不再覆盖本回归（需重新选种）"
 
 
 # ---------------------------------------------------------------------------

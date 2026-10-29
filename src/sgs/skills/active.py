@@ -1579,12 +1579,12 @@ JIEYIN_FLOW = SkillFlow(
 #           角色回复 1 点体力。
 #
 # 与标准版是**两条完全不同的收益**（标准 = 弃两张手牌、双方各回复 1 点），故不复用标准
-# 流水线：目标步仍是 ``PickSeats``（任意男性角色，**不要求已受伤**），其余是提交点里的
-# 手写询问（二选一 + 选牌）。两处裁定写进 `06`（§5「程序化约定与偏离一手」）/ `## Answer`：
+# 流水线：三步为 ``PickSeats``（任意男性角色，**不要求已受伤**）→ ``PickOption``
+# （弃一张手牌 / 置一张装备牌，闭集随目标现算）→ ``PickCards``（按选项收窄成本面）。
+# 两处裁定写进 `06`（§5「程序化约定与偏离一手」）/ `## Answer`：
 #
-# - **"将一张装备牌置入其装备区"的装备牌从你的手牌取**（票面 `## 已知歧义` 的第二条）：
-#   牌面没有"装备区里的牌"这类区域限定，而"置入其装备区"是把你手里的一张装备牌放过去；
-#   不从你的装备区取（那会变成"把已装备的牌送人"）。
+# - **"一张装备牌" = 手牌 + 装备区里的装备牌**（票 23 用户裁定，推翻票 17 的"只从手牌
+#   取"）：牌面没写区域限定，按默认读法（一）③，已经装备着的牌也算一张装备牌。
 # - **体力值相同 ⇒ 两种效果都不执行**：牌面写的是"较高的"与"较低的"，相等时两个角色
 #   都不满足。发动因此纯亏成本——玩家可以不作这次发动。
 # ---------------------------------------------------------------------------
@@ -1607,39 +1607,29 @@ _JIE_JIEYIN_DONE_KEY = "jie_jieyin_done"
 def _jie_jieyin_targets(
     state: GameState, frame: Any, owner: int, chosen: tuple[int, ...]
 ) -> tuple[int, ...]:
-    """可选目标：存活的**男性**其他角色（不要求已受伤）。"""
+    """可选目标：存活的**男性**其他角色，且**下一步至少有一个选项**。
+
+    不要求已受伤；但第 2 步的闭集（:func:`_jie_jieyin_options`：弃一张手牌 / 往目标的
+    空槽置一张装备牌）谁也走不通的座位**不进池**。票 01：只按"存活男性"发座位会把
+    "第 2 步走不通"的人发给参与者——AI 按关系选中他，``_flow_step_option`` 见空闭集
+    取消整条流水线，而取消零副作用、不落 ``_USED``，同一出牌阶段就会无限重来。
+    """
     del frame, chosen
     return tuple(
         p.seat
         for p in state.players
-        if p.alive and p.seat != owner and p.gender is Gender.MALE
+        if p.alive
+        and p.seat != owner
+        and p.gender is Gender.MALE
+        and _jie_jieyin_options(state, owner, p.seat)
     )
-
-
-def _jie_jieyin_options(state: GameState, owner: int) -> tuple[str, ...]:
-    """此刻走得通的选项：弃手牌（有手牌）/ 置装备（手牌 **或装备区** 里有装备牌）。
-
-    "一张**装备牌**"按默认读法（一）③ = **手牌 + 装备区**里的装备牌（用户裁定，票 23）：
-    已经装备着的牌也算"一张装备牌"，送出去就是把已装备的牌置入其装备区（与手牌里的装备牌
-    同一条移动，只是来源区不同）。
-    """
-    player = state.player(owner)
-    hand = player.hand
-    options: list[str] = []
-    if hand:
-        options.append(JIE_JIEYIN_DISCARD)
-    if any(state.card(card_id).slot is not None for card_id in (*hand, *player.equip)):
-        options.append(JIE_JIEYIN_EQUIP)
-    return tuple(options)
 
 
 def _jie_jieyin_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     if not _can_offer(state, ctx):
         return current
-    seats = _jie_jieyin_targets(state, None, ctx.subject, ())
-    # 目标与选项**互相依赖**（装备区空槽）：只要有**一名**男性角色走得通就产出候选，
-    # 具体选谁、走哪条分支由第 1 / 2 步问（不在这里替玩家裁）。
-    if not any(_jie_jieyin_options(state, ctx.subject, seat) for seat in seats):
+    # 目标池已按"第 2 步走得通"收口（:func:`_jie_jieyin_targets`）⇒ 池空即无候选。
+    if not _jie_jieyin_targets(state, None, ctx.subject, ()):
         return current
     return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
