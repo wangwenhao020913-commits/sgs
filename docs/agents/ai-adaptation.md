@@ -97,8 +97,10 @@
 - 新字段进来时：在**它所属的桶**里加一行。跨九类同义的字段（如 `kind`）放共用桶，别抄九遍。
 
 现状里几处"不读"值得知道（这几处是有意为之，不是漏登记）：`deck_count` / `discard`（记牌还
-没落地）、`RespondQuery` 的 `cause` / `required` / `target` / `window_frame`（响应打分是常量，
-无懈目标化那票会改）、`SkillActivationQuery` 的三个冻结报文（生产者恒给 `0 / 0 / ()`）。
+没落地）、`RespondQuery` 的 `required` / `window_frame`（候选里只有合法牌；嵌套靠处理区顶
+牌是无懈来判，不读层号）、`SkillActivationQuery` 的三个冻结报文（生产者恒给 `0 / 0 / ()`）。
+反方向的先例是 `RespondQuery` 的 `cause` / `target`：D1 无懈目标化（票 18）起它们进打分，
+写成"不读"就把那条规则藏起来了——评审时对照读取方。
 
 ### 3.3 `Mode` 表 `MODE_SITES`（`src/sgs/data/identities.py`）
 

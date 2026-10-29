@@ -436,10 +436,10 @@ _NULLIFY_FIXTURES = (
 
 
 def test_the_nullify_fixtures_reach_real_nullify_windows():
-    """夹具自检：停下来的真的是 AI 的无懈询问、处理区里真的是该牌、候选里真有 / 有 Pass。
+    """夹具自检：停下来的真的是 AI 的无懈询问、处理区里真的是该牌、候选里真有两条路。
 
-    与【遗计】自检同理：下方三条用例带 strict xfail，夹具被引擎改动弄坏时不能让
-    xfail 把它一起吞掉。这里的断言全部是**形状**断言，不含"宣 / 不宣"的策略判据。
+    与【遗计】自检同理：这里的断言全部是**形状**断言（不含"宣 / 不宣"的策略判据），
+    夹具被引擎改动弄坏时保持可见，而不是把下方六条用例一起拖红。
     """
     for name, build, expected_card, expected_target, nested in _NULLIFY_FIXTURES:
         query = build()
@@ -461,34 +461,31 @@ def test_the_nullify_fixtures_reach_real_nullify_windows():
             assert action in query.legal_actions, f"{name}：AI 应答不在真实候选里"
 
 
-@pytest.mark.xfail(strict=True, reason="已知蠢点 票 18：手里有无懈就一律宣")
 def test_d1_passes_on_its_own_ex_nihilo():
     """自己【无中生有】：取消它只是自断过牌 ⇒ ``Pass``（票面 6 条里的第 1 条）。"""
     _assert_nullify_answer(_own_ex_nihilo_query(), declare=False)
 
 
 def test_d1_declares_on_an_enemy_ex_nihilo():
-    """敌人【无中生有】：取消它 = 少给敌人两张牌 ⇒ 宣（第 2 条；当前实现已经会宣）。"""
+    """敌人【无中生有】：取消它 = 少给敌人两张牌 ⇒ 宣（第 2 条）。"""
     _assert_nullify_answer(_enemy_ex_nihilo_query(), declare=True)
 
 
 def test_d1_declares_on_an_ally_duel():
-    """盟友（已亮明主公）被【决斗】：取消伤害 ⇒ 宣（第 3 条；当前实现已经会宣）。"""
+    """盟友（已亮明主公）被【决斗】：取消伤害 ⇒ 宣（第 3 条）。"""
     _assert_nullify_answer(_ally_duel_query(), declare=True)
 
 
-@pytest.mark.xfail(strict=True, reason="已知蠢点 票 18：手里有无懈就一律宣")
 def test_d1_passes_on_an_enemy_indulgence():
     """敌人的【乐不思蜀】目标：替他拆掉乐才是亏 ⇒ ``Pass``（第 4 条）。"""
     _assert_nullify_answer(_enemy_indulgence_query(), declare=False)
 
 
 def test_d1_declares_on_an_enemy_peach_garden():
-    """敌人【桃园结义】目标：取消他的一次回复 ⇒ 宣（第 5 条；当前实现已经会宣）。"""
+    """敌人【桃园结义】目标：取消他的一次回复 ⇒ 宣（第 5 条）。"""
     _assert_nullify_answer(_enemy_peach_garden_query(), declare=True)
 
 
-@pytest.mark.xfail(strict=True, reason="已知蠢点 票 18：手里有无懈就一律宣")
 def test_d1_passes_on_a_nested_nullify():
     """嵌套无懈：不做链求解 ⇒ ``Pass``（第 6 条）。"""
     _assert_nullify_answer(_nested_nullify_query(), declare=False)

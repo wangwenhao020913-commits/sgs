@@ -17,6 +17,10 @@
 （静态扫描住 ``tests/test_source_discipline.py``）。
 **不做身份推断、不建决策时限**（ADR-011）：拿不准时缺省保守，而不是猜身份。
 
+**无懈目标化（D1，票 18）**：``RESPOND`` 不再"手里有牌就宣"——``cause = NULLIFY`` 时按
+:func:`_nullify_declares` 读处理区顶牌与 ``query.target``，只在"敌人拿到利 / 自己或已明
+盟友挨害"时宣；嵌套无懈与未登记的牌名一律 ``Pass``（不做链求解，spec §6.1 D1）。
+
 **M5-07 的属性 / 连环 / 酒**：军争的取舍只接进**既有打分器**，不另造策略框架。用到的
 公开事实 = 目标的装备区（藤甲 / 白银狮子 / 古锭刀）、自己的装备（青釭剑 / 朱雀羽扇）、
 横置与 ``wine_active``、手牌**张数**、体力与已明身份；【杀】族判据走行为表
@@ -75,6 +79,7 @@ from sgs.state import (
     SelectOptionQuery,
     SkillActivationQuery,
     UseCard,
+    WindowCause,
 )
 
 __all__ = ["SKILL_VALUES", "HeuristicPlayer"]
@@ -623,13 +628,110 @@ def _score_dodge(query: Query, action: Action) -> float:
     return 0.0
 
 
+_NULLIFY = "nullify"
+"""无懈窗口的响应牌名；也是**嵌套无懈**的判据（处理区顶牌是它 ⇒ 这层在"无懈无懈"）。"""
+
+_NULLIFY_HELPFUL_TRICKS = frozenset({"ex_nihilo", "harvest", "peach_garden"})
+"""被无懈取消时对**目标**是净收益的锦囊：过牌 / 拿牌 / 回复。
+
+取消它们 = 从目标手里拿走一份收益，故只有目标是**已明敌人**时才值得宣。
+"""
+
+_NULLIFY_HARMFUL_TRICKS = frozenset(
+    {
+        "arrow_barrage",
+        "barbarian_invasion",
+        "borrowed_sword",
+        "dismantlement",
+        "duel",
+        "fire_attack",
+        "indulgence",
+        "lightning",
+        "snatch",
+        "supply_shortage",
+    }
+)
+"""被无懈取消时对**目标**是净损失的锦囊：伤害 / 拆顺 / 跳过阶段 / 判定区。
+
+取消它们 = 替目标挡下损失，故只有目标是自己 / **已明盟友**时才值得宣；打敌人的那些
+（例：乐不思蜀贴在主公头上）反而**不能**宣（"无懈的无效化目标是敌人 ⇒ 不宣"）。
+【闪电】按"炸到判定者"的有害面归类：自己 / 盟友头上要拆，敌人头上让他自己扛。
+"""
+
+_NULLIFY_ABSTAIN_VALUE = -_RESPOND_VALUE
+"""无懈窗口里**不该宣**时给无懈候选的分值：**严格低于** ``Pass``（0）。
+
+不能给 0：那样"宣"与"不宣"平分，由 ``ai:<seat>`` 子流抽签决定（【遗计】收牌人的老问题），
+"不该宣"的 D 用例只会在部分种子上红。严格为负 ⇒ 判据是确定性的，不靠运气。
+"""
+
+
+def _nullified_target_is_harmed(
+    card: CardRef, view: PlayerView, target: int
+) -> bool | None:
+    """这张锦囊对 ``target`` 是**害**（``True``）/ **利**（``False``）/ **拿不准**（``None``）。
+
+    - 未登记的牌名（新增锦囊 / 未知虚拟产物）⇒ ``None``：拿不准就不宣，别用"猜"代替规则；
+    - 【铁索连环】的利 / 害按目标**当前是否横置**读：已横置 ⇒ 这一步是重置（解除传导，
+      是利），未横置 ⇒ 串上引线（是害）。横置是公开信息，不是猜测。
+    """
+    if card.type in _NULLIFY_HARMFUL_TRICKS:
+        return True
+    if card.type in _NULLIFY_HELPFUL_TRICKS:
+        return False
+    if card.type == "iron_chain" and 0 <= target < len(view.players):
+        return not view.players[target].chained
+    return None
+
+
+def _nullify_declares(query: Query) -> bool | None:
+    """无懈窗口里**该不该宣**【无懈可击】；不是无懈窗口 ⇒ ``None``。
+
+    判据（spec §6.1 D1）= **被取消的那张牌对目标有利 / 有害 × 目标与我的关系**：
+    ``view.processing`` 顶牌是本次结算的牌（置入序，先入在前），``query.target`` 是这次
+    结算针对的座位。
+
+    | 牌对目标 | 自己 / 已明盟友 | 已明敌人 | 关系未知 |
+    |---|---|---|---|
+    | 利 | 不宣（别拆自己的收益） | **宣**（少给敌人一份） | 不宣 |
+    | 害 | **宣**（替他挡下） | 不宣（替他挡刀） | 不宣 |
+
+    - **嵌套无懈**（处理区顶牌是无懈）：不做链求解 ⇒ 不宣（D1 的范围，spec §6.1）；
+    - 处理区为空 / ``target`` 缺失（协议上无懈窗口恒有目标，这里只作防御）：不宣；
+    - 关系只读**现有已亮明身份信号**（:func:`_is_revealed_enemy` / :func:`_is_revealed_ally`），
+      概率档留给票 21。
+    """
+    if getattr(query, "cause", None) is not WindowCause.NULLIFY:
+        return None
+    view = query.view
+    target = getattr(query, "target", None)
+    if target is None or not view.processing:
+        return False
+    if view.processing[-1].type == _NULLIFY:
+        return False
+    harmed = _nullified_target_is_harmed(view.processing[-1], view, target)
+    if harmed is None:
+        return False
+    if harmed:
+        return target == view.seat or _is_revealed_ally(view, target)
+    return _is_revealed_enemy(view, target)
+
+
 def _score_respond(query: Query, action: Action) -> float:
-    """``RESPOND``：能抵消就抵消；技能类提供者（【护驾】/【激将】）同价。"""
+    """``RESPOND``：能抵消就抵消；技能类提供者（【护驾】/【激将】）同价。
+
+    **无懈窗口是唯一的例外**（票 18 / spec §6.1 D1）：先按 :func:`_nullify_declares`
+    判"该不该宣"；不该宣时给无懈候选 :data:`_NULLIFY_ABSTAIN_VALUE`（**严格低于**
+    ``Pass``），由最大值直接选出 ``Pass``。其余窗口（【南蛮】/【万箭】/【决斗】/借刀 /
+    势力求助 / 改判）仍是"有牌就抵消"的常量分——它们没有"取消对谁有利"的二义性。
+    """
     if isinstance(action, Pass):
         return 0.0
     if isinstance(action, ActivateSkill):
         return _DODGE_SKILL_VALUE
     if isinstance(action, (UseCard, PlayCard)):
+        if _nullify_declares(query) is False:
+            return _NULLIFY_ABSTAIN_VALUE
         return _RESPOND_VALUE
     return 0.0
 
@@ -1466,7 +1568,11 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 "self_hand": (True, "自己的手牌牌面：成本、响应与转化源都从这里挑"),
                 "deck_count": (False, "只有剩余张数、没有顺序；记牌未落地（记牌票落地后才读），估值按未知牌常数"),
                 "discard": (False, "弃牌堆顺序对现有打分无影响（记牌批落地后才读；现状按未知池估值）"),
-                "processing": (True, "【火攻】判据：处理区里躺着那张【火攻】才给'弃一张换 1 点伤害'的价"),
+                "processing": (
+                    True,
+                    "处理区顶牌 = 本次结算的牌：【无懈可击】按它对目标的利 / 害决定宣不宣"
+                    "（D1），顶牌是无懈即嵌套层；【火攻】也靠它给'弃一张换 1 点伤害'的价",
+                ),
                 "turn_seat": (False, "回合归属不参与打分：没有'我的回合'加权"),
                 "phase": (False, "阶段不参与打分：是不是出牌阶段由询问类型本身表达"),
             }
@@ -1530,13 +1636,19 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
         "RespondQuery": MappingProxyType(
             {
                 "cause": (
-                    False,
-                    "窗口成因不影响常量打分（能抵消就抵消）；无懈现在也走 RESPOND，"
-                    "目标化留给 D1 那票",
+                    True,
+                    "无懈窗口（``NULLIFY``）按'被取消的牌对目标利 / 害 × 关系'判宣不宣"
+                    "（D1，``_nullify_declares``）；其余窗口仍是常量'能抵消就抵消'",
                 ),
                 "required": (False, "必需牌名不读：候选里只有合法的"),
-                "target": (False, "窗口针对谁不影响常量打分（响应牌不占使用次数）"),
-                "window_frame": (False, "嵌套层号只用于记录流区分，不参与打分"),
+                "target": (
+                    True,
+                    "无懈窗口里 = 本次结算针对的座位：它与我敌 / 友 / 未知决定宣不宣（D1）",
+                ),
+                "window_frame": (
+                    False,
+                    "嵌套层号只用于记录流区分：嵌套靠处理区顶牌是无懈判，不读层号",
+                ),
             }
         ),
         "SelectCardsQuery": MappingProxyType(
