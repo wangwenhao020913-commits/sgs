@@ -705,12 +705,12 @@ def test_the_lethal_fixtures_reach_real_play_phase_windows():
             assert action in query.legal_actions, "AI 应答必须落在真实候选面上"
 
 
-@pytest.mark.xfail(strict=True, reason="已知蠢点 票 19")
 def test_d2_strikes_the_lethal_target_over_the_healthy_one():
     """D2 斩杀优先：1 体力 0 手 vs 4 体力 0 手 ⇒ 打 1 体力（残局不放跑）。
 
     修复前两席同分（关系未知、都空手）⇒ 打谁由 ``ai:<seat>`` 平分抽签决定，跑满
-    #TIE_SEEDS 必有种子打 4 体力那一席。修复后按“伤害 ≥ 体力”的斩杀项取胜，与抽签无关。
+    #TIE_SEEDS 必有种子打 4 体力那一席（`6abb5c3` 上它带 ``xfail(strict=True)``）；
+    修复后按“伤害 ≥ 体力”的斩杀项取胜，与抽签无关。
     """
     query = _lethal_vs_full_query()
     lethal_seat = next(

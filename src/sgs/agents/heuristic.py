@@ -21,6 +21,13 @@
 :func:`_nullify_declares` 读处理区顶牌与 ``query.target``，只在"敌人拿到利 / 自己或已明
 盟友挨害"时宣；嵌套无懈与未登记的牌名一律 ``Pass``（不做链求解，spec §6.1 D1）。
 
+**斩杀优先（D2，票 19）**：``_score_attack`` 多一条斩杀项——目标**这一下就死**时加
+:data:`_LETHAL_STRIKE_VALUE`，残局不再把能一刀斩的目标放跑。判据收成
+:func:`_lethal_to`（``_damage_to >= 目标体力``）**一处**：伤害牌打分问"现在就够不够"，
+:func:`_wine_enables_kill` 问"加【酒】才够"，两者读同一份实际伤害（藤甲 / 白银狮子 /
+【酒】/ 古锭刀），不会各说各话。看不到目标手牌 ⇒ 不做"可能被【闪】抵消"的概率贴现
+（归 C1 记牌那票）。
+
 **M5-07 的属性 / 连环 / 酒**：军争的取舍只接进**既有打分器**，不另造策略框架。用到的
 公开事实 = 目标的装备区（藤甲 / 白银狮子 / 古锭刀）、自己的装备（青釭剑 / 朱雀羽扇）、
 横置与 ``wine_active``、手牌**张数**、体力与已明身份；【杀】族判据走行为表
@@ -266,6 +273,20 @@ _WASTED_ATTACK_PENALTY = 5.0
 另一个合法目标仍按正分参评，故"另有目标时避开藤甲"不是靠拒绝出牌做到的。
 """
 
+_LETHAL_STRIKE_VALUE = 6.5
+"""这一下**当场打死**（``_damage_to >= 目标体力``）时给伤害牌加的斩杀分（D2，票 19）。
+
+与 :data:`_WINE_LETHAL_VALUE` 同一个价：**击杀**是残局里最值钱的一步，不该被手牌贴现或
+已明敌人加权翻过去。两者共用 :func:`_lethal_to` 这一条判据（伤害够不够），区别只在"现在
+就够"还是"加【酒】才够"；藤甲 / 白银狮子让这一刀不造成伤害时一分不加，【酒】/ 古锭刀的
+加伤照常算进来（非【杀】家族的伤害牌按 1 点算，与 :func:`_damage_to` 同口径）。
+
+取值只需盖过"两个**非斩杀**目标之间"的常见分差——已明敌人（:data:`_ENEMY_FOCUS` 2.0）
+与手牌贴现（:data:`_HAND_DEFENSE_WEIGHT` × :data:`_HAND_DEFENSE_CAP` = 1.0）之和 3.0——
+就能让"一刀能斩的残局目标"稳过"更健康的敌人"，同时不动伤害牌的整体序（伤害 ＞ 装备 ＞
+过牌）。它不建模"这一刀可能被【闪】抵消"：概率贴现归 C1（记牌那票），本票只做公开可算版。
+"""
+
 _WINE_LETHAL_VALUE = 6.5
 """【酒】+【杀】正好斩杀时，那口【酒】的价值（高于任何单张伤害牌的裸分）。
 
@@ -414,6 +435,23 @@ def _wounded(view: PlayerView) -> bool:
     return me.hp < me.hp_max
 
 
+def _lethal_to(
+    card: CardRef | None, view: PlayerView, seat: int, *, wine: bool | None = None
+) -> bool:
+    """这一下落到 ``seat`` 身上是不是**当场打死**（``_damage_to >= 目标体力``）。
+
+    这是**唯一的斩杀判据**（D2，票 19）：:func:`_score_attack` 的斩杀项问"现在就够不够"，
+    :func:`_wine_enables_kill` 问"加【酒】才够、现在不够"——两条都读这里，不各写一份
+    ``_damage_to`` 比较（改伤害模型时只有一处会漂）。``wine`` 语义同 :func:`_damage_to`：
+    ``None`` 读当前状态，``True`` 推演"这一口已经喝下"。
+
+    只读公开面：目标体力（公开）与 :func:`_damage_to`（藤甲 / 白银狮子 / 【酒】/ 古锭刀都在
+    它里面）。**不**读目标手牌牌面：这一刀会不会被【闪】抵消是概率问题，归 C1（记牌那票），
+    本票的"斩杀"只回答"实际伤害够不够"。
+    """
+    return _damage_to(card, view, seat, wine=wine) >= view.players[seat].hp
+
+
 # ---------------------------------------------------------------------------
 # 每类询问一个 scorer：``(query, action) -> float``
 # ---------------------------------------------------------------------------
@@ -429,6 +467,10 @@ def _score_attack(action: Action, view: PlayerView) -> float:
     扣 :data:`_WASTED_ATTACK_PENALTY`；火【杀】打藤甲 = 2 ⇒ 每多一点加
     :data:`_DAMAGE_POINT_VALUE`。于是"火杀 vs 藤甲选火杀"与"普通杀避开藤甲"都不需要
     专门的牌名分支，只读同一张公开装备表。
+
+    **斩杀项（D2，票 19）**：目标**这一下就死**（判据见 :func:`_lethal_to`）时再加
+    :data:`_LETHAL_STRIKE_VALUE`——残局里"一刀能斩的 1 体力目标"因此压过"更健康的已明
+    敌人"，而伤害不够时一分不加（藤甲 / 白银狮子让这一刀无效 ⇒ 照样是浪费）。
     """
     targets = tuple(action.targets) if isinstance(action, UseCard) else ()
     if not targets:
@@ -453,6 +495,8 @@ def _score_attack(action: Action, view: PlayerView) -> float:
         # 主公是公开信息：反贼据此**略**偏向锁定他，但不能盖过"手牌越多越难命中"的贴现。
         if _is_revealed_enemy(view, seat):
             score += _ENEMY_FOCUS
+        if _lethal_to(card, view, seat):
+            score += _LETHAL_STRIKE_VALUE
     return score
 
 
@@ -460,11 +504,13 @@ def _wine_enables_kill(query: Query) -> bool:
     """【酒】用下去**真的能造成击杀**吗：某个合法【杀】目标正好差这 1 点。
 
     只读公开面：目标体力、目标装备（藤甲 / 白银狮子 / 古锭刀）、自己的 ``wine_active``
-    与**手里的【杀】候选**（候选由引擎从真局面生成）。判据是"这一刀打不死、加【酒】
-    正好打死"：目标体力 > 当前伤害、且 ≤ **喝下酒之后**的伤害
-    （``_damage_to(..., wine=True)``）。白银狮子的封顶把【酒】的 +1 也封在 1 点里
-    （除非我装备青釭剑越过防具），故那种局面下酒不是斩杀。已经能一刀打死（体力 ≤ 伤害）
-    时【酒】是多余的——那条不算"能击杀"，故 AI 不会为补刀白白扔掉【酒】。
+    与**手里的【杀】候选**（候选由引擎从真局面生成）。判据是"这一刀现在打不死、加【酒】
+    正好打死"——两条都走 :func:`_lethal_to` 同一份斩杀判据（D2 的斩杀项也读它，故"酒是
+    斩杀"与"这一刀是斩杀"不会各说各话）：目标现在不是斩杀、且 ``wine=True`` 的推演是斩杀。
+
+    白银狮子的封顶把【酒】的 +1 也封在 1 点里（除非我装备青釭剑越过防具），故那种局面下
+    ``_lethal_to(wine=True)`` 与现在同值 ⇒ 不是斩杀。已经能一刀打死时【酒】是多余的——
+    那条不算"能击杀"，故 AI 不会为补刀白白扔掉【酒】。
     """
     view = query.view
     me = view.seat
@@ -474,14 +520,13 @@ def _wine_enables_kill(query: Query) -> bool:
         for seat in action.targets:
             if seat == me or not 0 <= seat < len(view.players):
                 continue
-            target = view.players[seat]
-            if not target.alive:
+            if not view.players[seat].alive:
                 continue
-            damage = _damage_to(action.card, view, seat)
-            after_wine = _damage_to(action.card, view, seat, wine=True)
-            # ``damage == 0``（普通【杀】打藤甲）时【酒】也救不了这一刀：它无效，不是差 1 点。
-            # ``after_wine == damage``（白银狮子把 +1 封掉）同样不算"加酒正好打死"。
-            if damage < target.hp <= after_wine:
+            # ``_lethal_to`` 已经吸收了两条旧边界：伤害 0（普通【杀】打藤甲）时加酒也无效、
+            # 白银狮子把 +1 封掉时"加酒正好打死"不成立——两者都落在"现在与酒后同为不斩杀"。
+            if not _lethal_to(action.card, view, seat) and _lethal_to(
+                action.card, view, seat, wine=True
+            ):
                 return True
     return False
 
