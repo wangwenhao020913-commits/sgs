@@ -930,8 +930,12 @@ def _counting_play_query(*, drop: tuple[int, ...] = ()):
     return query
 
 
-def _visible_cards(view) -> list:
-    """``PlayerView`` 里**牌面可见**的那些牌（自己手牌 + 四公开区）。"""
+def _view_card_faces(view) -> list:
+    """``PlayerView`` 里**牌面可见**的那些牌（自己手牌 + 四公开区）。
+
+    与产品的 ``_visible_card_faces`` 分开写：夹具自检要独立核"15 张闪真的都在可见区"，
+    调产品实现就成了同义反复。名字也避开产品的 ``_visible_cards``（那张表不含共享区、语义不同）。
+    """
     cards = [*view.self_hand, *view.discard, *view.processing]
     for player in view.players:
         cards.extend(player.equip)
@@ -967,7 +971,7 @@ def test_the_counting_fixtures_reach_real_play_phase_windows():
     """
     query = _counting_play_query()
     assert query.kind == "PLAY_PHASE" and query.actor == COUNTING_AI_SEAT
-    visible = _visible_cards(query.view)
+    visible = _view_card_faces(query.view)
     assert (
         sum(1 for card in visible if card.type == "dodge") == len(COUNTING_DODGES)
     ), "夹具失效：15 张【闪】不再全在可见区"
@@ -978,7 +982,8 @@ def test_the_counting_fixtures_reach_real_play_phase_windows():
 
     broken = _counting_play_query(drop=(COUNTING_SPARE,))
     assert broken.kind == "PLAY_PHASE" and broken.actor == COUNTING_AI_SEAT
-    assert _chosen_targets(broken) == {3}, "夹具失效：守恒破坏的局面不该改变出牌阶段候选"
+    assert _slash_targets(broken) == {1, 3}, "夹具失效：少一张牌不该改变【杀】的目标面"
+    assert _empty_hand_target(broken) == 3, "夹具失效：0 手目标不再是座位 3"
 
     for candidate in (query, broken):
         for seed in TIE_SEEDS:

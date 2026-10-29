@@ -29,7 +29,7 @@
 
 **记牌 P(闪)（C1，票 20）**：【杀】族 / 【万箭齐发】这类**靠【闪】抵消**的伤害牌，其
 "每张手牌 0.25 防御贴现"换成由**目标手里有【闪】的概率**导出的期望伤害
-（:func:`_dodge_probability` / :func:`_expected_attack_points`）。输入只有 ``view`` 的
+（:func:`_dodge_probability` / :func:`_expected_attack_score`）。输入只有 ``view`` 的
 公开面（弃牌堆 / 处理区 / 装备 / 判定 / 自己手牌 / 他家的手牌**数** / 牌堆**数**）＋
 :data:`_DECK_TABLE` 的静态档位表；档位靠守恒量反推，**对不上就关闭记牌**、回落到常量
 贴现（不猜、零协议改动）。武将牌上的牌不在 ``PlayerView`` 里 ⇒ 一旦有牌上武将牌，守恒
@@ -476,12 +476,20 @@ _DODGE_DEFENDED_TYPES = frozenset({"arrow_barrage"})
 不吃 P(闪)，仍走常量手牌贴现。
 """
 
-_DODGE_CONSUMED_POINTS = 1.0
-"""躲掉也消耗对方一张【闪】的收益，用**伤害点**计。
+_DODGE_CONSUMED_VALUE = 1.0
+"""躲掉也消耗对方一张【闪】的收益，用**分数**计（≈ 一张普通牌的价值）。
 
-旧常量贴现的隐含价正好是它：``0.25/张`` = "每张手牌 25% 是【闪】、躲掉抵掉 1 点"，
-4 张封顶 ≈ 1.0 点。逐张计数后，期望伤害项是负的（这一刀可能落空）、消耗项是正的
-（对方的【闪】被真实拿走）；只扣不加会系统性低估进攻（spec §6.3 的批次说明）。
+与 :data:`_DAMAGE_POINT_VALUE` 是两把尺：伤害按"每点 1.4 分"计价，而"对方少一张【闪】"
+按一张普通牌 ≈ 1.0 分计价。**不能把收益写成 1.0 个伤害点**：那样 1 点伤害的期望
+``1×(1−p) + 1×p`` 恒等于 1，P(闪) 就完全不进普通【杀】的分数——那不是"期望伤害"，而是
+把常量贴现删掉了。收益项只把"这一刀被躲掉"的损失**部分**抵回来（否则会系统性低估进攻，
+spec §6.3），所以 P(闪) 始终影响分数：1 点伤害的期望增量从 ``0``（p=0）降到 ``−0.4``
+（p=1，= 白扔一张牌换对方一张【闪】）。
+
+数值上它恰好等于旧贴现的封顶 ``_HAND_DEFENSE_WEIGHT × _HAND_DEFENSE_CAP``（0.25 × 4），
+但**故意各留一个字面量**：那条是"旧模型最多打这么多折"，这条是"一张牌值多少分"；把一条
+绑到另一条上，调旧贴现的封顶就会偷偷改掉"消耗一张牌"的价。改一处时先想清楚是不是也要改
+另一处（与 :data:`_ILLEGAL_PENALTY` / :data:`_ABORT_SKILL_PENALTY` 同一条处置：同值不同义）。
 """
 
 
@@ -626,20 +634,34 @@ def _visible_card_faces(view: PlayerView) -> list[CardRef]:
     return cards
 
 
-def _deck_profile(view: PlayerView) -> tuple[int, Mapping[str, int]] | None:
-    """按守恒量反推牌堆档位；**对不上 / 表自身不自洽就答 None**（关闭记牌，不猜）。
+def _deck_table_is_consistent() -> bool:
+    """字面表自身是否自洽：每一档 ``sum(by_type) == total``。
+
+    这是**运行期的 fail-closed 自检**（票 20 D2 的"档位表被改动 ⇒ 记牌关闭"）：改了逐项没
+    改总数时，不必等测试就关闭记牌。**一致性漂移**（total 与逐项一起改）运行期看不出来——
+    那条由 ``tests/test_heuristic_ai.py`` 的反向对齐测试兜（对准内容包的 `by_type`，漂移即红）。
+    三档共 ≤ 90 个整数相加，放在每次询问的评估路径上也不值得缓存。
+    """
+    return all(
+        sum(by_type.values()) == declared_total
+        for declared_total, by_type in _DECK_TABLE.values()
+    )
+
+
+def _verified_deck_profile(view: PlayerView) -> tuple[int, Mapping[str, int]] | None:
+    """按守恒量反推牌堆档位，返回 ``(总张数, 逐项张数)``；**验不过就答 None**（关闭记牌，不猜）。
+
+    档位**名字**故意不返回：没有读取方（记牌只要总张数与【闪】数），少一个字段就少一处漂移。
 
     三条判据（spec §6.3 的"不猜"）：
 
-    - 表的每一档都要求 ``sum(by_type) == total``——字面表被改坏（改了逐项没改总数）时
-      运行期就能看见，不拿坏表算概率；
+    - 字面表自身自洽（:func:`_deck_table_is_consistent`）；
     - 守恒量必须**恰好等于**某一档的总张数（三档互不相同）——少一张（武将牌上的牌移出
       可见面）也对不上 ⇒ 关闭；
     - 可见牌面的**同类张数不得超过**该档声明（构造局面 / 串档的机械保护）。
     """
-    for declared_total, by_type in _DECK_TABLE.values():
-        if sum(by_type.values()) != declared_total:
-            return None
+    if not _deck_table_is_consistent():
+        return None
     count = _conserved_card_count(view)
     for declared_total, by_type in _DECK_TABLE.values():
         if declared_total != count:
@@ -659,7 +681,7 @@ def _unknown_pool(view: PlayerView) -> tuple[int, int] | None:
     未知池 = 牌堆 + 他家手牌（+ 守恒对得上时本不该存在的武将牌上的牌）。记牌关闭时
     （档位 / 守恒对不上）返回 ``None``，调用方回落到常量贴现。
     """
-    profile = _deck_profile(view)
+    profile = _verified_deck_profile(view)
     if profile is None:
         return None
     total, by_type = profile
@@ -719,11 +741,19 @@ def _defended_by_dodge(card: CardRef | None) -> bool:
     return card.type in _DODGE_DEFENDED_TYPES or _is_slash_card(card)
 
 
-def _expected_attack_points(damage: int, dodge_probability: float) -> float:
-    """``伤害 × (1 − P(闪)) + 消耗一张【闪】的收益 × P(闪)``（用伤害点计）。"""
+def _expected_attack_score(damage: int, dodge_probability: float) -> float:
+    """这张伤害牌的**期望增量分**（不含 :data:`_DAMAGE_BASE` / 目标数 / 关系项）。
+
+    ``_DAMAGE_POINT_VALUE × (damage × (1 − p) − 1) + _DODGE_CONSUMED_VALUE × p``
+
+    - 第一项 = 期望伤害相对"1 点保底"的增量：p=0 时就是 ``_DAMAGE_POINT_VALUE × (damage − 1)``，
+      与旧公式逐字节一致；p=1 时是 ``−_DAMAGE_POINT_VALUE × damage``（这一刀白打）。
+    - 第二项 = "躲掉也消耗一张【闪】"的收益（分数单位，见 :data:`_DODGE_CONSUMED_VALUE`）。
+      它让普通【杀】在 p 升高时只是**小幅**变差（1 点伤害：0 → −0.4），而不是被全价打折。
+    """
     return (
-        damage * (1.0 - dodge_probability)
-        + _DODGE_CONSUMED_POINTS * dodge_probability
+        _DAMAGE_POINT_VALUE * (damage * (1.0 - dodge_probability) - 1.0)
+        + _DODGE_CONSUMED_VALUE * dodge_probability
     )
 
 
@@ -783,9 +813,7 @@ def _score_attack(action: Action, view: PlayerView) -> float:
                 score += _DAMAGE_POINT_VALUE * (damage - 1)
                 score -= hand_defense
             else:
-                score += _DAMAGE_POINT_VALUE * (
-                    _expected_attack_points(damage, dodge_probability) - 1.0
-                )
+                score += _expected_attack_score(damage, dodge_probability)
         # 主公是公开信息：反贼据此**略**偏向锁定他，但不能盖过"手牌越多越难命中"的贴现。
         if _is_revealed_enemy(view, seat):
             score += _ENEMY_FOCUS
@@ -1904,22 +1932,27 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
             {
                 "seat": (True, "自己的座位：判'是否自己'与座位距离"),
                 "players": (True, "逐座位的公开面（体力 / 手牌数 / 装备 / 判定 / 横置 / 酒 / 已明身份）"),
-                "self_hand": (True, "自己的手牌牌面：成本、响应与转化源都从这里挑；记牌也数它（已出现的牌）"),
+                "self_hand": (
+                    True,
+                    "自己的手牌牌面：成本、响应与转化源都从这里挑；记牌也数它——"
+                    "_visible_card_faces 把它算进'已出现的牌'",
+                ),
                 "deck_count": (
                     True,
-                    "记牌守恒量的一项（C1）：与四区 / 手牌数一起反推牌堆档位，"
-                    "再算未知池里的【闪】占比（只有张数、没有顺序）",
+                    "记牌守恒量的一项（C1）：_conserved_card_count 与四区 / 手牌数相加后由"
+                    "_verified_deck_profile 反推牌堆档位，再经 _dodge_probability 算未知池的"
+                    "【闪】占比（只有张数、没有顺序）",
                 ),
                 "discard": (
                     True,
-                    "记牌的**可见牌面**（C1）：弃牌堆的牌已出现，从档位总牌面里扣；"
-                    "顺序对现有打分无影响",
+                    "记牌的**可见牌面**（C1）：_visible_card_faces 把弃牌堆的牌算进'已出现'，"
+                    "_unknown_pool 从档位总牌面里扣；顺序对现有打分无影响",
                 ),
                 "processing": (
                     True,
                     "处理区顶牌 = 本次结算的牌：【无懈可击】按它对目标的利 / 害决定宣不宣"
                     "（D1），顶牌是无懈即嵌套层；【火攻】也靠它给'弃一张换 1 点伤害'的价；"
-                    "记牌也数它（可见牌面，C1）",
+                    "记牌也数它（_visible_card_faces 的可见牌面，C1）",
                 ),
                 "turn_seat": (False, "回合归属不参与打分：没有'我的回合'加权"),
                 "phase": (False, "阶段不参与打分：是不是出牌阶段由询问类型本身表达"),

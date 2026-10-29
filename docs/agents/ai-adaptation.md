@@ -102,7 +102,8 @@
 反方向的先例是 `RespondQuery` 的 `cause` / `target`：D1 无懈目标化（票 18）起它们进打分，
 写成"不读"就把那条规则藏起来了——评审时对照读取方。另一条同类先例是 `deck_count` /
 `discard`：C1 记牌 P(闪)（票 20）起两者进 `_score_attack` 的守恒量 / 未知池计算，登记已从
-"不读"翻成"读"（理由指到 `_dodge_probability`）。
+"不读"翻成"读"，理由点名读它的那几个辅助（`_conserved_card_count` / `_visible_card_faces` /
+`_verified_deck_profile` / `_dodge_probability`），不是只说"记牌读了"。
 
 ### 3.3 `Mode` 表 `MODE_SITES`（`src/sgs/data/identities.py`）
 

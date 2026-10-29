@@ -20,6 +20,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from sgs.agents import (
     SKILL_VALUES,
     HeuristicPlayer,
@@ -617,24 +619,30 @@ def test_the_dodge_probability_grows_with_the_hand_and_is_zero_for_an_empty_one(
     )
 
 
-def test_an_attack_never_scores_below_a_certain_hit_because_a_dodge_still_costs_a_card():
-    """期望伤害 + “躲掉也消耗一张牌”：1 点伤害的期望不因可被【闪】抵消而变负。
+def test_the_dodge_probability_lowers_the_expected_attack_score_and_a_dodge_still_costs_a_card():
+    """期望伤害 + “躲掉也消耗一张牌”：P(闪) 必须真的进普通【杀】的分数。
 
-    这是 spec §6.3 的收益项（否则会系统性低估进攻）的机械面；2 点伤害则随 P(闪) 下降，
-    但始终不低于 1 点——被闪掉也只是回到“1 点伤害”那一笔的等价。
+    旧常量贴现下按"1 点伤害的期望增量"算：p=0 时 0（= 旧公式的 ``1.4 × (damage − 1)``），
+    p=1 时 **−0.4**——白扔一张牌换对方一张【闪】，收益项只抵掉损失的一部分，不是把
+    P(闪) 抵没（把收益写成 1.0 个伤害点会让 1 点伤害的期望恒为 1，那是删贴现、不是记牌）。
+    2 点伤害同样随 P 下降、且下降幅度更大（多出的那点伤害也会被躲掉）。
     """
-    one = [
-        heuristic_scoring._expected_attack_points(1, p)
+    increments = [
+        heuristic_scoring._expected_attack_score(1, p)
         for p in (0.0, 0.25, 0.5, 0.75, 1.0)
     ]
-    assert all(value >= 1.0 - 1e-9 for value in one), one
+    assert increments[0] == 0.0, "p=0 时与旧公式的伤害项一致"
+    assert increments == sorted(increments, reverse=True), increments
+    assert increments[1] < 0.0, "P(闪) 必须压低 1 点伤害的期望（不许被收益项抵没）"
+    assert increments[-1] == pytest.approx(-0.4), increments
 
     two = [
-        heuristic_scoring._expected_attack_points(2, p)
+        heuristic_scoring._expected_attack_score(2, p)
         for p in (0.0, 0.25, 0.5, 0.75, 1.0)
     ]
+    assert two[0] == pytest.approx(1.4), "p=0 时 2 点伤害的增量 = 旧公式的 1.4 × (2 − 1)"
     assert two == sorted(two, reverse=True), two
-    assert two[0] == 2.0 and two[-1] == 1.0, two
+    assert two[-1] == pytest.approx(-0.4), "被躲掉时多出的伤害也落空，只剩“消耗一张牌”的价"
 
 
 def test_the_ai_answers_the_borrowed_sword_holder_window_with_bn_inside_the_targets():
