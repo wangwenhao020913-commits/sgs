@@ -7899,15 +7899,29 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
         && simpleText.includes("对局结束")
         && !simpleText.includes("结算帧"),
       `simple="${simpleText.replace(/\s+/g, " ").slice(-120)}"`);
-    // 真服务端叙事（不是手写夹具）也要真的落到颜色 span 上。
+    // 真服务端叙事（不是手写夹具）也要真的落到颜色 span 上。判据**从载荷派生**：
+    // U1-05 的契约是"前端只按 segments[].cls 上色"，而这一局里出现哪几种颜色由**对局
+    // 内容**决定（谁发动了技能、伤害是不是火焰 / 雷电）——把它钉成固定五个类名等于把
+    // 前端烟测绑在 AI 的行为面上（票 21 的 I1 换了一局的走向就红过）。类名的闭集
+    // （seat / hero / card / card-fire / skill / dmg…）与各色的生成由 test_web.py 的
+    // 叙事契约钉住；这里核"回放该铺的那一段条目，申报的类都真的被画出来了"。
+    // 取数口径与 replay.js 的 `renderReplayLog` 同一处规则：`seq <= 当前记录` 的最后 60 条。
+    const replayCurrent = replay.records[replay.index] || {};
+    const replayLimit = typeof replayCurrent.seq === "number" ? replayCurrent.seq : 0;
+    const replayEntries = (replay.narrative || []).filter((entry) => entry.seq <= replayLimit);
+    const declared = new Set();
+    for (const entry of replayEntries.slice(Math.max(0, replayEntries.length - 60))) {
+      for (const segment of entry.segments || []) {
+        declared.add(`nar-${segment.cls || "act"}`);
+      }
+    }
     const realClasses = new Set();
     for (const item of $("r-log").children) {
       for (const span of item.children) realClasses.add(span.className);
     }
-    check("U1-05o2 真服务端叙事渲染出颜色类（座位 / 武将 / 卡名 / 技能 / 伤害）",
-      ["nar-seat", "nar-hero", "nar-card", "nar-skill", "nar-dmg"]
-        .every((name) => realClasses.has(name)),
-      [...realClasses].join(","));
+    check("U1-05o2 真服务端叙事申报的颜色类都落到 span 上（闭集与生成另由叙事契约钉住）",
+      declared.size >= 3 && [...declared].every((name) => realClasses.has(name)),
+      `declared=${[...declared].join(",")} rendered=${[...realClasses].join(",")}`);
     check("U1-05p 回放完整全部仍是既有逐条记录（切档不改已有行为）",
       /#\d+/.test(allText) && allText.includes("询问"),
       `all="${allText.replace(/\s+/g, " ").slice(-120)}"`);

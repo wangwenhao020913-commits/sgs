@@ -1164,7 +1164,6 @@ def test_the_identity_fixtures_reach_real_windows():
             assert action in candidate.legal_actions, "AI 应答必须落在真实候选面上"
 
 
-@pytest.mark.xfail(strict=True, reason="I1 身份后验未落地（先红后绿，票 21）")
 def test_i1_a_dead_loyalist_leaves_the_lord_facing_an_all_enemy_field():
     """I1 身份保守档：5 人局死 1 忠臣 ⇒ 主公视角的**存活未知座位** P(敌) = 1。
 
@@ -1195,7 +1194,6 @@ def test_i1_a_dead_loyalist_leaves_the_lord_facing_an_all_enemy_field():
     _assert_nullify_answer(query, declare=True)
 
 
-@pytest.mark.xfail(strict=True, reason="I1 身份后验未落地（先红后绿，票 21）")
 def test_i1_the_renegade_keeps_the_lord_off_the_priority_list():
     """I1：内奸语义保留——**不把主公当优先敌人**（先清场、最后弑主）。
 

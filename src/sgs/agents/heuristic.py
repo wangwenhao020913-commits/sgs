@@ -15,7 +15,15 @@
 **不** import ``sgs.engine`` / ``sgs.skills`` / ``sgs.data`` / ``sgs.resolution`` /
 ``sgs.timing``，也不读 ``GameState``——"信息隐藏不是约定"这条因此是可断言事实
 （静态扫描住 ``tests/test_source_discipline.py``）。
-**不做身份推断、不建决策时限**（ADR-011）：拿不准时缺省保守，而不是猜身份。
+**不做行为 / 历史推断、不建决策时限**（ADR-011）：身份只用**公开信号**做配比后验
+（I1，票 21，档 1）；拿不准时缺省保守，而不是猜。
+
+**身份保守档（I1，票 21）**：敌友不再只有"主公 ↔ 反贼"这一对 0/1——已亮明的身份
+（本人 / 主公 / 已阵亡 / ``identity_visible``）从 :data:`_IDENTITY_ROSTER` 里减掉，存活
+未知座位按人头均分得到 ``(P(敌), P(友))``（:func:`_identity_relation`），替换约 8 个用点
+的 0/1（伤害目标、座位步、连环、火攻、无懈、濒死救援）。``P(敌)`` **只作权重**、不升格成
+"必须打谁"的硬判；内奸仍不把主公当优先敌人（主公留到最后）。算不出（人数不在 4~8 /
+配比对不上）⇒ 退回中性的 0/0，与 I1 之前的行为一致。
 
 **无懈目标化（D1，票 18）**：``RESPOND`` 不再"手里有牌就宣"——``cause = NULLIFY`` 时按
 :func:`_nullify_declares` 读处理区顶牌与 ``query.target``，只在"敌人拿到利 / 自己或已明
@@ -252,6 +260,7 @@ _SEAT_PREFIX = "seat:"
 _LORD_SIDE = frozenset({"lord", "loyalist"})
 _REBEL_SIDE = frozenset({"rebel", "renegade"})
 _LORD = "lord"
+_LOYALIST = "loyalist"
 _REBEL = "rebel"
 _RENEGADE = "renegade"
 """身份的**字面量**（:class:`~sgs.data.Identity` 是 ``str`` 枚举，故可直接比）。
@@ -260,11 +269,49 @@ _RENEGADE = "renegade"
 白名单里。``frozenset`` 只作成员判定、从不迭代（源码纪律禁止的是迭代）。
 """
 
+_RENEGADE_ENEMIES = frozenset({_LOYALIST, _REBEL})
+"""内奸的对手：忠臣与反贼。**主公不在里面**——内奸要最后一个人活着，主公早死反贼就赢。
+
+这是"不把主公当优先敌人"的唯一落点：敌友概率（:func:`_identity_relation`）按这张集合
+算，故主公对内奸恒是 ``(0, 0)``（既不是敌人也不是盟友），与票 21 之前的内奸分支同义。
+"""
+
+_IDENTITY_ROSTER: Mapping[int, tuple[str, ...]] = MappingProxyType(
+    {
+        4: (_LORD, _LOYALIST, _REBEL, _RENEGADE),
+        5: (_LORD, _LOYALIST, _REBEL, _REBEL, _RENEGADE),
+        6: (_LORD, _LOYALIST, _REBEL, _REBEL, _REBEL, _RENEGADE),
+        7: (_LORD, _LOYALIST, _LOYALIST, _REBEL, _REBEL, _REBEL, _RENEGADE),
+        8: (
+            _LORD,
+            _LOYALIST,
+            _LOYALIST,
+            _REBEL,
+            _REBEL,
+            _REBEL,
+            _REBEL,
+            _RENEGADE,
+        ),
+    }
+)
+"""4~8 人的身份配比**字面表**（I1 身份保守档，spec §6.4；票 21）。
+
+**为什么是字面表**：同 :data:`_DECK_TABLE`——本模块的可见面白名单不许 import ``sgs.data``，
+而配比是静态内容表、不是询问面。**真源仍是数据层**：
+``tests/test_heuristic_ai.py::test_the_identity_roster_table_matches_the_content_pack``
+把这张表与 ``sgs.data.identities.IDENTITY_ROSTERS`` 逐人数反查（多重集相等），内容包 /
+配比漂移而表没跟上即红。
+
+键 = 座位数（= ``len(view.players)``）；值 = 该人数的身份多重集。**2 人无身份局不在表里**：
+查不到就退回"关系未知"的 ``(0, 0)``（= 票 21 之前的行为），不猜。
+"""
+
 _SEAT_TARGET_VALUE = 2.0
-"""座位步里"已明身份的敌 / 友"的分值幅度（未知身份是中性 0）。"""
+"""座位步里敌 / 友的分值幅度：按 ``P(敌)`` / ``P(友)`` 加权（I1），中性是 ``(0, 0)``。"""
 
 _ENEMY_FOCUS = 2.0
-"""伤害目标里"已明身份的敌人"的加权：小到不盖过手牌防御贴现，只作同价时的偏向。"""
+"""伤害目标里"敌人"的加权：乘 ``P(敌)``（I1；已明敌人是 1.0、未知座位按配比），
+小到不盖过手牌防御贴现，只作同价时的偏向。"""
 
 _DAMAGE_POINT_VALUE = 1.4
 """每**多一点**实际伤害的加权（藤甲的火焰 +1、【酒】的 +1、古锭刀的 +1）。
@@ -814,9 +861,10 @@ def _score_attack(action: Action, view: PlayerView) -> float:
                 score -= hand_defense
             else:
                 score += _expected_attack_score(damage, dodge_probability)
-        # 主公是公开信息：反贼据此**略**偏向锁定他，但不能盖过"手牌越多越难命中"的贴现。
-        if _is_revealed_enemy(view, seat):
-            score += _ENEMY_FOCUS
+        # 身份后验（I1）：P(敌) 只作权重——主公对反贼是 1.0，未知座位按配比均分（5 人局
+        # 主公眼里 3/4）；不升格成"必须打谁"的硬判，也不给 P(友) 扣分（与 I1 之前一样，
+        # 打盟友没有额外惩罚）。小到不能盖过"手牌越多越难命中"的贴现。
+        score += _ENEMY_FOCUS * _identity_relation(view, seat)[0]
         if _lethal_to(card, view, seat):
             score += _LETHAL_STRIKE_VALUE
     return score
@@ -876,18 +924,19 @@ def _elemental_ready(view: PlayerView) -> bool:
     return any(card.type in _ELEMENTAL_SLASH_TYPES for card in view.self_hand)
 
 
-def _is_friendly(view: PlayerView, seat: int) -> bool:
-    """自己或**已明身份**的盟友（未知身份的座位不算朋友，也不算敌人）。"""
-    return seat == view.seat or _is_revealed_ally(view, seat)
-
-
 def _score_iron_chain(action: Action, view: PlayerView) -> float:
     """【铁索连环】：每个目标**独立 toggle**，收益 = 各目标横置 / 重置的收益之和。
 
-    - 已在连环上的**自己 / 已明盟友** ⇒ 重置是好的（脱离传导名单）；
+    每条分支按 :func:`_identity_relation` 的 ``P(敌)`` / ``P(友)`` **加权**（I1，票 21）：
+
+    - 已在连环上的**自己 / 盟友** ⇒ 重置是好的（脱离传导名单）；
     - 已在连环上的**敌人** ⇒ 重置是亏的（替他拆引线）；
     - 未横置的**自己 / 盟友** ⇒ 纯亏（替对手接上引线）；
     - 未横置的**敌人** ⇒ 只有手里有属性引线时才值得（先串起来，下一刀火【杀】烧过去）。
+
+    中性的座位（``(0, 0)``，如无身份局、配比算不出）一分不加——与 I1 之前一致。别退回
+    ``if/elif`` 的两档写法：0/1 时结果虽然相同，但未知座位会被当成"无收益的中性"，那正是
+    概率档要修的那一格（7 人局起，主公眼里的未知座位 P(敌) 已经明显大于 P(友)）。
 
     没有收益时分数为 0：低于「重铸」（:data:`_REFORGE_VALUE`）⇒ 走重铸而不是空放。
     """
@@ -899,19 +948,17 @@ def _score_iron_chain(action: Action, view: PlayerView) -> float:
     for seat in targets:
         if not 0 <= seat < len(view.players):
             continue
-        player = view.players[seat]
-        if player.chained:
-            if _is_friendly(view, seat):
-                score += _IRON_CHAIN_RESET_FRIENDLY_VALUE
-            elif _is_revealed_enemy(view, seat):
-                # 常量名是 ``..._PENALTY``（M6 P0 之前这一行写成了不存在的
-                # ``..._VALUE``：该分支在启用池 16 名时没被随机对局走到，扩到 19 名后
-                # 第一次命中就 NameError；回归测试见 `tests/test_m5_ai_military.py`）。
-                score -= _IRON_CHAIN_RESET_ENEMY_PENALTY
-        elif _is_friendly(view, seat):
-            score -= _IRON_CHAIN_EXPOSE_FRIENDLY_PENALTY
-        elif _is_revealed_enemy(view, seat) and elemental:
-            score += _IRON_CHAIN_CHAIN_ENEMY_VALUE
+        enemy, ally = _identity_relation(view, seat)
+        if view.players[seat].chained:
+            score += _IRON_CHAIN_RESET_FRIENDLY_VALUE * ally
+            # 常量名是 ``..._PENALTY``（M6 P0 之前这一行写成了不存在的 ``..._VALUE``：该分支
+            # 在启用池 16 名时没被随机对局走到，扩到 19 名后第一次命中就 NameError；回归
+            # 测试见 `tests/test_m5_ai_military.py`）。
+            score -= _IRON_CHAIN_RESET_ENEMY_PENALTY * enemy
+        else:
+            score -= _IRON_CHAIN_EXPOSE_FRIENDLY_PENALTY * ally
+            if elemental:
+                score += _IRON_CHAIN_CHAIN_ENEMY_VALUE * enemy
     return score
 
 
@@ -938,8 +985,7 @@ def _score_fire_attack(action: Action, view: PlayerView) -> float:
     for seat in others:
         if _wears(view.players[seat], _VINE_ARMOR):
             score += _FIRE_ATTACK_VINE_BONUS
-        if _is_revealed_enemy(view, seat):
-            score += _ENEMY_FOCUS
+        score += _ENEMY_FOCUS * _identity_relation(view, seat)[0]
     return score
 
 
@@ -1058,15 +1104,16 @@ def _nullify_declares(query: Query) -> bool | None:
     ``view.processing`` 顶牌是本次结算的牌（置入序，先入在前），``query.target`` 是这次
     结算针对的座位。
 
-    | 牌对目标 | 自己 / 已明盟友 | 已明敌人 | 关系未知 |
-    |---|---|---|---|
-    | 利 | 不宣（别拆自己的收益） | **宣**（少给敌人一份） | 不宣 |
-    | 害 | **宣**（替他挡下） | 不宣（替他挡刀） | 不宣 |
+    | 牌对目标 | 宣的条件 | 为什么 |
+    |---|---|---|
+    | 利 | ``P(敌) > P(友)`` | 少给敌人一份；拆盟友的收益是亏 |
+    | 害 | ``P(友) > P(敌)`` | 替朋友挡下；替敌人挡刀是亏 |
 
     - **嵌套无懈**（处理区顶牌是无懈）：不做链求解 ⇒ 不宣（D1 的范围，spec §6.1）；
     - 处理区为空 / ``target`` 缺失（协议上无懈窗口恒有目标，这里只作防御）：不宣；
-    - 关系只读**现有已亮明身份信号**（:func:`_is_revealed_enemy` / :func:`_is_revealed_ally`），
-      概率档留给票 21。
+    - 关系按 :func:`_identity_relation` 的 ``(P(敌), P(友))`` 加权（I1，票 21）：这是
+      "利 / 害"两笔对称价下的期望值判据——宣与不宣的收益是一对相反数，故**比较两个概率**
+      就够了；**平**（含算不出的 ``(0, 0)``）⇒ 不宣，与票 18 的中性口径一致。
     """
     if getattr(query, "cause", None) is not WindowCause.NULLIFY:
         return None
@@ -1079,9 +1126,10 @@ def _nullify_declares(query: Query) -> bool | None:
     harmed = _nullified_target_is_harmed(view.processing[-1], view, target)
     if harmed is None:
         return False
+    enemy, ally = _identity_relation(view, target)
     if harmed:
-        return target == view.seat or _is_revealed_ally(view, target)
-    return _is_revealed_enemy(view, target)
+        return ally > enemy
+    return enemy > ally
 
 
 def _score_respond(query: Query, action: Action) -> float:
@@ -1104,16 +1152,20 @@ def _score_respond(query: Query, action: Action) -> float:
 
 
 def _peach_save_value(query: PeachQuery) -> float:
-    """在求桃窗口里救 `query.dying` 的价值（真【桃】与急救的转化【桃】共用）。"""
+    """在求桃窗口里救 ``query.dying`` 的价值（真【桃】与急救的转化【桃】共用）。
+
+    关系按 ``P(敌)`` **加权**（I1，票 21）：原来"已明敌人 ⇒ −6、其余 ⇒ +6"换成
+    ``_SAVE_VALUE × (1 − 2·P(敌))``——三个质量各自计价（救盟友 +6、救敌人 −6、两边都不是
+    +6）化简后就是这个式子，故 P(敌)=0 / 1 时与票 21 之前**同值**。5 人局主公眼里的未知
+    座位 P(敌)=3/4 ⇒ −3：**大概率是敌人就不救**（仍不是硬判，见 spec §6.4）。
+    """
     if query.dying == query.view.seat:
         return _SAVE_VALUE
     me = _me(query.view)
     if me.hp <= 1 and me.hand_count <= 1:
         return _CONSERVE_VALUE
-    if _is_revealed_enemy(query.view, query.dying):
-        # 已明的敌人（主公 ↔ 反贼）：救活他等于替对手续命。
-        return -_SAVE_VALUE
-    return _SAVE_VALUE
+    enemy, _ = _identity_relation(query.view, query.dying)
+    return _SAVE_VALUE * (1.0 - 2.0 * enemy)
 
 
 def _score_peach(query: Query, action: Action) -> float:
@@ -1307,32 +1359,98 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
 )
 
 
-def _is_revealed_enemy(view: PlayerView, seat: int) -> bool:
-    """``seat`` 是不是**已明身份**的敌人（只用公开信息）。
-
-    身份只对本人 / 主公 / 已阵亡者可见（``PlayerPublic.identity``），故可靠的敌我信号
-    就是"主公 ↔ 反贼/内奸"这一对；其余一律当作未知（不猜、不读隐藏面）。
-    """
-    mine = view.players[view.seat].identity
-    theirs = view.players[seat].identity
-    if mine is None or theirs is None:
-        return False
-    if mine == _RENEGADE:
-        # 内奸要**最后一个人活着**：主公提前死 ⇒ 反贼直接赢，自己也输。故不把主公当
-        # 优先敌人（其余都算对手）；这是内奸唯一的可靠策略信号。
-        return theirs not in (_RENEGADE, _LORD)
-    if mine == _REBEL:
-        return theirs in _LORD_SIDE
+def _enemy_identities(mine: str) -> frozenset[str]:
+    """``mine`` 这个身份眼里的**敌人身份集合**（内奸不含主公，见 :data:`_RENEGADE_ENEMIES`）。"""
     if mine in _LORD_SIDE:
-        return theirs in _REBEL_SIDE
-    return False
+        return _REBEL_SIDE
+    if mine == _REBEL:
+        return _LORD_SIDE
+    if mine == _RENEGADE:
+        return _RENEGADE_ENEMIES
+    return frozenset()
 
 
-def _is_revealed_ally(view: PlayerView, seat: int) -> bool:
-    """``seat`` 是不是**已明身份**的盟友（唯一的可靠情形：主公与我同在主公阵营）。"""
+def _ally_identities(mine: str) -> frozenset[str]:
+    """``mine`` 这个身份眼里的**盟友身份集合**（内奸没有盟友）。"""
+    if mine in _LORD_SIDE:
+        return _LORD_SIDE
+    if mine == _REBEL:
+        return frozenset({_REBEL})
+    return frozenset()
+
+
+def _unknown_identity_remainder(
+    view: PlayerView,
+) -> tuple[tuple[str, ...], int] | None:
+    """配比减掉**已亮明身份**后的剩余多重集 + 存活未知座位数（I1 身份保守档）。
+
+    已亮明 = ``PlayerPublic.identity`` 非空（本人 / 主公 / 已阵亡 / ``identity_visible``）。
+    三条"算不出"一律 ``None``（**不猜**，调用方退回 ``(0, 0)``＝票 21 之前的行为）：
+
+    - 人数不在 :data:`_IDENTITY_ROSTER` 里（2 人无身份局、3 人以下的构造局面）；
+    - 亮明身份不在配比里（人为局面写错了阵营，如两个主公）；
+    - 阵亡却身份不可见（投影上不该发生），或剩余人数与存活未知座位数对不上。
+    """
+    roster = _IDENTITY_ROSTER.get(len(view.players))
+    if roster is None:
+        return None
+    remaining = list(roster)
+    unknown = 0
+    for player in view.players:
+        if player.identity is not None:
+            try:
+                remaining.remove(player.identity)
+            except ValueError:
+                return None
+        elif player.alive:
+            unknown += 1
+        else:
+            return None
+    if unknown != len(remaining):
+        return None
+    return tuple(remaining), unknown
+
+
+def _identity_relation(view: PlayerView, seat: int) -> tuple[float, float]:
+    """``seat`` 与我的关系权重 ``(P(敌), P(友))``——只读公开面（I1 身份保守档，票 21）。
+
+    三档，替换的是原来"已明敌人 ⇒ 1、其余 ⇒ 0"的 0/1：
+
+    - **已亮明**（``identity`` 非空）⇒ 精确的 0/1，与票 21 之前逐字节一致（配比表不参与
+      这一步：亮明的身份是**确定**信息，不因表对不对而变）；
+    - **未知** ⇒ :func:`_unknown_identity_remainder` 的**均匀后验**：剩余多重集按人头均分，
+      ``P = 该集合里"敌人 / 盟友身份"的份数 ÷ 存活未知座位数``；
+    - **算不出**（见上）⇒ ``(0.0, 0.0)``，即今天的中性（不猜）。
+
+    自己恒 ``(0.0, 1.0)``；``P(敌) + P(友) ≤ 1``，剩下的质量是"两边都不是"（反贼眼里的
+    内奸、内奸眼里的主公）。**``P(敌)`` 只作权重**：调用方乘在原 0/1 的幅度上，不把它
+    升格成"必须打谁"的硬判（spec §6.4）。
+    """
+    if seat == view.seat:
+        return 0.0, 1.0
+    if not 0 <= seat < len(view.players):
+        return 0.0, 0.0
     mine = view.players[view.seat].identity
+    if mine is None:
+        return 0.0, 0.0
+    enemies = _enemy_identities(mine)
+    allies = _ally_identities(mine)
     theirs = view.players[seat].identity
-    return mine in _LORD_SIDE and theirs == _LORD
+    if theirs is not None:
+        return (
+            1.0 if theirs in enemies else 0.0,
+            1.0 if theirs in allies else 0.0,
+        )
+    remainder = _unknown_identity_remainder(view)
+    if remainder is None:
+        return 0.0, 0.0
+    remaining, unknown = remainder
+    if unknown <= 0:  # pragma: no cover - 未知座位自己就是其中一个，防御分支
+        return 0.0, 0.0
+    return (
+        sum(1 for identity in remaining if identity in enemies) / unknown,
+        sum(1 for identity in remaining if identity in allies) / unknown,
+    )
 
 
 _HOSTILE_SEAT_STEPS = (
@@ -1392,6 +1510,11 @@ def _score_seat_option(
     ``conversion``（W4-fix-6，D.1）：这一步来自**转化技清单**（``transform_preactivations``）
     ⇒ 座位是转化牌的目标（【杀】/【乐不思蜀】都指向对手）。判据由**清单来源**派生，
     不手抄技能 id，第五条转化技因此不会再静默落进"帮盟友"分支。
+
+    **敌友按 ``(P(敌), P(友))`` 加权**（I1，票 21）——三类座位步各自是一条线性插值，故已明
+    身份的 0/1 与票 21 之前逐字节一致，未知身份才从"中性 0"变成配比后验：
+    指向对手 ``2·P(敌)``；偷牌 ``1 + 1·P(敌)``（对任何人都有收益，敌人更高）；帮助类
+    ``2·(P(友) − P(敌))``（自己恒 +2，已明敌人 −2）。**不硬判**：P 只做幅度。
     """
     view = query.view
     try:
@@ -1400,19 +1523,19 @@ def _score_seat_option(
         return 0.0
     if not 0 <= seat < len(view.players):
         return 0.0
-    enemy = _is_revealed_enemy(view, seat)
+    enemy, ally = _identity_relation(view, seat)
     skill = (
         str(skill_id)
         if skill_id is not None
         else str(getattr(query, "skill_id", "") or "")
     )
     if conversion or skill.startswith(_HOSTILE_SEAT_STEPS):
-        return _SEAT_TARGET_VALUE if enemy else 0.0
+        return _SEAT_TARGET_VALUE * enemy
     if skill.startswith(_STOLEN_CARD_SEAT_STEPS):
-        return _SEAT_TARGET_VALUE if enemy else _STOLEN_CARD_SEAT_VALUE
-    if seat == view.seat or _is_revealed_ally(view, seat):
-        return _SEAT_TARGET_VALUE
-    return -_SEAT_TARGET_VALUE if enemy else 0.0
+        return _STOLEN_CARD_SEAT_VALUE + (
+            _SEAT_TARGET_VALUE - _STOLEN_CARD_SEAT_VALUE
+        ) * enemy
+    return _SEAT_TARGET_VALUE * (ally - enemy)
 
 
 def _score_select_option(query: Query, action: Action) -> float:
@@ -1970,7 +2093,13 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 "chained": (True, "【铁索连环】打分读横置状态（``exclude=True``，但询问自带）"),
                 "flipped": (False, "翻面只决定'跳过回合'，不影响任何打分分支"),
                 "wine_active": (True, "【酒】：下一张【杀】+1 的实际伤害"),
-                "identity": (True, "唯一敌我信号（本人 / 主公 / 已阵亡可见；隐藏身份不猜）"),
+                "identity": (
+                    True,
+                    "敌友的唯一信号（I1，票 21）：本人 / 主公 / 已阵亡可见，_identity_relation "
+                    "把已亮明的身份从配比字面表里减掉，存活未知座位按人头均分得 "
+                    "(P(敌), P(友))——伤害目标 / 座位步 / 连环 / 火攻 / 无懈 / 濒死救援都读它；"
+                    "算不出就退回中性的 (0, 0)，不做行为 / 历史推断",
+                ),
                 "hero": (False, "武将 id 不参与打分：技能语义走 ``SKILL_VALUES``，不按武将近路"),
                 "kingdom": (False, "势力不参与打分：敌友只按 identity，不看势力同异"),
             }

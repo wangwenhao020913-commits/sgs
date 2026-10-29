@@ -68,8 +68,9 @@ MODE_SITES: Mapping[Mode, Mapping[str, ModeSite]] = MappingProxyType(
             {
                 "relation": ModeSite(
                     (),
-                    "不适用：无身份局不发放身份 ⇒ 没有队伍，AI 的 `_is_friendly` 只剩"
-                    "'自己'（其余座位一律不是盟友）；不读 identity 面",
+                    "不适用：无身份局不发放身份 ⇒ 没有队伍可认、也没有配比可减；`identity` 恒"
+                    "None，故 `sgs.agents.heuristic._identity_relation` 对别的座位恒答 (0, 0)"
+                    "（只有自己 (0, 1)）——AI 侧因此没有要读的 identity 面",
                 ),
                 "victory": ModeSite(
                     ("sgs.engine.game:Engine.check_game_end",),
@@ -89,12 +90,10 @@ MODE_SITES: Mapping[Mode, Mapping[str, ModeSite]] = MappingProxyType(
         Mode.IDENTITY: MappingProxyType(
             {
                 "relation": ModeSite(
-                    (
-                        "sgs.agents.heuristic:_is_friendly",
-                        "sgs.agents.heuristic:_is_revealed_enemy",
-                    ),
-                    "只认 `PlayerPublic.identity`（本人 / 主公 / 已阵亡可见）：隐藏身份现在当"
-                    "未知（0/1 两档，ADR-011 不做身份推断），概率档是 I1 那票的事",
+                    ("sgs.agents.heuristic:_identity_relation",),
+                    "`PlayerPublic.identity`（本人 / 主公 / 已阵亡 / `identity_visible`）先从"
+                    "`IDENTITY_ROSTER` 里减掉，存活未知座位按人头均分得 `(P(敌), P(友))`"
+                    "（I1 身份保守档，票 21；只作权重、不硬判）；算不出就退回中性的 (0, 0)",
                 ),
                 "victory": ModeSite(
                     ("sgs.engine.victory:solve_identity_outcome",),

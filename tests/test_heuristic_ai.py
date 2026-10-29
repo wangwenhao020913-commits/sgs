@@ -35,6 +35,7 @@ from sgs.agents import heuristic as heuristic_scoring
 from sgs.data import (
     Color,
     Gender,
+    IDENTITY_ROSTERS,
     Identity,
     Kingdom,
     RuleConfig,
@@ -643,6 +644,121 @@ def test_the_dodge_probability_lowers_the_expected_attack_score_and_a_dodge_stil
     assert two[0] == pytest.approx(1.4), "p=0 时 2 点伤害的增量 = 旧公式的 1.4 × (2 − 1)"
     assert two == sorted(two, reverse=True), two
     assert two[-1] == pytest.approx(-0.4), "被躲掉时多出的伤害也落空，只剩“消耗一张牌”的价"
+
+
+# ---------------------------------------------------------------------------
+# 身份保守档（I1，票 21）：配比字面表反查 + 均匀后验的契约
+# ---------------------------------------------------------------------------
+
+
+def _identity_view(identities, *, viewer: int, dead: tuple[int, ...] = ()):
+    """坐在 ``viewer`` 的身份局视角（座位数 = ``len(identities)``，不跑引擎）。"""
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=len(identities)),
+        seats=[
+            SeatSpec(
+                hp=0 if seat in dead else 4,
+                hp_max=4,
+                alive=seat not in dead,
+                identity=identity,
+            )
+            for seat, identity in enumerate(identities)
+        ],
+        deck=_deck_excluding(),
+    )
+    return project(state, viewer)
+
+
+def test_the_identity_roster_table_matches_the_content_pack():
+    """身份的配比字面表必须与 ``sgs.data.identities.IDENTITY_ROSTERS`` 逐人数相等。
+
+    反查方向与记牌的档位表**相同且刻意**：AI 模块不能 import ``sgs.data``（可见面白名单），
+    表只能手抄；配比漂移（改人数 / 换阵营配比）而表没跟上 ⇒ 这条立刻红。多重集按排序比，
+    人数键两个方向都核（漏一档、多一档都红）。
+    """
+    table = heuristic_scoring._IDENTITY_ROSTER
+
+    assert set(table) == set(IDENTITY_ROSTERS), "人数键漂了（4~8 逐个都要在）"
+    for count, roster in IDENTITY_ROSTERS.items():
+        assert sorted(table[count]) == sorted(
+            identity.value for identity in roster
+        ), f"{count} 人局的配比漂了"
+
+
+def test_the_identity_posterior_is_a_uniform_split_of_the_remaining_roster():
+    """P(敌) / P(友) = 5 人局配比减掉亮明身份后按**人头均分**的比例（四种身份各读一次）。
+
+    5 人配比 = 主公 / 忠臣 / 反贼 / 反贼 / 内奸；观察者坐在 0 号（自己的身份对本人可见），
+    1 号是主公（主公恒亮明）⇒ 减掉 2 个已亮明身份后，剩下的 3 个身份均分给存活未知座位：
+
+    | 我 | 剩下的多重集 | P(敌) | P(友) |
+    |---|---|---|---|
+    | 主公 | 忠 / 反 / 反 / 内 | 3/4 | 1/4 |
+    | 忠臣 | 反 / 反 / 内 | 1 | 0 |
+    | 反贼 | 忠 / 反 / 内 | 1/3（忠臣） | 1/3（反贼） |
+    | 内奸 | 忠 / 反 / 反 | 1 | 0（没有盟友） |
+
+    内奸那一行同时钉住"主公不在内奸的敌人里"：主公是**已亮明**的另一席，不参与均分。
+    """
+    cases = (
+        (Identity.LORD, (Identity.LORD, Identity.REBEL, Identity.REBEL, Identity.REBEL, Identity.RENEGADE), 0.75, 0.25),
+        (Identity.LOYALIST, (Identity.LOYALIST, Identity.LORD, Identity.REBEL, Identity.REBEL, Identity.RENEGADE), 1.0, 0.0),
+        (Identity.REBEL, (Identity.REBEL, Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.RENEGADE), 1 / 3, 1 / 3),
+        (Identity.RENEGADE, (Identity.RENEGADE, Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.REBEL), 1.0, 0.0),
+    )
+    for mine, identities, expected_enemy, expected_ally in cases:
+        view = _identity_view(identities, viewer=0)
+        enemy, ally = heuristic_scoring._identity_relation(view, 2)
+        assert mine is view.players[0].identity, f"{mine}：观察者身份没落在 0 号"
+        assert enemy == pytest.approx(expected_enemy), f"{mine} 的 P(敌) = {enemy}"
+        assert ally == pytest.approx(expected_ally), f"{mine} 的 P(友) = {ally}"
+
+
+def test_the_identity_relation_keeps_revealed_seats_at_zero_or_one():
+    """已亮明的身份仍是精确 0/1——配比后验只补**未知**座位，不参与亮明的那一步。
+
+    观察者是忠臣（座位 1）：主公（座位 0）恒亮明 ⇒ 精确 ``(0, 1)``；自己 ⇒ ``(0, 1)``；
+    反贼（座位 2，未亮明）⇒ 走后验。这条与 D1/D2 的纯函数契约互为反面：那两条证明"未知
+    座位有了概率"，这条证明"已经确定的没被概率搅动"。
+    """
+    view = _identity_view(
+        (Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.REBEL, Identity.RENEGADE),
+        viewer=1,
+    )
+
+    assert heuristic_scoring._identity_relation(view, 1) == (0.0, 1.0), "自己恒是盟友"
+    assert heuristic_scoring._identity_relation(view, 0) == (0.0, 1.0), "主公对忠臣是盟友"
+    assert heuristic_scoring._identity_relation(view, 2)[0] == pytest.approx(1.0), (
+        "未知座位走后验（忠臣眼里剩下全是敌人）"
+    )
+
+
+def test_the_identity_posterior_falls_back_to_neutral_when_it_cannot_be_computed():
+    """算不出就退回中性的 ``(0, 0)``（= 票 21 之前的行为），**不猜**。
+
+    两条"算不出"路径：
+
+    - **无身份局**（2 人 ⇒ ``identity`` 全 None）：别人的关系恒 ``(0, 0)``；
+    - **亮明身份不在配比里**（5 人局出现两个主公，人为局面写错了阵营）：未知座位退回
+      ``(0, 0)``；但**已亮明的**座位不受影响（座位 2 的主公对反贼仍是精确 ``(1, 0)``）
+      ——"亮明的身份是确定的"不依赖配比表对不对。
+    """
+    no_identity = _identity_view((None, None), viewer=0)
+    assert heuristic_scoring._identity_relation(no_identity, 1) == (0.0, 0.0), (
+        "无身份局没有队伍可认"
+    )
+
+    two_lords = _identity_view(
+        (Identity.REBEL, Identity.LORD, Identity.LORD, Identity.REBEL, Identity.REBEL),
+        viewer=0,
+    )
+    assert heuristic_scoring._identity_relation(two_lords, 3) == (0.0, 0.0), (
+        "配比里只有一个主公 ⇒ 减不掉两个 ⇒ 未知座位不猜"
+    )
+    assert heuristic_scoring._identity_relation(two_lords, 2) == (1.0, 0.0), (
+        "已亮明的主公对反贼仍是敌人（精确档不经过配比）"
+    )
 
 
 def test_the_ai_answers_the_borrowed_sword_holder_window_with_bn_inside_the_targets():
