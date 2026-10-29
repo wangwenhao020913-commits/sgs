@@ -25,8 +25,15 @@
 :data:`_LETHAL_STRIKE_VALUE`，残局不再把能一刀斩的目标放跑。判据收成
 :func:`_lethal_to`（``_damage_to >= 目标体力``）**一处**：伤害牌打分问"现在就够不够"，
 :func:`_wine_enables_kill` 问"加【酒】才够"，两者读同一份实际伤害（藤甲 / 白银狮子 /
-【酒】/ 古锭刀），不会各说各话。看不到目标手牌 ⇒ 不做"可能被【闪】抵消"的概率贴现
-（归 C1 记牌那票）。
+【酒】/ 古锭刀），不会各说各话。D2 本身不读目标手牌。
+
+**记牌 P(闪)（C1，票 20）**：【杀】族 / 【万箭齐发】这类**靠【闪】抵消**的伤害牌，其
+"每张手牌 0.25 防御贴现"换成由**目标手里有【闪】的概率**导出的期望伤害
+（:func:`_dodge_probability` / :func:`_expected_attack_points`）。输入只有 ``view`` 的
+公开面（弃牌堆 / 处理区 / 装备 / 判定 / 自己手牌 / 他家的手牌**数** / 牌堆**数**）＋
+:data:`_DECK_TABLE` 的静态档位表；档位靠守恒量反推，**对不上就关闭记牌**、回落到常量
+贴现（不猜、零协议改动）。武将牌上的牌不在 ``PlayerView`` 里 ⇒ 一旦有牌上武将牌，守恒
+就对不上、记牌关闭（spec §6.3 登记的已知近似，fail-closed）。
 
 **M5-07 的属性 / 连环 / 酒**：军争的取舍只接进**既有打分器**，不另造策略框架。用到的
 公开事实 = 目标的装备区（藤甲 / 白银狮子 / 古锭刀）、自己的装备（青釭剑 / 朱雀羽扇）、
@@ -347,6 +354,136 @@ _FIRE_ATTACK_DISCARD_VALUE = 3.0
 （【桃】6 / 【闪】4 / 【无懈】3.5）留着更值；比它便宜的（【杀】、装备、普通锦囊）弃掉。
 """
 
+_DECK_TABLE: Mapping[str, tuple[int, Mapping[str, int]]] = MappingProxyType(
+    {
+        "basic_53": (
+            53,
+            MappingProxyType(
+                {
+                    "dodge": 15,
+                    "peach": 8,
+                    "slash": 30,
+                }
+            ),
+        ),
+        "standard_108": (
+            108,
+            MappingProxyType(
+                {
+                    "dodge": 15,
+                    "peach": 8,
+                    "slash": 30,
+                    "dismantlement": 6,
+                    "snatch": 5,
+                    "ex_nihilo": 4,
+                    "nullify": 4,
+                    "duel": 3,
+                    "barbarian_invasion": 3,
+                    "arrow_barrage": 1,
+                    "peach_garden": 1,
+                    "borrowed_sword": 2,
+                    "harvest": 2,
+                    "indulgence": 3,
+                    "lightning": 2,
+                    "crossbow": 2,
+                    "qinggang_sword": 1,
+                    "double_sword": 1,
+                    "green_dragon_blade": 1,
+                    "serpent_spear": 1,
+                    "axe": 1,
+                    "halberd": 1,
+                    "qilin_bow": 1,
+                    "ice_sword": 1,
+                    "eight_diagrams": 2,
+                    "renwang_shield": 1,
+                    "jueying": 1,
+                    "dilu": 1,
+                    "zhuahuang_feidian": 1,
+                    "chitu": 1,
+                    "dawan": 1,
+                    "zixing": 1,
+                }
+            ),
+        ),
+        "standard_ex_160": (
+            160,
+            MappingProxyType(
+                {
+                    "dodge": 24,
+                    "peach": 12,
+                    "slash": 30,
+                    "fire_slash": 5,
+                    "thunder_slash": 9,
+                    "wine": 5,
+                    "dismantlement": 6,
+                    "snatch": 5,
+                    "ex_nihilo": 4,
+                    "nullify": 7,
+                    "duel": 3,
+                    "barbarian_invasion": 3,
+                    "arrow_barrage": 1,
+                    "peach_garden": 1,
+                    "borrowed_sword": 2,
+                    "harvest": 2,
+                    "supply_shortage": 2,
+                    "fire_attack": 3,
+                    "iron_chain": 6,
+                    "indulgence": 3,
+                    "lightning": 2,
+                    "crossbow": 2,
+                    "qinggang_sword": 1,
+                    "double_sword": 1,
+                    "green_dragon_blade": 1,
+                    "serpent_spear": 1,
+                    "axe": 1,
+                    "halberd": 1,
+                    "qilin_bow": 1,
+                    "ice_sword": 1,
+                    "eight_diagrams": 2,
+                    "renwang_shield": 1,
+                    "silver_lion": 1,
+                    "vine_armor": 2,
+                    "ancient_scimitar": 1,
+                    "vermilion_feather_fan": 1,
+                    "jueying": 1,
+                    "dilu": 1,
+                    "zhuahuang_feidian": 1,
+                    "chitu": 1,
+                    "dawan": 1,
+                    "zixing": 1,
+                    "hualiu": 1,
+                }
+            ),
+        ),
+    }
+)
+"""记牌的牌堆档位**字面表**（票 05 §2 / spec §6.3；C1，票 20）。
+
+**为什么是字面表**：本模块的可见面白名单不许 import ``sgs.data``
+（``tests/test_source_discipline.py`` 的 ``HEURISTIC_ALLOWED_SGS_MODULES``），而牌堆分布是
+静态内容表、不是询问面。**真源仍是内容包**：``tests/test_heuristic_ai.py`` 把这张表与
+``load_content_pack(...).decks[*].expect.by_type`` 逐项反查，内容包漂移而表没跟上即红。
+
+键 = 牌堆档位；值 = ``(总张数, {牌名: 张数})``。总张数**独立成项**而不是现算 ``sum``：
+字面表被改坏（改了逐项没改总数）时，:func:`_deck_profile` 的运行期 self-check 能看见并
+关闭记牌。三档总张数互不相同（53 / 108 / 160）⇒ 守恒量能唯一定档。
+"""
+
+_DODGE_DEFENDED_TYPES = frozenset({"arrow_barrage"})
+"""**用【闪】抵消**的伤害牌里不在【杀】族的那几张（【万箭齐发】）。
+
+【杀】族走 :func:`_is_slash_card`（行为表的族键）；【决斗】/【南蛮入侵】要的是【杀】，
+不吃 P(闪)，仍走常量手牌贴现。
+"""
+
+_DODGE_CONSUMED_POINTS = 1.0
+"""躲掉也消耗对方一张【闪】的收益，用**伤害点**计。
+
+旧常量贴现的隐含价正好是它：``0.25/张`` = "每张手牌 25% 是【闪】、躲掉抵掉 1 点"，
+4 张封顶 ≈ 1.0 点。逐张计数后，期望伤害项是负的（这一刀可能落空）、消耗项是正的
+（对方的【闪】被真实拿走）；只扣不加会系统性低估进攻（spec §6.3 的批次说明）。
+"""
+
 
 def _is_slash_card(card: CardRef | None) -> bool:
     """这张牌的**产物牌型**是不是【杀】族（普通 / 火 / 雷与转化、虚拟产物）。
@@ -459,12 +596,144 @@ def _lethal_to(
 
 
 # ---------------------------------------------------------------------------
+# 记牌 P(闪)（C1，票 20）：只读 view 的公开面 + 静态档位表
+# ---------------------------------------------------------------------------
+
+
+def _conserved_card_count(view: PlayerView) -> int:
+    """整局实体牌的**守恒量**：牌堆 + 全部手牌数 + 弃牌堆 + 处理区 + 全部装备 / 判定区。
+
+    每一项都在 :class:`~sgs.state.PlayerView` 的公开面里（牌堆与他家手牌只有张数，自己的
+    手牌是牌面）。**武将牌上的牌不算在内**：它移出了这些区域，又不在 ``PlayerView`` 里——
+    那是 M6 的已知近似（spec §6.3），见 :func:`_dodge_probability`。
+    """
+    total = view.deck_count + len(view.discard) + len(view.processing)
+    for player in view.players:
+        total += player.hand_count + len(player.equip) + len(player.judge)
+    return total
+
+
+def _visible_card_faces(view: PlayerView) -> list[CardRef]:
+    """本视角里**看得到牌面**的牌：自己手牌 + 弃牌堆 + 处理区 + 全部装备 / 判定区。
+
+    与 :func:`_visible_cards` 的区别：那张表是选牌步的"可指认集合"（不含两个共享区），
+    这张表是记牌的"已出现的牌"（共享区恰恰是最主要的来源）。
+    """
+    cards = [*view.self_hand, *view.discard, *view.processing]
+    for player in view.players:
+        cards.extend(player.equip)
+        cards.extend(player.judge)
+    return cards
+
+
+def _deck_profile(view: PlayerView) -> tuple[int, Mapping[str, int]] | None:
+    """按守恒量反推牌堆档位；**对不上 / 表自身不自洽就答 None**（关闭记牌，不猜）。
+
+    三条判据（spec §6.3 的"不猜"）：
+
+    - 表的每一档都要求 ``sum(by_type) == total``——字面表被改坏（改了逐项没改总数）时
+      运行期就能看见，不拿坏表算概率；
+    - 守恒量必须**恰好等于**某一档的总张数（三档互不相同）——少一张（武将牌上的牌移出
+      可见面）也对不上 ⇒ 关闭；
+    - 可见牌面的**同类张数不得超过**该档声明（构造局面 / 串档的机械保护）。
+    """
+    for declared_total, by_type in _DECK_TABLE.values():
+        if sum(by_type.values()) != declared_total:
+            return None
+    count = _conserved_card_count(view)
+    for declared_total, by_type in _DECK_TABLE.values():
+        if declared_total != count:
+            continue
+        seen: dict[str, int] = {}
+        for card in _visible_card_faces(view):
+            seen[card.type] = seen.get(card.type, 0) + 1
+            if seen[card.type] > by_type.get(card.type, 0):
+                return None
+        return declared_total, by_type
+    return None
+
+
+def _unknown_pool(view: PlayerView) -> tuple[int, int] | None:
+    """未知池的 ``(张数, 【闪】张数)``：档位总牌面 − 可见牌面；记牌关闭时答 ``None``。
+
+    未知池 = 牌堆 + 他家手牌（+ 守恒对得上时本不该存在的武将牌上的牌）。记牌关闭时
+    （档位 / 守恒对不上）返回 ``None``，调用方回落到常量贴现。
+    """
+    profile = _deck_profile(view)
+    if profile is None:
+        return None
+    total, by_type = profile
+    visible = _visible_card_faces(view)
+    unknown = total - len(visible)
+    dodges = by_type.get("dodge", 0) - sum(
+        1 for card in visible if card.type == "dodge"
+    )
+    if unknown < 0 or dodges < 0 or dodges > unknown:
+        return None
+    return unknown, dodges
+
+
+def _dodge_probability(view: PlayerView, seat: int) -> float | None:
+    """目标 ``seat`` **手里至少有一张【闪】**的概率；记牌关闭时答 ``None``。
+
+    只用 ``view`` 的公开面 + :data:`_DECK_TABLE` 的静态档位表（零协议改动、零全知读点）：
+    未知池按**无放回**抽 ``hand_count`` 张算超几何概率
+    ``1 − C(未知 − 闪, h) / C(未知, h)``——"由未知池里【闪】的占比导出"的精确版本
+    （不放回；spec §6.3 的"4 张手牌约 47%"就是 4 张手牌在 standard_108 开局时的量级）。
+
+    **已知误差（登记，不补协议）**：武将牌上的牌移出了所有可数区域、又不在
+    :class:`~sgs.state.PlayerView` 里 ⇒ 守恒量对不上 ⇒ 记牌**关闭**（fail-closed）。
+    这与"把它算进未知池"的近似等价，只是连档位都不猜：宁可回到今天的常量贴现。
+    """
+    if not 0 <= seat < len(view.players):
+        return None
+    # 先判"记牌能不能用"，再看张数：0 手目标的答案恒为 0，但"记牌关闭"必须仍然可见
+    # （``None`` = 不知道 / 不可用），否则调用方分不清"没有闪"和"没在记牌"。
+    pool = _unknown_pool(view)
+    if pool is None:
+        return None
+    unknown, dodges = pool
+    hand = view.players[seat].hand_count
+    if hand <= 0:
+        return 0.0
+    if unknown < hand:
+        return None
+    if dodges == 0:
+        return 0.0
+    if dodges >= unknown:
+        return 1.0
+    # C(未知 − 闪, h) / C(未知, h) = ∏ (未知 − 闪 − i) / (未知 − i)：整数分子分母各乘一次，
+    # 最后一次除法——比逐项浮点乘更稳，也不引 math（可见面白名单里没有它）。
+    safe = 1
+    total = 1
+    for index in range(hand):
+        safe *= unknown - dodges - index
+        total *= unknown - index
+    return 1.0 - safe / total
+
+
+def _defended_by_dodge(card: CardRef | None) -> bool:
+    """这一张伤害牌是不是靠目标打出【闪】来抵消（【杀】族与【万箭齐发】）。"""
+    if card is None:
+        return False
+    return card.type in _DODGE_DEFENDED_TYPES or _is_slash_card(card)
+
+
+def _expected_attack_points(damage: int, dodge_probability: float) -> float:
+    """``伤害 × (1 − P(闪)) + 消耗一张【闪】的收益 × P(闪)``（用伤害点计）。"""
+    return (
+        damage * (1.0 - dodge_probability)
+        + _DODGE_CONSUMED_POINTS * dodge_probability
+    )
+
+
+# ---------------------------------------------------------------------------
 # 每类询问一个 scorer：``(query, action) -> float``
 # ---------------------------------------------------------------------------
 
 
 def _score_attack(action: Action, view: PlayerView) -> float:
-    """伤害期望：目标非己方恒正；目标手牌越多，被【闪】抵消的概率越高（用可见张数贴现）。
+    """伤害期望：目标非己方恒正；每一点**预期**伤害与"躲掉也消耗一张牌"各自计价。
 
     ``targets`` 只出现在 :class:`~sgs.state.UseCard` 上；``PlayCard``（打出）无目标，
     故按"无目标"读——打出伤害牌在出牌阶段本就不产生伤害。
@@ -477,6 +746,13 @@ def _score_attack(action: Action, view: PlayerView) -> float:
     **斩杀项（D2，票 19）**：目标**这一下就死**（判据见 :func:`_lethal_to`）时再加
     :data:`_LETHAL_STRIKE_VALUE`——残局里"一刀能斩的 1 体力目标"因此压过"更健康的已明
     敌人"，而伤害不够时一分不加（藤甲把这一刀挡成 0 ⇒ 照样是浪费）。
+
+    **记牌 P(闪)（C1，票 20）**：**靠【闪】抵消**的伤害牌（【杀】族 / 【万箭齐发】）且
+    记牌可用时，把"每张手牌 0.25 的常量贴现"换成
+    :func:`_expected_attack_points`——未知池里【闪】的占比导出目标有闪的概率，期望伤害
+    （负项）与"躲掉也消耗一张牌"（正项）一起算。记牌关闭（档位 / 守恒对不上）或不靠
+    【闪】抵消的伤害牌（【决斗】/【南蛮】要求【杀】）**仍走常量贴现**，与票 20 之前一致。
+    伤害为 0 的无效目标不进概率模型：那本来就不该出。
     """
     targets = tuple(action.targets) if isinstance(action, UseCard) else ()
     if not targets:
@@ -492,12 +768,24 @@ def _score_attack(action: Action, view: PlayerView) -> float:
     card = getattr(action, "card", None)
     score = _DAMAGE_BASE + _TARGET_BONUS * len(others)
     for seat in others:
+        hand_defense = _HAND_DEFENSE_WEIGHT * min(
+            view.players[seat].hand_count, _HAND_DEFENSE_CAP
+        )
         damage = _damage_to(card, view, seat)
         if damage <= 0:
             score -= _WASTED_ATTACK_PENALTY
+            score -= hand_defense
         else:
-            score += _DAMAGE_POINT_VALUE * (damage - 1)
-        score -= _HAND_DEFENSE_WEIGHT * min(view.players[seat].hand_count, _HAND_DEFENSE_CAP)
+            dodge_probability = (
+                _dodge_probability(view, seat) if _defended_by_dodge(card) else None
+            )
+            if dodge_probability is None:
+                score += _DAMAGE_POINT_VALUE * (damage - 1)
+                score -= hand_defense
+            else:
+                score += _DAMAGE_POINT_VALUE * (
+                    _expected_attack_points(damage, dodge_probability) - 1.0
+                )
         # 主公是公开信息：反贼据此**略**偏向锁定他，但不能盖过"手牌越多越难命中"的贴现。
         if _is_revealed_enemy(view, seat):
             score += _ENEMY_FOCUS
@@ -1616,13 +1904,22 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
             {
                 "seat": (True, "自己的座位：判'是否自己'与座位距离"),
                 "players": (True, "逐座位的公开面（体力 / 手牌数 / 装备 / 判定 / 横置 / 酒 / 已明身份）"),
-                "self_hand": (True, "自己的手牌牌面：成本、响应与转化源都从这里挑"),
-                "deck_count": (False, "只有剩余张数、没有顺序；记牌未落地（记牌票落地后才读），估值按未知牌常数"),
-                "discard": (False, "弃牌堆顺序对现有打分无影响（记牌批落地后才读；现状按未知池估值）"),
+                "self_hand": (True, "自己的手牌牌面：成本、响应与转化源都从这里挑；记牌也数它（已出现的牌）"),
+                "deck_count": (
+                    True,
+                    "记牌守恒量的一项（C1）：与四区 / 手牌数一起反推牌堆档位，"
+                    "再算未知池里的【闪】占比（只有张数、没有顺序）",
+                ),
+                "discard": (
+                    True,
+                    "记牌的**可见牌面**（C1）：弃牌堆的牌已出现，从档位总牌面里扣；"
+                    "顺序对现有打分无影响",
+                ),
                 "processing": (
                     True,
                     "处理区顶牌 = 本次结算的牌：【无懈可击】按它对目标的利 / 害决定宣不宣"
-                    "（D1），顶牌是无懈即嵌套层；【火攻】也靠它给'弃一张换 1 点伤害'的价",
+                    "（D1），顶牌是无懈即嵌套层；【火攻】也靠它给'弃一张换 1 点伤害'的价；"
+                    "记牌也数它（可见牌面，C1）",
                 ),
                 "turn_seat": (False, "回合归属不参与打分：没有'我的回合'加权"),
                 "phase": (False, "阶段不参与打分：是不是出牌阶段由询问类型本身表达"),

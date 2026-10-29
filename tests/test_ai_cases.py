@@ -986,7 +986,6 @@ def test_the_counting_fixtures_reach_real_play_phase_windows():
             assert action in candidate.legal_actions, "AI 应答必须落在真实候选面上"
 
 
-@pytest.mark.xfail(strict=True, reason="已知蠢点 票 20")
 def test_c1_when_every_dodge_is_visible_the_hand_count_no_longer_discounts_the_slash():
     """C1 记牌 P(闪)：全部【闪】已在可见区 ⇒ P(闪) = 0、防御贴现 = 0。
 
@@ -1007,7 +1006,6 @@ def test_c1_when_every_dodge_is_visible_the_hand_count_no_longer_discounts_the_s
     )
 
 
-@pytest.mark.xfail(strict=True, reason="已知蠢点 票 20")
 def test_c1_card_counting_switches_off_when_the_tier_or_the_conserved_count_is_unverifiable(
     monkeypatch,
 ):

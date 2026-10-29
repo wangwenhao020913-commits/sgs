@@ -96,11 +96,13 @@
   `SelectOptionQuery.skill_id`（座位步的敌我估值靠它查前缀表）。
 - 新字段进来时：在**它所属的桶**里加一行。跨九类同义的字段（如 `kind`）放共用桶，别抄九遍。
 
-现状里几处"不读"值得知道（这几处是有意为之，不是漏登记）：`deck_count` / `discard`（记牌还
-没落地）、`RespondQuery` 的 `required` / `window_frame`（候选里只有合法牌；嵌套靠处理区顶
-牌是无懈来判，不读层号）、`SkillActivationQuery` 的三个冻结报文（生产者恒给 `0 / 0 / ()`）。
+现状里几处"不读"值得知道（这几处是有意为之，不是漏登记）：`RespondQuery` 的 `required` /
+`window_frame`（候选里只有合法牌；嵌套靠处理区顶牌是无懈来判，不读层号）、
+`SkillActivationQuery` 的三个冻结报文（生产者恒给 `0 / 0 / ()`）。
 反方向的先例是 `RespondQuery` 的 `cause` / `target`：D1 无懈目标化（票 18）起它们进打分，
-写成"不读"就把那条规则藏起来了——评审时对照读取方。
+写成"不读"就把那条规则藏起来了——评审时对照读取方。另一条同类先例是 `deck_count` /
+`discard`：C1 记牌 P(闪)（票 20）起两者进 `_score_attack` 的守恒量 / 未知池计算，登记已从
+"不读"翻成"读"（理由指到 `_dodge_probability`）。
 
 ### 3.3 `Mode` 表 `MODE_SITES`（`src/sgs/data/identities.py`）
 

@@ -29,6 +29,7 @@ from sgs.agents import (
     is_structured_activation,
     tape_from_journal,
 )
+from sgs.agents import heuristic as heuristic_scoring
 from sgs.data import (
     Color,
     Gender,
@@ -540,6 +541,100 @@ def test_the_ai_picks_the_halberd_three_target_combo_in_the_play_phase():
 
     assert isinstance(action, UseCard) and action.card.type == "slash"
     assert action.targets == (1, 2, 3), "只有这一条 3 目标组合（恰好 3 名可达目标）"
+
+
+# ---------------------------------------------------------------------------
+# 记牌 P(闪)（C1，票 20）：档位表反查 + 概率契约
+# ---------------------------------------------------------------------------
+
+
+def _counting_view(*, target_hand=(), discard=()):
+    """2 人无身份局：座位 0 = 观察者（1 张【杀】），座位 1 = 目标；108 张全在局内。
+
+    ``deck`` 补满剩下的牌 ⇒ 守恒量恰为 108（``standard_108``），记牌可用。
+    """
+    viewer = _ids("slash")[0]
+    used = {viewer, *target_hand, *discard}
+    deck = tuple(index for index in range(len(PACK.deck.cards)) if index not in used)
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(viewer,)), SeatSpec(hand=tuple(target_hand))],
+        discard=tuple(discard),
+        deck=deck,
+        turn_seat=0,
+    )
+    return project(state, 0)
+
+
+def test_the_card_counting_tier_table_matches_the_content_pack():
+    """记牌的档位字面表必须与内容包 ``decks[*].expect.by_type`` 逐项相等。
+
+    反查方向是**刻意的**：AI 模块不能 import ``sgs.data``（可见面白名单），表只能手抄；
+    内容包漂移（加牌 / 改档）而表没跟上 ⇒ 这条立刻红。``total`` 也逐档核。
+    """
+    for profile in ("basic_53", "standard_108", "standard_ex_160"):
+        total, by_type = heuristic_scoring._DECK_TABLE[profile]
+        expect = load_content_pack(deck_profile=profile).decks[profile].expect
+        assert expect is not None, f"{profile} 的档位没有声明 expect（数据层契约变了）"
+        assert total == expect.total, f"{profile} 的总张数漂了"
+        assert dict(by_type) == expect.by_type, f"{profile} 的逐项张数漂了"
+
+
+def test_the_dodge_probability_is_the_hypergeometric_draw_from_the_unknown_pool():
+    """P(闪) 的量级与 spec §6.3 一致：standard_108 开局、4 张手牌 ≈ 47% 有【闪】。
+
+    未知池 = 108 − 自己手牌（1 张）= 107，其中 15 张【闪】⇒ 无放回抽 4 张：
+    ``1 − C(92,4)/C(107,4) ≈ 0.458``。断言取 spec 的文字区间，不重算公式（防同义反复）。
+    """
+    view = _counting_view(target_hand=tuple(_ids("peach")[:4]))
+
+    probability = heuristic_scoring._dodge_probability(view, 1)
+
+    assert probability is not None
+    assert 0.40 <= probability <= 0.50, (
+        f"4 张手牌的 P(闪) = {probability:.3f}，与 spec §6.3 的“约 47%”不同量级"
+    )
+
+
+def test_the_dodge_probability_grows_with_the_hand_and_is_zero_for_an_empty_one():
+    """手牌越多越可能摸到【闪】；0 手恒 0；【闪】全在弃牌堆时 4 手也恒 0。"""
+    probabilities = [
+        heuristic_scoring._dodge_probability(
+            _counting_view(target_hand=tuple(_ids("peach")[:hand])), 1
+        )
+        for hand in (0, 1, 2, 4, 8)
+    ]
+    assert probabilities[0] == 0.0, "0 手不可能有【闪】"
+    assert all(
+        later > earlier for earlier, later in zip(probabilities, probabilities[1:])
+    ), f"P(闪) 必须随手牌数严格递增：{probabilities}"
+
+    hidden = _counting_view(
+        target_hand=tuple(_ids("peach")[:4]), discard=_ids("dodge")
+    )
+    assert heuristic_scoring._dodge_probability(hidden, 1) == 0.0, (
+        "15 张【闪】全在弃牌堆 ⇒ 未知池里没有闪，4 手也是 0"
+    )
+
+
+def test_an_attack_never_scores_below_a_certain_hit_because_a_dodge_still_costs_a_card():
+    """期望伤害 + “躲掉也消耗一张牌”：1 点伤害的期望不因可被【闪】抵消而变负。
+
+    这是 spec §6.3 的收益项（否则会系统性低估进攻）的机械面；2 点伤害则随 P(闪) 下降，
+    但始终不低于 1 点——被闪掉也只是回到“1 点伤害”那一笔的等价。
+    """
+    one = [
+        heuristic_scoring._expected_attack_points(1, p)
+        for p in (0.0, 0.25, 0.5, 0.75, 1.0)
+    ]
+    assert all(value >= 1.0 - 1e-9 for value in one), one
+
+    two = [
+        heuristic_scoring._expected_attack_points(2, p)
+        for p in (0.0, 0.25, 0.5, 0.75, 1.0)
+    ]
+    assert two == sorted(two, reverse=True), two
+    assert two[0] == 2.0 and two[-1] == 1.0, two
 
 
 def test_the_ai_answers_the_borrowed_sword_holder_window_with_bn_inside_the_targets():

@@ -192,6 +192,11 @@ ALLOWLIST: dict[Site, Rule] = {
         "_damage_to",
         'if card.type == "slash":',
     ): Rule(NORMAL, 1, "藤甲只免疫**普通**杀（火杀 +1 / 雷杀照常）——有意 normal-only，与 _VINE_ARMOR_IMMUNE 同口径"),
+    (
+        "src/sgs/agents/heuristic.py",
+        "_DECK_TABLE",
+        '"slash": 30,',
+    ): Rule(NORMAL, 3, "记牌的牌堆档位表按**牌名**逐项记数：'slash' 就是普通【杀】，火 / 雷各有自己的一行（三档各一处，不是判族站点）"),
     # ---- effects/actions.py：响应候选的语境分派 ----
     (
         "src/sgs/effects/actions.py",
