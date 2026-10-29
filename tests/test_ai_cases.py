@@ -276,13 +276,16 @@ def _nullify_query(
     hp: dict[int, int] | None = None,
     declare_at: int | None = None,
     nested: bool = False,
+    dead: tuple[int, ...] = (),
 ):
     """把局面推到 ``ai_seat`` 的一条真实无懈询问。
 
     - ``user`` 在出牌阶段使用 ``trick``（目标 ``targets``）；
     - AI 座位手里恒有【无懈可击】，故"宣 / 不宣"是真的选择（不是合法性碰巧不成立）；
     - ``nested=True`` 时另让 ``declare_at`` 先声明一张无懈，于是停下时**处理区顶牌是
-      无懈本身**——嵌套窗口靠这个状态与第一层区分。
+      无懈本身**——嵌套窗口靠这个状态与第一层区分；
+    - ``dead``（票 21 的 I1 用例）：这些座位开局即阵亡、0 体力——**阵亡即亮明身份**，
+      身份后验因此能看见"配比里少了一个谁"。默认空 = 既有六条用例的局面逐字节不变。
 
     断言只到"引擎真的停在 AI 的这条询问上"；判据由各用例给。
     """
@@ -304,8 +307,9 @@ def _nullify_query(
     hp_overrides = dict(hp or {})
     seats = [
         SeatSpec(
-            hp=hp_overrides.get(seat, 4),
+            hp=0 if seat in dead else hp_overrides.get(seat, 4),
             hp_max=4,
+            alive=seat not in dead,
             identity=identity,
             hand=hands.get(seat, ()),
         )
@@ -1041,3 +1045,182 @@ def test_c1_card_counting_switches_off_when_the_tier_or_the_conserved_count_is_u
     for target in _slash_targets(query):
         assert heuristic_scoring._dodge_probability(query.view, target) is None
     assert _chosen_targets(query) == {empty}, "档位表被改动时行为必须与今天一致"
+
+
+# ---------------------------------------------------------------------------
+# I1 身份保守档（票 21）：已亮明身份 + 配比后验 ⇒ P(敌) / P(友) 替换 0/1
+#
+# 两条 D 用例在实现前是**红的**（先红后绿，spec §2.2）：今天未知身份一律判"中立"，
+# 故"全是敌人"与"内奸先清场"两件事都看不见。用例形状与 D1/D2/C1 相同：真局面 →
+# ``Engine.from_state`` → ``run_queries`` → 真 ``HeuristicPlayer.respond``；比例断言落在
+# **辅助纯函数** ``_identity_relation(view, seat) -> (P(敌), P(友))`` 上（spec 缝 A 允许的
+# 那一条），不碰私有评分器的中间数值。
+# ---------------------------------------------------------------------------
+
+I1_REBEL_HAND = tuple(cards_of_type(PACK, "peach")[:2])
+"""D2 里未知身份那一席的手牌：只占"2 张手牌"，与主公摸牌后的手牌数 **相等**。
+
+两个目标的体力 / 手牌 / 装备全都相同，修复前它们的分数因此**严格同分**（平分抽签）；
+修复后只差身份权重那一项。若这一席空手，手牌贴现已经让未知席位胜出，用例在修复前就
+是绿的（strict xfail 会 XPASS 判红），测不到身份后验。
+"""
+
+I1_AI_SEAT = 3
+"""D2 的内奸座位：5 人身份局的先手是主公（座位 2），故到座位 3 时主公已摸过牌。"""
+
+
+def _dead_loyalist_ex_nihilo_query():
+    """5 人局死 1 忠臣：AI = 主公（座位 0），座位 2 用【无中生有】打自己。
+
+    座位 1 的忠臣**开局即阵亡**（阵亡即亮明身份）：配比减掉主公与忠臣后只剩
+    反贼 / 反贼 / 内奸 ⇒ 座位 2 / 3 / 4 三席的 P(敌) 全是 1。座位 2 的【无中生有】对他
+    **有利**：取消它 = 少给一个已确定是敌人的座位两张牌，故该宣——今天关系判"未知"
+    （既非敌也非友）⇒ 恒不宣。
+    """
+    return _nullify_query(
+        trick="ex_nihilo",
+        user=2,
+        targets=(2,),
+        identities=(
+            Identity.LORD,
+            Identity.LOYALIST,
+            Identity.REBEL,
+            Identity.REBEL,
+            Identity.RENEGADE,
+        ),
+        ai_seat=0,
+        dead=(1,),
+    )
+
+
+def _renegade_lord_vs_unknown_query():
+    """AI = 内奸（座位 3）；已亮明主公（座位 2）与未知身份座位 4，两者 4 体力 / 2 手。
+
+    座位 2 是主公（先手）⇒ 摸牌阶段拿到 2 张；座位 4 构造 2 张 ⇒ 两个目标的分数在修复前
+    **严格同分**。两者都在【杀】的距离内（5 人局相邻）。修复后座位 4 的 P(敌) = 1
+    （配比减掉主公与内奸后只剩忠臣 / 反贼 / 反贼，全是内奸的对手），主公仍是 0。
+    """
+    return _lethal_play_query(
+        seats=[
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LOYALIST),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LORD),
+            SeatSpec(
+                hp=4,
+                hp_max=4,
+                identity=Identity.RENEGADE,
+                hand=(SLASH_ID,),
+            ),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL, hand=I1_REBEL_HAND),
+        ],
+        ai_seat=I1_AI_SEAT,
+        inert=4,
+    )
+
+
+def _relation(view, seat: int) -> tuple[float, float]:
+    """辅助纯函数的契约入口（名字收在这里一处，用例只读 ``(P(敌), P(友))``）。"""
+    return heuristic_scoring._identity_relation(view, seat)
+
+
+def test_the_identity_fixtures_reach_real_windows():
+    """夹具自检（不带 xfail）：两条 I1 用例的构造面（询问归属 / 身份可见面 / 平分的两条路）。
+
+    与 D1 / D2 / C1 的自检同一姿态：只核形状、不核策略判据。两条 D 用例整体是 strict
+    xfail，夹具被引擎改动弄坏时要保持可见，而不是被 xfail 一起吞掉。
+    """
+    d1 = _dead_loyalist_ex_nihilo_query()
+    assert _is_nullify_window(d1) and d1.actor == 0, "D1 没停在主公的无懈询问上"
+    assert d1.target == 2, "D1 的窗口目标不是座位 2"
+    assert [player.alive for player in d1.view.players] == [
+        True,
+        False,
+        True,
+        True,
+        True,
+    ], "D1 夹具失效：座位 1 不再是唯一阵亡者"
+    assert d1.view.players[1].identity is Identity.LOYALIST, (
+        "D1 夹具失效：阵亡的忠臣身份没亮明（阵亡即亮明）"
+    )
+    assert d1.view.processing[-1].type == "ex_nihilo", "D1 夹具失效：处理区顶牌不是无中生有"
+
+    d2 = _renegade_lord_vs_unknown_query()
+    assert d2.kind == "PLAY_PHASE" and d2.actor == I1_AI_SEAT, "D2 没停在内奸的出牌阶段"
+    targets = _slash_targets(d2)
+    lord = next(
+        seat
+        for seat, player in enumerate(d2.view.players)
+        if seat != d2.actor and player.identity is Identity.LORD
+    )
+    assert targets == {lord, 4}, "D2 夹具失效：可见目标不再是主公与座位 4"
+    assert {
+        seat: (d2.view.players[seat].hp, d2.view.players[seat].hand_count)
+        for seat in targets
+    } == {lord: (4, 2), 4: (4, 2)}, "D2 夹具失效：两个目标不再同体力 / 同手牌数"
+
+    for candidate in (d1, d2):
+        for seed in TIE_SEEDS:
+            action = HeuristicPlayer(ai_stream(seed, candidate.actor)).respond(candidate)
+            assert action in candidate.legal_actions, "AI 应答必须落在真实候选面上"
+
+
+@pytest.mark.xfail(strict=True, reason="I1 身份后验未落地（先红后绿，票 21）")
+def test_i1_a_dead_loyalist_leaves_the_lord_facing_an_all_enemy_field():
+    """I1 身份保守档：5 人局死 1 忠臣 ⇒ 主公视角的**存活未知座位** P(敌) = 1。
+
+    票面允许"动作级或辅助纯函数契约"，两层都钉：
+
+    - **纯函数契约**：``_identity_relation(view, seat)`` 对三个存活未知座位都答
+      ``(1.0, 0.0)``——已亮明的身份（本人 / 主公 / 阵亡者）先从配比里减掉，剩下的
+      （反贼 / 反贼 / 内奸）按**人头均分**，故 P(敌) 恰好是 1；
+    - **动作级**：座位 2 的【无中生有】对他是**有利**的牌 ⇒ 取消它 = 少给一个已确定是敌人
+      的座位两张牌 ⇒ 该宣（今天判"未知"⇒ 8 个平分子流种子恒 ``Pass``）。
+
+    修复前这条必红（``_identity_relation`` 还不存在 / 动作级恒 Pass）。
+    """
+    query = _dead_loyalist_ex_nihilo_query()
+    view = query.view
+    unknown = [
+        seat
+        for seat, player in enumerate(view.players)
+        if seat != view.seat and player.alive and player.identity is None
+    ]
+    assert unknown == [2, 3, 4], "夹具失效：存活未知座位不再是 2 / 3 / 4"
+
+    for seat in unknown:
+        assert _relation(view, seat) == (1.0, 0.0), (
+            f"座位 {seat} 的 P(敌) 不是 1：死 1 忠臣后配比里只剩敌人"
+        )
+
+    _assert_nullify_answer(query, declare=True)
+
+
+@pytest.mark.xfail(strict=True, reason="I1 身份后验未落地（先红后绿，票 21）")
+def test_i1_the_renegade_keeps_the_lord_off_the_priority_list():
+    """I1：内奸语义保留——**不把主公当优先敌人**（先清场、最后弑主）。
+
+    已亮明主公（座位 2）与未知身份（座位 4）同体力 / 同手牌数、都在【杀】的距离内：
+    修复前两者都是 0 加权 ⇒ 8 个平分子流种子两边都出现；修复后未知那一席的 P(敌) = 1
+    而主公是 0（内奸的敌人是忠臣 / 反贼，主公要留到最后）⇒ **恒打未知那一席**。
+
+    日后的回归若把主公也塞进"内奸的敌人"：这条第一段（``(0.0, 0.0)``）先红。
+    """
+    query = _renegade_lord_vs_unknown_query()
+    view = query.view
+    lord = next(
+        seat
+        for seat, player in enumerate(view.players)
+        if seat != view.seat and player.identity is Identity.LORD
+    )
+    assert _relation(view, lord) == (0.0, 0.0), "内奸不得把主公算成敌人 / 盟友"
+    (other,) = _slash_targets(query) - {lord}
+    assert _relation(view, other) == (1.0, 0.0), (
+        f"座位 {other} 的 P(敌) 不是 1：主公与内奸之外全是内奸的对手"
+    )
+
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(action, UseCard), f"预期出【杀】，实得 {action!r}"
+        assert action.targets == (other,), (
+            f"内奸该先清场（座位 {other}），不该把主公当优先敌人，实得 {action.targets}"
+        )
