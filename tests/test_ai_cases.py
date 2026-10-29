@@ -21,6 +21,7 @@ from __future__ import annotations
 import pytest
 
 from sgs.agents import HeuristicPlayer
+from sgs.agents import heuristic as heuristic_scoring
 from sgs.data import Identity, RuleConfig, load_content_pack
 from sgs.engine import Engine, ai_stream
 from sgs.effects import behavior_for, is_slash
@@ -864,3 +865,176 @@ def test_d2_strikes_a_lethal_target_that_still_holds_cards():
         assert action.targets == (lethal_seat,), (
             f"应当仍斩能杀的那一席（座位 {lethal_seat}），实得 {action.targets}"
         )
+
+
+# ---------------------------------------------------------------------------
+# C1 记牌 P(闪)（票 20）：闪全可见 ⇒ 不贴现；档位 / 守恒对不上 ⇒ 关闭记牌
+# ---------------------------------------------------------------------------
+
+COUNTING_DODGES = cards_of_type(PACK, "dodge")
+"""standard_108 的全部 15 张【闪】（``card_id`` 即数据表下标，不是牌面对象）。"""
+
+COUNTING_TARGET_HAND = tuple(cards_of_type(PACK, "peach")[:4])
+"""4 手目标的手牌：全是【桃】（非【闪】）——只占"手牌数"，不改变未知池里的闪剩几张。"""
+
+COUNTING_SPARE = cards_of_type(PACK, "slash")[1]
+"""守恒破坏用：这张【杀】既不入手也不进弃牌堆 / 牌堆顶，整局因此少一张实体牌。"""
+
+COUNTING_AI_SEAT = 2
+"""AI = 主公（身份局先手）；1 号 4 手、3 号 0 手，两者 4 体力、身份对 AI 都未知。"""
+
+
+def _counting_play_query(*, drop: tuple[int, ...] = ()):
+    """推进到 AI 的 ``PLAY_PHASE``；``drop`` 把实体牌从整局里拿掉（破坏守恒量）。
+
+    - 弃牌堆放 13 张【闪】、牌堆顶 2 张【闪】：AI 摸牌后手里 2 张【闪】⇒ **15 张全可见**，
+      未知池（牌堆 88 张）里一张【闪】也没有 ⇒ P(闪) = 0；
+    - 座位 1 的 4 张手牌全用【桃】⇒"4 手"只影响常量贴现，不改变未知池；
+    - ``drop`` 默认空：108 张全在局内（守恒量对得上 ``standard_108``）。
+    """
+    ai_card = cards_of_type(PACK, "slash")[0]
+    inert = tuple(COUNTING_DODGES[13:])
+    used = {ai_card, *COUNTING_TARGET_HAND, *COUNTING_DODGES[:13], *inert}
+    deck = (
+        *inert,
+        *(
+            card_id
+            for card_id in range(len(PACK.deck.cards))
+            if card_id not in used and card_id not in drop
+        ),
+    )
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=5),
+        seats=[
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LOYALIST),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL, hand=COUNTING_TARGET_HAND),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LORD, hand=(ai_card,)),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.RENEGADE),
+        ],
+        discard=COUNTING_DODGES[:13],
+        deck=deck,
+        turn_seat=COUNTING_AI_SEAT,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [PassPlayer() for _ in state.players],
+        lambda current: current.pending is not None
+        and current.pending.kind == "PLAY_PHASE"
+        and current.pending.actor == COUNTING_AI_SEAT,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达 AI 的出牌阶段前就停了"
+    return query
+
+
+def _visible_cards(view) -> list:
+    """``PlayerView`` 里**牌面可见**的那些牌（自己手牌 + 四公开区）。"""
+    cards = [*view.self_hand, *view.discard, *view.processing]
+    for player in view.players:
+        cards.extend(player.equip)
+        cards.extend(player.judge)
+    return cards
+
+
+def _chosen_targets(query) -> set[int]:
+    """跑满平分子流种子，收集 AI 真的出【杀】打到的座位。"""
+    chosen: set[int] = set()
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(action, UseCard), f"预期出【杀】，实得 {action!r}"
+        chosen.add(action.targets[0])
+    return chosen
+
+
+def _empty_hand_target(query) -> int:
+    """本构造里 0 手的目标（座位 3）；从真实询问算，不写死。"""
+    (seat,) = (
+        target
+        for target in _slash_targets(query)
+        if query.view.players[target].hand_count == 0
+    )
+    return seat
+
+
+def test_the_counting_fixtures_reach_real_play_phase_windows():
+    """夹具自检（不带 xfail）：询问归属、15 张闪全可见、"4 手 vs 0 手"两条路都在。
+
+    与上面两节的自检同理：只核形状，不核"该打谁"的策略判据。两条 D 用例整体是 strict
+    xfail，夹具被引擎改动弄坏时要保持可见，而不是被 xfail 一起吞掉。
+    """
+    query = _counting_play_query()
+    assert query.kind == "PLAY_PHASE" and query.actor == COUNTING_AI_SEAT
+    visible = _visible_cards(query.view)
+    assert (
+        sum(1 for card in visible if card.type == "dodge") == len(COUNTING_DODGES)
+    ), "夹具失效：15 张【闪】不再全在可见区"
+    assert {
+        seat: (query.view.players[seat].hp, query.view.players[seat].hand_count)
+        for seat in _slash_targets(query)
+    } == {1: (4, 4), 3: (4, 0)}, "夹具失效：不再是“4 手 vs 0 手、都 4 体力”"
+
+    broken = _counting_play_query(drop=(COUNTING_SPARE,))
+    assert broken.kind == "PLAY_PHASE" and broken.actor == COUNTING_AI_SEAT
+    assert _chosen_targets(broken) == {3}, "夹具失效：守恒破坏的局面不该改变出牌阶段候选"
+
+    for candidate in (query, broken):
+        for seed in TIE_SEEDS:
+            action = HeuristicPlayer(ai_stream(seed, candidate.actor)).respond(candidate)
+            assert action in candidate.legal_actions, "AI 应答必须落在真实候选面上"
+
+
+@pytest.mark.xfail(strict=True, reason="已知蠢点 票 20")
+def test_c1_when_every_dodge_is_visible_the_hand_count_no_longer_discounts_the_slash():
+    """C1 记牌 P(闪)：全部【闪】已在可见区 ⇒ P(闪) = 0、防御贴现 = 0。
+
+    票面允许"动作级优先，写不出来就断言辅助纯函数的公开契约"，这里两条都钉：
+
+    - **纯函数契约**：``_dodge_probability(view, seat)`` 对两个真实目标都答 ``0.0``
+      （记牌开着、未知池里没有【闪】）——它只吃 view，不碰任何全知状态；
+    - **动作级**：1 号（4 手）与 3 号（0 手）其余条件全同 ⇒ 常量贴现（0.25/张，4 张封顶）
+      让 0 手目标恒高 1.0 分；记牌落地后两者同分，8 个平分子流种子必须两边都出现过。
+      **修复前这条必红**（``chosen == {3}``）。
+    """
+    query = _counting_play_query()
+    for target in _slash_targets(query):
+        assert heuristic_scoring._dodge_probability(query.view, target) == 0.0
+
+    assert _chosen_targets(query) == {1, 3}, (
+        "P(闪)=0 时手牌张数不再贴现 ⇒ 两个目标同分、平分子流两边都该出现"
+    )
+
+
+@pytest.mark.xfail(strict=True, reason="已知蠢点 票 20")
+def test_c1_card_counting_switches_off_when_the_tier_or_the_conserved_count_is_unverifiable(
+    monkeypatch,
+):
+    """C1 记牌：档位表被改动 / 守恒量对不上 ⇒ **记牌关闭**、行为与今天一致。
+
+    两条关闭路径都按 spec §6.3 的"不猜"读法钉住：
+
+    - **守恒量对不上**：整局少一张实体牌（107 张）⇒ 三档总张数都对不上 ⇒ 关闭；
+    - **档位表被改动**：把 ``standard_108`` 的【闪】数改掉而总数不变（表自身不自洽）⇒ 关闭。
+    关闭时 ``_dodge_probability`` 答 ``None``，8 个种子**恒打 0 手那一席**——常量贴现下
+    0 手目标高 1.0 分，与今天的行为一致。
+    """
+    broken = _counting_play_query(drop=(COUNTING_SPARE,))
+    empty = _empty_hand_target(broken)
+    for target in _slash_targets(broken):
+        assert heuristic_scoring._dodge_probability(broken.view, target) is None
+    assert _chosen_targets(broken) == {empty}, "守恒量对不上时行为必须与今天一致"
+
+    table = dict(heuristic_scoring._DECK_TABLE)
+    total, by_type = table["standard_108"]
+    changed = dict(by_type)
+    changed["dodge"] -= 1
+    table["standard_108"] = (total, changed)
+    monkeypatch.setattr(heuristic_scoring, "_DECK_TABLE", table)
+
+    query = _counting_play_query()  # 108 张守恒，但档位表已不自洽
+    empty = _empty_hand_target(query)
+    for target in _slash_targets(query):
+        assert heuristic_scoring._dodge_probability(query.view, target) is None
+    assert _chosen_targets(query) == {empty}, "档位表被改动时行为必须与今天一致"
