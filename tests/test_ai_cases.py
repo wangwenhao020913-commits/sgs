@@ -21,8 +21,10 @@ import pytest
 from sgs.agents import HeuristicPlayer
 from sgs.data import Identity, RuleConfig, load_content_pack
 from sgs.engine import Engine, ai_stream
+from sgs.effects import behavior_for, is_slash
 from sgs.state import (
     ActivateSkill,
+    EndPhase,
     Pass,
     Phase,
     SelectCards,
@@ -495,3 +497,277 @@ def test_d1_declares_on_an_enemy_peach_garden():
 def test_d1_passes_on_a_nested_nullify():
     """嵌套无懈：不做链求解 ⇒ ``Pass``（第 6 条）。"""
     _assert_nullify_answer(_nested_nullify_query(), declare=False)
+
+
+# ---------------------------------------------------------------------------
+# D2 斩杀优先（票 19）：伤害已够就先斩，别把残局放跑
+# ---------------------------------------------------------------------------
+
+PACK_160 = load_content_pack(deck_profile="standard_ex_160")
+"""军争 160 档：本节的【酒】/【藤甲】只在这一档出现（显式选档，不依赖产品默认）。"""
+
+WINE_160 = cards_of_type(PACK_160, "wine")[0]
+SLASH_160 = cards_of_type(PACK_160, "slash")[0]
+VINE_ARMOUR_160 = cards_of_type(PACK_160, "vine_armor")[0]
+
+
+def _inert_draws(pack, *, count: int, used: set[int]) -> tuple[int, ...]:
+    """牌堆顶 ``count`` 张「惰性牌」（【闪】）：出牌阶段没有使用候选，摸到它们不改变决策面。
+
+    避开 ``used``（构造在座位上的实体牌）保证一局里不出现重复的实体牌。
+    """
+    top = tuple(card_id for card_id in cards_of_type(pack, "dodge") if card_id not in used)[
+        :count
+    ]
+    assert len(top) == count, "牌堆顶的惰性【闪】不够（构造局面写错了）"
+    return top
+
+
+def _lethal_play_query(*, pack=PACK, seats, ai_seat: int, inert: int):
+    """推进到 ``ai_seat`` 的**第一个** ``PLAY_PHASE`` 询问（候选由真实局面生成）。
+
+    **先手座位不是随便选的**（票 19 的构造纪律）：身份局的先手是**主公座位**、无身份局
+    读 ``RuleConfig.first_seat``（``engine._first_seat``）。故身份局用例把 AI 放在主公座位
+    上（或主公次席——见 :func:`_enemy_vs_unknown_query`），并用牌堆顶的惰性【闪】吸收
+    这之前所有摸牌阶段：AI 的决策面因此只剩构造的手牌。
+
+    与 D1 / D3 同一驱动姿态：真局面 → ``Engine.from_state`` → ``run_queries`` → 真
+    ``HeuristicPlayer.respond``；本文件不抄候选。
+    """
+    used = {card_id for spec in seats for card_id in (*spec.hand, *spec.equip)}
+    top = _inert_draws(pack, count=inert, used=used)
+    reserved = used | set(top)
+    deck = (
+        *top,
+        *(card_id for card_id in range(len(pack.deck.cards)) if card_id not in reserved),
+    )
+    state = build_state(
+        pack=pack,
+        rule_config=RuleConfig(player_count=len(seats)),
+        seats=seats,
+        deck=deck,
+        turn_seat=ai_seat,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [PassPlayer() for _ in seats],
+        lambda current: current.pending is not None
+        and current.pending.kind == "PLAY_PHASE"
+        and current.pending.actor == ai_seat,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达 AI 的出牌阶段前就停了"
+    return query
+
+
+def _lethal_vs_full_query():
+    """1 体力 0 手 vs 4 体力 0 手：两席都对 AI **未知身份**、都不在连环 / 都没装备。
+
+    AI = 主公（座位 2，身份局先手）；两个目标（座位 1 / 3）与主公相邻、手牌为空。
+    两席的关系相同（未知）、手牌数相同（0）⇒ 修复前两者**同分**（平分抽签），
+    修复后只按体力差取胜。
+    """
+    return _lethal_play_query(
+        seats=[
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LOYALIST),
+            SeatSpec(hp=1, hp_max=4, identity=Identity.RENEGADE),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LORD, hand=(SLASH_ID,)),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+        ],
+        ai_seat=2,
+        inert=2,
+    )
+
+
+def _wine_slash_query():
+    """AI 握【酒】+【杀】，目标 2 体力 0 手 ⇒ 这一刀差 1 点正好斩杀（军争 160 档）。
+
+    无身份 2 人局（先手 = 座位 0 = AI）：没有身份关系参与，判据只剩“酒 + 杀能不能斩”。
+    """
+    return _lethal_play_query(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hp=4, hp_max=4, hand=(WINE_160, SLASH_160)),
+            SeatSpec(hp=2, hp_max=4),
+        ],
+        ai_seat=0,
+        inert=2,
+    )
+
+
+def _enemy_vs_unknown_query():
+    """已明敌人（主公，3 手）vs 未知身份（0 手）：两者 4 体力、都不可一杀。
+
+    AI = 座位 3 的反贼；主公坐 2（第一回合，出牌阶段直接结束）⇒ 到 AI 时主公手牌
+    1 + 2 = 3 张。座位 4 的未知身份座位空手。两者都在【杀】的距离内。
+    """
+    return _lethal_play_query(
+        seats=[
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LOYALIST),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(
+                hp=4,
+                hp_max=4,
+                identity=Identity.LORD,
+                hand=(cards_of_type(PACK, "dodge")[3],),
+            ),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL, hand=(SLASH_ID,)),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.RENEGADE),
+        ],
+        ai_seat=3,
+        inert=4,
+    )
+
+
+def _vine_target_query():
+    """1 体力目标穿【藤甲】，AI 只有普通【杀】：这一杀**不造成伤害**（不是斩杀）。
+
+    无身份 2 人局（先手 = 座位 0 = AI），场上只有这一个目标 ⇒ “打不打”不被别的目标干扰。
+    """
+    return _lethal_play_query(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(hp=4, hp_max=4, hand=(SLASH_160,)),
+            SeatSpec(hp=1, hp_max=4, equip=(VINE_ARMOUR_160,)),
+        ],
+        ai_seat=0,
+        inert=2,
+    )
+
+
+def _slash_targets(query) -> set[int]:
+    """真实候选里**【杀】族**能落在哪些座位（单目标候选；不手抄候选）。
+
+    族判据走行为表（``is_slash(behavior_for(card))``）——与产品打分器同一份判据，不在这里
+    按牌名另抄一张集合（否则第五条【杀】又得补一次）。
+    """
+    return {
+        action.targets[0]
+        for action in query.legal_actions
+        if isinstance(action, UseCard)
+        and action.targets
+        and is_slash(behavior_for(action.card))
+    }
+
+
+def test_the_lethal_fixtures_reach_real_play_phase_windows():
+    """夹具自检（不带 xfail）：停下来的真的是 AI 的出牌阶段，且四条判据的“两条路”都在。
+
+    与 D1 / D3 的自检同理：这里只核**形状**（询问归属、目标体力 / 手牌、候选面），不核
+    “该打谁”的策略判据——夹具被引擎改动弄坏时保持可见，而不是把下方用例一起拖红。
+    """
+    lethal = _lethal_vs_full_query()
+    assert lethal.kind == "PLAY_PHASE" and lethal.actor == 2
+    assert {seat: lethal.view.players[seat].hp for seat in _slash_targets(lethal)} == {
+        1: 1,
+        3: 4,
+    }, "夹具失效：两个目标不再是 1 体力 / 4 体力"
+    assert all(
+        lethal.view.players[seat].hand_count == 0 for seat in _slash_targets(lethal)
+    ), "夹具失效：目标不再空手（会有【闪】的可能）"
+
+    wine = _wine_slash_query()
+    assert wine.kind == "PLAY_PHASE" and wine.actor == 0
+    assert any(
+        isinstance(action, UseCard) and action.card.type == "wine"
+        for action in wine.legal_actions
+    ), "夹具失效：出牌阶段没有【酒】的候选"
+    (wine_target,) = _slash_targets(wine)
+    assert wine.view.players[wine_target].hp == 2, "夹具失效：目标不再正好差【酒】的 1 点"
+
+    enemy = _enemy_vs_unknown_query()
+    assert enemy.kind == "PLAY_PHASE" and enemy.actor == 3
+    targets = _slash_targets(enemy)
+    lord = next(
+        seat
+        for seat, player in enumerate(enemy.view.players)
+        if seat != enemy.actor and player.identity is Identity.LORD
+    )
+    assert lord in targets, "夹具失效：已明敌人不在【杀】的候选里"
+    assert {seat: enemy.view.players[seat].hand_count for seat in targets} == {
+        lord: 3,
+        4: 0,
+    }, "夹具失效：目标不再是“敌人 3 手 / 未知 0 手”"
+
+    vine = _vine_target_query()
+    assert vine.kind == "PLAY_PHASE" and vine.actor == 0
+    (vine_target,) = _slash_targets(vine)
+    assert vine.view.players[vine_target].hp == 1, "夹具失效：藤甲目标不再在 1 体力"
+    assert any(
+        card.type == "vine_armor" for card in vine.view.players[vine_target].equip
+    ), "夹具失效：目标不再穿【藤甲】"
+
+    for query in (lethal, wine, enemy, vine):
+        for seed in TIE_SEEDS:
+            action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+            assert action in query.legal_actions, "AI 应答必须落在真实候选面上"
+
+
+@pytest.mark.xfail(strict=True, reason="已知蠢点 票 19")
+def test_d2_strikes_the_lethal_target_over_the_healthy_one():
+    """D2 斩杀优先：1 体力 0 手 vs 4 体力 0 手 ⇒ 打 1 体力（残局不放跑）。
+
+    修复前两席同分（关系未知、都空手）⇒ 打谁由 ``ai:<seat>`` 平分抽签决定，跑满
+    #TIE_SEEDS 必有种子打 4 体力那一席。修复后按“伤害 ≥ 体力”的斩杀项取胜，与抽签无关。
+    """
+    query = _lethal_vs_full_query()
+    lethal_seat = next(
+        seat for seat in _slash_targets(query) if query.view.players[seat].hp == 1
+    )
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(action, UseCard), f"预期出【杀】，实得 {action!r}"
+        assert action.targets == (lethal_seat,), (
+            f"应当先斩 1 体力目标（座位 {lethal_seat}），实得 {action.targets}"
+        )
+
+
+def test_d2_drinks_wine_before_a_lethal_slash():
+    """D2 斩杀优先：【酒】+【杀】正好斩杀 ⇒ 先酒（与 ``_wine_enables_kill`` 同一条判据）。
+
+    **修复前已绿**（M5-07 的【酒】取舍），故不加 xfail（strict 会把 XPASS 判红）。它是
+    护栏：本票把“斩杀”收成一个共享判据后，这条仍是“先酒再杀”。
+    """
+    query = _wine_slash_query()
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(action, UseCard), f"预期使用【酒】，实得 {action!r}"
+        assert action.card.type == "wine", f"预期先【酒】再【杀】，实得 {action.card.type}"
+        assert action.targets == (query.actor,), "出牌阶段的【酒】只对自己"
+
+
+def test_d2_prefers_a_revealed_enemy_when_no_target_is_lethal():
+    """D2 斩杀优先：已明敌人 3 手 vs 未知 0 手（都 4 体力、都不可一杀）⇒ 打敌人。
+
+    **修复前已绿**（``_ENEMY_FOCUS`` 大于手牌防御贴现），故不加 xfail。它是护栏：新增的
+    斩杀项不许把“手牌少的那一席”捧成首选，也不许盖过已明敌人。
+    """
+    query = _enemy_vs_unknown_query()
+    lord = next(
+        seat
+        for seat, player in enumerate(query.view.players)
+        if seat != query.actor and player.identity is Identity.LORD
+    )
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(action, UseCard), f"预期出【杀】，实得 {action!r}"
+        assert action.targets == (lord,), (
+            f"不可一杀时应打已明敌人（座位 {lord}），实得 {action.targets}"
+        )
+
+
+def test_d2_a_normal_slash_does_not_become_lethal_through_vine_armour():
+    """D2 斩杀优先：普通【杀】打【藤甲】不造成伤害 ⇒ 斩杀项不许把它变有效。
+
+    **修复前已绿**（``_WASTED_ATTACK_PENALTY``），故不加 xfail。它是护栏：斩杀项必须读
+    ``_damage_to`` 的实际伤害（藤甲 / 白银狮子 / 【酒】的修正都已算进去），不许拿“体力 ≤
+    裸伤害”把一张无效的【杀】捧起来。
+    """
+    query = _vine_target_query()
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(action, EndPhase), (
+            f"普通【杀】打藤甲无效 ⇒ 宁可结束阶段，实得 {action!r}"
+        )
