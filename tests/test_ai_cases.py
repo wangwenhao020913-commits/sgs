@@ -10,8 +10,10 @@
 判据形状（spec §2.2）：``action ∈ 可接受集合`` **且** ``action ∉ 已知蠢点集合``；
 精确相等只在"候选本来唯一"时用。
 
-D 类用例先以 ``xfail(strict=True)`` 落地（spec §2.2「先红后绿」）：strict 会在修好后
-变 XPASS、门禁因此判红，逼实现者摘标记，不靠自觉。被拒的条目保留 xfail 并写明原因。
+**在修复前是红的** D 类用例先以 ``xfail(strict=True)`` 落地（spec §2.2「先红后绿」）：
+strict 会在修好后变 XPASS、门禁因此判红，逼实现者摘标记，不靠自觉。**修复前已绿的护栏
+用例不加标记**——strict 会把 XPASS 判红；哪些是"先红"、哪些是护栏，逐条写在用例 docstring
+里（票 18 的 3/6、票 19 的 1/4 都是这个偏差）。被拒的条目保留 xfail 并写明原因。
 """
 
 from __future__ import annotations
@@ -523,8 +525,8 @@ def _inert_draws(pack, *, count: int, used: set[int]) -> tuple[int, ...]:
     return top
 
 
-def _lethal_play_query(*, pack=PACK, seats, ai_seat: int, inert: int):
-    """推进到 ``ai_seat`` 的**第一个** ``PLAY_PHASE`` 询问（候选由真实局面生成）。
+def _lethal_play_session(*, pack=PACK, seats, ai_seat: int, inert: int):
+    """推进到 ``ai_seat`` 的**第一个** ``PLAY_PHASE``，返回 ``(engine, query)``。
 
     **先手座位不是随便选的**（票 19 的构造纪律）：身份局的先手是**主公座位**、无身份局
     读 ``RuleConfig.first_seat``（``engine._first_seat``）。故身份局用例把 AI 放在主公座位
@@ -532,7 +534,8 @@ def _lethal_play_query(*, pack=PACK, seats, ai_seat: int, inert: int):
     这之前所有摸牌阶段：AI 的决策面因此只剩构造的手牌。
 
     与 D1 / D3 同一驱动姿态：真局面 → ``Engine.from_state`` → ``run_queries`` → 真
-    ``HeuristicPlayer.respond``；本文件不抄候选。
+    ``HeuristicPlayer.respond``；本文件不抄候选。**返回 engine** 的用处只在一处：② 要真的
+    把【酒】提交进去、再问同一座位的下一条应答（"先酒再杀"是一条两步链）。
     """
     used = {card_id for spec in seats for card_id in (*spec.hand, *spec.equip)}
     top = _inert_draws(pack, count=inert, used=used)
@@ -558,7 +561,14 @@ def _lethal_play_query(*, pack=PACK, seats, ai_seat: int, inert: int):
     )
     query = engine.pending
     assert query is not None, "推进器在到达 AI 的出牌阶段前就停了"
-    return query
+    return engine, query
+
+
+def _lethal_play_query(*, pack=PACK, seats, ai_seat: int, inert: int):
+    """只要询问的简写（四条夹具与自检用；② 另走 :func:`_lethal_play_session`）。"""
+    return _lethal_play_session(
+        pack=pack, seats=seats, ai_seat=ai_seat, inert=inert
+    )[1]
 
 
 def _lethal_vs_full_query():
@@ -581,20 +591,27 @@ def _lethal_vs_full_query():
     )
 
 
+def _wine_slash_seats():
+    """AI = 座位 0 握【酒】+【杀】；座位 1 = 2 体力空手目标（无身份 2 人局）。"""
+    return [
+        SeatSpec(hp=4, hp_max=4, hand=(WINE_160, SLASH_160)),
+        SeatSpec(hp=2, hp_max=4),
+    ]
+
+
+def _wine_slash_session():
+    """② 的两步链要真的提交【酒】（见 :func:`test_d2_drinks_wine_before_a_lethal_slash`）。"""
+    return _lethal_play_session(
+        pack=PACK_160, seats=_wine_slash_seats(), ai_seat=0, inert=2
+    )
+
+
 def _wine_slash_query():
     """AI 握【酒】+【杀】，目标 2 体力 0 手 ⇒ 这一刀差 1 点正好斩杀（军争 160 档）。
 
     无身份 2 人局（先手 = 座位 0 = AI）：没有身份关系参与，判据只剩“酒 + 杀能不能斩”。
     """
-    return _lethal_play_query(
-        pack=PACK_160,
-        seats=[
-            SeatSpec(hp=4, hp_max=4, hand=(WINE_160, SLASH_160)),
-            SeatSpec(hp=2, hp_max=4),
-        ],
-        ai_seat=0,
-        inert=2,
-    )
+    return _wine_slash_session()[1]
 
 
 def _enemy_vs_unknown_query():
@@ -633,6 +650,28 @@ def _vine_target_query():
             SeatSpec(hp=1, hp_max=4, equip=(VINE_ARMOUR_160,)),
         ],
         ai_seat=0,
+        inert=2,
+    )
+
+
+def _lethal_target_with_cards_query():
+    """1 体力 **2 手** vs 4 体力 0 手（两席对 AI 都未知）：斩杀项**不看手牌张数**。
+
+    票面那句“伤害已够且目标 0 手牌（不可能有【闪】）”与 spec §6.1 D2 的“改什么”
+    （只要求 ``_damage_to >= 体力``）有口径差：本票按 **spec 的“改什么”** 落地——只看
+    实际伤害够不够，手牌张数只进既有的防守贴现（这里 1 体力目标 2 手 ⇒ −0.5），概率版
+    P(闪) 归 C1（票 20）。这条用例把该读法钉住，并留给人类裁定（见 `## Answer`）。
+    """
+    dodges = cards_of_type(PACK, "dodge")
+    return _lethal_play_query(
+        seats=[
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LOYALIST),
+            SeatSpec(hp=1, hp_max=4, identity=Identity.RENEGADE, hand=tuple(dodges[4:6])),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LORD, hand=(SLASH_ID,)),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+        ],
+        ai_seat=2,
         inert=2,
     )
 
@@ -699,7 +738,14 @@ def test_the_lethal_fixtures_reach_real_play_phase_windows():
         card.type == "vine_armor" for card in vine.view.players[vine_target].equip
     ), "夹具失效：目标不再穿【藤甲】"
 
-    for query in (lethal, wine, enemy, vine):
+    cards = _lethal_target_with_cards_query()
+    assert cards.kind == "PLAY_PHASE" and cards.actor == 2
+    assert {seat: (cards.view.players[seat].hp, cards.view.players[seat].hand_count) for seat in _slash_targets(cards)} == {
+        1: (1, 2),
+        3: (4, 0),
+    }, "夹具失效：不再是“1 体力 2 手 vs 4 体力 0 手”"
+
+    for query in (lethal, wine, enemy, vine, cards):
         for seed in TIE_SEEDS:
             action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
             assert action in query.legal_actions, "AI 应答必须落在真实候选面上"
@@ -711,6 +757,9 @@ def test_d2_strikes_the_lethal_target_over_the_healthy_one():
     修复前两席同分（关系未知、都空手）⇒ 打谁由 ``ai:<seat>`` 平分抽签决定，跑满
     #TIE_SEEDS 必有种子打 4 体力那一席（`6abb5c3` 上它带 ``xfail(strict=True)``）；
     修复后按“伤害 ≥ 体力”的斩杀项取胜，与抽签无关。
+
+    **精确相等在这里成立**：这把【杀】只有两条候选（两个目标），而“打 1 体力”这个判据
+    的答案就是一个单元素集合——不是把“候选本来唯一”当借口（spec §2.2）。
     """
     query = _lethal_vs_full_query()
     lethal_seat = next(
@@ -725,17 +774,38 @@ def test_d2_strikes_the_lethal_target_over_the_healthy_one():
 
 
 def test_d2_drinks_wine_before_a_lethal_slash():
-    """D2 斩杀优先：【酒】+【杀】正好斩杀 ⇒ 先酒（与 ``_wine_enables_kill`` 同一条判据）。
+    """D2 斩杀优先：【酒】+【杀】正好斩杀 ⇒ 先酒，**再**补上那张【杀】（两步都真的提交）。
 
     **修复前已绿**（M5-07 的【酒】取舍），故不加 xfail（strict 会把 XPASS 判红）。它是
-    护栏：本票把“斩杀”收成一个共享判据后，这条仍是“先酒再杀”。
+    护栏：本票把“斩杀”收成一个共享判据后，这条仍是“先酒再杀”，且杀完那一步真的落到
+    同一个目标上（只断言“先酒”会漏掉第二步的回归）。
     """
-    query = _wine_slash_query()
     for seed in TIE_SEEDS:
-        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
-        assert isinstance(action, UseCard), f"预期使用【酒】，实得 {action!r}"
-        assert action.card.type == "wine", f"预期先【酒】再【杀】，实得 {action.card.type}"
-        assert action.targets == (query.actor,), "出牌阶段的【酒】只对自己"
+        engine, query = _wine_slash_session()
+        (target,) = _slash_targets(query)
+        player = HeuristicPlayer(ai_stream(seed, query.actor))
+
+        first = player.respond(query)
+
+        assert isinstance(first, UseCard), f"预期使用【酒】，实得 {first!r}"
+        assert first.card.type == "wine", f"预期先【酒】再【杀】，实得 {first.card.type}"
+        assert first.targets == (query.actor,), "出牌阶段的【酒】只对自己"
+
+        engine.submit(first)
+        run_queries(
+            engine,
+            [player, *(PassPlayer() for _ in range(len(query.view.players) - 1))],
+            lambda current: current.pending is not None
+            and current.pending.kind == "PLAY_PHASE"
+            and current.pending.actor == query.actor,
+        )
+
+        second = player.respond(engine.pending)
+
+        assert isinstance(second, UseCard), f"【酒】之后该补【杀】，实得 {second!r}"
+        assert second.targets == (target,), (
+            f"【杀】该落在同一目标（座位 {target}），实得 {second.targets}"
+        )
 
 
 def test_d2_prefers_a_revealed_enemy_when_no_target_is_lethal():
@@ -762,12 +832,35 @@ def test_d2_a_normal_slash_does_not_become_lethal_through_vine_armour():
     """D2 斩杀优先：普通【杀】打【藤甲】不造成伤害 ⇒ 斩杀项不许把它变有效。
 
     **修复前已绿**（``_WASTED_ATTACK_PENALTY``），故不加 xfail。它是护栏：斩杀项必须读
-    ``_damage_to`` 的实际伤害（藤甲 / 白银狮子 / 【酒】的修正都已算进去），不许拿“体力 ≤
-    裸伤害”把一张无效的【杀】捧起来。
+    ``_damage_to`` 的实际伤害——藤甲把普通【杀】挡成 0，【酒】/ 古锭刀的加伤照常算，
+    白银狮子把伤害封在 1——不许拿“体力 ≤ 裸伤害”把一张无效的【杀】捧起来。
     """
     query = _vine_target_query()
     for seed in TIE_SEEDS:
         action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
         assert isinstance(action, EndPhase), (
             f"普通【杀】打藤甲无效 ⇒ 宁可结束阶段，实得 {action!r}"
+        )
+
+
+def test_d2_strikes_a_lethal_target_that_still_holds_cards():
+    """D2 斩杀优先：1 体力 **2 手** vs 4 体力 0 手 ⇒ 仍打能斩的那一席（不看手牌张数）。
+
+    票面那句“伤害已够且目标 0 手牌（不可能有【闪】）”与 spec §6.1 D2 的“改什么”
+    （只要求 ``_damage_to >= 体力``）有口径差，本票按 **spec 的“改什么”** 落地；这条用例
+    把该读法钉住（修复前 3.5 < 4.0 会打 4 体力那席，修复后 3.5 + 斩杀项 > 4.0）。概率版
+    P(闪) 归 C1（票 20）——评审时若裁定要“0 手牌门”，改法是在 ``_score_attack`` 的斩杀项
+    上加 ``hand_count == 0`` 并把这条用例的期望反过来。
+    """
+    query = _lethal_target_with_cards_query()
+    lethal_seat = next(
+        seat
+        for seat in _slash_targets(query)
+        if query.view.players[seat].hp == 1 and query.view.players[seat].hand_count > 0
+    )
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert isinstance(action, UseCard), f"预期出【杀】，实得 {action!r}"
+        assert action.targets == (lethal_seat,), (
+            f"应当仍斩能杀的那一席（座位 {lethal_seat}），实得 {action.targets}"
         )
