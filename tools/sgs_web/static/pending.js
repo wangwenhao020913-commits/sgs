@@ -651,11 +651,13 @@ function refreshSubmit(pending) {
     const pa = state.preactivation;
     // 复合动作：填完就交（服务端校验器裁决）；转化技的本地入口：填完还得**查得到候选**
     // （查不到 = 这组来源 / 目标此刻不合法，按钮不给点）。
-    $("btn-submit").disabled = !preactivationReady(pa) || buildAction() === null;
-    if (!preactivationReady(pa)) {
-      $("t-choice").textContent = pa.cursor >= pa.steps.length
-        ? "清单里还有步骤没填完。"
-        : preactivationStepHint(pa, pending);
+    const ready = preactivationReady(pa);
+    $("btn-submit").disabled = !ready || buildAction() === null;
+    if (!ready) {
+      // 未填完 = 说**同一句**步骤提示（标题 `#t-target-hint` 读的也是它）：光标到末尾但
+      // 还有空步时它会指回第一个空步，不再出现标题说「清单已填完」、页脚说「还有步骤
+      // 没填完」的矛盾（票 08）。
+      $("t-choice").textContent = preactivationStepHint(pa, pending);
     } else {
       $("t-choice").textContent = pa.cardEntry
         ? "可以确认使用（提交一次带附带指定 [持刀者, Bn] 的使用）。"

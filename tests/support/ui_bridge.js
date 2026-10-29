@@ -33,6 +33,8 @@
     "preactivationManifest", "enterPreativation", "togglePreativationCard",
     "advancePreativation", "selectPreativationSeat", "selectPreativationOption",
     "jumpPreativationStep", "preactivationReady", "buildPreativationAction",
+    // 票 08：清单"填完没有"的唯一判据（ready / 步骤提示 / 重选落点同读）
+    "firstUnfilledPreativationStep",
     "preactivationStepKind", "preactivationOptions", "preactivationCardOptions",
     "preactivatedSkill", "isPassivePreativation", "renderPreativationEntry", "setActionLabels",
     // W7-01b：清单座位步多选（max > min）+ 借刀窗口首项（Bn）预选 / 必选

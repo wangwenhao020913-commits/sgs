@@ -296,15 +296,11 @@ function togglePreativationCard(cardId) {
   renderPending(state.view);
 }
 
-/** 选牌步的"下一步"：张数落在 `(min, max)` 内才放行。 */
+/** 选牌步的"下一步"：这一步按 `(min, cap)` 填完才放行（与 chip ✓ / ready 同一判据）。 */
 function advancePreativation() {
   const pa = state.preactivation;
   if (state.playback || !pa || pa.cursor >= pa.steps.length) return;
-  const step = pa.steps[pa.cursor];
-  const count = pa.answers[pa.cursor].values.length;
-  if (count < step.min) return;
-  const cap = preactivationStepCap(pa, pa.cursor);
-  if (cap !== null && count > cap) return;
+  if (!preactivationStepFilled(pa, pa.cursor)) return;
   pa.cursor += 1;
   applyPreativationDefaults(pa, state.view ? state.view.pending : null);
   state.lastRejectReason = "";
@@ -405,30 +401,62 @@ function selectPreativationOption(text) {
   renderPending(state.view);
 }
 
-/** 重选第 K 步：清空 K..N（用户裁定），把光标拨回去。 */
+/** 重选第 K 步：清空 K..N（用户裁定），把光标拨回去。
+ *
+ * **不许跳过空步**（票 08）：落点钳到 `firstUnfilledPreativationStep`——前面的步骤还空着
+ * 时，点后面的步骤 chip 只会落在那个空步上，不再出现"光标在末尾、前面还有空格"的坏态
+ * （标题说填完了 / 页脚说没填完 / 确认禁用 / 补选时一点就清空后面）。清空仍从**落点**
+ * 开始：落点之前填好的答案不动。
+ */
 function jumpPreativationStep(index) {
   const pa = state.preactivation;
   if (state.playback || !pa) return;
-  for (let at = index; at < pa.steps.length; at += 1) {
+  const first = firstUnfilledPreativationStep(pa);
+  const ceiling = first === null ? pa.steps.length : first;
+  const landing = Math.max(0, Math.min(index, ceiling));
+  for (let at = landing; at < pa.steps.length; at += 1) {
     pa.answers[at] = { values: [], texts: [] };
   }
-  pa.cursor = Math.max(0, Math.min(index, pa.steps.length));
+  pa.cursor = landing;
   applyPreativationDefaults(pa, state.view ? state.view.pending : null);
   state.lastRejectReason = "";
   renderTable();
   renderPending(state.view);
 }
 
+/** 这一步是否已按 `(min, cap)` 填齐（`cap` = 逐来源上限，`null` = 不限）。
+ *
+ * "这一步填完没有"**只算这一处**：`firstUnfilledPreativationStep`、步骤 chip 的 ✓、
+ * `advancePreativation` 与「下一步」的可点态都读它（票 08）。
+ */
+function preactivationStepFilled(pa, index) {
+  const step = pa && pa.steps[index];
+  if (!step) return false;
+  const answer = pa.answers[index];
+  const count = answer ? answer.values.length : 0;
+  if (count < step.min) return false;
+  const cap = preactivationStepCap(pa, index);
+  return cap === null || count <= cap;
+}
+
+/** 第一个**没填完**的步骤下标；全部填完 ⇒ `null`。
+ *
+ * 清单**每一步**填完没有的**唯一判据**（票 08）：`preactivationReady`（= 光标到末尾 **且**
+ * 它返回 `null`）/ 步骤提示 / 重选落点三处都读它，不再各算一套。光标**不许越过**它——
+ * 越过去就是"光标在末尾、前面还有空格"，标题与页脚会各说一套，确认按钮禁用且补不回来。
+ */
+function firstUnfilledPreativationStep(pa) {
+  if (!pa) return null;
+  for (let index = 0; index < pa.steps.length; index += 1) {
+    if (!preactivationStepFilled(pa, index)) return index;
+  }
+  return null;
+}
+
 /** 清单是否已按每一步的 `(min, max)` 填完。 */
 function preactivationReady(pa) {
   if (!pa || pa.cursor < pa.steps.length) return false;
-  return pa.steps.every((step, index) => {
-    const answer = pa.answers[index];
-    const count = answer ? answer.values.length : 0;
-    if (count < step.min) return false;
-    const cap = preactivationStepCap(pa, index);
-    return cap === null || count <= cap;
-  });
+  return firstUnfilledPreativationStep(pa) === null;
 }
 
 /** 预发动的提交载荷：`ActivateSkill(picks, choices)`（**不**在 `legal_actions` 里拼候选）。
@@ -496,34 +524,40 @@ function preactivationStepLabel(step) {
 }
 
 function preactivationStepHint(pa, pending) {
-  const step = pa.steps[pa.cursor];
-  if (!step) {
-    return pa && pa.cardEntry ? "清单已填完，可以确认使用。" : "清单已填完，可以确认发动。";
+  if (!pa) return "";
+  // 光标越过清单末尾时没有"当前步"：清单还有空步就**指回第一个空步**，不能说
+  // 「清单已填完」（票 08：判据与 `preactivationReady` 同源；标题 `#t-target-hint`
+  // 与页脚 `#t-choice` 都读这一份提示，不再一处看 cursor、一处看 ready）。
+  // 这是兜底支路：跳步已被钳住，正常交互走不到"光标在末尾、前面还有空格"。
+  const at = pa.cursor < pa.steps.length ? pa.cursor : firstUnfilledPreativationStep(pa);
+  if (at === null) {
+    return pa.cardEntry ? "清单已填完，可以确认使用。" : "清单已填完，可以确认发动。";
   }
+  const step = pa.steps[at];
   const wording = preactivationWording(step);
   if (preactivationStepKind(step) === "card") {
-    const count = pa.answers[pa.cursor].values.length;
+    const count = pa.answers[at].values.length;
     const what = wording || "选牌";
-    return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${what}（${step.min}–${step.max} 张，已选 ${count} 张）。`;
+    return `第 ${at + 1}/${pa.steps.length} 步：${what}（${step.min}–${step.max} 张，已选 ${count} 张）。`;
   }
   if (preactivationStepKind(step) === "seat") {
-    const count = pa.answers[pa.cursor].values.length;
-    const required = preactivationRequiredSeat(pa, pending, pa.cursor);
+    const count = pa.answers[at].values.length;
+    const required = preactivationRequiredSeat(pa, pending, at);
     const requiredText = required === null ? "" : "；借刀指定的目标（必选）";
     if (preactivationSeatMulti(step)) {
       const what = wording || "选目标";
-      const cap = preactivationSeatCap(pa);
+      const cap = preactivationStepCap(pa, at);
       if (cap !== null && cap <= step.min) {
-        return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${what}（点场上武将多选，已选 ${count} / ${cap} 个${requiredText}）。`;
+        return `第 ${at + 1}/${pa.steps.length} 步：${what}（点场上武将多选，已选 ${count} / ${cap} 个${requiredText}）。`;
       }
       const upper = cap === null ? "max" : cap;
-      return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${what}（点场上武将多选，已选 ${count} / ${step.min}–${upper} 个${requiredText}）。`;
+      return `第 ${at + 1}/${pa.steps.length} 步：${what}（点场上武将多选，已选 ${count} / ${step.min}–${upper} 个${requiredText}）。`;
     }
-    if (wording) return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${wording}（点场上武将选择）。`;
-    return `第 ${pa.cursor + 1}/${pa.steps.length} 步：点场上武将选目标。`;
+    if (wording) return `第 ${at + 1}/${pa.steps.length} 步：${wording}（点场上武将选择）。`;
+    return `第 ${at + 1}/${pa.steps.length} 步：点场上武将选目标。`;
   }
-  if (wording) return `第 ${pa.cursor + 1}/${pa.steps.length} 步：${wording}`;
-  return `第 ${pa.cursor + 1}/${pa.steps.length} 步：选一项。`;
+  if (wording) return `第 ${at + 1}/${pa.steps.length} 步：${wording}`;
+  return `第 ${at + 1}/${pa.steps.length} 步：选一项。`;
 }
 
 /** 清单已经选中的来源牌会以哪张**产物**使用（U1-07）：读服务端 `transform_products`。
@@ -562,7 +596,7 @@ function renderPreativation(pending) {
     chip.type = "button";
     chip.className = "opt";
     if (index === pa.cursor) chip.classList.add("sel");
-    const done = pa.answers[index].values.length >= step.min;
+    const done = preactivationStepFilled(pa, index);
     chip.textContent = `${index + 1}. ${preactivationStepLabel(step)}${done ? " ✓" : ""}`;
     chip.setAttribute("data-step", String(index));
     chip.addEventListener("click", () => jumpPreativationStep(index));
@@ -619,9 +653,7 @@ function renderPreativation(pending) {
     next.type = "button";
     next.className = "opt";
     next.textContent = "下一步";
-    const count = pa.answers[pa.cursor].values.length;
-    const cap = preactivationStepCap(pa, pa.cursor);
-    next.disabled = count < step.min || (cap !== null && count > cap);
+    next.disabled = !preactivationStepFilled(pa, pa.cursor);
     next.addEventListener("click", advancePreativation);
     box.appendChild(next);
   }

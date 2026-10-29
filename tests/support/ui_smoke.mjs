@@ -84,6 +84,16 @@ const rectOfBox = (left, top, width, height) => ({
 });
 const hasClassText = (node, name) =>
   String((node && node.className) || "").split(/\s+/).includes(name);
+/** 节点所属座位号（沿 `parentNode` 找最近的 `data-seat`）；找不到 ⇒ `null`。 */
+const seatAncestorOf = (node) => {
+  let cursor = node ? node.parentNode : null;
+  while (cursor) {
+    const seat = cursor.getAttribute ? cursor.getAttribute("data-seat") : undefined;
+    if (seat !== undefined && seat !== null && seat !== "") return Number(seat);
+    cursor = cursor.parentNode;
+  }
+  return null;
+};
 const shimRect = (node) => {
   const explicit = node.id ? RECT_TABLE.get(node.id) : null;
   if (explicit) return rectOfBox(explicit.left, explicit.top, explicit.width, explicit.height);
@@ -108,6 +118,15 @@ const shimRect = (node) => {
     const left = 80 + (Number.isFinite(n) ? n : 0) * 180;
     const top = zone === "judge" ? 100 : zone === "equip" ? 160 : 60;
     return rectOfBox(left, top, 120, slot ? 34 : 52);
+  }
+  // 座位里的武将块（无 id / data-* 属性）：位置按**所属座位**固定派生。座位每次重绘都会
+  // 重建这些节点，若沿用下面"构造序"的通用矩形，同一个武将块在重绘前后会落到不同位置——
+  // 「两条飘字起点相差 14」这类跨重绘比较位置的用例（U3-04d）就会随全局取数序偶发变红。
+  if (!node.id && hasClassText(node, "hero-block")) {
+    const seatNo = seatAncestorOf(node);
+    if (seatNo !== null && Number.isFinite(seatNo)) {
+      return rectOfBox(84 + seatNo * 180, 76, 104, 40);
+    }
   }
   if (hasClassText(node, "face")) return rectOfBox(360, 300, 88, 124);
   // U4-04：阶段飘字的盒子由文本 / 设计单位决定（垫片只给一个确定尺寸，供夹边距用）。
@@ -374,6 +393,16 @@ const candidateRowButtons = () => Array.from($("t-options").children).filter(
 const seatNodes = () => [...$("t-seats").children, $("t-self-seat")];
 const seatBox = (seat) => seatNodes().find(
   (node) => node.getAttribute("data-seat") === String(seat)) || null;
+/** 预发动步骤条的 chip 行（`renderPreativation` 铺在 `#t-options` 里的那个 `.cards` DIV）。
+ *  预发动用例共用同一处查找：步骤 chip 的文本 / 点击都不各自再抄一遍。 */
+const preactivationStepRow = () => Array.from($("t-options").children).find(
+  (node) => node.tagName === "DIV") || null;
+const preactivationStepChip = (index) => {
+  const row = preactivationStepRow();
+  if (!row) return null;
+  return Array.from(row.children).find(
+    (node) => node.getAttribute("data-step") === String(index)) || null;
+};
 /** 自己装备区里的第一张牌（就地高亮的用例共用一处查找）。
  *
  * U1-02 起自己的装备区是**固定四槽**（武器 / 防具 / 攻马 / 防马），槽位节点自己带
@@ -3578,10 +3607,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     `seat1=${seatBox(1).classList.contains("targetable")} seat0=${seatBox(0).classList.contains("targetable")}`);
 
   // 重选第 1 步：清空第 1..N 步（用户裁定的"重选第 K 步清空 K..N"）。
-  const stepRow = Array.from($("t-options").children).find((c) => c.tagName === "DIV");
-  const stepChip = stepRow && Array.from(stepRow.children).find(
-    (c) => c.getAttribute && c.getAttribute("data-step") === "0",
-  );
+  const stepChip = preactivationStepChip(0);
   (stepChip.listeners.click || []).forEach((fn) => fn({ target: stepChip }));
   check("㉿PZ7 重选第 1 步清空第 1..N 步",
     ui.state.preactivation.cursor === 0
@@ -3657,9 +3683,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       (b) => b.getAttribute("data-skill-id") === "demo.wording");
     (button.listeners.click || []).forEach((fn) => fn({ target: button }));
   };
-  const stepRow = () => Array.from($("t-options").children).find((c) => c.tagName === "DIV");
   const stepChipText = (index) => {
-    const chip = Array.from(stepRow().children).find((c) => c.getAttribute("data-step") === String(index));
+    const chip = preactivationStepChip(index);
     return chip ? chip.textContent : "";
   };
 
@@ -3680,6 +3705,128 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿WD4 没有 wording 时退回旧通用文案（步骤条\"选牌\"、提示也一样）",
     stepChipText(0).includes("选牌") && $("t-target-hint").textContent.includes("选牌"),
     `${stepChipText(0)} / ${$("t-target-hint").textContent}`);
+}
+
+/* ④c 票 08：预发动**不许越步** + 标题 / 页脚同源（三步清单：seat → option → card）。
+ *
+ * 旧实现允许点第 2 步的步骤 chip 跳过空着的第 1 步；把后面两步填满后光标到末尾而第 1 步
+ * 仍空 ⇒ 标题（`#t-target-hint`，只看 `pa.cursor`）写「清单已填完」，页脚（`#t-choice`，
+ * 按 `preactivationReady`）写「清单里还有步骤没填完。」，确认按钮禁用；此时点场上武将无效
+ * （座位步只认当前光标），点第 1 步 chip 又会把第 2/3 步清空 ⇒ 死锁。
+ * 修法：`firstUnfilledPreativationStep` 是**唯一判据**——ready / 提示 / chip 落点都读它。
+ *
+ * 清单形状与**写入面同源**（界孙尚香【结姻】的 `step_requirements` + `JIE_JIEYIN_OPTIONS`，
+ * `src/sgs/skills/active.py`）：选项步的池值是**机器 id**（实机渲染的就是这个），不是文案。
+ */
+{
+  const ticket08Card = { ...synthCard(31, "杀"), type: "slash" };
+  const ticket08Pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 950,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 950 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {
+      "demo.ticket08": [
+        { name: "seat", zones: [], min: 1, max: 1, order: 0, wording: "选择一名男性角色",
+          pool: [{ when: [], options: ["seat:1", "seat:2"] }] },
+        { name: "option", zones: [], min: 1, max: 1, order: 1,
+          wording: "选择弃置一张手牌，或将一张装备牌置入其装备区",
+          pool: [{ when: [], options: ["jieyin_discard_hand", "jieyin_place_equipment"] }] },
+        { name: "card", zones: ["hand"], min: 1, max: 1, order: 2,
+          wording: "弃置一张手牌 / 置入一张装备牌（目标同槽必须有空位）",
+          pool: [{ when: [], options: ["31"] }] },
+      ],
+    },
+    preactivation: [],
+  };
+  const ticket08View = synthView(ticket08Pending);
+  ticket08View.heroes = { 0: "jie_sunshangxiang", 1: "jie_zhangfei", 2: "jie_huaxiong" };
+  ticket08View.snapshot.self_hand = [ticket08Card];
+  ticket08View.skills = [{
+    skill_id: "demo.ticket08", name: "三步技", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "", convert_sources: [] },
+  }];
+  ui.state.view = ticket08View;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(ticket08View);
+
+  const t8Skill = () => Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "demo.ticket08");
+  const t8Button = (text) => Array.from($("t-options").children).find(
+    (c) => c.textContent === text) || null;
+  const t8Click = (node) => {
+    if (!node) return false;
+    (node.listeners.click || []).forEach((fn) => fn({ target: node }));
+    return true;
+  };
+  const t8Hand = () => $("t-hand").children[0] || null;
+  const t8Hint = () => $("t-target-hint").textContent;
+  const t8Foot = () => $("t-choice").textContent;
+  const t8Pa = () => ui.state.preactivation;
+  // 桥对缺失项容错 ⇒ 未实现的判据在这里是 `undefined`（一条 FAIL），不是加载期 ReferenceError。
+  const t8First = (pa) => (typeof ui.firstUnfilledPreativationStep === "function"
+    ? ui.firstUnfilledPreativationStep(pa) : undefined);
+
+  t8Click(t8Skill());
+  check("㉿JS1 三步清单进入预发动：光标停在第 1 步",
+    !!t8Pa() && t8Pa().cursor === 0 && t8Pa().steps.length === 3,
+    `cursor=${t8Pa() && t8Pa().cursor} steps=${t8Pa() && t8Pa().steps.length}`);
+
+  // 空着第 1 步点第 2 步的 chip：旧实现跳过去，修后钳回第一个空步。
+  t8Click(preactivationStepChip(1));
+  check("㉿JS2 不许越步：点第 2 步 chip 落回第 1 步（钳到第一个空步）",
+    !!t8Pa() && t8Pa().cursor === 0
+      && t8Pa().answers.every((answer) => answer.values.length === 0),
+    `cursor=${t8Pa() && t8Pa().cursor} answers=${JSON.stringify(t8Pa() && t8Pa().answers)}`);
+  check("㉿JS2b 唯一判据：第 1 步就是第一个空步、清单未 ready",
+    !!t8Pa() && t8First(t8Pa()) === 0 && ui.preactivationReady(t8Pa()) === false,
+    `first=${t8Pa() && t8First(t8Pa())} ready=${!!t8Pa() && ui.preactivationReady(t8Pa())}`);
+  check("㉿JS3 标题与页脚同源：都指第 1 步、都不说「清单已填完」、确认禁用",
+    t8Hint().includes("第 1/3 步") && t8Hint().includes("选择一名男性角色")
+      && t8Foot().includes("第 1/3 步")
+      // 标题 =（可能的产物前缀「将以【X】使用。」）+ 同一份步骤提示 ⇒ 以页脚那句结尾。
+      && t8Hint().endsWith(t8Foot())
+      && !t8Hint().includes("清单已填完") && !t8Foot().includes("清单已填完")
+      && $("btn-submit").disabled === true,
+    `hint="${t8Hint()}" foot="${t8Foot()}" submit=${$("btn-submit").disabled}`);
+
+  // 按序补完：座位步（点场上武将）→ 选项步（点选项池里的机器 id）→ 选牌步（点手牌 + 下一步）。
+  t8Click(seatBox(1));
+  check("㉿JS4 填完第 1 步自动进第 2 步（选项步）",
+    !!t8Pa() && t8Pa().cursor === 1 && t8Hint().includes("第 2/3 步"),
+    `cursor=${t8Pa() && t8Pa().cursor} hint="${t8Hint()}"`);
+  t8Click(t8Button("jieyin_discard_hand"));
+  check("㉿JS5 选项选完自动进第 3 步（选牌步），确认仍禁用",
+    !!t8Pa() && t8Pa().cursor === 2 && t8Hint().includes("第 3/3 步")
+      && $("btn-submit").disabled === true,
+    `cursor=${t8Pa() && t8Pa().cursor} hint="${t8Hint()}" submit=${$("btn-submit").disabled}`);
+  t8Click(t8Hand());
+  t8Click(t8Button("下一步"));
+  check("㉿JS6 按序填完 = 标题才说「清单已填完」、页脚说可以确认、按钮启用",
+    !!t8Pa() && ui.preactivationReady(t8Pa()) === true
+      && t8Hint().includes("清单已填完") && t8Hint().includes("可以确认发动")
+      && t8Foot().includes("可以确认发动") && !t8Foot().includes("还有步骤没填完")
+      && $("btn-submit").disabled === false,
+    `hint="${t8Hint()}" foot="${t8Foot()}" submit=${$("btn-submit").disabled}`);
+
+  // 兜底支路：「光标在末尾、第 1 步空」旧版跳步能造出来；跳步已被钳住 ⇒ 这里直接合成
+  // 那份坏态，钉住标题 / 页脚**同读**同一个判据（本票的症状就是两处各算一套）。
+  t8Pa().answers[0] = { values: [], texts: [] };
+  t8Pa().cursor = t8Pa().steps.length;
+  ui.renderPending(ticket08View);
+  check("㉿JS7 光标在末尾但第 1 步空：标题/页脚都指第 1 步、确认禁用",
+    t8Hint().endsWith(t8Foot()) && t8Hint().includes("第 1/3 步")
+      && !t8Hint().includes("清单已填完")
+      && $("btn-submit").disabled === true,
+    `hint="${t8Hint()}" foot="${t8Foot()}" submit=${$("btn-submit").disabled}`);
+  t8Click(preactivationStepChip(2));
+  check("㉿JS8 坏态下点第 3 步 chip ⇒ 落回第 1 步（目标步补得回来，不再死锁）",
+    !!t8Pa() && t8Pa().cursor === 0
+      && t8Pa().answers.every((answer) => answer.values.length === 0),
+    `cursor=${t8Pa() && t8Pa().cursor} answers=${JSON.stringify(t8Pa() && t8Pa().answers)}`);
+  ui.resetSelection();
 }
 
 /* ⑤ W4-1：退化清单（服务端 `pool=()`）——不铺候选索引，座位步退化为"全都点得动"，
@@ -17604,5 +17751,6 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.flushPlayback();
   resetAll();
 }
+
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
