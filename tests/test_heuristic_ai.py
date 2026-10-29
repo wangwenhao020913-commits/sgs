@@ -651,22 +651,23 @@ def test_the_dodge_probability_lowers_the_expected_attack_score_and_a_dodge_stil
 # ---------------------------------------------------------------------------
 
 
-def _identity_view(identities, *, viewer: int, dead: tuple[int, ...] = ()):
-    """坐在 ``viewer`` 的身份局视角（座位数 = ``len(identities)``，不跑引擎）。"""
+def _identity_view(identities, *, viewer: int, visible: tuple[int, ...] = ()):
+    """坐在 ``viewer`` 的身份局视角（座位数 = ``len(identities)``，不跑引擎）。
+
+    ``visible``（U1-04 的亮明入口）= 这些座位额外置 ``identity_visible=True``，投影因此对
+    所有观察者露出它们的身份——测"已亮明的忠臣 / 反贼"这一档才需要它。
+    """
     state = build_state(
         pack=PACK,
         rule_config=RuleConfig(player_count=len(identities)),
         seats=[
-            SeatSpec(
-                hp=0 if seat in dead else 4,
-                hp_max=4,
-                alive=seat not in dead,
-                identity=identity,
-            )
-            for seat, identity in enumerate(identities)
+            SeatSpec(hp=4, hp_max=4, identity=identity)
+            for identity in identities
         ],
         deck=_deck_excluding(),
     )
+    for seat in visible:
+        state.players[seat].identity_visible = True
     return project(state, viewer)
 
 
@@ -700,12 +701,35 @@ def test_the_identity_posterior_is_a_uniform_split_of_the_remaining_roster():
     | 内奸 | 忠 / 反 / 反 | 1 | 0（没有盟友） |
 
     内奸那一行同时钉住"主公不在内奸的敌人里"：主公是**已亮明**的另一席，不参与均分。
+
+    四个局面都用**合法配比**（1 主 / 1 忠 / 2 反 / 1 内）：后验只依赖配比与**亮明**的身份，
+    未知座位的真实身份不影响读数——但用不可能出现的配比会让"实现偷读真实身份"也通过。
     """
     cases = (
-        (Identity.LORD, (Identity.LORD, Identity.REBEL, Identity.REBEL, Identity.REBEL, Identity.RENEGADE), 0.75, 0.25),
-        (Identity.LOYALIST, (Identity.LOYALIST, Identity.LORD, Identity.REBEL, Identity.REBEL, Identity.RENEGADE), 1.0, 0.0),
-        (Identity.REBEL, (Identity.REBEL, Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.RENEGADE), 1 / 3, 1 / 3),
-        (Identity.RENEGADE, (Identity.RENEGADE, Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.REBEL), 1.0, 0.0),
+        (
+            Identity.LORD,
+            (Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.REBEL, Identity.RENEGADE),
+            0.75,
+            0.25,
+        ),
+        (
+            Identity.LOYALIST,
+            (Identity.LOYALIST, Identity.LORD, Identity.REBEL, Identity.REBEL, Identity.RENEGADE),
+            1.0,
+            0.0,
+        ),
+        (
+            Identity.REBEL,
+            (Identity.REBEL, Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.RENEGADE),
+            1 / 3,
+            1 / 3,
+        ),
+        (
+            Identity.RENEGADE,
+            (Identity.RENEGADE, Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.REBEL),
+            1.0,
+            0.0,
+        ),
     )
     for mine, identities, expected_enemy, expected_ally in cases:
         view = _identity_view(identities, viewer=0)
@@ -731,6 +755,36 @@ def test_the_identity_relation_keeps_revealed_seats_at_zero_or_one():
     assert heuristic_scoring._identity_relation(view, 0) == (0.0, 1.0), "主公对忠臣是盟友"
     assert heuristic_scoring._identity_relation(view, 2)[0] == pytest.approx(1.0), (
         "未知座位走后验（忠臣眼里剩下全是敌人）"
+    )
+
+
+def test_the_identity_relation_counts_a_revealed_teammate_as_an_ally():
+    """``identity_visible`` 露牌的同阵营座位是**盟友**（精确 0/1，按阵营而不是"只认主公"）。
+
+    票 21 之前只有"主公与我同在主公阵营"这一种已明盟友；I1 改成按阵营算（比旧函数宽一档）。
+    今天只有主公与 ``identity_visible`` 会亮明身份，故这条在实机里潜伏——它是 M5 亮明效果
+    放开后的语义钉子：主公侧眼里露牌的忠臣是盟友、反贼眼里露牌的反贼也是盟友。
+    """
+    lord_view = _identity_view(
+        (Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.REBEL, Identity.RENEGADE),
+        viewer=0,
+        visible=(1,),
+    )
+    assert heuristic_scoring._identity_relation(lord_view, 1) == (0.0, 1.0), (
+        "主公眼里露牌的忠臣是盟友"
+    )
+
+    rebel_view = _identity_view(
+        (Identity.REBEL, Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.RENEGADE),
+        viewer=0,
+        visible=(3,),
+    )
+    assert heuristic_scoring._identity_relation(rebel_view, 3) == (0.0, 1.0), (
+        "反贼眼里露牌的反贼是盟友"
+    )
+    enemy, ally = heuristic_scoring._identity_relation(rebel_view, 2)
+    assert (enemy, ally) == (pytest.approx(0.5), 0.0), (
+        "露牌的反贼占掉一个反贼席位 ⇒ 反贼眼里未知座位的 P(敌) 降到 1/2"
     )
 
 

@@ -293,3 +293,12 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
    叙事契约钉住。
 6. **tag 先于人类签认**（票 18 / 19 / 20 同先例）；`verdict.human_decision` 仍是 `null`，
    人签在台账。被拒绝时按停手线回退（tag 只增不删，台账追加拒绝理由）。
+
+- **`ai-v4` 的评审收尾**（`src/sgs/agents/heuristic.py` 的**两处 docstring**：
+  `_AI_READ_POINTS["PlayerPublic"]["alive"]` 补上"身份后验的分母"这条新读法；
+  `_identity_relation` / `_ally_identities` 把"已亮明档"的口径写准——敌人一侧与票 21 之前
+  逐项一致、**盟友一侧按阵营宽一档**（旧 `_is_revealed_ally` 只认主公，今天只有
+  `identity_visible` 露牌时才走到））：**行为不变**（纯注释），`ai-v4` 的 heuristic 字节仍按
+  `d00badb` 读（`e85629b7…`），版本加载器加载的也是那版；再往后的票不要把 HEAD 的 sha 与
+  台账行混着读。同一次评审还补了 `test_the_identity_relation_counts_a_revealed_teammate_as_an_ally`
+  与真对局的 `skill` 色断言（`tests/`，不进启发式字节）。

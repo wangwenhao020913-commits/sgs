@@ -6354,6 +6354,15 @@ def test_the_narrative_is_a_flat_observer_readable_stream() -> None:
     text = _line_text(entries)
     assert re.search(r"受到 \d+ 点伤害", text), f"没有伤害行：\n{text[:800]}"
     assert "发动【" in text, f"没有技能发动行：\n{text[:800]}"
+    # 颜色分段的**生成**要在真对局上钉住（合成记录的用例只证明"来什么画什么"）：技能名必须
+    # 落在 `skill` 类上——前端烟测 U1-05o2 改成"申报的类都画出来"之后，这一条是 `skill` 色
+    # 真实的产出面（票 21 评审点出的覆盖缺口）。
+    assert any(
+        segment["cls"] == "skill"
+        for entry in entries
+        if entry["kind"] == "line"
+        for segment in entry["segments"]
+    ), f"真实对局的技能发动行没有分到 skill 类：\n{text[:800]}"
     # U4-06 / D14：牌堆→手牌写「摸牌」；非牌堆来源（顺 / 借刀 / 获得）才写「获得」。
     assert re.search(r"摸牌 \d+ 张牌|摸牌【", text), f"没有摸牌行：\n{text[:800]}"
     for forbidden in ("RESPOND", "SKILL_ACTIVATION", "PLAY_PHASE", "结算帧", "#"):

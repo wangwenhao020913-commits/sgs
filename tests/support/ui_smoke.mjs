@@ -7902,15 +7902,18 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     // 真服务端叙事（不是手写夹具）也要真的落到颜色 span 上。判据**从载荷派生**：
     // U1-05 的契约是"前端只按 segments[].cls 上色"，而这一局里出现哪几种颜色由**对局
     // 内容**决定（谁发动了技能、伤害是不是火焰 / 雷电）——把它钉成固定五个类名等于把
-    // 前端烟测绑在 AI 的行为面上（票 21 的 I1 换了一局的走向就红过）。类名的闭集
-    // （seat / hero / card / card-fire / skill / dmg…）与各色的生成由 test_web.py 的
-    // 叙事契约钉住；这里核"回放该铺的那一段条目，申报的类都真的被画出来了"。
-    // 取数口径与 replay.js 的 `renderReplayLog` 同一处规则：`seq <= 当前记录` 的最后 60 条。
-    const replayCurrent = replay.records[replay.index] || {};
-    const replayLimit = typeof replayCurrent.seq === "number" ? replayCurrent.seq : 0;
-    const replayEntries = (replay.narrative || []).filter((entry) => entry.seq <= replayLimit);
+    // 前端烟测绑在 AI 的行为面上（票 21 的 I1 换了一局的走向就红过）。类名的闭集由
+    // test_web.py 的叙事契约钉住、`skill` 这类"某局未必出现"的色由真对局的那条生成断言
+    // 兜（`test_the_narrative_is_a_flat_observer_readable_stream`）；这里核"**已渲染的**
+    // 条目里，申报的类都真的被画出来了"。
+    // 窗口由 **DOM 反推**（`#r-log` 的 li 数 = 渲染器铺出的条目数），不抄 replay.js 的
+    // "seq <= 当前 + 最后 60 条"规则——窗口或取数口径改了这里跟着走，不会静默空转。
+    const renderedEntries = $("r-log").children.length;
+    const shownEntries = renderedEntries > 0
+      ? (replay.narrative || []).slice(-renderedEntries)
+      : [];
     const declared = new Set();
-    for (const entry of replayEntries.slice(Math.max(0, replayEntries.length - 60))) {
+    for (const entry of shownEntries) {
       for (const segment of entry.segments || []) {
         declared.add(`nar-${segment.cls || "act"}`);
       }
@@ -7921,7 +7924,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     }
     check("U1-05o2 真服务端叙事申报的颜色类都落到 span 上（闭集与生成另由叙事契约钉住）",
       declared.size >= 3 && [...declared].every((name) => realClasses.has(name)),
-      `declared=${[...declared].join(",")} rendered=${[...realClasses].join(",")}`);
+      `entries=${renderedEntries} declared=${[...declared].join(",")} rendered=${[...realClasses].join(",")}`);
     check("U1-05p 回放完整全部仍是既有逐条记录（切档不改已有行为）",
       /#\d+/.test(allText) && allText.includes("询问"),
       `all="${allText.replace(/\s+/g, " ").slice(-120)}"`);

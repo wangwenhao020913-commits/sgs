@@ -1360,7 +1360,11 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
 
 
 def _enemy_identities(mine: str) -> frozenset[str]:
-    """``mine`` 这个身份眼里的**敌人身份集合**（内奸不含主公，见 :data:`_RENEGADE_ENEMIES`）。"""
+    """``mine`` 这个身份眼里的**敌人身份集合**。
+
+    逐项等于票 21 之前的 :func:`_is_revealed_enemy`：主公侧 = 反贼 / 内奸、反贼 = 主公侧、
+    内奸 = 忠臣 / 反贼（**不含主公**，见 :data:`_RENEGADE_ENEMIES`）。
+    """
     if mine in _LORD_SIDE:
         return _REBEL_SIDE
     if mine == _REBEL:
@@ -1371,7 +1375,13 @@ def _enemy_identities(mine: str) -> frozenset[str]:
 
 
 def _ally_identities(mine: str) -> frozenset[str]:
-    """``mine`` 这个身份眼里的**盟友身份集合**（内奸没有盟友）。"""
+    """``mine`` 这个身份眼里的**盟友身份集合**（内奸没有盟友；按**阵营**算，不是按人）。
+
+    比票 21 之前的 :func:`_is_revealed_ally` **宽一档**：旧函数只认"主公与我同在主公阵营"，
+    这里认整个同阵营（主公侧的忠臣 / 反贼一方的反贼）。今天只有主公与 ``identity_visible``
+    会亮明身份，故扩宽是**潜伏**的；一旦 M5 的亮明效果让忠臣 / 反贼露牌，按阵营记盟友才是
+    对的——那条语义由 :func:`_identity_relation` 的"已亮明 ⇒ 精确 0/1"分支承载。
+    """
     if mine in _LORD_SIDE:
         return _LORD_SIDE
     if mine == _REBEL:
@@ -1416,8 +1426,10 @@ def _identity_relation(view: PlayerView, seat: int) -> tuple[float, float]:
 
     三档，替换的是原来"已明敌人 ⇒ 1、其余 ⇒ 0"的 0/1：
 
-    - **已亮明**（``identity`` 非空）⇒ 精确的 0/1，与票 21 之前逐字节一致（配比表不参与
-      这一步：亮明的身份是**确定**信息，不因表对不对而变）；
+    - **已亮明**（``identity`` 非空）⇒ 精确的 0/1（配比表不参与这一步：亮明的身份是**确定**
+      信息，不因表对不对而变）。敌人一侧逐项等于票 21 之前；**盟友一侧按阵营算**、比旧的
+      "只认主公"宽一档（见 :func:`_ally_identities`，今天只在 ``identity_visible`` 露牌时
+      才可能走到）；
     - **未知** ⇒ :func:`_unknown_identity_remainder` 的**均匀后验**：剩余多重集按人头均分，
       ``P = 该集合里"敌人 / 盟友身份"的份数 ÷ 存活未知座位数``；
     - **算不出**（见上）⇒ ``(0.0, 0.0)``，即今天的中性（不猜）。
@@ -2087,7 +2099,12 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 "hp": (True, "濒死与斩杀线：伤害够不够、要不要救、内奸估分"),
                 "hp_max": (True, "``hp < hp_max`` 判'已受伤'（【仁德】回体力的额外价值）"),
                 "hand_count": (True, "公开手牌数：【古锭刀】加伤、防守成本、够不够弃"),
-                "alive": (True, "只对存活座位出手（不把伤害算给已阵亡者）"),
+                "alive": (
+                    True,
+                    "只对存活座位出手（不把伤害算给已阵亡者）；也是身份后验的**分母**——"
+                    "_unknown_identity_remainder 只把存活座位算进未知席位，阵亡却身份不可见时"
+                    "直接 fail-closed（票 21）",
+                ),
                 "equip": (True, "装备区牌面：防具 / 武器 / 白银狮子的实际伤害；也进 ``_visible_cards``"),
                 "judge": (True, "判定区是公开信息，进 ``_visible_cards``（选牌步的可见面）"),
                 "chained": (True, "【铁索连环】打分读横置状态（``exclude=True``，但询问自带）"),
