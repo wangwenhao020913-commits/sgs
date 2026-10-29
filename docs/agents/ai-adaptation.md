@@ -105,6 +105,13 @@
 "不读"翻成"读"，理由点名读它的那几个辅助（`_conserved_card_count` / `_visible_card_faces` /
 `_verified_deck_profile` / `_dodge_probability`），不是只说"记牌读了"。
 
+**第三类先例：读法变了、读写档没变**——`PlayerPublic.identity`。I1 身份保守档（票 21）把
+"已明敌人 ⇒ 1、其余 ⇒ 0"换成配比字面表的均匀后验 `(P(敌), P(友))`（`_identity_relation`），
+登记仍是"读"。评审时不能只核"它还在读"，要对着**读法**复核：这个字段现在经
+`_identity_relation` 影响伤害目标 / 座位步 / 连环 / 火攻 / 无懈 / 濒死救援，理由里写的
+"算不出就退回 (0, 0)"必须真的能在读取方找到（`_unknown_identity_remainder` 的 fail-closed）。
+同类改法（把 0/1 换成权重）评审口径相同：**先问"这一档的幅度从哪来"**，再问读没读。
+
 ### 3.3 `Mode` 表 `MODE_SITES`（`src/sgs/data/identities.py`）
 
 键 = `Mode`，值 = 固定四格 `relation` / `victory` / `steps` / `projection`（顺序见

@@ -137,6 +137,7 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
 | `ai-v1` | `65609d40387e9b54c83ff14aa998d6e9d16cafb0` | `65609d40387e9b54c83ff14aa998d6e9d16cafb0` | `90ad861f387be9399124bb01d2a21b3f255c5abb687a77c80cda5f2aad0dca7a` | `29fb76e9d330b4c3a55915e6fec4f44c49e3a3eba378299fa6164d64b327793e` | 768（commit 派生） | `runs/ai-eval-65609d4-capped.json` | D1 无懈目标化（票 18）：`NULLIFY` 按"被取消的牌对目标利 / 害 × 已明关系"宣 / 不宣（嵌套与未登记牌名 `Pass`）。`quick` 59/128 全落 `RESPOND`；`promote` diff 311/768 全落 `RESPOND`，对父版本 `+0.0026`、CI `[-0.0169, 0.0235]`，对 `ai-v0` 同值 | **人类裁定通过**（agent 只记读数；`cases_green=false` 与 767/768 两条见下，不替人接受） |
 | `ai-v2` | `c01cbf25327201de300034280dc95be88d779c5c` | `c01cbf25327201de300034280dc95be88d779c5c` | `6d200c6803dfbcfe71aa5b055af182f3106df05f69e90c37906e6962e243f49d` | `f294c836a49a27747736b867aefff73e031c7cda10eaf749a72394c744fc7eaa` | 768（commit 派生） | `runs/ai-eval-c01cbf2.json` | D2 斩杀优先（票 19）：`_score_attack` 加"这一下就打死"（`_damage_to >= 目标体力`）的斩杀项，与【酒】的 `_wine_enables_kill` 共用 `_lethal_to` 一条判据；藤甲把普通【杀】挡成 0 时不算，白银狮子只把伤害封在 1（够不够仍看体力）。`quick` 38/128（37 落 `PLAY_PHASE`）；`promote` diff 192/768（183 `PLAY_PHASE` + 9 条下游平分抽签漂移），对父版本 `-0.0065`、CI `[-0.0221, 0.0091]`，对 `ai-v0` `-0.0013`、CI `[-0.0247, 0.0221]`，`errors=0`；`quick` JSON `runs/quick-c01cbf2.json`。**实机 seed=7002**（HEAD `5f2d329`，行为 = 本版）：4 项必验通过（能开局 / AI 应答 / 无非法 / 到终局），**D2 局面未遇上**（按用户裁定不算失败），读数见 `.scratch/ai-light/acceptance.md` §四 | **人类裁定通过（2026-10-30）**：① `cases_green=false` 按"本项 D 用例全绿"解释、② ③ 成立、④ 10 条下游平分抽签漂移按书面说明接受、⑤ 台账理由齐全；缓存下限重取与 tag 先建一并接受（逐条见下） |
 | `ai-v3` | `e2e4753464147d1bed51730236b7969c8627eedb` | `e2e4753464147d1bed51730236b7969c8627eedb` | `7768049d4b127f0da63f89349762f15dfc60015e029dd5cafa24312ca439cef4` | `e3ff03a0bfacc715b76de6735a785c578e6f019f108fc9b90342392aa2b5b1ce` | 768（commit 派生） | `runs/ai-eval-e2e4753.json` | C1 记牌 P(闪)（票 20）：`_score_attack` 的「0.25 × 手牌数（封顶 1.0）」换成「未知池超几何 P(目标有闪) 导出的期望伤害 + 躲掉也消耗一张【闪】的收益（1.0 分/张）」；档位靠守恒量反推、对不上就关闭记牌回落到旧公式。`quick` 45/128（43 `PLAY_PHASE` + 2 条下游平分抽签漂移）；`promote` diff 283/768（277 `PLAY_PHASE` + 6 条下游漂移），对父版本 `+0.0078`、CI `[-0.0104, 0.0273]`，对 `ai-v0` `+0.013`、CI `[-0.0104, 0.0352]`，`errors=0`；`quick` JSON `runs/quick-e2e4753.json`。**实机 seed=7003**（4 项必验通过；新增 2 条 D 报账——忠臣【决斗】主公后自无懈，进 v2 候选，见 `acceptance.md` §五）。**预注册「中后期更明显」被实测否定**（效果跟手牌厚度走、峰值在早期；见票 20 的 Answer），两处读数偏差（武将牌上的牌 / D2 的一致漂移）也留给人类裁定 | **人类裁定通过（2026-10-30）**：① ② ③ ④ 全部接受（①–③ 用户原话「1~3签字我都确认没问题」；④ 用户原话「确认通过，截至本票没有问题，因为以后票 27 会完善的」——武将牌读取面由票 27 补，D2 一致漂移由反向对齐测试兜） |
+| `ai-v4` | `d00badb2e7e853f91b8bd32ad0147cbe0602ed16` | `d00badb2e7e853f91b8bd32ad0147cbe0602ed16` | `e85629b76c2cbb5f0b3596bdd09b304d18958e25a02cefe1baa6d06ec5172b4b` | `2ef8d79409584b82b632222dc246772e0aeaa52bcbba81a0cf51fd7ab3b4042e` | 768（commit 派生） | `runs/ai-eval-d00badb.json` | I1 身份保守档（票 21）：敌友从"主公 ↔ 反贼"的 0/1 换成**配比均匀后验**——已亮明身份（本人 / 主公 / 已阵亡 / `identity_visible`）从启发式内的 4~8 人配比字面表里减掉，存活未知座位按人头均分得 `(P(敌), P(友))`，替换约 8 个用点的 0/1（伤害目标 / 火攻 / 座位步三类 / 铁索四条分支 / 无懈宣判 / 濒死救援）；算不出就退回中性的 (0, 0)。内奸语义保留（主公对内奸恒 (0, 0)）。`quick` 61/128（34 `PLAY_PHASE` + 10 `PEACH` + 9 `RESPOND` + 7 `SELECT_OPTION` + 1 条下游平分抽签漂移）；`promote` diff 352/768（216 `PLAY_PHASE` + 62 `PEACH` + 47 `RESPOND` + 22 `SELECT_OPTION` + 5 条下游漂移），对父版本 **+0.0365**、CI **[0.0156, 0.0586]**，对 `ai-v0` **+0.0326**、CI **[0.0026, 0.0612]**，`errors=0`；分身份：忠臣 **+0.1104**（0.1948 → 0.3052）、内奸 +0.0588、主公 +0.0065、反贼 +0.0033；`quick` JSON `runs/quick-d00badb.json`。**8 人局 32 局 sanity**：32/32 跑完、0 非法、32/32 可回放；同阵营伤害 198/703（28.2%）vs `ai-v3` 194/640（30.3%），其中**主公 → 忠臣 53 vs 38（上升）**、忠臣 → 主公 17 vs 32（读数见 `acceptance.md` §六） | **人类裁定（待签，2026-10-30）**：① `cases_green=false` 仍只因票 24 的 D3【遗计】`xfail`；② 5 条非预注册首分叉按**下游平分抽签漂移**接受（`probe21_promote.py` + `probe21_attrib.py` 逐条）；③ 缓存命中率下限按新行为面**重取**（0.98970 → 0.98866）；④ 8 人局"主公 → 忠臣"误伤读数上升 15 次（+0.6 次/局）而总误伤率下降——按 sanity 读法接受与否 |
 
 - `ai-v0` 是**原点基线**（spec §2.6）：`promote --anchor ai-v0` 用它防梯子漂移。
 - 上表的**种子批**列 = **该版评估所用的批**：`ai-v0` 行是 `derive_batch(ai-v0 commit, 128)`
@@ -251,3 +252,44 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
   函数名 `_expected_attack_points` → `_expected_attack_score`）：**行为不变**（纯注释），
   `ai-v3` 的 heuristic 字节仍按 `e2e4753` 读（`7768049d…`），版本加载器加载的也是那版；
   再往后的票不要把 HEAD 的 sha 与台账行混着读。
+
+**`ai-v4` 的口径说明（agent 只记读数；四条待签项在台账行的"人类裁定"格里）**：
+1. `cases` = **20/21**：红在票 24 的 D3【遗计】`xfail(strict=True)`（本票未开工），不是 I1；
+   I1 自己的 2 条 D 用例（`test_i1_a_dead_loyalist_leaves_the_lord_facing_an_all_enemy_field` /
+   `test_i1_the_renegade_keeps_the_lord_off_the_priority_list`）全绿。工具口径（模块里无
+   xfail）⇒ `cases_green=false`，与 `ai-v1` / `ai-v2` / `ai-v3` 同一条待裁定项。
+2. `diff_attributed = false`：`quick` 61/128 里 1 条落 `DISCARD`、`promote` 352/768 里
+   2 条 `DISCARD` + 3 条 `SELECT_CARDS` 不在预注册集合（`SELECT_OPTION` / `PLAY_PHASE` /
+   `PEACH` / `RESPOND`）。**书面说明（spec §2.3 ④）**：5 条都是**下游平分抽签漂移**——首分叉
+   之前该座位有一条询问的"最高分候选数"变了、**选中的动作没变**（`RandomSource.randbelow(1)`
+   不取随机数、`randbelow(n>1)` 会取 ⇒ 后续平分抽签整体错位）。逐条（`probe21_promote.py`
+   找种子，`probe21_attrib.py` 逐种子核）：
+
+   | seed | 首分叉 | 首分叉**之前**改变的平分候选数（new/old） | 选中的动作（两边相同） |
+   |---|---|---|---|
+   | `3314977869622878074` | `SELECT_CARDS@10` | `PLAY_PHASE#5` 1/2 | `card_id 55 → 座位 4` |
+   | `4514200405074212640` | `SELECT_CARDS@13` | `SELECT_OPTION#7` 2/1、`#9` 1/4 | `seat:0` / `Pass` |
+   | `5114203757752737980` | `DISCARD@83` | `PLAY_PHASE#79` 1/2 | `card_id 88 → 座位 3` |
+   | `7913102898836559292` | `SELECT_CARDS@13` | `PLAY_PHASE#10` 1/2 | `card_id 83 → 座位 1` |
+   | `11949779806123291935` | `DISCARD@105` | `PLAY_PHASE#65` 1/2 | `card_id 43 → 座位 3` |
+
+   两条 `DISCARD` 的分叉动作本身同价：一条都是"弃两张【闪】"、另一条都是"弃一张【闪】"
+   （只是**具体哪张**不同）；三条 `SELECT_CARDS` 是同一批同分牌里 `picks` 的位置不同。
+3. **缓存命中率下限按新行为面重取**（`tests/test_engine_cache.py` ⑤，同票 19 的口径）：
+   `12643 / 12788 = 0.98866`（上一版 `12686 / 12818 = 0.98970`；缓存实现与键函数一字未动，
+   键覆盖 ①–④ 全绿）。数值再降 0.104 pp，理由写进该文件的 docstring 与票 21 的 `## Answer`。
+4. **8 人局 32 局 sanity（spec §6.4，只作 sanity、不作晋升主判据）**：32/32 跑完、终局与身份
+   胜负一致 32/32、零非法应答、32/32 可回放。唯一的负面读数是**误伤结构变了**：
+   `lord → loyalist` 53 次（`ai-v3` 38）、`loyalist → lord` 17 次（`ai-v3` 32）、
+   `loyalist → loyalist` 34（32）、`rebel → rebel` 94（92）；总同阵营伤害 198/703 = 28.2%
+   （`ai-v3` 194/640 = 30.3%）。这正是 spec §6.4 预判的风险（8 人局主公眼里 5/7 是敌人），
+   幅度约 **+0.6 次/局**，交人类裁定（读数住 `.scratch/ai-light/acceptance.md` §六，
+   探针 `.scratch/ai-light/probe21_8p.py`）。
+5. **夹具随行为面重取（判据未放宽）**：火攻 tape 的"对 AI"那一段 seed 63 → **93**（同一份
+   固定脚本、同一组判据，重扫 1–259 的首个命中；探针 `probe20_fire_seed.py`，理由写进
+   `tests/support/web_client.py` 的注释）；`tests/support/ui_smoke.mjs` 的 U1-05o2 从
+   "固定五个颜色类名"改成**从载荷派生**（申报的类都落到 span 上）——原判据把前端烟测绑在
+   **这一局出现了谁发动技能**上，I1 换了走向就抖红；类名闭集与生成仍由 `test_web.py` 的
+   叙事契约钉住。
+6. **tag 先于人类签认**（票 18 / 19 / 20 同先例）；`verdict.human_decision` 仍是 `null`，
+   人签在台账。被拒绝时按停手线回退（tag 只增不删，台账追加拒绝理由）。
