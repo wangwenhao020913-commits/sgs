@@ -134,7 +134,7 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
 | tag | commit | engine_ref | heuristic_sha256 | 种子批 sha256 | deals | 结果 JSON | 一句话理由 | 人类裁定 |
 |---|---|---|---|---|---|---|---|---|
 | `ai-v0` | `ae7da0ad72d75c2cad96663a8e78f6fae3921439` | `ae7da0ad72d75c2cad96663a8e78f6fae3921439` | `09a56098ffe98701c8499ee1db60e85cf13b6400ada1d9a894b7a12b231c5bd2` | `93ada125f14cfc3bbe41663363eee3b1f3db59f6da4be2e3d2033f42686611cb` | 128（commit 派生） | —（原点，未跑批） | 原点：规则工程开工前的 HEAD（票 11 批量 + 票 12 座位子流已落地，AI 语义未动） | —（原点不裁定） |
-| `ai-v1` | `65609d40387e9b54c83ff14aa998d6e9d16cafb0` | `65609d40387e9b54c83ff14aa998d6e9d16cafb0` | `90ad861f387be9399124bb01d2a21b3f255c5abb687a77c80cda5f2aad0dca7a` | `29fb76e9d330b4c3a55915e6fec4f44c49e3a3eba378299fa6164d64b327793e` | 768（commit 派生） | `runs/ai-eval-65609d4-capped.json` | D1 无懈目标化（票 18）：`NULLIFY` 按"被取消的牌对目标利 / 害 × 已明关系"宣 / 不宣（嵌套与未登记牌名 `Pass`）。`quick` 59/128 全落 `RESPOND`；`promote` diff 311/768 全落 `RESPOND`，对父版本 `+0.0026`、CI `[-0.0169, 0.0235]`，对 `ai-v0` 同值 | **待人类裁定**（agent 只记读数；`cases_green=false` 与 767/768 两条见下，不替人接受） |
+| `ai-v1` | `65609d40387e9b54c83ff14aa998d6e9d16cafb0` | `65609d40387e9b54c83ff14aa998d6e9d16cafb0` | `90ad861f387be9399124bb01d2a21b3f255c5abb687a77c80cda5f2aad0dca7a` | `29fb76e9d330b4c3a55915e6fec4f44c49e3a3eba378299fa6164d64b327793e` | 768（commit 派生） | `runs/ai-eval-65609d4-capped.json` | D1 无懈目标化（票 18）：`NULLIFY` 按"被取消的牌对目标利 / 害 × 已明关系"宣 / 不宣（嵌套与未登记牌名 `Pass`）。`quick` 59/128 全落 `RESPOND`；`promote` diff 311/768 全落 `RESPOND`，对父版本 `+0.0026`、CI `[-0.0169, 0.0235]`，对 `ai-v0` 同值 | **人类裁定通过**（agent 只记读数；`cases_green=false` 与 767/768 两条见下，不替人接受） |
 
 - `ai-v0` 是**原点基线**（spec §2.6）：`promote --anchor ai-v0` 用它防梯子漂移。
 - 上表的**种子批**列 = **该版评估所用的批**：`ai-v0` 行是 `derive_batch(ai-v0 commit, 128)`
@@ -154,6 +154,8 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
      不设上限时 stock 的 `python -m ai_eval promote --deals 768` 永远等这一副。上限触发后
      按工具既有口径记成"该副对局错误、整对退出配对" ⇒ `errors = 4`、**767 对有效配对**
      （768 − 1）。被接受前请按"767/768"读 `non_inferior` / `anchor_non_inferior`。
+
+【人类裁定结果：满足】
 - `ai-v1` 的 tag 是为**版本留存**先建的（之后所有票的父版本都能被版本加载器复现）；它不是
   人类签认。人类裁定为"拒绝"时按停手线回退（tag 只增不删，台账追加拒绝理由）。
 - 封印批名字与摘要也记在这张表下方的说明里（`sealed-1` = `0d9cc40a450f208ddf0711555279104b72498b6581d97d4e6ca0847d324d5127`，1024 副）。
