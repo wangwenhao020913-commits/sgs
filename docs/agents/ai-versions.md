@@ -135,12 +135,13 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
 |---|---|---|---|---|---|---|---|---|
 | `ai-v0` | `ae7da0ad72d75c2cad96663a8e78f6fae3921439` | `ae7da0ad72d75c2cad96663a8e78f6fae3921439` | `09a56098ffe98701c8499ee1db60e85cf13b6400ada1d9a894b7a12b231c5bd2` | `93ada125f14cfc3bbe41663363eee3b1f3db59f6da4be2e3d2033f42686611cb` | 128（commit 派生） | —（原点，未跑批） | 原点：规则工程开工前的 HEAD（票 11 批量 + 票 12 座位子流已落地，AI 语义未动） | —（原点不裁定） |
 | `ai-v1` | `65609d40387e9b54c83ff14aa998d6e9d16cafb0` | `65609d40387e9b54c83ff14aa998d6e9d16cafb0` | `90ad861f387be9399124bb01d2a21b3f255c5abb687a77c80cda5f2aad0dca7a` | `29fb76e9d330b4c3a55915e6fec4f44c49e3a3eba378299fa6164d64b327793e` | 768（commit 派生） | `runs/ai-eval-65609d4-capped.json` | D1 无懈目标化（票 18）：`NULLIFY` 按"被取消的牌对目标利 / 害 × 已明关系"宣 / 不宣（嵌套与未登记牌名 `Pass`）。`quick` 59/128 全落 `RESPOND`；`promote` diff 311/768 全落 `RESPOND`，对父版本 `+0.0026`、CI `[-0.0169, 0.0235]`，对 `ai-v0` 同值 | **人类裁定通过**（agent 只记读数；`cases_green=false` 与 767/768 两条见下，不替人接受） |
+| `ai-v2` | `c01cbf25327201de300034280dc95be88d779c5c` | `c01cbf25327201de300034280dc95be88d779c5c` | `6d200c6803dfbcfe71aa5b055af182f3106df05f69e90c37906e6962e243f49d` | `f294c836a49a27747736b867aefff73e031c7cda10eaf749a72394c744fc7eaa` | 768（commit 派生） | `runs/ai-eval-c01cbf2.json` | D2 斩杀优先（票 19）：`_score_attack` 加"这一下就打死"（`_damage_to >= 目标体力`）的斩杀项，与【酒】的 `_wine_enables_kill` 共用 `_lethal_to` 一条判据；藤甲 / 白银狮子把这一刀挡成 0 时不算。`quick` 38/128（37 落 `PLAY_PHASE`）；`promote` diff 192/768（183 `PLAY_PHASE` + 9 条下游平分抽签漂移），对父版本 `-0.0065`、CI `[-0.0221, 0.0091]`，对 `ai-v0` `-0.0013`、CI `[-0.0247, 0.0221]`，`errors=0`；`quick` JSON `runs/quick-c01cbf2.json` | **待人类裁定**（agent 只记读数；`cases_green=false` 与 `diff_attributed=false` 两条见下，不替人接受） |
 
 - `ai-v0` 是**原点基线**（spec §2.6）：`promote --anchor ai-v0` 用它防梯子漂移。
 - 上表的**种子批**列 = **该版评估所用的批**：`ai-v0` 行是 `derive_batch(ai-v0 commit, 128)`
-  的**参考摘要**（`quick` 批大小，没跑过）；`ai-v1` 行是那次 `promote` 实际跑的 768 副
-  commit 派生批（`derive_batch(65609d4, 768)`，768 副）。两行不可直接比大小，比的是"这一版
-  的读数来自哪一批"。
+  的**参考摘要**（`quick` 批大小，没跑过）；`ai-v1` 起每一行是各自 `promote` 实际跑的 768 副
+  commit 派生批（`derive_batch(<该版 commit>, 768)`）。各行不可直接比大小，比的是"这一版的
+  读数来自哪一批"。
 - 后续版本在跑完 `quick` → `promote` → 实机（可选）后追加一行；被接受的 tag 必须能被版本
   加载器加载。实机结论只放指针：`.scratch/ai-light/acceptance.md`。
 - **`ai-v1` 的两条口径说明**（读 JSON 前先看这两条；它们也是 §2.3 五条件里两条的**待裁定项**）：
@@ -158,4 +159,24 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
 【人类裁定结果：满足】
 - `ai-v1` 的 tag 是为**版本留存**先建的（之后所有票的父版本都能被版本加载器复现）；它不是
   人类签认。人类裁定为"拒绝"时按停手线回退（tag 只增不删，台账追加拒绝理由）。
+- **`ai-v2` 的三条口径说明**（同上：都是 §2.3 五条件的**待裁定项**，台账不代判）：
+  1. `cases` = **13/14**：同样红在票 24 的 D3【遗计】`xfail(strict=True)`（本票未开工），
+     不是 D2；D2 自己的 4 条用例全绿。工具口径（模块里无 xfail）⇒ `cases_green=false`。
+  2. `diff_attributed = false`：`quick` 38/128 里 37 条落 `PLAY_PHASE`、1 条落
+     `SELECT_CARDS`；`promote` 192/768 里 183 条落 `PLAY_PHASE`、9 条落
+     `SELECT_CARDS` / `DISCARD` / `ARRANGE` / `DODGE` / `PEACH` / `RESPOND`。**书面说明（spec
+     §2.3）**：这 10 条都是**下游平分抽签漂移**——D2 只改 `_score_attack` 与
+     `_wine_enables_kill`（都只在 `PLAY_PHASE` 用），但某个 `PLAY_PHASE` 应答的"平分候选数"
+     从 n 变成 1 时，`randbelow(1)` **不取随机数**而 `randbelow(n>1)` 会取（`RandomSource.randbelow`
+     的 `bits == 0` 早退）⇒ 该座位后续的平分抽签整体错位；分叉点的动作都是**同一打分器里的同分
+     候选**（如两张【杀】/两张【闪】/两个摸闪技）。探针证据：`.scratch/ai-light/probe19_tie2.py`
+     （`SELECT_CARDS` 那副：第 88 次 `randbelow` 上界 2 vs 4、第 97 次 1 vs 2、第 115 次
+     同界不同值）与 `probe19_promote.py`（9 条逐条列出）。
+  3. 本版还**重取了缓存命中率下限**（`tests/test_engine_cache.py` ⑤，12832/12961 →
+     12686/12818）：⑤ 读的是真实 AI 对局，命中率随行为面漂；缓存实现与键函数未改（键覆盖
+     ①–④ 绿、miss 129 → 132），判据形态不变（实测值、零余量、少 1 命中即红）。理由与旧值
+     留在该测试的 docstring 里。
+- `ai-v2` 的 `promote` 是 **stock CLI** 跑的（`errors=0`、768/768 有效配对）：票 18 的
+  767/768 那颗【结姻】空转种子已由 `.scratch/jieyin-seat-pool/issues/01-jieyin-seat-pool.md`
+  （commit `d2de162`）修掉，本批不再需要应答上限。
 - 封印批名字与摘要也记在这张表下方的说明里（`sealed-1` = `0d9cc40a450f208ddf0711555279104b72498b6581d97d4e6ca0847d324d5127`，1024 副）。
