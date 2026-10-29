@@ -274,7 +274,6 @@ def test_player_view_reads_public_zones_in_insertion_order_and_never_the_deck_or
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="票 27：PlayerView 还没有 hero_zone_count / hero_zone_cards")
 def test_hero_zone_count_is_public_and_only_the_host_sees_the_faces():
     """票 27：武将牌上的牌——张数逐座位公开，牌面**只给宿主**（M6 2026-10 口径）。
 

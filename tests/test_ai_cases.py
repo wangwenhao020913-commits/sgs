@@ -1146,8 +1146,8 @@ def _qianxun_play_query():
 def test_the_qianxun_fixture_reaches_a_real_play_phase_window():
     """夹具自检（不带 xfail）：询问归属、【谦逊】的牌真的在武将牌上、两个【杀】候选都在。
 
-    只核形状，不核"记牌是否可用"（那两条 D 用例整体 strict xfail，夹具被引擎改动弄坏时
-    要单独可见）。
+    只核形状，不核"记牌是否可用"（那两条 D 用例是行为判据；夹具被引擎改动弄坏时要单独
+    可见，而不是被行为用例的失败一起掩盖）。
     """
     engine, query = _qianxun_play_query()
 
@@ -1166,7 +1166,6 @@ def test_the_qianxun_fixture_reaches_a_real_play_phase_window():
     assert slash_targets == {1}, "夹具失效：两张【杀】不再指向座位 1"
 
 
-@pytest.mark.xfail(strict=True, reason="票 27：武将牌上的牌还没进 PlayerView")
 def test_c1_qianxun_placement_keeps_card_counting_available():
     """票 27 验收①：放置期间守恒量完整、档位能认出来、``_dodge_probability`` 不再答 None。
 
@@ -1183,7 +1182,6 @@ def test_c1_qianxun_placement_keeps_card_counting_available():
     assert heuristic_scoring._dodge_probability(view, 1) is not None, "记牌必须恢复可用"
 
 
-@pytest.mark.xfail(strict=True, reason="票 27：武将牌上的牌还没进 PlayerView")
 def test_c1_qianxun_placement_keeps_the_slash_priced_by_dodge_probability():
     """票 27 验收②（决策级）：这张【杀】的分数等于记牌路径的期望，而不是常量贴现。
 

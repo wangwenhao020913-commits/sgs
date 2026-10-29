@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from sgs.data import Identity
 
-from .models import GameState, Player
+from .models import CardRef, GameState, Player
 from .protocol import PlayerPublic, PlayerView
 
 __all__ = ["project"]
@@ -34,11 +34,29 @@ def _visible_identity(player: Player, *, viewer: int) -> Identity | None:
     return None
 
 
+def _hero_zone_cards(state: GameState, player: Player) -> tuple[CardRef, ...]:
+    """``player`` 本人武将牌上的牌面（票 27）：只装**宿主 = 本人**的区。
+
+    与 M6 的 2026-10 口径一致（``tools/sgs_web/visibility.py::hero_zone_ref_visible``）：
+    牌面只给宿主，未登记 / 畸形的区同一默认；他人视角只拿张数
+    （:attr:`PlayerPublic.hero_zone_count`）。同一座位可能有多个放置技能实例的区，
+    区之间**没有规则先后**，这里按区键排序只为可重现（AI 的可见面只数张数，顺序不影响打分）。
+    """
+    cards: list[CardRef] = []
+    for skill_instance in sorted(player.hero_cards):
+        cards.extend(state.refs(state.hero_zone(player.seat, skill_instance)))
+    return tuple(cards)
+
+
 def project(state: GameState, seat: int) -> PlayerView:
     """投影出 ``seat`` 这一参与者能看到的棋盘信息。
 
     武将 id 与势力是**公开信息**（标准版武将牌明置；`04`（§2「信息可见性」）），故逐座位照搬；
     ``identity`` 仍走 :func:`_visible_identity` 的过滤（票 02 §可见性 8：过滤逻辑一字不改）。
+
+    武将牌上的牌（票 27）：逐座位给**张数**（公开，守恒量的一项）；牌面只给查看者自己当
+    宿主的区（:func:`_hero_zone_cards`），与 M6 的 2026-10 口径一致。两者都 ``exclude``，
+    不进记录流。
     """
     players = tuple(
         PlayerPublic(
@@ -49,6 +67,10 @@ def project(state: GameState, seat: int) -> PlayerView:
             alive=player.alive,
             equip=state.refs(player.equip),
             judge=state.refs(player.judge),
+            hero_zone_count=sum(
+                len(state.hero_zone(player.seat, skill_instance))
+                for skill_instance in player.hero_cards
+            ),
             chained=player.chained,
             flipped=player.flipped,
             wine_active=player.wine_active,
@@ -68,4 +90,5 @@ def project(state: GameState, seat: int) -> PlayerView:
         processing=state.refs(state.processing),
         turn_seat=state.turn_seat,
         phase=state.phase,
+        hero_zone_cards=_hero_zone_cards(state, state.player(seat)),
     )

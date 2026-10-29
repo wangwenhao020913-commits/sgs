@@ -43,9 +43,10 @@
    用构造测试（直接造 query 与候选）。
 5. **信息通道**：新增或遮挡了可见区？记牌守恒量（53 / 108 / 160）还成不成立？未知池变大要登记。
    ⚠️ 字段可以 `exclude=True`——`PlayerView` / `PlayerPublic` 上的先例是 `chained` / `hero` /
-   `kingdom`，询问上的先例是 `skill_id` / `preactivation`。它们**不进记录流**，所以改动
-   **不一定**触发金录像字节告警。票面因此必须写明"记牌 / 身份推断的输入变没变"，别指望
-   金录像替你报警。
+   `kingdom`，票 27 的 `hero_zone_cards` / `hero_zone_count` 也走这条（张数 / 本人牌面进
+   `view`，**不进记录流**）；询问上的先例是 `skill_id` / `preactivation`。它们**不进记录流**，
+   所以改动**不一定**触发金录像字节告警。票面因此必须写明"记牌 / 身份推断的输入变没变"，
+   别指望金录像替你报警。
 6. **回归**：≥1 条"不犯已知的蠢"用例进 `tests/test_ai_cases.py`；本票进决策 diff 批，diff 非空
    逐条解释（"为什么改对了"比"改了"重要）。
 
@@ -105,6 +106,13 @@
 "不读"翻成"读"，理由点名读它的那几个辅助（`_conserved_card_count` / `_visible_card_faces` /
 `_verified_deck_profile` / `_dodge_probability`），不是只说"记牌读了"。
 
+**第四类先例：新字段补的是一条读法的缺口**——`PlayerPublic.hero_zone_count` 与
+`PlayerView.hero_zone_cards`（票 27）。票 20 的记牌在【谦逊】放置期间 fail-closed（守恒量
+少几张），票 27 补的是**读取面**、不改判据：张数进 `_conserved_card_count`（守恒量完整），
+本人区的牌面进 `_visible_card_faces`（已出现的牌），他人区的牌面仍留在未知池。两条都登记为
+"读"、理由分别点名这两个辅助；评审时问"守恒量 / 未知池的输入变没变"，不能只看金录像（字段
+`exclude=True`，不触发字节告警）。
+
 **第三类先例：读法变了、读写档没变**——`PlayerPublic.identity`。I1 身份保守档（票 21）把
 "已明敌人 ⇒ 1、其余 ⇒ 0"换成配比字面表的均匀后验 `(P(敌), P(友))`（`_identity_relation`），
 登记仍是"读"。评审时不能只核"它还在读"，要对着**读法**复核：这个字段现在经
@@ -155,8 +163,9 @@
 
 - **不重评既有 `CATALOG`**：契约只管新进门；123 条既有技能的语义不因为这张表而"重新登记一遍"。
 - **`Victory.side` 三值不补课**：值域怎么扩由新模式票裁，不在这里先钉。
-- **"武将牌上的牌不进 `view`" 保持已知近似**：不动协议。真把它补进 `view` 时，读点表会立刻
-  逼出"记牌读不读它"，而不是再留一个静默近似。
+- **武将牌上的牌已补进 `view`（票 27）**：张数公开（`PlayerPublic.hero_zone_count`）、牌面只给
+  宿主（`PlayerView.hero_zone_cards`），两者 `exclude=True`、不进记录流；记牌读它们。这条不再是
+  "已知近似"——真再加一个移出可数区域的区时，守恒量 / 未知池要同票回答，别留静默缺口。
 - **不塞进 `docs/agents/skill-authoring.md`**：那边被"硬停判据恰 13 条"钉死，且只覆盖武将技能，
   新模式无处安放。两边的交叉点只有一行指针（`batch-ticket.md`）。
 - **不加"`SKILL_VALUES` 条目必须非零"**：不可机械判，还会误杀 0.0 的觉醒技先例。

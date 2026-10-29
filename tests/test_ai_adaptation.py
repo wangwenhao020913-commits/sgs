@@ -23,7 +23,6 @@ import importlib
 from collections.abc import Mapping
 from typing import Any, get_args
 
-import pytest
 from pydantic import BaseModel
 
 from sgs.agents import heuristic
@@ -254,7 +253,6 @@ def test_a_shared_entry_for_a_single_class_field_goes_red():
     assert any(f"{SHARED_BUCKET}.dying" in gap for gap in gaps), gaps
 
 
-@pytest.mark.xfail(strict=True, reason="票 27：hero_zone_count / hero_zone_cards 还没落地")
 def test_the_hero_zone_read_points_name_the_card_counting_readers():
     """票 27：两个新字段登记为**读**，理由点名读取方（不是只说“记牌读了”）。
 

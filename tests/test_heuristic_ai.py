@@ -647,7 +647,6 @@ def test_the_dodge_probability_lowers_the_expected_attack_score_and_a_dodge_stil
     assert two[-1] == pytest.approx(-0.4), "被躲掉时多出的伤害也落空，只剩“消耗一张牌”的价"
 
 
-@pytest.mark.xfail(strict=True, reason="票 27：武将牌上的牌还没进 PlayerView")
 def test_hero_zone_cards_complete_the_conserved_count_and_only_the_host_counts_faces():
     """票 27：武将牌上的牌进 view 后，守恒量完整、记牌在放置期间仍可用。
 

@@ -38,10 +38,11 @@
 **记牌 P(闪)（C1，票 20）**：【杀】族 / 【万箭齐发】这类**靠【闪】抵消**的伤害牌，其
 "每张手牌 0.25 防御贴现"换成由**目标手里有【闪】的概率**导出的期望伤害
 （:func:`_dodge_probability` / :func:`_expected_attack_score`）。输入只有 ``view`` 的
-公开面（弃牌堆 / 处理区 / 装备 / 判定 / 自己手牌 / 他家的手牌**数** / 牌堆**数**）＋
-:data:`_DECK_TABLE` 的静态档位表；档位靠守恒量反推，**对不上就关闭记牌**、回落到常量
-贴现（不猜、零协议改动）。武将牌上的牌不在 ``PlayerView`` 里 ⇒ 一旦有牌上武将牌，守恒
-就对不上、记牌关闭（spec §6.3 登记的已知近似，fail-closed）。
+公开面（弃牌堆 / 处理区 / 装备 / 判定 / 自己手牌 / 他家的手牌**数** / 牌堆**数** /
+武将牌上的**张数**与**本人**区的牌面）＋ :data:`_DECK_TABLE` 的静态档位表；档位靠守恒量
+反推，**对不上就关闭记牌**、回落到常量贴现（不猜）。票 27 起
+"武将牌上的牌"按张数补进守恒量、本人区里的牌面进可见面，故放置期间记牌**继续可用**
+（他人的区只给张数、牌面留在未知池）。
 
 **M5-07 的属性 / 连环 / 酒**：军争的取舍只接进**既有打分器**，不另造策略框架。用到的
 公开事实 = 目标的装备区（藤甲 / 白银狮子 / 古锭刀）、自己的装备（青釭剑 / 朱雀羽扇）、
@@ -656,25 +657,33 @@ def _lethal_to(
 
 
 def _conserved_card_count(view: PlayerView) -> int:
-    """整局实体牌的**守恒量**：牌堆 + 全部手牌数 + 弃牌堆 + 处理区 + 全部装备 / 判定区。
+    """整局实体牌的**守恒量**：牌堆 + 全部手牌数 + 弃牌堆 + 处理区 + 全部装备 / 判定区 +
+    **全部武将牌上的牌**。
 
     每一项都在 :class:`~sgs.state.PlayerView` 的公开面里（牌堆与他家手牌只有张数，自己的
-    手牌是牌面）。**武将牌上的牌不算在内**：它移出了这些区域，又不在 ``PlayerView`` 里——
-    那是 M6 的已知近似（spec §6.3），见 :func:`_dodge_probability`。
+    手牌是牌面；武将牌上的牌按座位给公开张数 ``hero_zone_count``——票 27）。跨座位的区算
+    宿主那一行，与投影口径一致。
     """
     total = view.deck_count + len(view.discard) + len(view.processing)
     for player in view.players:
-        total += player.hand_count + len(player.equip) + len(player.judge)
+        total += (
+            player.hand_count
+            + player.hero_zone_count
+            + len(player.equip)
+            + len(player.judge)
+        )
     return total
 
 
 def _visible_card_faces(view: PlayerView) -> list[CardRef]:
-    """本视角里**看得到牌面**的牌：自己手牌 + 弃牌堆 + 处理区 + 全部装备 / 判定区。
+    """本视角里**看得到牌面**的牌：自己手牌 + **本人武将牌上的牌** + 弃牌堆 + 处理区 +
+    全部装备 / 判定区。
 
     与 :func:`_visible_cards` 的区别：那张表是选牌步的"可指认集合"（不含两个共享区），
-    这张表是记牌的"已出现的牌"（共享区恰恰是最主要的来源）。
+    这张表是记牌的"已出现的牌"（共享区恰恰是最主要的来源）。他人武将牌上的牌**不在**这里：
+    投影只给张数（票 27 与 M6 的 2026-10 口径一致——牌面只给宿主）。
     """
-    cards = [*view.self_hand, *view.discard, *view.processing]
+    cards = [*view.self_hand, *view.hero_zone_cards, *view.discard, *view.processing]
     for player in view.players:
         cards.extend(player.equip)
         cards.extend(player.judge)
@@ -703,8 +712,9 @@ def _verified_deck_profile(view: PlayerView) -> tuple[int, Mapping[str, int]] | 
     三条判据（spec §6.3 的"不猜"）：
 
     - 字面表自身自洽（:func:`_deck_table_is_consistent`）；
-    - 守恒量必须**恰好等于**某一档的总张数（三档互不相同）——少一张（武将牌上的牌移出
-      可见面）也对不上 ⇒ 关闭；
+    - 守恒量必须**恰好等于**某一档的总张数（三档互不相同）——人为少一张（例如构造局面
+      少放一张实体牌）也对不上 ⇒ 关闭；票 27 起武将牌上的牌按张数补回守恒量，**不再**因为
+      【谦逊】放置而误关；
     - 可见牌面的**同类张数不得超过**该档声明（构造局面 / 串档的机械保护）。
     """
     if not _deck_table_is_consistent():
@@ -725,8 +735,9 @@ def _verified_deck_profile(view: PlayerView) -> tuple[int, Mapping[str, int]] | 
 def _unknown_pool(view: PlayerView) -> tuple[int, int] | None:
     """未知池的 ``(张数, 【闪】张数)``：档位总牌面 − 可见牌面；记牌关闭时答 ``None``。
 
-    未知池 = 牌堆 + 他家手牌（+ 守恒对得上时本不该存在的武将牌上的牌）。记牌关闭时
-    （档位 / 守恒对不上）返回 ``None``，调用方回落到常量贴现。
+    未知池 = 牌堆 + 他家手牌 + **他人武将牌上不可见的牌**（它们移出了可数区域、但张数在
+    守恒量里；本人武将牌上的牌面已经算进可见面，不会被重复计入）。记牌关闭时（档位 /
+    守恒对不上）返回 ``None``，调用方回落到常量贴现。
     """
     profile = _verified_deck_profile(view)
     if profile is None:
@@ -745,14 +756,15 @@ def _unknown_pool(view: PlayerView) -> tuple[int, int] | None:
 def _dodge_probability(view: PlayerView, seat: int) -> float | None:
     """目标 ``seat`` **手里至少有一张【闪】**的概率；记牌关闭时答 ``None``。
 
-    只用 ``view`` 的公开面 + :data:`_DECK_TABLE` 的静态档位表（零协议改动、零全知读点）：
+    只用 ``view`` 的公开面 + :data:`_DECK_TABLE` 的静态档位表（票 27 起含武将牌上的牌：
+    逐座位张数进守恒量、本人区的牌面进已出现的牌——零全知读点）：
     未知池按**无放回**抽 ``hand_count`` 张算超几何概率
     ``1 − C(未知 − 闪, h) / C(未知, h)``——"由未知池里【闪】的占比导出"的精确版本
     （不放回；spec §6.3 的"4 张手牌约 47%"就是 4 张手牌在 standard_108 开局时的量级）。
 
-    **已知误差（登记，不补协议）**：武将牌上的牌移出了所有可数区域、又不在
-    :class:`~sgs.state.PlayerView` 里 ⇒ 守恒量对不上 ⇒ 记牌**关闭**（fail-closed）。
-    这与"把它算进未知池"的近似等价，只是连档位都不猜：宁可回到今天的常量贴现。
+    **武将牌上的牌（票 27）**：本人武将牌上的牌面在 ``view.hero_zone_cards`` 里（已出现），
+    每个座位的张数在 ``hero_zone_count`` 里（守恒量）；**他人**武将牌上的牌只给张数、牌面
+    留在未知池里——与投影的宿主可见口径一致，不是全知读取。
     """
     if not 0 <= seat < len(view.players):
         return None
@@ -2072,6 +2084,12 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                     "自己的手牌牌面：成本、响应与转化源都从这里挑；记牌也数它——"
                     "_visible_card_faces 把它算进'已出现的牌'",
                 ),
+                "hero_zone_cards": (
+                    True,
+                    "本人武将牌上的牌面（票 27）：_visible_card_faces 把它算进'已出现的牌'，"
+                    "守恒量因此完整、记牌在【谦逊】放置期间仍可用；他人区不在本字段里"
+                    "（张数走 PlayerPublic.hero_zone_count）",
+                ),
                 "deck_count": (
                     True,
                     "记牌守恒量的一项（C1）：_conserved_card_count 与四区 / 手牌数相加后由"
@@ -2099,6 +2117,11 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 "hp": (True, "濒死与斩杀线：伤害够不够、要不要救、内奸估分"),
                 "hp_max": (True, "``hp < hp_max`` 判'已受伤'（【仁德】回体力的额外价值）"),
                 "hand_count": (True, "公开手牌数：【古锭刀】加伤、防守成本、够不够弃"),
+                "hero_zone_count": (
+                    True,
+                    "武将牌上的公开张数（票 27）：_conserved_card_count 按座位求和，是记牌"
+                    "守恒量的一项；本人区里的牌面另由 view.hero_zone_cards 进可见面",
+                ),
                 "alive": (
                     True,
                     "只对存活座位出手（不把伤害算给已阵亡者）；也是身份后验的**分母**——"

@@ -346,6 +346,13 @@ class PlayerPublic(_FrozenModel):
     由 ``sgs_web.display.seat_display`` 翻成 ``hero_name`` / ``kingdom`` / ``kingdom_label``
     补进**网页载荷**（U1-02 的座位卡读这三个键）；``chained`` / ``wine_active`` 同样由
     ``decorate_snapshot`` 补。会话顶层的 ``heroes`` 名单仍是逐座位武将 id 的真源。
+
+    ``hero_zone_count``（票 27）是**武将牌上的牌**的**公开张数**：与 ``hand_count`` /
+    牌堆数同级的公开信息，恒 =
+    ``sum(len(zone.cards) for zone in player.hero_cards.values())``。一个座位可能同时挂着
+    多个放置技能实例的区（【谦逊】/ 将来的【破军】/【七星】），因此是**求和**而不是逐个实例
+    各报一份；跨座位的区算在**宿主**（武将牌的主人）这一行，不是放置技能的持有者。牌面
+    只有宿主本人拿得到（``PlayerView.hero_zone_cards``），他人只拿张数。
     """
 
     seat: int
@@ -355,6 +362,13 @@ class PlayerPublic(_FrozenModel):
     alive: bool
     equip: tuple[CardRef, ...]
     judge: tuple[CardRef, ...]
+    hero_zone_count: int = Field(default=0, exclude=True)
+    """这个座位的**武将牌上有几张牌**（票 27；跨座位的区算宿主）。
+
+    与 ``chained`` / ``hero`` 同一条纪律：``exclude`` **不进记录流**，标准 47 条金录像
+    逐字节不变。区的**牌面**只给宿主本人（:attr:`PlayerView.hero_zone_cards`），张数
+    则是公开信息（守恒量的一项，AI 记牌读它）。
+    """
     chained: bool = Field(default=False, exclude=True)
     """横置状态（U1-04 下发的座位事实；M5-03 起由铁索连环 / 传导重置真实写入）。
 
@@ -382,6 +396,11 @@ class PlayerView(_FrozenModel):
 
     牌堆只给**剩余数量**、不给顺序；``discard`` 按置入序（先入在前）；
     ``processing``（处理区）是公开区，按置入序（票 07 §3）。
+
+    ``hero_zone_cards``（票 27）是**本人武将牌上的牌面**，与 ``self_hand`` 对称：只有自己
+    当宿主的区（``Player.hero_cards``）会进来，他人武将牌上的牌只经
+    :attr:`PlayerPublic.hero_zone_count` 给张数。与 M6 的 2026-10 口径一致——牌面只给宿主，
+    未登记 / 畸形的区同一默认（不是整块 fail-closed）。``exclude``：不进记录流，金录像不变。
     """
 
     seat: int
@@ -392,6 +411,14 @@ class PlayerView(_FrozenModel):
     processing: tuple[CardRef, ...]
     turn_seat: int | None
     phase: Phase | None
+    hero_zone_cards: tuple[CardRef, ...] = Field(default=(), exclude=True)
+    """**本人**武将牌上的牌面（票 27）。
+
+    与 ``self_hand`` 对称，是本人视角的"本人区里的牌"；他人武将牌上的牌不在任何
+    ``PlayerView`` 里（张数走 :attr:`PlayerPublic.hero_zone_count`）。区键 = （座位, 技能
+    实例），同一座位可有多个区；跨座位的区只有在查看者是宿主时才进来。``exclude``：不进
+    记录流（47 条金录像逐字节不变），但进询问、是 AI 记牌的"已出现的牌"之一。
+    """
 
 
 # ---------------------------------------------------------------------------
