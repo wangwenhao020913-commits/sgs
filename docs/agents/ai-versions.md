@@ -233,3 +233,8 @@ N = 768 ⇒ **0.0319**（约 3pp）、N = 128 ⇒ 0.078。绝对胜率只打印�
   ③ 预注册「中后期更明显」被否定后是保留本实现还是另改模型；④ 武将牌上的牌 fail-closed 与
   D2 一致漂移两条偏差。tag `ai-v3` 已建（版本留存），结论指针：票 20 的 `## Answer` +
   `runs/ai-eval-e2e4753.json`。
+
+- **`ai-v3` 的评审收尾**（`src/sgs/agents/heuristic.py` 的 `_score_attack` docstring 里一处旧
+  函数名 `_expected_attack_points` → `_expected_attack_score`）：**行为不变**（纯注释），
+  `ai-v3` 的 heuristic 字节仍按 `e2e4753` 读（`7768049d…`），版本加载器加载的也是那版；
+  再往后的票不要把 HEAD 的 sha 与台账行混着读。
