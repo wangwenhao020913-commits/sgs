@@ -178,6 +178,20 @@ class El {
     this._children.push(c);
     return c;
   }
+  // 票 01：排列面的落点预览靠 `insertBefore` 把占位格插到某张牌之前（拆不开的整面重绘
+  // 会在真浏览器里中断拖拽）。真 DOM 同样是**移动**语义，`ref` 缺失 / 不在列表里 ⇒ 追加。
+  insertBefore(c, ref) {
+    if (!c) return c;
+    if (c.parentNode) {
+      const at = c.parentNode._children.indexOf(c);
+      if (at >= 0) c.parentNode._children.splice(at, 1);
+    }
+    c.parentNode = this;
+    const at = ref ? this._children.indexOf(ref) : -1;
+    if (at < 0) this._children.push(c);
+    else this._children.splice(at, 0, c);
+    return c;
+  }
   // 舞台卡面按 `data-stage-key` 复用节点（淡出靠同一个节点上的 CSS 过渡），
   // 故垫片必须有真正的 removeChild —— 被撤下的旧项要真的从父节点消失。
   removeChild(c) {
@@ -5266,6 +5280,44 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const cardNode = (row, index) => Array.from(cardsBox(row).children).find(
     (node) => node.getAttribute && node.getAttribute("data-card-index") === String(index));
   const clickNode = (node) => (node.listeners.click || []).forEach((fn) => fn({ target: node, preventDefault() {} }));
+  /* 拖拽手势（票 01）：`dragstart` 落在**源牌**上，`dragover` / `drop` 落在**接收方**上。
+   * 真浏览器里 drop 会从牌冒泡到行容器，垫片不冒泡 ⇒ 用例按接收方逐个触发。
+   * `after` 用牌面矩形算出左半 / 右半的 clientX：落点判定只认指针在不在牌面中点的右侧。 */
+  const fire = (node, name, event = {}) => {
+    const payload = { preventDefault() {}, stopPropagation() {}, ...event };
+    (node.listeners[name] || []).forEach((fn) => fn(payload));
+    return payload;
+  };
+  const halfX = (node, after) => {
+    const rect = node.getBoundingClientRect();
+    return after ? rect.left + rect.width - 2 : rect.left + 2;
+  };
+  const dragStart = (node) => fire(node, "dragstart", { dataTransfer: { setData() {} } });
+  const dragOnto = (node, after = false) => {
+    const event = { clientX: halfX(node, after) };
+    fire(node, "dragover", event);
+    return event;
+  };
+  const dragDrop = (node, event) => fire(node, "drop", event || {});
+  const boxChildren = (name) => {
+    const row = rowOf(name);
+    return row ? Array.from(cardsBox(row).children) : [];
+  };
+  /** 垫片的 `className` 与 `classList` 互不同步（真 DOM 是同一份）：两处都查。 */
+  const hasClass = (node, name) => !!node && (
+    (node.classList && node.classList.contains(name))
+      || String(node.className || "").split(/\s+/).includes(name));
+  const placeholders = (name) => boxChildren(name).filter(
+    (node) => hasClass(node, "arrange-placeholder"));
+  const placeholderIndex = (name) => boxChildren(name).findIndex(
+    (node) => hasClass(node, "arrange-placeholder"));
+  /** 回到一份询问的**初始**双行布局（丢开上一手摆好的顺序）。 */
+  const showArrange = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
 
   ui.state.view = arrangeView;
   ui.resetSelection();
@@ -5352,6 +5404,83 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
         (candidate) => JSON.stringify(candidate) === JSON.stringify(finalAction)),
     JSON.stringify(finalAction));
 
+  // 拖拽落点判定（票 01）：拖到一张牌上按**指针在牌面中点的哪一侧**决定放到它前 / 后
+  // （旧实现一律"插到它前面"，要放到后面必须再往右拖过一整张牌）。
+  showArrange(arrangeView);
+  dragStart(cardNode(rowOf("top"), 0));
+  dragDrop(cardNode(rowOf("top"), 1), dragOnto(cardNode(rowOf("top"), 1), true));
+  check("㉿GX11b 行内拖到牌的**右半边** = 放到它后面（order [1,0,2] / split 3）",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[1,0,2]"
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(
+        { answers_seq: 77, kind: "ArrangeCards", order: [1, 0, 2], split: 3 }),
+    `上=${cardIndexes(rowOf("top"))} action=${JSON.stringify(ui.buildAction())}`);
+
+  showArrange(arrangeView);
+  dragStart(cardNode(rowOf("top"), 2));
+  dragDrop(cardNode(rowOf("top"), 1), dragOnto(cardNode(rowOf("top"), 1), false));
+  check("㉿GX11c 行内拖到牌的**左半边** = 放到它前面（order [0,2,1] / split 3）",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[0,2,1]"
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(
+        { answers_seq: 77, kind: "ArrangeCards", order: [0, 2, 1], split: 3 }),
+    `上=${cardIndexes(rowOf("top"))} action=${JSON.stringify(ui.buildAction())}`);
+
+  // 跨行（自由切分）：拖到下行某张牌上同样是插入，左右半边决定插在它前 / 后。
+  showArrange(arrangeView);
+  dragStart(cardNode(rowOf("top"), 0));
+  dragDrop(slots(rowOf("bottom"))[0]);
+  dragStart(cardNode(rowOf("top"), 1));
+  dragDrop(cardNode(rowOf("bottom"), 0), dragOnto(cardNode(rowOf("bottom"), 0), true));
+  check("㉿GX11d 跨行拖到下行那张牌的右半边 = 插到它后面（order [2,0,1] / split 1）",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[2]"
+      && JSON.stringify(cardIndexes(rowOf("bottom"))) === "[0,1]"
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(
+        { answers_seq: 77, kind: "ArrangeCards", order: [2, 0, 1], split: 1 }),
+    `上=${cardIndexes(rowOf("top"))} 下=${cardIndexes(rowOf("bottom"))} action=${JSON.stringify(ui.buildAction())}`);
+
+  showArrange(arrangeView);
+  dragStart(cardNode(rowOf("top"), 0));
+  dragDrop(slots(rowOf("bottom"))[0]);
+  dragStart(cardNode(rowOf("top"), 1));
+  dragDrop(cardNode(rowOf("bottom"), 0), dragOnto(cardNode(rowOf("bottom"), 0), false));
+  check("㉿GX11e 跨行拖到下行那张牌的左半边 = 插到它前面（order [2,1,0] / split 1）",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[2]"
+      && JSON.stringify(cardIndexes(rowOf("bottom"))) === "[1,0]"
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(
+        { answers_seq: 77, kind: "ArrangeCards", order: [2, 1, 0], split: 1 }),
+    `上=${cardIndexes(rowOf("top"))} 下=${cardIndexes(rowOf("bottom"))} action=${JSON.stringify(ui.buildAction())}`);
+
+  // 动态展示（票 01 / 用户报障）：鼠标拽着某张牌时，其它牌为它让道——落点上插一个与
+  // 卡面同尺寸的占位格（只动 DOM，不整面重绘，否则真浏览器会当场中断拖拽）。
+  showArrange(arrangeView);
+  const previewSource = cardNode(rowOf("top"), 0);
+  const previewTarget = cardNode(rowOf("top"), 1);
+  dragStart(previewSource);
+  const previewEvent = dragOnto(previewTarget, true);
+  check("㉿GX11f 拖动中：占位格落在目标牌之后（其它牌让道），拖动源挂 dragging",
+    placeholderIndex("top") === boxChildren("top").indexOf(previewTarget) + 1
+      && placeholders("bottom").length === 0
+      && hasClass(previewSource, "dragging"),
+    `占位格=${placeholderIndex("top")} 目标=${boxChildren("top").indexOf(previewTarget)}`);
+  dragDrop(previewTarget, previewEvent);
+  check("㉿GX11g 放下后预览清干净（没有残留占位格 / dragging），顺序已按落点更新",
+    placeholders("top").length === 0 && placeholders("bottom").length === 0
+      && JSON.stringify(cardIndexes(rowOf("top"))) === "[1,0,2]"
+      && !hasClass(cardNode(rowOf("top"), 0), "dragging"),
+    `上=${cardIndexes(rowOf("top"))} 占位格=${placeholders("top").length}`);
+
+  // 取消拖拽（没落到任何落点就松手）：预览是纯 DOM 手法、模型没被它改过 ⇒ `dragend`
+  // 重绘一次就整体复原（拖动源从文档流里"抽走"的那一格也回来了）。
+  showArrange(arrangeView);
+  const cancelSource = cardNode(rowOf("top"), 0);
+  dragStart(cancelSource);
+  dragOnto(cardNode(rowOf("top"), 2), false);
+  fire(cancelSource, "dragend");
+  check("㉿GX11h 拖拽取消（dragend 没有落点）⇒ 顺序与预览都复原",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[0,1,2]"
+      && placeholders("top").length === 0 && placeholders("bottom").length === 0
+      && !hasClass(cardNode(rowOf("top"), 0), "dragging"),
+    `上=${cardIndexes(rowOf("top"))} 占位格=${placeholders("top").length}`);
+
   // 顺序不完整（重复 / 缺一张）⇒ 确认必须置灰（buildAction 的完整性闸）。
   const brokenLayout = { ...ui.state.arrange, top: [2, 2], bottom: [0] };
   ui.state.arrange = brokenLayout;
@@ -5377,7 +5506,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && $("btn-cancel").hidden === true,
     `options="${$("t-options").text()}" disabled=${$("btn-submit").disabled}`);
 
-  // 固定切分（未来的李典 2/2）：两行各按声明铺开，跨行移动被拒绝。
+  // 固定切分（李典【恂恂】2/2）：两行各按声明铺开；跨行 = 互换（票 01），不是拒绝。
   const fixedCards = revealed.concat([synthCard(74, "桃")]);
   const fixedPending = {
     ...arrangePending, seq: 78, revealed: fixedCards,
@@ -5398,12 +5527,63 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && JSON.stringify(ui.buildAction()) === JSON.stringify(
         { answers_seq: 78, kind: "ArrangeCards", order: [0, 1, 2, 3], split: 2 }),
     `上=${cardIndexes(fixedTop)} 下=${cardIndexes(fixedBottom)} action=${JSON.stringify(ui.buildAction())}`);
-  clickNode(cardNode(fixedTop, 0));
-  clickNode(cardNode(fixedBottom, 2));
-  check("㉿GX15 固定切分拒绝跨行移动（张数由服务端声明，前端不改）",
-    JSON.stringify(cardIndexes(rowOf("top"))) === "[0,1]"
-      && JSON.stringify(cardIndexes(rowOf("bottom"))) === "[2,3]",
-    `上=${cardIndexes(rowOf("top"))} 下=${cardIndexes(rowOf("bottom"))}`);
+  clickNode(cardNode(rowOf("top"), 0));
+  clickNode(cardNode(rowOf("bottom"), 2));
+  const swapAction = ui.buildAction();
+  check("㉿GX15 固定切分跨行点选 = 互换：上行 [2,1] / 下行 [0,3]，张数仍 2/2、载荷 split 2",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[2,1]"
+      && JSON.stringify(cardIndexes(rowOf("bottom"))) === "[0,3]"
+      && !!swapAction && swapAction.split === 2
+      && JSON.stringify(swapAction.order) === JSON.stringify([2, 1, 0, 3])
+      && new Set(swapAction.order).size === 4,
+    `上=${cardIndexes(rowOf("top"))} 下=${cardIndexes(rowOf("bottom"))} action=${JSON.stringify(swapAction)}`);
+
+  // 票 01：同一判据也吃**拖拽**——落到另一行的牌上 = 与那张牌互换；落到行容器上 =
+  // 与该行末尾那张互换。两行张数都不变（否则提交的 split 与服务端候选不符）。
+  showArrange(fixedView);
+  dragStart(cardNode(rowOf("top"), 0));
+  dragDrop(cardNode(rowOf("bottom"), 2), dragOnto(cardNode(rowOf("bottom"), 2), true));
+  check("㉿GX15b 固定切分跨行拖拽 = 互换（与点选同一判据），张数不变",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[2,1]"
+      && JSON.stringify(cardIndexes(rowOf("bottom"))) === "[0,3]"
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(swapAction),
+    `上=${cardIndexes(rowOf("top"))} 下=${cardIndexes(rowOf("bottom"))} action=${JSON.stringify(ui.buildAction())}`);
+
+  showArrange(fixedView);
+  dragStart(cardNode(rowOf("top"), 0));
+  dragDrop(rowOf("bottom"));
+  check("㉿GX15c 固定切分跨行拖到**行容器** = 与该行末尾那张互换（张数仍是 2/2）",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[3,1]"
+      && JSON.stringify(cardIndexes(rowOf("bottom"))) === "[2,0]"
+      && !!ui.buildAction() && ui.buildAction().split === 2,
+    `上=${cardIndexes(rowOf("top"))} 下=${cardIndexes(rowOf("bottom"))} action=${JSON.stringify(ui.buildAction())}`);
+
+  // 动态展示（票 01）：交换没有空槽可让，故不插占位格；把"这一下会换哪张"挂成交换高亮。
+  showArrange(fixedView);
+  const swapSource = cardNode(rowOf("top"), 0);
+  const swapTarget = cardNode(rowOf("bottom"), 2);
+  dragStart(swapSource);
+  const swapDragEvent = dragOnto(swapTarget, true);
+  check("㉿GX15d 固定切分跨行拖动中：目标牌挂交换高亮、拖动源挂 dragging、不插占位格",
+    hasClass(swapTarget, "swap") && hasClass(swapSource, "dragging")
+      && placeholders("top").length === 0 && placeholders("bottom").length === 0,
+    `swap=${hasClass(swapTarget, "swap")} dragging=${hasClass(swapSource, "dragging")}`
+      + ` 占位格=${placeholders("top").length + placeholders("bottom").length}`);
+  dragDrop(swapTarget, swapDragEvent);
+  check("㉿GX15e 交换放下后目标已换位、没有残留高亮 / 占位格",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[2,1]"
+      && JSON.stringify(cardIndexes(rowOf("bottom"))) === "[0,3]"
+      && placeholders("top").length === 0 && placeholders("bottom").length === 0
+      && !hasClass(rowOf("top"), "drop") && !hasClass(rowOf("bottom"), "drop"),
+    `上=${cardIndexes(rowOf("top"))} 下=${cardIndexes(rowOf("bottom"))}`
+      + ` 占位格=${placeholders("top").length + placeholders("bottom").length}`);
+
+  showArrange(fixedView);
+  check("㉿GX15f 固定切分提示条改说「可交换上下两行」，不再说「只能行内排序」",
+    /交换/.test($("t-target-hint").textContent)
+      && /2 顶 \/ 2 底/.test($("t-target-hint").textContent)
+      && !/只能在上行/.test($("t-target-hint").textContent),
+    `hint="${$("t-target-hint").textContent}"`);
 
   // 真服务器回环：投影下发规格 ⇒ 前端拼的 action 通过 `submitAction` 的逐字段自检。
   // 固定 4 人 / 种子 7 / 人类 0 号位诸葛亮：第一问就是「是否发动【观星】」（实测）。
@@ -5460,15 +5640,18 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && $("btn-submit").disabled === true,
     `calls=${staleCalls.map((call) => call.path).join(" | ")} options="${$("t-options").text()}"`
       + ` disabled=${$("btn-submit").disabled} top=${!!rowOf("top")}`);
-  // 复原真询问，后面的成功提交（㉿GX18）照旧。
+  // 复原真询问，后面的成功提交（㉿GX18）照旧——**手势换成拖拽**（票 01 验收条：
+  // 观星上行 4 张 / 下行空槽，拖一张到下行 ⇒ split 3；点选那条由 ㉿GX8 覆盖）。
   ui.state.view.pending = realArrange;
   ui.resetSelection();
   ui.renderTable();
   ui.renderPending(ui.state.view);
   const realTop = rowOf("top");
-  if (realTop) clickNode(cardNode(realTop, 0));
   const realBottom = rowOf("bottom");
-  if (realBottom && slots(realBottom)[0]) clickNode(slots(realBottom)[0]);
+  if (realTop && realBottom && slots(realBottom)[0]) {
+    dragStart(cardNode(realTop, 0));
+    dragDrop(slots(realBottom)[0]);
+  }
   const realAction = ui.buildAction();
   const beforeAnswer = calls.length;
   await ui.submitAction();

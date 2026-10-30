@@ -279,6 +279,34 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   background: #f2efe9; cursor: pointer;
 }
 .arrange-slot:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+/* 拖拽预览（票 01）：鼠标拽着一张牌时，其它牌为它让道——落点上插一个与卡面同尺寸的
+ * 占位格；拖动源被抽出文档流（空出来的那一格正好由占位格顶上，行宽不涨、不换行）。
+ * 固定切分的跨行拖动没有空槽可让，改用「交换」角标标出这一下会换哪张。 */
+.arrange-placeholder {
+  flex: 0 0 calc(88 * var(--dsu));
+  width: calc(88 * var(--dsu)); height: calc(124 * var(--dsu));
+  border: 2px dashed var(--accent); border-radius: 7px;
+  background: var(--accent-soft);
+  pointer-events: none;
+  animation: arrange-placeholder-in .12s ease-out;
+}
+.arrange-card.swap {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft), 0 0 0 3px var(--accent), 0 7px 14px rgba(43, 36, 28, .18);
+}
+.arrange-card.swap::after {
+  content: "交换"; position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 0 calc(7 * var(--dsu));
+  border-radius: 99px; background: var(--accent); color: #fff;
+  font-size: calc(11 * var(--dsu)); font-weight: 700; line-height: 1.7; white-space: nowrap;
+  pointer-events: none;
+}
+.arrange-card.dragging { position: absolute; opacity: 0; pointer-events: none; }
+@keyframes arrange-placeholder-in {
+  from { opacity: 0; transform: scale(.9); }
+  to { opacity: 1; transform: scale(1); }
+}
 .arrange-unavailable { padding: 8px 0; }
 
 .options { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
