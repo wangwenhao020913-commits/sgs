@@ -179,9 +179,16 @@ class El {
     return c;
   }
   // 票 01：排列面的落点预览靠 `insertBefore` 把占位格插到某张牌之前（拆不开的整面重绘
-  // 会在真浏览器里中断拖拽）。真 DOM 同样是**移动**语义，`ref` 缺失 / 不在列表里 ⇒ 追加。
+  // 会在真浏览器里中断拖拽）。语义照真 DOM：**移动**；`c === ref` 是 no-op；`ref === null`
+  // 追加；`ref` 不是本节点的子节点 ⇒ 抛 NotFoundError（不静默追加，免得掩盖"锚已经过期"）。
   insertBefore(c, ref) {
     if (!c) return c;
+    if (c === ref) return c;
+    if (ref !== null && ref !== undefined && this._children.indexOf(ref) < 0) {
+      const error = new Error("insertBefore: ref 不是本节点的子节点");
+      error.name = "NotFoundError";
+      throw error;
+    }
     if (c.parentNode) {
       const at = c.parentNode._children.indexOf(c);
       if (at >= 0) c.parentNode._children.splice(at, 1);
@@ -5303,10 +5310,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     const row = rowOf(name);
     return row ? Array.from(cardsBox(row).children) : [];
   };
-  /** 垫片的 `className` 与 `classList` 互不同步（真 DOM 是同一份）：两处都查。 */
-  const hasClass = (node, name) => !!node && (
-    (node.classList && node.classList.contains(name))
-      || String(node.className || "").split(/\s+/).includes(name));
+  /** 垫片的 `className` 与 `classList` 互不同步（真 DOM 是同一份）：两处都查，
+   *  静态类走既有的 `hasClassText`，动态 `classList.add` 走 `classList.contains`。 */
+  const hasClass = (node, name) => !!node
+    && (hasClassText(node, name) || !!(node.classList && node.classList.contains(name)));
   const placeholders = (name) => boxChildren(name).filter(
     (node) => hasClass(node, "arrange-placeholder"));
   const placeholderIndex = (name) => boxChildren(name).findIndex(
@@ -5481,6 +5488,24 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && !hasClass(cardNode(rowOf("top"), 0), "dragging"),
     `上=${cardIndexes(rowOf("top"))} 占位格=${placeholders("top").length}`);
 
+  // 落点是**空槽 / 行容器**（行末）时，占位格要落在空槽**之前**：自由切分的空槽恒排在牌的
+  // 后面，占位格若跟着追加到整行末尾，让出来的那一格就跑到空槽后面去了（与真落点错位）。
+  showArrange(arrangeView);
+  const slotTarget = slots(rowOf("bottom"))[0];
+  dragStart(cardNode(rowOf("top"), 0));
+  fire(slotTarget, "dragover", {});
+  check("㉿GX11i 落点是空槽时：占位格插在空槽之前（不是整行末尾），行容器同时高亮",
+    placeholderIndex("bottom") === 0
+      && placeholders("bottom").length === 1
+      && hasClass(rowOf("bottom"), "drop"),
+    `占位格=${placeholderIndex("bottom")} 行=${boxChildren("bottom").length}`);
+  fire(slotTarget, "drop", {});
+  check("㉿GX11j 空槽放下后 = 移到该行末尾（观星拖到下行）",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[1,2]"
+      && JSON.stringify(cardIndexes(rowOf("bottom"))) === "[0]"
+      && placeholders("bottom").length === 0,
+    `上=${cardIndexes(rowOf("top"))} 下=${cardIndexes(rowOf("bottom"))}`);
+
   // 顺序不完整（重复 / 缺一张）⇒ 确认必须置灰（buildAction 的完整性闸）。
   const brokenLayout = { ...ui.state.arrange, top: [2, 2], bottom: [0] };
   ui.state.arrange = brokenLayout;
@@ -5564,10 +5589,12 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   const swapTarget = cardNode(rowOf("bottom"), 2);
   dragStart(swapSource);
   const swapDragEvent = dragOnto(swapTarget, true);
-  check("㉿GX15d 固定切分跨行拖动中：目标牌挂交换高亮、拖动源挂 dragging、不插占位格",
+  check("㉿GX15d 固定切分跨行拖动中：目标牌挂交换高亮、拖动源挂 dragging、不插占位格、行容器高亮",
     hasClass(swapTarget, "swap") && hasClass(swapSource, "dragging")
+      && hasClass(rowOf("bottom"), "drop") && !hasClass(rowOf("top"), "drop")
       && placeholders("top").length === 0 && placeholders("bottom").length === 0,
     `swap=${hasClass(swapTarget, "swap")} dragging=${hasClass(swapSource, "dragging")}`
+      + ` 行=${hasClass(rowOf("bottom"), "drop")}`
       + ` 占位格=${placeholders("top").length + placeholders("bottom").length}`);
   dragDrop(swapTarget, swapDragEvent);
   check("㉿GX15e 交换放下后目标已换位、没有残留高亮 / 占位格",
@@ -5577,6 +5604,17 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && !hasClass(rowOf("top"), "drop") && !hasClass(rowOf("bottom"), "drop"),
     `上=${cardIndexes(rowOf("top"))} 下=${cardIndexes(rowOf("bottom"))}`
       + ` 占位格=${placeholders("top").length + placeholders("bottom").length}`);
+
+  // 行内排序仍可用：2/2 里把上行第 2 张点选、再点第 1 张 ⇒ 插到它前面（不互换、张数不变）。
+  showArrange(fixedView);
+  clickNode(cardNode(rowOf("top"), 1));
+  clickNode(cardNode(rowOf("top"), 0));
+  check("㉿GX15g 固定切分行内点选仍是**排序**（不是互换），两行张数不变",
+    JSON.stringify(cardIndexes(rowOf("top"))) === "[1,0]"
+      && JSON.stringify(cardIndexes(rowOf("bottom"))) === "[2,3]"
+      && !!ui.buildAction() && ui.buildAction().split === 2
+      && JSON.stringify(ui.buildAction().order) === JSON.stringify([1, 0, 2, 3]),
+    `上=${cardIndexes(rowOf("top"))} 下=${cardIndexes(rowOf("bottom"))} action=${JSON.stringify(ui.buildAction())}`);
 
   showArrange(fixedView);
   check("㉿GX15f 固定切分提示条改说「可交换上下两行」，不再说「只能行内排序」",

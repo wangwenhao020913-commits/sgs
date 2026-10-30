@@ -25,7 +25,7 @@
 | `reveal.js` | 亮牌模板（五谷 / 遗计复用）与目标条；判据仍住 `modal.js`。 |
 | `modal.js` | 询问弹窗框架与武将详情壳：`selectionEnabled`、`stepDialogKind`、`DIALOG_KINDS`。 |
 | `hero-detail.js` | 武将详情正文（技能清单）与开合绑定。 |
-| `arrange.js` | 观星双行排列：布局、点选移动、提交载荷。 |
+| `arrange.js` | 排列面双行布局（观星自由切分 / 恂恂固定切分）：移动判据（插入 / 固定切分跨行互换）、拖拽落点（指针过牌面中点即"之后"）与落点预览（占位格让道 / 交换高亮）、提交载荷。 |
 | `answer.js` | 倒计时三色、`buildAction`、`submitAction`（`POST …/answer`）、`clearSelection`。 |
 | `log.js` | 事件流三档（简易 = 服务端叙事 / 完整重点 / 完整全部）。 |
 | `replay.js` | 回放页：录像列表、按记录重建座位全区、询问面板与播放控制。 |
