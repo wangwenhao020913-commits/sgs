@@ -2082,7 +2082,9 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 "self_hand": (
                     True,
                     "自己的手牌牌面：成本、响应与转化源都从这里挑；记牌也数它——"
-                    "_visible_card_faces 把它算进'已出现的牌'",
+                    "_visible_card_faces 把它算进'已出现的牌'；【贯石斧】的成本牌价与"
+                    "【谦逊】的续命牌判据（1 体力时手里有没有【闪】/【桃】/【酒】）也读它"
+                    "（票 22）",
                 ),
                 "hero_zone_cards": (
                     True,
@@ -2114,7 +2116,11 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
         "PlayerPublic": MappingProxyType(
             {
                 "seat": (True, "座位号：目标 / 敌友判定与座位步排序"),
-                "hp": (True, "濒死与斩杀线：伤害够不够、要不要救、内奸估分"),
+                "hp": (
+                    True,
+                    "濒死与斩杀线：伤害够不够、要不要救、内奸估分；【据守】的 1 体力风险"
+                    "（正面发动要跳过下个回合）与【谦逊】的续命判据也读它（票 22）",
+                ),
                 "hp_max": (True, "``hp < hp_max`` 判'已受伤'（【仁德】回体力的额外价值）"),
                 "hand_count": (True, "公开手牌数：【古锭刀】加伤、防守成本、够不够弃"),
                 "hero_zone_count": (
@@ -2131,7 +2137,12 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 "equip": (True, "装备区牌面：防具 / 武器 / 白银狮子的实际伤害；也进 ``_visible_cards``"),
                 "judge": (True, "判定区是公开信息，进 ``_visible_cards``（选牌步的可见面）"),
                 "chained": (True, "【铁索连环】打分读横置状态（``exclude=True``，但询问自带）"),
-                "flipped": (False, "翻面只决定'跳过回合'，不影响任何打分分支"),
+                "flipped": (
+                    True,
+                    "【据守】读它判'这一次翻面是翻回正面还是跳过下个回合'（票 22）：已翻面 ⇒"
+                    " 三张牌纯赚、恒发动；正面才要付'跳过下个回合'（1 体力时贵过收益）。"
+                    "其余打分分支仍不读它",
+                ),
                 "wine_active": (True, "【酒】：下一张【杀】+1 的实际伤害"),
                 "identity": (
                     True,
@@ -2501,6 +2512,134 @@ def _score_shizhan(query: Query, action: Action, view: PlayerView) -> float:
     return 1.0 if slashes else -_UNKNOWN_CARD_VALUE
 
 
+# ---------------------------------------------------------------------------
+# S1 技能表 top3（票 22）：据守 / 贯石斧 / 谦逊
+#
+# 这三条在盘点（spec 附录 A）里是「有条目但太粗」：正分常量 ⇒ 无条件发动，而牌面各有
+# **代价**（翻面 / 弃两张 / 扣光手牌）。三个打分器只读询问自带的 ``view``：体力、公开的
+# 翻面状态、自己的手牌牌面（成本与续命牌）——不读任何隐藏信息，也不改技能 / 规则语义。
+# ---------------------------------------------------------------------------
+
+_JUSHSOU_FACE_UP_VALUE = 2.0
+"""【据守】正面发动：三张牌 vs 跳过下个回合——票 22 之前的中等常数（口径不变）。"""
+
+_JUSHSOU_FLIPPED_VALUE = 3.0
+"""【据守】已翻面时发动：翻面是 **toggle**，这一次是翻回正面（下个回合不再被跳过）⇒
+三张牌纯赚，故高于正面档，且永远压过 Pass（0.0）。"""
+
+_JUSHSOU_LAST_STAND_VALUE = -1.0
+"""【据守】正面且只剩 1 体力（低于 Pass = 0.0）：跳过下个回合等于把命交给对手，
+三张牌换不起。
+
+量级只要求"低于 Pass"——它和 :data:`_UNKNOWN_SKILL_VALUE` 同值不同义（那条是"没教过
+这条技能"），故各留一个常量。
+"""
+
+_AXE_SALVAGE_VALUE = 3.0
+"""【贯石斧】把被抵消的【杀】捞回来的那 1 点**非致命**伤害的价 = 一张伤害牌的基础分
+（:data:`_DAMAGE_BASE`）。
+
+两张牌的常见牌价（【闪】4.0 / 【杀】3.0 / 【桃】6.0）都高于它 ⇒「两张高价值牌换 1 点
+非致命伤害」的净收益为负；只有两张废牌（【闪电】1.0 + 一匹 1.0 的坐骑）才付得起。
+"""
+
+_AXE_KILL_VALUE = _LETHAL_STRIKE_VALUE
+"""【贯石斧】这一下直接**打死**目标时的价：与 D2 斩杀项同一笔"击杀"的价，直接引用
+:data:`_LETHAL_STRIKE_VALUE`，不另写一个数（改价时两处不会漂开）。
+
+击杀**不扣牌价**（与 ``_score_attack`` 的斩杀项同口径：能打死就不为两张牌放弃）：票面验收
+写的是「目标 1 体力 ⇒ 发动」，没有给斩杀加成本条件。**非致命**那 1 点伤害才走"收益 − 成本"。"""
+
+_QIANXUN_VALUE = 2.0
+"""【谦逊】照常发动：躲开拆 / 顺、回合末拿回手牌，等于净赚（票 22 之前的常量）。"""
+
+_QIANXUN_LAST_STAND_VALUE = -1.0
+"""【谦逊】1 体力且手里有续命牌时的价（低于 Pass = 0.0）：把保命牌扣在武将牌上，
+这一回合就用不出来了，等于等死。"""
+
+_SELF_PRESERVATION_CARD_TYPES = frozenset({"dodge", "peach", "wine"})
+"""1 体力时要留在手里**续命**的牌：能抵消伤害（【闪】）或把自己从濒死拉回来（【桃】/【酒】）。
+
+``frozenset`` 只作成员判定、不迭代（源码纪律禁止的是集合**迭代**）。票面只点名【闪】，
+另外两张是同一条语义的闭集成员（1 体力时扣上武将牌同样用不出来），故一并算进来；
+杀 / 无懈一类"响应窗口用"的牌不算——它们救不了 1 体力时的命。
+"""
+
+
+def _score_jushou(query: Query, action: Action, view: PlayerView) -> float:
+    """【据守】（移动版界曹仁）：结束阶段摸三张，然后把自己的武将牌**翻面**。
+
+    翻面是 toggle（规则集 13.1）：已翻面时这一次翻面是**翻回正面**，下个回合不再被跳过
+    ⇒ 三张牌纯赚；正面发动要付"跳过下个回合"，而 1 体力时那笔代价最贵（对手有整整一个
+    回合动手），故低于 Pass。2 体力以上仍按既有的中等常数。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query
+    me = view.players[view.seat]
+    if me.flipped:
+        return _JUSHSOU_FLIPPED_VALUE
+    if me.hp <= 1:
+        return _JUSHSOU_LAST_STAND_VALUE
+    return _JUSHSOU_FACE_UP_VALUE
+
+
+def _salvage_targets(view: PlayerView) -> tuple[int, ...]:
+    """【贯石斧】的发动询问**不带目标**（``SkillActivationQuery`` 只有 ``skill_id``）。
+
+    这次【杀】是我自己打出去、刚被【闪】抵消的那一张，故目标只会是"我会打的人"，按这条
+    取集合：存活的非自己座位里**不是已亮明盟友**的那些（``P(友) < 1``）。判据只排除"确定是
+    盟友"的座位——未知座位（``P(友)`` 是配比里的比例）、中立座位（``(0, 0)``：2 人无身份局、
+    内奸眼中的主公、反贼眼中的内奸）都算**可能的目标**。与身份后验的 fail-closed 同一条口径：
+    算不出就不猜，但也不要因此把斧子判成永远不发动；反过来，已亮明盟友（``P(友) = 1``）连
+    "可能被打"都不该算，否则斧子会为"打死盟友"计价。
+
+    读法上的已知误差：真实目标不可见，故任一"可能的目标"是 1 体力就按斩杀计价。这比"永不
+    发动"接近牌面（这一刀已经打出去了），比"任意局面都发动"保守；不要在打分器里补历史。
+    """
+    return tuple(
+        player.seat
+        for player in view.players
+        if player.alive
+        and player.seat != view.seat
+        and _identity_relation(view, player.seat)[1] < 1.0
+    )
+
+
+def _score_axe(query: Query, action: Action, view: PlayerView) -> float:
+    """【贯石斧】：弃两张牌，让**被【闪】抵消的**自己的【杀】依然造成伤害。
+
+    两条分支（票面验收的两句话）：
+
+    - **可能的斩杀**（目标集合里有人 1 体力，见 :func:`_salvage_targets`）：按
+      :data:`_AXE_KILL_VALUE` 计分、**不扣牌价**——"能打死就不为两张牌放弃"，与
+      ``_score_attack`` 的斩杀项同口径；
+    - **1 点非致命伤害**：按 :data:`_AXE_SALVAGE_VALUE` − 成本；成本 = 这一问要付的两张牌
+      （复合候选已在 ``picks`` 里填好 ⇒ 实际牌价；裸候选按"手里最便宜的两张"预估——与成本步
+      ``_score_select_cards`` 挑牌共用 :func:`_skill_cost`，发不发动与挑哪几张算同一笔账）。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query
+    if any(view.players[seat].hp <= 1 for seat in _salvage_targets(view)):
+        return _AXE_KILL_VALUE
+    return _AXE_SALVAGE_VALUE - _skill_cost(view, action, 2)
+
+
+def _score_qianxun(query: Query, action: Action, view: PlayerView) -> float:
+    """【谦逊】（界陆逊）：别的角色对自己生效的锦囊把**全部手牌**扣上武将牌，回合末才拿回。
+
+    代价是"这一回合手牌都用不出来"。1 体力时那笔代价最贵——手里的【闪】/【桃】/【酒】
+    正是保命的牌，扣上去就等于等死，故 Pass；其余情况照常发动（躲开拆 / 顺是净赚）。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query
+    me = view.players[view.seat]
+    if me.hp <= 1 and any(
+        card.type in _SELF_PRESERVATION_CARD_TYPES for card in view.self_hand
+    ):
+        return _QIANXUN_LAST_STAND_VALUE
+    return _QIANXUN_VALUE
+
+
 _HAND_REQUIRED_SEAT_STEPS: frozenset[tuple[str, str]] = frozenset(
     {
         # 【义绝】的目标必须"有手牌"（规则 §十九 L2106：选择一名有手牌的其他角色）。
@@ -2606,8 +2745,10 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.jie_zhenji.qingguo": (_constant(2.0), "黑色手牌当【闪】：与标准【倾国】同一条转化"),
     # M6 票 10：武将牌上的牌区的首个载体——界陆逊【谦逊】/【连营】
     "hero.jie_luxun.qianxun": (
-        _constant(2.0),
-        "别的角色的普通锦囊 / 延时锦囊对自己生效时把全部手牌扣上武将牌：躲开拆顺，回合末拿回",
+        _score_qianxun,
+        "别的角色的普通锦囊 / 延时锦囊对自己生效时把全部手牌扣上武将牌：躲开拆顺，回合末拿回。"
+        "代价 = 这一回合手牌用不出来，1 体力且手里有续命牌（【闪】/【桃】/【酒】）时不发动"
+        "（票 22；读 view.players[self].hp 与 view.self_hand）",
     ),
     "hero.jie_luxun.lianying": (
         _constant(2.5),
@@ -2665,9 +2806,10 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     ),
     # 本票：移动版界曹仁【据守】——结束阶段摸三张，然后翻面
     "hero.jie_caoren_mobile.jushou": (
-        _constant(2.0),
-        "结束阶段摸三张、然后把武将牌翻面：三张牌是净赚，代价是下个回合被跳过；"
-        "残局（下个回合可能被直接打死）时价值下降，故给中等常数而不是最高档",
+        _score_jushou,
+        "结束阶段摸三张、然后把武将牌翻面：三张牌是净赚，代价是下个回合被跳过。"
+        "已翻面时这一次是翻回正面（不跳回合）⇒ 恒发动；正面且 1 体力 ⇒ Pass（票 22；"
+        "读 view.players[self].flipped 与 hp）",
     ),
     # M6 票 14：界·魏 A（曹操 / 司马懿 / 张辽 / 许褚）
     "hero.jie_caocao.jianxiong": (
@@ -2759,12 +2901,20 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(3.0),
         "与标准【枭姬】同一条零步钩子：失去装备区里的一张牌后摸两张",
     ),
-    # 装备技（W4-4）：会问"是否发动"的 5 条非锁定装备**各给一个正分常量**。
-    # 缺省 ``_UNKNOWN_SKILL_VALUE = -1.0 < Pass(0)`` ⇒ 不入表就永不发动（雌雄无法复现
-    # 的根因）；正分 ⇒ 永远发动（Pass = 0，成本 / 收益不建模，见票面"不做收益模型调参"）。
+    # 装备技（W4-4）：会问"是否发动"的 5 条非锁定装备都要有正分条目——缺省
+    # ``_UNKNOWN_SKILL_VALUE = -1.0 < Pass(0)`` ⇒ 不入表就永不发动（雌雄无法复现的根因）。
+    # 票 22 之前一律是常量正分（"正分 ⇒ 永远发动"，成本 / 收益不建模，见票面"不做收益模型
+    # 调参"）；票 22 起【贯石斧】换成 `_score_axe`（成本 = 两张牌，净收益低于 Pass 不发动），
+    # 其余四条仍是常量。
     "equip.double_sword": (_constant(2.0), "雌雄双股剑：令异性目标弃一张或你摸一张"),
     "equip.green_dragon_blade": (_constant(2.0), "青龙偃月刀：被抵消后再补一张【杀】"),
-    "equip.axe": (_constant(2.0), "贯石斧：弃两张令被抵消的【杀】依然造成伤害"),
+    "equip.axe": (
+        _score_axe,
+        "贯石斧：弃两张令被抵消的【杀】依然造成伤害。可能的斩杀 ⇒ 恒发动（击杀不扣牌价）；"
+        "否则 1 点非致命伤害 − 这一问要付的两张牌价，净收益低于 Pass 就不发动（票 22；读"
+        "action.picks / view.self_hand 的牌价与 PlayerPublic.hp 与 identity）。裸候选没有"
+        "picks 时成本按'手里最便宜的两张'预估（装备区的牌不进预估），AI 自己填表时 picks 在",
+    ),
     "equip.qilin_bow": (_constant(2.0), "麒麟弓：造成伤害时弃目标的一匹坐骑"),
     "equip.ice_sword": (_constant(2.0), "寒冰剑：防止伤害并依次弃目标两张牌"),
     # W4-fix-2：丈八蛇矛的转化【杀】候选已收回，AI 改从清单填 —— 没有条目就落在
@@ -2804,6 +2954,11 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
 修饰器），故仍走缺省保守 ``Pass``。三向同步断言住 ``tests/test_heuristic_ai.py``：
 ① 启用的非锁定武将技都在；② 那 5 条会问"是否发动"的非锁定装备技都在；③ 表里每个 id
 都在数据文件里（武将技 ∪ 装备技）。加武将 / 装备忘了教 AI 会立刻判红。
+
+**说明（第二列）必须写清两件事**（票 22，spec §6.5）：这条技能的发动**有没有代价**
+（翻面 / 弃牌 / 扣光手牌 / 限定次数…）与打分器**读了哪些字段**（``view`` 的哪一项、
+``action.picks`` 之类）。71 条常量条目的逐行盘点在 spec 附录 A——保持常量也是**裁定过的**
+结果（"免费 / 无条件"），不是没看。
 """
 
 
