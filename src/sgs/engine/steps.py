@@ -21,9 +21,11 @@
   **DEATH** 子帧（票 22）——死亡结算作为原子单元跑完，濒死帧与整条伤害链留给终局清栈。
 - **DEATH 帧**（票 22 / 票 25）：L13 裁剪后的死亡段，**按模式分叉**。无身份局四段
   （`DEATH_REVEAL_IDENTITY_BEFORE` 不入表、不 dispatch）；身份局五段——入表并把身份
-  亮明成一条 ``identity_reveal``（在时机 dispatch 之后、胜负检测之前）。`DEATH_ON` 先
-  执行 Ⅰ.a（弃置死者区域里的牌）再执行 Ⅱ 奖惩；检测点在 `DEATH_REVEAL_IDENTITY_AFTER`，
-  只记暂定胜负、不在那里终止（批次关闭由引擎的 DEATH 出栈逻辑宣布）。
+  亮明成一条 ``identity_reveal``（在时机 dispatch 之后、胜负检测之前）。`DEATH_ON` 只
+  dispatch 死亡时技能；Ⅰ.a（弃置死者区域里的牌）与 Ⅱ 奖惩在紧随其后的**非 dispatch 步**
+  （`death_settle_cards`，票 33 拆开：奖惩里的搬牌会挂起，续跑不许重发 `DEATH_ON` 记录）。
+  检测点在 `DEATH_REVEAL_IDENTITY_AFTER`，只记暂定胜负、不在那里终止（批次关闭由引擎的
+  DEATH 出栈逻辑宣布）。
 - **RECOVER 帧**（票 21）：L10 两个时机；"确定回复数值"之后把体力写高（夹在上限内）。
 - **JUDGE 帧**（票 26）：L14 三个时机；四步 = 取牌入处理区（复用摸牌原语、沿用 ``shuffle``
   子流、不算摸牌）→ 改判循环窗口（``RESPOND`` + ``WindowCause.REJUDGE``：每次替代后重开、
@@ -1254,7 +1256,8 @@ def _askers_from(state: GameState, start: int | None, count: int) -> tuple[int, 
 #   - 无身份局（1v1）四段：``DEATH_REVEAL_IDENTITY_BEFORE`` **不入表**（无身份牌）；
 #   - 身份局五段：``DEATH_REVEAL_IDENTITY_BEFORE`` 入表并亮明身份（主公也照发）；
 #   - ``DEATH_REVEAL_IDENTITY_AFTER`` 是唯一胜负检测点；
-#   - ``DEATH_ON`` = 死亡时技能 → Ⅰ.a 系统处理牌 → Ⅱ 奖惩（票 14 §4 的段序）；
+#   - ``DEATH_ON`` = 死亡时技能（只 dispatch）；Ⅰ.a 系统处理牌 → Ⅱ 奖惩在下一格
+#     ``death_settle_cards``（非 dispatch 步，票 33 的段序落点 / 挂起续跑边界）；
 #   - ``DEATH_BEFORE_START`` 定格 killer、主公死亡优先于回合结束；
 #   - ``DEATH_AFTER`` 空实现。
 # 检测点只置 ``pending_outcome``、**不**终止：同批最后一次 ``DEATH_AFTER`` 之后才宣布

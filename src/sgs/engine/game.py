@@ -249,20 +249,36 @@ _JUDGE_SUBSTITUTION = "judge_substitution"
 :func:`~sgs.engine.steps.judge_before_effect` 顶部消费它。
 """
 
+_DEAD_CARDS_CLEARED = "dead_cards_cleared"
+"""死亡帧私有槽名：Ⅰ.a 的"死者区域已清空"位（票 33 的重入幂等）。
+
+清区自身不挂起，但它与"可能挂起"的死亡奖惩同一步（``death_settle_cards``），续跑会再进
+一次。位落在帧私有（``CODING_STANDARDS.md`` §3）而不是靠"死者的区恰好是空的"：后者是
+**状态巧合**，钩子若在结算中途往死者的区里放了牌，第二次进来会把它当成 Ⅰ.a 的遗漏。
+"""
+
 _LORD_PENALTY_GROUPS = "lord_penalty_groups"
 """死亡帧私有槽名：主公杀忠臣那一次弃置要搬的**来源区分组**（票 33）。
 
 形如 ``((ZoneRef, (card_id, ...)), ...)``，在**首次进入**时定格。定格的必要性与
-``move_after._QINGJIAN_GROUPS`` 同源：【连营】一类的"失去牌后"钩子会在弃置的**结算中途**
-把牌摸进主公的手牌——而弃置的"所有牌"指的是**触发那一刻**的牌，不是重入时看到的牌。不定格
-就会在重入时把刚摸到的牌当成下一次弃置，形成"弃一张、摸一张、再弃一张"的死循环。
+``sgs.skills.move_after._QINGJIAN_GROUPS_KEY`` 同源：【连营】一类的"失去牌后"钩子会在
+弃置的**结算中途**把牌摸进主公的手牌——而弃置的"所有牌"指的是**触发那一刻**的牌，不是
+重入时看到的牌。不定格就会在重入时把刚摸到的牌当成下一次弃置，形成"弃一张、摸一张、
+再弃一张"的死循环。
 """
 
 _LORD_PENALTY_MOVED = "lord_penalty_moved"
 """死亡帧私有槽名：上面那组分群里**已经搬完**的组数（票 33 的挂起续跑游标）。
 
-钩子提问时本步返回 ``"stay"``，应答到达后整步重入；游标让重入接着搬下一组，而不是重搬
-已搬完的那一组（重搬由 :data:`_MOVE_DONE` 兜住，游标负责不让游标之外的新牌被卷进来）。
+钩子提问时本步返回 ``"stay"``，应答到达后整步重入。两份帧私有各管一件事：
+
+- **游标**管"不要重进**已经搬完**的组"——挂起可能发生在后面的组，重入若从头再来，
+  前面的组会再搬一遍（:data:`_MOVE_DONE` 只有一个槽、记的是**最近一次**移动，兜不住
+  更早那几组）；
+- **分组**管"哪些牌算这一次弃置"——钩子在结算中途摸进来的新牌不在定格名单里。
+
+重入**尚未前进的那一组**时，搬牌由 :data:`_MOVE_DONE` 的"这次移动已经搬完"判据挡掉
+（卡组不变、牌已在弃牌堆），故那一组只需把游标推进一格。
 """
 
 
@@ -822,7 +838,14 @@ class Engine:
         明文（社区通说是不发动），本票只钉**存活者**一侧（主公杀忠臣的弃置），死者一侧维持
         现状。理由与扩展路径登记在 `开发文档/06` §5「程序化约定与偏离一手」。注意这条与
         :meth:`_lord_discards_everything` 的不对称是**有意的**：后者弃的是存活主公的牌。
+
+        **重入是零动作**（票 33 的 §3 纪律）：本方法自身不会挂起，但它在
+        :func:`~sgs.engine.steps.death_settle_cards` 里与"可能挂起"的奖惩同一步，故续跑会
+        再进一次。帧私有 :data:`_DEAD_CARDS_CLEARED` 让第二次直接返回——不靠"死者的区恰好
+        是空的"这种**状态巧合**当守卫（死者的区里若被钩子放过牌，那也不属于这一次 Ⅰ.a）。
         """
+        if frame.data.get(_DEAD_CARDS_CLEARED):
+            return
         seat = frame.data["target"]
         ctx = EffectContext(
             actor=seat,
@@ -852,6 +875,7 @@ class Engine:
                 owner=seat,
             )
             self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+        frame.data[_DEAD_CARDS_CLEARED] = True
 
     def reveal_dead_identity(self, frame: Frame) -> None:
         """``DEATH_REVEAL_IDENTITY_BEFORE``：亮出阵亡者的身份，发一条 ``identity_reveal``。
