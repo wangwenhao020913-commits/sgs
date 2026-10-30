@@ -226,7 +226,7 @@ const state = {
   selectedOption: null,// 内部选中态：选中的 legal_action 下标（技能 / 小选项 / 右端动作）
   picks: [],           // 手选槽位下标 / 弃牌 card_id / 提供面的面内位置
   // 排列（W6-03 / 票 01）：{key,cards,count,free,fixed,top,bottom,selected,dragging,
-  // dragNode,nodes,preview}；后三个是拖拽期的纯 DOM 引用，不进载荷。
+  // dragNode,nodes,preview,geometry}；后四个是拖拽期的纯 DOM 引用 / 折叠几何，不进载荷。
   arrange: null,
   preactivation: null, // 预发动（W4-1）：{skillId,name,steps,answers,cursor}；本地态，取消零提交
   convertSkill: null,  // 转化技"挑来源牌"模式（【龙胆】）：正在等玩家点一张可转化的手牌
