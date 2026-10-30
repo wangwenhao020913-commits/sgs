@@ -567,6 +567,11 @@ function syncPlaybackDialog(record) {
   const match = /^reveal:harvest:(\d+):/.exec(String(state.dialog.key || ""));
   if (!match || Number(match[1]) !== Number(record.frame_id)) return;
   closeDialogDom();
+  // 收窗同时把**正文格**清掉：亮牌格挂在 `#t-options` 上（取牌步），关窗时
+  // `showOptionsHome()` 会把它送回提示区——不清就一直挂到下一次询问（报障 3 的原样）。
+  // 此时问句文本已由起播的 `blankAskSurface()` 清过，故这里只管格子。
+  const options = $("t-options");
+  if (options) options.innerHTML = "";
 }
 
 /** 在每次 `renderPending` 末尾调用：按"当前步骤的表面"决定开 / 关 / 换内容。

@@ -53,6 +53,47 @@ function isRightAction(action) {
 
 /* ------------------------------------------------------------ 询问渲染 */
 
+/** **清空询问面**：提示文本 / 询问文本 / 技能串 / 目标提示 / 选项格 / 询问弹窗。
+ *
+ * 回放期演的是"上一问**已经答完**"之后发生的事（`session.js:applyView` 在起播时调用）：
+ * 旧询问的这几样都不再属于当前这一步。此前只有 `#t-prompt` / `#t-choice` 被清，其余
+ * 五样一直挂到**下一次** `renderPending` 才被冲掉——那一问可能隔着几十条记录，于是：
+ * 观星的排列弹窗在效果演完前一直留在场上、五谷的亮牌格留在提示区、其它座位的询问来了
+ * 提示区还是上一问的技能文案（M6 实机报障的三条同源症状）。
+ *
+ * **亮牌窗例外**：`state.dialog.kind` 是 `reveal` 时窗口与它的正文都留着——亮牌是公开 /
+ * 授予的牌面展示，记录流还会往里追加（洛神的连续判定靠 `refreshJudgmentReveal` 把 JUDGE
+ * 记录接在已开的窗口上；五谷的持久亮牌跨整个结算）。它自己的出口有两条：源结算帧出栈
+ * （`modal.js:syncPlaybackDialog`）或下一问提交（`syncDialog`）。持久亮牌模式下正文画在
+ * `#t-dialog-reveal`、`#t-options` 留在提示区 ⇒ 那份仍属于上一问，照样清。
+ */
+function blankAskSurface() {
+  const prompt = $("t-prompt");
+  if (prompt) prompt.textContent = "";
+  const choice = $("t-choice");
+  if (choice) choice.textContent = "";
+  const hints = $("t-skill-hints");
+  if (hints) hints.textContent = "";
+  const targetHint = $("t-target-hint");
+  if (targetHint) targetHint.textContent = "";
+  const promptSkills = $("t-prompt-skills");
+  if (promptSkills) promptSkills.innerHTML = "";
+  const options = $("t-options");
+  const body = $("t-dialog-body");
+  // 正文这时**挂在弹窗正文槽里**吗（`renderPending` 的分派器把它写进 `#t-options`，
+  // `modal.js:applyDialogContentMode` 再把它搬进正文槽）——亮牌窗的累积正文就在那儿。
+  const bodyOwnsOptions = !!options && !!body && options.parentNode === body;
+  const keepDialog = state.dialog.open && state.dialog.kind === DIALOG_KINDS.reveal;
+  if (!keepDialog) {
+    // 弹窗收起时 `closeDialogDom()` 会把 `#t-options` 搬回提示区，故清格子放在它**之后**：
+    // 上一问的排列面 / 选项 / 槽位不跟着回到提示条上。
+    closeDialogDom();
+    if (options) options.innerHTML = "";
+    return;
+  }
+  if (!bodyOwnsOptions && options) options.innerHTML = "";
+}
+
 /** 手选路径：点牌设焦点、点座位选目标、选出一组**候选里真有**的组合才可提交。 */
 function renderPending(view) {
   const pending = view && view.pending;

@@ -27,10 +27,17 @@ def _bootstrap() -> None:
 _bootstrap()
 
 from sgs.agents import RandomPlayer, TapePlayer  # noqa: E402
-from sgs.data import Identity, Kingdom, Suit, load_content_pack, validate_rule_config  # noqa: E402
+from sgs.data import (  # noqa: E402
+    Identity,
+    Kingdom,
+    RuleConfig,
+    Suit,
+    load_content_pack,
+    validate_rule_config,
+)
 from sgs.engine import Engine, ai_stream, dump_journal  # noqa: E402
 from sgs.resolution import Frame, ResolutionStack  # noqa: E402
-from sgs.skills import FREE_SPLIT, hero_card_zone_key  # noqa: E402
+from sgs.skills import FREE_SPLIT, RUNNING_SKILL_KEY, hero_card_zone_key  # noqa: E402
 from sgs.state import (  # noqa: E402
     Action,
     ActivateSkill,
@@ -3523,6 +3530,83 @@ def test_a_real_session_reaches_the_yiji_card_step_wording() -> None:
     )
     assert payload["spec"]["optional"] is False
     assert payload["prompt_display"]["default_label"] == "超时将自动选择第一张亮牌"
+
+
+def _jizhi_nullify_session() -> Session:
+    """**真会话**：座位 1 = 界黄月英（回合角色）出【无中生有】⇒【集智】答完 ⇒ 无懈窗口。
+
+    报障 1 的原样局面（M6 实机）：界黄月英是**别人**的座位，她的【集智】答完之后，同一帧
+    里开出的无懈窗口在人类屏幕上仍然显示界【集智】的文案。会话壳 / 派发环 / `query_context`
+    这条**读取方**链路一字不换——与 :func:`_yiji_real_session` 同一条姿态。
+    """
+    pack = _context_pack()
+    nullify = cards_of_type(pack, "nullify")[0]
+    trick = cards_of_type(pack, "ex_nihilo")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="guanyu", hand=(nullify,)),
+            SeatSpec(hero="jie_huangyueying", hand=(trick,)),
+        ],
+        deck=tuple(
+            card_id
+            for card_id in range(len(pack.deck.cards))
+            if card_id not in {nullify, trick}
+        ),
+        turn_seat=1,
+        rule_config=RuleConfig(player_count=2, first_seat=1),
+    )
+    session = Session(pack=pack, seed=1, ai="heuristic", timeout_seconds=None, **TWO_PLAYERS)
+    session.engine = Engine.from_state(state, seed=1)
+    session.drive()
+    return session
+
+
+def test_a_nullify_window_does_not_inherit_the_wording_of_a_skill_that_just_ran() -> None:
+    """报障 1 的根因回归：**跑完的技能不许留在帧上**（M6 实机，界黄月英的【集智】）。
+
+    `running_skill` / `skill_owner` 写的是"**此刻**在跑哪条技能"（派发环在回调前写），故
+    回调跑完就必须还原成进入前的事实。旧行为把它们一直留在帧上 ⇒ 同一帧里**后续**开出的
+    窗口（无懈 / 取牌 / 【闪】）被 `projection._skill_of_query` 算到上一个技能头上，界面
+    拿上一条技能的文案回答这一问（用户看到的是界【集智】的"使用非转化的锦囊牌时摸一张牌…"
+    出现在无懈窗口上）。
+
+    判据三段，缺一不可：
+
+    1. 【集智】**真的跑过**（真会话里由派发环派发，不是构造出来的假象）；
+    2. 跑完之后栈上**没有任何帧**再带 `running_skill`（根因）；
+    3. 读取方拿到的 `context.requirement` 是**这一问**的文案（症状）。
+    """
+    session = _jizhi_nullify_session()
+
+    asked = [
+        str(record.query.skill_id)
+        for record in session.records()
+        if getattr(record, "kind", None) == "query"
+        and getattr(record.query, "kind", None) == QueryKind.SKILL_ACTIVATION
+    ]
+    assert "hero.jie_huangyueying.jizhi" in asked, (
+        f"前置：【集智】的发动询问真的发出过（派发环派发的才是真形状）：{asked}"
+    )
+
+    query = session.pending
+    assert query is not None and query.kind == "RESPOND"
+    assert query.cause is WindowCause.NULLIFY, "这一问是【无中生有】的无懈窗口"
+    leftover = {
+        frame.frame_id: frame.data[RUNNING_SKILL_KEY]
+        for frame in session.engine.stack.frames
+        if RUNNING_SKILL_KEY in frame.data
+    }
+    assert leftover == {}, (
+        f"技能跑完帧上不得再带『正在跑哪个技能』：{leftover}（旧行为会把无懈窗口算成集智的）"
+    )
+
+    payload = pending_payload(session)
+    assert payload is not None and payload["context"] is not None
+    assert payload["context"]["requirement"] == "需要使用【无懈可击】", (
+        "无懈窗口的『需要做什么』只能是这一问的；出现集智的文案就说明帧上的技能键又漏了"
+    )
+    assert payload["context"]["skill_hints"] == [], "这一步没有提供任何技能，技能串必须为空"
 
 
 def test_the_watched_cards_are_private_to_the_pending_seat() -> None:

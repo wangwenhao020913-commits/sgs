@@ -1277,11 +1277,19 @@ def _dispatch(
             if not isinstance(active, ActivateSkill):
                 continue
         for item in items:
-            frame.data["skill_owner"] = instance.owner
-            # 移动的重入判据要认"哪个技能在跑"（两个提供者可以发出参数相同的移动）；
-            # 重入时同一个 handler 写回同一个值，故它稳定。
-            frame.data[RUNNING_SKILL_KEY] = instance.skill_id
+            # 这两个键是"**此刻**正在跑哪条技能 / 它的持有者"：`_MOVE_DONE` 的重入身份
+            # （:meth:`Engine.move_in_frame`）、`_move_causer`（"是不是**别人**弃置的"）与
+            # 投影的询问归属（`projection._skill_of_query`）都读它们。故跑完这一段必须
+            # **还原成进入前的事实**（M6 实机报障）：留在帧上会让同一帧里**后续**的窗口
+            # （无懈 / 取牌 / 【闪】…）被算到上一个技能头上——界面于是拿上一条技能的文案
+            # 回答这一问（界黄月英的【集智】答完之后，无懈窗口的提示文本仍是界集智的）。
+            _enter_skill_keys(frame, instance, key)
             control = _run_item(host, frame, item, instance, timing)
+            if control == "stay":
+                # 悬起 = 这条技能**还在跑**：键与还原点都留着。派发环重入时会再写一遍，
+                # 而 `_flush_pending_move` 的原地续跑**不经过**派发环，靠的就是帧上这一份。
+                return control
+            _leave_skill_keys(frame, key)
             if control is not None:
                 return control
         if limited:
@@ -1308,6 +1316,56 @@ def _run_item(host: Any, frame: Frame, item: Any, instance: SkillInstance, timin
         return run_flow(host, frame, item.flow, owner=instance.owner, timing=timing)
     assert item.handler is not None  # __post_init__ 已保证恰有其一
     return item.handler(host, frame)
+
+
+_SKILL_KEYS_PRIOR = "_skill_keys_prior"
+"""帧私有：:data:`RUNNING_SKILL_KEY` 与 ``skill_owner`` 的**还原点**，按派发键记账。
+
+帧私有 ⇒ 不进记录流、不参与任何规则判据，只服务"回调跑完就还原"这条纪律。**按派发键
+（``timing.value`` / ``seam:<kind>``）记账**而不是"进一次记一次"：同一条技能挂起后
+（``"stay"``）派发环会从头重入，若重入时把**上一次的残留**当成还原点，还原就成了空操作
+——那正是 M6 实机报障的根因（界【集智】的无懈窗口仍显示集智文案）。
+"""
+
+
+def _enter_skill_keys(frame: Frame, instance: SkillInstance, key: str) -> None:
+    """回调前：写下"此刻在跑哪条技能 / 它的持有者"，并记下**第一次进入前**的事实。"""
+    priors = frame.data.get(_SKILL_KEYS_PRIOR)
+    if priors is None:
+        priors = {}
+        frame.data[_SKILL_KEYS_PRIOR] = priors
+    priors.setdefault(
+        key,
+        (
+            RUNNING_SKILL_KEY in frame.data,
+            frame.data.get(RUNNING_SKILL_KEY),
+            "skill_owner" in frame.data,
+            frame.data.get("skill_owner"),
+        ),
+    )
+    frame.data["skill_owner"] = instance.owner
+    # 移动的重入判据要认"哪个技能在跑"（两个提供者可以发出参数相同的移动）；
+    # 重入时同一个 handler 写回同一个值，故它稳定。
+    frame.data[RUNNING_SKILL_KEY] = instance.skill_id
+
+
+def _leave_skill_keys(frame: Frame, key: str) -> None:
+    """回调**跑完**（不是悬起）：把两个键还原成进入前的事实，并销掉这一份还原点。"""
+    priors = frame.data.get(_SKILL_KEYS_PRIOR)
+    prior = priors.pop(key, None) if priors is not None else None
+    if priors is not None and not priors:
+        frame.data.pop(_SKILL_KEYS_PRIOR, None)
+    if prior is None:
+        return
+    had_skill, skill_id, had_owner, owner = prior
+    if had_skill:
+        frame.data[RUNNING_SKILL_KEY] = skill_id
+    else:
+        frame.data.pop(RUNNING_SKILL_KEY, None)
+    if had_owner:
+        frame.data["skill_owner"] = owner
+    else:
+        frame.data.pop("skill_owner", None)
 
 
 def dispatch_timing(

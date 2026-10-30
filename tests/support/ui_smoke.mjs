@@ -18081,4 +18081,119 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 }
 
 
+/* ============ M6 实机报障（合成局面）：询问面跟着「这一步」走 ============
+ *
+ * 三条报障同一条根因（观星的排列弹窗在效果演完前还挂在场上 / 五谷的亮牌格留在提示区 /
+ * 上一问的文案留在提示条）：`applyView` 起播时只清了 `#t-prompt` 与 `#t-choice`，其余五样
+ * 询问面（技能串 / 目标提示 / 选项格 / 询问弹窗 / 弹窗正文）要等**下一次** `renderPending`
+ * 才被冲掉，而那一问可能隔着几十条记录。这里钉住"起播 = 询问面整块让位"，以及**亮牌窗**
+ * 那条例外（五谷的持久亮牌跨整个结算、洛神的连续判定靠记录流往里追加，收起各有其出口）。
+ *
+ * 判据只读**外部可观察**的东西：弹窗 `hidden`、`#t-options` 的子节点数、提示条文本。
+ */
+{
+  ui.state.sessionId = null;
+  ui.show("table");
+
+  const clearAsk = () => {
+    ui.flushPlayback();
+    ui.state.playback = null;
+    ui.state.view = null;
+    ui.state.liveView = null;
+    ui.state.logRecords = [];
+    ui.state.narrative = [];
+    ui.state.narrativeShown = 0;
+    ui.state.cursor = 0;
+    ui.state.logSeq = 0;
+    ui.resetSelection();
+    $("t-log").innerHTML = "";
+    $("t-options").innerHTML = "";
+    ui.renderPending(null);
+  };
+  const batchRecord = (seq) => ({ seq, kind: "timing", timing: "PHASE_PLAY", actor: 0 });
+  const askState = () => ({
+    dialog: $("t-dialog").hidden !== true,
+    options: $("t-options").children.length,
+    prompt: $("t-prompt").textContent,
+    hints: $("t-skill-hints").textContent,
+    choice: $("t-choice").textContent,
+  });
+
+  // ① 排列面开着：弹窗 + 正文格都在。
+  clearAsk();
+  const arrangePending = {
+    kind: "ARRANGE", actor: 0, seq: 9701, timing: "PHASE_PREPARE",
+    prompt: "请排列这些牌：给出顺序与前几张置于牌堆顶。",
+    revealed: [synthCard(84, "闪"), synthCard(85, "桃")],
+    legal_actions: [{ answers_seq: 9701, kind: "ArrangeCards", order: [0, 1], split: 1 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+    arrange: { count: 2, split: "free" },
+  };
+  ui.applyView(synthView(arrangePending));
+  const opened = askState();
+  check("M6-ASK1 排列面画出弹窗与正文格", opened.dialog && opened.options > 0,
+    JSON.stringify(opened));
+
+  // ② 排列已答：这一批演的是"答完之后"，新询问是出牌阶段。
+  const playPending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 9702, timing: "PHASE_PLAY",
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ answers_seq: 9702, kind: "EndPhase" }],
+    candidate_index: {}, option_seats: {},
+    context: { requirement: "使用一张牌（或发动技能），或结束出牌阶段", skill_hints: [] },
+    preactivations: {}, preactivation: [],
+  };
+  const next = synthView(playPending);
+  next.records = [batchRecord(9702)];
+  ui.applyViewRaw(next);
+  const during = askState();
+  check("M6-ASK2 起播即让位：上一问的排列弹窗当场收起", during.dialog === false,
+    JSON.stringify(during));
+  check("M6-ASK3 起播即让位：提示区不留上一问的正文格 / 文案 / 技能串",
+    during.options === 0 && during.prompt === "" && during.choice === "" && during.hints === "",
+    JSON.stringify(during));
+  ui.flushPlayback();
+  const after = askState();
+  check("M6-ASK4 播完提交新询问：提示文本换成本问的，弹窗仍关着",
+    after.dialog === false && after.options === 0 && after.prompt.includes("出牌阶段"),
+    JSON.stringify(after));
+
+  // ③ 五谷的**持久亮牌**例外：结算帧还活着（表面是牌桌的 RESPOND）⇒ 跨批次保留。
+  clearAsk();
+  const harvestCards = [
+    { ...synthCard(5, "五谷丰登"), type: "harvest" },
+    { ...synthCard(6, "桃"), type: "peach" },
+  ];
+  const harvestPending = {
+    kind: "RESPOND", actor: 0, seq: 9703, cause: "NULLIFY",
+    prompt: "响应窗口：请使用一张牌，或放弃。",
+    legal_actions: [{ answers_seq: 9703, kind: "Pass" }],
+    candidate_index: {}, option_seats: {},
+    context: { requirement: "需要使用【无懈可击】", skill_hints: [] },
+    preactivations: {}, preactivation: [],
+    harvest: {
+      key: "harvest:9:5:0", title: "五谷丰登", active: true,
+      revealed: harvestCards, current: 0, targets: [0, 1],
+    },
+  };
+  ui.applyView(synthView(harvestPending));
+  const harvestOpen = askState();
+  check("M6-ASK5 五谷结算的无懈窗口：亮牌弹窗开着（公开处理区）", harvestOpen.dialog === true,
+    JSON.stringify(harvestOpen));
+  const harvestNext = synthView(harvestPending);
+  harvestNext.records = [batchRecord(9703)];
+  harvestNext.pending = { ...harvestPending, seq: 9704 };
+  ui.applyViewRaw(harvestNext);
+  const harvestDuring = askState();
+  check("M6-ASK6 亮牌窗跨批次保留（五谷持久展示 / 洛神连续判定，结算期间不闪）",
+    harvestDuring.dialog === true, JSON.stringify(harvestDuring));
+  check("M6-ASK7 亮牌窗保留时，提示区仍让位（不留上一问的正文格 / 文案）",
+    harvestDuring.options === 0 && harvestDuring.prompt === "" && harvestDuring.choice === "",
+    JSON.stringify(harvestDuring));
+  ui.flushPlayback();
+  clearAsk();
+}
+
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

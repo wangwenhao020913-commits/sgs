@@ -674,13 +674,14 @@ function applyView(body) {
   };
   $("btn-submit").disabled = true;
   $("btn-cancel").disabled = true;
-  $("t-choice").textContent = "";
   // 回放期间倒计时与右端动作都收起：`state.view` 还停在上一条询问，继续画会误导。
   resetCountdown();
   resetRightActions();
-  // 回放期间**响应文本清空**：它属于"下方询问界面"的那一问，等播完、新询问提交后再显示。
-  // 描述文本不在这里清——它由 renderProcessing 按效果区逐事件改写。
-  $("t-prompt").textContent = "";
+  // 回放期间**整个询问面让位**（提示文本 / 技能串 / 目标提示 / 选项格 / 询问弹窗）：它们
+  // 属于"下方询问界面"的上一问，等这一批播完、新询问提交后再画。只清一两样会让其余几样
+  // 挂到下一次 `renderPending` 才消失（M6 实机报障）。描述文本不在这里清——它由
+  // `renderProcessing` 按效果区逐事件改写；五谷的持久亮牌也留着，见 `blankAskSurface`。
+  blankAskSurface();
   // 开局：先把新局的骨架画上（旧局的武将 / 手牌 / 判定装备一帧都不留在屏上），再按正常
   // 步长逐条演。顶栏的种子 / 座位也属于新局，不等 commit 再换。
   if (opening) {
