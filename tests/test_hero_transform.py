@@ -47,6 +47,7 @@ from sgs.skills.virtual import LEGACY_KIND_COUNT
 from sgs.state import (
     ActivateSkill,
     FrameKind,
+    Phase,
     PlayCard,
     PlayPhaseQuery,
     QueryKind,
@@ -382,6 +383,7 @@ def test_wusheng_respects_the_slash_count_limit_like_a_real_slash():
         seats=[SeatSpec(hand=(RED_PEACH,), hero="guanyu"), SeatSpec()],
         deck=_deck_excluding(RED_PEACH),
         turn_seat=0,
+        phase=Phase.PLAY,
     )
     state.player(0).card_use_counts["slash"] = 1
 
@@ -567,6 +569,7 @@ def test_using_a_longdan_converted_slash_counts_against_the_slash_use_limit():
         seats=[SeatSpec(hand=(RED_DODGE,), hero="zhaoyun"), SeatSpec()],
         deck=_deck_excluding(RED_DODGE),
         turn_seat=0,
+        phase=Phase.PLAY,
     )
     state.player(0).card_use_counts["slash"] = 1
 

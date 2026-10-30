@@ -488,6 +488,7 @@ def test_zhaxiang_count_bonus_lets_a_second_slash_through():
         pack=PACK,
         seats=[SeatSpec(hero="jie_huanggai"), SeatSpec()],
         turn_seat=0,
+        phase=Phase.PLAY,
     )
     slash = _black_slash()
     state.player(0).card_use_counts["slash"] = 1

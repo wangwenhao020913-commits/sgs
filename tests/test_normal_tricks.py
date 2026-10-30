@@ -670,27 +670,30 @@ def _pass_players(count: int = 3) -> list[_Planned]:
     return [_Planned(_Plan(play="__none__", played=True)) for _ in range(count)]
 
 
+def _borrowed_designation(
+    query, *, designations: tuple[int, ...] = (2,)
+) -> UseCard | None:
+    """本次出牌阶段询问的内部池里"借刀 + [持刀者 1, Bn]"那条动作（不在池里则 ``None``）。"""
+    for action in getattr(query, "designation_actions", ()):
+        if isinstance(action, UseCard) and action.designations == designations:
+            return action
+    return None
+
+
 def _submit_borrowed(engine, *, designations: tuple[int, ...] = (2,)) -> None:
     """停在座位 0 的出牌阶段询问上 ⇒ 提交"借刀 + [持刀者 1, Bn]"。"""
     query = engine.pending
     assert isinstance(query, PlayPhaseQuery), f"应停在出牌阶段询问，实得 {query!r}"
-    engine.submit(
-        next(
-            candidate
-            for candidate in query.designation_actions
-            if candidate.designations == designations
-        )
-    )
+    action = _borrowed_designation(query, designations=designations)
+    assert action is not None, "本次出牌阶段询问里没有 [持刀者 1, Bn] 的借刀动作"
+    engine.submit(action)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="W5-04 先红：借刀预览读到持刀者上一回合的 slash 计数 ⇒ auto-b",
-)
 def test_a_slash_used_in_an_earlier_turn_does_not_close_the_borrowed_sword_window(pack):
-    """W5-04 先红：持刀者**上一回合**用过【杀】，本回合（座位 0 的回合）被借刀。
+    """W5-04：持刀者**上一回合**用过【杀】，本回合（座位 0 的回合）被借刀。
 
     借刀窗口必须仍给出"对 Bn 使用【杀】"的候选（不是 auto-b）；持刀者由此不交出武器。
+    先红时以 ``xfail(strict=True)`` 落地（``08f222a``），修复提交摘掉标记。
     """
     engine, weapon, _slashes = _borrowed_in_another_turn(pack, holder_used=1)
     players = _pass_players()
@@ -728,13 +731,10 @@ class _BorrowRepeatedly:
 
     def respond(self, query):
         if query.kind == QueryKind.PLAY_PHASE:
-            for action in getattr(query, "designation_actions", ()):
-                if (
-                    isinstance(action, UseCard)
-                    and action.designations == self.designations
-                ):
-                    self.plays += 1
-                    return action
+            action = _borrowed_designation(query, designations=self.designations)
+            if action is not None:
+                self.plays += 1
+                return action
             return _find(query, EndPhase)
         for action in query.legal_actions:
             if isinstance(action, Pass):
@@ -753,10 +753,6 @@ def _slash_uses_settled(engine) -> int:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="W5-04 先红：同一个别人的回合里第二次借刀被第一次的计数挡住",
-)
 def test_two_borrowed_swords_in_one_other_turn_both_let_the_holder_use_a_slash(pack):
     """用户裁定："在其他角色回合不考虑出杀次数"——同一个别人的回合里两次借刀都允许。
 

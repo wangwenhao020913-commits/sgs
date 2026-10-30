@@ -49,6 +49,7 @@ from sgs.effects import (
     designation_actions_for,
     discard_count,
     draw_from_deck,
+    is_own_play_phase,
     is_slash,
     legal_actions_for,
     locate,
@@ -2840,12 +2841,12 @@ class Engine:
     def _note_play_phase_slash(self, card: CardRef, source: int) -> None:
         """把"出牌阶段内使用 / 打出过【杀】"记进座位级事实（M6 票 03【克己】）。
 
-        判据三条同时成立：这是**当前回合角色自己的出牌阶段**（``state.phase`` 是
-        ``PLAY`` 且 ``source`` 是 ``turn_seat``——回合外的响应、别人的出牌阶段都不算）、
+        判据三条同时成立：这是**当前回合角色自己的出牌阶段**
+        （:func:`~sgs.effects.is_own_play_phase`——回合外的响应、别人的出牌阶段都不算）、
         牌面属于【杀】**家族**（:func:`~sgs.effects.is_slash`，火 / 雷 / 转化 / 虚拟同族）。
         写入唯一入口；复位见 :meth:`_phase_play_start`。不发 delta（见 ``Player`` 字段文档）。
         """
-        if self.state.phase is not Phase.PLAY or self.state.turn_seat != source:
+        if not is_own_play_phase(self.state, source):
             return
         if not is_slash(behavior_for(card)):
             return
@@ -4491,8 +4492,9 @@ class Engine:
         self._clear_turn_effects()
         # 【酒】的"每回合一次"按**游戏回合**记（spec §5.1 酒）：濒死自救可能发生在别人的
         # 回合、记在濒死者身上，故回合末必须清**所有座位**的 wine 计数键，不能只清回合角色。
-        # 只动这一个键：其它键（【杀】等）仍按座位自己的 ``TURN_START`` 重置，回合外
-        # ``check_count``（【借刀杀人】迫使的【杀】）的可见面因此一字不变。
+        # 只动这一个键：其它键（【杀】等）仍按座位自己的 ``TURN_START`` 重置——【杀】的
+        # 计数只在**他自己的出牌阶段**被 ``check_count`` 读（W5-04），回合末这里不动它，
+        # 借刀窗口那类回合外读点也看不到差异。
         for player in self.state.players:
             player.card_use_counts.pop(WINE_COUNT_KEY, None)
         # 重入只可能来自上面那次挂起续跑：``TURN_AFTER_END`` 已经落过就不要再落一条。

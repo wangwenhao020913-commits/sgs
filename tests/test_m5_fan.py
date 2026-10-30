@@ -40,6 +40,7 @@ from sgs.state import (
     EndPhase,
     FrameKind,
     Pass,
+    Phase,
     PlayCard,
     QueryKind,
     RespondContext,
@@ -92,12 +93,13 @@ def _specs_used(specs) -> list[int]:
     return [card for spec in specs for card in (*spec.hand, *spec.equip, *spec.judge)]
 
 
-def _state(specs, *, turn_seat: int = 0, deck=None):
+def _state(specs, *, turn_seat: int = 0, deck=None, phase=None):
     return build_state(
         pack=PACK,
         seats=specs,
         deck=deck if deck is not None else _deck_excluding(*_specs_used(specs)),
         turn_seat=turn_seat,
+        phase=phase,
         rule_config=RuleConfig(first_seat=0),
     )
 
@@ -747,9 +749,13 @@ def test_the_crossbow_lifts_the_slash_limit_for_fire_and_thunder_slashes():
         [
             SeatSpec(hand=(FIRE_SLASH[0], THUNDER_SLASH[0]), equip=(CROSSBOW[0],)),
             SeatSpec(),
-        ]
+        ],
+        phase=Phase.PLAY,
     )
-    bare = _state([SeatSpec(hand=(FIRE_SLASH[0], THUNDER_SLASH[0])), SeatSpec()])
+    bare = _state(
+        [SeatSpec(hand=(FIRE_SLASH[0], THUNDER_SLASH[0])), SeatSpec()],
+        phase=Phase.PLAY,
+    )
 
     armed.player(0).card_use_counts["slash"] = 3
     bare.player(0).card_use_counts["slash"] = 1

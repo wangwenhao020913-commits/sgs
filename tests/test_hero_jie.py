@@ -12,7 +12,7 @@
 - ☆【攻心】：出牌阶段限一次，观看一名其他角色的手牌，然后可展示一张红桃牌并弃置 /
   置于牌堆顶；
 - 【诛害】（界徐庶）：其他角色的结束阶段若其本回合造成过伤害 ⇒ 可对其使用一张【杀】；
-  **距离与次数限制照常适用**（`06` §5「程序化约定与偏离一手」裁定 3）；
+  **距离限制照常适用**（次数限制只在自身出牌阶段生效，W5-04；`06` §5「程序化约定与偏离一手」）；
 - 【克己】（界吕蒙）：牌面与标准版逐字相同，共用同一条零步流水线与前提。
 
 
@@ -1144,8 +1144,10 @@ def test_the_paoxiao_bonus_expires_at_the_end_of_the_turn():
 #    任一不成立就整条不触发（没有部分效果）。
 # 2. 【勤学】"准备阶段或结束阶段"是**同一条技能的两条挂接**（一个 SkillDef、两条 Hook），
 #    不是两条技能；任一阶段满足条件即觉醒，觉醒后另一阶段的挂接不再触发（"已觉醒"位）。
-# 3. 【诛害】"对其使用一张【杀】"的**距离与次数限制照常适用**（票面裁定，覆盖部分社区
-#    攻略的"无距离限制"读法）：只能从手牌选目标合法且未超过本回合【杀】次数上限的那张。
+# 3. 【诛害】"对其使用一张【杀】"的**距离限制照常适用**（票面裁定，覆盖部分社区攻略的
+#    "无距离限制"读法）：只能从手牌选目标合法（在攻击范围内）的那张。**次数不是闸门**：
+#    这一次使用发生在**别人的**结束阶段，按 W5-04 的用户裁定（只有自身出牌阶段才计【杀】
+#    次数），`check_count` 在那里恒不设限。
 #
 # ☆ 技能的实例**只**来自觉醒时的 `grant_skill`（"获得"来源）：武将牌载体不产出它
 # （数据侧 `granted_by` 排除，见 `tests/data/test_heroes_validation.py`）。
@@ -1733,8 +1735,12 @@ def test_zhuhai_lets_the_owner_use_a_slash_against_the_turn_player():
     assert engine.state.player(0).card_use_counts.get("slash", 0) == 1, "这一次使用计入次数"
 
 
-def test_zhuhai_respects_distance_and_the_slash_count_limit():
-    """裁定 3：距离 / 次数限制照常适用 ⇒ 付不起时连"是否发动"都不问。"""
+def test_zhuhai_respects_distance_but_the_slash_count_only_binds_the_owners_play_phase():
+    """距离照常判；【杀】的次数限制只在**他自己出牌阶段**生效（W5-04 用户裁定 2026-10-30）。
+
+    【诛害】的使用发生在**别人的**结束阶段，故座位 0 的 ``slash`` 计数不再是闸门
+    （距离仍然照常：够不着时连"是否发动"都不问）。
+    """
     turn_slash = _cards("slash")[0]
     zhuhai_slash = _cards("slash")[1]
 
@@ -1758,7 +1764,8 @@ def test_zhuhai_respects_distance_and_the_slash_count_limit():
     assert _activation_queries(engine, XUSHU_ZHUHAI) == [], "够不着 ⇒ 不进候选"
     assert engine.state.player(2).hp == 4
 
-    # 次数：距离 1（座位 1 的回合），但本回合【杀】已用满。
+    # 次数（W5-04）：距离 1（座位 1 的回合），座位 0 的计数键上还留着 1——但这不是他的
+    # 出牌阶段，故次数不设限：照常问"是否发动"，【杀】也真的打出去。
     state = _zhuhai_state(turn_seat=1)
     engine = Engine.from_state(state, seed=7)
     engine.state.player(0).hand.append(zhuhai_slash)
@@ -1776,7 +1783,10 @@ def test_zhuhai_respects_distance_and_the_slash_count_limit():
         ],
         lambda e: ran_timing(e, Timing.TURN_AFTER_END),
     )
-    assert _activation_queries(engine, XUSHU_ZHUHAI) == [], "次数已满 ⇒ 不进候选"
+    assert _activation_queries(engine, XUSHU_ZHUHAI), (
+        "别人的回合里【杀】次数不是闸门（W5-04 裁定）"
+    )
+    assert engine.state.player(1).hp == 3, "【诛害】的【杀】命中当前回合角色"
 
 
 def test_zhuhai_needs_the_turn_player_to_have_dealt_damage():

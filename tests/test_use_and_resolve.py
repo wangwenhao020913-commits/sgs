@@ -31,7 +31,7 @@ from sgs.effects import (
 )
 from sgs.engine import Engine
 from sgs.resolution import Step
-from sgs.state import EndPhase, FrameKind, Pass, QueryKind, UseCard, alive_seats
+from sgs.state import EndPhase, FrameKind, Pass, Phase, QueryKind, UseCard, alive_seats
 from sgs.timing import FORBIDDEN_TIMING_NAMES, Timing
 
 from support import SeatSpec, build_state, cards_of_type, run_until
@@ -43,13 +43,15 @@ DODGE = cards_of_type(PACK, "dodge")
 PEACH = cards_of_type(PACK, "peach")
 
 
-def _state(*, hand_a=(), hand_b=(), hp_a=4, hp_b=4, deck=(), seats=2):
+def _state(*, hand_a=(), hand_b=(), hp_a=4, hp_b=4, deck=(), seats=2, phase=None):
     specs = [SeatSpec(hp=hp_a, hand=tuple(hand_a))]
     if seats > 1:
         specs.append(SeatSpec(hp=hp_b, hand=tuple(hand_b)))
     for _ in range(seats - len(specs)):
         specs.append(SeatSpec())
-    return build_state(pack=PACK, seats=specs, deck=tuple(deck), turn_seat=0)
+    return build_state(
+        pack=PACK, seats=specs, deck=tuple(deck), turn_seat=0, phase=phase
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +236,7 @@ def test_peach_is_offered_in_the_play_phase_only_below_full_hp_and_targets_self(
 
 
 def test_l3_checks_are_named_after_the_official_steps_and_agree_with_the_candidates():
-    healthy = _state(hand_a=(SLASH[0],))
+    healthy = _state(hand_a=(SLASH[0],), phase=Phase.PLAY)
 
     assert check_forbidden(healthy, 0, healthy.card(SLASH[0])) is False
     assert check_count(healthy, 0, healthy.card(SLASH[0])) is False

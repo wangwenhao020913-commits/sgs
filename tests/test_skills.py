@@ -41,6 +41,7 @@ from sgs.state import (
     FrameKind,
     Pass,
     PlayCard,
+    Phase,
     QueryKind,
     SelectCards,
     SelectOption,
@@ -1468,7 +1469,13 @@ def test_axe_with_only_one_card_is_never_asked():
 
 
 def test_serpent_spear_transformed_play_ignores_the_slash_limit():
-    """打出不占使用次数（票 19 §2）：次数用尽仍可从候选里打出转化【杀】。"""
+    """打出不占使用次数（票 19 §2）：次数用尽仍可从候选里打出转化【杀】。
+
+    下半段是 W5-04 的推论：同一张转化【杀】在**借刀窗口**里照样是"使用"的候选——
+    那个窗口发生在**别人的**出牌阶段（``turn_seat=1`` ∧ ``phase=PLAY``），次数限制按用户
+    裁定（只有自身出牌阶段才受次数限制）本来就不适用；它与第一段"打出不占次数"是两条
+    不同的闸门。
+    """
     from sgs.state import RespondContext, RespondMode, WindowCause
 
     first, second = _cards("peach")[0], _cards("peach")[1]
@@ -1476,7 +1483,8 @@ def test_serpent_spear_transformed_play_ignores_the_slash_limit():
         pack=PACK,
         seats=[SeatSpec(hand=(first, second), equip=(SERPENT,)), SeatSpec()],
         deck=_deck_excluding(first, second, SERPENT),
-        turn_seat=0,
+        turn_seat=1,
+        phase=Phase.PLAY,
     )
     state.player(0).card_use_counts["slash"] = 99  # 次数已用尽
 
@@ -1505,9 +1513,9 @@ def test_serpent_spear_transformed_play_ignores_the_slash_limit():
     assert any(
         isinstance(action, PlayCard) and action.card.card_id < 0 for action in played
     ), "打出不计次数 ⇒ 转化【杀】仍在候选中"
-    assert not any(
+    assert any(
         isinstance(action, UseCard) and action.card.card_id < 0 for action in used
-    ), "使用仍受次数限制"
+    ), "借刀窗口在别人的回合 ⇒ 次数不是闸门（W5-04），转化【杀】照样可被使用"
 
 
 def test_eight_diagrams_is_offered_in_the_arrow_barrage_dodge_window():

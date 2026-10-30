@@ -32,6 +32,7 @@ from sgs.state import (
     EndPhase,
     GameState,
     Pass,
+    Phase,
     PlayCard,
     Player,
     QueryKind,
@@ -58,6 +59,7 @@ from .behaviors import (
     TargetCount,
     UseContext,
     behavior_for,
+    is_slash,
     satisfies_required,
 )
 from .modifiers import (
@@ -82,6 +84,7 @@ __all__ = [
     "forced_use_targets",
     "hand_count",
     "hand_limit",
+    "is_own_play_phase",
     "legal_actions_for",
     "needs_designation",
     "seat_distance",
@@ -240,6 +243,20 @@ def check_forbidden(state: GameState, seat: int, card: CardRef) -> bool:
     return False
 
 
+def is_own_play_phase(state: GameState, seat: int) -> bool:
+    """``seat`` 此刻是否在**自己的**出牌阶段（``turn_seat == seat`` ∧ ``phase is Phase.PLAY``）。
+
+    这是一条**事实判据**，有两个读点、各服务一条规则：
+
+    - :func:`check_count` 的【杀】作用域（W5-04 用户裁定）：次数限制只在这里生效；
+    - ``Engine._note_play_phase_slash`` 的"本阶段使用 / 打出过【杀】"事实（M6 票 03
+      的【克己】）。
+
+    两处读同一个谓词，免得"自己的出牌阶段"被各写一份、改一处忘一处。
+    """
+    return state.turn_seat == seat and state.phase is Phase.PLAY
+
+
 def check_count(state: GameState, seat: int, card: CardRef) -> bool:
     """L3.2 ``USE_CHECK_COUNT``：``True`` = 已超过本回合次数上限。
 
@@ -248,9 +265,22 @@ def check_count(state: GameState, seat: int, card: CardRef) -> bool:
 
     已用次数读**行为表声明的计数键**（``CardBehavior.count_key``）：普通【杀】/ 火【杀】/
     雷【杀】共用 ``"slash"``，转化 / 虚拟【杀】按产物牌型（也是 ``"slash"``）读同一键。
-    """
 
+    **【杀】族的适用范围（W5-04 用户裁定 2026-10-30）**：§17.10 A2（L1820）写"只有『于
+    出牌阶段的空闲时间点使用【杀】』才受次数限制"（§3.5 L183–L185 / §17.1 L1643 只是未加
+    限定的默认额度），故次数限制只约束**他自己出牌阶段**的主动使用；响应、其他阶段、
+    其他角色回合里的使用**不查次数**（计数键照常记账，只是不再当限制读）。即【杀】族只在
+    ``turn_seat == seat`` ∧ ``phase is Phase.PLAY``（:func:`is_own_play_phase`）时读计数。
+    借刀窗口发生在**另一个角色**的回合，那里读到的 ``"slash"`` 是持刀者**上一回合**的陈旧
+    值——读它会把"a 可行"误判成 auto-b（W5-04 的实机根因）。
+
+    **不**在回合起点清空其他座位的计数：陈旧值只是不再被错误的窗口读到，该座位自己的
+    ``TURN_START`` 重置保持原样（清算别人的计数会掩盖"限制有适用范围"这条规则边界）。
+    其他牌（【酒】等）的计数语义不动。
+    """
     behavior = behavior_for(card)
+    if is_slash(behavior) and not is_own_play_phase(state, seat):
+        return False
     limit = behavior.use_limit
     rated = apply_modifiers(
         ModifierPoint.COUNT_LIMIT,

@@ -283,11 +283,13 @@ def _zhuhai_condition(host: Any, frame: Any) -> bool:
 def _zhuhai_illegal_cards(
     state: GameState, frame: Any, owner: int, answers: Any
 ) -> tuple[int, ...]:
-    """【诛害】候选里的**不可用**【杀】：距离 / 次数限制照常适用（`06` §5「程序化约定与偏离一手」裁定 3）。
+    """【诛害】候选里的**不可用**【杀】：距离照常判；次数闸门随 ``check_count`` 的适用范围走。
 
-    ``PickCards`` 的 ``exclude_cards`` 与选择面同源：从**手牌**里排除掉"本回合【杀】次数
-    已到上限"或"目标不在合法目标池里"的那些。判据直接调引擎既有的
-    :func:`~sgs.effects.check_count` / :func:`~sgs.effects.check_targets`，不另写一套。
+    ``PickCards`` 的 ``exclude_cards`` 与选择面同源：从**手牌**里排除掉"目标不在合法目标池
+    里"的那些。判据直接调引擎既有的 :func:`~sgs.effects.check_count` /
+    :func:`~sgs.effects.check_targets`，不另写一套——故【杀】的次数限制只在**持有者自己的
+    出牌阶段**读计数（W5-04 用户裁定 2026-10-30）。本技能的使用发生在**别人的**结束阶段，
+    那里 ``check_count`` 恒为 ``False``，不构成闸门。
     """
     del answers
     target = _zhuhai_target(frame)
@@ -361,7 +363,7 @@ def awakening_activation_plans() -> dict[str, Any]:
 _REQUIREMENTS: dict[str, str] = {
     "qianxue": "减 1 点体力上限，然后获得技能「荐言」（觉醒技：造成伤害后若你已受伤，强制发动）",
     "qinxue": "减 1 点体力上限并选择：摸两张牌 / 回复 1 点体力，然后获得技能「攻心」（觉醒技：准备或结束阶段手牌数减体力值至少为 2 时强制发动）",
-    "zhuhai": "对其使用一张【杀】（距离与次数限制照常适用）",
+    "zhuhai": "对其使用一张【杀】（距离限制照常适用）",
 }
 """觉醒族三条技能的"需要做什么"文案（item 4）。"""
 
