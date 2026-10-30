@@ -44,6 +44,14 @@
 "武将牌上的牌"按张数补进守恒量、本人区里的牌面进可见面，故放置期间记牌**继续可用**
 （他人的区只给张数、牌面留在未知池）。
 
+**记牌批 2（C2，票 23）**：同一台记牌机器铺到另外两件"能把打出去的牌作废"的牌上——
+【桃】（濒死 / 救援，:func:`_rescue_probability` × 斩杀分）与【无懈可击】（锦囊目标，
+:func:`_nullification_probability` × 锦囊分，**两个都按"目标那一侧 × 关系权重"算**）；同时把
+"未知牌一律按值 1.0"换成未知池里一张牌的**期望牌价**（:func:`_unknown_card_value`，装备按
+槽位价）。未知池为空 ⇒ 期望 ``0.0``（不是 1.0 的魔数）；记牌关闭 ⇒ 三条判据一律 ``None`` ⇒
+逐值回到 C2 之前的行为。收窄口径（无懈只数目标本人 / 逐座位独立超几何 / 多目标与延时锦囊
+不打折 / 零收益锦囊不打折）登记在票 23 的 Answer 与台账。
+
 **M5-07 的属性 / 连环 / 酒**：军争的取舍只接进**既有打分器**，不另造策略框架。用到的
 公开事实 = 目标的装备区（藤甲 / 白银狮子 / 古锭刀）、自己的装备（青釭剑 / 朱雀羽扇）、
 横置与 ``wine_active``、手牌**张数**、体力与已明身份；【杀】族判据走行为表
@@ -174,6 +182,13 @@ _TRICK_VALUES: Mapping[str, float] = MappingProxyType(
 )
 """锦囊（含延时锦囊）的使用价值；【无懈可击】/【闪】不能在出牌阶段主动使用 ⇒ 0。"""
 
+_UNREGISTERED_TRICK_VALUE = 1.0
+"""表里没有牌名的锦囊：按"一张普通牌的保守价"估（票 13 §DISCARD 的兜底口径）。
+
+**不是**未知牌的价（那是 :func:`_unknown_card_value`）：这里牌面是**知道的**，只是还没教
+AI 它值多少，故保持常量、不随牌局漂 —— 拿不着模型的牌不该因为牌堆变薄而涨价。
+"""
+
 _CARD_VALUES: Mapping[str, float] = MappingProxyType(
     {
         "peach": 6.0,
@@ -203,10 +218,15 @@ _CARD_VALUES: Mapping[str, float] = MappingProxyType(
 回落到普通【杀】的同价（见 :func:`_is_slash_card`）。
 """
 
-_UNKNOWN_CARD_VALUE = 1.0
 _EQUIP_VALUE = 1.5
+"""没有登记槽位价值的装备：按"一件普通装备"计（:func:`_card_value` 的兜底）。"""
+
 _HIDDEN_CARD_VALUE = 1.0
-"""隐藏槽（只有位置、没有牌面）的估值：他人手牌按"一张普通的牌"计。"""
+"""牌面不可见时的**兜底**牌价：隐藏槽（只有位置、没有牌面）按"一张普通的牌"计。
+
+票 23（C2）起它只作**记牌关闭**时的兜底——记牌可用时，一张看不见牌面的牌按未知池里
+一张牌的期望价算（:func:`_unknown_card_value`），不再一律回这个魔数。
+"""
 
 _DAMAGE_BASE = 3.0
 _TARGET_BONUS = 1.0
@@ -561,10 +581,15 @@ def _damage_card(card: CardRef) -> bool:
     return _is_slash_card(card) or card.type in _DAMAGE_CARD_TYPES
 
 
-def _card_value(card: CardRef | None) -> float:
-    """一张牌的局部估值：牌名表 → 装备槽位 → 未知兜底（不读任何隐藏信息）。"""
+def _card_value(card: CardRef | None, *, view: PlayerView | None = None) -> float:
+    """一张牌的局部估值：牌名表 → 装备槽位 → 未知兜底（不读任何隐藏信息）。
+
+    ``card is None``（只有位置、没有牌面：**别人的手牌**）时，C2（票 23）起按
+    **未知池的期望牌价**算（:func:`_unknown_card_value`）——票 23 之前恒为 1.0。
+    ``view`` 不给（没有视角可读）或记牌关闭 ⇒ :data:`_HIDDEN_CARD_VALUE`。
+    """
     if card is None:
-        return _HIDDEN_CARD_VALUE
+        return _HIDDEN_CARD_VALUE if view is None else _unknown_card_value(view)
     known = _CARD_VALUES.get(card.type)
     if known is not None:
         return known
@@ -573,7 +598,7 @@ def _card_value(card: CardRef | None) -> float:
         return _CARD_VALUES["slash"]
     if card.slot is not None:
         return _SLOT_VALUES.get(card.slot.value, _EQUIP_VALUE)
-    return _UNKNOWN_CARD_VALUE
+    return _UNREGISTERED_TRICK_VALUE
 
 
 def _me(view: PlayerView) -> PlayerPublic:
@@ -707,7 +732,9 @@ def _deck_table_is_consistent() -> bool:
 def _verified_deck_profile(view: PlayerView) -> tuple[int, Mapping[str, int]] | None:
     """按守恒量反推牌堆档位，返回 ``(总张数, 逐项张数)``；**验不过就答 None**（关闭记牌，不猜）。
 
-    档位**名字**故意不返回：没有读取方（记牌只要总张数与【闪】数），少一个字段就少一处漂移。
+    档位**名字**故意不返回：没有读取方（记牌要的是总张数与**整张逐牌名表**——C1 只用
+    【闪】那一项，C2 起未知牌期望 / P(【无懈】) / P(【桃】) 都读同一份剩余张数），
+    少一个字段就少一处漂移。
 
     三条判据（spec §6.3 的"不猜"）：
 
@@ -732,35 +759,75 @@ def _verified_deck_profile(view: PlayerView) -> tuple[int, Mapping[str, int]] | 
     return None
 
 
-def _unknown_pool(view: PlayerView) -> tuple[int, int] | None:
-    """未知池的 ``(张数, 【闪】张数)``：档位总牌面 − 可见牌面；记牌关闭时答 ``None``。
+def _unknown_pool(view: PlayerView) -> tuple[int, Mapping[str, int]] | None:
+    """未知池的 ``(张数, 逐牌名剩余张数)``：档位总牌面 − 可见牌面；记牌关闭时答 ``None``。
 
     未知池 = 牌堆 + 他家手牌 + **他人武将牌上不可见的牌**（它们移出了可数区域、但张数在
     守恒量里；本人武将牌上的牌面已经算进可见面，不会被重复计入）。记牌关闭时（档位 /
     守恒对不上）返回 ``None``，调用方回落到常量贴现。
+
+    C1（票 20）只取【闪】一项；C2（票 23）按**整张逐牌名表**读它：未知牌的期望牌价、
+    【无懈可击】与【桃】的概率都从这份剩余张数里算（不再各自从档位表重扣一遍）。
     """
     profile = _verified_deck_profile(view)
     if profile is None:
         return None
     total, by_type = profile
     visible = _visible_card_faces(view)
+    remaining = dict(by_type)
+    for card in visible:
+        left = remaining.get(card.type, 0) - 1
+        if left < 0:
+            return None
+        remaining[card.type] = left
     unknown = total - len(visible)
-    dodges = by_type.get("dodge", 0) - sum(
-        1 for card in visible if card.type == "dodge"
-    )
-    if unknown < 0 or dodges < 0 or dodges > unknown:
+    if unknown < 0:
         return None
-    return unknown, dodges
+    return unknown, remaining
 
 
-def _dodge_probability(view: PlayerView, seat: int) -> float | None:
-    """目标 ``seat`` **手里至少有一张【闪】**的概率；记牌关闭时答 ``None``。
+def _has_card_probability_in_pool(
+    pool: tuple[int, Mapping[str, int]], hand: int, types: tuple[str, ...]
+) -> float | None:
+    """在一份**已知的未知池**里，``hand`` 张手牌至少有一张 ``types`` 里某牌的概率。
 
-    只用 ``view`` 的公开面 + :data:`_DECK_TABLE` 的静态档位表（票 27 起含武将牌上的牌：
-    逐座位张数进守恒量、本人区的牌面进已出现的牌——零全知读点）：
-    未知池按**无放回**抽 ``hand_count`` 张算超几何概率
-    ``1 − C(未知 − 闪, h) / C(未知, h)``——"由未知池里【闪】的占比导出"的精确版本
-    （不放回；spec §6.3 的"4 张手牌约 47%"就是 4 张手牌在 standard_108 开局时的量级）。
+    未知池按**无放回**算超几何 ``1 − C(未知 − 该类, h) / C(未知, h)``（spec §6.3 的
+    "4 张手牌约 47%"就是 4 张手牌在 standard_108 开局时抽到【闪】的量级）；``None`` =
+    这份池子算不出（未知池比手牌还少）。
+
+    **为什么单独一层**：C2 起"目标那一侧"要对**多个座位**各算一次（:func:`_side_holds_probability`），
+    未知池只该算一次（``_unknown_pool`` 会走守恒量 + 可见面），故乘除这部分抽出来。
+    """
+    unknown, remaining = pool
+    if hand <= 0:
+        return 0.0
+    if unknown < hand:
+        return None
+    matches = sum(remaining.get(type_id, 0) for type_id in types)
+    if matches <= 0:
+        return 0.0
+    if matches >= unknown:
+        return 1.0
+    # C(未知 − 该类, h) / C(未知, h) = ∏ (未知 − 该类 − i) / (未知 − i)：整数分子分母各乘一次，
+    # 最后一次除法——比逐项浮点乘更稳，也不引 math（可见面白名单里没有它）。
+    safe = 1
+    total = 1
+    for index in range(hand):
+        safe *= unknown - matches - index
+        total *= unknown - index
+    return 1.0 - safe / total
+
+
+def _has_card_probability(
+    view: PlayerView, seat: int, types: tuple[str, ...]
+) -> float | None:
+    """目标 ``seat`` **手里至少有一张** ``types`` 里某牌的概率；记牌关闭时答 ``None``。
+
+    C1 的 P(闪)、C2 的 P(【桃】)、P(【无懈可击】) 共用这一台机器（乘除在
+    :func:`_has_card_probability_in_pool`）。
+
+    ``types`` 用**元组**而不是集合：这里要逐项求和，而集合的迭代序逐进程变化
+    （``tests/test_source_discipline.py`` ③）；调用方按固定字面量给。
 
     **武将牌上的牌（票 27）**：本人武将牌上的牌面在 ``view.hero_zone_cards`` 里（已出现），
     每个座位的张数在 ``hero_zone_count`` 里（守恒量）；**他人**武将牌上的牌只给张数、牌面
@@ -769,28 +836,20 @@ def _dodge_probability(view: PlayerView, seat: int) -> float | None:
     if not 0 <= seat < len(view.players):
         return None
     # 先判"记牌能不能用"，再看张数：0 手目标的答案恒为 0，但"记牌关闭"必须仍然可见
-    # （``None`` = 不知道 / 不可用），否则调用方分不清"没有闪"和"没在记牌"。
+    # （``None`` = 不知道 / 不可用），否则调用方分不清"没有这张牌"和"没在记牌"。
     pool = _unknown_pool(view)
     if pool is None:
         return None
-    unknown, dodges = pool
-    hand = view.players[seat].hand_count
-    if hand <= 0:
-        return 0.0
-    if unknown < hand:
-        return None
-    if dodges == 0:
-        return 0.0
-    if dodges >= unknown:
-        return 1.0
-    # C(未知 − 闪, h) / C(未知, h) = ∏ (未知 − 闪 − i) / (未知 − i)：整数分子分母各乘一次，
-    # 最后一次除法——比逐项浮点乘更稳，也不引 math（可见面白名单里没有它）。
-    safe = 1
-    total = 1
-    for index in range(hand):
-        safe *= unknown - dodges - index
-        total *= unknown - index
-    return 1.0 - safe / total
+    return _has_card_probability_in_pool(pool, view.players[seat].hand_count, types)
+
+
+def _dodge_probability(view: PlayerView, seat: int) -> float | None:
+    """目标 ``seat`` **手里至少有一张【闪】**的概率；记牌关闭时答 ``None``。
+
+    机器在 :func:`_has_card_probability`（C2 起三条概率共用一份乘除）；本函数只是把
+    "哪一类牌"钉成【闪】——C1 的伤害贴现读它。
+    """
+    return _has_card_probability(view, seat, _DODGE_TYPES)
 
 
 def _defended_by_dodge(card: CardRef | None) -> bool:
@@ -813,6 +872,313 @@ def _expected_attack_score(damage: int, dodge_probability: float) -> float:
     return (
         _DAMAGE_POINT_VALUE * (damage * (1.0 - dodge_probability) - 1.0)
         + _DODGE_CONSUMED_VALUE * dodge_probability
+    )
+
+
+# ---------------------------------------------------------------------------
+# 记牌批 2（C2，票 23）：未知牌期望 + 桃 / 无懈的期望
+#
+# C1 只把【闪】的占比接进了伤害打分（"这一刀会不会被躲掉"）。C2 把同一台记牌机器铺到
+# 另外两件**能把已经打出去的牌作废**的牌上——【桃】（濒死 / 救援）与【无懈可击】（锦囊
+# 目标）——并把"未知牌一律按 1.0"的魔数换成未知池里一张牌的**期望牌价**。
+#
+# 四条判据同源：都只读 `_unknown_pool` 的剩余张数 + `_DECK_TABLE`（与 C1 一份档位表），
+# 记牌关闭时一律 `None` ⇒ 回落到票 23 之前的行为（"关掉记牌 = 今天"这条仍然成立）。
+# ---------------------------------------------------------------------------
+
+_DODGE_TYPES = ("dodge",)
+"""P(有【闪】) 的牌名（C1）。元组而不是集合：概率函数要逐项求和，集合迭代序逐进程变化。"""
+
+_NULLIFY_TYPES = ("nullify",)
+"""P(有【无懈可击】) 的牌名（C2：锦囊目标能不能整张取消）。"""
+
+_RESCUE_OWN_TYPES = tuple(sorted(_RESCUE_CARD_TYPES))
+"""濒死**自救**的牌名（【桃】/【酒】；C2）：元组而不是集合，内容仍只声明一份。"""
+
+_RESCUE_OTHER_TYPES = ("peach",)
+"""**别人**救你的牌名：只有【桃】（【酒】只能自救，规则上不能替人回复）。"""
+
+_POOL_SLASH_TYPES = frozenset({"slash", "fire_slash", "thunder_slash"})
+"""档位表里按【杀】族计价的牌名（:func:`_pool_card_value`；只作成员判定、不迭代）。
+
+"火【杀】/ 雷【杀】与转化、虚拟【杀】同价"这条在**牌面**那一侧走 :func:`_is_slash_card`；
+档位表的键是**牌名字符串**、没有 ``CardRef``，故这里按牌名登记一张小表。
+
+**漂移由测试兜**：``tests/test_heuristic_ai.py::test_the_card_counting_tier_table_matches_the_content_pack``
+要求 ``_DECK_TABLE`` 的**每一个**牌名都落在三张字面表之一（本表 / :data:`_CARD_VALUES` /
+:data:`_POOL_EQUIPMENT_SLOTS`）——新加第五条【杀】而没登记，它会红（不是运行期静默按兜底价）。
+"""
+
+_POOL_EQUIPMENT_SLOTS: Mapping[str, str] = MappingProxyType(
+    {
+        "ancient_scimitar": "weapon",
+        "axe": "weapon",
+        "crossbow": "weapon",
+        "double_sword": "weapon",
+        "green_dragon_blade": "weapon",
+        "halberd": "weapon",
+        "ice_sword": "weapon",
+        "qilin_bow": "weapon",
+        "qinggang_sword": "weapon",
+        "serpent_spear": "weapon",
+        "vermilion_feather_fan": "weapon",
+        "eight_diagrams": "armor",
+        "renwang_shield": "armor",
+        "silver_lion": "armor",
+        "vine_armor": "armor",
+        "dilu": "horse_defense",
+        "hualiu": "horse_defense",
+        "jueying": "horse_defense",
+        "zhuahuang_feidian": "horse_defense",
+        "chitu": "horse_offense",
+        "dawan": "horse_offense",
+        "zixing": "horse_offense",
+    }
+)
+"""档位表里**装备牌名 → 槽位**的字面表（C2 的未知牌期望按槽位价计，不是一律一件价）。
+
+档位表逐**牌名**记数、装备没有 ``equip`` 这一类（``crossbow`` / ``eight_diagrams`` /
+``jueying`` …），故要按 :data:`_SLOT_VALUES` 计价就得知道每个牌名是哪个槽——AI 模块不能
+import ``sgs.data``，这张表只能手抄。**漂移由测试兜**：反向对齐测试逐条核「内容包里这个牌名
+的 ``subcategory`` 就是这里写的槽位」，改内容包 / 漏登记即红。
+"""
+
+
+def _pool_card_value(type_id: str) -> float:
+    """档位表的一个**牌名**值多少分：牌名表 → 【杀】族 → 装备槽位 → 未登记的锦囊兜底。
+
+    与 :func:`_card_value` 同一套价（装备按槽位、未登记的锦囊按一张普通牌），只是入口是
+    **牌名字符串**（档位表的键）而不是 ``CardRef``——两处读到同一个概念时价必须一致，
+    否则"弃牌时值多少"与"期望里值多少"会各说各话。
+    """
+    known = _CARD_VALUES.get(type_id)
+    if known is not None:
+        return known
+    if type_id in _POOL_SLASH_TYPES:
+        return _CARD_VALUES["slash"]
+    slot = _POOL_EQUIPMENT_SLOTS.get(type_id)
+    if slot is not None:
+        return _SLOT_VALUES.get(slot, _EQUIP_VALUE)
+    return _UNREGISTERED_TRICK_VALUE
+
+
+def _unknown_card_expectation(view: PlayerView) -> float | None:
+    """未知池里**一张牌的期望牌价**：``Σ 剩余张数 × 牌价 ÷ 剩余总张数``；记牌关闭 ⇒ ``None``。
+
+    期望牌价随牌局变化：牌堆里【桃】/【杀】被看见得越多、剩下的多为装备时，一张未知牌就
+    不值钱（票面"把未知牌一律 1.0 换成未知池期望"）。
+
+    **退化必须干净**（票面验收）：未知池**为空**（全部牌面都看得见）⇒ ``0.0``——没有牌可抽，
+    期望就是 0，**不是** :data:`_HIDDEN_CARD_VALUE` 那个 1.0 的魔数。记牌关闭（档位 / 守恒
+    对不上）⇒ ``None``，调用方走兜底（票 23 之前的行为）。
+    """
+    pool = _unknown_pool(view)
+    if pool is None:
+        return None
+    unknown, remaining = pool
+    if unknown <= 0:
+        return 0.0
+    total = sum(
+        count * _pool_card_value(type_id) for type_id, count in remaining.items()
+    )
+    return total / unknown
+
+
+def _unknown_card_value(view: PlayerView) -> float:
+    """一张**看不见牌面的牌**值多少分：记牌可用 ⇒ 未知池期望；关闭 ⇒ :data:`_HIDDEN_CARD_VALUE`。
+
+    票 23 之前这里恒是 1.0。现在只有"记牌关闭"才走那个兜底——与 C1 的"对不上就关闭记牌、
+    回到今天的行为"同一条口径（``None`` = 不猜，不是 0）。
+    """
+    expectation = _unknown_card_expectation(view)
+    return _HIDDEN_CARD_VALUE if expectation is None else expectation
+
+
+_NULLIFY_CONSUMED_VALUE = 1.0
+"""锦囊被【无懈可击】取消时对方的代价，用**分数**计（≈ 一张普通牌的价值）。
+
+与 :data:`_DODGE_CONSUMED_VALUE` 同一姿态、**故意各留一个字面量**：那条是"这一刀被躲掉也
+消耗一张【闪】"，这条是"这张锦囊被取消也消耗一张【无懈】"；把一条绑到另一条上，调其中
+一条的价就会偷偷改掉另一条（与 :data:`_ILLEGAL_PENALTY` / :data:`_ABORT_SKILL_PENALTY`
+同一条处置：同值不同义）。
+"""
+
+
+def _expected_with_consumed(value: float, probability: float, consumed: float) -> float:
+    """``value × (1 − p) + consumed × p``：一次"可能被作废"的落点的期望分（C2 的共用算式）。
+
+    :func:`_expected_trick_score`（锦囊被无懈取消）与 :func:`_expected_lethal_score`（斩杀被
+    桃救回）共用这一行；:func:`_expected_attack_score` **不**共用——那条按"伤害点"计价、
+    正负项的形状不同，硬套会把两把尺子混成一把。
+    """
+    return value * (1.0 - probability) + consumed * probability
+
+
+def _expected_trick_score(
+    value: float, nullify_probability: float | None
+) -> float:
+    """锦囊的**期望分**：``value × (1 − p) + 一张牌的价 × p``（C2）。
+
+    - ``p`` 为 ``None``（记牌关闭）⇒ 逐值返回 ``value``（票 23 之前的行为）；
+    - ``p = 0`` ⇒ 也逐值返回（未知池里没有【无懈】可宣）；
+    - ``p = 1`` ⇒ 只剩"对方消耗一张【无懈】"的价——与 :func:`_expected_attack_score` 的
+      收益项同一思路；否则"必然被取消"的锦囊与"白扔"同价，AI 分不出好坏。
+
+    **``value <= 0`` 一律不打折**（评审自纠）：补偿项说的是"这张打出去的牌**即使被取消**
+    也让对方付出了一张牌"，前提是这一手本来**值得打**。给零收益的【铁索连环】加上一个正的
+    补偿价，等于教 AI 为了钓一张【无懈】白打一张牌（还会压过 0.6 的重铸）；负收益的更不该
+    被抬高。
+    """
+    if nullify_probability is None or value <= 0.0:
+        return value
+    return _expected_with_consumed(value, nullify_probability, _NULLIFY_CONSUMED_VALUE)
+
+
+_NULLIFIABLE_TRICKS = (
+    "dismantlement",
+    "snatch",
+    "duel",
+    "borrowed_sword",
+    "fire_attack",
+    "iron_chain",
+)
+"""**单目标、当回合结算**的锦囊：目标手里的【无懈可击】能把整张取消（C2 的登记表）。
+
+两条"不打折"的边界（登记在票 23 的 Answer）：
+
+- **多目标锦囊**（【南蛮入侵】/【万箭齐发】/【五谷丰登】/【桃园结义】）：取消只覆盖**一个**
+  目标，整张按一个目标的概率打折会系统性低估；
+- **延时锦囊**（【乐不思蜀】/【兵粮寸断】/【闪电】）：它**之后**才结算，取消概率不再由
+  "目标此刻的手牌"决定（是整桌的未知池）。
+
+宁可少算（少一次打折）也不算错——这两类保持票 23 之前的常量分。
+"""
+
+
+def _trick_expectation(query: Query, action: Action, score: float) -> float:
+    """把"目标可能用【无懈可击】取消"折进这张锦囊的分（C2 的**唯一**落点）。
+
+    只在 :func:`_score_card_use` 调用：``_score_attack`` 也被本模块别处直接调（测试 / 将来
+    的单卡估值），锦囊的取消期望属于"出牌阶段用这张牌"这一步，不掺进纯伤害模型。
+    """
+    if not isinstance(action, UseCard) or action.card.type not in _NULLIFIABLE_TRICKS:
+        return score
+    view = query.view
+    others = [
+        seat
+        for seat in action.targets
+        if seat != view.seat and 0 <= seat < len(view.players)
+    ]
+    if len(others) != 1:
+        return score
+    return _expected_trick_score(score, _nullification_probability(view, others[0]))
+
+
+_RESCUE_CONSUMED_VALUE = 1.0
+"""斩杀被【桃】救回来时对方的代价，用**分数**计（≈ 一张普通牌的价值）。
+
+与 :data:`_DODGE_CONSUMED_VALUE` / :data:`_NULLIFY_CONSUMED_VALUE` 同一条思路、各留一个字面量：
+"这一下没打死"也不是白打——对方的【桃】被消耗掉了；但只抵掉一部分，不把斩杀价抹平。
+"""
+
+
+def _side_willingness(view: PlayerView, target: int) -> tuple[float, ...]:
+    """逐座位"**替 ``target`` 出头**"的权重（0..1）：``target`` 自己恒 1，其余按是否与它同阵营。
+
+    第三方之间的阵营不是公开事实，只能用我对这两席的关系权重推：``target`` 是**我的敌人** ⇒
+    只有"我的敌人"才是它的盟友（``P(敌)``）；反之用 ``P(友)``（I1 的关系权重，票 21）。
+    两边都不是（含配比算不出的中性 ``(0, 0)``）⇒ 0——中立不替任何人出头。
+
+    落点是**桃**那一侧（谁愿意救这个濒死者）；**无懈**那一侧按目标本人收窄，不走这里
+    （宽口径没过不劣化闸，见 :func:`_nullification_probability`）。
+    """
+    enemy_of_target, ally_of_target = _identity_relation(view, target)
+    enemy_side = enemy_of_target > ally_of_target
+    weights: list[float] = []
+    for seat, player in enumerate(view.players):
+        if seat == target:
+            weights.append(1.0)
+        elif seat == view.seat or not player.alive:
+            # **我自己不算**：决策是我在做——我不会宣无懈取消自己打出的锦囊，
+            # 也还没轮到（或已经错过）用我的【桃】去救那个濒死者。
+            weights.append(0.0)
+        else:
+            enemy, ally = _identity_relation(view, seat)
+            weights.append(enemy if enemy_side else ally)
+    return tuple(weights)
+
+
+def _side_holds_probability(
+    view: PlayerView,
+    target: int,
+    own_types: tuple[str, ...],
+    other_types: tuple[str, ...],
+) -> float | None:
+    """``target`` 那一侧**至少有一张**该牌的概率；记牌关闭 / 非法座位 ⇒ ``None``。
+
+    :func:`_side_willingness` 逐座位加权后按 ``1 − Π (1 − p_s × w_s)`` 合并：
+    ``target`` 自己用 ``own_types``（自救 / 无懈），别人用 ``other_types``（替它出手的牌）。
+    未知池只算一次（:func:`_has_card_probability_in_pool`），不逐座位重跑去守恒量。
+
+    **近似（登记在票 23 的 Answer）**：逐座位独立按超几何估，而同一张牌不可能落在两处——
+    严格口径要多元超几何。独立相乘会**略微高估**"多处出手"，对出手的一方保守。
+    """
+    if not 0 <= target < len(view.players) or not view.players[target].alive:
+        return None
+    pool = _unknown_pool(view)
+    if pool is None:
+        return None
+    missed = 1.0
+    for seat, weight in enumerate(_side_willingness(view, target)):
+        if weight <= 0.0:
+            continue
+        types = own_types if seat == target else other_types
+        probability = _has_card_probability_in_pool(
+            pool, view.players[seat].hand_count, types
+        )
+        if probability is None:
+            return None
+        missed *= 1.0 - probability * weight
+    return 1.0 - missed
+
+
+def _rescue_probability(view: PlayerView, seat: int) -> float | None:
+    """``seat`` 被打进濒死后**被救回来**的概率（C2 的"桃期望"）；记牌关闭 / 非法座位 ⇒ ``None``。
+
+    两个来源（都只读公开面 + :data:`_DECK_TABLE`）：
+
+    1. **他自己手里的【桃】/【酒】**（濒死自救：酒只对自己生效）；
+    2. **他那一侧的其他人手里的【桃】× 救援意愿**（意愿见 :func:`_side_willingness`）。
+
+    **一局只算一次**：不建模"救回来又被打死"的连锁（登记在票 23 的 Answer）。
+    """
+    return _side_holds_probability(view, seat, _RESCUE_OWN_TYPES, _RESCUE_OTHER_TYPES)
+
+
+def _nullification_probability(view: PlayerView, seat: int) -> float | None:
+    """这张锦囊在 ``seat`` 身上**被宣【无懈可击】取消**的概率；记牌关闭 ⇒ ``None``。
+
+    **收窄到目标本人（有实测依据，不是漏做）**：只数 ``seat`` **自己**手里的【无懈】，不数
+    它那一侧的盟友。宽口径（盟友 × 关系权重，与 :func:`_rescue_probability` 同一台机器）在
+    本票的第二轮曾整版落地，``promote`` 768 副**没过不劣化闸**（对父版本 ``-0.0143``、
+    CI ``[-0.0456, 0.0143]``、CI 下界低于 δ=0.0319）⇒ 按 spec §6.7 的停手线回退到收窄档。
+    语义上的收窄也站得住：无懈是**留住的一张牌**，盟友替一个单目标锦囊宣它的意愿本来就低，
+    "手里有无懈 ⇒ 一定宣"只在**目标自己**身上近似成立。逐条读数见台账 `ai-v7` 口径说明。
+    """
+    return _has_card_probability(view, seat, _NULLIFY_TYPES)
+
+
+def _expected_lethal_score(view: PlayerView, seat: int) -> float:
+    """斩杀分的**期望**：``_LETHAL_STRIKE_VALUE × (1 − p) + 一张牌的价 × p``（C2）。
+
+    ``p`` = :func:`_rescue_probability`；记牌关闭（``p = None``）⇒ 逐值返回
+    :data:`_LETHAL_STRIKE_VALUE`（票 23 之前的行为）。
+    """
+    probability = _rescue_probability(view, seat)
+    if probability is None:
+        return _LETHAL_STRIKE_VALUE
+    return _expected_with_consumed(
+        _LETHAL_STRIKE_VALUE, probability, _RESCUE_CONSUMED_VALUE
     )
 
 
@@ -842,6 +1208,10 @@ def _score_attack(action: Action, view: PlayerView) -> float:
     （负项）与"躲掉也消耗一张牌"（正项）一起算。记牌关闭（档位 / 守恒对不上）或不靠
     【闪】抵消的伤害牌（【决斗】/【南蛮】要求【杀】）**仍走常量贴现**，与票 20 之前一致。
     伤害为 0 的无效目标不进概率模型：那本来就不该出。
+
+    **记牌桃期望（C2，票 23）**：目标**这一下就死**时，斩杀项不再是满价——按
+    :func:`_expected_lethal_score` 折成期望（濒死者自己 / 同阵营座位的【桃】可能把他救回来；
+    救回来也消耗对方一张【桃】）。记牌关闭 ⇒ 逐值回到 :data:`_LETHAL_STRIKE_VALUE`。
     """
     targets = tuple(action.targets) if isinstance(action, UseCard) else ()
     if not targets:
@@ -878,7 +1248,7 @@ def _score_attack(action: Action, view: PlayerView) -> float:
         # 打盟友没有额外惩罚）。小到不能盖过"手牌越多越难命中"的贴现。
         score += _ENEMY_FOCUS * _identity_relation(view, seat)[0]
         if _lethal_to(card, view, seat):
-            score += _LETHAL_STRIKE_VALUE
+            score += _expected_lethal_score(view, seat)
     return score
 
 
@@ -1009,23 +1379,30 @@ def _score_reforge(action: Action) -> float:
 
 
 def _score_card_use(query: Query, action: Action) -> float:
-    """出牌阶段使用一张牌的局部收益（伤害 ＞ 装备 ＞ 过牌；【桃】只在受伤时用）。"""
+    """出牌阶段使用一张牌的局部收益（伤害 ＞ 装备 ＞ 过牌；【桃】只在受伤时用）。
+
+    **记牌无懈期望（C2，票 23）**：单目标、当回合结算的锦囊（:data:`_NULLIFIABLE_TRICKS`）
+    再乘一道"目标手里有【无懈可击】吗"的期望（:func:`_trick_expectation`）——被取消也不是
+    白打，对方的【无懈】被消耗掉。记牌关闭 / 多目标 / 延时锦囊 ⇒ 逐值不变。
+    """
     assert isinstance(action, (UseCard, PlayCard))
     view = query.view
     card = action.card
     if _damage_card(card):
-        return _score_attack(action, view)
-    if card.type == "wine":
-        return _score_wine(query, view)
-    if card.type == "peach":
-        return _HEAL_VALUE if _wounded(view) else 0.0
-    if card.type == "iron_chain":
-        return _score_iron_chain(action, view)
-    if card.type == "fire_attack":
-        return _score_fire_attack(action, view)
-    if card.slot is not None:
-        return _EQUIP_PLAY_VALUE
-    return _TRICK_VALUES.get(card.type, _UNKNOWN_CARD_VALUE)
+        score = _score_attack(action, view)
+    elif card.type == "wine":
+        score = _score_wine(query, view)
+    elif card.type == "peach":
+        score = _HEAL_VALUE if _wounded(view) else 0.0
+    elif card.type == "iron_chain":
+        score = _score_iron_chain(action, view)
+    elif card.type == "fire_attack":
+        score = _score_fire_attack(action, view)
+    elif card.slot is not None:
+        score = _EQUIP_PLAY_VALUE
+    else:
+        score = _TRICK_VALUES.get(card.type, _UNREGISTERED_TRICK_VALUE)
+    return _trick_expectation(query, action, score)
 
 
 def _score_play_phase(query: Query, action: Action) -> float:
@@ -1264,16 +1641,21 @@ def _step_skill_short(query: Query) -> str:
     return str(raw).rsplit(".", 1)[-1] if raw else ""
 
 
-def _step_card_score(card: CardRef | None, owner: int, me: int, short: str) -> float:
+def _step_card_score(
+    card: CardRef | None, owner: int, me: int, short: str, *, view: PlayerView
+) -> float:
     """一步选牌的**单张**分值（``_score_select_cards`` 与预发动填表共用的唯一口径）。
 
     - **别人的牌**（【麒麟弓】弃目标坐骑 / 【反间】挑发动者的牌）：取高价值 ⇒ ``+牌价``；
     - **自己的牌（成本）**：按技能语义取负——【制衡】每弃一张回抽一张，记
       ``_CYCLE_VALUE - 牌价``；其余（含【仁德】的给牌）记 ``-牌价``。
 
+    ``view`` 只服务**没有牌面**的槽（别人的手牌）：C2（票 23）起它按未知池的期望牌价算；
+    有牌面的槽逐值不受影响。
+
     两处读它（选牌步的打分、预发动填表的"选哪几张"），故两份模型不会漂移。
     """
-    value = _card_value(card)
+    value = _card_value(card, view=view)
     if owner != me:
         return value
     if short in _CYCLE_STEPS:
@@ -1324,7 +1706,9 @@ def _score_select_cards(query: Query, action: Action) -> float:
         if fire_attack_discard:
             total += _FIRE_ATTACK_DISCARD_VALUE - _card_value(slot.card)
             continue
-        total += _step_card_score(slot.card, slot.ref.seat, query.view.seat, short)
+        total += _step_card_score(
+            slot.card, slot.ref.seat, query.view.seat, short, view=query.view
+        )
     if short in _GIVE_STEPS and len(action.picks) >= 2 and _wounded(query.view):
         total += _RENDE_RECOVER_VALUE
     return total
@@ -1667,7 +2051,9 @@ def _pick_card_ids(
         except (TypeError, ValueError):
             return None
         card, owner = cards.get(card_id, (None, view.seat))
-        entries.append((card_id, _step_card_score(card, owner, view.seat, short)))
+        entries.append(
+            (card_id, _step_card_score(card, owner, view.seat, short, view=view))
+        )
     if not entries:
         return None
     return _model_card_picks(entries, step, short, view)
@@ -2095,13 +2481,16 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 "deck_count": (
                     True,
                     "记牌守恒量的一项（C1）：_conserved_card_count 与四区 / 手牌数相加后由"
-                    "_verified_deck_profile 反推牌堆档位，再经 _dodge_probability 算未知池的"
-                    "【闪】占比（只有张数、没有顺序）",
+                    "_verified_deck_profile 反推牌堆档位；C2（票 23）起未知池的**逐牌名剩余"
+                    "张数**同时喂四条判据——P(【闪】) / P(【无懈可击】) / P(【桃】) 与"
+                    "未知牌期望（_has_card_probability / _unknown_card_expectation）。"
+                    "只有张数、没有顺序",
                 ),
                 "discard": (
                     True,
                     "记牌的**可见牌面**（C1）：_visible_card_faces 把弃牌堆的牌算进'已出现'，"
-                    "_unknown_pool 从档位总牌面里扣；顺序对现有打分无影响",
+                    "_unknown_pool 从档位总牌面里扣（C2 起扣出来的是**逐牌名**剩余张数，"
+                    "三条概率与未知牌期望共用）；顺序对现有打分无影响",
                 ),
                 "processing": (
                     True,
@@ -2122,7 +2511,12 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                     "（正面发动要跳过下个回合）与【谦逊】的续命判据也读它（票 22）",
                 ),
                 "hp_max": (True, "``hp < hp_max`` 判'已受伤'（【仁德】回体力的额外价值）"),
-                "hand_count": (True, "公开手牌数：【古锭刀】加伤、防守成本、够不够弃"),
+                "hand_count": (
+                    True,
+                    "公开手牌数：【古锭刀】加伤、防守成本、够不够弃；记牌里它是"
+                    "_has_card_probability 的抽样张数（P(【闪】) / P(【无懈】) / P(【桃】)，"
+                    "票 20 / 23）——只给张数、不给牌面",
+                ),
                 "hero_zone_count": (
                     True,
                     "武将牌上的公开张数（票 27）：_conserved_card_count 按座位求和，是记牌"
@@ -2148,7 +2542,8 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                     True,
                     "敌友的唯一信号（I1，票 21）：本人 / 主公 / 已阵亡可见，_identity_relation "
                     "把已亮明的身份从配比字面表里减掉，存活未知座位按人头均分得 "
-                    "(P(敌), P(友))——伤害目标 / 座位步 / 连环 / 火攻 / 无懈 / 濒死救援都读它；"
+                    "(P(敌), P(友))——伤害目标 / 座位步 / 连环 / 火攻 / 无懈 / 濒死救援都读它"
+                    "（救援一侧：C2 起 _rescue_probability 用它算「谁愿意救濒死者」）；"
                     "算不出就退回中性的 (0, 0)，不做行为 / 历史推断",
                 ),
                 "hero": (False, "武将 id 不参与打分：技能语义走 ``SKILL_VALUES``，不按武将近路"),
@@ -2280,7 +2675,7 @@ def _picked_value(view: PlayerView, action: ActivateSkill) -> float:
     """
     mine = view.players[view.seat]
     by_id = {card.card_id: card for card in (*view.self_hand, *mine.equip)}
-    return sum(_card_value(by_id.get(card_id)) for card_id in action.picks)
+    return sum(_card_value(by_id.get(card_id), view=view) for card_id in action.picks)
 
 
 def _skeleton_cost(view: PlayerView, count: int) -> float:
@@ -2380,7 +2775,7 @@ def _score_keji(query: Query, action: Action, view: PlayerView) -> float:
     """
     del query, action
     me = view.players[view.seat]
-    return float(max(0, me.hand_count - me.hp)) * _UNKNOWN_CARD_VALUE
+    return float(max(0, me.hand_count - me.hp)) * _unknown_card_value(view)
 
 
 def _score_kurou(query: Query, action: Action, view: PlayerView) -> float:
@@ -2391,8 +2786,8 @@ def _score_kurou(query: Query, action: Action, view: PlayerView) -> float:
     """
     del query, action
     if view.players[view.seat].hp <= 1:
-        return -_UNKNOWN_CARD_VALUE
-    return 2.0 * _UNKNOWN_CARD_VALUE
+        return -_unknown_card_value(view)
+    return 2.0 * _unknown_card_value(view)
 
 
 def _score_qingnang(query: Query, action: Action, view: PlayerView) -> float:
@@ -2445,8 +2840,8 @@ def _score_jie_kurou(query: Query, action: Action, view: PlayerView) -> float:
     assert isinstance(action, ActivateSkill)
     del query
     if view.players[view.seat].hp <= 1:
-        return -_UNKNOWN_CARD_VALUE
-    return 3.0 * _UNKNOWN_CARD_VALUE - _skill_cost(view, action, 1)
+        return -_unknown_card_value(view)
+    return 3.0 * _unknown_card_value(view) - _skill_cost(view, action, 1)
 
 
 def _score_jie_guose(query: Query, action: Action, view: PlayerView) -> float:
@@ -2503,13 +2898,13 @@ def _score_shizhan(query: Query, action: Action, view: PlayerView) -> float:
     del query
     me = view.players[view.seat]
     if me.hp <= 1:
-        return -_UNKNOWN_CARD_VALUE
+        return -_unknown_card_value(view)
     slashes = sum(
         1
         for card in view.self_hand
         if _is_slash_card(card)
     )
-    return 1.0 if slashes else -_UNKNOWN_CARD_VALUE
+    return 1.0 if slashes else -_unknown_card_value(view)
 
 
 # ---------------------------------------------------------------------------
@@ -2547,8 +2942,12 @@ _AXE_KILL_VALUE = _LETHAL_STRIKE_VALUE
 """【贯石斧】这一下直接**打死**目标时的价：与 D2 斩杀项同一笔"击杀"的价，直接引用
 :data:`_LETHAL_STRIKE_VALUE`，不另写一个数（改价时两处不会漂开）。
 
-击杀**不扣牌价**（与 ``_score_attack`` 的斩杀项同口径：能打死就不为两张牌放弃）：票面验收
-写的是「目标 1 体力 ⇒ 发动」，没有给斩杀加成本条件。**非致命**那 1 点伤害才走"收益 − 成本"。"""
+击杀**不扣牌价**：票面验收写的是「目标 1 体力 ⇒ 发动」，没有给斩杀加成本条件。
+**非致命**那 1 点伤害才走"收益 − 成本"。
+
+**票 23（C2）的边界**：``_score_attack`` 的斩杀项现在按 :func:`_expected_lethal_score`
+折【桃】的期望，**斧子不折**——ai-v6 已裁定"击杀恒发动、不扣牌价"，本票"一次只改一个量"，
+不把那条裁定的行为面一起动（登记在票 23 的 Answer 与台账 `ai-v7` 口径 3①）。"""
 
 _QIANXUN_VALUE = 2.0
 """【谦逊】照常发动：躲开拆 / 顺、回合末拿回手牌，等于净赚（票 22 之前的常量）。"""

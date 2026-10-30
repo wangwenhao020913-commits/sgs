@@ -197,6 +197,21 @@ ALLOWLIST: dict[Site, Rule] = {
         "_DECK_TABLE",
         '"slash": 30,',
     ): Rule(NORMAL, 3, "记牌的牌堆档位表按**牌名**逐项记数：'slash' 就是普通【杀】，火 / 雷各有自己的一行（三档各一处，不是判族站点）"),
+    (
+        "src/sgs/agents/heuristic.py",
+        "_POOL_SLASH_TYPES",
+        '_POOL_SLASH_TYPES = frozenset({"slash", "fire_slash", "thunder_slash"})',
+    ): Rule(
+        FAMILY,
+        1,
+        "C2（票 23）的未知牌期望把档位表的**牌名**折成族价：这一行就是族登记表"
+        "（火 / 雷杀与普通杀同价），新加第五条【杀】时它与 _DECK_TABLE 的反查一起红",
+    ),
+    (
+        "src/sgs/agents/heuristic.py",
+        "_pool_card_value",
+        'return _CARD_VALUES["slash"]',
+    ): Rule(FAMILY, 1, "档位表牌名经族登记判定是【杀】后回落到族价（与 _card_value 同一口径）"),
     # ---- effects/actions.py：响应候选的语境分派 ----
     (
         "src/sgs/effects/actions.py",

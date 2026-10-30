@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 import sys
@@ -605,6 +606,49 @@ def test_the_card_counting_tier_table_matches_the_content_pack():
         assert dict(by_type) == expect.by_type, f"{profile} 的逐项张数漂了"
 
 
+def test_every_pooled_card_name_has_a_declared_price():
+    """C2 的未知牌期望：``_DECK_TABLE`` 的**每个**牌名都必须落在三张字面表之一。
+
+    三张表 = :data:`_CARD_VALUES`（明写价）/ :data:`_POOL_SLASH_TYPES`（【杀】族同价）/
+    :data:`_POOL_EQUIPMENT_SLOTS`（装备按槽位价）。漏登一个牌名时 :func:`_pool_card_value`
+    会静默回落到"未登记的锦囊"价（1.0）——那是**另一个概念**的价，会让"新加第五条【杀】"
+    这类漂移在运行期悄悄成立。这条把静默变成红。
+
+    另核装备表的**方向**：每个牌名在内容包里的 ``subcategory`` 就是这里写的槽位（改内容包 /
+    写错槽位即红），并且按槽位价与 :data:`_CARD_VALUES` 的口径一致。
+    """
+    priced = {
+        *heuristic_scoring._CARD_VALUES,
+        *heuristic_scoring._POOL_SLASH_TYPES,
+        *heuristic_scoring._POOL_EQUIPMENT_SLOTS,
+    }
+    slots: dict[str, str] = {}
+    for profile in ("basic_53", "standard_108", "standard_ex_160"):
+        pack = load_content_pack(deck_profile=profile)
+        _total, by_type = heuristic_scoring._DECK_TABLE[profile]
+        missing = sorted(name for name in by_type if name not in priced)
+        assert not missing, f"{profile} 的档位表里有没登记牌价的牌名：{missing}"
+        slots.update(
+            {
+                card_type.id: card_type.subcategory
+                for card_type in pack.card_types
+                if card_type.subcategory
+                in ("weapon", "armor", "horse_defense", "horse_offense", "treasure")
+            }
+        )
+    for name, slot in heuristic_scoring._POOL_EQUIPMENT_SLOTS.items():
+        assert slots.get(name) == slot, (
+            f"{name} 的槽位登记成 {slot!r}，内容包里是 {slots.get(name)!r}"
+        )
+        assert heuristic_scoring._pool_card_value(name) == heuristic_scoring._SLOT_VALUES[
+            slot
+        ], f"{name} 的牌价必须按槽位价 {slot!r} 计"
+    # 非装备、非【杀】、未明写价的牌名走"未登记的锦囊"价（与 `_card_value` 同一个概念）。
+    assert heuristic_scoring._POOL_SLASH_TYPES.isdisjoint(
+        heuristic_scoring._POOL_EQUIPMENT_SLOTS
+    )
+
+
 def test_the_dodge_probability_is_the_hypergeometric_draw_from_the_unknown_pool():
     """P(闪) 的量级与 spec §6.3 一致：standard_108 开局、4 张手牌 ≈ 47% 有【闪】。
 
@@ -735,6 +779,11 @@ _BASIC_EXPECTATION = (15 * 4.0 + 8 * 6.0 + 30 * 3.0) / 53
 """
 
 
+def _no_picks():
+    """骨架候选的**最小合法形状**（`_score_jie_kurou` 只读 `action.picks`）。"""
+    return ActivateSkill(answers_seq=1, skill_id="probe", picks=(), choices=())
+
+
 def _basic_pool_view(*, hand=(), hp=4, discard=(), missing=0):
     """2 人 ``basic_53`` 视角：座位 0 拿 ``hand``，``discard`` 进弃牌堆（可见）。
 
@@ -753,7 +802,6 @@ def _basic_pool_view(*, hand=(), hp=4, discard=(), missing=0):
     return project(state, 0)
 
 
-@pytest.mark.xfail(strict=True, reason="C2 先红：三条期望还没落地（票 23）")
 def test_the_unknown_card_expectation_is_the_tier_weighted_average():
     """未知池非空 ⇒ 期望由**档位表算得**（``basic_53`` 全未知 = 3.736，不是魔数 1.0）。
 
@@ -768,7 +816,6 @@ def test_the_unknown_card_expectation_is_the_tier_weighted_average():
     assert heuristic_scoring._unknown_card_value(view) == pytest.approx(_BASIC_EXPECTATION)
 
 
-@pytest.mark.xfail(strict=True, reason="C2 先红：三条期望还没落地（票 23）")
 def test_the_unknown_card_expectation_is_zero_for_an_empty_pool():
     """**未知池为空** ⇒ 退化值 ``0.0``（没有牌可抽），记牌关闭 ⇒ ``None`` + 兜底 1.0。
 
@@ -787,7 +834,6 @@ def test_the_unknown_card_expectation_is_zero_for_an_empty_pool():
     assert heuristic_scoring._unknown_card_value(off) == heuristic_scoring._HIDDEN_CARD_VALUE
 
 
-@pytest.mark.xfail(strict=True, reason="C2 先红：三条期望还没落地（票 23）")
 def test_the_unknown_card_value_replaces_the_one_point_zero_in_the_skill_scorers():
     """技能打分器里"未知牌 × 1.0"换成未知池期望；记牌关闭时**逐值不变**（回到旧行为）。
 
@@ -804,37 +850,55 @@ def test_the_unknown_card_value_replaces_the_one_point_zero_in_the_skill_scorers
         "记牌关闭 ⇒ 苦肉仍是旧的 2 × 1.0"
     )
 
-    hand = (1, 2, 3)
-    kept_on = _basic_pool_view(hand=hand, hp=1)
-    kept_off = _basic_pool_view(hand=hand, hp=1, missing=1)
+    # 手里 3 张【杀】（basic_53 只有闪 / 桃 / 杀三档）⇒ 未知池 50 张，
+    # Σ = 15×4.0（闪）+ 8×6.0（桃）+ 27×3.0（杀）= 189 ⇒ 期望 189/50 = 3.78/张。
+    # 手算常量：**不**读实现的那个期望函数（否则断言与被测代码同源，测试自证）。
+    slashes = _ids("slash")[:3]
+    kept_on = _basic_pool_view(hand=tuple(slashes), hp=1)
+    kept_off = _basic_pool_view(hand=tuple(slashes), hp=1, missing=1)
     assert heuristic_scoring._score_keji(None, None, kept_on) == pytest.approx(
-        2 * _BASIC_EXPECTATION
+        2 * 189 / 50
     )
     assert heuristic_scoring._score_keji(None, None, kept_off) == pytest.approx(2.0), (
         "记牌关闭 ⇒ 克己仍按每张 1.0"
     )
 
+    # 界【苦肉】（3 张 − 弃一张最便宜的）与界华雄【势斩】（没【杀】时的风险价）读同一个价：
+    # 两处都只钉"未知牌那一项"的接线（骨架候选下成本 = 最便宜的一张，这里手心为空 ⇒ 0）。
+    assert heuristic_scoring._score_jie_kurou(None, _no_picks(), on) == pytest.approx(
+        3 * _BASIC_EXPECTATION
+    )
+    assert heuristic_scoring._score_jie_kurou(None, _no_picks(), off) == pytest.approx(3.0), (
+        "记牌关闭 ⇒ 界苦肉仍按每张 1.0"
+    )
+    assert heuristic_scoring._score_shizhan(None, _no_picks(), on) == pytest.approx(
+        -_BASIC_EXPECTATION
+    )
+    assert heuristic_scoring._score_shizhan(None, _no_picks(), off) == pytest.approx(-1.0), (
+        "记牌关闭 ⇒ 势斩的风险价仍是 −1.0"
+    )
 
-@pytest.mark.xfail(strict=True, reason="C2 先红：三条期望还没落地（票 23）")
-def test_the_nullify_probability_is_the_hypergeometric_draw_and_zeros_out():
-    """P(目标有【无懈可击】) 与 C1 的 P(闪) 同一台机器：随牌局变化、记牌关闭 ⇒ ``None``。
 
-    锦囊的期望分按"取消 ⇒ 只剩对方消耗一张【无懈】的收益"计：p=0 与记牌关闭都等于裸分，
-    p=1 退化成一张牌的价，且对正的裸分**严格递减**（不许被收益项抵没，与 C1 同一条纪律）。
+def test_the_nullification_probability_is_the_side_weighted_hypergeometric():
+    """P(锦囊被宣【无懈】取消) 与 C1 的 P(闪) 同一台机器：随牌局变化、记牌关闭 ⇒ ``None``。
+
+    2 人无身份局里关系权重恒 ``(0, 0)``（配比表查不到）⇒ 只有**目标自己**那一项：p 恰是
+    "4 张手牌里至少一张【无懈】"的超几何 ``1 − C(107−4, 4)/C(107, 4)``（手算常量，不重算
+    实现的乘除，与 C1 的"4 张手牌约 47%"同一姿态）。
     """
     view = _counting_view(target_hand=tuple(_ids("peach")[:4]))
-    probability = heuristic_scoring._nullify_probability(view, 1)
-    assert probability is not None and 0.0 < probability < 1.0, probability
+    probability = heuristic_scoring._nullification_probability(view, 1)
+    assert probability == pytest.approx(1.0 - math.comb(103, 4) / math.comb(107, 4))
 
     seen = _counting_view(
         target_hand=tuple(_ids("peach")[:4]), discard=tuple(_ids("nullify"))
     )
-    assert heuristic_scoring._nullify_probability(seen, 1) == 0.0, (
+    assert heuristic_scoring._nullification_probability(seen, 1) == 0.0, (
         "4 张【无懈】全在弃牌堆 ⇒ 未知池里没有无懈"
     )
 
     off = _counting_off_view()
-    assert heuristic_scoring._nullify_probability(off, 1) is None, "记牌关闭 ⇒ None"
+    assert heuristic_scoring._nullification_probability(off, 1) is None, "记牌关闭 ⇒ None"
 
     base = heuristic_scoring._TRICK_VALUES["dismantlement"]
     assert heuristic_scoring._expected_trick_score(base, None) == base, "记牌关闭 ⇒ 行为不变"
@@ -847,8 +911,46 @@ def test_the_nullify_probability_is_the_hypergeometric_draw_and_zeros_out():
     ]
     assert values == sorted(values, reverse=True), values
 
+    # 评审自纠：**零收益 / 负收益的锦囊不打折**——否则"对方可能宣无懈"会给一张本来不值得
+    # 打的牌（零收益【铁索】/ 无同花色【火攻】/ 暴露盟友）一个正的补偿价。
+    for value in (0.0, -1.0, -2.0):
+        for p in (0.0, 0.3, 0.6, 0.9):
+            assert heuristic_scoring._expected_trick_score(value, p) == value, (value, p)
 
-@pytest.mark.xfail(strict=True, reason="C2 先红：三条期望还没落地（票 23）")
+
+def test_the_nullification_probability_stays_narrow_to_the_target_itself():
+    """**无懈侧收窄在目标本人**——这条用例钉的是"裁定的结果"，不是"忘了加关系权重"。
+
+    票面「无懈：锦囊目标的期望。关系权重用 P(敌)/P(友)」的第二半曾按宽度整版落地（盟友 ×
+    关系权重，与救援同一台机器）；``promote`` 768 副没过不劣化闸（对父版本 ``-0.0143``、
+    CI ``[-0.0456, 0.0143]``），按 spec §6.7 的停手线回退到收窄档。于是这条判据**只看目标
+    本人**：
+
+    - 同一副牌下"周围是已明反贼"与"周围是已明忠臣"**读数相同**（盟友不参与）；
+    - 它恰好等于目标自己那一项 :func:`_has_card_probability`。
+
+    日后再想放宽这条：先修 spec / 台账口径，再重跑 promote——这条会先红。
+    """
+    enemy_field = _rescue_view(
+        [Identity.LORD] + [Identity.REBEL] * 4,
+        target_hand=tuple(_ids("peach")[:4]),
+    )
+    ally_field = _rescue_view(
+        [Identity.LORD, Identity.REBEL] + [Identity.LOYALIST] * 3,
+        target_hand=tuple(_ids("peach")[:4]),
+    )
+
+    surrounded = heuristic_scoring._nullification_probability(enemy_field, 1)
+    alone = heuristic_scoring._nullification_probability(ally_field, 1)
+    assert surrounded is not None and alone is not None
+    assert surrounded == pytest.approx(alone), "盟友那一半不参与（收窄档）"
+    assert alone == pytest.approx(
+        heuristic_scoring._has_card_probability(
+            ally_field, 1, heuristic_scoring._NULLIFY_TYPES
+        )
+    ), "只剩目标自己那一项"
+
+
 def test_a_single_target_trick_prices_the_targets_nullify_probability():
     """走**真候选**：单目标锦囊（【过河拆桥】）的分被目标的 P(【无懈】) 折掉。
 
@@ -858,14 +960,15 @@ def test_a_single_target_trick_prices_the_targets_nullify_probability():
     dismantle = _ids("dismantlement")[0]
     target_hand = tuple(_ids("peach")[:4])
 
-    def _score(discard):
+    def _score(discard, *, missing=0):
         used = {dismantle, *target_hand, *discard}
+        deck = [index for index in range(len(PACK.deck.cards)) if index not in used]
+        if missing:
+            deck = deck[:-missing]
         state = build_state(
             pack=PACK,
             seats=[SeatSpec(hand=(dismantle,)), SeatSpec(hand=target_hand)],
-            deck=tuple(
-                index for index in range(len(PACK.deck.cards)) if index not in used
-            ),
+            deck=tuple(deck),
             discard=tuple(discard),
             turn_seat=0,
         )
@@ -882,6 +985,9 @@ def test_a_single_target_trick_prices_the_targets_nullify_probability():
         "【无懈】全可见 ⇒ 目标不可能宣，裸分"
     )
     assert _score(()) < base, "未知池里有【无懈】⇒ 期望分必须低于裸分"
+    assert _score(tuple(_ids("nullify")), missing=1) == pytest.approx(base), (
+        "记牌关闭（守恒量对不上）⇒ 逐值回到票 23 之前的裸分"
+    )
 
 
 def _rescue_view(identities, *, target_hand=(), others_hand=4, discard=()):
@@ -891,8 +997,12 @@ def _rescue_view(identities, *, target_hand=(), others_hand=4, discard=()):
     于是 :func:`_identity_relation` 走精确 0/1 档（不依赖配比表）。
     """
     viewer = _ids("slash")[0]
-    spare = [index for index in _ids("dodge") + _ids("wine") if index != viewer]
     hands = {1: tuple(target_hand)}
+    spare = [
+        index
+        for index in range(len(PACK.deck.cards))
+        if index not in {viewer, *target_hand, *discard}
+    ]
     cursor = 0
     for seat in range(2, len(identities)):
         hands[seat] = tuple(spare[cursor : cursor + others_hand])
@@ -912,10 +1022,14 @@ def _rescue_view(identities, *, target_hand=(), others_hand=4, discard=()):
         discard=tuple(discard),
         turn_seat=0,
     )
+    # 全部亮明：投影默认只露主公 / 已阵亡者（引擎建局时只给主公写 ``identity_visible``，
+    # 今天没有别的产品入口），其余座位的 ``identity`` 是 ``None``；**构造局面**把这一列置真
+    # 才能把关系权重钉成精确 0/1——不亮明就全部落进"配比后验"那一档，两档对照就测不出来。
+    for seat in range(len(identities)):
+        state.players[seat].identity_visible = True
     return project(state, 0)
 
 
-@pytest.mark.xfail(strict=True, reason="C2 先红：三条期望还没落地（票 23）")
 def test_the_rescue_probability_counts_own_cards_and_weights_the_relations():
     """P(被打进濒死者被救回) = 自己的【桃】/【酒】 + **同阵营**座位的【桃】× 关系权重。
 
@@ -944,7 +1058,9 @@ def test_the_rescue_probability_counts_own_cards_and_weights_the_relations():
     no_peaches = heuristic_scoring._rescue_probability(
         _rescue_view(
             [Identity.LORD] + [Identity.REBEL] * 4,
-            target_hand=tuple(_ids("peach")[:4]),
+            # 濒死者手里换成【闪】（不能让同一张【桃】既在手里又进弃牌堆——那会把守恒量
+            # 弄成 112、记牌直接关闭，测的就不是"池里没有桃"了）。
+            target_hand=tuple(_ids("dodge")[:4]),
             discard=tuple(_ids("peach") + _ids("wine")),
         ),
         1,
@@ -956,7 +1072,6 @@ def test_the_rescue_probability_counts_own_cards_and_weights_the_relations():
     )
 
 
-@pytest.mark.xfail(strict=True, reason="C2 先红：三条期望还没落地（票 23）")
 def test_the_lethal_bonus_is_priced_by_the_targets_rescue_probability():
     """斩杀分（D2 的 ``_LETHAL_STRIKE_VALUE``）按"救得回来吗"折成期望。
 
