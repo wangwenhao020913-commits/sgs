@@ -71,17 +71,21 @@ ENEMY_SEATS = (2, 3, 4)
 TIE_SEEDS = range(8)
 """平分抽签的种子样本（D3 的"平分"与 D1 的"不许靠平分"共用）。
 
-【遗计】收牌人当前的缺陷是打分**平分**（自己与主公同为 ``_SEAT_TARGET_VALUE``），
+【遗计】收牌人在票 24 之前是打分**平分**（自己与主公同为 ``_SEAT_TARGET_VALUE``），
 由 ``ai:<seat>`` 子流抽签决定。单一 seed 只能证明"某一次抽签抽到了谁"，故在固定
-若干种子上要求**同一个**性质成立：修好后无论平分如何都该给主公，修好前至少有一个
-seed 抽到自己，用例必红。它不是统计断言——输入输出全部确定。
+若干种子上要求**同一个**性质成立：票 24 修好后 8 个种子恒给主公；若有人把评分改回
+平分，至少一个 seed 会抽到自己，用例必红。它不是统计断言——输入输出全部确定。
 
 D1 也复用它：无懈候选若被记成与 ``Pass`` 同分（0），"不该宣"的判据就会由同一条
 子流抽签决定；跑满这 8 个 seed 让"平分"的实现不能靠运气通过。"""
 
 
 class _YijiDriver:
-    """把局面推到【遗计】的"交给谁"询问：主公打出【杀】、只发动【遗计】、选牌取一张。"""
+    """把局面推到【遗计】的询问：主公打出【杀】、只发动【遗计】、选牌取一张。
+
+    调用方用停止条件决定停在哪一步（"选一至两张亮牌"的 ``SELECT_CARDS``，或其后
+    "交给谁"的 ``SELECT_OPTION``）；本驱动只负责把伤害与技能发动这两步走完。
+    """
 
     def respond(self, query):
         if query.kind == "PLAY_PHASE":
@@ -110,7 +114,7 @@ class _YijiDriver:
 
 
 def _yiji_engine():
-    """构造 5 人局：主公坐 0 号、出牌阶段对 1 号 AI 使用【杀】；AI 是忠臣郭嘉。
+    """构造 5 人局并返回引擎：主公坐 0 号、出牌阶段对 1 号 AI 使用【杀】；AI 是忠臣郭嘉。
 
     伤害由真实的【杀】命中产生，不另压合成 ``DAMAGE`` 帧。
     """
@@ -130,39 +134,41 @@ def _yiji_engine():
         turn_seat=LORD_SEAT,
         phase=Phase.PLAY,
     )
-    return state, Engine.from_state(state, seed=7)
+    return Engine.from_state(state, seed=7)
+
+
+def _yiji_pending(stop, *, label: str):
+    """推进到 ``stop(engine)`` 为真，返回引擎停在的那条未应答询问（必属 AI）。"""
+    engine = _yiji_engine()
+    run_queries(
+        engine,
+        [_YijiDriver() for _ in range(len(engine.state.players))],
+        stop,
+    )
+    query = engine.pending
+    assert query is not None, f"推进器在到达【遗计】{label}前就停了"
+    assert query.actor == AI_SEAT, f"{label}必须发给受伤的 AI 自己"
+    return query
 
 
 def _yiji_give_query():
     """「交给谁」询问（尚未应答）——票 24 的 D 用例都停在这里。"""
-    state, engine = _yiji_engine()
-    run_queries(
-        engine,
-        [_YijiDriver() for _ in range(len(state.players))],
+    return _yiji_pending(
         lambda current: current.pending is not None
         and current.pending.kind == "SELECT_OPTION"
         and str(getattr(current.pending, "skill_id", "")).startswith("yiji:give"),
+        label="收牌人询问",
     )
-    query = engine.pending
-    assert query is not None, "推进器在到达【遗计】收牌人询问前就停了"
-    assert query.actor == AI_SEAT, "收牌人询问必须发给受伤的 AI 自己"
-    return query
 
 
 def _yiji_pick_query():
     """【遗计】的"选一至两张亮牌"询问（尚未应答）——此时收牌人还没选。"""
-    state, engine = _yiji_engine()
-    run_queries(
-        engine,
-        [_YijiDriver() for _ in range(len(state.players))],
+    return _yiji_pending(
         lambda current: current.pending is not None
         and current.pending.kind == "SELECT_CARDS"
         and current.pending.view.seat == AI_SEAT,
+        label="选牌询问",
     )
-    query = engine.pending
-    assert query is not None, "推进器在到达【遗计】选牌询问前就停了"
-    assert query.actor == AI_SEAT, "选牌询问必须发给受伤的 AI 自己"
-    return query
 
 
 def _yiji_case():
@@ -228,6 +234,9 @@ def test_yiji_gives_to_the_revealed_lord_not_self_or_enemy():
 def test_the_yiji_give_step_scores_self_as_a_no_op_and_allies_over_enemies():
     """D3 的打分口径（票 24）：给自己 = no-op（0）、盟友正分、敌人负分。
 
+    这条**先红后绿**：修复前给自己是帮助类的 ``+2``（断言红），票 24 把它改成 0.0；
+    它不带 xfail——红用例是上面动作级的那条 D，这里是同一票的分数级判据。
+
     动作级用例只钉"给主公"这一个点；这里把 spec 那句"给自己 = no-op、盟友正、敌人负"
     直接钉在分数上——否则"给主公"可以由任何把主公抬到最高的改动满足，而"交给自己等于
     没交"的语义没有判据。座位 2–4 在视角里身份未知，但 5 人局忠臣视角把已亮明的主公与
@@ -247,8 +256,10 @@ def test_the_yiji_give_step_scores_self_as_a_no_op_and_allies_over_enemies():
 def test_the_yiji_pick_step_gives_one_card_while_the_recipient_is_unknown():
     """D3 的另一半（票 24）：选牌步时收牌人还没选 ⇒ 按最坏情形只交 1 张。
 
-    收牌人在**下一步**（``SELECT_OPTION`` 的 ``seat:N``）才选，故选牌步只能按最坏情形估
-    （视为交给敌方）：给出的牌越多越亏，1 张优于两张一起选。修复前已绿（选牌步按"自己的
+    收牌人在**下一步**（``SELECT_OPTION`` 的 ``seat:N``）才选，故选牌步只能按最坏情形
+    考虑（这些牌可能落到敌人手里）：给出的牌越多越亏，1 张优于两张一起选。现有打分正是
+    这个结果——自己的牌按成本估（``_step_card_score`` 的 ``-牌价``），**打分器本身不读
+    收牌人**；这条护栏钉住的是结果，不是某个"敌方贴现"实现。修复前已绿（选牌步按"自己的
     牌 = 成本"估值），本票把它钉成护栏——将来若给选牌步加"给盟友两张"的正分，必须同时
     补上"这一批 + 可能的收牌人"的联合视图（spec §6.6 的 v2），不能只改一边。
     """
