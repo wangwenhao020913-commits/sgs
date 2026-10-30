@@ -1898,6 +1898,18 @@ _STOLEN_CARD_SEAT_STEPS = ("tuxi:",)
 _STOLEN_CARD_SEAT_VALUE = 1.0
 """【突袭】座位步：非敌人也值一张牌（估算，不做收益模型调参）。"""
 
+_YIJI_GIVE_STEP = "yiji:give:"
+"""【遗计】"把这些牌交给谁"的座位步（票 24 / D3）。
+
+与上面两类都不同：**给自己 = no-op**——这批牌是从牌堆顶亮出来、直接交出去的，交给自己
+等于没有交出（``_yiji`` 的移动只是把亮牌移进自己的手牌），故记 :data:`_YIJI_SELF_GIVE_VALUE`
+而不是帮助类的 ``+2``。其余座位仍按帮助类 ``2·(P(友) − P(敌))``：盟友正、敌人负。
+前缀与 `damage_after._yiji` 的询问名 ``yiji:give:<点号>:<轮号>`` 同源（票 24 不另造短 id）。
+"""
+
+_YIJI_SELF_GIVE_VALUE = 0.0
+"""【遗计】交给自己的估值：0（no-op）；低于任何正分的盟友、高于任何负分的敌人。"""
+
 
 def _score_seat_option(
     query: Query,
@@ -1923,6 +1935,9 @@ def _score_seat_option(
     身份的 0/1 与票 21 之前逐字节一致，未知身份才从"中性 0"变成配比后验：
     指向对手 ``2·P(敌)``；偷牌 ``1 + 1·P(敌)``（对任何人都有收益，敌人更高）；帮助类
     ``2·(P(友) − P(敌))``（自己恒 +2，已明敌人 −2）。**不硬判**：P 只做幅度。
+
+    【遗计】的"交给谁"（票 24，D3）是帮助类的一个**例外**：交给自己 = no-op（0 分），
+    其余仍按帮助类——见 :data:`_YIJI_GIVE_STEP`。
     """
     view = query.view
     try:
@@ -1943,6 +1958,8 @@ def _score_seat_option(
         return _STOLEN_CARD_SEAT_VALUE + (
             _SEAT_TARGET_VALUE - _STOLEN_CARD_SEAT_VALUE
         ) * enemy
+    if skill.startswith(_YIJI_GIVE_STEP) and seat == view.seat:
+        return _YIJI_SELF_GIVE_VALUE
     return _SEAT_TARGET_VALUE * (ally - enemy)
 
 

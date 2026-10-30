@@ -109,11 +109,10 @@ class _YijiDriver:
         return PassPlayer().respond(query)
 
 
-def _yiji_give_query():
+def _yiji_engine():
     """构造 5 人局：主公坐 0 号、出牌阶段对 1 号 AI 使用【杀】；AI 是忠臣郭嘉。
 
-    返回**真实引擎停在【遗计】"交给谁"询问上**的 query（尚未应答）。伤害由真实的
-    【杀】命中产生，不另压合成 ``DAMAGE`` 帧。
+    伤害由真实的【杀】命中产生，不另压合成 ``DAMAGE`` 帧。
     """
     state = build_state(
         pack=PACK,
@@ -131,7 +130,12 @@ def _yiji_give_query():
         turn_seat=LORD_SEAT,
         phase=Phase.PLAY,
     )
-    engine = Engine.from_state(state, seed=7)
+    return state, Engine.from_state(state, seed=7)
+
+
+def _yiji_give_query():
+    """「交给谁」询问（尚未应答）——票 24 的 D 用例都停在这里。"""
+    state, engine = _yiji_engine()
     run_queries(
         engine,
         [_YijiDriver() for _ in range(len(state.players))],
@@ -142,6 +146,22 @@ def _yiji_give_query():
     query = engine.pending
     assert query is not None, "推进器在到达【遗计】收牌人询问前就停了"
     assert query.actor == AI_SEAT, "收牌人询问必须发给受伤的 AI 自己"
+    return query
+
+
+def _yiji_pick_query():
+    """【遗计】的"选一至两张亮牌"询问（尚未应答）——此时收牌人还没选。"""
+    state, engine = _yiji_engine()
+    run_queries(
+        engine,
+        [_YijiDriver() for _ in range(len(state.players))],
+        lambda current: current.pending is not None
+        and current.pending.kind == "SELECT_CARDS"
+        and current.pending.view.seat == AI_SEAT,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达【遗计】选牌询问前就停了"
+    assert query.actor == AI_SEAT, "选牌询问必须发给受伤的 AI 自己"
     return query
 
 
@@ -171,8 +191,8 @@ def _assert_case(action, *, acceptable: set[str], stupid: set[str]):
 def test_the_yiji_fixture_reaches_a_real_give_query():
     """夹具自检：询问真的由引擎发出、主公答案真的在候选里、AI 应答真的落回候选。
 
-    这条**不带 xfail**：下方 D 用例整体是 strict xfail，若夹具将来被引擎改动弄坏，
-    xfail 会把它一起吞掉；自检让"夹具失效 / 应答崩溃"保持可见，而不是静默变绿。
+    这条**只核形状**：夹具将来被引擎改动弄坏时先在这里变红，而不是与下方 D 用例的策略
+    判据混成同一个失败；它同时钉住"AI 的应答一定落在真实候选面内"（应答崩溃不会被吞掉）。
     """
     query, lord, offered = _yiji_case()
     assert query.kind == "SELECT_OPTION"
@@ -185,12 +205,12 @@ def test_the_yiji_fixture_reaches_a_real_give_query():
         assert action.choice in offered, "AI 应答必须是真实候选之一"
 
 
-@pytest.mark.xfail(strict=True, reason="已知蠢点 票 24")
 def test_yiji_gives_to_the_revealed_lord_not_self_or_enemy():
     """D3【遗计】收牌人：5 人局 AI 忠臣、主公已亮明 ⇒ 收牌人是主公，不是自己 / 敌人。
 
-    当前实现里"给自己"与"给主公"同分，由平分抽签决定；故这是已知蠢点（票 24 修评分），
-    先以 strict xfail 落地。断言不手抄候选：可接受答案由询问视角里的主公身份算出。
+    票 24 修的就是这个蠢点：修复前"给自己"与"给主公"同分（都由帮助类的 ``+2`` 得到），
+    收牌人由平分抽签决定；修复后给自己 = no-op（0 分），已亮明的盟友严格更高。
+    断言不手抄候选：可接受答案由询问视角里的主公身份算出。
     """
     query, lord, offered = _yiji_case()
     acceptable = {f"seat:{lord}"}
@@ -203,6 +223,46 @@ def test_yiji_gives_to_the_revealed_lord_not_self_or_enemy():
     for seed in TIE_SEEDS:
         action = HeuristicPlayer(ai_stream(seed, AI_SEAT)).respond(query)
         _assert_case(action, acceptable=acceptable, stupid=stupid)
+
+
+def test_the_yiji_give_step_scores_self_as_a_no_op_and_allies_over_enemies():
+    """D3 的打分口径（票 24）：给自己 = no-op（0）、盟友正分、敌人负分。
+
+    动作级用例只钉"给主公"这一个点；这里把 spec 那句"给自己 = no-op、盟友正、敌人负"
+    直接钉在分数上——否则"给主公"可以由任何把主公抬到最高的改动满足，而"交给自己等于
+    没交"的语义没有判据。座位 2–4 在视角里身份未知，但 5 人局忠臣视角把已亮明的主公与
+    自己从配比里减掉后，剩下的全是敌人 ⇒ 后验 P(敌) = 1、负分（I1 的权重只做幅度）。
+    """
+    query, lord, _offered = _yiji_case()
+    score = heuristic_scoring._score_seat_option
+
+    assert score(query, f"seat:{query.view.seat}") == 0.0, (
+        "把牌交给自己 = 没有交出 ⇒ no-op（0 分）"
+    )
+    assert score(query, f"seat:{lord}") > 0.0, "已亮明的盟友必须正分"
+    for enemy in ENEMY_SEATS:
+        assert score(query, f"seat:{enemy}") < 0.0, "敌人必须负分"
+
+
+def test_the_yiji_pick_step_gives_one_card_while_the_recipient_is_unknown():
+    """D3 的另一半（票 24）：选牌步时收牌人还没选 ⇒ 按最坏情形只交 1 张。
+
+    收牌人在**下一步**（``SELECT_OPTION`` 的 ``seat:N``）才选，故选牌步只能按最坏情形估
+    （视为交给敌方）：给出的牌越多越亏，1 张优于两张一起选。修复前已绿（选牌步按"自己的
+    牌 = 成本"估值），本票把它钉成护栏——将来若给选牌步加"给盟友两张"的正分，必须同时
+    补上"这一批 + 可能的收牌人"的联合视图（spec §6.6 的 v2），不能只改一边。
+    """
+    query = _yiji_pick_query()
+    assert query.kind == "SELECT_CARDS"
+    assert query.spec.total == (1, 2), "【遗计】的选牌步仍该提供「一张 / 两张」两条路"
+    assert not query.spec.optional, "技能一旦发动就必然要交出，选牌步没有 Pass"
+
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, AI_SEAT)).respond(query)
+        assert isinstance(action, SelectCards), f"预期选牌动作，实得 {action!r}"
+        assert len(action.picks) == 1, (
+            f"收牌人未知时按最坏情形只给 1 张，实得 {len(action.picks)} 张"
+        )
 
 
 # ---------------------------------------------------------------------------
