@@ -52,6 +52,12 @@
 逐值回到 C2 之前的行为。收窄口径（无懈只数目标本人 / 逐座位独立超几何 / 多目标与延时锦囊
 不打折 / 零收益锦囊不打折）登记在票 23 的 Answer 与台账。
 
+**装备先手（D4，票 25）**：装备分不再恒为 :data:`_EQUIP_PLAY_VALUE`——先问
+:func:`_equip_setup_score`"装上之后手里那张【杀】是不是**才**打得死"，是则把这一手抬到
+那条【杀】**之前**（古锭刀对 0 手目标、青釭剑越过藤甲 / 白银狮子）。判据只看**真实候选**
+与**真实伤害模型**（"假如装上"的局面副本走同一份 :func:`_damage_to`，同槽位替换也在里面），
+装上不改斩杀 / 非武器 / 已经装着同一件 ⇒ 逐值不变；不做装备的一般优先级，也不做多步规划。
+
 **M5-07 的属性 / 连环 / 酒**：军争的取舍只接进**既有打分器**，不另造策略框架。用到的
 公开事实 = 目标的装备区（藤甲 / 白银狮子 / 古锭刀）、自己的装备（青釭剑 / 朱雀羽扇）、
 横置与 ``wine_active``、手牌**张数**、体力与已明身份；【杀】族判据走行为表
@@ -236,6 +242,12 @@ _SAVE_VALUE = 6.0
 _CONSERVE_VALUE = 0.5
 _HEAL_VALUE = 3.5
 _EQUIP_PLAY_VALUE = 2.5
+_EQUIP_SETUP_MARGIN = 0.1
+"""「先装后杀」要抢在那条【杀】前面所需的**一格**分（D4，票 25）。
+
+**不是**"装备比【杀】值钱"的估价：装上之后这一刀的伤害会变，那份收益在**下一步**的
+斩打分里才出现（:func:`_score_attack` 的斩杀项读真实伤害）。这里只补"同一次询问里两个
+候选的先后"所必需的那点差，故取一个只为"严格大于"的常数，不参与任何比例。"""
 _DODGE_VALUE = 5.0
 _DODGE_SKILL_VALUE = 4.5
 _RESPOND_VALUE = 5.0
@@ -1378,12 +1390,77 @@ def _score_reforge(action: Action) -> float:
     return _REFORGE_VALUE
 
 
+# ---------------------------------------------------------------------------
+# 装备先手（D4，票 25）：装上之后这一刀才"打得死" ⇒ 先装，再杀
+# ---------------------------------------------------------------------------
+
+
+def _equipment_after(me: PlayerPublic, card: CardRef) -> tuple[CardRef, ...]:
+    """把我装上 ``card`` 之后的**装备区**写出来：同槽位替换，其余槽位原样。
+
+    "换刀之后旧刀的效果不再生效"是规则事实，故这里不能把新旧两把武器叠加——古锭刀替下
+    青釭剑之后，普通【杀】打【藤甲】重新变成 0 点（:func:`_damage_to` 只读装备区的牌面）。
+    """
+    return (*(equipped for equipped in me.equip if equipped.slot != card.slot), card)
+
+
+def _view_wearing(view: PlayerView, card: CardRef) -> PlayerView:
+    """"假如我把这张装备装上"的视角副本：只改自己的装备区，其余逐字段原样。
+
+    这个副本的唯一用途是把"装上之后伤害是多少"交回 :func:`_damage_to`——**同一份**伤害
+    模型（藤甲 / 白银狮子的封顶、青釭剑的无视防具、古锭刀的手牌数判据都在里面）。另抄
+    一份"假如"算式就是第二处会漂的伤害模型，故这里只造局面、不算规则。
+    """
+    me = view.players[view.seat]
+    players = list(view.players)
+    players[view.seat] = me.model_copy(update={"equip": _equipment_after(me, card)})
+    return view.model_copy(update={"players": tuple(players)})
+
+
+def _equip_setup_score(query: Query, card: CardRef) -> float:
+    """装这件装备这一步的分（D4，票 25）：**只在"先装后杀能把打不死变成打死"时**抬高。
+
+    窄面判据（票面原文）：装上 ``card`` 之后，**真实候选面**里某张【杀】对某个目标的实际
+    伤害从"打不死"（:func:`_lethal_to` 假）变成"打得死"（真）⇒ 这一手必须排在**那条
+    【杀】之前**。否则 AI 会先把那 1 点伤害打出去、把残局放跑——古锭刀（目标 0 手时 +1）
+    与青釭剑（越过藤甲 / 白银狮子的封顶）就是这一格。
+
+    其余一切情形（含"装上也不改斩杀"、以及非武器 / 已经装着同一件）**逐值不变**，仍是
+    :data:`_EQUIP_PLAY_VALUE`：本票不给装备的通用优先级加权重，也不做多步规划。
+
+    比较用**那条【杀】现在的分**（同一询问、同一视角），故抬高的幅度只买"先后"这一格；
+    装完之后那条【杀】的伤害变了，斩打分（:func:`_score_attack` 的斩杀项）下一步自然跟着变。
+    """
+    view = query.view
+    after = _view_wearing(view, card)
+    unlocked: float | None = None
+    for action in query.legal_actions:
+        if not isinstance(action, UseCard) or not _is_slash_card(action.card):
+            continue
+        for seat in action.targets:
+            if seat == view.seat or not 0 <= seat < len(view.players):
+                continue
+            if _lethal_to(action.card, view, seat):
+                continue
+            if not _lethal_to(action.card, after, seat):
+                continue
+            score = _score_attack(action, view)
+            if unlocked is None or score > unlocked:
+                unlocked = score
+    if unlocked is None:
+        return _EQUIP_PLAY_VALUE
+    return max(_EQUIP_PLAY_VALUE, unlocked + _EQUIP_SETUP_MARGIN)
+
+
 def _score_card_use(query: Query, action: Action) -> float:
     """出牌阶段使用一张牌的局部收益（伤害 ＞ 装备 ＞ 过牌；【桃】只在受伤时用）。
 
     **记牌无懈期望（C2，票 23）**：单目标、当回合结算的锦囊（:data:`_NULLIFIABLE_TRICKS`）
     再乘一道"目标手里有【无懈可击】吗"的期望（:func:`_trick_expectation`）——被取消也不是
     白打，对方的【无懈】被消耗掉。记牌关闭 / 多目标 / 延时锦囊 ⇒ 逐值不变。
+
+    **装备先手（D4，票 25）**：装备分不再恒为 :data:`_EQUIP_PLAY_VALUE`，先问
+    :func:`_equip_setup_score`"装上之后手里那张【杀】是不是才打得死"；不是 ⇒ 逐值不变。
     """
     assert isinstance(action, (UseCard, PlayCard))
     view = query.view
@@ -1399,7 +1476,7 @@ def _score_card_use(query: Query, action: Action) -> float:
     elif card.type == "fire_attack":
         score = _score_fire_attack(action, view)
     elif card.slot is not None:
-        score = _EQUIP_PLAY_VALUE
+        score = _equip_setup_score(query, card)
     else:
         score = _TRICK_VALUES.get(card.type, _UNREGISTERED_TRICK_VALUE)
     return _trick_expectation(query, action, score)

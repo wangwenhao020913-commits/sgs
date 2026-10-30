@@ -2057,7 +2057,6 @@ def test_the_equipment_setup_fixtures_reach_real_play_phase_windows():
             assert action in query.legal_actions, "AI 应答必须落在真实候选面上"
 
 
-@pytest.mark.xfail(strict=True, reason="已知蠢点 票 25")
 def test_d4_equips_the_scimitar_before_the_lethal_slash_it_unlocks():
     """D4 装备先手：目标 2 体力 0 手 ⇒ **先装【古锭刀】**，再补那一刀（两步都真的提交）。
 
