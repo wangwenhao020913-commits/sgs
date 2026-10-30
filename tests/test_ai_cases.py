@@ -1950,7 +1950,11 @@ def _setup_seats(*, hand, target_hp, target_hand=(), target_equip=()):
 
 
 def _setup_session(*, hand, target_hp, target_hand=(), target_equip=()):
-    """两步链要**真的把装备提交进引擎**（见 :func:`test_d4_equips_the_scimitar_first`）。"""
+    """推进到 AI（座位 0）的第一个出牌阶段；返回 ``(engine, query)``。
+
+    两步链要**真的把装备提交进引擎**（见
+    :func:`test_d4_equips_the_scimitar_before_the_lethal_slash_it_unlocks`）。
+    """
     return _lethal_play_session(
         pack=PACK_160,
         seats=_setup_seats(
@@ -1964,21 +1968,12 @@ def _setup_session(*, hand, target_hp, target_hand=(), target_equip=()):
     )
 
 
-def _setup_query(*, hand, target_hp, target_hand=(), target_equip=()):
-    return _setup_session(
-        hand=hand,
-        target_hp=target_hp,
-        target_hand=target_hand,
-        target_equip=target_equip,
-    )[1]
-
-
 def _scimitar_query():
     """手里【古锭刀】+【杀】，目标 2 体力 **0 手**：装上刀这一刀才是 2 点（斩杀）。
 
     不装刀 = 1 点 ⇒ 打不死；装上 = 1 + 1（古锭刀的"目标没有手牌"）= 2 点 ⇒ 打死。
     """
-    return _setup_query(hand=(SCIMITAR_160, SLASH_160), target_hp=2)
+    return _setup_session(hand=(SCIMITAR_160, SLASH_160), target_hp=2)[1]
 
 
 def _qinggang_query():
@@ -1987,9 +1982,9 @@ def _qinggang_query():
     装上青釭剑（无视防具）⇒ 1 点 ⇒ 正好打死。它**修复前已绿**（不装时这一刀被
     ``_WASTED_ATTACK_PENALTY`` 压在装备分之下），故是护栏而不是 xfail 判据。
     """
-    return _setup_query(
+    return _setup_session(
         hand=(QINGGANG_160, SLASH_160), target_hp=1, target_equip=(VINE_ARMOUR_160,)
-    )
+    )[1]
 
 
 def _unrelated_setup_query():
@@ -1997,8 +1992,42 @@ def _unrelated_setup_query():
 
     它是"窄面"的对照面：装备分必须**逐值不变**（不因为"手里有刀"就抢在【杀】前面）。
     """
-    return _setup_query(
-        hand=(SCIMITAR_160, SLASH_160), target_hp=2, target_hand=(cards_of_type(PACK, "dodge")[4],)
+    return _setup_session(
+        hand=(SCIMITAR_160, SLASH_160),
+        target_hp=2,
+        target_hand=(cards_of_type(PACK, "dodge")[4],),
+    )[1]
+
+
+QILIN_BOW_160 = cards_of_type(PACK_160, "qilin_bow")[0]
+"""【麒麟弓】（射程 5）：装它会**换下**手里那把【古锭刀】（射程 2）。"""
+
+
+def _shorter_weapon_query():
+    """AI 已装【麒麟弓】(射程 5)、手里【古锭刀】(射程 2) + 【杀】，唯一可斩的目标在**距离 3**。
+
+    6 人局座位 0 = AI（主公）；座位 3 是 2 体力 0 手的目标，与 AI 相隔 3 席（射程边缘）。
+    装上【古锭刀】之后这一刀确实够 2 点（斩杀），但射程从 5 掉到 2 ⇒ **座位 3 直接掉出
+    【杀】的候选面**。判据必须问的不只是"伤害够不够"，还有"装完之后那个目标还够得着吗"。
+    """
+    return _lethal_play_query(
+        pack=PACK_160,
+        seats=[
+            SeatSpec(
+                hp=4,
+                hp_max=4,
+                identity=Identity.LORD,
+                hand=(SCIMITAR_160, SLASH_160),
+                equip=(QILIN_BOW_160,),
+            ),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LOYALIST),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=2, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.RENEGADE),
+        ],
+        ai_seat=0,
+        inert=2,
     )
 
 
@@ -2057,22 +2086,22 @@ def test_the_equipment_setup_fixtures_reach_real_play_phase_windows():
             assert action in query.legal_actions, "AI 应答必须落在真实候选面上"
 
 
-def test_d4_equips_the_scimitar_before_the_lethal_slash_it_unlocks():
-    """D4 装备先手：目标 2 体力 0 手 ⇒ **先装【古锭刀】**，再补那一刀（两步都真的提交）。
+def _assert_equips_then_strikes(*, session, equipment: int, why: str) -> None:
+    """两步链的共用断言：先使用 ``equipment``，**再**把【杀】落到同一个目标（真提交两次）。
 
-    第一刀（不装刀）只有 1 点 ⇒ 打不死；装上刀之后同一张【杀】是 2 点 ⇒ 当场打死。
-    修复前装备恒为 ``_EQUIP_PLAY_VALUE``(2.5)，那条【杀】按"1 点期望伤害"得 4.0 ⇒ AI
-    **先打后装**，把残局放跑（seed 恒定，8 个平分子流全同一选择）。
+    只断**顺序与落点**（§4：不比集合、不先归一化）；"分是多少"归各自的 docstring，
+    这里只回答"这一手先装、下一手补刀同一座位"。``why`` 是首步失败的**判据说明**，
+    两次失败各有各的因果，不让共用模板把它们说成一句话。
     """
     for seed in TIE_SEEDS:
-        engine, query = _setup_session(hand=(SCIMITAR_160, SLASH_160), target_hp=2)
+        engine, query = session()
         (target,) = _slash_targets(query)
         player = HeuristicPlayer(ai_stream(seed, query.actor))
 
         first = player.respond(query)
 
-        assert isinstance(first, UseCard) and first.card.card_id == SCIMITAR_160, (
-            f"应当先装【古锭刀】再杀，实得 {first!r}"
+        assert isinstance(first, UseCard) and first.card.card_id == equipment, (
+            f"{why}，实得 {first!r}"
         )
         assert first.targets == (query.actor,), "装备的使用目标只可能是自己"
 
@@ -2087,12 +2116,26 @@ def test_d4_equips_the_scimitar_before_the_lethal_slash_it_unlocks():
 
         second = player.respond(engine.pending)
 
-        assert isinstance(second, UseCard) and is_slash(
-            behavior_for(second.card)
-        ), f"装上古锭刀之后该补【杀】，实得 {second!r}"
+        assert isinstance(second, UseCard) and is_slash(behavior_for(second.card)), (
+            f"装完之后该补【杀】，实得 {second!r}"
+        )
         assert second.targets == (target,), (
             f"【杀】该落在同一目标（座位 {target}），实得 {second.targets}"
         )
+
+
+def test_d4_equips_the_scimitar_before_the_lethal_slash_it_unlocks():
+    """D4 装备先手：目标 2 体力 0 手 ⇒ **先装【古锭刀】**，再补那一刀（两步都真的提交）。
+
+    第一刀（不装刀）只有 1 点 ⇒ 打不死；装上刀之后同一张【杀】是 2 点 ⇒ 当场打死。
+    修复前装备恒为 ``_EQUIP_PLAY_VALUE``(2.5)，那条【杀】按"1 点期望伤害"得 4.0 ⇒ AI
+    **先打后装**，把残局放跑（seed 恒定，8 个平分子流全同一选择）。
+    """
+    _assert_equips_then_strikes(
+        session=lambda: _setup_session(hand=(SCIMITAR_160, SLASH_160), target_hp=2),
+        equipment=SCIMITAR_160,
+        why="目标 2 体力 0 手：装上【古锭刀】这一刀才是 2 点（斩杀）",
+    )
 
 
 def test_d4_equips_qinggang_before_the_slash_vine_armour_would_swallow():
@@ -2102,50 +2145,55 @@ def test_d4_equips_qinggang_before_the_slash_vine_armour_would_swallow():
     唯一能钉住**两步链完整**的护栏：被挡成 0 的【杀】本来就被判成浪费（低于装备分），
     装完青釭剑之后同一张【杀】才是斩杀。装配分的加法不许把这条改成"先杀后装"。
     """
-    for seed in TIE_SEEDS:
-        engine, query = _setup_session(
+    _assert_equips_then_strikes(
+        session=lambda: _setup_session(
             hand=(QINGGANG_160, SLASH_160),
             target_hp=1,
             target_equip=(VINE_ARMOUR_160,),
-        )
-        (target,) = _slash_targets(query)
-        player = HeuristicPlayer(ai_stream(seed, query.actor))
-
-        first = player.respond(query)
-
-        assert isinstance(first, UseCard) and first.card.card_id == QINGGANG_160, (
-            f"普通【杀】打【藤甲】无效 ⇒ 应先装【青釭剑】，实得 {first!r}"
-        )
-
-        engine.submit(first)
-        run_queries(
-            engine,
-            [player, *(PassPlayer() for _ in range(len(query.view.players) - 1))],
-            lambda current: current.pending is not None
-            and current.pending.kind == "PLAY_PHASE"
-            and current.pending.actor == query.actor,
-        )
-
-        second = player.respond(engine.pending)
-
-        assert isinstance(second, UseCard) and is_slash(behavior_for(second.card)), (
-            f"装上青釭剑之后该补【杀】，实得 {second!r}"
-        )
-        assert second.targets == (target,), (
-            f"【杀】该落在同一目标（座位 {target}），实得 {second.targets}"
-        )
+        ),
+        equipment=QINGGANG_160,
+        why="普通【杀】打【藤甲】是 0 点 ⇒ 应先装【青釭剑】（无视防具）",
+    )
 
 
 def test_d4_leaves_the_equipment_score_alone_when_the_kill_does_not_depend_on_it():
-    """D4 窄面（**修复前已绿**，护栏）：装上也不改斩杀 ⇒ 装备分逐值不变，照旧先杀。
+    """D4 窄面（**修复前已绿**，护栏）：装上也不改斩杀 ⇒ 装备分**逐值不变**，照旧先杀。
 
     票面写的"只在先装后杀能把打不死变成打死时"就是这条：目标还有 1 张手牌 ⇒ 古锭刀的
     +1 不生效 ⇒ 装与不装都只有 1 点 ⇒ 没有 setup 分可加。把装备分无差别抬高会把
     "打一刀再说"改成"先摆装备"，是这条用例要挡住的那一格。
+
+    **断到分数**而不只断"先出【杀】"：装备分被微抬到仍在【杀】之下（例如 2.6）时，
+    动作级断言照样绿，而"逐值不变"已经不成立——这条的题目要求的就是那一个字面值。
     """
     query = _unrelated_setup_query()
+    equipment = _equip_action(query, SCIMITAR_160)
+    assert equipment is not None, "夹具失效：古锭刀不在候选里"
+    assert (
+        heuristic_scoring._score_play_phase(query, equipment)
+        == heuristic_scoring._EQUIP_PLAY_VALUE
+    ), "装上不改斩杀 ⇒ 装备分必须逐值等于 _EQUIP_PLAY_VALUE"
     for seed in TIE_SEEDS:
         action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
         assert isinstance(action, UseCard) and is_slash(behavior_for(action.card)), (
             f"装上不改斩杀时应当先出【杀】，实得 {action!r}"
+        )
+
+
+def test_d4_does_not_swap_to_a_shorter_weapon_for_a_target_it_would_lose():
+    """D4 窄面（评审 B2 的回归）：装完够不着 ⇒ 不算"先装后杀能把打不死变成打死"。
+
+    局面见 :func:`_shorter_weapon_query`：已装【麒麟弓】(射程 5)、手里【古锭刀】(射程 2)、
+    唯一可斩的目标在**距离 3**。只看伤害的实现会把装备分抬到 5.7（高于全部【杀】的 5.6）
+    ⇒ 先装刀；装完射程 2，那个目标再也不是【杀】的合法目标 ⇒ **白装一手**，斩杀反而没了。
+    判据因此还要问"装完之后射程会不会缩短"：会 ⇒ 不追加分，照旧先出这一刀。
+    """
+    query = _shorter_weapon_query()
+    for seed in TIE_SEEDS:
+        action = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        assert not (
+            isinstance(action, UseCard) and action.card.card_id == SCIMITAR_160
+        ), f"换成射程更短的刀会把目标弄丢 ⇒ 不该先装，实得 {action!r}"
+        assert isinstance(action, UseCard) and is_slash(behavior_for(action.card)), (
+            f"应当先出够得着的【杀】，实得 {action!r}"
         )

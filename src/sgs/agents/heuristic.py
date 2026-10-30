@@ -53,10 +53,11 @@
 不打折 / 零收益锦囊不打折）登记在票 23 的 Answer 与台账。
 
 **装备先手（D4，票 25）**：装备分不再恒为 :data:`_EQUIP_PLAY_VALUE`——先问
-:func:`_equip_setup_score`"装上之后手里那张【杀】是不是**才**打得死"，是则把这一手抬到
+:func:`_equip_setup_score`"装上之后**候选面里**那张【杀】是不是**才**打得死"，是则把这一手抬到
 那条【杀】**之前**（古锭刀对 0 手目标、青釭剑越过藤甲 / 白银狮子）。判据只看**真实候选**
 与**真实伤害模型**（"假如装上"的局面副本走同一份 :func:`_damage_to`，同槽位替换也在里面），
-装上不改斩杀 / 非武器 / 已经装着同一件 ⇒ 逐值不变；不做装备的一般优先级，也不做多步规划。
+且**够得着才算**（射程变短的替换一律不追加分，见 :func:`_keeps_reach`）；装上不改斩杀 /
+射程可能变短 / 非武器 / 已经装着同一件 ⇒ 逐值不变。不做装备的一般优先级，也不做多步规划。
 
 **M5-07 的属性 / 连环 / 酒**：军争的取舍只接进**既有打分器**，不另造策略框架。用到的
 公开事实 = 目标的装备区（藤甲 / 白银狮子 / 古锭刀）、自己的装备（青釭剑 / 朱雀羽扇）、
@@ -1264,6 +1265,29 @@ def _score_attack(action: Action, view: PlayerView) -> float:
     return score
 
 
+def _slash_target_pairs(query: Query) -> list[tuple[UseCard, int]]:
+    """候选面里 **【杀】族 × 合法目标** 的成对清单（自己 / 越界 / 已阵亡都跳过）。
+
+    【酒】的"加这一口正好斩杀"（:func:`_wine_enables_kill`）与 D4 的"先装这一手才斩得掉"
+    （:func:`_equip_setup_score`）问的是**同一批**候选与目标，故扫描只留这一份：两边各抄
+    一遍的话，一边补了"存活 / 不可达"之类的过滤，另一边会悄悄漂开（评审 Standards 轴
+    2026-10-31 指出的 Duplicated Code）。**只产出真实候选**，不替引擎补候选面；候选面本来
+    就只是几张牌，收成 list 比再引一个迭代器类型便宜。
+    """
+    view = query.view
+    pairs: list[tuple[UseCard, int]] = []
+    for action in query.legal_actions:
+        if not isinstance(action, UseCard) or not _is_slash_card(action.card):
+            continue
+        for seat in action.targets:
+            if seat == view.seat or not 0 <= seat < len(view.players):
+                continue
+            if not view.players[seat].alive:
+                continue
+            pairs.append((action, seat))
+    return pairs
+
+
 def _wine_enables_kill(query: Query) -> bool:
     """【酒】用下去**真的能造成击杀**吗：某个合法【杀】目标正好差这 1 点。
 
@@ -1277,21 +1301,13 @@ def _wine_enables_kill(query: Query) -> bool:
     那条不算"能击杀"，故 AI 不会为补刀白白扔掉【酒】。
     """
     view = query.view
-    me = view.seat
-    for action in query.legal_actions:
-        if not isinstance(action, UseCard) or not _is_slash_card(action.card):
-            continue
-        for seat in action.targets:
-            if seat == me or not 0 <= seat < len(view.players):
-                continue
-            if not view.players[seat].alive:
-                continue
-            # ``_lethal_to`` 已经吸收了两条旧边界：伤害 0（普通【杀】打藤甲）时加酒也无效、
-            # 白银狮子把 +1 封掉时"加酒正好打死"不成立——两者都落在"现在与酒后同为不斩杀"。
-            if not _lethal_to(action.card, view, seat) and _lethal_to(
-                action.card, view, seat, wine=True
-            ):
-                return True
+    for action, seat in _slash_target_pairs(query):
+        # ``_lethal_to`` 已经吸收了两条旧边界：伤害 0（普通【杀】打藤甲）时加酒也无效、
+        # 白银狮子把 +1 封掉时"加酒正好打死"不成立——两者都落在"现在与酒后同为不斩杀"。
+        if not _lethal_to(action.card, view, seat) and _lethal_to(
+            action.card, view, seat, wine=True
+        ):
+            return True
     return False
 
 
@@ -1417,6 +1433,26 @@ def _view_wearing(view: PlayerView, card: CardRef) -> PlayerView:
     return view.model_copy(update={"players": tuple(players)})
 
 
+def _keeps_reach(me: PlayerPublic, card: CardRef) -> bool:
+    """换上 ``card`` 之后，**现在合法的【杀】目标会不会因为射程变短掉出候选面**。
+
+    装上装备是**同槽位替换**：把【麒麟弓】(射程 5) 换成【古锭刀】(射程 2) 之后，距离 3 的
+    目标不再是【杀】的合法目标——"先装后杀"在这一格根本不成立（装完反而够不着，白装一手）。
+    只比两件装备的**牌面事实** ``attack_range``：新射程 ≥ 现射程 ⇒ 现在够得着的都还够得着；
+    该槽位本来没装武器 ⇒ 只会变长或不变；这件装备本来就不带射程（防具 / 坐骑 / 宝物）
+    ⇒ 不影响【杀】的合法性。
+
+    这里**不预测**"具体掉哪些目标"：``PlayerView`` 里没有距离，自己算一遍就是把距离规则
+    抄第二份。宁可少赚一手（射程可能变短时一律不追加分），不可白装一手。
+    """
+    if card.attack_range is None:
+        return True
+    worn = next((equipped for equipped in me.equip if equipped.slot == card.slot), None)
+    if worn is None or worn.attack_range is None:
+        return True
+    return card.attack_range >= worn.attack_range
+
+
 def _equip_setup_score(query: Query, card: CardRef) -> float:
     """装这件装备这一步的分（D4，票 25）：**只在"先装后杀能把打不死变成打死"时**抬高。
 
@@ -1425,28 +1461,29 @@ def _equip_setup_score(query: Query, card: CardRef) -> float:
     【杀】之前**。否则 AI 会先把那 1 点伤害打出去、把残局放跑——古锭刀（目标 0 手时 +1）
     与青釭剑（越过藤甲 / 白银狮子的封顶）就是这一格。
 
-    其余一切情形（含"装上也不改斩杀"、以及非武器 / 已经装着同一件）**逐值不变**，仍是
-    :data:`_EQUIP_PLAY_VALUE`：本票不给装备的通用优先级加权重，也不做多步规划。
+    **够得着才算**（评审 B2）：伤害够但**射程变短**时，那个目标装完就不再是合法目标，
+    "先装后杀"整条链不成立 ⇒ 走 :func:`_keeps_reach` 一律不追加分。
+
+    其余一切情形（含"装上也不改斩杀"、非武器 / 已经装着同一件 / 射程可能变短）
+    **逐值不变**，仍是 :data:`_EQUIP_PLAY_VALUE`：本票不给装备的通用优先级加权重，
+    也不做多步规划。
 
     比较用**那条【杀】现在的分**（同一询问、同一视角），故抬高的幅度只买"先后"这一格；
     装完之后那条【杀】的伤害变了，斩打分（:func:`_score_attack` 的斩杀项）下一步自然跟着变。
     """
     view = query.view
+    if not _keeps_reach(view.players[view.seat], card):
+        return _EQUIP_PLAY_VALUE
     after = _view_wearing(view, card)
     unlocked: float | None = None
-    for action in query.legal_actions:
-        if not isinstance(action, UseCard) or not _is_slash_card(action.card):
+    for action, seat in _slash_target_pairs(query):
+        if _lethal_to(action.card, view, seat):
             continue
-        for seat in action.targets:
-            if seat == view.seat or not 0 <= seat < len(view.players):
-                continue
-            if _lethal_to(action.card, view, seat):
-                continue
-            if not _lethal_to(action.card, after, seat):
-                continue
-            score = _score_attack(action, view)
-            if unlocked is None or score > unlocked:
-                unlocked = score
+        if not _lethal_to(action.card, after, seat):
+            continue
+        score = _score_attack(action, view)
+        if unlocked is None or score > unlocked:
+            unlocked = score
     if unlocked is None:
         return _EQUIP_PLAY_VALUE
     return max(_EQUIP_PLAY_VALUE, unlocked + _EQUIP_SETUP_MARGIN)
@@ -1460,7 +1497,9 @@ def _score_card_use(query: Query, action: Action) -> float:
     白打，对方的【无懈】被消耗掉。记牌关闭 / 多目标 / 延时锦囊 ⇒ 逐值不变。
 
     **装备先手（D4，票 25）**：装备分不再恒为 :data:`_EQUIP_PLAY_VALUE`，先问
-    :func:`_equip_setup_score`"装上之后手里那张【杀】是不是才打得死"；不是 ⇒ 逐值不变。
+    :func:`_equip_setup_score`"装上之后**候选面里**那张【杀】是不是才打得死"；
+    不是 ⇒ 逐值不变。**只看 ``legal_actions``**：转化技的【杀】产物住在
+    ``transform_preactivations``（W4-fix-2 从候选面收回），本判据看不到它们。
     """
     assert isinstance(action, (UseCard, PlayCard))
     view = query.view
@@ -1483,7 +1522,11 @@ def _score_card_use(query: Query, action: Action) -> float:
 
 
 def _score_play_phase(query: Query, action: Action) -> float:
-    """``PLAY_PHASE``：能造成伤害且目标非己方 ＞ 装备 ＞ 过牌；技能查语义表。"""
+    """``PLAY_PHASE``：能造成伤害且目标非己方 ＞ 装备 ＞ 过牌；技能查语义表。
+
+    次序不是死的：装备在"先装后杀才斩得掉"时会被抬到那条【杀】之前（D4，票 25），
+    见 :func:`_equip_setup_score`。
+    """
     view = query.view
     if isinstance(action, EndPhase):
         return 0.0
