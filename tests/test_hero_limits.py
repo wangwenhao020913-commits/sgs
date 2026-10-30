@@ -14,10 +14,12 @@
 
 from __future__ import annotations
 
+import pytest
+
 from sgs.data import load_content_pack
 from sgs.effects import check_count, check_targets, legal_actions_for
 from sgs.engine import Engine
-from sgs.state import EndPhase, Pass, QueryKind, UseCard
+from sgs.state import EndPhase, Pass, Phase, QueryKind, UseCard
 from sgs.timing import Timing
 
 from support import PassPlayer, SeatSpec, build_state, cards_of_type, ran_timing, run_until
@@ -169,6 +171,69 @@ def test_without_paoxiao_the_second_slash_never_becomes_a_candidate():
     assert engine.state.player(1).hp == 3
     assert engine.state.player(0).card_use_counts.get("slash") == 1
     assert second in engine.state.player(0).hand, "没用出去的【杀】还在手里"
+
+
+# ---------------------------------------------------------------------------
+# 次数限制的**适用范围**（W5-04）：只在"他自己的出牌阶段"读计数
+# ---------------------------------------------------------------------------
+
+
+def _slash_limit_state(*, turn_seat: int | None, phase, used: int = 1) -> object:
+    """已用 ``used`` 张【杀】的两人局面；``turn_seat`` / ``phase`` = "现在是谁的什么阶段"。"""
+    slash = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(slash,)), SeatSpec()],
+        deck=_deck_without(PACK, slash),
+        turn_seat=turn_seat,
+        phase=phase,
+    )
+    state.player(0).card_use_counts["slash"] = used
+    return state
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="W5-04 先红：check_count 目前不看 state.turn_seat / phase，别人回合仍读陈旧计数",
+)
+def test_the_slash_count_binds_only_the_owners_own_play_phase():
+    """「每回合限一次」只约束**他自己出牌阶段**的主动使用（W5-04 用户裁定 2026-10-30）。
+
+    §3.5 L183–L185 / §17.1 L1643 的"每回合限一次"在裁定下收窄：响应、其他阶段、其他角色
+    回合里的【杀】使用**不计次数、也不受次数限制**。计数键仍只在该座位自己的 ``TURN_START``
+    重置；陈旧计数只是不再被错误的窗口读到（W5-04 的实机根因）。
+    """
+    slash = _cards("slash")[0]
+    own_play = _slash_limit_state(turn_seat=0, phase=Phase.PLAY)
+    other_play = _slash_limit_state(turn_seat=1, phase=Phase.PLAY)
+    own_judge = _slash_limit_state(turn_seat=0, phase=Phase.JUDGE)
+
+    assert check_count(own_play, 0, own_play.card(slash)), (
+        "自己的出牌阶段：已用 1 张 ⇒ 第二张不能再出"
+    )
+    assert not check_count(other_play, 0, other_play.card(slash)), (
+        "别人的回合：即便计数键上还留着上一回合的 1，也不查次数"
+    )
+    assert not check_count(own_judge, 0, own_judge.card(slash)), (
+        "自己的回合但不在出牌阶段：响应 / 技能驱动的使用同样不查次数"
+    )
+
+
+def test_narrowing_the_slash_limit_leaves_other_count_keys_alone():
+    """只收窄【杀】族：【酒】的每回合一次照旧读计数（包括在别人的回合里）。"""
+    wine = _cards_ex("wine")[0]
+    state = build_state(
+        pack=PACK_EX,
+        seats=[SeatSpec(hand=(wine,)), SeatSpec()],
+        deck=_deck_without(PACK_EX, wine),
+        turn_seat=1,
+        phase=Phase.PLAY,
+    )
+    state.player(0).card_use_counts["wine"] = 1
+
+    assert check_count(state, 0, state.card(wine)), (
+        "【酒】的计数键不是【杀】族，语义不动：已用一次 ⇒ 仍受限"
+    )
 
 
 # ---------------------------------------------------------------------------
