@@ -33,10 +33,12 @@ from sgs.state import (
     Phase,
     SelectCards,
     SelectOption,
+    SkillActivationQuery,
     UseCard,
     WindowCause,
     project,
 )
+from sgs.timing import Timing
 
 from support import (
     PassPlayer,
@@ -1414,3 +1416,388 @@ def test_i1_the_renegade_keeps_the_lord_off_the_priority_list():
         assert action.targets == (other,), (
             f"内奸该先清场（座位 {other}），不该把主公当优先敌人，实得 {action.targets}"
         )
+
+
+# ---------------------------------------------------------------------------
+# S1 技能表 top3（票 22）：据守 / 贯石斧 / 谦逊
+#
+# 三条「有条目但太粗」的常量换成**读得出代价**的打分器（spec §6.1 S1）：
+#
+# - **据守**：已翻面 ⇒ 发动（翻回正面 = 不跳回合，三张纯赚）；正面且 1 体力 ⇒ Pass
+#   （跳过下个回合，残局里等于把命交给对手）。
+# - **贯石斧**：净收益 = (击杀 / 1 点非致命伤害) − 两张最便宜牌的价 ⇒ 负则 Pass。
+#   「两张高价值牌换 1 点非致命伤害」因此是 Pass，「这一下能打死」才发动。
+# - **谦逊**：1 体力且手里有能续命的牌（【闪】/【桃】/【酒】）⇒ Pass——把保命牌扣在
+#   武将牌上等于等死；其余情况照旧发动（躲开拆顺）。
+#
+# 先红后绿（spec §2.2）：据守 / 贯石斧 / 谦逊各有一条**修复前必红**的用例，先以
+# ``xfail(strict=True)`` 提交；另两条同族用例是**护栏**（修复前也绿：常量本来就恒发动），
+# strict 会把 XPASS 判红，故它们不加标记。
+# ---------------------------------------------------------------------------
+
+JUSHSOU = "hero.jie_caoren_mobile.jushou"
+"""移动版界曹仁【据守】的全限定技能 id（``SKILL_VALUES`` 的键）。"""
+
+AXE_SKILL = "equip.axe"
+"""【贯石斧】的技能 id（``equip.`` + 牌名）：发动询问只在**自己的**【杀】被【闪】抵消时。"""
+
+QIANXUN_SKILL = "hero.jie_luxun.qianxun"
+"""界陆逊【谦逊】的全限定技能 id。"""
+
+JIE_CAOREN = "jie_caoren_mobile"
+JIE_LUXUN_S1 = "jie_luxun"
+"""S1 三条用例要的两个武将 id（技能条目按 ``hero.<id>.<skill>`` 查表）。"""
+
+S1_AI_SEAT = 0
+"""三条 S1 用例的 AI 座位：无身份 2 人局的先手（出牌 / 结束阶段的拥有者）。"""
+
+AXE_CARD = cards_of_type(PACK, "axe")[0]
+"""装备区里的那张【贯石斧】（``equip.axe`` 实例挂在它上面）。"""
+
+S1_SLASH = cards_of_type(PACK, "slash")[1]
+"""S1 用例专用的【杀】``card_id``（避开 D3 的 ``SLASH_ID``，一局里不出现重复实体牌）。"""
+
+S1_PEACH = cards_of_type(PACK, "peach")[6]
+S1_DODGE = cards_of_type(PACK, "dodge")[7]
+S1_LIGHTNING = cards_of_type(PACK, "lightning")[0]
+S1_CHEAP_HORSE = cards_of_type(PACK, "chitu")[0]
+S1_DISMANTLEMENT = cards_of_type(PACK, "dismantlement")[0]
+"""S1 各用例要的实体牌（按牌名取数据表下标；``桃`` / ``闪`` 取靠后的那张避开别的夹具）。
+
+``S1_LIGHTNING`` + ``S1_CHEAP_HORSE`` 是最便宜的武器：牌价 1.0 的两张（斩杀用例的成本池），
+且都不是"出牌阶段会先于【杀】被打出"的动作（【杀】的分数高于装备与延时锦囊）。
+"""
+
+
+def _activation_answer(query, *, skill_id: str):
+    """在 ``skill_id`` 的发动询问上取"发动"这一条候选（不手抄 id 以外的形状）。"""
+    assert query.kind == "SKILL_ACTIVATION" and query.skill_id == skill_id, (
+        f"夹具失效：停在 {query.kind} / {getattr(query, 'skill_id', None)!r}，"
+        f"不是 {skill_id} 的发动询问"
+    )
+    action = find_action(
+        query,
+        lambda candidate: isinstance(candidate, ActivateSkill)
+        and candidate.skill_id == skill_id,
+    )
+    assert action is not None, f"{skill_id} 的发动询问里没有 ActivateSkill 候选"
+    return action
+
+
+class _AxeDriver:
+    """AI（座位 0）的脚本：出牌阶段对座位 1 出这张【杀】，其余取最小合法应答。"""
+
+    def __init__(self) -> None:
+        self._fallback = PassPlayer()
+
+    def respond(self, query):
+        if query.kind == "PLAY_PHASE":
+            use = find_action(
+                query,
+                lambda action: isinstance(action, UseCard)
+                and action.card.card_id == S1_SLASH
+                and action.targets == (1,),
+            )
+            if use is not None:
+                return use
+        return self._fallback.respond(query)
+
+
+class _DodgeDriver:
+    """对手（座位 1）的脚本：被【杀】时打出一张【闪】（贯石斧的发动前提）。"""
+
+    def __init__(self) -> None:
+        self._fallback = PassPlayer()
+
+    def respond(self, query):
+        if query.kind == "DODGE":
+            dodge = find_action(
+                query,
+                lambda action: isinstance(action, UseCard)
+                and action.card.type == "dodge",
+            )
+            if dodge is not None:
+                return dodge
+        return self._fallback.respond(query)
+
+
+def _s1_seat(*, hero=None, hp=4, hp_max=4, hand=(), equip=()):
+    return SeatSpec(
+        hero=hero, hp=hp, hp_max=hp_max, hand=tuple(hand), equip=tuple(equip)
+    )
+
+
+def _axe_session(*, defender_hp: int, hand, ai_seat=S1_AI_SEAT):
+    """推进到**贯石斧的发动询问**：真【杀】被真【闪】抵消之后的那一问。
+
+    与 D2 / C1 同一驱动姿态（真局面 → ``Engine.from_state`` → ``run_queries``）；牌堆顶
+    两张惰性【闪】吸收摸牌阶段，AI 的手牌因此 = 构造的手牌 − 【杀】 + 2 张【闪】。
+    """
+    seats = [
+        _s1_seat(hand=hand, equip=(AXE_CARD,)),
+        _s1_seat(hp=defender_hp, hand=(cards_of_type(PACK, "dodge")[0],)),
+    ]
+    used = {card for spec in seats for card in (*spec.hand, *spec.equip)}
+    top = _inert_draws(PACK, count=2, used=used)
+    deck = (*top, *(index for index in range(len(PACK.deck.cards)) if index not in used | set(top)))
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=2),
+        seats=seats,
+        deck=deck,
+        turn_seat=ai_seat,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [_AxeDriver(), _DodgeDriver()],
+        lambda current: current.pending is not None
+        and current.pending.kind == "SKILL_ACTIVATION"
+        and current.pending.skill_id == AXE_SKILL,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达【贯石斧】的发动询问前就停了"
+    return engine, query
+
+
+def _axe_nonlethal_query():
+    """2 人局：AI 的【杀】被抵消，手里只剩【桃】+【闪】（两张高价值牌）⇒ 不值得。
+
+    瞄准的是 4 体力目标（非致命）：付掉桃 / 闪换 1 点伤害是负收益，故 Pass。
+    """
+    return _axe_session(defender_hp=4, hand=(S1_SLASH, S1_PEACH, S1_DODGE))[1]
+
+
+def _axe_lethal_query():
+    """2 人局：目标 **1 体力**、AI 手里是【闪电】+【赤兔】（牌价 1.0 的两张）⇒ 这一下是斩杀。
+
+    「目标 1 体力 ⇒ 发动」那一半：同样的两张牌在非致命局面下不够看，但能打死人就值。
+    """
+    return _axe_session(defender_hp=1, hand=(S1_SLASH, S1_LIGHTNING, S1_CHEAP_HORSE))[1]
+
+
+def _jushou_low_hp_query():
+    """2 人局：AI = 界曹仁（座位 0）**正面、1 体力**，走到自己的结束阶段 ⇒ 据守的发动询问。
+
+    真流程：``Engine.from_state`` → 摸牌 / 出牌阶段（脚本直接结束阶段）→ 结束阶段发问。
+    """
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=2),
+        seats=[_s1_seat(hero=JIE_CAOREN, hp=1, hp_max=4), _s1_seat()],
+        deck=deck_excluding(PACK),
+        turn_seat=S1_AI_SEAT,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda current: current.pending is not None
+        and current.pending.kind == "SKILL_ACTIVATION"
+        and current.pending.skill_id == JUSHSOU,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达【据守】的发动询问前就停了"
+    return engine, query
+
+
+def _jushou_flipped_query():
+    """已翻面的据守询问（**构造询问**，不是引擎产出：见用例 docstring）。
+
+    引擎里唯一的翻面来源就是【据守】自己，而背面朝上的角色在**回合开始前**被翻回正面并
+    跳过整个回合（规则集 13.2 / ``Engine._turn_before_start``）⇒ 真实对局走不到"自己回合的
+    结束阶段还翻着面"这一格。这一格仍要有判据（日后【放逐】一类会给它真实的第二个来源），
+    故按**真投影 + 真询问模型 + 真打分器**构造：``project(state, 0)`` 读出
+    ``PlayerPublic.flipped``，候选与 ``Kind`` 与引擎产出同形。
+    """
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=2),
+        seats=[_s1_seat(hero=JIE_CAOREN, hp=3, hp_max=4), _s1_seat()],
+        deck=deck_excluding(PACK),
+        turn_seat=S1_AI_SEAT,
+    )
+    state.players[S1_AI_SEAT].flipped = True
+    view = project(state, S1_AI_SEAT)
+    seq = 1
+    return SkillActivationQuery(
+        seq=seq,
+        actor=S1_AI_SEAT,
+        timing=Timing.PHASE_FINISH,
+        prompt="是否发动该技能？",
+        legal_actions=(
+            ActivateSkill(answers_seq=seq, skill_id=JUSHSOU),
+            Pass(answers_seq=seq),
+        ),
+        view=view,
+        skill_id=JUSHSOU,
+    )
+
+
+def _qianxun_low_hp_query():
+    """2 人局：界陆逊（AI，座位 0）**1 体力**手里有【闪】，被座位 1 的【过河拆桥】指上。
+
+    真流程：座位 0 的回合（脚本直接结束阶段）→ 座位 1 的回合：真【过河拆桥】指向座位 0
+    ⇒ 锦囊"对你生效"⇒ 【谦逊】的发动询问。
+    """
+    state = build_state(
+        pack=PACK,
+        rule_config=RuleConfig(player_count=2),
+        seats=[
+            _s1_seat(hero=JIE_LUXUN_S1, hp=1, hp_max=3, hand=(S1_DODGE, S1_PEACH)),
+            _s1_seat(hand=(S1_DISMANTLEMENT,)),
+        ],
+        deck=deck_excluding(PACK, S1_DODGE, S1_PEACH, S1_DISMANTLEMENT),
+        turn_seat=S1_AI_SEAT,
+    )
+    engine = Engine.from_state(state, seed=7)
+
+    class _DismantleDriver:
+        """座位 1 的脚本：【过河拆桥】指向座位 0（AI），其余取最小合法应答。"""
+
+        def __init__(self) -> None:
+            self._fallback = PassPlayer()
+
+        def respond(self, query):
+            if query.kind == "PLAY_PHASE":
+                use = find_action(
+                    query,
+                    lambda action: isinstance(action, UseCard)
+                    and action.card.card_id == S1_DISMANTLEMENT
+                    and action.targets == (S1_AI_SEAT,),
+                )
+                if use is not None:
+                    return use
+            return self._fallback.respond(query)
+
+    run_queries(
+        engine,
+        [PassPlayer(), _DismantleDriver()],
+        lambda current: current.pending is not None
+        and current.pending.kind == "SKILL_ACTIVATION"
+        and current.pending.skill_id == QIANXUN_SKILL,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达【谦逊】的发动询问前就停了"
+    return engine, query
+
+
+def _s1_seeds():
+    """发动询问上的平分子流样本（与 D1 / D3 同一批；决策不唯一时不许靠抽签过关）。"""
+    return TIE_SEEDS
+
+
+def _assert_activation(query, *, skill_id: str, activate: bool) -> None:
+    """在真实发动询问上跑真启发式：8 个种子**必须同一个答案**（不许靠平分抽签）。"""
+    _activation_answer(query, skill_id=skill_id)
+    for seed in _s1_seeds():
+        answer = HeuristicPlayer(ai_stream(seed, query.actor)).respond(query)
+        if activate:
+            assert isinstance(answer, ActivateSkill), (
+                f"{skill_id} 该发动，实得 {answer!r}"
+            )
+            assert answer.skill_id == skill_id
+        else:
+            assert isinstance(answer, Pass), f"{skill_id} 该 Pass，实得 {answer!r}"
+
+
+def test_the_skill_table_fixtures_reach_real_windows():
+    """夹具自检（不带 xfail）：三条 S1 用例的构造面（询问归属 / 牌面 / 成本池）。
+
+    只核形状，不核策略：夹具被引擎改动弄坏时保持可见，而不是被 strict xfail 一起吞掉。
+    """
+    _engine, axe = _axe_session(defender_hp=4, hand=(S1_SLASH, S1_PEACH, S1_DODGE))
+    assert axe.kind == "SKILL_ACTIVATION" and axe.actor == S1_AI_SEAT
+    assert axe.skill_id == AXE_SKILL, "夹具失效：停在的不是【贯石斧】的发动询问"
+    assert [card.type for card in axe.view.processing] == ["slash"], (
+        "夹具失效：处理区顶牌不是那张被抵消的【杀】"
+    )
+    assert axe.view.players[S1_AI_SEAT].equip[0].type == "axe", "夹具失效：AI 没装备【贯石斧】"
+    assert sorted(card.type for card in axe.view.self_hand) == [
+        "dodge",
+        "dodge",
+        "dodge",
+        "peach",
+    ], (
+        "夹具失效：成本池不是 2 张惰性【闪】+【桃】+【闪】，"
+        f"实得 {[card.type for card in axe.view.self_hand]}"
+    )
+
+    _engine, jushou = _jushou_low_hp_query()
+    assert jushou.kind == "SKILL_ACTIVATION" and jushou.actor == S1_AI_SEAT
+    assert jushou.skill_id == JUSHSOU
+    assert jushou.view.players[S1_AI_SEAT].hp == 1
+    assert not jushou.view.players[S1_AI_SEAT].flipped, "夹具失效：正面用例里 AI 已经翻面"
+
+    flipped = _jushou_flipped_query()
+    assert flipped.view.players[S1_AI_SEAT].flipped, "夹具失效：构造询问里 AI 没有翻面"
+
+    _engine, qianxun = _qianxun_low_hp_query()
+    assert qianxun.kind == "SKILL_ACTIVATION" and qianxun.actor == S1_AI_SEAT
+    assert qianxun.skill_id == QIANXUN_SKILL
+    assert qianxun.view.players[S1_AI_SEAT].hp == 1
+    assert any(card.type == "dodge" for card in qianxun.view.self_hand), (
+        "夹具失效：1 体力的界陆逊手里没有【闪】"
+    )
+    assert qianxun.view.processing[-1].type == "dismantlement", (
+        "夹具失效：处理区顶牌不是【过河拆桥】"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="票 22 S1：据守今天是常量 2.0（恒发动）——正面 1 体力也该 Pass",
+)
+def test_s1_jushou_passes_at_one_hp_when_face_up():
+    """据守：**正面**且只剩 1 体力 ⇒ Pass（不浪费下个回合，也不在残局里翻过去）。
+
+    修复前是 ``_constant(2.0)`` ⇒ 8 个种子恒发动；修复后按"翻面的代价"判。
+    """
+    _engine, query = _jushou_low_hp_query()
+    _assert_activation(query, skill_id=JUSHSOU, activate=False)
+
+
+def test_s1_jushou_activates_when_already_flipped():
+    """据守：**已翻面** ⇒ 发动（这一次翻面是翻回正面，不跳回合，三张牌纯赚）。
+
+    护栏用例（修复前也绿：常量恒发动）；它钉的是新分支——别把"已翻面"一起判成 Pass。
+    构造询问的理由见 :func:`_jushou_flipped_query`。
+    """
+    query = _jushou_flipped_query()
+    _assert_activation(query, skill_id=JUSHSOU, activate=True)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="票 22 S1：贯石斧今天是常量 2.0（恒发动）——两张高价值牌换 1 点非致命伤害也该 Pass",
+)
+def test_s1_axe_passes_when_two_good_cards_buy_one_ordinary_damage():
+    """贯石斧：付【桃】+【闪】换 1 点**非致命**伤害 ⇒ Pass（净收益为负）。
+
+    修复前恒发动（弃掉两张好牌换 1 点伤害）；修复后是否发动看"两张最便宜的牌 vs 伤害"。
+    """
+    query = _axe_nonlethal_query()
+    _assert_activation(query, skill_id=AXE_SKILL, activate=False)
+
+
+def test_s1_axe_activates_when_the_saved_slash_is_lethal():
+    """贯石斧：目标 **1 体力** ⇒ 发动（这一下就是击杀，值两张最便宜的牌）。
+
+    护栏用例（修复前也绿）；它钉住"能打死就换"的另一半，防止把斧子改成永不发动。
+    """
+    query = _axe_lethal_query()
+    _assert_activation(query, skill_id=AXE_SKILL, activate=True)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="票 22 S1：谦逊今天是常量 2.0（恒发动）——1 体力有【闪】被拆时该 Pass",
+)
+def test_s1_qianxun_passes_at_one_hp_with_a_dodge_in_hand():
+    """谦逊：1 体力、手里有【闪】，被【过河拆桥】指上 ⇒ Pass（不把保命牌扣上武将牌）。
+
+    修复前恒发动：把手牌全扣到武将牌上 = 本回合再没有【闪】可打，等于等死；
+    修复后 1 体力时只在"手里没有能续命的牌"才发动。
+    """
+    _engine, query = _qianxun_low_hp_query()
+    _assert_activation(query, skill_id=QIANXUN_SKILL, activate=False)
