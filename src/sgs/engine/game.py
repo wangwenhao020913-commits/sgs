@@ -249,6 +249,22 @@ _JUDGE_SUBSTITUTION = "judge_substitution"
 :func:`~sgs.engine.steps.judge_before_effect` 顶部消费它。
 """
 
+_LORD_PENALTY_GROUPS = "lord_penalty_groups"
+"""死亡帧私有槽名：主公杀忠臣那一次弃置要搬的**来源区分组**（票 33）。
+
+形如 ``((ZoneRef, (card_id, ...)), ...)``，在**首次进入**时定格。定格的必要性与
+``move_after._QINGJIAN_GROUPS`` 同源：【连营】一类的"失去牌后"钩子会在弃置的**结算中途**
+把牌摸进主公的手牌——而弃置的"所有牌"指的是**触发那一刻**的牌，不是重入时看到的牌。不定格
+就会在重入时把刚摸到的牌当成下一次弃置，形成"弃一张、摸一张、再弃一张"的死循环。
+"""
+
+_LORD_PENALTY_MOVED = "lord_penalty_moved"
+"""死亡帧私有槽名：上面那组分群里**已经搬完**的组数（票 33 的挂起续跑游标）。
+
+钩子提问时本步返回 ``"stay"``，应答到达后整步重入；游标让重入接着搬下一组，而不是重搬
+已搬完的那一组（重搬由 :data:`_MOVE_DONE` 兜住，游标负责不让游标之外的新牌被卷进来）。
+"""
+
 
 class _PendingMove(NamedTuple):
     """挂起栈的一项（票 25）：续跑一次 ``MOVE_AFTER`` 需要的四件事。
@@ -800,6 +816,12 @@ class Engine:
         逐来源区各发一条 delta（票 08 §7）：手牌 / 装备区 / 判定区各一条，**不**新增复合
         delta。归属 = 阵亡者本人（弃置者）；判定区的实体牌**直接**进弃牌堆（不经过处理区）。
         M1 的 ``basic_53`` 没有装备与延时锦囊，故实测仍只有手牌那一条。
+
+        **不派发"失去牌后"**（票 33 的裁定）：死者自己的区域清空**仍直接调**
+        :func:`~sgs.effects.move_card`——"死亡结算中死者的技能还能不能发动"官方手册没有
+        明文（社区通说是不发动），本票只钉**存活者**一侧（主公杀忠臣的弃置），死者一侧维持
+        现状。理由与扩展路径登记在 `开发文档/06` §5「程序化约定与偏离一手」。注意这条与
+        :meth:`_lord_discards_everything` 的不对称是**有意的**：后者弃的是存活主公的牌。
         """
         seat = frame.data["target"]
         ctx = EffectContext(
@@ -844,53 +866,75 @@ class Engine:
             depth=self.stack.depth,
         )
 
-    def apply_death_rewards(self, frame: Frame) -> None:
+    def apply_death_rewards(self, frame: Frame) -> Control:
         """``DEATH_ON`` 的 Ⅱ：执行死亡奖惩（票 25 / 决策回票 14 §4.2）。
 
         奖惩顺序在 Ⅰ（系统处理牌）之后；只进身份局。无来源伤害（闪电）、自杀、
         失去体力 ⇒ ``killer`` 未定格 ⇒ 无奖惩；killer 已阵亡 ⇒ 跳过（保"阵亡者区域为空"）。
         杀反贼 ⇒ killer 摸 3 张；主公杀忠臣 ⇒ **主公**弃置自己的手牌 / 装备区 / 判定区
         （一手 `flow_death.txt`「所有牌」，登记 `R:323` 偏差）。
+
+        **返回值透传"失去牌后"的挂起**（票 33）：主公的弃置是**存活角色**的规则动作，
+        走移动入口派发 ``MOVE_AFTER``，钩子提问时本方法返回 ``"stay"``，由调用方
+        （``steps.death_settle_cards``）原样透传——吞掉它会让引擎带着待答询问继续搬牌。
         """
         if self.state.rule_config.mode is not Mode.IDENTITY:
-            return
+            return None
         killer = frame.data.get("killer")
         if killer is None or not self.state.player(killer).alive:
-            return
+            return None
         dead = frame.data["target"]
         dead_identity = self.state.player(dead).identity
         if dead_identity is Identity.REBEL:
             self._reward_killer_draws(frame, killer)
-            return
+            return None
         if dead_identity is Identity.LOYALIST and self.state.player(killer).identity is Identity.LORD:
-            self._lord_discards_everything(frame, killer)
+            return self._lord_discards_everything(frame, killer)
+        return None
 
-    def _lord_discards_everything(self, frame: Frame, lord: int) -> None:
-        """主公杀死忠臣：逐来源区（手牌 / 装备区 / 判定区）各一条 ``card_move`` 入弃牌堆。"""
-        ctx = EffectContext(
-            actor=lord,
-            source=lord,
-            targets=(frame.data["target"],),
-            frame_id=frame.frame_id,
-            depth=self.stack.depth,
-        )
-        for source_ref in (
-            ZoneRef(Zone.HAND, lord),
-            ZoneRef(Zone.EQUIP, lord),
-            ZoneRef(Zone.JUDGE, lord),
-        ):
-            card_ids = tuple(self.state.zone(source_ref))
-            if not card_ids:
-                continue
-            delta = move_card(
-                self.state,
-                ctx,
+    def _lord_discards_everything(self, frame: Frame, lord: int) -> Control:
+        """主公杀死忠臣：逐来源区（手牌 / 装备区 / 判定区）各一条 ``card_move`` 入弃牌堆。
+
+        **经移动入口搬牌**（票 33）：承载帧 = 死亡帧，故 delta 的坐标与旧实现逐字相同
+        （帧外临时帧会把 ``frame_id`` 记成 0，打翻既有基准），但每次弃置都派发
+        ``MOVE_AFTER``——主公是**存活角色**，"失去最后的手牌 / 装备区里的一张牌"这类
+        钩子按规则必须被问。
+
+        **重入按"定格的分组 + 游标"续搬**（:data:`_LORD_PENALTY_GROUPS` /
+        :data:`_LORD_PENALTY_MOVED`）：钩子提问会让本步挂起、应答后整步重入；而钩子
+        可能已经在结算中途把牌摸回主公手里（【连营】就是），所以"要弃哪些牌"必须定格在
+        首次进入的那一刻，搬的进度也必须记在帧私有里。续跑把同一组再交进来时，搬牌本身
+        由 :data:`_MOVE_DONE` 的重入判据挡掉（"这次移动已经搬完"）。
+        """
+        groups = frame.data.get(_LORD_PENALTY_GROUPS)
+        if groups is None:
+            found: list[tuple[ZoneRef, tuple[int, ...]]] = []
+            for source_ref in (
+                ZoneRef(Zone.HAND, lord),
+                ZoneRef(Zone.EQUIP, lord),
+                ZoneRef(Zone.JUDGE, lord),
+            ):
+                card_ids = tuple(self.state.zone(source_ref))
+                if card_ids:
+                    found.append((source_ref, card_ids))
+            groups = tuple(found)
+            frame.data[_LORD_PENALTY_GROUPS] = groups
+        moved = int(frame.data.get(_LORD_PENALTY_MOVED, 0))
+        while moved < len(groups):
+            _source_ref, card_ids = groups[moved]
+            control = self.move_in_frame(
+                frame,
                 self.state.refs(card_ids),
                 to_zone=ZoneRef(Zone.DISCARD),
                 reason=MoveReason.DISCARD,
                 owner=lord,
+                actor=lord,
             )
-            self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+            if control == "stay":
+                return "stay"
+            moved += 1
+            frame.data[_LORD_PENALTY_MOVED] = moved
+        return None
 
     def _reward_killer_draws(self, frame: Frame, killer: int) -> None:
         """杀死反贼的奖惩摸牌：与摸牌阶段**同一原语、同一洗牌子流**（票 14 §5）。
@@ -2468,14 +2512,15 @@ class Engine:
         承载帧上的 op 会原地重入本方法一次；那一次必须经帧私有 :data:`_MOVE_DONE` 认出
         "同一次移动"，否则会重放搬牌并留下同区幻影 delta（见该属性的说明）。
 
-        **它不是全项目唯一的搬牌点**：使用链、效果回调与上面两类帧外移动都经本方法，
+        **它不是全项目唯一的搬牌点**：使用链、效果回调、上面两类帧外移动与**主公杀忠臣的
+        弃置**（:meth:`_lord_discards_everything`，票 33 起以死亡帧为承载帧）都经本方法，
         但另有一小组**直接调** :func:`~sgs.effects.move_card` 的收尾点——阵亡者的区域清空
-        （:meth:`discard_dead_cards`）、主公杀忠臣的弃置（:meth:`_lord_discards_everything`）、
-        奖惩摸牌（:meth:`_reward_killer_draws`）、摸牌阶段（:meth:`_phase_draw`）、终局清栈
-        （:meth:`_teardown_processing`）与开局发牌（:func:`build_initial`）。它们**不派发**
-        失去牌后：摸牌阶段 / 奖惩摸牌 / 开局发牌是"牌堆 → 手牌"（`R5-Q3`：摸牌不算失去），
-        终局清栈发生在胜负已定之后，而阵亡弃牌 / 主公弃置仍是票 07 §范围外登记在案的缺口。
-        勿据此在本方法里加回唯一性论断。
+        （:meth:`discard_dead_cards`）、奖惩摸牌（:meth:`_reward_killer_draws`）、摸牌阶段
+        （:meth:`_phase_draw`）、终局清栈（:meth:`_teardown_processing`）与开局发牌
+        （:func:`build_initial`）。它们**不派发**失去牌后：摸牌阶段 / 奖惩摸牌 / 开局发牌是
+        "牌堆 → 手牌"（`R5-Q3`：摸牌不算失去），终局清栈发生在胜负已定之后，而阵亡弃牌
+        仍登记为**有意**的缺口（票 33 只钉存活者一侧，裁定见 `开发文档/06`
+        §5「程序化约定与偏离一手」）。勿据此在本方法里加回唯一性论断。
         """
         card_ids = tuple(card.card_id for card in cards)
         # 这次移动的**身份** = "哪个技能、把哪些牌、搬到哪里"。
@@ -2516,8 +2561,10 @@ class Engine:
             return None
         # **事件帧无效**（M6 票 08 的【奇才】②）：只有"装备区 → 弃牌堆"的移动才开这个
         # 接缝（"其他角色弃置你装备区里的防具牌"的唯一形状），且只在有承载帧时——帧外
-        # 移动（弃牌阶段的自弃、阵亡清区）没有"其他角色"可判。技能标记后整个事件被取消：
-        # 不搬牌、不记 delta、不派发 `MOVE_AFTER`，移动入口原样返回。
+        # 移动（弃牌阶段的自弃、阵亡清区）没有"其他角色"可判。票 33 起主公杀忠臣的弃置
+        # 也带承载帧（死亡帧），但它同样判不出"其他角色"：死亡帧没有 `source`、也没有
+        # 正在跑的技能（`_move_causer` 因此是 `None`）⇒ 接缝的条件自己挡掉。
+        # 技能标记后整个事件被取消：不搬牌、不记 delta、不派发 `MOVE_AFTER`，移动入口原样返回。
         if frame is not None and to_zone.zone is Zone.DISCARD:
             from_zone = locate(self.state, card_ids[0])
             if from_zone.zone is Zone.EQUIP:

@@ -139,7 +139,7 @@ class FrameHost(StepHost, Protocol):
 
     def reveal_dead_identity(self, frame: Frame) -> None: ...
 
-    def apply_death_rewards(self, frame: Frame) -> None: ...
+    def apply_death_rewards(self, frame: Frame) -> Control: ...
 
     def record_death_fact(self, frame: Frame) -> None: ...
 
@@ -1318,13 +1318,24 @@ def death_reveal_identity_after(host: FrameHost, frame: Frame) -> Control:
 
 
 def death_on(host: FrameHost, frame: Frame) -> Control:
-    """死亡时：先 dispatch（M2 无死亡时技能），再 Ⅰ.a 系统处理牌、最后 Ⅱ 奖惩。"""
-    control = _emit_death(host, frame, Timing.DEATH_ON)
-    if control is not None:
-        return control
+    """死亡时：dispatch（M2 无死亡时技能）；Ⅰ.a 系统处理牌与 Ⅱ 奖惩在下一步（票 33）。"""
+    return _emit_death(host, frame, Timing.DEATH_ON)
+
+
+def death_settle_cards(host: FrameHost, frame: Frame) -> Control:
+    """死亡时的收尾：Ⅰ.a 系统处理牌 → Ⅱ 死亡奖惩（**非 dispatch 步**，票 33）。
+
+    与 :func:`death_on` 分成两步是**结构性**的：主公杀忠臣的弃置自票 33 起经移动入口
+    派发 ``MOVE_AFTER``，钩子提问会把这一步挂起、等应答到达后**重入同一个步骤**。
+    若 Ⅰ.a / Ⅱ 还挂在 ``DEATH_ON`` 那一步里，重入会把 `DEATH_ON` 的时机记录再发一遍
+    ——``_pending_timing`` 的幂等只覆盖"派发本身挂起"这一种，而这里挂起发生在派发
+    **已经完成之后**。时机记录因此必须留在前一步（派发一次、只落一条）。
+
+    ``apply_death_rewards`` 的返回值原样透传：奖惩里的搬牌挂起时，驱动循环必须带着
+    待答询问停在这里，而不是继续把死亡结算跑完。
+    """
     host.discard_dead_cards(frame)
-    host.apply_death_rewards(frame)
-    return None
+    return host.apply_death_rewards(frame)
 
 
 def death_after(host: FrameHost, frame: Frame) -> Control:
@@ -1336,18 +1347,24 @@ DEATH_STEPS = (
     Step(death_before_start, Timing.DEATH_BEFORE_START),
     Step(death_reveal_identity_after, Timing.DEATH_REVEAL_IDENTITY_AFTER),
     Step(death_on, Timing.DEATH_ON),
+    Step(death_settle_cards),
     Step(death_after, Timing.DEATH_AFTER),
 )
-"""无身份局（1v1）的死亡段：M1 的四段，与既有一字不差。"""
+"""无身份局（1v1）的死亡段：M1 的四个时机，记录流与既有一字不差。
+
+第五格 ``death_settle_cards`` 不对应任何时机枚举位（``Step.timing=None``，同
+``MOVE_STEPS``）：它只承载"可能挂起的系统处理牌 / 奖惩"，见该函数的说明。
+"""
 
 IDENTITY_DEATH_STEPS = (
     Step(death_before_start, Timing.DEATH_BEFORE_START),
     Step(death_reveal_identity_before, Timing.DEATH_REVEAL_IDENTITY_BEFORE),
     Step(death_reveal_identity_after, Timing.DEATH_REVEAL_IDENTITY_AFTER),
     Step(death_on, Timing.DEATH_ON),
+    Step(death_settle_cards),
     Step(death_after, Timing.DEATH_AFTER),
 )
-"""身份局的死亡段：多一段"亮出身份牌前"（票 25 / 决策回票 14 §4）。"""
+"""身份局的死亡段：多一段"亮出身份牌前"（票 25 / 决策回票 14 §4）+ 奖惩收尾步（票 33）。"""
 
 
 # ---- JUDGE 帧：L14 三个时机 + 取牌 / 后果（票 26 / 决策回票 10）------------

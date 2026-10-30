@@ -16,6 +16,11 @@
 顶替全算），**摸牌不算**（票 07 §要做什么 5 / R5-Q3）；无提供者时**零派发**
 （票 07 §验收 3，记录流逐字节不变由 ``tests/test_replays.py`` 的 34 条基准钉住）。
 
+**来源清单**（票 33 补了最后一条，判据一律落在**来源区**，不按技能名写白名单）：使用 /
+打出 / 弃置（含弃牌阶段）/ 交给 / 被拿走 / 重铸 / 顶替 / 判定区收尾 / **死亡奖惩的弃置**
+（主公杀忠臣 ⇒ 主公弃置所有牌，存活者一侧）。死者自己的区域清空**不派发**（裁定见
+`开发文档/06` §5「程序化约定与偏离一手」）。
+
 **时点精确的局面这样造**：先跑到"自己的出牌阶段开始"（摸牌阶段已过完），再把手牌种进
 座位（:func:`_seed_hand`）——与 ``support.build_state`` 的人为局面同一姿态，只是把种牌
 推迟到回合跑起来之后。这样"掉最后一张手牌"才是真的只有那一张。
@@ -27,7 +32,7 @@
 
 from __future__ import annotations
 
-from sgs.data import RuleConfig, load_content_pack
+from sgs.data import Identity, RuleConfig, load_content_pack
 from sgs.engine import Engine
 from sgs.state import (
     ActivateSkill,
@@ -35,18 +40,24 @@ from sgs.state import (
     MoveReason,
     Pass,
     QueryKind,
+    SelectOption,
     UseCard,
     Zone,
     ZoneRef,
 )
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state, cards_of_type
+from support import SeatSpec, build_state, cards_of_type, declare_death
 
 PACK = load_content_pack(deck_profile="standard_108")
 
+JIE_LUXUN = "jie_luxun"
+JIE_SUNSHANGXIANG = "jie_sunshangxiang"
+
 LIANYING = "hero.luxun.lianying"
 XIAOJI = "hero.sunshangxiang.xiaoji"
+JIE_LIANYING = "hero.jie_luxun.lianying"
+JIE_XIAOJI = "hero.jie_sunshangxiang.xiaoji"
 
 MOVE_AFTER = Timing.MOVE_AFTER
 
@@ -994,4 +1005,162 @@ def test_a_move_that_suspends_on_move_after_is_not_replayed_when_it_resumes():
     )
     assert _same_zone_moves(engine) == [], "重入不得留下 processing → processing 之类的幻影 delta"
     assert not engine._move_pending, "挂起状态已经收尾"
+
+
+# ---------------------------------------------------------------------------
+# 死亡奖惩的弃置也派发"失去牌后"（票 33：主公杀忠臣 ⇒ 主公弃置所有牌）
+# ---------------------------------------------------------------------------
+#
+# 判据是**来源区**（手牌 / 装备区），不是技能名、也不是"这次弃置是谁发起的"：
+# 主公是**存活角色**，`_lord_discards_everything` 的弃置是规则动作，故它经移动入口
+# （`Engine.move_in_frame`，承载帧 = 死亡帧）派发 `MOVE_AFTER`——与弃牌阶段、判定收尾、
+# 装备顶替同一条判据。阵亡者**自己**的区域清空仍是帧外直调（死者一侧维持现状，裁定见
+# `开发文档/06` §5「程序化约定与偏离一手」）。
+
+
+def _lord_kills_loyalist(*, hero: str, hand=(), equip=(), dead_hand=()):
+    """5p 身份局：座位 0 = 主公（``hero``）、座位 1 = 忠臣；主公杀死忠臣。
+
+    死亡用受控入口 ``support.declare_death``（同 ``tests/test_victory.py``）：本族要钉的是
+    "奖惩的弃置派不派发"，濒死 / 伤害链本身不是被测面。
+    """
+    seats = [
+        SeatSpec(hp=3, hand=tuple(hand), equip=tuple(equip), hero=hero, identity=Identity.LORD),
+        SeatSpec(hand=tuple(dead_hand), identity=Identity.LOYALIST),
+        SeatSpec(identity=Identity.REBEL),
+        SeatSpec(identity=Identity.REBEL),
+        SeatSpec(identity=Identity.RENEGADE),
+    ]
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=_deck_excluding(*hand, *equip, *dead_hand),
+        rule_config=RuleConfig(player_count=5),
+    )
+    engine = Engine.from_state(state, seed=7)
+    declare_death(engine, 1, killer=0)
+    return engine
+
+
+def _five_players(handler=None) -> list:
+    """5 个座位各自的应答脚本：座位 0（主公）挂被测钩子的应答，其余走缺省。"""
+    return [Scripted(handler), Scripted(), Scripted(), Scripted(), Scripted()]
+
+
+def _moves_touching(engine, card_id: int) -> list:
+    """记录流里**含** ``card_id`` 的 ``card_move``（一次搬一批时 ``_moves_of`` 读不到）。"""
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and any(card.card_id == card_id for card in record.cards)
+    ]
+
+
+def _timing_records(engine, timing: Timing) -> list:
+    """记录流里 ``timing`` 的全部 ``timing`` 记录（重入不得多发一条）。"""
+    return [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is timing
+    ]
+
+
+def _activation_queries(engine, skill_id: str) -> list:
+    """记录流里 ``skill_id`` 的发动询问（"玩家被问了几次"的直接读数）。"""
+    return [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == "SKILL_ACTIVATION"
+        and getattr(record.query, "skill_id", None) == skill_id
+    ]
+
+
+def _pick_our_own_seat(query):
+    """界【连营】逐座选人那一步选座位 0（主公会自己摸）。
+
+    选人询问的 ``skill_id`` 是 ``<短 id>:seat:<n>``，故按前缀认；发动询问交给
+    :class:`Scripted` 的缺省逻辑（``_activate``）——本问只钉"那一问之后选谁"。
+    """
+    if query.kind == "SELECT_OPTION" and str(getattr(query, "skill_id", "")).startswith(
+        "lianying:seat"
+    ):
+        for action in query.legal_actions:
+            if isinstance(action, SelectOption) and action.choice == "seat:0":
+                return action
+    return None
+
+
+def test_lianying_fires_when_the_lord_kills_a_loyalist_and_loses_the_whole_hand():
+    """主公杀忠臣 ⇒ 主公弃置所有手牌 = **一次"失去牌后"**（票 33 §现象）。
+
+    旧行为：`_lord_discards_everything` 直接调 ``move_card``，只记 delta、不派发
+    ``MOVE_AFTER`` ⇒ 界陆逊的【连营】整条静默（实机 seed=7032 的 seq 3245 之后没有任何
+    ``lianying`` 询问）。判据读**记录流**：弃置之后的发动询问 + 那次"牌堆 → 主公手牌"的摸牌。
+
+    同时钉住挂起 / 续跑的两条纪律（`CODING_STANDARDS.md` §3）：这唯一一条 ``card_move``、
+    唯一一条 ``DEATH_ON`` 记录、唯一一次发动询问——重入不许重放搬牌，也不许把
+    ``DEATH_ON`` 时机记录再发一遍。
+    """
+    peach = _cards("peach")[0]
+    engine = _lord_kills_loyalist(hero=JIE_LUXUN, hand=(peach,))
+    players = _five_players(_pick_our_own_seat)
+
+    _advance(engine, players, lambda e: e.pending is not None)
+
+    assert engine.pending is not None and engine.pending.kind == "SKILL_ACTIVATION"
+    assert engine.pending.skill_id == JIE_LIANYING, (
+        "主公失去最后的手牌 ⇒ 界陆逊【连营】的『是否发动』出现在弃置之后"
+    )
+
+    _advance(engine, players, lambda e: not e.stack)
+
+    moves = _moves_touching(engine, peach)
+    assert len(moves) == 1, f"这次失去恰一条 card_move（挂起续跑不重放搬牌）：{moves}"
+    assert (moves[0].from_zone.zone, moves[0].to_zone.zone, moves[0].reason) == (
+        Zone.HAND,
+        Zone.DISCARD,
+        MoveReason.DISCARD,
+    ), "奖惩的弃置仍是手牌 → 弃牌堆 / 弃置"
+    assert len(_timing_records(engine, Timing.DEATH_ON)) == 1, (
+        "奖惩里挂起、续跑回来不重发 DEATH_ON 时机记录"
+    )
+    assert len(_activation_queries(engine, JIE_LIANYING)) == 1, "只问一次，续跑不重问"
+    assert peach in _move_after_cards(engine), "这次弃置派发了『失去牌后』"
+    assert len(_drawn_to(_after(engine, peach), 0)) == 1, "连营真的摸了牌（X = 1 ⇒ 一座一张）"
+    assert len(engine.state.player(0).hand) == 1, "主公手牌从 0 变 1"
+
+
+def test_xiaoji_fires_when_the_lord_kills_a_loyalist_and_loses_the_equipment():
+    """同形：界孙尚香当主公杀忠臣 ⇒ 弃置装备区那张 ⇒ 【枭姬】摸 2 张（票 33 §影响面）。
+
+    判据落在**来源区**：这次移动的 ``from_zone`` 是装备区，去向与原因都不参与触发判据。
+    """
+    horse = _cards("chitu")[0]
+    engine = _lord_kills_loyalist(hero=JIE_SUNSHANGXIANG, equip=(horse,))
+    players = _five_players()
+
+    _advance(engine, players, lambda e: e.pending is not None)
+
+    assert engine.pending is not None and engine.pending.kind == "SKILL_ACTIVATION"
+    assert engine.pending.skill_id == JIE_XIAOJI, (
+        "主公失去装备区里的牌 ⇒ 界孙尚香【枭姬】的『是否发动』出现在弃置之后"
+    )
+
+    _advance(engine, players, lambda e: not e.stack)
+
+    moves = _moves_touching(engine, horse)
+    assert len(moves) == 1, f"这次失去恰一条 card_move（挂起续跑不重放搬牌）：{moves}"
+    assert (moves[0].from_zone.zone, moves[0].to_zone.zone, moves[0].reason) == (
+        Zone.EQUIP,
+        Zone.DISCARD,
+        MoveReason.DISCARD,
+    ), "奖惩的弃置仍是装备区 → 弃牌堆 / 弃置"
+    assert not engine.state.player(0).equip, "装备区那张没了"
+    assert len(_timing_records(engine, Timing.DEATH_ON)) == 1, "DEATH_ON 时机记录不重发"
+    assert len(_activation_queries(engine, JIE_XIAOJI)) == 1, "只问一次"
+    assert horse in _move_after_cards(engine), "这次弃置派发了『失去牌后』"
+    assert len(_drawn_to(_after(engine, horse), 0)) == 2, "枭姬摸 2 张"
 
