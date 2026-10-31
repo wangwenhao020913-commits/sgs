@@ -971,6 +971,7 @@ function applyEffectDelta(
   if (!record) return held;
   if (record.kind === "timing") {
     applyUseTiming(record, held);
+    applyConvertedProduct(record, held);
     return held;
   }
   if (record.kind === "frame") {
@@ -1074,6 +1075,35 @@ function applyEffectDelta(
     }
   }
   return held;
+}
+
+/** 时机记录里的**转化产物**：这次使用结算时换成了哪张牌（朱雀羽扇 / 转化技）。
+ *
+ * 服务端在 `USE_ON_USE` 之后把帧里的牌换成产物，其后的每个时机记录都带 `cards = [产物]`
+ * （`virtual_sources` 指回来源实体牌）。舞台项是在 `card_move` 时按**来源实体牌**建的，
+ * 不换的话台上一直是原牌——用户实机：羽扇把普通【杀】转成火【杀】，舞台仍画普通【杀】。
+ *
+ * 判据只读记录（不读规则、不查技能表）：产物带 `virtual_sources`、且这些来源正是台上
+ * 那张牌 ⇒ 只把**牌面**换成产物。位置 / 使用者 / 目标 / 承载帧仍跟着台上那一条；
+ * 之后"离场"的 `card_move` 带的是来源实体牌，靠换过来的 `virtual_sources` 照样命中。
+ */
+function applyConvertedProduct(record, effectCards = state.effectCards) {
+  const now = stageNow();
+  const held = (effectCards || []).filter(
+    (item) => item.stage && item.stage.lane === "processing" && stageLane(item, now) === "visible",
+  );
+  for (const product of record.cards || []) {
+    if (!product || !Array.isArray(product.virtual_sources) || !product.virtual_sources.length) continue;
+    const sources = product.virtual_sources.map(String);
+    const item = held.find(
+      (entry) => sources.includes(String(entry.card_id))
+        || (entry.virtual_sources || []).some((source) => sources.includes(String(source))),
+    );
+    if (!item) continue;
+    const stage = item.stage;
+    Object.assign(item, product);
+    item.stage = stage;
+  }
 }
 
 /** 时机记录对描述文本的两个贡献：认领这次使用的目标、更新"当前结算到谁"。

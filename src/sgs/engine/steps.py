@@ -71,6 +71,7 @@ from sgs.skills import (
     virtual_dodge,
 )
 from sgs.state import (
+    LIFE_DECREASE_DAMAGE_KEY,
     ActivateSkill,
     CardRef,
     DodgeContext,
@@ -941,6 +942,9 @@ def damage_push_life_decrease(host: FrameHost, frame: Frame) -> None:
             "source": frame.data["source"],
             "amount": frame.data["amount"],
             CHAIN_RESET_KEY: bool(frame.data.get(CHAIN_RESET_KEY)),
+            # 实机报障 2026-10-31：伤害带来的扣减 ≠「失去体力」。帧照压、L8 三个时机照发
+            # （记录形态不变），但挂在 LIFE_DECREASE_AFTER 的技能要能把它排除掉（【诈降】）。
+            LIFE_DECREASE_DAMAGE_KEY: True,
         },
         timing=Timing.LIFE_DECREASE_BEFORE,
     )

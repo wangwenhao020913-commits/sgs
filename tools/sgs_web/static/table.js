@@ -703,7 +703,11 @@ function skillOffer(pending, skill) {
       : (Boolean(skill.available) || convertCards.length > 0 || Boolean(manifest))
   );
   const passive = Boolean(ui.passive);
-  const inert = suppressed || Boolean(skill.locked) || passive;
+  // 锁定技也可以是**转化入口**（神关羽【武神】：锁定技 + "红桃手牌只能当【杀】"）。这类
+  // "锁定"没有"是否发动"要问，但玩家仍要挑来源牌与目标 ⇒ 按钮必须点得动。判据只读
+  // "这一问有没有下发清单"，纯锁定技 / 被动技（无清单、无转化来源）照旧只做说明。
+  const lockedEntry = Boolean(skill.locked) && Boolean(manifest) && !passive;
+  const inert = suppressed || (Boolean(skill.locked) && !lockedEntry) || passive;
   const clickable = usable && !inert;
   let handler = null;
   if (clickable && pending && !state.playback) {

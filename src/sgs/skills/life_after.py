@@ -44,7 +44,7 @@ from sgs.effects import (
     is_slash,
 )
 from sgs.resolution import Tag, add_tag
-from sgs.state import GameState, Phase
+from sgs.state import LIFE_DECREASE_DAMAGE_KEY, GameState, Phase
 from sgs.timing import Timing
 
 from .catalog import (
@@ -102,9 +102,16 @@ def _zhaxiang_after_losing_hp(host: Any, frame: Any) -> Any:
 
 
 def _zhaxiang_condition(host: Any, frame: Any) -> bool:
-    """触发条件：失去体力的是**持有者**、且这次失去至少 1 点。"""
+    """触发条件：**失去体力**的是持有者、且这次失去至少 1 点。
+
+    **受到伤害不算「失去体力」**（实机报障 2026-10-31）：伤害链照常压 ``LIFE_DECREASE``
+    子帧并派发 L8 的三个时机，但那一帧带 :data:`~sgs.state.LIFE_DECREASE_DAMAGE_KEY`。
+    本条件因此不能只看时机——不然"被打 1 点"也会摸三张（用户实机原样）。
+    """
     owner = _owns(host.state, frame)
     if owner is None:
+        return False
+    if frame.data.get(LIFE_DECREASE_DAMAGE_KEY):
         return False
     return int(frame.data.get("target", -1)) == owner and int(
         frame.data.get("amount", 0)

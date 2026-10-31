@@ -26,6 +26,7 @@ __all__ = [
     "FrameKind",
     "GameState",
     "HeroCardZone",
+    "LIFE_DECREASE_DAMAGE_KEY",
     "Marker",
     "MoveReason",
     "Phase",
@@ -301,6 +302,20 @@ class FrameKind(str, Enum):
     MAXLIFE = "MAXLIFE"
     RANK_COMPARE = "RANK_COMPARE"
     SKILL = "SKILL"
+
+
+LIFE_DECREASE_DAMAGE_KEY = "life_decrease_from_damage"
+"""``FrameKind.LIFE_DECREASE`` 帧的**来源判据**（实机报障 2026-10-31）：``True`` = 这次体力
+扣减是**伤害**带来的，**不是**「失去体力」。
+
+官方把「受到伤害」与「失去体力」当两件事：伤害链里确实压一次 ``LIFE_DECREASE`` 子帧（L8 的
+三个时机照常派发），但那是"扣减体力"，不是「失去体力」。挂在 ``LIFE_DECREASE_AFTER`` 的技能
+（界黄盖【诈降】）必须读这个键把两者分开——只按时机挂会让"被打 1 点"触发"失去 1 点体力后"
+（用户实机复现的原样）。
+
+缺省（没有这个键）= 真正意义上的「失去体力」：【苦肉】/【反间】这类技能自己压的帧。
+帧私有载荷不进记录流，故这条判据不改变任何金录像的字节。
+"""
 
 
 class Marker(_FrozenModel):

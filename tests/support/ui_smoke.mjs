@@ -7179,7 +7179,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       { kind: "EndPhase", answers_seq: 9420 },
     ],
     candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
-    preactivations: { "hero.demo.flow": manifest }, preactivation: [],
+    preactivations: { "hero.demo.flow": manifest, "hero.demo.lockedflow": manifest }, preactivation: [],
   };
   const skill = (id, name, extra = {}) => ({
     skill_id: id, name, skill_type: "NORMAL", locked: false, carrier: "HERO",
@@ -7196,6 +7196,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     skill("hero.demo.convert", "转化技", { ui: { requirement: "", passive: false, convert_sources: [31] } }),
     skill("hero.demo.passive", "被动技", { available: true, ui: { requirement: "", passive: true, convert_sources: [] } }),
     skill("hero.demo.locked", "锁定技", { available: true, locked: true }),
+    skill("hero.demo.lockedflow", "锁定转化技", { available: true, locked: true }),
     skill("hero.demo.off", "不可用技"),
   ];
   ui.state.view = view;
@@ -7204,7 +7205,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.renderTable();
   ui.renderPending(view);
 
-  const shown = "hero.demo.alpha,hero.demo.beta,hero.demo.flow,hero.demo.convert,hero.demo.passive,hero.demo.locked";
+  const shown = "hero.demo.alpha,hero.demo.beta,hero.demo.flow,hero.demo.convert,hero.demo.passive,hero.demo.locked,hero.demo.lockedflow";
   check("U2-04a 提示区技能组 = 这条询问给了入口的技能（中文名、服务端顺序；不可用技不出现）",
     promptSkillIds().join(",") === shown
       && promptSkillButtons().every((node) => {
@@ -7279,6 +7280,24 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
         && ui.state.selectedOption === option && calls.length === before;
     })(),
     `passive=${promptSkill("hero.demo.passive").disabled}/${[...promptSkill("hero.demo.passive").classList.set].join(",")} locked=${promptSkill("hero.demo.locked").disabled}`);
+
+  check("U2-04f2 锁定**转化**技（这一问下发了清单）可点 = 进入清单（锁定技按钮只做说明，不适用于锁定转化）",
+    (() => {
+      ui.resetSelection();
+      ui.renderTable();
+      ui.renderPending(view);
+      const node = promptSkill("hero.demo.lockedflow");
+      if (!node) return false;
+      const enabled = node.disabled !== true;
+      clickNode(node);
+      const entered = !!ui.state.preactivation
+        && ui.state.preactivation.skillId === "hero.demo.lockedflow";
+      ui.resetSelection();
+      ui.renderTable();
+      ui.renderPending(view);
+      return enabled && entered;
+    })(),
+    `disabled=${promptSkill("hero.demo.lockedflow") && promptSkill("hero.demo.lockedflow").disabled} pre=${ui.state.preactivation && ui.state.preactivation.skillId}`);
 
   check("U2-04g 底部技能区原样：顺序 / 全部技能 / 与提示区点出同一个选中项",
     (() => {
@@ -8879,6 +8898,38 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     $("t-processing").children.length === 1
       && attr($("t-processing").children[0], "data-card-id") === "-10",
     `ids=${Array.from($("t-processing").children).map((child) => attr(child, "data-card-id")).join(",")}`);
+
+  // 朱雀羽扇（票 09）：来源牌先进处理区，**使用中**被换成火【杀】——舞台要跟着换牌面。
+  // 记录流里产物只在时机的 `cards` 上（帧数据不进记录流），故判据只看时机记录。
+  const fanProduct = {
+    ...single, card_id: -609569600673815, type: "fire_slash", name: "火杀",
+    display_name: "火杀", virtual_sources: [18], color: "red", suit: "heart", rank: 10,
+  };
+  ui.state.effectCards = [];
+  ui.state.revealedCards = [];
+  ui.state.view = faceView;
+  ui.applyViewRaw({
+    session_id: "u1-07-fan", seed: 1, human_seat: 0, finished: false, timeout_seconds: null,
+    heroes: [], skills: [], pending: null, cursor: 5, log_seq: 0, narrative: [],
+    snapshot: { ...faceView.snapshot, processing: [] },
+    records: [
+      {
+        kind: "delta", delta_type: "card_move", seq: 4,
+        cards: [{ ...single, card_id: 18, type: "slash", name: "杀" }],
+        from_zone: { zone: "hand", seat: 0 }, to_zone: { zone: "processing", seat: null },
+        reason: "USE", owner: 0,
+      },
+      { kind: "timing", seq: 5, timing: "DAMAGE_TAKE", actor: 1, targets: [1], cards: [fanProduct] },
+    ],
+  });
+  ui.stepPlayback(true);   // ① 来源牌进处理区
+  ui.stepPlayback(true);   // ② 时机记录：使用中换成火【杀】
+  check("U1-07p 使用中被转化（羽扇：普通【杀】→火【杀】）：舞台换牌面（时机记录带 virtual_sources）",
+    ui.state.effectCards.length === 1
+      && String(ui.state.effectCards[0].card_id) === String(fanProduct.card_id)
+      && ui.state.effectCards[0].type === "fire_slash"
+      && String((ui.state.effectCards[0].virtual_sources || [])[0]) === "18",
+    `effect=${JSON.stringify(ui.state.effectCards.map((card) => [card.card_id, card.type]))}`);
 
   /* ---- 真会话：龙胆 / 丈八 / 八卦各一条 ---- */
   const submitEquip = async (typeId) => {

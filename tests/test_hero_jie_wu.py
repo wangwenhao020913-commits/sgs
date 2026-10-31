@@ -341,8 +341,13 @@ def test_the_standard_huanggai_kurou_is_still_repeatable_without_a_cost():
 # ---------------------------------------------------------------------------
 
 
-def test_zhaxiang_draws_three_after_every_hp_loss():
-    """正例（锁定）：失去 1 点体力后摸三张（伤害也算；不问即发动）。"""
+def test_zhaxiang_does_not_trigger_on_damage():
+    """反例（用户 2026-10-31 实机报障）：**受到伤害不算「失去体力」**，不问不摸。
+
+    伤害链里确实压了一次 ``LIFE_DECREASE`` 子帧（L8），但官方把"受到伤害"与"失去体力"当
+    两件事：【诈降】只认后者（【苦肉】这类直接扣减）。旧实现只按时机挂，于是"被打 1 点"
+    也摸三张——用户实机复现的原样。
+    """
     slash = _cards("slash")[0]
     state = build_state(
         pack=PACK,
@@ -369,9 +374,45 @@ def test_zhaxiang_draws_three_after_every_hp_loss():
     )
     run_queries(engine, [Scripted(), Scripted()], lambda e: not e._move_pending and not e.stack)
 
-    assert len(engine.state.player(0).hand) == 3, "失去 1 点体力后摸三张"
+    assert engine.state.player(0).hp == 3, "伤害照常扣体力"
+    assert len(engine.state.player(0).hand) == 0, "受到伤害**不**触发【诈降】"
     assert not engine.state.player(0).zhaxiang_active, (
         "别人回合里的体力损失不开启「本阶段」效果"
+    )
+
+
+def test_zhaxiang_draws_three_after_a_real_hp_loss():
+    """正例（锁定）：【苦肉】那种**失去体力**照常摸三张。"""
+    discard = _cards("slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_huanggai", hand=(discard,)), SeatSpec()],
+        deck=deck_excluding(PACK, discard),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=11)
+    used = {"count": 0, "before": 0}
+
+    def drive(query):
+        if query.kind == QueryKind.PLAY_PHASE and used["count"] == 0:
+            action = _find(
+                query, lambda a: isinstance(a, ActivateSkill) and a.skill_id == KUROU
+            )
+            if action is not None:
+                used["count"] += 1
+                used["before"] = len(engine.state.player(0).hand)
+                return action
+        if query.kind == QueryKind.SELECT_CARDS:
+            return SelectCards(picks=(0,), answers_seq=query.seq)
+        return None
+
+    def ready(e):
+        return e.state.player(0).zhaxiang_active
+
+    run_queries(engine, [Scripted(drive), Scripted()], ready)
+    assert engine.state.player(0).hp == 3, "界苦肉：弃一张、失去 1 点体力"
+    assert len(engine.state.player(0).hand) == used["before"] - 1 + 3, (
+        "失去体力后摸三张（【诈降】）：弃 1 张 + 摸 3 张"
     )
 
 
