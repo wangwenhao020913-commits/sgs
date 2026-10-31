@@ -79,6 +79,7 @@ __all__ = [
     "conversion_offers_by_source",
     "conversion_preactivations",
     "conversion_skill_definitions",
+    "is_forced_conversion",
     "is_transformed_action",
     "owned_conversion_skill_ids",
     "resolve_conversion_confirmation",
@@ -168,6 +169,21 @@ class ConversionSkill(HeroSkillDecl):
 
     转化技的"发动"本来就不问（它是候选入口），但锁定与否影响「所有非锁定技失效」的谓词
     （【义绝】/【铁骑】）与形态表；神关羽【武神】是首个锁定转化技。
+
+    与 :attr:`forced` **正交**：``locked`` 是"锁定技"这一**规则类型**，``forced`` 是
+    "只能 / 可以"这一**效果类型**——别拿一个推另一个。
+    """
+
+    forced: bool = False
+    """是否**强制转化**（牌面写「**只能**将…当…使用 / 打出」；当前只有神关羽【武神】）。
+
+    "可以"型（缺省 ``False``：武圣 / 龙胆 / 国色 / 急救 / 丈八…）保留源牌的原用途，
+    转化只在**预发动**里发生；"只能"型（``True``）的源牌默认就是产物——界面据此把手牌
+    画成产物、点它直接进转化清单（``pending.transform_products[*].forced``）。
+
+    **不是** :attr:`locked` 的派生值：锁定技是另一条规则类型（失效 / 形态表读它），
+    这里回答的只是"源牌还能不能按原用途用"。原用途的**合法性**仍由该技能自己的
+    ``FORBIDDEN`` 修饰器承担（武神同时声明了它与 ``forced=True``），本字段只管默认形态。
     """
     modifiers: tuple[Modifier, ...] = ()
     """这条转化技能**额外**的修饰器（M6 票 04 的加法；缺省空 = 既有六条一字不改）。
@@ -377,6 +393,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         predicate=_heart,
         scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
         locked=True,
+        forced=True,
         modifiers=(
             Modifier(ModifierPoint.TARGET_POOL, _heart_slash_target_pool),
             Modifier(ModifierPoint.FORBIDDEN, _wushen_forbidden),
@@ -487,6 +504,19 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
 票 07 界甘宁【奇袭】）。"""
 
 
+_FORCED_CONVERSION_SKILL_IDS: frozenset[str] = frozenset(
+    skill_id
+    for skill in CONVERSION_SKILLS
+    if skill.forced
+    for skill_id in skill.skill_ids
+)
+"""声明为**强制转化**（‘只能’型）的全部技能 id（当前只有 ``hero.shen_guanyu_mobile.wushen``）。
+
+由 :data:`CONVERSION_SKILLS` 的 :attr:`ConversionSkill.forced` 一次派生——不给"哪些技能
+默认画产物"留第二份名单。
+"""
+
+
 def _modifier(skill: ConversionSkill) -> Modifier:
     """一条转化技能的 ``CANDIDATES`` 修饰器（回调 = 该声明的 :meth:`candidate`）。"""
     return Modifier(ModifierPoint.CANDIDATES, skill.candidate)
@@ -575,6 +605,25 @@ def _candidate_skill_ids(state: GameState, owner: int, card: Any) -> tuple[str, 
         if instance.owner == owner
         and card.type in instance.definition.virtual_type_ids
         and instance.definition.virtual_source_count == len(sources)
+    )
+
+
+def is_forced_conversion(state: GameState, owner: int, card: Any) -> bool:
+    """这张虚拟牌候选是不是**强制转化**（‘只能’型，如【武神】）转出来的产物。
+
+    归属仍读 :func:`_candidate_skill_ids`（与清单 / 确认**同一份**判据），再问声明上的
+    :attr:`ConversionSkill.forced` —— **不读** ``SkillDef.locked``：锁定技是另一条规则
+    类型（失效 / 形态表），"只能 / 可以"是效果类型，二者正交。
+
+    纯虚拟牌（``virtual_sources`` 为空，如八卦阵的视为【闪】）不属于任何转化技 ⇒ ``False``。
+    展示层（``sgs_web.projection``）用它给 ``transform_products[*].forced``：手牌区只把
+    ``True`` 的产物画成默认牌面；``False`` 的产物仍下发（预发动提示要写「将以【X】使用」）。
+    """
+    if not getattr(card, "virtual_sources", ()):
+        return False
+    return any(
+        skill_id in _FORCED_CONVERSION_SKILL_IDS
+        for skill_id in _candidate_skill_ids(state, owner, card)
     )
 
 

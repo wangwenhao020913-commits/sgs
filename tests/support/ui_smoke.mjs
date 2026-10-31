@@ -7326,6 +7326,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     const product = {
       ...source, card_id: -23, name: "杀", type: "slash", display_name: "杀",
       attribute: "火焰", kind: "transformed", virtual_sources: [13], source_cards: [source],
+      forced: true,
     };
     const wushenPending = {
       kind: "PLAY_PHASE", actor: 0, seq: 9500,
@@ -7399,6 +7400,95 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       return order && fromBottom === 0 && ui.state.selectedOption === fromBottom;
     })(),
     `底部=${JSON.stringify(bottomSkillIds())}`);
+  ui.resetSelection();
+}
+
+/* ---- WS2：‘可以’型转化（武圣）的手牌默认仍画**原牌**，转化只走技能预发动 ----
+ *
+ * 报障（2026-10-31）：服务端 `transform_products` 里有产物 ⇒ 手牌被画成【杀】。
+ * 但产物索引的 `forced` 才是"默认画产物"的判据（‘只能’型 = 武神）；武圣是‘可以’型，
+ * 红【无中生有】必须还能按原用途使用。两者都不是 `locked` 推出来的（见服务端断言）。
+ */
+{
+  const source = {
+    ...synthCard(13, "无中生有"), display_name: "无中生有",
+    suit: "heart", rank: 12, color: "red", type: "ex_nihilo",
+  };
+  const product = {
+    ...source, card_id: -23, name: "杀", type: "slash", display_name: "杀",
+    attribute: "普通", kind: "transformed", virtual_sources: [13], source_cards: [source],
+    forced: false,
+  };
+  const pending = {
+    kind: "PLAY_PHASE", actor: 0, seq: 9501,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [
+      { kind: "UseCard", card: source, targets: [0], answers_seq: 9501 },
+      { kind: "EndPhase", answers_seq: 9501 },
+    ],
+    candidate_index: {
+      "13": { card: source, pool: [0], combos: [[0]], min_targets: 1, max_targets: 1 },
+    },
+    virtual_index: {}, option_seats: {}, context: null,
+    preactivations: {
+      "hero.guanyu.wusheng": [
+        { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["13"] }] },
+        { name: "seat", min: 1, max: 1, order: 1,
+          pool: [{ when: [], options: ["seat:1"] }] },
+      ],
+    },
+    preactivation: [],
+    transform_products: [product],
+  };
+  const view = synthView(pending);
+  view.snapshot.self_hand = [source];
+  view.skills = [{
+    skill_id: "hero.guanyu.wusheng", name: "武圣", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: false, preactivated: false,
+    ui: { requirement: "选择1张红色牌当【杀】使用或打出", convert_sources: [13] },
+  }];
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const handNode = $("t-hand").children[0];
+  const child = (cls) => Array.from(handNode.children).find(
+    (node) => String(node.className).split(/\s+/).includes(cls),
+  );
+  const corner = child("corner");
+  const cname = child("cname");
+  check("WS2-1 可转化（武圣）的手牌仍画**原牌**：红【无中生有】不带「转」角标",
+    !!handNode
+      && handNode.getAttribute("data-card-id") === "13"
+      && handNode.getAttribute("data-kind") === "normal"
+      && !handNode.classList.contains("attr-fire")
+      && corner === undefined
+      && !!cname && cname.textContent === "无中生有",
+    `id=${handNode && handNode.getAttribute("data-card-id")}`
+      + ` kind=${handNode && handNode.getAttribute("data-kind")}`
+      + ` corner=${corner && corner.textContent} name=${cname && cname.textContent}`);
+
+  clickNode(handNode);
+  check("WS2-2 点它 = 按**原用途**用这张牌（焦点留在原牌），不进入转化预发动",
+    ui.state.focusCardId === 13
+      && !ui.state.preactivation
+      && ui.state.convertSkill === null,
+    `focus=${ui.state.focusCardId} pre=${!!ui.state.preactivation}`
+      + ` convert=${ui.state.convertSkill}`);
+
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+  const wusheng = Array.from($("t-skills").children).find(
+    (node) => node.getAttribute("data-skill-id") === "hero.guanyu.wusheng");
+  if (wusheng) clickNode(wusheng);
+  check("WS2-3 转化仍只经**技能预发动**进入：点武圣 ⇒ 清单本地态",
+    !!wusheng
+      && !!ui.state.preactivation
+      && ui.state.preactivation.skillId === "hero.guanyu.wusheng",
+    `button=${!!wusheng} skill=${ui.state.preactivation && ui.state.preactivation.skillId}`);
   ui.resetSelection();
 }
 

@@ -22,6 +22,12 @@
 | **转化声明** | 「你可以将一张 X 当 Y 使用或打出」 | 【武圣】`hero.guanyu.wusheng`、界【国色】`hero.jie_daqiao.guose` |
 | **纯声明 / 状态位** | 只有被动约束或状态（空城、马术、谦逊放置） | 【空城】`hero.zhugeliang.kongcheng`、【谦逊】`hero.jie_luxun.qianxun` |
 
+> **「只能」型转化另立一档**：牌面写「**只能**将一张 X 当 Y 使用或打出」（当前只有神关羽
+> 【武神】）时，在 `ConversionSkill` 上声明 `forced=True`。它与 `locked` **正交**：锁定技是
+> 另一条规则类型（失效 / 形态表），`forced` 只回答"源牌还能不能按原用途用"——`forced=True`
+> 的源牌由界面默认画成产物；「可以」型（`forced=False`，武圣 / 龙胆 / 国色 / 急救 / 丈八）
+> 保留原牌，转化只经预发动。别用 `locked` 推 `forced`。
+
 ## 2. 形状表（选中**一行**，命不中 ⇒ 停 C1）
 
 | 形状 | 典型牌面 | 样板技能（必须存在于 `CATALOG`） |

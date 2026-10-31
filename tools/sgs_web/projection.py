@@ -42,6 +42,7 @@ from sgs.skills import (
     SEAT_PREFIX,
     ModifierPoint,
     conversion_offers_by_source,
+    is_forced_conversion,
     lord_skill_allowed,
     resolve_instances,
 )
@@ -117,7 +118,11 @@ def _active_virtual_cards(engine: Any) -> tuple[Any, ...]:
 
 
 def _transform_products(
-    query: Query, *, lookup: dict[int, Any] | None = None
+    query: Query,
+    *,
+    lookup: dict[int, Any] | None = None,
+    state: Any | None = None,
+    owner: int | None = None,
 ) -> list[dict[str, Any]]:
     """转化清单的**产物索引**（U1-07）：正在这次询问里的全部产物牌面。
 
@@ -125,6 +130,13 @@ def _transform_products(
     是红 / 黑 / 无，必须读这份展示派生。数据只来自**本次询问内部的转化候选**
     （``Query.transform_actions``）——它们已经从 ``legal_actions`` 收回，不会重新打开
     "手牌直接点一下就当【杀】"的老路径。
+
+    ``forced``（报障 2026-10-31）：这份产物是不是**强制转化**（‘只能’型，如【武神】）
+    转出来的。手牌区只把 ``forced=True`` 的产物画成默认牌面（点它进转化清单）；
+    ‘可以’型（武圣 / 龙胆 / 国色 / 急救 / 丈八 / 羽扇）的产物**仍下发**（预发动提示要读
+    牌名 / 颜色），但 ``forced=False`` —— 源牌保持原样，转化只走技能预发动。判据读
+    声明 :attr:`~sgs.skills.heroes.ConversionSkill.forced`（**不是** ``locked``）；
+    拿不到引擎（409 的裸 ``Query``）时降级为 ``False``（fail-closed，不画产物）。
 
     按产物 ``card_id`` 去重（同一来源组 / 同一目标类型只出现一次）。界面按选中来源
     牌组匹配（与 `session.js:sourceGroupKey` 同一份分组规则）；若同一组来源牌能产出
@@ -138,7 +150,13 @@ def _transform_products(
             continue
         if card.card_id in out:
             continue
-        out[card.card_id] = card_payload(card, lookup=lookup)
+        payload = card_payload(card, lookup=lookup)
+        payload["forced"] = bool(
+            state is not None
+            and owner is not None
+            and is_forced_conversion(state, owner, card)
+        )
+        out[card.card_id] = payload
     return list(out.values())
 
 
@@ -2152,7 +2170,14 @@ def pending_payload(
     # U1-07：转化清单的产物索引（全部产物牌面）。清单本身只说"选哪些来源牌"，
     # 界面要写「将以【X】使用」只能读这份派生；不是查看者的询问 ⇒ 空列表（fail-closed）。
     payload["transform_products"] = (
-        _transform_products(query, lookup=lookup) if same_viewer else []
+        _transform_products(
+            query,
+            lookup=lookup,
+            state=session.engine.state if isinstance(session, Session) else None,
+            owner=int(query.actor),
+        )
+        if same_viewer
+        else []
     )
     decorate_pending(
         payload,

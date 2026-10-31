@@ -4947,6 +4947,7 @@ def test_the_pending_payload_lists_the_transform_product_for_each_source() -> No
     assert product is not None, f"来源组 {first},{second} 的产物必须下发：{len(products)} 张"
     assert product["kind"] == "transformed"
     assert product["display_name"] == "杀"
+    assert product["forced"] is False, "丈八是‘可以’型：产物只用于提示，手牌不画成【杀】"
     assert len({candidate["card_id"] for candidate in products}) == len(products), (
         "同一产物只下发一次"
     )
@@ -4955,6 +4956,79 @@ def test_the_pending_payload_lists_the_transform_product_for_each_source() -> No
     foreign = pending_payload(engine.pending, human_seat=1)
     assert foreign is not None and foreign["transform_products"] == [], (
         "别人的转化方向不随询问下发"
+    )
+
+
+def _play_phase_session(hero: str, hand_card: int) -> Session:
+    """真引擎：4 人局、座位 0 = ``hero``、停在**座位 0 的出牌阶段**。
+
+    与 :func:`_real_transform_engine` 同一推进手法；``human_seat = 0`` 让挂起载荷
+    按"查看者就是询问者"下发（``transform_products`` 只给这个座位）。
+    """
+    pack = _context_pack()
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero=hero, hand=(hand_card,)),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=tuple(
+            card_id for card_id in range(len(pack.deck.cards)) if card_id != hand_card
+        ),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=1)
+    for _ in range(400):
+        if engine.pending is not None and engine.pending.kind == QueryKind.PLAY_PHASE:
+            break
+        engine._step()  # noqa: SLF001 - 与 _real_transform_engine 同一推进手法
+    assert engine.pending is not None and engine.pending.kind == QueryKind.PLAY_PHASE, (
+        "真引擎应当停在座位 0 的出牌阶段"
+    )
+    session = Session(pack=pack, seed=1, ai="random", timeout_seconds=None, player_count=4)
+    session.engine = engine
+    session.human_seat = 0
+    return session
+
+
+def test_the_pending_payload_marks_the_forced_conversion_product() -> None:
+    """报障（2026-10-31）：产物索引要能区分**‘只能’型**与**‘可以’型**转化。
+
+    分界是声明上的**效果类型**（``ConversionSkill.forced``），不是 ``SkillDef.locked``：
+
+    - 武神（‘只能’）：源牌只能当【杀】⇒ 每个产物 ``forced is True``，手牌区默认画产物；
+    - 武圣（‘可以’）：源牌保留原用途 ⇒ 产物照发（预发动要写「将以【杀】使用」）但
+      ``forced is False``，手牌区**不**画产物。
+
+    两者都不是靠"锁定 / 非锁定"推出来的：锁定技是另一条规则类型（失效 / 形态表读它）。
+    """
+    pack = _context_pack()
+    heart = next(
+        card_id
+        for card_id in cards_of_type(pack, "peach")
+        if pack.deck.cards[card_id].suit == "heart"
+    )
+    forced_payload = pending_payload(_play_phase_session("shen_guanyu_mobile", heart))
+    assert forced_payload is not None
+    forced_products = forced_payload["transform_products"]
+    assert forced_products, "武神的红桃手牌必须产出【杀】产物（提示条要读它）"
+    assert all(product["forced"] is True for product in forced_products), (
+        f"武神是‘只能’型：产物都该带 forced=true，实际 {forced_products}"
+    )
+
+    red = next(
+        card_id
+        for card_id in cards_of_type(pack, "peach")
+        if pack.deck.cards[card_id].suit in {"heart", "diamond"}
+    )
+    optional_payload = pending_payload(_play_phase_session("guanyu", red))
+    assert optional_payload is not None
+    optional_products = optional_payload["transform_products"]
+    assert optional_products, "武圣的产物仍要下发（预发动提示要写「将以【杀】使用」）"
+    assert all(product["forced"] is False for product in optional_products), (
+        f"武圣是‘可以’型：产物都不该带 forced=true，实际 {optional_products}"
     )
 
 

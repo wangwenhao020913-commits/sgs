@@ -122,6 +122,31 @@ def _respond(required: str, *, mode: RespondMode = RespondMode.PLAY, targets: tu
 
 
 # ---------------------------------------------------------------------------
+# 效果类型：‘只能’型转化 vs ‘可以’型转化（报障 2026-10-31）
+# ---------------------------------------------------------------------------
+
+
+def test_only_wushen_is_declared_as_a_forced_conversion():
+    """‘只能’型转化只有武神；分界是 ``ConversionSkill.forced``，**不是** ``locked``。
+
+    两条判据正交：``locked`` 是“锁定技”这一规则类型（「所有非锁定技失效」/ 形态表读它）；
+    ``forced`` 是**效果类型**——源牌只能当产物（武神），还是保留原用途、转化只在预发动里
+    发生（武圣 / 龙胆 / 国色 / 急救 / 丈八）。将来新增“只能”型转换必须显式改这张表，
+    不能借锁定与否顺带推出。
+    """
+    from sgs.skills.heroes import CONVERSION_SKILLS
+
+    forced = {
+        skill_id
+        for skill in CONVERSION_SKILLS
+        if skill.forced
+        for skill_id in skill.skill_ids
+    }
+
+    assert forced == {"hero.shen_guanyu_mobile.wushen"}, forced
+
+
+# ---------------------------------------------------------------------------
 # id 派生：单源 / 多源 / 纯虚拟三类不撞（验收 1 / 4；票 03 §要做什么 1）
 # ---------------------------------------------------------------------------
 

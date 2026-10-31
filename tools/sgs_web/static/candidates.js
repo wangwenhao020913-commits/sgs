@@ -42,13 +42,19 @@ function cardEntry(pending, cardId) {
   return cardIndex(pending)[String(aliases[0].card_id)] || null;
 }
 
-/** 这张手牌此刻被**强制转化**成什么（神关羽【武神】这类**锁定转化**）。
+/** 这张手牌此刻被**强制转化**成什么（‘只能’型转化，如神关羽【武神】）。
  *
- * 只读服务端 `pending.transform_products`（转化清单的产物索引，带 `source_cards`）：
- * 手牌区据此把源牌画成产物牌面（右上角「转」、悬停列出源牌）。读不到就是普通手牌。
+ * 只读服务端 `pending.transform_products` 的 ``forced`` 标记（声明面 =
+ * `ConversionSkill.forced`，**不是**锁定与否）：手牌区据此把源牌画成产物牌面
+ * （右上角「转」、悬停列出源牌），点它进转化清单。
+ *
+ * ‘可以’型（武圣 / 龙胆 / 国色 / 急救 / 丈八 / 羽扇）的产物**仍会下发**——预发动提示要
+ * 写「将以【X】使用」——但 ``forced === false``：手牌保持**原牌**，原用途照常可用，
+ * 转化只经技能预发动。缺字段 / 不是 ``true`` ⇒ 不画（fail-closed，不把原牌吞成产物）。
  */
 function convertedForm(pending, cardId) {
   for (const product of (pending && pending.transform_products) || []) {
+    if (product.forced !== true) continue;
     for (const source of product.source_cards || []) {
       if (String(source.card_id) === String(cardId)) return product;
     }
