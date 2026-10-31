@@ -23,6 +23,28 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "shen_lvmeng_mobile",
+      "name": "神吕蒙移动版",
+      "true_name": "神吕蒙",
+      "kingdom": "shen",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "feng-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "shelie",
+          "name": "涉猎",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "gongxin",
+          "name": "攻心",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

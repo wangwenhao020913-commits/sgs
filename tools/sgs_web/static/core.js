@@ -245,6 +245,12 @@ const state = {
   // 纪律的唯一例外。这里只记"已经自动提交过哪一问"（`pending.seq`）：重复的倒计时
   // tick / 重复渲染不会发第二次；网络失败也不重试（服务端超时兜底）。
   arrangeAutoSeq: null,
+  // 票 01：涉猎的"提交 / 放弃 / 超时"同义——到时限前由前端提交**当前选择**（与观星同一
+  // 个提前量）。`suitAutoSeq` 记"已经自动提交过哪一问"；`suitResult` 是提交成功后本地的
+  // 2.5 秒结果态（`{cards, picked, until, title}`，仅发动者的屏幕）。
+  suitAutoSeq: null,
+  suitResult: null,
+  suitResultTimer: null,
   // U2-06：询问弹窗（`#t-dialog`）的本地态。`kind` = `stepDialogKind()` 的种类或
   // `"preactivation"`（预发动清单借同一个容器，但仍是牌桌表面）；`key` = 当前窗口实例
   // （同一问的重复渲染保留折叠，换问关旧开新）；`collapsed` 只改遮挡、不参与只读判据。

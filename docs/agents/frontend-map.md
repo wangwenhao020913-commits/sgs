@@ -20,13 +20,13 @@
 | `effects.js` | 动效层：目标线、行动者高亮、体力闪、技能名飘字 / 白光；寿命判定是纯函数。 |
 | `preactivation.js` | 预发动清单、转化技来源模式、清单到 Action 的组装。 |
 | `interaction.js` | 点选：卡面芯片、点牌设焦点、点座位选目标、弃牌点选。 |
-| `pending.js` | 询问按种类分派到专用面、提示条右端动作、取消 / 不支持面 fail-closed。 |
+| `pending.js` | 询问按种类分派到专用面、提示条右端动作、取消 / 不支持面 fail-closed；涉猎的结果态门闸（`state.suitResult`）。 |
 | `options.js` | 选项按钮组、选择面槽位、「提供一张 B」、Action 文案与右端动作下标。 |
-| `reveal.js` | 亮牌模板（五谷 / 遗计复用）与目标条；判据仍住 `modal.js`。 |
-| `modal.js` | 询问弹窗框架与武将详情壳：`selectionEnabled`、`stepDialogKind`、`DIALOG_KINDS`。 |
+| `reveal.js` | 亮牌模板（五谷 / 遗计复用）与目标条；**按花色取牌**（涉猎：一行式、同花色置灰、2.5 秒结果态 `renderSuitResult`）；判据仍住 `modal.js`。 |
+| `modal.js` | 询问弹窗框架与武将详情壳：`selectionEnabled`、`stepDialogKind`、`DIALOG_KINDS`（含涉猎的 `suit`）、`dialogDisablesPass`（亮牌步带 `Pass` 时可放弃）。 |
 | `hero-detail.js` | 武将详情正文（技能清单）与开合绑定。 |
 | `arrange.js` | 排列面双行布局（观星自由切分 / 恂恂固定切分）：移动判据（插入 / 固定切分跨行互换）、拖拽落点（指针过牌面中点即"之后"）与落点预览（占位格让道 / 交换高亮）、提交载荷。 |
-| `answer.js` | 倒计时三色、`buildAction`、`submitAction`（`POST …/answer`）、`clearSelection`。 |
+| `answer.js` | 倒计时三色、`buildAction`、`submitAction`（`POST …/answer`）、`clearSelection`；两个前端代答例外（观星 `ARRANGE` / 涉猎 `suit` 到点自动提交当前选择）；涉猎提交后的 2.5 秒结果态。 |
 | `log.js` | 事件流三档（简易 = 服务端叙事 / 完整重点 / 完整全部）。 |
 | `replay.js` | 回放页：录像列表、按记录重建座位全区、询问面板与播放控制。 |
 | `anim.js` | 飞行层（U4-01）：`(reason, to_zone, from_zone)` 分类表、起 / 落点锚点、`anim.ini` 时长表载入、飞行器生成；阶段 / 回合飘字（U4-04）的 `#t-anim-phase` 层与 `animPlanPhase` 也在这里；`durationOf(record)` 是节奏公式（票 02）的只读时长口。 |

@@ -484,8 +484,8 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 57 and len(catalog) == 32, (
-        "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；票 08 加神关羽移动版 ⇒ 57 / 32"
+    assert len(flat) == 58 and len(catalog) == 33, (
+        "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33"
     )
     for group in catalog:
         true_name = group["true_name"]
@@ -2616,7 +2616,10 @@ def test_the_replay_api_carries_the_queries_and_zone_moves_the_page_draws(tmp_pa
     候选，``card_move`` 记录带 ``from_zone`` / ``to_zone``，手牌与装备 / 判定 / 处理区都能
     由增量重建。这里钉的是"API 不把这些字段裁掉"——裁掉时页面会静默变成空壳。
     """
-    session = _finished_session(seed=1)
+    # 换池历史：神吕蒙移动版进池（57 → 58）后 seed 1 的 2 人局不再走过"带槽位的选牌"；
+    # 按同一判据（终局 + 至少一条带非空 slots 的 SELECT_CARDS + 牌移动覆盖
+    # hand / equip / judge / processing）从 1 重扫到 **seed 3**。
+    session = _finished_session(seed=3)
     save_run(tmp_path, session)
     name = next(tmp_path.glob("*.jsonl")).name[: -len(".jsonl")]
 
@@ -2677,9 +2680,10 @@ def test_the_session_view_carries_the_human_seats_skills() -> None:
     registry = GameRegistry(runs_dir="/tmp/unused")
     # 判据（未放宽）：人类座位发到**标准版**武将（界将的显示归票 19，名称解析仍读内容包表）。
     # M6 票 18 换池（版本 50 → 54）后 20261001 的人类是界夏侯惇，按同一判据
-    # （人类座位发到**标准版**武将）重扫到 20261002。
+    # （人类座位发到**标准版**武将）重扫到 20261002；神吕蒙移动版进池（57 → 58）后
+    # 20261002 的人类是**非主公的曹操**（缺【护驾】）⇒ 按同一判据重扫到 **20260991**（吕蒙）。
     session = registry.create(
-        {"player_count": 8, "ai": "heuristic", "seed": 20261002, "timeout_seconds": None}
+        {"player_count": 8, "ai": "heuristic", "seed": 20260991, "timeout_seconds": None}
     )
     payload = registry.view(session, after=-1, logs_after=0)
 
@@ -6238,7 +6242,7 @@ MILITARY_CARD_TYPE_IDS = frozenset(
 
 
 def test_every_card_name_and_skill_id_has_a_description() -> None:
-    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 121 条技能一条不缺。
+    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 127 条技能一条不缺。
 
     缺一条时断言消息**直接列出缺的 key**（不是只报一个总数）——这是票面的验收判据。
     多余 / 拼错的 key 也一并拦：否则「43 条」可以是 42 条真条目 + 1 条错拼。
@@ -6257,7 +6261,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 125, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 127, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)
@@ -6333,10 +6337,11 @@ def test_the_card_and_skill_contracts_carry_the_server_side_description() -> Non
     from sgs_web.descriptions import card_description, skill_description
     from sgs_web.display import card_display
 
-    # M6 票 15 换池（版本 41 → 43）后 seed 5 的人类是界马超：详情清单的名称解析仍读
-    # 内容包表（界将的显示归票 19），`build_skills` 因此拿不到条目、本测试的
-    # "人类座位至少有一条武将技能"失去消费者。按同一判据（人类是标准版武将）从 1 重扫到 2。
-    session = Session(seed=2, ai="random", timeout_seconds=None, player_count=4)
+    # 换池历史：M6 票 15（41 → 43）seed 5 的人类是界马超（界将显示未接，`build_skills`
+    # 拿不到条目）⇒ 重扫到 2；神吕蒙移动版进池（57 → 58）后 seed 2 的人类首问变成
+    # 摸牌阶段的技能询问（候选无牌）⇒ 按同一判据（人类是标准版武将 + 首问有候选牌）
+    # 从 1 重扫，首个命中 **seed 4**（关羽：首问 = 出牌阶段，3 张候选牌）。
+    session = Session(seed=4, ai="random", timeout_seconds=None, player_count=4)
     snapshot = visible_snapshot(session)
 
     # 真产品路径：HTTP 门面拼的响应体（serve.GameRegistry.view）里就得有全文。
@@ -6976,6 +6981,10 @@ def test_the_replay_payload_uses_the_same_observer_filtered_narrative(tmp_path: 
     assert run["narrative"] == engine_entries, "模型记录与 JSON 记录生成了不同的叙事"
 
     # 观察者过滤在回放载入路径上也成立：对手摸牌只给张数。
+    # 判据用**同一份可见性函数**（`cards_visible`）：从**人类自己的手牌**交出去的那张
+    # （顺 / 借刀 / 突袭）对查看者是可见的，写牌名不算泄露。
+    from sgs_web.visibility import cards_visible
+
     records = run["records"]
     checked = 0
     for record in records:
@@ -6987,6 +6996,8 @@ def test_the_replay_payload_uses_the_same_observer_filtered_narrative(tmp_path: 
             continue
         if record["from_zone"]["zone"] not in ("deck", "hand"):
             continue
+        if cards_visible(record, run["meta"]["human_seat"]):
+            continue  # 来源是人类自己的手牌 ⇒ 牌面对查看者可见
         line = _line_at(run["narrative"], record["seq"])
         if line is None:
             continue  # 开局发牌不进叙事

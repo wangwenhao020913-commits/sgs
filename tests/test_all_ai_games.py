@@ -764,7 +764,7 @@ def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -
     """
     pool = enabled_hero_ids()
     true_names = {hero_by_id(hero_id).true_name for hero_id in pool}
-    assert (len(pool), len(true_names)) == (57, 32), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版）"
+    assert (len(pool), len(true_names)) == (58, 33), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版）"
 
     engine = _new_engine(seed, players=M6_CLOSEOUT_PLAYERS)
     scans = _participants(seed, M6_CLOSEOUT_PLAYERS)

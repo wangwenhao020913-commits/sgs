@@ -1553,14 +1553,15 @@ def _heart_and_black() -> tuple[int, int]:
 
 
 def _gongxin_player(*, heart: int | None, option: str | None):
-    """座位 0 的脚本：发动【攻心】→ 选座位 1 →（可选）选红桃 → 选处置方式。"""
+    """座位 0 的脚本：发动【攻心】→ 选座位 1 →（可选）选红桃 → 选处置方式。
+
+    ``heart=None`` = 看完整副手牌后**放弃展示**（不再表示"不发动"）：用户裁定「可以」必含
+    放弃出口，所以这条路径现在真的会发出一条（可能可选槽为空的）观看询问。
+    """
 
     def handler(query):
         if query.kind == QueryKind.PLAY_PHASE.value:
-            action = _activate(query, LVMENG_GONGXIN)
-            if action is not None and heart is not None:
-                return action
-            return None
+            return _activate(query, LVMENG_GONGXIN)
         if query.kind == QueryKind.SELECT_OPTION.value and str(query.skill_id) == "gongxin:seat":
             return _seat_option(query, 1)
         if query.kind == QueryKind.SELECT_CARDS.value:
@@ -1614,7 +1615,11 @@ def test_gongxin_can_put_the_heart_on_top_of_the_deck():
 
 
 def test_gongxin_may_pass_on_the_heart_and_handles_a_hand_without_hearts():
-    """反例：可以看完不展示（Pass）；手牌全是黑色 ⇒ 连选牌询问都不发。"""
+    """反例：可以看完不展示（Pass）；手牌全是黑色 ⇒ 仍然发一条**空选择面**的观看询问。
+
+    用户裁定 2026-10-31：只要目标有手牌就必须能观看——没有红桃不再跳过询问，弹窗展示
+    整副手牌、唯一出口是「放弃」（Pass）。两个武将（界吕蒙 / 神吕蒙移动版）共用这条流水线。
+    """
     heart, black = _heart_and_black()
     engine = _gongxin_state(target_hand=(black, heart))
     run_until(
@@ -1636,9 +1641,13 @@ def test_gongxin_may_pass_on_the_heart_and_handles_a_hand_without_hearts():
         [_gongxin_player(heart=None, option=None), PassPlayer()],
         lambda e: e.state.turn_seat == 1,
     )
-    assert [
+    watch = [
         query for query in _queries(engine, QueryKind.SELECT_CARDS.value) if query.actor == 0
-    ] == [], "没有红桃牌可展示 ⇒ 不发空询问"
+    ]
+    assert len(watch) == 1, "没有红桃 ⇒ 仍发一条观看询问（0 个可选槽）"
+    assert watch[0].slots == ()
+    assert {card.card_id for card in watch[0].revealed} == set(all_black), "整副手牌仍授予"
+    assert [action.kind for action in watch[0].legal_actions] == ["Pass"]
 
 
 # ---------------------------------------------------------------------------

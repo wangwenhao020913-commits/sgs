@@ -491,7 +491,7 @@ const sessionBodiesSince = (from) =>
 await ui.loadHeroCatalog();
 const catalogVersions = ui.heroVersions();
 check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版，按真名分组）",
-  ui.state.heroCatalog.length === 32 && catalogVersions.length === 57,
+  ui.state.heroCatalog.length === 33 && catalogVersions.length === 58,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -9084,8 +9084,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `hint="${$("t-target-hint").textContent}" products=${longdanPending && (longdanPending.transform_products || []).length}`);
   ui.cancelOrClear();
 
-  // ② 丈八蛇矛：seed 9 起始手牌有它；装备后真会话给出两来源步的转化清单。
-  await newSession(9);
+  // ② 丈八蛇矛：seed 38 起始手牌有它；装备后真会话给出两来源步的转化清单。
+  await newSession(38);
   let equippedSerpent = false;
   for (let step = 0; step < 80 && !equippedSerpent; step += 1) {
     const pending = ui.state.view.pending;
@@ -9104,7 +9104,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     && serpentPending.preactivations["equip.serpent_spear"]) || null;
   const serpentButton = Array.from($("t-skills").children).find(
     (node) => node.getAttribute("data-skill-id") === "equip.serpent_spear");
-  check("U1-07k 真会话【丈八】：seed 9 装备后服务端下发两来源步清单，技能按钮可点",
+  check("U1-07k 真会话【丈八】：seed 38 装备后服务端下发两来源步清单，技能按钮可点",
     equippedSerpent && serpentEquip.includes("serpent_spear")
       && Boolean(serpentSteps) && serpentSteps.length >= 1
       && serpentSteps[0].min === 2 && serpentSteps[0].max === 2
@@ -11370,11 +11370,11 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
  * 两段：
  *   ① 合成载荷（字段与真 payload 同形）：窗口不关、不占选项行、无懈可提交、下一次取牌
  *      复用同一个链键；
- *   ② **真生产路径**（种子 238、5 人、random AI、人类座位 0）：开局就是"人类手里有【无懈】、
+ *   ② **真生产路径**（种子 526、5 人、random AI、人类座位 0）：开局就是"人类手里有【无懈】、
  *      五谷已亮牌"的 RESPOND 窗口；逐字段断言 DOM 读的是 `harvest.revealed / taken_by /
  *      targets / current`，再驱动到真实取牌步，断言同一窗口切回正常取牌模式。
  *      （票 12 切每座位 `ai:<seat>` 子流后原种子 198 不再落到这个窗口，按本文件纪律
- *      在 5 人 random AI 里重扫：238 的 revealed=5 / current=3、且人类手里真有【无懈】，
+ *      在 5 人 random AI 里重扫：526 的 revealed=5 / current=3、且人类手里真有【无懈】，
  *      与旧断言同形。）
  */
 {
@@ -11600,14 +11600,14 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && Array.from($("t-options-home").children).includes($("t-options")),
     `dialogHidden=${$("t-dialog").hidden} revealHidden=${$("t-dialog-reveal").hidden} revealChildren=${$("t-dialog-reveal").children.length} key=${ui.state.dialog.key}`);
 
-  // ---- ④ 真生产路径：种子 238（5 人）开局 = 人类持有【无懈】的五谷无懈窗口 ----
+  // ---- ④ 真生产路径：种子 526（5 人）开局 = 人类持有【无懈】的五谷无懈窗口 ----
   ui.state.sessionId = null;
   ui.state.view = null;
-  await newSession(238, { player_count: 5 });
+  await newSession(526, { player_count: 5 });
   const realResponse = ui.state.view.pending;
   const realHarvest = realResponse && realResponse.harvest;
   const realKey = ui.state.dialog.key;
-  check("U2-R7 真会话（种子 238 / 5 人 / random AI）：开局 pending 就是带 harvest 的无懈 RESPOND",
+  check("U2-R7 真会话（种子 526 / 5 人 / random AI）：开局 pending 就是带 harvest 的无懈 RESPOND",
     !!realResponse && realResponse.kind === "RESPOND" && realResponse.cause === "NULLIFY"
       && !!realHarvest && realHarvest.active === true
       && realHarvest.revealed.length === 5 && realHarvest.current === 3,
@@ -18053,10 +18053,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   /* ---- B1：五谷亮牌弹窗在源牌结算完时当场收起 -------------------------------- */
   resetAll();
-  // 种子 238 / 5 人：开局的人类第一问就是【五谷丰登】的逐目标无懈窗口（既有用例同源；
+  // 种子 526 / 5 人：开局的人类第一问就是【五谷丰登】的逐目标无懈窗口（既有用例同源；
   // 票 12 切每座位子流后原种子 198 失效，按本文件纪律重扫）。
   const harvestBody = await post("/api/sessions", {
-    player_count: 5, ai: "random", human_seat: 0, timeout_seconds: null, seed: 238,
+    player_count: 5, ai: "random", human_seat: 0, timeout_seconds: null, seed: 526,
   });
   ui.state.sessionId = harvestBody.session_id;
   ui.state.view = null;
@@ -18329,5 +18329,210 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   clearAsk();
 }
 
+
+
+/* ============ 票 01（合成局面）：涉猎的按花色取牌 + 攻心的「放弃」 ============
+ *
+ * 两块都是**界面读法**：载荷形状 → 弹窗 / 置灰 / 出口。服务端那一侧（`max_per_suit`
+ * 的候选收窄、`ask_when_empty` 的询问）由 `tests/test_hero_feng.py` 钉。
+ */
+
+{
+  const suitCard = (id, name, suit) => ({
+    ...synthCard(id, name),
+    suit,
+    color: suit === "heart" || suit === "diamond" ? "red" : "black",
+  });
+  const five = [
+    suitCard(101, "桃", "heart"),
+    suitCard(102, "闪", "diamond"),
+    suitCard(103, "杀", "club"),
+    suitCard(104, "酒", "spade"),
+    suitCard(105, "桃", "heart"),
+  ];
+  const suitPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 9501, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", picks: [], answers_seq: 9501 },
+      { kind: "SelectCards", picks: [0], answers_seq: 9501 },
+      { kind: "SelectCards", picks: [1], answers_seq: 9501 },
+      { kind: "SelectCards", picks: [2], answers_seq: 9501 },
+      { kind: "SelectCards", picks: [3], answers_seq: 9501 },
+      { kind: "SelectCards", picks: [4], answers_seq: 9501 },
+      { kind: "SelectCards", picks: [0, 1], answers_seq: 9501 },
+    ],
+    candidate_index: {}, option_seats: {},
+    context: { requirement: "获得其中每种花色的牌各一张", skill_hints: [] },
+    preactivations: {}, preactivation: [],
+    slots: five.map((card) => ({ ref: { zone: "processing", seat: null }, card })),
+    spec: { zones: ["processing"], total: [0, 4], max_per_suit: 1 },
+  };
+  const suitView = synthView(suitPending);
+  suitView.snapshot.processing = five;
+  ui.state.sessionId = null;
+  ui.state.picks = [];
+  ui.state.suitResult = null;
+  ui.state.view = suitView;
+  ui.renderTable();
+  ui.renderPending(suitView);
+
+  const findAll = (root, predicate) => {
+    const out = [];
+    const walk = (node) => {
+      for (const child of node.children || []) {
+        if (predicate(child)) out.push(child);
+        walk(child);
+      }
+    };
+    walk(root);
+    return out;
+  };
+  const suitNodes = () => findAll($("t-options"), (node) => node.getAttribute
+    && node.getAttribute("data-suit")
+    && node.getAttribute("data-slot-index") !== undefined);
+  const byCard = (cardId) => suitNodes().find(
+    (node) => node.getAttribute("data-card-id") === String(cardId)) || null;
+
+  check("票 01-S1 按花色取牌 = 新弹窗（kind=suit），五张公开牌都在",
+    ui.stepDialogKind(suitPending) === ui.DIALOG_KINDS.suit
+      && !$("t-dialog").hidden && suitNodes().length === 5,
+    `kind=${ui.stepDialogKind(suitPending)} cards=${suitNodes().length}`);
+  check("票 01-S2 提交恒可点（0 张也合法）",
+    $("btn-submit").disabled === false && $("btn-cancel").disabled === true,
+    `submit=${$("btn-submit").disabled} cancel=${$("btn-cancel").disabled}`);
+  check("票 01-S3 右端「放弃」可见（与提交同义，不是 Pass 候选）",
+    $("btn-pass").hidden === false && $("btn-pass").textContent === "放弃",
+    `hidden=${$("btn-pass").hidden} text=${$("btn-pass").textContent}`);
+
+  await clickAndWait(byCard(101));
+  check("票 01-S4 点一张红桃 = 选中；同花色另一张置灰、不可点",
+    ui.state.picks.length === 1 && byCard(101).getAttribute("data-picked") === "true"
+      && byCard(105).getAttribute("data-dim") === "true"
+      && !(byCard(105).listeners.click || []).length,
+    JSON.stringify({ picks: ui.state.picks, dim: byCard(105).getAttribute("data-dim") }));
+  const dimHeart = byCard(105);
+  await clickAndWait(dimHeart);
+  check("票 01-S5 置灰牌点了不改变选择",
+    ui.state.picks.length === 1 && ui.state.picks[0] === 0,
+    JSON.stringify(ui.state.picks));
+  await clickAndWait(byCard(101));
+  check("票 01-S6 再点已选牌 = 取消选中，同花色另一张重新亮起",
+    ui.state.picks.length === 0 && !byCard(105).getAttribute("data-dim")
+      && !!(byCard(105).listeners.click || []).length,
+    JSON.stringify(ui.state.picks));
+
+  // 提交 = 一条 SelectCards（面内位置）；放弃 = 同一条（先选一张再点右端放弃）。
+  ui.state.sessionId = "smoke-missing-session";
+  await clickAndWait(byCard(101));
+  const beforeSuit = calls.length;
+  await clickAndWait($("btn-submit"));
+  const sentSuit = calls.length > beforeSuit ? calls[calls.length - 1].body.action : null;
+  check("票 01-S7 提交 = SelectCards（picks 指向选中的槽位）",
+    !!sentSuit && sentSuit.kind === "SelectCards"
+      && JSON.stringify(sentSuit.picks) === "[0]",
+    JSON.stringify(sentSuit));
+  ui.state.sessionId = null;
+  ui.state.picks = [];
+  ui.renderPending(suitView);
+  await clickAndWait(byCard(102));
+  ui.state.sessionId = "smoke-missing-session";
+  const beforeGiveUp = calls.length;
+  await clickAndWait($("btn-pass"));
+  const sentGiveUp = calls.length > beforeGiveUp ? calls[calls.length - 1].body.action : null;
+  check("票 01-S8 右端「放弃」= 提交当前选择（与提交完全相同）",
+    !!sentGiveUp && sentGiveUp.kind === "SelectCards"
+      && JSON.stringify(sentGiveUp.picks) === "[1]",
+    JSON.stringify(sentGiveUp));
+
+  // 2.5 秒结果态：获得的亮、其余置灰；标题读提交时记下的技能名。
+  ui.state.sessionId = null;
+  ui.state.picks = [];
+  ui.state.suitResult = {
+    cards: five, picked: [0, 2], until: Date.now() + 2500, title: "涉猎",
+  };
+  const afterPending = {
+    ...suitPending, seq: 9502, kind: "PLAY_PHASE",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9502 }],
+  };
+  const afterView = synthView(afterPending);
+  ui.state.view = afterView;
+  ui.renderPending(afterView);
+  const resultNodes = suitNodes();
+  check("票 01-S9 提交后 2.5 秒结果态：获得的牌亮、其余置灰",
+    resultNodes.length === 5
+      && resultNodes.filter((node) => node.getAttribute("data-dim") === "true").length === 3
+      && resultNodes.filter((node) => node.classList.contains("sel")).length === 2,
+    `nodes=${resultNodes.length}`);
+  check("票 01-S10 结果态标题 = 提交时记下的技能名（不是下一问的）",
+    $("t-dialog-title").textContent === "涉猎",
+    `title=${$("t-dialog-title").textContent}`);
+  ui.state.suitResult = null;
+
+  // 攻心：亮牌步带 Pass ⇒ 右端「放弃」可见；无红桃时也展示整副手牌。
+  const heart = suitCard(201, "桃", "heart");
+  const blackCard = suitCard(202, "杀", "club");
+  const watchPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 9601, prompt: "请从选择面里选择一张牌。",
+    legal_actions: [
+      { kind: "SelectCards", picks: [0], answers_seq: 9601 },
+      { kind: "Pass", answers_seq: 9601 },
+    ],
+    candidate_index: {}, option_seats: {},
+    context: { requirement: "观看其手牌：选择一张红桃牌展示（可放弃）", skill_hints: [] },
+    preactivations: {}, preactivation: [],
+    revealed: [heart, blackCard],
+    slots: [{ ref: { zone: "hand", seat: 1 }, card: heart }],
+    spec: { zones: ["hand"], total: [1, 1], optional: true },
+    dialog: "reveal",
+  };
+  const watchView = synthView(watchPending);
+  ui.state.sessionId = null;
+  ui.state.picks = [];
+  ui.state.view = watchView;
+  ui.renderTable();
+  ui.renderPending(watchView);
+  check("票 01-G1 亮牌弹窗 + Pass ⇒ 右端「放弃」可见、提示写明可放弃",
+    !$("t-dialog").hidden && $("btn-pass").hidden === false
+      && $("t-dialog-hint").textContent.includes("放弃"),
+    `pass=${$("btn-pass").hidden} hint=${$("t-dialog-hint").textContent}`);
+
+  const emptyWatch = {
+    ...watchPending, seq: 9602,
+    legal_actions: [{ kind: "Pass", answers_seq: 9602 }],
+    slots: [], revealed: [blackCard],
+  };
+  const emptyView = synthView(emptyWatch);
+  ui.state.view = emptyView;
+  ui.renderTable();
+  ui.renderPending(emptyView);
+  const watchCards = findAll($("t-options"), (node) => node.getAttribute
+    && node.getAttribute("data-card-id"));
+  check("票 01-G2 没有红桃也展示整副手牌；提示指向「放弃」",
+    watchCards.length === 1 && $("btn-pass").hidden === false
+      && $("t-dialog-hint").textContent.includes("没有可展示的红桃牌"),
+    `cards=${watchCards.length} hint=${$("t-dialog-hint").textContent}`);
+
+  // 攻心的两个选项：中文标签（不再直接写 discard / deck_top）。
+  const optionPending = {
+    kind: "SELECT_OPTION", actor: 0, seq: 9603, prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "discard", answers_seq: 9603 },
+      { kind: "SelectOption", choice: "deck_top", answers_seq: 9603 },
+    ],
+    candidate_index: {}, option_seats: {},
+    context: { requirement: "选择：弃置此牌 / 将此牌置于牌堆顶", skill_hints: [] },
+    preactivations: {}, preactivation: [],
+  };
+  const optionView = synthView(optionPending);
+  ui.state.view = optionView;
+  ui.renderTable();
+  ui.renderPending(optionView);
+  const optionButtons = findAll($("t-options"), (node) => node.tagName === "BUTTON");
+  const optionTexts = optionButtons.map((node) => node.textContent);
+  check("票 01-G3 攻心的两个选项写中文（弃置此牌 / 置于牌堆顶）",
+    optionTexts.some((text) => text.includes("弃置此牌"))
+      && optionTexts.some((text) => text.includes("置于牌堆顶")),
+    JSON.stringify(optionTexts));
+}
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

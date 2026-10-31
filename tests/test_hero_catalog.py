@@ -185,9 +185,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 125
+    assert len(CATALOG) == 127
     assert len(equipment) == 22
-    assert len(heroes) == 103
+    assert len(heroes) == 105
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -202,7 +202,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 103
+    assert len(expected) == 105
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -995,6 +995,9 @@ SKILL_FILES: dict[str, str] = {
     # 票 04 / 票 06：风包移动版神关羽【武神】/【武魂】
     "hero.shen_guanyu_mobile.wushen": "test_hero_feng.py",
     "hero.shen_guanyu_mobile.wuhun": "test_hero_feng.py",
+    # 票 01：风包移动版神吕蒙【涉猎】/【攻心】
+    "hero.shen_lvmeng_mobile.shelie": "test_hero_feng.py",
+    "hero.shen_lvmeng_mobile.gongxin": "test_hero_feng.py",
     # 界标准（M6 票 04 起）
     "hero.jie_guanyu.wusheng": "test_hero_jie.py",
     "hero.jie_guanyu.yijue": "test_hero_jie.py",
@@ -1757,6 +1760,10 @@ SKILL_SHAPE: dict[str, str] = {
     # 票 04：神关羽【武神】= 锁定转化（红桃手牌当普通【杀】）；【武魂】= 锁定触发（标记 / 死亡时）
     "hero.shen_guanyu_mobile.wushen": "转化技",
     "hero.shen_guanyu_mobile.wuhun": "锁定技",
+    # 票 01：神吕蒙移动版【涉猎】= 阶段体零步（亮五张 + 手写选牌）；【攻心】= 主动技
+    # （与界吕蒙 ☆攻心共用同一条流水线）
+    "hero.shen_lvmeng_mobile.shelie": "零步技能",
+    "hero.shen_lvmeng_mobile.gongxin": "主动技能",
     # 能力位 2（rejudge_capable，没有对持有者的询问）；M6 票 14 加界【鬼才】
     "hero.simayi.guicai": "能力位",
     "hero.jie_simayi.guicai": "能力位",
@@ -1787,9 +1794,9 @@ SKILL_SHAPE: dict[str, str] = {
 """
 
 SHAPE_COUNTS: dict[str, int] = {
-    "主动技能": 17,
+    "主动技能": 18,
     "触发技能": 13,
-    "零步技能": 26,
+    "零步技能": 27,
     "排列技能": 3,
     "多轮技能": 13,
     "锁定技": 30,
@@ -1835,7 +1842,7 @@ SHAPE_COUNTS: dict[str, int] = {
 STEP_LANGUAGE_SHAPES: frozenset[str] = frozenset(
     {"主动技能", "触发技能", "零步技能", "排列技能", "觉醒技"}
 )
-"""在步骤语言内的五个形态（60 条 = 17 + 13 + 25 + 3 + 2）。觉醒技也走 ``SkillFlow``
+"""在步骤语言内的五个形态（63 条 = 18 + 13 + 27 + 3 + 2）。觉醒技也走 ``SkillFlow``
 （【潜心】零步、【勤学】一步选项），故"内 == 有 ``flow_for``"仍成立。"""
 
 IN_STEP_LANGUAGE: frozenset[str] = frozenset(
@@ -1843,7 +1850,7 @@ IN_STEP_LANGUAGE: frozenset[str] = frozenset(
     for skill_id, shape in SKILL_SHAPE.items()
     if shape in STEP_LANGUAGE_SHAPES
 )
-"""在步骤语言内（60）：**派生**自 :data:`SKILL_SHAPE` 的五个步骤语言形态。
+"""在步骤语言内（63）：**派生**自 :data:`SKILL_SHAPE` 的五个步骤语言形态。
 
 W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同一份事实的两份拷贝——
 形态表一改，第二份名单就悄悄过期。现在它只是那张表的一个投影；真正的判据留在
@@ -1886,7 +1893,7 @@ def _flow_steps(skill_id: str):
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """122 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 125
+    assert len(SKILL_SHAPE) == len(CATALOG) == 127
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11
     assert all(SKILL_SHAPE.values()), "表里没有空形态"
@@ -2000,7 +2007,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """60 在内 / 63 在外（123 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """63 在内 / 64 在外（127 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -2012,7 +2019,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 61
+    assert len(inside) == 63
     assert len(outside) == 64
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

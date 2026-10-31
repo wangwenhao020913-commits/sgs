@@ -1382,6 +1382,12 @@ button.mini-slot { cursor: pointer; }
   cursor: default; opacity: .55; filter: grayscale(1);
   box-shadow: none;
 }
+/* 票 01：涉猎的按花色取牌——同花色已被选走的牌置灰（不可点）；结果态的未获得牌同形。 */
+.card.face.reveal-card.dim {
+  cursor: default; opacity: .38; filter: grayscale(1);
+  box-shadow: none;
+}
+.suit-pick .reveal-cards { justify-content: center; }
 .card.face.taken .taken-by {
   position: absolute; right: calc(4 * var(--dsu)); bottom: calc(5 * var(--dsu));
   min-width: calc(24 * var(--dsu)); padding: 1px calc(4 * var(--dsu));

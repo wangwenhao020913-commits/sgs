@@ -83,7 +83,11 @@ function blankAskSurface() {
   // 正文这时**挂在弹窗正文槽里**吗（`renderPending` 的分派器把它写进 `#t-options`，
   // `modal.js:applyDialogContentMode` 再把它搬进正文槽）——亮牌窗的累积正文就在那儿。
   const bodyOwnsOptions = !!options && !!body && options.parentNode === body;
-  const keepDialog = state.dialog.open && state.dialog.kind === DIALOG_KINDS.reveal;
+  // 票 01：涉猎的 2.5 秒结果态也跨"提交后的这一批回放"保留（与亮牌窗同一条理由：
+  // 起播即让位会把刚刷新的结果当场收掉，玩家看不到"拿走了哪几张"）。
+  const keepDialog = state.dialog.open
+    && (state.dialog.kind === DIALOG_KINDS.reveal
+      || (state.dialog.kind === DIALOG_KINDS.suit && suitResultActive()));
   if (!keepDialog) {
     // 弹窗收起时 `closeDialogDom()` 会把 `#t-options` 搬回提示区，故清格子放在它**之后**：
     // 上一问的排列面 / 选项 / 槽位不跟着回到提示条上。
@@ -97,6 +101,24 @@ function blankAskSurface() {
 /** 手选路径：点牌设焦点、点座位选目标、选出一组**候选里真有**的组合才可提交。 */
 function renderPending(view) {
   const pending = view && view.pending;
+  // 票 01：涉猎提交后的 2.5 秒结果态（仅发动者本地）。它**压过**下一问的表面直到计时
+  // 结束：牌桌已按新视图重画，询问面留在这里展示"拿走了哪几张"；计时结束再画真正的下一步。
+  if (!state.playback && suitResultActive()) {
+    renderSuitResult();
+    setActionLabels(false, false);
+    resetRightActions();
+    resetCountdown();
+    syncDialog();
+    enforceActionFreeze();
+    if (!state.suitResultTimer) {
+      state.suitResultTimer = window.setTimeout(() => {
+        state.suitResultTimer = null;
+        state.suitResult = null;
+        renderPending(state.view);
+      }, Math.max(0, state.suitResult.until - Date.now()));
+    }
+    return;
+  }
   syncPendingClock(view);
   // 重新渲染的界面是四键状态的**新真源**：丢弃上一次提交留下的冻结快照（请求还在飞时
   // `submitBusy` 为真，快照留着由 `enforceActionFreeze()` 继续压住四键）。
@@ -161,6 +183,10 @@ function renderPending(view) {
     // 正文照画、目标条按新状态更新；`interactive:false` 保证一张牌都不接 click。
     if (stepDialogKind(pending) === DIALOG_KINDS.reveal) {
       renderReveal(pending, { interactive: false });
+    }
+    // 票 01：涉猎的亮牌在公开处理区——其他人也看得到这条弹窗（只读；五张牌面公开）。
+    if (stepDialogKind(pending) === DIALOG_KINDS.suit) {
+      renderSuitPick(pending, { interactive: false });
     }
     $("t-choice").textContent = "";
     $("btn-submit").disabled = true;
@@ -315,7 +341,10 @@ function renderKind(pending, actions) {
   if (isOwnZonePick(pending)) return "own-zone-pick";
   // 空选择面 = 引擎仍要发的那条"只能放弃"询问（如【铁骑】没有同花色牌）：不铺空面板，
   // 只走唯一候选（Pass）的直提态；没有可选动作则 fail-closed。
+  // 票 01：【攻心】的"观看"在没有红桃时也是空选择面——表面仍是亮牌弹窗，要画整副手牌
+  // （正文在 `renderSlots` → `renderReveal`），不能退化成"将提交：放弃"的空弹窗。
   if (pending.kind === "SELECT_CARDS" && !(pending.slots || []).length) {
+    if (stepDialogKind(pending) === DIALOG_KINDS.reveal) return "slots";
     return directAction(pending) ? "direct" : "unsupported";
   }
   if (pending.kind === "SELECT_CARDS") return "slots";
@@ -625,6 +654,16 @@ function refreshSubmit(pending) {
   // 故这一支按既有 `selectionError` / `buildAction` 算可点态（判据仍是"能造出候选里真有
   // 的那条 Action"），不把提交键恒置灰。
   const dialogKind = stepDialogKind(pending);
+  // 票 01：按花色取牌（涉猎）——「提交」恒可点（0 张也合法）；「放弃」在右端，与提交同义，
+  // 由 `answer.js:submitRightAction` 特判成"提交当前选择"。
+  if (dialogKind === DIALOG_KINDS.suit) {
+    const ready = buildAction() !== null;
+    $("btn-submit").disabled = !ready;
+    $("t-choice").textContent = state.lastRejectReason
+      || `点选每种花色至多一张（已选 ${state.picks.length} 张）；`
+      + "点「提交」或右端「放弃」都按当前选择结算。";
+    return;
+  }
   // A1：洛神亮牌确认——弹窗里没有可选卡，出口是「提交 / 放弃」；按唯一选项的正常提交态算。
   if (isJudgmentRevealOption(pending)) {
     const selected = state.selectedOption === null
@@ -655,6 +694,16 @@ function refreshSubmit(pending) {
     } else {
       $("t-choice").textContent = "可以提交。";
     }
+    return;
+  }
+  // 票 01：可选亮牌（攻心）——点一张即提交（`submitRevealPick`），「提交」键不是出口；
+  // 没有可点的红桃时唯一出口是右端「放弃」。
+  if (dialogKind === DIALOG_KINDS.reveal && hasPassAction(pending)) {
+    $("btn-submit").disabled = true;
+    $("t-choice").textContent = state.lastRejectReason
+      || ((pending.slots || []).length
+        ? "点一张红桃牌即展示；也可以点右端「放弃」。"
+        : "没有可展示的红桃牌，点右端「放弃」结束。");
     return;
   }
   // 只从自己手牌 / 装备区选一张（火攻 / 铁骑等）：点牌即提交；出口是内容点击或右端「放弃」。

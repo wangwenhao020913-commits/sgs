@@ -2577,7 +2577,13 @@ def _gongxin_heart_face(host: Any, target: int) -> tuple[tuple[Slot, ...], tuple
 
 
 def _gongxin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
-    """提交点：观看（整副手牌授予）→（可选）展示一张红桃 → 弃置 / 置于牌堆顶。"""
+    """提交点：观看（整副手牌授予）→（可选）展示一张红桃 → 弃置 / 置于牌堆顶。
+
+    ``ask_when_empty=True``（用户裁定 2026-10-31）：目标**有手牌**就必须能观看——没有红桃
+    时照发一条"空选择面"的询问（只有 ``Pass``），弹窗展示整副手牌、出口是「放弃」。
+    目标有没有手牌是**发动前提**（``_gongxin_targets`` 只收手牌非空的其他角色）；
+    观看本身不再受"有没有红桃"影响。
+    """
     owner = frame.data["source"]
     target = int(answers["seat"][0])
     hand = tuple(host.state.player(target).hand)
@@ -2591,6 +2597,7 @@ def _gongxin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
         build_face=lambda: _gongxin_heart_face(host, target),
         # "观看"：目标的**整副手牌**只授予这一次询问的应答者（不进投影、不落 delta）。
         revealed=tuple(host.state.refs(hand)),
+        ask_when_empty=True,
     )
     if host.suspended(picked):
         return "stay"
@@ -2805,6 +2812,9 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     ActiveSkill("jie_xushu", "jianyan", _jianyan_offers, flow=JIANYAN_FLOW),
     # 界吕蒙 ☆【攻心】（M6 票 06）：同上。
     ActiveSkill("jie_lvmeng", "gongxin", _gongxin_offers, flow=GONGXIN_FLOW),
+    # 神吕蒙移动版【攻心】（用户裁定 2026-10-31）：牌面与界吕蒙 ☆【攻心】**逐字相同**
+    # ⇒ 同一条声明 / 同一条流水线（不复制回调）。两版共用"无红桃也观看"的修正。
+    ActiveSkill("shen_lvmeng_mobile", "gongxin", _gongxin_offers, flow=GONGXIN_FLOW),
     # 界周瑜【反间】（M6 票 08）：两步由发动者选（手牌 → 目标），二选一由**目标**应答。
     # 与【义绝】同姿态不翻预发动（多步由发动后的询问逐步收集；第二段换应答者）。
     ActiveSkill(

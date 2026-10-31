@@ -57,7 +57,16 @@ from sgs.effects import (
     place_on_deck,
 )
 from sgs.resolution import Control, Frame
-from sgs.state import FrameKind, GameState, MoveReason, SlotKind, Zone, ZoneRef
+from sgs.state import (
+    FrameKind,
+    GameState,
+    MoveReason,
+    SelectionSpec,
+    Slot,
+    SlotKind,
+    Zone,
+    ZoneRef,
+)
 from sgs.timing import Timing
 
 from .catalog import (
@@ -98,6 +107,8 @@ __all__ = [
     "LUOYI_FLOW",
     "PHASE_BODY_SKILLS",
     "PhaseBodySkill",
+    "SHELIE",
+    "SHELIE_FLOW",
     "TISHEN",
     "TISHEN_FLOW",
     "TUXI_FLOW",
@@ -390,6 +401,127 @@ _XUNXUN = PhaseBodySkill(
     timing=Timing.PHASE_DRAW,
     flow=XUNXUN_FLOW,
     deck_arrange=XUNXUN_ARRANGE,
+)
+
+
+# ---------------------------------------------------------------------------
+# 神吕蒙移动版【涉猎】（用户裁定 2026-10-31）：摸牌阶段，改为亮出牌堆顶的五张牌，
+#                           获得其中每种花色的牌各一张
+#
+# 规则原文（用户 `神吕蒙/技能.txt` 逐字）：
+#
+#     涉猎：摸牌阶段，你可以改为亮出牌堆顶的五张牌，然后获得其中每种花色的牌各一张。
+#
+# 用户的补充（同一轮命令，**是解释不是牌面**）：亮出的五张公开（处理区）；点选 0~4 张、
+# 每种花色至多一张；同花色其余牌置灰；已选可再点取消；提交 / 放弃 / 超时同义（按当前
+# 选择结算，未获得的置入弃牌堆）；任何短摸 ⇒ 游戏直接结束、平局。
+#
+# 结算口径：
+# - "改为" = **替换**本次摸牌：`set_draw_phase_count(owner, 0)`（与【突袭】同一条）。
+# - 亮牌进**处理区**（`draw_open`，公开、牌面全员可见；与【五谷丰登】同区）。
+# - 选牌由提交点手写 `ask_selection` 下发给发动者（处理区自铺槽位，与五谷
+#   `pick_harvest` 同形）；约束 `total=(0, 4)` + `max_per_suit=1` 落在
+#   `SelectionSpec` 上（候选生成期收窄，不是技能代码里过滤）。
+# - 获得 = 进手牌（`MoveReason.PUT`，与五谷同口径）；未获得的置入弃牌堆
+#   （`MoveReason.PUT`，与界【裸衣】"不获得 ⇒ 置入弃牌堆"同口径）。
+# - 短摸（两堆合计不足 5 张）⇒ `both_decks_empty` 平局并立即终止（用户裁定）。
+# ---------------------------------------------------------------------------
+
+SHELIE = hero_skill_id("shen_lvmeng_mobile", "shelie")
+"""神吕蒙移动版【涉猎】的全限定技能 id。"""
+
+SHELIE_REVEAL = 5
+"""「亮出牌堆顶的五张牌」的张数（亮不满即短摸 = 平局，用户裁定）。"""
+
+_SHELIE_REVEALED = "shelie_revealed"
+"""帧私有：本次亮出的牌 id（自顶向下；重入不重亮、不重复消耗随机数）。"""
+
+_ASK_SHELIE = "hero.shen_lvmeng_mobile.shelie.pick"
+"""手写询问位置：【涉猎】"每种花色至多一张"的那次 ``ask_selection``。"""
+
+
+def _shelie_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """提交点：亮五张（短摸即平局）→ 选 0~4 张（每花色至多一张）→ 分进手牌 / 弃牌堆。
+
+    "亮出"走 :meth:`~sgs.engine.Engine.draw_open`（处理区、公开）；选牌的面在提交点自铺
+    （五张都在处理区、牌面公开），故不是 ``PickCards`` 步骤。重入：亮牌缓存在帧私有
+    ``_SHELIE_REVEALED``，选牌答案由 ``ask_selection`` 的帧内缓存返回，搬牌由
+    ``move_in_frame`` 的"同一次移动"守卫挡住——续跑既不重亮也不重搬。
+    """
+    del answers
+    owner = frame.data["skill_owner"]
+    if _SHELIE_REVEALED not in frame.data:
+        revealed = host.draw_open(frame, SHELIE_REVEAL, owner=owner)
+        frame.data[_SHELIE_REVEALED] = tuple(card.card_id for card in revealed)
+        # "改为"先把摸牌数改成 0：短摸终止时 ``_phase_draw`` 也不会再摸（0 张不抽随机数）。
+        host.set_draw_phase_count(owner, 0)
+        if len(revealed) < SHELIE_REVEAL:
+            host.check_game_end(draw_reason="both_decks_empty")
+            host.finish()
+            return None
+    card_ids = tuple(frame.data[_SHELIE_REVEALED])
+    if not card_ids:
+        return None
+    slots = tuple(
+        Slot(ref=ZoneRef(Zone.PROCESSING), card=host.state.card(card_id))
+        for card_id in card_ids
+    )
+    picked = host.ask_selection(
+        frame,
+        owner=_ASK_SHELIE,
+        key="shelie:pick",
+        actor=owner,
+        timing=Timing.PHASE_DRAW,
+        spec=SelectionSpec(
+            zones=(Zone.PROCESSING,), total=(0, len(Suit)), max_per_suit=1
+        ),
+        face=(slots, card_ids),
+    )
+    if host.suspended(picked):
+        return "stay"
+    chosen = {int(card_id) for card_id in picked}
+    gained = tuple(card_id for card_id in card_ids if card_id in chosen)
+    rest = tuple(card_id for card_id in card_ids if card_id not in chosen)
+    if gained:
+        control = host.move_in_frame(
+            frame,
+            host.state.refs(gained),
+            to_zone=ZoneRef(Zone.HAND, owner),
+            reason=MoveReason.PUT,
+            owner=owner,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+    if rest:
+        control = host.move_in_frame(
+            frame,
+            host.state.refs(rest),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.PUT,
+            owner=owner,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+    return None
+
+
+SHELIE_FLOW = SkillFlow(name="shelie", steps=(), effect=_shelie_effect)
+"""【涉猎】的零步流水线：[是否发动] → 亮五张 → 选 0~4 张 → 分进手牌 / 弃牌堆。
+
+含选牌的面在提交点自铺（处理区），故本流水线没有步骤；形状与界【裸衣】的"亮牌 → 问"
+同族（零步 + 手写提交点询问）。
+"""
+
+
+_SHELIE = PhaseBodySkill(
+    # 神吕蒙移动版【涉猎】：摸牌阶段，你可以改为亮出牌堆顶的五张牌，然后获得其中每种
+    # 花色的牌各一张（用户裁定：0~4 张、每花色至多一张、未获得的置入弃牌堆）。
+    hero_id="shen_lvmeng_mobile",
+    short_id="shelie",
+    timing=Timing.PHASE_DRAW,
+    flow=SHELIE_FLOW,
 )
 
 
@@ -998,6 +1130,7 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _JUSHSOU,
     _BOTU,
     _XUNXUN,
+    _SHELIE,
 )
 """L 族十三条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
 票 03 的【克己】、票 05 的【替身】、票 06 的界【克己】、票 07 的界【闭月】、
@@ -1015,6 +1148,7 @@ _REQUIREMENTS: dict[str, str] = {
     "botu": "执行一个额外的回合",
     "xunxun": "观看牌堆顶四张牌，两张置于牌堆顶、其余置于牌堆底",
     "jushou": "摸三张牌，然后翻面",
+    "shelie": "亮出牌堆顶的五张牌，然后获得其中每种花色的牌各一张",
 }
 """L 族八条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
@@ -1025,6 +1159,11 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
     "luoyi": {
         "gain": "选择是否获得亮出牌里的基本牌 / 武器牌 /【决斗】；"
         "不获得则三张置入弃牌堆，正常摸两张"
+    },
+    # 神吕蒙移动版【涉猎】：选牌面是"亮出的五张"（处理区，公开）⇒ 键 = "card"。
+    "shelie": {
+        "card": "获得其中每种花色的牌各一张（每种花色至多一张，可一张不选；"
+        "未获得的置入弃牌堆）"
     },
 }
 """多步阶段体技能的逐步文案（M6 票 01）；键 = 短 id → 步骤名 → 文案。"""

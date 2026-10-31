@@ -988,8 +988,9 @@ def test_the_stuck_jieyin_seed_finishes_within_a_bounded_run():
 
     修复前探针跑到 2 万步仍未终局（票 18 的读数）：座位 4 的界孙尚香在同一出牌阶段反复
     「发动【结姻】→ 选死座位 → 空闭集取消」（取消零副作用、不落 ``_USED``）。
-    ``run_queries`` 的 ``limit`` 就是这条回归的步数上限（实测 199 次决策 / 1 335 次推进
-    迭代，留足余量）：真回退了这里会**断言失败**，而不是把 CI 挂死。
+    ``run_queries`` 的 ``limit`` 就是这条回归的步数上限：神吕蒙移动版进池（57 → 58）换掉了
+    这个种子的配将面后重测为 **717 次决策 / 6 324 次推进迭代**（原 199 / 1 335）；上限取
+    **12 000**——仍远低于修复前的 2 万步，真回退了会**断言失败**而不是把 CI 挂死。
     """
     seed = 5667218070898781
     engine = Engine.new_game(
@@ -1000,7 +1001,7 @@ def test_the_stuck_jieyin_seed_finishes_within_a_bounded_run():
     )
     players = [HeuristicPlayer(ai_stream(seed, seat)) for seat in range(5)]
 
-    run_queries(engine, players, lambda e: e.finished, limit=5_000)
+    run_queries(engine, players, lambda e: e.finished, limit=12_000)
 
     assert engine.finished, "步数上限内自然终局（实测 199 次决策）"
     assert any(

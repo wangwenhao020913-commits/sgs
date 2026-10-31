@@ -42,6 +42,7 @@
 | 放置区（牌扣在武将牌上） | 「将手牌置于你的武将牌上」 | `hero.jie_luxun.qianxun` |
 | 觉醒 / 限定（一次性转变） | 「觉醒技 / 限定技，…」 | `hero.jie_xushu.qianxue`、`hero.jie_zhangfei.tishen` |
 | 阶段体（阶段里改摸牌/弃牌） | 「摸牌阶段，你可以多摸一张牌」 | `hero.zhouyu.yingzi` |
+| 阶段体 + 亮出牌堆顶、按花色取 0~k（一行式） | 「摸牌阶段，你可以改为亮出牌堆顶的五张牌，然后获得其中每种花色的牌各一张」 | `hero.shen_lvmeng_mobile.shelie` |
 | 状态位 + 触发器 | 「横置 / 翻面 / 标记」 | 横置 = `Player.chained` + `Engine.set_chained`；翻面 = `Player.flipped` + `Engine.set_flipped`（首个载体：移动版界曹仁【据守】） |
 
 > 表里没有的形状，就是 C1：**停手开架构缺口票**，不许在技能代码里绕。
@@ -107,7 +108,7 @@
 | `PEACH` | 濒死求桃 | |
 | `DISCARD` | 弃牌阶段 | 逐张点选 |
 | `RESPOND` | 通用响应窗口（打出/使用一张牌） | 决斗的【杀】、万箭的【闪】 |
-| `SELECT_CARDS` | 流水线选牌步 | 自己区域的直选在 `candidates.js` 判 |
+| `SELECT_CARDS` | 流水线选牌步 | 自己区域的直选在 `candidates.js` 判；`spec.max_per_suit` 存在时按花色收窄（涉猎，0 下限由牌面决定） |
 | `SKILL_ACTIVATION` | 钩子的"是否发动" | 键含时机；同帧第二次触发会复用答案（已裁定） |
 | `SELECT_OPTION` | 选项步 / 手写二选一 | 单个选项 + `Pass` 走"提交/放弃"确认形态 |
 | `ARRANGE` | 观星式排列 | 不能下发预发动清单 |

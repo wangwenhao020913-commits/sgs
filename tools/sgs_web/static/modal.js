@@ -40,18 +40,40 @@ const DIALOG_KINDS = Object.freeze({
   choice: "choice",
   unknown: "unknown",
   reveal: "reveal",
+  suit: "suit",
 });
+
+/** 候选里有没有一条 `Pass`（判断"这一步能不能放弃"的**载荷**判据，不认技能 id）。 */
+function hasPassAction(pending) {
+  return ((pending && pending.legal_actions) || []).some(
+    (action) => action.kind === "Pass",
+  );
+}
 
 /** 这几类弹窗步骤**没有「放弃」**（spec D3 / 票 08 / 09 / 11）：即便引擎给了 `Pass`，
  *  界面也不读它——选择型、未知区域、亮牌三类都是"点内容即完成 / 必答"。
  *
  *  `renderRightActions` / `cancelAction` / `refreshSubmit` 三处原先各写一遍同一条析取；
  *  抽成这里是为了改一处即三处一致（评审 Standards：重复谓词）。
+ *
+ *  例外（用户裁定 2026-10-31）：①洛神连续判定；②**亮牌步的候选里真有 `Pass`**——
+ *  【攻心】的"然后你可以展示其中一张♥️牌"里的「可以」就是放弃出口（技能描述里带
+ *  「可以」的效果一定含放弃）。今天只有攻心有这种候选（五谷 / 遗计 / 火攻的亮牌步
+ *  都不带 `Pass`），故其余技能的行为不变；③**按花色取牌**（涉猎）：提交 / 放弃 / 超时
+ *  同义，右端「放弃」送出当前选择（见 `answer.js:submitRightAction` 的特判）。
  */
 function dialogDisablesPass(kind, pending = null) {
   // A1：洛神连续判定的亮牌确认是**可选**询问——「放弃」= Pass = 停止；不能被
   // "亮牌弹窗一律没有放弃"的旧规则吞掉。
   if (kind === DIALOG_KINDS.reveal && pending && isJudgmentRevealOption(pending)) {
+    return false;
+  }
+  // 票 01：亮牌步带 `Pass` ⇒ 允许放弃（与"技能描述里的『可以』必含放弃"同一条口径）。
+  if (kind === DIALOG_KINDS.reveal && pending && hasPassAction(pending)) {
+    return false;
+  }
+  // 票 01：涉猎的"提交 / 放弃 / 超时"同义，右端放弃由 `submitRightAction` 特判。
+  if (kind === DIALOG_KINDS.suit) {
     return false;
   }
   return kind === DIALOG_KINDS.choice
@@ -85,6 +107,8 @@ function stepDialogKind(pending) {
   // 长出第二份枚举表。
   if (isChoiceStep(pending)) return DIALOG_KINDS.choice;
   if (isUnknownZoneStep(pending)) return DIALOG_KINDS.unknown;
+  // 票 01：公开亮牌 + 每种花色至多 k 张（涉猎）——在亮牌判据之前，二者形状不同。
+  if (isSuitPickStep(pending)) return DIALOG_KINDS.suit;
   if (isRevealStep(pending)) return DIALOG_KINDS.reveal;
   return null;
 }
@@ -285,6 +309,14 @@ function dialogTitleFor(kind, pending) {
     const title = pending && pending.harvest && pending.harvest.title;
     const contextName = pending && pending.context && pending.context.name;
     return title || contextName || "亮牌";
+  }
+  if (kind === DIALOG_KINDS.suit) {
+    // 票 01：结果态用提交那一刻记下的技能名（下一问的 `context` 已经不是涉猎了）。
+    if (suitResultActive() && state.suitResult && state.suitResult.title) {
+      return state.suitResult.title;
+    }
+    const contextName = pending && pending.context && pending.context.name;
+    return contextName || "亮牌";
   }
   return "询问";
 }
@@ -601,14 +633,21 @@ function syncDialog() {
   const persistent = persistentRevealPending(pending) !== null;
   const harvestStepped = !!pending && isHarvestActive(pending)
     && stepDialogKind(pending) === DIALOG_KINDS.reveal;
-  const publicHarvest = harvestStepped || persistent;
-  const kind = state.playback || (!own && !publicHarvest) ? null : dialogWantedKind(pending);
+  // 票 01：涉猎的亮牌在**公开处理区**，弹窗对所有人都在（非发动者只读）。
+  const publicSuit = !!pending && isSuitPickStep(pending);
+  const publicHarvest = harvestStepped || persistent || publicSuit;
+  // 票 01：提交后 2.5 秒的结果态**只在发动者本地**（`state.suitResult`），它压过下一问的
+  // 表面直到计时结束；计时结束后 `renderPending` 会重画真正的下一步。
+  const settle = suitResultActive();
+  const kind = settle
+    ? DIALOG_KINDS.suit
+    : (state.playback || (!own && !publicHarvest) ? null : dialogWantedKind(pending));
   if (!kind) {
     closeDialogDom();
     syncHeroModal();
     return;
   }
-  const key = dialogKeyFor(kind, pending);
+  const key = settle ? "suit-result" : dialogKeyFor(kind, pending);
   if (key !== state.dialog.key || !state.dialog.open) {
     closeDialogDom();
     state.dialog.key = key;

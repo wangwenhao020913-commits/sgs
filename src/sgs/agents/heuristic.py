@@ -1993,6 +1993,9 @@ _HOSTILE_SEAT_STEPS = (
     # 界大乔【国色】（M6 票 17）的【乐不思蜀】目标：手写询问用**全限定** skill_id
     # （``hero.jie_daqiao.guose:seat``），故这里登记整段前缀，不另造第二套短 id 约定。
     "hero.jie_daqiao.guose:",
+    # 攻心（票 01；界吕蒙 ☆ / 神吕蒙移动版共用）：看谁的牌 + 可能弃 / 置顶他的牌 ⇒ 对手。
+    # 不登记会落进"帮盟友"的缺省分支（`docs/agents/ai-adaptation.md` §1 第 2 条点名的坑）。
+    "gongxin:",
 )
 """座位步的**语义分组**：这些步骤里的座位是"被指向的对手"，其余（治疗 / 给牌）是"被帮助的人"。
 
@@ -3345,6 +3348,17 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.jie_lvmeng.gongxin": (
         _constant(2.5),
         "☆ 出牌阶段：观看一名其他角色的手牌并处理其中一张红桃牌——信息 + 一张牌",
+    ),
+    # 票 01：神吕蒙移动版（与界吕蒙 ☆攻心共用同一条流水线；涉猎是阶段体 + 手写选牌）
+    "hero.shen_lvmeng_mobile.gongxin": (
+        _constant(2.5),
+        "出牌阶段限一次：观看一名其他角色的手牌并处理其中一张红桃牌——信息 + 一张牌"
+        "（与界吕蒙 ☆攻心同一条流水线、同一语义；座位步的敌我估值走 'gongxin:' 前缀）",
+    ),
+    "hero.shen_lvmeng_mobile.shelie": (
+        _constant(2.0),
+        "摸牌阶段放弃摸牌、改为亮五张并按每种花色至多取一张（0~4 张）：换掉固定的两张摸牌，"
+        "取到 2 张以上就是净赚；亮牌公开、不额外读隐藏信息",
     ),
     # 本票：移动版界曹仁【据守】——结束阶段摸三张，然后翻面
     "hero.jie_caoren_mobile.jushou": (

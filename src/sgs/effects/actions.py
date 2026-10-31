@@ -1023,13 +1023,35 @@ def _select_cards(
     ``spec.zones`` 已由调用方用于铺选择面，``per_zone`` / ``sequential`` 是 M3 的扩展点
     （票 19 §3 的"M3 只许增"）。M2 的三张选牌牌都是"取满 1 张"的强制选择，
     故候选恰是每个槽位一个单张；池为空时调用方**不构造询问**（票 19 §6）。
+
+    ``spec.max_per_suit``（神吕蒙移动版【涉猎】）：只枚举**每种花色至多 k 张**的组合。
+    判据是**候选生成期**的（不是界面灰显）：不在候选里的组合，引擎会拒；界面读同一份
+    候选把同花色的其余牌置灰。槽位没有牌面（隐藏槽）时无法判花色——那种询问不该设这个
+    字段，故按"不拦"处理（fail-open 只会在配置错误时出现，不会让非法组合进候选）。
     """
     del state, seat
     low, high = ctx.spec.total
+    per_suit = ctx.spec.max_per_suit
+
+    def allowed(picks: tuple[int, ...]) -> bool:
+        if per_suit is None:
+            return True
+        counts: dict[str, int] = {}
+        for index in picks:
+            card = ctx.slots[index].card
+            suit = None if card is None else card.suit
+            if suit is None:
+                continue
+            counts[suit] = counts.get(suit, 0) + 1
+            if counts[suit] > per_suit:
+                return False
+        return True
+
     actions: list[Action] = [
         SelectCards(picks=picks, answers_seq=answers_seq)
         for count in range(low, min(high, len(ctx.slots)) + 1)
         for picks in combinations(range(len(ctx.slots)), count)
+        if allowed(picks)
     ]
     if ctx.spec.optional:
         actions.append(Pass(answers_seq=answers_seq))

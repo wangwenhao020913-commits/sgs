@@ -168,6 +168,9 @@ const OPTION_LABELS = Object.freeze({
   // 界许褚【裸衣】（用户裁定）：亮出三张后的「获得 / 不获得」。
   luoyi_gain: "获得",
   luoyi_skip: "不获得",
+  // 攻心（票 01；界吕蒙 ☆ / 神吕蒙移动版共用）：展示红桃后的二选一。
+  discard: "弃置此牌",
+  deck_top: "将此牌置于牌堆顶",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。
@@ -307,11 +310,15 @@ function renderRightActions(pending, view = state.view) {
   // （`modal.js:dialogDisablesPass`，评审 Standards：重复谓词）。
   const dialogWithoutPass = dialogDisablesPass(dialogKind, pending);
   const endIndex = own ? rightActionIndex(pending, RIGHT_ACTION_KINDS.endPhase) : -1;
+  // 票 01：涉猎的「放弃」不是一条 `Pass` 候选，而是"提交当前选择"的第二个出口（与「提交」
+  // 同义）。它不走候选下标，单独标记；点击由 `answer.js:submitRightAction` 特判。
+  const suitForm = own && !!pending && isSuitPickStep(pending);
   const passIndex = own && !dialogWithoutPass
     ? rightActionIndex(pending, RIGHT_ACTION_KINDS.pass)
     : -1;
   // 被动入口的「取消」本身就是「放弃」（送出那条 Pass）：不再复制一个同义的右端按钮。
   const cancelIsPass = passIndex >= 0 && isPassivePreativation(pending);
+  const passVisible = passIndex >= 0 || suitForm;
   const end = $("btn-end-phase");
   const pass = $("btn-pass");
   if (end) {
@@ -319,11 +326,13 @@ function renderRightActions(pending, view = state.view) {
     end.disabled = state.playback || endIndex < 0;
   }
   if (pass) {
-    pass.hidden = passIndex < 0 || cancelIsPass;
-    pass.disabled = state.playback || passIndex < 0 || cancelIsPass;
-    pass.textContent = passIndex >= 0
-      ? alternativeLabel(pending, pending.legal_actions[passIndex])
-      : "放弃";
+    pass.hidden = !passVisible || cancelIsPass;
+    pass.disabled = state.playback || !passVisible || cancelIsPass;
+    pass.textContent = suitForm
+      ? "放弃"
+      : (passIndex >= 0
+        ? alternativeLabel(pending, pending.legal_actions[passIndex])
+        : "放弃");
   }
 }
 
@@ -465,6 +474,11 @@ function renderSlots(pending) {
   // 亮牌模板（票 11 五谷 / 票 12 遗计）：全部亮牌 + 目标条；**不**走下面那条
   // 「隐藏区域的槽位只有位置」的旧选择面（公开处理区的牌面是可见的）。
   const dialogKind = stepDialogKind(pending);
+  // 票 01：按花色取牌（涉猎）——一行公开亮牌 + 同花色置灰，单独一个模板。
+  if (dialogKind === DIALOG_KINDS.suit) {
+    renderSuitPick(pending, { interactive: true });
+    return;
+  }
   if (dialogKind === DIALOG_KINDS.reveal) {
     renderReveal(pending, { interactive: true });
     return;

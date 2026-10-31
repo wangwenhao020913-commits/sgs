@@ -139,6 +139,12 @@ class SelectionSpec(_FrozenModel):
 
     ``optional`` / ``sequential`` 是效果属性，M2 的拆、顺、五谷都取 ``(1, 1)`` 且非依次；
     字段按"M3 只许增"保留在协议里。
+
+    ``max_per_suit``（神吕蒙移动版【涉猎】的加法）：**每种花色至多取几张**（``None`` =
+    不约束）。它约束的是**候选生成**（``effects/actions.py:_select_cards`` 只枚举满足它的
+    组合），不是界面层的灰显——界面读同一个字段把"同花色的其余牌"置灰。缺省 ``None``
+    **不进序列化**（与 ``StepPool.max`` 同姿态）：``SelectionSpec`` 随 ``SelectCardsQuery``
+    落记录流，多一个 ``"max_per_suit": null`` 会让所有带选牌询问的金录像字节变化。
     """
 
     zones: tuple[Zone, ...]
@@ -146,6 +152,14 @@ class SelectionSpec(_FrozenModel):
     per_zone: tuple[tuple[Zone, int, int], ...] = ()
     optional: bool = False
     sequential: bool = False
+    max_per_suit: int | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> Any:
+        data = handler(self)
+        if data.get("max_per_suit") is None:
+            data.pop("max_per_suit", None)
+        return data
 
 
 class StepPool(_FrozenModel):

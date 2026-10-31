@@ -34,24 +34,29 @@ from sgs.state import (
     ActivateSkill,
     EndPhase,
     FrameKind,
+    MoveReason,
     Pass,
     Phase,
     QueryKind,
     RespondContext,
     RespondMode,
+    SelectCards,
     SelectOption,
     UseCard,
     WindowCause,
+    Zone,
     project,
 )
 from sgs.timing import Timing
 from sgs_web.display import seat_display
 
 from support import (
+    PassPlayer,
     SeatSpec,
     build_state,
     cards_of_type,
     deck_excluding,
+    ran_timing,
     run_queries,
     run_until,
 )
@@ -917,3 +922,400 @@ def test_wuhun_does_not_fire_when_the_game_is_already_decided():
     assert engine.pending_outcome is not None, "反贼全灭 ⇒ 神关羽死亡即判胜"
     assert _judge_targets(engine) == [], "已判胜 ⇒ 武魂不触发"
     assert engine.state.player(2).alive is True
+
+
+# ---------------------------------------------------------------------------
+# 神吕蒙移动版【涉猎】【攻心】（用户裁定 2026-10-31）
+#
+# 牌面（`D:\\SGS_HEROS\\神话再临-风包\\神吕蒙\\技能.txt`，逐字）：
+#
+#     涉猎：摸牌阶段，你可以改为亮出牌堆顶的五张牌，然后获得其中每种花色的牌各一张。
+#     攻心：出牌阶段限一次，你可以观看一名其他角色的手牌，然后你可以展示其中一张♥️牌并
+#           选择一项：1.弃置此牌；2.将此牌置于牌堆顶。
+#
+# 用户补充（同轮命令，是解释）：涉猎可取 0~4 张、每花色至多一张、未获得的置入弃牌堆、
+# 亮不满即短摸平局；攻心的"可以展示"包含"直接放弃"。
+# ---------------------------------------------------------------------------
+
+SHEN_LVMENG = "shen_lvmeng_mobile"
+SHELIE = "hero.shen_lvmeng_mobile.shelie"
+GONGXIN = "hero.shen_lvmeng_mobile.gongxin"
+
+
+def _deltas(engine, delta_type: str):
+    return [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == delta_type
+    ]
+
+
+def _slot_of(query, card_id: int) -> int:
+    for index, slot in enumerate(query.slots):
+        if slot.card is not None and slot.card.card_id == card_id:
+            return index
+    raise AssertionError(f"选择面里没有牌 {card_id}：{query.slots}")
+
+
+def _pick(query, card_ids: tuple[int, ...]) -> SelectCards:
+    return SelectCards(
+        picks=tuple(_slot_of(query, card_id) for card_id in card_ids),
+        answers_seq=query.seq,
+    )
+
+
+def _first_suit(suit: str, *, excluded=()) -> int:
+    return next(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id not in excluded and PACK.deck.cards[card_id].suit == suit
+    )
+
+
+def _shelie_deck(top: tuple[int, ...]) -> tuple[int, ...]:
+    """把 ``top`` 依次放在牌堆顶，其余牌接在后面（与界裸衣的测试同形）。"""
+    used = set(top)
+    return (*top, *(card_id for card_id in range(len(PACK.deck.cards)) if card_id not in used))
+
+
+def _shelie_slots(query) -> tuple[int, ...]:
+    return tuple(slot.card.card_id for slot in query.slots if slot.card is not None)
+
+
+def _shelie_queries(engine):
+    return [
+        query
+        for query in _queries(engine, QueryKind.SELECT_CARDS.value)
+        if query.spec.max_per_suit is not None
+    ]
+
+
+class _SheliePlayer:
+    """摸牌阶段发动涉猎；在选牌面里每选中的花色各拿第一张（``suits`` 为空 = 一张不拿）。"""
+
+    def __init__(self, suits: tuple[str, ...] = ()) -> None:
+        self.suits = tuple(suits)
+        self.activations = []
+        self.picks = []
+
+    def respond(self, query):
+        if query.kind == QueryKind.SKILL_ACTIVATION.value and query.skill_id == SHELIE:
+            self.activations.append(query)
+            return next(a for a in query.legal_actions if isinstance(a, ActivateSkill))
+        if query.kind == QueryKind.SELECT_CARDS.value and query.spec.max_per_suit is not None:
+            self.picks.append(query)
+            seen: set[str] = set()
+            slots = []
+            for index, slot in enumerate(query.slots):
+                suit = slot.card.suit if slot.card is not None else None
+                if suit is None or suit not in self.suits or suit in seen:
+                    continue
+                seen.add(suit)
+                slots.append(index)
+            return SelectCards(picks=tuple(sorted(slots)), answers_seq=query.seq)
+        if query.kind == QueryKind.PLAY_PHASE.value:
+            return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        return query.legal_actions[0]
+
+
+def _shelie_run(
+    *,
+    top: tuple[int, ...],
+    suits: tuple[str, ...],
+    discard: tuple[int, ...] = (),
+):
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=SHEN_LVMENG, hand=()), SeatSpec()],
+        deck=_shelie_deck(top),
+        discard=discard,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _SheliePlayer(suits=suits)
+    run_until(
+        engine,
+        [player, PassPlayer()],
+        lambda e: e.finished or ran_timing(e, Timing.PHASE_PLAY_START),
+    )
+    return engine, player
+
+
+def test_shelie_reveals_five_and_takes_one_per_chosen_suit():
+    """亮出五张（公开处理区）⇒ 每花色各取一张；未获得的置入弃牌堆；本阶段不摸牌。"""
+    heart = _first_suit("heart")
+    diamond = _first_suit("diamond", excluded={heart})
+    club = _first_suit("club", excluded={heart, diamond})
+    spade = _first_suit("spade", excluded={heart, diamond, club})
+    heart2 = _first_suit("heart", excluded={heart, diamond, club, spade})
+    top = (heart, diamond, club, spade, heart2)
+    engine, player = _shelie_run(top=top, suits=("heart", "spade"))
+
+    assert len(player.activations) == 1, "摸牌阶段问一次「是否发动」"
+    asked = player.picks
+    assert len(asked) == 1
+    query = asked[0]
+    assert query.actor == 0
+    assert query.spec.total == (0, 4)
+    assert query.spec.max_per_suit == 1
+    assert [slot.ref.zone for slot in query.slots] == [Zone.PROCESSING] * 5
+    assert set(_shelie_slots(query)) == set(top), "五张都在处理区、牌面公开"
+    # 候选生成期已按花色收窄：任何候选都不能同时拿两张红桃。
+    for action in query.legal_actions:
+        if not isinstance(action, SelectCards):
+            continue
+        suits = [PACK.deck.cards[query.slots[index].card.card_id].suit for index in action.picks]
+        assert len(suits) == len(set(suits)), f"候选 {action.picks} 同花色出现两次"
+    assert any(isinstance(a, SelectCards) and len(a.picks) == 0 for a in query.legal_actions), (
+        "0 张也是一个合法候选（放弃 = 提交 0 张）"
+    )
+
+    hand = engine.state.player(0).hand
+    assert heart in hand and spade in hand
+    assert not ({diamond, club, heart2} & set(hand))
+    assert {diamond, club, heart2} <= set(engine.state.discard), "未获得的置入弃牌堆"
+    assert len(hand) == 2, "改为亮牌 ⇒ 本阶段一张都不摸（不是 2 + 2）"
+    assert engine.state.processing == [], "亮牌结算完离开处理区"
+
+
+def test_shelie_can_take_zero_and_discards_all_five():
+    heart = _first_suit("heart")
+    diamond = _first_suit("diamond", excluded={heart})
+    club = _first_suit("club", excluded={heart, diamond})
+    spade = _first_suit("spade", excluded={heart, diamond, club})
+    heart2 = _first_suit("heart", excluded={heart, diamond, club, spade})
+    top = (heart, diamond, club, spade, heart2)
+    engine, _player = _shelie_run(top=top, suits=())
+
+    assert engine.state.player(0).hand == []
+    assert set(top) <= set(engine.state.discard), "一张不拿 ⇒ 五张全部置入弃牌堆"
+
+
+def test_shelie_discards_and_gains_use_put_not_discard():
+    heart = _first_suit("heart")
+    spade = _first_suit("spade", excluded={heart})
+    club = _first_suit("club", excluded={heart, spade})
+    diamond = _first_suit("diamond", excluded={heart, spade, club})
+    heart2 = _first_suit("heart", excluded={heart, spade, club, diamond})
+    top = (heart, spade, club, diamond, heart2)
+    engine, _player = _shelie_run(top=top, suits=("club",))
+
+    moves = [
+        record
+        for record in engine.records
+        if getattr(record, "delta_type", None) == "card_move"
+        and record.from_zone.zone is Zone.PROCESSING
+    ]
+    gained = [
+        record
+        for record in moves
+        if record.to_zone.zone is Zone.HAND
+        and {card.card_id for card in record.cards} == {club}
+    ]
+    leftover = [
+        record
+        for record in moves
+        if record.to_zone.zone is Zone.DISCARD
+        and {card.card_id for card in record.cards} == {heart, spade, diamond, heart2}
+    ]
+    assert len(gained) == 1 and gained[0].reason is MoveReason.PUT
+    assert len(leftover) == 1 and leftover[0].reason is MoveReason.PUT, (
+        "未获得的牌是规则性置入弃牌堆（PUT），不是弃置（DISCARD）"
+    )
+
+
+def test_shelie_short_reveal_ends_the_game_in_a_draw():
+    """短摸（两堆合计不足 5 张）⇒ 游戏直接结束、判平局（用户裁定）。"""
+    top = (
+        _first_suit("heart"),
+        _first_suit("diamond"),
+        _first_suit("club"),
+        _first_suit("spade"),
+    )
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=SHEN_LVMENG, hand=()), SeatSpec()],
+        deck=top,
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _SheliePlayer()
+    run_until(engine, [player, PassPlayer()], lambda e: e.finished)
+
+    assert engine.finished
+    tail = engine.records[-1]
+    assert tail.kind == "game_end"
+    assert tail.result == "draw" and tail.reason == "both_decks_empty"
+    assert player.picks == [], "短摸不再发选牌询问"
+
+
+def test_shelie_offers_nothing_without_a_deck():
+    """没有可亮的牌时同样按短摸结束（0 < 5），不进入选牌步。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=SHEN_LVMENG, hand=()), SeatSpec()],
+        deck=(),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _SheliePlayer()
+    run_until(engine, [player, PassPlayer()], lambda e: e.finished)
+    assert engine.finished and engine.records[-1].reason == "both_decks_empty"
+    assert player.picks == []
+
+
+# ---- 攻心（与界吕蒙 ☆攻心共用同一条流水线）-------------------------------
+
+
+def _gongxin_engine(target_hand: tuple[int, ...]):
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=SHEN_LVMENG, hand=()),
+            SeatSpec(hand=target_hand),
+        ],
+        deck=deck_excluding(PACK, *target_hand),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    return Engine.from_state(state, seed=7)
+
+
+def _heart_and_black() -> tuple[int, int]:
+    heart = _first_suit("heart")
+    black = next(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if PACK.deck.cards[card_id].suit in {"spade", "club"}
+    )
+    return heart, black
+
+
+class _GongxinPlayer:
+    """发动攻心 → 选座位 1 →（可选）选红桃 → 选处置。"""
+
+    def __init__(self, *, heart: int | None, option: str | None) -> None:
+        self.heart = heart
+        self.option = option
+        self.watch = []
+
+    def respond(self, query):
+        if query.kind == QueryKind.SKILL_ACTIVATION.value:
+            # 神吕蒙同时有【涉猎】：本组只测【攻心】，摸牌阶段一律不发动涉猎。
+            return next(
+                (a for a in query.legal_actions if isinstance(a, Pass)),
+                query.legal_actions[0],
+            )
+        if query.kind == QueryKind.PLAY_PHASE.value:
+            return next(
+                (a for a in query.legal_actions
+                 if isinstance(a, ActivateSkill) and a.skill_id == GONGXIN),
+                None,
+            ) or next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        if query.kind == QueryKind.SELECT_OPTION.value and query.skill_id == "gongxin:seat":
+            return next(
+                a for a in query.legal_actions
+                if isinstance(a, SelectOption) and a.choice == "seat:1"
+            )
+        if query.kind == QueryKind.SELECT_CARDS.value:
+            self.watch.append(query)
+            if self.heart is None:
+                return next(a for a in query.legal_actions if isinstance(a, Pass))
+            return _pick(query, (self.heart,))
+        if query.kind == QueryKind.SELECT_OPTION.value and query.skill_id == "gongxin:option":
+            if self.option is None:
+                return query.legal_actions[0]
+            return next(
+                a for a in query.legal_actions
+                if isinstance(a, SelectOption) and a.choice == self.option
+            )
+        return query.legal_actions[0]
+
+
+def test_gongxin_mobile_watches_the_whole_hand_and_discards_the_shown_heart():
+    heart, black = _heart_and_black()
+    engine = _gongxin_engine((black, heart))
+    player = _GongxinPlayer(heart=heart, option="discard")
+    run_until(engine, [player, PassPlayer()], lambda e: heart in e.state.discard)
+
+    assert len(player.watch) == 1
+    assert {card.card_id for card in player.watch[0].revealed} == {black, heart}
+    assert [slot.card.card_id for slot in player.watch[0].slots if slot.card] == [heart]
+    assert [
+        (delta.seat, delta.card.card_id)
+        for delta in _deltas(engine, "card_reveal")
+    ] == [(1, heart)], "展示是公开事实"
+    assert heart in engine.state.discard
+    assert heart not in engine.state.player(1).hand
+
+
+def test_gongxin_mobile_can_put_the_heart_on_top_of_the_deck():
+    heart, black = _heart_and_black()
+    engine = _gongxin_engine((black, heart))
+    player = _GongxinPlayer(heart=heart, option="deck_top")
+    run_until(engine, [player, PassPlayer()], lambda e: e.state.deck and e.state.deck[0] == heart)
+    assert engine.state.deck[0] == heart
+    assert heart not in engine.state.player(1).hand
+
+
+def test_gongxin_mobile_views_the_hand_even_without_a_heart():
+    """用户裁定：目标有手牌就必须能观看——没有红桃也发空面询问，出口是「放弃」。"""
+    black_cards = tuple(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if PACK.deck.cards[card_id].suit in {"spade", "club"}
+    )[:2]
+    engine = _gongxin_engine(black_cards)
+    player = _GongxinPlayer(heart=None, option=None)
+    run_until(engine, [player, PassPlayer()], lambda e: e.state.turn_seat == 1)
+
+    assert len(player.watch) == 1, "观看这一步无条件发生"
+    query = player.watch[0]
+    assert query.slots == (), "没有红桃 ⇒ 可选槽为空"
+    assert {card.card_id for card in query.revealed} == set(black_cards), "整副手牌仍授予"
+    assert [a.kind for a in query.legal_actions] == ["Pass"], "唯一出口 = 放弃"
+    assert _deltas(engine, "card_reveal") == []
+
+
+def test_gongxin_mobile_may_pass_with_a_heart_and_keeps_the_card():
+    heart, black = _heart_and_black()
+    engine = _gongxin_engine((black, heart))
+    player = _GongxinPlayer(heart=None, option=None)
+    run_until(engine, [player, PassPlayer()], lambda e: e.state.turn_seat == 1)
+    assert heart in engine.state.player(1).hand, "放弃 ⇒ 不展示、不动目标的牌"
+    assert _deltas(engine, "card_reveal") == []
+
+
+def test_gongxin_mobile_timeout_defaults_to_the_first_option():
+    """二选一不可放弃、超时取第一个合法项 = 弃置此牌（服务端 ``fallback_action`` 同一判据）。"""
+    heart, black = _heart_and_black()
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=SHEN_LVMENG, hand=()), SeatSpec(hand=(black, heart))],
+        deck=deck_excluding(PACK, black, heart),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=7)
+    player = _GongxinPlayer(heart=heart, option=None)
+    run_until(engine, [player, PassPlayer()], lambda e: e.state.turn_seat == 1)
+    # 脚本里 option=None 会去候选里找 choice=None ⇒ 落回第一个候选（= discard）。
+    assert heart in engine.state.discard
+
+
+def test_gongxin_mobile_is_once_per_play_phase():
+    heart, black = _heart_and_black()
+    engine = _gongxin_engine((black, heart))
+    player = _GongxinPlayer(heart=heart, option="discard")
+    run_until(engine, [player, PassPlayer()], lambda e: e.state.turn_seat == 1)
+    play_queries = [
+        query
+        for query in _queries(engine, QueryKind.PLAY_PHASE.value)
+        if query.actor == 0
+    ]
+    assert len(play_queries) >= 1
+    assert not any(
+        isinstance(action, ActivateSkill) and action.skill_id == GONGXIN
+        for action in play_queries[-1].legal_actions
+    ), "本阶段已经用过一次 ⇒ 不再进候选"
+

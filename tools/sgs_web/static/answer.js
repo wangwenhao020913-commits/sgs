@@ -100,13 +100,41 @@ function maybeAutoSubmitArrange(view) {
   return submitAction();
 }
 
+/** 票 01：涉猎的选牌面到了**该自动提交当前选择**的时刻吗（与观星同一个提前量）。
+ *
+ * 用户裁定"提交、超时或放弃完全相同，会获得当前已经排列好的获得牌"：服务端看不到本地
+ * 选择，只能由前端在剩余 ≤2 秒时把**当前**选择发出去；服务端先到点则按空选择（0 张）
+ * 代答（`legal_actions[0]` = 空 picks）。四条闸门与 :func:`arrangeAutoSubmitDue` 同形。
+ */
+function suitAutoSubmitDue(view) {
+  const pending = view && view.pending;
+  if (!pending || !isSuitPickStep(pending)) return false;
+  if (view !== state.view) return false;
+  if (state.playback || (view && view.finished)) return false;
+  if (!isOwnPending(pending, view)) return false;
+  if (state.suitAutoSeq === pending.seq) return false;
+  if (state.submitBusy || state.preactivation) return false;
+  const remain = arrangeAutoSubmitRemain(view);
+  if (remain === null || remain > ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS) return false;
+  return buildAction() !== null;
+}
+
+/** 到点就提交**一次**当前选择（先落 `suitAutoSeq` 再发请求，失败不重试）。 */
+function maybeAutoSubmitSuit(view) {
+  if (!state.sessionId) return false;
+  if (!suitAutoSubmitDue(view)) return false;
+  state.suitAutoSeq = view.pending.seq;
+  return submitAction();
+}
+
 /** 倒计时（U1-03）：进度条 + 剩余秒 + 默认动作；只显示**自己的**人类询问。
  *
  * 时间锚点住在 `state.pendingClock`（同一 `pending.seq` 轮询刷新不重置）。真正
  * 代答在服务端（`timeout.py`）；本函数对**所有非排列询问**都只读，不提交、不刷新、
- * 不碰 `legal_actions`。**唯一例外**是观星排列（`ARRANGE`）：到时限前
- * :data:`ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS` 秒，前端自动提交一次当前排列
- * （spec D9.3 / 票 07，见 :func:`arrangeAutoSubmitDue`）。
+ * 不碰 `legal_actions`。**两个例外**：观星排列（`ARRANGE`）与涉猎的按花色取牌
+ * （`SELECT_CARDS + max_per_suit`）——到时限前
+ * :data:`ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS` 秒，前端自动提交一次当前选择
+ * （spec D9.3 / 票 07；票 01 的涉猎同一条"当前选择"语义）。
  */
 function renderCountdown(view) {
   const box = $("t-countdown");
@@ -144,8 +172,14 @@ function renderCountdown(view) {
   if (label) {
     label.textContent = (pending.prompt_display && pending.prompt_display.default_label) || "";
   }
-  // 票 07：唯一例外——排列到点自动提交（其它询问在这里恒为 false，零请求）。
-  return maybeAutoSubmitArrange(view);
+  // 票 07 / 票 01：两个前端代答例外——排列与涉猎的按花色取牌（其它询问恒 false，零请求）。
+  // 返回**提交的 Promise**（不是 true）：调用方 `await renderCountdown(...)` 要等 POST 回来，
+  // 否则 409 的刷新还没发生就被断言"没刷新"。
+  const arranging = maybeAutoSubmitArrange(view);
+  if (arranging) return arranging;
+  const suiting = maybeAutoSubmitSuit(view);
+  if (suiting) return suiting;
+  return false;
 }
 
 /* ------------------------------------------------------------------ 提交 */
@@ -283,6 +317,12 @@ function buildAction() {
 async function submitRightAction(kind) {
   if (state.playback || state.submitBusy) return;
   const pending = state.view ? state.view.pending : null;
+  // 票 01：涉猎的右端「放弃」**不是一条候选**——它与「提交」同义（提交当前选择），
+  // 故不查 `rightActionIndex`，直接走同一条提交路径（`buildAction` 按 `state.picks` 造）。
+  if (kind === RIGHT_ACTION_KINDS.pass && pending && isSuitPickStep(pending)) {
+    await submitAction();
+    return;
+  }
   const index = rightActionIndex(pending, kind);
   if (index < 0) return;
   // 票 07：排列没有可用布局（规格缺失 / 顺序不完整）时不要退回成"送 Pass"。
@@ -342,6 +382,15 @@ async function submitAction(restoreSelection = null) {
   }
   // U2-03：POST 在飞 = 提示区四键全部禁用（快照留到结束）；轮询刷新也让路（见 refresh）。
   const viewBefore = state.view;
+  // 票 01：涉猎提交后在本机留 2.5 秒结果态——先把"交出去的那五张 + 选了哪几张 + 技能名"
+  // 定格下来（`resetSelection()` 会清 `state.picks`，不能等请求回来再读）。
+  const suitSettle = isSuitPickStep(pending)
+    ? {
+      cards: (pending.slots || []).map((slot) => slot.card),
+      picked: state.picks.slice(),
+      title: (pending.context && pending.context.name) || "亮牌",
+    }
+    : null;
   freezeActionButtons();
   state.submitBusy = true;
   try {
@@ -352,6 +401,13 @@ async function submitAction(restoreSelection = null) {
     state.submitBusy = false;
     releaseActionButtons(false);
     resetSelection();
+    if (suitSettle) {
+      state.suitResult = { ...suitSettle, until: Date.now() + 2500 };
+      if (state.suitResultTimer) {
+        window.clearTimeout(state.suitResultTimer);
+        state.suitResultTimer = null;
+      }
+    }
     applyView(body);
   } catch (error) {
     state.submitBusy = false;
