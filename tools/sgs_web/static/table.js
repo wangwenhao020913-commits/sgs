@@ -310,9 +310,12 @@ function renderTable() {
     const face = state.playback
       ? { selectable: false, selected: false, picked: false, slotIndex: -1 }
       : cardFace(pendingNow, card);
+    // 被**强制转化**的手牌（武神）：画产物牌面（「转」+ 属性色），但身份仍是那张源牌
+    // ——`card_id` 覆盖回源牌，点选 / 提交 / 置灰都还按源牌走。
+    const form = state.playback ? null : convertedForm(pendingNow, card.card_id);
     hand.appendChild(
       cardChip(
-        card, face.selected, false, face.selectable,
+        form ? { ...form, card_id: card.card_id } : card, face.selected, false, face.selectable,
         () => activateCard(pendingNow, card, face), face.picked,
       ),
     );

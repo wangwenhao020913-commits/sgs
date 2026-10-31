@@ -2265,6 +2265,18 @@ def visible_record(
             # 载荷另由 ``_card_tag_payloads`` 按牌面可见补 tags。手牌数两条都不改。
             if not tag_visible(raw.get("tag_type"), viewer):
                 return None
+    if kind == "timing" and raw.get("cards"):
+        # 时机记录带的牌面也是**公开事实**（这次使用 / 判定亮出的那张牌）。补同一份展示
+        # 契约（display_name / attribute / kind / source_cards / description）——不补的话
+        # 舞台只能读记录里的数据名（"火杀""雷杀"两个字、没有属性 ⇒ 画成黑色），
+        # 而卡面契约要求"单字【杀】+ 属性色"（用户实机报障 2026-10-31）。
+        lookup = _card_lookup(state) if state is not None else None
+        raw["cards"] = [
+            card_payload(CardRef.model_validate(card), lookup=lookup)
+            if isinstance(card, dict)
+            else card
+            for card in raw["cards"]
+        ]
     if kind == "action":
         # 公开事实：谁应答了、被接受与否；**具体选了什么**只对人类座位自己的应答展开
         # （spec D13）。``ActionRecord`` 不带座位 ⇒ 座位取 ``answers_seq`` 指向的询问 actor；

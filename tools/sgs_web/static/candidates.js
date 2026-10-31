@@ -42,6 +42,20 @@ function cardEntry(pending, cardId) {
   return cardIndex(pending)[String(aliases[0].card_id)] || null;
 }
 
+/** 这张手牌此刻被**强制转化**成什么（神关羽【武神】这类**锁定转化**）。
+ *
+ * 只读服务端 `pending.transform_products`（转化清单的产物索引，带 `source_cards`）：
+ * 手牌区据此把源牌画成产物牌面（右上角「转」、悬停列出源牌）。读不到就是普通手牌。
+ */
+function convertedForm(pending, cardId) {
+  for (const product of (pending && pending.transform_products) || []) {
+    for (const source of product.source_cards || []) {
+      if (String(source.card_id) === String(cardId)) return product;
+    }
+  }
+  return null;
+}
+
 /** 这张牌此刻点不点得动：候选索引里有它才有候选（唯一判据，不读规则）。 */
 function cardSelectable(pending, cardId) {
   return cardEntry(pending, cardId) !== null;

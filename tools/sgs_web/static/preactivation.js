@@ -215,6 +215,34 @@ function enterPreativation(skill, manifest) {
   renderPending(state.view);
 }
 
+/** 点一张**锁定转化**的手牌（神关羽【武神】）：进入它的清单，并把来源步预选成这张牌。
+ *
+ * 锁定 = 没有"是否发动"可问，故点牌就是"就用它"，剩下的只是选目标。判据只读服务端下发的
+ * 清单（哪条技能的来源步池里有这张牌），不按技能 id / 牌名分支；找不到清单就 no-op（
+ * 让既有的"用不出"提示照旧出现，不 fail-open）。
+ */
+function enterConvertedForm(pending, card) {
+  const skills = (state.view && state.view.skills) || [];
+  const skill = skills.find((item) => {
+    const manifest = preactivationManifest(pending, item.skill_id);
+    return Array.isArray(manifest) && manifest.length > 0
+      && preactivationStepKind(manifest[0]) === "card"
+      && (manifest[0].pool || []).some(
+        (row) => (row.options || []).includes(String(card.card_id)),
+      );
+  });
+  if (!skill) return;
+  enterPreativation(skill, preactivationManifest(pending, skill.skill_id));
+  const pa = state.preactivation;
+  if (!pa || !pa.steps.length) return;
+  pa.answers[0].values = [card.card_id];
+  pa.answers[0].texts = preactivationAnswerTexts(pa.steps[0], [card.card_id]);
+  if (pa.steps.length > 1) pa.cursor = 1;
+  applyPreativationDefaults(pa, pending);
+  renderTable();
+  renderPending(state.view);
+}
+
 /** 进入**手牌入口**的预发动（W5-02b 借刀）：点手牌 ⇒ 两步清单（持刀者 A → Bn）。
  *
  * 与技能清单**共用**步骤渲染器 / 答案结构 / 重选与取消；区别只在确认：

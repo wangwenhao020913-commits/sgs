@@ -107,6 +107,11 @@ function cardFace(pending, card) {
   if (cardPreactivationManifest(pending, card)) {
     return { selectable: true, selected: false, picked: false, slotIndex: -1 };
   }
+  // **锁定转化**的手牌（神关羽【武神】）：手牌区画的是产物（「转」+ 属性色），点它 =
+  // 进入该技能的转化清单（来源步预选这张牌），再点座位提交。没有直接候选也点得动。
+  if (pending && convertedForm(pending, card.card_id)) {
+    return { selectable: true, selected: false, picked: false, slotIndex: -1 };
+  }
   const selectable = pending
     ? (isHandPick(pending) ? cardSelectable(pending, card.card_id) : cardUsable(pending, card.card_id))
     : false;
@@ -142,5 +147,10 @@ function activateCard(pending, card, face) {
   if (state.preactivation) { togglePreativationCard(card.card_id); return; }
   const manifest = cardPreactivationManifest(pending, card);
   if (manifest) { enterCardPreativation(pending, card, manifest); return; }
+  // 锁定转化：有产物、且这张牌此刻没有直接候选 ⇒ 点它 = 走转化清单（不是"用不出"）。
+  if (convertedForm(pending, card.card_id) && !cardSelectable(pending, card.card_id)) {
+    enterConvertedForm(pending, card);
+    return;
+  }
   toggleFocus(card.card_id);
 }

@@ -5931,6 +5931,43 @@ def test_face_visible_tag_deltas_stay_out_of_the_human_record_stream() -> None:
     assert visible_record(delta, viewer=None) is not None, "全知通道仍可读原始记录"
 
 
+def test_timing_record_cards_carry_the_card_face_contract() -> None:
+    """时机记录带的牌面也要带**展示契约**（实机报障 2026-10-31）。
+
+    舞台是按记录画牌的；不补 ``display_name`` / ``attribute`` / ``kind`` 时它只能读数据名
+    （"火杀""雷杀"两个字、没有属性 ⇒ 画成黑色）。契约要求：杀族一律写「杀」，属性走
+    ``火焰`` / ``雷电``（卡面据此分色），转化牌 ``kind = transformed``（右上角「转」）。
+    """
+    from sgs.engine import TimingRecord
+    from sgs.state import CardRef
+
+    product = CardRef(
+        card_id=-609569600673815,
+        type="fire_slash",
+        name="火杀",
+        suit="heart",
+        rank=10,
+        color="red",
+        virtual_sources=(18,),
+    )
+    record = TimingRecord(
+        seq=7,
+        timing=Timing.DAMAGE_DEAL,
+        frame_id=1,
+        depth=1,
+        actor=0,
+        targets=(1,),
+        cards=(product,),
+    )
+
+    payload = visible_record(record, viewer=0)
+    card = payload["cards"][0]
+
+    assert (card["display_name"], card["attribute"], card["kind"]) == ("杀", "火焰", "transformed")
+    assert card["virtual_sources"] == [18]
+    assert card["description"], "展示契约的 description 也要在（悬停全文）"
+
+
 def test_tag_deltas_reach_the_live_channel_with_labels_but_stay_out_of_records() -> None:
     """标签走**展示用的 live 通道**：带服务端 label，但不进人类 ``records``。
 

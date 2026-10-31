@@ -7299,6 +7299,71 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     })(),
     `disabled=${promptSkill("hero.demo.lockedflow") && promptSkill("hero.demo.lockedflow").disabled} pre=${ui.state.preactivation && ui.state.preactivation.skillId}`);
 
+  // 锁定转化（神关羽【武神】）：手牌区画**产物**牌面（单字【杀】+「转」），点它 =
+  // 进转化清单并预选来源牌 —— 锁定技没有"是否发动"，点牌就是"就用它"。
+  {
+    const source = {
+      ...synthCard(13, "无中生有"), suit: "heart", rank: 12, color: "red", type: "ex_nihilo",
+    };
+    const product = {
+      ...source, card_id: -23, name: "杀", type: "slash", display_name: "杀",
+      attribute: "火焰", kind: "transformed", virtual_sources: [13], source_cards: [source],
+    };
+    const wushenPending = {
+      kind: "PLAY_PHASE", actor: 0, seq: 9500,
+      prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+      legal_actions: [{ kind: "EndPhase", answers_seq: 9500 }],
+      candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+      preactivations: {
+        "hero.demo.wushen": [
+          { name: "card", zones: ["hand"], min: 1, max: 1, order: 0, pool: [{ when: [], options: ["13"] }] },
+          { name: "seat", min: 1, max: 1, order: 1, pool: [{ when: [], options: ["seat:1"] }] },
+        ],
+      },
+      preactivation: [],
+      transform_products: [product],
+    };
+    const wv = synthView(wushenPending);
+    wv.snapshot.self_hand = [source];
+    wv.skills = [{
+      skill_id: "hero.demo.wushen", name: "武神", skill_type: "NORMAL", locked: true,
+      carrier: "HERO", available: true, preactivated: false, description: "锁定转化。",
+      ui: { requirement: "", passive: false, convert_sources: [] },
+    }];
+    ui.state.view = wv;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(wv);
+    const handNode = $("t-hand").children[0];
+    // 垫片的 `className` 与 `classList` 不联动（见其它烟测注释）：子节点按 `className` 找。
+    const child = (cls) => Array.from(handNode.children).find(
+      (node) => String(node.className).split(/\s+/).includes(cls),
+    );
+    const corner = child("corner");
+    const cname = child("cname");
+    check("U2-04h 锁定转化的手牌画**产物**牌面（单字【杀】+「转」角标；身份仍是源牌 id）",
+      !!handNode
+        && handNode.getAttribute("data-card-id") === "13"
+        && handNode.classList.contains("attr-fire")
+        && !!corner && corner.textContent === "转"
+        && !!cname && cname.textContent === "杀"
+        && handNode.getAttribute("title").indexOf("无中生有") >= 0,
+      `id=${handNode && handNode.getAttribute("data-card-id")} corner=${corner && corner.textContent} name=${cname && cname.textContent}`);
+    clickNode(handNode);
+    check("U2-04h2 点它 = 进入转化清单且来源步已预选这张牌（不再弹「不能用于当前询问」）",
+      !!ui.state.preactivation
+        && ui.state.preactivation.skillId === "hero.demo.wushen"
+        && JSON.stringify(ui.state.preactivation.answers[0].values) === "[13]"
+        && ui.state.preactivation.cursor === 1
+        && !ui.state.lastRejectReason,
+      `skill=${ui.state.preactivation && ui.state.preactivation.skillId} answers=${ui.state.preactivation && JSON.stringify(ui.state.preactivation.answers[0])} reason="${ui.state.lastRejectReason}"`);
+    // 回到上一节的夹具（后面 U2-04g 起仍读同一个 view）。
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  }
+
   check("U2-04g 底部技能区原样：顺序 / 全部技能 / 与提示区点出同一个选中项",
     (() => {
       const order = bottomSkillIds().join(",") === view.skills.map((item) => item.skill_id).join(",");
