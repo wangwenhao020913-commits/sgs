@@ -29,7 +29,12 @@ from __future__ import annotations
 from typing import Any
 
 from sgs.data import Category, SkillType, card_category, hero_skill_id
-from sgs.effects import CarrierKind, behavior_for, targets_within_attack_range
+from sgs.effects import (
+    CarrierKind,
+    behavior_for,
+    is_slash,
+    targets_within_attack_range,
+)
 from sgs.resolution import Control, Frame
 from sgs.state import (
     CardRef,
@@ -37,15 +42,25 @@ from sgs.state import (
     MoveReason,
     Pass,
     SelectionSpec,
+    Slot,
     Zone,
     ZoneRef,
 )
 from sgs.timing import Timing
 
-from .catalog import MATCH_OWNER_KEY, Hook, SkillDef
+from .catalog import (
+    MATCH_ACTOR_KEY,
+    MATCH_OWNER_KEY,
+    Hook,
+    SkillDef,
+    mark_round_skill_used,
+    round_skill_uses,
+)
 from .flow import SkillFlow, zero_step_effect
 
 __all__ = [
+    "CONGTAO",
+    "CONGTAO_PER_ROUND",
     "JIE_JIZHI",
     "JIE_JIZHI_FLOW",
     "JIZHI",
@@ -485,15 +500,211 @@ def _yajiao_hooks() -> tuple[Hook, Hook]:
     )
 
 
+# ---------------------------------------------------------------------------
+# 韬·刘备【从讨】（自制包）：攻击范围内的其他角色成为【杀】的目标时，观看牌堆顶两张
+# ---------------------------------------------------------------------------
+
+CONGTAO = hero_skill_id("tao_liubei", "congtao")
+"""韬·刘备【从讨】的全限定技能 id。
+
+牌面（用户 `技能.txt`）：**每轮限2次**，当你攻击范围内的其它角色成为【杀】的目标时，
+你可以观看牌堆顶 2 张牌，将其中一张交给【杀】的使用者，另一张加入弃牌堆或放回牌堆顶。
+
+两处与既有技能不同源的读法（用户 2026-10-31 裁定）：
+
+- **逐目标触发**："…其它角色成为【杀】的目标时"是 C2 的逐目标派发，多目标【杀】里每个
+  在范围内的目标各触发一次（受每轮 2 次封顶）；
+- **刘备自己用【杀】也算**："其它角色"约束的是**成为目标的那一个**，不约束使用者 ⇒
+  此时"交给【杀】的使用者"= 交给自己（账本 L791「交给一名角色含自己」的同向口径）。
+"""
+
+CONGTAO_COUNT = 2
+"""【从讨】观看的张数（牌面"牌堆顶2张牌"）。"""
+
+CONGTAO_PER_ROUND = 2
+"""【从讨】每轮次数上限（牌面"每轮限2次"；「轮」读账本 L754 的引擎状态口径）。"""
+
+_CONGTAO_OPTION_DISCARD = "congtao_discard"
+_CONGTAO_OPTION_DECK_TOP = "congtao_deck_top"
+_CONGTAO_OPTIONS: tuple[str, ...] = (_CONGTAO_OPTION_DISCARD, _CONGTAO_OPTION_DECK_TOP)
+"""另一张的去处：置入弃牌堆 / 放回牌堆顶（两项恒可执行、**不可放弃**——牌面没有第二个
+"可以"，发动之后两张牌都必须有去向）。"""
+
+_ASK_CONGTAO_PICK = "hero.tao_liubei.congtao.pick"
+"""手写询问位置：【从讨】从观看的两张里选一张交出去的那次 ``ask_selection``。"""
+
+
+def _congtao_keys(trigger: int) -> tuple[str, str, str, str]:
+    """**这一次触发**（这一次成为目标的那名角色）的四条帧私有键。
+
+    逐目标派发意味着同一个 USE 帧里可以有多次【从讨】（多目标【杀】）：观看、已交出的牌、
+    另一张的去处这三个游标都必须带上这次触发的座位，否则第二次触发会读到第一次的缓存
+    （不重看牌堆、不重给牌）。与【遗计】按伤害点号分桶同一个理由。
+    """
+    return (
+        f"congtao:{trigger}:seen",
+        f"congtao:{trigger}:given",
+        f"congtao:{trigger}:leftover",
+        f"congtao:{trigger}:done",
+    )
+
+
+def _congtao_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**这一次成为目标的别人**在我的攻击范围内、这一刀是【杀】、本轮还没用满。
+
+    两个"这一次"分别来自派发环写的两个帧私有槽：:data:`MATCH_OWNER_KEY`（我是谁）与
+    :data:`MATCH_ACTOR_KEY`（这一次落在谁身上）。缺任一条，条件就会对每个存活玩家成立
+    ——与【流离】票 13 的报障同一错型。
+
+    "付不起"的三档都在这里挡掉（``edge-cases.md`` G1）：不在攻击范围 / 本轮已满 2 次 /
+    牌堆与弃牌堆一张都没有（没有可观看的牌）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    trigger = frame.data.get(MATCH_ACTOR_KEY)
+    if owner is None or trigger is None or trigger == owner:
+        return False
+    card = frame.data.get("card")
+    # 【杀】按**家族**判据（火 / 雷 / 转化 / 虚拟同族），与【流离】同一条。
+    if card is None or not is_slash(behavior_for(card)):
+        return False
+    state = host.state
+    if trigger not in targets_within_attack_range(state, owner):
+        return False
+    if round_skill_uses(state, owner, CONGTAO) >= CONGTAO_PER_ROUND:
+        return False
+    return bool(state.deck or state.discard)
+
+
+def _congtao_settle(state: GameState, owner: int, frame: Frame, done_key: str) -> None:
+    """【从讨】一次触发的收尾：落"本次触发已完成"位并记一次**每轮已发动**。
+
+    计数**必须落在收尾**、不能落在"观看那一刻"：条件在每次派发前都会重跑，而挂起续跑是
+    "重跑同一个步骤"——若观看时就把本轮次数 +1，续跑时条件读到``本轮已满``，这一钩子会
+    不再匹配、把已经问过一半的那次触发**静默丢掉**（实机：多目标【杀】的第二张牌交不出去）。
+    与限定技/觉醒技"执行完才落位"是同一条纪律。
+    """
+    frame.data[done_key] = True
+    mark_round_skill_used(state, owner, CONGTAO)
+
+
+def _congtao(host: Any, frame: Frame) -> Control:
+    """【从讨】提交点：观看牌堆顶两张（仅自己可见）→ 选一张交给使用者 → 另一张二选一。
+
+    两段搬牌各带帧内游标（``given`` / ``done``）：搬牌会内联派发"失去牌 / 获得牌"一类钩子，
+    挂起后的续跑既不重做也不漏做。``deck_top`` 档**没有搬牌**——那一张本来就在牌堆顶上
+    （另一张被取走之后它就是顶），与【涯角】"放回牌堆顶"同一个落点。
+    """
+    state = host.state
+    owner = int(frame.data["skill_owner"])
+    trigger = int(frame.data[MATCH_ACTOR_KEY])
+    user = frame.data.get("source")
+    if user is None:
+        return None
+    seen_key, given_key, leftover_key, done_key = _congtao_keys(trigger)
+    if frame.data.get(done_key):
+        return None
+    seen: tuple[CardRef, ...] | None = frame.data.get(seen_key)
+    if seen is None:
+        seen = host.peek_deck(frame, CONGTAO_COUNT)
+        frame.data[seen_key] = seen
+    if not seen:
+        return None
+    picked_id = frame.data.get(given_key)
+    if picked_id is None:
+        picked = host.ask_selection(
+            frame,
+            owner=_ASK_CONGTAO_PICK,
+            key=f"congtao:pick:{trigger}",
+            actor=owner,
+            timing=Timing.USE_BECOME_TARGET,
+            spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1), optional=False),
+            build_face=lambda: (
+                tuple(Slot(ref=ZoneRef(Zone.HAND, owner), card=item) for item in seen),
+                tuple(item.card_id for item in seen),
+            ),
+            revealed=seen,
+        )
+        if host.suspended(picked):
+            return "stay"
+        if not picked:
+            return None
+        picked_id = int(picked[0])
+        frame.data[given_key] = picked_id
+        control = host.move_in_frame(
+            frame,
+            (state.card(picked_id),),
+            to_zone=ZoneRef(Zone.HAND, int(user)),
+            reason=MoveReason.PUT,
+            owner=int(user),
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+    leftover = tuple(card for card in seen if card.card_id != int(picked_id))
+    if not leftover:
+        # 没有"另一张"：这一段就是收尾（计数在收尾处落位，见下）。
+        _congtao_settle(state, owner, frame, done_key)
+        return None
+    rest = leftover[0]
+    choice = frame.data.get(leftover_key)
+    if choice is None:
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.USE_BECOME_TARGET,
+            skill_id=f"congtao:leftover:{trigger}",
+            options=_CONGTAO_OPTIONS,
+            optional=False,
+        )
+        if host.suspended(answer):
+            return "stay"
+        choice = str(answer.choice)
+        frame.data[leftover_key] = choice
+    if choice == _CONGTAO_OPTION_DISCARD:
+        control = host.move_in_frame(
+            frame,
+            (rest,),
+            to_zone=ZoneRef(Zone.DISCARD),
+            reason=MoveReason.PUT,
+            owner=owner,
+            actor=owner,
+        )
+        if control == "stay":
+            return "stay"
+    _congtao_settle(state, owner, frame, done_key)
+    return None
+
+
 def use_after_skill_definitions() -> tuple[SkillDef, ...]:
-    """U 族三条技能的 :class:`~sgs.skills.catalog.SkillDef`（非锁定；【涯角】挂使用 / 打出两条钩子）。
+    """U 族**四条**技能的 :class:`~sgs.skills.catalog.SkillDef`（非锁定；【涯角】挂使用 / 打出两条钩子）。
 
     标准 / 界**各自一条触发条件**，因为两版牌面不同：§九 L997 的标准版只排除延时类
     （转化锦囊照常触发），§十九 L2104–L2105 的界版只排除转化牌（延时类照常触发）：
     :func:`_jizhi_eligible` 的两个开关各传一个。提交点仍各一条零步流水线：界版只多
     "基本牌弃置换 +1"一段。
+
+    【从讨】是 U 族的第四条（自制包韬·刘备）：挂 ``USE_BECOME_TARGET``，``per_round_limit``
+    置真让轮次变化进记录流（账本 L754 的"轮"口径只给带每轮限次的技能用）。
     """
     return (
+        SkillDef(
+            skill_id=CONGTAO,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=(
+                Hook(
+                    Timing.USE_BECOME_TARGET,
+                    condition=_congtao_condition,
+                    handler=_congtao,
+                ),
+            ),
+            per_round_limit=True,
+            requirement=(
+                "每轮限2次：当你攻击范围内的其他角色成为【杀】的目标时，可以观看牌堆顶"
+                "两张牌，将其中一张交给【杀】的使用者，另一张置入弃牌堆或放回牌堆顶"
+            ),
+        ),
         SkillDef(
             skill_id=JIZHI,
             locked=False,

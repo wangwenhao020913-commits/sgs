@@ -280,6 +280,7 @@ const realFetch = globalThis.fetch;
  * 现状"这条只在真实竞态里出现的路径，也能在烟测里被跑到。注入用完即清。 */
 let staleAnswerStatus = null;   // 下一次 `/answer` 直接回这个状态码（409）
 let nextGetPending = null;      // 下一次 `GET /api/sessions` 把 `pending` 换成这一份
+let nextGetPendingSticky = false; // true = 这份注入一直有效到显式清掉（409 刷新窗口用）
 /* U3-05 / D12：静默轮询的失败注入——接下来的 N 次 `GET /api/sessions/…` 直接失败。
  * 用来钉「失败静默，连续 3 次才提示」；注入用完即清。 */
 let failNextGets = 0;
@@ -322,7 +323,7 @@ globalThis.fetch = async (path, options) => {
     if (nextGetPending && !(options && options.method && options.method !== "GET")) {
       const body = await response.json();
       const pending = nextGetPending;
-      nextGetPending = null;
+      if (!nextGetPendingSticky) nextGetPending = null;
       body.pending = pending;
       const text = JSON.stringify(body);
       return { ok: response.ok, status: response.status, text: async () => text, json: async () => JSON.parse(text) };
@@ -490,8 +491,8 @@ const sessionBodiesSince = (from) =>
 
 await ui.loadHeroCatalog();
 const catalogVersions = ui.heroVersions();
-check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版，按真名分组）",
-  ui.state.heroCatalog.length === 33 && catalogVersions.length === 58,
+check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版 + 自制包，按真名分组）",
+  ui.state.heroCatalog.length === 33 && catalogVersions.length === 59,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -1525,7 +1526,22 @@ check("开局页渲染出录像条目", $("run-list").children.length > 0, `${$(
 check("录像条目带胜负标记", /我赢|我输|—/.test($("run-list").text()), $("run-list").text().replace(/\s+/g, " ").trim().slice(0, 70));
 
 // 挑一局 8 人的录像（门禁里可能先跑过 4 人局；断言不该硬编码人数）。
-const target = runs.runs.find((run) => run.player_count === 8) || runs.runs[0];
+const isCompositeActivate = (record) => record.kind === "action" && record.action
+  && record.action.kind === "ActivateSkill"
+  && (((record.action.picks || []).length > 0) || ((record.action.choices || []).length > 0));
+// 回放断言的前置（W4-6）要求这一局里**出现复合 `ActivateSkill`**：烟测自己跑出来的录像
+// 有哪几局、哪一局带这条记录，取决于本次新跑的对局（换池 / 换 AI 都会变），故按**性质**
+// 挑一局（而不是按"第一局 8 人"硬点）：先问各局的记录，取第一局带复合应答的；
+// 一局都没有时退回第一局 8 人（断言照旧会红，红得也说得清）。
+const eightRunList = runs.runs.filter((run) => run.player_count === 8);
+let target = eightRunList[0] || runs.runs[0];
+for (const candidate of eightRunList) {
+  const body = await get(`/api/runs/${encodeURIComponent(candidate.name)}`);
+  if ((body.records || []).some(isCompositeActivate)) {
+    target = candidate;
+    break;
+  }
+}
 const seats = target.player_count;
 await ui.openReplay(target.name);
 // 回放页默认是简易档；下面这些 W4-6 断言读的是**逐条记录**，显式切到完整全部。
@@ -1676,9 +1692,7 @@ const clickButton = (node) => (node.listeners.click || []).forEach((fn) => fn({ 
 
 // 预发动确认在记录流里是一条复合 `ActivateSkill`（`picks` / `choices` 都在）：
 // 回放事件流必须把它摊开，用户才看得见"确认发动"选了什么（清单本身不进记录流）。
-const compositeIndex = replayRecords.findIndex((record) => record.kind === "action"
-  && record.action && record.action.kind === "ActivateSkill"
-  && ((record.action.picks || []).length > 0 || (record.action.choices || []).length > 0));
+const compositeIndex = replayRecords.findIndex(isCompositeActivate);
 check("录像里有复合 ActivateSkill 的应答记录（W4-6 断言的前置）",
   compositeIndex >= 0, `index=${compositeIndex}`);
 if (compositeIndex >= 0) {
@@ -7002,6 +7016,7 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
     `before=${beforeOptions} now=${$("t-options").children.length} 候选行=${candidateRowButtons().length}`);
   await clickPromise;
   staleAnswerStatus = null;
+  nextGetPendingSticky = false;
   nextGetPending = null;
   const answerCalls = calls.slice(beforeCalls).filter((call) => call.path.includes("/answer"));
   check("U2-03h 「放弃」只发一次提交，送出的正是那条 Pass",
@@ -7061,6 +7076,7 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
     clickError = error;
   }
   staleAnswerStatus = null;
+  nextGetPendingSticky = false;
   nextGetPending = null;
   const answerCalls = calls.slice(beforeCalls).filter((call) => call.path.includes("/answer"));
   check("U2-03m 真实点击「提交」被 400 拒：1 条 POST、不抛异常、四键回到点击前、错误文案可见",
@@ -7113,9 +7129,11 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
   const staleBefore = calls.length;
   staleAnswerStatus = 409;
   nextGetPending = nextPending;
+  nextGetPendingSticky = true;
   const stalePromise = ($("btn-pass").listeners.click || [])[0]({ target: $("btn-pass") });
   await stalePromise;
   staleAnswerStatus = null;
+  nextGetPendingSticky = false;
   nextGetPending = null;
   ui.flushPlayback();
   const staleCalls = calls.slice(staleBefore);
@@ -18533,6 +18551,50 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     optionTexts.some((text) => text.includes("弃置此牌"))
       && optionTexts.some((text) => text.includes("置于牌堆顶")),
     JSON.stringify(optionTexts));
+
+  // 票 01（自制包）：韬·刘备自制版【义起】= **一问**：选项步带着观看授予。
+  // 牌面画在弹窗里（只读、仅自己可见），3 个类型按钮也在同一个弹窗里（点一个即提交）。
+  const yiqiSeen = [suitCard(301, "杀", "spade"), suitCard(302, "无懈可击", "heart")];
+  const yiqiPending = {
+    kind: "SELECT_OPTION", actor: 0, seq: 9701, prompt: "请选择一项。",
+    legal_actions: [
+      { kind: "SelectOption", choice: "basic", answers_seq: 9701 },
+      { kind: "SelectOption", choice: "trick", answers_seq: 9701 },
+      { kind: "SelectOption", choice: "equipment", answers_seq: 9701 },
+    ],
+    candidate_index: {}, option_seats: {},
+    context: {
+      name: "义起",
+      requirement: "观看弃牌堆顶的 x 张牌（只有你能看），选择一种类型：获得其中该类型的所有牌（必须选一项）",
+      skill_hints: [],
+    },
+    preactivations: {}, preactivation: [],
+    revealed: yiqiSeen,
+  };
+  const yiqiView = synthView(yiqiPending);
+  ui.state.sessionId = null;
+  ui.state.picks = [];
+  ui.state.view = yiqiView;
+  ui.renderTable();
+  ui.renderPending(yiqiView);
+  const yiqiCards = findAll($("t-options"), (node) => node.getAttribute
+    && node.getAttribute("data-card-id"));
+  check("票 01-Y1 义起：观看牌面与选项在**同一个弹窗**里（牌 2 张、标题写技能名）",
+    !$("t-dialog").hidden && yiqiCards.length === 2
+      && $("t-dialog-title").textContent === "义起",
+    `dialog=${$("t-dialog").hidden} cards=${yiqiCards.length} title=${$("t-dialog-title").textContent}`);
+  const yiqiTypeTexts = findAll(
+    $("t-options"),
+    (node) => node.tagName === "BUTTON"
+      && !(node.getAttribute && node.getAttribute("data-card-id")),
+  ).map((node) => node.textContent);
+  check("票 01-Y2 义起：恒 3 个中文类型按钮（基本牌 / 锦囊牌 / 装备牌）、没有座位行",
+    yiqiTypeTexts.length === 3
+      && yiqiTypeTexts.some((text) => text.includes("基本牌"))
+      && yiqiTypeTexts.some((text) => text.includes("锦囊牌"))
+      && yiqiTypeTexts.some((text) => text.includes("装备牌"))
+      && !findAll($("t-options"), (node) => /^座位/.test(String(node.textContent || ""))).length,
+    JSON.stringify(yiqiTypeTexts));
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

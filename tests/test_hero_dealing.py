@@ -200,20 +200,22 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     jie_mobile = load_heroes("jie_mobile")
     feng = load_heroes("feng")
     feng_mobile = load_heroes("feng_mobile")
+    homebrew = load_heroes("homebrew")
     expected = tuple(
         hero.id
-        for table in (standard, jie, jie_mobile, feng, feng_mobile)
+        for table in (standard, jie, jie_mobile, feng, feng_mobile, homebrew)
         for hero in table.heroes
         if hero.enabled
     )
 
     assert enabled_hero_ids() == expected
-    assert len(expected) == 58
+    assert len(expected) == 59
     assert "jie_caoren_mobile" in expected, "移动版与 OL 系列**版本并存**、同进默认池"
     assert "jie_guanyu" in expected and "guanyu" in expected
     assert "huangzhong" in expected, "风包武将也进默认池（票 03）"
     assert "shen_guanyu_mobile" in expected, "风包移动版同理（`08`：神关羽移动版独开一栏）"
     assert "shen_lvmeng_mobile" in expected, "票 01：神吕蒙移动版同表"
+    assert "tao_liubei" in expected, "自制包：韬·刘备自制版（真名刘备，与标准版同真名）"
 
 
 def test_enabled_hero_ids_reads_the_table_enablement():
@@ -250,7 +252,7 @@ def test_every_enabled_hero_is_dealable_from_the_default_pool():
     **版本**、也不得抽到同一**真名**的另一版（票 12 的两段抽样）。
     """
     ids = enabled_hero_ids()
-    assert len(ids) == 58
+    assert len(ids) == 59
 
     for hero_id in ids:
         heroes = _heroes_of(

@@ -484,13 +484,17 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 58 and len(catalog) == 33, (
-        "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33"
+    assert len(flat) == 59 and len(catalog) == 33, (
+        "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
+        "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
+        "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）"
     )
     for group in catalog:
         true_name = group["true_name"]
         assert true_name, "每个真名都要能给人看（名称非空）"
-        assert 1 <= len(group["versions"]) <= 2, "一行一个真名、行内 1–2 个版本格"
+        # 行内版本格 = 该真名的启用版本数。刘备是第一个**三版**真名（标准 + 界 + 韬·刘备
+        # 自制版），故这里只钉"至少一格"，不写死 1–2。
+        assert 1 <= len(group["versions"]), "一行一个真名、行内至少一个版本格"
         for version in group["versions"]:
             hero = hero_by_id(version["id"])
             assert hero is not None and hero.true_name == true_name
@@ -6261,7 +6265,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 127, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 129, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

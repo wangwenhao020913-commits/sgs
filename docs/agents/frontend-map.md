@@ -22,7 +22,7 @@
 | `interaction.js` | 点选：卡面芯片、点牌设焦点、点座位选目标、弃牌点选。 |
 | `pending.js` | 询问按种类分派到专用面、提示条右端动作、取消 / 不支持面 fail-closed；涉猎的结果态门闸（`state.suitResult`）。 |
 | `options.js` | 选项按钮组、选择面槽位、「提供一张 B」、Action 文案与右端动作下标。 |
-| `reveal.js` | 亮牌模板（五谷 / 遗计复用）与目标条；**按花色取牌**（涉猎：一行式、同花色置灰、2.5 秒结果态 `renderSuitResult`）；判据仍住 `modal.js`。 |
+| `reveal.js` | 亮牌模板（五谷 / 遗计复用）与目标条；**按花色取牌**（涉猎：一行式、同花色置灰、2.5 秒结果态 `renderSuitResult`）；**带观看授予的选项步**（韬·刘备【义起】：`SELECT_OPTION` + `revealed` ⇒ 选择型弹窗里牌面只读、3 个类型按钮同窗，`options.js:renderOptionButtons` 画牌）；判据仍住 `modal.js`。 |
 | `modal.js` | 询问弹窗框架与武将详情壳：`selectionEnabled`、`stepDialogKind`、`DIALOG_KINDS`（含涉猎的 `suit`）、`dialogDisablesPass`（亮牌步带 `Pass` 时可放弃）。 |
 | `hero-detail.js` | 武将详情正文（技能清单）与开合绑定。 |
 | `arrange.js` | 排列面双行布局（观星自由切分 / 恂恂固定切分）：移动判据（插入 / 固定切分跨行互换）、拖拽落点（指针过牌面中点即"之后"）与落点预览（占位格让道 / 交换高亮）、提交载荷。 |

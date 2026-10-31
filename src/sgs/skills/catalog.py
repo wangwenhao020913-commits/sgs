@@ -103,6 +103,7 @@ __all__ = [
     "Hook",
     "HookCondition",
     "HeroSkillDecl",
+    "MATCH_ACTOR_KEY",
     "MATCH_OWNER_KEY",
     "RUNNING_SKILL_KEY",
     "SKILL_JUDGMENT_CARD_KEY",
@@ -123,6 +124,7 @@ __all__ = [
     "limited_skill_used",
     "lord_skill_allowed",
     "lord_skill_ids",
+    "mark_limited_skill_used",
     "mark_skill_used_this_turn",
     "placement_skill_ids",
     "prune_card_tags",
@@ -1011,6 +1013,24 @@ def limited_skill_used(state: GameState, seat: int, skill_id: str) -> bool:
     return False
 
 
+def mark_limited_skill_used(state: GameState, seat: int, skill_id: str) -> bool:
+    """给 ``seat`` 的 ``skill_id`` 落"整局已用"位（M6 票 05 的**写入面**；M6 票 11 的读面对称）。
+
+    与只读的 :func:`limited_skill_used` 同姿态（``include_suppressed=True`` 解析）：被动侧的
+    写入口是 :func:`_dispatch` 里的 :func:`_mark_used_once`（它手上有实例）；**主动侧**没有
+    派发环，故由 A 族的提交点经本函数落位（韬·刘备【义起】是第一个限定主动技）。
+    没有该实例 / 不是限定技时**零动作**并返回 ``False``（与 :func:`_mark_used_once` 的
+    "非限定技零动作"同一条纪律）。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            if instance.definition.skill_type is not SkillType.LIMITED:
+                return False
+            _mark_used_once(state, instance)
+            return True
+    return False
+
+
 def awakening_skill_awakened(state: GameState, seat: int, skill_id: str) -> bool:
     """``seat`` 的 ``skill_id`` 这条**觉醒技**是否已经觉醒过（M6 票 06 的只读面）。
 
@@ -1154,6 +1174,20 @@ MATCH_OWNER_KEY = "hook_owner"
 这个槽。它与 :data:`skill_owner`（**回调执行期**才写）分开，是为了不改变既有条件的
 求值时机；票 13 起所有"关于我"的条件（【反馈】【流离】【连营】【枭姬】…）都读这个槽
 自校持有者，表驱动机械检查见 ``tests/test_hero_catalog.py`` §⑤。
+"""
+
+
+MATCH_ACTOR_KEY = "hook_actor"
+"""帧私有槽名：**条件求值期这一次派发的对象**（`06`（§5「程序化约定与偏离一手」）韬·刘备行）。
+
+逐目标的时机（``USE_BECOME_TARGET`` 这类"时机外层、目标内层"的派发）每次只服务**一个**
+目标，而 ``Hook.condition(host, frame)`` 拿不到派发参数 —— 帧上只有**整份** ``targets``，
+读不出"这一次是谁"。故 :meth:`~sgs.engine.Engine.emit_frame_timing` 在派发前把本次
+``actor`` 写进这个槽、派发后还原（与 ``_DISPATCH_SCOPE`` 同姿态）。
+
+它与 :data:`MATCH_OWNER_KEY` 是两条正交的事实（"我是谁" vs "这一次落在谁身上"），
+与 :data:`skill_owner`（回调执行期才写）同理分开。不读它的技能因此零行为变化；帧私有
+数据不进记录流，既有基准逐字节不受影响。
 """
 
 

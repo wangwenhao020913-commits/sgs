@@ -34,7 +34,7 @@ from sgs.data import (
 from sgs.effects import ModifierPoint
 from sgs.engine import DRAW_COUNT, Engine
 from sgs.skills import CATALOG, PROVIDERS, flow_for
-from sgs.skills.catalog import MATCH_OWNER_KEY
+from sgs.skills.catalog import MATCH_ACTOR_KEY, MATCH_OWNER_KEY
 from sgs.skills.move_after import MOVE_EVENT_KEY, MoveEvent
 from sgs.state import (
     CardRef,
@@ -73,6 +73,10 @@ JIE_MOBILE_HEROES = load_heroes("jie_mobile")
 FENG_HEROES = load_heroes("feng")
 FENG_MOBILE_HEROES = load_heroes("feng_mobile")
 """**神话再临·风包**那一份（票 03 起）：独立系列包，版本字段 ``feng``（黄忠 / 烈弓）。"""
+
+HOMEBREW_HEROES = load_heroes("homebrew")
+"""**自制包**那一份（韬·刘备自制版）：独立系列包，版本字段 ``homebrew``，真名「刘备」
+（与标准版同名 ⇒ 同一局仍只出一个）。"""
 
 # 25 名启用武将（票 12 §落地表的 16 行 + M6 票 01 的魏三名 + 票 02 的魏/蜀三名 +
 # 票 03 的吴三名 —— P0 收口：整张标准表全开）。
@@ -118,6 +122,7 @@ FENG_ENABLED = tuple(hero.id for hero in FENG_HEROES.heroes if hero.enabled)
 FENG_MOBILE_ENABLED = tuple(
     hero.id for hero in FENG_MOBILE_HEROES.heroes if hero.enabled
 )
+HOMEBREW_ENABLED = tuple(hero.id for hero in HOMEBREW_HEROES.heroes if hero.enabled)
 
 # 规则文档第九章 933–1054 行的逐项事实（手抄的真源）：id → (势力, 性别, 体力上限)。
 _HERO_STATS = {
@@ -185,16 +190,23 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 127
+    assert len(CATALOG) == 129
     assert len(equipment) == 22
-    assert len(heroes) == 105
+    assert len(heroes) == 107
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     """武将那半 = 全部启用武将的技能清单（标准表 + 界版扩展表；数据文件是唯一真源）。"""
     expected = {
         f"hero.{hero.id}.{skill.id}"
-        for table in (HEROES, JIE_HEROES, JIE_MOBILE_HEROES, FENG_HEROES, FENG_MOBILE_HEROES)
+        for table in (
+            HEROES,
+            JIE_HEROES,
+            JIE_MOBILE_HEROES,
+            FENG_HEROES,
+            FENG_MOBILE_HEROES,
+            HOMEBREW_HEROES,
+        )
         for hero in table.heroes
         if hero.enabled
         for skill in hero.skills
@@ -202,7 +214,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 105
+    assert len(expected) == 107
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -212,6 +224,7 @@ def test_every_hero_skill_id_is_fully_qualified():
         | set(JIE_MOBILE_ENABLED)
         | set(FENG_ENABLED)
         | set(FENG_MOBILE_ENABLED)
+        | set(HOMEBREW_ENABLED)
     )
     for definition in CATALOG.values():
         if definition.carrier.value != "HERO":
@@ -1147,6 +1160,21 @@ class _HookHost:
         self.state = state
 
 
+def _congtao_probe_state() -> GameState:
+    """【从讨】的正面对照需要两件事：**五座环**（座位 0 在 ME 的攻击范围内、却不在座位 2
+    的攻击范围内——这样"持有者换成别人"那一步才会翻假），以及一个非空牌堆（条件要求
+    "有牌可观看"）。"""
+    slash = cards_of_type(PACK, "slash")[0]
+    deck = tuple(
+        card_id for card_id in range(len(PACK.deck.cards)) if card_id != slash
+    )
+    return build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(), SeatSpec(), SeatSpec(), SeatSpec()],
+        deck=deck,
+    )
+
+
 def _probe_state() -> GameState:
     """合成局面：座位 0 手里有牌（【反馈】的**伤害来源**）、座位 1 **已受伤**（【潜心】的
     "若你已受伤"）、座位 2 本回合造成过伤害（【诛害】）、处理区有一张【杀】（【奸雄】的渠道牌）。
@@ -1275,6 +1303,8 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _hujia_probe_state()
     if skill_id == "hero.jie_sunquan.jiuyuan":
         return _jiuyuan_probe_state()
+    if skill_id == "hero.tao_liubei.congtao":
+        return _congtao_probe_state()
     if skill_id == "hero.huangzhong.liegong":
         return _liegong_probe_state()
     if skill_id == "hero.jie_huanggai.zhaxiang":
@@ -1403,6 +1433,9 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
             _HookFrame(source=ME),
         ),
         "hero.jie_xushu.zhuhai": (_HookFrame(source=OTHER),),
+        # 自制包·韬·刘备自制版【从讨】：这一次成为目标的是座位 0（在 ME 的攻击范围内，
+        # 但**不在**座位 2 的攻击范围内 ⇒ 持有者换人后条件必须翻假）。逐目标的"这一次"
+        # 由派发环写进 MATCH_ACTOR_KEY，持有者由检查本身改写。
         # M6 票 14：界·魏 A 的三条条件钩子。
         # - 界【奸雄】：与标准版同一条条件（受伤的是我 + 渠道牌还在处理区）；
         # - 界【反馈】：与标准版同一条条件（受伤的是我 + 来源有牌）；
@@ -1412,6 +1445,14 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
             _HookFrame(target=ME, source=0, card=state.card(_PROBE_PROCESSING_SLASH)),
         ),
         "hero.jie_simayi.fankui": (_HookFrame(target=ME, source=0),),
+        "hero.tao_liubei.congtao": (
+            _HookFrame(
+                **{MATCH_ACTOR_KEY: 0},
+                card=state.card(_PROBE_CHANNEL_SLASH),
+                targets=(0,),
+                source=0,
+            ),
+        ),
         "hero.jie_caocao.hujia": (
             _HookFrame(card=state.card(_PROBE_DODGE_CARD), source=0),
             _HookFrame(card=state.card(_PROBE_DODGE_CARD), source=0),
@@ -1764,6 +1805,8 @@ SKILL_SHAPE: dict[str, str] = {
     # （与界吕蒙 ☆攻心共用同一条流水线）
     "hero.shen_lvmeng_mobile.shelie": "零步技能",
     "hero.shen_lvmeng_mobile.gongxin": "主动技能",
+    # 自制包·韬·刘备自制版【义起】= 主动技能（A 族第一条限定技；观看步 + 类型步）
+    "hero.tao_liubei.yiqi": "主动技能",
     # 能力位 2（rejudge_capable，没有对持有者的询问）；M6 票 14 加界【鬼才】
     "hero.simayi.guicai": "能力位",
     "hero.jie_simayi.guicai": "能力位",
@@ -1771,6 +1814,8 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.jie_caoren_mobile.jushou": "零步技能",
     # 票 03：风包黄忠【烈弓】= 零步流水线（只问「是否发动」）+ 逐目标帧标签
     "hero.huangzhong.liegong": "零步技能",
+    # 自制包·韬·刘备自制版【从讨】= 手写钩子（逐目标 + 私密观看 + 二选一，无流水线）
+    "hero.tao_liubei.congtao": "多轮技能",
     # 候选生成器 1（TARGET_POOL + TARGET_COUNT，从不发「是否发动」）
     "equip.halberd": "候选生成器",
     # 候选提供者 4（CANDIDATES + 势力求助窗口 / 引擎回退）；M6 票 14 加界【护驾】
@@ -1794,11 +1839,11 @@ SKILL_SHAPE: dict[str, str] = {
 """
 
 SHAPE_COUNTS: dict[str, int] = {
-    "主动技能": 18,
+    "主动技能": 19,
     "触发技能": 13,
     "零步技能": 27,
     "排列技能": 3,
-    "多轮技能": 13,
+    "多轮技能": 14,
     "锁定技": 30,
     "转化技": 13,
     "能力位": 2,
@@ -1842,7 +1887,7 @@ SHAPE_COUNTS: dict[str, int] = {
 STEP_LANGUAGE_SHAPES: frozenset[str] = frozenset(
     {"主动技能", "触发技能", "零步技能", "排列技能", "觉醒技"}
 )
-"""在步骤语言内的五个形态（63 条 = 18 + 13 + 27 + 3 + 2）。觉醒技也走 ``SkillFlow``
+"""在步骤语言内的五个形态（64 条 = 19 + 13 + 27 + 3 + 2）。觉醒技也走 ``SkillFlow``
 （【潜心】零步、【勤学】一步选项），故"内 == 有 ``flow_for``"仍成立。"""
 
 IN_STEP_LANGUAGE: frozenset[str] = frozenset(
@@ -1859,7 +1904,7 @@ W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同�
 """
 
 OUTSIDE_STEP_LANGUAGE: frozenset[str] = frozenset(SKILL_SHAPE) - IN_STEP_LANGUAGE
-"""不在步骤语言内（63）：多轮 13 + 锁定 29 + 转化 13 + 能力位 2 + 候选生成器 1 + 候选提供者 5。
+"""不在步骤语言内（65）：多轮 14 + 锁定 30 + 转化 13 + 能力位 2 + 候选生成器 1 + 候选提供者 5。
 
 同样**派生**（:data:`SKILL_SHAPE` 减 :data:`IN_STEP_LANGUAGE`）；63 这个数由
 `SHAPE_COUNTS` 的其余六格加出来，测试里另有一条规模断言。
@@ -1893,7 +1938,7 @@ def _flow_steps(skill_id: str):
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """122 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 127
+    assert len(SKILL_SHAPE) == len(CATALOG) == 129
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11
     assert all(SKILL_SHAPE.values()), "表里没有空形态"
@@ -1976,7 +2021,7 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
     }
 
     multi_round = _shape_members("多轮技能")
-    assert len(multi_round) == 13
+    assert len(multi_round) == 14
     assert all(_flow_steps(skill_id) is None for skill_id in multi_round)
     assert all(
         any(hook.handler is not None for hook in CATALOG[skill_id].hooks)
@@ -2019,8 +2064,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 63
-    assert len(outside) == 64
+    assert len(inside) == 64
+    assert len(outside) == 65
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

@@ -56,6 +56,12 @@ function renderJudgmentReveal(pending) {
 
 function renderOptionButtons(pending) {
   const box = $("t-options");
+  // 票 01（自制包·韬·刘备【义起】）：这一问带着**观看授予**（`revealed`）——先把牌面画在
+  // 按钮上面（只读、仅自己可见），再摆 3 个类型按钮。与洛神"亮牌 + 单选项确认"共用同一个
+  // 容器（`#t-options`，随后整体搬进弹窗正文）。
+  if ((pending.revealed || []).length) {
+    renderReveal(pending, { interactive: false, promptHint: false });
+  }
   const dialog = stepDialogKind(pending) === DIALOG_KINDS.choice;
   if (dialog) box.classList.add("suit-options");
   if (dialog) {
@@ -171,6 +177,13 @@ const OPTION_LABELS = Object.freeze({
   // 攻心（票 01；界吕蒙 ☆ / 神吕蒙移动版共用）：展示红桃后的二选一。
   discard: "弃置此牌",
   deck_top: "将此牌置于牌堆顶",
+  // 韬·刘备自制版【从讨】：另一张的去处（两项恒可执行、不可放弃）。
+  congtao_discard: "置入弃牌堆",
+  congtao_deck_top: "放回牌堆顶",
+  // 韬·刘备自制版【义起】：类型三选一（恒三项，必须选一项）。
+  basic: "基本牌",
+  trick: "锦囊牌",
+  equipment: "装备牌",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。

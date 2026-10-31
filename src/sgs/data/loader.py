@@ -78,7 +78,13 @@ KNOWN_HEROES_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 
 DEFAULT_PACK_ID = "standard"
 
-HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = ("jie", "jie_mobile", "feng", "feng_mobile")
+HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = (
+    "jie",
+    "jie_mobile",
+    "feng",
+    "feng_mobile",
+    "homebrew",
+)
 """与内容包表并行装载的**扩展武将包**（M6 票 04：界标准独立成一份数据）。
 
 界标准 29 名与标准 25 名**分开存**（ADR-006 的"分开存"这次真落），故
@@ -96,7 +102,11 @@ HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = ("jie", "jie_mobile", "feng", "feng_
 
 ``feng`` 是**神话再临·风包**那一份（``files/heroes.feng.json``，票 03 起）：它既不是标准版
 的"另一版本"、也不是移动版，而是一个**独立的系列包**——故单独一表、版本标记取 ``"feng"``。
-风包武将逐名追加到这张表；与界标准 / 移动版同一读取面（同一道三段校验、同一个默认将池）。"""
+风包武将逐名追加到这张表；与界标准 / 移动版同一读取面（同一道三段校验、同一个默认将池）。
+
+``homebrew`` 是**自制包**那一份（``files/heroes.homebrew.json``）：同样是一个独立系列包，
+版本标记取 ``"homebrew"``，显示名不带任何版本后缀（自制武将自带「韬·」系列前缀）。首个载体
+是韬·刘备自制版（真名刘备，与标准版同名 ⇒ 同一局仍只出一个）。"""
 
 HERO_SKILL_PREFIX = "hero."
 """武将技能 id 的前缀（票 01 §Data / 票 12）：``hero.<武将 id>.<短 id>``。

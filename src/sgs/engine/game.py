@@ -67,6 +67,7 @@ from sgs.resolution import (
 )
 from sgs.skills import (
     CATALOG,
+    MATCH_ACTOR_KEY,
     MOVE_EVENT_KEY,
     RUNNING_SKILL_KEY,
     SKILL_JUDGMENT_CARD_KEY,
@@ -1210,7 +1211,20 @@ class Engine:
             # "防止伤害"的既有语义不被"受到伤害后"的时点绕开。
             frame.data.pop("_pending_timing", None)
             return None
-        control = dispatch_timing(self, frame, timing)
+        # 这一次派发的对象（韬·刘备【从讨】）：逐目标的时机每次只服务一个目标，而
+        # ``Hook.condition`` 拿不到派发参数 —— 帧上只有整份 ``targets``。写进帧私有槽、
+        # 派发后还原（与 ``_DISPATCH_SCOPE`` 同姿态）；帧私有数据不进记录流，不读它的
+        # 技能因此零行为变化。
+        prior_actor = frame.data.get(MATCH_ACTOR_KEY)
+        had_actor = MATCH_ACTOR_KEY in frame.data
+        frame.data[MATCH_ACTOR_KEY] = actor
+        try:
+            control = dispatch_timing(self, frame, timing)
+        finally:
+            if had_actor:
+                frame.data[MATCH_ACTOR_KEY] = prior_actor
+            else:
+                frame.data.pop(MATCH_ACTOR_KEY, None)
         if control == "stay":
             frame.data["_pending_timing"] = key
         else:
@@ -2207,11 +2221,17 @@ class Engine:
         skill_id: str,
         options: tuple[str, ...],
         optional: bool = False,
+        revealed: tuple[CardRef, ...] = (),
     ) -> Any:
         """发一次 ``SELECT_OPTION`` 询问（票 12 §Q6 / 票 30）：选项闭集。
 
         缺省**强制选择**（既有消费者的口径）；``optional=True`` 时候选里多一条 ``Pass``，
         并把它**原样返回**给调用方——"这一步可以取消"的判据由调用方自己定（票 00 / N4）。
+
+        ``revealed``（韬·刘备【义起】的加法）：本次询问**授予 ``actor`` 的牌面**，与
+        :meth:`ask_selection` 的同名参数共用同一条授予通道（票 10 §①）。投影按"选项询问
+        带授予牌面"这个**形状**开选择型弹窗：牌面画在弹窗里（只读、仅本人可见）、选项按钮
+        也在同一弹窗 —— "先看到这几张牌，再选一项"因此是**一问**，不会被拆成两步。
 
         答案按 ``(skill_id, actor)`` 帧内缓存，重入不重发。
         """
@@ -2231,6 +2251,7 @@ class Engine:
                 payload=SelectOptionContext(
                     skill_id=skill_id, options=options, optional=optional
                 ),
+                revealed=revealed,
             )
         )
         if action is SUSPEND:

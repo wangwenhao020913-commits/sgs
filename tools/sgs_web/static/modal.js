@@ -105,12 +105,26 @@ function stepDialogKind(pending) {
   // 选择型（票 08）：服务端在载荷里给了选项标签（花色是第一个复用枚举），或选项 ≥4
   // （D3 的模板判据）⇒ 画弹窗。前端不按选项值自己判断"这是不是花色"——那会在这里
   // 长出第二份枚举表。
+  if (isWatchChoiceStep(pending)) return DIALOG_KINDS.choice;
   if (isChoiceStep(pending)) return DIALOG_KINDS.choice;
   if (isUnknownZoneStep(pending)) return DIALOG_KINDS.unknown;
   // 票 01：公开亮牌 + 每种花色至多 k 张（涉猎）——在亮牌判据之前，二者形状不同。
   if (isSuitPickStep(pending)) return DIALOG_KINDS.suit;
   if (isRevealStep(pending)) return DIALOG_KINDS.reveal;
   return null;
+}
+
+/** **带观看授予的选项步**（韬·刘备【义起】）：牌面与选项按钮同一个窗。
+ *
+ * 判据只看载荷形状：`SELECT_OPTION` ∧ `revealed` 非空 ∧ 不是选座位形态（`option_seats`
+ * 为空）。牌面由 `renderOptionButtons` 画在按钮**上面**（只读、仅自己可见），窗一开
+ * 按钮就落在弹窗正文里（`applyDialogContentMode` 把 `#t-options` 搬进正文）。
+ */
+function isWatchChoiceStep(pending) {
+  if (!pending || pending.kind !== "SELECT_OPTION") return false;
+  if (!Array.isArray(pending.revealed) || !pending.revealed.length) return false;
+  if (pending.option_seats && Object.keys(pending.option_seats).length) return false;
+  return true;
 }
 
 /** 选择型模板的判据（D3）：`SELECT_OPTION` 且（有服务端选项标签 或 选项 ≥4），
@@ -303,7 +317,12 @@ function dialogTitleFor(kind, pending) {
     return pa ? `预发动【${pa.name}】` : "预发动";
   }
   if (kind === DIALOG_KINDS.arrange) return "排列";
-  if (kind === DIALOG_KINDS.choice) return "选择";
+  if (kind === DIALOG_KINDS.choice) {
+    // 带观看授予的选项步（【义起】）标题写技能名：玩家一眼看出"这是谁在问"。
+    const watched = isWatchChoiceStep(pending);
+    const contextName = watched && pending.context && pending.context.name;
+    return contextName || "选择";
+  }
   if (kind === DIALOG_KINDS.unknown) return "选择一张牌";
   if (kind === DIALOG_KINDS.reveal) {
     const title = pending && pending.harvest && pending.harvest.title;

@@ -34,10 +34,12 @@ from sgs.skills.flow import (
     DeckTopArrange,
     FixedSplit,
     PickCards,
+    PickOption,
     PickProvide,
     PickSeats,
     SkillFlow,
     _flow_step_cards,
+    _flow_step_option,
     manifest,
     run_flow,
     validate_flow_activation,
@@ -268,7 +270,10 @@ def test_run_flow_needs_an_integer_owner_and_reads_the_frame_source_by_default()
             return tuple(slots), tuple(card_ids)
 
         @staticmethod
-        def ask_selection(frame, *, owner, key, actor, timing, spec, build_face):
+        def ask_selection(
+            frame, *, owner, key, actor, timing, spec, build_face,
+            revealed=(), ask_when_empty=False,
+        ):
             del frame, owner, key, timing, spec
             build_face()
             seen["actor"] = actor
@@ -395,7 +400,10 @@ def test_pick_cards_card_types_filter_narrows_the_face_and_the_hi_none_limit():
             return tuple(slots), tuple(card_ids)
 
         @staticmethod
-        def ask_selection(frame, *, owner, key, actor, timing, spec, build_face):
+        def ask_selection(
+            frame, *, owner, key, actor, timing, spec, build_face,
+            revealed=(), ask_when_empty=False,
+        ):
             del frame, owner, key, actor, timing
             slots, _card_ids = build_face()
             seen["total"] = spec.total
@@ -459,7 +467,10 @@ def test_pick_cards_slot_kinds_filter_narrows_the_face_and_the_hi_none_limit():
             return tuple(slots), tuple(card_ids)
 
         @staticmethod
-        def ask_selection(frame, *, owner, key, actor, timing, spec, build_face):
+        def ask_selection(
+            frame, *, owner, key, actor, timing, spec, build_face,
+            revealed=(), ask_when_empty=False,
+        ):
             del frame, owner, key, actor, timing
             slots, _card_ids = build_face()
             seen["total"] = spec.total
@@ -1320,3 +1331,58 @@ def test_a_synthetic_fixed_split_consumer_runs_the_arrange_step():
         )
         == 1
     ), "重入命中 ask_arrange 的帧内缓存，不重发询问"
+
+
+# ---------------------------------------------------------------------------
+# ⑧ PickOption.revealed（票 01 自制包）：选项步把观看授予透传给引擎
+# ---------------------------------------------------------------------------
+
+
+def test_pick_option_forwards_the_revealed_grant():
+    """``PickOption.revealed`` 原样传给 ``Engine.ask_option``（票 01，【义起】的观看+三选一）。
+
+    观看授予是"先看到这几张牌，再点一项"的**同一问**：执行器若不透传，弹窗里就没有牌面，
+    玩家只能盲选类型。定值档与可调用档各验一次（用户裁定的观看张数是**现算**的，
+    故可调用档才是真路径）。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=tuple(range(len(PACK.deck.cards))),
+        turn_seat=0,
+    )
+    watched = (state.card(state.deck[0]), state.card(state.deck[1]))
+    seen: dict[str, object] = {}
+
+    class _Host:
+        def __init__(self) -> None:
+            self.state = state
+
+        @staticmethod
+        def suspended(value) -> bool:
+            return value == "SUSPEND"
+
+        @staticmethod
+        def ask_option(
+            frame, actor, timing, *, skill_id, options, optional=False, revealed=(),
+        ):
+            del frame, actor, timing, skill_id, options, optional
+            seen["revealed"] = tuple(card.card_id for card in revealed)
+            return _Choice()
+
+    class _Choice:
+        choice = "a"
+
+    host = _Host()
+    fixed = PickOption(options=("a", "b"), optional=False, key="type", revealed=watched)
+    _flow_step_option(host, _Frame(source=0), fixed, 0, {}, Timing.PHASE_PLAY_IDLE, ("probe", 0))
+    assert seen["revealed"] == tuple(card.card_id for card in watched)
+
+    dynamic = PickOption(
+        options=("a", "b"),
+        optional=False,
+        key="type",
+        revealed=lambda _state, _frame, _owner, _answers: watched,
+    )
+    _flow_step_option(host, _Frame(source=0), dynamic, 0, {}, Timing.PHASE_PLAY_IDLE, ("probe", 1))
+    assert seen["revealed"] == tuple(card.card_id for card in watched), "可调用档也现算透传"

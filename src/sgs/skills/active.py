@@ -50,6 +50,7 @@ from sgs.data import (
     Suit,
     card_category,
     color_of_suit,
+    hero_card_skill_ids,
     hero_skill_id,
 )
 from sgs.effects import (
@@ -68,6 +69,7 @@ from sgs.effects import (
 from sgs.resolution import Tag, add_tag
 from sgs.state import (
     ActivateSkill,
+    CardRef,
     FrameKind,
     GameState,
     MoveReason,
@@ -86,6 +88,8 @@ from .catalog import (
     _USED_SECOND,
     _move_by_source,
     instance_key,
+    limited_skill_used,
+    mark_limited_skill_used,
     resolve_instances,
 )
 from .virtual import pure_virtual_card, transformed_card
@@ -265,6 +269,26 @@ from .flow import (  # noqa: F401  （重导出：既有 import 点与 __all__ �
     seat_choice as _seat_choice,
 )
 
+def _limited_offers(
+    skill: "ActiveSkill", offers: Callable[[GameState, ModifierContext, Any], Any]
+) -> Callable[[GameState, ModifierContext, Any], Any]:
+    """限定技的**候选闸**（韬·刘备【义起】）：整局已用之后不再产出候选。
+
+    被动侧的同一条门在 :func:`~sgs.skills.catalog._dispatch`（"限定技整局一次 ⇒ 不再产出
+    候选、不再发是否发动询问"）；主动侧没有派发环，故在声明装配处包一层。
+    **按类型判断，不按技能名**：非限定技原样返回同一个回调（零额外开销、零行为变化）。
+    """
+    if skill.skill_type is not SkillType.LIMITED:
+        return offers
+
+    def guarded(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+        if limited_skill_used(state, ctx.owner, skill.skill_id):
+            return current
+        return offers(state, ctx, current)
+
+    return guarded
+
+
 def _activation_handler(skill: ActiveSkill) -> ActivationHandler:
     """一条声明的发动回调：手写回调原样取用，声明式流水线在这里**现建闭包**。
 
@@ -277,18 +301,27 @@ def _activation_handler(skill: ActiveSkill) -> ActivationHandler:
     """
     if skill.flow is not None:
         flow = skill.flow
+        limited = skill.skill_type is SkillType.LIMITED
 
         def handler(host: Any, frame: Any) -> Any:
             def commit() -> None:
-                _mark_phase(
-                    host.state, frame.data["source"], frame.data["skill_id"], _USED
-                )
+                if flow.once_per_phase:
+                    _mark_phase(
+                        host.state, frame.data["source"], frame.data["skill_id"], _USED
+                    )
+                if limited:
+                    # 限定技的"整局已用"位（与被动侧执行完落位同一时机）。它**不随**
+                    # ``once_per_phase`` 开关：一次性与一次性是两条轴（【义起】只整局一次，
+                    # 不需要阶段位）。
+                    mark_limited_skill_used(
+                        host.state, frame.data["source"], frame.data["skill_id"]
+                    )
 
             return run_flow(
                 host,
                 frame,
                 flow,
-                on_commit=commit if flow.once_per_phase else None,
+                on_commit=commit if (flow.once_per_phase or limited) else None,
             )
 
         return handler
@@ -2695,13 +2728,208 @@ class ActiveSkill(HeroSkillDecl):
     只由 ``PlayPhaseQuery.preactivations`` 表达可用性（清单由 ``flow`` 渲染）。本票只落
     机制，逐条技能由 W4-2 翻这个位——翻之前既有候选 / 测试 / 录像一字不改。
     """
+    skill_type: SkillType = SkillType.NORMAL
+    """技能类型（韬·刘备【义起】的加法，缺省 ``NORMAL`` ⇒ 既有 A 族声明一字不改）。
+
+    与 :class:`~sgs.skills.phase_body.PhaseBodySkill.skill_type` **同一形状**：限定技在
+    被动侧由派发环按 ``SkillDef.skill_type`` 挡（"整局已用"位），主动侧没有派发环，故
+    这里把它透进 ``SkillDef``，并由 A 族自己的两处通用闸兑现：
+
+    - **候选**：:func:`_limited_offers` 在"整局已用"之后不再产出候选；
+    - **落位**：:func:`_activation_handler` 的提交点调
+      :func:`~sgs.skills.catalog.mark_limited_skill_used`（与被动侧的执行完落位同姿态）。
+    """
 
     def __post_init__(self) -> None:
         if (self.activate is None) == (self.flow is None):
             raise ValueError(f"{self.skill_id} 必须恰有 activate / flow 之一")
 
 
+# ---------------------------------------------------------------------------
+# 韬·刘备【义起】（自制包；「限」）：观看弃牌堆顶 x 张 → 获得一种类型的所有牌 →
+# 失去武将牌上除此技能外的所有技能 → 获得【武圣】【咆哮】
+# ---------------------------------------------------------------------------
+
+YIQI = hero_skill_id("tao_liubei", "yiqi")
+"""韬·刘备【义起】的全限定技能 id（A 族第一条**限定技**）。
+
+牌面（用户 `技能.txt`）：(限) 出牌阶段内，你可以观看弃牌堆顶 x 张牌，选择并获得其中一种
+类型的所有牌，然后你失去武将牌上除此技能外的所有技能并获得【武圣】、【咆哮】
+（x 为弃牌堆牌数整除 10）。
+
+用户 2026-10-31 逐条裁定的三处（`06`（§5「程序化约定与偏离一手」）韬·刘备行）：
+
+- **x = 0 不能发动**（弃牌堆不足 10 张 ⇒ 候选不出现，与"付不起"同档）；
+- **观看 = 自启亮牌弹窗**，随后**提示区恒 3 个选项**（基本 / 锦囊 / 装备），
+  **必须选 1 个、不可放弃**（选中顶 x 张里没有的类型 ⇒ 本次不得牌，仍继续后面的失去 / 获得）；
+- **"失去"严格按牌面派生**：武将牌技能清单减【义起】，代码里不出现具体技能 id。
+"""
+
+YIQI_DECK_PER_CARD = 10
+"""x 的分母：**弃牌堆张数整除 10**（向下取整；牌面"x为弃牌堆牌数整除10"）。"""
+
+WUSHENG_STANDARD = hero_skill_id("guanyu", "wusheng")
+"""【义起】授予的☆【武圣】= **标准版**（用户裁定"就是标武圣，照搬即可"）。"""
+
+PAOXIAO_STANDARD = hero_skill_id("zhangfei", "paoxiao")
+"""【义起】授予的☆【咆哮】= **标准版**（用户裁定"就是标咆哮，照搬即可"）。"""
+
+_YIQI_GAINED_KEY = "yiqi_gained"
+"""帧私有：这一步的获得已经搬完（搬牌挂起后的续跑不重搬）。"""
+
+_YIQI_LOST_KEY = "yiqi_lost"
+"""帧私有：武将牌上的技能已经失去（`lose_skill` 幂等，但重复遍历没有必要）。"""
+
+_YIQI_GRANTED_KEY = "yiqi_granted"
+"""帧私有：☆ 武圣 / 咆哮已经授予（`grant_skill` 幂等，同上）。"""
+
+_YIQI_TYPES: tuple[str, ...] = ("basic", "trick", "equipment")
+"""类型步的**恒 3 项**闭集（用户裁定：给 3 个选项，不收窄成"实际出现的类型"）。"""
+
+_YIQI_CATEGORY: dict[str, Category] = {
+    "basic": Category.BASIC,
+    "trick": Category.TRICK,
+    "equipment": Category.EQUIPMENT,
+}
+"""选项文本 → 牌类（数据的 :class:`~sgs.data.Category` 三档；标签由前端
+``options.js:OPTION_LABELS`` 给中文）。"""
+
+
+def _yiqi_view_count(state: GameState) -> int:
+    """x = 弃牌堆张数 **整除 10**（动态量：每次取用时按当下张数现算，账本 L775⑤）。"""
+    return len(state.discard) // YIQI_DECK_PER_CARD
+
+
+def _yiqi_top_cards(state: GameState) -> tuple[CardRef, ...]:
+    """弃牌堆**顶** x 张 = ``state.discard`` 的**尾部**（列表按置入序，最后置入的在堆顶）。
+
+    纯状态读：不抽随机数、不落 delta、不搬牌 —— 观看只是看。两个步骤与 effect 各自现算
+    同一批牌（步骤之间没有能改动弃牌堆的操作），故不必帧内缓存。
+    """
+    count = _yiqi_view_count(state)
+    if count <= 0:
+        return ()
+    return tuple(state.card(card_id) for card_id in state.discard[-count:])
+
+
+def _yiqi_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：出牌阶段 + 本人 + x ≥ 1（限定技的"整局已用"闸由 :func:`_limited_offers` 包在外层）。"""
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    if not _yiqi_top_cards(state):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _yiqi_revealed(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[CardRef, ...]:
+    """选项步授予的牌面 = 弃牌堆顶 x 张（投影按"``SELECT_OPTION`` ∧ ``revealed`` 非空"开选择型弹窗）。"""
+    del frame, owner, answers
+    return _yiqi_top_cards(state)
+
+
+def _yiqi_lost_skill_ids(state: GameState, owner: int) -> tuple[str, ...]:
+    """「武将牌上除此技能外的所有技能」= 武将牌技能清单 **减【义起】**（用户 Q7）。
+
+    清单来自数据表（:func:`~sgs.data.hero_card_skill_ids`，它已排除 ☆ 条目）⇒ 本将今天的
+    结果是【从讨】一条，但**代码里不出现"从讨"这个 id**：武将牌上多一条技能时它也会被
+    失去，断言的构造性用例钉这一点。
+    """
+    hero_id = state.player(owner).hero
+    if hero_id is None:
+        return ()
+    return tuple(
+        skill_id for skill_id in hero_card_skill_ids(hero_id) if skill_id != YIQI
+    )
+
+
+def _yiqi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：获得该类型的所有牌 → 失去武将牌上除【义起】外的技能 → 授予☆武圣 ★咆哮。
+
+    三段各带帧内游标：搬牌会内联派发"获得牌后"一类钩子，挂起后的续跑既不重做也不漏做。
+    选中一个**顶 x 张里没有的**类型时第一段零搬牌——用户裁定 3 项恒在，故这是合法的
+    （不取消，照样完成后面的失去 / 获得）。
+    """
+    state = host.state
+    owner = int(frame.data["source"])
+    wanted = _YIQI_CATEGORY[str(answers["type"])]
+    if not frame.data.get(_YIQI_GAINED_KEY):
+        in_pile = set(state.discard)
+        cards = tuple(
+            card
+            for card in _yiqi_top_cards(state)
+            if card.card_id in in_pile
+            and card_category(state.pack_id, card.type) is wanted
+        )
+        if cards:
+            control = host.move_in_frame(
+                frame,
+                cards,
+                to_zone=ZoneRef(Zone.HAND, owner),
+                reason=MoveReason.PUT,
+                owner=owner,
+                actor=owner,
+            )
+            if control == "stay":
+                return "stay"
+        frame.data[_YIQI_GAINED_KEY] = True
+    if not frame.data.get(_YIQI_LOST_KEY):
+        frame.data[_YIQI_LOST_KEY] = True
+        for skill_id in _yiqi_lost_skill_ids(state, owner):
+            host.lose_skill(owner, skill_id, frame=frame)
+    if not frame.data.get(_YIQI_GRANTED_KEY):
+        frame.data[_YIQI_GRANTED_KEY] = True
+        host.grant_skill(owner, WUSHENG_STANDARD, frame=frame)
+        host.grant_skill(owner, PAOXIAO_STANDARD, frame=frame)
+    return None
+
+
+YIQI_FLOW = SkillFlow(
+    name="yiqi",
+    steps=(
+        # **一问**：选项步带上观看授予（`revealed` = 弃牌堆顶 x 张）。投影按形状把这个
+        # 选项步开成选择型弹窗——牌面画在弹窗里（只读、仅自己可见），3 个类型按钮也在同一
+        # 个弹窗里；点一个即提交（`optional=False`：必须选 1 个、不可放弃）。
+        # 不分两步的理由（2026-10-31 实机验收）：第一步"只看不选"在预发动清单里是个空步骤，
+        # 而清单是"发动前一次填完"的形态，没有"先看到牌"这一环 ⇒ 带观看授予的流水线整条
+        # 不下发清单（`flow.manifest`），走"点技能按钮 → 逐步问"。
+        PickOption(
+            options=_YIQI_TYPES,
+            optional=False,
+            key="type",
+            revealed=_yiqi_revealed,
+        ),
+    ),
+    effect=_yiqi_effect,
+    # 限定技的"一次"是**整局**，不是本阶段 ⇒ 不落 `_USED` 阶段位（整局位由提交点落）。
+    once_per_phase=False,
+)
+"""【义起】的一步流水线：观看弃牌堆顶 x 张 + 三选一（同一问）→ 获得 / 失去 / 授予。"""
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
+    # 韬·刘备【义起】（自制包）：**A 族第一条限定技**。观看弃牌堆顶 x 张（x = 张数整除 10）→
+    # 恒 3 项类型选 1（不可放弃）→ 获得该类所有牌 → 失去武将牌上除【义起】外的技能 →
+    # 获得标准版【武圣】【咆哮】（用户 2026-10-31 逐条裁定）。不翻预发动：首步是"看弃牌堆"
+    # 的亮牌步，清单渲不出牌面。
+    ActiveSkill(
+        "tao_liubei",
+        "yiqi",
+        _yiqi_offers,
+        flow=YIQI_FLOW,
+        skill_type=SkillType.LIMITED,
+        requirement=(
+            "限定技：观看弃牌堆顶 x 张牌（x = 弃牌堆张数整除 10），选择并获得其中一种类型的"
+            "所有牌；然后你失去武将牌上除此技能外的所有技能，并获得【武圣】【咆哮】"
+        ),
+        step_requirements={
+            "type": (
+                "观看弃牌堆顶的 x 张牌（只有你能看），选择一种类型：获得其中该类型的"
+                "所有牌（必须选一项）"
+            ),
+        },
+    ),
     # 孙权【制衡】：弃任意张（手牌 + 装备区）→ 摸等量（规则 1009）；票 04 的单步流水线。
     ActiveSkill("sunquan", "zhiheng", _zhiheng_offers, flow=ZHIHENG_FLOW, preactivated=True),
     # 界孙权【制衡】（M6 票 17）：同一条单步清单，另加"弃光所有手牌多摸一张"（§十九 L2121–L2123）。
@@ -2952,16 +3180,17 @@ def active_skill_definitions() -> tuple[SkillDef, ...]:
     """A 族八条技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
 
     非锁定（技能面都写了"你可以"）：候选由 ``CANDIDATES`` 挂点产出；``carrier = HERO``
-    ⇒ 优先级档由载体派生；``skill_type = NORMAL``（无主公技）。
+    ⇒ 优先级档由载体派生；``skill_type`` 取声明上的同名字段（缺省 ``NORMAL``；【义起】是
+    A 族第一条 ``LIMITED``）——候选一律经 :func:`_limited_offers` 过一道"整局已用"闸。
     """
     return tuple(
         SkillDef(
             skill_id=skill.skill_id,
             locked=False,
             carrier=CarrierKind.HERO,
-            skill_type=SkillType.NORMAL,
+            skill_type=skill.skill_type,
             modifiers=(
-                Modifier(ModifierPoint.CANDIDATES, skill.offers),
+                Modifier(ModifierPoint.CANDIDATES, _limited_offers(skill, skill.offers)),
                 *skill.extra_modifiers,
             ),
             requirement=skill.requirement or _REQUIREMENTS[skill.short_id],

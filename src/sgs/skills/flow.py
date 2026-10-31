@@ -201,6 +201,7 @@ class PickCards:
     ``(state, frame, owner, answers)`` —— 【贯石斧】据此排除**这张技能对应的装备牌自己**
     （用户裁定，偏离官方 FAQ）：身份取 ``SkillInstance.source.card_id`` 的实例解析结果，
     不写死牌名。
+
     """
 
     zones: tuple[Zone, ...]
@@ -287,12 +288,23 @@ OptionChoices = (
 
 @dataclass(frozen=True, slots=True)
 class PickOption:
-    """选项步骤：问一次 ``SELECT_OPTION``（闭集 ``options``，选中文本原样进答案）。"""
+    """选项步骤：问一次 ``SELECT_OPTION``（闭集 ``options``，选中文本原样进答案）。
+
+    ``revealed``（韬·刘备【义起】的加法）：把本次询问**授予应答者**的牌面一起下发
+    （:meth:`Engine.ask_option` 的 ``revealed``）。投影按"``SELECT_OPTION`` ∧ ``revealed``
+    非空"这个**形状**开选择型弹窗：牌面画在弹窗里（只读），选项按钮也画在同一弹窗。
+    可调用档收 ``(state, frame, owner, answers)``，发问前现算——【义起】"观看弃牌堆顶 x 张
+    再选一种类型"因此是**一问**：先看到牌，再点一个类型（不用分两步、也填不进预发动清单）。
+    """
 
     options: OptionChoices
     actor: ActorRef = None
     optional: bool = True
     key: str = "option"
+    revealed: (
+        tuple[CardRef, ...]
+        | Callable[[GameState, Frame, int, FlowAnswers], tuple[CardRef, ...]]
+    ) = ()
 
 
 ArrangeCount = int | Callable[[GameState, Frame], int]
@@ -666,6 +678,20 @@ def _filter_face(
     )
 
 
+def _revealed_cards(
+    step: Any, state: Any, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[CardRef, ...]:
+    """本步**授予应答者**的牌面（``PickOption.revealed`` 的求值口）。
+
+    定值档原样返回；可调用档收 ``(state, frame, owner, answers)`` —— 与 ``face`` /
+    ``exclude_cards`` 的可调用档同一条求值纪律（发问前现算，不抽随机数、不落 delta）。
+    """
+    source = step.revealed
+    if callable(source):
+        return tuple(source(state, frame, owner, answers))
+    return tuple(source)
+
+
 def _flow_step_cards(
     host: Any,
     frame: Any,
@@ -917,6 +943,7 @@ def _flow_step_option(
         skill_id=_flow_option_id(frame, step.key, 0, multi=False),
         options=options,
         optional=step.optional,
+        revealed=_revealed_cards(step, host.state, frame, owner, answers),
     )
     if host.suspended(answer):
         return "stay", ""
@@ -1385,6 +1412,12 @@ def manifest(
         }
 
     for index, step in enumerate(flow.steps):
+        if getattr(step, "revealed", ()):
+            # 观看授予的步骤**不能在清单里填表**：玩家要先在弹窗里看到那几张牌，才选得出
+            # 这一步的答案；清单是"发动前一次填完"的形态，没有"看到"这一环。
+            # 故含观看步的流水线整条不下发清单（与含 ``Arrange`` 同一条纪律）——
+            # 【义起】因此走"点技能按钮 → 引擎逐步问"，而不是预发动入口。
+            return ()
         if isinstance(step, Arrange):
             # 排列无法用 ``Step.pool`` 表达（候选 = 全部排列 × 切分点，不是可选池），
             # 故含 ``Arrange`` 的流水线**整条不下发清单**：观星因此不翻预发动。
@@ -1434,7 +1467,9 @@ def manifest(
                 if step.hi is not None
                 else max((len(row) for _, row in rows), default=0)
             )
-            if maximum < step.lo:
+            if maximum < step.lo or maximum == 0:
+                # 0 张可选 = 这一步填不出任何答案（``lo = hi = 0`` 的"只看不选"步）：
+                # 清单里只会多出一个空步骤。整条不下发。
                 return ()
             steps.append(
                 Step(
@@ -1593,6 +1628,12 @@ def _assign_activation(
     pick_index = 0
     choice_index = 0
     for index, step in enumerate(flow.steps):
+        if getattr(step, "revealed", ()):
+            # 观看授予的步骤**不能在清单里填表**：玩家要先在弹窗里看到那几张牌，才选得出
+            # 这一步的答案；清单是"发动前一次填完"的形态，没有"看到"这一环。
+            # 故含观看步的流水线整条不下发清单（与含 ``Arrange`` 同一条纪律）——
+            # 【义起】因此走"点技能按钮 → 引擎逐步问"，而不是预发动入口。
+            return ()
         if isinstance(step, Arrange):
             break
         framed = _with_answers(base, answers)
