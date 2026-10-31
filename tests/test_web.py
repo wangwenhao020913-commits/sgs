@@ -5968,6 +5968,41 @@ def test_timing_record_cards_carry_the_card_face_contract() -> None:
     assert card["description"], "展示契约的 description 也要在（悬停全文）"
 
 
+def test_card_move_records_carry_the_card_face_contract() -> None:
+    """舞台是拿 `card_move` 建舞台项的：公开区的移动牌也要带同一份卡面契约。
+
+    只给裸 `CardRef` 时它只能读数据名（"雷杀"两个字、没有属性 ⇒ 画成黑色）——同一张牌
+    在手牌里是蓝色单字、在台上是黑色双字（用户实机报障 2026-10-31）。
+    """
+    from sgs.engine.journal import wrap_delta
+    from sgs.state import CardMoveDelta as _CardMoveDelta
+    from sgs.state import CardRef as _CardRef
+    from sgs.state import MoveReason, Zone, ZoneRef
+
+    card = _CardRef(
+        card_id=5, type="thunder_slash", name="雷杀", suit="spade", rank=4, color="black"
+    )
+    # 引擎记录流里的形态是**包过**的 ``CardMoveRecord``（``kind="delta"`` + ``delta_type``）。
+    move = wrap_delta(
+        _CardMoveDelta(
+            cards=(card,),
+            from_zone=ZoneRef(Zone.HAND, 0),
+            to_zone=ZoneRef(Zone.PROCESSING, None),
+            reason=MoveReason.USE,
+            owner=0,
+        ),
+        seq=3,
+        frame_id=0,
+        depth=0,
+    )
+
+    payload = visible_record(move, viewer=0)
+    shown = payload["cards"][0]
+
+    assert (shown["display_name"], shown["attribute"], shown["kind"]) == ("杀", "雷电", "normal")
+    assert shown["description"], "展示契约的 description 也要在（悬停全文）"
+
+
 def test_tag_deltas_reach_the_live_channel_with_labels_but_stay_out_of_records() -> None:
     """标签走**展示用的 live 通道**：带服务端 label，但不进人类 ``records``。
 

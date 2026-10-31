@@ -2250,6 +2250,18 @@ def visible_record(
                 # M5-09c：隐藏区的牌面不下发，只给张数——界面 / 事件流仍能说"移动了几张"。
                 raw["card_count"] = len(raw["cards"])
                 raw["cards"] = []
+            else:
+                # 公开区的移动牌也要**完整的卡面契约**（display_name / attribute / kind /
+                # source_cards / description）。舞台是拿 card_move 建舞台项的：只给裸
+                # CardRef 时它只能读数据名（"火杀""雷杀"两个字、没有属性 ⇒ 画成黑色），
+                # 同一张牌在手牌里是蓝的、在台上是黑的（用户实机报障 2026-10-31）。
+                lookup = _card_lookup(state) if state is not None else None
+                raw["cards"] = [
+                    card_payload(CardRef.model_validate(card), lookup=lookup)
+                    if isinstance(card, dict)
+                    else card
+                    for card in raw["cards"]
+                ]
         elif delta_type == "deck_shuffle" and raw.get("cards"):
             # A3：牌堆只给数量。整副洗后牌序是引擎 / 回放的全知事实，不是人类载荷。
             if not deck_cards_visible(viewer):
