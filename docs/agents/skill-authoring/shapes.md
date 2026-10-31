@@ -188,6 +188,27 @@ U1-06 **不接 click**，这一问的唯一入口是清单画出的浮动按钮�
 | 座位步，池由 `available` 门保证非空 | 渲得出 | 同上；也可以按"直提态 + 逐步问"不翻（【突袭】当前就是这一档） | 【突袭】 |
 | 读别人的**手牌**（隐藏面：`reveal_hand=False` / `_hidden_face`） | 渲不出 | **别翻** | 【反馈】【利驭】 |
 
+### 4.1 实现方式（闭集，一问一行）
+
+ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ 四类询问弹窗 + fail-closed**。
+票面「询问剧本」的"实现方式"一格从这里选一行；选不出 = **C3 停**（新面要走 UI 票 + 真实浏览器
+验收，不在技能代码里凑）。
+
+| 实现方式 | 答案是哪个表面 | 判据 / 入口 | 样板（可套用的模板） |
+|---|---|---|---|
+| 牌面直选 | 牌桌：自己的手牌 / 装备，不铺面板 | `candidates.js:isOwnZonePick` | `hero.sunquan.zhiheng` |
+| 预发动清单 + 浮动按钮「进入预发动」 | 牌桌：清单展开，牌桌照常接选择 | `preactivation.js:preactivatedSkill` | `hero.daqiao.liuli` |
+| 选择型弹窗 | 弹窗：闭集选项 / 枚举（花色、牌名） | `modal.js:stepDialogKind`（`choice`） | `hero.jie_xushu.jianyan` |
+| 未知区域弹窗 | 弹窗：他人手牌 / 装备 / 判定里盲挑一张 | `modal.js:stepDialogKind`（`unknown`） | `hero.jie_simayi.fankui` |
+| 排列弹窗 | 弹窗：牌堆顶排列（前端唯一可代答的面） | `modal.js:stepDialogKind`（`arrange`） | `hero.zhugeliang.guanxing` |
+| 亮牌弹窗 | 弹窗：亮出后逐张确认 | `modal.js:stepDialogKind`（`reveal`） | `hero.guojia.yiji` |
+| 单选项确认（提交 / 放弃） | 牌桌：标题取 `requirement`，**读不到**选项标签 | `pending.js:isSingleOptionalOption` | `hero.sunshangxiang.xiaoji` |
+| 直提态 | 牌桌：唯一候选直接提交，不铺面（提示条只做说明） | `pending.js:directAction` | `hero.jie_zhangliao.tuxi` |
+| fail-closed | 牌桌：一句明话，不铺任何控件（不发明合法性） | `pending.js:renderUnsupported` | —（并写一句为什么没有面） |
+
+**套不套用要写出来**：第 3 步反查出的相似技能就是模板源。套用 ⇒ 票面写它的 id 与抄哪一行；
+不套用 ⇒ 写一句为什么（形状不同 / 读法不同 / 它的模板有一半本技能用不上）。**不写 = 没选**。
+
 ## 5. 新机制怎么进框架（三档判定）
 
 先查它现在到哪一档，**别假设**：

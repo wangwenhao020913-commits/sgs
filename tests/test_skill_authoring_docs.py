@@ -275,10 +275,34 @@ def test_every_stop_criterion_has_exactly_one_table_row():
 def test_the_batch_ticket_template_keeps_its_required_fields():
     """一将一票的模板必须保留 tracker 约定字段与两条腿的 DoD。"""
     text = (DOCS_DIR / "skill-authoring" / "batch-ticket.md").read_text(encoding="utf-8")
-    for must in ("Status:", "Touches:", "规则原文:", "## 批次清单", "## 摘出记录", "## 收口", "## Answer"):
+    for must in (
+        "Status:",
+        "Touches:",
+        "规则原文:",
+        "规范确认:",
+        "### 询问剧本",
+        "## 批次清单",
+        "## 摘出记录",
+        "## 收口",
+        "## Answer",
+    ):
         assert must in text, f"批次票面模板缺少 `{must}`"
     for leg in ("已实现", "已摘出"):
         assert leg in text, f"批次票面模板缺少 DoD 的一条腿：{leg}"
+
+
+def test_the_spec_gate_survives_in_both_the_process_doc_and_the_ticket():
+    """规范确认门（用户加的四条）不许悄悄消失：过程文档有规矩，票面模板有落地的格子。
+
+    门的三件事各有承载体，缺一件这条流程就退回"边写边定"：过程文档写"签了才动工 / 逐字 /
+    死路不算兜底"，票面写"规范确认: / 询问剧本 / 套用模板"。
+    """
+    process = PROCESS_DOC.read_text(encoding="utf-8")
+    ticket = (DOCS_DIR / "skill-authoring" / "batch-ticket.md").read_text(encoding="utf-8")
+    for must in ("2.1 规范确认门", "签了才动工", "逐字", "死路不算兜底"):
+        assert must in process, f"过程文档缺少规范确认门的 `{must}`"
+    for must in ("规范确认:", "### 询问剧本", "套用模板"):
+        assert must in ticket, f"票面模板缺少规范确认门的 `{must}`"
 
 
 # ---------------------------------------------------------------------------
