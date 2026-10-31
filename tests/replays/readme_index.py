@@ -94,7 +94,7 @@ NAMES: dict[str, tuple[str, str]] = {
     "52-scimitar-empty-hand-hualiu": ("【古锭刀】+【骅骝】+【兵粮寸断】", "【兵粮寸断】判定非梅花 ⇒ 跳过摸牌阶段（该回合零 DRAW）；目标因此空手牌 ⇒ 【古锭刀】+1（2 点伤害）；【骅骝】的 +1 距离（2）仍被攻击范围 2 够到"),
     "53-supply-shortage-skips-draw": ("【兵粮寸断】跳过摸牌阶段", "延时锦囊 `PUT → JUDGE(座位 1)`；判定牌非梅花 ⇒ `hp` 不变但该回合没有该角色的 DRAW 移动（跳过摸牌阶段）"),
     "54-reforge-iron-chain": ("【铁索连环】重铸", "重铸是独立 `Reforge` Action（不是 `UseCard`）：牌按 `reason=REFORGE` 进弃牌堆、随后摸一张，且**不开**无懈窗口、不占使用次数"),
-    "55-fan-converts-normal-slash": ("【朱雀羽扇】转化火【杀】", "按预发动清单（`equip.vermilion_feather_fan`）确认：普通【杀】当成虚拟火【杀】（`virtual_sources` 非空、产物牌型 `fire_slash`）并造成火焰伤害"),
+    "55-fan-converts-normal-slash": ("【朱雀羽扇】转化火【杀】", "票 09 起改为**询问式**（\"当你使用普通【杀】时，可以将其转化为火【杀】\"）：先装扇（`PUT → EQUIP`）、再用普通【杀】⇒ 引擎开一次「是否发动」（零步流水线，骨架 `ActivateSkill`）+ 确认后这次使用按**虚拟火【杀】**结算并造成火焰伤害（记录流里的 `UseCard` 仍是玩家选的那张普通【杀】）"),
     "47-halberd-borrowed-sword": ("【借刀杀人】+【方天画戟】· 多目标", "【方天画戟】的 `TARGET_COUNT` 修饰器：持刀者的【杀】是**最后一张手牌**时最大目标数 +2 ⇒ 借刀窗口的候选恒含 Bn、另加 0..2 个其它合法目标（`targets` 里）；外层借刀的 `designations=(Bn,)` 不变，持刀者【杀】的 `designations` 为空"),
     # ---- 10. 界局机制（M6 票 20：spec §投影与记录流 的每类新原语） ----
     "56-jie-guanyu-yijue-suppress": ("【义绝】施加技能失效 → 回合末到期", "界关羽【义绝】弃一张牌 ⇒ 目标展示黑牌 ⇒ 座位级失效落一条 `skill_suppress`（`suppressed=true`，`scope=turn`），同一回合末落一条 `suppressed=false`；目标手里那张牌只以 `card_reveal` 公开、不移动"),

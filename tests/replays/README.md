@@ -127,7 +127,7 @@ golden + 更快的回放）；候选最少的基准先做贪心去重。**人数
 | `52-scimitar-empty-hand-hualiu` | 【古锭刀】+【骅骝】+【兵粮寸断】 | 军争机制 | `standard_ex_160` | 2 | 【兵粮寸断】判定非梅花 ⇒ 跳过摸牌阶段（该回合零 DRAW）；目标因此空手牌 ⇒ 【古锭刀】+1（2 点伤害）；【骅骝】的 +1 距离（2）仍被攻击范围 2 够到 |
 | `53-supply-shortage-skips-draw` | 【兵粮寸断】跳过摸牌阶段 | 军争机制 | `standard_ex_160` | 2 | 延时锦囊 `PUT → JUDGE(座位 1)`；判定牌非梅花 ⇒ `hp` 不变但该回合没有该角色的 DRAW 移动（跳过摸牌阶段） |
 | `54-reforge-iron-chain` | 【铁索连环】重铸 | 军争机制 | `standard_ex_160` | 2 | 重铸是独立 `Reforge` Action（不是 `UseCard`）：牌按 `reason=REFORGE` 进弃牌堆、随后摸一张，且**不开**无懈窗口、不占使用次数 |
-| `55-fan-converts-normal-slash` | 【朱雀羽扇】转化火【杀】 | 军争机制 | `standard_ex_160` | 2 | 按预发动清单（`equip.vermilion_feather_fan`）确认：普通【杀】当成虚拟火【杀】（`virtual_sources` 非空、产物牌型 `fire_slash`）并造成火焰伤害 |
+| `55-fan-converts-normal-slash` | 【朱雀羽扇】转化火【杀】 | 军争机制 | `standard_ex_160` | 2 | 票 09 起改为**询问式**（"当你使用普通【杀】时，可以将其转化为火【杀】"）：先装扇（`PUT → EQUIP`）、再用普通【杀】⇒ 引擎开一次「是否发动」（零步流水线，骨架 `ActivateSkill`）+ 确认后这次使用按**虚拟火【杀】**结算并造成火焰伤害（记录流里的 `UseCard` 仍是玩家选的那张普通【杀】） |
 | `56-jie-guanyu-yijue-suppress` | 【义绝】施加技能失效 → 回合末到期 | 界局机制 | `standard_108` | 2 | 界关羽【义绝】弃一张牌 ⇒ 目标展示黑牌 ⇒ 座位级失效落一条 `skill_suppress`（`suppressed=true`，`scope=turn`），同一回合末落一条 `suppressed=false`；目标手里那张牌只以 `card_reveal` 公开、不移动 |
 | `57-jie-xushu-awakening` | 【潜心】觉醒 → ☆【荐言】 | 界局机制 | `standard_108` | 2 | 觉醒技强制发动：造成伤害后（来源是自己、且自己已受伤）落 `hp_max_change`（4 → 3）与 `skill_gain`（☆【荐言】），两者之间没有「是否发动」询问；随后 ☆ 技能作为 `PLAY_PHASE` 的裸 `ActivateSkill` 候选真的被发动 |
 | `58-jie-luxun-hero-zone` | 【谦逊】武将牌上的牌区 · 放置与归还 | 界局机制 | `standard_108` | 2 | 一张延时 / 普通锦囊唯一指向界陆逊 ⇒ 【谦逊】把**全部手牌**置于 `Zone.HERO`（区键 `0:hero.jie_luxun.qianxun`，`card_move` 的 `to_zone.skill_instance` 非空）并触发【连营】；当前回合结束时整批归还（`HERO → HAND`）。同一帧里【连营】第二次触发**重新发问**（答案缓存按派发范围分桶） |

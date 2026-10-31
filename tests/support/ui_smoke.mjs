@@ -490,8 +490,8 @@ const sessionBodiesSince = (from) =>
 
 await ui.loadHeroCatalog();
 const catalogVersions = ui.heroVersions();
-check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包，按真名分组）",
-  ui.state.heroCatalog.length === 31 && catalogVersions.length === 56,
+check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版，按真名分组）",
+  ui.state.heroCatalog.length === 32 && catalogVersions.length === 57,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -15612,8 +15612,13 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   });
   zoneView.snapshot.players[0].hand_count = 2;   // 区里的两张**不算**手牌
   zoneView.snapshot.players[0].hero_zones = [{
-    skill_id: "hero.jie_luxun.qianxun", skill_name: "谦逊", owner: 1,
+    skill_id: "hero.jie_luxun.qianxun", skill_name: "谦逊", owner: 1, count: 2,
     cards: [synthCard(21, "杀"), synthCard(22, "闪")],
+  }];
+  zoneView.snapshot.players[0].markers = [{
+    name: "梦魇", count: 2, max_count: null, source_seat: 0,
+    source_skill_id: "hero.shen_guanyu_mobile.wuhun",
+    source_label: "座位 1 神关羽·武魂", description: null,
   }];
   zoneView.snapshot.players[0].hero_tags = [
     { tag: "hand_limit_bonus", label: "手牌上限+1" },
@@ -15621,7 +15626,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ];
   // 非宿主拿到的同一区：标签在、cards 为空（服务端已裁；界面不自己藏牌）。
   zoneView.snapshot.players[2].hero_zones = [{
-    skill_id: "hero.jie_xusheng.pojun", skill_name: "破军", owner: 0, cards: [],
+    skill_id: "hero.jie_xusheng.pojun", skill_name: "破军", owner: 0, count: 2, cards: [],
   }];
   zoneView.snapshot.players[2].hero_tags = [{ tag: "luoyi", label: "裸衣" }];
   ui.state.view = zoneView;
@@ -15648,7 +15653,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     !!selfZoneRow && selfZonesBox.hidden === false
       && selfZoneRow.getAttribute("data-skill-id") === "hero.jie_luxun.qianxun"
       && selfZoneRow.getAttribute("data-cards-visible") === "true"
-      && !!selfZoneTag && selfZoneTag.textContent === "谦逊"
+      && !!selfZoneTag && selfZoneTag.textContent === "谦逊 2"
       && cardsHiddenBefore && !!selfZoneCardsBox && selfZoneCardsBox.hidden === false
       && selfZoneCards.map((node) => node.getAttribute("data-card-id")).join(",") === "21,22",
     selfZoneRow ? selfZoneRow.text().replace(/\s+/g, " ").trim() : "没有 hero 行");
@@ -15671,6 +15676,19 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     closedAfterSecondClick && openOnHover
       && Boolean(selfZoneCardsBox && selfZoneCardsBox.hidden),
     `closed=${closedAfterSecondClick} hover=${openOnHover}`);
+  // 票 06：标记与武将牌上的牌区同骨架、异色；文本 = 名称×数量，悬停 = 来源。
+  const selfMarkerRow = selfZonesBox
+    ? rowOf(selfZonesBox, "data-zone", "marker")
+    : null;
+  const selfMarkerTag = selfMarkerRow
+    ? Array.from(selfMarkerRow.children).find((node) => hasClass(node, "marker-tag"))
+    : null;
+  check("㉉M6-6c 标记行：名称×数量 + 悬停来源（无效果说明只显示来源）",
+    !!selfMarkerRow
+      && selfMarkerRow.getAttribute("data-marker") === "梦魇"
+      && !!selfMarkerTag && selfMarkerTag.textContent === "梦魇×2"
+      && selfMarkerTag.getAttribute("title") === "座位 1 神关羽·武魂",
+    selfMarkerRow ? selfMarkerRow.text().replace(/\s+/g, " ").trim() : "没有标记行");
   check("㉉M6-7 区里的牌**不算**手牌数（公开数字仍是 hand_count）",
     $("t-self-hand").textContent === "2" && $("t-hand").children.length === 1,
     `hand_count=${$("t-self-hand").textContent} 手牌面=${$("t-hand").children.length}`);
@@ -15687,7 +15705,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && foeZoneRow.getAttribute("data-skill-id") === "hero.jie_xusheng.pojun"
       && foeZoneRow.getAttribute("data-seat") === "2"
       && foeZoneRow.getAttribute("data-cards-visible") === "false"
-      && !!foeZoneTag && foeZoneTag.textContent === "破军"
+      && !!foeZoneTag && foeZoneTag.textContent === "破军 2"
       && !foeZoneCardsBox
       && !foeZoneRow.text().includes("桃")
       && !(foeZoneTag.listeners.click || []).length,

@@ -234,13 +234,21 @@ def attack_range(
 
 
 def check_forbidden(state: GameState, seat: int, card: CardRef) -> bool:
-    """L3.1 ``USE_CHECK_FORBIDDEN``：``True`` = 禁止使用。
+    """L3.1 ``USE_CHECK_FORBIDDEN``：``True`` = 禁止使用 / 打出这张牌（按**原用途**）。
 
-    M2 没有"禁止使用"类效果（装备效果全部落在修饰器 / 钩子 / 接缝三层），故恒 ``False``；
-    函数保留（票 07 §4），**M3 技能长在这里**，而不是在候选生成器里加分支（票 12 §Q7）。
+    走 :data:`~sgs.effects.ModifierPoint.FORBIDDEN` 修饰器链：``current`` 从 ``False``
+    起，链上空无一物时原样返回 ``False``（既有技能零变化）；神关羽【武神】①在链上把
+    "红桃手牌"写成 ``True``（票 05）。只覆盖"使用 / 打出"——弃置、重铸、技能成本、
+    他人置入装备区都不经过这里。
     """
-    del state, seat, card
-    return False
+    return bool(
+        apply_modifiers(
+            ModifierPoint.FORBIDDEN,
+            state,
+            ModifierContext(subject=seat, card=card),
+            False,
+        )
+    )
 
 
 def is_own_play_phase(state: GameState, seat: int) -> bool:

@@ -2675,6 +2675,12 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                     "其余打分分支仍不读它",
                 ),
                 "wine_active": (True, "【酒】：下一张【杀】+1 的实际伤害"),
+                "markers": (
+                    False,
+                    "票 06：标记（「梦魇」等）不参与 v1 打分——武魂②的座位候选已由服务端"
+                    "裁到'来源为自身、标记最多'的那几名，AI 只按敌我选；标记也不是牌，"
+                    "不进记牌守恒量。将来要按标记做威胁估值时再翻转这一行",
+                ),
                 "identity": (
                     True,
                     "敌友的唯一信号（I1，票 21）：本人 / 主公 / 已阵亡可见，_identity_relation "
@@ -3450,6 +3456,14 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "否则 1 点非致命伤害 − 这一问要付的两张牌价，净收益低于 Pass 就不发动（票 22；读"
         "action.picks / view.self_hand 的牌价与 PlayerPublic.hp 与 identity）。裸候选没有"
         "picks 时成本按'手里最便宜的两张'预估（装备区的牌不进预估），AI 自己填表时 picks 在",
+    ),
+    # 票 09：朱雀羽扇从「转化候选」（AI 在普通【杀】/ 火【杀】之间挑）改成**询问式**
+    # （"当你使用普通【杀】时，可以将其转化为火【杀】"）⇒ 它变成会问"是否发动"的非锁定
+    # 装备技，必须有自己的正分条目，否则 `_UNKNOWN_SKILL_VALUE` 让 AI 永不转化。
+    # 恒发动：换的是**同一张牌**（不额外付成本），而火伤在【藤甲】/【铁索连环】上只增不减。
+    "equip.vermilion_feather_fan": (
+        _constant(2.0),
+        "朱雀羽扇：把手里的普通【杀】转成火【杀】。不付额外成本，火伤只增不减 ⇒ 恒发动",
     ),
     "equip.qilin_bow": (_constant(2.0), "麒麟弓：造成伤害时弃目标的一匹坐骑"),
     "equip.ice_sword": (_constant(2.0), "寒冰剑：防止伤害并依次弃目标两张牌"),

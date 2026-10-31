@@ -26,6 +26,7 @@ __all__ = [
     "FrameKind",
     "GameState",
     "HeroCardZone",
+    "Marker",
     "MoveReason",
     "Phase",
     "Player",
@@ -302,6 +303,31 @@ class FrameKind(str, Enum):
     SKILL = "SKILL"
 
 
+class Marker(_FrozenModel):
+    """一个座位身上的**标记实例**（票 06；用户 Q6 裁定）。
+
+    字段 = 名称 / 来源（座位 + 全限定技能 id）/ 数量 / 上限 / 效果 / 效果说明 + 寿命策略。
+    名字用中文（「梦魇」这类），**没有 id**；同一目标上 `(name, source_seat,
+    source_skill_id)` 相同的标记合并成一条，来源不同则分列。标记不是牌：不进任何区域、
+    不计手牌数 / 上限，不能被拆 / 顺 / 无懈；失去技能不移除（规则 §14.3）。
+
+    ``effect`` / ``description`` 本批只存不接线（梦魇都为空；将来大雾一类"标记自身效果"
+    需要标记驱动的派发，另行开票）。``clear_on_source_death`` 是寿命策略（梦魇 True）：
+    来源座位身死时与死者的弃牌同一钩子清空；目标身死则无条件清空（规则 §14.4 / 用户规则 7）。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    source_seat: int
+    source_skill_id: str
+    count: int = Field(ge=1)
+    max_count: int | None = None
+    effect: str | None = None
+    description: str | None = None
+    clear_on_source_death: bool = False
+
+
 class Player(BaseModel):
     """一个座位。``seat`` 就是它在 :attr:`GameState.players` 里的下标。"""
 
@@ -311,6 +337,25 @@ class Player(BaseModel):
     hp: int
     hp_max: int
     alive: bool = True
+    death_time_skills_active: bool = False
+    """死亡时技能窗口（票 10）：死者本人的技能在阵亡结算里**暂时**可解析。
+
+    ``alive=False`` 仍在死亡入口立即落（胜负 / 距离 / 人数必须看见死者）；本字段只把
+    "技能可解析"从"活着"里拆出来：死亡段在「阵亡时」空节点把它置真、在「失去技能」收尾
+    置假（`DEATH_ON` / `DEATH_AFTER` 与官方弃牌 / 奖惩在窗口内）。窗口只对**当前死亡者**
+    打开；先前死亡者在各自收尾已关窗，仍静默。
+
+    读点只有 :func:`sgs.skills.resolve_instances` 的实例过滤（以及它的缓存键）；不发
+    delta、不进投影 / 记录流——它不是可见状态，只是解析期的一次窗口。
+    """
+    markers: tuple[Marker, ...] = ()
+    """座位身上的**标记实例**（票 06；用户 Q6 裁定）。
+
+    按插入序（同种子逐字节复现）；同一 `(name, source_seat, source_skill_id)` 合并成一条。
+    公开信息（显示在目标武将牌上），但**不进记录流**（投影 `exclude`），变化经
+    ``marker_change`` delta 下发；阵亡清点在 :meth:`Engine.discard_dead_cards`（死亡弃牌
+    同一钩子）。标记不是牌，故不在任何 ``Zone`` 里。
+    """
     hand: list[int] = Field(default_factory=list)
     equip: list[int] = Field(default_factory=list)
     """装备区（一个整体区）；列表序 = 槽位枚举序（票 12 §Q2），每槽至多一张。"""

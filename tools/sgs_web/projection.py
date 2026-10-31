@@ -452,6 +452,7 @@ def seat_hero_zones(
                     _skill_display_name(state, zone.skill_id) or zone.skill_id
                 ),
                 "owner": int(zone.owner),
+                "count": len(zone.cards),
                 "cards": cards,
             }
         )

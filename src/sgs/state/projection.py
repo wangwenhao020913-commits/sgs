@@ -83,6 +83,7 @@ def project(state: GameState, seat: int) -> PlayerView:
             hero_zone_count=hero_zone_facts[player.seat][0],
             chained=player.chained,
             flipped=player.flipped,
+            markers=player.markers,
             wine_active=player.wine_active,
             identity=_visible_identity(player, viewer=seat),
             hero=player.hero,

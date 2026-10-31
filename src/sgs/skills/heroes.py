@@ -163,6 +163,12 @@ class ConversionSkill(HeroSkillDecl):
     predicate: Predicate
     scopes: tuple[CandidateScope, ...]
     outside_turn_only: bool = False
+    locked: bool = False
+    """是否**锁定技**（票 05 的加法；缺省 ``False`` = 既有转化技一字不改）。
+
+    转化技的"发动"本来就不问（它是候选入口），但锁定与否影响「所有非锁定技失效」的谓词
+    （【义绝】/【铁骑】）与形态表；神关羽【武神】是首个锁定转化技。
+    """
     modifiers: tuple[Modifier, ...] = ()
     """这条转化技能**额外**的修饰器（M6 票 04 的加法；缺省空 = 既有六条一字不改）。
 
@@ -295,6 +301,49 @@ def _diamond_slash_target_pool(
     return tuple(dict.fromkeys((*current, *everyone)))
 
 
+def _heart(state: GameState, card_id: int) -> bool:
+    """牌名谓词：**红桃**（神关羽【武神】①的源筛选；花色不是颜色）。"""
+    return state.card(card_id).suit == Suit.HEART.value
+
+
+def _heart_slash_target_pool(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """神关羽【武神】②：你使用**红桃【杀】**无距离限制（与界武圣②同形）。
+
+    牌面判据 = ``ctx.card`` 的**花色 + 族**；单源转化继承来源花色，故"红桃手牌当【杀】"
+    也命中；族判据走 :func:`~sgs.effects.is_slash`（火 / 雷【杀】同族）。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if not is_slash(behavior_for(ctx.card)):
+        return current
+    if ctx.card.suit != Suit.HEART.value:
+        return current
+    everyone = tuple(
+        player.seat for player in state.players if player.alive and player.seat != ctx.subject
+    )
+    return tuple(dict.fromkeys((*current, *everyone)))
+
+
+def _wushen_forbidden(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """神关羽【武神】①：**红桃手牌**不能按原用途使用 / 打出（票 05 的 FORBIDDEN）。
+
+    只禁"这张牌此刻在手牌区、花色红桃、由持有者自己使用 / 打出"；转化【杀】入口不在
+    ``check_forbidden`` 的读取面上（它由 CANDIDATES 产出），故同牌仍能当【杀】。重铸 /
+    弃置 / 技能成本 / 他人把牌置入其装备区都不经过这个挂点（与【义绝】的读法同姿态）。
+    """
+    if ctx.owner != ctx.subject or ctx.card is None:
+        return current
+    if ctx.card.suit != Suit.HEART.value:
+        return current
+    if ctx.card.card_id not in state.player(ctx.subject).hand:
+        return current
+    return True
+
+
 CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
     # 关羽【武圣】：一张红色牌当【杀】使用或打出（规则 976）。
     ConversionSkill(
@@ -317,6 +366,22 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
         modifiers=(Modifier(ModifierPoint.TARGET_POOL, _diamond_slash_target_pool),),
         requirement="选择1张红色牌当【杀】使用或打出；方块【杀】无距离限制",
+    ),
+    # 神关羽【武神】（票 04 / 票 05；移动版牌面）：锁定转化 + 红桃手牌牌级禁令 + 红桃【杀】
+    # 无距离限制。产物按 Q&A 是**普通【杀】**（红桃火杀 / 雷杀也被转成普通杀）。
+    ConversionSkill(
+        hero_id="shen_guanyu_mobile",
+        short_id="wushen",
+        target_type_id="slash",
+        source_zone=_hand,
+        predicate=_heart,
+        scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
+        locked=True,
+        modifiers=(
+            Modifier(ModifierPoint.TARGET_POOL, _heart_slash_target_pool),
+            Modifier(ModifierPoint.FORBIDDEN, _wushen_forbidden),
+        ),
+        requirement="选择1张红桃手牌当【杀】使用或打出；使用红桃【杀】无距离限制",
     ),
     # 赵云【龙胆】两条方向共用一个技能 id（规则 982）。
     # M6 票 16：界赵云【龙胆】的 杀↔闪 两向与标准版**逐字相同**（§十九 L2082–L2084），
@@ -801,8 +866,9 @@ def conversion_skill_definitions() -> tuple[SkillDef, ...]:
     （id 唯一）：两条声明的修饰器**合并进同一条定义**，故"一个技能只产一种构造子"与
     "一个 id 一条定义"两件事同时成立。
 
-    非锁定（技能面写了"你可以"）：发动是询问出来的；``skill_type = NORMAL``（都不是
-    主公技）；``carrier = HERO`` ⇒ 优先级档由载体派生（武将档先于装备档）。
+    锁定与否**按声明**（``ConversionSkill.locked``；缺省 False = 既有转化技不变）：
+    转化入口本身不问，但锁定技不受「所有非锁定技失效」影响；``skill_type = NORMAL``；
+    ``carrier = HERO`` ⇒ 优先级档由载体派生（武将档先于装备档）。
     """
     grouped: dict[str, list[ConversionSkill]] = {}
     for skill in CONVERSION_SKILLS:
@@ -811,7 +877,7 @@ def conversion_skill_definitions() -> tuple[SkillDef, ...]:
     return tuple(
         SkillDef(
             skill_id=skill_id,
-            locked=False,
+            locked=skills[0].locked,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             modifiers=tuple(

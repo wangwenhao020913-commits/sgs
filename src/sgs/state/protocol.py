@@ -29,7 +29,7 @@ from pydantic import Field, TypeAdapter, model_serializer
 from sgs.data import Identity, Kingdom
 from sgs.timing import Timing
 
-from .models import CardRef, Phase, Zone, ZoneRefField, _FrozenModel
+from .models import CardRef, Marker, Phase, Zone, ZoneRefField, _FrozenModel
 
 __all__ = [
     "Action",
@@ -385,6 +385,13 @@ class PlayerPublic(_FrozenModel):
     回合末清空，每次变化落一条 ``wine_change``）。
 
     同 ``chained``：``exclude`` 不进记录流，网页载荷由展示层补下。
+    """
+    markers: tuple[Marker, ...] = Field(default=(), exclude=True)
+    """座位身上的**标记实例**（票 06；用户 Q6）。
+
+    公开信息（显示在目标武将牌上），但 ``exclude`` **不进记录流**（同 ``chained`` /
+    ``hero``）：变化经 ``marker_change`` delta 下发，网页载荷由 ``display.seat_display``
+    补成带来源 / 说明的展示项；AI 的读点登记在 ``_AI_READ_POINTS``。
     """
     identity: Identity | None = None
     hero: str | None = Field(default=None, exclude=True)

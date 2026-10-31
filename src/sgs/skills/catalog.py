@@ -82,8 +82,15 @@ from .flow import (
     card_pool_size,
     provide_face,
     run_flow,
+    zero_step_effect,
 )
-from .virtual import card_ids, grouped_candidates, single_conversion
+from .virtual import (
+    card_ids,
+    grouped_candidates,
+    pure_virtual_card,
+    single_conversion,
+    transformed_card,
+)
 
 __all__ = [
     "ACTIVATION_PLANS",
@@ -536,6 +543,7 @@ _PLAYER_KEY_FIELDS = (
     "seat",
     "identity",
     "alive",
+    "death_time_skills_active",
     "equip",
     "virtual_equipment",
     "hero",
@@ -592,6 +600,7 @@ def _player_key_values(state: GameState, player: Player) -> tuple:
         player.seat,
         player.identity,
         player.alive,
+        player.death_time_skills_active,
         tuple((card_id, state.card(card_id).type) for card_id in player.equip),
         tuple(player.virtual_equipment),
         player.hero,
@@ -697,7 +706,7 @@ def _resolve_instances_uncached(
     """
     found: list[SkillInstance] = []
     for player in state.players:
-        if not player.alive:
+        if not player.alive and not player.death_time_skills_active:
             continue
         for card_id in player.equip:
             card = state.card(card_id)
@@ -1880,34 +1889,53 @@ def _normal_slash(state: GameState, card_id: int) -> bool:
     return state.card(card_id).type == "slash"
 
 
-def _vermilion_fan_candidate(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """朱雀羽扇：一张普通【杀】当火【杀】**使用或打出**（M5-05b；D2 / D8 / D9）。
+def _fan_is_normal_slash(state: GameState, card: Any) -> bool:
+    """朱雀羽扇的触发条件：**普通【杀】**（牌型相等，不是杀族判据）。
 
-    与 H 族单源转化**同一份**候选构造（:func:`~sgs.skills.virtual.single_conversion`）：
-    - 源 = **普通【杀】**（手牌 ∪ 装备，`GLOSSARY.md`「区域默认」）；
-    - 产物牌型 ``fire_slash``——FIRE 伤害由**产物牌型的行为表**声明（M5-02），故本技能
-      没有第二套属性通道；
-    - 语境 = ``PLAY`` + ``RESPOND``：出牌阶段使用，南蛮 / 决斗 / 借刀的响应窗口打出；
-    - 来源实体牌由引擎的虚拟源移动路径（``Engine._move_virtual_sources``）进弃牌堆。
+    真实牌走 :func:`_normal_slash`（已登记的 normal-only 站点）；虚拟 / 转化牌按产物
+    ``card.type == "slash"`` 判——武圣 / 龙胆 / 丈八蛇矛 / 武神的普通【杀】产物都能被
+    再转成火【杀】（用户口径："无论是否转化、转化过几次、是否虚拟"）。
     """
-    sources = tuple(
-        card_id
-        for card_id in (
-            card_ids(state, ctx.subject, Zone.HAND)
-            + card_ids(state, ctx.subject, Zone.EQUIP)
-        )
-        if _normal_slash(state, card_id)
-    )
-    return (
-        *current,
-        *single_conversion(
-            state,
-            ctx,
-            target_type_id="fire_slash",
-            cards=sources,
-            scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
-        ),
-    )
+    if card.is_virtual:
+        return card.type == "slash"
+    return _normal_slash(state, card.card_id)
+
+
+def _fan_condition(host: Any, frame: Any) -> bool:
+    """朱雀羽扇：**持有者自己使用**普通【杀】时问一次（不认"打出"，用户本轮裁定）。"""
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    card = frame.data.get("card")
+    if card is None:
+        return False
+    return _fan_is_normal_slash(host.state, card)
+
+
+def _fan_effect(host: Any, frame: Any) -> None:
+    """把**这次使用的**普通【杀】换成虚拟火【杀】（来源 = 原牌的实体来源）。
+
+    真实牌：来源 = 它自己；虚拟 / 转化牌：来源 = 它的 ``virtual_sources``（武神的红桃
+    手牌、丈八的两张手牌……）；纯虚拟无来源：用 ``pure_virtual_card``。原牌仍按使用 / 打出
+    收尾进弃牌堆（虚拟牌由 ``_move_virtual_sources`` 搬来源）。
+    """
+    card = frame.data.get("card")
+    if card is None:
+        return None
+    sources = tuple(card.virtual_sources) if card.is_virtual else (card.card_id,)
+    if sources:
+        frame.data["card"] = transformed_card(host.state, sources, "fire_slash")
+    else:
+        frame.data["card"] = pure_virtual_card(host.state, "fire_slash")
+    return None
+
+
+VERMILION_FAN_FLOW = SkillFlow(
+    name="vermilion_feather_fan",
+    steps=(),
+    effect=zero_step_effect(_fan_effect),
+)
+"""朱雀羽扇的零步流水线：只问"是否发动"，确认后把帧里的牌换成火【杀】。"""
 
 
 # ---------------------------------------------------------------------------
@@ -2561,9 +2589,14 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
     _equip(
         "vermilion_feather_fan",
         locked=False,
-        requirement="你可以将一张普通【杀】当【火杀】使用或打出",
-        modifiers=(Modifier(ModifierPoint.CANDIDATES, _vermilion_fan_candidate),),
-        virtual_type_ids=("fire_slash",),
+        requirement="当你使用普通【杀】时，你可以将其转化为火【杀】",
+        hooks=(
+            Hook(
+                Timing.USE_ON_USE,
+                condition=_fan_condition,
+                flow=VERMILION_FAN_FLOW,
+            ),
+        ),
     ),
     _equip(
         "hualiu",
@@ -2631,6 +2664,9 @@ from .hero_zone import (  # noqa: E402  （末尾 import 是刻意的）
 from .life_after import (  # noqa: E402  （末尾 import 是刻意的）
     life_after_skill_definitions,
 )
+from .death_after import (  # noqa: E402  （末尾 import 是刻意的）
+    death_after_skill_definitions,
+)
 
 ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], ActivationPlan]] = (
     MappingProxyType(
@@ -2672,6 +2708,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *negation_skill_definitions(),
             *hero_zone_skill_definitions(),
             *life_after_skill_definitions(),
+            *death_after_skill_definitions(),
         )
     }
 )

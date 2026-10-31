@@ -34,6 +34,7 @@ __all__ = [
     "CardRevealDelta",
     "ChainedChangeDelta",
     "FlippedChangeDelta",
+    "MarkerChangeDelta",
     "DeckShuffleDelta",
     "Delta",
     "HpChangeDelta",
@@ -123,6 +124,23 @@ class FlippedChangeDelta(_FrozenModel):
     delta_type: Literal["flipped_change"] = "flipped_change"
     seat: int
     flipped: bool
+
+
+class MarkerChangeDelta(_FrozenModel):
+    """一个座位身上的**标记**数量被写成某个值（票 06；用户 Q6）。
+
+    唯一写入口 ``Engine.add_marker`` / ``Engine.remove_marker``；`count` 是**绝对值**
+    （0 = 该标记已移除）。实例身份 = `(目标座位, name, source_seat, source_skill_id)`；
+    同名同来源合并、异来源分列；标记是公开信息（显示在目标武将牌上），但**不进记录流**的
+    投影面（``PlayerPublic.markers`` 为 ``exclude``），变化经这条 delta 下发。
+    """
+
+    delta_type: Literal["marker_change"] = "marker_change"
+    seat: int
+    name: str
+    source_seat: int
+    source_skill_id: str
+    count: int
 
 
 class WineChangeDelta(_FrozenModel):
@@ -301,6 +319,8 @@ Delta = Annotated[
     | HpChangeDelta
     | HpMaxChangeDelta
     | ChainedChangeDelta
+    | FlippedChangeDelta
+    | MarkerChangeDelta
     | WineChangeDelta
     | CardRevealDelta
     | DeckShuffleDelta

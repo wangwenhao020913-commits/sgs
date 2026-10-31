@@ -70,6 +70,7 @@
 | `RESOLVE_EFFECT` | 生效时（界谦逊） |
 | `JUDGE_CARD_AFTER_EFFECT` | 判定牌生效后（天妒） |
 | `RECOVER_VALUE` | 回复数值确定时（界救援） |
+| `DEATH_ON` | **死亡时**技能（神关羽移动版【武魂】②：死者本人的判定 / 直接致死）——`10` 起死者在这个窗口内仍可解析，`pass_away` 收口后静默 |
 
 ### 3.2 接缝 `SeamKind`
 
@@ -95,6 +96,7 @@
 | `DAMAGE_DEAL_AMOUNT` | 造成伤害量（裸衣、义绝、咆哮②） |
 | `DAMAGE_TAKE_AMOUNT` | 受到伤害量（藤甲） |
 | `DAMAGE_CAP` | 伤害上限（白银狮子一类） |
+| `FORBIDDEN` | 这张牌不能按**原用途**使用 / 打出（神关羽移动版【武神】①的红桃手牌；`05`，`check_forbidden` 走链） |
 
 ### 3.4 询问种类 `QueryKind`
 

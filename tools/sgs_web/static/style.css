@@ -677,6 +677,20 @@ button.mini-slot { cursor: pointer; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .self .hero-zone-tag, .self .hero-zone-card { font-size: calc(11 * var(--dsu)); }
+
+/* 票 06：标记（与武将牌上的牌区同骨架、异色；文本 = 名称×数量）。
+   标记不是牌，没有展开的牌容器；悬停 = 来源（+ 效果说明）。 */
+.marker-row {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding-bottom: 1px; border-top: 1px dashed #cbbad0;
+}
+.marker-tag {
+  flex: 0 0 auto; max-width: 8em; padding: 0 4px;
+  border: 1px solid #9d7bb0; border-radius: 4px; background: #f7f0fb;
+  font-size: calc(9 * var(--dsu)); font-weight: 600; color: #6c4f7e;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.self .marker-tag { font-size: calc(11 * var(--dsu)); }
 /* B：武将块上的状态标签（手牌上限 / 裸衣等；服务端 hero_tags）。 */
 .hero-tags { display: flex; flex-wrap: wrap; gap: 2px; margin: 2px 0; }
 .hero-tags[hidden] { display: none; }

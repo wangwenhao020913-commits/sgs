@@ -484,8 +484,8 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 56 and len(catalog) == 31, (
-        "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31"
+    assert len(flat) == 57 and len(catalog) == 32, (
+        "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；票 08 加神关羽移动版 ⇒ 57 / 32"
     )
     for group in catalog:
         true_name = group["true_name"]
@@ -5750,7 +5750,7 @@ def test_the_ui_smoke_hero_zone_and_skill_fixtures_match_the_real_snapshot_shape
     assert snapshot["players"][1]["hero_zones"] == [], "没有区的座位仍是空列表（键恒在）"
     zones = snapshot["players"][0]["hero_zones"]
     assert [set(zone) for zone in zones] == [
-        {"skill_id", "skill_name", "owner", "cards"}
+        {"skill_id", "skill_name", "owner", "count", "cards"}
     ], f"hero_zones 的键集 = ui_smoke 夹具照抄的形状：{zones}"
     assert (zones[0]["skill_id"], zones[0]["skill_name"], zones[0]["owner"]) == (
         "hero.jie_luxun.qianxun",
@@ -6185,7 +6185,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 123, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 125, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

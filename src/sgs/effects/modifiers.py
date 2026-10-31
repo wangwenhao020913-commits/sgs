@@ -117,6 +117,10 @@ class ModifierPoint(str, Enum):
       的牌查链，见下）；
     - ``DISTANCE``：座位距离（六坐骑：客体 +1 / 主体 −1）；
     - ``EFFECTIVENESS``：第 2 层"无效"（仁王盾）；
+    - ``FORBIDDEN``：L3.1"这张牌不能按原用途使用 / 打出"（票 05；神关羽【武神】①）。
+      ``current`` 从 ``False`` 起，回调把"这一张此刻必须被禁"写成 ``True``；空链恒
+      ``False``，故既有技能零变化。它只覆盖"使用 / 打出"——弃置、重铸、技能成本、
+      他人把牌置入装备区都不经过这个挂点；
     - ``CANDIDATES``：候选行动的追加（丈八蛇矛 / 八卦阵的候选注入）；
     - ``RESPONSE_COUNT``：本次响应窗口**需要几张**（缺省 1；票 08 的 M3 加法）；
     - ``RECOVER_AMOUNT``：本次回复**回复几点**（缺省 1；票 09 的 M3 加法，【救援】）；
@@ -148,6 +152,7 @@ class ModifierPoint(str, Enum):
     TARGET_COUNT = "TARGET_COUNT"
     DISTANCE = "DISTANCE"
     EFFECTIVENESS = "EFFECTIVENESS"
+    FORBIDDEN = "FORBIDDEN"
     CANDIDATES = "CANDIDATES"
     RESPONSE_COUNT = "RESPONSE_COUNT"
     RECOVER_AMOUNT = "RECOVER_AMOUNT"

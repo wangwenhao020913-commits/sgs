@@ -32,6 +32,7 @@ from sgs.state import (
     HpMaxChangeDelta,
     IdentityDealDelta,
     IdentityRevealDelta,
+    MarkerChangeDelta,
     Query,
     SkillGainDelta,
     SkillLoseDelta,
@@ -54,6 +55,7 @@ __all__ = [
     "CardRevealRecord",
     "ChainedChangeRecord",
     "FlippedChangeRecord",
+    "MarkerChangeRecord",
     "DeckShuffleRecord",
     "DeltaRecord",
     "FrameRecord",
@@ -154,6 +156,15 @@ class ChainedChangeRecord(ChainedChangeDelta):
 
 class FlippedChangeRecord(FlippedChangeDelta):
     """一次翻面状态变化：技能把武将牌翻过去 / 回合开始前翻回正面。"""
+
+    kind: Literal["delta"] = "delta"
+    seq: int
+    frame_id: int
+    depth: int
+
+
+class MarkerChangeRecord(MarkerChangeDelta):
+    """一次标记数量变化（票 06）：获得 / 清空（`count=0`）。"""
 
     kind: Literal["delta"] = "delta"
     seq: int
@@ -267,6 +278,7 @@ DeltaRecord = Annotated[
     | HpMaxChangeRecord
     | ChainedChangeRecord
     | FlippedChangeRecord
+    | MarkerChangeRecord
     | WineChangeRecord
     | CardRevealRecord
     | DeckShuffleRecord
@@ -397,6 +409,8 @@ def wrap_delta(delta: Delta, *, seq: int, frame_id: int, depth: int) -> DeltaRec
         return ChainedChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, FlippedChangeDelta):
         return FlippedChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
+    if isinstance(delta, MarkerChangeDelta):
+        return MarkerChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, WineChangeDelta):
         return WineChangeRecord(seq=seq, frame_id=frame_id, depth=depth, **payload)
     if isinstance(delta, CardRevealDelta):

@@ -189,7 +189,7 @@ def test_an_unknown_hero_id_is_rejected():
 
 
 def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
-    """票 12：默认将池 = **启用版本的全集**（标准 25 + 界版 29 + 移动版 1 + 风包 1 = **56**）。
+    """票 12：默认将池 = **启用版本的全集**（标准 25 + 界版 29 + 移动版 1 + 风包 1 + 风包移动版 1 = **57**）。
 
     这是 spec D19「默认将池全开 ⇒ 默认对局是混合局」在数据层的落点：``enabled_hero_ids``
     缺省（不给表）时读 :func:`load_hero_tables` 的并集，而不是只读内容包那一张表。
@@ -199,18 +199,20 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     jie = load_heroes("jie")
     jie_mobile = load_heroes("jie_mobile")
     feng = load_heroes("feng")
+    feng_mobile = load_heroes("feng_mobile")
     expected = tuple(
         hero.id
-        for table in (standard, jie, jie_mobile, feng)
+        for table in (standard, jie, jie_mobile, feng, feng_mobile)
         for hero in table.heroes
         if hero.enabled
     )
 
     assert enabled_hero_ids() == expected
-    assert len(expected) == 56
+    assert len(expected) == 57
     assert "jie_caoren_mobile" in expected, "移动版与 OL 系列**版本并存**、同进默认池"
     assert "jie_guanyu" in expected and "guanyu" in expected
     assert "huangzhong" in expected, "风包武将也进默认池（票 03）"
+    assert "shen_guanyu_mobile" in expected, "风包移动版同理（`08`：神关羽移动版独开一栏）"
 
 
 def test_enabled_hero_ids_reads_the_table_enablement():
@@ -247,7 +249,7 @@ def test_every_enabled_hero_is_dealable_from_the_default_pool():
     **版本**、也不得抽到同一**真名**的另一版（票 12 的两段抽样）。
     """
     ids = enabled_hero_ids()
-    assert len(ids) == 56
+    assert len(ids) == 57
 
     for hero_id in ids:
         heroes = _heroes_of(

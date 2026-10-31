@@ -508,6 +508,35 @@ function applyLiveDelta(record, view = state.liveView) {
       if (player) player.flipped = Boolean(record.flipped);
       return view;
     }
+    if (record.delta_type === "marker_change") {
+      // 票 06：标记数量变化（绝对值；0 = 移除）。live view 只改数量 / 增删条目，
+      // 来源标签与说明由下一次快照（服务端 seat_display）补齐。
+      const player = playerAt(record.seat);
+      if (!player) return view;
+      const markers = (player.markers || []).slice();
+      const at = markers.findIndex(
+        (marker) => marker.name === record.name
+          && Number(marker.source_seat) === Number(record.source_seat)
+          && marker.source_skill_id === record.source_skill_id,
+      );
+      const count = Number(record.count) || 0;
+      if (count <= 0) {
+        if (at >= 0) markers.splice(at, 1);
+      } else if (at >= 0) {
+        markers[at] = { ...markers[at], count };
+      } else {
+        markers.push({
+          name: record.name,
+          count,
+          source_seat: Number(record.source_seat),
+          source_skill_id: record.source_skill_id,
+          source_label: `座位 ${Number(record.source_seat) + 1}`,
+          description: null,
+        });
+      }
+      player.markers = markers;
+      return view;
+    }
     if (record.delta_type === "wine_change") {
       const player = playerAt(record.seat);
       if (player) player.wine_active = Boolean(record.active);

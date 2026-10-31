@@ -120,6 +120,8 @@ from sgs.state import (
     HpChangeDelta,
     HpMaxChangeDelta,
     IdentityRevealDelta,
+    Marker,
+    MarkerChangeDelta,
     MoveReason,
     Pass,
     PeachQuery,
@@ -826,6 +828,31 @@ class Engine:
             timing=Timing.DEATH_BEFORE_START,
         )
 
+    def pass_away(self, frame: Frame, seat: int) -> Frame:
+        """**技能直接致死**（票 07 V1 / 神关羽【武魂】②）：无伤害来源、无 killer、不进濒死。
+
+        与 :meth:`enter_death` 的唯一差别是来源：``source`` / ``damage_source`` 恒 ``None``
+        ⇒ ``death_before_start`` 不定格 killer ⇒ **无死亡奖惩**（反贼不摸 3、主公不弃牌）。
+        ``alive=False`` / 同批计数 / DEATH 帧与既有死亡完全同形；濒死 / 求桃不经过（牌面写
+        的是"该角色死亡"，不是"受到伤害"）。
+        """
+        self.state.player(seat).alive = False
+        self._deaths_pending += 1
+        return self.push_frame(
+            FrameKind.DEATH,
+            {
+                "target": seat,
+                "targets": (seat,),
+                "source": None,
+                "damage_source": None,
+            },
+            timing=Timing.DEATH_BEFORE_START,
+        )
+
+    def outcome_decided(self) -> bool:
+        """终局是否已判定（只读；死亡时技能据此跳过，票 07 V3）。"""
+        return self.pending_outcome is not None
+
     def discard_dead_cards(self, frame: Frame) -> None:
         """``DEATH_ON`` Ⅰ.a：把死亡角色区域里所有的牌置入弃牌堆（规则 4.8 第 2 步）。
 
@@ -875,6 +902,7 @@ class Engine:
                 owner=seat,
             )
             self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+        self._clear_dead_markers(frame, seat)
         frame.data[_DEAD_CARDS_CLEARED] = True
 
     def reveal_dead_identity(self, frame: Frame) -> None:
@@ -3020,6 +3048,152 @@ class Engine:
             depth=self.stack.depth,
         )
         return True
+
+    def add_marker(
+        self,
+        frame: Frame | None,
+        seat: int,
+        *,
+        name: str,
+        source_seat: int,
+        source_skill_id: str,
+        count: int = 1,
+        max_count: int | None = None,
+        effect: str | None = None,
+        description: str | None = None,
+        clear_on_source_death: bool = False,
+    ) -> bool:
+        """给 ``seat`` 加一枚/几枚标记（票 06 的唯一写入口）。
+
+        合并键 = ``(name, source_seat, source_skill_id)``：同键相加（有上限则夹住），异键
+        追加。每次真实变化发一条 ``marker_change``（绝对值）；没有变化（已达上限等）返回
+        ``False`` 且不发 delta。标记是公开事实（投影 ``PlayerPublic.markers``），但投影面
+        ``exclude``、不进记录流的询问视角；变化本身经 delta 进记录流。
+        """
+        player = self.state.player(seat)
+        for index, marker in enumerate(player.markers):
+            if (
+                marker.name == name
+                and marker.source_seat == source_seat
+                and marker.source_skill_id == source_skill_id
+            ):
+                limit = marker.max_count
+                new_count = marker.count + int(count)
+                if limit is not None:
+                    new_count = min(new_count, limit)
+                if new_count == marker.count:
+                    return False
+                updated = marker.model_copy(update={"count": new_count})
+                player.markers = (
+                    player.markers[:index] + (updated,) + player.markers[index + 1 :]
+                )
+                self._emit_marker_change(frame, seat, updated)
+                return True
+        if count <= 0:
+            return False
+        marker = Marker(
+            name=name,
+            source_seat=source_seat,
+            source_skill_id=source_skill_id,
+            count=int(count),
+            max_count=max_count,
+            effect=effect,
+            description=description,
+            clear_on_source_death=clear_on_source_death,
+        )
+        player.markers = (*player.markers, marker)
+        self._emit_marker_change(frame, seat, marker)
+        return True
+
+    def remove_marker(
+        self,
+        frame: Frame | None,
+        seat: int,
+        *,
+        name: str,
+        source_seat: int,
+        source_skill_id: str,
+        count: int | None = None,
+    ) -> bool:
+        """移去标记（票 06）：``count=None`` 清空该条；否则减 ``count``，减到 0 即清空。"""
+        player = self.state.player(seat)
+        for index, marker in enumerate(player.markers):
+            if (
+                marker.name != name
+                or marker.source_seat != source_seat
+                or marker.source_skill_id != source_skill_id
+            ):
+                continue
+            new_count = 0 if count is None else max(0, marker.count - int(count))
+            if new_count == marker.count:
+                return False
+            if new_count == 0:
+                player.markers = player.markers[:index] + player.markers[index + 1 :]
+                removed = marker
+            else:
+                removed = marker.model_copy(update={"count": new_count})
+                player.markers = (
+                    player.markers[:index] + (removed,) + player.markers[index + 1 :]
+                )
+            self.emit_delta(
+                MarkerChangeDelta(
+                    seat=seat,
+                    name=name,
+                    source_seat=source_seat,
+                    source_skill_id=source_skill_id,
+                    count=new_count,
+                ),
+                frame_id=(frame.frame_id if frame is not None else 0),
+                depth=self.stack.depth,
+            )
+            return True
+        return False
+
+    def _emit_marker_change(self, frame: Frame | None, seat: int, marker: Marker) -> None:
+        self.emit_delta(
+            MarkerChangeDelta(
+                seat=seat,
+                name=marker.name,
+                source_seat=marker.source_seat,
+                source_skill_id=marker.source_skill_id,
+                count=marker.count,
+            ),
+            frame_id=(frame.frame_id if frame is not None else 0),
+            depth=self.stack.depth,
+        )
+
+    def _clear_dead_markers(self, frame: Frame, seat: int) -> None:
+        """阵亡清标记（票 06；用户 Q6 规则 7）：目标为死者全清；来源身死的按寿命策略清。
+
+        与死者的弃牌**同一钩子**（:meth:`discard_dead_cards`；用户本轮："梦魇清除时机和
+        阵亡后弃置卡牌同一钩子"）。逐条发 ``marker_change(count=0)``；顺序 = 座位序 +
+        标记插入序，保同种子逐字节复现。
+        """
+        for player in self.state.players:
+            kept: list[Marker] = []
+            removed: list[Marker] = []
+            for marker in player.markers:
+                if player.seat == seat or (
+                    marker.clear_on_source_death and marker.source_seat == seat
+                ):
+                    removed.append(marker)
+                else:
+                    kept.append(marker)
+            if not removed:
+                continue
+            player.markers = tuple(kept)
+            for marker in removed:
+                self.emit_delta(
+                    MarkerChangeDelta(
+                        seat=player.seat,
+                        name=marker.name,
+                        source_seat=marker.source_seat,
+                        source_skill_id=marker.source_skill_id,
+                        count=0,
+                    ),
+                    frame_id=frame.frame_id,
+                    depth=self.stack.depth,
+                )
 
     def set_wine_active(self, frame: Frame | None, seat: int, active: bool) -> bool:
         """写一个座位的【酒】加伤状态并落一条 ``wine_change``（M5-04 的唯一写入口）。

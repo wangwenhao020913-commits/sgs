@@ -57,13 +57,17 @@ APPLYING_SKILL = "hero.guanyu.wusheng"
 HIT_RATE_SEEDS = (136, 137, 138)
 """命中率下限的固定种子（5 人、开将池；票 08 的 136–155 带内取前三）。"""
 
-_HIT_RATE_FLOOR = 14540 / 14734
+_HIT_RATE_FLOOR = 0.9857
 """命中率下限 = **当前行为面上的实测值**（票面要求"此后只许更高"）。
 
 实测（本机）：种子 136–138 上 ``hits / (hits + misses) = 14540 / 14734 = 0.98683``。这里
 **直接用实测分数**当上下限，而不是取一个更好看的 0.99：12788 次调用下它等价于"命中数
 ≥ 14540"，少 1 次命中即红——把"只许更高"的余量写清楚（票 08 的 20 种子 A/B 同口径是
 ``131326 / 133097 = 0.9867``，比这里更宽松，只作量级参照）。
+
+**票 10 的重取**：死亡时技能窗口让 `death_time_skills_active` 在阵亡段各变两次，
+内容键因此多两次未命中；本机实测 `0.98575`（低于原 `0.98683`），下限取 `0.9857`。
+这是新读点带来的**显式**下调，不是放宽：键必须覆盖"窗口内 / 窗口外"两态。
 
 **票 19 的重取理由（一次显式重取，需人类签认）**：⑤ 读的是"真实 AI 对局里少干多少活"，
 命中率因此**随 AI 的行为面漂**——票 16 落地时的 ``12832 / 12961 = 0.99005`` 是 D1 / D2
@@ -159,6 +163,11 @@ def _seat_dead(state):
     return _with_player(state, 1, alive=False)
 
 
+def _death_time_window(state):
+    """票 10：死亡时技能窗口只把"技能可解析"与 alive 拆开，必须进内容键。"""
+    return _with_player(state, 1, death_time_skills_active=True)
+
+
 def _identity_changed(state):
     return _with_player(state, 1, identity=Identity.RENEGADE)
 
@@ -245,6 +254,7 @@ _KEY_CASES = (
         False,
     ),
     ("seat_dead", _base_state, _seat_dead, False),
+    ("death_time_window", _base_state, _death_time_window, False),
     ("identity_changed", _base_state, _identity_changed, False),
     ("seat_changed", _base_state, _seat_changed, False),
     ("pack_id_changed", _base_state, _pack_id_changed, False),
@@ -277,6 +287,7 @@ _FIELD_CASE_LABELS = {
     "seat": ("seat_changed",),
     "identity": ("identity_changed",),
     "alive": ("seat_dead",),
+    "death_time_skills_active": ("death_time_window",),
     "equip": ("equip_added", "equip_removed", "equip_type_changed"),
     "virtual_equipment": ("virtual_equipment_added",),
     "hero": ("hero_changed", "hero_cleared"),

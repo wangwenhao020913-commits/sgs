@@ -62,7 +62,7 @@ CARD_KINDS: tuple[str, ...] = ("normal", "virtual", "transformed")
 CARD_ATTRIBUTES: tuple[str, ...] = ("普通", "火焰", "雷电")
 """牌面的属性（中文展示值；U1-02 的卡面据此分色）。"""
 
-KINGDOM_LABELS: dict[str, str] = {"wei": "魏", "shu": "蜀", "wu": "吴", "qun": "群"}
+KINGDOM_LABELS: dict[str, str] = {"wei": "魏", "shu": "蜀", "wu": "吴", "qun": "群", "shen": "神"}
 """势力枚举值 → 中文展示值（`GLOSSARY.md`「势力」：中文只出现在渲染层）。"""
 
 _SUIT_TEXT: dict[Suit, tuple[str, str]] = {
@@ -235,7 +235,10 @@ def _processing_display(
 
 
 def seat_display(
-    player: PlayerPublic, *, heroes: HeroTable | Sequence[HeroTable] | None = None
+    player: PlayerPublic,
+    *,
+    heroes: HeroTable | Sequence[HeroTable] | None = None,
+    players: Sequence[PlayerPublic] | None = None,
 ) -> dict[str, Any]:
     """座位卡的展示字段：横置 / 酒状态 + 身份标签 + 武将名称 / 势力。
 
@@ -260,6 +263,46 @@ def seat_display(
         "hero_name": hero.name if hero is not None else None,
         "kingdom": kingdom,
         "kingdom_label": KINGDOM_LABELS.get(kingdom) if kingdom is not None else None,
+        "markers": [
+            _marker_payload(marker, players=players, heroes=heroes)
+            for marker in tuple(player.markers)
+        ],
+    }
+
+
+def _marker_payload(
+    marker: Any,
+    *,
+    players: Sequence[PlayerPublic] | None,
+    heroes: HeroTable | Sequence[HeroTable] | None,
+) -> dict[str, Any]:
+    """一条标记的**展示项**（票 06；用户 Q6）。
+
+    文本 = 名称 + 数量（前端画 `名称×数量`）；悬停 = 来源（座位 + 武将 + 技能名）+
+    效果说明（有才加）。来源座位可能不是当前座位，``players`` 是同一份投影的座位列表；
+    技能名从武将表按全限定 id 的短 id 找 ``HeroSkill.name``，找不到退回短 id。
+    """
+    source_hero_id = None
+    if players is not None and 0 <= marker.source_seat < len(players):
+        source_hero_id = players[marker.source_seat].hero
+    hero = hero_in_tables(heroes, source_hero_id)
+    hero_name = hero.name if hero is not None else (source_hero_id or "无武将")
+    short_id = marker.source_skill_id.rsplit(".", 1)[-1]
+    skill_name = short_id
+    if hero is not None:
+        for skill in hero.skills:
+            if skill.id == short_id:
+                skill_name = skill.name
+                break
+    source_label = f"座位 {marker.source_seat + 1} {hero_name}·{skill_name}"
+    return {
+        "name": marker.name,
+        "count": marker.count,
+        "max_count": marker.max_count,
+        "source_seat": marker.source_seat,
+        "source_skill_id": marker.source_skill_id,
+        "source_label": source_label,
+        "description": marker.description,
     }
 
 
@@ -400,7 +443,7 @@ def decorate_snapshot(
                 player_payload[key] = _extend_card_list(
                     player_payload.get(key), lookup=lookup
                 )
-            player_payload.update(seat_display(player, heroes=heroes))
+            player_payload.update(seat_display(player, heroes=heroes, players=players))
     return payload
 
 

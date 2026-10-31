@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "pack_id": "feng_mobile",
+  "heroes": [
+    {
+      "id": "shen_guanyu_mobile",
+      "name": "神关羽移动版",
+      "true_name": "神关羽",
+      "kingdom": "shen",
+      "gender": "male",
+      "hp_max": 5,
+      "version": "feng-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "wushen",
+          "name": "武神",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "wuhun",
+          "name": "武魂",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

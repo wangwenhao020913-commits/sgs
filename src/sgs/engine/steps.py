@@ -137,6 +137,10 @@ class FrameHost(StepHost, Protocol):
 
     def enter_death(self, frame: Frame, seat: int) -> Frame: ...
 
+    def pass_away(self, frame: Frame, seat: int) -> Frame: ...
+
+    def outcome_decided(self) -> bool: ...
+
     def discard_dead_cards(self, frame: Frame) -> None: ...
 
     def reveal_dead_identity(self, frame: Frame) -> None: ...
@@ -1320,8 +1324,26 @@ def death_reveal_identity_after(host: FrameHost, frame: Frame) -> Control:
     return None
 
 
+def death_time_window_open(host: FrameHost, frame: Frame) -> Control:
+    """「阵亡时」空节点（票 10）：把**当前死者本人**的技能放回解析窗口，不 dispatch。
+
+    ``alive`` 在死亡入口已经是 ``False``（胜负 / 距离 / 人数正确）；本步只把
+    ``death_time_skills_active`` 置真，让 ``resolve_instances`` 在窗口内（DEATH_ON /
+    官方弃牌奖惩 / DEATH_AFTER）还能产出这名死者的实例。窗口不是按时机塞实例——它是
+    一个显式状态位；窗口外（TURN_END / 亮身份 / 死亡结算之后）死者仍静默。
+    """
+    host.state.player(frame.data["target"]).death_time_skills_active = True
+    return None
+
+
+def death_time_window_close(host: FrameHost, frame: Frame) -> Control:
+    """「失去技能」收尾（票 10）：DEATH_AFTER 之后关窗；死者本人此后不再产出实例。"""
+    host.state.player(frame.data["target"]).death_time_skills_active = False
+    return None
+
+
 def death_on(host: FrameHost, frame: Frame) -> Control:
-    """死亡时：dispatch（M2 无死亡时技能）；Ⅰ.a 系统处理牌与 Ⅱ 奖惩在下一步（票 33）。"""
+    """死亡时：dispatch 死亡时技能（窗口内；首个载体是神关羽【武魂】②）。"""
     return _emit_death(host, frame, Timing.DEATH_ON)
 
 
@@ -1349,23 +1371,28 @@ def death_after(host: FrameHost, frame: Frame) -> Control:
 DEATH_STEPS = (
     Step(death_before_start, Timing.DEATH_BEFORE_START),
     Step(death_reveal_identity_after, Timing.DEATH_REVEAL_IDENTITY_AFTER),
+    Step(death_time_window_open),
     Step(death_on, Timing.DEATH_ON),
     Step(death_settle_cards),
     Step(death_after, Timing.DEATH_AFTER),
+    Step(death_time_window_close),
 )
 """无身份局（1v1）的死亡段：M1 的四个时机，记录流与既有一字不差。
 
-第五格 ``death_settle_cards`` 不对应任何时机枚举位（``Step.timing=None``，同
-``MOVE_STEPS``）：它只承载"可能挂起的系统处理牌 / 奖惩"，见该函数的说明。
+``death_time_window_open`` / ``death_time_window_close`` 不对应任何时机枚举位（票 10）：
+它们只开关"死者本人的技能窗口"，不产记录；`death_settle_cards` 同样是非 dispatch 步
+（票 33 的Ⅰ.a / Ⅱ 挂起续跑边界）。
 """
 
 IDENTITY_DEATH_STEPS = (
     Step(death_before_start, Timing.DEATH_BEFORE_START),
     Step(death_reveal_identity_before, Timing.DEATH_REVEAL_IDENTITY_BEFORE),
     Step(death_reveal_identity_after, Timing.DEATH_REVEAL_IDENTITY_AFTER),
+    Step(death_time_window_open),
     Step(death_on, Timing.DEATH_ON),
     Step(death_settle_cards),
     Step(death_after, Timing.DEATH_AFTER),
+    Step(death_time_window_close),
 )
 """身份局的死亡段：多一段"亮出身份牌前"（票 25 / 决策回票 14 §4）+ 奖惩收尾步（票 33）。"""
 

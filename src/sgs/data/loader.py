@@ -78,7 +78,7 @@ KNOWN_HEROES_SCHEMA_VERSIONS: frozenset[int] = frozenset({1})
 
 DEFAULT_PACK_ID = "standard"
 
-HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = ("jie", "jie_mobile", "feng")
+HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = ("jie", "jie_mobile", "feng", "feng_mobile")
 """与内容包表并行装载的**扩展武将包**（M6 票 04：界标准独立成一份数据）。
 
 界标准 29 名与标准 25 名**分开存**（ADR-006 的"分开存"这次真落），故

@@ -238,12 +238,14 @@ function heroZoneRows(player) {
   for (const zone of (player && player.hero_zones) || []) {
     const cards = zone.cards || [];
     const hostVisible = cards.length > 0;
+    const zoneCount = Number(zone.count ?? cards.length) || 0;
     const row = document.createElement("div");
     row.className = "hero-zone-row";
     row.setAttribute("data-zone", "hero");
     row.setAttribute("data-seat", String(player.seat));
     row.setAttribute("data-skill-id", zone.skill_id || "");
     row.setAttribute("data-cards-visible", hostVisible ? "true" : "false");
+    row.setAttribute("data-count", String(zoneCount));
     const labelText = zone.skill_name || zone.skill_id || "武将牌上";
     let tag;
     let cardsBox = null;
@@ -252,7 +254,7 @@ function heroZoneRows(player) {
       tag.type = "button";
       tag.className = "hero-zone-tag";
       tag.setAttribute("aria-expanded", "false");
-      tag.setAttribute("title", `${labelText}：点击或悬停查看牌`);
+      tag.setAttribute("title", `${labelText}（${zoneCount} 张）：点击或悬停查看牌`);
       cardsBox = document.createElement("div");
       cardsBox.className = "hero-zone-cards";
       cardsBox.hidden = true;
@@ -274,10 +276,10 @@ function heroZoneRows(player) {
     } else {
       tag = document.createElement("span");
       tag.className = "hero-zone-tag static";
-      tag.setAttribute("title", `${labelText}（牌面仅宿主可见）`);
+      tag.setAttribute("title", `${labelText}（${zoneCount} 张；牌面仅宿主可见）`);
     }
     tag.setAttribute("data-tag", labelText);
-    tag.textContent = labelText;
+    tag.textContent = `${labelText} ${zoneCount}`;
     row.appendChild(tag);
     if (cardsBox) {
       for (const card of cards) {
@@ -296,11 +298,44 @@ function heroZoneRows(player) {
   return rows;
 }
 
-/** 把武将牌上的牌区铺进一个容器；没有区就整块隐藏（不占布局）。 */
+/** **标记**（票 06；用户 Q6）：与武将牌上的牌区同骨架、异色；文本 = 名称×数量。
+ *
+ * 服务端已按 `(名称, 来源)` 合并 / 分列；前端只读 `markers`（`name` / `count` /
+ * `source_label` / `description`）与数量，不自己算合并。悬停 = 来源（+ 效果说明）；
+ * 标记没有牌容器（它不是牌）。
+ */
+function markerRows(player) {
+  const rows = [];
+  for (const marker of (player && player.markers) || []) {
+    const row = document.createElement("div");
+    row.className = "marker-row";
+    row.setAttribute("data-zone", "marker");
+    row.setAttribute("data-seat", String(player.seat));
+    row.setAttribute("data-marker", marker.name || "");
+    row.setAttribute("data-source-seat", String(marker.source_seat));
+    row.setAttribute("data-source-skill-id", marker.source_skill_id || "");
+    const tag = document.createElement("span");
+    tag.className = "marker-tag";
+    const name = marker.name || "";
+    const count = Number(marker.count) || 0;
+    tag.setAttribute("data-tag", name);
+    tag.textContent = `${name}×${count}`;
+    const source = marker.source_label || `座位 ${Number(marker.source_seat) + 1}`;
+    tag.setAttribute(
+      "title",
+      marker.description ? `${source}\n${marker.description}` : source,
+    );
+    row.appendChild(tag);
+    rows.push(row);
+  }
+  return rows;
+}
+
+/** 把武将牌上的牌区与标记铺进一个容器；两者都空就整块隐藏（不占布局）。 */
 function fillHeroZones(box, player) {
   if (!box) return;
   box.innerHTML = "";
-  const rows = heroZoneRows(player);
+  const rows = [...heroZoneRows(player), ...markerRows(player)];
   box.hidden = rows.length === 0;
   for (const row of rows) box.appendChild(row);
 }

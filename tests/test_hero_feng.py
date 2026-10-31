@@ -19,10 +19,33 @@
 
 from __future__ import annotations
 
-from sgs.data import load_content_pack
+import sys
+from pathlib import Path
+
+_TOOLS = Path(__file__).resolve().parent.parent / "tools"
+if str(_TOOLS) not in sys.path:  # sgs_web 住在 tools/（与 test_web.py 同一条引导）
+    sys.path.insert(0, str(_TOOLS))
+
+from sgs.data import Identity, RuleConfig, load_content_pack, load_hero_tables
+from sgs.effects import check_targets, legal_actions_for
 from sgs.engine import Engine
-from sgs.state import ActivateSkill, EndPhase, Pass, Phase, UseCard, WindowCause
+from sgs.skills.virtual import transformed_card
+from sgs.state import (
+    ActivateSkill,
+    EndPhase,
+    FrameKind,
+    Pass,
+    Phase,
+    QueryKind,
+    RespondContext,
+    RespondMode,
+    SelectOption,
+    UseCard,
+    WindowCause,
+    project,
+)
 from sgs.timing import Timing
+from sgs_web.display import seat_display
 
 from support import (
     SeatSpec,
@@ -520,3 +543,377 @@ def test_liegong_also_seals_the_eight_diagrams_provider():
 
     assert _queries(engine, "DODGE") == [], "窗口根本不出现 ⇒ 【八卦阵】的提供者候选也没有"
     assert engine.state.player(1).hp == 3
+
+
+# ---------------------------------------------------------------------------
+# 票 04 / 票 05 / 票 06 / 票 07：神关羽移动版【武神】【武魂】
+# ---------------------------------------------------------------------------
+
+SHEN_GUANYU = "shen_guanyu_mobile"
+WUSHEN = "hero.shen_guanyu_mobile.wushen"
+WUHUN = "hero.shen_guanyu_mobile.wuhun"
+
+
+def _heart(type_id: str) -> int:
+    return next(
+        card_id
+        for card_id in cards_of_type(PACK, type_id)
+        if PACK.deck.cards[card_id].suit == "heart"
+    )
+
+
+def _not_heart(type_id: str) -> int:
+    return next(
+        card_id
+        for card_id in cards_of_type(PACK, type_id)
+        if PACK.deck.cards[card_id].suit != "heart"
+    )
+
+
+def _shen_play_state(hand: tuple[int, ...]):
+    """4 人身份局、座位 0 = 神关羽、出牌阶段；其余座位给距离 2 / 3 的对照。"""
+    seats = [
+        SeatSpec(hero=SHEN_GUANYU, hand=hand, hp=3, hp_max=4, identity=Identity.LORD),
+        SeatSpec(identity=Identity.REBEL),
+        SeatSpec(identity=Identity.LOYALIST),
+        SeatSpec(identity=Identity.RENEGADE),
+    ]
+    return build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck_excluding(PACK, *hand),
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+
+
+def _play_actions(state):
+    return legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+
+
+def _as_slash(actions, source: int):
+    return [
+        action
+        for action in actions
+        if getattr(action, "card", None) is not None
+        and action.card.type == "slash"
+        and action.card.is_virtual
+        and action.card.virtual_sources == (source,)
+    ]
+
+
+def test_wushen_turns_a_heart_hand_card_into_a_plain_slash_and_forbids_its_old_use():
+    """①：红桃手牌只能当【杀】；它原来的用途（这里是【桃】）从候选里消失。"""
+    heart_peach = _heart("peach")
+    black_peach = _not_heart("peach")
+    state = _shen_play_state((heart_peach, black_peach))
+    actions = _play_actions(state)
+
+    assert _as_slash(actions, heart_peach), "红桃手牌 ⇒ 一张普通【杀】的转化候选"
+    assert not any(
+        isinstance(action, UseCard) and action.card.card_id == heart_peach
+        for action in actions
+    ), "红桃【桃】不能按原用途使用"
+    assert any(
+        isinstance(action, UseCard) and action.card.card_id == black_peach
+        for action in actions
+    ), "非红桃【桃】照常"
+
+
+def test_wushen_heart_card_product_is_a_plain_slash():
+    """①的产物是**普通【杀】**（不是原牌名）：红桃【杀】也走"当普通【杀】"。
+
+    移动版 Q&A 的"红桃火杀按普通杀"由同一条声明覆盖（产物 ``type = "slash"``）；
+    火【杀】只在 160 档牌堆里，108 档用普通【杀】钉同一条产物声明。
+    """
+    heart_slash = _heart("slash")
+    state = _shen_play_state((heart_slash,))
+    products = _as_slash(_play_actions(state), heart_slash)
+    assert products and products[0].card.type == "slash"
+    assert products[0].card.name == "杀"
+
+
+def test_wushen_heart_slash_ignores_distance():
+    """②：红桃【杀】的目标池豁免距离（座位 2 在 4 人局距离 3 > 攻击范围 1）。"""
+    heart_slash = _heart("slash")
+    state = _shen_play_state((heart_slash,))
+    product = transformed_card(state, (heart_slash,), "slash")
+    pool = check_targets(state, 0, product)
+    assert 2 in pool and 3 in pool, "无距离限制 ⇒ 所有其他存活角色都在池里"
+
+
+def test_wushen_heart_dodge_cannot_answer_a_dodge_window():
+    """①：红桃【闪】不能当【闪】打出；非红桃【闪】照常。"""
+    heart_dodge = _heart("dodge")
+    black_dodge = _not_heart("dodge")
+    state = _shen_play_state((heart_dodge, black_dodge))
+    actions = legal_actions_for(state, 0, QueryKind.DODGE, answers_seq=1)
+    used = {
+        action.card.card_id
+        for action in actions
+        if isinstance(action, UseCard)
+    }
+    assert heart_dodge not in used
+    assert black_dodge in used
+
+
+def test_wushen_heart_peach_cannot_save_the_dying_holder():
+    """①：红桃【桃】不能当【桃】自救（濒死窗口）。"""
+    heart_peach = _heart("peach")
+    black_peach = _not_heart("peach")
+    state = _shen_play_state((heart_peach, black_peach))
+    actions = legal_actions_for(state, 0, QueryKind.PEACH, answers_seq=1, dying=0)
+    used = {
+        action.card.card_id
+        for action in actions
+        if isinstance(action, UseCard)
+    }
+    assert heart_peach not in used
+    assert black_peach in used
+
+
+def test_wushen_heart_card_can_be_played_as_a_slash_in_response():
+    """①：南蛮 / 决斗的响应窗口里，红桃手牌仍能当【杀】**打出**。"""
+    heart_peach = _heart("peach")
+    state = _shen_play_state((heart_peach,))
+    ctx = RespondContext(
+        cause=WindowCause.BARBARIAN_INVASION,
+        required="slash",
+        mode=RespondMode.PLAY,
+    )
+    actions = legal_actions_for(
+        state, 0, QueryKind.RESPOND, answers_seq=1, payload=ctx
+    )
+    assert any(
+        action.card.is_virtual and action.card.virtual_sources == (heart_peach,)
+        for action in actions
+    ), "红桃手牌当【杀】打出"
+
+
+# ---- 武魂：标记 / 死亡时 -------------------------------------------------
+
+KINDS = {
+    FrameKind.DAMAGE,
+    FrameKind.DEATH,
+    FrameKind.NEAR_DEATH,
+    FrameKind.LIFE_DECREASE,
+    FrameKind.JUDGE,
+}
+
+
+class _PassOrFirst:
+    def __init__(self):
+        self.queries = []
+
+    def respond(self, query):
+        self.queries.append(query)
+        if query.kind in ("RESPOND", "DODGE", "PEACH"):
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+        return query.legal_actions[0]
+
+
+def _four_seat_state(*, shen_hp=1, dead_seats=(), deck=None):
+    seats = [
+        SeatSpec(identity=Identity.LORD),
+        SeatSpec(identity=Identity.REBEL, hp=shen_hp, hero=SHEN_GUANYU),
+        SeatSpec(identity=Identity.LOYALIST),
+        SeatSpec(identity=Identity.RENEGADE),
+    ]
+    for seat in dead_seats:
+        seats[seat] = SeatSpec(
+            identity=seats[seat].identity, alive=False
+        )
+    return build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck if deck is not None else tuple(range(len(PACK.deck.cards))),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=4),
+    )
+
+
+def _run_damage(state, *, source, target, amount=1, markers=()):
+    engine = Engine.from_state(state, seed=7)
+    for marker in markers:
+        engine.add_marker(None, **marker)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": source,
+            "targets": (target,),
+            "card": None,
+            "use_timing": Timing.PHASE_PLAY_IDLE,
+            "target": target,
+            "channel": None,
+            "nature": "NORMAL",
+            "chain": False,
+            "amount": amount,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+    players = [_PassOrFirst() for _ in range(len(state.players))]
+    for _ in range(20_000):
+        if engine.pending is None and not any(
+            frame.kind in KINDS for frame in engine.stack.frames
+        ):
+            break
+        if engine.pending is None:
+            engine._step()
+            if engine.finished:
+                break
+            continue
+        query = engine.pending
+        engine.submit(players[query.actor].respond(query))
+    return engine, players
+
+
+def _marker(seat: int, *, count: int = 1, source_seat: int = 1) -> dict:
+    return {
+        "seat": seat,
+        "name": "梦魇",
+        "source_seat": source_seat,
+        "source_skill_id": WUHUN,
+        "count": count,
+        "clear_on_source_death": True,
+    }
+
+
+def _timings(engine, timing):
+    return [
+        record
+        for record in engine.records
+        if getattr(record, "kind", None) == "timing"
+        and getattr(record, "timing", None) is timing
+    ]
+
+
+def _judge_targets(engine):
+    return [
+        record.actor
+        for record in _timings(engine, Timing.JUDGE_ON)
+    ]
+
+
+def test_wuhun_gives_one_marker_per_damage_point_from_another_character():
+    """①逐点：一次 2 点伤害给来源 2 枚（per_point）。"""
+    state = _four_seat_state(shen_hp=4)
+    engine, _players = _run_damage(state, source=0, target=1, amount=2)
+    markers = engine.state.player(0).markers
+    assert len(markers) == 1
+    assert (markers[0].name, markers[0].count) == ("梦魇", 2)
+    assert markers[0].source_seat == 1 and markers[0].source_skill_id == WUHUN
+
+
+def test_wuhun_does_not_mark_self_or_sourceless_damage():
+    for source in (1, None):
+        state = _four_seat_state(shen_hp=4)
+        engine, _players = _run_damage(state, source=source, target=1)
+        assert all(not player.markers for player in engine.state.players)
+
+
+def test_wuhun_marker_is_public_with_its_source_label():
+    state = _four_seat_state(shen_hp=4)
+    engine = Engine.from_state(state, seed=7)
+    engine.add_marker(
+        None,
+        0,
+        name="梦魇",
+        source_seat=1,
+        source_skill_id=WUHUN,
+        count=2,
+        clear_on_source_death=True,
+    )
+    view = project(engine.state, 0)
+    payload = seat_display(
+        view.players[0], heroes=load_hero_tables(), players=view.players
+    )
+    marker = payload["markers"][0]
+    assert (marker["name"], marker["count"]) == ("梦魇", 2)
+    assert "神关羽" in marker["source_label"] and "武魂" in marker["source_label"]
+
+
+def test_wuhun_without_marks_does_nothing_on_death():
+    state = _four_seat_state()
+    engine, _players = _run_damage(state, source=0, target=1)
+    assert engine.state.player(1).alive is False
+    assert _judge_targets(engine) == []
+    assert engine.state.player(2).alive and engine.state.player(3).alive
+
+
+def test_wuhun_unique_max_marks_judges_without_a_choice():
+    slash = cards_of_type(PACK, "slash")[0]
+    deck = (slash,) + tuple(
+        card_id for card_id in range(len(PACK.deck.cards)) if card_id != slash
+    )
+    state = _four_seat_state(deck=deck)
+    engine, players = _run_damage(
+        state, source=0, target=1, markers=(_marker(2, count=2),)
+    )
+    assert _judge_targets(engine) == [2]
+    assert not any(query.kind == "SELECT_OPTION" for player in players for query in player.queries)
+    assert engine.state.player(2).alive is False, "非桃 / 桃园结义 ⇒ 直接死亡"
+    assert engine.state.player(3).alive
+
+
+def test_wuhun_tie_lets_the_dying_holder_pick_one():
+    deck = (cards_of_type(PACK, "slash")[0],) + tuple(
+        card_id
+        for card_id in range(len(PACK.deck.cards))
+        if card_id != cards_of_type(PACK, "slash")[0]
+    )
+    state = _four_seat_state(deck=deck)
+    engine, players = _run_damage(
+        state,
+        source=0,
+        target=1,
+        markers=(_marker(2, count=1), _marker(3, count=1)),
+    )
+    tie = [
+        query
+        for player in players
+        for query in player.queries
+        if query.kind == "SELECT_OPTION" and query.skill_id == "wuhun:pick"
+    ]
+    assert len(tie) == 1
+    assert tie[0].actor == 1, "平票由已经阵亡的神关羽选"
+    assert set(tie[0].options) == {"seat:2", "seat:3"}
+    assert _judge_targets(engine) == [2], "选中的座位进行判定"
+    assert engine.state.player(2).alive is False
+
+
+def test_wuhun_peach_or_peach_garden_saves_the_judged_character():
+    peach = cards_of_type(PACK, "peach")[0]
+    deck = (peach,) + tuple(
+        card_id for card_id in range(len(PACK.deck.cards)) if card_id != peach
+    )
+    state = _four_seat_state(deck=deck)
+    engine, _players = _run_damage(
+        state, source=0, target=1, markers=(_marker(2),)
+    )
+    assert _judge_targets(engine) == [2]
+    assert engine.state.player(2).alive is True
+
+
+def test_wuhun_ignores_marks_from_another_source():
+    state = _four_seat_state()
+    engine, _players = _run_damage(
+        state,
+        source=0,
+        target=1,
+        markers=(_marker(2, source_seat=0),),
+    )
+    assert _judge_targets(engine) == []
+    assert engine.state.player(2).alive is True
+
+
+def test_wuhun_does_not_fire_when_the_game_is_already_decided():
+    state = _four_seat_state(dead_seats=(3,))
+    engine, _players = _run_damage(
+        state, source=0, target=1, markers=(_marker(2),)
+    )
+    assert engine.pending_outcome is not None, "反贼全灭 ⇒ 神关羽死亡即判胜"
+    assert _judge_targets(engine) == [], "已判胜 ⇒ 武魂不触发"
+    assert engine.state.player(2).alive is True

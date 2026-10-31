@@ -275,7 +275,12 @@ ALLOWLIST: dict[Site, Rule] = {
         "src/sgs/skills/catalog.py",
         "_normal_slash",
         'return state.card(card_id).type == "slash"',
-    ): Rule(NORMAL, 1, "朱雀羽扇的**源筛选**：只收普通杀，避免产物属性按来源递归漂移（题面点名的 normal-only）"),
+    ): Rule(NORMAL, 1, "朱雀羽扇的**触发条件**（实体牌侧）：只收普通杀，避免产物属性按来源递归漂移（题面点名的 normal-only）"),
+    (
+        "src/sgs/skills/catalog.py",
+        "_fan_is_normal_slash",
+        'return card.type == "slash"',
+    ): Rule(NORMAL, 1, "朱雀羽扇的触发条件（虚拟 / 转化牌侧）：产物牌型必须是普通【杀】"),
     (
         "src/sgs/skills/catalog.py",
         "_SKILL_DEFS",
@@ -315,8 +320,8 @@ ALLOWLIST: dict[Site, Rule] = {
         'target_type_id="slash",',
     ): Rule(
         NORMAL,
-        3,
-        "武圣（标准 / 界）/ 龙胆的转化**产物**是普通杀牌型；源谓词 _slash 才用 is_slash（方向相反）",
+        4,
+        "武圣（标准 / 界）/ 龙胆 / 神关羽【武神】的转化**产物**是普通杀牌型；源谓词才用 is_slash（方向相反）",
     ),
     # ---- skills/lord_request.py ----
     (
@@ -477,6 +482,8 @@ M5_FIX_ANCHORS: tuple[tuple[str, str, str], ...] = (
     ("src/sgs/skills/target_pool.py", "TARGET_POOL_SKILLS", FAMILY),
     # 05b：朱雀羽扇的**源筛选**有意只收普通【杀】（产物属性不递归漂移）。
     ("src/sgs/skills/catalog.py", "_normal_slash", NORMAL),
+    # 票 09：询问式触发后，虚拟 / 转化牌侧同样只认普通【杀】。
+    ("src/sgs/skills/catalog.py", "_fan_is_normal_slash", NORMAL),
     # 藤甲只免疫普通【杀】——有意 normal-only。
     ("src/sgs/skills/catalog.py", "_VINE_ARMOR_IMMUNE_CARD_TYPES", NORMAL),
     # 转化**产物**有意是普通【杀】牌型（武圣 / 龙胆 / 丈八 / 蛇矛）。
@@ -521,7 +528,7 @@ def test_no_comparison_against_the_bare_slash_literal_remains_unclassified() -> 
     }
     assert comparisons, "全树扫不到任何牌型比较——扫描器失效"
     owners = {site[1] for site, _ in comparisons}
-    assert owners == {"_normal_slash", "_damage_to"}, (
+    assert owners == {"_normal_slash", "_fan_is_normal_slash", "_damage_to"}, (
         "牌型相等比较只许出现在朱雀羽扇的源筛选与藤甲免疫建模里，实得："
         f"{sorted(owners)}"
     )

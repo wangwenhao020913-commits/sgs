@@ -116,7 +116,7 @@ def test_loads_the_standard_hero_table():
 
 
 def test_the_table_covers_the_whole_ninth_chapter_roster():
-    """25 名 = 魏 7 / 蜀 7 / 吴 8 / 群 3，且五名女性与第九章一致（人工核对过的表驱动断言）。"""
+    """25 名 = 魏 7 / 蜀 7 / 吴 8 / 群 3 / 神 0，且五名女性与第九章一致（人工核对过的表驱动断言）。"""
     table = load_heroes()
 
     by_kingdom = {kingdom: 0 for kingdom in Kingdom}
@@ -127,6 +127,8 @@ def test_the_table_covers_the_whole_ninth_chapter_roster():
         Kingdom.SHU: 7,
         Kingdom.WU: 8,
         Kingdom.QUN: 3,
+        # 08：神势力与四势力并列（标准表里 0 名，神关羽移动版在 `feng_mobile` 表）。
+        Kingdom.SHEN: 0,
     }
     assert {hero.id for hero in table.heroes if hero.gender is Gender.FEMALE} == {
         "zhenji",

@@ -987,24 +987,32 @@ def _m5_reforge(engine: Engine) -> bool:
 
 
 def _m5_fan(engine: Engine) -> bool:
-    """55：羽扇按清单把普通【杀】转化成火【杀】（虚拟牌 + 来源实体牌）并造成火焰伤害。"""
-    products = [
-        (seq, action)
-        for seq, action in _m5_uses(engine, "fire_slash")
-        if action.card.is_virtual and action.card.virtual_sources
+    """55：羽扇按**询问式**（票 09）把这次使用的普通【杀】转成火【杀】并命中座位 1。
+
+    票 09 起羽扇是「当你使用普通【杀】时，可以将其转化为火【杀】」：转化发生在**这次
+    使用内部**，记录流里的 ``UseCard`` 仍是玩家选的那张普通【杀】（不是虚拟产物），
+    故判据读三件事：① 座位 0 真的装上了羽扇；② 羽扇的「是否发动」被**接受**
+    （``ActivateSkill``，零步 ⇒ 无 picks）；③ 之后座位 1 掉 1 点体力。
+
+    火属性本身不在记录流里（``hp_change`` 只记 amount），由
+    ``tests/test_m5_fan.py::test_the_fan_product_deals_fire_damage_and_sends_the_source_to_the_discard_pile``
+    钉住；本判据只证这条基准走到了"装扇 → 用【杀】→ 问 → 发动 → 命中"。
+    """
+    asks = [
+        record.seq
+        for record in _accepted(engine)
+        if isinstance(record.action, ActivateSkill)
+        and record.action.skill_id == "equip.vermilion_feather_fan"
     ]
-    if not products:
+    if not asks:
         return False
-    seq, product = products[0]
+    ask = asks[0]
+    used_before = [seq for seq, _action in _m5_uses(engine, "slash") if seq < ask]
     hp = _m5_hp(engine, 1)
     return (
-        bool(product.targets)
-        and any(
-            engine.state.card(card_id).type == "slash"
-            for card_id in product.card.virtual_sources
-        )
+        bool(used_before)
         and _m5_moved_to_equip(engine, 0, "vermilion_feather_fan")
-        and any(record.seq > seq and record.amount == -1 for record in hp)
+        and any(record.seq > ask and record.amount == -1 for record in hp)
     )
 
 

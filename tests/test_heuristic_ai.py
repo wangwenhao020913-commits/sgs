@@ -2849,6 +2849,27 @@ def _coverage_ice_sword():
     return state, query, None
 
 
+def _coverage_vermilion_feather_fan():
+    """票 09：羽扇改成**使用**普通【杀】时的询问（零步流水线，确认后换火【杀】）。
+
+    【朱雀羽扇】是军争装备，standard 108 的牌堆里没有它 ⇒ 这条场景用 :data:`PACK_EX_160`。
+    """
+    cards = PACK_EX_160.deck.cards
+    fan = next(index for index, card in enumerate(cards) if card.type == "vermilion_feather_fan")
+    slash = next(index for index, card in enumerate(cards) if card.type == "slash")
+    state = build_state(
+        pack=PACK_EX_160,
+        seats=[SeatSpec(hand=(slash,), equip=(fan,)), SeatSpec()],
+        deck=(),
+        turn_seat=0,
+    )
+    frame = _ActivationFrame(source=0, card=state.card(slash))
+    query = _passive_preactivation_query(
+        state, 0, "equip.vermilion_feather_fan", timing=Timing.USE_ON_USE, frame=frame
+    )
+    return state, query, frame
+
+
 _COVERAGE_CASES = {
     "hero.sunquan.zhiheng": _coverage_zhiheng,
     "hero.liubei.rende": _coverage_rende,
@@ -2869,6 +2890,7 @@ _COVERAGE_CASES = {
     "equip.qilin_bow": _coverage_qilin_bow,
     "equip.double_sword": _coverage_double_sword,
     "equip.ice_sword": _coverage_ice_sword,
+    "equip.vermilion_feather_fan": _coverage_vermilion_feather_fan,
 }
 """``skill_id`` → 构造 ``(state, query, frame)`` 的确定性场景。
 
@@ -3211,9 +3233,11 @@ def test_every_activatable_skill_can_be_ai_filled_and_validated_at_least_once():
             f"{skill_id}：AI 至少该选 ActivateSkill 而不是 Pass，实得 {action!r}"
         )
         assert action.skill_id == skill_id, f"{skill_id}：AI 发动的不是这条技能"
-        if flow_for(skill_id, query.timing) is None:
-            # 没有清单的装备技（雌雄 / 寒冰）：骨架候选就是它与 AI 的**全部**交互形态，
-            # 不是"退化的弱分支"——这两条本来就没有可填的表。
+        flow = flow_for(skill_id, query.timing)
+        if flow is None or not flow.steps:
+            # 没有可填的清单 ⇒ 骨架候选就是它与 AI 的**全部**交互形态，不是"退化的弱分支"。
+            # 两类都走这里：没有流水线的装备技（雌雄 / 寒冰），和**零步流水线**（朱雀羽扇，
+            # 票 09：只问"是否发动"，确认后在 effect 里把帧里的牌换成火【杀】）。
             assert action in query.legal_actions, (
                 f"{skill_id}：没有清单的技能只能答候选里的骨架动作"
             )

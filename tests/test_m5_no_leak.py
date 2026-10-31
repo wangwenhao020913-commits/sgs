@@ -52,6 +52,7 @@ from sgs.engine import (  # noqa: E402
     HpMaxChangeRecord,
     IdentityDealRecord,
     IdentityRevealRecord,
+    MarkerChangeRecord,
     SkillGainRecord,
     SkillLoseRecord,
     SkillSuppressRecord,
@@ -629,6 +630,17 @@ def _delta_records() -> dict[str, object]:
         "wine_change": WineChangeRecord(
             seq=104, frame_id=0, depth=0, seat=1, active=True
         ),
+        # 票 06：标记数量（公开信息；名称 / 来源 / 数量都在明面上，没有隐藏面）。
+        "marker_change": MarkerChangeRecord(
+            seq=117,
+            frame_id=0,
+            depth=0,
+            seat=1,
+            name="梦魇",
+            source_seat=0,
+            source_skill_id="hero.shen_guanyu_mobile.wuhun",
+            count=2,
+        ),
         "deck_shuffle": DeckShuffleRecord(
             seq=105,
             frame_id=0,
@@ -723,8 +735,8 @@ def test_every_delta_type_has_a_no_leak_case() -> None:
     """delta 类型表与判据表**双向**对齐：新增类型必须登记一条不泄露判据。"""
     schema_types = _delta_schema_types()
     cases = _delta_records()
-    assert len(schema_types) == 16, (
-        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 16 种写）："
+    assert len(schema_types) == 17, (
+        f"``sgs.state.deltas`` 现有 {len(schema_types)} 种 delta（判据按 17 种写）："
         f"{sorted(schema_types)}"
     )
     missing = sorted(set(schema_types) - set(cases))
