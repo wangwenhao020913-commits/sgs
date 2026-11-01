@@ -84,10 +84,19 @@ GUOHUO = "hero.yuji_mobile.guohuo"
 class GuohuoScript:
     """【蛊惑】的脚本应答：发动 / 声明哪个牌名 / 要不要质疑。"""
 
-    def __init__(self, *, activate: bool = False, declare: str = "", doubt: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        activate: bool = False,
+        declare: str = "",
+        doubt: bool = False,
+        designation: int | None = None,
+    ) -> None:
         self.activate = activate
         self.declare = declare
         self.doubt = doubt
+        self.designation = designation
+        """【借刀杀人】的 Bn：只在 ``:designation`` 那一问里答（``seat:<designation>``）。"""
         self.options: list[tuple[str, ...]] = []
 
     def respond(self, query):
@@ -106,6 +115,14 @@ class GuohuoScript:
             for action in choices:
                 if self.declare and str(action.choice) == self.declare:
                     return action
+            if (
+                self.designation is not None
+                and str(getattr(query, "skill_id", "")).endswith(":designation")
+            ):
+                # 这一问的候选是**座位**（持刀者的【杀】能打谁），不是牌名。
+                for action in choices:
+                    if str(action.choice) == f"seat:{self.designation}":
+                        return action
             for action in choices:
                 if str(action.choice).startswith("seat:"):
                     return action
@@ -116,7 +133,9 @@ class GuohuoScript:
                 if str(action.choice) == "guohuo_trust" and not self.doubt:
                     return action
             return choices[0]
-        return query.legal_actions[0]
+        # 其余询问（响应 / 濒死 / 选择面之外的一切）走"能放弃就放弃"：脚本只做它被交代的
+        # 那件事，别顺手在借刀 / 万箭的无懈窗口里把自己写死的选项点上去。
+        return _fallback(query)
 
 
 def _run_guohuo(
@@ -261,6 +280,185 @@ def test_guohuo_is_not_offered_without_hand_cards() -> None:
     assert not offered(
         legal_actions_for(state, 1, QueryKind.DODGE, answers_seq=1)
     ), "提供者入口：手里没牌 ⇒ 候选不出现"
+
+
+# ---------------------------------------------------------------------------
+# 蛊惑·出牌阶段的【借刀杀人】（附带指定 Bn 的那一路）
+#
+# 【借刀杀人】的使用要一条**附带指定**：Bn（持刀者被迫用【杀】打的那个人）由**使用者**
+# 一并指定，随 `UseCard.designations` 烘进 USE 帧（W5-02a / W5-02b）。出牌阶段的清单把
+# 它表达成"持刀者 A + Bn"两问；蛊惑的流水线因此多一问 = 目标步之后再问一次 Bn，答案由
+# `start_use(..., designations=(Bn,))` 交给借刀的结算（`resolve_borrowed_sword` 只认这一份）。
+# ---------------------------------------------------------------------------
+
+
+def _run_guohuo_borrowed_sword(
+    *,
+    borrowed: int,
+    weapon: int,
+    slash: int,
+    bodyguard: int,
+    declare: str = "借刀杀人",
+    doubters: tuple[bool, bool] = (False, False),
+):
+    """座位 0 = 于吉（手里 ``borrowed`` 一张）；座位 1 持武器 + 一张【杀】；2 / 3 空手。
+
+    于吉发动【蛊惑】声明 ``declare``、把座位 1 指定成持刀者、把 ``bodyguard`` 指定成 Bn；
+    座位 1 在借刀窗口里选 a（使用那张【杀】）；``doubters`` = 座位 2 / 3 要不要质疑
+    （座位 1 是自己上阵的持刀者，一律相信）。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="yuji_mobile", hand=(borrowed,), hp=3, hp_max=3),
+            SeatSpec(hand=(slash,), equip=(weapon,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(PACK, borrowed, weapon, slash),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [
+        GuohuoScript(activate=True, declare=declare, designation=bodyguard),
+        _WindowSeat(response=slash),
+        _Verdict(doubt=doubters[0]),
+        _Verdict(doubt=doubters[1]),
+    ]
+    # 停在**这一次**结算收尾（那张扣置的牌进弃牌堆）之后：于吉的手牌里还有摸牌阶段的
+    # 两张牌，再往下走它会发动第二次，用例要读的就是第一次的结论。
+    run_queries(
+        engine,
+        players,
+        lambda e: borrowed in e.state.discard and not e.stack,
+    )
+    return engine, state
+
+
+def test_guohuo_declares_borrowed_sword_and_asks_for_the_slash_target() -> None:
+    """声明【借刀杀人】⇒ 目标步之后再问一次 Bn，持刀者按它把【杀】打出去。
+
+    池与出牌阶段清单**同一份判据**（``targets_within_attack_range``）：座位 1 持雌雄双股剑
+    （攻击范围 2）⇒ 池 = 座位 0 / 2 / 3；这里答 ``seat:2``，故被指定挨刀的是座位 2、
+    座位 1 用了【杀】不交武器。
+    """
+    borrowed = _card(type_id="borrowed_sword")
+    weapon = _card(type_id="double_sword")
+    slash = _card(type_id="slash")
+    engine, state = _run_guohuo_borrowed_sword(
+        borrowed=borrowed, weapon=weapon, slash=slash, bodyguard=2
+    )
+
+    asked = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SELECT_OPTION
+        and str(getattr(record.query, "skill_id", "")).endswith(":designation")
+    ]
+    assert asked, "声明【借刀杀人】之后要问一次「被迫出【杀】的目标」（Bn）"
+    assert "seat:2" in tuple(str(action.choice) for action in asked[0].legal_actions), (
+        "Bn 的候选池 = 持刀者的攻击范围（座位 0 / 2 / 3）"
+    )
+    assert state.player(2).hp == 3, "持刀者按指定的 Bn 使用了【杀】"
+    assert weapon in state.player(1).equip, "持刀者使用了【杀】⇒ 不交出武器"
+    assert borrowed in state.discard, "【借刀杀人】结算完照常进弃牌堆"
+
+
+def test_guohuo_designation_step_reaches_the_web_payload() -> None:
+    """网页读取方拿到的那一问：文案 = `step_requirements["designation"]`，候选是座位。
+
+    形状与目标步**完全同形**（``SELECT_OPTION`` + ``seat:`` 选项 ⇒ 点场上武将），故这里钉
+    的是**服务端读出来的那份数据**（`CODING_STANDARDS.md` §6：读取方断言走真实产出路径）：
+    新加的 `step_requirements` 键真的被 ``pending_payload`` 读到，而不是退回一句话 summary。
+    """
+    from sgs_web.projection import pending_payload
+    from sgs_web.session import Session
+
+    borrowed = _card(type_id="borrowed_sword")
+    weapon = _card(type_id="double_sword")
+    slash = _card(type_id="slash")
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="yuji_mobile", hand=(borrowed,), hp=3, hp_max=3),
+            SeatSpec(hand=(slash,), equip=(weapon,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(PACK, borrowed, weapon, slash),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=11)
+    session = Session(
+        pack=PACK, seed=11, ai="random", timeout_seconds=None, player_count=4
+    )
+    session.engine = engine
+    session.participants = (
+        GuohuoScript(activate=True, declare="借刀杀人"),
+        _Verdict(doubt=False),
+        _Verdict(doubt=False),
+        _Verdict(doubt=False),
+    )
+    run_queries(
+        engine,
+        session.participants,
+        lambda e: e.pending is not None
+        and str(getattr(e.pending, "skill_id", "")).endswith(":designation"),
+    )
+
+    payload = pending_payload(session)
+    assert payload is not None
+    assert payload["context"]["requirement"] == (
+        "选择持刀者的【杀】打向谁（【借刀杀人】的附带指定）"
+    ), "读取方必须读到分步文案（`step_requirements` 的新键）"
+    assert [action["choice"] for action in payload["legal_actions"]] == [
+        "seat:0",
+        "seat:2",
+        "seat:3",
+    ], "Bn 的候选 = 持刀者的攻击范围（座位 0 / 2 / 3），界面因此只点场上武将"
+
+
+def test_guohuo_voided_borrowed_sword_never_opens_the_holder_window() -> None:
+    """假 + 非♥️ ⇒ 作废：那张借刀**从未使用**，持刀者连借刀窗口都不出现。
+
+    Bn 那一问在**质疑之前**（目标 → 附带指定 → 质疑），故作废时 Bn 已经问过了；作废的
+    意思仍是"从未使用 / 打出" ⇒ 一个 USE 帧都不压、持刀者不被问、武器与那张【杀】都还在。
+    """
+    # ♣【杀】声明成【借刀杀人】：牌名不等 ⇒ 假；梅花不是♥️ ⇒ 作废。
+    black_slash = _card(type_id="slash", suit="club")
+    weapon = _card(type_id="double_sword", exclude=frozenset({black_slash}))
+    holder_slash = _card(type_id="slash", exclude=frozenset({black_slash, weapon}))
+    engine, state = _run_guohuo_borrowed_sword(
+        borrowed=black_slash,
+        weapon=weapon,
+        slash=holder_slash,
+        bodyguard=2,
+        doubters=(True, False),
+    )
+
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "query"
+        and getattr(record.query, "cause", None) is WindowCause.BORROWED_SWORD
+    ], "作废的借刀不产生借刀窗口（持刀者不被问）"
+    assert weapon in state.player(1).equip, "持刀者连窗口都没开 ⇒ 武器没交出"
+    assert holder_slash in state.player(1).hand, "那张【杀】也没被用掉"
+    assert state.player(2).hp == 4, "没有人挨刀"
+    assert _moves(
+        engine,
+        reason=MoveReason.DISCARD,
+        source_zone=Zone.PROCESSING,
+        card=black_slash,
+    ), "非♥️的假牌要从处理区作废进弃牌堆"
+    assert [
+        record
+        for record in _guohuo_deltas(engine, "card_move")
+        if record.reason is MoveReason.DRAW and record.to_zone.seat == 2
+    ], "假 ⇒ 质疑者摸一张（作废不等于无代价）"
 
 
 # ---------------------------------------------------------------------------
