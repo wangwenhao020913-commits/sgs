@@ -295,6 +295,12 @@ class PickOption:
     非空"这个**形状**开选择型弹窗：牌面画在弹窗里（只读），选项按钮也画在同一弹窗。
     可调用档收 ``(state, frame, owner, answers)``，发问前现算——【义起】"观看弃牌堆顶 x 张
     再选一种类型"因此是**一问**：先看到牌，再点一个类型（不用分两步、也填不进预发动清单）。
+
+    ``disabled``（票 04 §3）：``options`` 里**显示但不可选**的那些（与 ``options`` 同形态，
+    可调用档收同样的四个参数，按**前序答案**现算）。"列出名字"与"这个能选"是两件事：
+    【蛊惑】的牌名弹窗要列全牌堆名（用户 Q1A），而"此刻没有合法目标"的名字只能置灰。
+    置灰**不是界面纪律**：`manifest` 把它下发进 ``StepPool.disabled``，
+    :func:`_assign_activation` 的逐步校验**拒绝**其中的项（fail-closed），故不点界面也提交不了。
     """
 
     options: OptionChoices
@@ -305,6 +311,7 @@ class PickOption:
         tuple[CardRef, ...]
         | Callable[[GameState, Frame, int, FlowAnswers], tuple[CardRef, ...]]
     ) = ()
+    disabled: OptionChoices = ()
 
 
 ArrangeCount = int | Callable[[GameState, Frame], int]
@@ -1277,22 +1284,28 @@ def _when_texts(
     return tuple(texts)
 
 
-def _pool_rows(rows: list[tuple[tuple[str, ...], tuple[str, ...]]]) -> tuple[StepPool, ...]:
+def _pool_rows(
+    rows: list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]],
+) -> tuple[StepPool, ...]:
     """去重后转成协议形状（保留首次出现的次序，确定性）。
 
-    若所有前序组合给出的候选**完全相同**，收成一行 ``when=()``："这一步的池与前序选择
-    无关"——比逐项重复 N 遍更小，也让接入层不必为无关的前序选择找行。
+    每行是 ``(when, options, disabled)``：``disabled`` 只有选项步会填（置灰项，见
+    :class:`PickOption` 的 ``disabled``），其余步骤一律空元组。
+
+    若所有前序组合给出的候选**完全相同**（含义上的相同：候选与置灰项都一样），收成一行
+    ``when=()``："这一步的池与前序选择无关"——比逐项重复 N 遍更小，也让接入层不必为无关的
+    前序选择找行。
     """
-    if rows and len({options for _when, options in rows}) == 1:
-        return (StepPool(when=(), options=rows[0][1]),)
-    seen: set[tuple[tuple[str, ...], tuple[str, ...]]] = set()
+    if rows and len({(options, disabled) for _when, options, disabled in rows}) == 1:
+        return (StepPool(when=(), options=rows[0][1], disabled=rows[0][2]),)
+    seen: set[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = set()
     out: list[StepPool] = []
-    for when, options in rows:
-        key = (when, options)
+    for when, options, disabled in rows:
+        key = (when, options, disabled)
         if key in seen:
             continue
         seen.add(key)
-        out.append(StepPool(when=when, options=options))
+        out.append(StepPool(when=when, options=options, disabled=disabled))
     return tuple(out)
 
 
@@ -1454,18 +1467,22 @@ def manifest(
                 if not hidden and len(options) < step.lo:
                     return ()
                 when = _when_texts(domains, combo) if combo else ()
-                rows.append((when, tuple(str(card_id) for card_id in options)))
+                rows.append((when, tuple(str(card_id) for card_id in options), ()))
                 values.extend(options)
             # 前序是多选步时，``when`` 只能按**单个**选项取键；若池确实随它变，
             # 逐选项行就与"选中的那几张"对不上 ⇒ 退化成一行空候选（校验器仍按真池裁决）。
             if multi_prior:
-                if not rows or len({options for _when, options in rows}) > 1:
+                if (
+                    not rows
+                    or len({(options, disabled) for _when, options, disabled in rows}) > 1
+                ):
                     return ()
-                rows = [((), rows[0][1])]
+                rows = [((), rows[0][1], rows[0][2])]
+            widths = [len(options) for _when, options, _disabled in rows]
             maximum = (
-                min(step.hi, max((len(row) for _, row in rows), default=0))
+                min(step.hi, max(widths, default=0))
                 if step.hi is not None
-                else max((len(row) for _, row in rows), default=0)
+                else max(widths, default=0)
             )
             if maximum < step.lo or maximum == 0:
                 # 0 张可选 = 这一步填不出任何答案（``lo = hi = 0`` 的"只看不选"步）：
@@ -1499,15 +1516,15 @@ def manifest(
                 if not pool and not domains:
                     return ()
                 when = _when_texts(domains, combo) if combo else ()
-                rows.append((when, tuple(seat_choice(seat) for seat in pool)))
+                rows.append((when, tuple(seat_choice(seat) for seat in pool), ()))
                 values.extend(pool)
             if multi_prior:
                 if not rows:
                     rows = []
-                elif len({options for _when, options in rows}) > 1:
+                elif len({(options, disabled) for _when, options, disabled in rows}) > 1:
                     rows = []
                 else:
-                    rows = [((), rows[0][1])]
+                    rows = [((), rows[0][1], rows[0][2])]
             if step.ordered and step.hi > 1:
                 # 有序多选座位步的第二问依赖**本步已选**的座位；清单只能表达第一问，
                 # 故不下发候选索引（执行器按 ``chosen`` 逐步问，校验器也按真池验）。
@@ -1527,7 +1544,9 @@ def manifest(
         elif isinstance(step, PickOption):
             # 可调用档按**前序答案**现算（票 23）：同一技能的选项集可能随第一步选中的人变
             # （【结姻】的目标装备区有没有空槽）。逐组合各算一次，行键沿用 ``when``。
-            option_rows: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+            option_rows: list[
+                tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]
+            ] = []
             option_values: list[object] = []
             for combo in combos:
                 answers = answer_map(combo)
@@ -1535,13 +1554,17 @@ def manifest(
                 choices = _resolve_options(step.options, state, framed, owner, answers)
                 if not choices:
                     return ()
+                disabled = _resolve_options(step.disabled, state, framed, owner, answers)
                 when = _when_texts(domains, combo) if combo else ()
-                option_rows.append((when, choices))
+                option_rows.append((when, choices, disabled))
                 option_values.extend(choices)
             if multi_prior:
-                if not option_rows or len({row for _when, row in option_rows}) > 1:
+                shapes = {
+                    (choices, disabled) for _when, choices, disabled in option_rows
+                }
+                if not option_rows or len(shapes) > 1:
                     return ()
-                option_rows = [((), option_rows[0][1])]
+                option_rows = [((), option_rows[0][1], option_rows[0][2])]
             steps.append(
                 Step(
                     name=step.key,
@@ -1563,18 +1586,27 @@ def manifest(
                 if len(options) < step.lo:
                     return ()
                 when = _when_texts(domains, combo) if combo else ()
-                rows.append((when, tuple(str(card_id) for card_id in options)))
+                rows.append((when, tuple(str(card_id) for card_id in options), ()))
                 values.extend(options)
             if multi_prior:
-                if not rows or len({options for _when, options in rows}) > 1:
+                if (
+                    not rows
+                    or len({(options, disabled) for _when, options, disabled in rows}) > 1
+                ):
                     return ()
-                rows = [((), rows[0][1])]
+                rows = [((), rows[0][1], rows[0][2])]
             steps.append(
                 Step(
                     name=step.key,
                     zones=step.zones,
                     min=step.lo,
-                    max=min(step.hi, max((len(row) for _, row in rows), default=0)),
+                    max=min(
+                        step.hi,
+                        max(
+                            (len(options) for _when, options, _disabled in rows),
+                            default=0,
+                        ),
+                    ),
                     pool=_pool_rows(rows),
                     order=index,
                     wording=wording(step),
@@ -1702,10 +1734,15 @@ def _assign_activation(
             text = choices[choice_index]
             choice_index += 1
             if check:
-                framed = _with_answers(state, answers)
+                framed = _with_answers(base, answers)
                 legal = _resolve_options(step.options, state, framed, owner, answers)
                 if text not in legal:
                     return answers, f"步骤 {step.key} 的选项 {text!r} 不在闭集内"
+                # 置灰项**在闭集里但不可选**（票 04 §3）：界面画灰是提示，这里才是判据。
+                # 与 ``options`` 读同一份前序答案（可调用档按刚选的那张牌现算）。
+                blocked = _resolve_options(step.disabled, state, framed, owner, answers)
+                if text in blocked:
+                    return answers, f"步骤 {step.key} 的选项 {text!r} 此刻不可选"
             answers[step.key] = text
 
         elif isinstance(step, PickProvide):

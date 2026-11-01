@@ -1386,3 +1386,129 @@ def test_pick_option_forwards_the_revealed_grant():
     )
     _flow_step_option(host, _Frame(source=0), dynamic, 0, {}, Timing.PHASE_PLAY_IDLE, ("probe", 1))
     assert seen["revealed"] == tuple(card.card_id for card in watched), "可调用档也现算透传"
+
+
+# ---------------------------------------------------------------------------
+# ⑨ PickOption.disabled（票 04 §3）：选项**显示但不可选**
+# ---------------------------------------------------------------------------
+
+
+def _option_flow(*, options, disabled=()):
+    """一条"选一项"的探针流水线（票 04 §3 的置灰通道：清单 + 校验器各读一份）。"""
+    captured: dict[str, object] = {}
+
+    def effect(host, frame, answers):
+        captured.update(answers)
+        return None
+
+    flow = SkillFlow(
+        name="option_probe",
+        steps=(
+            PickOption(options=options, disabled=disabled, optional=False, key="name"),
+        ),
+        effect=effect,
+    )
+    return flow, captured
+
+
+def test_manifest_renders_the_disabled_options_of_a_row():
+    """``PickOption.disabled`` 进 ``StepPool.disabled``：选项**在候选里**但不可选。
+
+    置灰与"不在候选里"是两件事：界要把名字**列出来**（"此刻没有合法目标"是一条提示），
+    而合法性仍由候选集合回答。故 ``options`` 恒为全量闭集，``disabled`` 只多带一份"这些
+    点不动"。读取方 = 前端 ``preactivation.js`` 的选项按钮（见 ui_smoke 的合成载荷）。
+    """
+    state = _manifest_state(hand=(_cards("slash")[0],))
+    flow, _captured = _option_flow(options=("a", "b", "c"), disabled=("b",))
+
+    steps = manifest(flow, state, 0)
+
+    assert steps[0].pool == (
+        StepPool(when=(), options=("a", "b", "c"), disabled=("b",)),
+    )
+
+
+def test_manifest_keeps_the_full_option_set_when_every_option_is_disabled():
+    """全被置灰也**不**退化成"没有清单"：清单照样下发，界面照旧列出名字（都是灰的）。"""
+    state = _manifest_state(hand=(_cards("slash")[0],))
+    flow, _captured = _option_flow(options=("a", "b"), disabled=("a", "b"))
+
+    steps = manifest(flow, state, 0)
+
+    assert steps[0].pool == (
+        StepPool(when=(), options=("a", "b"), disabled=("a", "b")),
+    )
+
+
+def test_the_disabled_payload_is_omitted_when_the_row_has_none():
+    """没有置灰项 ⇒ ``disabled`` **不进序列化**（与 ``StepPool.max`` 同一姿态）。
+
+    清单里绝大多数行都没有置灰项，恒发一个空数组会改掉既有载荷的字节形状。
+    """
+    step = Step(name="name", min=1, max=1, order=0, pool=(StepPool(options=("a",)),))
+
+    row = step.model_dump(mode="json")["pool"][0]
+
+    assert "disabled" not in row
+    grayed = Step(
+        name="name",
+        min=1,
+        max=1,
+        order=0,
+        pool=(StepPool(options=("a",), disabled=("b",)),),
+    ).model_dump(mode="json")["pool"][0]
+    assert grayed["disabled"] == ["b"]
+
+
+def test_validate_activation_rejects_a_disabled_option():
+    """置灰选项**不许靠界面挡**：校验器 fail-closed，与候选同源。
+
+    复合动作是"提交即接受"的通道（不看 ``legal_actions``），故"点不动"必须在这里也成立——
+    否则改一个前端状态就能提交一个"此刻用不了"的声明。
+    """
+    state = _manifest_state(hand=(_cards("slash")[0],))
+    flow, captured = _option_flow(options=("a", "b"), disabled=("b",))
+
+    error = validate_flow_activation(flow, state, 0, (), ("b",))
+
+    assert error is not None and "b" in error, f"置灰选项必须被拒（首个原因）：{error}"
+    assert captured == {}, "被拒的动作一个副作用都不产生"
+    assert validate_flow_activation(flow, state, 0, (), ("a",)) is None
+
+
+def test_the_disabled_set_is_recomputed_from_the_prior_answers():
+    """可调用档按**前序答案**现算（与 ``options`` 同形态）：蛊惑的牌名步就是这一档。
+
+    同一张牌名闭集在不同来源牌下"能不能用"不同（产物继承来源牌的花色 / 点数 ⇒ 目标池
+    会变），故置灰项必须与候选**同一条链路**：清单渲染、校验、界面三处读同一份解析结果。
+    """
+    card = _cards("slash")[0]
+
+    def disabled(state, frame, owner, answers):
+        del state, frame, owner
+        return ("b",) if answers["prior"] == (card,) else ()
+
+    def options(state, frame, owner, answers):
+        del state, frame, owner
+        return ("a", "b")
+
+    flow = SkillFlow(
+        name="option_probe_dynamic",
+        steps=(
+            PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="prior"),
+            PickOption(
+                options=options,
+                disabled=disabled,
+                optional=False,
+                key="name",
+            ),
+        ),
+        effect=_noop,
+    )
+    state = _manifest_state(hand=(card,))
+
+    steps = manifest(flow, state, 0)
+
+    assert [(row.options, row.disabled) for row in steps[1].pool] == [
+        (("a", "b"), ("b",))
+    ], "置灰项按前序答案（那张来源牌）现算"

@@ -47,8 +47,9 @@
 | 多步：选牌 → 座位 | 「弃置一张牌，令一名…角色回复」 | `hero.huatuo.qingnang` |
 | 多步：座位 → 选项 → 选牌 | 「选择一名男性角色，然后弃置一张手牌或将一张装备牌置入其装备区」 | `hero.jie_sunshangxiang.jieyin` |
 | 选项步（闭集，可动态） | 「选择一项：1… 2…」 | `hero.jie_xushu.jianyan` |
+| 选项步 + **置灰**（`disabled`：列出来但此刻不可选） | 「将此牌当任意一张基本牌或普通锦囊牌」——牌名**列全**，"此刻没有合法目标"的置灰 | `hero.yuji_mobile.guohuo`（移动版于吉【蛊惑】；`disabled` 见 `src/sgs/skills/flow.py:PickOption`） |
 | 手写询问（循环/逐点/逐目标） | 「逐点触发、每个伤害点各问一次」「逐个目标」 | `hero.guojia.yiji`、`hero.jie_machao.tieqi` |
-| **手写主动技**（A 族，无 `SkillFlow`、无钩子） | 「可以扣置一张手牌…依次选择相信或质疑」——一次发动里有**变长循环**（逐座位问） | `hero.yuji_mobile.guohuo`（移动版于吉【蛊惑】）；判据见 `src/sgs/skills/flow.py:SkillFlow` 的"本语言没有循环 / 每轮提交步骤" |
+| 手写**主体**（`SkillFlow` 只装前几步，段机住在 `effect` 里） | 「扣置一张手牌…然后其他角色**依次**质疑」——一次发动里有**变长循环**（逐座位问） | `hero.yuji_mobile.guohuo`（前两步是流水线，质疑循环住在提交点）；判据见 `src/sgs/skills/flow.py:SkillFlow` 的"本语言没有循环 / 每轮提交步骤" |
 | 钩子 + 修饰器（触发后改值） | 「当你失去 1 点体力后…本阶段…」 | `hero.jie_huanggai.zhaxiang` |
 | 纯修饰器（无询问） | 「锁定技，你与其他角色的距离 -1」 | `hero.machao.mashu` |
 | 目标池修饰器（剔除自己） | 「若你没有手牌，你不能成为【杀】或【决斗】的目标」 | `hero.zhugeliang.kongcheng` |
@@ -175,7 +176,7 @@
 |---|---|---|
 | `PickCards` | `cards` | 选牌（`lo`/`hi`/`zones`/`face`/`card_types`/`slot_kinds`/`exclude_cards`） |
 | `PickSeats` | `seats` | 选角色（`pool` 可依赖前序答案） |
-| `PickOption` | `option` | 闭集选项（`options` 可以是**可调用档**，按前序答案现算；`revealed` = 观看授予 ⇒ 选择型弹窗里牌面 + 选项同窗：韬·刘备【义起】的「看弃牌堆顶 x 张再选一种类型」是**一问**） |
+| `PickOption` | `option` | 闭集选项（`options` 可以是**可调用档**，按前序答案现算；`disabled` = **显示但不可选**的那几项（同形态的可调用档）⇒ 清单的 `StepPool.disabled` 让界面置灰、校验器拒收；`revealed` = 观看授予 ⇒ 选择型弹窗里牌面 + 选项同窗：韬·刘备【义起】的「看弃牌堆顶 x 张再选一种类型」是**一问**） |
 | `PickProvide` | `provide` | 选一张用于"提供"的牌（转化 / 提供者） |
 | `Arrange` | `arrange` | 排列（观星）；含它的流水线不下发预发动清单 |
 
@@ -189,6 +190,7 @@
 | 逐步文案 | `SkillDef.step_requirements` | SELECT_OPTION 读 `skill_id` 冒号后那段；SELECT_CARDS 恒读 `card` |
 | 一句话文案 | `SkillDef.requirement` | 提示条与预发动清单 |
 | 预发动清单 | `preactivation.js` | 由流水线步骤渲染；`Arrange` 不下发；**触发技要翻 `preactivated`**（见下） |
+| 选项**置灰不可选** | `preactivation.js:preactivationDisabled` | `StepPool.disabled`（`PickOption.disabled`）；画成 `.dis` + `disabled` **且不接 click**，键盘 / 合成事件那一层由 `selectPreativationOption` 再挡一次；垫片 = `tests/support/ui_smoke.mjs` 的合成载荷 |
 | 舞台 / 动效 | `session.js` / `effects.js` | 见 `docs/agents/frontend-map.md` |
 | 牌面标签 | `card-view.js:cardTagsNode` | 标签类型必须在 `CARD_TAG_TYPES` 登记 |
 | 武将详情 / 被封锁技能图标 | `hero-detail.js` / `table.js` | |

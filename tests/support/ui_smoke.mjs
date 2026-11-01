@@ -2555,6 +2555,81 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(action));
 }
 
+/* ============ 票 04 §3（合成局面）：选项步的**置灰不可选** ============
+ *
+ * 蛊惑的牌名弹窗列全牌堆名，把"此刻没有合法目标"的那几个置灰。载荷形状 =
+ * `StepPool.disabled`（服务端 `flow.manifest` 下发、`projection._steps_payload` 透传）；
+ * 读取方 = `preactivation.js:renderPreativation` 的选项分支 + `selectPreativationOption`
+ * 的守卫。五条一起钉：列出来（在候选里）、画成灰的（`.dis` + `disabled`）、点不动
+ * （没有 click 监听 / 合成 click 也不改答案）、没被置灰的照常能选、载荷带的是可用的那个。
+ */
+{
+  const handCard = synthCard(41, "闪");
+  const manifest = [
+    { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+      pool: [{ when: [], options: ["41"] }], wording: "扣置一张手牌" },
+    { name: "name", zones: [], min: 1, max: 1, order: 1,
+      pool: [{
+        when: ["41"],
+        options: ["桃园结义", "闪", "杀"],
+        disabled: ["闪"],
+      }],
+      wording: "声明一种牌名：基本牌或普通锦囊牌" },
+  ];
+  const view = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 903,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 903 }],
+    preactivations: { "hero.yuji_mobile.guohuo": manifest },
+    preactivation: [],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  view.heroes = { 0: "yuji_mobile", 1: "guanyu" };
+  view.snapshot.self_hand = [handCard];
+  view.skills = [{
+    skill_id: "hero.yuji_mobile.guohuo", name: "蛊惑", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "扣置一张手牌，将此牌当任意一张基本牌或普通锦囊牌使用" },
+  }];
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const skillButton = Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "hero.yuji_mobile.guohuo");
+  (skillButton.listeners.click || []).forEach((fn) => fn({ target: skillButton }));
+  const handChip = (index) => $("t-hand").children[index];
+  (handChip(0).listeners.click || []).forEach((fn) => fn({ target: handChip(0) }));
+  const next = Array.from($("t-options").children).find((b) => b.textContent === "下一步");
+  (next.listeners.click || []).forEach((fn) => fn({ target: next }));
+
+  const optionButton = (text) => Array.from($("t-options").children).find(
+    (b) => b.textContent === text);
+  const grayed = optionButton("闪");
+  const usable = optionButton("杀");
+  check("㉿U1 置灰的名字**照样列出来**（不是从选项里删掉）",
+    !!grayed && !!usable,
+    `选项=${JSON.stringify(Array.from($("t-options").children).map((b) => b.textContent))}`);
+  check("㉿U2 置灰项画成 .dis + disabled、且**不接 click**",
+    !!grayed && grayed.classList.contains("dis") && grayed.disabled === true
+      && (grayed.listeners.click || []).length === 0,
+    `dis=${grayed && grayed.classList.contains("dis")} disabled=${grayed && grayed.disabled} click=${grayed && (grayed.listeners.click || []).length}`);
+  (grayed && grayed.listeners.click || []).forEach((fn) => fn({ target: grayed }));
+  ui.selectPreativationOption("闪");
+  check("㉿U3 置灰项点 / 调用都选不动（答案仍是空的）",
+    JSON.stringify(ui.state.preactivation.answers[1].values) === "[]",
+    JSON.stringify(ui.state.preactivation.answers[1]));
+  (usable.listeners.click || []).forEach((fn) => fn({ target: usable }));
+  check("㉿U4 没被置灰的那个照常可选",
+    JSON.stringify(ui.state.preactivation.answers[1].values) === '["杀"]',
+    JSON.stringify(ui.state.preactivation.answers[1]));
+  const action = ui.buildAction();
+  check("㉿U5 提交载荷里带的是可用的那个名字",
+    !!action && JSON.stringify(action.choices) === '["杀"]',
+    JSON.stringify(action));
+}
+
 /* ============ 票 01（合成局面）：【离间】流水线 —— 逐步文案 + 取消送出 Pass ============
  *
  * 三步都是**服务端驱动的询问**（点技能 → SELECT_CARDS → SELECT_OPTION ×2），前端只按

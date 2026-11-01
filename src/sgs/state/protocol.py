@@ -179,17 +179,26 @@ class StepPool(_FrozenModel):
     （【方天画戟】只放宽"最后一张手牌"的转化源）。``options`` 只回答"哪些目标能点"，
     不回答"最多点几个"，故逐来源上限必须由行自己带出——界面据此把可选数收在该来源的
     合法数目内。值不进记录流（清单整体 ``exclude``），且缺省 ``None`` 时不序列化。
+
+    ``disabled``（票 04 §3）：``options`` 里**显示但不可选**的那些。选项原本只有"在不在
+    候选里"两态，而【蛊惑】的牌名弹窗要"列全牌堆名、把这个名字此刻用不了的那几项置灰"
+    ——"列出来"是提示（"此刻没有合法目标"），"选不了"是合法性，两件事各由一格回答。
+    **校验器与它同源**（:func:`sgs.skills.flow._assign_activation` 拒绝 disabled 里的项），
+    故置灰不是靠界面挡的。缺省空元组**不进序列化**（与 ``max`` 同姿态）。
     """
 
     when: tuple[str, ...] = ()
     options: tuple[str, ...] = ()
     max: int | None = None
+    disabled: tuple[str, ...] = ()
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> Any:
         data = handler(self)
         if data.get("max") is None:
             data.pop("max", None)
+        if not data.get("disabled"):
+            data.pop("disabled", None)
         return data
 
 

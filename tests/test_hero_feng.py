@@ -22,6 +22,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 _TOOLS = Path(__file__).resolve().parent.parent / "tools"
 if str(_TOOLS) not in sys.path:  # sgs_web 住在 tools/（与 test_web.py 同一条引导）
     sys.path.insert(0, str(_TOOLS))
@@ -81,6 +83,54 @@ from support import (
 GUOHUO = "hero.yuji_mobile.guohuo"
 
 
+def _manifest_row(step, prior: tuple[str, ...]):
+    """命中**前序答案**的那一行子池（与前端 `preactivationPoolRow` 同一套找法）。
+
+    先找精确匹配的 ``when``，其次 ``when=()`` 那一行（服务端把"与前序无关"的行收成它）。
+    ``None`` = 本步没有候选索引（退化）。
+    """
+    for row in getattr(step, "pool", ()) or ():
+        if tuple(row.when) == prior:
+            return row
+    for row in getattr(step, "pool", ()) or ():
+        if not row.when:
+            return row
+    return None
+
+
+def _guohuo_activation(query, *, declare: str = ""):
+    """出牌阶段入口的**复合动作**：从预发动清单填两步（选牌 → 牌名）。
+
+    用户 2026-11-02 的 Q3A 裁定之后，出牌阶段入口是**预发动**：骨架候选不再进
+    ``legal_actions``，可用性只剩 ``pending.preactivations[GUOHUO]`` 那一份清单，故脚本
+    必须像真玩家那样一次提交 ``ActivateSkill(picks, choices)``。
+
+    牌名步的**置灰项不选**（与界面 / 校验器同一条纪律：``disabled`` 里的名字提交会被拒）；
+    ``declare`` 不在这份清单里时退回第一个没置灰的名字。
+    """
+    steps = (getattr(query, "preactivations", None) or {}).get(GUOHUO) or ()
+    if len(steps) != 2:
+        return None
+    card_row = _manifest_row(steps[0], ())
+    if card_row is None or not card_row.options:
+        return None
+    picked = int(card_row.options[0])
+    name_row = _manifest_row(steps[1], (str(picked),))
+    if name_row is None or not name_row.options:
+        return None
+    blocked = tuple(getattr(name_row, "disabled", ()) or ())
+    usable = [text for text in name_row.options if text not in blocked]
+    chosen = declare if declare in usable else (usable[0] if usable else None)
+    if chosen is None:
+        return None
+    return ActivateSkill(
+        skill_id=GUOHUO,
+        picks=(picked,),
+        choices=(chosen,),
+        answers_seq=query.seq,
+    )
+
+
 class GuohuoScript:
     """【蛊惑】的脚本应答：发动 / 声明哪个牌名 / 要不要质疑。"""
 
@@ -111,10 +161,10 @@ class GuohuoScript:
         kind = getattr(query.kind, "value", query.kind)
         if kind == "PLAY_PHASE":
             if self.activate and not self.activated:
-                for action in query.legal_actions:
-                    if isinstance(action, ActivateSkill) and action.skill_id == GUOHUO:
-                        self.activated = True
-                        return action
+                action = _guohuo_activation(query, declare=self.declare)
+                if action is not None:
+                    self.activated = True
+                    return action
             return next(a for a in query.legal_actions if isinstance(a, EndPhase))
         if kind == "SELECT_CARDS":
             return next(a for a in query.legal_actions if isinstance(a, SelectCards))
@@ -493,6 +543,91 @@ def test_guohuo_designation_step_reaches_the_web_payload() -> None:
     assert option_seats(session.pending) == payload["option_seats"], (
         "载荷里的这一格就是读取方那一份（同源，不另抄一遍判据）"
     )
+
+
+def test_the_play_phase_manifest_lists_every_name_and_greys_out_the_unusable_ones() -> None:
+    """出牌阶段入口 = 预发动两步清单（用户 Q3A）：**列全**牌堆名、用不了的置灰。
+
+    读的全是**真实产出路径**：
+
+    1. ``pending_payload``（→ `preactivation.js`）下发的牌名步：``options`` = 本牌堆真有的
+       全部基本牌 + 普通锦囊（旧实现只列"此刻能用"的那几个），``disabled`` = 此刻没有合法
+       目标的那些，``when`` = 第一步选中的那张牌的 id（置灰按**来源牌**现算）；
+    2. 引擎自己拒收置灰的名字（``_assign_activation`` 的逐步校验，fail-closed）：界面画灰
+       只是提示，提交一条置灰的声明必须被拒——写进 ``action`` 记录的下发侧。
+    """
+    from sgs_web.projection import pending_payload
+    from sgs_web.session import Session
+
+    dodge = _card(type_id="dodge")
+    slash = _card(type_id="slash", exclude=frozenset({dodge}))
+    filler = _fillers(2, exclude=frozenset({dodge, slash}))
+    # 于吉已受伤（3 → 2）⇒【桃】此刻**能用**；【闪】/【无懈可击】在出牌阶段没有目标 ⇒ 置灰。
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="yuji_mobile", hand=(dodge,), hp=2, hp_max=3),
+            SeatSpec(hand=(filler[0],)),
+            SeatSpec(hand=(filler[1],)),
+        ],
+        deck=deck_excluding(PACK, dodge, slash, *filler),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = _park_at_guohuo_play_phase(state)
+    session = Session(
+        pack=PACK, seed=7, ai="random", timeout_seconds=None, player_count=4
+    )
+    session.engine = engine  # 会话的 pending 直接读引擎（`Session.pending` 是只读属性）
+
+    payload = pending_payload(session)
+    assert payload is not None
+    steps = payload["preactivations"][GUOHUO]
+    assert [step["name"] for step in steps] == ["card", "name"], (
+        "出牌阶段入口是两步：扣置哪张 → 声明成什么牌"
+    )
+    assert steps[0]["zones"] == ["hand"] and steps[0]["min"] == steps[0]["max"] == 1
+    assert steps[1]["wording"] == (
+        "声明一种牌名：基本牌或普通锦囊牌（此刻没有合法目标的名字置灰、不可选）"
+    ), '读取方读到的是声明上的那一句（`step_requirements["name"]`）'
+
+    rows = steps[1]["pool"]
+    assert len(rows) == 1, f"手里只有一张来源牌 ⇒ 一行子池，实得 {rows}"
+    row = rows[0]
+    assert tuple(row["when"]) == (), (
+        "只有一个前序组合时清单收成一行 when=()（`flow._pool_rows` 的既定收口）；"
+        "多个来源牌时才会逐牌各一行——那条由 tests/test_skill_flow.py 的"
+        "`test_the_disabled_set_is_recomputed_from_the_prior_answers` 钉住"
+    )
+
+    from sgs.skills.active import _guohuo_declaration_table
+
+    table = _guohuo_declaration_table(state)
+    assert row["options"] == list(table), "牌名闭集 = 本牌堆真有的全部基本牌 + 普通锦囊"
+    assert "闪" in row["disabled"] and "无懈可击" in row["disabled"], (
+        f"出牌阶段没有目标的牌名要置灰，实得 {row.get('disabled')}"
+    )
+    assert "桃" not in row["disabled"], "受伤了 ⇒【桃】能用（不置灰）"
+    assert "杀" not in row["disabled"], "场上有对手 ⇒【杀】有目标（不置灰）"
+
+    # ② 置灰项靠界面挡不住：提交一条置灰的声明，引擎必须拒收（fail-closed）。
+    from sgs.engine import IllegalActionError
+
+    with pytest.raises(IllegalActionError) as raised:
+        engine.submit(
+            ActivateSkill(
+                skill_id=GUOHUO,
+                picks=(dodge,),
+                choices=("闪",),
+                answers_seq=engine.pending.seq,
+            )
+        )
+    assert "闪" in str(raised.value), f"拒收原因要指名那个选项：{raised.value}"
+    rejected = engine.records[-1]
+    assert rejected.kind == "action" and rejected.accepted is False, (
+        "置灰的牌名必须被引擎拒收（不能只靠界面画灰）"
+    )
+    assert engine.pending is not None, "被拒之后这一问仍挂着（技能可重新提交）"
 
 
 def test_the_concealed_card_keeps_its_face_secret_until_the_reveal() -> None:
@@ -1398,6 +1533,101 @@ def test_guohuo_offers_only_peach_when_someone_else_is_dying() -> None:
         "多出这一问就说明【酒】被错误地并了进来（两项 ⇒ 引擎才会问）"
     )
     assert state.player(1).hp == 1 and state.player(1).alive, "于吉用蛊惑把座位 1 救回 1 点"
+
+
+def _park_at_guohuo_play_phase(state, *, seed: int = 7):
+    """把引擎开到**于吉自己的出牌阶段**那一问（预发动清单就挂在这条询问上）。"""
+    engine = Engine.from_state(state, seed=seed)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer(), PassPlayer()],
+        lambda e: e.pending is not None
+        and getattr(e.pending.kind, "value", e.pending.kind) == "PLAY_PHASE"
+        and e.pending.actor == 0,
+    )
+    return engine
+
+
+def _guohuo_query_with_grayed_names(query, card: int, *names: str, grayed: str):
+    """把真询问的清单换成一份**合成**清单：牌名闭集 = ``names``，``grayed`` 置灰。
+
+    与 `tests/support/ui_smoke.mjs` 的合成载荷同一姿态：这里要钉的是"AI 读到 ``disabled``
+    之后还选不选它"，而真实牌堆的声明表**第一项恒可用**（桃园结义对所有人合法），造不出
+    "第一个候选就被置灰"的局面。清单的形状由 `flow.manifest` 决定，这里照它逐字摆一份。
+    """
+    from sgs.state import Step, StepPool
+
+    steps = (
+        Step(
+            name="card",
+            zones=(Zone.HAND,),
+            min=1,
+            max=1,
+            order=0,
+            pool=(StepPool(when=(), options=(str(card),)),),
+            wording="扣置一张手牌",
+        ),
+        Step(
+            name="name",
+            min=1,
+            max=1,
+            order=1,
+            pool=(
+                StepPool(
+                    when=(str(card),), options=tuple(names), disabled=(grayed,)
+                ),
+            ),
+            wording="声明一种牌名",
+        ),
+    )
+    return query.model_copy(update={"preactivations": {GUOHUO: steps}})
+
+
+def test_the_ai_skips_the_grayed_names_in_the_play_phase_manifest() -> None:
+    """AI 面（`ai-adaptation.md` §1 第 2 条）：清单里**置灰的名字**一个都不许选。
+
+    置灰 = "在闭集里、此刻不可选"（蛊惑的牌名步：列全牌堆名，把没有合法目标的那几个画灰；
+    票 04 §3）。服务端仍会 fail-closed 拒收，但 AI 填出来的复合动作必须**先在候选面**上就是
+    合法的——否则它在 32 种子基准组（`tests/test_all_ai_games.py` 的"零非法应答"）里可能反复
+    提交被拒的动作。
+
+    断的是**填表那一面**（`_fill_activation`，与 `_score_peach` 同一条"判据面"先例）：
+    "选哪一步"由别的打分器决定，本条只问"填出来的那个牌名会不会是被置灰的那个"。
+    """
+    from sgs.agents import heuristic as heuristic_scoring
+
+    dodge = _card(type_id="dodge")
+    filler = _fillers(2, exclude=frozenset({dodge}))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="yuji_mobile", hand=(dodge,), hp=3, hp_max=3),
+            SeatSpec(hand=(filler[0],)),
+            SeatSpec(hand=(filler[1],)),
+        ],
+        deck=deck_excluding(PACK, dodge, *filler),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = _park_at_guohuo_play_phase(state)
+    query = _guohuo_query_with_grayed_names(
+        engine.pending, dodge, "桃园结义", "五谷丰登", "杀", grayed="桃园结义"
+    )
+    steps = query.preactivations[GUOHUO]
+
+    action = heuristic_scoring._fill_activation(
+        query, GUOHUO, steps, heuristic_scoring._visible_cards(query.view)
+    )
+
+    assert action is not None, "这一步填得出来（候选面上有能用的名字）"
+    row = steps[1].pool[0]
+    assert action.choices and action.choices[0] in row.options, (
+        f"声明的牌名要在闭集里：{action.choices}"
+    )
+    assert action.choices[0] not in row.disabled, (
+        f"AI 填了置灰的牌名 {action.choices[0]!r}（置灰 {row.disabled}）：置灰项不是候选"
+    )
+    assert action.picks == (dodge,), "代价步照样付那张牌"
 
 
 def test_the_ai_uses_guohuo_to_save_itself_in_the_peach_window() -> None:

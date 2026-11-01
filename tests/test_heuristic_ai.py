@@ -2614,6 +2614,22 @@ def _coverage_rende():
     return state, _play_phase_with_preactivations(state), None
 
 
+def _coverage_guohuo():
+    """移动版于吉【蛊惑】（票 04 §3 起翻预发动）：手里一张【闪】+ 一名对手。
+
+    出牌阶段用不出【闪】，故 AI 的正分动作只剩【蛊惑】那条复合动作（两步清单：代价牌 →
+    声明的牌名）。牌名闭合集里"此刻用不了"的几个被置灰，AI 填表时按同一份口径收窄。
+    """
+    dodge = _ids("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="yuji_mobile", hand=(dodge,)), SeatSpec()],
+        deck=_deck_excluding(dodge),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state), None
+
+
 def _coverage_jie_rende():
     low = tuple(_ids("lightning")[:2])
     state = build_state(
@@ -2883,6 +2899,8 @@ _COVERAGE_CASES = {
     # M6 票 17：界·吴两条已翻预发动的技能（界制衡 / 界流离）。
     "hero.jie_sunquan.zhiheng": _coverage_jie_zhiheng,
     "hero.jie_daqiao.liuli": _coverage_jie_liuli,
+    # 风包·移动版于吉【蛊惑】（票 04 §3：出牌阶段入口改预发动，清单 = 选牌 → 声明牌名）。
+    "hero.yuji_mobile.guohuo": _coverage_guohuo,
     # M6 票 23 报障：界夏侯惇【清俭】补翻预发动（首步选**自己**的手牌 / 装备 ⇒ 清单恒渲得出）。
     "hero.jie_xiahoudun.qingjian": _coverage_jie_qingjian,
     "equip.green_dragon_blade": _coverage_green_dragon,

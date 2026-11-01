@@ -18,7 +18,7 @@
 | `seat-view.js` | 座位卡的节点形状：武将块、判定 / 装备槽、状态类与悬停全文；**武将牌上的牌区**（`heroZoneRows`，标签带张数）与**标记行**（`markerRows`，与牌区同骨架异色、文本 = 名称×数量、悬停 = 来源 +（效果说明））都在 `fillHeroZones` 里铺。 |
 | `table.js` | 环桌布局与表体渲染：`tableViewForRender`、`renderTable`、`renderProcessing`、`renderSkills`。 |
 | `effects.js` | 动效层：目标线、行动者高亮、体力闪、技能名飘字 / 白光；寿命判定是纯函数。 |
-| `preactivation.js` | 预发动清单、转化技来源模式、清单到 Action 的组装。 |
+| `preactivation.js` | 预发动清单、转化技来源模式、清单到 Action 的组装；选项步的**置灰不可选**（`preactivationDisabled` 读 `StepPool.disabled`，画 `.dis` + 不接 click；票 04 §3）。 |
 | `interaction.js` | 点选：卡面芯片、点牌设焦点、点座位选目标、弃牌点选。 |
 | `pending.js` | 询问按种类分派到专用面、提示条右端动作、取消 / 不支持面 fail-closed；涉猎的结果态门闸（`state.suitResult`）。 |
 | `options.js` | 选项按钮组、选择面槽位、「提供一张 B」、Action 文案与右端动作下标。 |

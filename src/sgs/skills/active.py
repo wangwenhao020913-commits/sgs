@@ -2931,8 +2931,10 @@ YIQI_FLOW = SkillFlow(
 #   · 质疑顺序 = **从下家起逆时针**，**收齐全部答复后**再按同一顺序依次执行结果；
 #   · 触发次数**无限制**；作废 = 牌从**效果区**进弃牌堆（扣置时已离开手牌）。
 #
-# 本节的落点：手写 `activate`（不用 `SkillFlow`——流水线语言没有循环步骤，而质疑是逐座位
-# 循环）。`扣置` = 手牌 → 处理区（`MoveReason.LOSE`，`MOVE_AFTER` 因此照常触发"失去牌后"），
+# 本节的落点：**出牌阶段入口走两步流水线**（选牌 → 声明；用户 2026-11-02 的 Q3A 裁定 =
+# "点蛊惑 → 选 1 张手牌 → 牌名弹窗 → 一次提交"，故它翻成 `preactivated`），段 3–8 仍是
+# 手写段机；质疑的**逐座位循环**留在段机里（流水线语言没有循环步骤，见 `flow.py:SkillFlow`
+# 的边界）。`扣置` = 手牌 → 处理区（`MoveReason.LOSE`，`MOVE_AFTER` 因此照常触发"失去牌后"），
 # `验明` = `Engine.reveal_card`（M5-06 的公开揭示），`作废` = 处理区 → 弃牌堆。
 # ---------------------------------------------------------------------------
 
@@ -3007,20 +3009,64 @@ def _guohuo_declaration_table(state: GameState) -> dict[str, str]:
     return table
 
 
-def _guohuo_legal_names(
+def _guohuo_unusable_names(
     state: GameState, seat: int, source_card: int, table: Mapping[str, str]
-) -> dict[str, str]:
-    """再收窄一道：**此刻真的能使用**的牌名（`check_targets` 现算）。
+) -> frozenset[str]:
+    """此刻**用不了**的牌名（`check_targets` 现算）：界面置灰、校验器照同一份裁决。
 
     出牌阶段的【闪】/【无懈可击】没有目标池、【桃】在满体力时不可用、【杀】在攻击范围外
-    没有目标 ⇒ 这些名字不进选项（`edge-cases.md` 的 O1：此刻不可能执行的选项不该出现）。
+    没有目标 ⇒ 这些名字**列出来但点不动**（用户 Q1A：牌名弹窗列全牌堆名，把"此刻没有合法
+    目标"的名字置灰；`edge-cases.md` 的 O1 从"不出现"改成"出现但置灰"）。
+
+    产物继承来源牌的花色 / 点数，故这一步必须按**刚选的那张牌**现算——同一张牌名闭集在
+    不同来源牌下"能不能用"可以不同（黑【杀】撞【仁王盾】一类）。
     """
-    legal: dict[str, str] = {}
-    for name, type_id in table.items():
-        virtual = transformed_card(state, (source_card,), type_id)
-        if check_targets(state, seat, virtual):
-            legal[name] = type_id
-    return legal
+    return frozenset(
+        name
+        for name, type_id in table.items()
+        if not check_targets(
+            state, seat, transformed_card(state, (source_card,), type_id)
+        )
+    )
+
+
+def _guohuo_selected_card(answers: FlowAnswers) -> int | None:
+    """流水线第一步的答案（扣置哪张牌）→ 实体牌 id；还没有 ⇒ ``None``。
+
+    清单渲染与校验两条路都用它：前者给的是**代表值**（``_answer_shape`` 的元组），故这里
+    对形状不做假设，只取第一个元素。
+    """
+    picked = answers.get("card")
+    if not picked:
+        return None
+    return int(tuple(picked)[0])
+
+
+def _guohuo_name_options(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[str, ...]:
+    """牌名弹窗的**全量**闭集：本牌堆真有的全部基本牌 + 普通锦囊（用户 Q1A）。
+
+    这一段与"此刻能用"**分开**：`_guohuo_declaration_table` 回答"牌堆里有没有这种牌"，
+    `_guohuo_name_disabled` 回答"这张来源牌此刻能不能用它"。旧实现把两道闸并成一道
+    （`_guohuo_legal_names` 只留下能用的名字），于是没用的名字连提示都看不到。
+    """
+    del frame, owner, answers
+    return tuple(_guohuo_declaration_table(state))
+
+
+def _guohuo_name_disabled(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[str, ...]:
+    """全量闭集里**此刻用不了**的那些（界面置灰；校验器独立拒收，不靠界面挡）。"""
+    del frame
+    source = _guohuo_selected_card(answers)
+    if source is None:  # 前序还没选牌（清单的退化路径）⇒ 没有可置灰的依据
+        return ()
+    table = _guohuo_declaration_table(state)
+    return tuple(
+        name for name in table if name in _guohuo_unusable_names(state, owner, source, table)
+    )
 
 
 def _guohuo_virtual(state: GameState, frame: Any) -> CardRef:
@@ -3246,10 +3292,13 @@ def _guohuo_doubt_round(host: Any, frame: Any, owner: int) -> tuple[Control, boo
 
 
 def _guohuo_pick_card(host: Any, frame: Any, owner: int, timing: Timing) -> Any:
-    """段 1（两个入口共用）：扣置哪一张手牌 —— 自己的手牌，**牌面直选**。
+    """提供者入口的段 1：扣置哪一张手牌 —— 自己的手牌，**牌面直选**。
+
+    出牌阶段的同一问由 :data:`GUOHUO_FLOW` 的 `PickCards` 承担（预发动把这一问画进清单），
+    故这里是**手写段机**那一侧的实现，两个入口各问各的、产物形状一致（实体牌 id）。
 
     返回 ``card_id`` / ``None``（池为空，零张）/ ``SUSPEND``（挂起）。池为空只有一种成因：
-    手里没牌时两个入口都不产候选，故这里按"整条取消"处理。
+    手里没牌时提供者不产候选，故这里按"整条取消"处理。
     """
     picked = host.ask_selection(
         frame,
@@ -3323,62 +3372,85 @@ def _guohuo_ask_seat(
     return _option_seat(picked)
 
 
-def _guohuo_activate(host: Any, frame: Any) -> Any:
-    """移动版于吉【蛊惑】的出牌阶段入口：扣置 → 声明 → 目标 →（附带指定）→ 质疑 → 验明
-    → 结果 → 结算 / 作废。
+def _guohuo_flow_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """预发动提交点：把流水线的两组答案烘进帧私有键，再从**段 3（扣置）**继续跑段机。
 
-    九段由帧私有 ``guohuo_stage`` 串起来（每一段都可能挂起：扣置搬牌会内联派发"失去牌后"，
-    质疑是逐座位的询问，结果里扣体力会压子帧、摸牌会内联"获得牌后"，收尾的 `start_use`
-    会压整条使用链）。重入时按阶段键续跑，已完成的段不重做。
+    用户 2026-11-02 的 Q3 裁定 = A：出牌阶段入口是"点蛊惑 → 选 1 张手牌 → 牌名弹窗 →
+    **一次提交**"，故段 1–2 变成 :data:`GUOHUO_FLOW` 的两步（清单与校验器都从它渲染），
+    提交点只做一件翻译：``answers["card"] / answers["name"]`` → 段机认的那两个键
+    （``guohuo_source`` 实体牌 id / ``guohuo_name`` 牌型 id）。段 3–8 一字不动。
 
-    段 1 / 3 与段 5–7 与**提供者入口**（:func:`guohuo_provider`）共用同一份实现；本入口多出
-    来的只有"声明范围按出牌阶段现算"与"选目标 / 附带指定 / 出牌阶段的使用时机"。
+    重入：``effect`` 会在挂起后的续跑里**再进来一次**（`flow.run_flow` 的既有语义），故
+    "写翻译"这一步按段游标守卫——第二次进来时 ``guohuo_stage`` 已经在（段机自己推进它），
+    不再从答案重写，也不会把已经推进的阶段打回 ``kouchu``。
+    """
+    owner = int(frame.data["source"])  # SKILL 帧的载荷没有 skill_owner（A 族=发动者）
+    if _GUOHUO_STAGE not in frame.data:
+        table = _guohuo_declaration_table(host.state)
+        declared = str(answers["name"])
+        type_id = table.get(declared)
+        if type_id is None:  # 校验器已拦过同一份闭集；走到这里就是声明写错了
+            raise ValueError(f"【蛊惑】声明的牌名 {declared!r} 不在本牌堆的可声明表里")
+        source = _guohuo_selected_card(answers)
+        if source is None:  # 第一步是必答（lo=1），走到这里同样是声明写错了
+            raise ValueError("【蛊惑】的预发动没有带出扣置的那张牌")
+        frame.data[_GUOHUO_SOURCE] = source
+        frame.data[_GUOHUO_NAME] = type_id
+        frame.data[_GUOHUO_STAGE] = "kouchu"
+    return _guohuo_settle(host, frame, owner)
+
+
+GUOHUO_FLOW = SkillFlow(
+    name="guohuo",
+    steps=(
+        # 步 1：扣置哪张手牌（**牌面直选**：自己的手牌，票 22 的 own-zone 形态）。
+        PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="card"),
+        # 步 2：声明牌名。闭集 = 本牌堆真有的全部基本牌 + 普通锦囊（用户 Q1A：列全）；
+        # "此刻用不了"的名字**不删**，进 ``disabled`` 置灰（校验器同样拒收）。
+        PickOption(
+            options=_guohuo_name_options,
+            disabled=_guohuo_name_disabled,
+            optional=False,
+            key="name",
+        ),
+    ),
+    effect=_guohuo_flow_effect,
+    # **无次数限制**（用户 2026-11-01 裁定）⇒ 不落 ``_USED`` 阶段位（同【仁德】）。
+    once_per_phase=False,
+)
+"""【蛊惑】出牌阶段入口的两步流水线：扣置哪张手牌 → 声明成什么牌 → 段机接管。
+
+**只表达前两步**：后面的目标 / 附带指定 / 逐座位质疑 / 验明 / 结果都不是"发动前一次填完"
+的答案（质疑是**逐座位循环**，`flow.py:SkillFlow` 明说本语言没有循环步骤），故由
+:func:`_guohuo_settle` 的手写段机承担。"需要牌时"的提供者入口另有段机
+（:func:`guohuo_provider`）：两者的**选牌问法各一套**（这里走流水线的 `PickCards`、提供者
+走手写的 :func:`_guohuo_pick_card`），段 3 / 5–7（扣置 / 质疑 / 验明 / 结果）共用一份实现。
+"""
+
+
+def _guohuo_settle(host: Any, frame: Any, owner: int) -> Control:
+    """段 3–8：扣置 → 目标 →（附带指定）→ 质疑 → 验明 → 结果 → 结算 / 作废。
+
+    由 :func:`_guohuo_flow_effect` 在段 2 之后调用；剩余六段由帧私有 ``guohuo_stage``
+    串起来（每一段都可能挂起：扣置搬牌会内联派发"失去牌后"，质疑是逐座位的询问，结果里
+    扣体力会压子帧、摸牌会内联"获得牌后"，收尾的 `start_use` 会压整条使用链）。重入时按
+    阶段键续跑，已完成的段不重做。
+
+    段 3 与段 5–7 与**提供者入口**（:func:`guohuo_provider`）共用同一份实现；本入口多出来
+    的只有"选目标 / 附带指定 / 出牌阶段的使用时机"。
     """
     state = host.state
-    owner = int(frame.data["source"])  # SKILL 帧的载荷没有 skill_owner（A 族=发动者）
-    stage = frame.data.get(_GUOHUO_STAGE, "card")
-
-    # ---- 段 1：扣置一张手牌（手牌 → 处理区；算失去牌）------------------------
-    if stage == "card":
-        picked = _guohuo_pick_card(host, frame, owner, Timing.PHASE_PLAY_IDLE)
-        if host.suspended(picked):
-            return "stay"
-        if picked is None:  # 池为空 ⇒ 整条取消（零副作用）
-            return None
-        frame.data[_GUOHUO_SOURCE] = picked
-        frame.data[_GUOHUO_STAGE] = "name"
-
-    # ---- 段 2：声明牌名（任意一张此刻能用的基本牌 / 普通锦囊牌）--------------
-    if stage in ("card", "name"):
-        table = _guohuo_legal_names(
-            state,
-            owner,
-            int(frame.data[_GUOHUO_SOURCE]),
-            _guohuo_declaration_table(state),
-        )
-        if not table:  # 没有可声明的牌名 ⇒ 整条取消（零副作用）
-            return None
-        choice = host.ask_option(
-            frame,
-            owner,
-            Timing.PHASE_PLAY_IDLE,
-            skill_id=f"{GUOHUO}:name",
-            options=tuple(table),
-        )
-        if host.suspended(choice):
-            return "stay"
-        frame.data[_GUOHUO_NAME] = table[str(choice.choice)]
-        frame.data[_GUOHUO_STAGE] = "kouchu"
+    stage = frame.data.get(_GUOHUO_STAGE, "kouchu")
 
     # ---- 段 3：扣置进处理区（算失去牌；牌面仍随处理区的公开投影）----
-    if stage in ("card", "name", "kouchu"):
+    if stage == "kouchu":
         control = _guohuo_kouchu(host, frame, owner)
         if control is not None:
             return control
         frame.data[_GUOHUO_STAGE] = "targets"
 
     # ---- 段 4：选择目标（按声明的牌名现算；无目标 / 全体目标不询问）----------
-    if stage in ("card", "name", "kouchu", "targets"):
+    if stage in ("kouchu", "targets"):
         if _GUOHUO_TARGETS not in frame.data:
             card = _guohuo_virtual(state, frame)
             pool, count = _guohuo_targets_for(state, owner, card)
@@ -3755,13 +3827,15 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     ),
     # 移动版于吉【蛊惑】（用户 2026-11-01 裁定）：**两个入口**——出牌阶段主动使用（A 族）
     # **与**"需要牌时"的提供者（六扇窗口，见 `_PROVIDER_SCOPES`）。**无次数限制** ⇒
-    # `once_per_phase=False`（不落阶段位）。不翻预发动：手写发动主体里逐步问
-    # （质疑问是逐座位循环，清单表达不了）。
+    # `once_per_phase=False`（不落阶段位）。**翻预发动**（用户 2026-11-02 的 Q3A 裁定）：
+    # 出牌阶段是"点蛊惑 → 选 1 张手牌 → 牌名弹窗 → 一次提交"两步（`GUOHUO_FLOW`）；
+    # 逐座位质疑仍是段机里的手写循环（清单表达不了循环）。
     ActiveSkill(
         "yuji_mobile",
         "guohuo",
         _guohuo_offers,
-        activate=_guohuo_activate,
+        flow=GUOHUO_FLOW,
+        preactivated=True,
         requirement=(
             "扣置一张手牌，将此牌当任意一张基本牌或普通锦囊牌使用；"
             "其他角色可依次质疑：真则质疑者各失去 1 点体力，假则各摸一张牌，"
@@ -3777,8 +3851,10 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
             # ``SELECT_OPTION`` 读询问 ``skill_id`` 冒号后那段（本技能自造
             # ``…:name`` / ``…:target`` / ``…:designation`` 三个后缀，见 `_guohuo_ask_seat`）。
             # 文案逐字取票面 §1.5 的询问剧本；`card` 那一问两个入口共用，故写共通的说法。
+            # 牌名这一格 2026-11-02 起是"**列全**、用不了的置灰"（用户 Q1A）：旧文案
+            # "（此刻可使用的才列出来）"描述的是那次改动的**反**面。
             "card": "扣置一张手牌",
-            "name": "声明一种牌名：基本牌或普通锦囊牌（此刻可使用的才列出来）",
+            "name": "声明一种牌名：基本牌或普通锦囊牌（此刻没有合法目标的名字置灰、不可选）",
             "target": "（按声明的牌名）选择目标",
             "designation": "选择持刀者的【杀】打向谁（【借刀杀人】的附带指定）",
         },

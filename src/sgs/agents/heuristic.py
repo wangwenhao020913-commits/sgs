@@ -2381,6 +2381,10 @@ def _fill_activation(
     时，填出的目标集还要过 :func:`_conversion_choices_within_pool`——来源组上限不同（方天
     只放宽"最后一张手牌"的来源）时，按全局 ``max`` 填满可能越界；越界即缩到池里真实的
     最多张，仍填不出 ⇒ ``None``。
+
+    **置灰项不填**（票 04 §3）：``StepPool.disabled`` 里的选项在闭集里但**此刻不可选**，
+    服务端会拒收（`flow._assign_activation`），故这里先按它收窄候选；全部被置灰 ⇒ ``None``
+    （这一步填不出来，不交半成品）。
     """
     picks: list[int] = []
     choices: list[str] = []
@@ -2394,6 +2398,14 @@ def _fill_activation(
         options = tuple(row.options)
         if not options:
             return None
+        # 置灰项（票 04 §3）**不是候选**：它们在闭集里只为"列出来给玩家看"，服务端照样
+        # 拒收。AI 填表必须按同一份口径收窄——否则它会把一个"此刻用不了"的名字写进复合
+        # 动作，被引擎拒成非法应答（`test_all_ai_games.py` 的"零非法应答"当场红）。
+        blocked = frozenset(getattr(row, "disabled", ()) or ())
+        if blocked:
+            options = tuple(text for text in options if text not in blocked)
+            if not options:
+                return None
         if all(text.startswith(_SEAT_PREFIX) for text in options):
             if (str(skill_id), str(step.name)) in _HAND_REQUIRED_SEAT_STEPS:
                 # 只用**公开**的手牌数筛：空手目标会在展示 / 选牌步整步取消，AI 反复选它

@@ -86,7 +86,10 @@ function prunePreativationAnswers(pa, pending) {
     if (!answer || !answer.values.length) return;
     const options = preactivationOptions(pa, index);
     if (options === null || options === undefined) return; // 退化清单：全都点得动
-    const kept = answer.values.filter((value) => options.includes(String(value)));
+    const blocked = preactivationDisabled(pa, index) || [];
+    const kept = answer.values.filter(
+      (value) => options.includes(String(value)) && !blocked.includes(String(value)),
+    );
     answer.values = kept;
     answer.texts = preactivationAnswerTexts(step, kept);
   });
@@ -160,6 +163,17 @@ function preactivationPoolRow(pa, index) {
 function preactivationOptions(pa, index) {
   const row = preactivationPoolRow(pa, index);
   return row ? (row.options || []) : null;
+}
+
+/** 本步**显示但不可选**的候选（服务端 `StepPool.disabled`，票 04 §3 的置灰通道）。
+ *
+ *  "列出来"与"能选"是两件事：蛊惑的牌名弹窗要列全牌堆名（用户 Q1A），而"此刻没有合法
+ *  目标"的那几个只能画灰。**界面只管画灰**——合法性由服务端校验器裁决（它拒收 disabled
+ *  里的项），故这里返回 null（没有候选索引 / 服务端没下发）时退化成"全都点得动"。
+ */
+function preactivationDisabled(pa, index) {
+  const row = preactivationPoolRow(pa, index);
+  return row ? (row.disabled || []) : null;
 }
 
 /** 一步**允许选几个**（W7-03 / D4）：座位步的 `step.max` 是**全局**最大值，而同一个技能
@@ -422,6 +436,9 @@ function selectPreativationOption(text) {
   if (preactivationStepKind(step) !== "option") return;
   const options = preactivationOptions(pa, pa.cursor);
   if (options && !options.includes(text)) return;
+  // 置灰项在闭集里但**不可选**：按钮本来就不接 click，这里是第二道（键盘 / 合成事件）。
+  const blocked = preactivationDisabled(pa, pa.cursor);
+  if (blocked && blocked.includes(text)) return;
   pa.answers[pa.cursor] = { values: [text], texts: [text] };
   pa.cursor += 1;
   applyPreativationDefaults(pa, state.view ? state.view.pending : null);
@@ -640,12 +657,21 @@ function renderPreativation(pending) {
   const kind = preactivationStepKind(step);
   if (kind === "option") {
     const options = preactivationOptions(pa, pa.cursor) || [];
+    const blocked = preactivationDisabled(pa, pa.cursor) || [];
     for (const option of options) {
+      const grayed = blocked.includes(String(option));
       const button = document.createElement("button");
       button.type = "button";
       button.className = "opt";
       button.textContent = String(option);
-      button.addEventListener("click", () => selectPreativationOption(option));
+      if (grayed) {
+        // 置灰（票 04 §3）：画出来给玩家看（"这个名字此刻用不了"），不接 click。
+        button.classList.add("dis");
+        button.disabled = true;
+        button.title = "此刻没有合法目标";
+      } else {
+        button.addEventListener("click", () => selectPreativationOption(option));
+      }
       box.appendChild(button);
     }
   }

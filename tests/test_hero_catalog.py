@@ -33,7 +33,7 @@ from sgs.data import (
 )
 from sgs.effects import ModifierPoint
 from sgs.engine import DRAW_COUNT, Engine
-from sgs.skills import ACTIVATIONS, CATALOG, PROVIDERS, flow_for
+from sgs.skills import CATALOG, PROVIDERS, flow_for
 from sgs.skills.catalog import MATCH_ACTOR_KEY, MATCH_OWNER_KEY
 from sgs.skills.move_after import MOVE_EVENT_KEY, MoveEvent
 from sgs.state import (
@@ -1840,10 +1840,11 @@ SKILL_SHAPE: dict[str, str] = {
     # M6 票 16：界【激将】= ①求助窗口 + ②的两条零步钩子（按"提供者"单列，同界【护驾】）。
     "hero.jie_liubei.jijiang": "候选提供者",
     "equip.eight_diagrams": "候选提供者",
-    # 风包·移动版于吉【蛊惑】（用户 2026-11-01 裁定）：**手写的 A 族主动技**——质疑是逐座位
-    # 循环，而流水线语言没有循环步骤（`flow.py:SkillFlow` 的边界），故它既不进「主动技能」
-    # （那一格 = 有 flow），也不进「多轮技能」（那一格 = 有手写**钩子**）。单列一格。
-    "hero.yuji_mobile.guohuo": "手写主动技",
+    # 风包·移动版于吉【蛊惑】：出牌阶段入口自 `04` 票 §3 起是**两步流水线**（选牌 → 声明，
+    # 用户 2026-11-02 的 Q3A 裁定）⇒ 归「主动技能」格。它的**逐座位质疑**仍是段机里的手写
+    # 循环（流水线语言没有循环步骤），但那一半住在 `SkillFlow.effect` 里，不是"手写钩子"
+    # ⇒ 不进「多轮技能」格。原来的「手写主动技」一格因此**消失**（它唯一的成员就是这条）。
+    "hero.yuji_mobile.guohuo": "主动技能",
 }
 """113 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -1857,12 +1858,11 @@ SKILL_SHAPE: dict[str, str] = {
 """
 
 SHAPE_COUNTS: dict[str, int] = {
-    "主动技能": 19,
+    "主动技能": 20,
     "触发技能": 14,
     "零步技能": 27,
     "排列技能": 3,
     "多轮技能": 14,
-    "手写主动技": 1,
     "锁定技": 31,
     "转化技": 13,
     "能力位": 2,
@@ -1954,12 +1954,33 @@ def _flow_steps(skill_id: str):
     return None if flow is None else flow.steps
 
 
+def _flow_backed_active_ids() -> frozenset[str]:
+    """机械读出的「主动技能」格：有**非空**流水线、没有钩子 / 接缝。
+
+    两处读它（一处形态、一处边界），免得同一条谓词抄两遍就悄悄漂移：
+    :func:`test_every_shape_has_the_documented_count_and_members` 的逐格核对，与
+    :func:`test_the_step_language_boundary_is_exactly_the_flow_backed_skills` 的
+    "提供者里谁按主动技列格"（移动版于吉【蛊惑】同时有出牌阶段的流水线与提供者入口）。
+    """
+    return frozenset(
+        skill_id
+        for skill_id, definition in CATALOG.items()
+        if (_steps := _flow_steps(skill_id)) is not None
+        and _steps != ()
+        and not definition.hooks
+        and not definition.seams
+    )
+
+
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
-    """130 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
+    """132 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
     assert len(SKILL_SHAPE) == len(CATALOG) == 132
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
-    assert len(SHAPE_COUNTS) == 12
+    assert len(SHAPE_COUNTS) == 11, (
+        "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
+        "（它唯一的成员【蛊惑】归「主动技能」）"
+    )
     assert all(SKILL_SHAPE.values()), "表里没有空形态"
 
 
@@ -1978,14 +1999,7 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
     awakening = skills(lambda definition: definition.skill_type is SkillType.AWAKENING)
     # 觉醒技按**类型**单列一格；两条觉醒技都有流水线（零步 / 一步），故从"零步 / 触发"
     # 两个机械谓词里排除，避免一条技能落进两格。
-    active = frozenset(
-        skill_id
-        for skill_id in CATALOG
-        if (_steps := _flow_steps(skill_id)) is not None
-        and _steps != ()
-        and not CATALOG[skill_id].hooks
-        and not CATALOG[skill_id].seams
-    )
+    active = _flow_backed_active_ids()
     triggered = frozenset(
         skill_id
         for skill_id in CATALOG
@@ -1995,13 +2009,11 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
         and CATALOG[skill_id].deck_arrange is None
         and skill_id not in awakening
     )
-    # 手写主动技这一格要在 providers 之前定格：移动版于吉【蛊惑】**同时**是手写主动技与
-    # 提供者（出牌阶段入口 + "需要牌时"的提供者），而本表一格一技，取它更根本的那一格
-    # ——发动主体是手写的 A 族（提供者只是它的第二个入口）。故 providers 这里扣掉手写主动技。
-    hand_written_active = frozenset(
-        skill_id for skill_id in ACTIVATIONS if _flow_steps(skill_id) is None
-    )
-    providers = (frozenset(PROVIDERS) | {"equip.eight_diagrams"}) - hand_written_active
+    # 「主动技能」这一格要在 providers 之前定格：移动版于吉【蛊惑】**同时**是有流水线的
+    # 主动技与提供者（出牌阶段入口 + "需要牌时"的提供者），而本表一格一技，取它更根本的
+    # 那一格——发动主体是那条两步流水线（提供者只是它的第二个入口）。故 providers 这里
+    # 扣掉 flow-backed 的主动技（与"锁定技 / 觉醒技单列"同一条互斥纪律）。
+    providers = (frozenset(PROVIDERS) | {"equip.eight_diagrams"}) - active
     zero_step = frozenset(
         skill_id
         for skill_id in CATALOG
@@ -2048,8 +2060,6 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
         "hero.yuji_mobile.guohuo",
     }
 
-    assert _shape_members("手写主动技") == hand_written_active
-
     multi_round = _shape_members("多轮技能")
     assert len(multi_round) == 14
     assert all(_flow_steps(skill_id) is None for skill_id in multi_round)
@@ -2082,7 +2092,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """65 在内 / 66 在外（131 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """66 在内 / 66 在外（132 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -2094,15 +2104,17 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 65
-    assert len(outside) == 67
+    assert len(inside) == 66
+    assert len(outside) == 66
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉
     # **锁定技**：M6 票 08 的界【英姿】带一条零步阶段体流水线，但按技能类型归「锁定技」格
     # （与觉醒技单列同一姿态）——"有没有 flow"不再是划分步骤语言内外的充分条件。
     locked = {skill_id for skill_id in CATALOG if CATALOG[skill_id].locked}
-    providers = frozenset(PROVIDERS) | {"equip.eight_diagrams"}
+    # "提供者"这一格只收**按提供者单列**的那些：同时有主动技流水线的（【蛊惑】）归「主动
+    # 技能」格，故这里先扣掉它们——否则一条 inside 的技能会同时被当成 outside 的证据。
+    providers = (frozenset(PROVIDERS) | {"equip.eight_diagrams"}) - _flow_backed_active_ids()
     flow_backed = {
         skill_id for skill_id in CATALOG if flow_for(skill_id) is not None
     }
