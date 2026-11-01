@@ -2034,6 +2034,15 @@ def test_shensu_option_two_discards_one_equipment_and_skips_the_play_phase():
     assert not ran_timing(engine, Timing.PHASE_PLAY_START), "出牌阶段被跳过"
     assert _shensu_targets(engine) == [(2,)]
     assert state.player(2).hp == 3
+    # 次序（用户裁定 2026-11-01）：选完【2】**立刻**付代价，付完才问【杀】的目标。
+    asks = [
+        (record.seq, record.query.kind, str(getattr(record.query, "skill_id", "") or ""))
+        for record in engine.records
+        if record.kind == "query"
+    ]
+    pay_at = next(i for i, (_s, kind, _sid) in enumerate(asks) if kind == "SELECT_CARDS")
+    target_at = next(i for i, (_s, _k, sid) in enumerate(asks) if ":target:" in sid)
+    assert pay_at < target_at, f"弃装备必须早于选目标：{asks}"
 
 
 def test_shensu_both_options_use_two_slashes_in_order():
@@ -2059,7 +2068,7 @@ def test_shensu_both_options_use_two_slashes_in_order():
     assert _shensu_targets(engine) == [(2,), (3,)]
     assert state.player(2).hp == 3 and state.player(3).hp == 3
 
-    # 次序：第一张【杀】结算完才弃装备，弃完才用第二张。
+    # 次序（用户裁定 2026-11-01）：**先付【2】的代价**（弃装备）⇒ 再【1】的【杀】⇒ 再【2】的【杀】。
     uses = [
         record.seq
         for record in engine.records
@@ -2074,38 +2083,61 @@ def test_shensu_both_options_use_two_slashes_in_order():
         and any(card.card_id == _SHENSU_ARMOR for card in record.cards)
     ]
     assert len(uses) == 2 and len(moves) == 1
-    assert uses[0] < moves[0] < uses[1]
+    assert moves[0] < uses[0] < uses[1], "装备是第一张【杀】**之前**付掉的代价"
 
 
-def test_shensu_cancels_option_two_when_the_equipment_is_stolen_mid_flow():
-    """【2】付不起时**取消整项**（R4）：第一张【杀】的结算里装备被【刚烈】弃光。
+def test_shensu_pays_option_two_before_any_slash():
+    """【2】的弃牌是**选择的代价**：选完**立刻**付，付完才开始执行结果。
 
-    结算顺序 = 【1】的【杀】→（夏侯惇【刚烈】让夏侯渊弃两张手牌）→【2】的成本步。
-    此刻一张装备牌都没有 ⇒ 不跳出牌阶段、不出第二张【杀】，已进行的【1】不回退。
+    用户裁定（2026-11-01）：「第 2 个选项需要立刻付出代价才能选择成功；选择完毕后依次执行
+    跳过对应阶段」。故询问次序必须是 选项 → **弃装备** → 第一张【杀】的目标，而不是
+    "先选目标出杀、再回头弃牌"。
     """
     actor = _ShensuActor(
-        items="shensu_both",
-        targets=(1,),
-        picks=(_SHENSU_ARMOR, _SHENSU_HORSE),
-        ganglie_choice="discard_two",
+        items="shensu_both", targets=(2, 3), picks=(_SHENSU_ARMOR,)
     )
-    engine, state = _shensu_engine(
+    engine, _state = _shensu_engine(
         [
-            SeatSpec(hero=XIAHOUYUAN, hand=(_SHENSU_ARMOR, _SHENSU_HORSE)),
-            SeatSpec(hero=XIAHOUDUN),
+            SeatSpec(hero=XIAHOUYUAN, hand=(_SHENSU_ARMOR, *_SHENSU_HAND)),
+            SeatSpec(),
             SeatSpec(),
             SeatSpec(),
         ],
-        used=(_SHENSU_ARMOR, _SHENSU_HORSE),
-        top=_SHENSU_SPADE,
-        players=[actor, _GanglieActor()],
+        used=(_SHENSU_ARMOR,),
+        players=[actor],
     )
 
-    assert state.player(0).hand == [], "【刚烈】让夏侯渊弃掉了那两张装备牌"
-    assert _shensu_uses(engine) == 1, "只有【1】的一张【杀】"
-    assert _shensu_targets(engine) == [(1,)]
-    assert not ran_timing(engine, Timing.PHASE_DRAW), "【1】的跳过照旧"
-    assert ran_timing(engine, Timing.PHASE_PLAY_START), "【2】取消 ⇒ 出牌阶段没被跳过"
+    asks = [
+        (record.seq, record.query.kind, str(getattr(record.query, "skill_id", "") or ""))
+        for record in engine.records
+        if record.kind == "query"
+    ]
+    items_at = next(i for i, (_seq, _kind, sid) in enumerate(asks) if sid.endswith(":items"))
+    pay_at = next(i for i, (_seq, kind, _sid) in enumerate(asks) if kind == "SELECT_CARDS")
+    first_target_at = next(
+        i for i, (_seq, _kind, sid) in enumerate(asks) if ":target:" in sid
+    )
+    assert items_at < pay_at < first_target_at, (
+        f"次序必须是 选项 → 弃装备 → 选目标：{asks}"
+    )
+
+    # 更硬的一条：弃牌那条 delta 必须早于**第一张【杀】**的使用。
+    move = next(
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and getattr(record, "delta_type", None) == "card_move"
+        and record.to_zone.zone is Zone.DISCARD
+        and any(card.card_id == _SHENSU_ARMOR for card in record.cards)
+    )
+    first_use = next(
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.USE_DESIGNATE_TARGET
+    )
+    assert move.seq < first_use.seq, "代价先付：弃装备早于第一张【杀】的使用"
+
+
 
 
 def test_shensu_slash_does_not_consume_the_play_phase_slash_limit():

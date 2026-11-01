@@ -1278,11 +1278,15 @@ def _shensu_use_slash(host: Any, frame: Frame, owner: int, index: int) -> Contro
 
 
 def _shensu_pay_equipment(host: Any, frame: Frame, owner: int) -> Any:
-    """【2】的成本步：弃一张装备牌并置"跳过出牌阶段"。
+    """【2】的**代价步**：弃一张装备牌。
 
-    返回 ``"paid"``（已付）/ ``"stay"``（挂起）/ ``None``（**取消【2】整项**）——最后一种是
-    "已动工却在成本步付不起"的默认兜底（`edge-cases.md` §3.1 / 票面 §1.6 R4）：第一张
-    【杀】的结算里装备被【反馈】一类拿走时，不跳出牌阶段、也不出第二张【杀】。
+    牌面「跳过出牌阶段**并弃置一张装备牌**」里的弃牌是**这项选择的代价**，不是结果：
+    选项一交出去就立刻付（用户裁定 2026-11-01），付不起这一项就不成立——故这一步排在
+    **任何结果（跳阶段 / 第一张【杀】）之前**，不是"先选目标出杀、再回头弃牌"。
+
+    返回 ``"paid"``（已付）/ ``"stay"``（挂起）/ ``None``（付不起 ⇒ 这一项不成立）。
+    最后一种是防御分支：选项步的候选已按"有没有装备牌"收窄，选完到付款之间没有任何结算，
+    正常局面走不到；真走到就只作废【2】（另一项与已付的都不回退）。
     """
     if frame.data.get(_SHENSU_PAID):
         return "paid"
@@ -1314,31 +1318,36 @@ def _shensu_pay_equipment(host: Any, frame: Frame, owner: int) -> Any:
     if control == "stay":
         return "stay"
     frame.data[_SHENSU_PAID] = True
-    host.skip_play_phase(owner)
     return "paid"
 
 
 def _shensu_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
-    """提交点：按所选子集逐项结算【1】→【2】（每项各自"跳阶段 + 一张【杀】"）。
+    """提交点：**先付【2】的代价**，再按【1】→【2】依次执行各项结果。
 
-    每段一个帧私有游标：跳过阶段只置一次、【2】的牌只弃一次、第 n 张【杀】只发起一次。
-    两张【杀】各自选目标、各自结算（不是一次使用两个目标）。
+    次序是用户裁定的（2026-11-01）：「两个选项都是在回合开始时选择，第 2 个选项需要**立刻**
+    付出代价才能选择成功；选择完毕后依次执行跳过对应阶段」。故：
+    ① 选了两项 ⇒ **立刻**弃一张装备牌（`_shensu_pay_equipment`），付不起就【2】不成立；
+    ② 然后执行结果：先【1】（跳判定 + 摸牌 → 一张【杀】），再【2】（跳出牌 → 一张【杀】）。
+    每段一个帧私有游标：跳过阶段只置一次、装备只弃一次、第 n 张【杀】只发起一次。
     """
     owner = frame.data["skill_owner"]
     items = str(answers["items"])
-    if items in (SHENSU_SKIP_JUDGE_DRAW, SHENSU_BOTH):
+    want_one = items in (SHENSU_SKIP_JUDGE_DRAW, SHENSU_BOTH)
+    want_two = items in (SHENSU_SKIP_PLAY_EQUIP, SHENSU_BOTH)
+    if want_two:
+        paid = _shensu_pay_equipment(host, frame, owner)
+        if paid == "stay":
+            return "stay"
+        want_two = paid == "paid"
+    if want_one:
         if not frame.data.get(_SHENSU_ITEM1):
             host.skip_judge_phase(owner)
             host.skip_draw_phase(owner)
             frame.data[_SHENSU_ITEM1] = True
         if _shensu_use_slash(host, frame, owner, 0) == "stay":
             return "stay"
-    if items in (SHENSU_SKIP_PLAY_EQUIP, SHENSU_BOTH):
-        paid = _shensu_pay_equipment(host, frame, owner)
-        if paid == "stay":
-            return "stay"
-        if paid is None:
-            return None
+    if want_two:
+        host.skip_play_phase(owner)
         if _shensu_use_slash(host, frame, owner, 1) == "stay":
             return "stay"
     return None
