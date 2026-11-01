@@ -90,13 +90,15 @@ class GuohuoScript:
         activate: bool = False,
         declare: str = "",
         doubt: bool = False,
-        designation: int | None = None,
+        slash_target: int | None = None,
     ) -> None:
         self.activate = activate
         self.declare = declare
         self.doubt = doubt
-        self.designation = designation
-        """【借刀杀人】的 Bn：只在 ``:designation`` 那一问里答（``seat:<designation>``）。"""
+        self.slash_target = slash_target
+        """【借刀杀人】的 Bn（**座位号**）：只在 ``:designation`` 那一问里答
+        （``seat:<slash_target>``）。与 `_WindowSeat.designation`（``(持刀者, Bn)`` 一对）
+        不是一回事，故不共用名字。"""
         self.options: list[tuple[str, ...]] = []
 
     def respond(self, query):
@@ -116,12 +118,12 @@ class GuohuoScript:
                 if self.declare and str(action.choice) == self.declare:
                     return action
             if (
-                self.designation is not None
+                self.slash_target is not None
                 and str(getattr(query, "skill_id", "")).endswith(":designation")
             ):
                 # 这一问的候选是**座位**（持刀者的【杀】能打谁），不是牌名。
                 for action in choices:
-                    if str(action.choice) == f"seat:{self.designation}":
+                    if str(action.choice) == f"seat:{self.slash_target}":
                         return action
             for action in choices:
                 if str(action.choice).startswith("seat:"):
@@ -292,36 +294,47 @@ def test_guohuo_is_not_offered_without_hand_cards() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_guohuo_borrowed_sword(
-    *,
-    borrowed: int,
-    weapon: int,
-    slash: int,
-    bodyguard: int,
-    declare: str = "借刀杀人",
-    doubters: tuple[bool, bool] = (False, False),
+def _borrowed_sword_state(
+    *, borrowed: int, weapon: int, slash: int, dead: tuple[int, ...] = ()
 ):
-    """座位 0 = 于吉（手里 ``borrowed`` 一张）；座位 1 持武器 + 一张【杀】；2 / 3 空手。
+    """座位 0 = 于吉（手里 ``borrowed`` 一张）；座位 1 持 ``weapon`` + 一张【杀】；2 / 3 空手。
 
-    于吉发动【蛊惑】声明 ``declare``、把座位 1 指定成持刀者、把 ``bodyguard`` 指定成 Bn；
-    座位 1 在借刀窗口里选 a（使用那张【杀】）；``doubters`` = 座位 2 / 3 要不要质疑
-    （座位 1 是自己上阵的持刀者，一律相信）。
+    ``dead`` 里的座位**已阵亡**（用来把"持刀者的攻击范围内只剩几个候选"压到任意档）。
     """
-    state = build_state(
+    return build_state(
         pack=PACK,
         seats=[
             SeatSpec(hero="yuji_mobile", hand=(borrowed,), hp=3, hp_max=3),
             SeatSpec(hand=(slash,), equip=(weapon,)),
-            SeatSpec(),
-            SeatSpec(),
+            SeatSpec(alive=2 not in dead),
+            SeatSpec(alive=3 not in dead),
         ],
         deck=deck_excluding(PACK, borrowed, weapon, slash),
         turn_seat=0,
         phase=Phase.PLAY,
     )
+
+
+def _run_guohuo_borrowed_sword(
+    *,
+    borrowed: int,
+    weapon: int,
+    slash: int,
+    slash_target: int | None = None,
+    doubters: tuple[bool, bool] = (False, False),
+    dead: tuple[int, ...] = (),
+):
+    """于吉发动【蛊惑】声明【借刀杀人】、把座位 1 指定成持刀者、把 ``slash_target`` 指定成 Bn。
+
+    座位 1 在借刀窗口里选 a（使用那张【杀】）；``doubters`` = 座位 2 / 3 要不要质疑
+    （座位 1 是自己上阵的持刀者，一律相信）；``dead`` 透传给 :func:`_borrowed_sword_state`。
+    """
+    state = _borrowed_sword_state(
+        borrowed=borrowed, weapon=weapon, slash=slash, dead=dead
+    )
     engine = Engine.from_state(state, seed=11)
     players = [
-        GuohuoScript(activate=True, declare=declare, designation=bodyguard),
+        GuohuoScript(activate=True, declare="借刀杀人", slash_target=slash_target),
         _WindowSeat(response=slash),
         _Verdict(doubt=doubters[0]),
         _Verdict(doubt=doubters[1]),
@@ -347,7 +360,7 @@ def test_guohuo_declares_borrowed_sword_and_asks_for_the_slash_target() -> None:
     weapon = _card(type_id="double_sword")
     slash = _card(type_id="slash")
     engine, state = _run_guohuo_borrowed_sword(
-        borrowed=borrowed, weapon=weapon, slash=slash, bodyguard=2
+        borrowed=borrowed, weapon=weapon, slash=slash, slash_target=2
     )
 
     asked = [
@@ -371,26 +384,17 @@ def test_guohuo_designation_step_reaches_the_web_payload() -> None:
 
     形状与目标步**完全同形**（``SELECT_OPTION`` + ``seat:`` 选项 ⇒ 点场上武将），故这里钉
     的是**服务端读出来的那份数据**（`CODING_STANDARDS.md` §6：读取方断言走真实产出路径）：
-    新加的 `step_requirements` 键真的被 ``pending_payload`` 读到，而不是退回一句话 summary。
+    新加的 `step_requirements` 键真的被 ``pending_payload`` 读到，而不是退回一句话 summary；
+    而"界面画成可点的座位"那一格读的是 ``option_seats``（`projection.option_seats` →
+    `pending.js`），所以**它也要断**——只断 ``legal_actions`` 等于只证明服务端发了自己的键。
     """
-    from sgs_web.projection import pending_payload
+    from sgs_web.projection import option_seats, pending_payload
     from sgs_web.session import Session
 
     borrowed = _card(type_id="borrowed_sword")
     weapon = _card(type_id="double_sword")
     slash = _card(type_id="slash")
-    state = build_state(
-        pack=PACK,
-        seats=[
-            SeatSpec(hero="yuji_mobile", hand=(borrowed,), hp=3, hp_max=3),
-            SeatSpec(hand=(slash,), equip=(weapon,)),
-            SeatSpec(),
-            SeatSpec(),
-        ],
-        deck=deck_excluding(PACK, borrowed, weapon, slash),
-        turn_seat=0,
-        phase=Phase.PLAY,
-    )
+    state = _borrowed_sword_state(borrowed=borrowed, weapon=weapon, slash=slash)
     engine = Engine.from_state(state, seed=11)
     session = Session(
         pack=PACK, seed=11, ai="random", timeout_seconds=None, player_count=4
@@ -418,7 +422,13 @@ def test_guohuo_designation_step_reaches_the_web_payload() -> None:
         "seat:0",
         "seat:2",
         "seat:3",
-    ], "Bn 的候选 = 持刀者的攻击范围（座位 0 / 2 / 3），界面因此只点场上武将"
+    ], "Bn 的候选 = 持刀者的攻击范围（座位 0 / 2 / 3）"
+    assert payload["option_seats"] == {"seat:0": 0, "seat:2": 2, "seat:3": 3}, (
+        "界面据此把这三个座位画成**可点的**（点场上武将，不铺选项按钮）"
+    )
+    assert option_seats(session.pending) == payload["option_seats"], (
+        "载荷里的这一格就是读取方那一份（同源，不另抄一遍判据）"
+    )
 
 
 def test_guohuo_voided_borrowed_sword_never_opens_the_holder_window() -> None:
@@ -435,7 +445,7 @@ def test_guohuo_voided_borrowed_sword_never_opens_the_holder_window() -> None:
         borrowed=black_slash,
         weapon=weapon,
         slash=holder_slash,
-        bodyguard=2,
+        slash_target=2,
         doubters=(True, False),
     )
 
@@ -459,6 +469,29 @@ def test_guohuo_voided_borrowed_sword_never_opens_the_holder_window() -> None:
         for record in _guohuo_deltas(engine, "card_move")
         if record.reason is MoveReason.DRAW and record.to_zone.seat == 2
     ], "假 ⇒ 质疑者摸一张（作废不等于无代价）"
+
+
+def test_guohuo_borrowed_sword_skips_the_ask_when_only_one_slash_target_is_in_range() -> None:
+    """池只剩**一个**候选 ⇒ 这一步**不问**（同"只剩一种可声明牌名时不问"的口径）。
+
+    座位 2 / 3 已阵亡、座位 1 的武器是【诸葛连弩】（范围 1）⇒ Bn 只能是座位 0（于吉自己）：
+    直接按那个唯一候选烘进 ``designations``，持刀者的【杀】照常打过来。
+    """
+    borrowed = _card(type_id="borrowed_sword")
+    crossbow = _card(type_id="crossbow")
+    slash = _card(type_id="slash")
+    engine, state = _run_guohuo_borrowed_sword(
+        borrowed=borrowed, weapon=crossbow, slash=slash, dead=(2, 3)
+    )
+
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "query"
+        and str(getattr(record.query, "skill_id", "")).endswith(":designation")
+    ], "只有一个候选 ⇒ 不问 Bn"
+    assert state.player(0).hp == 2, "唯一可及的 Bn 就是于吉自己 ⇒ 他挨了这一刀"
+    assert crossbow in state.player(1).equip, "持刀者使用了【杀】⇒ 不交武器"
 
 
 # ---------------------------------------------------------------------------

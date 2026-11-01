@@ -3272,30 +3272,32 @@ def _guohuo_targets_for(
     return pool, count
 
 
-def _guohuo_designation_pool(
-    state: GameState, card: CardRef, targets: tuple[int, ...]
-) -> tuple[int, ...] | None:
-    """**附带指定**（【借刀杀人】的 Bn）的候选池；这张牌**不要**附带指定 ⇒ ``None``。
+def _guohuo_ask_seat(
+    host: Any, frame: Any, owner: int, step: str, pool: tuple[int, ...]
+) -> int | None:
+    """问一次**座位**（目标步 / 附带指定步共用）：返回座位号，挂起 ⇒ ``None``。
 
-    "要不要附带指定"读 :func:`needs_designation`（行为表上的 ``borrowed_sword_target``），
-    "Bn 能是谁"读 :func:`targets_within_attack_range`（持刀者的攻击范围）——两句都是**出牌
-    阶段清单**（:func:`~sgs.effects.designation_actions_for`）逐字用的那一份谓词，故蛊惑
-    声明的借刀与清单里的借刀"能指定谁"不会各说各话。
-
-    要附带指定却拿到空池（声明的这一刻就不可能）⇒ 空元组，由调用方 fail-closed。
+    ``step`` 决定 ``skill_id`` 的后缀（``target`` / ``designation``）：``ask_option`` 的帧内
+    答案缓存键是 ``(skill_id, actor)``，同一次发动里的两问**必须**用不同的后缀，否则前一个
+    答案会被当这一问的答案（见票面的"新踩的坑"）。
     """
-    if not needs_designation(card):
+    picked = host.ask_option(
+        frame,
+        owner,
+        Timing.PHASE_PLAY_IDLE,
+        skill_id=f"{GUOHUO}:{step}",
+        options=tuple(_seat_choice(seat) for seat in pool),
+    )
+    if host.suspended(picked):
         return None
-    if len(targets) != 1:  # 借刀的额定目标恰好一名持刀者（W5-02b 的 A）
-        return ()
-    return targets_within_attack_range(state, targets[0])
+    return _option_seat(picked)
 
 
 def _guohuo_activate(host: Any, frame: Any) -> Any:
     """移动版于吉【蛊惑】的出牌阶段入口：扣置 → 声明 → 目标 →（附带指定）→ 质疑 → 验明
     → 结果 → 结算 / 作废。
 
-    八段由帧私有 ``guohuo_stage`` 串起来（每一段都可能挂起：扣置搬牌会内联派发"失去牌后"，
+    九段由帧私有 ``guohuo_stage`` 串起来（每一段都可能挂起：扣置搬牌会内联派发"失去牌后"，
     质疑是逐座位的询问，结果里扣体力会压子帧、摸牌会内联"获得牌后"，收尾的 `start_use`
     会压整条使用链）。重入时按阶段键续跑，已完成的段不重做。
 
@@ -3355,16 +3357,10 @@ def _guohuo_activate(host: Any, frame: Any) -> Any:
             elif count >= len(pool):
                 frame.data[_GUOHUO_TARGETS] = tuple(pool)
             elif count == 1:
-                picked = host.ask_option(
-                    frame,
-                    owner,
-                    Timing.PHASE_PLAY_IDLE,
-                    skill_id=f"{GUOHUO}:target",
-                    options=tuple(f"seat:{seat}" for seat in pool),
-                )
-                if host.suspended(picked):
+                picked = _guohuo_ask_seat(host, frame, owner, "target", pool)
+                if picked is None:
                     return "stay"
-                frame.data[_GUOHUO_TARGETS] = (_option_seat(picked),)
+                frame.data[_GUOHUO_TARGETS] = (picked,)
             else:
                 # 区间规则（如【铁索连环】1–2 个）：取**下界**张，顺序由座位序定格。
                 frame.data[_GUOHUO_TARGETS] = tuple(pool[:count])
@@ -3373,38 +3369,39 @@ def _guohuo_activate(host: Any, frame: Any) -> Any:
     # ---- 段 4b：附带指定（【借刀杀人】的 Bn：谁挨持刀者那一刀）-------------------
     # 目标步（持刀者 A）之后再问一次：Bn 由**使用者**一并指定（W5-02a / W5-02b），随
     # ``start_use(..., designations=(Bn,))`` 烘进 USE 帧 —— 借刀的结算只认那一份，缺了
-    # 就 fail-closed。这一步只对**要附带指定**的牌名出现，别的牌名记一份空元组就过
-    # （段游标要能分辨"这一步做完了"）。
+    # 就 fail-closed。要不要这一步、Bn 能是谁，两句都与出牌阶段清单
+    # （`designation_actions_for`）同源：``needs_designation``（行为表上的
+    # ``borrowed_sword_target``）+ ``targets_within_attack_range``（持刀者的攻击范围）。
+    # 不需要附带指定的牌名记一份空元组就过（段游标要能分辨"这一步做完了"）。
     if stage in ("card", "name", "kouchu", "targets", "designation"):
         if _GUOHUO_DESIGNATIONS not in frame.data:
             card = _guohuo_virtual(state, frame)
-            pool = _guohuo_designation_pool(
-                state, card, tuple(frame.data[_GUOHUO_TARGETS])
-            )
-            if pool is None:
+            targets = tuple(frame.data[_GUOHUO_TARGETS])
+            if not needs_designation(card):
                 frame.data[_GUOHUO_DESIGNATIONS] = ()
-            elif not pool:
-                # 声明时"持刀者够得着谁"已由借刀的第 0 层滤子（``borrowed_sword_target``，
-                # 内含"攻击范围内至少有一个合法【杀】目标"）验过非空，故这里撞上空池只可能
-                # 是扣置之后状态翻转发出了缝 ⇒ fail-closed（同 ``ops.py`` 借刀缺附带指定
-                # 那条），不产出一条必崩的使用。
-                raise ValueError(
-                    "【蛊惑】声明的【借刀杀人】没有可指定的 Bn（扣置后持刀者够不着任何人）"
-                )
-            elif len(pool) == 1:
-                # 只有一个候选 ⇒ **不问**（同"只剩一种可声明的牌名时不问"的口径）。
-                frame.data[_GUOHUO_DESIGNATIONS] = tuple(pool)
             else:
-                picked = host.ask_option(
-                    frame,
-                    owner,
-                    Timing.PHASE_PLAY_IDLE,
-                    skill_id=f"{GUOHUO}:designation",
-                    options=tuple(f"seat:{seat}" for seat in pool),
+                # 借刀的额定目标恰好一名持刀者（W5-02b 的 A）。
+                pool = (
+                    targets_within_attack_range(state, targets[0])
+                    if len(targets) == 1
+                    else ()
                 )
-                if host.suspended(picked):
-                    return "stay"
-                frame.data[_GUOHUO_DESIGNATIONS] = (_option_seat(picked),)
+                if not pool:
+                    # 声明时"持刀者够得着谁"已由借刀的第 0 层滤子（``borrowed_sword_target``，
+                    # 内含"攻击范围内至少有一个合法【杀】目标"）验过非空，故这里撞上空池只
+                    # 可能是扣置之后状态翻转发出了缝 ⇒ fail-closed（同 ``ops.py`` 借刀缺附带
+                    # 指定那条），不产出一条必崩的使用。
+                    raise ValueError(
+                        "【蛊惑】声明的【借刀杀人】没有可指定的 Bn（扣置后持刀者够不着任何人）"
+                    )
+                if len(pool) == 1:
+                    # 只有一个候选 ⇒ **不问**（同"只剩一种可声明的牌名时不问"的口径）。
+                    frame.data[_GUOHUO_DESIGNATIONS] = tuple(pool)
+                else:
+                    picked = _guohuo_ask_seat(host, frame, owner, "designation", pool)
+                    if picked is None:
+                        return "stay"
+                    frame.data[_GUOHUO_DESIGNATIONS] = (picked,)
         frame.data[_GUOHUO_STAGE] = "doubt"
 
     # ---- 段 5–7：质疑轮询 → 翻开验明 → 按收集顺序执行结果（与提供者入口共用）----
@@ -3735,7 +3732,13 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
             Modifier(ModifierPoint.CANDIDATES, _guohuo_provider_offers),
         ),
         step_requirements={
+            # 键的取法同【离间】/【青囊】：``SELECT_CARDS`` 恒读 ``"card"``，
+            # ``SELECT_OPTION`` 读询问 ``skill_id`` 冒号后那段（本技能自造
+            # ``…:name`` / ``…:target`` / ``…:designation`` 三个后缀，见 `_guohuo_ask_seat`）。
+            # 文案逐字取票面 §1.5 的询问剧本；`card` 那一问两个入口共用，故写共通的说法。
+            "card": "扣置一张手牌",
             "name": "声明一种牌名：基本牌或普通锦囊牌（此刻可使用的才列出来）",
+            "target": "（按声明的牌名）选择目标",
             "designation": "选择持刀者的【杀】打向谁（【借刀杀人】的附带指定）",
         },
     ),
