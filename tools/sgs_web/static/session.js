@@ -326,6 +326,36 @@ function openingLiveView(body) {
 
 /* ------------------------------------------------ 回放期逐事件全表更新（U3-05 / D11） */
 
+/** 技能增删的两条 delta（M6 票 04）：`skill_gain` / `skill_lose`。 */
+const SKILL_DELTA_TYPES = new Set(["skill_gain", "skill_lose"]);
+
+/** 这条可见记录是不是**技能增删**（`:func:`adoptSkillLists` 的触发判据）。 */
+function isSkillDeltaRecord(record) {
+  return Boolean(record) && record.kind === "delta" && SKILL_DELTA_TYPES.has(record.delta_type);
+}
+
+/** 起播前把**技能清单**换成这一批的终态（`body` 里的权威清单）。
+ *
+ * 为什么技能不走逐事件派生：`skill_gain` / `skill_lose` 只带 `skill_id`，而按钮区要
+ * 名字 / 类别 / 徽标 / 可用性、详情要三态——全在快照里，客户端拼不出来第二条真源。
+ * 于是回放期若继续按 live view 的旧 `skills` 画，整段回放都在显示**上一份**清单：
+ * 韬·刘备【义起】实机报障（2026-11-01）"失去【从讨】之后按钮区还写着【从讨】、
+ * 也没有【武圣】【咆哮】"就是这个窗口（详情页同样是旧的——两处都读 live view）。
+ *
+ * 只覆盖两处**纯清单**字段：按钮区顶层 `skills` 与每座位 `players[].skills`（详情用）。
+ * 技能是明置的公开事实，且它们本来就不做逐张动画，故提前装终态不会提前泄露任何牌面；
+ * 牌面 / 体力 / 区域仍逐事件走 `applyLiveDelta`。
+ */
+function adoptSkillLists(liveView, body) {
+  if (!liveView || !body) return;
+  liveView.skills = (body.skills || []).slice();
+  const fresh = (body.snapshot && body.snapshot.players) || [];
+  for (const player of (liveView.snapshot && liveView.snapshot.players) || []) {
+    const same = fresh.find((item) => Number(item.seat) === Number(player.seat));
+    if (same && Array.isArray(same.skills)) player.skills = same.skills.slice();
+  }
+}
+
 /** 一份新的 **live view**：从最近一次提交的视图复制出牌桌会用到的可变容器。
  *
  * 它只属于回放期：每条记录把**可见**变化写进它（见 :func:`applyLiveDelta`），`renderTable`
@@ -698,6 +728,7 @@ function applyView(body) {
   // 骨架，故新局的开局批也 `live = true`——表体随记录逐条长出来，而不是等 commit 才出现。
   const live = opening || state.view !== null;
   if (live) state.liveView = opening ? openingLiveView(body) : cloneLiveView(state.view);
+  if (live && incoming.some(isSkillDeltaRecord)) adoptSkillLists(state.liveView, body);
   state.playback = {
     body, records: incoming, index: 0, querySeat: state.lastQuerySeat, live,
   };

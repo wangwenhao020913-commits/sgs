@@ -603,7 +603,9 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     - **谁的技能**：技能实例由 ``sgs.skills.resolve_instances`` 解析，它已经含身份门控
       （非主公的武将牌上**没有**主公技），故"有的技能"不是前端猜的；
     - **什么类型**：``locked`` 是官方"牌面有没有『可以』"的逐字判据，中文名与
-      ``skill_type`` 取自**武将面数据**（`HeroSkill.name` / `.skill_type`）；W4-fix-3 起
+      ``skill_type`` 取自**武将面数据**（`HeroSkill.name` / `.skill_type`）；"获得"来的
+      技能（载体 ``GRANTED``，如【义起】授予的【武圣】【咆哮】）在**本人**武将面上没有
+      条目，名字按目录反查（:func:`_skill_display_name`，与详情页同一份）；W4-fix-3 起
       ``ui.passive`` 另标"触发技"（有钩子 / 接缝且无主动入口，见
       :func:`_is_passive_skill`）——**不改** ``skill_type`` 的语义；
     - **此刻能不能用**：`available` = 当前挂起的询问里有没有针对这个技能的
@@ -674,6 +676,14 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
             # （``equip.crossbow`` → 诸葛连弩）。装备与武将技能同列，界面据 ``carrier``
             # 分别标注（报障：装备技能此前整条被略去）。
             name = _card_type_name(state, definition.skill_id[len("equip.") :])
+        if name is None:
+            # **获得**来的技能没有**本人**武将面可查：``names`` 只索引持有者的武将牌
+            # （短 id → 名字），而"获得别人的技能"（韬·刘备【义起】授予的 ☆【武圣】
+            # /【咆哮】）的短 id 根本不在那张表里。此前这里直接 ``continue``，于是
+            # 授予之后按钮区一条都不出现（武将详情页看得见，因为那边走的是
+            # :func:`seat_skill_display` 的 ``_skill_display_name`` 反查）——用户实机
+            # 报障：义起发动后没有【武圣】【咆哮】，两条都点不到。
+            name = _skill_display_name(state, instance.skill_id)
         if name is None:
             continue
         entry = _skill_entry(

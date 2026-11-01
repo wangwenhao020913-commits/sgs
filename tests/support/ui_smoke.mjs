@@ -18687,4 +18687,93 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     JSON.stringify(yiqiTypeTexts));
 }
 
+/* ============ 报障（2026-11-01）：义起之后的技能按钮区 =====================
+ * 两件事一起钉：
+ *  ① 按钮格子里**只放技能名**（前 3 个字 + 省略号）：面板是固定 3 列 × 6 行的等大网格，
+ *     名字长度不再决定排版；完整名字 / 类别 / 徽标进 `aria-label`，悬停描述仍是 `title`；
+ *  ② 一批记录里出现 `skill_gain` / `skill_lose` 时，按钮区与详情清单在**起播前**就换成
+ *     这一批的终态——技能没有逐事件的 live 通道，否则整段回放都在显示上一份清单（实机
+ *     看到的就是"失去【从讨】之后按钮区还写着【从讨】、而详情页已经有【武圣】【咆哮】"）。
+ */
+{
+  const reportSkillRow = (id, name, extra = {}) => ({
+    skill_id: id, name, skill_type: "NORMAL", locked: false, carrier: "HERO",
+    star: false, state: "active", description: `${name}的描述。`,
+    ui: { passive: false, requirement: "", convert_sources: [] }, ...extra,
+  });
+  const reportView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 9710,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 9710 }],
+    candidate_index: {}, option_seats: {}, context: null,
+    preactivations: {}, preactivation: [],
+  });
+  reportView.skills = [
+    { ...reportSkillRow("hero.demo.yiqi", "义起"), available: false, preactivated: false },
+    { ...reportSkillRow("demo.longname", "驱虎吞狼"), available: false, preactivated: false },
+  ];
+  ui.state.sessionId = null;
+  ui.state.view = reportView;
+  ui.resetSelection();
+  ui.renderTable();
+  const reportButton = (id) => Array.from($("t-skills").children)
+    .find((node) => node.getAttribute && node.getAttribute("data-skill-id") === id);
+  const longNameButton = reportButton("demo.longname");
+  check("报障-1 技能按钮只放前 3 个字（4 字名截成「驱虎吞…」），全名 / 类别进 aria-label",
+    !!longNameButton
+      && longNameButton.text().startsWith("驱虎吞…")
+      && longNameButton.getAttribute("aria-label").startsWith("驱虎吞狼（")
+      && longNameButton.getAttribute("title") === "驱虎吞狼的描述。",
+    longNameButton
+      ? `text=${longNameButton.text()} label=${longNameButton.getAttribute("aria-label")}`
+      : "没有长名字按钮");
+
+  /* ② 同一批里：失去【从讨】+ 获得【武圣】【咆哮】——起播前清单就是终态。 */
+  const afterView = {
+    ...reportView,
+    records: [
+      { kind: "delta", delta_type: "skill_lose", seat: 0, skill_id: "hero.tao_liubei.congtao", seq: 9711 },
+      { kind: "delta", delta_type: "skill_gain", seat: 0, skill_id: "hero.guanyu.wusheng", seq: 9712 },
+      { kind: "delta", delta_type: "skill_gain", seat: 0, skill_id: "hero.zhangfei.paoxiao", seq: 9713 },
+    ],
+    live_deltas: [], narrative: [], skill_events: [],
+    skills: [
+      { ...reportSkillRow("hero.guanyu.wusheng", "武圣"), available: false, preactivated: false },
+      { ...reportSkillRow("hero.zhangfei.paoxiao", "咆哮", { locked: true }), available: false, preactivated: false },
+      { ...reportSkillRow("hero.demo.yiqi", "义起"), available: false, preactivated: false },
+    ],
+    snapshot: {
+      ...reportView.snapshot,
+      players: reportView.snapshot.players.map((player) => (Number(player.seat) === 0
+        ? {
+          ...player,
+          skills: [
+            reportSkillRow("hero.tao_liubei.congtao", "从讨", { state: "lost" }),
+            reportSkillRow("hero.guanyu.wusheng", "武圣"),
+          ],
+        }
+        : player)),
+    },
+  };
+  ui.applyViewRaw(afterView);
+  ui.renderTable();  // 回放期的表体走 live view
+  const midSkills = Array.from($("t-skills").children)
+    .filter((node) => node.tagName === "BUTTON")
+    .map((node) => node.getAttribute("data-skill-id"));
+  check("报障-2 回放期按钮区已是这一批的终态（从讨没了、武圣 / 咆哮在）",
+    !!ui.state.playback
+      && midSkills.length === 3
+      && midSkills.includes("hero.guanyu.wusheng")
+      && midSkills.includes("hero.zhangfei.paoxiao")
+      && !midSkills.includes("hero.tao_liubei.congtao"),
+    `playback=${!!ui.state.playback} skills=${JSON.stringify(midSkills)}`);
+  const midDetail = ((ui.state.liveView.snapshot.players[0] || {}).skills || []);
+  check("报障-3 回放期详情清单同源（从讨仍是「失去」一条，不是从清单里被抹掉）",
+    midDetail.length === 2
+      && midDetail[0].skill_id === "hero.tao_liubei.congtao"
+      && midDetail[0].state === "lost",
+    JSON.stringify(midDetail.map((entry) => [entry.skill_id, entry.state])));
+  ui.flushPlayback();
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

@@ -5743,6 +5743,53 @@ def test_the_actionable_skill_list_marks_a_star_skill_and_keeps_the_key_set() ->
     )
 
 
+def test_the_actionable_skill_list_names_a_skill_granted_from_another_hero_card() -> None:
+    """报障（2026-11-01）：【义起】授予的【武圣】【咆哮】在按钮区整条消失。
+
+    ``build_skills`` 的中文名只从**持有者**的武将面取（短 id → 名字），而"获得别人的技能"
+    的短 id 不在那张表里（韬·刘备的武将面只有从讨 / 义起）⇒ 旧实现在"没有名字"处
+    ``continue``，按钮区一条都出不来。武将详情页（:func:`seat_skill_display`）走
+    ``_skill_display_name`` 反查，于是实机上"详情看得见、按钮点不到"。
+
+    这里用引擎的**同一个写入口**复现【义起】提交点的那一对状态（``lose_skill`` /
+    ``grant_skill``），并钉住两处清单同名同 id：名字来源不许各写一份。
+    """
+    from types import SimpleNamespace
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hero="tao_liubei"), SeatSpec(hp=4, hero="guanyu")],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, pending=None)
+
+    before = {entry["skill_id"] for entry in build_skills(session, 0)}
+    assert "hero.tao_liubei.congtao" in before, "发动前：从讨在按钮区"
+
+    engine.lose_skill(0, "hero.tao_liubei.congtao")
+    engine.grant_skill(0, "hero.guanyu.wusheng")
+    engine.grant_skill(0, "hero.zhangfei.paoxiao")
+
+    buttons = {entry["skill_id"]: entry for entry in build_skills(session, 0)}
+    assert "hero.tao_liubei.congtao" not in buttons, (
+        "失去的技能不是「有但被挡住」：实例不再存在，按钮区不列"
+    )
+    assert buttons["hero.guanyu.wusheng"]["name"] == "武圣", (
+        f"获得来的技能没有本人的武将面可查，名字必须反查目录：{buttons}"
+    )
+    assert buttons["hero.zhangfei.paoxiao"]["name"] == "咆哮"
+    for skill_id in ("hero.guanyu.wusheng", "hero.zhangfei.paoxiao"):
+        assert buttons[skill_id]["carrier"] == "HERO", "获得的武将技能与本人技能同组排序"
+        assert buttons[skill_id]["available"] is False, "此刻没有询问 ⇒ 不给入口"
+
+    # 两处清单的名字必须一致（按钮区 = 可操作清单，详情 = 公开只读清单）。
+    detail = {entry["skill_id"]: entry for entry in seat_skill_display(session, 0)}
+    for skill_id in ("hero.guanyu.wusheng", "hero.zhangfei.paoxiao"):
+        assert buttons[skill_id]["name"] == detail[skill_id]["name"]
+
+
 def test_the_actionable_skill_list_keeps_a_suppressed_skill_and_marks_its_state() -> None:
     """技能按钮区也要能画出「有但被挡住」：失效的非锁定技仍在清单里。
 

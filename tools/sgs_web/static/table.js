@@ -756,6 +756,12 @@ function selectSkillCandidate(index) {
  * 清单驱动的本地态（确认 = 复合动作、取消零提交），不再去 `legal_actions` 里找
  * 骨架候选（已翻的技能连骨架都没有）。未翻的技能照旧：转化技点它进入来源模式，其余
  * 点一下 = 选中那条 `ActivateSkill` 候选。判据与点击动作都住在 :func:`skillOffer`。
+ *
+ * **格子（报障 2026-11-01）**：底部技能区是**固定 3 列 × 6 行**的等大网格（CSS 里
+ * `#t-skills`），故按钮上只放名字的前 3 个字（:func:`shortSkillName`）；类别 / 徽标
+ * 副行（`.kind`）由 CSS 隐藏但仍在节点里，完整名字 + 类别 + 徽标写进 `aria-label`，
+ * 悬停描述照旧读 `title`。多于 18 条（现役武将到不了）按同一份等分继续往下排，仍等大、
+ * 一个都不裁——面板的格高来自 CSS，JS 只负责顺序与标签。
  */
 function renderSkills(view) {
   const box = $("t-skills");
@@ -799,8 +805,12 @@ function renderSkills(view) {
     // M6 票 19：☆ 技能（觉醒后获得）在按钮名字前标出来；未觉醒时它不在清单里。
     const star = skillStarLabel(skill);
     if (star) button.setAttribute("data-star", "true");
-    const shownName = star ? `${star} ${skill.name}` : skill.name;
+    // 报障 2026-11-01：格子是固定 3 列 × 6 行的等大网格 ⇒ 名字**只放前 3 个字**
+    //（`shortSkillName`，超出加省略号）；类别 / 状态副行仍留在节点里给悬停与读屏用
+    //（`#t-skills .kind` 由 CSS 隐藏），完整名字 + 类别 + 徽标进 `aria-label`。
+    const shownName = star ? `${star} ${shortSkillName(skill.name)}` : shortSkillName(skill.name);
     button.innerHTML = `${shownName}<span class="kind">${kind}${badge}</span>`;
+    button.setAttribute("aria-label", `${skill.name}（${kind}${badge}）`);
     applySkillState(button, skill);
     if (offer.handler) button.addEventListener("click", offer.handler);
     box.appendChild(button);

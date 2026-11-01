@@ -1140,14 +1140,43 @@ button.mini-slot { cursor: pointer; }
 }
 .hand .card { flex: 0 0 auto; line-height: 1.2; }
 
+/* 技能按钮区（报障 2026-11-01）：**固定 3 列 × 6 行**的等大网格，一技能一格。
+ *
+ * 旧版是 `display:flex; flex-wrap:wrap`，按钮按名字宽度自己撑、逐行换行；面板只有 10.5%
+ * 宽 ⇒ 技能一多就被挤出可视区（用户实机报障"技能区显示不全"）。改成网格后：列宽/行高
+ * 都由面板给出（`minmax(0, 1fr)` ⇒ 每格等宽、六行等高），格子里只放技能名（前 3 个字，
+ * 超出省略——名字长度不再影响排版）。多出 18 条的（现役武将都到不了）按同一份等分往下排：
+ * 每格仍等大，只是每行略矮——「显示不全」改成「都看得见」，而不是把后面的裁掉。
+ * `.kind` 副行（类别 + 预发动 / 转化 / 可发动徽标）在这里**隐藏**：它仍在下发的报文与
+ * 节点里（`aria-label` / `title` 读），只是不占格子。 */
 #t-skills {
-  flex: 0 0 10.5%;
-  min-width: 88px;
-  align-content: flex-end;
+  flex: 0 0 13%;
+  min-width: calc(120 * var(--dsu));
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-rows: repeat(6, minmax(0, 1fr));
+  grid-auto-rows: minmax(0, 1fr);
+  gap: calc(4 * var(--dsu));
   overflow-y: auto;
   padding-bottom: 2px;
 }
-#t-skills .skill { font-size: 12px; padding: 4px 8px; white-space: nowrap; }
+#t-skills .skill {
+  /* `min-width: 0` 是省略号的前提：网格项默认 min-width:auto，长内容会顶宽列。 */
+  min-width: 0; width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 calc(2 * var(--dsu));
+  border-radius: calc(6 * var(--dsu));
+  font-size: calc(13 * var(--dsu));
+  line-height: 1.1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#t-skills .skill .kind { display: none; }
+/* 失效格要留出禁止图标的位置（图标绝对定位在右侧，别压住名字）。 */
+#t-skills .skill.suppressed { padding-right: calc(13 * var(--dsu)); }
+#t-skills .skill.suppressed .skill-ban {
+  right: calc(2 * var(--dsu));
+  width: calc(11 * var(--dsu)); height: calc(11 * var(--dsu));
+}
 
 /* 自己的座位块（U1-02）：292×210 设计尺寸，左武将块 + 右判定 / 装备区（右块 130）。 */
 .seat.self {

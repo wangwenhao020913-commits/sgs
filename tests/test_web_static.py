@@ -1126,3 +1126,65 @@ def test_the_card_face_name_fits_four_characters_without_an_ellipsis() -> None:
         f"四字牌名 {four_characters:.1f} 设计单位放不进卡面可读内宽 {inner:.0f}"
         f"（{font} 号 / {em}em / 内缩 {inset[0][0]}px / 边框 {border.group(1)}px）"
     )
+
+
+def test_skill_bar_is_a_three_by_six_grid_of_equal_cells_with_name_only() -> None:
+    """报障（2026-11-01）：技能按钮区放不下，技能一多就"显示不全"。
+
+    旧形态是 `display:flex; flex-wrap:wrap`：按钮按名字宽度自己撑、逐行换行，面板只有
+    10.5% 宽 ⇒ 技能多起来后面的被挤出可视区。现在钉死成**固定 3 列 × 6 行**的等大网格
+    （用户口径：这一块要显示 3×6）：
+      * 列宽 `repeat(3, minmax(0, 1fr))`、行高 `repeat(6, minmax(0, 1fr))` ⇒ 每格等宽等高；
+      * `min-width: 0` 是省略号的前提（网格项默认 `min-width:auto`，长内容会顶宽列）；
+      * 格子里**只放技能名**（前 3 个字，超出省略）：`.kind` 副行在这里隐藏，
+        `renderSkills` 用 `shortSkillName` 截断名字（完整名字走 `aria-label` / `title`）。
+    """
+    bar = _css_rule("#t-skills")
+    assert re.search(r"display:\s*grid", bar), f"技能区必须是网格：{bar}"
+    assert re.search(r"grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)", bar), (
+        f"列数钉死 3 列、等宽：{bar}"
+    )
+    assert re.search(r"grid-template-rows:\s*repeat\(6, minmax\(0, 1fr\)\)", bar), (
+        f"行数钉死 6 行、等高（3×6 = 18 格）：{bar}"
+    )
+    assert re.search(r"overflow-y:\s*auto", bar), "超过 18 条要能滚动，而不是被裁掉"
+    assert not re.search(r"flex-wrap:\s*wrap", bar), (
+        f"网格路线不再用 flex 换行（换行会按名字宽度撑格子）：{bar}"
+    )
+
+    cell = _css_rule("#t-skills .skill")
+    assert re.search(r"min-width:\s*0", cell), f"省略号的前提被拿掉了：{cell}"
+    assert re.search(r"width:\s*100%", cell) and re.search(r"height:\s*100%", cell), (
+        f"每格必须填满自己的网格单元（等大）：{cell}"
+    )
+    assert re.search(r"overflow:\s*hidden", cell), cell
+    assert re.search(r"font-size:\s*calc\(\d+ \* var\(--dsu\)\)", cell), (
+        f"字号走设计单位（随壳宽缩放）：{cell}"
+    )
+    kind_line = _css_rule("#t-skills .skill .kind")
+    assert re.search(r"display:\s*none", kind_line), (
+        f"类别 / 徽标副行在按钮格子里隐藏（只显示技能名）：{kind_line}"
+    )
+
+    # 截断住 `renderSkills`：名字走 `shortSkillName`，副行仍在节点里（读屏 / 悬停不丢信息）。
+    table_js = _strip_js_comments((STATIC_DIR / "table.js").read_text(encoding="utf-8"))
+    render = re.search(r"function renderSkills\(view\) \{(?P<body>.*?)\n\}", table_js, re.S)
+    assert render is not None, "table.js 里找不到 renderSkills()"
+    body = render.group("body")
+    assert "shortSkillName(skill.name)" in body, (
+        "按钮上的名字必须过 shortSkillName（前 3 个字 + 省略号）"
+    )
+    assert '<span class="kind">' in body, (
+        "`.kind` 副行仍要下发（CSS 隐藏它，而不是 JS 删掉它）"
+    )
+    assert 'button.setAttribute("aria-label"' in body, (
+        "截断之后完整名字 / 类别 / 徽标必须进 aria-label（读屏与悬停读得到）"
+    )
+
+    core_js = _strip_js_comments((STATIC_DIR / "core.js").read_text(encoding="utf-8"))
+    helper = re.search(r"function shortSkillName\(name\) \{(?P<body>.*?)\n\}", core_js, re.S)
+    assert helper is not None, "core.js 里找不到 shortSkillName()"
+    assert "SKILL_NAME_MAX_CHARS = 3" in core_js, "截断长度必须是 3 个字（用户口径）"
+    assert "Array.from" in helper.group("body"), (
+        "按**字**切（Array.from），不按 UTF-16 码元——代理对不会被切一半"
+    )

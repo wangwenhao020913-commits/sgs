@@ -119,6 +119,21 @@ function skillKindLabel(skill) {
   return passive ? "被动技" : "主动技";
 }
 
+/** 技能按钮上的**名字**（报障 2026-11-01）：底部技能区是固定 **3 列 × 6 行**的等大网格，
+ *  格子宽度不再由名字长度决定，故按钮只见名字的前 :data:`SKILL_NAME_MAX_CHARS` 个字，
+ *  超出截断加省略号；完整名字 / 类别 / 状态仍由 `renderSkills` 写进 `title` 与 `aria-label`，
+ *  截断不丢信息（悬停 / 读屏照样读得到）。
+ *
+ *  按**字**切（`Array.from`）而不是按 UTF-16 码元：代理对不会被切一半。
+ *  名字缺失时返回空串（fail-visible：按钮上就是空的，不编名字）。 */
+const SKILL_NAME_MAX_CHARS = 3;
+
+function shortSkillName(name) {
+  const chars = Array.from(String(name === undefined || name === null ? "" : name));
+  if (chars.length <= SKILL_NAME_MAX_CHARS) return chars.join("");
+  return `${chars.slice(0, SKILL_NAME_MAX_CHARS).join("")}…`;
+}
+
 /** 技能**三态**的徽标文案（M6 票 19；`player.skills[].state` 是稳定报文值）。
  *
  * - `suppressed` = **失效**：有但被挡住（实例还在，作用域到期恢复）；
