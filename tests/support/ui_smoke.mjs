@@ -2689,6 +2689,60 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
     JSON.stringify(optionNodes.map((node) => [node.textContent, node.disabled])));
 }
 
+/* ============ 报障 2026-11-02（合成局面）：**已翻预发动**的技能仍要能走"提供者"入口 ============
+ *
+ * 【蛊惑】封了两个入口：出牌阶段走**预发动清单**（复合动作），"需要牌时"走**提供者**
+ * （这一问里它就是一条普通的 `ActivateSkill` 候选）。技能按钮的三态曾经按
+ * `skill.preactivated` 一刀切——已翻预发动就"只认清单"，于是响应窗口里没有清单 ⇒ 整片
+ * 变灰，玩家没法用【蛊惑】响应（用户实机报障）。判据改成看**这一问给了哪种入口**：
+ * 有清单 ⇒ 清单入口；没有清单但服务端说 `available`（= 这一问有骨架候选）⇒ 直提态。
+ */
+{
+  const nullify = synthCard(61, "无懈可击");
+  const view = synthView({
+    kind: "RESPOND", actor: 0, seq: 905,
+    cause: "NULLIFY", required: "nullify",
+    prompt: "需要使用【无懈可击】",
+    legal_actions: [
+      { kind: "ActivateSkill", skill_id: "hero.yuji_mobile.guohuo", answers_seq: 905 },
+      { kind: "UseCard", card: nullify, targets: [], answers_seq: 905 },
+      { kind: "Pass", answers_seq: 905 },
+    ],
+    preactivations: {}, preactivation: [],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  view.heroes = { 0: "yuji_mobile", 1: "guanyu" };
+  view.snapshot.self_hand = [nullify];
+  view.skills = [{
+    skill_id: "hero.yuji_mobile.guohuo", name: "蛊惑", skill_type: "NORMAL", locked: false,
+    carrier: "HERO", available: true, preactivated: true,
+    ui: { requirement: "扣置一张手牌，将此牌当任意一张基本牌或普通锦囊牌使用或打出" },
+  }];
+  ui.state.view = view;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(view);
+
+  const button = Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "hero.yuji_mobile.guohuo");
+  check("㉿PR1 响应窗口里【蛊惑】**点得动**（已翻预发动 ≠ 只认清单）",
+    !!button && button.disabled === false && button.classList.contains("ready"),
+    `disabled=${button && button.disabled} usable=${button && button.getAttribute("data-usable")} badge=${button && button.textContent}`);
+  // 徽标读 `aria-label`（服务端 → 节点的读屏文案，`innerHTML` 里的 `.kind` 副行同源）：
+  // 垫片不解析 `innerHTML` 文本，`textContent` 在这里恒空。
+  const label = (button && button.getAttribute("aria-label")) || "";
+  check("㉿PR2 徽标如实写「可发动」而不是「预发动」（这一问给的是骨架候选）",
+    !!button && !/预发动/.test(label) && /可发动/.test(label),
+    `aria-label="${label}"`);
+  (button.listeners.click || []).forEach((fn) => fn({ target: button }));
+  const picked = ui.buildAction();
+  check("㉿PR3 点它就是选中那条 `ActivateSkill` 候选（直提态，不是进预发动）",
+    ui.state.preactivation === null
+      && !!picked && picked.kind === "ActivateSkill"
+      && picked.skill_id === "hero.yuji_mobile.guohuo",
+    `pre=${JSON.stringify(ui.state.preactivation)} action=${JSON.stringify(picked)}`);
+}
+
 /* ============ 票 01（合成局面）：【离间】流水线 —— 逐步文案 + 取消送出 Pass ============
  *
  * 三步都是**服务端驱动的询问**（点技能 → SELECT_CARDS → SELECT_OPTION ×2），前端只按

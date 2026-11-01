@@ -64,6 +64,7 @@ from .display import (
     card_payload,
     decorate_pending,
     decorate_snapshot,
+    hidden_guohuo_payload,
     suit_labels,
 )
 from .session import Session
@@ -159,7 +160,7 @@ def concealed_guohuo_cards(engine: Any) -> dict[int, str]:
     return out
 
 
-def concealed_by_later_reveal(records: Iterable[object]) -> dict[int, str]:
+def concealed_by_later_reveal(records: Iterable[object], state: Any = None) -> dict[int, str]:
     """**本批记录里**"先进了处理区、之后才被公开亮出"的牌：``源牌 id → ""``。
 
     :func:`concealed_guohuo_cards` 读的是**当下**的结算栈，只回答"现在还挂在栈上的未验明牌"。
@@ -173,10 +174,28 @@ def concealed_by_later_reveal(records: Iterable[object]) -> dict[int, str]:
     就是"还没验明"的。判定不认技能 id（任何"处理区里的牌被公开亮出"都符合），故不会给别
     的技能添特例。
 
-    值的约定：``""``（**声明牌型未知**）——这批记录里没有声明牌名（它在询问载荷里，不进记录
-    流）；画家那条路（:func:`sgs_web.display._processing_display`）只吃
-    :func:`concealed_guohuo_cards` 的带牌型结果，掩码这条路只看"在不在表里"。
+    值 = **声明的牌型 id**（能解出来时）：这批记录里就有扣置者自己的复合动作
+    （`ActivateSkill.picks / .choices`），`choices[0]` 是声明的**显示名**，按牌名反查牌型
+    （与 `_guohuo_declaration_table` 同一张底表）。解不出来（旧形态 / 记录不全）⇒ ``""``
+    —— 那时只回答"要不要掩码"，画家退回"只给张数"。
     """
+    # 声明的牌型：**扣置者自己提交的复合动作**就在这批记录里（`ActivateSkill` 的
+    # `picks` = 扣置的那张、`choices[0]` = 声明的**显示名**）。有 `state` 时按牌名反查
+    # 牌型 id（与 `_guohuo_declaration_table` 同一张底表）；查不到 ⇒ 不猜，退回"只给张数"。
+    declared: dict[int, str] = {}
+    if state is not None:
+        type_of_name = {card.name: card.type for card in state.cards}
+        for record in records:
+            action = getattr(record, "action", None)
+            picks = getattr(action, "picks", ()) or ()
+            choices = getattr(action, "choices", ()) or ()
+            if not picks or not choices:
+                continue
+            type_id = type_of_name.get(str(choices[0]))
+            if type_id is None:
+                continue
+            for card_id in picks:
+                declared[int(card_id)] = type_id
     revealed_at: dict[int, int] = {}
     for record in records:
         if getattr(record, "delta_type", None) != "card_reveal":
@@ -209,7 +228,7 @@ def concealed_by_later_reveal(records: Iterable[object]) -> dict[int, str]:
             card_id = int(card.card_id)
             revealed = revealed_at.get(card_id)
             if revealed is not None and seq < revealed:
-                out[card_id] = ""
+                out[card_id] = declared.get(card_id, "")
     return out
 
 
@@ -2428,10 +2447,22 @@ def visible_record(
         elif delta_type == "card_move" and raw.get("cards"):
             hidden_seats = _concealed_hidden(raw, viewer, concealed)
             if hidden_seats is not None:
-                # UI1/UI2：这张牌是**未验明**的【蛊惑】扣置牌 ⇒ 牌面不下发（只给张数）。
-                # 记录流不写"它是谁"，故与隐藏区同一姿态：``cards = []`` + ``card_count``。
+                # UI1/UI2：这张牌是**未验明**的【蛊惑】扣置牌 ⇒ **源牌牌面不下发**。
+                # 画**声明的牌名**（无花色点数 + `concealed` 标记）——声明本身是公开事实，
+                # 舞台与事件流因此照旧是"于吉把牌当【无中生有】扣置"这条故事线；解不出
+                # 声明的牌型（旧形态记录）时退回"只给张数"。
                 raw["card_count"] = len(raw["cards"])
-                raw["cards"] = []
+                lookup = _card_lookup(state) if state is not None else None
+                shown = [
+                    hidden_guohuo_payload(
+                        int(card["card_id"]), concealed[int(card["card_id"])], lookup=lookup
+                    )
+                    if concealed.get(int(card["card_id"]))
+                    else None
+                    for card in raw["cards"]
+                    if isinstance(card, dict) and "card_id" in card
+                ]
+                raw["cards"] = [entry for entry in shown if entry is not None]
             elif not cards_visible(raw, viewer):
                 # M5-09c：隐藏区的牌面不下发，只给张数——界面 / 事件流仍能说"移动了几张"。
                 raw["card_count"] = len(raw["cards"])

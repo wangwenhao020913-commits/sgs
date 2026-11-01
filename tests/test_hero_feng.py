@@ -732,16 +732,26 @@ def test_the_concealed_card_keeps_its_face_secret_until_the_reveal() -> None:
         and [card.card_id for card in record.cards] == [black_slash]
     ]
     assert moves, "扣置这一步确实有一条 card_move"
-    payload = visible_record(moves[0], viewer=0, concealed=concealed)
-    assert payload is not None
-    assert payload["cards"] == [] and payload["card_count"] == 1, (
-        "事件流里对别人不给牌面，只给张数"
-    )
-    own = visible_record(moves[0], viewer=1, concealed=concealed)
-    assert own is not None
-    assert own["cards"] == [] and own["card_count"] == 1, (
-        "记录流同一份口径：扣置者自己也只拿到张数（牌面在验明之后才公开）"
-    )
+    def record_face(viewer: int) -> dict:
+        """记录流里那条扣置移动对 ``viewer`` 下发的牌面（读真实产出路径 `visible_record`）。"""
+        payload = visible_record(
+            moves[0], viewer=viewer, concealed=concealed, state=state
+        )
+        assert payload is not None and payload["cards"], (
+            f"查看者 {viewer}：扣置那条应当画**声明的牌**"
+        )
+        return payload["cards"][0]
+
+    for viewer, who in ((0, "别人"), (1, "扣置者自己")):
+        face = record_face(viewer)
+        assert face["concealed"] is True, f"{who}：声明的牌带只读标记"
+        assert face["display_name"] == "闪", f"{who}：画的是**声明的牌名**"
+        assert face["suit"] is None and face["rank"] is None, (
+            f"{who}：花色 / 点数依旧是秘密（♥ 判据决定作不作废）"
+        )
+        assert face["type"] == "dodge" and face["type"] != "slash", (
+            f"{who}：不能把源牌的牌型（♣【杀】）画出来"
+        )
 
 
 def test_guohuo_voided_borrowed_sword_never_opens_the_holder_window() -> None:
@@ -4181,8 +4191,15 @@ def test_a_no_target_declaration_never_ships_the_source_card_in_the_record_windo
         and record.get("reason") == "LOSE"
     ]
     assert kouchu, f"扣置那条 card_move 应当在本窗口里：{payload['records']}"
-    assert kouchu[0]["cards"] == [] and kouchu[0]["card_count"] == 1, (
-        "验明之前扣置的那张牌，记录流只给张数（否则舞台会把它画成源牌）"
+    assert kouchu[0]["card_count"] == 1
+    shown = kouchu[0]["cards"]
+    assert len(shown) == 1, f"验收方要画的是**声明的牌**，实得 {shown}"
+    assert shown[0]["card_id"] == slash, "牌位仍是扣置的那一张（舞台按 card_id 认项）"
+    assert shown[0]["concealed"] is True
+    assert shown[0]["display_name"] == "无中生有", "画的是**声明的牌名**"
+    assert shown[0]["type"] == "ex_nihilo", "不是源牌的牌型（否则等于当场亮牌）"
+    assert shown[0]["suit"] is None and shown[0]["rank"] is None, (
+        "花色 / 点数同样是秘密（♥ 判据决定作不作废）"
     )
     reveal = [
         record

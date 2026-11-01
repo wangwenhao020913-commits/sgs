@@ -51,6 +51,7 @@ __all__ = [
     "decorate_pending",
     "decorate_snapshot",
     "hero_in_tables",
+    "hidden_guohuo_payload",
     "prompt_display",
     "seat_display",
     "suit_labels",
@@ -185,7 +186,7 @@ def card_payload(
     return payload
 
 
-def _hidden_guohuo_payload(
+def hidden_guohuo_payload(
     card_id: int, declared_type: str, *, lookup: Mapping[int, CardRef] | None
 ) -> dict[str, Any]:
     """**未验明**的扣置牌要画的牌面：只给"声明的牌名"，花色 / 点数一概不给。
@@ -230,7 +231,7 @@ def _processing_display(
     就不换，避免把半组来源错画成产物。
 
     ``concealed``（UI1/UI2 + 用户 2026-11-02 口径）：未验明的【蛊惑】扣置牌**对谁都**
-    画成"声明的牌名"（:func:`_hidden_guohuo_payload`）——**扣置者自己也算"谁"**。
+    画成"声明的牌名"（:func:`hidden_guohuo_payload`）——**扣置者自己也算"谁"**。
     舞台只回答"这张牌现在**对场上公开的是什么**"，答案在验明那一刻变一次，与查看者无关。
     扣置者本来就认识那张牌，画两套只会让同一张牌在舞台与事件流里各说一套。
     """
@@ -264,7 +265,7 @@ def _processing_display(
             card_id = int(card.get("card_id", 0))
             declared = concealed.get(card_id)
             if declared is not None:
-                hidden = _hidden_guohuo_payload(card_id, declared, lookup=lookup)
+                hidden = hidden_guohuo_payload(card_id, declared, lookup=lookup)
         if hidden is not None:
             out.append(hidden)
             continue

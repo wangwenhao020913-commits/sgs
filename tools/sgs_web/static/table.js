@@ -644,10 +644,13 @@ function renderEffectCards(box, items, now = stageNow(), heroNameOf = stageHeroN
   for (const node of ordered) box.appendChild(node);
 }
 
-/** 技能按钮右下角的状态补充（预发动 / 点它转化 / 可发动）；详情模态不读它。 */
+/** 技能按钮右下角的状态补充（预发动 / 点它转化 / 可发动）；详情模态不读它。
+ *
+ * 徽标只描述**这一问给的入口**：有清单 ⇒ 预发动；已翻预发动、这一问给的却是一条普通
+ * 候选（【蛊惑】的提供者入口）⇒ 仍是"可发动"，不冒充清单入口。 */
 function skillBadgeText(skill, manifest, convertCards) {
   if (!skill) return "";
-  if (skill.preactivated || manifest) return " · 预发动";
+  if (manifest) return " · 预发动";
   if (convertCards.length) return " · 点它转化";
   return skill.available ? " · 可发动" : "";
 }
@@ -700,10 +703,14 @@ function skillOffer(pending, skill) {
   const suppressed = skill.state === "suppressed";
   // 失效优先于一切入口：即使这份询问里还留着同名清单，也不显示"预发动"。
   const manifest = suppressed ? null : preactivationManifest(pending, skill.skill_id);
+  // **已翻预发动 ≠ "只能走清单"**：同一条技能可以有第二个入口——【蛊惑】的"需要牌时"
+  // 就是**提供者**：它在【闪】/【无懈可击】/濒死这些窗口里是一条普通的 `ActivateSkill`
+  // 候选（`_guohuo_provider_offers`），与出牌阶段那份清单是两条路。判据只看**这一问给了
+  // 哪种入口**：有清单 ⇒ 复合动作入口；没有清单但服务端说可用（`skill.available` = 这一问
+  // 里有它的骨架候选）⇒ 直提态。故不能按 `preactivated` 一刀切成"只认清单"——那会让
+  // 提供者入口在响应窗口里整片变灰（用户实机报障 2026-11-02）。
   const usable = !suppressed && isOwnPending(pending) && (
-    preactivated
-      ? Boolean(manifest)
-      : (Boolean(skill.available) || convertCards.length > 0 || Boolean(manifest))
+    Boolean(manifest) || Boolean(skill.available) || convertCards.length > 0
   );
   const passive = Boolean(ui.passive);
   // 锁定技也可以是**转化入口**（神关羽【武神】既是锁定技、又是‘只能’型转化）。这类
@@ -799,9 +806,7 @@ function renderSkills(view) {
     const kind = skillKindLabel(skill);
     const badge = offer.suppressed
       ? ""
-      : (preactivated
-        ? (manifest ? " · 预发动" : "")
-        : skillBadgeText(skill, manifest, convertCards));
+      : skillBadgeText(skill, manifest, convertCards);
     // M6 票 19：☆ 技能（觉醒后获得）在按钮名字前标出来；未觉醒时它不在清单里。
     const star = skillStarLabel(skill);
     if (star) button.setAttribute("data-star", "true");

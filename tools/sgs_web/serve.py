@@ -335,7 +335,7 @@ class GameRegistry:
         # 报障 2026-11-02 §2 的残留）。两半同源：栈上还挂着的（画"声明的牌名"）+ 本窗口
         # 里先进处理区、后被亮出的（只掩码）。
         concealed = {
-            **concealed_by_later_reveal(window),
+            **concealed_by_later_reveal(window, session.engine.state),
             **concealed_guohuo_cards(session.engine),
         }
         records = [
