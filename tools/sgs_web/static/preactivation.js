@@ -95,6 +95,13 @@ function prunePreativationAnswers(pa, pending) {
   });
 }
 
+/** 选项步超过这么多项就**多列紧凑铺**（票 04 复验：蛊惑的牌名有十几个，单列要滚动）。
+ *
+ *  阈值只与**候选个数**有关，不认技能名：少选项的技能（三两下就点完的那种）保持原来的
+ *  单列按钮形态，只有"长清单"才换成网格。
+ */
+const OPTION_COMPACT_MIN = 6;
+
 /* ------------------------------------------------------------ 预发动（W4-1） */
 
 /** 一条技能此刻的预发动清单：主动入口 = `pending.preactivations[skill_id]`，
@@ -633,6 +640,10 @@ function renderPreativation(pending) {
   const pa = state.preactivation;
   const box = $("t-options");
   box.innerHTML = "";
+  // 选项很多时改用**紧凑多列**（票 04 的复验意见）：蛊惑的牌名弹窗有十几个名字，单列
+  // 排下来要滚动才找得着。判据只看**候选个数**（不认技能名）：超过这个数就多列铺，
+  // 少的时候保持原来的单列按钮。子节点形状不变（仍是 `#t-options` 的直接子节点）。
+  box.classList.remove("opt-compact");
   const hint = $("t-target-hint");
   if (hint) hint.textContent = `${preactivationProductHint(pa, pending)}${preactivationStepHint(pa, pending)}`;
   const row = document.createElement("div");
@@ -658,6 +669,7 @@ function renderPreativation(pending) {
   if (kind === "option") {
     const options = preactivationOptions(pa, pa.cursor) || [];
     const blocked = preactivationDisabled(pa, pa.cursor) || [];
+    box.classList.toggle("opt-compact", options.length > OPTION_COMPACT_MIN);
     for (const option of options) {
       const grayed = blocked.includes(String(option));
       const button = document.createElement("button");

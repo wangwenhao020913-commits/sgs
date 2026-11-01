@@ -46,7 +46,16 @@ from sgs.skills import (
     lord_skill_allowed,
     resolve_instances,
 )
-from sgs.state import CardRef, FrameKind, Query, Reforge, WindowCause, Zone, project
+from sgs.state import (
+    CardRef,
+    FrameKind,
+    MoveReason,
+    Query,
+    Reforge,
+    WindowCause,
+    Zone,
+    project,
+)
 from sgs.timing import Timing
 
 from .descriptions import skill_description
@@ -69,6 +78,7 @@ __all__ = [
     "HARVEST_REQUIREMENT",
     "build_skills",
     "candidate_index",
+    "concealed_by_later_reveal",
     "concealed_guohuo_cards",
     "decorate_records_card_tags",
     "harvest_state",
@@ -146,6 +156,60 @@ def concealed_guohuo_cards(engine: Any) -> dict[int, str]:
         if data.get("guohuo_revealed"):
             continue
         out[int(source)] = str(declared)
+    return out
+
+
+def concealed_by_later_reveal(records: Iterable[object]) -> dict[int, str]:
+    """**本批记录里**"先进了处理区、之后才被公开亮出"的牌：``源牌 id → ""``。
+
+    :func:`concealed_guohuo_cards` 读的是**当下**的结算栈，只回答"现在还挂在栈上的未验明牌"。
+    但记录流是**回看**：一次**没有目标步**的【蛊惑】（无中生有 / 万箭齐发一类）会在同一批
+    记录里走完"扣置 → 质疑 → 验明 → 结算 / 作废"，等这批记录下发时栈上早已不剩什么，
+    扣置那条 ``card_move`` 于是带着**源牌牌面**直接下发；前端把它画进"处理中"的舞台格，
+    看起来就像"验明之前就亮了源牌"（用户实机报障 2026-11-02 §2 的残留：有目标步时人会停在
+    目标询问上、那一批记录赶在验明之前下发，所以只有"不用指定目标"的牌看得出来）。
+
+    这里按**记录自己的次序**回答同一件事：先进处理区、后被亮出的那张牌，在那条搬牌记录里
+    就是"还没验明"的。判定不认技能 id（任何"处理区里的牌被公开亮出"都符合），故不会给别
+    的技能添特例。
+
+    值的约定：``""``（**声明牌型未知**）——这批记录里没有声明牌名（它在询问载荷里，不进记录
+    流）；画家那条路（:func:`sgs_web.display._processing_display`）只吃
+    :func:`concealed_guohuo_cards` 的带牌型结果，掩码这条路只看"在不在表里"。
+    """
+    revealed_at: dict[int, int] = {}
+    for record in records:
+        if getattr(record, "delta_type", None) != "card_reveal":
+            continue
+        card = getattr(record, "card", None)
+        seq = getattr(record, "seq", None)
+        if card is None or not isinstance(seq, int):
+            continue
+        revealed_at[int(card.card_id)] = seq
+    out: dict[int, str] = {}
+    for record in records:
+        if getattr(record, "delta_type", None) != "card_move":
+            continue
+        # 只认**扣置**那一串形状：手牌 → 处理区、原因 ``LOSE``。普通使用是 ``USE``、
+        # 判定 / 摸牌走的是别的区域 —— 它们都是公开事实，不能被这条掩码顺手抹掉
+        # （`tests/test_m5_no_leak.py` 的逐类判据会红）。
+        from_zone = getattr(record, "from_zone", None)
+        to_zone = getattr(record, "to_zone", None)
+        seq = getattr(record, "seq", None)
+        if (
+            from_zone is None
+            or from_zone.zone is not Zone.HAND
+            or to_zone is None
+            or to_zone.zone is not Zone.PROCESSING
+            or getattr(record, "reason", None) is not MoveReason.LOSE
+            or not isinstance(seq, int)
+        ):
+            continue
+        for card in getattr(record, "cards", ()) or ():
+            card_id = int(card.card_id)
+            revealed = revealed_at.get(card_id)
+            if revealed is not None and seq < revealed:
+                out[card_id] = ""
     return out
 
 

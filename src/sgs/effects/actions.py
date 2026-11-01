@@ -910,7 +910,7 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
     ]
     actions.extend(_transformed_peaches(state, seat, dying, answers_seq))
     # "需要牌时"的**提供者**（票 03）：同【闪】窗口那一趟整段追加——【蛊惑】扣置一张手牌
-    # 当【桃】（无人质疑 / ♥ 才是，否则作废）。它不是转化技：受理时**已经**验明完毕，故不进
+    # 当【桃】（无人质疑 /（真 且 ♥）才是，否则作废）。它不是转化技：受理时**已经**验明完毕，故不进
     # ``transform_preactivations`` 那条"确认即定死"的通道。
     actions = list(
         apply_modifiers(

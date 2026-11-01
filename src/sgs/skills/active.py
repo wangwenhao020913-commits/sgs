@@ -3217,18 +3217,23 @@ def _guohuo_truth(state: GameState, frame: Any) -> bool:
 
 
 def _guohuo_live(state: GameState, frame: Any) -> bool:
-    """这张被质疑的牌**还要不要结算**：**无人质疑 或 ♥️** ⇒ 依旧进行结算；否则作废。
+    """这张被质疑的牌**还要不要结算**：**无人质疑 或（真 且 ♥️）** ⇒ 结算；否则作废。
 
-    牌面原文（用户 2026-11-02 的读法）："若有其他角色质疑则翻开此牌且**此牌作废**，若为：
-    假，质疑者各摸一张牌；真，质疑者各失去 1 点体力，然后若被质疑的牌的花色为♥️，此牌依旧
-    进行结算。"⇒ 作废的**前提**是有人质疑，真 / 假只决定**质疑者的惩罚**；"依旧结算"只在
-    ♥️ 时才成立。故判据是"没人质疑"而不是"这张牌为真"——**真但非♥、且有人质疑 ⇒ 照样作废**。
+    牌面原文："若有其他角色质疑则翻开此牌且**此牌作废**，若为：假，质疑者各摸一张牌；真，
+    质疑者各失去 1 点体力，然后若被质疑的牌的花色为♥️，此牌依旧进行结算。"
+
+    用户 2026-11-02 的读法（`04` 票 §1 的五行真值表；第四行 = 假 + ♥ + 有人质疑 ⇒ **作废**，
+    2026-11-02 实机复验时纠正）：**有人质疑 ⇒ 作废**；真 / 假只决定**质疑者的惩罚**（真 ⇒
+    各失 1 点、假 ⇒ 各摸 1 张）；"依旧进行结算"是**真**这张牌在♥️ 时的**追加**豁免 ⇒
+    **假牌即便♥️ 也作废**。没人质疑时没有"翻开且作废"那一步，照常结算（与花色、真假无关）。
 
     ♥ 判据读**来源实体牌**的花色（G6）：声明成【火攻】的红桃牌，看的是那张红桃实体牌，
     不是产物的花色。
     """
+    if not frame.data.get(_GUOHUO_YES):
+        return True
     source = state.card(int(frame.data[_GUOHUO_SOURCE]))
-    return not frame.data.get(_GUOHUO_YES) or source.suit == Suit.HEART.value
+    return _guohuo_truth(state, frame) and source.suit == Suit.HEART.value
 
 
 def _guohuo_doubt_round(host: Any, frame: Any, owner: int) -> tuple[Control, bool]:
@@ -3516,7 +3521,7 @@ def _guohuo_settle(host: Any, frame: Any, owner: int) -> Control:
         return None
     frame.data[_GUOHUO_STAGE] = "settle"
 
-    # ---- 段 8：无人质疑 / ♥️ ⇒ 依旧结算；否则从效果区作废进弃牌堆 ---------------
+    # ---- 段 8：无人质疑 /（真 且 ♥️）⇒ 依旧结算；否则从效果区作废进弃牌堆 ---------
     if frame.data.get(_GUOHUO_SETTLED):
         return None
     frame.data[_GUOHUO_SETTLED] = True
@@ -3643,7 +3648,7 @@ def guohuo_provider(host: Any, frame: Any, actor: int, timing: Timing) -> Contro
         _give_up()
         return None
 
-    # ---- 段 7：无人质疑 / ♥️ ⇒ 把产物交给窗口；否则作废（从未使用 / 打出）----
+    # ---- 段 7：无人质疑 /（真 且 ♥️）⇒ 把产物交给窗口；否则作废（未使用 / 打出）--
     live = _guohuo_live(state, frame)
     frame.data[PROVIDER_SATISFIED_KEY] = live
     if not live:
@@ -3841,7 +3846,7 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         requirement=(
             "扣置一张手牌，将此牌当任意一张基本牌或普通锦囊牌使用；"
             "其他角色可依次质疑：真则质疑者各失去 1 点体力，假则各摸一张牌，"
-            "然后若此牌为♥️则照常结算，否则此牌作废"
+            "然后若此牌为真且为♥️则照常结算，否则此牌作废"
         ),
         # 提供者入口的候选（第二条 `CANDIDATES` 回调，与出牌阶段那条并存：两条读不同
         # 的 `ctx.scope`，互不打扰）。provider 回调由 `catalog.py` 末尾登记进 `PROVIDERS`。

@@ -358,8 +358,12 @@ def test_guohuo_undoubted_fake_card_still_resolves() -> None:
     assert state.card(diamond_dodge).card_id in state.discard, "用完之后来源牌照常进弃牌堆"
 
 
-def test_guohuo_heart_card_still_resolves_even_when_the_claim_is_false() -> None:
-    """♥️ ⇒ 无论真假都继续结算（用户裁定：♥️ 不看真假）。"""
+def test_guohuo_fake_heart_card_is_voided_when_someone_doubts() -> None:
+    """假 + ♥️ + **有人质疑** ⇒ **作废**（♥️ 只救"真"牌）。
+
+    牌面那句"然后若被质疑的牌的花色为♥️，此牌依旧进行结算"是**真**这张牌的追加豁免 ——
+    假牌即便♥️ 也照样作废（`04` 票 §1 五行真值表的第四行，用户 2026-11-02 实机复验时纠正）。
+    """
     heart_slash = next(
         index
         for index, card in enumerate(PACK.deck.cards)
@@ -368,15 +372,20 @@ def test_guohuo_heart_card_still_resolves_even_when_the_claim_is_false() -> None
     engine, state, _ = _run_guohuo(
         hand=(heart_slash,), declare="万箭齐发", doubters=(True, False)
     )
-    # ♥️ 假牌依旧结算：座位 1 挨了 1 点（万箭齐发）
-    assert state.player(1).hp < 4, "♥️ 的假牌依旧结算（【万箭齐发】生效）"
-    assert not [
-        record
-        for record in _guohuo_deltas(engine, "card_move")
-        if record.reason is MoveReason.DISCARD
-        and record.from_zone.zone is Zone.PROCESSING
-        and [card.card_id for card in record.cards] == [heart_slash]
-    ], "♥️ 的牌不作废"
+    assert state.player(1).hp == 4, "假牌作废 ⇒ 【万箭齐发】一次都没落地"
+    assert _moves(
+        engine,
+        reason=MoveReason.DRAW,
+        target_zone=Zone.HAND,
+        card=None,
+    ), "假 ⇒ 质疑者各摸一张（作废不等于无代价）"
+    assert _moves(
+        engine,
+        reason=MoveReason.DISCARD,
+        source_zone=Zone.PROCESSING,
+        card=heart_slash,
+    ), "♥️ 的假牌同样要从处理区作废进弃牌堆"
+    assert _pushed(engine, FrameKind.USE) == 0, "作废 = 从未使用（不产生 USE 帧）"
 
 
 def test_guohuo_is_not_offered_without_hand_cards() -> None:
@@ -1133,18 +1142,29 @@ def test_guohuo_undoubted_non_heart_card_still_answers_the_dodge_window() -> Non
     )
 
 
-def test_guohuo_heart_card_still_answers_the_dodge_window() -> None:
-    """♥️ + 假 ⇒ 依旧进行结算：这张牌照常当【闪】用，【杀】被抵消。"""
+def test_guohuo_fake_heart_card_does_not_answer_the_dodge_window() -> None:
+    """♥️ + 假 + **有人质疑** ⇒ 作废：这张牌**没交出去**，【杀】照常结算。
+
+    "♥️ 依旧结算"只救**真**牌（`04` 票 §1 的五行真值表第四行）；假牌作废后这次响应
+    没发生，窗口继续问真牌。
+    """
     heart_peach = _card(type_id="peach", suit="heart")
     engine, state = _run_provider(
         trigger_type="slash", hand=(heart_peach,), doubters=(True, False)
     )
 
     assert state.player(2).hp == 4, "假 ⇒ 质疑者摸一张"
-    assert state.player(1).hp == 3, "♥️ ⇒ 依旧结算，【杀】被抵消"
-    assert not _moves(
-        engine, reason=MoveReason.DISCARD, source_zone=Zone.PROCESSING, card=heart_peach
-    ), "♥️ 的牌不作废"
+    assert _moves(
+        engine, reason=MoveReason.DRAW, target_zone=Zone.HAND, card=None
+    ), "假 ⇒ 质疑者各摸一张牌"
+    assert _moves(
+        engine,
+        reason=MoveReason.DISCARD,
+        source_zone=Zone.PROCESSING,
+        card=heart_peach,
+    ), "♥️ 的假牌同样作废进弃牌堆"
+    assert _pushed(engine, FrameKind.USE) == 1, "作废 = 从未使用（只有【杀】自己那一次使用）"
+    assert state.player(1).hp == 2, "作废 ⇒ 这次响应没发生，【杀】照常结算（3 → 2）"
 
 
 def test_guohuo_asks_the_doubts_from_the_next_seat_counter_clockwise() -> None:
@@ -1681,8 +1701,9 @@ def test_the_ai_skips_the_grayed_names_in_the_play_phase_manifest() -> None:
 def test_the_ai_uses_guohuo_to_save_itself_in_the_peach_window() -> None:
     """AI 面（`ai-adaptation.md` §1 第 2 条）：启发式要能给**提供者候选**打分。
 
-    手里只有一张♥【杀】（当【桃】是假牌，但♥ 依旧结算）⇒ 真【桃】候选一条都没有，能自救的
-    只有【蛊惑】。``_score_peach`` 对 ``ActivateSkill`` 与真【桃】同价（``_peach_save_value``），
+    手里只有一张♥【杀】（当【桃】是假牌）⇒ 真【桃】候选一条都没有，能自救的只有【蛊惑】。
+    本局面**没有人质疑**（`_WindowSeat` 缺省相信）⇒ 假牌也照常结算（五行真值表第一格）；
+    若有人质疑，假 + ♥ 现在同样作废（第四格，见 `::test_guohuo_fake_heart_card_is_voided_when_someone_doubts`）。``_score_peach`` 对 ``ActivateSkill`` 与真【桃】同价（``_peach_save_value``），
     故 AI 必须选它；打分退化成 0 的实现在这里会与「放弃」打平、把于吉送死。
     """
     heart_slash = _card(type_id="slash", suit="heart")
@@ -4110,3 +4131,64 @@ def test_shensu_hero_is_in_the_default_pool():
     assert hero.kingdom.value == "wei"
     assert hero.hp_max == 4
     assert [skill.id for skill in hero.skills] == ["shensu"]
+
+
+def test_a_no_target_declaration_never_ships_the_source_card_in_the_record_window() -> None:
+    """②（用户 2026-11-02 实机复验）：**不用指定目标**的声明，记录流也不许带源牌牌面。
+
+    【蛊惑】扣置的那张牌在验明之前只有"声明的牌名"是公开的。有目标步时，人会被目标询问
+    挡住、那一批记录赶在验明之前下发，掩码按**当下的结算栈**算就够了；而**无目标**的声明
+    （无中生有 / 万箭齐发一类）在同一批记录里走完"扣置 → 质疑 → 验明 → 结算 / 作废"——
+    等这批记录下发时栈上早已空了，只看栈就会把扣置那条 `card_move` 连同**源牌牌面**发出去，
+    前端把它画进"处理中"的舞台格（用户看到的就是"验明之前亮了源牌"）。
+
+    读的是**真实产出路径**：`GameRegistry.view()` —— 它自己算窗口、自己算掩码。
+    """
+    from sgs_web.serve import GameRegistry
+    from sgs_web.session import Session
+
+    slash = _card(type_id="slash", suit="club")
+    filler = _fillers(3, exclude=frozenset({slash}))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="yuji_mobile", hand=(slash,), hp=3, hp_max=3),
+            SeatSpec(hand=(filler[0],)),
+            SeatSpec(hand=(filler[1],)),
+            SeatSpec(hand=(filler[2],)),
+        ],
+        deck=deck_excluding(PACK, slash, *filler),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = _park_at_guohuo_play_phase(state)
+    session = Session(
+        pack=PACK, seed=7, ai="random", timeout_seconds=None, player_count=4
+    )
+    session.engine = engine
+    registry = GameRegistry(runs_dir="/tmp/unused")
+
+    cursor = registry.view(session, after=-1, logs_after=0)["cursor"]
+    session.submit_answer(_guohuo_activation(engine.pending, declare="无中生有"))
+    payload = registry.view(session, after=cursor, logs_after=0)
+
+    kouchu = [
+        record
+        for record in payload["records"]
+        if record.get("kind") == "delta"
+        and record.get("delta_type") == "card_move"
+        and record.get("to_zone", {}).get("zone") == "processing"
+        and record.get("reason") == "LOSE"
+    ]
+    assert kouchu, f"扣置那条 card_move 应当在本窗口里：{payload['records']}"
+    assert kouchu[0]["cards"] == [] and kouchu[0]["card_count"] == 1, (
+        "验明之前扣置的那张牌，记录流只给张数（否则舞台会把它画成源牌）"
+    )
+    reveal = [
+        record
+        for record in payload["records"]
+        if record.get("kind") == "delta" and record.get("delta_type") == "card_reveal"
+    ]
+    assert reveal and reveal[0]["card"]["card_id"] == slash, (
+        "同一批记录里紧接着就是公开亮出——那一张从此是公开事实，照常下发"
+    )

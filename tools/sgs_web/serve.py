@@ -49,6 +49,7 @@ from sgs.engine import IllegalActionError  # noqa: E402
 from sgs_web.narrative import narrative_after  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
+    concealed_by_later_reveal,
     concealed_guohuo_cards,
     decorate_records_card_tags,
     live_tag_deltas_after,
@@ -328,7 +329,15 @@ class GameRegistry:
         # 应答者 = `answers_seq` 指向的那次询问的 actor；映射取**全量**记录（询问可能
         # 早于 `after` 游标），展开只对窗口里的记录做。
         query_actors = query_actor_map(all_records)
-        concealed = concealed_guohuo_cards(session.engine)
+        # 掩码按"**这批记录里**谁在验明之前就在处理区"算，而不是只按当下的结算栈算：
+        # 一次没有目标步的【蛊惑】会在同一批记录里走完扣置 → 验明，等这批下发时栈上已经
+        # 不剩什么，只看栈就会把扣置那条搬牌记录连同**源牌牌面**一起发出去（用户实机
+        # 报障 2026-11-02 §2 的残留）。两半同源：栈上还挂着的（画"声明的牌名"）+ 本窗口
+        # 里先进处理区、后被亮出的（只掩码）。
+        concealed = {
+            **concealed_by_later_reveal(window),
+            **concealed_guohuo_cards(session.engine),
+        }
         records = [
             payload
             for record in window

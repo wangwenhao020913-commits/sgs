@@ -146,7 +146,7 @@ class El {
     this.animations = [];
     this.parentNode = null;
     this.classList = new ClassList(); this._text = ""; this._html = ""; this.value = "";
-    this.hidden = false; this.disabled = false; this.type = ""; this.className = "";
+    this.hidden = false; this.disabled = false; this.type = "";
     // 真 DOM 的 `element.style` 是个可写对象；垫片补一个扁平副本，供断言"写进去了什么"。
     this.style = {};
     // 真 DOM 的 `<input type=checkbox>` 缺省未勾选；前端读的是 `.checked`（不是 `.value`）。
@@ -154,6 +154,11 @@ class El {
     // 滚动容器的三个度量：舞台「粘底」断言直接写这几个数（不读布局）。
     this.scrollTop = 0; this.scrollHeight = 0; this.clientHeight = 0;
   }
+  /** `className` 与 `classList` 在真 DOM 里是**同一个属性**：垫片曾把它做成两个互不相干
+   *  的字段，于是"代码用 `el.className = "opt"`、断言用 `classList.contains("opt")`"这种
+   *  读法在垫片里恒假（真浏览器恒真）。这里补成一对访问器。 */
+  get className() { return Array.from(this.classList.set).join(" "); }
+  set className(v) { this.classList.set = new Set(String(v).split(/\s+/).filter(Boolean)); }
   /** 活的 HTMLCollection 形状视图（真 DOM 的 `element.children`）。 */
   get children() { return this._childrenView; }
   get textContent() { return this._text + this._children.map((c) => c.textContent || c.text()).join(""); }
@@ -2624,6 +2629,9 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿U4 没被置灰的那个照常可选",
     JSON.stringify(ui.state.preactivation.answers[1].values) === '["杀"]',
     JSON.stringify(ui.state.preactivation.answers[1]));
+  check("㉿U4b 选项少的清单**不**走紧凑多列（仍是单列按钮）",
+    $("t-options").classList.contains("opt-compact") === false,
+    `class="${$("t-options").className}"`);
   const action = ui.buildAction();
   check("㉿U5 提交载荷里带的是可用的那个名字",
     !!action && JSON.stringify(action.choices) === '["杀"]',
@@ -2635,6 +2643,50 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿U6 已选里的置灰项被剔掉（宽松保留也认 disabled）",
     JSON.stringify(ui.state.preactivation.answers[1].values) === "[]",
     JSON.stringify(ui.state.preactivation.answers[1]));
+
+  // 长清单（13 个牌名，与实机同形）⇒ 紧凑多列，且**子节点形状不变**（按钮仍是
+  // `#t-options` 的直接子节点，只有布局换成分行等宽的格子）。
+  const manyNames = ["桃园结义", "万箭齐发", "闪", "桃", "五谷丰登", "无中生有", "杀",
+    "过河拆桥", "决斗", "顺手牵羊", "南蛮入侵", "无懈可击", "借刀杀人"];
+  const longView = synthView({
+    kind: "PLAY_PHASE", actor: 0, seq: 904,
+    prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+    legal_actions: [{ kind: "EndPhase", answers_seq: 904 }],
+    preactivations: {
+      "hero.yuji_mobile.guohuo": [
+        { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+          pool: [{ when: [], options: ["41"] }], wording: "扣置一张手牌" },
+        { name: "name", zones: [], min: 1, max: 1, order: 1,
+          pool: [{ when: [], options: manyNames, disabled: ["闪", "桃"] }],
+          wording: "声明一种牌名" },
+      ],
+    },
+    preactivation: [],
+    candidate_index: {}, virtual_index: {}, option_seats: {}, context: null,
+  });
+  longView.heroes = { 0: "yuji_mobile", 1: "guanyu" };
+  longView.snapshot.self_hand = [handCard];
+  longView.skills = view.skills;
+  ui.state.view = longView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(longView);
+  const longButton = Array.from($("t-skills").children).find(
+    (b) => b.getAttribute("data-skill-id") === "hero.yuji_mobile.guohuo");
+  (longButton.listeners.click || []).forEach((fn) => fn({ target: longButton }));
+  (handChip(0).listeners.click || []).forEach((fn) => fn({ target: handChip(0) }));
+  const longNext = Array.from($("t-options").children).find((b) => b.textContent === "下一步");
+  (longNext.listeners.click || []).forEach((fn) => fn({ target: longNext }));
+  const optionNodes = Array.from($("t-options").children).filter(
+    (node) => manyNames.includes(node.textContent));
+  check("㉿U7 长清单（13 个牌名）改**紧凑多列**，按钮仍是直接子节点",
+    $("t-options").classList.contains("opt-compact")
+      && optionNodes.length === manyNames.length,
+    `classes=${JSON.stringify(Array.from($("t-options").classList.set))} 选项数=${optionNodes.length}`);
+  check("㉿U8 置灰在紧凑布局里同样成立（闪 / 桃仍是 .dis + disabled）",
+    optionNodes.filter((node) => node.classList.contains("dis")).length === 2
+      && optionNodes.filter((node) => node.disabled === true).length === 2,
+    JSON.stringify(optionNodes.map((node) => [node.textContent, node.disabled])));
 }
 
 /* ============ 票 01（合成局面）：【离间】流水线 —— 逐步文案 + 取消送出 Pass ============
