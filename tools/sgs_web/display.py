@@ -190,8 +190,9 @@ def _hidden_guohuo_payload(
 ) -> dict[str, Any]:
     """**未验明**的扣置牌要画的牌面：只给"声明的牌名"，花色 / 点数一概不给。
 
-    【蛊惑】的扣置牌在验明之前是哪一张只有扣置者知道（详见
-    :func:`sgs_web.projection._concealed_guohuo`）。这里把它画成一张"**待验明**"的虚拟牌：
+    【蛊惑】的扣置牌在验明之前是哪一张还不是公开事实（详见
+    :func:`sgs_web.projection.concealed_guohuo_cards`）。这里把它画成一张"**待验明**"的
+    虚拟牌：
 
     - 牌名 / 属性 / 描述都取**声明的那张牌**——声明本身是公开事实（`card_display` 也只按
       ``type`` 算这三样），与真牌同一条展示契约；
@@ -218,8 +219,7 @@ def _processing_display(
     *,
     lookup: Mapping[int, CardRef] | None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef],
-    concealed: Mapping[int, tuple[str, int]] | None = None,
-    viewer: int | None = None,
+    concealed: Mapping[int, str] | None = None,
 ) -> list[Any]:
     """处理区要画的牌：**正在结算的虚拟 / 转化牌**顶掉它们的来源实体牌。
 
@@ -228,6 +228,11 @@ def _processing_display(
     ``virtual_sources`` 把来源整组换成那张虚拟牌。纯虚拟牌没有来源、从不进区域，
     在它结算期间直接追加进处理区。同一个来源组只换一次；来源不齐（已有一张离场）
     就不换，避免把半组来源错画成产物。
+
+    ``concealed``（UI1/UI2 + 用户 2026-11-02 口径）：未验明的【蛊惑】扣置牌**对谁都**
+    画成"声明的牌名"（:func:`_hidden_guohuo_payload`）——**扣置者自己也算"谁"**。
+    舞台只回答"这张牌现在**对场上公开的是什么**"，答案在验明那一刻变一次，与查看者无关。
+    扣置者本来就认识那张牌，画两套只会让同一张牌在舞台与事件流里各说一套。
     """
     if not isinstance(cards, list):
         return cards
@@ -257,9 +262,9 @@ def _processing_display(
         hidden = None
         if isinstance(card, dict) and concealed:
             card_id = int(card.get("card_id", 0))
-            entry = concealed.get(card_id)
-            if entry is not None and viewer is not None and int(viewer) != entry[1]:
-                hidden = _hidden_guohuo_payload(card_id, entry[0], lookup=lookup)
+            declared = concealed.get(card_id)
+            if declared is not None:
+                hidden = _hidden_guohuo_payload(card_id, declared, lookup=lookup)
         if hidden is not None:
             out.append(hidden)
             continue
@@ -460,8 +465,7 @@ def decorate_snapshot(
     lookup: Mapping[int, CardRef] | None = None,
     heroes: Sequence[HeroTable] | None = None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
-    concealed: Mapping[int, tuple[str, int]] | None = None,
-    viewer: int | None = None,
+    concealed: Mapping[int, str] | None = None,
 ) -> dict[str, Any]:
     """给一份 ``PlayerView`` 的 JSON 形态补展示字段（原地改，返回同一个 dict）。
 
@@ -471,6 +475,8 @@ def decorate_snapshot(
     与配将池同源），缺省时名称留空、界面退回 id。
     ``virtual_cards`` 是**当前正在结算**的虚拟 / 转化牌（U1-07）：``processing``
     按它换成产物（见 :func:`_processing_display`），其余区域只补展示字段。
+    ``concealed`` 是**未验明**的【蛊惑】扣置牌（:func:`sgs_web.projection.concealed_guohuo_cards`）：
+    ``processing`` 里那几张改画"声明的牌名"（对谁都不给源牌牌面）。
     """
     for key in ("self_hand", "discard"):
         payload[key] = _extend_card_list(payload.get(key), lookup=lookup)
@@ -479,7 +485,6 @@ def decorate_snapshot(
         lookup=lookup,
         virtual_cards=virtual_cards,
         concealed=concealed,
-        viewer=viewer,
     )
     seated = payload.get("players")
     if isinstance(seated, list):
@@ -499,8 +504,7 @@ def decorate_pending(
     lookup: Mapping[int, CardRef] | None = None,
     heroes: Sequence[HeroTable] | None = None,
     virtual_cards: tuple[CardRef, ...] | list[CardRef] = (),
-    concealed: Mapping[int, tuple[str, int]] | None = None,
-    viewer: int | None = None,
+    concealed: Mapping[int, str] | None = None,
 ) -> dict[str, Any]:
     """给一份 ``pending_payload`` 补展示字段（询问里的所有牌面 + 内嵌视角 + 提示条）。"""
     for entry in (payload.get("candidate_index") or {}).values():
@@ -523,7 +527,6 @@ def decorate_pending(
             heroes=heroes,
             virtual_cards=virtual_cards,
             concealed=concealed,
-            viewer=viewer,
         )
     # 没有候选是引擎不该出现的状态；显式给 None，不让展示派生抛异常，也不伪造默认动作。
     payload["prompt_display"] = prompt_display(query) if query.legal_actions else None

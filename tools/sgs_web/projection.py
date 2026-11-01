@@ -118,44 +118,52 @@ def _active_virtual_cards(engine: Any) -> tuple[Any, ...]:
     return tuple(out)
 
 
-def concealed_guohuo_cards(engine: Any) -> dict[int, tuple[str, int]]:
-    """**未验明**的【蛊惑】扣置牌：``源牌 id → (声明的牌型 id, 扣置者座位)``。
+def concealed_guohuo_cards(engine: Any) -> dict[int, str]:
+    """**未验明**的【蛊惑】扣置牌：``源牌 id → 声明的牌型 id``。
 
     【蛊惑】的扣置是"**背面朝上**放进处理区"的：验明（``Engine.reveal_card``）之前，
-    这张牌是哪张只有扣置者知道。而处理区是**全局公开区**（`sgs_web/visibility.py` 的
-    区域判据），不特别处理就会把源牌牌面下发给所有人 —— 那等于当场告诉所有人真假
+    这张牌是哪张**还不属于公开事实**。而处理区是**全局公开区**（`sgs_web/visibility.py`
+    的区域判据），不特别处理就会把源牌牌面下发给所有人 —— 那等于当场告诉所有人真假
     （用户实机报障 2026-11-02）。故展示层读结算栈上技能写下的公开事实：
 
-    - ``guohuo_source`` / ``guohuo_owner``（扣置段）：哪张牌、谁扣的；
+    - ``guohuo_source``（扣置段）：处理区里那一张是哪张实体牌；
     - ``guohuo_name``（声明段）：它**被声明成**什么牌 —— 这是可以公开的那部分；
     - ``guohuo_revealed``（验明段）：``True`` = 已经亮过，牌面从此公开。
 
     验明之后本函数不再返回这一张，于是"公开"照旧从 ``card_reveal`` 那一刻开始。
+
+    **"谁扣的"不再是这份判据的输入**（用户 2026-11-02 口径）：舞台与事件流对**任何人**
+    （含扣置者自己）都只公开"声明的牌名"，故这里只回答"这张牌验明了没有、它被声明成
+    什么牌"，没有第二个消费者需要记扣置者的座位。
     """
-    out: dict[int, tuple[str, int]] = {}
+    out: dict[int, str] = {}
     for frame in engine.stack.frames:
         data = frame.data
         source = data.get("guohuo_source")
         declared = data.get("guohuo_name")
-        owner = data.get("guohuo_owner")
-        if source is None or declared is None or owner is None:
+        if source is None or declared is None:
             continue
         if data.get("guohuo_revealed"):
             continue
-        out[int(source)] = (str(declared), int(owner))
+        out[int(source)] = str(declared)
     return out
 
 
 def _concealed_hidden(
     raw: Mapping[str, Any],
     viewer: int | None,
-    concealed: Mapping[int, tuple[str, int]] | None,
+    concealed: Mapping[int, str] | None,
 ) -> bool | None:
     """这条记录里的牌面是不是**未验明的【蛊惑】扣置牌**（是 ⇒ 不下发牌面）。
 
-    只有一条"移动的牌**全部**是未验明的扣置牌、且查看者不是扣置者"时才算隐藏；混合
-    移动（扣置牌与别的牌同批）照旧按区域判据下发——那种批次里本仓还不会出现，宁可
-    少判一档也不改既有口径。``viewer is None``（全知通道）不裁。
+    只有一条"移动的牌**全部**是未验明的扣置牌"时才算隐藏；混合移动（扣置牌与别的牌
+    同批）照旧按区域判据下发——那种批次里本仓还不会出现，宁少判一档也不改既有口径。
+    ``viewer is None``（全知通道）不裁。
+
+    **扣置者自己也不放行**（用户 2026-11-02 口径，与舞台
+    :func:`sgs_web.display._processing_display` 同一处口径）：事件的"这条移动搬的是哪些牌"
+    在验明之前对场上就只公开到张数，扣置者本来就认识那张牌，给他另开一档只会让同一件事
+    在舞台与事件流里各说一套。``viewer`` 仍参与判据，但只回答"是不是全知通道"。
     """
     if not concealed or viewer is None:
         return None
@@ -163,18 +171,13 @@ def _concealed_hidden(
     if not cards:
         return None
     ids: list[int] = []
-    entries: list[tuple[str, int]] = []
     for card in cards:
         if not isinstance(card, dict) or "card_id" not in card:
             return None
         card_id = int(card["card_id"])
-        entry = concealed.get(card_id)
-        if entry is None:
+        if concealed.get(card_id) is None:
             return None
         ids.append(card_id)
-        entries.append(entry)
-    if any(entry[1] == int(viewer) for entry in entries):
-        return None
     return bool(ids)
 
 
@@ -467,7 +470,6 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         # UI1/UI2：验明之前的【蛊惑】扣置牌**不给牌面**（处理区是全局公开区，这里按
         # "它不是公开事实"处理），舞台改画**声明的牌名**。
         concealed=concealed_guohuo_cards(session.engine),
-        viewer=session.human_seat,
     )
     # U1-06：武将详情对**任意**座位可开，故每个座位都带一份只读技能清单
     # （武将牌 + 装备区 + 虚拟装备）。它与顶层的 `skills`（可操作清单）不同源：
@@ -2266,7 +2268,6 @@ def pending_payload(
         concealed=(
             concealed_guohuo_cards(session.engine) if isinstance(session, Session) else None
         ),
-        viewer=viewer,
     )
     if isinstance(session, Session) and same_viewer:
         # 只给**自己的**询问载荷补标签；foreign（409 里附带的别人的现状）连标签也不带。
@@ -2310,7 +2311,7 @@ def visible_record(
     viewer: int | None = None,
     query_actors: Mapping[int, int] | None = None,
     state: Any = None,
-    concealed: Mapping[int, tuple[str, int]] | None = None,
+    concealed: Mapping[int, str] | None = None,
 ) -> dict[str, Any] | None:
     """把一条记录转成**查看者可下发**的 JSON；``None`` = 这一条不下发。
 
@@ -2433,7 +2434,7 @@ def serialize_record(
     viewer: int | None = None,
     query_actors: Mapping[int, int] | None = None,
     state: Any = None,
-    concealed: Mapping[int, tuple[str, int]] | None = None,
+    concealed: Mapping[int, str] | None = None,
 ) -> dict[str, Any] | None:
     """``visible_record`` 的别名，名字更贴近"序列化"的调用点。"""
     return visible_record(

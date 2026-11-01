@@ -100,13 +100,20 @@ class GuohuoScript:
         （``seat:<slash_target>``）。与 `_WindowSeat.designation`（``(持刀者, Bn)`` 一对）
         不是一回事，故不共用名字。"""
         self.options: list[tuple[str, ...]] = []
+        self.activated = False
+        """出牌阶段入口**只用一次**（与 `_WindowSeat` 的"每个入口只用一次"同一套建模）。
+
+        出牌阶段会走完一整个回合：于吉摸牌阶段摸到两张之后手里又有牌，若脚本每次都选
+        【蛊惑】，同一个用例里就会发动第二次、第三次——被测的那一次（第一次）的账目因此
+        被后续结算污染。故发动一次之后一律结束出牌阶段。"""
 
     def respond(self, query):
         kind = getattr(query.kind, "value", query.kind)
         if kind == "PLAY_PHASE":
-            if self.activate:
+            if self.activate and not self.activated:
                 for action in query.legal_actions:
                     if isinstance(action, ActivateSkill) and action.skill_id == GUOHUO:
+                        self.activated = True
                         return action
             return next(a for a in query.legal_actions if isinstance(a, EndPhase))
         if kind == "SELECT_CARDS":
@@ -230,14 +237,71 @@ def test_guohuo_declares_any_normal_trick_and_voids_a_fake_non_heart_card() -> N
 
 
 def test_guohuo_truth_makes_doubters_lose_one_hp_and_still_resolves() -> None:
-    """真（声明的牌名 = 实体牌牌名）⇒ 质疑者各失去 1 点体力，牌照常结算。"""
+    """真 + ♥️ ⇒ 质疑者各失去 1 点体力，牌照常结算——**救它的是♥️，不是"真"**。
+
+    用户 2026-11-02 的读法（`04` 票 §1）：有人质疑 ⇒ "翻开此牌且此牌作废"，真 / 假只决定
+    质疑者的惩罚；然后**只有♥️**才依旧结算。故本用例用的必须是 ♥ 牌：非♥ 的真牌反例见
+    :func:`test_guohuo_truth_but_doubted_non_heart_card_is_voided`。
+    """
     peach = cards_of_type(PACK, "peach")[0]
+    assert PACK.deck.cards[peach].suit.value == "heart", "这条用例的前提是♥️牌"
     engine, state, _ = _run_guohuo(hand=(peach,), declare="桃", doubters=(True, False))
     changes = _guohuo_deltas(engine, "hp_change")
     assert any(change.seat == 1 and change.amount < 0 for change in changes), (
         "真 ⇒ 质疑者失去 1 点体力"
     )
-    assert state.player(0).hp > 2, "真牌照常结算（【桃】把于吉回复）"
+    assert state.player(0).hp > 2, "♥️ ⇒ 牌照常结算（【桃】把于吉回复）"
+
+
+def test_guohuo_truth_but_doubted_non_heart_card_is_voided() -> None:
+    """真 + 有人质疑 + **非♥️** ⇒ 作废：质疑者各失 1 点照记，牌从处理区进弃牌堆。
+
+    牌面读法（用户 2026-11-02）：有人质疑 ⇒ "翻开此牌且此牌作废"，真 / 假只决定质疑者的
+    惩罚；然后**只有♥️**才依旧结算。♣【杀】声明成【杀】是最直白的眼睛用例：牌名**逐字
+    相等**（真），但花色不是♥️ ⇒ 依旧作废，且作废 = **从未使用**（不压 ``USE`` / ``PLAY``
+    帧、目标从未被指定）。
+    """
+    club_slash = _card(type_id="slash", suit="club")
+    engine, state, _ = _run_guohuo(
+        hand=(club_slash,), declare="杀", doubters=(False, True)
+    )
+
+    changes = _guohuo_deltas(engine, "hp_change")
+    assert any(change.seat == 2 and change.amount < 0 for change in changes), (
+        "真 ⇒ 质疑者（座位 2）各失去 1 点体力（作废不等于无代价）"
+    )
+    assert _moves(
+        engine,
+        reason=MoveReason.DISCARD,
+        source_zone=Zone.PROCESSING,
+        card=club_slash,
+    ), "非♥️的被质疑牌要从处理区作废进弃牌堆"
+    assert state.card(club_slash).card_id in state.discard
+    assert _pushed(engine, FrameKind.USE) == 0, "作废 = 从未使用（不产生 USE 帧）"
+    assert _pushed(engine, FrameKind.PLAY) == 0, "也没有打出帧"
+    assert state.player(1).hp == 4, "作废 ⇒ 这张【杀】对目标一次都没落地"
+
+
+def test_guohuo_undoubted_fake_card_still_resolves() -> None:
+    """假 + 非♥️ + **无人质疑** ⇒ 照常结算（"没人质疑"就没有作废那一步）。
+
+    牌面读法（用户 2026-11-02）：作废的前提是"有角色质疑"。♦【闪】声明成【杀】⇒ 牌名
+    不等（假）、花色不是♥️，但只要没人质疑，这张牌就按声明的【杀】结算。
+    """
+    diamond_dodge = _card(type_id="dodge", suit="diamond")
+    engine, state, _ = _run_guohuo(
+        hand=(diamond_dodge,), declare="杀", doubters=(False, False)
+    )
+
+    assert state.player(1).hp == 3, "无人质疑 ⇒ 声明的【杀】照常结算（座位 1 挨 1 点）"
+    assert not _moves(
+        engine,
+        reason=MoveReason.DISCARD,
+        source_zone=Zone.PROCESSING,
+        card=diamond_dodge,
+    ), "无人质疑 ⇒ 不作废"
+    assert _pushed(engine, FrameKind.USE) == 1, "声明的那张【杀】真的用出去了"
+    assert state.card(diamond_dodge).card_id in state.discard, "用完之后来源牌照常进弃牌堆"
 
 
 def test_guohuo_heart_card_still_resolves_even_when_the_claim_is_false() -> None:
@@ -432,12 +496,13 @@ def test_guohuo_designation_step_reaches_the_web_payload() -> None:
 
 
 def test_the_concealed_card_keeps_its_face_secret_until_the_reveal() -> None:
-    """UI1/UI2（用户实机报障 2026-11-02）：**验明之前**，别人拿到的只是"声明的牌名"。
+    """UI1/UI2（用户实机报障 2026-11-02）：**验明之前**，舞台上画的只是"声明的牌名"。
 
     处理区是全局公开区，而【蛊惑】的扣置是"背面朝上"进去的 ⇒ 不特别处理就会当场告诉
     所有人真假。这里跑真引擎到**质疑轮**（验明之前），再把引擎包进真会话，读网页那两份
-    数据：① 快照处理区里那张牌带 ``concealed`` 且花色 / 点数全空、牌名 = 声明的；
-    ② 记录流里"手牌 → 处理区"那条对**别人**只给张数。
+    数据：① 快照处理区里那张牌带 ``concealed`` 且花色 / 点数全空、牌名 = 声明的——
+    **扣置者自己也一样**（用户 2026-11-02 口径："舞台一律画声明的牌，与是谁无关"）；
+    ② 记录流里"手牌 → 处理区"那条对谁（含扣置者）都只给张数。
     """
     from sgs_web.projection import concealed_guohuo_cards, visible_record
     from sgs_web.projection import visible_snapshot
@@ -477,20 +542,30 @@ def test_the_concealed_card_keeps_its_face_secret_until_the_reveal() -> None:
     )
 
     concealed = concealed_guohuo_cards(engine)
-    assert concealed == {black_slash: ("dodge", 1)}, (
-        f"验明之前这张扣置牌应当记为「未验明」：{concealed}"
+    assert concealed == {black_slash: "dodge"}, (
+        f"验明之前这张扣置牌应当记为「未验明」（只公开声明的牌型）：{concealed}"
     )
 
-    shown = [
-        card
-        for card in visible_snapshot(session)["processing"]
-        if card["card_id"] == black_slash
-    ]
-    assert shown and shown[0]["concealed"] is True
-    assert shown[0]["display_name"] == "闪", "舞台画的是**声明的牌名**"
-    assert shown[0]["suit"] is None and shown[0]["rank"] is None, (
-        "花色 / 点数也是秘密（♥ 判据决定这张牌作不作废）"
-    )
+    def processing_of(seat: int) -> dict:
+        """以 ``seat`` 为查看者取一次舞台快照（读**真实产出路径** ``visible_snapshot``）。"""
+        session.human_seat = seat
+        shown = [
+            card
+            for card in visible_snapshot(session)["processing"]
+            if card["card_id"] == black_slash
+        ]
+        assert shown, f"座位 {seat} 的快照处理区里应当有这张扣置牌"
+        return shown[0]
+
+    def assert_declared_card(shown: dict, who: str) -> None:
+        assert shown["concealed"] is True, f"{who}：未验明的扣置牌要带只读标记"
+        assert shown["display_name"] == "闪", f"{who}：舞台画的是**声明的牌名**"
+        assert shown["suit"] is None and shown["rank"] is None, (
+            f"{who}：花色 / 点数也是秘密（♥ 判据决定这张牌作不作废）"
+        )
+
+    assert_declared_card(processing_of(0), "别人")
+    assert_declared_card(processing_of(1), "扣置者自己")
 
     moves = [
         record
@@ -506,8 +581,9 @@ def test_the_concealed_card_keeps_its_face_secret_until_the_reveal() -> None:
         "事件流里对别人不给牌面，只给张数"
     )
     own = visible_record(moves[0], viewer=1, concealed=concealed)
-    assert own is not None and [card["card_id"] for card in own["cards"]] == [black_slash], (
-        "扣置者自己照常看得到那张牌"
+    assert own is not None
+    assert own["cards"] == [] and own["card_count"] == 1, (
+        "记录流同一份口径：扣置者自己也只拿到张数（牌面在验明之后才公开）"
     )
 
 
@@ -811,18 +887,47 @@ def test_guohuo_is_offered_in_all_six_windows_with_a_provider_branch() -> None:
 
 
 def test_guohuo_truth_card_in_the_dodge_window_cancels_the_slash() -> None:
-    """真（声明【闪】= 实体牌就是【闪】）⇒ 质疑者各失 1 点，且【杀】被抵消。"""
+    """真 + ♥️ ⇒ 质疑者各失 1 点，且【杀】被抵消——**救它的是♥️，不是"真"**。
+
+    用户 2026-11-02 的读法（`04` 票 §1）：有人质疑 ⇒ 作废；真 / 假只决定质疑者的惩罚；
+    然后只有♥️ 才依旧结算。故这里显式要求这张【闪】是 ♥ 的；同一条路的非♥ 反例见
+    :func:`test_guohuo_truth_but_doubted_non_heart_dodge_is_voided`。
+    """
     dodge = _card(type_id="dodge")
+    assert PACK.deck.cards[dodge].suit.value == "heart", "这条用例的前提是♥️牌"
     engine, state = _run_provider(
         trigger_type="slash", hand=(dodge,), doubters=(True, False)
     )
 
     assert state.player(2).hp == 3, "真 ⇒ 质疑者各失去 1 点体力"
-    assert state.player(1).hp == 3, "这张【闪】照常结算 ⇒ 【杀】被抵消，于吉不受伤"
+    assert state.player(1).hp == 3, "♥️ ⇒ 这张【闪】照常结算，【杀】被抵消，于吉不受伤"
     assert state.player(3).hp == 4, "相信的人不付代价"
     assert engine.state.card(dodge).card_id in engine.state.discard
     assert _pushed(engine, FrameKind.USE) == 2, "【杀】+ 虚拟【闪】各一次使用"
     assert _pushed(engine, FrameKind.PLAY) == 0, "【闪】走使用链，不是打出"
+
+
+def test_guohuo_truth_but_doubted_non_heart_dodge_is_voided() -> None:
+    """真 + 有人质疑 + **非♥️** ⇒ 作废：这面【闪】没交出去，【杀】照常结算。
+
+    ♦【闪】声明成【闪】是这一格的唯一形态（108 档的黑【闪】不存在、♦ 是非♥️）：
+    牌名**逐字相等**（真 ⇒ 质疑者失去 1 点），但花色不是♥️ ⇒ 作废、**从未使用**。
+    """
+    diamond_dodge = _card(type_id="dodge", suit="diamond")
+    engine, state = _run_provider(
+        trigger_type="slash", hand=(diamond_dodge,), doubters=(True, False)
+    )
+
+    assert state.player(2).hp == 3, "真 ⇒ 质疑者失去 1 点体力（作废不等于无代价）"
+    assert _moves(
+        engine,
+        reason=MoveReason.DISCARD,
+        source_zone=Zone.PROCESSING,
+        card=diamond_dodge,
+    ), "非♥️的被质疑牌要从处理区作废进弃牌堆"
+    assert _pushed(engine, FrameKind.USE) == 1, "作废 = 从未使用（只有【杀】自己那一次使用）"
+    assert _pushed(engine, FrameKind.PLAY) == 0, "也没有打出帧"
+    assert state.player(1).hp == 2, "作废 ⇒ 这次响应没发生，【杀】照常结算（3 → 2）"
 
 
 def test_guohuo_voided_dodge_does_not_cancel_the_slash() -> None:
@@ -873,8 +978,13 @@ def test_guohuo_asks_the_doubts_from_the_next_seat_counter_clockwise() -> None:
 
 
 def test_guohuo_plays_a_slash_in_the_barbarian_window() -> None:
-    """南蛮的响应是**打出**【杀】：真 ⇒ 需要被满足、于吉不受伤害；实体牌走 PLAY 帧。"""
+    """南蛮的响应是**打出**【杀】：真 + ♥️ ⇒ 需要被满足、于吉不受伤害；实体牌走 PLAY 帧。
+
+    与【闪】那一格同一个判据（`04` 票 §1）：真只让质疑者失 1 点，**♥️** 才是"依旧结算"的
+    条件。非♥ 的真牌反例见 :func:`test_guohuo_truth_but_doubted_non_heart_slash_does_not_respond`。
+    """
     slash = _card(type_id="slash")
+    assert PACK.deck.cards[slash].suit.value == "heart", "这条用例的前提是♥️牌"
     engine, state = _run_provider(
         trigger_type="barbarian_invasion", hand=(slash,), doubters=(True, False)
     )
@@ -883,6 +993,31 @@ def test_guohuo_plays_a_slash_in_the_barbarian_window() -> None:
     assert _pushed(engine, FrameKind.PLAY) == 1, "产物按**打出**交付（PLAY 帧）"
     assert _pushed(engine, FrameKind.USE) == 1, "只有南蛮自己那一次使用"
     assert _verdict_seats(engine) == [2, 3, 0], "真 / 假都要先走完质疑段（与出牌阶段同一套）"
+
+
+def test_guohuo_truth_but_doubted_non_heart_slash_does_not_respond() -> None:
+    """真 + 有人质疑 + **非♥️** ⇒ 作废：南蛮的这次响应没发生，于吉照常挨 1 点。
+
+    ♣【杀】声明成【杀】：牌名逐字相等（真 ⇒ 质疑者失 1 点），花色不是♥️ ⇒ 作废、
+    **从未打出**（不压 ``PLAY`` 帧）。
+    """
+    club_slash = _card(type_id="slash", suit="club")
+    engine, state = _run_provider(
+        trigger_type="barbarian_invasion", hand=(club_slash,), doubters=(True, False)
+    )
+
+    assert state.player(2).hp == 2, (
+        "真 ⇒ 质疑者失去 1 点体力（作废不等于无代价）；他自己也是南蛮的目标、手里没有"
+        "【杀】⇒ 随后再挨 1 点（4 → 2）"
+    )
+    assert _pushed(engine, FrameKind.PLAY) == 0, "作废 = 从未打出"
+    assert _moves(
+        engine,
+        reason=MoveReason.DISCARD,
+        source_zone=Zone.PROCESSING,
+        card=club_slash,
+    ), "非♥️的被质疑牌进弃牌堆"
+    assert state.player(1).hp == 2, "作废 ⇒ 南蛮照常结算（3 → 2）"
 
 
 def test_guohuo_voided_slash_does_not_respond() -> None:
@@ -906,6 +1041,9 @@ def test_guohuo_voided_slash_does_not_respond() -> None:
 def test_guohuo_answers_the_duel_window() -> None:
     """【决斗】的响应也是**打出**【杀】：真 ⇒ 这一轮响应成立，对家接不上就挨 1 点。
 
+    这里**没有人质疑**（``doubters=(False, False)``），故牌照样结算与 ♥️ 无关——"无人质疑
+    ⇒ 结算"那半条判据正是本用例覆盖的（`04` 票 §1 的判据 = 无人质疑 **或** ♥️）。
+
     决斗的窗口与南蛮同形（``RESPOND`` + 杀族请求 + ``mode = PLAY``），但它是**交替**的
     帧内游标：于吉打出的这张【杀】若没记成"这次响应成立"，下一轮就会回到他自己身上。
     """
@@ -921,7 +1059,10 @@ def test_guohuo_answers_the_duel_window() -> None:
 
 
 def test_guohuo_answers_the_arrow_barrage_window() -> None:
-    """万箭（``required = dodge``）走同一套：真【闪】⇒ 需要被满足、不受伤害。"""
+    """万箭（``required = dodge``）走同一套：真【闪】⇒ 需要被满足、不受伤害。
+
+    同样**没有人质疑**，故这次结算靠的是"无人质疑"那半条判据（同【决斗】那条）。
+    """
     dodge = _card(type_id="dodge")
     engine, state = _run_provider(
         trigger_type="arrow_barrage", hand=(dodge,), doubters=(False, False)
@@ -1120,11 +1261,11 @@ def _closed(engine, frame_kind) -> bool:
 
 
 def test_guohuo_saves_itself_in_the_peach_window() -> None:
-    """濒死者自己是于吉：扣置 → 质疑 → 真 / ♥ ⇒ 这张【桃】照常回复。
+    """濒死者自己是于吉：扣置 → 质疑 → ♥ ⇒ 这张【桃】照常回复。
 
-    真（牌名相等）与 ♥ 同时成立，故"真 ⇒ 质疑者各失 1 点"与"♥ ⇒ 依旧结算"两条都落在
-    这一次结算里；【桃】的回复由**求桃窗口**建立（``recover_from_peach``：RECOVER 帧先于
-    使用帧的回复结算），故这里断的是"回复真的发生了"，不是"技能压了一个使用帧"。
+    真（牌名相等）与 ♥ 同时成立：**♥ 才是"依旧结算"的条件**，"真"只让质疑者各失 1 点
+    （`04` 票 §1 的读法）；【桃】的回复由**求桃窗口**建立（``recover_from_peach``：RECOVER
+    帧先于使用帧的回复结算），故这里断的是"回复真的发生了"，不是"技能压了一个使用帧"。
     """
     slash = _card(type_id="slash")
     heart_peach = _card(type_id="peach", suit="heart")
@@ -1427,7 +1568,11 @@ def test_guohuo_answers_the_borrowed_sword_window() -> None:
 
 
 def test_guohuo_voided_slash_hands_the_weapon_over() -> None:
-    """借刀窗口里作废（假 + 非♥️）⇒ 这次响应没发生；持刀者没有真【杀】⇒ 走 b 交刀。"""
+    """借刀窗口里作废（假 + 非♥️ + 有人质疑）⇒ 响应没发生；持刀者没有真【杀】⇒ 走 b 交刀。
+
+    作废的前提是**有人质疑**（`04` 票 §1 的读法）：座位 2 表态质疑，这张♦【桃】声明成
+    【杀】（假、非♥️）才作废；没人质疑时它照常结算（那正是另一条用例）。
+    """
     borrowed = _card(type_id="borrowed_sword")
     weapon = _card(type_id="qinggang_sword")
     fake = _card(type_id="peach", suit="diamond")
@@ -1443,7 +1588,7 @@ def test_guohuo_voided_slash_hands_the_weapon_over() -> None:
         players=[
             _WindowSeat(designation=(1, 3)),
             _WindowSeat(guohuo=("slash",)),
-            _WindowSeat(),
+            _WindowSeat(doubt=True),
             _WindowSeat(),
         ],
         stop=lambda e: borrowed in e.state.discard and not e.stack,

@@ -2957,7 +2957,6 @@ _GUOHUO_YES = "guohuo_doubted"
 _GUOHUO_REVEALED = "guohuo_revealed"
 _GUOHUO_RESULT = "guohuo_result_next"
 _GUOHUO_RESULT_SEAT = "guohuo_result"
-_GUOHUO_OWNER = "guohuo_owner"
 _GUOHUO_SETTLED = "guohuo_settled"
 """帧私有游标：扣置已完成 / 已问过谁 / 谁质疑了 / 验明过了 / 结果执行到第几个 / 收尾已完成。
 
@@ -3170,13 +3169,18 @@ def _guohuo_truth(state: GameState, frame: Any) -> bool:
 
 
 def _guohuo_live(state: GameState, frame: Any) -> bool:
-    """这张被质疑的牌**还要不要结算**：真 **或** ♥️ ⇒ 依旧进行结算；否则作废。
+    """这张被质疑的牌**还要不要结算**：**无人质疑 或 ♥️** ⇒ 依旧进行结算；否则作废。
+
+    牌面原文（用户 2026-11-02 的读法）："若有其他角色质疑则翻开此牌且**此牌作废**，若为：
+    假，质疑者各摸一张牌；真，质疑者各失去 1 点体力，然后若被质疑的牌的花色为♥️，此牌依旧
+    进行结算。"⇒ 作废的**前提**是有人质疑，真 / 假只决定**质疑者的惩罚**；"依旧结算"只在
+    ♥️ 时才成立。故判据是"没人质疑"而不是"这张牌为真"——**真但非♥、且有人质疑 ⇒ 照样作废**。
 
     ♥ 判据读**来源实体牌**的花色（G6）：声明成【火攻】的红桃牌，看的是那张红桃实体牌，
     不是产物的花色。
     """
     source = state.card(int(frame.data[_GUOHUO_SOURCE]))
-    return _guohuo_truth(state, frame) or source.suit == Suit.HEART.value
+    return not frame.data.get(_GUOHUO_YES) or source.suit == Suit.HEART.value
 
 
 def _guohuo_doubt_round(host: Any, frame: Any, owner: int) -> tuple[Control, bool]:
@@ -3272,9 +3276,6 @@ def _guohuo_kouchu(host: Any, frame: Any, owner: int) -> Control:
     """
     if frame.data.get(_GUOHUO_KOUCHU):
         return None
-    # 扣置者是谁：验明之前这张牌的牌面**只有他知道**（投影据此不给别人牌面，UI1/UI2）。
-    # 承载帧可能是外层窗口的帧（濒死帧 / 借刀的结算帧），故显式落一份，不靠帧的 ``source``。
-    frame.data[_GUOHUO_OWNER] = owner
     control = host.move_in_frame(
         frame,
         host.state.refs((int(frame.data[_GUOHUO_SOURCE]),)),
@@ -3441,7 +3442,7 @@ def _guohuo_activate(host: Any, frame: Any) -> Any:
         return None
     frame.data[_GUOHUO_STAGE] = "settle"
 
-    # ---- 段 8：♥️（或为真）⇒ 依旧结算；否则从效果区作废进弃牌堆 --------------
+    # ---- 段 8：无人质疑 / ♥️ ⇒ 依旧结算；否则从效果区作废进弃牌堆 ---------------
     if frame.data.get(_GUOHUO_SETTLED):
         return None
     frame.data[_GUOHUO_SETTLED] = True
@@ -3568,7 +3569,7 @@ def guohuo_provider(host: Any, frame: Any, actor: int, timing: Timing) -> Contro
         _give_up()
         return None
 
-    # ---- 段 7：♥️（或为真）⇒ 把产物交给窗口；否则作废（从未使用 / 打出）------
+    # ---- 段 7：无人质疑 / ♥️ ⇒ 把产物交给窗口；否则作废（从未使用 / 打出）----
     live = _guohuo_live(state, frame)
     frame.data[PROVIDER_SATISFIED_KEY] = live
     if not live:
