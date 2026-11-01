@@ -2473,6 +2473,17 @@ class Engine:
         if self.state.turn_seat == seat:
             self._turn_data["skip_play"] = True
 
+    def skip_judge_phase(self, seat: int) -> None:
+        """让 ``seat`` 的**判定阶段**整体跳过（风包夏侯渊【神速】①）。
+
+        与 :meth:`skip_play_phase` / :meth:`skip_draw_phase` 同姿态：只对**当前回合角色**
+        生效，跳过由 :meth:`_phase_judge` 的顶部消费（连阶段体与边界一并越过，直奔摸牌阶段）。
+        **判定区里的牌保留**（`三国杀详细规则.txt` §11.5 L1264 / 账本行「被跳过的判定阶段
+        不消费判定区里的牌」）——它只是不结算，不是被弃置。不是技能钩子，故不新增 ``Timing``。
+        """
+        if self.state.turn_seat == seat:
+            self._turn_data["skip_judge"] = True
+
     def skip_draw_phase(self, seat: int) -> None:
         """让 ``seat`` 的**摸牌阶段**整体跳过（M5-06【兵粮寸断】的判定后果）。
 
@@ -4390,25 +4401,38 @@ class Engine:
             # 本步返回后 ``_step_turn`` 会 ``_turn_pc += 1``，故拨到收尾步的前一格。
             self._skip_to(self._turn_after_end)
 
-    def _turn_start(self) -> None:
-        # 该座位自己的 TURN_START 是使用次数计数器的重置点（票 07 §6）。
+    def _turn_start(self) -> Control:
+        """回合开始时（L1.2）：每回合清理 + **帧外钩子派发**（夏侯渊【神速】的首个载体）。
+
+        「回合开始时」是与准备阶段 / 回合结束时同类的**帧外时机**：没有结算帧，钩子却
+        必须能提问、能跨重入续跑。故它走与 :meth:`_dispatch_phase_body` 同一条路径
+        （`TURN_END` 的【博图】是同一形态的先例）：无钩子时只照记一条 ``TURN_START``
+        （记录流与 M2 逐字节相同），有钩子时给它一条不压栈、可 "stay" 的帧。
+
+        **每回合清理只跑一次**（``turn_start_reset`` 闸）：钩子挂起后整个 ``_turn_start``
+        会被重入，若不加闸，钩子效果里刚落下的回合级事实（本回合置入弃牌堆的花色等）
+        会被第二次清理抹掉——【神速】恰好在回合开始时就会弃置装备牌。
+        """
         seat = self.state.turn_seat
-        # "本回合置入弃牌堆的牌"（M6 票 11 的【博图】判据）作用域 = **一个回合**：
-        # 每个回合（含额外回合）起点清空，故额外回合各自重算、不继承上一个回合的花色。
-        self.state.discard_suits_this_turn.clear()
-        if seat is not None:
-            self.state.player(seat).card_use_counts.clear()
-            # 【酒】加伤只在本回合有效（M5-04）：回合收尾已清，这里再幂等兜一次——
-            # 两处都走唯一写入口，故"清掉"与"从来没置过"的记录形态相同（无 delta）。
-            self._clear_wine_active(seat)
-            # 【裸衣】同口径（M6 票 01）：作用域 = 本回合结束，回合收尾已清，这里幂等兜底。
-            self._clear_luoyi_active(seat)
-            # 界【裸衣】的清理点**只在**这里（M6 票 14）：它的作用域是"直到**你的**下个回合
-            # 开始"，故别人的回合末不清、只有该座位自己的回合起点清（上一句是标准版）。
-            self._clear_luoyi_until_next_turn(seat)
-            # 【咆哮】②的"下一次 +1"同口径（M6 票 05）。
-            self._clear_paoxiao_bonus(seat)
-        self.emit_timing(Timing.TURN_START, actor=seat)
+        if not self._turn_data.get("turn_start_reset"):
+            # 该座位自己的 TURN_START 是使用次数计数器的重置点（票 07 §6）。
+            # "本回合置入弃牌堆的牌"（M6 票 11 的【博图】判据）作用域 = **一个回合**：
+            # 每个回合（含额外回合）起点清空，故额外回合各自重算、不继承上一个回合的花色。
+            self.state.discard_suits_this_turn.clear()
+            if seat is not None:
+                self.state.player(seat).card_use_counts.clear()
+                # 【酒】加伤只在本回合有效（M5-04）：回合收尾已清，这里再幂等兜一次——
+                # 两处都走唯一写入口，故"清掉"与"从来没置过"的记录形态相同（无 delta）。
+                self._clear_wine_active(seat)
+                # 【裸衣】同口径（M6 票 01）：作用域 = 本回合结束，回合收尾已清，这里幂等兜底。
+                self._clear_luoyi_active(seat)
+                # 界【裸衣】的清理点**只在**这里（M6 票 14）：它的作用域是"直到**你的**下个回合
+                # 开始"，故别人的回合末不清、只有该座位自己的回合起点清（上一句是标准版）。
+                self._clear_luoyi_until_next_turn(seat)
+                # 【咆哮】②的"下一次 +1"同口径（M6 票 05）。
+                self._clear_paoxiao_bonus(seat)
+            self._turn_data["turn_start_reset"] = True
+        return self._dispatch_phase_body(Timing.TURN_START, "turn_start")
 
     def _phase_prepare(self) -> str | None:
         # 准备阶段体照记；有技能钩子（M3 的【观星】式）时惰性建帧派发（票 10 §③）。
@@ -4481,6 +4505,12 @@ class Engine:
         （【闪电】顺延到下一个合法目标的判定区，其余弃牌堆，票 11 §4）。
         """
         seat = self._turn_seat()
+        if self._turn_data.pop("skip_judge", False):
+            # 【神速】①（风包夏侯渊）：**跳过判定阶段**——判定区里的牌保留、一张都不判
+            # （§11.5 L1264），阶段体与边界一并越过；返回 None 后回合环的 pc 自然落到
+            # ``_phase_draw_start``（与跳过摸牌 / 出牌同形）。
+            self.state.phase = Phase.JUDGE
+            return None
         if not self._turn_data.get("judge_entered"):
             self.state.phase = Phase.JUDGE
             self.emit_timing(Timing.PHASE_JUDGE, actor=seat)

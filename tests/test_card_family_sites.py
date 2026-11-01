@@ -301,6 +301,12 @@ ALLOWLIST: dict[Site, Rule] = {
         "GREEN_DRAGON_FLOW",
         'type_id="slash",',
     ): Rule(FAMILY, 1, "PickProvide 的面同样经 satisfies_required 过滤（与 _green_dragon_plan 同源）"),
+    # ---- skills/phase_body.py：夏侯渊【神速】的虚拟【杀】（feng-xiahouyuan 票 01）----
+    (
+        "src/sgs/skills/phase_body.py",
+        "_shensu_use_slash",
+        'card = pure_virtual_card(host.state, "slash")',
+    ): Rule(NORMAL, 1, "【神速】每选一项视为使用一张**普通**【杀】——这是**产物**牌型（牌面逐字），有意 normal-only；族判据走产物行为表，不在这里判"),
     # ---- skills/heroes.py：转化产物 ----
     # ---- skills/active.py：界刘备【仁德】的"视为使用一张基本牌"（M6 票 16）----
     (

@@ -460,3 +460,25 @@ def test_an_unknown_deck_profile_reports_the_loader_error_and_exits_1(capsys):
     assert captured.out == ""
     assert "decks.unknown_profile" in captured.err
     assert "standard_999" in captured.err
+
+
+def test_the_renderer_labels_hp_max_changes_in_chinese():
+    """体力上限变化（觉醒技的"减 1 点上限"）也要有自己的转写，不落进"洗牌"兜底。"""
+    from sgs.engine import HpMaxChangeRecord
+
+    line = render(
+        HpMaxChangeRecord(seq=4, frame_id=0, depth=0, seat=2, before=4, after=3, amount=-1)
+    )
+
+    assert "体力上限" in line and "座位=2" in line and "4→3" in line
+
+
+def test_the_renderer_never_crashes_on_a_delta_it_does_not_transcribe():
+    """未专门转写的 delta 只报类型：**不许**读别的 delta 才有的字段（旧兜底会 KeyError/AttributeError）。"""
+    from sgs.engine import TurnChangeRecord
+
+    line = render(
+        TurnChangeRecord(seq=5, frame_id=0, depth=0, seat=1, round=2, extra=False)
+    )
+
+    assert "turn_change" in line

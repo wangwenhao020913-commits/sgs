@@ -35,6 +35,23 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "xiahouyuan",
+      "name": "夏侯渊",
+      "true_name": "夏侯渊",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "feng",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "shensu",
+          "name": "神速",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

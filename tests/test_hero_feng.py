@@ -1626,3 +1626,519 @@ def test_kuanggu_reads_the_mount_chain():
     assert distance(state, 0, 2) == 1, "赤兔把座位距离 2 压成 1（也是【杀】能指定它的原因）"
     assert state.player(2).hp == 3
     assert state.player(0).hp == 4, "计算距离 1 ⇒ 狂骨回复 1 点"
+
+
+# ---------------------------------------------------------------------------
+# 夏侯渊【神速】（`feng-xiahouyuan` 票 01）：回合开始时一至两项 → 跳阶段 + 无距离【杀】
+#
+# 牌面（`D:\SGS_HEROS\神话再临-风包\夏侯渊\技能.txt`，逐字）：
+#
+#     神速：回合开始时，你可以选择一至两项：
+#           【1】跳过判定阶段和摸牌阶段；
+#           【2】跳过出牌阶段并弃置一张装备牌。
+#           你每以此法选择一项，便视为你使用一张无距离限制的普通【杀】。
+#
+# 全部走**外部缝**（询问 / 记录流 / 终局状态）：
+#
+# - **时点**：「回合开始时」是帧外时机，本技能是它补上派发点后的第一个消费者
+#   （`tests/test_hero_catalog.py` 的 `_owner_probes` 因此不必给探针——钩子无条件，
+#   "是不是我的回合"由激活计划按帧的 ``source`` 判）；
+# - **跳阶段**：`PHASE_JUDGE` / `PHASE_DRAW` / `PHASE_PLAY_START` 记录在场与否 + 判定区的牌保留；
+# - **虚拟【杀】**：`USE_DESIGNATE_TARGET` 记录的目标（打得到距离 2 的座位 = 无距离限制）。
+#
+# 三条容易写错的边界各有一条断言：【2】付不起时**取消整项**（R4）、
+# 回合开始时的【杀】**不占**出牌阶段次数（W5-04）、空城目标**不进**池。
+# ---------------------------------------------------------------------------
+
+SHENSU = "hero.xiahouyuan.shensu"
+XIAHOUYUAN = "xiahouyuan"
+XIAHOUDUN = "xiahoudun"
+GANGLIE = "hero.xiahoudun.ganglie"
+
+_SHENSU_ARMOR = cards_of_type(PACK, "eight_diagrams")[0]
+"""八卦阵（防具）：【2】的成本——**手牌**里的装备牌。"""
+
+_SHENSU_HORSE = cards_of_type(PACK, "dilu")[0]
+"""的卢（+1 防御马）：【2】的成本——**装备区**里的装备牌（"装备牌"含两个区）。"""
+
+_SHENSU_INDULGENCE = cards_of_type(PACK, "indulgence")[0]
+"""【乐不思蜀】：判定区里的牌（"跳过判定阶段时保留"的载体）。"""
+
+_SHENSU_HAND = tuple(cards_of_type(PACK, "dodge")[:2])
+"""手牌里的两张【闪】：不参与任何判据，只用来撑手牌数 / 给出牌阶段用。"""
+
+_SHENSU_SPADE = next(
+    card_id
+    for card_id, card in enumerate(PACK.deck.cards)
+    if card.suit == "spade"
+)
+
+
+def _shensu_option(query, choice: str):
+    """这条 ``SELECT_OPTION`` 询问里 ``choice`` 对应的候选。"""
+    for action in query.legal_actions:
+        if isinstance(action, SelectOption) and action.choice == choice:
+            return action
+    raise AssertionError(
+        f"没有选项 {choice!r}："
+        f"{[a.choice for a in query.legal_actions if isinstance(a, SelectOption)]}"
+    )
+
+
+def _shensu_cards_action(query, card_ids):
+    """这条 ``SELECT_CARDS`` 询问里"恰好选中 ``card_ids``"的那条候选。"""
+    wanted = set(card_ids)
+    for action in query.legal_actions:
+        if not isinstance(action, SelectCards):
+            continue
+        picked = {
+            query.slots[index].card.card_id
+            for index in action.picks
+            if query.slots[index].card is not None
+        }
+        if picked == wanted:
+            return action
+    raise AssertionError(f"选择面里选不出 {sorted(wanted)}：{[s.card for s in query.slots]}")
+
+
+def _shensu_fallback(query):
+    """其余询问取最小合法应答：有 Pass 就 Pass，否则第一条。"""
+    for action in query.legal_actions:
+        if isinstance(action, Pass):
+            return action
+    return query.legal_actions[0]
+
+
+class _ShensuActor:
+    """座位 0（夏侯渊）的脚本：答【神速】的每一问；可选在出牌阶段再出一张真【杀】。"""
+
+    def __init__(
+        self,
+        *,
+        activate: bool = True,
+        items: str | None = None,
+        targets=(),
+        picks=(),
+        play_slash=(),
+        ganglie_choice: str | None = None,
+    ) -> None:
+        self.activate = activate
+        self.items = items
+        self.targets = list(targets)
+        self.picks = tuple(picks)
+        self.play_slash = list(play_slash)
+        self.ganglie_choice = ganglie_choice
+        self.items_query = None
+        self.target_queries = []
+        self.cards_queries = []
+
+    def respond(self, query):
+        skill = str(getattr(query, "skill_id", "") or "")
+        if query.kind == "SKILL_ACTIVATION" and skill == SHENSU:
+            if self.activate:
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, ActivateSkill)
+                )
+            return _shensu_fallback(query)
+        if query.kind == "SELECT_OPTION" and skill.endswith(":items"):
+            self.items_query = query
+            return _shensu_option(query, self.items)
+        if query.kind == "SELECT_OPTION" and ":target:" in skill:
+            self.target_queries.append(query)
+            return _shensu_option(query, f"seat:{self.targets.pop(0)}")
+        if query.kind == "SELECT_OPTION" and self.ganglie_choice is not None and skill == "ganglie:choice":
+            return _shensu_option(query, self.ganglie_choice)
+        if query.kind == "SELECT_CARDS":
+            self.cards_queries.append(query)
+            return _shensu_cards_action(query, self.picks)
+        if query.kind == "PLAY_PHASE":
+            if self.play_slash:
+                target = self.play_slash.pop(0)
+                for action in query.legal_actions:
+                    if (
+                        isinstance(action, UseCard)
+                        and action.card.type == "slash"
+                        and action.targets == (target,)
+                    ):
+                        return action
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        return _shensu_fallback(query)
+
+
+class _GanglieActor:
+    """座位 1（夏侯惇）：受伤害后发动【刚烈】，其余取最小合法应答。"""
+
+    def respond(self, query):
+        if query.kind == "SKILL_ACTIVATION" and query.skill_id == GANGLIE:
+            return next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, ActivateSkill)
+            )
+        return _shensu_fallback(query)
+
+
+def _shensu_engine(seats, *, used=(), top=None, players=None, turn_seat=0, seed=29):
+    """造「座位 0 是夏侯渊、从自己的回合起点开跑」的局面，跑到弃牌阶段开始。"""
+    deck = tuple(card_id for card_id in deck_excluding(PACK, *used) if card_id != top)
+    if top is not None:
+        deck = (top, *deck)
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck,
+        turn_seat=turn_seat,
+        phase=Phase.PREPARE,
+    )
+    engine = Engine.from_state(state, seed=seed)
+    actors = list(players) if players is not None else []
+    while len(actors) < len(seats):
+        actors.append(PassPlayer())
+    run_queries(engine, actors, lambda e: ran_timing(e, Timing.PHASE_DISCARD_START))
+    return engine, state
+
+
+def _shensu_targets(engine):
+    """本局每一次"使用并指定目标"的目标元组（按记录序）。"""
+    return [
+        record.targets
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.USE_DESIGNATE_TARGET
+    ]
+
+
+def _shensu_uses(engine) -> int:
+    """本局压过几个 ``USE`` 帧。"""
+    return sum(
+        1
+        for record in engine.records
+        if record.kind == "frame"
+        and record.op == "push"
+        and record.frame_kind is FrameKind.USE
+    )
+
+
+def _shensu_activation_queries(engine):
+    return [
+        query
+        for query in _queries(engine, "SKILL_ACTIVATION")
+        if query.skill_id == SHENSU
+    ]
+
+
+def test_shensu_asks_once_at_own_turn_start_and_declines_cleanly():
+    """自己的回合开始时问一次；放弃 ⇒ 什么都不跳、一张【杀】都没有。"""
+    actor = _ShensuActor(activate=False)
+    engine, state = _shensu_engine(
+        [
+            SeatSpec(hero=XIAHOUYUAN, hand=_SHENSU_HAND),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=_SHENSU_HAND,
+        players=[actor],
+    )
+
+    assert len(_shensu_activation_queries(engine)) == 1
+    assert ran_timing(engine, Timing.PHASE_JUDGE), "没发动 ⇒ 判定阶段照常"
+    assert ran_timing(engine, Timing.PHASE_DRAW), "没发动 ⇒ 摸牌阶段照常"
+    assert _shensu_uses(engine) == 0
+    assert len(state.player(0).hand) == 4, "没发动 ⇒ 正常摸两张"
+
+
+def test_shensu_does_not_trigger_on_another_turn_start():
+    """别人的回合开始时**不问**（自校：只有当前回合角色的那一份实例被问）。
+
+    先手座位只能在**无身份局**（2 人）里配置（身份局的先手 = 主公座位），故这条用例
+    单独造一个 2 人局：座位 1 先手，夏侯渊在座位 0。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=XIAHOUYUAN), SeatSpec(hand=_SHENSU_HAND)],
+        deck=deck_excluding(PACK, *_SHENSU_HAND),
+        turn_seat=1,
+        phase=Phase.PREPARE,
+        rule_config=RuleConfig(
+            player_count=2, starting_hand_size=4, first_seat=1
+        ),
+    )
+    engine = Engine.from_state(state, seed=29)
+    run_queries(
+        engine,
+        [PassPlayer(), PassPlayer()],
+        lambda e: ran_timing(e, Timing.PHASE_DISCARD_START),
+    )
+
+    assert not _shensu_activation_queries(engine)
+    assert ran_timing(engine, Timing.TURN_START), "回合确实开始了，只是不是他的"
+
+
+def test_shensu_option_one_skips_judge_and_draw_and_uses_one_slash():
+    """选【1】：判定 + 摸牌阶段整体越过、准备阶段照常，换来一张无距离【杀】。"""
+    actor = _ShensuActor(items="shensu_skip_judge_draw", targets=(2,))
+    engine, state = _shensu_engine(
+        [
+            SeatSpec(hero=XIAHOUYUAN, hand=_SHENSU_HAND),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=_SHENSU_HAND,
+        players=[actor],
+    )
+
+    assert not ran_timing(engine, Timing.PHASE_JUDGE), "判定阶段被跳过"
+    assert not ran_timing(engine, Timing.PHASE_DRAW), "摸牌阶段被跳过"
+    assert ran_timing(engine, Timing.PHASE_PREPARE), "只跳两个阶段，准备阶段照常"
+    assert _shensu_targets(engine) == [(2,)]
+    assert state.player(2).hp == 3, "【杀】造成 1 点伤害"
+    assert len(state.player(0).hand) == 2, "摸牌阶段被跳过 ⇒ 一张都没摸"
+
+
+def test_shensu_skipped_judge_phase_keeps_the_judge_zone_cards():
+    """跳过的判定阶段**不消费**判定区里的牌（账本行；规则 §11.5）。"""
+    actor = _ShensuActor(items="shensu_skip_judge_draw", targets=(1,))
+    engine, state = _shensu_engine(
+        [
+            SeatSpec(hero=XIAHOUYUAN, judge=(_SHENSU_INDULGENCE,)),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(_SHENSU_INDULGENCE,),
+        players=[actor],
+    )
+
+    assert state.player(0).judge == [_SHENSU_INDULGENCE], "延时锦囊留在判定区"
+    assert not ran_timing(engine, Timing.PHASE_JUDGE)
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "frame" and record.frame_kind is FrameKind.JUDGE
+    ], "一张判定都没开"
+
+
+def test_shensu_slash_ignores_distance():
+    """【杀】的目标**不受攻击范围限制**：座位 2 在距离 2、攻击范围 1 之外，仍可指定。"""
+    actor = _ShensuActor(items="shensu_skip_judge_draw", targets=(2,))
+    engine, state = _shensu_engine(
+        [
+            SeatSpec(hero=XIAHOUYUAN),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        players=[actor],
+    )
+
+    assert distance(state, 0, 2) == 2, "座位 2 与座位 0 的距离是 2（攻击范围 1 够不着）"
+    assert _shensu_targets(engine) == [(2,)]
+    assert state.player(2).hp == 3
+
+
+def test_shensu_slash_respects_cannot_be_targeted():
+    """「无距离限制」只豁免距离：**不能成为目标**的锁定技照常生效（空城）。"""
+    actor = _ShensuActor(items="shensu_skip_judge_draw", targets=(2,))
+    _engine, _state = _shensu_engine(
+        [
+            SeatSpec(hero=XIAHOUYUAN),
+            SeatSpec(hero="jie_zhugeliang", hand=()),
+            SeatSpec(),
+        ],
+        players=[actor],
+    )
+
+    assert actor.target_queries, "有合法目标 ⇒ 照常发问"
+    choices = [
+        action.choice
+        for action in actor.target_queries[0].legal_actions
+        if isinstance(action, SelectOption)
+    ]
+    assert "seat:1" not in choices, "空城的界诸葛亮不能成为【杀】的目标"
+    assert "seat:2" in choices
+
+
+def test_shensu_without_a_legal_target_skips_only_the_slash():
+    """一个合法目标都没有 ⇒ 不发空询问：这一张【杀】不发生，跳过阶段照旧生效。"""
+    actor = _ShensuActor(items="shensu_skip_judge_draw")
+    engine, state = _shensu_engine(
+        [
+            SeatSpec(hero=XIAHOUYUAN),
+            SeatSpec(hero="jie_zhugeliang", hand=()),
+        ],
+        players=[actor],
+    )
+
+    assert not actor.target_queries, "不发没有候选的询问"
+    assert _shensu_uses(engine) == 0
+    assert not ran_timing(engine, Timing.PHASE_DRAW), "跳过阶段照旧"
+    assert ran_timing(engine, Timing.PHASE_PLAY_START)
+
+
+def test_shensu_option_two_disappears_without_equipment():
+    """没有装备牌 ⇒ 选项步只剩【1】（不能执行的项不出现）。"""
+    actor = _ShensuActor(items="shensu_skip_judge_draw", targets=(1,))
+    _engine, _state = _shensu_engine(
+        [
+            SeatSpec(hero=XIAHOUYUAN, hand=_SHENSU_HAND),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=_SHENSU_HAND,
+        players=[actor],
+    )
+
+    assert actor.items_query is not None
+    choices = [
+        action.choice
+        for action in actor.items_query.legal_actions
+        if isinstance(action, SelectOption)
+    ]
+    assert choices == ["shensu_skip_judge_draw"]
+
+
+def test_shensu_option_two_discards_one_equipment_and_skips_the_play_phase():
+    """选【2】：弃一张**装备牌**（手牌 / 装备区都铺）→ 跳过出牌阶段 → 一张【杀】。"""
+    actor = _ShensuActor(
+        items="shensu_skip_play_equip", targets=(2,), picks=(_SHENSU_HORSE,)
+    )
+    engine, state = _shensu_engine(
+        [
+            SeatSpec(
+                hero=XIAHOUYUAN,
+                hand=(_SHENSU_ARMOR, *_SHENSU_HAND),
+                equip=(_SHENSU_HORSE,),
+            ),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(_SHENSU_ARMOR, _SHENSU_HORSE),
+        players=[actor],
+    )
+
+    assert actor.cards_queries, "弃装备是一问"
+    face = {
+        slot.card.card_id
+        for slot in actor.cards_queries[0].slots
+        if slot.card is not None
+    }
+    assert face == {_SHENSU_ARMOR, _SHENSU_HORSE}, "手牌 + 装备区的装备牌都在面上"
+    assert _SHENSU_HORSE in state.discard, "选中的装备区牌进了弃牌堆"
+    assert not ran_timing(engine, Timing.PHASE_PLAY_START), "出牌阶段被跳过"
+    assert _shensu_targets(engine) == [(2,)]
+    assert state.player(2).hp == 3
+
+
+def test_shensu_both_options_use_two_slashes_in_order():
+    """两项都选：先【1】的一张【杀】、再弃装备、【2】的一张【杀】（固定次序）。"""
+    actor = _ShensuActor(
+        items="shensu_both", targets=(2, 3), picks=(_SHENSU_ARMOR,)
+    )
+    engine, state = _shensu_engine(
+        [
+            SeatSpec(hero=XIAHOUYUAN, hand=(_SHENSU_ARMOR, *_SHENSU_HAND)),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(_SHENSU_ARMOR,),
+        players=[actor],
+    )
+
+    assert not ran_timing(engine, Timing.PHASE_JUDGE)
+    assert not ran_timing(engine, Timing.PHASE_DRAW)
+    assert not ran_timing(engine, Timing.PHASE_PLAY_START)
+    assert _shensu_uses(engine) == 2
+    assert _shensu_targets(engine) == [(2,), (3,)]
+    assert state.player(2).hp == 3 and state.player(3).hp == 3
+
+    # 次序：第一张【杀】结算完才弃装备，弃完才用第二张。
+    uses = [
+        record.seq
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.USE_DESIGNATE_TARGET
+    ]
+    moves = [
+        record.seq
+        for record in engine.records
+        if record.kind == "delta"
+        and getattr(record, "delta_type", None) == "card_move"
+        and record.to_zone.zone is Zone.DISCARD
+        and any(card.card_id == _SHENSU_ARMOR for card in record.cards)
+    ]
+    assert len(uses) == 2 and len(moves) == 1
+    assert uses[0] < moves[0] < uses[1]
+
+
+def test_shensu_cancels_option_two_when_the_equipment_is_stolen_mid_flow():
+    """【2】付不起时**取消整项**（R4）：第一张【杀】的结算里装备被【刚烈】弃光。
+
+    结算顺序 = 【1】的【杀】→（夏侯惇【刚烈】让夏侯渊弃两张手牌）→【2】的成本步。
+    此刻一张装备牌都没有 ⇒ 不跳出牌阶段、不出第二张【杀】，已进行的【1】不回退。
+    """
+    actor = _ShensuActor(
+        items="shensu_both",
+        targets=(1,),
+        picks=(_SHENSU_ARMOR, _SHENSU_HORSE),
+        ganglie_choice="discard_two",
+    )
+    engine, state = _shensu_engine(
+        [
+            SeatSpec(hero=XIAHOUYUAN, hand=(_SHENSU_ARMOR, _SHENSU_HORSE)),
+            SeatSpec(hero=XIAHOUDUN),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(_SHENSU_ARMOR, _SHENSU_HORSE),
+        top=_SHENSU_SPADE,
+        players=[actor, _GanglieActor()],
+    )
+
+    assert state.player(0).hand == [], "【刚烈】让夏侯渊弃掉了那两张装备牌"
+    assert _shensu_uses(engine) == 1, "只有【1】的一张【杀】"
+    assert _shensu_targets(engine) == [(1,)]
+    assert not ran_timing(engine, Timing.PHASE_DRAW), "【1】的跳过照旧"
+    assert ran_timing(engine, Timing.PHASE_PLAY_START), "【2】取消 ⇒ 出牌阶段没被跳过"
+
+
+def test_shensu_slash_does_not_consume_the_play_phase_slash_limit():
+    """回合开始时的那张【杀】**不占**出牌阶段的次数（规则 §17.10 A2 / 账本 W5-04）。"""
+    actor = _ShensuActor(
+        items="shensu_skip_judge_draw", targets=(1,), play_slash=(1,)
+    )
+    engine, state = _shensu_engine(
+        [
+            SeatSpec(hero=XIAHOUYUAN, hand=(cards_of_type(PACK, "slash")[0],)),
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(cards_of_type(PACK, "slash")[0],),
+        players=[actor],
+    )
+
+    assert _shensu_uses(engine) == 2, "出牌阶段还能出第二张【杀】（额度没被回合开始时那张占掉）"
+    assert state.player(1).hp == 2, "两张【杀】各造成 1 点伤害"
+    assert state.player(0).card_use_counts.get("slash", 0) == 1, (
+        "计数只数到出牌阶段的那一张：回合开始时的虚拟【杀】用 counts=False"
+    )
+
+
+def test_shensu_hero_is_in_the_default_pool():
+    """夏侯渊进默认启用池（风包、魏、4 体力、神速）。"""
+    from sgs.data import enabled_hero_ids, hero_by_id
+
+    assert XIAHOUYUAN in enabled_hero_ids()
+    hero = hero_by_id(XIAHOUYUAN)
+    assert hero is not None
+    assert hero.true_name == "夏侯渊"
+    assert hero.kingdom.value == "wei"
+    assert hero.hp_max == 4
+    assert [skill.id for skill in hero.skills] == ["shensu"]

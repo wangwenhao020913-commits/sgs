@@ -52,6 +52,7 @@ from sgs.effects import (
     Modifier,
     ModifierContext,
     ModifierPoint,
+    apply_modifiers,
     behavior_for,
     is_slash,
     place_on_deck,
@@ -82,11 +83,13 @@ from .flow import (
     DeckTopArrange,
     FixedSplit,
     FlowAnswers,
+    PickOption,
     PickSeats,
     SkillFlow,
     watched_cards,
     zero_step_effect,
 )
+from .virtual import pure_virtual_card
 
 __all__ = [
     "BIYUE_FLOW",
@@ -109,6 +112,12 @@ __all__ = [
     "PhaseBodySkill",
     "SHELIE",
     "SHELIE_FLOW",
+    "SHENSU",
+    "SHENSU_BOTH",
+    "SHENSU_FLOW",
+    "SHENSU_OPTIONS",
+    "SHENSU_SKIP_JUDGE_DRAW",
+    "SHENSU_SKIP_PLAY_EQUIP",
     "TISHEN",
     "TISHEN_FLOW",
     "TUXI_FLOW",
@@ -1115,6 +1124,242 @@ _TISHEN = PhaseBodySkill(
 )
 
 
+# ---------------------------------------------------------------------------
+# 夏侯渊【神速】（风包，票 01）：回合开始时一至两项 → 跳阶段 + 无距离【杀】
+#
+# 牌面（`D:\SGS_HEROS\神话再临-风包\夏侯渊\技能.txt`，逐字）：
+#   回合开始时，你可以选择一至两项：
+#   【1】跳过判定阶段和摸牌阶段；
+#   【2】跳过出牌阶段并弃置一张装备牌。
+#   你每以此法选择一项，便视为你使用一张无距离限制的普通【杀】。
+#
+# 三条落地判据（票面 §1.6 的 R1–R4）：
+# - **一至两项** = 三档单选项（`{【1】}` / `{【2】}` / `{两项都选}`）：`SELECT_OPTION` 只有
+#   单选控件，把子集摊成三档**不引入新询问形态**；两项按【1】→【2】逐项结算完。
+# - **无距离限制** = 这一次使用的距离条件豁免：目标池在**技能侧**自算（全体其他存活 →
+#   `TARGET_POOL` 链）。**不**用"修饰器并集"（界武圣② / 武神② 的写法）：链序按 skill_id
+#   字典序，`hero.xiahouyuan.shensu` 排在 `hero.jie_zhugeliang.kongcheng` 之后，并集会把
+#   【空城】刚删掉的目标加回来（探针 `.scratch/feng-xiahouyuan/probe_target_pool_order.py`）。
+# - **跳过阶段** = 阶段推进状态（`host.skip_*_phase`），不新增 `Timing`；被跳过的判定阶段
+#   **不消费**判定区里的牌（规则 §11.5 / 账本行）。
+# ---------------------------------------------------------------------------
+
+SHENSU = hero_skill_id("xiahouyuan", "shensu")
+"""夏侯渊【神速】的全限定技能 id。"""
+
+SHENSU_SKIP_JUDGE_DRAW = "shensu_skip_judge_draw"
+SHENSU_SKIP_PLAY_EQUIP = "shensu_skip_play_equip"
+SHENSU_BOTH = "shensu_both"
+"""三档单选项的 id（闭集；不用裸序号，避免与别的选项表撞键）。"""
+
+SHENSU_OPTIONS: tuple[str, ...] = (
+    SHENSU_SKIP_JUDGE_DRAW,
+    SHENSU_SKIP_PLAY_EQUIP,
+    SHENSU_BOTH,
+)
+"""选项顺序 = 牌面【1】→【2】→"两项"；没有装备牌时只剩【1】（O1：走不通的项不出现）。"""
+
+SHENSU_TARGET_WORDING = "选择一张无距离限制的普通【杀】的目标"
+"""手写选目标询问的逐步文案（`step_requirements["target"]`）。"""
+
+_ASK_SHENSU_EQUIP = "hero.xiahouyuan.shensu.equip"
+"""手写询问位置：弃置一张装备牌（`ask_selection` 的询问位置，逐处唯一）。"""
+
+_SHENSU_ITEM1 = "shensu_item1"
+"""帧私有：【1】的跳过阶段已置位（续跑不重置）。"""
+
+_SHENSU_PAID = "shensu_paid"
+"""帧私有：【2】的装备牌已弃置（续跑不重弃）。"""
+
+_SHENSU_USED = "shensu_used"
+"""帧私有：第 n 张虚拟【杀】已经发起（续跑不重复使用）。"""
+
+_SHENSU_TARGET = "shensu_target"
+"""帧私有：第 n 张虚拟【杀】已经选定的目标座位（续跑不重问）。"""
+
+
+def _shensu_is_equipment(state: GameState, card: Any) -> bool:
+    """这张牌是不是**装备牌**（大类读数据层，与【裸衣】的"基本牌 / 武器牌"同一判据）。"""
+    return card_category(state.pack_id, card.type) is Category.EQUIPMENT
+
+
+def _shensu_equipment_cards(state: GameState, owner: int) -> tuple[int, ...]:
+    """可弃的装备牌：**手牌 + 装备区**里的装备牌（默认读法（一）③"装备牌"含手牌）。"""
+    player = state.player(owner)
+    return tuple(
+        card_id
+        for card_id in (*player.hand, *player.equip)
+        if _shensu_is_equipment(state, state.card(card_id))
+    )
+
+
+def _shensu_equipment_face(host: Any, owner: int) -> Any:
+    """弃牌面的**收窄**：自己的手牌 + 装备区，再按"是不是装备牌"过滤（槽位与 id 同序）。"""
+    slots, card_ids = host.selection_face(
+        owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True
+    )
+    kept = [
+        (slot, card_id)
+        for slot, card_id in zip(slots, card_ids, strict=True)
+        if _shensu_is_equipment(host.state, host.state.card(card_id))
+    ]
+    return tuple(slot for slot, _ in kept), tuple(card_id for _, card_id in kept)
+
+
+def _shensu_options(
+    state: GameState, frame: Frame, owner: int, answers: FlowAnswers
+) -> tuple[str, ...]:
+    """选项步的闭集（可调用档）：付不起【2】时它不出现，故本步恒有候选。"""
+    del frame, answers
+    if not _shensu_equipment_cards(state, owner):
+        return (SHENSU_SKIP_JUDGE_DRAW,)
+    return SHENSU_OPTIONS
+
+
+def _shensu_target_pool(state: GameState, owner: int, card: Any) -> tuple[int, ...]:
+    """虚拟【杀】的目标池：**全体其他存活角色**（无距离限制）再过 `TARGET_POOL` 链。
+
+    距离条件整条豁免（规则 §17.3 L1686–L1688：声明"使用【杀】无距离限制"即可指定任意
+    其他**合法**角色），但"不能成为目标"那一层照常——【空城】【谦逊】一类的删目标回调
+    在这条链上跑（与 `check_targets` 的链尾同源，只是省掉了距离筛）。
+    """
+    everyone = tuple(
+        player.seat for player in state.players if player.alive and player.seat != owner
+    )
+    return tuple(
+        apply_modifiers(
+            ModifierPoint.TARGET_POOL,
+            state,
+            ModifierContext(subject=owner, card=card),
+            everyone,
+        )
+    )
+
+
+def _shensu_use_slash(host: Any, frame: Frame, owner: int, index: int) -> Control:
+    """发起第 ``index`` 张虚拟【杀】：选目标 → ``start_use``，返回 ``"stay"`` / ``None``。"""
+    used_key = f"{_SHENSU_USED}:{index}"
+    if frame.data.get(used_key):
+        return None
+    card = pure_virtual_card(host.state, "slash")
+    pool = _shensu_target_pool(host.state, owner, card)
+    if not pool:
+        # 一个合法目标都没有（其他存活角色全部"不能成为目标"）：不发空询问，这一张【杀】
+        # 不发生；已选的跳过阶段照旧生效（牌面没有回退项）。
+        frame.data[used_key] = True
+        return None
+    target_key = f"{_SHENSU_TARGET}:{index}"
+    target = frame.data.get(target_key)
+    if target is None:
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.TURN_START,
+            skill_id=f"{SHENSU}:target:{index}",
+            options=tuple(f"seat:{seat}" for seat in pool),
+            optional=False,
+        )
+        if host.suspended(answer):
+            return "stay"
+        target = int(str(answer.choice).split(":", 1)[1])
+        frame.data[target_key] = target
+    frame.data[used_key] = True
+    # ``counts=False``：这次使用**不计入**出牌阶段的【杀】次数（规则 §17.10 A2 只约束
+    # "于出牌阶段的空闲时间点使用【杀】"）。照常记账会让回合开始时的这张【杀】把出牌阶段的
+    # 额度用掉（`check_count` 只在自己的出牌阶段读计数）。
+    host.start_use(
+        card,
+        source=owner,
+        targets=(int(target),),
+        use_timing=Timing.TURN_START,
+        counts=False,
+    )
+    return "stay"
+
+
+def _shensu_pay_equipment(host: Any, frame: Frame, owner: int) -> Any:
+    """【2】的成本步：弃一张装备牌并置"跳过出牌阶段"。
+
+    返回 ``"paid"``（已付）/ ``"stay"``（挂起）/ ``None``（**取消【2】整项**）——最后一种是
+    "已动工却在成本步付不起"的默认兜底（`edge-cases.md` §3.1 / 票面 §1.6 R4）：第一张
+    【杀】的结算里装备被【反馈】一类拿走时，不跳出牌阶段、也不出第二张【杀】。
+    """
+    if frame.data.get(_SHENSU_PAID):
+        return "paid"
+    if not _shensu_equipment_cards(host.state, owner):
+        return None
+    picked = host.ask_selection(
+        frame,
+        owner=_ASK_SHENSU_EQUIP,
+        key="shensu:equip",
+        actor=owner,
+        timing=Timing.TURN_START,
+        spec=SelectionSpec(
+            zones=(Zone.HAND, Zone.EQUIP), total=(1, 1), optional=False
+        ),
+        build_face=lambda: _shensu_equipment_face(host, owner),
+    )
+    if host.suspended(picked):
+        return "stay"
+    if not picked:
+        return None
+    control = host.move_in_frame(
+        frame,
+        host.state.refs((int(picked[0]),)),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=owner,
+        actor=owner,
+    )
+    if control == "stay":
+        return "stay"
+    frame.data[_SHENSU_PAID] = True
+    host.skip_play_phase(owner)
+    return "paid"
+
+
+def _shensu_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
+    """提交点：按所选子集逐项结算【1】→【2】（每项各自"跳阶段 + 一张【杀】"）。
+
+    每段一个帧私有游标：跳过阶段只置一次、【2】的牌只弃一次、第 n 张【杀】只发起一次。
+    两张【杀】各自选目标、各自结算（不是一次使用两个目标）。
+    """
+    owner = frame.data["skill_owner"]
+    items = str(answers["items"])
+    if items in (SHENSU_SKIP_JUDGE_DRAW, SHENSU_BOTH):
+        if not frame.data.get(_SHENSU_ITEM1):
+            host.skip_judge_phase(owner)
+            host.skip_draw_phase(owner)
+            frame.data[_SHENSU_ITEM1] = True
+        if _shensu_use_slash(host, frame, owner, 0) == "stay":
+            return "stay"
+    if items in (SHENSU_SKIP_PLAY_EQUIP, SHENSU_BOTH):
+        paid = _shensu_pay_equipment(host, frame, owner)
+        if paid == "stay":
+            return "stay"
+        if paid is None:
+            return None
+        if _shensu_use_slash(host, frame, owner, 1) == "stay":
+            return "stay"
+    return None
+
+
+SHENSU_FLOW = SkillFlow(
+    name="shensu",
+    steps=(PickOption(options=_shensu_options, optional=False, key="items"),),
+    effect=_shensu_effect,
+)
+"""【神速】的一步流水线：选一至两项（三档单选项）→ 按项结算（两张【杀】各自选目标）。"""
+
+
+_SHENSU = PhaseBodySkill(
+    hero_id="xiahouyuan",
+    short_id="shensu",
+    timing=Timing.TURN_START,
+    flow=SHENSU_FLOW,
+)
+
+
 PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _YINGZI,
     _JIE_YINGZI,
@@ -1131,6 +1376,7 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _BOTU,
     _XUNXUN,
     _SHELIE,
+    _SHENSU,
 )
 """L 族十三条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
 票 03 的【克己】、票 05 的【替身】、票 06 的界【克己】、票 07 的界【闭月】、
@@ -1149,6 +1395,11 @@ _REQUIREMENTS: dict[str, str] = {
     "xunxun": "观看牌堆顶四张牌，两张置于牌堆顶、其余置于牌堆底",
     "jushou": "摸三张牌，然后翻面",
     "shelie": "亮出牌堆顶的五张牌，然后获得其中每种花色的牌各一张",
+    "shensu": (
+        "回合开始时，你可以选择一至两项：【1】跳过判定阶段和摸牌阶段；"
+        "【2】跳过出牌阶段并弃置一张装备牌。你每以此法选择一项，"
+        "便视为你使用一张无距离限制的普通【杀】"
+    ),
 }
 """L 族八条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
@@ -1164,6 +1415,12 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
     "shelie": {
         "card": "获得其中每种花色的牌各一张（每种花色至多一张，可一张不选；"
         "未获得的置入弃牌堆）"
+    },
+    # 风包夏侯渊【神速】（票 01）：选项步 / 手写选目标 / 弃装备三处逐步文案。
+    "shensu": {
+        "items": "选择一至两项：【1】跳过判定阶段和摸牌阶段；【2】跳过出牌阶段并弃置一张装备牌",
+        "target": SHENSU_TARGET_WORDING,
+        "card": "弃置一张装备牌（手牌或装备区）",
     },
 }
 """多步阶段体技能的逐步文案（M6 票 01）；键 = 短 id → 步骤名 → 文案。"""

@@ -492,7 +492,7 @@ const sessionBodiesSince = (from) =>
 await ui.loadHeroCatalog();
 const catalogVersions = ui.heroVersions();
 check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版 + 自制包，按真名分组）",
-  ui.state.heroCatalog.length === 34 && catalogVersions.length === 60,
+  ui.state.heroCatalog.length === 35 && catalogVersions.length === 61,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -11478,12 +11478,15 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
  * 两段：
  *   ① 合成载荷（字段与真 payload 同形）：窗口不关、不占选项行、无懈可提交、下一次取牌
  *      复用同一个链键；
- *   ② **真生产路径**（种子 526、5 人、random AI、人类座位 0）：开局就是"人类手里有【无懈】、
+ *   ② **真生产路径**（种子 1303、5 人、random AI、人类座位 0）：开局就是"人类手里有【无懈】、
  *      五谷已亮牌"的 RESPOND 窗口；逐字段断言 DOM 读的是 `harvest.revealed / taken_by /
  *      targets / current`，再驱动到真实取牌步，断言同一窗口切回正常取牌模式。
  *      （票 12 切每座位 `ai:<seat>` 子流后原种子 198 不再落到这个窗口，按本文件纪律
  *      在 5 人 random AI 里重扫：526 的 revealed=5 / current=3、且人类手里真有【无懈】，
- *      与旧断言同形。）
+ *      与旧断言同形。**feng-xiahouyuan 票 01 换池（60→61 版本 / 34→35 真名）后 526 的
+ *      开局第一问变成 PLAY_PHASE**，按同一条判据（`RESPOND` / `NULLIFY` / `harvest.active` /
+ *      revealed=5 / current=3 / 人类持【无懈】）从 1 起重扫，首个命中 = **1303**；
+ *      探针 `.scratch/feng-xiahouyuan/rescan_harvest_seed.py`。）
  */
 {
   const harvestCard = (id, name, type, description) => ({
@@ -11708,14 +11711,14 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && Array.from($("t-options-home").children).includes($("t-options")),
     `dialogHidden=${$("t-dialog").hidden} revealHidden=${$("t-dialog-reveal").hidden} revealChildren=${$("t-dialog-reveal").children.length} key=${ui.state.dialog.key}`);
 
-  // ---- ④ 真生产路径：种子 526（5 人）开局 = 人类持有【无懈】的五谷无懈窗口 ----
+  // ---- ④ 真生产路径：种子 1303（5 人）开局 = 人类持有【无懈】的五谷无懈窗口 ----
   ui.state.sessionId = null;
   ui.state.view = null;
-  await newSession(526, { player_count: 5 });
+  await newSession(1303, { player_count: 5 });
   const realResponse = ui.state.view.pending;
   const realHarvest = realResponse && realResponse.harvest;
   const realKey = ui.state.dialog.key;
-  check("U2-R7 真会话（种子 526 / 5 人 / random AI）：开局 pending 就是带 harvest 的无懈 RESPOND",
+  check("U2-R7 真会话（种子 1303 / 5 人 / random AI）：开局 pending 就是带 harvest 的无懈 RESPOND",
     !!realResponse && realResponse.kind === "RESPOND" && realResponse.cause === "NULLIFY"
       && !!realHarvest && realHarvest.active === true
       && realHarvest.revealed.length === 5 && realHarvest.current === 3,
@@ -18161,10 +18164,12 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   /* ---- B1：五谷亮牌弹窗在源牌结算完时当场收起 -------------------------------- */
   resetAll();
-  // 种子 526 / 5 人：开局的人类第一问就是【五谷丰登】的逐目标无懈窗口（既有用例同源；
-  // 票 12 切每座位子流后原种子 198 失效，按本文件纪律重扫）。
+  // 种子 1303 / 5 人：开局的人类第一问就是【五谷丰登】的逐目标无懈窗口（既有用例同源；
+  // 票 12 切每座位子流后原种子 198 失效；feng-xiahouyuan 票 01 换池后 526 亦失效，
+  // 按同一固定策略与命中判据从 1 起重扫到 1303（探针
+  // `.scratch/feng-xiahouyuan/rescan_harvest_seed.py`）。
   const harvestBody = await post("/api/sessions", {
-    player_count: 5, ai: "random", human_seat: 0, timeout_seconds: null, seed: 526,
+    player_count: 5, ai: "random", human_seat: 0, timeout_seconds: null, seed: 1303,
   });
   ui.state.sessionId = harvestBody.session_id;
   ui.state.view = null;

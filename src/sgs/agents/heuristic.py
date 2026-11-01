@@ -1871,6 +1871,12 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         # 伤害），故给正分；不获得只作为"没有合格牌"的退化档，不由 AI 主动选择。
         "luoyi_gain": 2.5,
         "luoyi_skip": 0.0,
+        # 风包夏侯渊【神速】（票 01）的选项步：三档单选项。"【1】"只有代价（跳判定 / 摸牌）
+        # 换来一张无距离【杀】，是该技能值得发动的那一档；"【2】"要多付一张装备牌 + 跳出牌
+        # 阶段，贪心不选；"两项都选"= 两档之和、略低于【1】（多付一张装备）。
+        "shensu_skip_judge_draw": 2.0,
+        "shensu_skip_play_equip": -1.0,
+        "shensu_both": 1.0,
     }
 )
 
@@ -1996,6 +2002,9 @@ _HOSTILE_SEAT_STEPS = (
     # 攻心（票 01；界吕蒙 ☆ / 神吕蒙移动版共用）：看谁的牌 + 可能弃 / 置顶他的牌 ⇒ 对手。
     # 不登记会落进"帮盟友"的缺省分支（`docs/agents/ai-adaptation.md` §1 第 2 条点名的坑）。
     "gongxin:",
+    # 风包夏侯渊【神速】（票 01）：每张虚拟【杀】的**目标**——手写询问用全限定 skill_id
+    # （``hero.xiahouyuan.shensu:target:0/1``），不登记 AI 会拿【杀】打队友。
+    "hero.xiahouyuan.shensu:",
 )
 """座位步的**语义分组**：这些步骤里的座位是"被指向的对手"，其余（治疗 / 给牌）是"被帮助的人"。
 
@@ -3053,6 +3062,24 @@ def _score_shizhan(query: Query, action: Action, view: PlayerView) -> float:
     return 1.0 if slashes else -_unknown_card_value(view)
 
 
+def _score_shensu(query: Query, action: Action, view: PlayerView) -> float:
+    """风包夏侯渊【神速】（票 01）：跳判定 + 摸牌换一张无距离【杀】。
+
+    常态不划算——跳过摸牌阶段少摸两张，只换一张【杀】；**能补刀**时才值得：敌方有人
+    ``hp <= 1``（一张【杀】就能打死，且这个技能无距离限制、够得着任何位置）。读的都是
+    公开面（体力 + 身份关系），不碰隐藏信息。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query
+    for player in view.players:
+        if player.seat == view.seat or not player.alive:
+            continue
+        enemy, _ally = _identity_relation(view, player.seat)
+        if player.hp <= 1 and enemy >= 0.5:
+            return 3.0
+    return -1.0
+
+
 # ---------------------------------------------------------------------------
 # S1 技能表 top3（票 22）：据守 / 贯石斧 / 谦逊
 #
@@ -3217,6 +3244,10 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.zhangliao.tuxi": (
         _constant(3.5),
         "放弃摸牌改为至多拿两张：净赚（拿到 ≤2 张、代价是少摸 2 张）",
+    ),
+    "hero.xiahouyuan.shensu": (
+        _score_shensu,
+        "跳判定 + 摸牌换一张无距离【杀】：常态少摸两张不划算，只在敌方 1 血能补刀时发动",
     ),
     "hero.xuchu.luoyi": (
         _constant(2.0),

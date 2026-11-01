@@ -184,6 +184,10 @@ const OPTION_LABELS = Object.freeze({
   basic: "基本牌",
   trick: "锦囊牌",
   equipment: "装备牌",
+  // 风包夏侯渊【神速】：一至两项（三档单选项；"两项都选"是【1】+【2】）。
+  shensu_skip_judge_draw: "【1】跳过判定阶段和摸牌阶段",
+  shensu_skip_play_equip: "【2】跳过出牌阶段并弃置一张装备牌",
+  shensu_both: "两项都选",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。

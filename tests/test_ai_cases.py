@@ -2197,3 +2197,70 @@ def test_d4_does_not_swap_to_a_shorter_weapon_for_a_target_it_would_lose():
         assert isinstance(action, UseCard) and is_slash(behavior_for(action.card)), (
             f"应当先出够得着的【杀】，实得 {action!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# S2 技能表（feng-xiahouyuan 票 01）：夏侯渊【神速】只在该补刀时发动
+#
+# 判据来自 :func:`sgs.agents.heuristic._score_shensu`：跳过摸牌阶段要少摸两张、只换一张
+# 【杀】，常态不划算；只有"敌方能被这一张【杀】打死"（hp ≤ 1、且敌方概率过半）才值得。
+# 两局只差敌方那 3 点体力，答案必须相反——否则就是"每回合自废摸牌"的那类蠢。
+# ---------------------------------------------------------------------------
+
+SHENSU_SKILL = "hero.xiahouyuan.shensu"
+SHENSU_AI_SEAT = 0
+"""本构造局面里 AI 的座位：主公（身份对本人可见，故能算出敌我概率）。"""
+
+SHENSU_ENEMY_SEAT = 1
+
+
+def _shensu_query(*, enemy_hp: int):
+    """造「座位 0 = 主公夏侯渊、座位 1 = 反贼」的回合开始，停在【神速】的发动询问。"""
+    hand = tuple(cards_of_type(PACK, "dodge")[:2])
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="xiahouyuan", identity=Identity.LORD, hand=hand),
+            SeatSpec(hp=enemy_hp, identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.RENEGADE),
+        ],
+        deck=deck_excluding(PACK, *hand),
+        turn_seat=SHENSU_AI_SEAT,
+        phase=Phase.PREPARE,
+        rule_config=RuleConfig(player_count=4),
+    )
+    engine = Engine.from_state(state, seed=2026)
+    run_queries(
+        engine,
+        [PassPlayer() for _ in range(4)],
+        lambda current: current.pending is not None
+        and current.pending.kind == "SKILL_ACTIVATION"
+        and current.pending.skill_id == SHENSU_SKILL,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达【神速】的发动询问前就停了"
+    return engine, query
+
+
+def test_the_shensu_fixture_reaches_a_real_turn_start_window():
+    """夹具自检：这一问确实是【神速】的发动询问、问的是主公自己、敌方只剩 1 体力。"""
+    _engine, query = _shensu_query(enemy_hp=1)
+
+    assert query.kind == "SKILL_ACTIVATION"
+    assert query.actor == SHENSU_AI_SEAT
+    assert query.skill_id == SHENSU_SKILL
+    assert query.view.players[SHENSU_ENEMY_SEAT].hp == 1
+    assert query.view.players[SHENSU_AI_SEAT].identity == Identity.LORD.value
+
+
+def test_s2_shensu_activates_when_the_slash_can_finish_off_an_enemy():
+    """敌方 1 体力 ⇒ 发动（这一张无距离【杀】能补刀）。"""
+    _engine, query = _shensu_query(enemy_hp=1)
+    _assert_activation(query, skill_id=SHENSU_SKILL, activate=True)
+
+
+def test_s2_shensu_passes_when_the_slash_cannot_finish_anyone():
+    """敌方满体力 ⇒ Pass（为一张【杀】放弃摸牌阶段的两张牌不划算）。"""
+    _engine, query = _shensu_query(enemy_hp=4)
+    _assert_activation(query, skill_id=SHENSU_SKILL, activate=False)

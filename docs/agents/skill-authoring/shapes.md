@@ -49,6 +49,7 @@
 | 觉醒 / 限定（一次性转变） | 「觉醒技 / 限定技，…」 | `hero.jie_xushu.qianxue`、`hero.jie_zhangfei.tishen`；**A 族（主动技）的限定技** = `ActiveSkill(skill_type=LIMITED)`，样板 `hero.tao_liubei.yiqi` |
 | 阶段体（阶段里改摸牌/弃牌） | 「摸牌阶段，你可以多摸一张牌」 | `hero.zhouyu.yingzi` |
 | 阶段体 + 亮出牌堆顶、按花色取 0~k（一行式） | 「摸牌阶段，你可以改为亮出牌堆顶的五张牌，然后获得其中每种花色的牌各一张」 | `hero.shen_lvmeng_mobile.shelie` |
+| **帧外时机**钩子 + 单步选项（回合开始时 / 回合结束时） | 「回合开始时，你可以选择一至两项…」「回合结束时…执行一个额外的回合」 | `hero.xiahouyuan.shensu`（`TURN_START`）、`hero.jie_lvmeng.botu`（`TURN_END`） |
 | 状态位 + 触发器 | 「横置 / 翻面 / 标记」 | 横置 = `Player.chained` + `Engine.set_chained`；翻面 = `Player.flipped` + `Engine.set_flipped`（首个载体：移动版界曹仁【据守】） |
 
 > **第 1 行的锁定技变体**：牌面写「锁定技」时形状不变、但那一问**不发**（`locked=True`，派发环的
@@ -67,6 +68,7 @@
 
 | 时机 | 常见用途 |
 |---|---|
+| `TURN_START` | **回合开始时**（夏侯渊【神速】）：与 `PHASE_PREPARE` **不是一个时点**（它在准备阶段之前）。帧外派发点 = `_dispatch_phase_body` 的第五个消费者（`_turn_start`），每回合清理带一次性闸（钩子挂起重入不重复清理） |
 | `PHASE_PREPARE` | 准备阶段（洛神、勤学、替身、观星） |
 | `PHASE_DRAW` | 摸牌阶段（英姿、突袭、裸衣、恂恂） |
 | `PHASE_DISCARD_START` | 弃牌阶段开始（克己） |
@@ -202,6 +204,7 @@ U1-06 **不接 click**，这一问的唯一入口是清单画出的浮动按钮�
 | 选自己的手牌 / 装备区 | 渲得出 | 翻 `preactivated=True`，并补 AI 覆盖场景（`tests/test_heuristic_ai.py` 的 `_COVERAGE_CASES` 会机械要） | 【流离】【清俭】 |
 | 选**别人**的公开区域（装备 / 判定），且 `available` 保证非空 | 渲得出 | 同上 | 【麒麟弓】 |
 | 座位步，池由 `available` 门保证非空 | 渲得出 | 同上；也可以按"直提态 + 逐步问"不翻（【突袭】当前就是这一档） | 【突袭】 |
+| 选项步（闭集恒非空） | 渲得出 | 可翻可不翻；【神速】取**不翻**（激活问走直提态，选项 / 目标 / 弃牌逐步问） | 【神速】 |
 | 读别人的**手牌**（隐藏面：`reveal_hand=False` / `_hidden_face`） | 渲不出 | **别翻** | 【反馈】【利驭】 |
 
 ### 4.1 实现方式（闭集，一问一行）
@@ -218,6 +221,8 @@ ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ �
 | 未知区域弹窗 | 弹窗：他人手牌 / 装备 / 判定里盲挑一张 | `modal.js:stepDialogKind`（`unknown`） | `hero.jie_simayi.fankui` |
 | 排列弹窗 | 弹窗：牌堆顶排列（前端唯一可代答的面） | `modal.js:stepDialogKind`（`arrange`） | `hero.zhugeliang.guanxing` |
 | 亮牌弹窗 | 弹窗：亮出后逐张确认 | `modal.js:stepDialogKind`（`reveal`） | `hero.guojia.yiji` |
+| 小选项按钮组 | 牌桌：`SELECT_OPTION` 的按钮组（≤3 项、且没有 `option_labels`） | `pending.js:renderKind`（`options` 档） | 雌雄双股剑 / 界孙尚香【结姻】 |
+| 选座位（点场上武将） | 牌桌：`SELECT_OPTION` + `option_seats`，点武将 = 选中那条 `seat:N` | `pending.js:renderKind`（`seat` 档）/ `interaction.js` | `hero.zhangliao.tuxi` |
 | 单选项确认（提交 / 放弃） | 牌桌：标题取 `requirement`，**读不到**选项标签 | `pending.js:isSingleOptionalOption` | `hero.sunshangxiang.xiaoji` |
 | 直提态 | 牌桌：唯一候选直接提交，不铺面（提示条只做说明） | `pending.js:directAction` | `hero.jie_zhangliao.tuxi` |
 | fail-closed | 牌桌：一句明话，不铺任何控件（不发明合法性） | `pending.js:renderUnsupported` | —（并写一句为什么没有面） |
@@ -233,7 +238,7 @@ ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ �
 |---|---|---|
 | 无 | 全树没有对应字段 / 帧 / 时机 | **标记**（没有通用的"标记"概念，技能要计数就落座位布尔字段） |
 | 只有枚举位 | `Timing` 里有名字，但没人派发、没有流程 | **拼点**（L15 只留枚举位，`RANK_COMPARE` 帧型空转） |
-| 已解封 | 有帧 / 钩子 / 步骤 / 状态位，能被技能用 | **横置**（`Player.chained`）；**翻面**（`Player.flipped` + 「回合开始前」跳过整回合，移动版界曹仁【据守】是首个载体） |
+| 已解封 | 有帧 / 钩子 / 步骤 / 状态位，能被技能用 | **横置**（`Player.chained`）；**翻面**（`Player.flipped` + 「回合开始前」跳过整回合，移动版界曹仁【据守】是首个载体）；**`TURN_START` 的帧外派发**（夏侯渊【神速】：`_turn_start` 改走 `_dispatch_phase_body` + 一次性清理闸） |
 
 判定完：
 

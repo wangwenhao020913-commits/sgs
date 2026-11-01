@@ -484,11 +484,12 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 60 and len(catalog) == 34, (
+    assert len(flat) == 61 and len(catalog) == 35, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
-        "feng-weiyan 票 01 加风包魏延 ⇒ 60 / 34（新真名「魏延」⇒ 真名数 +1）"
+        "feng-weiyan 票 01 加风包魏延 ⇒ 60 / 34（新真名「魏延」⇒ 真名数 +1）；"
+        "feng-xiahouyuan 票 01 加风包夏侯渊 ⇒ 61 / 35（新真名「夏侯渊」⇒ 真名数 +1）"
     )
     for group in catalog:
         true_name = group["true_name"]
@@ -5294,7 +5295,9 @@ def test_the_web_snapshot_carries_each_seats_hero_name_and_kingdom() -> None:
         assert hero is not None
         assert payload["hero_name"] == hero.name, f"座位 {payload['seat']} 的武将名"
         assert payload["kingdom"] == hero.kingdom.value
-        assert payload["kingdom_label"] in ("魏", "蜀", "吴", "群")
+        from sgs_web.display import KINGDOM_LABELS
+
+        assert payload["kingdom_label"] in set(KINGDOM_LABELS.values())
 
 
 def test_the_two_versions_of_one_true_name_stay_distinguishable_in_the_payload() -> None:
@@ -6387,7 +6390,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 130, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 131, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)

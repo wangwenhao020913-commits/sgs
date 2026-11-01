@@ -192,7 +192,21 @@ def render(record: JournalRecord) -> str:
                 f"#{record.seq:<4} 亮明身份 座位={record.seat} "
                 f"{IDENTITY_LABELS[record.identity]}"
             )
-        return f"#{record.seq:<4} 洗牌 {_zone_label(record.from_zone)}→牌堆 {_cards(record.cards)}"
+        if record.delta_type == "hp_max_change":
+            # 体力上限变化（觉醒技的"减 1 点体力上限"）：只作调试转写。
+            return (
+                f"#{record.seq:<4} 体力上限 座位={record.seat} "
+                f"{record.before}→{record.after}（{record.amount:+d}）"
+            )
+        if record.delta_type == "deck_shuffle":
+            return (
+                f"#{record.seq:<4} 洗牌 {_zone_label(record.from_zone)}→牌堆 "
+                f"{_cards(record.cards)}"
+            )
+        # 其余 delta（标记 / 技能授予与失去 / 帧标签 / 轮次…）不专门转写：只报类型与序号，
+        # **不猜字段**。这里是旧的 `deck_shuffle` 兜底分支，任何未覆盖的 delta 都会在读
+        # `from_zone` 时炸掉——换池后 seed 7 的 5 人局出现觉醒技，才把它暴露出来。
+        return f"#{record.seq:<4} {record.delta_type}"
     if kind == "query":
         candidates = "、".join(action.kind for action in record.query.legal_actions)
         return (
