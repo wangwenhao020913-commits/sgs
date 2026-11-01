@@ -9,7 +9,8 @@
 1. 出牌阶段只能对自己使用；对他人 / 空目标 = 不在候选集合内（提交即拒）；
 2. 使用后 ``wine_active=True`` + 一条 ``wine_change``；本回合下一张【杀】的来源侧 +1，
    被【闪】抵消 / 未造成伤害也消耗，不留给再下一张；对锦囊 / 其它基本牌不生效、不消耗；
-3. 濒死自救只能对自己、回复 1、**不产生**加伤；两种用法共用同一个每回合一次计数键；
+3. 濒死自救只能对自己、回复 1、**不产生**加伤，且**无次数限制、不记账、不占出牌阶段
+   那一次**（用户 2026-11-02 裁定：两条轴）；
 4. 回合末清 ``wine_active``（含一条 ``wine_change=false``），下回合可再用；
 5. 加伤只烘进**初始目标**的实际伤害：火杀 + 酒命中横置角色时，传导基数是 2，
    传导目标不再吃酒的 +1（spec §5.1.1 第 6 条）；
@@ -260,7 +261,7 @@ def test_play_phase_wine_is_limited_to_once_per_turn():
             UseCard(card=engine.state.card(second), targets=(0,), answers_seq=query.seq)
         )
     assert engine.state.player(0).card_use_counts.get("wine") == 1, (
-        "两种用法共用的计数键只记一次"
+        "出牌阶段那一次照记账（濒死自救另算，不占用也不增加这个数）"
     )
 
 
@@ -771,7 +772,7 @@ def test_a_wine_boosted_fire_slash_conducts_with_the_boosted_base():
 
 
 # ---------------------------------------------------------------------------
-# 濒死自救：只能对自己、回复 1、不产生加伤；两种用法共用一个计数键
+# 濒死自救：只能对自己、回复 1、不产生加伤；无次数限制、不记账（用户 2026-11-02）
 # ---------------------------------------------------------------------------
 
 
@@ -914,7 +915,9 @@ def test_near_death_wine_recovers_one_without_activating_the_bonus():
     assert engine.state.player(0).hp == 1, "【酒】濒死自救回复 1 点"
     assert engine.state.player(0).wine_active is False, "濒死用法不产生加伤"
     assert _wine_changes(engine) == [], "濒死用法一条置位 delta 都不发"
-    assert engine.state.player(0).card_use_counts.get("wine") == 1, "计数照记到同一个键"
+    assert engine.state.player(0).card_use_counts.get("wine", 0) == 0, (
+        "濒死自救**不记账**：无次数限制，也不占用出牌阶段那一次（用户 2026-11-02 裁定）"
+    )
 
     use = next(
         data
@@ -929,8 +932,11 @@ def test_near_death_wine_recovers_one_without_activating_the_bonus():
     )
 
 
-def test_a_play_phase_wine_blocks_the_near_death_self_rescue_in_the_same_turn():
-    """两种用法共用同一个计数键：出牌阶段用过 ⇒ 同一回合濒死时不再给【酒】。"""
+def test_a_play_phase_wine_does_not_block_the_near_death_self_rescue_in_the_same_turn():
+    """【酒】的两种用法是**两条轴**（用户 2026-11-02 裁定）：出牌阶段增伤每回合一次；
+    濒死自救**无次数限制、也不占用那一次**——黄盖本回合喝过酒增伤，苦肉进入濒死后照样
+    能喝酒自救。故这里先出牌阶段喝一次，再进濒死，候选里【酒】照常出现。
+    """
     first, second = WINE[0], WINE[1]
     engine, players = _duel_into_near_death(hand=(first, second, DUEL[0]))
     used: list[str] = []
@@ -962,20 +968,24 @@ def test_a_play_phase_wine_blocks_the_near_death_self_rescue_in_the_same_turn():
 
     query = engine.pending
     assert engine.state.player(0).hp == 0, "先进入濒死"
-    assert engine.state.player(0).card_use_counts.get("wine") == 1
-    assert not [
+    assert engine.state.player(0).card_use_counts.get("wine") == 1, "出牌阶段那一次照记账"
+    offers = [
         action
         for action in query.legal_actions
         if isinstance(action, UseCard) and action.card.type == "wine"
-    ], "同一回合的第二次【酒】在濒死窗口里也不给候选"
-    with pytest.raises(IllegalActionError):
-        engine.submit(
-            UseCard(card=engine.state.card(second), targets=(0,), answers_seq=query.seq)
-        )
+    ]
+    assert offers, "出牌阶段喝过酒**不挡**同一回合的濒死自救（两条轴）"
+    assert {action.targets for action in offers} == {(0,)}, "自救目标恒为濒死者自己"
+    engine.submit(offers[0])
+    _advance(engine, players, lambda e: e.state.player(0).hp == 1 and not e.stack)
+    assert engine.state.player(0).hp == 1, "自救成功"
+    assert engine.state.player(0).card_use_counts.get("wine") == 1, (
+        "自救不记账 ⇒ 出牌阶段那一次仍然是 1（没有被加一次）"
+    )
 
 
-def test_a_near_death_self_rescue_uses_up_the_play_phase_wine_for_that_turn():
-    """反向：濒死自救用掉唯一一次 ⇒ 恢复后的出牌阶段不再有【酒】候选。"""
+def test_a_near_death_self_rescue_leaves_the_play_phase_wine_available():
+    """反向：濒死自救**不消耗**出牌阶段那一次 ⇒ 救回之后同回合仍能喝酒增伤。"""
     first, second = WINE[0], WINE[1]
     engine, players = _duel_into_near_death(hand=(first, second, DUEL[0]))
     rescued: list[str] = []
@@ -1013,16 +1023,12 @@ def test_a_near_death_self_rescue_uses_up_the_play_phase_wine_for_that_turn():
     query = engine.pending
     assert engine.state.player(0).hp == 1, "自救成功、回到出牌阶段"
     assert engine.state.player(0).wine_active is False
-    assert engine.state.player(0).card_use_counts.get("wine") == 1
-    assert not [
+    assert engine.state.player(0).card_use_counts.get("wine", 0) == 0, "自救不记账"
+    assert [
         action
         for action in query.legal_actions
         if isinstance(action, UseCard) and action.card.type == "wine"
-    ], "同一个键：濒死自救用掉后，出牌阶段不能再喝"
-    with pytest.raises(IllegalActionError):
-        engine.submit(
-            UseCard(card=engine.state.card(second), targets=(0,), answers_seq=query.seq)
-        )
+    ], "自救不占用出牌阶段那一次 ⇒ 出牌阶段照常能喝【酒】增伤"
 
 
 # ---------------------------------------------------------------------------
@@ -1108,8 +1114,8 @@ def test_a_wine_used_in_a_previous_turn_does_not_block_a_near_death_self_rescue(
 
     assert engine.state.player(0).hp == 1, "跨回合濒死自救成功（回复 1）"
     assert engine.state.player(0).wine_active is False, "自救不产生加伤"
-    assert engine.state.player(0).card_use_counts.get("wine") == 1, (
-        "这一次自救记在 Q 的回合上，仍是每回合一次"
+    assert engine.state.player(0).card_use_counts.get("wine", 0) == 0, (
+        "濒死自救不记账（无论谁的回合）"
     )
 
     _advance(

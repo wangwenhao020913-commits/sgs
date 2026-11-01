@@ -54,12 +54,14 @@ from sgs.data import (
     hero_skill_id,
 )
 from sgs.effects import (
+    CARD_BEHAVIORS,
     CandidateScope,
     CarrierKind,
     DamageNature,
     Modifier,
     ModifierContext,
     ModifierPoint,
+    PEACH_RESPONSE_CARD,
     behavior_for,
     check_count,
     check_targets,
@@ -2968,7 +2970,19 @@ _GUOHUO_PROVIDER_STAGE = "guohuo_provider_stage"
 **与出牌阶段入口分开住**：提供者在**外层窗口的帧**上跑（【杀】的结算帧 / 锦囊的结算帧 /
 濒死帧），出牌阶段入口在 SKILL 帧上跑——两套段机各自推进，共用的只有质疑 / 验明 / 结果
 那一段。收尾**不压任何帧**：产物写进 ``PROVIDER_CARD_KEY``、"需要是否被满足"写进
-``PROVIDER_SATISFIED_KEY``，由外层窗口按自己那一份规则消费（票 03）。
+``PROVIDER_SATISFIED_KEY``，由外层窗口按自己那一份规则消费（票 03）。"""
+
+_GUOHUO_SELF_RESCUE_NAMES: frozenset[str] = frozenset(
+    type_id
+    for type_id, behavior in CARD_BEHAVIORS.items()
+    if behavior.target_rule.near_death_self_only
+)
+"""**濒死自救**能当【桃】用的牌型：行为表声明 ``near_death_self_only`` 的那几张（当前只有
+【酒】）。
+
+与真牌路径（`effects/actions.py:_peach` 的候选过滤）读**同一份**声明，故"濒死者自己手牌里
+能给什么"与"蛊惑能声明什么"不会各说各话；用户 2026-11-02 裁定：濒死自救【酒】与【桃】同档，
+**不受**出牌阶段那次酒的限制。
 """
 
 
@@ -3118,7 +3132,9 @@ def _guohuo_provider_offers(state: GameState, ctx: ModifierContext, current: Any
     return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
 
-def _guohuo_response_names(state: GameState, required: str) -> dict[str, str]:
+def _guohuo_response_names(
+    state: GameState, required: str, *, asker: int | None = None, dying: int | None = None
+) -> dict[str, str]:
     """**"需要牌"窗口**里可声明的牌名：``显示名 → 牌型 id``（只留能当 ``required`` 的）。
 
     与出牌阶段的 :func:`_guohuo_legal_names` 同一张底表（基本牌 + 普通锦囊、且本牌堆真有），
@@ -3126,11 +3142,20 @@ def _guohuo_response_names(state: GameState, required: str) -> dict[str, str]:
     判"它能不能充当这次响应"（牌名闸门 ``satisfies_required``，杀族请求因此含火 / 雷【杀】）。
     两道闸都只有一份实现，不给技能再写一份"什么牌能当什么牌"。产物按**纯虚拟牌**试闸：
     它要的是牌名，与来源牌的牌面（花色 / 点数）无关。
+
+    **求桃窗口的语境放宽**（用户 2026-11-02 裁定）：牌名闸门是逐字比对的，【酒】永远不
+    满足 ``peach``；但**濒死者自己**被问时，【酒】与【桃】是同一档自救牌（真牌路径由
+    ``TargetRule.near_death_self_only`` 表达同一件事，见 `effects/actions.py:_peach`）。
+    故这里按同一份语境补一条：``asker == dying`` ⇒ 允许声明【酒】。别人濒死时**不**放宽
+    （酒只能自救）；濒死自救的酒**不受**出牌阶段那次酒的限制（不查计数、也不记账）。
     """
+    extra: frozenset[str] = frozenset()
+    if PEACH_RESPONSE_CARD == required and dying is not None and asker == dying:
+        extra = _GUOHUO_SELF_RESCUE_NAMES
     return {
         name: type_id
         for name, type_id in _guohuo_declaration_table(state).items()
-        if satisfies_required(pure_virtual_card(state, type_id), required)
+        if type_id in extra or satisfies_required(pure_virtual_card(state, type_id), required)
     }
 
 
@@ -3491,7 +3516,18 @@ def guohuo_provider(host: Any, frame: Any, actor: int, timing: Timing) -> Contro
 
     # ---- 段 2：声明牌名（**只列能当窗口要的那张牌的牌名**）-------------------
     if stage in ("card", "name"):
-        table = _guohuo_response_names(state, str(required))
+        # 求桃窗口：濒死者**本人**被问时【酒】与【桃】同档（用户 2026-11-02 裁定）。
+        # "濒死者是谁"由窗口帧给出（`near_death_ask` 的 `target`），不另推窗口形状。
+        table = _guohuo_response_names(
+            state,
+            str(required),
+            asker=actor,
+            dying=(
+                int(frame.data["target"])
+                if frame.kind is FrameKind.NEAR_DEATH and "target" in frame.data
+                else None
+            ),
+        )
         if not table:  # 本牌堆没有能当它的牌名 ⇒ 这次响应没发生（零副作用）
             _give_up()
             return None

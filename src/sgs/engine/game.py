@@ -1545,6 +1545,10 @@ class Engine:
             source=asker,
             targets=(dying,),
             use_timing=Timing.NEAR_DEATH_AT,
+            # 濒死自救的【酒】**不记账**（无次数限制、也不占用出牌阶段那一次）：用户
+            # 2026-11-02 裁定。求桃窗口里唯一声明 ``near_death_self_only`` 的牌就是【酒】，
+            # 故这里读行为表而不是写死牌名；【桃】本来无次数上限，记账与否等价。
+            counts=not behavior_for(card).target_rule.near_death_self_only,
         )
 
     def move_used_card_to_processing(self, frame: Frame) -> Control:

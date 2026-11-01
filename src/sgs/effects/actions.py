@@ -881,12 +881,16 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
     - ``TargetRule.near_death_self_only`` 的牌（【酒】）只在**濒死者自己**被问时进候选；
       【桃】不声明它，故"他人对濒死者出【桃】"不受影响。——单靠 ``self_only`` 会误伤
       【桃】（它的 ``self_only`` 只描述出牌阶段的目标池）。
-    - 次数上限照走 ``check_count``：本回合已用过【酒】（无论出牌阶段加伤还是上一次濒死
-      自救）⇒ 这次求桃不再给【酒】候选，出牌阶段与濒死自救因此共用**同一个**计数键。
+    - 次数上限：**濒死自救不查次数**（用户 2026-11-02 裁定）。【酒】的两种用法是两条轴——
+      出牌阶段增伤每回合一次；濒死自救**无次数限制、也不占用那一次**（黄盖本回合喝过酒
+      增伤，苦肉进入濒死后照样能喝酒自救，且可连喝到脱离濒死）。故 ``near_death_self_only``
+      的牌跳过 ``check_count``；【桃】本来无次数上限，查与不查等价。
 
     **提供者路径**（票 03）：除了真牌，**"需要牌时"的提供者**（【蛊惑】扣置一张手牌当【桃】）
     也在这里产出候选——它走 ``CANDIDATES`` 的 ``PEACH`` 语境，与真牌同一个槽位。它**不是**
     转化技：受理时已经扣置 / 质疑 / 验明完毕，故不进下面那条"确认即定死"的通道。
+    它的**牌名候选**读同一份语境判据（见 `skills/active.py:_guohuo_response_names`）：
+    濒死者本人是于吉时【酒】与【桃】都在声明表里。
 
     **转化源路径**（W4-3）：除了真牌，**能把牌当【桃】的转化技**（当前只有华佗【急救】）
     也在这里产出候选——红牌（手牌 ∪ 装备）当【桃】，目标仍是濒死者。候选集合与
@@ -899,7 +903,10 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
         UseCard(card=card, targets=(dying,), answers_seq=answers_seq)
         for card in _usable_hand(state, seat, UseContext.NEAR_DEATH)
         if (seat == dying or not behavior_for(card).target_rule.near_death_self_only)
-        and not check_count(state, seat, card)
+        and (  # 濒死自救**不查次数**（用户 2026-11-02 裁定，见上面的 docstring）
+            behavior_for(card).target_rule.near_death_self_only
+            or not check_count(state, seat, card)
+        )
     ]
     actions.extend(_transformed_peaches(state, seat, dying, answers_seq))
     # "需要牌时"的**提供者**（票 03）：同【闪】窗口那一趟整段追加——【蛊惑】扣置一张手牌

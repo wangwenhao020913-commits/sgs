@@ -916,6 +916,7 @@ class _WindowSeat:
         strike: int | None = None,
         designation: tuple[int, int] | None = None,
         guohuo: tuple[str, ...] = (),
+        guohuo_name: str | None = None,
         doubt: bool = False,
         rescue: int | None = None,
         response: int | None = None,
@@ -927,6 +928,8 @@ class _WindowSeat:
         """出牌阶段提交"借刀 · 持刀者 + 附带指定 Bn"（``(holder, Bn)``；只用一次）。"""
         self.guohuo = guohuo
         """在**需要这些牌名**的窗口里选【蛊惑】（``dodge`` / ``slash`` / ``peach`` / ``nullify``）。"""
+        self.guohuo_name = guohuo_name
+        """【蛊惑】的声明牌名：只在 ``:name`` 那一问里答（``None`` = 取第一个候选）。"""
         self.doubt = doubt
         self.rescue = rescue
         """求桃窗口打出的**真牌**（座位 2 的代救）。"""
@@ -987,6 +990,11 @@ class _WindowSeat:
                 if isinstance(action, SelectCards):
                     return action
         if kind == "SELECT_OPTION":
+            if self.guohuo_name and str(getattr(query, "skill_id", "")).endswith(":name"):
+                for action in query.legal_actions:
+                    if isinstance(action, SelectOption) and str(action.choice) == self.guohuo_name:
+                        self.guohuo_name = None
+                        return action
             wanted = GUOHUO_DOUBT_OPTION if self.doubt else GUOHUO_TRUST_OPTION
             for action in query.legal_actions:
                 if isinstance(action, SelectOption) and str(action.choice) == wanted:
@@ -1068,6 +1076,107 @@ def test_guohuo_saves_itself_in_the_peach_window() -> None:
     )
     assert _pushed(engine, FrameKind.USE) == 2, "【杀】+ 这张虚拟【桃】各一次使用"
     assert _pushed(engine, FrameKind.PLAY) == 0, "【桃】是使用，不是打出"
+
+
+def _peach_name_options(engine) -> list[tuple[str, ...]]:
+    """求桃窗口里【蛊惑】那一问的候选牌名（``:name`` 的 SELECT_OPTION）。"""
+    return [
+        tuple(str(action.choice) for action in record.query.legal_actions)
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SELECT_OPTION
+        and str(getattr(record.query, "skill_id", "")).endswith(":name")
+    ]
+
+
+def test_guohuo_offers_wine_and_peach_when_yuji_himself_is_dying() -> None:
+    """濒死自救：【酒】与【桃】同档（用户 2026-11-02 裁定）。
+
+    真牌路径由 ``TargetRule.near_death_self_only`` 表达同一件事（`effects/actions.py:_peach`），
+    【蛊惑】的声明表读同一份语境 ⇒ 濒死者本人被问时两个名字都在；【酒】还**不受**出牌阶段
+    那一次的限制。产物按真牌结算（这里声明的是手里那张真【酒】⇒ 真 ⇒ 回复 1）。
+    """
+    pack = MILITARY
+    wine = next(i for i, c in enumerate(pack.deck.cards) if c.type == "wine")
+    slash = next(i for i, c in enumerate(pack.deck.cards) if c.type == "slash")
+    filler = tuple(
+        i
+        for i in range(len(pack.deck.cards) - 1, -1, -1)
+        if i not in {wine, slash}
+    )[-2:]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hand=(slash,)),
+            SeatSpec(hero="yuji_mobile", hand=(wine,), hp=1, hp_max=3),
+            SeatSpec(hand=(filler[0],)),
+            SeatSpec(hand=(filler[1],)),
+        ],
+        deck=deck_excluding(pack, wine, slash, *filler),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [
+            _WindowSeat(strike=slash),
+            _WindowSeat(guohuo=("peach",), guohuo_name="酒"),
+            _WindowSeat(),
+            _WindowSeat(doubt=False),
+        ],
+        lambda e: _closed(e, FrameKind.NEAR_DEATH),
+    )
+
+    assert _peach_name_options(engine) == [("桃", "酒")], (
+        f"濒死者本人被问 ⇒ 桃 / 酒 都在（顺序按牌堆），实得 {_peach_name_options(engine)}"
+    )
+    assert state.player(1).hp == 1 and state.player(1).alive, (
+        "声明的【酒】按真牌结算 ⇒ 濒死自救回复 1（1 → 0 → 1）"
+    )
+
+
+def test_guohuo_offers_only_peach_when_someone_else_is_dying() -> None:
+    """别人濒死时【酒】**不**进声明表（酒只能自救）——与真牌路径同一条语境判据。
+
+    观测面用"声明表只剩一个名字 ⇒ 这一步不问"这条既定口径：座位 0（于吉，**不是**濒死者）
+    在求桃窗口里扣置一张真【桃】当【桃】。若【酒】被错误地并进来，就会多出一问
+    （``:name`` 有两项，脚本会按 ``guohuo_name`` 选【酒】），产物牌型随即变成 ``wine``。
+    故这里断两件事：**没有** ``:name`` 那一问、产出的虚拟牌是 ``peach``。
+    """
+    pack = MILITARY
+    slash = next(i for i, c in enumerate(pack.deck.cards) if c.type == "slash")
+    peach = next(i for i, c in enumerate(pack.deck.cards) if c.type == "peach")
+    filler = tuple(
+        i for i in range(len(pack.deck.cards) - 1, -1, -1) if i not in {peach, slash}
+    )[-2:]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="yuji_mobile", hand=(slash, peach)),
+            SeatSpec(hp=1, hp_max=3),
+            SeatSpec(hand=(filler[0],)),
+            SeatSpec(hand=(filler[1],)),
+        ],
+        deck=deck_excluding(pack, peach, slash, *filler),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(
+        engine,
+        [
+            _WindowSeat(strike=slash, guohuo=("peach",), guohuo_name="酒"),
+            _WindowSeat(),
+            _WindowSeat(),
+            _WindowSeat(doubt=False),
+        ],
+        lambda e: _closed(e, FrameKind.NEAR_DEATH),
+    )
+
+    assert not _peach_name_options(engine), (
+        "别人濒死 ⇒ 声明表只剩【桃】⇒ 这一步不问；"
+        "多出这一问就说明【酒】被错误地并了进来（两项 ⇒ 引擎才会问）"
+    )
+    assert state.player(1).hp == 1 and state.player(1).alive, "于吉用蛊惑把座位 1 救回 1 点"
 
 
 def test_the_ai_uses_guohuo_to_save_itself_in_the_peach_window() -> None:

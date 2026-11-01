@@ -594,7 +594,9 @@ CARD_BEHAVIORS: dict[str, CardBehavior] = {
     "fire_slash": _slash_variant("fire_slash", nature=DamageNature.FIRE),
     "thunder_slash": _slash_variant("thunder_slash", nature=DamageNature.THUNDER),
     # 酒：自己 + 出牌阶段 / 濒死；出牌阶段置加伤（M5-04 的 resolve_wine），濒死自救走
-    # 求桃窗口的统一回复（与【桃】同一骨架），两种用法共用一个每回合一次的计数键。
+    # 求桃窗口的统一回复（与【桃】同一骨架）。两种用法是**两条轴**：出牌阶段增伤每回合
+    # 一次（``UseLimit``）；濒死自救**无次数限制、也不记账**（``recover_from_peach`` 传
+    # ``counts=False``，候选侧 ``_peach`` 对 ``near_death_self_only`` 不查次数）。
     "wine": CardBehavior(
         card_type_id="wine",
         use_timings=(_PLAY_PHASE, _NEAR_DEATH),
