@@ -2644,7 +2644,11 @@ _SKILL_DEFS: tuple[SkillDef, ...] = (
 # `heroes` / `active` 反向 import 本模块的 SkillDef / ModifierContext，故这一行必须晚于
 # 那两者的定义（见 CATALOG 的 docstring）。
 from .heroes import conversion_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
-from .active import active_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
+from .active import (  # noqa: E402  （末尾 import 是刻意的）
+    GUOHUO,
+    active_skill_definitions,
+    guohuo_provider,
+)
 from .target_pool import target_pool_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 from .move_after import move_after_skill_definitions  # noqa: E402  （末尾 import 是刻意的）
 from .response_window import (  # noqa: E402  （末尾 import 是刻意的）
@@ -2653,6 +2657,7 @@ from .response_window import (  # noqa: E402  （末尾 import 是刻意的）
 from .lord_request import (  # noqa: E402  （末尾 import 是刻意的）
     lord_request_activation_plans,
     lord_skill_definitions,
+    register_provider,
 )
 from .arrange import (  # noqa: E402  （末尾 import 是刻意的）
     arrange_activation_plans,
@@ -2701,6 +2706,12 @@ from .life_after import (  # noqa: E402  （末尾 import 是刻意的）
 from .death_after import (  # noqa: E402  （末尾 import 是刻意的）
     death_after_skill_definitions,
 )
+
+# **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
+# 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
+# 质疑，最后才决定这张牌算不算数。登记点必须是**这里**：`active.py` 与 `lord_request.py`
+# 互相不认识（都反向 import 本模块），只有本文件末尾两个模块都已 import 完。
+register_provider(GUOHUO, guohuo_provider)
 
 ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], ActivationPlan]] = (
     MappingProxyType(

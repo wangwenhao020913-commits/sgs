@@ -33,6 +33,10 @@ r"""主公技族（F，票 09）：势力作用域、**势力求助窗口**与�
 引擎侧只做**通用提供者派发**（:func:`dispatch_provider`）：引擎不认识任何具体主公技 id，
 只把窗口里被选中的 ``ActivateSkill`` 交给本模块的注册表；【八卦阵】那类"选中才惰性判定"的
 提供者仍走引擎既有路径（本注册表无它的条目时由引擎回退）。
+
+注册表**不只服务主公技**（M6 票 01）：移动版于吉【蛊惑】用同一个口子实现"需要牌时先扣置
+再质疑"，由 :func:`register_provider` 在加载期并入（调用点 = `catalog.py` 末尾，那里两个
+模块都已 import）。引擎侧的分派代码因此一个字都不用改。
 """
 
 from __future__ import annotations
@@ -106,6 +110,7 @@ __all__ = [
     "lord_request_skill_definitions",
     "lord_skill_definitions",
     "provider_registered",
+    "register_provider",
     "start_provider",
 ]
 
@@ -653,10 +658,33 @@ JIE_JIUYUAN_FLOW = SkillFlow(name="jie_jiuyuan", steps=(), effect=_jie_jiuyuan_r
 """界【救援】的零步流水线：[是否发动] → 转移回复 + 摸一张（无步骤）。"""
 
 
-PROVIDERS: Mapping[str, ProviderHandler] = MappingProxyType(
-    {skill.skill_id: skill.provide for skill in LORD_REQUEST_SKILLS}
-)
-"""``skill_id`` → 势力求助提供者；**模块级不可变**，引擎按 :func:`dispatch_provider` 通用派发。"""
+_PROVIDERS: dict[str, ProviderHandler] = {
+    skill.skill_id: skill.provide for skill in LORD_REQUEST_SKILLS
+}
+"""``skill_id`` → 提供者回调的**唯一可变层**：初始只有四条主公技，加载期再由
+:func:`register_provider` 并入技能层别的提供者（对外只读视图见 :data:`PROVIDERS`）。"""
+
+
+def register_provider(skill_id: str, handler: ProviderHandler) -> None:
+    """把一条**非主公技**的提供者登记进 :data:`PROVIDERS`（加载期一次，调用点 = `catalog.py`）。
+
+    提供者不是主公技的专利：移动版于吉【蛊惑】在"需要一张基本牌 / 普通锦囊牌"时也走这条
+    注册表（先扣置一张手牌、逐座位质疑，再决定这张牌算不算数）。"谁能当提供者"因此必须
+    只有**一张**表——引擎按 :func:`provider_registered` 分派"求助 / 判定"两条路，表劈成
+    两半就会让"选了 ``ActivateSkill`` 却落到判定路径"。
+
+    只许在**加载期**登记：`catalog.py` 末尾（两个模块都已 import 时）调一次。运行期登记会
+    让"这次窗口能派发哪些提供者"取决于时序。重复登记是编程错误——同一 id 有两个回调时
+    没有"后者胜"的语义。
+    """
+    if skill_id in _PROVIDERS:
+        raise ValueError(f"提供者 {skill_id!r} 已登记：同一技能不能有两个提供者回调")
+    _PROVIDERS[skill_id] = handler
+
+
+PROVIDERS: Mapping[str, ProviderHandler] = MappingProxyType(_PROVIDERS)
+"""``skill_id`` → 提供者回调；对外**只读**（只有 :func:`register_provider` 在加载期写过一次），
+引擎按 :func:`dispatch_provider` 通用派发。"""
 
 
 def lord_request_skill_definitions() -> tuple[SkillDef, ...]:

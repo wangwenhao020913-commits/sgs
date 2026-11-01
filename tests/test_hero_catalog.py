@@ -1995,7 +1995,13 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
         and CATALOG[skill_id].deck_arrange is None
         and skill_id not in awakening
     )
-    providers = frozenset(PROVIDERS) | {"equip.eight_diagrams"}
+    # 手写主动技这一格要在 providers 之前定格：移动版于吉【蛊惑】**同时**是手写主动技与
+    # 提供者（出牌阶段入口 + "需要牌时"的提供者），而本表一格一技，取它更根本的那一格
+    # ——发动主体是手写的 A 族（提供者只是它的第二个入口）。故 providers 这里扣掉手写主动技。
+    hand_written_active = frozenset(
+        skill_id for skill_id in ACTIVATIONS if _flow_steps(skill_id) is None
+    )
+    providers = (frozenset(PROVIDERS) | {"equip.eight_diagrams"}) - hand_written_active
     zero_step = frozenset(
         skill_id
         for skill_id in CATALOG
@@ -2037,11 +2043,11 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
         "hero.jie_caocao.hujia",
         "hero.liubei.jijiang",
         "hero.jie_liubei.jijiang",
+        # M6 票 01：**非主公技**的提供者（移动版于吉【蛊惑】的"需要牌时"入口）——
+        # `PROVIDERS` 由 `register_provider` 在 `catalog.py` 末尾并入，不是靠主公技枚举。
+        "hero.yuji_mobile.guohuo",
     }
 
-    hand_written_active = frozenset(
-        skill_id for skill_id in ACTIVATIONS if _flow_steps(skill_id) is None
-    )
     assert _shape_members("手写主动技") == hand_written_active
 
     multi_round = _shape_members("多轮技能")

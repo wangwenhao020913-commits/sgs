@@ -319,6 +319,12 @@ ALLOWLIST: dict[Site, Rule] = {
         "_jie_rende_effect",
         'if type_id == "slash":',
     ): Rule(NORMAL, 1, "按产物牌型决定要不要选目标（普通杀需要目标；桃/酒只对自己）"),
+    # ---- skills/active.py：移动版于吉【蛊惑】的"需要牌时"窗口（M6 票 01）----
+    (
+        "src/sgs/skills/active.py",
+        "_GUOHUO_SLASH_RESPONSE",
+        '_GUOHUO_SLASH_RESPONSE = "slash"',
+    ): Rule(FAMILY, 1, "窗口**请求牌名**（南蛮 / 决斗要一张杀族牌）：成员判定在下游 satisfies_required，这里不筛具体牌面"),
     # ---- skills/heroes.py：转化产物 ----
     (
         "src/sgs/skills/heroes.py",

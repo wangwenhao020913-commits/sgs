@@ -11,7 +11,7 @@
 | **接缝** | `src/sgs/skills/catalog.py:SeamKind` | 时机枚举里**没有**的节点（杀被抵消、装备被弃） | 牌面写「…被【闪】抵消时」「当…被弃置时」 |
 | **修饰器** | `src/sgs/effects/modifiers.py:Modifier` | 改**一个值**（距离 / 次数 / 张数 / 上限 / 目标池） | 牌面写「+1 / 无限制 / 不能成为目标 / 手牌上限等于…」 |
 | **流水线步骤** | `src/sgs/skills/flow.py:SkillFlow` | 一次发动里的**多步交互** | 牌面写「你可以…，然后…」且要玩家选牌/选人/选一项 |
-| **提供者** | `src/sgs/skills/lord_request.py:PROVIDERS` | "我需要一张 B"时让别人代出 | 牌面写「令其他…角色打出一张…」 |
+| **提供者** | `src/sgs/skills/lord_request.py:PROVIDERS` | "我需要一张 B"时让别人（或自己）先付一张再决定算不算数 | 牌面写「令其他…角色打出一张…」，或「需要牌时你可以扣置一张手牌当它」 |
 
 四种"进入游戏"的方式（与上表正交，别混）：
 
