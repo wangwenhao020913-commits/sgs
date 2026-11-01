@@ -2628,6 +2628,13 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("㉿U5 提交载荷里带的是可用的那个名字",
     !!action && JSON.stringify(action.choices) === '["杀"]',
     JSON.stringify(action));
+  // 切转化模式时的「宽松保留」也要认置灰：已选里的置灰项必须被剔掉，不能把"点了必被拒"
+  // 的值原样带过提交（`prunePreativationAnswers` 的第二个消费者）。
+  ui.state.preactivation.answers[1] = { values: ["闪"], texts: ["闪"] };
+  ui.prunePreativationAnswers(ui.state.preactivation, view.pending);
+  check("㉿U6 已选里的置灰项被剔掉（宽松保留也认 disabled）",
+    JSON.stringify(ui.state.preactivation.answers[1].values) === "[]",
+    JSON.stringify(ui.state.preactivation.answers[1]));
 }
 
 /* ============ 票 01（合成局面）：【离间】流水线 —— 逐步文案 + 取消送出 Pass ============

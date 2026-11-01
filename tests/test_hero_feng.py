@@ -251,7 +251,11 @@ def _guohuo_deltas(engine, delta_type: str):
 
 
 def test_guohuo_declares_any_normal_trick_and_voids_a_fake_non_heart_card() -> None:
-    """假 + 非♥️ ⇒ 质疑者各摸一张，牌从**效果区**作废进弃牌堆（从未结算）。"""
+    """假 + 非♥️ + **有人质疑** ⇒ 质疑者各摸一张，牌从**效果区**作废进弃牌堆（从未结算）。
+
+    作废的前提是**有人质疑**（`04` 票 §1 的读法：真 / 假只决定质疑者的惩罚）；
+    `doubters=(True, False)` 里的座位 1 就是那一位。
+    """
     spade_slash = next(
         index
         for index, card in enumerate(PACK.deck.cards)
@@ -609,6 +613,15 @@ def test_the_play_phase_manifest_lists_every_name_and_greys_out_the_unusable_one
     )
     assert "桃" not in row["disabled"], "受伤了 ⇒【桃】能用（不置灰）"
     assert "杀" not in row["disabled"], "场上有对手 ⇒【杀】有目标（不置灰）"
+
+    # ①b 换一个查看者：牌名与置灰项都是**公开形状**（不含询问者的任何牌面信息），照常下发；
+    #     被抹掉的是"哪张来源牌对应哪一行"（`when`）。读取方 = `_mask_foreign_preactivations`。
+    foreign = pending_payload(session, human_seat=1)
+    assert foreign is not None
+    foreign_row = foreign["preactivations"][GUOHUO][1]["pool"][0]
+    assert foreign_row["options"] == row["options"], "牌名闭集是公开的"
+    assert foreign_row["disabled"] == row["disabled"], "置灰项也是公开的（不含牌面身份）"
+    assert tuple(foreign_row["when"]) == (), "前序答案（来源牌 id）必须被抹掉"
 
     # ② 置灰项靠界面挡不住：提交一条置灰的声明，引擎必须拒收（fail-closed）。
     from sgs.engine import IllegalActionError
@@ -1066,7 +1079,11 @@ def test_guohuo_truth_but_doubted_non_heart_dodge_is_voided() -> None:
 
 
 def test_guohuo_voided_dodge_does_not_cancel_the_slash() -> None:
-    """假 + 非♥️ ⇒ 此牌作废：**从未使用**，窗口继续问真牌 ⇒ 【杀】照常结算。"""
+    """假 + 非♥️ + **有人质疑** ⇒ 此牌作废：**从未使用**，窗口继续问真牌 ⇒ 【杀】照常结算。
+
+    作废的前提是**有人质疑**（`04` 票 §1）：座位 2 质疑，这张牌才作废；没人质疑时它照常
+    结算（见 `::test_guohuo_undoubted_non_heart_card_still_answers_the_dodge_window`）。
+    """
     # ♣【杀】声明成【闪】：牌名不等 ⇒ 假；梅花不是♥️ ⇒ 作废。
     black_slash = _card(type_id="slash", suit="club")
     engine, state = _run_provider(
@@ -1086,6 +1103,34 @@ def test_guohuo_voided_dodge_does_not_cancel_the_slash() -> None:
     assert _pushed(engine, FrameKind.USE) == 1, "作废 = 从未使用（只有【杀】自己那一次使用）"
     assert _pushed(engine, FrameKind.PLAY) == 0, "也没有打出帧"
     assert state.player(1).hp == 2, "作废 ⇒ 这次响应没发生，【杀】照常结算（3 → 2）"
+
+
+def test_guohuo_undoubted_non_heart_card_still_answers_the_dodge_window() -> None:
+    """假 + 非♥️ + **无人质疑** ⇒ 照常结算：这张【闪】交出去，【杀】被抵消。
+
+    与 `::test_guohuo_voided_dodge_does_not_cancel_the_slash` 是同一份局面、只改"有没有人
+    质疑"——`04` 票 §1 的判据两半里"无人质疑 ⇒ 结算"那一半在**提供者入口**上的眼睛用例
+    （出牌阶段那一半是 `::test_guohuo_undoubted_fake_card_still_resolves`）。
+    """
+    # ♣【杀】声明成【闪】：牌名不等 ⇒ 假；梅花不是♥️；但**没有人质疑** ⇒ 不作废。
+    black_slash = _card(type_id="slash", suit="club")
+    engine, state = _run_provider(
+        trigger_type="slash", hand=(black_slash,), doubters=(False, False)
+    )
+
+    assert _verdict_seats(engine) == [2, 3, 0], "质疑段照常问完（只是都答了相信）"
+    assert not _moves(
+        engine,
+        reason=MoveReason.DISCARD,
+        source_zone=Zone.PROCESSING,
+        card=black_slash,
+    ), "无人质疑 ⇒ 不作废"
+    assert _pushed(engine, FrameKind.USE) == 2, "【杀】+ 这张虚拟【闪】各一次使用"
+    assert _pushed(engine, FrameKind.PLAY) == 0, "【闪】走使用链，不是打出"
+    assert state.player(1).hp == 3, "这张【闪】照常结算 ⇒ 【杀】被抵消，于吉不受伤"
+    assert engine.state.card(black_slash).card_id in engine.state.discard, (
+        "用完之后来源牌照常进弃牌堆"
+    )
 
 
 def test_guohuo_heart_card_still_answers_the_dodge_window() -> None:
@@ -1156,7 +1201,10 @@ def test_guohuo_truth_but_doubted_non_heart_slash_does_not_respond() -> None:
 
 
 def test_guohuo_voided_slash_does_not_respond() -> None:
-    """假 + 非♥️ ⇒ 作废：这次响应没发生，南蛮照常结算（于吉挨 1 点）。"""
+    """假 + 非♥️ + **有人质疑** ⇒ 作废：这次响应没发生，南蛮照常结算（于吉挨 1 点）。
+
+    作废的前提是**有人质疑**（`04` 票 §1）。
+    """
     diamond_peach = _card(type_id="peach", suit="diamond")
     engine, state = _run_provider(
         trigger_type="barbarian_invasion", hand=(diamond_peach,), doubters=(True, False)

@@ -1512,3 +1512,78 @@ def test_the_disabled_set_is_recomputed_from_the_prior_answers():
     assert [(row.options, row.disabled) for row in steps[1].pool] == [
         (("a", "b"), ("b",))
     ], "置灰项按前序答案（那张来源牌）现算"
+
+
+def test_the_step_by_step_ask_never_offers_a_disabled_option():
+    """逐步询问那条路也要认置灰（票 04 §3）：``ask_option`` 的候选 = ``options`` − ``disabled``。
+
+    置灰在**三处**收口：清单画灰、复合动作被校验器拒收、以及这里（未翻预发动的流水线 /
+    被动技的逐步问）。少了第三条，玩家会在真正的询问里看到并选中一个"点了必被拒"的选项。
+    """
+    asked: dict[str, object] = {}
+
+    class _Choice:
+        choice = "a"
+
+    class _Host:
+        state = None
+
+        @staticmethod
+        def suspended(value) -> bool:
+            return value == "SUSPEND"
+
+        @staticmethod
+        def ask_option(frame, actor, timing, *, skill_id, options, optional=False, revealed=()):
+            del frame, actor, timing, skill_id, optional, revealed
+            asked["options"] = tuple(options)
+            return _Choice()
+
+    _Host.state = _manifest_state(hand=(_cards("slash")[0],))
+    step = PickOption(
+        options=("a", "b", "c"), disabled=("b",), optional=False, key="name"
+    )
+
+    status, value = _flow_step_option(
+        _Host(), _Frame(source=0), step, 0, {}, Timing.PHASE_PLAY_IDLE, ("probe", 0)
+    )
+
+    assert status == "ok" and value == "a"
+    assert asked["options"] == ("a", "c"), "置灰的那一项不下发给询问"
+
+
+def test_a_disabled_option_can_read_the_frame_during_validation():
+    """校验期的置灰回调拿得到**真帧**（票 04 §3；原先这一支把 GameState 当帧传）。
+
+    可调用档的签名是 ``(state, frame, owner, answers)``，而 `_assign_activation` 的选项步
+    曾经把 ``state`` 当帧塞进 ``_with_answers``——回调在那里读 ``frame.data`` 会拿到空字典。
+    这里让置灰回调**硬读**一个只有真帧才有的键：读不到就 KeyError，正好红。
+    """
+    card = _cards("slash")[0]
+    state = _manifest_state(hand=(card,))
+
+    def disabled(state, frame, owner, answers):
+        del state, owner, answers
+        return ("b",) if frame.data.get("probe_marker") else ()
+
+    flow = SkillFlow(
+        name="option_probe_frame",
+        steps=(
+            PickCards(zones=(Zone.HAND,), lo=1, hi=1, key="card"),
+            PickOption(options=("a", "b"), disabled=disabled, optional=False, key="name"),
+        ),
+        effect=_noop,
+    )
+
+    class _RealFrame:
+        """只有 ``data`` 的真帧替身：`_with_answers` 会把它原样透传下去。"""
+
+        def __init__(self) -> None:
+            self.data = {"source": 0, "probe_marker": True}
+
+    error = validate_flow_activation(
+        flow, state, 0, (card,), ("b",), frame=_RealFrame()
+    )
+
+    assert error is not None and "b" in error, (
+        f"置灰回调读到了真帧里的标记 ⇒ 'b' 必须被判不可选，实得 {error!r}"
+    )

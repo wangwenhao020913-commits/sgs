@@ -185,6 +185,46 @@ ui.state.view = {
 const play = ui.buildAction();
 if (!play) throw new Error("buildAction 没拼出 PlayCard（直取路径夹具失效）");
 
+/* 复合技能动作：两条步骤（选牌 → 选项）→ `ActivateSkill(picks, choices)`（票 04 §3）。
+ * 与借刀那条的区别只在载荷形状：`picks` 是实体牌 id、`choices` 是选项文本（不是座位），
+ * 这是蛊惑的两步清单（扣置哪张 → 声明成什么牌）拼出来的那条。 */
+resetState();
+const guohuoPending = {
+  kind: "PLAY_PHASE",
+  actor: 0,
+  seq: 96,
+  prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+  legal_actions: [{ kind: "EndPhase", answers_seq: 96 }],
+  candidate_index: {},
+  virtual_index: {},
+  option_seats: {},
+  context: null,
+  preactivations: {
+    "hero.yuji_mobile.guohuo": [
+      { name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+        pool: [{ when: [], options: ["52"] }], wording: "扣置一张手牌" },
+      { name: "name", zones: [], min: 1, max: 1, order: 1,
+        pool: [{ when: ["52"], options: ["杀", "闪"], disabled: ["闪"] }],
+        wording: "声明一种牌名" },
+    ],
+  },
+  preactivation: [],
+  card_preactivations: {},
+};
+const guohuoPa = {
+  skillId: "hero.yuji_mobile.guohuo",
+  name: "蛊惑",
+  composite: true,
+  steps: guohuoPending.preactivations["hero.yuji_mobile.guohuo"],
+  answers: [
+    { values: [52], texts: ["52"] },
+    { values: ["杀"], texts: ["杀"] },
+  ],
+  cursor: 2,
+};
+const composite = ui.buildPreativationAction(guohuoPending, guohuoPa);
+if (!composite) throw new Error("buildPreativationAction 没拼出复合 ActivateSkill（两步清单夹具失效）");
+
 /* 合成反例：同一张借刀卡的**展示形态**原样塞进 UseCard.card（实机 400 的形状）。 */
 const decorated = {
   kind: "UseCard",
@@ -198,6 +238,7 @@ process.stdout.write(
   JSON.stringify({
     cases: [
       { name: "borrowed_sword_preactivation", action: borrowed },
+      { name: "two_step_preactivation", action: composite },
       { name: "use_card", action: use },
       { name: "play_card", action: play },
     ],

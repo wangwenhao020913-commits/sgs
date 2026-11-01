@@ -136,7 +136,7 @@
 | `RESPOND` | 通用响应窗口（打出/使用一张牌） | 决斗的【杀】、万箭的【闪】、借刀的"使用【杀】"、无懈的收集式窗口；提供者在这些窗口里以 `CANDIDATES` 追加（`respond_declared` 为真时闭嘴：赢家已定） |
 | `SELECT_CARDS` | 流水线选牌步 | 自己区域的直选在 `candidates.js` 判；`spec.max_per_suit` 存在时按花色收窄（涉猎，0 下限由牌面决定） |
 | `SKILL_ACTIVATION` | 钩子的"是否发动" | 键含时机；同帧第二次触发会复用答案（已裁定） |
-| `SELECT_OPTION` | 选项步 / 手写二选一 | 单个选项 + `Pass` 走"提交/放弃"确认形态 |
+| `SELECT_OPTION` | 选项步 / 手写二选一 | 单个选项 + `Pass` 走"提交/放弃"确认形态；**置灰**的选项（`PickOption.disabled` → `StepPool.disabled`）在预发动清单里**照样列出来但不可选**（蛊惑的牌名弹窗：列全牌堆名，此刻用不了的画灰），引擎的逐步校验同样拒收它 |
 | `ARRANGE` | 观星式排列 | 不能下发预发动清单 |
 
 ### 3.5 区域 `Zone`

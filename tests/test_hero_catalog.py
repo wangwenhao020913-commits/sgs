@@ -1846,7 +1846,7 @@ SKILL_SHAPE: dict[str, str] = {
     # ⇒ 不进「多轮技能」格。原来的「手写主动技」一格因此**消失**（它唯一的成员就是这条）。
     "hero.yuji_mobile.guohuo": "主动技能",
 }
-"""113 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
+"""132 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
 `SkillDef` 上没有 shape 字段，也不该有：形态是从既有声明读出来的归类（`locked` /
 `skill_type` / `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` /
@@ -1906,7 +1906,7 @@ SHAPE_COUNTS: dict[str, int] = {
 STEP_LANGUAGE_SHAPES: frozenset[str] = frozenset(
     {"主动技能", "触发技能", "零步技能", "排列技能", "觉醒技"}
 )
-"""在步骤语言内的五个形态（64 条 = 19 + 13 + 27 + 3 + 2）。觉醒技也走 ``SkillFlow``
+"""在步骤语言内的五个形态（66 条 = 20 + 14 + 27 + 3 + 2）。觉醒技也走 ``SkillFlow``
 （【潜心】零步、【勤学】一步选项），故"内 == 有 ``flow_for``"仍成立。"""
 
 IN_STEP_LANGUAGE: frozenset[str] = frozenset(
@@ -1914,7 +1914,7 @@ IN_STEP_LANGUAGE: frozenset[str] = frozenset(
     for skill_id, shape in SKILL_SHAPE.items()
     if shape in STEP_LANGUAGE_SHAPES
 )
-"""在步骤语言内（63）：**派生**自 :data:`SKILL_SHAPE` 的五个步骤语言形态。
+"""在步骤语言内（66）：**派生**自 :data:`SKILL_SHAPE` 的五个步骤语言形态。
 
 W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同一份事实的两份拷贝——
 形态表一改，第二份名单就悄悄过期。现在它只是那张表的一个投影；真正的判据留在
@@ -1923,9 +1923,9 @@ W6-07 / 评审 J7：这里原先手抄了 19 个 id，与 `SKILL_SHAPE` 是同�
 """
 
 OUTSIDE_STEP_LANGUAGE: frozenset[str] = frozenset(SKILL_SHAPE) - IN_STEP_LANGUAGE
-"""不在步骤语言内（65）：多轮 14 + 锁定 30 + 转化 13 + 能力位 2 + 候选生成器 1 + 候选提供者 5。
+"""不在步骤语言内（66）：多轮 14 + 锁定 31 + 转化 13 + 能力位 2 + 候选生成器 1 + 候选提供者 5。
 
-同样**派生**（:data:`SKILL_SHAPE` 减 :data:`IN_STEP_LANGUAGE`）；63 这个数由
+同样**派生**（:data:`SKILL_SHAPE` 减 :data:`IN_STEP_LANGUAGE`）；66 这个数由
 `SHAPE_COUNTS` 的其余六格加出来，测试里另有一条规模断言。
 """
 

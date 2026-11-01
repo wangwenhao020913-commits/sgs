@@ -939,6 +939,12 @@ def _flow_step_option(
     del ask_owner  # 选项步走 ``ask_option``，其询问名是 ``skill_id``（自带步骤序号）
     actor = _flow_actor(step, host.state, frame, owner, answers)
     options = _resolve_options(step.options, host.state, frame, owner, answers)
+    blocked = _resolve_options(step.disabled, host.state, frame, owner, answers)
+    if blocked:
+        # 置灰项在**另两处**已经出不去（清单画灰、复合动作被校验器拒收），但逐步询问这条
+        # 路（未翻预发动的流水线 / 被动技）的候选就是 ``ask_option`` 的选项 —— 把置灰项
+        # 留在里面等于给出一条"点了必被拒"的候选。故这里也按同一份解析结果收窄。
+        options = tuple(text for text in options if text not in blocked)
     if not options:
         # 此刻一项都执行不了（例如【结姻】的目标装备区没有空槽、手里也没有手牌）⇒
         # 与"空池"同一条纪律：不发没有候选的询问，整条流水线取消（零副作用）。

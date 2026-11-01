@@ -2401,7 +2401,7 @@ def _fill_activation(
         # 置灰项（票 04 §3）**不是候选**：它们在闭集里只为"列出来给玩家看"，服务端照样
         # 拒收。AI 填表必须按同一份口径收窄——否则它会把一个"此刻用不了"的名字写进复合
         # 动作，被引擎拒成非法应答（`test_all_ai_games.py` 的"零非法应答"当场红）。
-        blocked = frozenset(getattr(row, "disabled", ()) or ())
+        blocked = frozenset(row.disabled)
         if blocked:
             options = tuple(text for text in options if text not in blocked)
             if not options:

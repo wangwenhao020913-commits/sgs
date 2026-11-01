@@ -3016,7 +3016,7 @@ def _guohuo_unusable_names(
 
     出牌阶段的【闪】/【无懈可击】没有目标池、【桃】在满体力时不可用、【杀】在攻击范围外
     没有目标 ⇒ 这些名字**列出来但点不动**（用户 Q1A：牌名弹窗列全牌堆名，把"此刻没有合法
-    目标"的名字置灰；`edge-cases.md` 的 O1 从"不出现"改成"出现但置灰"）。
+    目标"的名字置灰；`edge-cases.md` 的 O1 已同步成「删掉 **或** 置灰」两种处置）。
 
     产物继承来源牌的花色 / 点数，故这一步必须按**刚选的那张牌**现算——同一张牌名闭集在
     不同来源牌下"能不能用"可以不同（黑【杀】撞【仁王盾】一类）。
@@ -3049,7 +3049,8 @@ def _guohuo_name_options(
 
     这一段与"此刻能用"**分开**：`_guohuo_declaration_table` 回答"牌堆里有没有这种牌"，
     `_guohuo_name_disabled` 回答"这张来源牌此刻能不能用它"。旧实现把两道闸并成一道
-    （`_guohuo_legal_names` 只留下能用的名字），于是没用的名字连提示都看不到。
+    （票 04 §3 之前的 `_guohuo_legal_names` 只留下能用的名字，已删），于是没用的名字连
+    提示都看不到。
     """
     del frame, owner, answers
     return tuple(_guohuo_declaration_table(state))
@@ -3183,11 +3184,12 @@ def _guohuo_response_names(
 ) -> dict[str, str]:
     """**"需要牌"窗口**里可声明的牌名：``显示名 → 牌型 id``（只留能当 ``required`` 的）。
 
-    与出牌阶段的 :func:`_guohuo_legal_names` 同一张底表（基本牌 + 普通锦囊、且本牌堆真有），
-    差别只在最后那道闸：那里判"此刻能不能**使用**它"（``check_targets`` 现算目标池），这里
-    判"它能不能充当这次响应"（牌名闸门 ``satisfies_required``，杀族请求因此含火 / 雷【杀】）。
-    两道闸都只有一份实现，不给技能再写一份"什么牌能当什么牌"。产物按**纯虚拟牌**试闸：
-    它要的是牌名，与来源牌的牌面（花色 / 点数）无关。
+    与出牌阶段同一个底表（:func:`_guohuo_declaration_table`：基本牌 + 普通锦囊、且本牌堆
+    真有），最后那道闸不同——这里判"它能不能充当这次响应"（牌名闸门 ``satisfies_required``，
+    杀族请求因此含火 / 雷【杀】）；出牌阶段则**列全**，把"此刻没有目标池"的名字交给
+    :func:`_guohuo_name_disabled` 置灰（票 04 §3）。两道闸都只有一份实现，不给技能再写一份
+    "什么牌能当什么牌"。产物按**纯虚拟牌**试闸：它要的是牌名，与来源牌的牌面（花色 / 点数）
+    无关。
 
     **求桃窗口的语境放宽**（用户 2026-11-02 裁定）：牌名闸门是逐字比对的，【酒】永远不
     满足 ``peach``；但**濒死者自己**被问时，【酒】与【桃】是同一档自救牌（真牌路径由
@@ -3475,7 +3477,7 @@ def _guohuo_settle(host: Any, frame: Any, owner: int) -> Control:
     # （`designation_actions_for`）同源：``needs_designation``（行为表上的
     # ``borrowed_sword_target``）+ ``targets_within_attack_range``（持刀者的攻击范围）。
     # 不需要附带指定的牌名记一份空元组就过（段游标要能分辨"这一步做完了"）。
-    if stage in ("card", "name", "kouchu", "targets", "designation"):
+    if stage in ("kouchu", "targets", "designation"):
         if _GUOHUO_DESIGNATIONS not in frame.data:
             card = _guohuo_virtual(state, frame)
             targets = tuple(frame.data[_GUOHUO_TARGETS])
