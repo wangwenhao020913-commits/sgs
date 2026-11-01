@@ -190,9 +190,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 129
+    assert len(CATALOG) == 130
     assert len(equipment) == 22
-    assert len(heroes) == 107
+    assert len(heroes) == 108
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -214,7 +214,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 107
+    assert len(expected) == 108
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1082,6 +1082,8 @@ SKILL_FILES: dict[str, str] = {
     "hero.jie_huaxiong.shizhan": "test_hero_jie_qun.py",
     "hero.jie_gongsunzan.qiaomeng": "test_hero_jie_qun.py",
     "hero.jie_gongsunzan.yicong": "test_hero_jie_qun.py",
+    # 风包魏延【狂骨】（feng-weiyan 票 01）：锁定技，造伤后逐点回复。
+    "hero.weiyan.kuanggu": "test_hero_feng.py",
 }
 """101 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
 票 02 加 5 条、票 03 加 3 条、票 04 加 4 条界将技能、票 05 加界张飞 2 条、票 06 加界徐庶 /
@@ -1519,6 +1521,12 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         "hero.jie_huaxiong.yaowu": (
             _HookFrame(target=ME, card=state.card(_PROBE_CHANNEL_SLASH)),
         ),
+        # 风包魏延【狂骨】（feng-weiyan 票 01）：两条钩子共用"这次伤害由我造成"这条判据——
+        # ① 受伤害时定格距离；② 造成伤害后逐点回复（探针帧因此带上定格值）。
+        "hero.weiyan.kuanggu": (
+            _HookFrame(source=ME, target=0),
+            _HookFrame(source=ME, target=0, kuanggu_distance=1),
+        ),
         # 票 04 / 票 06：神关羽【武魂】的两条条件（逐点受伤后 / 死亡时）；朱雀羽扇的新触发
         # 条件（自己使用普通【杀】）。探针的"我"分别是受伤者 / 死者 / 使用者。
         "hero.shen_guanyu_mobile.wuhun": (
@@ -1729,6 +1737,8 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.jie_gongsunzan.qiaomeng": "触发技能",
     "hero.jie_lvbu.wushuang": "锁定技",
     "hero.jie_huaxiong.yaowu": "锁定技",
+    # 风包魏延【狂骨】（feng-weiyan 票 01）：锁定 + 造伤后逐点 + 手写回调（无 SkillFlow）。
+    "hero.weiyan.kuanggu": "锁定技",
     "hero.jie_gongsunzan.yicong": "锁定技",
     "hero.jie_huatuo.jijiu": "转化技",
     # 多轮技能 12（手写帧内游标循环；flow_for is None；M6 票 01 的【刚烈】= 判定 → 选项 → 选牌，
@@ -1844,7 +1854,7 @@ SHAPE_COUNTS: dict[str, int] = {
     "零步技能": 27,
     "排列技能": 3,
     "多轮技能": 14,
-    "锁定技": 30,
+    "锁定技": 31,
     "转化技": 13,
     "能力位": 2,
     "候选生成器": 1,
@@ -1936,9 +1946,9 @@ def _flow_steps(skill_id: str):
 
 
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
-    """122 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
+    """130 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 129
+    assert len(SKILL_SHAPE) == len(CATALOG) == 130
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11
     assert all(SKILL_SHAPE.values()), "表里没有空形态"
@@ -2052,7 +2062,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """63 在内 / 64 在外（127 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """64 在内 / 66 在外（130 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -2065,7 +2075,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
     assert len(inside) == 64
-    assert len(outside) == 65
+    assert len(outside) == 66
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

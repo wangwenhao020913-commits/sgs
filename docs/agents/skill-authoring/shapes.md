@@ -51,6 +51,12 @@
 | 阶段体 + 亮出牌堆顶、按花色取 0~k（一行式） | 「摸牌阶段，你可以改为亮出牌堆顶的五张牌，然后获得其中每种花色的牌各一张」 | `hero.shen_lvmeng_mobile.shelie` |
 | 状态位 + 触发器 | 「横置 / 翻面 / 标记」 | 横置 = `Player.chained` + `Engine.set_chained`；翻面 = `Player.flipped` + `Engine.set_flipped`（首个载体：移动版界曹仁【据守】） |
 
+> **第 1 行的锁定技变体**：牌面写「锁定技」时形状不变、但那一问**不发**（`locked=True`，派发环的
+> forced 分支直接跑回调），故效果与"零步"同形、不必造 `SkillFlow`（机械形态落「锁定技」格）。
+> 样板 = 界华雄【耀武】`hero.jie_huaxiong.yaowu`（造伤后自动效果）；风包魏延【狂骨】
+> `hero.weiyan.kuanggu` 是它的"两条钩子"版：一条在 `DAMAGE_TAKE` 定格距离、一条在
+> `DAMAGE_AFTER_DEAL` 逐点回复。
+
 > 表里没有的形状，就是 C1：**停手开架构缺口票**，不许在技能代码里绕。
 
 ## 3. 封闭集登记表（审计测试核这张表）
@@ -66,8 +72,9 @@
 | `PHASE_DISCARD_START` | 弃牌阶段开始（克己） |
 | `PHASE_FINISH` | 结束阶段（闭月、观星二段、诛害、勤学二段） |
 | `TURN_END` | 回合结束（博图） |
+| `DAMAGE_TAKE` | 受到伤害时（**风包【狂骨】的距离定格**：造伤后的效果要按「扣减体力前」的场况判，而濒死 / 死亡结算夹在两者之间——死者的装备技 / 义从类距离修饰器已不再解析，现算会低估 1。它是扣减体力前**最后一个派发点**） |
 | `DAMAGE_AFTER_TAKE` | 受到伤害后（奸雄、反馈、遗计、刚烈、忘隙、耀武）——**注意 `per_point`** |
-| `DAMAGE_AFTER_DEAL` | 造成伤害后（忘隙、潜心） |
+| `DAMAGE_AFTER_DEAL` | 造成伤害后（忘隙、潜心、狂骨）——**注意 `per_point`** |
 | `LIFE_DECREASE_AFTER` | 失去体力后（诈降） |
 | `MOVE_AFTER` | 失去牌后（连营、枭姬、清俭） |
 | `USE_ON_USE` | 使用牌时（集智） |

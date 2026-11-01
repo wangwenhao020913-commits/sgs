@@ -23,9 +23,12 @@ B 族的形态差别只有一处：它挂在 ``DAMAGE_AFTER_TAKE`` / ``DAMAGE_AF
 夏侯惇【刚烈】             非锁定  ``False``  判定 → 非红桃时**伤害来源**二选一：弃两张手牌 / 受 1 点伤害
 界夏侯惇【刚烈】           非锁定  ``True``   判定 → 红：对来源 1 点伤害 / 黑：弃来源一张牌
 界李典【忘隙】             非锁定  ``True``   造成 / 受到 1 点伤害后摸两张，交给该角色其中一张
+界华雄【耀武】             锁定    ``False``  受到**牌造成的**伤害时：红色来源摸一张，否则自己摸一张
+魏延【狂骨】               锁定    ``True``   造成 1 点伤害后，若**扣减体力前**你计算与其的距离 ≤ 1，回复 1 点体力
 =========================  ======  =========  ==========================================
 
-全部是**非锁定技**（技能面写了"你可以"）⇒ 发动是询问出来的。它们在回调里可以
+除两条**锁定技**（界【耀武】、魏延【狂骨】）外都是**非锁定技**（技能面写了"你可以"）⇒
+发动是询问出来的（锁定技不问，派发环的 forced 分支直接跑回调）。它们在回调里可以
 **提问**（【反馈】选牌、【遗计】看牌与交给、【刚烈】判定后问来源），返回 ``"stay"``
 让出控制权；引擎按"同一轮重入不重问、轮次推进"的帧内游标范式继续（票 19 §8）。
 【遗计】的面是**观看**（票 15）：牌面只在**持有者本人**的那次询问里（询问的
@@ -56,6 +59,7 @@ from sgs.effects import (
     DamageNature,
     behavior_for,
     check_targets,
+    distance,
     is_slash,
     locate,
 )
@@ -1441,6 +1445,166 @@ def _jie_ganglie(host: Any, frame: Any) -> Any:
     return "stay" if control == "stay" else None
 
 
+# ---------------------------------------------------------------------------
+# 魏延【狂骨】（风包）：造伤后按「扣减体力前」的距离判定，回复 1 点体力
+#
+# 牌面（用户录入 `D:\SGS_HEROS\神话再临-风包\魏延\技能.txt`，逐字）：
+#
+#     狂骨：锁定技，当你对一名角色造成1点伤害后，若其扣减体力前你计算与其的距离
+#           不大于 1，你回复 1 点体力。
+#
+# 读法（`docs/agents/skill-authoring/readings.md` 的五行表，逐行落到账本）：
+#
+# - **触发粒度 = 逐点**：牌面「1 点」⇒ 造成 N 点就判 N 次（默认读法（三）；`三国杀详细
+#   规则.txt` §4.14 L404–L407 逐字「按'造成 / 受到 1 点伤害后'判定的技能可发动 X 次」）。
+# - **指代**：「其」= 本次伤害的受伤者（帧里的 ``target``）；「你」= 持有者**且必须是伤害
+#   来源**（牌面写"**你**对…造成"）⇒ 条件自校 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`
+#   ``== frame["source"]``，否则"任何人造成伤害、魏延都回血"。
+# - **「一名角色」含自己**（默认读法（二）①）：自伤时距离 0（``distance`` 自身恒 0）⇒ 同样
+#   成立；本仓现有牌面走不到，但不写"排除自己"的判据。
+# - **「扣减体力前」= 距离的取值时点**（§4.15 L412 逐字把【狂骨】的发动条件检测放在
+#   「扣减体力前」）：见 :func:`_kuanggu_snapshot` 为什么必须**定格**而不能在造伤后现算。
+# - **锁定技** ⇒ 一次"是否发动"询问都不发（`:func:`~sgs.skills.catalog._dispatch` 的 forced
+#   分支直接跑回调）；本技能没有代价、没有目标、没有选项，故**整条技能零询问**。
+# ---------------------------------------------------------------------------
+
+KUANGGU = "hero.weiyan.kuanggu"
+"""魏延【狂骨】的全限定技能 id（风包牌面，用户录入的 `技能.txt`）。"""
+
+KUANGGU_DISTANCE_KEY = "kuanggu_distance"
+"""帧私有槽名：**扣减体力前**「你计算与其的距离」（伤害帧上，由受伤害时定格）。
+
+帧私有数据不进记录流，故对既有 47 条金录像逐字节无影响；它只服务"造伤后仍按扣减体力前的
+场况判"，寿命 = 这一次伤害事件（伤害帧出栈即弃）。
+"""
+
+KUANGGU_DONE_KEY = "kuanggu_done"
+"""帧私有槽名前缀：本点伤害的回复子帧已经压过（槽名再带点号，逐点各一份）。"""
+
+KUANGGU_RANGE = 1
+"""牌面「距离不大于 1」的那条线（`distance` 的下限是 1、自身 0，故相等也算）。"""
+
+
+def _kuanggu_deals(host: Any, frame: Any) -> bool:
+    """**这次伤害是持有者造成的吗**（两条钩子共用的前提）。
+
+    读 :data:`~sgs.skills.catalog.MATCH_OWNER_KEY`（派发环在条件求值前写）而不是
+    ``skill_owner``（回调执行期才写）：条件必须能按"我是谁"过滤——派发环遍历每个存活玩家的
+    实例，漏掉它就会"任何人造成伤害、魏延都回血"（与 :func:`_hurt_owner` 同一姿态、方向相反）。
+
+    无来源伤害（【闪电】一类）的 ``source`` 是 ``None``，与 ``owner`` 永不相等 ⇒ 天然排除。
+    """
+    del host
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None:
+        return False
+    if frame.data.get("source") != owner:
+        return False
+    return frame.data.get("target") is not None
+
+
+def _kuanggu_snapshot(host: Any, frame: Any) -> None:
+    """**扣减体力前**把「你计算与其的距离」写进伤害帧（``DAMAGE_TAKE`` 钩子）。
+
+    为什么必须定格、不能在 :func:`_kuanggu` 里现算（本技能唯一的实现难点）：
+
+    1. 规则把发动条件检测放在**扣减体力前**（§4.15 L412），牌面也写"其扣减体力前你计算
+       与其的距离"；
+    2. 而「造成伤害后」是在**濒死 / 死亡结算之后**才跑的（`三国杀详细规则.txt` §4.14 第 4 条 +
+       本仓的栈形状：目标被打死、对局继续时 ``DAMAGE_AFTER_DEAL`` 照跑，此刻死者
+       ``alive=False``、其区域已被死亡结算清空）。死者的**距离修饰器**因此不再解析 ——
+       装备技能（防御马 +1）与【义从】这类"其他角色计算与你的距离 +1"都随实例一起消失
+       ⇒ 现算会把距离**低估 1**：相邻目标带【的卢】（+1 防御马）时，扣减体力前距离是
+       **2**（狂骨**不**该触发），打死后再算变成 **1**（会白回 1 点体力）。
+    3. 座位环本身不受影响（死者的座位距离与存活时逐值相同：`distance` 的退化读法
+       `_counting_distance` 就是"数两方向中间的存活者 + 1"），故差异只来自**修饰器**这一侧；
+       但正是这一侧决定"够不够得着"。
+
+    时点选 ``DAMAGE_TAKE``（受到伤害时）而不是更早的 ``DAMAGE_DEAL``：它是扣减体力之前**最后
+    一个派发点**——``damage_finalize_amount`` 夹在两者之间，只算数值、不 dispatch、不改存活
+    集合，故"此刻的距离"与"扣减体力前的距离"逐值相同。伤害被防止时（帧标签 ``PREVENTED``）
+    ``DAMAGE_AFTER_DEAL`` 整条不派发，这份快照自然无人读。
+
+    若将来做"伤害转移"（天香一类，转移发生在受伤害时之内），本快照的时点须跟着挪到转移之后。
+    """
+    owner = int(frame.data["skill_owner"])
+    target = frame.data["target"]
+    frame.data[KUANGGU_DISTANCE_KEY] = distance(host.state, owner, int(target))
+
+
+def _kuanggu_condition(host: Any, frame: Any) -> bool:
+    """触发条件：**我是伤害来源** ∧ 受伤者存在 ∧ 扣减体力前的距离 ≤ 1。"""
+    if not _kuanggu_deals(host, frame):
+        return False
+    snapshot = frame.data.get(KUANGGU_DISTANCE_KEY)
+    return snapshot is not None and int(snapshot) <= KUANGGU_RANGE
+
+
+def _kuanggu(host: Any, frame: Any) -> Any:
+    """魏延【狂骨】：逐点结算 —— 每 1 点伤害回一次 1 点体力（§4.14 L404–L407）。
+
+    效果走**既有的回复体力路径**（压 ``RECOVER`` 子帧、``amount = 1``）：`回复体力` 是一类
+    独立事件（§4.15 L424–L426），`RECOVER_VALUE` / `RECOVER_AFTER` 上的钩子（界孙权【救援】
+    这类改回复量的技能）因此看得到它；回复量夹在体力上限内由 RECOVER 帧自己负责。
+
+    **满体力时不压帧**（§4.15 L426 逐字"满体力时不回复"）：锁定技照常"发动"，但什么也不
+    发生——没有 delta、也没有回复事件可供别人挂钩。
+
+    逐点游标 ``kuanggu_done:<点号>`` 在压帧**之前**落位：子帧出栈后派发环会从头重入本回调，
+    游标让第 N 点既不重压第二个回复帧、也不挡掉第 N+1 点（与界【刚烈】的逐点键同一范式）。
+    """
+    owner = int(frame.data["skill_owner"])
+    done_key = f"{KUANGGU_DONE_KEY}:{damage_point_index(frame)}"
+    if frame.data.get(done_key):
+        return None
+    frame.data[done_key] = True
+    player = host.state.player(owner)
+    if player.hp >= player.hp_max:
+        return None
+    host.push_frame(
+        FrameKind.RECOVER,
+        {
+            "source": owner,
+            "targets": (owner,),
+            "card": None,
+            "use_timing": frame.data.get("use_timing"),
+            "amount": 1,
+        },
+        timing=Timing.RECOVER_VALUE,
+    )
+    return "stay"
+
+
+KUANGGU_DEF = SkillDef(
+    skill_id=KUANGGU,
+    locked=True,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        # ① 扣减体力前定格距离（不问、只写帧私有键）。
+        Hook(Timing.DAMAGE_TAKE, handler=_kuanggu_snapshot, condition=_kuanggu_deals),
+        # ② 造成伤害后逐点回复（条件读 ① 的快照）。
+        Hook(
+            Timing.DAMAGE_AFTER_DEAL,
+            handler=_kuanggu,
+            condition=_kuanggu_condition,
+            per_point=True,
+        ),
+    ),
+    requirement=(
+        "锁定技：当你对一名角色造成 1 点伤害后，若其扣减体力前你计算与其的距离不大于 1，"
+        "你回复 1 点体力"
+    ),
+)
+"""【狂骨】一条定义：两条钩子（定格距离 / 逐点回复），锁定技 ⇒ 零询问、无流水线步骤。
+
+不并进 :data:`DAMAGE_AFTER_SKILLS`：那张表是"受伤侧一条时机 + 一条条件 + 一个回调"的声明
+形状（同一个 handler 挂到 ``timings`` 里的每个时机），而【狂骨】的两个时机要跑**不同**的回调
+（受伤害时定格、造伤后回复）。它是 B 族里第一条**造伤侧**的锁定技，故用整份 ``SkillDef`` 声明
+——仍是既有原语（钩子 + 帧私有键 + RECOVER 子帧），不新增机制。
+"""
+
+
 DAMAGE_AFTER_SKILLS: tuple[DamageAfterSkill, ...] = (
     # 曹操【奸雄】：你可以获得造成此伤害的牌（规则 972）——每次伤害事件一次。
     # W6-01：零步技能迁 ``run_flow``（模块级 ``JIANXIONG_FLOW``），行为与旧回调逐字等价。
@@ -1583,12 +1747,18 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
 def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
     """B 族技能的 :class:`~sgs.skills.catalog.SkillDef`（每条技能一个）。
 
-    全部是**非锁定技**（技能面写了"你可以"）；``carrier = HERO`` ⇒ 优先级档由载体派生；
-    ``skill_type = NORMAL``（都不是主公技）；``per_point`` / ``timings`` 由声明给出
+    主体（:data:`DAMAGE_AFTER_SKILLS`）是**受伤侧**的声明表：``carrier = HERO`` ⇒ 优先级档由
+    载体派生；``skill_type = NORMAL``（都不是主公技）；``per_point`` / ``timings`` 由声明给出
     （【遗计】逐点；【忘隙】在造成 / 受到两侧都逐点）。``handler`` 与 ``flow`` 恰有其一
-    （【刚烈】【遗计】（标准 / 界）是手写多轮回调，其余走流水线）。
+    （【刚烈】【遗计】（标准 / 界）是手写多轮回调，其余走流水线）；其中【耀武】是唯一的锁定技
+    （``locked=True`` ⇒ 不问是否发动）。
+
+    另有**一条独立声明** :data:`KUANGGU_DEF`（风包魏延【狂骨】）：它挂在造伤侧（
+    ``DAMAGE_AFTER_DEAL``），且两个时机要跑不同回调（受伤害时定格距离 / 造伤后逐点回复），
+    表达不了 :class:`DamageAfterSkill` 的"一条条件 + 一个回调挂到若干时机"的形状，故按整份
+    ``SkillDef`` 声明后并进来——仍是既有原语，不新增机制。
     """
-    return tuple(
+    declared = tuple(
         SkillDef(
             skill_id=skill.skill_id,
             locked=skill.locked,
@@ -1613,3 +1783,4 @@ def damage_after_skill_definitions() -> tuple[SkillDef, ...]:
         )
         for skill in DAMAGE_AFTER_SKILLS
     )
+    return (*declared, KUANGGU_DEF)

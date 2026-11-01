@@ -27,7 +27,7 @@ if str(_TOOLS) not in sys.path:  # sgs_web 住在 tools/（与 test_web.py 同�
     sys.path.insert(0, str(_TOOLS))
 
 from sgs.data import Identity, RuleConfig, load_content_pack, load_hero_tables
-from sgs.effects import check_targets, legal_actions_for
+from sgs.effects import check_targets, distance, legal_actions_for
 from sgs.engine import Engine
 from sgs.skills.virtual import transformed_card
 from sgs.state import (
@@ -1319,3 +1319,310 @@ def test_gongxin_mobile_is_once_per_play_phase():
         for action in play_queries[-1].legal_actions
     ), "本阶段已经用过一次 ⇒ 不再进候选"
 
+
+
+# ---------------------------------------------------------------------------
+# 魏延【狂骨】（`feng-weiyan` 票 01）：锁定技，造伤后按「扣减体力前」的距离回复 1 点体力
+#
+# 牌面（`D:\SGS_HEROS\神话再临-风包\魏延\技能.txt`，逐字）：
+#
+#     狂骨：锁定技，当你对一名角色造成1点伤害后，若其扣减体力前你计算与其的距离不大于 1，
+#           你回复 1 点体力。
+#
+# 全部走**外部缝**（记录流 / 终局状态）：一条【杀】或一张【南蛮入侵】打出伤害，看魏延的体力、
+# `RECOVER` 帧与 `hp_change`。距离这一侧的关键用例是
+# `test_kuanggu_uses_the_distance_before_the_hp_deduction`——目标被这一击打死、又带着 +1
+# 防御马时，只有"扣减体力前定格"的实现才会给出"不触发"（现算会算成 1 而误回血）。
+#
+# 两条判据（`edge-cases.md` 的 H2 / H3）：**持有者自校**（伤害必须由魏延造成：别人打人、
+# 魏延自己挨打都不触发）与**锁定技不问**（记录流里一条 `SKILL_ACTIVATION` 都没有）。
+# "无来源伤害（【闪电】）"与"失去体力（【苦肉】）"是结构排除：前者 `source` 为 `None`、
+# 与持有者永不相等；后者走 `LIFE_DECREASE` 帧、根本不到伤害帧的这两个时机。
+# ---------------------------------------------------------------------------
+
+KUANGGU = "hero.weiyan.kuanggu"
+WEIYAN = "weiyan"
+
+_KUANGGU_SLASH = cards_of_type(PACK, "slash")[0]
+
+_KUANGGU_PACK_160 = load_content_pack(deck_profile="standard_ex_160")
+"""军争 160 档：只有它带【古锭刀】（对无手牌目标 +1）——"2 点伤害 ⇒ 逐点两次"的载体。"""
+
+_KUANGGU_QINGLONG = cards_of_type(PACK, "green_dragon_blade")[0]
+"""青龙偃月刀：攻击范围 3——用来把"够不着"的目标变成能使用【杀】的目标（距离 2 仍合法）。"""
+
+_KUANGGU_CHITU = cards_of_type(PACK, "chitu")[0]
+"""赤兔（−1 进攻马）：**自己**计算与其他角色的距离 −1。"""
+
+_KUANGGU_DILU = cards_of_type(PACK, "dilu")[0]
+"""的卢（+1 防御马）：**其他角色**计算与你的距离 +1。"""
+
+
+def _kuanggu_use_chain_done(engine) -> bool:
+    """这张牌的使用链整个跑完（USE 帧已出栈 + 结算栈空）。
+
+    与 `tests/test_use_and_resolve.py::_use_chain_done` 同姿态：被动局面不会自然收局，故只跑到
+    被测链结束为止——死亡结算在链内，濒死 / 死亡 / 造成伤害后都已在记录里。
+    """
+    popped = any(
+        record.kind == "frame" and record.op == "pop" and record.frame_kind is FrameKind.USE
+        for record in engine.records
+    )
+    return popped and not engine.stack
+
+
+def _kuanggu_find_play(player, query):
+    """该座位要打的那张牌（【杀】要求目标正是 ``target``；锦囊只看牌名）。"""
+    for action in query.legal_actions:
+        if not isinstance(action, UseCard) or action.card.type != player.type_id:
+            continue
+        if player.type_id == "slash" and action.targets != (player.target,):
+            continue
+        return action
+    return None
+
+
+class _KuangguActor:
+    """座位 0（或指定座位）：打一次指定牌名的牌，其余询问取最小合法应答。"""
+
+    def __init__(self, *, target: int, type_id: str = "slash") -> None:
+        self.target = target
+        self.type_id = type_id
+        self.used = False
+
+    def respond(self, query):
+        if query.kind == "PLAY_PHASE":
+            if not self.used:
+                action = _kuanggu_find_play(self, query)
+                if action is not None:
+                    self.used = True
+                    return action
+            return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _kuanggu_engine(
+    seats, *, used=(), target=1, type_id="slash", turn_seat=0, seed=17, pack=PACK
+):
+    """造局面并跑到那一张牌的使用链结束；返回 ``(engine, state)``。"""
+    state = build_state(
+        pack=pack,
+        seats=seats,
+        deck=deck_excluding(pack, *used),
+        turn_seat=turn_seat,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=seed)
+    players = [PassPlayer() for _ in seats]
+    players[turn_seat] = _KuangguActor(target=target, type_id=type_id)
+    run_queries(engine, players, _kuanggu_use_chain_done)
+    return engine, state
+
+
+def _kuanggu_hp_changes(engine, seat: int):
+    """某座位的 ``hp_change`` delta 序列（回复 = before < after）。"""
+    return [record for record in _deltas(engine, "hp_change") if record.seat == seat]
+
+
+def _kuanggu_timings(engine) -> list:
+    return [record.timing for record in engine.records if record.kind == "timing"]
+
+
+def test_kuanggu_recovers_one_after_dealing_damage_within_distance():
+    """距离 1 造成 1 点伤害 ⇒ 回复 1 点；锁定技不问（一条 `SKILL_ACTIVATION` 都没有）。"""
+    engine, state = _kuanggu_engine(
+        [
+            SeatSpec(hero=WEIYAN, hp=3, hand=(_KUANGGU_SLASH,)),
+            SeatSpec(hp=4),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(_KUANGGU_SLASH,),
+    )
+
+    assert state.player(1).hp == 3, "【杀】照常造成 1 点伤害"
+    assert state.player(0).hp == 4, "距离 1 ⇒ 狂骨回复 1 点体力"
+    assert not [
+        query
+        for query in _queries(engine, QueryKind.SKILL_ACTIVATION.value)
+        if query.skill_id == KUANGGU
+    ], "锁定技不问是否发动"
+
+
+def test_kuanggu_recovery_goes_through_a_recover_frame():
+    """回复走**回复体力事件**（`RECOVER_VALUE` / `RECOVER_AFTER`）+ 一条 `hp_change`。"""
+    engine, state = _kuanggu_engine(
+        [
+            SeatSpec(hero=WEIYAN, hp=3, hand=(_KUANGGU_SLASH,)),
+            SeatSpec(hp=4),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(_KUANGGU_SLASH,),
+    )
+
+    timings = _kuanggu_timings(engine)
+    assert Timing.RECOVER_VALUE in timings and Timing.RECOVER_AFTER in timings
+    assert [(change.before, change.after) for change in _kuanggu_hp_changes(engine, 0)] == [
+        (3, 4)
+    ]
+
+
+def test_kuanggu_does_not_fire_outside_distance_one():
+    """距离 2 ⇒ 不回复；伤害照常结算（条件只管狂骨，不改伤害）。"""
+    engine, state = _kuanggu_engine(
+        [
+            SeatSpec(
+                hero=WEIYAN, hp=3, equip=(_KUANGGU_QINGLONG,), hand=(_KUANGGU_SLASH,)
+            ),
+            SeatSpec(),
+            SeatSpec(hp=4),
+            SeatSpec(),
+        ],
+        target=2,
+        used=(_KUANGGU_SLASH, _KUANGGU_QINGLONG),
+    )
+
+    assert distance(state, 0, 2) == 2, "四座环上 0 与 2 相距 2"
+    assert state.player(2).hp == 3, "伤害照常结算"
+    assert state.player(0).hp == 3, "距离 2 ⇒ 狂骨不回复"
+
+
+def test_kuanggu_ignores_damage_it_did_not_deal():
+    """别人造成的伤害不触发——**魏延自己挨打也不回血**（条件必须自校持有者是伤害来源）。"""
+    engine, state = _kuanggu_engine(
+        [
+            SeatSpec(hero=WEIYAN, hp=3),
+            SeatSpec(hand=(_KUANGGU_SLASH,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        target=0,
+        turn_seat=1,
+        used=(_KUANGGU_SLASH,),
+    )
+
+    assert state.player(0).hp == 2, "吃 1 点伤害但没回复（伤害不是我造成的）"
+    assert Timing.RECOVER_VALUE not in _kuanggu_timings(engine)
+
+
+def test_kuanggu_triggers_once_per_damage_point():
+    """「1 点伤害」⇒ 逐点：古锭刀造 2 点 ⇒ 两次触发、共回复 2 点（两帧）。"""
+    pack = _KUANGGU_PACK_160
+    scimitar = cards_of_type(pack, "ancient_scimitar")[0]
+    slash = cards_of_type(pack, "slash")[0]
+    engine, state = _kuanggu_engine(
+        [
+            SeatSpec(hero=WEIYAN, hp=2, equip=(scimitar,), hand=(slash,)),
+            SeatSpec(hp=4),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        pack=pack,
+        used=(slash, scimitar),
+    )
+
+    assert state.player(1).hp == 2, "古锭刀对**没有手牌**的目标 +1 ⇒ 2 点伤害"
+    assert state.player(0).hp == 4, "两点各回复 1 点"
+    assert [
+        (change.before, change.after) for change in _kuanggu_hp_changes(engine, 0)
+    ] == [(2, 3), (3, 4)], "两帧逐点各一次，不是一次回复 2 点"
+
+
+def test_kuanggu_still_recovers_when_the_lethal_damage_kills_a_character_within_distance():
+    """致死也在触发面上：造成伤害后在濒死 / 死亡**之后**跑，距离按扣减体力前照样是 1。"""
+    engine, state = _kuanggu_engine(
+        [
+            SeatSpec(hero=WEIYAN, hp=3, hand=(_KUANGGU_SLASH,)),
+            SeatSpec(hp=1),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(_KUANGGU_SLASH,),
+    )
+
+    assert not state.player(1).alive, "1 点伤害打死 1 体力的目标"
+    assert state.player(0).hp == 4, "目标死了也照常回复（距离在扣减体力前定格）"
+
+
+def test_kuanggu_uses_the_distance_before_the_hp_deduction():
+    """**本技能的核心边界**：相邻 + 【的卢】⇒ 扣减体力前距离 2 ⇒ 打死了也不触发。
+
+    这一条能红：若在"造成伤害后"现算距离，死者（装备已弃、装备技不再解析）会算成 1 ⇒ 误回血。
+    下面同时断言"现算值确实是 1"，把"为什么必须在扣减体力前定格"留在测试里。
+    """
+    engine, state = _kuanggu_engine(
+        [
+            SeatSpec(
+                hero=WEIYAN, hp=3, equip=(_KUANGGU_QINGLONG,), hand=(_KUANGGU_SLASH,)
+            ),
+            SeatSpec(hp=1, equip=(_KUANGGU_DILU,)),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(_KUANGGU_SLASH, _KUANGGU_QINGLONG, _KUANGGU_DILU),
+    )
+
+    assert not state.player(1).alive, "这一击把目标打死了"
+    assert state.player(0).hp == 3, "扣减体力前距离 2（相邻 + 的卢）⇒ 狂骨不回复"
+    assert state.player(1).equip == [], "死亡结算已弃置的卢"
+    assert distance(state, 0, 1) == 1, "死者现算反而够得着——正是必须定格的原因"
+
+
+def test_kuanggu_judges_each_damaged_target_separately():
+    """一次【南蛮入侵】打三个目标：逐目标各判距离（相邻的两个触发、相距 2 的不触发）。"""
+    barbarian = cards_of_type(PACK, "barbarian_invasion")[0]
+    engine, state = _kuanggu_engine(
+        [
+            SeatSpec(hero=WEIYAN, hp=1, hand=(barbarian,)),
+            SeatSpec(hp=4),
+            SeatSpec(hp=4),
+            SeatSpec(hp=4),
+        ],
+        type_id="barbarian_invasion",
+        used=(barbarian,),
+    )
+
+    assert [state.player(seat).hp for seat in (1, 2, 3)] == [3, 3, 3], "三个目标各 1 点伤害"
+    assert state.player(0).hp == 3, "相邻的 1 / 3 号各触发一次（1 → 3），2 号距离 2 不触发"
+
+
+def test_kuanggu_at_full_hp_recovers_nothing():
+    """满体力 ⇒ 不回复（规则 §4.15 L426）：连回复事件都不产生，零 delta。"""
+    engine, state = _kuanggu_engine(
+        [
+            SeatSpec(hero=WEIYAN, hp=4, hand=(_KUANGGU_SLASH,)),
+            SeatSpec(hp=4),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        used=(_KUANGGU_SLASH,),
+    )
+
+    assert state.player(1).hp == 3
+    assert state.player(0).hp == 4
+    assert _kuanggu_hp_changes(engine, 0) == [], "满体力不写体力"
+    assert Timing.RECOVER_VALUE not in _kuanggu_timings(engine), "也不该压回复帧"
+
+
+def test_kuanggu_reads_the_mount_chain():
+    """距离读既有的 `DISTANCE` 链：**赤兔（−1）**让座位距离 2 变 1 ⇒ 触发。"""
+    engine, state = _kuanggu_engine(
+        [
+            SeatSpec(
+                hero=WEIYAN, hp=3, equip=(_KUANGGU_CHITU,), hand=(_KUANGGU_SLASH,)
+            ),
+            SeatSpec(),
+            SeatSpec(hp=4),
+            SeatSpec(),
+        ],
+        target=2,
+        used=(_KUANGGU_SLASH, _KUANGGU_CHITU),
+    )
+
+    assert distance(state, 0, 2) == 1, "赤兔把座位距离 2 压成 1（也是【杀】能指定它的原因）"
+    assert state.player(2).hp == 3
+    assert state.player(0).hp == 4, "计算距离 1 ⇒ 狂骨回复 1 点"

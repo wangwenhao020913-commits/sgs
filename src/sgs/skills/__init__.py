@@ -19,7 +19,7 @@
 | 族 | 模块 | 代表技能 |
 |---|---|---|
 | A 主动技 | :mod:`sgs.skills.active` | 制衡 / 仁德 / 反间 / 青囊 / 离间 / 结姻 / ☆荐言 / ☆攻心 |
-| B 伤害后 | :mod:`sgs.skills.damage_after` | 奸雄 / 反馈 / 遗计 |
+| B 伤害后 | :mod:`sgs.skills.damage_after` | 奸雄 / 反馈 / 遗计 / 狂骨（造伤侧锁定技） |
 | H 转化（源谓词 → 虚拟牌） | :mod:`sgs.skills.heroes` | 武圣 / 龙胆 / 国色 / 急救 |
 | K·M 距离与目标转移 | :mod:`sgs.skills.target_change` | 马术 / 流离 |
 | 主公求助 | :mod:`sgs.skills.lord_request` | 护驾 / 激将 / 救援 |

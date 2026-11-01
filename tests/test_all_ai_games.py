@@ -757,14 +757,15 @@ def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -
     3. **零非法应答**（每次应答都在候选 / 清单 / 附带指定池里）；
     4. **可回放**（磁带重放后记录流逐字节相等）。
 
-    池 = **默认启用池**（spec D19：标准 25 + 界版 29 + 移动版 1 + 风包 1 + 风包移动版 1 = 57 个版本 / 32 个真名），不显式
+    池 = **默认启用池**（spec D19：标准 25 + 界版 29 + 移动版 1 + 风包 2 + 风包移动版 2 +
+    自制包 1 = 60 个版本 / 34 个真名），不显式
     发将、不点将、不设禁将。逐局另外断言真的从混合池里发牌：8 名武将都在池内、8 个真名
     互异（同一真名至多一个座位）、且标准版与界版**两版都在场**——否则"混合池"这一条
     可以被一局全标准版的空转局糊弄过去。
     """
     pool = enabled_hero_ids()
     true_names = {hero_by_id(hero_id).true_name for hero_id in pool}
-    assert (len(pool), len(true_names)) == (59, 33), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版）"
+    assert (len(pool), len(true_names)) == (60, 34), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版；feng-weiyan 票 01 加风包魏延 1 个）"
 
     engine = _new_engine(seed, players=M6_CLOSEOUT_PLAYERS)
     scans = _participants(seed, M6_CLOSEOUT_PLAYERS)
