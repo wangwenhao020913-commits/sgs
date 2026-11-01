@@ -45,6 +45,23 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "yuji_mobile",
+      "name": "于吉移动版",
+      "true_name": "于吉",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "feng-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "guohuo",
+          "name": "蛊惑",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

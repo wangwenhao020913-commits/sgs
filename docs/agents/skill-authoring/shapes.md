@@ -39,11 +39,12 @@
 | 多步：座位 → 选项 → 选牌 | 「选择一名男性角色，然后弃置一张手牌或将一张装备牌置入其装备区」 | `hero.jie_sunshangxiang.jieyin` |
 | 选项步（闭集，可动态） | 「选择一项：1… 2…」 | `hero.jie_xushu.jianyan` |
 | 手写询问（循环/逐点/逐目标） | 「逐点触发、每个伤害点各问一次」「逐个目标」 | `hero.guojia.yiji`、`hero.jie_machao.tieqi` |
+| **手写主动技**（A 族，无 `SkillFlow`、无钩子） | 「可以扣置一张手牌…依次选择相信或质疑」——一次发动里有**变长循环**（逐座位问） | `hero.yuji_mobile.guohuo`（移动版于吉【蛊惑】）；判据见 `src/sgs/skills/flow.py:SkillFlow` 的"本语言没有循环 / 每轮提交步骤" |
 | 钩子 + 修饰器（触发后改值） | 「当你失去 1 点体力后…本阶段…」 | `hero.jie_huanggai.zhaxiang` |
 | 纯修饰器（无询问） | 「锁定技，你与其他角色的距离 -1」 | `hero.machao.mashu` |
 | 目标池修饰器（剔除自己） | 「若你没有手牌，你不能成为【杀】或【决斗】的目标」 | `hero.zhugeliang.kongcheng` |
 | 接缝（时机枚举里没有） | 「当你的【杀】被【闪】抵消后」 | `equip.axe` |
-| 提供者（势力求助） | 「令其他蜀势力角色打出一张【杀】」 | `hero.liubei.jijiang` |
+| 提供者（势力求助） | 「令其他蜀势力角色打出一张【杀】」 | `hero.liubei.jijiang`；**提供者不只服务主公技**：移动版于吉【蛊惑】用它实现"需要牌时先质疑再决定这张牌算不算数" |
 | 判定 / 改判 | 「判定牌生效前，你可以打出一张牌代替之」 | `hero.simayi.guicai` |
 | 放置区（牌扣在武将牌上） | 「将手牌置于你的武将牌上」 | `hero.jie_luxun.qianxun` |
 | 觉醒 / 限定（一次性转变） | 「觉醒技 / 限定技，…」 | `hero.jie_xushu.qianxue`、`hero.jie_zhangfei.tishen`；**A 族（主动技）的限定技** = `ActiveSkill(skill_type=LIMITED)`，样板 `hero.tao_liubei.yiqi` |

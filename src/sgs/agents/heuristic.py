@@ -3245,6 +3245,11 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(3.5),
         "放弃摸牌改为至多拿两张：净赚（拿到 ≤2 张、代价是少摸 2 张）",
     ),
+    "hero.yuji_mobile.guohuo": (
+        _constant(1.5),
+        "扣置一张手牌当任意基本牌 / 普通锦囊：多一条使用路径，但要赌其他角色的质疑（"
+        "假牌会被作废，保守为正）",
+    ),
     "hero.xiahouyuan.shensu": (
         _score_shensu,
         "跳判定 + 摸牌换一张无距离【杀】：常态少摸两张不划算，只在敌方 1 血能补刀时发动",

@@ -184,6 +184,9 @@ const OPTION_LABELS = Object.freeze({
   basic: "基本牌",
   trick: "锦囊牌",
   equipment: "装备牌",
+  // 风包·移动版于吉【蛊惑】：其他角色逐个表态（两选项，必答；"相信"就是放弃质疑）。
+  guohuo_doubt: "质疑",
+  guohuo_trust: "相信",
   // 风包夏侯渊【神速】：一至两项（三档单选项；"两项都选"是【1】+【2】）。
   shensu_skip_judge_draw: "【1】跳过判定阶段和摸牌阶段",
   shensu_skip_play_equip: "【2】跳过出牌阶段并弃置一张装备牌",

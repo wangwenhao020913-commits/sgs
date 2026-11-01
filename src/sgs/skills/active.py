@@ -78,6 +78,7 @@ from sgs.state import (
     Slot,
     Zone,
     ZoneRef,
+    seats_from,
 )
 from sgs.timing import Timing
 
@@ -2908,6 +2909,305 @@ YIQI_FLOW = SkillFlow(
 """【义起】的一步流水线：观看弃牌堆顶 x 张 + 三选一（同一问）→ 获得 / 失去 / 授予。"""
 
 
+# ---------------------------------------------------------------------------
+# 移动版于吉【蛊惑】（神话再临·风包·移动版；用户 2026-11-01 读法裁定）
+#
+# 牌面（`D:\\SGS_HEROS\\神话再临-风包\\于吉\\技能.txt`，逐字）：
+#   你可以扣置一张手牌，将此牌当任意一张基本牌或普通锦囊牌使用或打出。若有其他角色质疑
+#   则翻开此牌且此牌作废，若为：假，质疑者各摸一张牌；真，质疑者各失去1点体力，然后若
+#   被质疑的牌的花色为♥️，此牌依旧进行结算。
+#
+# 用户裁定（2026-11-01）：
+#   · **两个入口**：① 出牌阶段主动使用；② 任何时候"需要使用 / 打出一张基本牌或普通锦囊牌"
+#     时进入询问（同【武圣】【龙胆】，区别只是产物牌名覆盖全部基本牌 + 普通锦囊牌）；
+#   · **扣置算失去牌**；质疑者 = **其他所有存活角色**；
+#   · 质疑顺序 = **从下家起逆时针**，**收齐全部答复后**再按同一顺序依次执行结果；
+#   · 触发次数**无限制**；作废 = 牌从**效果区**进弃牌堆（扣置时已离开手牌）。
+#
+# 本节的落点：手写 `activate`（不用 `SkillFlow`——流水线语言没有循环步骤，而质疑是逐座位
+# 循环）。`扣置` = 手牌 → 处理区（`MoveReason.LOSE`，`MOVE_AFTER` 因此照常触发"失去牌后"），
+# `验明` = `Engine.reveal_card`（M5-06 的公开揭示），`作废` = 处理区 → 弃牌堆。
+# ---------------------------------------------------------------------------
+
+GUOHUO = hero_skill_id("yuji_mobile", "guohuo")
+"""移动版于吉【蛊惑】的全限定技能 id。"""
+
+GUOHUO_DOUBT = "guohuo_doubt"
+GUOHUO_TRUST = "guohuo_trust"
+"""质疑 / 相信两个选项（`options.js:OPTION_LABELS` 各一条；闭集两选项 ⇒ 牌桌按钮组）。"""
+
+_ASK_GUOHUO_CARD = "hero.yuji_mobile.guohuo.card"
+"""手写询问位置（票 22）：扣置选牌。目标 / 质疑那两问的 `owner` 由技能 id 派生。"""
+
+_GUOHUO_STAGE = "guohuo_stage"
+_GUOHUO_SOURCE = "guohuo_source"
+_GUOHUO_NAME = "guohuo_name"
+_GUOHUO_TARGETS = "guohuo_targets"
+_GUOHUO_KOUCHU = "guohuo_kouchu"
+_GUOHUO_ASKED = "guohuo_asked"
+_GUOHUO_YES = "guohuo_doubted"
+_GUOHUO_RESULT = "guohuo_result_next"
+_GUOHUO_SETTLED = "guohuo_settled"
+"""帧私有游标：扣置已完成 / 已问过谁 / 谁质疑了 / 结果执行到第几个 / 收尾已完成。
+
+每条都是"重入既不重做也不漏做"的落点（`CODING_STANDARDS.md` §3：会挂起的操作必须幂等）。
+"""
+
+
+_GUOHUO_UNDECLARABLE: frozenset[str] = frozenset({"borrowed_sword"})
+"""**不能声明**的牌名：目前只有【借刀杀人】。
+
+【借刀杀人】的使用要求一条**附带指定**（``UseCard.designations`` = 被迫出【杀】的那个 Bn），
+而那个入口只存在于**出牌阶段的清单**（W5-02a：``designation_actions``）；蛊惑的流水线里没有
+这一步，声明它会在结算期撞上 ``ops.py`` 的 fail-closed（"借刀的附带指定恰好一个 Bn"）。
+故这里**不提供**这个选项——fail-closed 好过产出一条必崩的使用。补法 = 在目标步之后再加一步
+"选择 Bn"（待后续票；`01-yuji.md` 的遗留清单里有它）。
+"""
+
+
+def _guohuo_declaration_table(state: GameState) -> dict[str, str]:
+    """此刻可声明的牌名：``显示名 → 牌型 id``。
+
+    范围 = **基本牌 + 普通锦囊**（排除延时锦囊），且**本牌堆里真有这种牌**——与界【龙胆】
+    的 ``_product_in_pack`` 同一判据（108 档没有【酒】，把它列进选项会产出一张牌堆里不存在
+    的虚拟牌）。
+    """
+    table: dict[str, str] = {}
+    known: set[str] = set()
+    for card in state.cards:
+        if card.type in known:
+            continue
+        category = card_category(state.pack_id, card.type)
+        if category is Category.BASIC or (
+            category is Category.TRICK and not behavior_for(card).is_delayed
+        ):
+            known.add(card.type)
+            if card.type in _GUOHUO_UNDECLARABLE:
+                continue
+            table.setdefault(card.name, card.type)
+    return table
+
+
+def _guohuo_legal_names(
+    state: GameState, seat: int, source_card: int, table: Mapping[str, str]
+) -> dict[str, str]:
+    """再收窄一道：**此刻真的能使用**的牌名（`check_targets` 现算）。
+
+    出牌阶段的【闪】/【无懈可击】没有目标池、【桃】在满体力时不可用、【杀】在攻击范围外
+    没有目标 ⇒ 这些名字不进选项（`edge-cases.md` 的 O1：此刻不可能执行的选项不该出现）。
+    """
+    legal: dict[str, str] = {}
+    for name, type_id in table.items():
+        virtual = transformed_card(state, (source_card,), type_id)
+        if check_targets(state, seat, virtual):
+            legal[name] = type_id
+    return legal
+
+
+def _guohuo_virtual(state: GameState, frame: Any) -> CardRef:
+    """本次扣置牌按**声明的牌名**转化出来的那张虚拟牌（单源 ⇒ 继承花色 / 点数）。"""
+    return transformed_card(
+        state, (int(frame.data[_GUOHUO_SOURCE]),), str(frame.data[_GUOHUO_NAME])
+    )
+
+
+def _guohuo_doubters(state: GameState, owner: int) -> tuple[int, ...]:
+    """要表态的座位：**其他所有存活角色**，**从下家起逆时针**（用户裁定）。"""
+    count = len(state.players)
+    order = seats_from(state, (owner + 1) % count, count)
+    return tuple(seat for seat in order if seat != owner and state.player(seat).alive)
+
+
+def _guohuo_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """出牌阶段入口：手里有牌就给一条 ``ActivateSkill``（无次数限制 ⇒ 不落阶段位）。"""
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    if not state.player(ctx.subject).hand:
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _guohuo_targets_for(
+    state: GameState, seat: int, card: CardRef
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """``(候选池, 必须指定的目标数)``：目标数与池都读与真牌同一条规则。"""
+    pool = check_targets(state, seat, card)
+    rule = behavior_for(card).target_rule
+    count = rule.target_count(len(pool))
+    if count <= 0:
+        return pool, 0
+    return pool, count
+
+
+def _guohuo_activate(host: Any, frame: Any) -> Any:
+    """移动版于吉【蛊惑】的发动主体：扣置 → 声明 → 目标 → 质疑 → 验明 → 结果 → 结算 / 作废。
+
+    七段由帧私有 ``guohuo_stage`` 串起来（每一段都可能挂起：扣置搬牌会内联派发"失去牌后"，
+    质疑是逐座位的询问，结果里扣体力会压子帧、摸牌会内联"获得牌后"，收尾的 `start_use`
+    会压整条使用链）。重入时按阶段键续跑，已完成的段不重做。
+    """
+    state = host.state
+    owner = int(frame.data["source"])  # SKILL 帧的载荷没有 skill_owner（A 族=发动者）
+    stage = frame.data.get(_GUOHUO_STAGE, "card")
+
+    # ---- 段 1：扣置一张手牌（手牌 → 处理区；算失去牌）------------------------
+    if stage == "card":
+        picked = host.ask_selection(
+            frame,
+            owner=_ASK_GUOHUO_CARD,
+            key="guohuo:card",
+            actor=owner,
+            timing=Timing.PHASE_PLAY_IDLE,
+            spec=SelectionSpec(zones=(Zone.HAND,), total=(1, 1)),
+            build_face=lambda: host.selection_face(owner, (Zone.HAND,), reveal_hand=True),
+        )
+        if host.suspended(picked):
+            return "stay"
+        if not picked:  # 取消整条发动（零副作用）
+            return None
+        frame.data[_GUOHUO_SOURCE] = int(picked[0])
+        frame.data[_GUOHUO_STAGE] = "name"
+
+    # ---- 段 2：声明牌名（任意一张基本牌 / 普通锦囊牌）-----------------------
+    if stage in ("card", "name"):
+        table = _guohuo_legal_names(
+            state,
+            owner,
+            int(frame.data[_GUOHUO_SOURCE]),
+            _guohuo_declaration_table(state),
+        )
+        if not table:  # 没有可声明的牌名 ⇒ 整条取消（零副作用）
+            return None
+        choice = host.ask_option(
+            frame,
+            owner,
+            Timing.PHASE_PLAY_IDLE,
+            skill_id=f"{GUOHUO}:name",
+            options=tuple(table),
+        )
+        if host.suspended(choice):
+            return "stay"
+        frame.data[_GUOHUO_NAME] = table[str(choice.choice)]
+        frame.data[_GUOHUO_STAGE] = "kouchu"
+
+    # ---- 段 3：扣置进处理区（算失去牌；牌面仍随处理区的公开投影）----
+    if stage in ("card", "name", "kouchu"):
+        if not frame.data.get(_GUOHUO_KOUCHU):
+            control = host.move_in_frame(
+                frame,
+                state.refs((int(frame.data[_GUOHUO_SOURCE]),)),
+                to_zone=ZoneRef(Zone.PROCESSING),
+                reason=MoveReason.LOSE,
+                owner=owner,
+            )
+            if control == "stay":
+                return "stay"
+            frame.data[_GUOHUO_KOUCHU] = True
+        frame.data[_GUOHUO_STAGE] = "targets"
+
+    # ---- 段 4：选择目标（按声明的牌名现算；无目标 / 全体目标不询问）----------
+    if stage in ("card", "name", "kouchu", "targets"):
+        if _GUOHUO_TARGETS not in frame.data:
+            card = _guohuo_virtual(state, frame)
+            pool, count = _guohuo_targets_for(state, owner, card)
+            if count <= 0:
+                frame.data[_GUOHUO_TARGETS] = ()
+            elif count >= len(pool):
+                frame.data[_GUOHUO_TARGETS] = tuple(pool)
+            elif count == 1:
+                picked = host.ask_option(
+                    frame,
+                    owner,
+                    Timing.PHASE_PLAY_IDLE,
+                    skill_id=f"{GUOHUO}:target",
+                    options=tuple(f"seat:{seat}" for seat in pool),
+                )
+                if host.suspended(picked):
+                    return "stay"
+                frame.data[_GUOHUO_TARGETS] = (_option_seat(picked),)
+            else:
+                # 区间规则（如【铁索连环】1–2 个）：取**下界**张，顺序由座位序定格。
+                frame.data[_GUOHUO_TARGETS] = tuple(pool[:count])
+        frame.data[_GUOHUO_STAGE] = "doubt"
+
+    # ---- 段 5：逐座位质疑（从下家起逆时针；收齐答复后再执行结果）--------------
+    if stage in ("card", "name", "kouchu", "targets", "doubt"):
+        asked: list[int] = frame.data.setdefault(_GUOHUO_ASKED, [])
+        yes: list[int] = frame.data.setdefault(_GUOHUO_YES, [])
+        order = _guohuo_doubters(state, owner)
+        while len(asked) < len(order):
+            seat = order[len(asked)]
+            answer = host.ask_option(
+                frame,
+                seat,
+                Timing.USE_ON_USE,
+                skill_id=f"{GUOHUO}:doubt",
+                options=(GUOHUO_TRUST, GUOHUO_DOUBT),
+            )
+            if host.suspended(answer):
+                return "stay"
+            asked.append(seat)
+            if str(answer.choice) == GUOHUO_DOUBT:
+                yes.append(seat)
+        frame.data[_GUOHUO_STAGE] = "reveal"
+
+    # ---- 段 6：翻开验明（公开亮出；只揭示、不移动）---------------------------
+    if stage in ("card", "name", "kouchu", "targets", "doubt", "reveal"):
+        if not frame.data.get("guohuo_revealed"):
+            host.reveal_card(
+                frame, owner, state.card(int(frame.data[_GUOHUO_SOURCE]))
+            )
+            frame.data["guohuo_revealed"] = True
+        frame.data[_GUOHUO_STAGE] = "results"
+
+    # ---- 段 7：按收集顺序依次执行结果（真 ⇒ 各失去 1 点；假 ⇒ 各摸 1 张）------
+    source = state.card(int(frame.data[_GUOHUO_SOURCE]))
+    truth = source.type == str(frame.data[_GUOHUO_NAME])
+    yes = frame.data.setdefault(_GUOHUO_YES, [])
+    index = int(frame.data.get(_GUOHUO_RESULT, 0))
+    while index < len(yes):
+        seat = int(yes[index])
+        flag = f"guohuo_result:{seat}"
+        if not frame.data.get(flag):
+            if truth:
+                frame.data[flag] = True
+                host.push_frame(
+                    FrameKind.LIFE_DECREASE,
+                    {"target": seat, "source": None, "amount": 1},
+                    timing=Timing.LIFE_DECREASE_BEFORE,
+                )
+                return "stay"
+            frame.data[flag] = True
+            drawn = host.draw_for_hand(frame, seat, 1)
+            if drawn == "stay":
+                return "stay"
+            if drawn is False:
+                return None
+        index += 1
+        frame.data[_GUOHUO_RESULT] = index
+
+    # ---- 段 8：♥️（或为真）⇒ 依旧结算；否则从效果区作废进弃牌堆 --------------
+    if frame.data.get(_GUOHUO_SETTLED):
+        return None
+    frame.data[_GUOHUO_SETTLED] = True
+    if truth or source.suit == Suit.HEART.value:
+        host.start_use(
+            _guohuo_virtual(state, frame),
+            source=owner,
+            targets=tuple(frame.data[_GUOHUO_TARGETS]),
+            use_timing=Timing.PHASE_PLAY_IDLE,
+        )
+        return "stay"
+    host.move_in_frame(
+        frame,
+        state.refs((int(frame.data[_GUOHUO_SOURCE]),)),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=owner,
+    )
+    return "stay"
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 韬·刘备【义起】（自制包）：**A 族第一条限定技**。观看弃牌堆顶 x 张（x = 张数整除 10）→
     # 恒 3 项类型选 1（不可放弃）→ 获得该类所有牌 → 失去武将牌上除【义起】外的技能 →
@@ -3072,6 +3372,22 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         _shizhan_offers,
         flow=SHIZHAN_FLOW,
         requirement="出牌阶段限两次：令一名其他角色视为对你使用一张【决斗】",
+    ),
+    # 移动版于吉【蛊惑】（用户 2026-11-01 裁定）：**无次数限制** ⇒ `once_per_phase=False`
+    # （不落阶段位）。不翻预发动：手写发动主体里逐步问（质疑问是逐座位循环，清单表达不了）。
+    ActiveSkill(
+        "yuji_mobile",
+        "guohuo",
+        _guohuo_offers,
+        activate=_guohuo_activate,
+        requirement=(
+            "扣置一张手牌，将此牌当任意一张基本牌或普通锦囊牌使用；"
+            "其他角色可依次质疑：真则质疑者各失去 1 点体力，假则各摸一张牌，"
+            "然后若此牌为♥️则照常结算，否则此牌作废"
+        ),
+        step_requirements={
+            "name": "声明一种牌名：基本牌或普通锦囊牌（此刻可使用的才列出来）",
+        },
     ),
 )
 """A 族十七条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】+

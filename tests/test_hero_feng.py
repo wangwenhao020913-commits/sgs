@@ -61,6 +61,211 @@ from support import (
     run_until,
 )
 
+
+# ---------------------------------------------------------------------------
+# 风包·移动版：于吉移动版【蛊惑】（用户 2026-11-01 读法裁定）
+#
+# 牌面（`D:\\SGS_HEROS\\神话再临-风包\\于吉\\技能.txt`，逐字）：
+#   你可以扣置一张手牌，将此牌当任意一张基本牌或普通锦囊牌使用或打出。若有其他角色质疑
+#   则翻开此牌且此牌作废，若为：假，质疑者各摸一张牌；真，质疑者各失去1点体力，然后若
+#   被质疑的牌的花色为♥️，此牌依旧进行结算。
+#
+# 用户裁定：两个入口（出牌阶段主动 / 需要牌时询问）；扣置算失去牌；质疑者 = 其他所有存活
+# 角色，**从下家起逆时针**，**收齐答复后**再按同一顺序执行结果；无次数限制；
+# 作废 = 牌从**效果区**进弃牌堆（扣置时已离开手牌）。
+# ---------------------------------------------------------------------------
+
+GUOHUO = "hero.yuji_mobile.guohuo"
+
+
+class GuohuoScript:
+    """【蛊惑】的脚本应答：发动 / 声明哪个牌名 / 要不要质疑。"""
+
+    def __init__(self, *, activate: bool = False, declare: str = "", doubt: bool = False) -> None:
+        self.activate = activate
+        self.declare = declare
+        self.doubt = doubt
+        self.options: list[tuple[str, ...]] = []
+
+    def respond(self, query):
+        kind = getattr(query.kind, "value", query.kind)
+        if kind == "PLAY_PHASE":
+            if self.activate:
+                for action in query.legal_actions:
+                    if isinstance(action, ActivateSkill) and action.skill_id == GUOHUO:
+                        return action
+            return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        if kind == "SELECT_CARDS":
+            return next(a for a in query.legal_actions if isinstance(a, SelectCards))
+        if kind == "SELECT_OPTION":
+            choices = [a for a in query.legal_actions if isinstance(a, SelectOption)]
+            self.options.append(tuple(str(a.choice) for a in choices))
+            for action in choices:
+                if self.declare and str(action.choice) == self.declare:
+                    return action
+            for action in choices:
+                if str(action.choice).startswith("seat:"):
+                    return action
+            for action in choices:
+                if str(action.choice) == "guohuo_doubt" and self.doubt:
+                    return action
+            for action in choices:
+                if str(action.choice) == "guohuo_trust" and not self.doubt:
+                    return action
+            return choices[0]
+        return query.legal_actions[0]
+
+
+def _run_guohuo(
+    *,
+    hand: tuple[int, ...],
+    declare: str,
+    doubters: tuple[bool, ...],
+    hp: int = 2,
+    hp_max: int = 3,
+):
+    """座位 0 = 于吉移动版（受伤，故【桃】可用）；座位 1/2 表态由 ``doubters`` 决定。"""
+    used = set(hand)
+    # 座位 1 / 2 的手牌从牌堆尾部取，避开座位 0 的牌（同一 card_id 不能同时挂在两个人手上）
+    filler = tuple(
+        index
+        for index in range(len(PACK.deck.cards) - 1, -1, -1)
+        if index not in used
+    )[-2:]
+    used |= set(filler)
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="yuji_mobile", hand=hand, hp=hp, hp_max=hp_max),
+            SeatSpec(hand=(filler[0],)),
+            SeatSpec(hand=(filler[1],)),
+        ],
+        deck=deck_excluding(PACK, *sorted(used)),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=11)
+    players = [
+        GuohuoScript(activate=True, declare=declare),
+        GuohuoScript(doubt=doubters[0]),
+        GuohuoScript(doubt=doubters[1]),
+    ]
+    run_queries(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.TURN_AFTER_END
+            for record in e.records
+        ),
+    )
+    return engine, state, players
+
+
+def _guohuo_deltas(engine, delta_type: str):
+    return [
+        record
+        for record in engine.records
+        if record.kind == "delta" and record.delta_type == delta_type
+    ]
+
+
+def test_guohuo_declares_any_normal_trick_and_voids_a_fake_non_heart_card() -> None:
+    """假 + 非♥️ ⇒ 质疑者各摸一张，牌从**效果区**作废进弃牌堆（从未结算）。"""
+    spade_slash = next(
+        index
+        for index, card in enumerate(PACK.deck.cards)
+        if card.type == "slash" and card.suit.value == "spade"
+    )
+    engine, state, players = _run_guohuo(
+        hand=(spade_slash,), declare="万箭齐发", doubters=(True, False)
+    )
+    # 座位 1 质疑 ⇒ 假 ⇒ 摸一张
+    draws = [
+        record
+        for record in _guohuo_deltas(engine, "card_move")
+        if record.reason is MoveReason.DRAW and record.to_zone.seat == 1
+    ]
+    assert draws, "假 ⇒ 质疑者要摸一张牌"
+    # 作废：源牌从处理区进弃牌堆
+    voided = [
+        record
+        for record in _guohuo_deltas(engine, "card_move")
+        if record.reason is MoveReason.DISCARD
+        and record.from_zone.zone is Zone.PROCESSING
+        and [card.card_id for card in record.cards] == [spade_slash]
+    ]
+    assert voided, "非♥️的假牌要从效果区作废进弃牌堆"
+    # 从未使用：这张牌**没有**任何一条 reason=USE 的移动（作废 = 不产生使用帧）
+    assert not [
+        record
+        for record in _guohuo_deltas(engine, "card_move")
+        if record.reason is MoveReason.USE
+        and spade_slash in [card.card_id for card in record.cards]
+    ], "作废的牌不该被使用"
+    assert state.card(spade_slash).card_id in state.discard
+
+
+def test_guohuo_truth_makes_doubters_lose_one_hp_and_still_resolves() -> None:
+    """真（声明的牌名 = 实体牌牌名）⇒ 质疑者各失去 1 点体力，牌照常结算。"""
+    peach = cards_of_type(PACK, "peach")[0]
+    engine, state, _ = _run_guohuo(hand=(peach,), declare="桃", doubters=(True, False))
+    changes = _guohuo_deltas(engine, "hp_change")
+    assert any(change.seat == 1 and change.amount < 0 for change in changes), (
+        "真 ⇒ 质疑者失去 1 点体力"
+    )
+    assert state.player(0).hp > 2, "真牌照常结算（【桃】把于吉回复）"
+
+
+def test_guohuo_heart_card_still_resolves_even_when_the_claim_is_false() -> None:
+    """♥️ ⇒ 无论真假都继续结算（用户裁定：♥️ 不看真假）。"""
+    heart_slash = next(
+        index
+        for index, card in enumerate(PACK.deck.cards)
+        if card.type == "slash" and card.suit.value == "heart"
+    )
+    engine, state, _ = _run_guohuo(
+        hand=(heart_slash,), declare="万箭齐发", doubters=(True, False)
+    )
+    # ♥️ 假牌依旧结算：座位 1 挨了 1 点（万箭齐发）
+    assert state.player(1).hp < 4, "♥️ 的假牌依旧结算（【万箭齐发】生效）"
+    assert not [
+        record
+        for record in _guohuo_deltas(engine, "card_move")
+        if record.reason is MoveReason.DISCARD
+        and record.from_zone.zone is Zone.PROCESSING
+        and [card.card_id for card in record.cards] == [heart_slash]
+    ], "♥️ 的牌不作废"
+
+
+def test_guohuo_is_not_offered_without_hand_cards() -> None:
+    """没有手牌 ⇒ 两个入口都不出现。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="yuji_mobile", hand=()), SeatSpec(hand=(40,))],
+        deck=deck_excluding(PACK, 40),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=5)
+    player = GuohuoScript(activate=True)
+    run_queries(
+        engine,
+        [player, GuohuoScript()],
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.PHASE_PLAY_END
+            for record in e.records
+        ),
+    )
+    play_queries = [q for q in engine.records if q.kind == "query"]
+    assert all(
+        not any(
+            isinstance(action, ActivateSkill) and action.skill_id == GUOHUO
+            for action in query.query.legal_actions
+        )
+        for query in play_queries
+        if query.query.kind is QueryKind.PLAY_PHASE
+    )
+
 PACK = load_content_pack(deck_profile="standard_108")
 
 JUSHSOU = "hero.jie_caoren_mobile.jushou"

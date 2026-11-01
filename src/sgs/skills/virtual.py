@@ -95,6 +95,21 @@ class VirtualKind(IntEnum):
     且整段落在**兼容段与泛化段之间的未用空隙**里——旧 id 一字不动。
     """
 
+    # 移动版于吉【蛊惑】（用户 2026-11-01）是**第一条"任意牌名"**的转化技：它的产物覆盖
+    # 全部基本牌 + 普通锦囊牌，故这些牌名全部需要一段命名空间。追加段只增不改：旧 id
+    # （0–7 段）一字不动，尾部紧凑段按 :func:`_tail_segment_start` 依次排开。
+    THUNDER_SLASH = 8
+    SNATCH = 9
+    BARBARIAN_INVASION = 10
+    ARROW_BARRAGE = 11
+    PEACH_GARDEN = 12
+    HARVEST = 13
+    EX_NIHILO = 14
+    BORROWED_SWORD = 15
+    NULLIFY = 16
+    FIRE_ATTACK = 17
+    IRON_CHAIN = 18
+
 
 BLOCK_KIND_COUNT = 6
 """**共享冻结段布局**的 kind 数（``SLASH`` … ``FIRE_SLASH``，即 ``kind < 6``）。
@@ -126,6 +141,18 @@ _KIND_BY_TYPE: dict[str, VirtualKind] = {
     "fire_slash": VirtualKind.FIRE_SLASH,
     "dismantlement": VirtualKind.DISMANTLEMENT,
     "wine": VirtualKind.WINE,
+    # 移动版于吉【蛊惑】的产物牌名（基本牌 + 普通锦囊，用户 2026-11-01）：
+    "thunder_slash": VirtualKind.THUNDER_SLASH,
+    "snatch": VirtualKind.SNATCH,
+    "barbarian_invasion": VirtualKind.BARBARIAN_INVASION,
+    "arrow_barrage": VirtualKind.ARROW_BARRAGE,
+    "peach_garden": VirtualKind.PEACH_GARDEN,
+    "harvest": VirtualKind.HARVEST,
+    "ex_nihilo": VirtualKind.EX_NIHILO,
+    "borrowed_sword": VirtualKind.BORROWED_SWORD,
+    "nullify": VirtualKind.NULLIFY,
+    "fire_attack": VirtualKind.FIRE_ATTACK,
+    "iron_chain": VirtualKind.IRON_CHAIN,
 }
 """目标**牌名 id** → 命名空间；只登记本里程碑有生产者的牌（票 03 §表 / 票 04 加【决斗】；
 M5-05b 加朱雀羽扇的火【杀】产物；M6 票 03 加【奇袭】的【过河拆桥】；M6 票 16 加界【龙胆】

@@ -33,7 +33,7 @@ from sgs.data import (
 )
 from sgs.effects import ModifierPoint
 from sgs.engine import DRAW_COUNT, Engine
-from sgs.skills import CATALOG, PROVIDERS, flow_for
+from sgs.skills import ACTIVATIONS, CATALOG, PROVIDERS, flow_for
 from sgs.skills.catalog import MATCH_ACTOR_KEY, MATCH_OWNER_KEY
 from sgs.skills.move_after import MOVE_EVENT_KEY, MoveEvent
 from sgs.state import (
@@ -190,9 +190,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 131
+    assert len(CATALOG) == 132
     assert len(equipment) == 22
-    assert len(heroes) == 109
+    assert len(heroes) == 110
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -214,7 +214,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 109
+    assert len(expected) == 110
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1085,6 +1085,7 @@ SKILL_FILES: dict[str, str] = {
     # 风包魏延【狂骨】（feng-weiyan 票 01）：锁定技，造伤后逐点回复。
     "hero.weiyan.kuanggu": "test_hero_feng.py",
     "hero.xiahouyuan.shensu": "test_hero_feng.py",
+    "hero.yuji_mobile.guohuo": "test_hero_feng.py",
 }
 """101 条启用技能 → **点名它的族级单测文件**（票 14 §1 的机械覆盖表；M6 票 01 加 3 条、
 票 02 加 5 条、票 03 加 3 条、票 04 加 4 条界将技能、票 05 加界张飞 2 条、票 06 加界徐庶 /
@@ -1839,6 +1840,10 @@ SKILL_SHAPE: dict[str, str] = {
     # M6 票 16：界【激将】= ①求助窗口 + ②的两条零步钩子（按"提供者"单列，同界【护驾】）。
     "hero.jie_liubei.jijiang": "候选提供者",
     "equip.eight_diagrams": "候选提供者",
+    # 风包·移动版于吉【蛊惑】（用户 2026-11-01 裁定）：**手写的 A 族主动技**——质疑是逐座位
+    # 循环，而流水线语言没有循环步骤（`flow.py:SkillFlow` 的边界），故它既不进「主动技能」
+    # （那一格 = 有 flow），也不进「多轮技能」（那一格 = 有手写**钩子**）。单列一格。
+    "hero.yuji_mobile.guohuo": "手写主动技",
 }
 """113 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -1857,6 +1862,7 @@ SHAPE_COUNTS: dict[str, int] = {
     "零步技能": 27,
     "排列技能": 3,
     "多轮技能": 14,
+    "手写主动技": 1,
     "锁定技": 31,
     "转化技": 13,
     "能力位": 2,
@@ -1951,9 +1957,9 @@ def _flow_steps(skill_id: str):
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """130 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 131
+    assert len(SKILL_SHAPE) == len(CATALOG) == 132
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
-    assert len(SHAPE_COUNTS) == 11
+    assert len(SHAPE_COUNTS) == 12
     assert all(SKILL_SHAPE.values()), "表里没有空形态"
 
 
@@ -2033,6 +2039,11 @@ def test_every_shape_has_the_documented_count_and_members() -> None:
         "hero.jie_liubei.jijiang",
     }
 
+    hand_written_active = frozenset(
+        skill_id for skill_id in ACTIVATIONS if _flow_steps(skill_id) is None
+    )
+    assert _shape_members("手写主动技") == hand_written_active
+
     multi_round = _shape_members("多轮技能")
     assert len(multi_round) == 14
     assert all(_flow_steps(skill_id) is None for skill_id in multi_round)
@@ -2078,7 +2089,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
     assert len(inside) == 65
-    assert len(outside) == 66
+    assert len(outside) == 67
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

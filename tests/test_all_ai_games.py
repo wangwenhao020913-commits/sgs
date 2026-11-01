@@ -730,11 +730,17 @@ def test_the_m6_jie_qun_heroes_finish_a_full_ai_game_cleanly_and_replay():
 # M6 票 22（收口 / spec P2-2）：**8 个固定种子**的 8 人**混合池**全 AI 局
 # ---------------------------------------------------------------------------
 
-M6_CLOSEOUT_SEEDS: tuple[int, ...] = (136, 137, 138, 139, 140, 141, 142, 143)
-"""spec P2-2 的 **8 个固定种子**（票 22 收口批；取 32 种子验收批的前 8 个）。
+M6_CLOSEOUT_SEEDS: tuple[int, ...] = (136, 137, 138, 144, 140, 141, 142, 143)
+"""spec P2-2 的 **8 个固定种子**（票 22 收口批；原取 32 种子验收批的前 8 个）。
 
 写死而不是从 :data:`~support.ACCEPTANCE_SEEDS` 切片：种子批本身是验收内容，
 换批必须同时改票面 ``## Answer`` 与 ``acceptance-map.md`` 的 P2-2 行。
+
+**2026-11-01 换 1 个种子**（`feng-yuji` 票 01 加风包移动版于吉 ⇒ 默认池 62 / 36）：
+原种子 139 在新池下抽到的 8 名全是 `feng` / `feng-mobile` / `jie-mobile` / `jie-ol`，
+**没有标准版** ⇒ 违反本测试自己的"混合池"判据（判据未放宽）。按同一判据在 32 种子验收批
+里从 144 起重扫，**144** 是首个命中（`feng` / `feng-mobile` / `jie-mobile` / `jie-ol` /
+`standard` 五版齐、8 名互异、零非法应答、跑完）。替换只换种子，不换判据。
 """
 
 M6_CLOSEOUT_PLAYERS = 8
@@ -765,7 +771,7 @@ def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -
     """
     pool = enabled_hero_ids()
     true_names = {hero_by_id(hero_id).true_name for hero_id in pool}
-    assert (len(pool), len(true_names)) == (61, 35), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版；feng-weiyan 票 01 加风包魏延 1 个；feng-xiahouyuan 票 01 加风包夏侯渊 1 个）"
+    assert (len(pool), len(true_names)) == (62, 36), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版；feng-weiyan 票 01 加风包魏延 1 个；feng-xiahouyuan 票 01 加风包夏侯渊 1 个）"
 
     engine = _new_engine(seed, players=M6_CLOSEOUT_PLAYERS)
     scans = _participants(seed, M6_CLOSEOUT_PLAYERS)
