@@ -54,8 +54,11 @@ from sgs.state import (
 from sgs.timing import Timing
 
 from .behaviors import (
+    SLASH_FAMILY_KEY,
     CardBehavior,
     DODGE_RESPONSE_CARD,
+    NULLIFY_RESPONSE_CARD,
+    PEACH_RESPONSE_CARD,
     TargetCount,
     UseContext,
     behavior_for,
@@ -852,6 +855,8 @@ def _dodge(
             answers_seq=answers_seq,
             providers_used=providers_used,
             scope=CandidateScope.DODGE,
+            # 窗口"要一张什么牌"与另外三档同源：提供者（【蛊惑】）按它收窄声明范围。
+            respond_required=DODGE_RESPONSE_CARD,
         ),
         tuple(actions),
     )
@@ -879,6 +884,10 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
     - 次数上限照走 ``check_count``：本回合已用过【酒】（无论出牌阶段加伤还是上一次濒死
       自救）⇒ 这次求桃不再给【酒】候选，出牌阶段与濒死自救因此共用**同一个**计数键。
 
+    **提供者路径**（票 03）：除了真牌，**"需要牌时"的提供者**（【蛊惑】扣置一张手牌当【桃】）
+    也在这里产出候选——它走 ``CANDIDATES`` 的 ``PEACH`` 语境，与真牌同一个槽位。它**不是**
+    转化技：受理时已经扣置 / 质疑 / 验明完毕，故不进下面那条"确认即定死"的通道。
+
     **转化源路径**（W4-3）：除了真牌，**能把牌当【桃】的转化技**（当前只有华佗【急救】）
     也在这里产出候选——红牌（手牌 ∪ 装备）当【桃】，目标仍是濒死者。候选集合与
     ``GLOSSARY.md``「预发动清单」里的那一步**同源**：来源由
@@ -893,6 +902,22 @@ def _peach(state: GameState, seat: int, dying: int, answers_seq: int) -> list[Ac
         and not check_count(state, seat, card)
     ]
     actions.extend(_transformed_peaches(state, seat, dying, answers_seq))
+    # "需要牌时"的**提供者**（票 03）：同【闪】窗口那一趟整段追加——【蛊惑】扣置一张手牌
+    # 当【桃】（真 / ♥ 才是，否则作废）。它不是转化技：受理时**已经**验明完毕，故不进
+    # ``transform_preactivations`` 那条"确认即定死"的通道。
+    actions = list(
+        apply_modifiers(
+            ModifierPoint.CANDIDATES,
+            state,
+            ModifierContext(
+                subject=seat,
+                answers_seq=answers_seq,
+                scope=CandidateScope.PEACH,
+                respond_required=PEACH_RESPONSE_CARD,
+            ),
+            tuple(actions),
+        )
+    )
     actions.append(Pass(answers_seq=answers_seq))
     return actions
 
@@ -985,10 +1010,12 @@ def _respond(
                 actions.append(UseCard(card=card, targets=combo, answers_seq=answers_seq))
         else:
             actions.append(PlayCard(card=card, answers_seq=answers_seq))
-    if ctx.required in ("slash", "dodge"):
+    scope = _respond_scope(ctx.required)
+    if scope is not None:
         # 【丈八蛇矛】的转化【杀】可**打出**、【八卦阵】可"视为打出【闪】"（票 10 §5.5 /
-        # 票 30）：整段候选期追加一趟 CANDIDATES。"每提供者只问一次"由这里的通用过滤兜底。
-        scope = CandidateScope.RESPOND if ctx.required == "slash" else CandidateScope.DODGE
+        # 票 30）、【蛊惑】可"扣置一张手牌当它"（票 03）：整段候选期追加一趟 CANDIDATES。
+        # "每提供者只问一次"由这里的通用过滤兜底；收集式窗口的"赢家已定"由
+        # ``respond_declared`` 收口（提供者的产物是扣置一张牌换来的，不能白扣）。
         generated = apply_modifiers(
             ModifierPoint.CANDIDATES,
             state,
@@ -1001,6 +1028,7 @@ def _respond(
                 respond_required=ctx.required,
                 respond_mode=ctx.mode,
                 respond_targets=tuple(ctx.use_targets),
+                respond_declared=ctx.declared,
             ),
             tuple(actions),
         )
@@ -1013,6 +1041,22 @@ def _respond(
         ]
     actions.append(Pass(answers_seq=answers_seq))
     return actions
+
+
+def _respond_scope(required: str | None) -> CandidateScope | None:
+    """响应窗口按**请求牌名**选 ``CANDIDATES`` 的语境；``None`` = 这一趟不派发。
+
+    杀族请求与【闪】共用原有两档（火 / 雷【杀】与转化牌因此同形）；【无懈可击】是票 03
+    的加法——它是**收集式**窗口（先声明、赢家才使用），故独占 ``NULLIFY`` 一档：
+    提供者在那里的产物只能算"声明"，与打出 / 使用两档的交付方式都不同。
+    """
+    if required == SLASH_FAMILY_KEY:
+        return CandidateScope.RESPOND
+    if required == DODGE_RESPONSE_CARD:
+        return CandidateScope.DODGE
+    if required == NULLIFY_RESPONSE_CARD:
+        return CandidateScope.NULLIFY
+    return None
 
 
 def _select_cards(

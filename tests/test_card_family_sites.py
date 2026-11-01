@@ -213,16 +213,8 @@ ALLOWLIST: dict[Site, Rule] = {
         'return _CARD_VALUES["slash"]',
     ): Rule(FAMILY, 1, "档位表牌名经族登记判定是【杀】后回落到族价（与 _card_value 同一口径）"),
     # ---- effects/actions.py：响应候选的语境分派 ----
-    (
-        "src/sgs/effects/actions.py",
-        "_respond",
-        'if ctx.required in ("slash", "dodge"):',
-    ): Rule(FAMILY, 1, "required 是**请求牌名**；成员判定在下游 satisfies_required，这里只决定追加哪趟转化候选"),
-    (
-        "src/sgs/effects/actions.py",
-        "_respond",
-        'scope = CandidateScope.RESPOND if ctx.required == "slash" else CandidateScope.DODGE',
-    ): Rule(FAMILY, 1, "同上：按请求牌名选 CandidateScope，不筛具体牌面"),
+    # 票 03 起那一行改成按 `SLASH_FAMILY_KEY` 选 `CandidateScope`（不再有 "slash" 字面量，
+    # 故本清单里没有对应站点）：请求牌名仍是**族请求**，成员判定仍在下游 `satisfies_required`。
     # ---- effects/behaviors.py：杀族计数键与行为表 ----
     (
         "src/sgs/effects/behaviors.py",
@@ -255,11 +247,8 @@ ALLOWLIST: dict[Site, Rule] = {
         "resolve_duel",
         'required="slash",',
     ): Rule(FAMILY, 1, "决斗的响应请求是杀族请求；ask_respond 的候选成员判定走 satisfies_required"),
-    (
-        "src/sgs/effects/ops.py",
-        "resolve_borrowed_sword",
-        'required="slash",',
-    ): Rule(FAMILY, 2, "借刀两处请求（offers 预检 / 真询问）都是杀族请求，成员判定同 satisfies_required"),
+    # 借刀的两处请求（offers 预检 / 真询问）票 03 起读 `SLASH_FAMILY_KEY`（同一个线上取值，
+    # 不再写字面量），故本清单里没有对应站点；提供者那条分支读同一份常量。
     (
         "src/sgs/effects/ops.py",
         "resolve_barbarian_invasion",
@@ -319,12 +308,6 @@ ALLOWLIST: dict[Site, Rule] = {
         "_jie_rende_effect",
         'if type_id == "slash":',
     ): Rule(NORMAL, 1, "按产物牌型决定要不要选目标（普通杀需要目标；桃/酒只对自己）"),
-    # ---- skills/active.py：移动版于吉【蛊惑】的"需要牌时"窗口（M6 票 01）----
-    (
-        "src/sgs/skills/active.py",
-        "_GUOHUO_SLASH_RESPONSE",
-        '_GUOHUO_SLASH_RESPONSE = "slash"',
-    ): Rule(FAMILY, 1, "窗口**请求牌名**（南蛮 / 决斗要一张杀族牌）：成员判定在下游 satisfies_required，这里不筛具体牌面"),
     # ---- skills/heroes.py：转化产物 ----
     (
         "src/sgs/skills/heroes.py",

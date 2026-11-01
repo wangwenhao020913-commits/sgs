@@ -58,6 +58,7 @@ from sgs.effects import (
 from sgs.resolution import Control, Frame
 from sgs.state import (
     ActivateSkill,
+    CardRef,
     FrameKind,
     GameState,
     PlayCard,
@@ -97,6 +98,8 @@ __all__ = [
     "LORD_REQUEST_SKILLS",
     "PROVIDERS",
     "PROVIDER_ACTOR_KEY",
+    "PROVIDER_CARD_KEY",
+    "PROVIDER_REQUIRED_KEY",
     "PROVIDER_SATISFIED_KEY",
     "PROVIDER_SKILL_KEY",
     "LORD_ECHO_FLOW",
@@ -127,6 +130,34 @@ PROVIDER_ACTOR_KEY = "provider_actor"
 
 PROVIDER_SATISFIED_KEY = "provider_satisfied"
 """帧私有键：提供者收尾时写回的结果——需要是否被满足（``True`` / ``False``）。"""
+
+PROVIDER_REQUIRED_KEY = "provider_required"
+"""帧私有键：**这扇窗口要一张什么牌**（牌名 ``dodge`` / ``peach`` / ``nullify``，或杀族请求
+``slash``）。由 :func:`start_provider` 的 ``required`` 写入。
+
+提供者据此收窄声明范围（【蛊惑】只列能当它的牌名），**不从外层帧的牌反推**：濒死求【桃】
+的帧上没有牌、无懈窗口的帧上是被无懈的那张锦囊、借刀的帧上是【借刀杀人】本身——三处反推
+都会得到"需要的不是这张"。
+"""
+
+PROVIDER_CARD_KEY = "provider_card"
+"""帧私有键：提供者这次**交出的产物牌**（虚拟牌；没有产物 = 没写这个键）。
+
+提供者的契约是"答完就已经把牌付清了"：主公技（【护驾】/【激将】）的产物是**别人**打出的
+实体牌、由技能自己走 L6，故不写这个键；【蛊惑】的产物是它扣置的牌当成的虚拟牌，**交付给
+窗口**——六扇窗口对它的消费各不相同（【闪】= 使用、南蛮 / 万箭 / 决斗 = 打出、求桃 =
+``recover_from_peach``、借刀 = 对 Bn 使用、无懈 = 先声明后由赢家使用），故"怎么消费"只有
+窗口自己知道。技能因此不必认识窗口形状。
+
+``satisfied = True`` 且**没有**产物，读法是"需要已被别人付清，窗口没有牌可交付"（主公技式）。
+六扇窗口对它的处理因此分两类，这是**窗口自己的事实**、不是两种契约：
+
+- 【闪】/ 南蛮 / 万箭 / 决斗：需要已经满足 ⇒ 记一次成功、不压帧（``_accept(None)`` /
+  ``_play_produced(None)``）。今天唯一的这种提供者是【护驾】/【激将】，它们只出现在这里；
+- 求桃 / 借刀 / 无懈：这三扇的"需要"就是**窗口要交付的那张牌**（回复、打向 Bn 的【杀】、
+  一条无懈的声明），没有产物 ⇒ 这次响应没发生（求桃按放弃记、借刀落回真牌窗口、无懈
+  不记声明）。今天没有能走到这三扇、又交不出产物的提供者（登记表里只有【蛊惑】）。
+"""
 
 LORD_REQUEST_KEY = "lord_request"
 """帧私有键：**势力求助窗口**的进度（``askers`` / ``next`` / ``done`` / ``satisfied``）。
@@ -165,7 +196,10 @@ ProviderHandler = Callable[[Any, Frame, int, Timing], Control]
 
 ``actor`` = 发起这次提供者展开的座位（需要者），``timing`` = 外层窗口所在的时机
 （求助询问的记录语境）。返回 ``"stay"`` = 还没跑完（已挂起或已压子帧）；``None`` = 已收尾，
-结果写在 :data:`PROVIDER_SATISFIED_KEY`。
+结果写在 :data:`PROVIDER_SATISFIED_KEY`（产物牌若归窗口消费，另写 :data:`PROVIDER_CARD_KEY`）。
+
+"这扇窗口要一张什么牌"读 :data:`PROVIDER_REQUIRED_KEY`（由 :func:`start_provider` 写好），
+**不由回调的签名携带**：它是窗口的事实，主公技把它声明在技能定义上、【蛊惑】按它现算声明范围。
 """
 
 
@@ -188,39 +222,63 @@ def provider_registered(skill_id: str) -> bool:
     return skill_id in PROVIDERS
 
 
+def _finish_provider(frame: Frame) -> tuple[Control, bool, CardRef | None]:
+    """收尾：取走通用结果键，返回引擎要的三元组（见 :func:`start_provider`）。"""
+    frame.data.pop(PROVIDER_REQUIRED_KEY, None)
+    frame.data.pop(LORD_REQUEST_KEY, None)
+    satisfied = bool(frame.data.pop(PROVIDER_SATISFIED_KEY, False))
+    card = frame.data.pop(PROVIDER_CARD_KEY, None)
+    return None, satisfied, card
+
+
 def start_provider(
-    host: Any, frame: Frame, skill_id: str, actor: int, timing: Timing
-) -> tuple[Control, bool | None]:
+    host: Any,
+    frame: Frame,
+    skill_id: str,
+    actor: int,
+    timing: Timing,
+    *,
+    required: str,
+) -> tuple[Control, bool | None, CardRef | None]:
     """**开始**一次提供者展开：记进度键 → 派发一次。
 
-    返回 ``(control, satisfied)``：``control`` 非 ``None`` ⇒ 还在展开（调用方原样透传）；
-    ``control`` 为 ``None`` ⇒ 已收尾，``satisfied`` 是写回的结果（``True`` / ``False``）。
+    返回 ``(control, satisfied, card)``：
+
+    - ``control`` 非 ``None`` ⇒ 还在展开（调用方原样透传）；
+    - ``control`` 为 ``None`` ⇒ 已收尾：``satisfied`` 是写回的结果（``True`` / ``False``），
+      ``card`` 是提供者**交给窗口**的产物（``None`` = 没有产物可交付，见
+      :data:`PROVIDER_CARD_KEY`）。
+
+    ``required`` = **这扇窗口要一张什么牌**，写进帧私有键 :data:`PROVIDER_REQUIRED_KEY`
+    供回调读（引擎不猜、技能也不必从外层帧的牌反推）。
     """
     frame.data[PROVIDER_SKILL_KEY] = skill_id
     frame.data[PROVIDER_ACTOR_KEY] = actor
+    frame.data[PROVIDER_REQUIRED_KEY] = required
     control = dispatch_provider(host, frame, skill_id, actor, timing)
     if control is not None:
-        return control, None
+        return control, None, None
     frame.data.pop(PROVIDER_SKILL_KEY, None)
-    frame.data.pop(LORD_REQUEST_KEY, None)
-    return None, bool(frame.data.pop(PROVIDER_SATISFIED_KEY, False))
+    return _finish_provider(frame)
 
 
-def advance_provider(host: Any, frame: Frame, timing: Timing) -> tuple[Control, bool | None]:
+def advance_provider(
+    host: Any, frame: Frame, timing: Timing
+) -> tuple[Control, bool | None, CardRef | None]:
     """**重入**当前正在展开的提供者（若有）。
 
-    返回 ``(control, satisfied)``：``(None, None)`` ⇒ 当前没有在展开的提供者（窗口照常继续）；
-    ``(control, None)``（``control`` 非 ``None``）⇒ 还在展开；``(None, satisfied)`` ⇒ 刚收尾。
+    返回 ``(control, satisfied, card)``：``(None, None, None)`` ⇒ 当前没有在展开的提供者
+    （窗口照常继续）；``(control, None, None)``（``control`` 非 ``None``）⇒ 还在展开；
+    ``(None, satisfied, card)`` ⇒ 刚收尾（语义同 :func:`start_provider`）。
     """
     skill_id = frame.data.get(PROVIDER_SKILL_KEY)
     if skill_id is None:
-        return None, None
+        return None, None, None
     control = dispatch_provider(host, frame, skill_id, frame.data[PROVIDER_ACTOR_KEY], timing)
     if control is not None:
-        return control, None
+        return control, None, None
     frame.data.pop(PROVIDER_SKILL_KEY, None)
-    frame.data.pop(LORD_REQUEST_KEY, None)
-    return None, bool(frame.data.pop(PROVIDER_SATISFIED_KEY, False))
+    return _finish_provider(frame)
 
 
 # ---------------------------------------------------------------------------

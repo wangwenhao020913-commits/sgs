@@ -43,6 +43,7 @@ from sgs.data import Identity, Mode
 from sgs.effects import (
     DODGE_RESPONSE_CARD,
     NULLIFY_RESPONSE_CARD,
+    PEACH_RESPONSE_CARD,
     DamageNature,
     EffectStep,
     FinalZone,
@@ -158,9 +159,15 @@ class FrameHost(StepHost, Protocol):
 
     def provider_registered(self, skill_id: str) -> bool: ...
 
-    def advance_provider(self, frame: Frame, timing: Timing) -> Any: ...
+    def advance_provider(self, frame: Frame, timing: Timing) -> Any:
+        """``(control, satisfied, card)``：重入当前在展开的提供者（见 ``sgs.skills``）。"""
+        ...
 
-    def start_provider(self, frame: Frame, skill_id: str, actor: int, timing: Timing) -> Any: ...
+    def start_provider(
+        self, frame: Frame, skill_id: str, actor: int, timing: Timing, *, required: str
+    ) -> Any:
+        """``(control, satisfied, card)``：开始一次提供者展开；``required`` = 要哪张牌。"""
+        ...
 
     def open_skill_judgment(self, frame: Frame, subject: int, skill_id: str) -> None: ...
 
@@ -202,7 +209,7 @@ class FrameHost(StepHost, Protocol):
     ) -> Frame: ...
 
     def recover_from_peach(
-        self, frame: Frame, action: UseCard, *, asker: int, dying: int
+        self, frame: Frame, card: CardRef, *, asker: int, dying: int
     ) -> None: ...
 
     def apply_effects(
@@ -562,6 +569,10 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
 
     **提供者可能跨多次重入**（求助窗口逐个问人）：引擎在窗口顶部先 :meth:`advance_provider`
     重入它，收尾后再按它写回的"是否满足"记一次成功（票 09）。
+
+    **产物由本窗口交付**（票 03）：提供者交回的那张虚拟【闪】与真【闪】走**同一条**使用链
+    （``start_use``），收尾共用 :func:`_accept`；没有产物 = 主公技式（别人已打出过一张），
+    只记一次成功、不压帧。
     """
     # 这一问的响应者恒是这张【杀】给定的目标（``_dodge_window`` 逐目标开窗）⇒ ``role``
     # 标 ``TARGET``：与【决斗】用同一句"谁在响应"的事实（票 23）。【无双】①只看使用者
@@ -574,15 +585,29 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
         role=ModifierRole.TARGET,
     )
     done = frame.data.get("dodges_done", 0)
-    control, satisfied = host.advance_provider(frame, Timing.RESOLVE_BEFORE_EFFECT)
+
+    def _accept(card: CardRef | None) -> None:
+        """一次【闪】响应成立：攒够所需张数即把本层标成被抵消。
+
+        产物牌（提供者交回的那张虚拟【闪】）走与真【闪】**同一条**使用链；``None`` = 提供者
+        没有交付产物（主公技式：别人已经打出过一张，牌已经付清，窗口不必再压帧）。
+        """
+        nonlocal done
+        done += 1
+        frame.data["dodges_done"] = done
+        if done >= required:
+            frame.data["canceled"] = True
+        if card is not None:
+            host.start_use(card, source=target, targets=())
+
+    control, satisfied, produced = host.advance_provider(
+        frame, Timing.RESOLVE_BEFORE_EFFECT
+    )
     if control is not None:
         return control
     if satisfied is not None:
         if satisfied:
-            done += 1
-            frame.data["dodges_done"] = done
-            if done >= required:
-                frame.data["canceled"] = True
+            _accept(produced)
         return "stay"
     if "skill_result" in frame.data:
         success = frame.data.pop("skill_result")
@@ -613,16 +638,17 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
         if not host.provider_registered(action.skill_id):
             host.open_skill_judgment(frame, target, action.skill_id)
             return "stay"
-        control, satisfied = host.start_provider(
-            frame, action.skill_id, target, Timing.RESOLVE_BEFORE_EFFECT
+        control, satisfied, produced = host.start_provider(
+            frame,
+            action.skill_id,
+            target,
+            Timing.RESOLVE_BEFORE_EFFECT,
+            required=DODGE_RESPONSE_CARD,
         )
         if control is not None:
             return control
         if satisfied:
-            done += 1
-            frame.data["dodges_done"] = done
-            if done >= required:
-                frame.data["canceled"] = True
+            _accept(produced)
         return "stay"
     if isinstance(action, UseCard) and action.card.type == DODGE_RESPONSE_CARD:
         done += 1
@@ -648,8 +674,17 @@ def _collected_response_window(host: FrameHost, frame: Frame, target: int) -> Co
     ``RESOLVE`` 帧，于是嵌套就是"帧上叠帧"——**不新增帧类型**。赢家那张牌记住它指向
     "本帧 + 当前目标"（``cancel_target``），出栈时由引擎把那一层标成被抵消。
 
-    声明**按询问序追加**，故首个声明者就是优先级最高者（应答者区间 =
+    声明**按询问序追加**，故首个声明者就是最高优先级者（应答者区间 =
     当前回合角色起逆时针、按座位序，票 15 §2）；输家的声明不耗牌、不压任何帧。
+
+    **提供者（票 03 的 C1 缺口第三段）**：候选里的 ``ActivateSkill`` 走技能层通用派发，
+    它的产物（【蛊惑】扣置的牌当成的虚拟【无懈可击】）**只算一条声明**——与真牌同一姿态
+    进 ``response_declared``，此刻不耗牌、不压帧；真正的使用由下面的赢家分支统一发起。
+    这是六扇窗口里**唯一**"产物先记账、后交付"的一扇：收集式是"先声明、收齐后由优先者
+    使用"，赢家未定时谁都不该把牌用掉。
+
+    声明已存在时**不再派发提供者**（``declared`` 随询问下传，候选面据此收口）：赢家已定，
+    再扣置一张牌只会让那张牌白白离开手牌——质疑段已经答过，可它不会进结算。
     """
     if frame.data.get("response_used"):
         # 赢家的响应牌使用已完整结算：出栈传播（若成功）会先被上面的 ``canceled``
@@ -663,23 +698,50 @@ def _collected_response_window(host: FrameHost, frame: Frame, target: int) -> Co
         frame.data["response_declared"] = []
     askers: tuple[int, ...] = frame.data["response_askers"]
     while frame.data["response_next"] < len(askers):
-        asker = askers[frame.data["response_next"]]
-        action = host.ask_respond(
-            frame,
-            asker,
-            Timing.RESOLVE_BEFORE_EFFECT,
-            cause=WindowCause.NULLIFY,
-            required=NULLIFY_RESPONSE_CARD,
-            target=target,
-            window_frame=frame.frame_id,
-            mode=RespondMode.USE,
+        index = frame.data["response_next"]
+        asker = askers[index]
+        # 提供者可能跨多次重入（扣置搬牌 / 逐座位质疑 / 扣体力压子帧）：先接着走。
+        control, satisfied, produced = host.advance_provider(
+            frame, Timing.RESOLVE_BEFORE_EFFECT
         )
-        if host.suspended(action):
-            return "stay"
-        frame.data["response_next"] += 1
-        if isinstance(action, UseCard):
-            # **声明**：行动被接受，但此刻不耗牌、不压 USE 帧（票 19 §9.4）。
-            frame.data["response_declared"].append((asker, action.card))
+        if control is not None:
+            return control
+        if satisfied is None:
+            action = host.ask_respond(
+                frame,
+                asker,
+                Timing.RESOLVE_BEFORE_EFFECT,
+                cause=WindowCause.NULLIFY,
+                required=NULLIFY_RESPONSE_CARD,
+                target=target,
+                window_frame=frame.frame_id,
+                mode=RespondMode.USE,
+                declared=bool(frame.data["response_declared"]),
+            )
+            if host.suspended(action):
+                return "stay"
+            if isinstance(action, ActivateSkill):
+                if not host.provider_registered(action.skill_id):
+                    # 与【决斗】同一道闸：没有惰性判定式的提供者 ⇒ fail-closed。
+                    raise NotImplementedError(
+                        f"无懈窗口没有判定式提供者：{action.skill_id!r}（票 03）"
+                    )
+                control, satisfied, produced = host.start_provider(
+                    frame,
+                    action.skill_id,
+                    asker,
+                    Timing.RESOLVE_BEFORE_EFFECT,
+                    required=NULLIFY_RESPONSE_CARD,
+                )
+                if control is not None:
+                    return control
+            elif isinstance(action, UseCard):
+                # **声明**：行动被接受，但此刻不耗牌、不压 USE 帧（票 19 §9.4）。
+                frame.data["response_declared"].append((asker, action.card))
+        if satisfied and produced is not None:
+            # 提供者的产物同样是**声明**（不是使用）：由下面的赢家分支统一交付。
+            frame.data["response_declared"].append((asker, produced))
+        frame.data["response_next"] = index + 1
     declared: list[tuple[int, CardRef]] = frame.data["response_declared"]
     if not declared:
         frame.data["canceled"] = False
@@ -755,6 +817,8 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
     "provider_skill",
     "provider_actor",
     "provider_satisfied",
+    "provider_required",
+    "provider_card",
     "lord_request",
     "_pending_timing",
     DAMAGE_POINT_KEY,
@@ -1192,6 +1256,18 @@ def near_death_ask(host: FrameHost, frame: Frame) -> Control:
     上升**且仍 < 1 ⇒ 记 ``window_start`` 为那名响应者并 ``Goto`` 回 :func:`near_death_at`
     开新窗。检测点在响应结算之后，故体力写入本来就已经发生、判据零新增钩子；
     ``pending_response`` 在每次重入时先取走，因而"结算未回复"的分支天然干净。
+
+    **提供者（票 03 的 C1 缺口第一段）**：候选里的 ``ActivateSkill`` 与真牌占**同一个槽位**
+    ——真牌由本窗口自己压 ``recover_from_peach``（回复结算插在濒死之下），提供者交回的
+    产物牌也走同一条收尾（:func:`_peach_use`）。作废（``satisfied=False``：产物从未被使用）
+    与「放弃」同路 ⇒ ``next`` 前进、窗口问下一个座位；提供者说不出产物（主公技式的
+    "别人已经付过了"）在求桃窗口没有可交付的【桃】，同样按放弃处理。官方规则集的濒死例
+    （``glossary_flow.txt:67``）逐字写着于吉可以在濒死结算里【蛊惑】用【桃】——这扇窗口是
+    这条技能的**必需**窗口。
+
+    重入次序：提供者会跨多次重入（扣置搬牌内联「失去牌后」、逐座位质疑、扣体力压子帧），
+    故每轮先 :meth:`advance_provider` 接着上次的地方走，只有"当前没有在展开的提供者"时
+    才发新询问。
     """
     target = frame.data["target"]
     pending = frame.data.pop("pending_response", None)
@@ -1206,15 +1282,53 @@ def near_death_ask(host: FrameHost, frame: Frame) -> Control:
     while frame.data["next"] < len(frame.data["askers"]):
         idx = frame.data["next"]
         asker = frame.data["askers"][idx]
-        action = host.ask_query(QueryKind.PEACH, asker, Timing.NEAR_DEATH_AT, dying=target)
-        if host.suspended(action):
-            return "stay"
-        if isinstance(action, UseCard):
-            frame.data["pending_response"] = (idx, host.state.player(target).hp)
-            host.recover_from_peach(frame, action, asker=asker, dying=target)
-            return "stay"  # 响应链出栈后重入本步：此处判回退
+        control, satisfied, produced = host.advance_provider(
+            frame, Timing.NEAR_DEATH_AT
+        )
+        if control is not None:
+            return control
+        if satisfied is None:
+            action = host.ask_query(
+                QueryKind.PEACH, asker, Timing.NEAR_DEATH_AT, dying=target
+            )
+            if host.suspended(action):
+                return "stay"
+            if isinstance(action, ActivateSkill):
+                if not host.provider_registered(action.skill_id):
+                    # 求桃窗口没有"选中才惰性判定"的提供者（【八卦阵】那类只服务【闪】），
+                    # 撞到即编程错误，不静默当成放弃。
+                    raise NotImplementedError(
+                        f"求桃窗口没有判定式提供者：{action.skill_id!r}（票 03）"
+                    )
+                control, satisfied, produced = host.start_provider(
+                    frame,
+                    action.skill_id,
+                    asker,
+                    Timing.NEAR_DEATH_AT,
+                    required=PEACH_RESPONSE_CARD,
+                )
+                if control is not None:
+                    return control
+            elif isinstance(action, UseCard):
+                return _peach_use(host, frame, asker=asker, target=target, card=action.card)
+            else:
+                frame.data["next"] = idx + 1
+                continue
+        if satisfied and produced is not None:
+            return _peach_use(host, frame, asker=asker, target=target, card=produced)
         frame.data["next"] = idx + 1
     return None
+
+
+def _peach_use(host: FrameHost, frame: Frame, *, asker: int, target: int, card: CardRef) -> Control:
+    """求桃窗口**消费一张【桃】**：真牌与提供者产物共用这一份收尾。
+
+    ``pending_response`` 记的是"哪个座位 + 回复前的体力"：响应链出栈后重入本步，由它决定
+    "继续问下一个人"还是"开新窗口"（体力严格上升但仍 < 1）。故这里必须记在压帧**之前**。
+    """
+    frame.data["pending_response"] = (int(frame.data["next"]), host.state.player(target).hp)
+    host.recover_from_peach(frame, card, asker=asker, dying=target)
+    return "stay"  # 响应链出栈后重入本步：此处判回退
 
 
 def near_death_after(host: FrameHost, frame: Frame) -> Control:

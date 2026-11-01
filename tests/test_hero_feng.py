@@ -26,9 +26,11 @@ _TOOLS = Path(__file__).resolve().parent.parent / "tools"
 if str(_TOOLS) not in sys.path:  # sgs_web 住在 tools/（与 test_web.py 同一条引导）
     sys.path.insert(0, str(_TOOLS))
 
+from sgs.agents import HeuristicPlayer
+from sgs.agents import heuristic as heuristic_scoring
 from sgs.data import Identity, RuleConfig, load_content_pack, load_hero_tables
 from sgs.effects import check_targets, distance, legal_actions_for
-from sgs.engine import Engine
+from sgs.engine import Engine, ai_stream
 from sgs.skills.virtual import transformed_card
 from sgs.state import (
     ActivateSkill,
@@ -37,6 +39,7 @@ from sgs.state import (
     MoveReason,
     Pass,
     Phase,
+    PlayCard,
     QueryKind,
     RespondContext,
     RespondMode,
@@ -312,7 +315,12 @@ def _fallback(query):
 
 
 class _NeedsCard:
-    """于吉（座位 1）：需要牌时选【蛊惑】，扣置自己唯一那张手牌；不问则放弃。"""
+    """于吉（座位 1）：需要【闪】/【杀】时选【蛊惑】，扣置自己唯一那张手牌；不问则放弃。
+
+    只认**需要【闪】/【杀】**的窗口：锦囊的结算前面还隔着**无懈**的收集式窗口（票 03 起
+    【蛊惑】在那扇窗口里也进候选），在那里选它就成了"扣置一张牌当【无懈可击】"，与这些
+    用例要测的窗口不是同一扇。``query.required`` 正是那一格事实（``DODGE`` 询问没有它）。
+    """
 
     def __init__(self, *, activate: bool = True) -> None:
         self.activate = activate
@@ -320,7 +328,8 @@ class _NeedsCard:
     def respond(self, query):
         kind = getattr(query.kind, "value", query.kind)
         if kind in ("DODGE", "RESPOND"):
-            if self.activate:
+            needs_card = kind == "DODGE" or getattr(query, "required", None) in ("slash", "dodge")
+            if self.activate and needs_card:
                 for action in query.legal_actions:
                     if isinstance(action, ActivateSkill) and action.skill_id == GUOHUO:
                         return action
@@ -428,11 +437,12 @@ def _verdict_seats(engine) -> list[int]:
     ]
 
 
-def test_guohuo_is_offered_only_in_windows_with_a_provider_branch() -> None:
-    """候选面三档：【闪】窗口与"打出【杀】"窗口有；**借刀**（``RespondMode.USE``）没有。
+def test_guohuo_is_offered_in_all_six_windows_with_a_provider_branch() -> None:
+    """候选面六档齐（票 03 补齐后三扇）：【闪】/ 打出 / **使用**【杀】（借刀）/
+    求【桃】/ 需要【无懈可击】。/ 出牌阶段（不是"需要牌"窗口）不在这份清单里。
 
-    【蛊惑】的提供者只铺到了四个窗口（【闪】/ 南蛮 / 万箭 / 决斗）。借刀 / 无懈的
-    ``mode = USE`` 窗口没有 provider 分支——在那里发候选，玩家扣置完会落到"该座位放弃"。
+    每一档都读**同一份**"这扇窗口要一张什么牌"（``CANDIDATES`` 载荷的
+    ``respond_required``），故这张表就是"引擎把哪些窗口接上了提供者"的清单。
     """
     hand = (_card(type_id="peach"),)
     state = _provider_state(trigger=_card(type_id="slash", exclude=frozenset(hand)), hand=hand)
@@ -443,34 +453,50 @@ def test_guohuo_is_offered_only_in_windows_with_a_provider_branch() -> None:
             for action in actions
         )
 
-    dodge = legal_actions_for(state, 1, QueryKind.DODGE, answers_seq=1)
-    play = legal_actions_for(
-        state,
-        1,
-        QueryKind.RESPOND,
-        answers_seq=1,
-        payload=RespondContext(
-            cause=WindowCause.BARBARIAN_INVASION,
-            required="slash",
-            mode=RespondMode.PLAY,
-        ),
-    )
-    use = legal_actions_for(
-        state,
-        1,
-        QueryKind.RESPOND,
-        answers_seq=1,
-        payload=RespondContext(
-            cause=WindowCause.BORROWED_SWORD,
-            required="slash",
-            mode=RespondMode.USE,
-            use_targets=(2,),
-        ),
-    )
+    def respond(**payload) -> bool:
+        return offered(
+            legal_actions_for(
+                state,
+                1,
+                QueryKind.RESPOND,
+                answers_seq=1,
+                payload=RespondContext(**payload),
+            )
+        )
 
-    assert offered(dodge), "需要【闪】时【蛊惑】进候选（与【八卦阵】同一姿态）"
-    assert offered(play), "需要【杀】的响应窗口也进候选"
-    assert not offered(use), "借刀（mode=USE）没有 provider 分支 ⇒ 不发候选"
+    assert offered(
+        legal_actions_for(state, 1, QueryKind.DODGE, answers_seq=1)
+    ), "需要【闪】时【蛊惑】进候选（与【八卦阵】同一姿态）"
+    assert respond(
+        cause=WindowCause.BARBARIAN_INVASION, required="slash", mode=RespondMode.PLAY
+    ), "需要【杀】的响应窗口也进候选"
+    assert respond(
+        cause=WindowCause.BORROWED_SWORD,
+        required="slash",
+        mode=RespondMode.USE,
+        use_targets=(2,),
+    ), "借刀（mode=USE）有 provider 分支 ⇒ 进候选（票 03）"
+    assert respond(
+        cause=WindowCause.NULLIFY, required="nullify", mode=RespondMode.USE
+    ), "无懈的收集式窗口也进候选（票 03）"
+    assert offered(
+        legal_actions_for(state, 1, QueryKind.PEACH, answers_seq=1, dying=0)
+    ), "濒死求【桃】也进候选（票 03）"
+
+    # 收集式的赢家已定（``declared``）⇒ 提供者闭嘴：产物要扣置一张牌，赢家已定时不进结算。
+    assert not respond(
+        cause=WindowCause.NULLIFY,
+        required="nullify",
+        mode=RespondMode.USE,
+        declared=True,
+    ), "无懈窗口已有人声明 ⇒ 不再发【蛊惑】候选"
+    # 借刀的产物必须够得着 Bn：座位 3 在座位 1 的攻击范围之外 ⇒ 三张杀族牌名都不合法。
+    assert not respond(
+        cause=WindowCause.BORROWED_SWORD,
+        required="slash",
+        mode=RespondMode.USE,
+        use_targets=(3,),
+    ), "够不着 Bn ⇒ 借刀窗口不发候选（与真牌候选同一道判据）"
 
 
 def test_guohuo_truth_card_in_the_dodge_window_cancels_the_slash() -> None:
@@ -620,6 +646,512 @@ def test_guohuo_declining_the_provider_entry_leaves_the_window_alone() -> None:
     assert state.player(1).hp == 2, "没用【闪】⇒ 【杀】照常结算"
     assert state.player(2).hp == 4 and state.player(3).hp == 4, "没扣置 ⇒ 没有人被问质疑"
     assert _verdict_seats(engine) == [], "整条技能没发动，质疑段不出现"
+
+
+# ---------------------------------------------------------------------------
+# 蛊惑·濒死求【桃】窗口（票 03 的 C1 缺口第一段）
+#
+# 用户裁定的② = "任何时候需要一张基本牌或普通锦囊牌"；濒死求【桃】是其中一扇窗口，且官方
+# 规则集的濒死例**逐字**写着于吉在自己的濒死结算里发动【蛊惑】用【桃】——它是这条技能的
+# **必需**窗口，不是边角。
+#
+# 形状与【闪】/ 南蛮 / 决斗**逐字同构**：提供者在候选里是一条 ``ActivateSkill``，选中即
+# 扣置 → 声明 → 质疑 → 验明；差别只在窗口怎么消费产物——求桃窗口的产物必须走
+# ``recover_from_peach``（回复结算插在濒死之下），故产物由**窗口**交付，不是技能自己压帧。
+# ---------------------------------------------------------------------------
+
+
+def _window_required(query, kind: str) -> str | None:
+    """这次询问"要一张什么牌"：``RESPOND`` 读询问上的 ``required``，另两扇窗口按询问种类定。
+
+    与引擎侧同一句事实（``PROVIDER_REQUIRED_KEY`` / ``ctx.respond_required``）：脚本据此
+    分辨"这一问是要【闪】还是要【无懈可击】"，不必靠猜候选里有什么。另两扇窗口的牌名就是
+    询问种类的小写（``DODGE`` → ``dodge`` / ``PEACH`` → ``peach``），故这里不抄一份映射表。
+    """
+    return getattr(query, "required", None) or kind.lower()
+
+
+class _WindowSeat:
+    """一个座位在"需要牌"窗口里的应答：扣置入口 / 质疑表态 / 真牌（求桃 / 响应 / 无懈）。
+
+    每个入口只用**一次**（``guohuo`` / ``rescue`` / ``response`` / ``nullify`` / ``strike``）：
+    嵌套无懈会把同一批人再问一遍，而一张牌只付得起一次；这一份"只用一次"就是脚本对玩家的
+    建模（"我已经决定过了"），不是引擎语义。
+    """
+
+    def __init__(
+        self,
+        *,
+        strike: int | None = None,
+        designation: tuple[int, int] | None = None,
+        guohuo: tuple[str, ...] = (),
+        doubt: bool = False,
+        rescue: int | None = None,
+        response: int | None = None,
+        nullify: int | None = None,
+    ) -> None:
+        self.strike = strike
+        """出牌阶段用这张牌打座位 1（只用一次）。"""
+        self.designation = designation
+        """出牌阶段提交"借刀 · 持刀者 + 附带指定 Bn"（``(holder, Bn)``；只用一次）。"""
+        self.guohuo = guohuo
+        """在**需要这些牌名**的窗口里选【蛊惑】（``dodge`` / ``slash`` / ``peach`` / ``nullify``）。"""
+        self.doubt = doubt
+        self.rescue = rescue
+        """求桃窗口打出的**真牌**（座位 2 的代救）。"""
+        self.response = response
+        """除求桃以外的响应窗口打出的**真牌**。"""
+        self.nullify = nullify
+        """无懈窗口里**声明**的那张真牌（收集式：声明不等于使用）。"""
+
+    def respond(self, query):
+        kind = getattr(query.kind, "value", query.kind)
+        if kind == "PLAY_PHASE":
+            if self.designation is not None:
+                holder, bn = self.designation
+                for action in getattr(query, "designation_actions", ()):
+                    if (
+                        isinstance(action, UseCard)
+                        and action.targets == (holder,)
+                        and action.designations == (bn,)
+                    ):
+                        self.designation = None
+                        return action
+            if self.strike is not None:
+                for action in query.legal_actions:
+                    if isinstance(action, UseCard) and action.card.card_id == self.strike:
+                        self.strike = None
+                        return action
+            return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        if kind in ("DODGE", "RESPOND", "PEACH"):
+            required = _window_required(query, kind)
+            if self.guohuo and required in self.guohuo:
+                for action in query.legal_actions:
+                    if isinstance(action, ActivateSkill) and action.skill_id == GUOHUO:
+                        self.guohuo = ()
+                        return action
+            wanted = None
+            if required == "nullify":
+                wanted = self.nullify
+            elif kind == "PEACH":
+                wanted = self.rescue
+            else:
+                wanted = self.response
+            if wanted is not None:
+                for action in query.legal_actions:
+                    if (
+                        isinstance(action, (UseCard, PlayCard))
+                        and action.card.card_id == wanted
+                    ):
+                        if required == "nullify":
+                            self.nullify = None
+                        elif kind == "PEACH":
+                            self.rescue = None
+                        else:
+                            self.response = None
+                        return action
+            return _fallback(query)
+        if kind == "SELECT_CARDS":
+            for action in query.legal_actions:
+                if isinstance(action, SelectCards):
+                    return action
+        if kind == "SELECT_OPTION":
+            wanted = GUOHUO_DOUBT_OPTION if self.doubt else GUOHUO_TRUST_OPTION
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and str(action.choice) == wanted:
+                    return action
+        return _fallback(query)
+
+
+def _fillers(count: int, *, exclude: frozenset[int]) -> tuple[int, ...]:
+    """牌堆尾部的 ``count`` 张填充牌（避开 ``exclude``：同一张牌不能挂在两处）。"""
+    return tuple(
+        index
+        for index in range(len(PACK.deck.cards) - 1, -1, -1)
+        if index not in exclude
+    )[:count]
+
+
+def _run_window(*, seats: list[SeatSpec], players: list, stop) -> tuple[Engine, object]:
+    """造局面、装脚本、推进到 ``stop``：三个新窗口的公共驱动。"""
+    used = frozenset(card for spec in seats for card in (*spec.hand, *spec.equip, *spec.judge))
+    state = build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck_excluding(PACK, *sorted(used)),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=7)
+    run_queries(engine, players, stop)
+    return engine, state
+
+
+def _askers(engine, kind: str) -> list[int]:
+    """某类询问的**应答者顺序**（读数比集合更严：窗口的推进次序就是它）。"""
+    return [query.actor for query in _queries(engine, kind)]
+
+
+def _closed(engine, frame_kind) -> bool:
+    """记录流里某个帧已经出栈（= 那一整段结算跑完）。"""
+    return any(
+        record.kind == "frame" and record.op == "pop" and record.frame_kind is frame_kind
+        for record in engine.records
+    )
+
+
+def test_guohuo_saves_itself_in_the_peach_window() -> None:
+    """濒死者自己是于吉：扣置 → 质疑 → 真 / ♥ ⇒ 这张【桃】照常回复。
+
+    真（牌名相等）与 ♥ 同时成立，故"真 ⇒ 质疑者各失 1 点"与"♥ ⇒ 依旧结算"两条都落在
+    这一次结算里；【桃】的回复由**求桃窗口**建立（``recover_from_peach``：RECOVER 帧先于
+    使用帧的回复结算），故这里断的是"回复真的发生了"，不是"技能压了一个使用帧"。
+    """
+    slash = _card(type_id="slash")
+    heart_peach = _card(type_id="peach", suit="heart")
+    filler = _fillers(2, exclude=frozenset({slash, heart_peach}))
+    seats = [
+        SeatSpec(hand=(slash,)),
+        SeatSpec(hero="yuji_mobile", hand=(heart_peach,), hp=1, hp_max=3),
+        SeatSpec(hand=(filler[0],)),
+        SeatSpec(hand=(filler[1],)),
+    ]
+    engine, state = _run_window(
+        seats=seats,
+        players=[
+            _WindowSeat(strike=slash),
+            _WindowSeat(guohuo=("peach",)),
+            _WindowSeat(),
+            _WindowSeat(doubt=True),
+        ],
+        stop=lambda e: _closed(e, FrameKind.NEAR_DEATH),
+    )
+
+    assert _askers(engine, "PEACH") == [0, 1], (
+        "座位 0 放弃后问到濒死的于吉自己；他自救成功 ⇒ 窗口到此为止"
+    )
+    assert state.player(1).hp == 1 and state.player(1).alive, "真 / ♥ ⇒ 【桃】照常回复 1 点"
+    assert state.player(3).hp == 3, "真 ⇒ 质疑者（座位 3）各失去 1 点体力"
+    assert engine.state.card(heart_peach).card_id in engine.state.discard, (
+        "产物照常走使用链 ⇒ 来源牌进弃牌堆"
+    )
+    assert _pushed(engine, FrameKind.USE) == 2, "【杀】+ 这张虚拟【桃】各一次使用"
+    assert _pushed(engine, FrameKind.PLAY) == 0, "【桃】是使用，不是打出"
+
+
+def test_the_ai_uses_guohuo_to_save_itself_in_the_peach_window() -> None:
+    """AI 面（`ai-adaptation.md` §1 第 2 条）：启发式要能给**提供者候选**打分。
+
+    手里只有一张♥【杀】（当【桃】是假牌，但♥ 依旧结算）⇒ 真【桃】候选一条都没有，能自救的
+    只有【蛊惑】。``_score_peach`` 对 ``ActivateSkill`` 与真【桃】同价（``_peach_save_value``），
+    故 AI 必须选它；打分退化成 0 的实现在这里会与「放弃」打平、把于吉送死。
+    """
+    heart_slash = _card(type_id="slash", suit="heart")
+    filler = _fillers(3, exclude=frozenset({heart_slash}))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="yuji_mobile", hand=(heart_slash,), hp=1, hp_max=3),
+            SeatSpec(hand=(filler[0],)),
+            SeatSpec(hand=(filler[1],)),
+            SeatSpec(hand=(filler[2],)),
+        ],
+        deck=deck_excluding(PACK, heart_slash, *filler),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": 1,
+            "targets": (0,),
+            "card": None,
+            "use_timing": Timing.PHASE_PLAY_IDLE,
+            "target": 0,
+            "channel": None,
+            "nature": "NORMAL",
+            "chain": False,
+            "amount": 1,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+    players = [
+        HeuristicPlayer(ai_stream(7, 0)),
+        _WindowSeat(),
+        _WindowSeat(),
+        _WindowSeat(),
+    ]
+    run_queries(
+        engine,
+        players,
+        lambda e: _closed(e, FrameKind.NEAR_DEATH),
+    )
+
+    assert _askers(engine, "PEACH")[:1] == [0], "濒死的于吉自己先被问"
+    assert state.player(0).hp == 1 and state.player(0).alive, (
+        "AI 选了【蛊惑】自救：♥ 的假【桃】依旧结算，于吉回到 1 点体力"
+    )
+    assert [query.actor for query in _queries(engine, "SELECT_CARDS")] == [0], (
+        "AI 付了扣置这一步（选牌面），不是空过"
+    )
+    # 打分的**判据面**（不是靠平分抽签撞出来的）：提供者候选必须**严格**高于「放弃」，
+    # 否则 0 分与 Pass 打平，由 ai:<seat> 子流抽签决定救不救自己。
+    peach = _queries(engine, "PEACH")[0]
+    provider = next(a for a in peach.legal_actions if isinstance(a, ActivateSkill))
+    give_up = next(a for a in peach.legal_actions if isinstance(a, Pass))
+    assert heuristic_scoring._score_peach(peach, provider) > heuristic_scoring._score_peach(
+        peach, give_up
+    ), "濒死自救那一档要给【蛊惑】正分（ai-adaptation §1 第 2 条）"
+
+
+def test_guohuo_voided_peach_lets_the_next_asker_act() -> None:
+    """作废 ⇒ 需要没被满足（``satisfied=False``），窗口接着问**下一个座位**。
+
+    于吉扣置一张♣【杀】声明成【桃】：牌名不等 ⇒ 假，且♣不是♥ ⇒ 作废。作废的牌**从未使用**
+    （不压使用帧），窗口因此不会误以为有人救了——座位 2 的真【桃】才是这次自救。
+    """
+    slash = _card(type_id="slash")
+    fake = _card(type_id="slash", suit="club", exclude=frozenset({slash}))
+    rescue = _card(type_id="peach", exclude=frozenset({slash, fake}))
+    filler = _fillers(1, exclude=frozenset({slash, fake, rescue}))
+    seats = [
+        SeatSpec(hand=(slash,)),
+        SeatSpec(hero="yuji_mobile", hand=(fake,), hp=1, hp_max=3),
+        SeatSpec(hand=(rescue,)),
+        SeatSpec(hand=(filler[0],)),
+    ]
+    engine, state = _run_window(
+        seats=seats,
+        players=[
+            _WindowSeat(strike=slash),
+            _WindowSeat(guohuo=("peach",)),
+            _WindowSeat(rescue=rescue),
+            _WindowSeat(doubt=True),
+        ],
+        stop=lambda e: _closed(e, FrameKind.NEAR_DEATH),
+    )
+
+    assert _askers(engine, "PEACH") == [0, 1, 2], (
+        "作废 ⇒ 于吉这一问按「放弃」收尾，窗口问下一个座位（座位 2 出真【桃】后停止）"
+    )
+    assert state.player(1).hp == 1 and state.player(1).alive, "座位 2 的真【桃】救了于吉"
+    assert _moves(
+        engine,
+        reason=MoveReason.DISCARD,
+        source_zone=Zone.PROCESSING,
+        card=fake,
+    ), "非♥️的假牌要从处理区作废进弃牌堆"
+    assert _pushed(engine, FrameKind.USE) == 2, (
+        "作废的那张从未使用：只有【杀】与座位 2 的【桃】两次使用"
+    )
+    assert _pushed(engine, FrameKind.PLAY) == 0, "求桃窗口里没有人是「打出」"
+
+
+# ---------------------------------------------------------------------------
+# 蛊惑·借刀窗口（票 03 的第二段）与无懈的收集式窗口（第三段）
+# ---------------------------------------------------------------------------
+
+
+def test_guohuo_answers_the_borrowed_sword_window() -> None:
+    """被迫使用【杀】（借刀）：真 ⇒ 这张【杀】打向 Bn，持刀者**不交刀**。
+
+    窗口的形状与【闪】/ 南蛮不同：它是 ``RespondMode.USE``，且**目标由窗口给定**
+    （``frame.data["designations"][0]`` = Bn）。故产物由窗口交付成
+    ``start_use(产物, source=持刀者, targets=(Bn,))``——技能自己不看 Bn。
+    """
+    borrowed = _card(type_id="borrowed_sword")
+    weapon = _card(type_id="qinggang_sword")  # 射程 2 ⇒ Bn（座位 3）够得着
+    slash = _card(type_id="slash", suit="heart")
+    fillers = _fillers(2, exclude=frozenset({borrowed, weapon, slash}))
+    seats = [
+        SeatSpec(hand=(borrowed,)),
+        SeatSpec(hero="yuji_mobile", hand=(slash,), equip=(weapon,), hp=3, hp_max=3),
+        SeatSpec(hand=(fillers[0],)),
+        SeatSpec(hand=(fillers[1],)),
+    ]
+    engine, state = _run_window(
+        seats=seats,
+        players=[
+            _WindowSeat(designation=(1, 3)),
+            _WindowSeat(guohuo=("slash",)),
+            _WindowSeat(),
+            _WindowSeat(),
+        ],
+        stop=lambda e: borrowed in e.state.discard and not e.stack,
+    )
+
+    windows = [
+        query
+        for query in _queries(engine, "RESPOND")
+        if query.cause is WindowCause.BORROWED_SWORD
+    ]
+    assert [query.actor for query in windows] == [1], (
+        "借刀窗口问的是**持刀者**（座位 1），且只问一次"
+    )
+    assert any(
+        isinstance(action, ActivateSkill) and action.skill_id == GUOHUO
+        for action in windows[0].legal_actions
+    ), "候选里真有【蛊惑】——这条用例测的是提供者那条路"
+    assert weapon in state.player(1).equip, "用了【杀】⇒ 持刀者不交出武器"
+    assert state.player(3).hp == 3, "产物【杀】打向 Bn（座位 3），伤害真的落地"
+    assert state.player(1).hp == 3, "持刀者自己是使用者，不受伤"
+    assert _pushed(engine, FrameKind.USE) == 2, "借刀 + 产物【杀】各一次使用"
+    assert _pushed(engine, FrameKind.PLAY) == 0, "借刀窗口的产物是**使用**，不是打出"
+    assert _moves(
+        engine,
+        reason=MoveReason.LOSE,
+        source_zone=Zone.HAND,
+        target_zone=Zone.PROCESSING,
+        card=slash,
+    ), "扣置算失去牌：手牌 → 处理区"
+
+
+def test_guohuo_voided_slash_hands_the_weapon_over() -> None:
+    """借刀窗口里作废（假 + 非♥️）⇒ 这次响应没发生；持刀者没有真【杀】⇒ 走 b 交刀。"""
+    borrowed = _card(type_id="borrowed_sword")
+    weapon = _card(type_id="qinggang_sword")
+    fake = _card(type_id="peach", suit="diamond")
+    fillers = _fillers(2, exclude=frozenset({borrowed, weapon, fake}))
+    seats = [
+        SeatSpec(hand=(borrowed,)),
+        SeatSpec(hero="yuji_mobile", hand=(fake,), equip=(weapon,), hp=3, hp_max=3),
+        SeatSpec(hand=(fillers[0],)),
+        SeatSpec(hand=(fillers[1],)),
+    ]
+    engine, state = _run_window(
+        seats=seats,
+        players=[
+            _WindowSeat(designation=(1, 3)),
+            _WindowSeat(guohuo=("slash",)),
+            _WindowSeat(),
+            _WindowSeat(),
+        ],
+        stop=lambda e: borrowed in e.state.discard and not e.stack,
+    )
+
+    assert weapon not in state.player(1).equip, "作废 ⇒ 这次响应没发生，武器照规则交出"
+    assert state.card(weapon).card_id in state.player(0).hand, "b 支：武器进使用者手牌"
+    assert state.player(3).hp == 4, "没有【杀】打向 Bn ⇒ Bn 不受伤"
+    assert _pushed(engine, FrameKind.USE) == 1, "只有借刀自己那一次使用"
+    assert _moves(
+        engine,
+        reason=MoveReason.DISCARD,
+        source_zone=Zone.PROCESSING,
+        card=fake,
+    ), "非♥️的假牌要从处理区作废进弃牌堆"
+
+
+def test_guohuo_leaves_a_nullify_window_whose_winner_is_already_set() -> None:
+    """收集式窗口的**赢家已定** ⇒ 提供者不再发候选（``respond_declared`` 的产品路径）。
+
+    座位 2 先声明一张真【无懈可击】（首个声明者 = 赢家），座位 3 的于吉随后被问：此时扣置
+    一张手牌换来的产物**不会进结算**，故那一层的候选里不许有【蛊惑】——否则玩家点下去就是
+    白扣一张牌（牌离开手牌、牌面还已经公开过）。
+
+    **阳性对照**：无懈自己那一层是**新窗口**（``response_declared`` 重新为空），于吉在
+    那里被问时【蛊惑】照常进候选——两条一起才说明"候选缺席"不是别的原因（手里没牌 /
+    牌堆里没有无懈之类）。脚本始终不选它，故质疑段一次都不出现。
+    """
+    draw2 = _card(type_id="ex_nihilo")
+    real_nullify = _card(type_id="nullify", exclude=frozenset({draw2}))
+    spare = _card(type_id="peach", exclude=frozenset({draw2, real_nullify}))
+    filler = _fillers(1, exclude=frozenset({draw2, real_nullify, spare}))
+    seats = [
+        SeatSpec(hand=(draw2,)),
+        SeatSpec(hand=(filler[0],)),
+        SeatSpec(hand=(real_nullify,)),
+        SeatSpec(hero="yuji_mobile", hand=(spare,), hp=3, hp_max=3),
+    ]
+    engine, state = _run_window(
+        seats=seats,
+        players=[
+            _WindowSeat(strike=draw2),
+            _WindowSeat(),
+            _WindowSeat(nullify=real_nullify),
+            _WindowSeat(),
+        ],
+        stop=lambda e: draw2 in e.state.discard and not e.stack,
+    )
+
+    yuji_windows = [
+        query
+        for query in _queries(engine, "RESPOND")
+        if query.cause is WindowCause.NULLIFY and query.actor == 3
+    ]
+
+    def offers_guohuo(query) -> bool:
+        return any(
+            isinstance(action, ActivateSkill) and action.skill_id == GUOHUO
+            for action in query.legal_actions
+        )
+
+    assert len(yuji_windows) == 2, "于吉被问了两次：原窗口（赢家已定）+ 无懈自己那一层"
+    assert not offers_guohuo(yuji_windows[0]), (
+        "赢家已定 ⇒ 【蛊惑】不进候选（点下去就是白扣一张牌）"
+    )
+    assert offers_guohuo(yuji_windows[1]), (
+        "阳性对照：无懈自己那一层是新窗口，声明还没人下 ⇒ 照常进候选"
+    )
+    assert _verdict_seats(engine) == [], "脚本始终没选【蛊惑】⇒ 质疑段根本不出现"
+    assert engine.state.card(spare).card_id in state.player(3).hand, "那张手牌一张没动"
+
+
+def test_guohuo_nullifies_only_after_the_doubt_round() -> None:
+    """无懈窗口：**质疑在声明前收齐**，赢家才真的使用那张无懈。
+
+    收集式的模型是"先声明、收齐后只有首个声明者使用"，而提供者的契约是"答完就已经把牌
+    付清了"。两边拼起来的要求就是本用例断的这一条：质疑段必须**整段**跑在"声明"之前
+    （否则作废就没有回滚路径了），而扣置的那张牌只由**赢家**使用。
+    """
+    draw2 = _card(type_id="ex_nihilo")
+    heart = _card(type_id="slash", suit="heart")  # 真 / ♥ 都可以：声明的是【无懈可击】
+    real_nullify = _card(type_id="nullify", exclude=frozenset({draw2, heart}))
+    filler = _fillers(1, exclude=frozenset({draw2, heart, real_nullify}))
+    seats = [
+        SeatSpec(hand=(draw2,)),
+        SeatSpec(hero="yuji_mobile", hand=(heart,), hp=3, hp_max=3),
+        SeatSpec(hand=(real_nullify,)),
+        SeatSpec(hand=(filler[0],)),
+    ]
+    engine, state = _run_window(
+        seats=seats,
+        players=[
+            _WindowSeat(strike=draw2),
+            _WindowSeat(guohuo=("nullify",)),
+            _WindowSeat(nullify=real_nullify),
+            _WindowSeat(),
+        ],
+        stop=lambda e: draw2 in e.state.discard and not e.stack,
+    )
+
+    doubts = [
+        index
+        for index, record in enumerate(engine.records)
+        if record.kind == "query"
+        and record.query.kind == "SELECT_OPTION"
+        and GUOHUO_TRUST_OPTION
+        in tuple(str(action.choice) for action in record.query.legal_actions)
+    ]
+    uses = [
+        index
+        for index, record in enumerate(engine.records)
+        if record.kind == "frame"
+        and record.op == "push"
+        and record.frame_kind is FrameKind.USE
+    ]
+    assert doubts, "【蛊惑】进了无懈窗口的候选，质疑段因此出现"
+    assert uses and doubts[-1] < uses[-1], (
+        "质疑在**声明之前**收齐：最后一次质疑询问早于赢家那次使用"
+    )
+    assert len(state.player(0).hand) == 2, (
+        "手里只剩摸牌阶段的两张：被抵消的【无中生有】没有再摸两张"
+    )
+    assert engine.state.card(real_nullify).card_id in state.player(2).hand, (
+        "败者不耗牌：座位 2 的声明在【蛊惑】之后，赢家已定 ⇒ 那张无懈留在手里"
+    )
+    assert engine.state.card(heart).card_id in engine.state.discard, (
+        "赢家那张无懈照常走使用链 ⇒ 扣置的来源牌进弃牌堆"
+    )
 
 
 PACK = load_content_pack(deck_profile="standard_108")

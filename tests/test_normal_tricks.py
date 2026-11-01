@@ -1139,6 +1139,9 @@ class _BorrowedHost:
     def current_target(self, frame):
         return 1
 
+    def advance_provider(self, frame, timing):
+        return None, None, None
+
     def respond_candidates(self, actor, **kwargs):
         return self.offers
 

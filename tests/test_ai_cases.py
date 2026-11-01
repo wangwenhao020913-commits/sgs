@@ -352,6 +352,8 @@ def _nullify_query(
     declare_at: int | None = None,
     nested: bool = False,
     dead: tuple[int, ...] = (),
+    ai_hero: str | None = None,
+    ai_spare: int | None = None,
 ):
     """把局面推到 ``ai_seat`` 的一条真实无懈询问。
 
@@ -361,6 +363,8 @@ def _nullify_query(
       无懈本身**——嵌套窗口靠这个状态与第一层区分；
     - ``dead``（票 21 的 I1 用例）：这些座位开局即阵亡、0 体力——**阵亡即亮明身份**，
       身份后验因此能看见"配比里少了一个谁"。默认空 = 既有六条用例的局面逐字节不变。
+    - ``ai_hero`` / ``ai_spare``（票 03）：AI 座位换成指定武将（于吉 = 有无懈窗口的
+      **提供者**候选），另发一张手牌给它扣置。默认 ``None`` = 上面六条用例的局面不变。
 
     断言只到"引擎真的停在 AI 的这条询问上"；判据由各用例给。
     """
@@ -379,6 +383,9 @@ def _nullify_query(
         cursor += 2
         hands[seat] = hands.get(seat, ()) + cards
         used.update(cards)
+    if ai_spare is not None:
+        hands[ai_seat] = hands.get(ai_seat, ()) + (ai_spare,)
+        used.add(ai_spare)
     hp_overrides = dict(hp or {})
     seats = [
         SeatSpec(
@@ -386,6 +393,7 @@ def _nullify_query(
             hp_max=4,
             alive=seat not in dead,
             identity=identity,
+            hero=ai_hero if seat == ai_seat else None,
             hand=hands.get(seat, ()),
         )
         for seat, identity in enumerate(identities)
@@ -511,6 +519,23 @@ def _nested_nullify_query():
     )
 
 
+def _guohuo_own_ex_nihilo_query():
+    """自己【无中生有】、AI 座位是于吉移动版：无懈窗口里多一条【蛊惑】（票 03 的提供者）。
+
+    这是"提供者也是响应牌"的判据面：把真【无懈可击】换成扣置一张手牌当【无懈可击】之后，
+    "该不该宣"的结论必须**一字不变**（这里 = 不宣）。
+    """
+    return _nullify_query(
+        trick="ex_nihilo",
+        user=0,
+        targets=(0,),
+        identities=(Identity.LORD, Identity.LOYALIST, Identity.REBEL, Identity.REBEL, Identity.RENEGADE),
+        ai_seat=0,
+        ai_hero="yuji_mobile",
+        ai_spare=cards_of_type(PACK, "slash")[1],
+    )
+
+
 _NULLIFY_FIXTURES = (
     ("own_ex_nihilo", _own_ex_nihilo_query, "ex_nihilo", 0, False),
     ("enemy_ex_nihilo", _enemy_ex_nihilo_query, "ex_nihilo", 0, False),
@@ -554,6 +579,20 @@ def test_the_nullify_fixtures_reach_real_nullify_windows():
 def test_d1_passes_on_its_own_ex_nihilo():
     """自己【无中生有】：取消它只是自断过牌 ⇒ ``Pass``（票面 6 条里的第 1 条）。"""
     _assert_nullify_answer(_own_ex_nihilo_query(), declare=False)
+
+
+def test_d1_treats_a_provider_like_a_real_nullify_in_the_nullify_window():
+    """【蛊惑】在无懈窗口里也是响应牌：该不宣就不宣（票 03 的 AI 面）。
+
+    先红点：``_score_respond`` 曾给 ``ActivateSkill`` 无条件 :data:`_DODGE_SKILL_VALUE`
+    （正分），于是 AI 会用【蛊惑】去宣一张**换成真无懈它自己会 Pass** 的无懈。
+    """
+    query = _guohuo_own_ex_nihilo_query()
+
+    assert any(isinstance(action, ActivateSkill) for action in query.legal_actions), (
+        "候选里必须有【蛊惑】这条提供者路径——否则这条用例测的不是它"
+    )
+    _assert_nullify_answer(query, declare=False)
 
 
 def test_d1_declares_on_an_enemy_ex_nihilo():

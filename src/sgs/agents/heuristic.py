@@ -1642,20 +1642,25 @@ def _nullify_declares(query: Query) -> bool | None:
 
 
 def _score_respond(query: Query, action: Action) -> float:
-    """``RESPOND``：能抵消就抵消；技能类提供者（【护驾】/【激将】）同价。
+    """``RESPOND``：能抵消就抵消；技能类提供者（【护驾】/【激将】/【蛊惑】）同价。
 
     **无懈窗口是唯一的例外**（票 18 / spec §6.1 D1）：先按 :func:`_nullify_declares`
     判"该不该宣"；不该宣时给无懈候选 :data:`_NULLIFY_ABSTAIN_VALUE`（**严格低于**
     ``Pass``），由最大值直接选出 ``Pass``。其余窗口（【南蛮】/【万箭】/【决斗】/借刀 /
     势力求助 / 改判）仍是"有牌就抵消"的常量分——它们没有"取消对谁有利"的二义性。
+
+    **提供者也是响应牌**（票 03）：``ActivateSkill`` 在无懈窗口里同样过 :func:`_nullify_declares`
+    ——【蛊惑】的产物是一张【无懈可击】，它的"该不该宣"与真牌是同一件事。不这么写的话，
+    提供者恒拿 :data:`_DODGE_SKILL_VALUE`（正分）⇒ AI 会用它去宣一张**不该宣**的无懈，
+    而换成真牌那条路它是会 ``Pass`` 的。
     """
     if isinstance(action, Pass):
         return 0.0
-    if isinstance(action, ActivateSkill):
-        return _DODGE_SKILL_VALUE
-    if isinstance(action, (UseCard, PlayCard)):
+    if isinstance(action, (ActivateSkill, UseCard, PlayCard)):
         if _nullify_declares(query) is False:
             return _NULLIFY_ABSTAIN_VALUE
+        if isinstance(action, ActivateSkill):
+            return _DODGE_SKILL_VALUE
         return _RESPOND_VALUE
     return 0.0
 

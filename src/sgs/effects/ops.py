@@ -46,7 +46,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .behaviors import DamageNature
+from .behaviors import SLASH_FAMILY_KEY, DamageNature
 from .modifiers import responder_role, response_count
 
 __all__ = ("OPS",)
@@ -485,6 +485,16 @@ def _duel_accepted(op: dict[str, Any], *, other: int, required: int) -> str:
     return "stay"
 
 
+def _play_produced(host: Any, card: Any, *, source: int) -> None:
+    """把提供者交回的**产物牌**按 L6 打出（虚拟牌，无目标）。
+
+    ``card is None`` = 没有产物可交付：主公技式提供者（【护驾】/【激将】）的表达式是
+    "另一个角色打出 / 使用了一张牌"，那张牌**已经由代打者付清**，窗口只欠一条"需要已满足"。
+    """
+    if card is not None:
+        host.play_card(card, source=source, timing=Timing.PLAY_DECLARE)
+
+
 def resolve_duel(host: Any, frame: Frame) -> Any:
     """【决斗】：由目标开始，双方轮流**打出【杀】**；未打出者受到对方 1 点伤害。
 
@@ -534,11 +544,14 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
         # 在【决斗】使用上被误触发时（它的触发条件只看时机、不看牌名）会静默改写决斗。
         _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
         return None
-    control, satisfied = host.advance_provider(frame, Timing.RESOLVE_AFTER_EFFECT)
+    control, satisfied, produced = host.advance_provider(
+        frame, Timing.RESOLVE_AFTER_EFFECT
+    )
     if control is not None:
         return control
     if satisfied is not None:
         if satisfied:
+            _play_produced(host, produced, source=turn)
             return _duel_accepted(op, other=other, required=required)
         _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
         return None
@@ -563,12 +576,17 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
             raise NotImplementedError(
                 f"【决斗】窗口没有判定式提供者：{action.skill_id!r}（票 09）"
             )
-        control, satisfied = host.start_provider(
-            frame, action.skill_id, turn, Timing.RESOLVE_AFTER_EFFECT
+        control, satisfied, produced = host.start_provider(
+            frame,
+            action.skill_id,
+            turn,
+            Timing.RESOLVE_AFTER_EFFECT,
+            required=SLASH_FAMILY_KEY,
         )
         if control is not None:
             return control
         if satisfied:
+            _play_produced(host, produced, source=turn)
             return _duel_accepted(op, other=other, required=required)
         return "stay"
     _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
@@ -596,6 +614,13 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
     【枭姬】摸两张会提问），挂起的续跑重新进入本 op；``ask`` 的应答缓存是一次性的，
     没有 :data:`_BORROWED_SWORD_RESOLVED` 就会把同一个窗口再问一遍——实机缺陷的根因。
     标记在拿到应答 / 判定 auto-b **之后**才写，故首次询问挂起时不受影响。
+
+    **提供者（票 03 的 C1 缺口第二段）**：候选里的 ``ActivateSkill``（【蛊惑】"扣置一张
+    手牌当【杀】"）同样满足这扇窗口；产物由**本窗口**交付——目标恒为 Bn（``use_targets``），
+    故 ``start_use(产物, source=holder, targets=(Bn,))``，与真牌分支逐字同形。作废
+    （``satisfied=False``）⇒ 回到真牌窗口（该提供者已被 ``providers_used`` 过滤），
+    真牌也没有则走 auto-b。方天画戟式的**额外目标不做**：提供者的产物没有目标步，
+    借刀窗口对它的语义就是"只打 Bn"（票 03 的裁定）。
     """
     holder = host.current_target(frame)
     source = frame.data["source"]
@@ -614,15 +639,36 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
             "借刀的附带指定恰好一个 Bn（W5-02b）：入口只经清单，缺失即 fail-closed"
         )
     use_targets = (int(designations[0]),)
+
+    def _use_at_bn(card: Any) -> None:
+        """a 支成立：持刀者使用一张【杀】打向 Bn（真牌与提供者产物同一份交付）。"""
+        frame.data[_BORROWED_SWORD_RESOLVED] = _BORROWED_SWORD_USE
+        host.start_use(
+            card,
+            source=holder,
+            targets=use_targets,
+            use_timing=Timing.RESOLVE_AFTER_EFFECT,
+        )
+
+    control, satisfied, produced = host.advance_provider(
+        frame, Timing.RESOLVE_AFTER_EFFECT
+    )
+    if control is not None:
+        return control
+    if satisfied and produced is not None:
+        _use_at_bn(produced)
+        return None
+    providers_used = tuple(frame.data.get("providers_used", ()))
     offers = [
         action
         for action in host.respond_candidates(
             holder,
             cause=WindowCause.BORROWED_SWORD,
-            required="slash",
+            required=SLASH_FAMILY_KEY,
             target=holder,
             mode=RespondMode.USE,
             use_targets=use_targets,
+            providers_used=providers_used,
         )
         if not isinstance(action, Pass)
     ]
@@ -634,13 +680,34 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
         holder,
         Timing.RESOLVE_AFTER_EFFECT,
         cause=WindowCause.BORROWED_SWORD,
-        required="slash",
+        required=SLASH_FAMILY_KEY,
         target=holder,
         window_frame=frame.frame_id,
         mode=RespondMode.USE,
         use_targets=use_targets,
+        providers_used=providers_used,
     )
     if host.suspended(action):
+        return "stay"
+    if isinstance(action, ActivateSkill):
+        frame.data.setdefault("providers_used", []).append(action.skill_id)
+        if not host.provider_registered(action.skill_id):
+            # 与【决斗】同一道闸：没有惰性判定式的提供者 ⇒ fail-closed。
+            raise NotImplementedError(
+                f"借刀窗口没有判定式提供者：{action.skill_id!r}（票 03）"
+            )
+        control, satisfied, produced = host.start_provider(
+            frame,
+            action.skill_id,
+            holder,
+            Timing.RESOLVE_AFTER_EFFECT,
+            required=SLASH_FAMILY_KEY,
+        )
+        if control is not None:
+            return control
+        if satisfied and produced is not None:
+            _use_at_bn(produced)
+            return None
         return "stay"
     if isinstance(action, UseCard):
         frame.data[_BORROWED_SWORD_RESOLVED] = _BORROWED_SWORD_USE
@@ -688,12 +755,17 @@ def _resist_or_damage(
     （短路式），代打是真打出。
     """
     target = host.current_target(frame)
-    control, satisfied = host.advance_provider(frame, Timing.RESOLVE_AFTER_EFFECT)
+    control, satisfied, produced = host.advance_provider(
+        frame, Timing.RESOLVE_AFTER_EFFECT
+    )
     if control is not None:
         return control
     if satisfied is not None:
         if satisfied:
-            return None  # 需要被满足 ⇒ 不受伤害
+            # 需要被满足 ⇒ 不受伤害。产物按**打出**交付（L6）：提供者交回的是虚拟牌，
+            # 与真牌分支的 ``PlayCard`` 走同一条链；没有产物 = 别人已经打出过一张。
+            _play_produced(host, produced, source=target)
+            return None
         # 未满足 ⇒ 落回真牌窗口（该提供者已被 ``providers_used`` 过滤）
     if required == "dodge" and "skill_result" in frame.data:
         if frame.data.pop("skill_result"):
@@ -716,12 +788,17 @@ def _resist_or_damage(
         if not host.provider_registered(action.skill_id):
             host.open_skill_judgment(frame, target, action.skill_id)
             return "stay"
-        control, satisfied = host.start_provider(
-            frame, action.skill_id, target, Timing.RESOLVE_AFTER_EFFECT
+        control, satisfied, produced = host.start_provider(
+            frame,
+            action.skill_id,
+            target,
+            Timing.RESOLVE_AFTER_EFFECT,
+            required=required,
         )
         if control is not None:
             return control
         if satisfied:
+            _play_produced(host, produced, source=target)
             return None
         return "stay"
     if isinstance(action, PlayCard):

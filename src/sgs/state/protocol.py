@@ -236,6 +236,10 @@ class RespondContext:
     消费者：标准【鬼才】"打出一张**手牌**"、界【鬼才】"打出**一张牌**"（§十九 L2021）⇒
     界版带装备区，由 :func:`sgs.skills.rejudge_card_zones` 从技能定义派生。**不进记录流**
     （与 ``cause`` / ``required`` 同为候选生成载荷）。
+
+    ``declared`` = 这扇**收集式**窗口已经收到过一条声明（票 03）：赢家已定（首个声明者），
+    后面再声明的牌**不会进结算**。提供者（【蛊惑】）据此收口——它的产物是扣置一张手牌换来的，
+    让它在赢家已定之后还发候选，玩家点下去只会白扣一张牌。**不进记录流**（同上）。
     """
 
     cause: WindowCause
@@ -246,6 +250,7 @@ class RespondContext:
     use_targets: tuple[int, ...] = ()
     providers_used: tuple[str, ...] = ()
     zones: tuple[Zone, ...] = (Zone.HAND,)
+    declared: bool = False
 
 
 @dataclass(frozen=True, slots=True)

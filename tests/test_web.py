@@ -1372,9 +1372,14 @@ def test_the_respond_query_carries_no_second_target_stage() -> None:
     官方"使用者选 An 的同时选 An 使用【杀】的合法目标 Bn"已经被烘进候选
     （``UseCard{杀, targets=(Bn,)}``），故线上没有第二阶段可问。
     这条断言防的是"顺手把 ``use_targets`` 也下发"：那会让界面长出一次多余的目标选择。
+
+    **样本量（票 03，2026-11-02）**：【蛊惑】进了**无懈**与**濒死求【桃】**两扇窗口的候选后，
+    seed 31 的随机路径提前分出生死（175 → 55 步、RESPOND 94 → 26 次），两条种子的合计因此
+    从 106 掉到 38，低于下面的 50。按 `CODING_STANDARDS.md` §5 **加样本、不降阈值**：补 seed
+    43（它含移动版于吉，顺带覆盖本票新增的提供者路径，单种 90 次），合计 128（≈ 2.5× 阈值）。
     """
     checked = 0
-    for seed in (31, 37):
+    for seed in (31, 37, 43):
         session = Session(seed=seed, ai="random", timeout_seconds=None, player_count=8)
         guard = 0
         while session.pending is not None and guard < 400:

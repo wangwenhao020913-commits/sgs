@@ -48,15 +48,23 @@ class CandidateScope(str, Enum):
     """一次 ``CANDIDATES`` 派发发生在哪种"需要牌"语境（票 30）。
 
     ``CARD`` = 逐张牌的常规候选（M1 姿态、``ctx.card`` 非空）；``PLAY`` / ``DODGE`` /
-    ``RESPOND`` = 整段候选期的**通用追加**（虚拟牌不绑实体手牌）。用枚举而不是裸字符串：
-    写入端（``effects/actions.py``）与读取端（``skills/catalog.py``）共享同一个闭集，
-    新增语境只改这一处。
+    ``RESPOND`` / ``PEACH`` / ``NULLIFY`` = 整段候选期的**通用追加**（虚拟牌不绑实体手牌）。
+    用枚举而不是裸字符串：写入端（``effects/actions.py``）与读取端（``skills/catalog.py``）
+    共享同一个闭集，新增语境只改这一处。
+
+    四类"需要牌"语境的差别只在**窗口要什么**：``PLAY`` 是出牌阶段（任意牌）、``DODGE`` 是
+    【杀】的【闪】窗口、``RESPOND`` 是打出 / 使用的响应窗口（``respond_required`` 说牌名）、
+    ``PEACH`` 是濒死求【桃】、``NULLIFY`` 是无懈的收集式窗口。**提供者**（【蛊惑】）按它
+    收窄声明范围；``PEACH`` / ``NULLIFY`` 是票 03 的加法（那两扇窗口此前根本没有
+    ``CANDIDATES`` 派发）。
     """
 
     CARD = "CARD"
     PLAY = "PLAY"
     DODGE = "DODGE"
     RESPOND = "RESPOND"
+    PEACH = "PEACH"
+    NULLIFY = "NULLIFY"
 
 
 class CarrierKind(str, Enum):
@@ -218,6 +226,12 @@ class ModifierContext:
     respond_required: str | None = None
     respond_mode: RespondMode | None = None
     respond_targets: tuple[int, ...] = ()
+    respond_declared: bool = False
+    """这扇**收集式**窗口已经收到过一条声明（票 03）：赢家已定，提供者的产物不会进结算。
+
+    读者只有提供者的 ``CANDIDATES`` 回调（【蛊惑】）：它必须在这之后闭嘴——产物是**扣置一张
+    手牌**换来的，赢家已定时再发候选就是白扣一张牌。真牌候选不受影响（真牌声明不耗牌）。
+    """
     flags: dict[str, Any] = field(default_factory=dict)
     nature: DamageNature | None = None
     """本次伤害的**属性**（M5-05a 的加法；``DAMAGE_TAKE_AMOUNT`` / ``DAMAGE_CAP`` 用）。

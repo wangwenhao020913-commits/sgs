@@ -113,6 +113,15 @@ DODGE_RESPONSE_CARD = "dodge"
 【闪】候选（B1 的根因之一）。
 """
 
+PEACH_RESPONSE_CARD = "peach"
+"""求桃窗口里可用的牌名（票 03 的提供者 ``required``）。
+
+它只用于**提供者**那一侧（"这扇窗口要一张什么牌"→ ``PROVIDER_REQUIRED_KEY``）：真牌候选
+仍走 :func:`~sgs.effects.actions._peach` 的**语境**判据（``UseContext.NEAR_DEATH`` + 濒死者
+作目标），因为濒死窗口要的不止【桃】这一种牌名（【酒】只对**自己**有效），不是"一张叫什么
+名的牌"。故它与上面两条同住行为表，但只服务提供者的声明范围。
+"""
+
 
 class FinalZone(str, Enum):
     """结算完实体牌的**最终去向区**（票 09 §6）。

@@ -744,7 +744,7 @@ class _DodgeWindowHost:
         self.used = []
 
     def advance_provider(self, frame, timing):
-        return None, None
+        return None, None, None
 
     def ask_query(self, kind, actor, timing, payload=None):
         return self.answer
@@ -755,7 +755,7 @@ class _DodgeWindowHost:
     def provider_registered(self, skill_id):
         raise AssertionError("本用例不提供提供者")
 
-    def start_provider(self, frame, skill_id, actor, timing):
+    def start_provider(self, frame, skill_id, actor, timing, *, required):
         raise AssertionError("本用例不提供提供者")
 
     def open_skill_judgment(self, frame, seat, skill_id):

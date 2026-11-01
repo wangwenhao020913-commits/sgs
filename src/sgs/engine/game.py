@@ -1244,12 +1244,18 @@ class Engine:
         return provider_registered(skill_id)
 
     def advance_provider(self, frame: Frame, timing: Timing) -> Any:
-        """重入当前正在展开的提供者（票 09）：``(control, satisfied)``，见 ``sgs.skills``。"""
+        """重入当前正在展开的提供者（票 09）：``(control, satisfied, card)``，见 ``sgs.skills``。"""
         return advance_provider(self, frame, timing)
 
-    def start_provider(self, frame: Frame, skill_id: str, actor: int, timing: Timing) -> Any:
-        """开始一次提供者展开（票 09）：``(control, satisfied)``，见 ``sgs.skills``。"""
-        return start_provider(self, frame, skill_id, actor, timing)
+    def start_provider(
+        self, frame: Frame, skill_id: str, actor: int, timing: Timing, *, required: str
+    ) -> Any:
+        """开始一次提供者展开（票 09）：``(control, satisfied, card)``，见 ``sgs.skills``。
+
+        ``required`` = 这扇窗口**要一张什么牌**（牌名或杀族请求）：提供者据此收窄声明范围，
+        引擎与技能都不必从外层帧的牌反推（濒死 / 无懈 / 借刀三扇窗口反推都会得到别的牌）。
+        """
+        return start_provider(self, frame, skill_id, actor, timing, required=required)
 
     def suspended(self, value: Any) -> bool:
         """``ask`` 的返回值是否为"已暂停等应答"哨兵。"""
@@ -1510,7 +1516,7 @@ class Engine:
         return {"picks": tuple(action.picks), "choices": tuple(action.choices)}
 
     def recover_from_peach(
-        self, frame: Frame, action: UseCard, *, asker: int, dying: int
+        self, frame: Frame, card: CardRef, *, asker: int, dying: int
     ) -> None:
         """有人在濒死窗口出【桃】：把**回复结算插在濒死之下**，再走【桃】自己的使用链。
 
@@ -1529,13 +1535,13 @@ class Engine:
             {
                 "source": asker,
                 "targets": (dying,),
-                "card": action.card,
+                "card": card,
                 "amount": 1,
             },
             timing=Timing.RECOVER_VALUE,
         )
         self.start_use(
-            action.card,
+            card,
             source=asker,
             targets=(dying,),
             use_timing=Timing.NEAR_DEATH_AT,
@@ -1967,6 +1973,7 @@ class Engine:
         use_targets: tuple[int, ...] = (),
         providers_used: tuple[str, ...] = (),
         zones: tuple[Zone, ...] = (Zone.HAND,),
+        declared: bool = False,
     ) -> Any:
         """向 ``actor`` 发一次 ``RESPOND`` 询问；重入直接返回已存应答（票 19 §8）。
 
@@ -1977,6 +1984,8 @@ class Engine:
         ``providers_used`` 供"需要【闪】"窗口过滤已问过的装备提供者（票 10 §5.5）。
         ``zones`` = 候选牌取自应答者的哪几个区（缺省手牌）；改判窗口按
         :func:`~sgs.skills.rejudge_card_zones` 传入（界【鬼才】含装备区，M6 票 14）。
+        ``declared`` 只服务**收集式**窗口（票 03）：赢家已定（首个声明者）时提供者闭嘴
+        ——它的产物要扣置一张手牌，赢家已定时不会进结算。
         """
         payload = RespondContext(
             cause=cause,
@@ -1987,6 +1996,7 @@ class Engine:
             use_targets=tuple(use_targets),
             providers_used=tuple(providers_used),
             zones=tuple(zones),
+            declared=declared,
         )
         return self.ask(
             lambda seq: self._build_query(
