@@ -529,6 +529,8 @@ HEURISTIC_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
             "SelectOption",
             "SelectOptionQuery",
             "SkillActivationQuery",
+            # feng-zhangjiao 票 02：改判窗口的候选构造子（与 PlayCard 同为可见动作面）。
+            "SubstituteJudgeCard",
             "UseCard",
             # 票 18（D1）：无懈窗口的 `RespondQuery.cause` 就是它；AI 按 `NULLIFY` 分派
             # 目标化判据。它是询问自带面的一部分，不是全知状态。

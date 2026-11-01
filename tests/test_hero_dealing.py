@@ -209,7 +209,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     )
 
     assert enabled_hero_ids() == expected
-    assert len(expected) == 62
+    assert len(expected) == 63
     assert "jie_caoren_mobile" in expected, "移动版与 OL 系列**版本并存**、同进默认池"
     assert "jie_guanyu" in expected and "guanyu" in expected
     assert "huangzhong" in expected, "风包武将也进默认池（票 03）"
@@ -247,14 +247,14 @@ def test_enabled_hero_ids_reads_the_table_enablement():
 
 
 def test_every_enabled_hero_is_dealable_from_the_default_pool():
-    """M6 P0 收口（票 03）+ 票 12 混合池：默认将池真的**发得出每一名**（62 名逐名点将）。
+    """M6 P0 收口（票 03）+ 票 12 混合池：默认将池真的**发得出每一名**（63 名逐名点将）。
 
     判据比"池里有 61 个 id"强一层：逐个把目标武将当点将、其余座位仍从**默认启用池**
-    （``hero_pool=()``）随机——62 次都要成功落到座位 0，且其余座位不得重复抽到同一名
+    （``hero_pool=()``）随机——63 次都要成功落到座位 0，且其余座位不得重复抽到同一名
     **版本**、也不得抽到同一**真名**的另一版（票 12 的两段抽样）。
     """
     ids = enabled_hero_ids()
-    assert len(ids) == 62
+    assert len(ids) == 63
 
     for hero_id in ids:
         heroes = _heroes_of(

@@ -55,7 +55,8 @@
 | 目标池修饰器（剔除自己） | 「若你没有手牌，你不能成为【杀】或【决斗】的目标」 | `hero.zhugeliang.kongcheng` |
 | 接缝（时机枚举里没有） | 「当你的【杀】被【闪】抵消后」 | `equip.axe` |
 | 提供者（势力求助） | 「令其他蜀势力角色打出一张【杀】」 | `hero.liubei.jijiang`；**提供者不只服务主公技**：移动版于吉【蛊惑】用它实现"需要牌时先质疑再决定这张牌算不算数" |
-| 判定 / 改判 | 「判定牌生效前，你可以打出一张牌代替之」 | `hero.simayi.guicai` |
+| 判定 / 改判 | 「判定牌生效前，你可以**用**一张牌代替 / 替换之」（**不是打出**，走 `REJUDGE` 事件帧） | `hero.simayi.guicai`；张角【鬼道】= 同形 + `rejudge_card_color=BLACK` + `rejudge_original_to=HAND`（**替换**：原判定牌由改判者获得） |
+| 主公技·**跨座位注入**（别座位的出牌阶段里出现的主动技） | 「主公技，其他 X 势力角色的出牌阶段限一次，该角色可以交给你一张…」 | `hero.zhangjiao_mobile.huangtian`（张角移动版【黄天】）：`CANDIDATES` 注入 + A 族主动技 + 按**发动者**记的阶段位段（`catalog._HUANGTIAN_MASK`）；投影 `build_skills` 只把"这一问是问我的"那些列进我的技能区 |
 | 放置区（牌扣在武将牌上） | 「将手牌置于你的武将牌上」 | `hero.jie_luxun.qianxun` |
 | 觉醒 / 限定（一次性转变） | 「觉醒技 / 限定技，…」 | `hero.jie_xushu.qianxue`、`hero.jie_zhangfei.tishen`；**A 族（主动技）的限定技** = `ActiveSkill(skill_type=LIMITED)`，样板 `hero.tao_liubei.yiqi` |
 | 阶段体（阶段里改摸牌/弃牌） | 「摸牌阶段，你可以多摸一张牌」 | `hero.zhouyu.yingzi` |
@@ -169,6 +170,7 @@
 | `LIFE_LOSE` | 失去体力上限 |
 | `MAXLIFE` | 体力上限变化 |
 | `RANK_COMPARE` | 拼点类的比较帧 |
+| `REJUDGE` | **改判事件帧**（feng-zhangjiao 票 02）：一次"用一张牌代替 / 替换判定牌"。帧内两段移动（新牌 → 处理区；原牌 → 弃牌堆（**代替**）/ 改判者手牌（**替换**）），不派发任何"打出时 / 使用后"钩子。判据：动作是 `SubstituteJudgeCard`（不是 `PlayCard`），去向由 `SkillDef.rejudge_original_to` 回答 |
 
 ### 3.7 步骤类型
 

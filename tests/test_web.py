@@ -484,7 +484,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 62 and len(catalog) == 36, (
+    assert len(flat) == 63 and len(catalog) == 37, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -1828,8 +1828,8 @@ def test_query_context_names_the_skill_and_its_owner() -> None:
 def test_the_rejudge_window_links_guicai_by_the_shared_requirement_text() -> None:
     """U2-04：提示区技能组靠「这一步的 requirement = 技能声明的 requirement」认出【鬼才】。
 
-    改判窗口是 ``RESPOND`` / ``REJUDGE``：候选是手牌的 ``PlayCard``（没有
-    ``ActivateSkill``），故底部技能区的 ``available`` 判据看不见它。前端因此只做一次
+    改判窗口是 ``RESPOND`` / ``REJUDGE``：候选是 ``SubstituteJudgeCard``（没有
+    ``ActivateSkill``、也不是打出），故底部技能区的 ``available`` 判据看不见它。前端因此只做一次
     **服务端字符串相等**——两条都是声明面的"需要做什么"。这个测试走**真的判定帧**
     （座位 0 的【乐不思蜀】判定 → 座位 1 的司马懿被问改判），把那份相等钉住：改任一句
     都红，提示区的鬼才入口不会静默消失（它不是合法性判据）。
@@ -1876,9 +1876,10 @@ def test_the_rejudge_window_links_guicai_by_the_shared_requirement_text() -> Non
     }
 
     assert context is not None
-    assert {action.kind for action in query.legal_actions} == {"PlayCard", "Pass"}, (
-        "改判窗口的候选是手牌 PlayCard + Pass（没有 ActivateSkill）"
-    )
+    assert {action.kind for action in query.legal_actions} == {
+        "SubstituteJudgeCard",
+        "Pass",
+    }, "改判窗口的候选是 SubstituteJudgeCard + Pass（没有 ActivateSkill、也不是打出）"
     guicai = skills["hero.simayi.guicai"]
     assert guicai["available"] is False, "没有 ActivateSkill ⇒ 底部技能区的 available 是假"
     assert guicai["ui"]["passive"] is False, "鬼才不是触发技 / 锁定技"
@@ -6395,7 +6396,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 132, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 135, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)
@@ -9587,3 +9588,61 @@ def test_without_quiet_the_access_log_stays_one_line_per_request(
     assert status_line.endswith(b" 200 OK"), status_line
     out = capsys.readouterr().out
     assert out.count("[sgs-web]") == 1, f"缺省 = 每请求一行；实际：{out!r}"
+
+
+def test_the_skill_list_includes_a_cross_seat_granted_skill() -> None:
+    """feng-zhangjiao 票 01：【黄天】是**别人（张角）的**技能，但此刻发给我 ⇒ 列进我的技能区。
+
+    投影只在"本次询问真的给了我入口"（``offered`` 与候选同源）时才收别人的实例；
+    魏势力座位与张角自己都不该看到它。
+    """
+    from types import SimpleNamespace
+
+    from support import SeatSpec, build_state, cards_of_type, deck_excluding
+
+    pack = _context_pack()
+    dodge = cards_of_type(pack, "dodge")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="zhangjiao_mobile", identity=Identity.LORD, kingdom=Kingdom.QUN),
+            SeatSpec(hero="yuji_mobile", hand=(dodge,), kingdom=Kingdom.QUN),
+            SeatSpec(hero="simayi", kingdom=Kingdom.WEI),
+            SeatSpec(kingdom=Kingdom.WEI),
+        ],
+        deck=deck_excluding(pack, dodge),
+        rule_config=RuleConfig(player_count=4, starting_hand_size=1),
+    )
+    engine = Engine.from_state(state, seed=3)
+
+    def at_seat1_play_phase(e) -> bool:
+        return (
+            e.pending is not None
+            and e.pending.kind == QueryKind.PLAY_PHASE
+            and e.pending.actor == 1
+        )
+
+    from support import run_queries
+
+    run_queries(engine, [_FallThroughPlayer() for _ in range(4)], at_seat1_play_phase)
+    assert engine.pending is not None and engine.pending.actor == 1
+
+    session = SimpleNamespace(engine=engine, pending=engine.pending)
+    mine = {entry["skill_id"]: entry for entry in build_skills(session, 1)}
+    assert "hero.zhangjiao_mobile.huangtian" in mine, (
+        "跨座位授予：张角的【黄天】此刻发给座位 1 ⇒ 要出现在座位 1 的技能区"
+    )
+    assert mine["hero.zhangjiao_mobile.huangtian"]["available"] is True
+    assert mine["hero.zhangjiao_mobile.huangtian"]["ui"]["passive"] is False
+    assert mine["hero.zhangjiao_mobile.huangtian"]["name"] == "黄天"
+
+    # 别的座位**根本看不到**这条技能：跨座位授予只发给"这一问是问他"的那个座位。
+    for other_seat in (0, 2, 3):
+        ids = {entry["skill_id"] for entry in build_skills(session, other_seat)}
+        if other_seat == 0:
+            # 张角自己那一份是他的**本人**技能（不是跨座位授予），照常列出。
+            assert "hero.zhangjiao_mobile.huangtian" in ids
+            continue
+        assert "hero.zhangjiao_mobile.huangtian" not in ids, (
+            f"座位 {other_seat} 不该看到别人的技能"
+        )

@@ -26,7 +26,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, TypeAdapter, model_serializer
 
-from sgs.data import Identity, Kingdom
+from sgs.data import Color, Identity, Kingdom
 from sgs.timing import Timing
 
 from .models import CardRef, Marker, Phase, Zone, ZoneRefField, _FrozenModel
@@ -60,11 +60,13 @@ __all__ = [
     "SelectOptionContext",
     "SelectOptionQuery",
     "SelectionSpec",
+    "RejudgeOffer",
     "SkillActivationContext",
     "SkillActivationQuery",
     "Slot",
     "Step",
     "StepPool",
+    "SubstituteJudgeCard",
     "UseCard",
     "WindowCause",
     "parse_action",
@@ -99,7 +101,9 @@ class WindowCause(str, Enum):
     打出一张牌（【护驾】/【激将】），与"这张牌自己的响应窗口"（``DODGE`` / ``DUEL`` 等）
     分列，使记录流里读得出"这次询问来自求助"。
     票 11（M3）加 ``REJUDGE``：**改判窗口**的成因——判定牌生效前，有改判能力的角色
-    打出一张手牌代替之（`11.3`）；它挂在判定帧上、可循环重开，与效果自己的响应窗口分列。
+    **用一张牌代替 / 替换**之（`11.3`；feng-zhangjiao 票 02 起候选是
+    :class:`SubstituteJudgeCard`，不是打出）；它挂在判定帧上、可循环重开，与效果自己的
+    响应窗口分列。
     """
 
     NULLIFY = "NULLIFY"
@@ -112,15 +116,32 @@ class WindowCause(str, Enum):
 
 
 class RespondMode(str, Enum):
-    """响应窗口要求的是**打出**还是**使用**（票 19 §1 的候选型别分野）。
+    """响应窗口要求的是**打出**、**使用**，还是**改判**（票 19 §1；feng-zhangjiao 票 02 加第三档）。
 
     打出（南蛮 / 万箭 / 决斗）⇒ 候选 ``PlayCard``；借刀杀人的"使用【杀】"⇒ 候选 ``UseCard``
-    （目标由 ``use_targets`` 给出）。``mode`` 只用于**生成候选**，不进记录——记录里读得出
-    候选是哪种构造子。
+    （目标由 ``use_targets`` 给出）；**改判**（【鬼才】标 / 界、【鬼道】）⇒ 候选
+    :class:`SubstituteJudgeCard`——它不是打出：不压 PLAY 帧、不触发"打出时 / 使用后"钩子，
+    引擎压一个 ``FrameKind.REJUDGE`` 改判事件帧。``mode`` 只用于**生成候选**，
+    不进记录——记录里读得出候选是哪种构造子。
     """
 
     PLAY = "PLAY"
     USE = "USE"
+    REJUDGE = "REJUDGE"
+
+
+@dataclass(frozen=True, slots=True)
+class RejudgeOffer:
+    """改判窗口里**一条技能**的候选声明（feng-zhangjiao 票 02；不进记录流）。
+
+    一个座位可以有多条改判技能（当前最多一条）：每条各自回答三件事——候选取自哪几个区、
+    要不要按颜色筛选；原判定牌的去向由 :class:`~sgs.skills.catalog.SkillDef` 的
+    ``rejudge_original_to`` 回答（窗口按 ``skill_id`` 现查）。``color`` 为 ``None`` = 不限颜色。
+    """
+
+    skill_id: str
+    zones: tuple[Zone, ...] = (Zone.HAND,)
+    color: Color | None = None
 
 
 class Slot(_FrozenModel):
@@ -242,9 +263,13 @@ class RespondContext:
     技能 id 从候选里去掉，实现"每提供者只问一次"。
 
     ``zones`` = 候选牌取自**应答者的哪几个区**（缺省只有手牌）。改判窗口是唯一会放宽的
-    消费者：标准【鬼才】"打出一张**手牌**"、界【鬼才】"打出**一张牌**"（§十九 L2021）⇒
-    界版带装备区，由 :func:`sgs.skills.rejudge_card_zones` 从技能定义派生。**不进记录流**
-    （与 ``cause`` / ``required`` 同为候选生成载荷）。
+    消费者：标准【鬼才】"用一张**手牌**"、界【鬼才】"用**一张牌**"、张角【鬼道】"一张**黑色**
+    牌"⇒ 界版 / 鬼道带装备区，由 :func:`sgs.skills.rejudge_offers` 从技能定义派生。
+    **不进记录流**（与 ``cause`` / ``required`` 同为候选生成载荷）。
+
+    ``rejudge_offers`` = **改判窗口**每条技能各自的一条声明（feng-zhangjiao 票 02）：
+    候选按它逐条枚举（区 + 颜色），产出的构造子是 :class:`SubstituteJudgeCard`。
+    只服务 ``mode = REJUDGE``；其余窗口恒空。**不进记录流**（同上）。
 
     ``declared`` = 这扇**收集式**窗口已经收到过一条声明（票 03）：赢家已定（首个声明者），
     后面再声明的牌**不会进结算**。提供者（【蛊惑】）据此收口——它的产物是扣置一张手牌换来的，
@@ -260,6 +285,7 @@ class RespondContext:
     providers_used: tuple[str, ...] = ()
     zones: tuple[Zone, ...] = (Zone.HAND,)
     declared: bool = False
+    rejudge_offers: tuple[RejudgeOffer, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,6 +538,21 @@ class PlayCard(_ActionBase):
     card: CardRef
 
 
+class SubstituteJudgeCard(_ActionBase):
+    """**改判**：用这张牌代替 / 替换正在生效前的判定牌（feng-zhangjiao 票 02）。
+
+    必须与 ``PlayCard`` 分开（用户 2026-11-02 裁定："代替 / 替换走特殊的改判事件帧，
+    不要走打出"）：打出只发生在"确认一张牌 → 处理区 → 弃牌堆"的牌响应里，且只认**手牌**；
+    改判可以拿**装备区**的牌，也不触发任何"打出时 / 使用后"钩子。载荷：
+    ``skill_id`` = 由哪条技能（【鬼才】标 / 界、【鬼道】）发动——代替 / 替换与颜色筛选都
+    由那条技能的声明回答，窗口不另判；``card`` = 这张实体牌。
+    """
+
+    kind: Literal["SubstituteJudgeCard"] = "SubstituteJudgeCard"
+    skill_id: str
+    card: CardRef
+
+
 class Reforge(_ActionBase):
     """重铸（M5-03 / 决策 D6）：这张牌离开手牌进弃牌堆，摸一张；**不是使用**。
 
@@ -575,6 +616,7 @@ Action = Annotated[
     | EndPhase
     | DiscardCards
     | PlayCard
+    | SubstituteJudgeCard
     | Reforge
     | SelectCards
     | ActivateSkill

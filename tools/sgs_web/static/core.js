@@ -62,7 +62,8 @@ const DESCRIPTION_FALLBACK = "暂无描述";
 /** `CardRef` 的字段闭集（M5-bugfix）：与服务端 ``sgs.state.CardRef`` 逐字一致。
  *
  * 跨语言没有共享常量的通道，故这是**唯一**的 JS 副本；改服务端模型 = 两头一起改。
- * 提交 ``UseCard.card`` / ``PlayCard.card`` 时只能带这九个键——服务端模型是
+ * 提交 ``UseCard.card`` / ``PlayCard.card`` / ``SubstituteJudgeCard.card`` 时只能带这九个键
+ * ——服务端模型是
  * ``extra="forbid"``，多一个 ``display_name`` / ``attribute`` / ``description`` 就是
  * ``UseCard.card.attribute Extra inputs are not permitted``（借刀预发动的报障原样）。
  */

@@ -811,11 +811,16 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
         instance.skill_id for instance in resolve_instances(state) if instance.owner == seat
     }
     out: list[dict[str, Any]] = []
+    asked_here = pending is not None and int(getattr(pending, "actor", -1)) == seat
     for instance in resolve_instances(state, include_suppressed=True):
-        if instance.owner != seat:
+        cross_seat = instance.owner != seat
+        # 跨座位授予（feng-zhangjiao 票 01：张角【黄天】——别的座位的技能、此刻发给我）：
+        # 只把"**这一问是问我的**、且候选里真有这条技能"的那些列进我的技能区
+        # （``offered`` 与候选同源）。其余别人的技能一条不列——否则每个座位都会看到全场技能。
+        if cross_seat and not (asked_here and instance.skill_id in offered):
             continue
         definition = instance.definition
-        suppressed = instance.skill_id not in resolved_ids
+        suppressed = (not cross_seat) and instance.skill_id not in resolved_ids
         short_id = instance.skill_id.rsplit(".", 1)[-1]
         name, skill_type, star = names.get(
             short_id,
@@ -1291,12 +1296,13 @@ def _count_needed(engine: Any, query: Query, data: dict[str, Any]) -> int:
 def _rejudge_requirement(engine: Any, query: Query) -> str:
     """改判窗口的"需要做什么"：读**应答座位**当前活着的改判技能定义（不写死一句）。
 
-    标准【鬼才】"打出一张**手牌**"（§九 L942）、界【鬼才】"打出**一张牌**"（§十九 L2021）
+    标准【鬼才】"用一张**手牌**"（§九 L942）、界【鬼才】"用**一张牌**"（§十九 L2021）、
+    张角【鬼道】"用一张**黑色**牌替换"（feng-zhangjiao 票 02）
     ——两版文案不同，而界面按"本窗口文案 == 该技能声明的 ``requirement``"认领那个只说明
     入口（`tools/sgs_web/static/table.js:rejudgeWindowEntry`），写死会让界版对不上。
     找不到定义（构造局面 / 事件外的预览）时退回标准版文案，与 M5 起的既有字符串逐字相同。
     """
-    fallback = "打出一张手牌，代替此判定牌"
+    fallback = "用一张手牌，代替此判定牌"
     actor = int(getattr(query, "actor", -1))
     for instance in resolve_instances(engine.state):
         if instance.owner == actor and instance.definition.rejudge_capable:

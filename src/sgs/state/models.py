@@ -302,6 +302,15 @@ class FrameKind(str, Enum):
     MAXLIFE = "MAXLIFE"
     RANK_COMPARE = "RANK_COMPARE"
     SKILL = "SKILL"
+    REJUDGE = "REJUDGE"
+    """**改判事件帧**（feng-zhangjiao 票 02）：一次"用一张牌代替 / 替换判定牌"。
+
+    用户 2026-11-02 裁定：改判**不是打出**（打出只发生在"手牌 → 处理区"的牌响应里，
+    界【鬼才】/【鬼道】允许拿**装备区**的牌，而装备区的牌根本不能打出）。故它有自己的
+    事件帧：帧内两段移动（新牌 → 处理区成为判定牌；原牌 → 弃牌堆（**代替**）/
+    改判者手牌（**替换**）），不派发任何"打出时 / 使用后"钩子。帧私有载荷：
+    ``subject`` / ``seat`` / ``skill_id`` / ``old`` / ``new`` / ``original_to``。
+    """
 
 
 LIFE_DECREASE_DAMAGE_KEY = "life_decrease_from_damage"

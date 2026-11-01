@@ -92,6 +92,7 @@ from sgs.skills import (
     provider_registered,
     prune_card_tags,
     prune_skill_state,
+    rejudge_original_to,
     reset_phase_skill_state,
     reset_round_skill_state,
     reset_turn_skill_state,
@@ -132,6 +133,7 @@ from sgs.state import (
     Query,
     QueryKind,
     Reforge,
+    RejudgeOffer,
     RespondContext,
     RespondMode,
     RespondQuery,
@@ -242,15 +244,6 @@ _DISPATCH_SCOPE = "dispatch_scope"
 同一槽，而"同帧的下一次触发"是另一个槽。
 """
 
-_JUDGE_SUBSTITUTION = "judge_substitution"
-"""帧私有槽名：一次改判「**代替**」的在途进度（票 11 §② 的重入；code-review C2）。
-
-``{"old": CardRef, "new": CardRef, "seat": int, "stage": int}``：``stage`` = 已搬完的段数
-（0 = 都还没搬、1 = 新牌已进处理区、2 = 原判定牌也已进弃牌堆）。**原判定牌在首次进入时
-定格**，故重入不会把它错读成刚写进 ``judge_card`` 的新牌；``stage`` 让重入跳过已搬段，
-既不搬第二遍、也不会把原判定牌遗留在处理区。``resume`` 在
-:func:`~sgs.engine.steps.judge_before_effect` 顶部消费它。
-"""
 
 _DEAD_CARDS_CLEARED = "dead_cards_cleared"
 """死亡帧私有槽名：Ⅰ.a 的"死者区域已清空"位（票 33 的重入幂等）。
@@ -1978,6 +1971,7 @@ class Engine:
         providers_used: tuple[str, ...] = (),
         zones: tuple[Zone, ...] = (Zone.HAND,),
         declared: bool = False,
+        rejudge_offers: tuple[RejudgeOffer, ...] = (),
     ) -> Any:
         """向 ``actor`` 发一次 ``RESPOND`` 询问；重入直接返回已存应答（票 19 §8）。
 
@@ -2001,6 +1995,7 @@ class Engine:
             providers_used=tuple(providers_used),
             zones=tuple(zones),
             declared=declared,
+            rejudge_offers=tuple(rejudge_offers),
         )
         return self.ask(
             lambda seq: self._build_query(
@@ -2018,6 +2013,7 @@ class Engine:
         mode: RespondMode = RespondMode.PLAY,
         use_targets: tuple[int, ...] = (),
         providers_used: tuple[str, ...] = (),
+        rejudge_offers: tuple[RejudgeOffer, ...] = (),
     ) -> tuple[Action, ...]:
         """**预览**一次响应窗口的候选（W5-02b 的 auto-b）：不问、不记、不耗序号。
 
@@ -2036,6 +2032,7 @@ class Engine:
             mode=mode,
             use_targets=tuple(use_targets),
             providers_used=tuple(providers_used),
+            rejudge_offers=tuple(rejudge_offers),
         )
         return legal_actions_for(
             self.state,
@@ -2377,80 +2374,44 @@ class Engine:
             actor=subject,
         )
 
-    def substitute_judge_card(self, frame: Frame, *, seat: int, new_card: CardRef) -> Control:
-        """改判「**代替**」（票 11 §②）：新牌 手牌 → 处理区、原判定牌 处理区 → 弃牌堆。
+    def substitute_judge_card(
+        self, frame: Frame, *, seat: int, new_card: CardRef, skill_id: str
+    ) -> Control:
+        """改判（feng-zhangjiao 票 02）：压一个 **REJUDGE 事件帧**，把新牌变成判定牌。
 
-        与 :func:`sgs.effects.substitute_judge_card` 的**代替**口径逐字段一致
-        （``reason = JUDGE``、归属 = **被判定者**、新牌进处理区、原牌进弃牌堆），
-        只是走 :meth:`move_in_frame` 这个"搬牌必记 delta、必派发失去牌后"的公共移动口：
-        替代掉的手牌因此照常触发 D 族的"失去牌后"，而不是绕开移动入口直接改状态。
+        与旧实现的裁决**逐字段相同**（新牌 → 处理区 ``reason = JUDGE``、归属 = 被判定者、
+        原牌去向由 :attr:`~sgs.skills.catalog.SkillDef.rejudge_original_to` 回答），差别只在
+        **形状**：两段移动住在一个独立的 ``FrameKind.REJUDGE`` 子帧里，故记录流读得出
+        "这一次改判"是一次独立事件，而不是 JUDGE 帧里的两条散装移动；动作构造子也不再是
+        ``PlayCard``（用户裁定：改判不是打出）。
 
-        两条移动各发一条 ``card_move``（来源区不同）。完成时把帧私有 ``judge_card``
-        换成新牌 —— 它成为新的"生效前"判定牌（窗口据此重开）。
+        帧私有 ``judge_card`` 在这里**先换成新牌**：窗口要等这个子帧出栈后才重开
+        （``judge_before_effect`` 重入），期间没有别的读者，故"先写后搬"与旧实现等价。
 
-        **可重入（code-review C2）**：第一次移动可能因内联钩子提问而挂起（例如改判的
-        是【连营】持有者的最后一张手牌）。进度记在帧私有 :data:`_JUDGE_SUBSTITUTION`：
-        原判定牌**首次进入时定格**、``stage`` 记住已搬段，故重入要么由本方法续跑、
-        要么由 :meth:`resume_judge_substitution` 续跑——两者都不会把原判定牌遗留处理区。
+        原判定牌的身份在**压帧时定格**（帧私有 ``old``）：挂起重入由帧自己的步骤续跑
+        （``steps.rejudge_substitute``），不会把已经换成新牌的 ``judge_card`` 误当原牌
+        ——code-review C2 的那条缺陷在帧边界上不再可能发生。
         """
-        progress = frame.data.get(_JUDGE_SUBSTITUTION)
-        if progress is None:
-            progress = {
-                "old": frame.data["judge_card"],
-                "new": new_card,
+        old = frame.data["judge_card"]
+        original_to = rejudge_original_to(self.state, seat, skill_id)
+        frame.data["judge_card"] = new_card
+        self.push_frame(
+            FrameKind.REJUDGE,
+            {
+                "subject": frame.data["subject"],
+                "targets": (frame.data["subject"],),
+                "source": seat,
+                "card": frame.data.get("card"),
+                "use_timing": frame.data.get("use_timing"),
                 "seat": seat,
-                "stage": 0,
-            }
-            frame.data[_JUDGE_SUBSTITUTION] = progress
-        return self._advance_judge_substitution(frame, progress)
-
-    def resume_judge_substitution(self, frame: Frame) -> Control:
-        """把被打断的改判「代替」接着做完；没有在途替代时是**零动作**（code-review C2）。
-
-        改判窗口是**步骤级**循环：挂起重入时 ``_rejudge_window`` 已经把这个座位记进
-        "已问过"，不会再次调 :meth:`substitute_judge_card`。故续跑点放在
-        :func:`~sgs.engine.steps.judge_before_effect` 的入口——它先收尾在途替代，
-        再开新一轮询问。
-        """
-        progress = frame.data.get(_JUDGE_SUBSTITUTION)
-        if progress is None:
-            return None
-        return self._advance_judge_substitution(frame, progress)
-
-    def _advance_judge_substitution(self, frame: Frame, progress: dict[str, Any]) -> Control:
-        """按 ``progress["stage"]`` 搬完改判的两段移动；每段搬完即记进度、挂起即透传。
-
-        ``stage`` 在**调用移动之前**前进：``move_in_frame`` 返回 ``"stay"`` 时牌**已经**
-        搬完（只是钩子的派发还没续跑），故重入必须跳过这一段。
-        """
-        subject = frame.data["subject"]
-        if progress["stage"] < 1:
-            progress["stage"] = 1
-            control = self.move_in_frame(
-                frame,
-                (progress["new"],),
-                to_zone=ZoneRef(Zone.PROCESSING),
-                reason=MoveReason.JUDGE,
-                owner=subject,
-                actor=progress["seat"],
-            )
-            frame.data["judge_card"] = progress["new"]
-            if control is not None:
-                return control
-        if progress["stage"] < 2:
-            progress["stage"] = 2
-            control = self.move_in_frame(
-                frame,
-                (progress["old"],),
-                to_zone=ZoneRef(Zone.DISCARD),
-                reason=MoveReason.JUDGE,
-                owner=subject,
-                actor=subject,
-            )
-            if control is not None:
-                return control
-        frame.data.pop(_JUDGE_SUBSTITUTION, None)
-        return None
+                "skill_id": skill_id,
+                "old": old,
+                "new": new_card,
+                "original_to": original_to.value,
+            },
+            timing=Timing.JUDGE_CARD_BEFORE_EFFECT,
+        )
+        return "stay"
 
     def discard_judge_card(self, frame: Frame) -> None:
         """判定牌 处理区 → 弃牌堆（``reason = JUDGE``、归属 = 被判定者）：判定结算结束。
@@ -3954,6 +3915,9 @@ class Engine:
                 raise ValueError("RESPOND 询问必须给出 RespondContext")
             if payload.mode is RespondMode.USE:
                 prompt = "响应窗口：请使用一张牌，或放弃。"
+            elif payload.mode is RespondMode.REJUDGE:
+                # 改判**不是打出**（feng-zhangjiao 票 02）：窗口文案按"用一张牌代替 / 替换"
+                prompt = "改判窗口：用一张牌代替此判定牌，或放弃。"
             else:
                 prompt = "响应窗口：请打出一张牌，或放弃。"
             return RespondQuery(

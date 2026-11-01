@@ -62,6 +62,33 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "zhangjiao_mobile",
+      "name": "张角移动版",
+      "true_name": "张角",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "feng-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "leiji",
+          "name": "雷击",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "guidao",
+          "name": "鬼道",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "huangtian",
+          "name": "黄天",
+          "skill_type": "LORD"
+        }
+      ]
     }
   ]
 }

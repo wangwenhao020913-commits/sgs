@@ -64,10 +64,11 @@ from sgs.skills import (
     DAMAGE_RECORDED_KEY,
     JIE_JIUYUAN_REPLACED_KEY,
     QIANXUN_PLACED_KEY,
+    RejudgeOriginal,
     SeamKind,
     activate_skill,
-    rejudge_card_zones,
     rejudge_capable_seats,
+    rejudge_offers,
     target_is_ineffective,
     virtual_dodge,
 )
@@ -79,9 +80,11 @@ from sgs.state import (
     FrameKind,
     GameState,
     MoveReason,
-    PlayCard,
+    Pass,
     QueryKind,
     RespondMode,
+    RejudgeOffer,
+    SubstituteJudgeCard,
     UseCard,
     WindowCause,
     Zone,
@@ -127,9 +130,9 @@ class FrameHost(StepHost, Protocol):
 
     def discard_judge_card(self, frame: Frame) -> None: ...
 
-    def substitute_judge_card(self, frame: Frame, *, seat: int, new_card: CardRef) -> Control: ...
-
-    def resume_judge_substitution(self, frame: Frame) -> Control: ...
+    def substitute_judge_card(
+        self, frame: Frame, *, seat: int, new_card: CardRef, skill_id: str
+    ) -> Control: ...
 
     def apply_judge_after(self, frame: Frame) -> None: ...
 
@@ -194,7 +197,17 @@ class FrameHost(StepHost, Protocol):
         mode: RespondMode = RespondMode.PLAY,
         use_targets: tuple[int, ...] = (),
         zones: tuple[Zone, ...] = (Zone.HAND,),
+        rejudge_offers: tuple[RejudgeOffer, ...] = (),
     ) -> Any: ...
+
+    def respond_candidates(
+        self,
+        actor: int,
+        *,
+        cause: WindowCause,
+        mode: RespondMode = RespondMode.PLAY,
+        rejudge_offers: tuple[RejudgeOffer, ...] = (),
+    ) -> tuple[Any, ...]: ...
 
     def suspended(self, value: Any) -> bool: ...
 
@@ -1573,21 +1586,17 @@ def judge_before_effect(host: FrameHost, frame: Frame) -> Control:
     1. 真 dispatch 一次 ``JUDGE_CARD_BEFORE_EFFECT``（既有语义不变；M2 无改判技能
        ⇒ 队列恒空、无询问、无额外日志节点）。时机记录**每个判定帧只落一次**
        （``REJUDGE_EMITTED`` 守卫重入；循环重开不改时点序，票 11 §验收 7）。
-    2. 先把上一次替代的**在途进度**收尾（``resume_judge_substitution``；code-review C2：
-       替代的第一段移动可能因内联钩子提问而挂起，而 ``_rejudge_window`` 已把这个座位
-       记进"已问过"、不会再次进来），再在 :func:`_rejudge_window` 里逐个问**有改判能力**
-       的座位（``WindowCause.REJUDGE``、``required=None``、``mode=PLAY`` = 打出一张牌
-       代替之；候选区 = :func:`~sgs.skills.rejudge_card_zones` 按该座位的技能定义现算——
-       标准【鬼才】只有手牌，界【鬼才】另有装备区）；每次替代后窗口重开，直到无人再替代。
+    2. 再在 :func:`_rejudge_window` 里逐个问**有改判能力**的座位（``WindowCause.REJUDGE``、
+       ``required=None``、``mode=REJUDGE`` = **用一张牌代替 / 替换**判定牌；候选声明由
+       :func:`~sgs.skills.rejudge_offers` 按该座位的技能定义现算——标准【鬼才】只有手牌、
+       界【鬼才】另有装备区、张角【鬼道】只收黑色牌）；每次替代压一个 :class:`FrameKind.REJUDGE`
+       改判事件帧，帧出栈后本步重入、窗口重开，直到无人再替代。
     """
     if not frame.data.get(REJUDGE_EMITTED):
         control = _emit_judge(host, frame, Timing.JUDGE_CARD_BEFORE_EFFECT)
         if control is not None:
             return control
         frame.data[REJUDGE_EMITTED] = True
-    control = host.resume_judge_substitution(frame)
-    if control is not None:
-        return control
     return _rejudge_window(host, frame)
 
 
@@ -1596,11 +1605,15 @@ def _rejudge_window(host: FrameHost, frame: Frame) -> Control:
 
     循环口径（三处都必要）：
 
-    - **重开**：选中 ``PlayCard`` ⇒ :meth:`~sgs.engine.steps.FrameHost.substitute_judge_card`
-      把新牌变成判定牌（新的"生效前"），下一轮按新的局面重扫应答者；
+    - **重开**：选中 ``SubstituteJudgeCard`` ⇒
+      :meth:`~sgs.engine.steps.FrameHost.substitute_judge_card` 把新牌变成判定牌
+      （**新的"生效前"**）并压一个 **REJUDGE 改判事件帧**，下一轮按新的局面重扫应答者；
     - **每座位一次**：``REJUDGE_ASKED`` 记录已问过的座位，故同一座位不因循环被问第二次；
     - **绑帧与重滤**：每轮都从 ``rejudge_askers(存活座位, 有能力座位)`` 现算——窗口内
-      有人死亡时，死者自动从区间里消失（"冻结元组"是 M2 濒死窗口的口径，不搬到这里）。
+      有人死亡时，死者自动从区间里消失（"冻结元组"是 M2 濒死窗口的口径，不搬到这里）；
+    - **空候选不问**：某座位这一轮**没有可用来改判的牌**（没手牌 / 【鬼道】没有黑色牌）
+      ⇒ 先算一遍候选，只有 ``Pass`` 就不发这一问、直接记进"已问过"
+      （`edge-cases.md` 总纪律 1：绝不发一条玩家无法合法应答的询问）。
 
     ``ask_respond`` 的帧内应答缓存让挂起重入续跑同一次询问；``asked`` 在**应答到达后**
     才追加，故重入时仍选中同一座位、消费那条应答。
@@ -1611,6 +1624,16 @@ def _rejudge_window(host: FrameHost, frame: Frame) -> Control:
         seat = next((candidate for candidate in askers if candidate not in asked), None)
         if seat is None:
             return None
+        offers = rejudge_offers(host.state, seat)
+        preview = host.respond_candidates(
+            seat,
+            cause=WindowCause.REJUDGE,
+            mode=RespondMode.REJUDGE,
+            rejudge_offers=offers,
+        )
+        if not any(not isinstance(candidate, Pass) for candidate in preview):
+            asked.append(seat)
+            continue
         action = host.ask_respond(
             frame,
             seat,
@@ -1618,14 +1641,16 @@ def _rejudge_window(host: FrameHost, frame: Frame) -> Control:
             cause=WindowCause.REJUDGE,
             required=None,
             window_frame=frame.frame_id,
-            mode=RespondMode.PLAY,
-            zones=rejudge_card_zones(host.state, seat),
+            mode=RespondMode.REJUDGE,
+            rejudge_offers=offers,
         )
         if host.suspended(action):
             return "stay"
         asked.append(seat)
-        if isinstance(action, PlayCard):
-            control = host.substitute_judge_card(frame, seat=seat, new_card=action.card)
+        if isinstance(action, SubstituteJudgeCard):
+            control = host.substitute_judge_card(
+                frame, seat=seat, new_card=action.card, skill_id=action.skill_id
+            )
             if control is not None:
                 return control
 
@@ -1648,6 +1673,70 @@ JUDGE_STEPS = (
     Step(judge_finish, None),
 )
 """判定帧四步；``judge_finish`` **非 dispatch**（入弃牌堆是动作，没有对应时机节点）。"""
+
+
+# ---- REJUDGE 帧：改判事件（feng-zhangjiao 票 02）-----------------------------
+#
+# 用户 2026-11-02 裁定：**代替 / 替换走特殊的改判事件帧，不要走打出**。打出只发生在
+# "手牌 → 处理区 → 弃牌堆"的牌响应里（走 L6、触发「打出时」钩子），而改判可以拿**装备区**
+# 的牌、也不触发任何"打出 / 使用"钩子——故它有自己的事件帧，帧内两段移动：
+#   1. 新牌 → 处理区（`reason = JUDGE`，它成为新的判定牌；归属 = 被判定者）；
+#   2. 原判定牌 → 弃牌堆（**代替**，缺省）或 → **改判者手牌**（**替换**，`reason = PUT`）。
+# 去向由改判技能的定义字段 `rejudge_original_to` 回答，帧只读动作自带的 `skill_id`。
+
+REJUDGE_NEW_MOVED = "rejudge_new_moved"
+"""帧私有键：**新牌**那一段已经搬过（挂起重入时不重搬）。
+
+与 MOVER 的既有范式一致（``_advance_judge_substitution``）：标志在调搬牌**之前**落，
+故 ``move_in_frame`` 因内联钩子提问返回 ``"stay"`` 后，重入直接进第二段。
+"""
+
+
+def rejudge_substitute(host: FrameHost, frame: Frame) -> Control:
+    """改判事件帧的唯一（**非 dispatch**）步：搬两段牌。
+
+    - 第一段：``new`` → 处理区。归属 = **被判定者**（判定牌不为主人拥有，§11.6）。
+    - 第二段：``old`` → 弃牌堆 / 改判者手牌。**原牌已不在处理区**（被【天妒】一类拿走）
+      ⇒ 这一段跳过，不是错误——改判既已生效，原牌的去向由那次获得决定。
+    """
+    subject = frame.data["subject"]
+    seat = frame.data["seat"]
+    if not frame.data.get(REJUDGE_NEW_MOVED):
+        frame.data[REJUDGE_NEW_MOVED] = True
+        control = host.move_in_frame(
+            frame,
+            (frame.data["new"],),
+            to_zone=ZoneRef(Zone.PROCESSING),
+            reason=MoveReason.JUDGE,
+            owner=subject,
+            actor=seat,
+        )
+        if control is not None:
+            return control
+    old = frame.data["old"]
+    if old.card_id not in host.state.processing:
+        return None
+    if frame.data.get("original_to") == RejudgeOriginal.HAND.value:
+        return host.move_in_frame(
+            frame,
+            (old,),
+            to_zone=ZoneRef(Zone.HAND, seat),
+            reason=MoveReason.PUT,
+            owner=seat,
+            actor=seat,
+        )
+    return host.move_in_frame(
+        frame,
+        (old,),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.JUDGE,
+        owner=subject,
+        actor=subject,
+    )
+
+
+REJUDGE_STEPS = (Step(rejudge_substitute, None),)
+"""改判事件帧：一个非 dispatch 步（改判没有自己的时机枚举位，它是判定帧的一个子事件）。"""
 
 
 # ---- RECOVER 帧：L10 两个时机 ----------------------------------------------
@@ -1800,4 +1889,5 @@ def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
         FrameKind.DEATH: IDENTITY_DEATH_STEPS if mode is Mode.IDENTITY else DEATH_STEPS,
         FrameKind.RECOVER: RECOVER_STEPS,
         FrameKind.JUDGE: JUDGE_STEPS,
+        FrameKind.REJUDGE: REJUDGE_STEPS,
     }

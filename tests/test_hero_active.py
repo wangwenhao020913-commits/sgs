@@ -438,8 +438,12 @@ def test_the_phase_reset_mask_covers_every_phase_bit_and_nothing_else():
     # M6 票 16：界刘备【仁德】的"本阶段已给过的目标座位"位段也是阶段作用域。
     given_bits = catalog_module._GIVEN_TO_MASK
     assert given_bits == 0xFF << catalog_module._GIVEN_TO_SHIFT
+    # feng-zhangjiao 票 01：张角【黄天】的"本阶段这名群势力角色已交过牌"位段（键在张角身上）。
+    huangtian_bits = catalog_module._HUANGTIAN_MASK
+    assert huangtian_bits == 0xFF << catalog_module._HUANGTIAN_SHIFT
+    assert not (huangtian_bits & given_bits), "两段位不许重叠"
 
-    assert catalog_module._PHASE_STATE_MASK == phase_bits | given_bits
+    assert catalog_module._PHASE_STATE_MASK == phase_bits | given_bits | huangtian_bits
     assert catalog_module._USED_SECOND == active_module._USED_SECOND, (
         "位布局的唯一真源在 catalog；active 只是转发同一个常量"
     )
@@ -450,6 +454,7 @@ def test_the_phase_reset_mask_covers_every_phase_bit_and_nothing_else():
             | active_module._RECOVERED
             | active_module._GAVE_ANY
             | given_bits
+            | huangtian_bits
             | catalog_module._LIMITED_USED
             | catalog_module._AWAKENED
             | catalog_module._TURN_USED

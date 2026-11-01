@@ -28,9 +28,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from sgs.data import Category, SkillType, card_category, hero_skill_id
+from sgs.data import Category, SkillType, Suit, card_category, hero_skill_id
 from sgs.effects import (
+    DODGE_RESPONSE_CARD,
     CarrierKind,
+    DamageNature,
     behavior_for,
     is_slash,
     targets_within_attack_range,
@@ -38,6 +40,7 @@ from sgs.effects import (
 from sgs.resolution import Control, Frame
 from sgs.state import (
     CardRef,
+    FrameKind,
     GameState,
     MoveReason,
     Pass,
@@ -51,12 +54,13 @@ from sgs.timing import Timing
 from .catalog import (
     MATCH_ACTOR_KEY,
     MATCH_OWNER_KEY,
+    SKILL_JUDGMENT_CARD_KEY,
     Hook,
     SkillDef,
     mark_round_skill_used,
     round_skill_uses,
 )
-from .flow import SkillFlow, zero_step_effect
+from .flow import PickSeats, SkillFlow, zero_step_effect
 
 __all__ = [
     "CONGTAO",
@@ -675,6 +679,122 @@ def _congtao(host: Any, frame: Frame) -> Control:
     return None
 
 
+# ---------------------------------------------------------------------------
+# 张角移动版【雷击】（feng-zhangjiao 票 01）——触发技：使用 / 打出【闪】→ 判定 → ♠ 造伤
+#
+# 牌面（官方移动版张角页，逐字）：「当你使用或打出【闪】时，你可以令一名角色进行一次判定，
+# 若结果为♠️，你对其造成2点雷电伤害。」
+#
+# 与【涯角】同一姿态：**两条钩子**（`USE_ON_USE` + `PLAY_ON_PLAY`）共用同一个条件与主体
+# （牌面写「使用**或**打出」，规则 L1903 明写打出侧可发动【雷击】）。与【刚烈】同一范式：
+# 判定 → 读花色 → 压 DAMAGE 子帧（判定牌回写在 `SKILL_JUDGMENT_CARD_KEY`，逐段游标续跑）。
+# ---------------------------------------------------------------------------
+
+LEIJI = hero_skill_id("zhangjiao_mobile", "leiji")
+"""张角移动版【雷击】的全限定技能 id。"""
+
+LEIJI_DAMAGE = 2
+"""「2点雷电伤害」：**一个**伤害事件里的 2 点（不是两次 1 点；默认读法（三））。"""
+
+_LEIJI_JUDGED_KEY = "leiji_judged"
+"""帧私有：这一次发动已经压过判定帧（续跑不重开判定）。"""
+
+_LEIJI_SEAT_KEY = "leiji_seat"
+"""帧私有：被选中的**被判定者**（同时也是伤害目标；"其"= 该角色）。"""
+
+_LEIJI_SUIT_KEY = "leiji_suit"
+"""帧私有：判定牌的花色（判定期间读不出，回写后定格，续跑不重读）。"""
+
+_LEIJI_DONE_KEY = "leiji_done"
+"""帧私有：这次发动已经结算完（压伤害子帧之前落，出栈后重入直接收尾）。"""
+
+
+def _leiji_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**持有者自己**使用 / 打出的牌是【闪】（不回看区域与"回合外"）。
+
+    牌面没有"手牌"字样 ⇒ 【八卦阵】的虚拟【闪】、转化【闪】照常触发；
+    「使用**或**打出」由两条钩子各接一半（同一张【闪】只会走其中一条）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get("source") != owner:
+        return False
+    card = frame.data.get("card")
+    return card is not None and card.type == DODGE_RESPONSE_CARD
+
+
+def _leiji_pool(
+    host_state: GameState, frame: Frame, owner: int, chosen: tuple[int, ...]
+) -> tuple[int, ...]:
+    """判定对象池：**全部存活角色（含张角自己）**——「一名角色」按默认读法（二）①。
+
+    槽位恒非空（至少持有者自己活着），故不会出现"没有候选的询问"。
+    """
+    del frame, owner, chosen
+    return tuple(player.seat for player in host_state.players if player.alive)
+
+
+def _leiji_effect(host: Any, frame: Frame, answers: Any) -> Any:
+    """提交点：判定 → ♠ 则对**被判定者**造成 2 点雷电伤害（来源 = 张角、无渠道牌）。
+
+    三段游标（同【刚烈】）：``leiji_judged`` → ``leiji_suit`` → ``leiji_done``。伤害压成
+    ``DAMAGE`` 子帧（``nature = THUNDER``、``chain = False`` ⇒ 照常参与铁索传导）。
+    """
+    owner = frame.data["skill_owner"]
+    if frame.data.get(_LEIJI_DONE_KEY):
+        return None
+    if not frame.data.get(_LEIJI_JUDGED_KEY):
+        seat = next(iter(int(value) for value in answers.get("seat", ())), None)
+        if seat is None:
+            return None
+        frame.data[_LEIJI_JUDGED_KEY] = True
+        frame.data[_LEIJI_SEAT_KEY] = seat
+        host.open_skill_judgment(frame, seat, LEIJI)
+        return "stay"
+    if _LEIJI_SUIT_KEY not in frame.data:
+        judge_card = frame.data.pop(SKILL_JUDGMENT_CARD_KEY, None)
+        frame.data.pop("skill_result", None)
+        frame.data[_LEIJI_SUIT_KEY] = None if judge_card is None else judge_card.suit
+    if frame.data[_LEIJI_SUIT_KEY] != Suit.SPADE.value:
+        frame.data[_LEIJI_DONE_KEY] = True
+        return None
+    frame.data[_LEIJI_DONE_KEY] = True
+    target = int(frame.data[_LEIJI_SEAT_KEY])
+    host.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": owner,
+            "targets": (target,),
+            # 这次伤害不是任何一张牌造成的：渠道牌恒 ``None``（不能继承那张【闪】）。
+            "card": None,
+            "channel": None,
+            "use_timing": frame.data.get("use_timing"),
+            "target": target,
+            "nature": DamageNature.THUNDER,
+            "chain": False,
+            "amount": LEIJI_DAMAGE,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+    return "stay"
+
+
+LEIJI_FLOW = SkillFlow(
+    name="leiji",
+    # 「已发动就必须选一人」：`optional=False` ⇒ 座位步**不带 `Pass`**（票 01 §1.5 的兜底行）。
+    steps=(PickSeats(lo=1, hi=1, pool=_leiji_pool, optional=False, key="seat"),),
+    effect=_leiji_effect,
+)
+"""【雷击】的一步流水线：选一名角色（含自己）→ 判定 → ♠ 造 2 点雷电伤害。"""
+
+
+def _leiji_hooks() -> tuple[Hook, Hook]:
+    """使用 / 打出两条钩子（同一条件、同一流水线；与【涯角】同形）。"""
+    return (
+        Hook(Timing.USE_ON_USE, condition=_leiji_condition, flow=LEIJI_FLOW),
+        Hook(Timing.PLAY_ON_PLAY, condition=_leiji_condition, flow=LEIJI_FLOW),
+    )
+
+
 def use_after_skill_definitions() -> tuple[SkillDef, ...]:
     """U 族**四条**技能的 :class:`~sgs.skills.catalog.SkillDef`（非锁定；【涯角】挂使用 / 打出两条钩子）。
 
@@ -741,5 +861,18 @@ def use_after_skill_definitions() -> tuple[SkillDef, ...]:
                 "角色或放回牌堆顶；否则可以弃置一名攻击范围内包含你的其他角色区域里的一张"
                 "牌，并将亮出的牌放回牌堆顶"
             ),
+        ),
+        # 张角移动版【雷击】（feng-zhangjiao 票 01）：使用 / 打出【闪】→ 判定 → ♠ 2 点雷电。
+        SkillDef(
+            skill_id=LEIJI,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            hooks=_leiji_hooks(),
+            requirement=(
+                "当你使用或打出【闪】时，你可以令一名角色进行一次判定，若结果为♠️，"
+                "你对其造成2点雷电伤害"
+            ),
+            step_requirements={"seat": "选择一名角色进行判定"},
         ),
     )

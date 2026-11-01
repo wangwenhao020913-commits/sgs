@@ -497,7 +497,7 @@ const sessionBodiesSince = (from) =>
 await ui.loadHeroCatalog();
 const catalogVersions = ui.heroVersions();
 check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版 + 自制包，按真名分组）",
-  ui.state.heroCatalog.length === 36 && catalogVersions.length === 62,
+  ui.state.heroCatalog.length === 37 && catalogVersions.length === 63,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -7915,15 +7915,15 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const judgeCard = { ...synthCard(41, "桃"), type: "peach" };
   const pending = {
     kind: "RESPOND", actor: 0, seq: 9440, cause: "REJUDGE", required: null,
-    prompt: "响应窗口：请打出一张牌，或放弃。",
+    prompt: "改判窗口：用一张牌代替此判定牌，或放弃。",
     legal_actions: [
-      { kind: "PlayCard", answers_seq: 9440, card: judgeCard },
+      { kind: "SubstituteJudgeCard", answers_seq: 9440, skill_id: "hero.simayi.guicai", card: judgeCard },
       { kind: "Pass", answers_seq: 9440 },
     ],
     candidate_index: {
       41: { card: judgeCard, pool: [], min_targets: 0, max_targets: 0, combos: [[]] },
     },
-    option_seats: {}, context: { requirement: "打出一张手牌，代替此判定牌", skill_hints: [] },
+    option_seats: {}, context: { requirement: "用一张手牌，代替此判定牌", skill_hints: [] },
     preactivations: {}, preactivation: [],
   };
   const view = synthView(pending);
@@ -7936,7 +7936,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     { skill_id: "hero.simayi.guicai", name: "鬼才", skill_type: "NORMAL", locked: false,
       carrier: "HERO", available: false, preactivated: false,
       description: "鬼才的描述。",
-      ui: { requirement: "打出一张手牌，代替此判定牌", passive: false, convert_sources: [] } },
+      ui: { requirement: "用一张手牌，代替此判定牌", passive: false, convert_sources: [] } },
   ];
   ui.state.view = view;
   ui.state.sessionId = null;
@@ -7966,13 +7966,13 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `option=${ui.state.selectedOption} focus=${ui.state.focusCardId} calls=${calls.length - before} hint="${$("t-target-hint").textContent}"`);
 
   const handChip = () => $("t-hand").children[0];
-  check("U2-04n 点一张手牌 = 既有手选路径：焦点 + 提交可点 + 提交的就是那条 PlayCard 候选",
+  check("U2-04n 点一张手牌 = 既有手选路径：焦点 + 提交可点 + 提交的就是那条改判候选",
     (() => {
       clickNode(handChip());
       const action = ui.buildAction();
       return ui.state.focusCardId === 41 && $("btn-submit").disabled === false
         && $("btn-pass").hidden === false
-        && !!action && action.kind === "PlayCard" && action.card.card_id === 41
+        && !!action && action.kind === "SubstituteJudgeCard" && action.card.card_id === 41
         && pending.legal_actions.includes(action);
     })(),
     `focus=${ui.state.focusCardId} submit=${$("btn-submit").disabled} action=${JSON.stringify(ui.buildAction())}`);
@@ -7990,7 +7990,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   // 界版【鬼才】的改判窗口含装备区（M6 票 14）：同一句提示必须对"一张牌"成立，
   // 且入口仍按服务端 requirement 认领（不是只认标准版那句）。
-  const jieRequirement = "打出一张牌，代替此判定牌";
+  const jieRequirement = "用一张牌，代替此判定牌";
   pending.context = { ...pending.context, requirement: jieRequirement };
   view.skills[1].ui = { ...view.skills[1].ui, requirement: jieRequirement };
   ui.renderTable();
@@ -8005,7 +8005,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && /提交/.test(jieHint.textContent),
     `entry=${jieEntry && jieEntry.getAttribute("data-window-entry")} hint="${jieHint && jieHint.textContent}"`);
 
-  // 提交路径：一次 POST、载荷就是那条 PlayCard（400 由拦截器注入，不依赖真引擎）。
+  // 提交路径：一次 POST、载荷就是那条 SubstituteJudgeCard（400 由拦截器注入，不依赖真引擎）。
   // 走 `submitAction` 入口而不是 DOM 事件：按钮的监听器会把 MouseEvent 当"选择快照"
   // 传进来（main.js 的既有接线），与本票无关，见交付说明里的 known issue。
   ui.state.sessionId = "smoke-u2-04-rejudge";
@@ -8019,9 +8019,9 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   await submitPromise;
   staleAnswerStatus = null;
   const answerCalls = calls.slice(callsBefore).filter((call) => call.path.includes("/answer"));
-  check("U2-04q 点手牌 + 提交 = 恰好 1 条 POST，载荷是那条 PlayCard（被拒后回到点击前）",
+  check("U2-04q 点手牌 + 提交 = 恰好 1 条 POST，载荷是那条改判动作（被拒后回到点击前）",
     answerCalls.length === 1
-      && answerCalls[0].body.action.kind === "PlayCard"
+      && answerCalls[0].body.action.kind === "SubstituteJudgeCard"
       && answerCalls[0].body.action.card.card_id === 41
       && ui.state.focusCardId === 41
       && /提交被拒/.test($("t-choice").textContent),
@@ -9434,12 +9434,15 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   // ③ 八卦阵：起始手牌有它，装上后真会话走到需要【闪】的窗口，候选里有八卦。
   // 这条场景**依赖对手真的对座位 0 出【杀】**，因此对"启用池 → 随机发将 → AI 行动序列"敏感；
-  // M6 P0 票 02 换池（启用池 22 名）后 seed 21 不再命中，按同一判据重扫到 seed 29
-  // （后续换池若失效，按同一判据重扫；判据本身未放宽）。
+  // M6 P0 票 02 换池（启用池 22 名）后 seed 21 不再命中，按同一判据重扫到 seed 29；
+  // feng-zhangjiao 票 01 换池（张角移动版进池 ⇒ 63 版本）后原清单全部不再命中，
+  // 按**同一判据**重扫到 seed 63（探针 `.scratch/feng-zhangjiao/scan_bagua.py`：
+  // 起始手牌有【八卦阵】→ 装上 → 对手真的对座位 0 出【杀】→ DODGE 窗口的候选里有八卦）。
+  // 后续换池若失效，仍按同一判据重扫；判据本身未放宽。
   let baguaSeed = null;
   let equippedBagua = false;
   let sawBaguaDodge = false;
-  for (const seed of [29, 21, 7, 15, 20, 2, 24, 28, 38]) {
+  for (const seed of [63, 66, 88, 89, 90, 29, 21, 7, 15, 20, 2, 24, 28, 38]) {
     await newSession(seed);
     equippedBagua = false;
     sawBaguaDodge = false;

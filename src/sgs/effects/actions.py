@@ -44,6 +44,7 @@ from sgs.state import (
     SelectOption,
     SelectOptionContext,
     SkillActivationContext,
+    SubstituteJudgeCard,
     SlotKind,
     UseCard,
     Zone,
@@ -974,6 +975,22 @@ def _respond(
 
     手上没有所需牌者候选只有 ``Pass``——**仍发询问**（票 19 §9.2 的"各获一次机会"）。
     """
+    if ctx.mode is RespondMode.REJUDGE:
+        # 改判窗口（feng-zhangjiao 票 02）：**逐技能**枚举，一条技能一种构造子。
+        # 候选是 `SubstituteJudgeCard`（不是 `PlayCard`）：它不是打出，引擎据此压一个
+        # REJUDGE 事件帧。颜色筛选由技能声明派生（【鬼道】= 黑色），区也由它给。
+        rejudge: list[Action] = []
+        for offer in ctx.rejudge_offers:
+            for card in _required_cards(state, seat, None, offer.zones):
+                if offer.color is not None and card.color is not offer.color:
+                    continue
+                rejudge.append(
+                    SubstituteJudgeCard(
+                        skill_id=offer.skill_id, card=card, answers_seq=answers_seq
+                    )
+                )
+        rejudge.append(Pass(answers_seq=answers_seq))
+        return rejudge
     actions: list[Action] = []
     for card in _required_cards(state, seat, ctx.required, ctx.zones):
         if ctx.mode is RespondMode.USE:
@@ -1254,6 +1271,11 @@ def _sort_key(action: Action) -> tuple[Any, ...]:
     if isinstance(action, UseCard):
         return (0, (action.card.card_id, *action.targets), action.kind)
     if isinstance(action, PlayCard):
+        return (0, (action.card.card_id,), action.kind)
+    if isinstance(action, SubstituteJudgeCard):
+        # 改判候选（feng-zhangjiao 票 02）：与 `PlayCard` 同档（先按牌 id），**必须**
+        # 排在 `Pass` 之前——漏了这一支就落进兜底键 `(1, …)`，与 `Pass` 同档且
+        # `"Pass" < "SubstituteJudgeCard"` ⇒ "放弃"跑到首位（与票 03 的活锁同一类）。
         return (0, (action.card.card_id,), action.kind)
     if isinstance(action, Reforge):
         # 重铸带牌实例但没有目标：与其它带牌的构造子同档（先按牌 id），仍排在

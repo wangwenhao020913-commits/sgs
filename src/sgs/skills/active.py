@@ -93,12 +93,14 @@ from .catalog import (
     HeroSkillDecl,
     SkillDef,
     _GIVEN_TO_SHIFT,
+    _HUANGTIAN_SHIFT,
     _USED_SECOND,
     _move_by_source,
     instance_key,
     limited_skill_used,
     mark_limited_skill_used,
     resolve_instances,
+    same_kingdom,
 )
 from .virtual import pure_virtual_card, transformed_card
 
@@ -3667,6 +3669,137 @@ def guohuo_provider(host: Any, frame: Any, actor: int, timing: Timing) -> Contro
     return None
 
 
+# ---------------------------------------------------------------------------
+# 张角移动版【黄天】（feng-zhangjiao 票 01 / 02）——**主公技 · 跨座位注入**
+#
+# 牌面（官方移动版张角页）："主公技，其他群势力角色的出牌阶段限一次，该角色可以交给你
+# 一张【闪】或【闪电】。"
+#
+# 与 A 族其余九条的差别只有一处，且是**声明面的**：候选由 `CANDIDATES` 注入**别人的**
+# 出牌阶段（`ctx.owner` = 张角、`ctx.subject` = 发动者），而不是持有者自己的。执行面沿用
+# A 族的同一条路：`Engine.start_skill(source=发动者)` 压 SKILL 帧，`run_flow` 的 owner
+# 缺省读 `frame.data["source"]` —— 于是"选自己的手牌"自然是发动者自己的手牌。
+#
+# **次数**按发动者计（每名群势力角色每出牌阶段一次），落成**张角实例键上的座位位段**
+# （`_HUANGTIAN_MASK`）：见 `catalog._HUANGTIAN_SHIFT` 的说明——落在发动者名下会被
+# `prune_skill_state` 在每次搬牌后抹掉。
+# ---------------------------------------------------------------------------
+
+HUANGTIAN = hero_skill_id("zhangjiao_mobile", "huangtian")
+"""张角移动版【黄天】的全限定技能 id。"""
+
+_HUANGTIAN_CARD_TYPES: tuple[str, ...] = ("dodge", "lightning")
+"""可以交出的牌名：「一张【闪】或【闪电】」（牌名 id 白名单）。"""
+
+_HUANGTIAN_MOVED_KEY = "huangtian_moved"
+"""帧私有：这次发动的手牌已经交给张角（续跑不重搬）。"""
+
+
+def _huangtian_lord(state: GameState) -> int | None:
+    """持有【黄天】的座位 = 张角（主公技的身份门控已保证非主公时实例不存在）。
+
+    读**存活实例**而不是"名字叫张角的座位"：同一真名可以有两个版本、但主公技只有一个
+    主公 ⇒ 至多一个实例；找不到（已阵亡 / 构造局面）时返回 ``None``，效果侧整条取消。
+    """
+    for instance in resolve_instances(state):
+        if instance.skill_id == HUANGTIAN:
+            return instance.owner
+    return None
+
+
+def _huangtian_given(state: GameState, lord: int, seat: int) -> bool:
+    """``seat`` 本出牌阶段是否已经把牌交给张角（座位位段，键在**张角**的实例上）。"""
+    key = _skill_key(state, lord, HUANGTIAN)
+    if key is None:
+        return True  # 实例不在 ⇒ 记不了"已交过" ⇒ fail-closed，不产出候选
+    return bool(state.skill_state.get(key, 0) & (1 << (_HUANGTIAN_SHIFT + seat)))
+
+
+def _mark_huangtian_given(state: GameState, lord: int, seat: int) -> None:
+    """记下"本阶段 ``seat`` 已经交过牌"（位段随出牌阶段复位）。"""
+    key = _skill_key(state, lord, HUANGTIAN)
+    if key is not None and 0 <= seat < 8:
+        state.skill_state[key] = state.skill_state.get(key, 0) | (
+            1 << (_HUANGTIAN_SHIFT + seat)
+        )
+
+
+def _huangtian_hand_cards(state: GameState, seat: int) -> tuple[int, ...]:
+    """``seat`` 手牌里能交出的那张（【闪】/【闪电】），按手牌序。"""
+    return tuple(
+        card_id
+        for card_id in state.player(seat).hand
+        if state.card(card_id).type in _HUANGTIAN_CARD_TYPES
+    )
+
+
+def _huangtian_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：**别座位的出牌阶段**里，让群势力角色交一张【闪】/【闪电】给张角。
+
+    ``ctx.owner`` = 张角（实例持有者）、``ctx.subject`` = 正在出牌的那个座位。四个门：
+    作用域必须是出牌阶段、发动者**不是**张角本人（"其他"）、势力为**群**（与张角同势力）、
+    本阶段还没交过、手里真有一张可交的牌（没有候选就不产出——`edge-cases.md` 总纪律 1）。
+    """
+    lord = ctx.owner
+    seat = ctx.subject
+    if ctx.scope is not CandidateScope.PLAY:
+        return current
+    if seat == lord or not state.player(seat).alive:
+        return current
+    if not same_kingdom(state, lord, seat):
+        return current
+    if _huangtian_given(state, lord, seat):
+        return current
+    if not _huangtian_hand_cards(state, seat):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _huangtian_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
+    """提交点：把选中的那张牌交给张角（``PUT``、归属 = 张角），并记"本阶段交过"。
+
+    张角在选牌之后阵亡（或实例消失）⇒ 整条取消、**零副作用**：牌留在发动者手里。
+    搬牌可能内联派发"失去牌后"而挂起，故先落帧私有 ``huangtian_moved`` 再搬。
+    """
+    seat = frame.data["source"]
+    lord = _huangtian_lord(host.state)
+    if lord is None:
+        return None
+    if frame.data.get(_HUANGTIAN_MOVED_KEY):
+        return None
+    cards = tuple(int(card_id) for card_id in answers.get("card", ()))
+    if not cards:
+        return None
+    frame.data[_HUANGTIAN_MOVED_KEY] = True
+    _mark_huangtian_given(host.state, lord, seat)
+    control = host.move_in_frame(
+        frame,
+        host.state.refs(cards),
+        to_zone=ZoneRef(Zone.HAND, lord),
+        reason=MoveReason.PUT,
+        owner=lord,
+        actor=lord,
+    )
+    return control if control == "stay" else None
+
+
+HUANGTIAN_FLOW = SkillFlow(
+    name="huangtian",
+    steps=(
+        PickCards(
+            zones=(Zone.HAND,),
+            lo=1,
+            hi=1,
+            optional=False,
+            key="card",
+            card_types=_HUANGTIAN_CARD_TYPES,
+        ),
+    ),
+    effect=_huangtian_effect,
+)
+"""【黄天】的一步流水线：选一张【闪】/【闪电】（自己的手牌）→ 交给张角。"""
+
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 韬·刘备【义起】（自制包）：**A 族第一条限定技**。观看弃牌堆顶 x 张（x = 张数整除 10）→
     # 恒 3 项类型选 1（不可放弃）→ 获得该类所有牌 → 失去武将牌上除【义起】外的技能 →
@@ -3865,6 +3998,18 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
             "target": "（按声明的牌名）选择目标",
             "designation": "选择持刀者的【杀】打向谁（【借刀杀人】的附带指定）",
         },
+    ),
+    # 张角移动版【黄天】（feng-zhangjiao 票 01）：**主公技 · 跨座位注入**——候选进
+    # **别座位**的出牌阶段（只有群势力、只有本阶段还没交过、手里真有【闪】/【闪电】），
+    # 发动者是那个座位，交给张角。不翻预发动（一步选牌，直提态 + 逐步问就够）。
+    ActiveSkill(
+        "zhangjiao_mobile",
+        "huangtian",
+        _huangtian_offers,
+        flow=HUANGTIAN_FLOW,
+        skill_type=SkillType.LORD,
+        requirement="主公技，其他群势力角色的出牌阶段限一次，该角色可以交给你一张【闪】或【闪电】",
+        step_requirements={"card": "选择一张【闪】或【闪电】交给张角"},
     ),
 )
 """A 族十七条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】+

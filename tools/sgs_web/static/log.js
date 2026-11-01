@@ -185,7 +185,7 @@ function describeAction(action) {
   if (!action) return "？";
   const kind = action.kind;
   const trimmed = ACTION_KIND_LABELS[kind] || "应答";
-  if ((kind === "UseCard" || kind === "PlayCard") && !action.card) return trimmed;
+  if ((kind === "UseCard" || kind === "PlayCard" || kind === "SubstituteJudgeCard") && !action.card) return trimmed;
   if (kind === "ActivateSkill" && !action.skill_id && !action.skill_name) return trimmed;
   if (kind === "ArrangeCards" && !action.order) return trimmed;
   if (kind === "SelectOption" && typeof action.choice !== "string") return trimmed;

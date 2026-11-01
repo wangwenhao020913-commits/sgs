@@ -30,7 +30,7 @@ if str(_TOOLS) not in sys.path:  # sgs_web 住在 tools/（与 test_web.py 同�
 
 from sgs.agents import HeuristicPlayer
 from sgs.agents import heuristic as heuristic_scoring
-from sgs.data import Identity, RuleConfig, load_content_pack, load_hero_tables
+from sgs.data import Identity, Kingdom, RuleConfig, load_content_pack, load_hero_tables
 from sgs.effects import check_targets, distance, legal_actions_for
 from sgs.engine import Engine, ai_stream
 from sgs.skills.virtual import transformed_card
@@ -47,6 +47,7 @@ from sgs.state import (
     RespondMode,
     SelectCards,
     SelectOption,
+    SubstituteJudgeCard,
     UseCard,
     WindowCause,
     Zone,
@@ -4209,3 +4210,641 @@ def test_a_no_target_declaration_never_ships_the_source_card_in_the_record_windo
     assert reveal and reveal[0]["card"]["card_id"] == slash, (
         "同一批记录里紧接着就是公开亮出——那一张从此是公开事实，照常下发"
     )
+
+
+# ---------------------------------------------------------------------------
+# 风包·移动版：张角移动版（feng-zhangjiao 票 01）——【雷击】/【鬼道】/【黄天】
+#
+# 牌面（用户 `技能.txt`，与官方移动版张角页逐字一致）：
+#   雷击：当你使用或打出【闪】时，你可以令一名角色进行一次判定，若结果为♠️，你对其造成2点雷电伤害。
+#   鬼道：当一名角色的判定牌生效前，你可以用一张黑色牌替换之。（官方 OL 张角页作"用"）
+#   黄天：主公技，其他群势力角色的出牌阶段限一次，该角色可以交给你一张【闪】或【闪电】。
+#
+# 三条技能的公共口径（见 `.scratch/feng-zhangjiao/issues/01-zhangjiao.md` §5 R1–R13）：
+# 雷击的 2 点是**一个**伤害事件（逐点钩子照常触发 2 次）、判定对象含自己；鬼道是**替换**
+# （原判定牌由张角获得）且改判**不是打出**；黄天按**发动者**记次数。
+# ---------------------------------------------------------------------------
+
+ZJ_MOBILE = "zhangjiao_mobile"
+LEIJI = "hero.zhangjiao_mobile.leiji"
+GUIDAO = "hero.zhangjiao_mobile.guidao"
+HUANGTIAN = "hero.zhangjiao_mobile.huangtian"
+
+
+def _zj_card(*, suit: str, exclude=()) -> int:
+    """牌堆里第一张指定花色的牌（避开已发到座位上的）。"""
+    for index, card in enumerate(PACK.deck.cards):
+        if index in exclude or card.suit != suit:
+            continue
+        return index
+    raise AssertionError(f"牌堆里没有 {suit}")
+
+
+class _ZjScript:
+    """``handler(query) -> Action | None`` 优先；否则"是否发动"一律同意、其余放弃。"""
+
+    def __init__(self, handler=None, *, activate: bool = True) -> None:
+        self._handler = handler
+        self.activate = activate
+
+    def respond(self, query):
+        if self._handler is not None:
+            action = self._handler(query)
+            if action is not None:
+                return action
+        if query.kind == "SKILL_ACTIVATION" and self.activate:
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill):
+                    return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        for action in query.legal_actions:
+            if isinstance(action, EndPhase):
+                return action
+        return query.legal_actions[0]
+
+
+def _step_until(engine, predicate, *, limit: int = 4000, forward: bool = True) -> bool:
+    """推进到 ``predicate`` 成立。
+
+    中途出现的**其它询问**按"缺省放弃 / 结束阶段"应答（与 ``run_queries`` 的
+    ``PassPlayer`` 同姿态：延时锦囊的无懈窗口、别人的出牌阶段都要让路）；
+    ``forward=False`` 时停在第一个非预期询问上（用来断言"某类询问根本不出现"）。
+    """
+    for _ in range(limit):
+        if predicate(engine):
+            return True
+        if engine.pending is not None:
+            if not forward:
+                raise AssertionError(f"停在非预期询问：{engine.pending.kind}")
+            engine.submit(_pick_by(engine.pending, lambda action: True) if False else _default_action(engine.pending))
+            continue
+        engine._step()
+        if engine.finished:
+            return False
+    raise AssertionError("步数上限内没有到达停止条件")
+
+
+def _default_action(query):
+    """缺省应答：放弃 → 结束阶段 → 第一项（``PassPlayer`` 的同一条口径）。"""
+    for action in query.legal_actions:
+        if isinstance(action, Pass):
+            return action
+    for action in query.legal_actions:
+        if isinstance(action, EndPhase):
+            return action
+    return query.legal_actions[0]
+
+
+def _pick_by(query, predicate):
+    action = next((item for item in query.legal_actions if predicate(item)), None)
+    assert action is not None, (
+        f"候选里没有预期动作："
+        f"{[(a.kind, getattr(getattr(a, 'card', None), 'card_id', None)) for a in query.legal_actions]}"
+    )
+    return action
+
+
+def _leiji_state(*, judge: int, dodge_on_chained: bool = False):
+    """座位 1 先用【杀】打座位 0（张角）；座位 0 手里有【闪】。
+
+    首座 = 座位 1（``first_seat=1``），故判定牌 = 摸牌阶段两张之后的牌堆顶 —— 探针
+    `.scratch/feng-zhangjiao/probe_leiji2.py` 实测的偏移；牌堆序因此写成
+    ``(摸两张, 判定牌, …)``。
+    """
+    slash = cards_of_type(PACK, "slash")[0]
+    dodge = cards_of_type(PACK, "dodge")[0]
+    used = {slash, dodge, judge}
+    rest = tuple(index for index in range(len(PACK.deck.cards)) if index not in used)
+    deck = (rest[0], rest[1], judge, *rest[2:])
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hp=4,
+                hp_max=4,
+                hero=ZJ_MOBILE,
+                hand=(dodge,),
+                chained=dodge_on_chained,
+            ),
+            SeatSpec(hp=4, hp_max=4, hand=(slash,)),
+        ],
+        deck=deck,
+        rule_config=RuleConfig(player_count=2, starting_hand_size=1, first_seat=1),
+    )
+    return slash, dodge, state
+
+
+def _run_leiji(engine, *, slash: int, dodge: int, target_choice: str, activate: bool = True):
+    """走完"出【杀】→ 出【闪】→ 是否发动雷击 → 选判定角色"这四问。"""
+    assert _step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 1,
+    ), "没到座位 1 的出牌阶段"
+    engine.submit(
+        _pick_by(
+            engine.pending,
+            lambda action: isinstance(action, UseCard) and action.card.card_id == slash,
+        )
+    )
+    assert _step_until(
+        engine, lambda e: e.pending is not None and e.pending.kind == QueryKind.DODGE
+    ), "没到【闪】窗口"
+    engine.submit(
+        _pick_by(
+            engine.pending,
+            lambda action: isinstance(action, UseCard) and action.card.card_id == dodge,
+        )
+    )
+    assert _step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.SKILL_ACTIVATION
+        and getattr(e.pending, "skill_id", None) == LEIJI,
+    ), "没问【雷击】是否发动"
+    if not activate:
+        engine.submit(
+            _pick_by(engine.pending, lambda action: isinstance(action, Pass))
+        )
+        return
+    engine.submit(_pick_by(engine.pending, lambda action: isinstance(action, ActivateSkill)))
+    assert _step_until(
+        engine,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.SELECT_OPTION,
+    ), "没到选判定角色的询问"
+    engine.submit(
+        _pick_by(
+            engine.pending,
+            lambda action: isinstance(action, SelectOption)
+            and str(action.choice) == target_choice,
+        )
+    )
+
+
+def _run_to_quiet(engine, *, limit: int = 4000) -> None:
+    """把伤害 / 结算走完（遇到询问一律放弃），直到栈空或终局。"""
+    for _ in range(limit):
+        if engine.finished or not engine.stack:
+            return
+        if engine.pending is None:
+            engine._step()
+            continue
+        engine.submit(_pick_by(engine.pending, lambda action: isinstance(action, Pass)))
+
+
+def test_leiji_triggers_on_a_used_dodge_and_deals_two_thunder_damage() -> None:
+    """使用【闪】后问一次；选敌方判定，♠ ⇒ 对其造成**一次 2 点**雷电伤害。"""
+    spade = _zj_card(suit="spade")
+    slash, dodge, state = _leiji_state(judge=spade)
+    engine = Engine.from_state(state, seed=5)
+
+    _run_leiji(engine, slash=slash, dodge=dodge, target_choice="seat:1")
+    _run_to_quiet(engine)
+
+    assert engine.state.player(0).hp == 4, "伤害打的是被判定者（座位 1），不是张角"
+    assert engine.state.player(1).hp == 2, "♠ ⇒ 2 点雷电伤害（一个事件里的 2 点）"
+    damage = [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.DAMAGE_DEAL
+    ]
+    assert len(damage) == 1, "一次伤害事件（不是两次 1 点）"
+    assert engine.state.card(dodge).card_id in engine.state.discard
+
+
+def test_leiji_deals_no_damage_when_the_judgment_is_not_a_spade() -> None:
+    """非 ♠ ⇒ 只判定、零伤害；判定牌照常按判定流程进弃牌堆。"""
+    heart = _zj_card(suit="heart")
+    slash, dodge, state = _leiji_state(judge=heart)
+    engine = Engine.from_state(state, seed=5)
+
+    _run_leiji(engine, slash=slash, dodge=dodge, target_choice="seat:1")
+    _run_to_quiet(engine)
+
+    assert engine.state.player(0).hp == 4 and engine.state.player(1).hp == 4
+    assert heart in engine.state.discard, "判定牌照常结算完进弃牌堆"
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.DAMAGE_DEAL
+    ], "非 ♠ 不产生伤害事件"
+
+
+def test_leiji_lets_the_owner_pick_himself_as_the_judged_character() -> None:
+    """「一名角色」含自己（默认读法（二）①）：选自己 ⇒ 自己挨 2 点。"""
+    spade = _zj_card(suit="spade")
+    slash, dodge, state = _leiji_state(judge=spade)
+    engine = Engine.from_state(state, seed=5)
+
+    _run_leiji(engine, slash=slash, dodge=dodge, target_choice="seat:0")
+    _run_to_quiet(engine)
+
+    assert engine.state.player(0).hp == 2, "张角自己判定、自己挨伤害"
+    assert engine.state.player(1).hp == 4
+
+
+def test_leiji_declines_cleanly() -> None:
+    """放弃 ⇒ 不判定、不造伤（判定牌一张都不翻）。"""
+    spade = _zj_card(suit="spade")
+    slash, dodge, state = _leiji_state(judge=spade)
+    engine = Engine.from_state(state, seed=5)
+
+    _run_leiji(engine, slash=slash, dodge=dodge, target_choice="seat:1", activate=False)
+    _run_to_quiet(engine)
+
+    assert engine.state.player(1).hp == 4
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "frame" and record.op == "push" and record.frame_kind is FrameKind.JUDGE
+    ], "放弃 ⇒ 连判定帧都不压"
+
+
+def test_leiji_does_not_trigger_on_another_seats_dodge() -> None:
+    """别人使用【闪】不触发（条件自校"这张【闪】是我使用的"）。"""
+    slash = cards_of_type(PACK, "slash")[0]
+    dodge = cards_of_type(PACK, "dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=4, hp_max=4, hero=ZJ_MOBILE, hand=(slash,)),
+            SeatSpec(hp=4, hp_max=4, hand=(dodge,)),
+        ],
+        deck=deck_excluding(PACK, slash, dodge),
+        rule_config=RuleConfig(player_count=2, starting_hand_size=1, first_seat=0),
+    )
+    engine = Engine.from_state(state, seed=5)
+
+    assert _step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 0,
+    )
+    engine.submit(
+        _pick_by(
+            engine.pending,
+            lambda action: isinstance(action, UseCard) and action.card.card_id == slash,
+        )
+    )
+    assert _step_until(
+        engine, lambda e: e.pending is not None and e.pending.kind == QueryKind.DODGE
+    )
+    engine.submit(
+        _pick_by(
+            engine.pending,
+            lambda action: isinstance(action, UseCard) and action.card.card_id == dodge,
+        )
+    )
+    # 让这一整次【杀】的结算走完（含座位 1 的【闪】），全程不许出现【雷击】的发动询问。
+    assert engine.state.player(1).hp == 4, "【闪】抵消了【杀】"
+    for _ in range(2000):
+        if engine.finished or dodge in engine.state.discard:
+            break
+        if engine.pending is None:
+            engine._step()
+            continue
+        assert not (
+            engine.pending.kind == QueryKind.SKILL_ACTIVATION
+            and getattr(engine.pending, "skill_id", None) == LEIJI
+        ), "座位 1 打出的【闪】不该触发张角的【雷击】"
+        engine.submit(_default_action(engine.pending))
+
+
+def test_leiji_triggers_on_a_played_dodge_in_the_arrow_barrage_window() -> None:
+    """**打出**侧（``PLAY_ON_PLAY``）：万箭齐发里打出【闪】同样触发。"""
+    arrows = cards_of_type(PACK, "arrow_barrage")[0]
+    dodge = cards_of_type(PACK, "dodge")[0]
+    spade = _zj_card(suit="spade", exclude=(arrows, dodge))
+    rest = tuple(
+        index
+        for index in range(len(PACK.deck.cards))
+        if index not in {arrows, dodge, spade}
+    )
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=4, hp_max=4, hero=ZJ_MOBILE, hand=(dodge,)),
+            SeatSpec(hp=4, hp_max=4, hand=(arrows,)),
+        ],
+        deck=(rest[0], rest[1], spade, *rest[2:]),
+        rule_config=RuleConfig(player_count=2, starting_hand_size=1, first_seat=1),
+    )
+    engine = Engine.from_state(state, seed=5)
+
+    assert _step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 1,
+    )
+    engine.submit(
+        _pick_by(
+            engine.pending,
+            lambda action: isinstance(action, UseCard) and action.card.card_id == arrows,
+        )
+    )
+    assert _step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.RESPOND
+        and getattr(e.pending, "cause", None) is WindowCause.ARROW_BARRAGE,
+    ), "没到万箭齐发的【闪】响应窗口"
+    engine.submit(
+        _pick_by(
+            engine.pending,
+            lambda action: isinstance(action, PlayCard) and action.card.card_id == dodge,
+        )
+    )
+    assert _step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.SKILL_ACTIVATION
+        and getattr(e.pending, "skill_id", None) == LEIJI,
+    ), "打出【闪】同样触发【雷击】"
+    engine.submit(_pick_by(engine.pending, lambda action: isinstance(action, ActivateSkill)))
+    assert _step_until(
+        engine,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.SELECT_OPTION,
+    )
+    engine.submit(
+        _pick_by(
+            engine.pending,
+            lambda action: isinstance(action, SelectOption)
+            and str(action.choice) == "seat:1",
+        )
+    )
+    _run_to_quiet(engine)
+    assert engine.state.player(1).hp == 2
+
+
+def test_leiji_thunder_damage_conducts_through_the_iron_chain() -> None:
+    """雷电伤害是**属性伤害**：目标横置 ⇒ 照常沿【铁索连环】传导。"""
+    spade = _zj_card(suit="spade")
+    slash, dodge, state = _leiji_state(judge=spade, dodge_on_chained=True)
+    engine = Engine.from_state(state, seed=5)
+    # 两个座位都横置：座位 1 受 2 点雷电后，传导给同样横置的座位 0（张角）。
+    engine.state.player(1).chained = True
+
+    _run_leiji(engine, slash=slash, dodge=dodge, target_choice="seat:1")
+    _run_to_quiet(engine)
+
+    assert engine.state.player(1).hp == 2, "初始目标受 2 点"
+    assert engine.state.player(0).hp == 2, "横置的张角照样传导受 2 点"
+
+
+def _guidao_state(*, original: int, hand=(), equip=()):
+    """座位 0（张角）的判定阶段有一张【乐不思蜀】；判定牌 = ``original``。"""
+    indulgence = cards_of_type(PACK, "indulgence")[0]
+    used = {indulgence, original, *hand, *equip}
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hp=4,
+                hp_max=4,
+                hero=ZJ_MOBILE,
+                judge=(indulgence,),
+                hand=tuple(hand),
+                equip=tuple(equip),
+            ),
+            SeatSpec(hp=4, hp_max=4),
+        ],
+        deck=(original, *deck_excluding(PACK, *used)),
+        rule_config=RuleConfig(player_count=2, starting_hand_size=1, first_seat=0),
+    )
+    return state
+
+
+def _run_guidao(engine, *, pick_card: int | None):
+    """开到改判窗口；``pick_card`` 非空则用它改判，否则放弃。"""
+    assert _step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.RESPOND
+        and getattr(e.pending, "cause", None) is WindowCause.REJUDGE,
+    ), "没开改判窗口"
+    if pick_card is None:
+        engine.submit(_pick_by(engine.pending, lambda action: isinstance(action, Pass)))
+        return
+    engine.submit(
+        _pick_by(
+            engine.pending,
+            lambda action: isinstance(action, SubstituteJudgeCard)
+            and action.card.card_id == pick_card,
+        )
+    )
+
+
+def test_guidao_replaces_the_judge_card_and_the_owner_gains_the_original() -> None:
+    """**替换**：新牌成为判定牌，原判定牌由张角获得（不是进弃牌堆）。"""
+    original = _zj_card(suit="heart")
+    black = _zj_card(suit="club", exclude=(original,))
+    state = _guidao_state(original=original, hand=(black,))
+    engine = Engine.from_state(state, seed=7)
+
+    _run_guidao(engine, pick_card=black)
+    _run_to_quiet(engine)
+
+    assert original in engine.state.player(0).hand, "替换 ⇒ 原判定牌由张角获得"
+    assert black in engine.state.discard, "新判定牌照常结算完进弃牌堆"
+    assert original not in engine.state.discard
+
+
+def test_guidao_offers_only_black_cards_in_hand_and_equipment() -> None:
+    """候选区 = 手牌 ∪ 装备区，且只收黑色牌（红牌一张都不出现）。"""
+    original = _zj_card(suit="heart")
+    red_hand = _zj_card(suit="diamond", exclude=(original,))
+    black_equip = cards_of_type(PACK, "double_sword")[0]  # 雌雄双股剑：♠2、武器
+    assert PACK.deck.cards[black_equip].suit == "spade"
+    state = _guidao_state(original=original, hand=(red_hand,), equip=(black_equip,))
+    engine = Engine.from_state(state, seed=7)
+
+    assert _step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.RESPOND
+        and getattr(e.pending, "cause", None) is WindowCause.REJUDGE,
+    )
+    offered = [
+        action
+        for action in engine.pending.legal_actions
+        if isinstance(action, SubstituteJudgeCard)
+    ]
+    assert [action.card.card_id for action in offered] == [black_equip], (
+        "只有装备区那张黑色装备牌可改判（红手牌不进候选）"
+    )
+    assert all(action.skill_id == GUIDAO for action in offered), (
+        "候选自带技能 id：这条改判来自【鬼道】"
+    )
+
+
+def test_guidao_is_not_asked_without_a_black_card() -> None:
+    """没有黑色牌 ⇒ **不发这一问**（`edge-cases.md` 总纪律 1）。"""
+    original = _zj_card(suit="heart")
+    red = _zj_card(suit="diamond", exclude=(original,))
+    state = _guidao_state(original=original, hand=(red,))
+    engine = Engine.from_state(state, seed=7)
+
+    # 判定照常结算完：张角手里仍是那张红牌，判定牌进弃牌堆。
+    for _ in range(2000):
+        if engine.finished or original in engine.state.discard:
+            break
+        if engine.pending is None:
+            engine._step()
+            continue
+        assert not (
+            engine.pending.kind == QueryKind.RESPOND
+            and getattr(engine.pending, "cause", None) is WindowCause.REJUDGE
+        ), "没有黑色牌时不该发改判询问"
+        engine.submit(_default_action(engine.pending))
+    assert engine.state.player(0).hand == [red], "没改判 ⇒ 手牌不变"
+    assert original in engine.state.discard, "判定牌照常进弃牌堆"
+
+
+def test_guidao_replacement_emits_a_rejudge_frame_and_no_play_frame() -> None:
+    """改判走 **REJUDGE 事件帧**，不压 PLAY 帧（用户裁定：改判不是打出）。"""
+    original = _zj_card(suit="heart")
+    black = _zj_card(suit="club", exclude=(original,))
+    state = _guidao_state(original=original, hand=(black,))
+    engine = Engine.from_state(state, seed=7)
+
+    _run_guidao(engine, pick_card=black)
+    _run_to_quiet(engine)
+
+    pushed = [
+        record.frame_kind
+        for record in engine.records
+        if record.kind == "frame" and record.op == "push"
+    ]
+    assert FrameKind.REJUDGE in pushed, "改判压了一个 REJUDGE 事件帧"
+    assert FrameKind.PLAY not in pushed, "改判不走打出（没有 PLAY 帧）"
+    moves = [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and getattr(record, "delta_type", None) == "card_move"
+        and record.from_zone is not None
+        and record.to_zone.zone is Zone.HAND
+        and record.to_zone.seat == 0
+    ]
+    assert moves, "原判定牌有一条「进入张角手牌」的移动"
+
+
+def _huangtian_state(*, lord_identity=Identity.LORD, hand=(None,), kingdom=Kingdom.QUN):
+    dodge = cards_of_type(PACK, "dodge")[0]
+    actual = dodge if hand[0] is None else hand[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hp=4,
+                hp_max=4,
+                hero=ZJ_MOBILE,
+                identity=lord_identity,
+                kingdom=Kingdom.QUN,
+            ),
+            SeatSpec(
+                hp=4,
+                hp_max=4,
+                hero="yuji_mobile",
+                hand=(actual,) if actual is not None else (),
+                kingdom=kingdom,
+            ),
+            SeatSpec(hp=4, hp_max=4, hero="simayi", kingdom=Kingdom.WEI),
+            SeatSpec(hp=4, hp_max=4, kingdom=Kingdom.WEI),
+        ],
+        deck=deck_excluding(PACK, dodge),
+        rule_config=RuleConfig(player_count=4, starting_hand_size=1),
+    )
+    return state, actual
+
+
+def test_huangtian_is_offered_only_to_other_qun_seats() -> None:
+    """候选进**别人**的出牌阶段：张角自己与魏势力角色都没有它。"""
+    state, _dodge = _huangtian_state()
+    for seat, expected in ((0, False), (1, True), (2, False)):
+        actions = legal_actions_for(state, seat, QueryKind.PLAY_PHASE, answers_seq=0)
+        found = [
+            action
+            for action in actions
+            if isinstance(action, ActivateSkill) and action.skill_id == HUANGTIAN
+        ]
+        assert bool(found) is expected, f"座位 {seat} 的黄天候选应当是 {expected}"
+
+
+def test_huangtian_is_absent_when_the_owner_is_not_the_lord() -> None:
+    """主公技的身份门控：张角不是主公 ⇒ 武将牌上没有这个技能。"""
+    state, _dodge = _huangtian_state(lord_identity=Identity.REBEL)
+    actions = legal_actions_for(state, 1, QueryKind.PLAY_PHASE, answers_seq=0)
+    assert not [
+        action
+        for action in actions
+        if isinstance(action, ActivateSkill) and action.skill_id == HUANGTIAN
+    ]
+
+
+def test_huangtian_offers_no_entry_without_a_qualifying_card() -> None:
+    """发动者手里没有【闪】/【闪电】⇒ 入口不出现。"""
+    plain = cards_of_type(PACK, "slash")[0]
+    state, _card = _huangtian_state(hand=(plain,))
+    actions = legal_actions_for(state, 1, QueryKind.PLAY_PHASE, answers_seq=0)
+    assert not [
+        action
+        for action in actions
+        if isinstance(action, ActivateSkill) and action.skill_id == HUANGTIAN
+    ]
+
+
+def test_huangtian_gives_one_dodge_into_the_lords_hand_and_only_once_per_phase() -> None:
+    """交出一张【闪】⇒ 进张角手牌；同一出牌阶段不再出现（按**发动者**记次数）。"""
+    state, dodge = _huangtian_state()
+    engine = Engine.from_state(state, seed=3)
+
+    assert _step_until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 1,
+    ), "没到座位 1 的出牌阶段"
+    engine.submit(
+        _pick_by(
+            engine.pending,
+            lambda action: isinstance(action, ActivateSkill)
+            and action.skill_id == HUANGTIAN,
+        )
+    )
+    assert _step_until(
+        engine,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.SELECT_CARDS,
+    ), "没到选牌步"
+    engine.submit(SelectCards(answers_seq=engine.pending.seq, picks=(0,)))
+    assert _step_until(
+        engine,
+        lambda e: dodge in e.state.player(0).hand,
+    ), "那张【闪】要进张角手牌"
+    assert dodge not in engine.state.player(1).hand
+
+    after = legal_actions_for(engine.state, 1, QueryKind.PLAY_PHASE, answers_seq=0)
+    assert not [
+        action
+        for action in after
+        if isinstance(action, ActivateSkill) and action.skill_id == HUANGTIAN
+    ], "同一出牌阶段不再出现（每名群势力角色每阶段一次）"
+
+
+def test_zhangjiao_mobile_hero_is_in_the_default_pool() -> None:
+    """数据面：张角移动版进默认池（真名「张角」、群 / 男 / 3 体力）。"""
+    tables = load_hero_tables()
+    heroes = {hero.id: hero for table in tables for hero in table.heroes if hero.enabled}
+
+    hero = heroes[ZJ_MOBILE]
+    assert hero.name == "张角移动版"
+    assert hero.true_name == "张角"
+    assert hero.kingdom is Kingdom.QUN
+    assert hero.hp_max == 3
+    assert [skill.id for skill in hero.skills] == ["leiji", "guidao", "huangtian"]
+    assert [skill.skill_type.value for skill in hero.skills] == ["NORMAL", "NORMAL", "LORD"]

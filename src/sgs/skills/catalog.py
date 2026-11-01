@@ -107,6 +107,7 @@ __all__ = [
     "MATCH_OWNER_KEY",
     "RUNNING_SKILL_KEY",
     "SKILL_JUDGMENT_CARD_KEY",
+    "RejudgeOriginal",
     "Seam",
     "SeamKind",
     "SkillDef",
@@ -230,6 +231,17 @@ class Seam:
             raise ValueError(f"{self.kind.value} 上的接缝必须恰有 handler / flow 之一")
 
 
+class RejudgeOriginal(str, Enum):
+    """被换下的**原判定牌**去哪（feng-zhangjiao 票 02；规则 §11.3 L1243–L1245 的两分）。
+
+    - ``DISCARD``（**代替**，缺省）：原判定牌置入弃牌堆，改判者不获得——【鬼才】标 / 界；
+    - ``HAND``（**替换**）：**改判者获得**原判定牌——张角【鬼道】。
+    """
+
+    DISCARD = "DISCARD"
+    HAND = "HAND"
+
+
 @dataclass(frozen=True, slots=True)
 class SkillDef:
     """一张技能定义（票 07 §6 的冻结形状，票 30 / 票 01 只加可选字段）。
@@ -261,10 +273,26 @@ class SkillDef:
     rejudge_zones: tuple[Zone, ...] = (Zone.HAND,)
     """改判窗口的候选牌取自哪几个区（M6 票 14 的加法；缺省 = 一张**手牌**）。
 
-    牌面差别：标准【鬼才】（§九 L942）「打出一张**手牌**代替之」；界【鬼才】（§十九
-    L2021）「打出**一张牌**代替之」——`参考资料/界限突破-界标准包武将资料.md` 记作
+    牌面差别：标准【鬼才】（§九 L942）「用一张**手牌**代替之」；界【鬼才】（§十九
+    L2021）「用**一张牌**代替之」——`参考资料/界限突破-界标准包武将资料.md` 记作
     "鬼才由'一张手牌'放宽为'一张牌'"，故界版带装备区。判定帧的 ``RESPOND`` 窗口按
-    :func:`~sgs.skills.rejudge_card_zones` 现算，引擎不认识任何具体技能 id。
+    :func:`~sgs.skills.rejudge_offers` 现算，引擎不认识任何具体技能 id。
+    """
+
+    rejudge_card_color: Color | None = None
+    """改判候选的**颜色筛选**（feng-zhangjiao 票 02 的加法；缺省 ``None`` = 不限）。
+
+    张角【鬼道】「用一张**黑色**牌替换之」⇒ ``Color.BLACK``（黑桃 / 梅花）。筛选在
+    :func:`~sgs.skills.rejudge_offers` 派生进窗口载荷，候选生成器按它逐张判色；
+    筛选后**没有候选就不发这一问**（`edge-cases.md` 总纪律 1）。
+    """
+
+    rejudge_original_to: RejudgeOriginal = RejudgeOriginal.DISCARD
+    """被换下的**原判定牌**去哪（feng-zhangjiao 票 02 的加法；缺省 = 进弃牌堆）。
+
+    规则 §11.3 L1243–L1245 的两分：**代替**（【鬼才】）⇒ 原判定牌置入弃牌堆、改判者不获得；
+    **替换**（【鬼道】）⇒ 改判者获得原判定牌。引擎在改判事件帧里按本字段搬原牌，
+    不认识技能 id。
     """
 
     preactivated: bool = False
@@ -848,7 +876,19 @@ _USED_SECOND = 1 << 14
 **本出牌阶段**，故并入 :data:`_PHASE_STATE_MASK`；没有"限两次"的技能从不写这一位。
 """
 
-_PHASE_STATE_MASK = 0b111 | _GIVEN_TO_MASK | _USED_SECOND
+_HUANGTIAN_SHIFT = 15
+"""张角【黄天】的"本阶段这名群势力角色已经交过牌"位段的起始位（feng-zhangjiao 票 02）。
+
+位 15..22 = 发动座位 0..7。**为什么键在张角身上、位在发动者身上**：黄天的次数是"每名
+群势力角色每出牌阶段一次"，不是"张角每阶段一次"；而 ``prune_skill_state`` 会在**每次
+搬牌**后删掉"没有存活实例的键"（发动者名下没有黄天实例），故计数必须落在**张角**的
+实例键上、用座位位段区分发动者——与【仁德】的 :data:`_GIVEN_TO_MASK` 同一姿态。
+"""
+
+_HUANGTIAN_MASK = 0xFF << _HUANGTIAN_SHIFT
+"""张角【黄天】的"本阶段已交过牌的座位"位段（座位号 = 位序号 - ``_HUANGTIAN_SHIFT``）。"""
+
+_PHASE_STATE_MASK = 0b111 | _GIVEN_TO_MASK | _USED_SECOND | _HUANGTIAN_MASK
 """``skill_state`` 里属于**本出牌阶段**的位（A 族的 ``_USED`` / ``_RECOVERED`` /
 ``_GAVE_ANY`` + 界刘备【仁德】的目标座位位段 + 界华雄【势斩】的"第二次已用"位，
 见 :mod:`sgs.skills.active`）。

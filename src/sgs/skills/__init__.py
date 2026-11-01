@@ -56,7 +56,7 @@ from sgs.effects import (
     PriorityClass,
     apply_modifiers,
 )
-from sgs.state import GameState, Zone
+from sgs.state import GameState, RejudgeOffer, Zone
 
 from .catalog import (
     ACTIVATION_PLANS,
@@ -70,6 +70,7 @@ from .catalog import (
     Hook,
     RUNNING_SKILL_KEY,
     SKILL_JUDGMENT_CARD_KEY,
+    RejudgeOriginal,
     Seam,
     SeamKind,
     SkillDef,
@@ -395,6 +396,7 @@ __all__ = (
     "QIANXUN_PLACED_KEY",
     "QICAI",
     "REJUDGE_SKILL_IDS",
+    "RejudgeOriginal",
     "RUNNING_SKILL_KEY",
     "SKILL_JUDGMENT_CARD_KEY",
     "SEAT_PREFIX",
@@ -502,6 +504,8 @@ __all__ = (
     "pure_virtual_card",
     "rejudge_activation_plans",
     "rejudge_capable_seats",
+    "rejudge_offers",
+    "rejudge_original_to",
     "rejudge_card_zones",
     "rejudge_skill_definitions",
     "rejudge_skill_ids",
@@ -550,6 +554,44 @@ def rejudge_capable_seats(state: GameState) -> tuple[int, ...]:
         if instance.definition.rejudge_capable and instance.owner not in seats:
             seats.append(instance.owner)
     return tuple(seats)
+
+
+def rejudge_offers(state: GameState, seat: int) -> tuple[RejudgeOffer, ...]:
+    """``seat`` 的改判窗口**逐技能**的候选声明（feng-zhangjiao 票 02；窗口载荷的唯一真源）。
+
+    与 :func:`rejudge_capable_seats` 读**同一批存活实例**、同一批定义字段，只是这里把
+    每条改判技能的三个声明字段（``rejudge_zones`` / ``rejudge_card_color``）摊成一条
+    :class:`~sgs.state.RejudgeOffer`：候选生成器按它逐条枚举，一条技能一个构造子
+    （``SubstituteJudgeCard(skill_id=…)``），故"用哪条技能改判"在记录流里读得出。
+    原判定牌的去向（``rejudge_original_to``）不在这里——它由引擎按 ``skill_id`` 现查，
+    与"这条技能的候选"分列。实例序 = ``resolve_instances`` 的链序（确定性）。
+    """
+    offers: list[RejudgeOffer] = []
+    for instance in resolve_instances(state):
+        definition = instance.definition
+        if instance.owner != seat or not definition.rejudge_capable:
+            continue
+        offers.append(
+            RejudgeOffer(
+                skill_id=instance.skill_id,
+                zones=definition.rejudge_zones,
+                color=definition.rejudge_card_color,
+            )
+        )
+    return tuple(offers)
+
+
+def rejudge_original_to(state: GameState, seat: int, skill_id: str) -> RejudgeOriginal:
+    """``seat`` 用 ``skill_id`` 改判时，被换下的原判定牌去哪（票 02；缺省 = 弃牌堆）。
+
+    判据只在技能声明上（:attr:`~sgs.skills.catalog.SkillDef.rejudge_original_to`）：引擎
+    按改判动作自带的 ``skill_id`` 现查，不写死任何技能 id，也不按"哪个座位"特判。
+    查不到（构造局面 / 已失去技能）时退回 ``DISCARD``——那是规则 §11.3 的缺省一档（代替）。
+    """
+    for instance in resolve_instances(state, include_suppressed=True):
+        if instance.owner == seat and instance.skill_id == skill_id:
+            return instance.definition.rejudge_original_to
+    return RejudgeOriginal.DISCARD
 
 
 def rejudge_card_zones(state: GameState, seat: int) -> tuple[Zone, ...]:

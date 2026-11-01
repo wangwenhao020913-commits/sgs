@@ -115,7 +115,8 @@ function toggleFocus(cardId) {
 function cardCandidates(pending, cardId) {
   if (!pending) return [];
   return (pending.legal_actions || []).filter(
-    (action) => action.card && action.card.card_id === cardId && (action.kind === "UseCard" || action.kind === "PlayCard"),
+    (action) => action.card && action.card.card_id === cardId
+      && (action.kind === "UseCard" || action.kind === "PlayCard" || action.kind === "SubstituteJudgeCard"),
   );
 }
 

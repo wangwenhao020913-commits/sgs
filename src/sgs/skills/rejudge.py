@@ -28,16 +28,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from sgs.data import SkillType, hero_skill_id
+from sgs.data import Color, SkillType, hero_skill_id
 from sgs.effects import CarrierKind
 from sgs.resolution import Control, Frame
 from sgs.state import GameState, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
 
-from .catalog import ActivationPlan, Hook, SkillDef
+from .catalog import ActivationPlan, Hook, RejudgeOriginal, SkillDef
 from .flow import SkillFlow, zero_step_effect
 
 __all__ = [
+    "GUIDAO",
     "GUICAI",
     "JIE_GUICAI",
     "JIE_TIANDU",
@@ -60,6 +61,21 @@ JIE_GUICAI = hero_skill_id("jie_simayi", "guicai")
 "鬼才由'一张手牌'放宽为'一张牌'"），落成 :attr:`~sgs.skills.catalog.SkillDef.rejudge_zones`。
 改判能力仍只有 ``rejudge_capable`` 一个定义字段，座位集合由 :func:`rejudge_skill_ids`
 机械派生；候选区由 :func:`~sgs.skills.rejudge_card_zones` 从**同一批存活实例**现算。
+"""
+
+GUIDAO = hero_skill_id("zhangjiao_mobile", "guidao")
+"""张角移动版【鬼道】的全限定技能 id。
+
+牌面（官方 OL 张角页 `/hero/212`，2026-11-02 抓取，逐字）：「当一张判定牌生效前，你可以用
+一张**黑色**牌**替换**之。」与【鬼才】同一窗口、同一能力位，只多两处声明：
+
+- ``rejudge_card_color = Color.BLACK``：候选只收黑桃 / 梅花（没有黑色牌 ⇒ 窗口不发这一问）；
+- ``rejudge_original_to = RejudgeOriginal.HAND``：**替换**——被换下的原判定牌由**张角获得**
+  （规则 §11.3 L1243–L1245；`参考资料/机制详解-官方规则集研究.md` L139），与【鬼才】的
+  **代替**（原牌进弃牌堆）分列。
+
+文本里的"用"字是官方现行口径（feng-zhangjiao 票 01 的 R6）：改判**不是打出**，走
+``FrameKind.REJUDGE`` 事件帧（票 02）。
 """
 
 TIANDU = hero_skill_id("guojia", "tiandu")
@@ -136,7 +152,7 @@ def rejudge_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             rejudge_capable=True,
-            requirement="打出一张手牌，代替此判定牌",
+            requirement="用一张手牌，代替此判定牌",
         ),
         SkillDef(
             skill_id=JIE_GUICAI,
@@ -145,7 +161,18 @@ def rejudge_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             rejudge_capable=True,
             rejudge_zones=(Zone.HAND, Zone.EQUIP),
-            requirement="打出一张牌，代替此判定牌",
+            requirement="用一张牌，代替此判定牌",
+        ),
+        SkillDef(
+            skill_id=GUIDAO,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            rejudge_capable=True,
+            rejudge_zones=(Zone.HAND, Zone.EQUIP),
+            rejudge_card_color=Color.BLACK,
+            rejudge_original_to=RejudgeOriginal.HAND,
+            requirement="用一张黑色牌，替换此判定牌",
         ),
         SkillDef(
             skill_id=TIANDU,

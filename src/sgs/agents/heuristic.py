@@ -104,6 +104,7 @@ from sgs.state import (
     Pass,
     PeachQuery,
     PlayCard,
+    SubstituteJudgeCard,
     PlayPhaseQuery,
     PlayerPublic,
     PlayerView,
@@ -1656,7 +1657,7 @@ def _score_respond(query: Query, action: Action) -> float:
     """
     if isinstance(action, Pass):
         return 0.0
-    if isinstance(action, (ActivateSkill, UseCard, PlayCard)):
+    if isinstance(action, (ActivateSkill, UseCard, PlayCard, SubstituteJudgeCard)):
         if _nullify_declares(query) is False:
             return _NULLIFY_ABSTAIN_VALUE
         if isinstance(action, ActivateSkill):
@@ -2010,6 +2011,9 @@ _HOSTILE_SEAT_STEPS = (
     # 风包夏侯渊【神速】（票 01）：每张虚拟【杀】的**目标**——手写询问用全限定 skill_id
     # （``hero.xiahouyuan.shensu:target:0/1``），不登记 AI 会拿【杀】打队友。
     "hero.xiahouyuan.shensu:",
+    # 张角移动版【雷击】（feng-zhangjiao 票 01）：座位步选的是**被判定者**（也就是挨 2 点
+    # 雷电伤害的人）——不登记会落进"帮盟友"的缺省分支，AI 会给队友判一次、白打队友。
+    "hero.zhangjiao_mobile.leiji:",
 )
 """座位步的**语义分组**：这些步骤里的座位是"被指向的对手"，其余（治疗 / 给牌）是"被帮助的人"。
 
@@ -3261,6 +3265,20 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
     "hero.zhangliao.tuxi": (
         _constant(3.5),
         "放弃摸牌改为至多拿两张：净赚（拿到 ≤2 张、代价是少摸 2 张）",
+    ),
+    # feng-zhangjiao 票 01：张角移动版三条
+    "hero.zhangjiao_mobile.leiji": (
+        _constant(2.0),
+        "使用 / 打出【闪】后免费判定（♠ 1/4 概率造成 2 点雷电）：无成本，恒发动",
+    ),
+    "hero.zhangjiao_mobile.guidao": (
+        _constant(1.0),
+        "改判窗口：与两版【鬼才】同口径（有改判能力即参与，保守给正但不高）",
+    ),
+    "hero.zhangjiao_mobile.huangtian": (
+        _constant(-0.5),
+        "主公技：发动者是**别的座位**，交出一张【闪】/【闪电】的收益全归张角、"
+        "成本归自己 ⇒ 默认不发动（AI 不按身份关系替主公掏牌）",
     ),
     "hero.yuji_mobile.guohuo": (
         _constant(1.5),

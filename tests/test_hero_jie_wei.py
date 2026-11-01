@@ -50,6 +50,7 @@ from sgs.state import (
     MoveReason,
     Pass,
     PlayCard,
+    SubstituteJudgeCard,
     SelectCards,
     SelectOption,
     UseCard,
@@ -381,7 +382,8 @@ def test_jie_guicai_is_a_rejudge_capable_skill_and_the_window_asks_its_owner():
             return next(
                 action
                 for action in query.legal_actions
-                if isinstance(action, PlayCard) and action.card.card_id == replacement
+                if isinstance(action, SubstituteJudgeCard)
+                and action.card.card_id == replacement
             )
         return None
 
@@ -470,7 +472,7 @@ def test_jie_guicai_window_offers_the_players_equipment_cards():
             return next(
                 action
                 for action in query.legal_actions
-                if isinstance(action, PlayCard) and action.card.card_id == bow
+                if isinstance(action, SubstituteJudgeCard) and action.card.card_id == bow
             )
         return None
 
@@ -498,9 +500,9 @@ def test_the_standard_guicai_window_does_not_offer_equipment_cards():
     query = engine.pending
     assert query is not None and query.actor == 1, "改判询问仍会发出（只是候选只有手牌）"
     assert all(
-        not (isinstance(action, PlayCard) and action.card.card_id == bow)
+        not (isinstance(action, SubstituteJudgeCard) and action.card.card_id == bow)
         for action in query.legal_actions
-    ), "标准版只有手牌；装备区的牌不进改判候选（「打出一张牌」是界版才有的放宽）"
+    ), "标准版只有手牌；装备区的牌不进改判候选（「用一张牌」是界版才有的放宽）"
     engine.submit(next(action for action in query.legal_actions if isinstance(action, Pass)))
     assert bow in engine.state.player(1).equip, "放弃改判 ⇒ 装备牌留在装备区"
 

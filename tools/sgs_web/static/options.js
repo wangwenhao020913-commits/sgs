@@ -256,6 +256,7 @@ function selectionError(action, pending) {
 const ACTION_KIND_LABELS = Object.freeze({
   UseCard: "使用牌",
   PlayCard: "打出牌",
+  SubstituteJudgeCard: "改判",
   ActivateSkill: "发动技能",
   SelectCards: "选牌",
   SelectOption: "做出选择",
@@ -288,6 +289,10 @@ function actionLabel(action) {
   if (action.kind === "UseCard" || action.kind === "PlayCard") {
     const targets = action.targets && action.targets.length ? ` → 座位 ${action.targets.join("、")}` : "";
     return `使用【${cardName(action.card)}】${targets}`;
+  }
+  if (action.kind === "SubstituteJudgeCard") {
+    // 改判**不是打出**（feng-zhangjiao 票 02）：事件流写「改判【…】」，不写「打出 / 使用」。
+    return action.card ? `改判【${cardName(action.card)}】` : "改判";
   }
   if (action.kind === "Reforge") {
     // 重铸不是使用（M5-08b / D6）：事件流与任何候选文案都写「重铸」，不落英文构造子名。

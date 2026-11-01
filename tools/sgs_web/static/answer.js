@@ -288,7 +288,7 @@ function buildAction() {
     const isTargetStep = (action) =>
       action.card
       && String(action.card.card_id) === String(entry.card.card_id)
-      && (action.kind === "UseCard" || action.kind === "PlayCard");
+      && (action.kind === "UseCard" || action.kind === "PlayCard" || action.kind === "SubstituteJudgeCard");
     const inClickOrder = (action) => {
       const targets = (action.targets || []);
       return targets.length === clicked.length

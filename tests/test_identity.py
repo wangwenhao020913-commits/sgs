@@ -266,7 +266,7 @@ def test_no_identity_mode_projects_no_identities():
 
 
 def test_the_lord_skill_ids_are_now_derived_from_the_m3_definitions():
-    """M2 的接口位是手抄空集；M3 票 09 转正 ⇒ 由 ``SkillDef.skill_type`` 派生（六条主公技）。"""
+    """M2 的接口位是手抄空集；M3 票 09 转正 ⇒ 由 ``SkillDef.skill_type`` 派生（七条主公技）。"""
     assert LORD_SKILL_IDS == frozenset(
         {
             "hero.caocao.hujia",
@@ -275,6 +275,8 @@ def test_the_lord_skill_ids_are_now_derived_from_the_m3_definitions():
             "hero.jie_liubei.jijiang",
             "hero.sunquan.jiuyuan",
             "hero.jie_sunquan.jiuyuan",
+            # feng-zhangjiao 票 01：张角移动版【黄天】
+            "hero.zhangjiao_mobile.huangtian",
         }
     )
 

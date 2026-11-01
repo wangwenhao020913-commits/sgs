@@ -269,6 +269,8 @@ def test_lord_skill_ids_are_derived_from_the_skill_definitions(monkeypatch):
             "hero.jie_liubei.jijiang",
             "hero.sunquan.jiuyuan",
             "hero.jie_sunquan.jiuyuan",
+            # feng-zhangjiao 票 01：张角移动版【黄天】（主公技）
+            "hero.zhangjiao_mobile.huangtian",
         }
     )
 

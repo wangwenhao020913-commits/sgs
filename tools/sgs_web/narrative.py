@@ -559,6 +559,9 @@ class _Narrator:
             self._line(seq, segments)
         elif kind == "PlayCard":
             self._line(seq, [*self._subject(actor), _act(" 打出"), *_cards((card,))])
+        elif kind == "SubstituteJudgeCard":
+            # 改判**不是打出**（feng-zhangjiao 票 02）：叙事写「改判」，与打出 / 使用分开。
+            self._line(seq, [*self._subject(actor), _act(" 改判 → "), *_cards((card,))])
 
     # -- 终局 ---------------------------------------------------------------
 
