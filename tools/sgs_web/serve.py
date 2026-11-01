@@ -49,6 +49,7 @@ from sgs.engine import IllegalActionError  # noqa: E402
 from sgs_web.narrative import narrative_after  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     build_skills,
+    concealed_guohuo_cards,
     decorate_records_card_tags,
     live_tag_deltas_after,
     pending_payload,
@@ -327,6 +328,7 @@ class GameRegistry:
         # 应答者 = `answers_seq` 指向的那次询问的 actor；映射取**全量**记录（询问可能
         # 早于 `after` 游标），展开只对窗口里的记录做。
         query_actors = query_actor_map(all_records)
+        concealed = concealed_guohuo_cards(session.engine)
         records = [
             payload
             for record in window
@@ -336,6 +338,9 @@ class GameRegistry:
                     viewer=session.human_seat,
                     query_actors=query_actors,
                     state=session.engine.state,
+                    # UI1/UI2：未验明的【蛊惑】扣置牌**不给牌面**（处理区是公开区，
+                    # 但扣置是"背面朝上"进去的）——事件流与舞台同一份判据。
+                    concealed=concealed,
                 )
             )
             is not None

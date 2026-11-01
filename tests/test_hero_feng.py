@@ -431,6 +431,86 @@ def test_guohuo_designation_step_reaches_the_web_payload() -> None:
     )
 
 
+def test_the_concealed_card_keeps_its_face_secret_until_the_reveal() -> None:
+    """UI1/UI2（用户实机报障 2026-11-02）：**验明之前**，别人拿到的只是"声明的牌名"。
+
+    处理区是全局公开区，而【蛊惑】的扣置是"背面朝上"进去的 ⇒ 不特别处理就会当场告诉
+    所有人真假。这里跑真引擎到**质疑轮**（验明之前），再把引擎包进真会话，读网页那两份
+    数据：① 快照处理区里那张牌带 ``concealed`` 且花色 / 点数全空、牌名 = 声明的；
+    ② 记录流里"手牌 → 处理区"那条对**别人**只给张数。
+    """
+    from sgs_web.projection import concealed_guohuo_cards, visible_record
+    from sgs_web.projection import visible_snapshot
+    from sgs_web.session import Session
+
+    black_slash = _card(type_id="slash", suit="club")
+    strike = _card(type_id="slash", exclude=frozenset({black_slash}))
+    filler = _fillers(3, exclude=frozenset({black_slash, strike}))
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(strike,)),
+            SeatSpec(hero="yuji_mobile", hand=(black_slash,)),
+            SeatSpec(hand=(filler[0],)),
+            SeatSpec(hand=(filler[1],)),
+        ],
+        deck=deck_excluding(PACK, black_slash, strike, *filler),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=7)
+    session = Session(
+        pack=PACK, seed=7, ai="random", timeout_seconds=None, player_count=4
+    )
+    session.engine = engine
+    session.participants = (
+        _WindowSeat(strike=strike),
+        _WindowSeat(guohuo=("dodge",)),
+        _WindowSeat(),
+        _WindowSeat(),
+    )
+    run_queries(
+        engine,
+        session.participants,
+        lambda e: e.pending is not None
+        and str(getattr(e.pending, "skill_id", "")).endswith(":doubt"),
+    )
+
+    concealed = concealed_guohuo_cards(engine)
+    assert concealed == {black_slash: ("dodge", 1)}, (
+        f"验明之前这张扣置牌应当记为「未验明」：{concealed}"
+    )
+
+    shown = [
+        card
+        for card in visible_snapshot(session)["processing"]
+        if card["card_id"] == black_slash
+    ]
+    assert shown and shown[0]["concealed"] is True
+    assert shown[0]["display_name"] == "闪", "舞台画的是**声明的牌名**"
+    assert shown[0]["suit"] is None and shown[0]["rank"] is None, (
+        "花色 / 点数也是秘密（♥ 判据决定这张牌作不作废）"
+    )
+
+    moves = [
+        record
+        for record in session.records()
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and [card.card_id for card in record.cards] == [black_slash]
+    ]
+    assert moves, "扣置这一步确实有一条 card_move"
+    payload = visible_record(moves[0], viewer=0, concealed=concealed)
+    assert payload is not None
+    assert payload["cards"] == [] and payload["card_count"] == 1, (
+        "事件流里对别人不给牌面，只给张数"
+    )
+    own = visible_record(moves[0], viewer=1, concealed=concealed)
+    assert own is not None and [card["card_id"] for card in own["cards"]] == [black_slash], (
+        "扣置者自己照常看得到那张牌"
+    )
+
+
 def test_guohuo_voided_borrowed_sword_never_opens_the_holder_window() -> None:
     """假 + 非♥️ ⇒ 作废：那张借刀**从未使用**，持刀者连借刀窗口都不出现。
 

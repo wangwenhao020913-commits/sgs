@@ -2957,6 +2957,7 @@ _GUOHUO_YES = "guohuo_doubted"
 _GUOHUO_REVEALED = "guohuo_revealed"
 _GUOHUO_RESULT = "guohuo_result_next"
 _GUOHUO_RESULT_SEAT = "guohuo_result"
+_GUOHUO_OWNER = "guohuo_owner"
 _GUOHUO_SETTLED = "guohuo_settled"
 """帧私有游标：扣置已完成 / 已问过谁 / 谁质疑了 / 验明过了 / 结果执行到第几个 / 收尾已完成。
 
@@ -3271,6 +3272,9 @@ def _guohuo_kouchu(host: Any, frame: Any, owner: int) -> Control:
     """
     if frame.data.get(_GUOHUO_KOUCHU):
         return None
+    # 扣置者是谁：验明之前这张牌的牌面**只有他知道**（投影据此不给别人牌面，UI1/UI2）。
+    # 承载帧可能是外层窗口的帧（濒死帧 / 借刀的结算帧），故显式落一份，不靠帧的 ``source``。
+    frame.data[_GUOHUO_OWNER] = owner
     control = host.move_in_frame(
         frame,
         host.state.refs((int(frame.data[_GUOHUO_SOURCE]),)),
