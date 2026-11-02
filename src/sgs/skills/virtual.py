@@ -615,21 +615,28 @@ def virtual_card_use(
         if check_count(state, seat, card):
             return []
         pool = check_targets(state, seat, card)
-        rule = behavior_for(card).target_rule
-        count = rule.target_count(len(pool))
-        if count <= 0:
+        behavior = behavior_for(card)
+        rule = behavior.target_rule
+        # **目标数区间要照真牌摊开**（huo-mobile-batch 票 02）：【铁索连环】是
+        # ``min_targets=1 / max_targets=2``，真牌走 ``_play_phase`` 的
+        # ``rule.target_range`` ⇒ 1 个与 2 个目标的组合都在候选里。转化产物的第一张
+        # 区间牌就是【连环】，若这里仍按"至少 N 个"取单值，1–2 名目标会被压成"恰好 1 名"
+        # ——与真牌不是同一条合法性检测。
+        low, high = rule.target_range(len(pool))
+        if low <= 0 or high < low:
             return []
-        high = count
-        if rule.count is TargetCount.RATED:
+        if rule.count is TargetCount.RATED and not rule.is_range:
             high = apply_modifiers(
                 ModifierPoint.TARGET_COUNT,
                 state,
                 ModifierContext(subject=seat, card=card),
-                count,
+                high,
             )
         return [
             UseCard(card=card, targets=combo, answers_seq=ctx.answers_seq)
-            for combo in target_combos(pool, count, high)
+            for combo in target_combos(
+                pool, low, high, ordered=behavior.preserve_target_order
+            )
         ]
     if ctx.scope is CandidateScope.DODGE:
         targets = tuple((target,) for target in check_targets(state, seat, card)) or ((),)

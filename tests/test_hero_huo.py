@@ -905,6 +905,36 @@ def test_lianhuan_converts_a_club_hand_card_into_iron_chain() -> None:
     assert engine.state.player(1).chained is True, "【铁索连环】把目标横置"
 
 
+def test_lianhuan_can_chain_two_targets() -> None:
+    """产物是真锦囊 ⇒ **目标数区间照真牌**：【铁索连环】1–2 名，两名目标都要能选中。
+
+    转化候选走 ``virtual_card_use``，它原先按"至少 N 个"取单值 ⇒ 1–2 名会被压成恰好 1 名
+    （本仓第一张区间牌产物就是【连环】）。修后清单目标步 ``max = 2``、2 目标组合在内部池里。
+    """
+    club = _club_card(PACK_160, "slash")
+    engine = _lianhuan_play_phase(PACK_160, (club,))
+    steps = engine.pending.transform_preactivations[LIANHUAN]
+
+    assert (steps[1].min, steps[1].max) == (1, 2), "目标步 1–2 名"
+    engine.submit(
+        ActivateSkill(
+            skill_id=LIANHUAN,
+            picks=(club,),
+            choices=("seat:1", "seat:2"),
+            answers_seq=engine.pending.seq,
+        )
+    )
+    _until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and club in e.state.discard,
+    )
+
+    assert engine.state.player(1).chained is True
+    assert engine.state.player(2).chained is True, "两名目标都被横置（不是被压成一名）"
+
+
 def test_lianhuan_manifest_is_derived_from_the_club_sources_only() -> None:
     """清单来源步只列**♣ 手牌**（红桃不在候选里）。"""
     club = _club_card(PACK_160, "slash")
