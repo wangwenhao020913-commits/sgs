@@ -9646,3 +9646,61 @@ def test_the_skill_list_includes_a_cross_seat_granted_skill() -> None:
         assert "hero.zhangjiao_mobile.huangtian" not in ids, (
             f"座位 {other_seat} 不该看到别人的技能"
         )
+
+
+def test_the_lord_skill_grant_is_listed_but_greyed_without_a_qualifying_card() -> None:
+    """主公技授予同势力座位：**恒列**（画灰），可点亮与否仍只读候选。
+
+    用户实机报障（2026-11-02）：【黄天】在发动者手里没有【闪】/【闪电】时整条消失，
+    看不出"技能在、只是没牌可交"。
+    """
+    from types import SimpleNamespace
+
+    from support import SeatSpec, build_state, cards_of_type, deck_excluding
+
+    pack = _context_pack()
+    # 座位 1 = 界吕布（群），手里**没有**能交的牌（一张【杀】）；牌堆里也把
+    # 【闪】/【闪电】全部剔除——否则摸牌阶段摸到一张就又有了。
+    slash = cards_of_type(pack, "slash")[0]
+    forbidden = {
+        card_id
+        for card_id, card in enumerate(pack.deck.cards)
+        if card.type in ("dodge", "lightning")
+    }
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hero="zhangjiao_mobile", identity=Identity.LORD, kingdom=Kingdom.QUN),
+            SeatSpec(hero="lvbu", hand=(slash,), kingdom=Kingdom.QUN),
+            SeatSpec(hero="simayi", kingdom=Kingdom.WEI),
+            SeatSpec(kingdom=Kingdom.WEI),
+        ],
+        deck=tuple(
+            card_id
+            for card_id in deck_excluding(pack, slash)
+            if card_id not in forbidden
+        ),
+        rule_config=RuleConfig(player_count=4, starting_hand_size=1),
+    )
+    engine = Engine.from_state(state, seed=3)
+
+    def at_seat1_play_phase(e) -> bool:
+        return (
+            e.pending is not None
+            and e.pending.kind == QueryKind.PLAY_PHASE
+            and e.pending.actor == 1
+        )
+
+    from support import run_queries
+
+    run_queries(engine, [_FallThroughPlayer() for _ in range(4)], at_seat1_play_phase)
+    session = SimpleNamespace(engine=engine, pending=engine.pending)
+    mine = {entry["skill_id"]: entry for entry in build_skills(session, 1)}
+    entry = mine.get("hero.zhangjiao_mobile.huangtian")
+    assert entry is not None, "同势力座位**恒列**主公技授予（否则看不出技能存在）"
+    assert entry["available"] is False, "没有可交的牌 ⇒ 画灰（可用性仍只读候选）"
+    assert entry["name"] == "黄天"
+
+    # 魏势力座位不是授予对象 ⇒ 一条也不列。
+    wei = {entry["skill_id"] for entry in build_skills(session, 2)}
+    assert "hero.zhangjiao_mobile.huangtian" not in wei

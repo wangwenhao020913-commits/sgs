@@ -26,6 +26,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from sgs.data import (
+    SkillType,
     hero_by_id,
     hero_skill_id,
     load_content_pack,
@@ -814,12 +815,22 @@ def build_skills(session: Session, seat: int) -> list[dict[str, Any]]:
     asked_here = pending is not None and int(getattr(pending, "actor", -1)) == seat
     for instance in resolve_instances(state, include_suppressed=True):
         cross_seat = instance.owner != seat
-        # 跨座位授予（feng-zhangjiao 票 01：张角【黄天】——别的座位的技能、此刻发给我）：
-        # 只把"**这一问是问我的**、且候选里真有这条技能"的那些列进我的技能区
-        # （``offered`` 与候选同源）。其余别人的技能一条不列——否则每个座位都会看到全场技能。
-        if cross_seat and not (asked_here and instance.skill_id in offered):
-            continue
         definition = instance.definition
+        # 跨座位授予（feng-zhangjiao 票 01：张角【黄天】——别的座位的技能、此刻发给我）。
+        # 两条准入，缺一不列，**其余别人的技能一条都不列**（否则每个座位都会看到全场技能）：
+        #   ① 这一问是问我、且候选里真有这条技能 ⇒ 列出来（可点亮）；
+        #   ② **主公技授予同势力座位**：同势力的座位**恒列**（`available` 照旧读候选，
+        #      没有可交的牌 ⇒ 画灰）。用户实机报障（2026-11-02 验收）：手里没有
+        #      【闪】/【闪电】时这条技能整条消失，玩家看不出"技能在、只是我这会儿没牌可交"。
+        #      它不是信息泄露：主公技在武将面公开，且这些座位本来就是它的合法发动者。
+        lord_grant = (
+            cross_seat
+            and definition.skill_type is SkillType.LORD
+            and state.player(seat).kingdom is not None
+            and state.player(seat).kingdom is state.player(instance.owner).kingdom
+        )
+        if cross_seat and not (lord_grant or (asked_here and instance.skill_id in offered)):
+            continue
         suppressed = (not cross_seat) and instance.skill_id not in resolved_ids
         short_id = instance.skill_id.rsplit(".", 1)[-1]
         name, skill_type, star = names.get(

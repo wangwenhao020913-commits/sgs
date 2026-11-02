@@ -3248,6 +3248,35 @@ _HAND_REQUIRED_SEAT_STEPS: frozenset[tuple[str, str]] = frozenset(
 """
 
 
+def _huangtian_lord_seat(view: PlayerView) -> int | None:
+    """公开面上**主公的座位**（``identity`` 非空且是 ``lord``）——主公技的接收方。
+
+    主公的身份是公开信息（`06`（§5「程序化约定与偏离一手」）U1-04 行 / 投影的
+    ``_visible_identity``），故 AI 只读公开面就能找到他，不碰全知状态。
+    """
+    for player in view.players:
+        if player.identity == "lord":
+            return player.seat
+    return None
+
+
+def _score_huangtian(query: Query, action: Action, view: PlayerView) -> float:
+    """主公技【黄天】：把一张【闪】/【闪电】交给张角（收益归他、成本归我）。
+
+    候选侧的四个门之一就是"同势力"（群），故把主公按**未明敌人**处理：只有他**已亮明
+    是敌人**时才不给（−1），明盟友 / 未知给正分（一张牌换主公的防御资源）。不按势力
+    直接判"友"——身份局的群势力里既有忠臣也有反贼。
+    """
+    del query, action
+    lord = _huangtian_lord_seat(view)
+    if lord is None:
+        return 0.0
+    enemy, _ally = _identity_relation(view, lord)
+    if enemy >= 1.0:
+        return -1.0
+    return 2.0 * (1.0 - enemy)
+
+
 SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]] = {
     # 魏
     "hero.caocao.jianxiong": (_constant(4.0), "受伤后获得造成伤害的牌：净赚一张，恒发动"),
@@ -3276,9 +3305,9 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "改判窗口：与两版【鬼才】同口径（有改判能力即参与，保守给正但不高）",
     ),
     "hero.zhangjiao_mobile.huangtian": (
-        _constant(-0.5),
-        "主公技：发动者是**别的座位**，交出一张【闪】/【闪电】的收益全归张角、"
-        "成本归自己 ⇒ 默认不发动（AI 不按身份关系替主公掏牌）",
+        _score_huangtian,
+        "主公技：发动者是**别的座位**——交出一张【闪】/【闪电】的收益归张角、成本归自己；"
+        "按主公的身份关系打分（明敌人不给、其余给正分）",
     ),
     "hero.yuji_mobile.guohuo": (
         _constant(1.5),
