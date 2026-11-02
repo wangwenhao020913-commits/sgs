@@ -6228,6 +6228,7 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       equip: [weapon], judge: [indulgence], chained: true, wine_active: false,
       identity: identityMode ? "rebel" : null, identity_label: identityMode ? "反贼" : null,
       hero_name: "大乔", kingdom: "wu", kingdom_label: "吴",
+      hand_limit: 3,
     },
     {
       seat: 1, hp: 5, hp_max: 5, hand_count: 4, alive: true,
@@ -6236,18 +6237,21 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       flipped: true,
       identity: null, identity_label: null,
       hero_name: "吕布", kingdom: "qun", kingdom_label: "群",
+      hand_limit: 5,
     },
     {
       seat: 2, hp: 6, hp_max: 6, hand_count: 0, alive: true,
       equip: [horse], judge: [], chained: true, wine_active: true,
       identity: identityMode ? "lord" : null, identity_label: identityMode ? "主公" : null,
       hero_name: "曹操", kingdom: "wei", kingdom_label: "魏",
+      hand_limit: 6,
     },
     {
       seat: 3, hp: 0, hp_max: 4, hand_count: 0, alive: false,
       equip: [], judge: [supply], chained: true, wine_active: true,
       identity: identityMode ? "loyalist" : null, identity_label: identityMode ? "忠臣" : null,
       hero_name: "刘备", kingdom: "shu", kingdom_label: "蜀",
+      hand_limit: 0,
     },
   ];
   const pending = {
@@ -6359,8 +6363,8 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
   check("U1-02e 环上仍是 3 个对手，自己在底部面板（U1-01 的座位归属不变）",
     $("t-seats").children.length === 3 && attr(self, "data-seat") === "0" && self.classList.contains("me"));
 
-  check("U1-02f 武将块：势力 / 中文名 / 身份 / 手牌数 / 座位号（不是引擎 id）",
-    seat1.text().includes("群") && seat1.text().includes("吕布") && seat1.text().includes("手牌 4")
+  check("U1-02f 武将块：势力 / 中文名 / 身份 / 手牌数（张数/上限） / 座位号（不是引擎 id）",
+    seat1.text().includes("群") && seat1.text().includes("吕布") && seat1.text().includes("手牌：4/5")
       && seat1.text().includes("座位 1") && !seat1.text().includes("lvbu"),
     `seat1="${seat1.text().replace(/\s+/g, " ").trim()}"`);
 
@@ -6396,10 +6400,10 @@ check("㉿P7 提交的正是 seat:2 那条原候选",
       && $("t-self-identity").getAttribute("title") === "身份：反贼",
     `seat1=${byClass(seat1, "identity-badge").map((b) => b.textContent)} seat2=${byClass(seat2, "identity-badge").map((b) => b.textContent)} self="${$("t-self-identity").textContent}"`);
 
-  check("U1-02i2 自己的武将块与 footer 读同一份展示契约：大乔 / 吴 / 反贼 / 3/3 / 手牌 2 / 座位 0",
+  check("U1-02i2 自己的武将块与 footer 读同一份展示契约：大乔 / 吴 / 反贼 / 3/3 / 手牌 2/3 / 座位 0",
     $("t-hero").textContent === "大乔" && $("t-self-kingdom").textContent === "吴"
       && $("t-self-hp").text().includes("3/3")
-      && $("t-self-hand").textContent === "2" && $("t-self-seatno").textContent === "0",
+      && $("t-self-hand").textContent === "2/3" && $("t-self-seatno").textContent === "0",
     `hero=${$("t-hero").textContent} kingdom=${$("t-self-kingdom").textContent} hp=${$("t-self-hp").text()}`);
 
   check("U1-02j 横置 = 中央虚线、酒 = 泛红（无「酒」字）、阵亡 = 蒙灰 + 大号「阵亡」",
@@ -15742,8 +15746,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   check("U3-05a 体力随 hp_change 逐事件变化（不等到整批播完）",
     seatText(1).includes("3/4"), `座1="${seatText(1)}"`);
   step();  // 102 对手摸两张
-  check("U3-05b 对手手牌数随摸牌事件变化（隐藏区只给张数）",
-    seatText(1).includes("手牌 4"), `座1="${seatText(1)}"`);
+  check("U3-05b 对手手牌数随摸牌事件变化（隐藏区只给张数；合成载荷没有 hand_limit ⇒ 上限退回张数）",
+    seatText(1).includes("手牌：4/4"), `座1="${seatText(1)}"`);
   step();  // 103 自己摸一张
   // 张数行（旧 `#t-hand-count`）已按报障删掉（票 23）：这里只核牌面本身跟着事件更新。
   check("U3-05c 自己的手牌面随事件更新",
@@ -16372,8 +16376,8 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && !!selfMarkerTag && selfMarkerTag.textContent === "梦魇×2"
       && selfMarkerTag.getAttribute("title") === "座位 1 神关羽·武魂",
     selfMarkerRow ? selfMarkerRow.text().replace(/\s+/g, " ").trim() : "没有标记行");
-  check("㉉M6-7 区里的牌**不算**手牌数（公开数字仍是 hand_count）",
-    $("t-self-hand").textContent === "2" && $("t-hand").children.length === 1,
+  check("㉉M6-7 区里的牌**不算**手牌数（公开数字仍是 hand_count；合成载荷没有 hand_limit ⇒ 票 09 的 fail-closed 读数 2/2）",
+    $("t-self-hand").textContent === "2/2" && $("t-hand").children.length === 1,
     `hand_count=${$("t-self-hand").textContent} 手牌面=${$("t-hand").children.length}`);
   const foeZoneBox = seatBox(2);
   const foeZoneRow = foeZoneBox ? rowOf(foeZoneBox, "data-zone", "hero") : null;
@@ -18735,12 +18739,12 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   check("M6-B2c 开局批播完（未 commit）时表体已长成新局快照（初始化底稿正确）",
     !!liveSnapshot && !!liveHuman
       && $("t-deck").textContent === String(liveSnapshot.deck_count ?? 0)
-      && $("t-self-hand").textContent === String(liveHuman.hand_count)
+      && $("t-self-hand").textContent === `${liveHuman.hand_count}/${liveHuman.hand_limit}`
       && $("t-phase").textContent === ui.phaseLabel(liveSnapshot.phase)
       && $("t-round").textContent === String(liveSnapshot.round)
       && selfHeroName() === secondHero,
     `deck=${$("t-deck").textContent}/${liveSnapshot && liveSnapshot.deck_count}`
-      + ` hand=${$("t-self-hand").textContent}/${liveHuman && liveHuman.hand_count}`
+      + ` hand=${$("t-self-hand").textContent}/${liveHuman && liveHuman.hand_count}/${liveHuman && liveHuman.hand_limit}`
       + ` phase=${$("t-phase").textContent}/${liveSnapshot && ui.phaseLabel(liveSnapshot.phase)}`
       + ` round=${$("t-round").textContent}/${liveSnapshot && liveSnapshot.round}`
       + ` hero=${selfHeroName()}/${secondHero}`);
@@ -18765,13 +18769,13 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     const total = ui.state.playback.records.length;
     for (let index = 0; index < total; index += 1) ui.stepPlayback(true);
     const ok = $("t-deck").textContent === String(snapshot.deck_count ?? 0)
-      && $("t-self-hand").textContent === String(human.hand_count)
+      && $("t-self-hand").textContent === `${human.hand_count}/${human.hand_limit}`
       && $("t-phase").textContent === ui.phaseLabel(snapshot.phase)
       && $("t-round").textContent === String(snapshot.round);
     if (!ok) {
       extraProblems.push(
         `seed ${seed}: deck=${$("t-deck").textContent}/${snapshot.deck_count}`
-        + ` hand=${$("t-self-hand").textContent}/${human.hand_count}`
+        + ` hand=${$("t-self-hand").textContent}/${human.hand_count}/${human.hand_limit}`
         + ` phase=${$("t-phase").textContent}/${ui.phaseLabel(snapshot.phase)}`
         + ` round=${$("t-round").textContent}/${snapshot.round}`);
     }
@@ -19235,6 +19239,100 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && midDetail[0].state === "lost",
     JSON.stringify(midDetail.map((entry) => [entry.skill_id, entry.state])));
   ui.flushPlayback();
+}
+
+/* ============ 票 09：武将块手牌读数「手牌：张数/上限」 ============
+ *
+ * 用户口径（2026-11-02 实机验收，血裔通过后追加）：武将块左下角的手牌数改成
+ * 「手牌：手牌数/手牌上限」，例「手牌：3/5」，**自己与对手都**显示。
+ *
+ * 上限是**服务端下发的派生量**（`player.hand_limit` = `effects.hand_limit`：体力值 →
+ * 替换链 → 一次性加式），界面不自己拿体力算——那会是第二份真源（【英姿】的替换 /
+ * 【清俭】的加式立刻对不上）。
+ *
+ * 三条判据：
+ *  ① 对手座位卡读「手牌：3/5」（不因"不是自己"退回纯数字）；
+ *  ② 自己的武将块 footer 与右键详情说**同一句话**（`table.js` / `hero-detail.js` 同步）；
+ *  ③ fail-closed：旧载荷 / 合成视图没有 `hand_limit` ⇒ 上限退回张数，绝不出现 `undefined`。
+ */
+{
+  // 与响应体同形的合成 view：玩家 0（自己）2/3、玩家 1（对手）3/5、玩家 2（对手）4/4。
+  const handView = (withLimit) => {
+    const view = synthView(null);
+    view.snapshot.players = [
+      { seat: 0, hp: 3, hp_max: 3, hand_count: 2, alive: true,
+        equip: [], judge: [], identity: null, hero_name: "郭嘉" },
+      { seat: 1, hp: 5, hp_max: 5, hand_count: 3, alive: true,
+        equip: [], judge: [], identity: null, hero_name: "吕布" },
+      { seat: 2, hp: 4, hp_max: 4, hand_count: 4, alive: true,
+        equip: [], judge: [], identity: null, hero_name: "曹操" },
+    ];
+    if (withLimit) {
+      view.snapshot.players[0].hand_limit = 3;
+      view.snapshot.players[1].hand_limit = 5;
+      view.snapshot.players[2].hand_limit = 4;
+    }
+    return view;
+  };
+  const showHandView = (view) => {
+    ui.state.sessionId = null;
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+  };
+  const walkAll = (node, out = []) => {
+    for (const child of (node && node.children) || []) { out.push(child); walkAll(child, out); }
+    return out;
+  };
+  const classOf = (node) => String((node && node.className) || "").split(/\s+/);
+  const fireContext = (node) => {
+    const event = { target: node, stopPropagation() {} };
+    event.preventDefault = () => {};
+    if (node) (node.listeners.contextmenu || []).forEach((fn) => fn(event));
+  };
+  showHandView(handView(true));
+
+  /* ---- ① 对手座位卡：`手牌：3/5`（不是纯数字） ---- */
+  const foe = seatBox(1);
+  check("票 09-A1 对手座位卡读「手牌：3/5」（不因不是自己就退回纯数字）",
+    !!foe
+      && foe.text().includes("手牌：3/5")
+      && foe.text().includes("座位 1")
+      && !foe.text().includes("undefined"),
+    foe ? foe.text().replace(/\s+/g, " ").trim() : "缺座位 1");
+
+  /* ---- ② 自己的武将块 footer：读数 2/3 + 静态标签「手牌：」 ---- */
+  const html = readFileSync("tools/sgs_web/static/index.html", "utf8");
+  check("票 09-A2 自己的武将块同形：footer 读数 2/3、静态标签「手牌：」（顶栏不是纯数字）",
+    $("t-self-hand").textContent === "2/3"
+      && /手牌：<b id="t-self-hand">\s*0\/0\s*<\/b>/.test(html),
+    `t-self-hand="${$("t-self-hand").textContent}" 静态标签=${/手牌：<b id="t-self-hand">/.test(html)}`);
+
+  /* ---- ②b 右键详情：同一句话（`hero-detail.js` 与座位卡同步） ---- */
+  const foeHeroBlock = foe
+    ? Array.from(foe.children).find((node) => classOf(node).includes("hero-block"))
+    : null;
+  fireContext(foeHeroBlock);
+  const detailMeta = walkAll($("t-modal-body")).find((node) => classOf(node).includes("detail-meta"));
+  check("票 09-A3 对手的武将详情同读「手牌：3/5」（三处同一句话）",
+    $("t-modal").hidden === false
+      && !!detailMeta
+      && String(detailMeta.textContent).includes("手牌：3/5"),
+    detailMeta ? `detail-meta="${detailMeta.textContent}"` : "详情没有 detail-meta");
+  ui.state.modal.heroSeat = null;
+  $("t-modal").hidden = true;
+
+  /* ---- ③ fail-closed：没有 hand_limit 的旧载荷 ⇒ 张数/张数 ---- */
+  showHandView(handView(false));
+  const foeNoLimit = seatBox(2);
+  check("票 09-B1 fail-closed：载荷没有 hand_limit ⇒ 上限退回张数（不是 undefined）",
+    $("t-self-hand").textContent === "2/2"
+      && !!foeNoLimit
+      && foeNoLimit.text().includes("手牌：4/4")
+      && !$("t-seats").text().includes("undefined")
+      && !$("t-self-hand").textContent.includes("undefined"),
+    `t-self-hand="${$("t-self-hand").textContent}"`
+      + ` 座位2="${foeNoLimit ? foeNoLimit.text().replace(/\s+/g, " ").trim() : "缺"}"`);
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

@@ -1328,6 +1328,12 @@ def test_the_snapshot_never_exposes_other_hands_or_hidden_identity() -> None:
         if player["seat"] == session.human_seat:
             continue
         assert "self_hand" not in player
+        # 票 09：``hand_limit`` 是**允许字段**（对照 ``hand_count``）——「手牌：N/上限」这句
+        # 读数要显示给所有人。它只由公开事实（体力值 → 替换链 → 一次性加式）派生，没有隐藏
+        # 牌面信息，故不是新的泄露通道；这里显式允许，免得后来者把它当成"对手多了一个数"。
+        assert isinstance(player.get("hand_limit"), int), (
+            f"对手载荷应带公开派生的手牌上限：{player}"
+        )
         if player["alive"] and player["seat"] != lord:
             assert player["identity"] is None, f"存活非主公的身份不得可见：{player}"
     assert isinstance(snapshot["deck_count"], int)
@@ -5661,6 +5667,61 @@ def test_hero_tags_cover_hand_limit_bonus_and_luoyi_without_touching_player_view
     ], "界【裸衣】读 luoyi_until_next_turn"
     assert "hero_tags" not in PlayerView.model_fields, (
         "标签是网页显示字段，不能塞进 PlayerView（记录字节 / 金录像）"
+    )
+
+
+def test_the_snapshot_carries_hand_limit_for_every_seat_without_touching_the_ai_projection() -> None:
+    """票 09：武将块读「手牌：张数/上限」——上限只进**网页载荷**（显示层字段）。
+
+    订三件事：
+
+    - **对手也带** ``hand_limit``（显示层不因"不是自己"退回纯数字），值 = 服务端查询
+      :func:`sgs.effects.hand_limit`；前端不自己拿体力算（替换链 / 加式会让它变成第二份真源）。
+    - 值是**公开事实的派生量**：座位 2 的体力 4 + 一次性加式 2 ⇒ 6（同一条加式在
+      ``hero_tags`` 里也公开成「手牌上限+2」），因此它与 ``hand_count`` 同级的允许字段，
+      不夹带隐藏牌面信息。
+    - **不进** ``PlayerPublic`` / ``PlayerView`` / ``project`` 的输出：那是 AI 的读面与记录流，
+      新增字段要先登记读点表（`docs/agents/ai-adaptation.md` §1 第 2 条）；本需求只是显示。
+    """
+    from types import SimpleNamespace
+
+    from sgs.effects import hand_limit
+    from sgs.state import PlayerPublic, PlayerView, project
+
+    from sgs_web.projection import visible_snapshot
+
+    pack = load_content_pack(deck_profile="standard_108")
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=3, hero="daqiao"),
+            SeatSpec(hp=4, hero="zhenji"),
+            SeatSpec(hp=4, hero="xuchu"),
+        ],
+        deck=tuple(range(40, 50)),
+    )
+    state.player(2).hand_limit_bonus = 2
+    engine = Engine.from_state(state, seed=1)
+    session = SimpleNamespace(engine=engine, human_seat=0, pack=pack)
+    snapshot = visible_snapshot(session)
+
+    live = session.engine.state
+    for payload in snapshot["players"]:
+        seat = payload["seat"]
+        assert payload["hand_limit"] == hand_limit(live, live.player(seat)), (
+            f"座位 {seat} 的手牌上限必须与服务端查询同源：{payload}"
+        )
+    assert snapshot["players"][0]["hand_limit"] == 3, "本人：体力 3 ⇒ 上限 3"
+    assert snapshot["players"][2]["hand_limit"] == 6, (
+        "对手：体力 4 + 一次性加式 2 ⇒ 6（不是纯体力，也不是缺省值）"
+    )
+
+    # 接线检查：AI 读面（PlayerPublic / PlayerView / project）里没有这个字段。
+    assert "hand_limit" not in PlayerPublic.model_fields
+    assert "hand_limit" not in PlayerView.model_fields
+    view = project(live, session.human_seat)
+    assert all("hand_limit" not in player for player in view.model_dump(mode="json")["players"]), (
+        "project 的输出是 AI 读面：显示字段不得长在这里"
     )
 
 

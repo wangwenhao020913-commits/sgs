@@ -32,7 +32,7 @@ from sgs.data import (
     load_content_pack,
     load_hero_tables,
 )
-from sgs.effects import responder_role, response_count
+from sgs.effects import hand_limit, responder_role, response_count
 from sgs.engine import record_json
 from sgs.skills import (
     CATALOG,
@@ -537,7 +537,8 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
 
     这是 ``tests/test_web.py`` 的"不泄露"判据盯住的那个对象：对手只有 ``hand_count``、
     身份只出现"本人 / 主公 / 已阵亡 / ``identity_visible`` 为真"四种可见情形、牌堆只有
-    数量无顺序。
+    数量无顺序。``hand_limit``（票 09 的手牌读数上限）也在这里，但它是**允许字段**：
+    只由公开事实派生，与 ``hand_count`` 同级，不含隐藏牌面信息。
     """
     state = session.engine.state
     view = project(state, session.human_seat)
@@ -567,6 +568,10 @@ def visible_snapshot(session: Session) -> dict[str, Any]:
         )
         # B：武将块上的状态标签（手牌上限加式 / 裸衣）。纯网页显示字段，不进 PlayerView。
         player_payload["hero_tags"] = seat_hero_tags(state.player(player.seat))
+        # 票 09：手牌读数「手牌：张数/上限」。上限是**派生量**（体力值 → 替换链 → 加式），
+        # 前端不自己算（那会是第二份真源）⇒ 与 `hero_tags` 同姿态只补进**网页载荷**：
+        # 不进 `PlayerPublic` / `PlayerView`（AI 读面要登记读点表，记录流也不该多字节）。
+        player_payload["hand_limit"] = hand_limit(state, state.player(player.seat))
     # 牌面标签：只给**已下发的牌面**补 tags；隐藏区的牌不在载荷里，故连标签也没有。
     _decorate_snapshot_card_tags(payload, state, session.human_seat)
     # M6 票 19：顶栏的轮次 / 额外回合提示。轮次自票 11 起是引擎事实（额外回合不推进

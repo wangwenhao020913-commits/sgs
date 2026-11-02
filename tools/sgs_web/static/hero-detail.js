@@ -164,7 +164,7 @@ function renderHeroDetailBody() {
   const meta = document.createElement("span");
   meta.className = "detail-meta";
   meta.textContent = `座位 ${player.seat} · ${player.alive ? "存活" : "阵亡"}`
-    + ` · 手牌 ${Number(player.hand_count) || 0}`
+    + ` · 手牌：${handReading(player)}`
     + ` · 体力 ${Math.max(0, Number(player.hp) || 0)}/${Math.max(0, Number(player.hp_max) || 0)}`;
   head.appendChild(meta);
   root.appendChild(head);

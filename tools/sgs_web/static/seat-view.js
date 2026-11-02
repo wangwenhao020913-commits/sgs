@@ -6,7 +6,7 @@
  * U2-02 / D6：对手 +8%（228×163）在 8 人环上会重叠，回退为外形不变、内容放大（见 style.css）。
  *   |势力-名称-身份| |判定槽 ×3|
  *   |----体力条----| |-武器-| |-防具-|
- *   |手牌数--座位号| |-攻马-| |-防马-|
+ *   |手牌：N/上限--座位号| |-攻马-| |-防马-|
  * 尺寸 / 配色在 style.css；本文件只造节点的**语义形状**（槽位、状态类、悬停全文）。
  *
  * 纪律：
@@ -124,6 +124,22 @@ function hpBarNode(player) {
   number.textContent = `${hp}/${hpMax}`;
   bar.appendChild(number);
   return bar;
+}
+
+/** 手牌读数（票 09）：`张数/上限`——武将块左下的「手牌：」、武将详情与顶栏共用一句。
+ *
+ * 上限是**服务端下发的派生量**（`player.hand_limit` = `effects.hand_limit`：体力值 →
+ * 替换链 → 一次性加式），前端不自己拿体力算：那会是第二份真源（【英姿】的替换值 /
+ * 【清俭】的加式立刻对不上）。旧载荷 / 合成视图没有这个键时 fail-closed 退回张数——
+ * 界面上绝不出现 `undefined`（票 §3：`hand_limit` 理论上恒有值，显示层不赌）。
+ */
+function handReading(player) {
+  const count = Math.max(0, Number(player && player.hand_count) || 0);
+  const raw = Number(player && player.hand_limit);
+  const hasLimit = Boolean(player)
+    && player.hand_limit !== null && player.hand_limit !== undefined
+    && Number.isFinite(raw) && raw >= 0;
+  return `${count}/${hasLimit ? raw : count}`;
 }
 
 /** 高亮语义文字：当前回合「行动中」、合法目标「可指定」、已选「✓ 已选」。
@@ -457,7 +473,7 @@ function heroBlockNode(player, view, ctx, flags) {
   const foot = document.createElement("div");
   foot.className = "seat-foot";
   const hand = document.createElement("span");
-  hand.innerHTML = `手牌 <b>${Number(player.hand_count) || 0}</b>`;
+  hand.innerHTML = `手牌：<b>${handReading(player)}</b>`;
   const seat = document.createElement("span");
   seat.innerHTML = `座位 <b>${player.seat}</b>`;
   foot.appendChild(hand);

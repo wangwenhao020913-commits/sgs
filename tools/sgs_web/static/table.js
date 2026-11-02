@@ -183,7 +183,8 @@ function renderSelfSeat(view, ctx) {
   fillSeatTags($("t-self-tags"), ctx.flagsFor(player, classes));
   if ($("t-self-chain")) $("t-self-chain").hidden = !player.chained;
   if ($("t-self-dead")) $("t-self-dead").hidden = Boolean(player.alive);
-  $("t-self-hand").textContent = String(player.hand_count);
+  // 票 09：与对手座位卡 / 武将详情同一句话「手牌：张数/上限」（读数由 seat-view.js 派生）。
+  $("t-self-hand").textContent = handReading(player);
   $("t-self-seatno").textContent = String(player.seat);
   const zones = $("t-self-zones");
   if (zones) {
