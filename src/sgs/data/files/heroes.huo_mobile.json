@@ -40,6 +40,28 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "pangtong_mobile",
+      "name": "庞统移动版",
+      "true_name": "庞统",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "huo-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "lianhuan",
+          "name": "连环",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "niepan",
+          "name": "涅槃",
+          "skill_type": "LIMITED"
+        }
+      ]
     }
   ]
 }

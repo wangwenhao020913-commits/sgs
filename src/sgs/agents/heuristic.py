@@ -1401,11 +1401,24 @@ def _score_fire_attack(action: Action, view: PlayerView) -> float:
     return score
 
 
-def _score_reforge(action: Action) -> float:
-    """【铁索连环】重铸：换一张牌（不是使用、不占次数、不触发使用锦囊类技能）。"""
+def _score_reforge(action: Action, view: PlayerView) -> float:
+    """重铸：换一张牌（不是使用、不占次数、不触发使用锦囊类技能）——代价是**这张牌本身**。
+
+    基线取【铁索连环】的牌价（:data:`_CARD_VALUES` 的 ``iron_chain``）：重铸这张牌换一张
+    摸牌，净收益 = :data:`_REFORGE_VALUE` 减去"这张牌比【铁索连环】贵多少"。于是
+
+    - 【铁索连环】自己恒得 :data:`_REFORGE_VALUE`（既有口径：没收益时重铸它，见
+      :func:`_score_iron_chain` 的"没有收益时分数为 0"）；
+    - 更贵的牌（【桃】/【闪】/【杀】/【无懈可击】）得**负分** ⇒ 不会为了重铸白扔好牌；
+    - 更便宜的牌（【闪电】一类）仍按重铸的收益拿正分。
+
+    huo-mobile-batch 票 02 之前恒 0.6——那时只有【铁索连环】自己可重铸（它本来就是
+    "不想要才重铸"的牌），庞统【连环】把重铸能力扩到**任意♣手牌**之后，恒 0.6 会让 AI
+    为 0.6 分扔掉梅花【桃】/【无懈可击】/【杀】。代价不夹下限：负分才能输给「什么都不做」。
+    """
     assert isinstance(action, Reforge)
-    del action
-    return _REFORGE_VALUE
+    baseline = _CARD_VALUES["iron_chain"]
+    return _REFORGE_VALUE - (_card_value(action.card, view=view) - baseline)
 
 
 # ---------------------------------------------------------------------------
@@ -1535,7 +1548,7 @@ def _score_play_phase(query: Query, action: Action) -> float:
     if isinstance(action, ActivateSkill):
         return _skill_value(query, action)
     if isinstance(action, Reforge):
-        return _score_reforge(action)
+        return _score_reforge(action, view)
     if isinstance(action, (UseCard, PlayCard)):
         return _score_card_use(query, action)
     return 0.0
@@ -3360,6 +3373,16 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(2.0),
         "自己的【杀】被【闪】抵消后弃对方一张牌：代价 = 零（弃的是对方的牌），"
         "发动前提由 ACTIVATION_PLANS 保证（本方【杀】被抵消 ∧ 对方有牌）",
+    ),
+    # huo-mobile-batch 票 02：火包移动版庞统【连环】/【涅槃】
+    "hero.pangtong_mobile.lianhuan": (
+        _constant(1.0),
+        "一张♣手牌当【铁索连环】使用或重铸：多一条使用路径 + 一条重铸出口，保守为正；"
+        "重铸分支的打分由 _score_reforge 按牌值扣项",
+    ),
+    "hero.pangtong_mobile.niepan": (
+        _constant(9.0),
+        "限定技：濒死时弃区域所有牌、复原、摸三张、回复至 3 点——一局一条命，问到就发动",
     ),
     "hero.yuji_mobile.guohuo": (
         _constant(1.5),

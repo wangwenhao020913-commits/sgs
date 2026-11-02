@@ -57,6 +57,7 @@ from sgs.state import (
     GameState,
     PlayCard,
     QueryKind,
+    Reforge,
     Step,
     StepPool,
     UseCard,
@@ -360,6 +361,52 @@ def _wushen_forbidden(
     return True
 
 
+def _club_iron_chain(state: GameState, card_id: int) -> bool:
+    """花色谓词 + 产物闸门：**梅花手牌**，且本档牌堆里有【铁索连环】实体牌。
+
+    牌面「一张♣️手牌当【铁索连环】**使用**」——产物牌名不在本档牌堆时（默认
+    ``standard_108`` 一张都没有，只有军争 160 档有 6 张）不给"使用"方向：照界【龙胆】
+    酒 / 桃的既有口径（:func:`_product_in_pack`），否则会造出一张牌面名回落到
+    ``iron_chain`` 的虚拟牌，且"使用一张牌堆外的牌"不是这套数据的语义。
+    **重铸方向不受这条闸门影响**（它不产物虚拟牌，见 :func:`_lianhuan_reforge`）。
+    """
+    return _convertible(state, card_id, suit="club") and _product_in_pack(
+        state, "iron_chain"
+    )
+
+
+def _lianhuan_reforge(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """庞统移动版【连环】的**重铸**分支：出牌阶段给每张♣手牌补一条 ``Reforge`` 候选。
+
+    牌面「…当【铁索连环】**使用或重铸**」是**两条互斥的合法动作**（与【铁索连环】自己
+    在出牌阶段的候选排列同形），故不加 ``SELECT_OPTION``：使用 = 转化候选（``UseCard``
+    虚拟牌），重铸 = 本回调追加的 ``Reforge``。
+
+    - 「当【铁索连环】重铸」= 重铸**那张来源手牌**：虚拟牌从不落区域（``card_id < 0``
+      的牌 ``GameState.card`` fail-closed），而重铸的结算本来就是"这张实体牌进弃牌堆 +
+      摸一张"，两种读法可观测后果相同（票 02 R2）；
+    - 与原生重铸**去重**：牌堆里的♣【铁索连环】本身已经由 ``behavior_for(card).reforgeable``
+      产出同一条 ``Reforge``，这里跳过它，不让同一个动作出现两次（票 02 R4）；
+    - 只在出牌阶段（``CandidateScope.PLAY``）：账本「重铸 = 独立 ``Reforge`` Action」行的
+      "仅出牌阶段"是本技能的第一条"技能授予重铸"载体。
+    """
+    if ctx.card is not None or ctx.owner != ctx.subject:
+        return current
+    if ctx.scope is not CandidateScope.PLAY:
+        return current
+    extra: list[Any] = []
+    for card_id in state.player(ctx.subject).hand:
+        card = state.card(card_id)
+        if card.suit != Suit.CLUB.value:
+            continue
+        if behavior_for(card).reforgeable:
+            continue
+        extra.append(Reforge(card=card, answers_seq=ctx.answers_seq))
+    return (*current, *extra)
+
+
 CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
     # 关羽【武圣】：一张红色牌当【杀】使用或打出（规则 976）。
     ConversionSkill(
@@ -497,6 +544,20 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         scopes=(CandidateScope.PLAY,),
         requirement="选择1张黑色牌当【过河拆桥】使用",
         shared_with=("jie_ganning",),
+    ),
+    # 火包·移动版庞统【连环】（huo-mobile-batch 票 02）：一张♣手牌当【铁索连环】**使用**
+    # 或**重铸**。使用 = 常规单源转化（走与真牌同一条使用链：牌名闸门 / 无懈 / 目标池 /
+    # 帷幕 / 奋威 / 集智……）；重铸 = 同一 ``SkillDef`` 上另挂一条 ``CANDIDATES`` 回调
+    # 追加 ``Reforge``（CANDIDATES 早已追加过非使用类动作的先例：八卦阵的 ``ActivateSkill``）。
+    ConversionSkill(
+        hero_id="pangtong_mobile",
+        short_id="lianhuan",
+        target_type_id="iron_chain",
+        source_zone=_hand,
+        predicate=_club_iron_chain,
+        scopes=(CandidateScope.PLAY,),
+        modifiers=(Modifier(ModifierPoint.CANDIDATES, _lianhuan_reforge),),
+        requirement="选择1张♣手牌当【铁索连环】使用；或重铸这张手牌",
     ),
 )
 """H 族五条技能（六条声明：龙胆两个方向各一条；界甘宁【奇袭】经 ``shared_with`` 共用

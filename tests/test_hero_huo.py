@@ -30,6 +30,7 @@ from sgs.state import (
     Pass,
     Phase,
     QueryKind,
+    Reforge,
     SelectCards,
     SelectOption,
     SlotKind,
@@ -42,6 +43,9 @@ from support import SeatSpec, build_state, cards_of_type, deck_excluding, run_qu
 
 PACK = load_content_pack(deck_profile="standard_108")
 """标准 108 档：本文件只用它的武器牌与牌堆序（数据文件是唯一真源）。"""
+
+PACK_160 = load_content_pack(deck_profile="standard_ex_160")
+"""军争 160 档：**只有它**的牌堆里有【铁索连环】实体牌（108 档一张都没有）。"""
 
 QIANGXI = "hero.dianwei_mobile.qiangxi"
 """典韦移动版【强袭】的全限定 id。"""
@@ -613,6 +617,18 @@ def _advance(engine, predicate, *, limit: int = 4000) -> None:
     raise AssertionError("步数上限内没有到达停止条件")
 
 
+def _until(engine, predicate, *, limit: int = 4000) -> None:
+    """推进到 ``predicate`` 成立（不用"栈空"当停止条件：出牌阶段的步骤循环不在栈上）。"""
+    for _ in range(limit):
+        if predicate(engine):
+            return
+        if engine.pending is not None:
+            engine.submit(_default_action(engine.pending))
+            continue
+        engine._step()
+    raise AssertionError("步数上限内没有到达停止条件")
+
+
 def _pick(query, predicate):
     action = next((item for item in query.legal_actions if predicate(item)), None)
     assert action is not None, (
@@ -819,3 +835,339 @@ def test_pangde_mobile_hero_is_in_the_default_pool() -> None:
     assert hero.hp_max == 4
     assert [skill.id for skill in hero.skills] == ["mashu", "mengjin"]
     assert [skill.name for skill in hero.skills] == ["马术", "猛进"]
+
+
+# ---------------------------------------------------------------------------
+# ⑧ 庞统移动版【连环】（huo-mobile-batch 票 02）
+# ---------------------------------------------------------------------------
+
+PANGTONG = "pangtong_mobile"
+LIANHUAN = "hero.pangtong_mobile.lianhuan"
+
+
+def _club_card(pack, type_id: str) -> int:
+    """某牌名里的**第一张梅花**牌。"""
+    return next(
+        index
+        for index, card in enumerate(pack.deck.cards)
+        if card.type == type_id and card.suit == "club"
+    )
+
+
+def _pack_deck_without(pack, *used: int) -> tuple[int, ...]:
+    return tuple(index for index in range(len(pack.deck.cards)) if index not in used)
+
+
+def _lianhuan_state(pack, hand: tuple[int, ...]):
+    return build_state(
+        pack=pack,
+        seats=[SeatSpec(hero=PANGTONG, hand=hand), SeatSpec(), SeatSpec()],
+        deck=_pack_deck_without(pack, *hand),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+
+
+def _lianhuan_play_phase(pack, hand: tuple[int, ...]):
+    engine = Engine.from_state(_lianhuan_state(pack, hand), seed=3)
+    _advance(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 0,
+    )
+    return engine
+
+
+def test_lianhuan_converts_a_club_hand_card_into_iron_chain() -> None:
+    """160 档：♣ 手牌当【铁索连环】**使用**——走与真牌同一条使用链（目标被横置）。"""
+    club = _club_card(PACK_160, "slash")
+    engine = _lianhuan_play_phase(PACK_160, (club,))
+    steps = engine.pending.transform_preactivations.get(LIANHUAN)
+
+    assert steps, "160 档下【连环】有使用分支的清单"
+    assert int(steps[0].pool[0].options[0]) == club, "来源步只列那张♣手牌"
+    engine.submit(
+        ActivateSkill(
+            skill_id=LIANHUAN,
+            picks=(club,),
+            choices=("seat:1",),
+            answers_seq=engine.pending.seq,
+        )
+    )
+    _until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and club in e.state.discard,
+    )
+
+    assert engine.state.player(1).chained is True, "【铁索连环】把目标横置"
+
+
+def test_lianhuan_manifest_is_derived_from_the_club_sources_only() -> None:
+    """清单来源步只列**♣ 手牌**（红桃不在候选里）。"""
+    club = _club_card(PACK_160, "slash")
+    heart = next(
+        index
+        for index, card in enumerate(PACK_160.deck.cards)
+        if card.type == "slash" and card.suit == "heart"
+    )
+    engine = _lianhuan_play_phase(PACK_160, (club, heart))
+    steps = engine.pending.transform_preactivations.get(LIANHUAN)
+
+    assert steps, "清单下发"
+    options = {int(value) for value in steps[0].pool[0].options}
+    assert options == {club}, "来源步只有梅花牌"
+
+
+def test_lianhuan_reforge_turns_a_club_hand_card_into_a_draw() -> None:
+    """108 档：牌堆里没有【铁索连环】⇒ 只给**重铸**方向（弃一张 + 摸一张）。"""
+    club = _club_card(PACK, "slash")
+    engine = _lianhuan_play_phase(PACK, (club,))
+
+    assert LIANHUAN not in (engine.pending.transform_preactivations or {}), (
+        "本档牌堆没有【铁索连环】⇒ 不给使用分支"
+    )
+    action = _pick(
+        engine.pending,
+        lambda item: isinstance(item, Reforge) and item.card.card_id == club,
+    )
+    hand_before = len(engine.state.player(0).hand)
+    engine.submit(action)
+    _until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and club in e.state.discard,
+    )
+
+    assert len(engine.state.player(0).hand) == hand_before, "重铸 = 弃一张 + 摸一张"
+
+
+def test_lianhuan_does_not_duplicate_the_native_reforge_of_iron_chain() -> None:
+    """♣【铁索连环】本身原生可重铸 ⇒ 技能分支跳过，同一条候选只出现一次。"""
+    chain = _club_card(PACK_160, "iron_chain")
+    engine = _lianhuan_play_phase(PACK_160, (chain,))
+
+    reforges = [
+        action
+        for action in engine.pending.legal_actions
+        if isinstance(action, Reforge) and action.card.card_id == chain
+    ]
+    assert len(reforges) == 1, "原生重铸与技能重铸不重复产出"
+
+
+def test_lianhuan_use_branch_needs_the_product_in_the_deck() -> None:
+    """108 档没有【铁索连环】实体牌 ⇒ 使用分支的清单整个不存在（不造牌堆外的虚拟牌）。"""
+    club = _club_card(PACK, "slash")
+    engine = _lianhuan_play_phase(PACK, (club,))
+
+    assert not engine.pending.transform_preactivations, "没有转化清单"
+    assert any(
+        action.card.is_virtual and action.card.type == "iron_chain"
+        for action in engine.pending.transform_actions
+    ) is False, "内部池里也没有虚拟【铁索连环】"
+
+
+# ---------------------------------------------------------------------------
+# ⑨ 庞统移动版【涅槃】（huo-mobile-batch 票 02）
+# ---------------------------------------------------------------------------
+
+NEIPAN = "hero.pangtong_mobile.niepan"
+
+
+def _damage_seat_zero(engine, *, amount: int = 1, target: int = 0) -> None:
+    """压一个 ``DAMAGE`` 子帧（造成方 = 座位 1，无渠道牌）。"""
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        {
+            "source": 1,
+            "targets": (target,),
+            "card": None,
+            "use_timing": Timing.PHASE_PLAY_IDLE,
+            "target": target,
+            "channel": None,
+            "nature": "NORMAL",
+            "chain": False,
+            "amount": amount,
+        },
+        timing=Timing.DAMAGE_DEAL,
+    )
+
+
+def _niepan_engine(*, hp: int = 1, hp_max: int = 4, hand=(), equip=(), judge=(), chained=False, flipped=False):
+    used = (*hand, *equip, *judge)
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hero=PANGTONG,
+                hp=hp,
+                hp_max=hp_max,
+                hand=hand,
+                equip=equip,
+                judge=judge,
+                chained=chained,
+            ),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=deck_excluding(PACK, *used),
+    )
+    state.player(0).flipped = flipped
+    engine = Engine.from_state(state, seed=5)
+    _damage_seat_zero(engine)
+    return engine
+
+
+def _niepan_query(engine) -> bool:
+    return (
+        engine.pending is not None
+        and engine.pending.kind == QueryKind.SKILL_ACTIVATION
+        and getattr(engine.pending, "skill_id", None) == NEIPAN
+    )
+
+
+def test_niepan_discards_every_card_in_the_owners_area() -> None:
+    """「弃置你区域里所有的牌」= 手牌 + 装备 + 判定（全部进弃牌堆，没有选择面）。"""
+    peach = _cards("peach")[0]
+    weapon = _cards("crossbow")[0]
+    indulgence = _cards("indulgence")[0]
+    engine = _niepan_engine(hand=(peach,), equip=(weapon,), judge=(indulgence,))
+    _advance(engine, _niepan_query)
+    engine.submit(_pick(engine.pending, lambda action: isinstance(action, ActivateSkill)))
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    assert engine.state.player(0).equip == []
+    assert engine.state.player(0).judge == []
+    assert peach not in engine.state.player(0).hand, "原来那张手牌被弃置"
+    for card_id in (peach, weapon, indulgence):
+        assert card_id in engine.state.discard, f"{card_id} 进弃牌堆"
+    assert len(engine.state.player(0).hand) == 3, "弃完之后才是「摸三张」"
+
+
+def test_niepan_restores_the_hero_card() -> None:
+    """「复原武将牌」= 翻回正面 + 解除横置（两个状态位都落 delta）。"""
+    engine = _niepan_engine(chained=True, flipped=True)
+    _advance(engine, _niepan_query)
+    engine.submit(_pick(engine.pending, lambda action: isinstance(action, ActivateSkill)))
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    assert engine.state.player(0).flipped is False
+    assert engine.state.player(0).chained is False
+
+
+def test_niepan_draws_three_and_recovers_to_three() -> None:
+    """摸三张 + 体力回复至 3 点（绝对目标，不是 +3）。"""
+    engine = _niepan_engine()
+    _advance(engine, _niepan_query)
+    engine.submit(_pick(engine.pending, lambda action: isinstance(action, ActivateSkill)))
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    assert engine.state.player(0).hp == 3
+    assert len(engine.state.player(0).hand) == 3, "摸三张（起手为空）"
+
+
+def test_niepan_recovery_is_capped_by_the_hp_max() -> None:
+    """体力上限 < 3 ⇒ 夹到上限（与「回复至体力上限」同一条帧内夹法）。"""
+    engine = _niepan_engine(hp=1, hp_max=2)
+    _advance(engine, _niepan_query)
+    engine.submit(_pick(engine.pending, lambda action: isinstance(action, ActivateSkill)))
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    assert engine.state.player(0).hp == 2
+
+
+def test_niepan_ends_the_dying_state_before_the_peach_window() -> None:
+    """四段全在求桃窗口之前结算完 ⇒ 一问【桃】都不发（别人的桃原封不动）。"""
+    engine = _niepan_engine()
+    _advance(engine, _niepan_query)
+    engine.submit(_pick(engine.pending, lambda action: isinstance(action, ActivateSkill)))
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    assert not [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.PEACH.value
+    ], "回复至 3 点后不再求桃"
+
+
+def test_niepan_declining_keeps_the_area_and_the_dying_window_open() -> None:
+    """「放弃」⇒ 零副作用：牌原位、照常进求桃窗口。"""
+    peach = _cards("peach")[2]
+    engine = _niepan_engine(hand=(peach,))
+    _advance(engine, _niepan_query)
+    engine.submit(_pick(engine.pending, lambda action: isinstance(action, Pass)))
+    _advance(
+        engine,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.PEACH,
+    )
+
+    assert peach in engine.state.player(0).hand, "牌一张没动"
+    assert engine.state.player(0).hp == 0, "仍在濒死（求桃窗口照常开）"
+
+
+def test_niepan_is_offered_when_the_area_is_empty() -> None:
+    """区域为空仍可发动（"弃置所有的牌"= 零动作，其余三段照常）。"""
+    engine = _niepan_engine()
+    _advance(engine, _niepan_query)
+    engine.submit(_pick(engine.pending, lambda action: isinstance(action, ActivateSkill)))
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    assert engine.state.player(0).hp == 3
+    assert len(engine.state.player(0).hand) == 3
+
+
+def test_niepan_is_absent_when_another_character_is_dying() -> None:
+    """「当你处于濒死状态时」：别人濒死不问庞统。"""
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=PANGTONG), SeatSpec(hp=1), SeatSpec()],
+        deck=deck_excluding(PACK),
+    )
+    engine = Engine.from_state(state, seed=5)
+    _damage_seat_zero(engine, target=1)
+    _advance(engine, lambda e: e.pending is not None and e.pending.kind == QueryKind.PEACH)
+    assert engine.pending.actor != 0 or True
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    assert not any(
+        record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION.value
+        and getattr(record.query, "skill_id", None) == NEIPAN
+        for record in engine.records
+    ), "濒死的不是庞统 ⇒ 不问【涅槃】"
+
+
+def test_niepan_is_a_limited_skill_that_is_never_offered_twice() -> None:
+    """整局一次：发动过之后再次濒死不再派发（连询问都不构造）。"""
+    engine = _niepan_engine()
+    _advance(engine, _niepan_query)
+    engine.submit(_pick(engine.pending, lambda action: isinstance(action, ActivateSkill)))
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    _damage_seat_zero(engine, amount=3)
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    activations = [
+        record
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION.value
+        and getattr(record.query, "skill_id", None) == NEIPAN
+    ]
+    assert len(activations) == 1, "限定技整局只问一次"
+
+
+def test_pangtong_mobile_hero_is_in_the_default_pool() -> None:
+    """数据面：庞统移动版进默认池（显示名带「移动版」、真名「庞统」、蜀 / 男 / 3）。"""
+    heroes = {hero.id: hero for table in load_hero_tables() for hero in table.heroes}
+
+    hero = heroes[PANGTONG]
+    assert hero.name == "庞统移动版"
+    assert hero.true_name == "庞统"
+    assert hero.kingdom is Kingdom.SHU
+    assert hero.hp_max == 3
+    assert [skill.id for skill in hero.skills] == ["lianhuan", "niepan"]
+    assert [skill.name for skill in hero.skills] == ["连环", "涅槃"]

@@ -2747,6 +2747,9 @@ from .life_after import (  # noqa: E402  （末尾 import 是刻意的）
 from .death_after import (  # noqa: E402  （末尾 import 是刻意的）
     death_after_skill_definitions,
 )
+from .near_death import (  # noqa: E402  （末尾 import 是刻意的）
+    near_death_skill_definitions,
+)
 
 # **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
 # 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
@@ -2796,6 +2799,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *hero_zone_skill_definitions(),
             *life_after_skill_definitions(),
             *death_after_skill_definitions(),
+            *near_death_skill_definitions(),
         )
     }
 )

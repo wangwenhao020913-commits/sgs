@@ -3038,6 +3038,27 @@ def _coverage_jijiu():
     )
 
 
+def _coverage_lianhuan():
+    """160 档：庞统移动版把一张♣手牌当【铁索连环】使用（使用分支只在牌堆有它时存在）。"""
+    # 取一张**出牌阶段用不出去**的♣手牌（【无懈可击】）：否则 AI 直接把它按原用途打出去，
+    # 这条覆盖就测不到清单填表（与武圣 / 国色的覆盖取"用不出去的源牌"同一条口径）。
+    club = next(
+        index
+        for index, card in enumerate(PACK_EX_160.deck.cards)
+        if card.type == "nullify" and card.suit == "club"
+    )
+    deck = tuple(
+        index for index in range(len(PACK_EX_160.deck.cards)) if index != club
+    )
+    state = build_state(
+        pack=PACK_EX_160,
+        seats=[SeatSpec(hand=(club,), hero="pangtong_mobile"), SeatSpec()],
+        deck=deck,
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state)
+
+
 def _coverage_serpent_spear():
     first, second = _ids("dodge")[0], _ids("dodge")[1]
     serpent = _ids("serpent_spear")[0]
@@ -3057,6 +3078,8 @@ _TRANSFORM_COVERAGE_CASES = (
     ("国色", "hero.daqiao.guose", _coverage_guose, "indulgence"),
     ("急救", "hero.huatuo.jijiu", _coverage_jijiu, "peach"),
     ("丈八蛇矛", "equip.serpent_spear", _coverage_serpent_spear, "slash"),
+    # huo-mobile-batch 票 02：庞统移动版【连环】的使用分支（160 档才有【铁索连环】实体牌）
+    ("连环", "hero.pangtong_mobile.lianhuan", _coverage_lianhuan, "iron_chain"),
 )
 """``(标签, 技能 id, 场景构造, 解析出的虚拟牌名)``：五条转化技（龙胆两方向各一）。"""
 
