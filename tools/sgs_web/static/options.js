@@ -191,6 +191,9 @@ const OPTION_LABELS = Object.freeze({
   shensu_skip_judge_draw: "【1】跳过判定阶段和摸牌阶段",
   shensu_skip_play_equip: "【2】跳过出牌阶段并弃置一张装备牌",
   shensu_both: "两项都选",
+  // 火包移动版典韦【强袭】（huo-dianwei-mobile 票 01）：代价二选一（可以放弃）。
+  qiangxi_lose_hp: "失去1点体力",
+  qiangxi_discard_weapon: "弃置一张武器牌",
 });
 
 /** 一次性二选一的**配对**：只在候选里出现了同一对的一员时，才把整对画出来。

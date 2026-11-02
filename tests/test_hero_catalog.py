@@ -74,6 +74,10 @@ FENG_HEROES = load_heroes("feng")
 FENG_MOBILE_HEROES = load_heroes("feng_mobile")
 """**神话再临·风包**那一份（票 03 起）：独立系列包，版本字段 ``feng``（黄忠 / 烈弓）。"""
 
+HUO_MOBILE_HEROES = load_heroes("huo_mobile")
+"""**神话再临·火包的移动版**那一份（huo-dianwei-mobile 票 01 起）：移动版独立成表，
+版本字段 ``huo-mobile``，显示名加「移动版」后缀（典韦移动版 / 强袭）。"""
+
 HOMEBREW_HEROES = load_heroes("homebrew")
 """**自制包**那一份（韬·刘备自制版）：独立系列包，版本字段 ``homebrew``，真名「刘备」
 （与标准版同名 ⇒ 同一局仍只出一个）。"""
@@ -121,6 +125,9 @@ JIE_MOBILE_ENABLED = tuple(
 FENG_ENABLED = tuple(hero.id for hero in FENG_HEROES.heroes if hero.enabled)
 FENG_MOBILE_ENABLED = tuple(
     hero.id for hero in FENG_MOBILE_HEROES.heroes if hero.enabled
+)
+HUO_MOBILE_ENABLED = tuple(
+    hero.id for hero in HUO_MOBILE_HEROES.heroes if hero.enabled
 )
 HOMEBREW_ENABLED = tuple(hero.id for hero in HOMEBREW_HEROES.heroes if hero.enabled)
 
@@ -190,9 +197,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 135
+    assert len(CATALOG) == 136
     assert len(equipment) == 22
-    assert len(heroes) == 113
+    assert len(heroes) == 114
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -205,6 +212,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
             JIE_MOBILE_HEROES,
             FENG_HEROES,
             FENG_MOBILE_HEROES,
+            HUO_MOBILE_HEROES,
             HOMEBREW_HEROES,
         )
         for hero in table.heroes
@@ -214,7 +222,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 113
+    assert len(expected) == 114
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -224,6 +232,7 @@ def test_every_hero_skill_id_is_fully_qualified():
         | set(JIE_MOBILE_ENABLED)
         | set(FENG_ENABLED)
         | set(FENG_MOBILE_ENABLED)
+        | set(HUO_MOBILE_ENABLED)
         | set(HOMEBREW_ENABLED)
     )
     for definition in CATALOG.values():
@@ -253,6 +262,7 @@ def test_the_enabled_heroes_have_no_two_skills_on_the_same_timing():
         *JIE_MOBILE_HEROES.heroes,
         *FENG_HEROES.heroes,
         *FENG_MOBILE_HEROES.heroes,
+        *HUO_MOBILE_HEROES.heroes,
     ):
         if hero.id not in (
             set(ENABLED)
@@ -260,6 +270,7 @@ def test_the_enabled_heroes_have_no_two_skills_on_the_same_timing():
             | set(JIE_MOBILE_ENABLED)
             | set(FENG_ENABLED)
             | set(FENG_MOBILE_ENABLED)
+            | set(HUO_MOBILE_ENABLED)
         ):
             continue
         by_timing: dict[Timing, list[str]] = defaultdict(list)
@@ -1047,6 +1058,8 @@ SKILL_FILES: dict[str, str] = {
     "hero.zhangjiao_mobile.leiji": "test_hero_feng.py",
     "hero.zhangjiao_mobile.guidao": "test_hero_feng.py",
     "hero.zhangjiao_mobile.huangtian": "test_hero_feng.py",
+    # huo-dianwei-mobile 票 01：火包移动版典韦【强袭】（新包 → 新测试文件）
+    "hero.dianwei_mobile.qiangxi": "test_hero_huo.py",
     "hero.jie_zhangliao.tuxi": "test_hero_jie_wei.py",
     "hero.jie_xuchu.luoyi": "test_hero_jie_wei.py",
     # M6 票 15：界·魏 B（郭嘉 / 李典）
@@ -1108,6 +1121,7 @@ def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
             JIE_MOBILE_HEROES,
             FENG_HEROES,
             FENG_MOBILE_HEROES,
+            HUO_MOBILE_HEROES,
         )
         for hero in table.heroes
         if hero.enabled
@@ -1838,6 +1852,8 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.zhangjiao_mobile.leiji": "触发技能",
     "hero.zhangjiao_mobile.guidao": "能力位",
     "hero.zhangjiao_mobile.huangtian": "主动技能",
+    # huo-dianwei-mobile 票 01：火包移动版典韦【强袭】= 一步选项步 + 手写主体（主动技能格）
+    "hero.dianwei_mobile.qiangxi": "主动技能",
     "hero.jie_simayi.guicai": "能力位",
     # 本票：移动版界【曹仁】据守 = 阶段体零步（摸三张）+ 翻面，非锁定 ⇒ 零步技能格
     "hero.jie_caoren_mobile.jushou": "零步技能",
@@ -1875,7 +1891,8 @@ SKILL_SHAPE: dict[str, str] = {
 SHAPE_COUNTS: dict[str, int] = {
     # feng-zhangjiao 票 01：张角移动版三条 ⇒ 主动技能 20 → 21（黄天）、触发技能 14 → 15
     # （雷击，两条钩子同一条流水线）、能力位 2 → 3（鬼道）。
-    "主动技能": 21,
+    # huo-dianwei-mobile 票 01：火包移动版典韦【强袭】⇒ 主动技能 21 → 22。
+    "主动技能": 22,
     "触发技能": 15,
     "零步技能": 27,
     "排列技能": 3,
@@ -1992,7 +2009,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """132 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 135
+    assert len(SKILL_SHAPE) == len(CATALOG) == 136
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2109,7 +2126,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """66 在内 / 66 在外（132 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """69 在内 / 67 在外（136 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -2121,7 +2138,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 68
+    assert len(inside) == 69
     assert len(outside) == 67
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

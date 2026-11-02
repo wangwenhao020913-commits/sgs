@@ -529,6 +529,9 @@ HEURISTIC_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
             "SelectOption",
             "SelectOptionQuery",
             "SkillActivationQuery",
+            # huo-dianwei-mobile 票 01：`CardRef.slot` 的枚举（**可见面**的一部分，
+            # 与已允许的 CardRef 同源；不是全知状态 / 规则表）。
+            "SlotKind",
             # feng-zhangjiao 票 02：改判窗口的候选构造子（与 PlayCard 同为可见动作面）。
             "SubstituteJudgeCard",
             "UseCard",

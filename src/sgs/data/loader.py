@@ -83,6 +83,7 @@ HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = (
     "jie_mobile",
     "feng",
     "feng_mobile",
+    "huo_mobile",
     "homebrew",
 )
 """与内容包表并行装载的**扩展武将包**（M6 票 04：界标准独立成一份数据）。
@@ -103,6 +104,12 @@ HERO_SUPPLEMENT_PACK_IDS: tuple[str, ...] = (
 ``feng`` 是**神话再临·风包**那一份（``files/heroes.feng.json``，票 03 起）：它既不是标准版
 的"另一版本"、也不是移动版，而是一个**独立的系列包**——故单独一表、版本标记取 ``"feng"``。
 风包武将逐名追加到这张表；与界标准 / 移动版同一读取面（同一道三段校验、同一个默认将池）。
+
+``huo_mobile`` 是**神话再临·火包的移动版**那一份（``files/heroes.huo_mobile.json``，
+huo-dianwei-mobile 票 01 起）：与 ``feng_mobile`` 同一姿态——移动版独立成表、版本标记取
+``"huo-mobile"``、显示名加「移动版」后缀。火包武将逐个追加到这张表；将来做 **OL 火包**
+时另开 ``files/heroes.huo.json``（版本标记 ``"huo"``），两表并存、同真名可各持一版
+（用户裁定「移动版与 OL 系列版本并存」）。
 
 ``homebrew`` 是**自制包**那一份（``files/heroes.homebrew.json``）：同样是一个独立系列包，
 版本标记取 ``"homebrew"``，显示名不带任何版本后缀（自制武将自带「韬·」系列前缀）。首个载体

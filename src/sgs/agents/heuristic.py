@@ -117,6 +117,7 @@ from sgs.state import (
     SelectOption,
     SelectOptionQuery,
     SkillActivationQuery,
+    SlotKind,
     UseCard,
     WindowCause,
 )
@@ -1883,6 +1884,11 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         "shensu_skip_judge_draw": 2.0,
         "shensu_skip_play_equip": -1.0,
         "shensu_both": 1.0,
+        # 典韦移动版【强袭】（huo-dianwei-mobile 票 01）的代价二选一：两档都是成本，
+        # 由"哪一档更便宜"决定——1 点体力 ≈ 3.5、一张武器牌 ≈ 2.0 ⇒ 有牌就弃牌
+        # （已发动的技能不能再放弃：`_is_committed_skill_step` 给 Pass 惩罚）。
+        "qiangxi_lose_hp": -3.5,
+        "qiangxi_discard_weapon": -2.0,
     }
 )
 
@@ -2014,6 +2020,9 @@ _HOSTILE_SEAT_STEPS = (
     # 张角移动版【雷击】（feng-zhangjiao 票 01）：座位步选的是**被判定者**（也就是挨 2 点
     # 雷电伤害的人）——不登记会落进"帮盟友"的缺省分支，AI 会给队友判一次、白打队友。
     "hero.zhangjiao_mobile.leiji:",
+    # 典韦移动版【强袭】（huo-dianwei-mobile 票 01）：选的是**挨 1 点伤害的人**——不登记
+    # AI 会把【强袭】的伤害砸在队友身上。
+    "hero.dianwei_mobile.qiangxi:",
 )
 """座位步的**语义分组**：这些步骤里的座位是"被指向的对手"，其余（治疗 / 给牌）是"被帮助的人"。
 
@@ -3101,6 +3110,37 @@ def _score_shensu(query: Query, action: Action, view: PlayerView) -> float:
     return -1.0
 
 
+def _score_qiangxi(query: Query, action: Action, view: PlayerView) -> float:
+    """移动版典韦【强袭】（huo-dianwei-mobile 票 01）：1 点伤害，代价在下一步里挑。
+
+    代价二选一 ⇒ 这里只回答"值不值得发动"，挑哪一档交给 ``_OPTION_VALUES``
+    （武器牌 −2.0 比失去 1 点体力 −3.5 便宜，有牌就弃牌）。读的都是公开面（体力）
+    与自己可见的牌（手牌 / 装备区的槽位种类），不碰隐藏信息。
+
+    - **有武器牌可弃** ⇒ 3.5 − 2.0 ≈ +1.5：恒值得；
+    - **只能失去体力** ⇒ **能补刀**（任一存活敌方 ``hp <= 1``）时 +2.0，否则保守给 +0.5；
+    - **自己只剩 1 体力** ⇒ 自伤会直接进濒死 ⇒ −1.0（低于 Pass = 0.0）。
+    """
+    assert isinstance(action, ActivateSkill)
+    del query
+    me = next((player for player in view.players if player.seat == view.seat), None)
+    if me is None or not me.alive:
+        return _UNKNOWN_SKILL_VALUE
+    if me.hp <= 1:
+        return -1.0
+    weapons = [card for card in view.self_hand if card.slot is SlotKind.WEAPON]
+    weapons.extend(card for card in me.equip if card.slot is SlotKind.WEAPON)
+    if weapons:
+        return 1.5
+    for player in view.players:
+        if player.seat == view.seat or not player.alive:
+            continue
+        enemy, _ally = _identity_relation(view, player.seat)
+        if player.hp <= 1 and enemy >= 0.5:
+            return 2.0
+    return 0.5
+
+
 # ---------------------------------------------------------------------------
 # S1 技能表 top3（票 22）：据守 / 贯石斧 / 谦逊
 #
@@ -3308,6 +3348,12 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _score_huangtian,
         "主公技：发动者是**别的座位**——交出一张【闪】/【闪电】的收益归张角、成本归自己；"
         "按主公的身份关系打分（明敌人不给、其余给正分）",
+    ),
+    # huo-dianwei-mobile 票 01：火包移动版典韦【强袭】
+    "hero.dianwei_mobile.qiangxi": (
+        _score_qiangxi,
+        "1 点伤害换一张武器牌（净赚）或 1 点体力：有牌就弃牌；只能失血时只在能补刀 / "
+        "体力充裕时发动，1 体力时自伤进濒死 ⇒ 不发动",
     ),
     "hero.yuji_mobile.guohuo": (
         _constant(1.5),

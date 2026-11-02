@@ -984,15 +984,19 @@ def test_jie_jieyin_target_pool_leaves_out_a_seat_with_no_way_through():
 
 
 def test_the_stuck_jieyin_seed_finishes_within_a_bounded_run():
-    """票 01 回归（端到端）：卡死种子 ``5667218070898781`` 的一局能自然终局。
+    """票 01 回归（端到端）：卡死种子的一局能自然终局。
 
     修复前探针跑到 2 万步仍未终局（票 18 的读数）：座位 4 的界孙尚香在同一出牌阶段反复
     「发动【结姻】→ 选死座位 → 空闭集取消」（取消零副作用、不落 ``_USED``）。
-    ``run_queries`` 的 ``limit`` 就是这条回归的步数上限：神吕蒙移动版进池（57 → 58）换掉了
-    这个种子的配将面后重测为 **717 次决策 / 6 324 次推进迭代**（原 199 / 1 335）；上限取
-    **12 000**——仍远低于修复前的 2 万步，真回退了会**断言失败**而不是把 CI 挂死。
+    ``run_queries`` 的 ``limit`` 就是这条回归的步数上限。
+
+    **种子随池变**：本回归是"某个真种子真的走到那条死路"，故每次默认将池换掉配将面都得
+    重新选种。历史上换过两次：神吕蒙移动版进池（57 → 58）⇒ ``5667218070898781`` 重测为
+    **717 次决策 / 6 324 次推进迭代**；火包移动版典韦进池（63 → 64）⇒ 原种子不再走到
+    界【结姻】的候选，改取 ``100``（**396 次决策 / 3 138 次推进迭代**）。上限取 **12 000**
+    ——远低于修复前的 2 万步，真回退了会**断言失败**而不是把 CI 挂死。
     """
-    seed = 5667218070898781
+    seed = 100
     engine = Engine.new_game(
         seed=seed,
         rule_config=RuleConfig(player_count=5),
@@ -1003,7 +1007,7 @@ def test_the_stuck_jieyin_seed_finishes_within_a_bounded_run():
 
     run_queries(engine, players, lambda e: e.finished, limit=12_000)
 
-    assert engine.finished, "步数上限内自然终局（实测 199 次决策）"
+    assert engine.finished, "步数上限内自然终局（实测 396 次决策）"
     assert any(
         record.kind == "query"
         and JIEYIN in (getattr(record.query, "preactivations", None) or {})

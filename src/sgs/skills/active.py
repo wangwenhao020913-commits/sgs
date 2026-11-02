@@ -83,6 +83,7 @@ from sgs.state import (
     RespondMode,
     SelectionSpec,
     Slot,
+    SlotKind,
     Zone,
     ZoneRef,
     seats_from,
@@ -2223,6 +2224,226 @@ JIE_KUROU_FLOW = SkillFlow(
 
 
 # ---------------------------------------------------------------------------
+# 典韦移动版【强袭】（huo-dianwei-mobile 票 01）：失去 1 点体力或弃置一张武器牌，
+# 然后对你攻击范围内的一名其他角色造成 1 点伤害
+#
+# 牌面（用户 `D:\SGS_HEROS\神话再临-火包\典韦\技能.txt`，逐字）：
+#
+#     出牌阶段限一次，你可以失去1点体力或者弃置一张武器牌，然后对你攻击范围内的一名
+#     其他角色造成1点伤害。
+#
+# OL 版是**另一条技能**（限两次 / 没有攻击范围 / 每名目标每回合一次），本仓按移动版
+# 实现（huo-dianwei-mobile 票 01 §5 R1：账本「典韦移动版的平台差异（A1）」行）。
+#
+# 四条落地判据（票面 §5 R2–R7）：
+# - **代价与目标的先后**：「然后」⇒ 先付代价、再定目标；目标池按**代价付掉之后**的
+#   攻击范围算（`targets_within_attack_range(..., excluding=cost)`，与【流离】W4-2
+#   同一条判据）——弃掉自己唯一的武器后范围回落，够不到的目标不可选。
+# - **条件步住在 effect 里**：两条代价分支的后续步骤不同（弃武器要选牌、失去体力不要），
+#   而 `SkillFlow.steps` 是定长元组、任一步"没有候选"的语义是**取消整条流水线**
+#   ⇒ 选项步留在流水线、选武器牌 / 选目标 / 付代价住在 `effect`（界【国色】的同一姿态）。
+# - **次数在真提交点落**：`once_per_phase=False` + 手写 `_mark_phase`（【势斩】的姿态）——
+#   执行器的 `on_commit` 跑在 `effect` **之前**，而本技能的 effect 里还有可取消的手写步骤，
+#   那样"选了代价却中途取消"也会吃掉阶段位（违反"取消零副作用"）。
+# - **取消零副作用**：选武器牌 / 选目标任一步没有候选 ⇒ 整条取消，代价一张都不付
+#   （阶段位不落、牌不搬、体力不失）。
+# ---------------------------------------------------------------------------
+
+QIANGXI = hero_skill_id("dianwei_mobile", "qiangxi")
+"""典韦移动版【强袭】的全限定技能 id。"""
+
+QIANGXI_LOSE_HP = "qiangxi_lose_hp"
+"""【强袭】代价选项 1：失去 1 点体力。"""
+
+QIANGXI_DISCARD_WEAPON = "qiangxi_discard_weapon"
+"""【强袭】代价选项 2：弃置一张武器牌（没有武器牌时这一项不出现）。"""
+
+_ASK_QIANGXI_WEAPON = "hero.dianwei_mobile.qiangxi.weapon"
+"""手写询问位置：弃置一张武器牌（逐处唯一）。"""
+
+_QIANGXI_ASK_TARGET = "hero.dianwei_mobile.qiangxi:target"
+"""手写询问位置：选目标（投影读冒号后的 `target` 取逐步文案）。"""
+
+_QIANGXI_CARD = "qiangxi_card"
+"""帧私有：弃武器分支选中的那张武器牌（续跑不重问）。"""
+
+_QIANGXI_TARGET = "qiangxi_target"
+"""帧私有：已选定的目标座位（续跑不重问）。"""
+
+_QIANGXI_PAID = "qiangxi_paid"
+"""帧私有：代价已经付出去（搬牌 / 失血帧都可能挂起，重入不得再付一次）。"""
+
+_QIANGXI_DONE = "qiangxi_done"
+"""帧私有：伤害子帧已经压过（重入只收尾）。"""
+
+
+def _qiangxi_is_weapon(state: GameState, card: Any) -> bool:
+    """这张牌是不是**武器牌**：按槽位种类判（不按牌名 id 白名单）。"""
+    return card.slot is SlotKind.WEAPON
+
+
+def _qiangxi_weapon_cards(state: GameState, owner: int) -> tuple[int, ...]:
+    """可弃的武器牌：**手牌 + 装备区**里的武器牌（默认读法（一）②③）。"""
+    player = state.player(owner)
+    return tuple(
+        card_id
+        for card_id in (*player.hand, *player.equip)
+        if _qiangxi_is_weapon(state, state.card(card_id))
+    )
+
+
+def _qiangxi_weapon_face(host: Any, owner: int) -> Any:
+    """弃武器面的**收窄**：自己的手牌 + 装备区，再按"是不是武器牌"过滤（槽位与 id 同序）。"""
+    slots, card_ids = host.selection_face(
+        owner, (Zone.HAND, Zone.EQUIP), reveal_hand=True
+    )
+    kept = [
+        (slot, card_id)
+        for slot, card_id in zip(slots, card_ids, strict=True)
+        if _qiangxi_is_weapon(host.state, host.state.card(card_id))
+    ]
+    return tuple(slot for slot, _ in kept), tuple(card_id for _, card_id in kept)
+
+
+def _qiangxi_target_pool(
+    state: GameState, owner: int, cost: tuple[int, ...]
+) -> tuple[int, ...]:
+    """目标池：**代价付掉之后**仍在你攻击范围内的一名其他存活角色。
+
+    ``cost`` = 这次要弃掉的武器牌（失去体力那一档传空元组）：范围由
+    :func:`~sgs.effects.targets_within_attack_range` 的 ``excluding`` 用同一个公式重算，
+    不在技能层抄一份"没有武器 = 1"。【流离】（W4-2）是同一个判据的先例。
+    """
+    return targets_within_attack_range(state, owner, excluding=cost)
+
+
+def _qiangxi_options(
+    state: GameState, frame: Any, owner: int, answers: FlowAnswers
+) -> tuple[str, ...]:
+    """代价选项的闭集（可调用档）：**没有武器牌时"弃置一张武器牌"不出现**（O1 收窄）。
+
+    失去体力恒可付（1 体力也能失去、进濒死），故本步恒有候选。【神速】的
+    ``_shensu_options`` 是同一个收窄姿态。
+    """
+    del frame, answers
+    if not _qiangxi_weapon_cards(state, owner):
+        return (QIANGXI_LOSE_HP,)
+    return (QIANGXI_LOSE_HP, QIANGXI_DISCARD_WEAPON)
+
+
+def _qiangxi_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：自己的出牌阶段 ∧ 本阶段没用过 ∧ 攻击范围内至少一名其他存活角色。
+
+    次数位不走 ``_can_offer`` 的 ``once_per_phase``：本技能在**提交点**才落位
+    （``once_per_phase=False``），故"本阶段是否已用过"在这里显式读一次。
+    """
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    if _phase_flags(state, ctx.owner, ctx.skill_id) & _USED:
+        return current
+    if not _qiangxi_target_pool(state, ctx.owner, ()):
+        # 攻击范围内一个其他存活角色都没有：1 点伤害无处可去 ⇒ 不产出候选
+        # （总纪律 1：不发没有候选的询问）。
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _qiangxi_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：选武器牌（仅那一档）→ 选目标 → 付代价 → 造成 1 点伤害。
+
+    段游标：``_QIANGXI_CARD`` / ``_QIANGXI_TARGET``（选择只问一次）、``_QIANGXI_PAID``
+    （代价只付一次）、``_QIANGXI_DONE``（伤害只压一次）。**阶段位与第一笔代价同一个
+    提交点**：走到这里之前的任何取消（没有武器牌可挑 / 弃掉武器后没有目标）都不落位、
+    不搬牌、不失血。
+    """
+    state = host.state
+    owner = frame.data["source"]
+    discard_weapon = str(answers["option"]) == QIANGXI_DISCARD_WEAPON
+    card: int | None = frame.data.get(_QIANGXI_CARD)
+    if discard_weapon and card is None:
+        picked = host.ask_selection(
+            frame,
+            owner=_ASK_QIANGXI_WEAPON,
+            key="qiangxi:weapon",
+            actor=owner,
+            timing=Timing.PHASE_PLAY_IDLE,
+            spec=SelectionSpec(zones=(Zone.HAND, Zone.EQUIP), total=(1, 1)),
+            build_face=lambda: _qiangxi_weapon_face(host, owner),
+        )
+        if host.suspended(picked):
+            return "stay"
+        if not picked:
+            # 面为空（防御分支：入口已保证有武器牌）⇒ 整条取消、零副作用。
+            return None
+        card = int(picked[0])
+        frame.data[_QIANGXI_CARD] = card
+    cost: tuple[int, ...] = (card,) if discard_weapon and card is not None else ()
+    target = frame.data.get(_QIANGXI_TARGET)
+    if target is None:
+        pool = _qiangxi_target_pool(state, owner, cost)
+        if not pool:
+            # 弃掉的正是那把撑起范围的武器、且范围内已无别人 ⇒ 整条取消、零副作用。
+            # **防御分支**：只要场上还有别的存活角色，最近的那家恒在距离 1（距离按**存活**
+            # 座位数算），而弃武器后范围至少回到 1 ⇒ 这一支实际走不到；留着是为了"池永远
+            # 非空"不成为一条隐式前提（将来若出现减范围的共享原语，这里不该是空指针）。
+            return None
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.PHASE_PLAY_IDLE,
+            skill_id=_QIANGXI_ASK_TARGET,
+            options=tuple(_seat_choice(seat) for seat in pool),
+            optional=False,
+        )
+        if host.suspended(answer):
+            return "stay"
+        target = _option_seat(answer)
+        frame.data[_QIANGXI_TARGET] = target
+    if not frame.data.get(_QIANGXI_PAID):
+        # 真提交点：先落阶段位（之前的任何取消都走不到这里），再付代价。
+        _mark_phase(state, owner, QIANGXI, _USED)
+        if discard_weapon:
+            assert card is not None
+            if (
+                _move_to_discard(host, frame, (card,), owner=owner, key="qiangxi:cost")
+                == "stay"
+            ):
+                return "stay"
+        else:
+            frame.data[_QIANGXI_PAID] = True
+            # 失去体力 ≠ 受到伤害：只压 LIFE_DECREASE 帧（无来源、无属性），该帧自带濒死插入。
+            host.push_frame(
+                FrameKind.LIFE_DECREASE,
+                {"target": owner, "source": None, "amount": 1},
+                timing=Timing.LIFE_DECREASE_BEFORE,
+            )
+            return "stay"
+        frame.data[_QIANGXI_PAID] = True
+    if frame.data.get(_QIANGXI_DONE):
+        return None
+    if not state.player(owner).alive:
+        # 失去体力把自己送进濒死且没救回：角色已阵亡，伤害整段不发生。
+        return None
+    if not state.player(int(target)).alive:
+        # 目标在代价的结算里离场（内联钩子造成）：不压伤害帧。
+        return None
+    frame.data[_QIANGXI_DONE] = True
+    _push_damage(host, frame, source=owner, target=int(target), amount=1)
+    return "stay"
+
+
+QIANGXI_FLOW = SkillFlow(
+    name="qiangxi",
+    steps=(PickOption(options=_qiangxi_options, optional=True, key="option"),),
+    effect=_qiangxi_effect,
+    # 次数由提交点自己数（见上）：执行器的 `_USED` 落在 effect 之前，而本技能的 effect
+    # 里还有可取消的手写步骤 —— 那样"选了代价却中途取消"也会吃掉阶段位。
+    once_per_phase=False,
+)
+"""【强袭】的一步流水线：选代价 → （弃武器：选牌）→ 选目标 → 付代价 → 1 点伤害。"""
+
+
+# ---------------------------------------------------------------------------
 # 界关羽【义绝】（M6 票 04）：弃一张牌 → 一名其他角色展示一张手牌 → 红 / 黑分叉
 #
 # 规则原文（§十九 L2071–L2074）：
@@ -4010,6 +4231,26 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
         skill_type=SkillType.LORD,
         requirement="主公技，其他群势力角色的出牌阶段限一次，该角色可以交给你一张【闪】或【闪电】",
         step_requirements={"card": "选择一张【闪】或【闪电】交给张角"},
+    ),
+    # 典韦移动版【强袭】（huo-dianwei-mobile 票 01）：出牌阶段限一次，失去 1 点体力或
+    # 弃置一张武器牌（二选一）→ 对**代价付掉之后**仍在攻击范围内的一名其他角色造成
+    # 1 点伤害。不翻预发动（首步是选项步 ⇒ 直提态 + 逐步问，与【神速】同一档）。
+    ActiveSkill(
+        "dianwei_mobile",
+        "qiangxi",
+        _qiangxi_offers,
+        flow=QIANGXI_FLOW,
+        requirement=(
+            "出牌阶段限一次，你可以失去1点体力或者弃置一张武器牌，"
+            "然后对你攻击范围内的一名其他角色造成1点伤害"
+        ),
+        step_requirements={
+            # SELECT_OPTION 读询问 skill_id 冒号后那段（``qiangxi:option`` ⇒ ``option``）、
+            # SELECT_CARDS 恒读 ``card``、手写选目标读 ``…:target`` 的 ``target``。
+            "option": "选择一项：失去1点体力 / 弃置一张武器牌",
+            "card": "弃置一张武器牌（手牌或装备区）",
+            "target": "选择你攻击范围内的一名其他角色",
+        },
     ),
 )
 """A 族十七条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】+

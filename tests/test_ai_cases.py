@@ -2303,3 +2303,156 @@ def test_s2_shensu_passes_when_the_slash_cannot_finish_anyone():
     """敌方满体力 ⇒ Pass（为一张【杀】放弃摸牌阶段的两张牌不划算）。"""
     _engine, query = _shensu_query(enemy_hp=4)
     _assert_activation(query, skill_id=SHENSU_SKILL, activate=False)
+
+
+# ---------------------------------------------------------------------------
+# huo-dianwei-mobile 票 01：典韦移动版【强袭】的三步询问（发动 / 代价 / 目标）
+#
+# 判据只读公开面：有武器牌可弃 ⇒ 弃牌比失去 1 点体力便宜（−2.0 > −3.5）；座位步按敌我
+# 关系挑人（座位 1 = 反贼、2 / 3 = 忠臣）——不登记 `_HOSTILE_SEAT_STEPS` 时 AI 会打忠臣。
+#
+# 本技能**不翻预发动**（骨架仍在 legal_actions），但引擎对每个候选技能都渲染一份清单，
+# 故 AI 走的是"填清单 + 一次提交"的**复合动作**（`choices` 里带着代价选择）——这正是
+# 界面上真人点技能后再选代价的同一份声明，两档走的都是同一条 `SkillFlow`。
+# ---------------------------------------------------------------------------
+
+QIANGXI_SKILL = "hero.dianwei_mobile.qiangxi"
+QIANGXI_SEAT = 0
+QIANGXI_ENEMY_SEAT = 1
+
+
+def _qiangxi_engine(*, hp: int = 4, equip=(), reveal_enemy: bool = False):
+    """座位 0 = 主公典韦移动版（出牌阶段），1 = 反贼，2 / 3 = 忠臣。
+
+    牌堆顶两张【闪】：摸牌阶段摸到也用不出去，出牌阶段的候选于是只剩【强袭】（与结束
+    出牌阶段）——被测的决策不被别的牌抢走。
+    """
+    dodges = cards_of_type(PACK, "dodge")[:2]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hero="dianwei_mobile",
+                hp=hp,
+                hp_max=4,
+                identity=Identity.LORD,
+                equip=equip,
+            ),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LOYALIST),
+            SeatSpec(identity=Identity.LOYALIST),
+        ],
+        deck=(*dodges, *deck_excluding(PACK, *equip, *dodges)),
+        turn_seat=QIANGXI_SEAT,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+    if reveal_enemy:
+        # 身份局里别人的身份默认不可见（`PlayerView` 只揭示本人 / 主公 / 已死亡者），
+        # 这里让反贼**亮明身份**，座位步的敌我才分得出来（"已亮明 ⇒ 精确 0/1"那一档）。
+        state.player(QIANGXI_ENEMY_SEAT).identity_visible = True
+    return Engine.from_state(state, seed=2026)
+
+
+def _qiangxi_play_query(engine):
+    """推进到"出牌阶段询问里真有【强袭】候选"的那一问。"""
+    run_queries(
+        engine,
+        [PassPlayer() for _ in range(4)],
+        lambda current: current.pending is not None
+        and current.pending.kind == "PLAY_PHASE"
+        and find_action(
+            current.pending,
+            lambda action: isinstance(action, ActivateSkill)
+            and action.skill_id == QIANGXI_SKILL,
+        )
+        is not None,
+    )
+    query = engine.pending
+    assert query is not None, "推进器在到达【强袭】的候选前就停了"
+    return query
+
+
+def _step_until(engine, predicate, *, limit: int = 40):
+    """用真启发式应答，把引擎推到下一个满足 ``predicate(query)`` 的询问。
+
+    与 ``support.run_queries`` 同一推进姿态：``submit`` 之后引擎要再 ``_step()`` 一次才会
+    摆出下一个询问（``pending`` 在两次之间是 ``None``）。
+    """
+    for _ in range(limit):
+        if engine.pending is None:
+            engine._step()
+            continue
+        if predicate(engine.pending):
+            return engine.pending
+        engine.submit(
+            HeuristicPlayer(ai_stream(1, engine.pending.actor)).respond(engine.pending)
+        )
+    raise AssertionError("步数上限内没有到达目标询问")
+
+
+def test_the_qiangxi_fixture_reaches_a_real_play_phase_window():
+    """夹具自检：这一问是出牌阶段、问的是典韦自己、候选里真有【强袭】。"""
+    engine = _qiangxi_engine(equip=(cards_of_type(PACK, "crossbow")[0],))
+    query = _qiangxi_play_query(engine)
+
+    assert query.kind == "PLAY_PHASE"
+    assert query.actor == QIANGXI_SEAT
+    assert {action.kind for action in query.legal_actions} == {"ActivateSkill", "EndPhase"}, (
+        "手里两张【闪】用不出去 ⇒ 只剩【强袭】与结束出牌阶段"
+    )
+
+
+def test_s3_qiangxi_activates_with_a_weapon_card_in_hand_or_equipped():
+    """有武器牌可弃 ⇒ 发动（弃牌比失去 1 点体力便宜，1 点伤害净赚）。"""
+    engine = _qiangxi_engine(equip=(cards_of_type(PACK, "crossbow")[0],))
+    query = _qiangxi_play_query(engine)
+
+    for seed in TIE_SEEDS:
+        answer = HeuristicPlayer(ai_stream(seed, QIANGXI_SEAT)).respond(query)
+        assert isinstance(answer, ActivateSkill), f"该发动【强袭】，实得 {answer!r}"
+        assert answer.skill_id == QIANGXI_SKILL
+
+
+def test_s3_qiangxi_prefills_the_cheaper_cost_discard_the_weapon():
+    """清单里的代价项：弃武器（−2.0）比失去 1 点体力（−3.5）便宜 ⇒ 预填前者。"""
+    engine = _qiangxi_engine(equip=(cards_of_type(PACK, "crossbow")[0],))
+    query = _qiangxi_play_query(engine)
+
+    for seed in TIE_SEEDS:
+        answer = HeuristicPlayer(ai_stream(seed, QIANGXI_SEAT)).respond(query)
+        assert isinstance(answer, ActivateSkill)
+        assert tuple(answer.choices) == ("qiangxi_discard_weapon",), (
+            f"该弃武器，实得 {answer.choices!r}"
+        )
+
+
+def test_s3_qiangxi_passes_when_losing_the_last_hp_would_put_it_into_dying():
+    """1 体力且没有武器牌 ⇒ 不发动（自伤会把自己送进濒死）。"""
+    engine = _qiangxi_engine(hp=1)
+    query = _qiangxi_play_query(engine)
+
+    for seed in TIE_SEEDS:
+        answer = HeuristicPlayer(ai_stream(seed, QIANGXI_SEAT)).respond(query)
+        assert not (
+            isinstance(answer, ActivateSkill) and answer.skill_id == QIANGXI_SKILL
+        ), f"1 体力时不该自伤发动，实得 {answer!r}"
+
+
+def test_s3_qiangxi_targets_the_enemy_not_the_ally():
+    """座位步：只按敌我关系挑人（反贼 vs 忠臣），不落进"帮盟友"的缺省分支。"""
+    engine = _qiangxi_engine(
+        equip=(cards_of_type(PACK, "crossbow")[0],), reveal_enemy=True
+    )
+    _qiangxi_play_query(engine)
+    # 复合动作（代价已预填）→ 弃哪张武器 → 选目标。
+    _step_until(engine, lambda query: query.kind == "SELECT_CARDS")
+    engine.submit(HeuristicPlayer(ai_stream(1, QIANGXI_SEAT)).respond(engine.pending))
+    target_query = _step_until(engine, lambda query: query.kind == "SELECT_OPTION")
+
+    for seed in TIE_SEEDS:
+        answer = HeuristicPlayer(ai_stream(seed, QIANGXI_SEAT)).respond(target_query)
+        assert isinstance(answer, SelectOption), f"目标步该给选项，实得 {answer!r}"
+        assert answer.choice == f"seat:{QIANGXI_ENEMY_SEAT}", (
+            f"该打反贼（座位 {QIANGXI_ENEMY_SEAT}），实得 {answer.choice!r}"
+        )

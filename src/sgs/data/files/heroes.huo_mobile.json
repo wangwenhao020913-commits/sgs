@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "pack_id": "huo_mobile",
+  "heroes": [
+    {
+      "id": "dianwei_mobile",
+      "name": "典韦移动版",
+      "true_name": "典韦",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "huo-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "qiangxi",
+          "name": "强袭",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}
