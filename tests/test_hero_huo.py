@@ -22,8 +22,8 @@ import pytest
 
 from sgs.data import Identity, Kingdom, RuleConfig, load_content_pack, load_hero_tables
 from sgs.effects import distance, hand_limit
-from sgs.engine import Engine
-from sgs.skills import CATALOG
+from sgs.engine import Engine, IllegalActionError
+from sgs.skills import CATALOG, resolve_conversion_confirmation
 from sgs.state import (
     ActivateSkill,
     EndPhase,
@@ -1281,20 +1281,30 @@ def _clubs(pack, count: int) -> tuple[int, ...]:
     raise AssertionError("牌堆里没有足够的梅花牌")
 
 
-def _luanji_state(pack, hand: tuple[int, ...], *, others: int = 2):
-    seats = [SeatSpec(hero=YUANSHAO, hand=hand)]
-    seats.extend(SeatSpec() for _ in range(others))
+def _luanji_state(pack, hand: tuple[int, ...], *, players: int = 3):
+    """``players`` = 座位数；票 07 的验收局面是 4 人（座位 0 主公 + 三名反贼）。
+
+    4 人档要发主公座位并给 ``player_count``，否则引擎按身份局拒绝开局
+    （与票 06 的 ``_lianhuan_state`` 同一条口径）。
+    """
+    if players >= 4:
+        seats = [SeatSpec(hero=YUANSHAO, hand=hand, identity=Identity.LORD)]
+        seats += [SeatSpec(identity=Identity.REBEL) for _ in range(players - 1)]
+    else:
+        seats = [SeatSpec(hero=YUANSHAO, hand=hand)]
+        seats += [SeatSpec() for _ in range(players - 1)]
     return build_state(
         pack=pack,
         seats=seats,
         deck=_pack_deck_without(pack, *hand),
         turn_seat=0,
         phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4) if players >= 4 else None,
     )
 
 
-def _luanji_play_phase(pack, hand: tuple[int, ...], *, others: int = 2):
-    engine = Engine.from_state(_luanji_state(pack, hand, others=others), seed=3)
+def _luanji_play_phase(pack, hand: tuple[int, ...], *, players: int = 3):
+    engine = Engine.from_state(_luanji_state(pack, hand, players=players), seed=3)
     _advance(
         engine,
         lambda e: e.pending is not None
@@ -1308,19 +1318,27 @@ def _luanji_steps(engine):
     return engine.pending.transform_preactivations.get(LUANJI)
 
 
-def test_luanji_converts_two_same_suit_hand_cards_into_arrow_barrage() -> None:
-    """两张同花色手牌当【万箭齐发】：全体其他存活角色各挨 1 点、两张来源进弃牌堆。"""
+def test_luanji_manifest_has_only_the_source_step_and_chains_every_other_living_seat() -> None:
+    """票 07 验收①：目标由【万箭齐发】自己决定 ⇒ 清单里**没有**目标步。
+
+    4 人局（票 03 §5 的复现局面口径）、两张同花色手牌：确认只提交来源，引擎按候选给
+    目标——全体其他存活角色（座位 1 / 2 / 3）各结算一张【万箭齐发】，自己挨不到，
+    两张来源进弃牌堆。
+    """
     first, second = _clubs(PACK, 2)
-    engine = _luanji_play_phase(PACK, (first, second))
+    engine = _luanji_play_phase(PACK, (first, second), players=4)
     steps = _luanji_steps(engine)
 
     assert steps, "【乱击】的清单下发"
+    assert [step.name for step in steps] == ["card"], (
+        f"目标由牌本身决定 ⇒ 只有来源步，实得 {[step.name for step in steps]}"
+    )
     assert (steps[0].min, steps[0].max) == (2, 2), "来源步恰好两张"
     engine.submit(
         ActivateSkill(
             skill_id=LUANJI,
             picks=(first, second),
-            choices=("seat:1", "seat:2"),
+            choices=(),
             answers_seq=engine.pending.seq,
         )
     )
@@ -1328,13 +1346,104 @@ def test_luanji_converts_two_same_suit_hand_cards_into_arrow_barrage() -> None:
         engine,
         lambda e: e.pending is not None
         and e.pending.kind == QueryKind.PLAY_PHASE
-        and e.pending.actor == 0,
+        and e.pending.actor == 0
+        and all(e.state.player(seat).hp == 3 for seat in (1, 2, 3)),
     )
 
     assert engine.state.player(1).hp == 3, "座位 1 挨 1 点（没有【闪】）"
     assert engine.state.player(2).hp == 3, "座位 2 挨 1 点"
+    assert engine.state.player(3).hp == 3, "座位 3 挨 1 点"
     assert engine.state.player(0).hp == 4, "自己不挨"
     assert first in engine.state.discard and second in engine.state.discard
+
+
+def test_luanji_rejects_a_stale_target_set_when_a_target_left_the_legal_set() -> None:
+    """票 07 验收②（反向）：无目标步时**池是唯一真源**，过期目标集不能放行。
+
+    座位 2 在清单生成前已阵亡 ⇒ 池里的【万箭齐发】只指向座位 1 / 3。客户端若还交一份
+    "座位 2 还活着时"的目标集（过期答案），确认必须拒收、零状态改动；只交来源时才按池
+    结算——落账的 ``targets`` 就是池里那份（座位 2 不在里面）。
+    """
+    first, second = _clubs(PACK, 2)
+    state = _luanji_state(PACK, (first, second), players=4)
+    state.player(2).alive = False
+    engine = Engine.from_state(state, seed=3)
+    _advance(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 0,
+    )
+    steps = _luanji_steps(engine)
+
+    assert steps and [step.name for step in steps] == ["card"], "无目标步"
+
+    with pytest.raises(IllegalActionError) as caught:
+        engine.submit(
+            ActivateSkill(
+                skill_id=LUANJI,
+                picks=(first, second),
+                choices=("seat:1", "seat:2", "seat:3"),
+                answers_seq=engine.pending.seq,
+            )
+        )
+    assert "没有目标步" in caught.value.message, (
+        f"过期目标集该被拒，实得 {caught.value.message}"
+    )
+    assert engine.pending is not None, "拒绝不关闭询问，可重选"
+    assert [engine.state.player(seat).hp for seat in (1, 2, 3)] == [4, 4, 4], (
+        "被拒的那一次不碰任何状态"
+    )
+
+    engine.submit(
+        ActivateSkill(
+            skill_id=LUANJI,
+            picks=(first, second),
+            choices=(),
+            answers_seq=engine.pending.seq,
+        )
+    )
+    accepted = engine.records[-1]
+    assert accepted.kind == "action" and accepted.accepted is True, "只交来源该被接受"
+    assert accepted.action.targets == (1, 3), (
+        f"目标集取自池（此刻活着的其他角色），实得 {accepted.action.targets}"
+    )
+    _until(
+        engine,
+        lambda e: e.state.player(1).hp == 3 and e.state.player(3).hp == 3,
+    )
+    assert engine.state.player(2).hp == 4, "阵亡的座位 2 不在目标里"
+
+
+def test_a_conversion_without_a_target_step_needs_a_unique_target_set_in_the_pool() -> None:
+    """票 07 §3：无目标步时，来源组在池里必须**恰好**一条目标集（不替玩家猜）。
+
+    池里同一组来源出现两条不同目标集（合成反例：过期的一条 + 新鲜的一条）⇒ 确认报
+    「这次转化缺少目标」；只剩一条时才按它结算。判据住在确认解析器里，与清单同源。
+    """
+    first, second = _clubs(PACK, 2)
+    engine = _luanji_play_phase(PACK, (first, second), players=4)
+    steps = _luanji_steps(engine)
+    pool = tuple(
+        action
+        for action in engine.pending.transform_actions
+        if tuple(sorted(action.card.virtual_sources)) == (first, second)
+    )
+
+    assert len(pool) == 1, "正常情况下【乱击】的一组来源只有一条候选"
+    resolved = resolve_conversion_confirmation(
+        engine.state, 0, LUANJI, (first, second), (), pool, steps=steps
+    )
+    assert not isinstance(resolved, str), f"唯一目标集该放行：{resolved}"
+    assert resolved.targets == (1, 2, 3)
+
+    stale = pool[0].model_copy(update={"targets": (1, 2)})
+    reason = resolve_conversion_confirmation(
+        engine.state, 0, LUANJI, (first, second), (), (pool[0], stale), steps=steps
+    )
+    assert reason == "这次转化缺少目标", (
+        f"两条不同目标集 ⇒ 报缺目标，不能替玩家挑一条：{reason!r}"
+    )
 
 
 def test_luanji_sources_must_be_hand_cards_and_share_one_suit() -> None:
@@ -1412,7 +1521,7 @@ def test_luanji_is_absent_without_another_living_character() -> None:
     """场上没有其他存活角色 ⇒ 没有目标，候选阶段不产出。"""
     first, second = _clubs(PACK, 2)
     other = 1
-    state = _luanji_state(PACK, (first, second), others=1)
+    state = _luanji_state(PACK, (first, second), players=2)
     state.player(other).alive = False
     engine = Engine.from_state(state, seed=3)
     _advance(
@@ -1433,11 +1542,12 @@ def test_luanji_can_be_used_more_than_once_per_play_phase() -> None:
     for pair in (four[0:2], four[2:4]):
         steps = _luanji_steps(engine)
         assert steps, "第二组♣仍在清单里"
+        assert [step.name for step in steps] == ["card"], "目标由牌本身决定（票 07）"
         engine.submit(
             ActivateSkill(
                 skill_id=LUANJI,
                 picks=pair,
-                choices=("seat:1", "seat:2"),
+                choices=(),
                 answers_seq=engine.pending.seq,
             )
         )

@@ -49,6 +49,8 @@ from sgs.effects import (
     CarrierKind,
     Modifier,
     ModifierPoint,
+    TargetCount,
+    TargetRule,
     behavior_for,
     is_slash,
     locate,
@@ -828,8 +830,11 @@ def resolve_conversion_confirmation(
       来源集合与目标集合的顺序无关（来源在 ``virtual_sources`` 里本就已排序）；
     - **是否需要目标步由清单回答**（``steps`` 里有没有 ``min > 0`` 的 ``seat`` 步）：
       有目标步 ⇒ 按**完整目标集**比较（先比原始选择个数——重复选择因此被拒——再比
-      去重后的集合，见 :func:`sgs.effects.target_sets_match`）；没有目标步 ⇒ 目标已被清单
-      判为唯一（或本就没有目标），不比较。同一条判据也是清单的形状；
+      去重后的集合，见 :func:`sgs.effects.target_sets_match`）；没有目标步 ⇒ 目标由牌
+      本身决定（huo-mobile-batch 票 07 的 :func:`_targets_are_decided_by_the_card`），
+      提交里**不该**带目标集，目标改由候选池给出——池是唯一真源，且同一组来源的目标集
+      必须**唯一**，否则报「这次转化缺少目标」（过期的那一份不会被替玩家选中）。
+      同一条判据也是清单的形状；
     - **点击顺序**（huo-mobile-batch 票 06）：候选牌自己的行为表声明了
       :attr:`~sgs.effects.CardBehavior.preserve_target_order`（当前 =【铁索连环】）时，
       两种点击顺序在候选池里本就是**两条**动作（``_play_phase`` / ``virtual_card_use``
@@ -858,6 +863,7 @@ def resolve_conversion_confirmation(
     if wanted_targets and not needs_target:
         return "这次转化没有目标步：来源之外的答案不被接受"
     source_matched = False
+    matched: list[Any] = []
     for action in candidates:
         card = getattr(action, "card", None)
         if card is None or not card.virtual_sources:
@@ -877,10 +883,24 @@ def resolve_conversion_confirmation(
                     continue
             elif not target_sets_match(wanted_targets, targets):
                 continue
-        return action
+        matched.append(action)
     if not source_matched:
         return "来源牌不合法：这组牌此刻不能这样转化"
-    return "目标不合法：这组来源没有那条目标"
+    if not matched:
+        return "目标不合法：这组来源没有那条目标"
+    if needs_target:
+        return matched[0]
+    # **没有目标步**（huo-mobile-batch 票 07）：目标由牌本身决定（全体存活 / 只对自己 /
+    # 无目标），提交里不含目标 ⇒ 目标集只能取自候选池，而它必须**唯一**：池里同一组来源
+    # 出现两条不同目标集（例如一份已经过期）时，替玩家挑一条就是把过期目标放行。
+    if len(
+        {
+            frozenset(int(target) for target in (getattr(action, "targets", None) or ()))
+            for action in matched
+        }
+    ) > 1:
+        return "这次转化缺少目标"
+    return matched[0]
 
 
 def conversion_preactivations(
@@ -903,7 +923,14 @@ def conversion_preactivations(
       目标数；``pool`` 按前序来源逐行给该来源组**全部组合的全部目标**（``seat:N``）。
       目标完全唯一（所有候选都是同一个单目标、或根本就没有目标）时不下发——求桃 /
       【万箭】 / 无方天的借刀等既有形状因此不变；出现多目标候选（W7 的方天式额外目标）
-      才下发，座位步在界面上是多选。
+      才下发，座位步在界面上是多选；
+    - **目标由牌本身决定时不下发目标步**（huo-mobile-batch 票 07）：本技能这次询问的
+      **全部**候选产物的行为表都判为"目标不由玩家选"
+      （:func:`_targets_are_decided_by_the_card`：``ALL_ALIVE`` / ``ALL_ALIVE_WITH_SELF``
+      / ``self_only`` / 无目标）⇒ 清单只有来源步，确认只提交来源。判据读行为表，不在
+      技能 id 上特判；产物不止一种方向（界【龙胆】的【闪】当【杀】与【桃】当【酒】会在
+      同一问并存）时，只要有一个方向要玩家选，目标步就保留——那一步表达不了"按方向
+      分叉的清单形状"。
 
     **清单与候选同源**：张数、目标池、次数链（``check_count``）、区域与时机谓词都没有
     在这里重算一次——它们已经体现在"候选存在与否"里。空 dict = 这次询问没有可预发动的
@@ -918,6 +945,7 @@ def conversion_preactivations(
     """
     groups: dict[str, dict[tuple[int, ...], list[tuple[int, ...]]]] = {}
     source_zones: dict[int, Zone] = {}
+    target_rules: dict[str, set[TargetRule]] = {}
     for action in actions:
         card = getattr(action, "card", None)
         if card is None or not card.is_virtual:
@@ -929,17 +957,23 @@ def conversion_preactivations(
         skill_ids = _candidate_skill_ids(state, owner, card)
         if not skill_ids:
             continue
+        # 产物行为表（目标数来源是**牌面事实**）：清单要不要目标步由它回答（票 07）。
+        rule = behavior_for(card).target_rule
         for skill_id in skill_ids:
             rows = groups.setdefault(skill_id, {}).setdefault(sources, [])
             if targets not in rows:
                 rows.append(targets)
+            target_rules.setdefault(skill_id, set()).add(rule)
         for source in sources:
             source_zones.setdefault(source, locate(state, source).zone)
 
     out: dict[str, tuple[Step, ...]] = {}
     for skill_id in sorted(groups):
         steps = _manifest_steps(
-            groups[skill_id], source_zones, fixed_target=fixed_target
+            groups[skill_id],
+            source_zones,
+            target_rules[skill_id],
+            fixed_target=fixed_target,
         )
         if steps is not None:
             out[skill_id] = steps
@@ -949,6 +983,7 @@ def conversion_preactivations(
 def _manifest_steps(
     per_source: dict[tuple[int, ...], list[tuple[int, ...]]],
     source_zones: dict[int, Zone],
+    target_rules: Iterable[TargetRule],
     *,
     fixed_target: bool = False,
 ) -> tuple[Step, ...] | None:
@@ -963,6 +998,11 @@ def _manifest_steps(
       由确认的成员判定拒绝（清单只表达"最多可选几个"，不是第二份合法性）；每行还带出
       该来源组的**逐来源上限** ``StepPool.max``——``options`` 只说"哪些目标能点"，不说
       "最多点几个"，界面要收住逐来源上限只能读这一格（W7-03 的 D4）；行相同才并成一行；
+    - **目标由牌本身决定时不下发目标步**（huo-mobile-batch 票 07）：``target_rules`` 是
+      本技能这次询问全部候选产物的 ``TargetRule``——**每一个**都判为"目标不由玩家选"
+      （:func:`_targets_are_decided_by_the_card`）⇒ 清单只有来源步。只要有一个产物
+      方向要玩家选目标（界【龙胆】的【闪】当【杀】与【桃】当【酒】可在同一问并存），
+      目标步照旧下发——一条步骤表达不了"按方向分叉"的清单；
     - ``fixed_target=True``（目标由窗口承载：求桃的濒死者 / 【万箭】·【南蛮】的响应 /
       借刀的被迫使用）**只在目标完全唯一时**省掉目标步——所有候选都是同一个单目标
       （或无目标）⇒ 没有可选的第二步。出现第二个目标、或任一组合的目标数 > 1（W7 的
@@ -989,6 +1029,8 @@ def _manifest_steps(
     ]
     combos = [targets for rows in per_source.values() for targets in rows]
     if not combos or all(not targets for targets in combos):
+        return tuple(steps)
+    if all(_targets_are_decided_by_the_card(rule) for rule in target_rules):
         return tuple(steps)
     if fixed_target and _targets_are_truly_unique(combos):
         return tuple(steps)
@@ -1023,6 +1065,27 @@ def _manifest_steps(
         )
     )
     return tuple(steps)
+
+
+def _targets_are_decided_by_the_card(target_rule: TargetRule) -> bool:
+    """这张牌的产物是否**由牌本身决定目标集**（清单因此没有目标步，票 07）。
+
+    判据只读行为表（:attr:`~sgs.effects.CardBehavior.target_rule` 的
+    ``TargetCount`` 档），**不在技能 id 上特判**：
+
+    - ``ALL_ALIVE`` / ``ALL_ALIVE_WITH_SELF``：目标是按座位规则算出来的全体存活角色
+      （含 / 不含使用者），玩家没有可选的第二步（【万箭齐发】/【桃园结义】）；
+    - ``self_only``：产物只能指向自己（【酒】/出牌阶段的【桃】），同样没有第二步；
+    - ``rated_targets == 0``：这张牌本来就没有目标（【闪】/【无懈可击】）。
+
+    区间目标（【铁索连环】1–2 名）与额定 ≥1 名（【杀】/【顺手牵羊】1 名）仍要玩家选，
+    返回 ``False``——它们的目标步照旧留在清单里。
+    """
+    if target_rule.is_range:
+        return False
+    if target_rule.count is not TargetCount.RATED:
+        return True
+    return target_rule.self_only or target_rule.rated_targets == 0
 
 
 def _targets_are_truly_unique(combos: Iterable[tuple[int, ...]]) -> bool:

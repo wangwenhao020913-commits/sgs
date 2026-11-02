@@ -3059,24 +3059,46 @@ def _coverage_lianhuan():
     return state, _play_phase_with_preactivations(state)
 
 
-def _coverage_luanji():
-    """袁绍移动版：两张**同花色**手牌当【万箭齐发】（多源转化的第 2 条载体）。"""
-    # 取两张**出牌阶段用不出去**的同花色手牌（♥【闪】）：否则 AI 直接按原用途打出去，
-    # 这条覆盖就测不到清单填表（与武圣 / 国色的覆盖取"用不出去的源牌"同一条口径）。
-    dodges = [
-        index
-        for index, card in enumerate(PACK.deck.cards)
-        if card.suit == "heart" and card.type == "dodge"
+LUANJI = "hero.yuanshao_mobile.luanji"
+"""袁绍移动版【乱击】（huo-mobile-batch 票 03；票 07 起清单**没有**目标步）。"""
+
+
+def _luanji_mixed_suit_hand() -> tuple[int, int, int, int]:
+    """两组**同花色**搭档，分属两色：♦【无懈可击】+♦【闪】、♣【无懈可击】×2。
+
+    四张都是出牌阶段用不出去的牌（AI 不会按原用途把它们打出去，只能填清单）；牌价也让它
+    按分值挑出的前两张恰好**不同花色**：♣ / ♦ 的【无懈可击】同价（3.5），【闪】（4.0）更贵
+    ⇒ 贪心取到 ``(♦无懈, ♣无懈)``，而【乱击】要求两张同花色（票 07 的 AI 判据就是这一步）。
+    """
+    nullifies = _ids("nullify")
+    diamond = next(
+        card_id for card_id in nullifies if PACK.deck.cards[card_id].suit == "diamond"
+    )
+    clubs = [
+        card_id for card_id in nullifies if PACK.deck.cards[card_id].suit == "club"
     ]
-    first, second = dodges[0], dodges[1]
+    diamond_dodge = next(
+        card_id for card_id in _ids("dodge") if PACK.deck.cards[card_id].suit == "diamond"
+    )
+    return (diamond, diamond_dodge, clubs[0], clubs[1])
+
+
+def _coverage_luanji():
+    """袁绍移动版：两张**同花色**手牌当【万箭齐发】（多源转化的第 2 条载体）。
+
+    手牌 = :func:`_luanji_mixed_suit_hand`（两组同花色搭档）；清单**没有目标步**（目标是
+    产物【万箭齐发】的 ``ALL_ALIVE``，票 07），故填出来的来源组必须自己过池成员校验——
+    贪心挑出的 (♦, ♣) 那张不同花色组合会被换成池里真实存在的一组。
+    """
+    hand = _luanji_mixed_suit_hand()
     state = build_state(
         pack=PACK,
         seats=[
-            SeatSpec(hand=(first, second), hero="yuanshao_mobile"),
+            SeatSpec(hand=hand, hero="yuanshao_mobile"),
             SeatSpec(),
             SeatSpec(),
         ],
-        deck=_deck_excluding(first, second),
+        deck=_deck_excluding(*hand),
         turn_seat=0,
     )
     return state, _play_phase_with_preactivations(state)
@@ -3103,7 +3125,9 @@ _TRANSFORM_COVERAGE_CASES = (
     ("丈八蛇矛", "equip.serpent_spear", _coverage_serpent_spear, "slash"),
     # huo-mobile-batch 票 02：庞统移动版【连环】的使用分支（160 档才有【铁索连环】实体牌）
     ("连环", "hero.pangtong_mobile.lianhuan", _coverage_lianhuan, "iron_chain"),
-    # huo-mobile-batch 票 03：袁绍移动版【乱击】（两张同花色手牌 → 虚拟【万箭齐发】）
+    # huo-mobile-batch 票 03：袁绍移动版【乱击】（两张同花色手牌 → 虚拟【万箭齐发】）；
+    # 票 07 起它的清单**没有目标步**（目标由【万箭齐发】的 ALL_ALIVE 决定）⇒ 这条覆盖
+    # 同时逼着"来源组自己过池成员校验"（见 `_luanji_mixed_suit_hand`）。
     ("乱击", "hero.yuanshao_mobile.luanji", _coverage_luanji, "arrow_barrage"),
 )
 """``(标签, 技能 id, 场景构造, 解析出的虚拟牌名)``：五条转化技（龙胆两方向各一）。"""
@@ -3138,6 +3162,40 @@ def test_every_transform_skill_can_be_ai_filled_and_confirmed_at_least_once():
             f"{label}：解析出的虚拟牌名 = {resolved.card.type}"
         )
         assert resolved.card.virtual_sources, f"{label}：解析出的是转化牌"
+
+
+def test_the_ai_fills_a_conversion_without_a_target_step_from_the_pool():
+    """huo-mobile-batch 票 07：【乱击】的清单没有目标步 ⇒ 来源组自己过池成员校验。
+
+    目标由【万箭齐发】决定（``ALL_ALIVE``），确认只提交来源。旧路径靠"目标集对不对得上"
+    兜住越界的来源组；无目标步后这层没了——按牌价挑出的前两张（♦【无懈可击】+
+    ♣【无懈可击】）不同花色，拼出的来源组不在候选池里，必须被换成池里真实存在的一组
+    同花色来源，否则交给引擎的就是一条非法应答。
+    """
+    state, query = _coverage_luanji()
+    steps = query.transform_preactivations[LUANJI]
+
+    assert [step.name for step in steps] == ["card"], "前提：清单只有来源步"
+
+    action = HeuristicPlayer(_stream(0)).respond(query)
+
+    assert isinstance(action, ActivateSkill), f"AI 该填清单，实得 {action!r}"
+    assert action.skill_id == LUANJI
+    assert action.choices == (), "无目标步 ⇒ 不填目标"
+    assert len(action.picks) == 2, f"来源步恰好两张，实得 {action.picks}"
+    suits = {PACK.deck.cards[card_id].suit for card_id in action.picks}
+    assert len(suits) == 1, f"来源两张必须同花色（【乱击】的配对谓词），实得 {action.picks}"
+    resolved = resolve_conversion_confirmation(
+        state,
+        query.actor,
+        LUANJI,
+        action.picks,
+        action.choices,
+        query.transform_actions,
+        steps=steps,
+    )
+    assert not isinstance(resolved, str), f"AI 填出的来源组被确认解析器拒绝：{resolved}"
+    assert resolved.card.type == "arrow_barrage"
 
 
 # ---------------------------------------------------------------------------

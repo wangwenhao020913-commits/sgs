@@ -2333,6 +2333,10 @@ def _conversion_choices_within_pool(
     ``pool`` 行只表达"该来源能选哪些目标"，协议里没有"每个来源最多几张"这一格）。判定
     与 :func:`sgs.agents.participants.is_transform_use` 同姿态：成员校验读的是询问自带的
     公开候选面，引擎的确认仍是最终裁判。
+
+    **清单没有目标步时**（huo-mobile-batch 票 07：目标由牌本身决定，如【乱击】的
+    【万箭齐发】）没有目标文本要收，本函数不参与——那一形状的池成员校验是"来源组在不在
+    池里"，由 :func:`_conversion_sources_within_pool` 回答。
     """
     pool = tuple(getattr(query, "transform_actions", ()) or ())
     if not pool:
@@ -2401,7 +2405,7 @@ def _conversion_sources_within_pool(
     short: str,
     view: PlayerView,
 ) -> tuple[int, ...] | None:
-    """把转化清单填出的**多源来源组**收进内部候选池（huo-mobile-batch 票 03）。
+    """把转化清单填出的**多源来源组**收进内部候选池（huo-mobile-batch 票 03 / 票 07）。
 
     【乱击】的"两张花色相同"是**配对谓词**：清单来源步只列"至少有同花色搭档"的牌，但任意
     两张开得出来的牌都点得动——按牌值挑出的两张可能不同花色，拼出的组合就不在候选池里
@@ -2412,6 +2416,10 @@ def _conversion_sources_within_pool(
     2. 否则在**同一条来源步的选项**里，按同一打分模型（:func:`_step_card_score`）挑一个
        "池里存在、且目标集也对得上"的来源组；
     3. 一个都凑不出 ⇒ ``None``（不交半成品）。
+
+    **清单没有目标步时**（huo-mobile-batch 票 07：目标由牌本身决定，确认只提交来源——
+    如【乱击】的【万箭齐发】）没有目标集可比：池里的来源组**就是**判据，同一组来源的
+    目标集由池唯一给出。判据因此退化成"来源组在不在池里"——两张不同花色的牌照样被换掉。
 
     判据仍是询问自带的公开候选面（``transform_actions``），引擎的确认仍是最终裁判。
     """
@@ -2424,8 +2432,6 @@ def _conversion_sources_within_pool(
         for text in choices
         if str(text).startswith(_SEAT_PREFIX)
     )
-    if not targets:
-        return tuple(picks)
 
     def sources_of(action: object) -> tuple[int, ...]:
         card = getattr(action, "card", None)
@@ -2441,7 +2447,8 @@ def _conversion_sources_within_pool(
         for action in pool
         if sources_of(action)
         and len(sources_of(action)) == len(wanted)
-        and target_sets_match(targets, targets_of(action))
+        # 无目标步（``targets`` 为空）⇒ 不比目标：池里的来源组自己就是判据。
+        and (not targets or target_sets_match(targets, targets_of(action)))
     }
     if not groups:
         return tuple(picks)
@@ -2485,6 +2492,11 @@ def _fill_activation(
     **置灰项不填**（票 04 §3）：``StepPool.disabled`` 里的选项在闭集里但**此刻不可选**，
     服务端会拒收（`flow._assign_activation`），故这里先按它收窄候选；全部被置灰 ⇒ ``None``
     （这一步填不出来，不交半成品）。
+
+    **没有目标步的转化清单**（huo-mobile-batch 票 07）：目标由牌本身决定（【乱击】的
+    【万箭齐发】= 全体其他存活），清单只有来源步，``choices`` 因此为空；多源转化填出的
+    来源组仍要过 :func:`_conversion_sources_within_pool` 的池成员校验（那一形状下判据退化成
+    "来源组在不在池里"）。
     """
     picks: list[int] = []
     choices: list[str] = []
