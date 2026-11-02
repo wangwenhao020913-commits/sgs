@@ -283,7 +283,14 @@ function buildAction() {
   if (pending.kind === "DISTRIBUTE") return distributionAction(pending);
   const actions = pending.legal_actions;
   // 选择面的候选里**没有**具体 picks（引擎只发一条骨架），要按已点槽位补上。
-  const withPicks = (action) => (action.kind === "SelectCards" ? Object.assign({}, action, { picks: state.picks.slice() }) : action);
+  //
+  // **顺序无关**（2026-11-03 实机报障）：候选由引擎按 `combinations(...)` 枚举 ⇒ 面内位置
+  // **升序**；而 `state.picks` 记的是**点击顺序**。多选面（≥2 张：业炎的四色成本 / 界遗计
+  // 一次两张 / 涉猎）从右往左点会拼出降序 picks，逐字段自检找不到那条候选 ⇒ 「选择非法」、
+  // 提交键永远灰着。选牌语义是**集合**（"这四张"不关心先后），故这里按升序规范化，与弃牌
+  // 分支 `state.picks.slice().sort(...)` 的既有口径一致。
+  const canonicalPicks = () => state.picks.slice().sort((left, right) => left - right);
+  const withPicks = (action) => (action.kind === "SelectCards" ? Object.assign({}, action, { picks: canonicalPicks() }) : action);
   // 弃牌阶段：候选带的是 `cards`（不是单张 `card`），按"已选手牌集合"反查那一条。
   // 这条必须在 `directAction` **之前**：弃牌可能恰好只有一条候选（必须全弃），
   // 但那也不该在玩家点牌之前就显示成"将提交"。

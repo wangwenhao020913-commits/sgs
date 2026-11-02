@@ -48,6 +48,7 @@ from sgs.state import (
     ArrangeCards,
     CardRef,
     DiscardCards,
+    Distribute,
     EndPhase,
     FrameKind,
     GameState,
@@ -418,8 +419,15 @@ EXEMPT_ONE_DIMENSIONAL_FAMILIES: tuple[_ExemptFamily, ...] = (
         "（票 04 迁移后【制衡】的任意张走这里；询问级候选，非技能层两维组合）",
         lambda action: isinstance(action, SelectCards),
     ),
+    _ExemptFamily(
+        "Distribute",
+        "计数式分配（`DISTRIBUTE`）的分配向量：每座 0..单座上限、合计 ≤ 上限的一维枚举"
+        "（8 人局 C(11,3) = 165）。与 ``ArrangeCards`` 同一类**询问级**候选——它是"
+        "一张弹窗的答案域，不是技能层两维相乘（huo-shenzhouyu-mobile 票 05）",
+        lambda action: isinstance(action, Distribute),
+    ),
 )
-"""五条一维枚举豁免的**显式表**（C6：审计口径自文档化，判据与理由同处一张表）。
+"""六条一维枚举豁免的**显式表**（C6：审计口径自文档化，判据与理由同处一张表）。
 
 顺序 = 票 10 的文档顺序；增删一条必须同时改这里与元测试的样本表，
 故"悄悄放宽审计"会直接判红。
@@ -427,7 +435,7 @@ EXEMPT_ONE_DIMENSIONAL_FAMILIES: tuple[_ExemptFamily, ...] = (
 
 
 def _is_one_dimensional_enumeration(action: object) -> bool:
-    """五族**一维枚举**候选的机械判据（= :data:`EXEMPT_ONE_DIMENSIONAL_FAMILIES` 的并集）。"""
+    """六族**一维枚举**候选的机械判据（= :data:`EXEMPT_ONE_DIMENSIONAL_FAMILIES` 的并集）。"""
     return any(family.matches(action) for family in EXEMPT_ONE_DIMENSIONAL_FAMILIES)
 
 
@@ -1128,14 +1136,16 @@ def test_the_by_design_cap_exemption_is_empty_after_the_rende_migration():
 
 
 def test_the_candidate_cap_checker_exempts_the_one_dimensional_enumerations():
-    """五族一维枚举都放行，且**豁免表与样本一一对应**（票 14 §3 的审计口径 / C6）。
+    """六族一维枚举都放行，且**豁免表与样本一一对应**（票 14 §3 的审计口径 / C6 + 票 05）。
 
     这条是豁免规则的机械覆盖：
-    ① 表恰五条、每条都有非空理由；
+    ① 表恰六条、每条都有非空理由；
     ② 每条理由对应的候选样本**命中**该族判据；
     ③ 每条样本哪怕堆到 ``CANDIDATE_CAP + 1`` 也不报错（= 真的被放行）。
     """
-    assert len(EXEMPT_ONE_DIMENSIONAL_FAMILIES) == 5, "豁免表恰五族（C6 的裁定 + 票 04 的 SelectCards）"
+    assert len(EXEMPT_ONE_DIMENSIONAL_FAMILIES) == 6, (
+        "豁免表恰六族（C6 的裁定 + 票 04 的 SelectCards + 票 05 的 Distribute）"
+    )
     assert all(family.rationale for family in EXEMPT_ONE_DIMENSIONAL_FAMILIES), (
         "每条豁免都必须写明『为什么不是两维技能组合』"
     )
@@ -1162,6 +1172,9 @@ def test_the_candidate_cap_checker_exempts_the_one_dimensional_enumerations():
         ],
         "SelectCards": [
             SelectCards(picks=(0,), answers_seq=1) for _ in range(over_cap)
+        ],
+        "Distribute": [
+            Distribute(counts=((0, 1),), answers_seq=1) for _ in range(over_cap)
         ],
     }
 

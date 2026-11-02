@@ -19460,4 +19460,86 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     `answers=${distributeAnswers.length} action=${JSON.stringify(distributeAnswers[0] && distributeAnswers[0].body.action)}`);
 }
 
+/* ============ 选牌**顺序无关**（2026-11-03 实机报障：业炎的四色成本从右往左点 = 非法）============
+ *
+ * 根因：`SELECT_CARDS` 的候选由引擎按 `combinations(...)` 枚举 ⇒ 面内位置**升序**；而界面
+ * `state.picks` 记的是**点击顺序**。多选面（≥2 张）倒着点会拼出降序 picks ⇒ 逐字段自检找不到
+ * 候选 ⇒ 「选择非法」。这里钉住"点击顺序不影响提交"，并核对送出的就是候选里那条升序动作。
+ */
+{
+  const pickSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261103,
+  });
+  const pickSeq = 993;
+  const suitCards = [
+    { suit: "spade", name: "杀" },
+    { suit: "heart", name: "桃" },
+    { suit: "club", name: "闪" },
+    { suit: "diamond", name: "酒" },
+  ].map((entry, index) => ({
+    card_id: 300 + index,
+    name: entry.name,
+    suit: entry.suit,
+    rank: 7,
+    type: index % 2 === 0 ? "slash" : "dodge",
+    slot: null,
+    attack_range: null,
+    color: entry.suit === "heart" || entry.suit === "diamond" ? "red" : "black",
+    virtual_sources: [],
+  }));
+  const pickAction = {
+    kind: "SelectCards", picks: [0, 1, 2, 3], answers_seq: pickSeq,
+  };
+  const pickView = synthView({
+    kind: "SELECT_CARDS", actor: 0, seq: pickSeq,
+    prompt: "请从选择面里选择一张牌。",
+    legal_actions: [pickAction],
+    candidate_index: {}, option_seats: {},
+    slots: suitCards.map((card) => ({ ref: { seat: 0, zone: "hand" }, card })),
+    spec: { zones: ["hand"], total: [4, 4], max_per_suit: 1 },
+    context: {
+      actor: 0, name: "业炎", targets: [],
+      label: "0号位神周瑜移动版发动业炎",
+      requirement: "弃置四张花色各不相同的手牌", skill_hints: [],
+    },
+  });
+  pickView.snapshot.self_hand = suitCards;
+  pickView.snapshot.players[0].hand_count = suitCards.length;
+  ui.state.view = pickView;
+  ui.state.sessionId = pickSession.session_id;
+  ui.resetSelection();
+  ui.state.selectedOption = 0;
+  // 倒序点选：面内位置 3 → 2 → 1 → 0（`state.picks` 就是点击顺序）。
+  ui.state.picks = [3, 2, 1, 0];
+  ui.renderTable();
+  ui.renderPending(pickView);
+
+  const builtReverse = ui.buildAction();
+  check("选牌顺序-1 倒序点选也拼出候选里那条（picks 规范化为升序）",
+    !!builtReverse
+      && JSON.stringify(builtReverse.picks) === JSON.stringify([0, 1, 2, 3])
+      && pickView.pending.legal_actions.some(
+        (action) => JSON.stringify(action) === JSON.stringify(builtReverse),
+      ),
+    `built=${JSON.stringify(builtReverse)}`);
+  check("选牌顺序-2 倒序点选时「提交」可点（不再因为顺序而灰着）",
+    $("btn-submit").disabled === false,
+    `disabled=${$("btn-submit").disabled}`);
+
+  const beforePickSubmit = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  for (let index = 0; index < 400 && ui.state.submitBusy; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  staleAnswerStatus = null;
+  const pickAnswers = calls
+    .slice(beforePickSubmit)
+    .filter((call) => call.path.includes("/answer"));
+  check("选牌顺序-3 提交送出的是升序那条候选（不是点击顺序）",
+    pickAnswers.length === 1
+      && JSON.stringify(pickAnswers[0].body.action) === JSON.stringify(pickAction),
+    `answers=${pickAnswers.length} action=${JSON.stringify(pickAnswers[0] && pickAnswers[0].body.action)}`);
+}
+
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
