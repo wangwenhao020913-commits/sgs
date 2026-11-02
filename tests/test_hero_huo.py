@@ -1563,6 +1563,103 @@ def test_luanji_can_be_used_more_than_once_per_play_phase() -> None:
     assert engine.state.player(2).hp == 2
 
 
+def _suit_cards(pack, suit: str, count: int) -> tuple[int, ...]:
+    """牌堆序里前 ``count`` 张某花色的牌。"""
+    found = tuple(
+        index for index, card in enumerate(pack.deck.cards) if card.suit == suit
+    )[:count]
+    assert len(found) == count, f"牌堆里没有 {count} 张 {suit}"
+    return found
+
+
+def test_luanji_manifest_carries_the_legal_same_suit_source_groups() -> None:
+    """票 10 验收①：来源步带出**合法来源组合**（``Step.groups``），不是一张并集。
+
+    手牌 = ♣×2 / ♥×2 / ♠×1，摸牌再进 ♦×2 ⇒ 合法组**恰为**三对同花色牌（逐组点名，
+    不是只数个数）；跨花色的任何一对都不在任何一组里——界面据此把不同花色的牌置灰。
+    选项并集 = 这六张里的**五张**：单独一张的 ♠ 配不出对，故它连并集都不进。
+    """
+    clubs = _suit_cards(PACK, "club", 2)
+    hearts = _suit_cards(PACK, "heart", 2)
+    spade = _suit_cards(PACK, "spade", 1)
+    diamonds = _suit_cards(PACK, "diamond", 2)
+    hand = (*clubs, *hearts, *spade)
+    drawn = diamonds
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=YUANSHAO, hand=hand), SeatSpec(), SeatSpec()],
+        deck=(*drawn, *deck_excluding(PACK, *hand, *drawn)),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=3)
+    _advance(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 0,
+    )
+    assert set(engine.state.player(0).hand) == {*hand, *drawn}, "开局 5 张 + 摸 2 张"
+
+    steps = _luanji_steps(engine)
+    assert steps, "有同花色对 ⇒ 清单存在"
+    step = steps[0]
+    assert (step.min, step.max) == (2, 2), "来源步恰好两张"
+    assert set(step.pool[0].options) == {
+        str(card_id) for card_id in (*clubs, *hearts, *diamonds)
+    }, f"并集 = 有搭档的那几张；实得 {step.pool[0].options}"
+    groups = {frozenset(group) for group in step.groups}
+    assert groups == {
+        frozenset(str(card_id) for card_id in clubs),
+        frozenset(str(card_id) for card_id in hearts),
+        frozenset(str(card_id) for card_id in diamonds),
+    }, f"合法来源组合 = 三对同花色，实得 {step.groups}"
+    assert all(len(group) == 2 for group in step.groups), "每组 = 来源步的张数"
+    assert all(
+        isinstance(value, str) for group in step.groups for value in group
+    ), "组合里的 id 与 `pool[*].options` 同一口径（十进制文本）"
+    for left in step.pool[0].options:
+        for right in step.pool[0].options:
+            if left >= right:
+                continue
+            suits = {PACK.deck.cards[int(card_id)].suit for card_id in (left, right)}
+            if len(suits) == 2:
+                assert not any(
+                    {left, right} <= group for group in groups
+                ), f"跨花色的一对 {left}/{right} 不在任何合法组里"
+
+
+def test_a_conversion_whose_every_pair_is_legal_carries_no_source_groups() -> None:
+    """票 10 的**省略**判据：「任意两张都行」的转化（丈八蛇矛）不下发 ``groups``。
+
+    缺省 = 全组合合法（老载荷逐字段不变）：界面照旧按 ``pool[*].options`` 全都点得动，
+    服务端校验器仍是唯一裁判。下发一串"每一对都在里面"的数据没有信息量。
+    """
+    serpent = cards_of_type(PACK, "serpent_spear")[0]
+    hand = tuple(cards_of_type(PACK, "slash")[:3])
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=hand, equip=(serpent,)), SeatSpec(), SeatSpec()],
+        deck=deck_excluding(PACK, *hand, serpent),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=3)
+    _advance(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 0,
+    )
+    steps = engine.pending.transform_preactivations.get("equip.serpent_spear")
+
+    assert steps, "丈八蛇矛的转化清单下发"
+    assert steps[0].name == "card" and (steps[0].min, steps[0].max) == (2, 2)
+    assert steps[0].groups == (), (
+        f"任意两张都能配 ⇒ 不下发 groups；实得 {steps[0].groups}"
+    )
+
+
 def test_yuanshao_mobile_hero_is_in_the_default_pool() -> None:
     """数据面：袁绍移动版进默认池（显示名带「移动版」、真名「袁绍」、群 / 男 / 4）。"""
     heroes = {hero.id: hero for table in load_hero_tables() for hero in table.heroes}

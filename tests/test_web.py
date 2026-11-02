@@ -4279,6 +4279,67 @@ def test_the_pending_payload_forwards_a_multi_target_transform_manifest() -> Non
     assert target["wording"] == "选择【杀】的目标", "Step.wording 原样下发"
 
 
+def test_the_source_groups_are_masked_for_a_foreign_viewer() -> None:
+    """票 10 的不泄露面：``Step.groups`` 里全是**询问者的手牌 id**，别人拿到时整格抹掉。
+
+    写方 = ``_manifest_steps``（来源步的合法来源组合），读方 = 前端置灰判据。它与
+    ``pool[*].options`` 是**同一条泄露面**（W4-1 的 :func:`_mask_foreign_preactivations`）：
+    查看者不是询问者 ⇒ 两份都不能留；询问者自己那份原样带出。座位 / 选项步兜底也抹（组合
+    只该出现在选牌步上，但多留一条分支就多一条泄露面）。
+    """
+    pack = _context_pack()
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(), SeatSpec(), SeatSpec(), SeatSpec()],
+        deck=tuple(range(len(pack.deck.cards))),
+        turn_seat=0,
+    )
+    left, right = cards_of_type(pack, "dodge")[:2]
+    steps = (
+        Step(
+            name="card",
+            zones=(Zone.HAND,),
+            min=2,
+            max=2,
+            pool=(StepPool(when=(), options=(str(left), str(right))),),
+            order=0,
+            groups=((str(left), str(right)),),
+        ),
+        Step(
+            name="seat",
+            min=1,
+            max=1,
+            pool=(StepPool(when=(str(left),), options=("seat:1",)),),
+            order=1,
+            groups=((str(left),),),
+        ),
+    )
+    query = PlayPhaseQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="出牌阶段：使用一张牌，或结束出牌阶段。",
+        legal_actions=(),
+        view=project(state, 0),
+        transform_preactivations={"hero.yuanshao_mobile.luanji": steps},
+    )
+
+    own = pending_payload(query, human_seat=0)
+    own_steps = own["preactivations"]["hero.yuanshao_mobile.luanji"]
+    assert own_steps[0]["groups"] == [[str(left), str(right)]], (
+        "询问者自己那份原样带出（界面据此把不同花色的牌置灰）"
+    )
+
+    foreign = pending_payload(query, human_seat=None)
+    masked_card, masked_seat = foreign["preactivations"]["hero.yuanshao_mobile.luanji"]
+    assert masked_card["pool"][0]["options"] == [], "候选照旧清空（来源牌 id 不能露）"
+    assert "groups" not in masked_card, (
+        f"来源组合也不能露：{masked_card.get('groups')}"
+    )
+    assert masked_seat["pool"][0]["when"] == [], "座位步的前序答案（牌 id）照旧清空"
+    assert "groups" not in masked_seat, "座位 / 选项支路兜底也抹（组合只该在选牌步上）"
+
+
 # ---------------------------------------------------------------------------
 # W7-02：方天 × 转化【杀】的接入层面（清单 1..3 原样转发 / 借刀窗口的候选索引）
 # ---------------------------------------------------------------------------

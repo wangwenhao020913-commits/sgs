@@ -749,9 +749,17 @@ function refreshSubmit(pending) {
     const pa = state.preactivation;
     // 复合动作：填完就交（服务端校验器裁决）；转化技的本地入口：填完还得**查得到候选**
     // （查不到 = 这组来源 / 目标此刻不合法，按钮不给点）。
+    //
+    // 票 10：**来源是不是合法组合**另判（`Step.groups`）——清单填完不等于这组来源能一起
+    // 转化。缺省 `groups` 的步恒真；有 `groups` 时，陈旧 / 合成载荷也过不了这道闸，
+    // 「提交」不会亮、更不会发出一条注定 400 的 `ActivateSkill`。
+    const legal = preactivationSourcesLegal(pa);
     const ready = preactivationReady(pa);
-    $("btn-submit").disabled = !ready || buildAction() === null;
-    if (!ready) {
+    $("btn-submit").disabled = !legal || !ready || buildAction() === null;
+    if (!legal) {
+      // 通用文案（不认牌名 / 花色）：说清这一组不能一起转化，出口 = 取消再重选。
+      $("t-choice").textContent = PREACTIVATION_GROUP_HINT;
+    } else if (!ready) {
       // 未填完 = 说**同一句**步骤提示（标题 `#t-target-hint` 读的也是它）：光标到末尾但
       // 还有空步时它会指回第一个空步，不再出现标题说「清单已填完」、页脚说「还有步骤
       // 没填完」的矛盾（票 08）。

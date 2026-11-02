@@ -255,6 +255,26 @@ class Step(_FrozenModel):
     与 ``pool`` 同姿态：清单整体在询问字段里 ``exclude``，故**不进记录流**。
     """
 
+    groups: tuple[tuple[str, ...], ...] = ()
+    """多来源步的**合法来源组合**（huo-mobile-batch 票 10）：每个元素是一组能**一起提交**的
+    来源牌 id（十进制文本，与 ``StepPool.options`` 同一口径），由服务端从候选池派生
+    （:func:`sgs.skills.heroes._manifest_steps`：``per_source`` 的键就是合法组），故界面不必
+    自己判花色 / 牌名——它只回答"哪几张能配成一组"。
+
+    只给 ``min == max > 1`` 的来源步，且**只有存在非法组合时**才下发：任意 ``count`` 张都能
+    配成一组（【丈八蛇矛】的"任意两张"）时省略——缺省 / 空 = "每个组合都合法"，旧载荷因此
+    逐字段不变。**不进记录流**（清单整体 ``exclude``）；查看者不是询问者时由
+    :func:`sgs_web.projection._mask_foreign_preactivations` 与 ``pool[*].options`` 一起抹掉
+    （来源牌 id 是询问者的手牌）。
+    """
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> Any:
+        data = handler(self)
+        if not data.get("groups"):
+            data.pop("groups", None)
+        return data
+
 
 @dataclass(frozen=True, slots=True)
 class RespondContext:

@@ -19361,6 +19361,216 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       + ` 座位2="${foeNoLimit ? foeNoLimit.text().replace(/\s+/g, " ").trim() : "缺"}"`);
 }
 
+/* ============ 票 10：多来源步的合法来源组合（【乱击】两张同花色） ============
+ *
+ * 验收报障 ④（2026-11-02 实机）：袁绍移动版【乱击】要两张**花色相同**的手牌。清单的来源步
+ * 原先只有一张并集（`pool[0].options` = 5 张牌 id），界面无从知道"哪两张能配成一组"——
+ * 选两张不同花色 → 「下一步」把光标送到末尾 → 整片手牌置灰、提交键却亮着 → 每按一次都是
+ * 同一条注定 400 的 `ActivateSkill`（用户读作"什么按钮都按不了"）。
+ *
+ * 判据（票 §6）：
+ *  ① 来源步带 `groups`（合法来源组合）；点 ♦9杀 之后 ♠ / ♣ 牌**不可选**（置灰）、
+ *     ♦K紫骍 / ♦4闪 仍可选 ⇒ 凑不出不同花色的一对；
+ *  ② 同花色一对（♦9杀 + ♦K紫骍）照旧 下一步 → 提交 ⇒ 恰一条 POST、对局推进（服务端 200）；
+ *  ③ 反向保险：把**非法组合**塞进清单（合成载荷 / 陈旧 `groups`）⇒ 提交键不可点、给出
+ *     通用那句话、**零 POST**；`advancePreativation` 也不放行（光标停在原地）。
+ *
+ * 种子 12 的六张手牌由票 §2 逐张点名（真服务端载荷，不走合成视图）。
+ */
+{
+  const LUANJI = "hero.yuanshao_mobile.luanji";
+  const openYuanshaoSession = async (seed) => openSession(await post("/api/sessions", {
+    player_count: 4, ai: "heuristic", human_seat: 0, timeout_seconds: null,
+    seed, my_hero: "yuanshao_mobile", deck_profile: "standard_108",
+  }));
+  const passFirstIndex = (pending) => {
+    const actions = pending.legal_actions || [];
+    for (const kind of ["Pass", "EndPhase"]) {
+      const at = actions.findIndex((action) => action.kind === kind);
+      if (at >= 0) return at;
+    }
+    return 0;
+  };
+  const walkToMyPlay = async () => {
+    for (let step = 0; step < 40; step += 1) {
+      const pending = ui.state.view && ui.state.view.pending;
+      if (!pending) return null;
+      if (pending.kind === "PLAY_PHASE" && Number(pending.actor) === 0) return pending;
+      ui.resetSelection();
+      ui.state.selectedOption = passFirstIndex(pending);
+      await ui.submitAction();
+    }
+    return null;
+  };
+  const selfHand = () => (ui.state.view.snapshot.self_hand || []);
+  const handNode = (cardId) => Array.from($("t-hand").children).find(
+    (node) => node.getAttribute("data-card-id") === String(cardId)) || null;
+  const clickHand = async (cardId) => {
+    const node = handNode(cardId);
+    if (!node) return false;
+    for (const fn of node.listeners.click || []) await fn({ target: node, stopPropagation() {} });
+    return true;
+  };
+  const skillNode = (id) => Array.from($("t-skills").children).find(
+    (node) => node.getAttribute("data-skill-id") === id) || null;
+  const faceOf = (cardId) => {
+    const pending = ui.state.view.pending;
+    const card = selfHand().find((item) => Number(item.card_id) === Number(cardId));
+    return card ? ui.cardFace(pending, card) : null;
+  };
+  const groupsOf = () => {
+    const pending = ui.state.view.pending;
+    const steps = (pending.preactivations || {})[LUANJI] || [];
+    return (steps[0] && steps[0].groups) || [];
+  };
+  const groupKey = (group) => group.map(Number).sort((a, b) => a - b).join("-");
+  const picks = () => ui.state.preactivation.answers[0].values.slice();
+  const nextButton = () => Array.from($("t-options").children).find(
+    (node) => node.tagName === "BUTTON" && node.textContent === "下一步") || null;
+  const answersSince = (mark) => calls.slice(mark).filter((call) => call.path.includes("/answer"));
+  const settle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    ui.flushPlayback();
+  };
+  const ticketHand = [
+    [70, "♦9杀"], [41, "♠7南蛮入侵"], [80, "♦K紫骍"],
+    [40, "♠7杀"], [81, "♣A决斗"], [60, "♦4闪"],
+  ];
+  const freshLuanji = async () => {
+    await openYuanshaoSession(12);
+    const atPlay = await walkToMyPlay();
+    const skill = atPlay ? skillNode(LUANJI) : null;
+    if (skill) await clickAndWait(skill);
+    return { atPlay, skill };
+  };
+
+  /* ---- ① 真局面：清单带 groups、点 ♦9杀 之后不同花色的牌置灰 ---- */
+  const { atPlay, skill } = await freshLuanji();
+  const handIds = selfHand().map((card) => Number(card.card_id));
+  check("票 10-0 局面锚定票 §2：种子 12 / 4 人 / 座位 0 的六张手牌逐张点名",
+    atPlay !== null
+      && handIds.length === ticketHand.length
+      && ticketHand.every(([cardId]) => handIds.includes(cardId)),
+    `手牌=${selfHand().map((card) => `${card.card_id}(${card.name})`).join(",")}`);
+
+  // 组合的**集合**是判据（服务端的组合顺序 = 手牌分组序，不该由本测试钉死）。
+  const expectedGroups = new Set(["70-80", "60-70", "60-80", "40-41"]);
+  const actualGroups = new Set(groupsOf().map(groupKey));
+  check("票 10-A1 点【乱击】⇒ 来源步带出合法来源组合（= 同花色的四对，不是一张并集）",
+    !!skill && !!ui.state.preactivation
+      && ui.state.preactivation.steps.length === 1
+      && actualGroups.size === expectedGroups.size
+      && [...expectedGroups].every((key) => actualGroups.has(key)),
+    `groups=${JSON.stringify(groupsOf())}`);
+
+  check("票 10-A2 未选牌时：五张有同花搭档的牌都可点（♣A决斗没有搭档 ⇒ 不可点）",
+    faceOf(70).selectable === true && faceOf(80).selectable === true
+      && faceOf(60).selectable === true && faceOf(40).selectable === true
+      && faceOf(41).selectable === true && faceOf(81).selectable === false
+      && !!handNode(81) && handNode(81).classList.contains("dis"),
+    `70=${faceOf(70).selectable} 41=${faceOf(41).selectable} 81=${faceOf(81).selectable}`);
+
+  await clickHand(70);
+  check("票 10-A3 点♦9杀之后：♠7南蛮 / ♠7杀 / ♣A决斗 置灰点不动，♦K紫骍 / ♦4闪 仍可点（已选的牌可点 = 取消）",
+    JSON.stringify(picks()) === JSON.stringify([70])
+      && faceOf(41).selectable === false && faceOf(40).selectable === false
+      && faceOf(81).selectable === false
+      && faceOf(80).selectable === true && faceOf(60).selectable === true
+      && faceOf(70).selectable === true
+      && [41, 40, 81].every((cardId) => {
+        const node = handNode(cardId);
+        return !!node && node.classList.contains("dis");
+      }),
+    `picks=${JSON.stringify(picks())} 41=${faceOf(41).selectable} 40=${faceOf(40).selectable} `
+      + `81=${faceOf(81).selectable} 80=${faceOf(80).selectable} 60=${faceOf(60).selectable} 70=${faceOf(70).selectable}`);
+
+  let mark = calls.length;
+  const blockedClick = await clickHand(41);
+  check("票 10-A4 点置灰的♠7南蛮 = no-op（不同花色凑不成一对、零 POST）",
+    blockedClick && JSON.stringify(picks()) === JSON.stringify([70])
+      && answersSince(mark).length === 0,
+    `picks=${JSON.stringify(picks())} answers=${answersSince(mark).length}`);
+
+  await clickHand(80);
+  check("票 10-A5 再点♦K紫骍 = 同花色的一对：「下一步」可点",
+    JSON.stringify(picks()) === JSON.stringify([70, 80])
+      && nextButton() !== null && nextButton().disabled === false,
+    `picks=${JSON.stringify(picks())} next=${nextButton() ? nextButton().disabled : "缺"}`);
+
+  const seqBefore = atPlay ? atPlay.seq : null;
+  await clickAndWait(nextButton());
+  check("票 10-A6 合法一对的「下一步」把光标送到末尾：提交键可点（不再是\"末尾 + 非法组合\"的死路）",
+    ui.state.preactivation.cursor === 1
+      && $("btn-submit").disabled === false
+      && ui.buildAction() !== null,
+    `cursor=${ui.state.preactivation.cursor} disabled=${$("btn-submit").disabled} built=${JSON.stringify(ui.buildAction())}`);
+
+  mark = calls.length;
+  await clickAndWait($("btn-submit"));
+  await settle();
+  const submitted = answersSince(mark);
+  const afterPending = ui.state.view.pending || {};
+  check("票 10-A7 同花色一对提交 = 恰一条 ActivateSkill POST，服务端 200、对局推进（【万箭齐发】结算）",
+    submitted.length === 1
+      && submitted[0].body.action.kind === "ActivateSkill"
+      && submitted[0].body.action.skill_id === LUANJI
+      && JSON.stringify(submitted[0].body.action.picks) === JSON.stringify([70, 80])
+      && !$("t-choice").textContent.includes("提交被拒")
+      && Number(afterPending.seq) > Number(seqBefore)
+      && logText().includes("万箭齐发"),
+    `answers=${submitted.length} action=${JSON.stringify(submitted[0] && submitted[0].body.action)} `
+      + `seq=${seqBefore}→${afterPending.seq} log=${logText().includes("万箭齐发")}`);
+
+  /* ---- ③ 反向保险：合成载荷 / 陈旧 groups ⇒ 提交键不亮、通用文案、零 POST ---- */
+  await freshLuanji();
+  const pa2 = ui.state.preactivation;
+  const inject = (values, cursor) => {
+    pa2.answers[0].values = values.slice();
+    pa2.answers[0].texts = values.map(String);
+    pa2.cursor = cursor;
+    ui.renderTable();
+    ui.renderPending(ui.state.view);
+  };
+
+  inject([70, 41], 1);
+  mark = calls.length;
+  check("票 10-B1 合成载荷（♦9杀 + ♠7南蛮，服务端会 400 的那一对）塞到光标末尾："
+    + "提交键不可点、给出通用那句话、零 POST",
+    $("btn-submit").disabled === true
+      && ui.buildAction() === null
+      && $("t-choice").textContent.includes("这组来源不能一起转化")
+      && answersSince(mark).length === 0,
+    `disabled=${$("btn-submit").disabled} built=${JSON.stringify(ui.buildAction())} `
+      + `t-choice=${$("t-choice").textContent} answers=${answersSince(mark).length}`);
+
+  inject([70, 80], 1);
+  pa2.steps[0].groups = [["41", "40"]];  // 陈旧 groups：只剩♠组，♦ 对不再合法
+  ui.renderTable();
+  ui.renderPending(ui.state.view);
+  mark = calls.length;
+  check("票 10-B2 陈旧 groups（只剩♠组）⇒ 真合法的一对也不再可提交、零 POST",
+    $("btn-submit").disabled === true
+      && $("t-choice").textContent.includes("这组来源不能一起转化")
+      && answersSince(mark).length === 0,
+    `disabled=${$("btn-submit").disabled} t-choice=${$("t-choice").textContent}`);
+
+  pa2.steps[0].groups = [["70", "80"], ["70", "60"], ["80", "60"], ["41", "40"]];
+  inject([70, 41], 0);
+  const cursorBefore = pa2.cursor;
+  mark = calls.length;
+  ui.advancePreativation();
+  check("票 10-B3 非法来源时「下一步」不放行（cursor 停在原地、按钮也是灰的；两张已选的牌仍可点 = 能取消重选）",
+    pa2.cursor === cursorBefore
+      && nextButton() !== null && nextButton().disabled === true
+      && $("btn-submit").disabled === true
+      && faceOf(70).selectable === true && faceOf(41).selectable === true
+      && answersSince(mark).length === 0,
+    `cursor=${pa2.cursor}/${cursorBefore} next=${nextButton() ? nextButton().disabled : "缺"} `
+      + `submit=${$("btn-submit").disabled} 70=${faceOf(70).selectable} 41=${faceOf(41).selectable}`);
+}
+
 /* ============ 票 05：计数式分配（神周瑜移动版【业炎】） ============
  *
  * 与真实 `pending_payload` 同形的合成 view：`distribution` 的座位表 + 两个上限 + `Distribute`

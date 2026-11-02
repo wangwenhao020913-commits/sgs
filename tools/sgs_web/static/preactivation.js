@@ -183,6 +183,66 @@ function preactivationDisabled(pa, index) {
   return row ? (row.disabled || []) : null;
 }
 
+/**
+ * 这一步的**合法来源组合**（huo-mobile-batch 票 10）：`null` = 服务端没下发这一格。
+ *
+ * 载荷 = `Step.groups`（每个元素是一组能**一起提交**的来源牌 id，服务端从候选池派生）。
+ * 缺省 / 空 ⇒ `null`：旧载荷的语义是"**每个组合都合法**"，界面照旧按 `options` 全都点得动。
+ * 界面只读这份数据——**不**自己判花色 / 牌名（判据只住在服务端）。
+ */
+function preactivationGroups(pa, index) {
+  const step = pa && pa.steps[index];
+  const groups = (step && Array.isArray(step.groups)) ? step.groups : [];
+  if (!groups.length) return null;
+  return groups.map((group) => (group || []).map(String));
+}
+
+/** 已选来源 `values` 是否还能**落进**某一组合法来源（`null` groups ⇒ 恒真）。
+ *
+ * 子集语义（不是"恰好相等"）：选牌步是多选，挑到一半时已选的那几张必须还能凑进某一组，
+ * 否则下一张点什么都救不回来——卡面据此置灰。填满之后的合法性由同一判据复核：`count`
+ * 张 ⊆ 组 ⇒ 与组相等（服务端下发的每组都是 `count` 张）。
+ */
+function preactivationGroupHolds(pa, index, values) {
+  const groups = preactivationGroups(pa, index);
+  if (groups === null) return true;
+  const picked = new Set((values || []).map(String));
+  return groups.some((group) => [...picked].every((value) => group.includes(value)));
+}
+
+/** 再点一张 `cardId` 之后还能**落进**某组合法来源吗（票 10 §5 的第一条）。
+ *
+ * 已选中的牌不归这条管（再点 = 取消，恒可点）：调用方先判"是否已选"。 */
+function preactivationGroupAccepts(pa, index, values, cardId) {
+  return preactivationGroupHolds(pa, index, [...(values || []), cardId]);
+}
+
+/** 这一步的来源是否**合法**（票 10）：非选牌步 / 没有 `groups` 的步恒真。 */
+function preactivationStepLegal(pa, index) {
+  const step = pa && pa.steps[index];
+  if (!step || preactivationStepKind(step) !== "card") return true;
+  const answer = pa.answers[index];
+  return preactivationGroupHolds(pa, index, answer ? answer.values : []);
+}
+
+/** 清单里**全部**选牌步的来源是不是都合法（`preactivationReady` 只看填完没有）。
+ *
+ * 提交 / 下一步 / 提示条都读这一处：陈旧的来源 / 合成载荷也走同一条闸，绝不把注定
+ * 400 的组合发出去（票 10 §4 的死路正是这样来的）。 */
+function preactivationSourcesLegal(pa) {
+  if (!pa) return true;
+  for (let index = 0; index < pa.steps.length; index += 1) {
+    if (!preactivationStepLegal(pa, index)) return false;
+  }
+  return true;
+}
+
+/** 「这组来源不能一起转化」的**通用**文案（票 10）：不认牌名 / 花色，只说换一张牌。
+ *
+ * 服务端不下发"为什么"的规则文案（花色是牌面事实，不该由界面讲规则）；界面只把
+ * "这一组提交不了"说清楚，出口是取消再重选。 */
+const PREACTIVATION_GROUP_HINT = "这组来源不能一起转化，换一张牌试试。";
+
 /** 一步**允许选几个**（W7-03 / D4）：座位步的 `step.max` 是**全局**最大值，而同一个技能
  *  的不同来源组上限可以不同（方天只放宽"最后一张手牌"的转化源）⇒ 逐来源上限由命中池行的
  *  `max` 带出，这里取两者较小。行上没有 `max`（既有清单 / 服务端退化）⇒ 沿用 `step.max`。
@@ -311,6 +371,9 @@ function preactivationCardOptions(pending) {
  *
  * ``options === null``（服务端退化掉候选索引）时退化为"该区的牌全都可点"；合法性仍由
  * 服务端校验器裁决（与 :func:`togglePreativationCard` 同一姿态）。
+ *
+ * ``groups``（票 10）：已选的牌恒可点（再点 = 取消），其余牌还要能**落进**某组合法来源
+ * ——与 :func:`cardFace` 的选牌支路同一判据（卡面与牌桌表面不能各判一套）。
  */
 function preactivationCardPickable(pending, card, zone) {
   if (state.playback || !card) return false;
@@ -322,7 +385,11 @@ function preactivationCardPickable(pending, card, zone) {
   if (!zones.includes(zone)) return false;
   const options = preactivationCardOptions(pending);
   if (options === undefined) return false;
-  return options === null || options.includes(String(card.card_id));
+  if (!(options === null || options.includes(String(card.card_id)))) return false;
+  const answer = pa.answers[pa.cursor];
+  const values = answer ? answer.values : [];
+  return values.includes(card.card_id)
+    || preactivationGroupAccepts(pa, pa.cursor, values, card.card_id);
 }
 
 /** 点一张牌：多选步里点已选 = 取消该张、点新牌 = 追加（用户裁定的重选规则）。 */
@@ -336,6 +403,9 @@ function togglePreativationCard(cardId) {
   if (options && !options.includes(String(cardId))) return;
   const answer = pa.answers[pa.cursor];
   const at = answer.values.indexOf(cardId);
+  // 票 10：**追加**要过合法来源组合（取消恒可）；卡面的 `.dis` 是第一道，这里是
+  // 键盘 / 合成事件 / 陈旧界面走同一条路的第二道（不多算，只读同一份 `groups`）。
+  if (at < 0 && !preactivationGroupAccepts(pa, pa.cursor, answer.values, cardId)) return;
   if (at >= 0) answer.values.splice(at, 1);
   else if (step.max === null || step.max === undefined || answer.values.length < step.max) {
     answer.values.push(cardId);
@@ -346,11 +416,17 @@ function togglePreativationCard(cardId) {
   renderPending(state.view);
 }
 
-/** 选牌步的"下一步"：这一步按 `(min, cap)` 填完才放行（与 chip ✓ / ready 同一判据）。 */
+/**
+ * 选牌步的"下一步"：这一步按 `(min, cap)` 填完、且来源是**合法组合**才放行。
+ *
+ * 填完的判据与 chip ✓ / ready 同一处（:func:`preactivationStepFilled`）；合法来源组合
+ * 另判（票 10）：让 cursor 走到末尾就是 §4 的死路——提交键亮着、手牌全灰、每一按都 400。
+ */
 function advancePreativation() {
   const pa = state.preactivation;
   if (state.playback || !pa || pa.cursor >= pa.steps.length) return;
   if (!preactivationStepFilled(pa, pa.cursor)) return;
+  if (!preactivationStepLegal(pa, pa.cursor)) return;
   pa.cursor += 1;
   applyPreativationDefaults(pa, state.view ? state.view.pending : null);
   state.lastRejectReason = "";
@@ -523,6 +599,9 @@ function preactivationReady(pa) {
  */
 function buildPreativationAction(pending, pa) {
   if (!pending || !pa || !preactivationReady(pa)) return null;
+  // 票 10：来源不是合法组合 ⇒ **拼不出**这次提交（陈旧 / 合成载荷的最后一道闸；
+  // 服务端仍然会 400——这只是不让界面主动发一条注定被拒的动作）。
+  if (!preactivationSourcesLegal(pa)) return null;
   // 手牌入口（W5-02b 借刀）：两步座位答案 → 一次带**附带指定**的使用。
   // 牌是实体牌（不拼虚拟 id），`targets` = 持刀者 A、`designations` = 使用者指定的 Bn。
   // `pa.card` 是**展示卡**（快照里带 display_name / attribute / description …），
@@ -578,6 +657,8 @@ function preactivationStepLabel(step) {
 
 function preactivationStepHint(pa, pending) {
   if (!pa) return "";
+  // 票 10：已选来源凑不成合法组合 ⇒ 说清"换一张牌"，而不是继续画"第 k 步…"。
+  if (!preactivationSourcesLegal(pa)) return PREACTIVATION_GROUP_HINT;
   // 光标越过清单末尾时没有"当前步"：清单还有空步就**指回第一个空步**，不能说
   // 「清单已填完」（票 08：判据与 `preactivationReady` 同源；标题 `#t-target-hint`
   // 与页脚 `#t-choice` 都读这一份提示，不再一处看 cursor、一处看 ready）。
@@ -720,7 +801,8 @@ function renderPreativation(pending) {
     next.type = "button";
     next.className = "opt";
     next.textContent = "下一步";
-    next.disabled = !preactivationStepFilled(pa, pa.cursor);
+    next.disabled = !preactivationStepFilled(pa, pa.cursor)
+      || !preactivationStepLegal(pa, pa.cursor);
     next.addEventListener("click", advancePreativation);
     box.appendChild(next);
   }

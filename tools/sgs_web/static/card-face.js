@@ -94,12 +94,21 @@ function cardFace(pending, card) {
     };
   }
   if (state.preactivation) {
+    const pa = state.preactivation;
     const options = preactivationCardOptions(pending);
-    const answer = state.preactivation.answers[state.preactivation.cursor];
+    const answer = pa.answers[pa.cursor];
+    const picked = Boolean(answer && answer.values.includes(card.card_id));
+    const offered = options !== undefined
+      && (options === null || options.includes(String(card.card_id)));
+    // 票 10（多来源步的 `groups`）：已选的牌恒可点（再点 = 取消）；其余牌还要能**落进**
+    // 某一组合法来源才可点 ⇒ 点过 ♦9杀 之后 ♠ / ♣ 直接置灰，凑不出不同花色的一对
+    // （§4 的死路从源头消失）。`groups` 缺省 ⇒ 与改前逐张一致。
+    const selectable = offered && (picked
+      || preactivationGroupAccepts(pa, pa.cursor, answer ? answer.values : [], card.card_id));
     return {
-      selectable: options === undefined ? false : (options === null || options.includes(String(card.card_id))),
+      selectable,
       selected: false,
-      picked: Boolean(answer && answer.values.includes(card.card_id)),
+      picked,
       slotIndex: -1,
     };
   }

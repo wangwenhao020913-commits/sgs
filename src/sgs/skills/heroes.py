@@ -1009,7 +1009,11 @@ def _manifest_steps(
       本技能这次询问全部候选产物的 ``TargetRule``——**每一个**都判为"目标不由玩家选"
       （:func:`_targets_are_decided_by_the_card`）⇒ 清单只有来源步。只要有一个产物
       方向要玩家选目标（界【龙胆】的【闪】当【杀】与【桃】当【酒】可在同一问并存），
-      目标步照旧下发——一条步骤表达不了"按方向分叉"的清单。
+      目标步照旧下发——一条步骤表达不了"按方向分叉"的清单；
+    - **合法来源组合**（huo-mobile-batch 票 10）：多来源步（``count > 1``）的来源步带出
+      ``Step.groups`` = ``per_source`` 的键（"哪几张能配成一组"），且只在**存在非法组合**
+      时才下发（任意 ``count`` 张都能配 ⇒ 省略，见 :func:`_source_groups`）。判据只读候选池
+      ——不看技能 id / 牌名，界面也不必自己判花色。
     """
     sizes = {len(sources) for sources in per_source}
     if len(sizes) != 1:
@@ -1027,6 +1031,7 @@ def _manifest_steps(
             max=count,
             pool=(StepPool(when=(), options=options),),
             order=0,
+            groups=_source_groups(per_source, count, options),
         )
     ]
     combos = [targets for rows in per_source.values() for targets in rows]
@@ -1071,6 +1076,39 @@ def _manifest_steps(
         )
     )
     return tuple(steps)
+
+
+def _source_groups(
+    per_source: dict[tuple[int, ...], list[tuple[int, ...]]],
+    count: int,
+    options: tuple[str, ...],
+) -> tuple[tuple[str, ...], ...]:
+    """来源步的**合法来源组合**（huo-mobile-batch 票 10；``Step.groups`` 的唯一写方）。
+
+    判据只读**候选池**：``per_source`` 的键就是引擎认的"能一起提交"的来源组（多源转化按
+    谓词分组时，键 = 组内那几张实体牌），这里原样转成文本 id（与 ``StepPool.options`` 同一
+    口径），故"同花色的一对"这类规则**不在界面 / 不按技能 id 特判**。
+
+    两条收窄：
+
+    - ``count <= 1`` ⇒ 空：单来源步没有"组合"可言（缺省 = 全组合合法，旧载荷逐字段不变）；
+    - 任意 ``count`` 张都能配（案例 = 【丈八蛇矛】的"任意两张"，``per_source`` 里 C(n,2) 个
+      键全在）⇒ 空：下发一串"每一对都在里面"的数据没有信息量，界面退回旧行为。
+
+    ``options`` 是全组合的参照集：它的 ``count`` 元子集 = "这些候选里所有可能的搭配"。
+    """
+    if count <= 1:
+        return ()
+    legal = {frozenset(sources) for sources in per_source}
+    everything = {
+        frozenset(combo)
+        for combo in combinations(
+            tuple(int(option) for option in options), count
+        )
+    }
+    if legal == everything:
+        return ()
+    return tuple(tuple(str(source) for source in sources) for sources in per_source)
 
 
 def _targets_are_decided_by_the_card(target_rule: TargetRule) -> bool:

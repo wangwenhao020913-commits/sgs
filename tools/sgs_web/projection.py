@@ -1796,12 +1796,19 @@ def _mask_foreign_preactivations(payload: dict[str, Any]) -> None:
     - 选座位 / 选项步 ⇒ ``when`` 里的前序答案（可能含被选中的牌 id）清空，候选（公开的
       ``seat:N`` / 选项文本）并成一行保留。
 
+    ``Step.groups``（huo-mobile-batch 票 10 的合法来源组合）与 ``pool[*].options``
+    **同一条泄露面**：每个元素都是询问者手里的实体牌 id。故两步**都**整格抹掉（不是置空
+    数组——缺省 / 空在读取方那里的语义是"每个组合都合法"；非询问者没有可提交的清单，
+    用最省的那一档即可）。
+
     这条只在**非询问者**路径上生效；产品调用点（``Session`` 的 ``human_seat`` 就是询问者）
     不受影响。与 :func:`_mask_watched_faces` 同姿态：fail-closed（查看者缺失即按非询问者）。
     """
 
     def mask(steps: list[dict[str, Any]]) -> None:
         for step in steps:
+            # 先抹来源组合（只可能出现在选牌步上，但漏一条分支就是一条泄露面）。
+            step.pop("groups", None)
             if step.get("zones"):
                 step["pool"] = [
                     {**entry, "options": []} for entry in (step.get("pool") or [])
