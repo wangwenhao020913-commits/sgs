@@ -53,6 +53,7 @@
 | 钩子 + 修饰器（触发后改值） | 「当你失去 1 点体力后…本阶段…」 | `hero.jie_huanggai.zhaxiang` |
 | 纯修饰器（无询问） | 「锁定技，你与其他角色的距离 -1」 | `hero.machao.mashu` |
 | 目标池修饰器（剔除自己） | 「若你没有手牌，你不能成为【杀】或【决斗】的目标」 | `hero.zhugeliang.kongcheng` |
+| 转化声明（单源 / **多源**） | 「你可以将一张 X 当 Y 使用或打出」/「将**两张**花色相同的手牌当【万箭齐发】使用」 | `hero.pangtong_mobile.lianhuan`（单源 + `CANDIDATES` 追加 `Reforge` 的重铸分支）、`hero.yuanshao_mobile.luanji`（多源：两张同花色 → 虚拟【万箭齐发】；`virtual_source_count=2`） |
 | 接缝（时机枚举里没有） | 「当你的【杀】被【闪】抵消后」 | `equip.axe` |
 | 提供者（势力求助） | 「令其他蜀势力角色打出一张【杀】」 | `hero.liubei.jijiang`；**提供者不只服务主公技**：移动版于吉【蛊惑】用它实现"需要牌时先质疑再决定这张牌算不算数" |
 | 判定 / 改判 | 「判定牌生效前，你可以**用**一张牌代替 / 替换之」（**不是打出**，走 `REJUDGE` 事件帧） | `hero.simayi.guicai`；张角【鬼道】= 同形 + `rejudge_card_color=BLACK` + `rejudge_original_to=HAND`（**替换**：原判定牌由改判者获得） |
@@ -118,7 +119,7 @@
 | `DISTANCE` | 座位距离（马术、义从、坐骑） |
 | `DISTANCE_LIMIT` | 额定距离上限（奇才） |
 | `COUNT_LIMIT` | 使用次数上限（咆哮、诈降、酒） |
-| `HAND_LIMIT_REPLACE` | 手牌上限替换式（界英姿②） |
+| `HAND_LIMIT_REPLACE` | 手牌上限的**查询期修正链**：替换式（界英姿②「手牌上限 = 体力上限」）+ **持续加式**（袁绍移动版【血裔】「上限 + 2×其他存活群势力角色数」，huo-mobile-batch 票 03 / 08 读法 A）——加式在 `current` 上加；**一次性**加式（`Player.hand_limit_bonus`）不走本挂点 |
 | `EFFECTIVENESS` | 效果生效性（仁王盾 / 青釭剑一类） |
 | `RESPONSE_COUNT` | 本次响应的张数（无双） |
 | `RECOVER_AMOUNT` | 回复量加式（标准救援） |

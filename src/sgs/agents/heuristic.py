@@ -2390,6 +2390,80 @@ def _conversion_choices_within_pool(
     return None
 
 
+def _conversion_sources_within_pool(
+    query: Query,
+    picks: Sequence[int],
+    choices: Sequence[str],
+    *,
+    step: object,
+    options: Sequence[str],
+    cards: Mapping[int, tuple[CardRef, int]],
+    short: str,
+    view: PlayerView,
+) -> tuple[int, ...] | None:
+    """把转化清单填出的**多源来源组**收进内部候选池（huo-mobile-batch 票 03）。
+
+    【乱击】的"两张花色相同"是**配对谓词**：清单来源步只列"至少有同花色搭档"的牌，但任意
+    两张开得出来的牌都点得动——按牌值挑出的两张可能不同花色，拼出的组合就不在候选池里
+    （引擎的确认会拒绝，AI 没有重试机会 = 一条非法应答）。故与
+    :func:`_conversion_choices_within_pool` 同姿态做一次**只读的池成员校验**：
+
+    1. 当前（来源组, 目标集）在池里 ⇒ 原样返回；
+    2. 否则在**同一条来源步的选项**里，按同一打分模型（:func:`_step_card_score`）挑一个
+       "池里存在、且目标集也对得上"的来源组；
+    3. 一个都凑不出 ⇒ ``None``（不交半成品）。
+
+    判据仍是询问自带的公开候选面（``transform_actions``），引擎的确认仍是最终裁判。
+    """
+    pool = tuple(getattr(query, "transform_actions", ()) or ())
+    if not pool:
+        return tuple(picks)
+    wanted = tuple(sorted(int(card_id) for card_id in picks))
+    targets = tuple(
+        int(str(text).removeprefix(_SEAT_PREFIX))
+        for text in choices
+        if str(text).startswith(_SEAT_PREFIX)
+    )
+    if not targets:
+        return tuple(picks)
+
+    def sources_of(action: object) -> tuple[int, ...]:
+        card = getattr(action, "card", None)
+        return tuple(
+            sorted(int(source) for source in (getattr(card, "virtual_sources", None) or ()))
+        )
+
+    def targets_of(action: object) -> tuple[int, ...]:
+        return tuple(int(target) for target in (getattr(action, "targets", None) or ()))
+
+    groups = {
+        sources_of(action)
+        for action in pool
+        if sources_of(action)
+        and len(sources_of(action)) == len(wanted)
+        and target_sets_match(targets, targets_of(action))
+    }
+    if not groups:
+        return tuple(picks)
+    if wanted in groups:
+        return tuple(picks)
+    option_ids = set()
+    for text in options:
+        try:
+            option_ids.add(int(text))
+        except (TypeError, ValueError):
+            return None
+    allowed = sorted(group for group in groups if set(group) <= option_ids)
+    if not allowed:
+        return None
+    scored: dict[int, float] = {}
+    for card_id in option_ids:
+        card, owner = cards.get(card_id, (None, view.seat))
+        scored[card_id] = _step_card_score(card, owner, view.seat, short, view=view)
+    best = max(allowed, key=lambda group: (sum(scored[cid] for cid in group), tuple(-cid for cid in group)))
+    return best
+
+
 def _fill_activation(
     query: Query,
     skill_id: str,
@@ -2417,6 +2491,8 @@ def _fill_activation(
     prior: list[str] = []
     short = str(skill_id).rsplit(".", 1)[-1]
     multi_target: tuple[object, tuple[str, ...]] | None = None
+    source_step: object | None = None
+    source_options: tuple[str, ...] = ()
     for step in sorted(steps, key=lambda item: item.order):
         row = _pool_row_for(step, tuple(prior))
         if row is None:
@@ -2456,6 +2532,8 @@ def _fill_activation(
             picked = _pick_card_ids(step, options, cards, query.view, short)
             if picked is None:
                 return None
+            if conversion and len(picked) > 1:
+                source_step, source_options = step, options
             picks.extend(picked)
             prior.extend(str(card_id) for card_id in picked)
         else:
@@ -2474,6 +2552,20 @@ def _fill_activation(
         if shrunk is None:
             return None
         choices = list(shrunk)
+    if conversion and source_step is not None:
+        fixed = _conversion_sources_within_pool(
+            query,
+            picks,
+            choices,
+            step=source_step,
+            options=source_options,
+            cards=cards,
+            short=short,
+            view=query.view,
+        )
+        if fixed is None:
+            return None
+        picks = list(fixed)
     return ActivateSkill(
         skill_id=skill_id,
         picks=tuple(picks),
@@ -3373,6 +3465,11 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(2.0),
         "自己的【杀】被【闪】抵消后弃对方一张牌：代价 = 零（弃的是对方的牌），"
         "发动前提由 ACTIVATION_PLANS 保证（本方【杀】被抵消 ∧ 对方有牌）",
+    ),
+    # huo-mobile-batch 票 03：火包移动版袁绍【乱击】（血裔是锁定技，按纪律**不入表**）
+    "hero.yuanshao_mobile.luanji": (
+        _constant(2.0),
+        "两张同花色手牌当【万箭齐发】：一次群体伤害，代价是两张手牌（价值表拉平后仍为正）",
     ),
     # huo-mobile-batch 票 02：火包移动版庞统【连环】/【涅槃】
     "hero.pangtong_mobile.lianhuan": (

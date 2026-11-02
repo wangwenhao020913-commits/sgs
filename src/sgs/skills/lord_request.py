@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from sgs.data import SkillType, hero_skill_id
+from sgs.data import Kingdom, SkillType, hero_skill_id
 from sgs.effects import (
     CandidateScope,
     CarrierKind,
@@ -616,6 +616,47 @@ JIUYUAN = RecoverBoost(hero_id="sunquan", short_id="jiuyuan")
 
 
 # ---------------------------------------------------------------------------
+# 袁绍移动版【血裔】（huo-mobile-batch 票 03；08 裁定读法 A）
+#
+#     血裔　主公技，锁定技，你的手牌上限+X（X为其他群势力角色数的两倍）。
+#
+# 查询期的**持续加式**，挂在唯一的"手牌上限修正链" `HAND_LIMIT_REPLACE` 上（用户
+# 2026-11-02 签 08 = 读法 A）：`current` 是链上此刻的值（缺省 = 当前体力值、下限 0），
+# 这里在原值上加 2 × 其他**存活**群势力角色数。与界周瑜【英姿】②的"替换成体力上限"
+# 同座位并存时按链序决胜负——**当前局面模型不可达**（一个座位只有一张武将牌），故今天
+# 的可观测行为与"新增一个持续加式修饰点"完全一致；这就是不为此改共享原语的理由。
+# ---------------------------------------------------------------------------
+
+XUEYI = hero_skill_id("yuanshao_mobile", "xueyi")
+"""袁绍移动版【血裔】的全限定技能 id（主公技 + 锁定技）。"""
+
+_XUEYI_PER_OTHER_QUN = 2
+"""每有一名**其他存活**群势力角色，手牌上限 +2（X = 该人数 × 2）。"""
+
+
+def _xueyi_hand_limit(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``HAND_LIMIT_REPLACE`` 回调：主公的手牌上限 + 2 × 其他存活群势力角色数。
+
+    ``ctx.owner == ctx.subject`` 是"这条技能属于被查询的座位"的自校（修饰器链遍历的是
+    全体存活实例，缺这一条会替所有人加上限；与界【英姿】② 同一姿态）。「其他」不含自己
+    （账本默认读法（二）②）、「角色」只算存活（账本「X = 存活角色数…每次现算」）——
+    查询期重算，不需要任何游标：群角色阵亡 / 失去主公身份 / 技能失效都在下一次读取
+    立刻反映。与一次性加式（``Player.hand_limit_bonus``）并存时两者相加（`hand_limit`
+    在替换链之后加那一轴，先后无差别）。
+    """
+    if ctx.owner != ctx.subject:
+        return current
+    others = sum(
+        1
+        for player in state.players
+        if player.alive
+        and player.seat != ctx.subject
+        and player.kingdom is Kingdom.QUN
+    )
+    return current + _XUEYI_PER_OTHER_QUN * others
+
+
+# ---------------------------------------------------------------------------
 # 界孙权【救援】（M6 票 17）：**转移回复**——其他吴势力角色于其回合内回复体力时，可以
 # 改为让主公回复 1 点、然后自己摸一张
 #
@@ -800,6 +841,15 @@ def lord_skill_definitions() -> tuple[SkillDef, ...]:
         ),
         # 界孙权【救援】（M6 票 17）：回复事件上的可选用应答（决定者 = 正在回复的吴势力
         # 角色，受益者 = 主公），与标准版的"锁定 +1"不是同一条机制。
+        # 袁绍移动版【血裔】（huo-mobile-batch 票 03）：主公技 + 锁定技 + 持续加式。
+        SkillDef(
+            skill_id=XUEYI,
+            locked=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.LORD,
+            modifiers=(Modifier(ModifierPoint.HAND_LIMIT_REPLACE, _xueyi_hand_limit),),
+            requirement="主公技，锁定技，你的手牌上限+X（X为其他群势力角色数的两倍）",
+        ),
         SkillDef(
             skill_id=JIE_JIUYUAN,
             locked=False,

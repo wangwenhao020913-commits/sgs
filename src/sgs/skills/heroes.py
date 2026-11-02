@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from itertools import combinations
 from typing import Any
 
 from sgs.data import Color, SkillType, Suit, color_of_suit, hero_skill_id
@@ -72,7 +73,7 @@ from .catalog import (
     resolve_instances,
 )
 from .flow import seat_choice
-from .virtual import card_ids, single_conversion
+from .virtual import card_ids, single_conversion, virtual_candidates
 
 __all__ = [
     "CONVERSION_SKILLS",
@@ -361,6 +362,46 @@ def _wushen_forbidden(
     return True
 
 
+LUANJI = hero_skill_id("yuanshao_mobile", "luanji")
+"""袁绍移动版【乱击】的全限定技能 id（huo-mobile-batch 票 03）。"""
+
+
+def _luanji_candidate(
+    state: GameState, ctx: ModifierContext, current: Any
+) -> Any:
+    """袁绍移动版【乱击】：出牌阶段把**两张花色相同的手牌**当【万箭齐发】使用。
+
+    多源转化（与【丈八蛇矛】同一台构造器）：按花色把手牌分组、组内取 C(n,2) 个来源组，
+    再交给 :func:`~sgs.skills.virtual.virtual_candidates`——"同花色"这条谓词内联在这里，
+    与 H 族"每个技能一个 ``CANDIDATES`` 回调"同一条纪律（候选构造只有一处实现）。
+
+    目标由产品定（【万箭齐发】= 全体其他存活角色），本回调不声明任何目标；```ctx.card``
+    非空的那一趟逐张牌循环不产出（整段在第二趟 ``ctx.card=None`` 里补）。
+    """
+    if ctx.card is not None or ctx.owner != ctx.subject:
+        return current
+    if ctx.scope is not CandidateScope.PLAY:
+        return current
+    by_suit: dict[str | None, list[int]] = {}
+    for card_id in state.player(ctx.subject).hand:
+        by_suit.setdefault(state.card(card_id).suit, []).append(card_id)
+    groups = tuple(
+        combo for cards in by_suit.values() for combo in combinations(cards, 2)
+    )
+    if not groups:
+        return current
+    return (
+        *current,
+        *virtual_candidates(
+            state,
+            ctx,
+            target_type_id="arrow_barrage",
+            sources=groups,
+            scopes=(CandidateScope.PLAY,),
+        ),
+    )
+
+
 def _club_iron_chain(state: GameState, card_id: int) -> bool:
     """花色谓词 + 产物闸门：**梅花手牌**，且本档牌堆里有【铁索连环】实体牌。
 
@@ -563,6 +604,19 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
 """H 族五条技能（六条声明：龙胆两个方向各一条；界甘宁【奇袭】经 ``shared_with`` 共用
 甘宁那一行）的逐字声明（票 03 §表 + M6 票 02【倾国】/ 票 03【奇袭】/ 票 04 界关羽【武圣】/
 票 07 界甘宁【奇袭】）。"""
+
+
+_LUANJI_DEF = SkillDef(
+    skill_id=LUANJI,
+    locked=False,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    modifiers=(Modifier(ModifierPoint.CANDIDATES, _luanji_candidate),),
+    virtual_type_ids=("arrow_barrage",),
+    virtual_source_count=2,
+    requirement="选择两张花色相同的手牌当【万箭齐发】使用",
+)
+"""袁绍移动版【乱击】的独立定义（多源转化：两张同花色手牌 → 虚拟【万箭齐发】）。"""
 
 
 _FORCED_CONVERSION_SKILL_IDS: frozenset[str] = frozenset(
@@ -984,7 +1038,7 @@ def conversion_skill_definitions() -> tuple[SkillDef, ...]:
     for skill in CONVERSION_SKILLS:
         for skill_id in skill.skill_ids:
             grouped.setdefault(skill_id, []).append(skill)
-    return tuple(
+    definitions = tuple(
         SkillDef(
             skill_id=skill_id,
             locked=skills[0].locked,
@@ -1003,3 +1057,6 @@ def conversion_skill_definitions() -> tuple[SkillDef, ...]:
         )
         for skill_id, skills in grouped.items()
     )
+    # 多源转化是**配对谓词**（"两张花色相同"），单源声明的 `predicate` 表达不了 ⇒ 另立
+    # 一条独立定义（与【丈八蛇矛】同一台 `virtual_candidates` 构造器）。
+    return (*definitions, _LUANJI_DEF)

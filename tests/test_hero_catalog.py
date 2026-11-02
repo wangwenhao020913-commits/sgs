@@ -197,9 +197,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 140
+    assert len(CATALOG) == 142
     assert len(equipment) == 22
-    assert len(heroes) == 118
+    assert len(heroes) == 120
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -222,7 +222,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 118
+    assert len(expected) == 120
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1066,6 +1066,9 @@ SKILL_FILES: dict[str, str] = {
     # huo-mobile-batch 票 02：火包移动版庞统【连环】/【涅槃】
     "hero.pangtong_mobile.lianhuan": "test_hero_huo.py",
     "hero.pangtong_mobile.niepan": "test_hero_huo.py",
+    # huo-mobile-batch 票 03：火包移动版袁绍【乱击】/【血裔】
+    "hero.yuanshao_mobile.luanji": "test_hero_huo.py",
+    "hero.yuanshao_mobile.xueyi": "test_hero_huo.py",
     "hero.jie_zhangliao.tuxi": "test_hero_jie_wei.py",
     "hero.jie_xuchu.luoyi": "test_hero_jie_wei.py",
     # M6 票 15：界·魏 B（郭嘉 / 李典）
@@ -1870,6 +1873,10 @@ SKILL_SHAPE: dict[str, str] = {
     # 【涅槃】= 零步流水线（限定技 + 濒死钩子，按"零步技能"格）
     "hero.pangtong_mobile.lianhuan": "转化技",
     "hero.pangtong_mobile.niepan": "零步技能",
+    # huo-mobile-batch 票 03：袁绍【乱击】= 两张同花色手牌的转化（转化技格）；
+    # 【血裔】= 纯修饰器 + 锁定（锁定技格）
+    "hero.yuanshao_mobile.luanji": "转化技",
+    "hero.yuanshao_mobile.xueyi": "锁定技",
     "hero.jie_simayi.guicai": "能力位",
     # 本票：移动版界【曹仁】据守 = 阶段体零步（摸三张）+ 翻面，非锁定 ⇒ 零步技能格
     "hero.jie_caoren_mobile.jushou": "零步技能",
@@ -1914,8 +1921,8 @@ SHAPE_COUNTS: dict[str, int] = {
     "零步技能": 28,
     "排列技能": 3,
     "多轮技能": 14,
-    "锁定技": 32,
-    "转化技": 14,
+    "锁定技": 33,
+    "转化技": 15,
     "能力位": 3,
     "候选生成器": 1,
     "候选提供者": 5,
@@ -2026,7 +2033,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """132 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 140
+    assert len(SKILL_SHAPE) == len(CATALOG) == 142
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2156,7 +2163,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
     assert len(inside) == 71
-    assert len(outside) == 69
+    assert len(outside) == 71
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

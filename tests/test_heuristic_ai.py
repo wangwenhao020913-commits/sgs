@@ -3059,6 +3059,29 @@ def _coverage_lianhuan():
     return state, _play_phase_with_preactivations(state)
 
 
+def _coverage_luanji():
+    """袁绍移动版：两张**同花色**手牌当【万箭齐发】（多源转化的第 2 条载体）。"""
+    # 取两张**出牌阶段用不出去**的同花色手牌（♥【闪】）：否则 AI 直接按原用途打出去，
+    # 这条覆盖就测不到清单填表（与武圣 / 国色的覆盖取"用不出去的源牌"同一条口径）。
+    dodges = [
+        index
+        for index, card in enumerate(PACK.deck.cards)
+        if card.suit == "heart" and card.type == "dodge"
+    ]
+    first, second = dodges[0], dodges[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(first, second), hero="yuanshao_mobile"),
+            SeatSpec(),
+            SeatSpec(),
+        ],
+        deck=_deck_excluding(first, second),
+        turn_seat=0,
+    )
+    return state, _play_phase_with_preactivations(state)
+
+
 def _coverage_serpent_spear():
     first, second = _ids("dodge")[0], _ids("dodge")[1]
     serpent = _ids("serpent_spear")[0]
@@ -3080,6 +3103,8 @@ _TRANSFORM_COVERAGE_CASES = (
     ("丈八蛇矛", "equip.serpent_spear", _coverage_serpent_spear, "slash"),
     # huo-mobile-batch 票 02：庞统移动版【连环】的使用分支（160 档才有【铁索连环】实体牌）
     ("连环", "hero.pangtong_mobile.lianhuan", _coverage_lianhuan, "iron_chain"),
+    # huo-mobile-batch 票 03：袁绍移动版【乱击】（两张同花色手牌 → 虚拟【万箭齐发】）
+    ("乱击", "hero.yuanshao_mobile.luanji", _coverage_luanji, "arrow_barrage"),
 )
 """``(标签, 技能 id, 场景构造, 解析出的虚拟牌名)``：五条转化技（龙胆两方向各一）。"""
 

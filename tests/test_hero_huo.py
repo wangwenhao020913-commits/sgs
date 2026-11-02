@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import pytest
 
-from sgs.data import Kingdom, load_content_pack, load_hero_tables
-from sgs.effects import distance
+from sgs.data import Identity, Kingdom, load_content_pack, load_hero_tables
+from sgs.effects import distance, hand_limit
 from sgs.engine import Engine
 from sgs.skills import CATALOG
 from sgs.state import (
@@ -1171,3 +1171,271 @@ def test_pangtong_mobile_hero_is_in_the_default_pool() -> None:
     assert hero.hp_max == 3
     assert [skill.id for skill in hero.skills] == ["lianhuan", "niepan"]
     assert [skill.name for skill in hero.skills] == ["连环", "涅槃"]
+
+
+# ---------------------------------------------------------------------------
+# ⑩ 袁绍移动版【乱击】（huo-mobile-batch 票 03）
+# ---------------------------------------------------------------------------
+
+YUANSHAO = "yuanshao_mobile"
+LUANJI = "hero.yuanshao_mobile.luanji"
+XUEYI = "hero.yuanshao_mobile.xueyi"
+
+
+def _clubs(pack, count: int) -> tuple[int, ...]:
+    """某牌堆里的前 ``count`` 张**梅花**牌。"""
+    found: list[int] = []
+    for index, card in enumerate(pack.deck.cards):
+        if card.suit == "club":
+            found.append(index)
+            if len(found) == count:
+                return tuple(found)
+    raise AssertionError("牌堆里没有足够的梅花牌")
+
+
+def _luanji_state(pack, hand: tuple[int, ...], *, others: int = 2):
+    seats = [SeatSpec(hero=YUANSHAO, hand=hand)]
+    seats.extend(SeatSpec() for _ in range(others))
+    return build_state(
+        pack=pack,
+        seats=seats,
+        deck=_pack_deck_without(pack, *hand),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+
+
+def _luanji_play_phase(pack, hand: tuple[int, ...], *, others: int = 2):
+    engine = Engine.from_state(_luanji_state(pack, hand, others=others), seed=3)
+    _advance(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 0,
+    )
+    return engine
+
+
+def _luanji_steps(engine):
+    return engine.pending.transform_preactivations.get(LUANJI)
+
+
+def test_luanji_converts_two_same_suit_hand_cards_into_arrow_barrage() -> None:
+    """两张同花色手牌当【万箭齐发】：全体其他存活角色各挨 1 点、两张来源进弃牌堆。"""
+    first, second = _clubs(PACK, 2)
+    engine = _luanji_play_phase(PACK, (first, second))
+    steps = _luanji_steps(engine)
+
+    assert steps, "【乱击】的清单下发"
+    assert (steps[0].min, steps[0].max) == (2, 2), "来源步恰好两张"
+    engine.submit(
+        ActivateSkill(
+            skill_id=LUANJI,
+            picks=(first, second),
+            choices=("seat:1", "seat:2"),
+            answers_seq=engine.pending.seq,
+        )
+    )
+    _until(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 0,
+    )
+
+    assert engine.state.player(1).hp == 3, "座位 1 挨 1 点（没有【闪】）"
+    assert engine.state.player(2).hp == 3, "座位 2 挨 1 点"
+    assert engine.state.player(0).hp == 4, "自己不挨"
+    assert first in engine.state.discard and second in engine.state.discard
+
+
+def test_luanji_sources_must_be_hand_cards_and_share_one_suit() -> None:
+    """清单来源步只列**手牌**里的牌，且两张必须同花色——不同花色点得动但确认被拒。"""
+    first, second = _clubs(PACK, 2)
+    heart = next(
+        index
+        for index, card in enumerate(PACK.deck.cards)
+        if card.suit == "heart" and card.type == "slash"
+    )
+    engine = _luanji_play_phase(PACK, (first, second, heart))
+    steps = _luanji_steps(engine)
+
+    assert steps, "三张牌里有两张♣ ⇒ 清单存在"
+    options = {int(value) for value in steps[0].pool[0].options}
+    hand = set(engine.state.player(0).hand)
+    assert options <= hand, "来源步只列**手牌**（装备 / 判定区不在候选里）"
+    suits = [PACK.deck.cards[card_id].suit for card_id in hand]
+    for card_id in options:
+        suit = PACK.deck.cards[card_id].suit
+        assert suits.count(suit) >= 2, f"{card_id}（{suit}）在手里有同花色搭档"
+    assert heart not in options or suits.count("heart") >= 2
+
+
+def test_luanji_is_absent_without_a_same_suit_pair() -> None:
+    """凑不出同花色的一对 ⇒ 候选阶段不产出、清单键不存在。
+
+    摸牌阶段会再摸两张（四座局固定 2 张），故牌堆顶预置两种**还没出现过的花色**
+    （♠ / ♦），让四张手牌的四种花色互不相同——真局面里没有同花色对。
+    """
+    clubs = _clubs(PACK, 1)[0]
+    heart = next(
+        index
+        for index, card in enumerate(PACK.deck.cards)
+        if card.suit == "heart" and card.type == "slash"
+    )
+    spade = next(
+        index
+        for index, card in enumerate(PACK.deck.cards)
+        if card.suit == "spade" and card.type == "slash"
+    )
+    diamond = next(
+        index
+        for index, card in enumerate(PACK.deck.cards)
+        if card.suit == "diamond" and card.type == "slash"
+    )
+    used = {clubs, heart, spade, diamond}
+    deck = (spade, diamond) + tuple(
+        index for index in range(len(PACK.deck.cards)) if index not in used
+    )
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=YUANSHAO, hand=(clubs, heart)), SeatSpec(), SeatSpec()],
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=3)
+    _advance(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 0,
+    )
+
+    assert len(engine.state.player(0).hand) == 4, "两张开局 + 摸两张"
+    assert _luanji_steps(engine) is None, "没有同花色对 ⇒ 没有转化清单"
+    assert not any(
+        action.card.type == "arrow_barrage"
+        for action in engine.pending.transform_actions
+    ), "内部池里也没有虚拟【万箭齐发】"
+
+
+def test_luanji_is_absent_without_another_living_character() -> None:
+    """场上没有其他存活角色 ⇒ 没有目标，候选阶段不产出。"""
+    first, second = _clubs(PACK, 2)
+    other = 1
+    state = _luanji_state(PACK, (first, second), others=1)
+    state.player(other).alive = False
+    engine = Engine.from_state(state, seed=3)
+    _advance(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 0,
+    )
+
+    assert _luanji_steps(engine) is None
+
+
+def test_luanji_can_be_used_more_than_once_per_play_phase() -> None:
+    """牌面没有「限一次」⇒ 同一出牌阶段可以再用一次（没有阶段位）。"""
+    four = _clubs(PACK, 4)
+    engine = _luanji_play_phase(PACK, four)
+
+    for pair in (four[0:2], four[2:4]):
+        steps = _luanji_steps(engine)
+        assert steps, "第二组♣仍在清单里"
+        engine.submit(
+            ActivateSkill(
+                skill_id=LUANJI,
+                picks=pair,
+                choices=("seat:1", "seat:2"),
+                answers_seq=engine.pending.seq,
+            )
+        )
+        _advance(
+            engine,
+            lambda e: e.pending is not None
+            and e.pending.kind == QueryKind.PLAY_PHASE
+            and e.pending.actor == 0
+            and e.state.player(1).hp == (3 if pair == four[0:2] else 2),
+        )
+
+    assert engine.state.player(1).hp == 2, "两次【万箭】各 1 点"
+    assert engine.state.player(2).hp == 2
+
+
+def test_yuanshao_mobile_hero_is_in_the_default_pool() -> None:
+    """数据面：袁绍移动版进默认池（显示名带「移动版」、真名「袁绍」、群 / 男 / 4）。"""
+    heroes = {hero.id: hero for table in load_hero_tables() for hero in table.heroes}
+
+    hero = heroes[YUANSHAO]
+    assert hero.name == "袁绍移动版"
+    assert hero.true_name == "袁绍"
+    assert hero.kingdom is Kingdom.QUN
+    assert hero.hp_max == 4
+    assert [skill.id for skill in hero.skills] == ["luanji", "xueyi"]
+    assert [skill.name for skill in hero.skills] == ["乱击", "血裔"]
+    assert [skill.skill_type.value for skill in hero.skills] == ["NORMAL", "LORD"]
+
+
+# ---------------------------------------------------------------------------
+# ⑪ 袁绍移动版【血裔】（huo-mobile-batch 票 03；08 读法 A）
+# ---------------------------------------------------------------------------
+
+
+def _xueyi_state(*, others: tuple[Kingdom, ...] = (Kingdom.QUN, Kingdom.QUN), identity=None, hp=4, hp_max=4):
+    seats = [SeatSpec(hero=YUANSHAO, identity=identity, hp=hp, hp_max=hp_max, kingdom=Kingdom.QUN)]
+    seats.extend(SeatSpec(kingdom=kingdom) for kingdom in others)
+    return build_state(pack=PACK, seats=seats, deck=deck_excluding(PACK))
+
+
+def test_xueyi_adds_two_per_other_living_qun_character() -> None:
+    """X = 2 × 其他存活群势力角色数：两名其他群 ⇒ 手牌上限 = 体力 + 4。"""
+    state = _xueyi_state(identity=Identity.LORD)
+
+    assert hand_limit(state, state.player(0)) == 4 + 4
+
+
+def test_xueyi_ignores_the_holder_and_dead_characters() -> None:
+    """「其他」不含自己；阵亡的群势力角色不再算。"""
+    state = _xueyi_state(
+        others=(Kingdom.QUN, Kingdom.WEI, Kingdom.QUN), identity=Identity.LORD
+    )
+    assert hand_limit(state, state.player(0)) == 4 + 4, "自己不算、魏不算"
+
+    state.player(3).alive = False
+    assert hand_limit(state, state.player(0)) == 4 + 2, "死掉的群势力角色不再算"
+
+
+def test_xueyi_is_not_instantiated_for_a_non_lord_seat() -> None:
+    """主公技门控：不是主公 ⇒ 实例根本不产出（上限 = 体力值）。"""
+    state = _xueyi_state(identity=Identity.LOYALIST)
+
+    assert hand_limit(state, state.player(0)) == 4
+
+
+def test_xueyi_adds_nothing_when_no_other_qun_character_is_alive() -> None:
+    state = _xueyi_state(others=(Kingdom.WEI, Kingdom.WU), identity=Identity.LORD)
+
+    assert hand_limit(state, state.player(0)) == 4
+
+
+def test_xueyi_composes_with_a_one_shot_hand_limit_bonus() -> None:
+    """与一次性加式（``hand_limit_bonus``）不分先后：两者相加。"""
+    state = _xueyi_state(identity=Identity.LORD)
+    state.player(0).hand_limit_bonus = 2
+
+    assert hand_limit(state, state.player(0)) == 4 + 4 + 2
+
+
+def test_xueyi_current_definition_is_a_locked_lord_skill() -> None:
+    """声明面：锁定 + 主公技 + 只有一条手牌上限修饰器（逐字与牌面同源）。"""
+    definition = CATALOG[XUEYI]
+
+    assert definition.locked is True
+    assert definition.skill_type.value == "LORD"
+    assert [modifier.point.name for modifier in definition.modifiers] == [
+        "HAND_LIMIT_REPLACE"
+    ]
+    assert definition.hooks == () and definition.seams == ()
