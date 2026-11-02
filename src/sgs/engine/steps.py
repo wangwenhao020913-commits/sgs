@@ -180,6 +180,7 @@ class FrameHost(StepHost, Protocol):
         actor: int,
         timing: Timing,
         *,
+        frame: Frame | None = None,
         dying: int | None = None,
         payload: Any = None,
     ) -> Any: ...
@@ -642,6 +643,7 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
         QueryKind.DODGE,
         target,
         Timing.RESOLVE_BEFORE_EFFECT,
+        frame=frame,
         payload=DodgeContext(providers_used=providers_used),
     )
     if host.suspended(action):
@@ -1335,7 +1337,11 @@ def near_death_ask(host: FrameHost, frame: Frame) -> Control:
             return control
         if satisfied is None:
             action = host.ask_query(
-                QueryKind.PEACH, asker, Timing.NEAR_DEATH_AT, dying=target
+                QueryKind.PEACH,
+                asker,
+                Timing.NEAR_DEATH_AT,
+                frame=frame,
+                dying=target,
             )
             if host.suspended(action):
                 return "stay"

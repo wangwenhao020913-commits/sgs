@@ -1124,21 +1124,21 @@ def _one_shot_deviation(real_class):
     return OneShotDeviation
 
 
-def test_a_deal_with_different_decisions_is_counted_and_attributed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """非空 diff 的真链路：真批次 → 焦点座位决策 → `deals_differing` / 归因。"""
+def _install_deviating_arm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把 ``deviating`` 臂接到 HEAD 的启发式 + "首次有得选就换答案" 的子类上。
+
+    先抓住**未打补丁**的 ``run.load_version``，补丁只替换模块属性；``_load`` 直接调抓住的
+    那一个，故不需要一个只为测试存在的 ``run.load_version_original``。
+    """
     import ai_eval.run as run
     from ai_eval.versions import LoadedVersion
 
+    original = run.load_version
+
     def _load(ref, *, repo_root=None, versions_dir=None):
         if ref != "deviating":
-            return run.load_version_original(
-                ref, repo_root=repo_root, versions_dir=versions_dir
-            )
-        real = run.load_version_original(
-            "HEAD", repo_root=repo_root, versions_dir=versions_dir
-        )
+            return original(ref, repo_root=repo_root, versions_dir=versions_dir)
+        real = original("HEAD", repo_root=repo_root, versions_dir=versions_dir)
         return LoadedVersion(
             ref="deviating",
             commit=real.commit,
@@ -1147,10 +1147,14 @@ def test_a_deal_with_different_decisions_is_counted_and_attributed(
             player_class=_one_shot_deviation(real.player_class),
         )
 
-    monkeypatch.setattr(run, "load_version_original", run.load_version, raising=False)
     monkeypatch.setattr(run, "load_version", _load)
 
-    result = run.run_quick(
+
+def _run_quick_against_the_deviating_arm(tmp_path: Path) -> dict:
+    """2 副：baseline = ``deviating``（HEAD 启发式 + 一次偏离），candidate = HEAD。"""
+    import ai_eval.run as run
+
+    return run.run_quick(
         baseline="deviating",
         candidate_ref="HEAD",
         deals=2,
@@ -1158,11 +1162,28 @@ def test_a_deal_with_different_decisions_is_counted_and_attributed(
         versions_dir=tmp_path,
     )
 
+
+def _assert_a_decision_diff_is_attributed(result: dict, *, label: str) -> None:
+    """两臂对比的四条共用断言：errors / ``deals_differing`` / 类型归因 / 首个例子。
+
+    ``label`` 只进失败消息（HEAD 派生批与固定种子批共用同一份判据，票 02）。
+    """
+    assert result["errors"] == 0, f"{label}：有一副没打完"
     diff = result["decision_diff"]
-    assert result["errors"] == 0
-    assert diff["deals_differing"] >= 1
-    assert diff["first_divergence_by_kind"], "非空 diff 必须有类型归因"
-    assert diff["examples"][0]["candidate"] != diff["examples"][0]["baseline"]
+    assert diff["deals_differing"] >= 1, f"{label}：两臂没有产生决策差异"
+    assert diff["first_divergence_by_kind"], f"{label}：非空 diff 必须有类型归因"
+    assert diff["examples"][0]["candidate"] != diff["examples"][0]["baseline"], (
+        f"{label}：首个例子必须记录两臂的不同应答"
+    )
+
+
+def test_a_deal_with_different_decisions_is_counted_and_attributed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """非空 diff 的真链路：真批次 → 焦点座位决策 → `deals_differing` / 归因。"""
+    _install_deviating_arm(monkeypatch)
+    result = _run_quick_against_the_deviating_arm(tmp_path)
+    _assert_a_decision_diff_is_attributed(result, label="HEAD 派生批")
 
 
 # ---------------------------------------------------------------------------
@@ -1184,50 +1205,24 @@ BROKEN_SEEDS = (7541351177654252955, 12557545414948025534)
 def test_the_fixed_broken_batch_finishes_without_errors(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """固定种子批（不随 HEAD 漂）：两臂各两副都打完，`errors == 0`。
+    """固定种子批（不随 HEAD 漂）：与上面那条**跑同一份断言**，只把批次换成固定两副。
 
     修前：第二副在无懈收集式窗口抛 `NotImplementedError`（`ai_eval` 记 1 副没打完 / 臂，
-    共 2 个 errors）；修后：应答被交还给接受它的那一问，正常终局。
+    共 2 个 errors）；修后：应答被交还给接受它的那一问，正常终局。spec §DoD 第 2 条点名的
+    是"`test_a_deal_with_different_decisions_is_counted_and_attributed` 在这批种子上不再报
+    error"，故四条断言（errors / diff / 归因 / 首个例子）一条不少地复用，只是批次固定。
     """
     import ai_eval.run as run
     import ai_eval.seeds as seeds_mod
-    from ai_eval.versions import LoadedVersion
 
     batch = seeds_mod.derive_batch(BROKEN_COMMIT, 2)
     assert batch.seeds == BROKEN_SEEDS, "固定批的字面值变了：先查 derive_batch 的纪律"
 
-    def _load(ref, *, repo_root=None, versions_dir=None):
-        if ref != "deviating":
-            return run.load_version_original(
-                ref, repo_root=repo_root, versions_dir=versions_dir
-            )
-        real = run.load_version_original(
-            "HEAD", repo_root=repo_root, versions_dir=versions_dir
-        )
-        return LoadedVersion(
-            ref="deviating",
-            commit=real.commit,
-            heuristic_sha256="deviating" * 8,
-            path=real.path,
-            player_class=_one_shot_deviation(real.player_class),
-        )
-
-    monkeypatch.setattr(run, "load_version_original", run.load_version, raising=False)
-    monkeypatch.setattr(run, "load_version", _load)
+    _install_deviating_arm(monkeypatch)
     monkeypatch.setattr(run, "derive_batch", lambda commit, deals: batch)
 
-    result = run.run_quick(
-        baseline="deviating",
-        candidate_ref="HEAD",
-        deals=2,
-        measure_cases=False,
-        versions_dir=tmp_path,
-    )
-
-    assert result["errors"] == 0, (
-        f"固定种子批 {BROKEN_SEEDS} 里有一副没打完"
-        "（无懈窗口的 fail-closed 又响了？答案被交给了别的一问？）"
-    )
+    result = _run_quick_against_the_deviating_arm(tmp_path)
+    _assert_a_decision_diff_is_attributed(result, label=f"固定种子批 {BROKEN_SEEDS}")
     assert result["seed_batch"]["deals"] == 2
 
 

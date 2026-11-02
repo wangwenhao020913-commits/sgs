@@ -254,6 +254,10 @@ _ANSWER_BACKLOG_LIMIT = 32
 正常流程里每条应答都由它自己那一问立刻取走（:attr:`Engine._answers` 恒空一瞬）；只有
 "问了、答了，但问的那一帧还没重入"才会留一条。32 条同时悬空只可能是病态局面，那时淘汰
 最旧的一条：它那一问会重问一遍（规则仍正确），但内存不随对局长度无界增长。
+
+**这是登记过的程序化约定**（本项目的偏离一手账本，`CODING_STANDARDS.md` §1）：官方无
+条文，上限与"淘汰即重问"的张力登记在 `开发文档/06-里程碑与风险.md` §5「程序化约定与
+偏离一手」的应答归属行；要改这个数或改成"永不淘汰"是一次**重新裁定**，先改那一行。
 """
 
 _ANSWER_ORIGIN_KEY = "answer_origin"
@@ -269,9 +273,10 @@ _ANSWER_ORIGIN_KEY = "answer_origin"
 def _ask_origin(frame: Frame) -> int | None:
     """一次询问的**发问帧身份**（票 02 的应答归属键第三位）。
 
-    真实帧 = 帧号；``MOVE_AFTER`` 的续跑帧 = 建帧时记下的来源帧身份。``None`` = 没有承载帧
-    的询问（``ask_query`` 的窗口 / 回合环里那两问）或手工构造的孤立临时帧——它们没有可区分
-    的身份：宁可把"同一问"认宽一点，也不把真实帧的应答错配掉。
+    真实帧 = 帧号；``MOVE_AFTER`` 的续跑帧 = 建帧时记下的来源帧身份。``None`` 只剩两种：
+    真的没有承载帧的回合环发问（``PLAY_PHASE`` / ``DISCARD``，栈空时才问），以及手工构造
+    的孤立临时帧（没有来源帧可继承）——它们没有可区分的身份：宁可把"同一问"认宽一点，
+    也不把真实帧的应答错配掉。
     """
     if frame.frame_id:
         return frame.frame_id
@@ -572,7 +577,7 @@ class Engine:
         :data:`_ANSWER_BACKLOG_LIMIT`。
         """
 
-        self._asked: tuple[object, ...] | None = None
+        self._asked_identity: tuple[object, ...] | None = None
         """当前挂起那一问的身份；:meth:`Engine.submit` 据此把应答记到**它**名下。"""
         self._structured_activation: ActivateSkill | None = None
         """最近一次**经校验器接受**的复合 ``ActivateSkill``（W4-1）。
@@ -1305,6 +1310,7 @@ class Engine:
         actor: int,
         timing: Timing,
         *,
+        frame: Frame | None = None,
         dying: int | None = None,
         payload: RespondContext
         | SelectContext
@@ -1316,7 +1322,11 @@ class Engine:
         | None = None,
         revealed: tuple[CardRef, ...] = (),
     ) -> Any:
-        """构造并交付一次询问；已有应答（重入）则直接返回它。
+        """构造并交付一次询问；**重入时只返回这一问自己被接受的应答**（票 02 的应答归属）。
+
+        ``frame`` 是这次询问的**承载帧**（发起它、重入时也由它恢复的那一帧）：应答按
+        ``(kind, actor, 发问帧身份)`` 归属，故带帧的窗口（`steps._dodge_window` 的【闪】
+        与求桃）必须传它；缺省 ``None`` 只留给真的没有承载帧的发问。
 
         ``revealed`` 是**本次询问授予该参与者的牌面**（票 10 §①，缺省空 = 不授予）：
         它是通用通道，任何询问都能带（【观星】的排列与将来【遗计】的"只看不排"共用），
@@ -1326,7 +1336,7 @@ class Engine:
             lambda seq: self._build_query(
                 kind, actor, timing, seq, dying=dying, payload=payload, revealed=revealed
             ),
-            identity=self._ask_identity(kind, actor, None),
+            identity=self._ask_identity(kind, actor, frame),
         )
 
     def ask_arrange(
@@ -2816,7 +2826,7 @@ class Engine:
         # **发问身份随数据一起继承**（票 02 的应答归属）：续跑帧的 ``frame_id`` 恒为 0，
         # 而钩子在续跑里重问的是**同一问**——应答必须仍认得出它（见 :func:`_ask_origin`）。
         # 来源帧本身若也是续跑帧，就沿用它的那份身份。
-        origin = dispatch_frame.frame_id or dispatch_frame.data.get(_ANSWER_ORIGIN_KEY)
+        origin = _ask_origin(dispatch_frame)
         if origin is not None:
             data[_ANSWER_ORIGIN_KEY] = origin
         # 本次移动的载荷由**续跑帧自己**带一份（票 23）：``_dispatch_move_after`` 在派发
@@ -3633,14 +3643,15 @@ class Engine:
 
     # -- 询问 ---------------------------------------------------------------
 
+    @staticmethod
     def _ask_identity(
-        self, kind: QueryKind, actor: int, frame: Frame | None
+        kind: QueryKind, actor: int, frame: Frame | None
     ) -> tuple[object, ...]:
         """一次询问的**逻辑身份**（票 02 的应答归属）：同一问重入时不变，不同的问不同。
 
-        = ``(kind, actor, 发问帧身份)``；发问帧身份见 :func:`_ask_origin`，没有承载帧的询问
-        （``ask_query`` 的窗口 / 回合环里那两问）是 ``None``。身份**不**含询问序号：序号每次
-        重入都新取一个，拿它当身份会把"同一问的重入"认成新的一问。
+        = ``(kind, actor, 发问帧身份)``；发问帧身份见 :func:`_ask_origin`。带承载帧的询问
+        必须把帧传进来；``None`` 只留给真的没有承载帧的发问（回合环那两问）。身份**不**含
+        询问序号：序号每次重入都新取一个，拿它当身份会把"同一问的重入"认成新的一问。
         """
         return (
             kind,
@@ -3662,9 +3673,16 @@ class Engine:
         这条动作，fail-closed 于是抛 ``NotImplementedError``。
 
         故应答按询问身份记账（:meth:`_ask_identity`）：这里只取走 ``identity`` 名下那条；
-        取不到就照常建询问、挂起。被孤立的应答**留着**（:attr:`_answers`）——它的那一问真正
-        重入时取走，不重问（``CODING_STANDARDS.md`` §3）；它也可能永远等不到（那一问所在帧
-        不再重入），那是死条目，不再影响任何询问（上限见 :data:`_ANSWER_BACKLOG_LIMIT`）。
+        取不到就照常建询问、挂起。**被孤立的应答不丢**（:attr:`_answers`）——它那一问真正重入
+        时取走，不重问（``CODING_STANDARDS.md`` §3）。这是对侦察稿选项 (d) 的**落地读法**：
+        侦察稿写的是"被孤立的应答随下一次 ``submit`` 覆盖、那一问重问一遍"，本项目按 §3 改成
+        "留到它自己那一问重入"；上限与淘汰是登记过的程序化约定，见
+        :data:`_ANSWER_BACKLOG_LIMIT`。
+
+        **身份粒度** = ``(kind, actor, 发问帧身份)``：同一帧里同一 kind+actor 的两个不同
+        询问仍共用一个身份（要更细得用各帮手的**询问标识**，本票不做）；真的没有承载帧的
+        只剩回合环那两问（``PLAY_PHASE`` / ``DISCARD``），它们没有帧号可区分，只按
+        ``(kind, actor)`` 认同一问。
         """
         accepted = self._answers.pop(identity, None)
         if accepted is not None:
@@ -3677,21 +3695,21 @@ class Engine:
         query = build(seq)
         self._emit(QueryRecord(seq=seq, query=query))
         self.pending = query
-        self._asked = identity
+        self._asked_identity = identity
         return SUSPEND
 
     def _answer_to(self, action: Action) -> None:
         """把被接受的应答记在**接受它的那一问**名下（票 02 的应答归属），并清掉挂起态。
 
-        键 = ``ask`` 挂起时记下的 :attr:`_asked`：下一问（哪怕同一 actor、同一帧）取不到它，
-        只有把挂起态推进到它自己那一问，才取得走。
+        键 = ``ask`` 挂起时记下的 :attr:`_asked_identity`：别的询问（哪怕同一 actor、同一帧）
+        取不到它，只有把挂起态推进到它自己那一问，才取得走。
         """
-        assert self._asked is not None, "被接受的应答必须有它所属的那一问"
+        assert self._asked_identity is not None, "被接受的应答必须有它所属的那一问"
         if len(self._answers) >= _ANSWER_BACKLOG_LIMIT:
             # 病态局面的兜底（见 _ANSWER_BACKLOG_LIMIT）：淘汰最旧的一条，它那一问会重问。
             self._answers.pop(next(iter(self._answers)))
-        self._answers[self._asked] = (action, self._structured_activation)
-        self._asked = None
+        self._answers[self._asked_identity] = (action, self._structured_activation)
+        self._asked_identity = None
         self.pending = None
 
     def submit(self, response: object) -> None:

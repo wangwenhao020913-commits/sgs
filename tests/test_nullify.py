@@ -747,7 +747,7 @@ class _DodgeWindowHost:
     def advance_provider(self, frame, timing):
         return None, None, None
 
-    def ask_query(self, kind, actor, timing, payload=None):
+    def ask_query(self, kind, actor, timing, *, frame=None, payload=None):
         return self.answer
 
     def suspended(self, action):
