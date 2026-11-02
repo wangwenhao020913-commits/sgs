@@ -18,6 +18,28 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "pangde_mobile",
+      "name": "庞德移动版",
+      "true_name": "庞德",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "huo-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "mashu",
+          "name": "马术",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "mengjin",
+          "name": "猛进",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

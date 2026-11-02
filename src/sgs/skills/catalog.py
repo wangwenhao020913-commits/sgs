@@ -2723,6 +2723,7 @@ from .target_change import (  # noqa: E402  （末尾 import 是刻意的）
     target_change_skill_definitions,
 )
 from .limits import (  # noqa: E402  （末尾 import 是刻意的）
+    limits_activation_plans,
     limits_skill_definitions,
 )
 from .use_after import (  # noqa: E402  （末尾 import 是刻意的）
@@ -2763,12 +2764,13 @@ ACTIVATION_PLANS: Mapping[str, Callable[[GameState, Frame, SkillInstance], Activ
             **judgment_loop_activation_plans(),
             **awakening_activation_plans(),
             **lord_request_activation_plans(),
+            **limits_activation_plans(),
         }
     )
 )
-"""G 族（票 10）、I 族（票 11）、L 族（票 12）、J 族（M6 票 02）与 F 族（M6 票 14 的
-界【护驾】②：应答者 = 使用 / 打出【闪】的那个角色）的发动形态并入后的**完整**注册表：
-与 :data:`CATALOG` 同一合并姿态。"""
+"""G 族（票 10）、I 族（票 11）、L 族（票 12）、J 族（M6 票 02）、F 族（M6 票 14 的
+界【护驾】②：应答者 = 使用 / 打出【闪】的那个角色）与 P 族（huo-mobile-batch 票 01 的
+【猛进】）的发动形态并入后的**完整**注册表：与 :data:`CATALOG` 同一合并姿态。"""
 
 CATALOG: Mapping[str, SkillDef] = MappingProxyType(
     {

@@ -39,6 +39,7 @@ r"""P 族：限制豁免与【咆哮】②（M6 票 02 / 票 05）——【咆�
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from sgs.data import Category, SkillType, card_category, hero_skill_id
@@ -51,18 +52,22 @@ from sgs.effects import (
     is_slash,
 )
 from sgs.resolution import Frame, invalidate_event_frame
-from sgs.state import GameState, SlotKind, Zone
+from sgs.state import GameState, MoveReason, SlotKind, Zone, ZoneRef
 from sgs.timing import Timing
 
-from .catalog import Hook, Seam, SeamKind, SkillDef
+from .catalog import ActivationPlan, Hook, Seam, SeamKind, SkillDef, SkillInstance
+from .flow import FlowAnswers, PickCards, SkillFlow
 from .move_after import move_event
 
 __all__ = [
     "JIE_PAOXIAO",
     "JIE_QICAI",
+    "MENGJIN",
+    "MENGJIN_FLOW",
     "PAOXIAO",
     "PAOXIAO_BONUS",
     "QICAI",
+    "limits_activation_plans",
     "limits_skill_definitions",
 ]
 
@@ -194,12 +199,138 @@ def _jie_qicai_cancel(host: Any, frame: Frame) -> Any:
     return None
 
 
-def limits_skill_definitions() -> tuple[SkillDef, ...]:
-    """P 族三条锁定技的 :class:`~sgs.skills.catalog.SkillDef`。
+# ---------------------------------------------------------------------------
+# 火包·移动版庞德【猛进】（huo-mobile-batch 票 01）：接缝 + 一步选牌 + 弃置
+# ---------------------------------------------------------------------------
 
-    三条都 ``locked=True``（牌面写"锁定技"）⇒ 不进"是否发动"候选；``carrier = HERO``
+MENGJIN = hero_skill_id("pangde_mobile", "mengjin")
+"""庞德移动版【猛进】的全限定技能 id。
+
+牌面权威 = 用户 `D:\\SGS_HEROS\\神话再临-火包\\庞德\\技能.txt`；OL 庞德页的第二个技能是
+【鞬出】（另一条技能）⇒ **A1** 裁定票 04，用户 2026-11-02 签**读法 A：按移动版实现**。
+"""
+
+_MENGJIN_MATCHED = "mengjin_matched"
+"""帧私有：本帧上【猛进】已经认过的 ``(持有者, 目标)``。
+
+选牌步的**面**每次重入都重新求值，而提交点会把那张牌搬走——不认这个标记，挂起续跑会
+看到空面、把整条流水线判成取消（与【趫猛】/【利驭】同一条理由）。记的是**目标座号**而
+不是布尔：同一张多目标【杀】里每个被【闪】抵消的目标各触发一次，而 RESOLVE 帧跨目标
+复用，布尔标记会串到下一个目标身上。
+"""
+
+
+def _mengjin_target(state: GameState, frame: Frame) -> int | None:
+    """当前【杀】被【闪】抵消的那个**目标**（C 段的 ``targets[cursor]``）；无目标 ⇒ ``None``。"""
+    del state
+    targets = tuple(frame.data.get("targets", ()))
+    if not targets:
+        return None
+    return int(targets[frame.data.get("cursor", 0)])
+
+
+def _mengjin_face(state: GameState, frame: Frame, owner: int, answers: FlowAnswers) -> Any:
+    """选牌步的 ``face``：**被抵消的目标**的手牌 + 装备区。
+
+    「其」的先行词 = 句子里那个用【闪】抵消的目标角色（账本默认读法（二）②已裁「其他
+    角色」不含自己）；「一张牌」没有区域限定 ⇒ 手牌 + 装备区，**不含判定区**（默认读法
+    （一）②）。重入时那张牌可能已被搬走 ⇒ 认 :data:`_MENGJIN_MATCHED` 仍返回目标；
+    真正没有牌可弃 ⇒ 空元组 = 无此步（候选阶段已由 plan 挡住，这是防御分支）。
+    """
+    del answers
+    target = _mengjin_target(state, frame)
+    if target is None:
+        return ()
+    if frame.data.get(_MENGJIN_MATCHED) == (owner, target):
+        return target
+    player = state.player(target)
+    if not (player.hand or player.equip):
+        return ()
+    frame.data[_MENGJIN_MATCHED] = (owner, target)
+    return target
+
+
+def _mengjin_plan(state: GameState, frame: Frame, instance: SkillInstance) -> ActivationPlan:
+    """【猛进】的发动前提：**自己的**【杀】被抵消，且那个目标有牌可弃。
+
+    接缝对所有存活实例派发，故先自校 ``frame.data["source"] == instance.owner``（与
+    【贯石斧】的 ``_axe_plan`` 同一姿态）。"关于我"这条判据住在 plan 里而不是
+    ``Hook.condition``：接缝没有钩子面的条件字段，plan 就是它的"付不付得起 + 关于谁"。
+    """
+    if frame.data.get("source") != instance.owner:
+        return ActivationPlan(optional=True, available=False)
+    target = _mengjin_target(state, frame)
+    if target is None:
+        return ActivationPlan(optional=True, available=False)
+    if frame.data.get(_MENGJIN_MATCHED) == (instance.owner, target):
+        return ActivationPlan(optional=True, available=True)
+    player = state.player(target)
+    return ActivationPlan(optional=True, available=bool(player.hand or player.equip))
+
+
+def _mengjin_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
+    """提交点：把选中的那张牌**弃置**（弃置者是庞德，牌主是被抵消的目标）。
+
+    搬牌会内联派发「失去牌后」（目标失去最后一张手牌 ⇒ 【连营】一类）⇒ ``"stay"`` 原样
+    透传，续跑由 ``move_in_frame`` 的重入守卫与 :data:`_MENGJIN_MATCHED` 共同保证"不重弃"。
+    """
+    owner = frame.data.get("skill_owner")
+    picks = tuple(answers["card"])
+    target = _mengjin_target(host.state, frame)
+    if owner is None or target is None or not picks:
+        return None
+    card = host.state.card(int(picks[0]))
+    control = host.move_in_frame(
+        frame,
+        (card,),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=target,
+        actor=owner,
+    )
+    return "stay" if control == "stay" else None
+
+
+MENGJIN_FLOW = SkillFlow(
+    name="mengjin",
+    steps=(
+        PickCards(
+            zones=(Zone.HAND, Zone.EQUIP),
+            lo=1,
+            hi=1,
+            # 「弃置其一张牌」不是"可以不选"（"可以"管整条技能 ⇒ 放弃出口在发动询问），
+            # 故这一步没有 Pass；中途面为空 = 整条取消、零副作用。
+            optional=False,
+            face=_mengjin_face,
+            # 目标的手牌是**隐藏槽**（只有位置、没有牌面），装备区照旧可见——与【反馈】
+            # /【趫猛】同一姿态（UI = 未知区域弹窗）。
+            reveal_hand=False,
+        ),
+    ),
+    effect=_mengjin_effect,
+)
+"""【猛进】的一步流水线：[是否发动] → 弃置被抵消目标的一张牌（手牌 / 装备区）。"""
+
+
+def limits_activation_plans() -> Mapping[
+    str, Callable[[GameState, Frame, SkillInstance], ActivationPlan]
+]:
+    """本模块技能的**发动形态**注册表（并入 :data:`sgs.skills.catalog.ACTIVATION_PLANS`）。
+
+    【猛进】不是"裸问"：它的 ``available`` 要读帧（谁用的【杀】/ 目标有没有牌），故必须
+    有一条 plan；三条锁定技（【咆哮】/【奇才】）不问"是否发动"，没有 plan。
+    """
+    return {MENGJIN: _mengjin_plan}
+
+
+def limits_skill_definitions() -> tuple[SkillDef, ...]:
+    """P 族的锁定技 + 火包移动版【猛进】的 :class:`~sgs.skills.catalog.SkillDef`。
+
+    三条锁定技都 ``locked=True``（牌面写"锁定技"）⇒ 不进"是否发动"候选；``carrier = HERO``
     （优先级档由载体派生）、``skill_type = NORMAL``。界张飞【咆哮】①与标准版共用
     ``COUNT_LIMIT`` 回调，②另挂一条接缝 + 两条回调（加伤 / 消费）。
+    【猛进】是**非锁定**的接缝技（"你可以"）⇒ 有 plan、发"是否发动"，接缝上挂 ``flow``
+    （huo-mobile-batch 票 01；本仓第一条"武将底盘 + 接缝 + flow"）。
     """
     return (
         SkillDef(
@@ -244,5 +375,16 @@ def limits_skill_definitions() -> tuple[SkillDef, ...]:
             requirement=(
                 "你使用锦囊牌无距离限制；当其他角色弃置你装备区里的防具牌时，取消之"
             ),
+        ),
+        # 火包·移动版庞德【猛进】（huo-mobile-batch 票 01）：接缝 + 一步选牌 → 弃置。
+        # 牌面「当你使用的【杀】被目标角色使用【闪】抵消时，你可以弃置其一张牌」。
+        SkillDef(
+            skill_id=MENGJIN,
+            locked=False,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            seams=(Seam(SeamKind.SLASH_CANCELED, flow=MENGJIN_FLOW),),
+            requirement="当你使用的【杀】被目标角色使用【闪】抵消时，你可以弃置其一张牌",
+            step_requirements={"card": "弃置其一张牌（手牌 / 装备区）"},
         ),
     )

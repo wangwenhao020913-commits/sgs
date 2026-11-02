@@ -197,9 +197,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 136
+    assert len(CATALOG) == 138
     assert len(equipment) == 22
-    assert len(heroes) == 114
+    assert len(heroes) == 116
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -222,7 +222,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 114
+    assert len(expected) == 116
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1060,6 +1060,9 @@ SKILL_FILES: dict[str, str] = {
     "hero.zhangjiao_mobile.huangtian": "test_hero_feng.py",
     # huo-dianwei-mobile 票 01：火包移动版典韦【强袭】（新包 → 新测试文件）
     "hero.dianwei_mobile.qiangxi": "test_hero_huo.py",
+    # huo-mobile-batch 票 01：火包移动版庞德【马术】/【猛进】
+    "hero.pangde_mobile.mashu": "test_hero_huo.py",
+    "hero.pangde_mobile.mengjin": "test_hero_huo.py",
     "hero.jie_zhangliao.tuxi": "test_hero_jie_wei.py",
     "hero.jie_xuchu.luoyi": "test_hero_jie_wei.py",
     # M6 票 15：界·魏 B（郭嘉 / 李典）
@@ -1854,6 +1857,10 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.zhangjiao_mobile.huangtian": "主动技能",
     # huo-dianwei-mobile 票 01：火包移动版典韦【强袭】= 一步选项步 + 手写主体（主动技能格）
     "hero.dianwei_mobile.qiangxi": "主动技能",
+    # huo-mobile-batch 票 01：火包移动版庞德【马术】= 纯修饰器（锁定技格）；
+    # 【猛进】= 一步选牌流水线 + 接缝（触发技能格）
+    "hero.pangde_mobile.mashu": "锁定技",
+    "hero.pangde_mobile.mengjin": "触发技能",
     "hero.jie_simayi.guicai": "能力位",
     # 本票：移动版界【曹仁】据守 = 阶段体零步（摸三张）+ 翻面，非锁定 ⇒ 零步技能格
     "hero.jie_caoren_mobile.jushou": "零步技能",
@@ -1892,12 +1899,13 @@ SHAPE_COUNTS: dict[str, int] = {
     # feng-zhangjiao 票 01：张角移动版三条 ⇒ 主动技能 20 → 21（黄天）、触发技能 14 → 15
     # （雷击，两条钩子同一条流水线）、能力位 2 → 3（鬼道）。
     # huo-dianwei-mobile 票 01：火包移动版典韦【强袭】⇒ 主动技能 21 → 22。
+    # huo-mobile-batch 票 01：庞德【马术】+【猛进】⇒ 锁定技 31 → 32、触发技能 15 → 16。
     "主动技能": 22,
-    "触发技能": 15,
+    "触发技能": 16,
     "零步技能": 27,
     "排列技能": 3,
     "多轮技能": 14,
-    "锁定技": 31,
+    "锁定技": 32,
     "转化技": 13,
     "能力位": 3,
     "候选生成器": 1,
@@ -2009,7 +2017,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """132 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 136
+    assert len(SKILL_SHAPE) == len(CATALOG) == 138
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2138,8 +2146,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 69
-    assert len(outside) == 67
+    assert len(inside) == 70
+    assert len(outside) == 68
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

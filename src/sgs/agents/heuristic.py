@@ -3355,6 +3355,12 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "1 点伤害换一张武器牌（净赚）或 1 点体力：有牌就弃牌；只能失血时只在能补刀 / "
         "体力充裕时发动，1 体力时自伤进濒死 ⇒ 不发动",
     ),
+    # huo-mobile-batch 票 01：火包移动版庞德【猛进】
+    "hero.pangde_mobile.mengjin": (
+        _constant(2.0),
+        "自己的【杀】被【闪】抵消后弃对方一张牌：代价 = 零（弃的是对方的牌），"
+        "发动前提由 ACTIVATION_PLANS 保证（本方【杀】被抵消 ∧ 对方有牌）",
+    ),
     "hero.yuji_mobile.guohuo": (
         _constant(1.5),
         "扣置一张手牌当任意基本牌 / 普通锦囊：多一条使用路径，但要赌其他角色的质疑（"

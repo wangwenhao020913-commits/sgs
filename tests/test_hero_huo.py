@@ -21,7 +21,9 @@ from __future__ import annotations
 import pytest
 
 from sgs.data import Kingdom, load_content_pack, load_hero_tables
+from sgs.effects import distance
 from sgs.engine import Engine
+from sgs.skills import CATALOG
 from sgs.state import (
     ActivateSkill,
     EndPhase,
@@ -31,6 +33,7 @@ from sgs.state import (
     SelectCards,
     SelectOption,
     SlotKind,
+    UseCard,
 )
 from sgs.state import FrameKind
 from sgs.timing import Timing
@@ -531,3 +534,288 @@ def test_dianwei_mobile_hero_is_in_the_default_pool() -> None:
     assert hero.hp_max == 4
     assert [skill.id for skill in hero.skills] == ["qiangxi"]
     assert [skill.name for skill in hero.skills] == ["强袭"]
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 庞德移动版【马术】/【猛进】（huo-mobile-batch 票 01）
+# ---------------------------------------------------------------------------
+
+PANGDE = "pangde_mobile"
+PANGDE_MASHU = "hero.pangde_mobile.mashu"
+MENGJIN = "hero.pangde_mobile.mengjin"
+
+
+def _rings(*, hero: str | None, seats: int) -> object:
+    """``seats`` 个座位的环（只有座位 0 带武将）。"""
+    return build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=hero), *[SeatSpec() for _ in range(seats - 1)]],
+    )
+
+
+def test_pangde_mobile_mashu_subtracts_one_from_its_own_distance() -> None:
+    """庞德的【马术】与马超逐字相同 ⇒ 主体侧 −1（复用同一个回调）。
+
+    六座环上 0↔3 的座位距离是 3：无技能 3，有【马术】2；反方向（别人到庞德）仍是 3。
+    """
+    without = _rings(hero=None, seats=6)
+    with_hero = _rings(hero=PANGDE, seats=6)
+
+    assert distance(without, 0, 3) == 3
+    assert distance(with_hero, 0, 3) == 2, "你计算与其他角色的距离 -1"
+    assert distance(with_hero, 3, 0) == 3, "主体侧：别人算与你的距离不变"
+
+
+def test_pangde_mobile_mashu_stacks_with_a_minus_one_mount() -> None:
+    """数值只有加减、加在最终值上：与 −1 坐骑（大宛）叠加后由管道夹在下限 1。"""
+    mount = _cards("dawan")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=PANGDE, equip=(mount,)),
+            *[SeatSpec() for _ in range(5)],
+        ],
+        deck=deck_excluding(PACK, mount),
+    )
+
+    assert distance(state, 0, 3) == 1, "3 − 1（马术）− 1（大宛）"
+
+
+def test_pangde_mobile_mashu_reuses_the_same_distance_modifier() -> None:
+    """声明面：锁定技、只有一条 ``DISTANCE`` 修饰器（与两条既有【马术】同形）。"""
+    definition = CATALOG[PANGDE_MASHU]
+
+    assert definition.locked is True
+    assert [modifier.point.value for modifier in definition.modifiers] == ["DISTANCE"]
+    assert definition.hooks == () and definition.seams == ()
+
+
+def _default_action(query):
+    """缺省应答：放弃 → 结束阶段 → 第一项（``PassPlayer`` 的同一条口径）。"""
+    for action in query.legal_actions:
+        if isinstance(action, Pass):
+            return action
+    for action in query.legal_actions:
+        if isinstance(action, EndPhase):
+            return action
+    return query.legal_actions[0]
+
+
+def _advance(engine, predicate, *, limit: int = 4000) -> None:
+    """推进到 ``predicate`` 成立；途中其它询问按缺省应答让路。"""
+    for _ in range(limit):
+        if predicate(engine):
+            return
+        if engine.pending is not None:
+            engine.submit(_default_action(engine.pending))
+            continue
+        engine._step()
+    raise AssertionError("步数上限内没有到达停止条件")
+
+
+def _pick(query, predicate):
+    action = next((item for item in query.legal_actions if predicate(item)), None)
+    assert action is not None, (
+        f"候选里没有预期动作：{[item.kind for item in query.legal_actions]}"
+    )
+    return action
+
+
+def _mengjin_queries(engine) -> list:
+    """记录流里问给庞德的【猛进】发动询问。"""
+    return [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION.value
+        and getattr(record.query, "skill_id", None) == MENGJIN
+    ]
+
+
+_SLASH_CARD = _cards("slash")[0]
+_DODGE_CARD = _cards("dodge")[0]
+_PEACH_CARD = _cards("peach")[0]
+
+
+def _mengjin_engine(*, target_hand, target_hero: str | None = None, turn_seat: int = 0):
+    """座位 0 = 庞德移动版（手里一张【杀】），座位 1 = 目标（手里带【闪】）。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=PANGDE, hand=(_SLASH_CARD,)),
+            SeatSpec(hero=target_hero, hand=target_hand),
+        ],
+        deck=deck_excluding(PACK, _SLASH_CARD, *target_hand),
+        turn_seat=turn_seat,
+        phase=Phase.PLAY,
+    )
+    return Engine.from_state(state, seed=3)
+
+
+def _use_slash_and_dodge(engine, *, slash: int, dodge: int, actor: int) -> None:
+    """推进到 ``actor`` 的出牌阶段，用【杀】打另一个座位，再让对方打出【闪】。"""
+    target = 1 - actor
+    _advance(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == actor,
+    )
+    engine.submit(
+        _pick(
+            engine.pending,
+            lambda action: isinstance(action, UseCard) and action.card.card_id == slash,
+        )
+    )
+    _advance(
+        engine,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.DODGE,
+    )
+    assert engine.pending.actor == target, "【闪】窗口问的是被指定的目标"
+    engine.submit(
+        _pick(
+            engine.pending,
+            lambda action: isinstance(action, UseCard) and action.card.card_id == dodge,
+        )
+    )
+
+
+def test_mengjin_discards_a_card_from_the_target_who_dodged() -> None:
+    """自己的【杀】被【闪】抵消 ⇒ 问一次；弃掉那个目标的一张手牌（隐藏槽）。"""
+    engine = _mengjin_engine(target_hand=(_DODGE_CARD, _PEACH_CARD))
+
+    _use_slash_and_dodge(engine, slash=_SLASH_CARD, dodge=_DODGE_CARD, actor=0)
+    _advance(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.SKILL_ACTIVATION
+        and getattr(e.pending, "skill_id", None) == MENGJIN,
+    )
+    assert any(
+        isinstance(action, Pass) for action in engine.pending.legal_actions
+    ), "牌面「可以」⇒ 发动询问带放弃出口"
+    engine.submit(
+        _pick(engine.pending, lambda action: isinstance(action, ActivateSkill))
+    )
+    _advance(
+        engine,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.SELECT_CARDS,
+    )
+    assert len(engine.pending.slots) == 1, "目标只剩那一张手牌"
+    assert engine.pending.slots[0].card is None, "别人的手牌是隐藏槽（只有位置）"
+    engine.submit(
+        _pick(
+            engine.pending,
+            lambda action: isinstance(action, SelectCards) and action.picks == (0,),
+        )
+    )
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    assert engine.state.player(1).hand == [], "那张手牌被弃置"
+    assert _PEACH_CARD in engine.state.discard, "进的是弃牌堆（不是别处）"
+    assert _DODGE_CARD in engine.state.discard, "【闪】自己照常进弃牌堆"
+    assert len(_mengjin_queries(engine)) == 1, "每次抵消只问一次"
+
+
+def test_mengjin_declining_changes_nothing() -> None:
+    """右端「放弃」⇒ 零副作用：一张牌都不动。"""
+    engine = _mengjin_engine(target_hand=(_DODGE_CARD, _PEACH_CARD))
+
+    _use_slash_and_dodge(engine, slash=_SLASH_CARD, dodge=_DODGE_CARD, actor=0)
+    _advance(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.SKILL_ACTIVATION
+        and getattr(e.pending, "skill_id", None) == MENGJIN,
+    )
+    engine.submit(_pick(engine.pending, lambda action: isinstance(action, Pass)))
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    assert engine.state.player(1).hand == [_PEACH_CARD], "目标的手牌原封不动"
+    assert _PEACH_CARD not in engine.state.discard
+
+
+def test_mengjin_is_not_offered_when_the_target_has_no_card() -> None:
+    """目标把最后一张牌（【闪】）用掉后没有牌可弃 ⇒ 连询问都不发。"""
+    engine = _mengjin_engine(target_hand=(_DODGE_CARD,))
+
+    _use_slash_and_dodge(engine, slash=_SLASH_CARD, dodge=_DODGE_CARD, actor=0)
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    assert _mengjin_queries(engine) == [], "没有牌可弃 ⇒ 不发没有候选的询问"
+    assert engine.state.player(1).hand == []
+
+
+def test_mengjin_only_fires_for_the_owners_slash() -> None:
+    """别人用的【杀】被抵消时，不问庞德（接缝对所有实例派发，plan 自校「关于我」）。"""
+    slash = _cards("slash")[0]
+    dodge = _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=PANGDE, hand=(dodge,)),
+            SeatSpec(hand=(slash,)),
+        ],
+        deck=deck_excluding(PACK, slash, dodge),
+        turn_seat=1,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=3)
+
+    _use_slash_and_dodge(engine, slash=slash, dodge=dodge, actor=1)
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    assert _mengjin_queries(engine) == [], "不是庞德使用的【杀】⇒ 不关他的事"
+
+
+def test_mengjin_survives_a_suspended_move() -> None:
+    """弃掉目标的最后一张手牌会内联派发【连营】并挂起；续跑不重弃、不漏做。"""
+    engine = _mengjin_engine(
+        target_hand=(_DODGE_CARD, _PEACH_CARD), target_hero="jie_luxun"
+    )
+
+    _use_slash_and_dodge(engine, slash=_SLASH_CARD, dodge=_DODGE_CARD, actor=0)
+    _advance(
+        engine,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.SKILL_ACTIVATION
+        and getattr(e.pending, "skill_id", None) == MENGJIN,
+    )
+    engine.submit(
+        _pick(engine.pending, lambda action: isinstance(action, ActivateSkill))
+    )
+    _advance(
+        engine,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.SELECT_CARDS,
+    )
+    engine.submit(
+        _pick(
+            engine.pending,
+            lambda action: isinstance(action, SelectCards) and action.picks == (0,),
+        )
+    )
+    # 【连营】的"失去最后的手牌后"会在搬牌里挂起一次；一路让路到安静。
+    _advance(engine, lambda e: e.finished or not e.stack)
+
+    assert any(
+        record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION.value
+        and getattr(record.query, "skill_id", None) == "hero.jie_luxun.lianying"
+        for record in engine.records
+    ), "搬牌确实内联触发并挂起了【连营】（续跑路径被走到）"
+    assert _PEACH_CARD in engine.state.discard, "那张牌进了弃牌堆"
+    assert engine.state.player(1).hand == [], "只弃了这一张（挂起续跑不重弃）"
+
+
+def test_pangde_mobile_hero_is_in_the_default_pool() -> None:
+    """数据面：庞德移动版进默认池（显示名带「移动版」、真名「庞德」、群 / 男 / 4）。"""
+    heroes = {hero.id: hero for table in load_hero_tables() for hero in table.heroes}
+
+    hero = heroes[PANGDE]
+    assert hero.name == "庞德移动版"
+    assert hero.true_name == "庞德"
+    assert hero.kingdom is Kingdom.QUN
+    assert hero.gender.value == "male"
+    assert hero.hp_max == 4
+    assert [skill.id for skill in hero.skills] == ["mashu", "mengjin"]
+    assert [skill.name for skill in hero.skills] == ["马术", "猛进"]

@@ -72,6 +72,7 @@ __all__ = [
     "JIE_YICONG",
     "LIULI",
     "MASHU",
+    "PANGDE_MASHU",
     "target_change_skill_definitions",
 ]
 
@@ -87,6 +88,13 @@ JIE_MASHU = hero_skill_id("jie_machao", "mashu")
 界版的第二条技能是【铁骑】（票 04 的第二个载体，住 :mod:`sgs.skills.response_window`）；
 【马术】本身没有版本差异，故两个 id 共用**同一个** ``DISTANCE`` 回调——"一个技能一条定义"
 不因武将版本分叉而成两份行为。"""
+
+PANGDE_MASHU = hero_skill_id("pangde_mobile", "mashu")
+"""火包·移动版庞德【马术】的全限定技能 id（huo-mobile-batch 票 01）。
+
+牌面与两条既有【马术】逐字相同（`D:\\SGS_HEROS\\神话再临-火包\\庞德\\技能.txt`）⇒ 用户
+2026-11-02 签"复用马超的马术"：**同一个** ``DISTANCE`` 回调、另立一条 ``SkillDef``（第三条
+同形实例，与 :data:`JIE_MASHU` 同一姿态）。"""
 
 LIULI = hero_skill_id("daqiao", "liuli")
 """大乔【流离】的全限定技能 id。"""
@@ -345,6 +353,15 @@ def target_change_skill_definitions() -> tuple[SkillDef, ...]:
         # 界马超【马术】（M6 票 04）：牌面与标准版逐字相同 ⇒ 同一个回调、同一条链。
         SkillDef(
             skill_id=JIE_MASHU,
+            locked=True,
+            carrier=CarrierKind.HERO,
+            skill_type=SkillType.NORMAL,
+            modifiers=(Modifier(ModifierPoint.DISTANCE, _mashu_distance),),
+            requirement="计算与其他角色的距离时 -1",
+        ),
+        # 火包·移动版庞德【马术】（huo-mobile-batch 票 01）：同一份牌面、同一个回调。
+        SkillDef(
+            skill_id=PANGDE_MASHU,
             locked=True,
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,

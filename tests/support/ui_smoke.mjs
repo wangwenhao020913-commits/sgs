@@ -497,7 +497,7 @@ const sessionBodiesSince = (from) =>
 await ui.loadHeroCatalog();
 const catalogVersions = ui.heroVersions();
 check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版 + 火包移动版 + 自制包，按真名分组）",
-  ui.state.heroCatalog.length === 38 && catalogVersions.length === 64,
+  ui.state.heroCatalog.length === 39 && catalogVersions.length === 65,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
