@@ -13374,6 +13374,271 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.resetSelection();
 }
 
+/* ============ 票 05（庞统移动版【连环】）：牌名级预发动与重铸入口并存 ============
+ *
+ * 验收报障（2026-11-02 实机）：①♣【借刀杀人】点不出「重铸」；②重铸♣装备后其余牌
+ * "用不了 / 熔不了"。
+ *
+ * **真服务端载荷**（形状由 `tests/test_web.py` 的真会话用例
+ * `test_reforge_and_the_card_name_preactivation_coexist_on_one_card` 钉）：一张♣
+ * 【借刀杀人】既有牌名级两步清单（持刀者 / 【杀】目标）、又有【连环】授予的 ``Reforge``；
+ * 它在 `candidate_index` 里只有"可点、没有使用组合"的空条目（`max_targets = 0`）。
+ *
+ * 缺陷的根因是**点牌分派次序**：`cardPreactivationManifest` 抢在 `toggleFocus` 之前 ⇒
+ * 焦点永远设不上，而重铸入口只认 `state.focusCardId`；且清单开在**座位步**上时
+ * `preactivationCardOptions` 返回 undefined ⇒ 整片手牌置灰（玩家读作"用不了 / 熔不了"）。
+ *
+ * 判据按票 §5 的顺序走一遍真局面（seed 4 起扫）：先重铸♣装备（缺陷 B 的起点），再点
+ * ♣借刀杀人（缺陷 A），最后连续重铸它：
+ *   - 重铸一次 = 恰一条 `Reforge` POST：牌进弃牌堆、摸一张、手牌数不变，其余牌照旧可用；
+ *   - 点♣借刀杀人 ⇒ 焦点 + 并列出现「重铸【借刀杀人】」；使用方向仍从「使用【借刀杀人】」
+ *     进两步清单（不丢使用路径：裸借刀在 `legal_actions` 里**没有** UseCard 候选）；
+ *   - 点过它之后**其余手牌**的可用性与点之前逐张一致（不再一片 dis、点什么都不对）。
+ */
+{
+  const openPangtongSession = async (seed) => openSession(await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null,
+    seed, my_hero: "pangtong_mobile", deck_profile: "standard_108",
+  }));
+  /** 推进到**我的**出牌阶段：一律先选 `Pass` / `EndPhase`（"什么都不做"，与实机开局同一路）。 */
+  const passFirstIndex = (pending) => {
+    const actions = pending.legal_actions || [];
+    for (const kind of ["Pass", "EndPhase"]) {
+      const at = actions.findIndex((action) => action.kind === kind);
+      if (at >= 0) return at;
+    }
+    return 0;
+  };
+  const walkToMyPlay = async () => {
+    for (let step = 0; step < 40; step += 1) {
+      const pending = ui.state.view && ui.state.view.pending;
+      if (!pending) return null;
+      if (pending.kind === "PLAY_PHASE" && Number(pending.actor) === 0) return pending;
+      ui.resetSelection();
+      ui.state.selectedOption = passFirstIndex(pending);
+      await ui.submitAction();
+    }
+    return null;
+  };
+  const hand = () => (ui.state.view.snapshot.self_hand || []);
+  const handNode = (cardId) => Array.from($("t-hand").children).find(
+    (node) => node.getAttribute("data-card-id") === String(cardId)) || null;
+  const clickHand = async (cardId) => {
+    const node = handNode(cardId);
+    if (!node) return false;
+    for (const fn of node.listeners.click || []) await fn({ target: node, stopPropagation() {} });
+    return true;
+  };
+  const reforgeNode = () => Array.from($("t-options").children).find(
+    (node) => node.getAttribute("data-reforge") === "true") || null;
+  const useNode = (cardId) => Array.from($("t-options").children).find(
+    (node) => node.getAttribute("data-preactivation-card") === String(cardId)) || null;
+  const answersSince = (mark) => calls.slice(mark).filter((call) => call.path.includes("/answer"));
+  const settle = async () => {
+    for (let i = 0; i < 400 && ui.state.submitBusy; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    ui.flushPlayback();
+  };
+  /** 手牌可用性指纹（`card_id → cardFace.selectable` + DOM 上的 dis 类），可排除一张。 */
+  const availability = (excludeId = null) => {
+    const pending = ui.state.view.pending;
+    const out = {};
+    for (const card of hand()) {
+      if (excludeId !== null && Number(card.card_id) === Number(excludeId)) continue;
+      const node = handNode(card.card_id);
+      out[String(card.card_id)] = {
+        selectable: ui.cardFace(pending, card).selectable,
+        dis: node ? node.classList.contains("dis") : null,
+      };
+    }
+    return out;
+  };
+  const sameAvailability = (a, b) => Object.keys(a).length === Object.keys(b).length
+    && Object.keys(a).every(
+      (key) => b[key] && a[key].selectable === b[key].selectable && a[key].dis === b[key].dis,
+    );
+  /** 并存局面的三张关键牌：A = 既有清单又有重铸；B = 另一张可重铸；C = 有使用候选。 */
+  const pickScenario = (pending) => {
+    if (!Object.keys(pending.card_preactivations || {}).length) return null;
+    const both = hand().find((card) => ui.cardPreactivationManifest(pending, card)
+      && ui.reforgeAction(pending, card.card_id) !== null);
+    if (!both) return null;
+    const second = hand().find((card) => String(card.card_id) !== String(both.card_id)
+      && ui.reforgeAction(pending, card.card_id) !== null);
+    if (!second) return null;
+    const usable = hand().find((card) => String(card.card_id) !== String(both.card_id)
+      && String(card.card_id) !== String(second.card_id)
+      && ui.cardSelectable(pending, card.card_id));
+    if (!usable) return null;
+    return { both, second, usable };
+  };
+
+  let scenario = null;
+  for (const seed of [4, 6, 8, 9, 12, 13, 17, 21]) {
+    await openPangtongSession(seed);
+    const pending = await walkToMyPlay();
+    if (!pending) continue;
+    const found = pickScenario(pending);
+    if (!found) continue;
+    scenario = { seed, ...found, pending };
+    break;
+  }
+  check("票 05-0 找到一个真局面：一张♣牌同时有牌名级预发动与【连环】重铸",
+    scenario !== null,
+    scenario
+      ? `seed=${scenario.seed} 并存牌=${scenario.both.card_id}(${scenario.both.name}) `
+        + `另一张可重铸=${scenario.second.card_id} 手牌=${hand().map((card) => card.card_id).join(",")}`
+      : "8 个种子内没找到（庞统移动版 / 4 人 / 座位 0）");
+
+  if (scenario) {
+    const both = scenario.both;
+    const bothId = Number(both.card_id);
+    const secondId = Number(scenario.second.card_id);
+    const entry = ui.cardEntry(scenario.pending, bothId);
+
+    // ==== ①（票 §5 第一句）先重铸那张♣装备：一步一条 POST、牌进弃牌堆、摸一张 ====
+    check("票 05-A1 未点牌时：没有焦点、没有重铸入口（前置）",
+      ui.state.focusCardId === null && reforgeNode() === null,
+      `focus=${ui.state.focusCardId} entry=${reforgeNode() && reforgeNode().textContent}`);
+    const handBeforeFirst = hand().length;
+    const discardBeforeFirst = (ui.state.view.snapshot.discard || []).length;
+    await clickHand(secondId);
+    const firstEntry = reforgeNode();
+    check("票 05-A2 点♣装备 = 给焦点 + 「重铸」入口（M5-08b 既有行为不回归）",
+      Number(ui.state.focusCardId) === secondId && firstEntry !== null
+        && firstEntry.textContent.includes("重铸"),
+      `focus=${ui.state.focusCardId} entry=${firstEntry && firstEntry.textContent}`);
+    const beforeFirst = calls.length;
+    if (firstEntry) await clickAndWait(firstEntry);
+    await settle();
+    const firstCalls = answersSince(beforeFirst);
+    check("票 05-B1 重铸♣装备 = 恰一条 Reforge POST，牌进弃牌堆、摸一张（手牌数不变）",
+      firstCalls.length === 1
+        && firstCalls[0].body.action.kind === "Reforge"
+        && Number(firstCalls[0].body.action.card.card_id) === secondId
+        && (ui.state.view.snapshot.discard || []).length === discardBeforeFirst + 1
+        && hand().length === handBeforeFirst
+        && !hand().some((card) => Number(card.card_id) === secondId),
+      `answers=${firstCalls.length} discard=${discardBeforeFirst}→${(ui.state.view.snapshot.discard || []).length} `
+        + `hand=${hand().map((card) => card.card_id).join(",")}`);
+
+    // ==== ②（票 §5 缺陷 B）重铸之后其余牌照旧可用：没有一片 dis、点得动 ====
+    const facesAfterFirst = availability();
+    check("票 05-B2 重铸♣装备之后：其余手牌的 dis 只跟着 selectable 走（没有整片置灰）",
+      Object.keys(facesAfterFirst).every(
+        (key) => facesAfterFirst[key].dis === !facesAfterFirst[key].selectable,
+      ),
+      JSON.stringify(facesAfterFirst));
+
+    // ==== ③（票 §5 缺陷 A）重铸之后再点♣借刀杀人：焦点 + 「重铸」并列出现 ====
+    check("票 05-A3 前置：这张牌在候选索引里只有空条目（可点、没有使用组合）",
+      entry !== null && (entry.combos || []).length === 0 && entry.max_targets === 0,
+      JSON.stringify(entry));
+    const facesBeforeBoth = availability(bothId);
+    await clickHand(bothId);
+    check("票 05-A4 点♣借刀杀人 = 给焦点 + 「重铸【借刀杀人】」并列出现（不再只进清单）",
+      Number(ui.state.focusCardId) === bothId
+        && ui.state.preactivation === null
+        && reforgeNode() !== null
+        && reforgeNode().textContent.includes("重铸")
+        && reforgeNode().textContent.includes(both.name),
+      `focus=${ui.state.focusCardId} pre=${!!ui.state.preactivation} `
+        + `entry=${reforgeNode() && reforgeNode().textContent} hint="${$("t-target-hint").textContent}"`);
+    check("票 05-A5 使用方向没有丢：并列一个「使用【借刀杀人】」入口",
+      useNode(bothId) !== null && useNode(bothId).textContent.includes(both.name),
+      `use=${useNode(bothId) && useNode(bothId).textContent}`);
+    check("票 05-A6 提示条把两个出口都说清（重铸 / 使用清单）",
+      $("t-target-hint").textContent.includes("重铸")
+        && $("t-target-hint").textContent.includes("使用"),
+      `hint="${$("t-target-hint").textContent}"`);
+    check("票 05-B3 点过借刀之后，其余手牌的可用性 / 置灰与点之前逐张一致（缺陷 B）",
+      sameAvailability(facesBeforeBoth, availability(bothId)),
+      `before=${JSON.stringify(facesBeforeBoth)} after=${JSON.stringify(availability(bothId))}`);
+    check("票 05-B4 其余手牌不是「死不点」：点一张有使用候选的牌仍能设焦点",
+      (await clickHand(scenario.usable.card_id))
+        && Number(ui.state.focusCardId) === Number(scenario.usable.card_id)
+        && ui.state.preactivation === null,
+      `focus=${ui.state.focusCardId} want=${scenario.usable.card_id} pre=${!!ui.state.preactivation}`);
+
+    // ==== ④ 使用入口仍进两步清单（零提交），取消能回到同一问 ====
+    await clickHand(bothId);
+    const beforeUse = calls.length;
+    const useButton = useNode(bothId);
+    if (useButton) await clickAndWait(useButton);
+    check("票 05-A7 点「使用【借刀杀人】」= 进两步清单（本地态、零提交、第 1 步是选座位）",
+      useButton !== null
+        && !!ui.state.preactivation
+        && Number(ui.state.preactivation.cardId) === bothId
+        && ui.state.preactivation.steps.length === 2
+        && ui.state.preactivation.cursor === 0
+        && ui.preactivationStepKind(ui.state.preactivation.steps[0]) === "seat"
+        && calls.length === beforeUse,
+      `pre=${JSON.stringify(ui.state.preactivation && {
+        cardId: ui.state.preactivation.cardId,
+        steps: ui.state.preactivation.steps.length,
+        cursor: ui.state.preactivation.cursor,
+        kind: ui.preactivationStepKind(ui.state.preactivation.steps[0]),
+      })} calls=${calls.length - beforeUse}`);
+    const pendingSeq = ui.state.view.pending.seq;
+    await clickAndWait($("btn-cancel"));
+    check("票 05-A8 取消清单 = 回到同一问、零提交、没有残留只读态",
+      ui.state.preactivation === null
+        && ui.state.focusCardId === null
+        && ui.state.view.pending.seq === pendingSeq
+        && ui.selectionEnabled() === true,
+      `pre=${!!ui.state.preactivation} focus=${ui.state.focusCardId} `
+        + `seq=${ui.state.view.pending.seq}/${pendingSeq} enabled=${ui.selectionEnabled()}`);
+
+    // ==== ⑤（票 §5 第二句）连续重铸：借刀杀人也一步一条 POST ====
+    const handBeforeSecond = hand().length;
+    const discardBeforeSecond = (ui.state.view.snapshot.discard || []).length;
+    await clickHand(bothId);
+    const secondEntry = reforgeNode();
+    const beforeSecond = calls.length;
+    if (secondEntry) await clickAndWait(secondEntry);
+    await settle();
+    const secondCalls = answersSince(beforeSecond);
+    check("票 05-B5 连续重铸♣借刀杀人 = 恰一条 Reforge POST，牌进弃牌堆（手牌数不变）",
+      secondCalls.length === 1
+        && secondCalls[0].body.action.kind === "Reforge"
+        && Number(secondCalls[0].body.action.card.card_id) === bothId
+        && (ui.state.view.snapshot.discard || []).length === discardBeforeSecond + 1
+        && hand().length === handBeforeSecond
+        && !hand().some((card) => Number(card.card_id) === bothId),
+      `answers=${secondCalls.length} discard=${discardBeforeSecond}→${(ui.state.view.snapshot.discard || []).length} `
+        + `hand=${hand().map((card) => card.card_id).join(",")}`);
+
+    // ==== ⑥（票 §5 第三句）重铸之后：没有残留只读态，其余牌照旧可用 ====
+    check("票 05-B6 重铸后没有残留只读态：回到我的出牌阶段、焦点 / 清单 / 选中项都清空",
+      ui.state.view.pending.kind === "PLAY_PHASE"
+        && Number(ui.state.view.pending.actor) === 0
+        && ui.state.preactivation === null
+        && ui.state.focusCardId === null
+        && ui.state.selectedOption === null
+        && ui.selectionEnabled() === true,
+      `pending=${ui.state.view.pending.kind}#${ui.state.view.pending.seq} `
+        + `pre=${!!ui.state.preactivation} focus=${ui.state.focusCardId} `
+        + `selectedOption=${ui.state.selectedOption} enabled=${ui.selectionEnabled()}`);
+    check("票 05-B7 重铸之后其余手牌照旧可用（新 candidate_index 已替换、不留旧索引）",
+      Object.entries(facesAfterFirst)
+        .filter(([key]) => hand().some((card) => Number(card.card_id) === Number(key)))
+        .every(([key, face]) => {
+          const card = hand().find((item) => Number(item.card_id) === Number(key));
+          const now = ui.cardFace(ui.state.view.pending, card);
+          const node = handNode(card.card_id);
+          return now.selectable === face.selectable
+            && node !== null
+            && node.classList.contains("dis") === !now.selectable;
+        }),
+      JSON.stringify(availability()));
+  }
+
+  ui.state.sessionId = null;
+  ui.state.view = null;
+  ui.resetSelection();
+}
+
 /* ============ M5-bugfix（C）：铁索按**点击顺序**提交 ============
  *
  * 引擎侧（`effects/actions.py:target_combos(..., ordered=True)`）对声明了

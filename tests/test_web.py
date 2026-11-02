@@ -8278,6 +8278,137 @@ def test_reforge_is_not_offered_outside_the_play_phase() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 票 05（庞统移动版【连环】）：技能授予的重铸与**牌名级预发动**可以同时挂在一张牌上
+#
+# 验收报障（2026-11-02 实机）：♣【借刀杀人】点不出「重铸」。前端 `card-face.js:activateCard`
+# 原先让 `cardPreactivationManifest` 抢在 `toggleFocus` 之前 ⇒ 焦点永远设不上，而重铸入口
+# （`options.js:renderReforgeEntry`）只认 `state.focusCardId`。前端修法的前提是**服务端载荷**
+# 真的把两样同时下发：本节钉的就是这份载荷（写方 = 引擎 `_build_query` 的
+# ``card_preactivations`` + 【连环】的 ``_lianhuan_reforge``）。
+# ---------------------------------------------------------------------------
+
+
+def _reforge_preactivation_session():
+    """4 座构造局面：座位 0 = 庞统移动版（出牌阶段、手里两张♣牌），座位 1 装备武器。
+
+    用**构造局面**而不是种子：``card_preactivations`` 要有人装备武器才有持刀者池，
+    "哪两张牌"必须是断言的一部分，不想随 AI / 武将池的改动漂。♣牌按**花色**挑（同名牌
+    在标准 108 里各有两个版本，只有♣那两张会被【连环】授予重铸）。
+    """
+    pack = _context_pack()
+    borrowed = next(
+        card_id
+        for card_id in cards_of_type(pack, "borrowed_sword")
+        if pack.deck.cards[card_id].suit is Suit.CLUB
+    )
+    crossbow = next(
+        card_id
+        for card_id in cards_of_type(pack, "crossbow")
+        if pack.deck.cards[card_id].suit is Suit.CLUB
+    )
+    weapon = cards_of_type(pack, "qinggang_sword")[0]
+    used = {borrowed, crossbow, weapon}
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(hp=3, hp_max=3, hand=(borrowed, crossbow), hero="pangtong_mobile"),
+            SeatSpec(hp=4, equip=(weapon,)),
+            SeatSpec(hp=4),
+            SeatSpec(hp=4),
+        ],
+        deck=tuple(i for i in range(len(pack.deck.cards)) if i not in used),
+        turn_seat=0,
+        rule_config=RuleConfig(first_seat=0),
+    )
+    session = Session(
+        seed=1,
+        player_count=4,
+        ai="random",
+        human_seat=0,
+        hero_pool=None,
+        timeout_seconds=None,
+        pack=pack,
+    )
+    session.engine = Engine.from_state(state, seed=1)
+    session.participants = tuple(
+        _HaltSeat() if seat == 0 else _FireDriver() for seat in range(4)
+    )
+    session.drive()
+    pending = session.pending
+    assert pending is not None and pending.kind == QueryKind.PLAY_PHASE and pending.actor == 0, (
+        "前置：构造局面的首个询问就是座位 0 的出牌阶段"
+    )
+    return session, borrowed, crossbow
+
+
+def test_reforge_and_the_card_name_preactivation_coexist_on_one_card() -> None:
+    """票 05 / 缺陷 A 的载荷前提：♣【借刀杀人】同时有 ``Reforge`` 与两步预发动清单。
+
+    前端读方（`card-face.js:activateCard` / `options.js:renderReforgeEntry`）要在**同一份**
+    pending 上同时画「使用【借刀杀人】」与「重铸【借刀杀人】」——缺任何一样，票 05 的两个
+    入口就无处可挂。裸借刀在 ``legal_actions`` 里**没有** ``UseCard`` 候选（清单是它唯一的
+    使用路径），故这条不是"顺手多下发一个键"，而是界面不能把点牌全让给重铸的原因。
+    """
+    from sgs.state import Reforge
+
+    session, borrowed, crossbow = _reforge_preactivation_session()
+    payload = pending_payload(session)
+
+    assert set(payload["card_preactivations"]) == {"borrowed_sword"}, (
+        f"牌名级预发动清单按卡牌类型下发：{set(payload['card_preactivations'])}"
+    )
+    steps = payload["card_preactivations"]["borrowed_sword"]
+    assert [step["name"] for step in steps] == ["seat", "seat"], "两步都是选座位"
+    assert [step["min"] for step in steps] == [1, 1]
+
+    reforge_cards = {
+        action["card"]["card_id"]
+        for action in payload["legal_actions"]
+        if action["kind"] == "Reforge"
+    }
+    assert reforge_cards == {borrowed, crossbow}, (
+        f"♣借刀与♣装备各一条重铸候选：{reforge_cards}"
+    )
+    assert not any(
+        action.get("kind") == "UseCard"
+        and (action.get("card") or {}).get("card_id") == borrowed
+        for action in payload["legal_actions"]
+    ), "裸借刀没有 UseCard 候选 ⇒ 清单是它唯一的使用入口"
+
+    entry = payload["candidate_index"][str(borrowed)]
+    assert entry["combos"] == [] and entry["pool"] == [], "重铸牌只保留「可点」的条目"
+    assert entry["min_targets"] == 0 and entry["max_targets"] == 0, (
+        "重铸不进「使用」的目标聚合（票 05 的界面据 max_targets == 0 说「只能重铸」）"
+    )
+
+    # 重铸 ♣装备之后（票 §2 的服务端事实）：清单与另一张牌的重铸候选都还在。
+    hand_before = tuple(session.engine.state.player(0).hand)
+    session.submit_answer(next(
+        action
+        for action in session.pending.legal_actions
+        if isinstance(action, Reforge) and action.card.card_id == crossbow
+    ))
+    after = session.pending
+    assert after is not None and after.kind == QueryKind.PLAY_PHASE and after.actor == 0, (
+        "重铸后直接回到出牌阶段"
+    )
+    payload_after = pending_payload(session)
+    assert set(payload_after["card_preactivations"]) == {"borrowed_sword"}, (
+        "重铸一张♣装备不改变另一张牌的预发动清单"
+    )
+    reforge_after = {
+        action["card"]["card_id"]
+        for action in payload_after["legal_actions"]
+        if action["kind"] == "Reforge"
+    }
+    assert reforge_after == {borrowed}, "♣借刀的重铸候选仍在（界面的入口有东西可挂）"
+    hand_after = set(session.engine.state.player(0).hand)
+    assert borrowed in hand_after and crossbow not in hand_after, "重铸的那张走了、借刀还在"
+    assert len(hand_after) == len(hand_before), "弃一张 + 摸一张 ⇒ 手牌数不变"
+    assert payload_after["candidate_index"][str(borrowed)]["max_targets"] == 0
+
+
+# ---------------------------------------------------------------------------
 # M5-08c：酒界面（出牌阶段 / 濒死自救 / 每回合一次）
 #
 # 引擎侧（M5-04）已经保证：出牌阶段【酒】是**自己为目标**的 UseCard（目标恒为

@@ -42,6 +42,17 @@ function cardEntry(pending, cardId) {
   return cardIndex(pending)[String(aliases[0].card_id)] || null;
 }
 
+/** 自己的手牌里牌号为 ``cardId`` 的那张**展示副本**；找不到返回 ``null``。
+ *
+ * 展示字段（`display_name` / `type` / `description`）只挂在快照的牌面上：`legal_actions`
+ * 里的牌故意不带它们（会随提交上行，见 `core.js:cardName`）。故"这张牌有什么入口"这类
+ * 只读判断要先回到快照里取牌面。
+ */
+function selfHandCard(cardId) {
+  const hand = (state.view && state.view.snapshot && state.view.snapshot.self_hand) || [];
+  return hand.find((card) => String(card.card_id) === String(cardId)) || null;
+}
+
 /** 这张手牌此刻被**强制转化**成什么（‘只能’型转化，如神关羽【武神】）。
  *
  * 只读服务端 `pending.transform_products` 的 ``forced`` 标记（声明面 =
@@ -179,6 +190,24 @@ function sourceConversionHint(pending) {
   return `将以【${cardName(product)}】使用。`;
 }
 
+/** 焦点手牌没有目标可点时的提示：它可能还有**重铸**这条独立动作（M5-08b / 票 05）。
+ *
+ * 重铸不算使用、没有目标：这类牌（【连环】授予重铸的♣牌）点牌后「提交」恒灰，出口是
+ * 控件区那条 ``Reforge``。同一张牌**还**有牌名级预发动（【借刀杀人】的两步清单）时，
+ * 使用方向走并列的「使用【X】」入口——两句话都说清，玩家才知道该点哪个。
+ */
+function reforgeHint(pending) {
+  const action = reforgeAction(pending, state.focusCardId);
+  if (!action) return "本窗口无需指定目标。";
+  const name = cardName(action.card);
+  const manifest = cardPreactivationManifest(pending, selfHandCard(state.focusCardId));
+  if (manifest) {
+    return `点「使用【${name}】」按清单指定持刀者与目标；`
+      + `点「重铸【${name}】」弃置并摸一张（不算使用）。`;
+  }
+  return `这张牌此刻只可重铸：点「重铸【${name}】」弃置并摸一张（不算使用）。`;
+}
+
 /** 目标区的一句人话（不推荐、不排序，只说"还差什么"）。 */
 function pickerTargetHint(pending) {
   if (!isHandPick(pending)) return "";
@@ -187,7 +216,7 @@ function pickerTargetHint(pending) {
   if (!entry) return "";
   let suffix = "";
   if (entry.max_targets === 0) {
-    suffix = "本窗口无需指定目标。";
+    suffix = reforgeHint(pending);
   } else if (autoCombo(pending, state.focusCardId)) {
     suffix = "目标由规则唯一确定，已自动选中（点牌可整张取消）。";
   } else {

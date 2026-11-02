@@ -103,9 +103,16 @@ function cardFace(pending, card) {
       slotIndex: -1,
     };
   }
-  // 手牌入口的预发动（W5-02b 借刀）：点它进入两步清单，而不是设焦点 / 去候选索引里查。
+  // 手牌入口的预发动（W5-02b 借刀）：点它进入两步清单。同一张牌**还**有技能授予的重铸时
+  // 点牌先给焦点（见 :func:`activateCard`，票 05）——故有无重铸都要画选中态：焦点落在这张
+  // 牌上却没有视觉反馈会让玩家以为没点中。
   if (cardPreactivationManifest(pending, card)) {
-    return { selectable: true, selected: false, picked: false, slotIndex: -1 };
+    return {
+      selectable: true,
+      selected: state.focusCardId === card.card_id,
+      picked: false,
+      slotIndex: -1,
+    };
   }
   // **强制转化**的手牌（‘只能’型，神关羽【武神】）：手牌区画的是产物（「转」+ 属性色），
   // 点它 = 进入该技能的转化清单（来源步预选这张牌），再点座位提交。没有直接候选也点得动。
@@ -124,6 +131,11 @@ function cardFace(pending, card) {
  *
  * 牌桌选择入口的**总闸**：只读态（D8，当前步骤的表面是弹窗）里一次都不分派；被分派到的
  * 四个函数也各自再问一次 `selectionEnabled()`（它们还有别的调用方，例如键盘 / 烟测）。
+ *
+ * **牌名级预发动与重铸并存**（票 05 / 缺陷 A）：`cardPreactivationManifest` 原先排在这里、
+ * 无条件抢在 `toggleFocus` 之前，于是一张♣【借刀杀人】永远只进清单、设不上 `focusCardId`，
+ * 而重铸入口只认焦点 ⇒ 「重铸」永远不出现。现在只有**没有**重铸候选的牌才由点牌进清单；
+ * 两者都有的牌点牌 = 设焦点，清单入口由 `options.js:renderReforgeEntry` 并列渲染。
  */
 function activateCard(pending, card, face) {
   if (!selectionEnabled()) return;
@@ -146,7 +158,17 @@ function activateCard(pending, card, face) {
   if (isDiscardPick(pending)) { toggleDiscardPick(card.card_id); return; }
   if (state.preactivation) { togglePreativationCard(card.card_id); return; }
   const manifest = cardPreactivationManifest(pending, card);
-  if (manifest) { enterCardPreativation(pending, card, manifest); return; }
+  if (manifest) {
+    // 票 05 / 缺陷 A：一张♣【借刀杀人】同时有**牌名级预发动**（两步清单）与技能授予的
+    // **重铸**（【连环】）时，清单先手会把重铸入口挡死——重铸入口只认 `focusCardId`
+    // （`options.js:renderReforgeEntry`），而进清单永远设不上焦点。有重铸候选就给焦点，
+    // 清单改由控件区并列的「使用【X】」入口进入（`renderReforgeEntry`，落法 = 并存）；
+    // 没有重铸候选的牌维持"点牌 = 进清单"（借刀的本行不变）。
+    if (reforgeAction(pending, card.card_id) === null) {
+      enterCardPreativation(pending, card, manifest);
+      return;
+    }
+  }
   // 强制转化（‘只能’型）：有产物、且这张牌此刻没有直接候选 ⇒ 点它 = 走转化清单。
   if (convertedForm(pending, card.card_id) && !cardSelectable(pending, card.card_id)) {
     enterConvertedForm(pending, card);

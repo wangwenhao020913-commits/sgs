@@ -459,6 +459,11 @@ function reforgeAction(pending, cardId) {
  * 只在手选路（出牌阶段）且**已选中一张可重铸的牌**时出现；按钮点一下即提交一条
  * ``Reforge``（见 :func:`submitReforge`）。它不铺目标、不进目标选择，也不开门。
  * 弹窗步骤里 `selectionEnabled()` 为假，入口不出现（只读判据不另写一份）。
+ *
+ * **牌名级预发动与重铸并存**（票 05 / 缺陷 A 的落法 = 并存）：♣【借刀杀人】这类牌同时有
+ * `pending.card_preactivations` 的两步清单与【连环】授予的 ``Reforge``。点牌给焦点后
+ * （`card-face.js:activateCard`），这里除了「重铸」再并列一个「使用【X】」——清单仍是
+ * **使用**的入口，不进重铸；把重铸塞进清单会与"重铸不是使用"的口径打架。
  */
 function renderReforgeEntry(pending) {
   if (!isHandPick(pending) || state.focusCardId === null) return;
@@ -472,6 +477,29 @@ function renderReforgeEntry(pending) {
   button.textContent = `重铸【${cardName(action.card)}】`;
   button.title = "重铸：弃置这张牌并摸一张牌（不算使用，不消耗使用次数）。";
   button.addEventListener("click", () => submitReforge(pending, action));
+  $("t-options").appendChild(button);
+  renderCardPreativationEntry(pending, action.card);
+}
+
+/** 焦点手牌若**另有**牌名级预发动（借刀的两步清单），并列一个「使用【X】」入口（票 05）。
+ *
+ * 点牌已改由重铸入口接管（见 `card-face.js:activateCard`），使用方向不能再没有入口——
+ * 裸【借刀杀人】在 `legal_actions` 里**没有** ``UseCard`` 候选（`tests/test_web.py` 钉），
+ * 清单就是它唯一的使用路径。判据只读服务端下发的 `pending.card_preactivations[card.type]`，
+ * 前端不认牌名。
+ */
+function renderCardPreativationEntry(pending, card) {
+  const manifest = cardPreactivationManifest(pending, card);
+  if (!manifest) return;
+  // 优先用快照里的**展示副本**（候选里那张牌故意不带 `display_*`，见 `core.js:cardName`）。
+  const shown = selfHandCard(card.card_id) || card;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "opt";
+  button.setAttribute("data-preactivation-card", String(card.card_id));
+  button.textContent = `使用【${cardName(shown)}】`;
+  button.title = "按两步清单使用这张牌（指定持刀者与【杀】的目标）；重铸不走清单。";
+  button.addEventListener("click", () => enterCardPreativation(pending, shown, manifest));
   $("t-options").appendChild(button);
 }
 
