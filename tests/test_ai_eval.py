@@ -1165,6 +1165,72 @@ def test_a_deal_with_different_decisions_is_counted_and_attributed(
     assert diff["examples"][0]["candidate"] != diff["examples"][0]["baseline"]
 
 
+# ---------------------------------------------------------------------------
+# 票 02：固定种子批（不随 HEAD 漂）—— 无懈窗口吞掉上一问应答的那条路
+# ---------------------------------------------------------------------------
+
+BROKEN_COMMIT = "9de4b6824730d0c192a9c3eecc45ba574cefc505"
+"""出问题的那次提交（`../nullify-provider-gap/spec.md` 的已核事实表）。"""
+
+BROKEN_SEEDS = (7541351177654252955, 12557545414948025534)
+"""`derive_batch(BROKEN_COMMIT, 2)` 的字面值：**第二副**触发那条
+`NotImplementedError`（界司马懿【反馈】的应答被无懈窗口吞下）。
+
+门禁的判决批按 `derive_batch(HEAD, 2)` 派生 ⇒ 那条 bug 只在撞上的 commit 上现身。
+这条用例把种子**写死**，于是"修没修好"与当前 HEAD 无关。
+"""
+
+
+def test_the_fixed_broken_batch_finishes_without_errors(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """固定种子批（不随 HEAD 漂）：两臂各两副都打完，`errors == 0`。
+
+    修前：第二副在无懈收集式窗口抛 `NotImplementedError`（`ai_eval` 记 1 副没打完 / 臂，
+    共 2 个 errors）；修后：应答被交还给接受它的那一问，正常终局。
+    """
+    import ai_eval.run as run
+    import ai_eval.seeds as seeds_mod
+    from ai_eval.versions import LoadedVersion
+
+    batch = seeds_mod.derive_batch(BROKEN_COMMIT, 2)
+    assert batch.seeds == BROKEN_SEEDS, "固定批的字面值变了：先查 derive_batch 的纪律"
+
+    def _load(ref, *, repo_root=None, versions_dir=None):
+        if ref != "deviating":
+            return run.load_version_original(
+                ref, repo_root=repo_root, versions_dir=versions_dir
+            )
+        real = run.load_version_original(
+            "HEAD", repo_root=repo_root, versions_dir=versions_dir
+        )
+        return LoadedVersion(
+            ref="deviating",
+            commit=real.commit,
+            heuristic_sha256="deviating" * 8,
+            path=real.path,
+            player_class=_one_shot_deviation(real.player_class),
+        )
+
+    monkeypatch.setattr(run, "load_version_original", run.load_version, raising=False)
+    monkeypatch.setattr(run, "load_version", _load)
+    monkeypatch.setattr(run, "derive_batch", lambda commit, deals: batch)
+
+    result = run.run_quick(
+        baseline="deviating",
+        candidate_ref="HEAD",
+        deals=2,
+        measure_cases=False,
+        versions_dir=tmp_path,
+    )
+
+    assert result["errors"] == 0, (
+        f"固定种子批 {BROKEN_SEEDS} 里有一副没打完"
+        "（无懈窗口的 fail-closed 又响了？答案被交给了别的一问？）"
+    )
+    assert result["seed_batch"]["deals"] == 2
+
+
 def _engine_surface_offenders(source: str) -> list[str]:
     """旧版启发式里出现 `sgs.effects` / `sgs.state` 之外的 `sgs.*` import 即列名。"""
     tree = ast.parse(source)

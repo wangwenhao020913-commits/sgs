@@ -248,6 +248,36 @@ _DISPATCH_SCOPE = "dispatch_scope"
 """
 
 
+_ANSWER_BACKLOG_LIMIT = 32
+"""孤立的**被接受应答**最多留这么多条（票 02 的应答归属）：超过即淘汰最旧的一条。
+
+正常流程里每条应答都由它自己那一问立刻取走（:attr:`Engine._answers` 恒空一瞬）；只有
+"问了、答了，但问的那一帧还没重入"才会留一条。32 条同时悬空只可能是病态局面，那时淘汰
+最旧的一条：它那一问会重问一遍（规则仍正确），但内存不随对局长度无界增长。
+"""
+
+_ANSWER_ORIGIN_KEY = "answer_origin"
+"""帧私有槽名：这一族帧的**发问身份**（票 02 的应答归属键第三位）。
+
+真实帧直接用 :attr:`Frame.frame_id`；只有 ``MOVE_AFTER`` 的**续跑帧**需要它
+（``frame_id = 0``、由 :meth:`Engine._resume_frame` 建）：续跑帧从承载帧继承帧私有数据，
+故**建帧时**把来源帧的发问身份记进来（见 :func:`_ask_origin`）。不把续跑帧的 ``frame_id``
+改成来源帧号——那份坐标是 38 / 39 号冻结基准已经录下的，不能动。
+"""
+
+
+def _ask_origin(frame: Frame) -> int | None:
+    """一次询问的**发问帧身份**（票 02 的应答归属键第三位）。
+
+    真实帧 = 帧号；``MOVE_AFTER`` 的续跑帧 = 建帧时记下的来源帧身份。``None`` = 没有承载帧
+    的询问（``ask_query`` 的窗口 / 回合环里那两问）或手工构造的孤立临时帧——它们没有可区分
+    的身份：宁可把"同一问"认宽一点，也不把真实帧的应答错配掉。
+    """
+    if frame.frame_id:
+        return frame.frame_id
+    return frame.data.get(_ANSWER_ORIGIN_KEY)
+
+
 _DEAD_CARDS_CLEARED = "dead_cards_cleared"
 """死亡帧私有槽名：Ⅰ.a 的"死者区域已清空"位（票 33 的重入幂等）。
 
@@ -531,7 +561,19 @@ class Engine:
         self.pending_outcome: Outcome | None = None
         self.finished = False
 
-        self._answer: Action | None = None
+        self._answers: dict[
+            tuple[object, ...], tuple[Action, ActivateSkill | None]
+        ] = {}
+        """**被接受、但还没被它自己那一问取走**的应答（票 02 的应答归属）。
+
+        键 = :meth:`_ask_identity` 的三元组；值 = ``(应答, 复合动作载荷或 None)``。正常流程
+        里提交后立刻被重入的那一问取走（恒空一瞬）；"问了、答了，但问的那一帧还没重入"时
+        留在这里等它重入 —— 不重问（``CODING_STANDARDS.md`` §3）。上限见
+        :data:`_ANSWER_BACKLOG_LIMIT`。
+        """
+
+        self._asked: tuple[object, ...] | None = None
+        """当前挂起那一问的身份；:meth:`Engine.submit` 据此把应答记到**它**名下。"""
         self._structured_activation: ActivateSkill | None = None
         """最近一次**经校验器接受**的复合 ``ActivateSkill``（W4-1）。
 
@@ -1283,7 +1325,8 @@ class Engine:
         return self.ask(
             lambda seq: self._build_query(
                 kind, actor, timing, seq, dying=dying, payload=payload, revealed=revealed
-            )
+            ),
+            identity=self._ask_identity(kind, actor, None),
         )
 
     def ask_arrange(
@@ -1319,7 +1362,8 @@ class Engine:
                 seq,
                 payload=ArrangeContext(count=len(cards), split=split),
                 revealed=cards,
-            )
+            ),
+            identity=self._ask_identity(QueryKind.ARRANGE, actor, frame),
         )
         if action is SUSPEND:
             return SUSPEND
@@ -1359,7 +1403,8 @@ class Engine:
                     max_total=max_total,
                     per_seat_max=per_seat_max,
                 ),
-            )
+            ),
+            identity=self._ask_identity(QueryKind.DISTRIBUTE, actor, frame),
         )
         if action is SUSPEND:
             return SUSPEND
@@ -2044,7 +2089,8 @@ class Engine:
         return self.ask(
             lambda seq: self._build_query(
                 QueryKind.RESPOND, actor, timing, seq, payload=payload
-            )
+            ),
+            identity=self._ask_identity(QueryKind.RESPOND, actor, frame),
         )
 
     def respond_candidates(
@@ -2175,7 +2221,8 @@ class Engine:
                     provide_type=provide_type,
                 ),
                 revealed=revealed,
-            )
+            ),
+            identity=self._ask_identity(QueryKind.SELECT_CARDS, actor, frame),
         )
         if action is SUSPEND:
             return SUSPEND
@@ -2251,7 +2298,8 @@ class Engine:
                         else ()
                     ),
                 ),
-            )
+            ),
+            identity=self._ask_identity(QueryKind.SKILL_ACTIVATION, actor, frame),
         )
         if action is SUSPEND:
             return SUSPEND
@@ -2307,7 +2355,8 @@ class Engine:
                     skill_id=skill_id, options=options, optional=optional
                 ),
                 revealed=revealed,
-            )
+            ),
+            identity=self._ask_identity(QueryKind.SELECT_OPTION, actor, frame),
         )
         if action is SUSPEND:
             return SUSPEND
@@ -2764,6 +2813,12 @@ class Engine:
         data["source"] = event.actor
         data["targets"] = ()
         data["card"] = None
+        # **发问身份随数据一起继承**（票 02 的应答归属）：续跑帧的 ``frame_id`` 恒为 0，
+        # 而钩子在续跑里重问的是**同一问**——应答必须仍认得出它（见 :func:`_ask_origin`）。
+        # 来源帧本身若也是续跑帧，就沿用它的那份身份。
+        origin = dispatch_frame.frame_id or dispatch_frame.data.get(_ANSWER_ORIGIN_KEY)
+        if origin is not None:
+            data[_ANSWER_ORIGIN_KEY] = origin
         # 本次移动的载荷由**续跑帧自己**带一份（票 23）：``_dispatch_move_after`` 在派发
         # 结束后会把 ``move_event`` 还原成外层帧原来那份（嵌套搬牌不许改写外层载荷），
         # 故不能指望 dispatch_frame 上还留着"这一轮"的那条。
@@ -3578,16 +3633,66 @@ class Engine:
 
     # -- 询问 ---------------------------------------------------------------
 
-    def ask(self, build: Callable[[int], Query]) -> Action | _Suspend:
-        """把一次询问交给参与者；已有应答则直接返回它。"""
-        if self._answer is not None:
-            answer, self._answer = self._answer, None
+    def _ask_identity(
+        self, kind: QueryKind, actor: int, frame: Frame | None
+    ) -> tuple[object, ...]:
+        """一次询问的**逻辑身份**（票 02 的应答归属）：同一问重入时不变，不同的问不同。
+
+        = ``(kind, actor, 发问帧身份)``；发问帧身份见 :func:`_ask_origin`，没有承载帧的询问
+        （``ask_query`` 的窗口 / 回合环里那两问）是 ``None``。身份**不**含询问序号：序号每次
+        重入都新取一个，拿它当身份会把"同一问的重入"认成新的一问。
+        """
+        return (
+            kind,
+            actor,
+            None if frame is None else _ask_origin(frame),
+        )
+
+    def ask(
+        self,
+        build: Callable[[int], Query],
+        *,
+        identity: tuple[object, ...],
+    ) -> Action | _Suspend:
+        """把一次询问交给参与者；**只有这一问自己**被接受过时，才直接返回那条应答。
+
+        票 02（界司马懿【反馈】）：派发环在跑完一条 effect（它压出了子帧）之后**继续**问下
+        一个实例，于是恢复点落在新子帧上——被挂起的那一问还没重入，应答却先回来了。旧实现
+        「``_answer`` 非空就交还」让下一问（无懈收集式窗口）吃掉它；那一问的候选里根本没有
+        这条动作，fail-closed 于是抛 ``NotImplementedError``。
+
+        故应答按询问身份记账（:meth:`_ask_identity`）：这里只取走 ``identity`` 名下那条；
+        取不到就照常建询问、挂起。被孤立的应答**留着**（:attr:`_answers`）——它的那一问真正
+        重入时取走，不重问（``CODING_STANDARDS.md`` §3）；它也可能永远等不到（那一问所在帧
+        不再重入），那是死条目，不再影响任何询问（上限见 :data:`_ANSWER_BACKLOG_LIMIT`）。
+        """
+        accepted = self._answers.pop(identity, None)
+        if accepted is not None:
+            answer, structured = accepted
+            # 复合动作的载荷按**对象身份**认领（:meth:`_take_structured_activation`）：应答
+            # 可能在别的询问先回来之后再被取走，标记不能指望一直躺在引擎上。
+            self._structured_activation = structured
             return answer
         seq = self._next_seq()
         query = build(seq)
         self._emit(QueryRecord(seq=seq, query=query))
         self.pending = query
+        self._asked = identity
         return SUSPEND
+
+    def _answer_to(self, action: Action) -> None:
+        """把被接受的应答记在**接受它的那一问**名下（票 02 的应答归属），并清掉挂起态。
+
+        键 = ``ask`` 挂起时记下的 :attr:`_asked`：下一问（哪怕同一 actor、同一帧）取不到它，
+        只有把挂起态推进到它自己那一问，才取得走。
+        """
+        assert self._asked is not None, "被接受的应答必须有它所属的那一问"
+        if len(self._answers) >= _ANSWER_BACKLOG_LIMIT:
+            # 病态局面的兜底（见 _ANSWER_BACKLOG_LIMIT）：淘汰最旧的一条，它那一问会重问。
+            self._answers.pop(next(iter(self._answers)))
+        self._answers[self._asked] = (action, self._structured_activation)
+        self._asked = None
+        self.pending = None
 
     def submit(self, response: object) -> None:
         """接受一个应答；合法性 = **成员判定**（含 W4-1 的复合动作例外）。
@@ -3664,8 +3769,7 @@ class Engine:
                     answers_seq=action.answers_seq,
                 )
             self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
-            self._answer = action
-            self.pending = None
+            self._answer_to(action)
             return
         if action not in pending.legal_actions:
             confirmation = self._conversion_confirmation(action, pending)
@@ -3685,14 +3789,12 @@ class Engine:
                 self._emit(
                     ActionRecord(seq=self._next_seq(), accepted=True, action=resolved)
                 )
-                self._answer = resolved
-                self.pending = None
+                self._answer_to(resolved)
                 return
             if action in pending.transform_actions:
                 # 回放磁带 / 程序化提交：转化动作不在**暴露面**里，但仍是本次询问的合法池。
                 self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
-                self._answer = action
-                self.pending = None
+                self._answer_to(action)
                 return
             failure = self._structured_activation_failure(action, pending)
             if failure is _NOT_STRUCTURED:
@@ -3715,13 +3817,11 @@ class Engine:
                     answers_seq=action.answers_seq,
                 )
             self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
-            self._answer = action
             self._structured_activation = action
-            self.pending = None
+            self._answer_to(action)
             return
         self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
-        self._answer = action
-        self.pending = None
+        self._answer_to(action)
 
     def _designation_failure(
         self, action: Action, pending: Query
@@ -4207,8 +4307,9 @@ class Engine:
     def _flush_pending_move(self) -> None:
         """把被钩子挂起的 ``MOVE_AFTER`` 派发完（票 07；M6 票 08 补"帧私有续跑"）。
 
-        询问刚被应答、下一帧还没跑时调用：此时钩子重入需要的那条应答已经在
-        ``_answer`` 里，故续跑会把它消费掉。没有挂起的移动时是**零动作**。
+        询问刚被应答、下一帧还没跑时调用：此时钩子重入需要的那条应答已经记在**它那一问**
+        名下（票 02 的应答归属；续跑帧与承载帧是同一问，见 :func:`_ask_origin`），故续跑会
+        把它取走。没有挂起的移动时是**零动作**。
 
         **续跑帧** = 挂起时记下的那条临时帧（:meth:`_resume_frame`）：询问缓存与效果游标
         都在它上面，多步流水线（【清俭】）因此不会从头重问、也不会把下一条应答错配给
@@ -4733,7 +4834,8 @@ class Engine:
             self.emit_timing(Timing.PHASE_PLAY_IDLE, actor=seat)
             self._turn_data["play_idle_emitted"] = True
         action = self.ask(
-            lambda seq: self._build_query(QueryKind.PLAY_PHASE, seat, Timing.PHASE_PLAY_IDLE, seq)
+            lambda seq: self._build_query(QueryKind.PLAY_PHASE, seat, Timing.PHASE_PLAY_IDLE, seq),
+            identity=self._ask_identity(QueryKind.PLAY_PHASE, seat, None),
         )
         if action is SUSPEND:
             return "stay"
@@ -4793,7 +4895,8 @@ class Engine:
         # 由 fuzz 抓到）。
         while discard_count(self.state, player) > 0:
             action = self.ask(
-                lambda seq: self._build_query(QueryKind.DISCARD, seat, Timing.PHASE_DISCARD, seq)
+                lambda seq: self._build_query(QueryKind.DISCARD, seat, Timing.PHASE_DISCARD, seq),
+                identity=self._ask_identity(QueryKind.DISCARD, seat, None),
             )
             if action is SUSPEND:
                 return "stay"
