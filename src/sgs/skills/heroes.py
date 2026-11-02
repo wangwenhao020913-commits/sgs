@@ -830,6 +830,13 @@ def resolve_conversion_confirmation(
       有目标步 ⇒ 按**完整目标集**比较（先比原始选择个数——重复选择因此被拒——再比
       去重后的集合，见 :func:`sgs.effects.target_sets_match`）；没有目标步 ⇒ 目标已被清单
       判为唯一（或本就没有目标），不比较。同一条判据也是清单的形状；
+    - **点击顺序**（huo-mobile-batch 票 06）：候选牌自己的行为表声明了
+      :attr:`~sgs.effects.CardBehavior.preserve_target_order`（当前 =【铁索连环】）时，
+      两种点击顺序在候选池里本就是**两条**动作（``_play_phase`` / ``virtual_card_use``
+      按 ``target_combos(..., ordered=True)`` 摊开），目标因此按 ``tuple(choices) ==
+      tuple(action.targets)`` 的**顺序**匹配——按集合匹配会永远拿到候选池里座位序那条
+      （实机报障 ③：产物先点 3 再点 1，结算仍按 (1, 3)）。其余牌保持集合比较（顺序无关），
+      判据读行为表，不按技能 id 特判；1 名目标时两种比较等价；
     - **W7-01b**：多目标组合同样走这里——``ActivateSkill(虚拟牌来源, 1..max 个目标)``
       解析成候选池里那条 ``UseCard(虚拟牌, targets=…)``；清单只表达"最多可选几个"，
       不在池里的组合由上面的比较拒绝。
@@ -860,10 +867,16 @@ def resolve_conversion_confirmation(
         if tuple(sorted(int(source) for source in card.virtual_sources)) != wanted_sources:
             continue
         source_matched = True
-        if needs_target and not target_sets_match(
-            wanted_targets, getattr(action, "targets", ())
-        ):
-            continue
+        if needs_target:
+            targets = tuple(int(target) for target in getattr(action, "targets", ()))
+            # M5-bugfix 的同一判据（huo-mobile-batch 票 06）：声明了
+            # ``preserve_target_order`` 的牌把两种点击顺序摊成两条候选，确认必须按
+            # **点击顺序**对回那一条；其余牌仍按集合比较（与点击顺序无关）。
+            if behavior_for(card).preserve_target_order:
+                if tuple(wanted_targets) != targets:
+                    continue
+            elif not target_sets_match(wanted_targets, targets):
+                continue
         return action
     if not source_matched:
         return "来源牌不合法：这组牌此刻不能这样转化"

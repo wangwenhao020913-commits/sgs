@@ -6,8 +6,12 @@
  * 真实构造器，输出的就是浏览器会发的那条 JSON。
  *
  * 加载纪律与 `ui_smoke.mjs` 同姿态：脚本清单来自 `index.html` 的 `<script src>` 顺序；
- * 这里只取 `buildAction` 依赖闭包（core → candidates → preactivation → pending → arrange
- * → answer），不加载 `main.js`（它在末尾 `wire()`，需要 DOM）。桥会检查每个名字真的存在：
+ * 这里只取 `buildAction` / 预发动点击 的依赖闭包（core → candidates → preactivation →
+ * pending → reveal → modal → arrange → answer），不加载 `main.js`（它在末尾 `wire()`，
+ * 需要 DOM）。`reveal.js` / `modal.js` 只为 `selectPreativationSeat` 的只读态判据
+ * （`selectionEnabled` → `stepDialogKind`）——判据走真的那份，不在探针里另写。
+ * 两个**渲染**入口（`renderTable` / `renderPending`）换成空实现：DOM 垫片只在
+ * `ui_smoke.mjs` 里有，本探针只断"点击 → 载荷"，不断渲染。桥会检查每个名字真的存在：
  * 少一个就抛错，而不是让 Python 侧收到 `undefined` 后误判。
  */
 
@@ -20,6 +24,8 @@ const NEEDED = [
   "candidates.js",
   "preactivation.js",
   "pending.js",
+  "reveal.js",
+  "modal.js",
   "arrange.js",
   "answer.js",
 ];
@@ -48,7 +54,16 @@ vm.runInContext(readFileSync("tests/support/ui_bridge.js", "utf8"), context, {
   filename: "ui_bridge.js",
 });
 const ui = context.__bridge;
-for (const name of ["buildAction", "buildPreativationAction", "bareCardRef", "state"]) {
+for (const name of [
+  "buildAction",
+  "buildPreativationAction",
+  "bareCardRef",
+  "state",
+  "enterPreativation",
+  "togglePreativationCard",
+  "advancePreativation",
+  "selectPreativationSeat",
+]) {
   if (!(name in ui)) throw new Error(`ui_bridge 没桥出 ${name}：前端脚本加载不完整`);
 }
 
@@ -225,6 +240,60 @@ const guohuoPa = {
 const composite = ui.buildPreativationAction(guohuoPending, guohuoPa);
 if (!composite) throw new Error("buildPreativationAction 没拼出复合 ActivateSkill（两步清单夹具失效）");
 
+/* 预发动座位步的**点击顺序**（huo-mobile-batch 票 06 / 验收报障 ③）：
+ * 庞统移动版【连环】把一张♣手牌转化成【铁索连环】；产物声明了
+ * `preserve_target_order` ⇒ 两种点击顺序在服务端是**两条不同候选**，界面必须把点击
+ * 顺序**原样**带进 `choices`。这里点 3 再点 1，期望 `["seat:3", "seat:1"]`——任何按座位序
+ * 归一化的写法（排序 / 转集合）都会把它变成升序那条，服务端就只能按座位序结算。
+ *
+ * 清单形状与服务端 `conversion_preactivations` 同源（来源步 + `min 1 / max 2` 座位步）；
+ * 只喂形状，不替服务端算候选（合法性仍由引擎的确认解析裁决）。渲染不是本用例的对象：
+ * 两个渲染入口换成空实现，**点击处理器与只读态判据走真的那份**。 */
+const lianhuanManifest = [
+  {
+    name: "card", zones: ["hand"], min: 1, max: 1, order: 0,
+    pool: [{ when: [], options: ["52"] }], wording: "选择一张♣手牌",
+  },
+  {
+    name: "seat", zones: [], min: 1, max: 2, order: 1,
+    pool: [{ when: [], options: ["seat:0", "seat:1", "seat:2", "seat:3"] }],
+    wording: "选择 1 至 2 名角色",
+  },
+];
+const lianhuanPending = {
+  kind: "PLAY_PHASE",
+  actor: 0,
+  seq: 97,
+  prompt: "出牌阶段：使用一张牌，或结束出牌阶段。",
+  legal_actions: [{ kind: "EndPhase", answers_seq: 97 }],
+  candidate_index: {},
+  virtual_index: {},
+  option_seats: {},
+  context: null,
+  preactivations: { "hero.pangtong_mobile.lianhuan": lianhuanManifest },
+  preactivation: [],
+  card_preactivations: {},
+};
+const lianhuanSkill = {
+  skill_id: "hero.pangtong_mobile.lianhuan",
+  name: "连环",
+  preactivated: false,
+};
+
+resetState();
+context.renderTable = () => {};
+context.renderPending = () => {};
+ui.state.playback = null;
+ui.state.view = { human_seat: 0, pending: lianhuanPending };
+ui.enterPreativation(lianhuanSkill, lianhuanManifest);
+ui.togglePreativationCard(52); // 来源步：那张♣手牌
+ui.advancePreativation();
+ui.selectPreativationSeat(3); // 点击顺序：先 3
+ui.selectPreativationSeat(1); // 再 1
+ui.advancePreativation(); // 多选座位步的「下一步」
+const clickOrdered = ui.buildPreativationAction(lianhuanPending, ui.state.preactivation);
+if (!clickOrdered) throw new Error("buildPreativationAction 没拼出有序目标的 ActivateSkill（点击夹具失效）");
+
 /* 合成反例：同一张借刀卡的**展示形态**原样塞进 UseCard.card（实机 400 的形状）。 */
 const decorated = {
   kind: "UseCard",
@@ -239,6 +308,7 @@ process.stdout.write(
     cases: [
       { name: "borrowed_sword_preactivation", action: borrowed },
       { name: "two_step_preactivation", action: composite },
+      { name: "seat_order_preactivation", action: clickOrdered },
       { name: "use_card", action: use },
       { name: "play_card", action: play },
     ],

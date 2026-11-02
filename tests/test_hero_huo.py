@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import pytest
 
-from sgs.data import Identity, Kingdom, load_content_pack, load_hero_tables
+from sgs.data import Identity, Kingdom, RuleConfig, load_content_pack, load_hero_tables
 from sgs.effects import distance, hand_limit
 from sgs.engine import Engine
 from sgs.skills import CATALOG
@@ -858,18 +858,24 @@ def _pack_deck_without(pack, *used: int) -> tuple[int, ...]:
     return tuple(index for index in range(len(pack.deck.cards)) if index not in used)
 
 
-def _lianhuan_state(pack, hand: tuple[int, ...]):
+def _lianhuan_state(pack, hand: tuple[int, ...], *, players: int = 3):
+    """``players`` = 座位数；票 06 的复现局面是 4 人（座位 3 也要存在）。"""
+    seats = [SeatSpec(hero=PANGTONG, hand=hand, identity=Identity.LORD)]
+    seats += [
+        SeatSpec(identity=Identity.REBEL) for _ in range(players - 1)
+    ]
     return build_state(
         pack=pack,
-        seats=[SeatSpec(hero=PANGTONG, hand=hand), SeatSpec(), SeatSpec()],
+        seats=seats,
         deck=_pack_deck_without(pack, *hand),
         turn_seat=0,
         phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4) if players >= 4 else None,
     )
 
 
-def _lianhuan_play_phase(pack, hand: tuple[int, ...]):
-    engine = Engine.from_state(_lianhuan_state(pack, hand), seed=3)
+def _lianhuan_play_phase(pack, hand: tuple[int, ...], *, players: int = 3):
+    engine = Engine.from_state(_lianhuan_state(pack, hand, players=players), seed=3)
     _advance(
         engine,
         lambda e: e.pending is not None
@@ -877,6 +883,15 @@ def _lianhuan_play_phase(pack, hand: tuple[int, ...]):
         and e.pending.actor == 0,
     )
     return engine
+
+
+def _chained_change_seats(engine) -> list[int]:
+    """记录流里 ``chained_change`` delta 的座位**先后**（= 目标的结算顺序）。"""
+    return [
+        record.seat
+        for record in engine.records
+        if record.kind == "delta" and record.delta_type == "chained_change"
+    ]
 
 
 def test_lianhuan_converts_a_club_hand_card_into_iron_chain() -> None:
@@ -933,6 +948,49 @@ def test_lianhuan_can_chain_two_targets() -> None:
 
     assert engine.state.player(1).chained is True
     assert engine.state.player(2).chained is True, "两名目标都被横置（不是被压成一名）"
+
+
+@pytest.mark.parametrize(
+    ("choices", "settled"),
+    [
+        (("seat:3", "seat:1"), [3, 1]),
+        (("seat:1", "seat:3"), [1, 3]),
+    ],
+    ids=["click-3-then-1", "click-1-then-3"],
+)
+def test_lianhuan_product_settles_two_targets_in_the_click_order(
+    choices: tuple[str, ...], settled: list[int]
+) -> None:
+    """转化出的【铁索连环】按**点击顺序**结算（huo-mobile-batch 票 06，报障 ③）。
+
+    真牌由 ``_play_phase`` 的 ``target_combos(..., ordered=preserve_target_order)`` 摊出
+    **两种点击顺序**两条候选；产物原先在确认时按**集合**匹配 ⇒ 候选池按座位序排，
+    永远解析到升序那条：先点 3 再点 1，记录流仍是 ``(1, 3)``（§3 的实机复现）。
+
+    判据 = ``chained_change`` delta 的先后：铁索的每个目标各自结算（RESOLVE 帧逐目标走
+    过），故 delta 顺序就是使用者点出来的结算顺序。
+    """
+    club = _club_card(PACK_160, "slash")
+    engine = _lianhuan_play_phase(PACK_160, (club,), players=4)
+
+    engine.submit(
+        ActivateSkill(
+            skill_id=LIANHUAN,
+            picks=(club,),
+            choices=choices,
+            answers_seq=engine.pending.seq,
+        )
+    )
+    _until(
+        engine,
+        lambda e: e.state.player(1).chained and e.state.player(3).chained,
+    )
+
+    assert _chained_change_seats(engine) == settled, (
+        "产物也按点击顺序结算（真牌 preserve_target_order 的同一判据），不是座位序"
+    )
+    assert engine.state.player(1).chained is True
+    assert engine.state.player(3).chained is True
 
 
 def test_lianhuan_manifest_is_derived_from_the_club_sources_only() -> None:
