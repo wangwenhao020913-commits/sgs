@@ -315,6 +315,25 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   background: #fff; cursor: pointer;
 }
 .opt.sel { border-color: var(--accent); background: var(--accent-soft); }
+
+/* 计数式分配（神周瑜移动版【业炎】；huo-shenzhouyu-mobile 票 05）：一行一个座位 + 计数徽标，
+ * 底下「重置」。宽度撑满弹窗正文，计数用等宽数字（点几次都看得出）。 */
+.opt.distribution-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+.distribution-count {
+  min-width: 1.4em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.opt.distribution-reset {
+  margin-top: 6px;
+}
 /* 置灰不可选（票 04 §3）：选项**列出来**但点不动——蛊惑的牌名弹窗里"此刻没有合法目标"
  * 的那几个。与 `.card.dis` 同一姿态（降透明度 + 禁用光标），没有 hover 反馈。 */
 .opt.dis {

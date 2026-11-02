@@ -84,6 +84,28 @@
           "skill_type": "LORD"
         }
       ]
+    },
+    {
+      "id": "shen_zhouyu_mobile",
+      "name": "神周瑜移动版",
+      "true_name": "神周瑜",
+      "kingdom": "shen",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "huo-mobile",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "qinyin",
+          "name": "琴音",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "yeyan",
+          "name": "业炎",
+          "skill_type": "LIMITED"
+        }
+      ]
     }
   ]
 }

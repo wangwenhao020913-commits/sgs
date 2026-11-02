@@ -86,6 +86,7 @@ from sgs.state import (
     SlotKind,
     Zone,
     ZoneRef,
+    alive_seats,
     seats_from,
 )
 from sgs.timing import Timing
@@ -233,8 +234,21 @@ def _push_recover(host: Any, frame: Any, *, source: int, target: int, amount: in
     )
 
 
-def _push_damage(host: Any, frame: Any, *, source: int, target: int, amount: int = 1) -> None:
-    """压一个 ``DAMAGE`` 子帧（主动技的伤害无渠道牌，故 ``channel = None``）。"""
+def _push_damage(
+    host: Any,
+    frame: Any,
+    *,
+    source: int | None,
+    target: int,
+    amount: int = 1,
+    nature: DamageNature = DamageNature.NORMAL,
+) -> None:
+    """压一个 ``DAMAGE`` 子帧（主动技的伤害无渠道牌，故 ``channel = None``）。
+
+    ``nature``（神周瑜移动版【业炎】的加法）：火焰 / 雷电等属性伤害走行为表的同一处声明；
+    缺省 ``NORMAL`` ⇒ 既有主动技的伤害帧逐字不变。``source`` 可以是 ``None``——效果结算中
+    来源已阵亡时按"无伤害来源"压帧（【业炎】的用户裁定）。
+    """
     host.push_frame(
         FrameKind.DAMAGE,
         {
@@ -244,7 +258,7 @@ def _push_damage(host: Any, frame: Any, *, source: int, target: int, amount: int
             "use_timing": frame.data.get("use_timing"),
             "target": target,
             "channel": frame.data.get("card"),
-            "nature": DamageNature.NORMAL,
+            "nature": nature,
             "chain": False,
             "amount": amount,
         },
@@ -4021,6 +4035,184 @@ HUANGTIAN_FLOW = SkillFlow(
 """【黄天】的一步流水线：选一张【闪】/【闪电】（自己的手牌）→ 交给张角。"""
 
 
+
+# ---------------------------------------------------------------------------
+# 神周瑜移动版【业炎】（huo-shenzhouyu-mobile 票 01 / 框架票 05；用户 2026-11-02 逐字指定交互）
+#
+# 牌面（用户改判后的文本，与 OL 现行一致）：
+#
+#     业炎
+#     　限定技，出牌阶段，你可以选择至多三名角色，对这些角色造成共计至多3点火焰伤害
+#     　（若你将对一名角色分配大于等于2点火焰伤害，你须先弃置四张花色各不相同的手牌并失去3点体力）。
+#
+# 交互（**用户 2026-11-02 指定的两步**，票 05 的计数式分配询问是它的载体）：
+# 1. 分配弹窗：列出全部存活座位，每座一个 0–3 计数、合计 ≤ 3、可重置、随时提交、超时自动提交；
+# 2. 任一计数 ≥ 2 ⇒ 必须选四花色手牌各一张（涉猎形态）⇒ **分支 1**；全部 ≤ 1 ⇒ **分支 2**。
+#    分支 1 = 弃四张 → 失去 3 点体力 → 按**从你开始的行动顺序**造成伤害（三段按序入事件列表，
+#    你因此阵亡也照常结算，伤害来源改为无来源）；分支 2 = 直接按同一顺序造成伤害。
+#
+# 计数全 0 也是一次发动（限定技照常消耗）：用户在票面里明确"最少可以为0，随时可以提交"。
+# 代价付不起（手牌凑不出四花色）时**单座计数上限压到 1**（01 票 R4）：界面上"要付却付不起"
+# 的死路从候选生成期就不存在。
+# ---------------------------------------------------------------------------
+
+YEYAN = hero_skill_id("shen_zhouyu_mobile", "yeyan")
+"""神周瑜移动版【业炎】的全限定技能 id。"""
+
+YEYAN_TOTAL = 3
+"""「共计至多3点」：分配合计上限。"""
+
+YEYAN_COST_HP = 3
+"""代价里的「失去3点体力」。"""
+
+YEYAN_COST_CARDS = 4
+"""代价里的「四张花色各不相同的手牌」。"""
+
+_YEYAN_ALLOCATION = "yeyan_allocation"
+"""帧私有：分配结果（``((座位, 点数), ...)``，省略 0；提问一次、重入复用）。"""
+
+_YEYAN_PAID = "yeyan_paid"
+"""帧私有：代价已付（弃四张 + 压过失去体力帧；重入不重复付）。"""
+
+_YEYAN_DONE = "yeyan_done"
+"""帧私有：伤害已经结算过的座位（逐座压帧，重入既不重做也不漏做）。"""
+
+_YEYAN_ORDER = "yeyan_order"
+"""帧私有：伤害结算名单（首次进入时按"从你开始的行动顺序"定格）。"""
+
+_ASK_YEYAN_COST = "hero.shen_zhouyu_mobile.yeyan.cost"
+
+
+def _yeyan_cost_payable(state: GameState, owner: int) -> bool:
+    """代价付得起吗：手牌里凑得出**四种花色各一张**。"""
+    suits = {
+        card.suit
+        for card in (state.card(card_id) for card_id in state.player(owner).hand)
+        if card.suit is not None
+    }
+    return len(suits) >= YEYAN_COST_CARDS
+
+
+def _yeyan_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """候选：自己的出牌阶段（限定技的"整局已用"门由 ``_limited_offers`` 包在外面）。
+
+    "至多3点"允许全 0 提交 ⇒ 只要在出牌阶段就有合法分配，不另设"有没有收益"的收窄。
+    """
+    if not _can_offer(state, ctx, once_per_phase=False):
+        return current
+    return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
+
+
+def _yeyan_cost_face(host: Any, owner: int) -> Any:
+    """代价选牌面：**自己的手牌**（四花色各一张；同花色置灰由 ``max_per_suit`` 收窄）。"""
+    slots, card_ids = host.selection_face(owner, (Zone.HAND,), reveal_hand=True)
+    return slots, card_ids
+
+
+def _yeyan_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：分配弹窗 → （代价）→ 按行动顺序逐座压火焰伤害帧。"""
+    del answers
+    state = host.state
+    owner = int(frame.data["source"])
+    timing = Timing.PHASE_PLAY_IDLE
+    allocation = frame.data.get(_YEYAN_ALLOCATION)
+    if allocation is None:
+        answer = host.ask_distribution(
+            frame,
+            owner,
+            timing,
+            skill_id=f"{YEYAN}:distribute",
+            seats=alive_seats(state),
+            max_total=YEYAN_TOTAL,
+            # 付不起代价 ⇒ 单座上限压到 1（01 票 R4）：任何计数 ≥2 都要付代价，界面不该给出
+            # 一条点了必然付不起的路。
+            per_seat_max=YEYAN_TOTAL if _yeyan_cost_payable(state, owner) else 1,
+        )
+        if host.suspended(answer):
+            return "stay"
+        allocation = tuple((int(seat), int(count)) for seat, count in answer.counts)
+        frame.data[_YEYAN_ALLOCATION] = allocation
+    heavy = any(count >= 2 for _, count in allocation)
+    if heavy and not frame.data.get(_YEYAN_PAID):
+        picked = host.ask_selection(
+            frame,
+            owner=_ASK_YEYAN_COST,
+            key="yeyan:cost",
+            actor=owner,
+            timing=timing,
+            spec=SelectionSpec(
+                zones=(Zone.HAND,), total=(YEYAN_COST_CARDS, YEYAN_COST_CARDS), max_per_suit=1
+            ),
+            build_face=lambda: _yeyan_cost_face(host, owner),
+        )
+        if host.suspended(picked):
+            return "stay"
+        if len(picked) != YEYAN_COST_CARDS:
+            # 防御分支：入口已按"四花色齐"收窄（单座上限 2/3 只在付得起时出现）⇒ 走不到。
+            return None
+        if (
+            _move_to_discard(
+                host, frame, tuple(int(card) for card in picked), owner=owner, key="yeyan:cost"
+            )
+            == "stay"
+        ):
+            return "stay"
+        frame.data[_YEYAN_PAID] = True
+        # 失去体力 ≠ 受到伤害：一条 LIFE_DECREASE(3) 帧（濒死按一次结算；逐点派发住引擎）。
+        host.push_frame(
+            FrameKind.LIFE_DECREASE,
+            {"target": owner, "source": None, "amount": YEYAN_COST_HP},
+            timing=Timing.LIFE_DECREASE_BEFORE,
+        )
+        return "stay"
+    order = frame.data.get(_YEYAN_ORDER)
+    amounts = dict(allocation)
+    if order is None:
+        order = tuple(
+            seat
+            for seat in seats_from(state, owner, len(state.players))
+            if amounts.get(seat, 0) > 0
+        )
+        frame.data[_YEYAN_ORDER] = order
+    done = tuple(frame.data.get(_YEYAN_DONE, ()))
+    for seat in order:
+        if seat in done:
+            continue
+        frame.data[_YEYAN_DONE] = (*done, seat)
+        if not state.player(seat).alive:
+            continue
+        # 分支 1 的三段按顺序入事件列表：你已经阵亡时伤害照常结算，只是没有伤害来源。
+        _push_damage(
+            host,
+            frame,
+            source=owner if state.player(owner).alive else None,
+            target=seat,
+            amount=int(amounts[seat]),
+            nature=DamageNature.FIRE,
+        )
+        return "stay"
+    return None
+
+
+YEYAN_FLOW = SkillFlow(name="yeyan", steps=(), effect=_yeyan_effect)
+"""【业炎】的零步流水线：发动即进提交点（分配弹窗 + 代价判定的两分支）。"""
+
+_YEYAN = ActiveSkill(
+    "shen_zhouyu_mobile",
+    "yeyan",
+    _yeyan_offers,
+    flow=YEYAN_FLOW,
+    skill_type=SkillType.LIMITED,
+    requirement=(
+        "限定技，出牌阶段，你可以选择至多三名角色，对这些角色造成共计至多3点火焰伤害"
+        "（若你将对一名角色分配大于等于2点火焰伤害，你须先弃置四张花色各不相同的手牌并失去3点体力）"
+    ),
+    step_requirements={
+        "distribute": "为角色分配火焰伤害（合计至多3点；点一次计数 +1，可重置，随时提交）",
+        "card": "弃置四张花色各不相同的手牌（四种花色各一张）",
+    },
+)
+
 ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
     # 韬·刘备【义起】（自制包）：**A 族第一条限定技**。观看弃牌堆顶 x 张（x = 张数整除 10）→
     # 恒 3 项类型选 1（不可放弃）→ 获得该类所有牌 → 失去武将牌上除【义起】外的技能 →
@@ -4252,6 +4444,8 @@ ACTIVE_SKILLS: tuple[ActiveSkill, ...] = (
             "target": "选择你攻击范围内的一名其他角色",
         },
     ),
+    # 神周瑜移动版【业炎】（huo-shenzhouyu-mobile 票 01）：A 族限定技 + 计数式分配弹窗。
+    _YEYAN,
 )
 """A 族十七条技能（票 04 §逐技能落位表 + M6 票 03 的【苦肉】+ M6 票 04 的【义绝】+
 票 06 的两条 ☆ 技能【荐言】/【攻心】+ M6 票 17 的界·吴四条 + M6 票 18 的界华佗【除疠】/

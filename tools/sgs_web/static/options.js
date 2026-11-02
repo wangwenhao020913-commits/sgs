@@ -112,6 +112,86 @@ function renderOptionButtons(pending) {
   $("btn-cancel").disabled = state.selectedOption === null && !cancelAction(pending);
 }
 
+/** 计数式分配的本地计数（票 05）：同一 `pending.seq` 内跨重绘保留；换问即清零。
+ *
+ * 计数是**本地态**（服务端看不到玩家点了几次），提交时由 :func:`distributionAction`
+ * 拼成候选里那条 `Distribute`；超时同理——前端先把手上的计数交出去，服务端先到点则按
+ * 全 0 代答（`legal_actions[0]`）。
+ */
+function distributionCounts(pending) {
+  const seq = pending && pending.seq !== undefined && pending.seq !== null ? pending.seq : null;
+  if (!state.distribution || state.distribution.seq !== seq) {
+    state.distribution = { seq, counts: {} };
+  }
+  return state.distribution.counts;
+}
+
+/** 当前分配合计（点数总和）。 */
+function distributionTotal(counts) {
+  return Object.values(counts || {}).reduce(
+    (sum, value) => sum + (Number(value) || 0),
+    0,
+  );
+}
+
+/** 计数式分配面（神周瑜移动版【业炎】；huo-shenzhouyu-mobile 票 05）。
+ *
+ *  逐座位一行：点一行 = 计数 +1（合计到上限 / 单座到上限后该行不可点）；
+ *  底下「重置」清零；右端「提交」恒可点（全 0 也是合法分配）。
+ *  与 `renderOptionButtons` 同一个容器（`#t-options`，随后整体搬进弹窗正文）。
+ */
+function renderDistribution(pending) {
+  const box = $("t-options");
+  if (!box) return;
+  const info = pending.distribution || {};
+  const seats = Array.isArray(info.seats) ? info.seats : [];
+  const maxTotal = Number(info.max_total) || 0;
+  const perSeat = Number(info.per_seat_max) || 0;
+  const counts = distributionCounts(pending);
+  const total = distributionTotal(counts);
+  const hint = $("t-target-hint");
+  if (hint) {
+    hint.textContent = `点一行 = 计数 +1；合计至多 ${maxTotal} 点`
+      + `（单座至多 ${perSeat} 点）；可「重置」，随时「提交」。`;
+  }
+  seats.forEach((entry) => {
+    const seat = Number(entry.seat);
+    const label = entry.label
+      || (entry.name ? `${entry.seat}号位${entry.name}` : `${entry.seat}号位`);
+    const count = Number(counts[seat] || 0);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "opt distribution-row";
+    button.disabled = total >= maxTotal || count >= perSeat;
+    const name = document.createElement("span");
+    name.className = "distribution-name";
+    name.textContent = label;
+    const badge = document.createElement("span");
+    badge.className = "distribution-count";
+    badge.textContent = String(count);
+    button.appendChild(name);
+    button.appendChild(badge);
+    button.addEventListener("click", () => {
+      if (button.disabled) return;
+      counts[seat] = count + 1;
+      state.lastRejectReason = "";
+      renderPending(state.view);
+    });
+    box.appendChild(button);
+  });
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.className = "opt distribution-reset";
+  reset.textContent = "重置";
+  reset.disabled = total === 0;
+  reset.addEventListener("click", () => {
+    state.distribution = { seq: pending.seq, counts: {} };
+    state.lastRejectReason = "";
+    renderPending(state.view);
+  });
+  box.appendChild(reset);
+}
+
 /** 这一面要画哪些选项值（M5-bugfix）：一次性二选一画**完整的一对**，其余只画候选真有的。
  *
  * 配对来自 :data:`OPTION_PAIRS`——只要候选里有同一对的一项，就把整对都画出来；另一项

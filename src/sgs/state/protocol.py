@@ -91,6 +91,7 @@ class QueryKind(str, Enum):
     SKILL_ACTIVATION = "SKILL_ACTIVATION"
     SELECT_OPTION = "SELECT_OPTION"
     ARRANGE = "ARRANGE"
+    DISTRIBUTE = "DISTRIBUTE"
 
 
 class WindowCause(str, Enum):
@@ -361,6 +362,23 @@ class SelectOptionContext:
 
 
 @dataclass(frozen=True, slots=True)
+class DistributeContext:
+    """``DISTRIBUTE`` 候选生成的类型化载荷（huo-shenzhouyu-mobile 票 05）。
+
+    这是**计数式分配**这一询问形状（一张弹窗里给若干座位各配一个可累加计数）的
+    全部输入：可分配的座位（座位升序）、合计上限、单座上限。候选 = 「每座 0..单座上限、
+    合计 ≤ 上限」的**全量枚举**（4 人局 35 条、8 人局 165 条）；枚举出的 ``counts`` 省略
+    0 值、按座位升序，故全 0 的那一条的键最小、恒排在 ``legal_actions[0]``——超时兜底
+    （:func:`sgs_web.timeout.fallback_action` 的"取第一个候选"）因此天然是"不分配"。
+    """
+
+    skill_id: str
+    seats: tuple[int, ...]
+    max_total: int = 3
+    per_seat_max: int = 3
+
+
+@dataclass(frozen=True, slots=True)
 class ArrangeContext:
     """``ARRANGE`` 候选生成的类型化载荷（票 10；W6-02 加 ``split``）。
 
@@ -596,6 +614,18 @@ class SelectOption(_ActionBase):
     choice: str
 
 
+class Distribute(_ActionBase):
+    """计数式分配（huo-shenzhouyu-mobile 票 05；首个载体 = 神周瑜【业炎】）。
+
+    ``counts`` = ``((座位, 点数), ...)``：**座位升序、省略 0**，空元组 = 一个点都不分配。
+    座位是公开事实，故记录流里读得出"你把几点给了谁"；每一问的合法集合由引擎全量枚举
+    （成员判定照旧），客户端按本地计数拼出同一条再在候选里查。
+    """
+
+    kind: Literal["Distribute"] = "Distribute"
+    counts: tuple[tuple[int, int], ...] = ()
+
+
 class ArrangeCards(_ActionBase):
     """排列（票 10 §②）：``order`` = **全部 X 个面内位置**的一个排列，``split`` = 前几张放牌堆顶。
 
@@ -621,7 +651,8 @@ Action = Annotated[
     | SelectCards
     | ActivateSkill
     | SelectOption
-    | ArrangeCards,
+    | ArrangeCards
+    | Distribute,
     Field(discriminator="kind"),
 ]
 
@@ -811,6 +842,20 @@ class SelectOptionQuery(_QueryBase):
     options: tuple[str, ...]
 
 
+class DistributeQuery(_QueryBase):
+    """计数式分配（huo-shenzhouyu-mobile 票 05）：一张弹窗里给若干座位各配一个计数。
+
+    ``seats`` / ``max_total`` / ``per_seat_max`` 都是**公开事实**（谁在座上、能分几个），
+    故随询问下发；界面据它画计数行，服务端据同一份枚举候选。
+    """
+
+    kind: Literal["DISTRIBUTE"] = "DISTRIBUTE"
+    skill_id: str
+    seats: tuple[int, ...]
+    max_total: int = 3
+    per_seat_max: int = 3
+
+
 class ArrangeQuery(_QueryBase):
     """排列（票 10 §②）：被授予的牌面随询问给出，答复 = 一个排列 + 一个切分点。
 
@@ -831,6 +876,7 @@ Query = Annotated[
     | SelectCardsQuery
     | SkillActivationQuery
     | SelectOptionQuery
-    | ArrangeQuery,
+    | ArrangeQuery
+    | DistributeQuery,
     Field(discriminator="kind"),
 ]

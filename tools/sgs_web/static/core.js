@@ -265,6 +265,10 @@ const state = {
   // 个提前量）。`suitAutoSeq` 记"已经自动提交过哪一问"；`suitResult` 是提交成功后本地的
   // 2.5 秒结果态（`{cards, picked, until, title}`，仅发动者的屏幕）。
   suitAutoSeq: null,
+  // 票 05：计数式分配（`DISTRIBUTE`）的本地计数 `{seq, counts: {seat: n}}`；
+  // 超时由前端把**当前计数**提交出去（与服务端全 0 兜底同一条语义）。
+  distribution: null,
+  distributionAutoSeq: null,
   suitResult: null,
   suitResultTimer: null,
   // U2-06：询问弹窗（`#t-dialog`）的本地态。`kind` = `stepDialogKind()` 的种类或

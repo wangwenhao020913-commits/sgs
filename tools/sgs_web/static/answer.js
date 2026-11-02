@@ -100,6 +100,48 @@ function maybeAutoSubmitArrange(view) {
   return submitAction();
 }
 
+/** 票 05：计数式分配的最终答案动作——本地计数 → 候选里那条 `Distribute`。
+ *
+ *  空计数（一个点都没分）是最小键那条候选，故"随时可提交"天然成立：`buildAction`
+ *  永不为空 ⇒ 右端「提交」恒可点。找不到同一条候选时返回 `null`（界面不发明动作）。
+ */
+function distributionAction(pending) {
+  const counts = distributionCounts(pending);
+  const pairs = Object.keys(counts || {})
+    .map((key) => [Number(key), Number(counts[key]) || 0])
+    .filter(([, count]) => count > 0)
+    .sort((left, right) => left[0] - right[0]);
+  const wanted = JSON.stringify(pairs);
+  return ((pending && pending.legal_actions) || []).find(
+    (candidate) => candidate.kind === "Distribute"
+      && JSON.stringify(
+        (candidate.counts || []).map(([seat, count]) => [Number(seat), Number(count)]),
+      ) === wanted,
+  ) || null;
+}
+
+/** 票 05：到了**该自动提交当前计数**的时刻吗（与观星 / 涉猎同一个提前量）。 */
+function distributionAutoSubmitDue(view) {
+  const pending = view && view.pending;
+  if (!pending || pending.kind !== "DISTRIBUTE") return false;
+  if (view !== state.view) return false;
+  if (state.playback || (view && view.finished)) return false;
+  if (!isOwnPending(pending, view)) return false;
+  if (state.distributionAutoSeq === pending.seq) return false;
+  if (state.submitBusy || state.preactivation) return false;
+  const remain = arrangeAutoSubmitRemain(view);
+  if (remain === null || remain > ARRANGE_AUTO_SUBMIT_MARGIN_SECONDS) return false;
+  return buildAction() !== null;
+}
+
+/** 票 05：到点就把**当前计数**提交出去（服务端先到点则按全 0 代答）。 */
+function maybeAutoSubmitDistribution(view) {
+  if (!state.sessionId) return false;
+  if (!distributionAutoSubmitDue(view)) return false;
+  state.distributionAutoSeq = view.pending.seq;
+  return submitAction();
+}
+
 /** 票 01：涉猎的选牌面到了**该自动提交当前选择**的时刻吗（与观星同一个提前量）。
  *
  * 用户裁定"提交、超时或放弃完全相同，会获得当前已经排列好的获得牌"：服务端看不到本地
@@ -179,6 +221,8 @@ function renderCountdown(view) {
   if (arranging) return arranging;
   const suiting = maybeAutoSubmitSuit(view);
   if (suiting) return suiting;
+  const distributing = maybeAutoSubmitDistribution(view);
+  if (distributing) return distributing;
   return false;
 }
 
@@ -235,6 +279,8 @@ function buildAction() {
   // 排列（W6-03）：由服务端下发的 `arrange` 规格 + 本地双行布局拼一条 `ArrangeCards`。
   // **键序**必须是 answers_seq 在前（见 :func:`arrangeAction`），否则下面的逐字段自检会拒。
   if (pending.kind === "ARRANGE") return arrangeAction(pending);
+  // 计数式分配（票 05）：按本地计数拼出候选里那条 `Distribute`（不手拼服务器没发的东西）。
+  if (pending.kind === "DISTRIBUTE") return distributionAction(pending);
   const actions = pending.legal_actions;
   // 选择面的候选里**没有**具体 picks（引擎只发一条骨架），要按已点槽位补上。
   const withPicks = (action) => (action.kind === "SelectCards" ? Object.assign({}, action, { picks: state.picks.slice() }) : action);

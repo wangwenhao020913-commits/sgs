@@ -41,6 +41,7 @@ const DIALOG_KINDS = Object.freeze({
   unknown: "unknown",
   reveal: "reveal",
   suit: "suit",
+  distribution: "distribution",
 });
 
 /** 候选里有没有一条 `Pass`（判断"这一步能不能放弃"的**载荷**判据，不认技能 id）。 */
@@ -102,6 +103,8 @@ function dialogDisablesPass(kind, pending = null) {
 function stepDialogKind(pending) {
   if (!pending) return null;
   if (pending.kind === "ARRANGE") return DIALOG_KINDS.arrange;
+  // 票 05：计数式分配（【业炎】）——一张窗里给若干座位点计数，答案是一份"分配向量"。
+  if (pending.kind === "DISTRIBUTE") return DIALOG_KINDS.distribution;
   // 选择型（票 08）：服务端在载荷里给了选项标签（花色是第一个复用枚举），或选项 ≥4
   // （D3 的模板判据）⇒ 画弹窗。前端不按选项值自己判断"这是不是花色"——那会在这里
   // 长出第二份枚举表。
@@ -317,6 +320,7 @@ function dialogTitleFor(kind, pending) {
     return pa ? `预发动【${pa.name}】` : "预发动";
   }
   if (kind === DIALOG_KINDS.arrange) return "排列";
+  if (kind === DIALOG_KINDS.distribution) return "分配";
   if (kind === DIALOG_KINDS.choice) {
     // 带观看授予的选项步（【义起】）标题写技能名：玩家一眼看出"这是谁在问"。
     const watched = isWatchChoiceStep(pending);

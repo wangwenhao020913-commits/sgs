@@ -512,6 +512,11 @@ HEURISTIC_IMPORT_ALLOWLIST: dict[str, frozenset[str]] = {
             "CardRef",
             "DiscardCards",
             "DiscardQuery",
+            # 神周瑜移动版【业炎】的计数式分配（huo-shenzhouyu-mobile 票 05）：候选构造子 +
+            # 询问模型，都是**可见面**（与已允许的 SelectOption / SelectOptionQuery 同源）。
+            "Distribute",
+            "DistributeQuery",
+
             "DodgeQuery",
             "EndPhase",
             "Pass",

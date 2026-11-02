@@ -197,9 +197,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 142
+    assert len(CATALOG) == 144
     assert len(equipment) == 22
-    assert len(heroes) == 120
+    assert len(heroes) == 122
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -222,7 +222,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 120
+    assert len(expected) == 122
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1066,6 +1066,8 @@ SKILL_FILES: dict[str, str] = {
     # huo-mobile-batch 票 02：火包移动版庞统【连环】/【涅槃】
     "hero.pangtong_mobile.lianhuan": "test_hero_huo.py",
     "hero.pangtong_mobile.niepan": "test_hero_huo.py",
+    "hero.shen_zhouyu_mobile.qinyin": "test_hero_huo.py",
+    "hero.shen_zhouyu_mobile.yeyan": "test_hero_huo.py",
     # huo-mobile-batch 票 03：火包移动版袁绍【乱击】/【血裔】
     "hero.yuanshao_mobile.luanji": "test_hero_huo.py",
     "hero.yuanshao_mobile.xueyi": "test_hero_huo.py",
@@ -1431,6 +1433,11 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         "hero.sunshangxiang.xiaoji": (_HookFrame(**{MOVE_EVENT_KEY: move_xiaoji}),),
         # huo-mobile-batch 票 02：庞统移动版【涅槃】——濒死的是我（NEAR_DEATH 帧的 target）。
         "hero.pangtong_mobile.niepan": (_HookFrame(target=ME),),
+        # huo-shenzhouyu-mobile 票 01/03：神周瑜移动版【琴音】——帧的 source 是我（我的
+        # 弃牌阶段）、本阶段弃置了 2 张手牌。
+        "hero.shen_zhouyu_mobile.qinyin": (
+            _HookFrame(source=ME, discard_phase_hand_discards=2),
+        ),
         "equip.silver_lion": (_HookFrame(**{MOVE_EVENT_KEY: move_silver_lion}),),
         # M6 票 08：界【集智】的正面帧与标准版同形（使用者是我 + 非延时类锦囊），但两版
         # **条件已按牌面分开**（标准版排除延时类、界版排除转化牌；M6 评审订正），此处只核
@@ -1884,6 +1891,11 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.huangzhong.liegong": "零步技能",
     # 自制包·韬·刘备自制版【从讨】= 手写钩子（逐目标 + 私密观看 + 二选一，无流水线）
     "hero.tao_liubei.congtao": "多轮技能",
+    # huo-shenzhouyu-mobile 票 01：神周瑜移动版【琴音】= 帧外时机（弃牌阶段结束时）+
+    # 单步选项 + 手写主体（触发技能格）；【业炎】= 限定技 + 零步流水线 + 计数式分配弹窗
+    # （主动技能格）。
+    "hero.shen_zhouyu_mobile.qinyin": "触发技能",
+    "hero.shen_zhouyu_mobile.yeyan": "零步技能",
     # 候选生成器 1（TARGET_POOL + TARGET_COUNT，从不发「是否发动」）
     "equip.halberd": "候选生成器",
     # 候选提供者 4（CANDIDATES + 势力求助窗口 / 引擎回退）；M6 票 14 加界【护驾】
@@ -1917,8 +1929,8 @@ SHAPE_COUNTS: dict[str, int] = {
     # huo-dianwei-mobile 票 01：火包移动版典韦【强袭】⇒ 主动技能 21 → 22。
     # huo-mobile-batch 票 01：庞德【马术】+【猛进】⇒ 锁定技 31 → 32、触发技能 15 → 16。
     "主动技能": 22,
-    "触发技能": 16,
-    "零步技能": 28,
+    "触发技能": 17,
+    "零步技能": 29,
     "排列技能": 3,
     "多轮技能": 14,
     "锁定技": 33,
@@ -2033,7 +2045,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """132 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 142
+    assert len(SKILL_SHAPE) == len(CATALOG) == 144
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2162,7 +2174,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 71
+    assert len(inside) == 73
     assert len(outside) == 71
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

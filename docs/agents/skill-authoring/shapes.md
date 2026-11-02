@@ -63,6 +63,8 @@
 | 阶段体（阶段里改摸牌/弃牌） | 「摸牌阶段，你可以多摸一张牌」 | `hero.zhouyu.yingzi` |
 | 阶段体 + 亮出牌堆顶、按花色取 0~k（一行式） | 「摸牌阶段，你可以改为亮出牌堆顶的五张牌，然后获得其中每种花色的牌各一张」 | `hero.shen_lvmeng_mobile.shelie` |
 | **帧外时机**钩子 + 单步选项（回合开始时 / 回合结束时） | 「回合开始时，你可以选择一至两项…」「回合结束时…执行一个额外的回合」 | `hero.xiahouyuan.shensu`（`TURN_START`）、`hero.jie_lvmeng.botu`（`TURN_END`） |
+| **计数式分配**（新询问形态） | 「对这些角色造成共计至多3点伤害」——一张弹窗里逐座位点计数 | `hero.shen_zhouyu_mobile.yeyan`（huo-shenzhouyu-mobile 票 05；`QueryKind.DISTRIBUTE` + `Action.Distribute`） |
+| 帧外时机 + 单步选项（**弃牌阶段结束时**） | 「弃牌阶段结束时，若你于此阶段内弃置过…你可以选择一项」 | `hero.shen_zhouyu_mobile.qinyin`（huo-shenzhouyu-mobile 票 01/03） |
 | 状态位 + 触发器 | 「横置 / 翻面 / 标记」 | 横置 = `Player.chained` + `Engine.set_chained`；翻面 = `Player.flipped` + `Engine.set_flipped`（首个载体：移动版界曹仁【据守】） |
 
 > **第 1 行的锁定技变体**：牌面写「锁定技」时形状不变、但那一问**不发**（`locked=True`，派发环的
@@ -85,6 +87,7 @@
 | `PHASE_PREPARE` | 准备阶段（洛神、勤学、替身、观星） |
 | `PHASE_DRAW` | 摸牌阶段（英姿、突袭、裸衣、恂恂） |
 | `PHASE_DISCARD_START` | 弃牌阶段开始（克己） |
+| `PHASE_DISCARD_END` | **弃牌阶段结束时**（神周瑜移动版【琴音】= 首个载体，huo-shenzhouyu-mobile 票 03）：与 `PHASE_FINISH` 同一条惰性派发（`_dispatch_phase_body`）；帧私有 `discard_phase_hand_discards` = 本阶段弃牌步实际弃置的手牌数，钩子条件读它 |
 | `PHASE_FINISH` | 结束阶段（闭月、观星二段、诛害、勤学二段） |
 | `TURN_END` | 回合结束（博图） |
 | `DAMAGE_TAKE` | 受到伤害时（**风包【狂骨】的距离定格**：造伤后的效果要按「扣减体力前」的场况判，而濒死 / 死亡结算夹在两者之间——死者的装备技 / 义从类距离修饰器已不再解析，现算会低估 1。它是扣减体力前**最后一个派发点**） |
@@ -141,6 +144,7 @@
 | `SKILL_ACTIVATION` | 钩子的"是否发动" | 键含时机；同帧第二次触发会复用答案（已裁定） |
 | `SELECT_OPTION` | 选项步 / 手写二选一 | 单个选项 + `Pass` 走"提交/放弃"确认形态；**置灰**的选项（`PickOption.disabled` → `StepPool.disabled`）在预发动清单里**照样列出来但不可选**（蛊惑的牌名弹窗：列全牌堆名，此刻用不了的画灰），引擎的逐步校验同样拒收它 |
 | `ARRANGE` | 观星式排列 | 不能下发预发动清单 |
+| `DISTRIBUTE` | **计数式分配**（神周瑜移动版【业炎】= 首个载体，huo-shenzhouyu-mobile 票 05）：一张弹窗里给若干座位各配一个计数（`seats` / `max_total` / `per_seat_max`） | 候选 = 「每座 0..单座上限、合计 ≤ 上限」的全量枚举；答案 = `Action.Distribute(counts)`（座位升序、省略 0）；`counts=()` 键最小 ⇒ 超时兜底 = 不分配 |
 
 ### 3.5 区域 `Zone`
 
@@ -241,6 +245,7 @@ ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ �
 | 选座位（点场上武将） | 牌桌：`SELECT_OPTION` + `option_seats`，点武将 = 选中那条 `seat:N` | `pending.js:renderKind`（`seat` 档）/ `interaction.js` | `hero.zhangliao.tuxi` |
 | 单选项确认（提交 / 放弃） | 牌桌：标题取 `requirement`，**读不到**选项标签 | `pending.js:isSingleOptionalOption` | `hero.sunshangxiang.xiaoji` |
 | 直提态 | 牌桌：唯一候选直接提交，不铺面（提示条只做说明） | `pending.js:directAction` | `hero.jie_zhangliao.tuxi` |
+| 分配弹窗（计数式） | 弹窗：逐座位一行计数（点一次 +1）、「重置」、右端「提交」恒可点 | `modal.js:stepDialogKind`（`distribution`） | `hero.shen_zhouyu_mobile.yeyan`（huo-shenzhouyu-mobile 票 05） |
 | fail-closed | 牌桌：一句明话，不铺任何控件（不发明合法性） | `pending.js:renderUnsupported` | —（并写一句为什么没有面） |
 
 **套不套用要写出来**：第 3 步反查出的相似技能就是模板源。套用 ⇒ 票面写它的 id 与抄哪一行；

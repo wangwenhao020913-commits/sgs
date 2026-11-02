@@ -109,6 +109,9 @@ from sgs.state import (
     ArrangeContext,
     ArrangeQuery,
     CardRef,
+    Distribute,
+    DistributeContext,
+    DistributeQuery,
     CardRevealDelta,
     CardTag,
     ChainedChangeDelta,
@@ -1267,6 +1270,7 @@ class Engine:
         | SkillActivationContext
         | SelectOptionContext
         | ArrangeContext
+        | DistributeContext
         | None = None,
         revealed: tuple[CardRef, ...] = (),
     ) -> Any:
@@ -1315,6 +1319,46 @@ class Engine:
                 seq,
                 payload=ArrangeContext(count=len(cards), split=split),
                 revealed=cards,
+            )
+        )
+        if action is SUSPEND:
+            return SUSPEND
+        answers[answer_key] = action
+        return action
+
+    def ask_distribution(
+        self,
+        frame: Frame,
+        actor: int,
+        timing: Timing,
+        *,
+        skill_id: str,
+        seats: tuple[int, ...],
+        max_total: int = 3,
+        per_seat_max: int = 3,
+    ) -> Any:
+        """发一次 ``DISTRIBUTE`` 询问（huo-shenzhouyu-mobile 票 05）：计数式分配。
+
+        ``seats`` 是可分配的座位（调用方给、座位升序）；候选 = 「每座 0..``per_seat_max``、
+        合计 ≤ ``max_total``」的全量枚举。答案按 ``(skill_id, actor)`` 帧内缓存——同一帧
+        重入不重发（与 :meth:`ask_option` 同一口径）。返回 ``Distribute`` / ``SUSPEND``。
+        """
+        answers = frame.data.setdefault("ask_answers", {})
+        answer_key = ("distribute", skill_id, actor)
+        if answer_key in answers:
+            return answers[answer_key]
+        action = self.ask(
+            lambda seq: self._build_query(
+                QueryKind.DISTRIBUTE,
+                actor,
+                timing,
+                seq,
+                payload=DistributeContext(
+                    skill_id=skill_id,
+                    seats=tuple(seats),
+                    max_total=max_total,
+                    per_seat_max=per_seat_max,
+                ),
             )
         )
         if action is SUSPEND:
@@ -3795,6 +3839,7 @@ class Engine:
         | SkillActivationContext
         | SelectOptionContext
         | ArrangeContext
+        | DistributeContext
         | None = None,
         revealed: tuple[CardRef, ...] = (),
     ) -> Query:
@@ -3981,6 +4026,22 @@ class Engine:
                 view=view,
                 skill_id=payload.skill_id,
                 options=payload.options,
+                revealed=revealed,
+            )
+        if kind is QueryKind.DISTRIBUTE:
+            if not isinstance(payload, DistributeContext):
+                raise ValueError("DISTRIBUTE 询问必须给出 DistributeContext")
+            return DistributeQuery(
+                seq=seq,
+                actor=actor,
+                timing=timing,
+                prompt="请为角色分配点数。",
+                legal_actions=actions,
+                view=view,
+                skill_id=payload.skill_id,
+                seats=payload.seats,
+                max_total=payload.max_total,
+                per_seat_max=payload.per_seat_max,
                 revealed=revealed,
             )
         if kind is QueryKind.ARRANGE:
@@ -4417,8 +4478,19 @@ class Engine:
         self.state.phase = Phase.PREPARE
         return self._dispatch_phase_body(Timing.PHASE_PREPARE, "phase_prepare")
 
-    def _dispatch_phase_body(self, timing: Timing, key: str) -> Control:
+    def _dispatch_phase_body(
+        self,
+        timing: Timing,
+        key: str,
+        *,
+        data: Mapping[str, Any] | None = None,
+    ) -> Control:
         """**帧外阶段体**的钩子派发（票 10）：空实现照记，有提供者才惰性建帧。
+
+        ``data``（huo-shenzhouyu-mobile 票 03）：调用点交给钩子的**帧私有事实**
+        （本票只有 ``PHASE_DISCARD_END`` 的"本阶段弃置的手牌数"）。它并进阶段体帧
+        的 ``data``，从而能被钩子条件读到（``PhaseBodySkill.condition``）；缺省
+        ``None`` ⇒ 既有六个调用点的建帧载荷逐字不变。
 
         阶段体（准备 / 摸牌 / 结束）没有结算帧，而钩子必须能提问并跨重入续跑，故这里给
         它一个**不压栈**的持久帧（住 ``_turn_data``）：它不进记录流、不参与步骤表，
@@ -4438,9 +4510,16 @@ class Engine:
             if not timing_hooks_present(self.state, timing):
                 store[key] = None
                 return None
+            payload: dict[str, Any] = {
+                "source": self.state.turn_seat,
+                "targets": (),
+                "card": None,
+            }
+            if data:
+                payload.update(data)
             store[key] = Frame(
                 kind=FrameKind.RESOLVE,
-                data={"source": self.state.turn_seat, "targets": (), "card": None},
+                data=payload,
                 frame_id=0,
             )
         frame = store[key]
@@ -4729,10 +4808,32 @@ class Engine:
                 owner=seat,
                 actor=seat,
             )
+            # **本阶段实际弃置的手牌数**（huo-shenzhouyu-mobile 票 03）：【琴音】的
+            # 触发条件读它。累计点在这里而不是搬牌原语：弃牌阶段的唯一弃置来源就是
+            # 这一循环，且 ``move_in_frame`` 返回时就已搬完（``"stay"`` 分支也要计，
+            # 挂起重入不能漏）。
+            self._turn_data["discard_phase_hand_discards"] = (
+                int(self._turn_data.get("discard_phase_hand_discards", 0))
+                + len(action.cards)
+            )
         return None
 
-    def _phase_discard_end(self) -> None:
-        self.emit_timing(Timing.PHASE_DISCARD_END, actor=self.state.turn_seat)
+    def _phase_discard_end(self) -> Control:
+        """弃牌阶段结束时（huo-shenzhouyu-mobile 票 03）：**帧外时机 + 钩子派发**。
+
+        与 ``_phase_finish`` 同形：没有注册在该时机上的实例时只落一条时机记录
+        （与 ``emit_timing`` 的旧实现逐字节相同），有则惰性建阶段体帧、把"本阶段
+        弃置的手牌数"交给钩子条件。【琴音】是第一个消费者。
+        """
+        return self._dispatch_phase_body(
+            Timing.PHASE_DISCARD_END,
+            "phase_discard_end",
+            data={
+                "discard_phase_hand_discards": int(
+                    self._turn_data.get("discard_phase_hand_discards", 0)
+                )
+            },
+        )
 
     def _phase_finish(self) -> str | None:
         self.state.phase = Phase.FINISH

@@ -67,13 +67,16 @@ from sgs.state import (
     SlotKind,
     Zone,
     ZoneRef,
+    seats_from,
 )
 from sgs.timing import Timing
 
 from .catalog import (
+    MATCH_OWNER_KEY,
     ActivationPlan,
     HeroSkillDecl,
     Hook,
+    HookCondition,
     SkillDef,
     mark_round_skill_used,
     round_skill_uses,
@@ -109,6 +112,10 @@ __all__ = [
     "LUOYI_DAMAGE_BONUS",
     "LUOYI_FLOW",
     "PHASE_BODY_SKILLS",
+    "QINYIN",
+    "QINYIN_FLOW",
+    "QINYIN_LOSE",
+    "QINYIN_RECOVER",
     "PhaseBodySkill",
     "SHELIE",
     "SHELIE_FLOW",
@@ -155,6 +162,16 @@ class PhaseBodySkill(HeroSkillDecl):
     界周瑜【英姿】是锁定技（§十九 L2152–L2154 牌面写"锁定技"），故它**不问**"是否发动"、
     满足条件即执行（派发环 ``forced = locked or AWAKENING``）。与 ``skill_type`` 正交：
     锁定 / 非锁定管"要不要问"，``skill_type`` 管技能规则类型（普通 / 限定 / 觉醒）。
+    """
+    condition: HookCondition | None = None
+    """钩子的**触发条件**（huo-shenzhouyu-mobile 票 03 的加法；缺省 ``None`` = 无条件）。
+
+    形状与 :data:`~sgs.skills.catalog.HookCondition` 同一份（``(host, frame) -> bool``）：
+    条件为假 ⇒ 这条技能在本次时机里连"是否发动"都不问。它存在的理由是
+    ``available`` 只拿得到 ``(state, owner)``，而【琴音】的触发条件要读**帧私有**事实
+    （本弃牌阶段弃置的手牌数）——阶段体帧由 :meth:`Engine._dispatch_phase_body` 建，
+    只有 ``condition`` 拿得到它。既有十六条声明不传 ⇒ ``Hook`` 的 condition 为
+    ``None``（恒真），行为逐字节不变。
     """
     per_round_limit: bool = False
     """这条技能有没有**每轮限 X 次**（M6 票 11；缺省 ``False`` ⇒ 既有九条声明一字不改）。
@@ -1369,6 +1386,122 @@ _SHENSU = PhaseBodySkill(
 )
 
 
+
+# ---------------------------------------------------------------------------
+# 神周瑜移动版【琴音】（huo-shenzhouyu-mobile 票 01 / 框架票 03）
+#
+# 牌面（用户 2026-11-02 录入，移动版）：
+#
+#     琴音
+#     　弃牌阶段结束时，若你于此阶段内弃置过你至少两张手牌，则你可以选择一项：
+#     　1.令所有角色各回复1点体力；2.令所有角色各失去1点体力。
+#
+# 形状 = **阶段体（帧外时机 PHASE_DISCARD_END）+ 单步选项 + 手写主体**：
+# - 触发条件是**帧私有**事实（本弃牌阶段弃置的手牌数，由 ``_phase_discard`` 计数、
+#   ``_phase_discard_end`` 经 ``_dispatch_phase_body`` 的 ``data`` 并进阶段体帧）⇒
+#   用 :attr:`PhaseBodySkill.condition` 表达；条件不成立 = 连"是否发动"都不问。
+# - 选项步两项恒可执行（满体力时"回复 0 点"也合法）⇒ 闭集恒非空、发动后不给 Pass。
+# - 主体逐座位压帧（回复 / 失去体力各一条），座位序 = **从使用者开始的行动顺序**
+#   （账本「默认读法（二）④」+ §4.16 的"从当前回合角色开始、按逆时针"）。
+# ---------------------------------------------------------------------------
+
+QINYIN = hero_skill_id("shen_zhouyu_mobile", "qinyin")
+"""神周瑜移动版【琴音】的全限定技能 id。"""
+
+QINYIN_RECOVER = "qinyin_recover"
+"""选项 1：令所有角色各回复 1 点体力。"""
+
+QINYIN_LOSE = "qinyin_lose"
+"""选项 2：令所有角色各失去 1 点体力。"""
+
+QINYIN_HAND_DISCARDS_KEY = "discard_phase_hand_discards"
+"""阶段体帧私有：本弃牌阶段**实际弃置的手牌数**（`Engine._phase_discard` 计数）。"""
+
+_QINYIN_DONE = "qinyin_done"
+"""帧私有：本技能已经结算过的座位（重入既不重做也不漏做）。"""
+
+_QINYIN_ORDER = "qinyin_order"
+"""帧私有：本次发动的结算名单（首次进入时定格，见 :func:`_qinyin_effect`）。"""
+
+
+def _qinyin_condition(host: Any, frame: Frame) -> bool:
+    """触发条件：**我的**弃牌阶段内我弃置过**至少两张手牌**。
+
+    "是不是我的阶段"自校一次（``frame.source == 持有者``，与 `tests/test_hero_catalog.py`
+    的"关于我"机械检查同一口径——阶段体的 ``available`` 另挡一层是防御而非替代）；
+    张数读帧私有计数（``_phase_discard`` 累积、``_phase_discard_end`` 并入阶段体帧）。
+    条件为假 ⇒ 派发环连"是否发动"都不问。
+    """
+    del host
+    owner = frame.data.get("source")
+    matched = frame.data.get(MATCH_OWNER_KEY)
+    if matched is not None and owner != matched:
+        return False
+    return int(frame.data.get(QINYIN_HAND_DISCARDS_KEY, 0)) >= 2
+
+
+def _qinyin_effect(host: Any, frame: Frame, answers: FlowAnswers) -> Any:
+    """提交点：按选项逐座位压 `RECOVER` / `LIFE_DECREASE` 子帧（座位序 = 行动顺序）。
+
+    重入：每压一帧就 ``return "stay"``，已结算的座位记进帧私有 ``qinyin_done``
+    （回复的钩子 / 濒死 / 死亡都可能让本效果挂起）。名单在**首次进入时定格**
+    （``qinyin_order`` 没写就按当时的存活座位算）——结算中有人阵亡不改变名单。
+    """
+    owner = frame.data.get("skill_owner")
+    if owner is None:
+        return None
+    choice = str(answers.get("option") or "")
+    order = frame.data.get(_QINYIN_ORDER)
+    if order is None:
+        order = seats_from(host.state, int(owner), len(host.state.players))
+        frame.data[_QINYIN_ORDER] = tuple(order)
+    done = tuple(frame.data.get(_QINYIN_DONE, ()))
+    for seat in order:
+        if seat in done:
+            continue
+        frame.data[_QINYIN_DONE] = (*done, seat)
+        if choice == QINYIN_RECOVER:
+            host.push_frame(
+                FrameKind.RECOVER,
+                {
+                    "source": owner,
+                    "targets": (seat,),
+                    "card": None,
+                    "use_timing": frame.data.get("use_timing"),
+                    "amount": 1,
+                },
+                timing=Timing.RECOVER_VALUE,
+            )
+        else:
+            # 失去体力 ≠ 受到伤害：只压 LIFE_DECREASE 帧（无来源、无属性）。
+            host.push_frame(
+                FrameKind.LIFE_DECREASE,
+                {"target": seat, "source": None, "amount": 1},
+                timing=Timing.LIFE_DECREASE_BEFORE,
+            )
+        return "stay"
+    return None
+
+
+QINYIN_FLOW = SkillFlow(
+    name="qinyin",
+    steps=(PickOption(options=(QINYIN_RECOVER, QINYIN_LOSE), optional=False, key="option"),),
+    effect=_qinyin_effect,
+)
+"""【琴音】的一步流水线：选一项 → 逐座位回复 / 失去 1 点体力。"""
+
+_QINYIN = PhaseBodySkill(
+    hero_id="shen_zhouyu_mobile",
+    short_id="qinyin",
+    timing=Timing.PHASE_DISCARD_END,
+    flow=QINYIN_FLOW,
+    condition=_qinyin_condition,
+    requirement=(
+        "弃牌阶段结束时，若你于此阶段内弃置过至少两张手牌，"
+        "你可以选择一项：令所有角色各回复1点体力，或令所有角色各失去1点体力"
+    ),
+)
+
 PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _YINGZI,
     _JIE_YINGZI,
@@ -1386,6 +1519,7 @@ PHASE_BODY_SKILLS: tuple[PhaseBodySkill, ...] = (
     _XUNXUN,
     _SHELIE,
     _SHENSU,
+    _QINYIN,
 )
 """L 族十三条技能的逐字声明（票 12 §落地表第 17/27 行 + M6 票 01 的【突袭】/【裸衣】、
 票 03 的【克己】、票 05 的【替身】、票 06 的界【克己】、票 07 的界【闭月】、
@@ -1409,6 +1543,10 @@ _REQUIREMENTS: dict[str, str] = {
         "【2】跳过出牌阶段并弃置一张装备牌。你每以此法选择一项，"
         "便视为你使用一张无距离限制的普通【杀】"
     ),
+    "qinyin": (
+        "弃牌阶段结束时，若你于此阶段内弃置过至少两张手牌，"
+        "你可以选择一项：令所有角色各回复1点体力，或令所有角色各失去1点体力"
+    ),
 }
 """L 族八条技能的"需要做什么"文案（item 4）；键 = 短 id，与声明同处。"""
 
@@ -1426,6 +1564,9 @@ _STEP_REQUIREMENTS: dict[str, dict[str, str]] = {
         "未获得的置入弃牌堆）"
     },
     # 风包夏侯渊【神速】（票 01）：选项步 / 手写选目标 / 弃装备三处逐步文案。
+    "qinyin": {
+        "option": "选择一项：令所有角色各回复1点体力 / 令所有角色各失去1点体力",
+    },
     "shensu": {
         "items": "选择一至两项：【1】跳过判定阶段和摸牌阶段；【2】跳过出牌阶段并弃置一张装备牌",
         "target": SHENSU_TARGET_WORDING,
@@ -1475,7 +1616,7 @@ def phase_body_skill_definitions() -> tuple[SkillDef, ...]:
             locked=skill.locked,
             carrier=CarrierKind.HERO,
             skill_type=skill.skill_type,
-            hooks=(Hook(skill.timing, flow=skill.flow),),
+            hooks=(Hook(skill.timing, flow=skill.flow, condition=skill.condition),),
             modifiers=skill.modifiers,
             deck_arrange=skill.deck_arrange,
             requirement=skill.requirement or _REQUIREMENTS[skill.short_id],

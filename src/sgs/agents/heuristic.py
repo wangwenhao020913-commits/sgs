@@ -98,6 +98,8 @@ from sgs.state import (
     ActivateSkill,
     ArrangeCards,
     ArrangeQuery,
+    Distribute,
+    DistributeQuery,
     CardRef,
     DiscardCards,
     DiscardQuery,
@@ -1904,6 +1906,11 @@ _OPTION_VALUES: Mapping[str, float] = MappingProxyType(
         # （已发动的技能不能再放弃：`_is_committed_skill_step` 给 Pass 惩罚）。
         "qiangxi_lose_hp": -3.5,
         "qiangxi_discard_weapon": -2.0,
+        # 神周瑜移动版【琴音】（huo-shenzhouyu-mobile 票 01）：发动之后**必选一项**。
+        # 「各失去 1 点体力」是全场伤害（残局更主动）、「各回复 1 点体力」是全场治疗；
+        # 两项各有得失，差值只体现既有姿态"更愿意进攻"。
+        "qinyin_lose": 1.6,
+        "qinyin_recover": 1.2,
     }
 )
 
@@ -2737,6 +2744,30 @@ def _score_arrange(query: Query, action: Action) -> float:
     )
 
 
+def _score_distribute(query: Query, action: Action) -> float:
+    """``DISTRIBUTE``：计数式分配——点数给敌人值钱、给自己 / 盟友是负收益。
+
+    与座位步同一套 ``(P(敌), P(友))`` 加权（I1）：每点按 :data:`_SEAT_TARGET_VALUE` 折算，
+    指向敌人的点为正、指向自己或盟友的点为负。全 0 的 ``counts=()`` 因此恰好 0 分——
+    "不分配"是一个中性落点，不是被惩罚的非法动作（它在候选里、也是超时兜底）。
+    """
+    assert isinstance(query, DistributeQuery)
+    if not isinstance(action, Distribute):
+        return _ILLEGAL_PENALTY
+    view = query.view
+    total = 0.0
+    for seat, count in action.counts:
+        if not 0 <= seat < len(view.players) or count <= 0:
+            return _ILLEGAL_PENALTY
+        if count > query.per_seat_max:
+            return _ILLEGAL_PENALTY
+        enemy, ally = _identity_relation(view, seat)
+        total += count * _SEAT_TARGET_VALUE * (enemy - ally)
+    if sum(count for _, count in action.counts) > query.max_total:
+        return _ILLEGAL_PENALTY
+    return total
+
+
 _SCORERS: Mapping[QueryKind, Callable[[Query, Action], float]] = MappingProxyType(
     {
         QueryKind.PLAY_PHASE: _score_play_phase,
@@ -2748,9 +2779,10 @@ _SCORERS: Mapping[QueryKind, Callable[[Query, Action], float]] = MappingProxyTyp
         QueryKind.SELECT_CARDS: _score_select_cards,
         QueryKind.SELECT_OPTION: _score_select_option,
         QueryKind.ARRANGE: _score_arrange,
+        QueryKind.DISTRIBUTE: _score_distribute,
     }
 )
-"""选路表：**九类询问各一个 scorer**（键集恰等于 ``QueryKind``，由测试钉住）。"""
+"""选路表：**十类询问各一个 scorer**（键集恰等于 ``QueryKind``，由测试钉住）。"""
 
 
 # ---------------------------------------------------------------------------
@@ -2873,6 +2905,17 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 ),
                 "transform_actions": (True, "被收回的转化候选：确认路径的成员判定（清单从它派生）"),
                 "kind": (True, "选路键：``_SCORERS[QueryKind(query.kind)]`` 与候选生成的派发"),
+            }
+        ),
+        "DistributeQuery": MappingProxyType(
+            {
+                "skill_id": (True, "这一步属于哪条技能（文案归属；打分本身不按技能名分支）"),
+                "seats": (
+                    True,
+                    "可分配的座位（座位升序）：逐个查 `_identity_relation` 决定这点数给谁",
+                ),
+                "max_total": (True, "合计上限：超过即非法（与候选同一份声明）"),
+                "per_seat_max": (True, "单座上限：超过即非法（与候选同一份声明）"),
             }
         ),
         "PlayPhaseQuery": MappingProxyType(
@@ -3444,6 +3487,19 @@ def _score_huangtian(query: Query, action: Action, view: PlayerView) -> float:
 SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]] = {
     # 魏
     "hero.caocao.jianxiong": (_constant(4.0), "受伤后获得造成伤害的牌：净赚一张，恒发动"),
+    # 神周瑜移动版（huo-shenzhouyu-mobile 票 01）：【琴音】是"全体 1 点"的收益（净收益按
+    # 场上多寡变号，但恒有权衡⇒保守给正）；【业炎】是限定技 + 最多 3 点火焰伤害（分多少、
+    # 给谁由分配弹窗的打分逐点决定）。
+    "hero.shen_zhouyu_mobile.qinyin": (
+        _constant(2.0),
+        "弃牌阶段结束时无条件问一次：全体回复 / 全体失去 1 点，收益恒非负（选哪项由 "
+        "_OPTION_VALUES 定），故给正分",
+    ),
+    "hero.shen_zhouyu_mobile.yeyan": (
+        _constant(4.5),
+        "限定技：最多 3 点火焰伤害（整局一次）——伤害是货真价实的收益，按限定技给高分；"
+        "代价（四色弃牌 + 失 3 体力）由分配弹窗的单座上限与逐点打分间接约束",
+    ),
     "hero.caocao.hujia": (
         _constant(_DODGE_SKILL_VALUE),
         "主公技：视为打出一张【闪】，响应窗口里能抵消就抵消",

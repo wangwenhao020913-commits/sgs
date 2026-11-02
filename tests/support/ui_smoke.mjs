@@ -497,7 +497,7 @@ const sessionBodiesSince = (from) =>
 await ui.loadHeroCatalog();
 const catalogVersions = ui.heroVersions();
 check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版 + 火包移动版 + 自制包，按真名分组）",
-  ui.state.heroCatalog.length === 41 && catalogVersions.length === 67,
+  ui.state.heroCatalog.length === 42 && catalogVersions.length === 68,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -19359,6 +19359,105 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && !$("t-self-hand").textContent.includes("undefined"),
     `t-self-hand="${$("t-self-hand").textContent}"`
       + ` 座位2="${foeNoLimit ? foeNoLimit.text().replace(/\s+/g, " ").trim() : "缺"}"`);
+}
+
+/* ============ 票 05：计数式分配（神周瑜移动版【业炎】） ============
+ *
+ * 与真实 `pending_payload` 同形的合成 view：`distribution` 的座位表 + 两个上限 + `Distribute`
+ * 候选。钉四件事：逐座计数默认 0 / 点一行 +1 且合计封顶 / 「重置」清零 / 提交送出的就是
+ * 候选里那一条（不手拼服务端没发的动作）。全 0 也是合法分配 ⇒ 「提交」从第一刻就可点。
+ */
+{
+  const distributeSession = await post("/api/sessions", {
+    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null, seed: 20261102,
+  });
+  const dSeq = 970;
+  const dActions = [
+    [],
+    [[1, 1]],
+    [[2, 1]],
+    [[1, 1], [2, 1]],
+    [[1, 2]],
+    [[1, 2], [2, 1]],
+  ].map((counts) => ({
+    kind: "Distribute",
+    counts: counts.map(([seat, count]) => [seat, count]),
+    answers_seq: dSeq,
+  }));
+  const distributeView = synthView({
+    kind: "DISTRIBUTE", actor: 0, seq: dSeq, prompt: "请为角色分配点数。",
+    legal_actions: dActions,
+    candidate_index: {}, option_seats: {},
+    distribution: {
+      max_total: 3, per_seat_max: 3,
+      seats: [
+        { seat: 0, name: "神周瑜移动版", label: "0号位神周瑜移动版", max: 3 },
+        { seat: 1, name: "关羽", label: "1号位关羽", max: 3 },
+        { seat: 2, name: "张飞", label: "2号位张飞", max: 3 },
+      ],
+    },
+    context: {
+      actor: 0, name: "业炎", targets: [],
+      label: "0号位神周瑜移动版发动业炎",
+      requirement: "为角色分配火焰伤害（合计至多3点）", skill_hints: [],
+    },
+  });
+  ui.state.view = distributeView;
+  ui.state.sessionId = distributeSession.session_id;
+  ui.state.distribution = null;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(distributeView);
+
+  const rows = () => Array.from($("t-options").children).filter(
+    (node) => String(node.className || "").includes("distribution-row"),
+  );
+  check("分配弹窗-1 分配弹窗：每个存活座位一行 + 计数徽标（默认 0）+「重置」",
+    ui.stepDialogKind(distributeView.pending) === "distribution"
+      && $("t-dialog").hidden === false
+      && rows().length === 3
+      && rows().map((row) => row.textContent).join(",") === "0号位神周瑜移动版0,1号位关羽0,2号位张飞0"
+      && Array.from($("t-options").children).some((node) => node.textContent === "重置"),
+    `kind=${ui.stepDialogKind(distributeView.pending)} rows=${JSON.stringify(rows().map((row) => row.textContent))}`);
+  check("分配弹窗-2 分配步没有「放弃」出口；全 0 也能提交（提交键从一开始就可点）",
+    $("btn-cancel").hidden === true
+      && $("btn-pass").hidden === true
+      && $("btn-submit").disabled === false
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(dActions[0]),
+    `cancelHidden=${$("btn-cancel").hidden} submit=${$("btn-submit").disabled}`);
+
+  await clickAndWait(rows()[1]);
+  await clickAndWait(rows()[1]);
+  await clickAndWait(rows()[2]);
+  check("分配弹窗-3 点一行 = 计数 +1；合计到 3 后其余行不可点（封顶）",
+    rows()[1].textContent.endsWith("2")
+      && rows()[2].textContent.endsWith("1")
+      && rows()[0].disabled === true
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(dActions[5]),
+    `rows=${JSON.stringify(rows().map((row) => [row.textContent, row.disabled]))} built=${JSON.stringify(ui.buildAction())}`);
+
+  const resetNode = Array.from($("t-options").children).find((node) => node.textContent === "重置");
+  await clickAndWait(resetNode);
+  check("分配弹窗-4「重置」把全部计数清零（回到全 0 的合法分配）",
+    rows().every((row) => row.textContent.endsWith("0"))
+      && JSON.stringify(ui.buildAction()) === JSON.stringify(dActions[0]),
+    `rows=${JSON.stringify(rows().map((row) => row.textContent))}`);
+
+  await clickAndWait(rows()[1]);
+  const beforeDistribute = calls.length;
+  staleAnswerStatus = 400;
+  await clickAndWait($("btn-submit"));
+  for (let index = 0; index < 400 && ui.state.submitBusy; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  staleAnswerStatus = null;
+  const distributeAnswers = calls
+    .slice(beforeDistribute)
+    .filter((call) => call.path.includes("/answer"));
+  check("分配弹窗-5 点「提交」= 恰一条 POST，送出的就是候选里那条 Distribute（计数升序、省略 0）",
+    distributeAnswers.length === 1
+      && JSON.stringify(distributeAnswers[0].body.action) === JSON.stringify(dActions[1]),
+    `answers=${distributeAnswers.length} action=${JSON.stringify(distributeAnswers[0] && distributeAnswers[0].body.action)}`);
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);

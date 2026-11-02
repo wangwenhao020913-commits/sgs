@@ -1195,12 +1195,45 @@ def life_decrease_trigger_near_death(host: FrameHost, frame: Frame) -> None:
 
 
 def life_decrease_after(host: FrameHost, frame: Frame) -> Control:
-    """**扣减体力后**：照常空实现收尾。
+    """**扣减体力后**：按失去的数值**逐点**派发（huo-shenzhouyu-mobile 票 04）。
+
+    账本 `06`（§5「程序化约定与偏离一手」）的「界【诈降】『失去 1 点体力后』按逐点触发」一行逐字写着
+    "等出现一次失去 ≥2 点的载体时必须改成逐点"——【业炎】的代价「失去 3 点体力」就是
+    那个载体。范式与 :func:`damage_after_take` 逐字同形：
+
+    - 一条 ``LIFE_DECREASE`` 帧仍然只落**一条**时机记录（逐点只是"这条记录内派发多轮"）；
+    - 轮次写进 ``DAMAGE_POINT_KEY``（技能回调与派发答案键都读它），
+      ``DAMAGE_RECORDED_KEY`` 保证重入不重复记录；
+    - ``Hook.per_point`` 为真的钩子每轮都有机会，为假的只在第 0 轮（既有语义不变）；
+    - 某一轮里钩子提问让出控制权（返回 ``"stay"``）⇒ 本轮未标已派发，重入继续本轮。
+
+    **伤害来源的扣减**（``damage_push_life_decrease`` 压的那条）走同一个循环：它没有
+    ``per_point`` 钩子（【诈降】按牌面只认真正的失去体力），每轮派发都是空集合 ⇒
+    行为与记录形态都不变。
 
     无人救的死亡路径上这一步**不会被走到**——濒死帧在"濒死结算结束后"直接压入 DEATH
     子帧并留在栈上，整条伤害链（含本帧）由终局清栈统一丢弃（票 22）；救回时才回到这里。
     """
-    return _emit(host, frame, Timing.LIFE_DECREASE_AFTER, actor=frame.data["target"])
+    amount = int(frame.data.get("amount", 1))
+    if amount <= 0:
+        return _emit(host, frame, Timing.LIFE_DECREASE_AFTER, actor=frame.data["target"])
+    point = int(frame.data.get(DAMAGE_POINT_KEY, 0))
+    while point < amount:
+        frame.data[DAMAGE_POINT_KEY] = point
+        control = _emit(
+            host,
+            frame,
+            Timing.LIFE_DECREASE_AFTER,
+            actor=frame.data["target"],
+            emit_record=not frame.data.get(DAMAGE_RECORDED_KEY),
+        )
+        if control is not None:
+            # 让出控制权（钩子提问）：本轮尚未标成已派发，重入时同一轮继续。
+            return control
+        frame.data[DAMAGE_RECORDED_KEY] = True
+        point += 1
+        frame.data[DAMAGE_POINT_KEY] = point
+    return None
 
 
 LIFE_DECREASE_STEPS = (

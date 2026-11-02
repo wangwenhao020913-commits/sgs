@@ -227,6 +227,12 @@ function renderPending(view) {
   else if (kind === "option-confirm") renderOptionConfirm(pending);
   // 洛神连续判定的亮牌确认（A1）：同一弹窗换牌 + 单选项确认。
   else if (kind === "judge-reveal") renderJudgmentReveal(pending);
+  else if (kind === "distribution") {
+    // 计数式分配（票 05）：强制、无取消——唯一出口是右端「提交」（随时可点）。
+    $("btn-cancel").hidden = true;
+    $("btn-cancel").disabled = true;
+    renderDistribution(pending);
+  }
   else if (kind === "arrange") {
     // 排列（W6-03）：双行拖拽面；强制、无取消——唯一出口是「确认」。
     $("btn-cancel").hidden = true;
@@ -354,6 +360,8 @@ function renderKind(pending, actions) {
   // 规格缺失（409 裸 Query / 无技能定义）时也只走这条路径，由 `renderArrange` 画
   // "排列不可用"（fail-closed），**不**退回候选列表猜一个顺序。
   if (pending.kind === "ARRANGE") return "arrange";
+  // 票 05：计数式分配（【业炎】）——窗内逐座位计数，不铺候选、不点牌桌。
+  if (pending.kind === "DISTRIBUTE") return "distribution";
   // 预发动（W4-1）：清单驱动，不铺候选列表、不走手选。
   if (state.preactivation) return "preactivation";
   // 被动入口（W4-2）：已翻预发动的技能在时机上只发一次询问并随询问下发清单。界面给它

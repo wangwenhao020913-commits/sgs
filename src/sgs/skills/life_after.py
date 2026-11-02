@@ -194,8 +194,10 @@ def life_after_skill_definitions() -> tuple[SkillDef, ...]:
             carrier=CarrierKind.HERO,
             skill_type=SkillType.NORMAL,
             hooks=(
+                # 「失去 **1 点**体力后」⇒ 逐点触发（账本默认读法（三）；载体 = 【业炎】的
+                # 失去 3 点体力，huo-shenzhouyu-mobile 票 04）。一次失去 N 点 ⇒ 问 N 次。
                 Hook(Timing.LIFE_DECREASE_AFTER, handler=_zhaxiang_after_losing_hp,
-                     condition=_zhaxiang_condition),
+                     condition=_zhaxiang_condition, per_point=True),
                 Hook(
                     Timing.USE_AFTER_DESIGNATE_TARGET,
                     handler=_zhaxiang_unresponsive,

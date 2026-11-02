@@ -28,6 +28,8 @@ from sgs.state import (
     ArrangeContext,
     CardRef,
     DiscardCards,
+    Distribute,
+    DistributeContext,
     DodgeContext,
     EndPhase,
     GameState,
@@ -667,7 +669,7 @@ def legal_actions_for(
     *,
     answers_seq: int,
     dying: int | None = None,
-    payload: RespondContext | SelectContext | DodgeContext | SkillActivationContext | SelectOptionContext | None = None,
+    payload: RespondContext | SelectContext | DodgeContext | SkillActivationContext | SelectOptionContext | DistributeContext | None = None,
 ) -> tuple[Action, ...]:
     """给出 ``seat`` 在 ``kind`` 询问下的全部候选，按票 05 的稳定键排序。
 
@@ -706,6 +708,10 @@ def legal_actions_for(
         if not isinstance(payload, ArrangeContext):
             raise ValueError("ARRANGE 询问必须给出 ArrangeContext")
         candidates = _arrange(answers_seq, payload)
+    elif kind is QueryKind.DISTRIBUTE:
+        if not isinstance(payload, DistributeContext):
+            raise ValueError("DISTRIBUTE 询问必须给出 DistributeContext")
+        candidates = _distribute(answers_seq, payload)
     else:
         raise ValueError(f"还没有 {kind.value} 询问的候选生成器")
     if state.player(seat).hand_card_prohibited:
@@ -1190,6 +1196,31 @@ def _arrange(answers_seq: int, ctx: ArrangeContext) -> list[Action]:
     ]
 
 
+def _distribute(answers_seq: int, ctx: DistributeContext) -> list[Action]:
+    """计数式分配：**每座 0..``per_seat_max``、合计 ≤ ``max_total``** 的全量枚举。
+
+    顺序即语义的一部分：``counts`` 省略 0 值，故"一个点都不分配"的 ``counts=()``
+    在 :func:`_sort_key` 下键最小、恒排第一——超时兜底取 ``legal_actions[0]`` 因此
+    是"不分配"（确定性、零副作用）。规模：4 人局 35 条、8 人局 165 条（组合数
+    ``C(n + max_total, max_total)``），只在一次【业炎】里出现。
+    """
+    seats = tuple(ctx.seats)
+    limit = max(0, int(ctx.per_seat_max))
+    budget = max(0, int(ctx.max_total))
+    candidates: list[Action] = []
+
+    def walk(index: int, remaining: int, counts: tuple[tuple[int, int], ...]) -> None:
+        if index == len(seats):
+            candidates.append(Distribute(counts=counts, answers_seq=answers_seq))
+            return
+        seat = seats[index]
+        for count in range(0, min(remaining, limit) + 1):
+            walk(index + 1, remaining - count, counts + ((seat, count),) if count else counts)
+
+    walk(0, budget, ())
+    return candidates
+
+
 def _required_hand(
     state: GameState, seat: int, required: str | None
 ) -> list[CardRef]:
@@ -1298,6 +1329,10 @@ def _sort_key(action: Action) -> tuple[Any, ...]:
         return (0, action.picks, action.kind, action.choices)
     if isinstance(action, DiscardCards):
         return (0, tuple(card.card_id for card in action.cards), action.kind)
+    if isinstance(action, Distribute):
+        # 计数式分配（票 05）：键 = 计数元组本身 ⇒ 全 0 的 ``()`` 最小、恒排首位
+        # （超时兜底 = 不分配）。同一询问里只有这一族，故族内定序即全局定序。
+        return (0, action.counts, action.kind)
     if isinstance(action, ArrangeCards):
         # 排列候选只与排列候选同处一个询问，故键只需在族内定序（票 10）：显式写出
         # ``order`` / ``split``，不靠 `permutations` 的生成顺序当隐式约定。

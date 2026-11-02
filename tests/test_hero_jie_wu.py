@@ -1167,3 +1167,39 @@ def test_jie_jiuyuan_is_silent_for_non_wu_or_low_hp_recoveries():
     assert _run_jiuyuan(non_wu)[1] == []
     assert _run_jiuyuan(low_hp)[1] == []
     assert _run_jiuyuan(no_lord)[1] == [], "非主公的界孙权没有【救援】实例"
+
+
+def test_zhaxiang_triggers_three_times_on_a_three_point_life_loss():
+    """「失去 **1 点**体力后」⇒ 逐点：一次失去 3 点 ⇒ 摸三张 **×3**（票 04）。
+
+    载体是【业炎】的代价「失去 3 点体力」，但机制住在引擎里（``LIFE_DECREASE_AFTER`` 按
+    ``amount`` 逐点派发），故这里直接压一条 ``amount=3`` 的扣减帧：既钉住"一次扣减仍只
+    落**一条**时机记录"，又钉住"三个点各触发一次【诈降】"。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_huanggai"), SeatSpec()],
+        deck=deck_excluding(PACK),
+    )
+    engine = Engine.from_state(state, seed=7)
+    before = len(engine.state.player(0).hand)
+
+    engine.push_frame(
+        FrameKind.LIFE_DECREASE,
+        {"target": 0, "source": None, "amount": 3},
+        timing=Timing.LIFE_DECREASE_BEFORE,
+    )
+    for _ in range(400):
+        if not engine.stack:
+            break
+        engine._step()
+
+    assert not engine.stack, "扣减帧结算完毕"
+    assert engine.state.player(0).hp == 1, "失去 3 点体力（4 → 1）"
+    assert len(engine.state.player(0).hand) == before + 9, "三个点各摸三张"
+    records = [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.LIFE_DECREASE_AFTER
+    ]
+    assert len(records) == 1, "一条扣减帧仍然只落一条时机记录（逐点点数只多派发轮次）"

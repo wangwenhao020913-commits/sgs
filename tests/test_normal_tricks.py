@@ -212,9 +212,10 @@ def _resolve_frame_id(engine: Engine) -> int:
 # ---------------------------------------------------------------------------
 
 
-def test_the_nine_query_kinds_and_the_window_causes_are_defined():
-    """票 30 把 ``QueryKind`` 从 6 类扩到 8 类（+ 发动 / 选项），票 10 再加 ``ARRANGE``（排列）；
-    M1 四类与票 27 两类不动（闭集只许增，与 ``WindowCause`` 同一姿态）。"""
+def test_the_ten_query_kinds_and_the_window_causes_are_defined():
+    """票 30 把 ``QueryKind`` 从 6 类扩到 8 类（+ 发动 / 选项），票 10 再加 ``ARRANGE``（排列），
+    huo-shenzhouyu-mobile 票 05 再加 ``DISTRIBUTE``（计数式分配）；M1 四类与票 27 两类不动
+    （闭集只许增，与 ``WindowCause`` 同一姿态）。"""
     assert {kind.value for kind in QueryKind} == {
         "PLAY_PHASE",
         "DODGE",
@@ -225,6 +226,7 @@ def test_the_nine_query_kinds_and_the_window_causes_are_defined():
         "SKILL_ACTIVATION",
         "SELECT_OPTION",
         "ARRANGE",
+        "DISTRIBUTE",
     }
     assert {cause.value for cause in WindowCause} == {
         "NULLIFY",

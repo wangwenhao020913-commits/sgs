@@ -276,7 +276,12 @@ def play(
 _FIRE_TAPES = (
     # (seed, 目标是不是自己, 是否期望出现同花色弃牌询问)
     (4, True, True),
-    (93, False, False),
+    # huo-shenzhouyu-mobile 票 01（神周瑜移动版进默认池，67 → 68 版本）又改了配将的抽样面：
+    # seed 93 的人类开局拿不到可用的火攻局面（整局没打出【火攻】）⇒ 这条 tape 失效。
+    # 仍按**同一份固定脚本、同一组判据**（对 AI 用火攻 / 目标亮牌 / 没被无懈 / 人类无同花色 /
+    # 零伤害 / 零非法应答）重扫 1–259，命中 37 / 70 / 105，取首个未在用的 **seed 37**
+    # （探针 `.scratch/huo-shenzhouyu-mobile/scan_fire_seed.py`，判据逐字未改）。
+    (37, False, False),
 )
 
 

@@ -52,6 +52,7 @@ from sgs.state import (
     FrameKind,
     MoveReason,
     Query,
+    QueryKind,
     Reforge,
     WindowCause,
     Zone,
@@ -1059,6 +1060,33 @@ def _nullified_frame(engine: Any, data: dict[str, Any]) -> dict[str, Any]:
             return data
         data = parent.data
     return data
+
+
+def _distribution_payload(engine: Any, query: Query | None) -> dict[str, Any] | None:
+    """``DISTRIBUTE`` 询问的**展示事实**：每个可分配座位的人话标签 + 两个上限。
+
+    字段：``seats`` = ``[{"seat", "name", "label", "max"}]``（座位升序，与候选枚举同序）、
+    ``max_total`` / ``per_seat_max``。上限本身也在询问模型里（同一份真源），这里重复下发
+    只为让界面读一处；非 ``DISTRIBUTE`` 的询问返回 ``None``（键恒在，读取方契约）。
+    """
+    if query is None or getattr(query, "kind", None) != QueryKind.DISTRIBUTE.value:
+        return None
+    state = engine.state
+    per_seat = int(getattr(query, "per_seat_max", 3))
+    seats = tuple(getattr(query, "seats", ()) or ())
+    return {
+        "max_total": int(getattr(query, "max_total", 3)),
+        "per_seat_max": per_seat,
+        "seats": [
+            {
+                "seat": int(seat),
+                "name": _seat_name(state, int(seat)),
+                "label": _seat_label(state, int(seat)),
+                "max": per_seat,
+            }
+            for seat in seats
+        ],
+    }
 
 
 def option_seats(query: Query) -> dict[str, int]:
@@ -2267,6 +2295,15 @@ def pending_payload(
     # W6-07：牌面**不在这里重发**——前端读同一份载荷的 ``revealed``（评审 J9）。
     payload["arrange"] = (
         _arrange_spec(session.engine, query, payload.get("revealed") or [])
+        if isinstance(session, Session)
+        else None
+    )
+    # 计数式分配（huo-shenzhouyu-mobile 票 05；首个载体 = 神周瑜【业炎】）：
+    # 询问模型已带 ``seats`` / ``max_total`` / ``per_seat_max``（公开事实），这里只补
+    # **展示事实**（座位的人话标签）。与 ``option_seats`` 同姿态：派生、不进记录流；
+    # 取不到引擎（409 里的裸 ``Query``）⇒ ``None``，界面 fail-closed 画"分配不可用"。
+    payload["distribution"] = (
+        _distribution_payload(session.engine, query)
         if isinstance(session, Session)
         else None
     )

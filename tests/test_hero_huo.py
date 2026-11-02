@@ -1637,3 +1637,438 @@ def test_xueyi_current_definition_is_a_locked_lord_skill() -> None:
         "HAND_LIMIT_REPLACE"
     ]
     assert definition.hooks == () and definition.seams == ()
+
+
+# ---------------------------------------------------------------------------
+# ⑨ 神周瑜移动版【琴音】（huo-shenzhouyu-mobile 票 01 / 框架票 03）
+#
+# 牌面：弃牌阶段结束时，若你于此阶段内弃置过你至少两张手牌，则你可以选择一项：
+#       1.令所有角色各回复1点体力；2.令所有角色各失去1点体力。
+# ---------------------------------------------------------------------------
+
+SHENZHOUYU = "shen_zhouyu_mobile"
+QINYIN = "hero.shen_zhouyu_mobile.qinyin"
+QINYIN_RECOVER = "qinyin_recover"
+QINYIN_LOSE = "qinyin_lose"
+
+
+def _qinyin_state(
+    *,
+    owner_seat: int = 0,
+    hand: tuple[int, ...] = (2, 3, 4, 5),
+    hps: tuple[int, ...] = (4, 4, 4, 4),
+    turn_seat: int | None = None,
+):
+    """4 人身份局：主公坐 ``owner_seat``（先手），神周瑜就是主公。
+
+    开局手牌 ``hand`` ⇒ 摸牌阶段再摸 2 张 ⇒ 弃牌阶段弃到体力上限为止，故
+    ``len(hand) + 2 - hp`` 就是本阶段弃置的手牌数。
+    """
+    seats = []
+    for seat in range(4):
+        identity = Identity.LORD if seat == owner_seat else Identity.REBEL
+        if seat == owner_seat:
+            seats.append(
+                SeatSpec(hero=SHENZHOUYU, hp=hps[seat], hand=tuple(hand), identity=identity)
+            )
+        else:
+            seats.append(SeatSpec(hp=hps[seat], identity=identity))
+    used = set(hand)
+    deck = tuple(index for index in range(len(PACK.deck.cards)) if index not in used)
+    return build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck,
+        turn_seat=owner_seat if turn_seat is None else turn_seat,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+
+
+def _pass_of(query):
+    return next(action for action in query.legal_actions if isinstance(action, Pass))
+
+
+def _qinyin_run(engine, *, choice: str | None, limit: int = 4000) -> dict:
+    """跑到【琴音】询问（``choice=None`` = 不发动），答完之后跑完这一回合。"""
+    found: dict = {"activation": None, "option": None}
+    first_turn = engine.state.turn_seat
+    for _ in range(limit):
+        query = engine.pending
+        if query is not None:
+            if (
+                query.kind == QueryKind.SKILL_ACTIVATION
+                and getattr(query, "skill_id", None) == QINYIN
+            ):
+                found["activation"] = found["activation"] or query
+                if choice is None:
+                    engine.submit(_pass_of(query))
+                else:
+                    engine.submit(
+                        next(
+                            action
+                            for action in query.legal_actions
+                            if getattr(action, "skill_id", None) == QINYIN
+                        )
+                    )
+                continue
+            if query.kind == QueryKind.SELECT_OPTION and str(
+                getattr(query, "skill_id", "")
+            ).startswith("qinyin"):
+                found["option"] = found["option"] or query
+                engine.submit(
+                    next(
+                        action
+                        for action in query.legal_actions
+                        if getattr(action, "choice", None) == choice
+                    )
+                )
+                continue
+            engine.submit(_default_action(query))
+            continue
+        if engine.finished:
+            break
+        if engine.state.turn_seat != first_turn:
+            break
+        engine._step()
+    return found
+
+
+def _qinyin_asks(engine) -> list:
+    """记录流里问给神周瑜【琴音】的发动询问。"""
+    return [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == QueryKind.SKILL_ACTIVATION.value
+        and getattr(record.query, "skill_id", None) == QINYIN
+    ]
+
+
+def test_qinyin_is_not_offered_below_two_discarded_hand_cards() -> None:
+    """只弃 1 张（3 张起手 + 摸 2 = 5，上限 4）⇒ 条件不成立、连"是否发动"都不问。"""
+    engine = Engine.from_state(_qinyin_state(hand=(2, 3, 4)), seed=3)
+
+    _qinyin_run(engine, choice=None)
+
+    assert _qinyin_asks(engine) == []
+
+
+def test_qinyin_requires_two_hand_cards_discarded_in_the_discard_phase() -> None:
+    """弃 2 张 ⇒ 弃牌阶段结束时问一次；回答"发动"之后给两项选项。"""
+    engine = Engine.from_state(_qinyin_state(hand=(2, 3, 4, 5)), seed=3)
+
+    found = _qinyin_run(engine, choice=QINYIN_LOSE)
+
+    assert found["activation"] is not None, "弃 2 张手牌后应当触发"
+    assert len(_qinyin_asks(engine)) == 1, "一个弃牌阶段只问一次"
+    assert found["option"] is not None
+
+
+def test_qinyin_has_exactly_two_options_and_no_pass_after_activation() -> None:
+    """发动之后的两项是**必选其一**：闭集恰两项、没有 Pass（「可以」只在发动那一问）。"""
+    engine = Engine.from_state(_qinyin_state(hand=(2, 3, 4, 5)), seed=3)
+
+    found = _qinyin_run(engine, choice=QINYIN_LOSE)
+    option = found["option"]
+
+    assert option is not None
+    choices = [
+        action.choice
+        for action in option.legal_actions
+        if isinstance(action, SelectOption)
+    ]
+    assert choices == [QINYIN_RECOVER, QINYIN_LOSE]
+    assert not any(isinstance(action, Pass) for action in option.legal_actions)
+
+
+def test_qinyin_recover_gives_every_alive_seat_one_hp() -> None:
+    """选项 1：所有存活角色（含自己）各回复 1 点，夹体力上限。"""
+    engine = Engine.from_state(_qinyin_state(hand=(2, 3, 4, 5), hps=(2, 3, 2, 4)), seed=3)
+
+    _qinyin_run(engine, choice=QINYIN_RECOVER)
+
+    assert [player.hp for player in engine.state.players] == [3, 4, 3, 4]
+
+
+def test_qinyin_lose_hp_takes_one_from_every_alive_seat_in_action_order() -> None:
+    """选项 2：各失去 1 点体力；座位序 = **从使用者开始的行动顺序**（不是座位号升序）。"""
+    engine = Engine.from_state(_qinyin_state(owner_seat=2, hand=(2, 3, 4, 5)), seed=3)
+
+    _qinyin_run(engine, choice=QINYIN_LOSE)
+
+    assert [player.hp for player in engine.state.players] == [3, 3, 3, 3]
+    order = [
+        record.actor
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.LIFE_DECREASE_BEFORE
+    ]
+    assert order == [2, 3, 0, 1], "从座位 2（使用者）起按行动顺序逐个失去体力"
+
+
+def test_qinyin_lose_hp_can_kill_and_continues_with_the_remaining_seats() -> None:
+    """失去体力可以打死人：死者不再参与，其余座位照常结算。"""
+    engine = Engine.from_state(_qinyin_state(hand=(2, 3, 4, 5), hps=(4, 1, 4, 4)), seed=3)
+
+    _qinyin_run(engine, choice=QINYIN_LOSE)
+
+    assert engine.state.player(1).alive is False, "1 体力的人被【琴音】打死"
+    assert [engine.state.player(seat).hp for seat in (0, 2, 3)] == [3, 3, 3]
+
+
+def test_qinyin_does_not_trigger_in_another_players_discard_phase() -> None:
+    """默认读法（二）④：只认**自己**的弃牌阶段（别人的弃牌阶段里实例不产出候选）。"""
+    # 座位 1 是主公（先手），神周瑜坐在座位 0 ⇒ 本回合不是他的弃牌阶段。
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero=SHENZHOUYU, identity=Identity.REBEL),
+            SeatSpec(identity=Identity.LORD, hand=(2, 3, 4, 5)),
+            SeatSpec(identity=Identity.REBEL),
+            SeatSpec(identity=Identity.REBEL),
+        ],
+        deck=tuple(index for index in range(len(PACK.deck.cards)) if index not in {2, 3, 4, 5}),
+        turn_seat=1,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+    engine = Engine.from_state(state, seed=3)
+
+    _qinyin_run(engine, choice=QINYIN_LOSE)
+
+    assert _qinyin_asks(engine) == []
+
+
+# ---------------------------------------------------------------------------
+# ⑩ 神周瑜移动版【业炎】（huo-shenzhouyu-mobile 票 01 / 框架票 05）
+#
+# 牌面：限定技，出牌阶段，你可以选择至多三名角色，对这些角色造成共计至多3点火焰伤害
+#       （若你将对一名角色分配大于等于2点火焰伤害，你须先弃置四张花色各不相同的手牌并失去3点体力）。
+# 交互（用户 2026-11-02 指定）：分配弹窗 → 任一计数 ≥2 时四色选牌 → 分支 1 / 分支 2。
+# ---------------------------------------------------------------------------
+
+YEYAN = "hero.shen_zhouyu_mobile.yeyan"
+
+
+def _four_suits(pack) -> tuple[int, ...]:
+    """四张花色各不相同的手牌（♠♥♣♦ 各第一张）。"""
+    first: dict[str, int] = {}
+    for index, card in enumerate(pack.deck.cards):
+        if card.suit and card.suit not in first:
+            first[card.suit] = index
+    return tuple(first[suit] for suit in ("spade", "heart", "club", "diamond"))
+
+
+def _yeyan_state(*, hand=None, hps=(4, 4, 4, 4), chained=(), others_hand=(), lord_seat=0):
+    four = _four_suits(PACK) if hand is None else tuple(hand)
+    seats = [
+        SeatSpec(
+            hero=SHENZHOUYU,
+            hp=hps[0],
+            hand=four,
+            identity=Identity.LORD if lord_seat == 0 else Identity.REBEL,
+        ),
+    ]
+    for seat in range(1, 4):
+        seats.append(
+            SeatSpec(
+                hp=hps[seat],
+                identity=Identity.LORD if lord_seat == seat else Identity.REBEL,
+                hand=others_hand if seat == 1 else (),
+                chained=seat in chained,
+            )
+        )
+    used = set(four) | set(others_hand)
+    deck = tuple(index for index in range(len(PACK.deck.cards)) if index not in used)
+    return build_state(
+        pack=PACK,
+        seats=seats,
+        deck=deck,
+        turn_seat=0,
+        phase=Phase.PLAY,
+        rule_config=RuleConfig(player_count=4),
+    )
+
+
+def _yeyan_run(engine, *, counts: dict[int, int], limit: int = 4000) -> dict:
+    """发动【业炎】→ 提交分配 → （需要代价时）选四张手牌 → 跑回出牌阶段。"""
+    found: dict = {"distribution": None, "cost": None}
+    activated = False
+    for _ in range(limit):
+        query = engine.pending
+        if query is None:
+            if engine.finished:
+                break
+            engine._step()
+            continue
+        if query.kind == QueryKind.PLAY_PHASE and query.actor == 0:
+            if activated:
+                break
+            action = next(
+                (item for item in query.legal_actions if getattr(item, "skill_id", None) == YEYAN),
+                None,
+            )
+            if action is None:
+                break
+            activated = True
+            engine.submit(action)
+            continue
+        if query.kind == QueryKind.DISTRIBUTE:
+            found["distribution"] = query
+            engine.submit(
+                next(
+                    item
+                    for item in query.legal_actions
+                    if item.kind == "Distribute" and dict(item.counts) == counts
+                )
+            )
+            continue
+        if query.kind == QueryKind.SELECT_CARDS and getattr(query, "skill_id", None) == YEYAN:
+            found["cost"] = query
+            engine.submit(
+                next(
+                    item
+                    for item in query.legal_actions
+                    if item.kind == "SelectCards" and len(item.picks) == 4
+                )
+            )
+            continue
+        engine.submit(_default_action(query))
+    return found
+
+
+def test_yeyan_distribution_lists_all_alive_seats_with_zero_counters() -> None:
+    """分配弹窗：全部存活座位（含自己）、合计上限 3、单座上限 3；全 0 是一条合法候选。"""
+    engine = Engine.from_state(_yeyan_state(), seed=5)
+
+    found = _yeyan_run(engine, counts={})
+
+    query = found["distribution"]
+    assert query is not None
+    assert query.seats == (0, 1, 2, 3)
+    assert query.max_total == 3
+    assert query.per_seat_max == 3
+    assert any(item.kind == "Distribute" and item.counts == () for item in query.legal_actions)
+
+
+def test_yeyan_branch_two_deals_damage_without_cost() -> None:
+    """全部计数 ≤1 ⇒ 分支 2：不弃牌、不失去体力，只按分配造成火焰伤害。"""
+    engine = Engine.from_state(_yeyan_state(), seed=5)
+
+    found = _yeyan_run(engine, counts={1: 1, 2: 1})
+
+    assert found["cost"] is None, "没有计数 ≥2 ⇒ 不进第二步选牌"
+    assert [player.hp for player in engine.state.players] == [4, 3, 3, 4]
+    assert len(engine.state.discard) == 0, "没有代价、也没有弃牌"
+
+
+def test_yeyan_branch_one_discards_then_loses_hp_then_deals_damage() -> None:
+    """计数 ≥2 ⇒ 分支 1：弃四色手牌 → 失去 3 点体力 → 伤害；三段按顺序。"""
+    engine = Engine.from_state(_yeyan_state(), seed=5)
+
+    found = _yeyan_run(engine, counts={1: 2, 2: 1})
+
+    assert found["cost"] is not None, "有计数 ≥2 ⇒ 必须弃四色手牌"
+    assert engine.state.player(0).hp == 1, "失去 3 点体力"
+    assert [player.hp for player in engine.state.players] == [1, 2, 3, 4]
+    assert len(engine.state.discard) >= 4, "四张代价进了弃牌堆"
+    # 顺序：失去体力（座位 0）在第一个伤害之前。
+    timing = [
+        (record.timing, record.actor)
+        for record in engine.records
+        if record.kind == "timing"
+        and record.timing in (Timing.LIFE_DECREASE_ON, Timing.DAMAGE_TAKE)
+    ]
+    assert (Timing.LIFE_DECREASE_ON, 0) in timing
+    assert timing.index((Timing.LIFE_DECREASE_ON, 0)) < timing.index((Timing.DAMAGE_TAKE, 1))
+
+
+def test_yeyan_damage_resolves_in_action_order_not_click_order() -> None:
+    """伤害按**从你开始的行动顺序**结算（分配时先给座位 2 也会先结算座位 1）。"""
+    engine = Engine.from_state(_yeyan_state(), seed=5)
+
+    _yeyan_run(engine, counts={2: 2, 1: 1})
+
+    order = [
+        record.actor
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.DAMAGE_TAKE
+    ]
+    assert order[:2] == [1, 2], "座位 1 先于座位 2（行动顺序），与分配时点选顺序无关"
+
+
+def test_yeyan_zero_allocation_consumes_the_skill_without_damage() -> None:
+    """全 0 提交 = 一次发动：不造成伤害、不付代价，但限定技照常消耗。"""
+    engine = Engine.from_state(_yeyan_state(), seed=5)
+
+    _yeyan_run(engine, counts={})
+
+    assert [player.hp for player in engine.state.players] == [4, 4, 4, 4]
+    assert engine.state.discard == () or all(
+        engine.state.card(card_id).type != "slash" for card_id in engine.state.discard
+    )
+    # 已用：同一次出牌阶段的后续候选里不再出现【业炎】。
+    assert engine.pending is not None and engine.pending.kind == QueryKind.PLAY_PHASE
+    assert not any(
+        getattr(action, "skill_id", None) == YEYAN
+        for action in engine.pending.legal_actions
+    )
+
+
+def test_yeyan_unpayable_cost_caps_each_count_at_one() -> None:
+    """手里凑不出四花色 ⇒ 单座计数上限压到 1（不给出"要付却付不起"的路）。"""
+    one_suit = tuple(
+        index
+        for index, card in enumerate(PACK.deck.cards)
+        if card.suit == "spade"
+    )[:6]
+    engine = Engine.from_state(_yeyan_state(hand=one_suit), seed=5)
+
+    found = _yeyan_run(engine, counts={1: 1, 2: 1})
+
+    query = found["distribution"]
+    assert query is not None
+    assert query.per_seat_max == 1
+    assert not any(
+        any(count >= 2 for _, count in item.counts) for item in query.legal_actions
+    ), "没有计数 ≥2 的候选"
+
+
+def test_yeyan_damage_still_resolves_after_the_owner_dies() -> None:
+    """你因代价阵亡 ⇒ 伤害**照常结算**、来源改为无来源（用户 2026-11-02 裁定）。"""
+    engine = Engine.from_state(_yeyan_state(hps=(1, 4, 4, 4), lord_seat=1), seed=5)
+
+    _yeyan_run(engine, counts={1: 2, 2: 1})
+
+    assert engine.state.player(0).alive is False, "1 体力失去 3 点 ⇒ 阵亡"
+    assert [engine.state.player(seat).hp for seat in (1, 2)] == [2, 3], "伤害仍然发生"
+    damages = [
+        record
+        for record in engine.records
+        if record.kind == "timing" and record.timing is Timing.DAMAGE_TAKE
+    ]
+    assert damages, "伤害时机照常派发"
+
+
+def test_yeyan_is_a_limited_skill_and_disappears_after_use() -> None:
+    """限定技：整局一次；用完之后出牌阶段的候选里不再有它。"""
+    engine = Engine.from_state(_yeyan_state(), seed=5)
+
+    _yeyan_run(engine, counts={1: 1})
+
+    assert engine.pending is not None and engine.pending.kind == QueryKind.PLAY_PHASE
+    assert not any(
+        getattr(action, "skill_id", None) == YEYAN
+        for action in engine.pending.legal_actions
+    )
+
+
+def test_yeyan_fire_damage_propagates_through_iron_chain() -> None:
+    """火焰伤害照常参与铁索传导：座位 1、2 都横置，打座位 2 ⇒ 传导 1 点给座位 1。"""
+    engine = Engine.from_state(_yeyan_state(chained=(1, 2)), seed=5)
+
+    _yeyan_run(engine, counts={2: 1})
+
+    assert [engine.state.player(seat).hp for seat in (1, 2)] == [3, 3], "传导 1 点火焰伤害"
+    assert engine.state.player(1).chained is False, "受到属性伤害后重置横置"
+    assert engine.state.player(2).chained is False, "受到属性伤害后重置横置"

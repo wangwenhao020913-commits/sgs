@@ -189,7 +189,7 @@ def test_an_unknown_hero_id_is_rejected():
 
 
 def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
-    """票 12：默认将池 = **启用版本的全集**（标准 25 + 界版 29 + 移动版 1 + 风包 1 + 风包移动版 1 = **57**）。
+    """票 12：默认将池 = **启用版本的全集**（标准 25 + 界版 29 + 移动版 1 + 风包 1 + 风包移动版 1 + 火包移动版 5 + 自制包 1 = **68**）。
 
     这是 spec D19「默认将池全开 ⇒ 默认对局是混合局」在数据层的落点：``enabled_hero_ids``
     缺省（不给表）时读 :func:`load_hero_tables` 的并集，而不是只读内容包那一张表。
@@ -218,7 +218,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     )
 
     assert enabled_hero_ids() == expected
-    assert len(expected) == 67
+    assert len(expected) == 68
     assert "jie_caoren_mobile" in expected, "移动版与 OL 系列**版本并存**、同进默认池"
     assert "jie_guanyu" in expected and "guanyu" in expected
     assert "huangzhong" in expected, "风包武将也进默认池（票 03）"
@@ -264,7 +264,7 @@ def test_every_enabled_hero_is_dealable_from_the_default_pool():
     **版本**、也不得抽到同一**真名**的另一版（票 12 的两段抽样）。
     """
     ids = enabled_hero_ids()
-    assert len(ids) == 67
+    assert len(ids) == 68
 
     for hero_id in ids:
         heroes = _heroes_of(
