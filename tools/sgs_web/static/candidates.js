@@ -190,11 +190,28 @@ function sourceConversionHint(pending) {
   return `将以【${cardName(product)}】使用。`;
 }
 
+/** 牌名级清单**要玩家一步步选什么**的名词短语（只读清单形状：不认牌名、不认技能）。
+ *
+ * 载体是 `pending.card_preactivations[card.type]`（票 05）：清单由服务端下发，"这一步选
+ * 什么"由该步自己的形状回答——`card` = 来源牌、`seat` = 座位（持有者 / 目标）、
+ * `option` = 选项文本。两处**通用**入口（「使用【X】」按钮的 title 与重铸提示条）共用
+ * 这一句：同一张牌可能只有来源步、也可能来源 + 目标两步，文案跟着清单走，不写死任何
+ * 一张牌的形状（`options.js:renderCardPreativationEntry` / 本文件的 :func:`reforgeHint`）。
+ */
+function preactivationPickWording(manifest) {
+  const kinds = new Set((manifest || []).map((step) => preactivationStepKind(step)));
+  const picks = [];
+  if (kinds.has("card")) picks.push("来源牌");
+  if (kinds.has("seat")) picks.push("座位（玩家 / 目标）");
+  if (kinds.has("option")) picks.push("选项");
+  return picks.length ? picks.join("与") : "每一步";
+}
+
 /** 焦点手牌没有目标可点时的提示：它可能还有**重铸**这条独立动作（M5-08b / 票 05）。
  *
  * 重铸不算使用、没有目标：这类牌（【连环】授予重铸的♣牌）点牌后「提交」恒灰，出口是
- * 控件区那条 ``Reforge``。同一张牌**还**有牌名级预发动（【借刀杀人】的两步清单）时，
- * 使用方向走并列的「使用【X】」入口——两句话都说清，玩家才知道该点哪个。
+ * 控件区那条 ``Reforge``。同一张牌**还**有牌名级预发动（服务端下发的清单）时，使用方向
+ * 走并列的「使用【X】」入口——两句话都说清，玩家才知道该点哪个。
  */
 function reforgeHint(pending) {
   const action = reforgeAction(pending, state.focusCardId);
@@ -202,7 +219,7 @@ function reforgeHint(pending) {
   const name = cardName(action.card);
   const manifest = cardPreactivationManifest(pending, selfHandCard(state.focusCardId));
   if (manifest) {
-    return `点「使用【${name}】」按清单指定持刀者与目标；`
+    return `点「使用【${name}】」按清单逐步选${preactivationPickWording(manifest)}；`
       + `点「重铸【${name}】」弃置并摸一张（不算使用）。`;
   }
   return `这张牌此刻只可重铸：点「重铸【${name}】」弃置并摸一张（不算使用）。`;

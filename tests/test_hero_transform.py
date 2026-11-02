@@ -26,6 +26,8 @@ from sgs.effects import (
     DamageNature,
     ModifierContext,
     ModifierPoint,
+    TargetCount,
+    TargetRule,
     apply_modifiers,
     legal_actions_for,
     locate,
@@ -2481,6 +2483,35 @@ def test_a_synthetic_multi_target_manifest_keeps_the_fixed_window_shape_when_tar
     assert tuple(target.pool[0].options) == ("seat:2", "seat:1", "seat:3"), (
         "候选恒含 Bn ⇒ 逐来源组的目标并集首项就是 Bn（借刀指定的目标）"
     )
+
+
+def test_a_synthetic_multi_target_manifest_keeps_the_seat_step_for_a_non_unique_fixed_window():
+    """窗口承载目标时，**目标集不唯一**照样下发目标步——即使产物全是"目标由牌决定"的牌。
+
+    ``fixed_target=True`` 的判据是"窗口里的候选目标集是否唯一"，它**优先于**票 07 的
+    "目标由牌本身决定"（``ALL_ALIVE`` / ``self_only`` / 无目标）。两套判据叠在同一个技能上
+    （产物全是全体存活牌）、而池里带两份不同目标集（合成反例：一份已过期）时，票 07 的
+    省步分支会把目标步吞掉，确认端只能报「这次转化缺少目标」；票 07 之前的行为——池不
+    自明就让人选——才是对的。
+    """
+    from sgs.skills.heroes import _manifest_steps
+
+    source = _cards("slash")[0]
+    steps = _manifest_steps(
+        {(source,): [(1, 2, 3), (1, 2)]},
+        {source: Zone.HAND},
+        {TargetRule(count=TargetCount.ALL_ALIVE)},
+        fixed_target=True,
+    )
+
+    assert steps is not None
+    assert [step.name for step in steps] == ["card", "seat"], (
+        "窗口目标集不唯一 ⇒ 目标步必须在（票 07 之前的形状），"
+        f"实得 {[step.name for step in steps]}"
+    )
+    seat = steps[1]
+    assert (seat.min, seat.max) == (1, 3)
+    assert tuple(seat.pool[0].options) == ("seat:1", "seat:2", "seat:3")
 
 
 def test_a_synthetic_multi_target_confirmation_resolves_by_the_full_target_set():

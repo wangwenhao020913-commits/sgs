@@ -998,16 +998,18 @@ def _manifest_steps(
       由确认的成员判定拒绝（清单只表达"最多可选几个"，不是第二份合法性）；每行还带出
       该来源组的**逐来源上限** ``StepPool.max``——``options`` 只说"哪些目标能点"，不说
       "最多点几个"，界面要收住逐来源上限只能读这一格（W7-03 的 D4）；行相同才并成一行；
-    - **目标由牌本身决定时不下发目标步**（huo-mobile-batch 票 07）：``target_rules`` 是
-      本技能这次询问全部候选产物的 ``TargetRule``——**每一个**都判为"目标不由玩家选"
-      （:func:`_targets_are_decided_by_the_card`）⇒ 清单只有来源步。只要有一个产物
-      方向要玩家选目标（界【龙胆】的【闪】当【杀】与【桃】当【酒】可在同一问并存），
-      目标步照旧下发——一条步骤表达不了"按方向分叉"的清单；
     - ``fixed_target=True``（目标由窗口承载：求桃的濒死者 / 【万箭】·【南蛮】的响应 /
       借刀的被迫使用）**只在目标完全唯一时**省掉目标步——所有候选都是同一个单目标
       （或无目标）⇒ 没有可选的第二步。出现第二个目标、或任一组合的目标数 > 1（W7 的
       方天式多目标）⇒ 仍下发目标步（座位步因此可多选；借刀窗口的候选恒含 Bn，
-      ``(Bn,)`` 是候选排序的自然首条，故目标步首项 = Bn）。
+      ``(Bn,)`` 是候选排序的自然首条，故目标步首项 = Bn）。这条判据**优先于**下一条：
+      窗口里出现两份不同目标集时池已不自明，即使行为表判得出"目标由牌决定"也照旧下发
+      目标步——否则确认只能报「这次转化缺少目标」；
+    - **目标由牌本身决定时不下发目标步**（huo-mobile-batch 票 07）：``target_rules`` 是
+      本技能这次询问全部候选产物的 ``TargetRule``——**每一个**都判为"目标不由玩家选"
+      （:func:`_targets_are_decided_by_the_card`）⇒ 清单只有来源步。只要有一个产物
+      方向要玩家选目标（界【龙胆】的【闪】当【杀】与【桃】当【酒】可在同一问并存），
+      目标步照旧下发——一条步骤表达不了"按方向分叉"的清单。
     """
     sizes = {len(sources) for sources in per_source}
     if len(sizes) != 1:
@@ -1030,9 +1032,13 @@ def _manifest_steps(
     combos = [targets for rows in per_source.values() for targets in rows]
     if not combos or all(not targets for targets in combos):
         return tuple(steps)
-    if all(_targets_are_decided_by_the_card(rule) for rule in target_rules):
-        return tuple(steps)
-    if fixed_target and _targets_are_truly_unique(combos):
+    # 窗口承载目标的判据**优先**（票 07 之后的次序修正）：``fixed_target`` 语境只认窗口里
+    # 的目标集是否唯一。不唯一时池已不自明，**不**走"目标由牌决定"的省步分支——否则确认
+    # 只能报「这次转化缺少目标」，而目标步本来可以让玩家选（票 07 之前的形状）。
+    if fixed_target:
+        if _targets_are_truly_unique(combos):
+            return tuple(steps)
+    elif all(_targets_are_decided_by_the_card(rule) for rule in target_rules):
         return tuple(steps)
     rows = [
         (

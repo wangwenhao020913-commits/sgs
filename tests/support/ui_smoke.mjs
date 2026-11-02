@@ -13400,8 +13400,10 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
  *   - 点过它之后**其余手牌**的可用性与点之前逐张一致（不再一片 dis、点什么都不对）。
  */
 {
+  // AI 档位用**默认的启发式**：票 05 §2 的复现局面没有选 AI（= 默认档），而 `random` 档
+  // 下牌次序不同、种子 4 摸到的第 6 张是 ♦8杀（68）而不是票面点名的 ♠5绝影（37）。
   const openPangtongSession = async (seed) => openSession(await post("/api/sessions", {
-    player_count: 4, ai: "random", human_seat: 0, timeout_seconds: null,
+    player_count: 4, ai: "heuristic", human_seat: 0, timeout_seconds: null,
     seed, my_hero: "pangtong_mobile", deck_profile: "standard_108",
   }));
   /** 推进到**我的**出牌阶段：一律先选 `Pass` / `EndPhase`（"什么都不做"，与实机开局同一路）。 */
@@ -13494,6 +13496,30 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       ? `seed=${scenario.seed} 并存牌=${scenario.both.card_id}(${scenario.both.name}) `
         + `另一张可重铸=${scenario.second.card_id} 手牌=${hand().map((card) => card.card_id).join(",")}`
       : "8 个种子内没找到（庞统移动版 / 4 人 / 座位 0）");
+
+  // 票 05 §2/§5 点名的是**种子 4**，并给了摸牌后的六张手牌（♣借刀杀人 106 / ♥桃 16 /
+  // ♥爪黄飞电 26 / ♣诸葛连弩 82 / ♠杀 47 / ♠绝影 37）。上面的种子扫描在 4 号不再命中时
+  // 会**悄悄**换到后面的种子，本段的语义就漂了——这里把「就是种子 4 + 这一手」显式锚住。
+  const TICKET05_SEED = 4;
+  const TICKET05_HAND = [
+    [106, "♣借刀杀人"], [16, "♥桃"], [26, "♥爪黄飞电"],
+    [82, "♣诸葛连弩"], [47, "♠杀"], [37, "♠绝影"],
+  ];
+  const settledHand = hand().map((card) => Number(card.card_id));
+  const settledIds = settledHand.slice().sort((a, b) => a - b);
+  const namedIds = TICKET05_HAND.map(([cardId]) => cardId).sort((a, b) => a - b);
+  const missingNamed = TICKET05_HAND.filter(([cardId]) => !settledIds.includes(cardId));
+  const extraNamed = settledIds.filter((cardId) => !namedIds.includes(cardId));
+  check("票 05-0a 局面锚定在票 §5 的种子 4（摸牌后六张手牌逐张点名）",
+    scenario !== null
+      && scenario.seed === TICKET05_SEED
+      && settledIds.length === namedIds.length
+      && missingNamed.length === 0,
+    `seed=${scenario && scenario.seed} 应为 ${TICKET05_SEED}；手牌=${settledHand.join(",")}`
+      + (missingNamed.length
+        ? `；缺票面点名的牌：${missingNamed.map(([cardId, name]) => `${cardId}(${name})`).join("、")}`
+        : "")
+      + (extraNamed.length ? `；多出票面没有的牌：${extraNamed.join(",")}` : ""));
 
   if (scenario) {
     const both = scenario.both;

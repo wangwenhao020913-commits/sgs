@@ -74,8 +74,10 @@
 :func:`_score_seat_option` 最高、转化源取旧 :func:`_score_select_cards` 会挑的那张；
 提交后由引擎的**同一个校验器**（``sgs.skills.validate_activation``）放行。
 **转化技也走同一条路**（W4-fix-2）：候选已从 ``legal_actions`` 收回，AI 读
-``transform_preactivations`` 填 ``ActivateSkill(来源, 目标)``，由引擎按同一份内部候选池
-解析成普通使用 / 打出（`sgs.skills.resolve_conversion_confirmation`）。
+``transform_preactivations`` 填 ``ActivateSkill(来源, 目标)``——目标只填 ``choices``，且
+**只在清单带目标步时**填；没有目标步（目标由牌本身决定，huo-mobile-batch 票 07）时只
+交来源，目标集由引擎取自**候选池**，再由同一份内部候选池解析成普通使用 / 打出
+（`sgs.skills.resolve_conversion_confirmation`）。
 
 **技能语义表** :data:`SKILL_VALUES`：键 = 技能 id（含 ``hero.`` / ``equip.`` 前缀），值 =
 ``(打分函数, 默认策略说明)``；打分函数签名统一 ``(query, action, view) -> float``
@@ -2863,7 +2865,12 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 "legal_actions": (True, "候选枚举的唯一来源（骨架候选，转化 / 预发动另有清单）"),
                 "view": (True, "全部读点的入口：本座位视角"),
                 "revealed": (True, "``ARRANGE`` 按授予的牌面把最有用的那张排在顶"),
-                "transform_preactivations": (True, "转化技清单（候选已收回）：填 ``ActivateSkill(来源, 目标)``"),
+                "transform_preactivations": (
+                    True,
+                    "转化技清单（候选已收回）：填 ``ActivateSkill(来源, 目标)``——目标只在清单"
+                    "带目标步时填 ``choices``；没有目标步（目标由牌本身决定，huo-mobile-batch"
+                    " 票 07）就只交来源，目标集由引擎取自候选池",
+                ),
                 "transform_actions": (True, "被收回的转化候选：确认路径的成员判定（清单从它派生）"),
                 "kind": (True, "选路键：``_SCORERS[QueryKind(query.kind)]`` 与候选生成的派发"),
             }

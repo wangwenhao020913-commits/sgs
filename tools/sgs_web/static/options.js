@@ -481,7 +481,7 @@ function renderReforgeEntry(pending) {
   renderCardPreativationEntry(pending, action.card);
 }
 
-/** 焦点手牌若**另有**牌名级预发动（借刀的两步清单），并列一个「使用【X】」入口（票 05）。
+/** 焦点手牌若**另有**牌名级预发动（服务端下发的清单），并列一个「使用【X】」入口（票 05）。
  *
  * 点牌已改由重铸入口接管（见 `card-face.js:activateCard`），使用方向不能再没有入口——
  * 裸【借刀杀人】在 `legal_actions` 里**没有** ``UseCard`` 候选（`tests/test_web.py` 钉），
@@ -498,7 +498,7 @@ function renderCardPreativationEntry(pending, card) {
   button.className = "opt";
   button.setAttribute("data-preactivation-card", String(card.card_id));
   button.textContent = `使用【${cardName(shown)}】`;
-  button.title = "按两步清单使用这张牌（指定持刀者与【杀】的目标）；重铸不走清单。";
+  button.title = `按清单逐步选${preactivationPickWording(manifest)}；重铸不走清单。`;
   button.addEventListener("click", () => enterCardPreativation(pending, shown, manifest));
   $("t-options").appendChild(button);
 }
