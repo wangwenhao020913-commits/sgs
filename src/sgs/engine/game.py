@@ -3290,6 +3290,38 @@ class Engine:
             timing=Timing.MAXLIFE_INCREASE_BEFORE,
         )
 
+    def note_drawn_true_name(self, name: str) -> bool:
+        """把一张**被抽走**的武将牌真名记进状态（票 05；票 02 §4.5 E1 / E3）。
+
+        "抽走"的写入唯一入口（本票没有调用者；票 07 的 ``draw_hero_cards`` 抽到即调它）：
+        真名进 :attr:`GameState.drawn_true_names`（**抽走序**、去重），于是同一钩子 ``"stay"``
+        后的复跑不会再抽到它。返回值 = 状态真的变了吗（已记过 ⇒ ``False``，幂等）。
+
+        **只落状态**：不发 delta、不进记录流（见该字段的文档）；"在场"那一半不在这里写，
+        由 :func:`sgs.skills.blocked_true_names` 从座位派生。没有初始化点（E5）。
+        """
+        names = self.state.drawn_true_names
+        if name in names:
+            return False
+        self.state.drawn_true_names = (*names, name)
+        return True
+
+    def release_drawn_true_name(self, name: str) -> bool:
+        """把一个真名**放回**武将牌堆（票 05；票 02 §4.5 E3 的"解除"入口）。
+
+        用途是左慈重置一类"被抽走的武将牌回到堆里"的效果（本票暂无载体，构造测试钉形状）。
+        与 :meth:`note_drawn_true_name` 同姿态：**只落状态**，不发任何东西（无 delta / 记录）。
+
+        **幂等**：名字不在 :attr:`GameState.drawn_true_names` 里 ⇒ 返回 ``False`` 且状态一个
+        字节都不动。它**不**碰"在场"那一半：座位的真名由
+        :func:`sgs.skills.blocked_true_names` 从存活 / 死亡结算窗口派生，释放入口只管抽走的那一半。
+        """
+        names = self.state.drawn_true_names
+        if name not in names:
+            return False
+        self.state.drawn_true_names = tuple(one for one in names if one != name)
+        return True
+
     def note_damage_dealt(self, seat: int) -> bool:
         """记"``seat`` 本回合**造成过伤害**"的座位级事实（M6 票 06 的【诛害】判据）。
 

@@ -24,6 +24,7 @@ from sgs.engine import (
     dump_journal,
     read_journal,
 )
+from sgs.skills import blocked_true_names
 from sgs.state import ActivateSkill, QueryKind, UseCard, WindowCause, Zone
 
 from support import play_standard
@@ -287,6 +288,26 @@ def test_replaying_the_tape_reproduces_the_journal_byte_for_byte(tmp_path):
     player = TapePlayer(tape)
     replayed.run([player, player])
 
+    assert dump_journal(replayed.records) == engine.journal()
+
+
+def test_replaying_a_no_hero_tape_keeps_the_drawn_true_names_empty(tmp_path):
+    """票 05（E5）：无武将模式的一局里 ``drawn_true_names`` 一直是**空元组**。
+
+    "没有任何初始化点"的判据：同一盘磁带重跑一遍，新字段仍空、派生集合仍空，而记录流
+    逐字节不变。有武将的座位同样不写这个字段（在场那一半是派生的，见
+    ``tests/test_hero_dealing.py::test_the_blocked_true_names_are_the_drawn_half_plus_the_seated_half``）。
+    """
+    engine = play_standard(seed=7)
+    path = _write(tmp_path / "game.jsonl", engine.journal())
+    seed, tape = tape_from_journal(read_journal(path))
+
+    replayed = Engine.new_game(seed=seed, rule_config=RuleConfig(), pack=PACK)
+    player = TapePlayer(tape)
+    replayed.run([player, player])
+
+    assert replayed.state.drawn_true_names == ()
+    assert blocked_true_names(replayed.state) == frozenset()
     assert dump_journal(replayed.records) == engine.journal()
 
 

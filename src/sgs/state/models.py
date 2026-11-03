@@ -704,6 +704,21 @@ class GameState(BaseModel):
     :meth:`~sgs.engine.Engine.add_card_tag`，清除走声明触发的唯一入口
     :meth:`~sgs.engine.Engine.clear_card_tags` 与 ``skills.prune_card_tags``。
     """
+    drawn_true_names: tuple[str, ...] = ()
+    """**已被抽走**的武将牌真名（票 05；票 02 §4.5 E1）：从武将牌堆抽走、本局不再可抽的那部分。
+
+    只存"抽走"这**一半**；"在场"那一半由 :func:`sgs.skills.blocked_true_names` 从座位
+    派生——座位上的真名不需要存（阵亡在死亡结算收尾后自动解除），而被抽走的必须存
+    （否则重入会重抽、左慈也没法解除）。
+
+    顺序 = **抽走序**（插入序、去重），故同种子逐字节复现。**不进记录流、不发 delta**：
+    没有 JSON 读者，回放按同一份决策序列重跑引擎即可重建。写入 / 释放的唯一入口是
+    :meth:`~sgs.engine.Engine.note_drawn_true_name` /
+    :meth:`~sgs.engine.Engine.release_drawn_true_name`。
+
+    **没有任何初始化点**（E5）：无武将模式 ⇒ 恒空元组 ⇒ M2 基准逐字节不变；有武将的
+    座位同样不写它（在场是派生出来的，见上）。
+    """
 
     def tags_of(self, card_id: int) -> tuple[CardTag, ...]:
         """一张牌上的全部标签（没有 = 空元组，按加入序）。"""

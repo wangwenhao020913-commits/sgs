@@ -39,10 +39,17 @@ from sgs.data import (
     load_heroes,
 )
 from sgs.engine import INITIAL_HP, Engine, RandomSource, build_initial
-from sgs.skills import resolve_instances
+from sgs.skills import blocked_true_names, resolve_instances
 from sgs.state import project
 
-from support import SeatSpec, build_state
+from support import (
+    RecordingPlayer,
+    SeatSpec,
+    build_state,
+    declare_death,
+    deck_excluding,
+    run_turns,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 PACK = load_content_pack(deck_profile="standard_108")
@@ -790,6 +797,124 @@ def test_the_gender_field_is_filled_from_the_hero_data():
         Gender.FEMALE,
         Gender.MALE,
     ]
+
+
+# ---------------------------------------------------------------------------
+# 武将牌真名屏蔽集合（票 05；票 02 §4.5 E1–E5）
+# ---------------------------------------------------------------------------
+
+
+def _two_seat_state(*heroes: str):
+    """两人无身份局；``heroes`` 按座位序给（缺省 = 两座都不发武将）。"""
+    lineup = heroes if heroes else (None, None)
+    return build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=hero) for hero in lineup],
+        deck=deck_excluding(PACK),
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+
+
+def test_the_drawn_true_names_are_stored_in_draw_order_and_released_only_on_request():
+    """E1 / E3：**抽走**那一半存进状态——抽走序、去重、引擎活动不自动清空。"""
+    state = _two_seat_state()
+    engine = Engine.from_state(state, seed=7)
+
+    assert state.drawn_true_names == (), "GameState 的默认值 = 空元组（没有初始化点）"
+    assert engine.note_drawn_true_name("刘备") is True
+    assert engine.note_drawn_true_name("曹操") is True
+    assert state.drawn_true_names == ("刘备", "曹操"), "顺序 = 抽走序（插入序、确定性）"
+    assert engine.note_drawn_true_name("刘备") is False
+    assert state.drawn_true_names == ("刘备", "曹操"), "同一真名不重复占位"
+    assert "刘备" in blocked_true_names(state), "抽到的真名立刻进屏蔽集合"
+
+    # 引擎真的跑一个回合也不清它：这个集合没有复位点（不是"本回合"作用域）。
+    run_turns(engine, [RecordingPlayer(), RecordingPlayer()], turns=1)
+    assert state.drawn_true_names == ("刘备", "曹操")
+    assert "刘备" in blocked_true_names(state), "释放之前一直含"
+
+    assert engine.release_drawn_true_name("刘备") is True
+    assert state.drawn_true_names == ("曹操",)
+    assert "刘备" not in blocked_true_names(state), "释放后立刻可抽"
+    # 释放过的真名可以再次被抽到（重入 / 左慈重置那类流程的前提）。
+    assert engine.note_drawn_true_name("刘备") is True
+    assert state.drawn_true_names == ("曹操", "刘备")
+
+
+def test_releasing_a_name_that_is_not_drawn_is_a_no_op_that_emits_nothing():
+    """E3 的幂等面：不存在的名字返回 ``False``，状态与记录流一个字节都不动。"""
+    state = _two_seat_state()
+    engine = Engine.from_state(state, seed=7)
+    before = engine.records
+
+    assert engine.release_drawn_true_name("刘备") is False
+    assert engine.release_drawn_true_name("刘备") is False, "重复释放仍是空操作"
+
+    assert state.drawn_true_names == ()
+    assert engine.records == before, "两个写入口都不进记录流、不发 delta"
+
+    engine.note_drawn_true_name("刘备")
+    engine.release_drawn_true_name("刘备")
+    assert engine.records == before, "记录流在写入 / 释放前后逐条相同"
+
+
+def test_the_blocked_true_names_are_the_drawn_half_plus_the_seated_half():
+    """E2 / E5：在场那一半**派生**——发到座位的武将不进 ``drawn_true_names``。"""
+    state = _build(seed=7, player_count=4, hero_pool=POOL)
+
+    assert state.drawn_true_names == (), "在场武将不写进存储字段（没有初始化点）"
+    assert blocked_true_names(state) == {
+        hero_by_id(player.hero).true_name for player in state.players
+    }
+
+    Engine.from_state(state, seed=7).note_drawn_true_name("刘备")
+    assert "刘备" in blocked_true_names(state), "抽走的一半与派生的一半并集"
+    assert blocked_true_names(state) == {
+        hero_by_id(player.hero).true_name for player in state.players
+    } | {"刘备"}
+
+
+def test_a_game_without_heroes_blocks_nobody():
+    """E5：无武将模式 ⇒ 空集合（M2 基准因此逐字节不变）。"""
+    state = _two_seat_state()
+
+    assert state.drawn_true_names == ()
+    assert blocked_true_names(state) == frozenset()
+
+
+def test_the_blocked_true_name_of_a_seat_is_the_data_true_name_not_the_hero_id():
+    """E2 与 §4.5「不新增实现」：真名经数据层取——同一真名的各版本共用一个屏蔽位。"""
+    state = _two_seat_state("jie_guanyu", "diaochan")
+
+    blocked = blocked_true_names(state)
+
+    assert blocked == {"关羽", "貂蝉"}
+    assert "jie_guanyu" not in blocked
+
+
+def test_a_dead_hero_stays_blocked_until_the_death_settlement_closes_the_window():
+    """E2 / 用户第四轮第 3 条：阵亡在**死亡结算收尾**才解除，不在死亡入口就解除。"""
+    state = _two_seat_state("guanyu", "diaochan")
+    engine = Engine.from_state(state, seed=7)
+    dying = state.player(1)
+    assert "貂蝉" in blocked_true_names(state)
+
+    declare_death(engine, 1)
+    assert dying.alive is False
+    # 走进死亡结算的「阵亡时」窗口（步数上限只为防死循环：窗口没开 = 用例前提失效）。
+    for _ in range(32):
+        if dying.death_time_skills_active:
+            break
+        engine._step()
+    else:
+        pytest.fail("死亡结算没有打开技能窗口，本用例的前提不成立")
+    assert "貂蝉" in blocked_true_names(state), "死亡入口与结算窗口内仍占着武将牌"
+
+    while not engine.finished:
+        engine._step()
+    assert dying.death_time_skills_active is False
+    assert "貂蝉" not in blocked_true_names(state), "死亡结算收尾后才解除"
 
 
 # ---------------------------------------------------------------------------
