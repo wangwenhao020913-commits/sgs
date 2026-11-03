@@ -607,6 +607,11 @@ def test_xiaoji_fires_on_replacement_even_though_the_equipment_is_not_discarded(
 
     座位 0 的装备区已有一匹进攻马，自己再使用同槽的另一匹进攻马 ⇒ 旧装备**先失去**、
     新装备再置入。旧装备那条移动的 ``reason`` 是 ``LOSE``（不是弃置），判定仍只看区域。
+
+    **新装备入槽排在旧装备的"失去后"之后**（票 06）：旧装备那条移动内联派发了【枭姬】，
+    钩子提问让出 ⇒ 新装备的 ``PUT`` 要等【枭姬】结算完才跑（记录流里那张摸牌因此夹在
+    两条 ``card_move`` 中间）。故这里不再在"旧装备刚进弃牌堆"这一微步上断言新装备已入槽，
+    而是驱动到新装备入槽后再一起读三条终局事实。
     """
     old_horse, new_horse = _cards("chitu")[0], _cards("dawan")[0]
     state = build_state(
@@ -628,12 +633,13 @@ def test_xiaoji_fires_on_replacement_even_though_the_equipment_is_not_discarded(
 
     assert ("equip", "discard", "LOSE") in _moves_of(engine, old_horse), "顶替 = 旧装备失去"
     assert old_horse in engine.state.discard, "旧装备进了弃牌堆"
-    assert new_horse in engine.state.player(0).equip, "新装备置入"
+    assert new_horse in engine.state.processing, "此刻新装备还在处理区（PUT 让给【枭姬】）"
     _advance(
         engine,
         [Scripted(), Scripted()],
-        lambda e: len(_drawn_to(_after(e, old_horse), 0)) == 2,
+        lambda e: new_horse in e.state.player(0).equip,
     )
+    assert new_horse in engine.state.player(0).equip, "新装备置入"
     assert len(_drawn_to(_after(engine, old_horse), 0)) == 2, "枭姬摸 2 张"
 
 

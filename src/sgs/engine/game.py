@@ -220,6 +220,16 @@ op）两条都成立——那条 ``card_move`` 已记过、牌已在目标区；
 换了技能身份，要么牌还在来源区，故不会被误吞。
 """
 
+_EQUIP_REPLACED = "equip_replaced"
+"""帧私有槽名：本帧**已经决定过顶替**的那张新装备牌的 ``card_id``（票 06）。
+
+「使用装备牌」的顶替路径先搬走同槽旧牌、再 ``PUT`` 新牌。旧牌那次移动会内联派发
+``MOVE_AFTER``（白银狮子压 ``RECOVER`` 帧）并让出，续跑时**重入同一个 op**——那时槽位里
+可能已经站着新牌（旧牌搬完后若新牌的 ``PUT`` 先跑完），再扫一遍"同槽已有牌"就会把玩家
+刚装上的那张当旧装备搬走。故"顶替已经决定"必须落**帧私有**（§3 的帧私有键纪律），且写在
+搬牌**之前**（§3.1）：值 = 新牌 id，使同一帧里真出现第二次顶替时仍是新实例。
+"""
+
 _MOVE_EVENTS = "move_events"
 """帧私有槽名：本帧已经派发过的 ``MOVE_AFTER`` 次数（票 07 的派发幂等时钟）。
 
@@ -1748,7 +1758,7 @@ class Engine:
             owner=frame.data["source"],
         )
 
-    def move_used_card_to_equip_zone(self, frame: Frame) -> None:
+    def move_used_card_to_equip_zone(self, frame: Frame) -> Control:
         """处理区 → 装备区（``reason = PUT``）；同槽已有牌则先被"顶替"出去。
 
         替换 = **顶替**（票 12 §Q3）：新牌 ``PUT`` 入槽、旧牌 ``LOSE`` 入弃牌堆
@@ -1756,21 +1766,36 @@ class Engine:
         撞已占槽位由 :func:`~sgs.effects.move_card` 的编程错误兜底直接抛，只有"使用装备牌"
         这条路径能替换，故两条移动的次序必须是**先旧后新**——先 ``PUT`` 新牌会立刻撞上
         那条兜底（"先新后旧"是票 12 §Q3 自己撤销掉的提案）。
+
+        **返回 ``"stay"`` = 旧装备那次移动让出了**（票 06）：它的 ``MOVE_AFTER`` 钩子压了
+        子帧（顶替白银狮子 ⇒ ``RECOVER``）。调用方必须原样透传，子帧才会先于新装备入槽
+        结算——否则同一趟里接着 ``PUT`` 新牌，记录流里的次序就变成"新装备入场 → 回复"。
+
+        **顶替的决定落帧私有游标，且写在搬牌之前**（``CODING_STANDARDS.md`` §3.1）：续跑会
+        重入本方法，没有游标就会重扫一遍"同槽已有牌"——若那时新牌已经入了槽，扫到的就是
+        **玩家刚装上的那张**，于是把这次顶替又做一遍（旧牌进弃牌堆两次、新牌跟着离场）。
         """
         card = frame.data["card"]
         seat = frame.data["source"]
         if card.is_virtual:  # 虚拟装备不是牌（票 07 §6）：装备区只放实体牌
-            return
-        for card_id in list(self.state.player(seat).equip):
-            if self.state.card(card_id).slot is card.slot:
-                self.move_in_frame(
-                    frame,
-                    (self.state.card(card_id),),
-                    to_zone=ZoneRef(Zone.DISCARD),
-                    reason=MoveReason.LOSE,
-                    owner=seat,
-                )
-        self.move_in_frame(
+            return None
+        if frame.data.get(_EQUIP_REPLACED) != card.card_id:
+            # 游标在**压帧之前**落位（§3.1）：这次顶替的扫描只做一次，续跑只补搬还没搬完的步。
+            frame.data[_EQUIP_REPLACED] = card.card_id
+            for card_id in list(self.state.player(seat).equip):
+                if self.state.card(card_id).slot is card.slot:
+                    if (
+                        self.move_in_frame(
+                            frame,
+                            (self.state.card(card_id),),
+                            to_zone=ZoneRef(Zone.DISCARD),
+                            reason=MoveReason.LOSE,
+                            owner=seat,
+                        )
+                        == "stay"
+                    ):
+                        return "stay"
+        return self.move_in_frame(
             frame,
             (card,),
             to_zone=ZoneRef(Zone.EQUIP, seat),

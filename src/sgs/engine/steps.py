@@ -120,7 +120,7 @@ class FrameHost(StepHost, Protocol):
 
     def move_used_card_to_judge_zone(self, frame: Frame) -> None: ...
 
-    def move_used_card_to_equip_zone(self, frame: Frame) -> None: ...
+    def move_used_card_to_equip_zone(self, frame: Frame) -> Control: ...
 
     def move_processing_card_to_discard(self, frame: Frame) -> None: ...
 
@@ -415,6 +415,13 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
     发 ``RESOLVE_AFTER_END``——那一步归判定阶段循环（票 10 §3.6）；装备牌**留装备区**
     （``final_zone = EQUIP``，票 12 §2）：同槽已有牌则先被"顶替"出去（``LOSE``，不算弃置）。
     票 27 在这里补跑本牌的 ``timing_ops``（【五谷丰登】把亮牌中剩余的牌置入弃牌堆）。
+
+    **顶替的返回值必须透传**（票 06，``CODING_STANDARDS.md`` §3.1）：搬旧装备会内联派发
+    "失去装备后"（白银狮子压 ``RECOVER`` 帧）并让出。吞掉这个 ``"stay"`` 就会在同一趟里
+    接着把新装备 ``PUT`` 入槽——记录流次序变成"新装备入场 → 回复"，而 `hp` 数值与帧数都
+    不变，旧回归看不见。重入时 ``after_end_done`` 仍是假（它在这段**之后**才落位），故本步
+    原地重跑；"顶替已决定"由引擎侧帧私有游标 ``_EQUIP_REPLACED`` 守住，不会把刚入槽的
+    新装备当旧装备再搬一遍。
     """
     behavior = behavior_for(frame.data["card"])
     if behavior.is_delayed:
@@ -422,7 +429,9 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
         return None
     if not frame.data.get("after_end_done"):
         if behavior.final_zone is FinalZone.EQUIP:
-            host.move_used_card_to_equip_zone(frame)
+            control = host.move_used_card_to_equip_zone(frame)
+            if control is not None:
+                return control
         else:
             host.move_processing_card_to_discard(frame)
         control = _emit(

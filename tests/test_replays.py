@@ -1025,7 +1025,7 @@ STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
     "35-hero-damage-points": (465008, "053c6a7fd33d4e018c643c2d0de0772ca4ce20f56ff3f9f4660f51f89d760d35"),
     "36-hero-rejudge-cycle": (1228848, "9d80fa3751927bc33bd3f1c2861405a89631ef2ce4e281032002331b74729e97"),
     "37-hero-lord-request": (1430299, "66ad3ef3d6b8a06ac7a44bc109ec0671fc2f6cae4d98d291ac79dc0b181e306c"),
-    "38-hero-lost-cards": (857328, "3ed01389ce128ccc2591a4adfdaafca4d74087dac372e9e8407bb5cdae5ec251"),
+    "38-hero-lost-cards": (857045, "8e7dad34b0e4b5bf4c4d032efa28d8ab402dfcf5cbff66699b3a27131fb524a9"),
     "39-hero-target-pool": (2586144, "3409eb95b9a2460fc9b844e5eb521fe537f6c2f600630c11bd4b18fc400ed928"),
     "40-hero-wushuang": (359502, "ebfbda32bae631d9533396ac3e5eab51e8c75e7f0c778c86709c668a70b90ca7"),
     "41-hero-guanxing": (815491, "3cd14e5c0364b9cff3ff0f3ca3b396e871ba158363434e96af54944dde62db7f"),
@@ -1042,6 +1042,13 @@ STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
 "不变"钉成门禁判据——任何重录、格式化或手改都会让对应条目变红；改它 = 一次显式决定
 （本 effort 的 D14 明确禁止）。``M1_FROZEN_TRAJECTORIES`` 钉的是六条的**决策轨迹**，
 这张表钉的是 47 条的**文件字节**，两者互补。
+
+**唯一一次显式重基线（2026-11-03，票 06，用户批准）**：``38-hero-lost-cards`` 的字节由
+``(857328, 3ed0138…5ec251)`` 改为 ``(857045, 8e7dad3…524a9)``。原因是修「使用装备牌」的顶替
+路径：「失去装备后」的钩子（本盘是【枭姬】）让出之后，新装备的 ``PUT`` 必须等它结算完才
+入槽；旧录像恰好录下了错的次序（新装备先入槽、再问【枭姬】），且旧实现吞掉 ``"stay"`` 时
+多记了一条 ``MOVE_AFTER``。重录**只**重跑这一条（``scenarios.record("38-hero-lost-cards")``），
+其余 46 条一字未动，判据不放宽；38 在 ``goals.py`` 里的判据（D 族失去牌后）重录后仍命中。
 """
 
 
