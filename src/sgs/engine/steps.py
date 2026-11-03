@@ -420,8 +420,8 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
     "失去装备后"（白银狮子压 ``RECOVER`` 帧）并让出。吞掉这个 ``"stay"`` 就会在同一趟里
     接着把新装备 ``PUT`` 入槽——记录流次序变成"新装备入场 → 回复"，而 `hp` 数值与帧数都
     不变，旧回归看不见。重入时 ``after_end_done`` 仍是假（它在这段**之后**才落位），故本步
-    原地重跑；"顶替已决定"由引擎侧帧私有游标 ``_EQUIP_REPLACED`` 守住，不会把刚入槽的
-    新装备当旧装备再搬一遍。
+    原地重跑；"这次同槽扫描已经做过"由引擎侧帧私有游标 ``_EQUIP_SLOT_SCANNED`` 守住，不会把
+    刚入槽的新装备当旧装备再搬一遍。
     """
     behavior = behavior_for(frame.data["card"])
     if behavior.is_delayed:
@@ -429,12 +429,12 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
         return None
     if not frame.data.get("after_end_done"):
         if behavior.final_zone is FinalZone.EQUIP:
-            control = host.move_used_card_to_equip_zone(frame)
-            if control is not None:
-                return control
+            equip_control = host.move_used_card_to_equip_zone(frame)
+            if equip_control is not None:
+                return equip_control
         else:
             host.move_processing_card_to_discard(frame)
-        control = _emit(
+        emit_control = _emit(
             host,
             frame,
             Timing.RESOLVE_AFTER_END,
@@ -442,8 +442,8 @@ def use_after_end(host: FrameHost, frame: Frame) -> Control:
             cards=(frame.data["card"],),
         )
         frame.data["after_end_done"] = True
-        if control is not None:
-            return control
+        if emit_control is not None:
+            return emit_control
     return host.apply_timing_ops(frame, Timing.RESOLVE_AFTER_END)
 
 

@@ -1040,7 +1040,8 @@ STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
 
 **故意写死**：M5 只许**新增**军争基准，标准 108 的 47 条必须逐字节不变。这张表把
 "不变"钉成门禁判据——任何重录、格式化或手改都会让对应条目变红；改它 = 一次显式决定
-（本 effort 的 D14 明确禁止）。``M1_FROZEN_TRAJECTORIES`` 钉的是六条的**决策轨迹**，
+（本 effort 的 D14 明确禁止，**唯一例外是下面那次经用户批准的重基线**，其判据与覆盖都
+在下面写明）。``M1_FROZEN_TRAJECTORIES`` 钉的是六条的**决策轨迹**，
 这张表钉的是 47 条的**文件字节**，两者互补。
 
 **唯一一次显式重基线（2026-11-03，票 06，用户批准）**：``38-hero-lost-cards`` 的字节由
@@ -1049,6 +1050,11 @@ STANDARD_108_REPLAY_BYTES: dict[str, tuple[int, str]] = {
 入槽；旧录像恰好录下了错的次序（新装备先入槽、再问【枭姬】），且旧实现吞掉 ``"stay"`` 时
 多记了一条 ``MOVE_AFTER``。重录**只**重跑这一条（``scenarios.record("38-hero-lost-cards")``），
 其余 46 条一字未动，判据不放宽；38 在 ``goals.py`` 里的判据（D 族失去牌后）重录后仍命中。
+**重录 = 放弃一条覆盖**（`CODING_STANDARDS.md` §5）：旧录像原先钉住的那条**次序**覆盖由两条
+直接测试接手——`tests/test_m5_equipment.py::test_replacing_silver_lion_recovers_before_the_new_equipment_enters`
+（顶替白银狮子：旧装备离场 → 回复 → 新装备入槽，逐条比记录流序列）与
+`tests/test_hero_move_after.py::test_xiaoji_fires_on_replacement_even_though_the_equipment_is_not_discarded`
+（顶替算失去装备、但不算弃置 ⇒【枭姬】恰好触发一次，且新装备的 ``PUT`` 排在【枭姬】之后）。
 """
 
 

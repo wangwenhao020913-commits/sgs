@@ -39,7 +39,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state, cards_of_type
+from support import SeatSpec, build_state, cards_of_type, deck_excluding
 
 PACK = load_content_pack(deck_profile="standard_108")
 
@@ -1667,3 +1667,111 @@ def test_a_multi_actor_move_after_is_asked_seat_by_seat_from_the_turn_seat():
         "同一 MOVE_AFTER 上两名角色都能派发时，链序必须按「当前回合角色起逆时针」"
         f"逐角色（座位 2 先于座位 3）；实得询问序列 {asks()}"
     )
+
+
+def _equipment_vs_hero_move_engine():
+    """一次 ``equip(2) → hand(3)`` 同时点亮两个**档位方向与座次方向相反**的 ``MOVE_AFTER`` 钩子。
+
+    上一条形状（``hand(2) → hand(3)``）的两条钩子**同是武将档**（0），故它只钉住了"不按
+    ``skill_id`` 排"这一半；「两级**不可互换**」（§4.16）还要求"不按优先级把不同角色的技能
+    排成一队"。要分辨这一半，档位方向必须与座次方向相反。钩子清单里只有 6 条
+    ``MOVE_AFTER``，能凑出这个形状的配对只有一对（白银狮子是装备档、界【清俭】是武将档）：
+
+    白银狮子只住在 ``standard_ex_160`` 档，故本用例自带这个档（档位纪律：显式选档）。局面：
+
+    - 座位 0 = 当前回合角色，无技能；座位 1 无技能；
+    - 座位 2 = 已受伤（2/4）且装着**白银狮子**（``equip.silver_lion``，
+      ``priority_class = 1`` **装备档**）⇒ 失去它 ⇒ 压 ``RECOVER`` 帧回复 1 点；
+    - 座位 3 = 界夏侯惇（``hero.jie_xiahoudun.qingjian``，``priority_class = 0`` **武将档**）
+      ⇒ 这张牌进了自己的手牌区 ⇒ 【清俭】的"是否发动"询问。
+
+    座位环 = ``0 → 1 → 2 → 3``（``turn_seat = 0``）：**座位优先** ⇒ 座位 2 的装备钩子先
+    落（压 ``RECOVER`` 帧）；**优先级优先** ⇒ 座位 3 的武将钩子先落（先发【清俭】询问）。
+
+    返回 ``(engine, players, order, hp_deltas)``：``order`` 是记录流里这两件事的先后
+    （原样读记录流，不 ``sorted()`` / 不去重）。
+    """
+    pack = load_content_pack(deck_profile="standard_ex_160")
+    silver = cards_of_type(pack, "silver_lion")[0]
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(hp=2, hp_max=4, equip=(silver,)),
+            SeatSpec(hero="jie_xiahoudun"),
+        ],
+        deck=deck_excluding(pack, silver),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    # 本判据只读**次序**，故【清俭】一律不发动（答 ``Pass``）：它的选择面与次序无关。
+    players = [Scripted(activate=False) for _ in range(4)]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.PHASE_PLAY_START
+            for record in e.records
+        ),
+    )
+    engine.move_in_frame(
+        None,
+        engine.state.refs((silver,)),
+        to_zone=ZoneRef(Zone.HAND, 3),
+        reason=MoveReason.LOSE,
+        owner=3,
+        actor=3,
+    )
+
+    def order() -> list[tuple]:
+        marks: list[tuple] = []
+        for record in engine.records:
+            if (
+                record.kind == "frame"
+                and record.op == "push"
+                and record.frame_kind is FrameKind.RECOVER
+            ):
+                marks.append(("silver_lion_recover",))
+            elif (
+                record.kind == "query"
+                and record.query.kind == "SKILL_ACTIVATION"
+                and record.query.skill_id == QINGJIAN
+            ):
+                marks.append(("qingjian_ask", record.query.actor))
+        return marks
+
+    def hp_deltas() -> list[tuple[int, int, int]]:
+        return [
+            (record.seat, record.before, record.after)
+            for record in engine.records
+            if record.kind == "delta" and record.delta_type == "hp_change"
+        ]
+
+    # 回复帧的结算在派发让出**之后**，故推进到"回复真的落到 hp 上"为止：
+    # 那时两件事都已进记录流，次序已定格。
+    _advance(engine, players, lambda e: bool(hp_deltas()))
+    return engine, players, order, hp_deltas
+
+
+def test_a_seat_major_chain_beats_priority_class_across_role_boundaries():
+    """§4.16 两级顺序**不可互换**：座位环名次先于``priority_class``，即使优先级相反。
+
+    座位 2 = 白银狮子（装备档 1）、座位 3 = 界【清俭】（武将档 0），两者在同一次
+    ``equip(2) → hand(3)`` 上同时触发，座次方向（2 在 3 之前）与档位方向（0 在 1 之前）
+    **相反**。§4.16 明写「不是『先按优先级把不同角色的技能排成一队』」⇒ 必须是座位 2 的
+    ``RECOVER`` 帧先进记录流，界【清俭】的询问在后。
+
+    判据比较**记录流次序本身**（`CODING_STANDARDS.md` §4：不 ``sorted()`` / 不去重）：
+    两件事的先后就是这条判据要断的东西，故直接比序列。
+    """
+    _engine, _players, order, hp_deltas = _equipment_vs_hero_move_engine()
+
+    assert order() == [("silver_lion_recover",), ("qingjian_ask", 3)], (
+        "座位 2（装备档 1）与座位 3（武将档 0）在同一次移动上同时触发时，链序必须"
+        "**先逐角色**（座位 2 先于座位 3），不许按 priority_class 把两名角色排成一队；"
+        f"实得记录流次序 {order()}"
+    )
+    # 座位 2 的钩子不是空响：回复真的落了 hp（2 → 3），故上面那条"RECOVER 帧在询问之前"
+    # 断的是真事件；【清俭】答的是 Pass，故没有第二条 hp 变动。
+    assert hp_deltas() == [(2, 2, 3)]

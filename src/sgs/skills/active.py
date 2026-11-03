@@ -1605,7 +1605,8 @@ _JIEYIN_RECOVERED_KEY = "jieyin_recovered"
 
 §3.1 的帧私有游标纪律：``_push_recover`` **立即**压帧、帧栈后进先出，故一个效果体里连压
 两张会让**后压的**那张先结算；游标记「这次发动已经压到第几张」，续跑据此接着压下一张，
-且守卫在压帧**之前**落位（续跑不会把同一张重压一遍）。
+且守卫在压帧**之前**落位（续跑不会把同一张重压一遍）。它同时是
+:func:`_jieyin_effect` 里 ``targets`` 元组的下标——"压到第几张"与"压给谁"读同一份声明。
 """
 
 
@@ -1617,6 +1618,10 @@ def _jieyin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     帧栈后进先出 ⇒ 自己先回复，且"压完第一张帧之后又压第二张"正是 §3.1 禁止的形状。
     修法同白银狮子：压一张 → ``return "stay"`` → 续跑按 :data:`_JIEYIN_RECOVERED_KEY`
     接着压第二张 → ``return "stay"``。
+
+    两张回复的**目标按次序声明在 ``targets`` 里**（第一张给选中的男性角色，第二张给自己）：
+    游标是这条声明上的下标，故"压到第几张"与"压给谁"读同一份数据，不是一个计数器加一条
+    三元表达式。
     """
     owner = frame.data["source"]
     seats = answers["seat"]
@@ -1624,12 +1629,12 @@ def _jieyin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     assert isinstance(seats, tuple) and isinstance(cards, tuple)
     if _move_to_discard(host, frame, cards, owner=owner, key="jieyin:cost") == "stay":
         return "stay"
+    targets = (int(seats[0]), owner)
     pushed = int(frame.data.get(_JIEYIN_RECOVERED_KEY, 0))
-    if pushed >= 2:
+    if pushed >= len(targets):
         return None
     frame.data[_JIEYIN_RECOVERED_KEY] = pushed + 1
-    target = int(seats[0])
-    _push_recover(host, frame, source=owner, target=target if pushed == 0 else owner)
+    _push_recover(host, frame, source=owner, target=targets[pushed])
     return "stay"
 
 

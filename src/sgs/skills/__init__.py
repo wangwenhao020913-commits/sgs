@@ -564,7 +564,8 @@ def rejudge_offers(state: GameState, seat: int) -> tuple[RejudgeOffer, ...]:
     :class:`~sgs.state.RejudgeOffer`：候选生成器按它逐条枚举，一条技能一个构造子
     （``SubstituteJudgeCard(skill_id=…)``），故"用哪条技能改判"在记录流里读得出。
     原判定牌的去向（``rejudge_original_to``）不在这里——它由引擎按 ``skill_id`` 现查，
-    与"这条技能的候选"分列。实例序 = ``resolve_instances`` 的链序（确定性）。
+    与"这条技能的候选"分列。实例序 = ``resolve_instances`` 的**解析序**（确定性；定义见
+    `03` §4「技能描述模型」的「技能定义 / 实例 / 派发的冻结面」表「链序 / 优先级」行）。
     """
     offers: list[RejudgeOffer] = []
     for instance in resolve_instances(state):
