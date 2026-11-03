@@ -136,7 +136,7 @@ def test_a_hero_skill_takes_the_hero_priority_class_and_sorts_before_equipment(m
     hero_index = [instance.skill_id for instance in instances].index(HUJIA)
     equip_index = [instance.skill_id for instance in instances].index("equip.crossbow")
     assert hero_index < equip_index, (
-        "武将档（HERO=0）先于装备档（EQUIPMENT=1），由链序直接表达，不靠特判"
+        "武将档（HERO=0）先于装备档（EQUIPMENT=1），由优先级值序直接表达，不靠特判"
     )
 
 

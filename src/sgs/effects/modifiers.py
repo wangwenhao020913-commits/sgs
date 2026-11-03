@@ -81,8 +81,9 @@ class CarrierKind(str, Enum):
 class PriorityClass(IntEnum):
     """修饰器链的**优先级档**：武将 > 装备 > 使用牌（`02` §3.5(3) / 票 07 §6）。
 
-    值序即链序（越小越先），故"武将档先于装备档"由排序直接表达，不靠特判。M2 的载体
-    只有装备档，另两档是链序定义的一部分（票 29 的清单明列三档）。
+    值序即**修饰器管道序**（越小越先；这条管道走 ``resolve_instances`` 的解析序，与票 05 的
+    派发链序是两条链），故"武将档先于装备档"由排序直接表达，不靠特判。M2 的载体
+    只有装备档，另两档是优先级档定义的一部分（票 29 的清单明列三档）。
     """
 
     HERO = 0
@@ -143,7 +144,7 @@ class ModifierPoint(str, Enum):
     ``TARGET_COUNT`` 的语义（W7-01）：查询期修正"本牌**最大**目标数"，``current`` 从
     **额定目标数**起（``TargetRule.rated_targets``；【借刀杀人】的被迫使用窗口 base = 1，
     不是池大小），回调返回新的最大值（方天 = ``current + 2``，未来天义 = ``current + 1``
-    ——可叠加）；链序仍是 ``(priority_class, skill_id, owner)``。**只对
+    ——可叠加）；**修饰器管道序**仍是 ``(priority_class, skill_id, owner)``。**只对
     ``TargetCount.RATED`` 的牌生效**：``ALL_ALIVE`` / ``ALL_ALIVE_WITH_SELF``（南蛮 /
     万箭 / 桃园 / 五谷）的目标数由候选池决定，查链会造出**非法子集**，故读者
     （``_play_phase`` / ``_respond`` 的 USE 趟 / ``virtual_card_use``）只在 RATED 档派发。
@@ -208,7 +209,7 @@ class ModifierContext:
       一次"据此实现；
     - ``flags``：链**内部**的旁路标志（【青釭剑】置 ``ignore_armor``、【仁王盾】读它）。
       它是同一次查询里的临时便签，不是状态；用可变 ``dict`` 让链上先跑的回调能影响
-      后跑的回调（链序 = ``(priority_class, skill_id)``，青釭剑在仁王盾之前）。
+      后跑的回调（**修饰器管道序** = ``(priority_class, skill_id)``，青釭剑在仁王盾之前）。
     """
 
     subject: int
@@ -370,7 +371,7 @@ def damage_amount(
     ``nature``（M5-05a）是 DAMAGE 帧的属性（由 ``steps.damage_finalize_amount`` 原样传入），
     只进 ``ctx.nature`` 供目标侧回调读（藤甲火焰 +1）；属性本身不落到牌上。
 
-    链序仍是 ``(priority_class, skill_id, owner)``；没有命中任何修饰器时返回 ``base``
+    **修饰器管道序**仍是 ``(priority_class, skill_id, owner)``；没有命中任何修饰器时返回 ``base``
     （标准 108 无任何伤害数值修饰器 ⇒ 逐字节不变）。
     """
     ctx = ModifierContext(

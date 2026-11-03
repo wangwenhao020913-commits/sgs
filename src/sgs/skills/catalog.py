@@ -1750,7 +1750,7 @@ def _renwang_effectiveness(state: GameState, ctx: ModifierContext, current: Any)
     """仁王盾：锁定技，**黑色的【杀】对你无效**（`A/flow_use.txt:79`）。
 
     【青釭剑】的"无视防具"通过在 ``EFFECTIVENESS`` 链上先置 ``ignore_armor`` 标志实现
-    （票 07 §3 的窄结论：不建通用抑制机制）；链序保证青釭剑（``equip.qinggang_sword``）
+    （票 07 §3 的窄结论：不建通用抑制机制）；**修饰器管道序**保证青釭剑（``equip.qinggang_sword``）
     先于仁王盾（``equip.renwang_shield``）执行。
     """
     del state
@@ -1778,7 +1778,7 @@ def _qinggang_ignore_armor(state: GameState, ctx: ModifierContext, current: Any)
     "无视防具"是**防具的整体效果**，不只第一条链：:func:`~sgs.effects.damage_amount`
     只建**一个** ``ModifierContext``，三条链经 ``replace(ctx, role=...)`` 共用同一个
     可变 ``flags`` 字典——这里置一次就够，后两条链的防具回调读到的是同一份标志。
-    链序仍保证青釭剑在前（``equip.qinggang_sword`` 按 skill_id 排在防具之前），
+    **修饰器管道序**仍保证青釭剑在前（``equip.qinggang_sword`` 按 skill_id 排在防具之前），
     故第一次（``EFFECTIVENESS``）派发就把标志写进了共享字典。
     """
     del state

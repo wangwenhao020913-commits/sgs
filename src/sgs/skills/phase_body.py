@@ -1154,7 +1154,8 @@ _TISHEN = PhaseBodySkill(
 # - **一至两项** = 三档单选项（`{【1】}` / `{【2】}` / `{两项都选}`）：`SELECT_OPTION` 只有
 #   单选控件，把子集摊成三档**不引入新询问形态**；两项按【1】→【2】逐项结算完。
 # - **无距离限制** = 这一次使用的距离条件豁免：目标池在**技能侧**自算（全体其他存活 →
-#   `TARGET_POOL` 链）。**不**用"修饰器并集"（界武圣② / 武神② 的写法）：链序按 skill_id
+#   `TARGET_POOL` 链）。**不**用"修饰器并集"（界武圣② / 武神② 的写法）：**修饰器管道序**
+#   （= `resolve_instances` 的解析序，不是票 05 的派发链序）按 skill_id
 #   字典序，`hero.xiahouyuan.shensu` 排在 `hero.jie_zhugeliang.kongcheng` 之后，并集会把
 #   【空城】刚删掉的目标加回来（探针 `.scratch/feng-xiahouyuan/probe_target_pool_order.py`）。
 # - **跳过阶段** = 阶段推进状态（`host.skip_*_phase`），不新增 `Timing`；被跳过的判定阶段
