@@ -131,6 +131,18 @@ def test_loss_is_any_move_out_of_my_hand_or_equipment_regardless_of_target() -> 
         )
 
 
+def test_a_rearrangement_inside_my_own_hand_is_not_a_loss() -> None:
+    """但书（票 07 收敛后的唯一边界）：手牌 → **自己的**手牌没有离开，不算失去。
+
+    去向是手牌时只有"座位仍是我"才不算；交给**别人**的手牌照算（同一判据的两侧，见
+    :func:`test_loss_is_any_move_out_of_my_hand_or_equipment_regardless_of_target`）。
+    界【连营】在票 07 接到这条判据上后，靠这条但书挡住"任何手牌去向都算失去"的误读。
+    """
+    assert not loses_card(_move((Zone.HAND, ME), (Zone.HAND, ME)), ME), (
+        "手牌 → 自己的手牌（重排一类）没有离开 ⇒ 不算失去"
+    )
+
+
 def test_only_hand_and_equipment_lose_cards() -> None:
     """Q4 / Q5：**判定区、武将牌上、处理区的牌离开不算失去**（判定牌进弃牌堆也不算）。"""
     sources: tuple[tuple[Zone, int | None], ...] = (

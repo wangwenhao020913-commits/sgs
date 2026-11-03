@@ -802,6 +802,45 @@ def test_lianying_triggers_when_a_trick_takes_the_last_hand_card() -> None:
     assert len(engine.state.player(VICTIM).hand) == 1, "失去最后一张 + 连营摸回一张"
 
 
+def test_lianying_triggers_when_the_last_hand_card_goes_into_another_hand() -> None:
+    """裁定（票 07；用户 2026-11-03「把牌交给别人也算失去手牌」）：去向是**别人的手牌**也算。
+
+    【顺手牵羊】把界陆逊最后一张手牌拿进使用者（座位 0）的手牌：对失去方是"失去最后的
+    手牌"，【连营】该问——与标版【连营】同一读法
+    （`tests/test_hero_jie_hand_limit.py::test_lianying_triggers_when_the_last_hand_cards_are_given_away`）。
+    旧判据把"去向是手牌"一律排除（不分是谁的手牌），这条因此静默不触发。
+    """
+    trick = _card("snatch")
+    last = _card("peach")
+    engine = Engine.from_state(_trick_state(victim_hand=(last,), trick=trick), seed=7)
+    asked: list[tuple[str, ...]] = []
+
+    def victim(query):
+        # 拒【谦逊】（它会先把手牌全扣上，改走"手牌 → 武将牌上"那条失去路径）。
+        if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == JIE_QIANXUN:
+            return _find(query, lambda action: isinstance(action, Pass))
+        if query.kind == QueryKind.SKILL_ACTIVATION and query.skill_id == JIE_LIANYING:
+            return _activate(query, JIE_LIANYING)
+        if query.kind == QueryKind.SELECT_OPTION and query.skill_id.startswith("lianying:"):
+            asked.append(tuple(query.options))
+            return _seat_option(query, VICTIM)
+        return None
+
+    player = Scripted(victim)
+    run_until(
+        engine,
+        [_use_card(trick, "snatch"), player],
+        lambda e: ran_timing(e, Timing.RESOLVE_AFTER_END),
+    )
+
+    prompts = _skill_prompts(player, JIE_LIANYING)
+    assert len(prompts) == 1, "最后一张手牌进了别人的手牌 ⇒ 失去手牌 ⇒ 连营该问"
+    assert last in engine.state.player(USER).hand, "牌确实落在使用者的手牌里（去向是手牌）"
+    assert len(asked) == 1 and asked[0] == ("seat:0", "seat:1"), "X = 1 ⇒ 只问一次"
+    draws = _draw_records(engine, prompts[0].seq)
+    assert [(record.to_zone.seat, len(record.cards)) for record in draws] == [(VICTIM, 1)]
+
+
 def test_lianying_is_not_offered_when_hand_cards_remain() -> None:
     """反例：失去一张手牌但手里还有牌 ⇒ 不是『最后的手牌』，不问【连营】。"""
     trick = _card("dismantlement")

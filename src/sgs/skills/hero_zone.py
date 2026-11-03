@@ -37,7 +37,7 @@ from .catalog import (
     SkillDef,
 )
 from .flow import SkillFlow, option_seat, seat_choice, zero_step_effect
-from .move_after import MoveEvent, move_event
+from .move_after import MoveEvent, loses_card, move_event
 
 __all__ = [
     "JIE_LIANYING",
@@ -151,14 +151,14 @@ def _lost_hand_cards(move: MoveEvent | None, owner: int) -> int:
 def _lost_last_hand(move: MoveEvent | None, owner: int) -> int:
     """【连营】的触发判据：失去的是**最后**的手牌；返回 X（0 = 不发动）。
 
-    三个条件与标准版【连营】同源：来源是手牌、去向不是手牌（交给别人 / 弃置 / 使用 /
-    放置都算，移回手牌不算）、移动后手牌为空。X 取本次失去的手牌数。
+    **失去判据只有一份**（票 07）：与标准版【连营】同读
+    :func:`~sgs.skills.move_after.loses_card`——牌离开自己的手牌区 / 装备区就算失去，
+    **去向不限**（交给别人的手牌也算，用户 2026-11-03 裁定；旧实现把"去向是手牌"一律
+    排除，界版因此在【顺手牵羊】一类效果上漏触发），唯一但书是"手牌 → **自己的**手牌"
+    （重排一类，没离开）。界版在它之上只加自己那一半：**X = 本次从手牌失去的张数**；
+    "移动后手牌为空"由 :func:`_lianying_condition` 读移动后的状态判。
     """
-    if move is None:
-        return 0
-    if move.from_zone.zone is not Zone.HAND or move.from_zone.seat != owner:
-        return 0
-    if move.to_zone.zone is Zone.HAND:
+    if not loses_card(move, owner):
         return 0
     return _lost_hand_cards(move, owner)
 
