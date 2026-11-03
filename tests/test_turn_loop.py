@@ -5,12 +5,29 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from sgs.data import RuleConfig, load_content_pack
-from sgs.engine import Engine
-from sgs.state import MoveReason, Phase, Zone
+from sgs.engine import Engine, record_json
+from sgs.state import (
+    ActivateSkill,
+    MoveReason,
+    Phase,
+    QueryKind,
+    SelectOption,
+    SelectOptionContext,
+    Zone,
+)
 from sgs.timing import Timing
 
-from support import RecordingPlayer, SeatSpec, build_state, run_turns
+from support import (
+    RecordingPlayer,
+    SeatSpec,
+    build_state,
+    find_action,
+    run_queries,
+    run_turns,
+)
 
 PACK = load_content_pack(deck_profile="basic_53")
 
@@ -430,3 +447,324 @@ def test_a_skipped_turn_does_not_clear_the_jie_luoyi_bonus():
     # ② 轮到座位 0 真正开始的回合：`TURN_START` 到了，这一份加伤才清掉。
     _step_until(engine, lambda e: _turn_start_seats(e)[-1] == 0, players)
     assert engine.state.player(0).luoyi_until_next_turn is False, "真正开始的回合才清"
+
+
+# ---------------------------------------------------------------------------
+# L0「游戏开始时」的**派发点**（票 03）：帧外时机的又一个消费者
+#
+# 今天 ``GAME_START`` 只有枚举 + 记录（``_start`` 里 ``emit_timing``），挂在它上面的技能
+# 永不触发；``_start`` 在钩子发问挂起时还会把 ``_started`` 置真、复入直接进回合环、
+# 截断效果。这一组用例用 ``CATALOG`` 注入的合成钩子钉派发点本身（票 03 的 DoD）——
+# 不引入任何真实武将，故既有对局的记录流一行不动。
+# ---------------------------------------------------------------------------
+
+GAME_START_SKILL = "hero.fake.game_start"
+GAME_START_SKILL_B = "hero.fake.game_start_b"
+"""合成 L0 技能的 id（只活在 ``CATALOG`` 注入里）；两个座位各一条 ⇒ 必须是两个 id。
+
+``ask_skill_activation`` 的帧内答案缓存键 = ``(skill_id, key)``、**不含座位**，故同一个 id
+授予两个座位时第二次派发会直接读到第一个座位的答案、不再发问——那是既有缓存口径，本票
+不碰；要观测"逐座位派发"就得给两条不同的 id。
+"""
+
+_GAME_START_OPTION = "draw-one"
+
+_GAME_START_EFFECT_STARTED = "_fake_game_start_effect_started"
+"""帧私有守卫：本钩子的效果已发起。派发环在**别的实例**挂起后重入时会从头再跑一遍已完成的
+钩子（``_dispatch`` 的既有重入口径），没有它就会再摸一张。"""
+
+
+def _install_game_start_skill(monkeypatch, skill_id, handler, *, locked=False):
+    """把一条**只挂在 ``GAME_START`` 上**的合成技能注入 ``CATALOG``（合成钩子的唯一入口）。"""
+    from types import MappingProxyType
+
+    from sgs.effects import CarrierKind
+    from sgs.skills import Hook, SkillDef
+    from sgs.skills import catalog as catalog_module
+
+    definition = SkillDef(
+        skill_id=skill_id,
+        locked=locked,
+        carrier=CarrierKind.HERO,
+        hooks=(Hook(Timing.GAME_START, handler),),
+    )
+    monkeypatch.setattr(
+        catalog_module,
+        "CATALOG",
+        MappingProxyType({**catalog_module.CATALOG, skill_id: definition}),
+    )
+
+
+def _asking_game_start_handler(observed):
+    """合成 L0 钩子：先问一次选项（可挂起），答完摸 1 张；顺带记下 L0 帧的两条事实。"""
+
+    def handler(host, frame):
+        observed.append(
+            (
+                frame.data["skill_owner"],
+                frame.data.get("source"),
+                frame.data.get("hook_owner"),
+            )
+        )
+        seat = frame.data["skill_owner"]
+        answer = host.ask_query(
+            QueryKind.SELECT_OPTION,
+            seat,
+            Timing.GAME_START,
+            frame=frame,
+            payload=SelectOptionContext(
+                skill_id=GAME_START_SKILL, options=(_GAME_START_OPTION,)
+            ),
+        )
+        if host.suspended(answer):
+            return "stay"
+        if frame.data.get(_GAME_START_EFFECT_STARTED):
+            return None
+        frame.data[_GAME_START_EFFECT_STARTED] = True
+        control = host.draw_for_hand(frame, seat, 1)
+        return "stay" if control == "stay" else None
+
+    return handler
+
+
+def _quiet_game_start_handler(observed):
+    """合成 L0 钩子：只记下"谁被派发到了 + L0 帧的两条事实"，不问、不压帧。"""
+
+    def handler(host, frame):
+        observed.append(
+            (
+                frame.data["skill_owner"],
+                frame.data.get("source"),
+                frame.data.get("hook_owner"),
+            )
+        )
+        return None
+
+    return handler
+
+
+class _GameStartPlayer:
+    """应答合成 L0 钩子：发动（``ActivateSkill``）+ 取唯一选项；其余走最小合法应答。"""
+
+    def __init__(self) -> None:
+        self._fallback = RecordingPlayer()
+        self.seen: list = []
+
+    def respond(self, query):
+        self.seen.append(query)
+        activate = find_action(query, lambda action: isinstance(action, ActivateSkill))
+        if activate is not None:
+            return activate
+        option = find_action(query, lambda action: isinstance(action, SelectOption))
+        if option is not None:
+            return option
+        return self._fallback.respond(query)
+
+
+def _first_timing(engine, timing: Timing):
+    return next(
+        (
+            record
+            for record in engine.records
+            if record.kind == "timing" and record.timing is timing
+        ),
+        None,
+    )
+
+
+def _game_start_engine(*, seats: int = 2):
+    """真开局（含起始手牌）之后、第一次 ``_step`` 之前：把合成 L0 技能授予座位 0。"""
+    engine = Engine.new_game(
+        seed=7, rule_config=RuleConfig(player_count=seats), pack=PACK
+    )
+    engine.grant_skill(0, GAME_START_SKILL)
+    return engine
+
+
+def test_a_game_start_hook_is_asked_after_the_deal_and_before_the_first_turn(monkeypatch):
+    """L0.3 的位置 = 起始手牌**发完后**、第一个回合**之前**（规则 §3.9 L229–L233）。
+
+    判据比较**记录序本身**（`CODING_STANDARDS.md` §4：不 ``sorted()`` / 不去重）：
+    发牌时机 < ``GAME_START`` 记录 < 钩子的两个询问 < 第一条 ``TURN_BEFORE_START``。
+    效果（摸 1 张）落在同一个窗口里且**只落一次**。
+    """
+    _install_game_start_skill(
+        monkeypatch, GAME_START_SKILL, _asking_game_start_handler([])
+    )
+    engine = _game_start_engine()
+    players = [_GameStartPlayer(), _GameStartPlayer()]
+    run_queries(
+        engine,
+        players,
+        lambda e: _first_timing(e, Timing.TURN_BEFORE_START) is not None,
+    )
+
+    deal = _first_timing(engine, Timing.GAME_INITIAL_HAND_DEALING)
+    start = _first_timing(engine, Timing.GAME_START)
+    turn = _first_timing(engine, Timing.TURN_BEFORE_START)
+    asks = [
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.skill_id == GAME_START_SKILL
+    ]
+
+    assert deal is not None and start is not None and turn is not None
+    assert [record.query.kind for record in asks] == [
+        "SKILL_ACTIVATION",
+        "SELECT_OPTION",
+    ], "钩子先被问『是否发动』、再问自己的选项（两问各一次）"
+    assert deal.seq < start.seq < asks[0].seq < asks[-1].seq < turn.seq, (
+        "『游戏开始时』在起始手牌发完之后、第一回合之前；实得 "
+        f"发牌 {deal.seq} / GAME_START {start.seq} / 询问 "
+        f"{[record.seq for record in asks]} / 回合 {turn.seq}"
+    )
+
+    draws = [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.to_zone.zone is Zone.HAND
+        and record.to_zone.seat == 0
+        and record.seq > start.seq
+    ]
+    assert len(draws) == 1, "钩子的效果（摸 1 张）只落一次"
+    assert len(engine.state.player(0).hand) == 5, "起始手牌 4 + 钩子摸的 1"
+
+
+def test_a_suspended_game_start_hook_resumes_without_re_asking_and_finishes_its_effect(
+    monkeypatch,
+):
+    """``_start`` 可停可续：挂起时 ``_started`` 留假，复入原地续跑、不重问、效果完整。
+
+    这也是 A2 的分水岭：L0 帧 ``source`` 恒 ``None``（不把"游戏开始时"伪装成第一个座位的
+    回合事件），"关于我"自校走 ``hook_owner``（``MATCH_OWNER_KEY``）。
+    """
+    observed: list[tuple[object, object, object]] = []
+    _install_game_start_skill(
+        monkeypatch, GAME_START_SKILL, _asking_game_start_handler(observed)
+    )
+    engine = _game_start_engine()
+    players = [_GameStartPlayer(), _GameStartPlayer()]
+
+    # ① 第一次推进 = L0 派发：'是否发动'问出去就挂起。
+    engine._step()
+    first = engine.pending
+    assert first is not None
+    assert first.kind == "SKILL_ACTIVATION" and first.skill_id == GAME_START_SKILL
+    assert engine._started is False, (
+        "挂起时 ``_started`` 必须留假：置真会让复入直接进回合环、把钩子效果截断"
+    )
+    engine.submit(players[first.actor].respond(first))
+
+    # ② 复入：不再重问"是否发动"，问钩子自己的选项。
+    engine._step()
+    second = engine.pending
+    assert second is not None
+    assert second.kind == "SELECT_OPTION" and second.actor == 0
+    assert engine._started is False
+    engine.submit(players[second.actor].respond(second))
+
+    # ③ 续跑：答完选项，效果真的落地，派发才算完。
+    engine._step()
+    assert engine.pending is None
+    assert engine._started is True
+
+    questions = [
+        (record.query.kind, record.query.actor)
+        for record in engine.records
+        if record.kind == "query" and record.query.skill_id == GAME_START_SKILL
+    ]
+    assert questions == [("SKILL_ACTIVATION", 0), ("SELECT_OPTION", 0)], (
+        f"挂起 → 答 → 续跑整条跑完，同一个问只问一次；实得 {questions}"
+    )
+    assert len(
+        [
+            record
+            for record in engine.records
+            if record.kind == "timing" and record.timing is Timing.GAME_START
+        ]
+    ) == 1, "时机记录也去重：挂起 → 续跑只落一条 GAME_START（_turn_data 的键作幂等闸）"
+    draws = [
+        record
+        for record in engine.records
+        if record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.to_zone.zone is Zone.HAND
+        and record.to_zone.seat == 0
+        and record.seq > _first_timing(engine, Timing.GAME_START).seq
+    ]
+    assert len(draws) == 1, "效果完整且不重复（摸 1 张）"
+    assert len(engine.state.player(0).hand) == 5
+    assert observed, "钩子真的跑过"
+    assert set(observed) == {(0, None, 0)}, (
+        "L0 帧的记录/帧都不挂在第一个座位的回合上（source=None、记录 actor=None），"
+        f"『关于我』自校走 hook_owner；实得 {observed}"
+    )
+
+
+def test_two_seats_with_game_start_hooks_are_dispatched_in_seat_order(monkeypatch):
+    """多座位同时有 L0 技能 ⇒ 按座位升序派发（本构造 = 无身份局，先手座位 0，环序即升序）。
+
+    同座位内部仍按链序（``priority_class`` → ``skill_id``）；本用例两条都是武将档、
+    座位不同，故次序只由座位决定。钩子是锁定技（不问），观测面就是派发顺序本身。
+    """
+    observed: list[tuple[object, object, object]] = []
+    _install_game_start_skill(
+        monkeypatch,
+        GAME_START_SKILL,
+        _quiet_game_start_handler(observed),
+        locked=True,
+    )
+    _install_game_start_skill(
+        monkeypatch,
+        GAME_START_SKILL_B,
+        _quiet_game_start_handler(observed),
+        locked=True,
+    )
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], deck=tuple(range(10, 60)))
+    state.player(0).granted_skills.append(GAME_START_SKILL)
+    state.player(1).granted_skills.append(GAME_START_SKILL_B)
+    engine = Engine.from_state(state, seed=1)
+
+    engine._step()  # 第一次推进 = L0 派发（回合环一步都还没走）
+
+    assert observed == [(0, None, 0), (1, None, 1)], (
+        "两个座位各挂一条 ⇒ 座位 0 先于座位 1；两帧都不伪装成第一个座位的回合事件"
+        f"（source=None、hook_owner=持有者）；实得 {observed}"
+    )
+    assert engine._started is True, "派发完才置真"
+    assert not [record for record in engine.records if record.kind == "frame"], (
+        "L0 帧不压栈：派发只用那条不压栈的持久帧（frame_id = 0），记录流里没有 push/pop"
+    )
+
+
+def test_the_no_hook_game_start_record_is_byte_identical_to_the_frozen_replay():
+    """无钩子时只落**与今天同一条**记录：字节级对照冻结基准（票 03 DoD 第 2 条）。
+
+    基准 01 的开局参数与本用例相同（seed 101 / 2 座 / 起始手牌 4 / basic_53），故它的
+    ``GAME_START`` 行就是"今天"的规范字节；同时断"没有钩子 ⇒ 一条帧都不建"。
+    """
+    frozen = next(
+        line
+        for line in (
+            Path(__file__).resolve().parent / "replays" / "01-slash-dodge-cancel.jsonl"
+        )
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if '"timing":"GAME_START"' in line
+    )
+    engine = Engine.new_game(seed=101, rule_config=RuleConfig(player_count=2), pack=PACK)
+    run_turns(engine, [RecordingPlayer(), RecordingPlayer()], turns=1)
+
+    record = _first_timing(engine, Timing.GAME_START)
+    assert record is not None
+    assert record.actor is None and record.source is None, "不伪装成第一个座位的回合事件"
+    assert record_json(record) == frozen, "无钩子 ⇒ 这条记录逐字节不变"
+    first_turn = _first_timing(engine, Timing.TURN_BEFORE_START)
+    assert first_turn is not None
+    assert not [
+        other
+        for other in engine.records
+        if other.kind == "frame" and other.seq < first_turn.seq
+    ], "没有 L0 钩子 ⇒ 一个帧都不建"

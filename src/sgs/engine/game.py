@@ -396,6 +396,21 @@ _NOT_DESIGNATION: object = object()
 原因（要写进拒绝记录）；本哨兵 = 不是附带指定动作，交给既有路径。
 """
 
+class _TurnSeat:
+    """``_dispatch_phase_body`` 的 ``actor`` 缺省值：**当前回合角色**（既有帧外口径）。"""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - 仅调试可读性
+        return "TURN_SEAT"
+
+
+_TURN_SEAT = _TurnSeat()
+"""缺省不能用 ``None`` 表达"没给"——``None`` 在这里是**有意义的值**：L0「游戏开始时」的
+帧外派发没有当前回合角色，记录 ``actor`` 与帧 ``source`` 都必须是 ``None``（票 03 A2）。
+故用三态哨兵（同 ``SUSPEND`` / ``_NOT_STRUCTURED`` 的姿态），既有调用点一字不改。
+"""
+
 _BooleanPlayerFlag = Literal[
     "luoyi_active", "luoyi_until_next_turn", "paoxiao_bonus", "zhaxiang_active"
 ]
@@ -783,9 +798,14 @@ class Engine:
     ) -> Control:
         """dispatch 一个时机；空实现也照记。
 
-        帧外的时机（回合环 / 判定阶段收尾）没有承载帧，M2 的装备钩子都挂在 L4 / L5 / L7，
-        故这里只记录、不派发技能；返回 ``None`` 让"返回控制值"的接缝在形状上统一
-        （票 19 §8 / 票 30）。
+        **帧外 ≠ 不派发**（票 03 订正）：帧外时机（``TURN_START`` / ``PHASE_*`` /
+        ``TURN_END`` / ``GAME_START`` …）由 :meth:`_dispatch_phase_body` 在**记录之后**
+        自建一条不压栈的钩子帧去派发；本方法自己的派发分支只服务 ``MOVE_AFTER``
+        （``frame_id == 0 and event is not None``，即**无承载帧的移动**，如弃牌阶段）。
+        故"这里有没有派发分支"不等于"这个时机会不会问技能"：记录由本方法负责，派发由
+        调用方决定。本方法返回 ``None`` 让"返回控制值"的接缝在形状上统一
+        （票 19 §8 / 票 30）；``"stay"`` 由帧外派发的调用方（``_dispatch_phase_body``）
+        从钩子那里收。
 
         ``event`` 是**帧外时机**的私有载荷（票 07 的 ``MOVE_AFTER`` 用在无承载帧的移动上，
         如弃牌阶段）：写进一个**不压栈的临时帧**，使钩子回调拿到与帧内派发同形的上下文；
@@ -4494,7 +4514,12 @@ class Engine:
             # 错配（M6 票 12 的混合局暴露；回归 = test_hero_card_zone 的同名用例）。
             return
         if not self._started:
-            self._start()
+            # 开局派发（L0 的 ``GAME_START``）能提问：``"stay"`` ⇒ ``_started`` 仍为假、
+            # 帧与应答缓存都留着，下一次 ``_step`` 从 :meth:`_start` 原地续跑。
+            if self._start() == "stay":
+                return
+            # 派发完成也收在这里：回合环从下一次 ``_step`` 起跑（与旧实现同一粒度；
+            # 钩子也可能已经判定了终局，故不能顺手往下走）。
             return
         if self.stack:
             popped = self.stack.step(self.steps, self)
@@ -4509,14 +4534,36 @@ class Engine:
             return
         self._step_turn()
 
-    def _start(self) -> None:
+    def _start(self) -> Control:
+        """开局（L0）：先定先手与轮次，再走 **``GAME_START`` 派发点**（票 03）。
+
+        ``GAME_START`` 是**帧外时机**（L0.3 = 起始手牌发完之后、第一个回合之前，规则
+        §3.9 L229–L233），与 ``TURN_START`` 同一条模板：无钩子时只落**一条与 M2 逐字节
+        相同**的记录（``timing_hooks_present`` 为假 ⇒ 不建帧），有钩子时给它一条不压栈、
+        可 ``"stay"`` 的持久帧（派发路径见 :meth:`_dispatch_phase_body`）。
+
+        **``_started`` 派发完才置真**：钩子提问会挂起，此时 ``_started`` 留假，下一次
+        :meth:`_step` 从 ``_start`` 原地重入，接上同一帧与同一份应答缓存。置真会让复入
+        直接进回合环、把钩子的效果截断。
+
+        L0 没有当前回合角色 ⇒ 记录 ``actor`` 与帧 ``source`` 都是 ``None``（显式传
+        ``actor=None``），不把"游戏开始时"伪装成第一个座位的回合事件；钩子的"关于我"
+        自校因此读 ``MATCH_OWNER_KEY``（``hook_owner``）而不是帧的 ``source``。
+
+        开头那四项回合状态都**由局面 / 配置派生**（``_first_seat`` 读主公座位或
+        ``rule_config.first_seat``），挂起后重入写回的都是同一个值，故续跑不会漂移
+        （`CODING_STANDARDS.md` §3 的幂等：重复执行 = 同一个事实）。
+        """
         self.state.turn_seat = self._first_seat()
         # 轮次从 1 起、本轮起点 = 先手座位（M6 票 11）：自然指针再次轮到它时轮次 +1。
         self.state.round = 1
         self.state.round_start_seat = self.state.turn_seat
         self.state.turn_extra = False
-        self.emit_timing(Timing.GAME_START)
+        control = self._dispatch_phase_body(Timing.GAME_START, "game_start", actor=None)
+        if control == "stay":
+            return "stay"
         self._started = True
+        return None
 
     def _first_seat(self) -> int:
         """先手座位：身份局扫主公座位（从 state 派生）、无身份局读配置（票 13 §4）。
@@ -4712,13 +4759,22 @@ class Engine:
         key: str,
         *,
         data: Mapping[str, Any] | None = None,
+        actor: int | None | _TurnSeat = _TURN_SEAT,
     ) -> Control:
-        """**帧外阶段体**的钩子派发（票 10）：空实现照记，有提供者才惰性建帧。
+        """**帧外时机**的钩子派发（票 10）：空实现照记，有提供者才惰性建帧。
 
         ``data``（huo-shenzhouyu-mobile 票 03）：调用点交给钩子的**帧私有事实**
         （本票只有 ``PHASE_DISCARD_END`` 的"本阶段弃置的手牌数"）。它并进阶段体帧
         的 ``data``，从而能被钩子条件读到（``PhaseBodySkill.condition``）；缺省
-        ``None`` ⇒ 既有六个调用点的建帧载荷逐字不变。
+        ``None`` ⇒ 既有调用点的建帧载荷逐字不变。
+
+        ``actor``（票 03）：这次派发**挂在谁名下**——记录 ``actor`` 与帧 ``source`` 是
+        同一个值。缺省 ``_TURN_SEAT`` 读**当前回合角色**（回合开始 / 准备 / 摸牌 / 弃牌 /
+        结束 / 回合结束等既有调用点）；``None`` = **没有当前回合角色**的帧外时机，只有
+        ``GAME_START`` 用（L0 在 :meth:`_start` 里派发：记录 ``actor`` / 帧 ``source``
+        都保持 ``None``，不把"游戏开始时"伪装成第一个座位的回合事件）。这类钩子的
+        "关于我"自校因此读 ``MATCH_OWNER_KEY``（``hook_owner``，条件求值期写），
+        不读 ``source``。
 
         阶段体（准备 / 摸牌 / 结束）没有结算帧，而钩子必须能提问并跨重入续跑，故这里给
         它一个**不压栈**的持久帧（住 ``_turn_data``）：它不进记录流、不参与步骤表，
@@ -4726,20 +4782,22 @@ class Engine:
         临时帧同形，区别只是要跨暂停存活）。没有注册在该时机上的实例时**一个帧都不建**，
         记录流与 M2 逐字节相同（票 10 的硬纪律：34 条基准一行不改）。
 
-        同一机制也服务**回合结束时**（``TURN_END``，M6 票 11）：它同样是帧外时机、
-        同样要能提问，故不另造一套——区别只在调用点与 ``key``。
+        同一机制也服务**回合结束时**（``TURN_END``，M6 票 11）与**游戏开始时**
+        （``GAME_START``，票 03）：它们同样是帧外时机、同样要能提问，故不另造一套——
+        区别只在调用点与 ``key``。
 
         时机记录只发一次（``_turn_data`` 的键作幂等闸）；派发返回 ``"stay"`` 时整个阶段体
         原地重入，重用同一个帧与同一份应答缓存。
         """
         store = self._turn_data
         if key not in store:
-            self.emit_timing(timing, actor=self.state.turn_seat)
+            seat = self.state.turn_seat if actor is _TURN_SEAT else actor
+            self.emit_timing(timing, actor=seat)
             if not timing_hooks_present(self.state, timing):
                 store[key] = None
                 return None
             payload: dict[str, Any] = {
-                "source": self.state.turn_seat,
+                "source": seat,
                 "targets": (),
                 "card": None,
             }
