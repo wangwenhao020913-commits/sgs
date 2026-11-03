@@ -14,15 +14,55 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 import sgs.agents as agents
-from sgs.data import ContentPack, Identity, RuleConfig, load_content_pack, roster_for
+from sgs.data import (
+    ContentPack,
+    Identity,
+    Kingdom,
+    RuleConfig,
+    load_content_pack,
+    roster_for,
+)
 from sgs.engine import INITIAL_HP, Engine, ai_stream, read_journal
-from sgs.skills import LORD_SKILL_IDS, lord_skill_allowed
-from sgs.state import PlayerPublic, project
+from sgs.skills import (
+    LORD_SKILL_IDS,
+    SkillSourceKind,
+    lord_skill_allowed,
+    resolve_instances,
+)
+from sgs.state import ActivateSkill, PlayerPublic, QueryKind, SelectCards, project
 
-from support import RecordingPlayer, SeatSpec, build_state, run_turns
+from support import (
+    PassPlayer,
+    RecordingPlayer,
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+    find_action,
+    run_queries,
+    run_turns,
+)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _bootstrap_tools() -> None:
+    """把 ``tools/`` 放进 ``sys.path``（幂等）：投影 ``sgs_web`` 只在那边可导入。"""
+    entry = REPO_ROOT / "tools"
+    if str(entry) not in sys.path:
+        sys.path.insert(0, str(entry))
+
+
+_bootstrap_tools()
+
+from sgs_web.projection import build_skills, seat_skill_display  # noqa: E402
 
 PACK: ContentPack = load_content_pack(deck_profile="standard_108")
 SEED = 20261009
@@ -333,3 +373,142 @@ def test_the_projection_still_hides_a_seat_whose_field_is_false():
 
     assert project(state, 0).players[3].identity is None
     assert project(state, 1).players[3].identity is None
+
+
+# ---------------------------------------------------------------------------
+# 主公技门控只作用于**武将牌载体**（wuming 票 06 / 票 02 §4.4 D1–D4；用户第三轮 Q15）
+#
+# 用户裁定：门控**只拦武将牌载体**——获得的主公技任何身份都能发动；系统只按身份决定
+# "从不从武将牌上派发"。故下面三条各钉一面：
+#   ① 非主公**获得**主公技 ⇒ 实例存在、技能区列得出来（`resolve_instances` / 投影）；
+#   ② 获得的主公技**能真的发动**（走【黄天】"交一张【闪】"整条路）；
+#   ③ 反面对照：**武将牌载体**的主公技在非主公身上仍不产出（身份门控没有放松）。
+# ---------------------------------------------------------------------------
+
+HUANGTIAN = "hero.zhangjiao_mobile.huangtian"
+"""张角移动版【黄天】的全限定 id：本票拿它当"获得来的主公技"的样例。"""
+
+
+def _granted_huangtian_engine():
+    """座位 0 = 非主公（群）**获得**【黄天】；座位 1 = 群、手里一张【闪】。
+
+    座位 0 不挂武将：这条实例只可能来自 ``Player.granted_skills``（第四种来源），
+    故"非主公有实例"这件事不会是武将牌残留。
+    """
+    dodge = cards_of_type(PACK, "dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=4, hp_max=4, identity=Identity.REBEL, kingdom=Kingdom.QUN),
+            SeatSpec(
+                hp=4,
+                hp_max=4,
+                hand=(dodge,),
+                identity=Identity.REBEL,
+                kingdom=Kingdom.QUN,
+            ),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LORD, kingdom=Kingdom.WEI),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LOYALIST, kingdom=Kingdom.WEI),
+        ],
+        deck=deck_excluding(PACK, dodge),
+        rule_config=RuleConfig(player_count=4, starting_hand_size=1),
+    )
+    engine = Engine.from_state(state, seed=3)
+    assert engine.grant_skill(0, HUANGTIAN) is True, "获得是第四种来源的唯一写入口"
+    return engine, dodge
+
+
+def test_a_granted_lord_skill_exists_for_a_non_lord_and_is_listed_in_the_skills():
+    """非主公获得主公技 ⇒ 实例存在（`GRANTED` 来源），技能区与详情都列得出来。"""
+    engine, _dodge = _granted_huangtian_engine()
+
+    granted = [
+        instance
+        for instance in resolve_instances(engine.state)
+        if instance.owner == 0 and instance.skill_id == HUANGTIAN
+    ]
+    assert len(granted) == 1, "获得的主公技必须产出一个实例（门控只管武将牌载体）"
+    assert granted[0].source.kind is SkillSourceKind.GRANTED
+
+    session = SimpleNamespace(engine=engine, pending=None)
+    listed = {entry["skill_id"]: entry for entry in build_skills(session, 0)}
+    assert HUANGTIAN in listed, "可操作技能区读 `resolve_instances` ⇒ 获得的主公技要列出来"
+    assert listed[HUANGTIAN]["name"] == "黄天"
+
+    detail = {entry["skill_id"] for entry in seat_skill_display(session, 0)}
+    assert HUANGTIAN in detail, "详情面的 `granted_skills` 循环本来就不过滤身份（D3 只读核对）"
+
+
+def test_a_granted_lord_skill_can_be_activated_by_the_non_lord_holder():
+    """获得【黄天】的非主公座位真的能发动它：别的同势力座位交一张【闪】给他。"""
+    engine, dodge = _granted_huangtian_engine()
+    players = [PassPlayer() for _ in range(4)]
+
+    run_queries(
+        engine,
+        players,
+        lambda e: e.pending is not None
+        and e.pending.kind == QueryKind.PLAY_PHASE
+        and e.pending.actor == 1,
+    )
+    action = find_action(
+        engine.pending,
+        lambda item: isinstance(item, ActivateSkill) and item.skill_id == HUANGTIAN,
+    )
+    assert action is not None, "座位 1 的出牌阶段应能发动座位 0 获得的主公技【黄天】"
+    engine.submit(action)
+    run_queries(
+        engine,
+        players,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.SELECT_CARDS,
+    )
+    engine.submit(SelectCards(answers_seq=engine.pending.seq, picks=(0,)))
+    run_queries(engine, players, lambda e: dodge in e.state.player(0).hand)
+
+    assert dodge not in engine.state.player(1).hand, "交出的【闪】进了获得者的手牌"
+
+
+def _hero_card_lord_skill_engine(*, identity):
+    """座位 0 = 张角移动版（武将牌载体带【黄天】），身份由参数钉住。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hp=3,
+                hp_max=3,
+                hero="zhangjiao_mobile",
+                identity=identity,
+                kingdom=Kingdom.QUN,
+            ),
+            SeatSpec(hp=4, hp_max=4, identity=Identity.LOYALIST, kingdom=Kingdom.WEI),
+        ],
+        rule_config=RuleConfig(player_count=2),
+    )
+    return Engine.from_state(state, seed=3)
+
+
+def test_a_hero_card_lord_skill_still_does_not_exist_for_a_non_lord():
+    """反面对照：**武将牌载体**的主公技在非主公身上仍然不产出（门控没有放松）。"""
+    engine = _hero_card_lord_skill_engine(identity=Identity.REBEL)
+    session = SimpleNamespace(engine=engine, pending=None)
+
+    instances = {
+        instance.skill_id for instance in resolve_instances(engine.state) if instance.owner == 0
+    }
+    assert HUANGTIAN not in instances, "非主公的武将牌上根本没有主公技（语义 = 不产出）"
+    listed = {entry["skill_id"] for entry in build_skills(session, 0)}
+    assert HUANGTIAN not in listed
+    assert "hero.zhangjiao_mobile.leiji" in listed, "同一张武将牌上的普通技能照旧产出"
+
+
+def test_a_hero_card_lord_skill_still_exists_for_the_lord():
+    """主公分到同一主公技 ⇒ 行为不变：武将牌载体照旧产出一个 `HERO_CARD` 实例。"""
+    engine = _hero_card_lord_skill_engine(identity=Identity.LORD)
+
+    instances = [
+        instance
+        for instance in resolve_instances(engine.state)
+        if instance.owner == 0 and instance.skill_id == HUANGTIAN
+    ]
+    assert len(instances) == 1
+    assert instances[0].source.kind is SkillSourceKind.HERO_CARD

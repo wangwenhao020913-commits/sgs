@@ -3,7 +3,8 @@
 一张装备 = 一个 :class:`SkillDef`（稳定 id = ``equip.<牌名 id>``），内部可带多条
 :class:`Hook`（键 = 时机枚举本身）、多条 :class:`Seam`（帧内接缝）与多条
 :class:`Modifier`（六个挂点）。M3 票 01 起，**武将牌**成为与装备区并列的载体
-（``CarrierKind.HERO``、``SkillSourceKind.HERO_CARD``、``SkillDef.skill_type`` 的身份门控），
+（``CarrierKind.HERO``、``SkillSourceKind.HERO_CARD``、``SkillDef.skill_type`` 的身份门控；
+M3 起该门控**只作用于此来源**——wuming 票 06 收窄到"武将牌载体"，获得的主公技不受身份限制），
 故同一套定义 / 派发路径服务两类载体。定义目录 :data:`CATALOG` 是**模块级不可变**的；
 "谁持有哪一份"由 :func:`resolve_instances` 在派发时按**载体**
 （装备区 ∪ 虚拟授予 ∪ 武将牌）解析，不做 per-player 实例注册。
@@ -172,9 +173,11 @@ class SkillSourceKind(str, Enum):
     """技能实例的**来源**种类（票 07 §6 的带标签联合；M6 票 04 补第四种）。
 
     ``HERO_CARD``（票 01）是**武将牌**：它不是实体牌，故只为它记 ``skill_id``，
-    **绝不为它造 ``CardRef``**（与虚拟装备同一姿态）。``GRANTED``（M6 票 04）是
+    **绝不为它造 ``CardRef``**（与虚拟装备同一姿态）。它是**唯一**受身份门控的来源
+    （wuming 票 06：只有武将牌上的主公技会被"非主公"挡掉）。``GRANTED``（M6 票 04）是
     运行时**获得**的技能（`GLOSSARY.md`「技能来源」的第四种）：同样不是牌，
-    只记 ``skill_id``，实例由 :func:`resolve_instances` 读 ``Player.granted_skills`` 产出。
+    只记 ``skill_id``，实例由 :func:`resolve_instances` 读 ``Player.granted_skills`` 产出；
+    获得来的主公技**不受身份限制**。
     """
 
     EQUIPMENT_CARD = "EQUIPMENT_CARD"
@@ -504,19 +507,33 @@ def placement_skill_ids(catalog: Mapping[str, SkillDef] | None = None) -> frozen
     )
 
 
-def _identity_gates_out(definition: SkillDef, identity: Identity | None) -> bool:
-    """身份门控：主公技而持有者不是主公 ⇒ 该实例**不产出**（票 01 §身份门控）。"""
+def _identity_gates_out(
+    definition: SkillDef, identity: Identity | None, source: SkillSource
+) -> bool:
+    """身份门控：**武将牌载体**上的主公技而持有者不是主公 ⇒ 该实例**不产出**（票 01）。
+
+    门控的**作用范围只有武将牌**（``source.kind is SkillSourceKind.HERO_CARD``，wuming 票 06 /
+    票 02 §4.4 D1，用户 2026-11-03 第三轮 Q15）：系统只按身份决定"**从不从武将牌上派发**"。
+    其余三种来源——``GRANTED``（运行时获得）、``EQUIPMENT_CARD``、``VIRTUAL_GRANT``——**不拦**：
+    获得的主公技任何身份都能发动（存在"能获得别人主公技"的武将，故必须是通用规则，不按技能
+    特判）。身份缺失（``None``，无身份局）对武将牌载体按"不是主公"处理，与既有语义一致。
+    """
+    if source.kind is not SkillSourceKind.HERO_CARD:
+        return False
     return _is_lord_skill(definition) and identity is not Identity.LORD
 
 
 def lord_skill_allowed(identity: Identity | None, skill_id: str) -> bool:
-    """主公技门控的**只读谓词**：`(身份 == 主公) ∧ (技能定义的类型 == 主公技)`（票 01）。
+    """主公技门控的**武将牌侧**只读谓词：`(身份 == 主公) ∧ (类型 == 主公技)`（票 01）。
 
-    与 :func:`_identity_gates_out` 共用 :func:`_is_lord_skill` 这一个判据，故谓词与派发
-    不会各写一份而漂移。规范落点是 :func:`resolve_instances`（非主公 ⇒ 实例不产出，
-    语义 = 武将牌上根本没有）；本函数只回答"能不能用"，不产出、不驱动派发，给
-    `03` §6「技能分类与过滤」的**过滤链首项**与测试提供可读谓词。未知 ``skill_id``
-    （如 M2 的装备技能）恒 ``False``。
+    它只回答"**这张武将牌上**能不能有这个技能"——身份门控的作用范围就是武将牌载体
+    （wuming 票 06：`GRANTED` / `EQUIPMENT_CARD` / `VIRTUAL_GRANT` 不被拦，获得的主公技
+    任何身份都能发动），故本函数**不是**"这条技能此刻能不能用"的谓词。与
+    :func:`_identity_gates_out` 共用 :func:`_is_lord_skill` 这一个判据，故谓词与派发不会
+    各写一份而漂移；规范落点仍是 :func:`resolve_instances`（非主公的**武将牌**上 ⇒ 实例不
+    产出，语义 = 武将牌上根本没有）。本函数不产出、不驱动派发，给 `03` §6「技能分类与过滤」
+    的**过滤链首项**、投影的武将牌循环与测试提供可读谓词。未知 ``skill_id``（如 M2 的装备
+    技能）恒 ``False``。
     """
     definition = CATALOG.get(skill_id)
     return definition is not None and _is_lord_skill(definition) and identity is Identity.LORD
@@ -735,10 +752,13 @@ def _resolve_instances_uncached(
     失效恢复后那条限定技就能再发动一次。默认 ``False`` = 只回答"此刻真正**在解析中**的
     实例"。
 
-    **身份门控在派发侧的唯一兑现处**是这里（票 01 §身份门控 / `03` §6「技能分类与过滤」）：
-    主公技而持有者不是主公 ⇒ **该实例不产出**——不进实例集合、不进候选、不进修饰器链、不落
-    ``skill_state``、不进记录流。语义是"武将牌上根本没有这个技能"，不是"有但不生效"。
-    ``player.hero is None``（无武将模式）时**根本不查武将数据**，故 M2 的输出逐字节不变。
+    **身份门控在派发侧的唯一兑现处**是这里（票 01 §身份门控 / `03` §6「技能分类与过滤」；
+    wuming 票 06 收窄到武将牌载体）：**武将牌上**的主公技而持有者不是主公 ⇒ **该实例不产出**
+    ——不进实例集合、不进候选、不进修饰器链、不落 ``skill_state``、不进记录流。语义是
+    "武将牌上根本没有这个技能"，不是"有但不生效"。``GRANTED`` / ``EQUIPMENT_CARD`` /
+    ``VIRTUAL_GRANT`` 三种来源**不受身份限制**（获得的主公技任何身份都能发动，见
+    :func:`_identity_gates_out`）。``player.hero is None``（无武将模式）时**根本不查武将
+    数据**，故 M2 的输出逐字节不变。
 
     本函数是**无缓存**实现（缓存未命中的唯一落点，也是键覆盖单测的对照臂）；对外入口是
     :func:`resolve_instances`——两者结果必须逐条相同，这正是票 16 的差分判据。
@@ -793,7 +813,9 @@ def _resolve_instances_uncached(
     deduped: list[SkillInstance] = []
     seen: list[tuple[int, str]] = []
     for instance in found:
-        if _identity_gates_out(instance.definition, state.player(instance.owner).identity):
+        if _identity_gates_out(
+            instance.definition, state.player(instance.owner).identity, instance.source
+        ):
             continue
         key = (instance.owner, instance.skill_id)
         if key in seen:
@@ -1294,7 +1316,8 @@ def _instances_for(
     临时实例是"刚刚失去的装备"（:func:`~sgs.skills.move_after.lost_equipment_instances`）：
     它们已经不在装备区、故不在 :func:`resolve_instances` 的集合里，但这一次 ``MOVE_AFTER``
     仍要替它们派发。同一 ``(owner, skill_id)`` 以存活实例为准（临时实例不重复派发）。身份
-    门控对临时实例同样生效（与 :func:`resolve_instances` 同一条判据）。
+    门控对临时实例同样生效（与 :func:`resolve_instances` 同一条判据；判据只认**武将牌载体**，
+    而临时实例都是失去的装备 ⇒ 不拦）。
 
     **本函数只做并集**：链序（先逐角色、角色内部再按优先级）由 :func:`_chain_order` 在
     派发环里落**唯一一次**——这里再排一遍就成了第二份判据。
@@ -1304,7 +1327,9 @@ def _instances_for(
         return tuple(instances)
     seen = {(instance.owner, instance.skill_id) for instance in instances}
     for instance in extra_instances:
-        if _identity_gates_out(instance.definition, state.player(instance.owner).identity):
+        if _identity_gates_out(
+            instance.definition, state.player(instance.owner).identity, instance.source
+        ):
             continue
         key = (instance.owner, instance.skill_id)
         if key in seen:

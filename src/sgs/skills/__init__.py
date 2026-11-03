@@ -315,7 +315,9 @@ LORD_SKILL_IDS: frozenset[str] = lord_skill_ids()
 
 "这是不是主公技"因此只有一个真源（``SkillDef.skill_type``），不再是一张会与定义漂移的
 名单；运行期的门控读定义字段（:func:`_identity_gates_out` / :func:`lord_skill_allowed`），
-不读这个快照。
+不读这个快照。**这份名单不是"非主公一条都不许有"的过滤器**：身份门控只作用于**武将牌
+载体**（wuming 票 06；`SkillSourceKind.HERO_CARD`），运行时**获得**的主公技
+（`Player.granted_skills`，来源 ``GRANTED``）任何身份都能发动，投影的获得循环也不按它筛。
 """
 
 PLACEMENT_SKILL_IDS: frozenset[str] = placement_skill_ids()
