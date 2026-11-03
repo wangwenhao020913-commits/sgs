@@ -58,6 +58,8 @@ from support import (
 )
 
 PACK = load_content_pack(deck_profile="standard_108")
+EX_PACK = load_content_pack(deck_profile="standard_ex_160")
+"""军争档（票 03）：白银狮子只在 160 档里，故只有这一条结算顺序用例换包；其余仍走 ``PACK``。"""
 
 ZHIHENG = "hero.jie_sunquan.zhiheng"
 JIUYUAN = "hero.jie_sunquan.jiuyuan"
@@ -150,6 +152,31 @@ def _activated(engine, skill_id: str) -> bool:
         and record.action.skill_id == skill_id
         for record in engine.records
     )
+
+
+def _hp_deltas(engine) -> list[tuple[int, int, int]]:
+    """按记录流**先后**给出 ``(seat, before, after)``（不排序：断的就是先后）。"""
+    return [
+        (record.seat, record.before, record.after)
+        for record in engine.records
+        if record.kind == "delta" and record.delta_type == "hp_change"
+    ]
+
+
+def _pushed_frames(engine, kind: FrameKind) -> list:
+    return [
+        record
+        for record in engine.records
+        if record.kind == "frame" and record.op == "push" and record.frame_kind is kind
+    ]
+
+
+def _record_at(engine, predicate) -> int:
+    """第一条满足 ``predicate`` 的记录下标；没有则 ``-1``（次序断言用）。"""
+    for index, record in enumerate(engine.records):
+        if predicate(record):
+            return index
+    return -1
 
 
 def _ran(engine, timing: Timing) -> bool:
@@ -334,6 +361,100 @@ def test_the_standard_huanggai_kurou_is_still_repeatable_without_a_cost():
         turn_seat=0,
     )
     assert _skill_offers(state, "hero.huanggai.kurou")
+
+
+def test_kurou_paid_with_silver_lion_recovers_before_losing_the_hp():
+    """票 03（顺序）：1 体力界黄盖弃【白银狮子】发动界【苦肉】⇒ 回复**先于**失去体力。
+
+    白银狮子②是锁定技"失去装备区里的【白银狮子】时回复 1 点"，它插在**弃置**之后、苦肉
+    流程的"失去 1 点体力"**之前**（`三国杀详细规则.txt` §四 L450 插入结算「后发生的事件
+    先结算」+ §七 L757）：正确序列 `1 → 2（回复）→ 1（失去体力）`，全程不进濒死、不求桃，
+    【诈降】摸三张排在回复之后。
+
+    旧实现 ``_silver_lion_lost`` 压了 ``RECOVER`` 帧却不让出，苦肉的效果体接着把自己的
+    ``LIFE_DECREASE`` 帧压在它**上面**；帧栈后进先出 ⇒ 先跑失去体力：`1 → 0`（濒死、求桃、
+    被救回）`→ 1 → 2`。终局体力两种实现都是 1，故判据只能落在**记录流的先后**上。
+    """
+    silver = cards_of_type(EX_PACK, "silver_lion")[0]
+    peach = cards_of_type(EX_PACK, "peach")[0]
+    state = build_state(
+        pack=EX_PACK,
+        seats=[
+            SeatSpec(hp=1, hp_max=4, equip=(silver,), hero="jie_huanggai"),
+            SeatSpec(hand=(peach,)),
+        ],
+        deck=deck_excluding(EX_PACK, silver, peach),
+        turn_seat=0,
+        rule_config=RuleConfig(first_seat=0),
+    )
+    used = {"kurou": 0, "peach": 0}
+
+    def kurou(query):
+        if query.kind == QueryKind.PLAY_PHASE and not used["kurou"]:
+            action = _find(
+                query, lambda a: isinstance(a, ActivateSkill) and a.skill_id == KUROU
+            )
+            if action is not None:
+                used["kurou"] += 1
+                return action
+        if query.kind == QueryKind.SELECT_CARDS:
+            index = next(
+                (
+                    slot_index
+                    for slot_index, slot in enumerate(query.slots)
+                    if slot.card is not None and slot.card.type == "silver_lion"
+                ),
+                None,
+            )
+            assert index is not None, "选择面里没有白银狮子（局面构造坏了）"
+            return SelectCards(picks=(index,), answers_seq=query.seq)
+        return None
+
+    def rescue(query):
+        if query.kind == QueryKind.PEACH and not used["peach"]:
+            action = _find(
+                query, lambda a: isinstance(a, UseCard) and a.card.card_id == peach
+            )
+            if action is not None:
+                used["peach"] += 1
+                return action
+        return None
+
+    engine = _run(state, [Scripted(kurou), Scripted(rescue)], _phase_over)
+
+    assert used["kurou"] == 1, "脚本该发动一次界【苦肉】"
+    assert _hp_deltas(engine) == [(0, 1, 2), (0, 2, 1)], (
+        "先回复（1 → 2）再失去体力（2 → 1）；旧实现是 1 → 0 → 1 → 2"
+    )
+    assert _pushed_frames(engine, FrameKind.NEAR_DEATH) == [], (
+        "回复插在失去体力之前 ⇒ 全程不进濒死"
+    )
+    peach_queries = [
+        record.seq
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.PEACH
+    ]
+    assert peach_queries == [], f"没有濒死 ⇒ 一条求桃询问都不该有，实际 {peach_queries}"
+    assert used["peach"] == 0, "座位 1 的【桃】全程没被用掉"
+    recover_at = _record_at(
+        engine,
+        lambda record: record.kind == "delta"
+        and record.delta_type == "hp_change"
+        and (record.before, record.after) == (1, 2),
+    )
+    zhaxiang_at = _record_at(
+        engine,
+        lambda record: record.kind == "delta"
+        and record.delta_type == "card_move"
+        and record.from_zone.zone is Zone.DECK
+        and record.to_zone.zone is Zone.HAND
+        and len(record.cards) == 3,
+    )
+    assert -1 < recover_at < zhaxiang_at, (
+        f"【诈降】摸三张应排在回复之后（recover@{recover_at}, 诈降@{zhaxiang_at}）"
+    )
+    assert engine.state.player(0).hp == 1, "回复 1 点又被失去 1 点抵掉"
+    assert silver in engine.state.discard, "狮子是界【苦肉】付掉的那张成本"
 
 
 # ---------------------------------------------------------------------------

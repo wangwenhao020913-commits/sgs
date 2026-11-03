@@ -1824,20 +1824,44 @@ def _lost_this_equipment(card_type_id: str) -> HookCondition:
     return condition
 
 
-def _silver_lion_lost(host: Any, frame: Frame) -> None:
-    """失去白银狮子：**走正常 RECOVER 帧**回复 1 点（不直接改 HP）。
+def _silver_lion_lost(host: Any, frame: Frame) -> Control:
+    """失去白银狮子：**走正常 RECOVER 帧**回复 1 点（不直接改 HP），压完**让出**给子帧。
 
     压帧而不是原地写 ``hp``：回复量的修正（``RECOVER_AMOUNT``）、体力上限夹取与
     ``RECOVER_VALUE`` / ``RECOVER_AFTER`` 两个时机都仍由 :mod:`sgs.engine.steps` 的
     ``RECOVER`` 步骤表统一处理——与【桃】/【桃园结义】/主动技的回复是同一条流程。
     持有者 = :data:`skill_owner`（``_dispatch`` 在回调前写入）。
+
+    **压帧 = 让出**（票 03）：本钩子是在**别人的效果体里**由移动内联派发的（界【苦肉】：
+    弃一张牌 → 失去 1 点体力）。压完子帧若 ``return None``，那个效果体会以为"这次移动
+    没事了"，接着把自己的帧压在 ``RECOVER`` **上面**——帧栈后进先出，回复因此被顶到后面
+    （1 体力界黄盖先进濒死、求桃）。``"stay"`` 把控制权交回驱动循环：``_step`` 先
+    ``_flush_pending_move``（续跑 = 重新派发本钩子，下面那条游标命中、零动作），再
+    ``stack.step()`` 处理**栈顶**的 ``RECOVER`` ⇒ 回复先于效果体后续的动作。
+
+    帧私有游标（``silver_lion:recovered:<这批牌>``）**在压帧之前**写：续跑会重入**同一次**
+    移动的派发，没有游标就会压第二张 ``RECOVER``（回复两次）。键按**这批牌**分桶，与
+    【枭姬】的 ``<skill>:act:<cards>`` 同款：同一帧里两次独立失去装备是两个时机实例，
+    只按技能 id 分桶会让第二次读到第一次的游标而静默不回复。
     """
     owner = frame.data["skill_owner"]
+    # 延迟导入：``move_after`` 在 catalog **文件末尾**才并入技能表（模块级循环）。
+    from .move_after import move_event
+
+    event = move_event(frame)
+    key = "silver_lion:recovered:" + ",".join(
+        str(card_id) for card_id in (event.card_ids if event is not None else ())
+    )
+    if frame.data.get(key):
+        # 这次"失去装备"的时机已经做过（``_flush_pending_move`` 的续跑重入）。
+        return None
+    frame.data[key] = True
     host.push_frame(
         FrameKind.RECOVER,
         {"source": owner, "targets": (owner,), "card": None, "amount": 1},
         timing=Timing.RECOVER_VALUE,
     )
+    return "stay"
 
 
 def _scimitar_no_hand_bonus(state: GameState, ctx: ModifierContext, current: Any) -> Any:
