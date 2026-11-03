@@ -144,7 +144,7 @@
 | `RESPOND` | 通用响应窗口（打出/使用一张牌） | 决斗的【杀】、万箭的【闪】、借刀的"使用【杀】"、无懈的收集式窗口；提供者在这些窗口里以 `CANDIDATES` 追加（`respond_declared` 为真时闭嘴：赢家已定） |
 | `SELECT_CARDS` | 流水线选牌步 | 自己区域的直选在 `candidates.js` 判；`spec.max_per_suit` 存在时按花色收窄（涉猎，0 下限由牌面决定） |
 | `SKILL_ACTIVATION` | 钩子的"是否发动" | 键含时机；同帧第二次触发会复用答案（已裁定） |
-| `SELECT_OPTION` | 选项步 / 手写二选一 | 单个选项 + `Pass` 走"提交/放弃"确认形态；**置灰**的选项（`PickOption.disabled` → `StepPool.disabled`）在预发动清单里**照样列出来但不可选**（蛊惑的牌名弹窗：列全牌堆名，此刻用不了的画灰），引擎的逐步校验同样拒收它 |
+| `SELECT_OPTION` | 选项步 / 手写二选一 | 单个选项 + `Pass` 走"提交/放弃"确认形态；**置灰**的选项（`PickOption.disabled` → `StepPool.disabled`）在预发动清单里**照样列出来但不可选**（蛊惑的牌名弹窗：列全牌堆名，此刻用不了的画灰），引擎的逐步校验同样拒收它。**逐步询问**这一面自票 07 起同样有置灰口：`Engine.ask_option(..., disabled=..., hero_card=..., option_texts=...)` 把置灰项留在询问的 `options` 里、只从 `legal_actions` 剔除（提交被拒），投影派生 `option_details`（技能名 / `descriptions.json` 原文 / 置灰标记）给界面画灰——目前唯一载体是"展示武将牌"那一类（票 02 §4.2 B 段） |
 | `ARRANGE` | 观星式排列 | 不能下发预发动清单 |
 | `DISTRIBUTE` | **计数式分配**（神周瑜移动版【业炎】= 首个载体，huo-shenzhouyu-mobile 票 05）：一张弹窗里给若干座位各配一个计数（`seats` / `max_total` / `per_seat_max`） | 候选 = 「每座 0..单座上限、合计 ≤ 上限」的全量枚举；答案 = `Action.Distribute(counts)`（座位升序、省略 0）；`counts=()` 键最小 ⇒ 超时兜底 = 不分配 |
 

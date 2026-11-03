@@ -75,6 +75,7 @@ from sgs.state import (
     DodgeQuery,
     EndPhase,
     FrameKind,
+    HeroCardRef,
     HeroCardZone,
     Pass,
     PeachQuery,
@@ -5368,3 +5369,73 @@ def test_the_forced_and_locked_jie_skills_never_ask_for_an_activation() -> None:
         and record.query.kind == QueryKind.SKILL_ACTIVATION
     }
     assert asked == set(), f"未受伤的界徐庶不该有技能激活询问：{asked}"
+
+
+# ---------------------------------------------------------------------------
+# 展示武将牌的选项询问（票 07 / 票 02 §4.2 B5）：拿技能 vs 技能自己的效果行
+# ---------------------------------------------------------------------------
+
+HERO_CARD_SKILL = "hero.jie_guanyu.wusheng"
+HERO_CARD_OPTION = "max_hp_and_draw"
+HERO_CARD_OPTION_TEXT = "增加 1 点体力上限，回复 1 点体力，摸 2 张牌"
+
+
+def _shown_hero_card_query(*, disabled=()):
+    """展示武将牌的一次选项询问：一行"获得技能" + 一行技能自己的效果（引擎给文本）。"""
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()])
+    options = (HERO_CARD_SKILL, HERO_CARD_OPTION)
+    option_texts = {HERO_CARD_OPTION: HERO_CARD_OPTION_TEXT}
+    actions = legal_actions_for(
+        state,
+        0,
+        QueryKind.SELECT_OPTION,
+        answers_seq=1,
+        payload=SelectOptionContext(
+            skill_id="hero.wuming.tiancheng",
+            options=options,
+            disabled=disabled,
+            option_texts=option_texts,
+        ),
+    )
+    return SelectOptionQuery(
+        seq=1,
+        actor=0,
+        timing=Timing.PHASE_PLAY_IDLE,
+        prompt="请选择一项。",
+        legal_actions=actions,
+        view=project(state, 0),
+        skill_id="hero.wuming.tiancheng",
+        options=options,
+        disabled=disabled,
+        option_texts=option_texts,
+        hero_card=HeroCardRef(hero_id="jie_guanyu", index=1, total=3),
+    )
+
+
+def _select_option_score(query, choice):
+    return heuristic_scoring._SCORERS[QueryKind.SELECT_OPTION](
+        query, SelectOption(choice=choice, answers_seq=query.seq)
+    )
+
+
+def test_a_shown_hero_card_scores_the_skill_row_and_the_effect_row_differently():
+    """两行各有语义：``option_texts`` 里有文本 = 技能自己的效果行，没有 = 获得技能的行。"""
+    query = _shown_hero_card_query()
+
+    skill_score = _select_option_score(query, HERO_CARD_SKILL)
+    effect_score = _select_option_score(query, HERO_CARD_OPTION)
+
+    assert skill_score > 0.0, "获得一个技能是正收益，不能与「放弃」打平"
+    assert effect_score > skill_score, "技能自己的效果行按一次性收益估，优先于拿技能"
+    assert HeuristicPlayer(_stream(3)).respond(query).choice == HERO_CARD_OPTION
+
+
+def test_a_greyed_option_is_never_scored():
+    """置灰项只留在载荷里（候选里没有），打分器仍要压住它——防御性分支。"""
+    query = _shown_hero_card_query(disabled=(HERO_CARD_SKILL,))
+
+    assert [action.choice for action in query.legal_actions] == [HERO_CARD_OPTION]
+    assert HeuristicPlayer(_stream(4)).respond(query).choice == HERO_CARD_OPTION
+    assert _select_option_score(query, HERO_CARD_SKILL) < 0.0, (
+        "置灰项哪怕被硬塞进打分器也不该拿正分"
+    )

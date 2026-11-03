@@ -34,10 +34,17 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from sgs.data import IDENTITY_LABELS, Hero, HeroTable, Suit, color_of_suit
-from sgs.state import CardRef, EndPhase, Pass, PlayerPublic, Query, SelectCards
+from sgs.data import (
+    IDENTITY_LABELS,
+    Hero,
+    HeroTable,
+    Suit,
+    color_of_suit,
+    hero_skill_id,
+)
+from sgs.state import CardRef, EndPhase, HeroCardRef, Pass, PlayerPublic, Query, SelectCards
 
-from .descriptions import card_description
+from .descriptions import card_description, skill_description
 from .timeout import fallback_action, yiji_give_self_choice
 
 __all__ = [
@@ -50,8 +57,10 @@ __all__ = [
     "card_payload",
     "decorate_pending",
     "decorate_snapshot",
+    "hero_card_display",
     "hero_in_tables",
     "hidden_guohuo_payload",
+    "option_details",
     "prompt_display",
     "seat_display",
     "suit_labels",
@@ -367,6 +376,80 @@ def hero_in_tables(
         if hero is not None:
             return hero
     return None
+
+
+def hero_card_display(
+    heroes: HeroTable | Sequence[HeroTable] | None, card: HeroCardRef | None
+) -> dict[str, Any] | None:
+    """一次询问**展示的武将牌**的展示字段（票 07；票 02 §4.2 B4）：服务端派生。
+
+    引擎只给"是哪张 + 第几张 / 共几张"（:class:`~sgs.state.HeroCardRef`），势力 / 名称 /
+    体力上限是数据表的公开事实，在这里补齐——前端不查表、也不抄第二份武将数据。
+
+    ``card is None``（这一问不展示武将牌）⇒ ``None``，调用方**不加**这个键（既有询问载荷
+    逐字节不变）。``card.hero_id is None``（池子抽空的那一次）⇒ 只有 n-of-m，武将块三要素
+    全是 ``None``（界面只画"第 k/m 张"与效果行）。未知 id 与"没有武将牌"同形：不编名字。
+
+    读取方 = :func:`sgs_web.projection.pending_payload` 的 ``hero_card`` 键（UI 票 08）。
+    """
+    if card is None:
+        return None
+    hero = hero_in_tables(heroes, card.hero_id)
+    kingdom = hero.kingdom.value if hero is not None else None
+    return {
+        "hero_id": card.hero_id,
+        "index": card.index,
+        "total": card.total,
+        "name": hero.name if hero is not None else None,
+        "kingdom": kingdom,
+        "kingdom_label": KINGDOM_LABELS.get(kingdom) if kingdom is not None else None,
+        "hp_max": hero.hp_max if hero is not None else None,
+    }
+
+
+def option_details(
+    query: Query, *, heroes: HeroTable | Sequence[HeroTable] | None = None
+) -> list[dict[str, Any]] | None:
+    """``SELECT_OPTION`` 的**每一行选项**（票 07；票 02 §4.2 B4）：服务端派生、不按查看者裁剪。
+
+    一行 = ``{choice, text, description, skill_id, disabled}``，与 ``query.options`` **同序**
+    （置灰项保留原位）。三件事实各有唯一真源：
+
+    - 技能行（选项 id 在**这张武将牌**的技能清单里）：``text`` = 数据表的 ``HeroSkill.name``，
+      ``description`` = ``descriptions.json`` 的**原文、不截断**，``skill_id`` = 该 id；
+    - 非技能行（技能自己的效果，如"增加 1 点体力上限…摸 X 张牌"）：``text`` = 引擎随询问
+      给的文本（X 这类动态数字只有引擎算得出来），``description`` / ``skill_id`` 为 ``None``；
+    - ``disabled``：引擎随询问给的置灰标记（不在 ``legal_actions`` 里）。
+
+    ``query`` 没有 ``options``（不是选项询问）⇒ ``None``——调用方按"新字段在用时才加键"
+    的判据决定加不加，既有询问载荷因此逐字节不变。``heroes`` 给的是武将表（M6 票 19 起可
+    多张）；``None`` 时技能行退化成"用选项 id 当文本"，不会编名字。
+    """
+    options = getattr(query, "options", None)
+    if options is None:
+        return None
+    card = getattr(query, "hero_card", None)
+    hero = hero_in_tables(heroes, card.hero_id) if card is not None else None
+    names: dict[str, str] = {}
+    if hero is not None:
+        names = {hero_skill_id(hero.id, skill.id): skill.name for skill in hero.skills}
+    texts = dict(getattr(query, "option_texts", None) or {})
+    disabled = frozenset(getattr(query, "disabled", None) or ())
+    rows: list[dict[str, Any]] = []
+    for choice in options:
+        skill_name = names.get(choice) if isinstance(choice, str) else None
+        rows.append(
+            {
+                "choice": choice,
+                "text": texts.get(choice) or skill_name or choice,
+                "description": (
+                    skill_description(choice) if skill_name is not None else None
+                ),
+                "skill_id": choice if skill_name is not None else None,
+                "disabled": choice in disabled,
+            }
+        )
+    return rows
 
 
 def prompt_display(query: Query) -> dict[str, Any]:

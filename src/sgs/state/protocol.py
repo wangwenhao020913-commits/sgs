@@ -20,7 +20,8 @@ M1 四类询问（``PLAY_PHASE`` / ``DODGE`` / ``PEACH`` / ``DISCARD``）各一�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Annotated, Any, Literal
 
@@ -42,6 +43,7 @@ __all__ = [
     "DodgeContext",
     "DodgeQuery",
     "EndPhase",
+    "HeroCardRef",
     "Pass",
     "PeachQuery",
     "PlayCard",
@@ -374,11 +376,24 @@ class SelectOptionContext:
     ``optional`` 是**取消能力**的显式开关（票 00 / N4）：缺省 ``False`` ⟹ 强制闭集，
     候选一条不多（雌雄双股剑、遗计"交给谁"的既有口径不变）；置 ``True`` 才多一条
     ``Pass``，供"发动后中途取消、取消不消耗技能使用次数"的技能流水线用。
+
+    **展示面**（票 07；票 02 §4.2 B2）三件都是可选、缺省为"没有"：
+
+    - ``disabled``：**显示但不可选**的选项（如"已拥有的技能"）——它们在
+      :attr:`options` 里保留原位，但**不进** ``legal_actions``（与 ``StepPool.disabled``
+      同语义，走逐步询问这条面）；
+    - ``option_texts``：**引擎给**的选项显示文本（键 = 选项 id）；武将牌上的技能行不给，
+      由投影从数据表派生名字与描述（见 :attr:`SelectOptionQuery.option_texts`）；
+    - ``hero_card``：本次询问展示的**武将牌**（id + n-of-m）；``hero_id=None`` = 这一次
+      没有武将牌（池子抽空，只给技能自己的那一行）。
     """
 
     skill_id: str
     options: tuple[str, ...]
     optional: bool = False
+    disabled: tuple[str, ...] = ()
+    option_texts: Mapping[str, str] = field(default_factory=dict)
+    hero_card: "HeroCardRef | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -748,6 +763,12 @@ class _QueryBase(_FrozenModel):
         data = handler(self)
         if not self.revealed:
             data.pop("revealed", None)
+        # 票 07：``SELECT_OPTION`` 的展示载荷缺省**不落盘**——空值不出现在记录流里，
+        # 既有询问记录因此逐字节不变（与 ``revealed`` 同一姿态）。键只在这些子类上存在，
+        # 对其余询问是 no-op。
+        for absent in ("hero_card", "option_texts", "disabled"):
+            if absent in data and not data[absent]:
+                data.pop(absent)
         return data
 
 
@@ -854,12 +875,47 @@ class SkillActivationQuery(_QueryBase):
     """
 
 
+class HeroCardRef(_FrozenModel):
+    """一次询问**展示的武将牌**与它在本次展示里的序号（票 07；票 02 §4.2 B2）。
+
+    只有"是哪张 + 第几张 / 共几张"三个事实——势力 / 名称 / 体力上限**不在这里**：它们是
+    数据表的公开事实，由投影按 ``hero_id`` 派生下发（票 02 §4.2 B4）。本结构进询问记录，
+    故回放 / 排查看得到"这一问问的是哪张武将牌、第几次展示"。
+
+    ``hero_id=None`` = 这一次**没有武将牌**（可抽真名不足；01 的"展示恒为 3 次"里缺的那
+    几次），此时 ``index`` / ``total`` 仍给出 n-of-m（分母恒为 3）。
+    """
+
+    hero_id: str | None = None
+    index: int = 1
+    """本次展示的序号（1 基；"第 k/m 张"的 k）。"""
+    total: int = 1
+    """本次展示的**分母**（"第 k/m 张"的 m；缺牌的那几次它也不缩水）。"""
+
+
 class SelectOptionQuery(_QueryBase):
-    """选项二选一（票 12 §Q6 / 票 30）：生产者 = 【雌雄双股剑】，选择权在**目标**。"""
+    """选项二选一（票 12 §Q6 / 票 30）：生产者 = 【雌雄双股剑】，选择权在**目标**。
+
+    **展示载荷**（票 07；票 02 §4.2 B2–B3）三个字段都可选，缺省**不序列化**（既有询问记录
+    逐字节不变）：
+
+    - ``disabled``：显示但不可选的选项（置灰）——保留在 :attr:`options` 的原位，
+      **只**不在 ``legal_actions`` 里；
+    - ``option_texts``：引擎给的选项显示文本（键 = 选项 id）。**约定**：有文本的行是
+      技能自己的效果选项（选项 2 的"摸 X 张"这类动态文案由引擎算）；**没有**文本的行是
+      "武将牌上的一条技能"，名字与描述由投影从数据表 + ``descriptions.json`` 派生；
+    - ``hero_card``：本次展示的武将牌（id / 第几张 / 共几张）。
+
+    :attr:`options` 仍是**全部**选项（含置灰），因为它是展示面的真源；可提交性由
+    ``legal_actions`` 表达。
+    """
 
     kind: Literal["SELECT_OPTION"] = "SELECT_OPTION"
     skill_id: str
     options: tuple[str, ...]
+    disabled: tuple[str, ...] = ()
+    option_texts: dict[str, str] = Field(default_factory=dict)
+    hero_card: HeroCardRef | None = None
 
 
 class DistributeQuery(_QueryBase):

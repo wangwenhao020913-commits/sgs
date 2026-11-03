@@ -73,7 +73,7 @@ from sgs_web.display import (  # noqa: E402
     prompt_display,
     suit_labels,
 )
-from sgs_web.descriptions import skill_description  # noqa: E402
+from sgs_web.descriptions import SKILL_DESCRIPTIONS, skill_description  # noqa: E402
 from sgs_web.projection import (  # noqa: E402
     HARVEST_REQUIREMENT,
     build_skills,
@@ -9966,3 +9966,139 @@ def test_the_lord_skill_grant_is_listed_but_greyed_without_a_qualifying_card() -
     # 魏势力座位不是授予对象 ⇒ 一条也不列。
     wei = {entry["skill_id"] for entry in build_skills(session, 2)}
     assert "hero.zhangjiao_mobile.huangtian" not in wei
+
+
+# ---------------------------------------------------------------------------
+# 武将牌展示载荷（票 07 / 票 02 §4.2 B4）：武将块 + 选项行 + n-of-m，服务端派生、全场可见
+# ---------------------------------------------------------------------------
+
+HERO_CARD_SKILL = "hero.jie_guanyu.wusheng"
+HERO_CARD_OPTION = "max_hp_and_draw"
+HERO_CARD_OPTION_TEXT = "增加 1 点体力上限，回复 1 点体力，摸 2 张牌"
+
+
+def _shown_hero_card_session(*, hero_card=None, options=(HERO_CARD_SKILL, HERO_CARD_OPTION)):
+    """构造会话并把挂起**换成**一次"展示武将牌"的选项询问（走真的 ``ask_option``）。"""
+    from sgs.state import HeroCardRef  # noqa: PLC0415 - 只在票 07 用例里用
+
+    session = Session(
+        seed=20261107,
+        ai="random",
+        timeout_seconds=None,
+        player_count=2,
+        human_seat=1,
+        hero_pool=None,
+    )
+    card = (
+        HeroCardRef(hero_id="jie_guanyu", index=2, total=3)
+        if hero_card is None
+        else hero_card
+    )
+    session.engine.ask_option(
+        Frame(kind=FrameKind.SKILL, data={}),
+        0,
+        Timing.PHASE_PLAY_IDLE,
+        skill_id="hero.wuming.tiancheng",
+        options=options,
+        disabled=(HERO_CARD_SKILL,) if HERO_CARD_SKILL in options else (),
+        hero_card=card,
+        option_texts={HERO_CARD_OPTION: HERO_CARD_OPTION_TEXT},
+    )
+    assert session.pending is not None
+    return session
+
+
+def test_the_pending_payload_carries_the_hero_card_and_every_option_row() -> None:
+    """U1 的载荷契约（B4）：势力 / 名称 / 体力上限、n-of-m、技能描述全文、置灰标记。"""
+    session = _shown_hero_card_session()
+
+    payload = pending_payload(session)
+
+    hero = payload["hero_card"]
+    assert hero["hero_id"] == "jie_guanyu"
+    assert (hero["index"], hero["total"]) == (2, 3), "第 k/m 张"
+    assert hero["name"] == "界关羽", "名称从武将表派生（引擎只给 id）"
+    assert hero["kingdom"] == "shu" and hero["kingdom_label"] == "蜀"
+    assert hero["hp_max"] == 4
+
+    rows = payload["option_details"]
+    assert [row["choice"] for row in rows] == [HERO_CARD_SKILL, HERO_CARD_OPTION], (
+        "置灰项保留原位（选项行与 query.options 同序）"
+    )
+    skill_row = rows[0]
+    assert skill_row["skill_id"] == HERO_CARD_SKILL
+    assert skill_row["text"] == "武圣", "技能名 = 数据表 HeroSkill.name"
+    assert skill_row["description"] == SKILL_DESCRIPTIONS[HERO_CARD_SKILL], (
+        "描述 = descriptions.json 原文，不截断"
+    )
+    assert len(skill_row["description"]) > 20
+    assert skill_row["disabled"] is True
+
+    option_row = rows[1]
+    assert option_row["skill_id"] is None, "技能自己的效果行不是技能行"
+    assert option_row["text"] == HERO_CARD_OPTION_TEXT, "选项文本由引擎给（含具体 X）"
+    assert option_row["description"] is None, "非技能行没有技能描述"
+    assert option_row["disabled"] is False
+
+    assert [action["choice"] for action in payload["legal_actions"]] == [HERO_CARD_OPTION], (
+        "置灰项不在候选里（可提交的只有效果行）"
+    )
+
+
+def test_the_hero_card_payload_is_public_to_a_viewer_who_is_not_the_actor() -> None:
+    """全场可见（第二轮 R6）：查看者不是应答者时，武将牌与选项行**照样**下发。"""
+    session = _shown_hero_card_session()
+    assert session.pending is not None and session.pending.actor == 0
+    assert session.human_seat == 1, "查看者 ≠ 询问者"
+
+    payload = pending_payload(session)
+
+    assert payload["hero_card"]["name"] == "界关羽"
+    assert [row["text"] for row in payload["option_details"]] == [
+        "武圣",
+        HERO_CARD_OPTION_TEXT,
+    ]
+
+
+def test_the_hero_card_payload_also_lands_on_the_bare_409_path() -> None:
+    """409 里附带的裸 ``Query`` 拿不到会话，但武将牌是数据面的公开事实 —— 照样派生。"""
+    session = _shown_hero_card_session()
+    query = session.pending
+    assert query is not None
+
+    payload = pending_payload(query, human_seat=1)
+
+    assert payload["hero_card"]["name"] == "界关羽"
+    assert payload["hero_card"]["hp_max"] == 4
+    assert payload["option_details"][0]["description"] == SKILL_DESCRIPTIONS[HERO_CARD_SKILL]
+
+
+def test_a_show_without_a_hero_card_keeps_the_n_of_m_and_the_effect_row() -> None:
+    """池子抽空的那一次：没有武将牌，但 n-of-m 与效果行照旧（分母恒为 3）。"""
+    from sgs.state import HeroCardRef  # noqa: PLC0415 - 只在票 07 用例里用
+
+    session = _shown_hero_card_session(
+        hero_card=HeroCardRef(hero_id=None, index=3, total=3),
+        options=(HERO_CARD_OPTION,),
+    )
+
+    payload = pending_payload(session)
+
+    assert payload["hero_card"] == {
+        "hero_id": None,
+        "index": 3,
+        "total": 3,
+        "name": None,
+        "kingdom": None,
+        "kingdom_label": None,
+        "hp_max": None,
+    }, "没有武将牌时仍给 n-of-m，武将块字段为 None（界面只画效果行）"
+    assert payload["option_details"] == [
+        {
+            "choice": HERO_CARD_OPTION,
+            "text": HERO_CARD_OPTION_TEXT,
+            "description": None,
+            "skill_id": None,
+            "disabled": False,
+        }
+    ]

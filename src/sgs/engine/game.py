@@ -29,6 +29,7 @@ from sgs.data import (
     card_tag_spec,
     color_of_suit,
     deal_heroes,
+    enabled_hero_ids,
     hero_by_id,
     hero_placement_decl,
     roster_for,
@@ -76,6 +77,7 @@ from sgs.skills import (
     SeamKind,
     SkillInstance,
     advance_provider,
+    blocked_true_names,
     card_preactivations,
     dispatch_move_after,
     dispatch_seam,
@@ -121,6 +123,7 @@ from sgs.state import (
     DodgeQuery,
     FrameKind,
     GameState,
+    HeroCardRef,
     HeroCardZone,
     HpChangeDelta,
     HpMaxChangeDelta,
@@ -187,7 +190,7 @@ from .journal import (
     dump_journal,
     wrap_delta,
 )
-from .rng import RandomSource
+from .rng import RandomSource, hero_cards_stream
 from .steps import CHAIN_TRIGGER_KEY, MAXLIFE_INCREASE, build_steps
 from .victory import DeathFact, Side, solve_identity_outcome
 
@@ -599,6 +602,15 @@ class Engine:
 
         与 ``shuffle`` / ``ai`` / ``identity`` 相互独立；判定仍走 ``shuffle``（票 03 不变），
         故"新增一条子流"不扰动任何既有随机序列。
+        """
+
+        self._seed = seed
+        self._hero_cards: Randomness | None = None
+        """**武将牌堆抽取**子流（票 07；票 02 §4.2 B1）——**懒取**：首次真的抽牌时才派生。
+
+        ``None`` = 本局还没抽过武将牌。派生本身是名字哈希的纯函数、不消耗任何既有子流，
+        "懒"是为了让"抽牌这件事发生了没有"在代码里也是显式的一步：不抽武将牌的对局
+        一个随机数都不从这里取，既有金录像因此逐字节不变。
         """
 
         self.stack = ResolutionStack()
@@ -2442,6 +2454,9 @@ class Engine:
         options: tuple[str, ...],
         optional: bool = False,
         revealed: tuple[CardRef, ...] = (),
+        disabled: tuple[str, ...] = (),
+        option_texts: Mapping[str, str] | None = None,
+        hero_card: HeroCardRef | None = None,
     ) -> Any:
         """发一次 ``SELECT_OPTION`` 询问（票 12 §Q6 / 票 30）：选项闭集。
 
@@ -2453,6 +2468,19 @@ class Engine:
         带授予牌面"这个**形状**开选择型弹窗：牌面画在弹窗里（只读、仅本人可见）、选项按钮
         也在同一弹窗 —— "先看到这几张牌，再选一项"因此是**一问**，不会被拆成两步。
 
+        **展示载荷**（票 07；票 02 §4.2 B2）三个可选参数，缺省 = 既有行为（候选与载荷都不
+        多一个字节）：
+
+        - ``disabled``：**显示但不可选**的选项 id（已拥有的技能等）。它们必须来自
+          ``options``；候选（``legal_actions``）里**只有可选项**，置灰项只留在载荷里；
+        - ``option_texts``：引擎给的**选项显示文本**（键 = 选项 id，必须来自 ``options``）；
+          技能行不给，名字 / 描述由投影从数据表派生（见
+          :attr:`~sgs.state.SelectOptionContext.option_texts`）；
+        - ``hero_card``：本次展示的**武将牌**（:class:`~sgs.state.HeroCardRef`；``hero_id=None``
+          = 这一次没有武将牌，仍给 n-of-m）。
+
+        越界的置灰 / 文本是编程错误 ⇒ ``ValueError``（fail-closed，不静默忽略）。
+
         答案按 ``(skill_id, actor)`` 帧内缓存，重入不重发。
         """
         answers = frame.data.setdefault("ask_answers", {})
@@ -2463,6 +2491,15 @@ class Engine:
         answer_key = _option_answer_key(frame, skill_id, actor)
         if answer_key in answers:
             return answers[answer_key]
+        texts = dict(option_texts or {})
+        unknown = [option for option in disabled if option not in options]
+        if unknown:
+            raise ValueError(f"置灰项不在本次询问的选项里：{unknown!r}（选项 = {options!r}）")
+        unknown = [option for option in texts if option not in options]
+        if unknown:
+            raise ValueError(
+                f"选项文本指向了不在本次询问选项里的 id：{unknown!r}（选项 = {options!r}）"
+            )
         action = self.ask(
             lambda seq: self._build_query(
                 QueryKind.SELECT_OPTION,
@@ -2470,7 +2507,12 @@ class Engine:
                 timing,
                 seq,
                 payload=SelectOptionContext(
-                    skill_id=skill_id, options=options, optional=optional
+                    skill_id=skill_id,
+                    options=options,
+                    optional=optional,
+                    disabled=tuple(disabled),
+                    option_texts=texts,
+                    hero_card=hero_card,
                 ),
                 revealed=revealed,
             ),
@@ -3321,6 +3363,50 @@ class Engine:
             return False
         self.state.drawn_true_names = tuple(one for one in names if one != name)
         return True
+
+    def draw_hero_cards(self, count: int) -> tuple[str, ...]:
+        """从**未加入游戏的武将牌堆**里抽 ``count`` 张武将牌（票 07；票 02 §4.2 B1）。
+
+        两段随机、一条专用子流（:data:`sgs.engine.rng.HERO_CARDS_SUBSTREAM`，懒取）：
+
+        1. **真名段**：池 = ``enabled_hero_ids()`` 的真名投影 −
+           :func:`sgs.skills.blocked_true_names`（已抽走的 ∪ 在场 / 死亡结算窗口内的），
+           按**真名字符串升序**排定后洗一次、取前 ``count`` 个——**无放回**，真名两两不同。
+           排序是确定性要求：真名集合的迭代序不能进随机序列。
+        2. **版本段**：每个抽到的真名，在它的**全部启用版本**里均匀抽一版（版本序 =
+           ``enabled_hero_ids()`` 的数据文件序，确定性）。真名只有一版时
+           ``randbelow(1)`` 不消耗随机位。
+
+        抽到的真名**当场**逐个写进 :attr:`GameState.drawn_true_names`（立刻进屏蔽集合 ⇒
+        同一局里任何一次重入 / 再次抽取都不会重发它），故本方法**不幂等**：再调一次抽的是
+        下一批。调用方（技能）要把"这次抽到哪几张"存进帧私有数据，重入时读它而不是再抽
+        （`CODING_STANDARDS.md` §3）；本方法保证的是"抽到即入集合"这一半。
+
+        返回 ``(hero_id, ...)``（**抽到的先后序**）；池不足 ⇒ 结果短于 ``count``；池空 ⇒
+        ``()``。**不落记录、不发 delta**（武将牌不是牌，见票 05 的字段文档），"展示次数"
+        也不由这里决定（票 01 的分母恒为 3）。
+        """
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise ValueError(f"抽取张数必须是整数，得到 {type(count).__name__}")
+        if count < 0:
+            raise ValueError(f"抽取张数不能为负，得到 {count!r}")
+        if count == 0:
+            return ()
+        if self._hero_cards is None:
+            self._hero_cards = hero_cards_stream(self._seed)
+        stream = self._hero_cards
+        blocked = blocked_true_names(self.state)
+        versions_of = _enabled_true_name_versions()
+        pool = sorted(name for name in versions_of if name not in blocked)
+        if not pool:
+            return ()
+        stream.shuffle(pool)
+        drawn: list[str] = []
+        for true_name in pool[:count]:
+            versions = versions_of[true_name]
+            drawn.append(versions[stream.randbelow(len(versions))])
+            self.note_drawn_true_name(true_name)
+        return tuple(drawn)
 
     def note_damage_dealt(self, seat: int) -> bool:
         """记"``seat`` 本回合**造成过伤害**"的座位级事实（M6 票 06 的【诛害】判据）。
@@ -4355,6 +4441,10 @@ class Engine:
                 view=view,
                 skill_id=payload.skill_id,
                 options=payload.options,
+                # 票 07：展示载荷——缺省（空 / None）不落盘，既有询问记录逐字节不变。
+                disabled=payload.disabled,
+                option_texts=dict(payload.option_texts),
+                hero_card=payload.hero_card,
                 revealed=revealed,
             )
         if kind is QueryKind.DISTRIBUTE:
@@ -5299,6 +5389,26 @@ def instantiate_cards(pack: ContentPack) -> tuple[CardRef, ...]:
         )
         for index, deck_card in enumerate(pack.deck.cards)
     )
+
+
+def _enabled_true_name_versions() -> dict[str, tuple[str, ...]]:
+    """**真名 → 全部启用版本**的投影（票 07；票 02 §4.2 B1 / E4）。
+
+    唯一读面是数据层的 :func:`sgs.data.enabled_hero_ids` + :func:`sgs.data.hero_by_id`：
+    本模块**不建第二份真名表**（也不读 ``enabled`` 之外的将池 / 禁将——武将牌堆 = 全库
+    真名，票 01 第二轮 Q8）。版本序 = ``enabled_hero_ids()`` 的声明序（数据文件序），
+    确定性由数据层保证。
+
+    未知 id（数据表里查不到）**跳过**，与 ``resolve_instances`` 对未知武将 id 的静默同姿态；
+    数据面自己保证启用版本都能查到，故这条只是构造局面时的兜底。
+    """
+    versions: dict[str, list[str]] = {}
+    for hero_id in enabled_hero_ids():
+        hero = hero_by_id(hero_id)
+        if hero is None:  # pragma: no cover - 数据面契约外（加载期已闭合校验）
+            continue
+        versions.setdefault(hero.true_name, []).append(hero_id)
+    return {name: tuple(ids) for name, ids in versions.items()}
 
 
 def _deal_identities(*, seed: int, rule_config: RuleConfig) -> tuple[Identity, ...] | None:

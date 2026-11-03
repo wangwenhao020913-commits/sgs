@@ -1154,14 +1154,21 @@ def _skill_activation(
 def _select_option(
     seat: int, answers_seq: int, ctx: SelectOptionContext
 ) -> list[Action]:
-    """选项闭集：每个选项一个候选（缺省**强制选择**，没有 ``Pass``，票 12 §Q6）。
+    """选项闭集：每个**可选中**的选项一个候选（缺省**强制选择**，没有 ``Pass``，票 12 §Q6）。
 
     ``ctx.optional``（票 00 / N4）才多一条 ``Pass``——它是"取消这一步"的合法应答，
     供发动后的技能流水线用；缺省 ``False``，故既有消费者候选一字不变。
+
+    ``ctx.disabled``（票 07；票 02 §4.2 B3）是**显示但不可选**的选项：它们保留在询问的
+    ``options`` 里（投影画成置灰行），但**不进候选**——与 ``StepPool.disabled`` 同语义
+    （"列出来但选不了"），只是走逐步询问这条面。缺省空元组 ⇒ 候选逐条不变。
     """
     del seat
+    disabled = frozenset(ctx.disabled)
     actions: list[Action] = [
-        SelectOption(choice=option, answers_seq=answers_seq) for option in ctx.options
+        SelectOption(choice=option, answers_seq=answers_seq)
+        for option in ctx.options
+        if option not in disabled
     ]
     if ctx.optional:
         actions.append(Pass(answers_seq=answers_seq))

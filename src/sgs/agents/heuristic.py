@@ -349,6 +349,22 @@ _IDENTITY_ROSTER: Mapping[int, tuple[str, ...]] = MappingProxyType(
 _SEAT_TARGET_VALUE = 2.0
 """座位步里敌 / 友的分值幅度：按 ``P(敌)`` / ``P(友)`` 加权（I1），中性是 ``(0, 0)``。"""
 
+_HERO_CARD_SKILL_VALUE = 2.0
+"""展示武将牌时"获得该武将牌上的一个技能"一行的通用估值（票 07；票 02 §4.2 B5）。
+
+一次性获得一条**持久**能力：不比单张牌便宜（一张牌约 1.0~1.5），又低于"回血救人"
+（4.0~6.0）。具体武将若在 :data:`_OPTION_VALUES` 里登记了自己的选项 id，那条优先；
+这里是**没有登记时**的缺省，只保证"不与放弃打平、不被效果行淹没"。
+"""
+
+_HERO_CARD_EFFECT_VALUE = 2.5
+"""展示武将牌时**技能自己的效果行**（选项 2）的通用估值（票 07）。
+
+这一行的语义由技能自己定（【天成】= +1 上限 / 回复 1 / 摸 X 张），引擎给的文本就是它。
+按"一次性但立即兑现"估：略高于"拿一个技能"，因为 X 随次数增长、且含回血。
+一将一票可以改自己的选项 id 的登记值来覆盖这条缺省。
+"""
+
 _ENEMY_FOCUS = 2.0
 """伤害目标里"敌人"的加权：乘 ``P(敌)``（I1；已明敌人是 1.0、未知座位按配比），
 小到不盖过手牌防御贴现，只作同价时的偏向。"""
@@ -2135,19 +2151,51 @@ def _score_seat_option(
     return _SEAT_TARGET_VALUE * (ally - enemy)
 
 
+def _score_hero_card_option(query: SelectOptionQuery, choice: str) -> float:
+    """展示**武将牌**的一次选项询问里，一行选项的分值（票 07；票 02 §4.2 B5）。
+
+    判据只读询问自带面，**不碰数据表 / 技能表**（本模块的可见性硬约束）：
+
+    - ``choice`` 在 :attr:`SelectOptionQuery.disabled` 里 ⇒ :data:`_ILLEGAL_PENALTY`。
+      候选里本来就没有置灰项（引擎已剔除），这条是**防御性分支**：真被硬塞进来也绝不选。
+    - 在 :attr:`SelectOptionQuery.option_texts` 里有文本 ⇒ **技能自己的效果行**（选项 2
+      那种"摸 X 张"的动态文案由引擎算）⇒ :data:`_HERO_CARD_EFFECT_VALUE`。
+    - 没有文本 ⇒ **武将牌上的一条技能**（名字 / 描述由投影从数据表派生）⇒
+      :data:`_HERO_CARD_SKILL_VALUE`。
+
+    具体技能的选项 id 若在 :data:`_OPTION_VALUES` 里登记过，那条**先**命中（调用方按
+    先查表、再回落到本函数），故一将一票可以改自己那几个 id 的相对次序。
+    """
+    if choice in query.disabled:
+        return _ILLEGAL_PENALTY
+    if choice in query.option_texts:
+        return _HERO_CARD_EFFECT_VALUE
+    return _HERO_CARD_SKILL_VALUE
+
+
 def _score_select_option(query: Query, action: Action) -> float:
     """``SELECT_OPTION``：座位步按敌我估值、其余按特征表贪心；未知选项一律 0。
 
     「取消一次已发动的技能」（发动后流水线里的 ``Pass``）是例外：给它一个惩罚，
     否则 AI 会在座位步挑「取消」，再回头重新发动同一条技能 —— 空转（见
     :func:`_is_committed_skill_step`）。
+
+    **展示武将牌**的询问（票 07：``hero_card`` 非 None）多一档：两行都是正收益、
+    但"获得一个技能"与"技能自己的效果"各有估值（:func:`_score_hero_card_option`）。
+    与既有口径同一个优先序：``_OPTION_VALUES`` 的显式登记**先**命中，没登记才回落到
+    武将牌的通用估值——一将一票因此不需要改共享打分器。
     """
     assert isinstance(query, SelectOptionQuery)
     if not isinstance(action, SelectOption):
         return _ABORT_SKILL_PENALTY if _is_committed_skill_step(query) else 0.0
     if action.choice.startswith(_SEAT_PREFIX):
         return _score_seat_option(query, action.choice)
-    return _OPTION_VALUES.get(action.choice, 0.0)
+    registered = _OPTION_VALUES.get(action.choice)
+    if registered is not None:
+        return registered
+    if query.hero_card is not None:
+        return _score_hero_card_option(query, action.choice)
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -2989,6 +3037,21 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                     False,
                     "选项面不枚举：非座位选项按 ``action.choice`` 查 ``_OPTION_VALUES``——"
                     "未登记的新选项落 0 分（新增选项必须同票登记条目）",
+                ),
+                "disabled": (
+                    True,
+                    "置灰项绝不选：``_score_hero_card_option`` 把它们压到 "
+                    "``_ILLEGAL_PENALTY``（防御性分支——候选里引擎已把它们剔除）",
+                ),
+                "option_texts": (
+                    True,
+                    "有引擎给文本的行 = 技能自己的效果行（按一次性收益估）；没有文本的行 = "
+                    "『获得该武将牌上的一个技能』——``_score_hero_card_option`` 的判据",
+                ),
+                "hero_card": (
+                    True,
+                    "非 None = 这一问是『展示武将牌』：``_score_select_option`` 据此进入 "
+                    "``_score_hero_card_option``（技能行 / 效果行两档估值）",
                 ),
             }
         ),

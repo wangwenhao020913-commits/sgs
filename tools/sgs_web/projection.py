@@ -66,7 +66,9 @@ from .display import (
     card_payload,
     decorate_pending,
     decorate_snapshot,
+    hero_card_display,
     hidden_guohuo_payload,
+    option_details,
     suit_labels,
 )
 from .session import Session
@@ -2402,6 +2404,23 @@ def pending_payload(
         }
     # U1-02：内嵌视角里的座位也要武将名称 / 势力；裸 Query（409）拿不到包，传 None。
     heroes = load_hero_tables(session.pack.pack_id) if isinstance(session, Session) else None
+    # 票 07（票 02 §4.2 B4）：**展示武将牌**的询问——武将块（势力 / 名称 / 体力上限）、
+    # 每条选项的显示文本 / 技能描述（descriptions.json 原文、不截断）/ 置灰标记，全部
+    # 服务端派生、**不按查看者裁剪**（武将牌是公开事实，第二轮 R6）。
+    #
+    # 只有在**新字段真的在用**时才加键：既有询问载荷（雌雄双股剑 / 遗计"交给谁"等）
+    # 因此逐字节不变。裸 Query（409）拿不到会话的包，但武将牌堆的缺省池就是**全部**武将
+    # 表（``enabled_hero_ids()`` 的读法），故照样派生得出来——界面不会因 409 而丢名字。
+    hero_tables = heroes if heroes is not None else load_hero_tables()
+    shown_hero = getattr(query, "hero_card", None)
+    if shown_hero is not None:
+        payload["hero_card"] = hero_card_display(hero_tables, shown_hero)
+    if str(query.kind) == "SELECT_OPTION" and (
+        shown_hero is not None
+        or getattr(query, "disabled", ())
+        or getattr(query, "option_texts", None)
+    ):
+        payload["option_details"] = option_details(query, heroes=hero_tables)
     # U1-07：转化清单的产物索引（全部产物牌面）。清单本身只说"选哪些来源牌"，
     # 界面要写「将以【X】使用」只能读这份派生；不是查看者的询问 ⇒ 空列表（fail-closed）。
     payload["transform_products"] = (

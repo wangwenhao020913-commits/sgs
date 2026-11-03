@@ -15,9 +15,10 @@ from itertools import combinations
 import pytest
 
 from sgs.agents import tape_from_journal
-from sgs.data import load_content_pack
+from sgs.data import enabled_hero_ids, hero_by_id, load_content_pack
 from sgs.effects import legal_actions_for
-from sgs.skills import hero_card_zone_key
+from sgs.resolution import Frame
+from sgs.skills import blocked_true_names, hero_card_zone_key
 from sgs.engine import (
     ActionRecord,
     Engine,
@@ -32,6 +33,8 @@ from sgs.state import (
     ActivateSkill,
     DiscardQuery,
     EndPhase,
+    FrameKind,
+    HeroCardRef,
     HeroCardZone,
     Pass,
     Phase,
@@ -39,7 +42,9 @@ from sgs.state import (
     PlayerPublic,
     PlayerView,
     QueryKind,
+    SelectOption,
     SelectOptionContext,
+    SelectOptionQuery,
     UseCard,
     parse_action,
     project,
@@ -724,3 +729,259 @@ def test_a_preactivated_skill_drops_its_skeleton_and_availability_moves_to_the_m
     )
     _drive_until_pending(engine)
     assert card in engine.state.player(1).hand
+
+
+# ---------------------------------------------------------------------------
+# 武将牌抽取（票 07 / 票 02 §4.2 B1）：hero_cards 子流 + 两段随机 + 抽到即入屏蔽集合
+# ---------------------------------------------------------------------------
+
+
+def _hero_card_engine(*, seed: int = 12, heroes=("liubei", "diaochan")):
+    """两名武将占住两个真名（刘备 / 貂蝉）的局面：抽取池 = 其余 40 个真名。"""
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hp=4, hero=heroes[0]),
+            SeatSpec(hp=4, hero=heroes[1]),
+        ],
+        deck=DECK,
+        turn_seat=0,
+    )
+    return Engine.from_state(state, seed=seed)
+
+
+def _true_name(hero_id):
+    """武将 id → 真名；走数据层的唯一真名表（挑错 id 直接红）。"""
+    hero = hero_by_id(hero_id)
+    assert hero is not None, f"抽到了数据表里没有的武将 id：{hero_id!r}"
+    return hero.true_name
+
+
+def _all_enabled_true_names():
+    """数据面的**真名投影**（按首次出现序、去重）。
+
+    它是测试自己从 ``enabled_hero_ids()`` 派生的期望池，**不是**迭代
+    ``blocked_true_names`` 得来的（那个集合只做成员判定，迭代序逐进程变化）。
+    """
+    names = {}
+    for hero_id in enabled_hero_ids():
+        hero = hero_by_id(hero_id)
+        assert hero is not None
+        names.setdefault(hero.true_name, None)
+    return tuple(names)
+
+
+def _records_of(engine):
+    return [record_json(record) for record in engine.records]
+
+
+def test_draw_hero_cards_returns_distinct_true_names_absent_from_the_table():
+    """两段随机：先抽 3 个**互不相同**的真名，再各抽一版；座位武将的真名不在池里。"""
+    engine = _hero_card_engine()
+    blocked_before = blocked_true_names(engine.state)
+
+    drawn = engine.draw_hero_cards(3)
+
+    assert len(drawn) == 3, "池子足够时返回满额的 3 张"
+    names = [_true_name(hero_id) for hero_id in drawn]
+    assert len(set(names)) == 3, f"三个真名必须两两不同：{names}"
+    assert not blocked_before & set(names), (
+        "抽到的真名不得落在抽取前的屏蔽集合里（座位武将的真名）"
+    )
+    assert "刘备" not in names and "貂蝉" not in names, "在场武将的真名不在池里"
+    assert set(names) <= set(_all_enabled_true_names()), "只从数据面的启用真名池里抽"
+    for hero_id in drawn:
+        hero = hero_by_id(hero_id)
+        assert hero is not None and hero.enabled, "抽到的版本必须是启用版本"
+
+
+def test_draw_hero_cards_returns_a_shorter_tuple_when_the_pool_runs_out():
+    """池不足 ⇒ 返回更短的结果（缺的那几次由调用方补足，见 01 的「展示恒为 3 次」）。"""
+    engine = Engine.from_state(
+        build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], deck=DECK, turn_seat=0),
+        seed=5,
+    )
+    keep = _all_enabled_true_names()[:2]
+    for name in _all_enabled_true_names()[2:]:
+        assert engine.note_drawn_true_name(name) is True
+
+    drawn = engine.draw_hero_cards(3)
+
+    assert len(drawn) == 2, f"池里只剩两个真名：{keep!r}"
+    assert {_true_name(hero_id) for hero_id in drawn} == set(keep)
+    assert engine.draw_hero_cards(3) == (), "池空了 ⇒ 空元组，不是异常"
+    assert engine.draw_hero_cards(0) == ()
+    with pytest.raises(ValueError):
+        engine.draw_hero_cards(-1)
+
+
+def test_the_same_seed_draws_the_same_three_hero_cards():
+    """抽取走 ``hero_cards`` 子流 ⇒ 同种子逐字节可复现（跨引擎实例）。"""
+    first = _hero_card_engine(seed=77).draw_hero_cards(3)
+    second = _hero_card_engine(seed=77).draw_hero_cards(3)
+
+    assert first == second
+
+
+def test_drawing_hero_cards_does_not_move_the_other_streams():
+    """懒取子流：抽过武将牌的对局与没抽过的对局，记录流逐字节相同。
+
+    这条同时钉两件事：抽取**不落任何记录**，且它不消耗 ``shuffle`` / ``identity`` 等
+    既有子流（"不调用则不消耗"的机械判据是金录像，见 ``bash tools/check_goldens.sh``）。
+    """
+    states = [
+        build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], deck=DECK, turn_seat=0)
+        for _ in range(2)
+    ]
+    drawing = Engine.from_state(states[0], seed=31)
+    control = Engine.from_state(states[1], seed=31)
+    records_before = _records_of(drawing)
+
+    assert drawing.draw_hero_cards(3)
+
+    assert _records_of(drawing) == records_before, "抽取本身不落记录 / 不发 delta"
+    assert control.state.drawn_true_names == ()
+    run_turns(drawing, [RecordingPlayer(), RecordingPlayer()], turns=2)
+    run_turns(control, [RecordingPlayer(), RecordingPlayer()], turns=2)
+
+    assert drawing.state.drawn_true_names != ()
+    assert _records_of(drawing) == _records_of(control), (
+        "抽过武将牌的对局与没抽过的对局必须逐字节相同（子流互不消耗）"
+    )
+
+
+def test_the_drawn_true_names_are_recorded_immediately_and_are_never_drawn_again():
+    """抽到即入屏蔽集合：同一局里第二次抽取不会重发已抽过的真名（重入不重抽的前提）。"""
+    engine = _hero_card_engine()
+
+    first = engine.draw_hero_cards(3)
+    first_names = tuple(_true_name(hero_id) for hero_id in first)
+    assert engine.state.drawn_true_names == first_names, "抽到即入状态（不等展示完）"
+    assert set(first_names) <= blocked_true_names(engine.state)
+
+    second = engine.draw_hero_cards(3)
+    second_names = tuple(_true_name(hero_id) for hero_id in second)
+    assert not set(second_names) & set(first_names), "已抽走的真名不再回到池里"
+    assert engine.state.drawn_true_names == first_names + second_names
+
+
+# ---------------------------------------------------------------------------
+# SELECT_OPTION 的展示载荷（票 07 / 票 02 §4.2 B2–B3）：武将牌 / 选项文本 / 置灰
+# ---------------------------------------------------------------------------
+
+WUSHENG = "hero.jie_guanyu.wusheng"
+OPTION_TWO = "max_hp_and_draw"
+OPTION_TWO_TEXT = "增加 1 点体力上限，回复 1 点体力，摸 2 张牌"
+
+
+def _option_query(engine, *, options, **kwargs):
+    """经 ``Engine.ask_option`` 发一次选项询问，返回挂起的那一问。"""
+    frame = Frame(kind=FrameKind.SKILL, data={})
+    engine.ask_option(
+        frame,
+        0,
+        Timing.PHASE_PLAY_IDLE,
+        skill_id="hero.wuming.tiancheng",
+        options=options,
+        **kwargs,
+    )
+    query = engine.pending
+    assert isinstance(query, SelectOptionQuery), f"挂起的应当是选项询问：{query!r}"
+    return query
+
+
+def test_ask_option_carries_the_hero_card_the_option_texts_and_the_greyed_flags():
+    """B2 / B3：``disabled`` 显示但不可选（不在 ``legal_actions``），提交它被拒。"""
+    engine = _hero_card_engine()
+
+    query = _option_query(
+        engine,
+        options=(WUSHENG, OPTION_TWO),
+        disabled=(WUSHENG,),
+        hero_card=HeroCardRef(hero_id="jie_guanyu", index=1, total=3),
+        option_texts={OPTION_TWO: OPTION_TWO_TEXT},
+    )
+
+    assert query.options == (WUSHENG, OPTION_TWO), "置灰项**保留原位**、只留在载荷里"
+    assert query.disabled == (WUSHENG,)
+    assert query.option_texts == {OPTION_TWO: OPTION_TWO_TEXT}
+    assert query.hero_card == HeroCardRef(hero_id="jie_guanyu", index=1, total=3)
+    assert query.hero_card.index == 1 and query.hero_card.total == 3
+    assert [action.choice for action in query.legal_actions] == [OPTION_TWO], (
+        "候选只含可选中的项——置灰项从 legal_actions 剔除"
+    )
+    assert query.legal_actions[0] == SelectOption(
+        choice=OPTION_TWO, answers_seq=query.seq
+    )
+
+    with pytest.raises(IllegalActionError) as caught:
+        engine.submit(SelectOption(choice=WUSHENG, answers_seq=query.seq))
+    assert caught.value.message == "行动不在候选集合内", "提交置灰项必须被拒"
+    assert engine.pending is query, "被拒的提交不改变挂起态"
+
+    engine.submit(query.legal_actions[0])
+    assert engine.pending is None, "可选中的项照常接受"
+
+
+def test_ask_option_rejects_greyed_and_labelled_options_outside_the_option_set():
+    """置灰 / 文本都只能指向**这一问的选项**：越界是编程错误，fail-closed。"""
+    engine = _hero_card_engine()
+
+    with pytest.raises(ValueError, match="置灰"):
+        _option_query(engine, options=("a", "b"), disabled=("c",))
+    with pytest.raises(ValueError, match="文本"):
+        _option_query(engine, options=("a", "b"), option_texts={"c": "x"})
+
+
+def test_a_plain_select_option_query_serializes_exactly_as_before():
+    """缺省参数 ⇒ 既有询问载荷逐字节不变（记录流与请求载荷都多不出键）。"""
+    engine = _hero_card_engine()
+
+    query = _option_query(engine, options=("a", "b"))
+
+    payload = json.loads(query.model_dump_json())
+    assert set(payload) == {
+        "kind",
+        "seq",
+        "actor",
+        "timing",
+        "prompt",
+        "legal_actions",
+        "view",
+        "skill_id",
+        "options",
+    }, "新字段缺省时不序列化（既有 Golden Replay 逐字节不变）"
+    assert [action.choice for action in query.legal_actions] == ["a", "b"]
+
+    record = json.loads(record_json(engine.records[-1]))
+    assert record["kind"] == "query"
+    assert set(record["query"]) == set(payload), "记录流里同样不多出键"
+    assert "hero_card" not in record_json(engine.records[-1])
+
+
+def test_the_version_stage_draws_from_all_enabled_versions_of_a_true_name():
+    """第二段在**全部启用版本**里抽一版，不是恒取第一版（两段随机的后半段）。"""
+    engine = Engine.from_state(
+        build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()], deck=DECK, turn_seat=0),
+        seed=9,
+    )
+    keep = "关羽"
+    for name in _all_enabled_true_names():
+        if name != keep:
+            engine.note_drawn_true_name(name)
+    expected = {
+        hero_id
+        for hero_id in enabled_hero_ids()
+        if _true_name(hero_id) == keep
+    }
+    assert len(expected) >= 2, "夹具依赖：真名「关羽」至少有两个启用版本"
+
+    versions = set()
+    for _ in range(20):
+        drawn = engine.draw_hero_cards(1)
+        assert len(drawn) == 1, "池里只剩一个真名 ⇒ 每次抽到它的某一版"
+        assert _true_name(drawn[0]) == keep
+        versions.add(drawn[0])
+        assert engine.release_drawn_true_name(keep) is True
+
+    assert versions == expected, f"版本段必须覆盖 {sorted(expected)}，实得 {sorted(versions)}"
