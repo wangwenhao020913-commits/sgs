@@ -727,7 +727,19 @@ def _flow_step_cards(
     **铺面必须惰性**（``build_face`` 闭包）：``selection_face(reveal_hand=False)`` 铺隐藏
     槽时会消耗 ``select`` 子流的随机数，而 :meth:`Engine.ask_selection` 只在**第一次**
     调用它（帧内记忆）。这里若提前铺好，"每次重入消耗一次随机数"会让既有录像分叉。
+
+    **先认已接受的答案，再碰状态**（本 effort 票 01）：这一步问过就原样采用那份答案，
+    ``actor`` / ``face`` / 黑名单 / 过滤后的池一格都不读。挂起续跑时 effect 已经改过这些
+    判据要读的状态（【攻心】把目标最后一张手牌搬进牌堆），按活状态重算会把"已经发生过
+    副作用的发动"误判成 ``"cancel"``（"零副作用"）；这一步的答案与发问时**同键同源**
+    （:meth:`Engine.accepted_selection` 与 :meth:`Engine.ask_selection` 同一份缓存）。
     """
+    cache_key = ask_key_of(step, frame)
+    accepted = host.accepted_selection(frame, owner=ask_owner, key=cache_key)
+    if accepted is not None:
+        if len(accepted) < step.lo:
+            return "cancel", ()
+        return "ok", tuple(int(card_id) for card_id in accepted)
     actor = _flow_actor(step, host.state, frame, owner, answers)
     face = (
         actor
@@ -736,7 +748,6 @@ def _flow_step_cards(
     )
     if face == ():
         return "cancel", ()
-    cache_key = ask_key_of(step, frame)
     excluded = _excluded_card_ids(step, host.state, frame, owner, answers)
     hi = (
         step.hi
@@ -895,11 +906,27 @@ def _flow_step_seats(
     timing: Timing,
     ask_owner: Any,
 ) -> tuple[str, object]:
-    """跑一步选座位（``lo..hi`` 次 ``SELECT_OPTION``）：返回三态 + 座位元组。"""
+    """跑一步选座位（``lo..hi`` 次 ``SELECT_OPTION``）：返回三态 + 座位元组。
+
+    **先认已接受的答案，再算池**（本 effort 票 01）：这一问若已经答过，答案就是这一步的
+    裁决，``pool`` 一次都不算。挂起续跑时 effect 已经改过 ``pool`` 要读的状态（【攻心】
+    把目标最后一张手牌搬进牌堆 ⇒ "手牌非空的其他角色"池里没有目标了），按活状态现算会
+    把"已经发生过副作用的发动"误判成 ``"cancel"``（``run_flow`` 把它读成"零副作用、技能
+    可再发动"）。答案缓存与 :meth:`Engine.ask_option` **同键同源**
+    （:meth:`Engine.accepted_option`），故"重跑 steps 不重发询问"这条既有设计不变，只是
+    把"现算 pool"从重入路径上摘掉了。
+    """
     del ask_owner  # 座位步走 ``ask_option``，其询问名是 ``skill_id``（自带步骤序号）
     actor = _flow_actor(step, host.state, frame, owner, answers)
     chosen: list[int] = []
     while len(chosen) < step.hi:
+        option_id = _flow_option_id(frame, step.key, len(chosen), multi=step.hi > 1)
+        accepted = host.accepted_option(frame, skill_id=option_id, actor=actor)
+        if accepted is not None:
+            if isinstance(accepted, Pass):
+                break
+            chosen.append(option_seat(accepted))
+            continue
         pool = tuple(
             int(seat)
             for seat in step.pool(host.state, frame, owner, tuple(chosen))
@@ -912,7 +939,7 @@ def _flow_step_seats(
             frame,
             actor,
             timing,
-            skill_id=_flow_option_id(frame, step.key, len(chosen), multi=step.hi > 1),
+            skill_id=option_id,
             options=tuple(seat_choice(seat) for seat in pool),
             optional=step.optional,
         )
@@ -935,9 +962,21 @@ def _flow_step_option(
     timing: Timing,
     ask_owner: Any,
 ) -> tuple[str, object]:
-    """跑一步选项询问：返回三态 + 选项文本。"""
+    """跑一步选项询问：返回三态 + 选项文本。
+
+    **先认已接受的答案，再解析闭集**（本 effort 票 01）：``options`` / ``disabled`` /
+    ``revealed`` 都可按活状态现算（界【结姻】那类"可选项取决于目标状态"），故挂起续跑时
+    现算可能得到空闭集 ⇒ 把已经发生过副作用的发动误判成 ``"cancel"``。这一步问过就原样
+    采用那份答案；答案缓存与 :meth:`Engine.ask_option` 同键同源。
+    """
     del ask_owner  # 选项步走 ``ask_option``，其询问名是 ``skill_id``（自带步骤序号）
     actor = _flow_actor(step, host.state, frame, owner, answers)
+    option_id = _flow_option_id(frame, step.key, 0, multi=False)
+    accepted = host.accepted_option(frame, skill_id=option_id, actor=actor)
+    if accepted is not None:
+        if isinstance(accepted, Pass):
+            return "cancel", ""
+        return "ok", accepted.choice
     options = _resolve_options(step.options, host.state, frame, owner, answers)
     blocked = _resolve_options(step.disabled, host.state, frame, owner, answers)
     if blocked:
@@ -953,7 +992,7 @@ def _flow_step_option(
         frame,
         actor,
         timing,
-        skill_id=_flow_option_id(frame, step.key, 0, multi=False),
+        skill_id=option_id,
         options=options,
         optional=step.optional,
         revealed=_revealed_cards(step, host.state, frame, owner, answers),
@@ -1828,6 +1867,22 @@ picks（同一张【杀】的 RESOLVE 帧上先后开两次接缝就撞到这个
 """
 
 
+_EFFECT_STARTED = "flow_effect_started"
+"""帧私有：**已经开始跑 ``effect``** 的流水线名集合（本 effort 票 01 的 ``"cancel"`` 约束）。
+
+``run_flow`` 在调 ``effect`` 之前把 ``flow.name`` 加进来，那次发动真正收尾（``effect``
+返回的不是 ``"stay"``）时清掉。于是"这条流水线的 effect 已经开始"这条事实可判 —— 挂起
+续跑时它还留着，而 ``"cancel"`` 的语义（"一个副作用都不产生、技能可再发动"）此时已经
+不成立：再把发动报成取消就是把**已经改过状态**的结算丢掉（本 effort 的实机 bug 就是
+【攻心】的置顶尾巴整个丢失）。
+
+**为什么是集合而不是一个标记**：同一帧上可以先后（甚至嵌套）跑多条流水线（一张【杀】的
+RESOLVE 帧先【流离】、之后青龙 / 斧的接缝），一条的 effect 开始不该让另一条的 ``"cancel"``
+变成错误。**为什么按名字而不是帧 / 栈位置**：续跑的载体帧可能是从派发帧**复制**出来的
+临时帧（``Engine._resume_frame``），名字跨这份复制仍指同一次发动。
+"""
+
+
 def _activation_belongs(activation: Mapping[str, object], frame: Any, flow: SkillFlow) -> bool:
     """这份预填的复合动作是**这条流水线自己**的吗（帧内 ``activation`` 会跨技能存活）。
 
@@ -1861,8 +1916,20 @@ def run_flow(
     """执行一条 :class:`SkillFlow`。
 
     帧内**不需要额外游标**：每一步的询问都由 ``ask_answers`` 帧内缓存重入（票 01 的姿态），
-    故重入时从头重跑一边步骤既不会发第二次询问、也不会重复副作用；``answers`` 每次重建，
+    故重入时从头重跑一遍步骤既不会发第二次询问、也不会重复副作用；``answers`` 每次重建，
     效果拿到的永远是"已经全部提交"的那一份。
+
+    **重入时每一步先认它已接受的答案、再算池**（本 effort 票 01）：执行器的三态裁决因此
+    不受 ``effect`` 已经改过的状态影响 —— 这正是"从头重跑"能成立的前提。旧实现先按**活
+    状态**现算 ``pool`` / 选项闭集，effect 一旦把池读的东西搬走（【攻心】的 hand→DECK），
+    续跑就会把已经发生过副作用的发动判成 ``"cancel"``。
+
+    ``"cancel"`` 因此与"``effect`` 还没跑"**绑死**：本帧里这条流水线的 ``effect`` 一旦
+    开始（哪怕它随后挂起），后续步骤再判 ``"cancel"`` 就不是"零副作用"，而是把一次
+    已经改过状态的发动报成"技能可再发动"。这种形状只可能是步骤的询问标识在挂起期间
+    变了（缓存认不出来），故实现**显式失败**（``RuntimeError``）而不是静默返回 ``None``。
+    标记住在帧私有数据里（不进记录流），按流水线名记；某次发动真正收尾时清掉，故同一帧里
+    同一条流水线的第二次发动仍能正常取消。
 
     ``owner``（票 07）：发动者 —— 缺省（``_UNSET``）读 ``frame.data["source"]``（主动技的
     SKILL 帧）；**被动技**在钩子 / 接缝里没有"发动者"，由派发环显式传 ``instance.owner``。
@@ -1909,6 +1976,7 @@ def run_flow(
                 )
             )
         prefilled = dict(cache[cache_key])
+    started: set[str] = frame.data.setdefault(_EFFECT_STARTED, set())
     for index, step in enumerate(flow.steps):
         # 清单渲染器与执行器共用的通道：池 / 面回调若依赖前序答案，从这里读同一份
         # （预填的复合动作与逐步询问两条路都写它，故声明只写一次）。
@@ -1922,12 +1990,27 @@ def run_flow(
         if status == "stay":
             return "stay"
         if status == "cancel":
+            if flow.name in started:
+                raise RuntimeError(
+                    f"流水线 {flow.name!r} 的 effect **已经开始**（挂起后被续跑），步骤 "
+                    f"{step.key!r} 却要把这次发动判成 'cancel'。'cancel' 的语义是"
+                    "『一个副作用都不产生、技能可再发动』，而这次发动已经改过状态了 —— "
+                    "续跑的步骤必须先采用它已接受的答案（Engine.accepted_selection / "
+                    "Engine.accepted_option），不能按活状态重算池。"
+                )
             # 取消：一个副作用都不产生（提交点不落、``effect`` 不跑），技能可再发动。
             return None
         answers[step.key] = value
     if on_commit is not None:
         on_commit()
-    return flow.effect(host, frame, answers)
+    started.add(flow.name)
+    control = flow.effect(host, frame, answers)
+    if control != "stay":
+        # 这次发动**收尾**了：清掉标记，否则同一帧里同一条流水线的**第二次发动**
+        # （合法：W4-fix-6 的"同一帧同一技能两份载荷"）若真的取消，会被误判成
+        # "effect 已经开始"。挂起（``"stay"``）时标记留着 —— 那次发动还没跑完。
+        started.discard(flow.name)
+    return control
 
 
 def zero_step_effect(handler: Callable[[Any, Any], Any]) -> FlowEffect:

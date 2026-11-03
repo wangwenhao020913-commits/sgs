@@ -248,6 +248,25 @@ _DISPATCH_SCOPE = "dispatch_scope"
 """
 
 
+def _selection_answer_key(owner: Any, key: str) -> tuple[Any, ...]:
+    """``ask_selection`` 的帧内答案键：``("select", 询问位置, 询问名)``（唯一真源）。
+
+    读（:meth:`Engine.accepted_selection`）与写（:meth:`Engine.ask_selection`）共用，
+    故"重入时先认已接受的答案"与"发问时缓存"认的是同一个槽。两处各拼一份键，正是
+    "答案与面不同源"那一类 bug 的土壤（票 21 / 票 22 的判决）。
+    """
+    return ("select", owner, key)
+
+
+def _option_answer_key(frame: Frame, skill_id: str, actor: int) -> tuple[Any, ...]:
+    """``ask_option`` 的帧内答案键（唯一真源；M6 票 20 起带上**这次派发的范围**）。
+
+    同 :func:`_selection_answer_key`：读（:meth:`Engine.accepted_option`）与写
+    （:meth:`Engine.ask_option`）共用同一份槽名，不容许第二处拼键。
+    """
+    return ("option", skill_id, actor, frame.data.get(_DISPATCH_SCOPE))
+
+
 _ANSWER_BACKLOG_LIMIT = 32
 """孤立的**被接受应答**最多留这么多条（票 02 的应答归属）：超过即淘汰最旧的一条。
 
@@ -2142,6 +2161,26 @@ class Engine:
             payload=payload,
         )
 
+    def accepted_selection(
+        self, frame: Frame, *, owner: Any, key: str
+    ) -> tuple[int, ...] | None:
+        """**本帧已接受**的这一问的答案；还没问过 ⇒ ``None``（重入的"先认答案"入口）。
+
+        与 :meth:`ask_selection` 的帧内缓存**同键同源**（:func:`_selection_answer_key`），
+        故调用方可以在"按活状态算池 / 铺面"**之前**先问一句"这一步是不是已经答过了"。
+        步骤流水线（:func:`sgs.skills.flow.run_flow` 的各步执行器）正是靠它把"重入时
+        现算池"从续跑路径上摘掉的：``effect`` 已经改过的状态不再参与这一步的裁决
+        —— 本 effort 票 01 的类 bug 是【攻心】把目标最后一张手牌搬进牌堆后，按活状态
+        重算的座位池已经空了，整条流被误判成 ``"cancel"``（"零副作用"）。
+
+        返回空元组 ``()`` 与返回 ``None`` 是**两件事**：前者是"问过，答案是'一张没选'"
+        （可选 ``Pass`` / 刚好被缓存的空池），后者是"这一问还没发生"。
+        """
+        answers = frame.data.get("ask_answers")
+        if not answers:
+            return None
+        return answers.get(_selection_answer_key(owner, key))
+
     def ask_selection(
         self,
         frame: Frame,
@@ -2203,10 +2242,11 @@ class Engine:
                 "ask_selection 必须**恰好**给一个面来源：build_face（这里缓存）或 face（调用方缓存）"
             )
         identity = (owner, key)
+        answer_key = _selection_answer_key(owner, key)
+        accepted = self.accepted_selection(frame, owner=owner, key=key)
+        if accepted is not None:
+            return accepted
         answers = frame.data.setdefault("ask_answers", {})
-        answer_key = ("select", *identity)
-        if answer_key in answers:
-            return answers[answer_key]
         owned_store: dict[Any, Any] | None = None
         if face is None:
             owned_store = frame.data.setdefault("asks", {})
@@ -2325,6 +2365,23 @@ class Engine:
         answers[answer_key] = action
         return action
 
+    def accepted_option(
+        self, frame: Frame, *, skill_id: str, actor: int
+    ) -> Any | None:
+        """**本帧已接受**的这一问的答案；还没问过 ⇒ ``None``（与 :meth:`accepted_selection` 同姿态）。
+
+        返回值是 :class:`~sgs.state.SelectOption` **或** :class:`~sgs.state.Pass` —— 后者
+        也是"答过了"（"这一步被取消"是**已接受**的裁决），故调用方必须按"是不是 ``Pass``"
+        分流，不能按真假值判，也不能把它当成"没问过"再问一遍。
+
+        与 :meth:`ask_option` 的帧内缓存同键同源（:func:`_option_answer_key`，含
+        ``_DISPATCH_SCOPE``）：续跑的"先认答案"与发问的"存答案"认的永远是同一个槽。
+        """
+        answers = frame.data.get("ask_answers")
+        if not answers:
+            return None
+        return answers.get(_option_answer_key(frame, skill_id, actor))
+
     def ask_option(
         self,
         frame: Frame,
@@ -2351,8 +2408,9 @@ class Engine:
         answers = frame.data.setdefault("ask_answers", {})
         # M6 票 20：键带上**这次派发的范围**（``_DISPATCH_SCOPE``）。同一帧里同一技能的第二次
         # 触发是另一次派发、另一个范围键，故不会复用上一次的选择；同一次触发的挂起重入
-        # 范围键不变，仍然命中缓存（重入不重发）。
-        answer_key = ("option", skill_id, actor, frame.data.get(_DISPATCH_SCOPE))
+        # 范围键不变，仍然命中缓存（重入不重发）。键只此一处拼（:func:`_option_answer_key`），
+        # ``accepted_option`` 读的是同一个槽。
+        answer_key = _option_answer_key(frame, skill_id, actor)
         if answer_key in answers:
             return answers[answer_key]
         action = self.ask(

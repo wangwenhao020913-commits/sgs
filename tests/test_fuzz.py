@@ -867,6 +867,24 @@ def test_the_seeded_eight_player_gongxin_deck_top_replays():
     _play_and_check(7322422061626536934, players=8, deadline=time.monotonic() + 120)
 
 
+def test_the_seeded_eight_player_gongxin_deck_top_survives_the_lianying_suspension():
+    """回归（本 effort 票 01）：seed=15211799974272561945 / 8 人——【攻心】置顶**挂起续跑**。
+
+    与上一条的差别是这次真的**挂起**：那张红桃是座位 3 的**最后一张手牌**，hand→DECK 的移动
+    因此触发会提问的【连营】（``MOVE_AFTER``），``effect`` 停在"移动已记、``place_on_deck``
+    未跑"。续跑时流水线从头重跑第一步，按**活状态**重算的座位池（"手牌非空的其他角色"）已经
+    不含座位 3 ⇒ 整条流被判 ``"cancel"``（"零副作用、技能可再发动"）⇒ ``effect`` 不再重入，
+    牌停在**牌堆底**。终局互校因此判红："牌堆与从 delta 重建的结果不一致"（重建器按
+    ``SelectOption(deck_top)`` 补偿、把牌落到堆顶，引擎却没置顶）。
+
+    红/绿口径：修复前 ``_play_and_check`` 抛 :class:`FuzzInvariantError`（就是 ``probe_red.py``
+    的那一条），修复后整局不变量全绿；"牌真的在牌堆顶"这一条由
+    ``tests/test_hero_jie.py::test_gongxin_deck_top_lands_on_top_after_a_suspending_move_after_hook``
+    直接断言在 ``state.deck[0]`` 上。
+    """
+    _play_and_check(15211799974272561945, players=8, deadline=time.monotonic() + 120)
+
+
 def test_the_player_rotation_covers_the_six_identity_branches():
     """六档轮转是确定性的，且 2 人档（无身份分支）确在轮转里（票 17 §2）。"""
     rotation = [_players_for(index) for index in range(len(PLAYER_ROTATION))]

@@ -212,6 +212,12 @@ class FrameHost(StepHost, Protocol):
 
     def suspended(self, value: Any) -> bool: ...
 
+    def accepted_selection(
+        self, frame: Frame, *, owner: Any, key: str
+    ) -> tuple[int, ...] | None: ...
+
+    def accepted_option(self, frame: Frame, *, skill_id: str, actor: int) -> Any | None: ...
+
     def start_use(
         self,
         card: CardRef,

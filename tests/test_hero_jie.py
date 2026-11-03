@@ -1526,12 +1526,12 @@ def test_qinxue_adjusts_the_hp_when_it_was_full():
 # ---------------------------------------------------------------------------
 
 
-def _gongxin_state(*, target_hand: tuple[int, ...]):
+def _gongxin_state(*, target_hand: tuple[int, ...], target_hero: str | None = None):
     state = build_state(
         pack=PACK,
         seats=[
             SeatSpec(hero="jie_lvmeng"),
-            SeatSpec(hand=target_hand, gender=Gender.MALE),
+            SeatSpec(hand=target_hand, gender=Gender.MALE, hero=target_hero),
         ],
         deck=deck_excluding(PACK, *target_hand),
         turn_seat=0,
@@ -1612,6 +1612,50 @@ def test_gongxin_can_put_the_heart_on_top_of_the_deck():
 
     assert engine.state.deck[0] == heart, "展示的红桃被置于牌堆顶"
     assert heart not in engine.state.player(1).hand
+
+
+def test_gongxin_deck_top_lands_on_top_after_a_suspending_move_after_hook():
+    """回归（本 effort 票 01）：目标是**陆逊**、手牌只剩这一张红桃 ⇒ hand→DECK 触发【连营】。
+
+    牌离开目标手牌、去向是牌堆（``move_card`` 追加在**牌堆底**），"置于牌堆顶"是紧随其后
+    的一行 ``place_on_deck(to_top=True)``。这次移动要先问【连营】"是否发动"（非锁定技）⇒
+    挂起；续跑时流水线**从头重跑**第一步，按活状态重算的座位池（``_gongxin_targets`` =
+    手牌非空的其他角色）已经不含目标了 —— 修复前整条流因此被判 ``"cancel"``
+    （"零副作用、技能可再发动"）返回 ``None``：``effect`` 不再重入、置顶那一行永远不跑，
+    牌停在牌堆底。断言落在**活状态的牌堆首位**上（不是"不变量没炸"）。
+    """
+    heart = _first(suit=Suit.HEART.value)
+    engine = _gongxin_state(target_hand=(heart,), target_hero="luxun")
+    seat0 = _gongxin_player(heart=heart, option="deck_top")
+    seat1 = PassPlayer()
+    ledger: list[tuple[str, str | None]] = []
+    top_chosen = False
+    for _ in range(2000):
+        query = engine.pending
+        if query is None:
+            engine._step()
+            continue
+        if top_chosen and query.kind == QueryKind.PLAY_PHASE.value:
+            # 【攻心】的 SKILL 帧已出栈、控制权回到出牌阶段：牌堆还没被下一次摸牌动过。
+            break
+        action = (seat0 if query.actor == 0 else seat1).respond(query)
+        ledger.append((query.kind, getattr(action, "choice", None)))
+        if isinstance(action, SelectOption) and action.choice == "deck_top":
+            top_chosen = True
+        engine.submit(action)
+    else:
+        raise AssertionError("步数上限内【攻心】没有收尾")
+
+    assert top_chosen, f"夹具必须真的走到『置于牌堆顶』那一问；实际应答链 = {ledger}"
+    assert QueryKind.SKILL_ACTIVATION.value in [kind for kind, _ in ledger], (
+        "牌离开手牌后【连营】先问『是否发动』——这就是这次挂起的来源"
+    )
+    assert engine.state.player(1).hand == [], "目标是失去最后一张手牌（【连营】的触发条件）"
+    assert engine.state.deck[0] == heart, (
+        "『置于牌堆顶』必须真的落到 state.deck 首位；"
+        f"实际首位 = {engine.state.deck[0]}，这张红桃在牌堆第 "
+        f"{engine.state.deck.index(heart)} 位（共 {len(engine.state.deck)} 张）"
+    )
 
 
 def test_gongxin_may_pass_on_the_heart_and_handles_a_hand_without_hearts():
