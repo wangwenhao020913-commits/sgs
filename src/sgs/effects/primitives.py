@@ -126,16 +126,28 @@ def move_card(
     to_zone: ZoneRef,
     reason: MoveReason,
     owner: int | None,
+    to_top: bool = False,
 ) -> CardMoveDelta:
     """把一批牌从各自（同一个）来源区域移到目标区域坐标，返回一条变化事件。
 
     ``owner`` 是这次移动的**归属角色**（判定牌 = 被判定者、弃置 / 使用 = 弃置者 /
     使用者、摸牌 = 摸牌者、装备置入 = 持有者）；"无角色主体"的移动（如终局收尾）
     传 ``None``。``ctx`` 只提供结算主体信息，本原语不读结算栈。
+
+    ``to_top``（票 02 的落点）：**成为牌堆顶**。多张牌沿用
+    :func:`~sgs.effects.place_on_deck` 的既有口径——元组顺序即自顶向下（``cards[0]``
+    在最上）。只有进牌堆的移动才有"顶"，其它目标区传 ``True`` 是编程错误（``ValueError``，
+    在**搬牌之前**就拒绝，不留半个副作用）。落点随 :class:`~sgs.state.CardMoveDelta`
+    落记录（``to_top``），故调用方**不得**再补一次 ``place_on_deck``：那会把"进牌堆"与
+    "置于顶"拆成两步，中间可以被一个挂起的钩子劈开。
     """
     card_ids = tuple(card.card_id for card in cards)
     if not card_ids:
         raise ValueError("空的一批牌不构成一次移动操作")
+    if to_top and to_zone.zone is not Zone.DECK:
+        raise ValueError(
+            f"只有进牌堆的移动才有'置于顶'的落点，得到目标区 {to_zone.zone.value}"
+        )
 
     source = locate(state, card_ids[0])
     for card_id in card_ids[1:]:
@@ -152,7 +164,9 @@ def move_card(
         for card_id in card_ids:
             state.virtual_judge.pop(card_id, None)
 
-    if to_zone.zone is Zone.EQUIP:
+    if to_top:
+        state.deck[:0] = card_ids
+    elif to_zone.zone is Zone.EQUIP:
         _place_into_equipment(state, to_zone, cards)
     else:
         state.zone(to_zone).extend(card_ids)
@@ -169,6 +183,7 @@ def move_card(
         to_zone=to_zone,
         reason=reason,
         owner=owner,
+        to_top=to_top,
     )
 
 

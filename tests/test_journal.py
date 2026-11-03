@@ -17,6 +17,7 @@ from sgs.engine import (
     TimingRecord,
     dump_journal,
     record_json,
+    read_journal,
 )
 from sgs.state import FrameKind, MoveReason, Zone, ZoneRef
 from sgs.timing import Timing
@@ -162,3 +163,44 @@ def _query_records():
     records = [record for record in engine.records if record.kind in {"query", "action"}]
     assert isinstance(records[0], QueryRecord)
     return records
+
+
+def test_a_card_move_carries_the_landing_spot_only_when_it_is_not_the_default(tmp_path):
+    """票 02：进牌堆的落点是**可选事实**——缺省不落盘，显式置顶才写 ``to_top``。
+
+    记录形状在这里定死（``CardMoveDelta.to_top``）：
+
+    - 缺省 ``False`` 时**一个字节都不多**：70 条既有录像的每条 ``card_move`` 都长这样，
+      读回再 dump 必须逐字节相同（``tests/test_replays.py`` 的"录制 == 重放"是同一判据）；
+    - ``True`` 才写 ``"to_top":true``，且这条路也要能原样读回、原样 dump——fuzz 重建器只
+      读这份记录，不再靠"看见 ``SelectOption(deck_top)``"去猜落点。
+    """
+    engine = play_standard(seed=7)
+    header = engine.records[0]
+    move = next(
+        record for record in engine.records if getattr(record, "delta_type", None) == "card_move"
+    )
+    assert isinstance(move, CardMoveRecord)
+    landed = CardMoveRecord(
+        seq=move.seq,
+        frame_id=move.frame_id,
+        depth=move.depth,
+        cards=move.cards,
+        from_zone=move.from_zone,
+        to_zone=move.to_zone,
+        reason=move.reason,
+        owner=move.owner,
+        to_top=True,
+    )
+
+    assert "to_top" not in record_json(move), "缺省落点不落盘（旧文件逐字节可逆）"
+    assert '"to_top":true' in record_json(landed), "显式落点写在记录里（记录自描述）"
+
+    for record, to_top in ((move, False), (landed, True)):
+        path = tmp_path / f"card_move-{to_top}.jsonl"
+        path.write_text(dump_journal([header, record]), encoding="utf-8")
+        replayed = read_journal(path)
+        assert replayed[1].to_top is to_top
+        assert dump_journal(replayed) == path.read_text(encoding="utf-8"), (
+            "读回再 dump 必须逐字节相同（缺省与新形状两侧都要）"
+        )

@@ -847,6 +847,33 @@ def test_the_no_leak_assertions_bite_on_the_unredacted_payloads() -> None:
         _assert_identity_hidden(raw_deal, "rebel")
 
 
+def test_a_card_move_that_lands_on_the_deck_top_still_hides_its_faces() -> None:
+    """票 02 的新记录形状（``to_top``）**不是**第二条泄露通道。
+
+    落点只加在既有的 ``card_move`` 上（不新增 delta 类型），故牌面可见性判据仍然只有
+    一条：手牌 → 牌堆的移动对旁观者只给张数。这条用例钉住两件事——``to_top`` 在人类
+    载荷里**保留**（界面上"置于牌堆顶"是可读的公开事实），而 ``cards`` 照旧被抹空。
+    """
+    landed = CardMoveRecord(
+        seq=118,
+        frame_id=0,
+        depth=0,
+        cards=(HIDDEN_CARD,),
+        from_zone=ZoneRef(Zone.HAND, 1),
+        to_zone=ZoneRef(Zone.DECK),
+        reason=MoveReason.PUT,
+        owner=1,
+        to_top=True,
+    )
+    raw = json.loads(record_json(landed))
+    assert raw["to_top"] is True, "落点必须落在记录里（自描述）"
+
+    payload = visible_record(landed, viewer=VIEWER)
+    _assert_card_faces_absent(payload, tuple(raw["cards"]))
+    assert payload["to_top"] is True, "落点不是隐藏面：人类载荷照发"
+    # 全知通道（内部 / 回放）不裁剪牌面——裁剪只发生在这一个下发口。
+    assert visible_record(landed, viewer=None)["cards"], "全知通道照发牌面"
+
 
 # ---------------------------------------------------------------------------
 # M6 票 20：**标签增删**与**武将牌上的牌区**两条新面

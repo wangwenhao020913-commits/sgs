@@ -68,7 +68,6 @@ from sgs.effects import (
     forced_use_targets,
     is_slash,
     needs_designation,
-    place_on_deck,
     satisfies_required,
     targets_within_attack_range,
 )
@@ -2861,6 +2860,11 @@ def _gongxin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
     时照发一条"空选择面"的询问（只有 ``Pass``），弹窗展示整副手牌、出口是「放弃」。
     目标有没有手牌是**发动前提**（``_gongxin_targets`` 只收手牌非空的其他角色）；
     观看本身不再受"有没有红桃"影响。
+
+    "置于牌堆顶"是**一次**跨区移动（``move_in_frame(..., to_top=True)``，票 02）：落点随
+    delta 落记录，故 hand→DECK 的移动若被 MOVE_AFTER 钩子（【连营】一类）挂起，"置顶"
+    也不会被劈成第二步——旧实现是"先追加到牌堆尾、续跑后再 ``place_on_deck``"，挂起时
+    牌停在牌堆底（票 01 的实机缺陷）。
     """
     owner = frame.data["source"]
     target = int(answers["seat"][0])
@@ -2904,18 +2908,15 @@ def _gongxin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
             owner=owner,
             actor=owner,
         )
-    control = host.move_in_frame(
+    return host.move_in_frame(
         frame,
         host.state.refs((card_id,)),
         to_zone=ZoneRef(Zone.DECK),
         reason=MoveReason.PUT,
         owner=target,
         actor=owner,
+        to_top=True,
     )
-    if control == "stay":
-        return "stay"
-    place_on_deck(host.state, (host.state.card(card_id),), to_top=True)
-    return None
 
 
 GONGXIN_FLOW = SkillFlow(

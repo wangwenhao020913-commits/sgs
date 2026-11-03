@@ -14,9 +14,9 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_serializer
 
 from sgs.data import CardTagType, Identity
 
@@ -59,6 +59,18 @@ class CardMoveDelta(_FrozenModel):
     （判定牌 = 被判定者、弃置 / 使用 = 弃置者 / 使用者、摸牌 = 摸牌者、装备置入 = 持有者）；
     只有"无角色主体"的移动（如终局收尾）为 ``None``。归属 ≠ 区域坐标：判定区里的牌
     坐标带座位，但牌本身仍不为任何角色所拥有（规则 11.6）。
+
+    ``to_top``（票 02 的落点）：这批牌进入目标区域时是**成为牌堆顶**（``True``）还是接在
+    目标区尾部（缺省 ``False``）。只有进牌堆的移动才有落点——别的区没有"顶"这个位置，
+    故 ``move_card`` 对其它目标区直接 ``ValueError``。有了它，"置于牌堆顶"是一次**跨区
+    移动**（不是"先进牌堆尾、再同区重排"），挂起劈不开两步，记录流也自描述：重建器读
+    这一条 delta 就能落到堆顶，不必再从"上一条 ``SelectOption(deck_top)``"猜。
+
+    **缺省值不进序列化**（与 ``protocol.SelectionSpec.max_per_suit`` /
+    ``StepPool.max`` 同一姿态）：``record_json`` 是唯一 canonical 序列化器、不做默认值
+    过滤，若每条 ``card_move`` 都多一个 ``"to_top":false``，70 条录像的"录制 == 重放"
+    会全线字节变化。故这里挂一个只在 ``True`` 时写字面段的 wrap serializer：旧文件
+    （没有该字段）解析回 ``False``、再 dump 仍是同一串字节。
     """
 
     delta_type: Literal["card_move"] = "card_move"
@@ -68,6 +80,15 @@ class CardMoveDelta(_FrozenModel):
     reason: MoveReason
     owner: int | None = None
     """本次移动的归属角色；"无角色主体"时为 ``None``。"""
+    to_top: bool = False
+    """落点：``True`` = 成为牌堆新顶（元组顺序即自顶向下）；缺省 ``False`` = 接在区尾。"""
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> Any:
+        data = handler(self)
+        if not data.get("to_top"):
+            data.pop("to_top", None)
+        return data
 
 
 class HpChangeDelta(_FrozenModel):

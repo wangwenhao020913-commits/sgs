@@ -2712,6 +2712,7 @@ class Engine:
         reason: MoveReason,
         owner: int | None,
         actor: int | None = None,
+        to_top: bool = False,
     ) -> Control:
         """移动一批牌、记一条 delta，并在 ``move_card`` 之后内联派发 ``MOVE_AFTER``。
 
@@ -2720,6 +2721,13 @@ class Engine:
 
         这也是**效果回调的公共移动口**（票 27）：``OPS`` 里的 op 只经它搬牌，
         故"搬牌必记 delta"这条不变量对使用链与效果链是同一个实现。
+
+        ``to_top``（票 02 的落点）：这次移动**在落点就写进牌堆顶**——一次跨区移动，不是
+        "先进牌堆尾、再由调用方 ``place_on_deck`` 搬到顶"的两步。落点随 delta 落记录
+        （``CardMoveDelta.to_top``）并进钩子载荷（:class:`~sgs.skills.MoveEvent`），故
+        挂起劈不开两步、重建器也不必再从行动记录里猜落点；钩子看到的是**已经落在落点**
+        的局面（【攻心】的置顶在钩子提问前就完成）。别的目标区没有"顶"，``move_card``
+        对它们直接拒绝（编程错误）。
 
         **失去牌后（票 07）**：有承载帧的移动在本帧内派发 ``MOVE_AFTER``（帧私有载荷
         :class:`~sgs.skills.MoveEvent`，帧私有数据不进记录流）；**没有承载帧**的移动
@@ -2743,11 +2751,12 @@ class Engine:
         §5「程序化约定与偏离一手」）。勿据此在本方法里加回唯一性论断。
         """
         card_ids = tuple(card.card_id for card in cards)
-        # 这次移动的**身份** = "哪个技能、把哪些牌、搬到哪里"。
+        # 这次移动的**身份** = "哪个技能、把哪些牌、搬到哪里、落在哪里"。
         head = (
             frame.data.get(RUNNING_SKILL_KEY) if frame is not None else None,
             card_ids,
             to_zone,
+            to_top,
         )
         if (
             frame is not None
@@ -2797,6 +2806,7 @@ class Engine:
                     after_holder=to_zone.seat,
                     actor=actor,
                     causer=self._move_causer(frame),
+                    to_top=to_top,
                 )
                 control = self.dispatch_seam(frame, SeamKind.EQUIPMENT_DISCARD)
                 if control == "stay":
@@ -2810,7 +2820,13 @@ class Engine:
             actor=(frame.data["source"] if frame is not None else None) if actor is None else actor,
         )
         delta = move_card(
-            self.state, ctx, tuple(cards), to_zone=to_zone, reason=reason, owner=owner
+            self.state,
+            ctx,
+            tuple(cards),
+            to_zone=to_zone,
+            reason=reason,
+            owner=owner,
+            to_top=to_top,
         )
         self.emit_delta(
             delta,
@@ -2852,7 +2868,11 @@ class Engine:
         return None if source is None else int(source)
 
     def _move_event(self, delta: Any, *, actor: int | None) -> MoveEvent:
-        """把一条 ``card_move`` 的形状装成 :class:`~sgs.skills.MoveEvent`（派发载荷）。"""
+        """把一条 ``card_move`` 的形状装成 :class:`~sgs.skills.MoveEvent`（派发载荷）。
+
+        落点（``to_top``）一并透传：钩子读到的"这次移动"要与它落进记录的那条 delta 同形，
+        否则"牌已经在牌堆顶"这件事在钩子侧只能靠读 ``state.deck`` 才看得出来。
+        """
         return MoveEvent(
             cards=tuple(delta.cards),
             from_zone=delta.from_zone,
@@ -2861,6 +2881,7 @@ class Engine:
             owner=delta.owner,
             after_holder=delta.to_zone.seat,
             actor=actor,
+            to_top=delta.to_top,
         )
 
     @staticmethod

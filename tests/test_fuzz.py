@@ -34,6 +34,7 @@ import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Final
 
 import pytest
@@ -41,7 +42,15 @@ import pytest
 import sgs.agents as agents
 from sgs.data import ContentPack, Identity, RuleConfig, load_content_pack
 from sgs.effects import hand_count, hand_limit
-from sgs.engine import Engine, JournalRecord, QueryRecord, TimingRecord, ai_stream
+from sgs.engine import (
+    CardMoveRecord,
+    DeckShuffleRecord,
+    Engine,
+    JournalRecord,
+    QueryRecord,
+    TimingRecord,
+    ai_stream,
+)
 from sgs.skills import CANDIDATE_CAP
 from sgs.state import (
     ActivateSkill,
@@ -52,10 +61,10 @@ from sgs.state import (
     EndPhase,
     FrameKind,
     GameState,
+    MoveReason,
     Pass,
     PlayPhaseQuery,
     SelectCards,
-    SelectOption,
     SlotKind,
     UseCard,
     Zone,
@@ -642,13 +651,17 @@ class _Piles:
                 )
             pile.remove(card_id)
 
-    def place(self, record: JournalRecord, *, to_top: bool = False) -> None:
+    def place(self, record: JournalRecord) -> None:
+        """把这条移动落到重建的目标区上；**落点由记录自己回答**（``to_top``）。
+
+        跨区移动进牌堆时的落点写在 delta 里（``to_top=True`` = 成为牌堆新顶，元组顺序即
+        自顶向下）。重建器不再从"上一条 ``SelectOption(deck_top)``"推断落点：那种补偿在
+        引擎没真的置顶时会静默改写重建结果（票 01 的实机种子就是这么来的）。
+        """
         ref = record.to_zone
         pile = self._pile(ref)
         ids = _ids(record)
-        if ref.zone is Zone.DECK and to_top:
-            # 引擎的 ``move_card`` 先进牌堆尾，调用方随后 ``place_on_deck(to_top=True)``
-            # 把它移到牌堆顶；后者只改顺序、按设计不产 delta（避免泄露被授予的牌面）。
+        if ref.zone is Zone.DECK and record.to_top:
             pile[:0] = ids
         else:
             pile.extend(ids)
@@ -704,8 +717,6 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int, n: int) -> No
     piles = _Piles(seats=len(engine.state.players))
     arranged: tuple[CardRef, ...] = ()
     """最近一次 ``ARRANGE`` 询问授予的牌面（自顶向下）；排列行动据此落到重建牌堆上。"""
-    deck_top_next = False
-    """下一个 deck ``card_move`` 是否表示"随后被置于牌堆顶"（【攻心】的 ``deck_top``）。"""
 
     for record in engine.records:
         if record.kind == "query" and record.query.kind == "ARRANGE":
@@ -718,12 +729,6 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int, n: int) -> No
                 piles.arrange(record.action, arranged)
                 arranged = ()
                 continue
-            if isinstance(record.action, SelectOption) and record.action.choice == "deck_top":
-                # 【攻心】的"置于牌堆顶"：先 hand→deck 的 card_move 只记到"进了牌堆"，
-                # 随后 place_on_deck(to_top=True) 只改顺序、不产 delta。重建器必须把这条
-                # 移动落到牌堆顶，否则最终牌堆顺序会与活状态相差一张（seed 7322… 的回归）。
-                deck_top_next = True
-                continue
         if record.kind != "delta":
             continue
         piles.note_slots(record)
@@ -734,12 +739,7 @@ def _replay_deltas_and_cross_check(engine: _FuzzEngine, seed: int, n: int) -> No
                 piles.merge_reshuffle(record, seed)
         elif record.delta_type == "card_move":
             piles.take(record, seed)
-            piles.place(
-                record,
-                to_top=deck_top_next and record.to_zone.zone is Zone.DECK,
-            )
-            if record.to_zone.zone is Zone.DECK:
-                deck_top_next = False
+            piles.place(record)
         else:
             continue  # hp_change / identity_* 不动牌，与牌守恒无关
 
@@ -859,10 +859,17 @@ def test_random_games_satisfy_the_invariants():
 def test_the_seeded_eight_player_gongxin_deck_top_replays():
     """回归：seed=7322422061626536934 / 8 人的界吕蒙【攻心】把红桃置于牌堆顶。
 
-    这一局原来会在最终"牌堆与 delta 重建互校"判红：检查器只看到 hand→deck 的
+    这一局最早会在最终"牌堆与 delta 重建互校"判红：检查器只看到 hand→deck 的
     ``card_move``，把牌追加到重建牌堆**底**；引擎随后走 ``place_on_deck(to_top=True)``
     把它移到牌堆**顶**（顺序变化不产 delta）。这不是初始化问题——``_fail(record=None)``
     只是最终互校的报错位置标签。
+
+    票 02 起补偿已删，但**这条种子今天不再走到【攻心】置顶**（票 01 的行为修复改变了
+    这一局的走向：实测 0 次【攻心】发动，故也 0 条 ``deck_top``）。它现在钉的是"删掉
+    重建器补偿之后，一条普通 8 人局的逐记录互校仍然全绿"，不是"落点来自记录"——
+    后者由 :func:`test_the_rebuilder_takes_the_landing_spot_from_the_delta`（合成记录流）
+    与 ``tests/test_hero_jie.py::test_gongxin_deck_top_is_one_atomic_move_that_records_the_landing_spot``
+    钉住。
     """
     _play_and_check(7322422061626536934, players=8, deadline=time.monotonic() + 120)
 
@@ -881,6 +888,12 @@ def test_the_seeded_eight_player_gongxin_deck_top_survives_the_lianying_suspensi
     的那一条），修复后整局不变量全绿；"牌真的在牌堆顶"这一条由
     ``tests/test_hero_jie.py::test_gongxin_deck_top_lands_on_top_after_a_suspending_move_after_hook``
     直接断言在 ``state.deck[0]`` 上。
+
+    票 02 起补偿已删（落点只从 delta 的 ``to_top`` 读）。**这条种子只证"删掉补偿后不再
+    炸"，证不了"落点真的来自记录"**：这一局走到 3 次 ``deck_top``，但那三张牌后来都被
+    摸走 / 被重洗冲掉了顺序差（``merge_reshuffle`` 按记录还原整段新顺序），故"落点写错"
+    在终局牌堆上看不出来。真正的判据是合成用例
+    :func:`test_the_rebuilder_takes_the_landing_spot_from_the_delta`。
     """
     _play_and_check(15211799974272561945, players=8, deadline=time.monotonic() + 120)
 
@@ -1021,6 +1034,73 @@ def test_the_replay_check_catches_live_state_drifting_from_the_deltas():
 
     with pytest.raises(FuzzInvariantError, match="不一致"):
         _replay_deltas_and_cross_check(engine, engine.game_seed, engine.game_players)
+
+
+def test_the_rebuilder_takes_the_landing_spot_from_the_delta():
+    """重建器的落点**只读 delta**（``to_top``）：删掉 ``SelectOption(deck_top)`` 特判后仍成立。
+
+    合成一条最小记录流：开局洗牌 → 牌堆顶那张进手牌（座位 0）→ 同一次移动进牌堆**顶**
+    （"置于牌堆顶"的跨区形状）。``to_top=True`` 的重建必须与活状态一致；把落点改成缺省
+    （``False``）就**必须**判红——否则"删掉特判"没有判据。
+
+    为什么需要这条合成用例：两条实机种子的牌堆中途被重洗，顺序差的记忆会被冲掉
+    （``merge_reshuffle`` 按记录还原整段新顺序），故它们只证"不再补偿也不炸"，证不了
+    "落点真的来自记录"。
+    """
+    card = 0  # 牌 id 就是数据表下标
+    deck_order = (card, *(card_id for card_id in range(CARD_COUNT) if card_id != card))
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec()],
+        deck=deck_order,
+        turn_seat=0,
+        rule_config=RuleConfig(player_count=2),
+    )
+    deck_ref = ZoneRef(Zone.DECK)
+    hand_ref = ZoneRef(Zone.HAND, 0)
+    records: list[JournalRecord] = [
+        DeckShuffleRecord(
+            seq=1,
+            frame_id=0,
+            depth=0,
+            cards=state.refs(deck_order),
+            from_zone=None,
+            to_zone=deck_ref,
+        ),
+        CardMoveRecord(
+            seq=2,
+            frame_id=0,
+            depth=0,
+            cards=(state.card(card),),
+            from_zone=deck_ref,
+            to_zone=hand_ref,
+            reason=MoveReason.DRAW,
+            owner=0,
+        ),
+        CardMoveRecord(
+            seq=3,
+            frame_id=0,
+            depth=0,
+            cards=(state.card(card),),
+            from_zone=hand_ref,
+            to_zone=deck_ref,
+            reason=MoveReason.PUT,
+            owner=0,
+            to_top=True,
+        ),
+    ]
+
+    # 绿：记录说了落点，重建牌堆 == 活牌堆（[card, *其余]）。
+    _replay_deltas_and_cross_check(
+        SimpleNamespace(records=records, state=state), 1, 2
+    )
+
+    # 红：同一条移动不带落点（缺省 = 追加到牌堆尾）⇒ 重建与活状态不一致。
+    without = records[:2] + [records[2].model_copy(update={"to_top": False})]
+    with pytest.raises(FuzzInvariantError, match="牌堆与从 delta 重建的结果不一致"):
+        _replay_deltas_and_cross_check(
+            SimpleNamespace(records=without, state=state), 1, 2
+        )
 
 
 def test_the_failure_message_carries_the_seed_the_player_count_and_the_step():

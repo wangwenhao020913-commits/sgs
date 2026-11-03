@@ -84,6 +84,7 @@ from sgs.state import (
     SelectCards,
     SelectOption,
     UseCard,
+    Zone,
 )
 from sgs.timing import Timing
 
@@ -1617,12 +1618,15 @@ def test_gongxin_can_put_the_heart_on_top_of_the_deck():
 def test_gongxin_deck_top_lands_on_top_after_a_suspending_move_after_hook():
     """回归（本 effort 票 01）：目标是**陆逊**、手牌只剩这一张红桃 ⇒ hand→DECK 触发【连营】。
 
-    牌离开目标手牌、去向是牌堆（``move_card`` 追加在**牌堆底**），"置于牌堆顶"是紧随其后
-    的一行 ``place_on_deck(to_top=True)``。这次移动要先问【连营】"是否发动"（非锁定技）⇒
-    挂起；续跑时流水线**从头重跑**第一步，按活状态重算的座位池（``_gongxin_targets`` =
+    牌离开目标手牌、去向是牌堆。这次移动要先问【连营】"是否发动"（非锁定技）⇒ 挂起；
+    续跑时流水线**从头重跑**第一步，按活状态重算的座位池（``_gongxin_targets`` =
     手牌非空的其他角色）已经不含目标了 —— 修复前整条流因此被判 ``"cancel"``
-    （"零副作用、技能可再发动"）返回 ``None``：``effect`` 不再重入、置顶那一行永远不跑，
+    （"零副作用、技能可再发动"）返回 ``None``：``effect`` 不再重入、尾部原语永远不跑，
     牌停在牌堆底。断言落在**活状态的牌堆首位**上（不是"不变量没炸"）。
+
+    票 02 起"进牌堆"与"置于顶"是**一次**移动（落点进记录），故这条回归只剩"续跑不丢
+    effect 尾部"这一个判据；"挂起也劈不开两步"由
+    :func:`test_gongxin_deck_top_is_one_atomic_move_that_records_the_landing_spot` 钉住。
     """
     heart = _first(suit=Suit.HEART.value)
     engine = _gongxin_state(target_hand=(heart,), target_hero="luxun")
@@ -1656,6 +1660,79 @@ def test_gongxin_deck_top_lands_on_top_after_a_suspending_move_after_hook():
         f"实际首位 = {engine.state.deck[0]}，这张红桃在牌堆第 "
         f"{engine.state.deck.index(heart)} 位（共 {len(engine.state.deck)} 张）"
     )
+
+
+def test_gongxin_deck_top_is_one_atomic_move_that_records_the_landing_spot():
+    """票 02：置顶 = **一次**跨区移动 ⇒ 挂起劈不开"进牌堆"与"置于顶"，记录自己带落点。
+
+    局面与上一条同款（目标 = 陆逊、只剩这一张红桃 ⇒ hand→DECK 触发【连营】的提问），但断言
+    停在**挂起点**上、而不是收局之后：
+
+    - 牌必须**已经**在 ``state.deck[0]``。旧实现是"先追加到牌堆尾 → 钩子提问挂起 → 续跑才
+      ``place_on_deck(to_top=True)``"，故挂起点上牌还在牌堆底——这就是"一次挂起劈开两步"的
+      可观测形状；
+    - 钩子的移动载荷（``_move_pending[-1].event``）带 ``to_top``，钩子因此看得见落点；
+    - 记录流里这张红桃**恰一条** ``card_move``，且它写着 ``to_top = True``。fuzz 重建器只读
+      delta 就能落到堆顶（``SelectOption(deck_top)`` 的特判已删）。
+    """
+    heart = _first(suit=Suit.HEART.value)
+    engine = _gongxin_state(target_hand=(heart,), target_hero="luxun")
+    seat0 = _gongxin_player(heart=heart, option="deck_top")
+    seat1 = PassPlayer()
+    top_chosen = False
+    suspended = False
+    for _ in range(2000):
+        query = engine.pending
+        if query is None:
+            engine._step()
+            continue
+        if top_chosen and query.kind == QueryKind.SKILL_ACTIVATION.value:
+            # 停在【连营】的『是否发动』：这次移动已经搬完、钩子的提问还没被应答。
+            suspended = True
+            break
+        action = (seat0 if query.actor == 0 else seat1).respond(query)
+        if isinstance(action, SelectOption) and action.choice == "deck_top":
+            top_chosen = True
+        engine.submit(action)
+    else:
+        raise AssertionError("步数上限内没有走到『置于牌堆顶』之后的挂起点")
+
+    assert top_chosen and suspended, "夹具必须真的走到『置于牌堆顶』并触发【连营】的提问"
+    assert engine.state.deck[0] == heart, (
+        "挂起点上牌就必须已经在牌堆顶（一次原子移动，不是搬进牌堆尾再等续跑置顶）；"
+        f"实际首位 = {engine.state.deck[0]}，这张红桃在牌堆第 "
+        f"{engine.state.deck.index(heart)} 位（共 {len(engine.state.deck)} 张）"
+    )
+    assert engine._move_pending, "钩子的提问把这次移动挂在挂起栈上"
+    assert engine._move_pending[-1].event.to_top is True, (
+        "钩子能看见落点：MOVE_AFTER 的移动载荷带 to_top"
+    )
+
+    def moves_of_the_heart() -> list:
+        return [
+            record
+            for record in _deltas(engine, "card_move")
+            if heart in [card.card_id for card in record.cards]
+        ]
+
+    moves = moves_of_the_heart()
+    assert len(moves) == 1, f"这张红桃只被搬一次（实际 {len(moves)} 条 card_move）"
+    assert moves[0].to_zone.zone is Zone.DECK, "移动的目标区域是牌堆"
+    assert moves[0].to_top is True, "记录自己说得出『落到牌堆顶』（重建器只读 delta）"
+
+    # 续跑到底：没有第二步再挪一次牌，牌仍在牌堆顶。
+    for _ in range(2000):
+        query = engine.pending
+        if query is None:
+            engine._step()
+            continue
+        if query.kind == QueryKind.PLAY_PHASE.value:
+            break
+        engine.submit((seat0 if query.actor == 0 else seat1).respond(query))
+    else:
+        raise AssertionError("步数上限内【攻心】没有收尾")
+    assert engine.state.deck[0] == heart, "续跑之后牌仍在牌堆顶（置顶不是另一步）"
+    assert len(moves_of_the_heart()) == 1, "整条流水线里这张红桃只被搬一次"
 
 
 def test_gongxin_may_pass_on_the_heart_and_handles_a_hand_without_hearts():
