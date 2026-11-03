@@ -1,4 +1,4 @@
-r"""觉醒技（M6 票 06；§四 4.12 L357–L370 / §十九 L2111–L2145）。
+r"""觉醒技（M6 票 06；§四 4.12 L357–L370 / §十九 L2127–L2161）。
 
 觉醒技的机制面只有三条（票面「要做什么」）：
 
@@ -74,19 +74,19 @@ __all__ = [
 ]
 
 XUSHU_QIANXUE = hero_skill_id("jie_xushu", "qianxue")
-"""界徐庶【潜心】的全限定技能 id（§十九 L2114）。"""
+"""界徐庶【潜心】的全限定技能 id（§十九 L2130）。"""
 
 XUSHU_JIANYAN = hero_skill_id("jie_xushu", "jianyan")
-"""界徐庶 ☆【荐言】的全限定技能 id（§十九 L2116；由【潜心】觉醒后获得）。"""
+"""界徐庶 ☆【荐言】的全限定技能 id（§十九 L2132；由【潜心】觉醒后获得）。"""
 
 LVMENG_QINXUE = hero_skill_id("jie_lvmeng", "qinxue")
-"""界吕蒙【勤学】的全限定技能 id（§十九 L2136）。"""
+"""界吕蒙【勤学】的全限定技能 id（§十九 L2152）。"""
 
 LVMENG_GONGXIN = hero_skill_id("jie_lvmeng", "gongxin")
-"""界吕蒙 ☆【攻心】的全限定技能 id（§十九 L2142；由【勤学】觉醒后获得）。"""
+"""界吕蒙 ☆【攻心】的全限定技能 id（§十九 L2158；由【勤学】觉醒后获得）。"""
 
 XUSHU_ZHUHAI = hero_skill_id("jie_xushu", "zhuhai")
-"""界徐庶【诛害】的全限定技能 id（§十九 L2111–L2113）。"""
+"""界徐庶【诛害】的全限定技能 id（§十九 L2127–L2129）。"""
 
 _AWAKENING_COMMITTED = "awakening_committed"
 """帧私有：**在飞**的觉醒技的持有者（键 = 座位号，每个觉醒技自己的帧里只写一次）。
@@ -120,7 +120,7 @@ _ZHUHAI_STARTED = "zhuhai_started"
 
 
 def _qianxue_condition(host: Any, frame: Any) -> bool:
-    """【潜心】的触发条件（§十九 L2114）。
+    """【潜心】的触发条件（§十九 L2130）。
 
     两个条件在**同一时机**上是**合取**，先判归属、再判状态（`06` §5「程序化约定与偏离一手」裁定 1）：
 
@@ -161,7 +161,7 @@ QIANXUE_FLOW = SkillFlow(name="qianxue", steps=(), effect=_qianxue_effect)
 
 QINXUE_DRAW = "draw_two"
 QINXUE_RECOVER = "recover_one"
-"""【勤学】的两项：1. 摸两张牌；2. 回复 1 点体力（§十九 L2137–L2138）。"""
+"""【勤学】的两项：1. 摸两张牌；2. 回复 1 点体力（§十九 L2153–L2154）。"""
 
 QINXUE_OPTIONS: tuple[str, ...] = (QINXUE_DRAW, QINXUE_RECOVER)
 
@@ -211,7 +211,7 @@ def _qinxue_timing(state: GameState) -> Timing:
 def _qinxue_effect(host: Any, frame: Any, answers: Any) -> Any:
     """提交点：上限 -1 → **再问**二选一 → 摸两张 / 回复 1 点 → 获得 ☆【攻心】。
 
-    规则次序是"你减 1 点体力上限**并**选择一项"（§十九 L2136–L2138），且选项的信息面受
+    规则次序是"你减 1 点体力上限**并**选择一项"（§十九 L2152–L2154），且选项的信息面受
     上限变化影响（满体力减上限会同步下调体力值），故选项必须在**减上限之后**问——这不是
     ``SkillFlow`` 的步骤能表达的（步骤只收集、effect 之后才结算），故本技能走**零步流水线**
     + 在 effect 里手写这次 ``ask_option``（与【刚烈】的"判定后问来源"同一形状）。

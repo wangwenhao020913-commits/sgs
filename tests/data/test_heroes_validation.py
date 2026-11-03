@@ -453,7 +453,7 @@ def test_the_standard_table_stays_the_25_and_the_jie_table_is_loaded_separately(
 
 
 def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
-    """真名 / 版本 / 势力 / 体力上限 / 技能清单逐项落定（第十九章 L2067–L2081 等）。
+    """真名 / 版本 / 势力 / 体力上限 / 技能清单逐项落定（第十九章 L2083–L2097 等）。
 
     真名是**字段**而不是从显示名派生（票面「数据与加载」；4 名只有界版的武将没有可剥的
     前缀）。票 04 先落界版这半；票 12 已把标准 25 名补齐并把字段收紧为必写
@@ -519,7 +519,7 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
         SkillType.NORMAL,
         SkillType.AWAKENING,
         SkillType.NORMAL,
-    ], "【潜心】是觉醒技（§十九 L2114：觉醒技 = 满足条件时强制发动）"
+    ], "【潜心】是觉醒技（§十九 L2130：觉醒技 = 满足条件时强制发动）"
     assert xushu.skills[2].granted_by == "qianxue", "☆荐言由【潜心】觉醒后获得"
     assert [skill.granted_by for skill in xushu.skills[:2]] == [None, None]
 
@@ -529,7 +529,7 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
         Gender.MALE,
         4,
     )
-    # M6 票 11：再追加【博图】（「每轮限 X 次」+ 额外回合；§十九 L2140–L2142）。
+    # M6 票 11：再追加【博图】（「每轮限 X 次」+ 额外回合；§十九 L2156–L2158）。
     assert [skill.id for skill in lvmeng.skills] == [
         "keji",
         "qinxue",
@@ -564,7 +564,7 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     assert [skill.skill_type for skill in ganning.skills] == [
         SkillType.NORMAL,
         SkillType.LIMITED,
-    ], "【奋威】是限定技（§十九 L2130–L2131：整局只能发动一次）"
+    ], "【奋威】是限定技（§十九 L2146–L2147：整局只能发动一次）"
 
     assert (diaochan.name, diaochan.true_name, diaochan.version) == (
         "界貂蝉",
@@ -652,14 +652,14 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     assert luxun.skills[0].placement is not None, "【谦逊】必须带三项放置声明"
     assert luxun.skills[1].placement is None, "【连营】不是放置类技能"
 
-    # M6 票 14：界·魏 A（曹操 / 司马懿 / 张辽 / 许褚）。四名都在第十九章 L2012–L2039，
+    # M6 票 14：界·魏 A（曹操 / 司马懿 / 张辽 / 许褚）。四名都在第十九章 L2028–L2055，
     # 真名与标准版同名 ⇒ 追加它们只让**版本池** 37 → 41，真名池仍是 26。
     # M6 票 15：界·魏 B（郭嘉 / 李典）。界郭嘉真名同标准版（版本 41 → 42，真名仍 26）；
-    # 界李典是**只有界版**的新真名（版本 → 43、真名 → 27，§十九 L2050–L2057）。
+    # 界李典是**只有界版**的新真名（版本 → 43、真名 → 27，§十九 L2066–L2073）。
     # M6 票 16：界刘备 / 界赵云 / 界诸葛亮三名的真名都与标准版同名（版本 43 → 46、
-    # 真名仍 27，§十九 L2058–L2102）。
+    # 真名仍 27，§十九 L2074–L2118）。
     # M6 票 17：界孙权 / 界黄盖 / 界大乔 / 界孙尚香四名的真名也都与标准版同名
-    # （版本 46 → 50、真名仍 27，§十九 L2121–L2180）。
+    # （版本 46 → 50、真名仍 27，§十九 L2137–L2196）。
     caocao = jie.by_id("jie_caocao")
     simayi = jie.by_id("jie_simayi")
     zhangliao = jie.by_id("jie_zhangliao")
@@ -676,7 +676,7 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     assert [skill.skill_type for skill in caocao.skills] == [
         SkillType.NORMAL,
         SkillType.LORD,
-    ], "【护驾】是主公技（§十九 L2014–L2018）"
+    ], "【护驾】是主公技（§十九 L2030–L2034）"
 
     assert (simayi.name, simayi.true_name, simayi.version) == (
         "界司马懿",
@@ -710,7 +710,7 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     )
     assert [skill.id for skill in xuchu.skills] == ["luoyi"]
 
-    # M6 票 15：界郭嘉（§十九 L2040–L2044）、界李典（§十九 L2050–L2057）。两名都是 3 体力；
+    # M6 票 15：界郭嘉（§十九 L2056–L2060）、界李典（§十九 L2066–L2073）。两名都是 3 体力；
     # 【天妒】与标准版逐字相同，【遗计】是界版重写；【恂恂】/【忘隙】是李典的两条新技能。
     guojia = jie.by_id("jie_guojia")
     lidian = jie.by_id("jie_lidian")
@@ -743,7 +743,7 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
         SkillType.NORMAL,
     ]
 
-    # M6 票 16：界刘备（§十九 L2058–L2066）、界赵云（L2082–L2089）、界诸葛亮（L2097–L2102）。
+    # M6 票 16：界刘备（§十九 L2074–L2082）、界赵云（L2098–L2105）、界诸葛亮（L2113–L2118）。
     # 三名真名都与标准版同名；【激将】是主公技，其余五条都是普通技。
     liubei = jie.by_id("jie_liubei")
     zhaoyun = jie.by_id("jie_zhaoyun")
@@ -759,7 +759,7 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     assert [skill.skill_type for skill in liubei.skills] == [
         SkillType.NORMAL,
         SkillType.LORD,
-    ], "【激将】是主公技（§十九 L2062–L2065）"
+    ], "【激将】是主公技（§十九 L2078–L2081）"
 
     assert (zhaoyun.name, zhaoyun.true_name, zhaoyun.version) == (
         "界赵云",
@@ -793,8 +793,8 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
         SkillType.NORMAL,
     ]
 
-    # M6 票 17：界孙权（§十九 L2121–L2127）、界黄盖（L2146–L2151）、界大乔（L2159–L2165）、
-    # 界孙尚香（L2173–L2180）。四名真名都与标准版同名；【救援】是主公技。
+    # M6 票 17：界孙权（§十九 L2137–L2143）、界黄盖（L2162–L2167）、界大乔（L2175–L2181）、
+    # 界孙尚香（L2189–L2196）。四名真名都与标准版同名；【救援】是主公技。
     sunquan = jie.by_id("jie_sunquan")
     huanggai = jie.by_id("jie_huanggai")
     daqiao = jie.by_id("jie_daqiao")
@@ -815,7 +815,7 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     assert [skill.skill_type for skill in sunquan.skills] == [
         SkillType.NORMAL,
         SkillType.LORD,
-    ], "【救援】是主公技（§十九 L2124）"
+    ], "【救援】是主公技（§十九 L2140）"
 
     assert (huanggai.name, huanggai.true_name, huanggai.version) == (
         "界黄盖",
@@ -853,7 +853,7 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
     )
     assert [skill.id for skill in sunshangxiang.skills] == ["jieyin", "xiaoji"]
 
-    # M6 票 18：界华佗 / 界吕布 / 界华雄 / 界公孙瓒（§十九 L2181–L2215）。
+    # M6 票 18：界华佗 / 界吕布 / 界华雄 / 界公孙瓒（§十九 L2197–L2231）。
     # 华佗、吕布的真名与标准版同名（版本池 +2）；华雄、公孙瓒是**只有界版**的新真名
     # （版本池 +2、真名池 +2 ⇒ spec 收口的 54 个版本 / 29 个真名）。
     huatuo = jie.by_id("jie_huatuo")
@@ -879,7 +879,7 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
         Kingdom.QUN,
         Gender.MALE,
         5,
-    ), "界吕布体力上限 5（§十九 L2187）"
+    ), "界吕布体力上限 5（§十九 L2203）"
     assert [skill.id for skill in lvbu.skills] == ["wushuang", "liyu"]
 
     assert (huaxiong.name, huaxiong.true_name, huaxiong.version) == (
@@ -891,7 +891,7 @@ def test_a_jie_hero_carries_its_true_name_version_and_rule_book_stats():
         Kingdom.QUN,
         Gender.MALE,
         6,
-    ), "界华雄体力上限 6（§十九 L2201）"
+    ), "界华雄体力上限 6（§十九 L2217）"
     assert [skill.id for skill in huaxiong.skills] == ["yaowu", "shizhan"]
 
     assert (gongsunzan.name, gongsunzan.true_name, gongsunzan.version) == (

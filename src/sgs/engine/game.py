@@ -2614,7 +2614,7 @@ class Engine:
 
         与 :meth:`skip_play_phase` / :meth:`skip_draw_phase` 同姿态：只对**当前回合角色**
         生效，跳过由 :meth:`_phase_judge` 的顶部消费（连阶段体与边界一并越过，直奔摸牌阶段）。
-        **判定区里的牌保留**（`三国杀详细规则.txt` §11.5 L1264 / 账本行「被跳过的判定阶段
+        **判定区里的牌保留**（`三国杀详细规则.txt` §11.5 L1280 / 账本行「被跳过的判定阶段
         不消费判定区里的牌」）——它只是不结算，不是被弃置。不是技能钩子，故不新增 ``Timing``。
         """
         if self.state.turn_seat == seat:
@@ -3450,7 +3450,7 @@ class Engine:
 
         与 :meth:`set_luoyi_active` 同形、同样**不发 delta**，但是**另一个字段**：标准版
         裸衣到**本回合结束**（收尾点 :meth:`_turn_after_end`），界版到**你的下个回合开始**
-        （§十九 L2035–L2039），清理点因此落在该座位自己的 ``TURN_START``——两者共用一个
+        （§十九 L2051–L2055），清理点因此落在该座位自己的 ``TURN_START``——两者共用一个
         字段会让其中一版的作用域被另一版的收尾点提前抹掉。
         """
         return self._set_player_flag(seat, "luoyi_until_next_turn", active)
@@ -4762,7 +4762,7 @@ class Engine:
         seat = self._turn_seat()
         if self._turn_data.pop("skip_judge", False):
             # 【神速】①（风包夏侯渊）：**跳过判定阶段**——判定区里的牌保留、一张都不判
-            # （§11.5 L1264），阶段体与边界一并越过；返回 None 后回合环的 pc 自然落到
+            # （§11.5 L1280），阶段体与边界一并越过；返回 None 后回合环的 pc 自然落到
             # ``_phase_draw_start``（与跳过摸牌 / 出牌同形）。
             self.state.phase = Phase.JUDGE
             return None
@@ -5061,7 +5061,7 @@ class Engine:
         seat = self.state.turn_seat
         if seat is not None:
             self._clear_wine_active(seat)
-            # 【裸衣】的作用域是"直到回合结束"（§九 L952–954 / M6 票 01）：同一收尾点清掉。
+            # 【裸衣】的作用域是"直到回合结束"（§九 L968–970 / M6 票 01）：同一收尾点清掉。
             self._clear_luoyi_active(seat)
         # 技能失效 / 手牌禁令 / 红桃【杀】加伤的作用域 = 本回合（M6 票 04）：同一收尾点清掉。
         self._clear_turn_effects()

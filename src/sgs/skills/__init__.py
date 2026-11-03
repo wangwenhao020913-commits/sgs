@@ -598,8 +598,8 @@ def rejudge_card_zones(state: GameState, seat: int) -> tuple[Zone, ...]:
     """``seat`` 的改判窗口**可以打出哪些区的牌**（M6 票 14；缺省一张手牌）。
 
     与 :func:`rejudge_capable_seats` 读**同一批存活实例**、同一批定义字段，只是这里取
-    :attr:`~sgs.skills.catalog.SkillDef.rejudge_zones` 的并集：标准【鬼才】（§九 L942）
-    "打出一张**手牌**" ⇒ ``(HAND,)``；界【鬼才】（§十九 L2021）"打出**一张牌**" ⇒
+    :attr:`~sgs.skills.catalog.SkillDef.rejudge_zones` 的并集：标准【鬼才】（§九 L958）
+    "打出一张**手牌**" ⇒ ``(HAND,)``；界【鬼才】（§十九 L2037）"打出**一张牌**" ⇒
     ``(HAND, EQUIP)``。多个改判实例并存时取并集（能力只增不减的一个座位不会因此变窄）。
 
     该座位没有改判能力时不构造窗口（:func:`rejudge_capable_seats` 已先过滤），此处的

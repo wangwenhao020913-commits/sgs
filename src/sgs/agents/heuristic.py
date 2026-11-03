@@ -3442,7 +3442,7 @@ def _score_qianxun(query: Query, action: Action, view: PlayerView) -> float:
 
 _HAND_REQUIRED_SEAT_STEPS: frozenset[tuple[str, str]] = frozenset(
     {
-        # 【义绝】的目标必须"有手牌"（规则 §十九 L2106：选择一名有手牌的其他角色）。
+        # 【义绝】的目标必须"有手牌"（规则 §十九 L2122：选择一名有手牌的其他角色）。
         ("hero.jie_guanyu.yijue", "seat"),
     }
 )

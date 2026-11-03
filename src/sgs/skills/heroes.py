@@ -150,7 +150,7 @@ def _hand_equip(state: GameState, seat: int) -> tuple[int, ...]:
 
 
 def _hand(state: GameState, seat: int) -> tuple[int, ...]:
-    """**手牌**（牌面明写"手牌"时的区域谓词；【倾国】是第一个消费者，§九 L962）。"""
+    """**手牌**（牌面明写"手牌"时的区域谓词；【倾国】是第一个消费者，§九 L978）。"""
     return card_ids(state, seat, Zone.HAND)
 
 
@@ -204,7 +204,7 @@ class ConversionSkill(HeroSkillDecl):
     shared_with: tuple[str, ...] = ()
     """**同一份牌面文本**也由这些武将 id 持有的那条转化技（M6 票 07 的加法；缺省空）。
 
-    界甘宁【奇袭】（§十九 L2129）与标准甘宁【奇袭】（§九 L1009）**逐字相同**，
+    界甘宁【奇袭】（§十九 L2145）与标准甘宁【奇袭】（§九 L1025）**逐字相同**，
     故这里写 ``shared_with=("jie_ganning",)``——一条声明派生两个全限定技能 id，
     而不是把同一行声明复制两份：源筛选 / 产物 / 时机只有一份真源，界版只是另一个
     武将 id（与【克己】【马术】的"另一个武将 id"同一姿态）。
@@ -256,7 +256,7 @@ def _diamond(state: GameState, card_id: int) -> bool:
 
 
 def _black(state: GameState, card_id: int) -> bool:
-    """颜色谓词：黑色牌（【倾国】§九 L962 / 【奇袭】§九 L1009）。"""
+    """颜色谓词：黑色牌（【倾国】§九 L978 / 【奇袭】§九 L1025）。"""
     return _convertible(state, card_id, color=Color.BLACK)
 
 
@@ -286,7 +286,7 @@ def _product_in_pack(state: GameState, type_id: str) -> bool:
 
 
 def _wine(state: GameState, card_id: int) -> bool:
-    """牌名谓词：【酒】（【龙胆】的【酒】→【桃】，§十九 L2083–L2084）。"""
+    """牌名谓词：【酒】（【龙胆】的【酒】→【桃】，§十九 L2099–L2100）。"""
     return _convertible(state, card_id, card_type="wine") and _product_in_pack(state, "peach")
 
 
@@ -298,7 +298,7 @@ def _peach_to_wine(state: GameState, card_id: int) -> bool:
 def _diamond_slash_target_pool(
     state: GameState, ctx: ModifierContext, current: Any
 ) -> Any:
-    """界关羽【武圣】②：你使用**方块【杀】无距离限制**（§十九 L2068–L2070）。
+    """界关羽【武圣】②：你使用**方块【杀】无距离限制**（§十九 L2084–L2086）。
 
     落点是 ``TARGET_POOL``（"无距离限制" = 目标池豁免"距离 ≤ 攻击范围"这一条判据）：
     把**全部其他存活座位**并进池子。用"并集"而不是直接返回全集，是为了不与链上**其它**
@@ -461,7 +461,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         scopes=(CandidateScope.PLAY, CandidateScope.RESPOND),
         requirement="选择1张红色牌当【杀】使用或打出",
     ),
-    # 界关羽【武圣】（M6 票 04，§十九 L2068–L2070）：①与标准版逐字相同（红牌当【杀】）；
+    # 界关羽【武圣】（M6 票 04，§十九 L2084–L2086）：①与标准版逐字相同（红牌当【杀】）；
     # ②"你使用**方块**【杀】无距离限制"是同一技能的连续型效果，挂在 TARGET_POOL 上。
     ConversionSkill(
         hero_id="jie_guanyu",
@@ -491,7 +491,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         requirement="选择1张红桃手牌当【杀】使用或打出；使用红桃【杀】无距离限制",
     ),
     # 赵云【龙胆】两条方向共用一个技能 id（规则 982）。
-    # M6 票 16：界赵云【龙胆】的 杀↔闪 两向与标准版**逐字相同**（§十九 L2082–L2084），
+    # M6 票 16：界赵云【龙胆】的 杀↔闪 两向与标准版**逐字相同**（§十九 L2098–L2100），
     # 故经 ``shared_with`` 派生 ``hero.jie_zhaoyun.longdan``，不复制这两行；另加的
     # 酒↔桃 两向是**另一份声明**（产物牌名不同），见下面两条。
     ConversionSkill(
@@ -514,7 +514,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         requirement="选择1张【闪】当【杀】使用或打出",
         shared_with=("jie_zhaoyun",),
     ),
-    # 界赵云【龙胆】的 酒↔桃 两向（§十九 L2083–L2084）。【酒】当【桃】：出牌阶段可当
+    # 界赵云【龙胆】的 酒↔桃 两向（§十九 L2099–L2100）。【酒】当【桃】：出牌阶段可当
     # 【桃】对自己使用（受伤时），濒死求桃窗口由 ``_transformed_peaches`` 按产物牌名取
     # （该窗口不读 ``scopes``）。【桃】当【酒】：出牌阶段使用（每回合限一次由【酒】的
     # 行为表收住，目标只能是自己）。
@@ -547,7 +547,7 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         requirement="选择1张方块牌当【乐不思蜀】使用",
     ),
     # 华佗【急救】：回合外一张红色牌当【桃】使用（规则 1041）。
-    # M6 票 18：界华佗【急救】与标准版**逐字相同**（§十九 L2183）⇒ 同一条声明经
+    # M6 票 18：界华佗【急救】与标准版**逐字相同**（§十九 L2199）⇒ 同一条声明经
     # ``shared_with`` 派生 ``hero.jie_huatuo.jijiu``，不复制第二行。
     ConversionSkill(
         hero_id="huatuo",
@@ -560,9 +560,9 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         requirement="选择1张红色牌当【桃】使用",
         shared_with=("jie_huatuo",),
     ),
-    # 甄姬【倾国】（M6 票 02）：一张**黑色手牌**当【闪】使用或打出（§九 L962）。
+    # 甄姬【倾国】（M6 票 02）：一张**黑色手牌**当【闪】使用或打出（§九 L978）。
     # 区域 = 只有手牌：牌面明写"手牌"，故不套 `_hand_equip` 的区域默认。
-    # M6 票 09：界甄姬【倾国】与标准版**逐字相同**（§十九 L2048–L2049）⇒ 同一条声明经
+    # M6 票 09：界甄姬【倾国】与标准版**逐字相同**（§十九 L2064–L2065）⇒ 同一条声明经
     # ``shared_with`` 派生 ``hero.jie_zhenji.qingguo``，不复制第二行。
     ConversionSkill(
         hero_id="zhenji",
@@ -574,9 +574,9 @@ CONVERSION_SKILLS: tuple[ConversionSkill, ...] = (
         requirement="选择1张黑色手牌当【闪】使用或打出",
         shared_with=("jie_zhenji",),
     ),
-    # 甘宁【奇袭】（M6 票 03）：一张黑色牌当【过河拆桥】使用（§九 L1009）。
+    # 甘宁【奇袭】（M6 票 03）：一张黑色牌当【过河拆桥】使用（§九 L1025）。
     # 区域默认 = 手牌 ∪ 装备：牌面没写区域，按 `_hand_equip` 那一档读。
-    # M6 票 07：界甘宁【奇袭】牌面逐字相同（§十九 L2129）⇒ 同一条声明经 ``shared_with``
+    # M6 票 07：界甘宁【奇袭】牌面逐字相同（§十九 L2145）⇒ 同一条声明经 ``shared_with``
     # 派生 ``hero.jie_ganning.qixi``，不复制第二行。
     ConversionSkill(
         hero_id="ganning",

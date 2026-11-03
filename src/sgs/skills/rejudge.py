@@ -53,10 +53,10 @@ GUICAI = hero_skill_id("simayi", "guicai")
 """司马懿【鬼才】的全限定技能 id（前缀派生走 :func:`sgs.data.hero_skill_id`）。"""
 
 JIE_GUICAI = hero_skill_id("jie_simayi", "guicai")
-"""界司马懿【鬼才】的全限定技能 id（§十九 L2021：「当一名角色的判定牌生效前，你可以打出
+"""界司马懿【鬼才】的全限定技能 id（§十九 L2037：「当一名角色的判定牌生效前，你可以打出
 一张牌代替之」）。
 
-与标准版（§九 L942「打出一张**手牌**代替之」）的**唯一牌面差别**是候选牌的来源范围：
+与标准版（§九 L958「打出一张**手牌**代替之」）的**唯一牌面差别**是候选牌的来源范围：
 界版是"一张牌"⇒ 手牌 ∪ 装备区（`参考资料/界限突破-界标准包武将资料.md`：
 "鬼才由'一张手牌'放宽为'一张牌'"），落成 :attr:`~sgs.skills.catalog.SkillDef.rejudge_zones`。
 改判能力仍只有 ``rejudge_capable`` 一个定义字段，座位集合由 :func:`rejudge_skill_ids`
@@ -71,7 +71,7 @@ GUIDAO = hero_skill_id("zhangjiao_mobile", "guidao")
 
 - ``rejudge_card_color = Color.BLACK``：候选只收黑桃 / 梅花（没有黑色牌 ⇒ 窗口不发这一问）；
 - ``rejudge_original_to = RejudgeOriginal.HAND``：**替换**——被换下的原判定牌由**张角获得**
-  （规则 §11.3 L1243–L1245；`参考资料/机制详解-官方规则集研究.md` L139），与【鬼才】的
+  （规则 §11.3 L1259–L1261；`参考资料/机制详解-官方规则集研究.md` L139），与【鬼才】的
   **代替**（原牌进弃牌堆）分列。
 
 文本里的"用"字是官方现行口径（feng-zhangjiao 票 01 的 R6）：改判**不是打出**，走
@@ -82,7 +82,7 @@ TIANDU = hero_skill_id("guojia", "tiandu")
 """郭嘉【天妒】的全限定技能 id。"""
 
 JIE_TIANDU = hero_skill_id("jie_guojia", "tiandu")
-"""界郭嘉【天妒】的全限定技能 id（§十九 L2041：牌面与标准版逐字相同）。
+"""界郭嘉【天妒】的全限定技能 id（§十九 L2057：牌面与标准版逐字相同）。
 
 票 15 的"复用"落点与界【鬼才】同姿态：**同一个** :data:`TIANDU_FLOW` 对象与**同一条**
 发动形态（:func:`_tiandu_plan` 读判定帧的 ``subject``），只有技能 id 不同。
@@ -142,8 +142,8 @@ def rejudge_skill_definitions() -> tuple[SkillDef, ...]:
     【鬼才】（标准 / 界）非锁定（技能面写了"你可以"）但**不落钩子**——它把能力写在
     定义字段上，由引擎的通用改判窗口消费；【天妒】非锁定，落
     ``JUDGE_CARD_AFTER_EFFECT`` 钩子。三条 ``carrier = HERO``（优先级档由载体派生）、
-    ``skill_type = NORMAL``。界【鬼才】与标准版只差**候选牌区域**：标准版 §九 L942
-    "一张手牌" ⇒ 缺省 ``rejudge_zones=(HAND,)``；界版 §十九 L2021 "一张牌" ⇒ 手牌 ∪ 装备区。
+    ``skill_type = NORMAL``。界【鬼才】与标准版只差**候选牌区域**：标准版 §九 L958
+    "一张手牌" ⇒ 缺省 ``rejudge_zones=(HAND,)``；界版 §十九 L2037 "一张牌" ⇒ 手牌 ∪ 装备区。
     """
     return (
         SkillDef(

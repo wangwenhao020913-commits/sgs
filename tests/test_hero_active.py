@@ -506,7 +506,7 @@ def test_the_phase_reset_mask_covers_every_phase_bit_and_nothing_else():
 # ---------------------------------------------------------------------------
 # 黄盖【苦肉】（M6 票 03）：出牌阶段，你可以失去 1 点体力，然后摸两张牌
 #
-# §九 L1015 的**标准版**原文没有"限一次"、也不弃牌——界黄盖的"限一次 + 弃一张"随票 17。
+# §九 L1031 的**标准版**原文没有"限一次"、也不弃牌——界黄盖的"限一次 + 弃一张"随票 17。
 # 形态 = 裸发动（``picks == ()`` / ``choices == ()``、``once_per_phase=False``）+ 失去体力
 # （LIFE_DECREASE 帧，**不是** DAMAGE 帧）+ 摸两张。失去体力与受到伤害是两条事件：
 # 前者只走体力写入钩子（LIFE_DECREASE_*），后者先走 DAMAGE_* 再进 LIFE_DECREASE。
@@ -585,7 +585,7 @@ def test_a_bare_activation_candidate_and_handler_run_the_shape():
 
 
 def test_kurou_can_be_activated_again_in_the_same_play_phase():
-    """§九 L1015 没有"限一次"：同一出牌阶段连续发动两次，每次失去 1 点、摸两张。"""
+    """§九 L1031 没有"限一次"：同一出牌阶段连续发动两次，每次失去 1 点、摸两张。"""
     state, deck = _kurou_state()
     driver = _KurouDriver(times=2)
 

@@ -1,6 +1,6 @@
 """U 族：使用牌时触发（M6 票 02）——黄月英【集智】。
 
-规则原文：§九 L997（"当你使用一张非延时类锦囊牌时，你可以摸一张牌"）与界版 §十九
+规则原文：§九 L1013（"当你使用一张非延时类锦囊牌时，你可以摸一张牌"）与界版 §十九
 L2104–L2105（"当你使用一张**非转化的**锦囊牌时……"）。两版牌面**不同**（M6 评审订正）：
 
 - **标准版**只排除延时类：**转化锦囊照常触发**（票 02 曾把"非转化"写进标准版口径）；
@@ -158,9 +158,9 @@ def test_jizhi_does_not_fire_on_a_basic_card():
 
 
 def test_jizhi_does_not_fire_on_a_delayed_trick():
-    """反例：标准版（§九 L997 的"非延时类"）对真【乐不思蜀】不触发。
+    """反例：标准版（§九 L1013 的"非延时类"）对真【乐不思蜀】不触发。
 
-    界版牌面**没有**"非延时类"（§十九 L2104–L2105），同一张牌照常触发——正例见
+    界版牌面**没有**"非延时类"（§十九 L2120–L2121），同一张牌照常触发——正例见
     ``tests/test_hero_jie_hand_limit.py::test_jie_jizhi_fires_on_a_delayed_non_transformed_trick``。
     """
     delayed = _cards("indulgence")[0]
@@ -215,7 +215,7 @@ def _use_transformed_trick(hero_id: str):
 
 
 def test_jizhi_fires_on_a_transformed_trick_card():
-    """标准版（§九 L997 没有"非转化"）：转化【决斗】照样触发，摸牌堆顶一张。
+    """标准版（§九 L1013 没有"非转化"）：转化【决斗】照样触发，摸牌堆顶一张。
 
     M6 评审订正：票 02 曾把界版的"非转化"也套到标准版上，导致标准【集智】对转化锦囊
     整段哑火；规则原文只排除**延时类**。
@@ -227,7 +227,7 @@ def test_jizhi_fires_on_a_transformed_trick_card():
 
 
 def test_jie_jizhi_does_not_fire_on_a_transformed_trick_card():
-    """界版（§十九 L2105 的"非转化的"）：同一次转化【决斗】⇒ 不问、不摸。"""
+    """界版（§十九 L2121 的"非转化的"）：同一次转化【决斗】⇒ 不问、不摸。"""
     engine, _deck_before = _use_transformed_trick("jie_huangyueying")
 
     assert _jizhi_queries(engine, JIE_JIZHI) == [], "界版把转化牌挡在触发条件之外"

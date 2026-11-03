@@ -80,7 +80,7 @@ TARGET_POOL_SKILLS: tuple[TargetPoolSkill, ...] = (
         short_id="qianxun",
         card_types=("snatch", "indulgence"),
     ),
-    # 界诸葛亮【空城】（M6 票 16）：与标准版**逐字相同**（§十九 L2101–L2102）⇒ 同一个
+    # 界诸葛亮【空城】（M6 票 16）：与标准版**逐字相同**（§十九 L2117–L2118）⇒ 同一个
     # 谓词、同一条 ``remove_self``，故这里只是另起一条声明（另一个武将 id）。
     TargetPoolSkill(
         hero_id="jie_zhugeliang",

@@ -1340,7 +1340,7 @@ def _count_needed(engine: Any, query: Query, data: dict[str, Any]) -> int:
 def _rejudge_requirement(engine: Any, query: Query) -> str:
     """改判窗口的"需要做什么"：读**应答座位**当前活着的改判技能定义（不写死一句）。
 
-    标准【鬼才】"用一张**手牌**"（§九 L942）、界【鬼才】"用**一张牌**"（§十九 L2021）、
+    标准【鬼才】"用一张**手牌**"（§九 L958）、界【鬼才】"用**一张牌**"（§十九 L2037）、
     张角【鬼道】"用一张**黑色**牌替换"（feng-zhangjiao 票 02）
     ——两版文案不同，而界面按"本窗口文案 == 该技能声明的 ``requirement``"认领那个只说明
     入口（`tools/sgs_web/static/table.js:rejudgeWindowEntry`），写死会让界版对不上。

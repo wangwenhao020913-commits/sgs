@@ -80,10 +80,10 @@ MASHU = hero_skill_id("machao", "mashu")
 """马超【马术】的全限定技能 id（前缀派生走 :func:`sgs.data.hero_skill_id`）。"""
 
 JIE_YICONG = hero_skill_id("jie_gongsunzan", "yicong")
-"""界公孙瓒【义从】的全限定技能 id（M6 票 18；§十九 L2213–L2214）。"""
+"""界公孙瓒【义从】的全限定技能 id（M6 票 18；§十九 L2229–L2230）。"""
 
 JIE_MASHU = hero_skill_id("jie_machao", "mashu")
-"""界马超【马术】的全限定技能 id（M6 票 04）：§十九 L2091 与标准版逐字相同。
+"""界马超【马术】的全限定技能 id（M6 票 04）：§十九 L2107 与标准版逐字相同。
 
 界版的第二条技能是【铁骑】（票 04 的第二个载体，住 :mod:`sgs.skills.response_window`）；
 【马术】本身没有版本差异，故两个 id 共用**同一个** ``DISTANCE`` 回调——"一个技能一条定义"
@@ -100,7 +100,7 @@ LIULI = hero_skill_id("daqiao", "liuli")
 """大乔【流离】的全限定技能 id。"""
 
 JIE_LIULI = hero_skill_id("jie_daqiao", "liuli")
-"""界大乔【流离】的全限定技能 id（M6 票 17）：§十九 L2163–L2165 与标准版**逐字相同**。
+"""界大乔【流离】的全限定技能 id（M6 票 17）：§十九 L2179–L2181 与标准版**逐字相同**。
 
 与标准【流离】共用同一条钩子 / 流水线（同一个回调、同一份步骤声明）：界版只是另一个武将
 id，行为不因版本分叉。"""
@@ -123,7 +123,7 @@ def _mashu_distance(state: GameState, ctx: ModifierContext, current: Any) -> Any
 
 
 def _yicong_distance(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """界公孙瓒【义从】的两条距离修正（§十九 L2213–L2214）。
+    """界公孙瓒【义从】的两条距离修正（§十九 L2229–L2230）。
 
     ①"你计算与其他角色的距离 -1" ⇒ 持有者是**主体**时 −1（与【马术】同一条）；
     ②"若你的体力值不大于 2，其他角色计算与你的距离 +1" ⇒ 持有者是**客体**且**当前

@@ -429,7 +429,7 @@ class Player(BaseModel):
     """界【裸衣】的"直到你的下个回合开始【杀】/【决斗】基础伤害 +1"是否生效（M6 票 14）。
 
     与标准版【裸衣】（``luoyi_active``）**分字段**：两者作用域不同——标准版到**本回合结束**，
-    界版到**你的下个回合开始**（§十九 L2035–L2039），故不能共用"回合末清空"的清理点。
+    界版到**你的下个回合开始**（§十九 L2051–L2055），故不能共用"回合末清空"的清理点。
     写入唯一入口 ``Engine.set_luoyi_until_next_turn``（界许褚的摸牌阶段写入）；清理点 =
     该座位自己的 ``TURN_START``（:meth:`Engine._turn_start`）——那正是"你的下个回合开始"。
     读点是 :func:`sgs.skills.phase_body._jie_luoyi_damage_bonus` 的 ``DAMAGE_DEAL_AMOUNT``
@@ -456,7 +456,7 @@ class Player(BaseModel):
     动作已足以在回放时重建它。
     """
     zhaxiang_active: bool = False
-    """界黄盖【诈降】的"本阶段"效果是否生效（M6 票 17；§十九 L2148–L2151）。
+    """界黄盖【诈降】的"本阶段"效果是否生效（M6 票 17；§十九 L2164–L2167）。
 
     牌面："然后若此时是你的出牌阶段，你本阶段：使用红色【杀】无距离限制且不能被【闪】
     响应、使用【杀】的次数上限 +1。"写入唯一入口 ``Engine.set_zhaxiang_active``（诈降的
@@ -469,7 +469,7 @@ class Player(BaseModel):
     ``USE_AFTER_DESIGNATE_TARGET`` 的帧标签）。**不发 delta**：与 ``luoyi_active`` 同姿态。
     """
     damage_dealt_this_turn: bool = False
-    """本回合是否**造成过伤害**（M6 票 06 的【诛害】判据：§十九 L2111–L2113）。
+    """本回合是否**造成过伤害**（M6 票 06 的【诛害】判据：§十九 L2127–L2129）。
 
     写入唯一入口 :meth:`Engine.note_damage_dealt`（伤害数值定稿且 > 0、未被防止、
     有来源时由伤害帧调一次）；作用域 = **本回合**，回合末由
