@@ -4685,15 +4685,16 @@ class Engine:
             # 否则结算栈会继续走、再发一条无关询问把它覆盖，那条应答随后被前一个问句
             # 错配（M6 票 12 的混合局暴露；回归 = test_hero_card_zone 的同名用例）。
             return
-        if not self._started:
-            # 开局派发（L0 的 ``GAME_START``）能提问：``"stay"`` ⇒ ``_started`` 仍为假、
-            # 帧与应答缓存都留着，下一次 ``_step`` 从 :meth:`_start` 原地续跑。
-            if self._start() == "stay":
-                return
-            # 派发完成也收在这里：回合环从下一次 ``_step`` 起跑（与旧实现同一粒度；
-            # 钩子也可能已经判定了终局，故不能顺手往下走）。
-            return
         if self.stack:
+            # **结算栈优先于一切重入**（wuming 票 01）：L0 的钩子（【天成】）也会压子帧
+            # （``MAXLIFE`` / ``RECOVER``），而"钩子 ``"stay"`` = 让引擎先把这一帧跑完"
+            # 这条契约要求**帧先出栈、派发再重入**。旧顺序（``_start`` 在前）会让子帧还挂在
+            # 栈上时就把 L0 派发从头重入一遍：钩子看不到帧已经跑完，要么重做、要么死循环
+            # （``"stay"`` 一路传上去，栈永远轮不到）。
+            #
+            # 序不变的部分：开局那一刻栈是空的 ⇒ 仍然先走 ``_start``；``_started`` 只可能在
+            # L0 派发期间为假，而"假 + 栈非空"要求有钩子压过子帧——票 03 落 L0 派发点时
+            # 一个这样的钩子都不存在，故既有对局走到这里与旧实现逐字节相同。
             popped = self.stack.step(self.steps, self)
             if popped is not None:
                 self._after_pop(popped)
@@ -4703,6 +4704,15 @@ class Engine:
                 self._deaths_pending -= 1
                 if self._deaths_pending == 0:
                     self._close_death_batch()
+            return
+        if not self._started:
+            # 开局派发（L0 的 ``GAME_START``）能提问：``"stay"`` ⇒ ``_started`` 仍为假、
+            # 帧与应答缓存都留着，下一次 ``_step`` 从 :meth:`_start` 原地续跑（压出的子帧
+            # 由上面那一支先跑完，见那里的注释）。
+            if self._start() == "stay":
+                return
+            # 派发完成也收在这里：回合环从下一次 ``_step`` 起跑（与旧实现同一粒度；
+            # 钩子也可能已经判定了终局，故不能顺手往下走）。
             return
         self._step_turn()
 
@@ -4717,6 +4727,11 @@ class Engine:
         **``_started`` 派发完才置真**：钩子提问会挂起，此时 ``_started`` 留假，下一次
         :meth:`_step` 从 ``_start`` 原地重入，接上同一帧与同一份应答缓存。置真会让复入
         直接进回合环、把钩子的效果截断。
+
+        钩子也可以**压子帧**（wuming 票 01 的【天成】：``MAXLIFE`` + ``RECOVER``）：
+        ``return "stay"`` 的语义与回合环步骤**完全一致**——:meth:`_step` 先让结算栈出空，
+        栈空了才重入本方法，故"帧真正跑完"总是早于效果的下一段（否则钩子看到的是"帧还没
+        跑"的世界，续跑游标无从判断）。
 
         L0 没有当前回合角色 ⇒ 记录 ``actor`` 与帧 ``source`` 都是 ``None``（显式传
         ``actor=None``），不把"游戏开始时"伪装成第一个座位的回合事件；钩子的"关于我"

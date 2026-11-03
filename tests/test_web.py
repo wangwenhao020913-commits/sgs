@@ -35,6 +35,7 @@ from sgs.data import (  # noqa: E402
     load_content_pack,
     validate_rule_config,
 )
+from sgs.data import enabled_hero_ids, hero_by_id  # noqa: E402
 from sgs.engine import Engine, ai_stream, dump_journal  # noqa: E402
 from sgs.resolution import Frame, ResolutionStack  # noqa: E402
 from sgs.skills import FREE_SPLIT, RUNNING_SKILL_KEY, hero_card_zone_key  # noqa: E402
@@ -484,7 +485,7 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         if hero.true_name not in first_seen:
             first_seen.append(hero.true_name)
     assert [group["true_name"] for group in catalog] == first_seen
-    assert len(flat) == 68 and len(catalog) == 42, (
+    assert len(flat) == 69 and len(catalog) == 43, (
         "M6 票 18 后 54 个版本 / 29 个真名；移动版界曹仁 ⇒ 55 / 30；票 03 加风包黄忠 ⇒ 56 / 31；"
         "票 08 加神关羽移动版 ⇒ 57 / 32；票 01 加神吕蒙移动版 ⇒ 58 / 33；票 01（自制包）"
         "加韬·刘备自制版 ⇒ 59 / 33（真名刘备已在池里 ⇒ 真名数不变）；"
@@ -495,7 +496,8 @@ def test_the_hero_catalog_lists_exactly_the_enabled_pool() -> None:
         "huo-mobile-batch 票 01 加火包移动版庞德 ⇒ 65 / 39（新真名「庞德」⇒ 真名数 +1）；"
         "huo-mobile-batch 票 02 加火包移动版庞统 ⇒ 66 / 40（新真名「庞统」⇒ 真名数 +1）；"
         "huo-mobile-batch 票 03 加火包移动版袁绍 ⇒ 67 / 41（新真名「袁绍」⇒ 真名数 +1）；"
-        "huo-shenzhouyu-mobile 票 01 加火包移动版神周瑜 ⇒ 68 / 42（新真名「神周瑜」⇒ 真名数 +1）"
+        "huo-shenzhouyu-mobile 票 01 加火包移动版神周瑜 ⇒ 68 / 42（新真名「神周瑜」⇒ 真名数 +1）；"
+        "wuming 票 01 加无名自制版 ⇒ 69 / 43（新真名「无名」⇒ 真名数 +1）"
     )
     for group in catalog:
         true_name = group["true_name"]
@@ -6486,7 +6488,7 @@ def test_a_bare_query_rebuilds_transformed_source_cards_from_the_query_itself() 
 
 
 # ---------------------------------------------------------------------------
-# U1-04b 描述全文：43 个牌名 + 121 条技能（独立内容文件，不进引擎 / 录像）
+# U1-04b 描述全文：43 个牌名 + 145 条技能（独立内容文件，不进引擎 / 录像）
 # ---------------------------------------------------------------------------
 
 MILITARY_CARD_TYPE_IDS = frozenset(
@@ -6508,7 +6510,7 @@ MILITARY_CARD_TYPE_IDS = frozenset(
 
 
 def test_every_card_name_and_skill_id_has_a_description() -> None:
-    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 127 条技能一条不缺。
+    """覆盖测试：32 个标准牌名 + 11 个军争预写牌名 + 145 条技能一条不缺。
 
     缺一条时断言消息**直接列出缺的 key**（不是只报一个总数）——这是票面的验收判据。
     多余 / 拼错的 key 也一并拦：否则「43 条」可以是 42 条真条目 + 1 条错拼。
@@ -6527,7 +6529,7 @@ def test_every_card_name_and_skill_id_has_a_description() -> None:
     assert not stale_cards, f"descriptions.json 有陈旧 / 拼错的牌名条目：{stale_cards}"
 
     expected_skills = set(CATALOG)
-    assert len(expected_skills) == 144, f"CATALOG 技能数变了：{len(expected_skills)}"
+    assert len(expected_skills) == 145, f"CATALOG 技能数变了：{len(expected_skills)}"
     missing_skills = sorted(expected_skills - set(SKILL_DESCRIPTIONS))
     assert not missing_skills, f"descriptions.json 缺技能条目：{missing_skills}"
     stale_skills = sorted(set(SKILL_DESCRIPTIONS) - expected_skills)
@@ -10102,3 +10104,57 @@ def test_a_show_without_a_hero_card_keeps_the_n_of_m_and_the_effect_row() -> Non
             "disabled": False,
         }
     ]
+
+
+# ---------------------------------------------------------------------------
+# wuming 票 01：**真引擎**发出的【天成】展示询问——标题 / 提示文案 / 武将块都落在真数据上
+# ---------------------------------------------------------------------------
+
+
+def _tiancheng_reveal_engine():
+    """跑完开局发牌，停在【天成】的**第一次展示**询问上（池子钉成「关羽」）。"""
+    engine = Engine.new_game(
+        seed=7,
+        rule_config=RuleConfig(player_count=2),
+        pack=load_content_pack(deck_profile="standard_108"),
+        pinned_hero="wuming",
+        pinned_seat=0,
+        hero_pool=(),
+    )
+    for hero_id in enabled_hero_ids():
+        hero = hero_by_id(hero_id)
+        if hero is not None and hero.true_name != "关羽":
+            engine.note_drawn_true_name(hero.true_name)
+    assert engine.grant_skill(0, "hero.guanyu.wusheng") is True
+    assert engine.grant_skill(0, "hero.jie_guanyu.wusheng") is True
+    engine._step()  # L0：派发点把第一次展示问出去
+    assert engine.pending is not None
+    return engine
+
+
+def test_a_real_tiancheng_reveal_names_the_skill_and_carries_the_card_face() -> None:
+    """票 08 的实机验收只能用合成载荷（当时没有真实调用者）；本票把技能写进数据面之后，
+    `query_context` 的技能名与 `SkillDef.requirement` 才第一次在**真询问**上解析出来。
+
+    这条同时钉住界面取材的三处来源：标题 = 技能名（不再是「选择」）、提示条 = 牌面原文逐字、
+    正文段 = 服务端派生的武将块 + 带描述的选项行（含置灰行）。
+    """
+    from sgs.skills import TIANCHENG, TIANCHENG_REQUIREMENT
+
+    engine = _tiancheng_reveal_engine()
+    query = engine.pending
+
+    context = query_context(engine, query)
+    assert context is not None, "真询问必须给得出询问上下文（否则界面退回中性文案）"
+    assert context["name"] == "天成", "技能名从数据表解析（短 id → 中文名）"
+    assert context["requirement"] == TIANCHENG_REQUIREMENT, "提示条 = 牌面原文逐字"
+
+    payload = pending_payload(query, human_seat=0)
+    card = payload["hero_card"]
+    assert card["name"] in {"关羽", "界关羽"} and (card["index"], card["total"]) == (1, 3)
+    rows = payload["option_details"]
+    assert rows[-1]["text"] == "增加 1 点体力上限，回复 1 点体力，摸 1 张牌"
+    wusheng = [row for row in rows if str(row["skill_id"] or "").endswith(".wusheng")]
+    assert len(wusheng) == 1 and wusheng[0]["disabled"] is True
+    assert wusheng[0]["description"] == SKILL_DESCRIPTIONS[wusheng[0]["choice"]]
+    assert str(query.skill_id).startswith(TIANCHENG)

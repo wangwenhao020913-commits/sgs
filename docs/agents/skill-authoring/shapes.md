@@ -65,6 +65,7 @@
 | **帧外时机**钩子 + 单步选项（回合开始时 / 回合结束时） | 「回合开始时，你可以选择一至两项…」「回合结束时…执行一个额外的回合」 | `hero.xiahouyuan.shensu`（`TURN_START`）、`hero.jie_lvmeng.botu`（`TURN_END`） |
 | **计数式分配**（新询问形态） | 「对这些角色造成共计至多3点伤害」——一张弹窗里逐座位点计数 | `hero.shen_zhouyu_mobile.yeyan`（huo-shenzhouyu-mobile 票 05；`QueryKind.DISTRIBUTE` + `Action.Distribute`） |
 | 帧外时机 + 单步选项（**弃牌阶段结束时**） | 「弃牌阶段结束时，若你于此阶段内弃置过…你可以选择一项」 | `hero.shen_zhouyu_mobile.qinyin`（huo-shenzhouyu-mobile 票 01/03） |
+| **L0（游戏开始时）锁定技 + 手写展示循环**：帧外钩子（不问发动）+ 变长循环逐张弹选择型弹窗，每次的正文段是**武将牌**（武将块 / 技能行带描述 / 置灰 / 具体 X） | 「游戏开始时，依次展示3张真名不在场上的随机武将牌，且每次展示你须选择：1.获得该武将牌上的1个技能；2.增加一点体力上限，回复一点体力，摸X张牌」 | `hero.wuming.tiancheng`（wuming 票 01；`GAME_START` + `Engine.draw_hero_cards` + `ask_option(disabled=/option_texts=/hero_card=)`；循环游标住**帧私有**，加 / 减上限走 `MAXLIFE` 帧） |
 | 状态位 + 触发器 | 「横置 / 翻面 / 标记」 | 横置 = `Player.chained` + `Engine.set_chained`；翻面 = `Player.flipped` + `Engine.set_flipped`（首个载体：移动版界曹仁【据守】） |
 
 > **第 1 行的锁定技变体**：牌面写「锁定技」时形状不变、但那一问**不发**（`locked=True`，派发环的
@@ -83,7 +84,7 @@
 
 | 时机 | 常见用途 |
 |---|---|
-| `GAME_START` | **游戏开始时**（L0.3：起始手牌发完后、第一回合前，规则 §3.9 L229–L233）：帧外派发点 = `_dispatch_phase_body` 的又一个调用者（`_start`；无钩子时只落原有那一条记录，记录流逐字节不变）。L0 帧 `source=None` / 记录 `actor=None`——不把"游戏开始时"伪装成第一个座位的回合事件，钩子的"关于我"自校读 `MATCH_OWNER_KEY`（`hook_owner`）。`_start` 可停可续：钩子提问挂起时 `_started` 留假，复入原地续跑（票 03） |
+| `GAME_START` | **游戏开始时**（L0.3：起始手牌发完后、第一回合前，规则 §3.9 L229–L233）：帧外派发点 = `_dispatch_phase_body` 的又一个调用者（`_start`；无钩子时只落原有那一条记录，记录流逐字节不变）。L0 帧 `source=None` / 记录 `actor=None`——不把"游戏开始时"伪装成第一个座位的回合事件，钩子的"关于我"自校读 `MATCH_OWNER_KEY`（`hook_owner`）。`_start` 可停可续：钩子提问挂起时 `_started` 留假，复入原地续跑（票 03）。**首个载体 = 【天成】**（`hero.wuming.tiancheng`，wuming 票 01）：它还会在派发里**压子帧**（`MAXLIFE` / `RECOVER`），故 `_step` 让**结算栈先出空、再重入 `_start`**——`return "stay"` 的语义因此与回合环步骤一致（帧跑完才续跑） |
 | `TURN_START` | **回合开始时**（夏侯渊【神速】）：与 `PHASE_PREPARE` **不是一个时点**（它在准备阶段之前）。帧外派发点 = `_dispatch_phase_body` 的第五个消费者（`_turn_start`），每回合清理带一次性闸（钩子挂起重入不重复清理） |
 | `PHASE_PREPARE` | 准备阶段（洛神、勤学、替身、观星） |
 | `PHASE_DRAW` | 摸牌阶段（英姿、突袭、裸衣、恂恂） |
@@ -144,7 +145,7 @@
 | `RESPOND` | 通用响应窗口（打出/使用一张牌） | 决斗的【杀】、万箭的【闪】、借刀的"使用【杀】"、无懈的收集式窗口；提供者在这些窗口里以 `CANDIDATES` 追加（`respond_declared` 为真时闭嘴：赢家已定） |
 | `SELECT_CARDS` | 流水线选牌步 | 自己区域的直选在 `candidates.js` 判；`spec.max_per_suit` 存在时按花色收窄（涉猎，0 下限由牌面决定） |
 | `SKILL_ACTIVATION` | 钩子的"是否发动" | 键含时机；同帧第二次触发会复用答案（已裁定） |
-| `SELECT_OPTION` | 选项步 / 手写二选一 | 单个选项 + `Pass` 走"提交/放弃"确认形态；**置灰**的选项（`PickOption.disabled` → `StepPool.disabled`）在预发动清单里**照样列出来但不可选**（蛊惑的牌名弹窗：列全牌堆名，此刻用不了的画灰），引擎的逐步校验同样拒收它。**逐步询问**这一面自票 07 起同样有置灰口：`Engine.ask_option(..., disabled=..., hero_card=..., option_texts=...)` 把置灰项留在询问的 `options` 里、只从 `legal_actions` 剔除（提交被拒），投影派生 `option_details`（技能名 / `descriptions.json` 原文 / 置灰标记）给界面画灰——目前唯一载体是"展示武将牌"那一类（票 02 §4.2 B 段） |
+| `SELECT_OPTION` | 选项步 / 手写二选一 | 单个选项 + `Pass` 走"提交/放弃"确认形态；**置灰**的选项（`PickOption.disabled` → `StepPool.disabled`）在预发动清单里**照样列出来但不可选**（蛊惑的牌名弹窗：列全牌堆名，此刻用不了的画灰），引擎的逐步校验同样拒收它。**逐步询问**这一面自票 07 起同样有置灰口：`Engine.ask_option(..., disabled=..., hero_card=..., option_texts=...)` 把置灰项留在询问的 `options` 里、只从 `legal_actions` 剔除（提交被拒），投影派生 `option_details`（技能名 / `descriptions.json` 原文 / 置灰标记）给界面画灰——目前唯一载体是"展示武将牌"那一类（票 02 §4.2 B 段），首个真实调用者 = 【天成】（`hero.wuming.tiancheng`；选项 id 带展示序号 `tiancheng:reveal:<k>`，效果行文本给具体 X） |
 | `ARRANGE` | 观星式排列 | 不能下发预发动清单 |
 | `DISTRIBUTE` | **计数式分配**（神周瑜移动版【业炎】= 首个载体，huo-shenzhouyu-mobile 票 05）：一张弹窗里给若干座位各配一个计数（`seats` / `max_total` / `per_seat_max`） | 候选 = 「每座 0..单座上限、合计 ≤ 上限」的全量枚举；答案 = `Action.Distribute(counts)`（座位升序、省略 0）；`counts=()` 键最小 ⇒ 超时兜底 = 不分配 |
 

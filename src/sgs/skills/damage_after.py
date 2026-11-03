@@ -565,6 +565,15 @@ def _yiji(host: Any, frame: Any) -> Any:
     if host.suspended(choice):
         return "stay"
     receiver = int(choice.choice.split(":", 1)[1])
+    # 进度**先落、再搬牌**：``move_in_frame`` 返回 ``"stay"`` 的意思是「牌**已经搬完**了，
+    # 只是『失去牌后』的钩子挂起了」（它的重入守卫 = ``_MOVE_DONE`` + "牌已在目标区"）。
+    # 旧实现等到搬完才记进度，重入时于是又搬一遍——而「失去牌后」的钩子（界【清俭】）可能
+    # 已经把其中一张转交给了别人，第二次 ``move_card`` 的两张来源区因此不同 ⇒
+    # ``ValueError: 一次 move_card 只能有一个来源区域``（wuming 票 01 实测：郭嘉 + 界夏侯惇
+    # 同场；回归 = ``test_yiji_does_not_move_the_same_cards_again_when_the_receiver_relocates_one``）。
+    # ``ask_selection`` 返回的是**实体牌 id**（不是 ``CardRef``）；一次两张时两条 id
+    # **一起**记进 ``given``——进度按"这一批已经交给谁"推进，重入不会把其中一张再发一遍。
+    frame.data[given_key] = given + tuple(picked)
     control = host.move_in_frame(
         frame,
         host.state.refs(picked),
@@ -575,10 +584,6 @@ def _yiji(host: Any, frame: Any) -> Any:
     )
     if control == "stay":
         return "stay"
-    # 交出成功才记进度：移动若挂起，重入会拿同一份缓存答案重试（移动幂等）。
-    # ``ask_selection`` 返回的是**实体牌 id**（不是 ``CardRef``）；一次两张时两条 id
-    # **一起**记进 ``given``——进度按"这一批已经交给谁"推进，重入不会把其中一张再发一遍。
-    frame.data[given_key] = given + tuple(picked)
     return _yiji(host, frame)
 
 

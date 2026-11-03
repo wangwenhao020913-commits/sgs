@@ -5439,3 +5439,84 @@ def test_a_greyed_option_is_never_scored():
     assert _select_option_score(query, HERO_CARD_SKILL) < 0.0, (
         "置灰项哪怕被硬塞进打分器也不该拿正分"
     )
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 【天成】（wuming 票 01）：真引擎发出的三次展示询问由启发式答得出来
+# ---------------------------------------------------------------------------
+
+
+TIANCHENG = "hero.wuming.tiancheng"
+"""(wuming 票 01) 无名自制版【天成】的全限定技能 id（L0 的展示询问带它）。"""
+
+
+def _true_names() -> tuple[str, ...]:
+    """数据面的真名投影（首次出现序）：`note_drawn_true_name` 用它把抽取池钉死。"""
+    from sgs.data import enabled_hero_ids, hero_by_id
+
+    names: dict[str, None] = {}
+    for hero_id in enabled_hero_ids():
+        hero = hero_by_id(hero_id)
+        if hero is not None:
+            names.setdefault(hero.true_name, None)
+    return tuple(names)
+
+
+def test_the_heuristic_answers_a_real_tiancheng_reveal_without_touching_greyed_rows():
+    """真局面里的 L0 展示询问：启发式答得出、**不碰置灰行**、三次展示之后照常开局。
+
+    打分面本身已由票 07 的两条合成用例钉住（技能行 2.0 / 效果行 2.5 / 置灰 < 0）。这里钉的
+    是另一条腿：**真询问**（带 ``hero_card`` / ``disabled`` / 具体 X 的文本）经
+    `HeuristicPlayer` 的回答始终在候选里、且从不落到置灰行上——L0 没有"放弃"出口，答错一格
+    就是死路。夹具用点将把无名放到 0 号位，并先把「关羽」的两个版本的【武圣】授予它，
+    于是第一张展示必然带一条置灰行。
+    """
+    engine = Engine.new_game(
+        seed=7,
+        rule_config=RuleConfig(player_count=2),
+        pack=PACK,
+        pinned_hero="wuming",
+        pinned_seat=0,
+        hero_pool=(),
+    )
+    for name in _true_names():
+        if name != "关羽":
+            engine.note_drawn_true_name(name)
+    assert engine.grant_skill(0, "hero.guanyu.wusheng") is True
+    assert engine.grant_skill(0, "hero.jie_guanyu.wusheng") is True
+
+    players = [HeuristicPlayer(_stream(7, seat)) for seat in range(2)]
+    answered: list[tuple[str, tuple[str, ...]]] = []
+
+    class _Recorder:
+        """转给启发式，同时记下它给的答案（只为断言"没碰置灰行"）。"""
+
+        def __init__(self, inner, seat: int) -> None:
+            self._inner = inner
+            self._seat = seat
+
+        def respond(self, query):
+            action = self._inner.respond(query)
+            if str(getattr(query, "skill_id", "") or "").startswith(TIANCHENG):
+                answered.append((self._seat, action.choice))
+            return action
+
+    run_queries(
+        engine,
+        [_Recorder(players[0], 0), _Recorder(players[1], 1)],
+        lambda e: ran_timing(e, Timing.TURN_BEFORE_START),
+    )
+
+    assert len(answered) == 3, f"三次展示各答一次，实得 {answered}"
+    reveals = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and str(getattr(record.query, "skill_id", "") or "").startswith(TIANCHENG)
+    ]
+    for query, (seat, choice) in zip(reveals, answered):
+        assert seat == 0, "三次展示都问持有者本人"
+        assert choice in query.options, "答案必须来自这一问的选项闭集"
+        assert choice not in set(query.disabled), "置灰行永远不能被选中"
+        assert choice in {action.choice for action in query.legal_actions}, "答案必须在候选里"
+    assert ran_timing(engine, Timing.TURN_BEFORE_START), "展示完之后第一回合照常开始"

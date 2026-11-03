@@ -1775,3 +1775,79 @@ def test_a_seat_major_chain_beats_priority_class_across_role_boundaries():
     # 座位 2 的钩子不是空响：回复真的落了 hp（2 → 3），故上面那条"RECOVER 帧在询问之前"
     # 断的是真事件；【清俭】答的是 Pass，故没有第二条 hp 变动。
     assert hp_deltas() == [(2, 2, 3)]
+
+
+def test_yiji_does_not_move_the_same_cards_again_when_the_receiver_relocates_one():
+    """【遗计】交出两张 ⇒ 收牌人的【清俭】把其中一张转交别人，遗计**不得再搬一遍**。
+
+    ``move_in_frame`` 返回 ``"stay"`` 的意思是「牌**已经搬完**了，只是『失去牌后』的钩子
+    挂起了」（它的重入守卫是 ``_MOVE_DONE`` + "牌已在目标区"两个条件）。旧实现把「这一批
+    已交出」的进度记在这次移动**之后**，于是重入时又搬一遍——而此时【清俭】已经把其中一张
+    搬去了别的座位，两张的来源区不同 ⇒ ``ValueError: 一次 move_card 只能有一个来源区域``
+    （wuming 票 01 的 5 人局实测：郭嘉 + 界夏侯惇 同场，新武将入池改变了发将 ⇒ 既有崩溃被
+    踩到。本用例把那条路径钉成 2 人构造局面，不依赖种子）。
+    """
+    slash = _cards("slash")[0]
+    deck = _deck_excluding(slash)
+    top = deck[:2]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero="jie_xiahoudun"), SeatSpec(hero="guojia")],
+        deck=deck,
+        processing=(slash,),
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.push_frame(
+        FrameKind.DAMAGE,
+        _damage_frame(state, slash, amount=1, source=0),
+        timing=Timing.DAMAGE_DEAL,
+    )
+    handled: dict[str, int] = {}
+
+    def yiji_select(query, _index):
+        """一次把两张交给座位 0（界夏侯惇 = 【清俭】的持有者、本次移动的收牌人）。"""
+        if query.kind == "SELECT_OPTION":
+            return _yiji_give_to(0)(query)
+        return next(
+            action
+            for action in query.legal_actions
+            if isinstance(action, SelectCards) and action.picks == (0, 1)
+        )
+
+    def qingjian_select(query, _index):
+        """【清俭】从刚到手的两张里挑一张，转交给**座位 1**（郭嘉）。"""
+        if query.kind != "SELECT_CARDS":
+            wanted = "seat:1"
+            return next(
+                action
+                for action in query.legal_actions
+                if getattr(action, "choice", None) == wanted
+            )
+        index = next(
+            i
+            for i, slot in enumerate(query.slots)
+            if slot.card is not None and slot.card.card_id in set(top)
+        )
+        handled["moved"] = query.slots[index].card.card_id
+        return next(
+            action
+            for action in query.legal_actions
+            if isinstance(action, SelectCards) and action.picks == (index,)
+        )
+
+    players = [Scripted(qingjian_select), Scripted(yiji_select)]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.DAMAGE_END
+            for record in e.records
+        ),
+    )
+
+    relocated = handled["moved"]
+    survivor = next(card_id for card_id in top if card_id != relocated)
+    assert relocated in engine.state.player(1).hand, "【清俭】把这张转交给了郭嘉"
+    assert survivor in engine.state.player(0).hand, "另一张留在收牌人手里（没被再搬一次）"
+    assert _total_cards(engine.state) == len(PACK.deck.cards), "牌守恒仍成立"
+    assert engine.state.deck == list(deck[2:]), "两张亮牌没有回到牌堆"

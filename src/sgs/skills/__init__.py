@@ -37,6 +37,7 @@
 | **流水线执行器**（**不**依赖 catalog） | :mod:`sgs.skills.flow` | ``SkillFlow`` / ``PickCards`` / ``PickSeats`` / ``PickOption`` / ``PickProvide`` / ``run_flow`` |
 | **注册表 + 装备定义** | :mod:`sgs.skills.catalog` | ``SkillDef`` / ``CATALOG`` / ``resolve_instances`` / ``dispatch_timing`` / ``dispatch_seam`` |
 | **武将牌堆的占用面**（票 05） | :mod:`sgs.skills.hero_cards` | ``blocked_true_names``（"被抽走 ∪ 在场"的派生集合） |
+| **L0「游戏开始时」**（wuming 票 01） | :mod:`sgs.skills.start` | 天成（锁定技：展示 3 张武将牌，每次选"获得技能 / 加体力上限 + 回复 + 摸 X 张"） |
 
 本文件另装**跨层只读查询**：加载期用它校验"每张装备牌都有对应技能"（票 09 §7 #8），
 判定帧用它拿改判能力座位（票 10 §4），主公技门控用它（票 13 §4）。
@@ -294,6 +295,14 @@ from .life_after import (
     life_after_skill_definitions,
 )
 from .hero_cards import blocked_true_names
+from .start import (
+    TIANCHENG,
+    TIANCHENG_MAX_HP,
+    TIANCHENG_REQUIREMENT,
+    TIANCHENG_REVEALS,
+    WUMING,
+    start_skill_definitions,
+)
 
 EQUIPMENT_CARD_TYPE_IDS: tuple[str, ...] = tuple(
     skill_id.removeprefix("equip.")
@@ -467,6 +476,12 @@ __all__ = (
     "arrange_activation_plans",
     "arrange_skill_definitions",
     "blocked_true_names",
+    "start_skill_definitions",
+    "TIANCHENG",
+    "TIANCHENG_MAX_HP",
+    "TIANCHENG_REQUIREMENT",
+    "TIANCHENG_REVEALS",
+    "WUMING",
     "conversion_offers",
     "conversion_offers_by_source",
     "conversion_preactivations",

@@ -2847,6 +2847,9 @@ from .death_after import (  # noqa: E402  （末尾 import 是刻意的）
 from .near_death import (  # noqa: E402  （末尾 import 是刻意的）
     near_death_skill_definitions,
 )
+from .start import (  # noqa: E402  （末尾 import 是刻意的）
+    start_skill_definitions,
+)
 
 # **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
 # 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
@@ -2897,12 +2900,13 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *life_after_skill_definitions(),
             *death_after_skill_definitions(),
             *near_death_skill_definitions(),
+            *start_skill_definitions(),
         )
     }
 )
 """定义目录：``skill_id`` → :class:`SkillDef`，**模块级不可变**（票 07 §1 / §6）。
 
-装备技能（22 条：标准 17 + 军争 5）与武将技能（票 03 起逐族落地，票 12 起 29 条齐、M6 P0 票 01 起 32 条、票 02 起 37 条、票 03 收口 40 条、票 04 起 44 条、票 05 起 46 条、票 06 起 52 条、票 07 起 56 条、票 08 起 62 条、票 09 起 64 条、票 10 起 66 条、票 11 起 67 条、票 14 起 73 条、票 15 起 77 条、票 16 起 83 条、票 17 起 **91 条** = 合计 113 条）**共用同一张表**：
+装备技能（22 条：标准 17 + 军争 5）与武将技能（票 03 起逐族落地，票 12 起 29 条齐、M6 P0 票 01 起 32 条、票 02 起 37 条、票 03 收口 40 条、票 04 起 44 条、票 05 起 46 条、票 06 起 52 条、票 07 起 56 条、票 08 起 62 条、票 09 起 64 条、票 10 起 66 条、票 11 起 67 条、票 14 起 73 条、票 15 起 77 条、票 16 起 83 条、票 17 起 91 条、wuming 票 01 起 **92 条** = 合计 114 条）**共用同一张表**：
 载体解析、优先级档、修饰器链、时机派发都只认这张表，不区分两类载体。合并点在**文件末尾**
 （而不是模块头部的 import）是为了让 :mod:`sgs.skills.heroes` 能反向 import 本模块的
 :class:`SkillDef`——`heroes` 在 import 期读到的 :data:`CATALOG` 是装备那半张，而它的定义由

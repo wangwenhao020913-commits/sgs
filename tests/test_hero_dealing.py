@@ -196,7 +196,7 @@ def test_an_unknown_hero_id_is_rejected():
 
 
 def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
-    """票 12：默认将池 = **启用版本的全集**（标准 25 + 界版 29 + 移动版 1 + 风包 1 + 风包移动版 1 + 火包移动版 5 + 自制包 1 = **68**）。
+    """票 12：默认将池 = **启用版本的全集**（标准 25 + 界版 29 + 移动版 1 + 风包 1 + 风包移动版 1 + 火包移动版 5 + 自制包 2 = **69**）。
 
     这是 spec D19「默认将池全开 ⇒ 默认对局是混合局」在数据层的落点：``enabled_hero_ids``
     缺省（不给表）时读 :func:`load_hero_tables` 的并集，而不是只读内容包那一张表。
@@ -225,7 +225,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     )
 
     assert enabled_hero_ids() == expected
-    assert len(expected) == 68
+    assert len(expected) == 69
     assert "jie_caoren_mobile" in expected, "移动版与 OL 系列**版本并存**、同进默认池"
     assert "jie_guanyu" in expected and "guanyu" in expected
     assert "huangzhong" in expected, "风包武将也进默认池（票 03）"
@@ -234,6 +234,7 @@ def test_the_default_enabled_pool_is_the_union_of_standard_and_jie_versions():
     assert "shen_guanyu_mobile" in expected, "风包移动版同理（`08`：神关羽移动版独开一栏）"
     assert "shen_lvmeng_mobile" in expected, "票 01：神吕蒙移动版同表"
     assert "tao_liubei" in expected, "自制包：韬·刘备自制版（真名刘备，与标准版同真名）"
+    assert "wuming" in expected, "自制包：无名自制版（wuming 票 01；新真名「无名」）"
     assert "dianwei_mobile" in expected, "火包移动版（huo-dianwei-mobile 票 01）也进默认池"
 
 
@@ -264,14 +265,14 @@ def test_enabled_hero_ids_reads_the_table_enablement():
 
 
 def test_every_enabled_hero_is_dealable_from_the_default_pool():
-    """M6 P0 收口（票 03）+ 票 12 混合池：默认将池真的**发得出每一名**（67 名逐名点将）。
+    """M6 P0 收口（票 03）+ 票 12 混合池：默认将池真的**发得出每一名**（69 名逐名点将）。
 
     判据比"池里有 61 个 id"强一层：逐个把目标武将当点将、其余座位仍从**默认启用池**
-    （``hero_pool=()``）随机——67 次都要成功落到座位 0，且其余座位不得重复抽到同一名
+    （``hero_pool=()``）随机——69 次都要成功落到座位 0，且其余座位不得重复抽到同一名
     **版本**、也不得抽到同一**真名**的另一版（票 12 的两段抽样）。
     """
     ids = enabled_hero_ids()
-    assert len(ids) == 68
+    assert len(ids) == 69
 
     for hero_id in ids:
         heroes = _heroes_of(

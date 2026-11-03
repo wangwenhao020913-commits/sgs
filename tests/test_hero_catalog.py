@@ -197,9 +197,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 144
+    assert len(CATALOG) == 145
     assert len(equipment) == 22
-    assert len(heroes) == 122
+    assert len(heroes) == 123
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -222,7 +222,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 122
+    assert len(expected) == 123
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1891,6 +1891,9 @@ SKILL_SHAPE: dict[str, str] = {
     "hero.huangzhong.liegong": "零步技能",
     # 自制包·韬·刘备自制版【从讨】= 手写钩子（逐目标 + 私密观看 + 二选一，无流水线）
     "hero.tao_liubei.congtao": "多轮技能",
+    # wuming 票 01：无名自制版【天成】= L0（游戏开始时）锁定技：手写 3 次展示循环 +
+    # 逐询问展示载荷（武将牌 / 置灰 / 具体 X）；``locked=True`` ⇒ 归「锁定技」格。
+    "hero.wuming.tiancheng": "锁定技",
     # huo-shenzhouyu-mobile 票 01：神周瑜移动版【琴音】= 帧外时机（弃牌阶段结束时）+
     # 单步选项 + 手写主体（触发技能格）；【业炎】= 限定技 + 零步流水线 + 计数式分配弹窗
     # （主动技能格）。
@@ -1912,7 +1915,7 @@ SKILL_SHAPE: dict[str, str] = {
     # ⇒ 不进「多轮技能」格。原来的「手写主动技」一格因此**消失**（它唯一的成员就是这条）。
     "hero.yuji_mobile.guohuo": "主动技能",
 }
-"""132 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
+"""145 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
 `SkillDef` 上没有 shape 字段，也不该有：形态是从既有声明读出来的归类（`locked` /
 `skill_type` / `hooks` / `modifiers` / `seams` / `flow_for` / `deck_arrange` /
@@ -1933,7 +1936,7 @@ SHAPE_COUNTS: dict[str, int] = {
     "零步技能": 29,
     "排列技能": 3,
     "多轮技能": 14,
-    "锁定技": 33,
+    "锁定技": 34,
     "转化技": 15,
     "能力位": 3,
     "候选生成器": 1,
@@ -2043,9 +2046,9 @@ def _flow_backed_active_ids() -> frozenset[str]:
 
 
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
-    """132 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
+    """145 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 144
+    assert len(SKILL_SHAPE) == len(CATALOG) == 145
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2162,7 +2165,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """69 在内 / 67 在外（136 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """73 在内 / 72 在外（145 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -2175,7 +2178,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
     assert len(inside) == 73
-    assert len(outside) == 71
+    assert len(outside) == 72
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

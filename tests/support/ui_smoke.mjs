@@ -496,8 +496,9 @@ const sessionBodiesSince = (from) =>
 
 await ui.loadHeroCatalog();
 const catalogVersions = ui.heroVersions();
+// wuming 票 01：自制包加「无名自制版」（新真名「无名」）⇒ 真名 42 → 43、版本 68 → 69。
 check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版 + 火包移动版 + 自制包，按真名分组）",
-  ui.state.heroCatalog.length === 42 && catalogVersions.length === 68,
+  ui.state.heroCatalog.length === 43 && catalogVersions.length === 69,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -7285,8 +7286,11 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
 /* ---- ⑥ 「放弃」成功 = 一次 POST + 新询问；409 = 刷新到新询问、不留展开选项 ---- */
 {
   // 8 人 / heuristic / 该 seed 的建局首问 = 只有一条 Pass 的响应窗口（实测）。
+  // wuming 票 01：默认池加了「无名自制版」之后发将会重排——旧 seed 20261012 的这一局
+  // 会让无名落在别人身上、L0 的【天成】展示询问成为会话第一个可见询问（不是 Pass 窗口）。
+  // 按本仓纪律**重新选种**（不放宽判据）：20261013 的同一局不含无名、首问仍只有一条 Pass。
   const fresh = await post("/api/sessions", {
-    player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261012,
+    player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261013,
   });
   await openSession(fresh);
   ui.renderPending(ui.state.view);
@@ -7306,7 +7310,7 @@ const actionButtonsState = () => ["btn-submit", "btn-cancel", "btn-end-phase", "
 
   // 409：下一次 /answer 回 409；刷新取回的新询问换成"只有 EndPhase"的出牌阶段。
   const fresh2 = await post("/api/sessions", {
-    player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261012,
+    player_count: 8, ai: "heuristic", human_seat: 0, timeout_seconds: null, seed: 20261013,
   });
   await openSession(fresh2);
   ui.renderPending(ui.state.view);

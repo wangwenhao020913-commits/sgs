@@ -34,6 +34,7 @@ from sgs.data import (
     load_content_pack,
 )
 from sgs.engine import Engine, ai_stream
+from sgs.state import Pass
 
 from support import ACCEPTANCE_SEEDS
 
@@ -772,7 +773,7 @@ def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -
     """
     pool = enabled_hero_ids()
     true_names = {hero_by_id(hero_id).true_name for hero_id in pool}
-    assert (len(pool), len(true_names)) == (68, 42), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版；feng-weiyan 票 01 加风包魏延 1 个；feng-xiahouyuan 票 01 加风包夏侯渊 1 个；feng-zhangjiao 票 01 加张角移动版 1 个；huo-dianwei-mobile 票 01 加火包移动版典韦 1 个；huo-mobile-batch 票 01 加火包移动版庞德 1 个；huo-mobile-batch 票 02 加火包移动版庞统 1 个；huo-mobile-batch 票 03 加火包移动版袁绍 1 个；huo-shenzhouyu-mobile 票 01 加火包移动版神周瑜 1 个）"
+    assert (len(pool), len(true_names)) == (69, 43), "spec D18/D19 的收口池（票 03 加风包黄忠 1 个；票 08 加神关羽移动版；票 01 加神吕蒙移动版；票 01（自制包）加韬·刘备自制版；feng-weiyan 票 01 加风包魏延 1 个；feng-xiahouyuan 票 01 加风包夏侯渊 1 个；feng-zhangjiao 票 01 加张角移动版 1 个；huo-dianwei-mobile 票 01 加火包移动版典韦 1 个；huo-mobile-batch 票 01 加火包移动版庞德 1 个；huo-mobile-batch 票 02 加火包移动版庞统 1 个；huo-mobile-batch 票 03 加火包移动版袁绍 1 个；huo-shenzhouyu-mobile 票 01 加火包移动版神周瑜 1 个；wuming 票 01 加无名自制版 1 个 ⇒ 69 / 43（新真名「无名」⇒ 真名数 +1））"
 
     engine = _new_engine(seed, players=M6_CLOSEOUT_PLAYERS)
     scans = _participants(seed, M6_CLOSEOUT_PLAYERS)
@@ -808,5 +809,75 @@ def test_the_m6_mixed_pool_closeout_seeds_finish_cleanly_and_replay(seed: int) -
     assert replayed_seed == seed and tape, "磁带必须带上种子与行动序列"
     replay = _new_engine(replayed_seed, players=M6_CLOSEOUT_PLAYERS)
     replay.run([TapePlayer(tape)] * M6_CLOSEOUT_PLAYERS)
+
+    assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"
+
+
+# ---------------------------------------------------------------------------
+# wuming 票 01：无名自制版的**【天成】全 AI 局**（L0 三次展示的全自动应答）
+# ---------------------------------------------------------------------------
+
+WUMING_HEROES: tuple[str, ...] = (
+    "wuming",
+    "caocao",
+    "liubei",
+    "sunquan",
+    "guojia",
+)
+"""无名自制版 + 四名陪跑（5 人身份局；显式发放，不吃 ``hero`` 子流、不依赖启用池）。"""
+
+WUMING_AI_SEED = ACCEPTANCE_SEEDS[2]
+"""与 32 种子基准组同批的第三个种子（``ACCEPTANCE_SEEDS`` 的真源）。"""
+
+TIANCHENG = "hero.wuming.tiancheng"
+
+
+def test_wuming_tiancheng_fires_through_a_full_ai_game_and_replays():
+    """【天成】的 L0 三次展示在**全 AI 局**里由启发式应答：跑完 / 胜负一致 / 零非法 / 可回放。
+
+    L0 的三问走的是既有的 ``SELECT_OPTION`` 面（票 07 的展示载荷），故 AI 一侧**不需要**
+    新分支；本用例钉的是"真有人答得出来、而且答完游戏照常跑完"：三个 ``reveal`` 询问
+    各出现一次、置灰行从不出现在候选里、三次展示之后第一回合照常开始。
+    """
+    engine = Engine.new_game(
+        seed=WUMING_AI_SEED,
+        rule_config=RuleConfig(player_count=PLAYERS),
+        pack=PACK,
+        heroes=WUMING_HEROES,
+    )
+    scans = _participants(WUMING_AI_SEED)
+
+    engine.run(scans)
+
+    assert [player.hero for player in engine.state.players] == list(WUMING_HEROES)
+    reveals = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and str(getattr(record.query, "skill_id", "") or "").startswith(TIANCHENG)
+    ]
+    assert len(reveals) == 3, f"【天成】展示恒为 3 次，实得 {len(reveals)}"
+    assert [query.hero_card.total for query in reveals] == [3, 3, 3]
+    for query in reveals:
+        disabled = set(query.disabled)
+        assert all(
+            getattr(action, "choice", None) not in disabled
+            for action in query.legal_actions
+        ), "置灰项不会进候选（AI 也就永远不会选到它）"
+        assert not [action for action in query.legal_actions if isinstance(action, Pass)]
+
+    assert engine.finished, "必达终局"
+    _assert_endgame_identity_consistency(engine, WUMING_AI_SEED)
+    assert all(scan.illegal == 0 for scan in scans), "出现了候选集合之外的应答"
+
+    replayed_seed, tape = tape_from_journal(engine.records)
+    assert replayed_seed == WUMING_AI_SEED and tape
+    replay = Engine.new_game(
+        seed=replayed_seed,
+        rule_config=RuleConfig(player_count=PLAYERS),
+        pack=PACK,
+        heroes=WUMING_HEROES,
+    )
+    replay.run([TapePlayer(tape)] * PLAYERS)
 
     assert replay.journal() == engine.journal(), "重放的记录流必须逐字节相等"

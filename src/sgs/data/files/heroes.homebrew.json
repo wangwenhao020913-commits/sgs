@@ -23,6 +23,23 @@
           "skill_type": "LIMITED"
         }
       ]
+    },
+    {
+      "id": "wuming",
+      "name": "无名自制版",
+      "true_name": "无名",
+      "kingdom": "qun",
+      "gender": "male",
+      "hp_max": 2,
+      "version": "homebrew",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "tiancheng",
+          "name": "天成",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }
