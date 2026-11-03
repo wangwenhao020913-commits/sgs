@@ -247,7 +247,10 @@ class FrameHost(StepHost, Protocol):
         reason: MoveReason,
         owner: int | None,
         actor: int | None = None,
-    ) -> Control: ...
+        to_top: bool = False,
+    ) -> Control:
+        """``to_top``（票 02）：落点即牌堆顶的同一次移动，不进牌堆尾（见 ``Engine``）。"""
+        ...
 
     def draw_for_hand(self, frame: Frame, seat: int, n: int) -> bool | str: ...
 
