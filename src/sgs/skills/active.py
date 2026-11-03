@@ -1600,18 +1600,37 @@ def _jieyin_offers(state: GameState, ctx: ModifierContext, current: Any) -> Any:
     return (*current, ActivateSkill(skill_id=ctx.skill_id, answers_seq=ctx.answers_seq))
 
 
+_JIEYIN_RECOVERED_KEY = "jieyin_recovered"
+"""帧私有：本效果体**已经压过几张** ``RECOVER`` 帧（票 08）。
+
+§3.1 的帧私有游标纪律：``_push_recover`` **立即**压帧、帧栈后进先出，故一个效果体里连压
+两张会让**后压的**那张先结算；游标记「这次发动已经压到第几张」，续跑据此接着压下一张，
+且守卫在压帧**之前**落位（续跑不会把同一张重压一遍）。
+"""
+
+
 def _jieyin_effect(host: Any, frame: Any, answers: FlowAnswers) -> Any:
-    """提交点：搬两张成本进弃牌堆，再压两个回复帧（``_USED`` 已由执行器在调用前落位）。"""
+    """提交点：搬两张成本进弃牌堆，再**逐张**压两个回复帧（``_USED`` 已由执行器在调用前落位）。
+
+    票 08（``CODING_STANDARDS.md`` §3.1）：牌面写的是"令一名已受伤的男性角色回复 1 点体力，
+    **你**回复 1 点体力"，故目标先结算。旧实现一个效果体里连压两张帧再 ``return None``：
+    帧栈后进先出 ⇒ 自己先回复，且"压完第一张帧之后又压第二张"正是 §3.1 禁止的形状。
+    修法同白银狮子：压一张 → ``return "stay"`` → 续跑按 :data:`_JIEYIN_RECOVERED_KEY`
+    接着压第二张 → ``return "stay"``。
+    """
     owner = frame.data["source"]
     seats = answers["seat"]
     cards = answers["card"]
     assert isinstance(seats, tuple) and isinstance(cards, tuple)
     if _move_to_discard(host, frame, cards, owner=owner, key="jieyin:cost") == "stay":
         return "stay"
+    pushed = int(frame.data.get(_JIEYIN_RECOVERED_KEY, 0))
+    if pushed >= 2:
+        return None
+    frame.data[_JIEYIN_RECOVERED_KEY] = pushed + 1
     target = int(seats[0])
-    _push_recover(host, frame, source=owner, target=target)
-    _push_recover(host, frame, source=owner, target=owner)
-    return None
+    _push_recover(host, frame, source=owner, target=target if pushed == 0 else owner)
+    return "stay"
 
 
 JIEYIN_FLOW = SkillFlow(

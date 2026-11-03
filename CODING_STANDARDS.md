@@ -84,15 +84,16 @@ Standards 轴 enforce；没有全仓机械检查。
 - **边界（别写成一刀切）**：压完子帧就**到此结束**（`return None`）的站点是合法的——反间
   `src/sgs/skills/active.py:874`、青囊 `:1099` 都是「压帧是效果体的最后一个动作」，没有
   「压完还继续干活」。禁止的是后者，不是压帧本身。
-- **已知偏离（同族，未修）**：标【结姻】`src/sgs/skills/active.py:1612-1613` 在**一个效果体里
-  连压两张** `RECOVER` 帧（先目标、后自己）才 `return None`——第二次 `_push_recover` 就是上面
-  那句「压完还继续干活」（`_push_recover` 自己立即压帧，不等效果体返回），而且帧 LIFO 让
-  **自己**的回复先于目标结算，与牌面的书写顺序相反；`RECOVER_VALUE` / `RECOVER_AFTER` 上有
-  钩子时即可观测（界孙权【救援】挂在 `RECOVER_VALUE`，`src/sgs/skills/lord_request.py:860`）。
-  修法与白银狮子同一形状：压一张 → `return "stay"` → 续跑接着压第二张。跟进票
-  `.scratch/flow-resume-step-cancel/issues/08-jieyin-double-recover-order.md`。
-- 机械检查：**没有**（这是判断题，与 §3 同姿态）——由评审的 Standards 轴 + 票 03 的回归
-  `tests/test_hero_jie_wu.py::test_kurou_paid_with_silver_lion_recovers_before_losing_the_hp`
+- 反例（票 08，已修）：标【结姻】的旧效果体在**一个效果体里连压两张** `RECOVER` 帧
+  （先目标、后自己）才 `return None`——第二次 `_push_recover` 就是上面那句「压完还继续干活」
+  （`_push_recover` 自己立即压帧，不等效果体返回），而且帧 LIFO 让**自己**的回复先于目标
+  结算，与牌面的书写顺序相反；`RECOVER_VALUE` / `RECOVER_AFTER` 上有钩子时即可观测
+  （界孙权【救援】挂在 `RECOVER_VALUE`，`src/sgs/skills/lord_request.py:860`）。修法与白银狮子
+  同一形状：压一张 → `return "stay"` → 续跑用帧私有游标接着压第二张
+  （`src/sgs/skills/active.py:_jieyin_effect`）。
+- 机械检查：**没有**（这是判断题，与 §3 同姿态）——由评审的 Standards 轴 + 两条回归
+  `tests/test_hero_jie_wu.py::test_kurou_paid_with_silver_lion_recovers_before_losing_the_hp`、
+  `tests/test_hero_jie_wu.py::test_the_standard_jieyin_recovers_for_the_target_before_itself`
   enforce。
 
 ## 4. 断**次序**的断言不许先把次序归一化

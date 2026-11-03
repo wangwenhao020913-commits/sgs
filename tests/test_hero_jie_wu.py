@@ -68,6 +68,8 @@ GUOSE = "hero.jie_daqiao.guose"
 LIULI = "hero.jie_daqiao.liuli"
 JIEYIN = "hero.jie_sunshangxiang.jieyin"
 XIAOJI = "hero.jie_sunshangxiang.xiaoji"
+STANDARD_JIEYIN = "hero.sunshangxiang.jieyin"
+"""票 08：标【结姻】——界版在这里是**正确写法**的对照面（压一张帧即 ``return "stay"``）。"""
 
 
 def _cards(type_id: str) -> list[int]:
@@ -1134,6 +1136,76 @@ def test_the_stuck_jieyin_seed_finishes_within_a_bounded_run():
         and JIEYIN in (getattr(record.query, "preactivations", None) or {})
         for record in engine.records
     ), "该种子必须真的走到界【结姻】的候选，否则它不再覆盖本回归（需重新选种）"
+
+
+def _standard_jieyin_engine():
+    """标孙尚香（座位 0）2 血 + 一名 2 血男性（座位 1），打到出牌阶段结束。
+
+    标【结姻】是 ``preactivated=True`` 的技能（清单由本人一次填完），故确认 = 一个
+    **复合动作**（``picks`` = 一并弃的两张手牌、``choices`` = 目标座位），与
+    `tests/test_hero_active.py::test_jieyin_discards_exactly_two_cards_in_one_step_and_heals_both`
+    同一条真实路径。
+    """
+    first, second = _cards("slash")[0], _cards("dodge")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(
+                hp=2,
+                hp_max=4,
+                hand=(first, second),
+                hero="sunshangxiang",
+                gender=Gender.FEMALE,
+            ),
+            SeatSpec(hp=2, hp_max=4, gender=Gender.MALE),
+        ],
+        deck=deck_excluding(PACK, first, second),
+        turn_seat=0,
+    )
+    used = {"count": 0}
+
+    def drive(query):
+        if query.kind == QueryKind.PLAY_PHASE and used["count"] == 0:
+            if STANDARD_JIEYIN not in (getattr(query, "preactivations", None) or {}):
+                return None
+            used["count"] += 1
+            return ActivateSkill(
+                skill_id=STANDARD_JIEYIN,
+                picks=(first, second),
+                choices=("seat:1",),
+                answers_seq=query.seq,
+            )
+        if query.kind == QueryKind.SELECT_CARDS:
+            return SelectCards(picks=(0, 1), answers_seq=query.seq)
+        if query.kind == QueryKind.SELECT_OPTION:
+            return SelectOption(choice="seat:1", answers_seq=query.seq)
+        return None
+
+    return _run(state, [Scripted(drive), Scripted()], _phase_over), used
+
+
+def test_the_standard_jieyin_recovers_for_the_target_before_itself():
+    """票 08（顺序）：标【结姻】的两次回复**目标先、自己后**，各恰好一次。
+
+    牌面（`三国杀详细规则.txt` §十九 L2174）的书写顺序是"令一名已受伤的男性角色回复 1 点
+    体力，你回复 1 点体力"。旧效果体在**一个效果体里连压两张** ``RECOVER`` 帧（先目标、
+    后自己）再 ``return None``：帧栈后进先出 ⇒ 自己先回复、目标后回复，与牌面相反
+    （``CODING_STANDARDS.md`` §3.1 的反例）。修法与白银狮子同一形状：压一张帧 →
+    ``return "stay"`` → 续跑用帧私有游标接着压第二张。
+
+    旧实现上这条断言恰好读到 ``[(0, 2, 3), (1, 2, 3)]``（自己先），会红。
+    """
+    engine, used = _standard_jieyin_engine()
+
+    assert used["count"] == 1, "脚本该发动一次标【结姻】"
+    assert engine.state.player(0).hp == 3, "发动者回复 1 点"
+    assert engine.state.player(1).hp == 3, "目标回复 1 点"
+    assert _hp_deltas(engine) == [(1, 2, 3), (0, 2, 3)], (
+        "回复次序 = 目标（座位 1）先、自己（座位 0）后；比较序列本身，不排序（§4）"
+    )
+    assert len(_pushed_frames(engine, FrameKind.RECOVER)) == 2, (
+        "两次回复各压一张 RECOVER 帧：恰好两张（不能压三张、也不能只压一张）"
+    )
 
 
 # ---------------------------------------------------------------------------
