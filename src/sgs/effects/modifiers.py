@@ -257,9 +257,11 @@ def apply_modifiers(
 ) -> Any:
     """在 ``point`` 挂点上跑**链式管道**：``current`` 逐条交给命中的回调，返回终值。
 
-    链序 = ``(priority_class, skill_id, owner)``（由 :func:`sgs.skills.resolve_instances`
-    排好）；``ctx.owner`` 在派发时按当前实例填写，回调据此判定"本实例是否作用于本次
-    查询"。没有命中任何修饰器时**原样返回**（故 `basic_53` 的 M1 行为逐字节不变）。
+    **修饰器管道序** = ``resolve_instances`` 的**解析序** ``(priority_class, skill_id,
+    owner)``（那条链与"派发链序"是两回事：后者按 §4.16「先逐角色、角色内部再按优先级」
+    由 `sgs.skills.catalog._chain_order` 排，只管钩子 / 接缝的询问次序）。``ctx.owner``
+    在派发时按当前实例填写，回调据此判定"本实例是否作用于本次查询"。没有命中任何修饰器时
+    **原样返回**（故 `basic_53` 的 M1 行为逐字节不变）。
     """
     from sgs.skills import resolve_instances
 

@@ -70,6 +70,7 @@ from sgs.state import (
     SlotKind,
     Zone,
     ZoneRef,
+    seats_from,
 )
 from sgs.timing import Timing
 
@@ -675,7 +676,11 @@ def _cache_resolved(key: tuple, resolved: tuple[SkillInstance, ...]) -> None:
 def resolve_instances(
     state: GameState, *, include_suppressed: bool = False
 ) -> tuple[SkillInstance, ...]:
-    """全部**存活实例**（链序 ``(priority_class, skill_id, owner)``）——带内容键缓存的入口。
+    """全部**存活实例**（**解析序** ``(priority_class, skill_id, owner)``）——带内容键缓存的入口。
+
+    解析序是**集合的确定性次序**，不是派发链序：派发按 §4.16 的"先逐角色"另排一次
+    （:func:`_chain_order`，唯一实现）。解析结果的消费者按集合 / 按座位内部次序读，故
+    两者不冲突；**不要**把回合座位读进这里（那会把 ``turn_seat`` 拉进内容键）。
 
     解析口径逐字见 :func:`_resolve_instances_uncached`（载体并集 → 去重 → 减失去 →
     过失效谓词 → 排序，身份门控同处兑现）；本函数只加一层**语义不变**的缓存（票 16）：
@@ -707,7 +712,11 @@ def resolve_instances(
 def _resolve_instances_uncached(
     state: GameState, *, include_suppressed: bool = False
 ) -> tuple[SkillInstance, ...]:
-    """解析全部**存活实例**，按链序 ``(priority_class, skill_id, owner)`` 全序。
+    """解析全部**存活实例**，按**解析序** ``(priority_class, skill_id, owner)`` 全序。
+
+    **解析序 ≠ 派发链序**：后者按 §4.16「先逐角色（当前回合角色起逆时针），角色内部再按
+    优先级」排（:func:`_chain_order`）。这里排序只为让集合输出确定、可逐条对照缓存差分，
+    且**不读** ``state.turn_seat``（内容键因此不含它）。
 
     载体 = 装备区里的实体牌（``source = EQUIPMENT_CARD``）∪ 座位的虚拟授予
     （``source = VIRTUAL_GRANT``，不占牌守恒）∪ **武将牌**（``source = HERO_CARD``，
@@ -799,6 +808,8 @@ def _resolve_instances_uncached(
         if not include_suppressed and _skill_is_suppressed(player, instance):
             continue
         alive.append(instance)
+    # **解析序**（集合的确定性次序），不是派发链序：链序按 §4.16「先逐角色」由
+    # :func:`_chain_order` 在派发环里排。这里不读 ``state.turn_seat``，内容键因此不含它。
     alive.sort(key=lambda item: (int(item.definition.priority_class), item.skill_id, item.owner))
     return tuple(alive)
 
@@ -1282,9 +1293,11 @@ def _instances_for(
 
     临时实例是"刚刚失去的装备"（:func:`~sgs.skills.move_after.lost_equipment_instances`）：
     它们已经不在装备区、故不在 :func:`resolve_instances` 的集合里，但这一次 ``MOVE_AFTER``
-    仍要替它们派发。合并后仍按 ``(priority_class, skill_id, owner)`` 全序；同一
-    ``(owner, skill_id)`` 以存活实例为准（临时实例不重复派发）。身份门控对临时实例同样生效
-    （与 :func:`resolve_instances` 同一条判据）。
+    仍要替它们派发。同一 ``(owner, skill_id)`` 以存活实例为准（临时实例不重复派发）。身份
+    门控对临时实例同样生效（与 :func:`resolve_instances` 同一条判据）。
+
+    **本函数只做并集**：链序（先逐角色、角色内部再按优先级）由 :func:`_chain_order` 在
+    派发环里落**唯一一次**——这里再排一遍就成了第二份判据。
     """
     instances = list(resolve_instances(state))
     if not extra_instances:
@@ -1298,10 +1311,44 @@ def _instances_for(
             continue
         seen.add(key)
         instances.append(instance)
-    instances.sort(
-        key=lambda item: (int(item.definition.priority_class), item.skill_id, item.owner)
-    )
     return tuple(instances)
+
+
+def _chain_order(
+    state: GameState, instances: tuple[SkillInstance, ...]
+) -> tuple[SkillInstance, ...]:
+    """本次派发的**链序**——全项目唯一一处实现（§4.16 两级顺序；票 05）。
+
+    规则原文（`三国杀详细规则.txt` §4.16「同一时机涉及多个角色时的两级顺序」）：**先逐
+    角色**——从当前回合角色开始、按逆时针方向，对每一名角色处理完这个时机，再轮到下一名
+    角色；**同一角色内部**若有多个技能 / 效果，再按「武将技能 > 装备技能 > 使用牌」选一条
+    结算。两级**不可互换**：不是"先按优先级把不同角色的技能排成一队"。
+
+    故键 = ``(座位环名次, priority_class, skill_id, owner)``：座位环名次读
+    :func:`~sgs.state.seats_from`（座位环的唯一真源，与 :func:`~sgs.state.order_targets`
+    同一读法），后三段是**同一角色内部**的原全序——第一段只在跨角色时起作用，后三段只在
+    角色内部起作用，互不越权。不在存活环上的座位（死亡时技能窗口里的死者）排在环上座位
+    之后、段内仍按角色内部全序，故对任何输入都是确定的全序。
+
+    **为什么链序落在这里、而不是 :func:`resolve_instances` 的排序键上**：解析入口带内容键
+    缓存，把 ``state.turn_seat`` 拉进解析就得同步加一位键（否则两个只差回合座位的局面会
+    共用一条缓存）；而解析结果的消费者里只有**派发**要这条判据（``timing_hooks_present``、
+    失效 / 状态清理、修饰器链都按集合或座位内部次序读）。链序在真正消费它的地方
+    （:func:`_dispatch`）落一次，判据仍只有**一处实现**。
+    """
+    ring = seats_from(state, state.turn_seat, len(state.players))
+    rank = {seat: index for index, seat in enumerate(ring)}
+    return tuple(
+        sorted(
+            instances,
+            key=lambda item: (
+                rank.get(item.owner, len(rank)),
+                int(item.definition.priority_class),
+                item.skill_id,
+                item.owner,
+            ),
+        )
+    )
 
 
 def _dispatch(
@@ -1330,9 +1377,10 @@ def _dispatch(
     时重入必须还能续跑同一个实例。
 
     ``extra_instances``（M5-05a）只由"失去牌后"的派发传入：刚离开装备区的装备技能仍是
-    这一次移动的提供者（见 :func:`_instances_for`）。
+    这一次移动的提供者（见 :func:`_instances_for`）。链序走 :func:`_chain_order`
+    （§4.16 两级顺序的唯一实现：先逐角色、角色内部再按优先级）。
     """
-    for instance in _instances_for(host.state, extra_instances):
+    for instance in _chain_order(host.state, _instances_for(host.state, extra_instances)):
         items = match(instance)
         if not items:
             continue

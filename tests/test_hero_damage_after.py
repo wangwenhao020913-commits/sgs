@@ -26,6 +26,7 @@ from sgs.resolution import Tag, add_tag
 from sgs.state import (
     EndPhase,
     FrameKind,
+    MoveReason,
     Pass,
     Phase,
     SelectCards,
@@ -45,6 +46,9 @@ PACK = load_content_pack(deck_profile="standard_108")
 JIANXIONG = "hero.caocao.jianxiong"
 FANKUI = "hero.simayi.fankui"
 YIJI = "hero.guojia.yiji"
+LIANYING = "hero.luxun.lianying"
+QINGJIAN = "hero.jie_xiahoudun.qingjian"
+"""跨座位的两条 ``MOVE_AFTER`` 钩子（§4.16 两级顺序回归用；票 05）。"""
 
 DAMAGE_AFTER_TAKE = Timing.DAMAGE_AFTER_TAKE
 
@@ -1574,3 +1578,92 @@ def test_ganglie_is_not_offered_when_someone_else_takes_the_damage():
 
     assert _activation_count(engine, GANGLIE) == 0
     assert engine.state.player(2).hp == 3, "别人照常掉血（伤害本身不受影响）"
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 同一时机多名角色：**先逐角色**（当前回合角色起逆时针），同一角色内部才按优先级
+#    规则原文 = `三国杀详细规则.txt` §4.16「同一时机涉及多个角色时的两级顺序」（票 04
+#    落地）；本票（05）把它落到派发链序上。回归住在本文件是票面指定的落点（§5）——
+#    与上面那条「NEAR_DEATH 先于 DAMAGE_AFTER」同属"时机次序"判据家族。
+# ---------------------------------------------------------------------------
+
+
+def _multi_actor_move_engine():
+    """一次 ``hand(2) → hand(3)`` 的移动同时点亮**两个不同座位**的 ``MOVE_AFTER`` 钩子。
+
+    局面（`.scratch/flow-resume-step-cancel/probe_order_multi_actor.py` 已证可达）：
+
+    - 座位 0 = 当前回合角色，无技能；
+    - 座位 1 = 无技能；
+    - 座位 2 = 标陆逊，手里**恰好一张** ⇒ 失去最后的手牌 ⇒ 【连营】；
+    - 座位 3 = 界夏侯惇 ⇒ 摸牌阶段外获得牌 ⇒ 【清俭】。
+
+    真实对局里这个移动形状就是【反馈】（把伤害来源的一张牌搬进自己手牌）；这里直接经
+    移动入口复刻它，省掉"先造成伤害再答两问"的脚手架。返回 ``(engine, players, asks)``，
+    ``asks`` 是**询问序列本身**（``(actor, skill_id)`` 按记录流先后）。
+    """
+    card = _cards("peach")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(),
+            SeatSpec(),
+            SeatSpec(hand=(card,), hero="luxun"),
+            SeatSpec(hero="jie_xiahoudun"),
+        ],
+        deck=_deck_excluding(card),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=7)
+    players = [Scripted() for _ in range(4)]
+    _advance(
+        engine,
+        players,
+        lambda e: any(
+            record.kind == "timing" and record.timing is Timing.PHASE_PLAY_START
+            for record in e.records
+        ),
+    )
+    engine.move_in_frame(
+        None,
+        engine.state.refs((card,)),
+        to_zone=ZoneRef(Zone.HAND, 3),
+        reason=MoveReason.LOSE,
+        owner=3,
+        actor=3,
+    )
+
+    def asks() -> list[tuple[int, str]]:
+        return [
+            (record.query.actor, record.query.skill_id)
+            for record in engine.records
+            if record.kind == "query"
+            and record.query.kind == "SKILL_ACTIVATION"
+            and record.query.skill_id in (LIANYING, QINGJIAN)
+        ]
+
+    _advance(engine, players, lambda e: len(asks()) == 2)
+    return engine, players, asks
+
+
+def test_a_multi_actor_move_after_is_asked_seat_by_seat_from_the_turn_seat():
+    """同一时机两个座位都能派发 ⇒ 先问环上更早的座位（座位 2，不是字典序更小的座位 3）。
+
+    规则（§4.16 两级顺序）：**先逐角色**——从当前回合角色起逆时针，对每一名角色处理完
+    这个时机，再轮到下一名角色；**同一角色内部**多个技能才按优先级选一条。两级不可
+    互换：不是"先按优先级把不同角色的技能排成一队"。当前回合角色 = 座位 0 ⇒ 环是
+    ``0 → 1 → 2 → 3`` ⇒ 座位 2 先被问。
+
+    旧实现按实例全序 ``(priority_class, skill_id, owner)`` 派发，两条都是武将档（0）
+    ⇒ 比 ``skill_id``：``hero.jie_xiahoudun.qingjian`` < ``hero.luxun.lianying``
+    ⇒ **座位 3 先被问**，与座次顺序相反。
+
+    判据比较**询问序列本身**（`CODING_STANDARDS.md` §4：不 ``sorted()`` / 不去重）：
+    先问谁、问的是哪条技能，两件事实一起断。
+    """
+    _engine, _players, asks = _multi_actor_move_engine()
+
+    assert asks() == [(2, LIANYING), (3, QINGJIAN)], (
+        "同一 MOVE_AFTER 上两名角色都能派发时，链序必须按「当前回合角色起逆时针」"
+        f"逐角色（座位 2 先于座位 3）；实得询问序列 {asks()}"
+    )
