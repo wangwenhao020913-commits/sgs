@@ -11,7 +11,12 @@ M2 定格（票 17 §3 / 票 32）把分区改为里程碑中性名：
   但流程结构性地不经过、因此记录流里一个都不出现；
 - ``ENUM_ONLY``（19）：枚举位保留、流程走不到。
 
-末尾一节是**时机计数纪律**（retro 票 06 / code-review C7）：规则级账本
+此后两批解封：M3 的 ``MOVE_AFTER``（票 07）与 wuming 票 04 的
+``MAXLIFE_INCREASE_BEFORE`` / ``MAXLIFE_INCREASE_AFTER``（只解封"加体力上限"一侧；
+减侧继续留枚举位）。今天实测 = 白名单 **56** / 空日志 **11** / 枚举位 **16**。
+
+末尾两节分别是 **``MAXLIFE`` 事件帧的行为**（wuming 票 04：合成技能调
+``Engine.raise_hp_max`` 的三条用例）与**时机计数纪律**（retro 票 06 / code-review C7）：规则级账本
 （`06` §5「程序化约定与偏离一手」的"时机四轴计数"段）里这三个集合与派生的
 ``IMPLEMENTED`` 的四个计数必须与本文导入的长度同步，否则漂移只在 review 时被人读出来。
 术语表 `GLOSSARY.md` 只留定义、不承担账目（C7 把账目从术语表搬进账本）。
@@ -26,7 +31,10 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from sgs.engine import TimingRecord, record_json
+from sgs.data import RuleConfig, load_content_pack
+from sgs.engine import Engine, TimingRecord, record_json
+from sgs.resolution import Frame
+from sgs.state import FrameKind
 from sgs.timing import (
     DISPATCH_WHITELIST,
     EMPTY_LOG,
@@ -35,6 +43,11 @@ from sgs.timing import (
     IMPLEMENTED,
     Timing,
 )
+
+from support import SeatSpec, build_state
+
+PACK = load_content_pack(deck_profile="basic_53")
+"""合成技能 / 构造局面用最小牌堆档（与其它构造局面单测同一档）。"""
 
 
 def test_enum_has_exactly_83_nodes():
@@ -56,8 +69,12 @@ def test_implemented_and_enum_only_partition_the_whole_table():
     implemented = set(IMPLEMENTED)
     enum_only = set(ENUM_ONLY)
 
-    assert len(implemented) == 65, "M2 已实现类 64 + M3 解封的 1 个（票 07）"
-    assert len(enum_only) == 18, "M3 只解封 `MOVE_AFTER`，枚举位 19 → 18（票 07）"
+    assert len(implemented) == 67, (
+        "M2 已实现类 64 + M3 解封的 1 个（票 07）+ wuming 票 04 解封的 2 个"
+    )
+    assert len(enum_only) == 16, (
+        "枚举位 19 − M3 的 `MOVE_AFTER` − wuming 票 04 的加体力上限二时机"
+    )
     assert implemented | enum_only == set(Timing)
     assert implemented & enum_only == set()
 
@@ -66,10 +83,12 @@ def test_the_dispatch_whitelist_and_empty_log_nodes_partition_the_implemented_se
     dispatch = set(DISPATCH_WHITELIST)
     empty_log = set(EMPTY_LOG)
 
-    assert len(dispatch) == 54, "M2 dispatch 白名单 53 + M3 解封的 `MOVE_AFTER`（票 07）"
+    assert len(dispatch) == 56, (
+        "M2 dispatch 白名单 53 + M3 的 `MOVE_AFTER`（票 07）+ wuming 票 04 的二时机"
+    )
     assert len(empty_log) == 11, "空日志 L2 节点恰 11 个"
     assert dispatch.isdisjoint(empty_log)
-    assert dispatch | empty_log == set(IMPLEMENTED), "54 + 11 复原 65 个已实现类"
+    assert dispatch | empty_log == set(IMPLEMENTED), "56 + 11 复原 67 个已实现类"
     assert dispatch | empty_log | set(ENUM_ONLY) == set(Timing)
 
 
@@ -84,6 +103,23 @@ def test_the_m3_unseal_is_exactly_move_after():
     assert Timing.MOVE_BEFORE in ENUM_ONLY, "移动前继续留枚举位（M3 无载体）"
     assert Timing.MOVE_BEFORE not in IMPLEMENTED
     assert Timing.MOVE_BEFORE not in DISPATCH_WHITELIST
+
+
+def test_the_wuming_unseal_is_exactly_the_two_maxlife_increase_nodes():
+    """wuming 票 04 C3 + C4：解封的恰是「加体力上限」二时机；**减侧两个继续留枚举位**。
+
+    减侧不解封是**有意**的：既有 `reduce_hp_max`（界徐庶【潜心】/ 界吕蒙【勤学】）今天
+    走自己的写入口，迁进帧会改它的 `hp_max_change.frame_id` 并多两条时机记录 ⇒ 金录像
+    字节变化（E1）。加 / 减是规则 §4.15 的两个独立流程，各只有「前 / 后」。
+    """
+    for timing in (Timing.MAXLIFE_INCREASE_BEFORE, Timing.MAXLIFE_INCREASE_AFTER):
+        assert timing in IMPLEMENTED, "解封 = 引擎真的会 dispatch 它（由 MAXLIFE 帧兑现）"
+        assert timing in DISPATCH_WHITELIST
+        assert timing not in ENUM_ONLY
+    for timing in (Timing.MAXLIFE_DECREASE_BEFORE, Timing.MAXLIFE_DECREASE_AFTER):
+        assert timing in ENUM_ONLY, "减侧暂不解封（不迁 reduce_hp_max，见票 04 C4）"
+        assert timing not in IMPLEMENTED
+        assert timing not in DISPATCH_WHITELIST
 
 
 def test_the_six_m2_nodes_are_dispatchable():
@@ -159,6 +195,201 @@ def test_timing_records_store_only_the_enum_identifier_not_the_rendered_label():
     for derived in ("label", "layer", "order"):
         assert derived not in payload
         assert derived not in TimingRecord.model_fields
+
+
+# ---------------------------------------------------------------------------
+# L11 ``MAXLIFE`` 事件帧（wuming 票 04 C1–C5）：合成技能调 ``Engine.raise_hp_max``
+#
+# 规则 §4.15 L429–L439：加体力上限 / 减体力上限是**两个独立流程**，各只有「前 / 后」。
+# 本票只接"加"：`raise_hp_max` 推 ``FrameKind.MAXLIFE`` 帧，帧私有带 ``direction`` +
+# ``amount``；"减"分支写好但暂无调用者（既有 `reduce_hp_max` 不迁、`MAXLIFE_DECREASE_*`
+# 不解封）。这些用例用 ``CATALOG`` 注入的合成锁定技钉形状——不引入任何真实武将。
+# ---------------------------------------------------------------------------
+
+MAXLIFE_SKILL = "hero.fake.maxlife"
+"""合成 L11 技能的 id（只活在 ``CATALOG`` 注入里）。"""
+
+_MAXLIFE_RAISED = "fake_maxlife_raised"
+"""帧私有守卫：这次 L0 派发已经推过 MAXLIFE 帧。派发环在别的实例挂起后重入时会从头
+再跑一遍已完成的钩子（``_dispatch`` 的既有重入口径），没有它就会再推一个帧。"""
+
+
+def _install_maxlife_skill(monkeypatch, *, amount: int):
+    """把一条**只挂在 ``GAME_START`` 上**的合成锁定技注入 ``CATALOG``（票 04 的 DoD 夹具）。
+
+    锁定技 ⇒ 不发"是否发动"询问，回调直接跑；它只做一件事：按 ``hook_owner``
+    （帧私有的持有者槽）调 ``Engine.raise_hp_max``，然后 ``return "stay"`` 让引擎先跑完
+    这个帧。效果不重复由帧私有守卫保证（``CODING_STANDARDS.md`` §3）。
+    """
+    from types import MappingProxyType
+
+    from sgs.effects import CarrierKind
+    from sgs.skills import Hook, SkillDef
+    from sgs.skills import catalog as catalog_module
+
+    def handler(host, frame):
+        seat = int(frame.data["hook_owner"])
+        if frame.data.get(_MAXLIFE_RAISED):
+            return None
+        frame.data[_MAXLIFE_RAISED] = True
+        host.raise_hp_max(seat, amount)
+        return "stay"
+
+    definition = SkillDef(
+        skill_id=MAXLIFE_SKILL,
+        locked=True,
+        carrier=CarrierKind.HERO,
+        hooks=(Hook(Timing.GAME_START, handler),),
+    )
+    monkeypatch.setattr(
+        catalog_module,
+        "CATALOG",
+        MappingProxyType({**catalog_module.CATALOG, MAXLIFE_SKILL: definition}),
+    )
+
+
+def _step_until_the_maxlife_frame_closes(engine) -> None:
+    """推进到 ``MAXLIFE`` 帧 pop（合成锁定技不发问，故一路 ``_step`` 即可）。"""
+    for _ in range(50):
+        if [
+            record
+            for record in engine.records
+            if record.kind == "frame"
+            and record.frame_kind is FrameKind.MAXLIFE
+            and record.op == "pop"
+        ]:
+            return
+        assert engine.pending is None, "合成锁定技不该发问"
+        engine._step()
+    raise AssertionError("50 步内 MAXLIFE 帧没有跑完")
+
+
+def _records_of(engine, *, kind: str) -> list:
+    return [record for record in engine.records if record.kind == kind]
+
+
+def _maxlife_frame_id(engine) -> int:
+    pushes = [
+        record
+        for record in _records_of(engine, kind="frame")
+        if record.frame_kind is FrameKind.MAXLIFE and record.op == "push"
+    ]
+    assert len(pushes) == 1, "一次 raise_hp_max = 恰好一个 MAXLIFE 帧"
+    return pushes[0].frame_id
+
+
+def test_raise_hp_max_pushes_a_maxlife_frame_and_never_syncs_the_hp(monkeypatch):
+    """C1 + C2 + C5：合成技能调 ``raise_hp_max(+1)`` ⇒
+
+    - 帧类型 ``MAXLIFE``（push / pop 各一条，生命周期在记录流里没有缺口）；
+    - ``hp_max_change`` 的 ``frame_id`` 指向该帧，``amount`` = 1、``before/after`` = 4/5；
+    - 两个「加」时机各记录一次，序为 ① 前 → ② 落上限 → ③ 后；减侧一条都不落；
+    - **体力值不变**：满体力加上限也不触发"同步下调"（那是减侧的规则），也没有 ``hp_change``。
+    """
+    _install_maxlife_skill(monkeypatch, amount=1)
+    engine = Engine.new_game(seed=7, rule_config=RuleConfig(player_count=2), pack=PACK)
+    engine.grant_skill(0, MAXLIFE_SKILL)
+    _step_until_the_maxlife_frame_closes(engine)
+
+    player = engine.state.player(0)
+    assert (player.hp, player.hp_max) == (4, 5), "上限 +1；体力值不同步（回复是技能的第二段）"
+
+    frame_id = _maxlife_frame_id(engine)
+    assert [
+        record.frame_id
+        for record in _records_of(engine, kind="frame")
+        if record.frame_kind is FrameKind.MAXLIFE and record.op == "pop"
+    ] == [frame_id], "pop 必须与 push 同一个帧号"
+
+    timings = [
+        record
+        for record in _records_of(engine, kind="timing")
+        if record.timing.value.startswith("MAXLIFE_")
+    ]
+    assert [record.timing for record in timings] == [
+        Timing.MAXLIFE_INCREASE_BEFORE,
+        Timing.MAXLIFE_INCREASE_AFTER,
+    ], "两个「加体力上限」时机各一次；减侧两个时机一条都不落（不解封）"
+    assert [record.frame_id for record in timings] == [frame_id, frame_id]
+    assert [record.actor for record in timings] == [0, 0], "时机记录的主体 = 被改上限的座位"
+    assert [record.targets for record in timings] == [(0,), (0,)], "帧私有 targets = 该座位"
+
+    deltas = [
+        record
+        for record in _records_of(engine, kind="delta")
+        if record.delta_type == "hp_max_change"
+    ]
+    assert len(deltas) == 1
+    delta = deltas[0]
+    assert delta.frame_id == frame_id, "hp_max_change 指向承载它的 MAXLIFE 帧"
+    assert (delta.seat, delta.before, delta.after, delta.amount) == (0, 4, 5, 1)
+    assert timings[0].seq < delta.seq < timings[1].seq, "① 派发前时机 → ② 落上限 → ③ 派发后时机"
+    assert not [
+        record
+        for record in _records_of(engine, kind="delta")
+        if record.delta_type == "hp_change"
+    ], "满体力加上限**不**同步体力（「满体力同步下调」只属于减侧）"
+
+
+def test_raise_hp_max_carries_the_positive_magnitude_and_does_not_touch_the_hp(monkeypatch):
+    """C2 的幅度语义：``raise_hp_max(+3)`` ⇒ ``hp_max_change.amount == 3``（幅度恒正）、上限 +3。
+
+    已受伤时更不会动体力——"增加上限并回复 1 点"的回复是技能的第二段，走既有回复原语
+    （杜预【灭吴】一类将来直接用这个入口）。
+    """
+    _install_maxlife_skill(monkeypatch, amount=3)
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=2, hp_max=3), SeatSpec()],
+        deck=tuple(range(10)),
+    )
+    engine = Engine.from_state(state, seed=7)
+    engine.grant_skill(0, MAXLIFE_SKILL)
+    _step_until_the_maxlife_frame_closes(engine)
+
+    player = engine.state.player(0)
+    assert (player.hp, player.hp_max) == (2, 6), "上限 3 → 6；体力值不动"
+    deltas = [
+        record
+        for record in _records_of(engine, kind="delta")
+        if record.delta_type == "hp_max_change"
+    ]
+    assert [(record.before, record.after, record.amount) for record in deltas] == [(3, 6, 3)]
+
+
+def test_reduce_hp_max_stays_out_of_the_maxlife_frame():
+    """C4 的边界：减上限仍走**自己的**写入口（界徐庶【潜心】/ 界吕蒙【勤学】在用）。
+
+    调用它不推 ``MAXLIFE`` 帧、不落任何 ``MAXLIFE_*`` 时机记录，且"减上限前满体力 ⇒
+    体力值同步下调到新上限"（规则 L436–437）照旧落第二条 ``hp_change``。
+    既有觉醒技的记录流因此逐字节不变（字节级判据 = 金录像 57 / 59 的回放比对）。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hp=4, hp_max=4), SeatSpec()],
+        deck=tuple(range(10)),
+    )
+    engine = Engine.from_state(state, seed=7)
+    carrier = Frame(kind=FrameKind.SKILL, frame_id=0)
+
+    engine.reduce_hp_max(carrier, 0, 1)
+
+    player = engine.state.player(0)
+    assert (player.hp, player.hp_max) == (3, 3), "满体力减上限 ⇒ 体力同步下调（减侧的规则）"
+    assert not [
+        record
+        for record in _records_of(engine, kind="frame")
+        if record.frame_kind is FrameKind.MAXLIFE
+    ], "reduce_hp_max 不推 MAXLIFE 帧"
+    assert not [
+        record
+        for record in _records_of(engine, kind="timing")
+        if record.timing.value.startswith("MAXLIFE_")
+    ], "减侧时机不解封：一条记录都不许落"
+    assert [
+        (record.delta_type, record.before, record.after, record.amount)
+        for record in _records_of(engine, kind="delta")
+    ] == [("hp_max_change", 4, 3, 1), ("hp_change", 4, 3, -1)]
 
 
 # ---------------------------------------------------------------------------

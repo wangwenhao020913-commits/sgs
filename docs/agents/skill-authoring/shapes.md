@@ -105,6 +105,7 @@
 | `RECOVER_VALUE` | 回复数值确定时（界救援） |
 | `DEATH_ON` | **死亡时**技能（神关羽移动版【武魂】②：死者本人的判定 / 直接致死）——`10` 起死者在这个窗口内仍可解析，`pass_away` 收口后静默 |
 | `NEAR_DEATH_ENTER` | **濒死时**技能（庞统移动版【涅槃】：huo-mobile-batch 票 02 的首载体）——NEAR_DEATH 帧的**第一步**，在求桃窗口（`NEAR_DEATH_AT`）**之前**派发；帧外事件（任何人的回合都可能发生），效果在这里结算完 ⇒ 体力回到 1 以上时求桃窗口直接早退 |
+| `MAXLIFE_INCREASE_BEFORE` / `MAXLIFE_INCREASE_AFTER` | **加体力上限**的前 / 后（L11；规则 §4.15 L429–L439：加 / 减是两个**独立流程**，各只有「前 / 后」，没有「增减体力上限时」）。今天是**框架解封**（wuming 票 04）：唯一写入口 `Engine.raise_hp_max(seat, amount=1)` 推 `FrameKind.MAXLIFE` 帧，**尚无武将技能挂它**（票 01 的【天成】是第一个）。加上限**不同步体力**——"增加上限并回复一点"的回复是技能的第二段，走 `RECOVER` 帧。**减**侧 `MAXLIFE_DECREASE_*` 仍留枚举位（`reduce_hp_max` 未迁进帧，理由见 `06`（§5「程序化约定与偏离一手」）的时机四轴计数段） |
 
 ### 3.2 接缝 `SeamKind`
 
@@ -175,7 +176,7 @@
 | `NEAR_DEATH` | 濒死 |
 | `DEATH` | 死亡结算 |
 | `LIFE_LOSE` | 失去体力上限 |
-| `MAXLIFE` | 体力上限变化 |
+| `MAXLIFE` | **体力上限变化事件帧**（wuming 票 04 解封「加」侧）：三步 = ① 派发 `MAXLIFE_INCREASE_BEFORE` → ② 落上限 + `emit_delta(HpMaxChangeDelta(amount=+N))` → ③ 派发 `MAXLIFE_INCREASE_AFTER`。帧私有带 `direction` + `amount`（`HpMaxChangeDelta.amount` 恒为幅度，方向由 `before` / `after` 读出）；唯一写入口 `Engine.raise_hp_max`（今天没有技能调用它）。**不同步体力**（「满体力同步下调」只属于减侧）；"减"分支写好但**暂无调用者**——`reduce_hp_max` 不迁、`MAXLIFE_DECREASE_*` 不解封 |
 | `RANK_COMPARE` | 拼点类的比较帧 |
 | `REJUDGE` | **改判事件帧**（feng-zhangjiao 票 02）：一次"用一张牌代替 / 替换判定牌"。帧内两段移动（新牌 → 处理区；原牌 → 弃牌堆（**代替**）/ 改判者手牌（**替换**）），不派发任何"打出时 / 使用后"钩子。判据：动作是 `SubstituteJudgeCard`（不是 `PlayCard`），去向由 `SkillDef.rejudge_original_to` 回答 |
 
@@ -260,7 +261,7 @@ ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ �
 |---|---|---|
 | 无 | 全树没有对应字段 / 帧 / 时机 | **标记**（没有通用的"标记"概念，技能要计数就落座位布尔字段） |
 | 只有枚举位 | `Timing` 里有名字，但没人派发、没有流程 | **拼点**（L15 只留枚举位，`RANK_COMPARE` 帧型空转） |
-| 已解封 | 有帧 / 钩子 / 步骤 / 状态位，能被技能用 | **横置**（`Player.chained`）；**翻面**（`Player.flipped` + 「回合开始前」跳过整回合，移动版界曹仁【据守】是首个载体）；**`TURN_START` 的帧外派发**（夏侯渊【神速】：`_turn_start` 改走 `_dispatch_phase_body` + 一次性清理闸）；**`GAME_START` 的帧外派发**（票 03：`_start` 改走 `_dispatch_phase_body` + `_started` 派发完才置真 ⇒ 钩子可停可续；L0 帧 `source=None` / 记录 `actor=None`，无钩子时记录逐字节不变） |
+| 已解封 | 有帧 / 钩子 / 步骤 / 状态位，能被技能用 | **横置**（`Player.chained`）；**翻面**（`Player.flipped` + 「回合开始前」跳过整回合，移动版界曹仁【据守】是首个载体）；**`TURN_START` 的帧外派发**（夏侯渊【神速】：`_turn_start` 改走 `_dispatch_phase_body` + 一次性清理闸）；**`GAME_START` 的帧外派发**（票 03：`_start` 改走 `_dispatch_phase_body` + `_started` 派发完才置真 ⇒ 钩子可停可续；L0 帧 `source=None` / 记录 `actor=None`，无钩子时记录逐字节不变）；**`MAXLIFE` 的「加」侧事件帧**（wuming 票 04：`Engine.raise_hp_max` 推帧 + `MAXLIFE_INCREASE_BEFORE/AFTER` 解封；**减**侧仍留枚举位，`reduce_hp_max` 未迁） |
 
 判定完：
 

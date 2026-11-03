@@ -188,7 +188,7 @@ from .journal import (
     wrap_delta,
 )
 from .rng import RandomSource
-from .steps import CHAIN_TRIGGER_KEY, build_steps
+from .steps import CHAIN_TRIGGER_KEY, MAXLIFE_INCREASE, build_steps
 from .victory import DeathFact, Side, solve_identity_outcome
 
 __all__ = ["DRAW_COUNT", "INITIAL_HP", "Engine", "Outcome", "instantiate_cards", "new_game"]
@@ -3239,6 +3239,56 @@ class Engine:
             # 规则 L436–437：减上限前满体力 ⇒ 体力值同步调整到新上限（**不回血**，只下调）。
             self.apply_hp_change(frame, seat, after_max)
         return delta
+
+    def apply_hp_max_change(self, frame: Frame, seat: int, value: int) -> HpMaxChangeDelta:
+        """把座位 ``seat`` 的**体力上限**写成 ``value`` 并落一条 ``hp_max_change``（票 04）。
+
+        这是 ``FrameKind.MAXLIFE`` 帧的**唯一写入口**（步骤函数经它写，见
+        :func:`~sgs.engine.steps.maxlife_apply`）。与 :meth:`apply_hp_change` 同姿态：
+        目标值由调用帧算好（加 / 减在步骤里按 ``direction`` 算），本方法只负责写与记录。
+
+        ``amount`` = **幅度**（恒正），方向由 ``before`` / ``after`` 读出——与
+        :meth:`reduce_hp_max` 的 ``HpMaxChangeDelta`` 语义一致，故那个入口一字不改。
+
+        **不动体力**：加 / 减上限本身都不回血；减上限的"满体力同步下调"由调用帧另发一条
+        ``hp_change``（规则 §4.15；HpMaxChangeDelta 的 docstring 同一姿态）。
+        """
+        player = self.state.player(seat)
+        before = player.hp_max
+        player.hp_max = value
+        delta = HpMaxChangeDelta(
+            seat=seat, before=before, after=value, amount=abs(value - before)
+        )
+        self.emit_delta(delta, frame_id=frame.frame_id, depth=self.stack.depth)
+        return delta
+
+    def raise_hp_max(self, seat: int, amount: int = 1) -> Frame:
+        """**加体力上限**（票 04 的通用写入口；杜预【灭吴】一类将来直接用）。
+
+        推一个 ``FrameKind.MAXLIFE`` **事件帧**（帧私有 ``direction`` + ``amount``），
+        三步见 :data:`~sgs.engine.steps.MAXLIFE_STEPS`：① 派发
+        ``MAXLIFE_INCREASE_BEFORE`` → ② 落上限 + ``hp_max_change`` → ③ 派发
+        ``MAXLIFE_INCREASE_AFTER``。方向由**入口**（本方法）决定，幅度只能是正整数——
+        别用负值绕进减侧（：meth:`reduce_hp_max` 钉的是"减"，今天不迁进本帧）。
+
+        **不同步体力**（§4.15 的"满体力同步下调"只属于减侧）："增加上限并回复一点体力"
+        的回复是技能的第二段，走既有回复原语（``RECOVER`` 帧），本方法不替调用方回血。
+
+        返回值 = 新压入的帧（调用方通常紧接着 ``return "stay"``，让引擎先把这一帧跑完）。
+        帧外事件 ⇒ 无来源；存在承载帧时 ``push_frame`` 会把 ``return_to`` 记成父帧 + 时机。
+        """
+        if amount < 1:
+            raise ValueError(f"加体力上限的幅度必须是正整数，收到 {amount!r}")
+        return self.push_frame(
+            FrameKind.MAXLIFE,
+            {
+                "target": seat,
+                "targets": (seat,),
+                "direction": MAXLIFE_INCREASE,
+                "amount": amount,
+            },
+            timing=Timing.MAXLIFE_INCREASE_BEFORE,
+        )
 
     def note_damage_dealt(self, seat: int) -> bool:
         """记"``seat`` 本回合**造成过伤害**"的座位级事实（M6 票 06 的【诛害】判据）。

@@ -26,6 +26,7 @@ __all__ = [
     "deck_excluding",
     "declare_death",
     "move_after_engine",
+    "maxlife_engine",
     "play_phase_peach_engine",
     "play_standard",
     "run_turns",
@@ -316,6 +317,39 @@ class _MoveAfterPlayer:
                 if action.kind == "ActivateSkill":
                     return action
         return _end_phase_or_first(query)
+
+
+def maxlife_engine(seed: int = 7):
+    """场景 9（wuming 票 04）：``Engine.raise_hp_max`` 推一个 ``MAXLIFE`` 帧并跑完。
+
+    L11 的"加体力上限"今天**没有真实技能载体**（票 01 的【天成】是第一个），故这条记录流
+    不是任何基准录像，而是直接调**唯一写入口**的构造局面：座位 0 = 3 上限 / 2 体力
+    （已受伤），加 1 点 ⇒ 上限 4、体力不动。它就是 :data:`~sgs.timing.DISPATCH_WHITELIST`
+    里 ``MAXLIFE_INCREASE_BEFORE`` / ``MAXLIFE_INCREASE_AFTER`` 两个节点的**实测来源**。
+
+    先跑 L0「游戏开始时」派发再调写入口：``Engine.from_state`` 的 ``_started`` 是假，
+    不先 `_step` 一次的话帧会压在任何开局记录之前（记录次序仍是合法的，但场景意图是
+    "游戏内的上限变化"）。减侧两个时机不在本场景里——它们今天不解封。
+    """
+    state = build_state(
+        pack=load_content_pack(deck_profile=M1_DECK_PROFILE),
+        seats=[SeatSpec(hp=2, hp_max=3), SeatSpec()],
+        deck=tuple(range(10)),
+        turn_seat=0,
+        phase=Phase.PREPARE,
+    )
+    engine = Engine.from_state(state, seed=seed)
+    engine._step()  # L0 派发（GAME_START）：开局那一步，不碰结算栈
+    engine.raise_hp_max(0, 1)
+    for _ in range(20):
+        if not engine.stack:
+            break
+        engine._step()
+    assert any(
+        record.kind == "timing" and record.timing is Timing.MAXLIFE_INCREASE_AFTER
+        for record in engine.records
+    ), "场景没跑完 MAXLIFE 帧：加体力上限后的时机必须真的落进记录流"
+    return engine
 
 
 def play_phase_peach_engine(seed: int = 1):

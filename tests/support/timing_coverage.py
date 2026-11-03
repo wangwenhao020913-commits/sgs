@@ -1,7 +1,8 @@
 """时机覆盖清单（票 25 / 票 12 §5）：节点 → 覆盖它的基准或用例，连同来源的记录流。
 
-清单的键集必须**恰等于** M2 的 dispatch 白名单（``sgs.timing.DISPATCH_WHITELIST``，
-53 个可从记录流观测的节点）。每个值是一组来源 id：
+清单的键集必须**恰等于** dispatch 白名单（``sgs.timing.DISPATCH_WHITELIST``，
+56 个可从记录流观测的节点：M2 定格 53 + M3 解封的 ``MOVE_AFTER`` + wuming 票 04 解封的
+加体力上限二时机）。每个值是一组来源 id：
 
 - ``baseline:<slug>``：``tests/replays/<slug>.jsonl`` 这条 Golden Replay 的记录流
   （它的字节已由 ``tests/test_replays.py`` 用当前引擎回放验证）；
@@ -22,13 +23,17 @@
 - 票 32 §3：6 个原 enum-only 节点转 dispatch，来源挂在 M2 基准上——
   ``JUDGE_*`` 挂基准 14（闪电判定）、``DEATH_REVEAL_IDENTITY_BEFORE`` 挂基准 23
   （两次阵亡亮明）、``PLAY_DECLARE`` / ``PLAY_ON_PLAY`` 挂基准 31（打出链）。
+- wuming 票 04：L11 的**加体力上限**二时机（``MAXLIFE_INCREASE_BEFORE/AFTER``）解封，
+  落到 ``position:maxlife``。今天**没有真实技能载体**，故来源是直接调唯一写入口
+  ``Engine.raise_hp_max`` 的构造局面（`tests/support/positions.py:maxlife_engine`）；
+  减侧两个 ``MAXLIFE_DECREASE_*`` **不解封**，仍留枚举位。
 
-**不进清单的 30 个节点与理由**（票 12 §5"实战不可达者写明理由"）：
+**不进清单的 27 个节点与理由**（票 12 §5"实战不可达者写明理由"）：
 
 - ``sgs.timing.EMPTY_LOG``（11）：L2 边界 / 阶段间节点，流程结构上不 dispatch
   （票 18 承票 06 §7 的登记），记录流里不出现，故无来源可挂；
-- ``sgs.timing.ENUM_ONLY``（19）：触发它们的前提机制（拼点、翻面、失去体力 / 体力上限、
-  牌移动、属性伤害…）在 M2 仍被排除，只留枚举位。
+- ``sgs.timing.ENUM_ONLY``（16）：触发它们的前提机制（拼点、翻面、失去体力、**减**体力
+  上限、牌移动、属性伤害…）仍被排除，只留枚举位——"加"体力上限已于 wuming 票 04 解封。
 
 另：基准 ``06-deck-reshuffle`` 不作为来源——重洗没有专属时机节点，它 dispatch 的与
 01–05 相同；它自己的回归断言（重洗可观测）由 ``tests/test_deck_shuffle.py`` 与
@@ -43,7 +48,12 @@ from pathlib import Path
 from sgs.engine import read_journal
 from sgs.timing import Timing
 
-from .positions import move_after_engine, play_phase_peach_engine, turn_loop_engine
+from .positions import (
+    maxlife_engine,
+    move_after_engine,
+    play_phase_peach_engine,
+    turn_loop_engine,
+)
 
 __all__ = ["ALL_SOURCES", "COVERAGE", "dispatched", "stream_records"]
 
@@ -52,6 +62,7 @@ _REPLAYS_DIR = Path(__file__).resolve().parent.parent / "replays"
 TURN_LOOP = "position:turn-loop"
 PLAY_PHASE_PEACH = "position:play-phase-peach"
 MOVE_AFTER_SCENE = "position:move-after"
+MAXLIFE_SCENE = "position:maxlife"
 
 
 def _baseline(slug: str) -> str:
@@ -132,8 +143,11 @@ COVERAGE: dict[Timing, tuple[str, ...]] = {
     Timing.JUDGE_CARD_AFTER_EFFECT: (B14,),
     # ---- L16 牌移动：票 07 解封的 `MOVE_AFTER`，来源是 D 族的构造局面单测 ----
     Timing.MOVE_AFTER: (MOVE_AFTER_SCENE,),
+    # ---- L11 体力上限：wuming 票 04 解封**加**侧二时机，来源是构造局面单测 ----
+    Timing.MAXLIFE_INCREASE_BEFORE: (MAXLIFE_SCENE,),
+    Timing.MAXLIFE_INCREASE_AFTER: (MAXLIFE_SCENE,),
 }
-"""54 个可从记录流观测的节点 → 覆盖它的基准 / 构造局面用例。"""
+"""56 个可从记录流观测的节点 → 覆盖它的基准 / 构造局面用例。"""
 
 
 @lru_cache(maxsize=None)
@@ -148,6 +162,8 @@ def stream_records(source_id: str):
         return play_phase_peach_engine().records
     if source_id == MOVE_AFTER_SCENE:
         return move_after_engine().records
+    if source_id == MAXLIFE_SCENE:
+        return maxlife_engine().records
     raise KeyError(f"未知的覆盖来源：{source_id!r}")
 
 

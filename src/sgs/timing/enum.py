@@ -12,6 +12,11 @@ dispatch、不记）：
   票 18 已登记此口径）。覆盖清单以 :data:`DISPATCH_WHITELIST` 为白名单，见
   ``tests/support/timing_coverage.py``。
 
+以上三个数字是 **M2 定格**。此后两批解封：M3 的 ``MOVE_AFTER``（票 07）与 wuming 票 04
+的 ``MAXLIFE_INCREASE_BEFORE/AFTER``（加体力上限一侧）——今天的实测计数见
+:data:`IMPLEMENTED` / :data:`DISPATCH_WHITELIST` / :data:`ENUM_ONLY` 的 docstring，
+账本在 ``06`` §5「程序化约定与偏离一手」的"时机四轴计数"段。
+
 纪律：
 
 - 枚举值就是**官方标识符**（如 ``RESOLVE_BEFORE_EFFECT``），层号与序号由
@@ -127,7 +132,7 @@ class Timing(str, Enum):
     RECOVER_VALUE = ("RECOVER_VALUE", 10, 1)
     RECOVER_AFTER = ("RECOVER_AFTER", 10, 2)
 
-    # ---- L11 体力上限事件（只留枚举位）---------------------------------------
+    # ---- L11 体力上限事件（加 / 减是两个独立流程，各只有「前 / 后」）----------
     MAXLIFE_DECREASE_BEFORE = ("MAXLIFE_DECREASE_BEFORE", 11, 1)
     MAXLIFE_DECREASE_AFTER = ("MAXLIFE_DECREASE_AFTER", 11, 2)
     MAXLIFE_INCREASE_BEFORE = ("MAXLIFE_INCREASE_BEFORE", 11, 3)
@@ -233,6 +238,9 @@ IMPLEMENTED: tuple[Timing, ...] = (
     # L10：回复体力二时机
     Timing.RECOVER_VALUE,
     Timing.RECOVER_AFTER,
+    # L11：加体力上限二时机（wuming 票 04 解封**加**侧；减侧 `MAXLIFE_DECREASE_*` 继续留枚举位）
+    Timing.MAXLIFE_INCREASE_BEFORE,
+    Timing.MAXLIFE_INCREASE_AFTER,
     # L12：濒死三时机
     Timing.NEAR_DEATH_ENTER,
     Timing.NEAR_DEATH_AT,
@@ -250,11 +258,17 @@ IMPLEMENTED: tuple[Timing, ...] = (
     # L16：牌移动事件（票 07 的 M3 唯一解封；**只解封 after**，`MOVE_BEFORE` 继续留枚举位）
     Timing.MOVE_AFTER,
 )
-"""已实现类（M2 定格 64 + M3 解封 1 = 65）：流程真的会走到（允许空实现 / 空日志）。
+"""已实现类（M2 定格 64 + M3 解封 1 + wuming 票 04 解封 2 = 67）：流程真的会走到（允许空实现 / 空日志）。
 
 M3 的增量只有 :attr:`Timing.MOVE_AFTER` 一个（票 07 / ADR-010 的不对称解封）：它在
 :meth:`~sgs.engine.game.Engine.move_in_frame` 这个**唯一移动入口**里内联派发，且只在
 当前局面有注册在该时机上的实例时派发（惰性守卫）——无武将模式因此零派发、M2 基准一行不变。
+
+wuming 票 04 的增量是 L11 的**加体力上限**二时机（``MAXLIFE_INCREASE_BEFORE/AFTER``）：
+由 ``FrameKind.MAXLIFE`` 事件帧的步骤表派发（唯一入口 ``Engine.raise_hp_max``，今天还没有
+技能调用它）。**减**侧两个（``MAXLIFE_DECREASE_*``）继续留枚举位：既有
+``Engine.reduce_hp_max``（界徐庶【潜心】/ 界吕蒙【勤学】）不迁进帧，迁会改既有
+``hp_max_change.frame_id`` 并多两条时机记录（E1）。
 """
 
 _IMPLEMENTED_MEMBERS = frozenset(IMPLEMENTED)
@@ -262,9 +276,10 @@ _IMPLEMENTED_MEMBERS = frozenset(IMPLEMENTED)
 ENUM_ONLY: tuple[Timing, ...] = tuple(
     timing for timing in Timing if timing not in _IMPLEMENTED_MEMBERS
 )
-"""只留枚举位类（M2 定格 19 − M3 解封 1 = 18）：不 dispatch（遍历 ``Timing`` 保证顺序确定）。
+"""只留枚举位类（M2 定格 19 − M3 解封 1 − wuming 票 04 解封 2 = 16）：不 dispatch（遍历 ``Timing`` 保证顺序确定）。
 
-M3 只从中移走 :attr:`Timing.MOVE_AFTER` 一个（票 07）；其余 18 个仍无载体。
+M3 只从中移走 :attr:`Timing.MOVE_AFTER` 一个（票 07）；wuming 票 04 再移走
+``MAXLIFE_INCREASE_BEFORE/AFTER`` 两个（"加"侧真的 dispatch，"减"侧仍无载体）。其余 16 个仍无载体。
 """
 
 EMPTY_LOG: tuple[Timing, ...] = (
@@ -302,9 +317,9 @@ _EMPTY_LOG_MEMBERS = frozenset(EMPTY_LOG)
 DISPATCH_WHITELIST: tuple[Timing, ...] = tuple(
     timing for timing in IMPLEMENTED if timing not in _EMPTY_LOG_MEMBERS
 )
-"""**dispatch 白名单**（M2 定格 53 + M3 解封 1 = 54）：真的会 dispatch、可在记录流里观测的节点。
+"""**dispatch 白名单**（M2 定格 53 + M3 解封 1 + wuming 票 04 解封 2 = 56）：真的会 dispatch、可在记录流里观测的节点。
 
-= 65 个已实现类 − 11 个空日志节点（票 18 登记、票 25 落地、票 32 定格）。覆盖清单
+= 67 个已实现类 − 11 个空日志节点（票 18 登记、票 25 落地、票 32 定格）。覆盖清单
 （``tests/support/timing_coverage.py``）的键集必须**恰等于**本集合，且每个节点都要在
 它声明的基准 / 用例产出的记录流里实测出现。
 """

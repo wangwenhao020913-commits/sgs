@@ -238,6 +238,10 @@ class FrameHost(StepHost, Protocol):
 
     def apply_hp_change(self, frame: Frame, seat: int, value: int) -> Any: ...
 
+    def apply_hp_max_change(self, frame: Frame, seat: int, value: int) -> Any:
+        """把体力上限写成 ``value`` 并落一条 ``hp_max_change``（``MAXLIFE`` 帧的写入口）。"""
+        ...
+
     def move_in_frame(
         self,
         frame: Frame | None,
@@ -1840,6 +1844,85 @@ RECOVER_STEPS = (
 )
 
 
+# ---- MAXLIFE 帧：L11 的加 / 减体力上限（wuming 票 04）------------------------
+#
+# 规则 §4.15 L429–L439：**加体力上限**与**减体力上限**是**两个独立流程**，各只有
+# 「前 / 后」两个时机，没有「增减体力上限时」。故帧私有带 `direction` + `amount`，
+# 步骤表按方向选时机对，`build_steps` 只登记一张表：
+#
+#   ① 派发 `MAXLIFE_INCREASE_BEFORE` → ② 落上限 + `hp_max_change` →
+#   ③ 派发 `MAXLIFE_INCREASE_AFTER`（减侧换成 `MAXLIFE_DECREASE_*`，其余同形）。
+#
+# **本票只接"加"**（唯一入口 `Engine.raise_hp_max`）：减侧分支写好但**暂无调用者**——
+# 既有 `Engine.reduce_hp_max`（界徐庶【潜心】/ 界吕蒙【勤学】）不迁进来，
+# `MAXLIFE_DECREASE_*` 也**不解封**（迁会改既有 `hp_max_change.frame_id` 并多两条时机
+# 记录 ⇒ 金录像字节变化）。将来迁移时**只换调用点**，本表不必再动。
+
+MAXLIFE_INCREASE = "increase"
+MAXLIFE_DECREASE = "decrease"
+"""``FrameKind.MAXLIFE`` 帧私有的 ``direction`` 取值（加 / 减是两个独立流程，§4.15）。"""
+
+
+def _maxlife_timings(direction: str) -> tuple[Timing, Timing]:
+    """方向 → （前, 后）两个时机；未知方向是编程错误（fail-closed，不落半套流程）。"""
+    if direction == MAXLIFE_INCREASE:
+        return Timing.MAXLIFE_INCREASE_BEFORE, Timing.MAXLIFE_INCREASE_AFTER
+    if direction == MAXLIFE_DECREASE:
+        return Timing.MAXLIFE_DECREASE_BEFORE, Timing.MAXLIFE_DECREASE_AFTER
+    raise ValueError(f"未知的体力上限变化方向 {direction!r}（只认 increase / decrease）")
+
+
+def maxlife_before(host: FrameHost, frame: Frame) -> Control:
+    """① 派发「加 / 减体力上限前」（规则 L429–L439 的"前"）。"""
+    before, _ = _maxlife_timings(frame.data["direction"])
+    return _emit(host, frame, before, actor=frame.data["target"])
+
+
+def maxlife_apply(host: FrameHost, frame: Frame) -> None:
+    """② 落体力上限并落一条 ``hp_max_change``（``amount`` = 幅度，恒正）。
+
+    **加上限不同步体力**：规则只有减侧的"减上限前体力值等于上限 ⇒ 同步调整到新上限"
+    （L436–437；只下调、不回血）；"增加上限并回复 1 点"的回复是技能的第二段，走既有
+    回复原语（``RECOVER`` 帧），本帧不替调用方回血（票 04 C5）。
+
+    减侧分支与 :meth:`~sgs.engine.Engine.reduce_hp_max` 逐条同语义（含"满体力同步下调"
+    与"上限减为 0 无载体"的 fail-closed 守卫），故将来迁移只换调用点。
+    """
+    seat = frame.data["target"]
+    amount = int(frame.data["amount"])
+    player = host.state.player(seat)
+    before_max, before_hp = player.hp_max, player.hp
+    after_max = (
+        before_max + amount
+        if frame.data["direction"] == MAXLIFE_INCREASE
+        else before_max - amount
+    )
+    if after_max < 1:
+        raise ValueError(
+            f"体力上限 {before_max} 减 {amount} 后为 {after_max}："
+            "上限减为 0 的直接死亡流程未落地（今天没有该档载体）"
+        )
+    host.apply_hp_max_change(frame, seat, after_max)
+    if after_max < before_max and before_hp == before_max:
+        # 规则 L436–437：减上限前满体力 ⇒ 体力值同步调整到新上限（**不回血**，只下调）。
+        host.apply_hp_change(frame, seat, after_max)
+
+
+def maxlife_after(host: FrameHost, frame: Frame) -> Control:
+    """③ 派发「加 / 减体力上限后」（规则 L430–L439 的"后"：结算【伤逝】【威重】等技能）。"""
+    _, after = _maxlife_timings(frame.data["direction"])
+    return _emit(host, frame, after, actor=frame.data["target"])
+
+
+MAXLIFE_STEPS = (
+    Step(maxlife_before, Timing.MAXLIFE_INCREASE_BEFORE),
+    Step(maxlife_apply, None),
+    Step(maxlife_after, Timing.MAXLIFE_INCREASE_AFTER),
+)
+"""L11 事件帧：前 → 落上限 → 后三格（``timing`` 只是子帧 ``return_to`` 的标签；
+真正派发哪个时机由帧私有 ``direction`` 决定，减侧两个时机今天不解封）。"""
+
+
 # ---- PLAY 帧：L6 两个时机（票 19 §2：打出必须独立）---------------------------
 
 
@@ -1945,6 +2028,7 @@ def build_steps(mode: Mode = Mode.NO_IDENTITY) -> StepTable:
         FrameKind.NEAR_DEATH: NEAR_DEATH_STEPS,
         FrameKind.DEATH: IDENTITY_DEATH_STEPS if mode is Mode.IDENTITY else DEATH_STEPS,
         FrameKind.RECOVER: RECOVER_STEPS,
+        FrameKind.MAXLIFE: MAXLIFE_STEPS,
         FrameKind.JUDGE: JUDGE_STEPS,
         FrameKind.REJUDGE: REJUDGE_STEPS,
     }
