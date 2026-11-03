@@ -23,7 +23,7 @@
 | `pending.js` | 询问按种类分派到专用面、提示条右端动作、取消 / 不支持面 fail-closed；涉猎的结果态门闸（`state.suitResult`）。 |
 | `options.js` | 选项按钮组、选择面槽位、「提供一张 B」、Action 文案与右端动作下标；**计数式分配面**（`renderDistribution`：逐座位计数 + 「重置」，本地计数住 `state.distribution`；huo-shenzhouyu-mobile 票 05）。 |
 | `reveal.js` | 亮牌模板（五谷 / 遗计复用）与目标条；**按花色取牌**（涉猎：一行式、同花色置灰、2.5 秒结果态 `renderSuitResult`）；**带观看授予的选项步**（韬·刘备【义起】：`SELECT_OPTION` + `revealed` ⇒ 选择型弹窗里牌面只读、3 个类型按钮同窗，`options.js:renderOptionButtons` 画牌）；判据仍住 `modal.js`。 |
-| `modal.js` | 询问弹窗框架与武将详情壳：`selectionEnabled`、`stepDialogKind`、`DIALOG_KINDS`（含涉猎的 `suit`、计数式分配的 `distribution`）、`dialogDisablesPass`（亮牌步带 `Pass` 时可放弃）。 |
+| `modal.js` | 询问弹窗框架与武将详情壳：`selectionEnabled`、`stepDialogKind`、`DIALOG_KINDS`（含涉猎的 `suit`、计数式分配的 `distribution`）、`dialogDisablesPass`（亮牌步带 `Pass` 时可放弃）；**展示武将牌的选项步**（票 08：`.hero-card` 正文段 = 副标题「第 k/m 张」+ 武将块 + 带描述的选项行，复用 `choice` 外壳，不新增第七种 kind；判据 `isShowHeroCardStep` 只看载荷 `hero_card`）。 |
 | `hero-detail.js` | 武将详情正文（技能清单）与开合绑定。 |
 | `arrange.js` | 排列面双行布局（观星自由切分 / 恂恂固定切分）：移动判据（插入 / 固定切分跨行互换）、拖拽落点（指针过牌面中点即"之后"）与落点预览（占位格让道 / 交换高亮）、提交载荷。 |
 | `answer.js` | 倒计时三色、`buildAction`、`submitAction`（`POST …/answer`）、`clearSelection`；三个前端代答例外（观星 `ARRANGE` / 涉猎 `suit` / 计数式分配 `DISTRIBUTE` 到点提交当前选择）；涉猎提交后的 2.5 秒结果态。 |
@@ -69,7 +69,8 @@
 ## 测试 / 烟测入口
 
 - `tests/support/ui_smoke.mjs`：`node:vm` + 最小 DOM 垫片，按 `index.html` 顺序跑**真脚本**，
-  喂真服务端响应与合成载荷。垫片的 `El.children` 是 **HTMLCollection 形状的活视图**
+  喂真服务端响应与合成载荷（展示武将牌的 `heroCardPending` 与票 07 的投影载荷同形）。
+  垫片的 `El.children` 是 **HTMLCollection 形状的活视图**
   （`length` / 下标 / `item` / 迭代，无数组方法）——测试遍历一律 `Array.from(...)` 或展开；
   集合断言用 `setEquals`，纯函数断言经 `ui.stageLane` 喂 `now`。U4-01 起垫片另有
   **确定性 `getBoundingClientRect`** 与登记式 `animate`（飞行层只读"矩形存在 / 动画参数"，

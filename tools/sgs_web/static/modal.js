@@ -110,6 +110,10 @@ function stepDialogKind(pending) {
   // 长出第二份枚举表。
   if (isWatchChoiceStep(pending)) return DIALOG_KINDS.choice;
   if (isChoiceStep(pending)) return DIALOG_KINDS.choice;
+  // 票 08（票 02 §4.2 B7）：展示武将牌的选项步——正文是一张武将牌 + 带描述的选项行，
+  // 用**既有** `choice` 外壳（不新增第七种 kind）。放在两条既有选择型判据**之后**：
+  // 它们的判据一字不改，新形状只补一条。
+  if (isShowHeroCardStep(pending)) return DIALOG_KINDS.choice;
   if (isUnknownZoneStep(pending)) return DIALOG_KINDS.unknown;
   // 票 01：公开亮牌 + 每种花色至多 k 张（涉猎）——在亮牌判据之前，二者形状不同。
   if (isSuitPickStep(pending)) return DIALOG_KINDS.suit;
@@ -143,6 +147,20 @@ function isChoiceStep(pending) {
 function hasServerOptionLabels(pending) {
   const labels = pending && pending.option_labels;
   return !!labels && typeof labels === "object" && Object.keys(labels).length > 0;
+}
+
+/** 展示武将牌的选项步（票 08；票 02 §4.2 B7–B8）：判据**只看载荷形状**。
+ *
+ * `SELECT_OPTION` 且带 `pending.hero_card` 对象（服务端投影在"这次展示了一张武将牌"时
+ * 才加这个键，见票 07 的读取契约）。`hero_id` 为 null 的"这一次没有武将牌"**也有**这个键
+ * ⇒ 仍然进弹窗（副标题「第 k/m 张」+ 选项 2），只是正文不画武将块。
+ *
+ * 不认技能 id / 选项值：那是第二份真源；正文的每一行都读 `option_details`。
+ */
+function isShowHeroCardStep(pending) {
+  if (!pending || pending.kind !== "SELECT_OPTION") return false;
+  const card = pending.hero_card;
+  return !!card && typeof card === "object";
 }
 
 /** 未知区域模板认得的区域（D3）：他人手牌 / 装备 / 判定三区。
@@ -322,6 +340,8 @@ function dialogTitleFor(kind, pending) {
   if (kind === DIALOG_KINDS.arrange) return "排列";
   if (kind === DIALOG_KINDS.distribution) return "分配";
   if (kind === DIALOG_KINDS.choice) {
+    // 展示武将牌（票 08）：标题 = 技能名（`context.name` 优先 / `view.skills` 兜底）。
+    if (isShowHeroCardStep(pending)) return heroCardTitle(pending);
     // 带观看授予的选项步（【义起】）标题写技能名：玩家一眼看出"这是谁在问"。
     const watched = isWatchChoiceStep(pending);
     const contextName = watched && pending.context && pending.context.name;
@@ -477,6 +497,12 @@ function applyDialogContentMode(kind) {
     return;
   }
   clearDialogReveal();
+  // 票 08：展示武将牌的选项步——正文是**新的一段**（武将块 + 带描述的选项行）。它由
+  // `renderHeroCardBody` 画进共享的 `#t-options`（先把 `renderOptionButtons` 画的普通
+  // 按钮清掉），随后照常整体搬进正文槽，正文归属不改。
+  if (kind === DIALOG_KINDS.choice && isShowHeroCardStep(pending)) {
+    renderHeroCardBody(pending);
+  }
   if (options && body && options.parentNode !== body) body.appendChild(options);
 }
 
@@ -682,6 +708,141 @@ function syncDialog() {
   state.dialog.persistent = persistent;
   updateDialogDom(kind);
   syncHeroModal();
+}
+
+/* ------------------------------------------------------------ 展示武将牌的选项步（票 08） */
+
+/** 展示武将牌的选项步标题（票 08）：**技能名**，不新增标题键。
+ *
+ * 两个来源都是既有的：真实会话读 `query_context` 的 `context.name`；没有 context
+ * （409 裸 Query / 合成载荷）时按 `skill_id` 去 `view.skills`（`build_skills` 的产物）
+ * 找同一技能的展示名。都没有才退回中性「选择」——前端不抄技能名。
+ */
+function heroCardTitle(pending) {
+  const contextName = pending && pending.context && pending.context.name;
+  if (contextName) return contextName;
+  const skillId = pending && pending.skill_id;
+  const skills = (state.view && state.view.skills) || [];
+  const skill = skills.find((item) => item && item.skill_id === skillId);
+  return (skill && skill.name) || "选择";
+}
+
+/** 副标题「第 k/m 张」：k / m 全读服务端的 n-of-m。
+ *
+ * 分母恒 3 是**服务端**的保证（票 07 的载荷契约），界面不写死 3、也不数展示次数
+ * ——"展示恒为 3 次"由调用方（票 01）补足没有武将牌的那几次。
+ */
+function heroCardSubtitle(card) {
+  const index = card && card.index;
+  const total = card && card.total;
+  if (typeof index !== "number" || typeof total !== "number") return "";
+  return `第 ${index}/${total} 张`;
+}
+
+/** 这一行在 `legal_actions` 里的下标；-1 = 不是候选（置灰项只在载荷里，不可提交）。 */
+function heroCardChoiceIndex(pending, choice) {
+  const actions = (pending && pending.legal_actions) || [];
+  return actions.findIndex(
+    (action) => action.kind === "SelectOption"
+      && action.choice === choice
+      && !isRightAction(action),
+  );
+}
+
+/** 武将块（票 08）：势力徽记 + 名称 + `hp_max/hp_max` 点数条。
+ *
+ *  形状参照 `seat-view.js:heroBlockNode`，但**不含**技能清单（技能在下面的选项行里）。
+ *  展示的是"未加入游戏的武将牌"，没有当前体力 ⇒ 点数条按满体力画（复用同一个
+ *  `hpBarNode`，不另写一套点数 / 文案）。
+ */
+function heroCardBlockNode(card) {
+  const block = document.createElement("div");
+  block.className = "hero-card-block";
+  const head = document.createElement("div");
+  head.className = "hero-card-head";
+  if (card.kingdom_label) {
+    const kingdom = document.createElement("span");
+    kingdom.className = `kingdom ${card.kingdom || ""}`;
+    kingdom.textContent = card.kingdom_label;
+    kingdom.setAttribute("title", `势力：${card.kingdom_label}`);
+    head.appendChild(kingdom);
+  }
+  const name = document.createElement("span");
+  name.className = "hero-name";
+  name.textContent = card.name || card.hero_id || "未知武将";
+  head.appendChild(name);
+  block.appendChild(head);
+  const hpMax = Number(card.hp_max);
+  if (Number.isFinite(hpMax) && hpMax > 0) {
+    block.appendChild(hpBarNode({ hp: hpMax, hp_max: hpMax }));
+  }
+  return block;
+}
+
+/** 一行选项（票 08）：技能名 / 效果文本 + 描述正文；置灰行只展示、不接 click。
+ *
+ *  可提交性只看载荷：服务端的 `row.disabled`，以及这一行在不在 `legal_actions` 里
+ *  （`heroCardChoiceIndex` 找不到 = 引擎没发这条候选）——前端不猜"为什么不可选"。
+ */
+function heroCardRowNode(pending, row) {
+  const choice = row && row.choice;
+  const index = heroCardChoiceIndex(pending, choice);
+  const disabled = !row || row.disabled === true || index < 0;
+  const node = document.createElement("button");
+  node.type = "button";
+  node.className = disabled ? "hero-card-row dis" : "hero-card-row";
+  node.disabled = disabled;
+  node.setAttribute("data-choice", String(choice || ""));
+  const name = document.createElement("span");
+  name.className = "hero-card-row-name";
+  name.textContent = (row && row.text) || "";
+  node.appendChild(name);
+  if (row && row.description) {
+    // `descriptions.json` 的原文（服务端不截断、这里也不截断）。
+    const desc = document.createElement("div");
+    desc.className = "hero-card-desc";
+    desc.textContent = row.description;
+    node.appendChild(desc);
+  }
+  if (disabled) {
+    const blocked = document.createElement("span");
+    blocked.className = "hero-card-owned";
+    blocked.textContent = "不可选";
+    node.appendChild(blocked);
+    return node;
+  }
+  node.addEventListener("click", async () => {
+    await submitDialogChoice(pending, index);
+  });
+  return node;
+}
+
+/** 展示武将牌的选项步的**新正文段**（票 08；票 02 §4.2 B7）：由
+ *  `applyDialogContentMode` 在把 `#t-options` 搬进正文槽之前调用。
+ *
+ *  它先清掉 `renderOptionButtons` 画的普通按钮，再按服务端 `option_details` 的**原序**
+ *  画：副标题 + （有牌时）武将块 + 逐行选项。置灰项保留原位，只是 `.dis` + 不接 click；
+ *  选项 2 的文本（含具体 X）就来自效果行自己的 `text`。
+ *
+ *  `hero_card.hero_id` 为 null 的那一次没有武将块，但副标题与选项 2 照画：这是第四轮
+ *  裁定 1 的"缺的那几次"，一条都不能少。
+ */
+function renderHeroCardBody(pending) {
+  const box = $("t-options");
+  if (!box) return;
+  box.innerHTML = "";
+  box.classList.remove("suit-options");
+  const card = pending.hero_card || {};
+  const section = document.createElement("div");
+  section.className = "hero-card";
+  const sub = document.createElement("div");
+  sub.className = "hero-card-sub";
+  sub.textContent = heroCardSubtitle(card);
+  section.appendChild(sub);
+  if (card.hero_id) section.appendChild(heroCardBlockNode(card));
+  const rows = Array.isArray(pending.option_details) ? pending.option_details : [];
+  rows.forEach((row) => section.appendChild(heroCardRowNode(pending, row)));
+  box.appendChild(section);
 }
 
 /* ------------------------------------------------------------ 武将详情窗口 */

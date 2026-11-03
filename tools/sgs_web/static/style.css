@@ -1439,6 +1439,51 @@ button.mini-slot { cursor: pointer; }
 .dialog-body .options { margin: 0; }
 .dialog-body .arrange-row + .arrange-row { margin-top: 10px; }
 
+/* ---------- 展示武将牌的选项步（票 08；票 02 §4.2 B7–B8） ----------
+ * 正文段 = 副标题「第 k/m 张」+ 武将块（势力徽记 / 名称 / hp_max 点数条）+ 带描述的
+ * 选项行。版式与座位卡同源（`.kingdom` / `.hp-bar` 直接复用），但**不含技能清单**——
+ * 技能就是下面的选项行。描述是 descriptions.json 的原文：不裁剪、不省略。 */
+.hero-card { display: flex; flex-direction: column; gap: 10px; }
+.hero-card-sub {
+  font-size: 12px; color: var(--dim); letter-spacing: .04em;
+  font-variant-numeric: tabular-nums;
+}
+.hero-card-block {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 10px;
+  background: linear-gradient(180deg, #fffdf7 0%, #f4ead8 100%);
+  border: 1px solid var(--line); border-radius: 10px;
+}
+.hero-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.hero-card .hero-name {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 16px; font-weight: 700; letter-spacing: .04em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.hero-card-block .hp-bar { margin-top: 0; }
+.hero-card-block .hp-seg { width: calc(13 * var(--dsu)); height: calc(9 * var(--dsu)); }
+.hero-card-block .hp-num { font-size: calc(12 * var(--dsu)); }
+.hero-card-row {
+  display: flex; flex-direction: column; gap: 4px;
+  width: 100%;
+  text-align: left; border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px 10px; background: #fff; color: var(--ink);
+  cursor: pointer; font: inherit;
+}
+.hero-card-row:hover:not(.dis) { border-color: var(--accent); }
+.hero-card-row-name { font-size: 14px; font-weight: 700; }
+.hero-card-desc {
+  font-size: 12px; line-height: 1.55; color: var(--dim);
+  white-space: pre-wrap;
+}
+.hero-card-row.dis { opacity: .45; cursor: not-allowed; background: #f4eee2; }
+.hero-card-owned {
+  align-self: flex-start;
+  padding: 0 6px; border-radius: 999px;
+  font-size: 11px; line-height: 1.6;
+  color: var(--dim); background: #e8dfcf;
+}
+
 /* ---------- 亮牌模板（U2-11 五谷 / 票 12 遗计复用；spec D3 / D4） ----------
  * 正文 = 全部亮牌（按亮牌顺序，被拿走的牌**留在原位**）+ 左下角目标条。
  * 被拿走的牌置灰、牌面仍可读，右下角标写拿牌者座位号；目标条按拿牌顺序四态：

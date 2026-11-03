@@ -1188,3 +1188,144 @@ def test_skill_bar_is_a_three_by_six_grid_of_equal_cells_with_name_only() -> Non
     assert "Array.from" in helper.group("body"), (
         "按**字**切（Array.from），不按 UTF-16 码元——代理对不会被切一半"
     )
+
+
+# ---------------------------------------------------------------------------
+# 票 08（B-ui / 票 02 §4.2 B7–B8）：展示武将牌的选项弹窗 = 选择型外壳的**新正文段**
+# ---------------------------------------------------------------------------
+
+
+def _js_function(source: str, name: str) -> str:
+    """取一个顶层函数的正文（产品脚本的函数都以行首 `}` 收尾）。"""
+    match = re.search(rf"function {name}\((?P<args>[^)]*)\) \{{(?P<body>.*?)\n\}}", source, re.S)
+    assert match is not None, f"找不到函数 {name}()"
+    return match.group("body")
+
+
+def test_the_hero_card_dialog_is_a_new_body_section_of_the_choice_shell() -> None:
+    """新 DOM 形状的静态部分（行为归 `ui_smoke.mjs`，真浏览器归票面「复现配方」）。
+
+    票 08 的硬约束是**只加正文段**：
+
+    - 不新增第七种外壳：`DIALOG_KINDS` 仍是六种，展示武将牌这一步判成 `choice`；
+    - 判据只看载荷形状：`isShowHeroCardStep` 读 `pending.hero_card`（不认技能 id）；
+      `hero_id=null` 的"这一次没有武将牌"也有这个键 ⇒ 仍进弹窗，只是不画武将块；
+    - 新正文段的节点 / 类名：`.hero-card`（段）→ `.hero-card-sub`（第 k/m 张）+
+      `.hero-card-block`（势力徽记 / `.hero-name` / 体力点数条）+ 逐行
+      `.hero-card-row`（`.hero-card-desc` 原文、置灰 `.dis`）。形状参照
+      `seat-view.js:heroBlockNode`，点数条因此**复用** `hpBarNode`；
+    - 标题读既有技能名（`context.name` 优先、`build_skills` 的同一 `skill_id` 兜底），
+      不新增标题键；正文里没有「放弃」（这一步没有 Pass）。
+    """
+    modal = _strip_js_comments(_MODAL_JS.read_text(encoding="utf-8"))
+
+    kinds = re.search(r"const DIALOG_KINDS = Object\.freeze\(\{(?P<body>.*?)\}\)", modal, re.S)
+    assert kinds is not None, "modal.js 里找不到 DIALOG_KINDS"
+    keys = re.findall(r"^\s*(\w+):\s*\"", kinds.group("body"), re.M)
+    assert keys == ["arrange", "choice", "unknown", "reveal", "suit", "distribution"], (
+        "票 08 只加正文段，不新增第七种 dialog kind（展示武将牌复用 choice）："
+        f"{keys}"
+    )
+
+    predicate = _js_function(modal, "isShowHeroCardStep")
+    assert 'pending.kind !== "SELECT_OPTION"' in predicate, (
+        f"武将牌正文段只属于选项询问：{predicate}"
+    )
+    assert "pending.hero_card" in predicate, (
+        f"判据必须读载荷的 hero_card（不认技能 id）：{predicate}"
+    )
+    assert re.search(r"isShowHeroCardStep\(pending\)\) return DIALOG_KINDS\.choice", modal), (
+        "stepDialogKind 必须把展示武将牌这一步判成既有 choice 外壳"
+    )
+
+    title = _js_function(modal, "heroCardTitle")
+    assert "pending.context" in title and "context.name" in title, (
+        f"标题优先读 query_context 的技能名：{title}"
+    )
+    assert "skill_id === skillId" in title or "item.skill_id === skillId" in title, (
+        f"没有 context（409 裸 Query / 合成载荷）时退回 build_skills 的同一 skill_id：{title}"
+    )
+    assert '"选择"' in title, "两个来源都没有时退回中性文案，不留空标题"
+    assert re.search(r"isShowHeroCardStep\(pending\)\) return heroCardTitle\(pending\)", modal), (
+        "选择型的标题分支必须接上 heroCardTitle（不新增标题键）"
+    )
+
+    content_mode = _js_function(modal, "applyDialogContentMode")
+    assert re.search(
+        r"kind === DIALOG_KINDS\.choice && isShowHeroCardStep\(pending\)", content_mode
+    ), f"applyDialogContentMode 必须只为展示武将牌加新正文段：{content_mode}"
+    assert "renderHeroCardBody(pending)" in content_mode, content_mode
+    assert re.search(r"body\.appendChild\(options\)", content_mode), (
+        "新正文段画进共享的 #t-options 后仍整体搬进 #t-dialog-body（不改正文归属）"
+    )
+
+    render = _js_function(modal, "renderHeroCardBody")
+    assert '"hero-card"' in render, f"新正文段的根节点类名 .hero-card：{render}"
+    assert '"hero-card-sub"' in render, f"副标题「第 k/m 张」：{render}"
+    assert "heroCardBlockNode(card)" in render, "有武将牌时画武将块"
+    assert "heroCardRowNode(pending, row)" in render, "逐行画选项（顺序 = option_details 顺序）"
+    assert "pending.option_details" in render, (
+        f"选项行读服务端派生的 option_details（不自己拼技能名 / 描述）：{render}"
+    )
+    assert "放弃" not in render and "Pass" not in render, (
+        "正文段不画「放弃」：这一步没有 Pass（右端的收起由既有 choice 判据负责）"
+    )
+
+    block = _js_function(modal, "heroCardBlockNode")
+    assert '"hero-card-block"' in block and '"hero-card-head"' in block, block
+    assert "kingdom" in block and "kingdom_label" in block, (
+        f"势力徽记 = .kingdom + 服务端 kingdom_label：{block}"
+    )
+    assert '"hero-name"' in block and "card.name" in block, (
+        f"名称读服务端下发的 name：{block}"
+    )
+    assert "hpBarNode({ hp: hpMax, hp_max: hpMax })" in block, (
+        "体力点数条复用 seat-view.js:heroBlockNode 的同一形状（hp_max/hp_max）："
+        f"{block}"
+    )
+    assert "hero-card-desc" not in block, "武将块**不含**技能清单（技能在下面的选项行里）"
+
+    row = _js_function(modal, "heroCardRowNode")
+    assert '"hero-card-row' in row, row
+    assert '"hero-card-desc"' in row and "row.description" in row, (
+        f"技能行要画描述正文（服务端原文、不截断）：{row}"
+    )
+    assert '"hero-card-row dis"' in row, f"置灰行画 .dis：{row}"
+    assert "node.disabled = disabled" in row, f"置灰行同时 disabled：{row}"
+    assert re.search(
+        r"if \(disabled\) \{.*?return node;\s*\}\s*node\.addEventListener\(\"click\"",
+        row,
+        re.S,
+    ), f"置灰行**不接** click（可点行才绑处理器）：{row}"
+    assert "submitDialogChoice(pending, index)" in row, (
+        f"可点行 = 选中 legal_actions 里那条候选（一击提交，不手拼 Action）：{row}"
+    )
+    assert "heroCardChoiceIndex(pending, choice)" in row, (
+        "候选下标从 legal_actions 里按 choice 找（置灰项不在候选里）"
+    )
+
+    # CSS：新正文段的类名都要有自己的规则；描述不截断（没有 line-clamp / ellipsis）。
+    section = _css_rule(".hero-card")
+    assert re.search(r"display:\s*flex", section), f"正文段竖向铺：{section}"
+    sub = _css_rule(".hero-card-sub")
+    assert re.search(r"font-size:", sub) and re.search(r"color:\s*var\(--dim\)", sub), (
+        f"副标题是弱化的一行：{sub}"
+    )
+    block_rule = _css_rule(".hero-card-block")
+    assert re.search(r"border", block_rule), f"武将块要有自己的框（与座位块同形）：{block_rule}"
+    name_rule = _css_rule(".hero-card .hero-name")
+    assert re.search(r"font-size:", name_rule), (
+        f"`.seat .hero-name` 的样式不覆盖弹窗，名称要自己的字号：{name_rule}"
+    )
+    row_rule = _css_rule(".hero-card-row")
+    assert re.search(r"text-align:\s*left", row_rule), f"选项行左对齐：{row_rule}"
+    assert re.search(r"cursor:\s*pointer", row_rule), f"可点行显示可点：{row_rule}"
+    dis_rule = _css_rule(".hero-card-row.dis")
+    assert re.search(r"cursor:\s*not-allowed", dis_rule), f"置灰行不可点：{dis_rule}"
+    desc_rule = _css_rule(".hero-card-desc")
+    assert re.search(r"white-space:\s*pre-wrap", desc_rule), (
+        f"描述按原文换行铺（不截断）：{desc_rule}"
+    )
+    assert "line-clamp" not in desc_rule and "text-overflow" not in desc_rule, (
+        f"描述不许省略 / 截断：{desc_rule}"
+    )

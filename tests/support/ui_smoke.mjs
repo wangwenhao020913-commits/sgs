@@ -10862,6 +10862,220 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   ui.resetSelection();
 }
 
+/* ============ 票 08（B-ui）：展示武将牌的选项弹窗（【天成】） ============
+ *
+ * 载荷形状 = 票 07 的投影契约（`hero_card` / `option_details`，服务端那一侧由
+ * `tests/test_web.py` 钉）；本段钉**界面读法**：标题 / n-of-m / 武将块三要素 /
+ * 技能行带原文描述 / 置灰行 `.dis` 且点不动 / 选项 2 的具体 X / 没有「放弃」/
+ * 没牌的那一次仍画副标题与选项 2。
+ *
+ * **不是**完整流程：真实的 3 次展示要等票 01 把【天成】接上 `ask_option`（今天没有
+ * 调用者），故这里喂与服务端投影同形的合成 `pending`，走真脚本的渲染入口
+ * （`renderTable` + `renderPending`）。真浏览器验收见票面「复现配方」。
+ */
+{
+  const HERO_SKILL_ID = "hero.jie_guanyu.wusheng";
+  const HERO_OPTION_ID = "tiancheng:max_hp";
+  const HERO_SKILL_DESC = "你可以将一张红色牌当【杀】使用或打出；你使用方块【杀】无距离限制。"
+    + "本仓实现：①与标准版【武圣】逐字相同（手牌或装备区的红牌）；"
+    + "②「无距离限制」落在目标池的查询期修正上——方块（含单源转化出的方块）【杀】的"
+    + "目标池不受「距离 ≤ 攻击范围」限制，失去或失效【武圣】后立刻回到基线。";
+  const HERO_OPTION_TEXT = "增加 1 点体力上限，回复 1 点体力，摸 2 张牌";
+
+  /** 与 `tools/sgs_web/projection.pending_payload` 的键 / 值同形（`hero_id=null` =
+   *  这一次没有武将牌：武将块三要素全 null、`option_details` 只剩效果行）。 */
+  const heroCardPending = ({
+    heroId = "jie_guanyu", name = "界关羽", index = 2, total = 3,
+    enabledSkill = false, optionText = HERO_OPTION_TEXT,
+  } = {}) => {
+    const seq = 9950;
+    const card = heroId === null
+      ? { hero_id: null, index, total, name: null, kingdom: null, kingdom_label: null, hp_max: null }
+      : { hero_id: heroId, index, total, name, kingdom: "shu", kingdom_label: "蜀", hp_max: 4 };
+    const skillRow = {
+      choice: HERO_SKILL_ID, text: "武圣", description: HERO_SKILL_DESC,
+      skill_id: HERO_SKILL_ID, disabled: !enabledSkill,
+    };
+    const optionRow = {
+      choice: HERO_OPTION_ID, text: optionText, description: null, skill_id: null, disabled: false,
+    };
+    const rows = heroId === null ? [optionRow] : [skillRow, optionRow];
+    return {
+      kind: "SELECT_OPTION", actor: 0, seq,
+      skill_id: "hero.wuming.tiancheng",
+      prompt: "请选择一项。",
+      options: rows.map((row) => row.choice),
+      disabled: rows.filter((row) => row.disabled).map((row) => row.choice),
+      option_texts: { [HERO_OPTION_ID]: optionText },
+      hero_card: card,
+      option_details: rows,
+      legal_actions: rows.filter((row) => !row.disabled)
+        .map((row) => ({ kind: "SelectOption", choice: row.choice, answers_seq: seq })),
+      candidate_index: {}, virtual_index: {}, option_seats: {},
+      context: {
+        actor: 0, name: "天成", targets: [0], label: "0号位界关羽的【天成】",
+        requirement: "依次展示三张武将牌，每次须选择一项", skill_hints: [],
+      },
+      preactivations: {}, preactivation: [],
+    };
+  };
+  const heroView = (pending) => {
+    const view = synthView(pending);
+    // 标题的第二个来源：`build_skills` 里同一 `skill_id` 的技能名（真实会话的
+    // `body.skills`；合成视图没有它时标题只能退回中性文案）。
+    view.skills = [{
+      skill_id: "hero.wuming.tiancheng", name: "天成", skill_type: "NORMAL",
+      locked: true, carrier: "HERO", description: "游戏开始时，依次展示3张武将牌。",
+      ui: { passive: true },
+    }];
+    return view;
+  };
+  const render = (view) => {
+    ui.state.view = view;
+    ui.resetSelection();
+    ui.renderTable();
+    ui.renderPending(view);
+  };
+  const heroCardNode = () => Array.from($("t-options").children)
+    .find((node) => hasClassText(node, "hero-card")) || null;
+  const heroChildren = (name) => {
+    const card = heroCardNode();
+    return card
+      ? Array.from(card.children).filter((node) => hasClassText(node, name))
+      : [];
+  };
+  const heroRows = () => heroChildren("hero-card-row");
+  const clickCount = (node) => (node.listeners.click || []).length;
+
+  // ---- ① 外壳：仍是 `choice`（不新增第七种 dialog kind），标题来自技能名 ----
+  render(heroView(heroCardPending()));
+  check("U1-08a 武将牌弹窗 = 既有选择型外壳（不新增第七种 kind）：标题「天成」、正文在弹窗里",
+    Object.keys(ui.DIALOG_KINDS).length === 6
+      && !("hero" in ui.DIALOG_KINDS)
+      && ui.stepDialogKind(ui.state.view.pending) === "choice"
+      && $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "天成"
+      && Array.from($("t-dialog-body").children).includes($("t-options"))
+      && !!heroCardNode(),
+    `kinds=${Object.keys(ui.DIALOG_KINDS).join(",")} kind=${ui.stepDialogKind(ui.state.view.pending)} title="${$("t-dialog-title").textContent}" body=${$("t-dialog-body").children.length}`);
+
+  // ---- ② 副标题「第 k/m 张」+ 武将块三要素（势力 / 名称 / hp_max/hp_max 点数条） ----
+  const subNode = heroChildren("hero-card-sub")[0];
+  const blockNode = heroChildren("hero-card-block")[0];
+  const blockParts = blockNode ? Array.from(blockNode.children) : [];
+  const headNode = blockParts.find((node) => hasClassText(node, "hero-card-head"));
+  const hpNode = blockParts.find((node) => hasClassText(node, "hp-bar"));
+  const kingdomNode = headNode
+    ? Array.from(headNode.children).find((node) => hasClassText(node, "kingdom"))
+    : null;
+  const nameNode = headNode
+    ? Array.from(headNode.children).find((node) => hasClassText(node, "hero-name"))
+    : null;
+  const hpSegs = hpNode
+    ? Array.from(hpNode.children).filter((node) => hasClassText(node, "hp-seg"))
+    : [];
+  const hpNums = hpNode
+    ? Array.from(hpNode.children).filter((node) => hasClassText(node, "hp-num"))
+    : [];
+  check("U1-08b 副标题「第 k/m 张」+ 武将块三要素：势力徽记 / 名称 / hp_max/hp_max 点数条",
+    !!subNode && subNode.textContent === "第 2/3 张"
+      && !!blockNode
+      && !!kingdomNode && kingdomNode.textContent === "蜀"
+      && kingdomNode.classList.contains("shu")
+      && !!nameNode && nameNode.textContent === "界关羽"
+      && hpSegs.length === 4
+      && hpSegs.every((node) => !node.classList.contains("empty"))
+      && hpNums.length === 1 && hpNums[0].textContent === "4/4",
+    `sub="${subNode && subNode.textContent}" kingdom="${kingdomNode && kingdomNode.textContent}" name="${nameNode && nameNode.textContent}" hp="${hpNode && hpNode.textContent}"`);
+
+  // ---- ③ 选项行：与 options 同序；技能名 + 原文描述（不截断）；选项 2 固定最后、带具体 X ----
+  const rows = heroRows();
+  const skillRowNode = rows[0];
+  const optionRowNode = rows[rows.length - 1];
+  const skillDescNode = skillRowNode
+    ? Array.from(skillRowNode.children).find((node) => hasClassText(node, "hero-card-desc"))
+    : null;
+  check("U1-08c 选项行与 options 同序：技能名 + 原文描述（不截断），选项 2 最后且带具体 X",
+    rows.length === 2
+      && skillRowNode.getAttribute("data-choice") === HERO_SKILL_ID
+      && skillRowNode.textContent.includes("武圣")
+      && !!skillDescNode && skillDescNode.textContent === HERO_SKILL_DESC
+      && skillDescNode.textContent.length > 40
+      && optionRowNode.getAttribute("data-choice") === HERO_OPTION_ID
+      && optionRowNode.textContent.includes(HERO_OPTION_TEXT)
+      && /摸 2 张牌/.test(optionRowNode.textContent)
+      && !/摸 X 张牌/.test(optionRowNode.textContent),
+    `rows=${rows.length} first="${skillRowNode && skillRowNode.textContent.slice(0, 24)}" last="${optionRowNode && optionRowNode.textContent}"`);
+
+  // ---- ④ 置灰态：已拥有的技能行 `.dis` + disabled + 没有 click；效果行接 click ----
+  check("U1-08d 已拥有的技能行画 `.dis` + disabled、不接 click；效果行接 click（一击提交）",
+    skillRowNode.classList.contains("dis")
+      && skillRowNode.disabled === true
+      && clickCount(skillRowNode) === 0
+      && optionRowNode.classList.contains("dis") === false
+      && optionRowNode.disabled === false
+      && clickCount(optionRowNode) === 1,
+    `skillDis=${skillRowNode.classList.contains("dis")} skillDisabled=${skillRowNode.disabled} skillClicks=${clickCount(skillRowNode)} optionDis=${optionRowNode.classList.contains("dis")} optionDisabled=${optionRowNode.disabled} optionClicks=${clickCount(optionRowNode)}`);
+
+  // ---- ⑤ 没有「放弃」：载荷本来就没有 Pass，右端也不画；不走单选项确认那条分支 ----
+  check("U1-08e 弹窗里没有「放弃」：右端 Pass 收起、正文不含「放弃」、不退回单选项确认",
+    $("btn-pass").hidden === true
+      && !/放弃/.test($("t-dialog-body").text())
+      && ui.renderKind(ui.state.view.pending, ui.state.view.pending.legal_actions) === "options",
+    `passHidden=${$("btn-pass").hidden} bodyText="${$("t-dialog-body").text()}" renderKind=${ui.renderKind(ui.state.view.pending, ui.state.view.pending.legal_actions)}`);
+
+  // ---- ⑥ 一击提交：点效果行 ⇒ 只选中 `legal_actions` 里那条候选（合成载荷无会话，不 POST） ----
+  const beforeHeroClick = calls.length;
+  await clickAndWait(optionRowNode);
+  check("U1-08f 点效果行 = 选中 `legal_actions` 里那条候选（不手拼 Action、不发请求）",
+    ui.state.selectedOption === 0
+      && calls.length === beforeHeroClick
+      && JSON.stringify(ui.buildAction())
+        === JSON.stringify(ui.state.view.pending.legal_actions[0]),
+    `selected=${ui.state.selectedOption} calls=${calls.length - beforeHeroClick} action=${JSON.stringify(ui.buildAction())}`);
+
+  // ---- ⑦ 没牌的那一次（hero_id=null）：仍画副标题 + 选项 2，没有武将块 ----
+  const emptyView = heroView(heroCardPending({ heroId: null, index: 3, total: 3 }));
+  render(emptyView);
+  const emptySub = heroChildren("hero-card-sub")[0];
+  const emptyRows = heroRows();
+  check("U1-08g 没牌的那一次（hero_id=null）：无武将块，但副标题 3/3 与选项 2 都在（展示恒为 3 次）",
+    $("t-dialog").hidden === false
+      && ui.stepDialogKind(emptyView.pending) === "choice"
+      && !!emptySub && emptySub.textContent === "第 3/3 张"
+      && heroChildren("hero-card-block").length === 0
+      && emptyRows.length === 1
+      && emptyRows[0].getAttribute("data-choice") === HERO_OPTION_ID
+      && emptyRows[0].textContent.includes(HERO_OPTION_TEXT)
+      && $("btn-pass").hidden === true,
+    `sub="${emptySub && emptySub.textContent}" block=${heroChildren("hero-card-block").length} rows=${emptyRows.length} text="${emptyRows[0] && emptyRows[0].textContent}"`);
+
+  // ---- ⑧ 连续两次展示共用同一个窗（链键），只换副标题 / 正文：第 2 张 → 第 3 张 ----
+  render(heroView(heroCardPending({ index: 2, total: 3 })));
+  const keyAtSecond = ui.state.dialog.key;
+  const secondSub = heroChildren("hero-card-sub")[0];
+  render(heroView(heroCardPending({ index: 3, total: 3 })));
+  const thirdSub = heroChildren("hero-card-sub")[0];
+  check("U1-08h 连续两次展示共用同一个窗（键不变），只换副标题 / 正文",
+    !!secondSub && secondSub.textContent === "第 2/3 张"
+      && !!thirdSub && thirdSub.textContent === "第 3/3 张"
+      && ui.state.dialog.key === keyAtSecond
+      && $("t-dialog").hidden === false,
+    `key=${ui.state.dialog.key} before=${keyAtSecond} sub="${thirdSub && thirdSub.textContent}"`);
+
+  // ---- ⑨ 标题的第二个来源：`context` 缺失（409 裸 Query / 合成载荷）⇒ build_skills 的技能名 ----
+  const noContext = heroCardPending();
+  noContext.context = null;
+  render(heroView(noContext));
+  check("U1-08i 没有 context 时标题退回 `build_skills` 里同一 skill_id 的技能名（前端不抄技能名）",
+    $("t-dialog-title").textContent === "天成",
+    `title="${$("t-dialog-title").textContent}"`);
+
+  ui.state.view = null;
+  ui.state.sessionId = null;
+  ui.resetSelection();
+}
+
 /* ============ U2-09（D2 / D3 / D8）：未知区域弹窗推广到反馈 / 拆 / 顺 ============
  *
  * 08 的模板已按 `slots[].ref.zone` 分组；本段钉的是**判据的推广**：凡是"从另一名角色的
