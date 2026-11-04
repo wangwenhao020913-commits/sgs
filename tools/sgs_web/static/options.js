@@ -626,6 +626,12 @@ function renderSlots(pending) {
     renderUnknownZone(pending);
     return;
   }
+  // 武将牌上的牌（huo-shenzhugeliang 票 02）：与常规卡牌**同一套牌面**（花色 / 点数 / 牌名
+  // / 类型行 / 悬停说明），点一张 = 选中它；提交走既有的 `isSingleOptionalOption` / 候选条。
+  if (dialogKind === DIALOG_KINDS.heroPick) {
+    renderHeroZonePick(pending);
+    return;
+  }
   const box = $("t-options");
   const heading = document.createElement("div");
   heading.className = "small";
@@ -633,11 +639,7 @@ function renderSlots(pending) {
   // 上限 > 1 时要说清"可以多选"（【遗计】一次交两张，票 15）。
   const cap = selectionCap(pending);
   const pickText = cap === 1 ? "选择一张" : `选择一至 ${cap} 张`;
-  // 武将牌上的牌（huo-shenzhugeliang 票 02）：牌面对宿主**可见**，故不能沿用"隐藏区域 /
-  // 看不到牌面"那句话（那是对拆 / 顺 / 反馈那段说的）。判据只看 dialog kind。
-  heading.textContent = dialogKind === DIALOG_KINDS.heroPick
-    ? `武将牌上的牌（只有你可见）：这一步${pickText}，点选后提交。`
-    : `选择面：隐藏区域的槽位只有位置（看不到牌面），选中并结算后才揭晓。这一步${pickText}。`;
+  heading.textContent = `选择面：隐藏区域的槽位只有位置（看不到牌面），选中并结算后才揭晓。这一步${pickText}。`;
   box.appendChild(heading);
   const row = document.createElement("div");
   row.className = "cards";
@@ -654,6 +656,48 @@ function renderSlots(pending) {
       renderPending(state.view);
     });
     row.appendChild(chip);
+  });
+  box.appendChild(row);
+}
+
+/** 武将牌上的牌点选（huo-shenzhugeliang 票 02）：一行**完整牌面**（`cardFaceNode`），点选即
+ *  进 `state.picks`；与其余选择面的按钮语义相同（选中 → 右端「提交」/ 单张即点即提交）。
+ *
+ *  与 :func:`renderSlots` 的通用槽位面的差别只有牌面：那些是"隐藏区域只有位置"或"公开
+ *  亮牌"，这里是**宿主看得见的**自己武将牌上的牌（「星」），故按常规卡面画花色 / 点数。 */
+function renderHeroZonePick(pending) {
+  const box = $("t-options");
+  const heading = document.createElement("div");
+  heading.className = "small";
+  const cap = selectionCap(pending);
+  const pickText = cap === 1 ? "选择一张" : `选择一至 ${cap} 张`;
+  heading.textContent = `武将牌上的牌（只有你可见）：这一步${pickText}，点选后提交。`;
+  box.appendChild(heading);
+  const row = document.createElement("div");
+  row.className = "cards";
+  (pending.slots || []).forEach((slot, index) => {
+    if (!slot.card) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "card";
+      chip.textContent = "？";
+      chip.addEventListener("click", () => {
+        toggleSlotPick(pending, index);
+        renderPending(state.view);
+      });
+      row.appendChild(chip);
+      return;
+    }
+    row.appendChild(
+      cardFaceNode(slot.card, {
+        selected: state.picks.includes(index),
+        bottomLine: "武将牌上",
+        onClick: () => {
+          toggleSlotPick(pending, index);
+          renderPending(state.view);
+        },
+      }),
+    );
   });
   box.appendChild(row);
 }

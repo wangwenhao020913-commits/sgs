@@ -1508,8 +1508,9 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
         # 神诸葛亮（huo-shenzhugeliang 票 01）：三条都是"这一步是问我的"（阶段体帧的
         # source = 当前回合角色），【七星】另有"有星也有手牌"的状态前提。
         "hero.shen_zhugeliang.qixing": (_HookFrame(source=ME),),
-        "hero.shen_zhugeliang.kuangfeng": (_HookFrame(source=ME),),
-        "hero.shen_zhugeliang.dawu": (_HookFrame(source=ME),),
+        # 狂风 / 大雾 各有**两条**带条件钩子：结束阶段（自己的）与到期清扫（自己的回合开始）。
+        "hero.shen_zhugeliang.kuangfeng": (_HookFrame(source=ME), _HookFrame(source=ME)),
+        "hero.shen_zhugeliang.dawu": (_HookFrame(source=ME), _HookFrame(source=ME)),
         # 自制包·韬·刘备自制版【从讨】：这一次成为目标的是座位 0（在 ME 的攻击范围内，
         # 但**不在**座位 2 的攻击范围内 ⇒ 持有者换人后条件必须翻假）。逐目标的"这一次"
         # 由派发环写进 MATCH_ACTOR_KEY，持有者由检查本身改写。

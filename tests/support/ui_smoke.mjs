@@ -20201,6 +20201,13 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     .flatMap((node) => (node.children ? Array.from(node.children) : []))
     .filter((node) => node.className && String(node.className).includes("card"));
   check("狂风/大雾-3 每个星一张可点牌（两张）", chips.length === 2, `chips=${chips.length}`);
+  // 报障修复（用户 2026-11-04）：星牌要与**常规卡牌**同一套牌面——花色 + 点数 + 牌名，
+  // 不能只剩牌名。合成载荷的第 1 张是 ♥Q【桃】，第 2 张是 ♠7【杀】。
+  const chipText = (index) => (chips[index] ? chips[index].text() : "");
+  check("狂风/大雾-3b 星牌按常规卡面画：花色 + 点数 + 牌名（♥Q 桃 / ♠7 杀）",
+    chipText(0).includes("♥") && chipText(0).includes("Q") && chipText(0).includes("桃")
+      && chipText(1).includes("♠") && chipText(1).includes("7") && chipText(1).includes("杀"),
+    `chip0="${chipText(0)}" chip1="${chipText(1)}"`);
   if (chips.length) clickNode(chips[0]);
   const starPick = ui.buildAction();
   check("狂风/大雾-4 点一张星 = SelectCards(picks [0])",

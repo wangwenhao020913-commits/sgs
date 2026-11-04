@@ -114,6 +114,18 @@ def _qixing_zone(state: GameState, frame: Any, owner: int, answers: FlowAnswers)
     return star_zone_key(owner)
 
 
+def _own_turn_start(host: Any, frame: Frame) -> bool:
+    """**只有自己的回合开始**才该清扫标记（用户 2026-11-04 报障后的口径）。
+
+    标记的寿命是"**标记来源**的下个回合开始时消失"，而 `TURN_START` 是**每个座位**的
+    回合开始都会派发——不带条件就会在**目标**的回合开始就清掉（实机表现：庞统身上的
+    「大雾」在下一位角色（庞统自己）回合开始就没了）。故清扫钩子必须自校"这一步的回合
+    角色是不是持有者"：阶段体/帧外时机的帧 `source` = 当前回合角色。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    return owner is not None and frame.data.get("source") == owner
+
+
 def _own_turn_phase(host: Any, frame: Frame) -> bool:
     """帧外阶段时机上"这一步是问我的"（阶段体帧的 ``source`` = 当前回合角色）。"""
     owner = frame.data.get(MATCH_OWNER_KEY)
@@ -484,8 +496,14 @@ def shen_zhugeliang_skill_definitions() -> tuple[SkillDef, ...]:
             skill_type=SkillType.NORMAL,
             hooks=(
                 Hook(Timing.PHASE_FINISH, flow=KUANGFENG_FLOW, condition=_own_turn_phase),
-                # 到期清扫：来源的下个回合开始时清掉自己来源的标记（**强制**，不问）。
-                Hook(Timing.TURN_START, handler=_kuangfeng_expire, forced=True),
+                # 到期清扫：**来源的**下个回合开始时清掉自己来源的标记（**强制**，不问；
+                # 但要自校"这是不是我的回合开始"——TURN_START 每座都派发）。
+                Hook(
+                    Timing.TURN_START,
+                    handler=_kuangfeng_expire,
+                    forced=True,
+                    condition=_own_turn_start,
+                ),
             ),
             modifiers=(
                 Modifier(ModifierPoint.DAMAGE_TAKE_AMOUNT, _kuangfeng_bonus),
@@ -506,7 +524,12 @@ def shen_zhugeliang_skill_definitions() -> tuple[SkillDef, ...]:
                 Hook(Timing.PHASE_FINISH, flow=DAWU_FLOW, condition=_own_turn_phase),
                 # 监听：非雷电伤害 ⇒ 防止（**强制**，不问）。
                 Hook(Timing.DAMAGE_DEAL, handler=_dawu_prevent, forced=True),
-                Hook(Timing.TURN_START, handler=_dawu_expire, forced=True),
+                Hook(
+                    Timing.TURN_START,
+                    handler=_dawu_expire,
+                    forced=True,
+                    condition=_own_turn_start,
+                ),
             ),
             requirement="结束阶段，你可以移去任意张“星”并选择等量名角色，然后直到你的下回合开始前，"
             "当这些角色受到非雷电伤害时，防止之",

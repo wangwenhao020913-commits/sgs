@@ -2227,9 +2227,16 @@ class _ShenDriver:
     星牌点选取 ``legal_actions[0]``（一张的组合），座次选项按 ``seat`` 挑 ``seat:N``。
     """
 
-    def __init__(self, *, order: tuple[int, ...] | None = None, seat: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        order: tuple[int, ...] | None = None,
+        seat: int = 1,
+        activate_skills: tuple[str, ...] | None = None,
+    ) -> None:
         self.order = order
         self._target_seat = seat
+        self._activate_skills = activate_skills
         self.queries: list = []
 
     def respond(self, query):
@@ -2244,11 +2251,14 @@ class _ShenDriver:
                 answers_seq=legal.answers_seq, order=self.order, split=legal.split
             )
         if query.kind == "SKILL_ACTIVATION":
-            for action in query.legal_actions:
-                if isinstance(action, ActivateSkill):
-                    return action
+            allowed = self._activate_skills
+            skill_id = str(getattr(query, "skill_id", "") or "")
+            if allowed is None or skill_id in allowed:
+                for action in query.legal_actions:
+                    if isinstance(action, ActivateSkill):
+                        return action
         if query.kind == "SELECT_OPTION":
-            wanted = f"seat:-1"
+            wanted = f"seat:{self._target_seat}"
             for action in query.legal_actions:
                 if isinstance(action, SelectOption) and action.choice == wanted:
                     return action
@@ -2478,6 +2488,92 @@ def test_kuangfeng_marks_expire_at_the_start_of_the_owners_next_turn():
     frame = SimpleNamespace(data={"skill_owner": 0}, frame_id=0)
     hook.handler(engine, frame)
     assert engine.state.player(1).markers == ()
+
+
+def test_kuangfeng_spends_a_star_and_marks_the_chosen_character():
+    """端到端：结束阶段发动【狂风】→ 选 1 张星（点选弹窗的槽）→ 点座位 1 → 标记落地。
+
+    断言三件事：星少 1 张（进弃牌堆）、标记字段逐项 = 用户 2026-11-04 的口径
+    （来源 / 无自身效果 / 来源阵亡即清）、以及选牌询问的槽位带**牌面**（弹窗要按常规卡面画）。
+    """
+    from sgs.state import HeroCardZone
+
+    stars = list(cards_of_type(PACK, "peach")[:2])
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=SHEN, hp=3), SeatSpec(hp=4), SeatSpec(hp=4)],
+        # 牌堆要真的够（否则第一个摸牌阶段就短摸 ⇒ 平局收场，结束阶段根本到不了）。
+        deck=deck_excluding(PACK, *stars),
+    )
+    state.player(0).hero_cards[star_zone_key(0)] = HeroCardZone(
+        skill_id=QIXING_SKILL,
+        owner=0,
+        cards=stars,
+    )
+    engine = Engine.from_state(state, seed=3)
+    driver = _ShenDriver(seat=1, activate_skills=(KUANGFENG_SKILL,))
+    players = [driver, PassPlayer(), PassPlayer()]
+    run_queries(engine, players, lambda e: bool(e.state.player(1).markers))
+    markers = engine.state.player(1).markers
+    assert [marker.name for marker in markers] == ["狂风"]
+    marker = markers[0]
+    assert marker.source_seat == 0 and marker.source_skill_id == KUANGFENG_SKILL
+    assert marker.count == 1 and marker.max_count is None
+    assert marker.effect is None and marker.description is None, "标记自身无效果（用户口径）"
+    assert marker.clear_on_source_death is True, "来源阵亡后消失"
+    # 面内 = 开局扣置的 7 张（`GAME_START` 的强制段）+ 本用例注入的 2 张 = 9 张；
+    # 狂风移去 1 张（面内第 1 槽 = 注入的第一张）⇒ 8 张，且那 1 张进了弃牌堆。
+    assert len(_star_ids(engine)) == 8, "移去了一张星"
+    assert any(card_id in engine.state.discard for card_id in stars), (
+        "移去的星进入弃牌堆（武将牌上的牌 → 弃牌堆）"
+    )
+    star_queries = [
+        record.query
+        for record in engine.records
+        if record.kind == "query"
+        and record.query.kind == "SELECT_CARDS"
+        and (record.query.slots or ())
+        and all(slot.ref.zone == "hero" for slot in record.query.slots)
+    ]
+    assert star_queries, "狂风的第一步是星牌点选"
+    slots = star_queries[0].slots
+    assert slots and all(slot.ref.zone == "hero" for slot in slots)
+    assert all(slot.card is not None for slot in slots), "星对宿主可见（弹窗要画花色 / 点数）"
+
+
+def test_mark_expiry_hooks_only_fire_on_the_sources_own_turn_start():
+    """寿命口径：**标记来源**的下个回合开始时清，而不是**目标**的回合开始（用户 2026-11-04 报障）。
+
+    `TURN_START` 是每个座位的回合开始都会派发；若不清扫钩子自校"这一步的回合角色是不是
+    持有者"，庞统身上的「大雾」会在**庞统自己**的回合开始就被清掉（实机现象）。
+    """
+    from types import SimpleNamespace
+
+    from sgs.state import Marker
+
+    state = _kuangfeng_state()
+    state.player(1).markers = (
+        Marker(name="大雾", source_seat=0, source_skill_id=DAWU_SKILL, count=1),
+        Marker(name="狂风", source_seat=0, source_skill_id=KUANGFENG_SKILL, count=1),
+    )
+    engine = Engine.from_state(state, seed=1)
+    for skill_id in (KUANGFENG_SKILL, DAWU_SKILL):
+        hook = next(
+            hook for hook in CATALOG[skill_id].hooks if hook.timing is Timing.TURN_START
+        )
+        assert hook.condition is not None, "到期清扫必须自校『是不是我的回合开始』"
+        other_turn = SimpleNamespace(
+            data={"skill_owner": 0, "hook_owner": 0, "source": 1}, frame_id=0
+        )
+        assert hook.condition(engine, other_turn) is False, (
+            f"{skill_id}：目标座位的回合开始不该清标记"
+        )
+        own_turn = SimpleNamespace(
+            data={"skill_owner": 0, "hook_owner": 0, "source": 0}, frame_id=0
+        )
+        assert hook.condition(engine, own_turn) is True, (
+            f"{skill_id}：自己的回合开始才清"
+        )
 
 
 def test_dawu_prevents_non_thunder_damage_but_lets_thunder_through():
