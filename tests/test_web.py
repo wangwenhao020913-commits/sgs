@@ -9975,7 +9975,8 @@ def test_the_lord_skill_grant_is_listed_but_greyed_without_a_qualifying_card() -
 # ---------------------------------------------------------------------------
 
 HERO_CARD_SKILL = "hero.jie_guanyu.wusheng"
-HERO_CARD_OPTION = "max_hp_and_draw"
+# 选项 2 的真实选项 id（= src/sgs/skills/start.py:TIANCHENG_MAX_HP）
+HERO_CARD_OPTION = "tiancheng:max_hp"
 HERO_CARD_OPTION_TEXT = "增加 1 点体力上限，回复 1 点体力，摸 2 张牌"
 
 

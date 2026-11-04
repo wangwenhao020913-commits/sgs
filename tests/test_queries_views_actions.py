@@ -870,7 +870,8 @@ def test_the_drawn_true_names_are_recorded_immediately_and_are_never_drawn_again
 # ---------------------------------------------------------------------------
 
 WUSHENG = "hero.jie_guanyu.wusheng"
-OPTION_TWO = "max_hp_and_draw"
+# 选项 2 的真实选项 id（= src/sgs/skills/start.py:TIANCHENG_MAX_HP）
+OPTION_TWO = "tiancheng:max_hp"
 OPTION_TWO_TEXT = "增加 1 点体力上限，回复 1 点体力，摸 2 张牌"
 
 

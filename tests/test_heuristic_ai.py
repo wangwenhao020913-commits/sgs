@@ -5376,7 +5376,8 @@ def test_the_forced_and_locked_jie_skills_never_ask_for_an_activation() -> None:
 # ---------------------------------------------------------------------------
 
 HERO_CARD_SKILL = "hero.jie_guanyu.wusheng"
-HERO_CARD_OPTION = "max_hp_and_draw"
+# 选项 2 的真实选项 id（= src/sgs/skills/start.py:TIANCHENG_MAX_HP）
+HERO_CARD_OPTION = "tiancheng:max_hp"
 HERO_CARD_OPTION_TEXT = "增加 1 点体力上限，回复 1 点体力，摸 2 张牌"
 
 

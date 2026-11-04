@@ -322,10 +322,12 @@ class _MoveAfterPlayer:
 def maxlife_engine(seed: int = 7):
     """场景 9（wuming 票 04）：``Engine.raise_hp_max`` 推一个 ``MAXLIFE`` 帧并跑完。
 
-    L11 的"加体力上限"今天**没有真实技能载体**（票 01 的【天成】是第一个），故这条记录流
-    不是任何基准录像，而是直接调**唯一写入口**的构造局面：座位 0 = 3 上限 / 2 体力
-    （已受伤），加 1 点 ⇒ 上限 4、体力不动。它就是 :data:`~sgs.timing.DISPATCH_WHITELIST`
-    里 ``MAXLIFE_INCREASE_BEFORE`` / ``MAXLIFE_INCREASE_AFTER`` 两个节点的**实测来源**。
+    L11 的"加体力上限"的**首个真实载体 = 票 01 的【天成】**（`src/sgs/skills/start.py`）；这里
+    仍用直接调**唯一写入口**的构造局面，因为它给出**最小帧 + 两条时机记录**的定长记录流：
+    一次上限变化就是一条 ``MAXLIFE`` 帧、``MAXLIFE_INCREASE_BEFORE`` / ``_AFTER`` 各一条，
+    正好当 :data:`~sgs.timing.DISPATCH_WHITELIST` 那两个节点的**实测来源**（【天成】的记录流
+    还混着展示 / 询问 / 回复，不是这个节点的最小证据）。座位 0 = 3 上限 / 2 体力（已受伤），
+    加 1 点 ⇒ 上限 4、体力不动。
 
     先跑 L0「游戏开始时」派发再调写入口：``Engine.from_state`` 的 ``_started`` 是假，
     不先 `_step` 一次的话帧会压在任何开局记录之前（记录次序仍是合法的，但场景意图是

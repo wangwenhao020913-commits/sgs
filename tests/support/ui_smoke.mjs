@@ -10873,18 +10873,26 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
  * 技能行带原文描述 / 置灰行 `.dis` 且点不动 / 选项 2 的具体 X / 没有「放弃」/
  * 没牌的那一次仍画副标题与选项 2。
  *
- * **不是**完整流程：真实的 3 次展示要等票 01 把【天成】接上 `ask_option`（今天没有
- * 调用者），故这里喂与服务端投影同形的合成 `pending`，走真脚本的渲染入口
- * （`renderTable` + `renderPending`）。真浏览器验收见票面「复现配方」。
+ * **同源**（Standards §6）：下面的合成载荷**逐字抄** `src/sgs/skills/start.py` 的写入面——
+ * `context.requirement` = `TIANCHENG_REQUIREMENT`（牌面原文，以 `(锁)：` 起头）、
+ * `HERO_OPTION_ID` = `TIANCHENG_MAX_HP`（`"tiancheng:max_hp"`）、选项 2 的文本 = `_OPTION_TWO_TEXT`
+ * 现算到 X=2。票 01 已把【天成】接上 `ask_option`，真流程的 3 次展示由 `tests/test_hero_wuming.py`
+ * 钉；这里只钉**界面读法**（喂合成 `pending`，走真脚本的渲染入口 `renderTable` + `renderPending`）。
+ * 真浏览器验收见票面「复现配方」。
  */
 {
   const HERO_SKILL_ID = "hero.jie_guanyu.wusheng";
-  const HERO_OPTION_ID = "tiancheng:max_hp";
+  const HERO_OPTION_ID = "tiancheng:max_hp";   // = start.py:TIANCHENG_MAX_HP（选项 2 的真实 id）
   const HERO_SKILL_DESC = "你可以将一张红色牌当【杀】使用或打出；你使用方块【杀】无距离限制。"
     + "本仓实现：①与标准版【武圣】逐字相同（手牌或装备区的红牌）；"
     + "②「无距离限制」落在目标池的查询期修正上——方块（含单源转化出的方块）【杀】的"
     + "目标池不受「距离 ≤ 攻击范围」限制，失去或失效【武圣】后立刻回到基线。";
+  // = start.py:_OPTION_TWO_TEXT.format(x=2)（选项 2 的动态文本，X 由引擎现算）
   const HERO_OPTION_TEXT = "增加 1 点体力上限，回复 1 点体力，摸 2 张牌";
+  // = start.py:TIANCHENG_REQUIREMENT 逐字（`context.requirement`；以 `(锁)：` 起头）
+  const HERO_REQUIREMENT = "(锁)：游戏开始时，依次展示3张真名不在场上的随机武将牌，且每次展示你须选择："
+    + "1.获得该武将牌上的1个技能；2.增加一点体力上限，回复一点体力，摸X张牌"
+    + "（X为你选择选项2的次数）";
 
   /** 与 `tools/sgs_web/projection.pending_payload` 的键 / 值同形（`hero_id=null` =
    *  这一次没有武将牌：武将块三要素全 null、`option_details` 只剩效果行）。 */
@@ -10918,7 +10926,7 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       candidate_index: {}, virtual_index: {}, option_seats: {},
       context: {
         actor: 0, name: "天成", targets: [0], label: "0号位界关羽的【天成】",
-        requirement: "依次展示三张武将牌，每次须选择一项", skill_hints: [],
+        requirement: HERO_REQUIREMENT, skill_hints: [],
       },
       preactivations: {}, preactivation: [],
     };
@@ -11074,6 +11082,89 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   check("U1-08i 没有 context 时标题退回 `build_skills` 里同一 skill_id 的技能名（前端不抄技能名）",
     $("t-dialog-title").textContent === "天成",
     `title="${$("t-dialog-title").textContent}"`);
+
+  // ---- ⑩ 回放生命周期（Standards §7）：批里从第 1/3 张收敛到第 2/3 张 ----
+  // 一次「点掉第 1 张 + 服务器给出第 2 张」的响应 = **一批记录 + 新 pending**；弹窗的寿命
+  // 必须挂在这批回放上，而不是等下一次刷新：起播让位（旧问已答完，回放期演的是它的后果），
+  // 批尾收尾时回到**同一个窗、同一个键**（`chain:天成:0`），正文换成下一张武将牌。
+  // 判据分三处：① 批中途不残留第 1 张的正文；② 批尾收敛到第 2/3 张、键不变；③ 收敛后的
+  // 渲染与「把同一份载荷直接 commit」逐项相同（回放这条路径没有第二套读法）。
+  {
+    const partText = (parent, name) => (parent
+      ? (Array.from(parent.children).find((node) => hasClassText(node, name)) || {}).textContent || ""
+      : "");
+    const heroCardSnapshot = () => {
+      const block = heroChildren("hero-card-block")[0] || null;
+      const head = block
+        ? Array.from(block.children).find((node) => hasClassText(node, "hero-card-head")) || null
+        : null;
+      const hpBar = block
+        ? Array.from(block.children).find((node) => hasClassText(node, "hp-bar")) || null
+        : null;
+      return {
+        title: $("t-dialog-title").textContent,
+        sub: (heroChildren("hero-card-sub")[0] || {}).textContent || "",
+        kingdom: partText(head, "kingdom"),
+        name: partText(head, "hero-name"),
+        hp: partText(hpBar, "hp-num"),
+        rows: heroRows().map((node) => [
+          node.getAttribute("data-choice"),
+          node.classList.contains("dis"),
+          node.textContent,
+        ]),
+        bodyText: $("t-dialog-body").text(),
+      };
+    };
+    const revealAt = (index, heroId, name) =>
+      heroCardPending({ heroId, name, index, total: 3 });
+
+    render(heroView(revealAt(1, "jie_guanyu", "界关羽")));
+    const keyBefore = ui.state.dialog.key;
+    const firstSub = (heroChildren("hero-card-sub")[0] || {}).textContent;
+    const firstOpen = $("t-dialog").hidden === false;
+
+    // 下一批：这次询问的应答 + 第二张的询问；`pending` 已经换成第 2/3 张（另一张武将牌）。
+    const nextReveal = revealAt(2, "zhangfei", "张飞");
+    ui.applyViewRaw({
+      ...heroView(nextReveal),
+      session_id: "u1-08j-hero-playback",
+      cursor: 21, log_seq: 0, finished: false,
+      records: [
+        { kind: "action", seq: 9951, accepted: true, reason: null,
+          action: { kind: "SelectOption", choice: HERO_OPTION_ID, answers_seq: 9950 } },
+        { kind: "query", seq: 9952, query: { actor: 0, kind: "SELECT_OPTION" } },
+      ],
+    });
+    const batchSize = ui.state.playback ? ui.state.playback.records.length : 0;
+    // 起播即让位：旧问的第一张正文不再留在屏上（换成"要么收起、要么已经是新内容"）。
+    const subAtStart = (heroChildren("hero-card-sub")[0] || {}).textContent || "";
+    const noStaleAtStart = !($("t-dialog").hidden === false) || subAtStart !== firstSub;
+    for (let index = 0; index < batchSize; index += 1) ui.stepPlayback(true);
+    const stillPlaying = ui.state.playback !== null;
+    ui.stepPlayback(true);   // 批尾那一步 = 这一批的收尾（commit）
+    const keyAfter = ui.state.dialog.key;
+    const afterBatch = heroCardSnapshot();
+    // 对照：同一份载荷走「直接 commit」（render = renderTable + renderPending）。
+    render(heroView(nextReveal));
+    const commitRender = heroCardSnapshot();
+
+    check("U1-08j 批里收敛：第 1/3 张 → 第 2/3 张（同一窗同一键），且与直接 commit 的渲染逐项相同",
+      firstOpen
+        && keyBefore === "chain:天成:0"
+        && firstSub === "第 1/3 张"
+        && batchSize === 2
+        && noStaleAtStart
+        && stillPlaying
+        && keyAfter === keyBefore
+        && ui.state.dialog.open === true
+        && $("t-dialog").hidden === false
+        && afterBatch.sub === "第 2/3 张"
+        && afterBatch.name === "张飞"
+        && JSON.stringify(afterBatch) === JSON.stringify(commitRender),
+      `key=${keyBefore}→${keyAfter} sub="${firstSub}"→"${afterBatch.sub}"`
+        + ` batch=${batchSize} startSub="${subAtStart}" stillPlaying=${stillPlaying}`
+        + ` after=${JSON.stringify(afterBatch)} commit=${JSON.stringify(commitRender)}`);
+  }
 
   ui.state.view = null;
   ui.state.sessionId = null;

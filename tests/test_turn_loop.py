@@ -11,6 +11,7 @@ from sgs.data import RuleConfig, load_content_pack
 from sgs.engine import Engine, record_json
 from sgs.state import (
     ActivateSkill,
+    FrameKind,
     MoveReason,
     Phase,
     QueryKind,
@@ -700,6 +701,51 @@ def test_a_suspended_game_start_hook_resumes_without_re_asking_and_finishes_its_
     assert set(observed) == {(0, None, 0)}, (
         "L0 帧的记录/帧都不挂在第一个座位的回合上（source=None、记录 actor=None），"
         f"『关于我』自校走 hook_owner；实得 {observed}"
+    )
+
+
+def test_a_constructed_engine_with_a_pre_pushed_frame_still_starts_the_game_first():
+    """构造局面（``from_state`` + ``push_frame``）仍**先**派发 ``GAME_START``（A2 的不变式）。
+
+    "``_started`` 假 ∧ 结算栈非空"有两种来源，次序必须分开（见 :meth:`Engine._step` 的注释）：
+
+    - L0 钩子压过子帧 / 挂起在询问上 ⇒ **先让栈出空**，再重入 ``_start``（上一个用例）；
+    - **构造局面**：``Engine.from_state(...)`` 之后、第一次 ``_step`` 之前就 ``push_frame(...)``
+      （``tests/test_hero_damage_after.py`` 这类时点单测的标准造法）⇒ L0 一次都没派发过，
+      仍走原次序先 ``_start``。否则 ``GAME_START`` 被推迟到预压帧清空之后、甚至永不发出。
+    """
+    state = _small_position(deck=tuple(range(10)), hp_a=3)
+    engine = Engine.from_state(state, seed=1)
+    frame = engine.push_frame(
+        FrameKind.RECOVER,
+        {
+            "source": 1,
+            "targets": (0,),
+            "card": None,
+            "use_timing": None,
+            "amount": 1,
+        },
+        timing=Timing.RECOVER_VALUE,
+    )
+
+    # 第一次 _step：只派发 L0（GAME_START），预压帧原地不动。
+    engine._step()
+    start = _first_timing(engine, Timing.GAME_START)
+    assert start is not None, "构造局面 + 预压帧：第一次 _step 仍要发 GAME_START"
+    assert engine._started is True, "派发完成才置真（后续步骤据此进回合环 / 出栈）"
+    assert engine.stack.top is frame, (
+        "预压帧要等 L0 派发完才轮得到：栈非空不能把 _start 挡在后面"
+    )
+    assert _first_timing(engine, Timing.RECOVER_VALUE) is None, (
+        "L0 那一步不跑预压帧（先 _start、再栈，与票 01 之前同一粒度）"
+    )
+
+    # 之后照常按结算栈推进：帧自己的时机记录全部落在 GAME_START 之后。
+    engine._step()
+    value = _first_timing(engine, Timing.RECOVER_VALUE)
+    assert value is not None and value.seq > start.seq, (
+        "预压帧的时机记录必须落在 GAME_START 之后；实得 "
+        f"GAME_START {start.seq} / RECOVER_VALUE {value.seq if value is not None else None}"
     )
 
 

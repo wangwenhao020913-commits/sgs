@@ -265,8 +265,9 @@ M3 的增量只有 :attr:`Timing.MOVE_AFTER` 一个（票 07 / ADR-010 的不对
 当前局面有注册在该时机上的实例时派发（惰性守卫）——无武将模式因此零派发、M2 基准一行不变。
 
 wuming 票 04 的增量是 L11 的**加体力上限**二时机（``MAXLIFE_INCREASE_BEFORE/AFTER``）：
-由 ``FrameKind.MAXLIFE`` 事件帧的步骤表派发（唯一入口 ``Engine.raise_hp_max``，今天还没有
-技能调用它）。**减**侧两个（``MAXLIFE_DECREASE_*``）继续留枚举位：既有
+由 ``FrameKind.MAXLIFE`` 事件帧的步骤表派发（唯一入口 ``Engine.raise_hp_max``，首个调用者 =
+票 01 的【天成】，``src/sgs/skills/start.py``）。**减**侧两个
+（``MAXLIFE_DECREASE_*``）继续留枚举位：既有
 ``Engine.reduce_hp_max``（界徐庶【潜心】/ 界吕蒙【勤学】）不迁进帧，迁会改既有
 ``hp_max_change.frame_id`` 并多两条时机记录（E1）。
 """

@@ -658,6 +658,15 @@ class Engine:
         self._conversion_answer: Action | None = None
         """最近一次**转化技确认**解析出的普通使用 / 打出动作（W4-fix-2）。"""
         self._started = False
+        self._l0_in_progress = False
+        """L0 派发（:meth:`_start`）**是否已经开始过**。
+
+        与 ``_started`` 的区别只在挂起 / 压过子帧的窗口里可见：L0 钩子提问挂起（或压了子帧
+        后返回 ``"stay"``）时 ``_started`` 仍假、本标志已真——:meth:`_step` 据此区分"L0 派发
+        进行中，栈要先出空"与"构造局面（``from_state`` + ``push_frame``）里 L0 还没派发过、
+        必须先跑 ``_start``"。第一次派发完成后 ``_started`` 是更持久的事实，本标志不必复位。
+        """
+
         self._frame_seq = 0
         self._check_seq: int | None = None
         self._deaths_pending = 0
@@ -4685,16 +4694,20 @@ class Engine:
             # 否则结算栈会继续走、再发一条无关询问把它覆盖，那条应答随后被前一个问句
             # 错配（M6 票 12 的混合局暴露；回归 = test_hero_card_zone 的同名用例）。
             return
-        if self.stack:
-            # **结算栈优先于一切重入**（wuming 票 01）：L0 的钩子（【天成】）也会压子帧
+        if self.stack and (self._started or self._l0_in_progress):
+            # **结算栈优先于 L0 派发的重入**（wuming 票 01）：L0 的钩子（【天成】）也会压子帧
             # （``MAXLIFE`` / ``RECOVER``），而"钩子 ``"stay"`` = 让引擎先把这一帧跑完"
-            # 这条契约要求**帧先出栈、派发再重入**。旧顺序（``_start`` 在前）会让子帧还挂在
-            # 栈上时就把 L0 派发从头重入一遍：钩子看不到帧已经跑完，要么重做、要么死循环
+            # 这条契约要求**帧先出栈、派发再重入**。``_start`` 在前会让子帧还挂在栈上时就把
+            # L0 派发从头重入一遍：钩子看不到帧已经跑完，要么重做、要么死循环
             # （``"stay"`` 一路传上去，栈永远轮不到）。
             #
-            # 序不变的部分：开局那一刻栈是空的 ⇒ 仍然先走 ``_start``；``_started`` 只可能在
-            # L0 派发期间为假，而"假 + 栈非空"要求有钩子压过子帧——票 03 落 L0 派发点时
-            # 一个这样的钩子都不存在，故既有对局走到这里与旧实现逐字节相同。
+            # "``_started`` 假 ∧ 栈非空"有两种来源，次序必须分开：
+            #   ① L0 派发**已开始**（``_l0_in_progress``：钩子压了子帧，或挂起在询问上）⇒
+            #      就是上面那条契约：先让栈出空，下一次 ``_step`` 才重入 ``_start``；
+            #   ② **构造局面**（``Engine.from_state(...)`` 之后、第一次 ``_step`` 之前就
+            #      ``push_frame(...)``，见 ``tests/test_hero_damage_after.py`` 这类时点单测）：
+            #      L0 一次都没派发过 ⇒ 仍按原次序先 ``_start``（预压帧留到下一次 ``_step``），
+            #      否则 ``GAME_START`` 被推迟到预压帧清空之后、甚至永不发出。
             popped = self.stack.step(self.steps, self)
             if popped is not None:
                 self._after_pop(popped)
@@ -4741,6 +4754,7 @@ class Engine:
         ``rule_config.first_seat``），挂起后重入写回的都是同一个值，故续跑不会漂移
         （`CODING_STANDARDS.md` §3 的幂等：重复执行 = 同一个事实）。
         """
+        self._l0_in_progress = True
         self.state.turn_seat = self._first_seat()
         # 轮次从 1 起、本轮起点 = 先手座位（M6 票 11）：自然指针再次轮到它时轮次 +1。
         self.state.round = 1

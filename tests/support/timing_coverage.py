@@ -24,9 +24,11 @@
   ``JUDGE_*`` 挂基准 14（闪电判定）、``DEATH_REVEAL_IDENTITY_BEFORE`` 挂基准 23
   （两次阵亡亮明）、``PLAY_DECLARE`` / ``PLAY_ON_PLAY`` 挂基准 31（打出链）。
 - wuming 票 04：L11 的**加体力上限**二时机（``MAXLIFE_INCREASE_BEFORE/AFTER``）解封，
-  落到 ``position:maxlife``。今天**没有真实技能载体**，故来源是直接调唯一写入口
-  ``Engine.raise_hp_max`` 的构造局面（`tests/support/positions.py:maxlife_engine`）；
-  减侧两个 ``MAXLIFE_DECREASE_*`` **不解封**，仍留枚举位。
+  落到 ``position:maxlife``。首个真实载体 = 票 01 的【天成】（`src/sgs/skills/start.py`）；
+  这里仍用直接调唯一写入口 ``Engine.raise_hp_max`` 的构造局面（
+  `tests/support/positions.py:maxlife_engine`），因为它给出最小帧 + 两条时机记录的定长流
+  （【天成】的流还混着展示 / 询问 / 回复）；减侧两个 ``MAXLIFE_DECREASE_*`` **不解封**，
+  仍留枚举位。
 
 **不进清单的 27 个节点与理由**（票 12 §5"实战不可达者写明理由"）：
 
