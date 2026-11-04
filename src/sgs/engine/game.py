@@ -5076,6 +5076,22 @@ class Engine:
         store[key] = None
         return None
 
+    def phase_body_frame(self) -> Frame | None:
+        """**阶段体 / 帧外时机**里那条不压栈的帧（没有则 ``None``）。
+
+        ``_dispatch_phase_body`` 把帧存在 ``_turn_data`` 里（不进结算栈），故
+        :meth:`phase_body_skill` 能回答"是哪条技能"、却没人回答"那条帧在哪"——而
+        ``SkillDef.deck_arrange`` / 钩子条件的**声明回调**要读帧私有事实（谁在放牌、本阶段
+        弃了哪些牌）。投影算排列规格时必须拿到它：huo-shenzhugeliang 票 02 的【七星】在
+        ``GAME_START`` 上问两行交换，此时结算栈是空的 ⇒ 旧写法把 ``frame=None`` 传给
+        声明回调、规格算不出来（HTTP 载荷里 ``arrange: null``，界面 fail-closed）。
+        只读：不建帧、不改状态。
+        """
+        for value in self._turn_data.values():
+            if isinstance(value, Frame):
+                return value
+        return None
+
     def phase_body_skill(self) -> str | None:
         """**阶段体**里正在跑的技能 id（不压栈的那条帧），没有则 ``None``。
 

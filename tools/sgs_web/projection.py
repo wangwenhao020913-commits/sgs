@@ -1898,6 +1898,13 @@ def _arrange_spec(
         return None
     frames = getattr(getattr(engine, "stack", None), "frames", ()) or ()
     frame = frames[-1] if frames else None
+    if frame is None:
+        # 帧外时机（`GAME_START` / `PHASE_DRAW_END` / `PHASE_FINISH` …）：帧住在
+        # `_turn_data`、不在结算栈上。声明回调（张数 / 切分 / 牌面）读帧私有事实
+        # （谁在放牌），故这里要把它取回来——否则规格恒为 None、界面 fail-closed。
+        provider = getattr(engine, "phase_body_frame", None)
+        if callable(provider):
+            frame = provider()
     data = frame.data if frame is not None else {}
     skill_id = _skill_of_query(engine, query, data)
     definition = _definition_of(engine.state, skill_id) if skill_id is not None else None

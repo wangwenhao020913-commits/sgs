@@ -2423,6 +2423,43 @@ def test_the_arrange_spec_reports_the_skill_definition_split_and_fails_closed(mo
     )
 
 
+def test_the_qixing_swap_payload_carries_the_two_rows_and_the_structural_answer() -> None:
+    """神诸葛亮【七星】的开局两行交换（huo-shenzhugeliang 票 02）：
+
+    - 建局（点将神诸葛亮）后第一问就是 ``ARRANGE``：**不问"是否发动"**（扣置是强制段）；
+    - 载荷里 ``arrange`` 必须给全：``count = 星 + 手牌``、``split.top = 星数``、
+      行标签「星」/「手牌」、``enumerate = False``（答案由界面构造）、``reorder = False``
+      （只上下交换）；
+    - 牌面只有这次询问的 ``revealed`` 一份（11 张 = 7 星 + 4 起始手牌）。
+    """
+    session = Session(
+        seed=7,
+        ai="random",
+        timeout_seconds=None,
+        player_count=4,
+        human_seat=0,
+        my_hero="shen_zhugeliang",
+    )
+    payload = pending_payload(session)
+    assert payload is not None and payload["kind"] == "ARRANGE"
+    spec = payload["arrange"]
+    assert spec is not None, (
+        "帧外时机的排列规格要经 `phase_body_frame()` 取回帧才算得出来（否则恒为 null）"
+    )
+    revealed = payload["revealed"]
+    assert len(revealed) == 11, "7 张星 + 4 张起始手牌"
+    assert spec["count"] == len(revealed) == 11
+    assert spec["split"] == {"top": 7, "bottom": 4}
+    assert spec["rows"] == {"top": "星", "bottom": "手牌"}
+    assert spec["enumerate"] is False and spec["reorder"] is False
+    stars = session.engine.state.hero_zone(
+        0, "0:hero.shen_zhugeliang.qixing"
+    )
+    assert len(stars) == 7, "扣置发生在弹窗之前"
+    assert payload["legal_actions"][0]["kind"] == "ArrangeCards"
+    assert payload["legal_actions"][0]["split"] == 7, "唯一候选 = 恒等兜底（= 不交换）"
+
+
 def test_the_arrange_spec_evaluates_a_callable_count_and_fails_closed(monkeypatch) -> None:
     """W6-07（评审 SPEC-a）：**可调用**张数也要与实际牌数比对，对不上就 ``None``。
 
@@ -2456,8 +2493,13 @@ def test_the_arrange_spec_evaluates_a_callable_count_and_fails_closed(monkeypatc
     assert pending_payload(session)["arrange"] == {"count": 4, "split": FREE_SPLIT}
     assert seen, "可调用张数必须被求值（否则比对整段失效）"
     assert seen[-1][0] is session.engine.state, "求值喂的是引擎状态"
-    assert seen[-1][1] is None, (
-        "阶段体的排列询问不压栈 ⇒ 当前帧就是 None（声明自己决定用不用）"
+    assert seen[-1][1] is session.engine.phase_body_frame(), (
+        "帧外时机的帧住在 `_turn_data`（不压栈）：投影要用 `phase_body_frame()` 把它取回来，"
+        "否则声明回调读不到帧私有事实（huo-shenzhugeliang 票 02 的【七星】GAME_START 两行"
+        "交换因此曾下发 `arrange: null`）"
+    )
+    assert seen[-1][1] is not None and seen[-1][1].data.get("source") is not None, (
+        "取回来的必须是**这一问的**阶段体帧（带 `source`）"
     )
     # 有帧时按**栈顶**原样转发（纯函数直测；上面那条真实会话恰好是空栈）。
     sentinel = object()
