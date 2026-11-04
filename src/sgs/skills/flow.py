@@ -67,6 +67,7 @@ __all__ = [
     "Arrange",
     "AskIdentity",
     "DeckTopArrange",
+    "TwoRowArrange",
     "FixedSplit",
     "FlowAnswers",
     "FlowEffect",
@@ -219,6 +220,17 @@ class PickCards:
         tuple[int, ...]
         | Callable[[GameState, Any, int, FlowAnswers], tuple[int, ...]]
     ) = ()
+    hero_zone: str | Callable[[GameState, Any, int, FlowAnswers], str] | None = None
+    """**武将牌上的牌**的区键（huo-shenzhugeliang 票 02 的加法；缺省 ``None`` = 不选它）。
+
+    ``Zone.HERO`` 是唯一需要"技能实例"这第二维的区域（``GameState.zone`` 缺它直接
+    fail-closed，见 ``src/sgs/state/models.py``：「星」与【谦逊】是两个互不相干的区）。
+    ``PickCards.zones`` 只带 ``Zone`` 枚举维，故用本字段补那一维：非 ``None`` 时这一步的
+    唯一区域 = ``ZoneRef(Zone.HERO, face, <本字段>)``（``face`` = 铺面的那个座位），
+    ``zones`` 只作为"这是个区域步"的声明（传 ``(Zone.HERO,)``）。
+
+    可调用档收 ``(state, frame, owner, answers)``：区键与应答者 / 前序答案有关时用它。
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,6 +407,51 @@ class DeckTopArrange:
 
 
 @dataclass(frozen=True, slots=True)
+class TwoRowArrange:
+    """**两行交换**的排列规格（huo-shenzhugeliang 票 02；首个载体 = 神诸葛亮【七星】）。
+
+    与 :class:`DeckTopArrange` 的差别只有三处：
+
+    - 牌**不是**从牌堆顶看来的：``cards`` 自己回答这一面摆哪些牌（七星 = 武将牌上的
+      「星」＋手牌，两者对宿主都是可见事实）；
+    - 两行是**两个具名行**（牌面之外的事实），切分点由 ``top`` 现算 —— 七星取"交换前的
+      星数"，于是**上排张数恒定** ⇒ 上下交换必然等量（"替换等量的星"由规格保证，不靠
+      技能代码再校验一遍）；
+    - ``enumerate_candidates=False``：候选**不枚举**（答案空间是 `C(总张数, 星数)`，最坏
+      19,448 条），只给一条恒等兜底；界面自己构造答案，服务端只做结构校验
+      （:meth:`Engine.ask_arrange` 的 ``ArrangeCards`` 合法性检查）。
+      ``reorder=False``：界面上**只能上下交换、行内不可调序**（用户 2026-11-04 Q4：
+      手牌顺序与星顺序都没有影响）。
+    """
+
+    count: ArrangeCount
+    top: ArrangeCount
+    cards: Callable[[GameState, Any], tuple[CardRef, ...]]
+    top_label: str
+    bottom_label: str
+    enumerate_candidates: bool = False
+    reorder: bool = False
+
+    def count_of(self, state: GameState, frame: Any) -> int:
+        """本次面内张数（可调用档在这里求值）。"""
+        value = self.count
+        return int(value(state, frame) if callable(value) else value)
+
+    def top_of(self, state: GameState, frame: Any) -> int:
+        """上排（星）张数 —— 也是本次 ``ArrangeCards.split``。"""
+        value = self.top
+        return int(value(state, frame) if callable(value) else value)
+
+    def cards_of(self, state: GameState, frame: Any) -> tuple[CardRef, ...]:
+        """这一面要摆的牌（**顺序即两行的初始顺序**：先上排、后下排）。"""
+        return tuple(self.cards(state, frame))
+
+    def split_point(self, count: int) -> int | None:
+        """``DeckTopArrange`` 的同一接口：两行规格恒定切成 ``top`` 张牌。"""
+        return None
+
+
+@dataclass(frozen=True, slots=True)
 class Arrange:
     """排列步骤（W6-02）：看牌堆顶 ``spec.count`` 张，问一次 ``ARRANGE``，答案原样进 ``answers``。
 
@@ -421,7 +478,7 @@ class Arrange:
     """
 
     key: str
-    spec: DeckTopArrange
+    spec: DeckTopArrange | TwoRowArrange
     actor: ActorRef = None
 
 
@@ -565,9 +622,75 @@ def _flow_option_id(frame: Any, key: str, index: int, *, multi: bool) -> str:
     return f"{short}:{key}:{index}" if multi else f"{short}:{key}"
 
 
-def _zone_pool_size(state: GameState, seat: int, zones: tuple[Zone, ...]) -> int:
+def _zone_cards(state: GameState, ref: Any) -> list[int]:
+    """坐标 → 区里的牌；**武将牌上的区还没建**时按空区读（不是编程错误）。
+
+    `GameState.zone` 对"区不存在"是 fail-closed 的（目的地必须先由放置入口建区）。但
+    「星」这类区可能**还没建**：构造局面直接给了武将（`GAME_START` 的扣置没跑过），
+    或技能已失去（规则 §15.2：失去技能不影响区，但区本身可以不存在）。取牌面时把
+    "没有这个区"读成空区，才能让"没星可移"走到既有的**取消**路径（不发空询问）。
+    """
+    if ref.zone is Zone.HERO:
+        instance = getattr(ref, "skill_instance", None)
+        if instance is None:
+            return []
+        seat = getattr(ref, "seat", None)
+        if seat is None:
+            return []
+        return list(state.hero_zone(seat, instance))
+    return list(state.zone(ref))
+
+
+def zone_refs(seat: int, zones: tuple[Zone | Any, ...]) -> tuple[Any, ...]:
+    """把步骤的区域声明**坐标化**（huo-shenzhugeliang 票 02）。
+
+    ``zones`` 里的元素可以是 ``Zone`` 枚举（缺省坐标 = ``(zone, seat)``），也可以已经是
+    ``ZoneRef``（带 ``skill_instance`` 的武将牌上的牌区、或**另一个座位**的区）。两种都
+    收，是因为 ``PickCards.zones`` 的既有声明是枚举元组（145 条技能一字不改），而"武将牌
+    上的牌"必须多带一维。座位为 ``None`` 的 ``ZoneRef`` 按 ``seat`` 补齐。
+    """
+    out: list[Any] = []
+    for zone in zones:
+        if isinstance(zone, ZoneRef):
+            out.append(zone if zone.seat is not None else ZoneRef(zone.zone, seat, zone.skill_instance))
+        else:
+            out.append(ZoneRef(zone, seat))
+    return tuple(out)
+
+
+def _step_zones(
+    step: PickCards,
+    state: GameState,
+    face: int,
+    frame: Any = None,
+    owner: int | None = None,
+    answers: FlowAnswers | None = None,
+) -> tuple[Any, ...]:
+    """``PickCards`` 这一步此刻的区域坐标（``hero_zone`` 在这里补上实例键）。"""
+    raw = step.hero_zone
+    if raw is None:
+        return zone_refs(face, step.zones)
+    key = raw(state, frame, face if owner is None else owner, answers or {}) if callable(raw) else str(raw)
+    return (ZoneRef(Zone.HERO, face, key),)
+
+
+def _zone_pool_size(state: GameState, seat: int, zones: tuple[Zone | Any, ...]) -> int:
     """``zones`` 此刻对 ``seat`` 铺出的槽位数（``PickCards.hi=None`` 的解析真源）。"""
-    return sum(len(state.zone(ZoneRef(zone, seat))) for zone in zones)
+    return sum(len(_zone_cards(state, ref)) for ref in zone_refs(seat, zones))
+
+
+def _hi_of(
+    step: PickCards,
+    state: GameState,
+    frame: Any,
+    owner: int,
+    answers: FlowAnswers,
+) -> int | None:
+    """这一步的上限：定值 / 可调用档 / ``None``（= 全部可选，由池现算）。"""
+    hi = step.hi
+    if callable(hi):
+        return int(hi(state, frame, owner, answers))
+    return hi
 
 
 def zone_pool_size(state: GameState, seat: int, zones: tuple[Zone, ...]) -> int:
@@ -601,8 +724,8 @@ def _filtered_zone_pool_size(
     """
     return sum(
         1
-        for zone in zones
-        for card_id in state.zone(ZoneRef(zone, seat))
+        for ref in zone_refs(seat, zones)
+        for card_id in _zone_cards(state, ref)
         if _kept_by_filters(state.card(card_id), card_id, card_types, slot_kinds, exclude_cards)
     )
 
@@ -749,13 +872,12 @@ def _flow_step_cards(
     if face == ():
         return "cancel", ()
     excluded = _excluded_card_ids(step, host.state, frame, owner, answers)
-    hi = (
-        step.hi
-        if step.hi is not None
-        else _filtered_zone_pool_size(
-            host.state, face, step.zones, step.card_types, step.slot_kinds, excluded
+    zones = _step_zones(step, host.state, face, frame, owner, answers)
+    hi = _hi_of(step, host.state, frame, owner, answers)
+    if hi is None:
+        hi = _filtered_zone_pool_size(
+            host.state, face, zones, step.card_types, step.slot_kinds, excluded
         )
-    )
     if (step.card_types or step.slot_kinds or excluded) and hi < step.lo:
         # 与空池同形：一张能挑的都没有（或不够 ``lo``）⇒ 不发没有答案的询问；
         # 同时也挡住 ``(lo, hi) = (1, 0)`` 这种会让 `_select_cards` 的 range 为空的形状。
@@ -768,7 +890,12 @@ def _flow_step_cards(
         timing=timing,
         spec=SelectionSpec(zones=step.zones, total=(step.lo, hi), optional=step.optional),
         build_face=lambda: _filter_face(
-            *host.selection_face(face, step.zones, reveal_hand=step.reveal_hand),
+            # 没有 ``hero_zone`` 时把**原始声明**交给铺面口（145 条既有技能与测试里的
+            # 铺面夹具都按 ``Zone`` 枚举实现）；只有武将牌上的牌才需要坐标那一维。
+            *host.selection_face(
+                face, zones if step.hero_zone is not None else step.zones,
+                reveal_hand=step.reveal_hand,
+            ),
             step.card_types,
             step.slot_kinds,
             excluded,
@@ -1056,12 +1183,34 @@ def _flow_step_arrange(
     """
     actor = _flow_actor(step, host.state, frame, owner, answers)
     cache = frame.data.setdefault(ARRANGE_CARDS_KEY, {})
+    spec = step.spec
+    if isinstance(spec, TwoRowArrange):
+        # 两行交换（huo-shenzhugeliang 票 02）：牌由规格自己回答，不碰牌堆。
+        if ask_owner not in cache:
+            cache[ask_owner] = spec.cards_of(host.state, frame)
+        cards: tuple[CardRef, ...] = cache[ask_owner]
+        if not cards:
+            return "cancel", None
+        top = spec.top_of(host.state, frame)
+        if spec.count_of(host.state, frame) != len(cards) or not 0 <= top <= len(cards):
+            raise ValueError("TwoRowArrange 的张数 / 上排张数与实际牌面不符（声明写错了）")
+        action = host.ask_arrange(
+            frame,
+            actor,
+            timing,
+            cards=cards,
+            split=top,
+            enumerate_candidates=spec.enumerate_candidates,
+        )
+        if host.suspended(action):
+            return "stay", None
+        return "ok", action
     if ask_owner not in cache:
-        count = step.spec.count
+        count = spec.count
         if callable(count):
             count = count(host.state, frame)
         cache[ask_owner] = host.peek_deck(frame, int(count))
-    cards: tuple[CardRef, ...] = cache[ask_owner]
+    cards = cache[ask_owner]
     if not cards:
         return "cancel", None
     action = host.ask_arrange(
@@ -1069,7 +1218,7 @@ def _flow_step_arrange(
         actor,
         timing,
         cards=cards,
-        split=step.spec.split_point(len(cards)),
+        split=spec.split_point(len(cards)),
     )
     if host.suspended(action):
         return "stay", None
@@ -1181,8 +1330,8 @@ def _card_options(
         step, state, frame, face if owner is None else owner, answers or {}
     )
     out: list[int] = []
-    for zone in step.zones:
-        for card_id in state.zone(ZoneRef(zone, face)):
+    for ref in _step_zones(step, state, face, frame, owner, answers):
+        for card_id in _zone_cards(state, ref):
             if _kept_by_filters(
                 state.card(card_id), card_id, step.card_types, step.slot_kinds, excluded
             ):
@@ -1209,7 +1358,12 @@ def card_pool_size(
         step, state, frame, seat if owner is None else owner, answers or {}
     )
     return _filtered_zone_pool_size(
-        state, seat, step.zones, step.card_types, step.slot_kinds, excluded
+        state,
+        seat,
+        _step_zones(step, state, seat, frame, owner, answers),
+        step.card_types,
+        step.slot_kinds,
+        excluded,
     )
 
 

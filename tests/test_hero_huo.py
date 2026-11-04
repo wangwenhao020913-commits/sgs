@@ -24,8 +24,10 @@ from sgs.data import Identity, Kingdom, RuleConfig, load_content_pack, load_hero
 from sgs.effects import distance, hand_limit
 from sgs.engine import Engine, IllegalActionError
 from sgs.skills import CATALOG, resolve_conversion_confirmation
+from sgs.skills.shen_zhugeliang import star_zone_key
 from sgs.state import (
     ActivateSkill,
+    ArrangeCards,
     EndPhase,
     Pass,
     Phase,
@@ -39,7 +41,15 @@ from sgs.state import (
 from sgs.state import FrameKind
 from sgs.timing import Timing
 
-from support import SeatSpec, build_state, cards_of_type, deck_excluding, run_queries
+from support import (
+    PassPlayer,
+    SeatSpec,
+    build_state,
+    cards_of_type,
+    deck_excluding,
+    ran_timing,
+    run_queries,
+)
 
 PACK = load_content_pack(deck_profile="standard_108")
 """标准 108 档：本文件只用它的武器牌与牌堆序（数据文件是唯一真源）。"""
@@ -2169,3 +2179,337 @@ def test_yeyan_fire_damage_propagates_through_iron_chain() -> None:
     assert [engine.state.player(seat).hp for seat in (1, 2)] == [3, 3], "传导 1 点火焰伤害"
     assert engine.state.player(1).chained is False, "受到属性伤害后重置横置"
     assert engine.state.player(2).chained is False, "受到属性伤害后重置横置"
+
+
+# ---------------------------------------------------------------------------
+# 神诸葛亮（神话再临·火包 / OL 现行文本）：七星 / 狂风 / 大雾
+#
+# 用户 2026-11-04 的模型（`.scratch/huo-shenzhugeliang/issues/04-c1-forced-hooks.md` §1）：
+# 两枚标记**没有自身效果**（`effect=None` / `description=None`），效果由技能自己监听、
+# 技能失效即不生效；七星的两行交换**只上下交换、不调序**（答案 = 定长集合）。
+# ---------------------------------------------------------------------------
+
+SHEN = "shen_zhugeliang"
+QIXING_SKILL = "hero.shen_zhugeliang.qixing"
+KUANGFENG_SKILL = "hero.shen_zhugeliang.kuangfeng"
+DAWU_SKILL = "hero.shen_zhugeliang.dawu"
+
+
+def _shen_engine(*, seed: int = 7, seats: int = 2) -> Engine:
+    """真开局（含起始手牌）之后、第一次 ``_step`` 之前：神诸葛亮坐在 0 号位。"""
+    return Engine.new_game(
+        seed=seed,
+        rule_config=RuleConfig(player_count=seats),
+        pack=PACK,
+        pinned_hero=SHEN,
+        pinned_seat=0,
+        hero_pool=(),
+    )
+
+
+def _star_ids(engine_or_state) -> tuple[int, ...]:
+    state = getattr(engine_or_state, "state", engine_or_state)
+    return tuple(state.hero_zone(0, star_zone_key(0)))
+
+
+def _queries_of(engine: Engine, skill_id: str) -> list:
+    return [
+        record
+        for record in engine.records
+        if record.kind == "query"
+        and str(getattr(record.query, "skill_id", None) or "") == skill_id
+    ]
+
+
+class _ShenDriver:
+    """神诸葛亮的脚本玩家：排列按 ``order`` 答（``None`` = 恒等 = 不换），其余取最小合法应答。
+
+    星牌点选取 ``legal_actions[0]``（一张的组合），座次选项按 ``seat`` 挑 ``seat:N``。
+    """
+
+    def __init__(self, *, order: tuple[int, ...] | None = None, seat: int = 1) -> None:
+        self.order = order
+        self._target_seat = seat
+        self.queries: list = []
+
+    def respond(self, query):
+        self.queries.append(query)
+        if query.kind == "PLAY_PHASE":
+            return next(a for a in query.legal_actions if isinstance(a, EndPhase))
+        if query.kind == "ARRANGE":
+            legal = next(a for a in query.legal_actions if isinstance(a, ArrangeCards))
+            if self.order is None:
+                return legal
+            return ArrangeCards(
+                answers_seq=legal.answers_seq, order=self.order, split=legal.split
+            )
+        if query.kind == "SKILL_ACTIVATION":
+            for action in query.legal_actions:
+                if isinstance(action, ActivateSkill):
+                    return action
+        if query.kind == "SELECT_OPTION":
+            wanted = f"seat:-1"
+            for action in query.legal_actions:
+                if isinstance(action, SelectOption) and action.choice == wanted:
+                    return action
+        for action in query.legal_actions:
+            if isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _qixing_player(*, order=None) -> _ShenDriver:
+    return _ShenDriver(order=order)
+
+
+# --- 七星 ①：开局扣置七张 + 一次两行弹窗 -----------------------------------
+
+
+def test_qixing_places_seven_stars_at_game_start():
+    """L0.3 扣置七张；**不问"是否发动"**（强制段），接着一条 ``ARRANGE``（两行交换）。"""
+    engine = _shen_engine(seed=7, seats=2)
+    players = [_qixing_player(), PassPlayer()]
+    run_queries(engine, players, lambda e: ran_timing(e, Timing.TURN_BEFORE_START))
+
+    assert len(_star_ids(engine)) == 7, "牌堆顶七张扣置为「星」"
+    kinds = [record.query.kind for record in engine.records if record.kind == "query"]
+    assert kinds == ["ARRANGE"], "扣置不问『是否发动』；替换是两行弹窗的一次询问"
+    arrange = next(r for r in engine.records if r.kind == "query").query
+    assert len(arrange.revealed) == 11, "面 = 7 星 + 4 张起始手牌"
+
+
+def test_qixing_swaps_hand_cards_for_the_same_number_of_stars():
+    """上下交换：第 1 张手牌上星区、第 1 张星回手牌（等量由切分点保证）。"""
+    engine = _shen_engine(seed=7, seats=2)
+    player = _qixing_player()
+    run_queries(engine, player, lambda e: e.pending is not None and e.pending.kind == "ARRANGE")
+    arrange = engine.pending
+    legal = next(a for a in arrange.legal_actions if isinstance(a, ArrangeCards))
+    stars_before = _star_ids(engine)
+    hand_before = tuple(engine.state.player(0).hand)
+    assert legal.split == 7
+    face = arrange.revealed
+    up = face[7].card_id  # 第 1 张手牌
+    down = face[0].card_id  # 第 1 张星
+    order = (7, 1, 2, 3, 4, 5, 6, 0, 8, 9, 10)
+    engine.submit(
+        ArrangeCards(answers_seq=legal.answers_seq, order=order, split=legal.split)
+    )
+    run_queries(engine, [player, PassPlayer()], lambda e: ran_timing(e, Timing.TURN_BEFORE_START))
+
+    stars_after = _star_ids(engine)
+    hand_after = tuple(engine.state.player(0).hand)
+    assert up in stars_after and up not in hand_after
+    assert down in hand_after and down not in stars_after
+    assert len(stars_after) == len(stars_before) == 7
+    del hand_before
+
+
+def test_qixing_identity_submission_means_no_swap():
+    """原样提交 = 「放弃」（「可以」的出口）：两行一张都不动。"""
+    engine = _shen_engine(seed=7, seats=2)
+    run_queries(
+        engine,
+        [_qixing_player(), PassPlayer()],
+        lambda e: e.pending is not None and e.pending.kind == "ARRANGE",
+    )
+    stars_before = _star_ids(engine)
+    hand_before = tuple(engine.state.player(0).hand)
+    arrange = engine.pending
+    legal = next(a for a in arrange.legal_actions if isinstance(a, ArrangeCards))
+    engine.submit(legal)
+    run_queries(
+        engine, [_qixing_player(), PassPlayer()], lambda e: ran_timing(e, Timing.TURN_BEFORE_START)
+    )
+    assert _star_ids(engine) == stars_before
+    assert tuple(engine.state.player(0).hand) == hand_before
+
+
+def test_qixing_stars_are_their_own_zone_and_not_hand_cards():
+    """「星」是（座位, 七星实例）的独立区：不算手牌，且与【谦逊】的区互不相干。"""
+    engine = _shen_engine(seed=7, seats=2)
+    run_queries(
+        engine,
+        [_qixing_player(), PassPlayer()],
+        lambda e: e.state.turn_seat is not None and len(_star_ids(engine)) == 7,
+    )
+    state = engine.state
+    stars = _star_ids(engine)
+    assert not set(stars) & set(state.player(0).hand)
+    assert state.player(0).hero_cards[star_zone_key(0)].skill_id == QIXING_SKILL
+    assert len(state.player(0).hero_cards) == 1, "只有七星自己的区"
+
+
+def test_qixing_stars_are_host_only():
+    """牌面只给宿主：本人视角看得到牌面，别人只拿张数。"""
+    engine = _shen_engine(seed=7, seats=2)
+    run_queries(
+        engine,
+        [_qixing_player(), PassPlayer()],
+        lambda e: e.state.turn_seat is not None and len(_star_ids(engine)) == 7,
+    )
+    from sgs.state import project
+
+    mine = project(engine.state, 0)
+    other = project(engine.state, 1)
+    assert len(mine.hero_zone_cards) == 7
+    assert other.hero_zone_cards == ()
+    assert other.players[0].hero_zone_count == 7
+
+
+def test_qixing_asks_again_at_the_end_of_the_draw_phase():
+    """② 摸牌阶段结束时：先问"是否发动"（可选段），再是同一条两行弹窗。"""
+    engine = _shen_engine(seed=7, seats=2)
+    player = _qixing_player()
+    run_queries(
+        engine,
+        [player, PassPlayer()],
+        lambda e: sum(
+            1
+            for record in e.records
+            if record.kind == "query" and record.query.kind == "ARRANGE"
+        )
+        >= 2,
+    )
+    kinds = [record.query.kind for record in engine.records if record.kind == "query"]
+    assert kinds.count("ARRANGE") >= 2, "开局一次替换 + 摸牌阶段结束又一次"
+    assert "SKILL_ACTIVATION" in kinds, "② 是可选段（牌面写「可以」）"
+
+
+# --- 狂风：标记无自身效果，+X 由技能监听 --------------------------------
+
+
+def _kuangfeng_state(*, nature_marks: int = 1):
+    """座位 0 = 神诸葛亮（有 2 张星），座位 1 = 承受方；牌堆用标准 108。"""
+    from sgs.state import HeroCardZone
+
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hero=SHEN, hp=3), SeatSpec(hp=4), SeatSpec(hp=4)],
+        turn_seat=0,
+    )
+    state.player(0).hero_cards[star_zone_key(0)] = HeroCardZone(
+        skill_id=QIXING_SKILL,
+        owner=0,
+        cards=list(cards_of_type(PACK, "peach")[:2]),
+    )
+    return state
+
+
+def test_kuangfeng_boosts_fire_damage_by_one():
+    """监听是**技能**的：目标身上一枚「狂风」⇒ 火焰伤害 +1。"""
+    from sgs.effects import damage_amount
+    from sgs.effects.behaviors import DamageNature
+    from sgs.state import Marker
+
+    state = _kuangfeng_state()
+    state.player(1).markers = (
+        Marker(name="狂风", source_seat=0, source_skill_id=KUANGFENG_SKILL, count=1),
+    )
+    assert damage_amount(
+        state, source=0, target=1, card=None, base=1, chain=False,
+        nature=DamageNature.FIRE,
+    ) == 2
+
+
+def test_kuangfeng_does_not_boost_thunder_or_plain_damage():
+    """限火焰（用户 2026-11-04 Q1）：雷电 / 普通伤害不加。"""
+    from sgs.effects import damage_amount
+    from sgs.effects.behaviors import DamageNature
+    from sgs.state import Marker
+
+    state = _kuangfeng_state()
+    state.player(1).markers = (
+        Marker(name="狂风", source_seat=0, source_skill_id=KUANGFENG_SKILL, count=2),
+    )
+    for nature in (DamageNature.THUNDER, DamageNature.NORMAL, None):
+        assert damage_amount(
+            state, source=0, target=1, card=None, base=1, chain=False, nature=nature
+        ) == 1
+
+
+def test_kuangfeng_stacks_one_point_per_marker():
+    from sgs.effects import damage_amount
+    from sgs.effects.behaviors import DamageNature
+    from sgs.state import Marker
+
+    state = _kuangfeng_state()
+    state.player(1).markers = (
+        Marker(name="狂风", source_seat=0, source_skill_id=KUANGFENG_SKILL, count=2),
+    )
+    assert damage_amount(
+        state, source=0, target=1, card=None, base=1, chain=False,
+        nature=DamageNature.FIRE,
+    ) == 3
+
+
+def test_kuangfeng_effect_disappears_when_the_skill_is_suppressed():
+    """失效 ⇒ 不进修饰器链 ⇒ 不增伤（用户 2026-11-04 Q2 的同读口径）。"""
+    from sgs.effects import damage_amount
+    from sgs.effects.behaviors import DamageNature
+    from sgs.state import Marker
+
+    state = _kuangfeng_state()
+    state.player(1).markers = (
+        Marker(name="狂风", source_seat=0, source_skill_id=KUANGFENG_SKILL, count=1),
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.suppress_skills(0, "hero.jie_guanyu.yijue")
+    assert damage_amount(
+        engine.state, source=0, target=1, card=None, base=1, chain=False,
+        nature=DamageNature.FIRE,
+    ) == 1
+
+
+def test_kuangfeng_marks_expire_at_the_start_of_the_owners_next_turn():
+    """寿命：来源的下个回合开始时清（强制钩子的手写回调，直接驱动一次）。"""
+    from types import SimpleNamespace
+
+    from sgs.state import Marker
+
+    state = _kuangfeng_state()
+    state.player(1).markers = (
+        Marker(name="狂风", source_seat=0, source_skill_id=KUANGFENG_SKILL, count=1),
+    )
+    engine = Engine.from_state(state, seed=1)
+    hook = next(
+        hook for hook in CATALOG[KUANGFENG_SKILL].hooks if hook.timing is Timing.TURN_START
+    )
+    frame = SimpleNamespace(data={"skill_owner": 0}, frame_id=0)
+    hook.handler(engine, frame)
+    assert engine.state.player(1).markers == ()
+
+
+def test_dawu_prevents_non_thunder_damage_but_lets_thunder_through():
+    """防止由技能监听：非雷电 ⇒ 写 ``PREVENTED``；雷电 ⇒ 不写。"""
+    from types import SimpleNamespace
+
+    from sgs.effects.behaviors import DamageNature
+    from sgs.resolution import Tag, has_tag
+    from sgs.state import Marker
+
+    state = _kuangfeng_state()
+    state.player(1).markers = (
+        Marker(name="大雾", source_seat=0, source_skill_id=DAWU_SKILL, count=1),
+    )
+    engine = Engine.from_state(state, seed=1)
+    hook = next(
+        hook for hook in CATALOG[DAWU_SKILL].hooks if hook.timing is Timing.DAMAGE_DEAL
+    )
+    fire = SimpleNamespace(data={"target": 1, "nature": DamageNature.FIRE}, frame_id=0)
+    hook.handler(engine, fire)
+    assert has_tag(fire, Tag.PREVENTED)
+    thunder = SimpleNamespace(data={"target": 1, "nature": DamageNature.THUNDER}, frame_id=0)
+    hook.handler(engine, thunder)
+    assert not has_tag(thunder, Tag.PREVENTED)
+    plain = SimpleNamespace(data={"target": 2, "nature": None}, frame_id=0)
+    hook.handler(engine, plain)
+    assert not has_tag(plain, Tag.PREVENTED), "没有标记的人不受保护"
+
+
+def test_dawu_marks_carry_no_self_effect():
+    """用户 2026-11-04：两枚标记 `effect` / `description` 都是 ``None``（效果归技能）。"""
+    from sgs.state import Marker
+
+    marker = Marker(name="大雾", source_seat=0, source_skill_id=DAWU_SKILL, count=1)
+    assert marker.effect is None and marker.description is None

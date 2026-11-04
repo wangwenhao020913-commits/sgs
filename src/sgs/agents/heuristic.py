@@ -2955,6 +2955,16 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 "kind": (True, "选路键：``_SCORERS[QueryKind(query.kind)]`` 与候选生成的派发"),
             }
         ),
+        "ArrangeQuery": MappingProxyType(
+            {
+                "structural": (
+                    False,
+                    "不枚举档 / 结构校验档的标志（huo-shenzhugeliang 票 02）：候选只有恒等兜底，"
+                    "AI 因此只会'不换'。不读它的理由 = 这是**界面**的提交形态，不是打分输入；"
+                    "真要按两行内容挑牌，得另有一条从 slots 派生的策略（本批不做）",
+                ),
+            }
+        ),
         "DistributeQuery": MappingProxyType(
             {
                 "skill_id": (True, "这一步属于哪条技能（文案归属；打分本身不按技能名分支）"),
@@ -3557,6 +3567,21 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         _constant(2.0),
         "弃牌阶段结束时无条件问一次：全体回复 / 全体失去 1 点，收益恒非负（选哪项由 "
         "_OPTION_VALUES 定），故给正分",
+    ),
+    # 神诸葛亮（huo-shenzhugeliang 票 01）：三条都是"星是稀缺资源"的正分项。
+    # 七星的两行交换面候选只有恒等兜底（不枚举档）⇒ AI 实际只选"不换"，给 0 分是
+    # 诚实的（不做没被要求的挑牌策略）；狂风 / 大雾 各按收益给正分。
+    "hero.shen_zhugeliang.qixing": (
+        _constant(0.0),
+        "两行交换：候选只有恒等兜底（界面才构造答案）⇒ AI 只'不换'，中性分",
+    ),
+    "hero.shen_zhugeliang.kuangfeng": (
+        _constant(1.2),
+        "结束阶段花一张星：己方受到火焰伤害时 +1（通常是配合火杀 / 火攻），略高于放弃",
+    ),
+    "hero.shen_zhugeliang.dawu": (
+        _constant(2.0),
+        "结束阶段花星护核：非雷电伤害全免一轮，防御收益通常高于狂风",
     ),
     "hero.shen_zhouyu_mobile.yeyan": (
         _constant(4.5),

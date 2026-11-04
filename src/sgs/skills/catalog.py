@@ -216,6 +216,19 @@ class Hook:
     condition: HookCondition | None = None
     per_point: bool = False
     flow: SkillFlow | None = None
+    forced: bool = False
+    """这一条钩子**不问**"是否发动"、满足条件即执行（huo-shenzhugeliang 票 04）。
+
+    它服务的是「一条非锁定技里既有可选段、又有强制段」：牌面写「结束阶段，你可以…」的那一段
+    要问，而同一句话里的「当该角色受到火焰伤害时，此伤害 +1」「…防止之」（监听）与
+    「标记来源的下个回合开始时消失」（清扫）是**强制**的（牌面没有「可以」）。今天"问不问"
+    只有整条技能的 :attr:`SkillDef.locked` 一个来源，而 `locked` 同时被"所有非锁定技失效"
+    的谓词读取（:func:`_skill_is_suppressed`）——拿它当"不问"会让这条非锁定技免疫失效。
+
+    所以这一位只回答"这一条钩子要不要先问"，**不影响** :func:`_skill_is_suppressed`：
+    非锁定技的强制段照样会随实例失效而停摆（神诸葛亮的【狂风】【大雾】正是要这个语义）。
+    缺省 ``False`` ⇒ 既有 145 条技能逐字节不变。
+    """
 
     def __post_init__(self) -> None:
         if (self.handler is None) == (self.flow is None):
@@ -1419,20 +1432,30 @@ def _dispatch(
         if awakening and _instance_awakened(host.state, instance):
             # 觉醒技是**一次性转变**：已觉醒 ⇒ 不再派发（与限定技的"已用"同一位置）。
             continue
-        forced = instance.definition.locked or awakening
+        # 「要不要问」有两层（票 04）：整条技能的 `locked` / 觉醒技，与**逐条钩子**的
+        # `Hook.forced`。后者服务"一条非锁定技里既有可选段、又有强制段"——强制段不问，
+        # 但它仍然随实例失效而停摆（`forced` 不进 :func:`_skill_is_suppressed`）。
+        instance_forced = instance.definition.locked or awakening
         # ``available`` 是"这一刻这条技能成不成立"（阶段 / 回合归属、代价够不够），
         # 与"要不要问"是两条正交的轴：锁定技 / 觉醒技不问，但**同样要过这一道门**。
         # 缺了它，界【英姿】这类锁定阶段技会在别人的摸牌阶段替自己摸牌。
         plan = activation_plan(host.state, frame, instance)
         if not plan.available:
             continue
-        if not forced:
+        # 逐条钩子的"问不问"（票 04）：`forced` 段不问、答完也别处的段照旧；**放弃**只跳过
+        # 未声明 forced 的段，强制段照跑（牌面没有「可以」的那一句）。
+        forced_flags = [
+            instance_forced or bool(getattr(item, "forced", False)) for item in items
+        ]
+        accepted = True
+        if not all(forced_flags):
             active = host.ask_skill_activation(frame, instance, timing, plan, key=key)
             if host.suspended(active):
                 return "stay"
-            if not isinstance(active, ActivateSkill):
+            accepted = isinstance(active, ActivateSkill)
+        for item, forced in zip(items, forced_flags):
+            if not (forced or accepted):
                 continue
-        for item in items:
             # 这两个键是"**此刻**正在跑哪条技能 / 它的持有者"：`_MOVE_DONE` 的重入身份
             # （:meth:`Engine.move_in_frame`）、`_move_causer`（"是不是**别人**弃置的"）与
             # 投影的询问归属（`projection._skill_of_query`）都读它们。故跑完这一段必须
@@ -1448,6 +1471,10 @@ def _dispatch(
             _leave_skill_keys(frame, key)
             if control is not None:
                 return control
+        if not accepted:
+            # 放弃：未声明 forced 的段全部跳过；强制段跑过也不算"这条技能发动了"，
+            # 故限定 / 觉醒的"已用 / 已觉醒"位一个字都不落（与改之前的口径一致）。
+            continue
         if limited:
             # "已用"位落**执行完之后**：effect 挂起时（如【替身】压回复帧）重入必须还能
             # 走到这里续跑同一个实例，故不能先落位再判（先落位会让重入把实例自己挡掉）。
@@ -2850,6 +2877,9 @@ from .near_death import (  # noqa: E402  （末尾 import 是刻意的）
 from .start import (  # noqa: E402  （末尾 import 是刻意的）
     start_skill_definitions,
 )
+from .shen_zhugeliang import (  # noqa: E402  （末尾 import 是刻意的）
+    shen_zhugeliang_skill_definitions,
+)
 
 # **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
 # 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
@@ -2901,6 +2931,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *death_after_skill_definitions(),
             *near_death_skill_definitions(),
             *start_skill_definitions(),
+            *shen_zhugeliang_skill_definitions(),
         )
     }
 )

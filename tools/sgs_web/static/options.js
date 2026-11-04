@@ -633,7 +633,11 @@ function renderSlots(pending) {
   // 上限 > 1 时要说清"可以多选"（【遗计】一次交两张，票 15）。
   const cap = selectionCap(pending);
   const pickText = cap === 1 ? "选择一张" : `选择一至 ${cap} 张`;
-  heading.textContent = `选择面：隐藏区域的槽位只有位置（看不到牌面），选中并结算后才揭晓。这一步${pickText}。`;
+  // 武将牌上的牌（huo-shenzhugeliang 票 02）：牌面对宿主**可见**，故不能沿用"隐藏区域 /
+  // 看不到牌面"那句话（那是对拆 / 顺 / 反馈那段说的）。判据只看 dialog kind。
+  heading.textContent = dialogKind === DIALOG_KINDS.heroPick
+    ? `武将牌上的牌（只有你可见）：这一步${pickText}，点选后提交。`
+    : `选择面：隐藏区域的槽位只有位置（看不到牌面），选中并结算后才揭晓。这一步${pickText}。`;
   box.appendChild(heading);
   const row = document.createElement("div");
   row.className = "cards";
@@ -785,7 +789,11 @@ function selectionCap(pending) {
  */
 function toggleSlotPick(pending, index) {
   // 选择面槽位是牌桌选择入口（D8）：只读态里 no-op，与点牌 / 点座共用一条判据。
-  if (!selectionEnabled()) return;
+  // 例外：武将牌上的牌点选（huo-shenzhugeliang 票 02）的**正文就在弹窗里**，此时
+  // `selectionEnabled()` 为假（弹窗开着 = 牌桌不可选）——但那一面必须可点。
+  if (!selectionEnabled() && stepDialogKind(state.view ? state.view.pending : null) !== DIALOG_KINDS.heroPick) {
+    return;
+  }
   const at = state.picks.indexOf(index);
   if (at >= 0) {
     state.picks.splice(at, 1);

@@ -428,6 +428,15 @@ class ArrangeContext:
 
     count: int
     split: int | None = None
+    enumerate_candidates: bool = True
+    """是否**枚举**全部排列 × 切分点（huo-shenzhugeliang 票 02 的加法）。
+
+    ``True`` = 既有行为（观星 ≤ 5 张、恂恂 4 张定切分，候选 ≤ 720 条）；``False`` = 只给
+    一条**恒等兜底**（= 不改变现状），界面自己构造答案、服务端做结构校验——服务的是
+    "面内张数太大、全枚举不可接受"的两行交换（七星：星 ≤ 7 + 手牌可到 10+ ⇒ 最坏 19,448
+    条组合）。与 ``count`` / ``split`` 一样**不进询问记录**（``_build_query`` 对 ``ARRANGE``
+    不序列化本载荷），故既有金录像逐字节不变。
+    """
 
 
 class PlayerPublic(_FrozenModel):
@@ -941,6 +950,13 @@ class ArrangeQuery(_QueryBase):
     """
 
     kind: Literal["ARRANGE"] = "ARRANGE"
+    structural: bool = Field(default=False, exclude=True)
+    """不枚举档：答案**由界面构造**、只做结构校验（huo-shenzhugeliang 票 02）。
+
+    ``True`` 时本询问的 ``legal_actions`` 只有一条恒等兜底（= 什么都不换），界面可以提交
+    **任何**形状合法的 ``ArrangeCards``（引擎在 :meth:`Engine.ask_arrange` 校验 order 是
+    排列、split 与声明一致）。``exclude=True`` ⇒ 不进记录流，既有 47 条金录像逐字节不变。
+    """
 
 
 Query = Annotated[

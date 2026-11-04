@@ -1222,9 +1222,13 @@ def test_the_hero_card_dialog_is_a_new_body_section_of_the_choice_shell() -> Non
     kinds = re.search(r"const DIALOG_KINDS = Object\.freeze\(\{(?P<body>.*?)\}\)", modal, re.S)
     assert kinds is not None, "modal.js 里找不到 DIALOG_KINDS"
     keys = re.findall(r"^\s*(\w+):\s*\"", kinds.group("body"), re.M)
-    assert keys == ["arrange", "choice", "unknown", "reveal", "suit", "distribution"], (
-        "票 08 只加正文段，不新增第七种 dialog kind（展示武将牌复用 choice）："
-        f"{keys}"
+    assert keys == [
+        "arrange", "choice", "unknown", "reveal", "suit", "distribution",
+        # huo-shenzhugeliang 票 02：武将牌上的牌点选（星牌弹窗）——第七条。
+        "heroPick",
+    ], (
+        "票 08 只加正文段（展示武将牌复用 choice）；第七条由 huo-shenzhugeliang 票 02 加"
+        f"（武将牌上的牌点选）：{keys}"
     )
 
     predicate = _js_function(modal, "isShowHeroCardStep")

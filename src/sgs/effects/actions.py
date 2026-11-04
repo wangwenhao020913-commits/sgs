@@ -1187,6 +1187,12 @@ def _arrange(answers_seq: int, ctx: ArrangeContext) -> list[Action]:
     候选（观星与票 10 逐条相同）；整数 = **固定切分**，只给这一个置顶张数。固定值越界
     （``split > count``）是声明 / 实际张数对不上的编程错误 ⇒ fail-closed，不静默截断。
     """
+    if not getattr(ctx, "enumerate_candidates", True):
+        # **不枚举档**（huo-shenzhugeliang 票 02）：只给一条恒等兜底 —— 上排 = 面内前
+        # ``split`` 张（= 交换前的星），即"什么都不换"。界面自己构造答案（结构校验在
+        # :meth:`Engine.ask_arrange`），超时 / AI 的默认因此是**零副作用**的恒等排列。
+        split = 0 if ctx.split is None else int(ctx.split)
+        return [ArrangeCards(order=tuple(range(ctx.count)), split=split, answers_seq=answers_seq)]
     if ctx.split is None:
         splits: tuple[int, ...] = tuple(range(ctx.count + 1))
     else:

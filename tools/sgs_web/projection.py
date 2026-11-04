@@ -1909,6 +1909,23 @@ def _arrange_spec(
     if not known or declared != count:
         # 声明张数不可判定，或与实际发到的牌数不同 ⇒ 规格对不上，不拿它猜。
         return None
+    if hasattr(spec, "top_of"):
+        # **两行交换**（huo-shenzhugeliang 票 02；首个载体 = 神诸葛亮【七星】）：两行是
+        # 具名的（「星」/「手牌」），切分点由声明的 ``top`` 现算，答案由界面构造
+        # （``enumerate=False``）且行内不可调序（``reorder=False``）。
+        try:
+            top = int(spec.top_of(engine.state, frame))
+        except Exception:  # noqa: BLE001 —— 声明回调异常一律折算成"判定不了"
+            return None
+        if not 0 <= top <= count:
+            return None
+        return {
+            "count": count,
+            "split": {"top": top, "bottom": count - top},
+            "rows": {"top": spec.top_label, "bottom": spec.bottom_label},
+            "enumerate": bool(spec.enumerate_candidates),
+            "reorder": bool(spec.reorder),
+        }
     split_spec = getattr(spec, "split", None)
     split: str | dict[str, int]
     if split_spec == FREE_SPLIT:

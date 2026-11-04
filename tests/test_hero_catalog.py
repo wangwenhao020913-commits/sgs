@@ -37,6 +37,7 @@ from sgs.skills import CATALOG, PROVIDERS, flow_for
 from sgs.skills.catalog import MATCH_ACTOR_KEY, MATCH_OWNER_KEY
 from sgs.skills.move_after import MOVE_EVENT_KEY, MoveEvent
 from sgs.state import (
+    HeroCardZone,
     CardRef,
     EndPhase,
     GameState,
@@ -77,6 +78,10 @@ FENG_MOBILE_HEROES = load_heroes("feng_mobile")
 HUO_MOBILE_HEROES = load_heroes("huo_mobile")
 """**神话再临·火包的移动版**那一份（huo-dianwei-mobile 票 01 起）：移动版独立成表，
 版本字段 ``huo-mobile``，显示名加「移动版」后缀（典韦移动版 / 强袭）。"""
+
+HUO_HEROES = load_heroes("huo")
+"""**神话再临·火包的 OL 版**那一份（huo-shenzhugeliang 票 01 起）：独立系列包，版本字段
+``huo``，显示名不加后缀（神诸葛亮 / 七星 / 狂风 / 大雾）。"""
 
 HOMEBREW_HEROES = load_heroes("homebrew")
 """**自制包**那一份（韬·刘备自制版）：独立系列包，版本字段 ``homebrew``，真名「刘备」
@@ -129,6 +134,7 @@ FENG_MOBILE_ENABLED = tuple(
 HUO_MOBILE_ENABLED = tuple(
     hero.id for hero in HUO_MOBILE_HEROES.heroes if hero.enabled
 )
+HUO_ENABLED = tuple(hero.id for hero in HUO_HEROES.heroes if hero.enabled)
 HOMEBREW_ENABLED = tuple(hero.id for hero in HOMEBREW_HEROES.heroes if hero.enabled)
 
 # 规则文档第九章 933–1054 行的逐项事实（手抄的真源）：id → (势力, 性别, 体力上限)。
@@ -197,9 +203,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 145
+    assert len(CATALOG) == 148
     assert len(equipment) == 22
-    assert len(heroes) == 123
+    assert len(heroes) == 126
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -213,6 +219,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
             FENG_HEROES,
             FENG_MOBILE_HEROES,
             HUO_MOBILE_HEROES,
+            HUO_HEROES,
             HOMEBREW_HEROES,
         )
         for hero in table.heroes
@@ -222,7 +229,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 123
+    assert len(expected) == 126
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -233,6 +240,7 @@ def test_every_hero_skill_id_is_fully_qualified():
         | set(FENG_ENABLED)
         | set(FENG_MOBILE_ENABLED)
         | set(HUO_MOBILE_ENABLED)
+        | set(HUO_ENABLED)
         | set(HOMEBREW_ENABLED)
     )
     for definition in CATALOG.values():
@@ -989,6 +997,10 @@ SKILL_FILES: dict[str, str] = {
     "hero.machao.mashu": "test_hero_target_change.py",
     "hero.machao.tieqi": "test_hero_response_window.py",
     "hero.zhugeliang.guanxing": "test_hero_arrange.py",
+    # 火包 OL（神诸葛亮）：三条技能共用一支测试文件
+    "hero.shen_zhugeliang.qixing": "test_hero_huo.py",
+    "hero.shen_zhugeliang.kuangfeng": "test_hero_huo.py",
+    "hero.shen_zhugeliang.dawu": "test_hero_huo.py",
     "hero.zhugeliang.kongcheng": "test_hero_target_pool.py",
     "hero.huangyueying.jizhi": "test_hero_use_after.py",
     "hero.huangyueying.qicai": "test_hero_limits.py",
@@ -1133,6 +1145,7 @@ def test_every_enabled_hero_skill_is_named_by_a_family_test_file():
             FENG_HEROES,
             FENG_MOBILE_HEROES,
             HUO_MOBILE_HEROES,
+            HUO_HEROES,
         )
         for hero in table.heroes
         if hero.enabled
@@ -1250,6 +1263,23 @@ def _qianxun_probe_state() -> GameState:
     )
 
 
+def _shen_zhugeliang_probe_state() -> GameState:
+    """神诸葛亮的正面对照：ME 有手牌，且武将牌上有一个**非空的「星」区**（区按实例键建）。
+
+    【七星】② 的条件要"有星也有手牌"；【狂风】/【大雾】的条件只要"这一步是问我的"。
+    """
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(), SeatSpec(hp=3, hand=(_PROBE_SOURCE_CARD,)), SeatSpec()],
+    )
+    from sgs.skills.catalog import hero_card_zone_key
+
+    star_cards = list(cards_of_type(PACK, "peach")[1:3])
+    key = hero_card_zone_key(ME, "hero.shen_zhugeliang.qixing")
+    state.player(ME).hero_cards[key] = HeroCardZone(skill_id="hero.shen_zhugeliang.qixing", owner=ME, cards=star_cards)
+    return state
+
+
 def _hujia_probe_state() -> GameState:
     """界【护驾】②的正面对照：ME（座位 1）与【闪】的使用者（座位 0）都是**魏**势力。
 
@@ -1342,6 +1372,8 @@ def _probe_state_for(skill_id: str) -> GameState:
         return _liegong_probe_state()
     if skill_id == "hero.jie_huanggai.zhaxiang":
         return _zhaxiang_probe_state()
+    if skill_id.startswith("hero.shen_zhugeliang."):
+        return _shen_zhugeliang_probe_state()
     return _probe_state()
 
 
@@ -1473,6 +1505,11 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
             _HookFrame(source=ME),
         ),
         "hero.jie_xushu.zhuhai": (_HookFrame(source=OTHER),),
+        # 神诸葛亮（huo-shenzhugeliang 票 01）：三条都是"这一步是问我的"（阶段体帧的
+        # source = 当前回合角色），【七星】另有"有星也有手牌"的状态前提。
+        "hero.shen_zhugeliang.qixing": (_HookFrame(source=ME),),
+        "hero.shen_zhugeliang.kuangfeng": (_HookFrame(source=ME),),
+        "hero.shen_zhugeliang.dawu": (_HookFrame(source=ME),),
         # 自制包·韬·刘备自制版【从讨】：这一次成为目标的是座位 0（在 ME 的攻击范围内，
         # 但**不在**座位 2 的攻击范围内 ⇒ 持有者换人后条件必须翻假）。逐目标的"这一次"
         # 由派发环写进 MATCH_ACTOR_KEY，持有者由检查本身改写。
@@ -1760,6 +1797,11 @@ SKILL_SHAPE: dict[str, str] = {
     # 排列技能 2（deck_arrange + Arrange 步；M6 票 15 加固定切分 2 / 2 的【恂恂】）
     "hero.zhugeliang.guanxing": "排列技能",
     "hero.jie_lidian.xunxun": "排列技能",
+    # 火包 OL：七星用两行交换的排列面（deck_arrange + Arrange 步），狂风 / 大雾是带流水线
+    # 的触发技（阶段体时机 + 两条强制钩子）。
+    "hero.shen_zhugeliang.qixing": "排列技能",
+    "hero.shen_zhugeliang.kuangfeng": "触发技能",
+    "hero.shen_zhugeliang.dawu": "触发技能",
     # M6 票 16：界【观星】张数按存活数 3 / 5，且准备 / 结束两个时机各挂一条同名的排列流。
     "hero.jie_zhugeliang.guanxing": "排列技能",
     # M6 票 17：界·吴。界制衡（单步清单）/ 界苦肉（一步成本）/ 界结姻（目标步 + 提交点手写
@@ -1932,9 +1974,9 @@ SHAPE_COUNTS: dict[str, int] = {
     # huo-dianwei-mobile 票 01：火包移动版典韦【强袭】⇒ 主动技能 21 → 22。
     # huo-mobile-batch 票 01：庞德【马术】+【猛进】⇒ 锁定技 31 → 32、触发技能 15 → 16。
     "主动技能": 22,
-    "触发技能": 17,
+    "触发技能": 19,
     "零步技能": 29,
-    "排列技能": 3,
+    "排列技能": 4,
     "多轮技能": 14,
     "锁定技": 34,
     "转化技": 15,
@@ -2048,7 +2090,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """145 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 145
+    assert len(SKILL_SHAPE) == len(CATALOG) == 148
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2177,7 +2219,7 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 73
+    assert len(inside) == 76
     assert len(outside) == 72
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)

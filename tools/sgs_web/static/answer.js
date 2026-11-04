@@ -424,8 +424,13 @@ async function submitAction(restoreSelection = null) {
   const cardEntry = Boolean(state.preactivation && state.preactivation.cardEntry);
   const composite = state.preactivation !== null
     && (action.kind === "ActivateSkill" || (cardEntry && action.kind === "UseCard"));
+  // 排列的**不枚举档**（huo-shenzhugeliang 票 02）：候选只有恒等兜底，答案由界面的
+  // 两行布局拼出来 —— 服务端在收答案时做结构校验（order 是排列、split 与声明一致）。
+  const structuralArrange = action.kind === "ArrangeCards"
+    && Boolean(pending.arrange && pending.arrange.enumerate === false);
   if (
     !composite
+    && !structuralArrange
     && !pending.legal_actions.some((candidate) => JSON.stringify(candidate) === JSON.stringify(action))
   ) {
     // 最后一道自检：造出来的必须**逐字段**是候选里的那一条（否则引擎会拒，且错在界面）。

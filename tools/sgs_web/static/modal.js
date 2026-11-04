@@ -42,6 +42,8 @@ const DIALOG_KINDS = Object.freeze({
   reveal: "reveal",
   suit: "suit",
   distribution: "distribution",
+  // 武将牌上的牌（huo-shenzhugeliang 票 02）：星牌点选（1..k 张，提交后结算）。
+  heroPick: "heroPick",
 });
 
 /** 候选里有没有一条 `Pass`（判断"这一步能不能放弃"的**载荷**判据，不认技能 id）。 */
@@ -115,6 +117,9 @@ function stepDialogKind(pending) {
   // 它们的判据一字不改，新形状只补一条。
   if (isShowHeroCardStep(pending)) return DIALOG_KINDS.choice;
   if (isUnknownZoneStep(pending)) return DIALOG_KINDS.unknown;
+  // 武将牌上的牌（huo-shenzhugeliang 票 02）：选牌面的槽**全部**来自 HERO 区 ⇒ 弹窗。
+  // 判据只看载荷形状（槽的 ``ref.zone``），不认技能名。
+  if (isHeroZonePickStep(pending)) return DIALOG_KINDS.heroPick;
   // 票 01：公开亮牌 + 每种花色至多 k 张（涉猎）——在亮牌判据之前，二者形状不同。
   if (isSuitPickStep(pending)) return DIALOG_KINDS.suit;
   if (isRevealStep(pending)) return DIALOG_KINDS.reveal;
@@ -136,6 +141,16 @@ function isWatchChoiceStep(pending) {
 
 /** 选择型模板的判据（D3）：`SELECT_OPTION` 且（有服务端选项标签 或 选项 ≥4），
  *  但**排除选座位形态**（`option_seats` 非空 = 牌桌上点武将，不是窗内列表）。 */
+/** 武将牌上的牌的点选步（huo-shenzhugeliang 票 02）：`SELECT_CARDS` 且**每一槽**都来自
+ *  `Zone.HERO` 的某个实例区（「星」/【谦逊】各自成区，由 `skill_instance` 区分）。
+ *  这类询问要与牌桌左下角面板区分开：用户的口径是**弹窗**。 */
+function isHeroZonePickStep(pending) {
+  if (!pending || pending.kind !== "SELECT_CARDS") return false;
+  const slots = pending.slots || [];
+  if (!slots.length) return false;
+  return slots.every((slot) => slot.ref && slot.ref.zone === "hero");
+}
+
 function isChoiceStep(pending) {
   if (!pending || pending.kind !== "SELECT_OPTION") return false;
   if (pending.option_seats && Object.keys(pending.option_seats).length) return false;
@@ -338,6 +353,7 @@ function dialogTitleFor(kind, pending) {
     return pa ? `预发动【${pa.name}】` : "预发动";
   }
   if (kind === DIALOG_KINDS.arrange) return "排列";
+  if (kind === DIALOG_KINDS.heroPick) return "选择武将牌上的牌";
   if (kind === DIALOG_KINDS.distribution) return "分配";
   if (kind === DIALOG_KINDS.choice) {
     // 展示武将牌（票 08）：标题 = 技能名（`context.name` 优先 / `view.skills` 兜底）。

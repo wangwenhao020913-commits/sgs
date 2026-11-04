@@ -189,6 +189,13 @@ def _card_move_visible_to(card_move: dict, viewer: int) -> bool:
         return True
     if source["zone"] == "hand" and source.get("seat") == viewer:
         return True
+    # 武将牌上的牌（M6 票 10 / huo-shenzhugeliang 票 01）：**牌面只给宿主**（用户 2026-10
+    # 口径，`tools/sgs_web/visibility.py::hero_zone_ref_visible`）⇒ 宿主本人看得见自己的
+    # 「星」/【谦逊】的牌，别人只拿张数。
+    if source["zone"] == "hero" and source.get("seat") == viewer:
+        return True
+    if target["zone"] == "hero" and target.get("seat") == viewer:
+        return True
     return False
 
 

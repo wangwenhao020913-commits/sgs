@@ -82,6 +82,9 @@ function initialArrange(pending, spec, key) {
     count,
     free,
     fixed,
+    // 两行交换（huo-shenzhugeliang 票 02）：行标签与"能不能行内调序"都来自载荷。
+    rows: spec.rows || null,
+    reorder: spec.reorder !== false,
     top: Array.from({ length: topCount }, (_, at) => at),
     bottom: Array.from({ length: count - topCount }, (_, at) => topCount + at),
     selected: null,
@@ -177,6 +180,10 @@ function arrangeMovePlan(index, row, anchor) {
   const at = anchor === undefined ? null : anchor;
   if (at !== null && target.indexOf(at) < 0) return null;
   if (at === index) return null;                     // 落到自己身上：不动（不再"甩到行末"）
+  if (layout.reorder === false && from === row) {
+    // 两行交换（七星）：**只上下交换、行内不调序**（用户 2026-11-04 Q4）。
+    return null;
+  }
   if (layout.free || from === row) {
     return { kind: "insert", index, row, anchor: at };
   }
@@ -583,11 +590,18 @@ function renderArrange(pending) {
     state.arrange = initialArrange(pending, spec, arrangeKey(pending, spec));
   }
   const layout = state.arrange;
-  const top = arrangeRowNode("top", "牌堆顶", "（左 = 最上）");
+  const rows = layout.rows || {};
+  const topLabel = rows.top || "牌堆顶";
+  const bottomLabel = rows.bottom || "牌堆底";
+  const top = arrangeRowNode("top", topLabel, layout.rows ? "" : "（左 = 最上）");
   const bottom = arrangeRowNode(
     "bottom",
-    "牌堆底",
-    layout.free ? "（左起接在现有牌堆底之下）" : `（固定 ${layout.fixed.top} 顶 / ${layout.fixed.bottom} 底）`,
+    bottomLabel,
+    layout.rows
+      ? `（固定 ${layout.fixed ? layout.fixed.top : layout.top.length} / ${layout.fixed ? layout.fixed.bottom : layout.bottom.length}：只能上下交换）`
+      : layout.free
+        ? "（左起接在现有牌堆底之下）"
+        : `（固定 ${layout.fixed.top} 顶 / ${layout.fixed.bottom} 底）`,
   );
   // 重绘后旧节点全部作废：预览 / 拖动源的 DOM 引用要跟着换（票 01）。
   layout.nodes = { top, bottom };
@@ -607,12 +621,15 @@ function renderArrange(pending) {
   }
   if (hint) {
     // 票 01：固定切分不再说"只能行内排序"——跨行拖动是**互换**，两行张数不变。
-    const how = layout.free
-      ? "拖动卡牌在牌堆顶 / 牌堆底之间切换：落在牌的左 / 右半边 = 放到它前 / 后；行内也是这样排序。"
-        + "也可先点一张牌再点目标位置。"
-      : `上下两行张数固定（${layout.fixed.top} 顶 / ${layout.fixed.bottom} 底）：`
-        + "拖动可交换上下两行的牌（拖到另一行的牌上 = 两张互换），行内拖动排序；"
-        + "也可先点一张牌再点目标位置。";
+    const how = layout.reorder === false
+      ? `只交换「${topLabel}」与「${bottomLabel}」两行之间的牌：拖一张到另一行的牌上 = 两张互换；`
+        + "行内顺序不变（也可先点一张牌再点另一行的牌）。"
+      : layout.free
+        ? "拖动卡牌在牌堆顶 / 牌堆底之间切换：落在牌的左 / 右半边 = 放到它前 / 后；行内也是这样排序。"
+          + "也可先点一张牌再点目标位置。"
+        : `上下两行张数固定（${layout.fixed.top} 顶 / ${layout.fixed.bottom} 底）：`
+          + "拖动可交换上下两行的牌（拖到另一行的牌上 = 两张互换），行内拖动排序；"
+          + "也可先点一张牌再点目标位置。";
     // 票 07：出口说明按**实际候选**说话（文案唯一一份住 :func:`arrangeExitHint`）。
     hint.textContent = `${how} ${arrangeExitHint(pending)}`;
   }

@@ -108,6 +108,7 @@ from sgs.skills import (
 from sgs.state import (
     Action,
     ActivateSkill,
+    ArrangeCards,
     ArrangeContext,
     ArrangeQuery,
     CardRef,
@@ -1420,6 +1421,7 @@ class Engine:
         *,
         cards: tuple[CardRef, ...],
         split: int | None = None,
+        enumerate_candidates: bool = True,
     ) -> Any:
         """发一次 ``ARRANGE`` 询问（票 10 §②）：把 ``cards`` 授予 ``actor`` 并请其排列。
 
@@ -1443,13 +1445,30 @@ class Engine:
                 actor,
                 timing,
                 seq,
-                payload=ArrangeContext(count=len(cards), split=split),
+                payload=ArrangeContext(
+                    count=len(cards), split=split, enumerate_candidates=enumerate_candidates
+                ),
                 revealed=cards,
             ),
             identity=self._ask_identity(QueryKind.ARRANGE, actor, frame),
         )
         if action is SUSPEND:
             return SUSPEND
+        if isinstance(action, ArrangeCards):
+            # **结构校验**（huo-shenzhugeliang 票 02）：不枚举档的答案由界面构造，故这里
+            # 只回答"形状对不对"——``order`` 必须是 ``0..count-1`` 的一个排列，``split``
+            # 必须落在区间内、固定切分时还必须等于声明值。位置 → 实体牌的映射仍留在引擎。
+            order = tuple(int(index) for index in action.order)
+            if sorted(order) != list(range(len(cards))):
+                raise ValueError(
+                    f"ArrangeCards.order 必须是 0..{len(cards) - 1} 的排列，收到 {order!r}"
+                )
+            if not 0 <= int(action.split) <= len(cards):
+                raise ValueError(f"ArrangeCards.split={action.split} 越界（0..{len(cards)}）")
+            if split is not None and int(action.split) != int(split):
+                raise ValueError(
+                    f"ArrangeCards.split={action.split} 与声明切分 {split} 不一致"
+                )
         answers[answer_key] = action
         return action
 
@@ -2080,47 +2099,68 @@ class Engine:
         return None
 
     def selection_face(
-        self, seat: int, zones: tuple[Zone, ...], *, reveal_hand: bool = False
+        self, seat: int, zones: tuple[Zone | ZoneRef, ...], *, reveal_hand: bool = False
     ) -> tuple[tuple[Slot, ...], tuple[int, ...]]:
         """按 ``zones`` 给出的区（固定顺序）铺开 ``seat`` 的选择面。
 
-        他人手牌是**隐藏槽**（只有位置）、装备 / 判定区是可见槽；``reveal_hand=True``
+        他人手牌是**隐藏槽**（只有位置）、装备 / 判定区是同座位三个区的可见槽；``reveal_hand=True``
         用于"挑牌者就是手牌持有者本人"（【贯石斧】成本、【雌雄双股剑】弃牌、
         【青龙偃月刀】挑【杀】），此时自己的手牌是**可见槽**（票 19 §3）。
         隐藏槽的位置用新增的 ``select`` 子流打乱（票 19 §8 / §12），使"选了第几个"
         不携带手牌顺序信息；返回的 ``card_ids`` 是**引擎私有**的位置 → 实体牌映射，
         不进询问记录，故不泄露牌面身份。
+
+        **区域坐标**（huo-shenzhugeliang 票 02）：``zones`` 的元素可以是 ``Zone`` 枚举
+        （坐标 = ``(zone, seat)``），也可以是 ``ZoneRef`` —— 后者服务两类区：**武将牌上的
+        牌**（多一维技能实例键，缺它 `GameState.zone` 直接 fail-closed）与**另一个座位**的区
+        （【反间】把面指向发动者）。武将牌上的牌一律铺**可见槽**：它的牌面对宿主本来就是
+        可见的（`PlayerView.hero_zone_cards` 的同一口径），且「星」与【谦逊】是两个互不相干
+        的区，由坐标里的实例键区分，不靠调用方自觉。
         """
-        player = self.state.player(seat)
         slots: list[Slot] = []
         card_ids: list[int] = []
-        for zone in zones:
+        for item in zones:
+            if isinstance(item, ZoneRef):
+                ref = item if item.seat is not None else ZoneRef(item.zone, seat, item.skill_instance)
+            else:
+                ref = ZoneRef(item, seat)
+            zone = ref.zone
+            holder = ref.seat if ref.seat is not None else seat
+            player = self.state.player(holder)
             if zone is Zone.HAND:
                 if reveal_hand:
                     for card_id in player.hand:
                         slots.append(
-                            Slot(ref=ZoneRef(Zone.HAND, seat), card=self.state.card(card_id))
+                            Slot(ref=ZoneRef(Zone.HAND, holder), card=self.state.card(card_id))
                         )
                         card_ids.append(card_id)
                     continue
                 order = list(range(len(player.hand)))
                 self._select.shuffle(order)
                 for index in order:
-                    slots.append(Slot(ref=ZoneRef(Zone.HAND, seat), card=None))
+                    slots.append(Slot(ref=ZoneRef(Zone.HAND, holder), card=None))
                     card_ids.append(player.hand[index])
             elif zone is Zone.EQUIP:
                 for card_id in player.equip:
                     slots.append(
-                        Slot(ref=ZoneRef(Zone.EQUIP, seat), card=self.state.card(card_id))
+                        Slot(ref=ZoneRef(Zone.EQUIP, holder), card=self.state.card(card_id))
                     )
                     card_ids.append(card_id)
             elif zone is Zone.JUDGE:
                 for card_id in player.judge:
                     slots.append(
-                        Slot(ref=ZoneRef(Zone.JUDGE, seat), card=self.state.card(card_id))
+                        Slot(ref=ZoneRef(Zone.JUDGE, holder), card=self.state.card(card_id))
                     )
                     card_ids.append(card_id)
-            else:  # pragma: no cover - 选择面只对逐座位的三个区有意义
+            elif zone is Zone.HERO:
+                if ref.skill_instance is None:
+                    raise ValueError("武将牌上的牌区必须给 skill_instance（星 ≠ 谦逊）")
+                # 「区还没建」读成空面（构造局面直接给武将时 `GAME_START` 的扣置没跑过；
+                # 失去技能不影响已有的区，但区本身可以不存在）——空面走既有的取消路径。
+                for card_id in self.state.hero_zone(holder, ref.skill_instance):
+                    slots.append(Slot(ref=ref, card=self.state.card(card_id)))
+                    card_ids.append(card_id)
+            else:  # pragma: no cover - 选择面只对逐座位的四个区有意义
                 raise ValueError(f"{zone.value} 不是可选择的逐座位区域")
         return tuple(slots), tuple(card_ids)
 
@@ -4095,6 +4135,16 @@ class Engine:
             self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
             self._answer_to(action)
             return
+        if (
+            action not in pending.legal_actions
+            and getattr(pending, "structural", False)
+            and isinstance(action, ArrangeCards)
+        ):
+            # **不枚举档**（huo-shenzhugeliang 票 02）：候选只有恒等兜底，界面自己构造
+            # 两行交换的答案；形状校验在 `ask_arrange` 收答案时做，这里只放行。
+            self._emit(ActionRecord(seq=self._next_seq(), accepted=True, action=action))
+            self._answer_to(action)
+            return
         if action not in pending.legal_actions:
             confirmation = self._conversion_confirmation(action, pending)
             if confirmation is not _NOT_CONVERSION:
@@ -4479,10 +4529,15 @@ class Engine:
                 seq=seq,
                 actor=actor,
                 timing=timing,
-                prompt="请排列这些牌：给出顺序与前几张置于牌堆顶。",
+                prompt=(
+                    "请排列这些牌：给出顺序与前几张置于牌堆顶。"
+                    if payload.enumerate_candidates
+                    else "请交换两行之间的牌（行内顺序不变）。"
+                ),
                 legal_actions=actions,
                 view=view,
                 revealed=revealed,
+                structural=not payload.enumerate_candidates,
             )
         raise ValueError(f"还没有 {kind.value} 询问的构造器")
 
@@ -5188,8 +5243,17 @@ class Engine:
             self.finish()
         return None
 
-    def _phase_draw_end(self) -> None:
-        self.emit_timing(Timing.PHASE_DRAW_END, actor=self.state.turn_seat)
+    def _phase_draw_end(self) -> Control:
+        """**摸牌阶段结束时**（L7.3）：帧外时机，派发点与其余阶段体同形（huo-shenzhugeliang
+        票 03，用户 2026-11-04 签「可以」）。
+
+        与 :meth:`_phase_discard_end` 逐字同一姿态：只落一条时机记录；**没有**注册在该时机上
+        的实例时连帧都不建（:meth:`_dispatch_phase_body` 的惰性），故记录流与 M2 逐字节相同
+        （`tests/test_m5_supply_shortage.py` 的两条在场断言不变）。被【兵粮寸断】跳过的摸牌
+        阶段**不经过本步**（`_skip_to(_phase_play_start)`）⇒「摸牌阶段结束时」这个时点整段
+        不存在，挂在上面的技能不触发。
+        """
+        return self._dispatch_phase_body(Timing.PHASE_DRAW_END, "phase_draw_end")
 
     def _phase_play_start(self) -> None:
         self.state.phase = Phase.PLAY

@@ -70,6 +70,11 @@
 
 > **第 1 行的锁定技变体**：牌面写「锁定技」时形状不变、但那一问**不发**（`locked=True`，派发环的
 > forced 分支直接跑回调），故效果与"零步"同形、不必造 `SkillFlow`（机械形态落「锁定技」格）。
+>
+> **逐条钩子的「不问」**（huo-shenzhugeliang 票 04）：一条非锁定技里可以既有可选段（「你可以…」）
+> 又有强制段（「当…时，此伤害 +1」/「防止之」/ 标记的到期清扫）。后者在 `Hook` 上声明
+> `forced=True`：派发环**不问**"是否发动"、直接跑，但它**不**改 `locked`（因此仍随实例失效而
+> 停摆——这正是神诸葛亮【狂风】【大雾】要的语义："失效了就不增伤 / 不防止"）。
 > 样板 = 界华雄【耀武】`hero.jie_huaxiong.yaowu`（造伤后自动效果）；风包魏延【狂骨】
 > `hero.weiyan.kuanggu` 是它的"两条钩子"版：一条在 `DAMAGE_TAKE` 定格距离、一条在
 > `DAMAGE_AFTER_DEAL` 逐点回复。
@@ -90,6 +95,7 @@
 | `PHASE_DRAW` | 摸牌阶段（英姿、突袭、裸衣、恂恂） |
 | `PHASE_DISCARD_START` | 弃牌阶段开始（克己） |
 | `PHASE_DISCARD_END` | **弃牌阶段结束时**（神周瑜移动版【琴音】= 首个载体，huo-shenzhouyu-mobile 票 03）：与 `PHASE_FINISH` 同一条惰性派发（`_dispatch_phase_body`）；帧私有 `discard_phase_hand_discards` = 本阶段弃牌步实际弃置的手牌数，钩子条件读它 |
+| `PHASE_DRAW_END` | **摸牌阶段结束时**（神诸葛亮【七星】② = 首个载体，huo-shenzhugeliang 票 03）：`_phase_draw_end` 改走 `_dispatch_phase_body`（惰性：没有注册实例时只落一条时机记录，记录流不变）。被【兵粮寸断】跳过的摸牌阶段**不经过本步** ⇒ 这个时点整段不存在、挂在上面的技能不触发 |
 | `PHASE_FINISH` | 结束阶段（闭月、观星二段、诛害、勤学二段） |
 | `TURN_END` | 回合结束（博图） |
 | `DAMAGE_TAKE` | 受到伤害时（**风包【狂骨】的距离定格**：造伤后的效果要按「扣减体力前」的场况判，而濒死 / 死亡结算夹在两者之间——死者的装备技 / 义从类距离修饰器已不再解析，现算会低估 1。它是扣减体力前**最后一个派发点**） |
@@ -159,7 +165,7 @@
 | `JUDGE` | 判定区（公开，但"牌不为主人拥有"） |
 | `DISCARD` | 弃牌堆 |
 | `PROCESSING` | 处理区（使用中的牌在这里） |
-| `HERO` | 武将牌上（本仓按真区域建模，见账本） |
+| `HERO` | 武将牌上（本仓按真区域建模，见账本）。**坐标必须带 `skill_instance`**（区键 = `owner:skill_id`，「星」与【谦逊】是两个互不相干的区）；`Engine.selection_face` 与 `PickCards.hero_zone` 可把它当**可选面**铺开（huo-shenzhugeliang 票 02） |
 
 ### 3.6 帧型 `FrameKind`
 
@@ -189,7 +195,7 @@
 | `PickSeats` | `seats` | 选角色（`pool` 可依赖前序答案） |
 | `PickOption` | `option` | 闭集选项（`options` 可以是**可调用档**，按前序答案现算；`disabled` = **显示但不可选**的那几项（同形态的可调用档）⇒ 清单的 `StepPool.disabled` 让界面置灰、校验器拒收；`revealed` = 观看授予 ⇒ 选择型弹窗里牌面 + 选项同窗：韬·刘备【义起】的「看弃牌堆顶 x 张再选一种类型」是**一问**） |
 | `PickProvide` | `provide` | 选一张用于"提供"的牌（转化 / 提供者） |
-| `Arrange` | `arrange` | 排列（观星）；含它的流水线不下发预发动清单 |
+| `Arrange` | `arrange` | 排列（观星）；含它的流水线不下发预发动清单。规格可以是 `DeckTopArrange`（牌堆顶 / 底）或 `TwoRowArrange`（**两行交换**：具名行 + 定切分 + 不枚举候选 + 行内不调序；首个载体 = 神诸葛亮【七星】），后者见 §4.1 |
 
 ## 4. UI 触点（每项必须落到一个已存在的测试垫片）
 
@@ -249,6 +255,8 @@ ADR-014 只给了这几张表面：**牌桌（直选 / 清单 / 提示条）+ �
 | 单选项确认（提交 / 放弃） | 牌桌：标题取 `requirement`，**读不到**选项标签 | `pending.js:isSingleOptionalOption` | `hero.sunshangxiang.xiaoji` |
 | 直提态 | 牌桌：唯一候选直接提交，不铺面（提示条只做说明） | `pending.js:directAction` | `hero.jie_zhangliao.tuxi` |
 | 分配弹窗（计数式） | 弹窗：逐座位一行计数（点一次 +1）、「重置」、右端「提交」恒可点 | `modal.js:stepDialogKind`（`distribution`） | `hero.shen_zhouyu_mobile.yeyan`（huo-shenzhouyu-mobile 票 05） |
+| 两行交换（排列面·**不枚举**） | 弹窗：上排「星」/ 下排「手牌」，只上下交换、行内不调序；答案由界面构造、服务端只校验形状 | `modal.js:stepDialogKind`（`arrange`）+ `projection._arrange_spec` 下发 `rows` / `enumerate: false` / `reorder: false` | `hero.shen_zhugeliang.qixing`（huo-shenzhugeliang 票 02；外壳同 `hero.jie_lidian.xunxun`） |
+| 武将牌上的牌点选（弹窗） | 弹窗：一行牌（**牌面对宿主可见**），点选后提交 | `modal.js:stepDialogKind`（`heroPick`，判据 = 槽的 `ref.zone === "hero"`） | `hero.shen_zhugeliang.kuangfeng` / `.dawu`（huo-shenzhugeliang 票 02） |
 | fail-closed | 牌桌：一句明话，不铺任何控件（不发明合法性） | `pending.js:renderUnsupported` | —（并写一句为什么没有面） |
 
 **套不套用要写出来**：第 3 步反查出的相似技能就是模板源。套用 ⇒ 票面写它的 id 与抄哪一行；

@@ -696,6 +696,11 @@ class _Piles:
         :func:`sgs.skills.arrange._apply_arrangement` 的两次 ``place_on_deck``。
         """
         ids = [card.card_id for card in cards]
+        if any(card_id not in self.deck for card_id in ids):
+            # **不是牌堆顶排列**：神诸葛亮【七星】的两行交换授予的是「星」+ 手牌（都不在牌堆里），
+            # 它的两次搬牌已由 `card_move` 记过；这里再"落到牌堆"会把牌凭空加进重建堆
+            # （huo-shenzhugeliang 票 02：fuzz 的守恒不变量先抓到）。
+            return
         top = [ids[index] for index in action.order[: action.split]]
         bottom = [ids[index] for index in action.order[action.split :]]
         for batch, to_top in ((top, True), (bottom, False)):

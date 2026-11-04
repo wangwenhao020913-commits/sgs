@@ -496,9 +496,19 @@ const sessionBodiesSince = (from) =>
 
 await ui.loadHeroCatalog();
 const catalogVersions = ui.heroVersions();
+/** U2 / M6 两条**真会话**用例的固定 5 人阵容（huo-shenzhugeliang 票 01）。
+ *
+ * 它们断言的是"开局的第一问就是五谷的逐目标无懈窗口"——这依赖 **AI 的随机选择**，而 AI
+ * 的选择随阵容变。以前每次换池都要重扫种子（票 12 / feng-xiahouyuan 都重扫过）；这里改成
+ * **钉死阵容**（禁将 = 除这五个标准版之外的全部版本，版本粒度、只作用于随机配将），
+ * 以后加武将不再重排这两条用例的局面。 */
+const SMOKE_ROSTER = ["caocao", "guanyu", "zhangfei", "diaochan", "lvbu"];
+const SMOKE_BANNED = catalogVersions
+  .map((hero) => hero.id)
+  .filter((id) => !SMOKE_ROSTER.includes(id));
 // wuming 票 01：自制包加「无名自制版」（新真名「无名」）⇒ 真名 42 → 43、版本 68 → 69。
-check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版 + 火包移动版 + 自制包，按真名分组）",
-  ui.state.heroCatalog.length === 43 && catalogVersions.length === 69,
+check("⓪1 点将列表拉到了启用并集（标准 + 界版 + 风包 + 风包移动版 + 火包移动版 + 火包 OL + 自制包，按真名分组）",
+  ui.state.heroCatalog.length === 44 && catalogVersions.length === 70,
   `${ui.state.heroCatalog.length} 个真名 / ${catalogVersions.length} 个版本`);
 check("⓪2 列表铺进了「我的武将」下拉",
   $("in-my-hero").children.length === catalogVersions.length,
@@ -956,8 +966,12 @@ if (partial) {
       // 由 `transform_preactivations` 表达，按钮点击不在本段的三态判据里——M6 P0 收口换池后
       // 这里最先撞到【国色】（判据不变，扫描谓词按被测形态收窄，见下面 ㉿4d/4e）。
       const clickable = offered.filter(
-        (s) => s.preactivated || (pending.legal_actions || []).some(
-          (a) => a.kind === "ActivateSkill" && a.skill_id === s.skill_id));
+        (s) => s.preactivated || (
+          (pending.legal_actions || []).some(
+            (a) => a.kind === "ActivateSkill" && a.skill_id === s.skill_id)
+          // 有预发动清单的技能，点按钮进的是**清单入口**（不是选骨架候选）——那不是
+          // ㉿4d/4e 要判的形态（huo-shenzhugeliang 加池后扫描最先撞到的就是这种）。
+          && !(pending.preactivations && (pending.preactivations[s.skill_id] || []).length)));
       if (pending.kind === "PLAY_PHASE" && pending.actor === 0 && clickable.length > 0) {
         skillCase = { seed, steps: step, offered: clickable };
         break;
@@ -10959,10 +10973,12 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
   const heroRows = () => heroChildren("hero-card-row");
   const clickCount = (node) => (node.listeners.click || []).length;
 
-  // ---- ① 外壳：仍是 `choice`（不新增第七种 dialog kind），标题来自技能名 ----
+  // ---- ① 外壳：仍是 `choice`（**不为武将牌另立 kind**），标题来自技能名 ----
+  // 种类总数在 huo-shenzhugeliang 票 02 之后是 7（新增 `heroPick` = 武将牌上的牌点选），
+  // 本条判的仍是"武将牌弹窗**不**占用一个专用 kind"。
   render(heroView(heroCardPending()));
-  check("U1-08a 武将牌弹窗 = 既有选择型外壳（不新增第七种 kind）：标题「天成」、正文在弹窗里",
-    Object.keys(ui.DIALOG_KINDS).length === 6
+  check("U1-08a 武将牌弹窗 = 既有选择型外壳（不另立 kind）：标题「天成」、正文在弹窗里",
+    Object.keys(ui.DIALOG_KINDS).length === 7
       && !("hero" in ui.DIALOG_KINDS)
       && ui.stepDialogKind(ui.state.view.pending) === "choice"
       && $("t-dialog").hidden === false
@@ -11982,14 +11998,14 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
  * 两段：
  *   ① 合成载荷（字段与真 payload 同形）：窗口不关、不占选项行、无懈可提交、下一次取牌
  *      复用同一个链键；
- *   ② **真生产路径**（种子 1303、5 人、random AI、人类座位 0）：开局就是"人类手里有【无懈】、
+ *   ② **真生产路径**（种子 238、5 人、random AI、人类座位 0）：开局就是"人类手里有【无懈】、
  *      五谷已亮牌"的 RESPOND 窗口；逐字段断言 DOM 读的是 `harvest.revealed / taken_by /
  *      targets / current`，再驱动到真实取牌步，断言同一窗口切回正常取牌模式。
  *      （票 12 切每座位 `ai:<seat>` 子流后原种子 198 不再落到这个窗口，按本文件纪律
  *      在 5 人 random AI 里重扫：526 的 revealed=5 / current=3、且人类手里真有【无懈】，
  *      与旧断言同形。**feng-xiahouyuan 票 01 换池（60→61 版本 / 34→35 真名）后 526 的
  *      开局第一问变成 PLAY_PHASE**，按同一条判据（`RESPOND` / `NULLIFY` / `harvest.active` /
- *      revealed=5 / current=3 / 人类持【无懈】）从 1 起重扫，首个命中 = **1303**；
+ *      revealed=5 / current=3 / 人类持【无懈】）从 1 起重扫，首个"首个候选就是【无懈】"的命中 = **238**（huo-shenzhugeliang 加火包 OL 后重扫：1303 不再是命中；5 / 32 的候选序把 Pass 排在前）；
  *      探针 `.scratch/feng-xiahouyuan/rescan_harvest_seed.py`。）
  */
 {
@@ -12215,14 +12231,14 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
       && Array.from($("t-options-home").children).includes($("t-options")),
     `dialogHidden=${$("t-dialog").hidden} revealHidden=${$("t-dialog-reveal").hidden} revealChildren=${$("t-dialog-reveal").children.length} key=${ui.state.dialog.key}`);
 
-  // ---- ④ 真生产路径：种子 1303（5 人）开局 = 人类持有【无懈】的五谷无懈窗口 ----
+  // ---- ④ 真生产路径：种子 238（5 人）开局 = 人类持有【无懈】的五谷无懈窗口 ----
   ui.state.sessionId = null;
   ui.state.view = null;
-  await newSession(1303, { player_count: 5 });
+  await newSession(238, { player_count: 5, banned_heroes: SMOKE_BANNED });
   const realResponse = ui.state.view.pending;
   const realHarvest = realResponse && realResponse.harvest;
   const realKey = ui.state.dialog.key;
-  check("U2-R7 真会话（种子 1303 / 5 人 / random AI）：开局 pending 就是带 harvest 的无懈 RESPOND",
+  check("U2-R7 真会话（种子 238 / 5 人 / random AI）：开局 pending 就是带 harvest 的无懈 RESPOND",
     !!realResponse && realResponse.kind === "RESPOND" && realResponse.cause === "NULLIFY"
       && !!realHarvest && realHarvest.active === true
       && realHarvest.revealed.length === 5 && realHarvest.current === 3,
@@ -18959,12 +18975,13 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
 
   /* ---- B1：五谷亮牌弹窗在源牌结算完时当场收起 -------------------------------- */
   resetAll();
-  // 种子 1303 / 5 人：开局的人类第一问就是【五谷丰登】的逐目标无懈窗口（既有用例同源；
+  // 种子 238 / 5 人：开局的人类第一问就是【五谷丰登】的逐目标无懈窗口（既有用例同源；
   // 票 12 切每座位子流后原种子 198 失效；feng-xiahouyuan 票 01 换池后 526 亦失效，
-  // 按同一固定策略与命中判据从 1 起重扫到 1303（探针
+  // 按同一固定策略与命中判据从 1 起重扫到 238（huo-shenzhugeliang 加池后重扫；探针
   // `.scratch/feng-xiahouyuan/rescan_harvest_seed.py`）。
   const harvestBody = await post("/api/sessions", {
-    player_count: 5, ai: "random", human_seat: 0, timeout_seconds: null, seed: 1303,
+    player_count: 5, ai: "random", human_seat: 0, timeout_seconds: null, seed: 238,
+    banned_heroes: SMOKE_BANNED,
   });
   ui.state.sessionId = harvestBody.session_id;
   ui.state.view = null;
@@ -20059,6 +20076,137 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     pickAnswers.length === 1
       && JSON.stringify(pickAnswers[0].body.action) === JSON.stringify(pickAction),
     `answers=${pickAnswers.length} action=${JSON.stringify(pickAnswers[0] && pickAnswers[0].body.action)}`);
+}
+
+/* ============ huo-shenzhugeliang 票 02：两个新面（合成载荷） ============
+ *
+ * ① **两行交换**（神诸葛亮【七星】）：上排「星」、下排「手牌」，只上下交换、行内不调序；
+ *    候选**不枚举**（`arrange.enumerate === false`）⇒ 界面拼出来的 `ArrangeCards`
+ *    不在 `legal_actions` 里也必须能提交（服务端做结构校验）。
+ * ② **武将牌上的牌点选**（【狂风】/【大雾】的代价步）：`SELECT_CARDS` 且每一槽都来自
+ *    `zone: "hero"` ⇒ 走弹窗（`heroPick`），正文标题不再说"看不到牌面"。
+ */
+{
+  const cards5 = [
+    { ...synthCard(201, "桃"), suit: "heart", rank: 12 },
+    { ...synthCard(202, "杀"), suit: "spade", rank: 7 },
+    { ...synthCard(203, "闪"), suit: "diamond", rank: 2 },
+    { ...synthCard(204, "过河拆桥"), suit: "club", rank: 3 },
+    { ...synthCard(205, "无中生有"), suit: "heart", rank: 7 },
+  ];
+  const swapPending = {
+    kind: "ARRANGE", actor: 0, seq: 991, timing: "PHASE_DRAW_END",
+    prompt: "请交换两行之间的牌（行内顺序不变）。",
+    revealed: cards5,
+    legal_actions: [{ answers_seq: 991, kind: "ArrangeCards", order: [0, 1, 2, 3, 4], split: 3 }],
+    candidate_index: {}, option_seats: {}, preactivations: {}, preactivation: [],
+    arrange: {
+      count: 5, split: { top: 3, bottom: 2 },
+      rows: { top: "星", bottom: "手牌" }, enumerate: false, reorder: false,
+    },
+  };
+  const swapView = synthView(swapPending);
+  const rowOf = (name) => Array.from($("t-options").children).find(
+    (node) => node.getAttribute && node.getAttribute("data-row") === name);
+  const cardsBox = (row) => row.children[1];
+  const cardIndexes = (row) => Array.from(cardsBox(row).children)
+    .filter((node) => node.getAttribute && node.getAttribute("data-card-index") !== undefined)
+    .map((node) => Number(node.getAttribute("data-card-index")));
+  const cardNode = (row, index) => Array.from(cardsBox(row).children).find(
+    (node) => node.getAttribute && node.getAttribute("data-card-index") === String(index));
+  const clickNode = (node) => (node.listeners.click || []).forEach(
+    (fn) => fn({ target: node, preventDefault() {} }));
+
+  ui.state.view = swapView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(swapView);
+
+  const topRow = rowOf("top");
+  const bottomRow = rowOf("bottom");
+  check("七星-1 两行交换面：行标签来自载荷（「星」/「手牌」，不是牌堆顶 / 底）",
+    !!topRow && !!bottomRow
+      && topRow.children[0].textContent.includes("星")
+      && bottomRow.children[0].textContent.includes("手牌")
+      && !topRow.children[0].textContent.includes("牌堆顶"),
+    `top=${topRow && topRow.children[0].textContent} bottom=${bottomRow && bottomRow.children[0].textContent}`);
+  check("七星-2 上排 3 张星、下排 2 张手牌（切分点来自载荷）",
+    JSON.stringify(cardIndexes(topRow)) === "[0,1,2]"
+      && JSON.stringify(cardIndexes(bottomRow)) === "[3,4]",
+    `上=${cardIndexes(topRow)} 下=${cardIndexes(bottomRow)}`);
+  const identity = ui.buildAction();
+  check("七星-3 原样提交 = ArrangeCards(order 0..4, split 3)（= 不换任何一张）",
+    !!identity
+      && JSON.stringify(identity) === JSON.stringify(
+        { answers_seq: 991, kind: "ArrangeCards", order: [0, 1, 2, 3, 4], split: 3 }),
+    JSON.stringify(identity));
+
+  // 上下交换：点星 0 → 点下排的手牌 3（固定切分跨行 = 两张互换）。
+  clickNode(cardNode(rowOf("top"), 0));
+  clickNode(cardNode(rowOf("bottom"), 3));
+  const swapped = ui.buildAction();
+  check("七星-4 上下交换 = 两张互换（上排仍是 3 张），载荷 order [3,1,2,0,4] / split 3",
+    !!swapped
+      && JSON.stringify(swapped.order) === JSON.stringify([3, 1, 2, 0, 4])
+      && swapped.split === 3,
+    JSON.stringify(swapped));
+
+  // 行内不调序：点星 1 → 点星 2（同一行）⇒ 不动。
+  const beforeSameRow = JSON.stringify(cardIndexes(rowOf("top")));
+  clickNode(cardNode(rowOf("top"), 1));
+  clickNode(cardNode(rowOf("top"), 2));
+  check("七星-5 行内不可调序（reorder=false）：点同一行的另一张不产生移动",
+    JSON.stringify(cardIndexes(rowOf("top"))) === beforeSameRow,
+    `before=${beforeSameRow} after=${JSON.stringify(cardIndexes(rowOf("top")))}`);
+
+  // 不枚举档：界面的答案不在候选里，也必须能提交（服务端结构校验）。
+  const beforeSwapSubmit = calls.length;
+  await ui.submitAction();
+  const swapAnswers = calls.slice(beforeSwapSubmit).filter((call) => call.path.includes("/answer"));
+  check("七星-6 不枚举档：自造的 ArrangeCards 不在 legal_actions 里也能提交",
+    swapAnswers.length === 1
+      && JSON.stringify(swapAnswers[0].body.action) === JSON.stringify(swapped),
+    `answers=${swapAnswers.length} action=${JSON.stringify(swapAnswers[0] && swapAnswers[0].body.action)}`);
+
+  /* ---- ② 武将牌上的牌点选：弹窗 + 可见牌面 ---- */
+  const starSlots = [201, 202].map((id, index) => ({
+    ref: { zone: "hero", seat: 0, skill_instance: "0:hero.shen_zhugeliang.qixing" },
+    card: cards5[index],
+  }));
+  const pickPending = {
+    kind: "SELECT_CARDS", actor: 0, seq: 993, timing: "PHASE_FINISH",
+    prompt: "移去一张“星”（武将牌上的牌）",
+    slots: starSlots,
+    spec: { zones: ["hero"], total: [1, 1], optional: false },
+    legal_actions: [{ answers_seq: 993, kind: "SelectCards", picks: [0] }],
+    candidate_index: {}, option_seats: {}, preactivations: {}, preactivation: [],
+  };
+  const pickView = synthView(pickPending);
+  ui.state.view = pickView;
+  ui.resetSelection();
+  ui.renderTable();
+  ui.renderPending(pickView);
+
+  check("狂风/大雾-1 武将牌上的牌点选 = heroPick 弹窗（不是左下角面板）",
+    ui.stepDialogKind(pickPending) === "heroPick"
+      && $("t-dialog").hidden === false
+      && $("t-dialog-title").textContent === "选择武将牌上的牌"
+      && Array.from($("t-dialog-body").children).includes($("t-options")),
+    `kind=${ui.stepDialogKind(pickPending)} title="${$("t-dialog-title").textContent}"`);
+  check("狂风/大雾-2 正文标题不再说『看不到牌面』（星对宿主可见）",
+    $("t-options").text().includes("武将牌上的牌")
+      && !$("t-options").text().includes("看不到牌面"),
+    $("t-options").text().slice(0, 40));
+  const chips = Array.from($("t-options").children)
+    .flatMap((node) => (node.children ? Array.from(node.children) : []))
+    .filter((node) => node.className && String(node.className).includes("card"));
+  check("狂风/大雾-3 每个星一张可点牌（两张）", chips.length === 2, `chips=${chips.length}`);
+  if (chips.length) clickNode(chips[0]);
+  const starPick = ui.buildAction();
+  check("狂风/大雾-4 点一张星 = SelectCards(picks [0])",
+    !!starPick && JSON.stringify(starPick) === JSON.stringify(
+      { answers_seq: 993, kind: "SelectCards", picks: [0] }),
+    `${JSON.stringify(starPick)} picks=${JSON.stringify(ui.state.picks)} chips=${chips.length}`);
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
