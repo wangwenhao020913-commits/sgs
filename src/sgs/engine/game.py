@@ -426,6 +426,18 @@ _BooleanPlayerFlag = Literal[
 """座位级布尔技能状态的字段闭集（:meth:`Engine._set_player_flag` 的 ``field``）。"""
 
 
+ROUND_LIMIT = 300
+"""对局**轮次上限**（用户 2026-11-04 裁定：第 300 回合结束即平局，避免膀胱局）。
+
+"大战300回合不分胜负，鸣金收兵"。落在 :meth:`Engine._finish_round_and_advance` 的
+**绕圈分支**：自然指针走完第 300 圈（即将把 ``round`` +1）时不再 +1，直接判平局并终止。
+
+**不进 ``RuleConfig``**：``rule_config`` 会进 journal 头部 / 会话载荷的序列化面，加字段会
+改 47 条金录像的字节（E1）。它是引擎常量：没有一条标准录像打到 300 轮，故既有录像逐字节
+不变；测试用构造局面把 ``round`` 放在边界上。
+"""
+
+
 class Outcome(BaseModel):
     """终局判定结果；由唯一的 :meth:`Engine.check_game_end` 产出。
 
@@ -4991,6 +5003,13 @@ class Engine:
             return
         size = len(state.players)
         if (nxt - start) % size > (finished - start) % size:
+            return
+        if state.round >= ROUND_LIMIT:
+            # 第 ROUND_LIMIT 回合**结束**（自然指针走完这一圈）⇒ 平局收兵（用户 2026-11-04）。
+            # 待执行的额外回合随终局一并作废；已定的胜负（死亡路径）不被改写——那个分支
+            # 早已 finish，走不到这里。
+            if self.check_game_end(draw_reason="round_limit") is not None:
+                self.finish()
             return
         state.round += 1
         state.round_start_seat = nxt

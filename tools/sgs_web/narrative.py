@@ -295,6 +295,8 @@ class _Narrator:
             self._flipped_change(record, seq)
         elif delta_type == "wine_change":
             self._wine_change(record, seq)
+        elif delta_type == "pindian":
+            self._pindian(record, seq)
         elif delta_type == "identity_reveal":
             label = _IDENTITY_BY_VALUE.get(str(record.get("identity")))
             if label is None:
@@ -463,6 +465,11 @@ class _Narrator:
                 # 重铸是**失去**不是弃置（M5-08b / §5.1.3）：事件流写「重铸」。
                 self._reforge(record, seq, cards)
                 return
+            if reason == "PINDIAN":
+                # 拼点牌置入弃牌堆：算失去、**不算弃置**（huo-taishici-xunyu 票 03 /
+                # `06` §5 的拼点裁定行）⇒ 事件流不写「弃置」。
+                self._pindian_card(record, seq, cards)
+                return
             if reason in ("USE", "JUDGE"):
                 return
             self._discard(record, seq, cards)
@@ -510,6 +517,48 @@ class _Narrator:
             ]
         else:
             segments = [*self._subject(owner), _act(" 弃置"), *_cards(cards)]
+        self._line(seq, segments)
+
+    def _pindian(
+        self, record: dict[str, Any], seq: int
+    ) -> None:
+        """一次拼点的揭晓（huo-taishici-xunyu 票 03）：双方各一张牌 + 每一对的结果。
+
+        平点 = 双方都没赢（规则第十二章 12.1 L1318–L1319 / 12.4），按「没赢」写。
+        """
+        initiator = record.get("initiator")
+        targets = tuple(record.get("targets") or ())
+        cards = tuple(record.get("cards") or ())
+        won = tuple(record.get("won") or ())
+        if initiator is None or not targets or len(cards) < len(targets) + 1:
+            return
+        for index, target in enumerate(targets):
+            subject = self._subject(initiator)
+            other = self._subject(target)
+            verdict = "赢" if index < len(won) and won[index] else "没赢"
+            self._line(
+                seq,
+                [
+                    *subject,
+                    _act(" 与 "),
+                    *other,
+                    _act(" 拼点："),
+                    *_cards((cards[0],)),
+                    _act(" vs "),
+                    *_cards((cards[index + 1],)),
+                    _act(f"——{verdict}"),
+                ],
+            )
+
+    def _pindian_card(
+        self, record: dict[str, Any], seq: int, cards: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """拼点牌置入弃牌堆：写「拼点牌…置入弃牌堆」，不写「弃置」。"""
+        owner = record.get("owner")
+        origin = (record.get("from_zone") or {}).get("seat")
+        if owner is None:
+            owner = origin
+        segments = [*self._subject(owner), _act(" 的拼点牌"), *_cards(cards), _act("置入弃牌堆")]
         self._line(seq, segments)
 
     def _reforge(
@@ -570,8 +619,12 @@ class _Narrator:
         side = record.get("side")
         winners = tuple(int(seat) for seat in record.get("winners") or ())
         segments: list[dict[str, Any]] = [_act("对局结束")]
+        reason = str(record.get("reason") or "")
         if result == "draw":
             segments.append(_act(" · 平局"))
+            if reason == "round_limit":
+                # 用户 2026-11-04：第 300 回合结束 = 平局（大战三百回合，鸣金收兵）。
+                segments.append(_act(" · 大战300回合不分胜负，鸣金收兵"))
         else:
             label = _SIDE_LABELS.get(str(side)) if side is not None else None
             if label is not None:

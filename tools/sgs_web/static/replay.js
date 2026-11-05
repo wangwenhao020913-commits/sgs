@@ -164,8 +164,11 @@ function applyReplayThrough(replay, index) {
     applyReplayCardMove(replay, record);
     applyReplaySeatDelta(replay, record);
     if (record.kind === "query") noteReplayQuery(replay, record.query);
-    replay.effectCards = applyEffectDelta(record, replay.effectCards, null);
-    replay.revealedCards = applyRevealDelta(record, replay.revealedCards);
+    // 同一条记录的两个舞台入口共用一个 now（与牌桌 `stepPlayback` 同一姿态）：
+    // 两次 `Date.now()` 跨毫秒会让同一批"同刻淡出"差 1ms。
+    const stageAt = stageNow();
+    replay.effectCards = applyEffectDelta(record, replay.effectCards, null, stageAt);
+    replay.revealedCards = applyRevealDelta(record, replay.revealedCards, stageAt);
   }
   replay.appliedIndex = index;
 }

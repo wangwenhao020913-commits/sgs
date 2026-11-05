@@ -789,8 +789,12 @@ function stepPlayback(immediate) {
     // 简易档铺服务端叙事（与记录同 seq 的条目在这一步出现）；完整两档铺记录。
     if (logMode() === "simple") appendNarrativeThrough(record.seq);
     else appendLog(record, playback.querySeat);
-    state.effectCards = applyEffectDelta(record, state.effectCards);
-    state.revealedCards = applyRevealDelta(record, state.revealedCards);
+    // 同一条记录的两个舞台入口共用**一个** now：`pop` 那一批的 `fadeAt` 是
+    // `now + 停留` 算出来的，两个入口各调一次 `Date.now()` 就可能跨毫秒 ⇒ 同一批
+    // "同刻淡出"差 1ms（烟测 U3-01t 的 `fadeAt` 相等断言因此偶发红）。
+    const stageAt = stageNow();
+    state.effectCards = applyEffectDelta(record, state.effectCards, undefined, stageAt);
+    state.revealedCards = applyRevealDelta(record, state.revealedCards, stageAt);
     // M6 报障 1：亮牌弹窗跟**源结算帧**走——那个帧 pop 的这条记录一到就收起，不等整批
     // 播完（五谷的取牌步 / 无懈窗口跨多个响应，最后一批能有几十条记录）。
     syncPlaybackDialog(record);

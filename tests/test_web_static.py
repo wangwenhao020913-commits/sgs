@@ -649,7 +649,9 @@ def test_session_playback_hook_measures_source_before_render_and_launches_after(
     launch = body.find("animLaunchFlight(")
     assert plan >= 0, "stepPlayback 里没有显式调用 animPlanFlight(record, …)"
     assert launch >= 0, "stepPlayback 里没有显式调用 animLaunchFlight(...)"
-    delta = body.find("applyEffectDelta(record, state.effectCards)")
+    # 锚点只认 `applyEffectDelta(record, state.effectCards` 这一段前缀：入口现在带第 4 个
+    # 实参（同一条记录共用一次 `stageNow()`，见 U3-01t 的抖动修复），尾部括号不再是契约。
+    delta = body.find("applyEffectDelta(record, state.effectCards")
     assert delta >= 0 and plan > delta, (
         "起点必须在 applyEffectDelta 之后量（此时舞台卡 / 手牌 / 槽位还在原处）"
     )
@@ -882,7 +884,8 @@ def test_session_playback_plans_the_phase_float_next_to_the_flight_hook() -> Non
         "阶段飘字必须与飞行层**相邻**规划（同一处、同一时机）："
         f"flight@{flight_at[0]} phase@{phase_at[0]}"
     )
-    delta = body.find("applyEffectDelta(record, state.effectCards)")
+    # 锚点与上一条同源：只认前缀，不认尾部括号（入口现在带第 4 个实参 `now`）。
+    delta = body.find("applyEffectDelta(record, state.effectCards")
     phase = body.find("animPlanPhase(record)")
     assert delta >= 0 and phase > delta, "飘字规划必须在 applyEffectDelta 之后（与飞行层同一时机）"
     assert phase < body.find("applyLiveDelta(record"), "飘字必须在重绘之前规划（读旧布局的锚点）"

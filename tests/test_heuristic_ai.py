@@ -1763,6 +1763,10 @@ def test_the_heuristic_beats_random_on_the_same_seeds():
     σ≈0.043 下仍然落在噪声带里（`CODING_STANDARDS.md` §5）。
 
     座位 0 为候选、其余四席随机：同一种子下两臂的局面逐字节相同，故胜率差只反映档位。
+
+    第 300 回合上限（round-limit 票 01）落地后，本批里的病态长局（seed 5036 曾打到
+    6869 轮 / 约 40 秒）会在 300 轮收兵（1.7 秒），整数批因此回到分钟级以内；
+    统计判据一个字没改。
     """
     heuristic = _candidate_wins_over(RATE_SEEDS, heuristic=True)
     random = _candidate_wins_over(RATE_SEEDS, heuristic=False)
