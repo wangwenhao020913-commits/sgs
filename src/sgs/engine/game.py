@@ -72,10 +72,9 @@ from sgs.skills import (
     MOVE_EVENT_KEY,
     RUNNING_SKILL_KEY,
     SKILL_JUDGMENT_CARD_KEY,
-    ActivationPlan,
+    ActivationCandidate,
     MoveEvent,
     SeamKind,
-    SkillInstance,
     advance_provider,
     blocked_true_names,
     card_preactivations,
@@ -2421,31 +2420,80 @@ class Engine:
     def ask_skill_activation(
         self,
         frame: Frame,
-        instance: SkillInstance,
+        candidates: Sequence[ActivationCandidate],
         timing: Timing,
-        plan: ActivationPlan,
         *,
         key: str | None = None,
+        depth: int = 0,
+        seat: int = 0,
+        round: int = 0,
+        floor: int = 0,
+        used: tuple[str, ...] = (),
     ) -> Any:
-        """发一次 ``SKILL_ACTIVATION`` 询问（票 19 §5 / 票 30；W6-06a 收窄）。
+        """发一次 ``SKILL_ACTIVATION`` 询问：**本轮的全部候选**各一条裸 ``ActivateSkill``。
 
-        候选恒为**一条裸 ``ActivateSkill``**：成本 / 载荷由发动后的 ``SkillFlow`` 步骤问，
-        故这里不再把面内位置烘进候选（`ActivationPlan` 的载荷字段已删）。``plan`` 只决定
-        ``optional``；``available=False`` 由 ``_dispatch`` 在调用前挡掉。答案按
-        ``(skill_id, key)`` 帧内缓存，重入不重发（``key`` 让同一时机上的真钩子与帧内
-        接缝不共用缓存槽）。询问模型仍带 ``min_picks=0 / max_picks=0 / slots=()`` 的
-        冻结报文（A-4 另立票；15 份录像逐字节）。
+        票 01 的"一张面、一次选一条"（Q3=B / Q6=B）：``candidates`` 是派发环本轮收下的
+        可选项（:class:`~sgs.skills.ActivationCandidate`），候选集合与档 / 闸门参数原样进
+        类型化载荷，候选仍由 :func:`~sgs.effects.legal_actions_for` 这个唯一生成口产出。
+        成本 / 载荷仍由发动后的 ``SkillFlow`` 步骤问，故候选不烘焙 ``picks`` / ``choices``。
+        询问模型仍带 ``min_picks=0 / max_picks=0 / slots=()`` 的冻结报文（A-4 另立票；
+        15 份录像逐字节）。
+
+        **单候选必须逐字节不变**（Q6=B）：只有一个候选时 ``skill_id`` / ``optional`` /
+        冻结报文与候选（一条 ``ActivateSkill`` + 可放弃的 ``Pass``）都与改造前相同；
+        ``skill_ids`` / ``activation_preactivations`` 两个新面是 ``exclude=True``，不进记录流。
+
+        答案按 ``(timing, 派发键, 嵌套层号, 座位, 轮次)`` 帧内缓存：同一轮重入不重发，
+        **不同座位 / 不同轮 / 同键嵌套的那一趟**都不共用缓存槽（改造前的键是
+        ``(skill_id, key)``：同一个 id 授给两个座位时第二问会被第一问的答案短路，同键嵌套
+        时内层的询问会读到外层那张面的应答——那两件事都由 pass 游标 / 层号接手）。
 
         **应答者默认是技能持有者，但可以由计划指定**（M6 票 14 的 ``plan.actor``）：
         【护驾】②的"其可以令你摸一张牌"里决定者是**使用 / 打出【闪】的那个角色**，收益者
-        是技能持有者（主公）。询问因此发给 ``plan.actor``；``preactivation`` 清单也按
-        应答者取（清单是"这一问交给谁"的一部分，不是持有者的属性）。
+        是技能持有者（主公）。同一派发里全部候选的应答者相同——``plan.actor`` 只读帧 /
+        声明，不读实例，故取第一条即可。``preactivation`` 清单按应答者取（清单是"这一问
+        交给谁"的一部分，不是持有者的属性）。
         """
-        actor = instance.owner if plan.actor is None else plan.actor
+        first = candidates[0]
+        actor = first.actor
+        skill_ids = tuple(candidate.skill_id for candidate in candidates)
+        # 「可以 / 必须」是效果属性（与 ``locked`` 正交）：面里只要有一条"必须发动"，整张面
+        # 就没有 ``Pass``（少给一条会让它退化成"可以放弃"）。
+        optional = all(candidate.plan.optional for candidate in candidates)
+        # 清单只随**已翻预发动**的技能下发（与 PLAY_PHASE 删骨架同一个开关）。界面按这同一个
+        # 开关找入口（`preactivation.js:preactivatedSkill`）：清单在、开关没开 ⇒ 浮动按钮画
+        # 不出、被动技按钮又不接 click ⇒ 这一问没有任何入口（票 23 报障）。没翻的技能改走
+        # 直提态，步骤照旧逐步问。**按候选逐条**渲染（票 01；票 02 按选中的 id 取那一份）。
+        preactivated = preactivated_skill_ids()
+        manifests = {
+            skill_id: steps
+            for skill_id in skill_ids
+            if skill_id in preactivated
+            if (
+                steps := preactivation_for(
+                    self.state, actor, skill_id, timing=timing, frame=frame
+                )
+            )
+        }
+        representative = skill_ids[0]
+        context = SkillActivationContext(
+            skill_id=representative,
+            optional=optional,
+            min_picks=0,
+            max_picks=0,
+            slots=(),
+            preactivation=manifests.get(representative, ()),
+            candidates=tuple(
+                (candidate.skill_id, candidate.tier) for candidate in candidates
+            ),
+            floor=floor,
+            used=used,
+            preactivations=tuple(manifests.items()),
+        )
         # 帧外时机的询问：记下承载帧，供 ``submit`` 的复合动作校验器读同一份上下文（票 20）。
         self._activation_frame = frame
         answers = frame.data.setdefault("ask_answers", {})
-        answer_key = ("activate", instance.skill_id, key or str(timing))
+        answer_key = ("activate", timing.value, key or str(timing), depth, seat, round)
         if answer_key in answers:
             return answers[answer_key]
         action = self.ask(
@@ -2454,28 +2502,7 @@ class Engine:
                 actor,
                 timing,
                 seq,
-                payload=SkillActivationContext(
-                    skill_id=instance.skill_id,
-                    optional=plan.optional,
-                    min_picks=0,
-                    max_picks=0,
-                    slots=(),
-                    preactivation=(
-                        # 清单只随**已翻预发动**的技能下发（与 PLAY_PHASE 删骨架同一个开关）。
-                        # 界面按这同一个开关找入口（`preactivation.js:preactivatedSkill`）：
-                        # 清单在、开关没开 ⇒ 浮动按钮画不出、被动技按钮又不接 click ⇒ 这一问
-                        # 没有任何入口（票 23 报障）。没翻的技能改走直提态，步骤照旧逐步问。
-                        preactivation_for(
-                            self.state,
-                            actor,
-                            instance.skill_id,
-                            timing=timing,
-                            frame=frame,
-                        )
-                        if instance.skill_id in preactivated_skill_ids()
-                        else ()
-                    ),
-                ),
+                payload=context,
             ),
             identity=self._ask_identity(QueryKind.SKILL_ACTIVATION, actor, frame),
         )
@@ -2488,7 +2515,7 @@ class Engine:
                 # ``run_flow`` 摊回逐步答案。W4-fix-2：归属随载荷一起走——同一帧上后续
                 # 别的技能的流水线不得读它（`flow._activation_belongs`）。
                 frame.data["activation"] = _activation_payload(
-                    activation, instance.skill_id, timing
+                    activation, action.skill_id, timing
                 )
         answers[answer_key] = action
         return action
@@ -4353,7 +4380,10 @@ class Engine:
 
         - ``PLAY_PHASE``：该技能必须在 :attr:`PlayPhaseQuery.preactivations` 里（可用性
           的第二个真源；未迁移的技能仍走骨架候选的成员判定）；
-        - ``SKILL_ACTIVATION``：必须是这一问的那条技能、且它随询问下发了清单。
+        - ``SKILL_ACTIVATION``：必须是这一问**面上**的一条候选、且**它**随询问下发了清单
+          （票 01 起一条面可以有多条候选：逐候选的清单住
+          :attr:`SkillActivationQuery.activation_preactivations`，单候选的旧面仍由
+          ``preactivation`` 兜底）。
 
         其余询问（响应窗口 / 选项 / 选牌…）一律不适用——不然一次响应里的
         ``ActivateSkill`` 就能绕过窗口的候选集合。
@@ -4365,7 +4395,13 @@ class Engine:
                 return _NOT_STRUCTURED
             frame = None
         elif pending.kind == QueryKind.SKILL_ACTIVATION:
-            if action.skill_id != pending.skill_id or not pending.preactivation:
+            face = pending.skill_ids or (pending.skill_id,)
+            if action.skill_id not in face:
+                return _NOT_STRUCTURED
+            steps = pending.activation_preactivations.get(action.skill_id) or (
+                pending.preactivation if action.skill_id == pending.skill_id else ()
+            )
+            if not steps:
                 return _NOT_STRUCTURED
             # 被动入口的池常要读**真帧**（【流离】的使用者 / 【麒麟弓】的目标）：
             # 挂起期间栈顶就是发问的那一帧，校验器必须读同一份上下文。阶段体 / 回合末这类
@@ -4576,6 +4612,11 @@ class Engine:
                 max_picks=payload.max_picks,
                 slots=payload.slots,
                 preactivation=payload.preactivation,
+                # 票 01 的两个本地面（``exclude=True``）：候选集合仍由 ``legal_actions``
+                # 承载，故不进记录流；接入层 / 本地消费者按它们读"这一轮有哪些候选"与
+                # "每条候选各自的预发动清单"。
+                skill_ids=tuple(skill_id for skill_id, _tier in payload.candidates),
+                activation_preactivations=dict(payload.preactivations),
                 revealed=revealed,
             )
         if kind is QueryKind.SELECT_OPTION:

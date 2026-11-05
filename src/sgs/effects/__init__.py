@@ -12,6 +12,7 @@
 from .actions import (
     EFFECTIVENESS,
     TARGET_FILTERS,
+    activation_allowed,
     attack_range,
     check_count,
     check_forbidden,
@@ -116,6 +117,7 @@ __all__ = (
     "UseTiming",
     "WINE_COUNT_KEY",
     "WINE_DAMAGE_BONUS",
+    "activation_allowed",
     "apply_hp",
     "apply_modifiers",
     "attack_range",

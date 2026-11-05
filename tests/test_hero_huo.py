@@ -2321,11 +2321,13 @@ class _ShenDriver:
             )
         if query.kind == "SKILL_ACTIVATION":
             allowed = self._activate_skills
-            skill_id = str(getattr(query, "skill_id", "") or "")
-            if allowed is None or skill_id in allowed:
-                for action in query.legal_actions:
-                    if isinstance(action, ActivateSkill):
-                        return action
+            # 票 01 起一张面可以有多条候选（神诸葛亮的【狂风】【大雾】同为**结束阶段**）：
+            # 要按**面上的候选**挑，不能只看 ``query.skill_id``（那是代表候选）。
+            for action in query.legal_actions:
+                if not isinstance(action, ActivateSkill):
+                    continue
+                if allowed is None or action.skill_id in allowed:
+                    return action
         if query.kind == "SELECT_OPTION":
             wanted = f"seat:{self._target_seat}"
             for action in query.legal_actions:

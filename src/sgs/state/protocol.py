@@ -349,10 +349,15 @@ class SkillActivationContext:
     """``SKILL_ACTIVATION`` 候选生成的类型化载荷（票 19 §5 / 票 30；W6-06a 收窄）。
 
     发动 = **一次询问**：``optional`` 决定候选里有没有 ``Pass``（"可以 / 必须"是效果属性，
-    与 ``locked`` 正交）；候选恒为**一条裸 ``ActivateSkill``** —— 成本 / 载荷在发动后由
+    与 ``locked`` 正交）；候选为**裸 ``ActivateSkill``** —— 成本 / 载荷在发动后由
     ``SkillFlow`` 的步骤询问。``min_picks`` / ``max_picks`` / ``slots`` 仍随冻结报文
     ``SkillActivationQuery`` 下传（A-4 协议清理另立票）；当前生产者恒传 ``0 / 0 / ()``，
     保 15 份录像逐字节。``zones`` / ``card_types`` 一类候选烘焙字段已在 W6-06a 删除。
+
+    票 01（同一时机的激活结算）把"一条面"从单技能扩成**本轮的全部候选**：``candidates``
+    带档、``floor`` / ``used`` 是闸门的两个输入（判据在
+    :func:`~sgs.effects.actions.activation_allowed`，本结构只承载事实）。三者缺省为空 /
+    ``0`` / 空 ⇒ 旧构造（单候选 ``skill_id``）的候选逐条不变。
     """
 
     skill_id: str
@@ -366,6 +371,32 @@ class SkillActivationContext:
     由 ``SkillFlow.steps`` 渲染（:func:`sgs.skills.flow.manifest`），只含**由持有者本人**
     应答的前缀步骤；后续换成别人应答的段（反间猜花色 / 挑牌）仍然逐步询问。空元组 =
     这条技能此刻没有可下发的预发动清单（未迁移 / 选取面不可见 / 池为空）。
+    """
+    candidates: tuple[tuple[str, int], ...] = ()
+    """本轮同一张面上的**全部候选**：``(技能 id, 优先级档)``，按链序（票 01 §4-2）。
+
+    空元组 = 只有一个 ``skill_id``（旧构造 / 单候选面）——候选生成器按单条展开，
+    与改造前逐字节相同。档用 ``int(priority_class)``：``HERO=0`` / ``EQUIPMENT=1`` /
+    ``CARD_USE=2``（越小越先），闸门据此判"不升档"。
+    """
+    floor: int = 0
+    """**不升档**闸门（票 01 §4-3）：档 < ``floor`` 的候选不进面。
+
+    初值 = 最高档（``HERO`` = 0，故首轮全部档都进面）；每选定一条后 ``floor = 它的档``，
+    低档照进、高档不再进（选过装备档之后武将档不再上脸）。本 pass 结束即随帧私有游标清。
+    """
+    used: tuple[str, ...] = ()
+    """本座位本 pass **已经跑过**的技能 id（每技能一次；票 01 §4-6）。
+
+    与 ``floor`` 同属闸门的第二个输入：已跑过的技能不再进面——"每技能一次"由这个显式集合
+    兑现，不再靠答案缓存当去重手段。
+    """
+    preactivations: tuple[tuple[str, tuple[Step, ...]], ...] = ()
+    """按候选分发的预发动清单（票 01；票 02 的读取面）：``(技能 id, 清单)`` 有序对。
+
+    与 :attr:`preactivation` 同源（都由 ``SkillFlow.steps`` 渲染），区别只在**粒度**：
+    单候选面上两者内容相同，多候选面只有这里能回答"每条候选各自的清单"。接入层
+    （:func:`sgs_web.projection.pending_payload`）据此逐候选下发；**不进记录流**。
     """
 
 
@@ -864,11 +895,16 @@ class SelectCardsQuery(_QueryBase):
 
 
 class SkillActivationQuery(_QueryBase):
-    """是否发动（票 19 §5 / 票 30）：候选恒一条裸 ``ActivateSkill``；载荷由技能步骤问。
+    """是否发动（票 19 §5 / 票 30）：候选是**本轮的一到多条**裸 ``ActivateSkill``。
 
     ``min_picks`` / ``max_picks`` / ``slots`` 是 **A-4 待清理的冻结报文**：当前生产者恒传
     ``0 / 0 / ()``（W6-06a 删除了候选烘焙路径），但 15 份录像逐字节带着这三个字段，
     故协议清理另立票。
+
+    **序列化面一个字段都不改**（票 01 的 Q6=B）：同一时机只有一个候选时，本询问的
+    ``skill_id`` / ``optional`` / 冻结报文与候选 / 询问时机全都不变 ⇒ 47 条金录像逐字节。
+    多候选面上"这一轮有哪些候选"由 ``legal_actions`` 承载（候选集合本来就在记录里），
+    另加的两个字段都是 ``exclude=True`` 的**本地面**（票 01 §5）。
     """
 
     kind: Literal["SKILL_ACTIVATION"] = "SKILL_ACTIVATION"
@@ -881,6 +917,24 @@ class SkillActivationQuery(_QueryBase):
     """被动入口的**预发动清单**（W4-1）：空元组 = 这条技能此刻没有可下发的清单。
 
     与 :attr:`PlayPhaseQuery.preactivations` 同姿态：**不进记录流**，由接入层显式下发。
+    多候选面上它是**代表候选**（``skill_id``）那份；逐候选的清单在
+    :attr:`activation_preactivations`。
+    """
+    skill_ids: tuple[str, ...] = Field(default=(), exclude=True)
+    """**本轮候选的技能 id 清单**（票 01 §5；与 ``preactivation`` 同姿态）。
+
+    空元组 = 本询问不是由派发环的 pass 产出的（旧构造）；由 pass 产出时恒非空——单候选面
+    = ``(skill_id,)``，多候选面 = 全部候选。**不进记录流**：候选集合已由 ``legal_actions``
+    承载，这份清单只给接入层 / 本地消费者读。
+    """
+    activation_preactivations: dict[str, tuple[Step, ...]] = Field(
+        default_factory=dict, exclude=True
+    )
+    """**按候选分发**的预发动清单（票 01；票 02 的读取面）：技能 id → 清单。
+
+    与 :attr:`preactivation` 同源、只改粒度：单候选面上两者内容相同（旧面一字不变），
+    多候选面上前端按选中的候选取自己那一份。**不进记录流**（``exclude``，与
+    ``PlayPhaseQuery.transform_preactivations`` 同一姿态），由接入层显式下发。
     """
 
 

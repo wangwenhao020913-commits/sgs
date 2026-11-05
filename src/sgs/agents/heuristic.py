@@ -2686,7 +2686,11 @@ def _preactivation_candidates(query: Query) -> tuple[ActivateSkill, ...]:
     elif kind is QueryKind.SKILL_ACTIVATION:
         skill_id = getattr(query, "skill_id", None)
         steps = tuple(getattr(query, "preactivation", None) or ())
-        manifests = {str(skill_id): steps} if skill_id and steps else {}
+        # 票 01：一条面可以有多条候选，逐候选的清单住 ``activation_preactivations``；
+        # 单候选的旧面两个字段同源（``preactivation`` 兜底），故填表结果逐字不变。
+        manifests = dict(getattr(query, "activation_preactivations", None) or {})
+        if skill_id and steps:
+            manifests.setdefault(str(skill_id), steps)
     elif kind in (QueryKind.DODGE, QueryKind.RESPOND, QueryKind.PEACH):
         transforms = dict(getattr(query, "transform_preactivations", None) or {})
         manifests = transforms
@@ -3057,6 +3061,16 @@ _AI_READ_POINTS: Mapping[str, Mapping[str, tuple[bool, str]]] = MappingProxyType
                 "max_picks": (False, "同上：恒 0 的冻结报文"),
                 "slots": (False, "冻结报文：生产者恒给 ``()``；真要选的牌在随后的 ``SELECT_CARDS`` 里"),
                 "preactivation": (True, "被动入口的预发动清单（单条，不按技能分组）"),
+                "skill_ids": (
+                    False,
+                    "本轮候选 id 清单不读：候选由 ``legal_actions`` 承载，打分仍按 "
+                    "``action.skill_id`` 查 ``SKILL_VALUES``（票 01 的 N 候选面同一口径）",
+                ),
+                "activation_preactivations": (
+                    True,
+                    "逐候选的预发动清单：N 候选面靠它给**每一条**候选填复合动作"
+                    "（``_preactivation_candidates``）；单候选面与 ``preactivation`` 同源",
+                ),
             }
         ),
         "SelectOptionQuery": MappingProxyType(

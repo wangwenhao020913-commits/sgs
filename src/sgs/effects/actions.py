@@ -79,6 +79,7 @@ from .modifiers import (
 __all__ = [
     "EFFECTIVENESS",
     "TARGET_FILTERS",
+    "activation_allowed",
     "attack_range",
     "check_count",
     "check_forbidden",
@@ -1132,19 +1133,47 @@ def _select_cards(
     return actions
 
 
+def activation_allowed(
+    skill_id: str, tier: int, *, floor: int, used: Sequence[str]
+) -> bool:
+    """**同一时机激活结算**闸门的唯一判据（票 01 §4-3）：两关。
+
+    1. **不升档**（补充一手 §2.1.2.3）：选的这一条 "优先级须在不超过上次的前提下最高"。
+       档值越小越先（``HERO=0 < EQUIPMENT=1 < CARD_USE=2``），故闸门 = ``tier >= floor``：
+       小于 ``floor`` 的档（= 比上次更高优先）不再进面，同档与更低的档照进。
+    2. **每技能一次**（补充一手 §2.1.2.2(2)）：本座位本 pass 已经跑过的技能不再进面。
+       ``used`` 是**显式**记录（:attr:`~sgs.state.SkillActivationContext.used`），不再靠
+       答案缓存当去重手段。
+
+    两个输入都由派发环（:func:`sgs.skills.catalog._dispatch`）写进类型化载荷；本函数是
+    候选生成口（:func:`legal_actions_for`）与派发环**共用**的那一份判据——两处各写一遍
+    就会在"这一轮到底能选什么"上漂移。
+    """
+    return int(tier) >= int(floor) and skill_id not in used
+
+
 def _skill_activation(
     seat: int, answers_seq: int, ctx: SkillActivationContext
 ) -> list[Action]:
-    """"是否发动"：一次询问、候选恒一条**裸** ``ActivateSkill``（票 19 §5 / 票 30；W6-06a）。
+    """"是否发动"：一次询问、**本轮的全部候选**各一条裸 ``ActivateSkill``（票 01 §4）。
 
-    成本 / 载荷由发动后的 ``SkillFlow`` 步骤询问，故这里不再按 ``min_picks`` /
-    ``max_picks`` 把"取 k 张面内位置"的组合烘进 ``picks``（那条两维路径随
-    ``ActivationPlan`` 的载荷字段一起删除，见 W6-06a）。``optional`` 决定放弃候选
-    （"可以 / 必须"是效果属性，与 ``locked`` 正交）。
+    ``ctx.candidates`` 空 ⇒ 旧构造的单候选面（只展开 ``ctx.skill_id``），与改造前逐字节
+    相同；非空 ⇒ 按 ``(技能 id, 档)`` 逐条展开，并过 :func:`activation_allowed` 的两关闸门
+    （``floor`` / ``used``）。成本 / 载荷仍由发动后的 ``SkillFlow`` 步骤询问，故候选依旧
+    不烘焙 ``picks`` / ``choices``（W6-06a）。``optional`` 决定放弃候选——"可以 / 必须"是
+    效果属性，与 ``locked`` 正交。
     """
     del seat
+    if ctx.candidates:
+        faces = tuple(
+            skill_id
+            for skill_id, tier in ctx.candidates
+            if activation_allowed(skill_id, tier, floor=ctx.floor, used=ctx.used)
+        )
+    else:
+        faces = (ctx.skill_id,)
     actions: list[Action] = [
-        ActivateSkill(skill_id=ctx.skill_id, answers_seq=answers_seq)
+        ActivateSkill(skill_id=skill_id, answers_seq=answers_seq) for skill_id in faces
     ]
     if ctx.optional:
         actions.append(Pass(answers_seq=answers_seq))

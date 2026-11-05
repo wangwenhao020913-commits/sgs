@@ -20,6 +20,10 @@ M2 定格（票 17 §3 / 票 32）把分区改为里程碑中性名：
 （`06` §5「程序化约定与偏离一手」的"时机四轴计数"段）里这三个集合与派生的
 ``IMPLEMENTED`` 的四个计数必须与本文导入的长度同步，否则漂移只在 review 时被人读出来。
 术语表 `GLOSSARY.md` 只留定义、不承担账目（C7 把账目从术语表搬进账本）。
+
+末节是**同一时机的激活结算**（`timing-activation` 票 01）：逐角色 / 一次选一条 / 选完重估 /
+不升档 / 每技能一次 / 条件轮到时判 / 轮次游标不倒退 / R5 收口。它不属于"时机枚举"，
+但同样以**合成技能 + ``GAME_START`` 派发点**为夹具，故与 ``MAXLIFE`` 那节同居本文件。
 """
 
 from __future__ import annotations
@@ -34,7 +38,8 @@ from pydantic import ValidationError
 from sgs.data import RuleConfig, load_content_pack
 from sgs.engine import Engine, TimingRecord, record_json
 from sgs.resolution import Frame
-from sgs.state import FrameKind
+from sgs.skills import PASS_STATE_KEY
+from sgs.state import ActivateSkill, FrameKind, Pass, QueryKind, SelectOption
 from sgs.timing import (
     DISPATCH_WHITELIST,
     EMPTY_LOG,
@@ -501,3 +506,558 @@ def test_the_glossary_count_scan_goes_red_on_a_stale_count():
         assert any(axis in message for message in drift), (
             f"把『{axis}』的 {claimed} 改成 {stale} 应判红：{drift}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 同一时机的激活结算（票 01）：逐角色 / 一次选一条 / 选完重估 / 不升档 / 每技能一次
+#
+# 规则出处：仓内 §4.16 L443–L466（同档内次序归玩家）+ 补充一手《三国杀规则集 V3.0》
+# §2.1.2.2(2)（一次一个 / 每技能一次 / 条件轮到时判 / 终止即收口）与 §2.1.2.3（不升档）。
+# 全部用 ``CATALOG`` 注入的**合成技能**钉形状——不依赖任何真实武将，故真实对局的记录流
+# 不受这些用例影响；"候选数为 1 的时机逐字节不变"由 ``tools/check_goldens.sh`` 单独判
+# （47 条录像 ≈ 40 MiB，不在单测里重读，§8-9）。
+# ---------------------------------------------------------------------------
+
+FAKE_A = "hero.fake.face_a"
+FAKE_B = "hero.fake.face_b"
+FAKE_EQUIP = "hero.fake.face_equip"
+"""合成技能 id（只活在 ``CATALOG`` 注入里）：同档内按 id 的字典序 ⇒ A 先于 B。"""
+
+
+def _install_fake_skills(monkeypatch, *definitions) -> None:
+    """把合成技能注入 ``CATALOG``（票 01 的夹具；与 ``MAXLIFE`` 那节同姿态）。"""
+    from types import MappingProxyType
+
+    from sgs.skills import catalog as catalog_module
+
+    monkeypatch.setattr(
+        catalog_module,
+        "CATALOG",
+        MappingProxyType(
+            {
+                **catalog_module.CATALOG,
+                **{definition.skill_id: definition for definition in definitions},
+            }
+        ),
+    )
+
+
+def _fake_skill(skill_id, *, handler=None, flow=None, condition=None, carrier=None):
+    """一条**只挂在 ``GAME_START`` 上**的合成非锁定技（可带条件 / 流水线 / 载体）。"""
+    from sgs.effects import CarrierKind
+    from sgs.skills import Hook, SkillDef
+
+    return SkillDef(
+        skill_id=skill_id,
+        locked=False,
+        carrier=CarrierKind.HERO if carrier is None else carrier,
+        hooks=(
+            Hook(Timing.GAME_START, handler=handler, condition=condition, flow=flow),
+        ),
+    )
+
+
+def _activation_engine(*granted: str) -> Engine:
+    """两人局、无武将；把 ``granted`` 授予座位 0（L0 之前授予 ⇒ GAME_START 派发得到）。"""
+    engine = Engine.new_game(seed=7, rule_config=RuleConfig(player_count=2), pack=PACK)
+    for skill_id in granted:
+        engine.grant_skill(0, skill_id)
+    return engine
+
+
+class _FaceScript:
+    """按"每问选哪一条"应答的脚本参与者；顺带记下每一问的**候选技能序列**。
+
+    ``picks`` 逐问消费：``None`` = 答"放弃"。非 ``SKILL_ACTIVATION`` 的询问（合成流水线
+    里的选项步）取第一个非放弃候选；问到的技能不在本问面上时同样退到放弃，让断言在更靠前
+    的地方变红，而不是抛 KeyError。
+    """
+
+    def __init__(self, *picks: str | None) -> None:
+        self.picks = list(picks)
+        self.faces: list[tuple[str, ...]] = []
+
+    def respond(self, query):
+        if query.kind == QueryKind.SKILL_ACTIVATION:
+            face = tuple(
+                action.skill_id
+                for action in query.legal_actions
+                if isinstance(action, ActivateSkill)
+            )
+            self.faces.append(face)
+            wanted = self.picks.pop(0) if self.picks else None
+            if wanted is not None:
+                for action in query.legal_actions:
+                    if isinstance(action, ActivateSkill) and action.skill_id == wanted:
+                        return action
+            for action in query.legal_actions:
+                if isinstance(action, Pass):
+                    return action
+            return query.legal_actions[0]
+        for action in query.legal_actions:
+            if not isinstance(action, Pass):
+                return action
+        return query.legal_actions[0]
+
+
+def _activation_queries(engine) -> list:
+    """记录流里的全部 ``SKILL_ACTIVATION`` 询问。"""
+    return [
+        record.query
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.SKILL_ACTIVATION
+    ]
+
+
+def _face_of(query) -> tuple[str, ...]:
+    """一询问的候选技能序列（**次序本身**，不排序、不去重：`CODING_STANDARDS.md` §4）。"""
+    return tuple(
+        action.skill_id
+        for action in query.legal_actions
+        if isinstance(action, ActivateSkill)
+    )
+
+
+def _drive(engine, script: _FaceScript, stop, *, limit: int = 400) -> None:
+    """推进引擎到 ``stop(engine)`` 成立；每个挂起询问交给 ``script``。"""
+    for _ in range(limit):
+        if stop(engine):
+            return
+        if engine.pending is None:
+            engine._step()
+            continue
+        engine.submit(script.respond(engine.pending))
+    raise AssertionError("步数上限内没有到达停止条件")
+
+
+def test_a_single_candidate_face_keeps_the_frozen_query_shape(monkeypatch):
+    """§8-1（Q6=B）：只有一个候选时，询问面与**序列化字段集**与改造前逐字节相同。
+
+    判据钉三件事：① 候选恰是 ``[ActivateSkill, Pass]``、``skill_id`` 就是那一条；
+    ② 询问记录里的字段集恰是**冻结报文**那一组——``skill_ids`` /
+    ``activation_preactivations`` 是本地面（``exclude=True``），不进记录流；③ 同一时机
+    只落一条询问（放弃即收口）。真实 47 条录像的逐字节比对是 ``tools/check_goldens.sh``。
+    """
+    ran: list[str] = []
+    _install_fake_skills(
+        monkeypatch,
+        _fake_skill(FAKE_A, handler=lambda host, frame: ran.append(FAKE_A)),
+    )
+    engine = _activation_engine(FAKE_A)
+    script = _FaceScript(None)  # 放弃
+    _drive(engine, script, lambda e: bool(_activation_queries(e)))
+
+    query = _activation_queries(engine)[0]
+    assert query.skill_id == FAKE_A
+    assert query.optional is True
+    assert (query.min_picks, query.max_picks, query.slots) == (0, 0, ()), (
+        "冻结报文（A-4 待清理）在单候选面上一个字不改"
+    )
+    assert query.legal_actions == (
+        ActivateSkill(skill_id=FAKE_A, answers_seq=query.seq),
+        Pass(answers_seq=query.seq),
+    ), "单候选面的候选与改造前逐条相同（一条裸 ActivateSkill + 可放弃）"
+    assert query.skill_ids == (FAKE_A,), "本地面照常装本轮候选（只是不进记录流）"
+    assert query.activation_preactivations == {}, "未翻预发动的技能没有清单"
+
+    record = next(
+        record
+        for record in engine.records
+        if record.kind == "query" and record.query.kind == QueryKind.SKILL_ACTIVATION
+    )
+    serialized = json.loads(record_json(record))["query"]
+    assert set(serialized) == {
+        "kind",
+        "seq",
+        "actor",
+        "timing",
+        "prompt",
+        "legal_actions",
+        "view",
+        "skill_id",
+        "optional",
+        "min_picks",
+        "max_picks",
+        "slots",
+    }, "序列化面只许是冻结报文那一组：本轮候选清单是本地面（exclude=True）"
+
+    engine.submit(script.respond(engine.pending))
+    _drive(
+        engine,
+        script,
+        lambda e: e.pending is not None and e.pending.kind != QueryKind.SKILL_ACTIVATION,
+    )
+    assert len(_activation_queries(engine)) == 1, "放弃 = 结束本座位的这个时机，不重问"
+    assert ran == [], "放弃 ⇒ 不执行"
+
+
+def test_two_same_tier_skills_narrow_the_face_one_pick_at_a_time(monkeypatch):
+    """§8-2：两条同档技能 ⇒ 一次询问里两条候选都在；选 A 后只剩 B；选 B 后收口。
+
+    断的是**询问序列本身**（`CODING_STANDARDS.md` §4：不排序、不去重）。
+    """
+    ran: list[str] = []
+
+    def record(skill_id):
+        def handler(host, frame):
+            del host, frame
+            ran.append(skill_id)
+            return None
+
+        return handler
+
+    _install_fake_skills(
+        monkeypatch,
+        _fake_skill(FAKE_A, handler=record(FAKE_A)),
+        _fake_skill(FAKE_B, handler=record(FAKE_B)),
+    )
+    engine = _activation_engine(FAKE_A, FAKE_B)
+    script = _FaceScript(FAKE_A, FAKE_B)
+
+    _drive(engine, script, lambda e: ran == [FAKE_A, FAKE_B])
+
+    assert script.faces == [(FAKE_A, FAKE_B), (FAKE_B,)], (
+        "第一问是**一张面两条候选**（同档内次序归玩家），选 A 之后重估只剩 B："
+        f"实得 {script.faces}"
+    )
+    assert ran == [FAKE_A, FAKE_B], "选中的那一条按询问序各跑一次"
+    assert len(_activation_queries(engine)) == 2, "一轮一询问：两条候选不是两条询问"
+
+
+def test_a_lower_tier_pick_closes_the_higher_tier_for_the_rest_of_the_pass(monkeypatch):
+    """§8-3（不升档）：「武将 + 装备」两条，先取**装备**档 ⇒ 武将条不再进候选。
+
+    形状 = 补充一手 §2.1.2.3 的曹操/八卦阵⇒护驾：首轮两档都上脸（同档内次序归玩家），
+    选定装备档之后 ``pass_floor = 1`` ⇒ 武将档（0）被闸门挡掉，本 pass 内不再出现。
+    """
+    from sgs.effects import CarrierKind
+
+    ran: list[str] = []
+    _install_fake_skills(
+        monkeypatch,
+        _fake_skill(FAKE_A, handler=lambda host, frame: ran.append(FAKE_A)),
+        _fake_skill(
+            FAKE_EQUIP,
+            handler=lambda host, frame: ran.append(FAKE_EQUIP),
+            carrier=CarrierKind.EQUIPMENT,
+        ),
+    )
+    engine = _activation_engine(FAKE_A, FAKE_EQUIP)
+    script = _FaceScript(FAKE_EQUIP)  # 先取低档（装备）
+
+    _drive(engine, script, lambda e: ran == [FAKE_EQUIP])
+
+    assert script.faces == [(FAKE_A, FAKE_EQUIP)], (
+        "首轮两档都要上脸（玩家自己决定先发动哪一档）；选了装备档之后武将档不再进面："
+        f"实得 {script.faces}"
+    )
+    assert FAKE_A not in ran, "被闸门挡掉的那条一次都不跑"
+    assert len(_activation_queries(engine)) == 1, "没有第二条面：剩下的候选被闸门挡掉"
+
+
+def test_a_skill_is_offered_at_most_once_per_seat_pass(monkeypatch):
+    """§8-4（每技能一次）：A 的条件恒真，也不会在同一个 pass 里二次上脸。
+
+    选 A ⇒ 下一轮虽然 A 的条件仍成立、仍然"可发动"，但 ``pass_used`` 记过 ⇒ 只剩 B。
+    """
+    ran: list[str] = []
+    _install_fake_skills(
+        monkeypatch,
+        _fake_skill(FAKE_A, handler=lambda host, frame: ran.append(FAKE_A)),
+        _fake_skill(FAKE_B, handler=lambda host, frame: ran.append(FAKE_B)),
+    )
+    engine = _activation_engine(FAKE_A, FAKE_B)
+    script = _FaceScript(FAKE_A, None)  # 选 A，然后对 B 答放弃
+
+    _drive(engine, script, lambda e: ran == [FAKE_A])
+
+    assert script.faces == [(FAKE_A, FAKE_B)], (
+        "A 已选过 ⇒ 第二问只剩 B（A 不再上脸）：" f"实得第一问 {script.faces}"
+    )
+    assert _face_of(engine.pending) == (FAKE_B,), (
+        f"同一个 pass 里 A 不会二次上脸；实得第二问 {_face_of(engine.pending)}"
+    )
+    offered = [skill_id for face in script.faces for skill_id in face]
+    assert offered.count(FAKE_A) == 1, "同一条技能在同一个 pass 里不会二次上脸"
+
+
+def test_a_condition_is_judged_when_the_next_round_starts(monkeypatch):
+    """§8-5（条件轮到时判）：A 的效果改变 B 的条件 ⇒ B 在**下一轮**才消失 / 出现。
+
+    两个方向都断：① 首轮 B 在面上（条件此刻成立），A 的效果把它关掉 ⇒ 下一轮不再上脸；
+    ② 首轮 B 不在（条件不成立），A 的效果把它打开 ⇒ 下一轮才出现。
+    """
+    # 方向 ①：A 把 B 的条件关掉。
+    flags = {"b": True}
+    ran: list[str] = []
+
+    def close_b(host, frame):
+        del host, frame
+        flags["b"] = False
+        ran.append(FAKE_A)
+        return None
+
+    _install_fake_skills(
+        monkeypatch,
+        _fake_skill(FAKE_A, handler=close_b),
+        _fake_skill(
+            FAKE_B,
+            handler=lambda host, frame: ran.append(FAKE_B),
+            condition=lambda host, frame: flags["b"],
+        ),
+    )
+    engine = _activation_engine(FAKE_A, FAKE_B)
+    script = _FaceScript(FAKE_A)
+    _drive(engine, script, lambda e: ran == [FAKE_A])
+
+    assert script.faces == [(FAKE_A, FAKE_B)], (
+        "首轮按当时条件判：B 的条件成立 ⇒ 在面上；A 的效果关掉它之后，下一轮重判 ⇒ 不再上脸："
+        f"实得 {script.faces}"
+    )
+    assert len(_activation_queries(engine)) == 1
+
+    # 方向 ②：A 把 B 的条件打开。
+    flags2 = {"b": False}
+    ran2: list[str] = []
+
+    def open_b(host, frame):
+        del host, frame
+        flags2["b"] = True
+        ran2.append(FAKE_A)
+        return None
+
+    _install_fake_skills(
+        monkeypatch,
+        _fake_skill(FAKE_A, handler=open_b),
+        _fake_skill(
+            FAKE_B,
+            handler=lambda host, frame: ran2.append(FAKE_B),
+            condition=lambda host, frame: flags2["b"],
+        ),
+    )
+    engine2 = _activation_engine(FAKE_A, FAKE_B)
+    script2 = _FaceScript(FAKE_A, FAKE_B)
+    _drive(engine2, script2, lambda e: ran2 == [FAKE_A, FAKE_B])
+
+    assert script2.faces == [(FAKE_A,), (FAKE_B,)], (
+        "B 的条件在 A 结算前不成立 ⇒ 首轮不上脸；A 打开之后下一轮才出现："
+        f"实得 {script2.faces}"
+    )
+
+
+def test_a_skill_granted_mid_pass_joins_the_next_round(monkeypatch):
+    """§8-6（Q5=A 每轮重解析）：A 的效果里 ``grant_skill`` 得到的新实例本轮即可发动。"""
+
+    def grant_b(host, frame):
+        host.grant_skill(0, FAKE_B, frame=frame)
+        ran.append(FAKE_A)
+        return None
+
+    ran: list[str] = []
+    _install_fake_skills(
+        monkeypatch,
+        _fake_skill(FAKE_A, handler=grant_b),
+        _fake_skill(FAKE_B, handler=lambda host, frame: ran.append(FAKE_B)),
+    )
+    # 只授予 A：B 的**声明**在目录里，但实例要等 A 的效果授予才出现。
+    engine = _activation_engine(FAKE_A)
+    script = _FaceScript(FAKE_A, FAKE_B)
+
+    _drive(engine, script, lambda e: ran == [FAKE_A, FAKE_B])
+
+    assert script.faces == [(FAKE_A,), (FAKE_B,)], (
+        "B 在首轮收集时还不是实例；A 结算后每轮重解析 ⇒ 下一轮进面："
+        f"实得 {script.faces}"
+    )
+
+
+def test_a_suspended_effect_does_not_reask_or_rewind_the_round(monkeypatch):
+    """§8-7（悬起 / 重入）：A 的效果挂起（问一次选项）⇒ 不重发询问、``pass_round`` 不倒退。
+
+    判据读三处**都是真产出路径**：询问记录（重问会多一条）、帧私有的 pass 游标
+    （``pass_round`` / ``pass_chosen``，经 ``Engine.phase_body_frame`` 读）、以及 A 的效果体
+    被执行了几次。
+    """
+    from sgs.skills import PickOption, SkillFlow
+
+    ran: list[str] = []
+
+    def effect(host, frame, answers):
+        del host, frame, answers
+        ran.append(FAKE_A)
+        return None
+
+    flow_a = SkillFlow(
+        name="fake_suspended_a",
+        steps=(PickOption(options=("go",), key="go"),),
+        effect=effect,
+    )
+    _install_fake_skills(
+        monkeypatch,
+        _fake_skill(FAKE_A, flow=flow_a),
+        _fake_skill(FAKE_B, handler=lambda host, frame: ran.append(FAKE_B)),
+    )
+    engine = _activation_engine(FAKE_A, FAKE_B)
+    script = _FaceScript(FAKE_A, FAKE_B)
+
+    # ① 首问：一张面两条候选 ⇒ 选 A。
+    _drive(engine, script, lambda e: bool(_activation_queries(e)))
+    engine.submit(script.respond(engine.pending))
+
+    # ② A 的流水线挂起在选项步：游标仍是"本轮进行中"（第 0 轮、选中 A），不倒退。
+    _drive(
+        engine,
+        script,
+        lambda e: e.pending is not None and e.pending.kind == QueryKind.SELECT_OPTION,
+    )
+    cursor = _pass_cursor(engine)
+    assert cursor["pass_round"] == 0, "A 还没跑完 ⇒ 轮次停在 0"
+    assert cursor["pass_chosen"] is not None
+    assert cursor["pass_chosen"].skill_id == FAKE_A, "悬起的是选中项本身"
+    assert len(_activation_queries(engine)) == 1, "挂起期间不重发询问"
+
+    # ③ 答完选项 ⇒ A 跑完、轮次前进；第二问只剩 B（重入不重问、不重跑已完成项）。
+    engine.submit(script.respond(engine.pending))
+    _drive(engine, script, lambda e: len(_activation_queries(e)) == 2)
+
+    cursor = _pass_cursor(engine)
+    assert cursor["pass_round"] == 1, "已结算一轮：pass_round 前进且不倒退"
+    assert cursor["pass_used"] == (FAKE_A,), "跑过的那一条落进 pass_used"
+    assert script.faces == [(FAKE_A, FAKE_B)], (
+        f"重入不重发询问、不重跑已完成项；实得 {script.faces}"
+    )
+    assert _face_of(engine.pending) == (FAKE_B,), (
+        f"第二问只报剩下的 B（A 不重问）；实得 {_face_of(engine.pending)}"
+    )
+
+    engine.submit(script.respond(engine.pending))
+    _drive(engine, script, lambda e: ran == [FAKE_A, FAKE_B])
+    assert ran.count(FAKE_A) == 1, "A 的效果体恰好跑一次（悬起续跑不重跑）"
+    assert ran == [FAKE_A, FAKE_B]
+
+
+def test_an_effect_can_end_the_pass_explicitly(monkeypatch):
+    """R5（§4-7）：先发动者的效果终止此时机 ⇒ 其余候选作废（本票只给判据位 + 这条单测）。
+
+    规则出处 = 补充一手 §2.1.2.2(2) 的注意条。判据 = 第二条技能既不再上脸、也不再执行。
+    """
+    from sgs.skills import terminate_activation_pass
+
+    ran: list[str] = []
+
+    def end_pass(host, frame):
+        del host
+        terminate_activation_pass(
+            frame, timing=Timing.GAME_START, key=Timing.GAME_START.value
+        )
+        ran.append(FAKE_A)
+        return None
+
+    _install_fake_skills(
+        monkeypatch,
+        _fake_skill(FAKE_A, handler=end_pass),
+        _fake_skill(FAKE_B, handler=lambda host, frame: ran.append(FAKE_B)),
+    )
+    engine = _activation_engine(FAKE_A, FAKE_B)
+    script = _FaceScript(FAKE_A, FAKE_B)
+
+    _drive(engine, script, lambda e: bool(ran))
+    _drive(
+        engine,
+        script,
+        lambda e: e.pending is not None and e.pending.kind != QueryKind.SKILL_ACTIVATION,
+    )
+
+    assert script.faces == [(FAKE_A, FAKE_B)], "收口之后不再发第二问"
+    assert ran == [FAKE_A], "终止即收口：其余候选作废"
+
+
+def test_a_forced_segment_runs_before_the_optional_face_without_asking(monkeypatch):
+    """§4-5：强制段（锁定技）**不问、不上脸**，但轮到本档时直接跑（同档内先于可选项）。
+
+    链序里 ``hero.fake.face_a`` 在 ``hero.fake.forced`` 之前（按 id），故"强制段先跑"只能
+    来自本票的那条程序化约定，不是排序碰巧。
+    """
+    from sgs.effects import CarrierKind
+    from sgs.skills import Hook, SkillDef
+
+    order: list[str] = []
+
+    def forced_handler(host, frame):
+        del host, frame
+        order.append("forced")
+        return None
+
+    forced = SkillDef(
+        skill_id="hero.fake.forced",
+        locked=True,
+        carrier=CarrierKind.HERO,
+        hooks=(Hook(Timing.GAME_START, forced_handler),),
+    )
+    _install_fake_skills(
+        monkeypatch,
+        forced,
+        _fake_skill(FAKE_A, handler=lambda host, frame: order.append("optional")),
+    )
+    engine = _activation_engine("hero.fake.forced", FAKE_A)
+    script = _FaceScript(FAKE_A)
+
+    _drive(engine, script, lambda e: order == ["forced", "optional"])
+
+    assert script.faces == [(FAKE_A,)], "锁定技不上脸：面里只有可选项"
+    assert order == ["forced", "optional"], "强制段先跑，然后才问可选项"
+    assert len(_activation_queries(engine)) == 1
+
+
+def test_the_seam_path_carries_tiers_and_the_same_gate(monkeypatch):
+    """§6：``dispatch_seam`` 与 ``dispatch_timing`` 共用 ``_dispatch`` ⇒ 接缝候选同样带档、
+    同样过"不升档 / 每技能一次"的闸门（不是只给钩子那条路改）。
+
+    判据 = 接缝面上两档都在；选了装备档之后武将档被闸门挡掉、不再发第二问。
+    """
+    from sgs.effects import CarrierKind
+    from sgs.skills import Seam, SeamKind, SkillDef
+
+    ran: list[str] = []
+
+    def seam_of(skill_id, carrier, log):
+        return SkillDef(
+            skill_id=skill_id,
+            locked=False,
+            carrier=carrier,
+            seams=(
+                Seam(
+                    SeamKind.EQUIPMENT_DISCARD,
+                    handler=lambda host, frame: log.append(skill_id),
+                ),
+            ),
+        )
+
+    _install_fake_skills(
+        monkeypatch,
+        seam_of(FAKE_A, CarrierKind.HERO, ran),
+        seam_of(FAKE_EQUIP, CarrierKind.EQUIPMENT, ran),
+    )
+    engine = _activation_engine(FAKE_A, FAKE_EQUIP)
+    frame = Frame(kind=FrameKind.RESOLVE, data={"source": 0}, frame_id=101)
+
+    assert engine.dispatch_seam(frame, SeamKind.EQUIPMENT_DISCARD) == "stay"
+    query = engine.pending
+    assert _face_of(query) == (FAKE_A, FAKE_EQUIP), (
+        f"接缝面同样两档都在（同一张面）；实得 {_face_of(query)}"
+    )
+    engine.submit(ActivateSkill(skill_id=FAKE_EQUIP, answers_seq=query.seq))
+
+    assert engine.dispatch_seam(frame, SeamKind.EQUIPMENT_DISCARD) is None
+    assert ran == [FAKE_EQUIP], "选了装备档 ⇒ 武将档被闸门挡掉（接缝同样不升档）"
+    assert len(_activation_queries(engine)) == 1
+
+
+def _pass_cursor(engine) -> dict:
+    """当前 ``GAME_START`` 不压栈帧里的 pass 游标（帧私有的唯一读法 = 公开访问器）。"""
+    frame = engine.phase_body_frame()
+    assert frame is not None, "GAME_START 的派发帧应当还在（挂起在没有出栈的帧上）"
+    states = frame.data.get(PASS_STATE_KEY) or {}
+    assert len(states) == 1, f"本用例里同一时机只该有一趟 pass：{states}"
+    return next(iter(states.values()))
+

@@ -1446,6 +1446,98 @@ def test_skill_activation_defaults_to_pass_when_the_table_has_no_entry():
         assert isinstance(action, Pass), f"{skill_id} 不该被发动"
 
 
+def _multi_candidate_skill_query(
+    state, seat: int, skill_ids: tuple[str, ...]
+) -> SkillActivationQuery:
+    """与引擎同形的 **N 候选** ``SKILL_ACTIVATION`` 询问（票 01 §4-8 的面）。
+
+    候选由唯一的候选生成口 ``legal_actions_for`` 产出（带档 + 闸门），故这张面与派发环
+    交给 AI 的东西同源；``skill_id`` 取代表候选（与引擎的写法一致）。
+    """
+    actions = legal_actions_for(
+        state,
+        seat,
+        QueryKind.SKILL_ACTIVATION,
+        answers_seq=1,
+        payload=SkillActivationContext(
+            skill_id=skill_ids[0],
+            optional=True,
+            candidates=tuple((skill_id, 0) for skill_id in skill_ids),
+        ),
+    )
+    return SkillActivationQuery(
+        seq=1,
+        actor=seat,
+        timing=Timing.DAMAGE_AFTER_TAKE,
+        prompt="是否发动？",
+        legal_actions=actions,
+        view=project(state, seat),
+        skill_id=skill_ids[0],
+        optional=True,
+        skill_ids=skill_ids,
+    )
+
+
+def test_a_multi_candidate_face_passes_when_every_candidate_is_negative():
+    """§8-8 的"全负"侧：N 候选面里每一条都低于 Pass ⇒ 答放弃（拿不准就不发动）。
+
+    用两条**不在语义表里**的技能（``_UNKNOWN_SKILL_VALUE = -1.0``）与一条"只剩 1 体力时
+    自伤"的真实条目（【强袭】= −1.0）混排，全部低于 Pass 的 0.0。
+    """
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()])
+    state.player(0).hp = 1
+
+    query = _multi_candidate_skill_query(
+        state, 0, ("equip.eight_diagrams", "hero.dianwei_mobile.qiangxi")
+    )
+
+    action = HeuristicPlayer(_stream(4)).respond(query)
+
+    assert isinstance(action, Pass), "面里全是负收益 ⇒ 放弃（Pass 的 0.0 是最高分）"
+
+
+def test_a_multi_candidate_face_picks_the_highest_positive_on_the_same_face():
+    """§8-8 的"有正收益"侧：同一个面上按**语义表**比较，选分最高的那一条。
+
+    【义起】= +5.0 /【奸雄】= +4.0 / 一条表外技能 = −1.0 ⇒ 选【义起】。三条都在同一张
+    ``legal_actions`` 面里，故"比较"发生在同一张面上，而不是逐条询问各自打平。
+    """
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()])
+
+    query = _multi_candidate_skill_query(
+        state,
+        0,
+        ("hero.tao_liubei.yiqi", "hero.caocao.jianxiong", "equip.eight_diagrams"),
+    )
+
+    assert [
+        action.skill_id
+        for action in query.legal_actions
+        if isinstance(action, ActivateSkill)
+    ] == ["hero.tao_liubei.yiqi", "hero.caocao.jianxiong", "equip.eight_diagrams"], (
+        "面本身就是三条候选（候选生成口已排序；Pass 在最后）"
+    )
+    action = HeuristicPlayer(_stream(4)).respond(query)
+
+    assert isinstance(action, ActivateSkill)
+    assert action.skill_id == "hero.tao_liubei.yiqi", "选同一面上分值最高的那一条"
+
+
+def test_a_multi_candidate_face_prefers_the_unknown_skill_over_pass_after_the_known_one():
+    """补一条**反例**：不是"永远选第一条"——表外技能（−1.0）低于 Pass，故只剩它时答放弃。
+
+    与上一条成对：同一张面里换掉正收益的那条 ⇒ 答案从"选它"翻成"放弃"，证明打分确实
+    读的是每条候选的语义，而不是候选集合的形状。
+    """
+    state = build_state(pack=PACK, seats=[SeatSpec(), SeatSpec()])
+
+    query = _multi_candidate_skill_query(
+        state, 0, ("equip.eight_diagrams", "hero.machao.mashu")
+    )
+
+    assert isinstance(HeuristicPlayer(_stream(4)).respond(query), Pass)
+
+
 def test_select_cards_keeps_the_valuable_cards_when_they_are_a_cost():
     peach, slash = _ids("peach")[0], _ids("slash")[0]
     state = build_state(

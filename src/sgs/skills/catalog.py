@@ -51,6 +51,7 @@ from sgs.effects import (
     ModifierContext,
     ModifierPoint,
     PriorityClass,
+    activation_allowed,
     behavior_for,
     check_targets,
     is_slash,
@@ -101,6 +102,8 @@ __all__ = [
     "DAMAGE_RECORDED_KEY",
     "DAMAGE_DEAL_POINT_KEY",
     "DAMAGE_DEAL_RECORDED_KEY",
+    "PASS_STATE_KEY",
+    "ActivationCandidate",
     "ActivationPlan",
     "Hook",
     "HookCondition",
@@ -138,6 +141,7 @@ __all__ = [
     "resolve_instances",
     "same_kingdom",
     "skill_used_this_turn",
+    "terminate_activation_pass",
     "timing_hooks_present",
 ]
 
@@ -463,6 +467,38 @@ class ActivationPlan:
     optional: bool = True
     available: bool = True
     actor: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationCandidate:
+    """同一张面上的一个**可发动项**（票 01 §4 的结算单位）。
+
+    派发环每轮把本座位"有东西可派发"的实例收成这批候选：实例、这一轮算出的计划、条件成立
+    的那几条项、以及"要不要问"。档**由实例定义派生**（``priority_class``），不另存字段——
+    闸门（:func:`~sgs.effects.activation_allowed`）读的是同一份声明。
+
+    ``forced=True`` = **强制段**（锁定技 / 觉醒技 / 逐条 ``Hook.forced``）：不问、不上脸，
+    本档轮到它时直接跑；``False`` = 可选项，进"是否发动"的面。
+    """
+
+    instance: SkillInstance
+    plan: ActivationPlan
+    items: tuple[Any, ...]
+    forced: bool
+
+    @property
+    def skill_id(self) -> str:
+        return self.instance.skill_id
+
+    @property
+    def tier(self) -> int:
+        """优先级档（``HERO=0`` / ``EQUIPMENT=1`` / ``CARD_USE=2``，**越小越先**）。"""
+        return int(self.instance.definition.priority_class)
+
+    @property
+    def actor(self) -> int:
+        """这一项**由谁应答**：计划指定者优先，否则是技能持有者（缺省口径）。"""
+        return self.instance.owner if self.plan.actor is None else int(self.plan.actor)
 
 
 # ---------------------------------------------------------------------------
@@ -1389,36 +1425,169 @@ def _chain_order(
     )
 
 
-def _dispatch(
+PASS_STATE_KEY = "skill_pass"
+"""帧私有：同一时机激活结算的**轮次游标**（票 01 §6），键 = ``(timing.value, key, 层号)``。
+
+每一项是本座位这一趟的进度：``pass_seat``（座位环下标）、``pass_round``（本座位已结算的
+轮数）、``pass_floor``（不升档闸门）、``pass_used``（本座位已跑过的技能 id）、
+``pass_phase``（``start`` / ``forced`` / ``ask`` / ``run``）、``pass_forced``（本轮强制段）、
+``pass_forced_at``（跑到第几条）、``pass_optional``（本轮可选项；``None`` = 问之前要按活
+状态重估）、``pass_chosen``（本轮选中的那一条）与 ``pass_terminated``（R5 收口）。
+
+**为什么必须住帧私有**：挂起重入时派发环从头再跑，进度只能由帧里的**显式**游标表达；
+靠"重新算候选集合"隐式表达会在效果结算后答错轮（票 01 §6）。帧私有 ⇒ 不进记录流，
+既有基准的字节不受影响；`dict(frame.data)` 的续跑副本共享同一个 dict 对象，故游标跟着
+续跑帧一起走。
+
+**为什么键里有"层号"**：同键派发可以**嵌套**——`MOVE_AFTER` 的键对整帧恒为
+``"MOVE_AFTER"``，而钩子的效果（摸牌 / 搬牌）会就地再压一次同键派发。嵌套的那一趟是
+**新的一次时机实例**（新的事件载荷），不能续跑外层游标（否则外层的 ``pass_chosen``
+会被再跑一遍 → 无限递归）。层号 = 进入时栈上同键派发的个数，见 :data:`PASS_ACTIVE_KEY`。
+"""
+
+PASS_ACTIVE_KEY = "_skill_pass_active"
+"""帧私有：**当前同步调用栈上**的 pass 身份（元组，最内层在末尾）。
+
+``"stay"`` 会展开 Python 调用栈，故这个标记必须随 ``finally`` 一起弹出 / 下次重入再压：
+它表达的是"此刻**正在跑**哪几趟 pass"，不是"这个帧上有过哪些 pass"。续跑帧
+（`dict(frame.data)` 的副本）在建立那一刻继承这份栈，于是嵌套挂起的那一趟仍能按同一个
+层号续跑（见 :func:`_pass_scope` / :func:`_current_pass_scope`）。
+"""
+
+
+def _pass_id(timing: Timing, key: str) -> tuple[str, str]:
+    """一次派发的 pass 身份：``(时机, 派发键)``（层号在 :func:`_pass_scope` 里加）。"""
+    return (timing.value, key)
+
+
+def _pass_scope(frame: Frame, timing: Timing, key: str) -> tuple[str, str, int]:
+    """**进入**一趟 pass 的作用域：同键嵌套按"栈上已有几层"编号。
+
+    调用方必须在退出（含 ``"stay"``）时把 :data:`PASS_ACTIVE_KEY` 弹回去——见
+    :func:`_dispatch` 的 ``finally``。
+    """
+    pass_id = _pass_id(timing, key)
+    active = frame.data.get(PASS_ACTIVE_KEY) or ()
+    scope = (*pass_id, active.count(pass_id))
+    frame.data[PASS_ACTIVE_KEY] = (*active, pass_id)
+    return scope
+
+
+def _leave_pass_scope(frame: Frame) -> None:
+    """退出当前 pass（``finally`` 里调）：只弹自己那一层。"""
+    active = frame.data.get(PASS_ACTIVE_KEY) or ()
+    if not active:
+        return
+    remaining = active[:-1]
+    if remaining:
+        frame.data[PASS_ACTIVE_KEY] = remaining
+    else:
+        frame.data.pop(PASS_ACTIVE_KEY, None)
+
+
+def _current_pass_scope(
+    frame: Frame, timing: Timing, key: str
+) -> tuple[str, str, int]:
+    """**正在跑**的那一趟 pass 的作用域（效果体调 :func:`terminate_activation_pass` 用）。
+
+    效果体在派发环里跑，故栈上最内层的同键身份就是它自己那一趟；没在 pass 里调
+    （栈上没有同键身份）时退回第 0 层——那是"这一帧上还没有 pass"的默认槽。
+    """
+    pass_id = _pass_id(timing, key)
+    active = frame.data.get(PASS_ACTIVE_KEY) or ()
+    return (*pass_id, max(active.count(pass_id) - 1, 0))
+
+
+def _new_pass_state() -> dict[str, Any]:
+    """一趟 pass 的初始游标：从座位环第 0 席、第 0 轮、最高档（``HERO`` = 0）起算。"""
+    return {
+        "pass_seat": 0,
+        "pass_round": 0,
+        "pass_floor": 0,
+        "pass_used": (),
+        "pass_phase": "start",
+        "pass_forced": (),
+        "pass_forced_at": 0,
+        "pass_optional": None,
+        "pass_chosen": None,
+        "pass_terminated": False,
+    }
+
+
+def _pass_state(frame: Frame, scope: tuple[str, str, int]) -> dict[str, Any]:
+    """取（必要时建）本趟 pass 的游标。"""
+    states = frame.data.setdefault(PASS_STATE_KEY, {})
+    state = states.get(scope)
+    if state is None:
+        state = _new_pass_state()
+        states[scope] = state
+    return state
+
+
+def _close_pass(frame: Frame, scope: tuple[str, str, int]) -> None:
+    """本趟 pass 结束：清掉游标（`floor` 的"本 pass 结束即清"就落在这里）。"""
+    states = frame.data.get(PASS_STATE_KEY)
+    if states is None:
+        return
+    states.pop(scope, None)
+    if not states:
+        frame.data.pop(PASS_STATE_KEY, None)
+
+
+def _pass_next_seat(state: dict[str, Any]) -> None:
+    """本座位这个时机处理完：座位游标 +1，轮次 / 档 / 已用**对下一座位**重新起算。"""
+    state["pass_seat"] += 1
+    state["pass_round"] = 0
+    state["pass_floor"] = 0
+    state["pass_used"] = ()
+    state["pass_phase"] = "start"
+    state["pass_forced"] = ()
+    state["pass_forced_at"] = 0
+    state["pass_optional"] = None
+    state["pass_chosen"] = None
+
+
+def terminate_activation_pass(frame: Frame, *, timing: Timing, key: str) -> None:
+    """R5 **终止即收口**的显式出口（票 01 §4-7）：先发动者的效果终止此时机 ⇒ 其余作废。
+
+    效果体（钩子回调 / 流水线 effect）在**自己的**时机实例里调用它：本座位 / 本时机剩下的
+    候选（含还没轮到的强制段）一概不再发动，派发环在下一个边界直接收口。规则出处 =
+    补充一手 §2.1.2.2(2) 的注意条（"先发动者的效果若终止此时机，其余候选作废"）。
+
+    本票只给判据位（暂不接任何技能）：调用方把**派发键**原样给出——``dispatch_timing``
+    的键是 ``timing.value``（逐点时机带 ``":<点>"`` 后缀）、``dispatch_seam`` 的键是
+    ``"seam:<kind>"``。效果体知道自己在哪个时机实例里，故不在这里猜；同键嵌套时按
+    "正在跑的那一层"记账（:func:`_current_pass_scope`）。
+    """
+    _pass_state(frame, _current_pass_scope(frame, timing, key))[
+        "pass_terminated"
+    ] = True
+
+
+def _activation_candidates(
     host: Any,
     frame: Frame,
-    *,
     match: Any,
-    timing: Timing,
-    key: str,
-    extra_instances: tuple[SkillInstance, ...] = (),
-) -> Control:
-    """钩子与接缝共用的派发环（唯一一份）：强制类直接跑，其余先问"是否发动"。
+    *,
+    seat: int,
+    extra_instances: tuple[SkillInstance, ...],
+    floor: int,
+    used: tuple[str, ...],
+) -> tuple[ActivationCandidate, ...]:
+    """本座位这一刻的全部候选（票 01 §4-2）：条件成立、付得起、且过闸门的那些。
 
-    **只有答 ``ActivateSkill`` 才执行**——``Pass``（不发动）与 ``plan.available=False``
-    （付不起）都跳过；这是"非锁定技的发动是询问出来的"这条规则（`GLOSSARY.md` 的**发动**）
-    的唯一落点。暂停 = ``"stay"`，重入时整条链从头跑，但 `ask` 的应答按帧内键缓存。
+    **每轮重解析**（Q5=A）：调用方每轮都重新调 :func:`_instances_for`，故时机中途
+    ``grant_skill`` 得到的新实例本轮即可发动。闸门（:func:`~sgs.effects.activation_allowed`）
+    与候选生成口共用同一份判据——不升档（档 < ``floor`` 的不进面）+ 每技能一次（``used``
+    记过的不进面）。
 
-    **强制类 = 锁定技 ∪ 觉醒技**（§四 4.12：两者都是"满足条件即强制发动，不可选择不
-    发动"）。觉醒技**不并进 ``locked``**：``locked`` 是"锁定技"这一规则类型，同时被
-    "其所有非锁定技失效"的谓词读取；觉醒技是独立的类型（``SkillType.AWAKENING``），
-    故仍可被座位级失效挡住。两者的共同点只在"派发时不问"——本函数按类型读它，不另立
-    ``mandatory`` 字段（同一事实只留一处声明）。
-
-    **觉醒技整局一次转变**：已觉醒 ⇒ 不再派发（同限定技的"已用"门）。位在
-    :func:`_mark_awakened`，落点在**执行完**之后——effect 挂起（如【勤学】的选项询问）
-    时重入必须还能续跑同一个实例。
-
-    ``extra_instances``（M5-05a）只由"失去牌后"的派发传入：刚离开装备区的装备技能仍是
-    这一次移动的提供者（见 :func:`_instances_for`）。链序走 :func:`_chain_order`
-    （§4.16 两级顺序的唯一实现：先逐角色、角色内部再按优先级）。
+    座位环与角色内部的档 / 次序复用 :func:`_chain_order` 的同一份判据：这里只按座位过滤，
+    不另排一遍。
     """
+    found: list[ActivationCandidate] = []
     for instance in _chain_order(host.state, _instances_for(host.state, extra_instances)):
+        if instance.owner != seat:
+            continue
         items = match(instance)
         if not items:
             continue
@@ -1432,57 +1601,239 @@ def _dispatch(
         if awakening and _instance_awakened(host.state, instance):
             # 觉醒技是**一次性转变**：已觉醒 ⇒ 不再派发（与限定技的"已用"同一位置）。
             continue
-        # 「要不要问」有两层（票 04）：整条技能的 `locked` / 觉醒技，与**逐条钩子**的
-        # `Hook.forced`。后者服务"一条非锁定技里既有可选段、又有强制段"——强制段不问，
-        # 但它仍然随实例失效而停摆（`forced` 不进 :func:`_skill_is_suppressed`）。
-        instance_forced = instance.definition.locked or awakening
+        if not activation_allowed(
+            instance.skill_id,
+            int(instance.definition.priority_class),
+            floor=floor,
+            used=used,
+        ):
+            continue
         # ``available`` 是"这一刻这条技能成不成立"（阶段 / 回合归属、代价够不够），
         # 与"要不要问"是两条正交的轴：锁定技 / 觉醒技不问，但**同样要过这一道门**。
         # 缺了它，界【英姿】这类锁定阶段技会在别人的摸牌阶段替自己摸牌。
         plan = activation_plan(host.state, frame, instance)
         if not plan.available:
             continue
-        # 逐条钩子的"问不问"（票 04）：`forced` 段不问、答完也别处的段照旧；**放弃**只跳过
-        # 未声明 forced 的段，强制段照跑（牌面没有「可以」的那一句）。
-        forced_flags = [
-            instance_forced or bool(getattr(item, "forced", False)) for item in items
-        ]
-        accepted = True
-        if not all(forced_flags):
-            active = host.ask_skill_activation(frame, instance, timing, plan, key=key)
-            if host.suspended(active):
-                return "stay"
-            accepted = isinstance(active, ActivateSkill)
-        for item, forced in zip(items, forced_flags):
-            if not (forced or accepted):
-                continue
-            # 这两个键是"**此刻**正在跑哪条技能 / 它的持有者"：`_MOVE_DONE` 的重入身份
-            # （:meth:`Engine.move_in_frame`）、`_move_causer`（"是不是**别人**弃置的"）与
-            # 投影的询问归属（`projection._skill_of_query`）都读它们。故跑完这一段必须
-            # **还原成进入前的事实**（M6 实机报障）：留在帧上会让同一帧里**后续**的窗口
-            # （无懈 / 取牌 / 【闪】…）被算到上一个技能头上——界面于是拿上一条技能的文案
-            # 回答这一问（界黄月英的【集智】答完之后，无懈窗口的提示文本仍是界集智的）。
-            _enter_skill_keys(frame, instance, key)
-            control = _run_item(host, frame, item, instance, timing)
-            if control == "stay":
-                # 悬起 = 这条技能**还在跑**：键与还原点都留着。派发环重入时会再写一遍，
-                # 而 `_flush_pending_move` 的原地续跑**不经过**派发环，靠的就是帧上这一份。
-                return control
-            _leave_skill_keys(frame, key)
-            if control is not None:
-                return control
-        if not accepted:
-            # 放弃：未声明 forced 的段全部跳过；强制段跑过也不算"这条技能发动了"，
-            # 故限定 / 觉醒的"已用 / 已觉醒"位一个字都不落（与改之前的口径一致）。
-            continue
-        if limited:
-            # "已用"位落**执行完之后**：effect 挂起时（如【替身】压回复帧）重入必须还能
-            # 走到这里续跑同一个实例，故不能先落位再判（先落位会让重入把实例自己挡掉）。
-            _mark_used_once(host.state, instance)
-        if awakening:
-            # 同姿态：觉醒位也落执行完之后（【勤学】的选项询问会让第一轮挂起）。
-            _mark_awakened(host.state, instance)
+        # 「要不要问」有两层（票 04）：整条技能的 `locked` / 觉醒技，与**逐条钩子**的
+        # `Hook.forced`。后者服务"一条非锁定技里既有可选段、又有强制段"——强制段不问，
+        # 但它仍然随实例失效而停摆（`forced` 不进 :func:`_skill_is_suppressed`）。
+        forced = all(
+            instance.definition.locked
+            or awakening
+            or bool(getattr(item, "forced", False))
+            for item in items
+        )
+        found.append(
+            ActivationCandidate(
+                instance=instance, plan=plan, items=tuple(items), forced=forced
+            )
+        )
+    return tuple(found)
+
+
+def _run_candidate(
+    host: Any, frame: Frame, candidate: ActivationCandidate, timing: Timing, key: str
+) -> Control:
+    """跑一个候选的**全部项**（"派发选中的一条"）：与改造前的逐项循环同形。
+
+    ``"stay"`` = 这条技能还在跑：键与还原点都留着，重入时按游标续跑同一个候选；
+    跑完（非 ``"stay"``）才落限定 / 觉醒的"已用 / 已觉醒"位——effect 挂起时重入必须还能
+    续跑同一个实例，先落位会让重入把实例自己挡掉。
+    """
+    for item in candidate.items:
+        # ``MATCH_OWNER_KEY`` 是"这次派发落在谁身上"：候选是**批量**求值条件的，游标最后
+        # 停在别的实例上，故跑之前必须按本候选重写一次（条件 / 回调都读它自校持有者）。
+        frame.data[MATCH_OWNER_KEY] = candidate.instance.owner
+        _enter_skill_keys(frame, candidate.instance, key)
+        control = _run_item(host, frame, item, candidate.instance, timing)
+        if control == "stay":
+            return control
+        _leave_skill_keys(frame, key)
+        if control is not None:
+            return control
+    definition = candidate.instance.definition
+    if definition.skill_type is SkillType.LIMITED:
+        _mark_used_once(host.state, candidate.instance)
+    if definition.skill_type is SkillType.AWAKENING:
+        _mark_awakened(host.state, candidate.instance)
     return None
+
+
+def _seat_ring(host: Any, extra_instances: tuple[SkillInstance, ...]) -> tuple[int, ...]:
+    """本趟 pass 的**座位环**：存活环 + 死亡结算窗口里的死者（票 01 §4-1）。
+
+    规则 §4.16 的逐角色顺序只对**存活环**有定义，读法唯一（:func:`~sgs.state.seats_from`，
+    与 :func:`_chain_order` 的第一段同源）。``DEATH_ON`` / 死亡窗口里的 ``MOVE_AFTER`` /
+    ``DEATH_AFTER`` 还要派发**刚死的那名角色本人**的实例（``death_time_skills_active``，
+    票 10）：它们不在存活环上，故把"能解析出实例、却不在环上"的座位按座位号升序接在环尾
+    ——改造前由 :func:`_chain_order` 把这类座位排在环上座位之后，这里保留同一条口径。
+    """
+    ring = seats_from(host.state, host.state.turn_seat, len(host.state.players))
+    in_ring = set(ring)
+    present = {
+        instance.owner for instance in _instances_for(host.state, extra_instances)
+    }
+    return (*ring, *sorted(present - in_ring))
+
+
+def _dispatch(
+    host: Any,
+    frame: Frame,
+    *,
+    match: Any,
+    timing: Timing,
+    key: str,
+    extra_instances: tuple[SkillInstance, ...] = (),
+) -> Control:
+    """钩子与接缝共用的派发环（唯一一份）：**逐角色、一次选一条、选完重估**。
+
+    规则出处：仓内 §4.16 L443–L466（逐角色 / 同档内次序归玩家）+ 补充一手 §2.1.2.2(2) /
+    §2.1.2.3（一次一个 / 不升档 / 每技能一次 / 终止即收口）。改造前是"按 ``skill_id`` 定序
+    逐个实例问"，每实例一条裸 ``ActivateSkill``；现在**每个座位一轮一次询问**，面上是本轮
+    全部可选项（票 01 §4 / §5）。
+
+    每轮（= 一次"选一条"）的顺序：
+
+    1. **重解析**（:func:`_activation_candidates`）：本座位条件成立、付得起、过闸门的候选；
+    2. **强制段先跑**（``locked`` / 觉醒 / ``Hook.forced``）：不问、不上脸（程序化约定：
+       官方只定档间次序，同档内"强制段先于可选项"是本仓的登记口径）；
+    3. **可选项合成一张面**问一次；``Pass`` = **结束本座位的这个时机**（票 01 §4-6）；
+    4. 派发选中的那一条 → 记 ``pass_used``、``pass_floor`` 落到它的档 → 下一轮。
+
+    **重入**（§6）：进度只由 :data:`PASS_STATE_KEY` 的显式游标表达——``"stay"`` 回来时
+    既不重发询问、也不重跑已完成的项；**不靠"重算候选集合"外推进度**（候选集合在效果
+    结算后可能变，隐式进度会答错轮）。
+
+    ``extra_instances``（M5-05a）只由"失去牌后"的派发传入：刚离开装备区的装备技能仍是
+    这一次移动的提供者（见 :func:`_instances_for`）。
+
+    **嵌套**：同键派发可以嵌套（``MOVE_AFTER`` 的钩子摸牌会就地再压一次同键派发）。嵌套的
+    那一趟用**新的一层**作用域（:func:`_pass_scope`），故不会续跑外层游标；``finally``
+    退出时把自己那一层弹出——``"stay"`` 也走 ``finally``，续跑时重新压同一层号。
+    """
+    scope = _pass_scope(frame, timing, key)
+    try:
+        state = _pass_state(frame, scope)
+        ring = _seat_ring(host, extra_instances)
+        while True:
+            if state["pass_terminated"] or state["pass_seat"] >= len(ring):
+                # R5 收口 / 全座位处理完：本趟 pass 结束，游标清掉。
+                _close_pass(frame, scope)
+                return None
+            seat = ring[state["pass_seat"]]
+            if state["pass_phase"] == "start":
+                candidates = _activation_candidates(
+                    host,
+                    frame,
+                    match,
+                    seat=seat,
+                    extra_instances=extra_instances,
+                    floor=state["pass_floor"],
+                    used=state["pass_used"],
+                )
+                if not candidates:
+                    # 本座位这个时机没有可发动的了 ⇒ 轮到下一个座位（§4.16 逐角色）。
+                    _pass_next_seat(state)
+                    continue
+                forced = tuple(candidate for candidate in candidates if candidate.forced)
+                state["pass_forced"] = forced
+                state["pass_forced_at"] = 0
+                state["pass_optional"] = (
+                    None
+                    if forced
+                    else tuple(
+                        candidate for candidate in candidates if not candidate.forced
+                    )
+                )
+                state["pass_phase"] = "forced" if forced else "ask"
+                continue
+            if state["pass_phase"] == "forced":
+                forced = state["pass_forced"]
+                while state["pass_forced_at"] < len(forced):
+                    candidate = forced[state["pass_forced_at"]]
+                    control = _run_candidate(host, frame, candidate, timing, key)
+                    if control == "stay":
+                        return control
+                    if control is not None:
+                        _close_pass(frame, scope)
+                        return control
+                    state["pass_used"] = (*state["pass_used"], candidate.skill_id)
+                    state["pass_forced_at"] += 1
+                # 强制段跑完之后再看可选项：条件在这一刻重判（票 01 §4 的"轮到时判"）。
+                state["pass_optional"] = None
+                state["pass_phase"] = "ask"
+                continue
+            if state["pass_phase"] == "ask":
+                optional = state["pass_optional"]
+                if optional is None:
+                    optional = tuple(
+                        candidate
+                        for candidate in _activation_candidates(
+                            host,
+                            frame,
+                            match,
+                            seat=seat,
+                            extra_instances=extra_instances,
+                            floor=state["pass_floor"],
+                            used=state["pass_used"],
+                        )
+                        if not candidate.forced
+                    )
+                    state["pass_optional"] = optional
+                if not optional:
+                    _pass_next_seat(state)
+                    continue
+                active = host.ask_skill_activation(
+                    frame,
+                    optional,
+                    timing,
+                    key=key,
+                    depth=scope[2],
+                    seat=seat,
+                    round=state["pass_round"],
+                    floor=state["pass_floor"],
+                    used=state["pass_used"],
+                )
+                if host.suspended(active):
+                    return "stay"
+                if not isinstance(active, ActivateSkill):
+                    # ``Pass`` = **结束本座位的这个时机**（票 01 §4-6；与改造前的"拒绝
+                    # 这一条、继续问下一条"不同）：剩下的候选（含还没轮到的强制段）一概
+                    # 不再发动。
+                    _pass_next_seat(state)
+                    continue
+                chosen = next(
+                    (
+                        candidate
+                        for candidate in optional
+                        if candidate.skill_id == active.skill_id
+                    ),
+                    None,
+                )
+                if chosen is None:
+                    # 候选集合是**唯一的合法面**（:func:`legal_actions_for`）：走到这里说明
+                    # 应答绕过了成员判定，fail-closed 比默默换一条更接近"不可观测的错"。
+                    raise RuntimeError(f"应答的技能不在本轮候选里：{active.skill_id!r}")
+                state["pass_chosen"] = chosen
+                state["pass_phase"] = "run"
+                continue
+            # 阶段机的最后一相：跑本轮选中的那一条（挂起重入时从这里续跑）。
+            chosen = state["pass_chosen"]
+            assert chosen is not None, "run 阶段必有选中项（阶段机不变量）"
+            control = _run_candidate(host, frame, chosen, timing, key)
+            if control == "stay":
+                return control
+            if control is not None:
+                _close_pass(frame, scope)
+                return control
+            state["pass_used"] = (*state["pass_used"], chosen.skill_id)
+            # 不升档（§2.1.2.3）：档只降不升——选定这一档之后，更优先的档不再进面。
+            state["pass_floor"] = chosen.tier
+            state["pass_round"] += 1
+            state["pass_chosen"] = None
+            state["pass_phase"] = "start"
+    finally:
+        _leave_pass_scope(frame)
 
 
 def _run_item(host: Any, frame: Frame, item: Any, instance: SkillInstance, timing: Timing) -> Control:
@@ -1558,11 +1909,13 @@ def dispatch_timing(
     *,
     extra_instances: tuple[SkillInstance, ...] = (),
 ) -> Control:
-    """在 ``timing`` 上按链序派发钩子；**第一个返回非 ``None`` 的钩子即短路**。
+    """在 ``timing`` 上派发钩子：逐角色、一次选一条、选完重估；**第一个返回非 ``None``
+    的钩子即短路**（与改造前同）。
 
     答案缓存键带上 :func:`~sgs.skills.damage_after.damage_point_index`（票 05）：逐点触发的
     时机里"第 1 点"与"第 2 点"是**两个**时机实例，非锁定技在每一轮各自问一次"是否发动"；
-    其余时机里该序号恒为 0，键与既有形态逐字相同（M2 基准不受影响）。
+    其余时机里该序号恒为 0，键与既有形态逐字相同（M2 基准不受影响）。pass 游标
+    （:data:`PASS_STATE_KEY`）用同一个键，故两个时机实例的轮次互不串味。
 
     ``extra_instances``（M5-05a）：本次派发额外参与的**临时实例**（失去装备派发用）；
     缺省为空 ⇒ 既有调用点的行为与集合逐字不变。
@@ -1582,7 +1935,10 @@ def dispatch_seam(host: Any, frame: Frame, kind: SeamKind) -> Control:
     """在帧内接缝 ``kind`` 上派发；键是接缝名而**不是时机**（票 30）。
 
     发动询问仍发生在当前帧所处的时机里（接缝都嵌在 C2），故 ``timing`` 只作询问记录的
-    语境；**答案缓存键用接缝名**，与同时机上的真钩子互不串味。
+    语境；**答案缓存键与 pass 游标用接缝名**，与同时机上的真钩子互不串味。
+
+    与 :func:`dispatch_timing` **共用** :func:`_dispatch`，故接缝候选同样带档、同样过
+    "不升档 / 每技能一次"的闸门、同样逐角色（票 01 §6 的硬要求）。
     """
     return _dispatch(
         host,

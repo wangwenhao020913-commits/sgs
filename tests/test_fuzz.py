@@ -1026,8 +1026,15 @@ def test_the_live_checker_catches_a_dead_player_holding_cards():
     engine = _play(1)
     victim = engine.state.players[1]
     victim.alive = False
-    victim.hand.append(engine.state.deck[0])
-    engine.state.deck.remove(engine.state.deck[0])
+    # 本用例只借一张**真实存在**的实体牌（区域来源不影响「阵亡者三区为空」这条判据）；
+    # 种子的对局走向会随规则实现变化，牌堆可能恰好被摸空（票 01 的 N 候选面就改了这一局的
+    # 随机轨迹），故按"牌堆 → 弃牌堆"的次序取。
+    card_id = (engine.state.deck or engine.state.discard)[-1]
+    if card_id in engine.state.deck:
+        engine.state.deck.remove(card_id)
+    else:
+        engine.state.discard.remove(card_id)
+    victim.hand.append(card_id)
 
     with pytest.raises(FuzzInvariantError, match="已阵亡"):
         _check_live_invariants(engine, engine.records[-1])

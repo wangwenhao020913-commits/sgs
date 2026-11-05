@@ -254,6 +254,58 @@ def test_a_shared_entry_for_a_single_class_field_goes_red():
 
 
 # ---------------------------------------------------------------------------
+# 断言 2′：询问的序列化面 = 冻结报文（票 01 的 Q6=B）
+# ---------------------------------------------------------------------------
+
+
+def test_the_skill_activation_query_keeps_its_frozen_serialized_face():
+    """票 01（Q6=B）：本轮候选清单是**本地面**，``SkillActivationQuery`` 的序列化面一个字段
+    都不加。
+
+    15 份录像逐字节带着这张询问的报文（``min_picks`` / ``max_picks`` / ``slots`` 一类冻结
+    字段）。本条把「哪些字段不进记录流」钉成**字段级**判据：``exclude=True`` 的名单变了
+    就红——新加的本地面（``skill_ids`` / ``activation_preactivations``）也必须在名单里，
+    否则 47 条金录像立刻变红（那是 ``tools/check_goldens.sh`` 的另一半判据）。
+    """
+    from sgs.state import SkillActivationQuery
+
+    excluded = {
+        name for name, field in SkillActivationQuery.model_fields.items() if field.exclude
+    }
+    assert excluded == {
+        "transform_preactivations",
+        "transform_actions",
+        "preactivation",
+        "skill_ids",
+        "activation_preactivations",
+    }, (
+        "SkillActivationQuery 的 exclude=True 字段集变了：这正是「不进记录流」的那份名单；"
+        "加一个进记录流的字段 = 15 份录像 / 47 条金录像一起变红"
+    )
+    # ``revealed`` 没有字段级 exclude，但序列化器在**为空**时把它整键删掉（``_QueryBase``
+    # 的 ``_serialize``），故恒定落盘的字段集要把它单列出去。
+    serialized = {
+        name
+        for name, field in SkillActivationQuery.model_fields.items()
+        if not field.exclude and name != "revealed"
+    }
+    assert serialized == {
+        "kind",
+        "seq",
+        "actor",
+        "timing",
+        "prompt",
+        "legal_actions",
+        "view",
+        "skill_id",
+        "optional",
+        "min_picks",
+        "max_picks",
+        "slots",
+    }, "冻结报文的字段集（票 01 前后逐字相同）"
+
+
+# ---------------------------------------------------------------------------
 # 断言 3：Mode 表（每个模式四个格子，站点可解析）
 # ---------------------------------------------------------------------------
 
