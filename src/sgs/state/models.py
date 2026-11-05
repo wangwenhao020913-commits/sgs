@@ -657,9 +657,18 @@ class Player(BaseModel):
     过期 = 回合末，**不随技能实例存亡撤回**（故住座位而不是 ``skill_state``）。
     **不发 delta**：与 ``luoyi_active`` 同姿态——回放按同一条【闪】的应答重建。
     """
+    discarded_this_turn: bool = False
+    """本回合**弃置过牌**（lei-batch 票 03 的框架面；诸葛瞻【罪论】选项 2 的内置检测器）。
+
+    用户 2026-11-05 裁定：「未弃置过牌」= 技能拥有者于**自身回合内**弃置牌时置 ``False``
+    的检测器、**自身回合结束后**复位。落点 = :meth:`Engine.move_in_frame` 的
+    ``reason is DISCARD`` 分支（``actor`` 是弃置者：自己被拆牌 / 被别人弃置不算"你弃置"，
+    与【过河拆桥】一类"别人动手"的口径一致）。复位点与 ``damage_dealt_this_turn`` 同一处
+    （``Engine._clear_turn_effects``）——那正是"回合结束后"，不需要新时机。
+    **不发 delta**：与 ``hand_card_prohibited`` 同姿态。
+    """
     hand_limit_bonus: int = 0
     """本回合**手牌上限的加式增量**（M6 票 08；spec D11 / D9 的第二轴）。
-
     写入唯一入口 :meth:`Engine.add_hand_limit_bonus`（【清俭】作用于**当前回合角色**，
     【集智】作用于自己）；读取方是 :func:`sgs.effects.hand_limit` 的加式段。形状 =
     D9 的**一次性效果**（作用座位、增量、过期 = 回合末）：增量住**座位**、不随来源技能

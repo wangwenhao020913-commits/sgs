@@ -27,6 +27,7 @@ from sgs.state import (
     ActivateSkill,
     EndPhase,
     FrameKind,
+    MoveReason,
     Pass,
     Phase,
     QueryKind,
@@ -34,6 +35,8 @@ from sgs.state import (
     SelectOption,
     SlotKind,
     UseCard,
+    Zone,
+    ZoneRef,
 )
 from sgs.timing import Timing
 
@@ -609,3 +612,27 @@ def test_congjian_gives_a_card_and_draws_one_for_a_non_equipment_gift():
         and record.to_zone.seat == 0
     ]
     assert len(draws) == 1, f"非装备牌 ⇒ 摸一张（实得 {len(draws)} 条摸牌记录）"
+
+
+def test_discarding_a_card_is_tracked_for_the_turn_and_reset_after_it():
+    """「未弃置过牌」检测器（lei-batch 票 03 的框架面；用户 2026-11-05 的口径）。
+
+    弃置者 = ``actor``（自己被拆 / 被别人弃置不算"你弃置"）；复位点 = 回合末清理
+    （即"自身回合结束后"），不需要新时机。
+    """
+    engine = _seal_engine()
+    state = engine.state
+    assert state.player(0).discarded_this_turn is False
+
+    engine.move_in_frame(
+        None,
+        state.refs(state.player(0).hand[:1]),
+        to_zone=ZoneRef(Zone.DISCARD),
+        reason=MoveReason.DISCARD,
+        owner=0,
+        actor=0,
+    )
+    assert state.player(0).discarded_this_turn is True, "弃置者是自己 ⇒ 置真"
+
+    engine._clear_turn_effects()
+    assert state.player(0).discarded_this_turn is False, "回合结束后复位"

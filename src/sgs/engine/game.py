@@ -3123,6 +3123,10 @@ class Engine:
             depth=self.stack.depth,
         )
         prune_skill_state(self.state)
+        # 「本回合弃置过牌」检测器（lei-batch 票 03；诸葛瞻【罪论】选项 2）：
+        # 弃置者是 ``actor``（自己被拆 / 被别人弃置不算"你弃置"），回合末复位。
+        if reason is MoveReason.DISCARD and actor is not None and delta.cards:
+            self.state.player(actor).discarded_this_turn = True
         # 牌移动后同样核一次来源：装备 / 获得来源离场时，随来源消失的标签立刻清掉
         # （M6 票 09；武将技能失去 / 失效另走各自写入口的同一次清理）。
         self._prune_card_tags()
@@ -4203,6 +4207,8 @@ class Engine:
             player.xiongluan_target = None
             player.heart_slash_bonus_against.clear()
             player.damage_dealt_this_turn = False
+            # 「未弃置过牌」检测器的复位点（用户 2026-11-05 裁定：回合结束后置 True）。
+            player.discarded_this_turn = False
             player.hand_limit_bonus = 0
             self._clear_paoxiao_bonus(player.seat)
         # 牌标签的"本回合不计入"（M6 票 09）：与其它 ``TURN`` 作用域状态同一收尾点，
