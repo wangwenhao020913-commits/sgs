@@ -1936,6 +1936,7 @@ def _arrange_spec(
             "rows": {"top": spec.top_label, "bottom": spec.bottom_label},
             "enumerate": bool(spec.enumerate_candidates),
             "reorder": bool(spec.reorder),
+            "startsOnTop": bool(getattr(spec, "starts_on_top", False)),
         }
     split_spec = getattr(spec, "split", None)
     split: str | dict[str, int]

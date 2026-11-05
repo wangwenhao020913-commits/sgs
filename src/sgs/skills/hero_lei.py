@@ -632,6 +632,7 @@ ZUILUN_ARRANGE = TwoRowArrange(
     top_label="牌堆顶",
     bottom_label="获得",
     reorder=True,
+    starts_on_top=True,
 )
 """【罪论】的两行排列规格（用户 2026-11-05 签的形态）。
 
