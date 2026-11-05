@@ -36,10 +36,31 @@ import pytest
 from pydantic import ValidationError
 
 from sgs.data import RuleConfig, load_content_pack
+from sgs.effects import (
+    CandidateScope,
+    CarrierKind,
+    Modifier,
+    ModifierPoint,
+    PriorityClass,
+    need_card_tier,
+)
 from sgs.engine import Engine, TimingRecord, record_json
 from sgs.resolution import Frame
-from sgs.skills import PASS_STATE_KEY
-from sgs.state import ActivateSkill, FrameKind, Pass, QueryKind, SelectOption
+from sgs.skills import PASS_STATE_KEY, SkillDef
+from sgs.state import (
+    ActivateSkill,
+    DodgeContext,
+    EndPhase,
+    FrameKind,
+    Pass,
+    PeachContext,
+    QueryKind,
+    RespondContext,
+    RespondMode,
+    SelectOption,
+    UseCard,
+    WindowCause,
+)
 from sgs.timing import (
     DISPATCH_WHITELIST,
     EMPTY_LOG,
@@ -49,7 +70,7 @@ from sgs.timing import (
     Timing,
 )
 
-from support import SeatSpec, build_state
+from support import SeatSpec, build_state, cards_of_type, run_queries
 
 PACK = load_content_pack(deck_profile="basic_53")
 """合成技能 / 构造局面用最小牌堆档（与其它构造局面单测同一档）。"""
@@ -1061,3 +1082,416 @@ def _pass_cursor(engine) -> dict:
     assert len(states) == 1, f"本用例里同一时机只该有一趟 pass：{states}"
     return next(iter(states.values()))
 
+
+
+# ---------------------------------------------------------------------------
+# 需要（使用 / 打出）牌窗口的档位闸门（票 03 §4–§5）
+#
+# 规则出处：补充一手《三国杀规则集 V3.0》§4.2.2 / §4.2.5（「需要牌」拆成 ❶❷❸ 三个固定
+# 顺序的时机）+ §2.1.2.3（**不升档**：曹操先发动【八卦阵】⇒ 判定黑 ⇒「只能使用一张牌名为
+# 【闪】的牌，没有发动〖护驾〗的时机了」）。本票只给 **❶**（提供者窗口）补档位与闸门；
+# ❷/❸ 的合并面按「结果等价」保留并登记偏离（票面 §4′）。
+#
+# 本节的提供者是**合成技能**（不新增武将 / 装备数据）：档由载体声明（``HERO`` / ``EQUIPMENT``），
+# 两条都只在需要【闪】的窗口里上脸。不注册提供者回调 ⇒ 引擎走"选中才惰性判定"那条路
+# （与【八卦阵】同形：红 = 需要被满足，黑 = 没满足、窗口重问）。
+# ---------------------------------------------------------------------------
+
+NEED_HERO = "hero.fake.need_hero"
+NEED_EQUIP = "hero.fake.need_equip"
+"""合成提供者 id（只活在 ``CATALOG`` 注入里）：武将档 / 装备档各一条。"""
+
+
+def _need_card_provider(skill_id: str, *, carrier: CarrierKind) -> SkillDef:
+    """一条合成**提供者**：候选 = 自己的裸 ``ActivateSkill``（只在【闪】窗口）。"""
+
+    def offer(state, ctx, current):
+        del state
+        if ctx.scope is not CandidateScope.DODGE:
+            return current
+        return (*current, ActivateSkill(skill_id=skill_id, answers_seq=ctx.answers_seq))
+
+    return SkillDef(
+        skill_id=skill_id,
+        locked=False,
+        carrier=carrier,
+        modifiers=(Modifier(ModifierPoint.CANDIDATES, offer),),
+    )
+
+
+def _card_of_color(type_id: str, *, black: bool) -> int:
+    """某牌名里第一张黑色 / 红色的牌（判定牌用它当"没通过 / 通过"）。"""
+    from sgs.data import Color, color_of_suit
+
+    wanted = Color.BLACK if black else Color.RED
+    return next(
+        card_id
+        for card_id in cards_of_type(PACK, type_id)
+        if color_of_suit(PACK.deck.cards[card_id].suit) is wanted
+    )
+
+
+def _deck_before_the_first_judge(judge: int, *, used: tuple[int, ...]) -> tuple[int, ...]:
+    """把 ``judge`` 放在**第 3 张**：座位 0 的摸牌阶段先取走前两张，判定取到的就是它。"""
+    excluded = set(used) | {judge}
+    fillers = [
+        card_id for card_id in range(len(PACK.deck.cards)) if card_id not in excluded
+    ]
+    return (fillers[0], fillers[1], judge, *fillers[2:])
+
+
+class _Answers:
+    """按座位的一份脚本：``handler`` 返回动作；返回 ``None`` 时退到最小合法应答。"""
+
+    def __init__(self, handler=None) -> None:
+        self._handler = handler
+
+    def respond(self, query):
+        if self._handler is not None:
+            action = self._handler(query)
+            if action is not None:
+                return action
+        if query.kind == QueryKind.PLAY_PHASE:
+            return next(
+                (
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, EndPhase)
+                ),
+                query.legal_actions[0],
+            )
+        return next(
+            (
+                action
+                for action in query.legal_actions
+                if isinstance(action, Pass)
+            ),
+            query.legal_actions[0],
+        )
+
+
+def _need_card_engine(*, judge: int, hand: tuple[int, ...], skills: tuple[str, ...]):
+    """座位 0 用一张【杀】打座位 1；座位 1 = 需要【闪】的那一方，``skills`` 授予给它。"""
+    slash = cards_of_type(PACK, "slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[SeatSpec(hand=(slash,)), SeatSpec(hand=hand)],
+        deck=_deck_before_the_first_judge(judge, used=(slash, *hand, judge)),
+        turn_seat=0,
+    )
+    engine = Engine.from_state(state, seed=5)
+    for skill_id in skills:
+        engine.grant_skill(1, skill_id)
+    return engine, slash
+
+
+def _slash_resolved(engine, slash: int) -> bool:
+    """那张【杀】的使用链走完并结算栈清空（与 ``test_hero_response_window`` 同判据）。"""
+    return slash in engine.state.discard and not engine.stack
+
+
+def _need_card_face(engine, slash: int, *, answer) -> list[tuple[ActivateSkill, ...]]:
+    """把座位 1 在【闪】窗口被问到的每一张面记下来；``answer`` 逐问给出应答。"""
+    faces: list[tuple] = []
+
+    def defender(query):
+        if query.kind != QueryKind.DODGE:
+            return None
+        faces.append(tuple(query.legal_actions))
+        return answer(len(faces) - 1, query)
+
+    run_queries(
+        engine,
+        [
+            _Answers(lambda query: _slash_at(query, slash)),
+            _Answers(defender),
+        ],
+        lambda e: _slash_resolved(e, slash),
+    )
+    return faces
+
+
+def _slash_at(query, slash: int):
+    """座位 0 的出牌阶段：用 ``slash`` 打座位 1（唯一的【杀】候选）。"""
+    if query.kind != QueryKind.PLAY_PHASE:
+        return None
+    return next(
+        (
+            action
+            for action in query.legal_actions
+            if isinstance(action, UseCard)
+            and action.card.card_id == slash
+            and action.targets == (1,)
+        ),
+        None,
+    )
+
+
+def _providers(face) -> tuple[str, ...]:
+    """一张面上的提供者 id（**次序本身**：解析序 = 档序；不排序、不去重）。"""
+    return tuple(
+        action.skill_id for action in face if isinstance(action, ActivateSkill)
+    )
+
+
+def _card_ids(face) -> tuple[int, ...]:
+    """一张面上的真牌候选 id（同上，不排序）。"""
+    return tuple(action.card.card_id for action in face if isinstance(action, UseCard))
+
+
+def test_a_lower_tier_provider_closes_the_higher_tier_in_the_need_card_window(
+    monkeypatch,
+):
+    """§5-1（不升档的曹操形状）：先发动**装备档**提供者 ⇒ 没通过后，武将档的提供者不再进面。
+
+    规则原例（补充一手 §2.1.2.3）：曹操先发动【八卦阵】（装备）⇒ 判定黑 ⇒「只能使用一张
+    牌名为【闪】的牌，**没有发动〖护驾〗的时机了**」。合成两条提供者（装备档 / 武将档）+
+    一张真【闪】：第二次询问的面里只剩真【闪】与"放弃"。
+    """
+    black = _card_of_color("slash", black=True)
+    dodge = cards_of_type(PACK, "dodge")[0]
+    _install_fake_skills(
+        monkeypatch,
+        _need_card_provider(NEED_HERO, carrier=CarrierKind.HERO),
+        _need_card_provider(NEED_EQUIP, carrier=CarrierKind.EQUIPMENT),
+    )
+    engine, slash = _need_card_engine(
+        judge=black, hand=(dodge,), skills=(NEED_HERO, NEED_EQUIP)
+    )
+
+    faces = _need_card_face(
+        engine,
+        slash,
+        answer=lambda index, query: (
+            next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, ActivateSkill)
+                and action.skill_id == NEED_EQUIP
+            )
+            if index == 0
+            else None  # 第二问：放弃（闸门不替玩家做选择）
+        ),
+    )
+
+    assert len(faces) == 2, "提供者没通过 ⇒ 重开真牌窗口（一张面 + 重开，窗口结构不变）"
+    assert NEED_HERO in _providers(faces[0]) and NEED_EQUIP in _providers(faces[0]), (
+        "首问两档都要上脸（玩家自己决定先发动哪一档）："
+        f"实得 {_providers(faces[0])}"
+    )
+    assert NEED_EQUIP not in _providers(faces[1]), "每提供者只问一次（既有口径）"
+    assert NEED_HERO not in _providers(faces[1]), (
+        "选了装备档（低档）⇒ 武将档（更高优先）不再进面（曹操例）："
+        f"实得 {_providers(faces[1])}"
+    )
+    assert _card_ids(faces[1]) == (dodge,), (
+        "真【闪】是最低档，照旧可点（规则原例：此时仍可使用一张【闪】）"
+    )
+    assert engine.state.player(1).hp == 3, "放弃 ⇒ 【杀】照常结算"
+
+
+def test_a_failed_higher_tier_provider_leaves_the_lower_tier_open(monkeypatch):
+    """§5-1 的反面对照：先发动**武将档**提供者 ⇒ 没通过后，装备档的提供者仍可点。
+
+    "不升档"只禁"往回升"：档值越小越优先，``floor = 0``（武将档）⇒ 装备档（1）照进。
+    """
+    black = _card_of_color("slash", black=True)
+    dodge = cards_of_type(PACK, "dodge")[0]
+    _install_fake_skills(
+        monkeypatch,
+        _need_card_provider(NEED_HERO, carrier=CarrierKind.HERO),
+        _need_card_provider(NEED_EQUIP, carrier=CarrierKind.EQUIPMENT),
+    )
+    engine, slash = _need_card_engine(
+        judge=black, hand=(dodge,), skills=(NEED_HERO, NEED_EQUIP)
+    )
+
+    faces = _need_card_face(
+        engine,
+        slash,
+        answer=lambda index, query: (
+            next(
+                action
+                for action in query.legal_actions
+                if isinstance(action, ActivateSkill)
+                and action.skill_id == NEED_HERO
+            )
+            if index == 0
+            else None
+        ),
+    )
+
+    assert len(faces) == 2
+    assert NEED_HERO not in _providers(faces[1]), "每提供者只问一次"
+    assert NEED_EQUIP in _providers(faces[1]), (
+        f"先选高档（武将）⇒ 装备档照进（档值 1 ≥ floor 0）：实得 {_providers(faces[1])}"
+    )
+
+
+def _four_window_state():
+    """一个座位同时具备**四扇窗口**的真实提供者 / 真牌（于吉 + 八卦阵 + 闪 / 桃 / 无懈）。
+
+    于吉身上【蛊惑】是武将档（HERO）、八卦阵是装备档（EQUIPMENT）——一张【闪】面上三种档
+    同时出现，故档位标签的"形状断言"不依赖任何合成技能。
+    """
+    from sgs.data import load_content_pack as load
+
+    pack = load(deck_profile="standard_108")
+    ids = {
+        type_id: next(
+            card_id
+            for card_id, card in enumerate(pack.deck.cards)
+            if card.type == type_id
+        )
+        for type_id in ("dodge", "peach", "nullify", "eight_diagrams")
+    }
+    state = build_state(
+        pack=pack,
+        seats=[
+            SeatSpec(
+                hero="yuji_mobile",
+                hand=(ids["dodge"], ids["peach"], ids["nullify"]),
+                equip=(ids["eight_diagrams"],),
+            ),
+            SeatSpec(),
+        ],
+        deck=tuple(
+            card_id
+            for card_id in range(len(pack.deck.cards))
+            if card_id not in set(ids.values())
+        ),
+        turn_seat=0,
+    )
+    return state, ids
+
+
+def test_a_need_card_face_labels_every_candidate_by_its_deliverer():
+    """§5-3（形状断言，不比对排序）：四扇窗口的候选都带 ``int(priority_class)``。
+
+    真牌候选 = ``CARD_USE``（2）、武将技能 = ``HERO``（0）、装备技能 = ``EQUIPMENT``（1）。
+    档**由技能定义派生**（``SkillDef.priority_class``，票 01 的同一份声明）——本票不另写判据，
+    故这里断的是"标签读的是那张声明"，不是硬编码的字典。
+    """
+    from sgs.effects import legal_actions_for
+
+    state, ids = _four_window_state()
+    faces = {
+        "DODGE": legal_actions_for(
+            state,
+            0,
+            QueryKind.DODGE,
+            answers_seq=1,
+            payload=DodgeContext(),
+        ),
+        "PEACH": legal_actions_for(
+            state,
+            0,
+            QueryKind.PEACH,
+            answers_seq=1,
+            dying=0,
+            payload=PeachContext(),
+        ),
+        "RESPOND": legal_actions_for(
+            state,
+            0,
+            QueryKind.RESPOND,
+            answers_seq=1,
+            payload=RespondContext(cause=WindowCause.DUEL, required="slash"),
+        ),
+        "NULLIFY": legal_actions_for(
+            state,
+            0,
+            QueryKind.RESPOND,
+            answers_seq=1,
+            payload=RespondContext(
+                cause=WindowCause.NULLIFY,
+                required="nullify",
+                mode=RespondMode.USE,
+            ),
+        ),
+    }
+
+    tiers = {
+        kind: tuple(
+            (action.kind, need_card_tier(action))
+            for action in face
+            if not isinstance(action, Pass)
+        )
+        for kind, face in faces.items()
+    }
+    # 真牌 = CARD_USE：闪 / 桃 / 无懈在各自的窗口里都只有这一档。
+    for kind in ("DODGE", "PEACH", "NULLIFY"):
+        assert ("UseCard", int(PriorityClass.CARD_USE)) in tiers[kind], (
+            f"{kind} 面里的真牌候选应带 CARD_USE：实得 {tiers[kind]}"
+        )
+    assert ("UseCard", int(PriorityClass.CARD_USE)) not in tiers["RESPOND"], (
+        "决斗窗口要的是【杀】：于吉手里没有【杀】，唯一的候选是提供者"
+    )
+    # 武将档：【蛊惑】在四扇窗口里都是 HERO。
+    for kind in ("DODGE", "PEACH", "RESPOND", "NULLIFY"):
+        assert ("ActivateSkill", int(PriorityClass.HERO)) in tiers[kind], (
+            f"{kind} 面里的【蛊惑】应带 HERO：实得 {tiers[kind]}"
+        )
+    # 装备档：只有需要【闪】的窗口有装备提供者（【八卦阵】）。
+    assert ("ActivateSkill", int(PriorityClass.EQUIPMENT)) in tiers["DODGE"], (
+        f"【八卦阵】应带 EQUIPMENT：实得 {tiers['DODGE']}"
+    )
+    for kind in ("PEACH", "RESPOND", "NULLIFY"):
+        assert ("ActivateSkill", int(PriorityClass.EQUIPMENT)) not in tiers[kind], (
+            f"{kind} 窗口今天没有装备档提供者：实得 {tiers[kind]}"
+        )
+    assert ids["dodge"] in {
+        action.card.card_id for action in faces["DODGE"] if isinstance(action, UseCard)
+    }, "那张真【闪】确实在面里（档的断言不是空面）"
+
+
+def test_the_need_card_gate_reads_the_same_floor_in_all_four_windows():
+    """§4-2：四扇窗口共用**同一处**闸门（``legal_actions_for`` 是唯一候选生成口）。
+
+    ``floor = 1``（上一手选了装备档）⇒ 更高优先的武将档不再进面；真牌（``CARD_USE`` = 2）
+    与装备档照进。求桃 / 打出 / 无懈三扇今天只有武将档提供者（【蛊惑】），故端到端不可观测
+    ——这条把四扇窗口的**接线**钉在候选生成口上（读到的是同一个 ``floor`` 字段）。
+    """
+    from sgs.effects import legal_actions_for
+
+    state, _ids = _four_window_state()
+
+    def providers(face) -> tuple[str, ...]:
+        return tuple(a.skill_id for a in face if isinstance(a, ActivateSkill))
+
+    def without_floor(kind: str, **kwargs) -> tuple:
+        return legal_actions_for(state, 0, kind, answers_seq=1, **kwargs)
+
+    dodge = without_floor(QueryKind.DODGE, payload=DodgeContext(floor=1))
+    assert "hero.yuji_mobile.guohuo" not in providers(dodge), (
+        "武将档（0）被 floor=1 挡掉"
+    )
+    assert "equip.eight_diagrams" in providers(dodge), "装备档（1）照进（1 ≥ 1）"
+    assert any(isinstance(a, UseCard) for a in dodge), "真牌（2）照进"
+
+    for kind, payload in (
+        (
+            QueryKind.PEACH,
+            PeachContext(floor=1),
+        ),
+        (
+            QueryKind.RESPOND,
+            RespondContext(cause=WindowCause.DUEL, required="slash", floor=1),
+        ),
+        (
+            QueryKind.RESPOND,
+            RespondContext(
+                cause=WindowCause.NULLIFY,
+                required="nullify",
+                mode=RespondMode.USE,
+                floor=1,
+            ),
+        ),
+    ):
+        face = legal_actions_for(
+            state, 0, kind, answers_seq=1, dying=0 if kind == QueryKind.PEACH else None,
+            payload=payload,
+        )
+        assert "hero.yuji_mobile.guohuo" not in providers(face), (
+            f"{kind} 窗口的武将档提供者同样被 floor=1 挡掉"
+        )

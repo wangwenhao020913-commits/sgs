@@ -45,6 +45,7 @@ __all__ = [
     "EndPhase",
     "HeroCardRef",
     "Pass",
+    "PeachContext",
     "PeachQuery",
     "PlayCard",
     "PlayPhaseQuery",
@@ -297,6 +298,13 @@ class RespondContext:
     ``declared`` = 这扇**收集式**窗口已经收到过一条声明（票 03）：赢家已定（首个声明者），
     后面再声明的牌**不会进结算**。提供者（【蛊惑】）据此收口——它的产物是扣置一张手牌换来的，
     让它在赢家已定之后还发候选，玩家点下去只会白扣一张牌。**不进记录流**（同上）。
+
+    ``floor`` = 本次需要牌**事件**里已经定下的优先级档（票 03 §4-2；档越小越优先，
+    ``HERO=0`` / ``EQUIPMENT=1`` / ``CARD_USE=2``）。候选生成口据此执行"不升档"：
+    档 < ``floor`` 的候选不进面（曹操先发动【八卦阵】⇒ 判定黑 ⇒ 没有〖护驾〗的时机了）。
+    窗口在"这一次响应成立"处把它清回 0（``_dodge_window`` 的 ``dodges_done`` 每加一、
+    【决斗】每收下一次响应）——floor 的粒度是**一个需要牌事件**，不是整扇窗口（补充一手
+    §2.1.2.2(2) 的"每时机一次响应机会"+ §4.2.2 的 ❶❷❸）。**不进记录流**（同上）。
     """
 
     cause: WindowCause
@@ -309,6 +317,7 @@ class RespondContext:
     zones: tuple[Zone, ...] = (Zone.HAND,)
     declared: bool = False
     rejudge_offers: tuple[RejudgeOffer, ...] = ()
+    floor: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,9 +348,31 @@ class DodgeContext:
 
     "每提供者只问一次"（票 10 §5）：【八卦阵】判定未通过后，再次询问同一个"需要【闪】"
     的窗口时必须不再提供它。载荷只装**已经问过**的技能 id，候选生成器据此过滤。
+
+    ``floor`` = 本次**需要【闪】事件**里已经定下的优先级档（票 03 §4-2，语义与
+    :attr:`RespondContext.floor` 逐字相同）：档 < ``floor`` 的候选不进面，档值越小越优先。
+    ``_dodge_window`` 在 ``dodges_done`` 每加一处把它清回 0——【无双】的两张【闪】是
+    **两次**需要牌事件，第二张的 floor 从头开始（补充一手 §2.1.2.2(2)）。**不进记录流**。
     """
 
     providers_used: tuple[str, ...] = ()
+    floor: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class PeachContext:
+    """``PEACH`` 候选生成的类型化载荷（票 03 §4）：本次求桃里已定下的优先级档 ``floor``。
+
+    求桃窗口此前没有载荷（候选只由真牌 / 转化源构成）；票 03 起它也有**提供者**
+    （【蛊惑】"扣置一张手牌当【桃】"），故与另外三扇需要牌窗口走**同一道**"不升档"闸门，
+    载荷与 :class:`DodgeContext` 同形（档 < ``floor`` 的候选不进面；档越小越优先）。
+
+    求桃的"这一次响应成立"= :func:`sgs.engine.steps._peach_use`（回复结算开始的那一刻）：
+    在那之后要么脱离濒死、要么回退开新窗（同一帧内的**新**事件），floor 都在那里清回 0。
+    **不进记录流**（:class:`PeachQuery` 的序列化字段一个不加）。
+    """
+
+    floor: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -414,6 +414,104 @@ def test_wushuang_a_red_eight_diagrams_counts_as_one_of_the_two_dodges():
     assert engine.state.player(1).hp == 4, "两张都成功 ⇒ 抵消"
 
 
+def test_wushuang_a_real_dodge_first_still_offers_the_provider_for_the_second():
+    """票 03 §5-2（floor 按**需要牌事件**重置）：第一张【闪】用真牌 ⇒ 第二张仍可发动【八卦阵】。
+
+    【无双】要两张【闪】= **两次**需要牌事件（补充一手 §2.1.2.2(2)）：真牌是 ``CARD_USE``
+    （2，最低优先），若 floor 跨事件残留，第二张就会被自己的"不升档"挡掉——而规则只要求
+    **同一事件内**不升档。判据 = 第二问的面里【八卦阵】仍在，且红判定让它凑够两张、抵消
+    【杀】。
+    """
+    red_judge = _first_by_color("peach", black=False)
+    slash, state = _wushuang_provider_state(_cards("dodge")[0], red_judge)
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _use(query, slash, 1)
+        return None
+
+    faces: list[tuple[str, ...]] = []
+
+    def defender(query):
+        if query.kind == "DODGE":
+            faces.append(
+                tuple(
+                    action.skill_id
+                    for action in query.legal_actions
+                    if isinstance(action, ActivateSkill)
+                )
+            )
+            if len(faces) == 1:
+                return _find(query, lambda action: isinstance(action, UseCard))
+            return _find(query, lambda action: isinstance(action, ActivateSkill))
+        return None
+
+    engine = run_until(
+        Engine.from_state(state, seed=1),
+        [Scripted(attacker), Scripted(defender)],
+        lambda e: _slash_done(e, slash),
+    )
+
+    assert len(faces) == 2, "两次需要牌事件各问一次"
+    assert "equip.eight_diagrams" in faces[1], (
+        "第一张【闪】用真牌 ⇒ 第二张的 floor 已重置，【八卦阵】仍可点："
+        f"实得第二问 {faces[1]}"
+    )
+    assert engine.state.player(1).hp == 4, "真牌 + 八卦阵凑够两张 ⇒ 抵消"
+
+
+def test_wushuang_a_real_slash_first_still_offers_guohuo_for_the_second():
+    """票 03 §5-2 的另一扇窗口（打出 / 使用响应）：【决斗】的两张【杀】之间 floor 也重置。
+
+    吕布【无双】②让对手每次响应要连出两张【杀】；于吉先打出**真【杀】**（``CARD_USE``），
+    第二张仍可发动【蛊惑】（武将档）——与【闪】窗口同一条"一次响应成立即重置"的读法，
+    落点不同：这里是 :func:`sgs.effects.ops._duel_accepted`。
+    """
+    duel, first, second = _cards("duel")[0], _cards("slash")[0], _cards("slash")[1]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hand=(duel,), hero="lvbu"),
+            SeatSpec(hand=(first, second), hero="yuji_mobile"),
+        ],
+        deck=_deck_excluding(duel, first, second),
+        turn_seat=0,
+    )
+
+    def attacker(query):
+        if query.kind == "PLAY_PHASE":
+            return _use(query, duel, 1)
+        return None
+
+    faces: list[tuple[str, ...]] = []
+
+    def defender(query):
+        if query.kind == "RESPOND" and query.cause is WindowCause.DUEL:
+            faces.append(
+                tuple(
+                    action.skill_id
+                    for action in query.legal_actions
+                    if isinstance(action, ActivateSkill)
+                )
+            )
+            if len(faces) == 1:
+                return _find(query, lambda action: isinstance(action, PlayCard))
+            return None  # 第二张放弃：停止推进，面已经被记下
+        return None
+
+    engine = run_until(
+        Engine.from_state(state, seed=1),
+        [Scripted(attacker), Scripted(defender)],
+        lambda e: e.state.player(1).hp < 4,
+    )
+
+    assert len(faces) == 2, "【无双】的两张【杀】= 两次需要牌事件"
+    assert "hero.yuji_mobile.guohuo" in faces[1], (
+        "第一张【杀】用真牌 ⇒ 第二张的 floor 已重置，【蛊惑】仍可点："
+        f"实得第二问 {faces[1]}"
+    )
+
+
 def test_wushuang_a_black_eight_diagrams_does_not_count():
     """判定为黑 ⇒ 该提供者机会用尽、只算零张；真牌只够一张 ⇒ 照常受伤。"""
     black_judge = _first_by_color("slash", black=True)

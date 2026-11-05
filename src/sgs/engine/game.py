@@ -55,6 +55,8 @@ from sgs.effects import (
     legal_actions_for,
     locate,
     move_card,
+    need_card_floor,
+    record_need_card_choice,
     targets_within_attack_range,
 )
 from sgs.resolution import (
@@ -1421,13 +1423,19 @@ class Engine:
         ``revealed`` 是**本次询问授予该参与者的牌面**（票 10 §①，缺省空 = 不授予）：
         它是通用通道，任何询问都能带（【观星】的排列与将来【遗计】的"只看不排"共用），
         随询问结束即失效、不写状态、不进 ``PlayerView``。
+
+        拿到应答之后顺手记下这次选中的**优先级档**（票 03 §4-2）：【闪】与求桃是四扇
+        需要牌窗口里的两扇，闸门的输入由 :meth:`_note_need_card_choice` 一处写。
         """
-        return self.ask(
+        action = self.ask(
             lambda seq: self._build_query(
                 kind, actor, timing, seq, dying=dying, payload=payload, revealed=revealed
             ),
             identity=self._ask_identity(kind, actor, frame),
         )
+        if kind in (QueryKind.DODGE, QueryKind.PEACH):
+            self._note_need_card_choice(frame, actor, action)
+        return action
 
     def ask_arrange(
         self,
@@ -2229,7 +2237,13 @@ class Engine:
         :func:`~sgs.skills.rejudge_card_zones` 传入（界【鬼才】含装备区，M6 票 14）。
         ``declared`` 只服务**收集式**窗口（票 03）：赢家已定（首个声明者）时提供者闭嘴
         ——它的产物要扣置一张手牌，赢家已定时不会进结算。
+
+        ``floor`` **不由调用方给**：它读承载帧里这一座位已定下的优先级档（票 03 §4-2，
+        :func:`~sgs.effects.need_card_floor`），四扇需要牌窗口因此共用同一份状态；
+        拿到应答之后再记回这一档（:meth:`_note_need_card_choice`）。改判窗口（``REJUDGE``）
+        不是使用 / 打出 ⇒ 既不读也不记。
         """
+        need_card = mode is not RespondMode.REJUDGE
         payload = RespondContext(
             cause=cause,
             required=required,
@@ -2241,13 +2255,33 @@ class Engine:
             zones=tuple(zones),
             declared=declared,
             rejudge_offers=tuple(rejudge_offers),
+            floor=need_card_floor(frame, actor) if need_card else 0,
         )
-        return self.ask(
+        action = self.ask(
             lambda seq: self._build_query(
                 QueryKind.RESPOND, actor, timing, seq, payload=payload
             ),
             identity=self._ask_identity(QueryKind.RESPOND, actor, frame),
         )
+        if need_card:
+            self._note_need_card_choice(frame, actor, action)
+        return action
+
+    def _note_need_card_choice(
+        self, frame: Frame | None, actor: int, action: Any
+    ) -> None:
+        """把这一次应答选中的**优先级档**记进承载帧（票 03 §4-2 的唯一写入点）。
+
+        四扇需要牌窗口的收口在这里汇合：【闪】/ 求桃走 :meth:`ask_query`，打出 / 使用响应
+        （含无懈）走 :meth:`ask_respond`。判据本身只有一份（:func:`~sgs.effects.need_card_tier`
+        —— 真牌 = ``CARD_USE``、提供者 = 定义声明的档），这里只负责"写不写"：
+
+        - 挂起（``SUSPEND``）与 ``Pass`` 不写（没有"上一档"）；
+        - 写完**不**在这里清：窗口随后按"这一次响应成不成立"决定（``reset_need_card_floor``）。
+        """
+        if frame is None or self.suspended(action):
+            return
+        record_need_card_choice(frame, actor, action)
 
     def respond_candidates(
         self,
@@ -2260,6 +2294,7 @@ class Engine:
         use_targets: tuple[int, ...] = (),
         providers_used: tuple[str, ...] = (),
         rejudge_offers: tuple[RejudgeOffer, ...] = (),
+        floor: int = 0,
     ) -> tuple[Action, ...]:
         """**预览**一次响应窗口的候选（W5-02b 的 auto-b）：不问、不记、不耗序号。
 
@@ -2269,6 +2304,10 @@ class Engine:
         - **只读状态**：不压帧、不搬牌、不抽随机数（转化候选的生成也全是纯谓词）；
         - ``answers_seq`` 取 ``self._seq + 1``——这正是随后那次 ``ask`` 会拿到的序号；
           预览的产物只是被丢弃的候选，序号在这里不承载语义，但也不造出一个"未来值"。
+
+        ``floor``（票 03 §4-2）同样要与 :meth:`ask_respond` 一致：调用方有承载帧时传
+        ``need_card_floor(frame, actor)``，否则保留缺省 0——预览因此不会把已被闸门挡掉的
+        提供者当成"a 可行"（借刀杀人的 auto-b 判据就建在这份预览上）。
         """
         payload = RespondContext(
             cause=cause,
@@ -2279,6 +2318,7 @@ class Engine:
             use_targets=tuple(use_targets),
             providers_used=tuple(providers_used),
             rejudge_offers=tuple(rejudge_offers),
+            floor=0 if mode is RespondMode.REJUDGE else floor,
         )
         return legal_actions_for(
             self.state,

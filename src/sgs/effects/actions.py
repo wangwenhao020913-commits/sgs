@@ -34,6 +34,7 @@ from sgs.state import (
     EndPhase,
     GameState,
     Pass,
+    PeachContext,
     Phase,
     PlayCard,
     Player,
@@ -73,11 +74,13 @@ from .modifiers import (
     ModifierContext,
     ModifierPoint,
     ModifierRole,
+    PriorityClass,
     apply_modifiers,
 )
 
 __all__ = [
     "EFFECTIVENESS",
+    "NEED_CARD_FLOOR_KEY",
     "TARGET_FILTERS",
     "activation_allowed",
     "attack_range",
@@ -93,11 +96,16 @@ __all__ = [
     "hand_limit",
     "is_own_play_phase",
     "legal_actions_for",
+    "need_card_floor",
+    "need_card_tier",
     "needs_designation",
+    "record_need_card_choice",
+    "reset_need_card_floor",
     "seat_distance",
     "target_combos",
     "target_is_effective",
     "targets_within_attack_range",
+    "tier_not_downgraded",
 ]
 
 
@@ -670,29 +678,41 @@ def legal_actions_for(
     *,
     answers_seq: int,
     dying: int | None = None,
-    payload: RespondContext | SelectContext | DodgeContext | SkillActivationContext | SelectOptionContext | DistributeContext | None = None,
+    payload: RespondContext | SelectContext | DodgeContext | PeachContext | SkillActivationContext | SelectOptionContext | DistributeContext | None = None,
 ) -> tuple[Action, ...]:
     """给出 ``seat`` 在 ``kind`` 询问下的全部候选，按票 05 的稳定键排序。
 
     ``dying`` 只在 ``PEACH`` 询问下需要：濒死语境里【桃】的合法目标是**濒死者**
     而不是应答者自己，故目标不走行为表的目标规则（票 07 §4 / 票 21 §7）。
     票 27 的新 kind 走**类型化 ``payload``**（票 19 §4）；票 30 再补三类。
+
+    **需要（使用 / 打出）牌窗口的档位闸门**（票 03 §4-2）：四扇窗口（【闪】/ 求桃 /
+    打出·使用响应 / 无懈）的候选在生成之后统一过"不升档"——档 < ``payload.floor`` 的
+    候选不进面。闸门放在这里而不是各窗口里：本函数是全部询问候选的**唯一生成口**，
+    四扇窗口因此不可能只有三扇接线。其余询问走别的 ``payload``、也**不跑**这条闸门，
+    故它们的候选一条不动（改判窗口同样不跑：改判不是"使用 / 打出"）。
     """
     if kind is QueryKind.PLAY_PHASE:
         candidates = _play_phase(state, seat, answers_seq)
     elif kind is QueryKind.DISCARD:
         candidates = _discard(state, seat, answers_seq)
     elif kind is QueryKind.DODGE:
-        providers_used = payload.providers_used if isinstance(payload, DodgeContext) else ()
-        candidates = _dodge(state, seat, answers_seq, providers_used)
+        ctx = payload if isinstance(payload, DodgeContext) else DodgeContext()
+        candidates = _dodge(state, seat, answers_seq, ctx.providers_used)
+        candidates = _above_floor(candidates, floor=ctx.floor)
     elif kind is QueryKind.PEACH:
         if dying is None:
             raise ValueError("PEACH 询问必须给出濒死者座位")
+        ctx = payload if isinstance(payload, PeachContext) else PeachContext()
         candidates = _peach(state, seat, dying, answers_seq)
+        candidates = _above_floor(candidates, floor=ctx.floor)
     elif kind is QueryKind.RESPOND:
         if not isinstance(payload, RespondContext):
             raise ValueError("RESPOND 询问必须给出 RespondContext")
         candidates = _respond(state, seat, answers_seq, payload)
+        if payload.mode is not RespondMode.REJUDGE:
+            # 改判不是"使用 / 打出"（它不压 USE 帧、不触发使用后钩子），故不在这条通道上。
+            candidates = _above_floor(candidates, floor=payload.floor)
     elif kind is QueryKind.SELECT_CARDS:
         if not isinstance(payload, SelectContext):
             raise ValueError("SELECT_CARDS 询问必须给出 SelectContext")
@@ -1133,6 +1153,111 @@ def _select_cards(
     return actions
 
 
+NEED_CARD_FLOOR_KEY = "need_card_floor"
+"""帧私有键：四扇**需要（使用 / 打出）牌**窗口的不升档游标（票 03 §4-2），按座位分槽。
+
+形态 = ``{座位: int}``（缺项 = 0 = 最高档）。"不升档"是**逐角色**的（仓内 §4.16 L443
+"先逐角色、角色内部再按优先级"），故：求桃 / 无懈 / 势力求助逐个应答者、【决斗】双方轮流
+——同一帧里会有多个座位的档，挤在一个 int 里会串味。
+
+floor 的粒度是**一个需要牌事件**（补充一手 §4.2.2 的 ❶ ②③ + §2.1.2.2(2) 的"每时机一次
+响应机会"）：选了提供者而它**没通过**时 floor 留着（曹操先发动【八卦阵】⇒ 没有〖护驾〗的
+时机了）；**这一次响应成立**时清回 0（【无双】的两张【闪】是两次事件）。清点由各窗口的
+成功分支调 :func:`reset_need_card_floor`。
+
+**帧私有**（不进记录流）；它是**逐目标**分槽的状态，故必须登记在
+:data:`sgs.engine.steps._PER_TARGET_FRAME_KEYS`——否则同一帧的下一个目标会继承上一个目标的
+档（与 ``providers_used`` / ``dodges_done`` 同姿态）。
+"""
+
+
+def tier_not_downgraded(tier: int, floor: int) -> bool:
+    """**不升档**（补充一手 §2.1.2.3）：档值越小越优先，故闸门 = ``tier >= floor``。
+
+    小于 ``floor`` 的档（= 比上一次更高优先）不再进面，同档与更低优先的档照进。这一行
+    判据由两处消费：票 01 的 :func:`activation_allowed`（同一时机的激活结算）与票 03 的
+    四个需要牌窗口（:func:`_above_floor`）。写在**一处**，两边不可能对"高档 / 低档"给出
+    相反的读法。
+    """
+    return int(tier) >= int(floor)
+
+
+def need_card_tier(action: Action) -> int:
+    """一条"需要（使用 / 打出）牌"候选的**优先级档**（票 03 §4-1）。
+
+    - 真牌 / 转化牌（``UseCard`` / ``PlayCard``）= ``CARD_USE``（2）：窗口要的是**一张牌**，
+      牌从手牌来还是从装备区 / 转化来，不改变这一档；
+    - ``ActivateSkill``（提供者）= 该技能定义声明的 :attr:`~sgs.skills.SkillDef.priority_class`：
+      【八卦阵】= **装备档**（1），【护驾】/【激将】/【蛊惑】= **武将档**（0）。声明只有
+      一份（由载体派生），本函数不另判——也不在这里写技能 id 名单。
+
+    档是**定义**的属性、不是局面属性，故判据不读 ``GameState``。提供者候选必然来自一条
+    **解析得到的实例**（``CANDIDATES`` 链只遍历 :func:`sgs.skills.resolve_instances` 的
+    产物），故"目录里没有这条定义"是编程错误：**不 fail-open**（那会静默放过一条低档
+    提供者），让 ``KeyError`` 冒泡。
+    """
+    if not isinstance(action, ActivateSkill):
+        return int(PriorityClass.CARD_USE)
+    from sgs.skills import catalog as catalog_module
+
+    return int(catalog_module.CATALOG[action.skill_id].priority_class)
+
+
+def _above_floor(candidates: Iterable[Action], *, floor: int) -> list[Action]:
+    """过"不升档"闸门：``Pass`` 恒留，其余按 :func:`need_card_tier` 判。
+
+    ``floor <= 0``（= 初值 / 最高档）时没有可挡的候选，原样返回：其余询问的 ``payload``
+    没有 ``floor``、四扇窗口的首问也是 0，故这条闸门在常态下零开销、零变化。
+    """
+    if int(floor) <= 0:
+        return list(candidates)
+    return [
+        action
+        for action in candidates
+        if isinstance(action, Pass)
+        or tier_not_downgraded(need_card_tier(action), floor)
+    ]
+
+
+def need_card_floor(frame: Any, seat: int) -> int:
+    """``seat`` 在这扇需要牌窗口里**已经定下**的优先级档（读 :data:`NEED_CARD_FLOOR_KEY`）。
+
+    缺项 = 0 = 最高档（首问一律全档上脸）。
+    """
+    floors = frame.data.get(NEED_CARD_FLOOR_KEY)
+    if not floors:
+        return 0
+    return int(floors.get(seat, 0))
+
+
+def record_need_card_choice(frame: Any, seat: int, action: Action) -> None:
+    """记下这一次应答选中的**档**：下一次询问据此"不升档"（``Pass`` 不记）。
+
+    调用点只在引擎**拿到应答之后**的统一收口处（``Engine.ask_query`` 的【闪】/ 求桃 与
+    ``Engine.ask_respond`` 的真牌 / 无懈窗口）：窗口随后按"这一次响应成不成立"决定是否
+    :func:`reset_need_card_floor`——提供者没通过时 floor 留着（曹操例），成立时清掉
+    （【无双】的第二张【闪】）。``Pass`` 不记：玩家放弃之后没有"上一档"可谈。
+    """
+    if isinstance(action, Pass):
+        return
+    floors = frame.data.setdefault(NEED_CARD_FLOOR_KEY, {})
+    floors[seat] = need_card_tier(action)
+
+
+def reset_need_card_floor(frame: Any, seat: int | None = None) -> None:
+    """一次需要牌**事件成立**：把 ``seat`` 的 floor 清回 0（``seat=None`` = 清整个帧）。
+
+    "事件成立"的落点由各窗口自己判（它才知道"这一次响应"怎么算成立）：
+    【闪】/【决斗】= 每收下一张牌（【无双】的两张 = 两次事件），求桃 = 那张【桃】开始回复。
+    """
+    if seat is None:
+        frame.data.pop(NEED_CARD_FLOOR_KEY, None)
+        return
+    floors = frame.data.get(NEED_CARD_FLOOR_KEY)
+    if floors:
+        floors.pop(seat, None)
+
+
 def activation_allowed(
     skill_id: str, tier: int, *, floor: int, used: Sequence[str]
 ) -> bool:
@@ -1141,6 +1266,7 @@ def activation_allowed(
     1. **不升档**（补充一手 §2.1.2.3）：选的这一条 "优先级须在不超过上次的前提下最高"。
        档值越小越先（``HERO=0 < EQUIPMENT=1 < CARD_USE=2``），故闸门 = ``tier >= floor``：
        小于 ``floor`` 的档（= 比上次更高优先）不再进面，同档与更低的档照进。
+       这一关的实现是 :func:`tier_not_downgraded`——票 03 的四个需要牌窗口读**同一行**。
     2. **每技能一次**（补充一手 §2.1.2.2(2)）：本座位本 pass 已经跑过的技能不再进面。
        ``used`` 是**显式**记录（:attr:`~sgs.state.SkillActivationContext.used`），不再靠
        答案缓存当去重手段。
@@ -1149,7 +1275,7 @@ def activation_allowed(
     候选生成口（:func:`legal_actions_for`）与派发环**共用**的那一份判据——两处各写一遍
     就会在"这一轮到底能选什么"上漂移。
     """
-    return int(tier) >= int(floor) and skill_id not in used
+    return tier_not_downgraded(tier, floor) and skill_id not in used
 
 
 def _skill_activation(

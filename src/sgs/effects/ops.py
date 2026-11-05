@@ -46,6 +46,7 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
+from .actions import need_card_floor, reset_need_card_floor
 from .behaviors import SLASH_FAMILY_KEY, DamageNature
 from .modifiers import responder_role, response_count
 
@@ -476,8 +477,17 @@ def resolve_fire_attack(host: Any, frame: Frame) -> Any:
     return None
 
 
-def _duel_accepted(op: dict[str, Any], *, other: int, required: int) -> str:
-    """一次**成立**的【决斗】响应：累加已出张数，攒够所需张数就把响应权交给对方。"""
+def _duel_accepted(
+    frame: Frame, op: dict[str, Any], *, seat: int, other: int, required: int
+) -> str:
+    """一次**成立**的【决斗】响应：累加已出张数，攒够所需张数就把响应权交给对方。
+
+    这也是【决斗】窗口"**这一次需要牌事件成立**"的落点（票 03 §4-3）：一张【杀】成立即清掉
+    该座位的不升档 floor——【无双】的"每次响应两张【杀】"是**两次**需要牌事件（补充一手
+    §2.1.2.2(2) 的"每时机一次响应机会"），第二张仍可从任意档起手（第一张用真牌，第二张
+    照样能发动提供者）。
+    """
+    reset_need_card_floor(frame, seat)
     op["duel_plays"] = op.get("duel_plays", 0) + 1
     if op["duel_plays"] >= required:
         op["duel_plays"] = 0
@@ -552,7 +562,7 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
     if satisfied is not None:
         if satisfied:
             _play_produced(host, produced, source=turn)
-            return _duel_accepted(op, other=other, required=required)
+            return _duel_accepted(frame, op, seat=turn, other=other, required=required)
         _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
         return None
     action = host.ask_respond(
@@ -569,7 +579,7 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
         return "stay"
     if isinstance(action, PlayCard):
         host.play_card(action.card, source=turn, timing=Timing.PLAY_DECLARE)
-        return _duel_accepted(op, other=other, required=required)
+        return _duel_accepted(frame, op, seat=turn, other=other, required=required)
     if isinstance(action, ActivateSkill):
         frame.data.setdefault("providers_used", []).append(action.skill_id)
         if not host.provider_registered(action.skill_id):
@@ -587,7 +597,7 @@ def resolve_duel(host: Any, frame: Frame) -> Any:
             return control
         if satisfied:
             _play_produced(host, produced, source=turn)
-            return _duel_accepted(op, other=other, required=required)
+            return _duel_accepted(frame, op, seat=turn, other=other, required=required)
         return "stay"
     _push_damage(host, frame, source=other, target=turn, amount=DUEL_DAMAGE)
     return None
@@ -669,6 +679,9 @@ def resolve_borrowed_sword(host: Any, frame: Frame) -> Any:
             mode=RespondMode.USE,
             use_targets=use_targets,
             providers_used=providers_used,
+            # 与下面那次真询问**同一个** floor（票 03 §4-2）：预览若漏了它，闸门挡掉的
+            # 提供者仍会被当成"a 可行"，auto-b 就判错。
+            floor=need_card_floor(frame, holder),
         )
         if not isinstance(action, Pass)
     ]

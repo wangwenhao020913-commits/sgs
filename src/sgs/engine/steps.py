@@ -42,6 +42,7 @@ from typing import Any, Protocol
 from sgs.data import Identity, Mode
 from sgs.effects import (
     DODGE_RESPONSE_CARD,
+    NEED_CARD_FLOOR_KEY,
     NULLIFY_RESPONSE_CARD,
     PEACH_RESPONSE_CARD,
     DamageNature,
@@ -52,7 +53,9 @@ from sgs.effects import (
     damage_amount,
     is_slash,
     ModifierRole,
+    need_card_floor,
     recover_amount,
+    reset_need_card_floor,
     response_count,
     target_is_effective,
 )
@@ -82,6 +85,7 @@ from sgs.state import (
     GameState,
     MoveReason,
     Pass,
+    PeachContext,
     QueryKind,
     RespondMode,
     RejudgeOffer,
@@ -652,6 +656,12 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
     **产物由本窗口交付**（票 03）：提供者交回的那张虚拟【闪】与真【闪】走**同一条**使用链
     （``start_use``），收尾共用 :func:`_accept`；没有产物 = 主公技式（别人已打出过一张），
     只记一次成功、不压帧。
+
+    **优先级档**（票 03 §4-2 / §4-3）：本窗口读 :func:`~sgs.effects.need_card_floor` 写进
+    ``DodgeContext``——选中一条之后档由 :meth:`~sgs.engine.Engine.ask_query` 记进承载帧，
+    更高优先（更小档）的候选下一次不再进面。曹操先发动【八卦阵】（装备档）⇒ 判定黑 ⇒
+    下一次询问里没有〖护驾〗（武将档），而真【闪】（使用牌档）照旧可点；floor 在
+    :func:`_accept` 里清回最高档，故【无双】的第二张【闪】仍可发动【八卦阵】。
     """
     # 这一问的响应者恒是这张【杀】给定的目标（``_dodge_window`` 逐目标开窗）⇒ ``role``
     # 标 ``TARGET``：与【决斗】用同一句"谁在响应"的事实（票 23）。【无双】①只看使用者
@@ -665,19 +675,26 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
     )
     done = frame.data.get("dodges_done", 0)
 
-    def _accept(card: CardRef | None) -> None:
+    def _accept(card: CardRef | None, *, use_timing: Timing | None = None) -> None:
         """一次【闪】响应成立：攒够所需张数即把本层标成被抵消。
 
         产物牌（提供者交回的那张虚拟【闪】）走与真【闪】**同一条**使用链；``None`` = 提供者
         没有交付产物（主公技式：别人已经打出过一张，牌已经付清，窗口不必再压帧）。
+
+        **这里是唯一一处"这一次需要牌事件成立"的落点**（票 03 §4-3）：``dodges_done`` 每加
+        一即把不升档的 floor 清回最高档——【无双】的两张【闪】是**两次**需要牌事件，第二张
+        仍可从任意档起手（第一张用真牌，第二张照样能发动【八卦阵】）。
         """
         nonlocal done
         done += 1
         frame.data["dodges_done"] = done
+        reset_need_card_floor(frame, target)
         if done >= required:
             frame.data["canceled"] = True
         if card is not None:
-            host.start_use(card, source=target, targets=())
+            host.start_use(
+                card, source=target, targets=(), use_timing=use_timing
+            )
 
     control, satisfied, produced = host.advance_provider(
         frame, Timing.RESOLVE_BEFORE_EFFECT
@@ -692,14 +709,8 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
         success = frame.data.pop("skill_result")
         if success:
             # "视为使用【闪】"仍是**一次**使用：走与真牌同一条使用链（票 08 的一手读法）。
-            done += 1
-            frame.data["dodges_done"] = done
-            if done >= required:
-                frame.data["canceled"] = True
-            host.start_use(
+            _accept(
                 virtual_dodge(host.state),
-                source=target,
-                targets=(),
                 use_timing=Timing.RESOLVE_BEFORE_EFFECT,
             )
             return "stay"
@@ -709,7 +720,10 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
         target,
         Timing.RESOLVE_BEFORE_EFFECT,
         frame=frame,
-        payload=DodgeContext(providers_used=providers_used),
+        payload=DodgeContext(
+            providers_used=providers_used,
+            floor=need_card_floor(frame, target),
+        ),
     )
     if host.suspended(action):
         return "stay"
@@ -731,12 +745,9 @@ def _dodge_window(host: FrameHost, frame: Frame, target: int) -> Control:
             _accept(produced)
         return "stay"
     if isinstance(action, UseCard) and action.card.type == DODGE_RESPONSE_CARD:
-        done += 1
-        frame.data["dodges_done"] = done
-        if done >= required:
-            frame.data["canceled"] = True
         # 抵消是"被响应帧"的标志；【闪】自己作为一次**使用**照走 L4 / L5（票 07 §3）。
-        host.start_use(action.card, source=target, targets=())
+        # 与另两条成功分支共用 ``_accept``：计一次成功 + 清 floor 只写在那里。
+        _accept(action.card)
     else:
         # ``Pass``，或一张**不是【闪】**的 ``UseCard``（B1 的第二道闸）：候选已按
         # ``required`` 牌名收口（``actions._required_hand``），这里不再 fail-open——
@@ -890,6 +901,7 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
     "response_declared",
     "response_used",
     "providers_used",
+    NEED_CARD_FLOOR_KEY,
     "skill_result",
     "dodges_done",
     "axe_used",
@@ -928,6 +940,9 @@ _PER_TARGET_FRAME_KEYS: tuple[str, ...] = (
 票 05 追加逐点触发的两个键（``damage_point_index`` / ``damage_recorded``）：DAMAGE 帧今天
 恒单目标（多目标由行为表逐目标各压一个子帧），登在这里是姿态上的一致——真出现"一帧多目标"
 时它们同样必须逐目标重来。
+票 03（需要牌窗口的档位闸门）追加 :data:`sgs.effects.NEED_CARD_FLOOR_KEY`：它是**逐座位**
+分槽的"不升档"游标，但每扇窗口都挂在本帧的**某个目标**上（【闪】/ 求桃 / 响应窗口逐个
+目标开），故同样必须随游标推进清掉——否则第 2 个目标会继承第 1 个目标选过的档。
 """
 
 
@@ -1407,6 +1422,7 @@ def near_death_ask(host: FrameHost, frame: Frame) -> Control:
                 Timing.NEAR_DEATH_AT,
                 frame=frame,
                 dying=target,
+                payload=PeachContext(floor=need_card_floor(frame, asker)),
             )
             if host.suspended(action):
                 return "stay"
@@ -1442,8 +1458,12 @@ def _peach_use(host: FrameHost, frame: Frame, *, asker: int, target: int, card: 
 
     ``pending_response`` 记的是"哪个座位 + 回复前的体力"：响应链出栈后重入本步，由它决定
     "继续问下一个人"还是"开新窗口"（体力严格上升但仍 < 1）。故这里必须记在压帧**之前**。
+
+    这也是求桃窗口"**这一次需要牌事件成立**"的落点（票 03 §4-3）：那张【桃】开始回复，
+    本次需要牌事件结束，不升档的 floor 清回最高档（回退开的新窗是**新**事件）。
     """
     frame.data["pending_response"] = (int(frame.data["next"]), host.state.player(target).hp)
+    reset_need_card_floor(frame)
     host.recover_from_peach(frame, card, asker=asker, dying=target)
     return "stay"  # 响应链出栈后重入本步：此处判回退
 
