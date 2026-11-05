@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "pack_id": "lei",
+  "heroes": [
+    {
+      "id": "haozhao",
+      "name": "郝昭",
+      "true_name": "郝昭",
+      "kingdom": "wei",
+      "gender": "male",
+      "hp_max": 4,
+      "version": "lei",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "zhengku",
+          "name": "镇骨",
+          "skill_type": "NORMAL"
+        }
+      ]
+    }
+  ]
+}

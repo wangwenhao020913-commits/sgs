@@ -3343,6 +3343,9 @@ from .start import (  # noqa: E402  （末尾 import 是刻意的）
 from .shen_zhugeliang import (  # noqa: E402  （末尾 import 是刻意的）
     shen_zhugeliang_skill_definitions,
 )
+from .hero_lei import (  # noqa: E402  （末尾 import 是刻意的）
+    lei_skill_definitions,
+)
 
 # **提供者登记**（M6 票 01 的移动版于吉【蛊惑】）：`PROVIDERS` 原先只由四条主公技构造，
 # 而"需要牌时"的提供者不只主公技——蛊惑要在【闪】/ 南蛮 / 万箭 / 决斗里先扣置、再逐座位
@@ -3395,6 +3398,7 @@ CATALOG: Mapping[str, SkillDef] = MappingProxyType(
             *near_death_skill_definitions(),
             *start_skill_definitions(),
             *shen_zhugeliang_skill_definitions(),
+            *lei_skill_definitions(),
         )
     }
 )

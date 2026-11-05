@@ -321,7 +321,14 @@ def _fire_choice(pending: dict[str, Any], *, target_self: bool, fa_used: bool) -
 
 
 def fire_attack_tape(base: str) -> int:
-    """两条固定种子的火攻 tape；全部经真 HTTP，任何违规立即 FAIL。"""
+    """两条固定种子的火攻 tape；全部经真 HTTP，任何违规立即 FAIL。
+
+    **禁将钉死"加武将前"的将池**（lei-batch 票 01）：这两条 tape 钉的是**火攻的界面与
+    记录流**（亮牌 / 同花色弃牌 / 放弃），不是将池；而随机配将会随池子变大重排整局，
+    让"整局没摸到【火攻】"变成假红（真发生过：加郝昭后 seed=37 那一局不再用出火攻）。
+    故这里显式禁掉后加的雷包武将，把局面钉回原来的 72 人池。**再加武将时把它加进这条
+    禁将清单**，不要重扫种子。
+    """
     failures = 0
     for seed, target_self, expect_discard in _FIRE_TAPES:
         label = f"seed={seed} 目标={'自己' if target_self else 'AI'}"
@@ -334,6 +341,8 @@ def fire_attack_tape(base: str) -> int:
                 "human_seat": 0,
                 "timeout_seconds": None,
                 "deck_profile": "standard_ex_160",
+                # 见 docstring：钉死加武将前的将池（版本粒度、只作用于随机配将）。
+                "banned_heroes": ["haozhao"],
             },
         )
         if status != 200:
