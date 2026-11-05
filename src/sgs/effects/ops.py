@@ -869,10 +869,17 @@ def pick_harvest(host: Any, frame: Frame) -> Any:
     """【五谷丰登】生效后：当前目标从**剩余**亮牌里取一张进手牌。
 
     被无效 / 被无懈而跳过者不占份额（票 15 §5）：无效者根本走不到 C4、被无懈者归票 28。
+
+    **目标在取牌前阵亡**（死亡发生在无懈窗口 / 前序目标的结算里，或目标表在"使用时"
+    就冻结了）：死者不再被问，也不把它那一份 PUT 进死者的手牌——留在处理区的亮牌由
+    :func:`finish_harvest` 一并弃掉，与"被无懈跳过者不占份额"同一姿态。漏了这一条，
+    死者会在取牌询问里把一张牌收进手牌（`tests/test_fuzz.py` 的阵亡者三区为空判红）。
     """
     if frame.data.get("use_terminated"):
         return None
     target = host.current_target(frame)
+    if not host.state.player(target).alive:
+        return None
     revealed = tuple(frame.data.get("revealed", ()))
 
     def build_face() -> tuple[tuple[Slot, ...], tuple[int, ...]]:

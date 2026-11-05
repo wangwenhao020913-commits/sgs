@@ -903,6 +903,25 @@ def test_the_seeded_eight_player_gongxin_deck_top_survives_the_lianying_suspensi
     _play_and_check(15211799974272561945, players=8, deadline=time.monotonic() + 120)
 
 
+def test_the_seeded_harvest_target_that_dies_before_its_pick_is_skipped():
+    """回归（合并门禁的 fuzz 抓到；**预现存于** `201046a`，与本 effort 的改动无关）：
+    seed=18174453931029153341 / 8 人。
+
+    五谷丰登的逐目标是"使用时"冻结的目标表；目标 1 在轮到自己取牌前已经阵亡（前面那条
+    伤害 / 濒死结算把它打死，无懈窗口随后才收尾）。旧实现仍向死者发 ``SELECT_CARDS``，
+    把一张【闪】从处理区 ``PUT`` 进**死者手牌** ⇒ "阵亡者三区为空"判红（seq≈2503）。
+    修复 = :func:`sgs.effects.ops.pick_harvest` 跳过阵亡目标：它那一份留在处理区，由
+    ``finish_harvest`` 一并弃掉（与"被无懈跳过者不占份额"同一姿态）。
+
+    这一局只钉"死者不再拿牌"；不重录任何基准、不改 `tests/replays/`。
+    """
+    engine = _play_and_check(
+        18174453931029153341, players=8, deadline=time.monotonic() + 120
+    )
+    assert engine.state.players[1].alive is False, "这个种子必须真的走到座位 1 阵亡"
+    assert not engine.state.players[1].hand, "阵亡者三区为空"
+
+
 def test_the_player_rotation_covers_the_six_identity_branches():
     """六档轮转是确定性的，且 2 人档（无身份分支）确在轮转里（票 17 §2）。"""
     rotation = [_players_for(index) for index in range(len(PLAYER_ROTATION))]
