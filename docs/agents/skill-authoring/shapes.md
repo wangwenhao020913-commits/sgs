@@ -129,11 +129,12 @@
 | 修饰点 | 归属 |
 |---|---|
 | `CANDIDATES` | 补候选（转化技 / 护驾 / 激将 / 蛊惑）。语境由 `CandidateScope` 区分：`PLAY`（出牌阶段）、`DODGE`（【闪】）、`RESPOND`（打出 / 使用的响应窗口）、`PEACH`（濒死求【桃】）、`NULLIFY`（无懈的收集式窗口）、`CARD`（逐张牌的常规候选）。"这扇窗口要一张什么牌"随 `ModifierContext.respond_required` 下传（六扇窗口都填；`DODGE` 恒为 `dodge`） |
-| `TARGET_POOL` | 剔除或补目标（空城、谦逊、界武圣②、诈降） |
+| `TARGET_POOL` | 剔除或补目标（空城、谦逊、界武圣②、诈降）。**补目标能放宽"自用牌"**（给【无中生有】/【桃】一类 `TargetRule.self_only` 的牌加别人，是"可对别人使用自用牌"类技能的模板）——但补目标前先分清自己豁免的是**距离**还是**目标合法性**：雄乱（`hero.zhangxiu.xiongluan`）只豁免距离与次数，故回调按 `TargetRule.self_only` 收窄（lei-batch 票 04 的缺陷 B：不加这道守卫，雄乱生效时【无中生有】/【桃】就能指定雄乱目标） |
 | `TARGET_COUNT` | 额定目标数（方天画戟类） |
 | `DISTANCE` | 座位距离（马术、义从、坐骑） |
 | `DISTANCE_LIMIT` | 额定距离上限（奇才） |
 | `COUNT_LIMIT` | 使用次数上限（咆哮、诈降、酒） |
+| `COUNT_EXEMPT` | **按目标集合**豁免次数上限（雄乱「你对其使用牌无次数限制」）：`current` 从 `False` 起，回调把"这一次使用不受上限约束"写成 `True`；**只在 `check_count(..., targets=...)` 时派发**（`ModifierContext.use_targets` = 这一次使用已定下的目标集合），候选生成器的第一次询问（"整张牌还准不准用"）不派发它——超额时由 `_play_phase` 把目标池收窄到被豁免的角色 |
 | `HAND_LIMIT_REPLACE` | 手牌上限的**查询期修正链**：替换式（界英姿②「手牌上限 = 体力上限」）+ **持续加式**（袁绍移动版【血裔】「上限 + 2×其他存活群势力角色数」，huo-mobile-batch 票 03 / 08 读法 A）——加式在 `current` 上加；**一次性**加式（`Player.hand_limit_bonus`）不走本挂点 |
 | `EFFECTIVENESS` | 效果生效性（仁王盾 / 青釭剑一类） |
 | `RESPONSE_COUNT` | 本次响应的张数（无双） |

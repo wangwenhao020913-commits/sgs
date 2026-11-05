@@ -282,11 +282,24 @@ def is_own_play_phase(state: GameState, seat: int) -> bool:
     return state.turn_seat == seat and state.phase is Phase.PLAY
 
 
-def check_count(state: GameState, seat: int, card: CardRef) -> bool:
+def check_count(
+    state: GameState,
+    seat: int,
+    card: CardRef,
+    *,
+    targets: tuple[int, ...] | None = None,
+) -> bool:
     """L3.2 ``USE_CHECK_COUNT``：``True`` = 已超过本回合次数上限。
 
     额定上限先过 :data:`~sgs.skills.ModifierPoint.COUNT_LIMIT` 链：【诸葛连弩】把
     【杀】的上限改成"无限"（``None``）；``extra`` 是牌面给的额外额度，链后相加。
+
+    **目标维度**（lei-batch 票 04；02b 读法 A）：``targets`` 是**这一次使用**已经定下的
+    目标集合——给了它，就再问一次 :data:`~sgs.skills.ModifierPoint.COUNT_EXEMPT`
+    （雄乱「你对其使用牌无次数限制」按目标判：目标集合 ⊆ {其} 才豁免）。**不给**
+    （缺省）是"这张牌还准不准用"这个问题，按目标豁免的回调不参与 ⇒ 整张牌照常超额，
+    候选生成器（``_play_phase``）据此把目标池收窄到被豁免的角色。既有消费者
+    （咆哮 / 连弩 / 诈降 / 天义）都不传目标，故行为与加本参数前逐字相同。
 
     已用次数读**行为表声明的计数键**（``CardBehavior.count_key``）：普通【杀】/ 火【杀】/
     雷【杀】共用 ``"slash"``，转化 / 虚拟【杀】按产物牌型（也是 ``"slash"``）读同一键。
@@ -307,16 +320,36 @@ def check_count(state: GameState, seat: int, card: CardRef) -> bool:
     if is_slash(behavior) and not is_own_play_phase(state, seat):
         return False
     limit = behavior.use_limit
-    rated = apply_modifiers(
-        ModifierPoint.COUNT_LIMIT,
-        state,
-        ModifierContext(subject=seat, card=card),
-        limit.rated,
-    )
+    ctx = ModifierContext(subject=seat, card=card, use_targets=targets or ())
+    rated = apply_modifiers(ModifierPoint.COUNT_LIMIT, state, ctx, limit.rated)
     if rated is None:
+        return False
+    if targets is not None and apply_modifiers(
+        ModifierPoint.COUNT_EXEMPT, state, ctx, False
+    ):
         return False
     used = state.player(seat).card_use_counts.get(behavior.count_key, 0)
     return used >= rated + limit.extra
+
+
+def _count_exempt_targets(
+    state: GameState, seat: int, card: CardRef, pool: tuple[int, ...]
+) -> tuple[int, ...]:
+    """次数额度用尽时的**目标池**：只留"以它为目标的那次使用仍被次数豁免"的座位。
+
+    ``COUNT_EXEMPT`` 按**目标集合**求值（雄乱「你对其使用牌无次数限制」）。候选生成器在
+    ``check_count`` 报超额之后用它收窄池，再照常摊组合：多目标牌因此只会生成"目标集合 ⊆
+    被豁免角色"的那些组合（``target_combos`` 只从收窄后的池里取），含别人的组合根本不在
+    候选里。没有任何被豁免的目标 ⇒ 空元组（调用方照旧判"这张牌没有候选"）。
+
+    这是**纯收窄**：没有按目标豁免的修饰器时，每个座位都照常超额 ⇒ 空池 ⇒ 候选与加本
+    机制前逐字相同（金录像因此不变）。
+    """
+    return tuple(
+        target
+        for target in pool
+        if not check_count(state, seat, card, targets=(target,))
+    )
 
 
 def check_targets(state: GameState, seat: int, card: CardRef) -> tuple[int, ...]:
@@ -793,6 +826,11 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
     候选期的追加**）；回调只追加、不排序，全表仍由 :func:`legal_actions_for` 按票 05 的
     稳定键统一排序，故"候选与校验同源"不被打破。
 
+    **次数豁免按目标收窄**（lei-batch 票 04）：:func:`check_count` 报超额时不再整张牌跳过，
+    而是把池换成 :func:`_count_exempt_targets` 的"被豁免角色"再照常摊组合——雄乱生效时
+    只有"目标集合 ⊆ {雄乱目标}"的那些使用出现。没有按目标豁免的修饰器时那个池恒空，
+    故其余牌（以及全部金录像）的候选逐字节不变。
+
     **点击顺序**（M5-bugfix）：声明了
     :attr:`~sgs.effects.CardBehavior.preserve_target_order` 的牌（【铁索连环】）把每组
     目标再摊成全部排列（``target_combos(..., ordered=True)``），两种点击顺序都是合法动作；
@@ -807,11 +845,18 @@ def _play_phase(state: GameState, seat: int, answers_seq: int) -> list[Action]:
     for card in _usable_hand(state, seat, UseContext.PLAY_PHASE):
         if needs_designation(card):
             continue
-        if check_count(state, seat, card):
-            continue
+        exhausted = check_count(state, seat, card)
         behavior = behavior_for(card)
         rule = behavior.target_rule
         pool = check_targets(state, seat, card)
+        if exhausted:
+            # 次数额度用尽：**仍然枚举目标**，只保留"以它为目标的那次使用仍被豁免"的座位
+            # （lei-batch 票 04：雄乱「你对其使用牌无次数限制」按目标判）。收窄后再照常
+            # 摊组合 ⇒ 多目标牌只会生成"目标集合 ⊆ 被豁免角色"的那些组合。没有豁免
+            # （绝大多数牌）⇒ 空池 ⇒ 与加本机制前同一条 ``continue``。
+            pool = _count_exempt_targets(state, seat, card, pool)
+            if not pool:
+                continue
         low, high = rule.target_range(len(pool))
         if high <= 0:
             # 空池的"全体存活"牌（唯一存活者）没有合法候选；M1 的额定牌由

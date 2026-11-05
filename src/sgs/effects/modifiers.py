@@ -110,6 +110,13 @@ class ModifierPoint(str, Enum):
     """修饰器的**挂点**（票 07 §3）；M3 只许增。
 
     - ``COUNT_LIMIT``：本回合使用次数上限（诸葛连弩 / 【咆哮】）；
+    - ``COUNT_EXEMPT``：**这一次使用**按**目标集合**豁免次数上限（lei-batch 票 04：雄乱
+      「你对其使用牌无次数限制」）。``current`` 从 ``False`` 起，回调把"这一次使用不受
+      上限约束"写成 ``True``；只在调用方给出目标维度（``check_count(..., targets=...)``）
+      时派发，空链恒 ``False``。它与 ``COUNT_LIMIT`` 分开而不是挤进同一条链：次数上限是
+      **这张牌**的属性（"本回合还能用几次"），而按目标豁免是**这一次使用对谁**的属性——
+      两者在候选生成期的先后也不一样（``_play_phase`` 先用 ``COUNT_LIMIT`` 判超额，再用
+      本挂点把目标池收窄）；
     - ``DISTANCE_LIMIT``：本牌**额定距离上限**（M6 票 02 的加法；【奇才】把锦囊的
       ``TargetRule.max_distance`` 豁免成"无上限"）。``current`` 从 ``max_distance`` 起，
       返回 ``None`` ⇒ 这次使用的距离条件整体豁免。只在 ``max_distance is not None`` 的牌上
@@ -157,6 +164,7 @@ class ModifierPoint(str, Enum):
     """
 
     COUNT_LIMIT = "COUNT_LIMIT"
+    COUNT_EXEMPT = "COUNT_EXEMPT"
     DISTANCE_LIMIT = "DISTANCE_LIMIT"
     HAND_LIMIT_REPLACE = "HAND_LIMIT_REPLACE"
     TARGET_POOL = "TARGET_POOL"
@@ -216,6 +224,14 @@ class ModifierContext:
     target: int | None = None
     role: ModifierRole = ModifierRole.SUBJECT
     card: CardRef | None = None
+    use_targets: tuple[int, ...] = ()
+    """这次**使用**已定下的目标集合（``()`` = 未给目标维度 / 这次使用没有目标）。
+
+    唯一的读者是 :data:`ModifierPoint.COUNT_EXEMPT` 的回调（lei-batch 票 04）：次数上限
+    是"这张牌还能用几次"，而「你对其使用牌无次数限制」是按**这一次使用对谁**豁免，
+    故目标维度只能由调用方（``check_count(..., targets=...)``）在问"这一次行不行"时给。
+    ``check_count`` 不给目标时它是 ``()``——**别**把"未给"读成"目标集合为空 ⇒ 豁免"。
+    """
     owner: int = -1
     skill_id: str = ""
     answers_seq: int = 0

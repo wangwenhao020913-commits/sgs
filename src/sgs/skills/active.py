@@ -4627,7 +4627,16 @@ XIONGLUAN_FLOW = SkillFlow(
 
 
 def _xiongluan_distance_pool(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """``TARGET_POOL`` 回调：把我对其使用牌的目标补回池里（距离 / 攻击范围豁免）。"""
+    """``TARGET_POOL`` 回调：把我对其使用牌的目标补回池里（距离 / 攻击范围豁免）。
+
+    **只放宽距离，不放宽目标合法性**（lei-batch 票 04 的缺陷 B）：``TARGET_POOL`` 这个手法
+    本身能**给自用牌补目标**（将来"可以对别人使用【无中生有】/【桃】"类技能的模板，故不删
+    这个能力）；但雄乱的牌面只豁免"距离与次数"，而【无中生有】/【桃】/【酒】/装备牌的
+    "只能对自己"（:attr:`~sgs.effects.TargetRule.self_only`）是**目标规则**，不在这两条
+    豁免里——不给这道守卫，雄乱生效时这些牌就能指定雄乱目标（用户实机发现）。
+    """
+    if ctx.card is None or behavior_for(ctx.card).target_rule.self_only:
+        return current
     target = state.player(ctx.subject).xiongluan_target
     if target is None or target in current:
         return current
@@ -4636,21 +4645,30 @@ def _xiongluan_distance_pool(state: GameState, ctx: ModifierContext, current: An
     return (*current, target)
 
 
-def _xiongluan_count_limit(state: GameState, ctx: ModifierContext, current: Any) -> Any:
-    """次数侧豁免：本回合雄乱的目标在场 ⇒ 本回合使用牌**不受次数上限**。
+def _xiongluan_count_exempt(state: GameState, ctx: ModifierContext, current: Any) -> Any:
+    """``COUNT_EXEMPT`` 回调：**这一次使用**的目标集合 ⊆ {雄乱目标} ⇒ 不受次数上限。
 
-    **口径说明（E2 的已知边界）**：牌面的"你对其使用牌无**次数**限制"按目标收窄需要
-    "次数闸带目标维度"——而 ``check_count`` 的签名里没有目标、候选生成在"还没选目标"时
-    就要决定这张牌准不准用（见票 02b）。当前挂点是 ``COUNT_LIMIT``（整条牌的上限），
-    故本仓把**次数侧**落成"本回合无次数上限"（整次），**距离侧**仍按目标收窄
-    （``TARGET_POOL``）。要严格按目标，需要单独一张 E2 框架票。
+    ``ctx.use_targets`` 是候选生成期**已经定下的目标集合**（``check_count`` 的目标维度，
+    lei-batch 票 04）：牌面的"你对其使用牌无次数限制"指到的是那名角色，故
+
+    - 空集合（这次使用没有目标）= 与"其"无关 ⇒ 照常计次；
+    - 集合里出现任何一个别人 ⇒ 照常计次（多目标牌只在"目标集合 ⊆ {其}"时豁免——
+      02b §4 读法 A：一次使用同时打别人时那句豁免覆盖不到别人）；
+    - ``ctx.owner == ctx.subject`` 是"这条技能属于使用者本人"的自校，与【咆哮】同姿态
+      （链遍历全体存活实例，缺这一条会替别人豁免）。
+
+    只在 ``check_count(..., targets=...)`` 时派发，故"整张牌还准不准用"那个问题（候选
+    生成的第一次询问）仍读到超额——``_play_phase`` 据此把目标池收窄到被豁免的角色，
+    而不是把整张牌放行。
     """
-    if ctx.card is None:
+    if ctx.owner != ctx.subject or not ctx.use_targets:
         return current
     target = state.player(ctx.subject).xiongluan_target
     if target is None or not state.player(target).alive:
         return current
-    return None
+    if any(seat != target for seat in ctx.use_targets):
+        return current
+    return True
 
 
 _XIONGLUAN = ActiveSkill(
@@ -4662,7 +4680,7 @@ _XIONGLUAN = ActiveSkill(
     preactivated=True,
     extra_modifiers=(
         Modifier(ModifierPoint.TARGET_POOL, _xiongluan_distance_pool),
-        Modifier(ModifierPoint.COUNT_LIMIT, _xiongluan_count_limit),
+        Modifier(ModifierPoint.COUNT_EXEMPT, _xiongluan_count_exempt),
     ),
     requirement=(
         "限定技，出牌阶段，你可以废除你的判定区和装备区并选择一名其他角色，"

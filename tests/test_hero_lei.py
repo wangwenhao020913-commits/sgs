@@ -21,7 +21,12 @@
 from __future__ import annotations
 
 from sgs.data import load_content_pack
-from sgs.effects import check_targets, delayed_settle_target, legal_actions_for
+from sgs.effects import (
+    check_count,
+    check_targets,
+    delayed_settle_target,
+    legal_actions_for,
+)
 from sgs.engine import Engine
 from sgs.state import (
     ActivateSkill,
@@ -510,13 +515,107 @@ def test_xiongluan_is_no_longer_offered_once_both_zones_are_sealed():
     )
 
 
+def test_xiongluan_multi_target_card_counts_unless_only_the_chosen_target():
+    """多目标牌：**目标集合 ⊆ {雄乱目标}** 才豁免，含别人的照常计次（02b §4 读法 A）。
+
+    【方天画戟】把这张【杀】的最大目标数从 1 放宽到 3，故"只对他"与"他 + 别人"两种
+    目标集合都表达得出来：前者豁免、后者计次。候选面因此只剩"只对他"那一组。
+    """
+    slash = cards_of_type(PACK, "slash")[0]
+    halberd = cards_of_type(PACK, "halberd")[0]
+    state = _zhangxiu_state(hand=(slash,), equip=(halberd,))
+    state.player(0).xiongluan_target = 1
+
+    def combos():
+        return tuple(
+            sorted(
+                action.targets
+                for action in legal_actions_for(
+                    state, 0, QueryKind.PLAY_PHASE, answers_seq=1
+                )
+                if isinstance(action, UseCard) and action.card.type == "slash"
+            )
+        )
+
+    assert combos() == ((1,), (1, 2), (2,)), (
+        "前提：方天画戟把这张【杀】放宽成多目标牌（'他 + 别人'表达得出来）"
+    )
+
+    state.player(0).card_use_counts["slash"] = 9  # 额度用尽
+    assert check_count(state, 0, state.card(slash), targets=(1,)) is False
+    assert check_count(state, 0, state.card(slash), targets=(1, 2)) is True, (
+        "一次使用同时打别人时，'对其'那句豁免覆盖不到别人 ⇒ 照常计次"
+    )
+    assert check_count(state, 0, state.card(slash), targets=(2,)) is True
+    assert combos() == ((1,),), (
+        "含别人的目标组合（方天的 (1, 2)）不豁免，只剩'只对其'那组"
+    )
+
+
+def test_xiongluan_does_not_widen_self_only_cards():
+    """雄乱只豁免**距离 / 攻击范围**：自用牌的"只能对自己"是目标合法性，池保持原样。
+
+    lei-batch 票 04 的缺陷 B：``TARGET_POOL`` 能把"自用牌"的目标放宽到别人（这是**保留**
+    的手法，将来"可对别人使用【无中生有】/【桃】"类技能的模板），但雄乱这条修饰器不能
+    顺手放宽它——否则雄乱生效时【无中生有】/【桃】能指定雄乱目标。
+    """
+    ex_nihilo = cards_of_type(PACK, "ex_nihilo")[0]
+    peach = cards_of_type(PACK, "peach")[0]
+    duel = cards_of_type(PACK, "duel")[0]
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _zhangxiu_state(hand=(ex_nihilo, peach, duel, slash))
+    state.player(0).hp = 3  # 【桃】要"未满体力"才能指定自己
+    state.player(0).xiongluan_target = 1
+
+    assert check_targets(state, 0, state.card(ex_nihilo)) == (0,), (
+        "【无中生有】的'对自己使用'是目标规则，不是距离"
+    )
+    assert check_targets(state, 0, state.card(peach)) == (0,), "【桃】同理"
+    assert 1 in check_targets(state, 0, state.card(duel)), (
+        "【决斗】是额定 1 名他人的牌：'对其使用牌'照常能指定雄乱目标（别误伤）"
+    )
+    assert 1 in check_targets(state, 0, state.card(slash)), "【杀】同理"
+
+
+def test_xiongluan_count_waiver_is_per_target():
+    """次数豁免落到**角色**（02b 读法 A）：额度用尽后【杀】只以雄乱目标为目标。
+
+    ``check_count`` 的目标维度是"这一次使用对谁"：给定目标集合时按目标判（对其豁免、
+    对别人照常计次）；不给目标 = 问"整张牌还准不准用" ⇒ 照常超额（``_play_phase`` 据此
+    把目标池收窄到被豁免的角色，而不是整次放行）。
+    """
+    slash = cards_of_type(PACK, "slash")[0]
+    state = _zhangxiu_state(hand=(slash,))
+    state.player(0).card_use_counts["slash"] = 9  # 额度用尽
+    assert check_count(state, 0, state.card(slash)) is True
+
+    state.player(0).xiongluan_target = 1
+    assert check_count(state, 0, state.card(slash)) is True, (
+        "不给目标维度 ⇒ 问的是'整张牌还准不准用'，答案仍是超额"
+    )
+    candidates = tuple(
+        action.targets
+        for action in legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
+        if isinstance(action, UseCard) and action.card.type == "slash"
+    )
+    assert candidates == ((1,),), (
+        "次数用尽时仍枚举目标，只保留被豁免角色那组（不再出现对别人的组合）"
+    )
+    assert check_count(state, 0, state.card(slash), targets=(1,)) is False
+    assert check_count(state, 0, state.card(slash), targets=(2,)) is True
+
+
 def test_xiongluan_waives_distance_and_count_limits_against_the_chosen_target():
-    """效果①：距离按目标收窄；次数侧落成"本回合无次数上限"（见模块里的口径说明）。"""
+    """效果①：距离与**次数**都按目标收窄（票 04 把次数侧从"整次豁免"改成按目标）。
+
+    口径变更（lei-batch 票 04，02b 读法 A）：加雄乱目标之前额度用尽 ⇒ 没有【杀】候选；
+    加上之后只多出"以那名角色为目标"的那一组，**不**把对别人的【杀】也放出来。
+    """
     slash = cards_of_type(PACK, "slash")[0]
     state = _zhangxiu_state(hand=(slash,))
     state.player(0).card_use_counts["slash"] = 9  # 额度用尽
     before = tuple(
-        action
+        action.targets
         for action in legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
         if isinstance(action, UseCard) and action.card.type == "slash"
     )
@@ -524,11 +623,11 @@ def test_xiongluan_waives_distance_and_count_limits_against_the_chosen_target():
 
     state.player(0).xiongluan_target = 1
     after = tuple(
-        action
+        action.targets
         for action in legal_actions_for(state, 0, QueryKind.PLAY_PHASE, answers_seq=1)
         if isinstance(action, UseCard) and action.card.type == "slash"
     )
-    assert any(1 in action.targets for action in after), "雄乱目标重新可打（次数豁免）"
+    assert after == ((1,),), "只有对雄乱目标的【杀】回来（对别人的照常超额）"
 
 
 def _congjian_engine():
