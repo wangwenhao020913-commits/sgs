@@ -636,3 +636,125 @@ def test_discarding_a_card_is_tracked_for_the_turn_and_reset_after_it():
 
     engine._clear_turn_effects()
     assert state.player(0).discarded_this_turn is False, "回合结束后复位"
+
+
+# ---------------------------------------------------------------------------
+# 诸葛瞻（lei-batch 票 03）——判据函数先行（技能声明等两行排列弹窗就位后同票注册）
+# ---------------------------------------------------------------------------
+
+
+class _Frame:
+    """只带 ``data`` 的最小帧（判据函数的输入面）。"""
+
+    def __init__(self, **data) -> None:
+        self.data = dict(data)
+
+
+class _Host:
+    def __init__(self, state) -> None:
+        self.state = state
+
+
+def _zhugezhan_state(*, hand=(0, 1), others=(), damaged=False, discarded=False):
+    seats = [SeatSpec(hero=None, hand=hand), *[SeatSpec(hand=o) for o in others]]
+    used = {*hand, *(card for o in others for card in o)}
+    deck = tuple(card_id for card_id in range(60, 108) if card_id not in used)
+    state = build_state(
+        pack=PACK, seats=seats, deck=deck, turn_seat=0, phase=Phase.PLAY
+    )
+    state.player(0).damage_dealt_this_turn = damaged
+    state.player(0).discarded_this_turn = discarded
+    return state
+
+
+def test_zuilun_option_two_flips_with_the_discard_detector():
+    """选项 2「本回合未弃置过牌」= 检测器的反面（弃置过 ⇒ 不满足）。"""
+    from sgs.skills.hero_lei import zuilun_conditions
+
+    clean = _zhugezhan_state(others=((10, 11),))
+    assert zuilun_conditions(clean, 0)[1] is True, "没弃置过 ⇒ 满足"
+    dirty = _zhugezhan_state(others=((10, 11),), discarded=True)
+    assert zuilun_conditions(dirty, 0)[1] is False, "弃置过 ⇒ 不满足"
+
+
+def test_zuilun_fewest_hand_counts_ties_as_the_fewest():
+    """选项 3：自己 2、别人 2 / 3 ⇒ 满足（**含并列**）；自己 3、别人 2 ⇒ 不满足。"""
+    from sgs.skills.hero_lei import zuilun_conditions
+
+    tied = _zhugezhan_state(hand=(0, 1), others=((10, 11), (12, 13, 14)))
+    assert zuilun_conditions(tied, 0)[2] is True
+    behind = _zhugezhan_state(hand=(0, 1, 2), others=((10, 11), (12, 13, 14)))
+    assert zuilun_conditions(behind, 0)[2] is False, "别人更少 ⇒ 不满足"
+    # 阵亡角色不参与"全场"（它没有手牌，算进来会恒真）。
+    state = _zhugezhan_state(hand=(0, 1), others=((10,),))
+    state.player(1).alive = False
+    state.player(1).hand = []
+    assert zuilun_conditions(state, 0)[2] is True
+
+
+def test_zuilun_x_is_the_number_of_met_options():
+    from sgs.skills.hero_lei import zuilun_x
+
+    state = _zhugezhan_state(others=((10, 11),), damaged=True)
+    assert zuilun_x(state, 0) == 3, "造成过伤害 + 没弃置 + 全场最少（并列）⇒ 3"
+    state.player(0).damage_dealt_this_turn = False
+    assert zuilun_x(state, 0) == 2
+
+
+def test_fuyin_needs_this_dispatch_to_be_me_against_a_slash_or_duel():
+    """父荫：这一次成为【杀】的目标、使用者是别人、手牌数不大于使用者。"""
+    from sgs.skills.hero_lei import fuyin_condition
+
+    slash = cards_of_type(PACK, "slash")[0]
+    duel = cards_of_type(PACK, "duel")[0]
+    state = _zhugezhan_state(hand=(0, 1), others=((10,),))
+    # 座位 1 是使用者（手里一张），座位 0 是目标（两张）⇒ 手牌数 2 > 1 ⇒ 不满足。
+    assert (
+        fuyin_condition(
+            _Host(state),
+            _Frame(
+                hook_owner=0,
+                hook_actor=0,
+                source=1,
+                card=state.card(slash),
+            ),
+        )
+        is False
+    )
+    state.player(1).hand.extend((11, 12))
+    assert fuyin_condition(
+        _Host(state),
+        _Frame(
+            hook_owner=0,
+            hook_actor=0,
+            source=1,
+            card=state.card(slash),
+        ),
+    ) is True, "使用者 3 张 ≥ 我的 2 张 ⇒ 满足"
+    # 这一次不是我（hook_actor 不是我）⇒ 不触发。
+    assert (
+        fuyin_condition(
+            _Host(state),
+            _Frame(
+                hook_owner=0,
+                hook_actor=1,
+                source=0,
+                card=state.card(slash),
+            ),
+        )
+        is False
+    )
+    # 既不是【杀】也不是【决斗】⇒ 不触发。
+    trick = cards_of_type(PACK, "dismantlement")[0]
+    assert (
+        fuyin_condition(
+            _Host(state),
+            _Frame(
+                hook_owner=0,
+                hook_actor=0,
+                source=1,
+                card=state.card(trick),
+            ),
+        )
+        is False
+    )

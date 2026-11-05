@@ -45,7 +45,7 @@ from __future__ import annotations
 from typing import Any
 
 from sgs.data import Category, SkillType, card_category, hero_skill_id
-from sgs.effects import CarrierKind, behavior_for
+from sgs.effects import CarrierKind, behavior_for, is_slash
 from sgs.state import (
     GameState,
     Marker,
@@ -56,7 +56,15 @@ from sgs.state import (
 )
 from sgs.timing import Timing
 
-from .catalog import MATCH_ACTOR_KEY, MATCH_OWNER_KEY, Hook, SkillDef
+from .catalog import (
+    MATCH_ACTOR_KEY,
+    MATCH_OWNER_KEY,
+    Hook,
+    SkillDef,
+    mark_skill_used_this_turn,
+    skill_used_this_turn,
+)
+from .negation import mark_targets_ineffective
 from .flow import FlowAnswers, PickCards, PickSeats, SkillFlow
 
 __all__ = [
@@ -478,3 +486,100 @@ LEI_SKILL_DEFS: tuple[SkillDef, ...] = (_ZHENGKU, _CONGJIAN)
 def lei_skill_definitions() -> tuple[SkillDef, ...]:
     """雷包（``lei``）武将技能的 :class:`~sgs.skills.catalog.SkillDef` 集合。"""
     return LEI_SKILL_DEFS
+
+
+# ---------------------------------------------------------------------------
+# 诸葛瞻（lei-batch 票 03；用户 2026-11-05 签）——本段先落**判据函数**，技能声明等
+# 「两行排列弹窗」（C3 新 DOM 形状）就位后与【父荫】同票注册（一将一提交：诸葛瞻的每条
+# 技能都要在 CATALOG 闭合才允许 enabled）。
+#
+# 罪论（逐字）：
+#
+#     结束阶段，你可以观看牌堆顶的三张牌，获得其中X张（X为你满足的选项数），然后以任意
+#     顺序放回其余的牌：1.本回合造成过伤害；2.本回合未弃置过牌；3.手牌数为全场最少。
+#     若均不满足，你与一名其他角色各失去1点体力。
+#
+# 父荫（逐字）：
+#
+#     锁定技，当你每回合第一次成为【杀】或【决斗】的目标后，若你的手牌数不大于使用者，
+#     此牌对你无效。
+# ---------------------------------------------------------------------------
+
+ZHUGEZHAN = "zhugezhan"
+
+ZUILUN = hero_skill_id(ZHUGEZHAN, "zuilun")
+"""诸葛瞻【罪论】的全限定技能 id。"""
+
+FUYIN = hero_skill_id(ZHUGEZHAN, "fuyin")
+"""诸葛瞻【父荫】的全限定技能 id。"""
+
+
+def zuilun_conditions(state: GameState, owner: int) -> tuple[bool, bool, bool]:
+    """【罪论】的三个选项判据（用户 2026-11-05 签的口径）。
+
+    ① 本回合造成过伤害 ⇒ 座位级事实 ``Player.damage_dealt_this_turn``（【诛害】同一处）；
+    ② 本回合**未**弃置过牌 ⇒ 「弃置过牌」检测器的反面（`Player.discarded_this_turn`，
+       自身回合内弃置即置真、回合结束后复位）；
+    ③ 手牌数为**全场最少** ⇒ 依次对比**全场存活角色**的手牌数，自己的**不大于**每一名
+       其他角色即满足（**含并列**；用户举例：自己 2、其他 2 / 3 / 4 / 5 ⇒ 满足）。
+    """
+    me = state.player(owner)
+    damaged = bool(me.damage_dealt_this_turn)
+    not_discarded = not me.discarded_this_turn
+    my_hand = len(me.hand)
+    fewest = all(
+        my_hand <= len(player.hand)
+        for player in state.players
+        if player.alive and player.seat != owner
+    )
+    return damaged, not_discarded, fewest
+
+
+def zuilun_x(state: GameState, owner: int) -> int:
+    """本次发动的 X = 满足的选项数（0–3，每次发动时现算，不缓存）。"""
+    return sum(1 for met in zuilun_conditions(state, owner) if met)
+
+
+def _fuyin_trigger_suits(host: Any, frame: Any) -> bool:
+    """【父荫】的**时机 + 牌族**判据：这一次成为的是【杀】/【决斗】的目标。
+
+    ``USE_AFTER_BECOME_TARGET`` 逐目标派发（``MATCH_ACTOR_KEY`` = 这一次的目标），故
+    "这一次轮到我"读它；牌族按**产物牌型**判（转化 / 虚拟牌同判）。
+    """
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    if owner is None or frame.data.get(MATCH_ACTOR_KEY) != owner:
+        return False
+    card = frame.data.get("card")
+    if card is None:
+        return False
+    return is_slash(behavior_for(card)) or card.type == DUEL_CARD_TYPE
+
+
+DUEL_CARD_TYPE = "duel"
+"""【决斗】的牌名 id（牌面事实；与 `sgs.data` 的牌名表同一处，不另建白名单）。"""
+
+
+def fuyin_condition(host: Any, frame: Any) -> bool:
+    """【父荫】的完整触发条件（锁定技：满足即生效、不问"是否发动"）。
+
+    用户 2026-11-05 裁定「父荫，第一次成为目标」⇒ **数事件**：每回合**第一次**成为
+    【杀】/【决斗】的目标就是唯一机会；那一次若手牌数 > 使用者，本回合不再有机会。
+    """
+    if not _fuyin_trigger_suits(host, frame):
+        return False
+    owner = int(frame.data[MATCH_OWNER_KEY])
+    source = frame.data.get("source")
+    if source is None or int(source) == owner:
+        return False
+    state = host.state
+    if skill_used_this_turn(state, owner, FUYIN):
+        return False
+    return len(state.player(owner).hand) <= len(state.player(int(source)).hand)
+
+
+def fuyin_effect(host: Any, frame: Any) -> None:
+    """效果：**此牌对你无效** —— 目标级无效的唯一写入口 + 记一次"本回合已用过"。"""
+    owner = int(frame.data["skill_owner"])
+    mark_targets_ineffective(frame, (owner,))
+    mark_skill_used_this_turn(host.state, owner, FUYIN)
+    return None
