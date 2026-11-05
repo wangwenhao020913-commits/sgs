@@ -45,8 +45,10 @@ from __future__ import annotations
 from typing import Any
 
 from sgs.data import Category, SkillType, card_category, hero_skill_id
-from sgs.effects import CarrierKind, behavior_for, is_slash
+from sgs.effects import CarrierKind, behavior_for, is_slash, place_on_deck
 from sgs.state import (
+    ArrangeCards,
+    FrameKind,
     GameState,
     Marker,
     MoveReason,
@@ -65,7 +67,17 @@ from .catalog import (
     skill_used_this_turn,
 )
 from .negation import mark_targets_ineffective
-from .flow import FlowAnswers, PickCards, PickSeats, SkillFlow
+from .flow import (
+    Arrange,
+    FlowAnswers,
+    PickCards,
+    PickSeats,
+    SkillFlow,
+    TwoRowArrange,
+    option_seat,
+    seat_choice,
+    watched_cards,
+)
 
 __all__ = [
     "CONGJIAN",
@@ -583,3 +595,181 @@ def fuyin_effect(host: Any, frame: Any) -> None:
     mark_targets_ineffective(frame, (owner,))
     mark_skill_used_this_turn(host.state, owner, FUYIN)
     return None
+
+
+# ---------------------------------------------------------------------------
+# 诸葛瞻的两条技能声明（lei-batch 票 03；与上面的判据函数同票注册）
+# ---------------------------------------------------------------------------
+
+_ZUILUN_GAINED = "zuilun_gained"
+_ZUILUN_PLACED = "zuilun_placed"
+_ZUILUN_VICTIM = "zuilun_victim"
+_ZUILUN_STAGE = "zuilun_stage"
+_ZUILUN_DONE = "zuilun_done"
+
+
+def _deck_top_three(state: GameState, frame: Any) -> int:
+    del frame
+    return min(3, len(state.deck))
+
+
+def _zuilun_top(state: GameState, frame: Any) -> int:
+    """上排（放回牌堆顶）张数 = 3 − X；X 在**发动时**现算（用户裁定：每次取值按当下重算）。"""
+    owner = int(frame.data["skill_owner"])
+    return max(0, _deck_top_three(state, frame) - zuilun_x(state, owner))
+
+
+def _zuilun_face(state: GameState, frame: Any) -> tuple[Any, ...]:
+    """这一次摆的三张 = 牌堆顶三张（询问把它们授予观看者）。"""
+    del frame
+    return state.refs(tuple(state.deck[:3]))
+
+
+ZUILUN_ARRANGE = TwoRowArrange(
+    count=_deck_top_three,
+    top=_zuilun_top,
+    cards=_zuilun_face,
+    top_label="牌堆顶",
+    bottom_label="获得",
+    reorder=True,
+)
+"""【罪论】的两行排列规格（用户 2026-11-05 签的形态）。
+
+上排 = 放回牌堆顶的那叠（**3 − X** 张，按序放回）；下排 = 获得的那叠（**X** 张）；
+``reorder=True`` = 行内与跨行都能自由置换（用户："弹窗内所有卡牌可以自由上下左右交换"）；
+``enumerate_candidates=False``（`TwoRowArrange` 的缺省）= 界面自己构造答案、服务端只校验
+形状（张数 + 切分 = 3 − X 由规格的 ``top`` 保证）。
+
+> 视觉差异：现有排列弹窗画"两叠牌"、不画**空槽位**，故下行在 X 张就位前是空的
+> （顶行仍显示全部 3 张）；"必须把下行填满"由固定切分（``split`` 恒 = 3 − X）在提交校验里
+> 保证——少一张 / 多一张都会被拒。X = 0 时窗口照出（上行 3 张、下行 0 张，可直接提交）。
+"""
+
+
+def _zuilun_apply(host: Any, frame: Any, answers: FlowAnswers) -> Any:
+    """提交点：获得下排、上排按序放回牌堆顶；X = 0 时再走"你与一名其他角色各失 1 点体力"。"""
+    owner = int(frame.data["skill_owner"])
+    action = answers.get("cards")
+    if not isinstance(action, ArrangeCards):
+        return None
+    cards = watched_cards(frame, ZUILUN_FLOW, "cards")
+    split = int(action.split)
+    order = tuple(int(index) for index in action.order)
+    gained = tuple(cards[index] for index in order[split:])
+    back = tuple(cards[index] for index in order[:split])
+    x = len(cards) - split
+    if not frame.data.get(_ZUILUN_GAINED):
+        if gained:
+            control = host.move_in_frame(
+                frame,
+                gained,
+                to_zone=ZoneRef(Zone.HAND, owner),
+                reason=MoveReason.PUT,
+                owner=owner,
+                actor=owner,
+            )
+            if control == "stay":
+                return "stay"
+        frame.data[_ZUILUN_GAINED] = True
+    if not frame.data.get(_ZUILUN_PLACED):
+        place_on_deck(host.state, back, to_top=True)
+        frame.data[_ZUILUN_PLACED] = True
+    if x:
+        return None
+    if frame.data.get(_ZUILUN_DONE):
+        return None
+    victim = frame.data.get(_ZUILUN_VICTIM)
+    if victim is None:
+        pool = tuple(
+            player.seat
+            for player in host.state.players
+            if player.alive and player.seat != owner
+        )
+        if not pool:
+            frame.data[_ZUILUN_DONE] = True
+            return None
+        answer = host.ask_option(
+            frame,
+            owner,
+            Timing.PHASE_FINISH,
+            skill_id="zuilun:victim",
+            options=tuple(seat_choice(seat) for seat in pool),
+            optional=False,
+        )
+        if host.suspended(answer):
+            return "stay"
+        victim = option_seat(answer)
+        frame.data[_ZUILUN_VICTIM] = victim
+    stage = int(frame.data.get(_ZUILUN_STAGE, 0))
+    if stage == 0:
+        frame.data[_ZUILUN_STAGE] = 1
+        host.push_frame(
+            FrameKind.LIFE_DECREASE,
+            {"target": owner, "source": None, "amount": 1},
+            timing=Timing.LIFE_DECREASE_BEFORE,
+        )
+        return "stay"
+    if stage == 1:
+        frame.data[_ZUILUN_STAGE] = 2
+        host.push_frame(
+            FrameKind.LIFE_DECREASE,
+            {"target": victim, "source": None, "amount": 1},
+            timing=Timing.LIFE_DECREASE_BEFORE,
+        )
+        return "stay"
+    frame.data[_ZUILUN_DONE] = True
+    return None
+
+
+ZUILUN_FLOW = SkillFlow(
+    name="zuilun",
+    steps=(Arrange(key="cards", spec=ZUILUN_ARRANGE),),
+    effect=_zuilun_apply,
+)
+"""【罪论】的流水线：一次两行排列 → 提交点（拿 / 放回 / X=0 的失体力段）。"""
+
+
+def _own_phase(host: Any, frame: Any) -> bool:
+    """帧外阶段时机上"这一步是问我的"（阶段体帧的 ``source`` = 当前回合角色）。"""
+    owner = frame.data.get(MATCH_OWNER_KEY)
+    return owner is not None and frame.data.get("source") == owner
+
+
+_ZUILUN = SkillDef(
+    skill_id=ZUILUN,
+    locked=False,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        Hook(Timing.PHASE_FINISH, flow=ZUILUN_FLOW, condition=_own_phase),
+    ),
+    deck_arrange=ZUILUN_ARRANGE,
+    requirement=(
+        "结束阶段，你可以观看牌堆顶的三张牌，获得其中X张（X为你满足的选项数），"
+        "然后以任意顺序放回其余的牌：1.本回合造成过伤害；2.本回合未弃置过牌；"
+        "3.手牌数为全场最少。若均不满足，你与一名其他角色各失去1点体力"
+    ),
+)
+"""诸葛瞻【罪论】的完整声明。"""
+
+_FUYIN = SkillDef(
+    skill_id=FUYIN,
+    locked=True,
+    carrier=CarrierKind.HERO,
+    skill_type=SkillType.NORMAL,
+    hooks=(
+        Hook(
+            Timing.USE_AFTER_BECOME_TARGET,
+            handler=fuyin_effect,
+            condition=fuyin_condition,
+        ),
+    ),
+    requirement=(
+        "锁定技，当你每回合第一次成为【杀】或【决斗】的目标后，"
+        "若你的手牌数不大于使用者，此牌对你无效"
+    ),
+)
+"""诸葛瞻【父荫】的完整声明（锁定技：不问发动，满足即生效）。"""
+
+LEI_SKILL_DEFS = (*LEI_SKILL_DEFS, _ZUILUN, _FUYIN)
+"""雷包已落地的武将技能（逐票追加）：镇骨 / 从谏 / 罪论 / 父荫（雄乱住 A 族）。"""

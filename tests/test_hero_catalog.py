@@ -209,9 +209,9 @@ def test_the_catalog_holds_twenty_two_equipment_and_twenty_nine_hero_skills():
     equipment = [d for d in CATALOG.values() if d.carrier.value == "EQUIPMENT"]
     heroes = [d for d in CATALOG.values() if d.carrier.value == "HERO"]
 
-    assert len(CATALOG) == 154
+    assert len(CATALOG) == 156
     assert len(equipment) == 22
-    assert len(heroes) == 132
+    assert len(heroes) == 134
 
 
 def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
@@ -236,7 +236,7 @@ def test_the_hero_half_of_the_catalog_is_exactly_the_enabled_hero_sheet():
     actual = {d.skill_id for d in CATALOG.values() if d.carrier.value == "HERO"}
 
     assert actual == expected
-    assert len(expected) == 132
+    assert len(expected) == 134
 
 
 def test_every_hero_skill_id_is_fully_qualified():
@@ -1597,6 +1597,16 @@ def _owner_probes(state: GameState) -> dict[str, _HookFrame]:
                 card=state.card(_PROBE_TRICK_CARD),
             ),
         ),
+        # lei-batch 票 03：诸葛瞻【罪论】（自己的结束阶段）/【父荫】（这一次的目标是我，
+        # 牌是一张【杀】；正面对照的手牌数 0 ≤ 使用者 1）。
+        "hero.zhugezhan.zuilun": (_HookFrame(source=ME),),
+        "hero.zhugezhan.fuyin": (
+            _HookFrame(
+                **{MATCH_ACTOR_KEY: ME},
+                source=0,
+                card=state.card(_PROBE_CHANNEL_SLASH),
+            ),
+        ),
         "hero.jie_caocao.hujia": (
             _HookFrame(card=state.card(_PROBE_DODGE_CARD), source=0),
             _HookFrame(card=state.card(_PROBE_DODGE_CARD), source=0),
@@ -2035,6 +2045,10 @@ SKILL_SHAPE: dict[str, str] = {
     # 【从谏】= 成为目标时的钩子 + 两步流水线（选牌 → 座位）⇒ 触发技能格。
     "hero.zhangxiu.xiongluan": "主动技能",
     "hero.zhangxiu.congjian": "触发技能",
+    # lei-batch 票 03：诸葛瞻【罪论】= 排列规格（deck_arrange）+ 一步流水线 ⇒ 排列技能格；
+    # 【父荫】= 锁定技（不问发动、目标级无效）。
+    "hero.zhugezhan.zuilun": "排列技能",
+    "hero.zhugezhan.fuyin": "锁定技",
 }
 """145 条技能 → 形态（W6-04，spec §4.4）：**读法**，不是代码字段。
 
@@ -2057,9 +2071,9 @@ SHAPE_COUNTS: dict[str, int] = {
     "主动技能": 25,
     "触发技能": 22,
     "零步技能": 29,
-    "排列技能": 4,
+    "排列技能": 5,
     "多轮技能": 14,
-    "锁定技": 34,
+    "锁定技": 35,
     "转化技": 15,
     "能力位": 3,
     "候选生成器": 1,
@@ -2171,7 +2185,7 @@ def _flow_backed_active_ids() -> frozenset[str]:
 def test_the_skill_shape_table_covers_the_catalog_exactly_once() -> None:
     """145 条恰好一形态：键 = ``CATALOG`` 的键、值 = 11 个形态闭集之一。"""
     assert set(SKILL_SHAPE) == set(CATALOG)
-    assert len(SKILL_SHAPE) == len(CATALOG) == 154
+    assert len(SKILL_SHAPE) == len(CATALOG) == 156
     assert set(SKILL_SHAPE.values()) == set(SHAPE_COUNTS)
     assert len(SHAPE_COUNTS) == 11, (
         "原来 12 格；「手写主动技」那一格随票 04 §3 的预发动改造**消失**"
@@ -2288,7 +2302,7 @@ def test_the_halberd_declares_target_pool_and_target_count_only() -> None:
 
 
 def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
-    """82 在内 / 72 在外（154 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
+    """83 在内 / 73 在外（156 条）：两侧集合显式，且与「有没有 ``SkillFlow``」逐条同源。"""
     inside = frozenset(
         skill_id
         for skill_id, shape in SKILL_SHAPE.items()
@@ -2300,8 +2314,8 @@ def test_the_step_language_boundary_is_exactly_the_flow_backed_skills() -> None:
     assert inside == IN_STEP_LANGUAGE
     assert outside == OUTSIDE_STEP_LANGUAGE
     # ……真正的判据是它们与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。
-    assert len(inside) == 82
-    assert len(outside) == 72
+    assert len(inside) == 83
+    assert len(outside) == 73
     assert inside.isdisjoint(outside)
     assert inside | outside == set(CATALOG)
     # 与**执行路径**逐条同源（形态表若把一条没有 flow 的技能划进来，这里红）。判据要扣掉

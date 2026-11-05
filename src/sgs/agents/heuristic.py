@@ -4027,6 +4027,12 @@ SKILL_VALUES: dict[str, tuple[Callable[[Query, Action, PlayerView], float], str]
         "与次数限制 + 其不能使用或打出手牌；限定技整局一次、且废除后发不动 ⇒ 恒发动到底"
         "（读 view 只判「还有区域可废」，候选不出现时根本不到这里）",
     ),
+    # lei-batch 票 03：诸葛瞻【罪论】（非锁定；【父荫】是锁定技，不需要条目）。
+    "hero.zhugezhan.zuilun": (
+        _constant(3.0),
+        "结束阶段看牌堆顶三张、按满足的选项数拿走 0~3 张（其余按序放回牌堆顶）："
+        "拿到的张数只增不减，X=0 时还要与一名其他角色各失 1 点体力 ⇒ 恒发动为正",
+    ),
     "hero.zhangxiu.congjian": (
         _constant(2.5),
         "成为多目标普通锦囊的目标时，交出一张牌换摸 1 张（装备牌换 2 张）：净赚 0 / 1 张、"

@@ -40,6 +40,28 @@
           "skill_type": "NORMAL"
         }
       ]
+    },
+    {
+      "id": "zhugezhan",
+      "name": "诸葛瞻",
+      "true_name": "诸葛瞻",
+      "kingdom": "shu",
+      "gender": "male",
+      "hp_max": 3,
+      "version": "lei",
+      "enabled": true,
+      "skills": [
+        {
+          "id": "zuilun",
+          "name": "罪论",
+          "skill_type": "NORMAL"
+        },
+        {
+          "id": "fuyin",
+          "name": "父荫",
+          "skill_type": "NORMAL"
+        }
+      ]
     }
   ]
 }

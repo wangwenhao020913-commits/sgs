@@ -106,6 +106,7 @@
 | `USE_ON_USE` | 使用牌时（集智） |
 | `USE_AFTER_DESIGNATE_TARGET` | 使用并指定目标后（铁骑、奋威、无双类） |
 | `USE_BECOME_TARGET` | 成为目标时（流离） |
+| `USE_AFTER_BECOME_TARGET` | **成为目标后**（B6；目标已定、不会再被转移）：诸葛瞻【父荫】是首个载体（「此牌对你无效」= 目标级无效，逐目标派发、`MATCH_ACTOR_KEY` = 这一次的目标） |
 | `PLAY_ON_PLAY` | 打出牌时（界护驾/界激将 ②） |
 | `RESOLVE_EFFECT` | 生效时（界谦逊） |
 | `JUDGE_CARD_AFTER_EFFECT` | 判定牌生效后（天妒） |

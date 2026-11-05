@@ -25,6 +25,7 @@ from sgs.effects import check_targets, delayed_settle_target, legal_actions_for
 from sgs.engine import Engine
 from sgs.state import (
     ActivateSkill,
+    ArrangeCards,
     EndPhase,
     FrameKind,
     MoveReason,
@@ -758,3 +759,129 @@ def test_fuyin_needs_this_dispatch_to_be_me_against_a_slash_or_duel():
         )
         is False
     )
+
+
+def _zhugezhan_engine(*, seat1_hand, seat0_hand=(1,), owner_hp_max=8):
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="zhugezhan", hp=3, hp_max=owner_hp_max, hand=seat0_hand),
+            SeatSpec(hand=seat1_hand),
+        ],
+        deck=tuple(range(60, 108)),
+        turn_seat=0,
+        phase=Phase.PLAY,
+    )
+    return Engine.from_state(state, seed=7), state
+
+
+class _ZuilunResponder:
+    """座位 0：发动【罪论】并按给定 order / split 提交排列；其他询问一律合法第一项。"""
+
+    def __init__(self, *, activate: bool = True, split: int = 1) -> None:
+        self.activate = activate
+        self.split = split
+        self.arrange = None
+        self.queries = []
+
+    def respond(self, query):
+        kind = str(getattr(query.kind, "value", query.kind))
+        if kind == "SKILL_ACTIVATION" and str(getattr(query, "skill_id", "")) == ZUILUN:
+            self.queries.append(query)
+            if self.activate:
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, ActivateSkill)
+                )
+            return next(
+                action for action in query.legal_actions if isinstance(action, Pass)
+            )
+        if kind == "ARRANGE":
+            self.arrange = query
+            return ArrangeCards(answers_seq=query.seq, order=(0, 1, 2), split=self.split)
+        if kind == "PLAY_PHASE":
+            return next(
+                action for action in query.legal_actions if isinstance(action, EndPhase)
+            )
+        return query.legal_actions[0]
+
+
+ZUILUN = "hero.zhugezhan.zuilun"
+
+
+def test_zuilun_gains_x_cards_and_puts_the_rest_back_on_top():
+    """罪论：X=2 ⇒ 拿两张、剩一张按序放回牌堆顶（排列面 = 牌堆顶三张）。"""
+    engine, state = _zhugezhan_engine(seat1_hand=(10, 11))
+    state.player(0).damage_dealt_this_turn = True
+    player = _ZuilunResponder(split=1)
+    other = _ZuilunResponder(activate=False)
+    run_queries(
+        engine,
+        [player, other],
+        lambda e: player.arrange is not None and 63 in e.state.player(0).hand,
+    )
+    assert player.arrange is not None, "罪论发了一次排列询问"
+    revealed = [card.card_id for card in player.arrange.revealed]
+    assert revealed[:3] == [62, 63, 64], f"面 = 摸牌阶段之后牌堆顶三张（实得 {revealed}）"
+    hand = engine.state.player(0).hand
+    assert 63 in hand and 64 in hand, "下排两张进了手牌"
+    assert 62 not in hand, "上排那张留在牌堆顶"
+    assert engine.state.deck[0] == 62, "上排按序放回牌堆顶"
+
+
+def test_zuilun_declining_leaves_the_deck_and_hand_untouched():
+    engine, state = _zhugezhan_engine(seat1_hand=(10, 11))
+    player = _ZuilunResponder(activate=False)
+    other = _ZuilunResponder(activate=False)
+    run_queries(
+        engine,
+        [player, other],
+        lambda e: player.queries and len(e.state.player(0).hand) >= 3,
+    )
+    assert player.queries, "问过一次「是否发动」"
+    assert player.arrange is None, "不发动就没有排列询问"
+
+
+def test_fuyin_makes_the_first_slash_ineffective():
+    """父荫：第一次成为【杀】的目标、手牌数不大于使用者 ⇒ 此牌对你无效（不掉体力）。"""
+    slash = cards_of_type(PACK, "slash")[0]
+    state = build_state(
+        pack=PACK,
+        seats=[
+            SeatSpec(hero="zhugezhan", hp=3, hp_max=3, hand=(1,)),
+            SeatSpec(hand=(slash,)),
+        ],
+        deck=tuple(card_id for card_id in range(60, 108) if card_id != slash),
+        turn_seat=1,
+        phase=Phase.PLAY,
+    )
+    engine = Engine.from_state(state, seed=7)
+
+    class _Attacker:
+        def __init__(self) -> None:
+            self.played = False
+
+        def respond(self, query):
+            kind = str(getattr(query.kind, "value", query.kind))
+            if kind == "PLAY_PHASE":
+                for action in query.legal_actions:
+                    if isinstance(action, UseCard) and action.card.type == "slash":
+                        self.played = True
+                        return action
+                return next(
+                    action
+                    for action in query.legal_actions
+                    if isinstance(action, EndPhase)
+                )
+            return query.legal_actions[0]
+
+    attacker = _Attacker()
+    victim = _Attacker()
+    run_queries(
+        engine,
+        [victim, attacker],
+        lambda e: attacker.played and e.pending is None,
+    )
+    assert attacker.played
+    assert engine.state.player(0).hp == 3, "此牌对父荫持有者无效（没有掉体力）"
