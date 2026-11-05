@@ -1610,22 +1610,30 @@ button.mini-slot { cursor: pointer; }
   margin: 0; font-size: calc(15 * var(--dsu)); letter-spacing: .06em;
   text-align: center;
 }
-.pindian-body { display: flex; align-items: center; gap: calc(12 * var(--dsu)); }
+.pindian-body { display: flex; align-items: center; gap: calc(14 * var(--dsu)); }
 .pindian-vs { color: var(--dim); font-size: calc(13 * var(--dsu)); }
-.pindian-targets { display: flex; flex-direction: column; gap: calc(8 * var(--dsu)); }
-.pindian-slot {
+.pindian-targets { display: flex; flex-direction: column; gap: calc(10 * var(--dsu)); }
+/* 一个玩家块 = 上方结果 + 中间卡面 + 下方「座位号 武将名」（1v1 两块并排）。 */
+.pindian-player {
   display: flex; flex-direction: column; align-items: center;
   gap: calc(4 * var(--dsu));
 }
-.pindian-seat { font-size: calc(11 * var(--dsu)); color: var(--dim); }
-.pindian-pair { display: flex; align-items: center; gap: calc(8 * var(--dsu)); }
+.pindian-slot { display: flex; align-items: center; justify-content: center; }
+/* 结果在**卡面上方**：定高一行，赢字变多长都不推牌。 */
 .pindian-verdict {
-  min-width: calc(44 * var(--dsu));
-  font-size: calc(13 * var(--dsu)); font-weight: 700; letter-spacing: .06em;
+  min-height: calc(18 * var(--dsu));
+  font-size: calc(13 * var(--dsu)); font-weight: 700; letter-spacing: .10em;
+  line-height: calc(18 * var(--dsu));
 }
 .pindian-verdict.win { color: var(--ok); }
 .pindian-verdict.lose { color: var(--accent); }
 .pindian-verdict.tie { color: var(--dim); }
+/* 归属在**卡面下方**：座位号 + 武将名（与座位卡同源的名字）。 */
+.pindian-who {
+  font-size: calc(11 * var(--dsu)); color: var(--dim);
+  max-width: calc(120 * var(--dsu));
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 @media (max-height: 560px) {
   .table-hint { display: block; }

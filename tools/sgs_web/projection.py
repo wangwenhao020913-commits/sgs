@@ -2553,6 +2553,24 @@ def visible_record(
             card = raw.get("card")
             if isinstance(card, dict):
                 raw["card"] = card_payload(CardRef.model_validate(card))
+        elif delta_type == "pindian":
+            # 拼点揭晓是公开事实（huo-taishici-xunyu 票 03 / 04）：两张牌按**正常卡面**
+            # 下发——补展示字段（牌名 / 属性 / 转化来源 / 描述），牌上**有标签**时一并带上。
+            # 拼点弹窗因此与手牌 / 舞台 / 亮牌共用同一个 `cardFaceNode`，不另起一套牌面。
+            cards = raw.get("cards")
+            if isinstance(cards, list):
+                lookup = _card_lookup(state) if state is not None else None
+                upgraded: list[Any] = []
+                for card in cards:
+                    if not isinstance(card, dict):
+                        upgraded.append(card)
+                        continue
+                    payload = card_payload(CardRef.model_validate(card), lookup=lookup)
+                    # 标签要读引擎状态；没有 state（裸询问 / 单测）时不猜、不造空键。
+                    if state is not None:
+                        _decorate_card_tags(payload, state, viewer)
+                    upgraded.append(payload)
+                raw["cards"] = upgraded
         elif delta_type == "card_move" and raw.get("cards"):
             hidden_seats = _concealed_hidden(raw, viewer, concealed)
             if hidden_seats is not None:

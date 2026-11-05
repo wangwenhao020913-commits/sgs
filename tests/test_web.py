@@ -6320,6 +6320,69 @@ def test_card_move_records_carry_the_card_face_contract() -> None:
     assert shown["description"], "展示契约的 description 也要在（悬停全文）"
 
 
+def test_pindian_records_carry_the_card_face_contract_and_the_card_tags() -> None:
+    """拼点揭晓的牌也要带**卡面契约**与**牌上的标签**（huo-taishici-xunyu 票 04 复验）。
+
+    拼点弹窗与手牌 / 舞台 / 亮牌共用 `card-view.js:cardFaceNode`：只给裸 `CardRef` 时它的
+    悬停只剩「暂无描述」、转化牌的来源与「转」角标也画不出，牌上的标签（`card.tags`）更没有。
+    故 `visible_record` 对这一条 delta 与亮牌同姿态：补展示字段，并按查看者补标签。
+    """
+    from sgs.data import CardTagType
+    from sgs.engine.journal import wrap_delta
+    from sgs.state import CardRef, CardTag, PindianDelta
+
+    pack = load_content_pack(deck_profile="standard_108")
+    own = cards_of_type(pack, "slash")[0]
+    state = build_state(
+        pack=pack,
+        seats=[SeatSpec(hp=4, hand=(own,)), SeatSpec()],
+        deck=tuple(range(40, 50)),
+    )
+    engine = Engine.from_state(state, seed=1)
+    engine.add_card_tag(
+        own,
+        CardTag(
+            tag_type=CardTagType.LUOSHEN_HAND,
+            owner=0,
+            skill_id="hero.jie_zhenji.luoshen",
+        ),
+    )
+    product = CardRef(
+        card_id=-609569600673815,
+        type="fire_slash",
+        name="火杀",
+        suit="heart",
+        rank=10,
+        color="red",
+        virtual_sources=(18,),
+    )
+    record = wrap_delta(
+        PindianDelta(
+            title="天义",
+            initiator=0,
+            targets=(1,),
+            cards=(product, engine.state.card(own)),
+            won=(True,),
+            tied=(False,),
+        ),
+        seq=9,
+        frame_id=0,
+        depth=0,
+    )
+
+    payload = visible_record(record, viewer=0, state=engine.state)
+    shown, tagged = payload["cards"]
+
+    assert (shown["display_name"], shown["attribute"], shown["kind"]) == ("杀", "火焰", "transformed")
+    assert shown["description"], "展示契约的 description 也要在（悬停全文）"
+    assert shown["virtual_sources"] == [18], "来源牌要留着（悬停列出全部来源）"
+    assert tagged["card_id"] == own
+    assert [tag["label"] for tag in tagged.get("tags", [])], (
+        "牌上的标签（落神手牌标记）要对查看者照发——卡面要把它画出来"
+    )
+    assert payload["tied"] == [False], "平点位照发"
+
+
 def test_tag_deltas_reach_the_live_channel_with_labels_but_stay_out_of_records() -> None:
     """标签走**展示用的 live 通道**：带服务端 label，但不进人类 ``records``。
 

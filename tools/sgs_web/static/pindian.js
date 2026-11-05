@@ -19,7 +19,8 @@
  */
 "use strict";
 
-/** 结果标签的闭集（用户口径：赢 / 没赢；平点双方都没赢）。 */
+/** 结果标签的闭集（用户口径：每个槽位上方只写「赢 / 没赢」；平点 ⇒ 两个槽位都「没赢」，
+ *  悬停补一句「平点：双方都没赢」）。`tie` 只做 `data-verdict` 的第三档，不印成文案。 */
 const PINDIAN_VERDICTS = Object.freeze({ win: "赢", lose: "没赢", tie: "都没赢" });
 
 /** 弹窗停留时长（毫秒）：**全部**比较完统一停 3 秒（R7 / 用户 2026-11-04）。 */
@@ -43,64 +44,103 @@ function pindianPlan(record) {
     title: String(record.title),
     initiator: record.initiator,
     initiatorCard: cards[0],
+    // 每一**对**的两个结果：发起者的「赢 / 没赢」= `won`；被拼点者的 = 反过来，
+    // **平点两人都没赢**（`tied`）——所以被拼点者的标签不能简单取反，必须读 `tied`。
     pairs: targets.map((seat, index) => {
       const isTie = Boolean(tied[index]);
       const isWin = !isTie && Boolean(won[index]);
+      const targetWin = !isTie && !isWin;
       return {
         seat,
         card: cards[index + 1],
         state: isTie ? "tie" : (isWin ? "win" : "lose"),
-        verdict: isTie
-          ? PINDIAN_VERDICTS.tie
-          : (isWin ? PINDIAN_VERDICTS.win : PINDIAN_VERDICTS.lose),
+        initiatorVerdict: isWin ? PINDIAN_VERDICTS.win : PINDIAN_VERDICTS.lose,
+        targetVerdict: targetWin ? PINDIAN_VERDICTS.win : PINDIAN_VERDICTS.lose,
+        title: isTie ? "平点：双方都没赢" : "",
       };
     }),
   };
 }
 
-/** 一个槽位：座位号 + 一张**正常卡面**（`card-view.js:cardFaceNode`，静态不可点）。 */
-function pindianSlot(seat, card, role) {
+/** 座位号 + 武将名（"0号位 太史慈"）：名字与座位卡同源（`heroDisplayName` 读目录）。
+ *
+ * 目录没加载（裸询问 / 旧页面）时只写座位号，不把 hero id 当名字印出来。
+ */
+function pindianSeatLabel(seat) {
+  const heroes = (tableViewForRender() || state.view || {}).heroes || {};
+  const name = heroDisplayName(heroes[seat]);
+  const suffix = name && name !== String(heroes[seat]) ? ` ${name}` : "";
+  return `${seat}号位${suffix}`;
+}
+
+/** 一个**玩家块**：上方结果（赢 / 没赢）、中间一张**正常卡面**、下方"座位号 + 武将名"。
+ *
+ * 卡面走 `card-view.js:cardFaceNode`（与手牌 / 舞台 / 亮牌同一套渲染）：花色点数、虚拟 /
+ * 转化角标、**牌上的标签**（`card.tags`，服务端下发）都由它画，这里不另做牌面。
+ */
+function pindianPlayer({ seat, card, role, verdict, state: verdictState, title = "" }) {
+  const player = document.createElement("div");
+  player.className = `pindian-player ${role}`;
+  player.setAttribute("data-seat", String(seat));
+  player.setAttribute("data-role", role);
+  player.setAttribute("data-verdict", verdictState);
+  const top = document.createElement("span");
+  top.className = `pindian-verdict ${verdictState}`;
+  top.textContent = verdict;
+  if (title) top.setAttribute("title", title);
+  player.appendChild(top);
+
   const slot = document.createElement("div");
   slot.className = `pindian-slot ${role}`;
   slot.setAttribute("data-seat", String(seat));
   slot.setAttribute("data-role", role);
-  const label = document.createElement("span");
-  label.className = "pindian-seat";
-  label.textContent = `${seat}号位`;
-  slot.appendChild(label);
   if (card) slot.appendChild(cardFaceNode(card, { static: true }));
-  return slot;
+  player.appendChild(slot);
+
+  const who = document.createElement("span");
+  who.className = "pindian-who";
+  who.textContent = pindianSeatLabel(seat);
+  player.appendChild(who);
+  return player;
 }
 
-/** 一对：被拼点者的扣置牌 + 结果标签（发起者的牌由 :func:`renderPindian` 只画一次）。 */
-function pindianPair(pair) {
-  const row = document.createElement("div");
-  row.className = "pindian-pair";
-  row.setAttribute("data-seat", String(pair.seat));
-  row.setAttribute("data-verdict", pair.state);
-  row.appendChild(pindianSlot(pair.seat, pair.card, "target"));
-  const verdict = document.createElement("span");
-  verdict.className = `pindian-verdict ${pair.state}`;
-  verdict.textContent = pair.verdict;
-  row.appendChild(verdict);
-  return row;
-}
-
-/** 把载荷画进 `#t-pindian`：左 1 个固定槽 = 发起者、右 1..N 行 = 各被拼点者。 */
+/** 把载荷画进 `#t-pindian`：左 1 个固定槽 = 发起者、右 1..N 行 = 各被拼点者。
+ *
+ * 1v1 就是两块并排（各自上方赢 / 没赢、下方座位号 + 名字）；1vN 时发起者的牌只画一次。
+ */
 function renderPindian(plan) {
   const title = $("t-pindian-title");
   if (title) title.textContent = plan.title;
   const body = $("t-pindian-body");
   if (!body) return;
   body.innerHTML = "";
-  body.appendChild(pindianSlot(plan.initiator, plan.initiatorCard, "initiator"));
+  // 多对时发起者的结果不止一个：**全赢**才写「赢」，否则写「没赢」（不猜单对）。
+  const wins = plan.pairs.filter((pair) => pair.state === "win").length;
+  const initiatorState = plan.pairs.length && wins === plan.pairs.length ? "win" : "lose";
+  body.appendChild(pindianPlayer({
+    seat: plan.initiator,
+    card: plan.initiatorCard,
+    role: "initiator",
+    verdict: initiatorState === "win" ? PINDIAN_VERDICTS.win : PINDIAN_VERDICTS.lose,
+    state: initiatorState,
+    title: wins && wins < plan.pairs.length ? "与多名角色拼点：并非每一对都赢" : "",
+  }));
   const versus = document.createElement("span");
   versus.className = "pindian-vs";
   versus.textContent = "vs";
   body.appendChild(versus);
   const rows = document.createElement("div");
   rows.className = "pindian-targets";
-  plan.pairs.forEach((pair) => rows.appendChild(pindianPair(pair)));
+  plan.pairs.forEach((pair) => {
+    rows.appendChild(pindianPlayer({
+      seat: pair.seat,
+      card: pair.card,
+      role: "target",
+      verdict: pair.targetVerdict,
+      state: pair.state === "tie" ? "tie" : (pair.targetVerdict === PINDIAN_VERDICTS.win ? "win" : "lose"),
+      title: pair.title,
+    }));
+  });
   body.appendChild(rows);
 }
 

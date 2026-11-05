@@ -20229,6 +20229,9 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
  * initiator / targets / cards / won / tied），渲染走生产入口 `applyPindianDelta`
  * （`session.js:stepPlayback` 每条记录调一次）。弹窗**不是询问面**：不进 `stepDialogKind`、
  * 没有可点节点（选牌仍走牌桌）、停留 3 秒。
+ *
+ * 版面口径（用户 2026-11-05 复验）：每个**玩家块** = 上方「赢 / 没赢」+ 中间**正常卡面** +
+ * 下方「座位号 武将名」；1v1 两块并排，1vN 时发起者的牌只画一次。
  */
 {
   const pinCard = (id, name, suit, rank) => {
@@ -20247,69 +20250,103 @@ const bottomSkillIds = () => Array.from($("t-skills").children).filter(
     won: [true], tied: [false],
     ...overrides,
   });
+  // 座位号 + 武将名读视图的 heroes（与座位卡同源）：显式给一份，不吃上一段残留的 view。
+  ui.state.view = synthView(null);
   const popup = $("t-pindian");
   const popupBody = $("t-pindian-body");
-  const isSlot = (node) => hasClassText(node, "pindian-slot");
-  const initiatorSlot = () => Array.from(popupBody.children).find(isSlot) || null;
-  const targetRows = () => {
+  const isPlayer = (node) => hasClassText(node, "pindian-player");
+  const initiatorBlock = () => Array.from(popupBody.children).find(isPlayer) || null;
+  const verdictOf = (block) => {
+    if (!block) return null;
+    return Array.from(block.children).find((node) => hasClassText(node, "pindian-verdict")) || null;
+  };
+  const whoOf = (block) => {
+    if (!block) return null;
+    return Array.from(block.children).find((node) => hasClassText(node, "pindian-who")) || null;
+  };
+  const cardOf = (block) => {
+    if (!block) return null;
+    const slot = Array.from(block.children).find((node) => hasClassText(node, "pindian-slot"));
+    return slot ? Array.from(slot.children)[0] || null : null;
+  };
+  const targetBlocks = () => {
     const column = Array.from(popupBody.children)
       .find((node) => hasClassText(node, "pindian-targets"));
     return column ? Array.from(column.children) : [];
   };
 
-  // ① 1v1 赢：标题 = 发动技能名；左 1 个固定槽 = 发起者、右 1 行 = 被拼点者；标签「赢」
+  // ① 1v1 赢：标题 = 发动技能名；两块并排（左发起者、右被拼点者），各自上方赢 / 没赢
   const opened = ui.applyPindianDelta(pindianRecord());
-  const firstRow = targetRows()[0] || null;
-  check("票04-1 拼点弹窗：全场可见 + 标题 = 发动技能名 + 左 1 固定槽 / 右 1 行",
+  const left = initiatorBlock();
+  const right = targetBlocks()[0] || null;
+  check("票04-1 拼点弹窗：全场可见 + 标题 = 发动技能名 + 左 1 块 / 右 1 块",
     opened === true && popup.hidden === false
       && $("t-pindian-title").textContent === "天义"
-      && !!initiatorSlot() && initiatorSlot().getAttribute("data-role") === "initiator"
-      && targetRows().length === 1
-      && !!firstRow && hasClassText(firstRow, "pindian-pair")
-      && Array.from(firstRow.children).some(isSlot),
-    `opened=${opened} hidden=${popup.hidden} title="${$("t-pindian-title").textContent}" rows=${targetRows().length}`);
-  check("票04-2 左槽 = 发起者的牌（♥Q 杀）、右行 = 被拼点者的牌（♠9 闪）+ 结果「赢」",
-    !!initiatorSlot() && initiatorSlot().text().includes("♥")
-      && initiatorSlot().text().includes("Q") && initiatorSlot().text().includes("杀")
-      && !!firstRow && firstRow.text().includes("♠") && firstRow.text().includes("9")
-      && firstRow.text().includes("闪")
-      && firstRow.getAttribute("data-verdict") === "win"
-      && firstRow.text().includes("赢"),
-    `initiator="${initiatorSlot() ? initiatorSlot().text() : ""}" row="${firstRow ? firstRow.text() : ""}" verdict=${firstRow ? firstRow.getAttribute("data-verdict") : ""}`);
-  check("票04-3 停留 3 秒 = 前端展示（PINDIAN_HOLD_MS，服务端不阻塞）",
+      && !!left && left.getAttribute("data-role") === "initiator"
+      && targetBlocks().length === 1
+      && !!right && right.getAttribute("data-role") === "target",
+    `opened=${opened} hidden=${popup.hidden} title="${$("t-pindian-title").textContent}" rows=${targetBlocks().length}`);
+  check("票04-2 卡面走正常渲染：左块 = ♥Q 杀、右块 = ♠9 闪（卡面节点带 data-card-id）",
+    !!cardOf(left) && cardOf(left).text().includes("♥")
+      && cardOf(left).text().includes("Q") && cardOf(left).text().includes("杀")
+      && cardOf(left).getAttribute("data-card-id") === "901"
+      && !!cardOf(right) && cardOf(right).text().includes("♠")
+      && cardOf(right).text().includes("9") && cardOf(right).text().includes("闪")
+      && cardOf(right).getAttribute("data-card-id") === "902",
+    `left="${cardOf(left) ? cardOf(left).text() : ""}" right="${cardOf(right) ? cardOf(right).text() : ""}"`);
+  check("票04-3 结果在**卡面上方**：发起者「赢」、被拼点者「没赢」",
+    !!verdictOf(left) && verdictOf(left).textContent === "赢"
+      && verdictOf(left).classList.contains("win")
+      && !!verdictOf(right) && verdictOf(right).textContent === "没赢"
+      && verdictOf(right).classList.contains("lose"),
+    `left="${verdictOf(left) ? verdictOf(left).textContent : ""}" right="${verdictOf(right) ? verdictOf(right).textContent : ""}"`);
+  check("票04-4 归属在**卡面下方**：座位号 + 武将名（0号位 郭嘉 / 1号位 张飞）",
+    !!whoOf(left) && whoOf(left).textContent === `0号位 ${ui.heroDisplayName("guojia")}`
+      && !!whoOf(right) && whoOf(right).textContent === `1号位 ${ui.heroDisplayName("zhangfei")}`
+      && whoOf(left).textContent.includes("号位") && whoOf(right).textContent.includes("号位"),
+    `left="${whoOf(left) ? whoOf(left).textContent : ""}" right="${whoOf(right) ? whoOf(right).textContent : ""}"`);
+  check("票04-5 停留 3 秒 = 前端展示（PINDIAN_HOLD_MS，服务端不阻塞）",
     ui.PINDIAN_HOLD_MS === 3000 && latestTimerDelay() === 3000,
     `hold=${ui.PINDIAN_HOLD_MS} timer=${latestTimerDelay()}`);
 
-  // ② 平点：标签「都没赢」读服务端 `tied` 位（前端不比较点数）
+  // ② 平点：两块都「没赢」（读 tied；被拼点者不能靠取反说谎），平点信息进悬停
   ui.applyPindianDelta(pindianRecord({ cards: [initiator, sameRank], won: [false], tied: [true] }));
-  check("票04-4 平点标「都没赢」（读 tied，不在前端比点数）",
-    targetRows()[0].getAttribute("data-verdict") === "tie"
-      && targetRows()[0].text().includes("都没赢"),
-    `verdict=${targetRows()[0].getAttribute("data-verdict")} text="${targetRows()[0].text()}"`);
+  const tieLeft = initiatorBlock();
+  const tieRight = targetBlocks()[0] || null;
+  check("票04-6 平点：两个槽位都写「没赢」（读 tied，前端不比点数）",
+    verdictOf(tieLeft).textContent === "没赢" && verdictOf(tieRight).textContent === "没赢"
+      && verdictOf(tieRight).getAttribute("title").includes("平点")
+      && tieRight.getAttribute("data-verdict") === "tie",
+    `left="${verdictOf(tieLeft).textContent}" right="${verdictOf(tieRight).textContent}" tie=${verdictOf(tieRight).getAttribute("title")}`);
 
-  // ③ 1vN：左槽只画一次 + 每个被拼点者一行（一对一个结果标签）
+  // ③ 1vN：发起者的牌只画一次；每个被拼点者一块，各自的结果各行其是
   ui.applyPindianDelta(pindianRecord({
     targets: [1, 2], cards: [initiator, winner, sameRank],
     won: [true, false], tied: [false, false],
   }));
-  check("票04-5 1vN：左 1 个固定槽 + 右 2 行、2 个结果标签（发起者的牌只画一次）",
-    targetRows().length === 2
-      && targetRows()[0].getAttribute("data-verdict") === "win"
-      && targetRows()[1].getAttribute("data-verdict") === "lose"
-      && targetRows()[1].text().includes("没赢"),
-    `rows=${targetRows().length} verdicts=${targetRows().map((r) => r.getAttribute("data-verdict")).join(",")}`);
+  const vnLeft = initiatorBlock();
+  const vnRows = targetBlocks();
+  check("票04-7 1vN：左 1 块 + 右 2 块（发起者的牌只画一次）；发起者未全赢 ⇒ 写「没赢」",
+    vnRows.length === 2
+      && verdictOf(vnLeft).textContent === "没赢"
+      && verdictOf(vnLeft).getAttribute("title").includes("并非每一对都赢")
+      && verdictOf(vnRows[0]).textContent === "没赢"
+      && verdictOf(vnRows[1]).textContent === "赢"
+      && whoOf(vnRows[1]).textContent.startsWith("2号位"),
+    `left="${verdictOf(vnLeft).textContent}" rows=${vnRows.map((r) => verdictOf(r).textContent).join(",")}`);
 
   // ④ 只读：不进询问面判据、弹窗里没有一个可点节点（选牌仍走牌桌）
   const clickables = [popupBody, ...Array.from(popupBody.children)]
     .flatMap((node) => [node, ...Array.from(node.children || [])])
+    .flatMap((node) => [node, ...Array.from(node.children || [])])
     .filter((node) => (node.listeners.click || []).length);
-  check("票04-6 只读：DIALOG_KINDS 里没有 pindian、弹窗内没有可点节点",
+  check("票04-8 只读：DIALOG_KINDS 里没有 pindian、弹窗内没有可点节点",
     !Object.values(ui.DIALOG_KINDS).includes("pindian") && clickables.length === 0,
     `clickables=${clickables.length} kinds=${Object.keys(ui.DIALOG_KINDS).join(",")}`);
 
   // ⑤ 判据只看 `delta_type`：别的记录一律不弹窗
   const ignored = ui.applyPindianDelta({ kind: "delta", delta_type: "hp_change", seq: 1 });
-  check("票04-7 非拼点记录不弹窗（判据只看 delta_type）", ignored === false, `ignored=${ignored}`);
+  check("票04-9 非拼点记录不弹窗（判据只看 delta_type）", ignored === false, `ignored=${ignored}`);
 }
 
 console.log(failures === 0 ? `\n全部通过（驱动 ${steps} 步对局，覆盖 ${seen.size} 类询问）` : `\n${failures} 项失败`);process.exit(failures === 0 ? 0 : 1);
